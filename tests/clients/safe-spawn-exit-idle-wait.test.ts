@@ -219,16 +219,22 @@ describe("safeSpawnAsync post-exit pipe-idle wait (#1656)", () => {
 			settled = true;
 		});
 
+		// #1673 review round 3 (F2b): "exit" and "close" fire in the SAME
+		// synchronous turn for a real Node child — Node's own measurements put
+		// the gap at ~0.01-0.03ms, well under one microtask, let alone a timer
+		// tick. An earlier version of this test inserted an
+		// `await vi.advanceTimersByTimeAsync(0)` between the two emits "to let
+		// finalize progress past its `await killPromise`" — that gap is
+		// exactly what real Node does NOT give: by the time any awaited
+		// microtask resumes, `close` has already fired. A listener that only
+		// exists to catch `close` after such a gap (the round-2 fix) attaches
+		// to an event that already happened, so it never fires — every real
+		// spawn kept paying the full grace window. Emitting both events back
+		// to back, with no await between them, is what actually matches
+		// production and is what makes this test a faithful regression check
+		// for the fix (capturing `closeSeen` synchronously at spawn time,
+		// before `finalize` ever awaits anything).
 		child.emit("exit", 0, null);
-		// Let `finalize` progress past its `await killPromise` and register
-		// the idle wait's "close" listener before "close" is emitted below —
-		// this mirrors the real gap between a Node child's "exit" and "close"
-		// (Node emits "close" only once stdio is fully released, a beat after
-		// "exit", never in the same synchronous turn).
-		await vi.advanceTimersByTimeAsync(0);
-
-		// Nothing is holding this child's stdio open, so "close" fires right
-		// behind "exit" — well inside the 100ms idle-grace window.
 		child.emit("close", 0, null);
 
 		// Advance far LESS than the 100ms grace window. This is an

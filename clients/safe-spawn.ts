@@ -1356,6 +1356,23 @@ export async function safeSpawnAsync(
 			rearmIdleGrace?.();
 		});
 
+		// #1673 review round 3 (F2): registered HERE, at spawn time, alongside
+		// the other handlers above — not inside `waitForPipeIdle`. Real Node
+		// emits `close` a fraction of a millisecond after `exit` (both fire in
+		// the same "process exit" turn, well before any microtask), so a
+		// listener attached inside `waitForPipeIdle` — which `finalize` only
+		// reaches after `await killPromise`, at least one microtask later — is
+		// always attaching to an event that has already happened. That's why
+		// the round-2 `child.on("close", finish)` placed inside
+		// `waitForPipeIdle` never actually caught a real spawn's `close` early:
+		// every real call still paid the full grace window. Capturing the
+		// boolean here, before any await, means `waitForPipeIdle` can check
+		// "did close already happen" synchronously the moment it runs.
+		let closeSeen = false;
+		child.on("close", () => {
+			closeSeen = true;
+		});
+
 		// Timeout handling - KILL the process, don't just abandon it
 		const timeoutId = setTimeout(() => {
 			timedOut = true;
@@ -1401,6 +1418,15 @@ export async function safeSpawnAsync(
 		// clear both timers, so nothing outlives settlement either way.
 		const waitForPipeIdle = (): Promise<void> => {
 			if (!child.stdout && !child.stderr) return Promise.resolve();
+			// #1673 review round 3 (F2): `close` fires a fraction of a
+			// millisecond after `exit` for a real Node child — well before
+			// `finalize`'s `await killPromise` ever yields, i.e. before this
+			// function is even called. By the time we get here, `closeSeen`
+			// (set by the listener registered at spawn time, above) already
+			// reflects reality for the overwhelming majority of real spawns:
+			// nothing is holding this child's stdio open, so don't pay out the
+			// 100ms grace window for a signal that already arrived.
+			if (closeSeen) return Promise.resolve();
 			return new Promise((finishIdleWait) => {
 				let settled = false;
 				let graceTimer: ReturnType<typeof setTimeout> | undefined;
@@ -1427,17 +1453,17 @@ export async function safeSpawnAsync(
 					child.removeListener?.("close", finish);
 					finishIdleWait();
 				};
-				// #1673 review F2: `close` fires once every stdio fd referencing
-				// the child has actually released — a STRONGER signal than "no
-				// data for EXIT_PIPE_IDLE_GRACE_MS", and for the overwhelming
-				// majority of real spawns (nothing else holding stdio open) it
-				// fires within a few ms of `exit`. Finishing on it early means a
-				// normal spawn doesn't pay out the full 100ms grace window it
-				// never needed. The anti-hang property this construction exists
-				// for is untouched: a daemonized descendant holding the pipe
-				// open is EXACTLY the case where `close` never fires, so the
-				// grace/cap timers below still bound that case exactly as
-				// before.
+				// The `closeSeen` fast-path above catches the common case (close
+				// already happened by the time we get here). This listener is
+				// the fallback for the rare case where `close` genuinely lands
+				// DURING the wait — e.g. a child whose stdio takes a beat
+				// longer than usual to release, but still well under the grace
+				// window. `close` is a stronger signal than "no data for
+				// EXIT_PIPE_IDLE_GRACE_MS", so finishing on it here still beats
+				// waiting out the timer. The anti-hang property is untouched
+				// either way: a daemonized descendant holding the pipe open is
+				// EXACTLY the case where `close` never fires at all, so the
+				// grace/cap timers still bound that case as before.
 				child.on("close", finish);
 				rearmIdleGrace = (): void => {
 					if (graceTimer) clearTimeout(graceTimer);
