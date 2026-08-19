@@ -1751,6 +1751,161 @@ describe("monorepo root hoisting (#1671)", () => {
 			path.join(parentDir, "module-a"),
 		);
 	});
+
+	it("RustServer.root hoists a nested crate whose members entry spans a gap directory (exact path)", async () => {
+		const { RustServer } = await import("../../../clients/lsp/server.js");
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-cargo-nested-"));
+		dirs.push(tmp);
+
+		fs.writeFileSync(
+			path.join(tmp, "Cargo.toml"),
+			'[workspace]\nmembers = ["crates/foo"]\n',
+		);
+		// "crates" is a gap directory: it holds no Cargo.toml of its own, so the
+		// walk cursor climbs through it before reaching the workspace root. The
+		// `members` entry is relative to the WORKSPACE root, not to that gap
+		// directory (#1671 F1).
+		const crateDir = path.join(tmp, "crates", "foo");
+		fs.mkdirSync(path.join(crateDir, "src"), { recursive: true });
+		fs.writeFileSync(path.join(crateDir, "Cargo.toml"), '[package]\nname = "foo"\n');
+		const file = path.join(crateDir, "src", "lib.rs");
+		fs.writeFileSync(file, "pub fn x() {}\n");
+
+		await expect(RustServer.root(file)).resolves.toBe(tmp);
+	});
+
+	it("RustServer.root hoists a nested crate whose members entry spans a gap directory (glob)", async () => {
+		const { RustServer } = await import("../../../clients/lsp/server.js");
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-cargo-nested-glob-"));
+		dirs.push(tmp);
+
+		fs.writeFileSync(
+			path.join(tmp, "Cargo.toml"),
+			'[workspace]\nmembers = ["crates/*"]\n',
+		);
+		const crateDir = path.join(tmp, "crates", "foo");
+		fs.mkdirSync(path.join(crateDir, "src"), { recursive: true });
+		fs.writeFileSync(path.join(crateDir, "Cargo.toml"), '[package]\nname = "foo"\n');
+		const file = path.join(crateDir, "src", "lib.rs");
+		fs.writeFileSync(file, "pub fn x() {}\n");
+
+		await expect(RustServer.root(file)).resolves.toBe(tmp);
+	});
+
+	it("RustServer.root treats a bare `*` members entry as claiming every direct workspace subdirectory", async () => {
+		const { RustServer } = await import("../../../clients/lsp/server.js");
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-cargo-star-"));
+		dirs.push(tmp);
+
+		fs.writeFileSync(path.join(tmp, "Cargo.toml"), '[workspace]\nmembers = ["*"]\n');
+		const crateDir = path.join(tmp, "foo");
+		fs.mkdirSync(path.join(crateDir, "src"), { recursive: true });
+		fs.writeFileSync(path.join(crateDir, "Cargo.toml"), '[package]\nname = "foo"\n');
+		const file = path.join(crateDir, "src", "lib.rs");
+		fs.writeFileSync(file, "pub fn x() {}\n");
+
+		await expect(RustServer.root(file)).resolves.toBe(tmp);
+	});
+
+	it("RustServer.root matches a two-segment glob members entry (crates/*/*)", async () => {
+		const { RustServer } = await import("../../../clients/lsp/server.js");
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-cargo-deepglob-"));
+		dirs.push(tmp);
+
+		fs.writeFileSync(
+			path.join(tmp, "Cargo.toml"),
+			'[workspace]\nmembers = ["crates/*/*"]\n',
+		);
+		const crateDir = path.join(tmp, "crates", "group-a", "foo");
+		fs.mkdirSync(path.join(crateDir, "src"), { recursive: true });
+		fs.writeFileSync(path.join(crateDir, "Cargo.toml"), '[package]\nname = "foo"\n');
+		const file = path.join(crateDir, "src", "lib.rs");
+		fs.writeFileSync(file, "pub fn x() {}\n");
+
+		await expect(RustServer.root(file)).resolves.toBe(tmp);
+	});
+
+	it("RustServer.root does not read a [package] exclude key above [workspace] as workspace membership", async () => {
+		const { RustServer } = await import("../../../clients/lsp/server.js");
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-cargo-pkg-exclude-"));
+		dirs.push(tmp);
+
+		// The root crate's OWN [package] has a publish-time `exclude` key (a
+		// completely different concept from workspace membership) written above
+		// [workspace]. A whole-file regex would misread it as the workspace's
+		// exclude list and wrongly reject "crate-a" as excluded (#1671 F4).
+		fs.writeFileSync(
+			path.join(tmp, "Cargo.toml"),
+			[
+				"[package]",
+				'name = "root"',
+				'exclude = ["crate-a"]',
+				"",
+				"[workspace]",
+				'members = ["crate-a"]',
+			].join("\n"),
+		);
+		const crateDir = path.join(tmp, "crate-a");
+		fs.mkdirSync(path.join(crateDir, "src"), { recursive: true });
+		fs.writeFileSync(path.join(crateDir, "Cargo.toml"), '[package]\nname = "crate-a"\n');
+		const file = path.join(crateDir, "src", "lib.rs");
+		fs.writeFileSync(file, "pub fn x() {}\n");
+
+		await expect(RustServer.root(file)).resolves.toBe(tmp);
+	});
+
+	it("JavaServer.root hoists a module declared with a multi-segment path spanning a gap directory", async () => {
+		const { JavaServer } = await import("../../../clients/lsp/server.js");
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-maven-nested-"));
+		dirs.push(tmp);
+
+		fs.writeFileSync(
+			path.join(tmp, "pom.xml"),
+			"<project><modules><module>sub/dir</module></modules></project>",
+		);
+		// "sub" is a gap directory with no pom.xml of its own — the declared
+		// module path spans it in one hop (#1671 F2).
+		const moduleDir = path.join(tmp, "sub", "dir", "src", "main", "java");
+		fs.mkdirSync(moduleDir, { recursive: true });
+		fs.writeFileSync(
+			path.join(tmp, "sub", "dir", "pom.xml"),
+			"<project><artifactId>dir</artifactId></project>",
+		);
+		const file = path.join(moduleDir, "Main.java");
+		fs.writeFileSync(file, "class Main {}\n");
+
+		await expect(JavaServer.root(file)).resolves.toBe(tmp);
+	});
+
+	it("JavaServer.root does not hoist through a commented-out <module> entry", async () => {
+		const { JavaServer } = await import("../../../clients/lsp/server.js");
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-maven-commented-"));
+		dirs.push(tmp);
+
+		fs.writeFileSync(
+			path.join(tmp, "pom.xml"),
+			[
+				"<project>",
+				"  <modules>",
+				"    <!-- <module>module-a</module> -->",
+				"  </modules>",
+				"</project>",
+			].join("\n"),
+		);
+		const moduleDir = path.join(tmp, "module-a", "src", "main", "java");
+		fs.mkdirSync(moduleDir, { recursive: true });
+		fs.writeFileSync(
+			path.join(tmp, "module-a", "pom.xml"),
+			"<project><artifactId>module-a</artifactId></project>",
+		);
+		const file = path.join(moduleDir, "Main.java");
+		fs.writeFileSync(file, "class Main {}\n");
+
+		// The <module> entry is commented out — cargo/maven itself would not
+		// build it as part of the reactor, so pi-lens must not hoist to it
+		// either (#1671 F5).
+		await expect(JavaServer.root(file)).resolves.toBe(path.join(tmp, "module-a"));
+	});
 });
 
 describe("zizmor LSP candidacy path gate (#636)", () => {
