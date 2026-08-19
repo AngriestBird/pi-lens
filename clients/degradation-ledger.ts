@@ -43,6 +43,14 @@ export type DegradationKind =
 	 */
 	| "path-variant-unresolved"
 	/**
+	 * A deferred-format record's origin (the cwd/worktree it was queued
+	 * under) does not match the flush attempting to claim it as an orphan,
+	 * so it stays queued and re-surfaces on every subsequent `agent_end`
+	 * until a flush from its actual origin claims it (#1642 F3, #1678
+	 * item 1).
+	 */
+	| "path-attribution-orphan-unresolved"
+	/**
 	 * A `textDocument/diagnostic` or `workspace/diagnostic` pull's per-request
 	 * `withTimeout` abandoned the request, and the request later settled anyway
 	 * (#1713). The answer arrived too late to serve the caller that timed out,
@@ -146,14 +154,15 @@ export function recordDegradationOnce(record: DegradationRecord): void {
  * Count a repeated degradation while retaining one latest-reason entry per
  * kind/subject. The group count remains the exact event total.
  *
- * Returns the running per-kind/subject tally (1 on the first call for that
- * pair). #1716 reads this to gate a storm-prone caller's own bounded side
- * effect (one detailed log write per rising edge) on the existing tallies
- * map, instead of hand-rolling a second latch that would need its own
- * session_start re-arm. A failure returns 0 so a caller's `=== 1` rising-edge
- * check never misfires into "first occurrence" territory on error.
+ * Returns `true` when this call is the FIRST occurrence recorded for this
+ * kind/subject pair (the ledger is the single source of truth for that
+ * tally already — via `tallies` — so callers that need a once-per-subject
+ * "rising edge" signal, e.g. to gate a verbose one-time log line before
+ * falling back to the bounded count, read it off this return value instead
+ * of hand-rolling their own parallel `Set`/latch). #1716 reuses this same
+ * signal to gate `navRequest`'s detailed timeout/late-answer log writes.
  */
-export function incrementDegradationCount(record: DegradationRecord): number {
+export function incrementDegradationCount(record: DegradationRecord): boolean {
 	try {
 		const kind = boundedKind(record.kind);
 		const subject = truncateForLedger(record.subject);
@@ -177,11 +186,11 @@ export function incrementDegradationCount(record: DegradationRecord): number {
 		if (existing >= 0) group.entries.splice(existing, 1);
 		group.entries.push(entry);
 		if (group.entries.length > ENTRIES_PER_KIND) group.entries.shift();
-		return count;
+		return count === 1;
 	} catch (error) {
 		debugLedgerFailure("increment", error);
 		// Telemetry must never break the observed path.
-		return 0;
+		return false;
 	}
 }
 

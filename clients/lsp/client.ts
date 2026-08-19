@@ -3622,11 +3622,11 @@ const NAV_REQUEST_NO_PATH_SCOPE = "*no-path*";
  * counted exactly, via the degradation ledger (bounded, in-memory, no I/O),
  * but only the RISING EDGE — the first occurrence per (method, file) this
  * session — also pays for a detailed log write. `incrementDegradationCount`'s
- * return value (the running per-subject tally) is reused as that rising-edge
- * gate instead of a second hand-rolled latch: it already re-arms at
- * session_start via `resetDegradationLedger`, so this adds zero new module
- * state. Never throws: telemetry must not perturb a path that has already
- * decided to return `undefined` regardless.
+ * return value (`true` on the first occurrence for a kind/subject pair) is
+ * reused as that rising-edge gate instead of a second hand-rolled latch: it
+ * already re-arms at session_start via `resetDegradationLedger`, so this
+ * adds zero new module state. Never throws: telemetry must not perturb a
+ * path that has already decided to return `undefined` regardless.
  */
 function recordNavTimeoutTelemetry(args: {
 	method: string;
@@ -3636,12 +3636,12 @@ function recordNavTimeoutTelemetry(args: {
 }): void {
 	try {
 		const subject = `${args.method}:${args.scope ?? NAV_REQUEST_NO_PATH_SCOPE}`;
-		const occurrence = incrementDegradationCount({
+		const isRisingEdge = incrementDegradationCount({
 			kind: "lsp-nav-request-timeout",
 			subject,
 			reason: `timeout budget=${args.budgetMs}ms elapsed=${args.elapsedMs}ms`,
 		});
-		if (occurrence !== 1) return;
+		if (!isRisingEdge) return;
 		logLatency({
 			type: "phase",
 			phase: "lsp_nav_request_timeout",
@@ -3681,12 +3681,12 @@ function armNavLateAnswerTelemetry(args: {
 			try {
 				const elapsedMs = Date.now() - args.requestStartedAt;
 				const subject = `${args.method}:${args.scope ?? NAV_REQUEST_NO_PATH_SCOPE}`;
-				const occurrence = incrementDegradationCount({
+				const isRisingEdge = incrementDegradationCount({
 					kind: "lsp-nav-late-answer",
 					subject,
 					reason: `late nav answer discarded after ${elapsedMs}ms`,
 				});
-				if (occurrence !== 1) return;
+				if (!isRisingEdge) return;
 				logLatency({
 					type: "phase",
 					phase: "lsp_nav_late_answer_discarded",
