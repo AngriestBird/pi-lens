@@ -194,6 +194,20 @@ export function isTreeSitterWasmAbortError(error: unknown): boolean {
 export class TreeSitterClient {
 	private initialized = false;
 	private initPromise: Promise<boolean> | null = null;
+	/**
+	 * Latched permanently the first time `loadWebTreeSitter()` itself rejects
+	 * (#1592). That call is a dynamic `import()` of a fixed resolved URL, and
+	 * Node's ESM loader permanently memoizes a module record that threw
+	 * during evaluation — a later `import()` of the SAME URL from a later
+	 * `init()` call would just replay the cached rejection, not re-attempt
+	 * the load. Without this latch, every `withTreeSitterRoot()` call (one
+	 * per file parse) would re-invoke `init()`, see `initPromise` cleared by
+	 * the previous attempt's `finally`, and dynamically re-import — a dead
+	 * retry on the hot path. Distinct from `wasmAborted`: that one covers a
+	 * corrupted-heap Emscripten abort() from a runtime that DID load; this
+	 * one covers the runtime never loading in the first place.
+	 */
+	private webTreeSitterLoadFailed = false;
 	private languages: Map<string, TreeSitterLanguage> = new Map();
 	private parsers: Map<string, TreeSitterParserInstance> = new Map();
 	private treeCache: TreeCache;
@@ -1004,11 +1018,27 @@ export class TreeSitterClient {
 	async init(): Promise<boolean> {
 		if (this.wasmAborted) return false;
 		if (this.initialized) return true;
+		if (this.webTreeSitterLoadFailed) return false;
 		if (this.initPromise) return this.initPromise;
 
 		this.initPromise = (async () => {
 			try {
-				const mod = await loadWebTreeSitter();
+				let mod: Awaited<ReturnType<typeof loadWebTreeSitter>>;
+				try {
+					mod = await loadWebTreeSitter();
+				} catch (err) {
+					// See webTreeSitterLoadFailed's doc: this specific rejection is a
+					// dead retry, so latch instead of leaving initPromise clearable
+					// (the finally below would otherwise let the very next parse
+					// call re-import the same doomed URL).
+					this.webTreeSitterLoadFailed = true;
+					recordDegradationOnce({
+						kind: "web-tree-sitter-load-failed",
+						subject: "web-tree-sitter",
+						reason: err instanceof Error ? err.message : String(err),
+					});
+					throw err;
+				}
 				// biome-ignore lint/suspicious/noExplicitAny: web-tree-sitter module shape varies (Parser direct / default-wrapped)
 				const anyMod = mod as any;
 				const ParserClass = anyMod.Parser || anyMod.default || anyMod;
