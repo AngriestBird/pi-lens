@@ -2409,6 +2409,69 @@ export function hasPSScriptAnalyzerConfig(cwd: string): boolean {
 	return findPSScriptAnalyzerConfigPath(cwd) !== undefined;
 }
 
+// #1595 sweep — 7 of the 8 formatters #1572 left unreachable (038cd1df flipped
+// defaultWhenUnconfigured to false for these without adding an explicit-config
+// check; see EXPLICIT_FORMATTER_CONFIG_CHECKS in formatters.ts). nixfmt is the
+// 8th and stays unreachable: it is deliberately unconfigurable (no rc file,
+// no CLI flag surface) and has no project-level manifest marker analogous to
+// `terraform init`'s lock file, so there is no honest "explicit opt-in" signal
+// to gate on — see the KNOWN_UNREACHABLE_FORMATTERS comment in
+// formatter-policy-consistency.test.ts.
+
+export function hasCsharpierConfig(cwd: string): boolean {
+	return (
+		findNearestContaining(cwd, [
+			".csharpierrc",
+			".csharpierrc.json",
+			".csharpierrc.yaml",
+			".csharpierrc.yml",
+		]) !== undefined
+	);
+}
+
+// Ormolu has no general settings file, but it does read a project `.ormolu`
+// file for custom operator fixity declarations (the only file-based config
+// surface Ormolu supports) — real, if narrow, per its own docs.
+export function hasOrmoluConfig(cwd: string): boolean {
+	return findNearestContaining(cwd, [".ormolu"]) !== undefined;
+}
+
+export function hasTaploConfig(cwd: string): boolean {
+	return findNearestContaining(cwd, ["taplo.toml", ".taplo.toml"]) !== undefined;
+}
+
+// `terraform fmt` itself is deliberately unconfigurable (no rc file, no
+// per-project options — HashiCorp's own docs call this out). The nearest
+// thing to an explicit per-project opt-in is `.terraform.lock.hcl`, written
+// only by `terraform init`: it marks a directory the user has deliberately
+// set up as a Terraform root, as opposed to a stray `.tf`/`.tfvars` file
+// dropped into an unrelated repo. A manifest marker, per #1595's own guidance
+// for formatters with no dedicated config-file convention.
+export function hasTerraformConfig(cwd: string): boolean {
+	return findNearestContaining(cwd, [".terraform.lock.hcl"]) !== undefined;
+}
+
+export function hasSwiftformatConfig(cwd: string): boolean {
+	return findNearestContaining(cwd, [".swiftformat"]) !== undefined;
+}
+
+// Fantomas has no dedicated rc file; its documented config surface is
+// `.editorconfig` (fsharp_*-prefixed keys) or a `.fantomasignore` file (the
+// one Fantomas-specific marker it does ship). Mirrors hasGoogleJavaFormatConfig's
+// precedent for formatters whose only config surface is .editorconfig.
+export function hasFantomasConfig(cwd: string): boolean {
+	return (
+		findNearestContaining(cwd, [".fantomasignore", ".editorconfig"]) !==
+		undefined
+	);
+}
+
+// `.formatter.exs` is THE convention `mix format` reads project config from
+// (inputs, line_length, plugins) — universal in Elixir projects that use it.
+export function hasMixFormatConfig(cwd: string): boolean {
+	return findNearestContaining(cwd, [".formatter.exs"]) !== undefined;
+}
+
 export function hasPhpstanConfig(cwd: string): boolean {
 	return findNearestContaining(cwd, PHPSTAN_CONFIGS) !== undefined;
 }

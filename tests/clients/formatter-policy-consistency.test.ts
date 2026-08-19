@@ -242,21 +242,21 @@ describe("formatter ↔ policy consistency (#1135)", () => {
 // `defaultWhenUnconfigured: false` and the formatter had no explicit-config
 // check, so no configuration of a `.ps1` project could ever select it.
 //
-// #1595 tracks 8 more formatters found unreachable by this same check, root-
-// caused to the same commit (038cd1df) but out of #1572's scope to fix here.
-// Listing them keeps the guard honest instead of silently narrowing it: each
-// entry must be BOTH real (the check below considers it unreachable, so a
-// fixed one that goes stale here is caught) and necessary (removing a fixed
-// entry re-enables the guard for that name).
+// #1595 found 8 more formatters unreachable by this same check, root-caused to
+// the same commit (038cd1df) but out of #1572's scope to fix there. 7 are now
+// wired into EXPLICIT_FORMATTER_CONFIG_CHECKS (csharpier, ormolu, taplo,
+// terraform, swiftformat, fantomas, mix — see tool-policy.ts for each one's
+// config-file convention or manifest marker) and removed from this list.
+//
+// nixfmt stays: it is deliberately unconfigurable (opinionated by design, no
+// rc file, no CLI settings surface) and has no project-level manifest marker
+// analogous to `terraform init`'s `.terraform.lock.hcl` — there is no honest
+// "this project opted in" signal to gate an explicit-config check on. Listing
+// it here (rather than silently narrowing the guard) keeps that judgment call
+// checked: the guard below still verifies nixfmt is ACTUALLY unreachable, so a
+// future config-surface addition to nixfmt would be caught as a stale entry.
 const KNOWN_UNREACHABLE_FORMATTERS = new Set<string>([
-	"csharpier", // #1595
-	"ormolu", // #1595
-	"taplo", // #1595
-	"terraform", // #1595
-	"swiftformat", // #1595
-	"fantomas", // #1595
-	"nixfmt", // #1595
-	"mix", // #1595
+	"nixfmt", // #1595 — see comment above: no config surface, no manifest marker
 ]);
 
 /** True iff `name` can win EITHER selection branch under `policy`. */
