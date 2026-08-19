@@ -283,7 +283,7 @@ const FORMATTER_POLICY_BY_EXTENSION = new Map<string, FormatterPolicy>([
 			formatterNames: ["swiftformat"],
 			defaultFormatter: "swiftformat",
 			defaultWhenUnconfigured: false,
-			gate: "smart-default",
+			gate: "config-first",
 		},
 	],
 	[
@@ -292,7 +292,7 @@ const FORMATTER_POLICY_BY_EXTENSION = new Map<string, FormatterPolicy>([
 			formatterNames: ["fantomas"],
 			defaultFormatter: "fantomas",
 			defaultWhenUnconfigured: false,
-			gate: "smart-default",
+			gate: "config-first",
 		},
 	],
 	[
@@ -301,7 +301,7 @@ const FORMATTER_POLICY_BY_EXTENSION = new Map<string, FormatterPolicy>([
 			formatterNames: ["fantomas"],
 			defaultFormatter: "fantomas",
 			defaultWhenUnconfigured: false,
-			gate: "smart-default",
+			gate: "config-first",
 		},
 	],
 	[
@@ -310,7 +310,7 @@ const FORMATTER_POLICY_BY_EXTENSION = new Map<string, FormatterPolicy>([
 			formatterNames: ["fantomas"],
 			defaultFormatter: "fantomas",
 			defaultWhenUnconfigured: false,
-			gate: "smart-default",
+			gate: "config-first",
 		},
 	],
 	[
@@ -328,7 +328,7 @@ const FORMATTER_POLICY_BY_EXTENSION = new Map<string, FormatterPolicy>([
 			formatterNames: ["mix"],
 			defaultFormatter: "mix",
 			defaultWhenUnconfigured: false,
-			gate: "smart-default",
+			gate: "config-first",
 		},
 	],
 	[
@@ -337,7 +337,7 @@ const FORMATTER_POLICY_BY_EXTENSION = new Map<string, FormatterPolicy>([
 			formatterNames: ["mix"],
 			defaultFormatter: "mix",
 			defaultWhenUnconfigured: false,
-			gate: "smart-default",
+			gate: "config-first",
 		},
 	],
 	[
@@ -346,7 +346,7 @@ const FORMATTER_POLICY_BY_EXTENSION = new Map<string, FormatterPolicy>([
 			formatterNames: ["mix"],
 			defaultFormatter: "mix",
 			defaultWhenUnconfigured: false,
-			gate: "smart-default",
+			gate: "config-first",
 		},
 	],
 	[
@@ -355,7 +355,7 @@ const FORMATTER_POLICY_BY_EXTENSION = new Map<string, FormatterPolicy>([
 			formatterNames: ["mix"],
 			defaultFormatter: "mix",
 			defaultWhenUnconfigured: false,
-			gate: "smart-default",
+			gate: "config-first",
 		},
 	],
 	[
@@ -364,7 +364,7 @@ const FORMATTER_POLICY_BY_EXTENSION = new Map<string, FormatterPolicy>([
 			formatterNames: ["mix"],
 			defaultFormatter: "mix",
 			defaultWhenUnconfigured: false,
-			gate: "smart-default",
+			gate: "config-first",
 		},
 	],
 	[
@@ -454,7 +454,7 @@ const FORMATTER_POLICY_BY_EXTENSION = new Map<string, FormatterPolicy>([
 			formatterNames: ["csharpier"],
 			defaultFormatter: "csharpier",
 			defaultWhenUnconfigured: false,
-			gate: "smart-default",
+			gate: "config-first",
 		},
 	],
 	[
@@ -472,7 +472,7 @@ const FORMATTER_POLICY_BY_EXTENSION = new Map<string, FormatterPolicy>([
 			formatterNames: ["ormolu"],
 			defaultFormatter: "ormolu",
 			defaultWhenUnconfigured: false,
-			gate: "smart-default",
+			gate: "config-first",
 		},
 	],
 	[
@@ -481,7 +481,7 @@ const FORMATTER_POLICY_BY_EXTENSION = new Map<string, FormatterPolicy>([
 			formatterNames: ["ormolu"],
 			defaultFormatter: "ormolu",
 			defaultWhenUnconfigured: false,
-			gate: "smart-default",
+			gate: "config-first",
 		},
 	],
 	[
@@ -544,7 +544,7 @@ const FORMATTER_POLICY_BY_EXTENSION = new Map<string, FormatterPolicy>([
 			formatterNames: ["taplo"],
 			defaultFormatter: "taplo",
 			defaultWhenUnconfigured: false,
-			gate: "smart-default",
+			gate: "config-first",
 		},
 	],
 	[
@@ -553,7 +553,7 @@ const FORMATTER_POLICY_BY_EXTENSION = new Map<string, FormatterPolicy>([
 			formatterNames: ["terraform"],
 			defaultFormatter: "terraform",
 			defaultWhenUnconfigured: false,
-			gate: "smart-default",
+			gate: "config-first",
 		},
 	],
 	[
@@ -562,7 +562,7 @@ const FORMATTER_POLICY_BY_EXTENSION = new Map<string, FormatterPolicy>([
 			formatterNames: ["terraform"],
 			defaultFormatter: "terraform",
 			defaultWhenUnconfigured: false,
-			gate: "smart-default",
+			gate: "config-first",
 		},
 	],
 	[
