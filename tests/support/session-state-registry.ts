@@ -521,4 +521,6 @@ export const EXEMPT_SESSION_STATE_FILES: Readonly<Record<string, string>> = {
 	"project-changes.ts": "change-log sequence fold counter, an observability tally",
 	"project-trust.ts":
 		"install-refusal warn-once set, tied to the trust decision rather than the session",
+	"lsp/workspace-diagnostics-cache.ts":
+		"#1669 review F1/F2: a sweep-cwd discovery registry (idempotent — every createWorkspaceDiagnosticsCacheContext call re-registers its cwd, so a session boundary just means fewer known cwds until the next sweep) plus a per-cwd cache epoch invalidated by its own compare-before-persist check, not by the session boundary, same pattern as git-tracked-ignore.ts",
 };
