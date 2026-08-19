@@ -575,13 +575,14 @@ export function normalizeHostToolPath(
 	if (process.platform === "win32") {
 		normalized = hostNormalizeWindowsShellPath(normalized);
 	}
-	const home = os.homedir();
-	if (normalized === "~") return home;
+	// `homedir()` is resolved inside the branch, as pi does. This runs on every
+	// tool_call and a `~` path is the rare case.
+	if (normalized === "~") return os.homedir();
 	if (
 		normalized.startsWith("~/") ||
 		(process.platform === "win32" && normalized.startsWith("~\\"))
 	) {
-		return path.join(home, normalized.slice(2));
+		return path.join(os.homedir(), normalized.slice(2));
 	}
 	if (/^file:\/\//.test(normalized)) {
 		try {
