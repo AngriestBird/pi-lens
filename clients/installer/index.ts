@@ -46,7 +46,6 @@
  * - GitHub releases (platform-specific binaries → ~/.pi-lens/bin/)
  */
 
-import { logExtension } from "../extension-log.js";
 import { spawn } from "node:child_process";
 import { existsSync, statSync, unlinkSync } from "node:fs";
 import fs from "node:fs/promises";
@@ -56,6 +55,7 @@ import os from "node:os";
 import path from "node:path";
 import { writeFileAtomicAsync } from "../atomic-write.js";
 import { BoundedLruCache } from "../bounded-cache.js";
+import { logExtension } from "../extension-log.js";
 import { isFullyQualified } from "../path-utils.js";
 import {
 	assertInstallAllowed,
@@ -63,11 +63,11 @@ import {
 } from "../project-trust.js";
 
 const _installerRequire = createRequire(import.meta.url);
+
 import { createGunzip } from "node:zlib";
-import { logSessionStart } from "../sessionstart-logger.js";
+import { TRANSIENT_MAX_COOLDOWN_MS } from "../dispatch/runners/utils/availability-policy.js";
 import { commitDurableStoreAsync } from "../durable-store.js";
 import { getGlobalPiLensDir } from "../file-utils.js";
-import { TRANSIENT_MAX_COOLDOWN_MS } from "../dispatch/runners/utils/availability-policy.js";
 import {
 	allAvailableGlobalBinDirs,
 	installArgs,
@@ -78,6 +78,7 @@ import {
 	resetSafeSpawnWindowsCommandCache,
 	safeSpawnAsync,
 } from "../safe-spawn.js";
+import { logSessionStart } from "../sessionstart-logger.js";
 
 // Global installation directory for pi-lens tools
 const TOOLS_DIR = path.join(getGlobalPiLensDir(), "tools");
@@ -164,8 +165,7 @@ async function acquireInstallLock(): Promise<{
 				// than any legitimate install (owner install bound + slack) is
 				// stale regardless of what the PID now points at.
 				const maxAgeMs =
-					(Number(process.env.PI_LENS_INSTALL_TIMEOUT_MS) || 120_000) +
-					60_000;
+					(Number(process.env.PI_LENS_INSTALL_TIMEOUT_MS) || 120_000) + 60_000;
 				const expired =
 					Number.isFinite(owner.createdAt) &&
 					Date.now() - owner.createdAt > maxAgeMs;
@@ -238,6 +238,15 @@ function debugLog(...args: unknown[]): void {
 }
 
 // --- Tool Definitions ---
+
+/**
+ * The subset of a GitHub `releases/latest` response pi-lens reads: the tag that
+ * identifies the release, and the downloadable assets attached to it.
+ */
+export interface GitHubReleaseMetadata {
+	tag_name?: string;
+	assets: Array<{ name: string; browser_download_url: string }>;
+}
 
 interface GitHubAssetSpec {
 	/** owner/repo on GitHub */
@@ -948,7 +957,11 @@ export const TOOLS: ToolDefinition[] = [
 		id: "powershell-editor-services",
 		name: "PowerShell Editor Services",
 		checkCommand: "pwsh",
-		checkArgs: ["-NoProfile", "-Command", "$PSVersionTable.PSVersion.ToString()"],
+		checkArgs: [
+			"-NoProfile",
+			"-Command",
+			"$PSVersionTable.PSVersion.ToString()",
+		],
 		installStrategy: "archive",
 		binaryName: "powershell-editor-services",
 		archive: {
@@ -979,9 +992,12 @@ export const TOOLS: ToolDefinition[] = [
 				const version = "22.1.0";
 				const base = `https://github.com/clangd/clangd/releases/download/${version}`;
 				if (platform === "linux")
-					return arch === "x64" ? `${base}/clangd-linux-${version}.zip` : undefined;
+					return arch === "x64"
+						? `${base}/clangd-linux-${version}.zip`
+						: undefined;
 				if (platform === "darwin") return `${base}/clangd-mac-${version}.zip`;
-				if (platform === "win32") return `${base}/clangd-windows-${version}.zip`;
+				if (platform === "win32")
+					return `${base}/clangd-windows-${version}.zip`;
 				return undefined;
 			},
 			kind: "zip",
@@ -1355,7 +1371,9 @@ export const TOOLS: ToolDefinition[] = [
 				if (platform === "linux")
 					return arch === "arm64" ? "linux_arm64.tar.gz" : "linux_amd64.tar.gz";
 				if (platform === "darwin")
-					return arch === "arm64" ? "darwin_arm64.tar.gz" : "darwin_amd64.tar.gz";
+					return arch === "arm64"
+						? "darwin_arm64.tar.gz"
+						: "darwin_amd64.tar.gz";
 				if (platform === "win32")
 					return arch === "arm64" ? "windows_arm64.zip" : "windows_amd64.zip";
 				return undefined;
@@ -1436,9 +1454,7 @@ export const TOOLS: ToolDefinition[] = [
 			assetMatch: (platform, arch) => {
 				if (arch !== "x64" && arch !== "arm64") return undefined;
 				if (platform === "linux")
-					return arch === "arm64"
-						? "expert_linux_arm64"
-						: "expert_linux_amd64";
+					return arch === "arm64" ? "expert_linux_arm64" : "expert_linux_amd64";
 				if (platform === "darwin")
 					return arch === "arm64"
 						? "expert_darwin_arm64"
@@ -1618,7 +1634,10 @@ async function readProbeCache(): Promise<ProbeCache> {
 	return _probeCache;
 }
 
-function markProbeCacheChange(toolId: string, entry: ProbeCacheEntry | null): void {
+function markProbeCacheChange(
+	toolId: string,
+	entry: ProbeCacheEntry | null,
+): void {
 	_probeCacheChanges.set(toolId, entry);
 	_probeCacheChangeVersions.set(toolId, ++_probeCacheChangeGeneration);
 	_probeCacheDirty = true;
@@ -1636,7 +1655,8 @@ function scheduleProbeFlush(delayMs = PROBE_CACHE_FLUSH_RETRY_DELAY_MS): void {
 function scheduleProbeFlushRetry(): void {
 	const delay = Math.min(
 		PROBE_CACHE_FLUSH_RETRY_MAX_DELAY_MS,
-		PROBE_CACHE_FLUSH_RETRY_DELAY_MS * 2 ** Math.min(_probeCacheRetryAttempt, 6),
+		PROBE_CACHE_FLUSH_RETRY_DELAY_MS *
+			2 ** Math.min(_probeCacheRetryAttempt, 6),
 	);
 	_probeCacheRetryAttempt += 1;
 	scheduleProbeFlush(delay);
@@ -2433,6 +2453,18 @@ export function resolvePlatformPackageBinary(
 const lastResolveTransient = new Map<string, boolean>();
 
 /**
+ * The resolution identity the most recent install of each tool used — a GitHub
+ * release tag, a pinned archive URL, a Maven GAV (#1747).
+ *
+ * A side channel in the same shape as `lastManagedInstallVersion`: the install
+ * functions keep their `string | undefined` return, and `finishInstallAttempt`
+ * reads this to stamp the refresh state at install time. Without that stamp a
+ * freshly installed tool would look "never refreshed" and pay a redundant
+ * re-resolution the first time the cadence came round.
+ */
+const lastInstallResolutionId = new Map<string, string>();
+
+/**
  * True when the tool path `getToolPath` most recently returned for `toolId`
  * was selected after a candidate tier failed transiently — a stalled or
  * unspawnable probe, never a clean "not found". Such a selection may be a
@@ -2543,7 +2575,10 @@ async function getToolPathResolved(
 	// before falling back to PATH or a (re)install.
 	if (tool.platformPackage) {
 		const platformBin = resolvePlatformPackageBinary(tool);
-		if (platformBin && (await verifyToolBinary(platformBin, undefined, onTransient))) {
+		if (
+			platformBin &&
+			(await verifyToolBinary(platformBin, undefined, onTransient))
+		) {
 			logSessionStart(
 				`auto-install ${toolId}: resolved platform-package binary at ${platformBin}`,
 			);
@@ -2848,17 +2883,32 @@ function sameHost(a: string, b: string): boolean {
 	}
 }
 
+interface HttpGetResponse {
+	statusCode: number;
+	body: Buffer;
+	/** Response `ETag`, when the server sent one. */
+	etag?: string;
+}
+
 /**
- * Fetch a URL, following up to `maxRedirects` redirects.
- * Returns the raw Buffer of the response body. Any caller-supplied headers are
- * dropped when a redirect crosses to a different host, so an Authorization
- * header can never leak to a redirect target (e.g. a release CDN).
+ * Fetch a URL, following up to `maxRedirects` redirects, and surface the status
+ * line and `ETag` alongside the body.
+ *
+ * `304 Not Modified` resolves rather than rejects: the periodic GitHub
+ * re-resolution (#1747) sends `If-None-Match` and a 304 is its cheapest and
+ * most desirable answer — the release has not moved, no asset is downloaded,
+ * and GitHub does not charge the request against the caller's rate limit. Every
+ * other non-2xx status is still an error.
+ *
+ * Any caller-supplied headers are dropped when a redirect crosses to a
+ * different host, so an Authorization header can never leak to a redirect
+ * target (e.g. a release CDN).
  */
-function httpsGet(
+function httpsGetWithMeta(
 	url: string,
 	maxRedirects = 5,
 	headers: Record<string, string> = {},
-): Promise<Buffer> {
+): Promise<HttpGetResponse> {
 	return new Promise((resolve, reject) => {
 		https
 			.get(
@@ -2880,7 +2930,15 @@ function httpsGet(
 									const { Authorization: _drop, ...rest } = headers;
 									return rest;
 								})();
-						return resolve(httpsGet(location, maxRedirects - 1, nextHeaders));
+						return resolve(
+							httpsGetWithMeta(location, maxRedirects - 1, nextHeaders),
+						);
+					}
+					const etag =
+						typeof res.headers.etag === "string" ? res.headers.etag : undefined;
+					if (res.statusCode === 304) {
+						res.resume();
+						return resolve({ statusCode: 304, body: Buffer.alloc(0), etag });
 					}
 					if (res.statusCode !== 200) {
 						res.resume();
@@ -2888,12 +2946,31 @@ function httpsGet(
 					}
 					const chunks: Buffer[] = [];
 					res.on("data", (chunk: Buffer) => chunks.push(chunk));
-					res.on("end", () => resolve(Buffer.concat(chunks)));
+					res.on("end", () =>
+						resolve({ statusCode: 200, body: Buffer.concat(chunks), etag }),
+					);
 					res.on("error", reject);
 				},
 			)
 			.on("error", reject);
 	});
+}
+
+/**
+ * Fetch a URL and return the raw Buffer of the response body. Rejects on any
+ * non-200 status (a 304 is impossible here — no caller of this form sends a
+ * validator header).
+ */
+async function httpsGet(
+	url: string,
+	maxRedirects = 5,
+	headers: Record<string, string> = {},
+): Promise<Buffer> {
+	const response = await httpsGetWithMeta(url, maxRedirects, headers);
+	if (response.statusCode !== 200) {
+		throw new Error(`HTTP ${response.statusCode} for ${url}`);
+	}
+	return response.body;
 }
 
 /**
@@ -2929,6 +3006,13 @@ function runCommand(
  */
 async function installGitHubTool(
 	tool: ToolDefinition,
+	/**
+	 * Release metadata the caller already fetched. The periodic refresh (#1747)
+	 * resolves `releases/latest` to decide whether the tag moved at all, and
+	 * hands the SAME response here rather than paying a second GitHub API call
+	 * for an answer it already has.
+	 */
+	prefetchedRelease?: GitHubReleaseMetadata,
 ): Promise<string | undefined> {
 	const spec = tool.github;
 	if (!spec) return undefined;
@@ -2943,26 +3027,34 @@ async function installGitHubTool(
 		return undefined;
 	}
 
-	// Fetch latest release metadata from GitHub API
-	logSessionStart(
-		`github-install ${tool.id}: fetching release metadata from ${spec.repo}`,
-	);
-	let releaseJson: {
-		tag_name?: string;
-		assets: Array<{ name: string; browser_download_url: string }>;
-	};
-	try {
-		const body = await httpsGet(
-			`https://api.github.com/repos/${spec.repo}/releases/latest`,
-			5,
-			githubApiAuthHeaders(),
-		);
-		releaseJson = JSON.parse(body.toString("utf8"));
-	} catch (err) {
+	// Fetch latest release metadata from GitHub API, unless the caller already did.
+	let releaseJson: GitHubReleaseMetadata;
+	if (prefetchedRelease) {
+		releaseJson = prefetchedRelease;
 		logSessionStart(
-			`github-install ${tool.id}: release fetch failed: ${(err as Error).message}`,
+			`github-install ${tool.id}: using caller-supplied release metadata for ${spec.repo} (${prefetchedRelease.tag_name ?? "untagged"})`,
 		);
-		return undefined;
+	} else {
+		logSessionStart(
+			`github-install ${tool.id}: fetching release metadata from ${spec.repo}`,
+		);
+		try {
+			const body = await httpsGet(
+				`https://api.github.com/repos/${spec.repo}/releases/latest`,
+				5,
+				githubApiAuthHeaders(),
+			);
+			releaseJson = JSON.parse(body.toString("utf8"));
+		} catch (err) {
+			logSessionStart(
+				`github-install ${tool.id}: release fetch failed: ${(err as Error).message}`,
+			);
+			return undefined;
+		}
+	}
+
+	if (releaseJson.tag_name) {
+		lastInstallResolutionId.set(tool.id, releaseJson.tag_name);
 	}
 
 	const asset =
@@ -3230,13 +3322,516 @@ export function getRefreshableManagedNpmTools(): Array<{
 	toolId: string;
 	packageName: string;
 }> {
-	const refreshable: Array<{ toolId: string; packageName: string }> = [];
+	return getRefreshableManagedTools()
+		.filter((candidate) => candidate.strategy === "npm")
+		.map((candidate) => ({
+			toolId: candidate.toolId,
+			// The npm branch of getRefreshableManagedTools only admits entries that
+			// have one, so this is total.
+			packageName: candidate.packageName as string,
+		}));
+}
+
+// --- Periodic refresh seam for the non-npm strategies (#1747) ---
+
+export type ManagedToolStrategy = ToolDefinition["installStrategy"];
+
+export interface RefreshableManagedTool {
+	toolId: string;
+	strategy: ManagedToolStrategy;
+	packageName?: string;
+	/**
+	 * The identity of what the tool's coordinate resolves to TODAY, when that
+	 * identity is knowable without a network call. `archive` and `maven` entries
+	 * carry a version pinned in this registry, so their identity is the resolved
+	 * URL or the Maven GAV; a change to it means the installed artifact is stale
+	 * against the pin. `github` resolves `releases/latest` at refresh time and
+	 * `npm`/`pip`/`gem` resolve inside their package manager, so all three leave
+	 * this undefined.
+	 */
+	pinnedCoordinate?: string;
+}
+
+/** The Maven GAV a `maven` entry pins, as a stable identity string. */
+function mavenCoordinate(spec: MavenJarSpec): string {
+	return [
+		spec.repoBaseUrl ?? MAVEN_CENTRAL_BASE,
+		spec.groupId,
+		spec.artifactId,
+		spec.version,
+		spec.classifier ?? "",
+	].join(":");
+}
+
+/**
+ * Every managed tool whose installed copy is allowed to move, across ALL six
+ * install strategies — the single source of truth the periodic refresh selects
+ * from (#1730, #1747).
+ *
+ * Derived from `TOOLS` on every call rather than listed by hand. A hand-kept
+ * copy of a registry is the defect shape this repo keeps re-finding, and a tool
+ * added to `TOOLS` must become refreshable without anyone remembering a second
+ * list.
+ *
+ * Excluded: npm packages carrying an explicit `name@1.2.3` pin (the pin IS the
+ * intended version, and #589's drift check already repairs those), and any
+ * entry with no coordinate to re-resolve at all.
+ */
+export function getRefreshableManagedTools(): RefreshableManagedTool[] {
+	const refreshable: RefreshableManagedTool[] = [];
 	for (const tool of TOOLS) {
-		if (tool.installStrategy !== "npm" || !tool.packageName) continue;
-		if (parsePinnedVersion(tool.packageName) !== undefined) continue;
-		refreshable.push({ toolId: tool.id, packageName: tool.packageName });
+		switch (tool.installStrategy) {
+			case "npm": {
+				if (!tool.packageName) continue;
+				if (parsePinnedVersion(tool.packageName) !== undefined) continue;
+				refreshable.push({
+					toolId: tool.id,
+					strategy: "npm",
+					packageName: tool.packageName,
+				});
+				break;
+			}
+			case "pip":
+			case "gem": {
+				if (!tool.packageName) continue;
+				refreshable.push({
+					toolId: tool.id,
+					strategy: tool.installStrategy,
+					packageName: tool.packageName,
+				});
+				break;
+			}
+			case "github": {
+				if (!tool.github) continue;
+				refreshable.push({ toolId: tool.id, strategy: "github" });
+				break;
+			}
+			case "maven": {
+				if (!tool.maven) continue;
+				refreshable.push({
+					toolId: tool.id,
+					strategy: "maven",
+					pinnedCoordinate: mavenCoordinate(tool.maven),
+				});
+				break;
+			}
+			case "archive": {
+				if (!tool.archive) continue;
+				const url = resolveArchiveUrl(tool.archive);
+				// No archive for this platform/arch: nothing is installed and nothing
+				// can be refreshed.
+				if (!url) continue;
+				refreshable.push({
+					toolId: tool.id,
+					strategy: "archive",
+					pinnedCoordinate: url,
+				});
+				break;
+			}
+		}
 	}
 	return refreshable;
+}
+
+/**
+ * Is this tool present in a location pi-lens itself installs to?
+ *
+ * Deliberately filesystem-only — no spawn, no network. The refresh runs this
+ * over candidates on a background timer, and a presence check that spawned a
+ * probe per tool would cost more than the refresh it gates.
+ *
+ * A tool pi-lens has never installed is never refreshed: `pip install -U` or a
+ * release download on an absent tool would turn a refresh into an unrequested
+ * install.
+ */
+export async function isManagedToolPresent(toolId: string): Promise<boolean> {
+	const tool = TOOLS.find((t) => t.id === toolId);
+	if (!tool) return false;
+	switch (tool.installStrategy) {
+		case "npm": {
+			if (!tool.packageName) return false;
+			try {
+				await fs.access(
+					path.join(
+						TOOLS_DIR,
+						"node_modules",
+						tool.packageName,
+						"package.json",
+					),
+				);
+				return true;
+			} catch {
+				return false;
+			}
+		}
+		case "github":
+		case "maven":
+			return (
+				(await findGitHubToolPath(tool.binaryName ?? tool.id)) !== undefined
+			);
+		case "archive":
+			// A launcher archive leaves a shim in the managed bin; a TREE BUNDLE
+			// leaves only its extract dir, confirmed via the tree marker.
+			return (
+				(await findGitHubToolPath(tool.binaryName ?? tool.id)) !== undefined ||
+				(await getArchiveTreeBundlePath(tool)) !== undefined
+			);
+		case "pip":
+		case "gem": {
+			// pip/gem installs are not namespaced to pi-lens: they land in the
+			// user's site/gem dirs, so there is no pi-lens-owned directory to look
+			// in. The persisted probe cache is the record of where this tool last
+			// resolved, and it is written from the same discovery pass the install
+			// path uses. An entry whose file is gone is not presence.
+			const cached = (await readProbeCache())[toolId];
+			return cached?.path !== undefined && existsSync(cached.path);
+		}
+		default:
+			return false;
+	}
+}
+
+/**
+ * Version this tool reports today, read by running its own `--version` probe.
+ *
+ * Only used for `pip` and `gem`, the two strategies with no readable
+ * coordinate: their package managers install into user-owned directories with
+ * no manifest pi-lens can read, so the binary itself is the only source. Costs
+ * one spawn, bounded by the same one-tool-per-session budget as the refresh.
+ */
+async function probeManagedToolVersion(
+	tool: ToolDefinition,
+): Promise<string | undefined> {
+	const cached = (await readProbeCache())[tool.id];
+	if (!cached?.path || !existsSync(cached.path)) return undefined;
+	try {
+		const result = await safeSpawnAsync(cached.path, tool.checkArgs, {
+			timeout: 10_000,
+			ignoreAmbientSignal: true,
+			resourceLabel: `tool-refresh-version:${tool.id}`,
+		});
+		if (result.status !== 0) return undefined;
+		return extractVersionToken(`${result.stdout}\n${result.stderr}`);
+	} catch {
+		return undefined;
+	}
+}
+
+/** What the caller already knows about this tool from its persisted stamp. */
+export interface ManagedToolRefreshKnownState {
+	/** Last recorded resolution identity (release tag, or pinned coordinate). */
+	resolutionId?: string;
+	/** Last recorded `ETag` for the GitHub release query. */
+	etag?: string;
+	/** Last recorded installed version. */
+	version?: string;
+}
+
+export interface ManagedToolRefreshAttempt {
+	ok: boolean;
+	/** True when the re-resolution proved nothing moved, so nothing was downloaded. */
+	unchanged: boolean;
+	/** Resolution identity to persist for the next comparison. */
+	resolutionId?: string;
+	/** `ETag` to persist and replay as `If-None-Match` next time. */
+	etag?: string;
+	/** Version now installed, when this strategy can read one. */
+	version?: string;
+	/** Failure detail for the ledger, when `ok` is false. */
+	reason?: string;
+}
+
+/**
+ * Re-resolve one non-npm managed tool and, only if its coordinate actually
+ * moved, reinstall it (#1747).
+ *
+ * Never throws and never removes the installed copy: on any failure the
+ * currently installed version keeps serving and the caller records a
+ * degradation. npm is NOT handled here — `managed-tool-refresh.ts` owns that
+ * path because it needs the package-manager resolver.
+ */
+export async function refreshManagedTool(
+	toolId: string,
+	known: ManagedToolRefreshKnownState = {},
+): Promise<ManagedToolRefreshAttempt> {
+	const tool = TOOLS.find((t) => t.id === toolId);
+	if (!tool) {
+		return { ok: false, unchanged: true, reason: "unknown tool id" };
+	}
+	switch (tool.installStrategy) {
+		case "github":
+			return refreshGitHubManagedTool(tool, known);
+		case "pip":
+		case "gem":
+			return refreshPackageManagerManagedTool(tool);
+		case "maven":
+		case "archive":
+			return refreshPinnedManagedTool(tool, known);
+		default:
+			return {
+				ok: false,
+				unchanged: true,
+				reason: `strategy ${tool.installStrategy} is not refreshable here`,
+			};
+	}
+}
+
+/**
+ * `github`: ask `releases/latest` whether the tag moved, and download only if
+ * it did.
+ *
+ * Three things keep 27 GitHub-release tools off GitHub's rate limit. The
+ * per-tool weekly stamp means one query per tool per week; the one-refresh-per-
+ * session budget means at most one query per session; and the stored `ETag`
+ * replayed as `If-None-Match` makes the common answer a 304, which GitHub does
+ * not charge against the limit at all. A 304, or a tag equal to the recorded
+ * one, downloads nothing.
+ */
+async function refreshGitHubManagedTool(
+	tool: ToolDefinition,
+	known: ManagedToolRefreshKnownState,
+): Promise<ManagedToolRefreshAttempt> {
+	const spec = tool.github;
+	if (!spec) return { ok: false, unchanged: true, reason: "no github spec" };
+
+	let response: HttpGetResponse;
+	try {
+		response = await httpsGetWithMeta(
+			`https://api.github.com/repos/${spec.repo}/releases/latest`,
+			5,
+			{
+				...githubApiAuthHeaders(),
+				...(known.etag ? { "If-None-Match": known.etag } : {}),
+			},
+		);
+	} catch (err) {
+		return {
+			ok: false,
+			unchanged: true,
+			reason: `release query failed: ${(err as Error).message}`,
+		};
+	}
+
+	if (response.statusCode === 304) {
+		return {
+			ok: true,
+			unchanged: true,
+			resolutionId: known.resolutionId,
+			etag: known.etag,
+			version: known.version,
+		};
+	}
+
+	let release: GitHubReleaseMetadata;
+	try {
+		release = JSON.parse(response.body.toString("utf8"));
+	} catch (err) {
+		return {
+			ok: false,
+			unchanged: true,
+			reason: `release metadata unparseable: ${(err as Error).message}`,
+		};
+	}
+	const tag = release.tag_name;
+	if (!tag) {
+		return { ok: false, unchanged: true, reason: "release has no tag_name" };
+	}
+	if (known.resolutionId === tag) {
+		return {
+			ok: true,
+			unchanged: true,
+			resolutionId: tag,
+			etag: response.etag ?? known.etag,
+			version: known.version ?? tag,
+		};
+	}
+
+	const installed = await installGitHubTool(tool, release);
+	if (!installed) {
+		return {
+			ok: false,
+			unchanged: true,
+			// Keep the ETag off the failure stamp: replaying it would make the next
+			// attempt a 304 and skip the download this one never completed.
+			resolutionId: known.resolutionId,
+			version: known.version,
+			reason: `install from release ${tag} failed`,
+		};
+	}
+	const verified = await verifyRefreshedArtifact(tool, installed);
+	if (!verified) {
+		return {
+			ok: false,
+			unchanged: false,
+			resolutionId: known.resolutionId,
+			version: known.version,
+			reason: `release ${tag} installed but its binary does not run`,
+		};
+	}
+	return {
+		ok: true,
+		unchanged: false,
+		resolutionId: tag,
+		etag: response.etag,
+		version: tag,
+	};
+}
+
+/**
+ * Confirm a just-refreshed artifact still runs, and re-stamp the probe cache
+ * with its new mtime.
+ *
+ * A refresh REPLACES a working binary in place. Without this check a release
+ * that ships a broken or wrong-architecture asset would be written over a
+ * healthy copy and surface later as a dispatch failure with no obvious cause.
+ * The verdict goes back to the caller, which degrades and marks the stamp
+ * failed so the shorter retry cooldown applies.
+ *
+ * An archive TREE BUNDLE has no single binary to run; `installArchiveTool`
+ * already confirms its tree marker, so the install's own success is the check.
+ */
+async function verifyRefreshedArtifact(
+	tool: ToolDefinition,
+	installedPath: string,
+): Promise<boolean> {
+	if (tool.installStrategy === "archive" && !tool.archive?.launcher) {
+		return true;
+	}
+	if (!(await verifyToolBinary(installedPath))) {
+		logSessionStart(
+			`managed-tool-refresh ${tool.id}: refreshed artifact at ${installedPath} failed its --version check`,
+		);
+		return false;
+	}
+	// Record the NEW mtime rather than leaving the persisted entry to miss its
+	// mtime check and force a full re-resolution on the next dispatch.
+	await updateProbeCache(tool.id, installedPath);
+	return true;
+}
+
+/**
+ * `pip` and `gem`: re-run pi-lens's own install command in upgrade form.
+ *
+ * There is no coordinate to compare first — the registry pins no version and
+ * the package managers install into user-owned directories with no manifest
+ * pi-lens can read — so the tool's own `--version` output before and after is
+ * what says whether anything moved.
+ */
+async function refreshPackageManagerManagedTool(
+	tool: ToolDefinition,
+): Promise<ManagedToolRefreshAttempt> {
+	if (!tool.packageName) {
+		return { ok: false, unchanged: true, reason: "no package name" };
+	}
+	const previous = await probeManagedToolVersion(tool);
+	const installed =
+		tool.installStrategy === "pip"
+			? // `-U` is the whole fix: without it pip treats the installed copy as
+				// satisfying the requirement and the day-one version never moves.
+				await installPipTool(tool.packageName, { upgrade: true })
+			: // `gem install` always fetches the newest version that satisfies the
+				// requirement, so the install command IS the upgrade command.
+				await installGemTool(tool.packageName);
+	if (!installed) {
+		return {
+			ok: false,
+			unchanged: true,
+			version: previous,
+			reason: `${tool.installStrategy} upgrade failed`,
+		};
+	}
+	const current = await probeManagedToolVersion(tool);
+	if (previous !== undefined && current === undefined) {
+		// The tool answered `--version` before the upgrade and does not now: the
+		// upgrade replaced a working copy with a broken one. Say so rather than
+		// stamping success on a tool that no longer runs.
+		return {
+			ok: false,
+			unchanged: false,
+			version: previous,
+			reason: `${tool.installStrategy} upgrade left the binary unable to report a version`,
+		};
+	}
+	return {
+		ok: true,
+		// An unreadable version on both sides cannot prove a move, so it reads as
+		// unchanged rather than inventing one.
+		unchanged:
+			previous === undefined || current === undefined || previous === current,
+		version: current ?? previous,
+	};
+}
+
+/**
+ * `maven` and `archive`: both pin an explicit version in THIS registry, so
+ * their coordinate cannot move upstream — it moves when pi-lens bumps it.
+ *
+ * The freeze for these two is therefore the mirror image of the npm one: the
+ * installer only installs when the tool is ABSENT, so a repo that bumps
+ * spotbugs from 4.10.2 to 4.11.0 leaves every existing machine on 4.10.2
+ * forever. Comparing the recorded coordinate against the registry's current one
+ * catches exactly that, and costs no network when they match.
+ *
+ * A tool with no recorded coordinate is reinstalled once. pi-lens cannot read
+ * which pin the installed artifact came from — an archive bundle carries no
+ * manifest it writes — so the only way to make the installed copy provably
+ * match the declared pin is to install it. That happens at most once per tool,
+ * ever, and the stamp it writes suppresses it from then on.
+ */
+async function refreshPinnedManagedTool(
+	tool: ToolDefinition,
+	known: ManagedToolRefreshKnownState,
+): Promise<ManagedToolRefreshAttempt> {
+	const coordinate =
+		tool.installStrategy === "maven"
+			? tool.maven && mavenCoordinate(tool.maven)
+			: tool.archive && resolveArchiveUrl(tool.archive);
+	if (!coordinate) {
+		return {
+			ok: false,
+			unchanged: true,
+			reason: "no coordinate for this platform",
+		};
+	}
+	if (known.resolutionId === coordinate) {
+		return {
+			ok: true,
+			unchanged: true,
+			resolutionId: coordinate,
+			version: known.version,
+		};
+	}
+	const installed =
+		tool.installStrategy === "maven"
+			? await installMavenTool(tool)
+			: await installArchiveTool(tool);
+	if (!installed) {
+		return {
+			ok: false,
+			unchanged: true,
+			resolutionId: known.resolutionId,
+			version: known.version,
+			reason: `reinstall from ${coordinate} failed`,
+		};
+	}
+	if (!(await verifyRefreshedArtifact(tool, installed))) {
+		return {
+			ok: false,
+			unchanged: false,
+			resolutionId: known.resolutionId,
+			version: known.version,
+			reason: `reinstall from ${coordinate} produced an artifact that does not run`,
+		};
+	}
+	return {
+		ok: true,
+		// A first-ever stamp is an adoption, not a version move: the coordinate did
+		// not change, pi-lens simply had no record of it. Reporting it as a move
+		// would put a false "x → y" row in the log.
+		unchanged: known.resolutionId === undefined,
+		resolutionId: coordinate,
+		version: coordinate,
+	};
 }
 
 const MAVEN_CENTRAL_BASE = "https://repo1.maven.org/maven2";
@@ -3271,6 +3866,7 @@ async function installMavenTool(
 		spec.classifier ? `-${spec.classifier}` : ""
 	}.jar`;
 	const url = `${base}/${groupPath}/${spec.artifactId}/${spec.version}/${jarFile}`;
+	lastInstallResolutionId.set(tool.id, mavenCoordinate(spec));
 
 	logSessionStart(`maven-install ${tool.id}: downloading ${url}`);
 	let jarBuffer: Buffer;
@@ -3355,6 +3951,8 @@ async function installArchiveTool(
 		return undefined;
 	}
 
+	lastInstallResolutionId.set(tool.id, url);
+
 	logSessionStart(`archive-install ${tool.id}: downloading ${url}`);
 	let archiveBuffer: Buffer;
 	try {
@@ -3393,9 +3991,7 @@ async function installArchiveTool(
 			archiveName,
 			"-C",
 			extractName,
-			...(stripComponents > 0
-				? [`--strip-components=${stripComponents}`]
-				: []),
+			...(stripComponents > 0 ? [`--strip-components=${stripComponents}`] : []),
 		];
 		// Resolve `tar` to an absolute path on Windows (System32\tar.exe is the
 		// bsdtar shipped with Windows 10+) so extraction can't be hijacked via a
@@ -3641,41 +4237,57 @@ async function installNpmTool(
  */
 async function installPipTool(
 	packageName: string,
+	/**
+	 * Add `-U`, turning the install into an upgrade. Without it `pip install`
+	 * treats an already-present package as satisfied and leaves the day-one
+	 * version in place forever — the freeze #1747 is about. The flag is the ONLY
+	 * difference between install and refresh: same command ladder, same
+	 * `--user` target, so a refresh can never write somewhere the install would
+	 * not have.
+	 */
+	options: { upgrade?: boolean } = {},
 ): Promise<string | undefined> {
 	try {
 		const isWindows = process.platform === "win32";
+		const verb = options.upgrade
+			? ["install", "-U", "--user"]
+			: ["install", "--user"];
 		const pipCandidates = isWindows
 			? [
-					{ command: "pip", args: ["install", "--user", packageName] },
+					{ command: "pip", args: [...verb, packageName] },
 					{
 						command: "py",
-						args: ["-m", "pip", "install", "--user", packageName],
+						args: ["-m", "pip", ...verb, packageName],
 					},
 					{
 						command: "python",
-						args: ["-m", "pip", "install", "--user", packageName],
+						args: ["-m", "pip", ...verb, packageName],
 					},
 				]
 			: [
-					{ command: "pip3", args: ["install", "--user", packageName] },
-					{ command: "pip", args: ["install", "--user", packageName] },
+					{ command: "pip3", args: [...verb, packageName] },
+					{ command: "pip", args: [...verb, packageName] },
 					{
 						command: "python3",
-						args: ["-m", "pip", "install", "--user", packageName],
+						args: ["-m", "pip", ...verb, packageName],
 					},
 					{
 						command: "python",
-						args: ["-m", "pip", "install", "--user", packageName],
+						args: ["-m", "pip", ...verb, packageName],
 					},
 				];
 
 		let lastError = "";
 		for (const candidate of pipCandidates) {
-			const pipResult = await safeSpawnAsync(candidate.command, candidate.args, {
-				timeout: 120_000,
-				ignoreAmbientSignal: true,
-				lifetimeCoupled: true,
-			});
+			const pipResult = await safeSpawnAsync(
+				candidate.command,
+				candidate.args,
+				{
+					timeout: 120_000,
+					ignoreAmbientSignal: true,
+					lifetimeCoupled: true,
+				},
+			);
 			const outcome = {
 				ok: pipResult.status === 0,
 				error: (pipResult.error?.message ?? pipResult.stderr).trim(),
@@ -3687,14 +4299,10 @@ async function installPipTool(
 				const userBaseResult = await new Promise<string>((resolve) => {
 					let probe: ReturnType<typeof spawn>;
 					try {
-						probe = spawn(
-							candidate.command,
-							["-m", "site", "--user-base"],
-							{
-								stdio: ["ignore", "pipe", "pipe"],
-								shell: isWindows,
-							},
-						);
+						probe = spawn(candidate.command, ["-m", "site", "--user-base"], {
+							stdio: ["ignore", "pipe", "pipe"],
+							shell: isWindows,
+						});
 					} catch {
 						// SYNCHRONOUS spawn throw (Windows `spawn UNKNOWN`/EINVAL, the
 						// pidusage bug class, #533) — best-effort probe, resolve empty.
@@ -3815,6 +4423,30 @@ async function installGemTool(
 	}
 }
 
+/**
+ * Stamp the refresh state at INSTALL time (#1747).
+ *
+ * An install has just done, by definition, the freshest possible resolution.
+ * Recording it here means the periodic refresh starts its cadence from the
+ * install rather than treating a day-old tool as never checked — and it is what
+ * spares the archive/maven entries a redundant re-download the first time their
+ * coordinate comparison runs with no recorded pin.
+ *
+ * Lazily imported so `installer/index.ts` keeps no static dependency on the
+ * refresh module (which imports this one). Best-effort: a stamp that cannot be
+ * written only costs one extra re-resolution later, so it never fails an
+ * install.
+ */
+async function stampInstallResolution(toolId: string): Promise<void> {
+	try {
+		const resolutionId = lastInstallResolutionId.get(toolId);
+		const refresh = await import("./managed-tool-refresh.js");
+		await refresh.stampManagedToolInstall(toolId, resolutionId);
+	} catch {
+		// best-effort
+	}
+}
+
 async function finishInstallAttempt(
 	toolId: string,
 	ok: boolean,
@@ -3823,6 +4455,7 @@ async function finishInstallAttempt(
 	logSessionStart(
 		`auto-install ${toolId}: ${ok ? "success" : "failed"} (${Date.now() - startedAt}ms)`,
 	);
+	if (ok) await stampInstallResolution(toolId);
 	// Every install strategy funnels its outcome through here, so this one write
 	// records attempt-ness for all of them (#1500).
 	noteInstallAttempt(
@@ -3919,13 +4552,21 @@ export async function installTool(toolId: string): Promise<boolean> {
 			case "maven": {
 				if (!tool.maven) return false;
 				const mavenPath = await installMavenTool(tool);
-				return finishInstallAttempt(tool.id, mavenPath !== undefined, startedAt);
+				return finishInstallAttempt(
+					tool.id,
+					mavenPath !== undefined,
+					startedAt,
+				);
 			}
 
 			case "archive": {
 				if (!tool.archive) return false;
 				const archivePath = await installArchiveTool(tool);
-				return finishInstallAttempt(tool.id, archivePath !== undefined, startedAt);
+				return finishInstallAttempt(
+					tool.id,
+					archivePath !== undefined,
+					startedAt,
+				);
 			}
 
 			default:
@@ -3982,7 +4623,9 @@ async function ensureToolResolved(
 	// branch above deliberately keeps its `declined` record by never reaching here.
 	installAttempts.delete(toolId);
 	lastEnsureResolutionSource.delete(toolId);
-	const cacheResolvedPath = (result: string | undefined): string | undefined => {
+	const cacheResolvedPath = (
+		result: string | undefined,
+	): string | undefined => {
 		if (result) {
 			resolvedPathCache.set(toolId, result);
 			void updateProbeCache(toolId, result, wasLastResolveTransient(toolId));
@@ -4427,7 +5070,9 @@ export function pickReleaseAsset<T extends { name: string }>(
 ): T | undefined {
 	return (
 		assets.find((a) => a.name === assetSubstring) ??
-		assets.find((a) => a.name.includes(assetSubstring) && !isAssetSidecar(a.name))
+		assets.find(
+			(a) => a.name.includes(assetSubstring) && !isAssetSidecar(a.name),
+		)
 	);
 }
 

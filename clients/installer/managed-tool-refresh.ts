@@ -1,5 +1,13 @@
 /**
- * Periodic version refresh for pi-lens's managed npm tools (#1730).
+ * Periodic version refresh for pi-lens's managed tools (#1730, #1747).
+ *
+ * #1730 covered the npm strategy. #1747 extends the SAME cadence, stamp file,
+ * session budget and degradation kind to the other five rather than building a
+ * second mechanism: github (27 entries), pip (6), archive (4), maven (1) and
+ * gem (1) were all frozen at whatever the installer resolved on day one,
+ * because `installTool` only runs when the tool is ABSENT. The only per-
+ * strategy difference is the re-resolution step, which lives in
+ * `installer/index.ts`'s `refreshManagedTool`.
  *
  * `~/.pi-lens/tools/package.json` records ranges, not versions — `npm install
  * knip` writes `"knip": "^6.4.1"` and a lockfile pinning 6.4.1. Nothing ever
@@ -49,8 +57,11 @@ import { safeSpawnAsync } from "../safe-spawn.js";
 import { logSessionStart } from "../sessionstart-logger.js";
 import {
 	getManagedToolsDir,
-	getRefreshableManagedNpmTools,
+	getRefreshableManagedTools,
+	isManagedToolPresent,
+	type ManagedToolStrategy,
 	npmToolNeedsPostinstall,
+	refreshManagedTool,
 } from "./index.js";
 import {
 	managedToolRefreshesThisSession,
@@ -105,6 +116,23 @@ export interface ManagedToolRefreshEntry {
 	checkedAt: number;
 	/** Version installed after that run, when it could be read. */
 	version?: string;
+	/**
+	 * What the tool's coordinate resolved to at that run — a GitHub release tag,
+	 * an archive URL, a Maven GAV (#1747). This is the field that makes "did
+	 * anything move?" answerable WITHOUT downloading: a github refresh that sees
+	 * the same tag, or an archive refresh that sees the same pinned URL, stops
+	 * here. npm and pip/gem leave it unset; their package manager owns the
+	 * comparison.
+	 */
+	resolutionId?: string;
+	/**
+	 * `ETag` from the last GitHub `releases/latest` response (#1747), replayed as
+	 * `If-None-Match`. A 304 answer costs no rate-limit quota and no download,
+	 * which is what keeps 27 release-installed tools cheap. Written only after a
+	 * SUCCESSFUL refresh: replaying an ETag from a run whose download failed
+	 * would turn the retry into a 304 and skip the install forever.
+	 */
+	etag?: string;
 	/** The run failed; `retryIntervalMs` applies instead of `intervalMs`. */
 	failed?: boolean;
 }
@@ -146,6 +174,10 @@ function parseEntry(value: unknown): ManagedToolRefreshEntry | undefined {
 		...(typeof candidate.version === "string" && {
 			version: candidate.version,
 		}),
+		...(typeof candidate.resolutionId === "string" && {
+			resolutionId: candidate.resolutionId,
+		}),
+		...(typeof candidate.etag === "string" && { etag: candidate.etag }),
 		...(candidate.failed === true && { failed: true }),
 	};
 }
@@ -243,6 +275,31 @@ async function writeRefreshStamp(
 	}
 }
 
+/**
+ * Record that a tool was just INSTALLED, so the cadence starts from the install
+ * (#1747).
+ *
+ * An install has performed the freshest possible resolution, so leaving the
+ * stamp absent would make the refresh treat a brand-new tool as never checked
+ * and re-resolve it the moment the timer next fired. Recording the resolution
+ * identity here is also what spares the archive and maven entries a redundant
+ * re-download: their refresh compares the recorded pin against the registry's,
+ * and an install writes exactly the pin it used.
+ *
+ * Called from `installer/index.ts`'s `finishInstallAttempt`, the one funnel all
+ * six install strategies pass through.
+ */
+export async function stampManagedToolInstall(
+	toolId: string,
+	resolutionId?: string,
+	now: number = Date.now(),
+): Promise<void> {
+	await writeRefreshStamp(toolId, {
+		checkedAt: now,
+		...(resolutionId !== undefined && { resolutionId }),
+	});
+}
+
 // --- Per-session budget ---
 
 /**
@@ -259,25 +316,30 @@ function remainingSessionBudget(): number {
 
 export interface RefreshCandidate {
 	toolId: string;
-	packageName: string;
+	strategy: ManagedToolStrategy;
+	/** npm/pip/gem only; github/maven/archive resolve from their own spec. */
+	packageName?: string;
 }
 
 /**
- * Registry entries that are BOTH refreshable and actually installed in the
- * managed tree. An entry pi-lens has never installed has no version to move,
- * and `npm update` on it would install it — turning a refresh into an
- * unrequested download.
+ * Registry entries that are BOTH refreshable and actually installed where
+ * pi-lens installs. An entry pi-lens has never installed has no version to
+ * move, and `npm update`, `pip install -U` or a release download on one would
+ * turn a refresh into an unrequested install.
+ *
+ * The presence check is filesystem-only for every strategy (#1747), so scanning
+ * all 60-odd registry entries on a background timer costs no spawn and no
+ * network.
  */
 async function installedRefreshCandidates(): Promise<RefreshCandidate[]> {
-	const nodeModules = path.join(getManagedToolsDir(), "node_modules");
 	const candidates: RefreshCandidate[] = [];
-	for (const tool of getRefreshableManagedNpmTools()) {
-		try {
-			await fs.access(path.join(nodeModules, tool.packageName, "package.json"));
-			candidates.push(tool);
-		} catch {
-			// Not installed here — nothing to refresh.
-		}
+	for (const tool of getRefreshableManagedTools()) {
+		if (!(await isManagedToolPresent(tool.toolId))) continue;
+		candidates.push({
+			toolId: tool.toolId,
+			strategy: tool.strategy,
+			...(tool.packageName !== undefined && { packageName: tool.packageName }),
+		});
 	}
 	return candidates;
 }
@@ -340,7 +402,8 @@ export type ManagedToolRefreshSkipReason =
 
 export interface ManagedToolRefreshResult {
 	toolId: string;
-	packageName: string;
+	strategy: ManagedToolStrategy;
+	packageName?: string;
 	previousVersion?: string;
 	currentVersion?: string;
 	changed: boolean;
@@ -352,12 +415,112 @@ export interface ManagedToolRefreshOutcome {
 	refreshed: ManagedToolRefreshResult[];
 }
 
+/**
+ * Refresh one tool, choosing the mechanism its install strategy needs (#1747).
+ *
+ * npm stays here because it needs the package-manager resolver; every other
+ * strategy delegates to `refreshManagedTool` in the installer, which owns the
+ * GitHub release query, the `pip install -U` ladder, `gem install`, and the
+ * pinned-coordinate comparison for maven/archive. Both halves share ONE budget,
+ * ONE stamp file and ONE degradation kind, so adding five strategies does not
+ * turn one spawn per session into six.
+ */
 async function refreshOne(
+	candidate: RefreshCandidate,
+	entry: ManagedToolRefreshEntry | undefined,
+	now: number,
+): Promise<ManagedToolRefreshResult> {
+	return candidate.strategy === "npm"
+		? refreshNpmOne(candidate, now)
+		: refreshNonNpmOne(candidate, entry, now);
+}
+
+async function refreshNonNpmOne(
+	candidate: RefreshCandidate,
+	entry: ManagedToolRefreshEntry | undefined,
+	now: number,
+): Promise<ManagedToolRefreshResult> {
+	const previousVersion = entry?.version;
+	const startedAt = Date.now();
+	const attempt = await refreshManagedTool(candidate.toolId, {
+		...(entry?.resolutionId !== undefined && {
+			resolutionId: entry.resolutionId,
+		}),
+		...(entry?.etag !== undefined && { etag: entry.etag }),
+		...(previousVersion !== undefined && { version: previousVersion }),
+	});
+	const elapsedMs = Date.now() - startedAt;
+
+	if (!attempt.ok) {
+		recordDegradationOnce({
+			kind: "managed-tool-refresh",
+			subject: candidate.toolId,
+			reason: `${candidate.strategy} refresh failed: ${attempt.reason ?? "unknown"}`,
+		});
+		logSessionStart(
+			`managed-tool-refresh ${candidate.toolId}: ${candidate.strategy} refresh failed after ${elapsedMs}ms — keeping ${previousVersion ?? "installed"} (${attempt.reason ?? "unknown"})`,
+		);
+		await writeRefreshStamp(candidate.toolId, {
+			checkedAt: now,
+			failed: true,
+			...(previousVersion !== undefined && { version: previousVersion }),
+			...(entry?.resolutionId !== undefined && {
+				resolutionId: entry.resolutionId,
+			}),
+			// Deliberately NOT carrying `entry.etag` forward: a stamp that replays
+			// the validator of a run whose download failed would get a 304 next
+			// time and skip the install that never happened.
+		});
+		return {
+			toolId: candidate.toolId,
+			strategy: candidate.strategy,
+			...(candidate.packageName !== undefined && {
+				packageName: candidate.packageName,
+			}),
+			previousVersion,
+			currentVersion: previousVersion,
+			changed: false,
+			ok: false,
+		};
+	}
+
+	const currentVersion = attempt.version;
+	const changed = !attempt.unchanged;
+	await writeRefreshStamp(candidate.toolId, {
+		checkedAt: now,
+		...(currentVersion !== undefined && { version: currentVersion }),
+		...(attempt.resolutionId !== undefined && {
+			resolutionId: attempt.resolutionId,
+		}),
+		...(attempt.etag !== undefined && { etag: attempt.etag }),
+	});
+	logSessionStart(
+		changed
+			? `managed-tool-refresh ${candidate.toolId}: ${previousVersion ?? "unknown"} → ${currentVersion ?? "unknown"} via ${candidate.strategy} (${elapsedMs}ms)`
+			: `managed-tool-refresh ${candidate.toolId}: unchanged at ${currentVersion ?? previousVersion ?? "unknown"} via ${candidate.strategy} (${elapsedMs}ms)`,
+	);
+	return {
+		toolId: candidate.toolId,
+		strategy: candidate.strategy,
+		...(candidate.packageName !== undefined && {
+			packageName: candidate.packageName,
+		}),
+		previousVersion,
+		currentVersion,
+		changed,
+		ok: true,
+	};
+}
+
+async function refreshNpmOne(
 	candidate: RefreshCandidate,
 	now: number,
 ): Promise<ManagedToolRefreshResult> {
 	const toolsDir = getManagedToolsDir();
-	const previousVersion = await readInstalledVersion(candidate.packageName);
+	// Every npm candidate carries a packageName; `getRefreshableManagedTools`
+	// drops the ones that do not.
+	const packageName = candidate.packageName as string;
+	const previousVersion = await readInstalledVersion(packageName);
 	const pm = await resolveNodePackageManager(toolsDir);
 	const testNpmScript =
 		process.env.PI_LENS_TEST_MODE === "1"
@@ -366,8 +529,8 @@ async function refreshOne(
 	const command = testNpmScript ? process.execPath : pmBinary(pm);
 	const args = [
 		...(testNpmScript ? [testNpmScript] : []),
-		...updateArgs(pm, candidate.packageName, {
-			ignoreScripts: !npmToolNeedsPostinstall(candidate.packageName),
+		...updateArgs(pm, packageName, {
+			ignoreScripts: !npmToolNeedsPostinstall(packageName),
 		}),
 	];
 
@@ -400,7 +563,8 @@ async function refreshOne(
 		});
 		return {
 			toolId: candidate.toolId,
-			packageName: candidate.packageName,
+			strategy: "npm",
+			packageName,
 			previousVersion,
 			currentVersion: previousVersion,
 			changed: false,
@@ -408,7 +572,7 @@ async function refreshOne(
 		};
 	}
 
-	const currentVersion = await readInstalledVersion(candidate.packageName);
+	const currentVersion = await readInstalledVersion(packageName);
 	const changed =
 		currentVersion !== undefined && currentVersion !== previousVersion;
 	await writeRefreshStamp(candidate.toolId, {
@@ -424,7 +588,8 @@ async function refreshOne(
 	);
 	return {
 		toolId: candidate.toolId,
-		packageName: candidate.packageName,
+		strategy: "npm",
+		packageName,
 		previousVersion,
 		currentVersion,
 		changed,
@@ -476,7 +641,9 @@ export async function runManagedToolRefresh(
 		// slot to the next candidate and turn one budget into 22 spawns.
 		noteManagedToolRefreshAttempt();
 		try {
-			refreshed.push(await refreshOne(candidate, now));
+			refreshed.push(
+				await refreshOne(candidate, read.state.tools[candidate.toolId], now),
+			);
 		} catch (err) {
 			recordDegradationOnce({
 				kind: "managed-tool-refresh",
