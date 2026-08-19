@@ -29,10 +29,16 @@ describe("trivy-config appliesTo", () => {
 
 // ── Terraform files skip the yaml/k8s content gate ─────────────────────────────
 
-const { safeSpawnAsync, isTrivyEnabled, resolveSeverityFloor } = vi.hoisted(() => ({
+const {
+	safeSpawnAsync,
+	isTrivyEnabled,
+	resolveSeverityFloor,
+	incrementDegradationCount,
+} = vi.hoisted(() => ({
 	safeSpawnAsync: vi.fn(),
 	isTrivyEnabled: vi.fn(),
 	resolveSeverityFloor: vi.fn(),
+	incrementDegradationCount: vi.fn(),
 }));
 
 vi.mock("../../../clients/safe-spawn.js", () => ({
@@ -42,6 +48,10 @@ vi.mock("../../../clients/safe-spawn.js", () => ({
 vi.mock("../../../clients/trivy-client.js", () => ({
 	isTrivyEnabled,
 	resolveSeverityFloor,
+}));
+
+vi.mock("../../../clients/degradation-ledger.js", () => ({
+	incrementDegradationCount,
 }));
 
 vi.mock("../../../clients/dispatch/runners/utils/runner-helpers.js", () => ({
@@ -81,6 +91,7 @@ describe("trivy-config run() — terraform pass-through", () => {
 		safeSpawnAsync.mockReset();
 		isTrivyEnabled.mockReset();
 		resolveSeverityFloor.mockReset();
+		incrementDegradationCount.mockReset();
 		isTrivyEnabled.mockReturnValue(true);
 		resolveSeverityFloor.mockReturnValue(["HIGH", "CRITICAL"]);
 	});
@@ -141,7 +152,16 @@ describe("trivy-config run() — terraform pass-through", () => {
 	// reported `{ status: "succeeded", diagnostics: [] }`: a clean scan for a
 	// file trivy never read. Any nonzero exit must be treated as an error,
 	// full stop, regardless of what's on stdout.
-	it("treats a nonzero exit with non-empty (unparseable) stdout as errored, never clean", async () => {
+	//
+	// #1757 review round 3 (V1): the ledger call is the ENTIRE remedy for this
+	// silent-death lane — a future edit deleting it would leave the failure
+	// invisible again with every other assertion here still green (status
+	// "skipped" alone doesn't prove the record exists). This test asserts the
+	// exact kind, subject (the scanned file's absolute path), and that the
+	// reason names both the binary and the exit status, mirroring the
+	// reviewer's probe: nonzero exit + usage text on stdout through the
+	// production run() path → verdict skipped + exactly this ledger entry.
+	it("treats a nonzero exit with non-empty (unparseable) stdout as errored, never clean, and records it", async () => {
 		safeSpawnAsync.mockResolvedValue({
 			status: 1,
 			stdout: "Scan config files for misconfigurations\n\nUsage:\n  trivy config [flags] DIR\n".repeat(
@@ -160,6 +180,13 @@ describe("trivy-config run() — terraform pass-through", () => {
 
 		expect(result.status).not.toBe("succeeded");
 		expect(result.diagnostics).toEqual([]);
+
+		expect(incrementDegradationCount).toHaveBeenCalledTimes(1);
+		const record = incrementDegradationCount.mock.calls[0][0];
+		expect(record.kind).toBe("runner-empty-result");
+		expect(record.subject).toBe(tfFile);
+		expect(record.reason).toContain("trivy config");
+		expect(record.reason).toContain("1");
 	});
 });
 

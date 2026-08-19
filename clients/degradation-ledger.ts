@@ -82,13 +82,15 @@ export type DegradationKind =
 	 */
 	| "lsp-nav-late-answer"
 	/**
-	 * A shell-out linter/analyzer runner (knip, vulture, jscpd, …) produced no
-	 * usable output — empty stdout, or (for report-file runners) no report
-	 * file — on a NONZERO exit (#1736). The empty-result branches these
-	 * runners fall back to for "no findings" must never fire here: a broken
-	 * shim, crash, or config-load error must read as errored/skipped, not
-	 * clean. Reason names the binary and exit status so a stuck/corrupted
-	 * runner is diagnosable from the ledger alone.
+	 * A shell-out linter/analyzer runner (knip, vulture, jscpd, trivy-config, …)
+	 * produced no usable output — empty stdout, unparseable stdout (e.g. a
+	 * rejected CLI flag that prints usage text instead of the expected report;
+	 * #1757), or (for report-file runners) no report file — on a NONZERO exit
+	 * (#1736). The empty-result branches these runners fall back to for "no
+	 * findings" must never fire here: a broken shim, crash, rejected flag, or
+	 * config-load error must read as errored/skipped, not clean. Reason names
+	 * the binary and exit status so a stuck/corrupted runner is diagnosable
+	 * from the ledger alone.
 	 */
 	| "runner-empty-result";
 
