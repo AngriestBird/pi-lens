@@ -156,6 +156,7 @@ const sqlfluffRunner: RunnerDefinition = {
 
 		const result = await safeSpawnAsync(cmd, args, {
 			timeout: 20000,
+			cwd,
 		});
 
 		const diagnostics = parseSqlfluffOutput(result.stdout ?? "", ctx.filePath);

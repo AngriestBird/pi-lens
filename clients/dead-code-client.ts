@@ -13,6 +13,7 @@
  */
 
 import { createSubsystemLogger } from "./extension-log.js";
+import * as fs from "node:fs";
 import * as path from "node:path";
 import { findNearestMarkerRoot } from "./path-utils.js";
 import { getScratchTreeFnmatchPatterns } from "./scratch-tree-policy.js";
@@ -62,8 +63,8 @@ export interface DeadCodeClient {
 	detect(cwd: string): boolean;
 	/** Is this file one this client analyzes? Gates the per-turn delta re-scan. */
 	owns(filePath: string): boolean;
-	/** Resolve the binary (PATH first, then auto-install). */
-	ensureAvailable(): Promise<boolean>;
+	/** Resolve the binary (project venv first, then PATH; no auto-install). */
+	ensureAvailable(root?: string): Promise<boolean>;
 	/** Project-wide scan. Never throws; failures come back as success:false. */
 	analyze(cwd: string): Promise<DeadCodeResult>;
 }
@@ -223,11 +224,11 @@ export class PythonDeadCodeClient implements DeadCodeClient {
 		);
 	}
 
-	async ensureAvailable(): Promise<boolean> {
+	async ensureAvailable(root?: string): Promise<boolean> {
 		const memo = this.availabilityLatch.read();
 		if (memo !== null) return memo;
 		if (this.ensureInFlight) return this.ensureInFlight;
-		this.ensureInFlight = this.doEnsureAvailable();
+		this.ensureInFlight = this.doEnsureAvailable(root);
 		try {
 			return await this.ensureInFlight;
 		} finally {
@@ -235,15 +236,40 @@ export class PythonDeadCodeClient implements DeadCodeClient {
 		}
 	}
 
-	private async doEnsureAvailable(): Promise<boolean> {
+	/**
+	 * `<root>/.venv/bin/vulture` (and `venv`/Windows `Scripts` equivalents),
+	 * checked by existence only — no spawn. A project's own venv is the vulture
+	 * that project's own config and dependency set were written against; the
+	 * bare `vulture`/`python -m vulture` PATH probes below only ever see
+	 * whatever happens to be active in the CALLING shell, not the project's
+	 * (#1731, discipline B — the same venv-first shape sqlfluff's binary
+	 * resolution already uses, `runner-helpers.ts` `createVenvFinder`).
+	 */
+	private venvCandidates(root: string): Array<{ cmd: string; prefix: string[] }> {
+		const isWin = process.platform === "win32";
+		const relPaths = isWin
+			? [
+					path.join(".venv", "Scripts", "vulture.exe"),
+					path.join("venv", "Scripts", "vulture.exe"),
+				]
+			: [path.join(".venv", "bin", "vulture"), path.join("venv", "bin", "vulture")];
+		return relPaths
+			.map((rel) => path.join(root, rel))
+			.filter((full) => fs.existsSync(full))
+			.map((full) => ({ cmd: full, prefix: [] }));
+	}
+
+	private async doEnsureAvailable(root?: string): Promise<boolean> {
 		// Presence-gated, NOT auto-installed. vulture is a pure-Python package
 		// with no standalone binary, so "auto-install" would mean `pip install`
 		// into whatever Python environment happens to be active — wrong and
 		// intrusive for uv / poetry / conda / pipx users. So we only use vulture
-		// when the user already has it, probing both the `vulture` console script
-		// and `python -m vulture` (the script dir is frequently not on PATH even
-		// when the package is installed). Mirrors govulncheck's no-install gating.
+		// when the user already has it, probing the project's own venv first
+		// (#1731), then the `vulture` console script and `python -m vulture` on
+		// PATH (the script dir is frequently not on PATH even when the package
+		// is installed). Mirrors govulncheck's no-install gating.
 		const candidates: Array<{ cmd: string; prefix: string[] }> = [
+			...(root ? this.venvCandidates(root) : []),
 			{ cmd: "vulture", prefix: [] },
 			{ cmd: "python", prefix: ["-m", "vulture"] },
 			{ cmd: "python3", prefix: ["-m", "vulture"] },
@@ -351,7 +377,7 @@ export class PythonDeadCodeClient implements DeadCodeClient {
 				summary: "No Python project root found; vulture skipped",
 			};
 		}
-		if (!(await this.ensureAvailable())) {
+		if (!(await this.ensureAvailable(root))) {
 			return {
 				...emptyResult(this.language),
 				success: true,
@@ -369,14 +395,38 @@ export class PythonDeadCodeClient implements DeadCodeClient {
 		return promise;
 	}
 
+	/**
+	 * True when `<root>/pyproject.toml` carries a `[tool.vulture]` table.
+	 * vulture's own config discovery reads that table, but CLI flags override
+	 * it — passing `--min-confidence`/`--exclude` unconditionally silently
+	 * overrode a project's own thresholds and ignore list (#1731, discipline A).
+	 * Same shape as `hasSqlfluffConfig`/`hasMypyConfig` in `tool-policy.ts`: a
+	 * plain string search, no TOML parser, matching the section header only.
+	 */
+	private hasProjectVultureConfig(root: string): boolean {
+		try {
+			const content = fs.readFileSync(
+				path.join(root, "pyproject.toml"),
+				"utf-8",
+			);
+			return content.includes("[tool.vulture]");
+		} catch {
+			return false;
+		}
+	}
+
 	private async runAnalyze(root: string): Promise<DeadCodeResult> {
 		const startMs = Date.now();
 		const invocation = this.resolved ?? { cmd: "vulture", prefix: [] };
+		// Let the project's own [tool.vulture] config win (#1731, discipline A):
+		// vulture discovers it unaided, but these two flags override it when
+		// passed, so they are omitted whenever the project ships that table.
+		const hasConfig = this.hasProjectVultureConfig(root);
 		const args = [
 			...invocation.prefix,
 			".",
-			`--min-confidence=${this.minConfidence}`,
-			`--exclude=${VULTURE_EXCLUDES.join(",")}`,
+			...(hasConfig ? [] : [`--min-confidence=${this.minConfidence}`]),
+			...(hasConfig ? [] : [`--exclude=${VULTURE_EXCLUDES.join(",")}`]),
 			`--ignore-decorators=${VULTURE_IGNORE_DECORATORS.join(",")}`,
 		];
 		const result = await safeSpawnAsync(invocation.cmd, args, {
