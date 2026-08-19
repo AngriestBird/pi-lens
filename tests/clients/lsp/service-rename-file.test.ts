@@ -482,7 +482,11 @@ describe("LSPService.renameFile", () => {
 
 			expect(result.applied).toBe(true);
 			expect(result.didRenameFailures).toEqual([
-				{ serverId: "typescript", error: "notify failed" },
+				{
+					serverId: "typescript",
+					error: "notify failed",
+					disposition: "rejected",
+				},
 			]);
 			expect(fs.existsSync(oldPath)).toBe(false);
 			expect(fs.existsSync(newPath)).toBe(true);
