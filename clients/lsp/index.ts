@@ -1109,14 +1109,22 @@ export class LSPService {
 	 * ("serverId:normalizedRoot" — the same identity as every other gate here).
 	 *
 	 * `unacked` counts notifies ISSUED to this client that the server has not yet
-	 * been proven to have read. It rises with each write the sweep hands over and
-	 * falls only when a drain barrier round-trips (see
-	 * {@link awaitAuxNotifyDrain}). `drain` holds the one in-flight barrier so a
-	 * burst shares a single round-trip instead of each touch sending its own.
+	 * been proven to have PROCESSED. It rises with each write the sweep hands over
+	 * and falls only when a drain barrier round-trips (see {@link paceAuxNotify}).
+	 * `drain` holds the one in-flight barrier so a burst shares a single
+	 * round-trip instead of each touch sending its own.
 	 *
-	 * Cleared wholesale by {@link reset} (session_start runs through it), and per
-	 * key whenever the client identity changes, so no count can outlive the client
-	 * it describes.
+	 * `gateOpen` is the fail-open latch. A scanner that will not answer the
+	 * barrier inside the caller's budget has stopped being a pacing problem and
+	 * become a stall, which #743's write deadline, streak and wedge timer already
+	 * own — and they own it by DEMOTING and respawning, which pacing can never do.
+	 * Once latched, this gate steps aside for the rest of the client's life and
+	 * every notify takes the pre-#1714 path. It re-arms on the only event that
+	 * means the stall is over: a new client generation, which gets a new record.
+	 *
+	 * Cleared wholesale by the service teardown (`session_start` runs through it),
+	 * by {@link demoteForNotifyStall}, and per key whenever the client identity
+	 * changes, so no count can outlive the client it describes.
 	 */
 	private readonly auxNotifyInflight = new Map<
 		string,
@@ -1124,6 +1132,7 @@ export class LSPService {
 			client: LSPClientInfo;
 			unacked: number;
 			drain?: Promise<boolean>;
+			gateOpen?: boolean;
 			/** One stalled record per barrier, however many waiters give up on it. */
 			stallLogged?: boolean;
 		}
@@ -1693,62 +1702,90 @@ export class LSPService {
 	private auxNotifyBacklogAtCeiling(key: string, entry: SpawnedServer): boolean {
 		const record = this.auxNotifyInflight.get(key);
 		if (!record || record.client !== entry.client) return false;
+		// Latched open: this scanner is a stall, not a pacing problem, and the
+		// breaker owns it. Step aside here too rather than half-throttling it.
+		if (record.gateOpen) return false;
 		return record.unacked >= auxNotifyInflightLimit(entry.info);
 	}
 
 	/**
-	 * #1714: hold the next notify until this auxiliary has proven it drained the
-	 * ones already sent. Resolves `true` when the caller may write.
+	 * #1714: hold the next notify until this auxiliary has proven it PROCESSED the
+	 * ones already sent. Returns when the caller may write — it never refuses.
 	 *
-	 * Under the limit there is nothing to prove, so the common case is a synchronous
-	 * `true` and the sweep runs at full speed. At the limit the gate sends ONE
-	 * request round-trip (`pingLiveness`, #1277, clients/lsp/client.ts:2577). The
-	 * server reads its stdin in order, so a reply to a request written after N
-	 * `didOpen`s proves it read those N — an acknowledgement no notification can
-	 * give, because a notification has no reply.
+	 * Under the limit there is nothing to prove, so the common case returns without
+	 * awaiting anything and the sweep runs at full speed. At the limit the gate
+	 * sends ONE request round-trip (`pingLiveness`, #1277,
+	 * clients/lsp/client.ts:2577).
 	 *
-	 * A barrier is a QUEUE, not a drop, and it is bounded by the CALLER's remaining
-	 * budget, never by a schedule of its own: every waiter gives the shared
-	 * round-trip only `waitMs`, so a caller that asked for a 1 s touch still gets
-	 * one. A waiter whose budget runs out returns `false` and the caller reports
-	 * the scanner as uncovered for that file (the #1459 deferral path), which keeps
-	 * the file in the sweep's coverage gap instead of letting silence read as clean.
+	 * WHY A REPLY PROVES PROCESSING, measured rather than assumed. ast-grep-lsp is
+	 * tower-lsp-server and drains its message stream in order on one task, so a
+	 * request written after N `didOpen`s is answered after those N are scanned.
+	 * Live probe against the real binary, 30 real repository files:
+	 *
+	 *   idle `workspace/symbol` reply        0 ms
+	 *   after 30 didOpens                 2263 ms, 29 of 30 publishes already in
+	 *   all 30 processed                  2330 ms
+	 *
+	 *   idle `textDocument/hover` reply      1 ms
+	 *   after 30 didOpens                 2086 ms, 29 of 30 publishes already in
+	 *
+	 * Idle-zero to loaded-seconds, landing within one document of the whole
+	 * backlog, is the ordering property this gate needs; one document of slack is
+	 * immaterial against a ceiling of 4 to 8. A server that answered requests off a
+	 * SEPARATE task would not give this proof — the fail-open latch below is what
+	 * keeps such a server safe, because it hands it to the breaker rather than
+	 * pacing it on a false signal.
+	 *
+	 * The wait is bounded by the CALLER's remaining budget, never by a schedule of
+	 * its own: every waiter gives the shared round-trip only `waitMs`, so a caller
+	 * that asked for a 1 s touch still gets one.
+	 *
+	 * A waiter whose budget runs out does NOT defer the file. It latches the gate
+	 * open and falls through to the write. Pacing exists to stop a healthy-but-slow
+	 * scanner drowning; a scanner that will not answer at all is a stall, and #743's
+	 * write deadline, backpressure streak and wedge timer already own that case —
+	 * they demote and respawn it, which is the self-heal that recovered the live
+	 * session. Deferring instead withheld the write, accrued no strike, and left
+	 * the sweep with no exit.
 	 *
 	 * Fails OPEN for a client with no liveness round-trip: unmeasurable is not the
 	 * same as backlogged, and the codebase already reads this capability as
 	 * `pingLiveness?.() ?? true` (clients/lsp/client.ts:281). Every real client
 	 * provides it.
 	 */
-	private async awaitAuxNotifyDrain(
+	private async paceAuxNotify(
 		key: string,
 		entry: SpawnedServer,
 		filePath: string,
 		waitMs: number,
 		context: { source: string; clientScope: LSPTouchClientScope },
-	): Promise<boolean> {
+	): Promise<void> {
 		const record = this.auxNotifyInflight.get(key);
-		if (!record) return true;
+		if (!record) return;
 		if (record.client !== entry.client) {
 			// A previous generation's backlog says nothing about this client.
 			this.auxNotifyInflight.delete(key);
-			return true;
+			return;
 		}
+		// Already handed to the breaker: no barrier, no wait, no extra cost per
+		// file. This is what stops a stalled scanner turning every remaining file
+		// into a fresh full-budget wait.
+		if (record.gateOpen) return;
 		const limit = auxNotifyInflightLimit(entry.info);
-		if (record.unacked < limit) return true;
+		if (record.unacked < limit) return;
 		const ping = entry.client.pingLiveness;
 		if (!ping) {
 			record.unacked = 0;
-			return true;
+			return;
 		}
 		if (waitMs <= 0) {
-			this.noteDrainBarrierOutcome(key, entry, filePath, context, {
+			this.openAuxNotifyGate(key, entry, filePath, context, {
 				unacked: record.unacked,
 				limit,
 				waitMs,
 				durationMs: 0,
-				outcome: "stalled",
 			});
-			return false;
+			return;
 		}
 		if (!record.drain) {
 			const startedAt = Date.now();
@@ -1770,6 +1807,11 @@ export class LSPService {
 					// have issued a write after this round-trip was sent, and that write
 					// is still unacknowledged.
 					if (drained) current.unacked = Math.max(0, current.unacked - outstanding);
+					// Deliberately no `else` latch here. A barrier is only ever created
+					// by a call that goes on to await it, so a negative result always
+					// reaches a waiter — as `false`, or as that waiter's own timeout —
+					// and the waiter is what latches. A second latch here would be
+					// unreachable, and no test could hold it honest.
 				}
 				this.noteDrainBarrierOutcome(key, entry, filePath, context, {
 					unacked: outstanding,
@@ -1792,18 +1834,48 @@ export class LSPService {
 			onReject: "undefined",
 		});
 		if (drained !== true) {
-			// The waiter gave up before the round-trip answered. Record it here as
-			// well: a barrier whose ping NEVER answers would otherwise leave the
-			// stall invisible, which is the shape that reads as "nothing happened".
-			this.noteDrainBarrierOutcome(key, entry, filePath, context, {
+			// The waiter gave up before the round-trip answered. Latch open and let
+			// the caller write: a barrier whose ping never answers would otherwise
+			// tax every remaining file a full budget for nothing.
+			this.openAuxNotifyGate(key, entry, filePath, context, {
 				unacked: record.unacked,
 				limit,
 				waitMs,
 				durationMs: Date.now() - waitStartedAt,
-				outcome: "stalled",
 			});
 		}
-		return drained === true;
+	}
+
+	/**
+	 * #1714: stop pacing this client and hand it to the breaker.
+	 *
+	 * Latched, not cooled down — a timer here would be a schedule of this gate's
+	 * own, and it would race the caller's cadence. The latch clears only when the
+	 * record does: a demotion ({@link demoteForNotifyStall}), a client-identity
+	 * change, or the service teardown. Every one of those means a new server
+	 * process, which is the only event that makes the old backlog meaningless.
+	 */
+	private openAuxNotifyGate(
+		key: string,
+		entry: SpawnedServer,
+		filePath: string,
+		context: { source: string; clientScope: LSPTouchClientScope },
+		detail: {
+			unacked: number;
+			limit: number;
+			waitMs: number;
+			durationMs: number;
+		},
+	): void {
+		const record = this.auxNotifyInflight.get(key);
+		if (record && record.client === entry.client) {
+			record.gateOpen = true;
+			record.drain = undefined;
+		}
+		this.noteDrainBarrierOutcome(key, entry, filePath, context, {
+			...detail,
+			outcome: "stalled",
+		});
 	}
 
 	/**
@@ -3160,37 +3232,17 @@ export class LSPService {
 						entry.info.role === "auxiliary" && clientKey !== undefined;
 					let slot: { release: () => void } | undefined;
 					if (gated && clientKey) {
-						// #1714: before taking the slot, make the server prove it read the
-						// notifies already sent. A sweep is sequential, so the slot gate
-						// below is almost always free and cannot see a backlog building.
+						// #1714: before taking the slot, make the server prove it
+						// processed the notifies already sent. A sweep is sequential, so
+						// the slot gate below is almost always free and cannot see a
+						// backlog building. This never refuses the write — a scanner that
+						// will not answer is latched past and left to #743's stall
+						// machinery, which can demote and respawn it.
 						const barrierStartedAt = Date.now();
-						const paced = await this.awaitAuxNotifyDrain(
-							clientKey,
-							entry,
-							filePath,
-							queueWaitMs,
-							{ source, clientScope },
-						);
-						if (!paced) {
-							// Deferred, not dropped: the scanner is behind, so this touch
-							// reports it as uncovered and the file stays in the coverage gap.
-							// The next sweep pass re-offers the same file.
-							notifyDeferredServerIds.push(entry.info.id);
-							logLatency({
-								type: "phase",
-								phase: "lsp_notify_resync_deferred",
-								filePath: normalizedPath,
-								durationMs: Date.now() - barrierStartedAt,
-								metadata: {
-									serverId: entry.info.id,
-									source,
-									clientScope,
-									reason: "inflight_limit",
-									queueWaitMs,
-								},
-							});
-							return;
-						}
+						await this.paceAuxNotify(clientKey, entry, filePath, queueWaitMs, {
+							source,
+							clientScope,
+						});
 						// The barrier spends from the SAME budget the caller granted, so
 						// the slot wait gets only what is left. Otherwise a paced touch
 						// could cost two full budgets.

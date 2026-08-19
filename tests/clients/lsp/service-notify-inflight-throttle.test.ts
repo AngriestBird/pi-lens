@@ -76,21 +76,34 @@ function makeServer(
 /**
  * A scanner double with a real backlog ceiling.
  *
- * `wedgeAbove` is how many documents it can hold unread before its input path
- * dies. Every `didOpen` adds one; a `pingLiveness` round-trip is what proves it
- * read them, and clears the backlog — that ordering is the real protocol
- * property the fix leans on (one stdin, read in order, so a reply to a request
- * written after N notifications proves those N were read).
+ * `wedgeAbove` is how many documents it can hold before its input path dies.
+ * Every `didOpen` adds one; a `pingLiveness` round-trip is what clears it,
+ * because the real server drains one ordered message stream — measured against
+ * the ast-grep binary, whose reply goes from 0 ms idle to 2263 ms behind 30
+ * `didOpen`s, landing within one document of the whole backlog.
  *
- * Once wedged it behaves like the production failure: writes never settle, pings
- * never answer, and it never recovers.
+ * Once wedged it behaves like the production failure: writes never settle and it
+ * never recovers.
+ *
+ * `pingMs` is how long the round-trip takes. `pingAnswers: false` models a
+ * connection that does NOT round-trip: production's `pingLiveness` resolves
+ * FALSE at its own timeout (clients/lsp/client.ts:2588) rather than hanging, so
+ * this double resolves false at `pingMs` too. A never-settling promise would be
+ * a shape production cannot produce.
  */
 function makeScanner(
 	serverId: string,
-	options: { wedgeAbove?: number; pingAnswers?: boolean } = {},
+	options: {
+		wedgeAbove?: number;
+		pingAnswers?: boolean;
+		pingMs?: number;
+		writeLands?: boolean;
+	} = {},
 ) {
 	const wedgeAbove = options.wedgeAbove ?? Number.POSITIVE_INFINITY;
 	const pingAnswers = options.pingAnswers ?? true;
+	const pingMs = options.pingMs ?? 0;
+	const writeLands = options.writeLands ?? true;
 	const stats = {
 		opens: 0,
 		pings: 0,
@@ -118,9 +131,15 @@ function makeScanner(
 			(filePath: string) => stampsByPath.get(filePath) ?? 0,
 		),
 		getDiagnostics: vi.fn(() => []),
-		pingLiveness: vi.fn(async () => {
+		pingLiveness: vi.fn(async (timeoutMs?: number) => {
 			stats.pings += 1;
-			if (stats.wedged || !pingAnswers) return new Promise<boolean>(() => {});
+			const settleMs = Math.min(pingMs, timeoutMs ?? pingMs);
+			if (settleMs > 0) {
+				await new Promise((resolve) => setTimeout(resolve, settleMs));
+			}
+			// A wedged or non-answering connection reports dead at its own timeout,
+			// exactly as the production helper does. It never hangs.
+			if (stats.wedged || !pingAnswers) return false;
 			backlog = 0;
 			return true;
 		}),
@@ -134,6 +153,7 @@ function makeScanner(
 					stats.wedged = true;
 					return new Promise<void>(() => {});
 				}
+				if (!writeLands) return new Promise<void>(() => {});
 			}),
 			change: vi.fn(async () => {}),
 			close: vi.fn(async () => {}),
@@ -184,6 +204,14 @@ function makePrimary(serverId: string) {
 				}),
 		),
 	};
+}
+
+function brokenKeys(service: unknown): string[] {
+	return [
+		...(
+			service as { state: { broken: Map<string, number> } }
+		).state.broken.keys(),
+	];
 }
 
 function rowsFor(phase: string): Array<Record<string, unknown>> {
@@ -307,11 +335,19 @@ describe("#1714 — sweep notify volume must not out-run an auxiliary", () => {
 		expect(aux.stats.pings).toBeLessThanOrEqual(40 / 4);
 	});
 
-	it("defers the file rather than dropping it when the scanner will not answer", async () => {
+	it("falls through to the write when the scanner stops answering, and pays the barrier only once", async () => {
+		// The F2 shape: a ceiling plus a round-trip that never comes back. Pacing
+		// exists for a healthy-but-slow scanner; a scanner that will not answer at
+		// all is a STALL, and #743's write deadline, streak and wedge timer already
+		// own that — they demote and respawn, which pacing cannot. Deferring here
+		// withheld the write, accrued no strike, and left the sweep no exit.
 		process.env.PI_LENS_LSP_AUX_NOTIFY_INFLIGHT = "4";
-		// Accepts writes but never answers a round-trip: the backlog can never be
-		// proven read, so the barrier has to run out of budget.
-		const aux = makeScanner("ast-grep", { pingAnswers: false });
+		// Ping takes longer than the whole notify budget, so no waiter can ever
+		// afford it.
+		const aux = makeScanner("ast-grep", {
+			pingAnswers: false,
+			pingMs: NOTIFY_BUDGET_MS * 5,
+		});
 		const primary = makePrimary("typescript");
 		getServersForFileWithConfig.mockReturnValue([
 			makeServer("typescript"),
@@ -322,50 +358,196 @@ describe("#1714 — sweep notify volume must not out-run an auxiliary", () => {
 		);
 		const service = await makeService();
 
-		const results = await sweep(service, sweepFiles(6));
+		const results = await sweep(service, sweepFiles(20));
 
-		// The first four land; the fifth and sixth stall at the barrier.
-		expect(aux.stats.opens).toBe(4);
-		const uncovered = results.filter((r) =>
-			r?.unconfirmedServerIds?.includes("ast-grep"),
-		);
-		expect(uncovered).toHaveLength(2);
-		// A stalled file is NOT a clean file: the touch narrows to "partial" and
-		// names the scanner, so the sweep keeps it in the coverage gap.
-		for (const result of uncovered) {
-			expect(result?.confirmation).toBe("partial");
-		}
-		const deferred = rowsFor("lsp_notify_resync_deferred");
+		// Every file still reached the scanner. Nothing was withheld, nothing was
+		// reported as uncovered, and throughput did not collapse.
+		expect(aux.stats.opens).toBe(20);
 		expect(
-			deferred.filter(
-				(row) =>
-					(row.metadata as { reason?: string }).reason === "inflight_limit",
-			),
-		).toHaveLength(2);
-		expect(
-			rowsFor("lsp_notify_inflight_barrier").at(-1)?.metadata,
-		).toMatchObject({ outcome: "stalled" });
+			results.filter((r) => r?.unconfirmedServerIds?.includes("ast-grep")),
+		).toHaveLength(0);
+		// ONE round-trip attempted for the whole burst, not one per file: the gate
+		// latches open on the first failure instead of rebuilding a fresh
+		// full-budget barrier for every remaining file.
+		expect(aux.stats.pings).toBe(1);
+		const barriers = rowsFor("lsp_notify_inflight_barrier");
+		expect(barriers).toHaveLength(1);
+		expect(barriers[0]?.metadata).toMatchObject({
+			serverId: "ast-grep",
+			outcome: "stalled",
+		});
 	});
 
-	it("honors a per-server ceiling over the shared default", async () => {
-		// No env override: the shared default is 8, and the server class asks for 2.
-		const aux = makeScanner("ast-grep");
+	it("keeps the demote-and-respawn self-heal reachable through the ceiling path", async () => {
+		// F3: a ceiling stall must feed the SAME strike ladder as any other stalled
+		// write. The live session recovered because the wedge timer demoted the
+		// server and a clean instance respawned; a gate that withheld the write
+		// would arm no timer and the sweep would run to the end with no exit.
+		process.env.PI_LENS_LSP_AUX_NOTIFY_INFLIGHT = "2";
+		const aux = makeScanner("ast-grep", {
+			pingAnswers: false,
+			pingMs: NOTIFY_BUDGET_MS * 5,
+			// Dead input path: the write never lands either.
+			writeLands: false,
+		});
 		const primary = makePrimary("typescript");
 		getServersForFileWithConfig.mockReturnValue([
 			makeServer("typescript"),
-			makeServer("ast-grep", "auxiliary", { notifyInflightLimit: 2 }),
+			makeServer("ast-grep", "auxiliary"),
 		]);
 		createLSPClient.mockImplementation(async (options: { serverId?: string }) =>
 			options?.serverId === "ast-grep" ? aux : primary,
 		);
 		const service = await makeService();
 
-		await sweep(service, sweepFiles(8));
+		await sweep(service, sweepFiles(6));
 
-		expect(aux.stats.maxBacklog).toBeLessThanOrEqual(2);
-		expect(rowsFor("lsp_notify_inflight_barrier")[0]?.metadata).toMatchObject({
-			limit: 2,
+		// The writes went out, so the stall machinery saw them and demoted the
+		// server into the breaker cooldown — the entry point to respawn.
+		expect(aux.stats.opens).toBeGreaterThan(0);
+		expect(
+			brokenKeys(service).some((k) => k.startsWith(`ast-grep:`)),
+		).toBe(true);
+		expect(aux.shutdown).toHaveBeenCalled();
+	}, 30_000);
+
+	it("records one stalled barrier however many waiters abandon it (M1)", async () => {
+		// The waiter logs when its own budget lapses; the barrier logs again when
+		// the ping finally resolves false, later. Both describe ONE barrier, so the
+		// dedupe latch is load-bearing rather than decorative.
+		process.env.PI_LENS_LSP_AUX_NOTIFY_INFLIGHT = "2";
+		const aux = makeScanner("ast-grep", {
+			pingAnswers: false,
+			// Answers AFTER the waiter's budget lapses, so both log sites fire.
+			pingMs: NOTIFY_BUDGET_MS * 2,
 		});
+		const primary = makePrimary("typescript");
+		getServersForFileWithConfig.mockReturnValue([
+			makeServer("typescript"),
+			makeServer("ast-grep", "auxiliary"),
+		]);
+		createLSPClient.mockImplementation(async (options: { serverId?: string }) =>
+			options?.serverId === "ast-grep" ? aux : primary,
+		);
+		const service = await makeService();
+
+		await sweep(service, sweepFiles(5));
+		// Give the late round-trip time to resolve and reach its own log site.
+		await new Promise((r) => setTimeout(r, NOTIFY_BUDGET_MS * 4));
+
+		expect(
+			rowsFor("lsp_notify_inflight_barrier").filter(
+				(row) => (row.metadata as { outcome?: string }).outcome === "stalled",
+			),
+		).toHaveLength(1);
+	}, 30_000);
+
+	it("drops the backlog record when the stall ladder demotes the client (M2)", async () => {
+		// A demoted client is torn down. Its backlog count describes a process that
+		// no longer exists, and leaving it would make the replacement start at the
+		// ceiling and pay a barrier on its first file.
+		process.env.PI_LENS_LSP_AUX_NOTIFY_INFLIGHT = "2";
+		const aux = makeScanner("ast-grep", { writeLands: false });
+		const primary = makePrimary("typescript");
+		getServersForFileWithConfig.mockReturnValue([
+			makeServer("typescript"),
+			makeServer("ast-grep", "auxiliary"),
+		]);
+		createLSPClient.mockImplementation(async (options: { serverId?: string }) =>
+			options?.serverId === "ast-grep" ? aux : primary,
+		);
+		const service = await makeService();
+		await sweep(service, sweepFiles(5));
+
+		const inflight = (
+			service as unknown as { auxNotifyInflight: Map<string, unknown> }
+		).auxNotifyInflight;
+		// The wedge timer demoted it; the ledger entry went with the client.
+		expect(brokenKeys(service).some((k) => k.startsWith("ast-grep:"))).toBe(
+			true,
+		);
+		expect([...inflight.keys()]).not.toContain(AUX_KEY);
+	}, 30_000);
+
+	it("never charges a new client with a retired one's backlog (M3a)", async () => {
+		// Probed directly, because the two identity checks mask each other through
+		// the public path: whichever one survives, the other's guard cleans up and
+		// the test passes regardless. Each is pinned on its own.
+		process.env.PI_LENS_LSP_AUX_NOTIFY_INFLIGHT = "2";
+		const aux = makeScanner("ast-grep");
+		const primary = makePrimary("typescript");
+		getServersForFileWithConfig.mockReturnValue([
+			makeServer("typescript"),
+			makeServer("ast-grep", "auxiliary"),
+		]);
+		createLSPClient.mockImplementation(async (options: { serverId?: string }) =>
+			options?.serverId === "ast-grep" ? aux : primary,
+		);
+		const service = await makeService();
+		const inflight = (
+			service as unknown as {
+				auxNotifyInflight: Map<string, { client: unknown; unacked: number }>;
+			}
+		).auxNotifyInflight;
+		const retired = { serverId: "ast-grep-retired" };
+		inflight.set(AUX_KEY, { client: retired, unacked: 7 });
+
+		(
+			service as unknown as {
+				noteAuxNotifyIssued: (key: string, client: unknown) => void;
+			}
+		).noteAuxNotifyIssued(AUX_KEY, aux);
+
+		// A fresh count for a fresh process — not the corpse's seven plus one.
+		const record = inflight.get(AUX_KEY);
+		expect(record?.client).toBe(aux);
+		expect(record?.unacked).toBe(1);
+	});
+
+	it("never makes a new client wait out a retired one's backlog (M3b)", async () => {
+		process.env.PI_LENS_LSP_AUX_NOTIFY_INFLIGHT = "2";
+		const aux = makeScanner("ast-grep");
+		const primary = makePrimary("typescript");
+		getServersForFileWithConfig.mockReturnValue([
+			makeServer("typescript"),
+			makeServer("ast-grep", "auxiliary"),
+		]);
+		createLSPClient.mockImplementation(async (options: { serverId?: string }) =>
+			options?.serverId === "ast-grep" ? aux : primary,
+		);
+		const service = await makeService();
+		const inflight = (
+			service as unknown as {
+				auxNotifyInflight: Map<string, { client: unknown; unacked: number }>;
+			}
+		).auxNotifyInflight;
+		inflight.set(AUX_KEY, {
+			client: { serverId: "ast-grep-retired" },
+			unacked: 999,
+		});
+
+		await (
+			service as unknown as {
+				paceAuxNotify: (
+					key: string,
+					entry: unknown,
+					filePath: string,
+					waitMs: number,
+					context: unknown,
+				) => Promise<void>;
+			}
+		).paceAuxNotify(
+			AUX_KEY,
+			{ client: aux, info: { id: "ast-grep", role: "auxiliary" } },
+			`${ROOT}/probe.ts`,
+			1000,
+			{ source: "lens_diagnostics_full", clientScope: "all" },
+		);
+
+		// The stale record is dropped, and the live client was never made to prove
+		// anything about writes it never received.
+		expect(inflight.has(AUX_KEY)).toBe(false);
+		expect(aux.stats.pings).toBe(0);
 	});
 
 	it("counts the sweep's pre-open burst against the same ceiling", async () => {
@@ -379,9 +561,11 @@ describe("#1714 — sweep notify volume must not out-run an auxiliary", () => {
 			for (let i = 0; i < 12; i += 1) {
 				fs.writeFileSync(path.join(tmp, `f${i}.ts`), "export const x = 1;\n");
 			}
-			// Never answers a drain round-trip: once at the ceiling it stays there,
-			// so any pre-open that ignored the ledger shows up as an extra backlog.
-			const aux = makeScanner("ast-grep", { pingAnswers: false });
+			// Healthy but paced: it answers the round-trip, so the ceiling stays in
+			// force and any pre-open that ignored the ledger shows up as extra
+			// backlog. (A scanner that refuses to answer deliberately latches the
+			// gate open — see the fall-through test — so it cannot pin this.)
+			const aux = makeScanner("ast-grep");
 			const primary = makePrimary("typescript");
 			getServersForFileWithConfig.mockImplementation((fp: string) =>
 				fp.endsWith(".ts")
