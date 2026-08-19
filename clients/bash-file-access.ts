@@ -506,6 +506,14 @@ export function extractWrittenPathsFromCommand(
 		} else if (verb === "sed" && args.includes("-i")) {
 			for (const a of args) add(a);
 		} else if (verb === "cp" || verb === "mv" || verb === "install") {
+			// Known miss (#1668 review F3): the GNU `-t DEST`/`--target-directory`
+			// form puts the destination BEFORE the sources — this always treats
+			// the LAST non-flag argument as the destination, so `-t DEST SRC` and
+			// multi-source `-t DEST SRC1 SRC2...` are misread. Rare in agent-
+			// authored bash (source-before-dest is the common form); documented
+			// rather than fixed, since correctly parsing `-t` means recognizing it
+			// takes a value while telling it apart from every other single-letter
+			// flag this same branch already ignores.
 			const files = args.filter((a) => !a.startsWith("-"));
 			if (files.length >= 1) add(files[files.length - 1]); // destination
 		} else if (verb === "git") {
@@ -525,6 +533,12 @@ export function extractWrittenPathsFromCommand(
 							? args.slice(1).filter((a) => !a.startsWith("-"))
 							: []; // `git checkout` without `--` is ambiguous (ref vs path)
 				for (const a of fileArgs) add(a);
+			} else if (sub === "mv") {
+				// git mv SRC... DEST — the destination is a write, exactly like
+				// plain `mv` above (#1668 review F2). The source side is a delete,
+				// handled by extractDeletedPathsFromCommand.
+				const files = args.slice(1).filter((a) => !a.startsWith("-"));
+				if (files.length >= 1) add(files[files.length - 1]);
 			}
 		}
 	}
@@ -535,8 +549,9 @@ export function extractWrittenPathsFromCommand(
 /**
  * Extract files a bash command likely DELETED, for the type-3 (Deleted)
  * watched-files gap (#1668): `rm FILE...`, `git rm FILE...`, and the SOURCE
- * side of `mv SRC DEST` (the destination is a write, already covered by
- * `extractWrittenPathsFromCommand`).
+ * side of `mv SRC DEST` / `git mv SRC DEST` (the destination is a write,
+ * covered by `extractWrittenPathsFromCommand` — including for `git mv`,
+ * #1668 review F2).
  *
  * Deliberately narrow: only commands naming an explicit file target are
  * handled. A bare directory op (`rm -rf dir/`, `git clean`) is skipped —
@@ -554,6 +569,17 @@ export function extractDeletedPathsFromCommand(
 		const abs = resolveCandidate(token, cwd);
 		if (abs) out.add(abs);
 	};
+	// mv SRC... DEST / git mv SRC... DEST — every argument except the last is
+	// a source that vanishes from its original path once the move lands.
+	// Known miss (#1668 review F3): the same `-t DEST`/`--target-directory`
+	// form documented in `extractWrittenPathsFromCommand` misreads here too —
+	// this assumes source-before-destination order.
+	const addMoveSources = (args: string[]) => {
+		const files = args.filter((a) => !a.startsWith("-"));
+		if (files.length >= 2) {
+			for (const src of files.slice(0, -1)) add(src);
+		}
+	};
 
 	for (const tokens of commandSegments(command)) {
 		if (tokens.length === 0) continue;
@@ -570,13 +596,10 @@ export function extractDeletedPathsFromCommand(
 					? rmArgs.slice(dashDash + 1)
 					: rmArgs.filter((a) => !a.startsWith("-"));
 			for (const a of fileArgs) add(a);
+		} else if (verb === "git" && args[0] === "mv") {
+			addMoveSources(args.slice(1));
 		} else if (verb === "mv") {
-			const files = args.filter((a) => !a.startsWith("-"));
-			// mv SRC... DEST — every argument except the last is a source that
-			// vanishes from its original path once the move lands.
-			if (files.length >= 2) {
-				for (const src of files.slice(0, -1)) add(src);
-			}
+			addMoveSources(args);
 		}
 	}
 

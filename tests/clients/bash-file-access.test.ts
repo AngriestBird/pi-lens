@@ -190,6 +190,7 @@ describe("extractWrittenPathsFromCommand — bash writes", () => {
 		["git checkout <ref> -- <file>", (f) => `git checkout HEAD~1 -- ${f}`],
 		["git restore <file>", (f) => `git restore ${f}`],
 		["git restore --staged <file>", (f) => `git restore --staged ${f}`],
+		["git mv destination (#1668 review F2)", (f) => `git mv /other/src.ts ${f}`],
 	];
 
 	for (const [label, build] of cases) {
@@ -202,6 +203,13 @@ describe("extractWrittenPathsFromCommand — bash writes", () => {
 	it("cp source is NOT registered as a write (only the destination)", () => {
 		const dst = pathIn("dst.ts");
 		const r = extractWrittenPathsFromCommand(`cp /other/src.ts ${dst}`, tmp);
+		expect(r).toContain(dst);
+		expect(r).not.toContain("/other/src.ts");
+	});
+
+	it("git mv source is NOT registered as a write (only the destination)", () => {
+		const dst = pathIn("dst.ts");
+		const r = extractWrittenPathsFromCommand(`git mv /other/src.ts ${dst}`, tmp);
 		expect(r).toContain(dst);
 		expect(r).not.toContain("/other/src.ts");
 	});
@@ -268,6 +276,39 @@ describe("extractDeletedPathsFromCommand — bash deletes (#1668)", () => {
 		const result = extractDeletedPathsFromCommand(`mv ${src} ${dst}`, tmp);
 		expect(result).toContain(src);
 		expect(result).not.toContain(dst);
+	});
+
+	it("git mv SRC DEST registers the source (vanishes) but not the destination (#1668 review F2)", () => {
+		const src = touchLines("a.ts", 1);
+		const dst = pathIn("b.ts");
+		const result = extractDeletedPathsFromCommand(`git mv ${src} ${dst}`, tmp);
+		expect(result).toContain(src);
+		expect(result).not.toContain(dst);
+	});
+
+	it("git mv registers every source when moving multiple files into a directory", () => {
+		const a = touchLines("a.ts", 1);
+		const b = touchLines("b.ts", 1);
+		const destDir = pathIn("dest/");
+		const result = extractDeletedPathsFromCommand(
+			`git mv ${a} ${b} ${destDir}`,
+			tmp,
+		);
+		expect(result).toContain(a);
+		expect(result).toContain(b);
+	});
+
+	it("KNOWN MISS (#1668 review F3, documented not fixed): `mv -t DEST SRC` misreads the -t target-directory form", () => {
+		// GNU `-t DEST` puts the destination BEFORE the source, but this parser
+		// always treats the destination as the LAST non-flag argument — so `-t`
+		// usage is misread. Documented in extractDeletedPathsFromCommand's doc
+		// comment; this test pins the current (wrong) behavior so a future
+		// change to it is a deliberate, reviewed decision, not a silent drift.
+		const src = touchLines("a.ts", 1);
+		const dst = pathIn("dest.ts");
+		const result = extractDeletedPathsFromCommand(`mv -t ${dst} ${src}`, tmp);
+		// The real source (`src`) is NOT reported as deleted — the miss.
+		expect(result).not.toContain(src);
 	});
 
 	it("bare directory rm is skipped — no explicit file, nothing to confirm", () => {

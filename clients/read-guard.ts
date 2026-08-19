@@ -13,7 +13,7 @@
 import * as fs from "node:fs";
 import { createFileTime, type FileTime } from "./file-time.js";
 import { hashDiagnosticContent } from "./lsp/diagnostic-binding.js";
-import { normalizeFilePath } from "./path-utils.js";
+import { normalizeEphemeralMapKey, normalizeFilePath } from "./path-utils.js";
 import { logReadGuardEvent } from "./read-guard-logger.js";
 
 // --- Types ---
@@ -399,6 +399,23 @@ export class ReadGuard {
 	// pi Write tool authored, independent of filesystem mtime granularity
 	// or clock skew (NFS, FAT32, etc.).
 	private readonly writtenThisSession = new Set<string>();
+	// Existence-independent index for hasKnownPath/forgetPath (#1668 review
+	// F1). `this.key()` (normalizeFilePath) branches on whether `filePath`
+	// currently exists on disk: an existing file resolves to realpathSync
+	// canonical casing, a missing one to a lowercased tail. recordRead/
+	// recordWritten always key while the file is still on disk (real
+	// casing); hasKnownPath/forgetPath are queried AFTER an external delete
+	// already landed, when the path no longer exists — recomputing
+	// `this.key()` at that point returns a DIFFERENT string for any
+	// mixed-case basename (`MyModule.ts` → `mymodule.ts`), so a lookup
+	// against `reads`/`writtenThisSession` silently misses. This index maps
+	// a purely syntactic key (`normalizeEphemeralMapKey` — slash-fold +
+	// lowercase, no filesystem access, so it never depends on current disk
+	// state) to the REAL key `reads`/`writtenThisSession` used at record
+	// time, so a post-delete lookup finds the same entry regardless of what
+	// happened to the file since. Pruned inside `evictFile` so it never
+	// outlives the record it points at.
+	private readonly knownPathIndex = new Map<string, string>();
 	private readonly sessionId: string;
 	private readonly sessionStartMs: number;
 
@@ -441,6 +458,11 @@ export class ReadGuard {
 		this.fileLastUsed.delete(filePath);
 		this.consumedReadFiles.delete(filePath);
 		this.writtenThisSession.delete(filePath);
+		// #1668 review F1: prune the reverse-pointing knownPathIndex entries
+		// too, so it never outlives the record it points at.
+		for (const [syntacticKey, stored] of this.knownPathIndex) {
+			if (stored === filePath) this.knownPathIndex.delete(syntacticKey);
+		}
 	}
 
 	private touchFile(filePath: string): void {
@@ -493,6 +515,11 @@ export class ReadGuard {
 	 */
 	recordRead(record: ReadRecord): void {
 		const filePath = this.key(record.filePath);
+		// #1668 review F1: index by the existence-independent syntactic key
+		// while the file is (presumably) still on disk, so a later
+		// hasKnownPath/forgetPath lookup after an external delete can still
+		// find this entry's real key.
+		this.knownPathIndex.set(normalizeEphemeralMapKey(record.filePath), filePath);
 		const storedRecord: ReadRecord = {
 			...record,
 			filePath,
@@ -850,10 +877,21 @@ export class ReadGuard {
 	 * us, so an `rm` naming it carries no signal worth checking disk for —
 	 * this is a lookup against state already being tracked, never a fresh
 	 * filesystem stat over an unbounded path set.
+	 *
+	 * MUST go through `knownPathIndex`, not `this.key(filePath)` directly
+	 * (#1668 review F1): this is called AFTER a bash delete has already
+	 * landed, when `filePath` no longer exists — `this.key()` at that point
+	 * returns a lowercased-tail key, not the real-casing key `recordRead`/
+	 * `recordWritten` stored while the file was still on disk. For a
+	 * mixed-case basename (`MyModule.ts`) the two keys differ and a direct
+	 * `this.key()` lookup always misses.
 	 */
 	hasKnownPath(filePath: string): boolean {
-		const key = this.key(filePath);
-		return this.reads.has(key) || this.writtenThisSession.has(key);
+		const stored = this.knownPathIndex.get(normalizeEphemeralMapKey(filePath));
+		return (
+			stored !== undefined &&
+			(this.reads.has(stored) || this.writtenThisSession.has(stored))
+		);
 	}
 
 	/**
@@ -862,9 +900,16 @@ export class ReadGuard {
 	 * path would inherit a stale writtenThisSession/reads entry from before
 	 * the delete, and a repeat `rm` of the same already-gone path would keep
 	 * matching {@link hasKnownPath} and re-emitting a type-3 notification.
+	 *
+	 * MUST evict through `knownPathIndex`, not `this.key(filePath)` directly
+	 * (#1668 review F1) — same reasoning as {@link hasKnownPath}: `filePath`
+	 * is already gone from disk by the time this runs, so recomputing
+	 * `this.key()` targets the wrong (lowercased-tail) key for a mixed-case
+	 * basename and leaves the real entry behind un-evicted.
 	 */
 	forgetPath(filePath: string): void {
-		this.evictFile(this.key(filePath));
+		const stored = this.knownPathIndex.get(normalizeEphemeralMapKey(filePath));
+		this.evictFile(stored ?? this.key(filePath));
 	}
 
 	/**
@@ -886,8 +931,12 @@ export class ReadGuard {
 	 * Call this from the tool_result handler so the next checkEdit on the same
 	 * file doesn't see "file_modified" caused by our own previous edit.
 	 */
-	recordWritten(filePath: string): void {
-		filePath = this.key(filePath);
+	recordWritten(rawFilePath: string): void {
+		const filePath = this.key(rawFilePath);
+		// #1668 review F1: index by the existence-independent syntactic key
+		// (see `knownPathIndex`) so a later hasKnownPath/forgetPath lookup
+		// after an external delete can still find this entry's real key.
+		this.knownPathIndex.set(normalizeEphemeralMapKey(rawFilePath), filePath);
 		this.fileTime.read(filePath);
 		this.writtenThisSession.add(filePath);
 		if (this.reads.has(filePath)) this.consumedReadFiles.add(filePath);

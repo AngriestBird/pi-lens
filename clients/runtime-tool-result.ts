@@ -612,6 +612,14 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 				if (isExternalOrVendorFile(dp, workspaceRoot)) continue;
 				if (isPathIgnoredByProject(dp, workspaceRoot, false)) continue;
 				if (!deps.readGuard || !deps.readGuard.hasKnownPath(dp)) continue;
+				// #1668 review F4: this is the ONLY gate standing between a merely
+				// NAMED path and an actual confirmed delete — extractDeletedPathsFromCommand
+				// only proposes candidates from parsing the command text, so it can't
+				// tell `git rm --cached f` (index-only, file still on disk) from a
+				// real delete, can't see a short-circuited `rm f && false` that never
+				// ran, and can't resolve a relative path run from a `cd`-ed subdirectory
+				// against the wrong cwd. Every one of those is caught here, and only
+				// here — do not remove or reorder this check relative to the loop body.
 				if (nodeFs.existsSync(dp)) continue; // still there — not a real delete
 				deps.readGuard.forgetPath(dp);
 				void notifyExternalFileChange(dp, 3).catch((err) => {
