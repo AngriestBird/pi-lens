@@ -9,6 +9,22 @@
  * rejection should evict the memo immediately and let the next demand
  * retry; no cooldown is needed (unlike a network-backed memo such as the
  * grammar-download retry in #1536, which does need one).
+ *
+ * Caveat (#1592): the eviction genuinely helps for a RESOLUTION failure
+ * (`ERR_MODULE_NOT_FOUND` — the file did not exist yet, or a transient fs
+ * error before `load()` gets to `import()` at all) and for any pre-import
+ * throw. It does NOT help for an EVALUATION failure — `load()`'s `import()`
+ * running the target module's top-level code and that code throwing. Node's
+ * ESM loader permanently memoizes a module record that threw during
+ * evaluation: a later `import()` of the SAME resolved URL replays the
+ * cached rejection instead of re-running the module, even after whatever
+ * was broken gets fixed on disk. Measured in #1583's review: replaying that
+ * cached rejection costs ~0.01ms — cheap precisely because nothing is
+ * re-attempted. Evicting the memo here still lets `get()` call `load()`
+ * again, but if `load()` wraps an `import()` of a URL that failed during
+ * evaluation, that call is a dead retry — it looks like a second attempt
+ * and structurally cannot be one. Callers must not read "retries" as "can
+ * recover from a broken compiled module mid-process."
  */
 export interface LazyImport<T> {
 	/** Start (or reuse) the load. A rejected load evicts itself first, so the
