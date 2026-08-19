@@ -18,7 +18,8 @@ export type DegradationKind =
 	| "install-retry-exhausted"
 	| "ast-grep-napi-unavailable"
 	| "instance-registry-corrupt"
-	| "cascade-budget-override-disarmed";
+	| "cascade-budget-override-disarmed"
+	| "lsp-pull-unconfirmed";
 
 export interface DegradationRecord {
 	kind: unknown;

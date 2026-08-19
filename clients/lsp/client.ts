@@ -26,6 +26,7 @@ import {
 	StreamMessageWriter,
 } from "../deps/vscode-jsonrpc.js";
 import { getAmbientAbortSignal } from "../safe-spawn.js";
+import { incrementDegradationCount } from "../degradation-ledger.js";
 import {
 	hashDiagnosticContent,
 	type StoredDiagnosticBinding,
@@ -58,7 +59,7 @@ import {
 } from "./sync-kind.js";
 import { getStrategy } from "./wait-policy/index.js";
 import { WatchedFilesQueue } from "./watch-queue.js";
-import { clearWorkspaceDiagnosticsCache } from "./workspace-diagnostics-cache.js";
+import { clearAllWorkspaceDiagnosticsCaches } from "./workspace-diagnostics-cache.js";
 
 // Opt-in publishDiagnostics trace (PILENS_PUB_DEBUG=1) — read once, negligible
 // hot-path cost. Surfaces each server's publish behavior (version + count) to
@@ -1323,7 +1324,11 @@ function buildContentChanges(
 	if (previousText === undefined) {
 		return [{ text: content }];
 	}
-	const previousLines = previousText.split("\n");
+	// #1669 review F6: split on every LSP line terminator (\r\n, lone \r, or
+	// \n), not just \n — a document using CRLF or lone-CR line endings would
+	// otherwise be undercounted, computing a range that ends mid-document
+	// instead of at the real last line.
+	const previousLines = previousText.split(/\r\n|\r|\n/);
 	const lastLine = previousLines.length - 1;
 	const lastLineText = previousLines[lastLine] ?? "";
 	return [
@@ -1736,7 +1741,35 @@ export function setupIncomingHandlers(
 	// the server just told us to distrust.
 	state.connection.onRequest("workspace/diagnostic/refresh", async () => {
 		state.workspacePullResultCache.clear();
-		clearWorkspaceDiagnosticsCache(state.root);
+		// #1669 review F1: clear EVERY on-disk sweep cache this process has
+		// recorded a cwd for, not `state.root` — `state.root` is a per-SERVER
+		// identity marker that a monorepo/multi-root project routinely nests
+		// BELOW the real sweep cwd, so clearing at it misses the cache file the
+		// sweep actually reads/writes. See the doc comment on
+		// `clearAllWorkspaceDiagnosticsCaches`.
+		clearAllWorkspaceDiagnosticsCaches();
+		// #1669 review F3: a server-initiated "everything may be stale" signal
+		// must drop the SAME per-document state a normal resync already drops
+		// via `clearDiagnosticsForPath` (pullResultIds, pushDiagnostics,
+		// documentPullDiagnostics, diagnosticBindings,
+		// diagnosticsVersionsByPath, ...) — dropping only
+		// `workspacePullResultCache` above left every open document's OTHER
+		// pull state intact, so the next pull would echo a disowned
+		// `previousResultId`, get back `kind: "unchanged"`, and re-confirm
+		// stale diagnostics under a fresh timestamp; nothing would ever
+		// re-pull on its own. Route every open document through the resync
+		// clear, then proactively re-pull it (pull mode only — a push server
+		// republishes on its own schedule and a pull request would just be
+		// refused) so a consumer sees fresh diagnostics without waiting on
+		// that document's next edit.
+		for (const normalizedPath of state.openDocuments) {
+			clearDiagnosticsForPath(state, normalizedPath);
+			if (state.workspaceDiagnosticsSupport.mode === "pull") {
+				const uri = state.openDocumentUris?.get(normalizedPath);
+				const filePath = uri ? uriToPath(uri) : normalizedPath;
+				void clientRequestPullDiagnostics(state, filePath);
+			}
+		}
 		return null;
 	});
 }
@@ -2020,7 +2053,43 @@ export async function clientRequestWorkspaceDiagnostics(
 				// `items`, so without this a file the server confirmed unchanged
 				// would silently drop out of the sweep result entirely.
 				const prior = state.workspacePullResultCache.get(normalizedPath);
-				if (!prior) continue; // no earlier basis to inherit — nothing to report
+				if (!prior) {
+					// #1669 review F4: no earlier basis to inherit (e.g. right after a
+					// `workspace/diagnostic/refresh` cleared `workspacePullResultCache`)
+					// — the server is answering "unchanged" against a resultId basis we
+					// no longer hold, so there is nothing honest to report for this
+					// file from THIS response. `continue`-ing here would make the file
+					// silently absent from `out`, which the caller reads as "clean" —
+					// a false clean for a file the server just told us it hasn't even
+					// looked at freshly. Treat it as needs-full-pull: request the
+					// per-file diagnostic directly instead.
+					const outcome = await clientRequestPullDiagnostics(
+						state,
+						filePath,
+						budgetMs,
+					);
+					if (outcome.status === "found") {
+						out.push({
+							filePath,
+							diagnostics: state.documentPullDiagnostics.get(normalizedPath) ?? [],
+							contentHash: state.diagnosticBindings.get(normalizedPath)?.contentHash,
+						});
+					} else if (outcome.status === "unavailable") {
+						// Genuinely unconfirmed — never fabricate a clean result. Recorded
+						// via the shared degradation ledger (AGENTS.md: repeated
+						// degradations use incrementDegradationCount, not a hand-rolled
+						// counter) so a server that keeps racing refresh against sweeps
+						// is visible in aggregate instead of silently absorbed per-file.
+						incrementDegradationCount({
+							kind: "lsp-pull-unconfirmed",
+							subject: state.serverId,
+							reason:
+								"unchanged report with no workspacePullResultCache basis, and the per-file fallback pull was unavailable",
+						});
+					}
+					// "clean": genuinely clean, correctly absent from `out`.
+					continue;
+				}
 				if (item.resultId !== undefined) {
 					state.workspacePullResultCache.set(normalizedPath, {
 						...prior,
@@ -2276,19 +2345,27 @@ export async function handleNotifyOpen(
 			state.documentOpenedAt.set(normalizedPath, Date.now());
 			state.diagnosticPublicationCounts.set(normalizedPath, 0);
 			if (!isClientAlive(state)) return;
-			await safeSendNotification(state.connection, "textDocument/didOpen", {
-				textDocument: { uri, languageId, version, text: content },
-			});
-			recordSentContent(state, normalizedPath, version, content);
+			const reopenSent = await safeSendNotification(
+				state.connection,
+				"textDocument/didOpen",
+				{ textDocument: { uri, languageId, version, text: content } },
+			);
+			// #1669 review F7: only mirror the send locally once it actually left
+			// the process — see safeSendNotification's doc comment.
+			if (reopenSent) recordSentContent(state, normalizedPath, version, content);
 			state.openDocuments.add(normalizedPath);
 			state.openDocumentUris?.set(normalizedPath, uri);
 			return;
 		}
-		await safeSendNotification(state.connection, "textDocument/didChange", {
-			textDocument: { uri, version },
-			contentChanges: buildContentChanges(state, normalizedPath, content),
-		});
-		recordSentContent(state, normalizedPath, version, content);
+		const changeSent = await safeSendNotification(
+			state.connection,
+			"textDocument/didChange",
+			{
+				textDocument: { uri, version },
+				contentChanges: buildContentChanges(state, normalizedPath, content),
+			},
+		);
+		if (changeSent) recordSentContent(state, normalizedPath, version, content);
 		return;
 	}
 
@@ -2323,10 +2400,12 @@ export async function handleNotifyOpen(
 
 	if (!isClientAlive(state)) return;
 
-	await safeSendNotification(state.connection, "textDocument/didOpen", {
-		textDocument: { uri, languageId, version: 0, text: content },
-	});
-	recordSentContent(state, normalizedPath, 0, content);
+	const openSent = await safeSendNotification(
+		state.connection,
+		"textDocument/didOpen",
+		{ textDocument: { uri, languageId, version: 0, text: content } },
+	);
+	if (openSent) recordSentContent(state, normalizedPath, 0, content);
 	state.pendingOpens.delete(normalizedPath);
 	state.openDocuments.add(normalizedPath);
 	state.closedDocuments?.delete(normalizedPath);
@@ -2365,13 +2444,15 @@ export async function handleNotifyChange(
 	if (!state.openDocuments.has(normalizedPath)) {
 		// Safety fallback: keep protocol ordering valid even if caller sends
 		// didChange before first didOpen for this document.
-		await safeSendNotification(state.connection, "textDocument/didOpen", {
-			textDocument: { uri, languageId: "plaintext", version: 0, text: content },
-		});
+		const fallbackOpenSent = await safeSendNotification(
+			state.connection,
+			"textDocument/didOpen",
+			{ textDocument: { uri, languageId: "plaintext", version: 0, text: content } },
+		);
 		state.documentVersions.set(normalizedPath, 0);
 		state.documentOpenedAt.set(normalizedPath, Date.now());
 		state.diagnosticPublicationCounts.set(normalizedPath, 0);
-		recordSentContent(state, normalizedPath, 0, content);
+		if (fallbackOpenSent) recordSentContent(state, normalizedPath, 0, content);
 		state.openDocuments.add(normalizedPath);
 		state.openDocumentUris?.set(normalizedPath, uri);
 		return;
@@ -2382,11 +2463,15 @@ export async function handleNotifyChange(
 	// Clear stale diagnostics before sending new content so waitForDiagnostics
 	// doesn't return immediately with the previous edit's results.
 	clearDiagnosticsForPath(state, normalizedPath);
-	await safeSendNotification(state.connection, "textDocument/didChange", {
-		textDocument: { uri, version },
-		contentChanges: buildContentChanges(state, normalizedPath, content),
-	});
-	recordSentContent(state, normalizedPath, version, content);
+	const changeSent = await safeSendNotification(
+		state.connection,
+		"textDocument/didChange",
+		{
+			textDocument: { uri, version },
+			contentChanges: buildContentChanges(state, normalizedPath, content),
+		},
+	);
+	if (changeSent) recordSentContent(state, normalizedPath, version, content);
 }
 
 /** Close a document through the same lifecycle path exposed by the client. */
@@ -3569,17 +3654,28 @@ export async function createLSPClient(options: {
 }
 
 // Helper to safely send notifications - catches stream destruction
+/**
+ * Returns `true` once the notification was actually handed to the transport,
+ * `false` when a stream error was swallowed (connection error handlers will
+ * update state separately). #1669 review F7: callers that mirror what they
+ * just told the server locally (`recordSentContent`) MUST gate on this
+ * return value — recording a send that never left the process would desync
+ * the mirror from what the server actually has, with nothing to self-heal
+ * it (the next Incremental range would be computed against content the
+ * server never saw).
+ */
 async function safeSendNotification(
 	connection: MessageConnection,
 	method: string,
 	params: unknown,
-): Promise<void> {
+): Promise<boolean> {
 	try {
 		await connection.sendNotification(method as never, params as never);
+		return true;
 	} catch (err) {
 		if (isStreamError(err)) {
 			// Silently ignore - stream was destroyed, connection error handlers will update state
-			return;
+			return false;
 		}
 		throw err;
 	}
