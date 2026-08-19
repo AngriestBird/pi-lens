@@ -95,9 +95,13 @@ export function resolveToolCallCorrelationId(event: unknown): string | undefined
 		// absent (#1678 item 2): this assumes a host's `id` field identifies
 		// one TOOL CALL. A host that instead populates `id` per MESSAGE (one
 		// id shared by every tool call in that message) would cross two
-		// parallel calls in the same turn under the same id. No known host
-		// shape does this today (#1655's host-shape audit); revisit dropping
-		// this rung if that audit ever turns one up.
+		// parallel calls in the same turn under the same id. Stated plainly:
+		// real pi builds `tool_call`/`tool_result` events with exactly
+		// `toolCallId` and no bare `id` field at all (see the file header
+		// above, #1655 item 2, `src/core/agent-session.ts:502-516`), so this
+		// rung is dead code against today's host — kept only in case a
+		// different host shape needs it; drop it once #1655's audit confirms
+		// none does.
 		value.id,
 	]) {
 		const sanitized = sanitizeCorrelationId(candidate);

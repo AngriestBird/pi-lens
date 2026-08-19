@@ -119,8 +119,15 @@ export function recordDegradationOnce(record: DegradationRecord): void {
 /**
  * Count a repeated degradation while retaining one latest-reason entry per
  * kind/subject. The group count remains the exact event total.
+ *
+ * Returns `true` when this call is the FIRST occurrence recorded for this
+ * kind/subject pair (the ledger is the single source of truth for that
+ * tally already — via `tallies` — so callers that need a once-per-subject
+ * "rising edge" signal, e.g. to gate a verbose one-time log line before
+ * falling back to the bounded count, read it off this return value instead
+ * of hand-rolling their own parallel `Set`/latch).
  */
-export function incrementDegradationCount(record: DegradationRecord): void {
+export function incrementDegradationCount(record: DegradationRecord): boolean {
 	try {
 		const kind = boundedKind(record.kind);
 		const subject = truncateForLedger(record.subject);
@@ -139,9 +146,11 @@ export function incrementDegradationCount(record: DegradationRecord): void {
 		if (existing >= 0) group.entries.splice(existing, 1);
 		group.entries.push(entry);
 		if (group.entries.length > ENTRIES_PER_KIND) group.entries.shift();
+		return count === 1;
 	} catch (error) {
 		debugLedgerFailure("increment", error);
 		// Telemetry must never break the observed path.
+		return false;
 	}
 }
 

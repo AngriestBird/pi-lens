@@ -209,38 +209,46 @@ export async function handleAgentEnd({
 				.map((r) => `${r.filePath} origin=${r.originCwd}`)
 				.join(", ")}`,
 		);
-		logLatency({
-			type: "phase",
-			toolName: "agent_end",
-			filePath: ctxCwd ?? runtime.projectRoot,
-			phase: "agent_end_deferred_format_orphan_origin_mismatch",
-			durationMs: 0,
-			metadata: {
-				fileCount: droppedOrphans.length,
-				staleAfterMs,
-				currentOriginCwd: ctxCwd ?? runtime.projectRoot,
-				files: droppedOrphans.map((r) => ({
-					filePath: r.filePath,
-					originCwd: r.originCwd,
-					ownerSessionId: r.ownerSessionId,
-					queuedTurnIndex: r.queuedTurnIndex,
-					ageMs: Date.now() - r.lastTouchedAt,
-				})),
-			},
-		});
 		// #1678 item 1: a genuinely abandoned origin re-surfaces the SAME
 		// record on every subsequent agent_end for as long as the queued
 		// entry lives — by design (see the comment above), but the repo
 		// invariant is that a repeated degradation goes through the ledger's
-		// counting path rather than accumulating as unbounded raw log lines.
-		// `incrementDegradationCount` collapses every recurrence of the same
-		// file into one ledger group entry with a running count instead of a
-		// new entry per agent_end.
+		// counting path instead of accumulating as unbounded raw log lines.
+		// `incrementDegradationCount` is the single source of truth for
+		// whether THIS is a record's first appearance (its return value):
+		// the detailed forensic `logLatency` call below fires only on that
+		// rising edge, with file identity/origin/age. Every later repeat of
+		// the same record is counted ONLY by the ledger's running count —
+		// no second raw event, no parallel "already logged" latch to
+		// maintain here.
+		const firstSeenOrphans: typeof droppedOrphans = [];
 		for (const record of droppedOrphans) {
-			incrementDegradationCount({
+			const isFirstOccurrence = incrementDegradationCount({
 				kind: "path-attribution-orphan-unresolved",
 				subject: record.filePath,
 				reason: `origin=${record.originCwd} unclaimed >${staleAfterMs}ms`,
+			});
+			if (isFirstOccurrence) firstSeenOrphans.push(record);
+		}
+		if (firstSeenOrphans.length > 0) {
+			logLatency({
+				type: "phase",
+				toolName: "agent_end",
+				filePath: ctxCwd ?? runtime.projectRoot,
+				phase: "agent_end_deferred_format_orphan_origin_mismatch",
+				durationMs: 0,
+				metadata: {
+					fileCount: firstSeenOrphans.length,
+					staleAfterMs,
+					currentOriginCwd: ctxCwd ?? runtime.projectRoot,
+					files: firstSeenOrphans.map((r) => ({
+						filePath: r.filePath,
+						originCwd: r.originCwd,
+						ownerSessionId: r.ownerSessionId,
+						queuedTurnIndex: r.queuedTurnIndex,
+						ageMs: Date.now() - r.lastTouchedAt,
+					})),
+				},
 			});
 		}
 	}
