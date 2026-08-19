@@ -1609,6 +1609,131 @@ describe("turn_end license-risk surfacing", () => {
 	});
 });
 
+// ── #1634: trivy CRITICAL/advisory/license reports carry an explicit cache
+// age — package-pinned findings have no cited file:line to freshness-gate,
+// so the session_start cache's age is stated instead of presenting a
+// (possibly hours-old) 🔴 STOP blocker as current. See
+// clients/finding-delivery-gate.ts for the shared rationale/formatter.
+
+describe("turn_end trivy dependency-CVE/license reports — explicit cache age (#1634)", () => {
+	it("states the trivy scan age on a CRITICAL blocker, a non-critical advisory, and the license advisory", async () => {
+		const env = setupTestEnvironment("pi-lens-trivy-age-");
+		try {
+			const runtime = new RuntimeCoordinator();
+			runtime.setTelemetryIdentity({ sessionId: "trivy-age-session" });
+			const cacheManager = new CacheManager(false);
+
+			const file = path.join(env.tmpDir, "src/a.ts");
+			fs.mkdirSync(path.dirname(file), { recursive: true });
+			fs.writeFileSync(file, "export const x = 1;\n");
+			cacheManager.addModifiedRange(
+				file,
+				{ start: 1, end: 1 },
+				false,
+				env.tmpDir,
+				"trivy-age-session",
+			);
+
+			const scannedAt = new Date(Date.now() - 45 * 60_000).toISOString();
+			cacheManager.writeCache(
+				"trivy",
+				{
+					success: true,
+					scannedAt,
+					findings: [
+						{
+							vulnerabilityId: "CVE-2026-0001",
+							pkgName: "left-pad",
+							installedVersion: "1.0.0",
+							fixedVersion: "1.0.1",
+							severity: "CRITICAL",
+						},
+						{
+							vulnerabilityId: "CVE-2026-0002",
+							pkgName: "right-pad",
+							installedVersion: "2.0.0",
+							severity: "MEDIUM",
+						},
+					],
+					secrets: [],
+					licenses: [
+						{
+							license: "GPL-3.0",
+							pkgName: "leftpad",
+							severity: "HIGH",
+							category: "restricted",
+						},
+					],
+				},
+				env.tmpDir,
+			);
+
+			await handleTurnEnd(
+				makeTurnEndDeps(runtime, cacheManager, { ctxCwd: env.tmpDir }),
+			);
+
+			const content =
+				consumeTurnEndFindings(cacheManager, env.tmpDir)?.messages?.[0]
+					?.content ?? "";
+			expect(content).toContain("CRITICAL dependency CVEs (trivy, scanned 45m ago)");
+			expect(content).toContain("Dependency CVEs (trivy, scanned 45m ago)");
+			expect(content).toContain("Dependency license risk (trivy, scanned 45m ago)");
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("degrades to an honest unknown-age label rather than fabricating one from a missing scannedAt", async () => {
+		const env = setupTestEnvironment("pi-lens-trivy-age-unknown-");
+		try {
+			const runtime = new RuntimeCoordinator();
+			runtime.setTelemetryIdentity({ sessionId: "trivy-age-unknown-session" });
+			const cacheManager = new CacheManager(false);
+
+			const file = path.join(env.tmpDir, "src/a.ts");
+			fs.mkdirSync(path.dirname(file), { recursive: true });
+			fs.writeFileSync(file, "export const x = 1;\n");
+			cacheManager.addModifiedRange(
+				file,
+				{ start: 1, end: 1 },
+				false,
+				env.tmpDir,
+				"trivy-age-unknown-session",
+			);
+
+			cacheManager.writeCache(
+				"trivy",
+				{
+					success: true,
+					scannedAt: "",
+					findings: [
+						{
+							vulnerabilityId: "CVE-2026-0003",
+							pkgName: "up-pad",
+							installedVersion: "3.0.0",
+							severity: "CRITICAL",
+						},
+					],
+					secrets: [],
+					licenses: [],
+				},
+				env.tmpDir,
+			);
+
+			await handleTurnEnd(
+				makeTurnEndDeps(runtime, cacheManager, { ctxCwd: env.tmpDir }),
+			);
+
+			const content =
+				consumeTurnEndFindings(cacheManager, env.tmpDir)?.messages?.[0]
+					?.content ?? "";
+			expect(content).toContain("CRITICAL dependency CVEs (trivy, scan age unknown)");
+		} finally {
+			env.cleanup();
+		}
+	});
+});
+
 // ── #628: stale test results are cached, not discarded ────────────────────────
 
 describe("turn_end test runner — stale results are cached, not discarded", () => {
