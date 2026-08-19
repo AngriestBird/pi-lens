@@ -13,11 +13,11 @@
 //
 // This is the registered-or-fail guard: it greps every script under
 // scripts/ plus package.json for an author-machine absolute path literal
-// (C:\Users\<name> or C:/Users/<name>) baked into source, so a future commit
-// that reintroduces one -- an author pasting a debug command as-is -- fails
-// here instead of shipping unnoticed a second time. Not scoped to R3LiC
-// specifically: the shape is ANY hardcoded user-profile path, not just this
-// one author's.
+// baked into source, so a future commit that reintroduces one -- an author
+// pasting a debug command as-is -- fails here instead of shipping unnoticed
+// a second time. Not scoped to R3LiC, and not scoped to Windows/C:\Users\
+// specifically: the shape is ANY hardcoded user-profile path, on any OS, any
+// drive letter, any case.
 import { describe, expect, it } from "vitest";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -25,10 +25,16 @@ import * as path from "node:path";
 const REPO_ROOT = path.resolve(__dirname, "..", "..");
 const SCRIPTS_DIR = path.join(REPO_ROOT, "scripts");
 
-// A user-profile absolute path literal: C:\Users\<name>\... or
-// C:/Users/<name>/.... Deliberately NOT anchored to any one username -- the
-// defect shape is "baked-in machine path", not "baked-in R3LiC".
-const USER_PROFILE_PATH_RE = /C:[\\/]+Users[\\/]+[A-Za-z0-9_.-]+/g;
+// A user-profile absolute path literal, any of:
+//   - a Windows drive letter (any letter, not just C:) followed by \Users\
+//     or /Users/ -- e.g. C:\Users\name, C:/Users/name, D:\Users\name
+//   - a POSIX home directory -- /home/name (Linux) or /Users/name (macOS)
+// Case-insensitive throughout (NTFS/APFS are case-insensitive by default,
+// and a literal could be typed "c:/users/..." or "C:\USERS\...").
+// Deliberately NOT anchored to any one username or OS -- the defect shape
+// is "baked-in machine path", not "baked-in R3LiC on Windows".
+const USER_PROFILE_PATH_RE =
+	/(?:[A-Za-z]:[\\/]+Users[\\/]+[A-Za-z0-9_.-]+|\/(?:home|Users)\/[A-Za-z0-9_.-]+)/gi;
 
 // Legitimate exceptions, reviewed per entry -- never a blanket file skip.
 // Each entry names the file, the issue/PR that reviewed it, and why the hit
@@ -70,15 +76,21 @@ describe("no hardcoded machine paths in scripts/ or package.json (#1728)", () =>
 		expect(files.length).toBeGreaterThan(10);
 	});
 
-	it("the detector itself flags a synthetic hardcoded machine path, in both slash styles (mutation-proof)", () => {
-		const posix = 'const X = "C:/Users/someone/Desktop/whatever";';
-		const win32 = 'const X = "C:\\Users\\someone\\Desktop\\whatever";';
-		expect([...posix.matchAll(USER_PROFILE_PATH_RE)].map((m) => m[0])).toEqual([
-			"C:/Users/someone",
-		]);
-		expect([...win32.matchAll(USER_PROFILE_PATH_RE)].map((m) => m[0])).toEqual([
-			"C:\\Users\\someone",
-		]);
+	// Mutation-proof: exercises every shape the regex claims to cover, not
+	// just the one C:\Users\ pattern the original #1728 fix happened to find.
+	// A pre-merge review probe found the regex only fired on C:-drive Windows
+	// profiles despite this docstring's "ANY" claim -- these cases pin all
+	// seven shapes so that gap can't reopen silently.
+	it.each([
+		["Windows C: drive, forward slash", 'const X = "C:/Users/someone/Desktop/whatever";', "C:/Users/someone"],
+		["Windows C: drive, backslash", 'const X = "C:\\Users\\someone\\Desktop\\whatever";', "C:\\Users\\someone"],
+		["Windows non-C: drive letter", 'const X = "D:/Users/someone/Desktop/whatever";', "D:/Users/someone"],
+		["Windows drive letter, lowercase + lowercase Users", 'const X = "c:/users/someone/Desktop";', "c:/users/someone"],
+		["Windows drive letter, all-caps USERS", 'const X = "C:\\USERS\\someone\\Desktop";', "C:\\USERS\\someone"],
+		["Linux home directory", 'const X = "/home/someone/Desktop/whatever";', "/home/someone"],
+		["macOS home directory", 'const X = "/Users/someone/Desktop/whatever";', "/Users/someone"],
+	])("flags a synthetic %s literal", (_label, source, expected) => {
+		expect([...source.matchAll(USER_PROFILE_PATH_RE)].map((m) => m[0])).toEqual([expected]);
 	});
 
 	it("no script under scripts/ hardcodes an author-machine path outside the reviewed allowlist", () => {
