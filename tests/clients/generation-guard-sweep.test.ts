@@ -43,12 +43,14 @@ import * as path from "node:path";
 import { describe, expect, it } from "vitest";
 
 import { listDeclaredGenerationSources } from "../../clients/generation-guard.js";
+import { repoRoot } from "../support/session-state-scan.js";
 import {
-	clientSourceFiles,
-	clientsRelative,
-	repoRoot,
-	stripCommentsAndStrings,
-} from "../support/session-state-scan.js";
+	assertNonEmptyScan,
+	auditRegistry,
+	listSourceFiles,
+	relativePosix,
+	stripSource,
+} from "../support/sweep-kit.js";
 
 /**
  * Every `clients/` file that still compares a generation/epoch/sequence by
@@ -108,64 +110,102 @@ function comparesGenerationByHand(source: string): boolean {
 	return GENERATION_LHS.test(source) || GENERATION_RHS.test(source);
 }
 
-/** `clients/`-relative paths that compare a generation by hand. */
-function scanHandRolledGuards(): string[] {
+const CLIENTS_ROOT = path.join(repoRoot, "clients");
+
+/**
+ * `clients/`-relative paths that compare a generation by hand, and how many
+ * files were looked at to find them.
+ *
+ * Built on `tests/support/sweep-kit.ts` (#1755) rather than re-implementing
+ * the walk, the stripper and the registry semantics — this repo has paid for
+ * those four times. `strings: "blank"` is the right policy here: several of
+ * these files carry doc comments and log strings that NAME the pattern, and
+ * matching those would make the exemption list unmaintainable noise.
+ */
+/**
+ * Exemptions split by whether the file is in THIS tree.
+ *
+ * The kit's stale-exemption rule is right for a settled tree: an exemption
+ * that excuses no live hit is a screen that stopped screening (#1735). It
+ * cannot know that `clients/single-flight.ts` arrives with #1762. So the audit
+ * sees only exemptions whose file exists, and the absent ones are checked
+ * separately — they must name the issue that brings the file, and they resume
+ * normal stale-detection the moment it lands.
+ */
+function partitionExemptions(): {
+	present: Record<string, string>;
+	absent: string[];
+} {
+	const present: Record<string, string> = {};
+	const absent: string[] = [];
+	for (const [file, reason] of Object.entries(HAND_ROLLED_GENERATION_GUARDS)) {
+		if (fs.existsSync(path.join(CLIENTS_ROOT, file))) present[file] = reason;
+		else absent.push(file);
+	}
+	return { present, absent };
+}
+
+function scanHandRolledGuards(): { flagged: string[]; scanned: number } {
+	const files = listSourceFiles(CLIENTS_ROOT, { skipTests: true });
 	const flagged: string[] = [];
-	for (const file of clientSourceFiles()) {
-		const relative = clientsRelative(file);
+	for (const file of files) {
+		const relative = relativePosix(CLIENTS_ROOT, file);
 		if (relative === "generation-guard.ts") continue;
-		// Comments and strings must go first: several of these files carry long
-		// doc comments that NAME the pattern, and matching those would make the
-		// list unmaintainable noise.
-		const source = stripCommentsAndStrings(fs.readFileSync(file, "utf8"));
+		const source = stripSource(fs.readFileSync(file, "utf8"), {
+			strings: "blank",
+		});
 		if (comparesGenerationByHand(source)) flagged.push(relative);
 	}
-	return flagged.sort();
+	return { flagged: flagged.sort(), scanned: files.length };
 }
 
 describe("generation-guard ratchet (#1754)", () => {
-	const flagged = scanHandRolledGuards();
+	const { flagged, scanned } = scanHandRolledGuards();
 
-	it("flags a non-trivial number of files, so the scanner cannot silently die", () => {
-		// A regex change that matches nothing would make every assertion below
-		// vacuously pass. This floor is the same guard the session-state sweep's
-		// probe-count floor provides.
-		expect(flagged.length).toBeGreaterThanOrEqual(8);
+	it("actually walked clients/ and matched something", () => {
+		// Defect shape 10, #1718: a sweep that scanned nothing, or matched
+		// nothing, must FAIL rather than read as clean. Two separate floors,
+		// because "walked 0 files" and "walked 400 and matched 0" are different
+		// bugs with different fixes.
+		assertNonEmptyScan("generation-guard sweep: files walked", scanned, 200);
+		assertNonEmptyScan("generation-guard sweep: files flagged", flagged.length, 8);
 	});
 
-	it("every hand-rolled generation guard carries a written reason", () => {
-		const undeclared = flagged.filter(
-			(file) => !(file in HAND_ROLLED_GENERATION_GUARDS),
-		);
-		expect(
-			undeclared,
-			`${undeclared.length} file(s) compare a generation/epoch/sequence by hand ` +
-				"without going through clients/generation-guard.ts. Use the primitive " +
-				"(createGenerationSource / createGenerationMap), or add the file to " +
+	it("every hand-rolled generation guard is accounted for", () => {
+		const audit = auditRegistry({
+			sweepName: "generation-guard ratchet (#1754)",
+			flagged,
+			// Nothing is "registered" here: a file either guards through the
+			// primitive, in which case the scan does not flag it, or it carries
+			// an exemption reason. There is no third state to declare.
+			registered: [],
+			exemptions: partitionExemptions().present,
+			minReasonLength: 60,
+			minFlagged: 8,
+			scannedCount: scanned,
+			minScanned: 200,
+			remediation:
+				"Use clients/generation-guard.ts (createGenerationSource / " +
+				"createGenerationMap), or add the file to " +
 				"HAND_ROLLED_GENERATION_GUARDS with the reason it cannot.",
-		).toEqual([]);
+		});
+		// `auditRegistry` reports unaccounted files, reasonless exemptions AND
+		// stale ones in a single pass, so the reverse lock comes from the kit
+		// rather than from a second hand-written check.
+		expect(audit.problems.join("\n")).toBe("");
 	});
 
-	it("every declared exception is still a real one", () => {
-		// A file that is not in the tree at all is not a stale entry: an
-		// exemption may be written for a file arriving on another branch (this
-		// list is file-keyed precisely so it survives that). The reverse lock
-		// applies to files that EXIST and no longer compare a generation.
-		const stale = Object.keys(HAND_ROLLED_GENERATION_GUARDS).filter(
-			(file) =>
-				!flagged.includes(file) &&
-				fs.existsSync(path.join(repoRoot, "clients", file)),
-		);
-		expect(
-			stale,
-			`${stale.length} file(s) are listed as hand-rolled but no longer compare ` +
-				"a generation by hand. Delete their entries — the list may only shrink.",
-		).toEqual([]);
-	});
-
-	it("every reason is a real sentence, not a placeholder", () => {
-		for (const [file, reason] of Object.entries(HAND_ROLLED_GENERATION_GUARDS)) {
-			expect(reason.length, `${file} needs a real reason`).toBeGreaterThan(60);
+	it("does not treat a file absent from the tree as a stale exemption", () => {
+		// clients/single-flight.ts arrives with #1762. Its exemption is written
+		// now, deliberately, and must not red the sweep before that branch
+		// lands. This is the one place the kit's stale-entry rule is relaxed,
+		// and it is relaxed only for files that do not exist.
+		const { absent } = partitionExemptions();
+		for (const file of absent) {
+			expect(
+				HAND_ROLLED_GENERATION_GUARDS[file],
+				`${file}: an exemption for a file not in the tree must say which branch brings it`,
+			).toMatch(/#\d{3,}/);
 		}
 	});
 });
