@@ -15,6 +15,7 @@ import { access, readFile } from "node:fs/promises";
 import * as os from "node:os";
 import { pathToFileURL } from "node:url";
 import { withTimeout } from "../deadline-utils.js";
+import { incrementDegradationCount } from "../degradation-ledger.js";
 import { raceToCompletion } from "./aggregation.js";
 import type { MessageConnection } from "../deps/vscode-jsonrpc.js";
 import { logLatency } from "../latency-logger.js";
@@ -637,6 +638,10 @@ const LIVENESS_PING_QUERY = "__pi_lens_liveness_ping__";
 // cheaply rebuilt by the next full pull, the worst case is just one extra full
 // (non-`unchanged`) report per affected file.
 const WORKSPACE_PULL_RESULT_CACHE_MAX = 4096;
+// #1713: `workspace/diagnostic` has no per-file/per-identifier request to key
+// telemetry identity on — it is one project-wide pull — so timeout/late-answer
+// records use this fixed subject/scope instead of a real path.
+const WORKSPACE_PULL_SCOPE = "*workspace*";
 // Anti-deadlock backstop for workspace/executeCommand. Deliberately generous
 // (30s): the command is mutating and legitimately long-running (a real server
 // refactor / organize-imports), so this must not truncate valid work — it only
@@ -2225,30 +2230,38 @@ async function pullDiagnosticSource(
 	// alone would let a slow answer from the earlier round land on top of a newer
 	// one. Re-checked at write time below.
 	const requestSequence = claimPullRequestSequence(state, sourceKey);
+	// #1713: captured OUTSIDE withTimeout so a timeout's `catch` below still
+	// holds a live handle on the request. `withTimeout` itself only races it
+	// against a timer — the request keeps running server-side either way — and
+	// without this handle the abandoned answer would settle into the void with
+	// no way to observe it.
+	const requestStartedAt = Date.now();
+	const effectiveTimeoutMs = Math.max(
+		1,
+		Math.min(PULL_REQUEST_TIMEOUT_MS, budgetMs),
+	);
+	const requestPromise = safeSendRequest<{
+		kind?: string;
+		resultId?: string;
+		items?: LSPDiagnostic[];
+		relatedDocuments?: Record<
+			string,
+			{ kind?: string; resultId?: string; items?: LSPDiagnostic[] }
+		>;
+	}>(state.connection, "textDocument/diagnostic", {
+		textDocument: { uri },
+		// #1667: name the source this request is for, so the server answers
+		// from that source instead of its default one.
+		...(identifier !== undefined && { identifier }),
+		...(previousResultId !== undefined && { previousResultId }),
+	});
 	try {
 		// withTimeout is the backstop against a hung pull-mode server: without it
 		// this await never settles unless the stream is destroyed. Bounded by the
 		// smaller of the absolute ceiling and the caller's remaining wait budget.
 		// On timeout the caught error yields `unavailable` below (never a false
 		// `clean`), so it falls through to the push-wait/timeout backstop.
-		const report = await withTimeout(
-			safeSendRequest<{
-				kind?: string;
-				resultId?: string;
-				items?: LSPDiagnostic[];
-				relatedDocuments?: Record<
-					string,
-					{ kind?: string; resultId?: string; items?: LSPDiagnostic[] }
-				>;
-			}>(state.connection, "textDocument/diagnostic", {
-				textDocument: { uri },
-				// #1667: name the source this request is for, so the server answers
-				// from that source instead of its default one.
-				...(identifier !== undefined && { identifier }),
-				...(previousResultId !== undefined && { previousResultId }),
-			}),
-			Math.max(1, Math.min(PULL_REQUEST_TIMEOUT_MS, budgetMs)),
-		);
+		const report = await withTimeout(requestPromise, effectiveTimeoutMs);
 
 		if (!report) {
 			recordPullFailure(state, "textDocument/diagnostic", new Error("empty response"));
@@ -2371,9 +2384,124 @@ async function pullDiagnosticSource(
 			? { status: "found", count: totalCount, primaryCount }
 			: { status: "clean" };
 	} catch (err) {
+		if (isPullTimeoutError(err, effectiveTimeoutMs)) {
+			recordPullTimeoutTelemetry({
+				scope: normalizedPath,
+				identifier,
+				effectiveBudgetMs: effectiveTimeoutMs,
+				hadPreviousResultId: previousResultId !== undefined,
+				elapsedMs: Date.now() - requestStartedAt,
+			});
+			armLateAnswerTelemetry({
+				requestPromise,
+				scope: normalizedPath,
+				identifier,
+				subject: sourceKey,
+				requestStartedAt,
+			});
+		}
 		recordPullFailure(state, "textDocument/diagnostic", err);
 		return { status: "unavailable" };
 	}
+}
+
+/**
+ * #1713: `withTimeout` rejects with this EXACT message (`clients/deadline-utils.ts`)
+ * only when its own timer wins the race — every other rejection is the request
+ * itself failing (bad params, dead connection, thrown by the server). Only the
+ * timer-won case is a "the answer might still be coming" situation worth a
+ * late-answer watch; a request that already failed fast has nothing further to
+ * observe.
+ */
+function isPullTimeoutError(err: unknown, timeoutMs: number): boolean {
+	return err instanceof Error && err.message === `Timeout after ${timeoutMs}ms`;
+}
+
+/**
+ * #1713: every pull timeout emits exactly one bounded latency.log record — the
+ * observability gap the issue names (`withTimeout`'s throw previously skipped
+ * ALL telemetry for this site). Never throws: telemetry must not perturb the
+ * timeout path, which has already decided to return `unavailable` regardless.
+ */
+function recordPullTimeoutTelemetry(args: {
+	scope: string;
+	identifier: string | undefined;
+	effectiveBudgetMs: number;
+	hadPreviousResultId: boolean;
+	elapsedMs: number;
+}): void {
+	try {
+		logLatency({
+			type: "phase",
+			phase: "lsp_pull_diagnostic_timeout",
+			filePath: args.scope,
+			durationMs: args.elapsedMs,
+			metadata: {
+				identifier: args.identifier ?? "bare",
+				effectiveBudgetMs: args.effectiveBudgetMs,
+				hadPreviousResultId: args.hadPreviousResultId,
+			},
+		});
+	} catch {
+		// Telemetry must never break the observed path.
+	}
+}
+
+/**
+ * #1713: a telemetry-only continuation on the ALREADY-abandoned request
+ * promise. `withTimeout` only raced it against a timer — the request is still
+ * live server-side — so if it eventually resolves, this is the only place that
+ * ever finds out. Purely observational: it runs after the caller has already
+ * moved on with `unavailable`, and it never writes into `state`.
+ *
+ * Bounded via the degradation-ledger convention (`incrementDegradationCount`,
+ * chosen over a hand-rolled per-identity rising-edge Set): the ledger already
+ * caps entries per kind and re-arms at `session_start`
+ * (`resetDegradationLedger`, wired into `handleSessionStart`), so reusing it
+ * avoids a second latch this fix would otherwise have to register and reset
+ * itself. `subject` is the same `pullSourceKey` (path + identifier) the pull
+ * path already uses, so the discriminating identity survives aggregation.
+ *
+ * Attaching `.then` here creates no timer, socket, or other handle — it only
+ * observes a promise the request already created — so it cannot keep the
+ * process alive a moment longer than that pending request already does.
+ */
+function armLateAnswerTelemetry(args: {
+	requestPromise: Promise<unknown>;
+	scope: string;
+	identifier: string | undefined;
+	subject: string;
+	requestStartedAt: number;
+}): void {
+	args.requestPromise.then(
+		() => {
+			try {
+				const elapsedMs = Date.now() - args.requestStartedAt;
+				incrementDegradationCount({
+					kind: "lsp-pull-late-answer",
+					subject: args.subject,
+					reason: `late pull answer discarded after ${elapsedMs}ms`,
+				});
+				logLatency({
+					type: "phase",
+					phase: "lsp_pull_late_answer_discarded",
+					filePath: args.scope,
+					durationMs: elapsedMs,
+					metadata: { identifier: args.identifier ?? "bare" },
+				});
+			} catch {
+				// Telemetry must never break the observed path.
+			}
+		},
+		() => {
+			// The abandoned request eventually failed rather than answering — not
+			// an "answer discarded" event. Its failure was already visible via
+			// `recordPullFailure` at request time (a general request failure, not
+			// specific to this late arrival); nothing more to record here. This
+			// handler exists so the request's eventual rejection never surfaces as
+			// an unhandled rejection.
+		},
+	);
 }
 
 const PULL_FAILURE_HISTORY_LIMIT = 10;
@@ -2427,23 +2555,30 @@ export async function clientRequestWorkspaceDiagnostics(
 > {
 	if (!isClientAlive(state)) return undefined;
 	if (!state.workspaceDiagnosticsSupport.workspaceDiagnostics) return undefined;
+	// #1104: echo every resultId we hold from a PRIOR pull so the server can
+	// answer `kind: "unchanged"` for files it hasn't recomputed, instead of
+	// resending (and us re-hashing) every file on every sweep.
+	const previousResultIds = Array.from(
+		state.workspacePullResultCache.values(),
+	).map((entry) => ({ uri: entry.uri, value: entry.resultId }));
+	// #1713: declared OUTSIDE the try so the catch below can still reach them —
+	// same shape as `pullDiagnosticSource` above. Captured outside `withTimeout`
+	// so a timeout still holds a live handle on the request for the late-answer
+	// watch.
+	const workspacePullStartedAt = Date.now();
+	const workspacePullTimeoutMs = Math.max(1, budgetMs);
+	const workspaceRequestPromise = safeSendRequest<{
+		items?: Array<{
+			uri?: string;
+			kind?: string;
+			resultId?: string;
+			items?: LSPDiagnostic[];
+		}>;
+	}>(state.connection, "workspace/diagnostic", { previousResultIds });
 	try {
-		// #1104: echo every resultId we hold from a PRIOR pull so the server can
-		// answer `kind: "unchanged"` for files it hasn't recomputed, instead of
-		// resending (and us re-hashing) every file on every sweep.
-		const previousResultIds = Array.from(
-			state.workspacePullResultCache.values(),
-		).map((entry) => ({ uri: entry.uri, value: entry.resultId }));
 		const report = await withTimeout(
-			safeSendRequest<{
-				items?: Array<{
-					uri?: string;
-					kind?: string;
-					resultId?: string;
-					items?: LSPDiagnostic[];
-				}>;
-			}>(state.connection, "workspace/diagnostic", { previousResultIds }),
-			Math.max(1, budgetMs),
+			workspaceRequestPromise,
+			workspacePullTimeoutMs,
 		);
 		if (!report || !Array.isArray(report.items)) return undefined;
 		const out: Array<{
@@ -2506,6 +2641,22 @@ export async function clientRequestWorkspaceDiagnostics(
 		}
 		return out;
 	} catch (err) {
+		if (isPullTimeoutError(err, workspacePullTimeoutMs)) {
+			recordPullTimeoutTelemetry({
+				scope: WORKSPACE_PULL_SCOPE,
+				identifier: undefined,
+				effectiveBudgetMs: workspacePullTimeoutMs,
+				hadPreviousResultId: previousResultIds.length > 0,
+				elapsedMs: Date.now() - workspacePullStartedAt,
+			});
+			armLateAnswerTelemetry({
+				requestPromise: workspaceRequestPromise,
+				scope: WORKSPACE_PULL_SCOPE,
+				identifier: undefined,
+				subject: WORKSPACE_PULL_SCOPE,
+				requestStartedAt: workspacePullStartedAt,
+			});
+		}
 		recordPullFailure(state, "workspace/diagnostic", err);
 		return undefined;
 	}
