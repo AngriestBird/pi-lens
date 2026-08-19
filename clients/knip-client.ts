@@ -10,6 +10,7 @@
  */
 
 import { createSubsystemLogger } from "./extension-log.js";
+import { incrementDegradationCount } from "./degradation-ledger.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { getProjectDataDir } from "./file-utils.js";
@@ -25,6 +26,7 @@ import {
 	createAvailabilityLatch,
 	describeUnavailability,
 } from "./dispatch/runners/utils/availability-policy.js";
+import { spawnFailedWithNoOutput } from "./dispatch/runners/utils/spawn-outcome.js";
 import { findLocalBinUpwards } from "./package-manager.js";
 import { logSessionStart } from "./sessionstart-logger.js";
 
@@ -497,13 +499,47 @@ export class KnipClient {
 			};
 		}
 
-		// Knip exits 0 on success (even with issues), 1 on errors
+		// Empirical exit-code table (knip 6.4.1, verified live for #1736): 0 =
+		// clean run, JSON stdout `{"issues":[]}`; 1 = clean run WITH findings,
+		// JSON stdout `{"issues":[...]}`; 2 = config/load error, empty or
+		// non-JSON stdout with the error on stderr. A genuinely clean run's
+		// stdout is therefore NEVER empty — knip always prints at least
+		// `{"issues":[]}` on exit 0. Empty stdout only ever shows up paired
+		// with a NONZERO exit (a broken shim, a crash, or knip's own load
+		// error), so `status !== 0 && !output.trim()` is unambiguous evidence
+		// of a failed run, never a clean one.
 		const output = result.stdout || "";
-		this.log(`Knip output length: ${output.length}`);
+		this.log(`Knip output length: ${output.length}, exit status: ${result.status}`);
 		if (output.length < 500) {
 			this.log(`Knip output sample: ${output}`);
 		}
 		if (!output.trim()) {
+			// Reuses the SAME discriminator every dispatch/runners linter uses
+			// (`spawnFailedWithNoOutput`, `clients/dispatch/runners/utils/
+			// spawn-outcome.ts`) rather than a parallel hand-rolled check — a
+			// nonzero exit with nothing to parse is never a clean run, here or
+			// there.
+			if (spawnFailedWithNoOutput(result, output)) {
+				const stderr = (result.stderr || "").trim();
+				const reason =
+					`knip (${command}, source=${classifyKnipBinary(projectBinary, targetDir)})` +
+					` exited ${result.status} with empty stdout` +
+					(stderr ? `: ${stderr.split("\n")[0].slice(0, 200)}` : "");
+				this.log(reason);
+				incrementDegradationCount({
+					kind: "runner-empty-result",
+					subject: "knip",
+					reason,
+				});
+				return {
+					...EMPTY_RESULT,
+					summary: `Knip exited ${result.status} with no output; run skipped`,
+				};
+			}
+			// status === 0 with empty stdout has never been observed against a
+			// real knip binary (a genuine clean run still prints
+			// `{"issues":[]}`), but a defensive fallback is cheap insurance
+			// against a future knip release that changes this.
 			return {
 				...EMPTY_RESULT,
 				success: true,

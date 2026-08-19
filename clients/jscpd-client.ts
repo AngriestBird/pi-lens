@@ -9,6 +9,7 @@
  */
 
 import { createSubsystemLogger } from "./extension-log.js";
+import { incrementDegradationCount } from "./degradation-ledger.js";
 import * as fs from "node:fs";
 import { mkdtempSync } from "node:fs";
 import * as os from "node:os";
@@ -327,8 +328,29 @@ export class JscpdClient {
 				return { ...EMPTY_RESULT };
 			}
 
+			// Empirical exit-code table (jscpd 3.5.10, verified live for #1736's
+			// sweep): a genuinely clean run (no clones) exits 0 and writes NO
+			// report file — jscpd only writes `jscpd-report.json` when it has
+			// something to report. A crashed run (uncaught exception, e.g. a bad
+			// scan path) ALSO writes no report file, but exits nonzero. The
+			// missing-file check alone can't tell those apart, so a nonzero exit
+			// with no report file is reported as errored, never as "0 clones".
+			// (Not `spawnFailedWithNoOutput` — the parsed artifact here is a
+			// report FILE, not stdout, so the shared stdout-based discriminator
+			// doesn't apply; the underlying "nonzero exit -> not clean" rule is
+			// the same one.)
 			const reportPath = path.join(outDir, "jscpd-report.json");
 			if (!fs.existsSync(reportPath)) {
+				if (result.status !== 0) {
+					const reason = `jscpd (${cmd}) exited ${result.status} with no report file: ${(result.stderr || "").trim().split("\n")[0].slice(0, 200) || "no stderr"}`;
+					this.log(reason);
+					incrementDegradationCount({
+						kind: "runner-empty-result",
+						subject: "jscpd",
+						reason,
+					});
+					return { ...EMPTY_RESULT };
+				}
 				return { ...EMPTY_RESULT, success: true };
 			}
 
