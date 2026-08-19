@@ -68,6 +68,7 @@ const mockSummaries: ReturnType<
 vi.mock("../../clients/widget-state.js", () => ({
 	getFileDiagnosticSummaries: () => mockSummaries,
 	reconcileStaleWidgetFiles: async () => 0,
+	reconcileStaleWidgetDependencyBlockers: async () => 0,
 	reconcileScanDiagnostics: vi.fn(),
 }));
 
