@@ -200,238 +200,237 @@ export type DeliverySurfaceEntry = GatedDeliverySurface | LabeledDeliverySurface
  * Single source of truth: adding a new render seam without adding/tagging an
  * entry here fails the coverage test, not a human re-reading a hand list.
  */
+/**
+ * Factory for a `gated` entry. #1634 review round (SonarCloud): 20+ entries
+ * written as multi-line object literals put the SAME `mode`/`file` key
+ * sequence on the same relative lines over and over — the TS/JS duplication
+ * detector normalizes string literals to a placeholder token, so those
+ * literally-different-content blocks still read as duplicate TOKEN STREAMS.
+ * Collapsing each entry to one factory call removes the repeating shape
+ * instead of the (irreducible) per-entry data.
+ */
+function gated(
+	file: string,
+	description: string,
+	gates: string[],
+	evidence: string[],
+	extra: Partial<Pick<GatedDeliverySurface, "status" | "partialReason">> = {},
+): GatedDeliverySurface {
+	return { mode: "gated", file, description, gates, evidence, ...extra };
+}
+
+/** Factory for a `labeled` entry — see {@link gated}'s doc for why this exists. */
+function labeled(
+	file: string,
+	description: string,
+	reason: string,
+	ageSource: string,
+	evidence: string[] = [],
+	extra: Partial<Pick<LabeledDeliverySurface, "status" | "partialReason">> = {},
+): LabeledDeliverySurface {
+	return { mode: "labeled", file, description, reason, ageSource, evidence, ...extra };
+}
+
+const RUNTIME_TURN_FILE = "clients/runtime-turn.ts";
+const LENS_DIAGNOSTICS_FILE = "tools/lens-diagnostics.ts";
+
 export const DELIVERY_SURFACES: Record<string, DeliverySurfaceEntry> = {
-	"runtime-turn:secrets-gitleaks": {
-		mode: "gated",
-		file: "clients/runtime-turn.ts",
-		description: "Turn-end 🔴 secrets blocker, gitleaks cache.",
-		gates: ["gateFindingsByPathFreshness"],
-		evidence: ['store: "gitleaks"'],
-	},
-	"runtime-turn:secrets-trivy": {
-		mode: "gated",
-		file: "clients/runtime-turn.ts",
-		description: "Turn-end 🔴 secrets blocker, trivy secrets cache.",
-		gates: ["gateFindingsByPathFreshness"],
-		evidence: ['store: "trivy-secrets"'],
-	},
-	"runtime-turn:govulncheck-advisory": {
-		mode: "gated",
-		file: "clients/runtime-turn.ts",
-		description: "Turn-end 🛡️ Go CVE advisory (call-site line only).",
-		gates: ["gateFindingsByPathFreshness"],
-		evidence: ['store: "govulncheck"'],
-	},
-	"runtime-turn:unresolved-inline-blocker": {
-		mode: "gated",
-		file: "clients/runtime-turn.ts",
-		description: "Turn-end re-surfaced unresolved inline blockers.",
-		gates: ["sweepInlineBlockerFreshness"],
-		evidence: ["sweepInlineBlockerFreshness(runtime, cwd)"],
-	},
-	"runtime-turn:stale-secrets-tier": {
-		mode: "gated",
-		file: "clients/runtime-turn.ts",
-		description: "Turn-end 🔑 demoted-secrets tier (drifted since scan).",
-		gates: ["gateFindingsByPathFreshness"],
-		// Same two gate calls as the live secrets tier — this tier renders their
-		// `.stale` arm, so it has no OWN gate call to point at.
-		evidence: ['store: "gitleaks"', 'store: "trivy-secrets"'],
-	},
-	"runtime-turn:trivy-critical-blocker": {
-		mode: "labeled",
-		file: "clients/runtime-turn.ts",
-		description: "Turn-end 🔴 CRITICAL dependency CVE blocker (trivy).",
-		reason:
-			"Package-pinned finding with no cited file:line to stat — freshness " +
-			"has nothing to check drift against. The session_start cache can be " +
+	"runtime-turn:secrets-gitleaks": gated(
+		RUNTIME_TURN_FILE,
+		"Turn-end 🔴 secrets blocker, gitleaks cache.",
+		["gateFindingsByPathFreshness"],
+		['store: "gitleaks"'],
+	),
+	"runtime-turn:secrets-trivy": gated(
+		RUNTIME_TURN_FILE,
+		"Turn-end 🔴 secrets blocker, trivy secrets cache.",
+		["gateFindingsByPathFreshness"],
+		['store: "trivy-secrets"'],
+	),
+	"runtime-turn:govulncheck-advisory": gated(
+		RUNTIME_TURN_FILE,
+		"Turn-end 🛡️ Go CVE advisory (call-site line only).",
+		["gateFindingsByPathFreshness"],
+		['store: "govulncheck"'],
+	),
+	"runtime-turn:unresolved-inline-blocker": gated(
+		RUNTIME_TURN_FILE,
+		"Turn-end re-surfaced unresolved inline blockers.",
+		["sweepInlineBlockerFreshness"],
+		["sweepInlineBlockerFreshness(runtime, cwd)"],
+	),
+	// Same two gate calls as the live secrets tier — this tier renders their
+	// `.stale` arm, so it has no OWN gate call to point at.
+	"runtime-turn:stale-secrets-tier": gated(
+		RUNTIME_TURN_FILE,
+		"Turn-end 🔑 demoted-secrets tier (drifted since scan).",
+		["gateFindingsByPathFreshness"],
+		['store: "gitleaks"', 'store: "trivy-secrets"'],
+	),
+	// The evidence below is the literal header FRAGMENT including the
+	// interpolation — proves the label is actually rendered, not merely
+	// computed and discarded (review round F1's "deleted the age
+	// interpolations" attack).
+	"runtime-turn:trivy-critical-blocker": labeled(
+		RUNTIME_TURN_FILE,
+		"Turn-end 🔴 CRITICAL dependency CVE blocker (trivy).",
+		"Package-pinned finding with no cited file:line to stat — freshness has " +
+			"nothing to check drift against. The session_start cache can be " +
 			"arbitrarily old, so its age is stated instead. Also routes through " +
 			"`filterFindingsByDisposition` (#1625) first — a suppressed/false-" +
 			"positive finding never reaches this render, so the age label and the " +
 			"disposition filter compose rather than substitute for each other.",
-		ageSource: "TrivyResult.scannedAt",
-		// The literal header FRAGMENT including the interpolation — proves the
-		// label is actually rendered, not merely computed and discarded (the
-		// review round's exact "deleted the age interpolations" attack).
-		evidence: ["CRITICAL dependency CVEs (trivy, ${trivyAgeLabel}"],
-	},
-	"runtime-turn:trivy-cve-advisory": {
-		mode: "labeled",
-		file: "clients/runtime-turn.ts",
-		description: "Turn-end 🛡️ non-critical dependency CVE advisory (trivy).",
-		reason:
-			"Same package-pinned shape and #1625 disposition composition as the " +
+		"TrivyResult.scannedAt",
+		["CRITICAL dependency CVEs (trivy, ${trivyAgeLabel}"],
+	),
+	"runtime-turn:trivy-cve-advisory": labeled(
+		RUNTIME_TURN_FILE,
+		"Turn-end 🛡️ non-critical dependency CVE advisory (trivy).",
+		"Same package-pinned shape and #1625 disposition composition as the " +
 			"CRITICAL blocker above.",
-		ageSource: "TrivyResult.scannedAt",
-		evidence: ["Dependency CVEs (trivy, ${trivyAgeLabel}"],
-	},
-	"runtime-turn:trivy-license-advisory": {
-		mode: "labeled",
-		file: "clients/runtime-turn.ts",
-		description: "Turn-end 📜 dependency license-risk advisory (trivy).",
-		reason: "Same package-pinned shape as the CRITICAL blocker above.",
-		ageSource: "TrivyResult.scannedAt",
-		evidence: ["Dependency license risk (trivy, ${trivyAgeLabel}"],
-	},
-	"runtime-turn:dead-code-advisory": {
-		mode: "labeled",
-		file: "clients/runtime-turn.ts",
-		description: "Turn-end dead-code delta advisory (knip/vulture/etc).",
-		reason:
-			"The delta shown is computed from THIS turn's own analyze() call, " +
+		"TrivyResult.scannedAt",
+		["Dependency CVEs (trivy, ${trivyAgeLabel}"],
+	),
+	"runtime-turn:trivy-license-advisory": labeled(
+		RUNTIME_TURN_FILE,
+		"Turn-end 📜 dependency license-risk advisory (trivy).",
+		"Same package-pinned shape as the CRITICAL blocker above.",
+		"TrivyResult.scannedAt",
+		["Dependency license risk (trivy, ${trivyAgeLabel}"],
+	),
+	"runtime-turn:dead-code-advisory": labeled(
+		RUNTIME_TURN_FILE,
+		"Turn-end dead-code delta advisory (knip/vulture/etc).",
+		"The delta shown is computed from THIS turn's own analyze() call, " +
 			"diffed against the previous cache — never a replay of a stale cache.",
-		ageSource: "live",
-		evidence: [],
-	},
-	"runtime-turn:knip-blocker": {
-		mode: "labeled",
-		file: "clients/runtime-turn.ts",
-		description: "Turn-end 🔴 Knip unresolved-imports/deps blocker.",
-		reason:
-			"Same shape as the dead-code advisory: `await knipClient.analyze(cwd, " +
+		"live",
+	),
+	"runtime-turn:knip-blocker": labeled(
+		RUNTIME_TURN_FILE,
+		"Turn-end 🔴 Knip unresolved-imports/deps blocker.",
+		"Same shape as the dead-code advisory: `await knipClient.analyze(cwd, " +
 			"...)` runs fresh THIS turn, diffed against the previous cache and " +
 			"filtered to files edited this turn — never a replay of a stale cache.",
-		ageSource: "live",
-		evidence: [],
-	},
-	"runtime-turn:knip-advisory": {
-		mode: "labeled",
-		file: "clients/runtime-turn.ts",
-		description: "Turn-end ⚠️ Knip newly-unused-exports advisory.",
-		reason: "Same live-this-turn shape as the Knip blocker above.",
-		ageSource: "live",
-		evidence: [],
-	},
-	"runtime-turn:actionable-warnings-advisory": {
-		mode: "labeled",
-		file: "clients/runtime-turn.ts",
-		description: "Turn-end actionable-warnings advisory (ast-grep etc).",
-		reason:
-			"`peekActionableWarnings` reads `_actionableWarningsThisTurn` — " +
-			"recorded fresh from this turn's own dispatch, never a cross-turn cache.",
-		ageSource: "live",
-		evidence: [],
-	},
-	"runtime-turn:code-quality-warnings-advisory": {
-		mode: "labeled",
-		file: "clients/runtime-turn.ts",
-		description: "Turn-end code-quality-warnings advisory.",
-		reason:
-			"`peekCodeQualityWarnings` reads `_codeQualityWarningsThisTurn` — the " +
+		"live",
+	),
+	"runtime-turn:knip-advisory": labeled(
+		RUNTIME_TURN_FILE,
+		"Turn-end ⚠️ Knip newly-unused-exports advisory.",
+		"Same live-this-turn shape as the Knip blocker above.",
+		"live",
+	),
+	"runtime-turn:actionable-warnings-advisory": labeled(
+		RUNTIME_TURN_FILE,
+		"Turn-end actionable-warnings advisory (ast-grep etc).",
+		"`peekActionableWarnings` reads `_actionableWarningsThisTurn` — recorded " +
+			"fresh from this turn's own dispatch, never a cross-turn cache.",
+		"live",
+	),
+	"runtime-turn:code-quality-warnings-advisory": labeled(
+		RUNTIME_TURN_FILE,
+		"Turn-end code-quality-warnings advisory.",
+		"`peekCodeQualityWarnings` reads `_codeQualityWarningsThisTurn` — the " +
 			"same per-turn accumulator shape as actionable-warnings above.",
-		ageSource: "live",
-		evidence: [],
-	},
-	"runtime-turn:disposition-suppressed-notice": {
-		mode: "labeled",
-		file: "clients/runtime-turn.ts",
-		description: "Turn-end running disposition-suppressed-count notice (#1616).",
-		reason:
-			"A live running total accumulated from this turn's own gate/disposition " +
+		"live",
+	),
+	"runtime-turn:disposition-suppressed-notice": labeled(
+		RUNTIME_TURN_FILE,
+		"Turn-end running disposition-suppressed-count notice (#1616).",
+		"A live running total accumulated from this turn's own gate/disposition " +
 			"calls above (`dispositionSuppressedTotal`) — telemetry ABOUT the other " +
 			"gated surfaces, not a cache of its own.",
-		ageSource: "live",
-		evidence: [],
-	},
-	"runtime-turn:cascade-blocker": {
-		mode: "labeled",
-		file: "clients/runtime-turn.ts",
-		description: "Turn-end 🧪 cascade neighbor blocker.",
-		reason:
-			"Cascade results settle synchronously this turn where possible " +
+		"live",
+	),
+	"runtime-turn:cascade-blocker": labeled(
+		RUNTIME_TURN_FILE,
+		"Turn-end 🧪 cascade neighbor blocker.",
+		"Cascade results settle synchronously this turn where possible " +
 			"(`settleCascadeRuns`), but an unsettled compute can carry over to a " +
 			"later turn (bounded by a carry cap) — this round does not freshness-" +
 			"gate that carry-over window.",
-		ageSource: "live",
-		evidence: [],
-		status: "partial",
-		partialReason:
-			"A carried-over cascade result (run.carriedTurns > 0) is rendered " +
-			"without an age label. Follow-up: surface carriedTurns as an explicit " +
-			"label when > 0, or route through formatCacheAgeLabel using the run's " +
-			"own timestamp.",
-	},
-	"runtime-turn:cascade-coverage-advisory": {
-		mode: "labeled",
-		file: "clients/runtime-turn.ts",
-		description: "Turn-end cascade-coverage-gap advisories (graph/binding/budget).",
-		reason:
-			"Explains what the cascade check could NOT confirm this turn — not a " +
+		"live",
+		[],
+		{
+			status: "partial",
+			partialReason:
+				"A carried-over cascade result (run.carriedTurns > 0) is rendered " +
+				"without an age label. Follow-up: surface carriedTurns as an explicit " +
+				"label when > 0, or route through formatCacheAgeLabel using the run's " +
+				"own timestamp.",
+		},
+	),
+	"runtime-turn:cascade-coverage-advisory": labeled(
+		RUNTIME_TURN_FILE,
+		"Turn-end cascade-coverage-gap advisories (graph/binding/budget).",
+		"Explains what the cascade check could NOT confirm this turn — not a " +
 			"finding with a cited path, an absence-of-coverage disclosure computed " +
 			"from this turn's own indeterminate-run list.",
-		ageSource: "live",
-		evidence: [],
-		status: "partial",
-		partialReason: "Same cascade carry-over caveat as runtime-turn:cascade-blocker.",
-	},
-	"runtime-turn:call-graph-advisory": {
-		mode: "labeled",
-		file: "clients/runtime-turn.ts",
-		description: "Turn-end 📊 call-graph impact advisory.",
-		reason:
-			"`runtime.callGraph` is a session-lifetime in-memory structure; this " +
+		"live",
+		[],
+		{
+			status: "partial",
+			partialReason: "Same cascade carry-over caveat as runtime-turn:cascade-blocker.",
+		},
+	),
+	"runtime-turn:call-graph-advisory": labeled(
+		RUNTIME_TURN_FILE,
+		"Turn-end 📊 call-graph impact advisory.",
+		"`runtime.callGraph` is a session-lifetime in-memory structure; this " +
 			"round does not verify or gate ITS OWN freshness policy (how/when it " +
 			"incorporates edits made earlier in the session).",
-		ageSource: "live",
-		evidence: [],
-		status: "partial",
-		partialReason:
-			"call-graph freshness/invalidation policy is out of this PR's scope — " +
-			"tracked as a follow-up, not silently assumed fresh.",
-	},
-	"lens-diagnostics:mode-full": {
-		mode: "gated",
-		file: "tools/lens-diagnostics.ts",
-		description: "`lens_diagnostics mode=full` report.",
-		gates: ["applyDispositions", "applyRulePolicy", "reconcileProjectDiagnosticsSnapshot"],
-		evidence: ["applyDispositions(", "applyRulePolicy(", "reconcileProjectDiagnosticsSnapshot("],
-	},
-	"lens-diagnostics:mode-all": {
-		mode: "gated",
-		file: "tools/lens-diagnostics.ts",
-		description: "`lens_diagnostics mode=all` report (widget-state read).",
-		gates: ["reconcileStaleWidgetFiles", "reconcileStaleWidgetDependencyBlockers"],
-		evidence: ["reconcileStaleWidgetFiles(", "reconcileStaleWidgetDependencyBlockers("],
-	},
-	"lens-diagnostics:mode-delta": {
-		mode: "gated",
-		file: "tools/lens-diagnostics.ts",
-		description:
-			"`lens_diagnostics mode=delta` report (the tool's DEFAULT mode) — " +
+		"live",
+		[],
+		{
+			status: "partial",
+			partialReason:
+				"call-graph freshness/invalidation policy is out of this PR's scope — " +
+				"tracked as a follow-up, not silently assumed fresh.",
+		},
+	),
+	"lens-diagnostics:mode-full": gated(
+		LENS_DIAGNOSTICS_FILE,
+		"`lens_diagnostics mode=full` report.",
+		["applyDispositions", "applyRulePolicy", "reconcileProjectDiagnosticsSnapshot"],
+		["applyDispositions(", "applyRulePolicy(", "reconcileProjectDiagnosticsSnapshot("],
+	),
+	"lens-diagnostics:mode-all": gated(
+		LENS_DIAGNOSTICS_FILE,
+		"`lens_diagnostics mode=all` report (widget-state read).",
+		["reconcileStaleWidgetFiles", "reconcileStaleWidgetDependencyBlockers"],
+		["reconcileStaleWidgetFiles(", "reconcileStaleWidgetDependencyBlockers("],
+	),
+	// #1634 review round F3: this was the most important gap — the tool's
+	// DEFAULT mode rendered cached `file:line` findings with zero freshness
+	// check. `applyDeltaFreshnessGate` (this file's sibling in
+	// tools/lens-diagnostics.ts) now routes both caches through the shared
+	// gate using each report's own `generatedAt`.
+	"lens-diagnostics:mode-delta": gated(
+		LENS_DIAGNOSTICS_FILE,
+		"`lens_diagnostics mode=delta` report (the tool's DEFAULT mode) — " +
 			"re-serves the actionable-warnings/code-quality-warnings caches.",
-		gates: ["gateFindingsByPathFreshness"],
-		// #1634 review round F3: this was the most important gap — the tool's
-		// DEFAULT mode rendered cached `file:line` findings with zero freshness
-		// check. `applyDeltaFreshnessGate` (this file's sibling in
-		// tools/lens-diagnostics.ts) now routes both caches through the shared
-		// gate using each report's own `generatedAt`.
-		evidence: ['store: "lens-diagnostics-delta"', "applyDeltaFreshnessGate("],
-	},
-	"widget-state:footer": {
-		mode: "gated",
-		file: "clients/widget-state.ts",
-		description: "TUI footer blocking/error/warning tally.",
-		gates: ["reconcileStaleWidgetFiles", "isBlocking"],
-		evidence: ["isBlocking(diagnostic)", "reconcileStaleWidgetFiles()"],
-	},
-	"agent-nudge:context-message": {
-		mode: "labeled",
-		file: "clients/agent-nudge.ts",
-		description: "Post-edit file-touch nudge injected via `context`.",
-		reason:
-			"Not a scanner finding store: no severity, no cited line, no cache — " +
-			"the accumulator is drained and cleared at the moment of injection, so " +
-			"the content IS the current state by construction.",
-		ageSource: "live",
-		evidence: [],
-	},
-	"project-diagnostics:persisted-snapshot": {
-		mode: "gated",
-		file: "tools/lens-diagnostics.ts",
-		description: "Cross-session persisted project-diagnostics snapshot read.",
-		gates: ["reconcileProjectDiagnosticsSnapshot"],
-		evidence: ["reconcileProjectDiagnosticsSnapshot("],
-	},
+		["gateFindingsByPathFreshness"],
+		['store: "lens-diagnostics-delta"', "applyDeltaFreshnessGate("],
+	),
+	"widget-state:footer": gated(
+		"clients/widget-state.ts",
+		"TUI footer blocking/error/warning tally.",
+		["reconcileStaleWidgetFiles", "isBlocking"],
+		["isBlocking(diagnostic)", "reconcileStaleWidgetFiles()"],
+	),
+	"agent-nudge:context-message": labeled(
+		"clients/agent-nudge.ts",
+		"Post-edit file-touch nudge injected via `context`.",
+		"Not a scanner finding store: no severity, no cited line, no cache — the " +
+			"accumulator is drained and cleared at the moment of injection, so the " +
+			"content IS the current state by construction.",
+		"live",
+	),
+	"project-diagnostics:persisted-snapshot": gated(
+		LENS_DIAGNOSTICS_FILE,
+		"Cross-session persisted project-diagnostics snapshot read.",
+		["reconcileProjectDiagnosticsSnapshot"],
+		["reconcileProjectDiagnosticsSnapshot("],
+	),
 };
 
 function assertPartialStatusHasReason(id: string, entry: DeliverySurfaceEntry): void {
