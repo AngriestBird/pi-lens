@@ -363,17 +363,21 @@ export function canHandle(filePath: string): boolean {
  * file. Without this, `language:` reads as a real filter but isn't one for
  * ts↔js pairs, so twin rules sharing a base name (e.g. `hardcoded-url` /
  * `hardcoded-url-js`) both match the same construct in the SAME runner
- * invocation (#657). TSX is its own grammar here — the primary ast-grep
- * CLI/LSP also treats `tsx` as distinct from `typescript` — but the
- * relationship is one-directional like ts↔js: tsx is a syntactic superset
- * of typescript (JSX productions plus the removal of the `<T>expr` cast
- * form, which cannot appear in valid `.tsx` source), so the caller's
- * language-match check additionally lets a `TypeScript`-tagged rule run
- * against a `.tsx` file's fileLang (#1608) — otherwise the entire TS
- * ruleset silently never runs there. `javascript`-tagged rules stay
- * `.js`/`.jsx`-exclusive; there's no jsx↔tsx typed/untyped overlap to
- * bridge. Returns undefined for extensions this scoping doesn't apply to
- * (css/html), where no filtering is added.
+ * invocation (#657). TSX is its own grammar here too — the primary
+ * ast-grep CLI/LSP also treats `tsx` as distinct from `typescript` — but
+ * the caller's language-match check adds ONE deliberate exception on top
+ * of the exact-match rule: a `TypeScript`-tagged rule also runs against
+ * a `.tsx` file's fileLang (#1608). This is grounded empirically, not by
+ * analogy — tsx's grammar is a syntactic superset of typescript's for
+ * every construct the shipped catalog's rules target (JSX productions
+ * added, plus the removal of the `<T>expr` cast form, which cannot
+ * appear in valid `.tsx` source), and every `language: TypeScript`
+ * rule's fixture-test `invalid:` snippet is asserted to still match
+ * parsed as tsx (ast-grep-tsx-coverage.test.ts) rather than assumed.
+ * Without this exception the entire TS ruleset silently never runs on
+ * `.tsx` files. `TSX`-tagged rules stay `.tsx`-exclusive; the exception
+ * is TS→TSX only. Returns undefined for extensions this scoping doesn't
+ * apply to (css/html), where no filtering is added.
  */
 export function ruleLanguageForFile(
 	filePath: string,
