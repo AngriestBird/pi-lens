@@ -69,8 +69,40 @@
  * differently-packaged sibling is never part of the same value regardless of
  * scope. The single-file result needs no further filtering: every location
  * it reports already belongs to that one file.
+ *
+ * ## A package-less file can vet CLEAN by never being evaluated (review
+ * ## round 3, F8)
+ *
+ * The F5/F6 fallback above only fires when the DIRECTORY vet FAILS. But a
+ * directory holding both a packaged file and a package-less file is not a
+ * failure at all: `cue vet .` silently BUILDS ONLY THE PACKAGE, excludes the
+ * package-less file from evaluation, and exits 0. Verified against the real
+ * binary: a package-less `loose.cue` with a genuine conflicting value
+ * (`b: int & "x"`) sitting beside a valid packaged `packaged.cue` makes
+ * `cue vet -c=false .` exit 0 with empty output — the loose file's defect is
+ * never evaluated, and the F5/F6 fallback's `result.status !== 0` gate never
+ * triggers because there IS no failure to react to. This is shape 10 from
+ * the miss side: an empty result that does not distinguish "clean" from
+ * "never evaluated".
+ *
+ * The fix does not wait for a failure signal at all for this shape: before
+ * spawning anything, the touched file's own content is checked for a
+ * `package` clause (`hasPackageClause`). A package-less touched file goes
+ * straight to single-file scope — it is its own vet unit regardless of what
+ * shares its directory, so directory-scoped vet has nothing to add for ITS
+ * evaluation errors. Its SYNTAX errors are equally covered single-file
+ * (verified: `cue vet <file>` alone reports the identical syntax error a
+ * directory-wide parse would have caught for that file — parsing happens
+ * before the build-constraint exclusion, but a single-file invocation
+ * parses that file too), so nothing is lost by skipping the directory pass
+ * for this shape. The F5/F6 `directoryScopeUnavailable` fallback stays as a
+ * safety net for what the proactive check cannot see up front — the
+ * touched file's content is unreadable, or the touched file DOES declare a
+ * package but the directory as a whole still isn't a valid unit (F6's
+ * two-different-packages shape).
  */
 
+import * as fs from "node:fs";
 import * as path from "node:path";
 import { safeSpawnAsync } from "../../safe-spawn.js";
 import {
@@ -168,6 +200,24 @@ export function directoryScopeUnavailable(raw: string): boolean {
 		// structural "found packages X and Y" part is matched.
 		/found packages ".+"\s*\(.+\)\s+and\s+".+"\s*\(.+\)\s+in\s+".*"/.test(raw)
 	);
+}
+
+/**
+ * True when `content` opens with a `package` clause (review round 3, F8).
+ * CUE requires the package clause, when present, to be the first
+ * declaration in the file — blank lines and `//` comments above it are
+ * fine, verified against the real binary — so the first non-blank,
+ * non-comment line is decisive: if it isn't `package <name>`, the file has
+ * none, and `cue vet .` will silently exclude it from directory-scoped
+ * evaluation (F8) rather than fail outright.
+ */
+export function hasPackageClause(content: string): boolean {
+	for (const line of content.split(/\r?\n/)) {
+		const trimmed = line.trim();
+		if (!trimmed || trimmed.startsWith("//")) continue;
+		return /^package\s+[A-Za-z_]\w*\b/.test(trimmed);
+	}
+	return false;
 }
 
 /** `.\bad.cue`, `./bad.cue`, and `bad.cue` all name the same file. */
@@ -296,28 +346,54 @@ const cueVetRunner: RunnerDefinition = {
 		const absPath = path.resolve(cwd, ctx.filePath);
 		const fileDir = path.dirname(absPath);
 		const fileName = path.basename(absPath);
+		const singleFileArgs = ["vet", "-c=false", `./${fileName}`] as const;
 
-		// Package-scoped (F1): vet the whole directory the touched file lives
-		// in, not the file alone — CUE packages unify every file that shares a
-		// package clause, so a single-file invocation cannot see a definition
-		// or value declared in a sibling.
-		let result = await safeSpawnAsync(cmd, ["vet", "-c=false", "."], {
-			cwd: fileDir,
-			timeout: 30_000,
-		});
+		// F8: read the touched file's OWN content before deciding scope. A
+		// package-less file is excluded from directory-scoped evaluation
+		// entirely (silently, exit 0) rather than causing a failure, so
+		// waiting for the directory vet to fail (the F5/F6 gate below) can
+		// never catch this shape — go straight to single-file scope instead.
+		// An unreadable file falls through to the directory-scoped path below;
+		// package-less-ness that can't be verified is never assumed.
+		let touchedContent: string | null = null;
+		try {
+			touchedContent = fs.readFileSync(absPath, "utf8");
+		} catch {
+			touchedContent = null;
+		}
+		const touchedIsPackageLess =
+			touchedContent !== null && !hasPackageClause(touchedContent);
 
-		if (
-			!spawnFailedWithNoOutput(result, `${result.stdout}${result.stderr}`) &&
-			result.status !== 0 &&
-			directoryScopeUnavailable(`${result.stdout || ""}${result.stderr || ""}`)
-		) {
-			// F5/F6: the directory itself is not a valid vet unit (package-less
-			// file, or two+ differently-packaged files sharing it) — fall back to
-			// the touched file alone, which IS a valid unit either way.
-			result = await safeSpawnAsync(cmd, ["vet", "-c=false", `./${fileName}`], {
+		let result: Awaited<ReturnType<typeof safeSpawnAsync>>;
+		if (touchedIsPackageLess) {
+			result = await safeSpawnAsync(cmd, [...singleFileArgs], {
 				cwd: fileDir,
 				timeout: 30_000,
 			});
+		} else {
+			// Package-scoped (F1): vet the whole directory the touched file lives
+			// in, not the file alone — CUE packages unify every file that shares
+			// a package clause, so a single-file invocation cannot see a
+			// definition or value declared in a sibling.
+			result = await safeSpawnAsync(cmd, ["vet", "-c=false", "."], {
+				cwd: fileDir,
+				timeout: 30_000,
+			});
+
+			if (
+				!spawnFailedWithNoOutput(result, `${result.stdout}${result.stderr}`) &&
+				result.status !== 0 &&
+				directoryScopeUnavailable(`${result.stdout || ""}${result.stderr || ""}`)
+			) {
+				// F6: the directory holds two+ DIFFERENTLY-packaged files (the
+				// touched file has its own valid package, but the directory as a
+				// whole still isn't one unit) — fall back to the touched file
+				// alone, which IS a valid unit on its own.
+				result = await safeSpawnAsync(cmd, [...singleFileArgs], {
+					cwd: fileDir,
+					timeout: 30_000,
+				});
+			}
 		}
 
 		if (spawnFailedWithNoOutput(result, `${result.stdout}${result.stderr}`)) {
@@ -334,11 +410,11 @@ const cueVetRunner: RunnerDefinition = {
 
 		const raw = `${result.stdout || ""}\n${result.stderr || ""}`.trim();
 		const errors = parseCueVetOutput(raw);
-		// The single-file fallback needs no special-casing: every location it
-		// reports already belongs to the one file it vetted, so it trivially
-		// matches `fileName` and flows through the same filter as the
-		// directory-scoped path — one code path, and a single-file run that
-		// somehow fails with no location at all still gets the same
+		// The single-file path (F5/F6/F8) needs no special-casing: every
+		// location it reports already belongs to the one file it vetted, so it
+		// trivially matches `fileName` and flows through the same filter as
+		// the directory-scoped path — one code path, and a single-file run
+		// that somehow fails with no location at all still gets the same
 		// never-silently-clean `undefined` fallback as the directory path.
 		const filtered = filterToTouchedFile(errors, fileName);
 

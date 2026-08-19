@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	directoryScopeUnavailable,
 	filterToTouchedFile,
+	hasPackageClause,
 	parseCueVetOutput,
 } from "../../../clients/dispatch/runners/cue-vet.js";
 import type { DispatchContext } from "../../../clients/dispatch/types.js";
@@ -260,9 +261,24 @@ describe("directoryScopeUnavailable (#1522 review round 2, F5/F6)", () => {
 
 // ── run() — mocked spawn, real parser ───────────────────────────────────────
 
-const { safeSpawnAsync } = vi.hoisted(() => ({ safeSpawnAsync: vi.fn() }));
+const { safeSpawnAsync, readFileSync } = vi.hoisted(() => ({
+	safeSpawnAsync: vi.fn(),
+	// Default: no file exists at the mocked path (ENOENT) — the runner's
+	// catch-and-fall-through then behaves exactly as it did before F8
+	// (assume package-scoped, use the directory path), which is why every
+	// pre-F8 test below needs no fs mocking of its own. F8-specific tests
+	// override this per-case with `.mockReturnValueOnce`.
+	readFileSync: vi.fn((..._args: unknown[]): string => {
+		throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+	}),
+}));
 
 vi.mock("../../../clients/safe-spawn.js", () => ({ safeSpawnAsync }));
+
+vi.mock("node:fs", async () => {
+	const actual = await vi.importActual<typeof import("node:fs")>("node:fs");
+	return { ...actual, readFileSync };
+});
 
 vi.mock("../../../clients/dispatch/runners/utils/runner-helpers.js", () => ({
 	createAvailabilityChecker: () => ({
@@ -293,6 +309,10 @@ describe("cue-vet run() — real binary output shapes, mocked spawn", () => {
 	beforeEach(() => {
 		vi.resetModules();
 		safeSpawnAsync.mockReset();
+		readFileSync.mockReset();
+		readFileSync.mockImplementation(() => {
+			throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+		});
 	});
 
 	it("reports a BLOCKING diagnostic for a real conflicting-value error", async () => {
@@ -405,8 +425,13 @@ describe("cue-vet run() — real binary output shapes, mocked spawn", () => {
 	// F5 (review round 2, HIGH): a package-less standalone file used to block
 	// on every edit — the directory vet fails with "build constraints exclude
 	// all CUE files", which has no :line:col, so it read as an unattributable
-	// whole-vet failure. The fix falls back to vetting the touched file alone.
-	it("F5: falls back to single-file vet when the directory is package-less, and reports clean", async () => {
+	// whole-vet failure. This is now the REACTIVE safety net specifically —
+	// the touched file's content is unreadable here (readFileSync's default
+	// mock throws), so the F8 proactive check below cannot classify it and
+	// falls through to the directory-scoped attempt, which then hits this
+	// fallback on failure. The realistic readable case is covered by F8's
+	// tests further down, which take only ONE spawn call.
+	it("F5: falls back to single-file vet reactively when the directory vet fails AND the touched file is unreadable", async () => {
 		safeSpawnAsync
 			.mockResolvedValueOnce({
 				status: 1,
@@ -429,9 +454,10 @@ describe("cue-vet run() — real binary output shapes, mocked spawn", () => {
 		expect(secondArgs).toEqual(["vet", "-c=false", "./standalone.cue"]);
 	});
 
-	// F5's other half: the fallback still reports a REAL defect in a
-	// package-less file — this must not go permanently quiet.
-	it("F5: the single-file fallback still reports a real error in a package-less file", async () => {
+	// F5's other half: the reactive fallback still reports a REAL defect in a
+	// package-less (here: unreadable-content) file — this must not go
+	// permanently quiet.
+	it("F5: the reactive single-file fallback still reports a real error", async () => {
 		safeSpawnAsync
 			.mockResolvedValueOnce({
 				status: 1,
@@ -458,8 +484,12 @@ describe("cue-vet run() — real binary output shapes, mocked spawn", () => {
 
 	// F6 (review round 2, medium): a directory holding two DIFFERENT CUE
 	// packages — legal CUE — blocked both files on every edit for the same
-	// reason as F5. Same fallback fixes it.
+	// reason as F5. The touched file DOES have its own package clause here
+	// (`package alpha`), so F8's proactive check correctly takes the
+	// directory-scoped path first; the reactive F5/F6 fallback below is what
+	// then handles the two-different-packages failure.
 	it("F6: falls back to single-file vet when the directory holds two different packages, and reports clean", async () => {
+		readFileSync.mockReturnValue("package alpha\n\na: int\n");
 		safeSpawnAsync
 			.mockResolvedValueOnce({
 				status: 1,
@@ -475,7 +505,164 @@ describe("cue-vet run() — real binary output shapes, mocked spawn", () => {
 		expect(result.status).toBe("succeeded");
 		expect(result.diagnostics).toEqual([]);
 		expect(safeSpawnAsync).toHaveBeenCalledTimes(2);
+		const [, firstArgs] = safeSpawnAsync.mock.calls[0];
 		const [, secondArgs] = safeSpawnAsync.mock.calls[1];
+		expect(firstArgs).toEqual(["vet", "-c=false", "."]);
 		expect(secondArgs).toEqual(["vet", "-c=false", "./alpha.cue"]);
+	});
+
+	// F8 (review round 3, HIGH): a directory holding BOTH a packaged file and
+	// a package-less file. `cue vet .` builds only the package and exits 0 —
+	// it never evaluates the loose file at all, so the old F5/F6 fallback
+	// (gated on the directory vet FAILING) can never catch this: there is no
+	// failure. Reviewer's real-binary probe: a package-less `loose.cue` with
+	// `b: int & "x"` (genuine conflict) sitting beside a valid packaged file
+	// vetted clean/0-diagnostics before this fix. The fix reads the touched
+	// file's OWN content up front and never even attempts directory scope
+	// for a package-less file — proven here by asserting exactly ONE spawn
+	// call, straight to single-file scope.
+	it("F8: a package-less touched file goes straight to single-file scope, bypassing the directory entirely", async () => {
+		readFileSync.mockReturnValue("b: int\n");
+		safeSpawnAsync.mockResolvedValueOnce({ status: 0, stdout: "", stderr: "" });
+		const cueVetRunner = (
+			await import("../../../clients/dispatch/runners/cue-vet.js")
+		).default;
+		const looseFile = path.join(cueCwd, "loose.cue");
+		const result = await cueVetRunner.run(createCtx(looseFile, cueCwd));
+		expect(result.status).toBe("succeeded");
+		expect(result.diagnostics).toEqual([]);
+		expect(safeSpawnAsync).toHaveBeenCalledTimes(1);
+		const [, args] = safeSpawnAsync.mock.calls[0];
+		expect(args).toEqual(["vet", "-c=false", "./loose.cue"]);
+	});
+
+	// F8's exact regression scenario: the directory vet WOULD succeed (it
+	// only builds the packaged sibling), but the touched loose file has a
+	// real conflicting value. Before the fix, this reported succeeded/0
+	// diagnostics — shape 10 from the miss side, an empty result that does
+	// not distinguish "clean" from "never evaluated". The fix must report it.
+	it("F8: reports a real conflicting-value error in a package-less file sharing a directory with a packaged one", async () => {
+		readFileSync.mockReturnValue('b: int & "x"\n');
+		// A faithful simulation of the REAL binary's two possible responses,
+		// keyed on the args actually passed — not a fixed call-order queue —
+		// so this genuinely distinguishes "directory scope, which silently
+		// succeeds because it only builds the packaged sibling" (verified:
+		// `cue vet .` exits 0 on this exact directory shape) from "single-file
+		// scope, which evaluates the loose file and catches its real defect".
+		// Pre-F8 code only ever issues the first call and trusts its exit 0;
+		// the fix must issue (and trust) the second instead.
+		safeSpawnAsync.mockImplementation(async (_cmd: string, args: string[]) => {
+			if (args[args.length - 1] === ".") {
+				return { status: 0, stdout: "", stderr: "" };
+			}
+			return {
+				status: 1,
+				stdout:
+					'b: conflicting values int and "x" (mismatched types int and string):\n    .\\loose.cue:1:4\n    .\\loose.cue:1:10\n',
+				stderr: "",
+			};
+		});
+		const cueVetRunner = (
+			await import("../../../clients/dispatch/runners/cue-vet.js")
+		).default;
+		const looseFile = path.join(cueCwd, "loose.cue");
+		const result = await cueVetRunner.run(createCtx(looseFile, cueCwd));
+		// Exactly one spawn call — the directory pass is never attempted for a
+		// package-less touched file, so there's nothing for its misleading
+		// exit-0 to hide behind.
+		expect(safeSpawnAsync).toHaveBeenCalledTimes(1);
+		expect(result.status).toBe("failed");
+		expect(result.diagnostics).toHaveLength(1);
+		expect(result.diagnostics[0].line).toBe(1);
+		expect(result.diagnostics[0].column).toBe(4);
+	});
+
+	// F8: a package-less file whose first non-blank line is a comment still
+	// classifies correctly — comments above the (absent) package clause are
+	// legal CUE and must not be mistaken for the clause itself.
+	it("F8: a package-less file with a leading comment is still classified package-less", async () => {
+		readFileSync.mockReturnValue("// a loose config file\nb: int\n");
+		safeSpawnAsync.mockResolvedValueOnce({ status: 0, stdout: "", stderr: "" });
+		const cueVetRunner = (
+			await import("../../../clients/dispatch/runners/cue-vet.js")
+		).default;
+		const looseFile = path.join(cueCwd, "loose.cue");
+		await cueVetRunner.run(createCtx(looseFile, cueCwd));
+		expect(safeSpawnAsync).toHaveBeenCalledTimes(1);
+		const [, args] = safeSpawnAsync.mock.calls[0];
+		expect(args).toEqual(["vet", "-c=false", "./loose.cue"]);
+	});
+
+	// F8: a PACKAGED touched file takes the directory-scoped path, same as
+	// F1 — the proactive check must not over-fire on every file.
+	it("F8: a packaged touched file still takes the directory-scoped path first", async () => {
+		readFileSync.mockReturnValue("package smoke\n\na: int\n");
+		safeSpawnAsync.mockResolvedValueOnce({ status: 0, stdout: "", stderr: "" });
+		const cueVetRunner = (
+			await import("../../../clients/dispatch/runners/cue-vet.js")
+		).default;
+		const result = await cueVetRunner.run(createCtx(cueFile, cueCwd));
+		expect(result.status).toBe("succeeded");
+		expect(safeSpawnAsync).toHaveBeenCalledTimes(1);
+		const [, args] = safeSpawnAsync.mock.calls[0];
+		expect(args).toEqual(["vet", "-c=false", "."]);
+	});
+
+	// F9 (review round 3, low): pins the `result.status !== 0` guard on the
+	// F5/F6 reactive fallback. A status-0 (successful) directory vet must
+	// NEVER trigger a second spawn, even in the pathological case where its
+	// (empty, per the real binary) output would otherwise text-match
+	// `directoryScopeUnavailable` — success is success, never re-examined by
+	// output shape. Deleting the `result.status !== 0 &&` clause leaves this
+	// red (a second spawn would fire).
+	it("F9: a successful (status 0) directory vet never triggers the reactive fallback, regardless of output text", async () => {
+		readFileSync.mockReturnValue("package smoke\n\na: int\n");
+		safeSpawnAsync.mockResolvedValueOnce({
+			status: 0,
+			// Pathological: real cue never prints on success, but this pins the
+			// guard against a hypothetical false match rather than trusting exit
+			// code alone.
+			stdout: 'found packages "alpha" (alpha.cue) and "beta" (beta.cue) in "."\n',
+			stderr: "",
+		});
+		const cueVetRunner = (
+			await import("../../../clients/dispatch/runners/cue-vet.js")
+		).default;
+		const result = await cueVetRunner.run(createCtx(cueFile, cueCwd));
+		expect(result.status).toBe("succeeded");
+		expect(result.diagnostics).toEqual([]);
+		expect(safeSpawnAsync).toHaveBeenCalledTimes(1);
+	});
+});
+
+// ── hasPackageClause — the F8 fix's detector ────────────────────────────────
+
+describe("hasPackageClause (#1522 review round 3, F8)", () => {
+	it("recognizes a package clause on the first line", () => {
+		expect(hasPackageClause("package smoke\n\na: int\n")).toBe(true);
+	});
+
+	it("recognizes a package clause after leading blank lines and comments", () => {
+		expect(
+			hasPackageClause("\n// a header comment\n\npackage smoke\n\na: int\n"),
+		).toBe(true);
+	});
+
+	it("returns false for a package-less file", () => {
+		expect(hasPackageClause("a: int\n")).toBe(false);
+	});
+
+	it("returns false for a package-less file with only a leading comment", () => {
+		expect(hasPackageClause("// just a config\nb: int\n")).toBe(false);
+	});
+
+	it("returns false for an empty file", () => {
+		expect(hasPackageClause("")).toBe(false);
+	});
+
+	it("does not mistake a field literally named 'package' for the clause", () => {
+		// `package:` is a plain field label — the real clause has no colon and
+		// is followed by a bare identifier, and MUST be the first declaration.
+		expect(hasPackageClause('package: "not a clause"\n')).toBe(false);
 	});
 });
