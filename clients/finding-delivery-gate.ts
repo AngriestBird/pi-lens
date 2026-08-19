@@ -157,7 +157,20 @@ interface DeliverySurfaceBase {
 	 * requires instead (see `tests/clients/finding-delivery-gate.test.ts`).
 	 */
 	evidence: string[];
-	/** Minimum occurrences required for EACH string in `evidence`. Default 1. */
+	/**
+	 * Minimum occurrences required for EACH string in `evidence`. Default 1.
+	 *
+	 * For a `clients/runtime-turn.ts` surface, this doubles as the per-
+	 * occurrence CLAIM CAPACITY in the exclusive nearest-neighbor assignment
+	 * (#1634 review round R1c): when a surface legitimately has more than one
+	 * tagged seam sharing the same upstream evidence (e.g.
+	 * `unresolved-inline-blocker`'s stale/live render branches both consuming
+	 * one `sweepInlineBlockerFreshness` call), `evidenceMin` states how many
+	 * seams are EXPECTED to share it, so the coverage test's default
+	 * capacity-1 exclusivity doesn't wrongly fail the second legitimate seam.
+	 * Set it to the surface's real tagged-seam count whenever seams share one
+	 * evidence occurrence — see `tests/clients/finding-delivery-gate.test.ts`.
+	 */
 	evidenceMin?: number;
 }
 
@@ -214,7 +227,7 @@ function gated(
 	description: string,
 	gates: string[],
 	evidence: string[],
-	extra: Partial<Pick<GatedDeliverySurface, "status" | "partialReason">> = {},
+	extra: Partial<Pick<GatedDeliverySurface, "status" | "partialReason" | "evidenceMin">> = {},
 ): GatedDeliverySurface {
 	return { mode: "gated", file, description, gates, evidence, ...extra };
 }
@@ -253,11 +266,16 @@ export const DELIVERY_SURFACES: Record<string, DeliverySurfaceEntry> = {
 		["gateFindingsByPathFreshness"],
 		['store: "govulncheck"'],
 	),
+	// Two tagged seams (the stale and live render branches below the same
+	// `sweepInlineBlockerFreshness` call) legitimately share one evidence
+	// occurrence — evidenceMin: 2 tells the exclusive-assignment check both
+	// are expected claimants, not a rogue seam contesting the real one.
 	"runtime-turn:unresolved-inline-blocker": gated(
 		RUNTIME_TURN_FILE,
 		"Turn-end re-surfaced unresolved inline blockers.",
 		["sweepInlineBlockerFreshness"],
 		["sweepInlineBlockerFreshness(runtime, cwd)"],
+		{ evidenceMin: 2 },
 	),
 	// Same two gate calls as the live secrets tier — this tier renders their
 	// `.stale` arm, so it has no OWN gate call to point at.

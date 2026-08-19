@@ -519,44 +519,137 @@ const REGION_BACK_WINDOW = 150;
 const REGION_FORWARD_WINDOW = 10;
 const CALLEE_PROXIMITY_LINES = 3;
 
-/**
- * id -> every [startLine, endLine] (1-based, inclusive) region from each
- * INDIVIDUAL seam in `rawSource` tagged with that id — kept as SEPARATE
- * entries, never merged into one union. A union would let a rogue seam
- * "hide" behind a legitimate seam's real evidence elsewhere in the file: if
- * evidence only had to appear ANYWHERE across the combined regions, a second
- * seam tagged with the same (real) id but with no real gate nearby would
- * still pass, because the FIRST seam's region still carries the evidence.
- * #1634 review round R1b requires each TAGGED SEAM to independently prove
- * its own evidence — see the per-entry test below, which checks every
- * region in this list separately rather than their concatenation.
- */
-function regionsById(
-	rawSource: string,
-	seamPattern: RegExp,
-	back: number,
-	forward: number,
-): Map<string, Array<[number, number]>> {
-	const totalLines = rawSource.split("\n").length;
-	const out = new Map<string, Array<[number, number]>>();
-	for (const { seam, ids } of scanTaggedSeams(rawSource, seamPattern)) {
-		for (const id of ids) {
-			const region: [number, number] = [
-				Math.max(1, seam.line - back),
-				Math.min(totalLines, seam.line + forward),
-			];
-			const arr = out.get(id) ?? [];
-			arr.push(region);
-			out.set(id, arr);
-		}
-	}
+/** 1-based line numbers in `strippedWholeSource` where `needle` occurs. */
+function occurrenceLinesOf(strippedWholeSource: string, needle: string): number[] {
+	const out: number[] = [];
+	strippedWholeSource.split("\n").forEach((l, i) => {
+		if (l.includes(needle)) out.push(i + 1);
+	});
 	return out;
 }
 
 /**
- * Checks one surface's evidence against `scopeRawLines` (either its own seam
- * region(s), or a whole file) and returns problem strings — used both by the
- * real per-entry tests below AND the red-proof tests against fixtures.
+ * Nearest-neighbor, EXCLUSIVE assignment of evidence occurrences to the
+ * seams competing for them (#1634 review round R1c — "close-range
+ * laundering": a rogue seam placed INSIDE a real gate's lookback window,
+ * closer than or comparable to the legitimate seam, used to pass just by
+ * existing in the same window as the real evidence — the per-region check
+ * asked "is evidence somewhere in MY window", not "is this evidence actually
+ * MINE and nobody else's").
+ *
+ * Only seams tagged with the SAME id compete in one call — a DIFFERENT id's
+ * seam legitimately reusing the identical call (e.g. `stale-secrets-tier`
+ * reusing `secrets-gitleaks`'s gate) runs its OWN assignment and never
+ * competes here, so sharing across ids stays intact.
+ *
+ * Candidates are (seam, occurrence) pairs within the lookback/lookahead
+ * window, sorted by ascending distance; greedy assignment takes the closest
+ * pair first and removes both sides from the pool — standard greedy nearest-
+ * neighbor matching. A seam left without a claim failed to prove ITS OWN
+ * evidence, even when some other (closer) seam of the same id legitimately
+ * claimed the one real occurrence — which is exactly the outcome we want
+ * when two same-id seams compete for evidence only one of them should have.
+ */
+function assignNearestExclusive(
+	seamLines: number[],
+	occurrenceLines: number[],
+	back: number,
+	forward: number,
+	capacity: number,
+): Map<number, number> {
+	const pairs: Array<{ seamLine: number; occLine: number; dist: number }> = [];
+	for (const seamLine of seamLines) {
+		for (const occLine of occurrenceLines) {
+			if (occLine >= seamLine - back && occLine <= seamLine + forward) {
+				pairs.push({ seamLine, occLine, dist: Math.abs(seamLine - occLine) });
+			}
+		}
+	}
+	pairs.sort((a, b) => a.dist - b.dist);
+	const occClaimCount = new Map<number, number>();
+	const claimedSeam = new Set<number>();
+	const assignment = new Map<number, number>();
+	for (const p of pairs) {
+		if (claimedSeam.has(p.seamLine)) continue;
+		const used = occClaimCount.get(p.occLine) ?? 0;
+		if (used >= capacity) continue;
+		occClaimCount.set(p.occLine, used + 1);
+		claimedSeam.add(p.seamLine);
+		assignment.set(p.seamLine, p.occLine);
+	}
+	return assignment;
+}
+
+/**
+ * Checks one `clients/runtime-turn.ts` surface's evidence via exclusive
+ * nearest-neighbor assignment against ALL of that file's tagged seams (not
+ * just the ones tagged with `id` — every seam is a potential COMPETITOR for
+ * an occurrence). Returns problem strings, empty when every seam tagged
+ * with `id` claimed every needle.
+ */
+function checkRuntimeTurnSeamEvidenceExclusive(
+	id: string,
+	entry: DeliverySurfaceEntry,
+	allTaggedSeams: Array<{ seam: SeamHit; ids: string[] }>,
+	wholeStrippedLines: string[],
+): string[] {
+	const problems: string[] = [];
+	const seamsForId = allTaggedSeams
+		.filter(({ ids }) => ids.includes(id))
+		.map(({ seam }) => seam.line);
+	if (seamsForId.length === 0) return problems;
+	// Per-occurrence claim capacity — see `evidenceMin`'s doc in
+	// clients/finding-delivery-gate.ts. Default 1 (one seam per occurrence);
+	// a surface with N legitimate seams sharing one upstream call sets
+	// evidenceMin: N so all N can claim it without contesting each other.
+	const capacity = entry.evidenceMin ?? 1;
+	const wholeStripped = wholeStrippedLines.join("\n");
+	for (const needle of entry.evidence) {
+		const occurrenceLines = occurrenceLinesOf(wholeStripped, needle);
+		const assignment = assignNearestExclusive(
+			seamsForId,
+			occurrenceLines,
+			REGION_BACK_WINDOW,
+			REGION_FORWARD_WINDOW,
+			capacity,
+		);
+		for (const seamLine of seamsForId) {
+			const claimed = assignment.get(seamLine);
+			if (claimed === undefined) {
+				problems.push(
+					`"${id}": the seam at line ${seamLine} could not exclusively claim an occurrence of ` +
+						`"${needle}" within ${REGION_BACK_WINDOW}/${REGION_FORWARD_WINDOW} lines — either no ` +
+						`occurrence is that close, or a competing seam claimed the nearest one first`,
+				);
+				continue;
+			}
+			// R2 applies only to ARGUMENT-shaped evidence (no "(" of its own) —
+			// a needle that's already call-shaped (e.g. "applyDeltaFreshnessGate(")
+			// is its own callee proof.
+			if (entry.mode === "gated" && !needle.includes("(")) {
+				const satisfied = entry.gates.some((gate) =>
+					hasNearbyCallSite(wholeStrippedLines, claimed - 1, gate, CALLEE_PROXIMITY_LINES),
+				);
+				if (!satisfied) {
+					problems.push(
+						`"${id}": the occurrence of "${needle}" claimed by the seam at line ${seamLine} ` +
+							`(line ${claimed}) is not within ${CALLEE_PROXIMITY_LINES} lines of a call-shaped ` +
+							`${entry.gates.join("/")}( — possible identity-stub`,
+					);
+				}
+			}
+		}
+	}
+	return problems;
+}
+
+/**
+ * Whole-file evidence check for surfaces with no push/function seam scan of
+ * their own (`widget-state.ts`, `agent-nudge.ts`) and for the
+ * `tools/lens-diagnostics.ts` function-tagged surfaces, where the evidence
+ * genuinely lives inside a HELPER function called from the tagged line, not
+ * necessarily near it — see the module doc above for why those keep a
+ * whole-file scope instead of R1c's seam-exclusive assignment.
  */
 function checkEvidenceInScope(
 	id: string,
@@ -576,10 +669,6 @@ function checkEvidenceInScope(
 			);
 			continue;
 		}
-		// R2 applies only to ARGUMENT-shaped evidence (e.g. `store: "gitleaks"`)
-		// — a needle that is already call-shaped itself (contains "(", e.g.
-		// "applyDeltaFreshnessGate(" or "sweepInlineBlockerFreshness(runtime,
-		// cwd)") is its own callee proof and needs no separate proximity check.
 		if (entry.mode === "gated" && !needle.includes("(")) {
 			const occurrenceLines = findLineIndexes(scopeStrippedLines, needle);
 			const satisfied = occurrenceLines.some((lineIdx) =>
@@ -599,51 +688,53 @@ function checkEvidenceInScope(
 	return problems;
 }
 
-describe("finding-delivery-gate evidence ground-truth (#1634 review F1/R1b/R2)", () => {
+describe("finding-delivery-gate evidence ground-truth (#1634 review F1/R1b/R1c/R2)", () => {
 	const runtimeTurnRaw = source("clients/runtime-turn.ts");
-	const runtimeTurnRawLines = runtimeTurnRaw.split("\n");
-	const runtimeTurnRegions = regionsById(
-		runtimeTurnRaw,
-		RUNTIME_TURN_SEAM_PATTERN,
-		REGION_BACK_WINDOW,
-		REGION_FORWARD_WINDOW,
-	);
+	const runtimeTurnStrippedLines = stripCommentsOnly(runtimeTurnRaw).split("\n");
+	const allRuntimeTurnSeams = scanTaggedSeams(runtimeTurnRaw, RUNTIME_TURN_SEAM_PATTERN);
 
 	for (const [id, entry] of Object.entries(DELIVERY_SURFACES)) {
 		if (entry.evidence.length === 0) continue;
-		const seamRegions =
-			entry.file === "clients/runtime-turn.ts" ? runtimeTurnRegions.get(id) : undefined;
+		const isRuntimeTurn = entry.file === "clients/runtime-turn.ts";
 
-		if (!seamRegions) {
-			it(`"${id}" evidence is present in ${entry.file} (comments stripped)`, () => {
-				const scopeRawLines = source(entry.file).split("\n");
-				const problems = checkEvidenceInScope(id, entry, scopeRawLines, entry.file);
-				expect(problems, problems.join("\n")).toEqual([]);
-			});
-			continue;
-		}
-
-		// R1b: EVERY individually-tagged seam must independently satisfy the
-		// evidence — checked per region, never merged into one union (see
-		// `regionsById`'s doc for why a union would let a rogue seam hide
-		// behind a legitimate sibling seam's real evidence).
-		seamRegions.forEach((region, seamIndex) => {
-			const label =
-				seamRegions.length > 1
-					? `"${id}" evidence is present within tagged seam #${seamIndex + 1}'s region (line ~${region[0] + REGION_BACK_WINDOW}) (R1b/R2)`
-					: `"${id}" evidence is present within its own seam's region (R1b/R2)`;
-			it(label, () => {
-				const scopeRawLines = runtimeTurnRawLines.slice(region[0] - 1, region[1]);
-				const problems = checkEvidenceInScope(
-					id,
-					entry,
-					scopeRawLines,
-					`surface "${id}" seam #${seamIndex + 1}'s region`,
-				);
-				expect(problems, problems.join("\n")).toEqual([]);
-			});
+		it(isRuntimeTurn
+			? `"${id}" evidence is exclusively claimed by its own tagged seam(s) (R1b/R1c/R2)`
+			: `"${id}" evidence is present in ${entry.file} (comments stripped)`, () => {
+			const problems = isRuntimeTurn
+				? checkRuntimeTurnSeamEvidenceExclusive(id, entry, allRuntimeTurnSeams, runtimeTurnStrippedLines)
+				: checkEvidenceInScope(id, entry, source(entry.file).split("\n"), entry.file);
+			expect(problems, problems.join("\n")).toEqual([]);
 		});
 	}
+
+	// Explicit, named proof that exclusivity is scoped PER ID, not global —
+	// two DIFFERENT ids legitimately sharing the SAME gate call (the render
+	// for `stale-secrets-tier` reuses `secrets-gitleaks`'s/`secrets-trivy`'s
+	// gate output) must BOTH still pass; they are never competitors of each
+	// other since each runs its own `assignNearestExclusive` call.
+	it("shared-gate surfaces (secrets-gitleaks + stale-secrets-tier) both pass — exclusivity does not cross ids", () => {
+		const gitleaksProblems = checkRuntimeTurnSeamEvidenceExclusive(
+			"runtime-turn:secrets-gitleaks",
+			DELIVERY_SURFACES["runtime-turn:secrets-gitleaks"],
+			allRuntimeTurnSeams,
+			runtimeTurnStrippedLines,
+		);
+		const trivyProblems = checkRuntimeTurnSeamEvidenceExclusive(
+			"runtime-turn:secrets-trivy",
+			DELIVERY_SURFACES["runtime-turn:secrets-trivy"],
+			allRuntimeTurnSeams,
+			runtimeTurnStrippedLines,
+		);
+		const staleTierProblems = checkRuntimeTurnSeamEvidenceExclusive(
+			"runtime-turn:stale-secrets-tier",
+			DELIVERY_SURFACES["runtime-turn:stale-secrets-tier"],
+			allRuntimeTurnSeams,
+			runtimeTurnStrippedLines,
+		);
+		expect(gitleaksProblems, gitleaksProblems.join("\n")).toEqual([]);
+		expect(trivyProblems, trivyProblems.join("\n")).toEqual([]);
+		expect(staleTierProblems, staleTierProblems.join("\n")).toEqual([]);
+	});
 
 	// RED PROOF (F1): the reviewer's exact stub — the real evidence-bearing
 	// code is gone, but a DOC COMMENT still mentions the gate's name with an
@@ -670,38 +761,65 @@ let report = \`CRITICAL dependency CVEs (trivy, \${trivyAgeLabel}). Upgrade befo
 		expect(countOccurrences(strippedFixture, evidence)).toBeGreaterThanOrEqual(1);
 	});
 
-	// RED PROOF (R1b): "valid-tag laundering" — an ungated seam tagged with an
-	// EXISTING gated id must NOT pass just because that id's real evidence
-	// exists somewhere ELSE in the file. Reproduced with a self-contained
-	// fixture large enough that the real evidence sits OUTSIDE the rogue
-	// seam's region.
-	it("RED PROOF: a rogue seam tagged with a real id, far from that id's real evidence, is caught", () => {
+	// RED PROOF (R1b, far case): an ungated seam tagged with a real id, FAR
+	// (beyond the lookback window) from that id's real evidence, must still
+	// be caught — no candidate pair exists at all.
+	it("RED PROOF (far): a rogue seam tagged with a real id, beyond the lookback window, is caught", () => {
 		const filler = Array.from({ length: REGION_BACK_WINDOW + 20 }, (_, i) => `// filler ${i}`);
-		const rogueEntry = DELIVERY_SURFACES["runtime-turn:secrets-gitleaks"];
 		const rogueLines = [
-			...filler,
-			// The real evidence, far above the rogue seam below.
 			'const gitleaksGate = gateFindingsByPathFreshness({ store: "gitleaks" });',
 			...filler,
-			// The rogue seam: tagged with a REAL, registered id, but nothing near
-			// it actually gates anything.
 			"// @delivery-surface: runtime-turn:secrets-gitleaks",
-			'advisoryParts.push("a rogue finding wearing a real tag");',
+			'advisoryParts.push("a rogue finding wearing a real tag, far away");',
 		];
-		const rogueSeamLine = rogueLines.length; // 1-based: the push is the last line
-		const region: [number, number] = [
-			Math.max(1, rogueSeamLine - REGION_BACK_WINDOW),
-			rogueSeamLine + REGION_FORWARD_WINDOW,
-		];
-		const scopeRawLines = rogueLines.slice(region[0] - 1, region[1]);
-		const problems = checkEvidenceInScope(
+		const rogueSource = rogueLines.join("\n");
+		const strippedLines = stripCommentsOnly(rogueSource).split("\n");
+		const seams = scanTaggedSeams(rogueSource, RUNTIME_TURN_SEAM_PATTERN);
+		const problems = checkRuntimeTurnSeamEvidenceExclusive(
 			"runtime-turn:secrets-gitleaks",
-			rogueEntry,
-			scopeRawLines,
-			"the rogue seam's region",
+			DELIVERY_SURFACES["runtime-turn:secrets-gitleaks"],
+			seams,
+			strippedLines,
 		);
 		expect(problems.length).toBeGreaterThan(0);
-		expect(problems[0]).toContain("store");
+		expect(problems[0]).toContain("could not exclusively claim");
+	});
+
+	// RED PROOF (R1c, NEAR case — review round R1c's actual finding): a rogue
+	// seam placed INSIDE the lookback window, closer to the real evidence
+	// than the legitimate seam is, must still be caught — the per-region
+	// check (round 3's shipped fix) passed this exact shape, because both the
+	// rogue seam's OWN window and the real seam's OWN window each
+	// independently contained the one real occurrence. Exclusive assignment
+	// gives the occurrence to whichever seam is closer and leaves the OTHER
+	// seam — real or rogue — unsatisfied, so the overall check still reds
+	// whenever two same-id seams compete for one occurrence.
+	it("RED PROOF (near): a rogue seam placed CLOSER than the real seam to the same evidence is caught", () => {
+		const realGateLine = 'const gitleaksGate = gateFindingsByPathFreshness({ store: "gitleaks" });';
+		const spacer = (n: number) => Array.from({ length: n }, (_, i) => `// spacer ${i}`);
+		const rogueLines = [
+			realGateLine,
+			...spacer(69), // rogue sits 69 lines from the real gate — inside the window
+			"// @delivery-surface: runtime-turn:secrets-gitleaks",
+			'advisoryParts.push("a rogue finding, CLOSER to the real gate than the legit seam");',
+			...spacer(29), // the "legitimate" seam sits further still (98 lines total)
+			"// @delivery-surface: runtime-turn:secrets-gitleaks",
+			'advisoryParts.push("the finding that would have been the real one");',
+		];
+		const rogueSource = rogueLines.join("\n");
+		const strippedLines = stripCommentsOnly(rogueSource).split("\n");
+		const seams = scanTaggedSeams(rogueSource, RUNTIME_TURN_SEAM_PATTERN);
+		expect(seams.length).toBe(2); // sanity: both seams parsed and tagged
+		const problems = checkRuntimeTurnSeamEvidenceExclusive(
+			"runtime-turn:secrets-gitleaks",
+			DELIVERY_SURFACES["runtime-turn:secrets-gitleaks"],
+			seams,
+			strippedLines,
+		);
+		// Exactly one of the two same-id seams wins the single real occurrence;
+		// the other is left unsatisfied — the check must red either way.
+		expect(problems.length).toBeGreaterThan(0);
+		expect(problems[0]).toContain("could not exclusively claim");
 	});
 
 	// RED PROOF (R2): "identity-stub laundering" — the reviewer's exact
@@ -709,32 +827,40 @@ let report = \`CRITICAL dependency CVEs (trivy, \${trivyAgeLabel}). Upgrade befo
 	// `gateFindingsByPathFreshness` with an identity stub. The argument
 	// literal alone must NOT satisfy a `gated` surface's evidence.
 	it("RED PROOF: identity-stubbing the callee while keeping the argument literal is caught", () => {
-		const stubbedLines = [
+		const stubbedSource = [
 			"function identityStub(x) { return x; }",
 			'const gitleaksGate = identityStub({ store: "gitleaks", findings: [] });',
-		];
-		const problems = checkEvidenceInScope(
+			"// @delivery-surface: runtime-turn:secrets-gitleaks",
+			'advisoryParts.push("finding");',
+		].join("\n");
+		const strippedLines = stripCommentsOnly(stubbedSource).split("\n");
+		const seams = scanTaggedSeams(stubbedSource, RUNTIME_TURN_SEAM_PATTERN);
+		const problems = checkRuntimeTurnSeamEvidenceExclusive(
 			"runtime-turn:secrets-gitleaks",
 			DELIVERY_SURFACES["runtime-turn:secrets-gitleaks"],
-			stubbedLines,
-			"the stubbed fixture",
+			seams,
+			strippedLines,
 		);
 		expect(problems.length).toBeGreaterThan(0);
 		expect(problems[0]).toMatch(/possible identity-stub/);
 	});
 
 	it("control: the real (un-stubbed) call site satisfies both the argument and the callee-proximity check", () => {
-		const realLines = [
+		const realSource = [
 			"const gitleaksGate = gateFindingsByPathFreshness({",
 			'  store: "gitleaks",',
 			"  findings: [],",
 			"});",
-		];
-		const problems = checkEvidenceInScope(
+			"// @delivery-surface: runtime-turn:secrets-gitleaks",
+			'advisoryParts.push("finding");',
+		].join("\n");
+		const strippedLines = stripCommentsOnly(realSource).split("\n");
+		const seams = scanTaggedSeams(realSource, RUNTIME_TURN_SEAM_PATTERN);
+		const problems = checkRuntimeTurnSeamEvidenceExclusive(
 			"runtime-turn:secrets-gitleaks",
 			DELIVERY_SURFACES["runtime-turn:secrets-gitleaks"],
-			realLines,
-			"the real fixture",
+			seams,
+			strippedLines,
 		);
 		expect(problems).toEqual([]);
 	});

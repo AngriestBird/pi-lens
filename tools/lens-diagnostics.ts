@@ -545,6 +545,9 @@ function appendProjectDiagnosticsDeltaLines(
 		onMissing: "drop",
 	});
 	const staleSet = new Set(gated.stale);
+	// Concatenating live-then-stale reorders a file's demoted rows to the end
+	// of its bucket below (rather than each diagnostic's original report
+	// order) — cosmetic only, findings are neither dropped nor duplicated.
 	const diagnostics = [...gated.live, ...gated.stale];
 	const byFile = new Map<string, ProjectDiagnostic[]>();
 	for (const diagnostic of diagnostics) {
@@ -633,6 +636,9 @@ function applyDeltaFreshnessGate<W extends DispositionCandidate>(
 		citedPath: (f) => f.filePath,
 		onMissing: "drop",
 	});
+	// Two passes (live, then stale) reorder a file's demoted rows to the end
+	// of its warnings array rather than the original report order — cosmetic
+	// only, nothing is dropped or duplicated.
 	const byFile = new Map<string, Array<W & { stale?: boolean }>>();
 	for (const f of gated.live) {
 		const arr = byFile.get(f.filePath) ?? [];
