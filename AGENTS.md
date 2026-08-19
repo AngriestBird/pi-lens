@@ -138,6 +138,36 @@ its findings ride along. And an inconclusive touch must name its cause
 `diagnostics-wait` / `mixed`) on the result, in `lsp_touch_file`, and in the
 cascade's `neighbor_touch` row. (#1549)
 
+**Content-bound coverage is ONE rule, evaluated ONCE, at the merge.**
+`auxCoversThisContent` (`clients/lsp/index.ts`, inside `touchFile`) is that rule
+— the pre-notify `auxPublishedThisContent` snapshot unioned with a live
+`getDiagnosticBinding` read, both asking `bindingMatchesTouchContent`, the only
+place `touchContentHash` is compared. `auxCoveredAtMerge` freezes it as the last
+statement before the merge, and every door that shares the merge's consequences
+reads that SET, never the function: the merge drop, the deferred door, the
+merged BINDING (a dropped contributor loses its findings and its fingerprint
+together), and the result's `unconfirmedServerIds`. The two aux wait-outcome
+producers still call the function, because their rows describe their own instant;
+their verdict is reconciled against the freeze before anything is claimed.
+
+Both timing errors are live defects, and they point opposite ways. Asking
+EARLIER than the decision underclaims: #1549 put the notify-write door on the
+merge-time read but left the DEFERRED door on the pre-notify snapshot, which
+cannot see a write that lands after it, so a scanner that had published for
+exactly these bytes while its resync sat queued was dropped and named (#1586).
+Asking LATER overclaims, and that is the worse one: `touchFile` awaits after the
+merge (`brokenSkippedAuxiliaryServerIds` on every collecting touch, the tsserver
+sync and liveness gates on theirs), so re-asking when the gap is named let a
+publication landing in that window un-name a scanner whose findings the merge had
+ALREADY dropped — `confirmed` over a `.diags` that is missing the scanner's
+answer, which unblocks the `lastKnownDiagnostics` prime and the
+`demonstratedReady` mark that `coverageGap` exists to hold shut. A drop is an
+action; a later answer cannot undo it. The screen when you add a door: ask the
+rule where the decision is made, never earlier and never later, and if your door
+acts on the answer, read the freeze. The `lsp_notify_resync_deferred` row keeps
+recording the gate's action either way; the coverage fields report only what the
+touch is actually uncovered for. (#1586)
+
 A deferred cascade result that arrives LATE — past the turn-end settle cap, or
 in the quiet window after the turn already consumed its runs — must still reach
 the agent. `turnSeq` is not a staleness signal for such a run (a late run is by

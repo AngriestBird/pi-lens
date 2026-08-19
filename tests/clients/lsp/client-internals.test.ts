@@ -12,6 +12,26 @@ import * as path from "node:path";
 import { pathToFileURL } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 import type { MessageConnection } from "vscode-jsonrpc";
+
+// #1639: capture `lsp_typescript_diagnostic_sequence` phase records so the
+// pull-settle regression tests below can assert on durationMs/version/
+// settleSource without spinning up a real logging sink.
+const { pullSequenceEvents } = vi.hoisted(() => ({
+	pullSequenceEvents: [] as Array<Record<string, unknown>>,
+}));
+vi.mock("../../../clients/latency-logger.js", async (importOriginal) => {
+	const actual =
+		await importOriginal<typeof import("../../../clients/latency-logger.js")>();
+	return {
+		...actual,
+		logLatency: vi.fn((event: Record<string, unknown>) => {
+			if (event.phase === "lsp_typescript_diagnostic_sequence") {
+				pullSequenceEvents.push(event);
+			}
+		}),
+	};
+});
+
 import {
 	applyDynamicCapabilities,
 	bumpDiagnosticsVersion,
@@ -1628,6 +1648,136 @@ describe("publishDiagnostics handler — superseded push guard (cache-poisoning 
 		expect(state.pushDiagnostics.has(TEST_KEY)).toBe(false);
 		expect(state.diagnosticBindings.has(TEST_KEY)).toBe(false);
 	});
+
+	// #1639: `logSequence` — the PUSH-path producer of
+	// `lsp_typescript_diagnostic_sequence` — is the actual source of the
+	// issue's cited evidence. It had the same durationMs-as-document-age and
+	// version:null bugs as the pull path, PLUS its raw per-publication receipt
+	// (`logSequence(false)`) logged with no `settleSource` at all — the
+	// "unsettled-then-settled" pair (~61ms apart, near-identical document age)
+	// the issue described as a double-emit is this function's own designed
+	// shape, not `ensureWarmForSweep`'s pull path.
+	describe("logSequence — push-path pull-settle record shape (#1639)", () => {
+		it("a quiet-window settle's durationMs times the debounce wait, not document age", async () => {
+			const { state, emitPublishDiagnostics } = createCapturingState();
+			// native-ts7 → seedFirstPush false, so every publish goes through the
+			// debounce/quiet-window path (never the immediate first-push seed).
+			Object.defineProperty(state, "serverId", { value: "typescript" });
+			Object.defineProperty(state, "launchVariant", { value: "native-ts7" });
+			// Document opened 90s ago — pre-fix, durationMs on the SETTLED record
+			// was hardcoded to this age.
+			state.documentOpenedAt.set(TEST_KEY, Date.now() - 90_000);
+
+			pullSequenceEvents.length = 0;
+			emitPublishDiagnostics({
+				uri: pathToFileURL(TEST_FILE).href,
+				diagnostics: [diagnostic("real error", "2322")],
+			});
+			await new Promise((resolve) => setTimeout(resolve, DEBOUNCE_WAIT_MS));
+
+			const settled = pullSequenceEvents.find(
+				(event) => event.metadata &&
+					(event.metadata as Record<string, unknown>).settledReturn === true,
+			);
+			expect(settled).toBeDefined();
+			// The debounce wait is ~50ms (typescript's own debounceMs) — nowhere
+			// near the 90s document age.
+			expect(settled!.durationMs as number).toBeLessThan(1000);
+			const metadata = settled!.metadata as Record<string, unknown>;
+			expect(metadata.elapsedSinceDidOpenMs as number).toBeGreaterThanOrEqual(
+				89_000,
+			);
+			expect(metadata.settleSource).toBe("quiet-window");
+		});
+
+		it("tags the raw per-publication receipt distinctly from the settle it precedes", async () => {
+			const { state, emitPublishDiagnostics } = createCapturingState();
+			Object.defineProperty(state, "serverId", { value: "typescript" });
+			Object.defineProperty(state, "launchVariant", { value: "native-ts7" });
+
+			pullSequenceEvents.length = 0;
+			emitPublishDiagnostics({
+				uri: pathToFileURL(TEST_FILE).href,
+				diagnostics: [diagnostic("real error", "2322")],
+			});
+			await new Promise((resolve) => setTimeout(resolve, DEBOUNCE_WAIT_MS));
+
+			// The exact "double-emit" pair the issue described: one unsettled
+			// receipt immediately followed by one settle, for the same file.
+			expect(pullSequenceEvents).toHaveLength(2);
+			const [unsettled, settled] = pullSequenceEvents.map(
+				(event) => event.metadata as Record<string, unknown>,
+			);
+			expect(unsettled.settledReturn).toBe(false);
+			expect(unsettled.settleSource).toBe("publication");
+			expect(pullSequenceEvents[0].durationMs).toBe(0);
+			expect(settled.settledReturn).toBe(true);
+			expect(settled.settleSource).toBe("quiet-window");
+		});
+
+		it("a first-push settle's durationMs is 0 (no debounce wait), not document age", async () => {
+			const { state, emitPublishDiagnostics } = createCapturingState();
+			// serverId "typescript" alone (no native-ts7 launchVariant) →
+			// seedFirstPush true — the very first publish settles immediately.
+			Object.defineProperty(state, "serverId", { value: "typescript" });
+			state.documentOpenedAt.set(TEST_KEY, Date.now() - 90_000);
+
+			pullSequenceEvents.length = 0;
+			emitPublishDiagnostics({
+				uri: pathToFileURL(TEST_FILE).href,
+				diagnostics: [diagnostic("first push", "2322")],
+			});
+
+			expect(pullSequenceEvents).toHaveLength(1);
+			expect(pullSequenceEvents[0].durationMs).toBe(0);
+			const metadata = pullSequenceEvents[0].metadata as Record<
+				string,
+				unknown
+			>;
+			expect(metadata.settleSource).toBe("first-push");
+			expect(metadata.elapsedSinceDidOpenMs as number).toBeGreaterThanOrEqual(
+				89_000,
+			);
+		});
+
+		it("marks a settle with no server-reported version as push-unversioned, never null", async () => {
+			const { state, emitPublishDiagnostics } = createCapturingState();
+			Object.defineProperty(state, "serverId", { value: "typescript" });
+
+			pullSequenceEvents.length = 0;
+			emitPublishDiagnostics({
+				uri: pathToFileURL(TEST_FILE).href,
+				diagnostics: [diagnostic("no version", "2322")],
+				// version omitted — the server never reported one.
+			});
+
+			expect(pullSequenceEvents).toHaveLength(1);
+			const metadata = pullSequenceEvents[0].metadata as Record<
+				string,
+				unknown
+			>;
+			expect(metadata.version).toBe("push-unversioned");
+		});
+
+		it("keeps the real server-reported version when present", async () => {
+			const { state, emitPublishDiagnostics } = createCapturingState();
+			Object.defineProperty(state, "serverId", { value: "typescript" });
+
+			pullSequenceEvents.length = 0;
+			emitPublishDiagnostics({
+				uri: pathToFileURL(TEST_FILE).href,
+				version: 7,
+				diagnostics: [diagnostic("versioned", "2322")],
+			});
+
+			expect(pullSequenceEvents).toHaveLength(1);
+			const metadata = pullSequenceEvents[0].metadata as Record<
+				string,
+				unknown
+			>;
+			expect(metadata.version).toBe(7);
+		});
+	});
 });
 
 describe("clientWaitForDiagnostics — pull mode (#240)", () => {
@@ -1707,6 +1857,121 @@ describe("clientWaitForDiagnostics — pull mode (#240)", () => {
 		expect(elapsed).toBeGreaterThanOrEqual(100);
 		// ...and did NOT hang on the never-resolving request.
 		expect(elapsed).toBeLessThan(2000);
+	});
+});
+
+// #1639: `logTypeScriptPullSettle` (the `lsp_typescript_diagnostic_sequence`
+// phase's pull-path producer) misused durationMs as document age, hardcoded
+// version:null, and double-emitted indistinguishably for two legitimate call
+// paths (a real touch vs `ensureWarmForSweep`'s warm-up probe). Mirrors the
+// "pull mode (#240)" describe block's state shape.
+describe("logTypeScriptPullSettle — pull-settle record shape (#1639)", () => {
+	const pullState = (): LSPClientState =>
+		createMockState({
+			serverId: "typescript",
+			workspaceDiagnosticsSupport: {
+				advertised: true,
+				mode: "pull",
+				workspaceDiagnostics: false,
+				diagnosticProviderKind: "object",
+			},
+		});
+
+	it("durationMs measures the settle operation, not time-since-didOpen (document age stays in metadata)", async () => {
+		const state = pullState();
+		// Document opened 90s ago — pre-fix, durationMs was hardcoded to this
+		// age, so a settle that actually took milliseconds read as a >60s
+		// "duration" (the session evidence: 147/239 records read this way).
+		state.documentOpenedAt.set(TEST_KEY, Date.now() - 90_000);
+		state.connection.sendRequest = vi
+			.fn()
+			.mockResolvedValue({ kind: "full", items: [] });
+
+		pullSequenceEvents.length = 0;
+		await clientWaitForDiagnostics(state, TEST_FILE, 1000);
+
+		expect(pullSequenceEvents).toHaveLength(1);
+		const event = pullSequenceEvents[0];
+		// The settle itself took milliseconds (an in-memory mocked reply) —
+		// nowhere near the 90s document age.
+		expect(event.durationMs as number).toBeLessThan(1000);
+		const metadata = event.metadata as Record<string, unknown>;
+		// The document age is still recorded, honestly named, in metadata.
+		expect(metadata.elapsedSinceDidOpenMs as number).toBeGreaterThanOrEqual(
+			89_000,
+		);
+	});
+
+	it("carries the real tracked version instead of a hardcoded null", async () => {
+		const state = pullState();
+		state.connection.sendRequest = vi
+			.fn()
+			.mockResolvedValue({ kind: "full", items: [] });
+		// Mirror production: a prior publication already bumped the per-path
+		// version stamp before this pull settles.
+		bumpDiagnosticsVersion(state, TEST_KEY);
+		bumpDiagnosticsVersion(state, TEST_KEY);
+
+		pullSequenceEvents.length = 0;
+		await clientWaitForDiagnostics(state, TEST_FILE, 1000);
+
+		expect(pullSequenceEvents).toHaveLength(1);
+		const metadata = pullSequenceEvents[0].metadata as Record<
+			string,
+			unknown
+		>;
+		expect(metadata.version).toBe(diagnosticsVersionForPath(state, TEST_KEY));
+		expect(metadata.version).not.toBeNull();
+	});
+
+	it("marks a settle with no tracked version as pull-unversioned, never null", async () => {
+		const state = pullState();
+		// A "kind: unchanged" report never calls `bumpDiagnosticsVersion` (see
+		// the #1104 comment on that branch) — it inherits the PRIOR resultId
+		// basis unchanged. Pre-populate that basis directly (rather than via a
+		// real prior pull) so this settle is the first thing to ever touch
+		// `diagnosticsVersionsByPath` for this path: nothing is tracked yet.
+		state.pullResultIds.set(TEST_KEY, "r1");
+		state.documentPullDiagnostics.set(TEST_KEY, []);
+		state.connection.sendRequest = vi
+			.fn()
+			.mockResolvedValue({ kind: "unchanged" });
+
+		pullSequenceEvents.length = 0;
+		await clientWaitForDiagnostics(state, TEST_FILE, 1000);
+
+		expect(pullSequenceEvents).toHaveLength(1);
+		const metadata = pullSequenceEvents[0].metadata as Record<
+			string,
+			unknown
+		>;
+		expect(diagnosticsVersionForPath(state, TEST_KEY)).toBe(0);
+		expect(metadata.version).toBe("pull-unversioned");
+	});
+
+	it("tags a warm-up-only settle distinctly from a real touch's settle (double-emit fix)", async () => {
+		// #1639: `ensureWarmForSweep`'s readiness probe and the sweep's real
+		// touch both run a genuine pull round trip for the SAME file, close
+		// together — two legitimate settle observations, not a duplicate.
+		// Pre-fix both logged identically as settleSource "pull" (239 records
+		// vs 145 touches in the session evidence); the fix must tag them
+		// distinctly so a consumer can tell them apart.
+		const state = pullState();
+		state.connection.sendRequest = vi
+			.fn()
+			.mockResolvedValue({ kind: "full", items: [] });
+
+		pullSequenceEvents.length = 0;
+		await clientWaitForDiagnostics(state, TEST_FILE, 1000, {
+			pullSettleSource: "pull-warmup",
+		});
+		await clientWaitForDiagnostics(state, TEST_FILE, 1000);
+
+		expect(pullSequenceEvents).toHaveLength(2);
+		const sources = pullSequenceEvents.map(
+			(event) => (event.metadata as Record<string, unknown>).settleSource,
+		);
+		expect(sources).toEqual(["pull-warmup", "pull"]);
 	});
 });
 

@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { CacheManager } from "../../clients/cache-manager.js";
 import { readChangesSince } from "../../clients/project-changes.js";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
+import { handleToolCall } from "../../clients/runtime-tool-call.js";
 import { handleToolResult } from "../../clients/runtime-tool-result.js";
 import { createTempFile, setupTestEnvironment } from "./test-utils.js";
 
@@ -614,6 +615,11 @@ describe("runtime-tool-result inline behavior warnings", () => {
 				"edit",
 				env.tmpDir,
 				undefined,
+				// #1642 F3: the true resolution basis (origin cwd), threaded
+				// through so the orphan fallback can tell checkouts apart. No
+				// tool-call id on this event, so it falls back to the project
+				// root, same as the pre-#1642 basis.
+				env.tmpDir,
 			);
 			expect(deferMutation).toHaveBeenCalledWith(
 				filePath,
@@ -622,6 +628,7 @@ describe("runtime-tool-result inline behavior warnings", () => {
 				env.tmpDir,
 				"autofix",
 				undefined,
+				env.tmpDir,
 			);
 		} finally {
 			env.cleanup();
@@ -1537,6 +1544,491 @@ describe("#484 turn-summary collection gate", () => {
 				},
 			});
 		} finally {
+			env.cleanup();
+		}
+	});
+});
+
+describe("path attribution across tool_call/tool_result (#1642)", () => {
+	beforeEach(async () => {
+		const pipeline = await import("../../clients/pipeline.js");
+		vi.mocked(pipeline.runPipeline).mockReset();
+		vi.mocked(pipeline.runPipeline).mockResolvedValue({
+			output: "",
+			hasBlockers: false,
+			isError: false,
+			fileModified: false,
+		});
+		logLatency.mockClear();
+	});
+
+	it("resolves a relative tool_result path against the call's own worktree cwd, never the parent checkout", async () => {
+		const env = setupTestEnvironment("pi-lens-worktree-attribution-");
+		const previousDataDir = process.env.PILENS_DATA_DIR;
+		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+		try {
+			// Reproduce the #1642 report: a gitignored worktree (`.worktrees/`)
+			// holds its own `src/app.ts`, same relative path as the parent
+			// checkout's live `src/app.ts`. tool_call resolves and SKIPS the
+			// worktree file (gitignored). The paired tool_result's own
+			// authoritative `input.path` is the SAME relative string — it must
+			// resolve that against the call's own cwd (the worktree, carried by
+			// tool-call identity), never against the project root, which is
+			// exactly the basis that used to collapse it onto the parent file.
+			const parentRoot = env.tmpDir;
+			fs.writeFileSync(path.join(parentRoot, ".gitignore"), ".worktrees/\n");
+			const parentFile = createTempFile(
+				parentRoot,
+				"src/app.ts",
+				"parent original\n",
+			);
+			const worktreeDir = path.join(parentRoot, ".worktrees", "wt1");
+			const worktreeFile = createTempFile(
+				worktreeDir,
+				"src/app.ts",
+				"worktree edited\n",
+			);
+
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = parentRoot;
+
+			const dbg = vi.fn();
+			const toolCallId = "call-1642";
+
+			await handleToolCall({
+				event: {
+					toolCallId,
+					toolName: "edit",
+					input: { path: "src/app.ts" },
+				},
+				ctx: { cwd: worktreeDir },
+				lensEnabled: true,
+				getFlag: (name: string) => name === "no-lsp",
+				dbg,
+				runtime,
+				cacheManager: new CacheManager(false),
+				ensureLSPConfigInitialized: async () => {},
+				updateLspStatus: () => {},
+				resetLSPService: () => {},
+			} as any);
+
+			await handleToolResult({
+				event: {
+					toolCallId,
+					toolName: "edit",
+					input: { path: "src/app.ts" },
+					details: { diff: "+1 worktree edited" },
+					content: [{ type: "text", text: "base" }],
+				},
+				getFlag: () => false,
+				dbg,
+				runtime,
+				cacheManager: new CacheManager(false),
+				biomeClient: {},
+				ruffClient: {},
+				metricsClient: {},
+				resetLSPService: () => {},
+				agentBehaviorRecord: () => [],
+				formatBehaviorWarnings: () => "",
+			} as any);
+
+			// tool_result must have resolved the WORKTREE file (not the parent)
+			// and correctly recognized IT as gitignored — proving the basis
+			// correction, not a stale skip flag, is what protects the parent.
+			expect(dbg).toHaveBeenCalledWith(
+				expect.stringContaining(`tool_result: skipping gitignored file ${worktreeFile}`),
+			);
+			// No deferred-format work for EITHER file, and the parent checkout
+			// is untouched — that is exactly what dirtied the live checkout in
+			// the reported incident (the staleness fallback later formats
+			// whatever got queued here).
+			expect(runtime.pendingDeferredFormatCount).toBe(0);
+			expect(fs.readFileSync(parentFile, "utf-8")).toBe("parent original\n");
+			// No divergence between tool_call's call-time resolution and
+			// tool_result's fresh one — both correctly landed on the worktree
+			// file, so the pure-diagnostic refusal log must NOT fire here.
+			expect(dbg).not.toHaveBeenCalledWith(
+				expect.stringContaining("path_attribution_refused"),
+			);
+		} finally {
+			if (previousDataDir === undefined) {
+				delete process.env.PILENS_DATA_DIR;
+			} else {
+				process.env.PILENS_DATA_DIR = previousDataDir;
+			}
+			env.cleanup();
+		}
+	});
+
+	it("runs the full pipeline for a brand-new file's write, not just an existing one (#1642 F1)", async () => {
+		const env = setupTestEnvironment("pi-lens-new-file-pipeline-");
+		const previousDataDir = process.env.PILENS_DATA_DIR;
+		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+		try {
+			// `tool_call` fires PRE-execution — `existsSync` is false for every
+			// path a write is about to CREATE. That must never be treated as a
+			// "skip": folding it into the skip verdict made every new-file
+			// write's paired tool_result refuse diagnostics/autofix/format
+			// entirely (0 pipeline runs instead of 1) — a regression worse than
+			// the bug #1642 fixes.
+			const parentRoot = env.tmpDir;
+			const newFilePath = path.join(parentRoot, "src", "brand-new.ts");
+			fs.mkdirSync(path.dirname(newFilePath), { recursive: true });
+
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = parentRoot;
+			const toolCallId = "call-new-file";
+
+			await handleToolCall({
+				event: {
+					toolCallId,
+					toolName: "write",
+					input: { path: "src/brand-new.ts", content: "export const x = 1;\n" },
+				},
+				ctx: { cwd: parentRoot },
+				lensEnabled: true,
+				getFlag: (name: string) => name === "no-lsp",
+				dbg: () => {},
+				runtime,
+				cacheManager: new CacheManager(false),
+				ensureLSPConfigInitialized: async () => {},
+				updateLspStatus: () => {},
+				resetLSPService: () => {},
+			} as any);
+
+			// The write itself executes on the host side between tool_call and
+			// tool_result — the file exists by the time tool_result fires.
+			fs.writeFileSync(newFilePath, "export const x = 1;\n");
+
+			await handleToolResult({
+				event: {
+					toolCallId,
+					toolName: "write",
+					input: { path: "src/brand-new.ts", content: "export const x = 1;\n" },
+					content: [],
+				},
+				getFlag: () => false,
+				dbg: () => {},
+				runtime,
+				cacheManager: new CacheManager(false),
+				biomeClient: {},
+				ruffClient: {},
+				metricsClient: {},
+				resetLSPService: () => {},
+				agentBehaviorRecord: () => [],
+				formatBehaviorWarnings: () => "",
+			} as any);
+
+			const { runPipeline } = await import("../../clients/pipeline.js");
+			expect(vi.mocked(runPipeline)).toHaveBeenCalledTimes(1);
+		} finally {
+			if (previousDataDir === undefined) {
+				delete process.env.PILENS_DATA_DIR;
+			} else {
+				process.env.PILENS_DATA_DIR = previousDataDir;
+			}
+			env.cleanup();
+		}
+	});
+
+	it("clears a recorded attribution when the paired tool_call is BLOCKED, so it never leaks into the correlation cache (#1642 F2)", async () => {
+		const env = setupTestEnvironment("pi-lens-attribution-block-clear-");
+		try {
+			// A blocked call never gets a paired tool_result — the host never
+			// lets the tool execute. Reproduce a block via the duplicate-export
+			// guard (cachedExports), the simplest deterministic block path.
+			createTempFile(env.tmpDir, "src/dupe.ts", "export const unrelated = 0;\n");
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			runtime.cachedExports.set("existing", path.join(env.tmpDir, "src/elsewhere.ts"));
+			const toolCallId = "call-blocked";
+
+			const result = await handleToolCall({
+				event: {
+					toolCallId,
+					toolName: "write",
+					input: {
+						path: "src/dupe.ts",
+						content: "export const existing = 2;\n",
+					},
+				},
+				ctx: { cwd: env.tmpDir },
+				lensEnabled: true,
+				getFlag: (name: string) => name === "no-lsp",
+				dbg: () => {},
+				runtime,
+				cacheManager: new CacheManager(false),
+				ensureLSPConfigInitialized: async () => {},
+				updateLspStatus: () => {},
+				resetLSPService: () => {},
+			} as any);
+
+			expect((result as { block?: boolean } | undefined)?.block).toBe(true);
+			// The attribution recorded before the block fired must be gone —
+			// left behind, it would sit in the bounded correlation cache as
+			// pure garbage until evicted, crowding out live in-flight records
+			// under enough blocked-edit volume (reviewer-reproduced leak).
+			expect(runtime.takeToolCallAttribution(toolCallId)).toBeUndefined();
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("fails closed on a relative path when a real correlation id exists but no attribution was recorded under it (#1642 F2)", async () => {
+		const env = setupTestEnvironment("pi-lens-attribution-miss-");
+		const previousDataDir = process.env.PILENS_DATA_DIR;
+		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+		try {
+			// No handleToolCall ever ran for this id (evicted, or a host quirk)
+			// — but the tool_result DOES carry a real correlation id. A relative
+			// path here is ambiguous: guessing the project root as the basis is
+			// exactly the #1642 collapse. This must fail CLOSED, not silently
+			// fall back to the old naive resolution.
+			createTempFile(env.tmpDir, "src/app.ts", "parent original\n");
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			const dbg = vi.fn();
+
+			await handleToolResult({
+				event: {
+					toolCallId: "call-never-seen-by-tool-call",
+					toolName: "edit",
+					input: { path: "src/app.ts" },
+					content: [{ type: "text", text: "base" }],
+				},
+				getFlag: () => false,
+				dbg,
+				runtime,
+				cacheManager: new CacheManager(false),
+				biomeClient: {},
+				ruffClient: {},
+				metricsClient: {},
+				resetLSPService: () => {},
+				agentBehaviorRecord: () => [],
+				formatBehaviorWarnings: () => "",
+			} as any);
+
+			expect(runtime.pendingDeferredFormatCount).toBe(0);
+			expect(dbg).toHaveBeenCalledWith(
+				expect.stringContaining("path_attribution_missing"),
+			);
+			expect(logLatency).toHaveBeenCalledWith(
+				expect.objectContaining({ phase: "path_attribution_missing" }),
+			);
+		} finally {
+			if (previousDataDir === undefined) {
+				delete process.env.PILENS_DATA_DIR;
+			} else {
+				process.env.PILENS_DATA_DIR = previousDataDir;
+			}
+			env.cleanup();
+		}
+	});
+
+	it("correlates by `callId` when the host doesn't populate `toolCallId` (#1642 F4)", async () => {
+		const env = setupTestEnvironment("pi-lens-correlation-callid-");
+		const previousDataDir = process.env.PILENS_DATA_DIR;
+		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+		try {
+			// tool-event.ts documents that the host does not always populate
+			// `toolCallId` — read-guard-logger.ts's own correlation resolver
+			// already had to widen to callId/requestId/id for exactly this
+			// reason. The path-attribution correlation must use the SAME
+			// shared resolver, not a narrower `event.toolCallId`-only read.
+			const worktreeDir = path.join(env.tmpDir, "worktree");
+			const worktreeFile = createTempFile(worktreeDir, "src/app.ts", "x\n");
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			const callId = "callid-not-toolcallid";
+
+			await handleToolCall({
+				event: { callId, toolName: "write", input: { path: "src/app.ts", content: "x\n" } },
+				ctx: { cwd: worktreeDir },
+				lensEnabled: true,
+				getFlag: (name: string) => name === "no-lsp",
+				dbg: () => {},
+				runtime,
+				cacheManager: new CacheManager(false),
+				ensureLSPConfigInitialized: async () => {},
+				updateLspStatus: () => {},
+				resetLSPService: () => {},
+			} as any);
+
+			const dbg = vi.fn();
+			await handleToolResult({
+				event: {
+					callId,
+					toolName: "write",
+					input: { path: "src/app.ts", content: "x\n" },
+					content: [],
+				},
+				getFlag: () => false,
+				dbg,
+				runtime,
+				cacheManager: new CacheManager(false),
+				biomeClient: {},
+				ruffClient: {},
+				metricsClient: {},
+				resetLSPService: () => {},
+				agentBehaviorRecord: () => [],
+				formatBehaviorWarnings: () => "",
+			} as any);
+
+			// No "path_attribution_missing" refusal — the callId-keyed
+			// attribution WAS found, so the worktree file's own basis resolved
+			// correctly and the write was processed normally.
+			expect(dbg).not.toHaveBeenCalledWith(
+				expect.stringContaining("path_attribution_missing"),
+			);
+			// Direct proof it queued the WORKTREE file specifically — not the
+			// naive-resolved (and, here, DIFFERENT) parent-root path
+			// `env.tmpDir/src/app.ts` that a callId-blind lookup would have
+			// fallen back to.
+			const queued = runtime
+				.consumeDeferredFormatFiles()
+				.map((record) => path.resolve(record.filePath));
+			expect(queued).toContain(path.resolve(worktreeFile));
+			expect(queued).not.toContain(path.resolve(env.tmpDir, "src/app.ts"));
+		} finally {
+			if (previousDataDir === undefined) {
+				delete process.env.PILENS_DATA_DIR;
+			} else {
+				process.env.PILENS_DATA_DIR = previousDataDir;
+			}
+			env.cleanup();
+		}
+	});
+
+	it("correlates two concurrent calls correctly when their results arrive OUT OF ORDER (#1642, pi parallel-execution)", async () => {
+		// pi's default execution model runs tool calls in parallel and
+		// delivers results in COMPLETION order — call A, call B, result B,
+		// result A is normal, not an edge case. An id-keyed correlation map
+		// must not assume results arrive in call order.
+		const env = setupTestEnvironment("pi-lens-out-of-order-");
+		const previousDataDir = process.env.PILENS_DATA_DIR;
+		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+		try {
+			const worktreeA = path.join(env.tmpDir, "worktree-a");
+			const worktreeB = path.join(env.tmpDir, "worktree-b");
+			const fileA = createTempFile(worktreeA, "src/app.ts", "a\n");
+			const fileB = createTempFile(worktreeB, "src/app.ts", "b\n");
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+
+			const callDeps = (toolCallId: string, cwd: string) => ({
+				event: { toolCallId, toolName: "write", input: { path: "src/app.ts", content: "x\n" } },
+				ctx: { cwd },
+				lensEnabled: true,
+				getFlag: (name: string) => name === "no-lsp",
+				dbg: () => {},
+				runtime,
+				cacheManager: new CacheManager(false),
+				ensureLSPConfigInitialized: async () => {},
+				updateLspStatus: () => {},
+				resetLSPService: () => {},
+			});
+
+			// Call A, then call B (in order) — both fire before either result.
+			await handleToolCall(callDeps("call-A", worktreeA) as any);
+			await handleToolCall(callDeps("call-B", worktreeB) as any);
+
+			const resultDeps = (toolCallId: string) => ({
+				event: {
+					toolCallId,
+					toolName: "write",
+					input: { path: "src/app.ts", content: "x\n" },
+					content: [],
+				},
+				getFlag: () => false,
+				dbg: () => {},
+				runtime,
+				cacheManager: new CacheManager(false),
+				biomeClient: {},
+				ruffClient: {},
+				metricsClient: {},
+				resetLSPService: () => {},
+				agentBehaviorRecord: () => [],
+				formatBehaviorWarnings: () => "",
+			});
+
+			// Result B arrives BEFORE result A — out-of-order completion.
+			await handleToolResult(resultDeps("call-B") as any);
+			await handleToolResult(resultDeps("call-A") as any);
+
+			// Each call's own attribution must have resolved against ITS OWN
+			// worktree, regardless of arrival order — no cross-contamination.
+			expect(fs.existsSync(fileA)).toBe(true);
+			expect(fs.existsSync(fileB)).toBe(true);
+			expect(runtime.takeToolCallAttribution("call-A")).toBeUndefined();
+			expect(runtime.takeToolCallAttribution("call-B")).toBeUndefined();
+		} finally {
+			if (previousDataDir === undefined) {
+				delete process.env.PILENS_DATA_DIR;
+			} else {
+				process.env.PILENS_DATA_DIR = previousDataDir;
+			}
+			env.cleanup();
+		}
+	});
+
+	it("logs the diagnostic path_attribution_refused when a genuine call-time/execution-time divergence occurs, but still processes the correct fresh path", async () => {
+		const env = setupTestEnvironment("pi-lens-attribution-divergence-");
+		const previousDataDir = process.env.PILENS_DATA_DIR;
+		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+		try {
+			// Source-level fact: tool_call's own resolved path is not
+			// authoritative — a later extension handler can mutate event.input
+			// in place, or edit's prepareArguments can rewrite args before the
+			// event fires (pi host agent-session.ts/types.ts). Simulate that by
+			// recording an attribution for one gitignored path and then firing
+			// tool_result with a DIFFERENT, non-ignored relative path under the
+			// SAME basis — the fresh resolution wins and the file is processed;
+			// the divergence is only logged, never gates the outcome.
+			fs.writeFileSync(path.join(env.tmpDir, ".gitignore"), "ignored-dir/\n");
+			createTempFile(env.tmpDir, "ignored-dir/old.ts", "old\n");
+			const newFile = createTempFile(env.tmpDir, "src/new.ts", "new\n");
+
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			runtime.recordToolCallAttribution("call-rewritten", {
+				resolvedPath: path.join(env.tmpDir, "ignored-dir", "old.ts"),
+				skipped: true,
+				originCwd: env.tmpDir,
+			});
+
+			const dbg = vi.fn();
+			await handleToolResult({
+				event: {
+					toolCallId: "call-rewritten",
+					toolName: "write",
+					input: { path: "src/new.ts", content: "new\n" },
+					content: [],
+				},
+				getFlag: () => false,
+				dbg,
+				runtime,
+				cacheManager: new CacheManager(false),
+				biomeClient: {},
+				ruffClient: {},
+				metricsClient: {},
+				resetLSPService: () => {},
+				agentBehaviorRecord: () => [],
+				formatBehaviorWarnings: () => "",
+			} as any);
+
+			expect(dbg).toHaveBeenCalledWith(
+				expect.stringContaining("path_attribution_refused"),
+			);
+			// Diagnostic only — the freshly & correctly resolved (non-ignored)
+			// path is what actually got processed.
+			expect(runtime.pendingDeferredFormatCount).toBe(1);
+			expect(fs.existsSync(newFile)).toBe(true);
+		} finally {
+			if (previousDataDir === undefined) {
+				delete process.env.PILENS_DATA_DIR;
+			} else {
+				process.env.PILENS_DATA_DIR = previousDataDir;
+			}
 			env.cleanup();
 		}
 	});
