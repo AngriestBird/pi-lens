@@ -15,6 +15,7 @@ import { access, readFile } from "node:fs/promises";
 import * as os from "node:os";
 import { pathToFileURL } from "node:url";
 import { withTimeout } from "../deadline-utils.js";
+import { raceToCompletion } from "./aggregation.js";
 import type { MessageConnection } from "../deps/vscode-jsonrpc.js";
 import { logLatency } from "../latency-logger.js";
 // vscode-jsonrpc v9 ships an `exports` map exposing the Node entry as the
@@ -736,6 +737,29 @@ function installCrashGuard(): void {
 
 // --- Client State + Module-level helpers ---
 
+/**
+ * #1667: one live `client/registerCapability` entry, with the fields of
+ * `registerOptions` this client actually acts on.
+ *
+ * The map used to store the method name alone. That silently discarded
+ * `identifier` — the diagnostic SOURCE a `textDocument/diagnostic` registration
+ * speaks for. Roslyn registers "syntax", "semantic" and "analyzers" as separate
+ * sources; vtsls does the same. With the identifier gone the pull path issued
+ * one bare request and every other source's findings were never asked for.
+ * `workspaceDiagnostics` was discarded the same way, so workspace-pull support
+ * had to be guessed from the method name.
+ */
+export interface DynamicRegistration {
+	readonly method: string;
+	/** `registerOptions.identifier`. Absent = the server's default/bare source. */
+	readonly identifier?: string;
+	/** `registerOptions.workspaceDiagnostics` — whether THIS registration also
+	 *  serves a workspace-wide pull. Absent = the server did not say. */
+	readonly workspaceDiagnostics?: boolean;
+	/** `registerOptions.commands` for a `workspace/executeCommand` registration. */
+	readonly commands?: readonly string[];
+}
+
 export interface LSPClientState {
 	isConnected: boolean;
 	isDestroyed: boolean;
@@ -822,8 +846,39 @@ export interface LSPClientState {
 	 *  pull for a path (primary or a `relatedDocuments` entry), so the NEXT pull
 	 *  can send it as `previousResultId` and receive an `unchanged` report instead
 	 *  of a full recompute. Cleared with the rest of a path's diagnostic state by
-	 *  `clearDiagnosticsForPath` so a resync never inherits a stale basis. */
+	 *  `clearDiagnosticsForPath` so a resync never inherits a stale basis.
+	 *
+	 *  #1667: keyed by (path, diagnostic identifier), not by path alone — result
+	 *  ids are per SOURCE. A server registering several diagnostic sources
+	 *  (Roslyn: syntax/semantic/analyzers) issues an independent id per source,
+	 *  and echoing one source's id to another makes the server answer
+	 *  `unchanged` against a basis it never issued. Build keys with
+	 *  `pullSourceKey`; the bare (identifier-less) source keys on the plain path
+	 *  so single-source servers are byte-identical to before. */
 	readonly pullResultIds: Map<string, string>;
+	/** #1667: per-source pull diagnostics for a path — outer key the normalized
+	 *  path, inner key the diagnostic identifier (`""` for the bare source).
+	 *  `documentPullDiagnostics` holds the DEDUPED UNION of these, recomputed
+	 *  after every source's report, so each source can be replaced independently
+	 *  without one source's answer wiping another's. Optional: a state built
+	 *  before this field existed lazily gains it on first pull. */
+	documentPullDiagnosticsBySource?: Map<string, Map<string, LSPDiagnostic[]>>;
+	/** #1667: per-path pull generation, bumped by `clearDiagnosticsForPath`. The
+	 *  fan-out leaves losing pulls running so their results still merge into the
+	 *  cache; a resync that lands in that window must not be overwritten by a
+	 *  pull computed against the content it just replaced. A late write whose
+	 *  captured generation no longer matches is dropped. */
+	pullGenerations?: Map<string, number>;
+	/** #1667: the sequence number of the NEWEST request issued for each
+	 *  `pullSourceKey(path, identifier)`. The generation counter above only
+	 *  guards against a resync; it says nothing about two overlapping fan-outs
+	 *  for the SAME unchanged content. `ensureWarmForSweep` touches a file and
+	 *  the real touch follows ~60ms later, so touch 2 can re-pull a source and
+	 *  store a fresh answer while touch 1's slow answer for that same source is
+	 *  still in flight - and the late loser would clobber the newer result.
+	 *  Each request stamps its own number here; a write whose stamp is no longer
+	 *  the newest is dropped. */
+	pullRequestSequences?: Map<string, number>;
 	/** #1104: per-path cache of the last `workspace/diagnostic` pull's resultId +
 	 *  diagnostics + content binding, so an `unchanged` report in a LATER pull can
 	 *  inherit the prior basis instead of the record site staying stuck at
@@ -866,8 +921,11 @@ export interface LSPClientState {
 	syncKind?: TextDocumentSyncKind;
 	/** Baseline mode from static initResult — used to revert on unregister */
 	staticDiagnosticsMode: "pull" | "push-only";
-	/** Live dynamic registrations from client/registerCapability: id → method */
-	readonly dynamicRegistrations: Map<string, string>;
+	/** Live dynamic registrations from client/registerCapability: id → record.
+	 *  #1667: the record carries the registration's `registerOptions`, not just
+	 *  its method. Dropping `identifier` made every diagnostic source of a
+	 *  multi-source server collapse into one bare pull. */
+	readonly dynamicRegistrations: Map<string, DynamicRegistration>;
 	/**
 	 * Commands the server advertised it can run via workspace/executeCommand
 	 * (initialize `executeCommandProvider.commands` + any dynamically registered
@@ -1137,13 +1195,17 @@ function normalizeLspDiagnostics(
 	return diagnostics.map(normalizeLspDiagnostic);
 }
 
+/**
+ * Union of diagnostic lists, first occurrence wins, exact duplicates dropped.
+ * Variadic since #1667 so the per-identifier pull sources merge through the
+ * SAME key as the push/pull merge rather than growing a second dedupe rule.
+ */
 function mergeDiagnosticLists(
-	push: LSPDiagnostic[] | undefined,
-	pull: LSPDiagnostic[] | undefined,
+	...lists: (LSPDiagnostic[] | undefined)[]
 ): LSPDiagnostic[] {
 	const merged: LSPDiagnostic[] = [];
 	const seen = new Set<string>();
-	for (const diagnostic of [...(push ?? []), ...(pull ?? [])]) {
+	for (const diagnostic of lists.flatMap((list) => list ?? [])) {
 		const key = [
 			diagnostic.range.start.line,
 			diagnostic.range.start.character,
@@ -1172,6 +1234,205 @@ function getMergedDiagnosticsForPath(
 			legacy.diagnostics?.get(normalizedPath),
 		state.documentPullDiagnostics?.get(normalizedPath),
 	);
+}
+
+/**
+ * #1667: per-source pull-diagnostic bookkeeping.
+ *
+ * A pull-mode server can expose several diagnostic SOURCES, each named by its
+ * registration's `registerOptions.identifier` (Roslyn: syntax, semantic,
+ * analyzers). Each source answers independently, with its own `resultId` and
+ * its own findings, so per-path state that used to be a single slot has to
+ * become one slot per (path, source):
+ *
+ *  - `pullResultIds` keys on `pullSourceKey(path, identifier)`, so an
+ *    `unchanged` report is only ever answered against the id THAT source
+ *    issued (#240/#1104 machinery, now per source).
+ *  - `documentPullDiagnosticsBySource` holds each source's findings, and
+ *    `documentPullDiagnostics` is their deduped union - recomputed whenever a
+ *    source reports, so a fresh answer from one source never wipes another's.
+ *
+ * The bare (identifier-less) source keys on the plain path, so a single-source
+ * server stores exactly what it stored before this change.
+ */
+// NUL is the one byte a filesystem path can never contain, so
+// `path + SEP + identifier` is unambiguous: no path/identifier pair can
+// produce the same key as a different pair, and the bare source's key (the
+// plain path) can never collide with a named source's.
+const PULL_SOURCE_KEY_SEPARATOR = "\u0000";
+const BARE_PULL_SOURCE = "";
+
+function pullSourceKey(
+	normalizedPath: string,
+	identifier: string | undefined,
+): string {
+	return identifier === undefined
+		? normalizedPath
+		: `${normalizedPath}${PULL_SOURCE_KEY_SEPARATOR}${identifier}`;
+}
+
+/** Every `pullResultIds` key belonging to a path - the bare key plus one per
+ *  identifier. Used by the clear path so a resync drops EVERY source's basis. */
+function pullSourceKeysForPath(
+	state: LSPClientState,
+	normalizedPath: string,
+): string[] {
+	const prefix = `${normalizedPath}${PULL_SOURCE_KEY_SEPARATOR}`;
+	return [
+		normalizedPath,
+		...[...(state.pullResultIds?.keys() ?? [])].filter((key) =>
+			key.startsWith(prefix),
+		),
+	];
+}
+
+function pullSourcesFor(
+	state: LSPClientState,
+	normalizedPath: string,
+): Map<string, LSPDiagnostic[]> {
+	if (!state.documentPullDiagnosticsBySource) {
+		state.documentPullDiagnosticsBySource = new Map();
+	}
+	let sources = state.documentPullDiagnosticsBySource.get(normalizedPath);
+	if (!sources) {
+		sources = new Map();
+		state.documentPullDiagnosticsBySource.set(normalizedPath, sources);
+	}
+	return sources;
+}
+
+/** This source's currently stored findings for a path - what an `unchanged`
+ *  report inherits. Falls back to the whole per-path list when the source map
+ *  has no entry yet, so a state that pulled before this change (or a caller
+ *  that seeded `documentPullDiagnostics` directly) still inherits correctly. */
+function pullSourceDiagnostics(
+	state: LSPClientState,
+	normalizedPath: string,
+	identifier: string | undefined,
+): LSPDiagnostic[] {
+	const sources = state.documentPullDiagnosticsBySource?.get(normalizedPath);
+	const stored = sources?.get(identifier ?? BARE_PULL_SOURCE);
+	if (stored) return stored;
+	return sources && sources.size > 0
+		? []
+		: (state.documentPullDiagnostics.get(normalizedPath) ?? []);
+}
+
+/** Store one source's findings and republish the union to
+ *  `documentPullDiagnostics`, which every reader outside this file uses. */
+function storePullSourceDiagnostics(
+	state: LSPClientState,
+	normalizedPath: string,
+	identifier: string | undefined,
+	diagnostics: LSPDiagnostic[],
+): void {
+	const sources = pullSourcesFor(state, normalizedPath);
+	sources.set(identifier ?? BARE_PULL_SOURCE, diagnostics);
+	state.documentPullDiagnostics.set(
+		normalizedPath,
+		mergeDiagnosticLists(...sources.values()),
+	);
+}
+
+/** #1667: the pull generation for a path. The fan-out deliberately lets losing
+ *  pulls run to completion so their findings still reach the cache; a resync
+ *  that lands first must win, so every late write re-checks this. */
+function pullGenerationFor(
+	state: LSPClientState,
+	normalizedPath: string,
+): number {
+	return state.pullGenerations?.get(normalizedPath) ?? 0;
+}
+
+function bumpPullGeneration(
+	state: LSPClientState,
+	normalizedPath: string,
+): void {
+	if (!state.pullGenerations) state.pullGenerations = new Map();
+	state.pullGenerations.set(
+		normalizedPath,
+		(state.pullGenerations.get(normalizedPath) ?? 0) + 1,
+	);
+}
+
+/** #1667: claim the newest-request slot for a source and return the claim.
+ *  Called at REQUEST time; `isNewestPullRequest` re-checks it at WRITE time so
+ *  a slow answer from an earlier fan-out cannot overwrite a newer one's. */
+function claimPullRequestSequence(
+	state: LSPClientState,
+	sourceKey: string,
+): number {
+	if (!state.pullRequestSequences) state.pullRequestSequences = new Map();
+	const next = (state.pullRequestSequences.get(sourceKey) ?? 0) + 1;
+	state.pullRequestSequences.set(sourceKey, next);
+	return next;
+}
+
+function isNewestPullRequest(
+	state: LSPClientState,
+	sourceKey: string,
+	sequence: number,
+): boolean {
+	return (state.pullRequestSequences?.get(sourceKey) ?? 0) === sequence;
+}
+
+/**
+ * #1667: drop every trace of a diagnostic source the server just unregistered.
+ *
+ * `client/unregisterCapability` retires a source, but its findings sit in
+ * `documentPullDiagnosticsBySource` and its resultId in `pullResultIds`, so
+ * without this the union keeps serving a retired source's diagnostics until
+ * something resyncs the file. Roslyn and vtsls re-register their sources on
+ * solution reload, which is exactly when the old source's findings are stale.
+ *
+ * Purges the source's slice from every path and republishes each affected
+ * path's union, so the removal is visible on the next read rather than only
+ * after the next pull.
+ */
+function retirePullSource(state: LSPClientState, identifier: string): void {
+	const suffix = `${PULL_SOURCE_KEY_SEPARATOR}${identifier}`;
+	for (const source of [state.pullResultIds, state.pullRequestSequences]) {
+		if (!source) continue;
+		for (const key of [...source.keys()]) {
+			if (key.endsWith(suffix)) source.delete(key);
+		}
+	}
+	for (const [normalizedPath, sources] of state.documentPullDiagnosticsBySource ??
+		[]) {
+		if (!sources.delete(identifier)) continue;
+		state.documentPullDiagnostics.set(
+			normalizedPath,
+			mergeDiagnosticLists(...sources.values()),
+		);
+		bumpDiagnosticsVersion(state, normalizedPath);
+		state.diagnosticEmitter.emit("diagnostics", normalizedPath);
+	}
+}
+
+/**
+ * #1667: the diagnostic sources to pull for a document - always the bare
+ * request (a server may answer it even while registering named sources, and it
+ * is the ONLY request a single-source server understands), plus one per
+ * distinct `identifier` on a live `textDocument/diagnostic` registration.
+ *
+ * Derived from `dynamicRegistrations` on every call rather than cached in a
+ * parallel list: the registration map is the single source of truth, and
+ * `client/unregisterCapability` must be able to retire a source immediately.
+ */
+export function pullDiagnosticSources(
+	state: LSPClientState,
+): (string | undefined)[] {
+	const identifiers = new Set<string>();
+	for (const registration of state.dynamicRegistrations?.values() ?? []) {
+		if (registration.method !== "textDocument/diagnostic") continue;
+		if (registration.identifier) identifiers.add(registration.identifier);
+	}
+	// Sorted for a stable, reproducible request order in logs and tests; the
+	// fan-out is parallel, so order carries no priority.
+	return [
+		undefined,
+		...[...identifiers].sort((a, b) => a.localeCompare(b)),
+	];
 }
 
 /** #1531: bump the client-global diagnostics counter and stamp the path it was
@@ -1229,7 +1490,24 @@ export function clearDiagnosticsForPath(
 	// #1104: a resync invalidates any `unchanged`-report basis too — the next
 	// pull must not inherit a resultId/contentHash computed against the
 	// content this resync just replaced.
-	state.pullResultIds?.delete(normalizedPath);
+	// #1667: every SOURCE's basis, not just the bare one - a multi-source server
+	// holds one resultId per identifier, and leaving even one behind lets the
+	// next pull inherit against content this resync replaced.
+	for (const key of pullSourceKeysForPath(state, normalizedPath)) {
+		state.pullResultIds?.delete(key);
+	}
+	// `pullRequestSequences` is deliberately NOT cleared here. It is a
+	// monotonic per-source counter, and resetting it would let a request issued
+	// BEFORE this resync claim the same number as one issued after, so the stale
+	// answer would pass the newest-request check. The two guards cover different
+	// cases and neither subsumes the other: the generation bump below invalidates
+	// in-flight work when nothing newer was requested, and the sequence stamp
+	// invalidates it when something newer was.
+	state.documentPullDiagnosticsBySource?.delete(normalizedPath);
+	// #1667: invalidate any pull still in flight for this path. The fan-out lets
+	// losing pulls run to completion so their findings still reach the cache;
+	// without this bump one of them could resurrect what this resync cleared.
+	bumpPullGeneration(state, normalizedPath);
 	state.workspacePullResultCache?.delete(normalizedPath);
 	legacy.diagnostics?.delete(normalizedPath);
 	legacy.diagnosticTimestamps?.delete(normalizedPath);
@@ -1437,7 +1715,8 @@ const DYNAMIC_OPERATION_METHOD_MAP: Record<string, keyof LSPOperationSupport> =
 	};
 
 export function applyDynamicCapabilities(state: LSPClientState): void {
-	const registeredMethods = new Set(state.dynamicRegistrations.values());
+	const registrations = [...state.dynamicRegistrations.values()];
+	const registeredMethods = new Set(registrations.map((r) => r.method));
 
 	const hasDynamicPull =
 		registeredMethods.has("textDocument/diagnostic") ||
@@ -1447,7 +1726,16 @@ export function applyDynamicCapabilities(state: LSPClientState): void {
 		state.workspaceDiagnosticsSupport = {
 			advertised: true,
 			mode: "pull",
-			workspaceDiagnostics: registeredMethods.has("workspace/diagnostic"),
+			// #1667: workspace-pull support is what the REGISTRATION declares. The
+			// spec registers workspace pull as `registerOptions.workspaceDiagnostics`
+			// on a `textDocument/diagnostic` registration - `workspace/diagnostic` is
+			// not itself a registrable method - so reading the method name alone
+			// missed every conforming server and this client never issued a
+			// workspace pull for one. The method-name check stays as a fallback for
+			// servers that register it as a method anyway.
+			workspaceDiagnostics:
+				registrations.some((r) => r.workspaceDiagnostics === true) ||
+				registeredMethods.has("workspace/diagnostic"),
 			diagnosticProviderKind: "dynamic",
 		};
 	} else if (
@@ -1709,22 +1997,40 @@ export function setupIncomingHandlers(
 			registrations?: Array<{
 				id: string;
 				method: string;
-				registerOptions?: { commands?: unknown };
+				registerOptions?: {
+					commands?: unknown;
+					identifier?: unknown;
+					workspaceDiagnostics?: unknown;
+				};
 			}>;
 		}) => {
 			for (const reg of params?.registrations ?? []) {
+				const options = reg.registerOptions;
+				const commands = Array.isArray(options?.commands)
+					? options.commands.filter(
+							(cmd): cmd is string => typeof cmd === "string",
+						)
+					: undefined;
 				if (reg.id && reg.method) {
-					state.dynamicRegistrations.set(reg.id, reg.method);
+					// #1667: keep the whole registration, not just its method. An empty
+					// `identifier` is treated as absent - it names no source, and
+					// sending `identifier: ""` would be a second, indistinguishable
+					// bare pull.
+					state.dynamicRegistrations.set(reg.id, {
+						method: reg.method,
+						...(typeof options?.identifier === "string" && options.identifier
+							? { identifier: options.identifier }
+							: {}),
+						...(typeof options?.workspaceDiagnostics === "boolean"
+							? { workspaceDiagnostics: options.workspaceDiagnostics }
+							: {}),
+						...(commands ? { commands } : {}),
+					});
 				}
 				// executeCommand commands can arrive dynamically too — merge them
 				// into the allowlist so dynamically-registered commands are runnable.
-				if (
-					reg.method === "workspace/executeCommand" &&
-					Array.isArray(reg.registerOptions?.commands)
-				) {
-					for (const cmd of reg.registerOptions.commands) {
-						if (typeof cmd === "string") state.advertisedCommands.add(cmd);
-					}
+				if (reg.method === "workspace/executeCommand" && commands) {
+					for (const cmd of commands) state.advertisedCommands.add(cmd);
 				}
 			}
 			applyDynamicCapabilities(state);
@@ -1733,9 +2039,30 @@ export function setupIncomingHandlers(
 	state.connection.onRequest(
 		"client/unregisterCapability",
 		async (params: { unregisterations?: Array<{ id: string }> }) => {
+			const retiredIdentifiers = new Set<string>();
 			for (const unreg of params?.unregisterations ?? []) {
-				if (unreg.id) {
-					state.dynamicRegistrations.delete(unreg.id);
+				if (!unreg.id) continue;
+				const registration = state.dynamicRegistrations.get(unreg.id);
+				state.dynamicRegistrations.delete(unreg.id);
+				if (
+					registration?.method === "textDocument/diagnostic" &&
+					registration.identifier
+				) {
+					retiredIdentifiers.add(registration.identifier);
+				}
+			}
+			// #1667: a retired source's cached findings and resultId must go with
+			// it, or the union keeps serving them. Checked after the deletes above,
+			// and only when NO surviving registration still speaks for that
+			// identifier.
+			const stillRegistered = new Set(
+				[...state.dynamicRegistrations.values()]
+					.filter((r) => r.method === "textDocument/diagnostic")
+					.map((r) => r.identifier),
+			);
+			for (const identifier of retiredIdentifiers) {
+				if (!stillRegistered.has(identifier)) {
+					retirePullSource(state, identifier);
 				}
 			}
 			applyDynamicCapabilities(state);
@@ -2007,11 +2334,125 @@ type PullDiagnosticsOutcome =
 	| { status: "clean" }
 	| { status: "unavailable" };
 
+/**
+ * One diagnostic SOURCE's outcome. `primaryCount` is the part of `count` that
+ * belongs to the REQUESTED file — `count` also includes `relatedDocuments`.
+ * The fan-out races on `primaryCount` because "the answer arrived" means the
+ * file the caller asked about has an answer, not that some other document did.
+ */
+type PullSourceOutcome =
+	| { status: "found"; count: number; primaryCount: number }
+	| { status: "clean" }
+	| { status: "unavailable" };
+
+/** Margin between each source's own request timeout and the race's backstop
+ *  deadline, so the natural "all sources settled" path wins over the backstop
+ *  and the race never reports `unavailable` for sources that did answer. */
+const PULL_RACE_BACKSTOP_MARGIN_MS = 25;
+
+/**
+ * #1667: pull EVERY registered diagnostic source for a file, in parallel, and
+ * answer as soon as the first source returns findings for that file.
+ *
+ * Roslyn, vtsls and some Java setups register `textDocument/diagnostic` once
+ * per source (syntax, semantic, analyzers), each named by
+ * `registerOptions.identifier`. One bare request asks only the server's default
+ * source, so whole categories of findings were never requested. The fan-out
+ * asks all of them plus the bare request.
+ *
+ * Timing is deliberate and load-bearing:
+ *  - PARALLEL, never one source after another. Sequencing would add every
+ *    slow source's latency to every touch.
+ *  - The race resolves on the FIRST source with findings for the file, with no
+ *    settle or debounce window after the match. A post-match wait is the exact
+ *    latency shape #1112/#1407 already cost this codebase once.
+ *  - Losing sources are NOT cancelled. Each source writes its own findings into
+ *    the pull cache before it resolves, so a late answer merges in the
+ *    background and the NEXT read of the file sees it. Late answers are not
+ *    dropped, they are just not waited for.
+ *
+ * The race runs inside the existing `raceToCompletion` primitive rather than a
+ * second first-wins helper.
+ */
 async function clientRequestPullDiagnostics(
 	state: LSPClientState,
 	filePath: string,
 	budgetMs: number = PULL_REQUEST_TIMEOUT_MS,
 ): Promise<PullDiagnosticsOutcome> {
+	if (!isClientAlive(state)) return { status: "unavailable" };
+	const sources = pullDiagnosticSources(state);
+	if (sources.length === 1) {
+		// The overwhelmingly common case: no named sources registered. Skip the
+		// race entirely so a single-source server pays nothing for this feature.
+		return aggregatePullOutcomes(state, filePath, [
+			await pullDiagnosticSource(state, filePath, budgetMs, undefined),
+		]);
+	}
+
+	const attempts = sources.map((identifier) =>
+		pullDiagnosticSource(state, filePath, budgetMs, identifier),
+	);
+	const settled = await raceToCompletion(
+		attempts,
+		(results) => results.some((r) => r.status === "found" && r.primaryCount > 0),
+		{
+			// No graceMs: finalize the instant a source answers for this file.
+			// The per-request `withTimeout` inside each attempt is the real bound;
+			// this deadline is only a backstop, so it sits just past it.
+			timeoutMs:
+				Math.max(1, Math.min(PULL_REQUEST_TIMEOUT_MS, budgetMs)) +
+				PULL_RACE_BACKSTOP_MARGIN_MS,
+		},
+	);
+	return aggregatePullOutcomes(state, filePath, settled);
+}
+
+/**
+ * Collapse the sources that answered into one outcome for the caller.
+ * `found` beats `clean` beats `unavailable`: a source with findings is an
+ * answer, an authoritative empty report is an answer, and only "nobody
+ * answered" is unavailable (#240 — an empty result must distinguish clean
+ * from errored).
+ */
+function aggregatePullOutcomes(
+	state: LSPClientState,
+	filePath: string,
+	outcomes: PullSourceOutcome[],
+): PullDiagnosticsOutcome {
+	const found = outcomes.filter((o) => o.status === "found");
+	if (found.length > 0) {
+		const normalizedPath = normalizeMapKey(filePath);
+		// The union for the requested file, which is what a caller reading the
+		// cache will see. A source that only reported `relatedDocuments` findings
+		// contributes nothing there, so fall back to its own count.
+		const unionCount =
+			state.documentPullDiagnostics.get(normalizedPath)?.length ?? 0;
+		return {
+			status: "found",
+			count: Math.max(unionCount, ...found.map((o) => o.count)),
+		};
+	}
+	// #240, applied across sources: `clean` is an authoritative "this file has no
+	// findings", and one source saying so proves nothing about a source that
+	// FAILED to answer. A fan-out where any source errored is therefore
+	// unavailable, not clean - the caller falls through to the push-wait/timeout
+	// backstop instead of recording a confirmed-clean touch it cannot support.
+	// (`raceToCompletion` drops still-pending promises from its result array, so
+	// "every source settled, none errored" is the only shape that reads clean.)
+	if (outcomes.some((o) => o.status === "unavailable")) {
+		return { status: "unavailable" };
+	}
+	return outcomes.some((o) => o.status === "clean")
+		? { status: "clean" }
+		: { status: "unavailable" };
+}
+
+async function pullDiagnosticSource(
+	state: LSPClientState,
+	filePath: string,
+	budgetMs: number,
+	identifier: string | undefined,
+): Promise<PullSourceOutcome> {
 	if (!isClientAlive(state)) return { status: "unavailable" };
 	const uri = pathToFileURL(filePath).href;
 	const normalizedPath = normalizeMapKey(filePath);
@@ -2019,7 +2460,21 @@ async function clientRequestPullDiagnostics(
 	// hasn't changed its view can answer `kind: "unchanged"` instead of
 	// recomputing — see the `kind === "unchanged"` branch below for how that's
 	// honored (inherit, never treat an omitted `items` as clean).
-	const previousResultId = state.pullResultIds.get(normalizedPath);
+	// #1667: read THIS source's id, never another source's. Result ids are
+	// issued per source, so echoing a syntax id on a semantic request asks the
+	// server to compare against a basis it never handed out.
+	const sourceKey = pullSourceKey(normalizedPath, identifier);
+	const previousResultId = state.pullResultIds.get(sourceKey);
+	// #1667: the generation this pull was computed against. A resync landing
+	// while the request is in flight bumps it, and every write below is dropped
+	// rather than resurrecting state the resync cleared.
+	const generation = pullGenerationFor(state, normalizedPath);
+	// #1667: claim the newest-request slot for THIS source. Two fan-outs can
+	// overlap for the same file with no resync between them (`ensureWarmForSweep`
+	// touches, then the real touch follows ~60ms later), so the generation check
+	// alone would let a slow answer from the earlier round land on top of a newer
+	// one. Re-checked at write time below.
+	const requestSequence = claimPullRequestSequence(state, sourceKey);
 	try {
 		// withTimeout is the backstop against a hung pull-mode server: without it
 		// this await never settles unless the stream is destroyed. Bounded by the
@@ -2037,6 +2492,9 @@ async function clientRequestPullDiagnostics(
 				>;
 			}>(state.connection, "textDocument/diagnostic", {
 				textDocument: { uri },
+				// #1667: name the source this request is for, so the server answers
+				// from that source instead of its default one.
+				...(identifier !== undefined && { identifier }),
 				...(previousResultId !== undefined && { previousResultId }),
 			}),
 			Math.max(1, Math.min(PULL_REQUEST_TIMEOUT_MS, budgetMs)),
@@ -2055,29 +2513,58 @@ async function clientRequestPullDiagnostics(
 		// response describes whatever the server had when it answered, which for
 		// a pi-lens-opened document is exactly that last-sent payload.
 		const sentHash = state.documentContentHashes.get(normalizedPath)?.hash;
-		let totalCount: number;
+		// #1667: two ways this answer can already be obsolete, and neither may
+		// write. Report the round trip as unavailable - a superseded answer is not
+		// evidence the file is clean (#240).
+		//  - A resync landed while the request was in flight, so these findings
+		//    describe content that no longer exists.
+		//  - A LATER request for this same source has already been issued (an
+		//    overlapping fan-out), so this answer is the stale loser and would
+		//    clobber the newer result.
+		if (
+			pullGenerationFor(state, normalizedPath) !== generation ||
+			!isNewestPullRequest(state, sourceKey, requestSequence)
+		) {
+			return { status: "unavailable" };
+		}
+		let primaryCount: number;
 		if (report.kind === "unchanged") {
 			// #1104: same resultId basis as last time — an omitted `items` here
 			// means "no change", NOT "clean". Overwriting with `[]` would be the
 			// exact false-clean shape #570/#571 already fixed for the touch path;
 			// keep the previously stored diagnostics and binding as-is.
-			totalCount = state.documentPullDiagnostics.get(normalizedPath)?.length ?? 0;
+			// #1667: "the previously stored diagnostics" means THIS SOURCE's, so
+			// one source reporting unchanged neither inherits nor disturbs another
+			// source's findings for the same file.
+			primaryCount = pullSourceDiagnostics(
+				state,
+				normalizedPath,
+				identifier,
+			).length;
 			// Still a fresh confirmation as of `now` even though the content is
 			// unchanged — bump the timestamp so `getAllDiagnostics()` doesn't read
 			// this entry as aging purely because the server had nothing new to say.
 			state.documentPullDiagnosticTimestamps.set(normalizedPath, now);
 		} else {
 			const primaryItems = normalizeLspDiagnostics(report.items ?? []);
-			state.documentPullDiagnostics.set(normalizedPath, primaryItems);
+			// #1667: replace only this source's slice; `documentPullDiagnostics`
+			// becomes the deduped union of every source that has reported.
+			storePullSourceDiagnostics(
+				state,
+				normalizedPath,
+				identifier,
+				primaryItems,
+			);
 			state.documentPullDiagnosticTimestamps.set(normalizedPath, now);
 			bumpDiagnosticsVersion(state, normalizedPath);
 			state.diagnosticBindings.set(normalizedPath, { contentHash: sentHash });
-			totalCount = primaryItems.length;
+			primaryCount = primaryItems.length;
 		}
+		let totalCount = primaryCount;
 		if (report.resultId !== undefined) {
-			state.pullResultIds.set(normalizedPath, report.resultId);
+			state.pullResultIds.set(sourceKey, report.resultId);
 		} else {
-			state.pullResultIds.delete(normalizedPath);
+			state.pullResultIds.delete(sourceKey);
 		}
 
 		// #1531 note (pre-existing, unchanged): a related document's diagnostics are
@@ -2094,13 +2581,24 @@ async function clientRequestPullDiagnostics(
 			)) {
 				const relatedPath = uriToPath(relatedUri);
 				const relatedNormalized = normalizeMapKey(relatedPath);
+				// #1667: a related document's report belongs to the SAME source as
+				// the request that carried it, so it stores and inherits under that
+				// source's key too.
 				if (related?.kind === "unchanged") {
-					totalCount +=
-						state.documentPullDiagnostics.get(relatedNormalized)?.length ?? 0;
+					totalCount += pullSourceDiagnostics(
+						state,
+						relatedNormalized,
+						identifier,
+					).length;
 					state.documentPullDiagnosticTimestamps.set(relatedNormalized, now);
 				} else {
 					const relatedItems = normalizeLspDiagnostics(related?.items ?? []);
-					state.documentPullDiagnostics.set(relatedNormalized, relatedItems);
+					storePullSourceDiagnostics(
+						state,
+						relatedNormalized,
+						identifier,
+						relatedItems,
+					);
 					state.documentPullDiagnosticTimestamps.set(relatedNormalized, now);
 					// #1104: a related document's diagnostics were NOT computed against
 					// content we independently sent/fingerprinted (we never requested
@@ -2110,14 +2608,17 @@ async function clientRequestPullDiagnostics(
 					totalCount += relatedItems.length;
 				}
 				if (related?.resultId !== undefined) {
-					state.pullResultIds.set(relatedNormalized, related.resultId);
+					state.pullResultIds.set(
+						pullSourceKey(relatedNormalized, identifier),
+						related.resultId,
+					);
 				}
 			}
 		}
 
 		state.diagnosticEmitter.emit("diagnostics", normalizedPath);
 		return totalCount > 0
-			? { status: "found", count: totalCount }
+			? { status: "found", count: totalCount, primaryCount }
 			: { status: "clean" };
 	} catch (err) {
 		recordPullFailure(state, "textDocument/diagnostic", err);
@@ -3298,6 +3799,9 @@ export async function createLSPClient(options: {
 		documentContentHashes: new Map(),
 		diagnosticBindings: new Map(),
 		pullResultIds: new Map(),
+		documentPullDiagnosticsBySource: new Map(),
+		pullGenerations: new Map(),
+		pullRequestSequences: new Map(),
 		workspacePullResultCache: new Map(),
 		openDocuments: new Set(),
 		closedDocuments: new Set(),
