@@ -39,15 +39,20 @@ const FAKE_SERVER_PATH = path.join(
 	"../../fixtures/fake-lsp-server.mjs",
 );
 const ROOT = process.cwd();
-/** The server dies above this many unread documents. */
-const WEDGE_ABOVE = 2;
+/**
+ * The server dies above this many unread documents. Deliberately three times the
+ * ceiling the test configures: the assertion is that pacing keeps the backlog
+ * bounded, and a knife-edge margin would let a slow CI host, rather than the
+ * throttle, decide the result (#1491/#1498).
+ */
+const WEDGE_ABOVE = 6;
 /**
  * Per-document cost, set ABOVE the touch's own notify budget so the sweep hands
  * documents over faster than the server retires them. That is the production
  * asymmetry: a touch stops waiting after its budget and moves to the next file,
  * while the scanner is still working on the last one.
  */
-const NOTIFY_COST_MS = 150;
+const NOTIFY_COST_MS = 60;
 const SWEEP_FILES = 12;
 
 async function makeAuxServer() {
@@ -113,7 +118,12 @@ describe("#1714 — real-stream proof against a server with an intake ceiling", 
 		vi.resetModules();
 		getServersForFileWithConfig.mockReset();
 		logLatency.mockReset();
-		process.env.PI_LENS_LSP_NOTIFY_BUDGET_MS = "2000";
+		// Generous on purpose. This test is about the barrier's PROTOCOL, not about
+		// what happens when it runs out of time — that path has its own test with
+		// doubles, where the clock is not the host's to move. A tight budget here
+		// would let CI contention turn a drained barrier into a stalled one, which
+		// is the host-dependent-test shape (#1491/#1498), not a product signal.
+		process.env.PI_LENS_LSP_NOTIFY_BUDGET_MS = "15000";
 	});
 
 	afterEach(() => {
