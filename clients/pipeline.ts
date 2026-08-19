@@ -323,6 +323,18 @@ export interface PipelineResult {
 	 * retire the record (see `retireInlineBlockerOnConfirmedClean`).
 	 */
 	inlineBlockerSources?: string[];
+	/**
+	 * #1641 remainder: the 1-based cited lines of the blockers behind
+	 * `inlineBlockerSummary`, carried structurally instead of re-parsed from the
+	 * rendered text later. Cheap here — `dispatchResult.blockers` already has
+	 * `.line` on each diagnostic from this same dispatch; re-deriving it by
+	 * regexing the summary string at turn end would be the re-derivation-vs-
+	 * correlation screen's exact failure shape (a line embedded in prose is not
+	 * reliably parseable, and dispatcher-side rendering changes would silently
+	 * break it). Omits entries with no line (a blocker that doesn't cite one,
+	 * e.g. a whole-file secret finding).
+	 */
+	inlineBlockerLines?: number[];
 	/** Fixable warning diagnostics introduced by this pipeline run. */
 	actionableWarnings?: ActionableWarningRecord[];
 	/** Non-fixable code-quality warnings introduced/touched by this pipeline run. */
@@ -1595,6 +1607,11 @@ export async function runPipeline(
 						dispatchResult.blockers.map((d) => d.tool?.trim() || "unknown"),
 					),
 				]
+			: undefined,
+		inlineBlockerLines: dispatchResult.hasBlockers
+			? dispatchResult.blockers
+					.map((d) => d.line)
+					.filter((line): line is number => typeof line === "number")
 			: undefined,
 		actionableWarnings,
 		codeQualityWarnings,

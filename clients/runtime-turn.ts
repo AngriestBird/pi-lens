@@ -89,6 +89,7 @@ import {
 	snapshotAdvisoryProvenance,
 } from "./advisory-provenance.js";
 import { sweepInlineBlockerFreshness } from "./blocker-freshness.js";
+import { sweepInlineBlockerPastEof } from "./blocker-past-eof.js";
 // #1631 review V2: moved to its own leaf module so a low-level store
 // (widget-state.ts) can use the marker without importing this orchestrator —
 // see clients/stale-marker.ts's doc comment.
@@ -485,6 +486,27 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	const advisoryParts: string[] = [];
 	const projectDiagnosticsDelta: ProjectDiagnostic[] = [];
 	const projectDiagnosticsSources = new Set<string>();
+
+	// #1641: past-EOF gate. Runs BEFORE the dependency-drift sweep below — a
+	// cheap statSync per cited file is worth paying first so the pricier
+	// import-parsing sweep can skip anything already taken out of the
+	// authoritative channel this turn (see blocker-past-eof.ts's module doc
+	// for the full composition rule with #1631's gate).
+	const blockerPastEofStart = Date.now();
+	const blockerPastEof = sweepInlineBlockerPastEof(runtime, cwd);
+	logLatency({
+		type: "phase",
+		toolName: "turn_end",
+		filePath: cwd,
+		phase: "blocker_past_eof_sweep",
+		durationMs: Date.now() - blockerPastEofStart,
+		metadata: {
+			total: blockerPastEof.total,
+			checked: blockerPastEof.checked,
+			demoted: blockerPastEof.demoted,
+			healed: blockerPastEof.healed,
+		},
+	});
 
 	// #1631: freshness gate. A cached blocker is a verdict about the file AND
 	// everything it imports; before re-serving it, sweep for out-of-band drift of
