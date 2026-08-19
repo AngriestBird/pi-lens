@@ -58,6 +58,10 @@ import {
 	createAvailabilityLatch,
 	resetInstallRetryLatches,
 } from "../../clients/dispatch/runners/utils/availability-policy.js";
+import {
+	getSharedTreeSitterClient,
+	resetTreeSitterClientLoadState,
+} from "../../clients/tree-sitter-shared.js";
 import { removeTempDirSync } from "../clients/test-utils.js";
 
 /**
@@ -277,6 +281,31 @@ export const SESSION_STATE_REGISTRY: SessionStateEntry[] = [
 		reason:
 			"A once-per-session coverage notice must be sayable again to the next session's agent.",
 	},
+	{
+		id: "tree-sitter-shared:webTreeSitterLoadFailed",
+		module: "tree-sitter-shared.ts",
+		state:
+			"the shared TreeSitterClient singleton's webTreeSitterLoadFailed latch",
+		policy: "session_start",
+		resetName: "resetTreeSitterClientLoadState",
+		reason:
+			"#1592: an EVALUATION-shaped loadWebTreeSitter() rejection latches for the session (Node's ESM loader permanently memoizes the rejected module record for that URL, the same shape #1567/#1575 fixed for sgSessionHold) — but that verdict must not outlive the session that observed it, so a fresh session (or a process restart in between) gets a real re-attempt instead of a silently reused stale failure.",
+		probe: {
+			arm: () => {
+				const client = getSharedTreeSitterClient() as unknown as {
+					webTreeSitterLoadFailed: boolean;
+				} | null;
+				if (client) client.webTreeSitterLoadFailed = true;
+			},
+			isArmed: () => {
+				const client = getSharedTreeSitterClient() as unknown as {
+					webTreeSitterLoadFailed: boolean;
+				} | null;
+				return client ? client.webTreeSitterLoadFailed === false : true;
+			},
+			reset: () => resetTreeSitterClientLoadState(),
+		},
+	},
 
 	// ── The rest of the session_start reset chain ────────────────────────────
 	{
@@ -450,7 +479,6 @@ export const EXEMPT_SESSION_STATE_FILES: Readonly<Record<string, string>> = {
 	// the session. Re-deriving per session would just re-pay a spawn. ---
 	"lsp/jvm-runtime.ts": "resolved JVM location; a session boundary cannot move it",
 	"review-graph/git-identity.ts": "git user identity, read once per process",
-	"tree-sitter-shared.ts": "the shared parser client singleton",
 	"slow-fs.ts": "measured filesystem-latency classification of the host",
 	"tui-fit.ts": "terminal truncation-behavior probe",
 	"project-scale.ts": "project-scale base measurement, recomputed on its own inputs",
