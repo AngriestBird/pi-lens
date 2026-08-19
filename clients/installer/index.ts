@@ -2658,7 +2658,7 @@ async function findNpmGlobalToolPath(
 	onTransient?: () => void,
 ): Promise<string | undefined> {
 	const isWindows = process.platform === "win32";
-	const binDirs = await getNpmGlobalBinCandidates();
+	const binDirs = await getNpmGlobalBinCandidates(onTransient);
 
 	for (const dir of binDirs) {
 		const candidates = isWindows
@@ -2683,7 +2683,9 @@ async function findNpmGlobalToolPath(
 	return undefined;
 }
 
-async function getNpmGlobalBinCandidates(): Promise<string[]> {
+async function getNpmGlobalBinCandidates(
+	onTransient?: () => void,
+): Promise<string[]> {
 	const dirs: string[] = [];
 	const seen = new Set<string>();
 
@@ -2703,8 +2705,11 @@ async function getNpmGlobalBinCandidates(): Promise<string[]> {
 	}
 
 	// Global bin dirs for every installed manager (npm/pnpm/yarn/bun) — a tool
-	// may have been installed globally via any of them.
-	for (const dir of await allAvailableGlobalBinDirs()) {
+	// may have been installed globally via any of them. `onTransient` surfaces
+	// a manager whose availability probe stalled rather than genuinely failed,
+	// so its bin dir may be missing from `dirs` for a reason other than "not
+	// installed" (#1585).
+	for (const dir of await allAvailableGlobalBinDirs(onTransient)) {
 		add(dir);
 	}
 
