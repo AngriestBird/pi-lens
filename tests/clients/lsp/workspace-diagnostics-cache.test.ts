@@ -25,6 +25,7 @@ import {
 	WORKSPACE_DIAGNOSTICS_CACHE_VERSION,
 	type WorkspaceDiagnosticsCacheEntry,
 } from "../../../clients/lsp/workspace-diagnostics-cache.js";
+import { MTIME_DRIFT_TOLERANCE_MS } from "../../../clients/blocker-freshness.js";
 import { hashDiagnosticContent } from "../../../clients/lsp/diagnostic-binding.js";
 import { removeTempDirSync } from "../test-utils.js";
 
@@ -140,6 +141,30 @@ describe("isEntryFresh (#671)", () => {
 		const scannedAt = Date.now() + 10_000; // entry "recorded" after the dep's mtime
 		const entry = makeEntry({ mtimeMs, scannedAt });
 		expect(isEntryFresh(filePath, entry, () => [depPath])).toBe(true);
+	});
+
+	// #1708 sweep: same defect shape as `findingPathFreshness` — a strict
+	// `mtimeMs > scannedAt` against a captured scan timestamp. Fabricates the
+	// mtime/scannedAt pair directly (no real write race) so the boundary is
+	// deterministic and pins both edges against a `>` / tolerance-widening
+	// mutation.
+	it("stays fresh when a dependency's mtime lands within MTIME_DRIFT_TOLERANCE_MS of scannedAt", () => {
+		const depPath = path.join(tmp, "dep-tolerance.ts");
+		fs.writeFileSync(depPath, "export const x = 1;\n");
+		const mtimeMs = fs.statSync(filePath).mtimeMs;
+		const scannedAt = fs.statSync(depPath).mtimeMs - MTIME_DRIFT_TOLERANCE_MS;
+		const entry = makeEntry({ mtimeMs, scannedAt });
+		expect(isEntryFresh(filePath, entry, () => [depPath])).toBe(true);
+	});
+
+	it("is stale when a dependency's mtime lands past MTIME_DRIFT_TOLERANCE_MS of scannedAt", () => {
+		const depPath = path.join(tmp, "dep-past-tolerance.ts");
+		fs.writeFileSync(depPath, "export const x = 1;\n");
+		const mtimeMs = fs.statSync(filePath).mtimeMs;
+		const scannedAt =
+			fs.statSync(depPath).mtimeMs - MTIME_DRIFT_TOLERANCE_MS - 1;
+		const entry = makeEntry({ mtimeMs, scannedAt });
+		expect(isEntryFresh(filePath, entry, () => [depPath])).toBe(false);
 	});
 
 	it("is stale when a dependency has been deleted (fail closed)", () => {

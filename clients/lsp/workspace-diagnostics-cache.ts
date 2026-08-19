@@ -5,6 +5,7 @@ import { writeFileAtomic } from "../atomic-write.js";
 import { readJsonCache } from "../json-cache-read.js";
 import { normalizeMapKey } from "../path-utils.js";
 import { loadReverseDependencyIndexFromSnapshot } from "../reverse-deps.js";
+import { MTIME_DRIFT_TOLERANCE_MS } from "../blocker-freshness.js";
 import type { LSPDiagnostic } from "./client.js";
 import {
 	createDiskBindingCache,
@@ -144,6 +145,12 @@ export function saveWorkspaceDiagnosticsCache(
  * cheap-tier `project-diagnostics.json` cache already accepts today. Once a
  * reverse-deps index IS available, this function upgrades to using it
  * automatically — no separate cache format/version needed.
+ *
+ * #1708 sweep: the dependency check below compares a captured `scannedAt`
+ * against each dependency's mtime, the same shape `findingPathFreshness`
+ * under-tolerated. `MTIME_DRIFT_TOLERANCE_MS` (`blocker-freshness.ts`) keeps
+ * it from over-invalidating on the same host mtime-vs-`Date.now()` skew
+ * (#1491/#1498) rather than just a redundant re-touch.
  */
 export function isEntryFresh(
 	filePath: string,
@@ -162,7 +169,9 @@ export function isEntryFresh(
 	if (imports === undefined) return true; // no dep graph this session: mtime-only
 	for (const dep of imports) {
 		try {
-			if (fs.statSync(dep).mtimeMs > entry.scannedAt) return false;
+			if (fs.statSync(dep).mtimeMs > entry.scannedAt + MTIME_DRIFT_TOLERANCE_MS) {
+				return false;
+			}
 		} catch {
 			return false; // dependency deleted/unreadable: fail closed
 		}
