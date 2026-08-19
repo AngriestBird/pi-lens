@@ -132,4 +132,31 @@ describe("resyncLspFile — bounded pre-dispatch LSP sync", () => {
 			.find((entry: any) => entry.phase === "lsp_sync_abandoned");
 		expect(abandoned?.metadata?.reason).toBe("timeout");
 	});
+
+	// #1766 review F3: a service double (or a future service shape) that lacks
+	// isSpawnInFlight must not throw. An unguarded call throws into the
+	// swallow-all catch in resyncLspFile, which suppresses the
+	// lsp_sync_abandoned record entirely — a stall that used to be logged
+	// (even with the wrong reason) would go completely silent.
+	it("degrades to the old timeout wording, without throwing, when the service lacks isSpawnInFlight", async () => {
+		const dbgCalls: string[] = [];
+		const dbgSpy = (msg: string) => dbgCalls.push(msg);
+		vi.mocked(getLSPService).mockReturnValue({
+			supportsLSP: () => true,
+			touchFile: vi.fn(() => new Promise(() => {})),
+			// isSpawnInFlight intentionally omitted — partial double / older shape.
+		} as any);
+
+		await resyncLspFile("/proj/a.ts", "content", true, false, getFlag, dbgSpy);
+
+		const joined = dbgCalls.join("\n");
+		expect(joined).toContain("slow/wedged");
+		expect(joined).not.toContain("after autofix error"); // did not fall into the catch
+
+		const abandoned = logLatencyMock.mock.calls
+			.map((call) => call[0])
+			.find((entry: any) => entry.phase === "lsp_sync_abandoned");
+		expect(abandoned).toBeDefined();
+		expect(abandoned?.metadata?.reason).toBe("timeout");
+	});
 });

@@ -180,6 +180,91 @@ describe("LSPService race hardening", () => {
 		});
 	});
 
+	// #1766 review F1: reviewer's probe — a PRIMARY server already alive with
+	// zero pending spawn calls, and only an AUXILIARY server (typos, opengrep,
+	// …) parked mid-spawn. Auxiliary spawns are routine and concurrent with an
+	// alive primary (dispatch/runners/lsp.ts's with-auxiliary path fires one
+	// per edit for most files), so isSpawnInFlight must stay false here — the
+	// unfiltered prefix scan previously answered true, which would downgrade a
+	// genuinely wedged primary to a benign "spawn-in-flight" verdict, the
+	// worse misreport direction.
+	it("stays false when only an auxiliary server is mid-spawn and the primary is alive", async () => {
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const service = new LSPService();
+
+		let releaseAux!: () => void;
+		const auxGate = new Promise<void>((resolve) => {
+			releaseAux = resolve;
+		});
+		let auxAdmitted!: () => void;
+		const auxAdmittedPromise = new Promise<void>((resolve) => {
+			auxAdmitted = resolve;
+		});
+		createLSPClient.mockImplementation(
+			async ({ serverId }: { serverId: string }) => {
+				if (serverId === "typos") {
+					auxAdmitted();
+					await auxGate;
+				}
+				return { isAlive: () => true, shutdown: vi.fn(async () => {}) };
+			},
+		);
+
+		const primarySpawn = vi.fn(async () => ({
+			process: {
+				process: { killed: false },
+				stdin: {} as any,
+				stdout: {} as any,
+				stderr: {} as any,
+				pid: 1,
+			},
+		}));
+		const auxSpawn = vi.fn(async () => ({
+			process: {
+				process: { killed: false },
+				stdin: {} as any,
+				stdout: {} as any,
+				stderr: {} as any,
+				pid: 2,
+			},
+		}));
+		getServersForFileWithConfig.mockReturnValue([
+			{
+				id: "typescript",
+				name: "TypeScript",
+				extensions: [".ts"],
+				root: async () => "C:/repo",
+				spawn: primarySpawn,
+			},
+			{
+				id: "typos",
+				name: "Typos",
+				role: "auxiliary",
+				extensions: [".ts"],
+				root: async () => "C:/repo",
+				spawn: auxSpawn,
+			},
+		]);
+
+		const file = "C:/repo/main.ts";
+		// Primary spawns and settles fully first: alive, zero pending spawn calls.
+		await service.getClientForFile(file);
+		expect(primarySpawn).toHaveBeenCalledTimes(1);
+		expect(service.isSpawnInFlight(file)).toBe(false);
+
+		// Kick off the auxiliary spawn and let it park mid-initialize.
+		const auxPending = service.getAuxiliaryClientsForFile(
+			file,
+			new Set(["typos"]),
+		);
+		await auxAdmittedPromise;
+
+		expect(service.isSpawnInFlight(file)).toBe(false);
+
+		releaseAux();
+		await auxPending;
+	});
+
 	it("retries broken server after cooldown window", async () => {
 		const now = vi.spyOn(Date, "now");
 		now.mockReturnValue(0);

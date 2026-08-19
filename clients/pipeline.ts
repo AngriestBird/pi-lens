@@ -1062,8 +1062,13 @@ export async function resyncLspFile(
 				// old wording blamed as "slow/wedged" did not exist yet. Distinguish
 				// the two via a fresh, synchronous inFlight lookup so the record keeps
 				// the discriminating identity (which server, which lifecycle state).
+				// Guarded: a test double or future service shape lacking the method
+				// must degrade to the old "timeout"/slow-wedged wording, not throw
+				// into the catch below and suppress this record entirely (#1766 F3).
 				const spawnInFlight =
-					!abort?.aborted && lspService.isSpawnInFlight(filePath);
+					!abort?.aborted &&
+					typeof lspService.isSpawnInFlight === "function" &&
+					lspService.isSpawnInFlight(filePath);
 				const reason = abort?.aborted
 					? "aborted"
 					: spawnInFlight
