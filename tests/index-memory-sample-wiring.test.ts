@@ -13,7 +13,8 @@ import { createPiMock } from "./support/pi-mock.js";
 
 const latencyCalls: Array<Record<string, unknown>> = [];
 vi.mock("../clients/latency-logger.js", async (importActual) => {
-	const actual = await importActual<typeof import("../clients/latency-logger.js")>();
+	const actual =
+		await importActual<typeof import("../clients/latency-logger.js")>();
 	return {
 		...actual,
 		logLatency: (entry: Record<string, unknown>) => {
@@ -37,7 +38,8 @@ vi.mock("../clients/runtime-turn.js", () => ({
 	cancelLSPIdleReset: vi.fn(),
 }));
 
-const memorySamples = () => latencyCalls.filter((e) => e.phase === "memory_sample");
+const memorySamples = () =>
+	latencyCalls.filter((e) => e.phase === "memory_sample");
 
 const turnCtx = {
 	cwd: process.cwd(),
@@ -63,7 +65,20 @@ async function driveTurns(count: number) {
 	return mock;
 }
 
-describe("index turn_end memory_sample wiring (#1123 item 2)", () => {
+// #1778: each case drives `driveTurns`, which pays a COLD
+// `import("../index.js")` after `vi.resetModules()` in `beforeEach` —
+// deliberate, not accidental. index.ts carries turn-scoped module state
+// (runtime.turnIndex), which is exactly what this wiring guard checks
+// (cadence across turns). Sharing one import across cases would defeat the
+// isolation the tests exist to prove, so the fix is a timeout budget, not a
+// hoisted import (matching #1772/#1779's index-loop-block-wiring fix and
+// this repo's HEAVY_IO_TIMEOUT_MS convention,
+// tests/clients/ast-grep-rule-precedence-followups.test.ts:210).
+const MEMORY_SAMPLE_WIRING_TIMEOUT_MS = 30_000;
+
+describe("index turn_end memory_sample wiring (#1123 item 2)", {
+	timeout: MEMORY_SAMPLE_WIRING_TIMEOUT_MS,
+}, () => {
 	beforeEach(() => {
 		vi.resetModules();
 		latencyCalls.length = 0;
