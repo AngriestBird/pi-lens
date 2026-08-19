@@ -291,6 +291,15 @@ export interface LSPClientInfo {
 			silent?: boolean,
 		): Promise<void>;
 		change(filePath: string, content: string): Promise<void>;
+		/**
+		 * #1668: queue a `workspace/didChangeWatchedFiles` entry for a disk
+		 * change this client did not learn about through didOpen/didChange —
+		 * an external bash write/delete outside the open-document sync path.
+		 * `type` is the LSP `FileChangeType` (1 Created, 2 Changed, 3 Deleted).
+		 * Routes through the same #271 debounced queue as a first-time open, so
+		 * a burst of external changes still flushes as one notification.
+		 */
+		watchedFileChange(filePath: string, type: number): void;
 	};
 	getDiagnostics(filePath: string): LSPDiagnostic[];
 	/**
@@ -2155,6 +2164,25 @@ export async function clientWaitForDiagnostics(
 	});
 }
 
+/**
+ * Queue a watched-files change for a file this client did not learn about
+ * through textDocument/didOpen or didChange — an external bash write/delete,
+ * or any other disk change outside the open-document sync path (#1668).
+ * Shares `handleNotifyOpen`'s per-client debounced queue (#271), so a burst
+ * of external changes coalesces into one notification per debounce window
+ * instead of flooding the server with one per file.
+ */
+export function handleNotifyExternalChange(
+	state: LSPClientState,
+	filePath: string,
+	type: number,
+): void {
+	if (!isClientAlive(state)) return;
+	const normalizedPath = normalizeMapKey(filePath);
+	const uri = state.openDocumentUris?.get(normalizedPath) ?? pathToFileURL(filePath).href;
+	state.watchQueue.enqueue(uri, type);
+}
+
 export async function handleNotifyOpen(
 	state: LSPClientState,
 	filePath: string,
@@ -3133,6 +3161,9 @@ export async function createLSPClient(options: {
 			},
 			async change(filePath, content) {
 				return handleNotifyChange(state, filePath, content);
+			},
+			watchedFileChange(filePath, type) {
+				handleNotifyExternalChange(state, filePath, type);
 			},
 		},
 
