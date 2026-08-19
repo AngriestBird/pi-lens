@@ -452,6 +452,63 @@ const SYMBOL_QUERIES: Record<string, { defs: string; refs: string }> = {
         name: (command_name (word) @callIdent)) @callRef
     `,
 	},
+	// #1522: tree-sitter-cue (eonpatapon/tree-sitter-cue, vendored per #1520) has
+	// no `label:`/`value:` field names on `field` — verified directly against the
+	// committed wasm (`value:` fails query compilation with "Bad field name");
+	// only `let_clause`'s `left:`/`right:` and `call_expression`'s `function:`
+	// are real fields. A `#Definition` is not a distinct node kind: `#Service`
+	// parses as a plain (identifier) whose text happens to start with "#", so
+	// definitions are told apart from ordinary struct fields with a `#match?`/
+	// `#not-match?` text predicate rather than a grammar-level distinction —
+	// both predicates must sit INSIDE the pattern's own parens (this repo's
+	// tree-sitter gotcha). `#Definition`s map to `type` (the closest existing
+	// SymbolKind to a reusable CUE schema); plain fields map to `property`;
+	// `let` bindings map to `variable`.
+	//
+	// Two known upstream grammar rough edges (#1522 review round 1, F4;
+	// docs/language-coverage.md's CUE row has the same note, kept in sync):
+	// (1) an aliased field label (`X=name: value`) exposes BOTH identifiers
+	// as untagged siblings under one `label` node — `(label alias:
+	// (identifier) (identifier))` — with no field/structural way to tell the
+	// alias from the real name, so `fieldDef` spuriously captures the alias
+	// too, alongside the correct symbol for `name`. (2) a multi-hash raw
+	// string (`##"..."##`, 2+ `#` delimiters) mis-parses regardless of
+	// content — the field's value becomes a bare `identifier` instead of a
+	// `string`, which can surface as a spurious `#`-prefixed ref via the
+	// `typeIdent` pattern below. Both are grammar bugs, not query bugs — no
+	// query change here can distinguish what the parse tree doesn't.
+	cue: {
+		defs: `
+      (field
+        (label (identifier) @defName)
+        (#match? @defName "^#")) @defDef
+
+      (field
+        (label (identifier) @fieldName)
+        (value (_)) @fieldValue
+        (#not-match? @fieldName "^#")) @fieldDef
+
+      (let_clause
+        left: (identifier) @letName
+        right: (_) @letValue) @letDef
+    `,
+		// `#Service` used as a value (e.g. `#Other: #Service & {...}`) is the same
+		// (identifier) node kind as its own definition label — there is no
+		// separate reference/definition node kind in this grammar, so the
+		// definition's own label also matches this pattern, mirroring the same
+		// self-match already accepted for swift/java's broad `type_identifier`
+		// ref patterns above.
+		refs: `
+      ((identifier) @typeIdent
+        (#match? @typeIdent "^#"))
+
+      (call_expression
+        function: (identifier) @callIdent) @callRef
+
+      (call_expression
+        function: (selector_expression (identifier) (identifier) @callMethod)) @callMethodRef
+    `,
+	},
 };
 
 // The tsx grammar (downloaded as tree-sitter-tsx.wasm) shares TypeScript's node
@@ -608,6 +665,17 @@ const IMPORT_QUERIES: Record<string, string> = {
       (command (command_name (word) @_m)
         (word) @importSource
         (#match? @_m "^(source|\\.)$"))
+    `,
+	// import "strings" / import x "encoding/json" — `import_spec`'s `path:`
+	// field is verified against the committed wasm. Block-form
+	// (`import (\n\t"strings"\n)`) nests each `import_spec` one level deeper,
+	// under `import_spec_list`, rather than as a direct child of
+	// `import_declaration` — a second pattern is needed, not a reshaped first
+	// one (#1522 review round 1, F2: the single-line-only pattern extracted
+	// zero imports from the block form).
+	cue: `
+      (import_declaration (import_spec path: (string) @importSource))
+      (import_declaration (import_spec_list (import_spec path: (string) @importSource)))
     `,
 };
 
@@ -853,6 +921,25 @@ export class TreeSitterSymbolExtractor {
 			name = captures.moduleName.text;
 			kind = "class";
 			defNode = captures.moduleDef?.node as any;
+		} else if (captures.defName) {
+			// CUE `#Definition` — the closest existing SymbolKind to a reusable
+			// schema type.
+			name = captures.defName.text;
+			kind = "type";
+			// biome-ignore lint/suspicious/noExplicitAny: Node type
+			defNode = captures.defDef?.node as any;
+		} else if (captures.fieldName) {
+			// CUE plain struct field.
+			name = captures.fieldName.text;
+			kind = "property";
+			// biome-ignore lint/suspicious/noExplicitAny: Node type
+			defNode = captures.fieldDef?.node as any;
+		} else if (captures.letName) {
+			// CUE `let` binding — a computed local value.
+			name = captures.letName.text;
+			kind = "variable";
+			// biome-ignore lint/suspicious/noExplicitAny: Node type
+			defNode = captures.letDef?.node as any;
 		}
 
 		if (!name || !kind || !defNode) return null;
