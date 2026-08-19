@@ -74,12 +74,15 @@ import {
 	getFileDiagnosticSummaries,
 	type FileDiagnosticSummary,
 	reconcileScanDiagnostics,
+	reconcileStaleWidgetDependencyBlockers,
 	reconcileStaleWidgetFiles,
 	type WidgetDiagnostic,
 } from "../clients/widget-state.js";
+import { logLatency } from "../clients/latency-logger.js";
 import { convertLspDiagnostics } from "../clients/dispatch/utils/lsp-diagnostics.js";
 import { retagAuxiliaryDiagnostics } from "../clients/dispatch/auxiliary-lsp.js";
 import { detectFileRole } from "../clients/file-role.js";
+import { STALE_LINE_MARKER } from "../clients/stale-marker.js";
 import { makeProgressReporter, scanningSummaryLine } from "./scan-progress.js";
 import {
 	demotePastEofDiagnostics,
@@ -434,6 +437,28 @@ export function createLensDiagnosticsTool(
 			const staleDropped = await reconcileStaleWidgetFiles();
 
 			if (mode === "all") {
+				// #1631 dependency-axis gate for the mode=all store. `reconcileStaleWidgetFiles`
+				// (above) only sees the diagnosed file's OWN mtime; this demotes blocking
+				// findings whose forward imports drifted out-of-band. Paired reconciles, one
+				// read site — the same gate that covers the turn-end inline-blocker store.
+				const dependencyGateStart = Date.now();
+				const { demoted: dependencyDemoted, truncatedImports } =
+					await reconcileStaleWidgetDependencyBlockers(
+						cwd,
+						getRuntime?.()?.turnIndex,
+					);
+				logLatency({
+					type: "phase",
+					toolName: "lens_diagnostics",
+					filePath: cwd,
+					phase: "blocker_freshness_widget_gate",
+					durationMs: Date.now() - dependencyGateStart,
+					metadata: {
+						demoted: dependencyDemoted,
+						truncatedImports,
+						surface: "mode=all",
+					},
+				});
 				return formatAllMode(
 					cwd,
 					severity,
@@ -441,6 +466,7 @@ export function createLensDiagnosticsTool(
 					undefined,
 					staleDropped,
 					pathsScope,
+					dependencyDemoted,
 				);
 			}
 			if (mode === "full") {
@@ -2028,14 +2054,18 @@ function formatAllMode(
 	detailOverrides: Record<string, unknown> = { mode: "all" },
 	staleDropped = 0,
 	pathsScope?: PathsScope,
+	dependencyDemoted = 0,
 ): { content: [{ type: "text"; text: string }]; details: object } {
 	// Files changed/deleted since their diagnostics were recorded have already
 	// been dropped by reconcileStaleWidgetFiles; note them so the agent knows
 	// those aren't "clean", just un-rescanned (use mode=full to refresh).
 	const staleNote =
-		staleDropped > 0
+		(staleDropped > 0
 			? ` (${staleDropped} changed file${staleDropped === 1 ? "" : "s"} omitted as stale — use mode=full to rescan)`
-			: "";
+			: "") +
+		(dependencyDemoted > 0
+			? ` (${dependencyDemoted} blocking finding${dependencyDemoted === 1 ? "" : "s"} demoted to [stale] — an imported file changed since; re-run to confirm)`
+			: "");
 
 	// mode=full already actively scanned exactly the requested paths, so a zero
 	// result there IS a legitimate clean read — the cache-only note only applies
@@ -2162,11 +2192,13 @@ function formatAllMode(
 			.sort(bySeverityThenLine);
 		const shown = matching.slice(0, MAX_DIAGNOSTICS_PER_FILE);
 		for (const d of shown) {
-			const marker = isErrorLike(d)
-				? d.semantic === "blocking"
-					? "🔴 "
-					: ""
-				: "";
+			const marker = d.stale
+				? ""
+				: isErrorLike(d)
+					? d.semantic === "blocking"
+						? "🔴 "
+						: ""
+					: "";
 			const label = d.rule ?? d.tool;
 			const tag = label ? ` [${label}]` : "";
 			const flaggedTag = d.flagged ? " 📌 flagged-to-fix" : "";
@@ -2174,8 +2206,13 @@ function formatAllMode(
 			// #1641: a demoted past-EOF entry no longer has a trustworthy line —
 			// show the marker instead of a coordinate that doesn't exist in the
 			// current file, matching the #1622/#1627 stale-line render convention.
-			const loc = d.stale ? PAST_EOF_STALE_MARKER : `L${d.line ?? "?"}`;
-			lines.push(`  ${marker}${loc}: ${msg}${tag}${flaggedTag}`);
+			// Past-EOF demotions replace the untrustworthy coordinate; other
+			// demotions (#1631 drift) keep their in-bounds line and append the
+			// shared stale marker instead.
+			const pastEof = d.stale && (d.staleReason ?? "past-eof") === "past-eof";
+			const loc = pastEof ? PAST_EOF_STALE_MARKER : `L${d.line ?? "?"}`;
+			const staleTag = d.stale && !pastEof ? ` ${STALE_LINE_MARKER}` : "";
+			lines.push(`  ${marker}${loc}: ${msg}${tag}${flaggedTag}${staleTag}`);
 		}
 		if (matching.length > shown.length) {
 			lines.push(

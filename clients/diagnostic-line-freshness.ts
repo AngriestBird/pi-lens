@@ -245,6 +245,11 @@ export interface PastEofDiagnosticLike {
 	/** Demotion marker, shared with sibling freshness gates. RE-DERIVED on
 	 * every call from the current line count — never trusted as a latch. */
 	stale?: boolean;
+	/** Which gate demoted this entry. This gate owns only "past-eof" (and
+	 * legacy entries with no reason): an entry another gate demoted (e.g.
+	 * #1631's "dependency-drift") is passed through untouched, so re-deriving
+	 * the past-EOF verdict cannot un-demote a sibling gate's finding. */
+	staleReason?: string;
 }
 
 export interface PastEofGateResult<T> {
@@ -289,10 +294,14 @@ export function demotePastEofDiagnostics<T extends PastEofDiagnosticLike>(args: 
 	}
 	const risingEdgeLines: number[] = [];
 	const out = diagnostics.map((d) => {
+		// Another gate's demotion is not this gate's to heal (#1631 drift
+		// entries have in-bounds lines; re-deriving here would clear them).
+		if (d.stale && d.staleReason !== undefined && d.staleReason !== "past-eof")
+			return d;
 		const isPastEof = typeof d.line === "number" && d.line > lineCount;
 		if (isPastEof === !!d.stale) return d; // no transition either direction
 		if (isPastEof) risingEdgeLines.push(d.line as number);
-		return { ...d, stale: isPastEof };
+		return { ...d, stale: isPastEof, staleReason: isPastEof ? "past-eof" : undefined };
 	});
 	if (risingEdgeLines.length === 0) {
 		return { diagnostics: out, demotedCount: 0 };
