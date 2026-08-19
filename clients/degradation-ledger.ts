@@ -28,6 +28,7 @@ export type DegradationKind =
 	| "web-tree-sitter-load-failed"
 	| "instance-registry-corrupt"
 	| "cascade-budget-override-disarmed"
+	| "lsp-pull-unconfirmed"
 	/**
 	 * A pi-lens `tool_call` handler threw. pi's `emitToolCall` has no
 	 * per-handler catch, so an escaped throw blocks the user's tool call —

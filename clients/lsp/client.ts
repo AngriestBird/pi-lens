@@ -28,6 +28,7 @@ import {
 	StreamMessageWriter,
 } from "../deps/vscode-jsonrpc.js";
 import { getAmbientAbortSignal } from "../safe-spawn.js";
+import { incrementDegradationCount } from "../degradation-ledger.js";
 import {
 	hashDiagnosticContent,
 	type StoredDiagnosticBinding,
@@ -52,8 +53,18 @@ import {
 	negotiatePositionEncoding,
 	type PositionEncoding,
 } from "./position-encoding.js";
+import {
+	negotiateSyncKind,
+	TEXT_DOCUMENT_SYNC_KIND_FULL,
+	TEXT_DOCUMENT_SYNC_KIND_INCREMENTAL,
+	type TextDocumentSyncKind,
+} from "./sync-kind.js";
 import { getStrategy } from "./wait-policy/index.js";
 import { WatchedFilesQueue } from "./watch-queue.js";
+import {
+	clearAllWorkspaceDiagnosticsCaches,
+	clearWorkspaceDiagnosticsCache,
+} from "./workspace-diagnostics-cache.js";
 
 // Opt-in publishDiagnostics trace (PILENS_PUB_DEBUG=1) — read once, negligible
 // hot-path cost. Surfaces each server's publish behavior (version + count) to
@@ -642,6 +653,35 @@ const WORKSPACE_PULL_RESULT_CACHE_MAX = 4096;
 // telemetry identity on — it is one project-wide pull — so timeout/late-answer
 // records use this fixed subject/scope instead of a real path.
 const WORKSPACE_PULL_SCOPE = "*workspace*";
+// #1669 review N2: cap on simultaneous re-pulls the `workspace/diagnostic/
+// refresh` handler fires for open documents. A workspace with hundreds of
+// open documents fanning out one `textDocument/diagnostic` request each,
+// with no cap, floods the server the refresh itself just told us is under
+// load. Small and fixed — this is a background improvement after the
+// protocol reply, never something worth tuning per project.
+const REFRESH_REPULL_CONCURRENCY = 4;
+
+/** Run `mapper` over `items` with at most `concurrency` in flight at once.
+ *  Same shape as `dependency-checker.ts`'s helper of the same name — a
+ *  worker-pool pattern repeated per-file by design in this codebase rather
+ *  than shared, so each caller can keep it un-exported and file-local. */
+async function mapWithConcurrency<T>(
+	items: readonly T[],
+	concurrency: number,
+	mapper: (item: T) => Promise<void>,
+): Promise<void> {
+	if (items.length === 0) return;
+	let nextIndex = 0;
+	const workerCount = Math.max(1, Math.min(concurrency, items.length));
+	const worker = async (): Promise<void> => {
+		while (true) {
+			const index = nextIndex++;
+			if (index >= items.length) return;
+			await mapper(items[index]);
+		}
+	};
+	await Promise.all(Array.from({ length: workerCount }, () => worker()));
+}
 // Anti-deadlock backstop for workspace/executeCommand. Deliberately generous
 // (30s): the command is mutating and legitimately long-running (a real server
 // refactor / organize-imports), so this must not truncate valid work — it only
@@ -789,10 +829,16 @@ export interface LSPClientState {
 	 *  we sent for a path, tagged with the document version it was sent as.
 	 *  Captured at SEND time on in-memory content (never a disk read on the
 	 *  notification path) so a later `publishDiagnostics` echoing that version can
-	 *  bind its diagnostics to the content they were computed against. */
+	 *  bind its diagnostics to the content they were computed against.
+	 *
+	 *  #1669: `text` additionally retains that same payload's full content, but
+	 *  ONLY when `syncKind` is Incremental — the one case that needs it, to
+	 *  compute the NEXT change's full-range replace against the document as the
+	 *  server last saw it (see `buildContentChanges`). Full/None servers never
+	 *  populate it, so the common case pays no extra retained memory. */
 	readonly documentContentHashes: Map<
 		string,
-		{ version: number; hash: string }
+		{ version: number; hash: string; text?: string }
 	>;
 	/** #1095: the content binding for the diagnostics currently stored for a path
 	 *  — {version, contentHash} of the document those diagnostics were computed
@@ -871,6 +917,13 @@ export interface LSPClientState {
 	 *  the server advertised otherwise; drives character-offset translation on
 	 *  outgoing navigation requests. */
 	positionEncoding: PositionEncoding;
+	/** #1669: `textDocumentSync.change` kind the server negotiated at initialize
+	 *  — None (0), Full (1) or Incremental (2). Optional so existing state
+	 *  literals across the test suite don't all need updating; every read site
+	 *  falls back to `TEXT_DOCUMENT_SYNC_KIND_FULL`, which is the whole-document
+	 *  `{ text }` shape pi-lens has always sent — an absent value never changes
+	 *  behavior. Set once at initialize, next to `positionEncoding`. */
+	syncKind?: TextDocumentSyncKind;
 	/** Baseline mode from static initResult — used to revert on unregister */
 	staticDiagnosticsMode: "pull" | "push-only";
 	/** Live dynamic registrations from client/registerCapability: id → record.
@@ -1549,6 +1602,12 @@ function recordSentContent(
 	state.documentContentHashes.set(normalizedPath, {
 		version,
 		hash: hashDiagnosticContent(content),
+		// #1669: retain the full text only for Incremental — the sole reader
+		// (`buildContentChanges`) needs it to compute the NEXT change against
+		// what the server last saw; Full/None never read this field.
+		...(state.syncKind === TEXT_DOCUMENT_SYNC_KIND_INCREMENTAL && {
+			text: content,
+		}),
 	});
 	// #1641 criterion 3: the in-memory document's version + content length AT
 	// SEND TIME, so a later "diagnostic cited a line past current disk EOF"
@@ -1579,6 +1638,68 @@ function recordSentContent(
 			contentLineCount: newlineCount + 1,
 		},
 	});
+}
+
+/**
+ * #1669: the `contentChanges` array for a `textDocument/didChange` notification.
+ *
+ * Full/None (or unrecognized/absent) sync kind: unchanged — a single
+ * whole-document `{ text }` event, the shape pi-lens has always sent.
+ *
+ * Incremental: a server registering Incremental-only expects every change
+ * event to carry a `range`; a shapeless whole-document event is out of spec
+ * for it. Rather than hand-roll a real diff, send the SAFEST incremental
+ * representation of a full update — one ranged edit spanning the entire
+ * PREVIOUS document (start of file to its last character), replacing it with
+ * the entire new content. That is spec-valid for any Incremental server and
+ * semantically identical to the Full-sync event it replaces.
+ *
+ * The previous document's end position is computed from the text
+ * `recordSentContent` retained for THIS path the last time content was sent
+ * (reusing that seam rather than a second parallel content store — see its
+ * doc comment). No prior text on record (first change since Incremental was
+ * negotiated, or the path was never sent before) falls back to the
+ * whole-document shape — still spec-valid, and self-heals once the next
+ * change has a retained previous text to diff against.
+ */
+function buildContentChanges(
+	state: LSPClientState,
+	normalizedPath: string,
+	content: string,
+): Array<{
+	range?: { start: { line: number; character: number }; end: { line: number; character: number } };
+	text: string;
+}> {
+	if (state.syncKind !== TEXT_DOCUMENT_SYNC_KIND_INCREMENTAL) {
+		return [{ text: content }];
+	}
+	const previousText = state.documentContentHashes.get(normalizedPath)?.text;
+	if (previousText === undefined) {
+		return [{ text: content }];
+	}
+	// #1669 review F6: split on every LSP line terminator (\r\n, lone \r, or
+	// \n), not just \n — a document using CRLF or lone-CR line endings would
+	// otherwise be undercounted, computing a range that ends mid-document
+	// instead of at the real last line.
+	const previousLines = previousText.split(/\r\n|\r|\n/);
+	const lastLine = previousLines.length - 1;
+	const lastLineText = previousLines[lastLine] ?? "";
+	return [
+		{
+			range: {
+				start: { line: 0, character: 0 },
+				end: {
+					line: lastLine,
+					character: convertCharacterOffset(
+						state.positionEncoding,
+						lastLineText,
+						lastLineText.length,
+					),
+				},
+			},
+			text: content,
+		},
+	];
 }
 
 // Methods that can be registered dynamically and map to operationSupport keys
@@ -2011,6 +2132,135 @@ export function setupIncomingHandlers(
 		},
 	);
 	state.connection.onRequest("window/workDoneProgress/create", async () => {});
+	// #1669: a server can send `workspace/diagnostic/refresh` (typically after a
+	// project-wide config change) to say every pull result it has already
+	// reported may be stale. Left unhandled, vscode-jsonrpc replies
+	// MethodNotFound to a server explicitly telling us its results are stale —
+	// this is exactly the signal `workspacePullResultCache` and the persisted
+	// workspace-diagnostics cache want (the #1461 family, server-initiated for
+	// once). Reply null per spec and drop both so the NEXT pull recomputes
+	// instead of replaying — or inheriting an `unchanged` basis from — results
+	// the server just told us to distrust.
+	// #1669 review R1: single-flight coalescing latch for the re-pull pool
+	// below, scoped to THIS client (one `setupIncomingHandlers` call per
+	// connection). A refresh FLOOD — a watch-mode rebuild or a `git checkout`
+	// can legitimately fire many `workspace/diagnostic/refresh` requests in a
+	// tight burst — used to queue one independent capped pool PER refresh:
+	// N refreshes meant N pools running concurrently (peak concurrency N x
+	// the per-pool cap) and N full passes over every open document (N x
+	// redundant pulls for the SAME documents). `refreshRepullRunning` gates a
+	// SECOND pool from ever starting while one is already in flight;
+	// `refreshRepullRerunRequested` remembers that at least one more refresh
+	// arrived meanwhile and coalesces it into exactly ONE trailing rerun
+	// after the current pool finishes, using a FRESH snapshot of open
+	// documents at rerun time (not the stale list from whenever the burst
+	// started) — so an arbitrarily large burst still costs at most 2 passes
+	// and never more than `REFRESH_REPULL_CONCURRENCY` pulls at once.
+	let refreshRepullRunning = false;
+	let refreshRepullRerunRequested = false;
+
+	const runRefreshRepullPool = async (): Promise<void> => {
+		do {
+			refreshRepullRerunRequested = false;
+			const toRepull =
+				state.workspaceDiagnosticsSupport.mode === "pull"
+					? [...state.openDocuments]
+					: [];
+			if (toRepull.length > 0) {
+				try {
+					await mapWithConcurrency(
+						toRepull,
+						REFRESH_REPULL_CONCURRENCY,
+						async (normalizedPath) => {
+							const uri = state.openDocumentUris?.get(normalizedPath);
+							const filePath = uri ? uriToPath(uri) : normalizedPath;
+							await clientRequestPullDiagnostics(state, filePath);
+						},
+					);
+				} catch (err) {
+					// #1669 review N2: rejections are observed, never
+					// `void`-swallowed — `clientRequestPullDiagnostics` itself never
+					// throws (it returns an `unavailable` outcome), so this only
+					// fires on a genuine programming error, but a silent throw
+					// inside `mapWithConcurrency`'s `Promise.all` must not vanish.
+					incrementDegradationCount({
+						kind: "lsp-pull-unconfirmed",
+						subject: state.serverId,
+						reason: `refresh re-pull threw: ${err instanceof Error ? err.message : String(err)}`,
+					});
+				}
+			}
+			// A refresh that arrived WHILE this pool was running gets exactly
+			// one more pass, never a pass per refresh.
+		} while (refreshRepullRerunRequested);
+		refreshRepullRunning = false;
+	};
+
+	state.connection.onRequest("workspace/diagnostic/refresh", async () => {
+		state.workspacePullResultCache.clear();
+		// #1669 review F1: clear every on-disk sweep cache this process has
+		// recorded a cwd for — `state.root` alone is a per-SERVER identity
+		// marker that a monorepo/multi-root project routinely nests BELOW the
+		// real sweep cwd, so clearing ONLY there would miss the cache file the
+		// sweep actually reads/writes. See the doc comment on
+		// `clearAllWorkspaceDiagnosticsCaches`.
+		clearAllWorkspaceDiagnosticsCaches();
+		// #1669 review N3: ALSO clear at `state.root` directly. The registry
+		// above only knows cwds a sweep has already run under IN THIS PROCESS —
+		// a refresh arriving before this project's first sweep this process
+		// (e.g. right after a respawn) would otherwise clear nothing at all,
+		// and a later sweep would load the untouched, now-genuinely-stale
+		// on-disk cache a PRIOR process/session left behind. `state.root` is
+		// the one cwd this handler can always reach regardless of registry
+		// state — a cheap, durable backstop for the common single-root case
+		// where root and sweep cwd coincide. It does NOT cover a monorepo
+		// subproject a sweep hasn't reached yet under a DIFFERENT cwd than
+		// `state.root` — that residual gap is tracked in #1707, not silently
+		// claimed as solved (see `clearAllWorkspaceDiagnosticsCaches`'s doc
+		// comment for the full shape).
+		clearWorkspaceDiagnosticsCache(state.root);
+		// #1669 review F3: a server-initiated "everything may be stale" signal
+		// must drop the SAME per-document state a normal resync already drops
+		// via `clearDiagnosticsForPath` (pullResultIds, pushDiagnostics,
+		// documentPullDiagnostics, diagnosticBindings,
+		// diagnosticsVersionsByPath, ...) — dropping only
+		// `workspacePullResultCache` above left every open document's OTHER
+		// pull state intact, so the next pull would echo a disowned
+		// `previousResultId`, get back `kind: "unchanged"`, and re-confirm
+		// stale diagnostics under a fresh timestamp; nothing would ever
+		// re-pull on its own. This clear is cheap and always runs — every
+		// refresh in a burst gets its own, unlike the re-pull pool below.
+		for (const normalizedPath of state.openDocuments) {
+			clearDiagnosticsForPath(state, normalizedPath);
+		}
+		// #1669 review N2: reply to the PROTOCOL request now — every clear
+		// above is synchronous and already complete, so there is nothing left
+		// this reply should wait on. The re-pull below is a background
+		// improvement (so an open document reflects the refresh without
+		// waiting on its next edit), never something worth delaying — or
+		// risking — the required `null` reply over.
+		if (
+			state.workspaceDiagnosticsSupport.mode === "pull" &&
+			state.openDocuments.size > 0
+		) {
+			if (refreshRepullRunning) {
+				// #1669 review R1: a pool is already in flight from an earlier
+				// refresh in this burst — coalesce instead of starting a second
+				// one.
+				refreshRepullRerunRequested = true;
+			} else {
+				refreshRepullRunning = true;
+				// `setImmediate` defers even the SYNCHRONOUS prefix of the pool
+				// (URI lookups, map bookkeeping) to the next tick, so it can
+				// never compete with this reply for the current one regardless
+				// of how many documents are open.
+				setImmediate(() => {
+					void runRefreshRepullPool();
+				});
+			}
+		}
+		return null;
+	});
 }
 
 /**
@@ -2586,6 +2836,16 @@ export async function clientRequestWorkspaceDiagnostics(
 			diagnostics: LSPDiagnostic[];
 			contentHash?: string;
 		}> = [];
+		// #1669 review N1: ONE deadline, shared across every "unchanged, no
+		// cached basis" fallback pull this call makes — not a fresh `budgetMs`
+		// grant handed to EACH one. A refresh clears `workspacePullResultCache`,
+		// so the very next sweep after a refresh can route every item down this
+		// path; granting each one the full budget serially turned a bounded call
+		// unbounded (measured: 6 files x 300ms budget = 1844ms; worst case is
+		// the normal case — 2000 files x 30s). Mirrors the shared-budget shape
+		// `runWorkspaceDiagnosticsSwept`'s `perFileMs` bounds each file to,
+		// scoped to fallback pulls made from within THIS one call.
+		const fallbackPullDeadline = Date.now() + Math.max(1, budgetMs);
 		for (const item of report.items) {
 			if (!item?.uri) continue;
 			const filePath = uriToPath(item.uri);
@@ -2596,7 +2856,58 @@ export async function clientRequestWorkspaceDiagnostics(
 				// `items`, so without this a file the server confirmed unchanged
 				// would silently drop out of the sweep result entirely.
 				const prior = state.workspacePullResultCache.get(normalizedPath);
-				if (!prior) continue; // no earlier basis to inherit — nothing to report
+				if (!prior) {
+					// #1669 review F4: no earlier basis to inherit (e.g. right after a
+					// `workspace/diagnostic/refresh` cleared `workspacePullResultCache`)
+					// — the server is answering "unchanged" against a resultId basis we
+					// no longer hold, so there is nothing honest to report for this
+					// file from THIS response. `continue`-ing here would make the file
+					// silently absent from `out`, which the caller reads as "clean" —
+					// a false clean for a file the server just told us it hasn't even
+					// looked at freshly. Treat it as needs-full-pull: request the
+					// per-file diagnostic directly instead.
+					const remainingMs = fallbackPullDeadline - Date.now();
+					if (remainingMs <= 0) {
+						// #1669 review N1: the shared fallback-pull deadline is already
+						// exhausted by earlier files in this same loop — bail WITHOUT
+						// attempting a request (never fabricate clean; this file was
+						// never actually asked about) and surface it as unavailable via
+						// the same degradation ledger path as a real unavailable pull.
+						incrementDegradationCount({
+							kind: "lsp-pull-unconfirmed",
+							subject: state.serverId,
+							reason:
+								"unchanged report with no workspacePullResultCache basis; the shared fallback-pull deadline was already exhausted by earlier files this sweep",
+						});
+						continue;
+					}
+					const outcome = await clientRequestPullDiagnostics(
+						state,
+						filePath,
+						remainingMs,
+					);
+					if (outcome.status === "found") {
+						out.push({
+							filePath,
+							diagnostics: state.documentPullDiagnostics.get(normalizedPath) ?? [],
+							contentHash: state.diagnosticBindings.get(normalizedPath)?.contentHash,
+						});
+					} else if (outcome.status === "unavailable") {
+						// Genuinely unconfirmed — never fabricate a clean result. Recorded
+						// via the shared degradation ledger (AGENTS.md: repeated
+						// degradations use incrementDegradationCount, not a hand-rolled
+						// counter) so a server that keeps racing refresh against sweeps
+						// is visible in aggregate instead of silently absorbed per-file.
+						incrementDegradationCount({
+							kind: "lsp-pull-unconfirmed",
+							subject: state.serverId,
+							reason:
+								"unchanged report with no workspacePullResultCache basis, and the per-file fallback pull was unavailable",
+						});
+					}
+					// "clean": genuinely clean, correctly absent from `out`.
+					continue;
+				}
 				if (item.resultId !== undefined) {
 					state.workspacePullResultCache.set(normalizedPath, {
 						...prior,
@@ -2887,19 +3198,27 @@ export async function handleNotifyOpen(
 			state.documentOpenedAt.set(normalizedPath, Date.now());
 			state.diagnosticPublicationCounts.set(normalizedPath, 0);
 			if (!isClientAlive(state)) return;
-			await safeSendNotification(state.connection, "textDocument/didOpen", {
-				textDocument: { uri, languageId, version, text: content },
-			});
-			recordSentContent(state, normalizedPath, version, content);
+			const reopenSent = await safeSendNotification(
+				state.connection,
+				"textDocument/didOpen",
+				{ textDocument: { uri, languageId, version, text: content } },
+			);
+			// #1669 review F7: only mirror the send locally once it actually left
+			// the process — see safeSendNotification's doc comment.
+			if (reopenSent) recordSentContent(state, normalizedPath, version, content);
 			state.openDocuments.add(normalizedPath);
 			state.openDocumentUris?.set(normalizedPath, uri);
 			return;
 		}
-		await safeSendNotification(state.connection, "textDocument/didChange", {
-			textDocument: { uri, version },
-			contentChanges: [{ text: content }],
-		});
-		recordSentContent(state, normalizedPath, version, content);
+		const changeSent = await safeSendNotification(
+			state.connection,
+			"textDocument/didChange",
+			{
+				textDocument: { uri, version },
+				contentChanges: buildContentChanges(state, normalizedPath, content),
+			},
+		);
+		if (changeSent) recordSentContent(state, normalizedPath, version, content);
 		return;
 	}
 
@@ -2934,10 +3253,12 @@ export async function handleNotifyOpen(
 
 	if (!isClientAlive(state)) return;
 
-	await safeSendNotification(state.connection, "textDocument/didOpen", {
-		textDocument: { uri, languageId, version: 0, text: content },
-	});
-	recordSentContent(state, normalizedPath, 0, content);
+	const openSent = await safeSendNotification(
+		state.connection,
+		"textDocument/didOpen",
+		{ textDocument: { uri, languageId, version: 0, text: content } },
+	);
+	if (openSent) recordSentContent(state, normalizedPath, 0, content);
 	state.pendingOpens.delete(normalizedPath);
 	state.openDocuments.add(normalizedPath);
 	state.closedDocuments?.delete(normalizedPath);
@@ -2976,13 +3297,15 @@ export async function handleNotifyChange(
 	if (!state.openDocuments.has(normalizedPath)) {
 		// Safety fallback: keep protocol ordering valid even if caller sends
 		// didChange before first didOpen for this document.
-		await safeSendNotification(state.connection, "textDocument/didOpen", {
-			textDocument: { uri, languageId: "plaintext", version: 0, text: content },
-		});
+		const fallbackOpenSent = await safeSendNotification(
+			state.connection,
+			"textDocument/didOpen",
+			{ textDocument: { uri, languageId: "plaintext", version: 0, text: content } },
+		);
 		state.documentVersions.set(normalizedPath, 0);
 		state.documentOpenedAt.set(normalizedPath, Date.now());
 		state.diagnosticPublicationCounts.set(normalizedPath, 0);
-		recordSentContent(state, normalizedPath, 0, content);
+		if (fallbackOpenSent) recordSentContent(state, normalizedPath, 0, content);
 		state.openDocuments.add(normalizedPath);
 		state.openDocumentUris?.set(normalizedPath, uri);
 		return;
@@ -2993,11 +3316,15 @@ export async function handleNotifyChange(
 	// Clear stale diagnostics before sending new content so waitForDiagnostics
 	// doesn't return immediately with the previous edit's results.
 	clearDiagnosticsForPath(state, normalizedPath);
-	await safeSendNotification(state.connection, "textDocument/didChange", {
-		textDocument: { uri, version },
-		contentChanges: [{ text: content }],
-	});
-	recordSentContent(state, normalizedPath, version, content);
+	const changeSent = await safeSendNotification(
+		state.connection,
+		"textDocument/didChange",
+		{
+			textDocument: { uri, version },
+			contentChanges: buildContentChanges(state, normalizedPath, content),
+		},
+	);
+	if (changeSent) recordSentContent(state, normalizedPath, version, content);
 }
 
 /** Close a document through the same lifecycle path exposed by the client. */
@@ -3638,6 +3965,7 @@ export async function createLSPClient(options: {
 		operationSupport: undefined as unknown as LSPOperationSupport,
 		staticDiagnosticsMode: "push-only",
 		positionEncoding: "utf-16",
+		syncKind: TEXT_DOCUMENT_SYNC_KIND_FULL,
 		dynamicRegistrations: new Map(),
 		advertisedCommands: new Set(),
 		serverEditsAllowed: 0,
@@ -3754,6 +4082,9 @@ export async function createLSPClient(options: {
 		detectWorkspaceDiagnosticsSupport(initResult);
 	state.operationSupport = detectOperationSupport(initResult);
 	state.positionEncoding = negotiatePositionEncoding(
+		(initResult as { capabilities?: unknown })?.capabilities,
+	);
+	state.syncKind = negotiateSyncKind(
 		(initResult as { capabilities?: unknown })?.capabilities,
 	);
 	state.rawCapabilityKeys = Object.keys(
@@ -4182,17 +4513,28 @@ export async function createLSPClient(options: {
 }
 
 // Helper to safely send notifications - catches stream destruction
+/**
+ * Returns `true` once the notification was actually handed to the transport,
+ * `false` when a stream error was swallowed (connection error handlers will
+ * update state separately). #1669 review F7: callers that mirror what they
+ * just told the server locally (`recordSentContent`) MUST gate on this
+ * return value — recording a send that never left the process would desync
+ * the mirror from what the server actually has, with nothing to self-heal
+ * it (the next Incremental range would be computed against content the
+ * server never saw).
+ */
 async function safeSendNotification(
 	connection: MessageConnection,
 	method: string,
 	params: unknown,
-): Promise<void> {
+): Promise<boolean> {
 	try {
 		await connection.sendNotification(method as never, params as never);
+		return true;
 	} catch (err) {
 		if (isStreamError(err)) {
 			// Silently ignore - stream was destroyed, connection error handlers will update state
-			return;
+			return false;
 		}
 		throw err;
 	}
