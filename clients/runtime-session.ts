@@ -2,6 +2,7 @@ import * as nodeFs from "node:fs";
 import * as path from "node:path";
 import type { AstGrepClient } from "./ast-grep-client.js";
 import type { BiomeClient } from "./biome-client.js";
+import { resetBoundedTelemetry } from "./bounded-telemetry.js";
 import type { CacheManager } from "./cache-manager.js";
 import { createDeadline, yieldIfOverBudget } from "./cooperative-budget.js";
 import type { DeadCodeClient, DeadCodeResult } from "./dead-code-client.js";
@@ -10,10 +11,10 @@ import { logDeadCodeScan } from "./dead-code-logger.js";
 import { resetDegradationLedger } from "./degradation-ledger.js";
 import type { DependencyChecker } from "./dependency-checker.js";
 import { getDiagnosticTracker } from "./diagnostic-tracker.js";
-import { resetDispatchAvailabilityState } from "./dispatch/runners/utils/runner-helpers.js";
+import { resetPsScriptAnalyzerAvailability } from "./dispatch/runners/psscriptanalyzer.js";
 import { resetInstallRetryLatches } from "./dispatch/runners/utils/availability-policy.js";
 import { resetLazyInstallAttempts } from "./dispatch/runners/utils/lazy-installer.js";
-import { resetPsScriptAnalyzerAvailability } from "./dispatch/runners/psscriptanalyzer.js";
+import { resetDispatchAvailabilityState } from "./dispatch/runners/utils/runner-helpers.js";
 import type { FileKind } from "./file-kinds.js";
 import { clearAllSessions as clearFileTimeSessions } from "./file-time.js";
 import {
@@ -1548,6 +1549,12 @@ export async function handleSessionStart(
 	deps: SessionStartDeps,
 ): Promise<void> {
 	resetDegradationLedger();
+	// #1743: the bounded-telemetry per-turn counters. The rising-edge state is
+	// NOT here — it is the ledger's own tally, reset on the line above. These
+	// counters are keyed by turn index, and a new session restarts turn
+	// numbering at 0, so without this a stale count could survive a session
+	// boundary that happened to land on the same index.
+	resetBoundedTelemetry();
 	const handlerEnteredAt = Date.now();
 	const sessionStartMs = deps.sessionStartFiredAt ?? handlerEnteredAt;
 	const cwdForTelemetry = deps.ctxCwd ?? process.cwd();
