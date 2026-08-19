@@ -5,13 +5,11 @@
  * directly with mock LSPClientState to avoid spawning real language servers.
  */
 
-import { EventEmitter } from "node:events";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
 import { describe, expect, it, vi } from "vitest";
-import type { MessageConnection } from "vscode-jsonrpc";
 import {
 	applyDynamicCapabilities,
 	bumpDiagnosticsVersion,
@@ -35,8 +33,13 @@ import {
 } from "../../../clients/lsp/client.js";
 import { normalizeMapKey } from "../../../clients/path-utils.js";
 import { hashDiagnosticContent } from "../../../clients/lsp/diagnostic-binding.js";
-import { WatchedFilesQueue } from "../../../clients/lsp/watch-queue.js";
 import { applyWorkspaceEdit } from "../../../clients/lsp/edits.js";
+// #1667: the LSPClientState fixture moved to a shared module so the
+// multi-identifier pull tests reuse it instead of maintaining a copy.
+import {
+	createMockLspProcess,
+	createMockState,
+} from "./mock-client-state.js";
 
 const TEST_FILE = "/project/app.ts";
 const TEST_KEY = normalizeMapKey(TEST_FILE);
@@ -371,112 +374,6 @@ describe("workDoneProgress capability (#974)", () => {
 		).resolves.toBeUndefined();
 	});
 });
-
-function createMockConnection(): MessageConnection {
-	return {
-		sendNotification: vi.fn().mockResolvedValue(undefined),
-		sendRequest: vi.fn().mockResolvedValue(undefined),
-		onNotification: vi.fn(),
-		onRequest: vi.fn().mockResolvedValue(undefined),
-		onError: vi.fn(),
-		onClose: vi.fn(),
-		listen: vi.fn(),
-		dispose: vi.fn(),
-	} as unknown as MessageConnection;
-}
-
-function createMockLspProcess() {
-	return {
-		pid: 12345,
-		process: { killed: false, kill: vi.fn() } as unknown as NodeJS.Process,
-		stdin: {
-			on: vi.fn(),
-			off: vi.fn(),
-			write: vi.fn(),
-		} as unknown as NodeJS.WritableStream,
-		stdout: {
-			on: vi.fn(),
-			off: vi.fn(),
-			pipe: vi.fn(),
-		} as unknown as NodeJS.ReadableStream,
-		stderr: { on: vi.fn(), off: vi.fn() } as unknown as NodeJS.ReadableStream,
-	};
-}
-
-function createMockState(overrides?: Partial<LSPClientState>): LSPClientState {
-	const diagnosticEmitter = new EventEmitter();
-	diagnosticEmitter.setMaxListeners(50);
-	const state: LSPClientState = {
-		isConnected: true,
-		isDestroyed: false,
-		shutdownRequested: false,
-		exitedAt: undefined,
-		connectionDisposed: false,
-		lastError: undefined,
-		connection: createMockConnection(),
-		pushDiagnostics: new Map(),
-		pushDiagnosticTimestamps: new Map(),
-		documentPullDiagnostics: new Map(),
-		documentPullDiagnosticTimestamps: new Map(),
-		pullFailureHistory: [],
-		pendingDiagnostics: new Map(),
-		diagnosticPublicationCounts: new Map(),
-		documentOpenedAt: new Map(),
-		diagnosticEmitter,
-		diagnosticsVersion: 0,
-		diagnosticsVersionsByPath: new Map(),
-		documentVersions: new Map(),
-		diagnosticDocVersions: new Map(),
-		documentContentHashes: new Map(),
-		diagnosticBindings: new Map(),
-		pullResultIds: new Map(),
-		workspacePullResultCache: new Map(),
-		openDocuments: new Set(),
-		closedDocuments: new Set(),
-		pendingOpens: new Set(),
-		workspaceDiagnosticsSupport: {
-			advertised: false,
-			mode: "push-only",
-			workspaceDiagnostics: false,
-			diagnosticProviderKind: "none",
-		},
-		operationSupport: {
-			definition: false,
-			typeDefinition: false,
-			declaration: false,
-			references: false,
-			hover: false,
-			signatureHelp: false,
-			documentSymbol: false,
-			workspaceSymbol: false,
-			codeAction: false,
-			rename: false,
-			implementation: false,
-			callHierarchy: false,
-		},
-		staticDiagnosticsMode: "push-only",
-		positionEncoding: "utf-16",
-		dynamicRegistrations: new Map(),
-		advertisedCommands: new Set(),
-		serverEditsAllowed: 0,
-		serverId: "test-server",
-		root: "/project",
-		lspProcess: createMockLspProcess() as any,
-		watchQueue: undefined as unknown as WatchedFilesQueue,
-		...overrides,
-	};
-	// #271: mirror production — the queue flushes a batched didChangeWatchedFiles
-	// through the (mock) connection. Tests drive it via state.watchQueue.flush().
-	if (!state.watchQueue) {
-		state.watchQueue = new WatchedFilesQueue((changes) => {
-			void state.connection.sendNotification(
-				"workspace/didChangeWatchedFiles",
-				{ changes },
-			);
-		});
-	}
-	return state;
-}
 
 describe("resolveConfigurationSection (#983)", () => {
 	const initialization = {
@@ -2222,7 +2119,9 @@ describe("runServerCommand — executeCommand timeout backstop (#365)", () => {
 describe("applyDynamicCapabilities", () => {
 	it("upgrades to pull mode when textDocument/diagnostic is registered", () => {
 		const state = createMockState();
-		state.dynamicRegistrations.set("diag-1", "textDocument/diagnostic");
+		state.dynamicRegistrations.set("diag-1", {
+			method: "textDocument/diagnostic",
+		});
 
 		applyDynamicCapabilities(state);
 
@@ -2235,7 +2134,9 @@ describe("applyDynamicCapabilities", () => {
 
 	it("upgrades to pull mode when workspace/diagnostic is registered", () => {
 		const state = createMockState();
-		state.dynamicRegistrations.set("ws-diag-1", "workspace/diagnostic");
+		state.dynamicRegistrations.set("ws-diag-1", {
+			method: "workspace/diagnostic",
+		});
 
 		applyDynamicCapabilities(state);
 
@@ -2244,7 +2145,9 @@ describe("applyDynamicCapabilities", () => {
 
 	it("reverts to push-only when dynamic pull registration is removed", () => {
 		const state = createMockState();
-		state.dynamicRegistrations.set("diag-1", "textDocument/diagnostic");
+		state.dynamicRegistrations.set("diag-1", {
+			method: "textDocument/diagnostic",
+		});
 		applyDynamicCapabilities(state);
 		expect(state.workspaceDiagnosticsSupport.mode).toBe("pull");
 
@@ -2276,9 +2179,15 @@ describe("applyDynamicCapabilities", () => {
 
 	it("upgrades operation capabilities when methods are registered", () => {
 		const state = createMockState();
-		state.dynamicRegistrations.set("def-1", "textDocument/definition");
-		state.dynamicRegistrations.set("ref-1", "textDocument/references");
-		state.dynamicRegistrations.set("hover-1", "textDocument/hover");
+		state.dynamicRegistrations.set("def-1", {
+			method: "textDocument/definition",
+		});
+		state.dynamicRegistrations.set("ref-1", {
+			method: "textDocument/references",
+		});
+		state.dynamicRegistrations.set("hover-1", {
+			method: "textDocument/hover",
+		});
 
 		applyDynamicCapabilities(state);
 
@@ -2313,7 +2222,9 @@ describe("applyDynamicCapabilities", () => {
 
 	it("ignores unknown registration methods without throwing", () => {
 		const state = createMockState();
-		state.dynamicRegistrations.set("unknown-1", "some/unknownMethod");
+		state.dynamicRegistrations.set("unknown-1", {
+			method: "some/unknownMethod",
+		});
 
 		expect(() => applyDynamicCapabilities(state)).not.toThrow();
 		expect(state.workspaceDiagnosticsSupport.mode).toBe("push-only");
