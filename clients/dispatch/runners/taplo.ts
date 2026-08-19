@@ -1,4 +1,5 @@
 import * as path from "node:path";
+import { findLocalBinUpwards } from "../../package-manager.js";
 import { safeSpawnAsync } from "../../safe-spawn.js";
 import { getLinterPolicyForCwd } from "../../tool-policy.js";
 import { PRIORITY } from "../priorities.js";
@@ -71,11 +72,22 @@ const taploRunner: RunnerDefinition = {
 			return { status: "skipped", diagnostics: [], semantic: "none" };
 		}
 
-		let cmd: string | null = null;
-		if (await (taplo.isAvailableAsync(cwd))) {
-			cmd = taplo.getCommand(cwd);
-		} else {
-			cmd = await resolveToolCommandWithInstallFallback(cwd, "taplo");
+		// Project binary first (#1731, discipline B): `taplo.isAvailableAsync`
+		// resolves through `findManagedNodeToolBinary`, pi-lens's own managed
+		// shim — checked BEFORE any project-local candidate, so a project's own
+		// `node_modules/.bin/taplo` (npm `@taplo/cli`) never won once the managed
+		// copy answered. `findLocalBinUpwards` defaults to `.cmd` on Windows,
+		// matching that npm shim; the availability checker's `.exe` extension is
+		// correct for pi-lens's OWN managed install (a GitHub-release binary,
+		// `clients/installer/index.ts` taplo entry), a different artifact with a
+		// different extension, so it stays as the checker's fallback only.
+		let cmd: string | null = findLocalBinUpwards("taplo", cwd) ?? null;
+		if (!cmd) {
+			if (await (taplo.isAvailableAsync(cwd))) {
+				cmd = taplo.getCommand(cwd);
+			} else {
+				cmd = await resolveToolCommandWithInstallFallback(cwd, "taplo");
+			}
 		}
 
 		if (!cmd) return { status: "skipped", diagnostics: [], semantic: "none" };
