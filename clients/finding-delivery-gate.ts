@@ -42,6 +42,15 @@
  * contradicting a same-minute `mode=full` sweep on the same paths (#1631
  * criterion 3 / #1634 criterion 4).
  *
+ * Two INDEPENDENT gates share this `stale` field, distinguished by
+ * `WidgetDiagnostic.staleReason`: `"dependency-drift"` (#1631, above) and
+ * `"past-eof"` (#1641 — a cited line beyond the file's current on-disk length,
+ * a stale in-memory LSP document diverged from disk). Each gate only HEALS
+ * demotions it made itself (`staleReason` defaults to `"past-eof"` for
+ * backward compatibility with pre-#1641 records) — composed, not merged into
+ * one undifferentiated flag, so a fix for one hazard can never silently clear
+ * the other's verdict.
+ *
  * ── Dispositions (strict-only for blocking) ───────────────────────────────
  * `applyDispositions` (diagnostic-dispositions.ts) filters false-positive/
  * suppress/defer/flagged judgments the agent or user already recorded for a
@@ -165,14 +174,19 @@ export const DELIVERY_SURFACES: Record<string, DeliverySurfaceEntry> = {
 		reason:
 			"Package-pinned finding with no cited file:line to stat — freshness " +
 			"has nothing to check drift against. The session_start cache can be " +
-			"arbitrarily old, so its age is stated instead.",
+			"arbitrarily old, so its age is stated instead. Also routes through " +
+			"`filterFindingsByDisposition` (#1625) first — a suppressed/false-" +
+			"positive finding never reaches this render, so the age label and the " +
+			"disposition filter compose rather than substitute for each other.",
 		ageSource: "TrivyResult.scannedAt",
 	},
 	"runtime-turn:trivy-cve-advisory": {
 		mode: "labeled",
 		file: "clients/runtime-turn.ts",
 		description: "Turn-end 🛡️ non-critical dependency CVE advisory (trivy).",
-		reason: "Same package-pinned shape as the CRITICAL blocker above.",
+		reason:
+			"Same package-pinned shape and #1625 disposition composition as the " +
+			"CRITICAL blocker above.",
 		ageSource: "TrivyResult.scannedAt",
 	},
 	"runtime-turn:trivy-license-advisory": {
