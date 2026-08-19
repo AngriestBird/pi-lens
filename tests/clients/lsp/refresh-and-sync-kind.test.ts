@@ -3,13 +3,11 @@
  * `textDocumentSync.change` kind honored on outgoing `didChange`.
  */
 
-import { EventEmitter } from "node:events";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { describe, expect, it, vi } from "vitest";
-import type { MessageConnection } from "vscode-jsonrpc";
 
 import {
 	clientRequestWorkspaceDiagnostics,
@@ -21,123 +19,22 @@ import {
 } from "../../../clients/lsp/client.js";
 import { launchLSP, stopLSP } from "../../../clients/lsp/launch.js";
 import { normalizeMapKey } from "../../../clients/path-utils.js";
-import { WatchedFilesQueue } from "../../../clients/lsp/watch-queue.js";
 import {
 	createWorkspaceDiagnosticsCacheContext,
 	loadWorkspaceDiagnosticsCache,
 } from "../../../clients/lsp/workspace-diagnostics-cache.js";
 import { negotiateSyncKind } from "../../../clients/lsp/sync-kind.js";
+// #1669 review F8/rebase: #1682 landed the shared factory this file's local
+// copy was anticipating — use it instead of hand-maintaining a parallel one
+// (single-source-of-truth). `createMockState` there now also carries the F8
+// fix (openDocumentUris/projectIdentityProbedFiles) and a `syncKind` default,
+// both folded into the shared file directly by this round's rebase.
+import { createMockState } from "./mock-client-state.js";
 
 const TEST_FILE = "/project/app.ts";
 const TEST_KEY = normalizeMapKey(TEST_FILE);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const FAKE_SERVER_PATH = path.join(__dirname, "../../fixtures/fake-lsp-server.mjs");
-
-function createMockConnection(): MessageConnection {
-	return {
-		sendNotification: vi.fn().mockResolvedValue(undefined),
-		sendRequest: vi.fn().mockResolvedValue(undefined),
-		onNotification: vi.fn(),
-		onRequest: vi.fn().mockResolvedValue(undefined),
-		onError: vi.fn(),
-		onClose: vi.fn(),
-		listen: vi.fn(),
-		dispose: vi.fn(),
-	} as unknown as MessageConnection;
-}
-
-function createMockLspProcess() {
-	return {
-		pid: 12345,
-		process: { killed: false, kill: vi.fn() } as unknown as NodeJS.Process,
-		stdin: { on: vi.fn(), off: vi.fn(), write: vi.fn() } as unknown as NodeJS.WritableStream,
-		stdout: { on: vi.fn(), off: vi.fn(), pipe: vi.fn() } as unknown as NodeJS.ReadableStream,
-		stderr: { on: vi.fn(), off: vi.fn() } as unknown as NodeJS.ReadableStream,
-	};
-}
-
-// #1669 review F8: `openDocumentUris` and `projectIdentityProbedFiles` are
-// REQUIRED here — both are `optional` fields on `LSPClientState`, and a
-// local factory that omits them exercises production's `?.`-fallback branch
-// (e.g. `state.openDocumentUris?.get(normalizedPath) ?? pathToFileURL(...)`)
-// instead of the real optional-field-present path every live client
-// actually runs under. PR #1682 extracts a shared factory to
-// tests/clients/lsp/mock-client-state.ts with this same fix; once it lands,
-// this local factory should be replaced with that import instead of kept in
-// parallel (single-source-of-truth — do not hand-maintain two copies).
-function createMockState(overrides?: Partial<LSPClientState>): LSPClientState {
-	const diagnosticEmitter = new EventEmitter();
-	diagnosticEmitter.setMaxListeners(50);
-	const state: LSPClientState = {
-		isConnected: true,
-		isDestroyed: false,
-		shutdownRequested: false,
-		exitedAt: undefined,
-		connectionDisposed: false,
-		lastError: undefined,
-		connection: createMockConnection(),
-		pushDiagnostics: new Map(),
-		pushDiagnosticTimestamps: new Map(),
-		documentPullDiagnostics: new Map(),
-		documentPullDiagnosticTimestamps: new Map(),
-		pullFailureHistory: [],
-		pendingDiagnostics: new Map(),
-		diagnosticPublicationCounts: new Map(),
-		documentOpenedAt: new Map(),
-		diagnosticEmitter,
-		diagnosticsVersion: 0,
-		diagnosticsVersionsByPath: new Map(),
-		documentVersions: new Map(),
-		diagnosticDocVersions: new Map(),
-		documentContentHashes: new Map(),
-		diagnosticBindings: new Map(),
-		pullResultIds: new Map(),
-		workspacePullResultCache: new Map(),
-		openDocuments: new Set(),
-		closedDocuments: new Set(),
-		openDocumentUris: new Map(),
-		pendingOpens: new Set(),
-		projectIdentityProbedFiles: new Set(),
-		workspaceDiagnosticsSupport: {
-			advertised: false,
-			mode: "push-only",
-			workspaceDiagnostics: false,
-			diagnosticProviderKind: "none",
-		},
-		operationSupport: {
-			definition: false,
-			typeDefinition: false,
-			declaration: false,
-			references: false,
-			hover: false,
-			signatureHelp: false,
-			documentSymbol: false,
-			workspaceSymbol: false,
-			codeAction: false,
-			rename: false,
-			implementation: false,
-			callHierarchy: false,
-		},
-		staticDiagnosticsMode: "push-only",
-		positionEncoding: "utf-16",
-		dynamicRegistrations: new Map(),
-		advertisedCommands: new Set(),
-		serverEditsAllowed: 0,
-		serverId: "test-server",
-		root: "/project",
-		lspProcess: createMockLspProcess() as any,
-		watchQueue: undefined as unknown as WatchedFilesQueue,
-		...overrides,
-	};
-	if (!state.watchQueue) {
-		state.watchQueue = new WatchedFilesQueue((changes) => {
-			void state.connection.sendNotification("workspace/didChangeWatchedFiles", {
-				changes,
-			});
-		});
-	}
-	return state;
-}
 
 describe("workspace/diagnostic/refresh handler (#1669)", () => {
 	it("registers a handler that replies null and clears workspacePullResultCache", async () => {
