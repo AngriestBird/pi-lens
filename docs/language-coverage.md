@@ -9,7 +9,7 @@ Dispatch is diagnostics-oriented: automatic formatting and safe autofix happen i
 | Language              | LSP | Dispatch Runners                                                                                               | Formatter               |
 | --------------------- | --- | -------------------------------------------------------------------------------------------------------------- | ----------------------- |
 | JavaScript/TypeScript | ✓   | lsp, ts-lsp, biome-check-json, tree-sitter, ast-grep-napi, type-safety, similarity, fact-rules, eslint, oxlint | biome, prettier         |
-| Python                | ✓   | lsp, pyright, ruff-lint, tree-sitter                                                                           | ruff, black             |
+| Python                | ✓   | lsp, pyright, mypy (config-first), ruff-lint, tree-sitter                                                      | ruff, black             |
 | Go                    | ✓   | lsp, go-vet, golangci-lint, tree-sitter                                                                        | gofmt                   |
 | Rust                  | ✓   | lsp, rust-clippy, tree-sitter                                                                                  | rustfmt                 |
 | Ruby                  | ✓   | lsp, rubocop, tree-sitter                                                                                      | rubocop, standardrb     |
@@ -77,3 +77,13 @@ this repo's queries):
 Both are upstream grammar limitations (tracked among
 [eonpatapon/tree-sitter-cue](https://github.com/eonpatapon/tree-sitter-cue)'s
 open issues), not something a query change here can fix.
+
+## Considered and skipped (2026-08-20 survey)
+
+Recorded so these are not re-litigated. Each was evaluated for adoption and rejected as a duplicate of an existing lane:
+
+- **bandit** (Python SAST): ruff's `S` ruleset implements Bandit's checks; a second runner would duplicate findings.
+- **checkov** (IaC security): `trivy config` plus tflint cover the same misconfiguration classes.
+- **radon / lizard** (complexity): ruff's `C90` (mccabe) covers cyclomatic complexity for Python; jscpd covers duplication cross-language.
+
+Known coverage holes with no tool currently clearing the adoption bar: Rust and Java dead-code detection, Ruby type checking (sorbet judged too heavy and idiosyncratic for a default lane).
