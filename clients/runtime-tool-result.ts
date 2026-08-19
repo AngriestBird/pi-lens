@@ -4,6 +4,7 @@ import * as path from "node:path";
 import { noteAuthoritativeContentAttachment } from "./agent-nudge.js";
 import {
 	extractReadPathsFromCommand,
+	extractDeletedPathsFromCommand,
 	extractGrepSearchReadsFromOutput,
 	extractWrittenPathsFromCommand,
 } from "./bash-file-access.js";
@@ -32,6 +33,7 @@ import {
 import type { PiLensFlagSource } from "./lens-config.js";
 import type { EditToolDetails } from "@earendil-works/pi-coding-agent";
 import type { LSPShutdownOptions } from "./lsp/client.js";
+import { notifyExternalFileChange } from "./lsp/index.js";
 import type { MetricsClient } from "./metrics-client.js";
 import { runPipeline, type PipelineResult } from "./pipeline.js";
 import {
@@ -47,21 +49,35 @@ import { RUNTIME_CONFIG } from "./runtime-config.js";
 
 const AUTHORITATIVE_CONTENT_MAX_BYTES = RUNTIME_CONFIG.pipeline.lspMaxFileBytes;
 
+/**
+ * The `tool_result` payload pi-lens actually receives.
+ *
+ * Kept aligned with what pi BUILDS, not with what a payload might plausibly
+ * carry. `AgentSession._installAgentToolHooks`'s `afterToolCall` constructs the
+ * event literal with exactly eight keys —
+ * `type`/`toolName`/`toolCallId`/`input`/`content`/`details`/`isError`/`usage`
+ * (`@earendil-works/pi-coding-agent/dist/core/agent-session.js:243-256`, source
+ * `src/core/agent-session.ts:502-516`) — and `ExtensionRunner.emitToolResult`
+ * forwards that same object to every handler
+ * (`dist/core/extensions/runner.js:649-651`, source `runner.ts:877-880`).
+ *
+ * #1655 item 2 removed seven fields this interface used to declare that pi
+ * never sets on the wire: `id`, `callId`, `requestId`, `provider`, `model`,
+ * `sessionId`, and `session`. They made a telemetry-identity branch here
+ * unreachable against a real host. Identity is read from the runtime instead —
+ * see the `telemetry:` block handed to `runPipeline` below, which already
+ * sources `model`/`sessionId`/`provider` from `RuntimeCoordinator`.
+ *
+ * Do not re-add a field here without a pi source line that assigns it.
+ */
 interface ToolResultEvent {
 	toolName: string;
-	id?: string | number;
 	toolCallId?: string | number;
-	callId?: string | number;
-	requestId?: string | number;
 	/** Host tool_result status; distinct from pi-lens PipelineResult.isError. */
 	isError?: boolean;
 	input: unknown;
 	details?: unknown;
 	content: Array<{ type: string; text?: string }>;
-	provider?: string;
-	model?: string;
-	sessionId?: string;
-	session?: { id?: string };
 }
 
 interface ToolResultDeps {
@@ -590,6 +606,41 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 				});
 			}
 		}
+
+		// #1668: bash-deleted files never go through the edit tool, so nothing
+		// else tells an LSP server one of its watched files is gone — the ONLY
+		// existing enqueue site fires on first open and can only emit type 1/2.
+		// Extract the command's likely delete targets, confirm each by existence
+		// (never scan the workspace — only the paths the command named), and only
+		// act on paths pi-lens already knows about (a read or a write this
+		// session) so an `rm` on something pi-lens never touched is not treated
+		// as a signal. Each match is routed to already-active LSP clients as a
+		// type-3 watched-files event through the same #271 coalescing queue a
+		// burst of deletes still flushes as one notification per server.
+		if (
+			event.isError !== true &&
+			!getFlag("no-lsp") &&
+			!getFlag("no-read-guard")
+		) {
+			for (const dp of extractDeletedPathsFromCommand(command, workspaceRoot)) {
+				if (isExternalOrVendorFile(dp, workspaceRoot)) continue;
+				if (isPathIgnoredByProject(dp, workspaceRoot, false)) continue;
+				if (!deps.readGuard || !deps.readGuard.hasKnownPath(dp)) continue;
+				// #1668 review F4: this is the ONLY gate standing between a merely
+				// NAMED path and an actual confirmed delete — extractDeletedPathsFromCommand
+				// only proposes candidates from parsing the command text, so it can't
+				// tell `git rm --cached f` (index-only, file still on disk) from a
+				// real delete, can't see a short-circuited `rm f && false` that never
+				// ran, and can't resolve a relative path run from a `cd`-ed subdirectory
+				// against the wrong cwd. Every one of those is caught here, and only
+				// here — do not remove or reorder this check relative to the loop body.
+				if (nodeFs.existsSync(dp)) continue; // still there — not a real delete
+				deps.readGuard.forgetPath(dp);
+				void notifyExternalFileChange(dp, 3).catch((err) => {
+					dbg(`tool_result: external-delete notify failed for ${dp}: ${err}`);
+				});
+			}
+		}
 	}
 
 	// Search tools reveal specific lines (file:line) the agent then edits — register
@@ -793,13 +844,15 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 	dbg(
 		`tool_result: resolved dispatch cwd ${dispatchCwd} for ${filePath} (turnState cwd ${turnStateCwd})`,
 	);
-	if (event.model || event.provider || event.sessionId || event.session?.id) {
-		runtime.setTelemetryIdentity({
-			model: event.model,
-			provider: event.provider,
-			sessionId: event.sessionId ?? event.session?.id,
-		});
-	}
+	// #1655 item 2: a `setTelemetryIdentity` call used to sit here, gated on
+	// `event.model`/`provider`/`sessionId`/`session.id`. pi sets none of those on
+	// a `tool_result` — `afterToolCall` builds the event with exactly
+	// `type`/`toolName`/`toolCallId`/`input`/`content`/`details`/`isError`/`usage`
+	// (`@earendil-works/pi-coding-agent/dist/core/agent-session.js:243-256`,
+	// source `src/core/agent-session.ts:502-516`), so the gate was always false
+	// against a real host and the branch never ran. Identity for this dispatch
+	// comes from the runtime, which `message_start`/`session_start` populate —
+	// see the `telemetry:` block handed to `runPipeline` below.
 	const writeIndex = runtime.nextWriteIndex();
 	let modifiedRanges: Array<{ start: number; end: number }> | undefined;
 	try {

@@ -1355,3 +1355,114 @@ describe("PersistedWidgetState v1→v2 migration — per-entry stamps inherit th
 		}
 	});
 });
+
+describe("past-EOF diagnostic gate (#1641)", () => {
+	it("RED CASE: demotes a stored diagnostic whose cited line exceeds the file's current on-disk line count", async () => {
+		const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "past-eof-"));
+		const filePath = path.join(tmpDir, "kilo.ts");
+		try {
+			// A live in-memory-vs-disk desync never touches mtime — the file was
+			// NEVER re-written on disk (#1641's forensic case: 402 lines on disk,
+			// diagnostics served at 407-410). A 5-line file stands in for that
+			// shape here: the cited line is past EOF from the moment it's recorded.
+			await fs.writeFile(filePath, "a\nb\nc\nd\ne\n");
+			recordDiagnostics(
+				filePath,
+				[
+					{ severity: "error", message: "still valid", line: 3, rule: "X" },
+					{ severity: "error", message: "stale in-memory citation", line: 407, rule: "Y" },
+				],
+				1,
+			);
+
+			// Pre-fix: both entries re-serve verbatim, including the impossible
+			// line-407 citation on a 5-line file, and both count as blocking.
+			const summaries = getFileDiagnosticSummaries();
+			const rec = summaries.find((s) => s.filePath === filePath);
+			expect(rec).toBeDefined();
+			const stale = rec?.diagnostics.find((d) => d.line === 407);
+			const live = rec?.diagnostics.find((d) => d.line === 3);
+			expect(stale?.stale).toBe(true);
+			expect(live?.stale).toBeFalsy();
+			// Demoted out of the blocking tally — same reasoning as isBlocking.
+			expect(rec?.blocking).toBe(1);
+
+			// getFileDiagnostics (the bus-publish/single-file accessor) sees the
+			// same demotion — one gate, every reader.
+			const single = getFileDiagnostics(filePath);
+			expect(single?.find((d) => d.line === 407)?.stale).toBe(true);
+		} finally {
+			await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+		}
+	});
+
+	it("does not demote a diagnostic whose cited line is still within the current file", async () => {
+		const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "past-eof-ok-"));
+		const filePath = path.join(tmpDir, "fine.ts");
+		try {
+			await fs.writeFile(filePath, "a\nb\nc\nd\ne\n");
+			recordDiagnostics(
+				filePath,
+				[{ severity: "error", message: "on the last line", line: 5, rule: "X" }],
+				1,
+			);
+			const rec = getFileDiagnosticSummaries().find((s) => s.filePath === filePath);
+			expect(rec?.diagnostics[0]?.stale).toBeFalsy();
+			expect(rec?.blocking).toBe(1);
+		} finally {
+			await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+		}
+	});
+
+	it("the TUI render loop demotes a past-EOF blocker out of the blocking list it shows", async () => {
+		const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "past-eof-render-"));
+		const filePath = path.join(tmpDir, "widget.ts");
+		try {
+			await fs.writeFile(filePath, "a\nb\nc\n");
+			recordDiagnostics(
+				filePath,
+				[{ severity: "error", message: "phantom citation", line: 999, rule: "X" }],
+				1,
+			);
+			const out = renderWidget(120, theme).join("\n");
+			expect(out).not.toContain("L999");
+		} finally {
+			await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+		}
+	});
+
+	it("F3 RE-ARM: a transient shrink demotes, restoring the file un-demotes the STORED record", async () => {
+		const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "past-eof-rearm-"));
+		const filePath = path.join(tmpDir, "transient.ts");
+		try {
+			await fs.writeFile(filePath, "a\nb\nc\nd\ne\n"); // 6 addressable lines
+			recordDiagnostics(
+				filePath,
+				[{ severity: "error", message: "real blocking error", line: 5, rule: "X" }],
+				1,
+			);
+			expect(getFileDiagnosticSummaries().find((s) => s.filePath === filePath)?.blocking).toBe(1);
+
+			// Transient shrink (formatter pass / checkout / partial write) —
+			// line 5 no longer exists. Force the mtime forward explicitly:
+			// successive writes within one filesystem timestamp tick can
+			// otherwise land on the SAME mtime, defeating the mtime-keyed cache
+			// for reasons unrelated to what this test verifies.
+			await fs.writeFile(filePath, "a\nb\n"); // 3 addressable lines
+			await fs.utimes(filePath, new Date(Date.now() + 1000), new Date(Date.now() + 1000));
+			const shrunk = getFileDiagnosticSummaries().find((s) => s.filePath === filePath);
+			expect(shrunk?.diagnostics[0]?.stale).toBe(true);
+			expect(shrunk?.blocking).toBe(0);
+
+			// Restored to its original content — the STORE must re-arm, not stay
+			// permanently latched stale (the #1633-V1 lesson: derive, don't latch).
+			await fs.writeFile(filePath, "a\nb\nc\nd\ne\n");
+			await fs.utimes(filePath, new Date(Date.now() + 2000), new Date(Date.now() + 2000));
+			const restored = getFileDiagnosticSummaries().find((s) => s.filePath === filePath);
+			expect(restored?.diagnostics[0]?.stale).toBeFalsy();
+			expect(restored?.blocking).toBe(1);
+		} finally {
+			await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+		}
+	});
+});

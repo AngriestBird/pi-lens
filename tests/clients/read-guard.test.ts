@@ -1253,6 +1253,108 @@ describe("ReadGuard export/import across resume (#1041)", () => {
 	});
 });
 
+describe("ReadGuard.hasKnownPath / forgetPath (#1668)", () => {
+	it("returns false for a path pi-lens never read or wrote", () => {
+		const guard = createReadGuard("test-session");
+		expect(guard.hasKnownPath("/src/never-touched.ts")).toBe(false);
+	});
+
+	it("returns true after a recordRead", () => {
+		const guard = createReadGuard("test-session");
+		guard.recordRead(createReadRecord("/src/api.ts"));
+		expect(guard.hasKnownPath("/src/api.ts")).toBe(true);
+	});
+
+	it("returns true after a recordWritten", () => {
+		const guard = createReadGuard("test-session");
+		guard.recordWritten("/src/api.ts");
+		expect(guard.hasKnownPath("/src/api.ts")).toBe(true);
+	});
+
+	it("forgetPath drops the record so hasKnownPath goes back to false", () => {
+		const guard = createReadGuard("test-session");
+		guard.recordWritten("/src/api.ts");
+		expect(guard.hasKnownPath("/src/api.ts")).toBe(true);
+
+		guard.forgetPath("/src/api.ts");
+		expect(guard.hasKnownPath("/src/api.ts")).toBe(false);
+	});
+
+	it("forgetPath on an unknown path is a no-op, not a throw", () => {
+		const guard = createReadGuard("test-session");
+		expect(() => guard.forgetPath("/src/never-touched.ts")).not.toThrow();
+	});
+
+	/**
+	 * #1668 review F1 (BLOCKING, Windows-only — CI can't see it): a REAL file
+	 * with a mixed-case basename, actually deleted from disk, checked through
+	 * the REAL guard (no stubbed hasKnownPath, no never-existing path — both
+	 * of those hid the defect). `this.key()` (normalizeFilePath) branches on
+	 * whether the path currently exists: real casing via `realpathSync.native`
+	 * while it's on disk, a lowercased tail once it's gone. `recordWritten`/
+	 * `recordRead` key while the file is still there; `hasKnownPath`/
+	 * `forgetPath` run in production AFTER the delete already landed. Before
+	 * the fix, `MyModule.ts` and any other mixed-case basename silently
+	 * dropped its record the moment the file went away — exactly the
+	 * `mymodule.ts` (works) vs `MyModule.ts` (fails) split the review probed.
+	 */
+	it("a real mixed-case file, actually deleted, is still a known path afterward", () => {
+		const env = setupTestEnvironment("read-guard-mixed-case-delete-");
+		try {
+			const filePath = path.join(env.tmpDir, "MyModule.ts");
+			fs.writeFileSync(filePath, "export const x = 1;\n");
+
+			const guard = createReadGuard("test-session");
+			guard.recordWritten(filePath);
+			expect(guard.hasKnownPath(filePath)).toBe(true);
+
+			// The delete this whole feature exists to detect — happens for real,
+			// not simulated by skipping the write.
+			fs.rmSync(filePath);
+
+			expect(guard.hasKnownPath(filePath)).toBe(true);
+			guard.forgetPath(filePath);
+			expect(guard.hasKnownPath(filePath)).toBe(false);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("a real mixed-case file recorded via recordRead survives the same post-delete lookup", () => {
+		const env = setupTestEnvironment("read-guard-mixed-case-read-delete-");
+		try {
+			const filePath = path.join(env.tmpDir, "Button.tsx");
+			fs.writeFileSync(filePath, "export const Button = () => null;\n");
+
+			const guard = createReadGuard("test-session");
+			guard.recordRead(createReadRecord(filePath));
+			expect(guard.hasKnownPath(filePath)).toBe(true);
+
+			fs.rmSync(filePath);
+
+			expect(guard.hasKnownPath(filePath)).toBe(true);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("a lowercase basename (the case the pre-fix code accidentally got right) still works", () => {
+		const env = setupTestEnvironment("read-guard-lowercase-delete-");
+		try {
+			const filePath = path.join(env.tmpDir, "mymodule.ts");
+			fs.writeFileSync(filePath, "export const x = 1;\n");
+
+			const guard = createReadGuard("test-session");
+			guard.recordWritten(filePath);
+			fs.rmSync(filePath);
+
+			expect(guard.hasKnownPath(filePath)).toBe(true);
+		} finally {
+			env.cleanup();
+		}
+	});
+});
+
 // --- Helpers ---
 
 function createReadRecord(
