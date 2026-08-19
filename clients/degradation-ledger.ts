@@ -48,7 +48,24 @@ export type DegradationKind =
 	 * (#1713). The answer arrived too late to serve the caller that timed out,
 	 * so it is discarded — this kind is the only trace that it ever landed.
 	 */
-	| "lsp-pull-late-answer";
+	| "lsp-pull-late-answer"
+	/**
+	 * `navRequest`'s (`clients/lsp/client.ts`) per-request `withTimeout`
+	 * abandoned a hover/definition/references/etc. request (#1716). Every
+	 * timeout is counted here; only the FIRST occurrence per (method, file)
+	 * this session also writes a detailed `lsp_nav_request_timeout`
+	 * latency.log record — navRequest is the highest-volume LSP call site, so
+	 * a stuck server storming timeouts must not storm log writes too.
+	 */
+	| "lsp-nav-request-timeout"
+	/**
+	 * The abandoned request behind an `lsp-nav-request-timeout` settled anyway
+	 * after the caller gave up (#1716) — the nav-request sibling of
+	 * `lsp-pull-late-answer`. Nav answers are read-once (no persistent cache
+	 * to poison), but the count still tells a dogfood session whether a
+	 * "hung" server is truly hung or just answering late.
+	 */
+	| "lsp-nav-late-answer";
 
 export interface DegradationRecord {
 	kind: unknown;
@@ -128,8 +145,15 @@ export function recordDegradationOnce(record: DegradationRecord): void {
 /**
  * Count a repeated degradation while retaining one latest-reason entry per
  * kind/subject. The group count remains the exact event total.
+ *
+ * Returns the running per-kind/subject tally (1 on the first call for that
+ * pair). #1716 reads this to gate a storm-prone caller's own bounded side
+ * effect (one detailed log write per rising edge) on the existing tallies
+ * map, instead of hand-rolling a second latch that would need its own
+ * session_start re-arm. A failure returns 0 so a caller's `=== 1` rising-edge
+ * check never misfires into "first occurrence" territory on error.
  */
-export function incrementDegradationCount(record: DegradationRecord): void {
+export function incrementDegradationCount(record: DegradationRecord): number {
 	try {
 		const kind = boundedKind(record.kind);
 		const subject = truncateForLedger(record.subject);
@@ -143,14 +167,21 @@ export function incrementDegradationCount(record: DegradationRecord): void {
 			groups.set(kind, group);
 		}
 		group.count += 1;
-		const entry = { subject, reason: truncateForLedger(`${reason} (count: ${count})`) };
-		const existing = group.entries.findIndex((candidate) => candidate.subject === subject);
+		const entry = {
+			subject,
+			reason: truncateForLedger(`${reason} (count: ${count})`),
+		};
+		const existing = group.entries.findIndex(
+			(candidate) => candidate.subject === subject,
+		);
 		if (existing >= 0) group.entries.splice(existing, 1);
 		group.entries.push(entry);
 		if (group.entries.length > ENTRIES_PER_KIND) group.entries.shift();
+		return count;
 	} catch (error) {
 		debugLedgerFailure("increment", error);
 		// Telemetry must never break the observed path.
+		return 0;
 	}
 }
 
@@ -204,7 +235,9 @@ function isRenderableSummary(value: unknown): value is DegradationGroup[] {
 	});
 }
 
-export function renderDegradationLines(summary: unknown = getDegradationSummary()): string[] {
+export function renderDegradationLines(
+	summary: unknown = getDegradationSummary(),
+): string[] {
 	if (!isRenderableSummary(summary)) return [];
 	if (summary.length === 0) return [];
 	return [
