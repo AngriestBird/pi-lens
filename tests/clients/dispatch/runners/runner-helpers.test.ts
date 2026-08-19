@@ -343,6 +343,72 @@ describe("runner-helpers availability checker", () => {
 		expect(getSgCommand().cmd).toContain("ast-grep");
 	});
 
+	it("does not re-serve a retained ast-grep winner this sweep just proved durably missing (#1593)", async () => {
+		const safeSpawnMod = await import("../../../../clients/safe-spawn.js");
+		try {
+			vi.useFakeTimers({ toFake: ["Date"] });
+			vi.setSystemTime(new Date(1_700_000_000_000));
+
+			// Sweep 1: every earlier tier stalls (transient); npx answers, so the
+			// win is provisional and memoized as `cmd: "npx"`.
+			vi.mocked(safeSpawnMod.safeSpawnAsync).mockImplementation(((
+				cmd: string,
+			) => {
+				if (cmd === "npx") {
+					return Promise.resolve({
+						stdout: "ast-grep 0.40.0",
+						stderr: "",
+						status: 0,
+					});
+				}
+				return Promise.resolve({
+					stdout: "",
+					stderr: "",
+					status: null,
+					failure: "timeout",
+					spawnFailure: { kind: "timeout" },
+				});
+			}) as never);
+			expect(await isSgAvailableAsync()).toBe(true);
+			expect(getSgCommand().cmd).toBe("npx");
+
+			// Let the provisional cooldown expire so the next call re-sweeps
+			// instead of serving the memoized verdict straight from the latch.
+			vi.setSystemTime(new Date(Date.now() + 301_000));
+
+			// Sweep 2: the memoized winner (npx) now ENOENTs — durably missing —
+			// while an unrelated earlier tier merely stalls again. The retained
+			// arm must NOT re-serve the dead `npx` command just because a sibling
+			// stalled in the same sweep.
+			vi.mocked(safeSpawnMod.safeSpawnAsync).mockImplementation(((
+				cmd: string,
+			) => {
+				if (cmd === "npx") {
+					return Promise.resolve({
+						stdout: "",
+						stderr: "",
+						status: null,
+						error: Object.assign(new Error("npx ENOENT"), {
+							code: "ENOENT",
+						}),
+						failure: "spawn",
+						spawnFailure: { kind: "tool-not-found" },
+					});
+				}
+				return Promise.resolve({
+					stdout: "",
+					stderr: "",
+					status: null,
+					failure: "timeout",
+					spawnFailure: { kind: "timeout" },
+				});
+			}) as never);
+			expect(await isSgAvailableAsync()).toBe(false);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
 	it("bounds missing-tool installs to one attempt and records the failure", async () => {
 		const safeSpawnMod = await import("../../../../clients/safe-spawn.js");
 		const installerMod = await import("../../../../clients/installer/index.js");
