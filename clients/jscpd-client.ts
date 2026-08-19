@@ -58,6 +58,32 @@ const EMPTY_RESULT: JscpdResult = {
 
 const SCAN_TIMEOUT_MS = 30_000;
 
+/** jscpd's own config-file names, in its discovery order, checked at `cwd` only
+ * (jscpd does not walk up). */
+const JSCPD_CONFIG_FILENAMES = [".jscpd.json", "jscpd.json"];
+
+/**
+ * True when the project ships its own jscpd config: a `.jscpd.json`/
+ * `jscpd.json` file, or a `package.json` `jscpd` field. jscpd discovers either
+ * unaided, but `--min-lines`/`--min-tokens`/`--ignore` on the CLI override
+ * whatever the config sets — passing them unconditionally silently discarded a
+ * project's own thresholds and ignore list (#1731, discipline A).
+ */
+function hasProjectJscpdConfig(cwd: string): boolean {
+	for (const name of JSCPD_CONFIG_FILENAMES) {
+		if (fs.existsSync(path.join(cwd, name))) return true;
+	}
+	try {
+		const pkg = JSON.parse(
+			fs.readFileSync(path.join(cwd, "package.json"), "utf-8"),
+		);
+		if (pkg && typeof pkg === "object" && pkg.jscpd !== undefined) return true;
+	} catch {
+		// No/malformed package.json — "no project config" is the honest answer.
+	}
+	return false;
+}
+
 const jscpdAvailability = createAvailabilityChecker("jscpd", "", ["--version"], {
 	probeTimeout: 1500,
 	// One definition of the managed-shim fast path, shared with knip (#1476).
@@ -272,21 +298,23 @@ export class JscpdClient {
 				: this.jscpdManagedPath
 					? { cmd: this.jscpdManagedPath, prefix: [] as string[] }
 					: { cmd: "npx", prefix: ["jscpd"] };
+			// A project's own jscpd config wins outright (#1731, discipline A):
+			// these three flags all override whatever it sets, so none are passed
+			// when the project ships one — jscpd discovers it unaided.
+			const hasConfig = hasProjectJscpdConfig(cwd);
 			const result = await safeSpawnAsync(
 				cmd,
 				[
 					...prefix,
 					".",
-					"--min-lines",
-					String(minLines),
-					"--min-tokens",
-					String(minTokens),
+					...(hasConfig
+						? []
+						: ["--min-lines", String(minLines), "--min-tokens", String(minTokens)]),
 					"--reporters",
 					"json",
 					"--output",
 					outDir,
-					"--ignore",
-					ignorePattern,
+					...(hasConfig ? [] : ["--ignore", ignorePattern]),
 				],
 				{
 					timeout: SCAN_TIMEOUT_MS,
