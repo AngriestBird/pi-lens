@@ -21,6 +21,7 @@ import {
 	type DispositionCandidate,
 } from "../clients/diagnostic-dispositions.js";
 import { applyInlineSuppressions } from "../clients/dispatch/inline-suppressions.js";
+import { gateFindingsByPathFreshness } from "../clients/advisory-provenance.js";
 import { normalizeRuleId } from "../clients/dispatch/rule-id-normalize.js";
 import { applyRulePolicy, rulePolicyMapFromConfig } from "../clients/dispatch/rule-policy.js";
 import { loadPiLensProjectConfig } from "../clients/project-lens-config.js";
@@ -499,15 +500,30 @@ export function createLensDiagnosticsTool(
 
 // ── delta mode ────────────────────────────────────────────────────────────────
 
-function formatProjectDeltaDiagnostic(diagnostic: ProjectDiagnostic): string {
+function formatProjectDeltaDiagnostic(
+	diagnostic: ProjectDiagnostic,
+	stale: boolean,
+): string {
 	const marker =
 		diagnostic.semantic === "blocking" || diagnostic.severity === "error"
 			? "🔴"
 			: "ℹ";
 	const rule = diagnostic.rule ?? diagnostic.code ?? diagnostic.runner;
-	return `  ${marker} L${diagnostic.line ?? "?"}  ${rule}  ${diagnostic.message}`;
+	const where = stale ? STALE_LINE_MARKER : `L${diagnostic.line ?? "?"}`;
+	return `  ${marker} ${where}  ${rule}  ${diagnostic.message}`;
 }
 
+/**
+ * #1634 review round R3: `appendProjectDiagnosticsDeltaLines` re-serves the
+ * persisted project-diagnostics DELTA report verbatim — the third of
+ * `mode=delta`'s three arms (the other two, actionable/quality warnings, were
+ * gated in the F3 pass above), and it carried the identical unfixed shape:
+ * cited `file:line` findings from a report with its own `generatedAt`, no
+ * freshness check. Same gate, same policy as `applyDeltaFreshnessGate`:
+ * missing file -> DROP, edited-since -> DEMOTE (loses its line, keeps
+ * rule/message), live -> unchanged. See `clients/finding-delivery-gate.ts`
+ * surface `lens-diagnostics:mode-delta`.
+ */
 function appendProjectDiagnosticsDeltaLines(
 	lines: string[],
 	cwd: string,
@@ -515,11 +531,24 @@ function appendProjectDiagnosticsDeltaLines(
 	severity: string,
 	includeFile: (filePath: string) => boolean,
 ): number {
-	const diagnostics = (report?.diagnostics ?? []).filter(
+	const scoped = (report?.diagnostics ?? []).filter(
 		(diagnostic) =>
 			includeFile(diagnostic.filePath) &&
 			matchesSeverity(projectDiagnosticToWidget(diagnostic), severity),
 	);
+	const gated = gateFindingsByPathFreshness({
+		store: "lens-diagnostics-delta-project",
+		findings: scoped,
+		cwd,
+		scannedAt: report?.generatedAt,
+		citedPath: (d) => d.filePath,
+		onMissing: "drop",
+	});
+	const staleSet = new Set(gated.stale);
+	// Concatenating live-then-stale reorders a file's demoted rows to the end
+	// of its bucket below (rather than each diagnostic's original report
+	// order) — cosmetic only, findings are neither dropped nor duplicated.
+	const diagnostics = [...gated.live, ...gated.stale];
 	const byFile = new Map<string, ProjectDiagnostic[]>();
 	for (const diagnostic of diagnostics) {
 		const filePath = path.resolve(diagnostic.filePath);
@@ -531,7 +560,7 @@ function appendProjectDiagnosticsDeltaLines(
 		const rel = path.relative(cwd, filePath);
 		if (!lines.includes(rel)) lines.push(rel);
 		for (const diagnostic of fileDiagnostics) {
-			lines.push(formatProjectDeltaDiagnostic(diagnostic));
+			lines.push(formatProjectDeltaDiagnostic(diagnostic, staleSet.has(diagnostic)));
 		}
 	}
 	return diagnostics.length;
@@ -576,6 +605,60 @@ function loadProjectRulePolicyMap(cwd: string) {
 	return rulePolicyMapFromConfig(loadPiLensProjectConfig(cwd).rules);
 }
 
+/**
+ * #1634 review round: `formatDeltaMode` re-serves the `actionable-warnings`/
+ * `code-quality-warnings` caches verbatim — each cited `file:line`, no
+ * freshness check — the SAME shape #1622 fixed for gitleaks/trivy-secrets,
+ * unfixed here because `mode=delta` is the tool's DEFAULT and easy to miss
+ * in a per-store sweep. Both reports carry a report-level `generatedAt`; a
+ * warning is gated against it exactly like a scanner finding against
+ * `scannedAt`: missing file → DROP (nothing to fix in a file that's gone),
+ * edited-since → DEMOTE (loses its line, keeps its rule/message, marked
+ * `STALE_LINE_MARKER`), live → unchanged. See
+ * `clients/finding-delivery-gate.ts` surface `lens-diagnostics:mode-delta`.
+ */
+function applyDeltaFreshnessGate<W extends DispositionCandidate>(
+	files: Array<{ filePath: string; warnings: W[] }>,
+	cwd: string,
+	generatedAt: string | undefined,
+): Array<{ filePath: string; warnings: Array<W & { stale?: boolean }> }> {
+	if (!generatedAt) return files;
+	const flat: Array<{ filePath: string; warning: W }> = [];
+	for (const file of files) {
+		for (const warning of file.warnings) flat.push({ filePath: file.filePath, warning });
+	}
+	if (flat.length === 0) return files;
+	const gated = gateFindingsByPathFreshness({
+		store: "lens-diagnostics-delta",
+		findings: flat,
+		cwd,
+		scannedAt: generatedAt,
+		citedPath: (f) => f.filePath,
+		onMissing: "drop",
+	});
+	// Two passes (live, then stale) reorder a file's demoted rows to the end
+	// of its warnings array rather than the original report order — cosmetic
+	// only, nothing is dropped or duplicated.
+	const byFile = new Map<string, Array<W & { stale?: boolean }>>();
+	for (const f of gated.live) {
+		const arr = byFile.get(f.filePath) ?? [];
+		arr.push(f.warning);
+		byFile.set(f.filePath, arr);
+	}
+	for (const f of gated.stale) {
+		const arr = byFile.get(f.filePath) ?? [];
+		arr.push({ ...f.warning, stale: true, line: undefined });
+		byFile.set(f.filePath, arr);
+	}
+	return files
+		.map((file) => ({
+			filePath: file.filePath,
+			warnings: byFile.get(file.filePath) ?? [],
+		}))
+		.filter((file) => file.warnings.length > 0);
+}
+
+// @delivery-surface: lens-diagnostics:mode-delta
 function formatDeltaMode(
 	cacheManager: CacheManager,
 	cwd: string,
@@ -625,8 +708,16 @@ function formatDeltaMode(
 				),
 			}))
 			.filter((file) => file.warnings.length > 0);
-	const actionableFiles = visibleWarningFiles(actionable?.files);
-	const qualityFiles = visibleWarningFiles(quality?.files);
+	const actionableFiles = applyDeltaFreshnessGate(
+		visibleWarningFiles(actionable?.files),
+		cwd,
+		actionable?.generatedAt,
+	);
+	const qualityFiles = applyDeltaFreshnessGate(
+		visibleWarningFiles(quality?.files),
+		cwd,
+		quality?.generatedAt,
+	);
 
 	const lines: string[] = [];
 
@@ -636,9 +727,8 @@ function formatDeltaMode(
 			const rel = path.relative(cwd, file.filePath);
 			lines.push(`${rel}`);
 			for (const w of file.warnings) {
-				lines.push(
-					`  ⚠ L${w.line ?? "?"}  ${w.rule ?? w.code ?? w.tool}  ${w.message}`,
-				);
+				const where = w.stale ? STALE_LINE_MARKER : `L${w.line ?? "?"}`;
+				lines.push(`  ⚠ ${where}  ${w.rule ?? w.code ?? w.tool}  ${w.message}`);
 			}
 		}
 	}
@@ -649,9 +739,8 @@ function formatDeltaMode(
 			const rel = path.relative(cwd, file.filePath);
 			if (!lines.includes(rel)) lines.push(rel);
 			for (const w of file.warnings) {
-				lines.push(
-					`  ℹ L${w.line ?? "?"}  ${w.rule ?? w.code ?? w.tool}  ${w.message}`,
-				);
+				const where = w.stale ? STALE_LINE_MARKER : `L${w.line ?? "?"}`;
+				lines.push(`  ℹ ${where}  ${w.rule ?? w.code ?? w.tool}  ${w.message}`);
 			}
 		}
 	}
@@ -1387,6 +1476,7 @@ async function getProjectDiagnosticsSnapshotForFullMode(
 	return undefined;
 }
 
+// @delivery-surface: lens-diagnostics:mode-full
 async function formatFullMode(
 	cwd: string,
 	severity: string,
@@ -2047,6 +2137,7 @@ async function formatFullMode(
 	return resultWithCold;
 }
 
+// @delivery-surface: lens-diagnostics:mode-all
 function formatAllMode(
 	cwd: string,
 	severity: string,

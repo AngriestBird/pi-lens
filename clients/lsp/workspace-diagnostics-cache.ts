@@ -92,6 +92,80 @@ function cachePath(cwd: string): string {
 	return path.join(getProjectDataDir(cwd), "cache", CACHE_FILE);
 }
 
+// #1669 (review round): every cwd that has ever backed a
+// `createWorkspaceDiagnosticsCacheContext` call in this process — the ONLY
+// reliable record of which on-disk cache(s) are actually live. A
+// `workspace/diagnostic/refresh` reaches us at the per-LSP-client layer
+// (`client.ts`), which knows its own `state.root` — a per-SERVER identity
+// root that `resolveServerRoot` (`index.ts`) routinely nests BELOW the real
+// sweep cwd for a monorepo/multi-root project's nested-boundary-marker
+// subproject — but has no way to know which cwd(s) `runWorkspaceDiagnostics`/
+// `tools/lsp-diagnostics.ts` actually swept under. Clearing at `state.root`
+// would miss the real cache file entirely and write a stray empty one at a
+// fabricated path. Recording every real cwd here, at the one funnel both
+// callers already share, lets a refresh invalidate every cache that could
+// legitimately be affected without threading cwd knowledge into client.ts.
+// Bounded defensively: a session touching more than this many distinct sweep
+// roots is already pathological, and dropping new entries past the cap is
+// safe (a "not yet registered" cwd's cache was never able to receive a
+// pre-refresh entry in the first place).
+//
+// Known residual (#1707): a monorepo subproject this process has NOT swept
+// yet, under a cwd DIFFERENT from `state.root`, is reachable by neither this
+// registry nor the `state.root` fallback the refresh handler also applies
+// (`client.ts`) — a refresh arriving before that subproject's first sweep
+// clears nothing for it. Filed rather than silently claimed as solved; the
+// real fix needs `LSPService` to tell a client its actual sweep cwd(s), not
+// just its per-server root.
+const MAX_REGISTERED_CWDS = 64;
+const _registeredCwds = new Set<string>();
+
+/** Drop every cache this process has ever swept under. Best-effort, matching
+ *  `clearWorkspaceDiagnosticsCache`'s own fail-open posture. See the
+ *  `_registeredCwds` doc comment above for the #1707 residual this does not
+ *  cover. */
+export function clearAllWorkspaceDiagnosticsCaches(): void {
+	for (const cwd of _registeredCwds) {
+		clearWorkspaceDiagnosticsCache(cwd);
+	}
+}
+
+// #1669 (review round): per-cwd epoch, mirroring
+// `clients/review-graph/builder.ts`'s workspace-cache epoch shape — AGENTS.md's
+// canonical pattern for "a durable commit followed by an out-of-guard mirror
+// refresh" (shape 12). A sweep's `createWorkspaceDiagnosticsCacheContext` loads
+// the file ONCE and `persist()` blind-overwrites the whole map at the end; a
+// refresh landing mid-sweep would otherwise be UNDONE the moment that sweep's
+// own (now-stale) in-memory copy is written back. Capture the epoch at
+// context-creation (read) time; refuse to publish if it advanced before
+// `persist()` (write) time — the clear wins, and the next sweep starts clean.
+// Per N4, `lookup()` also checks it on every call, so an in-flight sweep
+// stops serving pre-refresh entries the moment its OWN epoch goes stale, not
+// only at `persist()` time.
+//
+// #1669 review R2: this map is IN-MEMORY ONLY, deliberately — a round-3
+// attempt to also persist it inside the cache file (a `generation` field)
+// was reverted here: nothing actually READ that field to invalidate entries
+// on load, so it was inert machinery (verified by the round-4 review:
+// replacing the disk read with a constant left every test green). A cwd
+// this process has never opened a context for — most concretely a monorepo
+// subproject a sweep hasn't reached yet — still has no epoch here at all;
+// see the `state.root` fallback's doc comment on `clearWorkspaceDiagnosticsCache`
+// below and #1707 for that residual gap, tracked rather than silently
+// claimed as solved.
+const _cacheEpochs = new Map<string, number>();
+
+function cacheEpoch(root: string): number {
+	return _cacheEpochs.get(normalizeMapKey(root)) ?? 0;
+}
+
+function bumpCacheEpoch(root: string): number {
+	const key = normalizeMapKey(root);
+	const next = (_cacheEpochs.get(key) ?? 0) + 1;
+	_cacheEpochs.set(key, next);
+	return next;
+}
+
 /** Fail-safe on any read/parse/shape problem: return `undefined` so the
  * caller treats a stale/missing/corrupt cache as "nothing cached" — every
  * file then falls through to a fresh touch, same fail-open posture as
@@ -119,6 +193,35 @@ export function saveWorkspaceDiagnosticsCache(
 	writeFileAtomic(filePath, JSON.stringify(cache, null, 2), {
 		bestEffort: false,
 	});
+}
+
+/**
+ * Drop every entry from the persisted cache so the next sweep from either
+ * call site (`runWorkspaceDiagnostics` or `tools/lsp-diagnostics.ts`) pays for
+ * a fresh pull instead of replaying entries the server just told us to
+ * distrust. Used by the `workspace/diagnostic/refresh` handler (#1669) — a
+ * server-initiated signal (typically a project-wide config change) that
+ * everything it has already reported may be stale, so this on-disk cache must
+ * not survive it either.
+ *
+ * Best-effort, matching `persist()`'s fail-open policy: a write failure just
+ * means the next sweep may reuse stale entries once more, never worth
+ * crashing the caller (a live LSP request handler) over.
+ */
+export function clearWorkspaceDiagnosticsCache(cwd: string): void {
+	const root = path.resolve(cwd);
+	// Bump FIRST: any sweep context already loaded (whose own `persist()`
+	// hasn't run yet) must observe an epoch mismatch regardless of exactly
+	// when its write lands relative to this clear.
+	bumpCacheEpoch(root);
+	try {
+		saveWorkspaceDiagnosticsCache(root, {
+			version: WORKSPACE_DIAGNOSTICS_CACHE_VERSION,
+			entries: {},
+		});
+	} catch {
+		// best-effort — see doc comment above.
+	}
 }
 
 /**
@@ -279,6 +382,11 @@ export function createWorkspaceDiagnosticsCacheContext(
 	cwd: string,
 ): WorkspaceDiagnosticsCacheContext {
 	const root = path.resolve(cwd);
+	if (_registeredCwds.size < MAX_REGISTERED_CWDS || _registeredCwds.has(root)) {
+		_registeredCwds.add(root);
+	}
+	// #1669: captured at load time — see the epoch doc comment above.
+	const epoch = cacheEpoch(root);
 	const existing = loadWorkspaceDiagnosticsCache(root);
 	const entries: Record<string, WorkspaceDiagnosticsCacheEntry> = {
 		...(existing?.entries ?? {}),
@@ -296,6 +404,18 @@ export function createWorkspaceDiagnosticsCacheContext(
 
 	return {
 		lookup(filePath, scopeKey) {
+			// #1669 review N4: the epoch guarded `persist()` but not `lookup()` —
+			// an in-flight sweep kept REPLAYING disowned entries into its OWN
+			// served results for the rest of its run even though the on-disk
+			// cache was already correctly cleared (disk stayed clean, but the
+			// user still saw stale results for the remainder of THIS sweep).
+			// Check on every call, not just at load time: a refresh landing
+			// mid-sweep must stop lookups from serving pre-refresh entries
+			// immediately, not only prevent them from being written back.
+			// `cacheEpoch` is in-memory only (see its doc comment) — this runs
+			// per file, and a same-process clear always updates memory
+			// synchronously, so this needs no disk read to be authoritative.
+			if (cacheEpoch(root) !== epoch) return undefined;
 			const entry = entries[cacheKeyFor(filePath)];
 			if (!entry || entry.scopeKey !== scopeKey) return undefined;
 			if (!isEntryFresh(filePath, entry, getImports)) return undefined;
@@ -324,6 +444,14 @@ export function createWorkspaceDiagnosticsCacheContext(
 		},
 		persist() {
 			if (!dirty) return;
+			// #1669: a refresh invalidated this cwd's cache after we loaded it —
+			// publishing this sweep's (now-stale-relative-to-the-refresh) in-memory
+			// copy would resurrect exactly what the refresh cleared. Drop the
+			// write; the next sweep loads clean and recomputes.
+			if (cacheEpoch(root) !== epoch) {
+				dirty = false;
+				return;
+			}
 			try {
 				saveWorkspaceDiagnosticsCache(root, {
 					version: WORKSPACE_DIAGNOSTICS_CACHE_VERSION,

@@ -77,6 +77,7 @@ import {
 	resetAstGrepNapiLoadState,
 	resetAstGrepUnsupportedLanguageLog,
 } from "./runners/ast-grep-napi.js";
+import { resetTreeSitterClientLoadState } from "../tree-sitter-shared.js";
 import { isTestRoleCollateral } from "../collateral-test-role.js";
 import {
 	clearReviewGraphWorkspaceCache,
@@ -430,6 +431,9 @@ export function resetDispatchBaselines(cwd?: string): void {
 	// #1567: a genuine-failure verdict or a live transient cooldown on the
 	// napi load latch is session-scoped state, not process-lifetime state.
 	resetAstGrepNapiLoadState();
+	// #1592: same shape for the web-tree-sitter load latch — an evaluation-
+	// shaped rejection is session-scoped state, not process-lifetime state.
+	resetTreeSitterClientLoadState();
 	sessionFacts.clearAll();
 	resetSessionSlopScore();
 	clearCoverageNoticeState();
