@@ -459,6 +459,8 @@ export const EXEMPT_SESSION_STATE_FILES: Readonly<Record<string, string>> = {
 	"generated-artifacts.ts": "generated-file classification derived from path patterns",
 	"git-tracked-ignore.ts":
 		"git tracked/ignored sets, invalidated by their own mtime checks rather than by the session boundary",
+	"diagnostic-line-freshness.ts":
+		"the #1641 past-EOF line-count memo, keyed on mtime AND size and re-stat'd on every read — a mismatch always recomputes, so it is invalidated by its own freshness check per file, not by the session boundary, same as git-tracked-ignore.ts",
 	"warm-attach.ts":
 		"the warm-attach IPC server and incumbent-PID role, which belong to the process instance, not the session; its served-diagnostic dedupe is keyed by content hash, so a carried entry can only mean the answer is unchanged",
 
