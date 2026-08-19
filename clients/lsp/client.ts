@@ -1809,6 +1809,61 @@ export function setupIncomingHandlers(
 	// once). Reply null per spec and drop both so the NEXT pull recomputes
 	// instead of replaying — or inheriting an `unchanged` basis from — results
 	// the server just told us to distrust.
+	// #1669 review R1: single-flight coalescing latch for the re-pull pool
+	// below, scoped to THIS client (one `setupIncomingHandlers` call per
+	// connection). A refresh FLOOD — a watch-mode rebuild or a `git checkout`
+	// can legitimately fire many `workspace/diagnostic/refresh` requests in a
+	// tight burst — used to queue one independent capped pool PER refresh:
+	// N refreshes meant N pools running concurrently (peak concurrency N x
+	// the per-pool cap) and N full passes over every open document (N x
+	// redundant pulls for the SAME documents). `refreshRepullRunning` gates a
+	// SECOND pool from ever starting while one is already in flight;
+	// `refreshRepullRerunRequested` remembers that at least one more refresh
+	// arrived meanwhile and coalesces it into exactly ONE trailing rerun
+	// after the current pool finishes, using a FRESH snapshot of open
+	// documents at rerun time (not the stale list from whenever the burst
+	// started) — so an arbitrarily large burst still costs at most 2 passes
+	// and never more than `REFRESH_REPULL_CONCURRENCY` pulls at once.
+	let refreshRepullRunning = false;
+	let refreshRepullRerunRequested = false;
+
+	const runRefreshRepullPool = async (): Promise<void> => {
+		do {
+			refreshRepullRerunRequested = false;
+			const toRepull =
+				state.workspaceDiagnosticsSupport.mode === "pull"
+					? [...state.openDocuments]
+					: [];
+			if (toRepull.length > 0) {
+				try {
+					await mapWithConcurrency(
+						toRepull,
+						REFRESH_REPULL_CONCURRENCY,
+						async (normalizedPath) => {
+							const uri = state.openDocumentUris?.get(normalizedPath);
+							const filePath = uri ? uriToPath(uri) : normalizedPath;
+							await clientRequestPullDiagnostics(state, filePath);
+						},
+					);
+				} catch (err) {
+					// #1669 review N2: rejections are observed, never
+					// `void`-swallowed — `clientRequestPullDiagnostics` itself never
+					// throws (it returns an `unavailable` outcome), so this only
+					// fires on a genuine programming error, but a silent throw
+					// inside `mapWithConcurrency`'s `Promise.all` must not vanish.
+					incrementDegradationCount({
+						kind: "lsp-pull-unconfirmed",
+						subject: state.serverId,
+						reason: `refresh re-pull threw: ${err instanceof Error ? err.message : String(err)}`,
+					});
+				}
+			}
+			// A refresh that arrived WHILE this pool was running gets exactly
+			// one more pass, never a pass per refresh.
+		} while (refreshRepullRerunRequested);
+		refreshRepullRunning = false;
+	};
+
 	state.connection.onRequest("workspace/diagnostic/refresh", async () => {
 		state.workspacePullResultCache.clear();
 		// #1669 review F1: clear every on-disk sweep cache this process has
@@ -1825,12 +1880,12 @@ export function setupIncomingHandlers(
 		// and a later sweep would load the untouched, now-genuinely-stale
 		// on-disk cache a PRIOR process/session left behind. `state.root` is
 		// the one cwd this handler can always reach regardless of registry
-		// state — imprecise for a monorepo (the F1 gap), but a cheap, durable
-		// backstop for the common single-root case where root and sweep cwd
-		// coincide. `clearWorkspaceDiagnosticsCache` also persists the epoch
-		// INTO the file (see its `generation` field), so even a swept cwd this
-		// call happens to miss is caught by `cacheEpoch`'s disk read the next
-		// time anything opens a context for it.
+		// state — a cheap, durable backstop for the common single-root case
+		// where root and sweep cwd coincide. It does NOT cover a monorepo
+		// subproject a sweep hasn't reached yet under a DIFFERENT cwd than
+		// `state.root` — that residual gap is tracked in #1707, not silently
+		// claimed as solved (see `clearAllWorkspaceDiagnosticsCaches`'s doc
+		// comment for the full shape).
 		clearWorkspaceDiagnosticsCache(state.root);
 		// #1669 review F3: a server-initiated "everything may be stale" signal
 		// must drop the SAME per-document state a normal resync already drops
@@ -1841,50 +1896,36 @@ export function setupIncomingHandlers(
 		// pull state intact, so the next pull would echo a disowned
 		// `previousResultId`, get back `kind: "unchanged"`, and re-confirm
 		// stale diagnostics under a fresh timestamp; nothing would ever
-		// re-pull on its own.
-		const toRepull: string[] = [];
+		// re-pull on its own. This clear is cheap and always runs — every
+		// refresh in a burst gets its own, unlike the re-pull pool below.
 		for (const normalizedPath of state.openDocuments) {
 			clearDiagnosticsForPath(state, normalizedPath);
-			if (state.workspaceDiagnosticsSupport.mode === "pull") {
-				toRepull.push(normalizedPath);
-			}
 		}
 		// #1669 review N2: reply to the PROTOCOL request now — every clear
 		// above is synchronous and already complete, so there is nothing left
 		// this reply should wait on. The re-pull below is a background
 		// improvement (so an open document reflects the refresh without
 		// waiting on its next edit), never something worth delaying — or
-		// risking — the required `null` reply over. `setImmediate` defers even
-		// the SYNCHRONOUS prefix of the re-pull loop (URI lookups, map
-		// bookkeeping) to the next tick, so it can never compete with this
-		// reply for the current one regardless of how many documents are open.
-		if (toRepull.length > 0) {
-			setImmediate(() => {
-				// #1669 review N2: capped concurrency — an open workspace with
-				// hundreds of documents fanning out one simultaneous
-				// `textDocument/diagnostic` request each would flood the very
-				// server this refresh just told us is under load. Rejections are
-				// observed (via the shared degradation ledger), never
-				// `void`-swallowed — `clientRequestPullDiagnostics` itself never
-				// throws (it returns an `unavailable` outcome), so this only
-				// fires on a genuine programming error, but a silent throw inside
-				// `mapWithConcurrency`'s `Promise.all` must not vanish either way.
-				void mapWithConcurrency(
-					toRepull,
-					REFRESH_REPULL_CONCURRENCY,
-					async (normalizedPath) => {
-						const uri = state.openDocumentUris?.get(normalizedPath);
-						const filePath = uri ? uriToPath(uri) : normalizedPath;
-						await clientRequestPullDiagnostics(state, filePath);
-					},
-				).catch((err) => {
-					incrementDegradationCount({
-						kind: "lsp-pull-unconfirmed",
-						subject: state.serverId,
-						reason: `refresh re-pull threw: ${err instanceof Error ? err.message : String(err)}`,
-					});
+		// risking — the required `null` reply over.
+		if (
+			state.workspaceDiagnosticsSupport.mode === "pull" &&
+			state.openDocuments.size > 0
+		) {
+			if (refreshRepullRunning) {
+				// #1669 review R1: a pool is already in flight from an earlier
+				// refresh in this burst — coalesce instead of starting a second
+				// one.
+				refreshRepullRerunRequested = true;
+			} else {
+				refreshRepullRunning = true;
+				// `setImmediate` defers even the SYNCHRONOUS prefix of the pool
+				// (URI lookups, map bookkeeping) to the next tick, so it can
+				// never compete with this reply for the current one regardless
+				// of how many documents are open.
+				setImmediate(() => {
+					void runRefreshRepullPool();
 				});
-			});
+			}
 		}
 		return null;
 	});

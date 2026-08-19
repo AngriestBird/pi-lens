@@ -717,6 +717,82 @@ describe("workspace/diagnostic/refresh caps simultaneous re-pulls (#1669 review 
 	});
 });
 
+describe("workspace/diagnostic/refresh coalesces a burst into one trailing rerun (#1669 review R1)", () => {
+	it("a burst of N refreshes costs at most 2 passes over open documents and never exceeds the concurrency cap", async () => {
+		const state = createMockState({
+			workspaceDiagnosticsSupport: {
+				advertised: true,
+				mode: "pull",
+				workspaceDiagnostics: false,
+				diagnosticProviderKind: "documentDiagnosticProvider",
+			},
+		});
+		const DOC_COUNT = 50;
+		for (let i = 0; i < DOC_COUNT; i++) {
+			const filePath = `/project/burst-file-${i}.ts`;
+			const key = normalizeMapKey(filePath);
+			state.openDocuments.add(key);
+			state.openDocumentUris!.set(key, pathToFileURL(filePath).href);
+		}
+
+		let inFlight = 0;
+		let maxInFlight = 0;
+		vi.mocked(state.connection.sendRequest).mockImplementation(
+			async (method: unknown) => {
+				if (method === "textDocument/diagnostic") {
+					inFlight++;
+					maxInFlight = Math.max(maxInFlight, inFlight);
+					await new Promise<void>((resolve) => setImmediate(resolve));
+					inFlight--;
+					return { kind: "full", resultId: "r", items: [] };
+				}
+				return undefined;
+			},
+		);
+
+		setupIncomingHandlers(state, {});
+		const calls = vi.mocked(state.connection.onRequest).mock.calls as unknown as Array<
+			[string, (...args: unknown[]) => unknown]
+		>;
+		const handler = calls.find((c) => c[0] === "workspace/diagnostic/refresh")?.[1];
+		expect(handler).toBeDefined();
+
+		// The real trigger the review names: a watch-mode rebuild or a `git
+		// checkout` can fire many `workspace/diagnostic/refresh` requests back
+		// to back. Fire a burst of 20 essentially synchronously — no await
+		// between them — mirroring how a real jsonrpc connection would
+		// deliver a rapid-fire sequence of independent requests.
+		const BURST_SIZE = 20;
+		const replies: unknown[] = [];
+		for (let i = 0; i < BURST_SIZE; i++) {
+			replies.push(await handler!());
+		}
+		// Every refresh in the burst still gets its OWN protocol reply — the
+		// coalescing only applies to the background re-pull pool, never to
+		// spec compliance.
+		expect(replies).toHaveLength(BURST_SIZE);
+		expect(replies.every((r) => r === null)).toBe(true);
+
+		// Drain fully: at most 2 pool passes x (DOC_COUNT / cap) batches, plus
+		// slack.
+		for (let i = 0; i < DOC_COUNT * 2 + 8; i++) {
+			await new Promise((resolve) => setImmediate(resolve));
+		}
+
+		expect(inFlight, "worker pool must have fully drained").toBe(0);
+		const pullCalls = vi
+			.mocked(state.connection.sendRequest)
+			.mock.calls.filter((c) => c[0] === "textDocument/diagnostic");
+		// Pre-fix: one independent pool per refresh — 20 refreshes x 50 docs =
+		// 1000 pulls (20x redundant) and peak concurrency 20 x 4 = 80. Post-fix:
+		// at most ONE trailing rerun coalesces the whole burst, so at most 2
+		// passes over the open-document set, and the cap is never exceeded
+		// regardless of how many refreshes arrived.
+		expect(pullCalls.length).toBeLessThanOrEqual(2 * DOC_COUNT);
+		expect(maxInFlight).toBeLessThanOrEqual(4);
+	});
+});
+
 describe("workspace/diagnostic/refresh reaches an unregistered cwd's on-disk cache (#1669 review N3)", () => {
 	it("clears the persisted cache at state.root even when no sweep has registered that cwd in this process yet", async () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-refresh-n3-"));
