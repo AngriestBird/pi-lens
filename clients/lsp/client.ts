@@ -1301,7 +1301,12 @@ export function pullDiagnosticSources(
 		if (registration.method !== "textDocument/diagnostic") continue;
 		if (registration.identifier) identifiers.add(registration.identifier);
 	}
-	return [undefined, ...[...identifiers].sort()];
+	// Sorted for a stable, reproducible request order in logs and tests; the
+	// fan-out is parallel, so order carries no priority.
+	return [
+		undefined,
+		...[...identifiers].sort((a, b) => a.localeCompare(b)),
+	];
 }
 
 /** #1531: bump the client-global diagnostics counter and stamp the path it was
