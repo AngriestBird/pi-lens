@@ -98,10 +98,17 @@ const EXEMPTIONS: Record<string, string> = {
  * its entry ahead of time means neither PR has to be held for the other, and
  * neither author has to notice the interaction.
  *
- * The cost is real and bounded: for exactly these keys, "the exemption still
- * describes something" is unverified until the declaration lands. Keep the set
- * empty in steady state. An entry that never lands is dead weight, and the only
- * thing catching that is a person reading this comment.
+ * The cost is real and bounded. Two failure modes, handled differently:
+ *
+ * - The declaration LANDS and the entry parks here forever. The retirement test
+ *   below fails that, so the entry has to move into `EXEMPTIONS` where the
+ *   normal stale check governs it again. Review round 2 proved this is needed:
+ *   creating the declaration locally left all tests green, so nothing but
+ *   convention was moving the entry.
+ * - The declaration NEVER lands, because its PR is abandoned. Nothing mechanical
+ *   catches that, since "not yet" and "never" look identical from here. The size
+ *   bound keeps the blast radius to a couple of keys, and a person reading this
+ *   comment is the backstop.
  */
 const FORWARD_DECLARED = new Set([
 	"installer/managed-tool-refresh.ts:refreshInFlight",
@@ -130,6 +137,20 @@ describe("singleFlight ratchet (#1753)", () => {
 		expect(stale, "these exemptions no longer match any declaration").toEqual(
 			[],
 		);
+	});
+
+	it("retires a forward declaration once its declaration lands", () => {
+		const live = new Set(scanInFlightDeclarations().map((d) => d.key));
+		const landed = [...FORWARD_DECLARED].filter((key) => live.has(key));
+		expect(landed, "move these out of FORWARD_DECLARED").toEqual([]);
+	});
+
+	it("keeps the forward-declaration set small", () => {
+		// A forward declaration is a merge-window device: it exists only while a
+		// PR that declares the symbol is open alongside this one. More than a
+		// couple at once means the set is being used as a general escape hatch
+		// from the stale check, which is the one thing it must not become.
+		expect(FORWARD_DECLARED.size).toBeLessThanOrEqual(2);
 	});
 
 	it("keeps every forward declaration listed in EXEMPTIONS", () => {

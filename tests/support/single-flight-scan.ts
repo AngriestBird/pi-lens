@@ -34,7 +34,7 @@ export interface InFlightDeclaration {
 }
 
 /**
- * Declarations this scan can see, and the two it cannot.
+ * Declarations this scan can see, and the three it cannot.
  *
  * IN, three forms:
  *
@@ -58,12 +58,22 @@ export interface InFlightDeclaration {
  *    of why #1687 went unnoticed);
  * 3. a modifier-less, UNANNOTATED class field (`inFlight = new Map();` with no
  *    `private` and no type). By shape that is identical to a bare assignment to
- *    a closure variable — `ensureInFlight = null;` in
- *    `toolchain-availability.ts` is exactly that — and this scan chooses the
- *    false negative over flagging every clear-in-finally in the repo.
+ *    a closure variable — `ensureInFlight = null;` at
+ *    `dispatch/runners/utils/toolchain-availability.ts:139` is exactly that —
+ *    and this scan chooses the false negative over flagging every
+ *    clear-in-finally in the repo.
  *
  * All three are FALSE NEGATIVES. The ratchet still catches the common case,
  * which is the copy someone writes by pattern-matching a sibling client.
+ *
+ * FALSE POSITIVES are the safe direction, which is why they are not enumerated:
+ * they announce themselves. The widened regex also matches things that are not
+ * declarations at all — object-literal properties and parameter annotations —
+ * so `lsp/index.ts`'s `inFlight` matches both at its interface member (:204)
+ * and at its object-literal initializer (:1198). Both collapse to one
+ * `file:symbol` key, and any such match simply demands an exemption that a
+ * person then writes or dismisses. A false negative is silent and ships the
+ * next copy of the bug; a false positive costs one line and a moment's thought.
  */
 export const SCAN_HEURISTIC_LIMITS = [
 	"closure-scoped state inside factory functions is not seen",
