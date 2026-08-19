@@ -43,7 +43,7 @@ export interface LatencyEntry {
 }
 
 /** Bound on the `recentPhases` ring below — keeps the attribution record small. */
-const RECENT_PHASE_CAP = 5;
+export const RECENT_PHASE_CAP = 5;
 
 /**
  * Most recent non-`loop_block` phases seen by `logLatency`, newest first, for
@@ -148,6 +148,32 @@ export function getRecentLoggedPhases(
 	limit = RECENT_PHASE_CAP,
 ): Array<{ phase: string; ts: string }> {
 	return recentPhases.slice(0, Math.min(limit, RECENT_PHASE_CAP));
+}
+
+/**
+ * Test-only: the ring's actual storage length, bypassing the read-side
+ * `Math.min` clamp in `getRecentLoggedPhases` entirely. Needed because that
+ * clamp and the write-side `.slice(0, RECENT_PHASE_CAP)` in `logLatency` are
+ * a compensating pair — as long as ONE of them is intact, the other's
+ * deletion is invisible to any test that only observes
+ * `getRecentLoggedPhases()` output length. This pins the write-side guard
+ * specifically: if its `.slice` is deleted, storage grows past the cap and
+ * this returns the unclamped size regardless of what the read side does.
+ */
+export function _recentPhasesStorageLengthForTest(): number {
+	return recentPhases.length;
+}
+
+/**
+ * Test-only: seed the ring directly, bypassing the write-side cap in
+ * `logLatency`. Lets a test put the ring in a state the normal write path can
+ * never produce (more than `RECENT_PHASE_CAP` entries), so the read-side
+ * clamp in `getRecentLoggedPhases` can be pinned independently of the
+ * write-side guard (see `_recentPhasesStorageLengthForTest` above for why
+ * that independence matters).
+ */
+export function _setRecentPhasesForTest(entries: Array<{ phase: string; ts: string }>): void {
+	recentPhases = entries;
 }
 
 export function logLatency(entry: LatencyEntry): void {

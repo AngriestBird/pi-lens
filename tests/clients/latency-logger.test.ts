@@ -14,9 +14,12 @@ vi.mock("../../clients/ndjson-logger.js", () => ({
 }));
 
 import {
+	_recentPhasesStorageLengthForTest,
+	_setRecentPhasesForTest,
 	getLastLoggedPhase,
 	getRecentLoggedPhases,
 	logLatency,
+	RECENT_PHASE_CAP,
 } from "../../clients/latency-logger.js";
 
 describe("latency-logger", () => {
@@ -153,5 +156,38 @@ describe("getRecentLoggedPhases (#1723: bounded attribution ring)", () => {
 		logLatency({ type: "phase", phase: "two", filePath: "<x>", durationMs: 1 });
 		expect(getRecentLoggedPhases(1)).toHaveLength(1);
 		expect(getRecentLoggedPhases(1)[0].phase).toBe("two");
+	});
+
+	// Follow-up from review: "bounds the ring" above only observes OUTPUT
+	// length through getRecentLoggedPhases, which is a compensating pair —
+	// the write-side `.slice(0, RECENT_PHASE_CAP)` in logLatency and the
+	// read-side `Math.min(limit, RECENT_PHASE_CAP)` clamp in
+	// getRecentLoggedPhases each independently bound that output, so deleting
+	// EITHER ONE ALONE still leaves the other masking it and the existing
+	// test green. These two tests isolate each guard so a mutant that removes
+	// either one reds on its own, not just in combination.
+	it("write-side guard: storage itself never exceeds the cap, independent of the read-side clamp (#1723 review)", () => {
+		for (let i = 0; i < RECENT_PHASE_CAP + 7; i++) {
+			logLatency({ type: "phase", phase: `storage_flood_${i}`, filePath: "<x>", durationMs: 1 });
+		}
+		// Bypasses getRecentLoggedPhases (and so its read-side clamp) entirely —
+		// if logLatency's `.slice(0, RECENT_PHASE_CAP)` were deleted, storage
+		// would grow to RECENT_PHASE_CAP + 7 and this reds regardless of what
+		// the read side does.
+		expect(_recentPhasesStorageLengthForTest()).toBe(RECENT_PHASE_CAP);
+	});
+
+	it("read-side guard: an oversized limit is clamped even when storage already holds more than the cap (#1723 review)", () => {
+		// Seed storage directly, past the cap, bypassing logLatency's write-side
+		// slice entirely — a state the normal write path can never produce. This
+		// isolates the read-side clamp: if Math.min(limit, RECENT_PHASE_CAP)
+		// were deleted from getRecentLoggedPhases, requesting an oversized limit
+		// against this over-capacity ring would return more than the cap.
+		const overCapacity = Array.from({ length: RECENT_PHASE_CAP + 10 }, (_, i) => ({
+			phase: `seed_${i}`,
+			ts: new Date().toISOString(),
+		}));
+		_setRecentPhasesForTest(overCapacity);
+		expect(getRecentLoggedPhases(1000)).toHaveLength(RECENT_PHASE_CAP);
 	});
 });
