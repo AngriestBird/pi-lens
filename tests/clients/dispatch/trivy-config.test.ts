@@ -109,10 +109,11 @@ describe("trivy-config run() — terraform pass-through", () => {
 		expect(result.status).toBe("succeeded");
 	});
 
-	// trivy exits nonzero with an empty stdout when it never scanned — a bad
-	// policy bundle, an unreadable file, a rejected flag. A nonzero exit is not a
-	// spawn failure, so `result.error` is unset and an error-only guard reports a
-	// clean scan for a file trivy never read.
+	// `trivy config` gets no `--exit-code`, so it exits 0 whenever it
+	// completed (findings included). A nonzero exit is therefore always a
+	// real error, regardless of stdout content — an empty-output-ONLY guard
+	// would miss this (a bad policy bundle, an unreadable file, a rejected
+	// flag with empty stdout, all real errors).
 	it("skips when trivy exits nonzero without producing output", async () => {
 		safeSpawnAsync.mockResolvedValue({
 			status: 1,
@@ -129,6 +130,35 @@ describe("trivy-config run() — terraform pass-through", () => {
 		);
 
 		expect(result.status).toBe("skipped");
+		expect(result.diagnostics).toEqual([]);
+	});
+
+	// #1757 F3: a rejected flag (e.g. the `--no-progress` bug that shipped in
+	// the first version of this fix) makes trivy exit nonzero but print
+	// non-empty, unparseable usage text to STDOUT — an empty-output-only
+	// guard does NOT catch this. Pre-fix, this fell through to
+	// `parseTrivyConfigOutput` (which returns `[]` on unparseable JSON) and
+	// reported `{ status: "succeeded", diagnostics: [] }`: a clean scan for a
+	// file trivy never read. Any nonzero exit must be treated as an error,
+	// full stop, regardless of what's on stdout.
+	it("treats a nonzero exit with non-empty (unparseable) stdout as errored, never clean", async () => {
+		safeSpawnAsync.mockResolvedValue({
+			status: 1,
+			stdout: "Scan config files for misconfigurations\n\nUsage:\n  trivy config [flags] DIR\n".repeat(
+				40,
+			),
+			stderr: "FATAL	Fatal error	unknown flag: --no-progress",
+		});
+
+		const runner = (
+			await import("../../../clients/dispatch/runners/trivy-config.js")
+		).default;
+
+		const result = await runner.run(
+			createCtx("terraform", tfFile, tfCwd) as never,
+		);
+
+		expect(result.status).not.toBe("succeeded");
 		expect(result.diagnostics).toEqual([]);
 	});
 });

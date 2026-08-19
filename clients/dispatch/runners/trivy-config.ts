@@ -38,6 +38,7 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { incrementDegradationCount } from "../../degradation-ledger.js";
 import { safeSpawnAsync } from "../../safe-spawn.js";
 import {
 	isTrivyEnabled,
@@ -55,7 +56,6 @@ import {
 	createAvailabilityChecker,
 	resolveAvailableOrInstall,
 } from "./utils/runner-helpers.js";
-import { spawnFailedWithNoOutput } from "./utils/spawn-outcome.js";
 
 const trivy = createAvailabilityChecker("trivy", ".exe");
 
@@ -211,11 +211,15 @@ const trivyConfigRunner: RunnerDefinition = {
 				"config",
 				// `--quiet` alone suppresses both the progress bar and log output.
 				// `--no-progress` is NOT a `config` subcommand flag (unlike `fs`,
-				// which does accept it) — trivy 0.73.0 exits 1 with an empty stdout
-				// ("FATAL unknown flag: --no-progress") when it's passed here,
-				// which silently "skipped" every single trivy-config run rather
-				// than ever scanning a file (refs #1757; verified against the real
-				// installed binary, not assumed).
+				// which does accept it) — trivy 0.73.0 exits 1 on the rejected
+				// flag, but prints its full usage/help text (thousands of bytes)
+				// to STDOUT before the FATAL line on stderr. That stdout is
+				// non-empty, so an empty-output-only guard did not catch it: the
+				// help text failed to JSON-parse, `parseTrivyConfigOutput`
+				// returned `[]`, and this reported `{ status: "succeeded",
+				// diagnostics: [] }` — a clean scan — on every single real
+				// invocation (refs #1757; verified against the real installed
+				// binary, not assumed).
 				"--quiet",
 				"--format",
 				"json",
@@ -226,7 +230,30 @@ const trivyConfigRunner: RunnerDefinition = {
 			{ cwd, timeout: 60_000 },
 		);
 
-		if (spawnFailedWithNoOutput(result)) {
+		// `trivy config` is not given `--exit-code`, so it exits 0 whenever it
+		// completed (findings included — see parseTrivyConfigOutput's severity
+		// mapping for how CRITICAL becomes blocking). ANY nonzero status is
+		// therefore a real error, WITH or WITHOUT something on stdout — mirrors
+		// the model already in clients/dispatch/runners/helm-render.ts's
+		// runIacPass, which has the same "trivy prints usage text on a bad
+		// flag" exposure and already got this right. A bounded ledger record
+		// means a broken trivy invocation can no longer go unnoticed for an
+		// entire lane's lifetime the way this one did (refs #1757).
+		if (result.error || result.status !== 0) {
+			const detail = (
+				result.stderr ||
+				result.error?.message ||
+				result.stdout ||
+				"no output"
+			)
+				.trim()
+				.split("\n")[0]
+				.slice(0, 200);
+			incrementDegradationCount({
+				kind: "runner-empty-result",
+				subject: absPath,
+				reason: `trivy config exited ${result.status ?? "spawn-failure"}: ${detail}`,
+			});
 			return { status: "skipped", diagnostics: [], semantic: "none" };
 		}
 
