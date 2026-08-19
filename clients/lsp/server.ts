@@ -2240,8 +2240,21 @@ function RustWorkspaceRoot(): RootFunction {
  * this is the "Maven module-chain verification" #1671 asks for, as opposed to
  * rust-analyzer's simpler "any ancestor [workspace] wins" hoist.
  */
+/**
+ * Strip XML comments to a fixed point rather than in one pass: a single
+ * `.replace()` can leave a residual `<!--` behind on adversarially-nested
+ * input (CodeQL flags this class as "incomplete multi-character
+ * sanitization" — the removal of one comment can expose a delimiter that
+ * was itself inside another). Looping until nothing changes closes that gap.
+ */
 function stripXmlComments(content: string): string {
-	return content.replace(/<!--[\s\S]*?-->/g, "");
+	let result = content;
+	let previous: string;
+	do {
+		previous = result;
+		result = result.replace(/<!--[\s\S]*?-->/g, "");
+	} while (result !== previous);
+	return result;
 }
 
 async function declaresMavenModule(
