@@ -1055,6 +1055,25 @@ export async function resyncLspFile(
 			if (outcome === "bailed") {
 				// Abandon the still-pending write; the edit continues. Log it so this
 				// stall — previously an invisible hang — is queryable in latency.log.
+				//
+				// #1766: a resync deadline can expire while the target server's FIRST
+				// spawn is still in flight (cold spawn > budget). That is not the same
+				// state as a running server that stalled on a write — the server the
+				// old wording blamed as "slow/wedged" did not exist yet. Distinguish
+				// the two via a fresh, synchronous inFlight lookup so the record keeps
+				// the discriminating identity (which server, which lifecycle state).
+				// Guarded: a test double or future service shape lacking the method
+				// must degrade to the old "timeout"/slow-wedged wording, not throw
+				// into the catch below and suppress this record entirely (#1766 F3).
+				const spawnInFlight =
+					!abort?.aborted &&
+					typeof lspService.isSpawnInFlight === "function" &&
+					lspService.isSpawnInFlight(filePath);
+				const reason = abort?.aborted
+					? "aborted"
+					: spawnInFlight
+						? "spawn-in-flight"
+						: "timeout";
 				logLatency({
 					type: "phase",
 					phase: "lsp_sync_abandoned",
@@ -1062,13 +1081,16 @@ export async function resyncLspFile(
 					durationMs: Date.now() - startedAt,
 					metadata: {
 						source: "lsp_sync",
-						reason: abort?.aborted ? "aborted" : "timeout",
+						reason,
 						budgetMs,
 					},
 				});
-				dbg(
-					`LSP resync ${abort?.aborted ? "aborted (Escape)" : `timed out after ${budgetMs}ms`}; server slow/wedged for ${filePath}`,
-				);
+				const cause = abort?.aborted
+					? "aborted (Escape)"
+					: spawnInFlight
+						? `timed out after ${budgetMs}ms; reason: spawn-in-flight (server still cold-spawning)`
+						: `timed out after ${budgetMs}ms; server slow/wedged`;
+				dbg(`LSP resync ${cause} for ${filePath}`);
 			}
 		}
 	} catch (err) {
