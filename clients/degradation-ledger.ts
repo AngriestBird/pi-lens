@@ -56,7 +56,24 @@ export type DegradationKind =
 	 * (#1713). The answer arrived too late to serve the caller that timed out,
 	 * so it is discarded — this kind is the only trace that it ever landed.
 	 */
-	| "lsp-pull-late-answer";
+	| "lsp-pull-late-answer"
+	/**
+	 * `navRequest`'s (`clients/lsp/client.ts`) per-request `withTimeout`
+	 * abandoned a hover/definition/references/etc. request (#1716). Every
+	 * timeout is counted here; only the FIRST occurrence per (method, file)
+	 * this session also writes a detailed `lsp_nav_request_timeout`
+	 * latency.log record — navRequest is the highest-volume LSP call site, so
+	 * a stuck server storming timeouts must not storm log writes too.
+	 */
+	| "lsp-nav-request-timeout"
+	/**
+	 * The abandoned request behind an `lsp-nav-request-timeout` settled anyway
+	 * after the caller gave up (#1716) — the nav-request sibling of
+	 * `lsp-pull-late-answer`. Nav answers are read-once (no persistent cache
+	 * to poison), but the count still tells a dogfood session whether a
+	 * "hung" server is truly hung or just answering late.
+	 */
+	| "lsp-nav-late-answer";
 
 export interface DegradationRecord {
 	kind: unknown;
@@ -142,7 +159,8 @@ export function recordDegradationOnce(record: DegradationRecord): void {
  * tally already — via `tallies` — so callers that need a once-per-subject
  * "rising edge" signal, e.g. to gate a verbose one-time log line before
  * falling back to the bounded count, read it off this return value instead
- * of hand-rolling their own parallel `Set`/latch).
+ * of hand-rolling their own parallel `Set`/latch). #1716 reuses this same
+ * signal to gate `navRequest`'s detailed timeout/late-answer log writes.
  */
 export function incrementDegradationCount(record: DegradationRecord): boolean {
 	try {
@@ -158,8 +176,13 @@ export function incrementDegradationCount(record: DegradationRecord): boolean {
 			groups.set(kind, group);
 		}
 		group.count += 1;
-		const entry = { subject, reason: truncateForLedger(`${reason} (count: ${count})`) };
-		const existing = group.entries.findIndex((candidate) => candidate.subject === subject);
+		const entry = {
+			subject,
+			reason: truncateForLedger(`${reason} (count: ${count})`),
+		};
+		const existing = group.entries.findIndex(
+			(candidate) => candidate.subject === subject,
+		);
 		if (existing >= 0) group.entries.splice(existing, 1);
 		group.entries.push(entry);
 		if (group.entries.length > ENTRIES_PER_KIND) group.entries.shift();
@@ -221,7 +244,9 @@ function isRenderableSummary(value: unknown): value is DegradationGroup[] {
 	});
 }
 
-export function renderDegradationLines(summary: unknown = getDegradationSummary()): string[] {
+export function renderDegradationLines(
+	summary: unknown = getDegradationSummary(),
+): string[] {
 	if (!isRenderableSummary(summary)) return [];
 	if (summary.length === 0) return [];
 	return [
