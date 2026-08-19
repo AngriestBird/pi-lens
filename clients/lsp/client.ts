@@ -299,6 +299,15 @@ export interface LSPClientInfo {
 			silent?: boolean,
 		): Promise<void>;
 		change(filePath: string, content: string): Promise<void>;
+		/**
+		 * #1668: queue a `workspace/didChangeWatchedFiles` entry for a disk
+		 * change this client did not learn about through didOpen/didChange —
+		 * an external bash write/delete outside the open-document sync path.
+		 * `type` is the LSP `FileChangeType` (1 Created, 2 Changed, 3 Deleted).
+		 * Routes through the same #271 debounced queue as a first-time open, so
+		 * a burst of external changes still flushes as one notification.
+		 */
+		watchedFileChange(filePath: string, type: number): void;
 	};
 	getDiagnostics(filePath: string): LSPDiagnostic[];
 	/**
@@ -1284,6 +1293,35 @@ function recordSentContent(
 		...(state.syncKind === TEXT_DOCUMENT_SYNC_KIND_INCREMENTAL && {
 			text: content,
 		}),
+	});
+	// #1641 criterion 3: the in-memory document's version + content length AT
+	// SEND TIME, so a later "diagnostic cited a line past current disk EOF"
+	// record (`diagnostic_past_eof`, clients/diagnostic-line-freshness.ts) can be
+	// paired with the send that produced the divergent in-memory document —
+	// today only the symptom (the stale citation) is observable; this is the
+	// cause side of the same timeline.
+	//
+	// Review round F4/F1: `contentLineCount` MUST use the same LSP-addressable
+	// convention as the gate itself (newline count + 1 — a trailing `\n` adds
+	// one more, empty, addressable line; an empty document is still 1 line),
+	// or the two records disagree by one at exactly the boundary this counter
+	// exists to help debug. Counted directly (no `.split("\n")`, which
+	// allocates one substring per line — measured at 13.3ms/200k allocations
+	// on a 7MB send) since only the COUNT is needed here, not the lines.
+	let newlineCount = 0;
+	for (let i = 0; i < content.length; i++) {
+		if (content.charCodeAt(i) === 10) newlineCount++;
+	}
+	logLatency({
+		type: "phase",
+		phase: "lsp_document_send",
+		filePath: normalizedPath,
+		durationMs: 0,
+		metadata: {
+			version,
+			contentLength: content.length,
+			contentLineCount: newlineCount + 1,
+		},
 	});
 }
 
@@ -2293,6 +2331,25 @@ export async function clientWaitForDiagnostics(
 	});
 }
 
+/**
+ * Queue a watched-files change for a file this client did not learn about
+ * through textDocument/didOpen or didChange — an external bash write/delete,
+ * or any other disk change outside the open-document sync path (#1668).
+ * Shares `handleNotifyOpen`'s per-client debounced queue (#271), so a burst
+ * of external changes coalesces into one notification per debounce window
+ * instead of flooding the server with one per file.
+ */
+export function handleNotifyExternalChange(
+	state: LSPClientState,
+	filePath: string,
+	type: number,
+): void {
+	if (!isClientAlive(state)) return;
+	const normalizedPath = normalizeMapKey(filePath);
+	const uri = state.openDocumentUris?.get(normalizedPath) ?? pathToFileURL(filePath).href;
+	state.watchQueue.enqueue(uri, type);
+}
+
 export async function handleNotifyOpen(
 	state: LSPClientState,
 	filePath: string,
@@ -3291,6 +3348,9 @@ export async function createLSPClient(options: {
 			},
 			async change(filePath, content) {
 				return handleNotifyChange(state, filePath, content);
+			},
+			watchedFileChange(filePath, type) {
+				handleNotifyExternalChange(state, filePath, type);
 			},
 		},
 
