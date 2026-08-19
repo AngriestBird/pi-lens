@@ -17,6 +17,7 @@ import {
 	resetDegradationLedger,
 } from "../clients/degradation-ledger.js";
 import { _resetSessionLifecycleForTests } from "../clients/session-lifecycle.js";
+import { makeSessionStartEvent } from "./support/host-event-factory.js";
 import { createPiMock, makeCtx } from "./support/pi-mock.js";
 import { removeTempDirSync } from "./clients/test-utils.js";
 
@@ -770,7 +771,14 @@ describe("index.ts extension wiring", () => {
 			_resetSessionLifecycleForTests();
 			const pi = createPiMock({ "no-lens-context": true });
 			extension(pi.asExtensionAPI());
-			await pi.emit("session_start", { sessionId: "wiring-session" }, makeCtx({ cwd: tmp, sessionId: "wiring-session" }));
+			// #1681: the host never puts sessionId on the session_start event — see
+			// index.ts's own comment at the `stableSessionId` read ("the event
+			// carries none"). It belongs on ctx, via makeCtx below.
+			await pi.emit(
+				"session_start",
+				makeSessionStartEvent(),
+				makeCtx({ cwd: tmp, sessionId: "wiring-session" }),
+			);
 			seedTurnEndFindings(tmp, "TESTFINDINGS_XYZZY", "wiring-session");
 
 			const existing = [{ role: "system", content: "orig" }];
