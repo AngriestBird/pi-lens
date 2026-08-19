@@ -13,8 +13,15 @@
 // Usage:
 //   node scripts/run-astgrep-pi-lens.mjs                 # scan and report; exit 1 on an untriaged hit
 //   node scripts/run-astgrep-pi-lens.mjs --update-baseline # regenerate the baseline from the current scan
+//   node scripts/run-astgrep-pi-lens.mjs <path> [<path> ...] # scan explicit path(s) instead of clients/+tests/
 //
 // npm scripts: `npm run astgrep:self-scan` / `npm run astgrep:self-scan:update-baseline`.
+//
+// Test-only override (tests/scripts/astgrep-self-scan.test.ts spawns this
+// file for real via execFileSync to prove the exit code, not just the lib
+// function's return value): PI_LENS_SELF_SCAN_SGCONFIG points the scan at an
+// explicit sgconfig path, so the wrapper's failure handling can be exercised
+// against a genuinely broken config without touching the real one.
 import {
 	findingSignature,
 	loadBaseline,
@@ -25,6 +32,8 @@ import {
 
 const args = process.argv.slice(2);
 const updateBaseline = args.includes("--update-baseline");
+const scanPathArgs = args.filter((a) => a !== "--update-baseline");
+const sgConfigOverride = process.env.PI_LENS_SELF_SCAN_SGCONFIG || undefined;
 
 function main() {
 	const ruleIds = selfScanRuleIds();
@@ -34,7 +43,11 @@ function main() {
 
 	let result;
 	try {
-		result = runSelfScan({ ruleIds });
+		result = runSelfScan({
+			ruleIds,
+			...(scanPathArgs.length > 0 ? { scanPaths: scanPathArgs } : {}),
+			...(sgConfigOverride ? { sgConfigPath: sgConfigOverride } : {}),
+		});
 	} catch (e) {
 		console.error(`[astgrep-self-scan] scan failed to run: ${e?.message ?? e}`);
 		process.exit(1);

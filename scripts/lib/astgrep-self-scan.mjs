@@ -90,6 +90,11 @@ export function runSelfScan({
 	root = repoRoot(),
 	scanPaths = ["clients", "tests"],
 	ruleIds,
+	// Override hook for the wrapper-level failure test (#1729 review round):
+	// point the scan at a broken/nonexistent sgconfig to prove the CLI
+	// wrapper exits nonzero on a genuine scan failure, not just an untriaged
+	// finding.
+	sgConfigPath: sgConfigPathOverride,
 } = {}) {
 	const ids = ruleIds ?? selfScanRuleIds(root);
 	if (ids.length === 0) {
@@ -103,7 +108,7 @@ export function runSelfScan({
 		[
 			"scan",
 			"-c",
-			sgConfigPath(root),
+			sgConfigPathOverride ?? sgConfigPath(root),
 			"--filter",
 			filterRegex,
 			...scanPaths,
@@ -121,10 +126,25 @@ export function runSelfScan({
 	const scannedMatch = stderrText.match(/scannedFileCount=(\d+)/);
 	const effectiveRuleMatch = stderrText.match(/effectiveRuleCount=(\d+)/);
 
-	let findings = [];
+	// A genuinely clean scan still emits a literal `[]` on stdout (verified:
+	// a 0-finding run over 369 files prints "[]", 3 bytes, exit 0) -- never
+	// zero bytes. Zero bytes means ast-grep itself failed before it could
+	// emit JSON (bad -c config path, malformed rule YAML, etc.), which
+	// previously fell through silently as `findings = []`, indistinguishable
+	// from a real clean scan. That must throw, not report "clean".
 	const stdout = (result.stdout ?? "").trim();
-	if (stdout) {
+	if (!stdout) {
+		throw new Error(
+			`[astgrep-self-scan] ast-grep produced no output (exit status ${result.status ?? "unknown"}) -- treating as a FAILED scan, not a clean one. stderr:\n${stderrText}`,
+		);
+	}
+	let findings;
+	try {
 		findings = JSON.parse(stdout);
+	} catch (e) {
+		throw new Error(
+			`[astgrep-self-scan] failed to parse ast-grep JSON output: ${e?.message ?? e}\nstdout:\n${stdout}`,
+		);
 	}
 
 	return {

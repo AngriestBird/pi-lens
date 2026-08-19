@@ -28,6 +28,7 @@ export function runSelfScan(options?: {
   root?: string;
   scanPaths?: string[];
   ruleIds?: string[];
+  sgConfigPath?: string;
 }): SelfScanResult;
 
 export function findingSignature(finding: SelfScanFinding): string;
