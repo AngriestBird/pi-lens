@@ -471,13 +471,25 @@ describe("LSPService circuit breaker — windowed-rate trip (#1142)", () => {
 		// Exactly TRIP_COUNT spawns happened before give-up.
 		expect(server.getSpawnCount()).toBe(TRIP_COUNT);
 		const { getDegradationSummary } = await import("../../../clients/degradation-ledger.js");
-		expect(getDegradationSummary()).toEqual([
+		const summary = getDegradationSummary();
+		// The breaker records the trip exactly once, under this key. Filtered to
+		// the breaker kind rather than compared against the whole summary: #1743
+		// added `lsp-client-skipped-broken`, so the summary now carries a second,
+		// unrelated group. Asserting the whole array would turn every future
+		// ledger neighbour into a false failure here, and this test is about the
+		// breaker's own double-count guard.
+		expect(summary.filter((group) => group.kind === "lsp-breaker")).toEqual([
 			expect.objectContaining({
 				kind: "lsp-breaker",
 				count: 1,
 				latestReasons: [expect.objectContaining({ subject: key })],
 			}),
 		]);
+		// The neighbour is named rather than ignored: the give-up path skipped
+		// this file once, and #1743 counts that skip per (server, file).
+		expect(
+			summary.filter((group) => group.kind === "lsp-client-skipped-broken"),
+		).toEqual([expect.objectContaining({ count: 1 })]);
 
 		// Stays given up: no new spawn even if a cooldown "elapses".
 		const spawnAtGiveUp = server.getSpawnCount();
