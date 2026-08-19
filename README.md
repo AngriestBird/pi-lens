@@ -213,11 +213,19 @@ Thanks goes to these wonderful people:
     </tr>
     <tr>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/pppobear"><img src="https://avatars.githubusercontent.com/u/21952175?v=4" width="100px;" alt=""/><br /><sub><b>pppobear</b></sub></a><br /><a href="#bug-pppobear" title="Bug reports">🐛</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/bcachet"><img src="https://avatars.githubusercontent.com/u/45542?v=4" width="100px;" alt=""/><br /><sub><b>Bertrand Cachet</b></sub></a><br /><a href="#code-bcachet" title="Code">💻</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/EarthChen"><img src="https://avatars.githubusercontent.com/u/20179425?v=4" width="100px;" alt=""/><br /><sub><b>earthchen</b></sub></a><br /><a href="#code-EarthChen" title="Code">💻</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/Don-Yin"><img src="https://avatars.githubusercontent.com/u/65135356?v=4" width="100px;" alt=""/><br /><sub><b>Don Yin</b></sub></a><br /><a href="#code-Don-Yin" title="Code">💻</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/ELA718"><img src="https://avatars.githubusercontent.com/u/193304463?v=4" width="100px;" alt=""/><br /><sub><b>ELA718</b></sub></a><br /><a href="#doc-ELA718" title="Documentation">📖</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/sujeito-operator/pilot"><img src="https://avatars.githubusercontent.com/u/313599463?v=4" width="100px;" alt=""/><br /><sub><b>Sujeito Operator</b></sub></a><br /><a href="#code-sujeito-operator" title="Code">💻</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="http://www.blahs.life/"><img src="https://avatars.githubusercontent.com/u/620336?v=4" width="100px;" alt=""/><br /><sub><b>Dan Blah</b></sub></a><br /><a href="#bug-danblah" title="Bug reports">🐛</a></td>
+    </tr>
+    <tr>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/3choBoomer"><img src="https://avatars.githubusercontent.com/u/521828?v=4" width="100px;" alt=""/><br /><sub><b>Nathan Cooke</b></sub></a><br /><a href="#code-3choBoomer" title="Code">💻</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/white-hat"><img src="https://avatars.githubusercontent.com/u/922988?v=4" width="100px;" alt=""/><br /><sub><b>Eli Stark</b></sub></a><br /><a href="#code-white-hat" title="Code">💻</a></td>
-      <td align="center" valign="top" width="14.28%"><a href="https://github.com/marvtub"><img src="https://avatars.githubusercontent.com/u/33159023?v=4" width="100px;" alt=""/><br /><sub><b>Marvin Aziz</b></sub></a><br /><a href="#code-marvtub" title="Code">💻</a></td>
-      <td align="center" valign="top" width="14.28%"><a href="https://github.com/mjfaga"><img src="https://avatars.githubusercontent.com/u/7584015?v=4" width="100px;" alt=""/><br /><sub><b>Mark Faga</b></sub></a><br /><a href="#code-mjfaga" title="Code">💻</a></td>
-      <td align="center" valign="top" width="14.28%"><a href="https://github.com/aeturnal"><img src="https://avatars.githubusercontent.com/u/219271200?v=4" width="100px;" alt=""/><br /><sub><b>aeturnal</b></sub></a><br /><a href="#code-aeturnal" title="Code">💻</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://marvinaziz.de/"><img src="https://avatars.githubusercontent.com/u/33159023?v=4" width="100px;" alt=""/><br /><sub><b>Marvin Aziz</b></sub></a><br /><a href="#code-marvtub" title="Code">💻</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/mjfaga"><img src="https://avatars.githubusercontent.com/u/7584015?v=4" width="100px;" alt=""/><br /><sub><b>Mark</b></sub></a><br /><a href="#code-mjfaga" title="Code">💻</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://aeturnal.io/"><img src="https://avatars.githubusercontent.com/u/219271200?v=4" width="100px;" alt=""/><br /><sub><b>aeturnal</b></sub></a><br /><a href="#code-aeturnal" title="Code">💻</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/floatGray"><img src="https://avatars.githubusercontent.com/u/44295302?v=4" width="100px;" alt=""/><br /><sub><b>floatGray</b></sub></a><br /><a href="#code-floatGray" title="Code">💻</a></td>
     </tr>
   </tbody>
