@@ -50,6 +50,7 @@ const _require = createRequire(import.meta.url);
 
 import {
 	createTreeCacheCounters,
+	deriveScanTreeCacheCapacity,
 	TreeCache,
 	type TreeCacheCounters,
 	type TreeCacheStats,
@@ -484,6 +485,22 @@ export class TreeSitterClient {
 			...this.treeCache.getStats(),
 			...this.parserCounters,
 		};
+	}
+
+	/**
+	 * Grow the tree cache to span a full-project scan's working set (#1715).
+	 * The interactive default (50 entries) can't hold a mid/large project's
+	 * file count, so a second scan re-parses everything the first scan's LRU
+	 * evicted — live dogfood evidence showed every miss on a second 110-file
+	 * scan was a `capacityMisses` one. Bounded by
+	 * `TREE_CACHE_SCAN_CAPACITY_CEILING` (see `deriveScanTreeCacheCapacity`'s
+	 * heap-cost note) and monotonic — a smaller scan never shrinks a capacity
+	 * an earlier, larger one already grew.
+	 */
+	ensureTreeCacheCapacity(fileCount: number): void {
+		this.treeCache.setMaxSize(
+			deriveScanTreeCacheCapacity(fileCount, this.treeCache.getMaxSize()),
+		);
 	}
 
 	async withParseCacheMeasurement<T>(
