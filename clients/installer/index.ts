@@ -2073,8 +2073,12 @@ const lastManagedInstallVersion = new Map<string, string>();
  * `onVersionOutput`, when provided, receives the raw stdout on a successful
  * (exit 0) probe — used to piggyback version-pin drift detection onto this
  * already-happening spawn instead of adding a new one (#589).
+ *
+ * Exported so every managed-binary check runs THIS verification rather than a
+ * bare `existsSync` of its own: an on-disk shim that cannot run must not
+ * shadow a working PATH binary (#1657).
  */
-async function verifyToolBinary(
+export async function verifyToolBinary(
 	binPath: string,
 	onVersionOutput?: (output: string) => void,
 	/**
@@ -2087,6 +2091,12 @@ async function verifyToolBinary(
 	 * genuinely broken.
 	 */
 	onTransient?: () => void,
+	/**
+	 * Spawn budget, ms. Install paths keep the generous default; a latency-
+	 * sensitive caller on the dispatch hot path passes a shorter one and treats
+	 * the expiry as transient rather than as a verdict (#1657).
+	 */
+	timeoutMs = 10000,
 ): Promise<boolean> {
 	return new Promise((resolve) => {
 		const isWindows = installerPlatform() === "win32";
@@ -2116,7 +2126,7 @@ async function verifyToolBinary(
 		let proc: ReturnType<typeof spawn>;
 		try {
 			proc = spawn(spawnCmd, useShell ? [] : ["--version"], {
-				timeout: 10000,
+				timeout: timeoutMs,
 				stdio: ["ignore", "pipe", "pipe"],
 				shell: useShell,
 			});
@@ -2149,7 +2159,7 @@ async function verifyToolBinary(
 				debugLog(`Verified (stdio LSP, transport-required): ${binPath}`);
 				resolve(true);
 			} else {
-				// `code === null` (usually paired with a `signal`) means the 10s
+				// `code === null` (usually paired with a `signal`) means the
 				// spawn timeout fired and the process was killed before it could
 				// exit on its own — a stall, not a verdict from the binary.
 				if (code === null || signal) onTransient?.();
