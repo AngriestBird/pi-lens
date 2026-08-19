@@ -20,6 +20,20 @@ describe("TypeScript diagnostic strategies (#1412)", () => {
 	});
 });
 
+describe("cue diagnostic strategy (#1522) — measured against the real v0.17.1 binary", () => {
+	it("is push-only, seeds the first push, and is silent on a clean cold open", () => {
+		const strategy = getStrategy("cue");
+		expect(strategy.pullRetryBudgetMs).toBe(0);
+		expect(strategy.seedFirstPush).toBe(true);
+		// The load-bearing measurement: a clean file's cold didOpen publishes
+		// nothing at all, so the shared push-only clean-confirm gate needs this
+		// flag to read "no publish, notify succeeded" as confirmed clean rather
+		// than inconclusive (#1520's original review concern).
+		expect(strategy.silentOnClean).toBe(true);
+		expect(strategy.reopenOnResync).toBeFalsy();
+	});
+});
+
 describe("resolveAstGrepNativeExe", () => {
 	it("resolves the real native exe for the CURRENT platform/arch (installed in this repo's node_modules)", () => {
 		// This repo has @ast-grep/cli-win32-x64-msvc (or the platform-appropriate
