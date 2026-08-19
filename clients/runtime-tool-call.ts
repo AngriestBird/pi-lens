@@ -29,6 +29,7 @@ import {
 	type HostPathVariantResolution,
 	isExternalOrVendorFile,
 	resolveHostPathVariants,
+	resolveHostToolPath,
 } from "./path-utils.js";
 import {
 	EXPANSION_BUDGET_MS,
@@ -109,9 +110,23 @@ function getToolCallRawFilePath(
  * `tests/clients/pi-host-contract.test.ts` pins that, because the day a host
  * lets one move independently, every path here silently retargets.
  *
- * The returned path runs through pi's own unicode/spacing fallback ladder
- * (#1655 item 5) so pi-lens keys its read guard and LSP touch off the file pi
- * read, not off a naive `path.resolve` pi itself would have discarded.
+ * The path is produced the way pi produces it, in pi's two stages (#1655 item
+ * 5, plus review F1):
+ *
+ *   1. `resolveHostToolPath` mirrors pi's BASE resolution, `resolveToCwd`
+ *      (`dist/core/tools/path-utils.js:42-44`, source
+ *      `src/core/tools/path-utils.ts:~44-46`) — unicode-space folding, `@`
+ *      prefix stripping, `~` expansion, `file://` conversion, and Git-Bash
+ *      drive paths, all BEFORE anything is probed.
+ *   2. `resolveHostPathVariants` mirrors pi's fallback LADDER
+ *      (`dist/core/tools/path-utils.js:45-70`, source
+ *      `src/core/tools/path-utils.ts:52-83`).
+ *
+ * Stage 1 was missing in the first cut of this fix, and the ladder cannot
+ * stand in for it: an `@`-prefixed path, a `file://` URL, or a non-breaking
+ * space are all resolved by pi at stage 1 and are untouched by any of the four
+ * stage-2 candidates. A plain `path.resolve` therefore produced a path pi
+ * never opens, and the miss looked identical to "file genuinely absent".
  */
 function resolveToolCallFilePath(
 	rawFilePath: string | undefined,
@@ -119,10 +134,9 @@ function resolveToolCallFilePath(
 	projectRoot: string,
 ): HostPathVariantResolution | undefined {
 	if (!rawFilePath) return undefined;
-	const naive = path.isAbsolute(rawFilePath)
-		? rawFilePath
-		: path.resolve(cwd ?? projectRoot, rawFilePath);
-	return resolveHostPathVariants(naive);
+	return resolveHostPathVariants(
+		resolveHostToolPath(rawFilePath, cwd ?? projectRoot),
+	);
 }
 
 type ReadToolInput = {
@@ -342,9 +356,37 @@ export async function handleToolCall(
 	try {
 		const result = await handleToolCallImpl(deps);
 		if (result && (result as { block?: boolean }).block) {
-			const toolCallId = resolveToolCallCorrelationId(deps.event);
-			if (toolCallId !== undefined) {
-				deps.runtime.takeToolCallAttribution(toolCallId);
+			// Review F2 — this cleanup gets its OWN catch, and it is not optional
+			// tidiness. By the time it runs, `result` is a FINAL `{ block: true }`
+			// verdict: the read guard has already refused an edit-without-read, or
+			// the git guard has already refused a commit. Letting a throw out of
+			// bookkeeping reach the outer catch would convert that verdict into
+			// `undefined` — "pi-lens has no opinion" — and the refused edit would
+			// execute. A guard that fails OPEN because its telemetry broke is
+			// worse than no guard, so the verdict is returned regardless of what
+			// the cleanup does.
+			try {
+				const toolCallId = resolveToolCallCorrelationId(deps.event);
+				if (toolCallId !== undefined) {
+					deps.runtime.takeToolCallAttribution(toolCallId);
+				}
+			} catch (cleanupError) {
+				const reason =
+					cleanupError instanceof Error
+						? cleanupError.message
+						: String(cleanupError);
+				recordDegradationOnce({
+					kind: "tool-call-handler-throw",
+					subject: `attribution-cleanup:${(deps.event as { toolName?: string } | undefined)?.toolName ?? "unknown"}`,
+					reason,
+				});
+				try {
+					deps.dbg?.(
+						`tool_call blocked-attribution cleanup threw (block verdict preserved): ${reason}`,
+					);
+				} catch {
+					// A broken `dbg` must not resurrect the throw just absorbed.
+				}
 			}
 		}
 		return result;
@@ -526,15 +568,21 @@ async function handleToolCallImpl(
 		// indistinguishable silence (defect shape 10). `write` is exempt for the
 		// same reason #1642 F1 gives just above: a write's target legitimately
 		// does not exist yet.
-		if (
-			toolName !== "write" &&
-			pathResolution?.unresolved &&
-			pathResolution.triedVariants.length > 0
-		) {
+		//
+		// Review F1: this used to also require `triedVariants.length > 0`, which
+		// silenced exactly the misses the base-normalization gap produced —
+		// those paths have no quote and no AM/PM, so every stage-2 candidate
+		// collapses onto the base path and nothing is "tried". `unresolved` is
+		// the whole condition; the tried list is detail for the reason string.
+		if (toolName !== "write" && pathResolution?.unresolved) {
+			const tried =
+				pathResolution.triedVariants.length > 0
+					? `tried ${pathResolution.triedVariants.join(", ")}`
+					: "no variant differed from the resolved path";
 			recordDegradationOnce({
 				kind: "path-variant-unresolved",
 				subject: filePath,
-				reason: `${toolName}: no file at the resolved path, and none of pi's variants matched (tried ${pathResolution.triedVariants.join(", ")})`,
+				reason: `${toolName}: no file at the resolved path, and none of pi's variants matched (${tried})`,
 			});
 		}
 		return;

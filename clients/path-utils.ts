@@ -512,6 +512,114 @@ const NARROW_NO_BREAK_SPACE = "\u202F";
 /** Right single quotation mark, U+2019. macOS writes it; users type U+0027. */
 const RIGHT_SINGLE_QUOTE = "\u2019";
 
+/**
+ * The unicode space class pi folds to U+0020, copied character-for-character
+ * from `@earendil-works/pi-coding-agent/dist/utils/paths.js:6`
+ * (`UNICODE_SPACES`, source `src/utils/paths.ts`). Widening or narrowing this
+ * set makes pi-lens resolve a different file than pi does.
+ */
+const HOST_UNICODE_SPACES = /[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g;
+
+/**
+ * Mirror pi's `normalizeWindowsShellPath`
+ * (`@earendil-works/pi-coding-agent/dist/utils/paths.js:47-56`): convert Git
+ * Bash, MSYS, Cygwin, and WSL drive paths to a form native Windows APIs
+ * accept.
+ */
+function hostNormalizeWindowsShellPath(filePath: string): string {
+	if (
+		!filePath.startsWith("/") ||
+		filePath.startsWith("//") ||
+		filePath.includes("\\")
+	) {
+		return filePath;
+	}
+	const match = filePath.match(/^\/(?:mnt\/|cygdrive\/)?([a-z])(?:\/(.*))?$/i);
+	if (!match) return filePath;
+	const suffix = match[2]?.replaceAll("/", "\\");
+	return `${match[1].toUpperCase()}:\\${suffix ?? ""}`;
+}
+
+interface HostNormalizeOptions {
+	/** Fold the unicode space class to U+0020. */
+	normalizeUnicodeSpaces?: boolean;
+	/** Drop a single leading `@` (pi's file-mention prefix). */
+	stripAtPrefix?: boolean;
+}
+
+/**
+ * Mirror pi's `normalizePath`
+ * (`@earendil-works/pi-coding-agent/dist/utils/paths.js:57-79`, source
+ * `src/utils/paths.ts`), in pi's order, which is load-bearing: the unicode
+ * fold runs BEFORE the `@` strip, and the tilde expansion before the
+ * `file://` conversion.
+ *
+ * The `win32` step is gated on `process.platform`, exactly as pi gates it.
+ * This is a deliberate exception to the usual probe-the-filesystem rule
+ * (AGENTS.md shape 2): pi-lens runs in pi's own process, so mirroring the
+ * host's own platform branch is what keeps the two resolvers in agreement.
+ * Shape-based parsing here would DIVERGE from the host, not protect against
+ * it.
+ */
+export function normalizeHostToolPath(
+	input: string,
+	options: HostNormalizeOptions = {},
+): string {
+	let normalized = input;
+	if (options.normalizeUnicodeSpaces) {
+		normalized = normalized.replace(HOST_UNICODE_SPACES, " ");
+	}
+	if (options.stripAtPrefix && normalized.startsWith("@")) {
+		normalized = normalized.slice(1);
+	}
+	if (process.platform === "win32") {
+		normalized = hostNormalizeWindowsShellPath(normalized);
+	}
+	const home = os.homedir();
+	if (normalized === "~") return home;
+	if (
+		normalized.startsWith("~/") ||
+		(process.platform === "win32" && normalized.startsWith("~\\"))
+	) {
+		return path.join(home, normalized.slice(2));
+	}
+	if (/^file:\/\//.test(normalized)) {
+		try {
+			return fileURLToPath(normalized);
+		} catch {
+			// pi lets a malformed file: URL throw out of normalizePath, but pi-lens
+			// is advisory instrumentation on the same event: a URL pi rejects must
+			// degrade to "no path" here, never take down the tool_call handler.
+			return normalized;
+		}
+	}
+	return normalized;
+}
+
+/**
+ * Mirror pi's `resolveToCwd`
+ * (`@earendil-works/pi-coding-agent/dist/core/tools/path-utils.js:42-44`,
+ * source `src/core/tools/path-utils.ts:~44-46`) \u2014 the BASE resolution every
+ * read/edit/write path goes through before the variant ladder below ever
+ * runs.
+ *
+ * Two details are pi's, not ours, and both matter:
+ *   - the input is normalized with `normalizeUnicodeSpaces` + `stripAtPrefix`;
+ *     the BASE DIR is normalized with neither (`resolvePath`,
+ *     `dist/utils/paths.js:80-84`).
+ *   - an already-absolute input is re-resolved on its own, ignoring the cwd.
+ */
+export function resolveHostToolPath(input: string, baseDir: string): string {
+	const normalized = normalizeHostToolPath(input, {
+		normalizeUnicodeSpaces: true,
+		stripAtPrefix: true,
+	});
+	const normalizedBaseDir = normalizeHostToolPath(baseDir);
+	return path.isAbsolute(normalized)
+		? path.resolve(normalized)
+		: path.resolve(normalizedBaseDir, normalized);
+}
+
 export interface HostPathVariantResolution {
 	/** The path to use: the first variant that exists, else the naive resolve. */
 	path: string;
@@ -524,7 +632,14 @@ export interface HostPathVariantResolution {
 	 * returning silently (defect shape 10 — an empty result must say WHY).
 	 */
 	unresolved: boolean;
-	/** Variant labels actually probed. Empty when the naive resolve existed. */
+	/**
+	 * Variant labels actually probed. Empty when the base resolve existed — and
+	 * ALSO empty when every candidate collapsed onto the base path (a plain
+	 * ASCII name with no quote and no AM/PM). Callers must therefore gate a
+	 * degradation on `unresolved`, never on this being non-empty: the
+	 * all-candidates-identical miss is a real miss, and gating it away is how
+	 * the base-normalization cases went silent (#1655 review F1).
+	 */
 	triedVariants: string[];
 }
 

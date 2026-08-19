@@ -10,14 +10,18 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { CacheManager } from "../../clients/cache-manager.js";
 import {
 	getDegradationSummary,
 	resetDegradationLedger,
 } from "../../clients/degradation-ledger.js";
-import { resolveHostPathVariants } from "../../clients/path-utils.js";
+import {
+	normalizeHostToolPath,
+	resolveHostPathVariants,
+	resolveHostToolPath,
+} from "../../clients/path-utils.js";
 import {
 	readHostModelIdentity,
 	RuntimeCoordinator,
@@ -369,37 +373,6 @@ describe("#1655 item 4 — the tool cwd basis", () => {
 		expect(schema).not.toContain("cwd:");
 	});
 
-	it("keeps bash-file-access the only bash-side path source", () => {
-		const source = fs.readFileSync(
-			path.join(repoRoot, "clients", "runtime-tool-result.ts"),
-			"utf-8",
-		);
-		// Every path pi-lens attributes to a bash command comes from these three
-		// extractors, and each resolves against the project root — never against
-		// a ctx.cwd that the bash command's own `cd` may have already left.
-		for (const extractor of [
-			"extractWrittenPathsFromCommand",
-			"extractReadPathsFromCommand",
-			"extractGrepSearchReadsFromOutput",
-		]) {
-			expect(source).toContain(extractor);
-			expect(source).toMatch(
-				new RegExp(`${extractor}\\([\\s\\S]{0,80}?workspaceRoot`),
-			);
-		}
-
-		// No sibling module may grow a second bash-command path parser.
-		const clientsDir = path.join(repoRoot, "clients");
-		const offenders: string[] = [];
-		for (const entry of fs.readdirSync(clientsDir)) {
-			if (!entry.endsWith(".ts") || entry === "bash-file-access.ts") continue;
-			const text = fs.readFileSync(path.join(clientsDir, entry), "utf-8");
-			if (/export function extract\w*(Read|Written)Paths/.test(text)) {
-				offenders.push(entry);
-			}
-		}
-		expect(offenders).toEqual([]);
-	});
 });
 
 describe("#1655 item 5 — pi's unicode path-variant ladder", () => {
@@ -546,5 +519,410 @@ describe("#1655 item 5 — pi's unicode path-variant ladder", () => {
 		} finally {
 			env.cleanup();
 		}
+	});
+});
+
+/**
+ * Review round 1 on PR #1680. Three findings, each reproduced before it was
+ * fixed. The probes are the reviewer's, not paraphrases of them.
+ */
+describe("#1655 review F1 — the base resolution pi runs BEFORE the ladder", () => {
+	it("pins that pi's read resolver starts from resolveToCwd, not a bare resolve", () => {
+		const hostPaths = readHostSource(path.join("core", "tools", "path-utils.js"));
+		const resolveRead = hostPaths.slice(
+			hostPaths.indexOf("export function resolveReadPath("),
+		);
+		// The FIRST thing resolveReadPath does is resolveToCwd — the ladder only
+		// ever runs on what that produced.
+		expect(resolveRead.slice(0, resolveRead.indexOf("fileExists"))).toContain(
+			"resolveToCwd(filePath, cwd)",
+		);
+		expect(hostPaths).toContain("normalizeUnicodeSpaces: true");
+		expect(hostPaths).toContain("stripAtPrefix: true");
+
+		// ...and those options are honoured by normalizePath, in this order.
+		const hostUtils = readHostSource(path.join("utils", "paths.js"));
+		expect(hostUtils).toContain(
+			"const UNICODE_SPACES = /[\\u00A0\\u2000-\\u200A\\u202F\\u205F\\u3000]/g",
+		);
+		expect(hostUtils).toContain('normalized.startsWith("@")');
+		expect(hostUtils).toContain("normalizeWindowsShellPath");
+		expect(hostUtils).toContain("fileURLToPath(normalized)");
+	});
+
+	it("folds pi's unicode space class exactly", () => {
+		// Every code point in pi's UNICODE_SPACES, and nothing outside it.
+		for (const code of [0x00a0, 0x2000, 0x2005, 0x200a, 0x202f, 0x205f, 0x3000]) {
+			expect(
+				normalizeHostToolPath(`a${String.fromCharCode(code)}b`, {
+					normalizeUnicodeSpaces: true,
+				}),
+			).toBe("a b");
+		}
+		// Folding is opt-in, exactly as it is in pi.
+		expect(normalizeHostToolPath("a\u00a0b")).toBe("a\u00a0b");
+	});
+
+	it("strips the @ mention prefix only when asked, and only one", () => {
+		expect(normalizeHostToolPath("@src/a.ts", { stripAtPrefix: true })).toBe(
+			"src/a.ts",
+		);
+		expect(normalizeHostToolPath("@@src/a.ts", { stripAtPrefix: true })).toBe(
+			"@src/a.ts",
+		);
+		expect(normalizeHostToolPath("@src/a.ts")).toBe("@src/a.ts");
+	});
+
+	it("converts a file:// URL and degrades on a malformed one", () => {
+		const target = path.resolve(path.join("some", "dir", "a.ts"));
+		expect(normalizeHostToolPath(pathToFileURL(target).href)).toBe(target);
+		// pi lets a malformed file: URL throw out of normalizePath. pi-lens is
+		// advisory instrumentation on the same event and must not take the
+		// handler down over one.
+		expect(() => normalizeHostToolPath("file://")).not.toThrow();
+	});
+
+	it("resolves a relative path against the cwd and an absolute one on its own", () => {
+		const cwd = path.resolve(path.join("base", "dir"));
+		expect(resolveHostToolPath("a.ts", cwd)).toBe(path.join(cwd, "a.ts"));
+		const absolute = path.resolve(path.join("elsewhere", "b.ts"));
+		expect(resolveHostToolPath(absolute, cwd)).toBe(absolute);
+	});
+
+	// The reviewer's three probe shapes, each driven end-to-end through the real
+	// handler. pi resolves all three; pre-fix pi-lens resolved none of them, and
+	// said nothing about any of them.
+	const probes: Array<{
+		label: string;
+		fileName: string;
+		typed: (dir: string, resolved: string) => string;
+	}> = [
+		{
+			label: "a non-breaking space where the file has a plain space",
+			fileName: "note a.ts",
+			// Typed with U+00A0; the file on disk has a plain U+0020.
+			typed: (dir) => path.join(dir, "src", "note\u00a0a.ts"),
+		},
+		{
+			label: "an @-prefixed mention path",
+			fileName: "at.ts",
+			typed: (dir, resolved) => `@${path.relative(dir, resolved)}`,
+		},
+		{
+			label: "a file:// URL",
+			fileName: "url.ts",
+			typed: (_dir, resolved) => pathToFileURL(resolved).href,
+		},
+	];
+
+	for (const probe of probes) {
+		it(`resolves ${probe.label}`, async () => {
+			const env = setupTestEnvironment("pi-lens-1655-f1-");
+			try {
+				const onDisk = createTempFile(
+					env.tmpDir,
+					`src/${probe.fileName}`,
+					"export const probe = 1;\n",
+				);
+				const typed = probe.typed(env.tmpDir, onDisk);
+				const runtime = new RuntimeCoordinator();
+				runtime.projectRoot = env.tmpDir;
+				const recordRead = vi.spyOn(runtime.readGuard, "recordRead");
+
+				await handleToolCall(
+					baseDeps({
+						runtime,
+						event: { toolName: "read", input: { path: typed } },
+						ctx: { cwd: env.tmpDir },
+					}),
+				);
+
+				expect(recordRead).toHaveBeenCalledWith(
+					expect.objectContaining({ filePath: onDisk }),
+				);
+				expect(
+					getDegradationSummary().find(
+						(entry) => entry.kind === "path-variant-unresolved",
+					),
+				).toBeUndefined();
+			} finally {
+				env.cleanup();
+			}
+		});
+	}
+
+	it("records the miss even when no variant differed from the resolved path", async () => {
+		const env = setupTestEnvironment("pi-lens-1655-f1-silent-");
+		try {
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			// Plain ASCII, no quote, no AM/PM: every ladder candidate collapses
+			// onto the resolved path, so nothing is "tried". Gating the
+			// degradation on that list being non-empty is what made this whole
+			// class of miss silent.
+			const missing = path.join(env.tmpDir, "src", "gone.ts");
+
+			await handleToolCall(
+				baseDeps({
+					runtime,
+					event: { toolName: "read", input: { path: missing } },
+					ctx: { cwd: env.tmpDir },
+				}),
+			);
+
+			const group = getDegradationSummary().find(
+				(entry) => entry.kind === "path-variant-unresolved",
+			);
+			expect(group?.count).toBe(1);
+			expect(group?.latestReasons.at(-1)?.reason).toContain("no variant differed");
+		} finally {
+			env.cleanup();
+		}
+	});
+});
+
+describe("#1655 review F2 — bookkeeping must not discard a block verdict", () => {
+	it("still blocks an unread edit when the attribution cleanup throws", async () => {
+		const env = setupTestEnvironment("pi-lens-1655-f2-");
+		try {
+			const filePath = createTempFile(
+				env.tmpDir,
+				"src/guarded.ts",
+				"function foo() {\n\treturn 1;\n}\n",
+			);
+			const beforeSession = new Date(Date.now() - 1000);
+			fs.utimesSync(filePath, beforeSession, beforeSession);
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+
+			// #1642's cleanup runs only AFTER the read guard has returned a final
+			// block. A throw out of it must not reach the #1655 outer catch, which
+			// answers "pi-lens has no opinion" — and would let the edit run.
+			const takeToolCallAttribution = vi
+				.spyOn(runtime, "takeToolCallAttribution")
+				.mockImplementation(() => {
+					throw new Error("attribution cache exploded");
+				});
+
+			const result = await handleToolCall(
+				baseDeps({
+					runtime,
+					ctx: { cwd: env.tmpDir },
+					event: {
+						toolName: "edit",
+						toolCallId: "call-f2",
+						input: {
+							path: filePath,
+							oldText: "function foo() {\n\treturn 1;\n}",
+							newText: "function foo() {\n\treturn 2;\n}",
+						},
+					},
+				}),
+			);
+
+			expect(takeToolCallAttribution).toHaveBeenCalled();
+			// The verdict survives its own telemetry failing.
+			expect(result).toMatchObject({ block: true });
+			// ...and the failure is still visible rather than swallowed whole.
+			const group = getDegradationSummary().find(
+				(entry) => entry.kind === "tool-call-handler-throw",
+			);
+			expect(group?.latestReasons.at(-1)?.subject).toBe(
+				"attribution-cleanup:edit",
+			);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("still blocks an unread edit when the cleanup succeeds", async () => {
+		const env = setupTestEnvironment("pi-lens-1655-f2-ok-");
+		try {
+			const filePath = createTempFile(
+				env.tmpDir,
+				"src/guarded.ts",
+				"function foo() {\n\treturn 1;\n}\n",
+			);
+			const beforeSession = new Date(Date.now() - 1000);
+			fs.utimesSync(filePath, beforeSession, beforeSession);
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+
+			const result = await handleToolCall(
+				baseDeps({
+					runtime,
+					ctx: { cwd: env.tmpDir },
+					event: {
+						toolName: "edit",
+						toolCallId: "call-f2-ok",
+						input: {
+							path: filePath,
+							oldText: "function foo() {\n\treturn 1;\n}",
+							newText: "function foo() {\n\treturn 2;\n}",
+						},
+					},
+				}),
+			);
+
+			expect(result).toMatchObject({ block: true });
+			// A blocked call leaves no attribution behind for a tool_result that
+			// will never arrive (#1642 F2).
+			expect(runtime.takeToolCallAttribution("call-f2-ok")).toBeUndefined();
+			expect(
+				getDegradationSummary().find(
+					(entry) => entry.kind === "tool-call-handler-throw",
+				),
+			).toBeUndefined();
+		} finally {
+			env.cleanup();
+		}
+	});
+});
+
+describe("#1655 review F3 — the bash-side path source, pinned by use", () => {
+	/** Text of every `event.toolName === "bash"` block in a source file. */
+	function bashBlocks(source: string): string[] {
+		const blocks: string[] = [];
+		let from = 0;
+		for (;;) {
+			const hit = source.indexOf('event.toolName === "bash"', from);
+			if (hit === -1) break;
+			from = hit + 1;
+			const open = source.indexOf("{", source.indexOf(")", hit));
+			if (open === -1) continue;
+			let depth = 0;
+			let index = open;
+			for (; index < source.length; index++) {
+				if (source[index] === "{") depth++;
+				else if (source[index] === "}" && --depth === 0) break;
+			}
+			blocks.push(source.slice(open, index + 1));
+		}
+		return blocks;
+	}
+
+	/** Control-flow heads that are not calls, however much they look like one. */
+	const NOT_CALLS = new Set([
+		"if",
+		"for",
+		"while",
+		"switch",
+		"catch",
+		"return",
+		"function",
+	]);
+
+	/**
+	 * Reduce an argument list to the identifiers this call receives DIRECTLY:
+	 * drop string and template literals (prose says "command" too — one of the
+	 * bash branch's user-facing warnings does), then drop every nested
+	 * `()`/`{}`/`[]` group.
+	 */
+	function ownArgsOnly(args: string): string {
+		let withoutLiterals = "";
+		let quote: string | undefined;
+		for (let index = 0; index < args.length; index++) {
+			const char = args[index];
+			if (quote) {
+				if (char === "\\") index++;
+				else if (char === quote) quote = undefined;
+				continue;
+			}
+			if (char === '"' || char === "'" || char === "`") {
+				quote = char;
+				continue;
+			}
+			withoutLiterals += char;
+		}
+
+		let depth = 0;
+		let kept = "";
+		for (const char of withoutLiterals) {
+			if (char === "(" || char === "{" || char === "[") depth++;
+			else if (char === ")" || char === "}" || char === "]") depth--;
+			else if (depth === 0) kept += char;
+		}
+		return kept;
+	}
+
+	/**
+	 * Callee names that receive `command` as one of their OWN arguments, at any
+	 * position. Nested groups are stripped first, so
+	 * `searchReads.push(...extractGrepSearchReadsFromOutput(command, …))`
+	 * credits the extractor rather than `push` — only the function the command
+	 * string is actually handed to counts as a path source.
+	 */
+	function calleesTakingCommand(block: string): Set<string> {
+		const callees = new Set<string>();
+		const callSite = /\b([A-Za-z_$][\w$]*)\s*\(/g;
+		let match: RegExpExecArray | null = callSite.exec(block);
+		for (; match !== null; match = callSite.exec(block)) {
+			if (NOT_CALLS.has(match[1])) continue;
+			let depth = 0;
+			let index = match.index + match[0].length - 1;
+			for (; index < block.length; index++) {
+				if (block[index] === "(") depth++;
+				else if (block[index] === ")" && --depth === 0) break;
+			}
+			const args = block.slice(match.index + match[0].length, index);
+			if (/\bcommand\b/.test(ownArgsOnly(args))) callees.add(match[1]);
+		}
+		return callees;
+	}
+
+	it("passes the bash command string to nothing but bash-file-access", () => {
+		const source = fs.readFileSync(
+			path.join(repoRoot, "clients", "runtime-tool-result.ts"),
+			"utf-8",
+		);
+		const blocks = bashBlocks(source);
+		// Guard the guard: if bash handling is restructured out of these blocks,
+		// fail here rather than silently scanning nothing (shape 7).
+		expect(blocks.length).toBeGreaterThanOrEqual(2);
+
+		const callees = new Set<string>();
+		for (const block of blocks) {
+			for (const callee of calleesTakingCommand(block)) callees.add(callee);
+		}
+		expect(callees.size).toBeGreaterThan(0);
+
+		// The real invariant, and it is behavioural rather than a naming
+		// convention: whatever a new helper is CALLED, handing it the bash
+		// command string makes it a second bash-side path source, and it shows up
+		// here. Every legitimate consumer lives in bash-file-access.ts.
+		expect([...callees].sort()).toEqual([
+			"extractGrepSearchReadsFromOutput",
+			"extractReadPathsFromCommand",
+			"extractWrittenPathsFromCommand",
+		]);
+
+		// ...and each resolves against the project root, never a ctx.cwd the
+		// command's own `cd` may already have left.
+		for (const extractor of [
+			"extractWrittenPathsFromCommand",
+			"extractReadPathsFromCommand",
+			"extractGrepSearchReadsFromOutput",
+		]) {
+			expect(source).toMatch(
+				new RegExp(`${extractor}\\([\\s\\S]{0,80}?workspaceRoot`),
+			);
+		}
+	});
+
+	it("keeps the three extractors named consistently (naming pin only)", () => {
+		// Deliberately weaker than the test above, and labelled so. This catches
+		// a COPY of an extractor under the established name in another module. It
+		// cannot catch a differently-named one — that is the use-site test's job,
+		// which is exactly why that test exists.
+		const clientsDir = path.join(repoRoot, "clients");
+		const offenders: string[] = [];
+		for (const entry of fs.readdirSync(clientsDir)) {
+			if (!entry.endsWith(".ts") || entry === "bash-file-access.ts") continue;
+			const text = fs.readFileSync(path.join(clientsDir, entry), "utf-8");
+			if (/export function extract\w*(Read|Written)Paths/.test(text)) {
+				offenders.push(entry);
+			}
+		}
+		expect(offenders).toEqual([]);
 	});
 });
