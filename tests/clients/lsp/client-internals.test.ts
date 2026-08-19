@@ -24,6 +24,7 @@ import {
 	diagnosticsVersionForPath,
 	normalizeClientWorkspaceEdit,
 	handleNotifyChange,
+	handleNotifyExternalChange,
 	navRequest,
 	resolveConfigurationSection,
 	runServerCommand,
@@ -907,6 +908,81 @@ describe("handleNotifyOpen", () => {
 		await handleNotifyOpen(state, TEST_FILE, "const x = 1;", "typescript");
 
 		expect(state.pushDiagnostics.has(TEST_KEY)).toBe(false);
+	});
+});
+
+/**
+ * #1668 — external (bash-authored) file changes that never went through
+ * textDocument/didOpen/didChange. Reproduces the server-side stale view: a
+ * bash-deleted file left NO trace in the fixture client's outbound traffic
+ * before this fix (`handleNotifyExternalChange` did not exist), so a server
+ * given only didOpen/didChange would keep the file in its index/vfs forever.
+ */
+describe("handleNotifyExternalChange (#1668)", () => {
+	it("queues a type-3 (Deleted) change and flushes it as one notification", () => {
+		const state = createMockState();
+		handleNotifyExternalChange(state, TEST_FILE, 3);
+
+		// Not on the wire yet — routed through the #271 debounce queue.
+		let calls = vi.mocked(state.connection.sendNotification).mock.calls;
+		expect(calls.some((c) => c[0] === "workspace/didChangeWatchedFiles")).toBe(
+			false,
+		);
+		expect(state.watchQueue.size).toBe(1);
+
+		state.watchQueue.flush();
+		calls = vi.mocked(state.connection.sendNotification).mock.calls;
+		const watched = calls.find((c) => c[0] === "workspace/didChangeWatchedFiles");
+		expect(watched).toBeDefined();
+		const changes = (watched?.[1] as { changes: Array<{ uri: string; type: number }> })
+			.changes;
+		expect(changes).toEqual([
+			{ uri: pathToFileURL(TEST_FILE).href, type: 3 },
+		]);
+	});
+
+	it("a burst of N distinct external deletes coalesces into ONE flush (flood control)", () => {
+		const state = createMockState();
+		const files = Array.from({ length: 25 }, (_, i) => `/project/gen-${i}.ts`);
+		for (const f of files) handleNotifyExternalChange(state, f, 3);
+
+		expect(state.watchQueue.size).toBe(25);
+		expect(state.connection.sendNotification).not.toHaveBeenCalledWith(
+			"workspace/didChangeWatchedFiles",
+			expect.anything(),
+		);
+
+		state.watchQueue.flush();
+		const watchedCalls = vi
+			.mocked(state.connection.sendNotification)
+			.mock.calls.filter((c) => c[0] === "workspace/didChangeWatchedFiles");
+		expect(watchedCalls).toHaveLength(1);
+		expect(
+			(watchedCalls[0][1] as { changes: unknown[] }).changes,
+		).toHaveLength(25);
+	});
+
+	it("uses the tracked open-document URI when the path is already open", () => {
+		const state = createMockState({ openDocumentUris: new Map() });
+		const uri = "file:///project/app.ts?variant=1";
+		state.openDocumentUris?.set(TEST_KEY, uri);
+
+		handleNotifyExternalChange(state, TEST_FILE, 1);
+		state.watchQueue.flush();
+
+		const calls = vi.mocked(state.connection.sendNotification).mock.calls;
+		const watched = calls.find((c) => c[0] === "workspace/didChangeWatchedFiles");
+		expect((watched?.[1] as { changes: Array<{ uri: string }> }).changes).toEqual(
+			[{ uri, type: 1 }],
+		);
+	});
+
+	it("does nothing when the client is not alive", () => {
+		const state = createMockState({ isConnected: false });
+		handleNotifyExternalChange(state, TEST_FILE, 3);
+
+		expect(state.watchQueue.size).toBe(0);
+		expect(state.connection.sendNotification).not.toHaveBeenCalled();
 	});
 });
 

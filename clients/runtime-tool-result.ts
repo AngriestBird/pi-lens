@@ -4,6 +4,7 @@ import * as path from "node:path";
 import { noteAuthoritativeContentAttachment } from "./agent-nudge.js";
 import {
 	extractReadPathsFromCommand,
+	extractDeletedPathsFromCommand,
 	extractGrepSearchReadsFromOutput,
 	extractWrittenPathsFromCommand,
 } from "./bash-file-access.js";
@@ -31,6 +32,7 @@ import {
 import type { PiLensFlagSource } from "./lens-config.js";
 import type { EditToolDetails } from "@earendil-works/pi-coding-agent";
 import type { LSPShutdownOptions } from "./lsp/client.js";
+import { notifyExternalFileChange } from "./lsp/index.js";
 import type { MetricsClient } from "./metrics-client.js";
 import { runPipeline, type PipelineResult } from "./pipeline.js";
 import {
@@ -499,6 +501,33 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 					turnIndex: runtime.turnIndex,
 					writeIndex: runtime.peekWriteIndex(),
 					timestamp: Date.now(),
+				});
+			}
+		}
+
+		// #1668: bash-deleted files never go through the edit tool, so nothing
+		// else tells an LSP server one of its watched files is gone — the ONLY
+		// existing enqueue site fires on first open and can only emit type 1/2.
+		// Extract the command's likely delete targets, confirm each by existence
+		// (never scan the workspace — only the paths the command named), and only
+		// act on paths pi-lens already knows about (a read or a write this
+		// session) so an `rm` on something pi-lens never touched is not treated
+		// as a signal. Each match is routed to already-active LSP clients as a
+		// type-3 watched-files event through the same #271 coalescing queue a
+		// burst of deletes still flushes as one notification per server.
+		if (
+			event.isError !== true &&
+			!getFlag("no-lsp") &&
+			!getFlag("no-read-guard")
+		) {
+			for (const dp of extractDeletedPathsFromCommand(command, workspaceRoot)) {
+				if (isExternalOrVendorFile(dp, workspaceRoot)) continue;
+				if (isPathIgnoredByProject(dp, workspaceRoot, false)) continue;
+				if (!deps.readGuard || !deps.readGuard.hasKnownPath(dp)) continue;
+				if (nodeFs.existsSync(dp)) continue; // still there — not a real delete
+				deps.readGuard.forgetPath(dp);
+				void notifyExternalFileChange(dp, 3).catch((err) => {
+					dbg(`tool_result: external-delete notify failed for ${dp}: ${err}`);
 				});
 			}
 		}

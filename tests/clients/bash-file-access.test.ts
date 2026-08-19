@@ -3,6 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
+	extractDeletedPathsFromCommand,
 	extractGrepSearchReadsFromOutput,
 	extractReadPathsFromCommand,
 	extractWrittenPathsFromCommand,
@@ -224,6 +225,72 @@ describe("extractWrittenPathsFromCommand — bash writes", () => {
 		expect(extractWrittenPathsFromCommand(`git stash pop`, tmp)).toHaveLength(
 			0,
 		);
+	});
+});
+
+// ── deletes: the #1668 type-3 watched-files gap ─────────────────────────────
+
+describe("extractDeletedPathsFromCommand — bash deletes (#1668)", () => {
+	it("rm FILE registers the target", () => {
+		const f = touchLines("a.ts", 3);
+		expect(extractDeletedPathsFromCommand(`rm ${f}`, tmp)).toContain(f);
+	});
+
+	it("rm -f/-rf FILE ignores the flag, keeps the target", () => {
+		const f = touchLines("a.ts", 3);
+		expect(extractDeletedPathsFromCommand(`rm -f ${f}`, tmp)).toContain(f);
+		expect(extractDeletedPathsFromCommand(`rm -rf ${f}`, tmp)).toContain(f);
+	});
+
+	it("rm A B registers every named target", () => {
+		const a = touchLines("a.ts", 1);
+		const b = touchLines("b.ts", 1);
+		const result = extractDeletedPathsFromCommand(`rm ${a} ${b}`, tmp);
+		expect(result).toContain(a);
+		expect(result).toContain(b);
+	});
+
+	it("git rm FILE registers the target", () => {
+		const f = touchLines("a.ts", 1);
+		expect(extractDeletedPathsFromCommand(`git rm ${f}`, tmp)).toContain(f);
+	});
+
+	it("git rm --cached -- FILE registers the target after --", () => {
+		const f = touchLines("a.ts", 1);
+		expect(
+			extractDeletedPathsFromCommand(`git rm --cached -- ${f}`, tmp),
+		).toContain(f);
+	});
+
+	it("mv SRC DEST registers the source (vanishes) but not the destination", () => {
+		const src = touchLines("a.ts", 1);
+		const dst = pathIn("b.ts");
+		const result = extractDeletedPathsFromCommand(`mv ${src} ${dst}`, tmp);
+		expect(result).toContain(src);
+		expect(result).not.toContain(dst);
+	});
+
+	it("bare directory rm is skipped — no explicit file, nothing to confirm", () => {
+		// A dir has no recognized extension, so isReadableSourceFile rejects it —
+		// this is the "don't stat the world" guard: no candidate is proposed.
+		expect(extractDeletedPathsFromCommand(`rm -rf build/`, tmp)).toHaveLength(
+			0,
+		);
+	});
+
+	it("git clean (no named files) proposes nothing", () => {
+		expect(extractDeletedPathsFromCommand(`git clean -fd`, tmp)).toHaveLength(
+			0,
+		);
+	});
+
+	it("unrelated commands (cat, grep, git status) propose nothing", () => {
+		const f = touchLines("a.ts", 1);
+		expect(extractDeletedPathsFromCommand(`cat ${f}`, tmp)).toHaveLength(0);
+		expect(extractDeletedPathsFromCommand(`grep -n foo ${f}`, tmp)).toHaveLength(
+			0,
+		);
+		expect(extractDeletedPathsFromCommand(`git status`, tmp)).toHaveLength(0);
 	});
 });
 

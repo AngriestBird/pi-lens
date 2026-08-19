@@ -844,6 +844,30 @@ export class ReadGuard {
 	}
 
 	/**
+	 * Whether pi-lens has any record of this path from a read or write this
+	 * session (#1668). Gates external-delete detection: a path pi-lens never
+	 * read or wrote is one no LSP server's cache was ever told about through
+	 * us, so an `rm` naming it carries no signal worth checking disk for —
+	 * this is a lookup against state already being tracked, never a fresh
+	 * filesystem stat over an unbounded path set.
+	 */
+	hasKnownPath(filePath: string): boolean {
+		const key = this.key(filePath);
+		return this.reads.has(key) || this.writtenThisSession.has(key);
+	}
+
+	/**
+	 * Drop all record of a path pi-lens confirmed no longer exists on disk
+	 * (#1668, external delete). Without this a later write reusing the same
+	 * path would inherit a stale writtenThisSession/reads entry from before
+	 * the delete, and a repeat `rm` of the same already-gone path would keep
+	 * matching {@link hasKnownPath} and re-emitting a type-3 notification.
+	 */
+	forgetPath(filePath: string): void {
+		this.evictFile(this.key(filePath));
+	}
+
+	/**
 	 * Mark a file as pending creation (Write tool to a non-existing file).
 	 * Must be called from the tool_call handler before the write lands so
 	 * isNewFile() still returns true. recordWritten will inject a synthetic

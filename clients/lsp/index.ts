@@ -1972,6 +1972,31 @@ export class LSPService {
 		return false;
 	}
 
+	/**
+	 * #1668: deliver a `workspace/didChangeWatchedFiles` event for a disk
+	 * change the client did not author through open-document sync — a bash
+	 * write/delete, or any other external change. `type` is the LSP
+	 * `FileChangeType` (1 Created, 2 Changed, 3 Deleted).
+	 *
+	 * Only reaches ALREADY-ACTIVE clients for this file's servers — a server
+	 * that hasn't been spawned yet has no stale cache to correct, so this
+	 * never spawns one just to deliver the notification. Each affected
+	 * client enqueues into its own #271 debounced queue, so a burst of
+	 * external changes still coalesces into one notification per server.
+	 */
+	async notifyExternalFileChange(filePath: string, type: number): Promise<void> {
+		if (this.checkDestroyed()) return;
+		for (const server of getServersForFileWithConfig(filePath)) {
+			const root = await this.resolveServerRoot(server, filePath);
+			if (!root) continue;
+			const key = `${server.id}:${normalizeMapKey(root)}`;
+			const existing = this.state.clients.get(key);
+			if (existing?.isAlive()) {
+				existing.notify.watchedFileChange(filePath, type);
+			}
+		}
+	}
+
 	private async ensureClientForServer(
 		filePath: string,
 		server: LSPServerInfo,
@@ -6720,6 +6745,19 @@ export async function isAuxiliaryLspAlive(
 	filePath: string,
 ): Promise<boolean> {
 	return getLSPService().isServerAliveForFile(serverId, filePath);
+}
+
+/**
+ * Cross-layer seam (#1668) for callers outside `lsp/` (bash/write tool-result
+ * handling) that observe a disk change no open-document sync path will ever
+ * report — an external delete/create/modify. Delivers to already-active
+ * clients only; see `LSPService.notifyExternalFileChange`.
+ */
+export async function notifyExternalFileChange(
+	filePath: string,
+	type: number,
+): Promise<void> {
+	return getLSPService().notifyExternalFileChange(filePath, type);
 }
 
 export function resetLSPService(options: LSPShutdownOptions = {}): void {

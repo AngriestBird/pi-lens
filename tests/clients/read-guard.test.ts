@@ -1253,6 +1253,39 @@ describe("ReadGuard export/import across resume (#1041)", () => {
 	});
 });
 
+describe("ReadGuard.hasKnownPath / forgetPath (#1668)", () => {
+	it("returns false for a path pi-lens never read or wrote", () => {
+		const guard = createReadGuard("test-session");
+		expect(guard.hasKnownPath("/src/never-touched.ts")).toBe(false);
+	});
+
+	it("returns true after a recordRead", () => {
+		const guard = createReadGuard("test-session");
+		guard.recordRead(createReadRecord("/src/api.ts"));
+		expect(guard.hasKnownPath("/src/api.ts")).toBe(true);
+	});
+
+	it("returns true after a recordWritten", () => {
+		const guard = createReadGuard("test-session");
+		guard.recordWritten("/src/api.ts");
+		expect(guard.hasKnownPath("/src/api.ts")).toBe(true);
+	});
+
+	it("forgetPath drops the record so hasKnownPath goes back to false", () => {
+		const guard = createReadGuard("test-session");
+		guard.recordWritten("/src/api.ts");
+		expect(guard.hasKnownPath("/src/api.ts")).toBe(true);
+
+		guard.forgetPath("/src/api.ts");
+		expect(guard.hasKnownPath("/src/api.ts")).toBe(false);
+	});
+
+	it("forgetPath on an unknown path is a no-op, not a throw", () => {
+		const guard = createReadGuard("test-session");
+		expect(() => guard.forgetPath("/src/never-touched.ts")).not.toThrow();
+	});
+});
+
 // --- Helpers ---
 
 function createReadRecord(
