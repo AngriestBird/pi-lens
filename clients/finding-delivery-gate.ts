@@ -434,6 +434,42 @@ export const DELIVERY_SURFACES: Record<string, DeliverySurfaceEntry> = {
 	},
 };
 
+function assertPartialStatusHasReason(id: string, entry: DeliverySurfaceEntry): void {
+	if (entry.status === "partial" && !entry.partialReason) {
+		throw new Error(
+			`finding-delivery-gate: surface "${id}" is status=partial but names no partialReason`,
+		);
+	}
+}
+
+function assertGatedShapeIsWellFormed(id: string, entry: GatedDeliverySurface): void {
+	if (!Array.isArray(entry.gates) || entry.gates.length === 0) {
+		throw new Error(
+			`finding-delivery-gate: surface "${id}" is mode=gated but names no gate`,
+		);
+	}
+	if (!Array.isArray(entry.evidence) || entry.evidence.length === 0) {
+		throw new Error(
+			`finding-delivery-gate: surface "${id}" is mode=gated but names no evidence`,
+		);
+	}
+}
+
+function assertLabeledShapeIsWellFormed(id: string, entry: LabeledDeliverySurface): void {
+	if (!entry.reason || !entry.ageSource) {
+		throw new Error(
+			`finding-delivery-gate: surface "${id}" is mode=labeled but is missing reason/ageSource`,
+		);
+	}
+	// "live" surfaces call no age-formatting helper — nothing to grep for.
+	// Every other ageSource claims a real cache, so it must be provable.
+	if (entry.ageSource !== "live" && entry.evidence.length === 0) {
+		throw new Error(
+			`finding-delivery-gate: surface "${id}" claims ageSource "${entry.ageSource}" but names no evidence`,
+		);
+	}
+}
+
 /**
  * Enforce #1634's "no third state" rule: every registered surface is either
  * `gated` (names at least one gate) or `labeled` (names a reason and an age
@@ -445,37 +481,13 @@ export function assertNoDeliveryBypass(
 	registry: Record<string, DeliverySurfaceEntry> = DELIVERY_SURFACES,
 ): void {
 	for (const [id, entry] of Object.entries(registry)) {
-		if (entry.status === "partial" && !entry.partialReason) {
-			throw new Error(
-				`finding-delivery-gate: surface "${id}" is status=partial but names no partialReason`,
-			);
-		}
+		assertPartialStatusHasReason(id, entry);
 		if (entry.mode === "gated") {
-			if (!Array.isArray(entry.gates) || entry.gates.length === 0) {
-				throw new Error(
-					`finding-delivery-gate: surface "${id}" is mode=gated but names no gate`,
-				);
-			}
-			if (!Array.isArray(entry.evidence) || entry.evidence.length === 0) {
-				throw new Error(
-					`finding-delivery-gate: surface "${id}" is mode=gated but names no evidence`,
-				);
-			}
+			assertGatedShapeIsWellFormed(id, entry);
 			continue;
 		}
 		if (entry.mode === "labeled") {
-			if (!entry.reason || !entry.ageSource) {
-				throw new Error(
-					`finding-delivery-gate: surface "${id}" is mode=labeled but is missing reason/ageSource`,
-				);
-			}
-			// "live" surfaces call no age-formatting helper — nothing to grep for.
-			// Every other ageSource claims a real cache, so it must be provable.
-			if (entry.ageSource !== "live" && entry.evidence.length === 0) {
-				throw new Error(
-					`finding-delivery-gate: surface "${id}" claims ageSource "${entry.ageSource}" but names no evidence`,
-				);
-			}
+			assertLabeledShapeIsWellFormed(id, entry);
 			continue;
 		}
 		throw new Error(

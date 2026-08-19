@@ -696,9 +696,8 @@ function formatDeltaMode(
 			const rel = path.relative(cwd, file.filePath);
 			lines.push(`${rel}`);
 			for (const w of file.warnings) {
-				lines.push(
-					`  ⚠ ${w.stale ? STALE_LINE_MARKER : `L${w.line ?? "?"}`}  ${w.rule ?? w.code ?? w.tool}  ${w.message}`,
-				);
+				const where = w.stale ? STALE_LINE_MARKER : `L${w.line ?? "?"}`;
+				lines.push(`  ⚠ ${where}  ${w.rule ?? w.code ?? w.tool}  ${w.message}`);
 			}
 		}
 	}
@@ -709,9 +708,8 @@ function formatDeltaMode(
 			const rel = path.relative(cwd, file.filePath);
 			if (!lines.includes(rel)) lines.push(rel);
 			for (const w of file.warnings) {
-				lines.push(
-					`  ℹ ${w.stale ? STALE_LINE_MARKER : `L${w.line ?? "?"}`}  ${w.rule ?? w.code ?? w.tool}  ${w.message}`,
-				);
+				const where = w.stale ? STALE_LINE_MARKER : `L${w.line ?? "?"}`;
+				lines.push(`  ℹ ${where}  ${w.rule ?? w.code ?? w.tool}  ${w.message}`);
 			}
 		}
 	}
