@@ -516,10 +516,9 @@ async function refreshOne(
  * `handleSessionStart`, and an `npm update` can easily outlive the 30s gap to
  * the next session. Without this, two runs raced through the budget check and
  * both spawned a package manager into the same unlocked managed
- * `node_modules`. The identity guard on clear is the same one
- * `package-manager.ts`'s `isAvailable` and `dependency-checker.ts`'s
- * `resolveMadge` use: an unconditional delete can evict a NEWER entry that a
- * later caller already installed, reopening the gap it was meant to close.
+ * `node_modules`. The join is the same shape `ensureTool` uses for its own
+ * duplicate startup requests (`clients/installer/index.ts:4175-4182`, cleared
+ * at `:4314-4318`).
  *
  * This is the local form of the single-flight primitive #1753 proposes. When
  * that lands, this is one of its callers.
@@ -546,8 +545,17 @@ export function runManagedToolRefresh(
 	}
 	// No `await` between starting the run and publishing it, so no third caller
 	// can slip through and start a second one.
+	//
+	// The clear is unconditional. An identity check (`if (refreshInFlight ===
+	// run)`) is the usual companion to this pattern — `package-manager.ts:225`
+	// needs one because its map entry can be replaced by a later caller while an
+	// older probe is still settling. This slot cannot: the line below is its only
+	// writer, and every other caller returns early while it is non-null, so when
+	// this `finally` runs the slot still holds `run`. #1746 review round 2 proved
+	// that branch unreachable (mutating it to an unconditional clear failed no
+	// test), and a branch no input can take is not a guard.
 	const run = executeManagedToolRefresh(now).finally(() => {
-		if (refreshInFlight === run) refreshInFlight = null;
+		refreshInFlight = null;
 	});
 	refreshInFlight = run;
 	return run;
@@ -566,11 +574,13 @@ async function executeManagedToolRefresh(
 	if (!reserveManagedToolRefreshSlot(maxPerSession())) {
 		return { skipped: "session-budget", refreshed: [] };
 	}
-	let reserved = 1;
+	// Slots this run HOLDS and has not yet spent. Held slots are given back on
+	// every exit that never reached a spawn; a spent slot is gone for good.
+	let held = 1;
 	const releaseReservation = (): void => {
-		if (reserved > 0) {
+		while (held > 0) {
 			releaseManagedToolRefreshSlot();
-			reserved -= 1;
+			held -= 1;
 		}
 	};
 
@@ -604,14 +614,32 @@ async function executeManagedToolRefresh(
 			return { skipped: "nothing-due", refreshed: [] };
 		}
 
+		// Top the reservation up to cover this run's whole walk, in ONE
+		// synchronous block, and capture the total LOCALLY.
+		//
+		// #1746 review round 2 (R2-F1): the loop used to call
+		// `reserveManagedToolRefreshSlot` again for each tool after the previous
+		// tool's awaited refresh. `handleSessionStart` zeroes the global counter,
+		// and a session start landing inside a 120s `npm update` therefore re-armed
+		// the budget the running loop was still spending. Each further session
+		// start bought the same loop another tool, so a long update plus a few
+		// `/new` calls walked the entire 22-tool stale list. A local allowance
+		// cannot be re-armed by anyone: a mid-run reset restores the SESSION's
+		// right to start a new run, which is correct, without extending this one.
+		const want = Math.min(maxPerSession(), stale.length);
+		while (held < want && reserveManagedToolRefreshSlot(maxPerSession())) {
+			held += 1;
+		}
+		let allowance = held;
+
 		const refreshed: ManagedToolRefreshResult[] = [];
 		for (const candidate of stale) {
-			// The first tool spends the slot reserved up front; each further tool
-			// (only when `maxPerSession` is raised) takes its own. Once a spawn
-			// happens the slot is spent for good — a failing tool must not hand it
-			// to the next candidate and turn a budget of one into 22 spawns.
-			if (reserved > 0) reserved -= 1;
-			else if (!reserveManagedToolRefreshSlot(maxPerSession())) break;
+			// Once a spawn happens the slot is spent for good — a failing tool must
+			// not hand its slot to the next candidate and turn a budget of one into
+			// 22 spawns.
+			if (allowance <= 0) break;
+			allowance -= 1;
+			held -= 1;
 			try {
 				refreshed.push(await refreshOne(candidate, now));
 			} catch (err) {

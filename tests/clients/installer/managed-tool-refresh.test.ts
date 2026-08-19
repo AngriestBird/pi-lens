@@ -555,6 +555,90 @@ describe("concurrent runs (review F1)", () => {
 });
 
 /**
+ * #1746 review round 2 (R2-F1). The walk used to re-consult the GLOBAL session
+ * counter after each awaited refresh. `handleSessionStart` zeroes that counter,
+ * so a session start landing inside a 120s `npm update` re-armed the budget the
+ * running loop was still spending — and N session starts during one long update
+ * walked the whole 22-tool stale list.
+ */
+describe("a session start mid-run does not extend the run (review R2-F1)", () => {
+	it("still spawns one update when the budget re-arms during the spawn", async () => {
+		installFixture("knip", "6.4.1");
+		installFixture("pyright", "1.0.0");
+		let sawUpdate = 0;
+		spawnMock.mockImplementation(async (_c: string, args: string[]) => {
+			if (!args.includes("update")) {
+				return { stdout: "npm", stderr: "", status: 0 };
+			}
+			sawUpdate += 1;
+			// A `/new` arrives while npm is still running. This is the ordinary
+			// case: the spawn budget is 120s and a session start costs nothing.
+			resetManagedToolRefreshSession();
+			return { stdout: "", stderr: "", status: 0 };
+		});
+
+		await runManagedToolRefresh(NOW);
+
+		expect(sawUpdate).toBe(1);
+		expect(updateCalls()).toHaveLength(1);
+	});
+
+	it("does not walk the stale list when many session starts land mid-run", async () => {
+		for (const pkg of ["knip", "pyright", "oxlint", "madge"]) {
+			installFixture(pkg, "1.0.0");
+		}
+		spawnMock.mockImplementation(async (_c: string, args: string[]) => {
+			if (!args.includes("update")) {
+				return { stdout: "npm", stderr: "", status: 0 };
+			}
+			// Three sessions start while this one update runs.
+			resetManagedToolRefreshSession();
+			resetManagedToolRefreshSession();
+			resetManagedToolRefreshSession();
+			return { stdout: "", stderr: "", status: 0 };
+		});
+
+		await runManagedToolRefresh(NOW);
+
+		expect(updateCalls()).toHaveLength(1);
+	});
+
+	it("still refreshes the run's own allowance when it is raised", async () => {
+		installFixture("knip", "6.4.1");
+		installFixture("pyright", "1.0.0");
+		installFixture("oxlint", "1.0.0");
+		vi.stubEnv("PI_LENS_TOOL_REFRESH_MAX_PER_SESSION", "2");
+		stubSpawn("ok", {});
+
+		await runManagedToolRefresh(NOW);
+
+		// The local capture must not become a cap of one: a run reserves the
+		// whole allowance up front and is entitled to spend it.
+		expect(updateCalls()).toHaveLength(2);
+	});
+
+	it("lets the NEXT run use the budget a mid-run session start restored", async () => {
+		installFixture("knip", "6.4.1");
+		installFixture("pyright", "1.0.0");
+		spawnMock.mockImplementation(async (_c: string, args: string[]) => {
+			if (!args.includes("update")) {
+				return { stdout: "npm", stderr: "", status: 0 };
+			}
+			resetManagedToolRefreshSession();
+			return { stdout: "", stderr: "", status: 0 };
+		});
+
+		await runManagedToolRefresh(NOW);
+		// The reset is not swallowed — it restores the SESSION's right to start a
+		// fresh run, which is what re-arming is for. It just must not extend the
+		// run that was already walking.
+		await runManagedToolRefresh(NOW);
+
+		expect(updateCalls()).toHaveLength(2);
+	});
+});
+
+/**
  * #1746 review F3: the session counter is the seam the "count the ATTEMPT, not
  * the success" claim actually lives on. The earlier tests proved it off a
  * function-local budget variable, which a mutation to the shared counter left
