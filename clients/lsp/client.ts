@@ -13,6 +13,7 @@ import { EventEmitter } from "node:events";
 import { access, readFile } from "node:fs/promises";
 import * as os from "node:os";
 import { pathToFileURL } from "node:url";
+import { emitBounded } from "../bounded-telemetry.js";
 import { withTimeout } from "../deadline-utils.js";
 import { incrementDegradationCount } from "../degradation-ledger.js";
 import type { MessageConnection } from "../deps/vscode-jsonrpc.js";
@@ -2681,6 +2682,13 @@ function isPullTimeoutError(err: unknown, timeoutMs: number): boolean {
  * observability gap the issue names (`withTimeout`'s throw previously skipped
  * ALL telemetry for this site). Never throws: telemetry must not perturb the
  * timeout path, which has already decided to return `unavailable` regardless.
+ *
+ * #1743: routed through `emitBounded`. This phase takes NO rising-edge gate
+ * and NO per-turn cap, which is the pre-existing behavior kept exactly: a
+ * pull timeout costs at least the full budget (seconds), so the call cadence
+ * already bounds the volume, unlike `navRequest` below. The helper still
+ * supplies the identity discipline and the registry membership the sweep
+ * checks.
  */
 function recordPullTimeoutTelemetry(args: {
 	scope: string;
@@ -2689,10 +2697,11 @@ function recordPullTimeoutTelemetry(args: {
 	hadPreviousResultId: boolean;
 	elapsedMs: number;
 }): void {
-	try {
-		logLatency({
+	emitBounded(
+		"lsp_pull_diagnostic_timeout",
+		`${args.scope}::${args.identifier ?? "bare"}`,
+		{
 			type: "phase",
-			phase: "lsp_pull_diagnostic_timeout",
 			filePath: args.scope,
 			durationMs: args.elapsedMs,
 			metadata: {
@@ -2700,10 +2709,8 @@ function recordPullTimeoutTelemetry(args: {
 				effectiveBudgetMs: args.effectiveBudgetMs,
 				hadPreviousResultId: args.hadPreviousResultId,
 			},
-		});
-	} catch {
-		// Telemetry must never break the observed path.
-	}
+		},
+	);
 }
 
 /**
@@ -2736,18 +2743,25 @@ function armLateAnswerTelemetry(args: {
 		() => {
 			try {
 				const elapsedMs = Date.now() - args.requestStartedAt;
-				incrementDegradationCount({
-					kind: "lsp-pull-late-answer",
-					subject: args.subject,
-					reason: `late pull answer discarded after ${elapsedMs}ms`,
-				});
-				logLatency({
-					type: "phase",
-					phase: "lsp_pull_late_answer_discarded",
-					filePath: args.scope,
-					durationMs: elapsedMs,
-					metadata: { identifier: args.identifier ?? "bare" },
-				});
+				// #1743: `emitBounded` counts every late answer in the ledger
+				// under the same `pullSourceKey` subject as before, then writes
+				// the record. No rising-edge gate, matching #1713's original
+				// behavior: a late answer arrives at most once per abandoned
+				// request, so the record count cannot exceed the timeout count.
+				emitBounded(
+					"lsp_pull_late_answer_discarded",
+					args.subject,
+					{
+						type: "phase",
+						filePath: args.scope,
+						durationMs: elapsedMs,
+						metadata: { identifier: args.identifier ?? "bare" },
+					},
+					{
+						ledgerKind: "lsp-pull-late-answer",
+						reason: `late pull answer discarded after ${elapsedMs}ms`,
+					},
+				);
 			} catch {
 				// Telemetry must never break the observed path.
 			}
@@ -3643,24 +3657,24 @@ function recordNavTimeoutTelemetry(args: {
 	budgetMs: number;
 	elapsedMs: number;
 }): void {
-	try {
-		const subject = `${args.method}:${args.scope ?? NAV_REQUEST_NO_PATH_SCOPE}`;
-		const isRisingEdge = incrementDegradationCount({
-			kind: "lsp-nav-request-timeout",
-			subject,
-			reason: `timeout budget=${args.budgetMs}ms elapsed=${args.elapsedMs}ms`,
-		});
-		if (!isRisingEdge) return;
-		logLatency({
+	// #1743: `risingEdgePer: "identity"` is the same gate this site hand-rolled
+	// off `incrementDegradationCount`'s return value, now expressed as an
+	// option. The ledger still counts every timeout exactly, per (method, file).
+	emitBounded(
+		"lsp_nav_request_timeout",
+		`${args.method}:${args.scope ?? NAV_REQUEST_NO_PATH_SCOPE}`,
+		{
 			type: "phase",
-			phase: "lsp_nav_request_timeout",
 			filePath: args.scope ?? NAV_REQUEST_NO_PATH_SCOPE,
 			durationMs: args.elapsedMs,
 			metadata: { method: args.method, effectiveBudgetMs: args.budgetMs },
-		});
-	} catch {
-		// Telemetry must never break the observed path.
-	}
+		},
+		{
+			ledgerKind: "lsp-nav-request-timeout",
+			risingEdgePer: "identity",
+			reason: `timeout budget=${args.budgetMs}ms elapsed=${args.elapsedMs}ms`,
+		},
+	);
 }
 
 /**
@@ -3689,20 +3703,23 @@ function armNavLateAnswerTelemetry(args: {
 		() => {
 			try {
 				const elapsedMs = Date.now() - args.requestStartedAt;
-				const subject = `${args.method}:${args.scope ?? NAV_REQUEST_NO_PATH_SCOPE}`;
-				const isRisingEdge = incrementDegradationCount({
-					kind: "lsp-nav-late-answer",
-					subject,
-					reason: `late nav answer discarded after ${elapsedMs}ms`,
-				});
-				if (!isRisingEdge) return;
-				logLatency({
-					type: "phase",
-					phase: "lsp_nav_late_answer_discarded",
-					filePath: args.scope ?? NAV_REQUEST_NO_PATH_SCOPE,
-					durationMs: elapsedMs,
-					metadata: { method: args.method },
-				});
+				// #1743: same rising-edge gate as the timeout record above, now
+				// carried by the helper instead of hand-rolled here.
+				emitBounded(
+					"lsp_nav_late_answer_discarded",
+					`${args.method}:${args.scope ?? NAV_REQUEST_NO_PATH_SCOPE}`,
+					{
+						type: "phase",
+						filePath: args.scope ?? NAV_REQUEST_NO_PATH_SCOPE,
+						durationMs: elapsedMs,
+						metadata: { method: args.method },
+					},
+					{
+						ledgerKind: "lsp-nav-late-answer",
+						risingEdgePer: "identity",
+						reason: `late nav answer discarded after ${elapsedMs}ms`,
+					},
+				);
 			} catch {
 				// Telemetry must never break the observed path.
 			}

@@ -176,6 +176,15 @@ import {
 	getRecentLoggedPhases,
 	logLatency,
 } from "./clients/latency-logger.js";
+import { emitBounded } from "./clients/bounded-telemetry.js";
+
+/**
+ * Identity for the `loop_block` record (#1743). An event-loop block is a
+ * process-wide fact — there is no file, tool, or request to discriminate on —
+ * so the identity is this fixed marker, the same value the record's
+ * `filePath` has carried since #192.
+ */
+const LOOP_BLOCK_IDENTITY = "<pi-lens>";
 import {
 	isFreshSessionStart,
 	planToolSet,
@@ -2316,10 +2325,16 @@ function activateExtension(hostPi: ExtensionAPI) {
 					loopMaxMs,
 					lastLoggedLoopWorstMs,
 				);
-				logLatency({
+				// #1743: routed through the bounded-telemetry helper. No
+				// `capPerTurn` here, deliberately: this site's bound is its CALL
+				// CADENCE (#1723) — `turn_end` runs it at most once per turn
+				// because the histogram window resets every turn — so a
+				// `capPerTurn: 1` would be a second, redundant guard that could
+				// only ever fire in a harness that drives two `turn_end`s without
+				// an intervening `turn_start`. The helper still supplies the
+				// registry membership the sweep checks.
+				emitBounded("loop_block", LOOP_BLOCK_IDENTITY, {
 					type: "phase",
-					filePath: "<pi-lens>",
-					phase: "loop_block",
 					durationMs: Math.round(loopMaxMs),
 					metadata: {
 						worstSoFar: isNewSessionWorst,
