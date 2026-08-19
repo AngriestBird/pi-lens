@@ -18,6 +18,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	buildScopeKey,
 	cacheKeyFor,
+	clearAllWorkspaceDiagnosticsCaches,
+	clearWorkspaceDiagnosticsCache,
 	createWorkspaceDiagnosticsCacheContext,
 	isEntryFresh,
 	loadWorkspaceDiagnosticsCache,
@@ -503,5 +505,100 @@ describe("persist() write-failure retry (#1239)", () => {
 			mtimeMs,
 			scopeKey: "all|",
 		});
+	});
+});
+
+// #1669 review F1: `workspace/diagnostic/refresh` used to clear the cache at
+// the per-LSP-server `state.root`, which a monorepo/multi-root project can
+// nest BELOW the real sweep cwd — the clear missed the actual cache file.
+// `clearAllWorkspaceDiagnosticsCaches` instead drops every cwd this process
+// has ever created a `createWorkspaceDiagnosticsCacheContext` for.
+describe("clearAllWorkspaceDiagnosticsCaches (#1669 review F1)", () => {
+	it("clears every cwd a sweep has registered, not just one", () => {
+		const projectA = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-cache-a-"));
+		const projectB = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-cache-b-"));
+		fs.mkdirSync(path.join(projectA, ".pi-lens"));
+		fs.mkdirSync(path.join(projectB, ".pi-lens"));
+		try {
+			const fileA = path.join(projectA, "a.ts");
+			const fileB = path.join(projectB, "b.ts");
+			// Two independent sweeps, mirroring two projects a single LSP process
+			// might route files through (e.g. two roots resolved by the SAME
+			// language server key in a multi-root workspace).
+			const ctxA = createWorkspaceDiagnosticsCacheContext(projectA);
+			ctxA.record(fileA, "all|", [], 1);
+			ctxA.persist();
+			const ctxB = createWorkspaceDiagnosticsCacheContext(projectB);
+			ctxB.record(fileB, "all|", [], 1);
+			ctxB.persist();
+
+			expect(
+				Object.keys(loadWorkspaceDiagnosticsCache(projectA)?.entries ?? {}),
+			).toHaveLength(1);
+			expect(
+				Object.keys(loadWorkspaceDiagnosticsCache(projectB)?.entries ?? {}),
+			).toHaveLength(1);
+
+			// A refresh at a THIRD root (e.g. `state.root` for a per-server
+			// identity that is neither project's cwd) must still clear both —
+			// clearing only `state.root` (the pre-fix behavior) would clear
+			// nothing here at all.
+			clearAllWorkspaceDiagnosticsCaches();
+
+			expect(
+				Object.keys(loadWorkspaceDiagnosticsCache(projectA)?.entries ?? {}),
+			).toHaveLength(0);
+			expect(
+				Object.keys(loadWorkspaceDiagnosticsCache(projectB)?.entries ?? {}),
+			).toHaveLength(0);
+		} finally {
+			removeTempDirSync(projectA);
+			removeTempDirSync(projectB);
+		}
+	});
+});
+
+// #1669 review F2: `createWorkspaceDiagnosticsCacheContext` loads the cache
+// ONCE at the start of a sweep, and `persist()` blind-overwrites the whole
+// map at the end. A `workspace/diagnostic/refresh` landing mid-sweep used to
+// be silently undone the moment that sweep's own (now-stale) in-memory copy
+// was written back — the exact staleness class #1669 exists to close.
+describe("createWorkspaceDiagnosticsCacheContext persist() vs. a mid-sweep clear (#1669 review F2)", () => {
+	it("drops a stale persist() once clearWorkspaceDiagnosticsCache raced it, instead of resurrecting the cleared entries", () => {
+		const filePath = path.join(tmp, "a.ts");
+		fs.writeFileSync(filePath, "const a = 1;\n");
+		const mtimeMs = fs.statSync(filePath).mtimeMs;
+
+		// A sweep starts and loads the (currently empty) cache.
+		const ctx = createWorkspaceDiagnosticsCacheContext(tmp);
+		// Mid-sweep, a server-initiated refresh clears the on-disk cache —
+		// e.g. because a project-wide config change made everything the sweep
+		// is about to record stale.
+		clearWorkspaceDiagnosticsCache(tmp);
+		// The sweep, unaware of the refresh, finishes and writes back what it
+		// computed BEFORE the refresh landed.
+		ctx.record(filePath, "all|", [], mtimeMs);
+		ctx.persist();
+
+		// The refresh's clear must win: nothing from the stale in-memory copy
+		// may resurrect on disk. Pre-fix, this assertion would see 1 entry —
+		// the sweep's persist() overwrote the clear.
+		expect(
+			Object.keys(loadWorkspaceDiagnosticsCache(tmp)?.entries ?? {}),
+		).toHaveLength(0);
+	});
+
+	it("still persists normally when no clear raced the sweep", () => {
+		const filePath = path.join(tmp, "a.ts");
+		fs.writeFileSync(filePath, "const a = 1;\n");
+		const mtimeMs = fs.statSync(filePath).mtimeMs;
+
+		const ctx = createWorkspaceDiagnosticsCacheContext(tmp);
+		ctx.record(filePath, "all|", [], mtimeMs);
+		ctx.persist();
+
+		expect(
+			Object.keys(loadWorkspaceDiagnosticsCache(tmp)?.entries ?? {}),
+		).toHaveLength(1);
 	});
 });
