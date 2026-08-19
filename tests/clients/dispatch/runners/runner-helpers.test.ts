@@ -3,6 +3,7 @@ import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	createAvailabilityChecker,
+	createCwdCachedProbe,
 	createVenvFinder,
 	findManagedNodeToolBinary,
 	getSgCommand,
@@ -1093,6 +1094,111 @@ describe("compensating row: the memo burns only on a genuine correction (#1657)"
 			correctsLatchedRow: false,
 		});
 	});
+
+	/**
+	 * #1674 delta F6(a) — the latch lives under whatever name its writer used.
+	 * A checker built on a resolved path records THAT string, so an install-seam
+	 * row keyed on the toolId alone would miss the very row it is correcting.
+	 */
+	it("finds a latch recorded under the checker's command, not the toolId", async () => {
+		const installerMod = await import("../../../../clients/installer/index.js");
+		const safeSpawnMod = await import("../../../../clients/safe-spawn.js");
+		const command = path.join(path.sep, "usr", "local", "bin", "stylelint");
+		vi.mocked(installerMod.isSpawnableCommand).mockResolvedValue(false);
+		vi.mocked(installerMod.ensureTool).mockResolvedValue("/managed/bin/stylelint");
+		vi.mocked(installerMod.getInstallAttempt).mockReturnValue(undefined);
+		vi.mocked(safeSpawnMod.safeSpawnAsync).mockResolvedValue(missingProbe);
+		const cwd = process.cwd();
+
+		// The checker's own name IS the resolved path, so the latched row is
+		// recorded under that path — never under "stylelint".
+		expect(
+			await createAvailabilityChecker(command).isAvailableAsync(cwd),
+		).toBe(false);
+		await resolveCommandWithInstallFallback(command, "stylelint", cwd);
+
+		const available = availabilityDecisions().filter(
+			(record) => record.metadata.verdict === "available",
+		);
+		expect(available).toHaveLength(1);
+		expect(available[0].metadata.evidence).toMatchObject({
+			correctsLatchedRow: true,
+		});
+	});
+
+	/**
+	 * #1674 delta F6(b) — `createCwdCachedProbe` is the second latched-row
+	 * producer, and its `available` verdict must clear the record too.
+	 */
+	it("clears the latch record on the shared cwd probe's available verdict", async () => {
+		const installerMod = await import("../../../../clients/installer/index.js");
+		vi.mocked(installerMod.isSpawnableCommand).mockResolvedValue(false);
+		vi.mocked(installerMod.ensureTool).mockResolvedValue("/managed/bin/stylelint");
+		vi.mocked(installerMod.getInstallAttempt).mockReturnValue(undefined);
+		const cwd = process.cwd();
+
+		let missing = true;
+		const probe = createCwdCachedProbe(
+			async () =>
+				missing
+					? {
+							status: null,
+							error: Object.assign(new Error("missing"), { code: "ENOENT" }),
+							failure: "spawn" as const,
+							spawnFailure: missingSpawnFailure(),
+						}
+					: { status: 0 },
+			{ tool: "stylelint" },
+		);
+
+		expect(await probe(cwd)).toBe(false);
+		missing = false;
+		probe.reset();
+		expect(await probe(cwd)).toBe(true);
+
+		await resolveToolCommandWithInstallFallback(cwd, "stylelint");
+
+		const available = availabilityDecisions().filter(
+			(record) => record.metadata.verdict === "available",
+		);
+		expect(available).toHaveLength(2);
+		expect(available[1].metadata.evidence).toMatchObject({
+			correctsLatchedRow: false,
+		});
+	});
+
+	/**
+	 * #1674 delta F6(c) — the #1612 seam records its own latch before emitting,
+	 * so the emitter READS that a correction is happening from the same ledger
+	 * every caller reads. Without that write, a checker whose command differs
+	 * from the toolId leaves the emitter with nothing to find.
+	 */
+	it("reads its own latch when the checker's command differs from the toolId", async () => {
+		const installerMod = await import("../../../../clients/installer/index.js");
+		const safeSpawnMod = await import("../../../../clients/safe-spawn.js");
+		vi.mocked(installerMod.isSpawnableCommand).mockResolvedValue(false);
+		vi.mocked(installerMod.ensureTool).mockResolvedValue("/managed/bin/stylelint");
+		vi.mocked(installerMod.getInstallAttempt).mockReturnValue(undefined);
+		vi.mocked(safeSpawnMod.safeSpawnAsync).mockResolvedValue(missingProbe);
+		const cwd = process.cwd();
+
+		// Checker command "stylelint-bin", toolId "stylelint": the latched row
+		// carries the command, and a failed probe leaves `getCommand` null, so
+		// only the seam's own record can answer for this correction.
+		await resolveAvailableOrInstall(
+			createAvailabilityChecker("stylelint-bin"),
+			"stylelint",
+			cwd,
+		);
+
+		const available = availabilityDecisions().filter(
+			(record) => record.metadata.verdict === "available",
+		);
+		expect(available).toHaveLength(1);
+		expect(available[0].metadata.evidence).toMatchObject({
+			correctsLatchedRow: true,
+		});
+	});
 });
 
 /**
@@ -1293,6 +1399,47 @@ describe("managed shim resolution verifies the binary (#1657)", () => {
 	 * in-flight share mirrors `resolveInstallInFlightByCwd`: one probe, four
 	 * awaiters.
 	 */
+	/**
+	 * #1674 delta F5 — a verification that straddles a session boundary answers
+	 * its own caller, but its verdict belongs to the session that asked. Written
+	 * into the fresh session, it hands the new session the old one's cooldown,
+	 * which is exactly the state `session_start` exists to re-arm.
+	 */
+	it("does not seed the fresh session from a verification that straddled the reset", async () => {
+		const installerMod = await import("../../../../clients/installer/index.js");
+		const env = setupTestEnvironment("pi-lens-managed-straddle-");
+		try {
+			process.env.PI_LENS_HOME = env.tmpDir;
+			resetDispatchAvailabilityState();
+			const shim = writeManagedShim(env.tmpDir, "straddletool");
+			vi.mocked(installerMod.verifyToolBinary).mockReset();
+			// The session boundary falls INSIDE the verification, so the ordering
+			// is deterministic rather than left to scheduling luck. The stall
+			// verdict this call produces belongs to the session that is ending.
+			let boundaryCrossed = false;
+			vi.mocked(installerMod.verifyToolBinary).mockImplementation(
+				async (_bin, _onVersion, onTransient) => {
+					if (!boundaryCrossed) {
+						boundaryCrossed = true;
+						resetDispatchAvailabilityState();
+					}
+					onTransient?.();
+					return false;
+				},
+			);
+
+			expect(await findManagedNodeToolBinary("straddletool")).toBe(shim);
+			// The fresh session starts with no memo and no cooldown, so it probes
+			// for itself instead of inheriting the last session's stall.
+			expect(await findManagedNodeToolBinary("straddletool")).toBe(shim);
+			expect(installerMod.verifyToolBinary).toHaveBeenCalledTimes(2);
+		} finally {
+			vi.mocked(installerMod.verifyToolBinary).mockReset();
+			vi.mocked(installerMod.verifyToolBinary).mockResolvedValue(true);
+			env.cleanup();
+		}
+	});
+
 	it("shares one verification across concurrent first touches", async () => {
 		const installerMod = await import("../../../../clients/installer/index.js");
 		const env = setupTestEnvironment("pi-lens-managed-inflight-");

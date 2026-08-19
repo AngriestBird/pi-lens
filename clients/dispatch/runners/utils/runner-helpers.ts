@@ -182,7 +182,10 @@ const managedVerifyInFlight = new Map<string, Promise<ManagedVerdict>>();
 const MANAGED_VERIFY_TIMEOUT_MS = 5000;
 /** First cooldown after a verification that never got a fair run. */
 const MANAGED_VERIFY_COOLDOWN_MS = 60_000;
-/** Ceiling for the cooldown ladder — a stalling shim is re-probed hourly. */
+/**
+ * Ceiling for the cooldown ladder — a shim that keeps stalling is still
+ * re-probed every 15 minutes.
+ */
 const MANAGED_VERIFY_COOLDOWN_MAX_MS = 15 * 60_000;
 
 function managedVerifyCooldownMs(attempts: number): number {
@@ -196,6 +199,7 @@ async function runManagedVerification(
 	candidate: string,
 	stamp: string,
 	priorAttempts: number,
+	generation: number,
 ): Promise<ManagedVerdict> {
 	let transient = false;
 	let ok: boolean;
@@ -220,16 +224,26 @@ async function runManagedVerification(
 	// spawn-boundary failure says nothing about the shim, so it never demotes
 	// the candidate. It IS remembered, under a cooldown, so the wait is paid
 	// once per window rather than on every resolve (#1674 review F1).
+	// A verification that straddles a session boundary answers ITS caller, but
+	// its verdict belongs to the session that asked. Writing it into the fresh
+	// session would hand the new session the old one's cooldown — the exact
+	// re-arm this state clears at `session_start` (#1674 review F5). Same guard
+	// the install seam's in-flight share uses.
+	const currentGeneration = generation === availabilityStateGeneration;
 	if (!ok && transient) {
 		const attempts = priorAttempts + 1;
-		managedBinaryVerdicts.set(stamp, {
-			verdict: "unverified",
-			attempts,
-			retryAtMs: Date.now() + managedVerifyCooldownMs(attempts),
-		});
+		if (currentGeneration) {
+			managedBinaryVerdicts.set(stamp, {
+				verdict: "unverified",
+				attempts,
+				retryAtMs: Date.now() + managedVerifyCooldownMs(attempts),
+			});
+		}
 		return "unverified";
 	}
-	managedBinaryVerdicts.set(stamp, { verdict: ok ? "ok" : "broken" });
+	if (currentGeneration) {
+		managedBinaryVerdicts.set(stamp, { verdict: ok ? "ok" : "broken" });
+	}
 	if (!ok) {
 		// Once per shim per session, at the moment the verdict is reached — the
 		// memo answers every later call, so this cannot become per-dispatch spam.
@@ -259,11 +273,20 @@ async function verifyManagedCandidate(
 	}
 	const existing = managedVerifyInFlight.get(stamp);
 	if (existing) return existing;
-	const probe = runManagedVerification(candidate, stamp, priorAttempts).finally(
-		() => {
+	const generation = availabilityStateGeneration;
+	const probe = runManagedVerification(
+		candidate,
+		stamp,
+		priorAttempts,
+		generation,
+	).finally(() => {
+		// A settling old-session probe must not evict the live entry a new
+		// session already started for the same shim (#1674 review F5).
+		if (generation !== availabilityStateGeneration) return;
+		if (managedVerifyInFlight.get(stamp) === probe) {
 			managedVerifyInFlight.delete(stamp);
-		},
-	);
+		}
+	});
 	managedVerifyInFlight.set(stamp, probe);
 	return probe;
 }
