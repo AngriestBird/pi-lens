@@ -468,11 +468,18 @@ export async function findGlobalBinary(
 	return undefined;
 }
 
-/** Local `node_modules/.bin/<tool>` walking up from `startDir` to the fs root. */
-function findLocalBinUpwards(
+/**
+ * Local `node_modules/.bin/<tool>` walking up from `startDir` to the fs root.
+ *
+ * Exported so callers that must NOT pay for global-bin discovery can reuse this
+ * walk instead of copying it. `findNodeToolBinary` below adds `findGlobalBinary`,
+ * which spawns a probe per package manager; a caller resolving a command on
+ * every run (knip, #1721) needs the filesystem half only.
+ */
+export function findLocalBinUpwards(
 	tool: string,
 	startDir: string,
-	windowsExt: string,
+	windowsExt = ".cmd",
 ): string | undefined {
 	const names = onWindows() ? [`${tool}${windowsExt}`, tool] : [tool];
 	let dir = path.resolve(startDir);

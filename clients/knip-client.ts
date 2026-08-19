@@ -25,6 +25,8 @@ import {
 	createAvailabilityLatch,
 	describeUnavailability,
 } from "./dispatch/runners/utils/availability-policy.js";
+import { findLocalBinUpwards } from "./package-manager.js";
+import { logSessionStart } from "./sessionstart-logger.js";
 
 // --- Types ---
 
@@ -107,6 +109,118 @@ export function readOverridePinnedPackageNames(targetDir: string): Set<string> {
 	return names;
 }
 
+/**
+ * knip's own config-file names, in knip's discovery order (knip 6
+ * `configFilesLookup`). Used for REPORTING which config a run resolved — the
+ * runner never passes `--config`, so knip still does its own discovery from the
+ * spawn cwd. Reading the same list here keeps the recorded answer honest
+ * instead of guessing "knip.json or nothing".
+ */
+const KNIP_CONFIG_FILENAMES = [
+	"knip.json",
+	"knip.jsonc",
+	"knip.ts",
+	"knip.js",
+	"knip.config.ts",
+	"knip.config.js",
+	".knip.json",
+	".knip.jsonc",
+	".knip.ts",
+	".knip.js",
+];
+
+/**
+ * The knip config this project ships, relative to `targetDir`, or null when the
+ * project ships none (knip then runs on its built-in defaults).
+ *
+ * `package.json` is reported last and only when it carries a `knip` field —
+ * knip reads that field as a config source, and a project that configures knip
+ * there is just as configured as one with a `knip.json`.
+ */
+export function resolveProjectKnipConfig(targetDir: string): string | null {
+	for (const name of KNIP_CONFIG_FILENAMES) {
+		if (fs.existsSync(path.join(targetDir, name))) return name;
+	}
+	try {
+		const pkg = JSON.parse(
+			fs.readFileSync(path.join(targetDir, "package.json"), "utf-8"),
+		);
+		if (pkg && typeof pkg === "object" && pkg.knip !== undefined) {
+			return "package.json#knip";
+		}
+	} catch {
+		// No/malformed package.json — "no project config" is the honest answer.
+	}
+	return null;
+}
+
+/** Where a resolved knip shim came from, as named in the toolchain record. */
+export type KnipBinarySource = "project" | "global" | "managed-or-path";
+
+/**
+ * The knip the PROJECT itself would run: its own `node_modules/.bin/knip`,
+ * walking up so a workspace package finds the monorepo's hoisted copy. Null
+ * when the project installs no knip and pi-lens's managed shim is all there is.
+ *
+ * A project that installs knip pins the version its config is written against,
+ * and that version is what the project's `npx knip` / `npm run knip` runs.
+ * Preferring pi-lens's managed shim instead makes the lens report a DIFFERENT
+ * tool's verdict under the project's config (#1721): a managed knip 6.4.1
+ * flagged 62 unused type exports on a tree that knip 6.32.2 leaves clean, and
+ * every one of those flags is destructive advice.
+ *
+ * The walk is the shared `findLocalBinUpwards`, the same one behind jscpd's
+ * (`clients/jscpd-client.ts:269`) and madge's
+ * (`clients/dependency-checker.ts:420`) resolution, rather than a fourth copy.
+ * It stops at the filesystem half deliberately: the global-bin step those two
+ * add spawns a probe per package manager, and this runs on every analyze().
+ */
+export function resolveProjectKnipBinary(targetDir: string): string | null {
+	return findLocalBinUpwards("knip", targetDir) ?? null;
+}
+
+/**
+ * Classify a resolved shim for the toolchain record: inside the project tree,
+ * elsewhere on the user's machine, or pi-lens's own managed/PATH fallback.
+ */
+export function classifyKnipBinary(
+	binary: string | null,
+	targetDir: string,
+): KnipBinarySource {
+	if (binary === null) return "managed-or-path";
+	const relative = path.relative(path.resolve(targetDir), path.resolve(binary));
+	return relative === "" || relative.startsWith("..") || path.isAbsolute(relative)
+		? "global"
+		: "project";
+}
+
+/**
+ * The version of the knip package behind a resolved shim, read from disk (no
+ * spawn — a `--version` probe per project root would add a process to a hot
+ * path for a telemetry field). Returns null for a bare PATH command, whose
+ * package location is unknown.
+ */
+function readKnipShimVersion(binary: string): string | null {
+	if (!path.isAbsolute(binary)) return null;
+	const binDir = path.dirname(binary);
+	if (path.basename(binDir) !== ".bin") return null;
+	try {
+		const pkg = JSON.parse(
+			fs.readFileSync(
+				path.join(path.dirname(binDir), "knip", "package.json"),
+				"utf-8",
+			),
+		);
+		const version = (pkg as { version?: unknown }).version;
+		return typeof version === "string" ? version : null;
+	} catch {
+		return null;
+	}
+}
+
+/** Distinct toolchain records kept per client instance (bounded telemetry). */
+const MAX_RECORDED_TOOLCHAINS = 32;
+
 // --- Client ---
 
 export class KnipClient {
@@ -144,6 +258,12 @@ export class KnipClient {
 	 * in-flight promise; completing clears the slot.
 	 */
 	private inFlight = new Map<string, Promise<KnipResult>>();
+
+	/**
+	 * (project root, binary, config) triples already recorded, so the toolchain
+	 * row is written once per distinct resolution instead of once per run.
+	 */
+	private readonly recordedToolchains = new Set<string>();
 
 	constructor(verbose = false) {
 		this.log = verbose
@@ -269,7 +389,14 @@ export class KnipClient {
 			};
 		}
 
-		if (!(await this.ensureAvailable())) {
+		// A project that ships its own knip needs no managed install and no
+		// managed probe — the shim is already on disk, and gating on
+		// `ensureAvailable()` would tell such a project to "npm install -D knip"
+		// whenever the MANAGED copy is missing (#1721).
+		if (
+			resolveProjectKnipBinary(targetDir) === null &&
+			!(await this.ensureAvailable())
+		) {
 			return this.unavailableResult();
 		}
 
@@ -344,7 +471,19 @@ export class KnipClient {
 			cacheLocation,
 		];
 
-		const result = await safeSpawnAsync(this.knipCommand, args, {
+		// Project toolchain first. #1199 already put `<targetDir>/node_modules/.bin`
+		// at the front of the child PATH for exactly this preference, but the spawn
+		// command is an ABSOLUTE managed path, so PATH order never got a say
+		// (#1721). Resolving the command here is what makes that intent real.
+		const projectBinary = resolveProjectKnipBinary(targetDir);
+		const command = projectBinary ?? this.knipCommand;
+		this.recordToolchain(
+			targetDir,
+			command,
+			classifyKnipBinary(projectBinary, targetDir),
+		);
+
+		const result = await safeSpawnAsync(command, args, {
 			timeout: ANALYSIS_TIMEOUT_MS,
 			cwd: targetDir,
 			env: await getManagedToolEnvironment("knip", targetDir),
@@ -373,6 +512,41 @@ export class KnipClient {
 		}
 
 		return this.dropOverridePinnedDeps(this.parseOutput(output), targetDir);
+	}
+
+	/**
+	 * Record WHICH knip a run used and WHICH config it ran under (#1721).
+	 *
+	 * The dogfood failure this fixes was invisible from the outside: the lens
+	 * reported 62 unused type exports and the project's own `npx knip` reported
+	 * none, with nothing in any log to say the two ran different binaries. This
+	 * row is that missing evidence — it names the shim, its version, the config
+	 * knip will discover, and whether the shim came from the project or from
+	 * pi-lens.
+	 *
+	 * Bounded twice over: one row per distinct (project root, binary, config)
+	 * triple, and at most `MAX_RECORDED_TOOLCHAINS` distinct triples per client.
+	 * Steady-state cost is therefore one line per project per session, not one
+	 * per turn_end.
+	 */
+	private recordToolchain(
+		targetDir: string,
+		command: string,
+		source: KnipBinarySource,
+	): void {
+		const config = resolveProjectKnipConfig(targetDir);
+		const key = `${targetDir} ${command} ${config ?? ""}`;
+		if (this.recordedToolchains.has(key)) return;
+		if (this.recordedToolchains.size >= MAX_RECORDED_TOOLCHAINS) return;
+		this.recordedToolchains.add(key);
+
+		const version = readKnipShimVersion(command);
+		logSessionStart(
+			`knip toolchain ${targetDir}: binary=${command}` +
+				`${version ? ` version=${version}` : ""}` +
+				` source=${source}` +
+				` config=${config ?? "none (knip defaults)"}`,
+		);
 	}
 
 	/**

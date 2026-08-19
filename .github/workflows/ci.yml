@@ -95,6 +95,16 @@ jobs:
       - name: Build
         run: npm run build
 
+      # #1718: dogfoods the pi-lens-self-scan ast-grep rule subset (recurring
+      # AI-authorship defect shapes from #1158) against pi-lens's own
+      # clients/ + tests/ trees. ~3.5s on 1073 files — cheap enough for every
+      # PR rather than nightly. Fails on any finding not already triaged into
+      # the committed rules/ast-grep-rules/self-scan-baseline.json. The
+      # registered-or-fail proof that this scan mechanism actually executes
+      # lives in tests/support/astgrep-self-scan.test.ts (Run tests, below).
+      - name: Ast-grep self-scan
+        run: npm run astgrep:self-scan
+
       - name: Run tests
         env:
           # Spawn-heavy MCP smokes retain a 20s local deadline but need room
