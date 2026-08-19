@@ -5,6 +5,7 @@ import type { RuntimeCoordinator } from "./runtime-coordinator.js";
 import { logLatency } from "./latency-logger.js";
 import { normalizeMapKey, toProjectRelativePath } from "./path-utils.js";
 import { resolveRunnerPath } from "./dispatch/runner-context.js";
+import { MTIME_DRIFT_TOLERANCE_MS } from "./blocker-freshness.js";
 
 export type AdvisoryFileRole = "source" | "test" | "affected";
 
@@ -302,12 +303,22 @@ export type FindingMissingPolicy = "drop" | "demote";
  * One stat, one verdict. With `scannedAtMs` supplied, a surviving file whose
  * mtime is newer than the scan reports `stale`.
  *
- * The boundary is `mtime > scannedAt`: a file scanned AT `scannedAt` reads
- * live, one millisecond past it reads stale.
- * `reconcileProjectDiagnosticsSnapshot` allows a further +1ms of slack; this
- * gate deliberately does not, because its stale arm DEMOTES rather than drops.
- * Over-demoting costs a line number; under-demoting replays a false coordinate.
- * The cheaper error wins the tie.
+ * The boundary is `mtime > scannedAt + MTIME_DRIFT_TOLERANCE_MS`: a file
+ * scanned AT `scannedAt`, or written within the tolerance window of the scan
+ * timestamp being captured, reads live; genuinely past it reads stale.
+ *
+ * #1708: a bare +1ms tolerance — the convention `reconcileProjectDiagnosticsSnapshot`
+ * (clients/project-diagnostics/cache.ts:98) still uses, and the one this gate
+ * originally cited-but-withheld ("over-demoting costs a line number,
+ * under-demoting replays a false coordinate — the cheaper error wins the
+ * tie") — was not enough: on Windows a file's mtime can LEAD the immediately
+ * following `Date.now()` read by up to ~11.4ms, the same host skew
+ * `MTIME_DRIFT_TOLERANCE_MS` (`blocker-freshness.ts`) was raised to 50ms for
+ * (#1491/#1498). At +1ms this gate still demoted a real STOP-blocker (a
+ * trivy secret, #1628) to ACTION NEEDED, flaking
+ * tests/clients/runtime-turn-secrets-disposition.test.ts. Reusing the shared
+ * constant — rather than a second hand-tuned number — keeps one source of
+ * truth for the measured skew.
  */
 export function findingPathFreshness(
 	resolvedPath: string,
@@ -315,7 +326,10 @@ export function findingPathFreshness(
 ): FindingPathFreshness {
 	try {
 		const stat = fs.statSync(resolvedPath);
-		if (scannedAtMs !== undefined && stat.mtimeMs > scannedAtMs) {
+		if (
+			scannedAtMs !== undefined &&
+			stat.mtimeMs > scannedAtMs + MTIME_DRIFT_TOLERANCE_MS
+		) {
 			return "stale";
 		}
 		return "live";
