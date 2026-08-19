@@ -73,7 +73,19 @@ export type DegradationKind =
 	 * to poison), but the count still tells a dogfood session whether a
 	 * "hung" server is truly hung or just answering late.
 	 */
-	| "lsp-nav-late-answer";
+	| "lsp-nav-late-answer"
+	/**
+	 * A `GenerationHandle.guardedWrite` (`clients/generation-guard.ts`) dropped
+	 * a post-await write because the generation it captured is no longer
+	 * current (#1754) — a session reset, a cache refresh, or a newer request
+	 * for the same key landed while the write's producer was in flight. The
+	 * drop is correct: the write belongs to a world that no longer exists.
+	 * It is recorded because a silently dropped write is indistinguishable
+	 * from a guard that never fires, which is how two hand-rolled versions of
+	 * this guard reached review vacuous. Subject carries the source name and
+	 * the identity of the dropped write.
+	 */
+	| "generation-guard-stale-write";
 
 export interface DegradationRecord {
 	kind: unknown;
