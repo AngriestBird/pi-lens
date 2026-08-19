@@ -221,6 +221,15 @@ export class SgRunner {
 	private sweepFallbackCause: AvailabilityCause = "probe-timeout";
 	/** Host stall summed over every probe of the current sweep, ms. */
 	private sweepHostStallMs = 0;
+	/**
+	 * Candidates — direct or fallback — that this sweep probed and found
+	 * DURABLY missing (real ENOENT/non-installable, not a stall) (#1593). The
+	 * retained-arm fallback below only sees whether SOME candidate stalled; this
+	 * list lets it also check whether the memoized winner itself is one of the
+	 * candidates this very sweep just disproved, rather than re-serving a
+	 * command that ENOENTed a moment ago because an unrelated sibling stalled.
+	 */
+	private sweepDurablyMissing: string[] = [];
 
 	constructor(verbose = false) {
 		this.log = verbose
@@ -259,6 +268,7 @@ export class SgRunner {
 		this.sweepFallbackTransient = false;
 		this.sweepFallbackCause = "probe-timeout";
 		this.sweepHostStallMs = 0;
+		this.sweepDurablyMissing = [];
 
 		// Step 1: PATH — canonical binary names + npx fallback.
 		// Prefer ast-grep over sg on Linux: /usr/bin/sg is util-linux, not ast-grep.
@@ -332,7 +342,13 @@ export class SgRunner {
 			// run #1476 backwards — a timeout erasing a positive result — and it
 			// would send the sweep on to Step 4 to install a tool that is already
 			// runnable. Keep the winner and re-arm the cooldown (#1568 review F1).
-			if (this.availabilityLatch.isProvisional() && this.sgPath) {
+			// #1593: a sibling tier stalling this sweep is not license to re-serve
+			// a winner that THIS SAME sweep just proved durably missing.
+			if (
+				this.availabilityLatch.isProvisional() &&
+				this.sgPath &&
+				!this.sweepDurablyMissing.includes(this.sgPath)
+			) {
 				this.noteAvailable(
 					startedAt,
 					`ast-grep re-probe stalled; keeping ${this.sgPath}`,
@@ -610,6 +626,8 @@ export class SgRunner {
 					this.sweepUnreachable.push(name);
 				}
 			}
+		} else if (!this.sweepDurablyMissing.includes(cmd)) {
+			this.sweepDurablyMissing.push(cmd);
 		}
 		return false;
 	}
