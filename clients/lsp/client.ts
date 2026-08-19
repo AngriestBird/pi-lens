@@ -50,8 +50,15 @@ import {
 	negotiatePositionEncoding,
 	type PositionEncoding,
 } from "./position-encoding.js";
+import {
+	negotiateSyncKind,
+	TEXT_DOCUMENT_SYNC_KIND_FULL,
+	TEXT_DOCUMENT_SYNC_KIND_INCREMENTAL,
+	type TextDocumentSyncKind,
+} from "./sync-kind.js";
 import { getStrategy } from "./wait-policy/index.js";
 import { WatchedFilesQueue } from "./watch-queue.js";
+import { clearWorkspaceDiagnosticsCache } from "./workspace-diagnostics-cache.js";
 
 // Opt-in publishDiagnostics trace (PILENS_PUB_DEBUG=1) — read once, negligible
 // hot-path cost. Surfaces each server's publish behavior (version + count) to
@@ -751,10 +758,16 @@ export interface LSPClientState {
 	 *  we sent for a path, tagged with the document version it was sent as.
 	 *  Captured at SEND time on in-memory content (never a disk read on the
 	 *  notification path) so a later `publishDiagnostics` echoing that version can
-	 *  bind its diagnostics to the content they were computed against. */
+	 *  bind its diagnostics to the content they were computed against.
+	 *
+	 *  #1669: `text` additionally retains that same payload's full content, but
+	 *  ONLY when `syncKind` is Incremental — the one case that needs it, to
+	 *  compute the NEXT change's full-range replace against the document as the
+	 *  server last saw it (see `buildContentChanges`). Full/None servers never
+	 *  populate it, so the common case pays no extra retained memory. */
 	readonly documentContentHashes: Map<
 		string,
-		{ version: number; hash: string }
+		{ version: number; hash: string; text?: string }
 	>;
 	/** #1095: the content binding for the diagnostics currently stored for a path
 	 *  — {version, contentHash} of the document those diagnostics were computed
@@ -802,6 +815,13 @@ export interface LSPClientState {
 	 *  the server advertised otherwise; drives character-offset translation on
 	 *  outgoing navigation requests. */
 	positionEncoding: PositionEncoding;
+	/** #1669: `textDocumentSync.change` kind the server negotiated at initialize
+	 *  — None (0), Full (1) or Incremental (2). Optional so existing state
+	 *  literals across the test suite don't all need updating; every read site
+	 *  falls back to `TEXT_DOCUMENT_SYNC_KIND_FULL`, which is the whole-document
+	 *  `{ text }` shape pi-lens has always sent — an absent value never changes
+	 *  behavior. Set once at initialize, next to `positionEncoding`. */
+	syncKind?: TextDocumentSyncKind;
 	/** Baseline mode from static initResult — used to revert on unregister */
 	staticDiagnosticsMode: "pull" | "push-only";
 	/** Live dynamic registrations from client/registerCapability: id → method */
@@ -1257,7 +1277,71 @@ function recordSentContent(
 	state.documentContentHashes.set(normalizedPath, {
 		version,
 		hash: hashDiagnosticContent(content),
+		// #1669: retain the full text only for Incremental — the sole reader
+		// (`buildContentChanges`) needs it to compute the NEXT change against
+		// what the server last saw; Full/None never read this field.
+		...(state.syncKind === TEXT_DOCUMENT_SYNC_KIND_INCREMENTAL && {
+			text: content,
+		}),
 	});
+}
+
+/**
+ * #1669: the `contentChanges` array for a `textDocument/didChange` notification.
+ *
+ * Full/None (or unrecognized/absent) sync kind: unchanged — a single
+ * whole-document `{ text }` event, the shape pi-lens has always sent.
+ *
+ * Incremental: a server registering Incremental-only expects every change
+ * event to carry a `range`; a shapeless whole-document event is out of spec
+ * for it. Rather than hand-roll a real diff, send the SAFEST incremental
+ * representation of a full update — one ranged edit spanning the entire
+ * PREVIOUS document (start of file to its last character), replacing it with
+ * the entire new content. That is spec-valid for any Incremental server and
+ * semantically identical to the Full-sync event it replaces.
+ *
+ * The previous document's end position is computed from the text
+ * `recordSentContent` retained for THIS path the last time content was sent
+ * (reusing that seam rather than a second parallel content store — see its
+ * doc comment). No prior text on record (first change since Incremental was
+ * negotiated, or the path was never sent before) falls back to the
+ * whole-document shape — still spec-valid, and self-heals once the next
+ * change has a retained previous text to diff against.
+ */
+function buildContentChanges(
+	state: LSPClientState,
+	normalizedPath: string,
+	content: string,
+): Array<{
+	range?: { start: { line: number; character: number }; end: { line: number; character: number } };
+	text: string;
+}> {
+	if (state.syncKind !== TEXT_DOCUMENT_SYNC_KIND_INCREMENTAL) {
+		return [{ text: content }];
+	}
+	const previousText = state.documentContentHashes.get(normalizedPath)?.text;
+	if (previousText === undefined) {
+		return [{ text: content }];
+	}
+	const previousLines = previousText.split("\n");
+	const lastLine = previousLines.length - 1;
+	const lastLineText = previousLines[lastLine] ?? "";
+	return [
+		{
+			range: {
+				start: { line: 0, character: 0 },
+				end: {
+					line: lastLine,
+					character: convertCharacterOffset(
+						state.positionEncoding,
+						lastLineText,
+						lastLineText.length,
+					),
+				},
+			},
+			text: content,
+		},
+	];
 }
 
 // Methods that can be registered dynamically and map to operationSupport keys
@@ -1641,6 +1725,20 @@ export function setupIncomingHandlers(
 		},
 	);
 	state.connection.onRequest("window/workDoneProgress/create", async () => {});
+	// #1669: a server can send `workspace/diagnostic/refresh` (typically after a
+	// project-wide config change) to say every pull result it has already
+	// reported may be stale. Left unhandled, vscode-jsonrpc replies
+	// MethodNotFound to a server explicitly telling us its results are stale —
+	// this is exactly the signal `workspacePullResultCache` and the persisted
+	// workspace-diagnostics cache want (the #1461 family, server-initiated for
+	// once). Reply null per spec and drop both so the NEXT pull recomputes
+	// instead of replaying — or inheriting an `unchanged` basis from — results
+	// the server just told us to distrust.
+	state.connection.onRequest("workspace/diagnostic/refresh", async () => {
+		state.workspacePullResultCache.clear();
+		clearWorkspaceDiagnosticsCache(state.root);
+		return null;
+	});
 }
 
 /**
@@ -2188,7 +2286,7 @@ export async function handleNotifyOpen(
 		}
 		await safeSendNotification(state.connection, "textDocument/didChange", {
 			textDocument: { uri, version },
-			contentChanges: [{ text: content }],
+			contentChanges: buildContentChanges(state, normalizedPath, content),
 		});
 		recordSentContent(state, normalizedPath, version, content);
 		return;
@@ -2286,7 +2384,7 @@ export async function handleNotifyChange(
 	clearDiagnosticsForPath(state, normalizedPath);
 	await safeSendNotification(state.connection, "textDocument/didChange", {
 		textDocument: { uri, version },
-		contentChanges: [{ text: content }],
+		contentChanges: buildContentChanges(state, normalizedPath, content),
 	});
 	recordSentContent(state, normalizedPath, version, content);
 }
@@ -2926,6 +3024,7 @@ export async function createLSPClient(options: {
 		operationSupport: undefined as unknown as LSPOperationSupport,
 		staticDiagnosticsMode: "push-only",
 		positionEncoding: "utf-16",
+		syncKind: TEXT_DOCUMENT_SYNC_KIND_FULL,
 		dynamicRegistrations: new Map(),
 		advertisedCommands: new Set(),
 		serverEditsAllowed: 0,
@@ -3042,6 +3141,9 @@ export async function createLSPClient(options: {
 		detectWorkspaceDiagnosticsSupport(initResult);
 	state.operationSupport = detectOperationSupport(initResult);
 	state.positionEncoding = negotiatePositionEncoding(
+		(initResult as { capabilities?: unknown })?.capabilities,
+	);
+	state.syncKind = negotiateSyncKind(
 		(initResult as { capabilities?: unknown })?.capabilities,
 	);
 	state.rawCapabilityKeys = Object.keys(

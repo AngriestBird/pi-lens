@@ -121,6 +121,30 @@ export function saveWorkspaceDiagnosticsCache(
 }
 
 /**
+ * Drop every entry from the persisted cache so the next sweep from either
+ * call site (`runWorkspaceDiagnostics` or `tools/lsp-diagnostics.ts`) pays for
+ * a fresh pull instead of replaying entries the server just told us to
+ * distrust. Used by the `workspace/diagnostic/refresh` handler (#1669) — a
+ * server-initiated signal (typically a project-wide config change) that
+ * everything it has already reported may be stale, so this on-disk cache must
+ * not survive it either.
+ *
+ * Best-effort, matching `persist()`'s fail-open policy: a write failure just
+ * means the next sweep may reuse stale entries once more, never worth
+ * crashing the caller (a live LSP request handler) over.
+ */
+export function clearWorkspaceDiagnosticsCache(cwd: string): void {
+	try {
+		saveWorkspaceDiagnosticsCache(path.resolve(cwd), {
+			version: WORKSPACE_DIAGNOSTICS_CACHE_VERSION,
+			entries: {},
+		});
+	} catch {
+		// best-effort — see doc comment above.
+	}
+}
+
+/**
  * True when `filePath`'s cached entry is still trustworthy enough to reuse
  * instead of paying for a fresh `touchFile`.
  *
