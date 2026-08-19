@@ -87,9 +87,14 @@ describe("LSPService.renameFile with a wedged notify (#1621)", () => {
 
 		const client = makeClient(tmpDir);
 		client.isDocumentOpen.mockReturnValue(true);
-		// The wedged write: never resolves, never rejects — exactly what a
-		// notification write on a non-draining pipe does.
+		// A wedged pipe wedges every write on it, not just the first one: the
+		// didClose notify AND the resync `notify.open` that runs after it both
+		// go out over the same stdin. A double that only wedges closeDocument
+		// while leaving notify.open healthy is not production-faithful (F1 —
+		// the abort path's reopen is the identical unbounded-notify primitive
+		// one write later), so both are wedged here.
 		client.closeDocument.mockImplementation(() => new Promise<void>(() => {}));
+		client.notify.open.mockImplementation(() => new Promise<void>(() => {}));
 
 		const service = new mod.LSPService();
 		addClient(service, "typescript", tmpDir, client, normalizeMapKey);
@@ -105,7 +110,7 @@ describe("LSPService.renameFile with a wedged notify (#1621)", () => {
 				});
 
 			// Well inside vitest's default per-test timeout, but comfortably
-			// beyond the 80ms notify budget above.
+			// beyond even TWO sequential 80ms notify budgets (close, then resync).
 			await new Promise((resolve) => setTimeout(resolve, 1000));
 			expect(settled, "renameFile must settle within its notify budget").toBe(
 				true,
@@ -118,6 +123,9 @@ describe("LSPService.renameFile with a wedged notify (#1621)", () => {
 			// The disposition must distinguish "timed out" from "rejected" — not
 			// collapse to a generic failure string.
 			expect(message).toMatch(/typescript \(timedOut\)/);
+			// The wedged resync must also be bounded and its own disposition
+			// recorded, not silently swallowed or left to hang the abort path.
+			expect(message).toMatch(/resync also failed.*typescript \(timedOut\)/);
 		} finally {
 			removeTempDirSync(tmpDir);
 		}
