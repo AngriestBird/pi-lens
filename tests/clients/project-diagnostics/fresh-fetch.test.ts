@@ -656,6 +656,58 @@ describe("fetchFreshProjectDiagnostics (#585)", () => {
 		);
 	});
 
+	// #1628: before this fix, `TrivyResult.secrets` was never read here at
+	// all — only `findings` (CVEs) reached `lens_diagnostics mode=full`. A
+	// trivy-only secret finding was a genuine honesty gap: scanned and
+	// cached, but never surfaced, and therefore never disposition-suppressible.
+	it("surfaces trivy secret findings under the 'trivy' runner and honors dispositions (#1628)", async () => {
+		fs.writeFileSync(
+			path.join(tmp, ".pi-lens.json"),
+			JSON.stringify({ trivy: { enabled: true } }),
+		);
+		fs.writeFileSync(path.join(tmp, "package.json"), "{}");
+		const content = "const apiKey = 'not-a-real-secret';\n";
+		fs.writeFileSync(path.join(tmp, "a.ts"), content);
+		const cacheManager = makeCacheManager();
+		const clients = makeClients();
+		(clients.trivyClient.scan as ReturnType<typeof vi.fn>).mockResolvedValue({
+			success: true,
+			scannedAt: "now",
+			findings: [],
+			licenses: [],
+			secrets: [{ ruleId: "generic-api-key", file: "a.ts", line: 1 }],
+		});
+
+		const before = await fetchFreshProjectDiagnostics(cacheManager, tmp, clients);
+		expect(before.runners).toContain("trivy");
+		expect(before.diagnostics).toContainEqual(
+			expect.objectContaining({
+				tool: "trivy",
+				rule: "trivy-secret:generic-api-key",
+			}),
+		);
+
+		markDisposition(
+			path.resolve(tmp),
+			{
+				cwd: path.resolve(tmp),
+				filePath: path.resolve(tmp, "a.ts"),
+				tool: "trivy",
+				rule: "trivy-secret:generic-api-key",
+				message: "Potential secret: generic-api-key",
+				line: 1,
+				content,
+			},
+			"false-positive",
+		);
+
+		const after = await fetchFreshProjectDiagnostics(cacheManager, tmp, clients);
+		expect(after.diagnostics).not.toContainEqual(
+			expect.objectContaining({ rule: "trivy-secret:generic-api-key" }),
+		);
+		expect(after.dispositionSuppressed).toBe(1);
+	});
+
 	// #585 regression: opengrep was registered in the cache-only extractor
 	// registry (extractors.ts) but MISSING from this fresh-fetch path, so its
 	// session-start scan cached findings that `lens_diagnostics mode=full` never
