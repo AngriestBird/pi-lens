@@ -141,4 +141,47 @@ describe("index turn_end loop_block wiring (#1122)", () => {
 		// Attribution is carried through.
 		expect((logged[1].metadata as Record<string, unknown>).lastPhase).toBe("graph_build");
 	});
+
+	it("(c) #1723: logs a block below the session's prior worst, not only new maxima", async () => {
+		const { default: registerExtension } = await import("../index.js");
+		const mock = createPiMock({ "lens-lsp": true });
+		registerExtension(mock.asExtensionAPI() as never);
+		const turnEnd = mock.getHandlers("turn_end")[0];
+
+		// Turn 1: a genuine 15s block sets the session high-water.
+		statsToReturn = {
+			maxMs: 15000,
+			p99Ms: 0,
+			meanMs: 0,
+			windowWallMs: 16000,
+			windowCpuMs: 15500,
+			suspectSystemStall: false,
+		};
+		await turnEnd?.({}, turnCtx as never);
+
+		// Turn 2: a genuine 5s block — well above the 60ms floor, but far below
+		// the 15000ms high-water plus its 25ms delta. Pre-#1723 code gates the
+		// LOG itself on "beats the high-water", so this block was silently
+		// dropped: shouldLogWorstBlock(5000, 15000) is false. That is exactly the
+		// gap #1723 reports — every sub-maximum block after a session's first
+		// large one was invisible, so a loop_block-vs-pull-timeout correlation
+		// couldn't be checked.
+		statsToReturn = {
+			maxMs: 5000,
+			p99Ms: 0,
+			meanMs: 0,
+			windowWallMs: 6000,
+			windowCpuMs: 5500,
+			suspectSystemStall: false,
+		};
+		await turnEnd?.({}, turnCtx as never);
+
+		const logged = loopBlocks();
+		expect(logged).toHaveLength(2);
+		expect(logged[0].durationMs).toBe(15000);
+		expect((logged[0].metadata as Record<string, unknown>).worstSoFar).toBe(true);
+		expect(logged[1].durationMs).toBe(5000);
+		// Not a new session worst, but still recorded.
+		expect((logged[1].metadata as Record<string, unknown>).worstSoFar).toBe(false);
+	});
 });

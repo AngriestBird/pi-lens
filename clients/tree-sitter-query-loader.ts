@@ -125,8 +125,7 @@ export interface TreeSitterQuery {
 	query: string;
 	metavars: string[];
 	post_filter?: string;
-	// biome-ignore lint/suspicious/noExplicitAny: Flexible filter params
-	post_filter_params?: Record<string, any>;
+	post_filter_params?: Record<string, unknown>;
 	/**
 	 * Native tree-sitter predicates for filtering (#eq?, #match?)
 	 * These run in WASM and are faster than post-filters

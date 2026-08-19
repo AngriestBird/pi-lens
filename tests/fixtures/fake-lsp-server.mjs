@@ -32,11 +32,75 @@ let applyEditIdCounter = 9000;
 let pendingExec = null;
 const openDocuments = new Map();
 
+// #1714: a single-threaded scanner with a finite intake ceiling, for the
+// full-sweep throttle tests.
+//
+// Opt in with `FAKE_LSP_NOTIFY_BACKLOG_WEDGE=<N>`. Decoded messages then go into
+// a work QUEUE that drains one message at a time, and each `didOpen` costs
+// `FAKE_LSP_NOTIFY_COST_MS` of real synchronous work — the shape of a scanner
+// that re-parses the whole file on every open. Two properties follow, and both
+// are the ones the production failure turned on:
+//
+//   - a caller that opens documents faster than the cost grows the queue, and
+//     past N the server's input path dies: it stops reading stdin and answers
+//     nothing again, exactly the end state ast-grep reached twice in two
+//     `lens_diagnostics mode=full` exposures;
+//   - a reply to a REQUEST proves every message queued before it was processed,
+//     because one queue is drained in order.
+//
+// Off by default, so every existing test keeps the incumbent behaviour.
+const NOTIFY_BACKLOG_WEDGE = Number(
+	process.env.FAKE_LSP_NOTIFY_BACKLOG_WEDGE ?? "",
+);
+const HAS_BACKLOG_WEDGE =
+	Number.isFinite(NOTIFY_BACKLOG_WEDGE) && NOTIFY_BACKLOG_WEDGE > 0;
+const NOTIFY_COST_MS = Number(process.env.FAKE_LSP_NOTIFY_COST_MS ?? "200");
+const workQueue = [];
+let draining = false;
+let wedged = false;
+
+function burnCpu(ms) {
+	const until = Date.now() + ms;
+	while (Date.now() < until) {
+		/* the scanner is busy; nothing else runs */
+	}
+}
+
+function drainWorkQueue() {
+	if (draining || wedged) return;
+	draining = true;
+	const step = () => {
+		if (wedged || workQueue.length === 0) {
+			draining = false;
+			return;
+		}
+		const next = workQueue.shift();
+		handle(next);
+		setImmediate(step);
+	};
+	setImmediate(step);
+}
+
 process.stdin.on("data", (chunk) => {
+	if (wedged) return;
 	readBuffer = Buffer.concat([readBuffer, chunk]);
 	const { messages, rest } = decodeFrames(readBuffer);
 	readBuffer = rest;
-	for (const m of messages) handle(m);
+	if (!HAS_BACKLOG_WEDGE) {
+		for (const m of messages) handle(m);
+		return;
+	}
+	for (const m of messages) {
+		if (workQueue.length >= NOTIFY_BACKLOG_WEDGE) {
+			// More work outstanding than this server can hold. It stops reading and
+			// never comes back.
+			wedged = true;
+			process.stdin.pause();
+			return;
+		}
+		workQueue.push(m);
+	}
+	drainWorkQueue();
 });
 
 function send(msg) {
@@ -102,6 +166,23 @@ function handle(raw) {
 			data.params?.textDocument?.uri,
 			data.params?.textDocument?.text ?? "",
 		);
+		// Gated on the wedge profile so every existing test keeps the incumbent
+		// silent-on-open behaviour it was written against.
+		if (HAS_BACKLOG_WEDGE) {
+			burnCpu(NOTIFY_COST_MS);
+			// Push-model scanner: report clean for the content just received, so a
+			// throttled sweep can tell "answered, nothing found" from "never
+			// answered".
+			send({
+				jsonrpc: "2.0",
+				method: "textDocument/publishDiagnostics",
+				params: {
+					uri: data.params?.textDocument?.uri,
+					version: data.params?.textDocument?.version,
+					diagnostics: [],
+				},
+			});
+		}
 		return;
 	}
 	if (data.method === "textDocument/didChange") {

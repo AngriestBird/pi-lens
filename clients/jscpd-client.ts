@@ -9,6 +9,7 @@
  */
 
 import { createSubsystemLogger } from "./extension-log.js";
+import { incrementDegradationCount } from "./degradation-ledger.js";
 import * as fs from "node:fs";
 import { mkdtempSync } from "node:fs";
 import * as os from "node:os";
@@ -57,6 +58,32 @@ const EMPTY_RESULT: JscpdResult = {
 };
 
 const SCAN_TIMEOUT_MS = 30_000;
+
+/** jscpd's own config-file names, in its discovery order, checked at `cwd` only
+ * (jscpd does not walk up). */
+const JSCPD_CONFIG_FILENAMES = [".jscpd.json", "jscpd.json"];
+
+/**
+ * True when the project ships its own jscpd config: a `.jscpd.json`/
+ * `jscpd.json` file, or a `package.json` `jscpd` field. jscpd discovers either
+ * unaided, but `--min-lines`/`--min-tokens`/`--ignore` on the CLI override
+ * whatever the config sets — passing them unconditionally silently discarded a
+ * project's own thresholds and ignore list (#1731, discipline A).
+ */
+function hasProjectJscpdConfig(cwd: string): boolean {
+	for (const name of JSCPD_CONFIG_FILENAMES) {
+		if (fs.existsSync(path.join(cwd, name))) return true;
+	}
+	try {
+		const pkg = JSON.parse(
+			fs.readFileSync(path.join(cwd, "package.json"), "utf-8"),
+		);
+		if (pkg && typeof pkg === "object" && pkg.jscpd !== undefined) return true;
+	} catch {
+		// No/malformed package.json — "no project config" is the honest answer.
+	}
+	return false;
+}
 
 const jscpdAvailability = createAvailabilityChecker("jscpd", "", ["--version"], {
 	probeTimeout: 1500,
@@ -272,21 +299,23 @@ export class JscpdClient {
 				: this.jscpdManagedPath
 					? { cmd: this.jscpdManagedPath, prefix: [] as string[] }
 					: { cmd: "npx", prefix: ["jscpd"] };
+			// A project's own jscpd config wins outright (#1731, discipline A):
+			// these three flags all override whatever it sets, so none are passed
+			// when the project ships one — jscpd discovers it unaided.
+			const hasConfig = hasProjectJscpdConfig(cwd);
 			const result = await safeSpawnAsync(
 				cmd,
 				[
 					...prefix,
 					".",
-					"--min-lines",
-					String(minLines),
-					"--min-tokens",
-					String(minTokens),
+					...(hasConfig
+						? []
+						: ["--min-lines", String(minLines), "--min-tokens", String(minTokens)]),
 					"--reporters",
 					"json",
 					"--output",
 					outDir,
-					"--ignore",
-					ignorePattern,
+					...(hasConfig ? [] : ["--ignore", ignorePattern]),
 				],
 				{
 					timeout: SCAN_TIMEOUT_MS,
@@ -299,8 +328,29 @@ export class JscpdClient {
 				return { ...EMPTY_RESULT };
 			}
 
+			// Empirical exit-code table (jscpd 3.5.10, verified live for #1736's
+			// sweep): a genuinely clean run (no clones) exits 0 and writes NO
+			// report file — jscpd only writes `jscpd-report.json` when it has
+			// something to report. A crashed run (uncaught exception, e.g. a bad
+			// scan path) ALSO writes no report file, but exits nonzero. The
+			// missing-file check alone can't tell those apart, so a nonzero exit
+			// with no report file is reported as errored, never as "0 clones".
+			// (Not `spawnFailedWithNoOutput` — the parsed artifact here is a
+			// report FILE, not stdout, so the shared stdout-based discriminator
+			// doesn't apply; the underlying "nonzero exit -> not clean" rule is
+			// the same one.)
 			const reportPath = path.join(outDir, "jscpd-report.json");
 			if (!fs.existsSync(reportPath)) {
+				if (result.status !== 0) {
+					const reason = `jscpd (${cmd}) exited ${result.status} with no report file: ${(result.stderr || "").trim().split("\n")[0].slice(0, 200) || "no stderr"}`;
+					this.log(reason);
+					incrementDegradationCount({
+						kind: "runner-empty-result",
+						subject: "jscpd",
+						reason,
+					});
+					return { ...EMPTY_RESULT };
+				}
 				return { ...EMPTY_RESULT, success: true };
 			}
 

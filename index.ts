@@ -171,7 +171,11 @@ import {
 } from "./tools/module-report.js";
 import { createProjectReportTool } from "./tools/project-report.js";
 import { createSymbolSearchTool } from "./tools/symbol-search.js";
-import { getLastLoggedPhase, logLatency } from "./clients/latency-logger.js";
+import {
+	getLastLoggedPhase,
+	getRecentLoggedPhases,
+	logLatency,
+} from "./clients/latency-logger.js";
 import {
 	isFreshSessionStart,
 	planToolSet,
@@ -199,6 +203,7 @@ import { renderTurnSummaryMessage } from "./clients/turn-summary-render.js";
 import {
 	getEventLoopStats,
 	resetEventLoopMonitor,
+	shouldLogLoopBlock,
 	shouldLogWorstBlock,
 	startEventLoopMonitor,
 } from "./clients/event-loop-monitor.js";
@@ -2281,40 +2286,57 @@ function activateExtension(hostPi: ExtensionAPI) {
 		setAmbientAbortSignal((ctx as { signal?: AbortSignal })?.signal);
 		try {
 			const repaintLspStatus = captureLspStatusRepaint(ctx);
-			// Persist a new worst event-loop block to latency.log, attributed to
-			// this turn, so freezes are queryable across sessions (#192). The
-			// window is per-turn (#1122): the probe cannot itself see machine
-			// sleep or commit-charge paging, both of which freeze the process and
-			// masquerade as huge synchronous blocks, so we tag samples the turn's
-			// CPU budget can't account for as `suspectSystemStall` and keep them
-			// out of the genuine-block high-waters. `lastPhase` is cheap block
-			// attribution (#1123 item 1) — the last phase that ran before the
-			// block was detected.
+			// Persist every event-loop block over the floor to latency.log,
+			// attributed to this turn, so freezes are queryable across sessions
+			// (#192). Logging used to gate on "new session worst" alone, which
+			// hid every sub-maximum block after a session's first large one —
+			// exactly the blocks that need to be checked against LSP pull
+			// timeouts (#1549/#1713), so #1723 widened the gate to the floor and
+			// kept "new worst" only as metadata / high-water bookkeeping. Volume
+			// stays bounded because this runs at most once per turn (the window
+			// is per-turn, #1122): one `loop_block` record per turn, not one per
+			// sample. The window is per-turn also so the probe cannot itself see
+			// machine sleep or commit-charge paging, both of which freeze the
+			// process and masquerade as huge synchronous blocks — samples the
+			// turn's CPU budget can't account for are tagged
+			// `suspectSystemStall` and excluded from the genuine-block
+			// high-waters. `lastPhase`/`recentPhases` are cheap block attribution
+			// (#1123 item 1, widened #1723 item 2) — the phases that ran before
+			// the block was detected; a bounded ring rather than one pointer,
+			// because the phase actually causing a synchronous block is often
+			// still in flight (and so unlogged) when the block fires, so the
+			// single last-COMPLETED phase can point at unrelated prior work.
 			const elStats = getEventLoopStats();
 			const loopMaxMs = elStats?.maxMs ?? 0;
 			const suspectSystemStall = elStats?.suspectSystemStall ?? false;
-			if (shouldLogWorstBlock(loopMaxMs, lastLoggedLoopWorstMs)) {
+			if (shouldLogLoopBlock(loopMaxMs)) {
 				const lastPhase = getLastLoggedPhase();
+				const recentPhases = getRecentLoggedPhases(3);
+				const isNewSessionWorst = shouldLogWorstBlock(
+					loopMaxMs,
+					lastLoggedLoopWorstMs,
+				);
 				logLatency({
 					type: "phase",
 					filePath: "<pi-lens>",
 					phase: "loop_block",
 					durationMs: Math.round(loopMaxMs),
 					metadata: {
-						worstSoFar: true,
+						worstSoFar: isNewSessionWorst,
 						turnIndex: runtime.turnIndex,
 						suspectSystemStall,
 						windowCpuMs: elStats?.windowCpuMs,
 						windowWallMs: elStats?.windowWallMs,
 						lastPhase: lastPhase?.phase,
 						lastPhaseAt: lastPhase?.ts,
+						recentPhases,
 					},
 				});
 				// A system stall must not raise the "new worst genuine block"
 				// bar, or it would silence every real block that follows it.
 				if (suspectSystemStall) {
 					sessionSuspectedStalls += 1;
-				} else {
+				} else if (isNewSessionWorst) {
 					lastLoggedLoopWorstMs = loopMaxMs;
 					sessionWorstRealBlockMs = Math.max(
 						sessionWorstRealBlockMs,

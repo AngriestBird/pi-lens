@@ -28,7 +28,7 @@ import {
 	logAvailabilityDecision,
 	startHostStallSampler,
 } from "./dispatch/runners/utils/availability-policy.js";
-import { findGlobalBinary } from "./package-manager.js";
+import { findGlobalBinary, findLocalBinUpwards } from "./package-manager.js";
 import { safeSpawnAsync } from "./safe-spawn.js";
 import { assertInstallAllowed } from "./project-trust.js";
 import { tryLazyInstallForFormatter } from "./dispatch/runners/utils/lazy-installer.js";
@@ -1253,8 +1253,17 @@ export const styluaFormatter: FormatterInfo = {
 	name: "stylua",
 	command: ["stylua", "$FILE"],
 	extensions: [".lua"],
+	async resolveCommand(filePath, cwd) {
+		// Project binary first (#1731, discipline B): stylua has no pi-lens
+		// managed install, so before this the ONLY resolution was a bare
+		// `stylua` PATH lookup — a project-local install via npm
+		// `@johnnymorganz/stylua` (`node_modules/.bin/stylua`) was invisible.
+		const local = findLocalBinUpwards("stylua", cwd);
+		return local ? [local, filePath] : null;
+	},
 	async detect(cwd: string) {
-		if ((await which("stylua")) === null) return false;
+		const local = findLocalBinUpwards("stylua", cwd);
+		if (!local && (await which("stylua")) === null) return false;
 		// Prefer explicit config but also run if binary is present in a Lua project
 		const configs = ["stylua.toml", ".stylua.toml"];
 		const found = await findUp(configs, cwd);

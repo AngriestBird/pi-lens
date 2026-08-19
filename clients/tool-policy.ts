@@ -2299,10 +2299,16 @@ export function ruffConfigArgs(cwd: string): string[] {
  * `config/biome/core.jsonc` fallback — applies on `lint --write` too.
  */
 export function biomeConfigArgs(cwd: string): string[] {
+	// A project config wins outright (#1731, discipline A): passing
+	// `--config-path` even when the project ships `biome.json(c)` pinned
+	// biome's config resolution to that ONE file, so a monorepo package
+	// underneath `cwd` with its own `biome.json` never got to extend/override
+	// the root config the way biome's own nested-config resolution allows. No
+	// flag at all lets biome discover it unaided, exactly like the ruff/
+	// markdownlint fallbacks above skip `--config` under the same condition.
+	if (getBiomeConfigPath(cwd)) return [];
 	return [
-		"--config-path=" +
-			(getBiomeConfigPath(cwd) ??
-				resolvePackagePath(import.meta.url, "config/biome/core.jsonc")),
+		"--config-path=" + resolvePackagePath(import.meta.url, "config/biome/core.jsonc"),
 	];
 }
 

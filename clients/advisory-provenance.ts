@@ -261,7 +261,7 @@ const MAX_LOGGED_DEAD_PATHS = 3;
 //
 // The verdict is three-way, and the middle arm is the security-critical one:
 //   - missing → DROP, as #1460. Nothing to remediate in a file that is gone.
-//   - stale (mtimeMs > scannedAt) → DEMOTE, never drop. The secret may well
+//   - stale (mtimeMs > scannedAt + MTIME_DRIFT_TOLERANCE_MS) → DEMOTE, never drop. The secret may well
 //     still be there at a shifted line. Dropping would hand an attacker — or
 //     an innocent formatter — a one-touch mute button for a real credential.
 //     The caller renders demoted findings out of the blocker tier and WITHOUT

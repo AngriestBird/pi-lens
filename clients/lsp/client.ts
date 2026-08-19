@@ -81,7 +81,10 @@ const PUB_DEBUG = Boolean(process.env.PILENS_PUB_DEBUG);
  * today, and any other server later launched with a temp-file `--config`/`-c`
  * argument, without new server-specific code.
  */
-function extractSpawnMarker(args: readonly string[]): string | undefined {
+function extractSpawnMarker(
+	args: readonly string[] | undefined,
+): string | undefined {
+	if (!args) return undefined;
 	const tmpDir = os.tmpdir();
 	for (let i = 0; i < args.length - 1; i++) {
 		const flag = args[i];
@@ -3462,15 +3465,21 @@ export async function clientShutdown(
 		// including the `processExiting` path where the event loop is closing
 		// (#234 forbids spawning here, but a plain fs write/rename is fine; even
 		// so, we don't await it to keep this teardown path as fast as before).
-		void removeLspChild(pid).catch((err) => {
-			logLatency({
-				type: "phase",
-				phase: "lsp_registry_write_failed",
-				filePath: "",
-				durationMs: 0,
-				metadata: { op: "remove", pid, error: String(err) },
-			});
-		});
+		// #1724: pass this spawn's marker so removeLspChild can guard against a
+		// pid-recycling window (a NEW child claiming this exact pid before this
+		// fire-and-forget write lands) rather than removing whichever child
+		// currently sits at this pid.
+		void removeLspChild(pid, extractSpawnMarker(state.lspProcess.args)).catch(
+			(err) => {
+				logLatency({
+					type: "phase",
+					phase: "lsp_registry_write_failed",
+					filePath: "",
+					durationMs: 0,
+					metadata: { op: "remove", pid, error: String(err) },
+				});
+			},
+		);
 		// On Windows, killing the direct child first can orphan grandchildren before
 		// taskkill can traverse the tree. Kill the full tree first and wait briefly.
 		// Safe and idempotent on an already-exited child: killProcessTree returns
@@ -4212,7 +4221,7 @@ export async function createLSPClient(options: {
 		// A child registered above (recordLspChild) but never reaching a healthy
 		// createLSPClient return must still be deregistered here — otherwise the
 		// registry keeps a stale entry for a process we just killed.
-		void removeLspChild(pid).catch((err) => {
+		void removeLspChild(pid, extractSpawnMarker(lspProcess.args)).catch((err) => {
 			// best-effort — a stale registry entry is harmless (the reaper's
 			// liveness check will find it dead on the next sweep regardless)
 			logLatency({
