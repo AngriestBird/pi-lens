@@ -38,6 +38,10 @@ import {
 	clearWorkspaceSweepHoldForSessionStart,
 } from "./workspace-sweep-hold.js";
 import {
+	DocumentDriftTracker,
+	type DriftSweepResult,
+} from "./document-drift.js";
+import {
 	isAtOrAboveHomeDir,
 	isWindowsPath,
 	normalizeMapKey,
@@ -1068,6 +1072,13 @@ export class LSPService {
 	 * those falls through to a fresh check rather than serving a stale result.
 	 */
 	private readonly lastKnownContentHash = new Map<string, string>();
+	/**
+	 * #1783: what content actually landed on a language server, per document.
+	 * The drift sweep compares disk (size, mtime) against these records and
+	 * resynchronizes anything an untracked edit moved behind the server's back.
+	 * See `document-drift.ts` for the key design and the pacing rules.
+	 */
+	private readonly documentDrift = new DocumentDriftTracker();
 	/**
 	 * #1095: lazily verifies a stored {@link DiagnosticBinding} against current
 	 * disk bytes, memoizing the disk fingerprint per (file, mtime) so repeated
@@ -2393,6 +2404,100 @@ export class LSPService {
 		}
 	}
 
+	/**
+	 * #1783: disk-drift backstop. Stat one batch of the documents a language
+	 * server currently holds, and re-push any whose bytes on disk no longer
+	 * match what the server was last given.
+	 *
+	 * Why this exists: an edit made outside the tracked write/edit path (a
+	 * bash-tool bulk edit) sends no `didChange`, so the server keeps publishing
+	 * pre-edit diagnostics with nothing to correct it. The resync-on-read path
+	 * only fires for a file the session reads again; a file that is edited and
+	 * never re-read stayed stale for the life of the server.
+	 *
+	 * Hot-path contract: callers fire this WITHOUT awaiting it. It is
+	 * rate-limited to one pass per drift-check interval (10s default),
+	 * stats at most 64 documents per pass, reads only the ones whose stat
+	 * already diverged, and issues at most 4 resyncs per pass serially. So the
+	 * steady-state cost on the touch path is zero, and the worst-case cost of a
+	 * pass is 64 stats plus up to 4 reads, off the caller's critical path.
+	 *
+	 * Never spawns: a document with no live client already holding it open has
+	 * no stale view to correct, so its record is dropped instead of resynced.
+	 */
+	async sweepDocumentDrift(
+		options: { force?: boolean } = {},
+	): Promise<DriftSweepResult | undefined> {
+		if (this.checkDestroyed()) return undefined;
+		return this.documentDrift.sweep(
+			{
+				resync: async (filePath, content) => {
+					// Reuse the normal touch path so the resync inherits the existing
+					// per-server notify-write budget, the #743 backpressure demotion and
+					// the client-lease machinery. diagnostics:"none" keeps it a pure
+					// content push — the next genuine query gets correct diagnostics
+					// because the server's view is now right, not because this call
+					// waited for them.
+					await this.touchFile(filePath, content, {
+						diagnostics: "none",
+						source: "drift_resync",
+						clientScope: "primary",
+					});
+				},
+				holdsDocument: (filePath) => this.hasLiveClientHoldingDocument(filePath),
+				onDrift: (event) => {
+					// A clean re-stamp, a deleted file and a closed document are all
+					// normal bookkeeping, not degradations. Only a real resync — or a
+					// heal the pacing had to defer — earns a record.
+					if (
+						event.disposition === "unchanged" ||
+						event.disposition === "vanished" ||
+						event.disposition === "unheld"
+					) {
+						return;
+					}
+					// Bounded record, per-file so the identity of the stuck document
+					// survives aggregation. `incrementDegradationCount` keeps one entry
+					// per file with an exact repeat tally instead of N entries.
+					incrementDegradationCount({
+						kind: "lsp-document-drift",
+						subject: event.filePath,
+						reason:
+							event.disposition === "deferred"
+								? `disk drift deferred by resync pacing after ${event.driftAgeMs}ms`
+								: `resynced after ${event.driftAgeMs}ms of untracked disk drift (${event.syncedSize}->${event.diskSize} bytes)`,
+					});
+					logLatency({
+						type: "phase",
+						phase: "lsp_document_drift",
+						filePath: event.filePath,
+						durationMs: event.driftAgeMs,
+						metadata: {
+							disposition: event.disposition,
+							driftAgeMs: event.driftAgeMs,
+							syncedSize: event.syncedSize,
+							diskSize: event.diskSize,
+						},
+					});
+				},
+			},
+			options,
+		);
+	}
+
+	/**
+	 * #1783: does any LIVE client already hold this document open? A record for
+	 * a document no server holds is dropped rather than resynced, so the drift
+	 * backstop can never spawn a server just to correct a view nobody has.
+	 */
+	private hasLiveClientHoldingDocument(filePath: string): boolean {
+		for (const client of this.state.clients.values()) {
+			if (!client.isAlive()) continue;
+			if (client.isDocumentOpen(filePath)) return true;
+		}
+		return false;
+	}
+
 	private async ensureClientForServer(
 		filePath: string,
 		server: LSPServerInfo,
@@ -2966,6 +3071,16 @@ export class LSPService {
 		}
 		const startedAt = Date.now();
 		const normalizedPath = normalizeMapKey(filePath);
+		// #1783: every path that asks a language server anything comes through
+		// here, so this is where the disk-drift backstop gets its heartbeat.
+		// Deliberately NOT awaited: the sweep is rate-limited to one pass per
+		// 10s and runs alongside this touch's own client acquisition and
+		// diagnostics wait, so it adds nothing to this call's latency. The
+		// resync it may issue re-enters touchFile; the tracker's single-flight
+		// guard makes that re-entry a no-op rather than a recursive sweep.
+		if (options.source !== "drift_resync") {
+			void this.sweepDocumentDrift().catch(() => {});
+		}
 		const diagnosticsMode = options.collectDiagnostics
 			? (options.diagnostics ?? "document")
 			: (options.diagnostics ?? "none");
@@ -3362,6 +3477,12 @@ export class LSPService {
 						// touch that looks fully delivered (which the silent-clean gates
 						// would then read as a confirmed clean).
 						this.markTouched(filePath, content, clientScope, entry.info.id);
+						// #1783: record what the server now holds, for the disk-drift
+						// backstop. Deliberately on the SAME condition as the debounce
+						// entry: only a write that landed changed a server's view, and a
+						// record written for a timed-out write would let the drift sweep
+						// believe a document is in sync when no server ever received it.
+						this.documentDrift.recordSynced(filePath, content);
 					} else {
 						notifyWriteTimedOutServerIds.push(entry.info.id);
 						if (!rejected) {
@@ -6283,6 +6404,12 @@ export class LSPService {
 		const startedAt = Date.now();
 		const root = path.resolve(cwd);
 		const { signal } = options;
+		// #1783: second heartbeat for the drift backstop. The per-file touch
+		// below already carries one, but a round that answers every file from
+		// the #671 cache never calls touchFile at all — and that is precisely the
+		// round whose stale answers the pi-codec witness recorded. Same rate
+		// limit, same non-awaited contract.
+		void this.sweepDocumentDrift().catch(() => {});
 		// Cap the per-file LSP sweep: a Next.js-scale project can route thousands
 		// of files through the language server at concurrency 8, and without a
 		// caller cap that grinds for tens of minutes (#341). `maxFiles` lets
