@@ -13,6 +13,7 @@ import { EventEmitter } from "node:events";
 import { vi } from "vitest";
 import type { MessageConnection } from "vscode-jsonrpc";
 import type { LSPClientState } from "../../../clients/lsp/client.js";
+import { TEXT_DOCUMENT_SYNC_KIND_FULL } from "../../../clients/lsp/sync-kind.js";
 import { WatchedFilesQueue } from "../../../clients/lsp/watch-queue.js";
 
 export function createMockConnection(): MessageConnection {
@@ -78,7 +79,19 @@ export function createMockState(
 		workspacePullResultCache: new Map(),
 		openDocuments: new Set(),
 		closedDocuments: new Set(),
+		// #1669 review F8: REQUIRED, not left to the `?.`-optional default —
+		// both are `optional` on `LSPClientState`, and a factory that omits
+		// them makes every test exercise the `?.`-fallback branch (e.g.
+		// `state.openDocumentUris?.get(...) ?? pathToFileURL(...)`) instead of
+		// the real optional-field-present path every live client actually
+		// runs under.
+		openDocumentUris: new Map(),
 		pendingOpens: new Set(),
+		projectIdentityProbedFiles: new Set(),
+		// #1669: mirrors `createLSPClient`'s own initial state literal, which
+		// sets this explicitly rather than leaving it undefined — a test that
+		// needs a non-Full kind still overrides it per call.
+		syncKind: TEXT_DOCUMENT_SYNC_KIND_FULL,
 		workspaceDiagnosticsSupport: {
 			advertised: false,
 			mode: "push-only",
