@@ -73,7 +73,22 @@ function smellNotifyCalls() {
 	);
 }
 
-describe("index turn_end smells-rollup wiring (#1123 item 3)", () => {
+// #1778: each case drives `driveTurns`, which pays a COLD
+// `import("../index.js")` after `vi.resetModules()` in `beforeEach` —
+// deliberate, not accidental. index.ts carries turn-scoped module state
+// (the smells-rollup once-per-session gate, reset via
+// resetSmellsSessionState), which is exactly what this wiring guard checks.
+// Sharing one import across cases would defeat the isolation the tests exist
+// to prove, so the fix is a timeout budget, not a hoisted import (matching
+// #1772/#1779's index-loop-block-wiring fix and this repo's
+// HEAVY_IO_TIMEOUT_MS convention,
+// tests/clients/ast-grep-rule-precedence-followups.test.ts:210). Reproduced
+// red pre-fix at 5222ms (over the 5000ms default) — see #1778.
+const SMELLS_ROLLUP_WIRING_TIMEOUT_MS = 30_000;
+
+describe("index turn_end smells-rollup wiring (#1123 item 3)", {
+	timeout: SMELLS_ROLLUP_WIRING_TIMEOUT_MS,
+}, () => {
 	beforeEach(async () => {
 		vi.resetModules();
 		notify.mockClear();
