@@ -2156,15 +2156,28 @@ function activateExtension(hostPi: ExtensionAPI) {
 	// unreliable as no heuristic at all, and a timer-based "drain if settled
 	// hasn't fired within N ms" watchdog would reintroduce this exact bug on
 	// a SUPPORTED host whenever a retry/compaction cycle legitimately takes
-	// longer than the watchdog window. Instead, a host that never fires
-	// `agent_settled` simply accumulates queued records for the rest of the
-	// session — not lost (nothing here discards them), just not drained until
-	// the `session_shutdown` safety net below. That is a real behavior change
-	// for such a host (deferred format previously ran every agent_end), but
-	// it trades staleness for correctness, which the mid-run formatting harm
-	// this issue reports makes the right trade.
+	// longer than the watchdog window.
+	//
+	// There is also deliberately no separate "drain at session_shutdown"
+	// safety net (review round 1, F2/F3/F4/F5): `agent_settled` is
+	// documented to fire from `_runAgentPrompt`'s `finally` on normal
+	// completion, on an aborted run, AND on a throw — the only way to miss it
+	// is the process itself dying (a hard kill, an OOM, a host crash before
+	// the finally runs), and a `session_shutdown`-based net cannot help with
+	// that case either (the process is gone before any handler could run). A
+	// run that dies without settling therefore strands its queued records in
+	// this session's in-memory `_pendingDeferredMutations` map — but not
+	// permanently: `claimDeferredMutations`'s existing staleness fallback
+	// (`DEFERRED_FORMAT_STALE_AFTER_MS`, 10 minutes — the same mechanism
+	// #791 already uses to recover a concurrent-secondary session's orphaned
+	// records) lets the NEXT session in this process claim them as orphaned
+	// once they've aged out. That is a real, honestly-documented behavior
+	// change from pre-#1654 (deferred format used to run every `agent_end`,
+	// so it never truly stranded), traded for correctness: it beats
+	// formatting files the agent is still actively working on mid-retry.
 	type DeferredDrainCtx = {
 		cwd?: string;
+		signal?: AbortSignal;
 		ui?: {
 			setStatus?: (id: string, text: string | undefined) => void;
 			theme?: LspStatusTheme;
@@ -2218,43 +2231,12 @@ function activateExtension(hostPi: ExtensionAPI) {
 		}
 	}
 
-	const SHUTDOWN_DRAIN_TIMEOUT_MS = 5_000;
-
-	/**
-	 * #1654 safety net: `agent_settled` is documented to fire on both normal
-	 * completion and aborts (SDK finally-block), but it is not a hard
-	 * guarantee for every way a session can end — a hard session kill, or a
-	 * host bug, could leave records this session queued in the in-memory
-	 * `_pendingDeferredMutations` map, which teardown below discards. Without
-	 * this, that work is silently lost rather than merely delayed. Best
-	 * effort and time-boxed: a hung formatter must not delay session
-	 * teardown indefinitely, so this races the drain against a bound and
-	 * lets teardown proceed either way.
-	 */
-	async function runShutdownFallbackDrain(ctx: DeferredDrainCtx): Promise<void> {
-		let timer: ReturnType<typeof setTimeout> | undefined;
-		try {
-			await Promise.race([
-				runDeferredMutationDrain(ctx),
-				new Promise<void>((resolve) => {
-					timer = setTimeout(() => {
-						dbg(
-							"session_shutdown: deferred-mutation drain timed out — proceeding with teardown",
-						);
-						resolve();
-					}, SHUTDOWN_DRAIN_TIMEOUT_MS);
-				}),
-			]);
-		} catch (err) {
-			dbg(`session_shutdown: deferred-mutation drain failed: ${err}`);
-		} finally {
-			if (timer) clearTimeout(timer);
-		}
-	}
-
 	pi.on("agent_end", async (_event, ctx) => {
 		if (!lensEnabled) return;
-		// Esc/abort during the deferred format + flush kills in-flight children.
+		// Esc/abort during the debounce flush kills in-flight children. The
+		// deferred-format/autofix drain no longer runs from this handler at
+		// all (#1654 — see the module comment above); its own abort/requeue
+		// handling is wired at the `agent_settled` registration below instead.
 		setAmbientAbortSignal((ctx as { signal?: AbortSignal })?.signal);
 		try {
 			// Ensure any pipeline still queued in the debounce window finishes
@@ -2590,10 +2572,24 @@ function activateExtension(hostPi: ExtensionAPI) {
 				// block `agent_end` the same way), just correctly gated on true
 				// settlement instead of firing mid-retry. A throw here must not
 				// skip the quiet window below.
+				//
+				// Review round 1 (F1): `agent_settled` fires on an ABORTED run too
+				// (ESC), and `ctx.signal` on that firing still reflects the
+				// aborted controller. `handleAgentEnd`'s abort/requeue branches
+				// (clients/runtime-agent-end.ts) read the ambient signal via
+				// `getAmbientAbortSignal()`, not a parameter — exactly like
+				// `agent_end`/`turn_end` already do around their own work — so an
+				// ESC-aborted settle must set it here too, or every queued record
+				// gets FORMATTED instead of requeued (an inversion of the #1642
+				// harm this issue exists to fix) and the requeue branches become
+				// production-unreachable.
+				setAmbientAbortSignal(ctx?.signal);
 				try {
 					await runDeferredMutationDrain(ctx);
 				} catch (drainErr) {
 					dbg(`agent_settled deferred_mutation_drain crashed: ${drainErr}`);
+				} finally {
+					setAmbientAbortSignal(undefined);
 				}
 				void runQuietWindow({
 					runtime,
@@ -2642,16 +2638,10 @@ function activateExtension(hostPi: ExtensionAPI) {
 			return;
 		}
 
-		// #1654 safety net: best-effort drain of any deferred-format/autofix
-		// records still queued for THIS (primary) session — covers a run that
-		// ends without ever firing `agent_settled` (see
-		// `runShutdownFallbackDrain`'s doc comment above). Deliberately NOT
-		// awaited: this handler's synchronous teardown order below (LSP
-		// fleet kill, idle-timer cancel, instance deregistration) is relied
-		// on by other tests/behavior and must not shift behind an await; the
-		// drain instead races in the background against its own bound and
-		// swallows its own errors.
-		void runShutdownFallbackDrain(ctx as DeferredDrainCtx);
+		// #1654: no drain runs here — see the module comment above
+		// `runDeferredMutationDrain` (review round 1, F2/F3/F4/F5) for why a
+		// session_shutdown-based safety net was deliberately dropped rather
+		// than kept.
 
 		// #1018: drop this (primary) session's prefix baseline now it has ended,
 		// so its entry is reclaimed promptly instead of lingering until the LRU

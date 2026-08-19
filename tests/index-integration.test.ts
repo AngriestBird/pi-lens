@@ -387,7 +387,7 @@ describe("index.ts integration", () => {
 			expect(handleAgentEndMock).toHaveBeenCalledTimes(1);
 		}, INTEGRATION_TIMEOUT_MS);
 
-		it("session_shutdown drains any still-queued work as a safety net when the run never settled", async () => {
+		it("session_shutdown does NOT drain (review round 1, F2) — a run that dies without settling strands until the next session's staleness claim, by design", async () => {
 			const handleAgentEndMock = vi.fn(async () => undefined);
 			mockDrainDeps(handleAgentEndMock);
 
@@ -397,6 +397,14 @@ describe("index.ts integration", () => {
 
 			// A run ends (agent_end fires) but the session is torn down before
 			// agent_settled ever gets a chance to fire — e.g. a session kill.
+			// `agent_settled` is documented to fire on completion, on an aborted
+			// run, AND on a throw (the SDK's finally block) — the only way to
+			// miss it is the process dying outright, which no session_shutdown
+			// handler can help with either (the process is gone first). A
+			// session_shutdown-based net was tried and dropped: it fired
+			// unawaited ahead of the LSP-fleet teardown right below it,
+			// formatting on a dying loop the adjacent teardown comment says must
+			// not spawn on, with near-zero real coverage.
 			const agentEnd = handlers.agent_end?.[0];
 			await agentEnd?.({ messages: [] }, { cwd: tmpDir });
 			expect(handleAgentEndMock).not.toHaveBeenCalled();
@@ -404,11 +412,52 @@ describe("index.ts integration", () => {
 			const shutdown = handlers.session_shutdown?.[0];
 			expect(shutdown).toBeTypeOf("function");
 			shutdown?.({ reason: "quit" }, { cwd: tmpDir });
-			// The shutdown drain is deliberately fire-and-forget (must not shift
-			// the handler's synchronous teardown order) — drain microtasks.
 			await new Promise((resolve) => setTimeout(resolve, 0));
 
+			expect(handleAgentEndMock).not.toHaveBeenCalled();
+		}, INTEGRATION_TIMEOUT_MS);
+
+		it("agent_settled sets the ambient abort signal around the drain (F1) — an ESC-aborted run must requeue, not format", async () => {
+			// #197 / F1: handleAgentEnd's abort/requeue branches
+			// (clients/runtime-agent-end.ts) read the ambient signal via
+			// `getAmbientAbortSignal()`, a module-level value set by
+			// `setAmbientAbortSignal` — not a parameter on the event. If the
+			// `agent_settled` wiring doesn't set it from `ctx.signal` before
+			// calling the drain, an ESC-aborted run FORMATS every queued file
+			// instead of requeuing it (an inversion of the #1642 harm this
+			// issue exists to fix), and the abort/requeue branches become
+			// production-unreachable (their own unit tests only pass because
+			// they hand-set the signal directly).
+			const seenAbortedFlags: Array<boolean | undefined> = [];
+			const handleAgentEndMock = vi.fn(async () => {
+				const { getAmbientAbortSignal } = await import(
+					"../clients/safe-spawn.js"
+				);
+				seenAbortedFlags.push(getAmbientAbortSignal()?.aborted);
+			});
+			mockDrainDeps(handleAgentEndMock);
+
+			const { default: registerExtension } = await import("../index.js");
+			const { getAmbientAbortSignal } = await import(
+				"../clients/safe-spawn.js"
+			);
+			const { pi, handlers } = createMockPi();
+			registerExtension(pi as any);
+
+			const controller = new AbortController();
+			controller.abort();
+
+			const settled = handlers.agent_settled?.[0];
+			expect(settled).toBeTypeOf("function");
+			await settled?.({}, { cwd: tmpDir, signal: controller.signal });
+
 			expect(handleAgentEndMock).toHaveBeenCalledTimes(1);
+			// The drain saw the run's real abort state while it ran...
+			expect(seenAbortedFlags).toEqual([true]);
+			// ...and the ambient signal is cleared afterward, so it can't leak
+			// into unrelated later work (matches agent_end/turn_end's own
+			// finally-block clear).
+			expect(getAmbientAbortSignal()).toBeUndefined();
 		}, INTEGRATION_TIMEOUT_MS);
 	});
 
