@@ -38,6 +38,43 @@ vi.mock("../../clients/lsp/index.js", async (importOriginal) => ({
 	})),
 }));
 
+// #1767: every test in this file drives `handleSessionStart`, which does
+// real synchronous fs work (detectProjectLanguageProfile, scanProjectRules)
+// plus fire-and-forget background scans (`scheduleStartupScans`) that reach
+// their `todoScanner.scanFile`/tool-`ensureAvailable` mocks only after a real
+// `setImmediate` tick and, for `collectTodoBaselineItems`, real per-file fs
+// reads against a temp project dir. Solo runs of this file measured 8-13s for
+// all 14 tests combined (well inside both `vi.waitFor`'s 1000ms default and
+// vitest's 5000ms `testTimeout` default). Under contention — this file run 6x
+// in parallel, `PI_LENS_TEST_MAX_WORKERS=1` each, N=24 samples — 8 runs
+// (33%) failed: some on individual `vi.waitFor` calls timing out waiting for
+// a scan mock to fire, others on the whole test (no `vi.waitFor` in the body)
+// blowing the 5000ms default `testTimeout` while `handleSessionStart` itself
+// ran long. This reproduces the reporter's ~1-in-8 rate and matches their A/B
+// evidence that swapping only `clients/runtime-session.ts` between branches
+// didn't change the failure rate — the production code is not the cause. The
+// budget below matches this repo's `HEAVY_IO_TIMEOUT_MS` convention
+// (tests/clients/ast-grep-rule-precedence-followups.test.ts) and gives ~4x
+// headroom over the worst contended full-test duration observed.
+//
+// The enclosing `describe`/`it` budget is deliberately larger than the
+// `vi.waitFor` budget it wraps (45_000 vs 30_000, not the same number). If
+// they matched, a genuine failure would race the two timeouts and could let
+// the outer, generic "Test timed out in Nms" win instead of the inner
+// `vi.waitFor` — discarding the specific, debuggable message ("orphan
+// staging files not yet reaped", "background startup scans still touching
+// tmpDir", or the mock assertion diff) that a real regression needs. The 15s
+// gap is enough for `vi.waitFor`'s own rejection, plus the `finally` block's
+// `env.cleanup()`, to run and surface before the outer clock fires. This is
+// inherent to the fire-and-forget-scan precedent this file follows (no
+// deterministic completion signal exists to swap in instead — see the
+// file-level comment above) and does not itself detect a genuine slowdown in
+// `handleSessionStart`; at 30x the worst observed solo per-test time, a real
+// regression there would still pass unnoticed until it also blew the 45s
+// ceiling.
+const HEAVY_IO_TIMEOUT_MS = 30_000;
+const TEST_BUDGET_MS = 45_000;
+
 const EMPTY_KNIP_RESULT = {
 	success: true,
 	issues: [],
@@ -197,7 +234,7 @@ async function runSessionStart(
 						throw new Error("background startup scans still touching tmpDir");
 					}
 				},
-				{ timeout: 2000 },
+				{ timeout: HEAVY_IO_TIMEOUT_MS },
 			);
 			env.cleanup();
 		};
@@ -230,31 +267,48 @@ afterEach(() => {
 	delete process.env.PI_LENS_STARTUP_MODE;
 });
 
-it("executes the ast-grep export path and reports the returned exports", async () => {
-	const exports = new Map([
-		["readConfig", "src/config.ts"],
-		["writeConfig", "src/config.ts"],
-	]);
-	const scanExports = vi.fn(async () => exports);
-	const { env, astGrepEnsure, dbg } = await runSessionStart(
-		"full",
-		(tmpDir) => createTempFile(tmpDir, "package.json", JSON.stringify({ type: "module" })),
-		{ astGrepEnsure: async () => true, scanExports },
-	);
-	try {
-		await vi.waitFor(() => expect(astGrepEnsure).toHaveBeenCalled());
-		await vi.waitFor(() => expect(scanExports).toHaveBeenCalled());
-		await vi.waitFor(() =>
-			expect(dbg).toHaveBeenCalledWith(
-				expect.stringContaining("exports scan: 2 functions found"),
-			),
+it(
+	"executes the ast-grep export path and reports the returned exports",
+	async () => {
+		const exports = new Map([
+			["readConfig", "src/config.ts"],
+			["writeConfig", "src/config.ts"],
+		]);
+		const scanExports = vi.fn(async () => exports);
+		const { env, astGrepEnsure, dbg } = await runSessionStart(
+			"full",
+			(tmpDir) =>
+				createTempFile(
+					tmpDir,
+					"package.json",
+					JSON.stringify({ type: "module" }),
+				),
+			{ astGrepEnsure: async () => true, scanExports },
 		);
-	} finally {
-		await env.cleanup();
-	}
-});
+		try {
+			await vi.waitFor(() => expect(astGrepEnsure).toHaveBeenCalled(), {
+				timeout: HEAVY_IO_TIMEOUT_MS,
+			});
+			await vi.waitFor(() => expect(scanExports).toHaveBeenCalled(), {
+				timeout: HEAVY_IO_TIMEOUT_MS,
+			});
+			await vi.waitFor(
+				() =>
+					expect(dbg).toHaveBeenCalledWith(
+						expect.stringContaining("exports scan: 2 functions found"),
+					),
+				{ timeout: HEAVY_IO_TIMEOUT_MS },
+			);
+		} finally {
+			await env.cleanup();
+		}
+	},
+	TEST_BUDGET_MS,
+);
 
-describe("runtime-session notifications", () => {
+describe("runtime-session notifications", {
+	timeout: TEST_BUDGET_MS,
+}, () => {
 	it("quick mode hydrates cached exports and rules from a fresh project snapshot", async () => {
 		const env = setupTestEnvironment("pi-lens-session-snapshot-");
 		const restoreStartupMode = setStartupMode("quick");
@@ -416,7 +470,10 @@ describe("runtime-session notifications", () => {
 			);
 			expect(scanDirectory).not.toHaveBeenCalled();
 			expect(ensureTool).not.toHaveBeenCalled();
-			expect(resetLSPService).toHaveBeenCalledWith({ fast: true, reason: "session_start" });
+			expect(resetLSPService).toHaveBeenCalledWith({
+				fast: true,
+				reason: "session_start",
+			});
 		} finally {
 			await env.cleanup();
 		}
@@ -463,7 +520,9 @@ describe("runtime-session notifications", () => {
 			// than a single blocking scanDirectory. It must be deferred until after
 			// session_start returns, then run.
 			expect(scanFile).not.toHaveBeenCalled();
-			await vi.waitFor(() => expect(scanFile).toHaveBeenCalled());
+			await vi.waitFor(() => expect(scanFile).toHaveBeenCalled(), {
+				timeout: HEAVY_IO_TIMEOUT_MS,
+			});
 		} finally {
 			await env.cleanup();
 		}
@@ -488,9 +547,13 @@ describe("runtime-session notifications", () => {
 				// scheduleStartupScans — it must still run in slow-FS mode (the
 				// original guard was an early `return` that wrongly killed it and
 				// call-graph/codebase-model/word-index along with knip/jscpd/etc).
-				await vi.waitFor(() => expect(astGrepEnsure).toHaveBeenCalledTimes(1));
+				await vi.waitFor(() => expect(astGrepEnsure).toHaveBeenCalledTimes(1), {
+					timeout: HEAVY_IO_TIMEOUT_MS,
+				});
 				// todo (before the guard) also stays on.
-				await vi.waitFor(() => expect(scanFile).toHaveBeenCalled());
+				await vi.waitFor(() => expect(scanFile).toHaveBeenCalled(), {
+					timeout: HEAVY_IO_TIMEOUT_MS,
+				});
 
 				// The external-CLI scans are skipped…
 				expect(knipAnalyze).not.toHaveBeenCalled();
@@ -534,8 +597,12 @@ describe("runtime-session notifications", () => {
 			try {
 				// In-process scans (ast-grep-exports, todo) stay on — same contract
 				// as the slow-FS gate above.
-				await vi.waitFor(() => expect(astGrepEnsure).toHaveBeenCalledTimes(1));
-				await vi.waitFor(() => expect(scanFile).toHaveBeenCalled());
+				await vi.waitFor(() => expect(astGrepEnsure).toHaveBeenCalledTimes(1), {
+					timeout: HEAVY_IO_TIMEOUT_MS,
+				});
+				await vi.waitFor(() => expect(scanFile).toHaveBeenCalled(), {
+					timeout: HEAVY_IO_TIMEOUT_MS,
+				});
 
 				// The external-CLI scans are skipped…
 				expect(knipAnalyze).not.toHaveBeenCalled();
@@ -584,7 +651,9 @@ describe("runtime-session notifications", () => {
 			);
 
 			try {
-				await vi.waitFor(() => expect(knipAnalyze).toHaveBeenCalledTimes(1));
+				await vi.waitFor(() => expect(knipAnalyze).toHaveBeenCalledTimes(1), {
+					timeout: HEAVY_IO_TIMEOUT_MS,
+				});
 				expect(jscpdEnsure).toHaveBeenCalledTimes(1);
 				expect(
 					notify.mock.calls.some(([msg]) =>
@@ -640,14 +709,48 @@ describe("runtime-session notifications", () => {
 				},
 				metricsClient: { reset: () => {} },
 				cacheManager: { writeCache: () => {}, readCache: () => null },
-				todoScanner: { scanDirectory: () => ({ items: [] }), scanFile: () => [] },
-				astGrepClient: { isAvailable: () => false, ensureAvailable: async () => false, scanExports: async () => new Map() },
-				biomeClient: { isAvailable: () => false, ensureAvailable: async () => false },
-				ruffClient: { isAvailable: () => false, ensureAvailable: async () => false },
-				knipClient: { isAvailable: () => false, ensureAvailable: async () => false, analyze: async () => ({ success: true, issues: [], unusedExports: [], unusedFiles: [], unusedDeps: [], unlistedDeps: [], summary: "skipped" }) },
-				jscpdClient: { isAvailable: () => false, ensureAvailable: async () => false },
-				depChecker: { isAvailable: () => false, ensureAvailable: async () => false },
-				testRunnerClient: { detectRunner: () => ({ runner: "vitest", config: null }), runTestFile: () => ({ failed: 1, error: false }) },
+				todoScanner: {
+					scanDirectory: () => ({ items: [] }),
+					scanFile: () => [],
+				},
+				astGrepClient: {
+					isAvailable: () => false,
+					ensureAvailable: async () => false,
+					scanExports: async () => new Map(),
+				},
+				biomeClient: {
+					isAvailable: () => false,
+					ensureAvailable: async () => false,
+				},
+				ruffClient: {
+					isAvailable: () => false,
+					ensureAvailable: async () => false,
+				},
+				knipClient: {
+					isAvailable: () => false,
+					ensureAvailable: async () => false,
+					analyze: async () => ({
+						success: true,
+						issues: [],
+						unusedExports: [],
+						unusedFiles: [],
+						unusedDeps: [],
+						unlistedDeps: [],
+						summary: "skipped",
+					}),
+				},
+				jscpdClient: {
+					isAvailable: () => false,
+					ensureAvailable: async () => false,
+				},
+				depChecker: {
+					isAvailable: () => false,
+					ensureAvailable: async () => false,
+				},
+				testRunnerClient: {
+					detectRunner: () => ({ runner: "vitest", config: null }),
+					runTestFile: () => ({ failed: 1, error: false }),
+				},
 				goClient: { isGoAvailableAsync: async () => false },
 				rustClient: { isAvailableAsync: async () => false },
 				ensureTool: async () => null,
@@ -709,14 +812,48 @@ describe("runtime-session notifications", () => {
 				},
 				metricsClient: { reset: () => {} },
 				cacheManager: { writeCache: () => {}, readCache: () => null },
-				todoScanner: { scanDirectory: () => ({ items: [] }), scanFile: () => [] },
-				astGrepClient: { isAvailable: () => false, ensureAvailable: async () => false, scanExports: async () => new Map() },
-				biomeClient: { isAvailable: () => false, ensureAvailable: async () => false },
-				ruffClient: { isAvailable: () => false, ensureAvailable: async () => false },
-				knipClient: { isAvailable: () => false, ensureAvailable: async () => false, analyze: async () => ({ success: true, issues: [], unusedExports: [], unusedFiles: [], unusedDeps: [], unlistedDeps: [], summary: "skipped" }) },
-				jscpdClient: { isAvailable: () => false, ensureAvailable: async () => false },
-				depChecker: { isAvailable: () => false, ensureAvailable: async () => false },
-				testRunnerClient: { detectRunner: () => ({ runner: "vitest", config: null }), runTestFile: () => ({ failed: 1, error: false }) },
+				todoScanner: {
+					scanDirectory: () => ({ items: [] }),
+					scanFile: () => [],
+				},
+				astGrepClient: {
+					isAvailable: () => false,
+					ensureAvailable: async () => false,
+					scanExports: async () => new Map(),
+				},
+				biomeClient: {
+					isAvailable: () => false,
+					ensureAvailable: async () => false,
+				},
+				ruffClient: {
+					isAvailable: () => false,
+					ensureAvailable: async () => false,
+				},
+				knipClient: {
+					isAvailable: () => false,
+					ensureAvailable: async () => false,
+					analyze: async () => ({
+						success: true,
+						issues: [],
+						unusedExports: [],
+						unusedFiles: [],
+						unusedDeps: [],
+						unlistedDeps: [],
+						summary: "skipped",
+					}),
+				},
+				jscpdClient: {
+					isAvailable: () => false,
+					ensureAvailable: async () => false,
+				},
+				depChecker: {
+					isAvailable: () => false,
+					ensureAvailable: async () => false,
+				},
+				testRunnerClient: {
+					detectRunner: () => ({ runner: "vitest", config: null }),
+					runTestFile: () => ({ failed: 1, error: false }),
+				},
 				goClient: { isGoAvailableAsync: async () => false },
 				rustClient: { isAvailableAsync: async () => false },
 				ensureTool: async () => null,
@@ -777,14 +914,48 @@ describe("runtime-session notifications", () => {
 				},
 				metricsClient: { reset: () => {} },
 				cacheManager: { writeCache: () => {}, readCache: () => null },
-				todoScanner: { scanDirectory: () => ({ items: [] }), scanFile: () => [] },
-				astGrepClient: { isAvailable: () => false, ensureAvailable: async () => false, scanExports: async () => new Map() },
-				biomeClient: { isAvailable: () => false, ensureAvailable: async () => false },
-				ruffClient: { isAvailable: () => false, ensureAvailable: async () => false },
-				knipClient: { isAvailable: () => false, ensureAvailable: async () => false, analyze: async () => ({ success: true, issues: [], unusedExports: [], unusedFiles: [], unusedDeps: [], unlistedDeps: [], summary: "skipped" }) },
-				jscpdClient: { isAvailable: () => false, ensureAvailable: async () => false },
-				depChecker: { isAvailable: () => false, ensureAvailable: async () => false },
-				testRunnerClient: { detectRunner: () => ({ runner: "vitest", config: null }), runTestFile: () => ({ failed: 1, error: false }) },
+				todoScanner: {
+					scanDirectory: () => ({ items: [] }),
+					scanFile: () => [],
+				},
+				astGrepClient: {
+					isAvailable: () => false,
+					ensureAvailable: async () => false,
+					scanExports: async () => new Map(),
+				},
+				biomeClient: {
+					isAvailable: () => false,
+					ensureAvailable: async () => false,
+				},
+				ruffClient: {
+					isAvailable: () => false,
+					ensureAvailable: async () => false,
+				},
+				knipClient: {
+					isAvailable: () => false,
+					ensureAvailable: async () => false,
+					analyze: async () => ({
+						success: true,
+						issues: [],
+						unusedExports: [],
+						unusedFiles: [],
+						unusedDeps: [],
+						unlistedDeps: [],
+						summary: "skipped",
+					}),
+				},
+				jscpdClient: {
+					isAvailable: () => false,
+					ensureAvailable: async () => false,
+				},
+				depChecker: {
+					isAvailable: () => false,
+					ensureAvailable: async () => false,
+				},
+				testRunnerClient: {
+					detectRunner: () => ({ runner: "vitest", config: null }),
+					runTestFile: () => ({ failed: 1, error: false }),
+				},
 				goClient: { isGoAvailableAsync: async () => false },
 				rustClient: { isAvailableAsync: async () => false },
 				ensureTool: async () => null,
@@ -826,8 +997,12 @@ describe("runtime-session notifications", () => {
 		});
 
 		try {
-			await vi.waitFor(() => expect(depEnsure).toHaveBeenCalledTimes(1));
-			await vi.waitFor(() => expect(astGrepEnsure).toHaveBeenCalledTimes(1));
+			await vi.waitFor(() => expect(depEnsure).toHaveBeenCalledTimes(1), {
+				timeout: HEAVY_IO_TIMEOUT_MS,
+			});
+			await vi.waitFor(() => expect(astGrepEnsure).toHaveBeenCalledTimes(1), {
+				timeout: HEAVY_IO_TIMEOUT_MS,
+			});
 
 			// biome is covered by startup preinstall; ast-grep/knip/jscpd by startup
 			// scans. ruff is irrelevant for this JS/TS-only project.
@@ -851,7 +1026,9 @@ describe("runtime-session notifications", () => {
 // repeated kills ACCUMULATE orphans rather than overwriting one. Pre-fix,
 // runtime-session.ts's sweep call omitted both directories entirely, so an
 // orphan planted there was never reaped by session_start.
-describe("session_start orphan-stage sweep (#1609 review F1)", () => {
+describe("session_start orphan-stage sweep (#1609 review F1)", {
+	timeout: TEST_BUDGET_MS,
+}, () => {
 	it("reaps a dead-pid orphan staging file in the installer's bin/ and tools/ dirs", async () => {
 		const globalDir = getGlobalPiLensDir();
 		const binDir = path.join(globalDir, "bin");
@@ -875,7 +1052,7 @@ describe("session_start orphan-stage sweep (#1609 review F1)", () => {
 						throw new Error("orphan staging files not yet reaped");
 					}
 				},
-				{ timeout: 2000 },
+				{ timeout: HEAVY_IO_TIMEOUT_MS },
 			);
 		} finally {
 			fs.rmSync(binDir, { recursive: true, force: true });
