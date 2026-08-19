@@ -1,4 +1,6 @@
-### Fixed
+---
+section: Fixed
+---
 
 - A cascade's neighbor re-check no longer notifies auxiliary scanners
   (ast-grep, opengrep, typos) for every changed neighbor. A neighbor's
