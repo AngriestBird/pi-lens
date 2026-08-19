@@ -154,7 +154,7 @@ function getExtractor(
  */
 const importResolutionMemo = new Map<
 	string,
-	{ mtimeMs: number; imports: string[] }
+	{ mtimeMs: number; size: number; imports: string[] }
 >();
 let importResolutionMemoTurnIndex: number | undefined;
 
@@ -171,8 +171,8 @@ async function resolveForwardImportsMemoized(
 	filePath: string,
 	resolveForwardImports: ForwardImportResolver,
 ): Promise<string[]> {
-	const mtimeMs = await statMtimeMs(filePath);
-	if (mtimeMs === undefined) {
+	const sig = await statSignature(filePath);
+	if (sig === undefined) {
 		// Can't key reliably (deleted/unreadable) — resolve uncached rather than
 		// risk serving a memo entry for content that may no longer exist.
 		try {
@@ -182,14 +182,17 @@ async function resolveForwardImportsMemoized(
 		}
 	}
 	const cached = importResolutionMemo.get(filePath);
-	if (cached && cached.mtimeMs === mtimeMs) return cached.imports;
+	// mtime alone collides for writes within the same timestamp tick (~1ms);
+	// size disambiguates the shrink-then-restore case (#1641's measurement).
+	if (cached && cached.mtimeMs === sig.mtimeMs && cached.size === sig.size)
+		return cached.imports;
 	let imports: string[];
 	try {
 		imports = await resolveForwardImports(cwd, filePath);
 	} catch {
 		imports = [];
 	}
-	importResolutionMemo.set(filePath, { mtimeMs, imports });
+	importResolutionMemo.set(filePath, { mtimeMs: sig.mtimeMs, size: sig.size, imports });
 	return imports;
 }
 
@@ -244,6 +247,17 @@ export async function extractForwardImportPaths(
 		}
 	}
 	return [...resolved];
+}
+
+async function statSignature(
+	filePath: string,
+): Promise<{ mtimeMs: number; size: number } | undefined> {
+	try {
+		const stat = await fs.promises.stat(filePath);
+		return { mtimeMs: stat.mtimeMs, size: stat.size };
+	} catch {
+		return undefined;
+	}
 }
 
 async function statMtimeMs(filePath: string): Promise<number | undefined> {
