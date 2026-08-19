@@ -1577,6 +1577,182 @@ describe("heavy workspace servers do not fall back to per-file dirs (#201)", () 
 	// depends on the FileDirRoot fallback. See the standalone-csharp test above.
 });
 
+describe("monorepo root hoisting (#1671)", () => {
+	const originalCwd = process.cwd();
+
+	afterEach(() => {
+		process.chdir(originalCwd);
+	});
+
+	it("RustServer.root hoists every crate in a Cargo workspace to the shared workspace root", async () => {
+		const { RustServer } = await import("../../../clients/lsp/server.js");
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-cargo-ws-"));
+		dirs.push(tmp);
+
+		fs.writeFileSync(
+			path.join(tmp, "Cargo.toml"),
+			'[workspace]\nmembers = ["crate-a", "crate-b", "crate-c"]\n',
+		);
+		const crateFiles: string[] = [];
+		for (const crate of ["crate-a", "crate-b", "crate-c"]) {
+			const crateDir = path.join(tmp, crate);
+			fs.mkdirSync(path.join(crateDir, "src"), { recursive: true });
+			fs.writeFileSync(
+				path.join(crateDir, "Cargo.toml"),
+				`[package]\nname = "${crate}"\n`,
+			);
+			const file = path.join(crateDir, "src", "lib.rs");
+			fs.writeFileSync(file, "pub fn x() {}\n");
+			crateFiles.push(file);
+		}
+
+		const roots = await Promise.all(crateFiles.map((f) => RustServer.root(f)));
+		// N heavy servers where 1 suffices is exactly the memory/process cost #1671
+		// is closing: every crate must resolve to the same workspace root.
+		expect(new Set(roots).size).toBe(1);
+		expect(roots[0]).toBe(tmp);
+	});
+
+	it("RustServer.root leaves a crate outside the workspace's members table crate-rooted", async () => {
+		const { RustServer } = await import("../../../clients/lsp/server.js");
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-cargo-nonmember-"));
+		dirs.push(tmp);
+
+		fs.writeFileSync(
+			path.join(tmp, "Cargo.toml"),
+			'[workspace]\nmembers = ["crate-a"]\n',
+		);
+		const memberDir = path.join(tmp, "crate-a");
+		fs.mkdirSync(path.join(memberDir, "src"), { recursive: true });
+		fs.writeFileSync(path.join(memberDir, "Cargo.toml"), '[package]\nname = "crate-a"\n');
+		const memberFile = path.join(memberDir, "src", "lib.rs");
+		fs.writeFileSync(memberFile, "pub fn x() {}\n");
+
+		// standalone-tool sits next to the workspace but is never listed in
+		// `members` — cargo itself does not build it as part of the workspace, so
+		// pi-lens must not spawn a shared rust-analyzer root that merges it in.
+		const nonMemberDir = path.join(tmp, "standalone-tool");
+		fs.mkdirSync(path.join(nonMemberDir, "src"), { recursive: true });
+		fs.writeFileSync(
+			path.join(nonMemberDir, "Cargo.toml"),
+			'[package]\nname = "standalone-tool"\n',
+		);
+		const nonMemberFile = path.join(nonMemberDir, "src", "lib.rs");
+		fs.writeFileSync(nonMemberFile, "pub fn y() {}\n");
+
+		await expect(RustServer.root(memberFile)).resolves.toBe(tmp);
+		await expect(RustServer.root(nonMemberFile)).resolves.toBe(nonMemberDir);
+	});
+
+	it("RustServer.root does not hoist a workspace root above the session cwd", async () => {
+		const { RustServer } = await import("../../../clients/lsp/server.js");
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-cargo-ceil-"));
+		dirs.push(tmp);
+
+		const workspaceDir = path.join(tmp, "workspace");
+		fs.mkdirSync(workspaceDir, { recursive: true });
+		fs.writeFileSync(
+			path.join(workspaceDir, "Cargo.toml"),
+			'[workspace]\nmembers = ["crates/foo"]\n',
+		);
+		const crateDir = path.join(workspaceDir, "crates", "foo");
+		fs.mkdirSync(path.join(crateDir, "src"), { recursive: true });
+		fs.writeFileSync(
+			path.join(crateDir, "Cargo.toml"),
+			'[package]\nname = "foo"\n',
+		);
+		const file = path.join(crateDir, "src", "main.rs");
+		fs.writeFileSync(file, "fn main() {}\n");
+
+		// Session started narrower than the workspace: cwd IS the crate root, so
+		// there is no room to hoist upward without crossing the session boundary.
+		process.chdir(crateDir);
+
+		await expect(RustServer.root(file)).resolves.toBe(crateDir);
+	});
+
+	it("JavaServer.root hoists declared Maven modules to the parent pom, but leaves an undeclared sibling crate-rooted", async () => {
+		const { JavaServer } = await import("../../../clients/lsp/server.js");
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-maven-ws-"));
+		dirs.push(tmp);
+
+		fs.writeFileSync(
+			path.join(tmp, "pom.xml"),
+			[
+				"<project>",
+				"  <modules>",
+				"    <module>module-a</module>",
+				"    <module>module-b</module>",
+				"  </modules>",
+				"</project>",
+			].join("\n"),
+		);
+
+		const moduleFiles: string[] = [];
+		for (const mod of ["module-a", "module-b"]) {
+			const modDir = path.join(tmp, mod, "src", "main", "java");
+			fs.mkdirSync(modDir, { recursive: true });
+			fs.writeFileSync(
+				path.join(tmp, mod, "pom.xml"),
+				`<project><parent><artifactId>${mod}</artifactId></parent></project>`,
+			);
+			const file = path.join(modDir, "Main.java");
+			fs.writeFileSync(file, "class Main {}\n");
+			moduleFiles.push(file);
+		}
+
+		const siblingDir = path.join(tmp, "sibling", "src", "main", "java");
+		fs.mkdirSync(siblingDir, { recursive: true });
+		fs.writeFileSync(
+			path.join(tmp, "sibling", "pom.xml"),
+			"<project><artifactId>sibling</artifactId></project>",
+		);
+		const siblingFile = path.join(siblingDir, "Sibling.java");
+		fs.writeFileSync(siblingFile, "class Sibling {}\n");
+
+		const moduleRoots = await Promise.all(
+			moduleFiles.map((f) => JavaServer.root(f)),
+		);
+		expect(new Set(moduleRoots).size).toBe(1);
+		expect(moduleRoots[0]).toBe(tmp);
+
+		// The sibling pom is never declared in the parent's <modules>, so it stays
+		// its own independent root instead of being swept into the parent's server.
+		await expect(JavaServer.root(siblingFile)).resolves.toBe(
+			path.join(tmp, "sibling"),
+		);
+	});
+
+	it("JavaServer.root does not hoist a declared module chain above the session cwd", async () => {
+		const { JavaServer } = await import("../../../clients/lsp/server.js");
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-maven-ceil-"));
+		dirs.push(tmp);
+
+		const parentDir = path.join(tmp, "parent");
+		fs.mkdirSync(parentDir, { recursive: true });
+		fs.writeFileSync(
+			path.join(parentDir, "pom.xml"),
+			"<project><modules><module>module-a</module></modules></project>",
+		);
+		const moduleDir = path.join(parentDir, "module-a", "src", "main", "java");
+		fs.mkdirSync(moduleDir, { recursive: true });
+		fs.writeFileSync(
+			path.join(parentDir, "module-a", "pom.xml"),
+			"<project><artifactId>module-a</artifactId></project>",
+		);
+		const file = path.join(moduleDir, "Main.java");
+		fs.writeFileSync(file, "class Main {}\n");
+
+		// Session cwd is the module itself: no room to hoist to the parent without
+		// crossing the session boundary.
+		process.chdir(path.join(parentDir, "module-a"));
+
+		await expect(JavaServer.root(file)).resolves.toBe(
+			path.join(parentDir, "module-a"),
+		);
+	});
+});
+
 describe("zizmor LSP candidacy path gate (#636)", () => {
 	// zizmor's extension match is "any YAML" — the real filter that keeps it out
 	// of the candidate list for a guaranteed-no-op file (measured directly

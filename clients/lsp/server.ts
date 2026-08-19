@@ -1054,7 +1054,10 @@ async function markerExists(dir: string, pattern: string): Promise<boolean> {
  * NearestRoot(includePatterns, excludePatterns?) → RootFunction
  *
  * - includePatterns: file/dir names that signal the project root (e.g. ["package.json"])
- * - excludePatterns: if any of these exist in a directory, skip it (e.g. ["node_modules"])
+ * - excludePatterns: if any of these exist in a directory, SKIP that directory and
+ *   keep walking up toward stopDir — it does not abort resolution. A directory that
+ *   matches an exclude pattern is simply never returned as a root; the walk still
+ *   continues past it looking for an include-pattern hit higher up (#1671).
  * - stopDir: walk stops here (defaults to filesystem root; set to project cwd for safety)
  *
  * Equivalent to createRootDetector; exported under both names for clarity.
@@ -2063,14 +2066,74 @@ export const GoServer: LSPServerInfo = {
 	},
 };
 
-async function hasWorkspaceSection(cargoPath: string): Promise<boolean> {
+async function readTextFileOrUndefined(filePath: string): Promise<string | undefined> {
 	try {
-		const { readFile } = await import("node:fs/promises");
-		const content = await readFile(cargoPath, "utf-8");
-		return /^\s*\[workspace\]/m.test(content);
+		return await readFile(filePath, "utf-8");
 	} catch {
+		return undefined;
+	}
+}
+
+function parseTomlStringArray(content: string, key: string): string[] {
+	const match = content.match(
+		new RegExp(`^[ \\t]*${key}[ \\t]*=[ \\t]*\\[([\\s\\S]*?)\\]`, "m"),
+	);
+	if (!match) return [];
+	return [...match[1].matchAll(/"([^"]*)"|'([^']*)'/g)].map(
+		(m) => (m[1] ?? m[2] ?? "").trim(),
+	);
+}
+
+/** A `members`/`exclude` entry either names a path exactly or globs one level
+ * of subdirectories via a trailing `/*` (cargo's own convention). */
+function matchesCargoWorkspacePattern(pattern: string, relativePath: string): boolean {
+	const normalized = pattern.replace(/\/+$/, "");
+	if (normalized === relativePath) return true;
+	if (normalized.endsWith("/*")) {
+		const prefix = normalized.slice(0, -2);
+		if (!relativePath.startsWith(`${prefix}/`)) return false;
+		return !relativePath.slice(prefix.length + 1).includes("/");
+	}
+	return false;
+}
+
+/**
+ * Given an ancestor Cargo.toml's raw contents that already contains a
+ * `[workspace]` table, decide whether it actually claims `childDir` as a
+ * member. Cargo's own default is that a bare `[workspace]` with no `members`
+ * key claims only the manifest's own package — a nested crate is NOT
+ * implicitly swept in just because it sits underneath the workspace root on
+ * disk. Without this check any Cargo.toml with a `[workspace]` table would
+ * hoist every crate below it, including ones the workspace never declared
+ * (#1671) — the same defect shape as an undeclared Maven sibling module.
+ */
+function cargoWorkspaceDeclaresMember(
+	workspaceContent: string,
+	parentDir: string,
+	childDir: string,
+): boolean {
+	const relativePath = path.relative(parentDir, childDir).split(path.sep).join("/");
+	if (relativePath === "" || relativePath.startsWith("..")) return false;
+	const excluded = parseTomlStringArray(workspaceContent, "exclude");
+	if (excluded.some((pattern) => matchesCargoWorkspacePattern(pattern, relativePath))) {
 		return false;
 	}
+	const members = parseTomlStringArray(workspaceContent, "members");
+	return members.some((pattern) => matchesCargoWorkspacePattern(pattern, relativePath));
+}
+
+/**
+ * Bound a monorepo-hoist walk-up by the session ceiling: when `file` is inside
+ * the session cwd, the walk must stop AT the cwd rather than climb past it —
+ * matching enforceLspRootCeiling's clamp semantics but avoiding the wasted stat
+ * calls of walking past a boundary we would clamp back down anyway. When
+ * `file` is outside the session (isolated tests, out-of-session API callers),
+ * enforceLspRootCeiling is a no-op, so the walk is left unbounded (`undefined`).
+ */
+function sessionHoistCeiling(sessionCwd: string, file: string): string | undefined {
+	return isSameOrWithin(path.resolve(sessionCwd), path.resolve(file))
+		? path.resolve(sessionCwd)
+		: undefined;
 }
 
 function RustWorkspaceRoot(): RootFunction {
@@ -2078,18 +2141,90 @@ function RustWorkspaceRoot(): RootFunction {
 	return async (file: string): Promise<string | undefined> => {
 		const root = await crateRoot(file);
 		if (!root) return undefined;
+
+		const sessionCwd = process.cwd();
+		// The walk-up for an ancestor Cargo.toml with a [workspace] table stays
+		// bounded by the same session ceiling the crate-root lookup above already
+		// enforces (enforceLspRootCeiling) — a monorepo hoist must never cross the
+		// session boundary just because a workspace manifest happens to sit above
+		// it (#1671).
+		const stop = sessionHoistCeiling(sessionCwd, file);
+
 		let current = root;
 		const fsRoot = path.parse(current).root;
 		while (true) {
+			if (stop !== undefined && current === stop) break;
 			const parent = path.dirname(current);
 			if (parent === current || parent === fsRoot) break;
-			const parentCargo = path.join(parent, "Cargo.toml");
-			if (await hasWorkspaceSection(parentCargo)) {
-				return parent;
+			const parentCargoPath = path.join(parent, "Cargo.toml");
+			const parentCargoContent = await readTextFileOrUndefined(parentCargoPath);
+			if (parentCargoContent !== undefined && /^\s*\[workspace\]/m.test(parentCargoContent)) {
+				if (cargoWorkspaceDeclaresMember(parentCargoContent, parent, current)) {
+					return enforceLspRootCeiling(parent, sessionCwd, file);
+				}
+				// A workspace root exists here but its `members`/`exclude` tables do
+				// not claim this crate — stop climbing; the crate stays independently
+				// rooted rather than being swept into a workspace it opted out of.
+				break;
 			}
 			current = parent;
 		}
 		return root;
+	};
+}
+
+/**
+ * Resolve whether `parentPomPath`'s <modules> block declares `childDir` as one
+ * of its member modules. Maven multi-module hoisting must only chain through
+ * poms that actually declare the child (an undeclared sibling directory that
+ * merely happens to sit next to a parent pom stays independently rooted) —
+ * this is the "Maven module-chain verification" #1671 asks for, as opposed to
+ * rust-analyzer's simpler "any ancestor [workspace] wins" hoist.
+ */
+async function declaresMavenModule(
+	parentDir: string,
+	parentPomPath: string,
+	childDir: string,
+): Promise<boolean> {
+	try {
+		const content = await readFile(parentPomPath, "utf-8");
+		const modulesBlock = content.match(/<modules>([\s\S]*?)<\/modules>/);
+		if (!modulesBlock) return false;
+		const resolvedChild = path.resolve(childDir);
+		for (const match of modulesBlock[1].matchAll(/<module>\s*([^<]+?)\s*<\/module>/g)) {
+			if (path.resolve(parentDir, match[1]) === resolvedChild) return true;
+		}
+		return false;
+	} catch {
+		return false;
+	}
+}
+
+function JavaWorkspaceRoot(): RootFunction {
+	const moduleRoot = createRootDetector(["pom.xml", "build.gradle", ".classpath"]);
+	return async (file: string): Promise<string | undefined> => {
+		const root = await moduleRoot(file);
+		if (!root) return undefined;
+		// Only a Maven (pom.xml) module chain-hoists here — Gradle/.classpath module
+		// roots are returned as found; multi-module Gradle wiring (settings.gradle)
+		// is a different shape and out of scope for #1671.
+		if (!(await markerExists(root, "pom.xml"))) return root;
+
+		const sessionCwd = process.cwd();
+		const stop = sessionHoistCeiling(sessionCwd, file);
+
+		let current = root;
+		const fsRoot = path.parse(current).root;
+		while (true) {
+			if (stop !== undefined && current === stop) break;
+			const parent = path.dirname(current);
+			if (parent === current || parent === fsRoot) break;
+			const parentPom = path.join(parent, "pom.xml");
+			if (!(await markerExists(parent, "pom.xml"))) break;
+			if (!(await declaresMavenModule(parent, parentPom, current))) break;
+			current = parent;
+		}
+		return enforceLspRootCeiling(current, sessionCwd, file);
 	};
 }
 
@@ -2366,9 +2501,7 @@ export const JavaServer = createInteractiveServer({
 	id: "java",
 	name: "JDT Language Server",
 	extensions: KIND_EXTENSIONS["java"],
-	root: RootWithFallback(
-		createRootDetector(["pom.xml", "build.gradle", ".classpath"]),
-	),
+	root: RootWithFallback(JavaWorkspaceRoot()),
 	language: "java",
 	command: () => process.env.JDTLS_PATH || "jdtls",
 	args: (root) => createLombokJdtlsArgs(root),
