@@ -189,4 +189,37 @@ describe("safeSpawnAsync decides from the close-event SHAPE, not event timing (#
 		expect(result.error).toBeUndefined();
 		expect(result.spawnFailure).toBeUndefined();
 	});
+
+	it("never downgrades a healthy exit(0) run when 'close' never fires and a late, unrelated 'error' follows (#1673 review round 4, F1)", async () => {
+		const child = makeFakeChild();
+		spawnMock.mockImplementation(() => {
+			queueMicrotask(async () => {
+				child.stdout?.emit("data", "ok");
+				// The production shape the verdict-latch race actually matters
+				// for: a daemonized descendant inherits our stdout/stderr pipe
+				// and never releases it, so 'close' never fires at all — only
+				// 'exit' does. Every other fixture in this file emits 'close',
+				// which (with the #1673 F2 closeSeen fast-path) makes
+				// waitForPipeIdle resolve instantly and never actually
+				// exercises the F1 latch — this fixture is exit-only so the
+				// full idle-grace window runs with the promise still undecided.
+				child.emit("exit", 0, null);
+				// Land the late error INSIDE the post-exit idle-pipe wait
+				// window (EXIT_PIPE_IDLE_GRACE_MS = 100ms), same as the F4
+				// close-based fixture above.
+				await delay(10);
+				// An unrelated failure arriving AFTER a clean exit (e.g. a
+				// post-exit kill() attempt that itself failed) must never
+				// overwrite the already-decided clean verdict.
+				child.emit("error", epermKillError);
+			});
+			return child;
+		});
+
+		const result = await safeSpawnAsync(REAL_ABSOLUTE_COMMAND, ["--version"]);
+
+		expect(result.status).toBe(0);
+		expect(result.error).toBeUndefined();
+		expect(result.spawnFailure).toBeUndefined();
+	});
 });
