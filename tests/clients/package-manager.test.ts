@@ -366,6 +366,35 @@ describe("allAvailableGlobalBinDirs", () => {
 		});
 		expect(transientCalls).toBeGreaterThan(0);
 	});
+
+	/**
+	 * #1585 review — the precision half of the fix. A manager that fails its
+	 * probe cleanly (`where`/`which` runs fine and exits 1: a real "not
+	 * installed") must NOT call `onTransient`. Without this case, a broken
+	 * implementation that fires `onTransient` on every `false` — transient or
+	 * not — would pass the "stalled" test above just as well, defeating the
+	 * whole point: distinguishing a stall from a genuine absence, not just
+	 * noticing SOME `false`.
+	 */
+	it("does not report a genuinely absent manager as transient", async () => {
+		setPlatform("linux");
+		onlyAvailable("npm");
+
+		let transientCalls = 0;
+		const dirs = await allAvailableGlobalBinDirs(() => {
+			transientCalls += 1;
+		});
+
+		expect(dirs).toEqual([]);
+		expect(transientCalls).toBe(0);
+
+		// The genuine absence latches: a second call re-reads the same durable
+		// memo, still no transient report.
+		await allAvailableGlobalBinDirs(() => {
+			transientCalls += 1;
+		});
+		expect(transientCalls).toBe(0);
+	});
 });
 
 describe("findGlobalBinary", () => {
