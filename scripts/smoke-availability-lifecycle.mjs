@@ -120,27 +120,100 @@ function writeFixtureGh(binDir, mode) {
 	if (!isWindows) fs.chmodSync(posixPath, 0o755);
 }
 
-/** Ambient system `gh`, if any -- so it can be excluded (not the WHOLE
- * system PATH) rather than stripping PATH down to just the fixture dir,
- * which would also break the fixture's OWN dependency on system utilities
- * (the "hang" mode shells out to `ping`/`cmd.exe` on Windows). */
-function findOnPath(binName) {
+/**
+ * Every ambient system `gh` on PATH.
+ *
+ * #1651 review round 3: this used to take only the FIRST `which`/`where`
+ * hit, on the assumption a host has at most one `gh` on PATH. GitHub-hosted
+ * ubuntu-latest runners don't hold that assumption -- they carry a second,
+ * independently-resolvable `gh` (observed at a location `which gh` doesn't
+ * report first) alongside the apt-installed one `which` DOES report.
+ * Excluding only the reported one left phase 5's "genuinely absent gh"
+ * setup silently answering a REAL `gh auth token` call ("no oauth token
+ * found for github.com", a real completed run, exit 1, no spawn error) --
+ * that real, correctly-classified `non-installable` answer is what phase 5
+ * was actually asserting against, not a missing binary at all. `which -a`
+ * (POSIX) / `where` (Windows already lists every match) surfaces all of them.
+ */
+function findAllOnPath(binName) {
 	const finder = process.platform === "win32" ? "where" : "which";
-	const res = spawnSync(finder, [binName], { encoding: "utf8" });
-	if (res.status !== 0) return null;
-	const lines = res.stdout
+	const args = process.platform === "win32" ? [binName] : ["-a", binName];
+	const res = spawnSync(finder, args, { encoding: "utf8" });
+	if (res.status !== 0) return [];
+	return res.stdout
 		.split(/\r?\n/)
 		.map((l) => l.trim())
 		.filter(Boolean);
-	return lines[0] ?? null;
 }
 
-function pathWithoutDirOf(fullPath, binPath) {
-	const dir = path.dirname(binPath);
+/** Symlink (falling back to a hardlink, then a copy, for filesystems/platforms
+ * that reject symlinks without elevated privilege) `src` at `dest`. */
+function shadowFile(src, dest) {
+	try {
+		fs.symlinkSync(src, dest);
+		return;
+	} catch {
+		// fall through
+	}
+	try {
+		fs.linkSync(src, dest);
+		return;
+	} catch {
+		// fall through
+	}
+	try {
+		fs.copyFileSync(src, dest);
+	} catch {
+		// Best-effort: one unreadable/unlinkable sibling (a broken symlink, a
+		// permission-denied device node under /dev-adjacent dirs, ...) must not
+		// abort the whole PATH setup over a tool this lane never calls.
+	}
+}
+
+/**
+ * A real PATH directory that (also) holds `gh`, reproduced as a SHADOW
+ * directory that links every OTHER entry but omits `gh`/`gh.exe`/`gh.cmd`.
+ *
+ * #1651 review round 3 F1: excluding the WHOLE directory (this function's
+ * predecessor) breaks any other tool that directory also carries --
+ * GitHub-hosted ubuntu-latest keeps `getconf` in the very same `/usr/bin` a
+ * second `gh` lives in, and stripping that directory silently took `getconf`
+ * off PATH too (pi-lens's own resource sampler shells out to it, and the
+ * "hang"/"ok" fixtures' own `#!/bin/sh` scripts need `/bin/sh` reachable).
+ * Masking one file instead of a whole directory keeps everything else in
+ * that directory exactly as discoverable as it was.
+ */
+function maskedGhDir(dir, maskRoot, index) {
+	const shadowDir = path.join(maskRoot, `path-mask-${index}`);
+	fs.mkdirSync(shadowDir, { recursive: true });
+	let entries;
+	try {
+		entries = fs.readdirSync(dir);
+	} catch {
+		// Directory vanished or is unreadable between `which` reporting it and
+		// now -- an empty shadow dir is the safe (if inert) fallback.
+		return shadowDir;
+	}
+	for (const name of entries) {
+		if (name === "gh" || name === "gh.exe" || name === "gh.cmd") continue;
+		shadowFile(path.join(dir, name), path.join(shadowDir, name));
+	}
+	return shadowDir;
+}
+
+/** Rebuild `fullPath` with every directory that holds one of `ghPaths`
+ * replaced by its `maskedGhDir` shadow -- every other entry is untouched. */
+function pathWithGhMasked(fullPath, ghPaths, maskRoot) {
+	const ghDirs = new Set(ghPaths.map((p) => path.resolve(path.dirname(p))));
 	const sep = path.delimiter;
+	let maskIndex = 0;
 	return fullPath
 		.split(sep)
-		.filter((e) => path.resolve(e || ".") !== path.resolve(dir))
+		.map((entry) => {
+			const resolved = path.resolve(entry || ".");
+			if (!ghDirs.has(resolved)) return entry;
+			return maskedGhDir(resolved, maskRoot, maskIndex++);
+		})
 		.join(sep);
 }
 
@@ -207,22 +280,25 @@ async function main() {
 	const binDir = fs.mkdtempSync(
 		path.join(os.tmpdir(), "pi-lens-smoke-avail-bin-"),
 	);
+	const maskRoot = fs.mkdtempSync(
+		path.join(os.tmpdir(), "pi-lens-smoke-avail-mask-"),
+	);
 	process.env.PI_LENS_HOME = scratch;
-	// Exclude any REAL system `gh` directory (GitHub-hosted runners ship one
-	// on PATH by default), don't strip PATH down to just the fixture dir --
-	// phase 5 removes the fixture to reproduce a genuinely-absent `gh`
-	// (ENOENT), and a bare "prepend the fixture dir" would silently fall
-	// through to the real system `gh` the moment the fixture is deleted
-	// (exactly the "never touch the real gh CLI" contract this lane
-	// promises). Stripping the WHOLE system PATH instead would also break the
-	// fixture's own "hang" mode, which shells out to `ping`/`cmd.exe` on
-	// Windows -- so only the real gh's directory is excluded, everything else
-	// stays.
-	const realGhPath = findOnPath("gh");
-	const pathSansRealGh = realGhPath
-		? pathWithoutDirOf(process.env.PATH ?? "", realGhPath)
+	// Mask every REAL system `gh` (GitHub-hosted runners can ship more than
+	// one on PATH -- see `findAllOnPath`'s doc comment, #1651 round 3), don't
+	// strip PATH down to just the fixture dir -- phase 5 removes the fixture
+	// to reproduce a genuinely-absent `gh` (ENOENT), and a bare "prepend the
+	// fixture dir" would silently fall through to a real system `gh` the
+	// moment the fixture is deleted (exactly the "never touch the real gh
+	// CLI" contract this lane promises). `pathWithGhMasked` only omits `gh`
+	// itself from each affected directory (round 3 F1) -- unlike excluding
+	// the whole directory, every OTHER tool that directory also carries
+	// (`getconf`, `sh`, ...) stays exactly as reachable as it was.
+	const realGhPaths = findAllOnPath("gh");
+	const pathWithGhHidden = realGhPaths.length
+		? pathWithGhMasked(process.env.PATH ?? "", realGhPaths, maskRoot)
 		: (process.env.PATH ?? "");
-	process.env.PATH = `${binDir}${path.delimiter}${pathSansRealGh}`;
+	process.env.PATH = `${binDir}${path.delimiter}${pathWithGhHidden}`;
 	// Never let a real ambient token short-circuit the fixture probe.
 	delete process.env.GH_TOKEN;
 	delete process.env.GITHUB_TOKEN;
@@ -426,6 +502,7 @@ async function main() {
 	} finally {
 		fs.rmSync(scratch, { recursive: true, force: true });
 		fs.rmSync(binDir, { recursive: true, force: true });
+		fs.rmSync(maskRoot, { recursive: true, force: true });
 	}
 
 	console.log(
