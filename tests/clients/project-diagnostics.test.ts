@@ -540,6 +540,60 @@ describe("project diagnostics adapters", () => {
 		expect(diag.line).toBeUndefined();
 	});
 
+	// #1628: trivy's `secrets` findings (`TrivyResult.secrets`) had no adapter
+	// at all before this — the CVE lane (`findings`) was the only trivy lane
+	// `lens_diagnostics mode=full` surfaced. A trivy-only secret (no gitleaks/
+	// ast-grep corroboration) was invisible there, so an agent had nothing to
+	// anchor a `lens_diagnostic_mark` call against.
+	it("anchors a trivy secret at its file:line, namespaced apart from the CVE rule id", () => {
+		const [diag] = trivyResultToProjectDiagnostics(tmp, {
+			success: true,
+			scannedAt: "",
+			findings: [],
+			licenses: [],
+			secrets: [
+				{
+					ruleId: "aws-access-key-id",
+					file: ".env",
+					line: 3,
+					title: "AWS Access Key ID",
+				},
+			],
+		});
+		expect(diag).toMatchObject({
+			filePath: path.join(tmp, ".env"),
+			line: 3,
+			severity: "error",
+			semantic: "blocking",
+			tool: "trivy",
+			runner: "trivy",
+			rule: "trivy-secret:aws-access-key-id",
+			message: "Potential secret: AWS Access Key ID",
+		});
+	});
+
+	it("surfaces both a CVE and a secret from the same trivy scan pass", () => {
+		const diags = trivyResultToProjectDiagnostics(tmp, {
+			success: true,
+			scannedAt: "",
+			licenses: [],
+			findings: [
+				{
+					vulnerabilityId: "CVE-2024-9",
+					pkgName: "lodash",
+					severity: "HIGH",
+					target: "package-lock.json",
+				},
+			],
+			secrets: [{ ruleId: "generic-api-key", file: "a.ts", line: 5 }],
+		});
+		expect(diags).toHaveLength(2);
+		expect(diags.map((d) => d.rule)).toEqual([
+			"trivy:CVE-2024-9",
+			"trivy-secret:generic-api-key",
+		]);
+	});
+
 	it("flattens dead-code buckets; unlisted deps are blocking", () => {
 		const diags = deadCodeResultToProjectDiagnostics(tmp, {
 			success: true,
