@@ -74,7 +74,7 @@ function declare(name: string): string {
 
 /** Every generation-carrying store name declared this process. */
 export function listDeclaredGenerationSources(): string[] {
-	return [...declaredSources].sort();
+	return [...declaredSources].sort((a, b) => a.localeCompare(b));
 }
 
 /**
