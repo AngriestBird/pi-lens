@@ -1,9 +1,18 @@
 import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import { queryLoader, isDisabledQueryFilePath } from "../clients/tree-sitter-query-loader.js";
 import { TreeSitterClient } from "../clients/tree-sitter-client.js";
 import { execSync } from "node:child_process";
 
-const PI_LENS = "C:/Users/R3LiC/Desktop/pi-lens";
+// #1728: repo root derived from this file's own on-disk location, never a
+// hardcoded machine path. This dev-only tool scans pi-lens's own tree.
+// Forward-slashed for the `find` shell invocation below, which expects
+// POSIX-style paths (git-bash `find` on Windows).
+const PI_LENS = path
+	.resolve(fileURLToPath(import.meta.url), "..", "..")
+	.replace(/\\/g, "/");
 
 const tsFiles = execSync(
   `find "${PI_LENS}" -name "*.ts" -type f -not -path "*/node_modules/*" -not -path "*/dist/*" -not -path "*/.pi-lens/*"`,
@@ -63,4 +72,6 @@ for (const [ruleId, ruleFindings] of sorted) {
   }
 }
 
-fs.writeFileSync("C:/WINDOWS/TEMP/pi_lens_ts_findings.json", JSON.stringify(findings, null, 2));
+const outPath = path.join(os.tmpdir(), "pi_lens_ts_findings.json");
+fs.writeFileSync(outPath, JSON.stringify(findings, null, 2));
+console.log(`Wrote findings to ${outPath}`);
