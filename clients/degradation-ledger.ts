@@ -80,7 +80,17 @@ export type DegradationKind =
 	 * to poison), but the count still tells a dogfood session whether a
 	 * "hung" server is truly hung or just answering late.
 	 */
-	| "lsp-nav-late-answer";
+	| "lsp-nav-late-answer"
+	/**
+	 * A shell-out linter/analyzer runner (knip, vulture, jscpd, …) produced no
+	 * usable output — empty stdout, or (for report-file runners) no report
+	 * file — on a NONZERO exit (#1736). The empty-result branches these
+	 * runners fall back to for "no findings" must never fire here: a broken
+	 * shim, crash, or config-load error must read as errored/skipped, not
+	 * clean. Reason names the binary and exit status so a stuck/corrupted
+	 * runner is diagnosable from the ledger alone.
+	 */
+	| "runner-empty-result";
 
 export interface DegradationRecord {
 	kind: unknown;

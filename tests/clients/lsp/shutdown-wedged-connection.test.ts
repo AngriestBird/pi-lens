@@ -109,7 +109,7 @@ describe("clientShutdown with a fully wedged connection (#1620)", () => {
 		await mod.clientShutdown(state);
 
 		expect(state.connection.dispose).toHaveBeenCalledTimes(1);
-		expect(removeLspChild).toHaveBeenCalledWith(0);
+		expect(removeLspChild).toHaveBeenCalledWith(0, undefined);
 		expect(kill).toHaveBeenCalled();
 	}, 5_000);
 
@@ -164,6 +164,6 @@ describe("clientShutdown with a fully wedged connection (#1620)", () => {
 
 		expect(settled, "clientShutdown must settle within 1000ms").toBe(true);
 		expect(kill).toHaveBeenCalled();
-		expect(removeLspChild).toHaveBeenCalledWith(0);
+		expect(removeLspChild).toHaveBeenCalledWith(0, undefined);
 	}, 5_000);
 });

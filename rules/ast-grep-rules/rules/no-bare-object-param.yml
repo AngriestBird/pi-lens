@@ -1,6 +1,6 @@
 id: no-bare-object-param
 language: TypeScript
-severity: warning
+severity: error
 message: "Parameter typed bare 'object' — guarantees nothing about shape, use Record<string, unknown> or a real interface"
 note: |
   `object` only tells the compiler "not a primitive" — it doesn't
@@ -41,6 +41,12 @@ note: |
   non-primitive — `Record<string, unknown>` says that honestly without
   over-committing to a fixed shape. Zero hits remained after the fix,
   so severity stays at `warning` rather than `hint`.
+
+  2026-08-19 (refs #1718): promoted `warning` -> `error` as part of the
+  anti-slop pattern adoption. Re-ran the FP scan on the current tree
+  (clients/ + tests/, same napi engine): still 0 hits. A zero-violation
+  rule costs nothing to run at `error`, and it stays free only if
+  promoted before someone writes the first one.
 rule:
   kind: predefined_type
   regex: "^object$"

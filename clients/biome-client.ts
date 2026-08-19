@@ -105,14 +105,15 @@ export class BiomeClient {
 		const resolveCwd = cwd ?? process.cwd();
 		const cached = this.localBinaryByCwd.get(resolveCwd);
 		if (cached) return { cmd: cached, args: [] };
-		if (this.autoInstalledBinaryPath) {
-			return { cmd: this.autoInstalledBinaryPath, args: [] };
-		}
 
-		// Walk up from cwd looking for node_modules/.bin/biome.
-		// Also check ~/.pi-lens/tools (where ensureTool("biome") auto-installs),
-		// so we avoid the ~1.5s `npx @biomejs/biome --version` fallback when
-		// the tool is already installed but not in the project's node_modules.
+		// Walk up from cwd looking for node_modules/.bin/biome BEFORE trusting
+		// `autoInstalledBinaryPath` (#1731). That field is set once, the first
+		// time `ensureAvailable()` auto-installs for ANY cwd this session, and
+		// every later call for every OTHER cwd short-circuited on it — so a
+		// project that ships its own biome never won once the session's first
+		// managed install had already happened. Project-local-first (discipline
+		// B, #1721) means the project's pinned version and config resolution
+		// always outrank a managed copy, autoinstalled or not.
 		// On Windows prefer .cmd (native batch) over the sh wrapper — 2x faster.
 		const isWin = process.platform === "win32";
 		const piLensBin = path.join(
@@ -125,15 +126,24 @@ export class BiomeClient {
 			? [
 					path.join(resolveCwd, "node_modules", ".bin", "biome.cmd"),
 					path.join(resolveCwd, "node_modules", ".bin", "biome"),
-					path.join(piLensBin, "biome.cmd"),
-					path.join(piLensBin, "biome"),
 				]
-			: [
-					path.join(resolveCwd, "node_modules", ".bin", "biome"),
-					path.join(resolveCwd, "node_modules", ".bin", "biome.cmd"),
-					path.join(piLensBin, "biome"),
-				];
+			: [path.join(resolveCwd, "node_modules", ".bin", "biome")];
 		for (const p of candidates) {
+			if (fs.existsSync(p)) {
+				this.localBinaryByCwd.set(resolveCwd, p);
+				return { cmd: p, args: [] };
+			}
+		}
+		if (this.autoInstalledBinaryPath) {
+			return { cmd: this.autoInstalledBinaryPath, args: [] };
+		}
+		// Also check ~/.pi-lens/tools (where ensureTool("biome") auto-installs),
+		// so we avoid the ~1.5s `npx @biomejs/biome --version` fallback when the
+		// tool is already installed but not in the project's node_modules.
+		const managedCandidates = isWin
+			? [path.join(piLensBin, "biome.cmd"), path.join(piLensBin, "biome")]
+			: [path.join(piLensBin, "biome")];
+		for (const p of managedCandidates) {
 			if (fs.existsSync(p)) {
 				this.localBinaryByCwd.set(resolveCwd, p);
 				return { cmd: p, args: [] };

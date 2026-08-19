@@ -10,6 +10,7 @@ import {
 	saveProjectDiagnosticsSnapshot,
 	writeProjectDiagnosticsDeltaReport,
 } from "../../clients/project-diagnostics/cache.js";
+import { MTIME_DRIFT_TOLERANCE_MS } from "../../clients/blocker-freshness.js";
 import { knipIssuesToProjectDiagnostics } from "../../clients/project-diagnostics/runner-adapters/knip.js";
 import { jscpdResultToProjectDiagnostics } from "../../clients/project-diagnostics/runner-adapters/jscpd.js";
 import { circularDepsToProjectDiagnostics } from "../../clients/project-diagnostics/runner-adapters/madge.js";
@@ -141,6 +142,11 @@ describe("project diagnostics cache", () => {
 	});
 });
 
+function setMtime(file: string, ms: number): void {
+	const when = new Date(ms);
+	fs.utimesSync(file, when, when);
+}
+
 describe("reconcileProjectDiagnosticsSnapshot (#298 staleness)", () => {
 	function diag(filePath: string) {
 		return {
@@ -213,6 +219,46 @@ describe("reconcileProjectDiagnosticsSnapshot (#298 staleness)", () => {
 			reconcileProjectDiagnosticsSnapshot(snap);
 		expect(reconciled.diagnostics).toHaveLength(1);
 		expect(staleDropped).toBe(0);
+	});
+
+	// #1711: fabricates the mtime/scannedAt pair directly, rather than relying
+	// on a real write race, so the boundary is deterministic. A bare +1ms
+	// tolerance did not cover the measured Windows host skew between a file's
+	// mtime and the `Date.now()` read that produces `scannedAt` (up to
+	// ~11.4ms, #1491/#1498) — a same-tick write-then-scan silently DROPPED a
+	// live diagnostic here, the worse sibling of #1708's demote-only gate.
+	it("keeps a diagnostic whose mtime lands within MTIME_DRIFT_TOLERANCE_MS of scannedAt", () => {
+		const f = path.join(tmp, "same-tick.ts");
+		fs.writeFileSync(f, "export const a = 1;\n");
+		const scannedAtMs = Date.UTC(2026, 7, 18, 7, 0, 0);
+		setMtime(f, scannedAtMs + MTIME_DRIFT_TOLERANCE_MS);
+		const snap = snapshot({
+			scannedAt: new Date(scannedAtMs).toISOString(),
+			diagnostics: [diag(f)],
+			filesScanned: 1,
+		});
+		const { snapshot: reconciled, staleDropped } =
+			reconcileProjectDiagnosticsSnapshot(snap);
+		expect(reconciled.diagnostics).toHaveLength(1);
+		expect(staleDropped).toBe(0);
+	});
+
+	// Pins the far edge so a deleted or widened tolerance cannot survive:
+	// one millisecond past MTIME_DRIFT_TOLERANCE_MS still drops.
+	it("still drops a diagnostic whose mtime lands past MTIME_DRIFT_TOLERANCE_MS of scannedAt", () => {
+		const f = path.join(tmp, "genuine-edit.ts");
+		fs.writeFileSync(f, "export const a = 1;\n");
+		const scannedAtMs = Date.UTC(2026, 7, 18, 7, 0, 0);
+		setMtime(f, scannedAtMs + MTIME_DRIFT_TOLERANCE_MS + 1);
+		const snap = snapshot({
+			scannedAt: new Date(scannedAtMs).toISOString(),
+			diagnostics: [diag(f)],
+			filesScanned: 1,
+		});
+		const { snapshot: reconciled, staleDropped } =
+			reconcileProjectDiagnosticsSnapshot(snap);
+		expect(reconciled.diagnostics).toHaveLength(0);
+		expect(staleDropped).toBe(1);
 	});
 });
 

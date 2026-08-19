@@ -72,13 +72,24 @@ import {
 	getDegradationSummary,
 	resetDegradationLedger,
 } from "../../../clients/degradation-ledger.js";
-import { getRefreshableManagedNpmTools } from "../../../clients/installer/index.js";
+import {
+	checkProbeCache,
+	getRefreshableManagedNpmTools,
+	resetProbeCacheStateForTesting,
+	TOOLS,
+	updateProbeCache,
+} from "../../../clients/installer/index.js";
 import {
 	getManagedToolRefreshStatePath,
 	readManagedToolRefreshState,
 	runManagedToolRefresh,
+	stampManagedToolInstalled,
 } from "../../../clients/installer/managed-tool-refresh.js";
-import { resetManagedToolRefreshSession } from "../../../clients/installer/managed-tool-refresh-session.js";
+import {
+	managedToolRefreshesThisSession,
+	reserveManagedToolRefreshSlot,
+	resetManagedToolRefreshSession,
+} from "../../../clients/installer/managed-tool-refresh-session.js";
 
 const TOOLS_DIR = path.join(TEST_HOME, "tools");
 const NODE_MODULES = path.join(TOOLS_DIR, "node_modules");
@@ -86,14 +97,45 @@ const STATE_PATH = getManagedToolRefreshStatePath();
 const DAY_MS = 24 * 60 * 60 * 1000;
 const NOW = 1_800_000_000_000;
 
-/** Install a fake managed package at `version`, as npm would leave it. */
-function installFixture(packageName: string, version: string): void {
+const IS_WINDOWS = process.platform === "win32";
+
+/**
+ * A real, runnable `node_modules/.bin` shim. `verifyToolBinary` spawns the
+ * binary for real (through `node:child_process`, not the mocked safe-spawn
+ * seam), so the post-update verification #1746 review F2 asks for can only be
+ * exercised against something the OS can actually execute.
+ */
+function installBinShim(binaryName: string, exitCode = 0): void {
+	const binDir = path.join(NODE_MODULES, ".bin");
+	fs.mkdirSync(binDir, { recursive: true });
+	if (IS_WINDOWS) {
+		fs.writeFileSync(
+			path.join(binDir, `${binaryName}.cmd`),
+			`@echo off\r\necho 9.9.9\r\nexit /b ${exitCode}\r\n`,
+		);
+		return;
+	}
+	const shimPath = path.join(binDir, binaryName);
+	fs.writeFileSync(shimPath, `#!/bin/sh\necho 9.9.9\nexit ${exitCode}\n`);
+	fs.chmodSync(shimPath, 0o755);
+}
+
+/**
+ * Install a fake managed package at `version`, as npm would leave it: the
+ * package tree AND a runnable bin shim.
+ */
+function installFixture(
+	packageName: string,
+	version: string,
+	options: { binaryName?: string; shimExitCode?: number } = {},
+): void {
 	const dir = path.join(NODE_MODULES, packageName);
 	fs.mkdirSync(dir, { recursive: true });
 	fs.writeFileSync(
 		path.join(dir, "package.json"),
 		JSON.stringify({ name: packageName, version }),
 	);
+	installBinShim(options.binaryName ?? packageName, options.shimExitCode ?? 0);
 }
 
 function installedVersion(packageName: string): string | undefined {
@@ -169,6 +211,9 @@ beforeEach(() => {
 	sessionLogSpy.mockReset();
 	resetDegradationLedger();
 	resetManagedToolRefreshSession();
+	// The probe cache is module state shared with the installer; a leaked entry
+	// would let the F2 invalidation test pass on a stale answer.
+	resetProbeCacheStateForTesting();
 	delete process.env.PI_LENS_DISABLE_TOOL_REFRESH;
 	delete process.env.PI_LENS_TOOL_REFRESH_MAX_PER_SESSION;
 	delete process.env.PI_LENS_TOOL_REFRESH_INTERVAL_MS;
@@ -193,6 +238,24 @@ describe("refresh candidate selection", () => {
 		// reinstalls a managed copy that drifts off one, so it must not be
 		// re-resolved here.
 		expect(candidates.every((c) => !/[^@]@\d/.test(c.packageName))).toBe(true);
+	});
+
+	it("every refreshable npm tool declares the binary the refresh verifies", () => {
+		// A refresh verifies `node_modules/.bin/<binaryName>` after the update, so
+		// an npm entry without a `binaryName` cannot be verified and is skipped.
+		// No such entry exists today, which is why the skip itself is a type
+		// narrowing rather than a live branch. THIS is the guard with teeth: it
+		// fails the day someone adds an unverifiable npm tool, instead of that
+		// tool silently dropping out of the refresh population.
+		const npmEntries = TOOLS.filter(
+			(t) => t.installStrategy === "npm" && t.packageName,
+		);
+		expect(npmEntries.filter((t) => !t.binaryName).map((t) => t.id)).toEqual(
+			[],
+		);
+		expect(
+			getRefreshableManagedNpmTools().every((c) => c.binaryName.length > 0),
+		).toBe(true);
 	});
 
 	it("ignores registry entries that are not installed in the managed tree", async () => {
@@ -275,6 +338,45 @@ describe("cadence", () => {
 		await runManagedToolRefresh(NOW);
 
 		expect(updateCalls()[0].args).toContain("pyright");
+	});
+
+	it("breaks a stamp tie on tool id so the choice is deterministic", async () => {
+		installFixture("knip", "1.0.0");
+		installFixture("pyright", "1.0.0");
+		writeState({
+			knip: { checkedAt: NOW - 9 * DAY_MS },
+			pyright: { checkedAt: NOW - 9 * DAY_MS },
+		});
+		stubSpawn("ok", {});
+
+		await runManagedToolRefresh(NOW);
+
+		// Identical stamps: without the tie-break the winner is whatever order
+		// the registry happens to list, which changes when a tool is added.
+		expect(updateCalls()[0].args).toContain("knip");
+	});
+});
+
+describe("update command", () => {
+	it("skips lifecycle scripts for an ordinary package", async () => {
+		installFixture("knip", "6.4.1");
+		stubSpawn("ok", {});
+
+		await runManagedToolRefresh(NOW);
+
+		expect(updateCalls()[0].args).toContain("--ignore-scripts");
+	});
+
+	it("keeps lifecycle scripts for a package that needs its postinstall", async () => {
+		// biome downloads its native binary in postinstall. Updating it with
+		// --ignore-scripts moves the JS launcher and leaves the old binary.
+		installFixture("@biomejs/biome", "1.0.0", { binaryName: "biome" });
+		stubSpawn("ok", {});
+
+		await runManagedToolRefresh(NOW);
+
+		expect(updateCalls()[0].args).toContain("@biomejs/biome");
+		expect(updateCalls()[0].args).not.toContain("--ignore-scripts");
 	});
 });
 
@@ -377,6 +479,214 @@ describe("failed refresh", () => {
 	});
 });
 
+/**
+ * #1746 review F1. `remainingSessionBudget()` used to be read BEFORE two
+ * `await`s and the attempt counted after them, so two overlapping runs both saw
+ * a free slot and both spawned `npm update` for the same package into the same
+ * unlocked managed `node_modules`. `scheduleManagedToolRefresh` arms on every
+ * `handleSessionStart` and an `npm update` easily outlives a 30s session gap,
+ * so the overlap is the ordinary case, not a contrived one.
+ */
+describe("concurrent runs (review F1)", () => {
+	/** Hold the update spawn open until the test lets it finish. */
+	function stubSlowSpawn(): { finish: () => void } {
+		let release: () => void = () => {};
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		spawnMock.mockImplementation(async (_command: string, args: string[]) => {
+			if (!args.includes("update") && !args.includes("upgrade")) {
+				return { stdout: "npm", stderr: "", status: 0 };
+			}
+			await gate;
+			return { stdout: "", stderr: "", status: 0 };
+		});
+		return { finish: () => release() };
+	}
+
+	it("spawns one update when two runs overlap", async () => {
+		installFixture("knip", "6.4.1");
+		installFixture("pyright", "1.0.0");
+		const slow = stubSlowSpawn();
+
+		// Genuinely concurrent: the second call starts while the first is parked
+		// inside its spawn, which is exactly the window the old code raced in.
+		const first = runManagedToolRefresh(NOW);
+		const second = runManagedToolRefresh(NOW);
+		slow.finish();
+		await Promise.all([first, second]);
+
+		expect(updateCalls()).toHaveLength(1);
+	});
+
+	it("gives both overlapping callers the same outcome", async () => {
+		installFixture("knip", "6.4.1");
+		const slow = stubSlowSpawn();
+
+		const first = runManagedToolRefresh(NOW);
+		const second = runManagedToolRefresh(NOW);
+		slow.finish();
+		const [a, b] = await Promise.all([first, second]);
+
+		expect(b).toBe(a);
+	});
+
+	it("starts a fresh run once the previous one has settled", async () => {
+		installFixture("knip", "6.4.1");
+		installFixture("pyright", "1.0.0");
+		vi.stubEnv("PI_LENS_TOOL_REFRESH_MAX_PER_SESSION", "2");
+		stubSpawn("ok", {});
+
+		await runManagedToolRefresh(NOW);
+		await runManagedToolRefresh(NOW);
+
+		// The in-flight guard must not become a process-lifetime latch.
+		expect(updateCalls()).toHaveLength(2);
+	});
+
+	it("takes the session slot without a gap between checking and taking", () => {
+		// The budget seam itself, independent of the in-flight guard: two
+		// reservations against a budget of one cannot both succeed. A
+		// read-then-take split is precisely what the F1 race exploited.
+		expect(reserveManagedToolRefreshSlot(1)).toBe(true);
+		expect(reserveManagedToolRefreshSlot(1)).toBe(false);
+		expect(managedToolRefreshesThisSession()).toBe(1);
+	});
+});
+
+/**
+ * #1746 review round 2 (R2-F1). The walk used to re-consult the GLOBAL session
+ * counter after each awaited refresh. `handleSessionStart` zeroes that counter,
+ * so a session start landing inside a 120s `npm update` re-armed the budget the
+ * running loop was still spending — and N session starts during one long update
+ * walked the whole 22-tool stale list.
+ */
+describe("a session start mid-run does not extend the run (review R2-F1)", () => {
+	it("still spawns one update when the budget re-arms during the spawn", async () => {
+		installFixture("knip", "6.4.1");
+		installFixture("pyright", "1.0.0");
+		let sawUpdate = 0;
+		spawnMock.mockImplementation(async (_c: string, args: string[]) => {
+			if (!args.includes("update")) {
+				return { stdout: "npm", stderr: "", status: 0 };
+			}
+			sawUpdate += 1;
+			// A `/new` arrives while npm is still running. This is the ordinary
+			// case: the spawn budget is 120s and a session start costs nothing.
+			resetManagedToolRefreshSession();
+			return { stdout: "", stderr: "", status: 0 };
+		});
+
+		await runManagedToolRefresh(NOW);
+
+		expect(sawUpdate).toBe(1);
+		expect(updateCalls()).toHaveLength(1);
+	});
+
+	it("does not walk the stale list when many session starts land mid-run", async () => {
+		for (const pkg of ["knip", "pyright", "oxlint", "madge"]) {
+			installFixture(pkg, "1.0.0");
+		}
+		spawnMock.mockImplementation(async (_c: string, args: string[]) => {
+			if (!args.includes("update")) {
+				return { stdout: "npm", stderr: "", status: 0 };
+			}
+			// Three sessions start while this one update runs.
+			resetManagedToolRefreshSession();
+			resetManagedToolRefreshSession();
+			resetManagedToolRefreshSession();
+			return { stdout: "", stderr: "", status: 0 };
+		});
+
+		await runManagedToolRefresh(NOW);
+
+		expect(updateCalls()).toHaveLength(1);
+	});
+
+	it("still refreshes the run's own allowance when it is raised", async () => {
+		installFixture("knip", "6.4.1");
+		installFixture("pyright", "1.0.0");
+		installFixture("oxlint", "1.0.0");
+		vi.stubEnv("PI_LENS_TOOL_REFRESH_MAX_PER_SESSION", "2");
+		stubSpawn("ok", {});
+
+		await runManagedToolRefresh(NOW);
+
+		// The local capture must not become a cap of one: a run reserves the
+		// whole allowance up front and is entitled to spend it.
+		expect(updateCalls()).toHaveLength(2);
+	});
+
+	it("lets the NEXT run use the budget a mid-run session start restored", async () => {
+		installFixture("knip", "6.4.1");
+		installFixture("pyright", "1.0.0");
+		spawnMock.mockImplementation(async (_c: string, args: string[]) => {
+			if (!args.includes("update")) {
+				return { stdout: "npm", stderr: "", status: 0 };
+			}
+			resetManagedToolRefreshSession();
+			return { stdout: "", stderr: "", status: 0 };
+		});
+
+		await runManagedToolRefresh(NOW);
+		// The reset is not swallowed — it restores the SESSION's right to start a
+		// fresh run, which is what re-arming is for. It just must not extend the
+		// run that was already walking.
+		await runManagedToolRefresh(NOW);
+
+		expect(updateCalls()).toHaveLength(2);
+	});
+});
+
+/**
+ * #1746 review F3: the session counter is the seam the "count the ATTEMPT, not
+ * the success" claim actually lives on. The earlier tests proved it off a
+ * function-local budget variable, which a mutation to the shared counter left
+ * green.
+ */
+describe("the session counter records attempts (review F3)", () => {
+	it("keeps the slot spent after a failed update", async () => {
+		installFixture("knip", "6.4.1");
+		stubSpawn("fail");
+
+		await runManagedToolRefresh(NOW);
+
+		expect(managedToolRefreshesThisSession()).toBe(1);
+	});
+
+	it("keeps the slot spent after a successful update", async () => {
+		installFixture("knip", "6.4.1");
+		stubSpawn("ok", { knip: "6.32.2" });
+
+		await runManagedToolRefresh(NOW);
+
+		expect(managedToolRefreshesThisSession()).toBe(1);
+	});
+
+	it("hands the slot back when the run finds nothing to refresh", async () => {
+		installFixture("knip", "6.32.2");
+		writeState({ knip: { checkedAt: NOW - DAY_MS, version: "6.32.2" } });
+		stubSpawn("ok");
+
+		const outcome = await runManagedToolRefresh(NOW);
+
+		expect(outcome.skipped).toBe("nothing-due");
+		// A run that never spawned must not burn the session's only slot.
+		expect(managedToolRefreshesThisSession()).toBe(0);
+	});
+
+	it("hands the slot back when the state is unreadable", async () => {
+		installFixture("knip", "6.4.1");
+		fs.mkdirSync(TOOLS_DIR, { recursive: true });
+		fs.writeFileSync(STATE_PATH, "{ not json");
+		stubSpawn("ok");
+
+		await runManagedToolRefresh(NOW);
+
+		expect(managedToolRefreshesThisSession()).toBe(0);
+	});
+});
+
 describe("unreadable state is not fresh and not stale", () => {
 	it("refreshes nothing and records the gap", async () => {
 		installFixture("knip", "6.4.1");
@@ -410,6 +720,18 @@ describe("unreadable state is not fresh and not stale", () => {
 			status: "unreadable",
 		});
 	});
+
+	it("reports an unreadable path as unreadable, not empty", async () => {
+		// ONLY ENOENT means "never refreshed". A directory where the file belongs
+		// (EISDIR/EPERM on read) is unknown cadence — treating every read error as
+		// "no stamp yet" makes every tool look due, forever.
+		fs.rmSync(STATE_PATH, { force: true, recursive: true });
+		fs.mkdirSync(STATE_PATH, { recursive: true });
+		const read = await readManagedToolRefreshState();
+		fs.rmSync(STATE_PATH, { force: true, recursive: true });
+
+		expect(read.status).toBe("unreadable");
+	});
 });
 
 describe("observability", () => {
@@ -440,19 +762,195 @@ describe("observability", () => {
 		).toBe(true);
 	});
 
-	it("names the tool that kept serving a version it could not verify", async () => {
+	it("reports the version actually on disk after a failed update", async () => {
 		installFixture("knip", "6.4.1");
 		stubSpawn("fail");
 
 		await runManagedToolRefresh(NOW);
 
+		// Not "keeping 6.4.1" (review F2): the spawn budget can kill the package
+		// manager mid-write, so the only honest claim is what the tree says NOW.
 		expect(
 			logRows().some(
 				(row) =>
 					row.includes("managed-tool-refresh knip") &&
-					row.includes("keeping 6.4.1"),
+					row.includes("on disk now 6.4.1") &&
+					row.includes("was 6.4.1"),
 			),
 		).toBe(true);
+	});
+
+	it("reports the new version when a killed update already moved the tree", async () => {
+		installFixture("knip", "6.4.1");
+		spawnMock.mockImplementation(async (_c: string, args: string[]) => {
+			if (!args.includes("update")) {
+				return { stdout: "npm", stderr: "", status: 0 };
+			}
+			// npm rewrote the package, then the 120s budget killed it mid-run.
+			installFixture("knip", "6.32.2");
+			return {
+				stdout: "",
+				stderr: "",
+				status: null,
+				error: new Error("Process timed out after 120000ms"),
+			};
+		});
+
+		const outcome = await runManagedToolRefresh(NOW);
+
+		expect(outcome.refreshed[0]).toMatchObject({
+			ok: false,
+			currentVersion: "6.32.2",
+			changed: true,
+		});
+		expect(logRows().some((row) => row.includes("on disk now 6.32.2"))).toBe(
+			true,
+		);
+	});
+});
+
+/**
+ * #1746 review F2. The refresh mutates `node_modules`, so it owes the same
+ * post-write verification `installNpmTool` treats as mandatory, and it owes the
+ * probe cache an invalidation — a 24h cached path would otherwise keep serving
+ * a binary the update just replaced or broke.
+ */
+describe("post-update verification (review F2)", () => {
+	it("fails the refresh when the updated binary cannot run", async () => {
+		installFixture("knip", "6.4.1");
+		spawnMock.mockImplementation(async (_c: string, args: string[]) => {
+			if (!args.includes("update")) {
+				return { stdout: "npm", stderr: "", status: 0 };
+			}
+			// The update lands a new version whose shim is broken.
+			installFixture("knip", "6.32.2", { shimExitCode: 1 });
+			return { stdout: "", stderr: "", status: 0 };
+		});
+
+		const outcome = await runManagedToolRefresh(NOW);
+
+		expect(outcome.refreshed[0]).toMatchObject({
+			ok: false,
+			verified: false,
+			currentVersion: "6.32.2",
+		});
+		const group = getDegradationSummary().find(
+			(g) => g.kind === "managed-tool-refresh",
+		);
+		expect(group?.count).toBe(1);
+		expect(group?.latestReasons[0].reason).toContain("failed verification");
+		// Stamped failed, so the shorter retry cooldown brings it back sooner.
+		expect(readState().knip.failed).toBe(true);
+	});
+
+	it("leaves the package in place when verification fails", async () => {
+		installFixture("knip", "6.4.1");
+		spawnMock.mockImplementation(async (_c: string, args: string[]) => {
+			if (!args.includes("update")) {
+				return { stdout: "npm", stderr: "", status: 0 };
+			}
+			installFixture("knip", "6.32.2", { shimExitCode: 1 });
+			return { stdout: "", stderr: "", status: 0 };
+		});
+
+		await runManagedToolRefresh(NOW);
+
+		// installNpmTool deletes a fresh install that fails verification; here a
+		// working tool existed a moment ago, so deleting it takes the tool offline
+		// for certain instead of probably.
+		expect(installedVersion("knip")).toBe("6.32.2");
+	});
+
+	it("marks a verified refresh as verified", async () => {
+		installFixture("knip", "6.4.1");
+		stubSpawn("ok", { knip: "6.32.2" });
+
+		const outcome = await runManagedToolRefresh(NOW);
+
+		expect(outcome.refreshed[0]).toMatchObject({ ok: true, verified: true });
+		expect(logRows().some((row) => row.includes("verified"))).toBe(true);
+	});
+
+	it("clears the cached resolution so the next probe sees the new tree", async () => {
+		installFixture("knip", "6.4.1");
+		// Cache a path the update does NOT rewrite. Pointing the cache at
+		// `package.json` would make this test pass on the mtime check alone —
+		// vacuously green with the invalidation deleted. npm frequently leaves the
+		// `.bin` shim's mtime untouched while replacing the package, which is the
+		// real case the invalidation exists for.
+		const stablePath = path.join(NODE_MODULES, "knip", "stable-shim");
+		fs.writeFileSync(stablePath, "shim");
+		await updateProbeCache("knip", stablePath);
+		expect(await checkProbeCache("knip")).toBe(stablePath);
+
+		spawnMock.mockImplementation(async (_c: string, args: string[]) => {
+			if (!args.includes("update")) {
+				return { stdout: "npm", stderr: "", status: 0 };
+			}
+			// The package moves; the cached shim path and its mtime do not.
+			fs.writeFileSync(
+				path.join(NODE_MODULES, "knip", "package.json"),
+				JSON.stringify({ name: "knip", version: "6.32.2" }),
+			);
+			return { stdout: "", stderr: "", status: 0 };
+		});
+		await runManagedToolRefresh(NOW);
+
+		// A 24h cached path would otherwise keep answering for the tree the
+		// update just replaced.
+		expect(await checkProbeCache("knip")).toBeUndefined();
+	});
+
+	it("clears the cached resolution after a failed update too", async () => {
+		installFixture("knip", "6.4.1");
+		const stablePath = path.join(NODE_MODULES, "knip", "stable-shim");
+		fs.writeFileSync(stablePath, "shim");
+		await updateProbeCache("knip", stablePath);
+		expect(await checkProbeCache("knip")).toBe(stablePath);
+
+		// A killed package manager can rewrite `.bin` shims without moving the
+		// version, so the cached answer is untrustworthy on this path as well.
+		stubSpawn("fail");
+		await runManagedToolRefresh(NOW);
+
+		expect(await checkProbeCache("knip")).toBeUndefined();
+	});
+});
+
+/**
+ * #1746 review F4. A fresh machine installs its tools today; without a stamp
+ * at install time it then spends the following sessions running `npm update`
+ * on packages that were resolved against the registry minutes earlier.
+ */
+describe("install-time stamping (review F4)", () => {
+	it("records the installed version as freshly checked", async () => {
+		installFixture("knip", "6.32.2");
+
+		await stampManagedToolInstalled("knip", "knip", NOW);
+
+		expect(readState().knip).toMatchObject({
+			checkedAt: NOW,
+			version: "6.32.2",
+		});
+	});
+
+	it("leaves a just-installed tool out of the due set", async () => {
+		installFixture("knip", "6.32.2");
+		stubSpawn("ok", {});
+
+		await stampManagedToolInstalled("knip", "knip", NOW);
+		const outcome = await runManagedToolRefresh(NOW);
+
+		expect(outcome.skipped).toBe("nothing-due");
+		expect(updateCalls()).toHaveLength(0);
+	});
+
+	it("is wired into the npm install path", () => {
+		const installer = fs.readFileSync(
+			path.join(process.cwd(), "clients", "installer", "index.ts"),
+			"utf-8",
+		);
+		expect(installer).toContain("stampManagedToolInstalled(");
 	});
 });
 

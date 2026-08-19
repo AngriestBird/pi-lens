@@ -10,6 +10,7 @@ section: Fixed
   live code. pi-lens now re-resolves one managed tool per session, at most once
   a week per tool, on a background timer that never blocks startup. Every
   refresh records the version it moved from and to in
-  `~/.pi-lens/sessionstart.log`; a refresh that fails leaves the installed
-  version serving and records one degradation rather than blocking the tool.
-  Set `PI_LENS_DISABLE_TOOL_REFRESH=1` to turn it off.
+  `~/.pi-lens/sessionstart.log`, and verifies the updated binary still runs
+  before trusting it. A refresh that fails records one degradation and clears
+  the cached tool path so the next probe re-checks the tree, rather than
+  blocking the tool. Set `PI_LENS_DISABLE_TOOL_REFRESH=1` to turn it off.

@@ -113,6 +113,42 @@ describe("taplo runner", () => {
 	// taplo exits nonzero with an empty stdout when it never linted — a rejected
 	// flag, an unreadable schema. A nonzero exit is not a spawn failure, so
 	// `result.error` is unset and an error-only guard reports a clean file.
+	// #1731 discipline B: the availability checker resolves through pi-lens's
+	// MANAGED taplo (findManagedNodeToolBinary) before any project-local check
+	// ever runs, so a project's own `node_modules/.bin/taplo` (npm
+	// `@taplo/cli`) was unreachable whenever the managed shim answered. The
+	// checker in this file is mocked to always report available, mirroring
+	// that managed-shim-present condition — the project binary must still win.
+	it("spawns the project's own node_modules/.bin/taplo ahead of the checker's command (#1731)", async () => {
+		const env = setupTestEnvironment("pi-lens-taplo-local-");
+		try {
+			const filePath = path.join(env.tmpDir, "config.toml");
+			fs.writeFileSync(filePath, "a = 1\n");
+			const binDir = path.join(env.tmpDir, "node_modules", ".bin");
+			fs.mkdirSync(binDir, { recursive: true });
+			const shimName = process.platform === "win32" ? "taplo.cmd" : "taplo";
+			const shim = path.join(binDir, shimName);
+			fs.writeFileSync(shim, "#!/bin/sh\nexit 0\n");
+			safeSpawn.mockReturnValue({
+				error: null,
+				status: 0,
+				stdout: JSON.stringify({ errors: [] }),
+				stderr: "",
+			});
+
+			const runner = (
+				await import("../../../../clients/dispatch/runners/taplo.js")
+			).default;
+			await runner.run(createTomlCtx(filePath, env.tmpDir) as never);
+
+			expect(safeSpawn).toHaveBeenCalled();
+			const [spawnedCmd] = safeSpawn.mock.calls[0] as [string, ...unknown[]];
+			expect(spawnedCmd).toBe(shim);
+		} finally {
+			env.cleanup();
+		}
+	});
+
 	it("skips when taplo exits nonzero without producing output", async () => {
 		const env = setupTestEnvironment("pi-lens-taplo-");
 		try {

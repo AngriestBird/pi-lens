@@ -60,7 +60,7 @@ import {
 } from "../../clients/dispatch/runners/utils/availability-policy.js";
 import {
 	managedToolRefreshesThisSession,
-	noteManagedToolRefreshAttempt,
+	reserveManagedToolRefreshSlot,
 	resetManagedToolRefreshSession,
 } from "../../clients/installer/managed-tool-refresh-session.js";
 import {
@@ -220,7 +220,9 @@ export const SESSION_STATE_REGISTRY: SessionStateEntry[] = [
 		reason:
 			"#1730: the managed-tool refresh budget is one `npm update` per SESSION; left process-lived, a long-running pi refreshes one tool at launch and never revisits the other 21. The weekly per-tool cadence is deliberately NOT reset here — it lives in the persisted stamp, so re-arming the budget only restores the session's right to ask.",
 		probe: {
-			arm: () => noteManagedToolRefreshAttempt(),
+			arm: () => {
+				reserveManagedToolRefreshSlot(1);
+			},
 			isArmed: () => managedToolRefreshesThisSession() === 0,
 			reset: () => resetManagedToolRefreshSession(),
 		},

@@ -42,14 +42,22 @@ export interface LatencyEntry {
 	metadata?: Record<string, unknown>;
 }
 
+/** Bound on the `recentPhases` ring below — keeps the attribution record small. */
+export const RECENT_PHASE_CAP = 5;
+
 /**
- * Most recent non-`loop_block` phase seen by `logLatency`, for cheap block
- * attribution (#1122 / #1123 item 1): the event-loop-block probe fires at
- * turn_end and cannot see *what* stalled the loop, so it stamps the last phase
- * that ran as a starting point for root-causing a genuine block. Tracked before
- * the test-mode guard so it is deterministic and unit-testable.
+ * Most recent non-`loop_block` phases seen by `logLatency`, newest first, for
+ * cheap block attribution (#1122 / #1123 item 1, widened #1723): the
+ * event-loop-block probe fires at turn_end and cannot see *what* stalled the
+ * loop, so it stamps the phases that ran as a starting point for root-causing
+ * a genuine block. A single `lastPhase` pointer names only the phase that
+ * finished right before the block — useless when the CPU hog itself never got
+ * to log a completion (it was busy blocking the loop). Keeping a short,
+ * bounded ring instead gives the block's neighborhood, not just one frame of
+ * it, while staying O(1) per call and fixed-size in memory. Tracked before the
+ * test-mode guard so it is deterministic and unit-testable.
  */
-let lastPhase: { phase: string; ts: string } | undefined;
+let recentPhases: Array<{ phase: string; ts: string }> = [];
 
 /**
  * Phases excluded from `lastPhase` attribution alongside `loop_block`.
@@ -127,13 +135,51 @@ const LAST_PHASE_EXCLUDED = new Set([
  * trusting it as the cause (it is a breadcrumb, not proof).
  */
 export function getLastLoggedPhase(): { phase: string; ts: string } | undefined {
-	return lastPhase;
+	return recentPhases[0];
+}
+
+/**
+ * The last `limit` non-`loop_block` phases logged, newest first (#1723).
+ * Bounded to `RECENT_PHASE_CAP` regardless of `limit` — a caller cannot
+ * request an unbounded ring. Same staleness caveat as `getLastLoggedPhase`:
+ * these are breadcrumbs from whatever ran most recently, not proof of cause.
+ */
+export function getRecentLoggedPhases(
+	limit = RECENT_PHASE_CAP,
+): Array<{ phase: string; ts: string }> {
+	return recentPhases.slice(0, Math.min(limit, RECENT_PHASE_CAP));
+}
+
+/**
+ * Test-only: the ring's actual storage length, bypassing the read-side
+ * `Math.min` clamp in `getRecentLoggedPhases` entirely. Needed because that
+ * clamp and the write-side `.slice(0, RECENT_PHASE_CAP)` in `logLatency` are
+ * a compensating pair — as long as ONE of them is intact, the other's
+ * deletion is invisible to any test that only observes
+ * `getRecentLoggedPhases()` output length. This pins the write-side guard
+ * specifically: if its `.slice` is deleted, storage grows past the cap and
+ * this returns the unclamped size regardless of what the read side does.
+ */
+export function _recentPhasesStorageLengthForTest(): number {
+	return recentPhases.length;
+}
+
+/**
+ * Test-only: seed the ring directly, bypassing the write-side cap in
+ * `logLatency`. Lets a test put the ring in a state the normal write path can
+ * never produce (more than `RECENT_PHASE_CAP` entries), so the read-side
+ * clamp in `getRecentLoggedPhases` can be pinned independently of the
+ * write-side guard (see `_recentPhasesStorageLengthForTest` above for why
+ * that independence matters).
+ */
+export function _setRecentPhasesForTest(entries: Array<{ phase: string; ts: string }>): void {
+	recentPhases = entries;
 }
 
 export function logLatency(entry: LatencyEntry): void {
 	const ts = new Date().toISOString();
 	if (entry.type === "phase" && entry.phase && !LAST_PHASE_EXCLUDED.has(entry.phase)) {
-		lastPhase = { phase: entry.phase, ts };
+		recentPhases = [{ phase: entry.phase, ts }, ...recentPhases].slice(0, RECENT_PHASE_CAP);
 	}
 	if (isTestMode()) {
 		return;

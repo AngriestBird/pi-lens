@@ -317,6 +317,96 @@ describe("instance-registry", () => {
 		expect(instances[0].lspChildCount).toBe(0);
 	});
 
+	describe("#1724 — recordLspChild/removeLspChild share one mutation seam", () => {
+		it("a forced shutdown's removeLspChild is not lost to a concurrent recordLspChild for a different pid", async () => {
+			// Reproduces the dogfood gap: a forced LSP shutdown's deregistration
+			// (removeLspChild) firing at roughly the same moment as a DIFFERENT
+			// client's spawn (recordLspChild) — e.g. client-ceiling eviction
+			// immediately followed by the replacement spawn. Pre-#1724,
+			// recordLspChild and removeLspChild each did their own unserialized
+			// read-modify-write, so the later WRITE to land could be built from a
+			// read taken before the earlier write, silently reverting it (this is
+			// exactly the "no read-modify-write isolation" gap atomic-write.ts
+			// documents — concurrent same-process writers still need to serialize
+			// themselves at the caller's read-modify-write seam).
+			const atomicWrite = await import("../../clients/atomic-write.js");
+			const { registerInstance, recordLspChild, removeLspChild, readInstanceRegistry } =
+				await import("../../clients/instance-registry.js");
+			await registerInstance("/proj");
+			await recordLspChild({ pid: 111, serverId: "ast-grep", command: "a" });
+
+			const realWrite = atomicWrite.writeFileAtomicAsync;
+			let releaseRecordWrite: () => void = () => {};
+			const gate = new Promise<void>((resolve) => {
+				releaseRecordWrite = resolve;
+			});
+			let writeCallCount = 0;
+			const writeSpy = vi
+				.spyOn(atomicWrite, "writeFileAtomicAsync")
+				.mockImplementation(async (...args) => {
+					writeCallCount++;
+					if (writeCallCount === 1) {
+						// This is recordLspChild(222)'s write. Hold it so
+						// removeLspChild(111) — started after it, on the same
+						// pre-removal snapshot — can complete its own
+						// read-modify-write first.
+						await gate;
+					}
+					return realWrite(
+						...(args as Parameters<typeof realWrite>),
+					);
+				});
+
+			// Kick off both without awaiting either individually: pre-fix, each
+			// runs its own unserialized read-modify-write and removeLspChild can
+			// race ahead to completion while recordLspChild's write sits gated;
+			// post-fix, removeLspChild is queued behind recordLspChild and simply
+			// waits for the gate too. Either way, only awaiting Promise.all AFTER
+			// releasing the gate avoids assuming which ordering is in effect.
+			const recordPromise = recordLspChild({
+				pid: 222,
+				serverId: "typescript",
+				command: "b",
+			});
+			const removePromise = removeLspChild(111);
+			// Give a real-fs read-modify-write cycle time to land before
+			// releasing the gated write, so pre-fix's race is deterministic
+			// rather than dependent on a single microtask tick.
+			await new Promise((resolve) => setTimeout(resolve, 50));
+			releaseRecordWrite();
+			await Promise.all([recordPromise, removePromise]);
+			writeSpy.mockRestore();
+
+			const instances = await readInstanceRegistry();
+			const pids = instances[0].lspChildren.map((child) => child.pid);
+			expect(pids).toContain(222); // the concurrent registration must land
+			expect(pids).not.toContain(111); // the removal must not be reverted
+		});
+
+		it("removeLspChild refuses to drop a pid whose recorded marker no longer matches (recycled-pid guard)", async () => {
+			const { registerInstance, recordLspChild, removeLspChild, readInstanceRegistry } =
+				await import("../../clients/instance-registry.js");
+			await registerInstance("/proj");
+			await recordLspChild({
+				pid: 444,
+				serverId: "ast-grep",
+				command: "ast-grep.exe",
+				marker: "C:\\temp\\pi-lens-ast-grep\\new-spawn.sgconfig.yml",
+			});
+
+			// A caller holding a stale marker for a pid that's since been
+			// recycled onto a differently-marked child must never remove it.
+			await removeLspChild(444, "C:\\temp\\pi-lens-ast-grep\\stale.sgconfig.yml");
+			let instances = await readInstanceRegistry();
+			expect(instances[0].lspChildren.map((c) => c.pid)).toContain(444);
+
+			// The correct marker still removes it.
+			await removeLspChild(444, "C:\\temp\\pi-lens-ast-grep\\new-spawn.sgconfig.yml");
+			instances = await readInstanceRegistry();
+			expect(instances[0].lspChildren.map((c) => c.pid)).not.toContain(444);
+		});
+	});
+
 	it("recordLspChild works even without a prior registerInstance (synthesizes a minimal entry)", async () => {
 		const { recordLspChild, readInstanceRegistry } = await import(
 			"../../clients/instance-registry.js"

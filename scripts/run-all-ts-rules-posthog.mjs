@@ -1,21 +1,37 @@
 import * as path from "node:path";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import { queryLoader } from "../clients/tree-sitter-query-loader.js";
 import { TreeSitterClient } from "../clients/tree-sitter-client.js";
 import { execSync } from "node:child_process";
 
-const POSTHOG = "C:/Users/R3LiC/Desktop/posthog";
-const TARGET_DIRS = [
-  "C:/Users/R3LiC/Desktop/posthog/posthog",
-  "C:/Users/R3LiC/Desktop/posthog/products",
-  "C:/Users/R3LiC/Desktop/posthog/ee",
-];
+// #1728: this dev-only tool scans an EXTERNAL checkout (posthog), not
+// pi-lens's own tree, so there is no repo-relative default to derive. It
+// used to hardcode a single author's now-nonexistent posthog checkout path.
+// Point it at a checkout via --posthog-dir or the POSTHOG_DIR env var.
+const argDir = process.argv
+  .slice(2)
+  .find((_, i, arr) => arr[i - 1] === "--posthog-dir");
+const POSTHOG = argDir ?? process.env.POSTHOG_DIR;
+if (!POSTHOG) {
+  console.error(
+    "Usage: node scripts/run-all-ts-rules-posthog.mjs --posthog-dir <path> " +
+      "(or set POSTHOG_DIR). Point it at a local posthog checkout."
+  );
+  process.exit(1);
+}
+const TARGET_DIRS = ["posthog", "products", "ee"].map((sub) =>
+  path.join(POSTHOG, sub)
+);
+
+const posthogPosix = POSTHOG.replace(/\\/g, "/");
+const posthogPrefix = new RegExp(`^${posthogPosix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/`);
 
 const pyFiles = [];
 for (const dir of TARGET_DIRS) {
   try {
     const found = execSync(
-      `find "${dir}" -name "*.py" -type f -not -path "*/node_modules/*" -not -path "*/.venv/*" -not -path "*/venv/*" -not -path "*/migrations/*"`,
+      `find "${dir.replace(/\\/g, "/")}" -name "*.py" -type f -not -path "*/node_modules/*" -not -path "*/.venv/*" -not -path "*/venv/*" -not -path "*/migrations/*"`,
       { encoding: "utf-8" }
     ).trim().split("\n").filter(Boolean);
     pyFiles.push(...found);
@@ -48,7 +64,7 @@ for (let i = 0; i < pyFiles.length; i++) {
       const r = await client.runQueryOnFile(q, file, "python");
       for (const f of r) {
         findings[q.id].push({
-          file: file.replace(/C:\/Users\/R3LiC\/Desktop\/posthog\//, ""),
+          file: file.replace(posthogPrefix, ""),
           line: f.line,
           text: f.text?.slice(0, 120) ?? "",
         });
@@ -69,4 +85,6 @@ for (const [ruleId, ruleFindings] of sorted) {
   }
 }
 
-fs.writeFileSync("C:/WINDOWS/TEMP/all_ts_posthog.json", JSON.stringify(findings, null, 2));
+const outPath = path.join(os.tmpdir(), "all_ts_posthog.json");
+fs.writeFileSync(outPath, JSON.stringify(findings, null, 2));
+console.log(`Wrote findings to ${outPath}`);

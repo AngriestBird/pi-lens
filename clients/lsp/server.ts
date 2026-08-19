@@ -271,6 +271,17 @@ export interface LSPServerInfo {
 	 */
 	clientWaitTimeoutMs?: number;
 	/**
+	 * #1714: how many document notifies this AUXILIARY server may hold
+	 * unacknowledged before the next notify has to prove the server drained its
+	 * input (`awaitAuxNotifyDrain`, clients/lsp/index.ts). Ignored for primaries —
+	 * they serve one file per touch and are not the fan-out target a project
+	 * sweep floods.
+	 *
+	 * Omit to take the shared auxiliary default. Set it only for a server class
+	 * with evidence of a lower ceiling.
+	 */
+	notifyInflightLimit?: number;
+	/**
 	 * Server recomputes/pushes dependent-file diagnostics after primary file changes.
 	 * Cascade can read its passive snapshot instead of actively touching neighbors.
 	 */
@@ -3352,6 +3363,13 @@ export const AstGrepServer: LSPServerInfo = {
 		RootWithFallback(NearestRoot([".git"]), async () => process.cwd()),
 	),
 	availabilityKey: "ast-grep",
+	// #1714: the one auxiliary with a measured wedge ceiling. A `lens_diagnostics
+	// mode=full` sweep of 225 files drove this server into an unrecoverable stall
+	// twice in two exposures (writes outstanding 5.9 s and 9.4 s, then a forced
+	// shutdown that timed out both the request and the exit notify). It re-parses
+	// the whole file on every didOpen, so it absorbs a sweep more slowly than the
+	// other scanners — hold it to half the shared default.
+	notifyInflightLimit: 4,
 	// First scan of a session compiles the rules.
 	initializeTimeoutMs: 15000,
 	async spawn(root, options) {

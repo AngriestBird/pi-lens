@@ -58,14 +58,17 @@ import { logSessionStart } from "../sessionstart-logger.js";
 import {
 	getManagedToolsDir,
 	getRefreshableManagedTools,
+	invalidateManagedToolResolution,
 	isManagedToolPresent,
 	type ManagedToolStrategy,
 	npmToolNeedsPostinstall,
 	refreshManagedTool,
+	resolveManagedNpmBinPath,
+	verifyToolBinary,
 } from "./index.js";
 import {
-	managedToolRefreshesThisSession,
-	noteManagedToolRefreshAttempt,
+	releaseManagedToolRefreshSlot,
+	reserveManagedToolRefreshSlot,
 } from "./managed-tool-refresh-session.js";
 
 const STATE_FILENAME = ".refresh-state.json";
@@ -286,8 +289,10 @@ async function writeRefreshStamp(
  * re-download: their refresh compares the recorded pin against the registry's,
  * and an install writes exactly the pin it used.
  *
- * Called from `installer/index.ts`'s `finishInstallAttempt`, the one funnel all
- * six install strategies pass through.
+ * Called from `installer/index.ts`'s `finishInstallAttempt` for every strategy
+ * EXCEPT npm — npm stamps itself via `stampManagedToolInstalled` below, which
+ * also captures the installed version; this funnel would otherwise overwrite
+ * that version-bearing stamp with a version-less one milliseconds later.
  */
 export async function stampManagedToolInstall(
 	toolId: string,
@@ -300,17 +305,31 @@ export async function stampManagedToolInstall(
 	});
 }
 
-// --- Per-session budget ---
-
 /**
- * Refreshes still allowed in the CURRENT session. The counter itself lives in
- * `managed-tool-refresh-session.ts` because its reset has to be reachable from
- * `handleSessionStart`, and importing THIS module for it would drag the
- * installer registry onto the `session_start` path.
+ * Stamp a tool as freshly resolved, without refreshing it.
+ *
+ * Called right after a successful managed npm install (#1746 review F4). An
+ * install already resolved the range against the registry seconds ago, so the
+ * tool is by definition current. Without this stamp a fresh machine that
+ * installs 22 tools on day one has 22 tools with no stamp, and then burns the
+ * next 22 sessions running `npm update` on packages installed minutes earlier.
+ *
+ * Best-effort by design: a missing stamp costs one wasted update, never a
+ * wrong version, so it must not fail an install.
  */
-function remainingSessionBudget(): number {
-	return Math.max(0, maxPerSession() - managedToolRefreshesThisSession());
+export async function stampManagedToolInstalled(
+	toolId: string,
+	packageName: string,
+	now: number = Date.now(),
+): Promise<void> {
+	const version = await readInstalledVersion(packageName);
+	await writeRefreshStamp(toolId, {
+		checkedAt: now,
+		...(version !== undefined && { version }),
+	});
 }
+
+// --- Per-session budget ---
 
 // --- Candidate selection ---
 
@@ -319,6 +338,8 @@ export interface RefreshCandidate {
 	strategy: ManagedToolStrategy;
 	/** npm/pip/gem only; github/maven/archive resolve from their own spec. */
 	packageName?: string;
+	/** npm only — what `refreshNpmOne` verifies after `npm update`. */
+	binaryName?: string;
 }
 
 /**
@@ -339,6 +360,7 @@ async function installedRefreshCandidates(): Promise<RefreshCandidate[]> {
 			toolId: tool.toolId,
 			strategy: tool.strategy,
 			...(tool.packageName !== undefined && { packageName: tool.packageName }),
+			...(tool.binaryName !== undefined && { binaryName: tool.binaryName }),
 		});
 	}
 	return candidates;
@@ -407,6 +429,8 @@ export interface ManagedToolRefreshResult {
 	previousVersion?: string;
 	currentVersion?: string;
 	changed: boolean;
+	/** The updated binary answered `--version`. False also covers a failed spawn. */
+	verified: boolean;
 	ok: boolean;
 }
 
@@ -480,6 +504,9 @@ async function refreshNonNpmOne(
 			previousVersion,
 			currentVersion: previousVersion,
 			changed: false,
+			// No spawn to verify for the non-npm strategies — a failed refresh never
+			// touched the installed copy, so there is nothing new to check.
+			verified: false,
 			ok: false,
 		};
 	}
@@ -508,6 +535,10 @@ async function refreshNonNpmOne(
 		previousVersion,
 		currentVersion,
 		changed,
+		// `refreshManagedTool` already verifies the artifact it just wrote
+		// (`verifyRefreshedArtifact` for github/archive/maven, the `--version`
+		// probe for pip/gem) — `ok: true` here already means "and it runs".
+		verified: true,
 		ok: true,
 	};
 }
@@ -548,26 +579,35 @@ async function refreshNpmOne(
 			0,
 			200,
 		);
+		// "Keeping <old version>" would be an unchecked assertion (#1746 review
+		// F2). The spawn budget kills the package manager where it stands, which
+		// can be mid-write: the tree may hold a new version, a half-written one,
+		// or the old one. So report the version that is actually on disk now, and
+		// drop the cached resolution either way — a killed package manager can
+		// rewrite `.bin` shims without moving the version in `package.json`.
+		const onDisk = await readInstalledVersion(packageName);
+		invalidateManagedToolResolution(candidate.toolId);
 		recordDegradationOnce({
 			kind: "managed-tool-refresh",
 			subject: candidate.toolId,
 			reason: `${pm} update failed: ${reason || "non-zero exit"}`,
 		});
 		logSessionStart(
-			`managed-tool-refresh ${candidate.toolId}: ${pm} update failed after ${elapsedMs}ms — keeping ${previousVersion ?? "installed"} (${reason || "non-zero exit"})`,
+			`managed-tool-refresh ${candidate.toolId}: ${pm} update failed after ${elapsedMs}ms — on disk now ${onDisk ?? "unreadable"} (was ${previousVersion ?? "unknown"}); resolution cache cleared for re-probe (${reason || "non-zero exit"})`,
 		);
 		await writeRefreshStamp(candidate.toolId, {
 			checkedAt: now,
 			failed: true,
-			...(previousVersion !== undefined && { version: previousVersion }),
+			...(onDisk !== undefined && { version: onDisk }),
 		});
 		return {
 			toolId: candidate.toolId,
 			strategy: "npm",
 			packageName,
 			previousVersion,
-			currentVersion: previousVersion,
-			changed: false,
+			currentVersion: onDisk,
+			changed: onDisk !== undefined && onDisk !== previousVersion,
+			verified: false,
 			ok: false,
 		};
 	}
@@ -575,6 +615,56 @@ async function refreshNpmOne(
 	const currentVersion = await readInstalledVersion(packageName);
 	const changed =
 		currentVersion !== undefined && currentVersion !== previousVersion;
+
+	// The update rewrote `node_modules`, so every cached claim about where this
+	// tool resolves — the in-memory path cache and the 24h probe cache — is now
+	// an assertion about a tree that no longer exists. Drop it BEFORE verifying,
+	// so a caller arriving mid-verify re-probes rather than reading the stale
+	// entry (#1746 review F2).
+	invalidateManagedToolResolution(candidate.toolId);
+
+	// `installNpmTool` treats verification as mandatory: an install that cannot
+	// run its own binary is not an install. An UPDATE that leaves an unrunnable
+	// binary is the same failure, and it used to pass silently — the version row
+	// was written from `package.json` alone, which a half-written tree still
+	// answers.
+	// Every npm candidate carries a binaryName; `getRefreshableManagedTools`
+	// drops npm entries that do not.
+	const binaryName = candidate.binaryName as string;
+	const binPath = resolveManagedNpmBinPath(binaryName);
+	const verified = await verifyToolBinary(binPath);
+	if (!verified) {
+		recordDegradationOnce({
+			kind: "managed-tool-refresh",
+			subject: candidate.toolId,
+			reason: `binary failed verification after ${pm} update (${previousVersion ?? "unknown"} → ${currentVersion ?? "unknown"})`,
+		});
+		// Deliberately NOT removed. `installNpmTool` deletes a freshly installed
+		// package that fails verification because nothing was working before it;
+		// here a working tool existed a moment ago, and deleting the tree takes it
+		// offline for certain rather than probably. The cache invalidation above is
+		// what lets `ensureTool`'s own probe-and-repair path see the breakage and
+		// reinstall. Stamped as failed so the shorter retry cooldown applies.
+		logSessionStart(
+			`managed-tool-refresh ${candidate.toolId}: ${pm} update ran but ${binPath} failed verification — resolution cache cleared for re-probe (${elapsedMs}ms)`,
+		);
+		await writeRefreshStamp(candidate.toolId, {
+			checkedAt: now,
+			failed: true,
+			...(currentVersion !== undefined && { version: currentVersion }),
+		});
+		return {
+			toolId: candidate.toolId,
+			strategy: "npm",
+			packageName: candidate.packageName,
+			previousVersion,
+			currentVersion,
+			changed,
+			verified: false,
+			ok: false,
+		};
+	}
+
 	await writeRefreshStamp(candidate.toolId, {
 		checkedAt: now,
 		...(currentVersion !== undefined && { version: currentVersion }),
@@ -583,7 +673,7 @@ async function refreshNpmOne(
 	// can be traced to the version that produced it, and to the moment it moved.
 	logSessionStart(
 		changed
-			? `managed-tool-refresh ${candidate.toolId}: ${previousVersion ?? "unknown"} → ${currentVersion} via ${pm} update (${elapsedMs}ms)`
+			? `managed-tool-refresh ${candidate.toolId}: ${previousVersion ?? "unknown"} → ${currentVersion} via ${pm} update, verified (${elapsedMs}ms)`
 			: `managed-tool-refresh ${candidate.toolId}: unchanged at ${currentVersion ?? previousVersion ?? "unknown"} (${elapsedMs}ms)`,
 	);
 	return {
@@ -593,64 +683,158 @@ async function refreshNpmOne(
 		previousVersion,
 		currentVersion,
 		changed,
+		verified: true,
 		ok: true,
 	};
 }
 
 /**
+ * The refresh currently running in this process, so a second caller joins it
+ * instead of starting a rival one.
+ *
+ * #1746 review F1: `scheduleManagedToolRefresh` arms on EVERY
+ * `handleSessionStart`, and an `npm update` can easily outlive the 30s gap to
+ * the next session. Without this, two runs raced through the budget check and
+ * both spawned a package manager into the same unlocked managed
+ * `node_modules`. The join is the same shape `ensureTool` uses for its own
+ * duplicate startup requests (`clients/installer/index.ts:4175-4182`, cleared
+ * at `:4314-4318`).
+ *
+ * This is the local form of the single-flight primitive #1753 proposes. When
+ * that lands, this is one of its callers.
+ */
+let refreshInFlight: Promise<ManagedToolRefreshOutcome> | null = null;
+
+/**
  * Run one session's worth of managed-tool refresh. Never throws: the caller is
  * a background timer with no one to report to.
+ *
+ * Concurrent callers share one run. The guard is only process-wide; two pi
+ * processes can still refresh at the same time, which the per-tool stamp
+ * narrows but does not close. See the PR body for that limit stated plainly.
  */
-export async function runManagedToolRefresh(
+export function runManagedToolRefresh(
 	now: number = Date.now(),
+): Promise<ManagedToolRefreshOutcome> {
+	const joined = refreshInFlight;
+	if (joined) {
+		logSessionStart(
+			"managed-tool-refresh: joining the refresh already in flight",
+		);
+		return joined;
+	}
+	// No `await` between starting the run and publishing it, so no third caller
+	// can slip through and start a second one.
+	//
+	// The clear is unconditional. An identity check (`if (refreshInFlight ===
+	// run)`) is the usual companion to this pattern — `package-manager.ts:225`
+	// needs one because its map entry can be replaced by a later caller while an
+	// older probe is still settling. This slot cannot: the line below is its only
+	// writer, and every other caller returns early while it is non-null, so when
+	// this `finally` runs the slot still holds `run`. #1746 review round 2 proved
+	// that branch unreachable (mutating it to an unconditional clear failed no
+	// test), and a branch no input can take is not a guard.
+	const run = executeManagedToolRefresh(now).finally(() => {
+		refreshInFlight = null;
+	});
+	refreshInFlight = run;
+	return run;
+}
+
+async function executeManagedToolRefresh(
+	now: number,
 ): Promise<ManagedToolRefreshOutcome> {
 	if (process.env.PI_LENS_DISABLE_TOOL_REFRESH === "1") {
 		return { skipped: "disabled", refreshed: [] };
 	}
-	let budget = remainingSessionBudget();
-	if (budget <= 0) return { skipped: "session-budget", refreshed: [] };
-
-	const candidates = await installedRefreshCandidates();
-	if (candidates.length === 0)
-		return { skipped: "no-candidates", refreshed: [] };
-
-	const read = await readManagedToolRefreshState();
-	if (read.status === "unreadable") {
-		// Unknown cadence. Refreshing nothing is the only answer that neither
-		// drifts forever nor bursts every session; the ledger row is what makes
-		// the suppressed cadence visible instead of silent.
-		recordDegradationOnce({
-			kind: "managed-tool-refresh",
-			subject: "refresh-state",
-			reason: `refresh state unreadable (${read.reason}); skipping refresh this session`,
-		});
-		logSessionStart(
-			`managed-tool-refresh: state unreadable (${read.reason}) — no tool refreshed this session`,
-		);
-		return { skipped: "state-unreadable", refreshed: [] };
+	// Reserve BEFORE any await. Reading the budget here and spending it after
+	// the two reads below is the F1 race; `reserveManagedToolRefreshSlot`
+	// checks and takes in one synchronous step, and a run that turns out to
+	// have nothing to do hands the slot straight back.
+	if (!reserveManagedToolRefreshSlot(maxPerSession())) {
+		return { skipped: "session-budget", refreshed: [] };
 	}
+	// Slots this run HOLDS and has not yet spent. Held slots are given back on
+	// every exit that never reached a spawn; a spent slot is gone for good.
+	let held = 1;
+	const releaseReservation = (): void => {
+		while (held > 0) {
+			releaseManagedToolRefreshSlot();
+			held -= 1;
+		}
+	};
 
-	const stale = selectStaleTools(candidates, read.state, now);
-	if (stale.length === 0) return { skipped: "nothing-due", refreshed: [] };
+	try {
+		const candidates = await installedRefreshCandidates();
+		if (candidates.length === 0) {
+			releaseReservation();
+			return { skipped: "no-candidates", refreshed: [] };
+		}
 
-	const refreshed: ManagedToolRefreshResult[] = [];
-	for (const candidate of stale) {
-		if (budget <= 0) break;
-		budget -= 1;
-		// Count the ATTEMPT, not the success: a failing tool must not hand its
-		// slot to the next candidate and turn one budget into 22 spawns.
-		noteManagedToolRefreshAttempt();
-		try {
-			refreshed.push(
-				await refreshOne(candidate, read.state.tools[candidate.toolId], now),
-			);
-		} catch (err) {
+		const read = await readManagedToolRefreshState();
+		if (read.status === "unreadable") {
+			// Unknown cadence. Refreshing nothing is the only answer that neither
+			// drifts forever nor bursts every session; the ledger row is what makes
+			// the suppressed cadence visible instead of silent.
+			releaseReservation();
 			recordDegradationOnce({
 				kind: "managed-tool-refresh",
-				subject: candidate.toolId,
-				reason: `refresh threw: ${(err as Error).message}`,
+				subject: "refresh-state",
+				reason: `refresh state unreadable (${read.reason}); skipping refresh this session`,
 			});
+			logSessionStart(
+				`managed-tool-refresh: state unreadable (${read.reason}) — no tool refreshed this session`,
+			);
+			return { skipped: "state-unreadable", refreshed: [] };
 		}
+
+		const stale = selectStaleTools(candidates, read.state, now);
+		if (stale.length === 0) {
+			releaseReservation();
+			return { skipped: "nothing-due", refreshed: [] };
+		}
+
+		// Top the reservation up to cover this run's whole walk, in ONE
+		// synchronous block, and capture the total LOCALLY.
+		//
+		// #1746 review round 2 (R2-F1): the loop used to call
+		// `reserveManagedToolRefreshSlot` again for each tool after the previous
+		// tool's awaited refresh. `handleSessionStart` zeroes the global counter,
+		// and a session start landing inside a 120s `npm update` therefore re-armed
+		// the budget the running loop was still spending. Each further session
+		// start bought the same loop another tool, so a long update plus a few
+		// `/new` calls walked the entire 22-tool stale list. A local allowance
+		// cannot be re-armed by anyone: a mid-run reset restores the SESSION's
+		// right to start a new run, which is correct, without extending this one.
+		const want = Math.min(maxPerSession(), stale.length);
+		while (held < want && reserveManagedToolRefreshSlot(maxPerSession())) {
+			held += 1;
+		}
+		let allowance = held;
+
+		const refreshed: ManagedToolRefreshResult[] = [];
+		for (const candidate of stale) {
+			// Once a spawn happens the slot is spent for good — a failing tool must
+			// not hand its slot to the next candidate and turn a budget of one into
+			// 22 spawns.
+			if (allowance <= 0) break;
+			allowance -= 1;
+			held -= 1;
+			try {
+				refreshed.push(
+					await refreshOne(candidate, read.state.tools[candidate.toolId], now),
+				);
+			} catch (err) {
+				recordDegradationOnce({
+					kind: "managed-tool-refresh",
+					subject: candidate.toolId,
+					reason: `refresh threw: ${(err as Error).message}`,
+				});
+			}
+		}
+		return { refreshed };
+	} finally {
+		// A throw before any spawn must not leak the reservation.
+		releaseReservation();
 	}
-	return { refreshed };
 }
