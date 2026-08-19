@@ -59,6 +59,11 @@ import {
 	resetInstallRetryLatches,
 } from "../../clients/dispatch/runners/utils/availability-policy.js";
 import {
+	managedToolRefreshesThisSession,
+	reserveManagedToolRefreshSlot,
+	resetManagedToolRefreshSession,
+} from "../../clients/installer/managed-tool-refresh-session.js";
+import {
 	getSharedTreeSitterClient,
 	resetTreeSitterClientLoadState,
 } from "../../clients/tree-sitter-shared.js";
@@ -204,6 +209,22 @@ export const SESSION_STATE_REGISTRY: SessionStateEntry[] = [
 			},
 			isArmed: () => probeLatch === undefined || !probeLatch.isInstallExhausted(),
 			reset: () => resetInstallRetryLatches(),
+		},
+	},
+	{
+		id: "managed-tool-refresh-session:refreshesThisSession",
+		module: "installer/managed-tool-refresh-session.ts",
+		state: "refreshesThisSession",
+		policy: "session_start",
+		resetName: "resetManagedToolRefreshSession",
+		reason:
+			"#1730: the managed-tool refresh budget is one `npm update` per SESSION; left process-lived, a long-running pi refreshes one tool at launch and never revisits the other 21. The weekly per-tool cadence is deliberately NOT reset here — it lives in the persisted stamp, so re-arming the budget only restores the session's right to ask.",
+		probe: {
+			arm: () => {
+				reserveManagedToolRefreshSlot(1);
+			},
+			isArmed: () => managedToolRefreshesThisSession() === 0,
+			reset: () => resetManagedToolRefreshSession(),
 		},
 	},
 	{
