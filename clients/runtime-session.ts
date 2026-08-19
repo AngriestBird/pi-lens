@@ -39,6 +39,7 @@ import { logLatency } from "./latency-logger.js";
 import { runLogCleanup } from "./log-cleanup.js";
 import type { LSPShutdownOptions } from "./lsp/client.js";
 import { initLSPConfig, loadLSPConfig } from "./lsp/config.js";
+import { resetWorkspaceDiagnosticsCacheSession } from "./lsp/workspace-diagnostics-cache.js";
 import { loadLspService } from "./lsp-lazy.js";
 import type { MetricsClient } from "./metrics-client.js";
 import type { OpengrepClient, OpengrepResult } from "./opengrep-client.js";
@@ -1878,6 +1879,10 @@ export async function handleSessionStart(
 	// #1123 item 3: a fresh session can re-report smells that a prior session
 	// already surfaced once (see `checkSmellsAndNoteOnce`'s once-per-session gate).
 	resetSmellsSessionState();
+	// #1782: re-arm the workspace-diagnostics cache session clock. Entries
+	// written before this instant assert findings from a session that is over,
+	// so they must revalidate before they can be served as current again.
+	resetWorkspaceDiagnosticsCacheSession(sessionStartMs);
 	runtime.resetForSession(sessionStartMs);
 	logLatency({
 		type: "phase",

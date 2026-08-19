@@ -7,6 +7,7 @@ import { createGenerationMap } from "../generation-guard.js";
 import { normalizeMapKey } from "../path-utils.js";
 import { loadReverseDependencyIndexFromSnapshot } from "../reverse-deps.js";
 import { MTIME_DRIFT_TOLERANCE_MS } from "../blocker-freshness.js";
+import { logLatency } from "../latency-logger.js";
 import type { LSPDiagnostic } from "./client.js";
 import {
 	createDiskBindingCache,
@@ -224,6 +225,88 @@ export function clearWorkspaceDiagnosticsCache(cwd: string): void {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// #1782: serve-time freshness bound on entries that ASSERT findings
+// ---------------------------------------------------------------------------
+
+/**
+ * #1782: the session clock this cache measures entry age against.
+ *
+ * Defaults to module-import time so the very first sweep in a cold extension
+ * host already treats every entry written by a PREVIOUS process as
+ * pre-session (fail-closed). `resetWorkspaceDiagnosticsCacheSession` re-arms
+ * it from `handleSessionStart`, because a pi extension host survives
+ * `session_start` and a process-lifetime value would pin the first session's
+ * clock for the life of the process (AGENTS.md's session-signal-vs-latch
+ * screen). Registered in `tests/support/session-state-registry.ts`.
+ */
+let _sessionStartedAt = Date.now();
+
+/** Re-arm the session clock. Called by `handleSessionStart`. */
+export function resetWorkspaceDiagnosticsCacheSession(
+	startedAt: number = Date.now(),
+): void {
+	_sessionStartedAt = startedAt;
+}
+
+/** Test/probe accessor for the current session clock. */
+export function workspaceDiagnosticsCacheSessionStart(): number {
+	return _sessionStartedAt;
+}
+
+/**
+ * Ceiling on how long a finding-bearing entry may keep serving INSIDE one
+ * session. The session bound alone leaves a multi-day session replaying hour-one
+ * findings forever; four hours is short enough that a stale blocker cannot
+ * outlive the work that caused it, and long enough that a normal working
+ * session re-touches a finding-bearing file only a handful of times.
+ */
+export const WORKSPACE_DIAGNOSTICS_FINDING_MAX_AGE_MS = 4 * 60 * 60_000;
+
+/** Why a cached entry was refused at serve time. */
+export type WorkspaceDiagnosticsCacheExpiryReason = "pre-session" | "max-age";
+
+/**
+ * #1782: decide whether an entry has aged out of its right to be SERVED.
+ *
+ * The bound applies only to entries that assert findings. That asymmetry is
+ * deliberate, not an oversight:
+ *
+ * - A finding-bearing entry makes a POSITIVE claim ("this file has errors
+ *   right now"). Replayed after the config that produced it changed, it renders
+ *   as a current blocking gate failure that no gate ever ran — the #1782
+ *   defect, where five `typescript:2339` errors born under inferred settings
+ *   (#1640) were still rendered as fresh `blocking` rows 28 hours and one
+ *   session later, because no newer pull ever re-answered those files and
+ *   nothing expired them.
+ * - A clean entry makes only a NEGATIVE claim, and its whole content is "the
+ *   file and its dependencies are unchanged" — precisely what `isEntryFresh`'s
+ *   mtime + dependency gates and the #1095 content binding already verify.
+ *   Expiring clean entries too would force a full re-touch of every swept file
+ *   on the first sweep of every session, which is the exact cost #671 built
+ *   this cache to avoid, for no gain in honesty.
+ *
+ * So the re-touch volume this policy adds is bounded by the number of files
+ * that previously REPORTED something, not by the size of the repo.
+ *
+ * Pure and exported so the policy is unit-testable without a filesystem.
+ */
+export function classifyWorkspaceDiagnosticsCacheExpiry(
+	entry: WorkspaceDiagnosticsCacheEntry,
+	now: number,
+	sessionStartedAt: number,
+): WorkspaceDiagnosticsCacheExpiryReason | undefined {
+	const findings = Array.isArray(entry.diagnostics)
+		? entry.diagnostics.length
+		: 0;
+	if (findings === 0) return undefined;
+	if (entry.scannedAt < sessionStartedAt) return "pre-session";
+	if (now - entry.scannedAt > WORKSPACE_DIAGNOSTICS_FINDING_MAX_AGE_MS) {
+		return "max-age";
+	}
+	return undefined;
+}
+
 /**
  * True when `filePath`'s cached entry is still trustworthy enough to reuse
  * instead of paying for a fresh `touchFile`.
@@ -401,6 +484,34 @@ export function createWorkspaceDiagnosticsCacheContext(
 	// #1095: per-sweep disk-fingerprint memo (per file+mtime) for binding verify.
 	const diskBindingCache = createDiskBindingCache();
 	let dirty = false;
+	// #1782 (AC4): one BOUNDED record per context, not one per expired entry —
+	// a sweep that ages out 400 ghosts emits a single line carrying the count,
+	// the oldest age, and the per-reason split. Flushed from `persist()`, the
+	// end-of-sweep hook both call sites already run.
+	let expiredCount = 0;
+	let oldestExpiredAgeMs = 0;
+	const expiredByReason: Record<WorkspaceDiagnosticsCacheExpiryReason, number> =
+		{ "pre-session": 0, "max-age": 0 };
+	let expiryReported = false;
+
+	const flushExpiryTelemetry = (): void => {
+		if (expiryReported || expiredCount === 0) return;
+		expiryReported = true;
+		logLatency({
+			type: "phase",
+			phase: "lsp_workspace_diagnostics_cache_expiry",
+			filePath: root,
+			durationMs: 0,
+			metadata: {
+				expiredEntries: expiredCount,
+				oldestExpiredAgeMs,
+				preSession: expiredByReason["pre-session"],
+				maxAge: expiredByReason["max-age"],
+				sessionStartedAt: _sessionStartedAt,
+				maxAgeMs: WORKSPACE_DIAGNOSTICS_FINDING_MAX_AGE_MS,
+			},
+		});
+	};
 
 	return {
 		lookup(filePath, scopeKey) {
@@ -416,8 +527,37 @@ export function createWorkspaceDiagnosticsCacheContext(
 			// per file, and a same-process clear always updates memory
 			// synchronously, so this needs no disk read to be authoritative.
 			if (!epoch.isCurrent()) return undefined;
-			const entry = entries[cacheKeyFor(filePath)];
+			const key = cacheKeyFor(filePath);
+			const entry = entries[key];
 			if (!entry || entry.scopeKey !== scopeKey) return undefined;
+			// #1782: age gate BEFORE the mtime/dependency gate — it is two number
+			// comparisons and no syscalls, so an expired entry costs strictly less
+			// than a served one did. An entry that asserts findings and predates
+			// this session (or has aged past the in-session ceiling) is DROPPED,
+			// not served: the caller falls through to a fresh touch, and that
+			// re-touch is what re-subjects the file to every live-publish gate,
+			// including the #1640 inferred-project demote (which needs a live
+			// tsserver for the file and therefore cannot fire on a pure cache hit).
+			// Deleting rather than merely refusing keeps the on-disk file from
+			// carrying ghosts forever: the #1782 cache was rewritten hours after
+			// the entries went stale and still contained them.
+			const now = Date.now();
+			const expiry = classifyWorkspaceDiagnosticsCacheExpiry(
+				entry,
+				now,
+				_sessionStartedAt,
+			);
+			if (expiry) {
+				delete entries[key];
+				dirty = true;
+				expiredCount += 1;
+				expiredByReason[expiry] += 1;
+				oldestExpiredAgeMs = Math.max(
+					oldestExpiredAgeMs,
+					Math.max(0, now - entry.scannedAt),
+				);
+				return undefined;
+			}
 			if (!isEntryFresh(filePath, entry, getImports)) return undefined;
 			return {
 				diagnostics: entry.diagnostics,
@@ -443,6 +583,10 @@ export function createWorkspaceDiagnosticsCacheContext(
 			dirty = true;
 		},
 		persist() {
+			// #1782: emit the expiry record even when nothing new was recorded —
+			// a sweep whose only outcome was aging out ghosts is exactly the run a
+			// dogfood needs to see in `latency.log`.
+			flushExpiryTelemetry();
 			if (!dirty) return;
 			// #1669: a refresh invalidated this cwd's cache after we loaded it —
 			// publishing this sweep's (now-stale-relative-to-the-refresh) in-memory
