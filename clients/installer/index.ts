@@ -3201,6 +3201,87 @@ const NEEDS_POSTINSTALL = new Set([
 	"intelephense", // postinstall fetches platform binary; --ignore-scripts breaks install
 ]);
 
+/**
+ * Does this npm package need its lifecycle scripts to install correctly?
+ *
+ * Exported so the periodic refresh (#1730) re-runs each package under the SAME
+ * script policy its original install used. A refresh that drops
+ * `--ignore-scripts` for biome or `@ast-grep/cli` leaves the JS launcher
+ * updated and its native binary on the old version.
+ */
+export function npmToolNeedsPostinstall(packageName: string): boolean {
+	return NEEDS_POSTINSTALL.has(packageName);
+}
+
+/**
+ * The managed npm tools whose installed version is free to move — every
+ * registry entry with `installStrategy: "npm"` and an UNPINNED `packageName`.
+ *
+ * Derived from `TOOLS` on every call rather than listed by hand: a hand-kept
+ * copy of a registry is the single-source-of-truth defect this repo keeps
+ * finding, and a new npm tool added to `TOOLS` must be refreshed without anyone
+ * remembering a second list.
+ *
+ * Packages carrying an explicit `name@1.2.3` pin are excluded. The pin IS the
+ * intended version, and #589's drift check already reinstalls a managed copy
+ * that wanders off it.
+ */
+export function getRefreshableManagedNpmTools(): Array<{
+	toolId: string;
+	packageName: string;
+	binaryName: string;
+}> {
+	const refreshable: Array<{
+		toolId: string;
+		packageName: string;
+		binaryName: string;
+	}> = [];
+	for (const tool of TOOLS) {
+		if (tool.installStrategy !== "npm" || !tool.packageName) continue;
+		if (parsePinnedVersion(tool.packageName) !== undefined) continue;
+		// `binaryName` is what `installNpmTool` verifies after an install, and the
+		// refresh has to verify the SAME path after an update. An npm entry
+		// without one cannot be verified, so it is not refreshed either.
+		if (!tool.binaryName) continue;
+		refreshable.push({
+			toolId: tool.id,
+			packageName: tool.packageName,
+			binaryName: tool.binaryName,
+		});
+	}
+	return refreshable;
+}
+
+/**
+ * The managed `node_modules/.bin` path for a tool binary, spelled the way
+ * `installNpmTool` spells it (npm writes a `.cmd` shim on Windows, and that
+ * shim — not its extensionless POSIX sibling — is the executable).
+ *
+ * Exported so the periodic refresh (#1730) verifies the same path the install
+ * verified, instead of rebuilding the convention next to it.
+ */
+export function resolveManagedNpmBinPath(binaryName: string): string {
+	const binBase = path.join(TOOLS_DIR, "node_modules", ".bin", binaryName);
+	return installerPlatform() === "win32" ? `${binBase}.cmd` : binBase;
+}
+
+/**
+ * Drop every cached claim about where a tool resolves: the in-memory
+ * resolved-path cache and the 24h on-disk probe cache.
+ *
+ * The probe cache keys on the binary's path and mtime, and a package-manager
+ * update rewrites the package while frequently leaving the `.bin` shim's mtime
+ * alone. Without this, a refresh that changed the version — or left a binary
+ * that no longer runs — kept serving the previous answer from cache for up to
+ * a day (#1746 review F2). Callers fall through to a fresh probe, which is the
+ * path that can repair a broken install.
+ */
+export function invalidateManagedToolResolution(toolId: string): void {
+	resolvedPathCache.delete(toolId);
+	if (_probeCache !== null) delete _probeCache[toolId];
+	markProbeCacheChange(toolId, null);
+}
+
 const MAVEN_CENTRAL_BASE = "https://repo1.maven.org/maven2";
 
 /**
@@ -3857,6 +3938,28 @@ export async function installTool(toolId: string): Promise<boolean> {
 			case "npm": {
 				if (!tool.packageName || !tool.binaryName) return false;
 				const npmPath = await installNpmTool(tool.packageName, tool.binaryName);
+				if (npmPath !== undefined) {
+					// #1746 review F4: an install just resolved this package's range
+					// against the registry, so record it as freshly checked. Otherwise a
+					// new machine that installs 22 tools today has 22 unstamped tools,
+					// and spends the next 22 sessions running `npm update` on packages
+					// it installed minutes ago.
+					//
+					// Dynamic import, not a static one: managed-tool-refresh.ts imports
+					// THIS module for the tool registry, and a static import back would
+					// be a cycle. By the time this line runs the module graph is long
+					// since evaluated, so the lazy import is safe and also keeps the
+					// refresh module off the startup path.
+					await import("./managed-tool-refresh.js")
+						.then((m) =>
+							m.stampManagedToolInstalled(tool.id, tool.packageName as string),
+						)
+						.catch(() => {
+							// Best-effort telemetry: a missing stamp costs one wasted
+							// update later, never a wrong version, and must not fail the
+							// install that just succeeded.
+						});
+				}
 				return finishInstallAttempt(tool.id, npmPath !== undefined, startedAt);
 			}
 
