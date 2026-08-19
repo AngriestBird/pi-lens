@@ -35,6 +35,11 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import {
+	_boundedTurnCountForTest,
+	admitBounded,
+	resetBoundedTelemetry,
+} from "../../clients/bounded-telemetry.js";
+import {
 	getDegradationSummary,
 	recordDegradationOnce,
 	resetDegradationLedger,
@@ -132,6 +137,25 @@ function scratchCwd(): string {
 }
 
 export const SESSION_STATE_REGISTRY: SessionStateEntry[] = [
+	// ── #1743 bounded-telemetry helper ───────────────────────────────
+	{
+		id: "bounded-telemetry:turnCounts",
+		module: "bounded-telemetry.ts",
+		state: "turnCounts, countedTurnIndex",
+		policy: "session_start",
+		resetName: "resetBoundedTelemetry",
+		reason:
+			"#1743: the per-turn admission counters are keyed by turn index, and a new session restarts turn numbering at 0, so without a session-boundary clear a count from the previous session's turn 0 would consume the new session's budget. The helper's rising-edge state is deliberately NOT here — it is the degradation ledger's own tally, reset one line above this one in handleSessionStart.",
+		probe: {
+			arm: () => {
+				admitBounded("loop_block", "session-state-registry-probe", {
+					capPerTurn: { limit: 1, turnIndex: 0 },
+				});
+			},
+			isArmed: () => _boundedTurnCountForTest("loop_block") === 0,
+			reset: () => resetBoundedTelemetry(),
+		},
+	},
 	// ── The named population from #1635 ──────────────────────────────────────
 	{
 		id: "degradation-ledger:onceKeys",

@@ -10,6 +10,21 @@ export type DegradationKind =
 	| "formatter-skip"
 	| "grammar-blocked"
 	| "lsp-breaker"
+	/**
+	 * A per-file touch skipped a language server because that server is in the
+	 * breaker cooldown or is latched permanently broken (#1743). During an
+	 * outage this fires once per file per touch, so the count here is the exact
+	 * total and only the FIRST skip per (server, file) also writes an
+	 * `lsp_client_skipped_broken` latency.log record.
+	 */
+	| "lsp-client-skipped-broken"
+	/**
+	 * A per-file touch skipped a language server because its direct spawn
+	 * command is temporarily marked unavailable (#1743). Same shape and same
+	 * bounding as `lsp-client-skipped-broken`, but keyed on the command, since
+	 * that is what the availability latch is about.
+	 */
+	| "lsp-client-skipped-unavailable-command"
 	| "formatter-failure"
 	| "wasm-abort"
 	| "lsp-diagnostics-timeout"
