@@ -263,6 +263,16 @@ const FIXTURES = [
 		tools: [],
 		expectDiagnostic: true,
 	},
+	// cue-vet (#1522): an evaluation error (conflicting concrete value) — the
+	// class cuelsp deliberately does not publish (syntax/parse only).
+	{
+		lang: "cue-vet",
+		dir: "tests/fixtures/tool-smoke/cue-vet",
+		file: "bad.cue",
+		targets: ["cue-vet"],
+		tools: ["cue"],
+		expectDiagnostic: true,
+	},
 	{
 		lang: "elixir",
 		dir: "tests/fixtures/tool-smoke/elixir",
