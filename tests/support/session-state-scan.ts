@@ -16,7 +16,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import { toPosix } from "../../clients/path-utils.js";
+import { listSourceFiles, relativePosix, stripSource } from "./sweep-kit.js";
 
 export const repoRoot = path.resolve(
 	path.dirname(fileURLToPath(import.meta.url)),
@@ -27,19 +27,12 @@ const CLIENTS_ROOT = path.join(repoRoot, "clients");
 
 /** Every `.ts` file under `clients/`, minus declarations and tests. */
 export function clientSourceFiles(dir = CLIENTS_ROOT): string[] {
-	return fs.readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
-		const entryPath = path.join(dir, entry.name);
-		if (entry.isDirectory()) return clientSourceFiles(entryPath);
-		if (!/\.ts$/.test(entry.name)) return [];
-		if (/\.d\.ts$/.test(entry.name)) return [];
-		if (entry.name.endsWith(".test.ts")) return [];
-		return [entryPath];
-	});
+	return listSourceFiles(dir, { extensions: [".ts"], skipTests: true });
 }
 
 /** `clients/`-relative posix path for an absolute source path. */
 export function clientsRelative(absolute: string): string {
-	return toPosix(path.relative(CLIENTS_ROOT, absolute));
+	return relativePosix(CLIENTS_ROOT, absolute);
 }
 
 // ── 1. What session_start actually resets ────────────────────────────────────
@@ -48,154 +41,23 @@ export function clientsRelative(absolute: string): string {
  * Blank out every comment body and string literal, preserving length and line
  * breaks so positions and line numbers still line up with the original.
  *
+ * Now a thin alias over the sweep kit's single stripper (#1755) — the kit owns
+ * the lexer, the regex-position rule and the recovery guards, and every sweep
+ * in the repo shares one implementation instead of seven. Kept as a named
+ * export because `host-event-shape-scan.ts` and the finding-delivery gate
+ * import it, and because this name states which POLICY the session-state walk
+ * needs: string contents BLANKED, so a reset named inside a string is not read
+ * as a call.
+ *
  * This is load-bearing, not tidiness. Review round R1 reinstated #1535's bug
  * by REPLACING the real `resetZizmorTokenAvailability()` call with a comment
- * that merely names it — and the conformance suite stayed green, because the
- * reachability walk regexed raw source and a comment mentioning a call is
- * indistinguishable from the call. `runtime-session.ts`'s reset block is
+ * that merely names it, and the conformance suite stayed green, because the
+ * reachability walk regexed raw source. `runtime-session.ts`'s reset block is
  * mostly `#issue`-narrative comments that name resets by hand, so that
  * false-negative mode was armed on real source, not hypothetical.
- *
- * Everything downstream — the declaration search, the brace matcher and the
- * call extraction — runs on the stripped text, which also closes the sibling
- * hole of a function DECLARATION appearing inside a comment.
- *
- * REGEX LITERALS are recognized too, and have to be: `safe-spawn.ts:384`'s
- * `arg.replace(/"/g, '""')` puts a bare `"` inside a regex, which a
- * strings-only scanner reads as the start of a string literal and then
- * swallows the rest of the file — silently losing every declaration below it.
- * That is a FALSE NEGATIVE, the direction that matters here, and it showed up
- * the moment stripping was switched on.
  */
 export function stripCommentsAndStrings(source: string): string {
-	const out = source.split("");
-	const blank = (index: number) => {
-		if (out[index] !== "\n") out[index] = " ";
-	};
-	/**
-	 * A `/` opens a regex only where a VALUE may start. Deciding that from the
-	 * preceding TOKEN is the standard lexer-free approximation: after an
-	 * identifier, a literal, or a closing `)`/`]`, a `/` is division.
-	 * `}` is treated as regex-position because a statement-block brace is far
-	 * more common in this codebase than an object literal followed by division.
-	 *
-	 * The preceding token, not the preceding CHARACTER (review round R2). A
-	 * character check reads the `n` of `return /x/` as an identifier and calls
-	 * the regex a division, leaving its contents unstripped — 41 keyword-position
-	 * regex sites across `clients/` were mis-lexed that way, and a phantom call
-	 * written inside `typeof /resetZizmorTokenAvailability()/` satisfied the
-	 * wiring check. So when the preceding token is a word, read the whole word
-	 * and ask whether it is a keyword an expression can follow.
-	 */
-	const KEYWORDS_BEFORE_REGEX = new Set([
-		"return",
-		"typeof",
-		"instanceof",
-		"in",
-		"of",
-		"case",
-		"await",
-		"yield",
-		"delete",
-		"void",
-		"new",
-		"do",
-		"else",
-		"throw",
-	]);
-	const regexMayStart = (index: number): boolean => {
-		let end = -1;
-		for (let j = index - 1; j >= 0; j--) {
-			const prev = out[j];
-			if (prev === " " || prev === "\t" || prev === "\n" || prev === "\r") {
-				continue;
-			}
-			end = j;
-			break;
-		}
-		if (end < 0) return true; // start of file
-		const prev = out[end];
-		if (!/[\w$]/.test(prev)) return !/[)\]"'`]/.test(prev);
-		let start = end;
-		while (start > 0 && /[\w$]/.test(out[start - 1])) start--;
-		return KEYWORDS_BEFORE_REGEX.has(out.slice(start, end + 1).join(""));
-	};
-	let quote: string | undefined;
-	let lineComment = false;
-	let blockComment = false;
-	let regex = false;
-	let regexClass = false;
-	for (let i = 0; i < source.length; i++) {
-		const ch = source[i];
-		const next = source[i + 1];
-		if (regex) {
-			blank(i);
-			if (ch === "\\") {
-				blank(i + 1);
-				i++;
-			} else if (ch === "[") regexClass = true;
-			else if (ch === "]") regexClass = false;
-			else if (ch === "/" && !regexClass) regex = false;
-			else if (ch === "\n") regex = false; // unterminated: bail, don't swallow
-			continue;
-		}
-		if (lineComment) {
-			if (ch === "\n") lineComment = false;
-			else blank(i);
-			continue;
-		}
-		if (blockComment) {
-			blank(i);
-			if (ch === "*" && next === "/") {
-				blank(i + 1);
-				blockComment = false;
-				i++;
-			}
-			continue;
-		}
-		if (quote) {
-			// Keep the delimiters, blank the contents: a blanked-out template
-			// literal must not merge with the code around it.
-			if (ch === "\\") {
-				blank(i);
-				blank(i + 1);
-				i++;
-			} else if (ch === quote) {
-				quote = undefined;
-			} else if (ch === "\n" && quote !== "`") {
-				// A `'`/`"` string cannot span a raw newline in valid source, so
-				// reaching one means this scanner mis-identified the opener.
-				// Recover at the line break rather than swallowing the rest of the
-				// file — a second guard behind the regex handling above.
-				quote = undefined;
-			} else {
-				blank(i);
-			}
-			continue;
-		}
-		if (ch === "/" && next === "/") {
-			blank(i);
-			blank(i + 1);
-			lineComment = true;
-			i++;
-			continue;
-		}
-		if (ch === "/" && next === "*") {
-			blank(i);
-			blank(i + 1);
-			blockComment = true;
-			i++;
-			continue;
-		}
-		if (ch === "/" && regexMayStart(i)) {
-			blank(i);
-			regex = true;
-			regexClass = false;
-			continue;
-		}
-		if (ch === '"' || ch === "'" || ch === "`") quote = ch;
-	}
-	return out.join("");
+	return stripSource(source, { strings: "blank" });
 }
 
 /**
