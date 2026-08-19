@@ -921,4 +921,142 @@ describe("Pipeline", () => {
 			expect(result.isError).toBe(false);
 		});
 	});
+
+	// #1641 review F1/F2: `inlineBlockerLines` is the structured field the
+	// turn-end past-EOF gate (`clients/blocker-past-eof.ts`) reads. It has
+	// exactly one production writer (`runPipeline`, here) — a test that calls
+	// `RuntimeCoordinator.recordInlineBlockers` directly proves nothing about
+	// whether the pipeline actually populates it.
+	describe("inlineBlockerLines (#1641)", () => {
+		it("captures the cited lines from dispatch's blocking diagnostics", async () => {
+			const filePath = createTempFile(tmpDir, "app.ts", "const x = 1;");
+			vi.mocked(dispatchLintWithResult).mockResolvedValue({
+				diagnostics: [],
+				blockers: [
+					{
+						id: "err-1",
+						message: "Type error",
+						filePath,
+						line: 7,
+						severity: "error",
+						semantic: "blocking",
+						tool: "tsc",
+					},
+					{
+						id: "err-2",
+						message: "Another error",
+						filePath,
+						line: 12,
+						severity: "error",
+						semantic: "blocking",
+						tool: "tsc",
+					},
+				],
+				warnings: [],
+				baselineWarningCount: 0,
+				fixed: [],
+				resolvedCount: 0,
+				output: "errors",
+				blockerOutput: "errors",
+				hasBlockers: true,
+			});
+
+			const result = await runPipeline(
+				createMockContext(filePath),
+				createMockDeps(),
+			);
+
+			expect(result.inlineBlockerLines).toEqual([7, 12]);
+		});
+
+		it("does NOT harvest a line from a blocker reported against a different file", async () => {
+			// A chart-wide runner (helm-lint, helm-render) reports blocking
+			// diagnostics against OTHER files in the chart alongside the edited
+			// one — e.g. editing a 4-line template but the blocker is really
+			// against `values.yaml:150`. That line describes different content
+			// than the file this record's past-EOF gate will check, so it must
+			// never be attributed to THIS file's record (#1641 review F2).
+			const filePath = createTempFile(tmpDir, "templates/deploy.yaml", "a: 1\n");
+			const otherChartFile = path.join(tmpDir, "values.yaml");
+			vi.mocked(dispatchLintWithResult).mockResolvedValue({
+				diagnostics: [],
+				blockers: [
+					{
+						id: "helm-1",
+						message: "nil pointer evaluating interface {}.replicas",
+						filePath: otherChartFile,
+						line: 150,
+						severity: "error",
+						semantic: "blocking",
+						tool: "helm-lint",
+					},
+				],
+				warnings: [],
+				baselineWarningCount: 0,
+				fixed: [],
+				resolvedCount: 0,
+				output: "helm error",
+				blockerOutput: "helm error",
+				hasBlockers: true,
+			});
+
+			const result = await runPipeline(
+				createMockContext(filePath),
+				createMockDeps(),
+			);
+
+			expect(result.inlineBlockerLines).toEqual([]);
+		});
+
+		// #1641 review round 2 (LOW, win32-only — the dogfood host): an
+		// LSP-sourced diagnostic's `filePath` is stamped with realpath canonical
+		// casing (dispatch/runners/lsp.ts -> normalizeMapKey), but the pipeline's
+		// OWN `ctx.filePath` can arrive with a lowercase drive letter — the same
+		// drive-letter class as #1139/#1150. A bare `path.resolve` equality does
+		// not fold that case difference, so it drops EVERY LSP blocker line and
+		// this record silently skips the past-EOF gate — fail-open, but exactly
+		// the pre-fix behavior on the surface #1641 targets. Guarded like this
+		// repo's other win32-casing probes (see `normalizeEphemeralMapKey`'s own
+		// tests in `path-utils.test.ts`) since CI's Unit tests job runs on
+		// ubuntu-latest and case-folding is a no-op there.
+		it("still captures lines when the blocker's path differs from ctx.filePath only by drive-letter case (win32)", async () => {
+			if (process.platform !== "win32") return;
+			const filePath = createTempFile(tmpDir, "app.ts", "const x = 1;");
+			const lowerDriveFilePath =
+				filePath.charAt(0).toLowerCase() + filePath.slice(1);
+			// The diagnostic's path is the OPPOSITE case from `ctx.filePath` —
+			// simulating an LSP-stamped realpath-canonical path colliding with a
+			// pipeline call site that received a lowercase-drive path.
+			const canonicalCaseFilePath =
+				filePath.charAt(0).toUpperCase() + filePath.slice(1);
+			vi.mocked(dispatchLintWithResult).mockResolvedValue({
+				diagnostics: [],
+				blockers: [
+					{
+						id: "lsp-1",
+						message: "Type error",
+						filePath: canonicalCaseFilePath,
+						line: 3,
+						severity: "error",
+						semantic: "blocking",
+						tool: "lsp",
+					},
+				],
+				warnings: [],
+				baselineWarningCount: 0,
+				fixed: [],
+				resolvedCount: 0,
+				output: "type error",
+				blockerOutput: "type error",
+				hasBlockers: true,
+			});
+
+			const result = await runPipeline(
+				createMockContext(lowerDriveFilePath),
+				createMockDeps(),
+			);
+
+			expect(result.inlineBlockerLines).toEqual([3]);
+		});
+	});
 });

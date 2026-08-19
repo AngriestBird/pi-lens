@@ -26,6 +26,7 @@ import {
 	partitionFindingsByCitedPath,
 	type FindingPathFreshness,
 } from "../../clients/advisory-provenance.js";
+import { MTIME_DRIFT_TOLERANCE_MS } from "../../clients/blocker-freshness.js";
 import { setupTestEnvironment } from "./test-utils.js";
 
 interface Finding {
@@ -284,10 +285,12 @@ describe("freshness boundary (#1622 review L1)", () => {
 	});
 
 	/**
-	 * Pins BOTH sides of the comparison so a `>` / `>=` mutation cannot survive:
-	 * mtime exactly AT the scan is unchanged, one millisecond past it is modified.
+	 * Pins both sides of the comparison so a `>` / `>=` mutation, and a
+	 * deleted-or-widened tolerance, cannot survive: mtime exactly AT the scan
+	 * and at the edge of `MTIME_DRIFT_TOLERANCE_MS` (#1708's write-then-scan
+	 * tolerance) are unchanged; one millisecond past the tolerance is modified.
 	 */
-	it("treats mtime == scannedAt as live and scannedAt + 1 as stale", () => {
+	it("treats mtime <= scannedAt + MTIME_DRIFT_TOLERANCE_MS as live, one past it as stale", () => {
 		const env = setupTestEnvironment("pi-lens-freshness-boundary-");
 		cleanups.push(env.cleanup);
 		const scannedAtMs = Date.UTC(2026, 7, 18, 7, 0, 0);
@@ -298,7 +301,10 @@ describe("freshness boundary (#1622 review L1)", () => {
 		setMtime(file, scannedAtMs);
 		expect(findingPathFreshness(file, scannedAtMs)).toBe("live");
 
-		setMtime(file, scannedAtMs + 1);
+		setMtime(file, scannedAtMs + MTIME_DRIFT_TOLERANCE_MS);
+		expect(findingPathFreshness(file, scannedAtMs)).toBe("live");
+
+		setMtime(file, scannedAtMs + MTIME_DRIFT_TOLERANCE_MS + 1);
 		expect(findingPathFreshness(file, scannedAtMs)).toBe("stale");
 	});
 
@@ -312,12 +318,12 @@ describe("freshness boundary (#1622 review L1)", () => {
 		fs.writeFileSync(at, "1\n");
 		fs.writeFileSync(past, "1\n");
 		setMtime(at, scannedAtMs);
-		setMtime(past, scannedAtMs + 1);
+		setMtime(past, scannedAtMs + MTIME_DRIFT_TOLERANCE_MS + 1);
 
 		const result = partitionFindingsByCitedPath<Finding>({
 			findings: [
 				{ file: at, rule: "at-scan" },
-				{ file: past, rule: "one-ms-past" },
+				{ file: past, rule: "past-tolerance" },
 			],
 			cwd: env.tmpDir,
 			scannedAt,
@@ -325,11 +331,54 @@ describe("freshness boundary (#1622 review L1)", () => {
 		});
 
 		expect(result.live.map((f) => f.rule)).toEqual(["at-scan"]);
-		expect(result.stale.map((f) => f.rule)).toEqual(["one-ms-past"]);
+		expect(result.stale.map((f) => f.rule)).toEqual(["past-tolerance"]);
 	});
 });
 
 // ── Review round H1: onMissing=demote for whole-artifact findings ─────────────
+
+// ── #1708: same-millisecond write-then-scan race ─────────────────────────────
+
+describe("freshness boundary same-millisecond tolerance (#1708)", () => {
+	const cleanups: Array<() => void> = [];
+	afterEach(() => {
+		cleanups.splice(0).forEach((cleanup) => cleanup());
+	});
+
+	// Fabricates the mtime/scannedAt pair directly rather than relying on a
+	// real write race — a file written and scanned in the same millisecond
+	// must not demote. A bare +1ms tolerance
+	// (`reconcileProjectDiagnosticsSnapshot`'s convention) was not enough:
+	// measured Windows host skew between a file's mtime and the immediately
+	// following `Date.now()` read runs up to ~11.4ms (#1491/#1498), the same
+	// skew `MTIME_DRIFT_TOLERANCE_MS` already covers in `blocker-freshness.ts`
+	// / `reconcileStaleWidgetFiles`. Without it, #1628's trivy-secrets
+	// turn_end test flaked ~1-in-5 (a STOP blocker read back as a demoted
+	// ACTION NEEDED tier).
+	it("does not demote a file whose mtime lands within MTIME_DRIFT_TOLERANCE_MS of scannedAt", () => {
+		const env = setupTestEnvironment("pi-lens-freshness-1708-");
+		cleanups.push(env.cleanup);
+		const scannedAtMs = Date.UTC(2026, 7, 18, 7, 0, 0);
+		const file = path.join(env.tmpDir, "src/race.ts");
+		fs.mkdirSync(path.dirname(file), { recursive: true });
+		fs.writeFileSync(file, "const k = 1;\n");
+		setMtime(file, scannedAtMs + MTIME_DRIFT_TOLERANCE_MS);
+
+		expect(findingPathFreshness(file, scannedAtMs)).toBe("live");
+	});
+
+	it("still demotes a file whose mtime lands past MTIME_DRIFT_TOLERANCE_MS of scannedAt", () => {
+		const env = setupTestEnvironment("pi-lens-freshness-1708-outside-");
+		cleanups.push(env.cleanup);
+		const scannedAtMs = Date.UTC(2026, 7, 18, 7, 0, 0);
+		const file = path.join(env.tmpDir, "src/genuine-edit.ts");
+		fs.mkdirSync(path.dirname(file), { recursive: true });
+		fs.writeFileSync(file, "const k = 1;\n");
+		setMtime(file, scannedAtMs + MTIME_DRIFT_TOLERANCE_MS + 1);
+
+		expect(findingPathFreshness(file, scannedAtMs)).toBe("stale");
+	});
+});
 
 describe("gateFindingsByPathFreshness onMissing (#1622 review H1)", () => {
 	afterEach(() => logLatency.mockReset());
