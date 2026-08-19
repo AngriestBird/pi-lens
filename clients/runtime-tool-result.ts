@@ -18,10 +18,11 @@ import { publishFormatQueued } from "./format-events-publish.js";
 import { isPathIgnoredByProject } from "./file-utils.js";
 import type { ReadGuard } from "./read-guard.js";
 import { getFormatService } from "./format-service.js";
-import { isExternalOrVendorFile, normalizeEphemeralMapKey } from "./path-utils.js";
+import { isExternalOrVendorFile, normalizeEphemeralMapKey, pathsEqual } from "./path-utils.js";
 import { PathKeyedMap } from "./path-keyed-map.js";
 import { resolveLanguageRootForFile } from "./language-profile.js";
 import { logLatency } from "./latency-logger.js";
+import { resolveToolCallCorrelationId } from "./tool-event.js";
 import {
 	boundedIndexesForCount,
 	createReadGuardEditBatchSummary,
@@ -46,21 +47,35 @@ import { RUNTIME_CONFIG } from "./runtime-config.js";
 
 const AUTHORITATIVE_CONTENT_MAX_BYTES = RUNTIME_CONFIG.pipeline.lspMaxFileBytes;
 
+/**
+ * The `tool_result` payload pi-lens actually receives.
+ *
+ * Kept aligned with what pi BUILDS, not with what a payload might plausibly
+ * carry. `AgentSession._installAgentToolHooks`'s `afterToolCall` constructs the
+ * event literal with exactly eight keys —
+ * `type`/`toolName`/`toolCallId`/`input`/`content`/`details`/`isError`/`usage`
+ * (`@earendil-works/pi-coding-agent/dist/core/agent-session.js:243-256`, source
+ * `src/core/agent-session.ts:502-516`) — and `ExtensionRunner.emitToolResult`
+ * forwards that same object to every handler
+ * (`dist/core/extensions/runner.js:649-651`, source `runner.ts:877-880`).
+ *
+ * #1655 item 2 removed seven fields this interface used to declare that pi
+ * never sets on the wire: `id`, `callId`, `requestId`, `provider`, `model`,
+ * `sessionId`, and `session`. They made a telemetry-identity branch here
+ * unreachable against a real host. Identity is read from the runtime instead —
+ * see the `telemetry:` block handed to `runPipeline` below, which already
+ * sources `model`/`sessionId`/`provider` from `RuntimeCoordinator`.
+ *
+ * Do not re-add a field here without a pi source line that assigns it.
+ */
 interface ToolResultEvent {
 	toolName: string;
-	id?: string | number;
 	toolCallId?: string | number;
-	callId?: string | number;
-	requestId?: string | number;
 	/** Host tool_result status; distinct from pi-lens PipelineResult.isError. */
 	isError?: boolean;
 	input: unknown;
 	details?: unknown;
 	content: Array<{ type: string; text?: string }>;
-	provider?: string;
-	model?: string;
-	sessionId?: string;
-	session?: { id?: string };
 }
 
 interface ToolResultDeps {
@@ -387,11 +402,98 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 
 	const rawFilePath = (event.input as { path?: string }).path;
 	const workspaceRoot = runtime.projectRoot || process.cwd();
+
+	// #1642: a gitignored worktree edit got re-attributed onto a
+	// same-relative-path file in the parent checkout because this handler
+	// used to always resolve a relative path against `workspaceRoot`
+	// (`runtime.projectRoot`), with no idea the call actually ran under a
+	// different cwd/worktree.
+	//
+	// Source-level correction (pi host audit, earendil-works/pi): tool_call's
+	// own resolved path is NOT authoritative for what executed —
+	// `agent-session.ts:914-919`'s extension-handler contract lets a LATER
+	// `tool_call` handler mutate `event.input` in place with no
+	// re-validation, and edit's `prepareArguments` rewrites args before the
+	// event fires at all. `tool_result.input`, by contrast, is populated
+	// from the EXECUTED args (`agent-session.ts:502-516`) — it is the
+	// authoritative path source. So the correlation record's job is narrower
+	// than "the path": it is the RESOLUTION BASIS (the cwd/worktree the call
+	// actually ran under). Every tool_result resolves ITS OWN authoritative
+	// `rawFilePath` against that basis, rather than trusting a call-time path
+	// that a later handler may have superseded.
+	const toolCallId = resolveToolCallCorrelationId(event);
+	const attribution =
+		toolCallId !== undefined
+			? runtime.takeToolCallAttribution(toolCallId)
+			: undefined;
+
+	let resolutionBasis: string;
+	if (attribution) {
+		resolutionBasis = attribution.originCwd;
+	} else if (toolCallId !== undefined && rawFilePath && !path.isAbsolute(rawFilePath)) {
+		// A real correlation id existed (the host DOES support one) but no
+		// attribution was recorded under it — evicted, cleared because the
+		// call was blocked before it could execute, or simply never seen by
+		// `handleToolCall`. A RELATIVE path here is ambiguous: we have no
+		// idea which cwd it is relative to, and guessing `workspaceRoot` is
+		// exactly the #1642 collapse. Fail CLOSED instead of guessing — no
+		// turn state, no deferred work — and log it so a real incident is
+		// countable rather than silently mis-attributed.
+		const guessedPath = path.resolve(workspaceRoot, rawFilePath);
+		dbg(
+			`path_attribution_missing: no recorded resolution basis for toolCallId=${toolCallId}, refusing relative path ${rawFilePath} (would have guessed ${guessedPath})`,
+		);
+		logLatency({
+			type: "phase",
+			toolName: event.toolName,
+			filePath: guessedPath,
+			phase: "path_attribution_missing",
+			durationMs: 0,
+			metadata: { toolCallId, rawFilePath, guessedPath },
+		});
+		return;
+	} else {
+		// Either an ABSOLUTE path (bash-synthetic writes always pass one —
+		// unambiguous regardless of any basis, see the bash-write dispatch
+		// below) or a host that supplies NO correlation id at all under any
+		// known field name. The latter cannot be correlated by identity full
+		// stop; this is the SAME exposure every host had before this fix,
+		// not a regression introduced by it.
+		resolutionBasis = workspaceRoot;
+	}
 	const filePath = rawFilePath
 		? path.isAbsolute(rawFilePath)
 			? rawFilePath
-			: path.resolve(workspaceRoot, rawFilePath)
+			: path.resolve(resolutionBasis, rawFilePath)
 		: rawFilePath;
+
+	// Purely diagnostic: tool_call's call-time verdict (computed on ITS OWN
+	// resolved path, which may since have been superseded) disagreed with
+	// what actually executed. This does NOT gate anything by itself — the
+	// ignore re-check below, running on the freshly & correctly resolved
+	// `filePath`, is the real decision — but a divergence is exactly the
+	// shape of the reported incident, so it is named legibly.
+	if (
+		attribution?.skipped &&
+		filePath &&
+		attribution.resolvedPath &&
+		!pathsEqual(filePath, attribution.resolvedPath)
+	) {
+		const message = `path_attribution_refused: call target ${attribution.resolvedPath} (originCwd=${attribution.originCwd}) vs tool_result resolved ${filePath}`;
+		dbg(message);
+		logLatency({
+			type: "phase",
+			toolName: event.toolName,
+			filePath,
+			phase: "path_attribution_refused",
+			durationMs: 0,
+			metadata: {
+				callTarget: attribution.resolvedPath,
+				resolvedPath: filePath,
+				originCwd: attribution.originCwd,
+			},
+		});
+	}
 	const behaviorWarnings = agentBehaviorRecord(event.toolName, filePath);
 	const syntheticWriteContent: Array<{ type: string; text?: string }> = [];
 	let syntheticAttachmentBytes = 0;
@@ -705,13 +807,15 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 	dbg(
 		`tool_result: resolved dispatch cwd ${dispatchCwd} for ${filePath} (turnState cwd ${turnStateCwd})`,
 	);
-	if (event.model || event.provider || event.sessionId || event.session?.id) {
-		runtime.setTelemetryIdentity({
-			model: event.model,
-			provider: event.provider,
-			sessionId: event.sessionId ?? event.session?.id,
-		});
-	}
+	// #1655 item 2: a `setTelemetryIdentity` call used to sit here, gated on
+	// `event.model`/`provider`/`sessionId`/`session.id`. pi sets none of those on
+	// a `tool_result` — `afterToolCall` builds the event with exactly
+	// `type`/`toolName`/`toolCallId`/`input`/`content`/`details`/`isError`/`usage`
+	// (`@earendil-works/pi-coding-agent/dist/core/agent-session.js:243-256`,
+	// source `src/core/agent-session.ts:502-516`), so the gate was always false
+	// against a real host and the branch never ran. Identity for this dispatch
+	// comes from the runtime, which `message_start`/`session_start` populate —
+	// see the `telemetry:` block handed to `runPipeline` below.
 	const writeIndex = runtime.nextWriteIndex();
 	let modifiedRanges: Array<{ start: number; end: number }> | undefined;
 	try {
@@ -818,6 +922,10 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 				getFilesChangedSince: (seq: number) =>
 					runtime.getFilesChangedSince(seq),
 			},
+			// The settle clock is live because the deferred cascade may reach its
+			// budget derivation before or after turn_end starts waiting.
+			turnEndCascadeSettleStart: () =>
+				runtime.getTurnEndCascadeSettleStart(),
 			// #348 phase 2: live reference so the deferred cascade can update the
 			// warm word index in place at the same seam as the graph rebuild.
 			// `runtime.wordIndex` is read fresh (not captured) via this closure-free
@@ -982,7 +1090,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 		autofixNewlyQueued =
 			(runtime as Partial<RuntimeCoordinator>).deferMutation?.call(
 				runtime, filePath, dispatchCwd, event.toolName, turnStateCwd,
-				"autofix", deps.sessionId,
+				"autofix", deps.sessionId, resolutionBasis,
 			) ?? false;
 		dbg(`tool_result: queued deferred autofix for ${filePath}`);
 	}
@@ -1000,6 +1108,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 			event.toolName,
 			turnStateCwd,
 			deps.sessionId,
+			resolutionBasis,
 		);
 		formatQueued = true;
 		dbg(`tool_result: queued deferred format for ${filePath}`);

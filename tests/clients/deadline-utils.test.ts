@@ -116,6 +116,32 @@ describe("late-rejection suppression (#366 bug fix)", () => {
 			).toBe(false);
 		},
 	);
+
+	// #1621 F3: the ms<=0 early return settles WITHOUT ever entering the race
+	// below, so it never got the loser-leg's `promise.catch(() => {})` either.
+	// A non-positive budget (e.g. a negative env override surviving parsing)
+	// left the caller's own promise uncaught — an unhandled rejection once it
+	// eventually settled, on top of silently disabling whatever the promise
+	// was doing since nothing ever awaited its result.
+	it.each([
+		["reject mode", { ms: 0 } as const],
+		["undefined mode", { ms: 0, onTimeout: "undefined" } as const],
+		["negative ms (clamped the same as 0)", { ms: -100 } as const],
+	])(
+		"does not surface a non-positive-budget promise's later rejection in %s",
+		async (_label, opts) => {
+			reasons = [];
+			process.on("unhandledRejection", onUnhandled);
+			const race = withDeadline(slowReject("late-loser-nonpositive", 40), opts);
+			await race.catch(() => undefined);
+			await new Promise((r) => setTimeout(r, 80));
+			expect(
+				reasons.some(
+					(r) => r instanceof Error && r.message === "late-loser-nonpositive",
+				),
+			).toBe(false);
+		},
+	);
 });
 
 describe("named adapters preserve their exact semantics", () => {

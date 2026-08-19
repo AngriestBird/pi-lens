@@ -86,6 +86,7 @@ import * as path from "node:path";
 import type { BootstrapClients } from "../bootstrap.js";
 import type { CacheManager } from "../cache-manager.js";
 import type { RuntimeCoordinator } from "../runtime-coordinator.js";
+import { applyDispositionsMultiFile } from "../diagnostic-dispositions.js";
 import { getKnipIgnorePatterns } from "../file-utils.js";
 import { isAtOrAboveHomeDir } from "../path-utils.js";
 import { GitleaksClient } from "../gitleaks-client.js";
@@ -155,6 +156,25 @@ export interface FreshProjectDiagnosticsResult {
 	 *  nothing was spawned. Kept separate from the per-analyzer skip reasons so
 	 *  a caller can render "unsafe root" instead of "not applicable". */
 	unsafeRoot?: boolean;
+	/**
+	 * Count of findings dropped by an agent/user disposition (false-positive
+	 * or suppress mark — #1617) before landing in `diagnostics`. Every
+	 * analyzer here previously had ZERO disposition wiring — a mark never
+	 * suppressed a project-scan finding, only a dispatch (per-edit) one. Kept
+	 * as a count, not silently dropped: the #1616 suppressed-bucket rule — a
+	 * finding must never vanish with no trace, even when the disposition that
+	 * dropped it is working exactly as intended.
+	 */
+	dispositionSuppressed?: number;
+	/**
+	 * Review-round F4 (#1617/#1625): the same count as `dispositionSuppressed`,
+	 * broken down per analyzer id — "gitleaks: 2, knip: 1" is actionable in a
+	 * way a bare total isn't (a caller can tell WHICH lane's marks are doing
+	 * the suppressing). Does not attempt to also flag a lane that is 100%
+	 * suppressed (so absent from both `runners` and `cold`) as distinct from
+	 * "ran clean" — that gap is #1623's lane-status territory, not this one.
+	 */
+	dispositionSuppressedByLane?: Record<string, number>;
 }
 
 /** The heavyweight analyzers surfaced in `lens_diagnostics mode=full` — this is
@@ -239,7 +259,20 @@ export async function fetchFreshProjectDiagnostics(
 	// when attempted (see the module header), so there is nothing to date.
 	const cachedAgeMs: Record<string, number> = {};
 	const settledIds = new Set<string>();
+	let dispositionSuppressed = 0;
+	const dispositionSuppressedByLane: Record<string, number> = {};
 
+	// #1617: this is the ONE choke point every analyzer's findings pass
+	// through on the way into `diagnostics`, so applying the agent/user
+	// disposition filter HERE covers the whole mode=full class (knip/jscpd/
+	// madge/gitleaks/govulncheck/opengrep/trivy/dead-code) in one place — the
+	// same anchor derivation `dispatcher.ts:924` uses, via
+	// `applyDispositionsMultiFile` (`diagnostic-dispositions.ts`), not a
+	// second cloned filter. Unlike the dispatch path's one-file-at-a-time
+	// shape, a project-wide scan's findings span many files, so this groups by
+	// each diagnostic's own `filePath` and reads each file's current content
+	// once — see that function's doc for the fail-open contract when a file
+	// can't be read.
 	function markCold(id: string, reason: string): void {
 		pushUnique(cold, id);
 		coldReasons[id] = reason;
@@ -247,8 +280,19 @@ export async function fetchFreshProjectDiagnostics(
 
 	function record(id: string, adapted: ProjectDiagnostic[], elapsedMs: number): void {
 		timings[id] = (timings[id] ?? 0) + elapsedMs;
-		if (adapted.length > 0) {
-			diagnostics.push(...adapted);
+		const kept = applyDispositionsMultiFile(
+			adapted,
+			analysisRoot,
+			(d) => d.filePath,
+		);
+		const suppressedHere = adapted.length - kept.length;
+		dispositionSuppressed += suppressedHere;
+		if (suppressedHere > 0) {
+			dispositionSuppressedByLane[id] =
+				(dispositionSuppressedByLane[id] ?? 0) + suppressedHere;
+		}
+		if (kept.length > 0) {
+			diagnostics.push(...kept);
 			pushUnique(runners, id);
 		}
 	}
@@ -641,8 +685,20 @@ export async function fetchFreshProjectDiagnostics(
 			cachedAgeMs,
 			aborted: true,
 			abortedIds,
+			dispositionSuppressed,
+			dispositionSuppressedByLane,
 		};
 	}
 
-	return { diagnostics, runners, cold, coldReasons, failed, timings, cachedAgeMs };
+	return {
+		diagnostics,
+		runners,
+		cold,
+		coldReasons,
+		failed,
+		timings,
+		cachedAgeMs,
+		dispositionSuppressed,
+		dispositionSuppressedByLane,
+	};
 }
