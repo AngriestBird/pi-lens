@@ -131,6 +131,10 @@ import {
 	isWarmAttached,
 	tryWarmAttachedDiagnostics,
 } from "../warm-attach.js";
+import {
+	getSuccessfulLspSpawnDurationMs,
+	recordSuccessfulLspSpawn,
+} from "./spawn-history.js";
 
 function destinationUriPreservingSpelling(
 	oldUri: string,
@@ -2209,6 +2213,7 @@ export class LSPService {
 		maxWaitMs?: number,
 		hardCapMs?: number,
 		resolvedRoots?: Map<string, string>,
+		waitSkipReasons?: Set<string>,
 	): Promise<SpawnedServer | undefined> {
 		if (this.checkDestroyed()) return undefined;
 		// Primary selection considers language servers only — auxiliary servers
@@ -2234,6 +2239,20 @@ export class LSPService {
 					: hardCapMs
 				: serverBaseMs;
 
+		let knownSlowResolve: (() => void) | undefined;
+		const knownSlowSentinel = Symbol("lsp-client-wait-known-slow");
+		const knownSlow = new Promise<typeof knownSlowSentinel>((resolve) => {
+			knownSlowResolve = () => resolve(knownSlowSentinel);
+		});
+		const noteSpawnInFlight = (serverId: string): void => {
+			const knownDurationMs = getSuccessfulLspSpawnDurationMs(serverId);
+			if (knownDurationMs !== undefined && knownDurationMs > effectiveMaxWaitMs * 2) {
+				// Let a completion microtask already queued by the acquisition win
+				// before the shortcut decision is observed by Promise.race.
+				queueMicrotask(() => knownSlowResolve?.());
+			}
+		};
+
 		const withBudget = async (): Promise<SpawnedServer | undefined> => {
 			if (servers.length === 0) return undefined;
 
@@ -2243,6 +2262,7 @@ export class LSPService {
 					filePath,
 					server,
 					resolvedRoots,
+					noteSpawnInFlight,
 				);
 				if (spawned) {
 					logLatency({
@@ -2303,12 +2323,20 @@ export class LSPService {
 		// a member of the uncleared-race-timeout class the shared `withDeadline`
 		// helper already guards against elsewhere).
 		let waitTimer: ReturnType<typeof setTimeout> | undefined;
-		let waitResult: SpawnedServer | undefined | typeof timeoutSentinel;
+		let waitResult:
+			| SpawnedServer
+			| undefined
+			| typeof timeoutSentinel
+			| typeof knownSlowSentinel;
 		try {
 			waitResult = await Promise.race<
-				SpawnedServer | undefined | typeof timeoutSentinel
+				| SpawnedServer
+				| undefined
+				| typeof timeoutSentinel
+				| typeof knownSlowSentinel
 			>([
 				withBudget(),
+				knownSlow,
 				new Promise<typeof timeoutSentinel>((resolve) => {
 					waitTimer = setTimeout(
 						() => resolve(timeoutSentinel),
@@ -2318,6 +2346,32 @@ export class LSPService {
 			]);
 		} finally {
 			if (waitTimer) clearTimeout(waitTimer);
+		}
+
+		if (waitResult === knownSlowSentinel) {
+			// `inFlight` is cleared in ensureClientForServer's finally block, so a
+			// settled acquisition can still be present here. Re-read the published
+			// clients at the decision point; a usable client outranks the sentinel.
+			for (const server of servers) {
+				const root = await this.resolveServerRoot(server, filePath);
+				const client = root
+					? this.state.clients.get(`${server.id}:${normalizeMapKey(root)}`)
+					: undefined;
+				if (client?.isAlive()) return { client, info: server };
+			}
+			waitSkipReasons?.add("budget_skipped_known_slow");
+			logLatency({
+				type: "phase",
+				phase: "lsp_client_wait_skipped",
+				filePath,
+				durationMs: 0,
+				metadata: {
+					maxWaitMs: effectiveMaxWaitMs,
+					serverIds: servers.map((server) => server.id),
+					reason: "budget_skipped_known_slow",
+				},
+			});
+			return undefined;
 		}
 
 		if (waitResult === timeoutSentinel) {
@@ -2649,6 +2703,7 @@ export class LSPService {
 		filePath: string,
 		server: LSPServerInfo,
 		resolvedRoots?: Map<string, string>,
+		onSpawnInFlight?: (serverId: string) => void,
 	): Promise<SpawnedServer | undefined> {
 		const handoff = this.generationHandoff;
 		if (handoff) {
@@ -2981,6 +3036,19 @@ export class LSPService {
 			if (!started) return undefined;
 			spawnPromise = started.promise;
 		}
+		// Announce the in-flight spawn so the caller can skip a doomed touch
+		// wait. The announcement never returns a client and never
+		// short-circuits. A spawn that settles inside the race window is picked
+		// up by getClientForFile, which re-reads `state.clients` at the point it
+		// acts on the shortcut.
+		//
+		// Do NOT add a `state.clients` early return here. This point sits
+		// downstream of the warm-reuse path, the dead-client shutdown, the #1127
+		// give-up latch, the breaker cooldown, and the #1332 idle eviction, so a
+		// return here re-publishes a client every one of those already declined.
+		// It also skips the `finally` below that owns the `inFlight` entry,
+		// which strands the settled promise and stops the server respawning.
+		onSpawnInFlight?.(server.id);
 
 		try {
 			return await spawnPromise;
@@ -3127,7 +3195,9 @@ export class LSPService {
 			logSessionStart(
 				`lsp spawn ${server.id}: success source=${spawned.source ?? "unknown"} (${Date.now() - startedAt}ms)`,
 			);
-			recordLsp(server.id, root, "spawn_success", Date.now() - startedAt);
+			const spawnDurationMs = Date.now() - startedAt;
+			recordLsp(server.id, root, "spawn_success", spawnDurationMs);
+			recordSuccessfulLspSpawn(server.id, spawnDurationMs);
 			if (!this.workspaceProbeLogged.has(key)) {
 				logSessionStart(
 					`lsp workspace-diag probe ${server.id}: advertised=${wsDiag.advertised} mode=${wsDiag.mode} provider=${wsDiag.diagnosticProviderKind}`,
@@ -3288,6 +3358,7 @@ export class LSPService {
 			options.clientScope ?? (diagnosticsMode === "full" ? "all" : "primary");
 		const useAllClients = clientScope === "all";
 		const resolvedPrimaryRoots = new Map<string, string>();
+		const waitSkipReasons = new Set<string>();
 		let spawned: SpawnedServer[];
 		let serverCountAttempted: number;
 		if (useAllClients) {
@@ -3307,6 +3378,7 @@ export class LSPService {
 					options.maxClientWaitMs,
 					undefined,
 					resolvedPrimaryRoots,
+					waitSkipReasons,
 				),
 				this.getAuxiliaryClientsForFile(
 					filePath,
@@ -3321,6 +3393,7 @@ export class LSPService {
 				options.maxClientWaitMs,
 				undefined,
 				resolvedPrimaryRoots,
+				waitSkipReasons,
 			);
 			spawned = entry ? [entry] : [];
 			serverCountAttempted =
@@ -3355,6 +3428,9 @@ export class LSPService {
 					source,
 					maxClientWaitMs: options.maxClientWaitMs,
 					failureKind,
+					...(waitSkipReasons.size > 0
+						? { reason: [...waitSkipReasons][0] }
+						: {}),
 				},
 			});
 			return;

@@ -200,6 +200,8 @@ export const UNBOUNDED_FAILURE_PHASE_REASONS: Record<string, string> = {
 		"The site already holds a first-seen set keyed by (server, root) (`unavailableLogged`) and returns early when it admits nothing.",
 	lsp_client_wait_timeout:
 		"One record per client wait, and a wait that times out has already spent its full budget, so the cadence is the bound.",
+	lsp_client_wait_skipped:
+		"The budget_skipped_known_slow verdict fires at most once per touch, so touch volume bounds this raw record.",
 	lsp_diagnostics_timeout:
 		"One batched record per touch's diagnostics wait; the per-server exact counts already go to the ledger via `incrementDegradationCount` immediately above it.",
 	lsp_launch_candidate_failed:
