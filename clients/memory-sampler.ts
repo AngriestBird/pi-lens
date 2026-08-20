@@ -89,7 +89,6 @@ export interface MemorySampleSubsystems {
 		treeCacheTotalBytes: number;
 	} | null;
 	dispatchCaches: {
-		neighborTouchCacheSize: number;
 		recentlyCleanNeighborCacheSize: number;
 	};
 }

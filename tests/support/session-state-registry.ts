@@ -319,7 +319,7 @@ export const SESSION_STATE_REGISTRY: SessionStateEntry[] = [
 		id: "dispatch-integration:sessionCaches",
 		module: "dispatch/integration.ts",
 		state:
-			"cascadeDiagnosticBaselines, neighborTouchCache, recentlyCleanNeighborCache, primaryFilesThisTurn, sessionSlopRuleCounts, sessionFacts",
+			"cascadeDiagnosticBaselines, recentlyCleanNeighborCache, primaryFilesThisTurn, sessionSlopRuleCounts, sessionFacts",
 		policy: "session_start",
 		resetName: "resetDispatchBaselines",
 		reason:
@@ -715,7 +715,8 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	"diagnostic-line-freshness.ts": 1,
 	"diagnostics-publish.ts": 1,
 	"dispatch/dispatcher.ts": 1,
-	"dispatch/integration.ts": 10,
+	// #1899 removed the dead `neighborTouchCache` (10 → 9).
+	"dispatch/integration.ts": 9,
 	"dispatch/lazy.ts": 0,
 	"dispatch/runners/ast-grep-napi.ts": 5,
 	"dispatch/runners/biome-check.ts": 1,

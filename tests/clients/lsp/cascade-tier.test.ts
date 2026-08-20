@@ -12,6 +12,10 @@ import { normalizeMapKey } from "../../../clients/path-utils.js";
 
 const getServersForFileWithConfig = vi.fn();
 const registerQuietWindowTask = vi.fn();
+// Module-scope so the identity survives `vi.resetModules()` — a factory-local
+// `vi.fn()` is rebuilt with the module and the assertions would read a
+// different spy than the code under test called.
+const logCascade = vi.fn();
 
 vi.mock("../../../clients/lsp/config.js", () => ({
 	getServersForFileWithConfig,
@@ -22,7 +26,7 @@ vi.mock("../../../clients/quiet-window.js", () => ({
 }));
 
 vi.mock("../../../clients/cascade-logger.js", () => ({
-	logCascade: vi.fn(),
+	logCascade,
 }));
 
 vi.mock("../../../clients/latency-logger.js", () => ({
@@ -30,6 +34,19 @@ vi.mock("../../../clients/latency-logger.js", () => ({
 }));
 
 const FILE = "C:/repo/neighbor.ts";
+
+// #1899: the registry now bounds how OLD an outstanding touch may be
+// (`OUTSTANDING_TOUCH_MAX_AGE_MS`, 15 minutes), so a touch stamped at an
+// absolute `1_000` would read as ~56 years old and be discarded before any
+// reconcile saw it. These constants keep a touch inside the age bound while
+// staying EXPLICIT relative to one sampled base — the production comparison is
+// a strict `entry.ts > touchedAt`, so the ordering must never depend on two
+// wall-clock reads landing in different milliseconds.
+const NOW_BASE = Date.now();
+/** A touch fired 1s ago — well inside the age bound. */
+const TOUCH_TS = NOW_BASE - 1_000;
+/** A publish that landed after `TOUCH_TS`. */
+const PUBLISH_TS = NOW_BASE;
 
 function server(id: string, role?: "language" | "auxiliary") {
 	return { id, name: id, extensions: [".ts"], root: async () => "C:/repo", role };
@@ -262,9 +279,9 @@ describe("outstanding touch registry + reconcile", () => {
 	// the SAME millisecond, and the production comparison is deliberately a
 	// strict `entry.ts > touchedAt` (ties fail safe to unresolved), so
 	// real-clock sampling makes these tests non-deterministic.
-	const TOUCHED_AT = 1_000;
-	const AFTER_TOUCH = 2_000;
-	const BEFORE_TOUCH = 500;
+	const TOUCHED_AT = TOUCH_TS;
+	const AFTER_TOUCH = PUBLISH_TS;
+	const BEFORE_TOUCH = TOUCH_TS - 500;
 
 	it("resolves an outstanding touch as resolved-found when THAT FILE's diagnostics published after the touch", async () => {
 		mod.recordOutstandingCascadeTouch({
@@ -529,12 +546,29 @@ describe("registerCascadeTierReconcileTask", () => {
 		);
 	});
 
-	it("the registered task is a no-op when the registry is empty", async () => {
+	// #1899: an empty registry used to return before the log line, so "the
+	// backlog is drained" and "the sweep never ran" read identically in
+	// cascade.log. The sweep now always emits its gauge.
+	it("the registered task emits a zero gauge when the registry is empty", async () => {
+		logCascade.mockClear();
 		mod.registerCascadeTierReconcileTask(() => ({
 			getWarmClientForFile: vi.fn(),
 		}) as any);
 		const task = registerQuietWindowTask.mock.calls[0][1] as () => Promise<void>;
 		await expect(task()).resolves.toBeUndefined();
+
+		expect(logCascade).toHaveBeenCalledWith(
+			expect.objectContaining({
+				phase: "cascade_tier3_reconcile",
+				metadata: expect.objectContaining({
+					count: 0,
+					unresolved: 0,
+					avgAgeMs: 0,
+					expired: 0,
+					evicted: 0,
+				}),
+			}),
+		);
 	});
 
 	// #1023: a resolved-found neighbor error must be RE-INJECTED to the agent
@@ -549,7 +583,7 @@ describe("registerCascadeTierReconcileTask", () => {
 					new Map([
 						[
 							normalizeMapKey("C:/repo/neighbor.ts"),
-							{ diags: [{ message: "cold neighbor err", severity: 1 }], ts: 2_000 },
+							{ diags: [{ message: "cold neighbor err", severity: 1 }], ts: PUBLISH_TS },
 						],
 					]),
 				),
@@ -562,7 +596,7 @@ describe("registerCascadeTierReconcileTask", () => {
 		mod.recordOutstandingCascadeTouch({
 			filePath: "C:/repo/neighbor.ts",
 			serverId: "typescript",
-			touchedAt: 1_000,
+			touchedAt: TOUCH_TS,
 		});
 		const task = registerQuietWindowTask.mock.calls[0][1] as () => Promise<void>;
 		await task();
@@ -587,7 +621,7 @@ describe("registerCascadeTierReconcileTask", () => {
 				serverId: "typescript",
 				getAllDiagnostics: vi.fn().mockReturnValue(
 					new Map([
-						[normalizeMapKey("C:/repo/neighbor.ts"), { diags: [], ts: 2_000 }],
+						[normalizeMapKey("C:/repo/neighbor.ts"), { diags: [], ts: PUBLISH_TS }],
 					]),
 				),
 			},
@@ -599,7 +633,7 @@ describe("registerCascadeTierReconcileTask", () => {
 		mod.recordOutstandingCascadeTouch({
 			filePath: "C:/repo/neighbor.ts",
 			serverId: "typescript",
-			touchedAt: 1_000,
+			touchedAt: TOUCH_TS,
 		});
 		const task = registerQuietWindowTask.mock.calls[0][1] as () => Promise<void>;
 		await task();
@@ -620,7 +654,7 @@ describe("registerCascadeTierReconcileTask", () => {
 				serverId: "typescript",
 				getAllDiagnostics: vi.fn().mockReturnValue(
 					new Map([
-						[normalizeMapKey("C:/repo/neighbor.ts"), { diags: [], ts: 2_000 }],
+						[normalizeMapKey("C:/repo/neighbor.ts"), { diags: [], ts: PUBLISH_TS }],
 					]),
 				),
 			},
@@ -632,7 +666,7 @@ describe("registerCascadeTierReconcileTask", () => {
 		mod.recordOutstandingCascadeTouch({
 			filePath: "C:/repo/neighbor.ts",
 			serverId: "typescript",
-			touchedAt: 1_000,
+			touchedAt: TOUCH_TS,
 		});
 		const task = registerQuietWindowTask.mock.calls[0][1] as () => Promise<void>;
 		await task();
@@ -642,7 +676,7 @@ describe("registerCascadeTierReconcileTask", () => {
 		expect(onResolvedClean).toHaveBeenCalledWith({
 			filePath: "C:/repo/neighbor.ts",
 			serverId: "typescript",
-			publishedAt: 2_000,
+			publishedAt: PUBLISH_TS,
 		});
 	});
 
@@ -664,7 +698,7 @@ describe("registerCascadeTierReconcileTask", () => {
 		mod.recordOutstandingCascadeTouch({
 			filePath: "C:/repo/neighbor.ts",
 			serverId: "typescript",
-			touchedAt: 1_000,
+			touchedAt: TOUCH_TS,
 		});
 		const task = registerQuietWindowTask.mock.calls[0][1] as () => Promise<void>;
 		await task();

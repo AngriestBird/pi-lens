@@ -1037,7 +1037,6 @@ describe("computeCascadeForFile", () => {
 					phase: "cascade_result",
 					metadata: expect.objectContaining({
 						recentlyCleanHits: 1,
-						cacheHits: 0,
 					}),
 				}),
 			);
@@ -1046,7 +1045,13 @@ describe("computeCascadeForFile", () => {
 		}
 	});
 
-	it("#1446 item 5: cascade_result records cacheHits when the same-write neighbor cache short-circuits a re-touch", async () => {
+	// #1899: this used to assert the same-write `neighborTouchCache` short-
+	// circuited the re-touch. That cache is gone. It could only hit when two
+	// cascades ran inside ONE write, and `writeSeq` (pi's per-write index)
+	// advances on every write, so live sessions measured 0 hits across 236 cold
+	// touches. The test now pins the behavior that replaced it: a repeat cascade
+	// re-touches, and `cacheHits` is no longer part of the result record.
+	it("#1899: a repeat cascade in the same write re-touches (no same-write neighbor cache)", async () => {
 		const env = setupTestEnvironment("cascade-cache-hits-");
 		try {
 			const primary = path.join(env.tmpDir, "model.py");
@@ -1067,8 +1072,6 @@ describe("computeCascadeForFile", () => {
 				"../../clients/dispatch/integration.js"
 			);
 
-			// First cascade at turnSeq/writeSeq 1 performs the real touch and
-			// populates neighborTouchCache.
 			await computeCascadeForFile(primary, env.tmpDir, {
 				turnSeq: 1,
 				writeSeq: 1,
@@ -1076,23 +1079,19 @@ describe("computeCascadeForFile", () => {
 			expect(touchFile).toHaveBeenCalledTimes(1);
 			mocks.logCascade.mockClear();
 
-			// A second cascade run for the SAME turn/write (a second primary edited
-			// in the same pipeline pass touching the same neighbor) must reuse the
-			// cached diagnostics rather than re-touch, and the reuse must be counted.
 			await computeCascadeForFile(primary, env.tmpDir, {
 				turnSeq: 1,
 				writeSeq: 1,
 			});
-			expect(touchFile).toHaveBeenCalledTimes(1);
-			expect(mocks.logCascade).toHaveBeenCalledWith(
-				expect.objectContaining({
-					phase: "cascade_result",
-					metadata: expect.objectContaining({
-						cacheHits: 1,
-						recentlyCleanHits: 0,
-					}),
-				}),
+			expect(touchFile).toHaveBeenCalledTimes(2);
+
+			const resultCall = mocks.logCascade.mock.calls.find(
+				(call) => (call[0] as { phase?: string }).phase === "cascade_result",
 			);
+			const metadata = (resultCall![0] as { metadata: Record<string, unknown> })
+				.metadata;
+			expect(metadata).toMatchObject({ coldTouches: 1, recentlyCleanHits: 0 });
+			expect(metadata).not.toHaveProperty("cacheHits");
 		} finally {
 			env.cleanup();
 		}
@@ -1101,28 +1100,30 @@ describe("computeCascadeForFile", () => {
 	// F1 (adversarial review of #1446): `coldTouches` used to be derived from
 	// `coldSnapshotPaths.length`, a list finalized BEFORE the cache-hit checks
 	// inside the touch pool run — so a coldSnapshotPaths neighbour that then hit
-	// neighborTouchCache/recentlyCleanNeighborCache was double-counted (cold AND
+	// recentlyCleanNeighborCache was double-counted (cold AND
 	// cache/clean), while a non-autopropagate (activePaths) neighbour that missed
 	// both caches and took a genuine touch was counted in neither bucket. This
-	// exercises all four touch-pool outcomes in ONE run, with BOTH failure modes
-	// live at once: `neighborCache` (.ts, autoPropagate) sits in
-	// `coldSnapshotPaths` on every run (its snapshot is never valid) yet resolves
-	// via `neighborTouchCache` on this run — the double-count case — while
-	// `neighborCold` (.py, activePaths) takes a genuine cold touch and would be
-	// invisible to the old `coldSnapshotPaths.length` derivation entirely — the
-	// silent-drop case. The four counters must still partition the touched-
-	// neighbour count exactly.
-	it("F1: cacheHits/recentlyCleanHits/coldTouches/deferredTouches partition the touched-neighbour set", async () => {
+	// exercises the touch-pool outcomes in ONE run: `neighborColdTs` (.ts,
+	// autoPropagate) sits in `coldSnapshotPaths` on every run (its snapshot is
+	// never valid) and takes a genuine cold touch — the double-count case —
+	// while `neighborCold` (.py, activePaths) takes a genuine cold touch too and
+	// would be invisible to the old `coldSnapshotPaths.length` derivation
+	// entirely — the silent-drop case. The counters must still partition the
+	// touched-neighbour count exactly.
+	//
+	// #1899 dropped the `cacheHits` bucket with the dead `neighborTouchCache`;
+	// the partition invariant is unchanged and now spans three buckets.
+	it("F1: recentlyCleanHits/coldTouches/deferredTouches partition the touched-neighbour set", async () => {
 		const env = setupTestEnvironment("cascade-f1-partition-");
 		try {
 			const primary = path.join(env.tmpDir, "hub.py");
-			const neighborCache = path.join(env.tmpDir, "src", "cache_hit.ts");
+			const neighborColdTs = path.join(env.tmpDir, "src", "cache_hit.ts");
 			const neighborClean = path.join(env.tmpDir, "recently_clean.py");
 			const neighborCold = path.join(env.tmpDir, "genuinely_cold.py");
 			const neighborDeferred = path.join(env.tmpDir, "src", "deferred.ts");
 			fs.writeFileSync(primary, "class Hub: pass\n");
-			fs.mkdirSync(path.dirname(neighborCache), { recursive: true });
-			fs.writeFileSync(neighborCache, "export const cacheHit = 1;\n");
+			fs.mkdirSync(path.dirname(neighborColdTs), { recursive: true });
+			fs.writeFileSync(neighborColdTs, "export const cacheHit = 1;\n");
 			fs.writeFileSync(neighborClean, "from hub import Hub  # clean\n");
 			fs.writeFileSync(neighborCold, "from hub import Hub  # cold\n");
 			fs.writeFileSync(
@@ -1131,7 +1132,7 @@ describe("computeCascadeForFile", () => {
 			);
 
 			const touchFile = vi.fn().mockImplementation(async (p: string) => {
-				if (p === neighborCache) return { diags: [lspError("cache seed")] };
+				if (p === neighborColdTs) return { diags: [lspError("cache seed")] };
 				if (p === neighborClean) return { diags: [] };
 				if (p === neighborCold) return { diags: [lspError("genuinely cold")] };
 				return undefined; // neighborDeferred's notify-only touch
@@ -1164,11 +1165,10 @@ describe("computeCascadeForFile", () => {
 				"../../clients/dispatch/integration.js"
 			);
 
-			// Setup run: seeds neighborTouchCache (neighborCache, a real error)
-			// and recentlyCleanNeighborCache (neighborClean, a confirmed clean
-			// touch) at turnSeq=1/writeSeq=1.
+			// Setup run: seeds recentlyCleanNeighborCache (neighborClean, a
+			// confirmed clean touch) at turnSeq=1/writeSeq=1.
 			mocks.computeImpactCascade.mockReturnValueOnce(
-				impact(primary, [neighborCache, neighborClean]),
+				impact(primary, [neighborColdTs, neighborClean]),
 			);
 			await computeCascadeForFile(primary, env.tmpDir, {
 				turnSeq: 1,
@@ -1177,11 +1177,11 @@ describe("computeCascadeForFile", () => {
 			expect(touchFile).toHaveBeenCalledTimes(2);
 			mocks.logCascade.mockClear();
 
-			// Main run, SAME turnSeq/writeSeq (so neighborCache's cache entry
-			// matches exactly) plus two new neighbours neither cache has seen.
+			// Main run, SAME turnSeq/writeSeq, plus two new neighbours the
+			// recently-clean cache has not seen.
 			mocks.computeImpactCascade.mockReturnValueOnce(
 				impact(primary, [
-					neighborCache,
+					neighborColdTs,
 					neighborClean,
 					neighborCold,
 					neighborDeferred,
@@ -1199,7 +1199,6 @@ describe("computeCascadeForFile", () => {
 			const metadata = (
 				resultCall![0] as {
 					metadata: {
-						cacheHits: number;
 						recentlyCleanHits: number;
 						coldTouches: number;
 						deferredTouches: number;
@@ -1207,9 +1206,8 @@ describe("computeCascadeForFile", () => {
 				}
 			).metadata;
 			expect(metadata).toMatchObject({
-				cacheHits: 1,
 				recentlyCleanHits: 1,
-				coldTouches: 1,
+				coldTouches: 2,
 				deferredTouches: 1,
 			});
 			// The partition invariant: every touched neighbour (the 4 in this
@@ -1218,8 +1216,7 @@ describe("computeCascadeForFile", () => {
 			// undercounting bug).
 			const touchedNeighbourCount = 4;
 			expect(
-				metadata.cacheHits +
-					metadata.recentlyCleanHits +
+				metadata.recentlyCleanHits +
 					metadata.coldTouches +
 					metadata.deferredTouches,
 			).toBe(touchedNeighbourCount);
@@ -2426,7 +2423,9 @@ describe("computeCascadeForFile", () => {
 				expect(neighborTouchEntry?.metadata).toMatchObject({
 					inconclusive: true,
 				});
-				expect(getDispatchCascadeCacheStats().neighborTouchCacheSize).toBe(0);
+				expect(
+					getDispatchCascadeCacheStats().recentlyCleanNeighborCacheSize,
+				).toBe(0);
 				expect(run.result?.neighbors[0]).toMatchObject({
 					inconclusive: true,
 				});
@@ -2540,7 +2539,9 @@ describe("computeCascadeForFile", () => {
 				expect(diags).toHaveLength(1);
 				expect(diags?.[0]?.message).toBe("live cross-file error");
 				// Not cached as a confirmed neighbor result either.
-				expect(getDispatchCascadeCacheStats().neighborTouchCacheSize).toBe(0);
+				expect(
+					getDispatchCascadeCacheStats().recentlyCleanNeighborCacheSize,
+				).toBe(0);
 				// The third unconfirmed-touch cause is named in cascade.log, so it is
 				// distinguishable from the inconclusive and bound-false causes.
 				const neighborTouchEntry = mocks.logCascade.mock.calls

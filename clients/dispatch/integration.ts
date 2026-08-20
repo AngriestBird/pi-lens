@@ -441,7 +441,6 @@ export function resetDispatchBaselines(cwd?: string): void {
 	clearReviewGraphWorkspaceCache();
 	clearReverseDepsIndexCache();
 	clearModuleGraphCache();
-	neighborTouchCache.clear();
 	recentlyCleanNeighborCache.clear();
 	primaryFilesThisTurn.clear();
 	cascadeDiagnosticBaselines.clear();
@@ -468,15 +467,21 @@ export function getCascadeSessionStats(): {
 	return { ...cascadeSessionStats };
 }
 
-// A5: per-turn neighbor-touch cache keyed by normalized path.
-// Avoids re-touching the same neighbor on every write in a multi-file refactor.
-// Invalidated when writeSeq advances (i.e. a new write starts a new pipeline run).
-type NeighborCacheEntry = {
-	turnSeq: number;
-	writeSeq: number;
-	diagnostics: import("./types.js").Diagnostic[];
-};
-const neighborTouchCache = new Map<string, NeighborCacheEntry>();
+// #1899: the A5 per-write `neighborTouchCache` used to live here. It was
+// removed as dead BY CONSTRUCTION, not merely unused. Its read gate required
+// `cached.turnSeq === turnSeq && cached.writeSeq === writeSeq`, and `writeSeq`
+// is pi's per-write index (`ctx.telemetry.writeIndex`, clients/pipeline.ts),
+// which advances on every write. One write starts one cascade, so a hit needed
+// two cascade computations inside a SINGLE write — a shape the pipeline never
+// produces. Dogfooding measured 0 hits across 236 cold touches.
+//
+// Broadening it was considered and rejected. Dropping the `writeSeq` equality
+// to make it turn-scoped would serve a neighbour's diagnostics from BEFORE a
+// later write in the same turn, which is the stale-answer trap #1092/#1095
+// closed. The two caches that remain already cover the safe reuse: the
+// passive-snapshot path (TTL plus content binding) and
+// `recentlyCleanNeighborCache` (clean answers only, with a fresh-passive-error
+// override).
 
 // Cross-turn clean cache: neighbor touches that recently returned no errors can
 // be skipped for a few turns. LSP servers push diagnostics proactively when a
@@ -487,14 +492,12 @@ const recentlyCleanNeighborCache = new Map<
 	RecentlyCleanNeighborEntry
 >();
 
-/** O(1) entry counts of this module's turn-bounded caches (#1123 item 2
- *  memory attribution) — both are `Map.size` reads, never iterated. */
+/** O(1) entry count of this module's turn-bounded cache (#1123 item 2
+ *  memory attribution) — a `Map.size` read, never iterated. */
 export function getDispatchCascadeCacheStats(): {
-	neighborTouchCacheSize: number;
 	recentlyCleanNeighborCacheSize: number;
 } {
 	return {
-		neighborTouchCacheSize: neighborTouchCache.size,
 		recentlyCleanNeighborCacheSize: recentlyCleanNeighborCache.size,
 	};
 }
@@ -510,7 +513,6 @@ function ensureCascadeTurnScope(turnSeq: number): void {
 	if (turnSeq === cascadeTurnScope) return;
 	cascadeTurnScope = turnSeq;
 	primaryFilesThisTurn.clear();
-	neighborTouchCache.clear();
 	for (const [key, entry] of recentlyCleanNeighborCache) {
 		if (turnSeq - entry.turnSeq > RECENTLY_CLEAN_TTL_TURNS) {
 			recentlyCleanNeighborCache.delete(key);
@@ -1550,12 +1552,12 @@ export async function computeCascadeForFile(
 	// deferred EVERY neighbour is distinguishable from a genuine leaf (both are
 	// `neighborCount: 0` with no output otherwise).
 	let collectLaterSkipped = 0;
-	// #1446 item 5: `recentlyCleanNeighborCache` and `neighborTouchCache` hits
-	// are the whole point of both caches, but neither was ever counted — the
-	// only visible signal was 267s/day of touch wall time with no way to tell
-	// whether the caches were absorbing repeat work or every touch was cold.
+	// #1446 item 5: `recentlyCleanNeighborCache` hits are the whole point of the
+	// cache, but they were never counted — the only visible signal was 267s/day
+	// of touch wall time with no way to tell whether the cache was absorbing
+	// repeat work or every touch was cold. (#1899 removed the sibling
+	// `cacheHits` counter along with the dead `neighborTouchCache`.)
 	let recentlyCleanHits = 0;
-	let cacheHits = 0;
 	// F1 (#1446 follow-up): `coldTouches` must be counted at the point each
 	// neighbour's OUTCOME is actually known, not derived from `coldSnapshotPaths`
 	// (finalized earlier, before the cache-hit checks below run against it). Using
@@ -1742,32 +1744,9 @@ export async function computeCascadeForFile(
 					} satisfies CascadeResult["neighbors"][number];
 				}
 
-				// A5: skip re-touch if this neighbor was already diagnosed at the current
-				// write sequence. A new write (higher writeSeq) invalidates the cache entry.
-				const cached =
-					writeSeq != null ? neighborTouchCache.get(cacheKey) : undefined;
-				if (cached?.turnSeq === turnSeq && cached?.writeSeq === writeSeq) {
-					producedLspData = true;
-					cacheHits++;
-					const durationMs = Date.now() - neighborStart;
-					logCascade({
-						phase: "neighbor_snapshot",
-						filePath,
-						neighborFile: neighborPath,
-						diagnosticCount: cached.diagnostics.length,
-						durationMs,
-						autoPropagate: false,
-						snapshotMissing: false,
-						metadata: { cachedWriteSeq: writeSeq },
-					});
-					return {
-						filePath: neighborPath,
-						reason: neighborReason(importerSet, callerSet, neighborPath),
-						diagnostics: cached.diagnostics,
-						lspTouched: false,
-						durationMs,
-					} satisfies CascadeResult["neighbors"][number];
-				}
+				// #1899: the A5 same-write cache read stood here. See the removal note
+				// at the module's cache declarations — the gate could only pass inside
+				// a single write, which never runs two cascades.
 
 				const configuredServerCount =
 					getServersForFileWithConfig(neighborPath).length;
@@ -1851,8 +1830,8 @@ export async function computeCascadeForFile(
 									},
 								});
 								// Deliberately NOT cached as clean/diagnosed — the wait was
-								// skipped, not resolved, so neither neighborTouchCache nor
-								// recentlyCleanNeighborCache may treat this as a real answer
+								// skipped, not resolved, so recentlyCleanNeighborCache must
+								// not treat this as a real answer
 								// (#240 doctrine). Return undefined: the degraded-fallback
 								// path below still has a chance to surface a passive/stale
 								// snapshot, same as any other "no fresh data this touch" case.
@@ -1935,15 +1914,7 @@ export async function computeCascadeForFile(
 				);
 				const durationMs = Date.now() - neighborStart;
 
-				// Cache only a confirmed answer. An inconclusive or binding-rejected
-				// result must not become a confirmed cache hit on the next cascade.
-				if (writeSeq != null && confirmed) {
-					neighborTouchCache.set(cacheKey, {
-						turnSeq,
-						writeSeq,
-						diagnostics: diags,
-					});
-				}
+				// #1899: the A5 same-write cache write stood here.
 				if (diags.length === 0) {
 					// Only a CONFIRMED clean touch may seed the recently-clean cache
 					// (#1095: a bound-false touch is unconfirmed, exactly like inconclusive).
@@ -2159,7 +2130,6 @@ export async function computeCascadeForFile(
 	).length;
 		const selectedOutcomeCount =
 			passiveSnapshotHits +
-			cacheHits +
 			recentlyCleanHits +
 			deferredTouches +
 			coldTouches +
@@ -2197,11 +2167,10 @@ export async function computeCascadeForFile(
 			// #1446 item 5: cache effectiveness as a number instead of an inference
 			// from `coldSnapshot`/`snapshotMissing` flags scattered across
 			// per-neighbor `neighbor_touch`/`neighbor_snapshot` rows.
-			// F1: cacheHits + recentlyCleanHits + deferredTouches + coldTouches
+			// F1: recentlyCleanHits + deferredTouches + coldTouches
 				// retain their outcome semantics. Passive snapshots and no-server selections
 				// complete the selected-neighbor denominator; touchFailures is a bounded
 				// subtype of coldTouches, not an additional outcome.
-			cacheHits,
 			recentlyCleanHits,
 			deferredTouches,
 			coldTouches,

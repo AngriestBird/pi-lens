@@ -223,7 +223,16 @@ export type DegradationKind =
 	 * carries the rule name so a specific stuck rule (vs. a whole-binary
 	 * mismatch) is diagnosable from the ledger alone.
 	 */
-	| "biome-explain-unavailable";
+	| "biome-explain-unavailable"
+	/**
+	 * The tier-3 cascade's outstanding-touch registry
+	 * (`clients/lsp/cascade-tier.ts`) reached its cap before a quiet-window
+	 * reconcile drained it, so the oldest touch was dropped unanswered (#1899).
+	 * The registry is drained in full by every sweep, but the sweep runs on
+	 * pi's `agent_settled` window and dogfood logs show gaps up to 52 minutes;
+	 * this kind means a session out-touched that cadence.
+	 */
+	| "cascade-tier3-backlog-evicted";
 
 export interface DegradationRecord {
 	kind: unknown;

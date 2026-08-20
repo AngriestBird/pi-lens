@@ -112,7 +112,6 @@ describe("collectMemorySampleSubsystems (O(1)/O(bounded-cache-size) live reads)"
 		expect(subsystems.reviewGraph.cacheEntries).toBeGreaterThanOrEqual(0);
 		expect(subsystems.reviewGraph.totalNodes).toBeGreaterThanOrEqual(0);
 		expect(subsystems.reviewGraph.totalEdges).toBeGreaterThanOrEqual(0);
-		expect(subsystems.dispatchCaches.neighborTouchCacheSize).toBeGreaterThanOrEqual(0);
 		expect(subsystems.dispatchCaches.recentlyCleanNeighborCacheSize).toBeGreaterThanOrEqual(0);
 		if (subsystems.treeSitter) {
 			expect(subsystems.treeSitter.languagesLoaded).toBeGreaterThanOrEqual(0);
