@@ -310,4 +310,196 @@ describe("resolveBiomeFixKinds (#1810)", () => {
 		// successful spawn.
 		expect(recovered.get("useConst")).toBe("safe");
 	});
+
+	it("caches a genuine 'No fix available.' verdict and does not re-spawn (#1810 review F2)", async () => {
+		const { resolveBiomeFixKinds } = await import(
+			"../../../../clients/dispatch/runners/biome-check.js"
+		);
+		const cmd = `biome-nofix-cache-test-${Math.random()}`;
+
+		safeSpawnAsync.mockResolvedValue({
+			error: null,
+			status: 0,
+			stdout:
+				"Summary\n\n- Name: noConstantCondition\n- No fix available.\n- Default severity: error\n",
+			stderr: "",
+		});
+
+		const first = await resolveBiomeFixKinds(cmd, "/cwd", [
+			"lint/correctness/noConstantCondition",
+		]);
+		expect(first.get("noConstantCondition")).toBe("none");
+		const callsAfterFirst = safeSpawnAsync.mock.calls.length;
+		expect(callsAfterFirst).toBeGreaterThan(0);
+
+		const second = await resolveBiomeFixKinds(cmd, "/cwd", [
+			"lint/correctness/noConstantCondition",
+		]);
+		expect(second.get("noConstantCondition")).toBe("none");
+		// Mutation-proofing: if the genuine "No fix available." verdict were
+		// not cached (F2's finding), this second call would re-spawn.
+		expect(safeSpawnAsync.mock.calls.length).toBe(callsAfterFirst);
+	});
+
+	it("never caches an unparseable explain output — fails closed without poisoning (#1810 review F1)", async () => {
+		const { resolveBiomeFixKinds } = await import(
+			"../../../../clients/dispatch/runners/biome-check.js"
+		);
+		const cmd = `biome-unparseable-test-${Math.random()}`;
+
+		// Shaped like a biome 1.x `explain` answer might be: no "- Fix:" or
+		// "- No fix available." line at all, since that structured text is a
+		// 2.x-era addition.
+		safeSpawnAsync.mockResolvedValueOnce({
+			error: null,
+			status: 0,
+			stdout: "useConst: require const declarations\n",
+			stderr: "",
+		});
+		const first = await resolveBiomeFixKinds(cmd, "/cwd", [
+			"lint/style/useConst",
+		]);
+		expect(first.get("useConst")).toBe("none");
+
+		// A later call against the SAME (cmd, rule) with real 2.x-shaped output
+		// must still get the real answer — proving the unparseable read above
+		// was never written to the cache.
+		safeSpawnAsync.mockResolvedValueOnce({
+			error: null,
+			status: 0,
+			stdout: "- Name: useConst\n- Fix: safe\n",
+			stderr: "",
+		});
+		const second = await resolveBiomeFixKinds(cmd, "/cwd", [
+			"lint/style/useConst",
+		]);
+		expect(second.get("useConst")).toBe("safe");
+	});
+
+	it("records a bounded degradation on explain spawn failure (#1810 review F4)", async () => {
+		const { resolveBiomeFixKinds } = await import(
+			"../../../../clients/dispatch/runners/biome-check.js"
+		);
+		const { getDegradationSummary, resetDegradationLedger } = await import(
+			"../../../../clients/degradation-ledger.js"
+		);
+		resetDegradationLedger();
+		const cmd = `biome-degradation-test-${Math.random()}`;
+
+		safeSpawnAsync.mockResolvedValueOnce({
+			error: "spawn ENOENT",
+			status: null,
+			stdout: "",
+			stderr: "",
+		});
+		await resolveBiomeFixKinds(cmd, "/cwd", ["lint/style/useConst"]);
+
+		const summary = getDegradationSummary();
+		const group = summary.find((g) => g.kind === "biome-explain-unavailable");
+		expect(group).toBeDefined();
+		expect(group?.count).toBeGreaterThanOrEqual(1);
+		expect(
+			group?.latestReasons.some((r) => r.subject === "useConst"),
+		).toBe(true);
+	});
+
+	it("records a bounded degradation on unparseable explain output too (#1810 review F1/F4)", async () => {
+		const { resolveBiomeFixKinds } = await import(
+			"../../../../clients/dispatch/runners/biome-check.js"
+		);
+		const { getDegradationSummary, resetDegradationLedger } = await import(
+			"../../../../clients/degradation-ledger.js"
+		);
+		resetDegradationLedger();
+		const cmd = `biome-degradation-unparseable-test-${Math.random()}`;
+
+		safeSpawnAsync.mockResolvedValueOnce({
+			error: null,
+			status: 0,
+			stdout: "garbled, not the real shape at all",
+			stderr: "",
+		});
+		await resolveBiomeFixKinds(cmd, "/cwd", ["lint/style/useTemplate"]);
+
+		const summary = getDegradationSummary();
+		const group = summary.find((g) => g.kind === "biome-explain-unavailable");
+		expect(group).toBeDefined();
+		expect(
+			group?.latestReasons.some((r) => r.subject === "useTemplate"),
+		).toBe(true);
+	});
+
+	it("caps concurrent 'explain' spawns rather than firing them all at once (#1810 review F6)", async () => {
+		const { resolveBiomeFixKinds } = await import(
+			"../../../../clients/dispatch/runners/biome-check.js"
+		);
+		const cmd = `biome-concurrency-test-${Math.random()}`;
+		const ruleCount = 12;
+		let inFlight = 0;
+		let maxInFlight = 0;
+
+		safeSpawnAsync.mockImplementation(async (_cmd: string, args: string[]) => {
+			inFlight++;
+			maxInFlight = Math.max(maxInFlight, inFlight);
+			// Yield so overlapping calls actually overlap instead of resolving
+			// synchronously one at a time.
+			await new Promise((resolve) => setTimeout(resolve, 5));
+			inFlight--;
+			const ruleName = args[1];
+			return {
+				error: null,
+				status: 0,
+				stdout: `- Name: ${ruleName}\n- Fix: safe\n`,
+				stderr: "",
+			};
+		});
+
+		const categories = Array.from(
+			{ length: ruleCount },
+			(_, i) => `lint/style/rule${i}`,
+		);
+		const resolved = await resolveBiomeFixKinds(cmd, "/cwd", categories);
+
+		expect(resolved.size).toBe(ruleCount);
+		expect(maxInFlight).toBeLessThanOrEqual(4);
+		// Mutation-proofing: an unbounded `Promise.all` fan-out would drive
+		// maxInFlight to ruleCount (12) here — the cap is what keeps it low.
+		expect(maxInFlight).toBeGreaterThan(1);
+	});
+
+	it("no-ops without spawning when there are no categories at all (#1810 review F7)", async () => {
+		const { resolveBiomeFixKinds } = await import(
+			"../../../../clients/dispatch/runners/biome-check.js"
+		);
+		const cmd = `biome-empty-test-${Math.random()}`;
+
+		const resolved = await resolveBiomeFixKinds(cmd, "/cwd", []);
+
+		expect(resolved.size).toBe(0);
+		expect(safeSpawnAsync).not.toHaveBeenCalled();
+	});
+
+	it("_resetBiomeFixKindCacheForTests clears cached verdicts (#1810 review F5)", async () => {
+		const { resolveBiomeFixKinds, _resetBiomeFixKindCacheForTests } =
+			await import("../../../../clients/dispatch/runners/biome-check.js");
+		const cmd = `biome-reset-seam-test-${Math.random()}`;
+
+		safeSpawnAsync.mockResolvedValue({
+			error: null,
+			status: 0,
+			stdout: "- Name: useConst\n- Fix: safe\n",
+			stderr: "",
+		});
+
+		await resolveBiomeFixKinds(cmd, "/cwd", ["lint/style/useConst"]);
+		const callsAfterFirst = safeSpawnAsync.mock.calls.length;
+		expect(callsAfterFirst).toBeGreaterThan(0);
+
+		_resetBiomeFixKindCacheForTests();
+
+		await resolveBiomeFixKinds(cmd, "/cwd", ["lint/style/useConst"]);
+		// Mutation-proofing: if the reset didn't actually clear the map, this
+		// second call would hit the cache and spawn nothing more.
+		expect(safeSpawnAsync.mock.calls.length).toBeGreaterThan(callsAfterFirst);
+	});
 });

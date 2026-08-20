@@ -7,6 +7,7 @@
  */
 
 import * as path from "node:path";
+import { incrementDegradationCount } from "../../degradation-ledger.js";
 import { safeSpawnAsync } from "../../safe-spawn.js";
 import {
 	biomeConfigArgs,
@@ -24,7 +25,7 @@ import type {
 import { resolveToolCommandWithInstallFallback } from "./utils/runner-helpers.js";
 
 interface BiomeDiagnostic {
-	severity: "error" | "warning" | "information" | "hint";
+	severity: "error" | "warning" | "info" | "hint";
 	category: string;
 	message: string;
 	// Real `biome lint --reporter=json` output (probed against the shipped
@@ -43,10 +44,14 @@ interface BiomeDiagnostic {
 /**
  * Map biome's own severity vocabulary onto the four-tier `Diagnostic.severity`
  * (clients/dispatch/types.ts), the same way `normalizeRuleSeverity` does for
- * ast-grep-napi post-#1787. Biome names its info tier `"information"`; every
- * other tier is a direct pass-through. An unrecognized value falls back to
- * `"warning"` — the tier every biome diagnostic reported at before this fix,
- * so reviving hint/info never silently demotes an existing finding.
+ * ast-grep-napi post-#1787. Biome's real `lint --reporter=json` output
+ * (re-probed live for #1810's review round) spells its info tier `"info"`,
+ * not `"information"` — the value this switch matched before, which meant a
+ * real info-tier diagnostic fell through the `default` and was silently
+ * promoted to `"warning"`, one tier too loud. Every other tier is a direct
+ * pass-through; an unrecognized value still falls back to `"warning"` — the
+ * tier every biome diagnostic reported at before this fix, so reviving
+ * hint/info never silently demotes an existing finding.
  */
 export function normalizeBiomeSeverity(
 	raw: BiomeDiagnostic["severity"] | undefined,
@@ -54,7 +59,7 @@ export function normalizeBiomeSeverity(
 	switch (raw) {
 		case "error":
 			return "error";
-		case "information":
+		case "info":
 			return "info";
 		case "hint":
 			return "hint";
@@ -133,10 +138,54 @@ export function parseBiomeJson(
 // (biome binary, rule name) pair, not of any one diagnostic occurrence, so
 // it's resolved once and reused. Keyed on the resolved `cmd` so a different
 // biome binary (e.g. a different project's pinned version) never reuses
-// another binary's answer.
+// another binary's answer. Registered in
+// tests/support/session-state-registry.ts as `process_lifetime` — the
+// answer cannot change without a different biome binary, which is a
+// different cache key, so there is nothing for a session boundary to
+// invalidate.
 const biomeFixKindCache = new Map<string, BiomeFixKind>();
 
+/** Test-only: drop every cached verdict so a test starts from a clean cache. */
+export function _resetBiomeFixKindCacheForTests(): void {
+	biomeFixKindCache.clear();
+}
+
 const BIOME_FIX_KIND_PATTERN = /^-\s*Fix:\s*(safe|unsafe)\s*$/m;
+// The explicit "no fix" statement `biome explain` prints for a rule with no
+// autofix at all (e.g. `noConstantCondition`). Matching this SEPARATELY from
+// "the safe/unsafe pattern didn't match" is the point (#1810 review F1/F2):
+// only a POSITIVE read — either a stated fix tier or this explicit negative
+// — is trustworthy enough to cache. Anything else (a differently-shaped
+// `explain` output, e.g. a biome 1.x install) is a parse failure, not a
+// verdict, and must never be cached as one.
+const BIOME_NO_FIX_PATTERN = /^-\s*No fix available\.\s*$/m;
+
+/** At most this many `biome explain` spawns run concurrently (#1810 review F6). */
+const EXPLAIN_CONCURRENCY = 4;
+
+/**
+ * Runs `mapper` over `items` with at most `concurrency` in flight at once.
+ * Same shape as `mapWithConcurrency` in clients/dependency-checker.ts:237-252
+ * — kept as a small local copy rather than an import, since that helper is
+ * module-private there and this is the only other call site today.
+ */
+async function runWithConcurrency<T>(
+	items: T[],
+	concurrency: number,
+	mapper: (item: T) => Promise<void>,
+): Promise<void> {
+	if (items.length === 0) return;
+	let nextIndex = 0;
+	const workerCount = Math.max(1, Math.min(concurrency, items.length));
+	const worker = async (): Promise<void> => {
+		while (true) {
+			const index = nextIndex++;
+			if (index >= items.length) return;
+			await mapper(items[index]);
+		}
+	};
+	await Promise.all(Array.from({ length: workerCount }, () => worker()));
+}
 
 /**
  * Resolves each rule referenced by `categories` to its fix kind via
@@ -146,8 +195,12 @@ const BIOME_FIX_KIND_PATTERN = /^-\s*Fix:\s*(safe|unsafe)\s*$/m;
  * registry rather than a hand-maintained table (#1810; real diagnostics
  * carry no per-occurrence fixability field — see `BiomeDiagnostic`).
  *
- * A spawn failure or unrecognized rule name resolves to `"none"` for THIS
- * call only and is never written to the cache: caching a transient failure
+ * Only a POSITIVE read is cached: either `- Fix: safe|unsafe` or the
+ * explicit `- No fix available.` statement. A spawn failure, a nonzero
+ * exit, or output that matches NEITHER pattern (e.g. a biome 1.x install —
+ * its `explain` text differs and would otherwise poison every rule as
+ * permanently unfixable, #1810 review F1) resolves to `"none"` for THIS
+ * call only and is never written to the cache — caching an unparsed result
  * would permanently under-report a genuinely fixable rule for the rest of
  * the process's life (the never-cache-a-transient-failure screen).
  */
@@ -162,36 +215,60 @@ export async function resolveBiomeFixKinds(
 		const ruleName = biomeRuleNameFromCategory(category);
 		if (ruleName) ruleNames.add(ruleName);
 	}
+	const toResolve: string[] = [];
+	for (const ruleName of ruleNames) {
+		const cacheKey = `${cmd}::${ruleName}`;
+		const cached = biomeFixKindCache.get(cacheKey);
+		if (cached !== undefined) {
+			resolved.set(ruleName, cached);
+		} else {
+			toResolve.push(ruleName);
+		}
+	}
 
-	await Promise.all(
-		[...ruleNames].map(async (ruleName) => {
-			const cacheKey = `${cmd}::${ruleName}`;
-			const cached = biomeFixKindCache.get(cacheKey);
-			if (cached !== undefined) {
-				resolved.set(ruleName, cached);
-				return;
-			}
+	await runWithConcurrency(toResolve, EXPLAIN_CONCURRENCY, async (ruleName) => {
+		const cacheKey = `${cmd}::${ruleName}`;
 
-			const spawned = await safeSpawnAsync(cmd, ["explain", ruleName], {
-				timeout: 10000,
-				cwd,
+		const spawned = await safeSpawnAsync(cmd, ["explain", ruleName], {
+			timeout: 10000,
+			cwd,
+		});
+		if (spawned.error || spawned.status !== 0) {
+			incrementDegradationCount({
+				kind: "biome-explain-unavailable",
+				subject: ruleName,
+				reason: spawned.error
+					? `spawn failed: ${spawned.error}`
+					: `explain exited ${spawned.status}`,
 			});
-			if (spawned.error || spawned.status !== 0) {
-				resolved.set(ruleName, "none");
-				return;
-			}
+			resolved.set(ruleName, "none");
+			return;
+		}
 
-			const match = (spawned.stdout || "").match(BIOME_FIX_KIND_PATTERN);
-			const kind: BiomeFixKind =
-				match?.[1] === "safe"
-					? "safe"
-					: match?.[1] === "unsafe"
-						? "unsafe"
-						: "none";
+		const stdout = spawned.stdout || "";
+		const fixMatch = stdout.match(BIOME_FIX_KIND_PATTERN);
+		if (fixMatch) {
+			const kind: BiomeFixKind = fixMatch[1] === "safe" ? "safe" : "unsafe";
 			biomeFixKindCache.set(cacheKey, kind);
 			resolved.set(ruleName, kind);
-		}),
-	);
+			return;
+		}
+		if (BIOME_NO_FIX_PATTERN.test(stdout)) {
+			biomeFixKindCache.set(cacheKey, "none");
+			resolved.set(ruleName, "none");
+			return;
+		}
+
+		// Neither pattern matched — an unrecognized `explain` output shape, not
+		// a confirmed negative. Resolve to "none" for this call, but leave the
+		// cache untouched so the next batch retries against real output.
+		incrementDegradationCount({
+			kind: "biome-explain-unavailable",
+			subject: ruleName,
+			reason: "explain output matched neither the Fix nor No-fix pattern",
+		});
+		resolved.set(ruleName, "none");
+	});
 
 	return resolved;
 }
@@ -244,8 +321,10 @@ const biomeCheckJsonRunner: RunnerDefinition = {
 		if (checkResult.status === 0 || checkResult.status === 1) {
 			// Cheap pre-parse just to collect rule categories — the real parse
 			// (with parseError handling) happens below via parseBiomeJson. A
-			// malformed-JSON pre-parse simply yields no categories; the real
-			// parse still surfaces the parseError diagnostic as before.
+			// malformed-JSON pre-parse simply yields no categories, and
+			// `resolveBiomeFixKinds` no-ops on an empty list (no spawn, an
+			// immediately-resolved empty map) — the real parse still surfaces
+			// the parseError diagnostic as before.
 			let categories: (string | undefined)[] = [];
 			try {
 				const preParsed = JSON.parse(checkResult.stdout || "{}");
@@ -255,9 +334,7 @@ const biomeCheckJsonRunner: RunnerDefinition = {
 			} catch {
 				categories = [];
 			}
-			if (categories.length > 0) {
-				fixKindByRule = await resolveBiomeFixKinds(cmd, cwd, categories);
-			}
+			fixKindByRule = await resolveBiomeFixKinds(cmd, cwd, categories);
 		}
 
 		const parsed =

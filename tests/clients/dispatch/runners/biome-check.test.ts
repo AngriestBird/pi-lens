@@ -157,7 +157,13 @@ describe("biome-check JSON parser", () => {
 						},
 					},
 					{
-						severity: "information",
+						// #1810 review F3: real `biome lint --reporter=json` (2.5.7,
+						// live-probed across all 514 shipped lint rules) spells this
+						// tier "info", never "information" — the value this fixture
+						// used to assert, which meant the parser's own "information"
+						// branch was never actually reachable and every real info-tier
+						// finding silently fell to the `default: "warning"` branch.
+						severity: "info",
 						category: "i1",
 						message: "Info",
 						location: {
@@ -167,6 +173,14 @@ describe("biome-check JSON parser", () => {
 						},
 					},
 					{
+						// "hint" is NOT a real `biome lint` severity value: probing
+						// every one of the 514 shipped 2.5.7 lint rules' `explain`
+						// output found only error/warn/info as a configurable or
+						// default severity — the config schema's own
+						// `RulePlainConfiguration` enum is `off|on|info|warn|error`,
+						// with no `hint` member. This case is a defensive
+						// pass-through for a value the real `lint` command has never
+						// been observed to emit, not a confirmed-real fixture.
 						severity: "hint",
 						category: "h1",
 						message: "Hint",
@@ -186,21 +200,22 @@ describe("biome-check JSON parser", () => {
 			expect(result[0].semantic).toBe("blocking");
 			expect(result[1].severity).toBe("warning");
 			expect(result[1].semantic).toBe("warning");
-			// #1791: biome's "information" tier now survives as Diagnostic
+			// #1791/#1810: biome's real "info" tier survives as Diagnostic
 			// severity "info", instead of being collapsed into "warning".
 			expect(result[2].severity).toBe("info");
 			expect(result[2].semantic).toBe("warning");
-			// "hint" survives as-is; only "error" is a blocking semantic.
+			// "hint" survives as-is (defensive pass-through); only "error" is a
+			// blocking semantic.
 			expect(result[3].severity).toBe("hint");
 			expect(result[3].semantic).toBe("warning");
 		});
 
 		it("keeps blocking classification error-only when info/hint tiers are present", () => {
-			// #1791: reviving hint/info severity must not widen what blocks.
+			// #1791/#1810: reviving hint/info severity must not widen what blocks.
 			const biomeOutput = JSON.stringify({
 				diagnostics: [
 					{
-						severity: "information",
+						severity: "info",
 						category: "i1",
 						message: "Info",
 						location: {
@@ -412,9 +427,12 @@ describe("biome-check JSON parser", () => {
 		it("maps each of biome's four declared tiers independently", () => {
 			// #1791: each branch asserted independently so deleting/merging any
 			// one of them into the "warning" fallback reds this test.
+			// #1810 review F3: "info" is the real value (see the live-binary
+			// fixture below) — "information" is never emitted and was a
+			// hand-written guess the switch matched against nothing real.
 			expect(normalizeBiomeSeverity("error")).toBe("error");
 			expect(normalizeBiomeSeverity("warning")).toBe("warning");
-			expect(normalizeBiomeSeverity("information")).toBe("info");
+			expect(normalizeBiomeSeverity("info")).toBe("info");
 			expect(normalizeBiomeSeverity("hint")).toBe("hint");
 		});
 
@@ -422,6 +440,102 @@ describe("biome-check JSON parser", () => {
 			expect(
 				normalizeBiomeSeverity(undefined as unknown as "warning"),
 			).toBe("warning");
+		});
+
+		it("no longer recognizes the never-real 'information' spelling (#1810 F3)", () => {
+			// Mutation-proofing: if the "info" case regresses back to
+			// "information", this assertion is the one that reds — it pins the
+			// exact pre-fix defect (a real "info" diagnostic silently promoted
+			// to "warning") as a still-failing case for the wrong spelling.
+			expect(
+				normalizeBiomeSeverity("information" as unknown as "info"),
+			).toBe("warning");
+		});
+	});
+
+	describe("real biome 2.5.7 severity tiers (#1810 review F3)", () => {
+		// Captured live via `node_modules/.bin/biome lint --reporter=json
+		// --no-errors-on-unmatched` (no project config, so biome's own default
+		// severities apply) against a fixture with one violation per tier:
+		// `debugger;` (noDebugger, error), `let x = 1;` unused-once (useConst,
+		// warning), and `"a" + b` string concatenation (useTemplate, info).
+		// Every severity value below is the literal value biome printed — none
+		// hand-typed.
+		const REAL_TIERED_OUTPUT = JSON.stringify({
+			summary: {
+				changed: 0,
+				unchanged: 1,
+				matches: 0,
+				errors: 1,
+				warnings: 1,
+				infos: 1,
+			},
+			diagnostics: [
+				{
+					severity: "info",
+					message: "Template literals are preferred over string concatenation.",
+					category: "lint/style/useTemplate",
+					location: {
+						path: ".probe-biome/tiers.ts",
+						start: { line: 5, column: 11 },
+						end: { line: 5, column: 18 },
+					},
+					advices: [],
+				},
+				{
+					severity: "warning",
+					message: "This let declares a variable that is only assigned once.",
+					category: "lint/style/useConst",
+					location: {
+						path: ".probe-biome/tiers.ts",
+						start: { line: 2, column: 1 },
+						end: { line: 2, column: 4 },
+					},
+					advices: [
+						{
+							start: { line: 2, column: 5 },
+							end: { line: 2, column: 6 },
+							text: "Safe fix: Use const instead.",
+						},
+					],
+				},
+				{
+					severity: "error",
+					message: "This is an unexpected use of the debugger statement.",
+					category: "lint/suspicious/noDebugger",
+					location: {
+						path: ".probe-biome/tiers.ts",
+						start: { line: 1, column: 1 },
+						end: { line: 1, column: 10 },
+					},
+					advices: [],
+				},
+			],
+			command: "lint",
+		});
+
+		it("maps the real info tier to Diagnostic severity 'info', not 'warning'", () => {
+			const result = parseBiomeJsonImpl(
+				REAL_TIERED_OUTPUT,
+				"/project/.probe-biome/tiers.ts",
+			);
+			expect(result.diagnostics).toHaveLength(3);
+			const useTemplateDiag = result.diagnostics.find(
+				(d) => d.rule === "lint/style/useTemplate",
+			);
+			expect(useTemplateDiag?.severity).toBe("info");
+			expect(useTemplateDiag?.semantic).toBe("warning");
+
+			const useConstDiag = result.diagnostics.find(
+				(d) => d.rule === "lint/style/useConst",
+			);
+			expect(useConstDiag?.severity).toBe("warning");
+
+			const noDebuggerDiag = result.diagnostics.find(
+				(d) => d.rule === "lint/suspicious/noDebugger",
+			);
+			expect(noDebuggerDiag?.severity).toBe("error");
+			expect(noDebuggerDiag?.semantic).toBe("blocking");
 		});
 	});
 });
