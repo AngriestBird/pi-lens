@@ -6,6 +6,10 @@ import { readChangesSince } from "../../clients/project-changes.js";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
 import { handleToolCall } from "../../clients/runtime-tool-call.js";
 import { handleToolResult } from "../../clients/runtime-tool-result.js";
+import {
+	getVerifiedPathAttributionGuessCount,
+	resetVerifiedPathAttributionGuessCount,
+} from "../../clients/path-attribution-telemetry.js";
 import { createTempFile, setupTestEnvironment } from "./test-utils.js";
 
 const logLatency = vi.hoisted(() => vi.fn());
@@ -1791,7 +1795,7 @@ describe("path attribution across tool_call/tool_result (#1642)", () => {
 			// path here is ambiguous: guessing the project root as the basis is
 			// exactly the #1642 collapse. This must fail CLOSED, not silently
 			// fall back to the old naive resolution.
-			createTempFile(env.tmpDir, "src/app.ts", "parent original\n");
+			resetVerifiedPathAttributionGuessCount();
 			const runtime = new RuntimeCoordinator();
 			runtime.projectRoot = env.tmpDir;
 			const dbg = vi.fn();
@@ -1819,6 +1823,7 @@ describe("path attribution across tool_call/tool_result (#1642)", () => {
 			expect(dbg).toHaveBeenCalledWith(
 				expect.stringContaining("path_attribution_missing"),
 			);
+			expect(getVerifiedPathAttributionGuessCount()).toBe(0);
 			expect(logLatency).toHaveBeenCalledWith(
 				expect.objectContaining({ phase: "path_attribution_missing" }),
 			);
@@ -1828,6 +1833,51 @@ describe("path attribution across tool_call/tool_result (#1642)", () => {
 			} else {
 				process.env.PILENS_DATA_DIR = previousDataDir;
 			}
+			env.cleanup();
+		}
+	});
+
+	it("keeps a same-named workspace-root guess unverified without execution evidence (#1886)", async () => {
+		const env = setupTestEnvironment("pi-lens-attribution-verified-");
+		const previousDataDir = process.env.PILENS_DATA_DIR;
+		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+		try {
+			resetVerifiedPathAttributionGuessCount();
+			createTempFile(env.tmpDir, "src/app.ts", "parent original\n");
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+
+			await handleToolResult({
+				event: {
+					toolCallId: "call-verified-guess",
+					toolName: "edit",
+					input: { path: "src/app.ts" },
+					content: [{ type: "text", text: "base" }],
+				},
+				getFlag: () => false,
+				dbg: vi.fn(),
+				runtime,
+				cacheManager: new CacheManager(false),
+				biomeClient: {},
+				ruffClient: {},
+				metricsClient: {},
+				resetLSPService: () => {},
+				agentBehaviorRecord: () => [],
+				formatBehaviorWarnings: () => "",
+			} as any);
+
+			// A wrong-but-existing same-named file must not verify the guess.
+			// MUTATION PROOF: restoring existence-only verification makes both
+			// assertions fail because the tally increments and the full record is
+			// suppressed.
+			expect(getVerifiedPathAttributionGuessCount()).toBe(0);
+			expect(logLatency).toHaveBeenCalledWith(
+				expect.objectContaining({ phase: "path_attribution_missing" }),
+			);
+		} finally {
+			resetVerifiedPathAttributionGuessCount();
+			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+			else process.env.PILENS_DATA_DIR = previousDataDir;
 			env.cleanup();
 		}
 	});

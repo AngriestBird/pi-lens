@@ -286,6 +286,9 @@ record and admitted tally milestones also emit a `degradation_ledger` row throug
 the session remains auditable when no health render reaches the transcript.
 Scanner coverage gaps and stalled notify-inflight barriers use the ledger;
 successful notify drains remain latency-only because they are not degradations.
+Workspace-root path-attribution rollups are separate, memory-only session
+telemetry. They reset on the primary `session_start`, emit once on primary
+shutdown, and secondary shutdown returns before consuming the primary tally.
 Durable rows use the same 20-entry per-kind admission as the summary and emit
 count increments only at powers of two, so the sink remains bounded. Each row
 also carries the ledger generation for session grouping. (#1366, #1292, #1866)
@@ -1958,6 +1961,8 @@ Short, obvious changes may use a subject only. Non-trivial changes get a body.
 Three failures in one day forced this rule. knip died and reported "not available" for weeks, because a timing-out probe logged nothing a reader could distinguish from a missing tool. The opengrep LSP lane starved on every edit while its CLI kept finding real issues, and no record showed the lane losing the race. Five merged fixes could not be verified from telemetry at all, which is why #1432 exists. Each was found by reading code, not logs, long after it started costing us.
 
 Keep the records bounded, use the existing log conventions, and exclude zero-duration decision phases from `lastPhase` attribution.
+
+Verified workspace-root guesses for a missing tool-call attribution are benign host behavior: count them in `clients/path-attribution-telemetry.ts` and emit one `path_attribution_verified_rollup` row at session shutdown. Keep non-existent or otherwise unverified guesses as full `path_attribution_missing` records with `rawFilePath` and `guessedPath`; this uses the session-rollup shape from `clients/bus-events-logger.ts`, not the degradation ledger.
 
 ## Issue triage & labels
 
