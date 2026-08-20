@@ -79,6 +79,7 @@ import {
 	reconcileStaleWidgetDependencyBlockers,
 	reconcileStaleWidgetFiles,
 	type WidgetDiagnostic,
+	widgetDiagnosticUri,
 } from "../clients/widget-state.js";
 import { logLatency } from "../clients/latency-logger.js";
 import { convertLspDiagnostics } from "../clients/dispatch/utils/lsp-diagnostics.js";
@@ -549,7 +550,10 @@ function appendProjectDiagnosticsDeltaLines(
 	const scoped = (report?.diagnostics ?? []).filter(
 		(diagnostic) =>
 			includeFile(diagnostic.filePath) &&
-			matchesSeverity(projectDiagnosticToWidget(diagnostic), severity),
+			matchesSeverity(
+				projectDiagnosticToWidget(diagnostic, diagnostic.filePath),
+				severity,
+			),
 	);
 	const gated = gateFindingsByPathFreshness({
 		store: "lens-diagnostics-delta-project",
@@ -600,7 +604,11 @@ function filterDeltaReportDispositions(
 	if (!report?.diagnostics.length) return report;
 	const kept = report.diagnostics.filter(
 		(d) =>
-			applyWeakDispositions([projectDiagnosticToWidget(d)], cwd, d.filePath)
+			applyWeakDispositions(
+				[projectDiagnosticToWidget(d, d.filePath)],
+				cwd,
+				d.filePath,
+			)
 				.length === 1,
 	);
 	const policyKept = applyRulePolicy(kept, policyMap);
@@ -1052,6 +1060,7 @@ function lspDiagnosticToWidget(diagnostic: LSPDiagnostic): WidgetDiagnostic {
 
 function projectDiagnosticToWidget(
 	diagnostic: ProjectDiagnostic,
+	filePath: string,
 ): WidgetDiagnostic {
 	return {
 		severity: diagnostic.severity,
@@ -1061,6 +1070,7 @@ function projectDiagnosticToWidget(
 		col: diagnostic.column,
 		rule: diagnostic.rule ?? diagnostic.code,
 		tool: diagnostic.runner || diagnostic.tool,
+		uri: widgetDiagnosticUri(filePath, diagnostic.line, diagnostic.column),
 	};
 }
 
@@ -1340,13 +1350,13 @@ function mergeDiagnosticsWithWidgetSummaries(
 	for (const diagnostic of projectSnapshot?.diagnostics ?? []) {
 		addDiagnostic(
 			path.resolve(diagnostic.filePath),
-			projectDiagnosticToWidget(diagnostic),
+			projectDiagnosticToWidget(diagnostic, diagnostic.filePath),
 		);
 	}
 	for (const diagnostic of projectDelta?.diagnostics ?? []) {
 		addDiagnostic(
 			path.resolve(diagnostic.filePath),
-			projectDiagnosticToWidget(diagnostic),
+			projectDiagnosticToWidget(diagnostic, diagnostic.filePath),
 		);
 	}
 

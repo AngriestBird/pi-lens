@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createLensDiagnosticsTool } from "../../tools/lens-diagnostics.js";
 import { createLensDiagnosticMarkTool } from "../../tools/lens-diagnostic-mark.js";
@@ -83,15 +84,21 @@ let mockDependencyDemoted = 0;
 const reconcileScanDiagnosticsMock = vi.fn();
 const reconcileCorrelatedScanDiagnosticsMock = vi.fn();
 
-vi.mock("../../clients/widget-state.js", () => ({
-	getFileDiagnosticSummaries: () => mockSummaries,
-	reconcileStaleWidgetFiles: async () => mockStaleDropped,
-	reconcileStaleWidgetDependencyBlockers: async () => mockDependencyDemoted,
-	reconcileScanDiagnostics: (...args: unknown[]) =>
-		reconcileScanDiagnosticsMock(...args),
-	reconcileCorrelatedScanDiagnostics: (...args: unknown[]) =>
-		reconcileCorrelatedScanDiagnosticsMock(...args),
-}));
+vi.mock("../../clients/widget-state.js", async (importOriginal) => {
+	const actual = await importOriginal<
+		typeof import("../../clients/widget-state.js")
+	>();
+	return {
+		...actual,
+		getFileDiagnosticSummaries: () => mockSummaries,
+		reconcileStaleWidgetFiles: async () => mockStaleDropped,
+		reconcileStaleWidgetDependencyBlockers: async () => mockDependencyDemoted,
+		reconcileScanDiagnostics: (...args: unknown[]) =>
+			reconcileScanDiagnosticsMock(...args),
+		reconcileCorrelatedScanDiagnostics: (...args: unknown[]) =>
+			reconcileCorrelatedScanDiagnosticsMock(...args),
+	};
+});
 
 // #1641: the past-EOF gate's demote/log logic is real (imported for real
 // below); only its resync side effect is mocked here so a demoted-line test
@@ -1348,7 +1355,11 @@ describe("lens_diagnostics mode=full", () => {
 		expect(reconcileCorrelatedScanDiagnosticsMock).toHaveBeenCalledWith(
 			path.resolve(filePath),
 			expect.arrayContaining([
-				expect.objectContaining({ tool: "ast-grep-napi", rule: "self-scan-1" }),
+				expect.objectContaining({
+					tool: "ast-grep-napi",
+					rule: "self-scan-1",
+					uri: `${pathToFileURL(filePath).href}#L1`,
+				}),
 				expect.objectContaining({ tool: "ast-grep-napi", rule: "self-scan-2" }),
 				expect.objectContaining({ tool: "ast-grep-napi", rule: "self-scan-3" }),
 			]),

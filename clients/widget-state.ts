@@ -455,6 +455,18 @@ function toSingleLineMessage(message: string | undefined): string {
 	return (message ?? "").replace(/\s+/g, " ").trim();
 }
 
+/** Build the OSC-8 target used by every stored diagnostic row. */
+export function widgetDiagnosticUri(
+	filePath: string,
+	line?: number,
+	column?: number,
+): string {
+	const base = pathToFileURL(filePath).href;
+	return line != null
+		? `${base}#L${line}${column != null ? `:${column}` : ""}`
+		: base;
+}
+
 export function recordDiagnostics(
 	filePath: string,
 	diagnostics: Array<{
@@ -524,13 +536,8 @@ function normalizeDiagnostics(
 	}>,
 	observedTs: number,
 ): WidgetDiagnostic[] {
-	const base = pathToFileURL(filePath).href;
 	return diagnostics.map((d) => {
 		const rule = d.rule ?? d.id;
-		const uri =
-			d.line != null
-				? `${base}#L${d.line}${d.column != null ? `:${d.column}` : ""}`
-				: base;
 		return {
 			severity: d.severity ?? "info",
 			semantic: d.semantic,
@@ -539,7 +546,7 @@ function normalizeDiagnostics(
 			col: d.column,
 			rule,
 			tool: d.tool,
-			uri,
+			uri: widgetDiagnosticUri(filePath, d.line, d.column),
 			observedAt: observedTs,
 		} satisfies WidgetDiagnostic;
 	});

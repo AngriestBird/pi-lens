@@ -1,6 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { pathToFileURL } from "node:url";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
@@ -219,6 +220,64 @@ describe("getFileDiagnosticSummaries", () => {
 });
 
 describe("widget-state renderWidget", () => {
+	it("preserves stamped rows and stamps new correlated project rows", () => {
+		const filePath = `${process.cwd()}/timestamp-merge.ts`;
+		reconcileCorrelatedScanDiagnostics(
+			filePath,
+			[
+				{
+					severity: "error",
+					semantic: "blocking",
+					message: "old finding",
+					line: 1,
+					tool: "ast-grep",
+					rule: "old",
+					observedAt: 1000,
+				},
+				{
+					severity: "error",
+					semantic: "blocking",
+					message: "new project finding",
+					line: 2,
+					tool: "ast-grep-napi",
+					rule: "new",
+				},
+			],
+			undefined,
+			2000,
+		);
+
+		expect(getFileDiagnostics(filePath)).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({ message: "old finding", observedAt: 1000 }),
+				expect.objectContaining({
+					message: "new project finding",
+					observedAt: 2000,
+				}),
+			]),
+		);
+	});
+
+	it("renders the projected project-row URI as an OSC-8 line link", () => {
+		const filePath = `${process.cwd()}/project-row-link.ts`;
+		reconcileCorrelatedScanDiagnostics(filePath, [
+			{
+				severity: "error",
+				semantic: "blocking",
+				message: "project finding",
+				line: 7,
+				tool: "ast-grep-napi",
+				rule: "self-scan",
+				uri: `${pathToFileURL(filePath).href}#L7`,
+			},
+		]);
+
+		const rendered = renderWidget(120, theme).join("\n");
+		expect(rendered).toContain(
+			`\x1b]8;;${pathToFileURL(filePath).href}#L7\x1b\\L7`,
+		);
+	});
+
 	it("counts napi self-scan findings when the correlated LSP lane is unconfirmed (#1888)", () => {
 		const filePath = `${process.cwd()}/coverage-window.ts`;
 		const lspFindings = Array.from({ length: 9 }, (_, index) => ({

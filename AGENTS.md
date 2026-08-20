@@ -43,7 +43,9 @@ loop. That final seam has correlated the LSP, project-scan, delta, and retained
 widget lanes; committing only the earlier confirmed-LSP rows makes a broken
 auxiliary lane hide independent `ast-grep-napi` findings from the widget count.
 Preserve existing per-entry observation times and stamp only newly correlated
-rows with the project scan time. (#1888)
+rows with the project scan time. Projected rows must also use the shared
+`widgetDiagnosticUri` normalization seam so their OSC-8 line links match
+`recordDiagnostics` output. (#1888)
 
 Advisory caches must carry immutable capture provenance and validate it again
 at every delivery surface. A finding is current only when session/turn state
