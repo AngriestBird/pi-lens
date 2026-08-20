@@ -166,4 +166,62 @@ describe("clientShutdown with a fully wedged connection (#1620)", () => {
 		expect(kill).toHaveBeenCalled();
 		expect(removeLspChild).toHaveBeenCalledWith(0, undefined);
 	}, 5_000);
+
+	// #1620 residual 1: a rejection that is NOT the timer winning (an
+	// immediate protocol error) must not be reported as a timeout — the two
+	// are both "forced" for the rolled-up verdict, but the per-field flag
+	// should say which happened. Mutation-proof: if `isShutdownTimeoutError`'s
+	// exact-message check is loosened back to "catch sets *TimedOut
+	// unconditionally", this immediate-rejection case flips to
+	// `exitNotifyTimedOut: true` and the assertion below goes red.
+	it("marks an immediate rejection as *Rejected, not *TimedOut", async () => {
+		const mod: ClientModule = await import("../../../clients/lsp/client.js");
+		const state = createWedgedState(vi.fn(() => true));
+		state.connection.sendRequest = vi.fn().mockResolvedValue(undefined);
+		state.connection.sendNotification = vi
+			.fn()
+			.mockRejectedValue(new Error("write EPIPE"));
+
+		await mod.clientShutdown(state);
+
+		const hit = vi
+			.mocked(logLatency)
+			.mock.calls.find(([e]) => e?.phase === "lsp_client_shutdown");
+		const meta = hit![0].metadata!;
+		expect(meta.exitNotifyTimedOut).toBe(false);
+		expect(meta.exitNotifyRejected).toBe(true);
+		expect(meta.shutdownRequestTimedOut).toBe(false);
+		expect(meta.shutdownRequestRejected).toBe(false);
+		expect(meta.shutdownOutcome).toBe("forced");
+	}, 5_000);
+
+	// #1620 residual 3: two racing callers on the same state (8 call sites can
+	// race the same client — see LSPClientState.shutdownPromise) must not each
+	// run the RPC handshake and emit their own record. Mutation-proof: if the
+	// `state.shutdownPromise` guard in clientShutdown() is removed, this test
+	// goes red — TWO lsp_client_shutdown records and TWO removeLspChild calls
+	// instead of one.
+	it("is idempotent: a second concurrent call awaits the first instead of re-running teardown", async () => {
+		const mod: ClientModule = await import("../../../clients/lsp/client.js");
+		const kill = vi.fn(() => true);
+		const state = createWedgedState(kill);
+
+		const first = mod.clientShutdown(state);
+		const second = mod.clientShutdown(state);
+		await Promise.all([first, second]);
+
+		const hits = vi
+			.mocked(logLatency)
+			.mock.calls.filter(([e]) => e?.phase === "lsp_client_shutdown");
+		expect(hits).toHaveLength(1);
+		expect(removeLspChild).toHaveBeenCalledTimes(1);
+
+		// A THIRD, sequential call after settlement also reuses the same
+		// promise rather than starting a fresh teardown.
+		await mod.clientShutdown(state);
+		const hitsAfterThird = vi
+			.mocked(logLatency)
+			.mock.calls.filter(([e]) => e?.phase === "lsp_client_shutdown");
+		expect(hitsAfterThird).toHaveLength(1);
+	}, 5_000);
 });

@@ -56,6 +56,7 @@ export function createMockState(
 		isConnected: true,
 		isDestroyed: false,
 		shutdownRequested: false,
+		shutdownPromise: undefined,
 		exitedAt: undefined,
 		connectionDisposed: false,
 		lastError: undefined,

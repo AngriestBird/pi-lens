@@ -788,6 +788,17 @@ export interface LSPClientState {
 	 *  made every crash silently look "expected"). */
 	shutdownRequested: boolean;
 	/**
+	 * #1620 residual 3: set on the FIRST `clientShutdown()` call and awaited
+	 * by every subsequent one on the same state, instead of each caller
+	 * re-running the RPC handshake and emitting its own `lsp_client_shutdown`
+	 * record. Two of the 8 call sites can race the same client (e.g. a
+	 * ceiling eviction and a #1459 notify-stall demotion) — the individual
+	 * teardown steps are idempotent, but a duplicated record inflates any
+	 * `shutdownOutcome: "forced"` count read from the log. `undefined` until
+	 * the first call.
+	 */
+	shutdownPromise: Promise<void> | undefined;
+	/**
 	 * #1127: wall-clock time the client FIRST observed its own death (whichever
 	 * of connection close/error or the process 'exit' event fires first — see
 	 * `setupConnectionLifecycle`). Detection of a dead client happens lazily,
@@ -3524,9 +3535,23 @@ export async function closeDocument(
 	clearDiagnosticsForPath(state, normalizedPath);
 }
 
-export async function clientShutdown(
+export function clientShutdown(
 	state: LSPClientState,
 	options: LSPShutdownOptions = {},
+): Promise<void> {
+	// #1620 residual 3: idempotent across racing callers — see the doc comment
+	// on `LSPClientState.shutdownPromise`. The FIRST call starts the real
+	// teardown and stores its promise; every subsequent call (any of the 8
+	// call sites, on the same state) awaits that same promise instead of
+	// running the RPC handshake and emitting `lsp_client_shutdown` again.
+	if (state.shutdownPromise) return state.shutdownPromise;
+	state.shutdownPromise = clientShutdownOnce(state, options);
+	return state.shutdownPromise;
+}
+
+async function clientShutdownOnce(
+	state: LSPClientState,
+	options: LSPShutdownOptions,
 ): Promise<void> {
 	const shutdownStart = Date.now();
 	state.shutdownRequested = true;
@@ -3548,6 +3573,15 @@ export async function clientShutdown(
 	state.diagnosticEmitter.removeAllListeners();
 	let shutdownRequestTimedOut = false;
 	let exitNotifyTimedOut = false;
+	// #1620 residual 1: a rejection that ISN'T the timer winning (an immediate
+	// protocol error, a destroyed-stream rejection that raced the timeout) was
+	// previously folded into the same "*TimedOut" flag as a real timeout —
+	// honest as "forced" (shutdownOutcome below is unaffected either way), but
+	// imprecise about WHICH failure happened. Split it out so a log reader can
+	// tell "the server never answered" from "the server answered with an
+	// error" without re-deriving it from durationMs.
+	let shutdownRequestRejected = false;
+	let exitNotifyRejected = false;
 	// #1620: the graceful handshake is BEST-EFFORT and the teardown is not. A
 	// teardown path must not depend on the health of the thing it is tearing
 	// down — the breaker fires exactly when the server is unresponsive. Keep the
@@ -3562,18 +3596,26 @@ export async function clientShutdown(
 					safeSendRequest(state.connection, "shutdown", {}),
 					SHUTDOWN_REQUEST_TIMEOUT_MS,
 				);
-			} catch {
+			} catch (err) {
 				/* ignore — proceed to exit/kill so shutdown cannot hang the session */
-				shutdownRequestTimedOut = true;
+				if (isShutdownTimeoutError(err, SHUTDOWN_REQUEST_TIMEOUT_MS)) {
+					shutdownRequestTimedOut = true;
+				} else {
+					shutdownRequestRejected = true;
+				}
 			}
 			try {
 				await withTimeout(
 					safeSendNotification(state.connection, "exit", {}),
 					EXIT_NOTIFY_TIMEOUT_MS,
 				);
-			} catch {
+			} catch (err) {
 				/* ignore — same reason as the request above */
-				exitNotifyTimedOut = true;
+				if (isShutdownTimeoutError(err, EXIT_NOTIFY_TIMEOUT_MS)) {
+					exitNotifyTimedOut = true;
+				} else {
+					exitNotifyRejected = true;
+				}
 			}
 		}
 	} finally {
@@ -3595,9 +3637,19 @@ export async function clientShutdown(
 				// pre-fix no record was emitted at all. Report both halves plus one
 				// rolled-up verdict, so a forced teardown is countable from the log.
 				exitNotifyTimedOut,
+				// #1620 residual 1: the *Rejected pair covers the failure this PAIR
+				// of *TimedOut flags used to also claim — an immediate rejection
+				// (protocol error, destroyed stream) that is NOT the timer winning.
+				// Both still roll into shutdownOutcome "forced" below; only the
+				// per-field attribution gets more precise.
+				shutdownRequestRejected,
+				exitNotifyRejected,
 				shutdownOutcome: options.fast
 					? "fast"
-					: shutdownRequestTimedOut || exitNotifyTimedOut
+					: shutdownRequestTimedOut ||
+							exitNotifyTimedOut ||
+							shutdownRequestRejected ||
+							exitNotifyRejected
 						? "forced"
 						: "graceful",
 			},
@@ -3754,6 +3806,18 @@ export async function navRequest<T>(
  * telemetry — never the existing timeout-handling behavior.
  */
 function isNavTimeoutError(err: unknown, timeoutMs: number): boolean {
+	return err instanceof Error && err.message === `Timeout after ${timeoutMs}ms`;
+}
+
+/**
+ * #1620 residual 1: `withTimeout` rejects with this EXACT message only when
+ * its own timer wins the race — mirrors #1713's `isPullTimeoutError` and
+ * #1716's `isNavTimeoutError`. `clientShutdown`'s two catches previously
+ * treated ANY rejection (a real timeout OR an immediate protocol error) as
+ * "timed out"; honest for the rolled-up `shutdownOutcome` (both are
+ * "forced"), imprecise for the per-field flag a log reader keys on.
+ */
+function isShutdownTimeoutError(err: unknown, timeoutMs: number): boolean {
 	return err instanceof Error && err.message === `Timeout after ${timeoutMs}ms`;
 }
 
@@ -4281,6 +4345,7 @@ export async function createLSPClient(options: {
 		isConnected: true,
 		isDestroyed: false,
 		shutdownRequested: false,
+		shutdownPromise: undefined,
 		exitedAt: undefined,
 		connectionDisposed: false,
 		lastError: undefined,
