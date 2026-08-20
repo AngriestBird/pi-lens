@@ -23,6 +23,7 @@ import {
 	getPhaseForWindow,
 	getRecentLoggedPhases,
 	logLatency,
+	type PhaseWindowAttribution,
 	phaseFinished,
 	phaseStarted,
 	RECENT_PHASE_CAP,
@@ -364,21 +365,37 @@ describe("getCurrentPhase/getPhaseForWindow: overlap and window attribution (#17
 		}
 	});
 
-	// Mutation-proof: window-overlap off-by-one (#1723 review). A bracket that
-	// only TOUCHES a window edge (zero overlap) proves nothing about that
-	// window and must not win — pins the `overlapMs <= 0` guard specifically
-	// (a mutant that loosened it to `< 0` would let this through).
-	it("mutation-proof: a bracket with exactly zero overlap is not attributed", () => {
+	// #1723 review round 3, N2: an earlier version of this test pinned a
+	// dedicated `overlapMs <= 0` early-return guard that turned out to be
+	// PROVABLY DEAD CODE — with `bestOverlapMs` seeded at 0 and the accept
+	// condition requiring `overlapMs > bestOverlapMs` (a tie only ever refines
+	// an EXISTING best), a zero-or-negative overlap can never win regardless
+	// of whether that guard exists. The old test could not fail under any
+	// mutation of it (catalog shape 7 — a vacuous test). The guard was
+	// deleted; this test is its discriminating replacement: it pins the
+	// INTRINSIC behavior (zero overlap never wins) against a genuine
+	// positive-overlap INCUMBENT, so a real regression — e.g. loosening the
+	// accept condition to `>=`, letting a tie silently overturn a correct
+	// answer — has something to break.
+	it("a bracket with exactly zero overlap against the window never overturns a genuine positive-overlap incumbent", () => {
 		vi.useFakeTimers();
 		try {
 			const t0 = new Date("2026-08-19T20:03:22.575Z").getTime();
 			vi.setSystemTime(t0);
-			const token = phaseStarted("unrelated_earlier_phase");
-			vi.setSystemTime(t0 + 100);
-			phaseFinished(token); // closed well before the window we'll check
-			// Window starts exactly at closedAt — zero overlap, not negative.
-			const attribution = getPhaseForWindow(t0 + 100, t0 + 5100);
-			expect(attribution).toBeUndefined();
+			const incumbentToken = phaseStarted("genuine_incumbent");
+			vi.setSystemTime(t0 + 5000);
+			phaseFinished(incumbentToken); // elapsedMs 5000, fully inside the window below
+
+			// Starts exactly when the window ends (zero overlap, not negative);
+			// long enough on its own to clear the N4 plausibility floor, so
+			// this candidate is excluded by the OVERLAP check specifically, not
+			// incidentally by the floor.
+			const zeroOverlapToken = phaseStarted("zero_overlap_candidate");
+			vi.setSystemTime(t0 + 5000 + 6000);
+			phaseFinished(zeroOverlapToken);
+
+			const attribution = getPhaseForWindow(t0, t0 + 5000);
+			expect(attribution?.phase).toBe("genuine_incumbent");
 		} finally {
 			vi.useRealTimers();
 		}
@@ -405,5 +422,143 @@ describe("getCurrentPhase/getPhaseForWindow: overlap and window attribution (#17
 		phaseFinished(staleToken);
 		phaseStarted("genuinely_running_now");
 		expect(getCurrentPhase()?.phase).toBe("genuinely_running_now");
+	});
+});
+
+// #1723 review round 3: N1 (blocker), N3, N4 — three findings against the
+// round-2 redesign, each proven with a controlled fake-timer scenario so the
+// exact numbers are reproducible instead of racing real wall-clock ms.
+describe("getPhaseForWindow tie-break and plausibility floor (#1723 review round 3)", () => {
+	beforeEach(() => {
+		resetCurrentPhaseForSession();
+	});
+
+	// N1 (blocker) + N3: the round-2 tie-break kept "whichever candidate was
+	// found first" (live brackets scanned oldest-first, i.e. Map insertion
+	// order). Two brackets can tie in overlap while genuinely differing in
+	// elapsedMs (a phase whose lifetime roughly IS the window, vs. one that
+	// merely CONTAINS it) — insertion order is not a real signal for which is
+	// the culprit, and the reviewer demonstrated that flipping which one
+	// started first (equivalently: dispatcher.ts group order) flipped the
+	// named culprit for an IDENTICAL scenario. This constructs the same exact
+	// tie in BOTH insertion orders (via fake-timer time travel, so the two
+	// brackets' `startedAt` values are identical across both runs — only
+	// which `phaseStarted` call happens first differs) and asserts
+	// `getPhaseForWindow` — the production read path (index.ts's `turn_end`)
+	// — names the smaller-elapsedMs bracket (the real culprit) either way.
+	it("N1/N3: an exact overlap tie between two live brackets is decided by elapsedMs, never by insertion order", () => {
+		const t0 = new Date("2026-08-19T20:03:22.575Z").getTime();
+		const hogStartMs = t0 + 1000;
+		const longLivedStartMs = t0; // started well before the window
+		const windowStartMs = hogStartMs;
+		const windowEndMs = hogStartMs + 18_270;
+		const queryNowMs = windowEndMs + 500; // both still running past the window
+
+		const runScenario = (hogInsertedFirst: boolean): PhaseWindowAttribution | undefined => {
+			resetCurrentPhaseForSession();
+			vi.useFakeTimers();
+			try {
+				if (hogInsertedFirst) {
+					vi.setSystemTime(hogStartMs);
+					phaseStarted("cpu_hog");
+					vi.setSystemTime(longLivedStartMs); // time-travel backward
+					phaseStarted("innocent_long_lived");
+				} else {
+					vi.setSystemTime(longLivedStartMs);
+					phaseStarted("innocent_long_lived");
+					vi.setSystemTime(hogStartMs);
+					phaseStarted("cpu_hog");
+				}
+				vi.setSystemTime(queryNowMs);
+				return getPhaseForWindow(windowStartMs, windowEndMs);
+			} finally {
+				vi.useRealTimers();
+			}
+		};
+
+		const hogFirst = runScenario(true);
+		const longLivedFirst = runScenario(false);
+
+		// Both scenarios describe the IDENTICAL tie (same overlap, 18 270ms,
+		// for both brackets) — only insertion order differs. cpu_hog's own
+		// elapsedMs (18 770ms: it started at the window edge) is smaller than
+		// innocent_long_lived's (19 770ms: it started 1000ms earlier), so the
+		// hog must win regardless of which order it was inserted in.
+		expect(hogFirst?.phase).toBe("cpu_hog");
+		expect(longLivedFirst?.phase).toBe("cpu_hog");
+		expect(hogFirst?.elapsedMs).toBe(18_770);
+		expect(longLivedFirst?.elapsedMs).toBe(18_770);
+	});
+
+	// N3: a bracket leaked by a torn-down concurrent secondary (no age/size
+	// cap on `liveBrackets` itself — see `phaseFinished`'s doc comment) is old
+	// by construction, so it ties in overlap with a REAL later culprit for
+	// any window the leak fully contains. Confirms the N1 tie-break demotes
+	// it: the real culprit's smaller elapsedMs wins even though the leaked
+	// bracket has been "open" for 78 seconds.
+	it("N3: a 78s leaked bracket does not beat a real, smaller-elapsedMs culprit on an overlap tie", () => {
+		vi.useFakeTimers();
+		try {
+			const t0 = new Date("2026-08-19T20:03:22.575Z").getTime();
+			vi.setSystemTime(t0);
+			phaseStarted("leaked_from_torn_down_secondary"); // never finished — the leak
+
+			const cullStartMs = t0 + 78_000;
+			vi.setSystemTime(cullStartMs);
+			const culpritToken = phaseStarted("full_scan_18s");
+			vi.setSystemTime(cullStartMs + 18_270);
+			phaseFinished(culpritToken);
+
+			vi.setSystemTime(cullStartMs + 18_270 + 500); // sample shortly after
+			const attribution = getPhaseForWindow(cullStartMs, cullStartMs + 18_270);
+
+			expect(attribution?.phase).toBe("full_scan_18s");
+			expect(attribution?.stillRunning).toBe(false);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	// N4: the closed-bracket ring is bounded (`CLOSED_BRACKET_CAP`) — sibling
+	// churn can evict the real culprit before `turn_end` ever samples. Without
+	// a plausibility floor, whatever tiny bracket is left with SOME positive
+	// overlap would be reported as a confident (and wrong) answer. This
+	// evicts an 18 270ms culprit with `CLOSED_BRACKET_CAP` later closes and
+	// leaves a single 2ms bracket with a genuine 2ms overlap against the
+	// culprit's own window — the floor must reject it, returning `undefined`
+	// (absent-but-honest) rather than naming the 2ms blip.
+	it("N4: sibling churn evicting the real culprit off the ring does not produce a confident wrong answer", () => {
+		vi.useFakeTimers();
+		try {
+			const t0 = new Date("2026-08-19T20:03:22.575Z").getTime();
+			vi.setSystemTime(t0);
+			const culpritToken = phaseStarted("full_scan_18s");
+			const culpritEndMs = t0 + 18_270;
+			vi.setSystemTime(culpritEndMs);
+			phaseFinished(culpritToken); // ring: [culprit]
+
+			// CLOSED_BRACKET_CAP - 1 filler siblings, entirely AFTER the window
+			// (zero/negative overlap on their own) — just occupy ring capacity.
+			for (let i = 0; i < CLOSED_BRACKET_CAP - 1; i++) {
+				const fillerToken = phaseStarted(`filler_${i}`);
+				vi.setSystemTime(culpritEndMs + 100 + i);
+				phaseFinished(fillerToken);
+			}
+
+			// The CAP-th close evicts the culprit. This one straddles the
+			// window's tail by exactly 2ms — real, positive overlap, but far
+			// too small to plausibly explain an 18 270ms block.
+			vi.setSystemTime(culpritEndMs - 2);
+			const tinyToken = phaseStarted("tiny_unrelated_blip");
+			vi.setSystemTime(culpritEndMs);
+			phaseFinished(tinyToken);
+
+			expect(_closedBracketsStorageLengthForTest()).toBe(CLOSED_BRACKET_CAP);
+
+			const attribution = getPhaseForWindow(t0, culpritEndMs);
+			expect(attribution).toBeUndefined();
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 });

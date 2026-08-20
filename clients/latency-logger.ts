@@ -262,6 +262,16 @@ export function phaseStarted(phase: string): PhaseToken {
  * process-lifetime latch). `resetCurrentPhaseForSession` is the session-
  * boundary backstop for the case where even try/finally doesn't run (a torn-
  * down activation whose in-flight phase never gets a chance to unwind).
+ *
+ * #1723 review round 3 (N3) — the honest residual: a bracket leaked this way
+ * (e.g. a torn-down concurrent secondary, see `resetCurrentPhaseForSession`)
+ * has no age or size cap of its own and sits in `liveBrackets` until the next
+ * FULL session start clears it. It does NOT go unnoticed in the meantime: a
+ * leaked bracket is old by construction, so its `elapsedMs` is large, and
+ * `getPhaseForWindow`'s tie-break below prefers the SMALLER-`elapsedMs`
+ * candidate on an overlap tie — a genuine culprit whose own lifetime roughly
+ * matches the block window beats a stale bracket that merely contains it.
+ * The leak is real; it is demoted, not silently trusted.
  */
 export function phaseFinished(token: PhaseToken): void {
 	if (!liveBrackets.delete(token)) return;
@@ -273,11 +283,14 @@ export function phaseFinished(token: PhaseToken): void {
 
 /**
  * The OLDEST phase still executing, if any — the longest-running open
- * bracket, and so the one most likely to own a long block (#1723 review
- * F1/F2). For `loop_block` attribution specifically, prefer
- * `getPhaseForWindow` below instead: this function alone cannot see a phase
- * that already closed, which is exactly what happens for a synchronous block
- * by the time anything samples it (F3).
+ * bracket. #1723 review round 3: this has NO production consumer — `turn_end`
+ * (index.ts) reads `getPhaseForWindow` below instead, since this function
+ * alone cannot see a phase that already closed, which is exactly what
+ * happens for a synchronous block by the time anything samples it (F3).
+ * Kept deliberately as a TEST SEAM: several regression tests assert "which
+ * phase is currently open" directly, without constructing a window, which is
+ * simpler to read and still exercises the same `liveBrackets` map the
+ * production path shares. Remove if it stops earning its keep.
  */
 export function getCurrentPhase(): PhaseToken | undefined {
 	const oldest = liveBrackets.keys().next();
@@ -294,15 +307,45 @@ export interface PhaseWindowAttribution {
 }
 
 /**
+ * A candidate bracket is ignored outright if its OWN lifetime (`elapsedMs`)
+ * is under this fraction of the window's length (#1723 review round 3, N4).
+ * Overlap alone is not enough: the bounded closed-bracket ring can churn a
+ * real culprit out (busy siblings filling `CLOSED_BRACKET_CAP`), leaving only
+ * a 1ms bracket that happens to have SOME positive overlap with an 18-second
+ * window — reporting it would be a CONFIDENT WRONG ANSWER, worse than no
+ * answer. 5%: a genuine cause's own duration should be a meaningful fraction
+ * of the block it explains, not a sliver of it. Below that, absent-but-honest
+ * (return `undefined`) beats present-but-wrong.
+ */
+const MIN_PLAUSIBLE_ELAPSED_FRACTION = 0.05;
+
+/**
  * Attribute a block's time window `[windowStartMs, windowEndMs]` to whichever
  * bracket — live OR recently closed — overlaps it the most (#1723 review,
  * F3: the decisive finding). A live bracket's end, for overlap purposes, is
  * "now" (it is still running); a closed bracket's end is its own `closedAt`.
- * Only a STRICTLY POSITIVE overlap is a candidate — a bracket that merely
- * touches a window edge (zero overlap) proves nothing and must not win.
- * Ties keep whichever candidate was found first (live brackets are scanned
- * oldest-first, then the closed ring newest-first), matching
- * `getCurrentPhase`'s "oldest wins" tie-break.
+ *
+ * Two safeguards refined in review round 3:
+ *   - N4: a candidate whose own `elapsedMs` is under
+ *     `MIN_PLAUSIBLE_ELAPSED_FRACTION` of the window is skipped before it can
+ *     ever be compared — see that constant's doc comment.
+ *   - N1/N3: on an exact overlap TIE, the candidate with the SMALLER
+ *     `elapsedMs` wins — a phase whose entire lifetime roughly IS the window
+ *     is a more plausible cause than one that merely CONTAINS the window (a
+ *     long-lived innocent bracket still running throughout it, or a leaked
+ *     bracket per N3). An earlier version broke this tie by SCAN ORDER
+ *     (whichever candidate was found first), which is not a real signal —
+ *     flipping which runner group started first silently changed the named
+ *     culprit for the identical scenario.
+ *
+ * A candidate needs a STRICTLY POSITIVE overlap: with `bestOverlapMs` seeded
+ * at 0 and the comparison below requiring `overlapMs > bestOverlapMs` to
+ * accept a NEW best (a tie only ever refines an EXISTING one), a zero or
+ * negative overlap can never win — no separate early-return guard is needed
+ * to enforce that; do not re-add one without also adding a genuine case it
+ * changes the answer for (#1723 review N2: a former such guard proved dead
+ * code, and its "mutation-proof" test could not fail under any mutation of
+ * it).
  *
  * This is the seam that makes the SYNCHRONOUS motivating case attributable at
  * all: the offending phase's `finally` (a microtask) always runs before
@@ -310,12 +353,23 @@ export interface PhaseWindowAttribution {
  * bracket has typically already moved from `liveBrackets` to
  * `closedBrackets` — checking only the live set reads empty for exactly that
  * case, which is why `getCurrentPhase` alone was not enough.
+ *
+ * Caveat for an automated consumer (e.g. #1549's loop_block ↔
+ * lsp_diagnostics_timeout correlation): the window's own end is `now` at
+ * SAMPLE time, which assumes the block ended right when `turn_end` read
+ * `getEventLoopStats()` — a reasonable approximation, not a measured fact.
+ * `startedAt`/`elapsedMs`/`stillRunning` on the returned attribution let a
+ * human reader judge that assumption per-record; an automated correlation
+ * should account for the same slack rather than treating the window edges as
+ * exact.
  */
 export function getPhaseForWindow(
 	windowStartMs: number,
 	windowEndMs: number,
 ): PhaseWindowAttribution | undefined {
 	const nowMs = Date.now();
+	const windowLengthMs = windowEndMs - windowStartMs;
+	const minPlausibleElapsedMs = windowLengthMs * MIN_PLAUSIBLE_ELAPSED_FRACTION;
 	let best: PhaseWindowAttribution | undefined;
 	let bestOverlapMs = 0;
 
@@ -326,11 +380,15 @@ export function getPhaseForWindow(
 		stillRunning: boolean,
 	): void => {
 		const startMs = Date.parse(startedAt);
+		const elapsedMs = endMs - startMs;
+		if (elapsedMs < minPlausibleElapsedMs) return; // N4: implausibly short to be the cause
 		const overlapMs = Math.min(endMs, windowEndMs) - Math.max(startMs, windowStartMs);
-		if (overlapMs <= 0) return;
-		if (overlapMs > bestOverlapMs) {
+		const isNewBest = overlapMs > bestOverlapMs;
+		const winsTie =
+			best !== undefined && overlapMs === bestOverlapMs && elapsedMs < best.elapsedMs;
+		if (isNewBest || winsTie) {
 			bestOverlapMs = overlapMs;
-			best = { phase, startedAt, stillRunning, elapsedMs: endMs - startMs };
+			best = { phase, startedAt, stillRunning, elapsedMs };
 		}
 	};
 

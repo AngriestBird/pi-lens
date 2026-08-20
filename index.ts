@@ -2353,6 +2353,16 @@ function activateExtension(hostPi: ExtensionAPI) {
 				// the LSP workspace-diagnostics sweep's own touch loop
 				// (clients/lsp/index.ts) — that remains a named, deferred gap (see
 				// the PR body / issue comment), not a silent one.
+				//
+				// #1723 review round 3: this window — [now - loopMaxMs, now] —
+				// assumes the block ENDED right at this sample, which is a
+				// reasonable approximation, not a measured fact (getEventLoopStats
+				// reports the window's max delay, not its precise end instant). A
+				// human reader has `inFlightPhaseStartedAt`/`inFlightPhaseElapsedMs`/
+				// `inFlightPhaseStillRunning` on the record below to judge that
+				// assumption per-block; an automated correlation (#1549) should
+				// account for the same slack rather than treating these window
+				// edges as exact.
 				const blockSampledAtMs = Date.now();
 				const inFlight = getPhaseForWindow(
 					blockSampledAtMs - loopMaxMs,

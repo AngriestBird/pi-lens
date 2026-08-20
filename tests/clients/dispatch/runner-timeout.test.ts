@@ -18,6 +18,8 @@ import { FactStore } from "../../../clients/dispatch/fact-store.js";
 import type { RunnerGroup, RunnerResult } from "../../../clients/dispatch/types.js";
 import {
 	getCurrentPhase,
+	getPhaseForWindow,
+	type PhaseWindowAttribution,
 	resetCurrentPhaseForSession,
 } from "../../../clients/latency-logger.js";
 
@@ -326,14 +328,101 @@ describe("runRunner in-flight phase attribution against real parallel groups (#1
 		resetCurrentPhaseForSession();
 	});
 
+	// #1723 review round 3, N1 (blocker): the reviewer flipped ONLY the
+	// dispatch group order (idle-first vs. hog-first) and got "innocent-idle"
+	// again — the round-2 tie-break fell back to scan/insertion order on an
+	// overlap tie, which is not a real signal. This runs the SAME scenario in
+	// BOTH group orders and asserts via `getPhaseForWindow` — the actual
+	// production read path (`index.ts`'s `turn_end`, not the test-only
+	// `getCurrentPhase` seam) — so the fix is proven at the call site
+	// `turn_end` really uses.
+	async function runParallelHogAndIdle(
+		groupOrder: readonly ["cpu-hog", "idle"] | readonly ["idle", "cpu-hog"],
+	): Promise<{
+		duringHog: PhaseWindowAttribution | undefined;
+		afterHog: PhaseWindowAttribution | undefined;
+	}> {
+		let hogResolve!: (r: RunnerResult) => void;
+		const hogPromise = new Promise<RunnerResult>((resolve) => {
+			hogResolve = resolve;
+		});
+
+		registry.register({
+			id: "cpu-hog",
+			appliesTo: ["jsts"],
+			priority: 10,
+			enabledByDefault: true,
+			timeoutMs: 5_000,
+			async run(): Promise<RunnerResult> {
+				return hogPromise;
+			},
+		});
+		registry.register({
+			id: "idle",
+			appliesTo: ["jsts"],
+			priority: 11,
+			enabledByDefault: true,
+			async run(): Promise<RunnerResult> {
+				return { status: "succeeded", diagnostics: [], semantic: "warning" };
+			},
+		});
+
+		const ctx = createMockContext("test.ts");
+		const dispatchStartMs = Date.now();
+		const dispatchPromise = dispatchForFile(
+			ctx,
+			groupOrder.map((runnerId) => ({ mode: "all" as const, runnerIds: [runnerId] })),
+		);
+
+		// Flush a REAL macrotask (50ms, not 0) so the idle group's whole
+		// promise chain (run() → Promise.race → .finally → phaseFinished) has
+		// fully settled and cpu-hog's own elapsedMs clears the N4 plausibility
+		// floor, while cpu-hog's run() is still deliberately unresolved.
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		const sampledAtMs = Date.now();
+		const duringHog = getPhaseForWindow(dispatchStartMs, sampledAtMs);
+
+		hogResolve({ status: "succeeded", diagnostics: [], semantic: "warning" });
+		await dispatchPromise;
+		const afterHog = getPhaseForWindow(dispatchStartMs, Date.now());
+
+		return { duringHog, afterHog };
+	}
+
 	it(
-		"names the CPU hog while an idle runner in a parallel group starts after it and finishes first",
+		"names the CPU hog via getPhaseForWindow when the hog's group is listed first",
+		async () => {
+			const { duringHog, afterHog } = await runParallelHogAndIdle(["cpu-hog", "idle"]);
+			expect(duringHog?.phase).toBe("cpu-hog");
+			expect(duringHog?.stillRunning).toBe(true);
+			// Once the hog also finishes, it is still the right answer — now as
+			// a CLOSED bracket rather than a live one (the closed-ring half of
+			// getPhaseForWindow, not just the live-map half).
+			expect(afterHog?.phase).toBe("cpu-hog");
+			expect(afterHog?.stillRunning).toBe(false);
+		},
+		2_000,
+	);
+
+	it(
+		"names the CPU hog via getPhaseForWindow when the IDLE runner's group is listed first (flipped order)",
+		async () => {
+			const { duringHog, afterHog } = await runParallelHogAndIdle(["idle", "cpu-hog"]);
+			expect(duringHog?.phase).toBe("cpu-hog");
+			expect(duringHog?.stillRunning).toBe(true);
+			expect(afterHog?.phase).toBe("cpu-hog");
+			expect(afterHog?.stillRunning).toBe(false);
+		},
+		2_000,
+	);
+
+	it(
+		"getCurrentPhase (test seam) agrees with getPhaseForWindow while the hog is still live",
 		async () => {
 			let hogResolve!: (r: RunnerResult) => void;
 			const hogPromise = new Promise<RunnerResult>((resolve) => {
 				hogResolve = resolve;
 			});
-
 			registry.register({
 				id: "cpu-hog",
 				appliesTo: ["jsts"],
@@ -359,19 +448,8 @@ describe("runRunner in-flight phase attribution against real parallel groups (#1
 				{ mode: "all", runnerIds: ["cpu-hog"] },
 				{ mode: "all", runnerIds: ["idle"] },
 			]);
+			await new Promise((resolve) => setTimeout(resolve, 50));
 
-			// Flush a macrotask so the idle group's whole promise chain (several
-			// microtask hops: run() → Promise.race → .finally → phaseFinished)
-			// has fully settled, while cpu-hog's run() is still deliberately
-			// unresolved.
-			await new Promise((resolve) => setTimeout(resolve, 0));
-
-			// F1: a single slot held only the LAST starter — idle, which started
-			// AFTER the hog — so it would have named the innocent idle runner.
-			// F2: idle finishing FIRST would then have cleared that slot,
-			// wiping the hog's attribution while it was still running. The
-			// Map-based live set does neither: it still names the hog, the
-			// oldest bracket still open.
 			expect(getCurrentPhase()?.phase).toBe("cpu-hog");
 
 			hogResolve({ status: "succeeded", diagnostics: [], semantic: "warning" });
