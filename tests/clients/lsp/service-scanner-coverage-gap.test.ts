@@ -456,6 +456,14 @@ describe("#1459 — sweep fan-out must not black out a scanner silently", () => 
 		expect(gapRows[0]?.metadata).toMatchObject({
 			brokenSkippedServerIds: ["opengrep"],
 		});
+		expect(rowsFor("degradation_ledger")).toContainEqual(
+			expect.objectContaining({
+				metadata: expect.objectContaining({
+					kind: "lsp-scanner-coverage-gap",
+					subject: expect.stringContaining("opengrep:"),
+				}),
+			}),
+		);
 	});
 
 	// #1533 makes the "still confirmed" half load-bearing on this scope too: `"all"`

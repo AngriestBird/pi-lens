@@ -4,6 +4,14 @@ Coverage markers are deduped per session by normalized kind, file, and the
 normalized silent-scanner set. A changed set admits a new marker, and a marker
 is appended after primary diagnostics so both remain visible.
 
+Bounded LSP warm touches preserve the spawn coordinator's lifecycle evidence:
+an empty ready-client set reports `spawn_in_flight_budget_elapsed` while a
+matching primary single-flight spawn remains pending, and
+`no_clients_none_spawning` only when none does. Read the existing `inFlight`
+state at the touch verdict; correlate the full `serverId:root` key using the
+root resolved by acquisition, and do not add a second pending-warm latch.
+(#1875, #1875 fix round)
+
 Post-fix decision observability is durable and bounded: advisory delivery logs
 one `advisory_provenance_decision` per consume, classic TypeScript project
 identity logs every success/failure outcome, deferred mutation drains summarize
@@ -242,7 +250,15 @@ site/subject that represents one user-visible degradation, and
 `incrementDegradationCount` when every event contributes to the exact group
 count but health should retain only one updated entry per subject. Both reset
 with the ledger at the session boundary; do not add caller-local duplicate
-sets or count one blocked action at both policy gates. (#1366, #1292)
+sets or count one blocked action at both policy gates. Every accepted once
+record and admitted tally milestones also emit a `degradation_ledger` row through
+`latency.log`; the row carries the bounded kind, subject, and current count, so
+the session remains auditable when no health render reaches the transcript.
+Scanner coverage gaps and stalled notify-inflight barriers use the ledger;
+successful notify drains remain latency-only because they are not degradations.
+Durable rows use the same 20-entry per-kind admission as the summary and emit
+count increments only at powers of two, so the sink remains bounded. Each row
+also carries the ledger generation for session grouping. (#1366, #1292, #1866)
 
 ## Maintaining this file (do this on every commit)
 
@@ -308,6 +324,13 @@ message text, and trigger install/reinstall only for `tool-not-found`.
 `cwd-unresolvable`, `permission-denied`, `spawn-failed`, `timeout`, and `killed`
 must remain non-repairable at that seam; the original errno-bearing Error is
 preserved as `cause`. (#1214)
+
+**One-shot process-table collection distinguishes exit failure from empty.**
+`spawnCollectStdoutResult` reports `exit-error` with code/signal and discards
+stdout from non-zero exits; process-table callers record that outcome instead
+of parsing partial output as a clean empty result. Sampler timeouts inject the
+reaper's tree-kill-and-verify hook and settle only after its fate is known.
+(#1863, #1864)
 
 ## Issue and PR design contract
 
@@ -1957,3 +1980,10 @@ Every issue should carry **one TYPE label + at least one `area:` label**.
   Known gap, accepted not fixed: `pi.events` (a separate bus, not an
   `ExtensionAPI` member) is unwrapped — fine today because every subscriber on
   it is subscribe-only.
+
+Process-table resource samples preserve query outcome. `clients/child-unref.ts`
+`spawnCollectStdoutResult` distinguishes successful empty stdout from
+`spawn-error` and `timeout`. `clients/resource-sampler.ts` returns `null` for
+those failures, so consumers leave usage unknown rather than fabricating zero
+samples, and records one bounded `resource-sampler-query-failed` degradation
+per query subject. (#1863)

@@ -258,6 +258,7 @@ async function buildHeartbeatResourcePatch(): Promise<HeartbeatPatch> {
 		const self = instances.find((instance) => instance.pid === process.pid);
 		const childPids = self?.lspChildren.map((child) => child.pid) ?? [];
 		const usage = await sampleProcesses([process.pid, ...childPids]);
+		if (usage === null) return {};
 
 		const childUsage: Record<number, { rssBytes?: number; cpuPercent?: number }> = {};
 		for (const pid of childPids) {
