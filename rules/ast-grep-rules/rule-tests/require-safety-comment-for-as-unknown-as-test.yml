@@ -27,3 +27,21 @@ invalid:
   - |
     // this cast is safe, trust me
     const d = x as unknown as Foo;
+  # #1834: the `follows: {stopBy: end}` scan is unbounded — it must not walk
+  # past the contiguous comment block into an EARLIER statement's SAFETY:
+  # comment. A stray SAFETY: comment anywhere earlier in the same block must
+  # not exempt a later, undocumented cast.
+  - |
+    function f(x: unknown, y: unknown) {
+      // SAFETY: this comment documents a DIFFERENT assertion below.
+      const a = (y as unknown as string).length;
+
+      const b = (x as unknown as string).length;
+      return a + b;
+    }
+  # SAFETY: on cast A must not bleed to cast B directly below it, even with
+  # no other statement in between.
+  - |
+    // SAFETY: documents castA only
+    const castA = a as unknown as Foo;
+    const castB = b as unknown as Foo;
