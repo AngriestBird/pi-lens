@@ -31,9 +31,11 @@ note: |
   the two never collide. `function_type` (`(x: T) => R`, used in
   function-type aliases) was the one exception in
   tree-sitter-typescript's grammar: its return type sits directly after
-  `=>` with no `type_annotation` wrapper at all. The #1824 scope
-  correction removed that branch because callback result types describe
-  what callers consume, not an unparsed value crossing a boundary.
+  `=>` with no `type_annotation` wrapper at all, so it needed its own
+  branch. The #1824 scope correction removed that branch because callback
+  result types describe what callers consume, not an unparsed value crossing
+  a boundary. See the 2026-08-20 #1824 entry below for why that branch is
+  now gone.
 
   2026-08-20 (refs #1727, #1777): CONSIDERED for promotion to `error`,
   KEPT at `hint`. Four-corpus census, ast-grep CLI 0.45:
@@ -60,6 +62,15 @@ note: |
   it is a scope correction, not a tier change, and this PR does not make
   it.
 
+  2026-08-20 (#1824, refs #1727, #1815, review round 1 N4): dropped
+  the `function_type` arm named above. A TYPE-POSITION `unknown`
+  return is a legitimate contract ("the caller ignores my result"),
+  not a value-position return that skipped parsing at a boundary. This
+  is a scope correction, not a severity change. Same scan setup,
+   before → after: pi-lens full tree 79 → 23; pi-lens `clients/` +
+   `index.ts` 21 → 9 (see the adopting PR for the four-corpus
+   before/after on the same narrow scope). The value-position arm below
+   is unchanged and is what the rule now exclusively targets.
   2026-08-20 (refs #1856): PROMOTED from `hint` to `error` after the
   remaining value-position returns were given named domain types or made
   generic so their pass-through contract stays exact. The pi-lens
