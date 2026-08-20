@@ -535,7 +535,7 @@ function buildCoverageNotice(
 			.map(normalizeMapKey)
 			// Code-unit comparator: the sorted set is a dedupe KEY, so ordering
 			// must be deterministic across locales — localeCompare is not.
-			.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
+			.sort((a, b) => Number(a > b) - Number(a < b))
 			.join(",");
 		const onceKey = `${ctx.kind}:${normalizeMapKey(ctx.filePath)}:${silentScannerSet}`;
 		if (coverageNoticeSeen.has(onceKey)) return undefined;
