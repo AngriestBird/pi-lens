@@ -63,7 +63,7 @@ export function trivySecretFindingToProjectDiagnostic(
 	};
 }
 
-export function trivySecretsToProjectDiagnostics(
+function trivySecretsToProjectDiagnostics(
 	cwd: string,
 	secrets: TrivySecretFinding[],
 ): ProjectDiagnostic[] {
