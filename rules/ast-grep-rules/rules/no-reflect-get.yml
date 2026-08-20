@@ -14,3 +14,4 @@ note: |
   than allowlisted by call site.
 rule:
   pattern: Reflect.get($OBJ, $KEY)
+fix: "$OBJ[$KEY]"

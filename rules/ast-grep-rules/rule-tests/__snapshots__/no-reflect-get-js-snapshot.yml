@@ -1,0 +1,16 @@
+id: no-reflect-get-js
+snapshots:
+  Reflect.get(obj, "key"):
+    fixed: obj["key"]
+    labels:
+    - source: Reflect.get(obj, "key")
+      style: primary
+      start: 0
+      end: 23
+  const v = Reflect.get(target, prop);:
+    fixed: const v = target[prop];
+    labels:
+    - source: Reflect.get(target, prop)
+      style: primary
+      start: 10
+      end: 35

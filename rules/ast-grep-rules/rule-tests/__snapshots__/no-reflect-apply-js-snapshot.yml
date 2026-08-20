@@ -1,0 +1,16 @@
+id: no-reflect-apply-js
+snapshots:
+  Reflect.apply(fn, obj, args):
+    fixed: fn.apply(obj, args)
+    labels:
+    - source: Reflect.apply(fn, obj, args)
+      style: primary
+      start: 0
+      end: 28
+  const r = Reflect.apply(target[method], target, argumentsList);:
+    fixed: const r = target[method].apply(target, argumentsList);
+    labels:
+    - source: Reflect.apply(target[method], target, argumentsList)
+      style: primary
+      start: 10
+      end: 62

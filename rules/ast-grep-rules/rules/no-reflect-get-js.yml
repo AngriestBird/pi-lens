@@ -11,3 +11,4 @@ note: |
   trap idiom.
 rule:
   pattern: Reflect.get($OBJ, $KEY)
+fix: "$OBJ[$KEY]"

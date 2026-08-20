@@ -6,4 +6,5 @@ note: |
   Reflect.apply reaches for reflection where a typed call already works.
   Prefer Function#apply or a direct call with spread arguments.
 rule:
-  pattern: Reflect.apply($$$ARGS)
+  pattern: Reflect.apply($FN, $THIS, $ARGS)
+fix: "$FN.apply($THIS, $ARGS)"
