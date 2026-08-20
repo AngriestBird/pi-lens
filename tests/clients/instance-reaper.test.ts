@@ -390,6 +390,10 @@ function osProc(overrides: Partial<OsProcessInfo> = {}): OsProcessInfo {
 		pid: 5000,
 		parentPid: 4000,
 		command: "C:\\tools\\opengrep.exe --lsp",
+		// #1857: past the spawn-grace window by default, so these eligibility
+		// cases keep testing the property they were written for. The grace guard
+		// itself is covered in instance-reaper-backstop.test.ts.
+		ageMs: 10 * 60 * 1000,
 		...overrides,
 	};
 }

@@ -95,7 +95,7 @@ import { getLSPService, resetLSPService } from "./clients/lsp/index.js";
 import { warmLspService } from "./clients/lsp-lazy.js";
 import {
 	sweepOrphans,
-	sweepUntrackedOrphans,
+	scheduleUntrackedOrphanSweep,
 } from "./clients/instance-reaper.js";
 import {
 	deregisterInstance,
@@ -1824,7 +1824,12 @@ function activateExtension(hostPi: ExtensionAPI) {
 			// untracked by the current registry snapshot AND have a
 			// confirmed-dead parent — never on name alone. Fire-and-forget, same
 			// non-blocking/never-throws contract as `sweepOrphans`.
-			void sweepUntrackedOrphans();
+			//
+			// #1857: SCHEDULED, not called. The sweep's OS-process enumeration was
+			// measured at 9344ms on the session_start critical path, exactly
+			// overlapping and starving `warmup_language_profile`. It now fires on
+			// an unref'd timer well after warmup, under a machine-wide cooldown.
+			scheduleUntrackedOrphanSweep();
 			// #449 slice 2 (prototype): machine-wide LSP budget check. Reads the
 			// same registry, decides locally whether THIS session should skip
 			// spawning auxiliary LSP servers, and caches the decision for
