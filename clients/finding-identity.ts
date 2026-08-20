@@ -74,21 +74,33 @@ export function relativeFile(filePath: string, cwd: string): string {
  * never collide in a shared store. `parts` is the caller's own ordered,
  * domain-specific identity fields (tool/rule/code/normalizedMessage/line/
  * lineContentHash/...) — this function only supplies the canonical
- * `relativeFile` component and the hash/prefix wiring; `undefined` entries
- * fold to `""` so an omitted optional field hashes identically to an
- * explicitly-empty one.
+ * `relativeFile` component and the hash/prefix wiring.
+ *
+ * Both `undefined` AND `null` entries fold to `""` (review-round F4,
+ * #1816), matching the `String(x ?? "")` idiom every pre-#1816 id builder
+ * used. `null` is in the parts type despite every caller's field being
+ * declared `T | undefined` in TypeScript: those fields (`Diagnostic.code`,
+ * `.rule`, etc.) are frequently assigned straight from `JSON.parse`'d tool
+ * output, which defeats the static type at runtime — a runner that emits
+ * `"code": null` produces a real `null`, not `undefined`. Folding only
+ * `undefined` would silently hash that as the string `"null"` instead of
+ * `""`, diverging from every other id-construction path for the exact same
+ * finding — a fresh, narrower instance of the #533 divergence class this
+ * module exists to eliminate.
  */
 export function stableFindingId(
 	prefix: string,
 	args: {
 		cwd: string;
 		filePath: string;
-		parts: Array<string | number | undefined>;
+		parts: Array<string | number | null | undefined>;
 	},
 ): string {
 	const joined = [
 		relativeFile(args.filePath, args.cwd),
-		...args.parts.map((part) => (part === undefined ? "" : String(part))),
+		...args.parts.map((part) =>
+			part === undefined || part === null ? "" : String(part),
+		),
 	].join("|");
 	return `${prefix}${hashText(joined)}`;
 }

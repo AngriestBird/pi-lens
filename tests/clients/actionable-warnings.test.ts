@@ -392,12 +392,37 @@ describe("actionable-warning-state.json migration (#1816 — pre-fix id back-com
 	// 10-char, non-canonicalized id: it must still read as suppressed, and
 	// the store must migrate the entry onto the new id so the lookup doesn't
 	// need the fallback forever.
-	it("honors and migrates a suppression recorded under the pre-#1816 id", async () => {
-		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-aw-migrate-"));
-		const filePath = path.join(cwd, "src", "a.ts");
-		fs.mkdirSync(path.dirname(filePath), { recursive: true });
-		fs.writeFileSync(filePath, "console.log('x');\n");
+	// Review-round F3: a fixture whose raw and canonical path forms COINCIDE
+	// (e.g. a fresh mkdtempSync path with no mixed-case segment) makes the
+	// "never canonicalize legacyActionableWarningId" guard vacuous — a
+	// reviewer canonicalized it and every assertion below still passed,
+	// because canonicalizing a no-op input changes nothing. Use a mis-cased
+	// path form (mirrors the id-divergence fixture above and
+	// diagnostic-dispositions.test.ts's "anchor path-form stability" fixture)
+	// so the mutation actually reds: a pre-#1816 build never canonicalized,
+	// so it would have anchored the suppression under the RAW, mis-cased
+	// relative path — canonicalizing `legacyActionableWarningId` shifts its
+	// output onto the canonical form and the lookup below would silently
+	// miss the entry.
+	it("honors and migrates a suppression recorded under the pre-#1816 id for a mis-cased path form", async () => {
+		const projectDir = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-aw-migrate-"),
+		);
 		try {
+			// Real on-disk casing: lowercase `sub`.
+			const subDirOnDisk = path.join(projectDir, "sub");
+			fs.mkdirSync(subDirOnDisk, { recursive: true });
+			const fileOnDisk = path.join(subDirOnDisk, "a.ts");
+			fs.writeFileSync(fileOnDisk, "console.log('x');\n");
+
+			// WRITE form a pre-#1816 build would have anchored under: a raw,
+			// mis-cased segment, never realpath-canonicalized.
+			const cwd = projectDir;
+			const filePath = path.join(projectDir, "SUB", "a.ts");
+			// Only aliases on a case-insensitive filesystem — skip honestly on
+			// Linux CI rather than asserting something the FS can't produce.
+			if (!fs.existsSync(filePath)) return;
+
 			const diagnostic = makeWarning(filePath);
 			const legacyId = legacyActionableWarningIdForTest({
 				cwd,
@@ -460,7 +485,7 @@ describe("actionable-warning-state.json migration (#1816 — pre-fix id back-com
 			});
 			expect(persisted.warnings[legacyId]).toBeUndefined();
 		} finally {
-			removeTempDirSync(cwd);
+			removeTempDirSync(projectDir);
 		}
 	});
 });

@@ -49,6 +49,24 @@ export interface ActionableWarningRecord {
 	actions: ActionableWarningAction[];
 	suppressed: boolean;
 	suppressionReason?: string;
+	/** #1816 migration-only, internal to `actionable-warnings.ts`'s own
+	 * suppression-store bookkeeping — not for display. The id this warning
+	 * would have hashed to under the pre-#1816 formula (raw `relativeFile`,
+	 * 10-char hash), computed ONCE by `suppressionFor` at record-construction
+	 * time and carried here (AGENTS.md shape 5: an enumerable field survives
+	 * `mergeWarnings`' spread copies; a WeakMap keyed on object identity would
+	 * not, since merging allocates new record objects). `updateWarningState`
+	 * reads this field directly and never re-derives a legacy id from
+	 * `rule`/`tool`/`source`/`code` — those diverge from the id-construction
+	 * args for LSP-origin records (`recordFromLspDiagnostic` passes no `rule`
+	 * into `createActionableWarningId`, then sets `rule` afterward to
+	 * `${source}:${code}` for display), so re-deriving would silently compute
+	 * the wrong legacy id and bifurcate the store. Optional only because a
+	 * handful of test/consumer sites construct a synthetic
+	 * `ActionableWarningRecord` outside this module's own constructors and
+	 * have no real pre-#1816 id to carry; `writeActionableWarningsReport`'s
+	 * caller strips this field before persisting the report. */
+	legacyId?: string;
 	origin: "dispatch" | "lsp" | "merged";
 }
 
@@ -158,7 +176,12 @@ export function createActionableWarningId(args: {
  * this id. Do not canonicalize this function — that would make it identical
  * to `createActionableWarningId` and silently defeat the migration lookup
  * for every path that actually needed canonicalizing (the #533 class this
- * whole item exists to fix). */
+ * whole item exists to fix). Review-round F3 (#1816): this guard is only
+ * provable under a MIS-CASED path fixture — a fixture whose raw and
+ * canonical forms coincide (a bare mkdtempSync path) makes canonicalizing
+ * this function a no-op, so the regression test must seed under a mis-cased
+ * segment (see `actionable-warnings.test.ts`'s migration describe block) or
+ * the guard passes vacuously either way. */
 function legacyActionableWarningId(args: {
 	cwd: string;
 	filePath: string;
@@ -263,18 +286,21 @@ function updateWarningState(
 				// suppressed before the migration stays suppressed, and repeated
 				// re-encounters converge the store onto one id per warning
 				// instead of accumulating both forever.
-				const legacyId = legacyActionableWarningId({
-					cwd,
-					filePath: warning.filePath,
-					tool: warning.tool,
-					source: warning.source,
-					code: warning.code,
-					rule: warning.rule,
-					message: warning.message,
-					line: warning.line,
-				});
+				//
+				// Review-round F1: this MUST read `warning.legacyId` — the value
+				// `suppressionFor` already computed from the exact identity args
+				// used at lookup time — and must NEVER re-derive a legacy id from
+				// `warning.rule`/`tool`/`source`/`code`. Those fields hold
+				// DISPLAY values that diverge from the id-construction args for
+				// LSP-origin records (see `ActionableWarningRecord.legacyId`'s
+				// doc comment), so a re-derivation here would compute a
+				// different legacy id than the one `suppressionFor` checked,
+				// permanently bifurcating the store.
+				const legacyId = warning.legacyId;
 				const legacyEntry =
-					legacyId !== warning.id ? state.warnings[legacyId] : undefined;
+					legacyId && legacyId !== warning.id
+						? state.warnings[legacyId]
+						: undefined;
 				const existing = state.warnings[warning.id] ?? legacyEntry ?? {};
 				state.warnings[warning.id] = {
 					...existing,
@@ -283,7 +309,7 @@ function updateWarningState(
 					lastSeenAt: now,
 					seenCount: (existing.seenCount ?? 0) + 1,
 				};
-				if (legacyEntry) delete state.warnings[legacyId];
+				if (legacyEntry && legacyId) delete state.warnings[legacyId];
 			}
 			return state;
 		},
@@ -303,7 +329,19 @@ function updateWarningState(
 /** Looks up suppression under the current id, falling back to the pre-#1816
  * id (see `legacyActionableWarningId`) so a warning suppressed before this
  * migration doesn't silently reappear as unsuppressed. `args` is the exact
- * identity shape both id builders take. */
+ * identity shape both id builders take.
+ *
+ * Also RETURNS the `legacyId` it computed (review-round F1, #1816): the
+ * caller carries it onto the record's `legacyId` field so
+ * `updateWarningState` can migrate the SAME legacy id this lookup used,
+ * instead of re-deriving one from the record's own `rule`/`tool`/`source`/
+ * `code` fields later. Re-deriving is unsound for LSP-origin records —
+ * `recordFromLspDiagnostic` passes no `rule` into this function (LSP
+ * diagnostics don't have one), then sets `record.rule` afterward to
+ * `${source}:${code}` purely for display. Recomputing from that display
+ * value would silently compute a DIFFERENT legacy id than the one actually
+ * checked here, permanently bifurcating the store: a suppression written
+ * this turn under the current id would never be found again next turn. */
 function suppressionFor(
 	cwd: string,
 	id: string,
@@ -316,7 +354,7 @@ function suppressionFor(
 		message: string;
 		line?: number;
 	},
-): { suppressed: boolean; reason?: string } {
+): { suppressed: boolean; reason?: string; legacyId: string } {
 	const state = readSuppressionState(cwd);
 	const legacyId = legacyActionableWarningId({ cwd, ...args });
 	const entry =
@@ -325,6 +363,7 @@ function suppressionFor(
 	return {
 		suppressed: entry?.status === "suppressed",
 		reason: entry?.reason,
+		legacyId,
 	};
 }
 
@@ -369,6 +408,7 @@ export function recordFromDispatchDiagnostic(
 		actions: [],
 		suppressed: suppression.suppressed,
 		suppressionReason: suppression.reason,
+		legacyId: suppression.legacyId,
 		origin: "dispatch",
 	};
 }
@@ -418,6 +458,7 @@ function recordFromLspDiagnostic(
 		actions: [],
 		suppressed: suppression.suppressed,
 		suppressionReason: suppression.reason,
+		legacyId: suppression.legacyId,
 		origin: "lsp",
 	};
 }
@@ -587,8 +628,15 @@ export async function buildActionableWarningsReport(args: {
 
 	const merged = mergeWarnings(records);
 	updateWarningState(cwd, merged);
+	// legacyId is #1816 migration bookkeeping for updateWarningState above —
+	// strip it before the report leaves this function, so it never lands in
+	// the `.pi-lens/cache/actionable-warnings.json` cache file or any
+	// agent-facing rendering of a warning record.
+	const reportWarnings = merged.map(
+		({ legacyId: _legacyId, ...rest }) => rest,
+	);
 	const byFile = new Map<string, ActionableWarningRecord[]>();
-	for (const warning of merged) {
+	for (const warning of reportWarnings) {
 		const arr = byFile.get(warning.filePath) ?? [];
 		arr.push(warning);
 		byFile.set(warning.filePath, arr);

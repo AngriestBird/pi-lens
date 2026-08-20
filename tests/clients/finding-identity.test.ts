@@ -51,6 +51,27 @@ describe("finding-identity", () => {
 		expect(withUndefined).toBe(withEmpty);
 	});
 
+	// Review-round F4 (#1816): a runtime `null` (a JSON.parse'd tool field
+	// assigned straight into a `T | undefined`-typed diagnostic field, which
+	// defeats the static type) must fold the same as `undefined` and an
+	// explicit `""` — not stringify to the literal "null", which would
+	// diverge from every other id-construction path for the same finding.
+	it("stableFindingId folds a runtime null part the same as undefined and an explicit empty string", () => {
+		const cwd = path.join(os.tmpdir(), "project");
+		const filePath = path.join(cwd, "src", "a.ts");
+		const withNull = stableFindingId("zz:", {
+			cwd,
+			filePath,
+			parts: ["tool", null, "msg"],
+		});
+		const withEmpty = stableFindingId("zz:", {
+			cwd,
+			filePath,
+			parts: ["tool", "", "msg"],
+		});
+		expect(withNull).toBe(withEmpty);
+	});
+
 	// #533 class (mirrors diagnostic-dispositions.test.ts's "anchor path-form
 	// stability" fixture): relativeFile canonicalizes BOTH cwd and filePath
 	// through normalizeMapKey before relativizing, so a raw mis-cased path form
