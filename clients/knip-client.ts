@@ -74,6 +74,17 @@ export interface KnipAnalyzeOptions {
 	projectSeq?: number;
 }
 
+interface KnipMemoFileSignal {
+	path: string;
+	mtimeMs: number;
+	size: number;
+}
+
+interface KnipMemoSignal {
+	packageJson: KnipMemoFileSignal | null;
+	config: KnipMemoFileSignal | null;
+}
+
 const EMPTY_RESULT: Omit<KnipResult, "summary"> = {
 	success: false,
 	issues: [],
@@ -274,7 +285,7 @@ export class KnipClient {
 	/** Last successful result per project and runtime content generation. */
 	private completedByProject = new Map<
 		string,
-		{ projectSeq: number; result: KnipResult }
+		{ projectSeq: number; result: KnipResult; signal: KnipMemoSignal }
 	>();
 
 	/**
@@ -395,6 +406,11 @@ export class KnipClient {
 	 *
 	 * Re-entrancy safe: concurrent calls resolving to the same project
 	 * root share a single knip process via `inFlight`.
+	 *
+	 * Successful memo hits validate package.json and the resolved Knip config
+	 * with bounded metadata checks. The two statSync calls replace a 10-23
+	 * second project scan. Source-only external edits remain undetected until
+	 * pi observes a write or the session resets.
 	 */
 	async analyze(
 		cwd?: string,
@@ -420,7 +436,8 @@ export class KnipClient {
 		const completed = this.completedByProject.get(key);
 		if (
 			options.projectSeq !== undefined &&
-			completed?.projectSeq === options.projectSeq
+			completed?.projectSeq === options.projectSeq &&
+			this.matchesMemoSignal(targetDir, completed.signal)
 		) {
 			this.log(`Analysis cache hit for ${key} at projectSeq ${options.projectSeq}`);
 			return { ...completed.result, execution: "cache" };
@@ -450,6 +467,7 @@ export class KnipClient {
 					this.completedByProject.set(key, {
 						projectSeq: options.projectSeq,
 						result: executed,
+						signal: this.readMemoSignal(key),
 					});
 				}
 				return executed;
@@ -459,6 +477,37 @@ export class KnipClient {
 			});
 		this.inFlight.set(key, promise);
 		return promise;
+	}
+
+	private readMemoFileSignal(filePath: string): KnipMemoFileSignal | null {
+		try {
+			const stat = fs.statSync(filePath);
+			return { path: filePath, mtimeMs: stat.mtimeMs, size: stat.size };
+		} catch {
+			return null;
+		}
+	}
+
+	private readMemoSignal(targetDir: string): KnipMemoSignal {
+		const config = resolveProjectKnipConfig(targetDir);
+		return {
+			packageJson: this.readMemoFileSignal(path.join(targetDir, "package.json")),
+			config:
+				config && config !== "package.json#knip"
+					? this.readMemoFileSignal(path.join(targetDir, config))
+					: null,
+		};
+	}
+
+	private matchesMemoSignal(targetDir: string, signal: KnipMemoSignal): boolean {
+		const current = {
+			packageJson: this.readMemoFileSignal(path.join(targetDir, "package.json")),
+			config: signal.config ? this.readMemoFileSignal(signal.config.path) : null,
+		};
+		return (
+			JSON.stringify(current.packageJson) === JSON.stringify(signal.packageJson) &&
+			JSON.stringify(current.config) === JSON.stringify(signal.config)
+		);
 	}
 
 	private async runAnalyze(targetDir: string): Promise<KnipResult> {

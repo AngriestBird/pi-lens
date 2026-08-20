@@ -1183,6 +1183,8 @@ Never write `path.join(cwd, ".pi-lens", ...)` for a project cache — it breaks 
 - `~/.pi-lens/actionable-warnings.log` — NDJSON for the actionable-warnings advisory pipeline (rotates at 1 MiB); events: `report_started`, `lsp_file_checked`, `lsp_file_skipped`, `report_complete`, `advisory_injected`, `advisory_skipped`
 - `~/.pi-lens/probe-cache.json` — tool binary path cache (TTL 24h)
 - `.pi-lens/cache/` — knip, jscpd, madge, gitleaks/govulncheck/trivy/opengrep, dead-code-`<lang>` (#127), todo-baseline, turn-end-findings, actionable-warnings, code-quality-warnings, and project-snapshot caches
+
+**Knip memo freshness (#1873).** `clients/knip-client.ts` keys successful in-memory reuse by canonical project root and `projectSeq`, then validates a bounded metadata signal for `package.json` and the resolved Knip config on every hit. The signal records mtime and size, so external changes to those files invalidate without a tree walk; two `statSync` calls replace a 10–23 second scan. Source-only external edits remain advisory stale until pi observes a write or the session resets.
 - `~/.pi-lens/dead-code.log` — NDJSON, one event per cross-file dead-code scan (#127): language, per-bucket counts, durationMs
 - `.pi-lens/cache/project-snapshot.json` / `.pi-lens/cache/project-snapshot.meta.json` — versioned seq-stamped project snapshot; preserves cached exports, project rules, startup scan/profile metadata, and reverse dependency data
 - `<project-data-dir>/change-log.jsonl` — append-only observed mutation log with project/file sequence numbers
