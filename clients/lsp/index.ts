@@ -2177,6 +2177,7 @@ export class LSPService {
 		filePath: string,
 		maxWaitMs?: number,
 		hardCapMs?: number,
+		resolvedRoots?: Map<string, string>,
 	): Promise<SpawnedServer | undefined> {
 		if (this.checkDestroyed()) return undefined;
 		// Primary selection considers language servers only — auxiliary servers
@@ -2207,7 +2208,11 @@ export class LSPService {
 
 			// Try each matching server
 			for (const server of servers) {
-				const spawned = await this.ensureClientForServer(filePath, server);
+				const spawned = await this.ensureClientForServer(
+					filePath,
+					server,
+					resolvedRoots,
+				);
 				if (spawned) {
 					logLatency({
 						type: "phase",
@@ -2318,6 +2323,7 @@ export class LSPService {
 	async getClientsForFile(
 		filePath: string,
 		excludeServerIds?: ReadonlySet<string>,
+		resolvedRoots?: Map<string, string>,
 	): Promise<{ clients: SpawnedServer[]; serverCountAttempted: number }> {
 		const allServers = getServersForFileWithConfig(filePath);
 		const servers =
@@ -2334,7 +2340,9 @@ export class LSPService {
 		const serverCountAttempted = roots.filter(Boolean).length;
 
 		const spawned = await Promise.all(
-			servers.map((server) => this.ensureClientForServer(filePath, server)),
+			servers.map((server) =>
+				this.ensureClientForServer(filePath, server, resolvedRoots),
+			),
 		);
 		return {
 			clients: spawned.filter((entry): entry is SpawnedServer =>
@@ -2609,6 +2617,7 @@ export class LSPService {
 	private async ensureClientForServer(
 		filePath: string,
 		server: LSPServerInfo,
+		resolvedRoots?: Map<string, string>,
 	): Promise<SpawnedServer | undefined> {
 		const handoff = this.generationHandoff;
 		if (handoff) {
@@ -2621,6 +2630,9 @@ export class LSPService {
 
 		const root = await this.resolveServerRoot(server, filePath);
 		if (!root || this.checkDestroyed()) return undefined;
+		if (server.role !== "auxiliary") {
+			resolvedRoots?.set(server.id, normalizeMapKey(root));
+		}
 		const allowInstall = this.shouldAllowInstall(server.id);
 
 		const normalizedRoot = normalizeMapKey(root);
@@ -3244,12 +3256,14 @@ export class LSPService {
 		const clientScope: LSPTouchClientScope =
 			options.clientScope ?? (diagnosticsMode === "full" ? "all" : "primary");
 		const useAllClients = clientScope === "all";
+		const resolvedPrimaryRoots = new Map<string, string>();
 		let spawned: SpawnedServer[];
 		let serverCountAttempted: number;
 		if (useAllClients) {
 			const result = await this.getClientsForFile(
 				filePath,
 				options.excludeServerIds,
+				resolvedPrimaryRoots,
 			);
 			spawned = result.clients;
 			serverCountAttempted = result.serverCountAttempted;
@@ -3257,7 +3271,12 @@ export class LSPService {
 			// Primary language server + the enabled cross-cutting auxiliaries
 			// (opengrep, …). The aggregation layer merges/dedups their diagnostics.
 			const [entry, aux] = await Promise.all([
-				this.getClientForFile(filePath, options.maxClientWaitMs),
+				this.getClientForFile(
+					filePath,
+					options.maxClientWaitMs,
+					undefined,
+					resolvedPrimaryRoots,
+				),
 				this.getAuxiliaryClientsForFile(
 					filePath,
 					new Set(options.auxiliaryServerIds ?? []),
@@ -3269,6 +3288,8 @@ export class LSPService {
 			const entry = await this.getClientForFile(
 				filePath,
 				options.maxClientWaitMs,
+				undefined,
+				resolvedPrimaryRoots,
 			);
 			spawned = entry ? [entry] : [];
 			serverCountAttempted =
@@ -3279,6 +3300,17 @@ export class LSPService {
 						: 0;
 		}
 		if (spawned.length === 0) {
+			// A bounded caller can lose the client race while the single-flight spawn
+			// it started is still progressing. Preserve that lifecycle evidence in the
+			// touch verdict instead of reclassifying an empty ready set as absence.
+			// `isSpawnInFlight` reads the spawn coordinator's own state and filters to
+			// primary candidates, so this stays coupled to the dedupe mechanism.
+			const failureKind = this.isSpawnInFlight(
+				filePath,
+				resolvedPrimaryRoots,
+			)
+				? "spawn_in_flight_budget_elapsed"
+				: "no_clients_none_spawning";
 			logLatency({
 				type: "phase",
 				phase: "lsp_touch_file",
@@ -3291,7 +3323,7 @@ export class LSPService {
 					diagnosticsMode,
 					source,
 					maxClientWaitMs: options.maxClientWaitMs,
-					failureKind: "no_clients",
+					failureKind,
 				},
 			});
 			return;
@@ -7652,24 +7684,18 @@ export class LSPService {
 	 * unrelated auxiliary spawn would downgrade a genuinely wedged primary to
 	 * a benign "spawn-in-flight" verdict — the worse misreport direction.
 	 *
-	 * Root-blind: the match is a `${server.id}:` PREFIX over inFlight keys, not
-	 * an exact `${server.id}:${root}` match, because root resolution
-	 * (resolveServerRoot) is async and this must stay synchronous for the
-	 * caller's bail path. A same-server spawn in an unrelated workspace root
-	 * also reports true. Rare in practice (this codebase is single-root per
-	 * pi-lens session in the overwhelming common case) and the failure mode is
-	 * the same "downgrade wedged to spawn-in-flight" direction as the
-	 * auxiliary case above — acceptable for a log-wording hint, not a gate.
+	 * The touch path supplies roots resolved before acquisition. Matching the full
+	 * server/root key prevents another workspace's spawn from relabeling this one.
+	 * Root resolution is already complete, and this check stays synchronous.
+	 * The failure mode is limited to the matching workspace key.
 	 * Pure lookup — does not spawn or wait for a client.
 	 */
-	isSpawnInFlight(filePath: string): boolean {
-		const servers = getServersForFileWithConfig(filePath).filter(
-			(s) => s.role !== "auxiliary",
-		);
-		if (servers.length === 0) return false;
-		const prefixes = servers.map((server) => `${server.id}:`);
-		for (const key of this.state.inFlight.keys()) {
-			if (prefixes.some((prefix) => key.startsWith(prefix))) return true;
+	isSpawnInFlight(
+		_filePath: string,
+		resolvedRoots: ReadonlyMap<string, string> = new Map(),
+	): boolean {
+		for (const [serverId, root] of resolvedRoots) {
+			if (this.state.inFlight.has(`${serverId}:${root}`)) return true;
 		}
 		return false;
 	}
