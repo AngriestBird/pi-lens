@@ -2,9 +2,7 @@
 section: Changed
 ---
 
-- **Anti-slop rules: one promotion to `error`, six deliberate holds
-  ([refs #1727](https://github.com/apmantza/pi-lens/issues/1727),
-  [refs #1777](https://github.com/apmantza/pi-lens/issues/1777))** —
+- **Anti-slop rules: one promotion to `error`, six deliberate holds ([refs #1727](https://github.com/apmantza/pi-lens/issues/1727), [refs #1777](https://github.com/apmantza/pi-lens/issues/1777))** —
   `require-safety-comment-for-as-unknown-as` moves from `hint` to `error`,
   the tier that blocks a turn. Two changes earn that. The rule now excludes
   test paths structurally, because a four-corpus census (pi-lens, pi core,
