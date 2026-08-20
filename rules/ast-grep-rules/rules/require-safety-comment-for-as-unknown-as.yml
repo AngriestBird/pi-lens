@@ -84,6 +84,23 @@ note: |
   matched the identical `as unknown as` site list (verified: 16/16
   pi-lens, 182/182 pi, 194/194 opencode), so every uncommented site
   raised two diagnostics for one defect.
+
+  2026-08-20 (#1834): both `follows` checks used `stopBy: end`, which
+  scans EVERY preceding sibling all the way to the top of the enclosing
+  block, not just the comment directly above the cast. A `SAFETY:`
+  comment attached to one cast silently exempted every LATER cast in the
+  same block, including casts on a different subject with no
+  justification of their own. Probe: `// SAFETY: ...` above `const a =
+  (y as unknown as string).length` followed by an undocumented `const b
+  = (x as unknown as string).length` scored 0 hits; `b`'s cast should
+  have been flagged. Fixed the same way as `redundant-unsafe-function`'s
+  identical valve (PR #1821, refs #1806): bound the backward scan with
+  `stopBy: {not: {kind: comment}}`, so it stops at the first non-comment
+  sibling and only ever searches the CONTIGUOUS comment run directly
+  above the cast (or its containing statement), never an earlier
+  statement's comment. The "Scope and known gap" note above already
+  described this contiguous-comment intent; the shipped pattern didn't
+  implement it.
 ignores:
   - "**/*.test.ts"
   - "**/*.test.tsx"
@@ -98,7 +115,10 @@ rule:
   pattern: $X as unknown as $Y
   not:
     any:
-      - follows: { kind: comment, regex: 'SAFETY\s*:', stopBy: end }
+      - follows:
+          kind: comment
+          regex: 'SAFETY\s*:'
+          stopBy: { not: { kind: comment } }
       - inside:
           stopBy: end
           any:
@@ -106,4 +126,7 @@ rule:
             - kind: lexical_declaration
             - kind: variable_declaration
             - kind: return_statement
-          follows: { kind: comment, regex: 'SAFETY\s*:', stopBy: end }
+          follows:
+            kind: comment
+            regex: 'SAFETY\s*:'
+            stopBy: { not: { kind: comment } }
