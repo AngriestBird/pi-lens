@@ -94,7 +94,10 @@ const h = vi.hoisted(() => {
 						if (isEnumeration && state.stdout) {
 							for (const handler of stdout.handlers) handler(state.stdout);
 						}
-						cb(0);
+						// Match Node's ChildProcess "close" contract exactly. Omitting the
+						// second argument turns a successful exit into an exit-error under
+						// the production classifier (`undefined !== null`).
+						cb(0, null);
 					});
 				}
 				return child;
