@@ -16,12 +16,13 @@
 import { describe, expect, it, vi } from "vitest";
 import { LSPService } from "../../../clients/lsp/index.js";
 
-function makeFakeClient(supportsWorkspaceSymbol: boolean) {
+function makeFakeClient(supportsWorkspaceSymbol: boolean, alive = true) {
 	const workspaceSymbol = vi.fn(async () => [
 		{ name: "greet", kind: 12 },
 	]);
 	return {
 		workspaceSymbol,
+		isAlive: () => alive,
 		getOperationSupport: () => ({
 			definition: false,
 			typeDefinition: false,
@@ -158,6 +159,61 @@ describe("LSPService.workspaceSymbol supporting-client selection (#1812)", () =>
 
 		expect(auxOnly.workspaceSymbol).not.toHaveBeenCalled();
 		expect(primaryUnsupported.workspaceSymbol).not.toHaveBeenCalled();
+		expect(result).toEqual([]);
+	});
+
+	// F1 (review round on #1835): the previous test set never exercised the
+	// primary-over-auxiliary PREFERENCE itself — every prior "aux first"
+	// fixture had a non-supporting aux, so the predicate alone already
+	// skipped it before role ever mattered. Here BOTH the aux (first) and the
+	// primary (second) support workspace/symbol: a selector that returns the
+	// first predicate match regardless of role would wrongly pick the aux.
+	// Deleting the role-preference branch in `selectWorkspaceScopeClient`
+	// must fail this test even though every other test in this file stays
+	// green.
+	it("prefers a supporting primary over a supporting auxiliary spawned first", async () => {
+		const auxSupporting = makeFakeClient(true);
+		const primarySupporting = makeFakeClient(true);
+		const svc = new LSPService();
+		// Insertion order: auxiliary first, primary second — both support the
+		// query, so only the role preference decides which one gets called.
+		injectClient(svc, "ast-grep:root", auxSupporting);
+		injectClient(svc, "typescript:root", primarySupporting);
+
+		const result = await svc.workspaceSymbol("greet");
+
+		expect(auxSupporting.workspaceSymbol).not.toHaveBeenCalled();
+		expect(primarySupporting.workspaceSymbol).toHaveBeenCalledWith("greet");
+		expect(result).toEqual([{ name: "greet", kind: 12 }]);
+	});
+
+	// F2 (review round on #1835): `selectWorkspaceScopeClient` must skip a
+	// dead client for BOTH the preferred (primary) and fallback (auxiliary)
+	// role, mirroring `getCapabilitySnapshots`'s own `isAlive()` filter — a
+	// dead primary must never beat a live, answering auxiliary just because
+	// role preference ran before liveness was checked.
+	it("skips a dead primary and falls through to a live supporting auxiliary", async () => {
+		const deadPrimary = makeFakeClient(true, false);
+		const liveAux = makeFakeClient(true, true);
+		const svc = new LSPService();
+		injectClient(svc, "typescript:root", deadPrimary);
+		injectClient(svc, "ast-grep:root", liveAux);
+
+		const result = await svc.workspaceSymbol("greet");
+
+		expect(deadPrimary.workspaceSymbol).not.toHaveBeenCalled();
+		expect(liveAux.workspaceSymbol).toHaveBeenCalledWith("greet");
+		expect(result).toEqual([{ name: "greet", kind: 12 }]);
+	});
+
+	it("returns [] when the only supporting client is dead", async () => {
+		const deadPrimary = makeFakeClient(true, false);
+		const svc = new LSPService();
+		injectClient(svc, "typescript:root", deadPrimary);
+
+		const result = await svc.workspaceSymbol("greet");
+
+		expect(deadPrimary.workspaceSymbol).not.toHaveBeenCalled();
 		expect(result).toEqual([]);
 	});
 });

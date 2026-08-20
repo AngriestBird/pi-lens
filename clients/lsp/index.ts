@@ -5657,21 +5657,30 @@ export class LSPService {
 	 * scanner (ast-grep, opengrep, zizmor, ...) that happens to spawn first in
 	 * a polyglot workspace used to win every no-filePath query outright (#1812
 	 * — a supporting primary server spawned later never got a look-in). Scans
-	 * for the first client matching `predicate` (when given), preferring any
-	 * primary (non-`"auxiliary"` role) match over an auxiliary one — the same
-	 * primary-over-auxiliary preference `getClientForFile` encodes via its
-	 * `role !== "auxiliary"` filter (this file, `getClientForFile`) and
-	 * `getAliveServerIds` groups by. Role is read from the map key's
-	 * `serverId` prefix against `LSP_SERVERS`, the single source of truth
-	 * `getCapabilitySnapshots`'s own no-filePath branch already parses the
-	 * same way — never a second, hand-rolled role table. Returns undefined
-	 * only when NO client (primary or auxiliary) matches.
+	 * for the first LIVE client matching `predicate` (when given), preferring
+	 * any primary (non-`"auxiliary"` role) match over an auxiliary one — the
+	 * same primary-over-auxiliary preference `getClientForFile` encodes via
+	 * its `role !== "auxiliary"` filter (this file, `getClientForFile`) and
+	 * `getAliveServerIds` groups by. `isAlive()` is required for BOTH the
+	 * preferred and fallback candidate — mirrors `getCapabilitySnapshots`'s
+	 * own no-filePath branch (this file, ~line 5868), whose liveness filter
+	 * this helper otherwise duplicates; without it a dead primary would win
+	 * over a live, answering auxiliary. Role is read from the map key's
+	 * `serverId` prefix against `LSP_SERVERS`, the same single source of
+	 * truth `getCapabilitySnapshots` already parses that key from — never a
+	 * second, hand-rolled role table. A `serverId` prefix absent from
+	 * `LSP_SERVERS` (should not happen in practice — every spawned client's
+	 * key is built from a known server's `id`) resolves to `role === undefined`,
+	 * which falls through to the primary branch: unknown treated as primary,
+	 * never silently dropped. Returns undefined only when NO live client
+	 * (primary or auxiliary) matches.
 	 */
 	private selectWorkspaceScopeClient(
 		predicate?: (client: LSPClientInfo) => boolean,
 	): LSPClientInfo | undefined {
 		let auxFallback: LSPClientInfo | undefined;
 		for (const [key, client] of this.state.clients) {
+			if (!client.isAlive()) continue;
 			if (predicate && !predicate(client)) continue;
 			const separator = key.indexOf(":");
 			const serverId = separator >= 0 ? key.slice(0, separator) : key;
