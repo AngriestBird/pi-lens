@@ -97,6 +97,41 @@ export type DegradationKind =
 	 */
 	| "lsp-nav-late-answer"
 	/**
+	 * The abandoned request behind an `lsp-pull-late-answer` timeout REJECTED
+	 * instead of answering (#1774) — e.g. a permanent server error such as
+	 * `RequestFailed` (-32803) surfacing after the caller gave up.
+	 * `ContentModified` (-32801) does NOT reach here: `safeSendRequest`
+	 * retries it once internally and resolves `undefined` rather than
+	 * rejecting. Without this kind, "timeout then silence" and "timeout then
+	 * rejection" both read as the same nothing in latency.log, which is
+	 * exactly the discrimination #1549's requests-die-or-arrive-late verdict
+	 * needs. The rejection handler still swallows the error; this only
+	 * observes it.
+	 */
+	| "lsp-pull-late-rejection"
+	/**
+	 * A `textDocument/diagnostic` or `workspace/diagnostic` pull's per-request
+	 * `withTimeout` abandoned a GENUINELY dispatched request (#1771). Every
+	 * pull timeout emits a detailed `lsp_pull_diagnostic_timeout` latency.log
+	 * record already, but until now that record counted nothing in the
+	 * ledger — the bounded-telemetry rule (`clients/bounded-telemetry.ts`)
+	 * says a failure path omits `ledgerKind` only when it is not a
+	 * degradation, and an abandoned pull is one. Subject carries server and
+	 * file so a storming server is visible in aggregate, not just per-event.
+	 */
+	| "lsp-pull-diagnostic-timeout"
+	/**
+	 * A `textDocument/diagnostic` or `workspace/diagnostic` pull was SKIPPED
+	 * outright because the caller's budget was already exhausted (#1773,
+	 * review round). Not dispatched, so it is not an LSP-side degradation the
+	 * way `lsp-pull-diagnostic-timeout` is — the server never saw the
+	 * request — but a caller that repeatedly hands out exhausted budgets to
+	 * this call site is itself a shape worth seeing in aggregate (e.g. a
+	 * sweep whose own upstream deadline math is too tight). Subject carries
+	 * server and file for the same reason every other pull kind does.
+	 */
+	| "lsp-pull-skipped-budget-exhausted"
+	/**
 	 * A `GenerationHandle.guardedWrite` (`clients/generation-guard.ts`) dropped
 	 * a post-await write because the generation it captured is no longer
 	 * current (#1754) — a session reset, a cache refresh, or a newer request
