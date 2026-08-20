@@ -5651,21 +5651,65 @@ export class LSPService {
 	}
 
 	/**
+	 * Resolves "the target client" for a workspace-scope query that has no
+	 * filePath to route through `getClientForFile`. `state.clients` is keyed
+	 * `${serverId}:${root}` in spawn order, not role order, so an auxiliary
+	 * scanner (ast-grep, opengrep, zizmor, ...) that happens to spawn first in
+	 * a polyglot workspace used to win every no-filePath query outright (#1812
+	 * — a supporting primary server spawned later never got a look-in). Scans
+	 * for the first LIVE client matching `predicate` (when given), preferring
+	 * any primary (non-`"auxiliary"` role) match over an auxiliary one — the
+	 * same primary-over-auxiliary preference `getClientForFile` encodes via
+	 * its `role !== "auxiliary"` filter (this file, `getClientForFile`) and
+	 * `getAliveServerIds` groups by. `isAlive()` is required for BOTH the
+	 * preferred and fallback candidate — mirrors `getCapabilitySnapshots`'s
+	 * own no-filePath branch (this file, ~line 5868), whose liveness filter
+	 * this helper otherwise duplicates; without it a dead primary would win
+	 * over a live, answering auxiliary. Role is read from the map key's
+	 * `serverId` prefix against `LSP_SERVERS`, the same single source of
+	 * truth `getCapabilitySnapshots` already parses that key from — never a
+	 * second, hand-rolled role table. A `serverId` prefix absent from
+	 * `LSP_SERVERS` (should not happen in practice — every spawned client's
+	 * key is built from a known server's `id`) resolves to `role === undefined`,
+	 * which falls through to the primary branch: unknown treated as primary,
+	 * never silently dropped. Returns undefined only when NO live client
+	 * (primary or auxiliary) matches.
+	 */
+	private selectWorkspaceScopeClient(
+		predicate?: (client: LSPClientInfo) => boolean,
+	): LSPClientInfo | undefined {
+		let auxFallback: LSPClientInfo | undefined;
+		for (const [key, client] of this.state.clients) {
+			if (!client.isAlive()) continue;
+			if (predicate && !predicate(client)) continue;
+			const separator = key.indexOf(":");
+			const serverId = separator >= 0 ? key.slice(0, separator) : key;
+			const role = LSP_SERVERS.find((s) => s.id === serverId)?.role;
+			if (role === "auxiliary") {
+				if (!auxFallback) auxFallback = client;
+				continue;
+			}
+			return client;
+		}
+		return auxFallback;
+	}
+
+	/**
 	 * Navigation: workspace-wide symbol search
 	 *
 	 * #1789: gated on the target server's advertised `workspaceSymbolProvider`
 	 * (the same `getOperationSupport().workspaceSymbol` single source of truth
 	 * `lsp-document-symbols.ts`'s documentSymbol gate reads — see clients/
-	 * lsp-document-symbols.ts:50). Without a path, "the target server" is
-	 * `this.state.clients`' first entry by insertion order — every spawned
-	 * client, auxiliary scanners (ast-grep, opengrep, zizmor, ...) included,
-	 * not just primary language servers. A workspace with no primary server
-	 * for the query's language (or none spawned yet) can have an auxiliary as
-	 * that first entry, and auxiliaries never advertise workspaceSymbolProvider
-	 * — every such query sent the request anyway and ate a wasted round trip
-	 * per call. Gating here, at the point that resolves and calls the target
-	 * client, closes that regardless of which caller reaches this method (a
-	 * caller-side check elsewhere is a duplicate, not the source of truth).
+	 * lsp-document-symbols.ts:50).
+	 *
+	 * #1812: without a path, the no-filePath branch used to stop at
+	 * `state.clients`' first entry by insertion order regardless of whether it
+	 * supported `workspace/symbol` — an auxiliary spawned first silently ate
+	 * every query with `[]` and zero requests, even when a supporting primary
+	 * server was already spawned too. `selectWorkspaceScopeClient` now scans
+	 * for the first client that DOES support it, preferring a primary over an
+	 * auxiliary; only when none of the spawned clients support it does this
+	 * fall back to `[]`.
 	 */
 	async workspaceSymbol(query: string, filePath?: string) {
 		if (filePath) {
@@ -5678,17 +5722,18 @@ export class LSPService {
 			return spawned.client.workspaceSymbol(query);
 		}
 
-		// Use the first active client for workspace-level queries
-		const clients = Array.from(this.state.clients.values());
-		if (clients.length === 0) return [];
-		const target = clients[0];
-		if (!target.getOperationSupport().workspaceSymbol) return [];
+		const target = this.selectWorkspaceScopeClient(
+			(client) => client.getOperationSupport().workspaceSymbol,
+		);
+		if (!target) return [];
 		return target.workspaceSymbol(query);
 	}
 
 	/**
 	 * Commands advertised for workspace/executeCommand. If filePath is given,
-	 * the server for that file; otherwise the first active client.
+	 * the server for that file; otherwise the first active client, preferring
+	 * a primary over an auxiliary scanner spawned first (#1812 sweep — see
+	 * `selectWorkspaceScopeClient`).
 	 */
 	async getAdvertisedCommands(filePath?: string): Promise<string[]> {
 		if (filePath) {
@@ -5699,14 +5744,16 @@ export class LSPService {
 			if (!spawned) return [];
 			return spawned.client.getAdvertisedCommands();
 		}
-		const first = this.state.clients.values().next().value;
+		const first = this.selectWorkspaceScopeClient();
 		return first ? first.getAdvertisedCommands() : [];
 	}
 
 	/**
 	 * Run a server command via workspace/executeCommand (hardened: allowlisted by
 	 * advertisement in the client). If filePath is given, target that file's
-	 * server; otherwise the first active client.
+	 * server; otherwise the first active client, preferring a primary over an
+	 * auxiliary scanner spawned first (#1812 sweep — see
+	 * `selectWorkspaceScopeClient`).
 	 */
 	async executeCommand(
 		filePath: string | undefined,
@@ -5724,7 +5771,7 @@ export class LSPService {
 			}
 			return spawned.client.executeCommand(command, args, mutationContext);
 		}
-		const first = this.state.clients.values().next().value;
+		const first = this.selectWorkspaceScopeClient();
 		if (!first) return { executed: false, reason: "no active LSP server" };
 		return first.executeCommand(command, args, mutationContext);
 	}
@@ -5772,7 +5819,26 @@ export class LSPService {
 
 	/**
 	 * Capability snapshot for LSP operations.
-	 * If filePath is provided, probes that server; otherwise uses first active client.
+	 * If filePath is provided, probes that server. Without a filePath the
+	 * snapshot describes the whole workspace, so each capability is ORed
+	 * across every client `selectWorkspaceScopeClient` would consider.
+	 *
+	 * #1846: the no-filePath branch used to report ONE client's capabilities,
+	 * whichever `selectWorkspaceScopeClient()` returned with no predicate. In
+	 * a multi-primary workspace (say `json` spawned before `typescript`), a
+	 * first client that does not advertise `workspaceSymbolProvider` reported
+	 * the operation unsupported even though a later client advertises it. The
+	 * tool layer then refused the call before `workspaceSymbol()` — which
+	 * #1812 taught to find the supporting client — was ever reached
+	 * (tools/lsp-navigation.ts, the `runWorkspaceSymbolOperation` gate).
+	 *
+	 * Each capability resolves through `selectWorkspaceScopeClient` with a
+	 * per-capability predicate, so this answer is built from the SAME liveness
+	 * and primary-over-auxiliary rules that route the operation itself (see
+	 * `selectWorkspaceScopeClient`, this file). A dead client therefore cannot
+	 * contribute a capability nobody can execute. Capabilities the base client
+	 * already reports true are skipped, so the extra scans only run for the
+	 * capabilities it lacks.
 	 */
 	async getOperationSupport(
 		filePath?: string,
@@ -5785,11 +5851,22 @@ export class LSPService {
 			return getter();
 		}
 
-		const first = this.state.clients.values().next().value;
+		const readable = (client: LSPClientInfo) =>
+			typeof client.getOperationSupport === "function";
+		const first = this.selectWorkspaceScopeClient(readable);
 		if (!first) return null;
-		const getter = first.getOperationSupport;
-		if (typeof getter !== "function") return null;
-		return getter();
+		const aggregate = { ...first.getOperationSupport() };
+		for (const capability of Object.keys(aggregate) as Array<
+			keyof import("./client.js").LSPOperationSupport
+		>) {
+			if (aggregate[capability]) continue;
+			const supporter = this.selectWorkspaceScopeClient(
+				(client) =>
+					readable(client) && Boolean(client.getOperationSupport()[capability]),
+			);
+			if (supporter) aggregate[capability] = true;
+		}
+		return aggregate;
 	}
 
 	/**
@@ -5852,7 +5929,7 @@ export class LSPService {
 			return getter();
 		}
 
-		const first = this.state.clients.values().next().value;
+		const first = this.selectWorkspaceScopeClient();
 		if (!first) return null;
 		const getter = first.getWorkspaceDiagnosticsSupport;
 		if (typeof getter !== "function") return null;
@@ -6230,6 +6307,11 @@ export class LSPService {
 
 	/**
 	 * Navigation: find incoming calls (callers)
+	 *
+	 * #1803: gated on the target server's advertised `callHierarchyProvider`
+	 * (the same `getOperationSupport().callHierarchy` single source of truth
+	 * populated by `detectOperationSupport` in clients/lsp/client.ts — see
+	 * client.ts:5253). Mirrors the #1789 gate on `workspaceSymbol` above.
 	 */
 	async incomingCalls(item: import("./client.js").LSPCallHierarchyItem) {
 		const spawned = await this.getClientForFile(
@@ -6237,11 +6319,14 @@ export class LSPService {
 			NAV_CLIENT_WAIT_TIMEOUT_MS,
 		);
 		if (!spawned) return [];
+		if (!spawned.client.getOperationSupport().callHierarchy) return [];
 		return spawned.client.incomingCalls(item);
 	}
 
 	/**
 	 * Navigation: find outgoing calls (callees)
+	 *
+	 * #1803: same gate as `incomingCalls` above.
 	 */
 	async outgoingCalls(item: import("./client.js").LSPCallHierarchyItem) {
 		const spawned = await this.getClientForFile(
@@ -6249,6 +6334,7 @@ export class LSPService {
 			NAV_CLIENT_WAIT_TIMEOUT_MS,
 		);
 		if (!spawned) return [];
+		if (!spawned.client.getOperationSupport().callHierarchy) return [];
 		return spawned.client.outgoingCalls(item);
 	}
 
