@@ -763,34 +763,42 @@ describe("getPhaseForWindow tie-break and plausibility floor (#1723 review round
 	// (which flips their position in the closedBracket ring, and so the scan
 	// order `getPhaseForWindow` sees them in) and asserts both orders name
 	// the SAME winner.
+	//
+	// #1723 review round 8, T1: the FIRST version of this test (elapsedMs
+	// 15 000/14 000/16 000 over an 18 270ms window) passed under the correct
+	// two-pass code AND under an actual round-6-style chaining revert — its
+	// numbers happened to land on the same winner (candidateB) either way,
+	// so it pinned the elapsedMs discriminator but never actually exercised
+	// the chaining defect it was written to catch. Replaced with the
+	// reviewer's discriminating set: under CORRECT two-pass selection both
+	// scan orders name Y; under a CHAINED single-pass revert, ascending scan
+	// order (X, Y, Z) yields Z and descending order (Z, Y, X) yields X — two
+	// different wrong answers, proving this version genuinely discriminates
+	// (see the round-8 red-proof run in the PR body / session report).
 	it("R1/S1 (C1 chain): a three-candidate near-tie chain is decided by the global maximum, not scan order", () => {
 		const t0 = new Date("2026-08-19T20:03:22.575Z").getTime();
 		const windowStartMs = t0;
-		const windowLengthMs = 18_270;
+		const windowLengthMs = 1_000_000;
 		const windowEndMs = t0 + windowLengthMs;
 
-		// Overlap in ms, chosen so adjacent fraction gaps (~1/18270 ≈ 5.47e-5)
-		// sit INSIDE FRACTION_TIE_EPSILON (1e-4) while the outer gap
-		// (~2/18270 ≈ 1.10e-4) sits OUTSIDE it. All three elapsedMs values are
-		// ≤ windowLengthMs, so all three share the same windowLengthMs
-		// denominator — a clean, comparable fraction ladder.
-		// candidateA: overlap 10 960 (fraction ≈0.599891) — its gap from the
-		//   TRUE maximum (candidateC, ≈0.600000) is ≈1.095e-4, OUTSIDE the
-		//   epsilon band, so it is correctly EXCLUDED — even though it is
-		//   just as close to candidateB as candidateB is to candidateC. A
-		//   single-pass CHAINED comparison (B accepted as a near-tie of C,
-		//   then A accepted as a near-tie of B) would wrongly let A win.
-		// candidateB: overlap 10 961, elapsedMs 14 000 (fraction ≈0.599945)
-		//   — within the epsilon band of the TRUE maximum (candidateC), and
-		//   the smaller of the two elapsedMs values in that band — the
-		//   correct winner.
-		// candidateC: overlap 10 962, elapsedMs 16 000 (fraction 0.600000)
-		//   — the true maximum fraction, but NOT the winner: candidateB is
-		//   within its band and has a smaller elapsedMs.
+		// Fractions 0.600000 / 0.600080 / 0.600160 — adjacent gaps (8e-5) sit
+		// INSIDE FRACTION_TIE_EPSILON (1e-4); the outer gap (X to Z, 1.6e-4)
+		// sits OUTSIDE it. All three elapsedMs values are ≤ windowLengthMs, so
+		// all three share the same windowLengthMs denominator.
+		// X: overlap 600 000, elapsedMs 600 000 (fraction 0.600000) — its gap
+		//   from the TRUE maximum (Z, 0.600160) is 1.6e-4, OUTSIDE the epsilon
+		//   band — must be EXCLUDED under correct two-pass selection.
+		// Y: overlap 600 080, elapsedMs 700 000 (fraction 0.600080) — within
+		//   the epsilon band of the TRUE maximum (Z), and the smaller of the
+		//   two elapsedMs values in that band — the correct winner in BOTH
+		//   scan orders.
+		// Z: overlap 600 160, elapsedMs 800 000 (fraction 0.600160) — the true
+		//   maximum fraction, but not the winner: Y is within its band and has
+		//   a smaller elapsedMs.
 		const candidates = [
-			{ name: "candidateA", overlapMs: 10_960, elapsedMs: 15_000 },
-			{ name: "candidateB", overlapMs: 10_961, elapsedMs: 14_000 },
-			{ name: "candidateC", overlapMs: 10_962, elapsedMs: 16_000 },
+			{ name: "X", overlapMs: 600_000, elapsedMs: 600_000 },
+			{ name: "Y", overlapMs: 600_080, elapsedMs: 700_000 },
+			{ name: "Z", overlapMs: 600_160, elapsedMs: 800_000 },
 		];
 
 		const runInCloseOrder = (
@@ -815,22 +823,22 @@ describe("getPhaseForWindow tie-break and plausibility floor (#1723 review round
 			}
 		};
 
-		const forwardOrder = runInCloseOrder([0, 1, 2]); // A, B, C
-		const reverseOrder = runInCloseOrder([2, 1, 0]); // C, B, A
+		const ascendingOrder = runInCloseOrder([0, 1, 2]); // X, Y, Z
+		const descendingOrder = runInCloseOrder([2, 1, 0]); // Z, Y, X
 
 		// Sanity: the fraction ladder is shaped as designed.
 		const fractionOf = (overlapMs: number) => overlapMs / windowLengthMs;
 		expect(
-			Math.abs(fractionOf(10_961) - fractionOf(10_962)),
+			Math.abs(fractionOf(600_080) - fractionOf(600_160)),
 		).toBeLessThanOrEqual(1e-4);
 		expect(
-			Math.abs(fractionOf(10_960) - fractionOf(10_962)),
+			Math.abs(fractionOf(600_000) - fractionOf(600_160)),
 		).toBeGreaterThan(1e-4);
 
-		expect(forwardOrder?.phase).toBe("candidateB");
-		expect(forwardOrder?.elapsedMs).toBe(14_000);
-		expect(reverseOrder?.phase).toBe("candidateB");
-		expect(reverseOrder?.elapsedMs).toBe(14_000);
+		expect(ascendingOrder?.phase).toBe("Y");
+		expect(ascendingOrder?.elapsedMs).toBe(700_000);
+		expect(descendingOrder?.phase).toBe("Y");
+		expect(descendingOrder?.elapsedMs).toBe(700_000);
 	});
 
 	// #1723 review round 7, S2 — round 6's `best === undefined` branch (now
