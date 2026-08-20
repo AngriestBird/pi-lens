@@ -7,7 +7,7 @@
  * - both outcomes (success and throw) complete without hanging
  */
 
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	clearCoverageNoticeState,
 	createDispatchContext,
@@ -464,24 +464,25 @@ describe("runRunner in-flight phase attribution against real parallel groups (#1
 	// exercised the N1-resid failure mode — by the time either sample ran,
 	// nothing else was still LIVE to compete with the (already closed) hog.
 	//
-	// #1723 review round 5: an earlier version of this test co-started the
-	// innocent runner and the hog (same `Promise.all`, same instant), then
-	// added only a small extra lag after the hog closed. That construction
-	// does not match production's window: `index.ts` sizes the window to
-	// `loopMaxMs`, the BLOCK'S OWN duration, so a co-started innocent bracket
-	// ends up wholly spanning the window too, same as the hog, and the two
-	// becomes indistinguishable by proportion alone (an artifact of the
-	// TEST's shape, not a real gap in the fix — see round 4's fake-timer
-	// N1-resid unit test, which already pins the correct closed-form ratio).
-	// This version starts the innocent runner MEANINGFULLY EARLIER (its own
-	// dispatch call, well before the block window opens), matching the shape
-	// that made the round-4 fix work in the first place: a genuinely
-	// long-lived bracket has a bigger `elapsedMs` denominator, which is what
-	// dilutes its fraction relative to a culprit whose lifetime roughly IS
-	// the window. The hog then runs for a real, meaningfully long duration
-	// (300ms) relative to the real sampling lag that follows it (~15ms) —
-	// production-realistic proportions (an 18s block sampled a few ms late is
-	// a <0.1% gap).
+	// #1723 review round 5 note, CORRECTED in round 6: an earlier version of
+	// this comment called round 5's co-started construction "an artifact of
+	// the test's shape, not a real gap in the fix." Round 6's review
+	// disproved that: co-starting is the NORMAL production path, not an edge
+	// case — `dispatchForFile` launches its runner groups via `Promise.all`,
+	// and a runner's `when` precondition awaits only microtasks, so two
+	// brackets opening with the identical `startedAt` millisecond string is
+	// routine. The co-started shape is restored below as its OWN dedicated
+	// test (`E1-real (co-started)`) rather than folded back into this one, so
+	// each test's failure mode stays legible on its own. This version keeps
+	// the OTHER real production shape — a long-lived innocent bracket that
+	// started well before the block window opens — which is what made the
+	// round-4 sampling-lag fix distinguishable in the first place: a
+	// genuinely long-lived bracket has a bigger `elapsedMs` denominator,
+	// which dilutes its fraction relative to a culprit whose lifetime
+	// roughly IS the window. The hog runs for a real, meaningfully long
+	// duration (300ms) relative to the real sampling lag that follows it
+	// (~15ms) — production-realistic proportions (an 18s block sampled a few
+	// ms late is a <0.1% gap).
 	it(
 		"E1-real: getPhaseForWindow names the hog over a still-live innocent runner that started well before the block window",
 		async () => {
@@ -547,4 +548,117 @@ describe("runRunner in-flight phase attribution against real parallel groups (#1
 		},
 		3_000,
 	);
+
+	// #1723 review round 6, R4 (process finding): round 5 REMOVED this
+	// construction and called co-starting "an artifact of the test's shape"
+	// — the reviewer's probes disproved that. Co-starting IS the production
+	// shape: `dispatchForFile` launches its runner groups via `Promise.all`,
+	// and a runner's `when` precondition awaits only microtasks, so an
+	// innocent bracket and the hog opening with the identical `startedAt`
+	// millisecond string is routine, not rare. Restored as its own test
+	// alongside R3's epsilon-band tie-break fix — the closed-form math (see
+	// `getPhaseForWindow`'s doc comment) shows the gap between a co-started
+	// innocent bracket and a real culprit is order `(lag/W)^2`, which at
+	// production scale (W = 18 270ms, lag = 5ms) is ~7e-8 — far below
+	// `Date.now()`'s millisecond resolution, so the tie-break must treat a
+	// NEAR fraction tie the same as an exact one, or this test reds again.
+	// Standing lesson this round encoded: when a test reds after a fix, the
+	// first hypothesis is the fix is incomplete, not the test.
+	//
+	// Fake timers, real dispatcher: a genuine sub-millisecond-scale near-tie
+	// cannot be constructed reliably with REAL wall-clock timing at
+	// test-suite speed — `Date.now()` truncates to whole milliseconds, and
+	// the real async overhead of a fast test (a few real ms between steps)
+	// is itself LARGER than the ~7e-8-scale gap this fix targets, so a
+	// real-timer version of this test would either always pass for the wrong
+	// reason (its own overhead dwarfing the genuine mathematical gap) or flake
+	// under CI load. `vi.useFakeTimers()` gives exact control over
+	// `phaseStarted`'s `Date.now()` calls while still exercising the REAL
+	// `dispatchForFile`/`runRunner` code path — the runner promises are
+	// resolved manually (no reliance on a real timer firing), so only
+	// microtask resolution is needed to settle each `await`, which fake
+	// timers do not block.
+	it("E1-real (co-started): getPhaseForWindow names the hog over a still-live innocent runner co-started in the SAME Promise.all as the hog", async () => {
+		vi.useFakeTimers();
+		try {
+			const t0 = new Date("2026-08-19T20:03:22.575Z").getTime();
+			vi.setSystemTime(t0);
+
+			let hogResolve!: (r: RunnerResult) => void;
+			const hogPromise = new Promise<RunnerResult>((resolve) => {
+				hogResolve = resolve;
+			});
+			let innocentResolve!: (r: RunnerResult) => void;
+			const innocentPromise = new Promise<RunnerResult>((resolve) => {
+				innocentResolve = resolve; // deliberately NOT resolved until cleanup
+			});
+
+			registry.register({
+				id: "cpu-hog",
+				appliesTo: ["jsts"],
+				priority: 10,
+				enabledByDefault: true,
+				timeoutMs: 60_000, // generous — never meant to fire, resolved manually
+				async run(): Promise<RunnerResult> {
+					return hogPromise;
+				},
+			});
+			registry.register({
+				id: "innocent-co-started-runner",
+				appliesTo: ["jsts"],
+				priority: 11,
+				enabledByDefault: true,
+				timeoutMs: 60_000,
+				async run(): Promise<RunnerResult> {
+					return innocentPromise;
+				},
+			});
+
+			const ctx = createMockContext("test.ts");
+			// Both groups start HERE, in the SAME dispatchForFile call — the
+			// exact production shape (dispatcher.ts:853's Promise.all). `.map()`
+			// invokes each group's runGroup synchronously up to its own first
+			// await, so both runners' phaseStarted calls fire within this one
+			// synchronous call, before this line returns. Do NOT await this
+			// promise: the innocent runner's group never resolves during the
+			// assertion window, so dispatchForFile's own Promise.all would hang
+			// forever.
+			void dispatchForFile(ctx, [
+				{ mode: "all", runnerIds: ["innocent-co-started-runner"] },
+				{ mode: "all", runnerIds: ["cpu-hog"] },
+			]);
+			const coStartMs = t0;
+
+			// The hog's TRUE duration is loopMaxMs (what the event-loop monitor
+			// will report as the block's size) — it closes exactly loopMaxMs
+			// after co-starting.
+			const loopMaxMs = 18_270;
+			vi.setSystemTime(coStartMs + loopMaxMs);
+			hogResolve({ status: "succeeded", diagnostics: [], semantic: "warning" });
+			// The hog's own `runRunner` promise chain resolves via microtasks
+			// only (no real timer involved once `hogResolve` has fired) — a
+			// handful of microtask turns is enough for its `finally`
+			// (`phaseFinished`) to have run, without waiting on the whole
+			// (still-pending, innocent-blocked) `dispatchPromise`.
+			for (let i = 0; i < 10; i++) {
+				await Promise.resolve();
+			}
+
+			// turn_end samples lag=5ms AFTER the hog actually closed — this is
+			// what makes windowStart = now - loopMaxMs land AFTER the hog's own
+			// startedAt, not exactly on it (see getPhaseForWindow's doc comment
+			// for the closed form this reproduces).
+			const lagMs = 5;
+			const sampledAtMs = coStartMs + loopMaxMs + lagMs;
+			vi.setSystemTime(sampledAtMs);
+
+			const attribution = getPhaseForWindow(sampledAtMs - loopMaxMs, sampledAtMs);
+			expect(attribution?.phase).toBe("cpu-hog");
+			expect(attribution?.stillRunning).toBe(false);
+
+			innocentResolve({ status: "succeeded", diagnostics: [], semantic: "warning" });
+		} finally {
+			vi.useRealTimers();
+		}
+	});
 });

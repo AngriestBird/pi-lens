@@ -367,19 +367,40 @@ const MIN_PLAUSIBLE_ELAPSED_FRACTION = 0.05;
  * fractions tie while their `elapsedMs` differs. See
  * `tests/clients/latency-logger.test.ts` for a constructed example.
  *
+ * The tie-break compares within an EPSILON band (`1e-4`), not exact `===`
+ * equality (#1723 review round 6, R3). Co-starting — two brackets opening
+ * with the identical `startedAt` millisecond string — is the NORMAL path,
+ * not an edge case: `dispatchForFile` launches its runner groups via
+ * `Promise.all`, and a runner's `when` precondition awaits only microtasks,
+ * so this happens routinely. Closed form for a culprit that closes `lag` ms
+ * before the sample versus a co-started bracket that stays live: the
+ * culprit scores `1 - lag/W`, the co-started bracket scores
+ * `1/(1 + lag/W)` — the co-started bracket wins by `(lag/W)^2`, which at a
+ * real `W` = 18 270ms and `lag` = 5ms is ~7e-8 — far below millisecond
+ * timestamp resolution, so an EXACT tie never actually engages and the
+ * "winner" becomes floating-point rounding noise instead. `1e-4` is well
+ * above any realistic `(lag/W)^2` term (a co-started pair collapses into it)
+ * and well below the gap between two genuinely different candidates in every
+ * test/probe this module has been checked against.
+ *
  * Composes with N4's plausibility floor below in the natural order: the
  * floor FILTERS candidates (an implausibly short bracket is never even a
  * candidate for fraction ranking); fraction then RANKS the survivors. A
  * bracket that clears the floor always has a well-defined fraction in (0, 1].
  *
- * A candidate needs a STRICTLY POSITIVE overlap: with `bestFraction` seeded
- * at 0 and the comparison below requiring `fraction > bestFraction` to
- * accept a NEW best (a tie only ever refines an EXISTING one), a zero or
- * negative overlap (and so a zero-or-negative fraction) can never win — no
- * separate early-return guard is needed to enforce that; do not re-add one
- * without also adding a genuine case it changes the answer for (#1723 review
- * N2: a former such guard proved dead code, and its "mutation-proof" test
- * could not fail under any mutation of it).
+ * A candidate needs a STRICTLY POSITIVE overlap: `if (fraction <= 0) return;`
+ * enforces that explicitly. #1723 review N2 deleted an EARLIER such guard as
+ * dead code, because `bestFraction` seeded at 0 plus a strict `>` comparison
+ * already excluded a non-positive fraction with no help needed. That
+ * reasoning no longer holds here: round 6's `best === undefined` branch
+ * (below) accepts the very FIRST candidate unconditionally — including one
+ * with a zero/negative fraction, absent this guard — so this one is real,
+ * not vestigial. `best === undefined` itself exists to fix a DIFFERENT gap:
+ * without it, a lone candidate whose fraction happens to be ≤ `1e-4` (an
+ * extremely thin sliver of overlap that still cleared the N4 floor) would
+ * read as "near" the seeded `bestFraction` of 0 and be silently dropped by
+ * neither the `isNewBest` nor `winsTie` branch, even though it is the only —
+ * and therefore correct — candidate.
  *
  * This is the seam that makes the SYNCHRONOUS motivating case attributable at
  * all: the offending phase's `finally` (a microtask) always runs before
@@ -432,9 +453,33 @@ export function getPhaseForWindow(
 		// elapsedMs denominator let a short bracket wholly INSIDE the window
 		// score a perfect, undeserved 1.0.
 		const fraction = overlapMs / Math.max(elapsedMs, windowLengthMs);
-		const isNewBest = fraction > bestFraction;
-		const winsTie =
-			best !== undefined && fraction === bestFraction && elapsedMs < best.elapsedMs;
+		if (fraction <= 0) return; // no meaningful overlap — never a candidate
+		// #1723 review round 6, R3: an EXACT fraction tie (`===`) almost never
+		// happens once the window's own end is a real wall-clock sample, not a
+		// fake-timer instant. Co-starting is the NORMAL path here, not an edge
+		// case — `dispatchForFile` launches its runner groups via `Promise.all`,
+		// and `runner.when`'s await only yields microtasks, so two brackets
+		// sharing the identical `startedAt` millisecond string is routine, not
+		// rare. Closed form for that shape: a culprit that closes `lag` ms
+		// before the sample scores `1 - lag/W`; a co-started bracket that stays
+		// live scores `1/(1 + lag/W)` — the co-started one wins by
+		// `(lag/W)^2`, which at a real 18 270ms window and a 5ms sampling lag
+		// is ~7e-8: far below millisecond timestamp resolution, so an EXACT `===`
+		// tie-break never engages and the winner is decided by floating-point
+		// rounding noise instead. Comparing within an epsilon band (1e-4, far
+		// above any realistic (lag/W)^2 term but far below a genuinely
+		// different candidate's fraction gap) routes this case through the
+		// SAME elapsedMs discriminator as a true tie, instead of silently
+		// falling through to the (undefined) "greater than" branch.
+		const near = Math.abs(fraction - bestFraction) <= 1e-4;
+		// `best === undefined` on its own handles the very first accepted
+		// candidate — otherwise a lone candidate whose fraction is ITSELF
+		// within 1e-4 of the seeded `bestFraction` (0) would be wrongly read
+		// as "near" a best that doesn't exist yet and dropped by neither
+		// branch below. The `fraction <= 0` guard above is what keeps this
+		// escape hatch from ever accepting a non-candidate as the first "best".
+		const isNewBest = best === undefined || (fraction > bestFraction && !near);
+		const winsTie = best !== undefined && near && elapsedMs < best.elapsedMs;
 		if (isNewBest || winsTie) {
 			bestFraction = fraction;
 			best = { phase, startedAt, stillRunning, elapsedMs };
