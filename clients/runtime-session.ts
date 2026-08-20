@@ -41,6 +41,7 @@ import {
 } from "./language-profile.js";
 import { logLatency } from "./latency-logger.js";
 import { runLogCleanup } from "./log-cleanup.js";
+import { resetCascadeTierSessionState } from "./lsp/cascade-tier.js";
 import type { LSPShutdownOptions } from "./lsp/client.js";
 import { initLSPConfig, loadLSPConfig } from "./lsp/config.js";
 import { resetWorkspaceDiagnosticsCacheSession } from "./lsp/workspace-diagnostics-session.js";
@@ -2179,6 +2180,14 @@ export async function handleSessionStart(
 	// concrete KnipClient. Session reset is an optional lifecycle capability;
 	// its absence must not make session_start fail.
 	knipClient.resetSessionState?.();
+	// #1910: the tier-3 cascade outstanding-touch registry and its
+	// sweep-scoped expired/evicted counters (clients/lsp/cascade-tier.ts) are
+	// a per-SESSION claim about touches THIS session fired. #1899 bounded the
+	// registry between sweeps but, by its own review, left the session
+	// boundary unwired — a session replacement inherited the prior session's
+	// outstanding touches and misattributed a stray expiry/eviction to the
+	// next session's first reconcile gauge.
+	resetCascadeTierSessionState();
 	runtime.resetForSession(sessionStartMs);
 	logLatency({
 		type: "phase",
@@ -2369,6 +2378,29 @@ export async function handleSessionStart(
 		dbg(
 			"session_start: quick mode active - skipping slow tool probes, language profiling, preinstall, scans, and error debt baseline",
 		);
+		// #1911: the debug line above says WHICH steps were skipped, but nothing
+		// bounded or structured said so — quick mode's absence of work and an
+		// absent LOGGER read identically in latency.log. This record is that
+		// line's structured twin: one bounded gauge per quick-mode session_start,
+		// naming exactly the step set skipped, so a reader can tell "quick mode
+		// correctly skipped these" from "the probes silently never ran".
+		logLatency({
+			type: "phase",
+			phase: "session_start_skipped_steps",
+			filePath: cwd,
+			durationMs: 0,
+			metadata: {
+				mode: startupMode,
+				reason: deps.sessionReason,
+				steps: [
+					"slow_tool_probes",
+					"language_profiling",
+					"tool_preinstall",
+					"startup_scans",
+					"error_debt_baseline",
+				],
+			},
+		});
 		const totalDurationMs = Date.now() - sessionStartMs;
 		dbg(`session_start total: ${totalDurationMs}ms (interactive path)`);
 		logLatency({

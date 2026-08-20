@@ -50,6 +50,11 @@ import {
 	isWorkspaceSweepActive,
 } from "../../clients/lsp/workspace-sweep-hold.js";
 import {
+	_getOutstandingCascadeTouchesForTests,
+	recordOutstandingCascadeTouch,
+	resetCascadeTierSessionState,
+} from "../../clients/lsp/cascade-tier.js";
+import {
 	_resetDeferredForTests,
 	isDeferredThisSession,
 	markDisposition,
@@ -519,6 +524,26 @@ export const SESSION_STATE_REGISTRY: SessionStateEntry[] = [
 		reason:
 			"#1895: formatter PATH availability is session-scoped, but these module-local latches are not covered by the dispatch availability generation. A formatter installed or removed between sessions must be re-probed. The reset is `clearFormatterCache`, not the latch clear alone: `getFormattersForFile` answers a same-cwd lookup from `detectionCache` before it reaches a `which` probe, so dropping the latches without the selection cache re-arms every directory except the working one (review round on PR #1896).",
 	},
+	{
+		id: "cascade-tier:outstandingTouches",
+		module: "lsp/cascade-tier.ts",
+		state: "_outstandingTouches, _expiredSinceLastSweep, _evictedSinceLastSweep",
+		policy: "session_start",
+		resetName: "resetCascadeTierSessionState",
+		reason:
+			"#1910: the tier-3 cascade outstanding-touch registry and its sweep-scoped expired/evicted counters are a per-SESSION claim about touches THIS session fired. #1899 bounded the registry between sweeps but, by its own review, left the session boundary unwired — a session replacement inherited the prior session's outstanding touches, and a stray eviction/expiry landing between a sweep and the boundary attributed its count to the next session's first reconcile gauge. Previously the whole file was blanket-exempted (#1909 review F4: 'cascade-tier registration and outstanding-touch bookkeeping'); this entry replaces that blanket claim with the real reset now that one exists. `_reconcileTaskRegistered` and the `_enabledCache` kill-switch memo are deliberately still NOT covered by a reset — the former is idempotent quiet-window-task registration (same shape as the other publisher-registration exemptions in this file), and the latter is a memo of the `PI_LENS_TIER_AWARE_CASCADE` env var, unaffected by a session boundary.",
+		probe: {
+			arm: () => {
+				recordOutstandingCascadeTouch({
+					filePath: "/probe/session-state-registry.ts",
+					serverId: "session-state-registry-probe",
+					touchedAt: Date.now(),
+				});
+			},
+			isArmed: () => _getOutstandingCascadeTouchesForTests().length === 0,
+			reset: () => resetCascadeTierSessionState(),
+		},
+	},
 
 	// ── Deliberately not session_start ───────────────────────────────────────
 	{
@@ -645,7 +670,6 @@ export const EXEMPT_SESSION_STATE_FILES: Readonly<Record<string, string>> = {
 	"quiet-window.ts": "quiet-window task registration",
 	"quiet-window-config.ts":
 		"the env-derived quiet-window kill switch and wait budget, split out of quiet-window.ts by #1462; a memo of configuration, not of a session verdict",
-	"lsp/cascade-tier.ts": "cascade-tier registration and outstanding-touch bookkeeping",
 	"dispatch/lazy.ts": "the lazy dispatch-integration import cell",
 	"extension-log.ts": "console-method guard installation",
 	"cache-observability.ts":
