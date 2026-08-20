@@ -533,7 +533,9 @@ function buildCoverageNotice(
 		// in the session dedupe identity rather than only kind and path.
 		const silentScannerSet = [...new Set(unconfirmedServerIds)]
 			.map(normalizeMapKey)
-			.sort()
+			// Code-unit comparator: the sorted set is a dedupe KEY, so ordering
+			// must be deterministic across locales — localeCompare is not.
+			.sort((a, b) => Number(a > b) - Number(a < b))
 			.join(",");
 		const onceKey = `${ctx.kind}:${normalizeMapKey(ctx.filePath)}:${silentScannerSet}`;
 		if (coverageNoticeSeen.has(onceKey)) return undefined;
