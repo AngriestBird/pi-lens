@@ -17,7 +17,7 @@ rule:
     - pattern: $CALL
     - any:
         - pattern: Reflect.get($OBJ, $KEY)
-        - pattern: Reflect.get($TARGET, $PROP, $RECEIVER)
+        - pattern: Reflect.get($GET_TARGET, $PROP, $RECEIVER)
     - not:
         inside:
           kind: method_definition

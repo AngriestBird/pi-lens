@@ -210,6 +210,8 @@ unambiguous. Reflect.apply remains diagnostic-only because an own shadowed
 `.apply` changes the obvious rewrite's semantics. Two-argument Reflect.get uses
 a scoped rewriter; receiver forms remain diagnostic-only. Snapshot fixtures
 under `rules/ast-grep-rules/rule-tests/__snapshots__/` prove generated output.
+Keep branch metavariables distinct from the outer Proxy-carve-out metavariables;
+fixtures deliberately name the constructor target and trap parameter differently.
 The generated ast-grep catalog derives its Fixable yes/no column from each
 rule's top-level `fix:` key. (#1850)
 
