@@ -225,11 +225,14 @@ export function consumeSessionStartGuidance(
 	);
 	if (!guidance?.data?.content) return;
 
-	cacheManager.writeCache(
-		"session-start-guidance",
-		null as unknown as { content: string },
-		cwd,
-	);
+	// Consume by writing empty guidance, not by casting `null` into the entry's
+	// own type. `writeCache` infers its type parameter from `data`, so the cast
+	// bought nothing and claimed the file held a `{ content: string }` when it
+	// held JSON `null`. The producer (`runtime-session.ts`) always writes
+	// `{ content }`, and this reader gates on `data?.content` being non-empty,
+	// so an empty string is the same "already consumed" signal with the type
+	// the entry actually has. Same idiom as `acknowledgeTestFindings` above.
+	cacheManager.writeCache("session-start-guidance", { content: "" }, cwd);
 
 	return {
 		messages: [

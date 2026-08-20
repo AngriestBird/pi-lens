@@ -951,6 +951,90 @@ export async function reconcileStaleWidgetDependencyBlockers(
 }
 
 /**
+ * #1790: sweep-population feed for `sweepInlineBlockerFreshness` (the turn-end
+ * gate in `clients/blocker-freshness.ts`). That sweep's population was built
+ * solely from `RuntimeCoordinator`'s inline-blocker map — a live-dispatch-only
+ * store. A workspace-diagnostics CACHE HIT never touches that map; it calls
+ * `reconcileScanDiagnostics` straight into `files` here (the cache-serve branch
+ * in `tools/lsp-diagnostics.ts`), so a cache-served blocking row could render in
+ * the widget while the turn-end sweep's `total` count never saw it (the live
+ * 2026-08-20 dogfood: `total:1 kept:1` against five stale cache-served blocking
+ * rows on screen).
+ *
+ * One entry per file with at least one CURRENTLY blocking (non-stale),
+ * LSP-sourced diagnostic — the same provenance narrowing
+ * `reconcileStaleWidgetDependencyBlockers` already applies, so every row this
+ * feeds into the sweep is one its `isLspSourced` gate would keep anyway.
+ * `recordedAtMs` is the EARLIEST `observedAt` among them: the conservative
+ * baseline, since using the latest could hide drift that predates an earlier
+ * diagnostic's own observation.
+ */
+export function getWidgetBlockingFilesForSweep(): Array<{
+	filePath: string;
+	recordedAtMs: number;
+}> {
+	const out: Array<{ filePath: string; recordedAtMs: number }> = [];
+	for (const rec of files.values()) {
+		let earliest: number | undefined;
+		for (const d of rec.allDiagnostics) {
+			if (!isBlocking(d) || d.tool !== "lsp") continue;
+			const observedAt = d.observedAt ?? rec.touchedAt;
+			if (earliest === undefined || observedAt < earliest) earliest = observedAt;
+		}
+		if (earliest !== undefined) out.push({ filePath: rec.filePath, recordedAtMs: earliest });
+	}
+	return out;
+}
+
+/**
+ * #1790: demote every currently-blocking, LSP-sourced diagnostic for `filePath`
+ * to stale (#1419 demote-not-drop). Called by the turn-end sweep once its own
+ * drift check (`detectDrift`/`collectForwardImportMtimes`, shared with the
+ * inline-blocker branch) independently confirms drift for a file that reached
+ * the sweep's population through `getWidgetBlockingFilesForSweep` rather than an
+ * inline blocker. Same store and same write `reconcileStaleWidgetDependencyBlockers`
+ * already performs per-diagnostic — this is the single-file entry point the
+ * sweep drives once ITS check (not a second implementation of the check) says
+ * to. Returns true iff something changed.
+ *
+ * #1790 review F4 (latent): unlike `reconcileStaleWidgetDependencyBlockers`, which
+ * checks drift per-diagnostic against EACH diagnostic's own `observedAt`, this
+ * demotes every currently-blocking LSP diagnostic for the file against the ONE
+ * file-level baseline `getWidgetBlockingFilesForSweep` computed (the earliest
+ * `observedAt` among them) — because the sweep's `detectDrift` contract is
+ * file-level, not per-diagnostic. That is safe ONLY as long as every LSP
+ * diagnostic on a `FileRecord` shares (or is more conservative than) that
+ * earliest stamp, which holds today because every writer that populates
+ * `allDiagnostics` (`recordDiagnostics`, `reconcileCascadeNeighborLspErrors`)
+ * replaces the file's LSP errors wholesale with one `observedAt` per write. If a
+ * future writer ever merges LSP diagnostics with genuinely MIXED per-entry
+ * stamps on one record, this function would over-demote entries observed after
+ * the earliest one drifted — re-derive per-diagnostic (mirroring
+ * `reconcileStaleWidgetDependencyBlockers`) rather than assume the single
+ * baseline still holds.
+ */
+export function markWidgetFileBlockersStale(
+	filePath: string,
+	reason: "dependency-drift",
+): boolean {
+	const rec = files.get(fileMapKey(filePath));
+	if (!rec) return false;
+	let changed = false;
+	for (const d of rec.allDiagnostics) {
+		if (!isBlocking(d) || d.tool !== "lsp") continue;
+		d.stale = true;
+		d.staleReason = reason;
+		changed = true;
+	}
+	if (changed) {
+		rec.diagnosticCounts = countDiagnostics(rec.allDiagnostics);
+		rec.diagnostics = capStoredDiagnostics(rec.allDiagnostics);
+		requestRenderFn?.();
+	}
+	return changed;
+}
+
+/**
  * Keep the TUI honest (#298 follow-up). `reconcileStaleWidgetFiles` drops
  * widget entries whose file changed on disk after they were last recorded
  * (i.e. diagnostics the agent already fixed) — but it was only ever wired

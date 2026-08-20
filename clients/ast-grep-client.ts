@@ -259,9 +259,12 @@ export class AstGrepClient {
 		ruleYaml: string,
 		options: SgExecutionOptions = {},
 	): Promise<SgScanResult> {
-		// Keep tests and older embedders that replace the runner with the historic
-		// match-only seam working. The production SgRunner always has the detailed
-		// method, so failures cannot be mistaken for an empty result there.
+		// SAFETY: keep tests and older embedders that replace the runner with the
+		// historic match-only seam working. The cast only makes
+		// `tempScanDetailedAsync` OPTIONAL on the runner surface — it claims
+		// nothing about the method existing. The call site below checks for it
+		// before invoking, and the production SgRunner always has it, so a
+		// failure there cannot be mistaken for an empty result.
 		const detailed = (
 			this.runner as unknown as {
 				tempScanDetailedAsync?: (
@@ -811,11 +814,13 @@ message: found
 
 		const errors = diags.filter((d) => d.severity === "error");
 		const warnings = diags.filter((d) => d.severity === "warning");
+		const infos = diags.filter((d) => d.severity === "info");
 		const hints = diags.filter((d) => d.severity === "hint");
 
 		let output = `[ast-grep] ${diags.length} structural issue(s)`;
 		if (errors.length) output += ` — ${errors.length} error(s)`;
 		if (warnings.length) output += ` — ${warnings.length} warning(s)`;
+		if (infos.length) output += ` — ${infos.length} info(s)`;
 		if (hints.length) output += ` — ${hints.length} hint(s)`;
 		output += ":\n";
 

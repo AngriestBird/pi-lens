@@ -1,0 +1,5 @@
+---
+section: Fixed
+---
+
+- **Preserve pyright's information severity and fix its diagnostic positions in dispatch (closes #1802)** — `pyright` collapsed every `"information"`-tier diagnostic to `warning`, even though pyright's own `--outputjson` output declares `error`/`warning`/`information`. Pyright findings now carry the same four-tier `Diagnostic.severity` biome-check adopted in #1791: `information` maps to `info`. Only `error` still blocks. The parser also read a top-level `start` field that real pyright output never sets — every diagnostic landed at line 0/column 0 — and now reads the documented `range.start.line`/`character` (zero-based, converted to pi-lens's one-based `line`/`column`). `rust-clippy`'s mapping got its own fix: rustc/clippy's `compiler-message.level` serializes six values, not two, and a top-level `"note"`/`"help"` message can carry a real primary span. `note` now maps to `hint`, `help` to `info`, and an internal-compiler-error (`"error: internal compiler error"`) is classified as blocking instead of silently falling through to `warning`.
