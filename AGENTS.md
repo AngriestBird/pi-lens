@@ -8,7 +8,9 @@ Bounded LSP warm touches preserve the spawn coordinator's lifecycle evidence:
 an empty ready-client set reports `spawn_in_flight_budget_elapsed` while a
 matching primary single-flight spawn remains pending, and
 `no_clients_none_spawning` only when none does. Read the existing `inFlight`
-state at the touch verdict; do not add a second pending-warm latch. (#1875)
+state at the touch verdict; correlate the full `serverId:root` key using the
+root resolved by acquisition, and do not add a second pending-warm latch.
+(#1875, #1875 fix round)
 
 Post-fix decision observability is durable and bounded: advisory delivery logs
 one `advisory_provenance_decision` per consume, classic TypeScript project
