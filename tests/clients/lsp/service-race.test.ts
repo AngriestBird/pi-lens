@@ -218,6 +218,121 @@ describe("LSPService race hardening", () => {
 		initialize.restore();
 	});
 
+	it("skips a doomed touch wait when spawn history identifies the in-flight server as slow", async () => {
+		vi.useFakeTimers();
+		const { recordSuccessfulLspSpawn } = await import(
+			"../../../clients/lsp/spawn-history.js"
+		);
+		recordSuccessfulLspSpawn("marksman", 6_000);
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const service = new LSPService();
+		const client = {
+			serverId: "marksman",
+			isAlive: () => true,
+			shutdown: vi.fn(async () => {}),
+			getOperationSupport: () => ({}),
+			getWorkspaceDiagnosticsSupport: () => ({
+				advertised: false,
+				mode: "push-only" as const,
+				diagnosticProviderKind: "none",
+			}),
+			getAdvertisedCommands: () => [],
+			getRawCapabilityKeys: () => [],
+			notify: { open: vi.fn().mockResolvedValue(undefined) },
+		};
+		const initialize = suspendAt(createLSPClient, async () => client);
+		getServersForFileWithConfig.mockReturnValue([
+			{
+				id: "marksman",
+				name: "Marksman",
+				extensions: [".md"],
+				root: async () => "C:/repo",
+				spawn: vi.fn(async () => ({
+					process: {
+						process: { killed: false },
+						stdin: {} as any,
+						stdout: {} as any,
+						stderr: {} as any,
+						pid: 1884,
+					},
+				})),
+			},
+		]);
+
+		const startedAt = Date.now();
+		const touch = service.touchFile("C:/repo/README.md", "# slow\n", {
+			diagnostics: "none",
+			clientScope: "primary",
+			maxClientWaitMs: 750,
+			source: "tool_call:read",
+		});
+		await initialize.admitted;
+		expect(await touch).toBeUndefined();
+		expect(Date.now() - startedAt).toBeLessThan(10);
+		expect(logLatency).toHaveBeenCalledWith(
+			expect.objectContaining({
+				phase: "lsp_touch_file",
+				metadata: expect.objectContaining({
+					failureKind: "spawn_in_flight_budget_elapsed",
+					reason: "budget_skipped_known_slow",
+				}),
+			}),
+		);
+
+		initialize.release();
+		await initialize.completed;
+		initialize.restore();
+	});
+
+	it("keeps the bounded touch wait when the in-flight server has no spawn history", async () => {
+		vi.useFakeTimers();
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const service = new LSPService();
+		const initialize = suspendAt(createLSPClient, async () => ({
+			isAlive: () => true,
+			shutdown: async () => {},
+		}));
+		getServersForFileWithConfig.mockReturnValue([
+			{
+				id: "marksman",
+				name: "Marksman",
+				extensions: [".md"],
+				root: async () => "C:/repo",
+				spawn: vi.fn(async () => ({
+					process: {
+						process: { killed: false },
+						stdin: {} as any,
+						stdout: {} as any,
+						stderr: {} as any,
+						pid: 1885,
+					},
+				})),
+			},
+		]);
+
+		let settled = false;
+		const touch = service
+			.touchFile("C:/repo/README.md", "# first\n", {
+				diagnostics: "none",
+				clientScope: "primary",
+				maxClientWaitMs: 750,
+				source: "tool_call:read",
+			})
+			.finally(() => {
+				settled = true;
+			});
+		await initialize.admitted;
+		await vi.advanceTimersByTimeAsync(749);
+		expect(settled).toBe(false);
+		await vi.advanceTimersByTimeAsync(1);
+		expect(await touch).toBeUndefined();
+		expect(settled).toBe(true);
+
+		initialize.release();
+		await initialize.completed;
+		initialize.restore();
+	});
+
 	// #1766: a resync caller whose own wait budget expires needs to tell "the
 	// server's first spawn is still running" apart from "the server is up and
 	// stalled". isSpawnInFlight reads the real state.inFlight map — no

@@ -131,6 +131,10 @@ import {
 	isWarmAttached,
 	tryWarmAttachedDiagnostics,
 } from "../warm-attach.js";
+import {
+	getSuccessfulLspSpawnDurationMs,
+	recordSuccessfulLspSpawn,
+} from "./spawn-history.js";
 
 function destinationUriPreservingSpelling(
 	oldUri: string,
@@ -2200,6 +2204,7 @@ export class LSPService {
 		maxWaitMs?: number,
 		hardCapMs?: number,
 		resolvedRoots?: Map<string, string>,
+		waitSkipReasons?: Set<string>,
 	): Promise<SpawnedServer | undefined> {
 		if (this.checkDestroyed()) return undefined;
 		// Primary selection considers language servers only — auxiliary servers
@@ -2225,6 +2230,18 @@ export class LSPService {
 					: hardCapMs
 				: serverBaseMs;
 
+		let knownSlowResolve: (() => void) | undefined;
+		const knownSlowSentinel = Symbol("lsp-client-wait-known-slow");
+		const knownSlow = new Promise<typeof knownSlowSentinel>((resolve) => {
+			knownSlowResolve = () => resolve(knownSlowSentinel);
+		});
+		const noteSpawnInFlight = (serverId: string): void => {
+			const knownDurationMs = getSuccessfulLspSpawnDurationMs(serverId);
+			if (knownDurationMs !== undefined && knownDurationMs > effectiveMaxWaitMs * 2) {
+				knownSlowResolve?.();
+			}
+		};
+
 		const withBudget = async (): Promise<SpawnedServer | undefined> => {
 			if (servers.length === 0) return undefined;
 
@@ -2234,6 +2251,7 @@ export class LSPService {
 					filePath,
 					server,
 					resolvedRoots,
+					noteSpawnInFlight,
 				);
 				if (spawned) {
 					logLatency({
@@ -2294,12 +2312,20 @@ export class LSPService {
 		// a member of the uncleared-race-timeout class the shared `withDeadline`
 		// helper already guards against elsewhere).
 		let waitTimer: ReturnType<typeof setTimeout> | undefined;
-		let waitResult: SpawnedServer | undefined | typeof timeoutSentinel;
+		let waitResult:
+			| SpawnedServer
+			| undefined
+			| typeof timeoutSentinel
+			| typeof knownSlowSentinel;
 		try {
 			waitResult = await Promise.race<
-				SpawnedServer | undefined | typeof timeoutSentinel
+				| SpawnedServer
+				| undefined
+				| typeof timeoutSentinel
+				| typeof knownSlowSentinel
 			>([
 				withBudget(),
+				knownSlow,
 				new Promise<typeof timeoutSentinel>((resolve) => {
 					waitTimer = setTimeout(
 						() => resolve(timeoutSentinel),
@@ -2309,6 +2335,22 @@ export class LSPService {
 			]);
 		} finally {
 			if (waitTimer) clearTimeout(waitTimer);
+		}
+
+		if (waitResult === knownSlowSentinel) {
+			waitSkipReasons?.add("budget_skipped_known_slow");
+			logLatency({
+				type: "phase",
+				phase: "lsp_client_wait_skipped",
+				filePath,
+				durationMs: 0,
+				metadata: {
+					maxWaitMs: effectiveMaxWaitMs,
+					serverIds: servers.map((server) => server.id),
+					reason: "budget_skipped_known_slow",
+				},
+			});
+			return undefined;
 		}
 
 		if (waitResult === timeoutSentinel) {
@@ -2640,6 +2682,7 @@ export class LSPService {
 		filePath: string,
 		server: LSPServerInfo,
 		resolvedRoots?: Map<string, string>,
+		onSpawnInFlight?: (serverId: string) => void,
 	): Promise<SpawnedServer | undefined> {
 		const handoff = this.generationHandoff;
 		if (handoff) {
@@ -2972,6 +3015,7 @@ export class LSPService {
 			if (!started) return undefined;
 			spawnPromise = started.promise;
 		}
+		onSpawnInFlight?.(server.id);
 
 		try {
 			return await spawnPromise;
@@ -3118,7 +3162,9 @@ export class LSPService {
 			logSessionStart(
 				`lsp spawn ${server.id}: success source=${spawned.source ?? "unknown"} (${Date.now() - startedAt}ms)`,
 			);
-			recordLsp(server.id, root, "spawn_success", Date.now() - startedAt);
+			const spawnDurationMs = Date.now() - startedAt;
+			recordLsp(server.id, root, "spawn_success", spawnDurationMs);
+			recordSuccessfulLspSpawn(server.id, spawnDurationMs);
 			if (!this.workspaceProbeLogged.has(key)) {
 				logSessionStart(
 					`lsp workspace-diag probe ${server.id}: advertised=${wsDiag.advertised} mode=${wsDiag.mode} provider=${wsDiag.diagnosticProviderKind}`,
@@ -3279,6 +3325,7 @@ export class LSPService {
 			options.clientScope ?? (diagnosticsMode === "full" ? "all" : "primary");
 		const useAllClients = clientScope === "all";
 		const resolvedPrimaryRoots = new Map<string, string>();
+		const waitSkipReasons = new Set<string>();
 		let spawned: SpawnedServer[];
 		let serverCountAttempted: number;
 		if (useAllClients) {
@@ -3298,6 +3345,7 @@ export class LSPService {
 					options.maxClientWaitMs,
 					undefined,
 					resolvedPrimaryRoots,
+					waitSkipReasons,
 				),
 				this.getAuxiliaryClientsForFile(
 					filePath,
@@ -3312,6 +3360,7 @@ export class LSPService {
 				options.maxClientWaitMs,
 				undefined,
 				resolvedPrimaryRoots,
+				waitSkipReasons,
 			);
 			spawned = entry ? [entry] : [];
 			serverCountAttempted =
@@ -3346,6 +3395,9 @@ export class LSPService {
 					source,
 					maxClientWaitMs: options.maxClientWaitMs,
 					failureKind,
+					...(waitSkipReasons.size > 0
+						? { reason: [...waitSkipReasons][0] }
+						: {}),
 				},
 			});
 			return;
