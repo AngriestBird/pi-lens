@@ -33,8 +33,10 @@ import {
 	downloadGrammarDetailed,
 	fileHasWasmMagic,
 	grammarBlockReason,
+	grammarFileSha256,
 	isVendoredGrammar,
 	LANGUAGE_TO_GRAMMAR,
+	pinnedGrammarHash,
 	vendoredGrammarRefusal,
 	vendoredGrammarsDir,
 } from "./grammar-source.js";
@@ -330,6 +332,36 @@ export class TreeSitterClient {
 	 * rather than permanently distrusted — same shape as `verifiedGrammarPaths`.
 	 */
 	private decodeFailedGrammarPaths = new Map<string, string>();
+	/**
+	 * Grammar path → the `size:mtimeMs` stamp at which its bytes were verified
+	 * to match the CURRENTLY PINNED sha256 manifest (#1760). Positive-only,
+	 * same discipline as `verifiedGrammarPaths`: the hash is computed once per
+	 * stamp (not per parse), and a stamp change — a fresh download — forces a
+	 * re-check rather than trusting a memo made for different bytes.
+	 */
+	private verifiedGrammarVersionAt = new Map<string, string>();
+	/**
+	 * Grammar path → the `size:mtimeMs` stamp at which it was found to no
+	 * longer match the pinned manifest hash — a version bump
+	 * (`TREE_SITTER_WASMS_VERSION`, or a `SOURCE_OVERRIDES` entry), or on-disk
+	 * corruption (#1760). `resolveGrammarFile` treats a path recorded here (at
+	 * the SAME stamp) as absent, exactly like `decodeFailedGrammarPaths`, so
+	 * the next demand re-fetches instead of serving the stale/corrupt file for
+	 * the rest of the process's life. A fresh download (new stamp) is
+	 * re-examined rather than permanently distrusted.
+	 */
+	private staleGrammarVersionAt = new Map<string, string>();
+	/**
+	 * Paths already reported as version-stale THIS SESSION, to log/record them
+	 * once each (#1801 review F1). Deliberately separate from
+	 * `staleGrammarVersionAt`: that map is a pure hash-verdict memo whose whole
+	 * point is to persist for the process's life (re-hashing an unchanged file
+	 * is exactly what it exists to avoid), so it must never double as a report
+	 * gate — a gate riding on process-lifetime state can't re-arm at a session
+	 * boundary. Cleared in `refreshGrammarSessionLatches`, mirroring
+	 * `poisonedGrammarPaths`.
+	 */
+	private staleReportedGrammarPaths = new Set<string>();
 	/** Paths already reported as non-wasm, to log/record them once each. */
 	private poisonedGrammarPaths = new Set<string>();
 	/** Consecutive download failures per grammar, for the exponential
@@ -674,10 +706,18 @@ export class TreeSitterClient {
 			// non-wasm-magic case below. A stamp mismatch (the file changed —
 			// re-downloaded) falls through to re-examine it fresh.
 			if (this.decodeFailedGrammarPaths.get(candidate) === stamp) continue;
-			if (this.verifiedGrammarPaths.get(candidate) === stamp) return candidate;
+			if (this.verifiedGrammarPaths.get(candidate) === stamp) {
+				if (this.isGrammarVersionCurrent(candidate, grammarFile, stamp)) {
+					return candidate;
+				}
+				continue;
+			}
 			if (fileHasWasmMagic(candidate)) {
 				this.verifiedGrammarPaths.set(candidate, stamp);
-				return candidate;
+				if (this.isGrammarVersionCurrent(candidate, grammarFile, stamp)) {
+					return candidate;
+				}
+				continue;
 			}
 			this.verifiedGrammarPaths.delete(candidate);
 			this.reportPoisonedGrammarFile(candidate, grammarFile);
@@ -701,6 +741,7 @@ export class TreeSitterClient {
 		this.grammarNotificationsLedgerGen = ledgerGen;
 		this.grammarLastNotifiedDelayMs.clear();
 		this.poisonedGrammarPaths.clear();
+		this.staleReportedGrammarPaths.clear();
 	}
 
 	/**
@@ -735,6 +776,97 @@ export class TreeSitterClient {
 			subject: grammarFile,
 			reason:
 				"on-disk grammar file is not a wasm module — ignored, re-fetching",
+		});
+	}
+
+	/**
+	 * Is the cached grammar at `candidate` (whose wasm preamble already passed)
+	 * still current against the pinned sha256 manifest (#1760)?
+	 *
+	 * A grammar downloaded once is never revisited when this repo bumps
+	 * `TREE_SITTER_WASMS_VERSION` or changes a `SOURCE_OVERRIDES` entry — the
+	 * cached file's name carries no version, so a stale build serves forever.
+	 * The check is cheap and NEVER touches the network: it compares the
+	 * on-disk sha256 (hashed once per `size:mtimeMs` stamp, memoized exactly
+	 * like `verifiedGrammarPaths` above so a hot parse loop never re-hashes an
+	 * unchanged file) against `pinnedGrammarHash`, which itself is a pure
+	 * in-memory manifest lookup. A mismatch also catches on-disk corruption,
+	 * which nothing detected before this.
+	 *
+	 * Vendored grammars (`VENDORED_GRAMMARS`) are skipped: they have no CDN
+	 * pin to drift against, and their bytes are already guarded by the
+	 * separate build-provenance check (`scripts/check-grammar-provenance.mjs`).
+	 * No pinned hash for this filename (manifest missing, or a grammar added
+	 * before `--write-manifest` was re-run) is treated as "can't verify" and
+	 * trusted, the same fallback `downloadGrammarDetailed`'s own hash check
+	 * already uses — never as a forced, unbounded refetch loop.
+	 */
+	private isGrammarVersionCurrent(
+		candidate: string,
+		grammarFile: string,
+		stamp: string,
+	): boolean {
+		if (isVendoredGrammar(grammarFile)) return true;
+		if (this.staleGrammarVersionAt.get(candidate) === stamp) {
+			// #1801 review F1: the hash-verdict memo above is process-lifetime by
+			// design (re-hashing an unchanged file on every resolve is the exact
+			// cost this whole check exists to avoid), so an early return here must
+			// NOT skip the report — a still-stale grammar has to keep showing up
+			// in every NEW session's ledger, not just the session that first
+			// discovered the mismatch.
+			this.reportStaleGrammarVersion(candidate, grammarFile);
+			return false;
+		}
+		if (this.verifiedGrammarVersionAt.get(candidate) === stamp) return true;
+
+		const pinnedHash = pinnedGrammarHash(grammarFile);
+		if (!pinnedHash) {
+			this.verifiedGrammarVersionAt.set(candidate, stamp);
+			return true;
+		}
+		const actualHash = grammarFileSha256(candidate);
+		if (actualHash === pinnedHash) {
+			this.verifiedGrammarVersionAt.set(candidate, stamp);
+			return true;
+		}
+
+		this.verifiedGrammarVersionAt.delete(candidate);
+		this.staleGrammarVersionAt.set(candidate, stamp);
+		this.reportStaleGrammarVersion(candidate, grammarFile);
+		return false;
+	}
+
+	/**
+	 * Log + record a version-stale (or corrupt) cached grammar, once per path
+	 * per SESSION (#1801 review F1). Called from BOTH the memoized-stale path
+	 * and the fresh-mismatch path in `isGrammarVersionCurrent`, so the report
+	 * gate is independent of `staleGrammarVersionAt`'s own process-lifetime
+	 * memo — a grammar that is STILL stale in a later session must still emit
+	 * a fresh record into that session's ledger, exactly like
+	 * `reportPoisonedGrammarFile` already does for the non-wasm case.
+	 */
+	private reportStaleGrammarVersion(
+		candidate: string,
+		grammarFile: string,
+	): void {
+		this.refreshGrammarSessionLatches();
+		if (this.staleReportedGrammarPaths.has(candidate)) return;
+		this.staleReportedGrammarPaths.add(candidate);
+		logTreeSitterDiagnostic({
+			subsystem: "tree-sitter-client",
+			level: "warn",
+			message:
+				`ignoring ${candidate}: its sha256 no longer matches the pinned grammar ` +
+				`manifest — the pinned tree-sitter-wasms version (or a SOURCE_OVERRIDES entry) ` +
+				`moved since this file was downloaded. pi-lens will treat the grammar as ` +
+				`missing and re-fetch the current build (#1760).`,
+			metadata: { grammarFile, path: candidate, outcome: "stale-version" },
+		});
+		incrementDegradationCount({
+			kind: "grammar-blocked",
+			subject: grammarFile,
+			reason:
+				"cached grammar no longer matches the pinned manifest hash — ignored, re-fetching",
 		});
 	}
 

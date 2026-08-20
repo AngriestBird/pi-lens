@@ -34,6 +34,8 @@ import {
 	it,
 	vi,
 } from "vitest";
+import { exploreInterleavings } from "../../support/reset-explorer.js";
+import { withEnv } from "../../support/with-env.js";
 
 vi.unmock("../../../clients/installer/index.js");
 
@@ -84,6 +86,7 @@ import {
 	getManagedToolRefreshStatePath,
 	readManagedToolRefreshState,
 	runManagedToolRefresh,
+	runManagedToolRefreshForExploration,
 	stampManagedToolInstalled,
 } from "../../../clients/installer/managed-tool-refresh.js";
 import {
@@ -216,7 +219,7 @@ function degradationCount(): number {
 	);
 }
 
-let originalDisableToolInstall: string | undefined;
+let restoreDisableToolInstall: () => void;
 
 beforeEach(() => {
 	fs.rmSync(TOOLS_DIR, { recursive: true, force: true });
@@ -238,16 +241,11 @@ beforeEach(() => {
 	// this whole file deliberately exercises the npm refresh-and-spawn path
 	// against a mocked `safeSpawnAsync` — so it opts back in, the same way
 	// `managed-tool-refresh-strategies.test.ts` already does.
-	originalDisableToolInstall = process.env.PI_LENS_DISABLE_TOOL_INSTALL;
-	process.env.PI_LENS_DISABLE_TOOL_INSTALL = "0";
+	restoreDisableToolInstall = withEnv({ PI_LENS_DISABLE_TOOL_INSTALL: "0" });
 });
 
 afterEach(() => {
-	if (originalDisableToolInstall === undefined) {
-		delete process.env.PI_LENS_DISABLE_TOOL_INSTALL;
-	} else {
-		process.env.PI_LENS_DISABLE_TOOL_INSTALL = originalDisableToolInstall;
-	}
+	restoreDisableToolInstall();
 	delete process.env.PI_LENS_INSTALL_LOCK_TIMEOUT_MS;
 	resetProjectTrust();
 	vi.unstubAllEnvs();
@@ -1097,5 +1095,58 @@ describe("opt-out", () => {
 
 		expect(outcome.skipped).toBe("disabled");
 		expect(updateCalls()).toHaveLength(0);
+	});
+});
+
+/**
+ * Reference adoption of `tests/support/reset-explorer.ts` (#1840).
+ *
+ * The "review round 2 (R2-F1)" describe block above pins the bug at the ONE
+ * await point a reviewer picked by hand. This block asks the same question
+ * exhaustively: fire `resetManagedToolRefreshSession` at EVERY await point
+ * `executeManagedToolRefresh` exposes via its `tap` seam
+ * (`runManagedToolRefreshForExploration`), one point per run, and check the
+ * budget invariant after each. It is exercising the CURRENT, fixed code —
+ * see `tests/support/reset-explorer.test.ts`'s "rediscovers a known bug"
+ * block for the red-first proof that the explorer catches the pre-fix shape.
+ */
+describe("reset-interleaving explorer (#1840 adoption)", () => {
+	it("holds the session-budget invariant at every await point in the real walk", async () => {
+		const resetFixtures = (): void => {
+			fs.rmSync(TOOLS_DIR, { recursive: true, force: true });
+			fs.mkdirSync(NODE_MODULES, { recursive: true });
+			installFixture("knip", "6.4.1");
+			installFixture("pyright", "1.0.0");
+			installFixture("oxlint", "1.0.0");
+			resetManagedToolRefreshSession();
+			resetProbeCacheStateForTesting();
+			resetDegradationLedger();
+			spawnMock.mockClear();
+		};
+		stubSpawn("ok", {});
+
+		const outcome = await exploreInterleavings({
+			run: (tap) => {
+				// Every pass needs the SAME starting state, or the walk's tap
+				// sequence (and the tools it sees as stale) drifts between passes —
+				// the explorer requires a deterministic tap sequence to address
+				// "the Nth point" meaningfully. See the file header on reset-explorer.ts.
+				resetFixtures();
+				return runManagedToolRefreshForExploration(NOW, tap);
+			},
+			reset: () => resetManagedToolRefreshSession(),
+			invariant: () => {
+				// The R2-F1 invariant: a mid-run session reset restores the
+				// SESSION's right to start a fresh run, but must never let the run
+				// already walking spend more than the allowance it reserved.
+				expect(updateCalls().length).toBeLessThanOrEqual(1);
+			},
+		});
+
+		// 3 tap points: after `installedRefreshCandidates`, after
+		// `readManagedToolRefreshState`, and after the one tool the local
+		// allowance (default `maxPerSession` = 1) permits before it breaks.
+		expect(outcome.tapPointCount).toBe(3);
+		expect(outcome.executions).toBe(4);
 	});
 });

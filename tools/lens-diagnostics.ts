@@ -50,7 +50,7 @@ import {
 	reconcileProjectDiagnosticsSnapshot,
 } from "../clients/project-diagnostics/cache.js";
 import {
-	formatCacheAge,
+	formatCacheAgeOld,
 	formatNotRunEntry,
 } from "../clients/project-diagnostics/extractors.js";
 import type { FreshProjectDiagnosticsResult } from "../clients/project-diagnostics/fresh-fetch.js";
@@ -308,6 +308,17 @@ export function createLensDiagnosticsTool(
 					return `lens_diagnostics delta — clean${coldSuffix}${failedSuffix}`;
 				return `lens_diagnostics delta — ${aw} actionable · ${cq} quality · ${pd} project${coldSuffix}${failedSuffix}`;
 			}
+			// #1799: `semantic === "blocking"` iff `severity === "error"` holds for
+			// RAW classification, but not for the rendered counts — a
+			// dependency-drift demotion (#1631, widget-state.ts `isBlocking` vs
+			// `countDiagnostics`) revokes an error's blocking authority (stale)
+			// while the finding itself stays real evidence, so it lands in
+			// `totalErrors` with `totalBlocking` unchanged. That is the one case
+			// where the two totals genuinely disagree, and it must still render —
+			// otherwise a file with drift-demoted errors reads as "clean". What
+			// must NOT happen is printing both terms for the SAME findings (the
+			// actual #1799 bug), so `errors` renders only when `blocking === 0`,
+			// mirroring the per-file row's own guard below.
 			const b = details?.totalBlocking ?? 0;
 			const e = details?.totalErrors ?? 0;
 			const w = details?.totalWarnings ?? 0;
@@ -315,7 +326,10 @@ export function createLensDiagnosticsTool(
 			if (b + e + w === 0) {
 				return `lens_diagnostics ${mode} — clean (${files} files)${coldSuffix}${failedSuffix}`;
 			}
-			return `lens_diagnostics ${mode} — ${b} blocking · ${e} errors · ${w} warnings (${files} files)${coldSuffix}${failedSuffix}`;
+			const parts = [`${b} blocking`];
+			if (b === 0 && e > 0) parts.push(`${e} errors`);
+			parts.push(`${w} warnings`);
+			return `lens_diagnostics ${mode} — ${parts.join(" · ")} (${files} files)${coldSuffix}${failedSuffix}`;
 		}),
 		parameters: Type.Object({
 			mode: Type.Optional(
@@ -1957,9 +1971,9 @@ async function formatFullMode(
 		? `\n\ncheap project scan (tree-sitter/fact-rules/ast-grep): not run this call (${NOT_REQUESTED_REASON}).`
 		: options.refreshRunners === "cached"
 			? cheapScanScannedAtMs !== undefined && Number.isFinite(cheapScanScannedAtMs)
-				? `\n\ncheap project scan (tree-sitter/fact-rules/ast-grep): served from cache, ${formatCacheAge(
+				? `\n\ncheap project scan (tree-sitter/fact-rules/ast-grep): served from cache, ${formatCacheAgeOld(
 						Date.now() - cheapScanScannedAtMs,
-					)} old — not re-run this call.`
+					)} — not re-run this call.`
 				: `\n\ncheap project scan (tree-sitter/fact-rules/ast-grep): not run (no cached scan; refresh with refreshRunners=cheap/all to populate).`
 			: "";
 	const abortedNote =
@@ -1994,7 +2008,7 @@ async function formatFullMode(
 	const cachedAgeNote =
 		cachedAgeEntries.length > 0
 			? `\n\nserved from cache this call (not re-run): ${cachedAgeEntries
-					.map(([id, ms]) => `${id} (${formatCacheAge(ms)} old)`)
+					.map(([id, ms]) => `${id} (${formatCacheAgeOld(ms)})`)
 					.join(", ")}.`
 			: "";
 	// coldRunners always lands in details (even when empty) so a caller can
@@ -2327,12 +2341,20 @@ function formatAllMode(
 		totalWarnings += s.warnings;
 	}
 
+	// #1799: `totalBlocking` and `totalErrors` count the same findings UNLESS a
+	// dependency-drift demotion (#1631) has revoked blocking authority from an
+	// error while leaving it in the error tally (widget-state.ts `isBlocking`
+	// vs `countDiagnostics`) — that's a real, live disagreement between the two
+	// totals, not double-counting. So `errors` renders only when
+	// `blocking === 0`, same guard as the per-file row above: it shows the
+	// drift-demoted findings the blocking line can't, without ever printing the
+	// same findings twice under two labels when blocking > 0.
 	const summary = [
 		`\nSummary (${visibleSummaries.length} files diagnosed this session):`,
 		totalBlocking > 0
 			? `  🔴 ${totalBlocking} blocking error${totalBlocking === 1 ? "" : "s"}`
 			: null,
-		totalErrors > 0
+		totalBlocking === 0 && totalErrors > 0
 			? `  ${totalErrors} error${totalErrors === 1 ? "" : "s"}`
 			: null,
 		totalWarnings > 0

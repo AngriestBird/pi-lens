@@ -11,6 +11,7 @@ import {
 } from "../../clients/diagnostic-dispositions.js";
 import { resetProjectLensConfigCache } from "../../clients/project-lens-config.js";
 import { removeTempDirSync } from "../clients/test-utils.js";
+import type { Theme } from "@earendil-works/pi-coding-agent";
 
 const projectDiagnosticsMocks = vi.hoisted(() => ({
 	scanProjectDiagnostics: vi.fn(),
@@ -163,6 +164,62 @@ function withIgnoredFixture<T>(fn: (cwd: string) => Promise<T>): Promise<T> {
 		resetProjectLensConfigCache();
 	});
 }
+
+// ── compact render header ────────────────────────────────────────────────────
+
+// #1799: the compact header (shown in the tool-call row) reads details.totalBlocking
+// / details.totalErrors / details.totalWarnings directly — no execute() call
+// involved. `totalBlocking` and `totalErrors` count the SAME findings unless a
+// #1631 dependency-drift demotion has revoked an error's blocking authority
+// (widget-state.ts `isBlocking` vs `countDiagnostics`) while leaving it in the
+// error tally — that's the one case the two totals genuinely disagree. The
+// header must not print both terms for the same findings when blocking > 0,
+// but must still surface drift-demoted errors when blocking === 0.
+describe("lens_diagnostics compact render header", () => {
+	const identityTheme = { fg: (_color: string, text: string) => text, bold: (text: string) => text } as unknown as Theme;
+
+	function renderHeader(details: Record<string, unknown>) {
+		const tool = makeTool();
+		const component = tool.renderResult?.(
+			{ content: [{ type: "text", text: "" }], details, isError: false },
+			{ expanded: false },
+			identityTheme,
+			{ args: { mode: "all" }, lastComponent: undefined },
+		);
+		return (component?.render(200) ?? []).join("\n");
+	}
+
+	it("shows blocking and warnings only — no redundant errors term when blocking > 0 (#1799)", () => {
+		const line = renderHeader({
+			mode: "all",
+			totalBlocking: 3,
+			totalErrors: 3,
+			totalWarnings: 2,
+			filesWithIssues: 1,
+		});
+		expect(line).toContain("3 blocking");
+		expect(line).toContain("2 warnings");
+		expect(line).not.toMatch(/\b3 errors?\b/);
+	});
+
+	// F1 regression: 3 dependency-drift-demoted errors (#1631) have
+	// blocking: 0, errors: 3 by design — isBlocking excludes any stale entry,
+	// but countDiagnostics keeps a drift demotion (unlike past-eof) in the
+	// error tally. An over-corrected fix that drops the errors term entirely
+	// would render this "clean", contradicting the per-file row (3E) and the
+	// TUI footer (●3E). The errors term must still surface when blocking === 0.
+	it("surfaces drift-demoted errors when blocking is 0, instead of reporting clean (#1799 F1)", () => {
+		const line = renderHeader({
+			mode: "all",
+			totalBlocking: 0,
+			totalErrors: 3,
+			totalWarnings: 0,
+			filesWithIssues: 1,
+		});
+		expect(line).not.toContain("clean");
+		expect(line).toContain("3 errors");
+	});
+});
 
 // ── schema ────────────────────────────────────────────────────────────────────
 
@@ -1366,12 +1423,16 @@ describe("lens_diagnostics mode=full", () => {
 		).toEqual({ "test-runner": 18 * 60_000 });
 	});
 
-	// #1623 fix-round F4: `CacheManager.readCache` accepts a missing/corrupt
+	// #1623 fix-round F4/F5: `CacheManager.readCache` accepts a missing/corrupt
 	// `meta.timestamp` as a cache HIT (the timestamp only gates staleness),
 	// so a corrupt test-runner-findings cache reaches `formatCacheAge` as
-	// NaN. Pre-fix-round this rendered "test-runner (NaNh old)" — a fabricated
-	// age is a worse honesty gap than the one #1623 exists to close.
-	it("renders 'age unknown' instead of NaN for a cache-read lane with a corrupt age (#1623 fix-round F4)", async () => {
+	// NaN. Pre-F4 this rendered "test-runner (NaNh old)" — a fabricated age is
+	// a worse honesty gap than the one #1623 exists to close. F4 fixed the NaN
+	// but the render call site still appended the literal word " old"
+	// unconditionally, so the result read "test-runner (age unknown old)" —
+	// ungrammatical, and still implying a real age exists. F5 makes "old" only
+	// appear once an age is actually known.
+	it("renders 'age unknown' with no trailing 'old' for a cache-read lane with a corrupt age (#1623 fix-round F5)", async () => {
 		mockSummaries.length = 0;
 		const lspService = {
 			runWorkspaceDiagnostics: vi.fn().mockResolvedValue([]),
@@ -1392,7 +1453,7 @@ describe("lens_diagnostics mode=full", () => {
 		const text = String(result.content[0].text);
 		expect(text).not.toMatch(/NaN/i);
 		expect(text).toContain(
-			"served from cache this call (not re-run): test-runner (age unknown old).",
+			"served from cache this call (not re-run): test-runner (age unknown).",
 		);
 	});
 
@@ -2337,6 +2398,38 @@ describe("lens_diagnostics mode=all", () => {
 			totalErrors: 3,
 			totalWarnings: 4,
 		});
+	});
+
+	// #1799: `semantic === "blocking"` iff `severity === "error"` holds
+	// codebase-wide, so every error-severity finding is ALSO a blocking one —
+	// the rendered summary must not print the same 3 findings once as
+	// "blocking" and again as "errors", which would read as 6 problems.
+	it("summary renders blocking count once, not doubled as a separate errors line (#1799)", async () => {
+		mockSummaries.length = 0;
+		mockSummaries.push(sum("/proj/a.ts", { blocking: 3, errors: 3 }));
+		const result = await run(makeTool(), { mode: "all" });
+		const text = String(result.content[0].text);
+		expect(text).toContain("3 blocking");
+		expect(text).not.toMatch(/\b3 errors?\b/);
+	});
+
+	// F1 regression (#1799 fix round): a #1631 dependency-drift demotion
+	// revokes an error's blocking authority (widget-state.ts `isBlocking`
+	// returns false for any stale entry) while `countDiagnostics` keeps it in
+	// the error tally (unlike a past-eof demotion) — so this file summarizes
+	// to blocking: 0, errors: 3 by design, a real disagreement between the two
+	// totals, not a double count. The summary must still surface it instead of
+	// reporting "no issues" — same reasoning as the per-file row's own
+	// `s.errors > 0 && s.blocking === 0` guard.
+	it("summary surfaces drift-demoted errors when blocking is 0, instead of reporting clean (#1799 F1)", async () => {
+		mockSummaries.length = 0;
+		mockSummaries.push(sum("/proj/a.ts", { blocking: 0, errors: 3 }));
+		const result = await run(makeTool(), { mode: "all" });
+		const text = String(result.content[0].text);
+		expect(text).toContain("3 errors");
+		expect(text).not.toContain("No issues");
+		expect(text).not.toContain("✓");
+		expect(result.details).toMatchObject({ totalBlocking: 0, totalErrors: 3 });
 	});
 
 	// ── actual-message exposure (the point of the tool) ───────────────────────────
