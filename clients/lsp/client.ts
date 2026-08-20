@@ -4492,7 +4492,9 @@ export async function createLSPClient(options: {
 		projectIdentityProbedFiles: new Set(),
 		// these are filled in after initialize — cast to avoid two-phase init
 		workspaceDiagnosticsSupport:
+			// SAFETY: initialize fills this capability before any workspace diagnostic request.
 			undefined as unknown as LSPWorkspaceDiagnosticsSupport,
+		// SAFETY: initialize fills this capability before operation dispatch.
 		operationSupport: undefined as unknown as LSPOperationSupport,
 		staticDiagnosticsMode: "push-only",
 		positionEncoding: "utf-16",
@@ -4506,6 +4508,7 @@ export async function createLSPClient(options: {
 		root,
 		lspProcess,
 		// two-phase: the flush closure needs `state` (below)
+		// SAFETY: state construction completes before the flush closure can run.
 		watchQueue: undefined as unknown as WatchedFilesQueue,
 	};
 

@@ -203,7 +203,7 @@ function countNewlinesChunked(filePath: string, sizeBytes: number): number {
  * unless a caller injects its own) and invalidated by mtime AND size (V1 —
  * mtime alone is not a reliable cache key on hosts where its resolution is
  * coarser than back-to-back writes). Returns `undefined` when the file
- * cannot be stat'ed, exceeds the byte-size gate, or
+ * cannot be stat'ed, is zero bytes, exceeds the byte-size gate, or
  * cannot be read (deleted, unreadable, permissions, oversized) — callers MUST
  * treat `undefined` as "no verdict", not as "zero lines" (the empty-result-
  * must-distinguish-clean-from-errored screen).
@@ -218,6 +218,10 @@ export function getCachedLineCount(
 	} catch {
 		return undefined;
 	}
+	// A zero-byte stat can be a truncate-then-write window. It is not evidence
+	// that the file has one addressable line, so fail open like an unreadable
+	// file rather than manufacturing a verdict from the empty read.
+	if (stat.size === 0) return undefined;
 	const cached = cache.get(filePath);
 	if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
 		return cached.lineCount;
@@ -306,6 +310,12 @@ export function demotePastEofDiagnostics<T extends PastEofDiagnosticLike>(args: 
 	if (risingEdgeLines.length === 0) {
 		return { diagnostics: out, demotedCount: 0 };
 	}
+	let sizeBytes: number;
+	try {
+		sizeBytes = fs.statSync(args.filePath).size;
+	} catch {
+		sizeBytes = 0;
+	}
 	logLatency({
 		type: "phase",
 		phase: "diagnostic_past_eof",
@@ -314,6 +324,7 @@ export function demotePastEofDiagnostics<T extends PastEofDiagnosticLike>(args: 
 		metadata: {
 			store: args.store,
 			file: toProjectRelativePath(args.filePath, args.cwd),
+			sizeBytes,
 			actualLineCount: lineCount,
 			demotedCount: risingEdgeLines.length,
 			sampleCitedLines: risingEdgeLines.slice(0, MAX_LOGGED_PAST_EOF_LINES),
