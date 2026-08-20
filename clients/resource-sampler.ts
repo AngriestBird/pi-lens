@@ -48,14 +48,20 @@ import * as path from "node:path";
 import pidusage from "pidusage";
 import { spawnCollectStdoutResult } from "./child-unref.js";
 import { recordDegradationOnce } from "./degradation-ledger.js";
+import { terminateScannerChild } from "./instance-reaper.js";
 
 export const RESOURCE_SAMPLE_QUERY_TIMEOUT_MS = 2_000;
 
-function recordQueryFailure(subject: string, status: string): void {
+function recordQueryFailure(
+	subject: string,
+	status: string,
+	exitCode?: number | null,
+): void {
+	const exitReason = status === "exit-error" ? ` (exit code ${exitCode ?? "unknown"})` : "";
 	recordDegradationOnce({
 		kind: "resource-sampler-query-failed",
 		subject,
-		reason: `process-table query ${status}`,
+		reason: `process-table query ${status}${exitReason}`,
 	});
 }
 
@@ -145,10 +151,17 @@ async function findDescendantPidsWindows(rootPid: number): Promise<number[] | nu
 		powershell,
 		["-NoProfile", "-NonInteractive", "-Command", psScript],
 		{ shell: false, windowsHide: true, stdio: ["ignore", "pipe", "ignore"] },
-		{ timeoutMs: RESOURCE_SAMPLE_QUERY_TIMEOUT_MS },
+		{
+			timeoutMs: RESOURCE_SAMPLE_QUERY_TIMEOUT_MS,
+			onTimeout: (child) => terminateScannerChild(child, {}),
+		},
 	);
 	if (result.status !== "ok") {
-		recordQueryFailure("windows-descendant-process-table", result.status);
+		recordQueryFailure(
+			"windows-descendant-process-table",
+			result.status,
+			result.exitCode,
+		);
 		return null;
 	}
 	const pairs: Array<[number, number]> = [];
@@ -193,7 +206,7 @@ export function __resetWindowsCpuHistoryForTests(): void {
  * Windows-only CPU%/RSS sampling via a FULLY GUARDED `Get-CimInstance
  * Win32_Process` query (mirrors `findDescendantPidsWindows`): a synchronous
  * throw from `spawn` (the `spawn UNKNOWN` crash vector, #620), a `child`
- * `error` event, or a non-zero/garbage exit all resolve to a partial/empty
+ * `error` event, or a non-zero/garbage exit all resolve to an errored/absent
  * map — this function can NEVER throw or reject. Deliberately does NOT call
  * `pidusage`, whose unguarded internal `gwmi` spawn is the crash we're fixing.
  *
@@ -229,17 +242,20 @@ async function sampleProcessesWindows(
 	// reaper's identical spawn→collect plumbing (#1153/#1160). It also absorbs
 	// both failure modes this function used to guard inline — a synchronous
 	// `spawn` throw (the `spawn UNKNOWN` crash vector, #620) and an async
-	// `error` event — the result status keeps failure distinct from an empty
+	// `error` event, or a non-zero exit — the result status keeps failure distinct
 	// map. Sampling still works normally in an interactive/long-lived
 	// session: unref only means "don't hold the loop open FOR this alone."
 	const query = await spawnCollectStdoutResult(
 		powershell,
 		["-NoProfile", "-NonInteractive", "-Command", psScript],
 		{ shell: false, windowsHide: true, stdio: ["ignore", "pipe", "ignore"] },
-		{ timeoutMs: RESOURCE_SAMPLE_QUERY_TIMEOUT_MS },
+		{
+			timeoutMs: RESOURCE_SAMPLE_QUERY_TIMEOUT_MS,
+			onTimeout: (child) => terminateScannerChild(child, {}),
+		},
 	);
 	if (query.status !== "ok") {
-		recordQueryFailure("windows-process-table", query.status);
+		recordQueryFailure("windows-process-table", query.status, query.exitCode);
 		return null;
 	}
 	try {

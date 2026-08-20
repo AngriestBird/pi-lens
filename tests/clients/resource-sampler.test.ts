@@ -36,6 +36,12 @@ vi.mock("pidusage", () => ({
 // output — the neutral "no data this tick" shape.
 type SpawnFn = (...args: unknown[]) => unknown;
 let fakeSpawn: SpawnFn = () => makeFakeChild({ stdout: "" });
+const timeoutControl = vi.hoisted(() => ({
+	handler: undefined as
+		| ((child: unknown, options: unknown) => Promise<"gone">)
+		| undefined,
+	called: false,
+}));
 vi.mock("node:child_process", async (importOriginal) => {
 	const actual = await importOriginal<typeof import("node:child_process")>();
 	return {
@@ -43,6 +49,12 @@ vi.mock("node:child_process", async (importOriginal) => {
 		spawn: (...args: unknown[]) => fakeSpawn(...args),
 	};
 });
+vi.mock("../../clients/instance-reaper.js", () => ({
+	terminateScannerChild: async (child: unknown, options: unknown) => {
+		timeoutControl.called = true;
+		return timeoutControl.handler?.(child, options) ?? "gone";
+	},
+}));
 
 const {
 	sampleProcesses,
@@ -70,6 +82,7 @@ function makeFakeChild(opts: {
 	stdout?: string;
 	code?: number;
 	emitError?: boolean;
+	holdOpen?: boolean;
 }): FakeChild {
 	const handlers = new Map<string, (...a: unknown[]) => void>();
 	const dataCbs: Array<(chunk: Buffer) => void> = [];
@@ -84,8 +97,10 @@ function makeFakeChild(opts: {
 			handlers.set(event, cb);
 		},
 		unref: vi.fn(),
+		pid: 4242,
 	};
 	queueMicrotask(() => {
+		if (opts.holdOpen) return;
 		if (opts.emitError) {
 			handlers.get("error")?.(new Error("spawn failed (async)"));
 			return;
@@ -93,7 +108,7 @@ function makeFakeChild(opts: {
 		if (opts.stdout) {
 			for (const cb of dataCbs) cb(Buffer.from(opts.stdout));
 		}
-		handlers.get("close")?.(opts.code ?? 0);
+		handlers.get("close")?.(opts.code ?? 0, null);
 	});
 	return child;
 }
@@ -112,6 +127,8 @@ function requireMap<T>(result: Map<number, T> | null): Map<number, T> {
 afterEach(() => {
 	setPlatform(realPlatform);
 	fakeSpawn = () => makeFakeChild({ stdout: "" });
+	timeoutControl.handler = undefined;
+	timeoutControl.called = false;
 	resetDegradationLedger();
 });
 
@@ -316,10 +333,35 @@ describe("sampleProcesses (Windows / guarded CIM path)", () => {
 		await expect(sampleProcesses([111])).resolves.toBeNull();
 	});
 
-	it("RESOLVES when the child exits non-zero with garbage stdout", async () => {
+	it("reports an errored outcome when the child exits non-zero with garbage stdout", async () => {
 		fakeSpawn = () =>
 			makeFakeChild({ stdout: "not-a-csv-line\r\n<<broken>>\r\n", code: 1 });
-		await expect(sampleProcesses([111])).resolves.toEqual(new Map());
+		await expect(sampleProcesses([111])).resolves.toBeNull();
+		expect(getDegradationSummary().find((g) => g.kind === "resource-sampler-query-failed"))
+			.toMatchObject({
+				count: 1,
+				latestReasons: [{ subject: "windows-process-table", reason: "process-table query exit-error (exit code 1)" }],
+			});
+	});
+
+	it("does not settle a timed-out sampler query until the tree-kill hook reports the child's fate", async () => {
+		vi.useFakeTimers();
+		let release!: (outcome: "gone") => void;
+		timeoutControl.handler = async () =>
+			new Promise<"gone">((resolve) => {
+				release = resolve;
+			});
+		fakeSpawn = () => makeFakeChild({ holdOpen: true });
+		let settled = false;
+		const query = sampleProcesses([111]).then(() => {
+			settled = true;
+		});
+		await vi.advanceTimersByTimeAsync(2_000);
+		expect(timeoutControl.called).toBe(true);
+		expect(settled).toBe(false);
+		release("gone");
+		await query;
+		expect(settled).toBe(true);
 	});
 
 	it("does not turn a failed descendant process-table query into an empty tree", async () => {

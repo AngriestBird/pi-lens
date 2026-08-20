@@ -303,6 +303,13 @@ message text, and trigger install/reinstall only for `tool-not-found`.
 must remain non-repairable at that seam; the original errno-bearing Error is
 preserved as `cause`. (#1214)
 
+**One-shot process-table collection distinguishes exit failure from empty.**
+`spawnCollectStdoutResult` reports `exit-error` with code/signal and discards
+stdout from non-zero exits; process-table callers record that outcome instead
+of parsing partial output as a clean empty result. Sampler timeouts inject the
+reaper's tree-kill-and-verify hook and settle only after its fate is known.
+(#1863, #1864)
+
 ## Issue and PR design contract
 
 - **Design the state space before coding.** For stateful, ordered, resource-mutating, or security-sensitive work, write the invariants, supported transitions, explicit deferrals, and a cross-product test matrix before implementation. Examples are not enough: cover operation order, preview/apply, validation/normalization/execution seams, failure atomicity, observability bounds, and OS/path/encoding axes. If adversarial review finds repeated cross-product defects, stop patching one symptom at a time and return to the model.
