@@ -26,29 +26,31 @@ note: |
   definition, call/construct signature) — that is exactly the
   return-type position; a parameter's `type_annotation` is nested one
   level deeper, inside `required_parameter`/`optional_parameter`, so
-  the two never collide. `function_type` (`(x: T) => R`, used in
-  function-type aliases) is the one exception in
-  tree-sitter-typescript's grammar: its return type sits directly after
-  `=>` with no `type_annotation` wrapper at all, so it needs its own
-  branch.
+  the two never collide.
+
+  2026-08-20 (#1824, refs #1727, #1815): dropped the `function_type`
+  arm (`(x: T) => R`, used in callback signatures and type aliases).
+  Its return type sits directly after `=>` with no `type_annotation`
+  wrapper, so it needed its own branch — but a TYPE-POSITION `unknown`
+  return is a legitimate contract ("the caller ignores my result"),
+  not a value-position return that skipped parsing at a boundary. This
+  is a scope correction, not a severity change: pi-lens's own tree
+  went from 79 hits to 21 under this repo's scan setup (see the PR
+  note for the four-corpus before/after). The value-position arm below
+  is unchanged and is what the rule now exclusively targets.
 rule:
-  any:
-    - kind: predefined_type
-      regex: "^unknown$"
-      inside:
-        kind: type_annotation
-        inside:
-          any:
-            - kind: function_declaration
-            - kind: function_expression
-            - kind: generator_function_declaration
-            - kind: arrow_function
-            - kind: method_signature
-            - kind: method_definition
-            - kind: construct_signature
-            - kind: constructor_type
-            - kind: call_signature
-    - kind: predefined_type
-      regex: "^unknown$"
-      inside:
-        kind: function_type
+  kind: predefined_type
+  regex: "^unknown$"
+  inside:
+    kind: type_annotation
+    inside:
+      any:
+        - kind: function_declaration
+        - kind: function_expression
+        - kind: generator_function_declaration
+        - kind: arrow_function
+        - kind: method_signature
+        - kind: method_definition
+        - kind: construct_signature
+        - kind: constructor_type
+        - kind: call_signature
