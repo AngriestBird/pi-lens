@@ -2,8 +2,8 @@
 section: Fixed
 ---
 
-- **Tree-sitter grammar wasms now refresh when the pinned version moves (refs
-  #1760)** — a grammar wasm downloaded once was never replaced when this repo
+- **Tree-sitter grammar wasms now refresh when the pinned version moves (refs #1760)**
+  — a grammar wasm downloaded once was never replaced when this repo
   bumped the version it pins, because the cached file's name carries no
   version. A future fix to a broken grammar build (the class #255 and #427
   already hit) would never reach a machine that had already downloaded the
