@@ -2639,6 +2639,7 @@ describe("clientRequestWorkspaceDiagnostics — real report parsing", () => {
 		expect(state.connection.sendRequest).toHaveBeenCalledWith(
 			"workspace/diagnostic",
 			{ previousResultIds: [] },
+			expect.anything(),
 		);
 		expect(out).toBeDefined();
 		const byName = (name: string) =>

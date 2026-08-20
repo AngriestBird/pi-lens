@@ -2573,16 +2573,15 @@ async function pullDiagnosticSource(
 	// alone would let a slow answer from the earlier round land on top of a newer
 	// one. Re-checked at write time below.
 	const requestSequence = claimPullRequestSequence(state, sourceKey);
-	// #1713: captured OUTSIDE withTimeout so a timeout's `catch` below still
-	// holds a live handle on the request. `withTimeout` itself only races it
-	// against a timer — the request keeps running server-side either way — and
-	// without this handle the abandoned answer would settle into the void with
-	// no way to observe it.
+	// #1889: give the request a cancellation token. `withTimeout` only abandons
+	// its await; aborting in the timeout branch below also sends `$/cancelRequest`
+	// so repeated touches cannot leave an aging backlog inside the server.
 	const requestStartedAt = Date.now();
 	const effectiveTimeoutMs = Math.max(
 		1,
 		Math.min(PULL_REQUEST_TIMEOUT_MS, budgetMs),
 	);
+	const pullAbort = new AbortController();
 	const requestPromise = safeSendRequest<{
 		kind?: string;
 		resultId?: string;
@@ -2591,13 +2590,18 @@ async function pullDiagnosticSource(
 			string,
 			{ kind?: string; resultId?: string; items?: LSPDiagnostic[] }
 		>;
-	}>(state.connection, "textDocument/diagnostic", {
-		textDocument: { uri },
-		// #1667: name the source this request is for, so the server answers
-		// from that source instead of its default one.
-		...(identifier !== undefined && { identifier }),
-		...(previousResultId !== undefined && { previousResultId }),
-	});
+	}>(
+		state.connection,
+		"textDocument/diagnostic",
+		{
+			textDocument: { uri },
+			// #1667: name the source this request is for, so the server answers
+			// from that source instead of its default one.
+			...(identifier !== undefined && { identifier }),
+			...(previousResultId !== undefined && { previousResultId }),
+		},
+		pullAbort.signal,
+	);
 	try {
 		// withTimeout is the backstop against a hung pull-mode server: without it
 		// this await never settles unless the stream is destroyed. Bounded by the
@@ -2732,6 +2736,7 @@ async function pullDiagnosticSource(
 			: { status: "clean" };
 	} catch (err) {
 		if (isPullTimeoutError(err, effectiveTimeoutMs)) {
+			pullAbort.abort();
 			recordPullTimeoutTelemetry({
 				scope: normalizedPath,
 				identifier,
@@ -3013,6 +3018,7 @@ export async function clientRequestWorkspaceDiagnostics(
 	// watch.
 	const workspacePullStartedAt = Date.now();
 	const workspacePullTimeoutMs = Math.max(1, budgetMs);
+	const workspacePullAbort = new AbortController();
 	const workspaceRequestPromise = safeSendRequest<{
 		items?: Array<{
 			uri?: string;
@@ -3020,7 +3026,12 @@ export async function clientRequestWorkspaceDiagnostics(
 			resultId?: string;
 			items?: LSPDiagnostic[];
 		}>;
-	}>(state.connection, "workspace/diagnostic", { previousResultIds });
+	}>(
+		state.connection,
+		"workspace/diagnostic",
+		{ previousResultIds },
+		workspacePullAbort.signal,
+	);
 	try {
 		const report = await withTimeout(
 			workspaceRequestPromise,
@@ -3151,6 +3162,7 @@ export async function clientRequestWorkspaceDiagnostics(
 		return out;
 	} catch (err) {
 		if (isPullTimeoutError(err, workspacePullTimeoutMs)) {
+			workspacePullAbort.abort();
 			recordPullTimeoutTelemetry({
 				scope: WORKSPACE_PULL_SCOPE,
 				identifier: undefined,
