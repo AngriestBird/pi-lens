@@ -45,6 +45,7 @@
  * not a silently-closed one.
  */
 import * as fs from "node:fs";
+import { normalizeMapKey } from "./path-utils.js";
 import { resolveImportToFiles } from "./review-graph/import-resolvers.js";
 import type { RuntimeCoordinator } from "./runtime-coordinator.js";
 import {
@@ -95,11 +96,44 @@ export type ForwardImportResolver = (
 	filePath: string,
 ) => Promise<string[]> | string[];
 
+/**
+ * #1790: a blocking row served by the widget store's `files` map — reached via
+ * a live dispatch OR a workspace-diagnostics cache-hit replay
+ * (`reconcileScanDiagnostics` in the cache-serve branch of
+ * `tools/lsp-diagnostics.ts`) — that has no corresponding entry in
+ * `RuntimeCoordinator`'s inline-blocker map. Population is injected from the
+ * call site (`runtime-turn.ts`) rather than imported here, because
+ * `widget-state.ts` already imports FROM this module
+ * (`collectForwardImportMtimes`); importing it back would create a cycle
+ * (the exact shape #1631's review round already flagged and fixed once for
+ * `STALE_LINE_MARKER`). `demote` closes over the widget store's own write path
+ * so the sweep applies its ONE drift check (`detectDrift`, shared with the
+ * inline-blocker branch below) without re-implementing the write.
+ */
+export interface WidgetSweepBlockerEntry {
+	filePath: string;
+	/** Earliest `observedAt` among this file's non-stale, LSP-sourced blocking
+	 * diagnostics — the conservative baseline (using the latest could hide
+	 * drift that predates a later diagnostic's own observation). */
+	recordedAtMs: number;
+	/** Demotes every currently-blocking, LSP-sourced diagnostic for this file
+	 * to stale in the widget store. Returns true iff something changed. */
+	demote: () => boolean;
+}
+
 export interface BlockerFreshnessOptions {
 	/** Wall-clock baseline override; defaults to `Date.now()`. Test seam only. */
 	now?: number;
 	/** Forward-import resolution override; defaults to tree-sitter extraction. */
 	resolveForwardImports?: ForwardImportResolver;
+	/**
+	 * #1790: widget-store blocking rows to widen the sweep's population with,
+	 * deduped against the inline-blocker map by file path (one population, no
+	 * double-processing a file present in both stores). Defaults to none, so
+	 * every existing caller/test that doesn't pass this keeps today's
+	 * inline-blockers-only behavior.
+	 */
+	additionalEntries?: WidgetSweepBlockerEntry[];
 }
 
 /**
@@ -362,11 +396,35 @@ async function detectDrift(
 }
 
 /**
- * Freshness sweep over the cached inline blockers. Called at turn end before the
- * blockers are re-served. Entries whose own file or forward imports drifted since the
- * verdict are demoted via `markInlineBlockerStale`; the turn-end renderer then serves
- * them out of the advisory channel with a `[stale — re-run to confirm]` marker instead
- * of as an authoritative blocker.
+ * One row of the sweep's unified population, whichever store it came from.
+ * `demote` closes over the origin store's own write path (`markInlineBlockerStale`
+ * for an inline blocker, the widget store's per-file setter for a widget-only row)
+ * so the loop below runs the SAME drift check over every row without caring which
+ * store will record the result (#1790).
+ */
+interface SweepPopulationEntry {
+	filePath: string;
+	stale: boolean;
+	recordedAtMs: number | undefined;
+	sources: readonly string[] | undefined;
+	demote: () => boolean;
+}
+
+/**
+ * Freshness sweep over every blocking row the widget currently serves — the cached
+ * inline blockers (`RuntimeCoordinator`) AND, since #1790, any widget-store row
+ * reached only through a cache-served replay (`options.additionalEntries`, injected
+ * by the call site to avoid an import cycle with `widget-state.ts`). Called at turn
+ * end before the blockers are re-served. Entries whose own file or forward imports
+ * drifted since the verdict are demoted via `demote`; the turn-end renderer then
+ * serves them out of the advisory channel with a `[stale — re-run to confirm]`
+ * marker instead of as an authoritative blocker.
+ *
+ * #1790: a file present in BOTH stores (e.g. a live dispatch that also left a stale
+ * widget-only remnant) is processed ONCE, via its inline-blocker entry — the widget
+ * row for that same path is skipped so the sweep's one drift check never runs twice
+ * over the same file (one population, the existing gates, per the issue's
+ * acceptance criteria).
  *
  * Never throws: any internal failure leaves the entry untouched (existing re-serve
  * behavior) rather than failing the turn end.
@@ -392,20 +450,46 @@ export async function sweepInlineBlockerFreshness(
 		turnIndex = undefined;
 	}
 
-	let entries: Array<{
+	let inlineEntries: Array<{
 		filePath: string;
 		stale?: boolean;
 		recordedAtMs?: number;
 		sources?: readonly string[];
 	}>;
 	try {
-		entries = runtime.getInlineBlockersSnapshot();
+		inlineEntries = runtime.getInlineBlockersSnapshot();
 	} catch {
 		return counts;
 	}
-	counts.total = entries.length;
 
-	for (const entry of entries) {
+	const population: SweepPopulationEntry[] = inlineEntries.map((entry) => ({
+		filePath: entry.filePath,
+		stale: entry.stale ?? false,
+		recordedAtMs: entry.recordedAtMs,
+		sources: entry.sources,
+		demote: () => runtime.markInlineBlockerStale(entry.filePath, "dependency-drift"),
+	}));
+
+	const inlinePaths = new Set(
+		inlineEntries.map((entry) => normalizeMapKey(entry.filePath)),
+	);
+	for (const extra of options?.additionalEntries ?? []) {
+		// One population: a path already covered by an inline-blocker entry is not
+		// added a second time, even though it reached this sweep through a different
+		// store — see the function doc.
+		if (inlinePaths.has(normalizeMapKey(extra.filePath))) continue;
+		population.push({
+			filePath: extra.filePath,
+			stale: false,
+			recordedAtMs: extra.recordedAtMs,
+			sources: ["lsp"],
+			demote: extra.demote,
+		});
+	}
+
+	counts.total = population.length;
+
+	for (const entry of population) {
 		try {
 			if (entry.stale) {
 				counts.alreadyStale += 1;
@@ -438,7 +522,7 @@ export async function sweepInlineBlockerFreshness(
 			);
 			if (truncated) counts.truncatedImports += 1;
 			if (drifted.length > 0) {
-				runtime.markInlineBlockerStale(entry.filePath, "dependency-drift");
+				entry.demote();
 				counts.revalidated += 1;
 			} else {
 				counts.kept += 1;
