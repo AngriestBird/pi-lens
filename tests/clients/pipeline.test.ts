@@ -20,6 +20,7 @@ import {
 	type PipelineDeps,
 	runPipeline,
 } from "../../clients/pipeline.js";
+import { renderPostAutofixNotice } from "../../clients/post-autofix-notice.js";
 import { loadPiLensProjectConfig } from "../../clients/project-lens-config.js";
 import type { RuffClient } from "../../clients/ruff-client.js";
 import { TestRunnerClient } from "../../clients/test-runner-client.js";
@@ -293,7 +294,19 @@ describe("Pipeline", () => {
 			);
 
 			expect(result.fileModified).toBe(true);
-			expect(result.output).toContain("File was modified by auto-format/fix");
+			// #1590: the pipeline hands up the notice DATA and renders no sentence
+			// of its own — it cannot see whether the authoritative bytes shipped.
+			// `handleToolResult` renders it; the neutral wording is what a
+			// format-only change (no attachment) produces there.
+			expect(result.output).not.toContain(
+				"File was modified by auto-format/fix",
+			);
+			expect(result.postAutofixNotice?.changedFiles).toContain(
+				path.basename(filePath),
+			);
+			expect(
+				renderPostAutofixNotice(result.postAutofixNotice as never, "none"),
+			).toContain("File was modified by auto-format/fix");
 		});
 
 		it("surfaces formatter failures instead of plain clean output", async () => {
