@@ -395,7 +395,7 @@ This is the payoff of the two disciplines above: a bounded checklist of defect *
 
 18. **A cooldown ladder that outruns its caller's cadence.** A long exponential cooldown can block the caller's natural recovery loop; repeated calls inside that cooldown can also launder a cooldown-served value into a permanent cache. *Screen:* name the caller's retry cadence when wiring a latch, then check both directions: the cooldown must neither suppress recovery nor let a caller promote an unprobed value (#1541/#1543).
 
-19. **A later stage re-deriving identity instead of carrying correlation.** Relative paths, worktrees, drive case, and other ambiguous inputs can resolve differently after the first stage. *Screen:* paired stages carry the earlier stage's resolved identity by call ID or resolved path; they never reconstruct it from the later stage's inputs (#1550/#1642).
+19. **A later stage re-deriving identity instead of carrying correlation.** Relative paths, worktrees, drive case, and other ambiguous inputs can resolve differently after the first stage. *Screen:* paired stages carry the earlier stage's resolved identity by call ID or resolved path; they never reconstruct it from the later stage's inputs (#1642; fixed by #1648, whose issue thread documents the re-derivation and resolution-basis correction).
 
 20. **A fallback claiming work from staleness alone.** Age can show that work may be abandoned, but it cannot show who owns it. *Screen:* any fallback that claims unclaimed work proves origin provenance, such as cwd and session, in addition to staleness (#1642).
 
@@ -405,7 +405,7 @@ This is the payoff of the two disciplines above: a bounded checklist of defect *
 
 23. **An ancestor-walk predicate testing the advanced cursor instead of the starting leaf.** The loop variable changes meaning on every step, so it cannot answer a question about the entity that began the walk. *Screen:* predicates about the starting entity receive the starting path, not the cursor; tests include a layout with a gap directory (#1686).
 
-24. **A second writer added to a shared field without a discriminator.** Full treatment in "Prove composition with evidence when your PR overlaps an open PR" above; listed here so the catalog catches the shape before implementation (#1631/#1641).
+24. **A second writer added to a shared field without a discriminator.** The #1631/#1641 fix PRs' `WidgetDiagnostic.stale` collision combined demote-and-exclude with demote-but-keep-tally semantics; each fix was green alone, but the incompatibility surfaced only when their branches composed (#1633/#1703). *Screen:* when your change adds a second writer to an existing field: name every existing writer (grep the field's assignments); add a reason/kind discriminator with per-writer semantics BEFORE either lands; prove composition by running the other in-flight PR's test files on a locally merged tree — never by reasoning about different structures.
 
 ### AI-authorship smells
 
