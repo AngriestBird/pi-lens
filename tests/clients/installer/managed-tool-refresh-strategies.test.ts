@@ -37,6 +37,7 @@ import {
 	it,
 	vi,
 } from "vitest";
+import { withEnv } from "../../support/with-env.js";
 
 vi.unmock("../../../clients/installer/index.js");
 
@@ -384,7 +385,7 @@ function freshenAllExcept(
 }
 
 let originalPath: string | undefined;
-let originalDisableToolInstall: string | undefined;
+let restoreDisableToolInstall: () => void;
 
 beforeEach(() => {
 	fs.rmSync(TOOLS_DIR, { recursive: true, force: true });
@@ -417,17 +418,12 @@ beforeEach(() => {
 	// exercise the archive/maven/github/pip/gem refresh-and-install paths
 	// against mocked https/spawn — have to opt back in, the same way
 	// `installer-lifecycle.integration.test.ts` does for its child process.
-	originalDisableToolInstall = process.env.PI_LENS_DISABLE_TOOL_INSTALL;
-	process.env.PI_LENS_DISABLE_TOOL_INSTALL = "0";
+	restoreDisableToolInstall = withEnv({ PI_LENS_DISABLE_TOOL_INSTALL: "0" });
 });
 
 afterEach(() => {
 	if (originalPath !== undefined) process.env.PATH = originalPath;
-	if (originalDisableToolInstall === undefined) {
-		delete process.env.PI_LENS_DISABLE_TOOL_INSTALL;
-	} else {
-		process.env.PI_LENS_DISABLE_TOOL_INSTALL = originalDisableToolInstall;
-	}
+	restoreDisableToolInstall();
 	delete process.env.PI_LENS_INSTALL_LOCK_TIMEOUT_MS;
 	resetProjectTrust();
 	vi.unstubAllEnvs();
