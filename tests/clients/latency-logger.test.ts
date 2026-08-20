@@ -14,10 +14,13 @@ vi.mock("../../clients/ndjson-logger.js", () => ({
 }));
 
 import {
+	_closedBracketsStorageLengthForTest,
 	_recentPhasesStorageLengthForTest,
 	_setRecentPhasesForTest,
+	CLOSED_BRACKET_CAP,
 	getCurrentPhase,
 	getLastLoggedPhase,
+	getPhaseForWindow,
 	getRecentLoggedPhases,
 	logLatency,
 	phaseFinished,
@@ -263,5 +266,144 @@ describe("phaseStarted/phaseFinished/getCurrentPhase (#1723 in-flight attributio
 		expect(getCurrentPhase()).toBeDefined();
 		resetCurrentPhaseForSession();
 		expect(getCurrentPhase()).toBeUndefined();
+	});
+});
+
+// #1723 review round (redesign of the slot mechanism, probe-proven against the
+// real dispatcher): a single slot broke two ways once overlap is the NORMAL
+// case (dispatchForFile runs runner groups in PARALLEL, dispatcher.ts:853),
+// plus a third, decisive gap for the motivating synchronous case. This block
+// rebuilds the reviewer's three probes as regression tests, all reproducible
+// at the latency-logger unit level (a dispatcher-level version of F1/F2 lives
+// in tests/clients/dispatch/runner-timeout.test.ts).
+describe("getCurrentPhase/getPhaseForWindow: overlap and window attribution (#1723 review)", () => {
+	beforeEach(() => {
+		resetCurrentPhaseForSession();
+	});
+
+	// F1: a single slot held only the LAST starter — a cheap idle runner
+	// starting after a CPU hog would win outright, naming the innocent runner
+	// while the hog stayed anonymous. The Map-based live set instead surfaces
+	// the OLDEST still-open bracket, which is the hog.
+	it("F1: names the CPU hog, not an idle runner that started after it, while both are live", () => {
+		phaseStarted("cpu-hog");
+		phaseStarted("idle"); // starts AFTER the hog, while the hog is still open
+		expect(getCurrentPhase()?.phase).toBe("cpu-hog");
+	});
+
+	// F2: a quick sibling that starts second but finishes FIRST used to clear
+	// the single slot out from under the still-running long phase. Per-token
+	// map entries mean a sibling's finish can only ever remove ITS OWN entry.
+	it("F2: an idle runner finishing first does not clear the still-running long phase's bracket", () => {
+		const hogToken = phaseStarted("cpu-hog");
+		const idleToken = phaseStarted("idle");
+		phaseFinished(idleToken); // idle finishes quickly...
+		// ...but the hog is still open, and still names as current.
+		expect(getCurrentPhase()?.phase).toBe("cpu-hog");
+		phaseFinished(hogToken);
+		expect(getCurrentPhase()).toBeUndefined();
+	});
+
+	// F3 (decisive): phaseFinished runs inside a `finally`, which resumes as a
+	// MICROTASK. turn_end is scheduled as a MACROTASK. Microtasks always fully
+	// drain before the next macrotask runs, so a genuinely SYNCHRONOUS phase —
+	// the motivating 18s case — has ALREADY closed (and so left liveBrackets)
+	// by the time anything reads it. This is the real, unmocked JS scheduling
+	// order (no fake timers): the phase's own try/finally resolves entirely
+	// before the setTimeout callback below ever runs.
+	it("F3: a macrotask sample after a synchronous phase's microtask-scheduled finish still attributes it via window overlap", async () => {
+		const blockStartMs = Date.now();
+		const token = phaseStarted("full_scan_18s");
+		const doSynchronousWork = async () => {
+			try {
+				// Real synchronous (blocking) work, kept short for test speed.
+				const busyUntil = Date.now() + 30;
+				while (Date.now() < busyUntil) {
+					/* busy-wait, mimicking a CPU-bound scan */
+				}
+			} finally {
+				phaseFinished(token); // exactly like runRunner's finally
+			}
+		};
+		await doSynchronousWork();
+
+		// By now the bracket has already closed — liveBrackets is empty. This
+		// is exactly what made the old single-slot design (and getCurrentPhase
+		// alone) miss the synchronous case.
+		expect(getCurrentPhase()).toBeUndefined();
+
+		// Simulate turn_end firing as a macrotask AFTER the phase's finally.
+		const attribution = await new Promise<ReturnType<typeof getPhaseForWindow>>((resolve) => {
+			setTimeout(() => {
+				const blockEndMs = Date.now();
+				resolve(getPhaseForWindow(blockStartMs, blockEndMs));
+			}, 0);
+		});
+
+		expect(attribution?.phase).toBe("full_scan_18s");
+		expect(attribution?.stillRunning).toBe(false);
+		expect(attribution?.elapsedMs).toBeGreaterThanOrEqual(30);
+	});
+
+	// Deterministic companion to the real-scheduling F3 test above: fake
+	// timers pin the exact overlap arithmetic, including that a live bracket
+	// (still running, no closedAt yet) is attributed too, not just closed ones.
+	it("F3b: getPhaseForWindow attributes a still-open bracket against an exact window (fake timers)", () => {
+		vi.useFakeTimers();
+		try {
+			const t0 = new Date("2026-08-19T20:03:22.575Z").getTime();
+			vi.setSystemTime(t0);
+			phaseStarted("full_scan_18s");
+			vi.setSystemTime(t0 + 18_270); // block ends exactly when the probe samples
+			const attribution = getPhaseForWindow(t0, t0 + 18_270);
+			expect(attribution?.phase).toBe("full_scan_18s");
+			expect(attribution?.stillRunning).toBe(true);
+			expect(attribution?.elapsedMs).toBe(18_270);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	// Mutation-proof: window-overlap off-by-one (#1723 review). A bracket that
+	// only TOUCHES a window edge (zero overlap) proves nothing about that
+	// window and must not win — pins the `overlapMs <= 0` guard specifically
+	// (a mutant that loosened it to `< 0` would let this through).
+	it("mutation-proof: a bracket with exactly zero overlap is not attributed", () => {
+		vi.useFakeTimers();
+		try {
+			const t0 = new Date("2026-08-19T20:03:22.575Z").getTime();
+			vi.setSystemTime(t0);
+			const token = phaseStarted("unrelated_earlier_phase");
+			vi.setSystemTime(t0 + 100);
+			phaseFinished(token); // closed well before the window we'll check
+			// Window starts exactly at closedAt — zero overlap, not negative.
+			const attribution = getPhaseForWindow(t0 + 100, t0 + 5100);
+			expect(attribution).toBeUndefined();
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	// Mutation-proof: ring unbounded (#1723 review, mirrors the existing
+	// recentPhases write-side guard test). If phaseFinished's
+	// `.slice(0, CLOSED_BRACKET_CAP)` were deleted, storage would grow past
+	// the cap.
+	it("mutation-proof: the closed-bracket ring never exceeds CLOSED_BRACKET_CAP", () => {
+		for (let i = 0; i < CLOSED_BRACKET_CAP + 7; i++) {
+			const token = phaseStarted(`closed_flood_${i}`);
+			phaseFinished(token);
+		}
+		expect(_closedBracketsStorageLengthForTest()).toBe(CLOSED_BRACKET_CAP);
+	});
+
+	// Mutation-proof: a never-deleted live entry (phaseFinished's `Map.delete`
+	// silently made a no-op) would leave a phantom bracket "open" forever,
+	// permanently winning getCurrentPhase's oldest-wins tie-break over every
+	// later, genuinely-running phase.
+	it("mutation-proof: a correctly finished phase never lingers as the oldest open bracket", () => {
+		const staleToken = phaseStarted("should_have_closed");
+		phaseFinished(staleToken);
+		phaseStarted("genuinely_running_now");
+		expect(getCurrentPhase()?.phase).toBe("genuinely_running_now");
 	});
 });

@@ -294,3 +294,90 @@ describe("runRunner in-flight phase attribution (#1723)", () => {
 		500,
 	);
 });
+
+// #1723 review round: the earlier single-slot design was probe-proven wrong
+// against the REAL dispatcher, not just in the abstract. `dispatchForFile`
+// runs its runner groups in PARALLEL (`Promise.all`, dispatcher.ts:853) — two
+// runners in DIFFERENT groups genuinely overlap; two runners in the SAME
+// group run sequentially (runGroup's own for-loop), so this test deliberately
+// puts the hog and the idle runner in separate groups.
+describe("runRunner in-flight phase attribution against real parallel groups (#1723 review F1/F2)", () => {
+	let registry: RunnerRegistry;
+
+	function dispatchForFile(
+		ctx: Parameters<typeof runDispatchForFile>[0],
+		groups: RunnerGroup[],
+	) {
+		return runDispatchForFile(ctx, groups, registry);
+	}
+
+	function createMockContext(filePath: string) {
+		return createDispatchContext(
+			filePath,
+			"/project",
+			{ getFlag: () => false },
+			new FactStore(),
+		);
+	}
+
+	beforeEach(() => {
+		registry = new RunnerRegistry();
+		clearCoverageNoticeState();
+		resetCurrentPhaseForSession();
+	});
+
+	it(
+		"names the CPU hog while an idle runner in a parallel group starts after it and finishes first",
+		async () => {
+			let hogResolve!: (r: RunnerResult) => void;
+			const hogPromise = new Promise<RunnerResult>((resolve) => {
+				hogResolve = resolve;
+			});
+
+			registry.register({
+				id: "cpu-hog",
+				appliesTo: ["jsts"],
+				priority: 10,
+				enabledByDefault: true,
+				timeoutMs: 5_000,
+				async run(): Promise<RunnerResult> {
+					return hogPromise;
+				},
+			});
+			registry.register({
+				id: "idle",
+				appliesTo: ["jsts"],
+				priority: 11,
+				enabledByDefault: true,
+				async run(): Promise<RunnerResult> {
+					return { status: "succeeded", diagnostics: [], semantic: "warning" };
+				},
+			});
+
+			const ctx = createMockContext("test.ts");
+			const dispatchPromise = dispatchForFile(ctx, [
+				{ mode: "all", runnerIds: ["cpu-hog"] },
+				{ mode: "all", runnerIds: ["idle"] },
+			]);
+
+			// Flush a macrotask so the idle group's whole promise chain (several
+			// microtask hops: run() → Promise.race → .finally → phaseFinished)
+			// has fully settled, while cpu-hog's run() is still deliberately
+			// unresolved.
+			await new Promise((resolve) => setTimeout(resolve, 0));
+
+			// F1: a single slot held only the LAST starter — idle, which started
+			// AFTER the hog — so it would have named the innocent idle runner.
+			// F2: idle finishing FIRST would then have cleared that slot,
+			// wiping the hog's attribution while it was still running. The
+			// Map-based live set does neither: it still names the hog, the
+			// oldest bracket still open.
+			expect(getCurrentPhase()?.phase).toBe("cpu-hog");
+
+			hogResolve({ status: "succeeded", diagnostics: [], semantic: "warning" });
+			await dispatchPromise;
+			expect(getCurrentPhase()).toBeUndefined();
+		},
+		2_000,
+	);
+});

@@ -27,11 +27,13 @@ vi.mock("../clients/event-loop-monitor.js", async (importActual) => {
 
 // Capture latency writes without touching disk; provide the attribution seam.
 const latencyCalls: Array<Record<string, unknown>> = [];
-// #1723: controllable in-flight-phase stand-in — undefined by default (no
-// phase currently running), overridable per test to simulate a synchronous
-// block sampled WHILE a phase is still executing (recentPhases only ever
-// carries a finished phase, so this seam is the only way turn_end can see it).
-let currentPhaseToReturn: { phase: string; startedAt: string } | undefined;
+// #1723 (redesigned after review): controllable in-flight-phase-window stand-in
+// — undefined by default (no bracket overlaps the sampled block window),
+// overridable per test to simulate `getPhaseForWindow` finding a live OR
+// recently-closed bracket that overlaps the block's own time window.
+let phaseForWindowToReturn:
+	| { phase: string; startedAt: string; stillRunning: boolean; elapsedMs: number }
+	| undefined;
 vi.mock("../clients/latency-logger.js", async (importActual) => {
 	const actual = await importActual<typeof import("../clients/latency-logger.js")>();
 	return {
@@ -40,7 +42,7 @@ vi.mock("../clients/latency-logger.js", async (importActual) => {
 			latencyCalls.push(entry);
 		},
 		getLastLoggedPhase: () => ({ phase: "graph_build", ts: "2026-08-07T00:00:00.000Z" }),
-		getCurrentPhase: () => currentPhaseToReturn,
+		getPhaseForWindow: () => phaseForWindowToReturn,
 	};
 });
 
@@ -113,7 +115,7 @@ describe("index turn_end loop_block wiring (#1122)", { timeout: LOOP_BLOCK_WIRIN
 		latencyCalls.length = 0;
 		resetSpy.mockClear();
 		statsToReturn = undefined;
-		currentPhaseToReturn = undefined;
+		phaseForWindowToReturn = undefined;
 	});
 	afterEach(() => {
 		vi.clearAllMocks();
@@ -227,7 +229,12 @@ describe("index turn_end loop_block wiring (#1122)", { timeout: LOOP_BLOCK_WIRIN
 	// own duration.
 	it("(d) #1723: an in-flight phase is named in the loop_block record, not just the previous finished one", async () => {
 		const startedAt = new Date(Date.now() - 18_270).toISOString();
-		currentPhaseToReturn = { phase: "full_scan_18s", startedAt };
+		phaseForWindowToReturn = {
+			phase: "full_scan_18s",
+			startedAt,
+			stillRunning: true,
+			elapsedMs: 18270,
+		};
 		statsToReturn = {
 			maxMs: 18270,
 			p99Ms: 0,
@@ -251,7 +258,7 @@ describe("index turn_end loop_block wiring (#1122)", { timeout: LOOP_BLOCK_WIRIN
 	});
 
 	it("(e) #1723: no in-flight phase means the new fields stay undefined instead of a false attribution", async () => {
-		currentPhaseToReturn = undefined;
+		phaseForWindowToReturn = undefined;
 		statsToReturn = {
 			maxMs: 5000,
 			p99Ms: 0,

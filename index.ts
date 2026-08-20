@@ -172,8 +172,8 @@ import {
 import { createProjectReportTool } from "./tools/project-report.js";
 import { createSymbolSearchTool } from "./tools/symbol-search.js";
 import {
-	getCurrentPhase,
 	getLastLoggedPhase,
+	getPhaseForWindow,
 	getRecentLoggedPhases,
 	logLatency,
 	resetCurrentPhaseForSession,
@@ -1639,14 +1639,6 @@ function activateExtension(hostPi: ExtensionAPI) {
 	// --- Events ---
 
 	pi.on("session_start", async (event, ctx) => {
-		// #1723: the in-flight-phase slot is process-lifetime state (see
-		// `resetCurrentPhaseForSession`'s doc comment), so a phase abandoned
-		// mid-flight by a torn-down activation could otherwise survive into a
-		// new session and misattribute every later loop_block to stale work.
-		// Unconditional, before the #473 concurrent-secondary gate below, same
-		// as `warmDispatchAtSessionStart()` — this must re-arm on EVERY
-		// session_start, not only a full one.
-		resetCurrentPhaseForSession();
 		warmDispatchAtSessionStart();
 		void warmLspService().catch((err) =>
 			logExtension({ subsystem: "lsp", level: "warn", message: `LSP warm failed: ${err}` }),
@@ -1711,6 +1703,19 @@ function activateExtension(hostPi: ExtensionAPI) {
 				});
 				return;
 			}
+
+			// #1723 review F4: the in-flight-phase live-bracket map/closed-ring
+			// (clients/latency-logger.ts) is process-shared state, exactly like
+			// the LSP fleet / runtime generation the #473 gate above already
+			// protects — so this reset belongs BEHIND that gate, not before it.
+			// A concurrent secondary's session_start must not wipe brackets a
+			// still-live PARENT activation genuinely has open; only a confirmed
+			// full session start (this line has already returned otherwise) may
+			// assume no sibling activation still owns live brackets in this
+			// process. See `resetCurrentPhaseForSession`'s doc comment for the
+			// accepted cost on the other side (a torn-down secondary's own
+			// bracket goes stale until the next full session start).
+			resetCurrentPhaseForSession();
 
 			// Dynamic tooling (#pi 0.80.x+): put the active tool set back to the
 			// posture this logical conversation had — the always-active baseline
@@ -2331,15 +2336,28 @@ function activateExtension(hostPi: ExtensionAPI) {
 			if (shouldLogLoopBlock(loopMaxMs)) {
 				const lastPhase = getLastLoggedPhase();
 				const recentPhases = getRecentLoggedPhases(3);
-				// #1723 residual: `lastPhase`/`recentPhases` above only ever name a
-				// phase that already FINISHED. The motivating case — an 18s
-				// synchronous full-scan block — had no attribution because the
-				// phase burning the CPU was still running (and so unlogged) when
-				// this sampled. `getCurrentPhase` reads the slot dispatcher.ts's
-				// `runRunner` (and the workspace-diagnostics touch loop) keeps
-				// live for exactly this window; when it is set, it names what is
-				// STILL RUNNING right now, not just what last finished.
-				const inFlightPhase = getCurrentPhase();
+				// #1723 residual, redesigned after review (F1/F2/F3): `lastPhase`/
+				// `recentPhases` above only ever name a phase that already
+				// FINISHED. The motivating case — an 18s synchronous full-scan
+				// block — had no attribution because the phase burning the CPU was
+				// still running when the probe sampled, so it hadn't logged a
+				// completion yet. `getPhaseForWindow` (clients/latency-logger.ts)
+				// checks the block's own time window against both the still-live
+				// brackets dispatcher.ts's `runRunner` keeps open AND a short ring
+				// of recently CLOSED ones — the latter is load-bearing, not
+				// redundant: `phaseFinished` resumes as a microtask, `turn_end` is
+				// scheduled as a macrotask, and microtasks always drain first, so a
+				// genuinely synchronous phase has typically ALREADY closed by the
+				// time this line runs. Checking live brackets alone would read
+				// empty for exactly the case this exists to catch. NOT wired into
+				// the LSP workspace-diagnostics sweep's own touch loop
+				// (clients/lsp/index.ts) — that remains a named, deferred gap (see
+				// the PR body / issue comment), not a silent one.
+				const blockSampledAtMs = Date.now();
+				const inFlight = getPhaseForWindow(
+					blockSampledAtMs - loopMaxMs,
+					blockSampledAtMs,
+				);
 				const isNewSessionWorst = shouldLogWorstBlock(
 					loopMaxMs,
 					lastLoggedLoopWorstMs,
@@ -2364,11 +2382,10 @@ function activateExtension(hostPi: ExtensionAPI) {
 						lastPhase: lastPhase?.phase,
 						lastPhaseAt: lastPhase?.ts,
 						recentPhases,
-						inFlightPhase: inFlightPhase?.phase,
-						inFlightPhaseStartedAt: inFlightPhase?.startedAt,
-						inFlightPhaseElapsedMs: inFlightPhase
-							? Date.now() - Date.parse(inFlightPhase.startedAt)
-							: undefined,
+						inFlightPhase: inFlight?.phase,
+						inFlightPhaseStartedAt: inFlight?.startedAt,
+						inFlightPhaseElapsedMs: inFlight?.elapsedMs,
+						inFlightPhaseStillRunning: inFlight?.stillRunning,
 					},
 				});
 				// A system stall must not raise the "new worst genuine block"

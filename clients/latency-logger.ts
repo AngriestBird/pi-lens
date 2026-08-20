@@ -176,89 +176,215 @@ export function _setRecentPhasesForTest(entries: Array<{ phase: string; ts: stri
 	recentPhases = entries;
 }
 
-/** A phase's start marker, and the identity token its own `phaseFinished` call needs. */
+/** A phase's start marker, and the identity key its own `phaseFinished` call needs. */
 export interface PhaseToken {
 	phase: string;
 	startedAt: string;
 }
 
+interface ClosedBracket {
+	phase: string;
+	startedAt: string;
+	closedAt: string;
+}
+
+/** Bound on the closed-bracket ring below — same size discipline as `recentPhases`. */
+export const CLOSED_BRACKET_CAP = RECENT_PHASE_CAP;
+
 /**
- * The phase currently running, if any (#1723 residual on top of `recentPhases`
- * above). `recentPhases` only ever names phases that already FINISHED — no
- * help when the CPU hog causing the block is the phase still in flight, which
- * is exactly the motivating case (an 18s synchronous full-scan block whose
- * `recentPhases`/`lastPhase` named the PREVIOUS, unrelated completed phase).
- * A single slot, not a ring: JS is single-threaded, so at most one phase is
- * ever actually EXECUTING (as opposed to merely awaiting) at a time — the one
- * a synchronous block would belong to.
+ * Phases currently executing, keyed by their own start token (#1723 review
+ * round: this replaces an earlier single-slot design that broke two ways.
+ * `dispatchForFile` runs its runner groups in PARALLEL (`Promise.all`,
+ * dispatcher.ts), so overlap is the NORMAL case, not an edge case:
+ *   F1 — a single slot holds only the LAST starter. A cheap idle runner
+ *        starting after a CPU hog wins the slot outright; a block gets
+ *        attributed to the innocent idle runner while the hog stays
+ *        anonymous.
+ *   F2 — the inverse: a quick sibling that starts SECOND but FINISHES FIRST
+ *        clears the slot the moment its own `finally` runs, wiping out the
+ *        still-running long phase's attribution — the identity-token check
+ *        only guarded the OTHER stale-clear direction (an EARLIER phase's
+ *        late finish clobbering a LATER phase), not this one.
+ * A `Map` keyed by the token itself (not by phase name — two calls can share
+ * a name) fixes both: every bracket owns its own entry regardless of what
+ * else is live, and `phaseFinished` only ever removes ITS OWN entry. `Map`
+ * iteration order is insertion order, so the oldest surviving entry — read by
+ * `getCurrentPhase` — is the longest-running phase still open: the one most
+ * likely to own a long block.
  */
-let currentPhase: PhaseToken | undefined;
+const liveBrackets = new Map<PhaseToken, true>();
+
+/**
+ * Recently CLOSED brackets, newest first, bounded to `CLOSED_BRACKET_CAP`
+ * (#1723 review round, F3 — the decisive finding). `phaseFinished` runs
+ * inside a `finally`, which resumes as a MICROTASK, while the host schedules
+ * `turn_end` as a MACROTASK — and microtasks always fully drain before the
+ * next macrotask runs. For the motivating SYNCHRONOUS block, this means the
+ * offending phase has ALREADY closed (its `finally` already ran) by the time
+ * `turn_end` gets to sample: `liveBrackets` alone reads EMPTY for exactly the
+ * case this feature exists to catch. Keeping a short history of recently
+ * closed brackets lets `getPhaseForWindow` below check whether a block's time
+ * window overlaps a bracket that already closed, not only ones still open.
+ */
+let closedBrackets: ClosedBracket[] = [];
 
 /**
  * Mark a phase as started. Returns a token the caller must pass back to
- * `phaseFinished` — identity-based (not name-based) so an interleaved second
- * call's finish can never clear the wrong phase's start (see `phaseFinished`).
- * Cheap: one object allocation and one slot write, no scan of any collection
- * — call-site cost is a single `Date.now()`/`toISOString()` plus an assignment,
- * negligible next to the runner/phase work it brackets (dispatcher.ts's
- * per-runner `runRunner` call, this PR's wiring, runs one native scan per
- * call — orders of magnitude more expensive than this bookkeeping).
+ * `phaseFinished` — the token itself is the map key, so it identifies this
+ * bracket uniquely even against a same-named sibling running concurrently.
+ * Cost per call: one object allocation, one `Date.now()`/`toISOString()`
+ * call, and one `Map.set` (O(1), no scan of any collection) — negligible
+ * next to the runner/phase work it brackets. Measured against this PR's own
+ * call site (dispatcher.ts's per-runner `runRunner`): a native ast-grep or
+ * tree-sitter scan, or a subprocess spawn, is orders of magnitude more
+ * expensive than one map insert.
  */
 export function phaseStarted(phase: string): PhaseToken {
 	const token: PhaseToken = { phase, startedAt: new Date().toISOString() };
-	currentPhase = token;
+	liveBrackets.set(token, true);
 	return token;
 }
 
 /**
- * Clear the current-phase slot — but only if it still holds THIS token. Two
- * phases can overlap (a runner awaiting I/O while another starts executing),
- * so a bare unconditional clear on finish could wipe a LATER phase's still-
- * live start out from under it the moment an EARLIER phase's own async tail
- * resolves. Comparing object identity (not phase name — two calls can share a
- * name) makes each `phaseStarted`/`phaseFinished` pair self-contained: a
- * mismatched finish is a no-op, never a false clear.
+ * Close a bracket: removes it from `liveBrackets` (one `Map.delete`, O(1))
+ * and records it on the closed-bracket ring, bounded to `CLOSED_BRACKET_CAP`
+ * with the oldest entry dropped first — see the `closedBrackets` doc comment
+ * above for why a closed history is load-bearing, not just nice-to-have
+ * (#1723 review F3). `Map.delete` reports whether it actually removed
+ * anything, so a stale or duplicate `phaseFinished` call (the token isn't
+ * live — already closed, or never was) is a no-op and can't push a phantom
+ * entry onto the closed ring.
  *
  * Callers MUST pair this with `phaseStarted` via try/finally — an exception
- * or an abandoned promise that skips this call leaves the slot pointing at a
- * phase that already ended, silently misattributing every LATER loop_block to
- * stale work (catalog: a slot that must clear on finish, never left to a
+ * or an abandoned promise that skips this call leaves a phantom entry in
+ * `liveBrackets` forever, silently misattributing every LATER loop_block to
+ * stale work (catalog: a bracket that must clear on finish, never left to a
  * process-lifetime latch). `resetCurrentPhaseForSession` is the session-
  * boundary backstop for the case where even try/finally doesn't run (a torn-
  * down activation whose in-flight phase never gets a chance to unwind).
  */
 export function phaseFinished(token: PhaseToken): void {
-	if (currentPhase === token) {
-		currentPhase = undefined;
-	}
+	if (!liveBrackets.delete(token)) return;
+	closedBrackets = [
+		{ phase: token.phase, startedAt: token.startedAt, closedAt: new Date().toISOString() },
+		...closedBrackets,
+	].slice(0, CLOSED_BRACKET_CAP);
 }
 
 /**
- * The phase currently executing, if any, with its own `startedAt` so a
- * consumer can compute elapsed time against "now". Returns undefined when no
- * phase has an open `phaseStarted`/`phaseFinished` bracket right now.
+ * The OLDEST phase still executing, if any — the longest-running open
+ * bracket, and so the one most likely to own a long block (#1723 review
+ * F1/F2). For `loop_block` attribution specifically, prefer
+ * `getPhaseForWindow` below instead: this function alone cannot see a phase
+ * that already closed, which is exactly what happens for a synchronous block
+ * by the time anything samples it (F3).
  */
 export function getCurrentPhase(): PhaseToken | undefined {
-	return currentPhase;
+	const oldest = liveBrackets.keys().next();
+	return oldest.done ? undefined : oldest.value;
+}
+
+export interface PhaseWindowAttribution {
+	phase: string;
+	startedAt: string;
+	/** True if this bracket was still open (live) at read time; false if it had already closed. */
+	stillRunning: boolean;
+	/** The bracket's full lifetime so far: (closedAt ?? now) − startedAt. */
+	elapsedMs: number;
 }
 
 /**
- * Session-boundary backstop: unconditionally clears the current-phase slot.
- * `phaseFinished` is the normal clear path (paired via try/finally at each
- * call site), but this module's state is process-lifetime, not session-
- * scoped, so a phase abandoned mid-flight by a torn-down activation (an abort
- * that skips straight past the `finally`, a session replaced mid-scan) would
- * otherwise leave `currentPhase` stuck forever — misattributing every
- * loop_block in every LATER session to that one stale phase. Call
- * unconditionally from every `session_start`, before any concurrent-secondary
- * gating, matching this repo's "state that must re-arm at session_start
- * cannot hide behind a process-lifetime latch" rule. Harmless on a clean
- * session (the slot is already undefined) and never destructive to a still-
- * live phase in the SAME activation, since a real in-flight phase re-marks
- * itself the next time it starts.
+ * Attribute a block's time window `[windowStartMs, windowEndMs]` to whichever
+ * bracket — live OR recently closed — overlaps it the most (#1723 review,
+ * F3: the decisive finding). A live bracket's end, for overlap purposes, is
+ * "now" (it is still running); a closed bracket's end is its own `closedAt`.
+ * Only a STRICTLY POSITIVE overlap is a candidate — a bracket that merely
+ * touches a window edge (zero overlap) proves nothing and must not win.
+ * Ties keep whichever candidate was found first (live brackets are scanned
+ * oldest-first, then the closed ring newest-first), matching
+ * `getCurrentPhase`'s "oldest wins" tie-break.
+ *
+ * This is the seam that makes the SYNCHRONOUS motivating case attributable at
+ * all: the offending phase's `finally` (a microtask) always runs before
+ * `turn_end` (a macrotask) samples, so by the time this is called the
+ * bracket has typically already moved from `liveBrackets` to
+ * `closedBrackets` — checking only the live set reads empty for exactly that
+ * case, which is why `getCurrentPhase` alone was not enough.
+ */
+export function getPhaseForWindow(
+	windowStartMs: number,
+	windowEndMs: number,
+): PhaseWindowAttribution | undefined {
+	const nowMs = Date.now();
+	let best: PhaseWindowAttribution | undefined;
+	let bestOverlapMs = 0;
+
+	const consider = (
+		phase: string,
+		startedAt: string,
+		endMs: number,
+		stillRunning: boolean,
+	): void => {
+		const startMs = Date.parse(startedAt);
+		const overlapMs = Math.min(endMs, windowEndMs) - Math.max(startMs, windowStartMs);
+		if (overlapMs <= 0) return;
+		if (overlapMs > bestOverlapMs) {
+			bestOverlapMs = overlapMs;
+			best = { phase, startedAt, stillRunning, elapsedMs: endMs - startMs };
+		}
+	};
+
+	for (const token of liveBrackets.keys()) {
+		consider(token.phase, token.startedAt, nowMs, true);
+	}
+	for (const closed of closedBrackets) {
+		consider(closed.phase, closed.startedAt, Date.parse(closed.closedAt), false);
+	}
+	return best;
+}
+
+/**
+ * Test-only: the closed-bracket ring's actual storage length, mirroring
+ * `_recentPhasesStorageLengthForTest` above — pins that `phaseFinished`'s
+ * `.slice(0, CLOSED_BRACKET_CAP)` guard is intact independent of any
+ * read-side behavior (#1723 review: "ring unbounded" mutation).
+ */
+export function _closedBracketsStorageLengthForTest(): number {
+	return closedBrackets.length;
+}
+
+/**
+ * Session-boundary backstop: unconditionally clears BOTH the live-bracket map
+ * and the closed-bracket ring. `phaseFinished` is the normal clear path
+ * (paired via try/finally at each call site), but this module's state is
+ * process-lifetime, not session-scoped, so a phase abandoned mid-flight by a
+ * torn-down activation (an abort that skips straight past the `finally`, a
+ * session replaced mid-scan) would otherwise leave a phantom bracket live
+ * forever — misattributing every loop_block in every LATER session to that
+ * one stale phase.
+ *
+ * #1723 review F4 — placement is deliberate, and DIFFERENT from
+ * `warmDispatchAtSessionStart()`: call this only once `session_start` has
+ * confirmed it is running a FULL session start (`decideSessionStart(...)
+ * .runFullSessionStart`), i.e. from BEHIND the #473 concurrent-secondary
+ * gate, not before it. The reason is the opposite of what an unconditional,
+ * "re-arm on every session_start" placement would give: this module's state
+ * is process-shared across every concurrently-live activation in the same
+ * process, exactly like the LSP fleet / runtime generation #473 already
+ * protects — a concurrent secondary's `session_start` firing while the
+ * PARENT activation has genuinely in-flight brackets must not wipe the
+ * parent's live attribution out from under it. Only a real sequential
+ * session replacement (new/resume/fork/reload confirmed by
+ * `decideSessionStart`) may safely assume no other activation still owns
+ * live brackets in this process. A concurrent secondary's OWN torn-down
+ * brackets are still covered: each caller's `phaseFinished` runs in its own
+ * try/finally, and if that activation is torn down hard enough to skip even
+ * that, the accepted cost is a stale bracket that the NEXT full session start
+ * clears — not a wrong clear of a sibling that is still working.
  */
 export function resetCurrentPhaseForSession(): void {
-	currentPhase = undefined;
+	liveBrackets.clear();
+	closedBrackets = [];
 }
 
 export function logLatency(entry: LatencyEntry): void {

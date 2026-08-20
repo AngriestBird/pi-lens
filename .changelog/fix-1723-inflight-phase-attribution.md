@@ -2,8 +2,9 @@
 section: Fixed
 ---
 
-- **`loop_block` now names a synchronous block still in progress** — a
-  current-phase slot (`clients/latency-logger.ts`) records when a dispatch
-  runner starts, not only when it finishes, so an event-loop block sampled
-  mid-scan attributes to the phase actually running instead of the previous,
-  unrelated one that already completed (#1723).
+- **`loop_block` now names a synchronous block still in progress** — every
+  dispatch runner brackets its run with a start/finish marker
+  (`clients/latency-logger.ts`), and an event-loop block attributes to
+  whichever bracket — still running, or recently closed — overlaps the
+  block's own time window the most, instead of only the previous, unrelated
+  phase that had already finished (#1723).
