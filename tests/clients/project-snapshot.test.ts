@@ -40,6 +40,7 @@ import {
 	getProjectSnapshotPath,
 	getProjectSnapshotPersistErrorForTests,
 	hydrateRuntimeFromProjectSnapshot,
+	hydrateRuntimeFromProjectSnapshotIfIdle,
 	isProjectSnapshotFresh,
 	isProjectSnapshotMetaStale,
 	loadProjectSnapshot,
@@ -54,7 +55,11 @@ import {
 } from "../../clients/project-snapshot.js";
 import type { ProjectSnapshot } from "../../clients/project-snapshot.js";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
-import { buildWordIndex, searchWordIndex } from "../../clients/word-index.js";
+import {
+	buildWordIndex,
+	searchWordIndex,
+	serializeWordIndex,
+} from "../../clients/word-index.js";
 import { createTempFile, setupTestEnvironment } from "./test-utils.js";
 import { suspendAt, waitFor } from "./interleaving-kit.js";
 
@@ -262,6 +267,136 @@ describe("project snapshot", () => {
 
 			expect(loadProjectSnapshot(cwd)?.wordIndex).toBeDefined();
 		}));
+
+	describe("hydrateRuntimeFromProjectSnapshotIfIdle (#1785 F2/F3)", () => {
+		function makeSnapshot(
+			cwd: string,
+			overrides: Partial<ProjectSnapshot> = {},
+		): ProjectSnapshot {
+			return {
+				version: PROJECT_SNAPSHOT_VERSION,
+				projectRoot: cwd,
+				generatedAt: new Date().toISOString(),
+				seq: 0,
+				files: {},
+				symbols: {},
+				reverseDeps: {},
+				cachedExports: [["fromSnapshot", path.join(cwd, "src/a.ts")]],
+				projectRulesScan: { hasCustomRules: true, rules: [] },
+				...overrides,
+			};
+		}
+
+		it("hydrates every field when the runtime is fully idle", () =>
+			withProjectDataDir((cwd) => {
+				const runtime = new RuntimeCoordinator();
+				runtime.wordIndex = null;
+				const snapshot = makeSnapshot(cwd, {
+					wordIndex: serializeWordIndex(
+						buildWordIndex([
+							{ path: path.join(cwd, "a.ts"), content: "function f() {}" },
+						]),
+					),
+				});
+
+				const hydrated = hydrateRuntimeFromProjectSnapshotIfIdle(
+					runtime,
+					snapshot,
+				);
+
+				expect(hydrated).toBe(true);
+				expect(runtime.cachedExports.get("fromSnapshot")).toBe(
+					path.join(cwd, "src/a.ts"),
+				);
+				expect(runtime.projectRulesScan.hasCustomRules).toBe(true);
+				expect(runtime.wordIndex).not.toBeNull();
+			}));
+
+		it("never nulls a live wordIndex from a snapshot with no serialized index (F2, Probe A shape)", () =>
+			withProjectDataDir((cwd) => {
+				const runtime = new RuntimeCoordinator();
+				const liveIndex = buildWordIndex([
+					{ path: path.join(cwd, "live.ts"), content: "function liveFn() {}" },
+				]);
+				runtime.wordIndex = liveIndex;
+				// Captured before the warmup built the live index above — its OWN
+				// wordIndex field is absent, exactly the #1785 Probe A shape.
+				const snapshot = makeSnapshot(cwd, { wordIndex: undefined });
+
+				const hydrated = hydrateRuntimeFromProjectSnapshotIfIdle(
+					runtime,
+					snapshot,
+				);
+
+				// wordIndex is untouched (still the live one, not nulled)...
+				expect(runtime.wordIndex).toBe(liveIndex);
+				// ...but cachedExports was still idle, so it DOES hydrate — proving
+				// the guard is per-field, not one all-or-nothing bail-out.
+				expect(hydrated).toBe(true);
+				expect(runtime.cachedExports.get("fromSnapshot")).toBe(
+					path.join(cwd, "src/a.ts"),
+				);
+			}));
+
+		it("does not clobber a live cachedExports map (F3 guard, mutation check: the guard is load-bearing)", () =>
+			withProjectDataDir((cwd) => {
+				const runtime = new RuntimeCoordinator();
+				runtime.cachedExports.set("liveOnly", path.join(cwd, "live.ts"));
+				const snapshot = makeSnapshot(cwd, {
+					cachedExports: [["fromSnapshot", path.join(cwd, "src/a.ts")]],
+				});
+
+				hydrateRuntimeFromProjectSnapshotIfIdle(runtime, snapshot);
+
+				expect(runtime.cachedExports.get("liveOnly")).toBe(
+					path.join(cwd, "live.ts"),
+				);
+				expect(runtime.cachedExports.has("fromSnapshot")).toBe(false);
+				expect(runtime.cachedExports.size).toBe(1);
+			}));
+
+		it("does not clobber a live projectRulesScan", () =>
+			withProjectDataDir((cwd) => {
+				const runtime = new RuntimeCoordinator();
+				runtime.projectRulesScan = {
+					hasCustomRules: true,
+					rules: [
+						{
+							source: "root",
+							name: "LIVE.md",
+							filePath: path.join(cwd, "LIVE.md"),
+							relativePath: "LIVE.md",
+						},
+					],
+				};
+				const snapshot = makeSnapshot(cwd, {
+					projectRulesScan: { hasCustomRules: false, rules: [] },
+				});
+
+				hydrateRuntimeFromProjectSnapshotIfIdle(runtime, snapshot);
+
+				expect(runtime.projectRulesScan.rules[0]?.name).toBe("LIVE.md");
+			}));
+
+		it("returns false and touches nothing when every field already carries live state", () =>
+			withProjectDataDir((cwd) => {
+				const runtime = new RuntimeCoordinator();
+				runtime.cachedExports.set("liveOnly", path.join(cwd, "live.ts"));
+				runtime.projectRulesScan = { hasCustomRules: true, rules: [] };
+				runtime.wordIndex = buildWordIndex([
+					{ path: path.join(cwd, "live.ts"), content: "function liveFn() {}" },
+				]);
+				const snapshot = makeSnapshot(cwd);
+
+				const hydrated = hydrateRuntimeFromProjectSnapshotIfIdle(
+					runtime,
+					snapshot,
+				);
+
+				expect(hydrated).toBe(false);
+				expect(runtime.cachedExports.has("fromSnapshot")).toBe(false);
+			}));
+	});
 
 	it("does NOT launder a stale word index into looking fresh across a seq bump (#348 seq-laundering guard)", () =>
 		withProjectDataDir((cwd) => {

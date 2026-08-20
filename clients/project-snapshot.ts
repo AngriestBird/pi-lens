@@ -1142,6 +1142,64 @@ export function hydrateRuntimeFromProjectSnapshot(
 	runtime.wordIndex = deserializeWordIndex(snapshot.wordIndex);
 }
 
+/**
+ * #1785 F2/F3: additive counterpart to `hydrateRuntimeFromProjectSnapshot`
+ * for a LATE/retroactive hydration attempt — one that runs after other work
+ * may already have populated the runtime for real (e.g. quick mode's
+ * background warmup building a genuine `wordIndex`, docCount > 0). The
+ * unconditional version above is only safe for the FIRST hydration attempt,
+ * made before anything else has run: clearing `cachedExports` and
+ * unconditionally deserializing `wordIndex` (even from `undefined`, which
+ * `deserializeWordIndex` maps to `null`) are both correct there because
+ * there is nothing yet to destroy.
+ *
+ * A late call cannot make that assumption, and the three fields are
+ * populated by INDEPENDENT tasks (quick mode's warmup only ever builds
+ * `wordIndex`; nothing else in quick mode touches `cachedExports` or
+ * `projectRulesScan`), so this guards each field on its OWN "nothing
+ * computed since" check rather than one all-or-nothing bail-out — the field
+ * a concurrent task actually populated is protected without needlessly
+ * withholding the other, still-idle fields the snapshot could still supply.
+ * A captured snapshot missing a field (e.g. no `wordIndex`, because it was
+ * captured before the live work built one) can never regress that field,
+ * because the check for "is the live field still idle" fails first. Returns
+ * whether it hydrated ANY field, so the caller can log honestly instead of
+ * claiming success when nothing changed.
+ */
+export function hydrateRuntimeFromProjectSnapshotIfIdle(
+	runtime: RuntimeCoordinator,
+	snapshot: ProjectSnapshot,
+): boolean {
+	let hydratedAnything = false;
+
+	if (runtime.cachedExports.size === 0 && snapshot.cachedExports.length > 0) {
+		runtime.cachedExports.clear();
+		for (const [name, filePath] of snapshot.cachedExports) {
+			runtime.cachedExports.set(name, filePath);
+		}
+		hydratedAnything = true;
+	}
+
+	if (
+		!runtime.projectRulesScan.hasCustomRules &&
+		runtime.projectRulesScan.rules.length === 0 &&
+		snapshot.projectRulesScan
+	) {
+		runtime.projectRulesScan = snapshot.projectRulesScan;
+		hydratedAnything = true;
+	}
+
+	// Never null a live wordIndex from an absent serialized one (#1785 F2):
+	// only assign when the runtime's copy is STILL the idle default AND the
+	// snapshot actually has one to offer.
+	if (runtime.wordIndex === null && snapshot.wordIndex) {
+		runtime.wordIndex = deserializeWordIndex(snapshot.wordIndex);
+		hydratedAnything = true;
+	}
+
+	return hydratedAnything;
+}
+
 export function saveRuntimeProjectSnapshot(args: {
 	cwd: string;
 	runtime: RuntimeCoordinator;
