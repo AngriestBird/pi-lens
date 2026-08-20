@@ -433,6 +433,19 @@ describe("getPhaseForWindow tie-break and plausibility floor (#1723 review round
 		resetCurrentPhaseForSession();
 	});
 
+	// #1723 review round 4 note: this test constructs an EXACT overlap tie,
+	// which round 4 found does not occur in production — a live bracket's end
+	// is always `nowMs` (the window's own end), so it always scores the
+	// MAXIMUM possible raw overlap, and a closed culprit can only match that
+	// by closing at the exact sample instant, which `turn_end` never does.
+	// Kept anyway: it is still a genuine (if synthetic) property of
+	// `getPhaseForWindow` — a real fraction tie must still fall back to
+	// elapsedMs, not insertion order — and it still passes under fraction
+	// ranking (fraction happens to strictly favor the hog here too, so this
+	// is no longer testing the TIE branch specifically). The LOAD-BEARING
+	// regression test for the actual production failure mode is
+	// "N1-resid" below.
+	//
 	// N1 (blocker) + N3: the round-2 tie-break kept "whichever candidate was
 	// found first" (live brackets scanned oldest-first, i.e. Map insertion
 	// order). Two brackets can tie in overlap while genuinely differing in
@@ -488,6 +501,53 @@ describe("getPhaseForWindow tie-break and plausibility floor (#1723 review round
 		expect(longLivedFirst?.phase).toBe("cpu_hog");
 		expect(hogFirst?.elapsedMs).toBe(18_770);
 		expect(longLivedFirst?.elapsedMs).toBe(18_770);
+	});
+
+	// #1723 review round 4, N1 — the LOAD-BEARING regression test. Raw overlap
+	// is capped at the window's own length, and a LIVE bracket's end is always
+	// `nowMs` — the window's own end — so a long-lived, still-running innocent
+	// bracket ALWAYS scores the maximum possible raw overlap. A genuine CLOSED
+	// culprit can only match that by closing at the exact sample instant,
+	// which `turn_end` never does: it samples milliseconds AFTER the
+	// culprit's own `finally` runs (a microtask; `turn_end` is a macrotask —
+	// see the F3 note above). Under raw-overlap ranking the culprit's overlap
+	// is therefore ALWAYS slightly short of the window's full length, and the
+	// innocent bracket wins every time — not a tie, an outright loss, exactly
+	// as the reviewer's probe demonstrated (18 270ms block sampled 5ms late:
+	// innocent wins 18270 vs 18265). Containment FRACTION fixes this
+	// structurally: the culprit's fraction stays close to 1.0 regardless of a
+	// few milliseconds of sampling lag, while the innocent bracket's fraction
+	// is diluted by its own much longer `elapsedMs` denominator.
+	it("N1-resid: a culprit sampled 5ms after its own finally still beats a still-live innocent bracket that merely contains the window", () => {
+		vi.useFakeTimers();
+		try {
+			const t0 = new Date("2026-08-19T20:03:22.575Z").getTime();
+			vi.setSystemTime(t0);
+			// Innocent: starts well before the block window, stays live through
+			// and past it (e.g. a long-poll subprocess runner parked waiting on
+			// I/O — genuinely running, genuinely innocent).
+			phaseStarted("innocent_parked_runner");
+
+			const cullStartMs = t0 + 1000;
+			vi.setSystemTime(cullStartMs);
+			const culpritToken = phaseStarted("full_scan_18s");
+			const loopMaxMs = 18_270;
+			const culpritClosedAtMs = cullStartMs + loopMaxMs;
+			vi.setSystemTime(culpritClosedAtMs);
+			phaseFinished(culpritToken); // the culprit's own `finally` runs HERE
+
+			// turn_end samples 5ms LATER — never zero, since the finally is a
+			// microtask and turn_end is scheduled as a macrotask.
+			const sampleLagMs = 5;
+			const nowMs = culpritClosedAtMs + sampleLagMs;
+			vi.setSystemTime(nowMs);
+
+			const attribution = getPhaseForWindow(nowMs - loopMaxMs, nowMs);
+			expect(attribution?.phase).toBe("full_scan_18s");
+			expect(attribution?.stillRunning).toBe(false);
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
 	// N3: a bracket leaked by a torn-down concurrent secondary (no age/size
@@ -557,6 +617,45 @@ describe("getPhaseForWindow tie-break and plausibility floor (#1723 review round
 
 			const attribution = getPhaseForWindow(t0, culpritEndMs);
 			expect(attribution).toBeUndefined();
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	// #1723 review round 4: explicit proof that N4's floor FILTERS candidates
+	// and N1's fraction ranking only RANKS the survivors — not the other way
+	// around. A 1ms bracket whose entire (tiny) lifetime sits inside the
+	// window scores a PERFECT containment fraction (1.0) — strictly higher
+	// than any real, partially-overlapping candidate could ever score — so if
+	// fraction ranking ran before the floor, this blip would always win. It
+	// must not: the floor rejects it outright before its fraction is ever
+	// compared against anything.
+	it("N4+N1 interaction: the plausibility floor filters candidates before fraction ranking sees them", () => {
+		vi.useFakeTimers();
+		try {
+			const t0 = new Date("2026-08-19T20:03:22.575Z").getTime();
+			const windowStartMs = t0;
+			const windowEndMs = t0 + 18_270; // floor = 5% of 18 270 = 913.5ms
+
+			// Real candidate: starts before the window, closes partway through
+			// it. Genuine, plausible, but an IMPERFECT (0.882) fraction.
+			vi.setSystemTime(t0 - 2_000);
+			const genuineToken = phaseStarted("genuine_partial_overlap");
+			vi.setSystemTime(t0 + 15_000);
+			phaseFinished(genuineToken); // elapsedMs 17 000, overlap 15 000
+
+			// Blip: 1ms lifetime, entirely INSIDE the window — a PERFECT (1.0)
+			// containment fraction, the best score any candidate could get.
+			vi.setSystemTime(t0 + 9_000);
+			const blipToken = phaseStarted("perfect_fraction_but_implausibly_short");
+			vi.setSystemTime(t0 + 9_001);
+			phaseFinished(blipToken); // elapsedMs 1, fraction 1.0 — but under the floor
+
+			const attribution = getPhaseForWindow(windowStartMs, windowEndMs);
+			// If fraction ranking ran BEFORE the floor, the 1.0-fraction blip
+			// would win here regardless of its implausible size. It doesn't:
+			// the floor removes it from consideration entirely.
+			expect(attribution?.phase).toBe("genuine_partial_overlap");
 		} finally {
 			vi.useRealTimers();
 		}

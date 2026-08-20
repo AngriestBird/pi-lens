@@ -458,4 +458,80 @@ describe("runRunner in-flight phase attribution against real parallel groups (#1
 		},
 		2_000,
 	);
+
+	// #1723 review round 4, N1 (E1-real): the LOAD-BEARING dispatcher-level
+	// reproduction. Round 3's flipped-order tests above never actually
+	// exercised the N1-resid failure mode — by the time either sample ran,
+	// nothing else was still LIVE to compete with the (already closed) hog.
+	// This runs a genuinely-live "innocent" runner ALONGSIDE the hog — parked
+	// on a promise this test deliberately never resolves during the
+	// assertion — so when the hog closes and `getPhaseForWindow` samples
+	// shortly after (a REAL macrotask flush, not a hand-tuned tie), there is
+	// an actual live bracket whose raw overlap is capped at the window's own
+	// full length, competing against a just-closed culprit whose raw overlap
+	// is always a little short of that. Round 3's code named the innocent
+	// runner here; the fraction-ranked fix must name the hog.
+	it(
+		"E1-real: getPhaseForWindow names the hog over a still-live innocent runner sampled shortly after the hog's own finally",
+		async () => {
+			let hogResolve!: (r: RunnerResult) => void;
+			const hogPromise = new Promise<RunnerResult>((resolve) => {
+				hogResolve = resolve;
+			});
+			let innocentResolve!: (r: RunnerResult) => void;
+			const innocentPromise = new Promise<RunnerResult>((resolve) => {
+				innocentResolve = resolve; // deliberately NOT resolved until cleanup
+			});
+
+			registry.register({
+				id: "cpu-hog",
+				appliesTo: ["jsts"],
+				priority: 10,
+				enabledByDefault: true,
+				timeoutMs: 5_000,
+				async run(): Promise<RunnerResult> {
+					return hogPromise;
+				},
+			});
+			registry.register({
+				id: "innocent-parked-runner",
+				appliesTo: ["jsts"],
+				priority: 11,
+				enabledByDefault: true,
+				timeoutMs: 5_000,
+				async run(): Promise<RunnerResult> {
+					return innocentPromise;
+				},
+			});
+
+			const ctx = createMockContext("test.ts");
+			const dispatchStartMs = Date.now();
+			// Fire both groups in parallel; do NOT await this promise — the
+			// innocent runner's group never resolves during the assertion
+			// window, so dispatchForFile's own Promise.all would hang forever.
+			const dispatchPromise = dispatchForFile(ctx, [
+				{ mode: "all", runnerIds: ["innocent-parked-runner"] },
+				{ mode: "all", runnerIds: ["cpu-hog"] },
+			]);
+
+			// Let both groups' phaseStarted calls land, then let the hog run for
+			// a real (short) duration before resolving it.
+			await new Promise((resolve) => setTimeout(resolve, 50));
+			hogResolve({ status: "succeeded", diagnostics: [], semantic: "warning" });
+
+			// Real, unforced sampling lag after the hog's own runRunner
+			// `finally` (phaseFinished) — the exact shape of the bug: never
+			// zero, and the innocent runner is still genuinely live throughout.
+			await new Promise((resolve) => setTimeout(resolve, 20));
+			const sampledAtMs = Date.now();
+
+			const attribution = getPhaseForWindow(dispatchStartMs, sampledAtMs);
+			expect(attribution?.phase).toBe("cpu-hog");
+			expect(attribution?.stillRunning).toBe(false);
+
+			innocentResolve({ status: "succeeded", diagnostics: [], semantic: "warning" });
+			await dispatchPromise;
+		},
+		2_000,
+	);
 });

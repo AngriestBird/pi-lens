@@ -321,31 +321,41 @@ const MIN_PLAUSIBLE_ELAPSED_FRACTION = 0.05;
 
 /**
  * Attribute a block's time window `[windowStartMs, windowEndMs]` to whichever
- * bracket — live OR recently closed — overlaps it the most (#1723 review,
- * F3: the decisive finding). A live bracket's end, for overlap purposes, is
+ * bracket — live OR recently closed — best explains it (#1723 review, F3:
+ * the decisive finding). A live bracket's end, for overlap purposes, is
  * "now" (it is still running); a closed bracket's end is its own `closedAt`.
  *
- * Two safeguards refined in review round 3:
- *   - N4: a candidate whose own `elapsedMs` is under
- *     `MIN_PLAUSIBLE_ELAPSED_FRACTION` of the window is skipped before it can
- *     ever be compared — see that constant's doc comment.
- *   - N1/N3: on an exact overlap TIE, the candidate with the SMALLER
- *     `elapsedMs` wins — a phase whose entire lifetime roughly IS the window
- *     is a more plausible cause than one that merely CONTAINS the window (a
- *     long-lived innocent bracket still running throughout it, or a leaked
- *     bracket per N3). An earlier version broke this tie by SCAN ORDER
- *     (whichever candidate was found first), which is not a real signal —
- *     flipping which runner group started first silently changed the named
- *     culprit for the identical scenario.
+ * Ranked by CONTAINMENT FRACTION (`overlapMs / elapsedMs`), not raw overlap
+ * (#1723 review round 4, N1 — the actual fix, after round 3's elapsedMs
+ * tie-break turned out not to engage in practice). Raw overlap is capped at
+ * the window's own length, and a LIVE bracket's end is always `nowMs` — the
+ * window's own end — so a long-lived, still-running INNOCENT bracket always
+ * scores the maximum possible raw overlap. A genuine CLOSED culprit can only
+ * match that by closing at the exact sample instant, which `turn_end` never
+ * does: it samples milliseconds AFTER the culprit's `finally` runs, so the
+ * culprit's raw overlap is always slightly short of the window's full length
+ * — round 3's "exact tie" tie-break never engaged, and the innocent bracket
+ * won every time on raw overlap alone. Fraction fixes this structurally: a
+ * culprit whose own lifetime roughly IS the window scores close to 1.0
+ * regardless of a few milliseconds of sampling lag, while a long-lived
+ * innocent bracket that merely CONTAINS the window scores meaningfully
+ * lower (its `elapsedMs` denominator is bigger). The round-3 elapsedMs
+ * comparison is kept as the tie-break for a genuine FRACTION tie (two
+ * candidates scoring identically), not as the primary ranking.
  *
- * A candidate needs a STRICTLY POSITIVE overlap: with `bestOverlapMs` seeded
- * at 0 and the comparison below requiring `overlapMs > bestOverlapMs` to
+ * Composes with N4's plausibility floor below in the natural order: the
+ * floor FILTERS candidates (an implausibly short bracket is never even a
+ * candidate for fraction ranking); fraction then RANKS the survivors. A
+ * bracket that clears the floor always has a well-defined fraction in (0, 1].
+ *
+ * A candidate needs a STRICTLY POSITIVE overlap: with `bestFraction` seeded
+ * at 0 and the comparison below requiring `fraction > bestFraction` to
  * accept a NEW best (a tie only ever refines an EXISTING one), a zero or
- * negative overlap can never win — no separate early-return guard is needed
- * to enforce that; do not re-add one without also adding a genuine case it
- * changes the answer for (#1723 review N2: a former such guard proved dead
- * code, and its "mutation-proof" test could not fail under any mutation of
- * it).
+ * negative overlap (and so a zero-or-negative fraction) can never win — no
+ * separate early-return guard is needed to enforce that; do not re-add one
+ * without also adding a genuine case it changes the answer for (#1723 review
+ * N2: a former such guard proved dead code, and its "mutation-proof" test
+ * could not fail under any mutation of it).
  *
  * This is the seam that makes the SYNCHRONOUS motivating case attributable at
  * all: the offending phase's `finally` (a microtask) always runs before
@@ -353,6 +363,16 @@ const MIN_PLAUSIBLE_ELAPSED_FRACTION = 0.05;
  * bracket has typically already moved from `liveBrackets` to
  * `closedBrackets` — checking only the live set reads empty for exactly that
  * case, which is why `getCurrentPhase` alone was not enough.
+ *
+ * KNOWN RESIDUAL (#1723 review round 4, stated not fixed): a leaked bracket
+ * (see `phaseFinished`'s doc comment on N3) with NO competing candidate still
+ * wins any window it fully contains, however many times over its own
+ * lifetime exceeds the window — fraction ranking only demotes a leak when
+ * something else is competing for the same window. A ceiling on elapsedMs
+ * relative to the window length (e.g. reject a candidate whose lifetime is
+ * some large multiple of the window) would close this, at the cost of a
+ * second magic number; left open pending a concrete false-positive to size
+ * it against.
  *
  * Caveat for an automated consumer (e.g. #1549's loop_block ↔
  * lsp_diagnostics_timeout correlation): the window's own end is `now` at
@@ -371,7 +391,7 @@ export function getPhaseForWindow(
 	const windowLengthMs = windowEndMs - windowStartMs;
 	const minPlausibleElapsedMs = windowLengthMs * MIN_PLAUSIBLE_ELAPSED_FRACTION;
 	let best: PhaseWindowAttribution | undefined;
-	let bestOverlapMs = 0;
+	let bestFraction = 0;
 
 	const consider = (
 		phase: string,
@@ -383,11 +403,12 @@ export function getPhaseForWindow(
 		const elapsedMs = endMs - startMs;
 		if (elapsedMs < minPlausibleElapsedMs) return; // N4: implausibly short to be the cause
 		const overlapMs = Math.min(endMs, windowEndMs) - Math.max(startMs, windowStartMs);
-		const isNewBest = overlapMs > bestOverlapMs;
+		const fraction = overlapMs / elapsedMs;
+		const isNewBest = fraction > bestFraction;
 		const winsTie =
-			best !== undefined && overlapMs === bestOverlapMs && elapsedMs < best.elapsedMs;
+			best !== undefined && fraction === bestFraction && elapsedMs < best.elapsedMs;
 		if (isNewBest || winsTie) {
-			bestOverlapMs = overlapMs;
+			bestFraction = fraction;
 			best = { phase, startedAt, stillRunning, elapsedMs };
 		}
 	};
