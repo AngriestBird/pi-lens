@@ -782,6 +782,19 @@ async function performNpmRefresh(
 let refreshInFlight: Promise<ManagedToolRefreshOutcome> | null = null;
 
 /**
+ * A yield tap: called (and awaited) at every point in the walk where a
+ * `handleSessionStart` reset could land mid-run. Production never passes one
+ * — `noopTap` costs one no-op function call per await site. `tests/support/
+ * reset-explorer.ts` fires `resetManagedToolRefreshSession` at a chosen tap
+ * to prove the R2-F1 class (#1746) can't recur: see
+ * `runManagedToolRefreshForExploration` below and
+ * `tests/clients/installer/managed-tool-refresh.test.ts`'s "reset-interleaving
+ * explorer (#1840)" block.
+ */
+type RefreshTap = () => void | Promise<void>;
+const noopTap: RefreshTap = () => {};
+
+/**
  * Run one session's worth of managed-tool refresh. Never throws: the caller is
  * a background timer with no one to report to.
  *
@@ -810,15 +823,30 @@ export function runManagedToolRefresh(
 	// this `finally` runs the slot still holds `run`. #1746 review round 2 proved
 	// that branch unreachable (mutating it to an unconditional clear failed no
 	// test), and a branch no input can take is not a guard.
-	const run = executeManagedToolRefresh(now).finally(() => {
+	const run = executeManagedToolRefresh(now, noopTap).finally(() => {
 		refreshInFlight = null;
 	});
 	refreshInFlight = run;
 	return run;
 }
 
+/**
+ * Test-only entry point for `tests/support/reset-explorer.ts`. Calls
+ * `executeManagedToolRefresh` directly, bypassing the `refreshInFlight`
+ * singleton above — the explorer runs one walk per await point and each must
+ * be independent, not coalesced into the previous one. Never call this from
+ * production code; production always goes through `runManagedToolRefresh`.
+ */
+export function runManagedToolRefreshForExploration(
+	now: number,
+	tap: RefreshTap,
+): Promise<ManagedToolRefreshOutcome> {
+	return executeManagedToolRefresh(now, tap);
+}
+
 async function executeManagedToolRefresh(
 	now: number,
+	tap: RefreshTap = noopTap,
 ): Promise<ManagedToolRefreshOutcome> {
 	if (process.env.PI_LENS_DISABLE_TOOL_REFRESH === "1") {
 		return { skipped: "disabled", refreshed: [] };
@@ -842,12 +870,14 @@ async function executeManagedToolRefresh(
 
 	try {
 		const candidates = await installedRefreshCandidates();
+		await tap();
 		if (candidates.length === 0) {
 			releaseReservation();
 			return { skipped: "no-candidates", refreshed: [] };
 		}
 
 		const read = await readManagedToolRefreshState();
+		await tap();
 		if (read.status === "unreadable") {
 			// Unknown cadence. Refreshing nothing is the only answer that neither
 			// drifts forever nor bursts every session; the ledger row is what makes
@@ -900,6 +930,7 @@ async function executeManagedToolRefresh(
 				refreshed.push(
 					await refreshOne(candidate, read.state.tools[candidate.toolId], now),
 				);
+				await tap();
 			} catch (err) {
 				recordDegradationOnce({
 					kind: "managed-tool-refresh",
