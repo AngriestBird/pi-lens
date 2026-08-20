@@ -48,6 +48,14 @@ function stripAnsi(value: string): string {
 export interface ShellCommandSegment {
 	tokens: string[];
 	unsupported: boolean;
+	/**
+	 * Set to "pipe" when this segment's output feeds the NEXT segment via an
+	 * unquoted `|` (used by #1908 to detect a truncating pipe tail after
+	 * grep). Undefined for every other terminator (`;`, `&&`, `||`, `&`, EOF)
+	 * — those consumers don't need it and adding cases here is a no-op for
+	 * them.
+	 */
+	terminator?: "pipe";
 }
 
 export function tokenizeShellCommand(command: string): ShellCommandSegment[] {
@@ -63,10 +71,10 @@ export function tokenizeShellCommand(command: string): ShellCommandSegment[] {
 		word = "";
 		atTokenStart = true;
 	};
-	const flushSegment = () => {
+	const flushSegment = (terminator?: "pipe") => {
 		flushWord();
 		if (tokens.length > 0 || unsupported)
-			segments.push({ tokens, unsupported });
+			segments.push({ tokens, unsupported, terminator });
 		tokens = [];
 		unsupported = false;
 		atTokenStart = true;
@@ -131,10 +139,14 @@ export function tokenizeShellCommand(command: string): ShellCommandSegment[] {
 		}
 		if (ch === ";" || ch === "\n" || ch === "|" || ch === "&") {
 			flushWord();
+			let terminator: "pipe" | undefined;
 			if (ch === "|" && next === "|") i++;
 			else if (ch === "&" && next === "&") i++;
-			else if (ch === "|" || ch === "&") unsupported = true;
-			flushSegment();
+			else if (ch === "|") {
+				unsupported = true;
+				terminator = "pipe";
+			} else if (ch === "&") unsupported = true;
+			flushSegment(terminator);
 			continue;
 		}
 		if (ch === "<" || ch === ">") {
@@ -509,6 +521,70 @@ function parseGrepLineWithoutFile(
 	return { file, startLine: lineNumber, endLine: lineNumber };
 }
 
+/**
+ * Verbs that cut a piped stream short by LINE COUNT (#1908): `head`/`tail`
+ * (even bare, since both default to a 10-line window) and a `sed` script
+ * carrying a `q` command (quits after the addressed line). Either can leave
+ * only part of a `grep -C` block's printed context in the command's actual
+ * stdout, so a hit that survives the cut cannot be trusted to carry the
+ * context grep's flags alone promised.
+ *
+ * Per-tail credit policy, decided per pipe stage rather than per verb:
+ *   - `head`/`tail`/`sed q` downstream of a matching grep → the match-line
+ *     survives truncation unpredictably, so credit falls back to
+ *     match-line-only (the same conservative default used for unparseable
+ *     commands) rather than trusting the declared -A/-B/-C flags.
+ *   - `wc`, `sort`, `uniq -c`, and similar STREAM-CONSUMING or reordering
+ *     tails need no special case: they replace grep's `file:line:` shaped
+ *     lines with a count or reordered text, so `parseGrepOutputSearchReads`
+ *     already finds zero (or renumbered-away) matches in the real captured
+ *     stdout and credits nothing. Only a verb that can leave an UNMODIFIED
+ *     `file:line:` prefix in place while still cutting lines needs handling
+ *     here.
+ *   - A pass-through filter (`cat`, `grep -v`, ...) between grep and a
+ *     truncating tail still counts: the walk below follows the whole
+ *     pipe chain, not just the immediate next segment.
+ *   - Out of scope, deliberately: `sed -n 'Np'`/range-address filtering
+ *     without `q` also truncates but isn't in the issue's stated scope
+ *     (#1908) — revisit if it recurs in the field.
+ */
+const TRUNCATING_TAIL_VERBS = new Set(["head", "tail"]);
+
+function isSedQuitCommand(args: string[]): boolean {
+	for (const arg of args) {
+		const token = stripQuotes(arg);
+		if (token.startsWith("-")) continue;
+		// A `q` command anchored at the start of the script or after a `;`/
+		// newline separator, optionally preceded by a numeric/`$` address
+		// (`q`, `1q`, `$q`, `1,3p;q`). Deliberately not a full sed parser.
+		if (/(^|[;\n])\s*(\d+|\$)?\s*q\b/.test(token)) return true;
+	}
+	return false;
+}
+
+function isTruncatingTailCommand(tokens: string[]): boolean {
+	const verb = path.basename(stripQuotes(tokens[0] ?? ""));
+	if (TRUNCATING_TAIL_VERBS.has(verb)) return true;
+	if (verb === "sed") return isSedQuitCommand(tokens.slice(1));
+	return false;
+}
+
+/**
+ * True when the grep segment starting at `index` feeds — directly or through
+ * a chain of pipes — into a truncating tail (#1908).
+ */
+function grepPipesIntoTruncatingTail(
+	segments: ShellCommandSegment[],
+	index: number,
+): boolean {
+	if (segments[index]?.terminator !== "pipe") return false;
+	for (let j = index + 1; j < segments.length; j++) {
+		if (isTruncatingTailCommand(segments[j].tokens)) return true;
+		if (segments[j].terminator !== "pipe") return false;
+	}
+	return false;
+}
+
 function collectGrepCommandFiles(
 	command: string,
 	cwd: string,
@@ -524,7 +600,14 @@ function collectGrepCommandFiles(
 	// contributing grep printed, so no line is credited that a hit from the
 	// narrowest grep never delivered.
 	let context: GrepContextLines | undefined;
-	for (const tokens of commandSegments(command)) {
+	// #1908: if ANY contributing grep pipes into a truncating tail, fall back
+	// to match-line-only credit for the whole command — the parsed hits carry
+	// no segment identity, so a per-segment override isn't representable in
+	// the aggregate `context` this function returns.
+	let truncated = false;
+	const segments = tokenizeShellCommand(command);
+	for (let i = 0; i < segments.length; i++) {
+		const tokens = segments[i].tokens;
 		const verb = path.basename(stripQuotes(tokens[0] ?? ""));
 		if (verb !== "grep" && verb !== "egrep" && verb !== "fgrep") continue;
 		const args = tokens.slice(1);
@@ -538,11 +621,12 @@ function collectGrepCommandFiles(
 				}
 			: segmentContext;
 		for (const file of extractGrepSearchFiles(args, cwd)) files.add(file);
+		if (grepPipesIntoTruncatingTail(segments, i)) truncated = true;
 	}
 	return {
 		hasLineNumberGrep,
 		files,
-		context: context ?? { before: 0, after: 0 },
+		context: truncated ? { before: 0, after: 0 } : (context ?? { before: 0, after: 0 }),
 	};
 }
 

@@ -988,6 +988,74 @@ describe("ReadGuard", () => {
 			}
 		});
 
+		// ── #1913: eviction telemetry must survive at default verbosity ──────
+
+		it("emits a bounded read_cap_trimmed record when eviction fires", () => {
+			const env = setupTestEnvironment("read-guard-cap-trim-event-");
+			try {
+				const filePath = path.join(env.tmpDir, "hot.ts");
+				fs.writeFileSync(
+					filePath,
+					Array.from({ length: 400 }, (_, i) => `line${i + 1}`).join("\n"),
+				);
+				const guard = createReadGuard("test-session");
+				for (let i = 1; i <= 129; i++) {
+					guard.recordRead(
+						createReadRecord(filePath, {
+							requestedOffset: i,
+							requestedLimit: 1,
+							effectiveOffset: i,
+							effectiveLimit: 1,
+						}),
+					);
+				}
+				const trimCalls = vi
+					.mocked(logReadGuardEvent)
+					.mock.calls.filter(([e]) => e.event === "read_cap_trimmed");
+				expect(trimCalls).toHaveLength(1);
+				expect(trimCalls[0][0]).toMatchObject({
+					event: "read_cap_trimmed",
+					filePath: normalizeFilePath(filePath),
+					metadata: {
+						evictedRecordCount: 1,
+						evictedGenuineCount: 1,
+						evictedCreditCount: 0,
+						rawReadCountForFile: 129,
+					},
+				});
+			} finally {
+				env.cleanup();
+			}
+		});
+
+		it("emits no read_cap_trimmed record when the cap is never reached", () => {
+			const env = setupTestEnvironment("read-guard-cap-no-trim-event-");
+			try {
+				const filePath = path.join(env.tmpDir, "warm.ts");
+				fs.writeFileSync(
+					filePath,
+					Array.from({ length: 40 }, (_, i) => `line${i + 1}`).join("\n"),
+				);
+				const guard = createReadGuard("test-session");
+				for (let i = 1; i <= 5; i++) {
+					guard.recordRead(
+						createReadRecord(filePath, {
+							requestedOffset: i,
+							requestedLimit: 1,
+							effectiveOffset: i,
+							effectiveLimit: 1,
+						}),
+					);
+				}
+				const trimCalls = vi
+					.mocked(logReadGuardEvent)
+					.mock.calls.filter(([e]) => e.event === "read_cap_trimmed");
+				expect(trimCalls).toHaveLength(0);
+			} finally {
+				env.cleanup();
+			}
+		});
+
 		it("keeps the newest read usable for coverage after the cap trims", () => {
 			const env = setupTestEnvironment("read-guard-record-cap-cover-");
 			try {

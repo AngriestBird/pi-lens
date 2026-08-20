@@ -226,12 +226,30 @@ const READ_GUARD_MAX_RECORDS_PER_FILE = 128;
  * Records are trimmed IN PLACE: `EditRecord.precedingReads` holds a reference
  * to this same array, so a replacement array would silently detach it.
  */
-function enforceRecordCapForFile(records: ReadRecord[]): number {
-	if (records.length <= READ_GUARD_MAX_RECORDS_PER_FILE) return 0;
+interface RecordCapTrimResult {
+	evictedCount: number;
+	/** Of `evictedCount`, how many were search-credit records (spent first). */
+	evictedCreditCount: number;
+	/** Of `evictedCount`, how many were genuine (non-credit) reads. */
+	evictedGenuineCount: number;
+}
+
+const NO_TRIM: RecordCapTrimResult = {
+	evictedCount: 0,
+	evictedCreditCount: 0,
+	evictedGenuineCount: 0,
+};
+
+function enforceRecordCapForFile(records: ReadRecord[]): RecordCapTrimResult {
+	if (records.length <= READ_GUARD_MAX_RECORDS_PER_FILE) return NO_TRIM;
 	const excess = records.length - READ_GUARD_MAX_RECORDS_PER_FILE;
 	const evicted = new Set<number>();
+	let evictedCreditCount = 0;
 	for (let i = 0; i < records.length && evicted.size < excess; i++) {
-		if (records[i].searchCredit !== undefined) evicted.add(i);
+		if (records[i].searchCredit !== undefined) {
+			evicted.add(i);
+			evictedCreditCount++;
+		}
 	}
 	for (let i = 0; i < records.length && evicted.size < excess; i++) {
 		evicted.add(i);
@@ -239,7 +257,11 @@ function enforceRecordCapForFile(records: ReadRecord[]): number {
 	const kept = records.filter((_, i) => !evicted.has(i));
 	records.length = 0;
 	for (const record of kept) records.push(record);
-	return excess;
+	return {
+		evictedCount: excess,
+		evictedCreditCount,
+		evictedGenuineCount: excess - evictedCreditCount,
+	};
 }
 
 /**
@@ -646,7 +668,8 @@ export class ReadGuard {
 		// eviction starts, so it stops showing growth. `rawReadCountForFile` keeps
 		// the real arrival count observable alongside `evictedRecordCount`.
 		const rawReadCountForFile = arr.length;
-		const evictedRecordCount = enforceRecordCapForFile(arr);
+		const { evictedCount: evictedRecordCount, evictedCreditCount, evictedGenuineCount } =
+			enforceRecordCapForFile(arr);
 		this.touchFile(storedRecord.filePath);
 		this.enforceFileCap();
 
@@ -682,6 +705,27 @@ export class ReadGuard {
 				}),
 			},
 		});
+
+		// #1913: the eviction counters above ride `read_recorded`, which is
+		// gated behind PI_LENS_READ_GUARD_VERBOSE — off by default. That left a
+		// live eviction regression with no trace at default verbosity. Evictions
+		// are rare BY CONSTRUCTION (bounded by READ_GUARD_MAX_RECORDS_PER_FILE
+		// overflowing), so one always-on line per trim event is cheap; emit it
+		// as its own event and add it to read-guard-logger's always-log list
+		// instead of gating it, while every other per-read line stays gated.
+		if (evictedRecordCount > 0) {
+			logReadGuardEvent({
+				event: "read_cap_trimmed",
+				sessionId: this.sessionId,
+				filePath: storedRecord.filePath,
+				metadata: {
+					evictedRecordCount,
+					evictedCreditCount,
+					evictedGenuineCount,
+					rawReadCountForFile,
+				},
+			});
+		}
 
 		// Also update FileTime stamp for this file
 		this.fileTime.read(storedRecord.filePath);

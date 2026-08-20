@@ -247,6 +247,96 @@ describe("extractGrepSearchReadsFromOutput", () => {
 			{ file: a, startLine: 9, endLine: 9, contextBefore: 0, contextAfter: 0 },
 		]);
 	});
+
+	// ── #1908: a truncating pipe tail severs the flags-to-delivery link ──────
+
+	it("falls back to match-line-only credit when piped through head", () => {
+		const a = touchLines("a.ts", 40);
+		expect(
+			extractGrepSearchReadsFromOutput(
+				`grep -n -C2 foo ${a} | head -1`,
+				tmp,
+				"9:foo",
+			),
+		).toEqual([
+			{ file: a, startLine: 9, endLine: 9, contextBefore: 0, contextAfter: 0 },
+		]);
+	});
+
+	it("falls back to match-line-only credit when piped through tail", () => {
+		const a = touchLines("a.ts", 40);
+		expect(
+			extractGrepSearchReadsFromOutput(
+				`grep -n -C2 foo ${a} | tail -n 1`,
+				tmp,
+				"9:foo",
+			),
+		).toEqual([
+			{ file: a, startLine: 9, endLine: 9, contextBefore: 0, contextAfter: 0 },
+		]);
+	});
+
+	it("falls back to match-line-only credit when piped through sed q", () => {
+		const a = touchLines("a.ts", 40);
+		expect(
+			extractGrepSearchReadsFromOutput(
+				`grep -n -C2 foo ${a} | sed q`,
+				tmp,
+				"9:foo",
+			),
+		).toEqual([
+			{ file: a, startLine: 9, endLine: 9, contextBefore: 0, contextAfter: 0 },
+		]);
+	});
+
+	it("still credits full context through a non-truncating pipe tail", () => {
+		const a = touchLines("a.ts", 40);
+		expect(
+			extractGrepSearchReadsFromOutput(
+				`grep -n -C2 foo ${a} | sort`,
+				tmp,
+				"9:foo",
+			),
+		).toEqual([
+			{ file: a, startLine: 9, endLine: 9, contextBefore: 2, contextAfter: 2 },
+		]);
+	});
+
+	it("credits nothing when piped through wc, since the count carries no lines", () => {
+		const a = touchLines("a.ts", 40);
+		// `wc` replaces grep's `file:line:` output with a bare count, so the
+		// output-line parser already finds zero matches — no special-casing
+		// needed for #1908's "shows NO lines" policy.
+		expect(
+			extractGrepSearchReadsFromOutput(
+				`grep -n -C2 foo ${a} | wc -l`,
+				tmp,
+				"1",
+			),
+		).toEqual([]);
+	});
+
+	it("follows a pass-through filter before the truncating tail", () => {
+		const a = touchLines("a.ts", 40);
+		expect(
+			extractGrepSearchReadsFromOutput(
+				`grep -n -C2 foo ${a} | cat | head -1`,
+				tmp,
+				"9:foo",
+			),
+		).toEqual([
+			{ file: a, startLine: 9, endLine: 9, contextBefore: 0, contextAfter: 0 },
+		]);
+	});
+
+	it("credits full context when the command is not piped at all", () => {
+		const a = touchLines("a.ts", 40);
+		expect(
+			extractGrepSearchReadsFromOutput(`grep -n -C2 foo ${a}`, tmp, "9:foo"),
+		).toEqual([
+			{ file: a, startLine: 9, endLine: 9, contextBefore: 2, contextAfter: 2 },
+		]);
+	});
 });
 
 describe("parseGrepContextLines", () => {
