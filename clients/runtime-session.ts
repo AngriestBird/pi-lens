@@ -59,6 +59,7 @@ import {
 } from "./project-changes.js";
 import {
 	getProjectSnapshotPath,
+	getProjectSnapshotLegacyPath,
 	hydrateRuntimeFromProjectSnapshot,
 	hydrateRuntimeFromProjectSnapshotIfIdle,
 	isProjectSnapshotFresh,
@@ -328,11 +329,16 @@ function loadSnapshotBodyUnlessStale(args: {
 function describeSnapshotMiss(
 	snapshot: ProjectSnapshot | null,
 	currentProjectSeq: number,
+	args: { skippedStale: boolean; bodyPresent: boolean },
 ): string {
-	if (!snapshot) return "missing";
+	if (args.skippedStale) return "stale-meta-gate";
+	if (!snapshot) return args.bodyPresent ? "invalid-body" : "missing";
 	if (snapshot.seq !== currentProjectSeq) {
 		return `stale(seq=${snapshot.seq}, current=${currentProjectSeq})`;
 	}
+	// Defensive-only arm: parseSnapshot rejects incompatible versions, and a
+	// same-sequence parsed snapshot is fresh. Keep this classification explicit
+	// so a future loader change cannot collapse it into a generic miss.
 	return "incompatible";
 }
 
@@ -341,6 +347,7 @@ function logProjectSnapshotProbe(args: {
 	root: string;
 	currentProjectSeq: number;
 	snapshot: ProjectSnapshot | null;
+	missReason: string;
 }): void {
 	args.dbg(
 		`project_snapshot: probe root=${args.root} path=${getProjectSnapshotPath(args.root)} currentSeq=${args.currentProjectSeq}`,
@@ -351,7 +358,7 @@ function logProjectSnapshotProbe(args: {
 		);
 	} else {
 		args.dbg(
-			`project_snapshot: miss reason=${describeSnapshotMiss(args.snapshot, args.currentProjectSeq)}`,
+			`project_snapshot: miss reason=${args.missReason}`,
 		);
 	}
 }
@@ -2254,6 +2261,9 @@ export async function handleSessionStart(
 		} catch {
 			// Missing snapshots are the normal cold-start case.
 		}
+		const snapshotBodyPresent =
+			nodeFs.existsSync(snapshotPath) ||
+			nodeFs.existsSync(getProjectSnapshotLegacyPath(snapshotRoot));
 		const snapshotGate = loadSnapshotBodyUnlessStale({
 			root: snapshotRoot,
 			currentProjectSeq: freshnessSeq,
@@ -2261,6 +2271,10 @@ export async function handleSessionStart(
 		});
 		const snapshot = snapshotGate.snapshot;
 		const snapshotFresh = isProjectSnapshotFresh(snapshot, freshnessSeq);
+		const snapshotMissReason = describeSnapshotMiss(snapshot, freshnessSeq, {
+			skippedStale: snapshotGate.skippedStale,
+			bodyPresent: snapshotBodyPresent,
+		});
 		logLatency({
 			type: "phase",
 			phase: "session_start_snapshot_load",
@@ -2271,6 +2285,7 @@ export async function handleSessionStart(
 				bytes: snapshotBytes,
 				fresh: snapshotFresh,
 				seq: snapshot?.seq ?? null,
+				reason: snapshotFresh ? undefined : snapshotMissReason,
 				...(snapshotGate.skippedStale ? { skippedStale: true } : {}),
 				...(timedOut ? { sequenceUnknown: true } : {}),
 			},
@@ -2280,6 +2295,7 @@ export async function handleSessionStart(
 			root: snapshotRoot,
 			currentProjectSeq: freshnessSeq,
 			snapshot,
+			missReason: snapshotMissReason,
 		});
 		if (snapshotFresh) {
 			hydrateRuntimeFromProjectSnapshot(runtime, snapshot);
@@ -2381,6 +2397,9 @@ export async function handleSessionStart(
 	} catch {
 		// Missing snapshots are the normal cold-start case.
 	}
+	const snapshotBodyPresent =
+		nodeFs.existsSync(snapshotPath) ||
+		nodeFs.existsSync(getProjectSnapshotLegacyPath(snapshotRoot));
 	const snapshotGate = loadSnapshotBodyUnlessStale({
 		root: snapshotRoot,
 		currentProjectSeq: freshnessSeq,
@@ -2388,6 +2407,10 @@ export async function handleSessionStart(
 	});
 	const snapshot = snapshotGate.snapshot;
 	const snapshotFresh = isProjectSnapshotFresh(snapshot, freshnessSeq);
+	const snapshotMissReason = describeSnapshotMiss(snapshot, freshnessSeq, {
+		skippedStale: snapshotGate.skippedStale,
+		bodyPresent: snapshotBodyPresent,
+	});
 	logLatency({
 		type: "phase",
 		phase: "session_start_snapshot_load",
@@ -2398,6 +2421,7 @@ export async function handleSessionStart(
 			bytes: snapshotBytes,
 			fresh: snapshotFresh,
 			seq: snapshot?.seq ?? null,
+			reason: snapshotFresh ? undefined : snapshotMissReason,
 			...(snapshotGate.skippedStale ? { skippedStale: true } : {}),
 			...(timedOut ? { sequenceUnknown: true } : {}),
 		},
@@ -2407,6 +2431,7 @@ export async function handleSessionStart(
 		root: snapshotRoot,
 		currentProjectSeq: freshnessSeq,
 		snapshot,
+		missReason: snapshotMissReason,
 	});
 	const freshSnapshot = snapshotFresh ? snapshot : null;
 	if (freshSnapshot) {
