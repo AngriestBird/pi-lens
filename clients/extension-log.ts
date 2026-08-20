@@ -252,10 +252,10 @@ function inCaptureWindow<T extends ConsoleFn | ((...args: never[]) => unknown)>(
 	// assignable to an arbitrary function type. The invariant is the
 	// pass-through itself: change the body to alter arguments or the return
 	// value and this cast stops being true.
-	return function (this: unknown, ...args: unknown[]): unknown {
+	return function (this: unknown, ...args: unknown[]): ReturnType<T> {
 		return runInConsoleCaptureWindow(() =>
 			(fn as (...a: unknown[]) => unknown).apply(this, args),
-		);
+		) as ReturnType<T>;
 	} as unknown as T;
 }
 
@@ -306,9 +306,9 @@ function isCaptureSeam(prop: PropertyKey): boolean {
  * shape 5), and these definitions are pi-lens's own, built just above the
  * register call.
  */
-function wrapFunctionsInPlace(value: unknown): unknown {
+function wrapFunctionsInPlace<T>(value: T): T {
 	if (typeof value === "function") {
-		return inCaptureWindow(value as ConsoleFn);
+		return inCaptureWindow(value as ConsoleFn) as T;
 	}
 	if (value === null || typeof value !== "object" || Array.isArray(value)) {
 		return value;
@@ -378,7 +378,7 @@ function assignWrapped(
 export function withConsoleCaptureWindows<T extends object>(api: T): T {
 	const wrapperCache = new Map<PropertyKey, unknown>();
 	const proxy: T = new Proxy(api, {
-		get(target, prop): unknown {
+		get(target, prop) {
 			// A non-configurable, non-writable OWN data property is a proxy
 			// invariant: the get trap MUST return the exact value the target
 			// holds, or the engine throws a TypeError on read. Degrade to the raw
@@ -396,8 +396,8 @@ export function withConsoleCaptureWindows<T extends object>(api: T): T {
 			// A host that returns `this` for chaining would hand back the raw API,
 			// so a chained `on(...).on(...)` would register an unwrapped handler.
 			// Keep the proxy on the chain.
-			const keepProxy = (result: unknown): unknown =>
-				result === target ? proxy : result;
+			const keepProxy = <TResult>(result: TResult): TResult | T =>
+				Object.is(result, target) ? proxy : result;
 			// Pass-through members are cached too (S3a/S3b: `proxy.getFlag ===
 			// proxy.getFlag`), but the cached wrapper re-reads `target[prop]` on
 			// EVERY call rather than closing over `method` -- a plain
@@ -407,11 +407,11 @@ export function withConsoleCaptureWindows<T extends object>(api: T): T {
 			// Re-reading keeps the cached wrapper's identity stable while staying
 			// live to whatever `target[prop]` currently is.
 			const wrapper = isCaptureSeam(prop)
-				? (...args: unknown[]): unknown => {
+				? (...args: unknown[]) => {
 						const wrapped = args.map((arg) => wrapFunctionsInPlace(arg));
 						return keepProxy(method.apply(target, wrapped));
 					}
-				: (...args: unknown[]): unknown => {
+				: (...args: unknown[]) => {
 						const current = Reflect.get(target, prop, target) as (
 							...a: unknown[]
 						) => unknown;

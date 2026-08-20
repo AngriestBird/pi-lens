@@ -491,6 +491,15 @@ export const SESSION_STATE_REGISTRY: SessionStateEntry[] = [
 
 	// ── Deliberately not session_start ───────────────────────────────────────
 	{
+		id: "biome-check:fixKindCache",
+		module: "dispatch/runners/biome-check.ts",
+		state: "biomeFixKindCache",
+		policy: "process_lifetime",
+		resetName: "_resetBiomeFixKindCacheForTests",
+		reason:
+			"#1810: the cache maps (biome binary path, rule name) to that rule's real fix tier, read live from `biome explain <rule>`. That answer is a static property of the running binary — it cannot change without a different biome install, which is itself a different cache key — so there is nothing for a session boundary to invalidate. No probe: arming it for real requires spawning the actual biome binary, which this generic registry sweep does not do; `tests/clients/dispatch/runners/biome-check-runner.test.ts`'s dedicated cache/reset tests cover the re-arm behavior with a mocked spawn instead.",
+	},
+	{
 		id: "formatters:runtimeState",
 		module: "formatters.ts",
 		state: "whichLatchByCommand, whichTransientCommands, cooldownRecordedForRetryAtMs",
@@ -581,7 +590,8 @@ export const EXEMPT_SESSION_STATE_FILES: Readonly<Record<string, string>> = {
 	"diagnostics-publish.ts": "diagnostics publisher registration and dirty-path dedupe",
 	"bus-events-logger.ts": "bus event rollup counters, an observability tally",
 	"ndjson-logger.ts": "registered log-file paths",
-	"latency-logger.ts": "the latency log file handle",
+	"latency-logger.ts":
+		"the scan's two flagged containers here are LAST_PHASE_EXCLUDED (a fixed, never-mutated Set of phase names — a constant, not state) and, since #1723, liveBrackets (the in-flight-phase bracket map). liveBrackets DOES have a genuine session-boundary reset, resetCurrentPhaseForSession — but it is called from the `pi.on(\"session_start\", ...)` handler in index.ts itself, BEFORE `handleSessionStart(...)` runs (deliberately: #1723 review F4 needs it positioned behind the #473 concurrent-secondary gate but is not part of handleSessionStart's own body), so `sessionStartResetNames()`'s walk — which starts specifically from handleSessionStart — cannot see it. Exempted here rather than added to SESSION_STATE_REGISTRY with a false reachability claim; see resetCurrentPhaseForSession's own doc comment for the full placement reasoning.",
 	"quiet-window.ts": "quiet-window task registration",
 	"quiet-window-config.ts":
 		"the env-derived quiet-window kill switch and wait budget, split out of quiet-window.ts by #1462; a memo of configuration, not of a session verdict",
@@ -658,6 +668,7 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	"dispatch/integration.ts": 10,
 	"dispatch/lazy.ts": 0,
 	"dispatch/runners/ast-grep-napi.ts": 5,
+	"dispatch/runners/biome-check.ts": 1,
 	"dispatch/runners/psscriptanalyzer.ts": 2,
 	"dispatch/runners/spotbugs.ts": 0,
 	"dispatch/runners/utils/lazy-installer.ts": 2,
@@ -671,7 +682,7 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	"git-tracked-ignore.ts": 3,
 	"installer/index.ts": 12,
 	"instance-registry.ts": 0,
-	"latency-logger.ts": 1,
+	"latency-logger.ts": 2,
 	"lens-config.ts": 1,
 	"lens-events.ts": 0,
 	"lsp-budget.ts": 0,

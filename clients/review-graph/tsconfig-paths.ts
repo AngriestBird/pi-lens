@@ -37,7 +37,7 @@ const cache = new BoundedLruCache<string, TsconfigPathMatcher[]>(64);
 const referencesCache = new BoundedLruCache<string, Map<string, string>>(64);
 
 /** Strip JSONC comments and trailing commas without touching string contents. */
-function parseJsonc(content: string): unknown {
+function parseJsonc(content: string): TsconfigJson {
 	let output = "";
 	let inString = false;
 	let escaped = false;
@@ -69,7 +69,7 @@ function parseJsonc(content: string): unknown {
 			output += char;
 		}
 	}
-	return JSON.parse(output.replace(/,\s*([}\]])/g, "$1"));
+	return JSON.parse(output.replace(/,\s*([}\]])/g, "$1")) as TsconfigJson;
 }
 
 function configSignature(configPath: string): string {
@@ -89,7 +89,7 @@ function configDependencyPaths(configPath: string): string[] {
 		paths.add(normalized);
 		let json: TsconfigJson;
 		try {
-			json = parseJsonc(fs.readFileSync(normalized, "utf8")) as TsconfigJson;
+			json = parseJsonc(fs.readFileSync(normalized, "utf8"));
 		} catch {
 			return;
 		}
