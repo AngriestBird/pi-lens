@@ -15,8 +15,19 @@ import {
 	createAvailabilityChecker,
 	resolveToolCommandWithInstallFallback,
 } from "./utils/runner-helpers.js";
+import type { ToolExitCodes } from "./utils/spawn-outcome.js";
+import { skipUnlessToolRan } from "./utils/tool-failure.js";
 
 const stylelint = createAvailabilityChecker("stylelint", ".cmd");
+
+// stylelint exit codes (its "Exit codes" docs page): 0 = no problems, 2 = lint
+// problems found, 78 = a configuration error. 1 is documented as a fatal error
+// but real invocations (and this repo's own stylelint fixture, see
+// tests/clients/dispatch/runners/stylelint-fixable.test.ts) also report
+// findings under 1, so 1 stays a run. A fatal stylelint under
+// `--formatter json` writes nothing to stdout, so the nothing-to-parse rule
+// still catches it. 78 is the rejection this table exists to name.
+const STYLELINT_EXIT_CODES: ToolExitCodes = { ran: [1, 2] };
 
 interface StylelintWarning {
 	line: number;
@@ -136,6 +147,15 @@ const stylelintRunner: RunnerDefinition = {
 			["--formatter", "json", ctx.filePath],
 			{ timeout: 20000, cwd },
 		);
+
+		// #1816: this runner read `result.status` zero times, so an exit-78
+		// config error (or an exit-1 crash) fell through parseStylelintJson's
+		// catch to zero diagnostics and reported a clean stylesheet.
+		const skipped = skipUnlessToolRan("stylelint", {
+			result,
+			exitCodes: STYLELINT_EXIT_CODES,
+		});
+		if (skipped) return skipped;
 
 		const raw = result.stdout ?? "";
 		const diagnostics = parseStylelintJson(raw, ctx.filePath);

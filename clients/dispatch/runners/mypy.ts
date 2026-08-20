@@ -12,8 +12,15 @@ import {
 	createAvailabilityChecker,
 	resolveToolCommandWithInstallFallback,
 } from "./utils/runner-helpers.js";
+import type { ToolExitCodes } from "./utils/spawn-outcome.js";
+import { skipUnlessToolRan } from "./utils/tool-failure.js";
 
 const mypy = createAvailabilityChecker("mypy", "");
+
+// mypy exit codes (its command-line docs): 0 = no type errors, 1 = type errors
+// found, 2 = a problem that stopped the check (bad flag, unreadable config, no
+// files matched). Only 2 is a rejected invocation.
+const MYPY_EXIT_CODES: ToolExitCodes = { ran: [1] };
 
 // mypy output: file.py:10: error: Incompatible types [assignment]
 //
@@ -88,7 +95,16 @@ const mypyRunner: RunnerDefinition = {
 			{ timeout: 30000, cwd },
 		);
 
+		// #1816: this runner read `result.status` zero times, so an exit-2
+		// config error reported the file as cleanly type-checked.
 		const raw = `${result.stdout ?? ""}${result.stderr ?? ""}`;
+		const skipped = skipUnlessToolRan("mypy", {
+			result,
+			output: raw,
+			exitCodes: MYPY_EXIT_CODES,
+		});
+		if (skipped) return skipped;
+
 		const diagnostics = parseMypyOutput(raw, ctx.filePath, cwd);
 		if (diagnostics.length === 0) {
 			return { status: "succeeded", diagnostics: [], semantic: "none" };

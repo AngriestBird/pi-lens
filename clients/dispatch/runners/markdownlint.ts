@@ -14,8 +14,15 @@ import {
 	createAvailabilityChecker,
 	resolveToolCommandWithInstallFallback,
 } from "./utils/runner-helpers.js";
+import type { ToolExitCodes } from "./utils/spawn-outcome.js";
+import { skipUnlessToolRan } from "./utils/tool-failure.js";
 
 const markdownlint = createAvailabilityChecker("markdownlint-cli2", ".cmd");
+
+// markdownlint-cli2 exit codes (its README's "Exit Codes" section): 0 = no
+// findings, 1 = lint findings, 2 = unexpected error (unreadable config, bad
+// glob, crash). Only 2 is a rejected invocation.
+const MARKDOWNLINT_EXIT_CODES: ToolExitCodes = { ran: [1] };
 
 // markdownlint-cli2 text output does not include per-violation fixability,
 // so we keep a static allowlist of MD### rules whose --fix is deterministic.
@@ -126,7 +133,18 @@ const markdownlintRunner: RunnerDefinition = {
 			cwd,
 		});
 
+		// #1816: this runner read `result.status` zero times, so an exit-2
+		// config error with an empty stdout parsed to zero diagnostics and was
+		// reported as a clean Markdown file. An empty result must distinguish
+		// clean from errored.
 		const raw = `${result.stdout ?? ""}${result.stderr ?? ""}`;
+		const skipped = skipUnlessToolRan("markdownlint", {
+			result,
+			output: raw,
+			exitCodes: MARKDOWNLINT_EXIT_CODES,
+		});
+		if (skipped) return skipped;
+
 		const diagnostics = parseMarkdownlintOutput(raw, ctx.filePath);
 		if (diagnostics.length === 0) {
 			return { status: "succeeded", diagnostics: [], semantic: "none" };
