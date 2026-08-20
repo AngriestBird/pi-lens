@@ -61,9 +61,9 @@ const SOURCE_EXTS = new Set([
 	".hpp",
 ]);
 
-function readJsonSafe(filePath: string): unknown {
+function readJsonSafe(filePath: string): PackageJson | undefined {
 	try {
-		return JSON.parse(fs.readFileSync(filePath, "utf-8"));
+		return JSON.parse(fs.readFileSync(filePath, "utf-8")) as PackageJson;
 	} catch {
 		return undefined;
 	}
@@ -89,9 +89,7 @@ function detectWorkspaceType(cwd: string): WorkspaceType | null {
 		} catch {}
 	}
 	if (markers.hasPackageJson) {
-		const pkgJson = readJsonSafe(path.join(cwd, "package.json")) as
-			| PackageJson
-			| undefined;
+		const pkgJson = readJsonSafe(path.join(cwd, "package.json"));
 		const workspaces = normalizeWorkspacePatterns(pkgJson?.workspaces);
 		if (workspaces.length > 0) return "npm";
 	}
