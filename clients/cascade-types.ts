@@ -75,3 +75,13 @@ export interface CascadeRun {
 	 */
 	carriedTurns?: number;
 }
+
+/**
+ * How long a cascade neighbour's diagnostics stay usable (#1816).
+ *
+ * One constant for two consumers that each declared their own `240_000`:
+ * `clients/lsp/index.ts` (the neighbour-diagnostics cache) and
+ * `clients/dispatch/integration.ts` (the cascade turn scope). They must move
+ * together — a split pair reads as two independent policies and drifts.
+ */
+export const CASCADE_DIAGNOSTICS_TTL_MS = 240_000;
