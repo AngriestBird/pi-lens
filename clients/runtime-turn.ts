@@ -978,6 +978,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	const t2 = Date.now();
 	let knipMeta: {
 		skipped?: boolean;
+		execution?: "executed" | "cache";
 		success?: boolean;
 		totalIssues?: number;
 		newIssues?: number;
@@ -1012,7 +1013,9 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			);
 			knipMeta = { skipped: true, reason: prevKnip.data.summary };
 		} else {
-			const knipResult = await knipClient.analyze(cwd, getKnipIgnorePatterns());
+			const knipResult = await knipClient.analyze(cwd, getKnipIgnorePatterns(), {
+				projectSeq: runtime.projectSeq,
+			});
 			// Never overwrite a good scan with a failure (#925, #1467): the last
 			// good result stays until a new successful scan replaces it.
 			const knipWouldPoison = wouldPoisonCache(prevKnip, knipResult);
@@ -1024,6 +1027,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				cacheManager.writeCache("knip", knipResult, cwd);
 			}
 			knipMeta = {
+				execution: knipResult.execution ?? "executed",
 				success: knipResult.success,
 				totalIssues: knipResult.issues.length,
 				newIssues: 0,
