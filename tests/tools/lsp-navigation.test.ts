@@ -611,7 +611,9 @@ describe("lsp_navigation tool", () => {
 	// pair proves both directions: unsupported reports the discriminator,
 	// and a genuinely supporting server with zero callers still reports a
 	// clean empty (not a false "unsupported").
-	it("reports the unsupported discriminator when the server never advertised callHierarchyProvider", async () => {
+	it.each(["incomingCalls", "outgoingCalls"] as const)(
+		"reports the unsupported discriminator for %s when the server never advertised callHierarchyProvider",
+		async (operation) => {
 		const tool = createLspNavigationTool((flag) => flag === "lens-lsp");
 		(
 			mocked.service as { getOperationSupport: ReturnType<typeof vi.fn> }
@@ -629,9 +631,9 @@ describe("lsp_navigation tool", () => {
 			implementation: false,
 			callHierarchy: false,
 		});
-		const incomingCallsSpy = (
-			mocked.service as { incomingCalls: ReturnType<typeof vi.fn> }
-		).incomingCalls;
+		const operationSpy = (
+			mocked.service as Record<typeof operation, ReturnType<typeof vi.fn>>
+		)[operation];
 		const callHierarchyItem = {
 			name: "foo",
 			kind: 12,
@@ -647,22 +649,25 @@ describe("lsp_navigation tool", () => {
 		};
 
 		const result = await tool.execute(
-			"unsupported-incoming",
-			{ operation: "incomingCalls", callHierarchyItem },
+			`unsupported-${operation}`,
+			{ operation, callHierarchyItem },
 			new AbortController().signal,
 			null,
 			{ cwd: "." },
 		);
 
-		expect(incomingCallsSpy).not.toHaveBeenCalled();
+		expect(operationSpy).not.toHaveBeenCalled();
 		expect(result.isError).toBe(true);
 		expect(result.details?.emptyReason).toBe("unsupported");
 		expect(String(result.content[0]?.text)).toContain(
-			"does not advertise support for incomingCalls",
+			`does not advertise support for ${operation}`,
 		);
-	});
+		},
+	);
 
-	it("reports a clean empty (not unsupported) when a supporting server finds zero callers", async () => {
+	it.each(["incomingCalls", "outgoingCalls"] as const)(
+		"reports a clean empty (not unsupported) when %s finds zero calls",
+		async (operation) => {
 		const tool = createLspNavigationTool((flag) => flag === "lens-lsp");
 		(
 			mocked.service as { getOperationSupport: ReturnType<typeof vi.fn> }
@@ -680,9 +685,9 @@ describe("lsp_navigation tool", () => {
 			implementation: false,
 			callHierarchy: true,
 		});
-		(
-			mocked.service as { outgoingCalls: ReturnType<typeof vi.fn> }
-		).outgoingCalls = vi.fn().mockResolvedValue([]);
+		(mocked.service as Record<typeof operation, ReturnType<typeof vi.fn>>)[
+			operation
+		] = vi.fn().mockResolvedValue([]);
 		const callHierarchyItem = {
 			name: "leaf",
 			kind: 12,
@@ -698,20 +703,22 @@ describe("lsp_navigation tool", () => {
 		};
 
 		const result = await tool.execute(
-			"supported-empty-outgoing",
-			{ operation: "outgoingCalls", callHierarchyItem },
+			`supported-empty-${operation}`,
+			{ operation, callHierarchyItem },
 			new AbortController().signal,
 			null,
 			{ cwd: "." },
 		);
 
 		expect(
-			(mocked.service as { outgoingCalls: ReturnType<typeof vi.fn> })
-				.outgoingCalls,
+			(mocked.service as Record<typeof operation, ReturnType<typeof vi.fn>>)[
+				operation
+			],
 		).toHaveBeenCalledWith(callHierarchyItem);
 		expect(result.isError).toBeUndefined();
 		expect(result.details?.emptyReason).toBe("no-call-hierarchy-results");
-	});
+		},
+	);
 
 	it("opens scoped file before workspaceSymbol query", async () => {
 		const tool = createLspNavigationTool((flag) => flag === "lens-lsp");
