@@ -54,13 +54,17 @@
  * layered on later without changing the store shape.
  */
 
-import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { commitDurableStore } from "./durable-store.js";
 import { logDispositionEvent } from "./disposition-logger.js";
 import { publishDisposition } from "./disposition-publish.js";
 import { getProjectDataDir } from "./file-utils.js";
+import {
+	normalizeMessage as sharedNormalizeMessage,
+	relativeFile as sharedRelativeFile,
+	stableFindingId,
+} from "./finding-identity.js";
 import { normalizeMapKey } from "./path-utils.js";
 import { lineContentHash } from "./read-guard.js";
 
@@ -137,10 +141,10 @@ function deferredKey(cwd: string, anchor: string): string {
 
 /** Exported (#802) so lens-diagnostic-mark's cross-check against live widget
  * diagnostics matches a message the same way anchor derivation does — a
- * second, slightly different normalizer would make a real match invisible. */
-export function normalizeMessage(message: string): string {
-	return message.replace(/\s+/g, " ").trim().toLowerCase();
-}
+ * second, slightly different normalizer would make a real match invisible.
+ * Re-exports the shared `finding-identity.js` normalizer (#1816) so this
+ * module keeps its existing public surface. */
+export const normalizeMessage = sharedNormalizeMessage;
 
 // Anchor derivation chokepoint (#1024, #210 class): the `dd:`/`ddw:` id builders
 // (computeStrictAnchor/computeWeakAnchor) both derive their path component here,
@@ -160,12 +164,13 @@ export function normalizeMessage(message: string): string {
 // widget hot path, and the read side already pays exactly this cost. Semantics
 // are unchanged: the `..`-escape fallback still returns the canonical filePath,
 // only now in the same canonical form the non-escape branch uses.
-function relativeFile(filePath: string, cwd: string): string {
-	const canonicalCwd = normalizeMapKey(cwd);
-	const canonicalFile = normalizeMapKey(filePath);
-	const rel = path.relative(canonicalCwd, canonicalFile).replace(/\\/g, "/");
-	return rel && !rel.startsWith("..") ? rel : canonicalFile;
-}
+//
+// #1816: this used to be a local copy; it is now `finding-identity.js`'s
+// `relativeFile` (identical body — canonicalize both inputs through
+// `normalizeMapKey` before relativizing), re-exported so the rest of this
+// file, and the module doc/comments above referencing `relativeFile`, keep
+// working unchanged.
+const relativeFile = sharedRelativeFile;
 
 export interface DispositionAnchorArgs {
 	cwd: string;
@@ -187,25 +192,25 @@ export function computeStrictAnchor(args: DispositionAnchorArgs): string {
 	const lines = args.content?.split(/\r?\n/);
 	const lineText =
 		args.line !== undefined && lines ? (lines[args.line - 1] ?? "") : "";
-	const parts = [
-		relativeFile(args.filePath, args.cwd),
-		args.tool ?? "",
-		args.rule ?? "",
-		normalizeMessage(args.message),
-		lineContentHash(lineText),
-	];
-	return `dd:${createHash("sha256").update(parts.join("|")).digest("hex").slice(0, 12)}`;
+	return stableFindingId("dd:", {
+		cwd: args.cwd,
+		filePath: args.filePath,
+		parts: [
+			args.tool ?? "",
+			args.rule ?? "",
+			normalizeMessage(args.message),
+			lineContentHash(lineText),
+		],
+	});
 }
 
 /** Intent-level anchor — see module doc. Used for defer/flagged/suppress. */
 export function computeWeakAnchor(args: DispositionAnchorArgs): string {
-	const parts = [
-		relativeFile(args.filePath, args.cwd),
-		args.tool ?? "",
-		args.rule ?? "",
-		normalizeMessage(args.message),
-	];
-	return `ddw:${createHash("sha256").update(parts.join("|")).digest("hex").slice(0, 12)}`;
+	return stableFindingId("ddw:", {
+		cwd: args.cwd,
+		filePath: args.filePath,
+		parts: [args.tool ?? "", args.rule ?? "", normalizeMessage(args.message)],
+	});
 }
 
 /** Both anchors a stored/filtered diagnostic would compute — the one shared
