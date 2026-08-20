@@ -10,6 +10,11 @@ import {
 import { FactStore } from "../../../clients/dispatch/fact-store.js";
 import javacRunner from "../../../clients/dispatch/runners/javac.js";
 import type { RunnerResult } from "../../../clients/dispatch/types.js";
+import {
+	clearWidgetState,
+	getFileDiagnostics,
+	recordDiagnostics,
+} from "../../../clients/widget-state.js";
 import { setupTestEnvironment } from "../test-utils.js";
 
 const { safeSpawnAsync } = vi.hoisted(() => ({
@@ -28,6 +33,7 @@ vi.mock("../../../clients/dispatch/runners/utils/runner-helpers.js", () => ({
 describe("javac dispatcher integration (#1877)", () => {
 	beforeEach(() => {
 		clearCoverageNoticeState();
+		clearWidgetState();
 		safeSpawnAsync.mockReset();
 		safeSpawnAsync.mockResolvedValue({
 			error: null,
@@ -35,6 +41,62 @@ describe("javac dispatcher integration (#1877)", () => {
 			stdout: "",
 			stderr: "",
 		});
+	});
+
+	it("replaces an earlier javac cache entry when LSP recovers clean", async () => {
+		const env = setupTestEnvironment("pi-lens-javac-cache-recovery-");
+		try {
+			const filePath = path.join(env.tmpDir, "module", "src", "App.java");
+			fs.mkdirSync(path.dirname(filePath), { recursive: true });
+			fs.writeFileSync(filePath, "class App {}\n");
+			fs.writeFileSync(path.join(env.tmpDir, "pom.xml"), "<project />\n");
+
+			// Reproduce the poisoned state from a pre-gate LSP-skipped window.
+			recordDiagnostics(filePath, [
+				{
+					tool: "javac",
+					rule: "compile",
+					message: "package dependency does not exist",
+					severity: "error",
+					semantic: "blocking",
+				},
+			]);
+			expect(getFileDiagnostics(filePath)?.[0]?.tool).toBe("javac");
+
+			let lspReady = false;
+			const registry = createJavaRegistry(() => lspReady);
+			const ctx = createDispatchContext(
+				filePath,
+				env.tmpDir,
+				{ getFlag: () => false },
+				new FactStore(),
+				undefined,
+				undefined,
+				env.tmpDir,
+			);
+
+			const skipped = await dispatchForFile(
+				ctx,
+				[{ mode: "fallback", runnerIds: ["lsp", "javac"] }],
+				registry,
+			);
+			recordDiagnostics(filePath, skipped.diagnostics);
+			expect(skipped.output).toContain("analysis unavailable");
+			expect(safeSpawnAsync).not.toHaveBeenCalled();
+
+			lspReady = true;
+			const recovered = await dispatchForFile(
+				ctx,
+				[{ mode: "fallback", runnerIds: ["lsp", "javac"] }],
+				registry,
+			);
+			recordDiagnostics(filePath, recovered.diagnostics);
+
+			expect(recovered.diagnostics).toEqual([]);
+			expect(getFileDiagnostics(filePath)).toEqual([]);
+		} finally {
+			env.cleanup();
+		}
 	});
 
 	it("reports unavailable analysis when the descriptor gate skips javac", async () => {
@@ -108,7 +170,7 @@ describe("javac dispatcher integration (#1877)", () => {
 	});
 });
 
-function createJavaRegistry(): RunnerRegistry {
+function createJavaRegistry(lspReady: () => boolean = () => false): RunnerRegistry {
 	const registry = new RunnerRegistry();
 	registry.register({
 		id: "lsp",
@@ -116,7 +178,11 @@ function createJavaRegistry(): RunnerRegistry {
 		priority: 4,
 		enabledByDefault: true,
 		async run() {
-			return { status: "skipped", diagnostics: [], semantic: "none" };
+			return {
+				status: lspReady() ? "succeeded" : "skipped",
+				diagnostics: [],
+				semantic: "none",
+			};
 		},
 	});
 	registry.register(javacRunner);
