@@ -31,9 +31,20 @@ jobs:
     outputs:
       changed: ${{ steps.diff.outputs.changed }}
     steps:
+      # Pin to the PR's own head commit, NOT the default checkout ref. For
+      # pull_request events, actions/checkout defaults to GitHub's synthetic
+      # refs/pull/N/merge commit (base branch's CURRENT tip merged with the
+      # PR). Diffing that synthetic HEAD against the PR's recorded (and
+      # potentially stale, once the PR falls BEHIND) base.sha then picks up
+      # every change master accumulated in between as if the PR had made it
+      # -- caught in review verification: this PR doesn't touch
+      # package-lock.json, but the gate still fired because master gained an
+      # unrelated lockfile change after this branch was cut. Pinning `ref`
+      # to head.sha makes HEAD the PR's real, stable branch tip.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         if: github.event_name == 'pull_request'
         with:
+          ref: ${{ github.event.pull_request.head.sha }}
           persist-credentials: false
 
       - id: diff
@@ -65,8 +76,14 @@ jobs:
     # finding should show as a red advisory check a reviewer can see and
     # choose to act on, not a silently-green one (#1917 review F2).
     steps:
+      # Same head.sha pin as detect-lockfile-change, and for the same
+      # reason: scan the PR's own lockfile, not a merge-drifted one that
+      # would make the result move whenever master changes independently of
+      # this PR. On schedule/workflow_dispatch there's no PR head, so this
+      # falls back to the default (current branch tip).
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || '' }}
           persist-credentials: false
 
       # Pinned release + checksum verification, matching the actionlint job
