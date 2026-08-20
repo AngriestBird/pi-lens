@@ -1,5 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createPiMock } from "./support/pi-mock.js";
+import {
+	getCurrentPhase,
+	phaseStarted,
+} from "../clients/latency-logger.js";
 
 // Wiring guards for the #1122 loop_block probe fix. These live at the index.ts
 // turn_end seam (not the pure classifier) because the two things that broke —
@@ -27,6 +31,13 @@ vi.mock("../clients/event-loop-monitor.js", async (importActual) => {
 
 // Capture latency writes without touching disk; provide the attribution seam.
 const latencyCalls: Array<Record<string, unknown>> = [];
+// #1723 (redesigned after review): controllable in-flight-phase-window stand-in
+// — undefined by default (no bracket overlaps the sampled block window),
+// overridable per test to simulate `getPhaseForWindow` finding a live OR
+// recently-closed bracket that overlaps the block's own time window.
+let phaseForWindowToReturn:
+	| { phase: string; startedAt: string; stillRunning: boolean; elapsedMs: number }
+	| undefined;
 vi.mock("../clients/latency-logger.js", async (importActual) => {
 	const actual = await importActual<typeof import("../clients/latency-logger.js")>();
 	return {
@@ -35,6 +46,7 @@ vi.mock("../clients/latency-logger.js", async (importActual) => {
 			latencyCalls.push(entry);
 		},
 		getLastLoggedPhase: () => ({ phase: "graph_build", ts: "2026-08-07T00:00:00.000Z" }),
+		getPhaseForWindow: () => phaseForWindowToReturn,
 	};
 });
 
@@ -107,6 +119,7 @@ describe("index turn_end loop_block wiring (#1122)", { timeout: LOOP_BLOCK_WIRIN
 		latencyCalls.length = 0;
 		resetSpy.mockClear();
 		statsToReturn = undefined;
+		phaseForWindowToReturn = undefined;
 	});
 	afterEach(() => {
 		vi.clearAllMocks();
@@ -210,5 +223,99 @@ describe("index turn_end loop_block wiring (#1122)", { timeout: LOOP_BLOCK_WIRIN
 		expect(logged[1].durationMs).toBe(5000);
 		// Not a new session worst, but still recorded.
 		expect((logged[1].metadata as Record<string, unknown>).worstSoFar).toBe(false);
+	});
+
+	// #1723 residual: the motivating case is a SYNCHRONOUS block, so the phase
+	// actually burning the CPU is still running (and so unlogged) when the
+	// probe samples. `recentPhases`/`lastPhase` name only the PREVIOUS
+	// finished phase — this pins that when a phase is currently in flight, the
+	// loop_block record names IT, with an elapsed time at least the block's
+	// own duration.
+	it("(d) #1723: an in-flight phase is named in the loop_block record, not just the previous finished one", async () => {
+		const startedAt = new Date(Date.now() - 18_270).toISOString();
+		phaseForWindowToReturn = {
+			phase: "full_scan_18s",
+			startedAt,
+			stillRunning: true,
+			elapsedMs: 18270,
+		};
+		statsToReturn = {
+			maxMs: 18270,
+			p99Ms: 0,
+			meanMs: 0,
+			windowWallMs: 32832,
+			windowCpuMs: 21844,
+			suspectSystemStall: false,
+		};
+
+		await fireTurnEnd();
+
+		const logged = loopBlocks();
+		expect(logged).toHaveLength(1);
+		const metadata = logged[0].metadata as Record<string, unknown>;
+		// The previous-finished-phase attribution is untouched (still reported).
+		expect(metadata.lastPhase).toBe("graph_build");
+		// The NEW attribution: what is still running right now.
+		expect(metadata.inFlightPhase).toBe("full_scan_18s");
+		expect(metadata.inFlightPhaseStartedAt).toBe(startedAt);
+		expect(metadata.inFlightPhaseElapsedMs as number).toBeGreaterThanOrEqual(18270);
+	});
+
+	it("(e) #1723: no in-flight phase means the new fields stay undefined instead of a false attribution", async () => {
+		phaseForWindowToReturn = undefined;
+		statsToReturn = {
+			maxMs: 5000,
+			p99Ms: 0,
+			meanMs: 0,
+			windowWallMs: 6000,
+			windowCpuMs: 5500,
+			suspectSystemStall: false,
+		};
+
+		await fireTurnEnd();
+
+		const logged = loopBlocks();
+		expect(logged).toHaveLength(1);
+		const metadata = logged[0].metadata as Record<string, unknown>;
+		expect(metadata.inFlightPhase).toBeUndefined();
+		expect(metadata.inFlightPhaseElapsedMs).toBeUndefined();
+	});
+
+	// #1723 review round 7, S3: `resetCurrentPhaseForSession()`'s call site
+	// (index.ts's `session_start` handler, behind the #473 gate) is exactly
+	// the kind of wiring `SESSION_STATE_REGISTRY`'s reachability derivation
+	// cannot see (it walks `handleSessionStart`'s body specifically, and this
+	// call sits BEFORE that function runs — see
+	// `tests/support/session-state-registry.ts`'s exemption note). The
+	// reviewer confirmed that reasoning is correct, but pointed out the
+	// coverage gap it leaves: deleting the call site is invisible to every
+	// existing test (113 stayed green). This test drives the REAL
+	// `session_start` handler (not a direct call to
+	// `resetCurrentPhaseForSession`) to close that gap at the one seam that
+	// can see it.
+	it("(f) #1723 S3: session_start clears a leaked in-flight phase via the real handler", async () => {
+		const { default: registerExtension } = await import("../index.js");
+		const mock = createPiMock({ "lens-lsp": true });
+		registerExtension(mock.asExtensionAPI() as never);
+
+		// Seed a live bracket BEFORE firing session_start — simulates a phase
+		// abandoned by a torn-down activation, per resetCurrentPhaseForSession's
+		// own doc comment.
+		phaseStarted("leaked_before_session_start");
+		expect(getCurrentPhase()).toBeDefined();
+
+		const sessionStart = mock.getHandlers("session_start")[0];
+		expect(sessionStart).toBeTypeOf("function");
+		const sessionCtx = {
+			cwd: process.cwd(),
+			ui: {
+				notify: vi.fn(),
+				setStatus: () => {},
+				theme: { fg: (_c: string, s: string) => s },
+			},
+		};
+		await sessionStart?.({ reason: "new" }, sessionCtx as never);
+
+		expect(getCurrentPhase()).toBeUndefined();
 	});
 });
