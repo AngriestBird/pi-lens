@@ -757,6 +757,65 @@ export function checkSeamEvidence(input: SeamEvidenceInput): string[] {
 	return problems;
 }
 
+// ── 3b. Per-file symbol-count pin ───────────────────────────────────────────
+
+export interface SymbolCountAuditInput {
+	/** Sweep name, used in every composed message. */
+	sweepName: string;
+	/** file → count of stateful symbols the scan detects there RIGHT NOW. */
+	counts: Readonly<Record<string, number>>;
+	/** file → count the registry/exemption list has PINNED. */
+	pinned: Readonly<Record<string, number>>;
+	/** Appended to the drift message: what the author should do. */
+	remediation?: string;
+}
+
+/**
+ * A per-file stateful-SYMBOL-COUNT pin, layered on {@link auditRegistry}'s
+ * registered-or-fail semantics rather than a parallel mechanism (#1817).
+ *
+ * The session-state sweep's file-level coverage audit ({@link auditRegistry}
+ * called directly on file paths) answers "is this FILE registered or
+ * exempted" — it cannot see that a NEW stateful symbol landed inside a file
+ * that already answered yes. That is exactly how #1801 review F1 shipped:
+ * `tree-sitter-client.ts`'s `staleGrammarVersionAt` memo sat invisible inside
+ * an already-registered module while the sweep stayed 55/55 green.
+ *
+ * The fix folds each file's LIVE detected-symbol count into its registry id
+ * (`file@N`) and re-uses {@link auditRegistry} unchanged: a file whose count
+ * changed presents a DIFFERENT id than the one pinned, and an id the pin does
+ * not name is, to `auditRegistry`, an ordinary unaccounted item. No new
+ * registry, no new exemption semantics — the same machinery, one extra
+ * dimension folded into the id.
+ *
+ * This is coarser than full symbol-to-reset attribution (option (a) in
+ * #1817): it says a file's total changed, not which symbol changed or
+ * whether the new one needs a reset. That is the deliberate trade — cheap
+ * enough to pin all ~72 currently-flagged files in one table, and it still
+ * makes the #1801 shape structurally impossible to add silently, because the
+ * pin can only ever fail LOUD (an unmatched id), never pass on a symbol it
+ * never saw.
+ */
+export function auditSymbolCounts(input: SymbolCountAuditInput): RegistryAudit {
+	const key = (file: string, count: number) => `${file}@${count}`;
+	return auditRegistry({
+		sweepName: input.sweepName,
+		flagged: Object.entries(input.counts).map(([file, count]) => key(file, count)),
+		registered: Object.entries(input.pinned).map(([file, count]) => key(file, count)),
+		// Count-drift is a supplementary check layered on a coverage sweep that
+		// already declares its own scanned/flagged floors — a second emptiness
+		// floor here would just duplicate that message under a different name.
+		minFlagged: 0,
+		remediation:
+			input.remediation ??
+			"A file's pinned stateful-symbol count no longer matches what the scan " +
+				"detects. First decide whether the new (or removed) symbol needs its " +
+				"own registry entry, a reset, or an exemption reason, or it is an " +
+				"import-time constant the scan cannot distinguish (SWEEP_HEURISTIC_LIMITS " +
+				"item 5) — THEN update the pin to the new count.",
+	});
+}
+
 // ── 4. The emptiness guard ──────────────────────────────────────────────────
 
 /**
