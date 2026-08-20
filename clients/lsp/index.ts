@@ -8,6 +8,7 @@
  * - Resource cleanup
  */
 
+import { CASCADE_DIAGNOSTICS_TTL_MS } from "../cascade-types.js";
 import * as nodeFs from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -473,7 +474,6 @@ const EARLY_UNBLOCK_GRACE_MS = Math.max(
 		10,
 	) || 400,
 );
-const CASCADE_DIAGNOSTICS_TTL_MS = 240_000;
 export interface SpawnedServer {
 	client: LSPClientInfo;
 	info: LSPServerInfo;
@@ -5652,6 +5652,20 @@ export class LSPService {
 
 	/**
 	 * Navigation: workspace-wide symbol search
+	 *
+	 * #1789: gated on the target server's advertised `workspaceSymbolProvider`
+	 * (the same `getOperationSupport().workspaceSymbol` single source of truth
+	 * `lsp-document-symbols.ts`'s documentSymbol gate reads — see clients/
+	 * lsp-document-symbols.ts:50). Without a path, "the target server" is
+	 * `this.state.clients`' first entry by insertion order — every spawned
+	 * client, auxiliary scanners (ast-grep, opengrep, zizmor, ...) included,
+	 * not just primary language servers. A workspace with no primary server
+	 * for the query's language (or none spawned yet) can have an auxiliary as
+	 * that first entry, and auxiliaries never advertise workspaceSymbolProvider
+	 * — every such query sent the request anyway and ate a wasted round trip
+	 * per call. Gating here, at the point that resolves and calls the target
+	 * client, closes that regardless of which caller reaches this method (a
+	 * caller-side check elsewhere is a duplicate, not the source of truth).
 	 */
 	async workspaceSymbol(query: string, filePath?: string) {
 		if (filePath) {
@@ -5660,13 +5674,16 @@ export class LSPService {
 				NAV_CLIENT_WAIT_TIMEOUT_MS,
 			);
 			if (!spawned) return [];
+			if (!spawned.client.getOperationSupport().workspaceSymbol) return [];
 			return spawned.client.workspaceSymbol(query);
 		}
 
 		// Use the first active client for workspace-level queries
 		const clients = Array.from(this.state.clients.values());
 		if (clients.length === 0) return [];
-		return clients[0].workspaceSymbol(query);
+		const target = clients[0];
+		if (!target.getOperationSupport().workspaceSymbol) return [];
+		return target.workspaceSymbol(query);
 	}
 
 	/**
@@ -6213,6 +6230,11 @@ export class LSPService {
 
 	/**
 	 * Navigation: find incoming calls (callers)
+	 *
+	 * #1803: gated on the target server's advertised `callHierarchyProvider`
+	 * (the same `getOperationSupport().callHierarchy` single source of truth
+	 * populated by `detectOperationSupport` in clients/lsp/client.ts — see
+	 * client.ts:5253). Mirrors the #1789 gate on `workspaceSymbol` above.
 	 */
 	async incomingCalls(item: import("./client.js").LSPCallHierarchyItem) {
 		const spawned = await this.getClientForFile(
@@ -6220,11 +6242,14 @@ export class LSPService {
 			NAV_CLIENT_WAIT_TIMEOUT_MS,
 		);
 		if (!spawned) return [];
+		if (!spawned.client.getOperationSupport().callHierarchy) return [];
 		return spawned.client.incomingCalls(item);
 	}
 
 	/**
 	 * Navigation: find outgoing calls (callees)
+	 *
+	 * #1803: same gate as `incomingCalls` above.
 	 */
 	async outgoingCalls(item: import("./client.js").LSPCallHierarchyItem) {
 		const spawned = await this.getClientForFile(
@@ -6232,6 +6257,7 @@ export class LSPService {
 			NAV_CLIENT_WAIT_TIMEOUT_MS,
 		);
 		if (!spawned) return [];
+		if (!spawned.client.getOperationSupport().callHierarchy) return [];
 		return spawned.client.outgoingCalls(item);
 	}
 

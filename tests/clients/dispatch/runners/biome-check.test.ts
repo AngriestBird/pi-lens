@@ -1,50 +1,26 @@
 import { describe, expect, it } from "vitest";
+import {
+	normalizeBiomeSeverity,
+	parseBiomeJson as parseBiomeJsonImpl,
+} from "../../../../clients/dispatch/runners/biome-check.js";
 
 /****************************************************************
  * NOTE: This test file tests the Biome JSON parser logic.
  *
  * The actual biome-check runner spawns the biome CLI binary,
  * which isn't available in tests. Instead, we test the JSON
- * parsing logic directly with mock Biome JSON output.
+ * parsing logic directly with mock Biome JSON output, importing
+ * the REAL `parseBiomeJson`/`normalizeBiomeSeverity` from the
+ * compiled runner rather than an inlined copy (#1791) — a private
+ * copy here would silently drift from the shipped mapping.
  *
  * To run integration tests with the actual biome binary,
  * use the doctor command or manual testing.
  ****************************************************************/
 
 describe("biome-check JSON parser", () => {
-	// Inline the parser function for testing
-	// (The actual implementation is in biome-check.ts)
 	function parseBiomeJson(raw: string, filePath: string) {
-		interface BiomeDiagnostic {
-			severity: "error" | "warning" | "information" | "hint";
-			category: string;
-			message: string;
-			location: {
-				source: string;
-				start: { line: number; column: number };
-				end: { line: number; column: number };
-			};
-			tags?: string[];
-		}
-
-		try {
-			const result = JSON.parse(raw);
-			const diagnostics: BiomeDiagnostic[] = result.diagnostics || [];
-
-			return diagnostics.map((d) => ({
-				id: `biome:${d.category}:${d.location.start.line}`,
-				message: d.message,
-				filePath,
-				line: d.location.start.line,
-				column: d.location.start.column,
-				severity: d.severity === "error" ? "error" : "warning",
-				semantic: d.severity === "error" ? "blocking" : ("warning" as const),
-				tool: "biome",
-				rule: d.category,
-			}));
-		} catch {
-			return [];
-		}
+		return parseBiomeJsonImpl(raw, filePath).diagnostics;
 	}
 
 	describe("parseBiomeJson", () => {
@@ -67,7 +43,10 @@ describe("biome-check JSON parser", () => {
 			const result = parseBiomeJson(biomeOutput, "/src/test.ts");
 
 			expect(result).toHaveLength(1);
-			expect(result[0]).toEqual({
+			// #1791: toMatchObject, not toEqual — the real parser also carries
+			// fixable/autoFixAvailable/fixKind (driven by getAutofixCapability),
+			// which the old test's private inlined copy never produced.
+			expect(result[0]).toMatchObject({
 				id: "biome:noShadow:10",
 				message: "Do not shadow variables",
 				filePath: "/src/test.ts",
@@ -206,11 +185,45 @@ describe("biome-check JSON parser", () => {
 			expect(result[0].semantic).toBe("blocking");
 			expect(result[1].severity).toBe("warning");
 			expect(result[1].semantic).toBe("warning");
-			// information and hint are mapped to warning (non-blocking)
-			expect(result[2].severity).toBe("warning");
+			// #1791: biome's "information" tier now survives as Diagnostic
+			// severity "info", instead of being collapsed into "warning".
+			expect(result[2].severity).toBe("info");
 			expect(result[2].semantic).toBe("warning");
-			expect(result[3].severity).toBe("warning");
+			// "hint" survives as-is; only "error" is a blocking semantic.
+			expect(result[3].severity).toBe("hint");
 			expect(result[3].semantic).toBe("warning");
+		});
+
+		it("keeps blocking classification error-only when info/hint tiers are present", () => {
+			// #1791: reviving hint/info severity must not widen what blocks.
+			const biomeOutput = JSON.stringify({
+				diagnostics: [
+					{
+						severity: "information",
+						category: "i1",
+						message: "Info",
+						location: {
+							source: "f",
+							start: { line: 1, column: 1 },
+							end: { line: 1, column: 1 },
+						},
+					},
+					{
+						severity: "hint",
+						category: "h1",
+						message: "Hint",
+						location: {
+							source: "f",
+							start: { line: 2, column: 1 },
+							end: { line: 2, column: 1 },
+						},
+					},
+				],
+			});
+
+			const result = parseBiomeJson(biomeOutput, "/src/test.ts");
+
+			expect(result.every((d) => d.semantic !== "blocking")).toBe(true);
 		});
 
 		it("uses correct id format", () => {
@@ -232,6 +245,23 @@ describe("biome-check JSON parser", () => {
 			const result = parseBiomeJson(biomeOutput, "/project/config.ts");
 
 			expect(result[0].id).toBe("biome:noHardcodedCredentials:42");
+		});
+	});
+
+	describe("normalizeBiomeSeverity", () => {
+		it("maps each of biome's four declared tiers independently", () => {
+			// #1791: each branch asserted independently so deleting/merging any
+			// one of them into the "warning" fallback reds this test.
+			expect(normalizeBiomeSeverity("error")).toBe("error");
+			expect(normalizeBiomeSeverity("warning")).toBe("warning");
+			expect(normalizeBiomeSeverity("information")).toBe("info");
+			expect(normalizeBiomeSeverity("hint")).toBe("hint");
+		});
+
+		it("falls back to warning for an unrecognized value", () => {
+			expect(
+				normalizeBiomeSeverity(undefined as unknown as "warning"),
+			).toBe("warning");
 		});
 	});
 });

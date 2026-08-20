@@ -1,6 +1,10 @@
 /** Bounded, process-local telemetry for behavior degraded during one session. */
 
 import { logExtension } from "./extension-log.js";
+import { LEDGER_FIELD_MAX, truncateForLedger } from "./ledger-bounds.js";
+
+// Re-exported so existing importers keep one name for the ledger's bound.
+export { LEDGER_FIELD_MAX, truncateForLedger };
 
 export type DegradationKind =
 	| "trust-refusal"
@@ -268,10 +272,11 @@ export function incrementDegradationCount(record: DegradationRecord): boolean {
 			groups.set(kind, group);
 		}
 		group.count += 1;
-		const entry = {
-			subject,
-			reason: truncateForLedger(`${reason} (count: ${count})`),
-		};
+		// #1816: append the count AFTER truncation, never before. `reason` is
+		// already bounded above, so re-truncating the concatenation pushed the
+		// suffix past LEDGER_FIELD_MAX and silently ate it — a 200-char reason
+		// lost the one field that says how often the degradation fired.
+		const entry = { subject, reason: `${reason} (count: ${count})` };
 		const existing = group.entries.findIndex(
 			(candidate) => candidate.subject === subject,
 		);
@@ -286,25 +291,11 @@ export function incrementDegradationCount(record: DegradationRecord): boolean {
 	}
 }
 
-/** Detached snapshot, grouped in first-seen kind order. */
-const LEDGER_FIELD_MAX = 200;
-
-function normalizeForLedger(value: unknown): string {
-	return String(value ?? "unknown");
-}
-
 function boundedKind(value: unknown): string {
 	const kind = truncateForLedger(value);
 	if (groups.has(kind) || kind === OVERFLOW_KIND) return kind;
 	// Keep one slot available for all kinds beyond the cardinality bound.
 	return groups.size < MAX_DISTINCT_KINDS - 1 ? kind : OVERFLOW_KIND;
-}
-
-function truncateForLedger(value: unknown): string {
-	const text = normalizeForLedger(value);
-	return text.length > LEDGER_FIELD_MAX
-		? `${text.slice(0, LEDGER_FIELD_MAX)}…`
-		: text;
 }
 
 export function getDegradationSummary(): DegradationGroup[] {

@@ -11,6 +11,7 @@ import {
 	createAvailabilityChecker,
 	resolveToolCommandWithInstallFallback,
 } from "./utils/runner-helpers.js";
+import { skipUnlessToolRan } from "./utils/tool-failure.js";
 
 const swiftlint = createAvailabilityChecker("swiftlint", ".exe");
 
@@ -176,6 +177,15 @@ const swiftlintRunner: RunnerDefinition = {
 			["--reporter", "json", path.resolve(cwd, ctx.filePath)],
 			{ cwd, timeout: 15000 },
 		);
+
+		// #1816: this runner read `result.status` zero times, so a SwiftLint
+		// that refused the invocation reported a clean Swift file. No exit-code
+		// table is declared: SwiftLint's nonzero codes are not documented
+		// stably enough to call any of them a rejection, so classification
+		// rests on the conservative rule — a nonzero exit with nothing to parse
+		// never ran.
+		const skipped = skipUnlessToolRan("swiftlint", { result });
+		if (skipped) return skipped;
 
 		// SwiftLint exits non-zero on violations — stdout still has the JSON
 		const raw = result.stdout || "";

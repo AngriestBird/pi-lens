@@ -34,6 +34,8 @@ import {
 	it,
 	vi,
 } from "vitest";
+import { exploreInterleavings } from "../../support/reset-explorer.js";
+import { withEnv } from "../../support/with-env.js";
 
 vi.unmock("../../../clients/installer/index.js");
 
@@ -75,6 +77,7 @@ import {
 import {
 	checkProbeCache,
 	getRefreshableManagedNpmTools,
+	installTool,
 	resetProbeCacheStateForTesting,
 	TOOLS,
 	updateProbeCache,
@@ -83,6 +86,7 @@ import {
 	getManagedToolRefreshStatePath,
 	readManagedToolRefreshState,
 	runManagedToolRefresh,
+	runManagedToolRefreshForExploration,
 	stampManagedToolInstalled,
 } from "../../../clients/installer/managed-tool-refresh.js";
 import {
@@ -90,6 +94,10 @@ import {
 	reserveManagedToolRefreshSlot,
 	resetManagedToolRefreshSession,
 } from "../../../clients/installer/managed-tool-refresh-session.js";
+import {
+	resetProjectTrust,
+	setProjectTrustState,
+} from "../../../clients/project-trust.js";
 
 const TOOLS_DIR = path.join(TEST_HOME, "tools");
 const NODE_MODULES = path.join(TOOLS_DIR, "node_modules");
@@ -204,6 +212,15 @@ function logRows(): string[] {
 	return sessionLogSpy.mock.calls.map(([message]) => String(message));
 }
 
+function degradationCount(): number {
+	return (
+		getDegradationSummary().find((g) => g.kind === "managed-tool-refresh")
+			?.count ?? 0
+	);
+}
+
+let restoreDisableToolInstall: () => void;
+
 beforeEach(() => {
 	fs.rmSync(TOOLS_DIR, { recursive: true, force: true });
 	fs.mkdirSync(NODE_MODULES, { recursive: true });
@@ -218,9 +235,19 @@ beforeEach(() => {
 	delete process.env.PI_LENS_TOOL_REFRESH_MAX_PER_SESSION;
 	delete process.env.PI_LENS_TOOL_REFRESH_INTERVAL_MS;
 	delete process.env.PI_LENS_TOOL_REFRESH_RETRY_MS;
+	// `vitest.config.*` defaults this to "1" globally so an ordinary test run
+	// can never trigger a real install. `refreshNpmOne` now honors that same
+	// kill switch through `acquireManagedInstallGate` (#1759 review R2), and
+	// this whole file deliberately exercises the npm refresh-and-spawn path
+	// against a mocked `safeSpawnAsync` — so it opts back in, the same way
+	// `managed-tool-refresh-strategies.test.ts` already does.
+	restoreDisableToolInstall = withEnv({ PI_LENS_DISABLE_TOOL_INSTALL: "0" });
 });
 
 afterEach(() => {
+	restoreDisableToolInstall();
+	delete process.env.PI_LENS_INSTALL_LOCK_TIMEOUT_MS;
+	resetProjectTrust();
 	vi.unstubAllEnvs();
 });
 
@@ -952,6 +979,110 @@ describe("install-time stamping (review F4)", () => {
 		);
 		expect(installer).toContain("stampManagedToolInstalled(");
 	});
+
+	it("keeps the version-bearing stamp through a real npm install (#1759 review F4)", async () => {
+		spawnMock.mockImplementation(async (_command: string, args: string[]) => {
+			if ((args ?? []).includes("install")) {
+				installFixture("knip", "6.32.2");
+				return { stdout: "", stderr: "", status: 0 };
+			}
+			// package-manager availability probe(s)
+			return { stdout: "npm", stderr: "", status: 0 };
+		});
+
+		const installed = await installTool("knip");
+
+		expect(installed).toBe(true);
+		// `installTool`'s npm case stamps the version directly
+		// (`stampManagedToolInstalled`) BEFORE `finishInstallAttempt` runs its
+		// universal `stampInstallResolution` funnel for every strategy. That
+		// funnel used to re-stamp npm too, with no version (npm never sets
+		// `lastInstallResolutionId`), clobbering the version this test checks
+		// for milliseconds later. `stampInstallResolution` now skips npm.
+		expect(readState().knip).toMatchObject({
+			checkedAt: expect.any(Number),
+			version: "6.32.2",
+		});
+	});
+});
+
+// --- install kill-switch, trust gate, and install lock (#1759 review R2) --
+//
+// F2's review round gated the five non-npm strategies through
+// `refreshManagedTool`. npm predates that PR and kept spawning `npm update`
+// directly, ungated — the reviewer's V4c probe: kill-switch set, expect zero
+// npm spawns. These tests prove `refreshNpmOne` now clears the same three
+// gates `acquireManagedInstallGate` enforces for every other strategy.
+
+describe("install kill-switch, trust gate, and install lock", () => {
+	it("declines and spawns nothing when PI_LENS_DISABLE_TOOL_INSTALL=1 (reviewer V4c)", async () => {
+		installFixture("knip", "6.4.1");
+		writeState({ knip: { checkedAt: NOW - 8 * DAY_MS, version: "6.4.1" } });
+		stubSpawn("ok", { knip: "6.32.2" });
+		process.env.PI_LENS_DISABLE_TOOL_INSTALL = "1";
+
+		const outcome = await runManagedToolRefresh(NOW);
+
+		expect(outcome.refreshed[0]).toMatchObject({ ok: false, changed: false });
+		expect(updateCalls()).toHaveLength(0);
+		expect(degradationCount()).toBe(0);
+		// No stamp write: the tool is retried plainly once the block lifts,
+		// rather than throttled by a 24h failure cooldown that has nothing to
+		// do with it.
+		expect(readState().knip).toEqual({ checkedAt: NOW - 8 * DAY_MS, version: "6.4.1" });
+		expect(
+			logRows().some((row) => row.includes("knip") && row.includes("declined")),
+		).toBe(true);
+	});
+
+	it("declines and spawns nothing when the host denies project trust", async () => {
+		installFixture("knip", "6.4.1");
+		writeState({ knip: { checkedAt: NOW - 8 * DAY_MS, version: "6.4.1" } });
+		stubSpawn("ok", { knip: "6.32.2" });
+		setProjectTrustState("untrusted");
+
+		const outcome = await runManagedToolRefresh(NOW);
+
+		expect(outcome.refreshed[0]).toMatchObject({ ok: false, changed: false });
+		expect(updateCalls()).toHaveLength(0);
+		expect(degradationCount()).toBe(0);
+	});
+
+	it("proceeds normally on a host with no trust surface (default)", async () => {
+		installFixture("knip", "6.4.1");
+		writeState({ knip: { checkedAt: NOW - 8 * DAY_MS, version: "6.4.1" } });
+		stubSpawn("ok", { knip: "6.32.2" });
+
+		const outcome = await runManagedToolRefresh(NOW);
+
+		expect(outcome.refreshed[0]).toMatchObject({ ok: true });
+		expect(updateCalls()).toHaveLength(1);
+	});
+
+	it("declines rather than racing a concurrent install holding the shared lock", async () => {
+		installFixture("knip", "6.4.1");
+		writeState({ knip: { checkedAt: NOW - 8 * DAY_MS, version: "6.4.1" } });
+		stubSpawn("ok", { knip: "6.32.2" });
+		process.env.PI_LENS_INSTALL_LOCK_TIMEOUT_MS = "150";
+		const lockPath = path.join(TOOLS_DIR, ".install.lock");
+		fs.mkdirSync(TOOLS_DIR, { recursive: true });
+		fs.writeFileSync(
+			lockPath,
+			JSON.stringify({ pid: process.pid, createdAt: Date.now() }),
+		);
+
+		try {
+			const outcome = await runManagedToolRefresh(NOW);
+
+			expect(outcome.refreshed[0]).toMatchObject({
+				ok: false,
+				changed: false,
+			});
+			expect(updateCalls()).toHaveLength(0);
+		} finally {
+			fs.rmSync(lockPath, { force: true });
+		}
+	});
 });
 
 describe("opt-out", () => {
@@ -964,5 +1095,58 @@ describe("opt-out", () => {
 
 		expect(outcome.skipped).toBe("disabled");
 		expect(updateCalls()).toHaveLength(0);
+	});
+});
+
+/**
+ * Reference adoption of `tests/support/reset-explorer.ts` (#1840).
+ *
+ * The "review round 2 (R2-F1)" describe block above pins the bug at the ONE
+ * await point a reviewer picked by hand. This block asks the same question
+ * exhaustively: fire `resetManagedToolRefreshSession` at EVERY await point
+ * `executeManagedToolRefresh` exposes via its `tap` seam
+ * (`runManagedToolRefreshForExploration`), one point per run, and check the
+ * budget invariant after each. It is exercising the CURRENT, fixed code —
+ * see `tests/support/reset-explorer.test.ts`'s "rediscovers a known bug"
+ * block for the red-first proof that the explorer catches the pre-fix shape.
+ */
+describe("reset-interleaving explorer (#1840 adoption)", () => {
+	it("holds the session-budget invariant at every await point in the real walk", async () => {
+		const resetFixtures = (): void => {
+			fs.rmSync(TOOLS_DIR, { recursive: true, force: true });
+			fs.mkdirSync(NODE_MODULES, { recursive: true });
+			installFixture("knip", "6.4.1");
+			installFixture("pyright", "1.0.0");
+			installFixture("oxlint", "1.0.0");
+			resetManagedToolRefreshSession();
+			resetProbeCacheStateForTesting();
+			resetDegradationLedger();
+			spawnMock.mockClear();
+		};
+		stubSpawn("ok", {});
+
+		const outcome = await exploreInterleavings({
+			run: (tap) => {
+				// Every pass needs the SAME starting state, or the walk's tap
+				// sequence (and the tools it sees as stale) drifts between passes —
+				// the explorer requires a deterministic tap sequence to address
+				// "the Nth point" meaningfully. See the file header on reset-explorer.ts.
+				resetFixtures();
+				return runManagedToolRefreshForExploration(NOW, tap);
+			},
+			reset: () => resetManagedToolRefreshSession(),
+			invariant: () => {
+				// The R2-F1 invariant: a mid-run session reset restores the
+				// SESSION's right to start a fresh run, but must never let the run
+				// already walking spend more than the allowance it reserved.
+				expect(updateCalls().length).toBeLessThanOrEqual(1);
+			},
+		});
+
+		// 3 tap points: after `installedRefreshCandidates`, after
+		// `readManagedToolRefreshState`, and after the one tool the local
+		// allowance (default `maxPerSession` = 1) permits before it breaks.
+		expect(outcome.tapPointCount).toBe(3);
+		expect(outcome.executions).toBe(4);
 	});
 });
