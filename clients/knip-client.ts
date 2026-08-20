@@ -63,6 +63,15 @@ export interface KnipResult {
 	 * hard knip failure — the tool is installed, the probe just timed out.
 	 */
 	failureKind?: "unavailable-transient" | "unavailable-missing";
+	/** Whether this call executed knip or reused the same project's successful
+	 * result at the supplied project sequence. */
+	execution?: "executed" | "cache";
+}
+
+export interface KnipAnalyzeOptions {
+	/** Monotonic content generation supplied by RuntimeCoordinator. Calls that
+	 * cannot prove a generation omit it and retain the explicit fresh-run path. */
+	projectSeq?: number;
 }
 
 const EMPTY_RESULT: Omit<KnipResult, "summary"> = {
@@ -262,6 +271,12 @@ export class KnipClient {
 	 */
 	private inFlight = new Map<string, Promise<KnipResult>>();
 
+	/** Last successful result per project and runtime content generation. */
+	private completedByProject = new Map<
+		string,
+		{ projectSeq: number; result: KnipResult }
+	>();
+
 	/**
 	 * (project root, binary, config) triples already recorded, so the toolchain
 	 * row is written once per distinct resolution instead of once per run.
@@ -272,6 +287,11 @@ export class KnipClient {
 		this.log = verbose
 			? createSubsystemLogger("knip")
 			: () => {};
+	}
+
+	/** Re-arm content-keyed reuse at the session boundary. */
+	resetSessionState(): void {
+		this.completedByProject.clear();
 	}
 
 	/**
@@ -376,7 +396,11 @@ export class KnipClient {
 	 * Re-entrancy safe: concurrent calls resolving to the same project
 	 * root share a single knip process via `inFlight`.
 	 */
-	async analyze(cwd?: string, _ignore?: string[]): Promise<KnipResult> {
+	async analyze(
+		cwd?: string,
+		_ignore?: string[],
+		options: KnipAnalyzeOptions = {},
+	): Promise<KnipResult> {
 		const targetDir = this.resolveProjectRoot(cwd || process.cwd());
 		if (!targetDir) {
 			// No package.json / knip config anywhere up the tree. Running knip
@@ -392,6 +416,16 @@ export class KnipClient {
 			};
 		}
 
+		const key = path.resolve(targetDir);
+		const completed = this.completedByProject.get(key);
+		if (
+			options.projectSeq !== undefined &&
+			completed?.projectSeq === options.projectSeq
+		) {
+			this.log(`Analysis cache hit for ${key} at projectSeq ${options.projectSeq}`);
+			return { ...completed.result, execution: "cache" };
+		}
+
 		// A project that ships its own knip needs no managed install and no
 		// managed probe — the shim is already on disk, and gating on
 		// `ensureAvailable()` would tell such a project to "npm install -D knip"
@@ -403,16 +437,26 @@ export class KnipClient {
 			return this.unavailableResult();
 		}
 
-		const key = path.resolve(targetDir);
 		const existing = this.inFlight.get(key);
 		if (existing) {
 			this.log(`Analysis already in flight for ${key}; sharing result`);
 			return existing;
 		}
 
-		const promise = this.runAnalyze(key).finally(() => {
-			this.inFlight.delete(key);
-		});
+		const promise = this.runAnalyze(key)
+			.then((result) => {
+				const executed = { ...result, execution: "executed" as const };
+				if (result.success && options.projectSeq !== undefined) {
+					this.completedByProject.set(key, {
+						projectSeq: options.projectSeq,
+						result: executed,
+					});
+				}
+				return executed;
+			})
+			.finally(() => {
+				this.inFlight.delete(key);
+			});
 		this.inFlight.set(key, promise);
 		return promise;
 	}

@@ -1626,6 +1626,8 @@ function logTypeScriptPullSettle(
 		filePath: normalizedPath,
 		durationMs,
 		metadata: {
+			serverId: state.serverId,
+			outcome: "settled",
 			launchVariant: state.launchVariant ?? "unknown",
 			publicationIndex:
 				state.diagnosticPublicationCounts.get(normalizedPath) ?? 0,
@@ -1951,6 +1953,8 @@ export function setupIncomingHandlers(
 					filePath: normalizedPath,
 					durationMs,
 					metadata: {
+						serverId: state.serverId,
+						outcome: settledReturn ? "settled" : "published",
 						launchVariant: state.launchVariant ?? "unknown",
 						publicationIndex,
 						version: docVersion ?? "push-unversioned",

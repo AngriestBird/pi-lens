@@ -1,5 +1,11 @@
 # pi-lens — agent context
 
+Knip's dispatch memo is instance-owned and keyed by canonical project root plus
+the runtime's monotonic project sequence. Only callers that supply that content
+generation may reuse a successful result; explicit fresh-analysis callers omit
+it. Cache hits and executions are separately labeled, and session start clears
+the memo before the startup scan can prime it. (#1868)
+
 Post-fix decision observability is durable and bounded: advisory delivery logs
 one `advisory_provenance_decision` per consume, classic TypeScript project
 identity logs every success/failure outcome, deferred mutation drains summarize
