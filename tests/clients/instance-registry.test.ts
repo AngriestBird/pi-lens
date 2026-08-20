@@ -702,9 +702,19 @@ describe("instance-registry", () => {
 			expect(footprint.instanceCount).toBe(1);
 			expect(footprint.perInstance.map((i) => i.pid)).not.toContain(deadPid);
 
-			// Prune is fire-and-forget — wait a tick for the background write.
-			await new Promise((r) => setTimeout(r, 20));
-			const remaining = await readInstanceRegistry();
+			// Prune is fire-and-forget, so poll for the background write instead
+			// of budgeting a fixed sleep. A loaded CI runner can take well over
+			// 20ms to land a locked read-modify-write, which made the fixed wait
+			// fail as a host-dependent flake rather than a real regression.
+			let remaining = await readInstanceRegistry();
+			const pruneDeadline = Date.now() + 5000;
+			while (
+				remaining.some((i) => i.pid === deadPid) &&
+				Date.now() < pruneDeadline
+			) {
+				await new Promise((r) => setTimeout(r, 20));
+				remaining = await readInstanceRegistry();
+			}
 			expect(remaining.map((i) => i.pid)).not.toContain(deadPid);
 			expect(remaining).toHaveLength(1);
 		});
