@@ -276,6 +276,19 @@ const TEST_ONLY_RESET = /ForTests?$|ForTesting$/;
  *    frozen lookup table built once at import. That judgment stays in the
  *    registry and in {@link SessionStateExemption}'s reasons.
  *
+ * The #1817 symbol-count pin narrows the FIRST four of these from "invisible"
+ * to "a total the pin table tracks", but it inherits one more blind spot of
+ * its own:
+ *
+ * 6. **Substitution.** Adding one new uncleared container while removing an
+ *    already-covered one leaves the file's total count unchanged, so the pin
+ *    sees nothing. The pin proves the COUNT is deliberate, not that every
+ *    individual symbol behind it still is — a swap that nets to zero is
+ *    invisible to a total the same way it would be to a checksum. Full
+ *    symbol-to-reset attribution (#1817's option (a), not taken here) is the
+ *    only way to close this; the count pin's job is the cheaper, LOUDER
+ *    common case where a symbol is added without one being removed.
+ *
  * The sweep is therefore a floor, not a proof of coverage. It makes a NEW
  * matching file impossible to add without a decision; it does not certify
  * that everything session-scoped is registered.
@@ -286,15 +299,24 @@ export const SWEEP_HEURISTIC_LIMITS = [
 	"state with no reset seam at all",
 	"instance fields on bootstrap-lived singletons",
 	"session-scoped vs import-time-constant semantics",
+	"substitution: add one container, remove another, and the #1817 symbol-count pin sees no change",
 ] as const;
 
 let cachedCandidates: SessionStateCandidate[] | undefined;
 
-/** Every `clients/` file matching the session-scoped-state code pattern. */
-export function scanSessionStateCandidates(): SessionStateCandidate[] {
-	if (cachedCandidates) return cachedCandidates;
+/**
+ * Every source file under `dir` matching the session-scoped-state code
+ * pattern. Defaults to (and caches) the real `clients/` tree; a caller may
+ * pass an override root to run the same detection against a synthetic
+ * fixture tree — `tests/clients/session-state-conformance.test.ts` uses this
+ * to regression-test the #1817 symbol-count pin against a fixture that
+ * cannot drift out from under the test the way the real tree can.
+ */
+export function scanSessionStateCandidates(dir = CLIENTS_ROOT): SessionStateCandidate[] {
+	const useCache = dir === CLIENTS_ROOT;
+	if (useCache && cachedCandidates) return cachedCandidates;
 	const found: SessionStateCandidate[] = [];
-	for (const absolute of clientSourceFiles()) {
+	for (const absolute of clientSourceFiles(dir)) {
 		// Stripped for the same reason the reachability walk is (R1): a
 		// commented-out declaration or reset export is not one.
 		const source = stripCommentsAndStrings(fs.readFileSync(absolute, "utf8"));
@@ -308,13 +330,13 @@ export function scanSessionStateCandidates(): SessionStateCandidate[] {
 		// seam, which by itself says "this module holds state tests must undo").
 		if (containers.length === 0 && !hasTestOnlyReset) continue;
 		found.push({
-			file: clientsRelative(absolute),
+			file: relativePosix(dir, absolute),
 			containers,
 			resets,
 			hasTestOnlyReset,
 		});
 	}
-	cachedCandidates = found;
+	if (useCache) cachedCandidates = found;
 	return found;
 }
 
