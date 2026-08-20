@@ -11,11 +11,12 @@
  *
  * The fixture's `FAKE_LSP_WEDGE_STDIN_AFTER_INIT=1` mode pauses its stdin
  * for good right after the `initialized` handshake notification. The test
- * then fires ~4MB of padding `didOpen` traffic (unawaited — those writes
- * never settle either) to exhaust the OS pipe buffer, confirmed against a
- * throwaway probe: a single small write past ~1-2MB of unread backlog stops
- * invoking its callback entirely. Only then does clientShutdown's own
- * "shutdown" request and "exit" notification writes race the same wedge.
+ * then fires three ~4MB (~12MB total) padding `didOpen` writes (unawaited —
+ * those writes never settle either) to exhaust the OS pipe buffer, confirmed
+ * against a throwaway probe: a single small write past ~1-2MB of unread
+ * backlog stops invoking its callback entirely. Only then does
+ * clientShutdown's own "shutdown" request and "exit" notification writes
+ * race the same wedge.
  *
  * Red-first: reverting #1624's try/finally (restoring the bare unbounded
  * `await safeSendNotification(connection, "exit", {})`) makes this hang to
@@ -129,9 +130,9 @@ describe("clientShutdown against a real wedged child process (#1620)", () => {
 		expect(removeSpy).toHaveBeenCalledWith(pid, undefined);
 
 		// Same "prove the wedge was real, not a fast failure" concern, from the
-		// teardown's own record: a dead-child EPIPE would show up as *Rejected,
-		// not *TimedOut (residual 1's distinction) — this run must show the
-		// timer actually winning the race.
+		// teardown's own record: a dead-child EPIPE would show up as
+		// *Undelivered, not *TimedOut (residual 1 / F2's distinction) — this
+		// run must show the timer actually winning the race.
 		const hit = vi
 			.mocked(logLatency)
 			.mock.calls.find(([e]) => e?.phase === "lsp_client_shutdown");

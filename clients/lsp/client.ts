@@ -789,15 +789,29 @@ export interface LSPClientState {
 	shutdownRequested: boolean;
 	/**
 	 * #1620 residual 3: set on the FIRST `clientShutdown()` call and awaited
-	 * by every subsequent one on the same state, instead of each caller
-	 * re-running the RPC handshake and emitting its own `lsp_client_shutdown`
-	 * record. Two of the 8 call sites can race the same client (e.g. a
-	 * ceiling eviction and a #1459 notify-stall demotion) — the individual
-	 * teardown steps are idempotent, but a duplicated record inflates any
+	 * by every subsequent one on the same state whose options are no MORE
+	 * aggressive than these (see `shutdownOptions` and
+	 * `isAtLeastAsAggressiveShutdown`), instead of each caller re-running the
+	 * RPC handshake and emitting its own `lsp_client_shutdown` record. Two of
+	 * the 8 call sites can race the same client (e.g. a ceiling eviction and
+	 * a #1459 notify-stall demotion) — the individual teardown steps are
+	 * idempotent, but a duplicated record inflates any
 	 * `shutdownOutcome: "forced"` count read from the log. `undefined` until
 	 * the first call.
+	 *
+	 * #1620 residual review F1: a call whose options ARE more aggressive
+	 * (e.g. a `fast`+`processExiting` session-exit reset racing a graceful
+	 * eviction teardown that is still mid-handshake) does NOT dedupe onto
+	 * this promise — that in-flight teardown may still spawn `taskkill` and
+	 * await its close event, which is exactly what `processExiting` exists
+	 * to forbid during a closing event loop. It starts (and stores) its own
+	 * teardown instead; see `clientShutdown`.
 	 */
 	shutdownPromise: Promise<void> | undefined;
+	/** #1620 residual review F1: the options the current `shutdownPromise`
+	 *  was started with — compared against a new call's options to decide
+	 *  dedupe vs. escalate. `undefined` exactly when `shutdownPromise` is. */
+	shutdownOptions: LSPShutdownOptions | undefined;
 	/**
 	 * #1127: wall-clock time the client FIRST observed its own death (whichever
 	 * of connection close/error or the process 'exit' event fires first — see
@@ -3535,6 +3549,24 @@ export async function closeDocument(
 	clearDiagnosticsForPath(state, normalizedPath);
 }
 
+/**
+ * #1620 residual review F1: `fast` and `processExiting` only ever escalate —
+ * a `true` demands strictly less work (or none) than a `false`, never more.
+ * `existing` covers `requested` when it is at least as demanding on BOTH
+ * axes, so deduping onto it can't silently downgrade what the new caller
+ * needs (e.g. a `processExiting` caller must never inherit a teardown that
+ * might still spawn `taskkill`).
+ */
+function isAtLeastAsAggressiveShutdown(
+	existing: LSPShutdownOptions,
+	requested: LSPShutdownOptions,
+): boolean {
+	return (
+		!!existing.fast >= !!requested.fast &&
+		!!existing.processExiting >= !!requested.processExiting
+	);
+}
+
 export function clientShutdown(
 	state: LSPClientState,
 	options: LSPShutdownOptions = {},
@@ -3542,11 +3574,51 @@ export function clientShutdown(
 	// #1620 residual 3: idempotent across racing callers — see the doc comment
 	// on `LSPClientState.shutdownPromise`. The FIRST call starts the real
 	// teardown and stores its promise; every subsequent call (any of the 8
-	// call sites, on the same state) awaits that same promise instead of
-	// running the RPC handshake and emitting `lsp_client_shutdown` again.
-	if (state.shutdownPromise) return state.shutdownPromise;
-	state.shutdownPromise = clientShutdownOnce(state, options);
-	return state.shutdownPromise;
+	// call sites, on the same state) whose options are no MORE aggressive
+	// awaits that same promise instead of running the RPC handshake and
+	// emitting `lsp_client_shutdown` again.
+	//
+	// #1620 residual review F1: a call whose options ARE more aggressive does
+	// NOT dedupe — it starts (and takes over as) its own teardown instead.
+	// The concrete failure this closes: `resetLSPService`'s session-exit path
+	// (`index.ts`) calls `shutdown({fast:true, processExiting:true})` — the
+	// event loop is already closing, and `processExiting` exists precisely so
+	// this teardown never spawns `taskkill` (a closing-loop `uv_async_send`
+	// hard-aborts, `src\win\async.c`). If a GRACEFUL teardown (default
+	// options — e.g. `client_ceiling_lru` eviction) is already in flight on
+	// this same client when the exit path arrives, blindly deduping would
+	// make the exit path inherit that graceful run's own `taskkill` spawn and
+	// its close-event wait — the exact hazard `processExiting` forbids, on
+	// top of blocking the closing loop for however long that takes. The
+	// weaker in-flight teardown is left to finish on its own (every step
+	// downstream — dispose, kill, deregister — is already idempotent).
+	if (
+		state.shutdownPromise &&
+		state.shutdownOptions &&
+		isAtLeastAsAggressiveShutdown(state.shutdownOptions, options)
+	) {
+		return state.shutdownPromise;
+	}
+	state.shutdownOptions = options;
+	const attempt = clientShutdownOnce(state, options);
+	state.shutdownPromise = attempt;
+	// #1620 residual review F3: a REJECTED teardown (e.g. `killProcessTree`
+	// throwing something its own internal catches don't cover) must not
+	// latch a permanently-rejected promise here — every later call, even one
+	// with equal or weaker options, would dedupe onto it forever and never
+	// retry, so the child leaks silently with no further kill/dispose/
+	// deregister attempt. Clear the latch on rejection (only if nothing more
+	// aggressive has already superseded it) so the NEXT call starts a fresh
+	// attempt instead of re-handing back the same dead promise. The rejection
+	// itself still propagates to whoever is awaiting `attempt` right now —
+	// this only affects callers that haven't asked yet.
+	attempt.catch(() => {
+		if (state.shutdownPromise === attempt) {
+			state.shutdownPromise = undefined;
+			state.shutdownOptions = undefined;
+		}
+	});
+	return attempt;
 }
 
 async function clientShutdownOnce(
@@ -3573,15 +3645,22 @@ async function clientShutdownOnce(
 	state.diagnosticEmitter.removeAllListeners();
 	let shutdownRequestTimedOut = false;
 	let exitNotifyTimedOut = false;
-	// #1620 residual 1: a rejection that ISN'T the timer winning (an immediate
-	// protocol error, a destroyed-stream rejection that raced the timeout) was
-	// previously folded into the same "*TimedOut" flag as a real timeout —
-	// honest as "forced" (shutdownOutcome below is unaffected either way), but
-	// imprecise about WHICH failure happened. Split it out so a log reader can
-	// tell "the server never answered" from "the server answered with an
-	// error" without re-deriving it from durationMs.
-	let shutdownRequestRejected = false;
-	let exitNotifyRejected = false;
+	// #1620 residual 1 / residual-review F2: a failure that ISN'T the timer
+	// winning was previously folded into the same "*TimedOut" flag as a real
+	// timeout — honest for the rolled-up `shutdownOutcome` (still "forced"
+	// either way), imprecise about WHICH failure happened. Two shapes land
+	// here, both meaning "no confirmation this reached the server":
+	//   (a) a genuine promise rejection that isn't the timer (an immediate
+	//       protocol error) — reaches the `catch` below.
+	//   (b) `safeSendRequest`/`safeSendNotification` SWALLOW a stream error
+	//       (EPIPE, disposed connection — `isStreamError`) and RESOLVE
+	//       instead of rejecting, so the `catch` never runs at all. A real
+	//       `shutdown` reply is `null`, never `undefined`, and a real `exit`
+	//       notify send returns `true`; `undefined`/`false` is the swallow
+	//       case. Without this, a coded EPIPE reported `shutdownOutcome:
+	//       "graceful"` — nothing was delivered, but the log called it clean.
+	let shutdownRequestUndelivered = false;
+	let exitNotifyUndelivered = false;
 	// #1620: the graceful handshake is BEST-EFFORT and the teardown is not. A
 	// teardown path must not depend on the health of the thing it is tearing
 	// down — the breaker fires exactly when the server is unresponsive. Keep the
@@ -3592,29 +3671,31 @@ async function clientShutdownOnce(
 	try {
 		if (!options.fast) {
 			try {
-				await withTimeout(
+				const shutdownAck = await withTimeout(
 					safeSendRequest(state.connection, "shutdown", {}),
 					SHUTDOWN_REQUEST_TIMEOUT_MS,
 				);
+				if (shutdownAck === undefined) shutdownRequestUndelivered = true;
 			} catch (err) {
 				/* ignore — proceed to exit/kill so shutdown cannot hang the session */
 				if (isShutdownTimeoutError(err, SHUTDOWN_REQUEST_TIMEOUT_MS)) {
 					shutdownRequestTimedOut = true;
 				} else {
-					shutdownRequestRejected = true;
+					shutdownRequestUndelivered = true;
 				}
 			}
 			try {
-				await withTimeout(
+				const exitSent = await withTimeout(
 					safeSendNotification(state.connection, "exit", {}),
 					EXIT_NOTIFY_TIMEOUT_MS,
 				);
+				if (exitSent === false) exitNotifyUndelivered = true;
 			} catch (err) {
 				/* ignore — same reason as the request above */
 				if (isShutdownTimeoutError(err, EXIT_NOTIFY_TIMEOUT_MS)) {
 					exitNotifyTimedOut = true;
 				} else {
-					exitNotifyRejected = true;
+					exitNotifyUndelivered = true;
 				}
 			}
 		}
@@ -3637,19 +3718,21 @@ async function clientShutdownOnce(
 				// pre-fix no record was emitted at all. Report both halves plus one
 				// rolled-up verdict, so a forced teardown is countable from the log.
 				exitNotifyTimedOut,
-				// #1620 residual 1: the *Rejected pair covers the failure this PAIR
-				// of *TimedOut flags used to also claim — an immediate rejection
-				// (protocol error, destroyed stream) that is NOT the timer winning.
-				// Both still roll into shutdownOutcome "forced" below; only the
-				// per-field attribution gets more precise.
-				shutdownRequestRejected,
-				exitNotifyRejected,
+				// #1620 residual 1 / residual-review F2: the *Undelivered pair covers
+				// the failure the *TimedOut pair used to also claim — a rejection
+				// that is NOT the timer winning, OR (the F2 gap) a swallowed stream
+				// error that `safeSendRequest`/`safeSendNotification` resolved
+				// instead of rejecting, so no exception ever reached the catches
+				// above. Both still roll into shutdownOutcome "forced" below — an
+				// undelivered write is never reported as "graceful".
+				shutdownRequestUndelivered,
+				exitNotifyUndelivered,
 				shutdownOutcome: options.fast
 					? "fast"
 					: shutdownRequestTimedOut ||
 							exitNotifyTimedOut ||
-							shutdownRequestRejected ||
-							exitNotifyRejected
+							shutdownRequestUndelivered ||
+							exitNotifyUndelivered
 						? "forced"
 						: "graceful",
 			},
@@ -4346,6 +4429,7 @@ export async function createLSPClient(options: {
 		isDestroyed: false,
 		shutdownRequested: false,
 		shutdownPromise: undefined,
+		shutdownOptions: undefined,
 		exitedAt: undefined,
 		connectionDisposed: false,
 		lastError: undefined,
