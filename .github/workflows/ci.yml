@@ -21,6 +21,26 @@ jobs:
       - name: Validate per-issue close keywords
         run: node scripts/check-close-keywords.mjs --lint-pr
 
+  # #1844: the changelog-fragment format error hit four PRs in one day, each
+  # costing a full ~4-minute Unit-tests lap to discover. This job runs ONLY
+  # the fragment parser (no `npm install`, no `npm run build` -- it is pure
+  # Node against .changelog/*.md) so a bad fragment fails in seconds. It is
+  # additive early signal, not a replacement for the Unit-tests job below,
+  # which still runs the full changelog-entries.test.ts as part of the suite.
+  changelog-fragment-fastfail:
+    name: Changelog fragment (fast-fail)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Validate changelog fragments
+        run: node scripts/check-changelog-fragments.mjs
+
   lint-and-typecheck:
     name: Lint & type-check
     runs-on: ubuntu-latest
