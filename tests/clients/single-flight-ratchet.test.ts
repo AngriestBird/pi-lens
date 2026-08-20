@@ -17,6 +17,8 @@ import {
  * Keys are `clients/`-relative-path:symbol.
  */
 const EXEMPTIONS: Record<string, string> = {
+	"lsp/index.ts:onSpawnInFlight":
+		"Read-only callback observer: ensureClientForServer owns the existing state.inFlight coordinator; this callback only resolves the known-slow wait sentinel.",
 	// ── The `ensureInFlight` availability family: #1753's migration backlog ──
 	// Identical shape to the two converted sites (biome-client, sg-runner):
 	// a latch short-circuit, then at-most-one probe/auto-install. #1753 converts

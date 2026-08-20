@@ -35,9 +35,15 @@ Bounded LSP warm touches preserve the spawn coordinator's lifecycle evidence:
 an empty ready-client set reports `spawn_in_flight_budget_elapsed` while a
 matching primary single-flight spawn remains pending, and
 `no_clients_none_spawning` only when none does. Read the existing `inFlight`
- state at the touch verdict; correlate the full `serverId:root` key using the
- root resolved by acquisition, and do not add a second pending-warm latch.
- (#1875, #1875 fix round)
+state at the touch verdict; correlate the full `serverId:root` key using the
+root resolved by acquisition, and do not add a second pending-warm latch.
+Successful LSP spawn-plus-initialize durations also
+feed a bounded process-lifetime history. A bounded client wait skips only after
+the matching spawn enters `inFlight` and that server's recorded duration exceeds
+twice the wait budget; missing history keeps the full wait. The skip retains the
+in-flight verdict and records `budget_skipped_known_slow`, while the background
+single-flight spawn continues for the next touch. (#1875, #1875 fix round,
+#1884 item 2)
 
 Post-fix decision observability is durable and bounded: advisory delivery logs
 one `advisory_provenance_decision` per consume, classic TypeScript project
@@ -359,6 +365,11 @@ first client operation with `tests/clients/interleaving-kit.ts`, never sleeps.
 The TypeScript idle default is 20 minutes to preserve warm LSPs across subagent
 bursts; every non-idle removal path must also clear timer ownership. (#1332)
 
+**Known-slow LSP shortcuts yield to completed acquisition.** The spawn-history
+margin is strict and boundary-tested at 2x the effective wait. A known-slow
+sentinel is deferred long enough for queued completion publication, and its
+decision point re-reads live clients because `inFlight` cleanup is asynchronous.
+
 **Path-keyed Tier-3 caches normalize at both boundaries.** Widget LSP server
 roots, startup-scan context keys, and Ruby drive-root memo keys use
 `normalizeMapKey`; equivalent separator/case spellings must share one entry.
@@ -381,6 +392,13 @@ stdout from non-zero exits; process-table callers record that outcome instead
 of parsing partial output as a clean empty result. Sampler timeouts inject the
 reaper's tree-kill-and-verify hook and settle only after its fate is known.
 (#1863, #1864)
+
+**Workspace refresh walks the bounded ancestor cache chain.** A language server
+root can be a nested monorepo member while workspace diagnostics persist under
+the enclosing sweep root. `workspace/diagnostic/refresh` clears the client
+root and each ancestor through the session cwd, so a never-swept member cannot
+leave its prior workspace cache alive; it never walks above that ceiling.
+(#1707)
 
 ## Issue and PR design contract
 
