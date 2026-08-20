@@ -703,7 +703,9 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	"project-lens-config.ts": 3,
 	"project-report.ts": 1,
 	"project-scale.ts": 0,
-	"project-snapshot.ts": 5,
+	// #1785: 5 -> 6 for _lastNarrowParseDigestForTests, the bounded digest hook
+	// (see clients/project-snapshot.ts:605-609's own comment anticipating this).
+	"project-snapshot.ts": 6,
 	"project-trust.ts": 1,
 	"quiet-window-config.ts": 0,
 	"quiet-window.ts": 0,
