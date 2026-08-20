@@ -65,16 +65,19 @@ note: |
   `tests/`. The rule is tagged `metadata.category: pi-lens-self-scan`,
   so CI's `npm run astgrep:self-scan` lane keeps it at zero.
 
-  Scope and known gap: a comment is accepted if it directly precedes
-  the assertion as a structural sibling (inline, e.g. `/* SAFETY: ... */
-  x as unknown as T`), OR if it directly precedes the assertion's
-  containing expression/variable/return statement as a structural
-  sibling. Upstream walks an arbitrary number of statement-owner levels
-  looking for ANY preceding comment in the file; this port only checks
-  one level up from the assertion and one level up from its immediate
-  containing statement. There is NO dominance verification: the rule
-  proves a comment is adjacent, never that the comment is true or that
-  it describes this cast.
+  Placement contract: a `SAFETY:` comment may directly precede the cast,
+  its enclosing statement, or an object-literal member (`pair`) containing
+  the cast. Array elements and call arguments are also supported through the
+  direct-cast arm when the comment is immediately above the cast expression.
+  JSX attributes, class static blocks, and switch cases are not comment
+  anchors for this valve; place those comments on the enclosing statement.
+  Inline comments remain valid, for example `/* SAFETY: ... */ x as unknown
+  as T`. Upstream walks an arbitrary number of statement-owner levels looking
+  for ANY preceding comment in the file; this port only checks one level up
+  from the assertion and one level up from its immediate containing
+  statement or supported object member. There is NO dominance verification:
+  the rule proves a comment is adjacent, never that the comment is true or
+  that it describes this cast.
 
   2026-08-20 (#1847, found in #1843's review): the "one level up from
   its immediate containing statement" kind list omitted
@@ -133,6 +136,12 @@ note: |
   statement's comment. The "Scope and known gap" note above already
   described this contiguous-comment intent; the shipped pattern didn't
   implement it.
+
+  2026-08-20 (#1870): the pair arm is bounded by the nearest `pair`. An
+  outer object member's SAFETY comment must not suppress a cast in a nested
+  member, and a nested member's comment must not suppress a parent cast.
+  The direct-cast arm remains the precise escape valve for comments adjacent
+  to casts in array elements and call arguments.
 ignores:
   - "**/*.test.ts"
   - "**/*.test.tsx"
@@ -151,6 +160,14 @@ rule:
           kind: comment
           regex: 'SAFETY\s*:'
           stopBy: { not: { kind: comment } }
+      - inside:
+          stopBy: { kind: pair }
+          any:
+            - kind: pair
+          follows:
+            kind: comment
+            regex: 'SAFETY\s*:'
+            stopBy: { not: { kind: comment } }
       - inside:
           stopBy: end
           any:
