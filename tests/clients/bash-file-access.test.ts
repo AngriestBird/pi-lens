@@ -191,6 +191,19 @@ describe("extractWrittenPathsFromCommand — bash writes", () => {
 		["git restore <file>", (f) => `git restore ${f}`],
 		["git restore --staged <file>", (f) => `git restore --staged ${f}`],
 		["git mv destination (#1668 review F2)", (f) => `git mv /other/src.ts ${f}`],
+		["biome format --write", (f) => `npx biome format --write ${f}`],
+		["biome check --write", (f) => `biome check --write ${f}`],
+		["prettier --write", (f) => `prettier --write ${f}`],
+		["eslint --fix", (f) => `eslint --fix ${f}`],
+		["ruff format", (f) => `ruff format ${f}`],
+		["ruff check --fix", (f) => `ruff check --fix ${f}`],
+		["ruff --fix", (f) => `ruff --fix ${f}`],
+		["gofmt -w", (f) => `gofmt -w ${f}`],
+		["cargo fmt explicit path", (f) => `cargo fmt -- ${f}`],
+		["rustfmt explicit path", (f) => `rustfmt ${f}`],
+		["black", (f) => `black ${f}`],
+		["clang-format -i", (f) => `clang-format -i ${f}`],
+		["dotnet format --include", (f) => `dotnet format --include ${f}`],
 	];
 
 	for (const [label, build] of cases) {
@@ -233,6 +246,21 @@ describe("extractWrittenPathsFromCommand — bash writes", () => {
 		expect(extractWrittenPathsFromCommand(`git stash pop`, tmp)).toHaveLength(
 			0,
 		);
+	});
+
+	it("does not invent paths for project-scoped formatter invocations", () => {
+		expect(extractWrittenPathsFromCommand("cargo fmt", tmp)).toHaveLength(0);
+		expect(extractWrittenPathsFromCommand("dotnet format", tmp)).toHaveLength(0);
+		expect(extractWrittenPathsFromCommand("rustfmt", tmp)).toHaveLength(0);
+	});
+
+	it("does not register formatter operands without their write flag", () => {
+		const f = pathIn("a.ts");
+		expect(extractWrittenPathsFromCommand(`biome format ${f}`, tmp)).not.toContain(f);
+		expect(extractWrittenPathsFromCommand(`prettier ${f}`, tmp)).not.toContain(f);
+		expect(extractWrittenPathsFromCommand(`eslint ${f}`, tmp)).not.toContain(f);
+		expect(extractWrittenPathsFromCommand(`gofmt ${f}`, tmp)).not.toContain(f);
+		expect(extractWrittenPathsFromCommand(`clang-format ${f}`, tmp)).not.toContain(f);
 	});
 });
 
