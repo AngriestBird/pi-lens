@@ -1863,13 +1863,17 @@ async function formatFullMode(
 						", ",
 					)}${unconfirmedLspResults.length > 20 ? ", …" : ""}. These files' LSP contribution is excluded from this result; re-run mode=full to retry them (they may still show findings above from cached/project-runner state).`
 			: "";
+	// Code-unit comparator (#1883): this list ships as the
+	// `unconfirmedLspServerIds` structured field and as the lane names in the
+	// agent-visible coverage note, so its order must be deterministic across
+	// locales — localeCompare is deliberately avoided.
 	const uncoveredScannerIds = [
 		...new Set(
 			partiallyCoveredLspResults.flatMap(
 				(result) => result.unconfirmedServerIds ?? [],
 			),
 		),
-	].sort();
+	].sort((a, b) => Number(a > b) - Number(a < b));
 	const auxiliaryCoverageNote =
 		uncoveredScannerIds.length > 0
 			? `\n\n⚠ Auxiliary coverage incomplete: ${uncoveredScannerIds.join(", ")} did not answer for ${partiallyCoveredLspResults.length} file(s). Findings from answering servers are included; this is not a clean verdict for the named scanner lane(s).`

@@ -7530,9 +7530,13 @@ export class LSPService {
 		const partiallyCoveredFiles = results.filter(
 			(result) => (result.unconfirmedServerIds?.length ?? 0) > 0,
 		).length;
+		// Code-unit comparator (#1883): this list ships as the
+		// `unconfirmedServerIds` field on the `lsp_workspace_diagnostics` record,
+		// so its order must be deterministic across locales — localeCompare is
+		// deliberately avoided.
 		const unconfirmedServerIds = [
 			...new Set(results.flatMap((result) => result.unconfirmedServerIds ?? [])),
-		].sort();
+		].sort((a, b) => Number(a > b) - Number(a < b));
 		logLatency({
 			type: "phase",
 			phase: "lsp_workspace_diagnostics",
