@@ -1,11 +1,34 @@
 id: no-non-null-assertion
 language: TypeScript
 message: "Non-null assertion '!' used — prefer explicit null checks or optional chaining"
-severity: warning
+severity: hint
 note: |
   The ! operator bypasses TypeScript's null checking which can lead to
   runtime errors. Use optional chaining (?.), nullish coalescing (??),
   or explicit null checks instead.
+
+  Demoted from warning to hint (#1777): a false-positive census sampled
+  49 hits across three real TypeScript codebases — this one (43 hits,
+  full coverage across clients/ tools/ index.ts) and a spot-checked
+  sample from nestjs/nest (6 of 326 hits, read with surrounding context;
+  a third codebase, colinhacks/zod, scored 0 hits, showing the pattern
+  is absent where null-safety discipline is already strict rather than
+  rare everywhere). 43 of the 49 sampled hits (88%) were the
+  narrow-after-check idiom TypeScript can't itself verify: a Map
+  `.get(k)!` right after `.has(k)`, `array.pop()!`/`shift()!` inside a
+  `while (array.length > 0)` loop, a property re-asserted after its
+  parent was checked (`r.enclosingSymbol!.name` after
+  `.filter((r) => r.enclosingSymbol)`), or a boolean flag derived from a
+  null check used later in place of the original narrowed variable. The
+  remaining 6 (12%) crossed a function or module boundary the assertion
+  couldn't verify locally (e.g. `dart.getCommand(cwd)!` right after
+  `dart.isAvailableAsync(cwd)` returned true, or a private field read
+  before its own guarded initializer runs) — genuine risk, but too thin
+  a share and too opinion-shaped a check (this is a style preference
+  about how to spell a narrowing, not a precision detector) to justify
+  warning-tier volume. Opinion-density: this repo alone throws 43 hits
+  from one rule, in line with #1777's live plegma count of 84 hits/turn
+  at warning tier.
 rule:
   pattern: $X!
   not:
