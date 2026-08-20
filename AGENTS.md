@@ -32,11 +32,19 @@ the full count preserved. Never replace this with shared last-client state;
 concurrent navigation requests must not overwrite each other's attribution.
 (#1854)
 
+File-scoped LSP navigation is capability-gated twice: the tool layer rejects
+unsupported requests before opening a file, and every `LSPService` navigation
+chokepoint re-checks the resolved client's `getOperationSupport()` snapshot.
+An unsupported client-layer request throws the `__UNSUPPORTED__` discriminator;
+do not collapse it into the clean empty result returned by a supporting server.
+(#1826)
+
 Workspace-diagnostics per-file sweep verdicts preserve per-server evidence. A
 primary answer remains deliverable when an auxiliary is silent or cut off; the
 result carries that lane in `unconfirmedServerIds` and stays ineligible for the
 fully-covered workspace cache and footer replacement. Never reconstruct the gap
 from a touch-wide timeout: consume `touchFile`'s frozen coverage set. (#1549)
+
 Bounded LSP warm touches preserve the spawn coordinator's lifecycle evidence:
 an empty ready-client set reports `spawn_in_flight_budget_elapsed` while a
 matching primary single-flight spawn remains pending, and
