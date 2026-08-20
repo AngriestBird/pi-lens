@@ -2392,6 +2392,15 @@ export async function handleSessionStart(
 			metadata: {
 				mode: startupMode,
 				reason: deps.sessionReason,
+				// #1911 review F3: this `if (quickMode)` branch is an early return —
+				// the whole quick path — so there is no enumerable list of "steps
+				// run vs. skipped" this array could be derived from mechanically. It
+				// is DESCRIPTIVE documentation of what the early return skips,
+				// matching the `dbg()` line above word for word; keep both in sync by
+				// hand if either changes. It also does NOT narrow under
+				// `getFlag("no-lsp")` — quick mode skips the same five steps either
+				// way; the LSP flag instead affects `quickTools` above, a separate
+				// record.
 				steps: [
 					"slow_tool_probes",
 					"language_profiling",

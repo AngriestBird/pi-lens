@@ -265,6 +265,20 @@ export function _getOutstandingCascadeTouchesForTests(): OutstandingTouch[] {
 }
 
 /**
+ * Test-only: peek at the sweep-scoped expired/evicted counters without
+ * mutating them. Exists so a probe of `resetCascadeTierSessionState` can
+ * assert on THESE counters directly, rather than only on the registry map —
+ * a future counter added here and left out of the reset would otherwise
+ * stay invisible to any probe that only checks the map went empty.
+ */
+export function _getCascadeTierSweepCountersForTests(): {
+	expired: number;
+	evicted: number;
+} {
+	return { expired: _expiredSinceLastSweep, evicted: _evictedSinceLastSweep };
+}
+
+/**
  * #1899: WHY a touch stayed unresolved. Five distinct causes used to collapse
  * into the single word `unresolved`, which is what made the dogfood backlog
  * unreadable: 676 of 756 outcomes were `unresolved` with no way to tell the

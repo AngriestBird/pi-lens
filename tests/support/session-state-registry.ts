@@ -50,6 +50,7 @@ import {
 	isWorkspaceSweepActive,
 } from "../../clients/lsp/workspace-sweep-hold.js";
 import {
+	_getCascadeTierSweepCountersForTests,
 	_getOutstandingCascadeTouchesForTests,
 	recordOutstandingCascadeTouch,
 	resetCascadeTierSessionState,
@@ -533,14 +534,40 @@ export const SESSION_STATE_REGISTRY: SessionStateEntry[] = [
 		reason:
 			"#1910: the tier-3 cascade outstanding-touch registry and its sweep-scoped expired/evicted counters are a per-SESSION claim about touches THIS session fired. #1899 bounded the registry between sweeps but, by its own review, left the session boundary unwired — a session replacement inherited the prior session's outstanding touches, and a stray eviction/expiry landing between a sweep and the boundary attributed its count to the next session's first reconcile gauge. Previously the whole file was blanket-exempted (#1909 review F4: 'cascade-tier registration and outstanding-touch bookkeeping'); this entry replaces that blanket claim with the real reset now that one exists. `_reconcileTaskRegistered` and the `_enabledCache` kill-switch memo are deliberately still NOT covered by a reset — the former is idempotent quiet-window-task registration (same shape as the other publisher-registration exemptions in this file), and the latter is a memo of the `PI_LENS_TIER_AWARE_CASCADE` env var, unaffected by a session boundary.",
 		probe: {
+			// Arms all THREE pieces of state the reset claims to cover, not just
+			// the map: an ancient touch trips the age prune (bumps `expired` on
+			// the next record), and CAP+1 fresh touches trip the size cap (bumps
+			// `evicted`). A probe that only checked the map would stay green if a
+			// future counter were added and left out of the reset — this one
+			// would not (review round, F2).
 			arm: () => {
+				const base = Date.now();
 				recordOutstandingCascadeTouch({
-					filePath: "/probe/session-state-registry.ts",
+					filePath: "/probe/session-state-registry-ancient.ts",
 					serverId: "session-state-registry-probe",
-					touchedAt: Date.now(),
+					// Mirrors OUTSTANDING_TOUCH_MAX_AGE_MS in clients/lsp/cascade-tier.ts.
+					touchedAt: base - 15 * 60_000 - 1,
 				});
+				// Mirrors MAX_OUTSTANDING_TOUCHES in clients/lsp/cascade-tier.ts; the
+				// (CAP + 1)th record both prunes the ancient entry above and evicts
+				// the oldest surviving one.
+				const CAP = 256;
+				for (let i = 0; i <= CAP; i++) {
+					recordOutstandingCascadeTouch({
+						filePath: `/probe/session-state-registry-f${i}.ts`,
+						serverId: "session-state-registry-probe",
+						touchedAt: base - CAP + i,
+					});
+				}
 			},
-			isArmed: () => _getOutstandingCascadeTouchesForTests().length === 0,
+			isArmed: () => {
+				const counters = _getCascadeTierSweepCountersForTests();
+				return (
+					_getOutstandingCascadeTouchesForTests().length === 0 &&
+					counters.expired === 0 &&
+					counters.evicted === 0
+				);
+			},
 			reset: () => resetCascadeTierSessionState(),
 		},
 	},
