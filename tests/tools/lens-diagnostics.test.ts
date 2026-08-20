@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createLensDiagnosticsTool } from "../../tools/lens-diagnostics.js";
 import { createLensDiagnosticMarkTool } from "../../tools/lens-diagnostic-mark.js";
@@ -81,14 +82,23 @@ let mockStaleDropped = 0;
 let mockDependencyDemoted = 0;
 
 const reconcileScanDiagnosticsMock = vi.fn();
+const reconcileCorrelatedScanDiagnosticsMock = vi.fn();
 
-vi.mock("../../clients/widget-state.js", () => ({
-	getFileDiagnosticSummaries: () => mockSummaries,
-	reconcileStaleWidgetFiles: async () => mockStaleDropped,
-	reconcileStaleWidgetDependencyBlockers: async () => mockDependencyDemoted,
-	reconcileScanDiagnostics: (...args: unknown[]) =>
-		reconcileScanDiagnosticsMock(...args),
-}));
+vi.mock("../../clients/widget-state.js", async (importOriginal) => {
+	const actual = await importOriginal<
+		typeof import("../../clients/widget-state.js")
+	>();
+	return {
+		...actual,
+		getFileDiagnosticSummaries: () => mockSummaries,
+		reconcileStaleWidgetFiles: async () => mockStaleDropped,
+		reconcileStaleWidgetDependencyBlockers: async () => mockDependencyDemoted,
+		reconcileScanDiagnostics: (...args: unknown[]) =>
+			reconcileScanDiagnosticsMock(...args),
+		reconcileCorrelatedScanDiagnostics: (...args: unknown[]) =>
+			reconcileCorrelatedScanDiagnosticsMock(...args),
+	};
+});
 
 // #1641: the past-EOF gate's demote/log logic is real (imported for real
 // below); only its resync side effect is mocked here so a demoted-line test
@@ -116,6 +126,7 @@ beforeEach(() => {
 	mockStaleDropped = 0;
 	mockDependencyDemoted = 0;
 	reconcileScanDiagnosticsMock.mockReset();
+	reconcileCorrelatedScanDiagnosticsMock.mockReset();
 	resetProjectLensConfigCache();
 });
 
@@ -1336,6 +1347,65 @@ describe("lens_diagnostics mode=full", () => {
 				diagnostics: 1,
 			},
 		});
+	});
+
+	it("projects napi findings into widget state while the matching LSP file is unconfirmed (#1888)", async () => {
+		const filePath = "/proj/src/backpressure-broken.ts";
+		const lspService = {
+			runWorkspaceDiagnostics: vi.fn().mockResolvedValue([
+				{
+					filePath,
+					diagnostics: [],
+					count: 0,
+					timedOut: true,
+					unconfirmedReason: "service_destroyed",
+				},
+			]),
+		};
+		projectDiagnosticsMocks.scanProjectDiagnostics.mockResolvedValue({
+			version: 2,
+			cwd: "/proj",
+			tier: "cheap",
+			scannedAt: "2026-08-20T14:30:14.000Z",
+			filesScanned: 1,
+			runners: ["ast-grep-napi"],
+			diagnostics: Array.from({ length: 3 }, (_, index) => ({
+				filePath,
+				line: index + 1,
+				severity: "error",
+				semantic: "blocking",
+				tool: "ast-grep-napi",
+				runner: "ast-grep-napi",
+				rule: `self-scan-${index + 1}`,
+				message: `napi finding ${index + 1}`,
+				source: "project-scan",
+			})),
+		});
+
+		const result = await run(makeTool({}, lspService), {
+			mode: "full",
+			refreshRunners: "cheap",
+		});
+
+		expect(result.details).toMatchObject({
+			lspFilesUnconfirmed: 1,
+			unconfirmedLspFiles: [filePath],
+		});
+		expect(reconcileScanDiagnosticsMock).not.toHaveBeenCalled();
+		expect(reconcileCorrelatedScanDiagnosticsMock).toHaveBeenCalledWith(
+			path.resolve(filePath),
+			expect.arrayContaining([
+				expect.objectContaining({
+					tool: "ast-grep-napi",
+					rule: "self-scan-1",
+					uri: `${pathToFileURL(filePath).href}#L1`,
+				}),
+				expect.objectContaining({ tool: "ast-grep-napi", rule: "self-scan-2" }),
+				expect.objectContaining({ tool: "ast-grep-napi", rule: "self-scan-3" }),
+			]),
+			undefined,
+			Date.parse("2026-08-20T14:30:14.000Z"),
+		);
 	});
 
 	it("refreshRunners=cached includes the stored project runner snapshot without scanning", async () => {

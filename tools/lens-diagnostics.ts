@@ -74,10 +74,12 @@ import type { CodeQualityWarningsReport } from "../clients/code-quality-warnings
 import {
 	getFileDiagnosticSummaries,
 	type FileDiagnosticSummary,
+	reconcileCorrelatedScanDiagnostics,
 	reconcileScanDiagnostics,
 	reconcileStaleWidgetDependencyBlockers,
 	reconcileStaleWidgetFiles,
 	type WidgetDiagnostic,
+	widgetDiagnosticUri,
 } from "../clients/widget-state.js";
 import { logLatency } from "../clients/latency-logger.js";
 import { convertLspDiagnostics } from "../clients/dispatch/utils/lsp-diagnostics.js";
@@ -551,7 +553,10 @@ function appendProjectDiagnosticsDeltaLines(
 	const scoped = (report?.diagnostics ?? []).filter(
 		(diagnostic) =>
 			includeFile(diagnostic.filePath) &&
-			matchesSeverity(projectDiagnosticToWidget(diagnostic), severity),
+			matchesSeverity(
+				projectDiagnosticToWidget(diagnostic, diagnostic.filePath),
+				severity,
+			),
 	);
 	const gated = gateFindingsByPathFreshness({
 		store: "lens-diagnostics-delta-project",
@@ -602,7 +607,11 @@ function filterDeltaReportDispositions(
 	if (!report?.diagnostics.length) return report;
 	const kept = report.diagnostics.filter(
 		(d) =>
-			applyWeakDispositions([projectDiagnosticToWidget(d)], cwd, d.filePath)
+			applyWeakDispositions(
+				[projectDiagnosticToWidget(d, d.filePath)],
+				cwd,
+				d.filePath,
+			)
 				.length === 1,
 	);
 	const policyKept = applyRulePolicy(kept, policyMap);
@@ -1054,6 +1063,7 @@ function lspDiagnosticToWidget(diagnostic: LSPDiagnostic): WidgetDiagnostic {
 
 function projectDiagnosticToWidget(
 	diagnostic: ProjectDiagnostic,
+	filePath: string,
 ): WidgetDiagnostic {
 	return {
 		severity: diagnostic.severity,
@@ -1063,6 +1073,7 @@ function projectDiagnosticToWidget(
 		col: diagnostic.column,
 		rule: diagnostic.rule ?? diagnostic.code,
 		tool: diagnostic.runner || diagnostic.tool,
+		uri: widgetDiagnosticUri(filePath, diagnostic.line, diagnostic.column),
 	};
 }
 
@@ -1342,13 +1353,13 @@ function mergeDiagnosticsWithWidgetSummaries(
 	for (const diagnostic of projectSnapshot?.diagnostics ?? []) {
 		addDiagnostic(
 			path.resolve(diagnostic.filePath),
-			projectDiagnosticToWidget(diagnostic),
+			projectDiagnosticToWidget(diagnostic, diagnostic.filePath),
 		);
 	}
 	for (const diagnostic of projectDelta?.diagnostics ?? []) {
 		addDiagnostic(
 			path.resolve(diagnostic.filePath),
-			projectDiagnosticToWidget(diagnostic),
+			projectDiagnosticToWidget(diagnostic, diagnostic.filePath),
 		);
 	}
 
@@ -1766,6 +1777,28 @@ async function formatFullMode(
 		cwd,
 		policyMap,
 	);
+	// #1888: the full-mode summary above is the first seam where every
+	// producing lane is correlated. The earlier footer loop intentionally writes
+	// only CONFIRMED LSP results, so an ast-grep backpressure failure left
+	// project-scan (`ast-grep-napi`) findings visible to lens_diagnostics but
+	// absent from the widget. Commit this same post-policy, post-suppression set
+	// to the widget so its human-facing count cannot silently become single-lane.
+	const parsedProjectScanObservedAt = projectSnapshot?.scannedAt
+		? Date.parse(projectSnapshot.scannedAt)
+		: undefined;
+	const projectScanObservedAt =
+		parsedProjectScanObservedAt !== undefined &&
+		Number.isFinite(parsedProjectScanObservedAt)
+		? parsedProjectScanObservedAt
+		: undefined;
+	for (const summary of summaries) {
+		reconcileCorrelatedScanDiagnostics(
+			summary.filePath,
+			summary.diagnostics,
+			nextWriteIndex?.(),
+			projectScanObservedAt,
+		);
+	}
 	const result = formatAllMode(cwd, severity, summaries, {
 		mode: "full",
 		lspFilesChecked: rawLspResults.length,
