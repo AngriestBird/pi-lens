@@ -67,12 +67,60 @@ export function spawnCollectStdout(
 	args: string[],
 	options: SpawnOptions,
 ): Promise<string> {
+	return spawnCollectStdoutResult(command, args, options).then(
+		(result) => result.stdout,
+	);
+}
+
+/**
+ * Why a spawn's stdout is what it is. `""` alone cannot tell "the query ran
+ * and found nothing" from "the query never ran" — the availability invariant
+ * in CLAUDE.md: an empty result must distinguish clean from errored. Callers
+ * that must emit a distinguishable record use `spawnCollectStdoutResult`;
+ * callers that genuinely only want best-effort text keep calling
+ * `spawnCollectStdout`, which is now a thin projection of this same code path
+ * (one implementation, not two).
+ */
+export type SpawnCollectStatus = "ok" | "spawn-error" | "timeout";
+
+export interface SpawnCollectResult {
+	/** Text collected before settle. Partial output is kept on a timeout. */
+	stdout: string;
+	status: SpawnCollectStatus;
+	/** Present only for `spawn-error`. */
+	error?: unknown;
+}
+
+export interface SpawnCollectOptions {
+	/**
+	 * Hard upper bound on the child's wall-clock lifetime. On expiry the child
+	 * is killed, the collected partial stdout is returned, and the status is
+	 * `timeout`. Omitted or non-positive means no bound (the historical
+	 * behavior). The timer is `unref`'d, so it never holds a settled one-shot
+	 * process open.
+	 */
+	timeoutMs?: number;
+}
+
+/**
+ * `spawnCollectStdout` plus the reason the output is what it is. Same spawn,
+ * unref, collect, settle plumbing; the only additions are an optional hard
+ * timeout and a status discriminator. Never rejects.
+ */
+export function spawnCollectStdoutResult(
+	command: string,
+	args: string[],
+	options: SpawnOptions,
+	collectOptions: SpawnCollectOptions = {},
+): Promise<SpawnCollectResult> {
 	return new Promise((resolve) => {
 		let settled = false;
-		const settle = (value: string) => {
+		let timer: NodeJS.Timeout | undefined;
+		const settle = (result: SpawnCollectResult) => {
 			if (settled) return;
 			settled = true;
-			resolve(value);
+			if (timer) clearTimeout(timer);
+			resolve(result);
 		};
 		try {
 			const child = nodeSpawn(command, args, options);
@@ -81,10 +129,24 @@ export function spawnCollectStdout(
 			child.stdout?.on("data", (chunk) => {
 				out += chunk.toString();
 			});
-			child.once("error", () => settle(""));
-			child.once("close", () => settle(out));
-		} catch {
-			settle("");
+			child.once("error", (error) =>
+				settle({ stdout: "", status: "spawn-error", error }),
+			);
+			child.once("close", () => settle({ stdout: out, status: "ok" }));
+			const timeoutMs = collectOptions.timeoutMs;
+			if (typeof timeoutMs === "number" && timeoutMs > 0) {
+				timer = setTimeout(() => {
+					try {
+						child.kill();
+					} catch {
+						// best-effort — the child may already be gone
+					}
+					settle({ stdout: out, status: "timeout" });
+				}, timeoutMs);
+				timer.unref();
+			}
+		} catch (error) {
+			settle({ stdout: "", status: "spawn-error", error });
 		}
 	});
 }

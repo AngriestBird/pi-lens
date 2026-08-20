@@ -158,7 +158,36 @@ export type DegradationKind =
 	 * the binary and exit status so a stuck/corrupted runner is diagnosable
 	 * from the ledger alone.
 	 */
-	| "runner-empty-result";
+	| "runner-empty-result"
+	/**
+	 * The registry-independent orphan backstop could not enumerate the OS
+	 * process table (spawn error or scan timeout). Its empty result therefore
+	 * means "did not look", not "found nothing" (#1857 item 2) — the same
+	 * clean-vs-errored discrimination `runner-empty-result` makes for
+	 * shell-out runners.
+	 */
+	| "orphan-backstop-scan-failed"
+	/**
+	 * A backstop kill was attempted and the process was still alive
+	 * afterwards. Subject carries `<binary>#<pid>` so a permanently unkillable
+	 * process is identifiable, instead of counting as a successful reap and
+	 * paying the full sweep again every session (#1857 items 1 and 3).
+	 */
+	| "orphan-backstop-kill-unverified"
+	/**
+	 * A backstop candidate passed every other eligibility test, but the OS
+	 * snapshot reported no usable process creation time. The spawn-grace guard
+	 * could not rule out "spawned seconds ago, not yet registered", so the
+	 * process was spared (#1857 item 4). Without this record the guard would
+	 * be indistinguishable from finding nothing.
+	 */
+	| "orphan-backstop-age-unknown"
+	/**
+	 * Same as `orphan-backstop-kill-unverified`, for the registry-driven
+	 * reaper path, which spelled the identical attempt-counted-as-kill defect
+	 * (#1857 class sweep).
+	 */
+	| "orphan-reap-kill-unverified";
 
 export interface DegradationRecord {
 	kind: unknown;
