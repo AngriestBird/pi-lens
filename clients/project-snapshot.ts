@@ -602,6 +602,11 @@ export function _stripTopLevelJsonKeysForTests(
 	return stripTopLevelJsonKeys(text, new Set(keysToStrip));
 }
 
+// A fixed, 4-entry, import-time constant — not per-session accumulating
+// state, so it needs no session_start reset (session-state-conformance's
+// pin, once tests/support/session-state-registry.ts's SESSION_STATE_SYMBOL_COUNTS
+// lands via #1837, should count this file's module-level container total
+// going up by one for this and the bounded digest hook below).
 const HEAVY_SNAPSHOT_KEYS: ReadonlySet<string> = new Set([
 	"wordIndex",
 	"files",
@@ -617,25 +622,42 @@ export interface ProjectSnapshotExportsAndRules {
 	projectRulesScan?: RuleScanResult;
 }
 
-// Test-observable: the exact text `parseExportsAndRulesOnly` hands to
-// `JSON.parse`, so a test can prove the heavy fields' text never reaches it —
-// the only place their construction cost would be paid — without globally
-// monkey-patching `JSON.parse` itself (which collides with every OTHER
-// JSON.parse call in the same process, including ones this file's own
-// internals make while answering the very call under test).
-let _lastNarrowParseTextForTests: string | undefined;
-export function getLastNarrowParseTextForTests(): string | undefined {
-	return _lastNarrowParseTextForTests;
+/**
+ * Test-observable DIGEST of the text `parseExportsAndRulesOnly` hands to
+ * `JSON.parse` — never the text itself. #1785 F6 (review round 4): an
+ * earlier version of this hook retained the full narrowed text at module
+ * scope, unconditionally, with no cap and no reset on the hot path — the
+ * EXACT retention class the narrow loader exists to close, reintroduced by
+ * its own observability hook (measured: 28.2MB retained on a production
+ * body). `session-state-conformance.test.ts`'s registry didn't catch it
+ * because `project-snapshot.ts` carries a file-level exemption written for
+ * the bounded parse caches elsewhere in this file — this variable rode that
+ * exemption instead of declaring its own bound. A length + a "does the text
+ * still contain a heavy key" boolean is everything a test needs to prove the
+ * strip ran, without ever holding the (potentially many-MB) text itself.
+ */
+interface NarrowParseDigest {
+	length: number;
+	containsHeavyKey: boolean;
 }
-export function resetLastNarrowParseTextForTests(): void {
-	_lastNarrowParseTextForTests = undefined;
+let _lastNarrowParseDigestForTests: NarrowParseDigest | undefined;
+export function getLastNarrowParseDigestForTests(): NarrowParseDigest | undefined {
+	return _lastNarrowParseDigestForTests;
+}
+export function resetLastNarrowParseDigestForTests(): void {
+	_lastNarrowParseDigestForTests = undefined;
 }
 
 function parseExportsAndRulesOnly(
 	json: string,
 ): ProjectSnapshotExportsAndRules | null {
 	const narrowed = stripTopLevelJsonKeys(json, HEAVY_SNAPSHOT_KEYS);
-	_lastNarrowParseTextForTests = narrowed;
+	_lastNarrowParseDigestForTests = {
+		length: narrowed.length,
+		containsHeavyKey: [...HEAVY_SNAPSHOT_KEYS].some((key) =>
+			narrowed.includes(`"${key}":`),
+		),
+	};
 	const parsed = JSON.parse(narrowed) as Partial<ProjectSnapshot>;
 	if (parsed.version !== PROJECT_SNAPSHOT_VERSION) return null;
 	if (typeof parsed.seq !== "number") return null;

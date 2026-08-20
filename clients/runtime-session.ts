@@ -238,47 +238,51 @@ function recordSnapshotSequenceTimeout(args: {
  * leaving the runtime without `cachedExports`/`projectRulesScan` for the rest
  * of the session.
  *
- * #1785 review round F1: `capturedSnapshot` — when set to a value (including
- * `null`, meaning "no snapshot existed at capture time") — is used AS-IS,
- * never re-loaded from disk. Quick mode's own cold-start warmup
- * (`PI_LENS_WARMUP_DELAY_MS`, default 2000ms) saves a snapshot built from the
- * LIVE runtime — which, while THIS call's own sequence read is still
- * stalled, has empty `cachedExports` — silently overwriting the real on-disk
- * snapshot. The stall window this fix targets (CPU starvation past the
- * sequence-read budget) is exactly the window that can cross the warmup's 2s
- * mark. Re-loading from disk at deferred-resolve time would read whichever
- * of the two versions happened to land last — flaky by construction. The
- * caller captures the snapshot BEFORE the warmup timer is even armed (see
- * `preWarmupSnapshotForRetroHydrate`) whenever THIS call is the one arming
- * it, so this function's decision is immune to anything the warmup does
- * afterward.
+ * #1785 review round F5 (design (a), replacing rounds 1-3's synchronous
+ * capture entirely): quick mode's own cold-start warmup ALREADY loads the
+ * on-disk snapshot for its own purposes — `cachedSnapshot` at the top of the
+ * warmup body, used to reuse a still-fresh `startupScan` verdict — strictly
+ * BEFORE the warmup's own possible save (`saveRuntimeProjectSnapshot`, only
+ * reached when that verdict was NOT fresh). Reusing THAT already-loaded
+ * value costs nothing new: the read was always going to happen regardless of
+ * this fix, and it is guaranteed to predate any overwrite the SAME warmup
+ * invocation might go on to make — a read-before-write invariant of the
+ * warmup's own code, not something this function has to defend against with
+ * a race window of its own. `getWarmupOwnSnapshotRead` is a closure over a
+ * per-`handleSessionStart`-call LOCAL variable (never module-scope — #1785
+ * F6 is exactly the class of bug a module-scope holder here would
+ * reintroduce) that the warmup publishes into once its own read completes.
  *
- * When `capturedSnapshot` is `undefined`, THIS call never armed a new warmup
- * (a later quick-mode call in the same process, after an earlier call's
- * warmup already fired) — there is no fresh race for this call to protect
- * against, so it falls back to a live re-load from `snapshotRoot`, same as
- * before this fix.
+ * When the getter still returns `undefined` — the deferred read resolved
+ * before the warmup got that far (or no warmup was ever armed by this call:
+ * a later quick-mode call in the same process, print mode, full mode) —
+ * there is nothing published yet, so this falls back to a live re-load via
+ * `loadProjectSnapshotExportsAndRules`. That fallback is exactly as safe as
+ * the primary path: if the warmup hasn't reached its own read yet, it
+ * certainly hasn't saved yet either (same invariant), so disk still holds
+ * whatever was there before any warmup activity.
  *
- * #1785 review round F5: both the captured value AND the fallback re-load
- * use `loadProjectSnapshotExportsAndRules` — the narrow, postings-free
- * loader — never `loadProjectSnapshot`. This path only ever hydrates
+ * Both the published value and the fallback re-load are the narrow,
+ * postings-free `ProjectSnapshotExportsAndRules` shape — never the full
+ * `loadProjectSnapshot`. This path only ever hydrates
  * `cachedExports`/`projectRulesScan`; it can NOT hydrate `wordIndex` even
- * when the captured/reloaded snapshot would otherwise have one, because the
- * narrow type never carries it. That is intentional, not a regression: F2's
- * hazard was this exact path nulling a `wordIndex` that quick mode's warmup
- * had, in the meantime, built for real — the warmup remains the sole source
- * of a late-arriving `wordIndex` for the interactive path.
+ * when the underlying snapshot would otherwise have one, because the narrow
+ * type never carries it. That is intentional, not a regression: F2's hazard
+ * was this exact path nulling a `wordIndex` that quick mode's warmup had, in
+ * the meantime, built for real — the warmup remains the sole source of a
+ * late-arriving `wordIndex` for the interactive path.
  */
 function retroactivelyHydrateAfterDeferredSequence(args: {
-	capturedSnapshot: ProjectSnapshotExportsAndRules | null | undefined;
+	getWarmupOwnSnapshotRead: () => ProjectSnapshotExportsAndRules | null | undefined;
 	snapshotRoot: string;
 	runtime: RuntimeCoordinator;
 	dbg: (msg: string) => void;
 }): (latestSeq: ProjectSequenceIndex) => void {
 	return (latestSeq) => {
+		const published = args.getWarmupOwnSnapshotRead();
 		const snapshot =
-			args.capturedSnapshot !== undefined
-				? args.capturedSnapshot
+			published !== undefined
+				? published
 				: loadProjectSnapshotExportsAndRules(args.snapshotRoot);
 		if (
 			!snapshot ||
@@ -1758,21 +1762,20 @@ export async function handleSessionStart(
 	}
 	processGlobals.__piLensFirstSessionDone = true;
 
-	// #1785 F1: the on-disk project snapshot (narrowed — see #1785 F5 and
-	// `loadProjectSnapshotExportsAndRules`) as it existed BEFORE this call
-	// (if any) armed the cold-start warmup timer below. `undefined` means this
-	// call never arms a NEW warmup (a later session in the process, or full
-	// mode, or print mode) — the quick-mode block below only uses this for
-	// retroactive hydration when it is actually set. Captured here,
-	// synchronously, strictly before `setTimeout` exists: nothing can have
-	// written to the snapshot because of THIS warmup yet, so this read is
-	// race-free by construction. See the matching comment on
-	// `retroactivelyHydrateAfterDeferredSequence` for why re-loading from
-	// disk later (once the warmup may have already run) is NOT safe.
-	let preWarmupSnapshotForRetroHydrate:
-		| ProjectSnapshotExportsAndRules
-		| null
-		| undefined;
+	// #1785 F5 (round 4, design (a)): the warmup timer body below ALREADY
+	// loads the on-disk snapshot for its own purposes (`cachedSnapshot`,
+	// reused for the `startupScan` verdict cache) strictly BEFORE any save it
+	// might go on to make. This LOCAL variable — per-`handleSessionStart`-call,
+	// deliberately NOT module-scope (see #1785 F6) — lets the warmup publish
+	// that already-loaded read (narrowed to exports+rules, never the full
+	// object with `wordIndex`) for `retroactivelyHydrateAfterDeferredSequence`
+	// to reuse at zero additional cost, instead of this call paying for its
+	// own separate synchronous capture (rounds 1-3's approach, reverted here:
+	// see that function's doc comment for the full history). `undefined`
+	// means the warmup hasn't reached its own read yet (or was never armed by
+	// this call at all) — the quick-mode block's retroactive-hydration
+	// callback then falls back to a live re-load instead.
+	let warmupOwnSnapshotRead: ProjectSnapshotExportsAndRules | null | undefined;
 
 	// #1154: quick mode is entered on BOTH `pi -p`/`--print` (a one-shot that
 	// exits right after this turn) and an interactive process's first
@@ -1794,16 +1797,6 @@ export async function handleSessionStart(
 		const warmupDelayMs = Number(process.env.PI_LENS_WARMUP_DELAY_MS ?? 2000);
 		const warmupCwd = deps.ctxCwd ?? process.cwd();
 		const warmupDbg = deps.dbg;
-		// #1785 F1/F5: capture BEFORE arming the timer two lines down — see the
-		// hoisted `preWarmupSnapshotForRetroHydrate` doc comment above. The
-		// narrow loader (F5) means this synchronous capture, on the
-		// interactive session_start hot path, costs a small `cachedExports`
-		// array parse — NOT a full body gunzip+parse of `wordIndex`/`files`/
-		// `symbols`/`reverseDeps` (see `loadProjectSnapshotExportsAndRules`'s
-		// own doc comment for the measured numbers this closes out).
-		preWarmupSnapshotForRetroHydrate = loadProjectSnapshotExportsAndRules(
-			resolveSnapshotRoot(warmupCwd),
-		);
 		// #1154: `.unref()` the warmup timer so — even for a warmup that IS
 		// scheduled (an interactive first-session) — the pending timer alone can
 		// never hold the loop open. Interactive processes stay alive for other
@@ -1834,6 +1827,23 @@ export async function handleSessionStart(
 					// reuse it instead of re-walking a possibly huge tree from
 					// scratch on every single startup.
 					const cachedSnapshot = loadProjectSnapshot(warmupSnapshotRoot);
+					// #1785 F5 (round 4): publish this ALREADY-loaded read — narrowed
+					// to exports+rules, never a reference to `cachedSnapshot` itself
+					// (which carries `wordIndex`/`files`/`symbols`/`reverseDeps`) — for
+					// `retroactivelyHydrateAfterDeferredSequence` to reuse. This read
+					// strictly precedes the warmup's own possible save a few lines
+					// below, so it is guaranteed to reflect disk as it stood before
+					// THIS warmup could have touched it. Zero marginal cost: this read
+					// already happens unconditionally for the `startupScan` verdict
+					// cache below, with or without this fix.
+					warmupOwnSnapshotRead = cachedSnapshot
+						? {
+								version: cachedSnapshot.version,
+								seq: cachedSnapshot.seq,
+								cachedExports: cachedSnapshot.cachedExports,
+								projectRulesScan: cachedSnapshot.projectRulesScan,
+							}
+						: null;
 					const cachedVerdict = cachedSnapshot?.startupScan;
 					let scan: StartupScanContext;
 					if (
@@ -2178,11 +2188,12 @@ export async function handleSessionStart(
 		runtime.projectRoot = cwd;
 		const sequenceReadStartedAt = Date.now();
 		const snapshotRoot = resolveSnapshotRoot(cwd);
-		// #1785 F1: pass the pre-warmup captured snapshot through as-is (see
+		// #1785 F5 (round 4): the getter closes over `warmupOwnSnapshotRead`
+		// directly (a `let` in this same `handleSessionStart` invocation's
+		// scope), so it reads whatever value is current AT DEFERRED-RESOLVE
+		// TIME — not whatever it was at this wiring instant. See
 		// `retroactivelyHydrateAfterDeferredSequence`'s doc comment for the
-		// `undefined`-vs-value distinction). Only THIS call's own warmup-arming
-		// branch above ever sets `preWarmupSnapshotForRetroHydrate` to a
-		// defined value — it stays `undefined` for every other quick-mode call.
+		// full design.
 		const { latestSeq, timedOut } = await readSequenceWithBudget({
 			snapshotRoot,
 			base: snapshotSequenceBase(snapshotRoot),
@@ -2191,7 +2202,7 @@ export async function handleSessionStart(
 			sessionGeneration: runtime.sessionGeneration,
 			dbg,
 			onDeferredSequenceResolved: retroactivelyHydrateAfterDeferredSequence({
-				capturedSnapshot: preWarmupSnapshotForRetroHydrate,
+				getWarmupOwnSnapshotRead: () => warmupOwnSnapshotRead,
 				snapshotRoot,
 				runtime,
 				dbg,

@@ -40,7 +40,7 @@ import {
 	getProjectSnapshotMetaPath,
 	getProjectSnapshotPath,
 	getProjectSnapshotPersistErrorForTests,
-	getLastNarrowParseTextForTests,
+	getLastNarrowParseDigestForTests,
 	hydrateRuntimeFromProjectSnapshot,
 	hydrateRuntimeFromProjectSnapshotIfIdle,
 	isProjectSnapshotFresh,
@@ -48,7 +48,7 @@ import {
 	loadProjectSnapshot,
 	loadProjectSnapshotExportsAndRules,
 	readProjectSnapshotMeta,
-	resetLastNarrowParseTextForTests,
+	resetLastNarrowParseDigestForTests,
 	resetProjectSnapshotPersistWorkerForTests,
 	setProjectSnapshotGenerationGateForTests,
 	setProjectSnapshotPromotionSeamForTests,
@@ -436,16 +436,62 @@ describe("project snapshot", () => {
 				]);
 				saveRuntimeProjectSnapshot({ cwd, runtime });
 				_resetProjectSnapshotParseCacheForTests();
-				resetLastNarrowParseTextForTests();
+				resetLastNarrowParseDigestForTests();
 
 				const narrow = loadProjectSnapshotExportsAndRules(cwd);
 
 				expect(narrow?.cachedExports).toEqual([
 					["hot", path.join(cwd, "src/hot.ts")],
 				]);
-				const parsedText = getLastNarrowParseTextForTests();
-				expect(parsedText).toBeDefined();
-				expect(parsedText).not.toContain('"wordIndex"');
+				// #1785 F6: a DIGEST, never the retained text itself — see that
+				// function's doc comment for why the earlier text-retaining version
+				// of this hook was itself a regression.
+				const digest = getLastNarrowParseDigestForTests();
+				expect(digest).toBeDefined();
+				expect(digest?.containsHeavyKey).toBe(false);
+				expect(digest?.length).toBeGreaterThan(0);
+			}));
+
+		// #1785 F6 (review round 4): the earlier hook retained the FULL
+		// narrowed text at module scope — a 28.2MB retention on a production
+		// body, in a variable never reset and never bounded. This test proves
+		// the REPLACEMENT hook cannot reproduce that class of bug structurally
+		// (not by measuring bytes retained, which would need GC-timing-
+		// dependent heap probing — exactly the flaky-by-construction shape
+		// this repo's test discipline avoids): the only artifact exposed after
+		// a load, of ANY body size, is a plain object with two PRIMITIVE
+		// fields. A number and a boolean cannot pin a multi-megabyte string no
+		// matter how large the body that produced them was.
+		it("exposes only a bounded {length, containsHeavyKey} shape after a load — never a value that could itself retain body-sized content", () =>
+			withProjectDataDir((cwd) => {
+				const runtime = new RuntimeCoordinator();
+				runtime.seedProjectSequence(0);
+				// A body an order of magnitude "larger" in field count than the
+				// other tests here, so a retained-text regression would be
+				// unmissable if this test's shape check were bypassed.
+				for (let i = 0; i < 500; i++) {
+					runtime.cachedExports.set(`export${i}`, path.join(cwd, `f${i}.ts`));
+				}
+				runtime.wordIndex = buildWordIndex(
+					Array.from({ length: 200 }, (_, i) => ({
+						path: path.join(cwd, `w${i}.ts`),
+						content: `export function w${i}() { return ${i}; }`,
+					})),
+				);
+				saveRuntimeProjectSnapshot({ cwd, runtime });
+				_resetProjectSnapshotParseCacheForTests();
+				resetLastNarrowParseDigestForTests();
+
+				loadProjectSnapshotExportsAndRules(cwd);
+
+				const digest = getLastNarrowParseDigestForTests();
+				expect(digest).toBeDefined();
+				expect(Object.keys(digest as object).sort()).toEqual([
+					"containsHeavyKey",
+					"length",
+				]);
+				expect(typeof digest?.length).toBe("number");
+				expect(typeof digest?.containsHeavyKey).toBe("boolean");
 			}));
 	});
 
