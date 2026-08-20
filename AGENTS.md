@@ -31,6 +31,13 @@ aggregated operation support. Capability snapshot client ids are capped, with
 the full count preserved. Never replace this with shared last-client state;
 concurrent navigation requests must not overwrite each other's attribution.
 (#1854)
+
+File-scoped LSP navigation is capability-gated twice: the tool layer rejects
+unsupported requests before opening a file, and every `LSPService` navigation
+chokepoint re-checks the resolved client's `getOperationSupport()` snapshot.
+An unsupported client-layer request throws the `__UNSUPPORTED__` discriminator;
+do not collapse it into the clean empty result returned by a supporting server.
+(#1826)
 Bounded LSP warm touches preserve the spawn coordinator's lifecycle evidence:
 an empty ready-client set reports `spawn_in_flight_budget_elapsed` while a
 matching primary single-flight spawn remains pending, and
@@ -397,6 +404,13 @@ stdout from non-zero exits; process-table callers record that outcome instead
 of parsing partial output as a clean empty result. Sampler timeouts inject the
 reaper's tree-kill-and-verify hook and settle only after its fate is known.
 (#1863, #1864)
+
+**Workspace refresh walks the bounded ancestor cache chain.** A language server
+root can be a nested monorepo member while workspace diagnostics persist under
+the enclosing sweep root. `workspace/diagnostic/refresh` clears the client
+root and each ancestor through the session cwd, so a never-swept member cannot
+leave its prior workspace cache alive; it never walks above that ceiling.
+(#1707)
 
 ## Issue and PR design contract
 
