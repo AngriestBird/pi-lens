@@ -26,8 +26,8 @@
  * the raw event path — these tests mock `spawn()` directly so every shape
  * reproduces regardless of which platform runs the suite.
  */
-import { EventEmitter } from "node:events";
 import { describe, expect, it, vi } from "vitest";
+import { makeFakeChild } from "../support/fake-child.js";
 
 const enoentError = Object.assign(new Error("spawn gh ENOENT"), {
 	code: "ENOENT",
@@ -39,37 +39,6 @@ const epermKillError = Object.assign(new Error("kill EPERM"), {
 	code: "EPERM",
 	syscall: "kill",
 });
-
-interface FakeChild extends EventEmitter {
-	stdout?: EventEmitter;
-	stderr?: EventEmitter;
-	pid?: number;
-	killed?: boolean;
-	kill: (...args: unknown[]) => boolean;
-}
-
-function makeFakeChild(): FakeChild {
-	const child = new EventEmitter() as FakeChild;
-	child.kill = () => true;
-	child.killed = false;
-	// #1673 review F1b: a real spawned child ALWAYS has stdout/stderr
-	// Readable streams (Node creates them the moment stdio: "pipe" is
-	// requested, even for a child that goes on to fail to launch) — this
-	// double was a bare EventEmitter with neither, which is production-
-	// unfaithful (AGENTS.md shape 7: a double that skips a real seam the
-	// production code path always exercises). `safeSpawnAsync`'s post-exit
-	// wait (`waitForPipeIdle`, #1656) short-circuits when a child has no
-	// pipes at all, so this fixture never entered that wait — hiding a real
-	// race (#1673 review F1) where a late 'error' landing DURING that wait
-	// could steal an already-decided verdict.
-	child.stdout = Object.assign(new EventEmitter(), {
-		setEncoding: () => {},
-	});
-	child.stderr = Object.assign(new EventEmitter(), {
-		setEncoding: () => {},
-	});
-	return child;
-}
 
 const spawnMock = vi.fn();
 
