@@ -459,7 +459,7 @@ See [`docs/custom-rules.md`](custom-rules.md) to add your own. Rule sources: `ru
 | `no-negation-in-equality-check` | error | pi-lens | Negation before equality check — !a === b evaluates as (!a) === b, not !(a === b) |
 | `no-new-symbol` | error | pi-lens | Symbol cannot be called as a constructor. |
 | `no-new-wrappers` | error | pi-lens | Do not use 'new' with wrapper objects — use literal primitives instead |
-| `no-non-null-assertion` | hint | pi-lens | Non-null assertion '!' used — prefer explicit null checks or optional chaining |
+| `no-non-null-assertion` | warning | pi-lens | Non-null assertion '!' used — prefer explicit null checks or optional chaining |
 | `no-octal-literal` | warning | pi-lens | Legacy octal literal — a leading-zero number is parsed as octal in sloppy mode and throws in strict mode; use the 0o prefix |
 | `no-open-redirect` | error | pi-lens | Potential open redirect vulnerability — validate redirect URLs |
 | `no-prototype-builtins` | error | pi-lens | Use Object.hasOwn() or Object.prototype.hasOwnProperty.call() instead of calling methods directly on the object |

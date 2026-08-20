@@ -3,8 +3,90 @@ valid:
   - 'const x = foo'
   - 'const x = foo?.bar'
   - 'const x: number = foo()'
+  # #1777: get-after-has, same map, same key — suppressed.
+  - |
+    function f(m: Map<string, number>, k: string) {
+      if (m.has(k)) {
+        return m.get(k)!;
+      }
+    }
+  # #1777: get-after-has via an early-return guard clause (the check
+  # and the use are siblings in the same function, not nested).
+  - |
+    function f(m: Map<string, number>, k: string) {
+      if (!m.has(k)) return;
+      return m.get(k)!;
+    }
+  # #1777: pop-after-length, same array, in a while loop.
+  - |
+    function f(stack: number[]) {
+      while (stack.length > 0) {
+        const x = stack.pop()!;
+      }
+    }
+  # #1777: shift-after-length, same array, in an if branch.
+  - |
+    function f(queue: number[]) {
+      if (queue.length > 0) {
+        return queue.shift()!;
+      }
+    }
 invalid:
   - 'const x = foo!'
   - 'foo!.bar()'
   - 'const x = (foo!)!.bar'
   - 'foo!!'
+  # #1777 mutation guard: a get()! with NO has() check anywhere in the
+  # function must still flag — deleting the exclusion's pattern match
+  # (not just its metavariable binding) reds this.
+  - |
+    function f(m: Map<string, number>, k: string) {
+      return m.get(k)!;
+    }
+  # #1777 mutation guard: the has() check is for a DIFFERENT key —
+  # same-key binding discipline is the guard, not mere presence of
+  # any .has() call on the map.
+  - |
+    function f(m: Map<string, number>, k: string, other: string) {
+      if (m.has(other)) {
+        return m.get(k)!;
+      }
+    }
+  # #1777 mutation guard: the has() check is on a DIFFERENT map —
+  # same-receiver binding discipline is the guard.
+  - |
+    function f(m: Map<string, number>, other: Map<string, number>, k: string) {
+      if (other.has(k)) {
+        return m.get(k)!;
+      }
+    }
+  # #1777 mutation guard: pop()! with NO length check anywhere in the
+  # function must still flag.
+  - |
+    function f(arr: number[]) {
+      return arr.pop()!;
+    }
+  # #1777 mutation guard: the length check is on a DIFFERENT array —
+  # same-array binding discipline is the guard.
+  - |
+    function f(arr: number[], other: number[]) {
+      if (other.length > 0) {
+        return arr.pop()!;
+      }
+    }
+  # #1777: a length check elsewhere in the SAME function that does not
+  # dominate this particular pop() (documented approximation — the
+  # rule only requires presence in the enclosing function, not proven
+  # dominance) still suppresses; this fixture exists to make that
+  # scoping visible rather than silently assumed. Left as `invalid`
+  # because this specific shape (length check AFTER the pop, in an
+  # unrelated later branch) is outside the two named idiom shapes: the
+  # pop here is not itself inside the while/for/if that carries the
+  # length check.
+  - |
+    function f(arr: number[]) {
+      const x = arr.pop()!;
+      if (arr.length > 0) {
+        return x;
+      }
+    }

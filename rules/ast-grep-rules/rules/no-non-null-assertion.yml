@@ -1,37 +1,115 @@
 id: no-non-null-assertion
 language: TypeScript
 message: "Non-null assertion '!' used — prefer explicit null checks or optional chaining"
-severity: hint
+severity: warning
 note: |
   The ! operator bypasses TypeScript's null checking which can lead to
   runtime errors. Use optional chaining (?.), nullish coalescing (??),
   or explicit null checks instead.
 
-  Demoted from warning to hint (#1777): a false-positive census sampled
-  49 hits across three real TypeScript codebases — this one (43 hits,
-  full coverage across clients/ tools/ index.ts) and a spot-checked
-  sample from nestjs/nest (6 of 326 hits, read with surrounding context;
-  a third codebase, colinhacks/zod, scored 0 hits, showing the pattern
-  is absent where null-safety discipline is already strict rather than
-  rare everywhere). 43 of the 49 sampled hits (88%) were the
-  narrow-after-check idiom TypeScript can't itself verify: a Map
-  `.get(k)!` right after `.has(k)`, `array.pop()!`/`shift()!` inside a
-  `while (array.length > 0)` loop, a property re-asserted after its
-  parent was checked (`r.enclosingSymbol!.name` after
-  `.filter((r) => r.enclosingSymbol)`), or a boolean flag derived from a
-  null check used later in place of the original narrowed variable. The
-  remaining 6 (12%) crossed a function or module boundary the assertion
-  couldn't verify locally (e.g. `dart.getCommand(cwd)!` right after
-  `dart.isAvailableAsync(cwd)` returned true, or a private field read
-  before its own guarded initializer runs) — genuine risk, but too thin
-  a share and too opinion-shaped a check (this is a style preference
-  about how to spell a narrowing, not a precision detector) to justify
-  warning-tier volume. Opinion-density: this repo alone throws 43 hits
-  from one rule, in line with #1777's live plegma count of 84 hits/turn
-  at warning tier.
+  #1777 census and decision: the original false-positive census (49
+  hits across pi-lens, nestjs/nest, and colinhacks/zod) found 88% of
+  hits were the narrow-after-check idiom TypeScript can't itself
+  verify. Two of those idiom shapes are common enough, and structural
+  enough, to exclude with an ast-grep relational constraint instead of
+  demoting the whole rule — so the rule stays at `warning` and gets
+  narrower instead:
+
+  1. `$M.get($K)!` when the enclosing function ALSO contains a call to
+     `$M.has($K)` — same receiver, same key (ast-grep enforces the
+     metavariable binding, so a `.has()` check on a DIFFERENT key or a
+     DIFFERENT map does not suppress the finding).
+  2. `$A.pop()!` / `$A.shift()!` inside a `while`/`for`/`if` whose
+     condition references `$A.length` — again same-array-binding, so a
+     length check on a different array does not suppress it.
+
+  Both exclusions are scoped to the nearest enclosing function
+  (`function_declaration`/`method_definition`/`arrow_function`/
+  `function_expression` are themselves members of the "stop here" kind
+  list), not the whole file — an earlier draft that let the search
+  escalate to `program` silently suppressed unrelated hits that
+  happened to reuse common variable names like `m`/`k` in a different
+  function. That draft never shipped; this note records the mistake so
+  a future edit doesn't reintroduce it.
+
+  Approximation caveat: ast-grep matches structurally, not
+  semantically. It cannot verify the guard genuinely DOMINATES the use
+  (no intervening mutation of `$M`/`$A` or reassignment of the
+  narrowed variable, no early return between the check and the use
+  that would make the "same function" scope too wide) or that the key
+  is the same value at runtime versus merely the same source text. The
+  suppression is deliberately biased toward false negatives — leaving
+  a real risk unflagged — over false positives, which is the correct
+  bias for a lint the census already showed fires mostly on legitimate
+  code: an occasional missed genuine risk in this class is cheaper than
+  the opinion-density that justified narrowing it in the first place.
+
+  Re-census on the narrowed rule, four corpora, hit count before →
+  after:
+  - pi-lens (this repo, `clients/` `tools/` `index.ts`): 43 → 35 (8
+    suppressed, -19%). All 8 verified by hand: `.get()!`-after-`.has()`
+    guard clauses in `tree-sitter-client.ts` (`loadLanguage`,
+    `getParser`) and `review-graph/builder.ts`, plus
+    `pop()!`/`shift()!` inside `while (x.length > 0)` loops in
+    `call-graph.ts`, `pipeline.ts`, `tree-sitter-client.ts`
+    (`bindingNames`), and `review-graph/workspace-modules.ts`.
+  - inspiration-pi: 674 → 650 (24 suppressed, -3.6%).
+  - inspiration-opencode: 1067 → 1057 (10 suppressed, -0.9%).
+  - inspiration-oh-my-pi: 3569 → 3527 (42 suppressed, -1.2%).
+
+  Honest read of the residual: outside pi-lens's own hand-verified
+  drop, the narrowing removes a small, single-digit-percent slice.
+  pi-lens's own residual 35 is NOT dominated by the genuine
+  cross-boundary-risk class (`dart.getCommand(cwd)!` right after
+  `dart.isAvailableAsync(cwd)`, and similar) — that class accounts for
+  roughly 7 of the 35. The rest (~28) are still legitimate-idiom
+  shaped, just not expressible by these two structural constraints: a
+  property re-asserted after its parent was checked
+  (`r.enclosingSymbol!.name` after `.filter((r) => r.enclosingSymbol)`
+  in `read-guard.ts`), a boolean flag standing in for a narrowed
+  variable, a value narrowed by a ternary rather than `.has()`
+  (`index.forward! ` in `word-index.ts`), and a module-singleton
+  pattern (`format-service.ts`'s `globalFormatService!`). Filed as
+  #1777 follow-up discussion: the residual is still noisier than a
+  bounded-false-positive-rate warning ideally is, but neither of the
+  two remaining unexpressed idiom classes named in review (re-asserted
+  property, boolean flag) has an ast-grep-expressible relational shape
+  — narrowing further would need a rule engine with dataflow, not
+  syntax-tree relations. Severity stays `warning` pending that
+  follow-up; revisit hint for the residual there rather than here.
 rule:
   pattern: $X!
   not:
     any:
       - kind: function_type
       - kind: method_signature
+      - all:
+          - pattern: $M.get($K)!
+          - inside:
+              stopBy: end
+              any:
+                - kind: function_declaration
+                - kind: method_definition
+                - kind: arrow_function
+                - kind: function_expression
+              has:
+                stopBy: end
+                pattern: $M.has($K)
+      - all:
+          - any:
+              - pattern: $A.pop()!
+              - pattern: $A.shift()!
+          - inside:
+              stopBy: end
+              any:
+                - kind: while_statement
+                - kind: for_statement
+                - kind: if_statement
+                - kind: function_declaration
+                - kind: method_definition
+                - kind: arrow_function
+                - kind: function_expression
+              has:
+                field: condition
+                stopBy: end
+                pattern: $A.length
