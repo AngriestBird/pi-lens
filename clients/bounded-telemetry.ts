@@ -60,6 +60,14 @@ export const BOUNDED_TELEMETRY_PHASES = [
 	"lsp_pull_diagnostic_timeout",
 	/** #1713: that abandoned pull answered anyway, too late to serve anyone. */
 	"lsp_pull_late_answer_discarded",
+	/** #1773: a pull skipped outright because the caller's budget was already
+	 *  exhausted — never dispatched, so it must not be confused with a genuine
+	 *  timeout. */
+	"lsp_pull_skipped_budget_exhausted",
+	/** #1774: an abandoned pull's request eventually REJECTED (e.g. a server
+	 *  `ContentModified`) rather than answering or staying silent forever —
+	 *  the third outcome late-answer telemetry previously could not see. */
+	"lsp_pull_late_rejection",
 	/** #1716: a hover/definition/references/etc. request abandoned at budget. */
 	"lsp_nav_request_timeout",
 	/** #1716: that abandoned nav request answered anyway, after the caller left. */
