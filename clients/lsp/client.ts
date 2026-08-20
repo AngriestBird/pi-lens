@@ -59,7 +59,7 @@ import { getStrategy } from "./wait-policy/index.js";
 import { WatchedFilesQueue } from "./watch-queue.js";
 import {
 	clearAllWorkspaceDiagnosticsCaches,
-	clearWorkspaceDiagnosticsCache,
+	clearWorkspaceDiagnosticsCacheAtAndAbove,
 } from "./workspace-diagnostics-cache.js";
 
 // Opt-in publishDiagnostics trace (PILENS_PUB_DEBUG=1) — read once, negligible
@@ -2292,7 +2292,7 @@ export function setupIncomingHandlers(
 		// `state.root` — that residual gap is tracked in #1707, not silently
 		// claimed as solved (see `clearAllWorkspaceDiagnosticsCaches`'s doc
 		// comment for the full shape).
-		clearWorkspaceDiagnosticsCache(state.root);
+		clearWorkspaceDiagnosticsCacheAtAndAbove(state.root);
 		// #1669 review F3: a server-initiated "everything may be stale" signal
 		// must drop the SAME per-document state a normal resync already drops
 		// via `clearDiagnosticsForPath` (pullResultIds, pushDiagnostics,
