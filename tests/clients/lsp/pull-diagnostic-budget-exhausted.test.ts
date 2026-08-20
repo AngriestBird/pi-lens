@@ -3,10 +3,13 @@
  * (`Math.max(1, Math.min(PULL_REQUEST_TIMEOUT_MS, budgetMs))`) let
  * `budgetMs <= 0` through as an unwinnable 1ms pull — sent, timed out by
  * construction, and recorded as a genuine `lsp_pull_diagnostic_timeout` with
- * a fabricated `effectiveBudgetMs: 1`. Fix: at or below a 5ms usable floor
- * (`PULL_MIN_USABLE_BUDGET_MS`), skip the dispatch entirely and emit a
- * distinct `lsp_pull_skipped_budget_exhausted` record instead. TWO entry
- * points had this clamp independently — `pullDiagnosticSource` (the
+ * a fabricated `effectiveBudgetMs: 1`. Fix: below a 5ms usable floor
+ * (`PULL_MIN_USABLE_BUDGET_MS`, `budgetMs < floor`, so the floor value ITSELF
+ * still dispatches), skip the dispatch entirely and emit a distinct
+ * `lsp_pull_skipped_budget_exhausted` record instead, counted in the ledger
+ * under `lsp-pull-skipped-budget-exhausted` (review round: a repeatedly
+ * budget-exhausted caller is worth seeing in aggregate too). TWO entry points
+ * had this clamp independently — `pullDiagnosticSource` (the
  * `lens_diagnostics_full` fan-out) and `clientRequestWorkspaceDiagnostics`
  * (the `workspace/diagnostic` round) — both fixed and both covered below,
  * per live dogfood evidence naming both as sources of the artifact.
@@ -18,7 +21,10 @@
  * in latency.log. Fix: the rejection path now emits a bounded
  * `lsp_pull_late_rejection` record (error code, server, elapsed-since-
  * timeout) while still swallowing the rejection — behavior on that path is
- * otherwise unchanged.
+ * otherwise unchanged. Review round: the ledger subject is prefixed with the
+ * server (matching the timeout kind's own `server::file` shape), because the
+ * workspace call site's subject is the bare `WORKSPACE_PULL_SCOPE` constant —
+ * without the prefix two servers' rejections would collapse into one.
  *
  * #1771: `lsp_pull_diagnostic_timeout` (a genuine, dispatched-then-abandoned
  * pull) was emitted with no `ledgerKind`, so it counted nothing in the
@@ -128,6 +134,17 @@ describe("#1773 a budget-exhausted pull skips instead of dispatching an unwinnab
 			remainingBudgetMs: 0,
 			server: "typescript",
 		});
+
+		// #1773 review: the skip is itself worth seeing in aggregate (a caller
+		// that repeatedly hands out exhausted budgets), so it counts in the
+		// ledger under its own kind — distinct from the genuine-timeout kind.
+		const group = getDegradationSummary().find(
+			(g) => g.kind === "lsp-pull-skipped-budget-exhausted",
+		);
+		expect(group).toBeDefined();
+		expect(group?.count).toBe(1);
+		expect(group?.latestReasons[0]?.subject).toContain("typescript");
+		expect(group?.latestReasons[0]?.subject).toContain(TEST_KEY);
 	});
 
 	it("negative budgetMs also skips (already-exhausted budget, not merely zero)", async () => {
@@ -147,7 +164,10 @@ describe("#1773 a budget-exhausted pull skips instead of dispatching an unwinnab
 		expect(skipEvents()).toHaveLength(1);
 	});
 
-	it("at the 5ms floor still skips (boundary is inclusive)", async () => {
+	// Mutation guard: deleting/loosening the `<` boundary would make a
+	// below-floor budget dispatch too. 4ms is one below the floor and must
+	// still skip.
+	it("just below the floor (4ms) skips", async () => {
 		const state = pullState();
 		const sendRequest = installSendRequest(state, (method) =>
 			method !== "textDocument/diagnostic"
@@ -155,7 +175,7 @@ describe("#1773 a budget-exhausted pull skips instead of dispatching an unwinnab
 				: Promise.resolve({ kind: "full", items: [] }),
 		);
 
-		await clientWaitForDiagnostics(state, TEST_FILE, 5, { pullOnly: true });
+		await clientWaitForDiagnostics(state, TEST_FILE, 4, { pullOnly: true });
 
 		const diagnosticCalls = sendRequest.mock.calls.filter(
 			([method]) => method === "textDocument/diagnostic",
@@ -164,10 +184,31 @@ describe("#1773 a budget-exhausted pull skips instead of dispatching an unwinnab
 		expect(skipEvents()).toHaveLength(1);
 	});
 
-	// Mutation guard: deleting/loosening the `<=` boundary would make a normal
-	// above-floor budget skip too. 6ms is one above the floor and must dispatch
-	// a genuine request, same as the pre-existing 20ms/30ms fixtures.
-	it("just above the floor (6ms) dispatches a real request, not a skip", async () => {
+	// Mutation guard: deleting/loosening the `<` boundary would make the floor
+	// value itself skip too. `PULL_MIN_USABLE_BUDGET_MS` (5ms) is named as the
+	// smallest USABLE budget, so it must dispatch a genuine request, same as
+	// the pre-existing 20ms/30ms fixtures — never skip.
+	it("at the 5ms floor dispatches a real request (the floor is usable, not excluded)", async () => {
+		const state = pullState();
+		const sendRequest = installSendRequest(
+			state,
+			(method) =>
+				method !== "textDocument/diagnostic"
+					? Promise.resolve(undefined)
+					: new Promise(() => {}), // never resolves -> times out, not skipped
+		);
+
+		await clientWaitForDiagnostics(state, TEST_FILE, 5, { pullOnly: true });
+
+		const diagnosticCalls = sendRequest.mock.calls.filter(
+			([method]) => method === "textDocument/diagnostic",
+		);
+		expect(diagnosticCalls).toHaveLength(1);
+		expect(skipEvents()).toHaveLength(0);
+		expect(timeoutEvents()).toHaveLength(1);
+	});
+
+	it("well above the floor (6ms) also dispatches, not a boundary fluke", async () => {
 		const state = pullState();
 		const sendRequest = installSendRequest(
 			state,
@@ -185,6 +226,30 @@ describe("#1773 a budget-exhausted pull skips instead of dispatching an unwinnab
 		expect(diagnosticCalls).toHaveLength(1);
 		expect(skipEvents()).toHaveLength(0);
 		expect(timeoutEvents()).toHaveLength(1);
+	});
+
+	// Mutation guard: deleting the skip's `ledgerKind` would make this
+	// undefined again — the exact #1771-shaped gap the review round flagged.
+	it("does NOT count toward the genuine-timeout ledger kind — it has its own", async () => {
+		const state = pullState();
+		installSendRequest(state, (method) =>
+			method !== "textDocument/diagnostic"
+				? Promise.resolve(undefined)
+				: Promise.resolve({ kind: "full", items: [] }),
+		);
+
+		await clientWaitForDiagnostics(state, TEST_FILE, 0, { pullOnly: true });
+
+		expect(
+			getDegradationSummary().find(
+				(g) => g.kind === "lsp-pull-diagnostic-timeout",
+			),
+		).toBeUndefined();
+		expect(
+			getDegradationSummary().find(
+				(g) => g.kind === "lsp-pull-skipped-budget-exhausted",
+			)?.count,
+		).toBe(1);
 	});
 });
 
@@ -227,7 +292,10 @@ describe("#1774 a late server rejection after a pull timeout is a bounded, trace
 		const group = ledger.find((g) => g.kind === "lsp-pull-late-rejection");
 		expect(group).toBeDefined();
 		expect(group?.count).toBe(1);
-		expect(group?.latestReasons[0]?.subject).toBe(TEST_KEY);
+		// #1774 review: prefixed with the server, same shape as the timeout
+		// kind's subject — mutation guard against dropping the `${server}::`
+		// prefix and losing the discriminator between two servers.
+		expect(group?.latestReasons[0]?.subject).toBe(`typescript::${TEST_KEY}`);
 	});
 
 	// Mutation guard: a rejection with no numeric/string `code` must still
@@ -247,21 +315,35 @@ describe("#1774 a late server rejection after a pull timeout is a bounded, trace
 		expect(rejectionEvents()[0].metadata).not.toHaveProperty("code");
 	});
 
-	// Behavior-unchanged guard: the rejection must stay swallowed. If the
-	// instrumentation ever let it surface as an unhandled rejection, this test
-	// would fail the whole run (vitest fails on unhandled rejections).
+	// Behavior-unchanged guard: the rejection must stay swallowed. This test
+	// installs its OWN `process.on("unhandledRejection")` capture rather than
+	// relying on vitest's global detector (review round: a handler that
+	// rethrows still leaves every assertion above green, since nothing in
+	// THIS test file asserted on the absence of an unhandled rejection —
+	// vitest only fails the run via a separate top-level mechanism a
+	// per-test `expect` never observes).
 	it("does not change the swallow behavior — no unhandled rejection escapes", async () => {
-		const state = pullState();
-		installSendRequest(state, async (method) => {
-			if (method !== "textDocument/diagnostic") return undefined;
-			await wait(30);
-			throw new Error("server rejected");
-		});
+		const unhandled: unknown[] = [];
+		const onUnhandledRejection = (reason: unknown) => {
+			unhandled.push(reason);
+		};
+		process.on("unhandledRejection", onUnhandledRejection);
+		try {
+			const state = pullState();
+			installSendRequest(state, async (method) => {
+				if (method !== "textDocument/diagnostic") return undefined;
+				await wait(30);
+				throw new Error("server rejected");
+			});
 
-		await clientWaitForDiagnostics(state, TEST_FILE, 20, { pullOnly: true });
-		await wait(70);
+			await clientWaitForDiagnostics(state, TEST_FILE, 20, { pullOnly: true });
+			await wait(70);
 
-		expect(rejectionEvents()).toHaveLength(1);
+			expect(rejectionEvents()).toHaveLength(1);
+			expect(unhandled).toEqual([]);
+		} finally {
+			process.off("unhandledRejection", onUnhandledRejection);
+		}
 	});
 });
 
@@ -300,6 +382,12 @@ describe("#1773 class sweep: workspace/diagnostic shares the same budget-exhaust
 			server: "typescript",
 			remainingBudgetMs: 0,
 		});
+
+		const group = getDegradationSummary().find(
+			(g) => g.kind === "lsp-pull-skipped-budget-exhausted",
+		);
+		expect(group).toBeDefined();
+		expect(group?.latestReasons[0]?.subject).toBe("typescript::*workspace*");
 	});
 
 	it("above the floor still dispatches a real workspace/diagnostic request", async () => {
@@ -320,6 +408,31 @@ describe("#1773 class sweep: workspace/diagnostic shares the same budget-exhaust
 		expect(workspaceCalls).toHaveLength(1);
 		expect(skipEvents()).toHaveLength(0);
 		expect(timeoutEvents()).toHaveLength(1);
+	});
+
+	// #1774 review: the workspace call site's late-rejection `subject` is the
+	// bare `WORKSPACE_PULL_SCOPE` constant, unlike the per-file site's
+	// path-based subject — the exact case F4 named where two servers'
+	// rejections would otherwise collapse into one ledger entry.
+	it("a late workspace-pull rejection is also prefixed with the server", async () => {
+		const state = workspacePullState();
+		installSendRequest(state, async (method) => {
+			if (method !== "workspace/diagnostic") return undefined;
+			await wait(80);
+			const err = new Error("request failed") as Error & { code: number };
+			err.code = -32803;
+			throw err;
+		});
+
+		await clientRequestWorkspaceDiagnostics(state, 20);
+		await wait(120);
+
+		expect(rejectionEvents()).toHaveLength(1);
+		const group = getDegradationSummary().find(
+			(g) => g.kind === "lsp-pull-late-rejection",
+		);
+		expect(group).toBeDefined();
+		expect(group?.latestReasons[0]?.subject).toBe("typescript::*workspace*");
 	});
 });
 

@@ -114,6 +114,17 @@ export type DegradationKind =
 	 */
 	| "lsp-pull-diagnostic-timeout"
 	/**
+	 * A `textDocument/diagnostic` or `workspace/diagnostic` pull was SKIPPED
+	 * outright because the caller's budget was already exhausted (#1773,
+	 * review round). Not dispatched, so it is not an LSP-side degradation the
+	 * way `lsp-pull-diagnostic-timeout` is — the server never saw the
+	 * request — but a caller that repeatedly hands out exhausted budgets to
+	 * this call site is itself a shape worth seeing in aggregate (e.g. a
+	 * sweep whose own upstream deadline math is too tight). Subject carries
+	 * server and file for the same reason every other pull kind does.
+	 */
+	| "lsp-pull-skipped-budget-exhausted"
+	/**
 	 * A shell-out linter/analyzer runner (knip, vulture, jscpd, …) produced no
 	 * usable output — empty stdout, or (for report-file runners) no report
 	 * file — on a NONZERO exit (#1736). The empty-result branches these

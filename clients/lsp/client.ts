@@ -609,18 +609,21 @@ const PULL_REQUEST_TIMEOUT_MS = positiveIntFromEnv(
 	"PI_LENS_LSP_PULL_REQUEST_TIMEOUT_MS",
 	10_000,
 );
-// #1773: below this, dispatching is not a real attempt. The old clamp
-// (`Math.max(1, ...)`) let an exhausted `budgetMs` (0 or negative) through as
-// a 1ms pull — sent, timed out by construction, and recorded as a genuine
-// `lsp_pull_diagnostic_timeout` with a fabricated `effectiveBudgetMs: 1`
-// (observed live: both pull-timeout records in the 2026-08-20 plegma dogfood
-// session carried exactly that). 5ms sits below the smallest budget this
-// codebase's own regression fixtures already treat as a real dispatch
-// (`tests/clients/lsp/pull-diagnostic-timeout-telemetry.test.ts` exercises
-// 20ms and 30ms as genuinely-attempted-then-timed-out) and above the
-// 1-4ms band that is indistinguishable from "already exhausted" — a local
-// stdio server round trip (write + compute + parse) needs more than a
-// handful of milliseconds even on the fast path.
+// #1773: the smallest budget this codebase treats as usable — dispatching
+// BELOW it is not a real attempt. The old clamp (`Math.max(1, ...)`) let an
+// exhausted `budgetMs` (0 or negative) through as a 1ms pull — sent, timed
+// out by construction, and recorded as a genuine `lsp_pull_diagnostic_timeout`
+// with a fabricated `effectiveBudgetMs: 1` (observed live: both pull-timeout
+// records in the 2026-08-20 plegma dogfood session carried exactly that).
+// 5ms sits below the smallest budget this codebase's own regression fixtures
+// already treat as a real dispatch (`tests/clients/lsp/pull-diagnostic-
+// timeout-telemetry.test.ts` exercises 20ms and 30ms as genuinely-attempted-
+// then-timed-out) and above the 1-4ms band that is indistinguishable from
+// "already exhausted" — a local stdio server round trip (write + compute +
+// parse) needs more than a handful of milliseconds even on the fast path.
+// `budgetMs === PULL_MIN_USABLE_BUDGET_MS` dispatches (the comparison below
+// is strict `<`), so the name reads literally: this is the floor value that
+// still gets a real attempt.
 const PULL_MIN_USABLE_BUDGET_MS = 5;
 const SHUTDOWN_REQUEST_TIMEOUT_MS = positiveIntFromEnv(
 	"PI_LENS_LSP_SHUTDOWN_TIMEOUT_MS",
@@ -2486,10 +2489,10 @@ async function pullDiagnosticSource(
 	// attempted. The caller sees the same `unavailable` outcome a timeout
 	// would have produced (#240: unavailable, never a false clean), so
 	// nothing downstream of this call changes shape.
-	if (budgetMs <= PULL_MIN_USABLE_BUDGET_MS) {
+	if (budgetMs < PULL_MIN_USABLE_BUDGET_MS) {
 		emitBounded(
 			"lsp_pull_skipped_budget_exhausted",
-			pullSourceKey(normalizedPath, identifier),
+			`${state.serverId}::${pullSourceKey(normalizedPath, identifier)}`,
 			{
 				type: "phase",
 				filePath: normalizedPath,
@@ -2499,6 +2502,10 @@ async function pullDiagnosticSource(
 					remainingBudgetMs: budgetMs,
 					server: state.serverId,
 				},
+			},
+			{
+				ledgerKind: "lsp-pull-skipped-budget-exhausted",
+				reason: `pull skipped on ${state.serverId}: budget already exhausted (${budgetMs}ms remaining)`,
 			},
 		);
 		return { status: "unavailable" };
@@ -2841,7 +2848,12 @@ function armLateAnswerTelemetry(args: {
 						: undefined;
 				emitBounded(
 					"lsp_pull_late_rejection",
-					args.subject,
+					// #1774 review: prefix the server, same reason the timeout kind
+					// does (#1771). The workspace call site's `subject` is the bare
+					// `WORKSPACE_PULL_SCOPE` constant — without the server prefix,
+					// two servers' abandoned-workspace-pull rejections would collapse
+					// into one ledger subject and hide which server is storming.
+					`${args.server}::${args.subject}`,
 					{
 						type: "phase",
 						filePath: args.scope,
@@ -2931,17 +2943,25 @@ export async function clientRequestWorkspaceDiagnostics(
 	// `lsp_workspace_diagnostics_start` (not just the `lens_diagnostics_full`
 	// fan-out `pullDiagnosticSource` covers), so this call site needs its own
 	// skip, not just a shared helper the caller happens to hit.
-	if (budgetMs <= PULL_MIN_USABLE_BUDGET_MS) {
-		emitBounded("lsp_pull_skipped_budget_exhausted", WORKSPACE_PULL_SCOPE, {
-			type: "phase",
-			filePath: WORKSPACE_PULL_SCOPE,
-			durationMs: 0,
-			metadata: {
-				identifier: "bare",
-				remainingBudgetMs: budgetMs,
-				server: state.serverId,
+	if (budgetMs < PULL_MIN_USABLE_BUDGET_MS) {
+		emitBounded(
+			"lsp_pull_skipped_budget_exhausted",
+			`${state.serverId}::${WORKSPACE_PULL_SCOPE}`,
+			{
+				type: "phase",
+				filePath: WORKSPACE_PULL_SCOPE,
+				durationMs: 0,
+				metadata: {
+					identifier: "bare",
+					remainingBudgetMs: budgetMs,
+					server: state.serverId,
+				},
 			},
-		});
+			{
+				ledgerKind: "lsp-pull-skipped-budget-exhausted",
+				reason: `workspace pull skipped on ${state.serverId}: budget already exhausted (${budgetMs}ms remaining)`,
+			},
+		);
 		return undefined;
 	}
 	// #1713: declared OUTSIDE the try so the catch below can still reach them —
@@ -4346,19 +4366,17 @@ export async function createLSPClient(options: {
 		// A child registered above (recordLspChild) but never reaching a healthy
 		// createLSPClient return must still be deregistered here — otherwise the
 		// registry keeps a stale entry for a process we just killed.
-		void removeLspChild(pid, extractSpawnMarker(lspProcess.args)).catch(
-			(err) => {
-				// best-effort — a stale registry entry is harmless (the reaper's
-				// liveness check will find it dead on the next sweep regardless)
-				logLatency({
-					type: "phase",
-					phase: "lsp_registry_write_failed",
-					filePath: "",
-					durationMs: 0,
-					metadata: { op: "remove", pid, error: String(err) },
-				});
-			},
-		);
+		void removeLspChild(pid, extractSpawnMarker(lspProcess.args)).catch((err) => {
+			// best-effort — a stale registry entry is harmless (the reaper's
+			// liveness check will find it dead on the next sweep regardless)
+			logLatency({
+				type: "phase",
+				phase: "lsp_registry_write_failed",
+				filePath: "",
+				durationMs: 0,
+				metadata: { op: "remove", pid, error: String(err) },
+			});
+		});
 		setTimeout(() => {
 			// #1114: gate on the process's own observed `exitCode`/`signalCode`,
 			// not `.killed` — `killProcessTree` above signals the POSIX process
