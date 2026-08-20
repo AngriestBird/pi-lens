@@ -102,19 +102,117 @@ note: |
   for a narrowed variable, a value narrowed by a ternary rather than
   `.has()` (`index.forward!` in `word-index.ts`), and a
   module-singleton pattern (`format-service.ts`'s
-  `globalFormatService!`). Tracked as #1818: the residual is still
-  noisier than a bounded-false-positive-rate warning ideally is, but
-  neither remaining unexpressed idiom class (re-asserted property,
-  boolean flag) has an ast-grep-expressible relational shape —
-  narrowing further would need a rule engine with dataflow, not
-  syntax-tree relations. Severity stays `warning` pending that
-  follow-up.
+  `globalFormatService!`). Tracked as #1818.
+
+  2026-08-20 (#1818 round 2): two of the four named unexpressed shapes
+  DO have a cheap structural signature after all, and are now
+  excluded:
+
+  1. **Ternary-narrow**: `$TO.$TP ? ...$TO.$TP!... : ...` — the
+     `$TO.$TP!` sits under the `consequence` field of a ternary whose
+     `condition` is the identical `$TO.$TP` truthy check, even when
+     the assertion is nested inside a closure passed to `.map()` (the
+     `word-index.ts` and `lsp/index.ts` cases). `has: field:
+     consequence` — not a bare `inside` — is what keeps a same-shaped
+     assertion sitting in the `alternative` branch (a real narrowing
+     bug: falsy there) from being suppressed by accident.
+  2. **Filter-then-map re-assert**: `$OBJ.filter(($F) => $F.$PROP)
+     .map(($M) => ...$M.$PROP!...)` — `$M` is the SAME metavariable as
+     both the map callback's own parameter and the asserted receiver,
+     so the exclusion fires only when the narrowed value is literally
+     that parameter, not an unrelated same-named variable elsewhere
+     (the `read-guard.ts` case, 2 sites × 3 properties each).
+
+  Both follow the same discipline as the `#1777` exclusions above:
+  `stopBy` is a RULE (nearest ternary / nearest arrow function), never
+  `end`, and the suppression is guarded by same-metavariable binding,
+  not mere presence of the guard shape anywhere in scope. Fixtured
+  (suppressed shape, mismatched-binding lookalike, and — for the
+  ternary — the opposite-branch bug lookalike) in
+  `rule-tests/no-non-null-assertion-test.yml`.
+
+  Re-census, pi-lens `clients/` `tools/` `index.ts`: 36 → 27 (9
+  suppressed). All 9 verified by hand: 1 in `word-index.ts`, 2 in
+  `lsp/index.ts` (an `AbortSignal`-narrowed-by-truthy-ternary variant
+  of the same idiom), and the 6 `read-guard.ts` sites already named
+  above. Four-corpus census (F1/F2-fixed rule → round-2 rule; these
+  corpora move independently of pi-lens's own history and the
+  upstream trees have drifted since the #1777 note, so treat this as
+  a fresh baseline rather than a delta against the numbers above):
+  inspiration-pi 659 → 657, inspiration-opencode 1078 → 1071,
+  inspiration-oh-my-pi 3548 → 3543.
+
+  The two remaining named shapes — a boolean flag standing in for a
+  narrowed variable, and a property re-asserted after its PARENT
+  (rather than itself) was checked — were re-probed and are still not
+  expressible: both require proving that an assignment or a `.filter`
+  predicate on a DIFFERENT expression than the one being asserted
+  actually dominates the assertion, which needs a dataflow model, not
+  a syntax-tree relation. The module-singleton case
+  (`format-service.ts`'s `globalFormatService!`) was also re-probed: a
+  direct `if (!$X) { $X = ...; }` guard immediately before `return
+  $X!` would be structurally expressible the same way as the
+  `#1777` `.has()` exclusion, but `format-service.ts`'s actual
+  instance routes the check through an intermediate boolean
+  (`shouldCreateNew`) rather than testing `$X` directly, which is the
+  boolean-flag shape, not a new one — so no rule was added for it
+  rather than risk a suppression that can't tell "just assigned" from
+  "assigned in an unrelated earlier branch." The residual (27, was 36)
+  is smaller but still idiom-dominated: pending the maintainer's
+  standing decision, severity stays `warning`.
 rule:
   pattern: $X!
   not:
     any:
       - kind: function_type
       - kind: method_signature
+      - all:
+          # #1818 round 2: ternary-narrow. `$TO.$TP ? ...$TO.$TP!... :
+          # ...` — the consequence branch is reached only when `$TO.$TP`
+          # is truthy, but a closure nested in that branch (an arrow
+          # passed to `.map()`, etc.) loses TS's own narrowing across the
+          # function boundary. `stopBy` bounds the walk to the NEAREST
+          # enclosing ternary (never an outer one), and `has: field:
+          # consequence` confirms the exact same assertion text exists
+          # specifically under the consequence — not the alternative —
+          # branch, so a bug-shaped assertion in the alternative branch is
+          # unaffected. Named `$TO`/`$TP`, not `$X`/`$P`: the outer
+          # `pattern: $X!` already binds `$X` to the WHOLE asserted
+          # expression (e.g. `index.forward`), so reusing `$X` here would
+          # force it to match `index.forward.$P!` — a different shape —
+          # instead of decomposing `index.forward` into object+property.
+          - pattern: $TO.$TP!
+          - inside:
+              stopBy:
+                kind: ternary_expression
+              all:
+                - kind: ternary_expression
+                - has:
+                    field: condition
+                    pattern: $TO.$TP
+                - has:
+                    field: consequence
+                    stopBy: end
+                    pattern: $TO.$TP!
+      - all:
+          # #1818 round 2: a property re-asserted after a `.filter()` on
+          # that SAME property, immediately chained into `.map()` — TS's
+          # narrowing from `.filter((r) => r.$PROP)` does not carry into
+          # the separate `.map()` callback closure. `$M` (the map
+          # callback's parameter) is the SAME metavariable as the
+          # assertion's receiver, so the exclusion only fires when the
+          # asserted value is literally the map callback's own parameter,
+          # not an unrelated same-named variable; `$PROP` must match on
+          # both the filter predicate and the assertion.
+          - pattern: $M.$PROP!
+          - inside:
+              stopBy:
+                kind: arrow_function
+              kind: arrow_function
+              inside:
+                stopBy: end
+                kind: call_expression
+                pattern: $OBJ.filter(($F) => $F.$PROP).map(($M) => $BODY)
       - all:
           - pattern: $M.get($K)!
           - inside:

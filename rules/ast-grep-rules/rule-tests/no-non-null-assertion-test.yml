@@ -24,6 +24,23 @@ valid:
         return queue.shift()!;
       }
     }
+  # #1818 round 2: ternary-narrow. The consequence branch is only reached
+  # when the condition's own property access is truthy; the nested closure
+  # loses TS's narrowing across the function boundary, hence the `!`.
+  - |
+    function f(index: { forward?: Map<string, number> }, files: string[]) {
+      return index.forward
+        ? files.map((file) => index.forward!.get(file))
+        : undefined;
+    }
+  # #1818 round 2: property re-asserted after a `.filter()` on the same
+  # property, immediately followed by `.map()` in the same chain.
+  - |
+    function f(reads: Array<{ enclosingSymbol?: { name: string } }>) {
+      return reads
+        .filter((r) => r.enclosingSymbol)
+        .map((r) => ({ name: r.enclosingSymbol!.name }));
+    }
 invalid:
   - 'const x = foo!'
   - 'foo!.bar()'
@@ -131,4 +148,39 @@ invalid:
     function f(m: Map<string, number>, k: string) {
       if (!m.has(k)) return;
       return m.get(k)!;
+    }
+  # #1818 mutation guard: ternary-narrow, but the assertion sits in the
+  # ALTERNATIVE branch (the condition's property is falsy there) — a real
+  # bug, must still flag.
+  - |
+    function f(index: { forward?: Map<string, number> }, files: string[]) {
+      return index.forward
+        ? undefined
+        : files.map((file) => index.forward!.get(file));
+    }
+  # #1818 mutation guard: ternary-narrow, but the assertion targets a
+  # DIFFERENT object than the condition checked — same-binding discipline
+  # is the guard, not mere presence of a truthy-ternary anywhere outside.
+  - |
+    function f(
+      index: { forward?: Map<string, number> },
+      other: { forward?: Map<string, number> },
+      files: string[],
+    ) {
+      return index.forward
+        ? files.map((file) => other.forward!.get(file))
+        : undefined;
+    }
+  # #1818 mutation guard: filter+map, but the filter checks a DIFFERENT
+  # property than the one asserted in map — must still flag.
+  - |
+    function f(reads: Array<{ enclosingSymbol?: { name: string }; other?: unknown }>) {
+      return reads
+        .filter((r) => r.other)
+        .map((r) => ({ name: r.enclosingSymbol!.name }));
+    }
+  # #1818 mutation guard: no preceding filter at all — must still flag.
+  - |
+    function f(reads: Array<{ enclosingSymbol?: { name: string } }>) {
+      return reads.map((r) => ({ name: r.enclosingSymbol!.name }));
     }
