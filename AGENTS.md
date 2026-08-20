@@ -372,9 +372,9 @@ A separate, narrower family from the shapes above: not a recurring bug, but a re
 3. **`type X = unknown` alias.** An alias that only renames `unknown` carries zero type information — every consumer still narrows from scratch. *Screen:* give the alias real shape, or drop it and let the rare genuine unknown-input site say `unknown` directly. *Detect:* `no-unknown-laundering.yml` (`type $T = unknown`). Scoped to the alias form only — an FP-scan found `unknown` return types, parameters, and `Record<string, unknown>` dictionaries are the CORRECT, idiomatic contract at validator/parser/Proxy-trap boundaries in this codebase (166+192+9 hits, all legitimate), so those arms were dropped rather than shipped noisy.
 4. **Conditional empty-object spread.** `{...(cond ? {} : {x})}` hides field omission behind a ternary instead of an explicit branch. *Screen:* prefer an explicit `if`/`else` that builds the object directly. *Detect:* `no-conditional-empty-object-spread.yml` / `-js` (spread of a ternary whose consequence or alternative is an empty object literal). Shipped at `hint` severity: an FP-scan found 147 existing pi-lens uses of this exact shape, which is this codebase's established idiom for optional-field construction, not a shape mismatch.
 5. **`Reflect.apply`/`Reflect.get` calls.** Reflection where a typed call or property access already works. *Screen:* prefer `fn(...args)`/`fn.apply(...)` and `obj.prop`/`obj[key]`. *Detect:* `no-reflect-apply.yml` / `no-reflect-get.yml` (+ `-js` twins). `no-reflect-get` is scoped to the 2-argument form — the 3-argument `Reflect.get(target, key, receiver)` form is the standard Proxy `get`-trap receiver-forwarding idiom (found in an FP-scan) and stays allowed.
-6. **Chained type assertions.** `x as A as B` stacks two unrelated-type assertions with no runtime check between them. *Screen:* narrow with a type guard, or assert once to the type actually needed. *Detect:* `no-chained-type-assertions.yml` (`$X as $A as $B`, excluding `as const`, at `error`). 2026-08-19 (refs #1718): the earlier `as unknown as $B` exemption was dropped for the shipped catalog — upstream anti-slop treats that form as forbidden too, and this catalog ships to other repositories, not just this one. pi-lens's own ~267 `as unknown as` sites stay non-conforming until a self-scan baseline exists (#1718); see the rule file's note for the full trade.
+6. **Chained type assertions.** `x as A as B` stacks two unrelated-type assertions with no runtime check between them. *Screen:* narrow with a type guard, or assert once to the type actually needed. *Detect:* two rules that PARTITION the shape (2026-08-20, refs #1727/#1777). `no-chained-type-assertions.yml` owns the concrete chain (`$X as $A as $B`, excluding `as const` and excluding the `unknown` hop, at `error`, no escape valve). `require-safety-comment-for-as-unknown-as.yml` owns `x as unknown as T` at `error`, cleared by a `SAFETY:` comment naming the invariant. Before the split both rules matched the identical site list, so one cast raised two diagnostics. Both are now tagged `metadata.category: pi-lens-self-scan`, so CI holds this tree at zero for both: the 16 `clients/` casts each carry a real `SAFETY:` comment, and the one unjustified cast was replaced (`clients/runtime-context.ts`).
 7. **Bare `object` parameter type.** `object` guarantees nothing about shape, not even that a property exists. *Screen:* use `Record<string, unknown>` for an open bag, or a real interface. *Detect:* `no-bare-object-param.yml` (`predefined_type` regex `^object$` in a parameter's `type_annotation`, at `error`). Zero violations on this tree as of #1597/#1599 and again on 2026-08-19.
-8. **"Shape" in a symbol name.** A name that only says "this has some shape" (`PackageJsonShape`, `windowsShaped`) is filler a domain term would replace. *Screen:* name the ownership/role, not the structure. *Detect:* `no-shape-in-symbol-names.yml`, at `hint`. **Deliberately NOT self-scanned**: "shape" is load-bearing vocabulary in this very catalog (the numbered defect-shape list above, `ProbeFailureShape`, `windowsShaped`) — 27 distinct identifiers / 291 occurrences as of the 2026-08-19 audit. The rule ships for repositories without that convention; #1718 decides whether/how pi-lens's own tree is scanned against it.
+8. **"Shape" in a symbol name.** A name that only says "this has some shape" (`PackageJsonShape`, `windowsShaped`) is filler a domain term would replace. *Screen:* name the ownership/role, not the structure. *Detect:* `no-shape-in-symbol-names.yml`, at `hint` — considered for the `error` floor on 2026-08-20 and left at `hint`; excluding test paths still leaves all 48 `clients/` hits, which are production identifiers, not a test idiom. **Deliberately NOT self-scanned**: "shape" is load-bearing vocabulary in this very catalog (the numbered defect-shape list above, `ProbeFailureShape`, `windowsShaped`) — 27 distinct identifiers / 291 occurrences as of the 2026-08-19 audit. The rule ships for repositories without that convention; #1718 decides whether/how pi-lens's own tree is scanned against it.
 
 **ast-grep candidates:** shapes 4, 2, 1, and 6 are *syntactically* detectable and could become dogfooded rules (assessed for false-positive load in **#1158**); shapes 3, 5, 7, 8, 10 are semantic — good and bad uses are syntactically identical — and stay review-enforced. Do not author rules here; #1158 tracks the viable set.
 
@@ -1539,6 +1539,30 @@ Pick a tier by the evidence behind the rule:
 - **`hint`** and **`info`** are style opinions. They render as advisory text, never block, and lose the report budget to warnings when a report is capped.
 
 Tier governs how loudly a finding renders, not whether its fix is offered: a hint-tier rule with a fix still routes to actionable warnings. Do not re-tier a rule without recording the false-positive census that justifies the move.
+
+**Promoting a rule to `error` (the 2026-08-20 procedure, refs #1727).** Three
+things must all be true, and the rule's `note` must record them:
+
+1. **A multi-corpus false-positive census**, not a single-tree count. Run the
+   rule over pi-lens's `clients/` and `tests/` plus at least one real external
+   codebase of the kind the rule targets, classify the hits, and put the table
+   in the note. A rule that is clean here and noisy everywhere else is still a
+   turn-blocker for the catalog's users.
+2. **Structural narrowing before exemption.** Suppress a legitimate idiom with
+   a relational constraint on the rule (`inside`/`has`/`follows`, scoped path
+   globs), not with prose in the note telling readers to ignore the hit.
+   Record the false-negative bias the narrowing buys, because a path glob or a
+   name regex approximates intent, it does not read it.
+3. **Self-scan wiring.** Tag the rule `metadata.category: pi-lens-self-scan`
+   so `npm run astgrep:self-scan` holds this tree at zero in CI. An `error`
+   rule that never runs against pi-lens's own source is an unaudited claim.
+   Fix or replace the residual hits; do not baseline them.
+
+If the post-narrowing residual is still tens of legitimate hits, STOP and
+report the numbers. Six of the eight #1727 anti-slop rules stopped there on
+2026-08-20; each one's note carries its census and the reason. Volume alone is
+the verdict: at `error` an agent editing a file with a pre-existing hit is
+blocked on code it did not write.
 
 When changing a serialized cache that feeds this pipeline (e.g. `clients/cache/rule-cache.ts`), bump `CACHE_VERSION` so old entries invalidate. The tree-sitter rule cache previously stripped `has_fix` on roundtrip, silently demoting every tree-sitter rule with auto-fix to non-fixable on any cache hit (commit `24af518`).
 
