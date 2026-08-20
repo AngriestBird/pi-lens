@@ -263,6 +263,13 @@ edited file's directory through `DispatchContext.projectRoot` inclusive. Never
 let a descriptor above the session project suppress the fallback; nested module
 descriptors inside the project still gate it. (#1877)
 
+Context-free compiler runners preserve compiler severity but never claim a
+blocking semantic when the invocation lacks the project inputs needed to prove
+that verdict. This applies to standalone javac, C/C++ syntax checks without a
+compile database, `zig build-exe` without build.zig module context, and direct
+elixirc without Mix; project-backed Mix and dotnet builds may still block.
+(#1885)
+
 Mechanical ast-grep rules may expose a `fix:` only when one syntax rewrite is
 unambiguous. Reflect.apply remains diagnostic-only because an own shadowed
 `.apply` changes the obvious rewrite's semantics. Two-argument Reflect.get uses

@@ -35,7 +35,9 @@ function parseJavacOutput(raw: string, filePath: string): Diagnostic[] {
 			line: lineNum,
 			column: 1,
 			severity,
-			semantic: severity === "error" ? "blocking" : "warning",
+			// A standalone single-file javac run has no project classpath. It can
+			// report useful syntax/type evidence, but it cannot prove a blocker.
+			semantic: "warning",
 			tool: "javac",
 			rule: "compile",
 			fixable: false,
@@ -107,7 +109,7 @@ const javacRunner: RunnerDefinition = {
 		return {
 			status: hasErrors ? "failed" : "succeeded",
 			diagnostics,
-			semantic: hasErrors ? "blocking" : "warning",
+			semantic: "warning",
 		};
 	},
 };
