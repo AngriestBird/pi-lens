@@ -394,6 +394,109 @@ describe("knip-client", () => {
 		}
 	});
 
+	it.each([
+		{ name: "changed sequence", nextSeq: 8, reset: false },
+		{ name: "session reset", nextSeq: 7, reset: true },
+	])("re-executes after $name", async ({ nextSeq, reset }) => {
+		const { tmpDir, cleanup } = setupTestEnvironment("pi-lens-knip-memo-change-");
+		try {
+			fs.writeFileSync(path.join(tmpDir, "package.json"), '{"name":"demo"}');
+			const client = new KnipClient(false);
+			vi.spyOn(client, "ensureAvailable").mockResolvedValue(true);
+			const result = {
+				success: true,
+				issues: [],
+				unusedExports: [],
+				unusedFiles: [],
+				unusedDeps: [],
+				unlistedDeps: [],
+				summary: "ok",
+			};
+			const run = vi
+				.spyOn(
+					client as unknown as { runAnalyze: (dir: string) => Promise<unknown> },
+					"runAnalyze",
+				)
+				.mockResolvedValue(result);
+
+			await client.analyze(tmpDir, [], { projectSeq: 7 });
+			if (reset) client.resetSessionState();
+			await client.analyze(tmpDir, [], { projectSeq: nextSeq });
+
+			expect(run).toHaveBeenCalledTimes(2);
+		} finally {
+			cleanup();
+			vi.restoreAllMocks();
+		}
+	});
+
+	it("serves unchanged project content from cache without spawning", async () => {
+		const { tmpDir, cleanup } = setupTestEnvironment("pi-lens-knip-memo-");
+		try {
+			fs.writeFileSync(path.join(tmpDir, "package.json"), '{"name":"demo"}');
+			const client = new KnipClient(false);
+			vi.spyOn(client, "ensureAvailable").mockResolvedValue(true);
+			const run = vi
+				.spyOn(
+					client as unknown as { runAnalyze: (dir: string) => Promise<unknown> },
+					"runAnalyze",
+				)
+				.mockResolvedValue({
+					success: true,
+					issues: [],
+					unusedExports: [],
+					unusedFiles: [],
+					unusedDeps: [],
+					unlistedDeps: [],
+					summary: "ok",
+				});
+
+			const first = await client.analyze(tmpDir, [], { projectSeq: 7 });
+			const cached = await client.analyze(tmpDir, [], { projectSeq: 7 });
+
+			expect(run).toHaveBeenCalledTimes(1);
+			expect(first.execution).toBe("executed");
+			expect(cached.execution).toBe("cache");
+		} finally {
+			cleanup();
+			vi.restoreAllMocks();
+		}
+	});
+
+	it("invalidates the memo when an external package change does not advance projectSeq", async () => {
+		const { tmpDir, cleanup } = setupTestEnvironment("pi-lens-knip-memo-external-");
+		try {
+			const packagePath = path.join(tmpDir, "package.json");
+			fs.writeFileSync(packagePath, '{"name":"demo"}');
+			const client = new KnipClient(false);
+			vi.spyOn(client, "ensureAvailable").mockResolvedValue(true);
+			const run = vi
+				.spyOn(
+					client as unknown as { runAnalyze: (dir: string) => Promise<unknown> },
+					"runAnalyze",
+				)
+				.mockResolvedValue({
+					success: true,
+					issues: [],
+					unusedExports: [],
+					unusedFiles: [],
+					unusedDeps: [],
+					unlistedDeps: [],
+					summary: "ok",
+				});
+
+			await client.analyze(tmpDir, [], { projectSeq: 7 });
+			fs.writeFileSync(packagePath, '{"name":"demo","version":"2"}');
+			const refreshed = await client.analyze(tmpDir, [], { projectSeq: 7 });
+
+			expect(run).toHaveBeenCalledTimes(2);
+			expect(refreshed.execution).toBe("executed");
+		} finally {
+			cleanup();
+			vi.restoreAllMocks();
+		}
+	});
+
 	it("parses fallback flat issue array format", () => {
 		const client = new KnipClient(false) as unknown as {
 			parseOutput: (output: string) => {

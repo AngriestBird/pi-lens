@@ -1209,6 +1209,7 @@ function scheduleStartupScans(
 			const knipResult = await knipClient.analyze(
 				analysisRoot,
 				getKnipIgnorePatterns(),
+				{ projectSeq: runtime.projectSeq },
 			);
 			if (!runtime.isCurrentSession(sessionGeneration)) return;
 			if (knipResult.success) {
@@ -2034,6 +2035,7 @@ export async function handleSessionStart(
 		log,
 		runtime,
 		metricsClient,
+		knipClient,
 		cacheManager,
 		testRunnerClient,
 		goClient,
@@ -2121,6 +2123,10 @@ export async function handleSessionStart(
 	// written before this instant assert findings from a session that is over,
 	// so they must revalidate before they can be served as current again.
 	resetWorkspaceDiagnosticsCacheSession(sessionStartMs);
+	// Some embedders inject a capability-shaped Knip client rather than the
+	// concrete KnipClient. Session reset is an optional lifecycle capability;
+	// its absence must not make session_start fail.
+	knipClient.resetSessionState?.();
 	runtime.resetForSession(sessionStartMs);
 	logLatency({
 		type: "phase",
