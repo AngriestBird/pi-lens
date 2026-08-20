@@ -8,6 +8,12 @@ import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
 import { handleTurnEnd } from "../../clients/runtime-turn.js";
 import { setupTestEnvironment } from "./test-utils.js";
 
+/** Set a file's mtime `ms` (epoch milliseconds). */
+function setMtime(file: string, ms: number): void {
+	const when = new Date(ms);
+	fs.utimesSync(file, when, when);
+}
+
 // #1617: turn_end's own secrets gate ("🔴 STOP — hardcoded secrets detected")
 // is the literal surface the dogfood incident hit — an agent marked a
 // gitleaks finding false-positive via lens_diagnostic_mark, but the NEXT
@@ -191,6 +197,163 @@ describe("turn_end secrets gate honors dispositions for trivy secrets (#1628)", 
 			const afterContent = after?.messages[0]?.content ?? "";
 			expect(afterContent).not.toContain("STOP — hardcoded secrets detected");
 			// #1616 suppressed-bucket rule: the drop must stay visible as a trace.
+			expect(afterContent).toContain("suppressed by disposition");
+		} finally {
+			env.cleanup();
+		}
+	});
+});
+
+// #1694 residual 1: the #1617/#1625/#1691 disposition filtering above is
+// proven only for the LIVE arm — every finding in those tests sits in a file
+// untouched since the scan. #1622's freshness gate demotes findings whose
+// cited file changed after the scan into a SEPARATE `.stale` arm
+// (`gitleaksGate.stale` / `trivySecretsGate.stale`), reported through its own
+// "🔑 ACTION NEEDED" tier. `filterFindingsByDisposition` is applied to that
+// arm too (`gitleaksStaleFiltered` / `trivySecretsStaleFiltered`), but nothing
+// proved it: mutating `trivySecretsStaleFiltered.kept` back to the raw
+// `trivySecretsGate.stale` (and the gitleaks equivalent) left the full suite
+// green. These pin the stale arm the same way the tests above pin the live
+// arm — mark a stale finding false-positive and prove it stops reappearing in
+// the ACTION NEEDED tier, with the suppression staying visible as a trace.
+describe("turn_end secrets gate honors dispositions on the STALE arm (#1694)", () => {
+	it("re-reports a stale gitleaks finding as ACTION NEEDED when unmarked, then drops it once marked false-positive", async () => {
+		const env = setupTestEnvironment("pi-lens-turnend-secrets-stale-gitleaks-");
+		try {
+			const cwd = env.tmpDir;
+			const filePath = path.join(cwd, "a.ts");
+			const content = "const clientId = 'not-a-real-secret';\n";
+			fs.writeFileSync(filePath, content);
+
+			// Scan happened 60s ago; the file's mtime is 5s AFTER that — edited
+			// since the scan, so `gateFindingsByPathFreshness` routes this finding
+			// into the `.stale` arm, not `.live`.
+			const scannedAtMs = Date.now() - 60_000;
+			setMtime(filePath, scannedAtMs + 5_000);
+
+			const cacheManager = new CacheManager(false);
+			cacheManager.addModifiedRange(filePath, { start: 1, end: 1 }, false, cwd);
+			cacheManager.writeCache(
+				"gitleaks",
+				{
+					success: true,
+					findings: [
+						{
+							ruleId: "generic-api-key",
+							file: filePath,
+							startLine: 1,
+						},
+					],
+					scannedAt: new Date(scannedAtMs).toISOString(),
+				},
+				cwd,
+			);
+
+			// Baseline: unmarked stale finding IS an ACTION NEEDED entry, and
+			// never a STOP blocker (the stale tier withholds the line, it never
+			// escalates to the live blocker tier).
+			const runtimeBefore = new RuntimeCoordinator();
+			await handleTurnEnd(makeTurnEndDeps(runtimeBefore, cacheManager, cwd));
+			const before = consumeTurnEndFindings(cacheManager, cwd);
+			const beforeContent = before?.messages[0]?.content ?? "";
+			expect(beforeContent).toContain("ACTION NEEDED");
+			expect(beforeContent).toContain("generic-api-key");
+			expect(beforeContent).not.toContain("STOP — hardcoded secrets detected");
+
+			// Mark it false-positive using the SAME identity
+			// `gitleaksFindingToProjectDiagnostic` derives — what an agent would
+			// have gotten from lens_diagnostics and fed straight into
+			// lens_diagnostic_mark.
+			markDisposition(
+				cwd,
+				{
+					cwd,
+					filePath,
+					tool: "gitleaks",
+					rule: "gitleaks:generic-api-key",
+					message: "Potential secret: generic-api-key",
+					line: 1,
+					content,
+				},
+				"false-positive",
+			);
+
+			cacheManager.addModifiedRange(filePath, { start: 1, end: 1 }, false, cwd);
+			const runtimeAfter = new RuntimeCoordinator();
+			await handleTurnEnd(makeTurnEndDeps(runtimeAfter, cacheManager, cwd));
+			const after = consumeTurnEndFindings(cacheManager, cwd);
+			const afterContent = after?.messages[0]?.content ?? "";
+			expect(afterContent).not.toContain("ACTION NEEDED");
+			// #1616 suppressed-bucket rule: the drop must stay visible as a trace.
+			expect(afterContent).toContain("suppressed by disposition");
+		} finally {
+			env.cleanup();
+		}
+	});
+});
+
+describe("turn_end secrets gate honors dispositions on the STALE arm for trivy secrets (#1694)", () => {
+	it("re-reports a stale trivy-secret finding as ACTION NEEDED when unmarked, then drops it once marked false-positive", async () => {
+		const env = setupTestEnvironment("pi-lens-turnend-secrets-stale-trivy-");
+		try {
+			const cwd = env.tmpDir;
+			const filePath = path.join(cwd, "b.ts");
+			const content = "const apiKey = 'not-a-real-secret';\n";
+			fs.writeFileSync(filePath, content);
+
+			const scannedAtMs = Date.now() - 60_000;
+			setMtime(filePath, scannedAtMs + 5_000);
+
+			const cacheManager = new CacheManager(false);
+			cacheManager.addModifiedRange(filePath, { start: 1, end: 1 }, false, cwd);
+			cacheManager.writeCache(
+				"trivy",
+				{
+					success: true,
+					scannedAt: new Date(scannedAtMs).toISOString(),
+					findings: [],
+					secrets: [
+						{
+							ruleId: "aws-access-key-id",
+							file: filePath,
+							line: 1,
+						},
+					],
+					licenses: [],
+				},
+				cwd,
+			);
+
+			const runtimeBefore = new RuntimeCoordinator();
+			await handleTurnEnd(makeTurnEndDeps(runtimeBefore, cacheManager, cwd));
+			const before = consumeTurnEndFindings(cacheManager, cwd);
+			const beforeContent = before?.messages[0]?.content ?? "";
+			expect(beforeContent).toContain("ACTION NEEDED");
+			expect(beforeContent).toContain("aws-access-key-id");
+			expect(beforeContent).not.toContain("STOP — hardcoded secrets detected");
+
+			// Mark it false-positive using the SAME identity
+			// `trivySecretFindingToProjectDiagnostic` derives.
+			markDisposition(
+				cwd,
+				{
+					cwd,
+					filePath,
+					tool: "trivy",
+					rule: "trivy-secret:aws-access-key-id",
+					message: "Potential secret: aws-access-key-id",
+					line: 1,
+					content,
+				},
+				"false-positive",
+			);
+
+			cacheManager.addModifiedRange(filePath, { start: 1, end: 1 }, false, cwd);
+			const runtimeAfter = new RuntimeCoordinator();
+			await handleTurnEnd(makeTurnEndDeps(runtimeAfter, cacheManager, cwd));
+			const after = consumeTurnEndFindings(cacheManager, cwd);
+			const afterContent = after?.messages[0]?.content ?? "";
+			expect(afterContent).not.toContain("ACTION NEEDED");
 			expect(afterContent).toContain("suppressed by disposition");
 		} finally {
 			env.cleanup();

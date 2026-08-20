@@ -1,0 +1,5 @@
+---
+section: Fixed
+---
+
+- **The secrets gate's stale-arm disposition filters are now proven, not just present (closes #1694)** — `filterFindingsByDisposition` was applied to both the live and stale arms of the gitleaks/trivy-secrets freshness gate since #1625/#1628, but only the live arm had a regression test; mutating `trivySecretsStaleFiltered.kept`/`gitleaksStaleFiltered.kept` back to the raw pre-filter `.stale` array left the whole suite green. New tests in `tests/clients/runtime-turn-secrets-disposition.test.ts` mark a stale finding (a scan whose cited file was edited afterward, routed into the 🔑 ACTION NEEDED tier) false-positive and prove it stops reappearing there, going red against each lane's mutant independently. `docs/dispositions.md` now documents the dual-scanner double-mark: gitleaks and trivy anchor the same credential under different `tool`/`rule` identities, so clearing a corroborated finding takes two `lens_diagnostic_mark` calls — expected defense-in-depth, previously undocumented. `trivySecretsToProjectDiagnostics` (no consumer outside its own file) is no longer exported.
