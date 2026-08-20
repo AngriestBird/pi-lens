@@ -1,8 +1,28 @@
 # pi-lens — agent context
 
+Knip's dispatch memo is instance-owned and keyed by canonical project root plus
+the runtime's monotonic project sequence. Only callers that supply that content
+generation may reuse a successful result; explicit fresh-analysis callers omit
+it. Cache hits and executions are separately labeled, and session start clears
+the memo before the startup scan can prime it. (#1868)
+
+Bash write attribution recognizes common in-place formatter and fixer commands
+only when their source-file targets are explicit. Bare project-scoped `cargo
+fmt` and `dotnet format` remain unresolvable without a workspace walk. At the
+read guard's FileTime gate, uniquely resolved live `oldText` is stronger content
+evidence and softens staleness; ambiguous or missing `oldText` never does.
+(#1903)
+
 Coverage markers are deduped per session by normalized kind, file, and the
 normalized silent-scanner set. A changed set admits a new marker, and a marker
 is appended after primary diagnostics so both remain visible.
+
+Pull-diagnostics request deadlines send `$/cancelRequest`, but cancellation is
+advisory. While a cancelled request remains unsettled, admission blocks another
+pull for the same path/source. The slot frees only on settlement. Apply this to
+both `textDocument/diagnostic` and `workspace/diagnostic`, including new pull
+entry points, so a server that ignores cancellation cannot accumulate a backlog.
+(#1889)
 
 No-filePath workspace-scope LSP queries use a request-local attribution
 collector. `lsp_navigation_result` records the serving server id for each
@@ -15,9 +35,15 @@ Bounded LSP warm touches preserve the spawn coordinator's lifecycle evidence:
 an empty ready-client set reports `spawn_in_flight_budget_elapsed` while a
 matching primary single-flight spawn remains pending, and
 `no_clients_none_spawning` only when none does. Read the existing `inFlight`
- state at the touch verdict; correlate the full `serverId:root` key using the
- root resolved by acquisition, and do not add a second pending-warm latch.
- (#1875, #1875 fix round)
+state at the touch verdict; correlate the full `serverId:root` key using the
+root resolved by acquisition, and do not add a second pending-warm latch.
+Successful LSP spawn-plus-initialize durations also
+feed a bounded process-lifetime history. A bounded client wait skips only after
+the matching spawn enters `inFlight` and that server's recorded duration exceeds
+twice the wait budget; missing history keeps the full wait. The skip retains the
+in-flight verdict and records `budget_skipped_known_slow`, while the background
+single-flight spawn continues for the next touch. (#1875, #1875 fix round,
+#1884 item 2)
 
 Post-fix decision observability is durable and bounded: advisory delivery logs
 one `advisory_provenance_decision` per consume, classic TypeScript project
@@ -36,12 +62,26 @@ entry point; later sessions emit no host-ready phase because no clean
 per-session anchor exists. The session handler receives an explicit first-start
 bit, so session-state resets must not re-arm or reuse this measurement.
 
+Session-start lifecycle hooks must tolerate capability-shaped injected clients.
+Optional reset methods may be absent from test doubles or embedders and must not
+turn session initialization into a failure; concrete clients still reset state.
+
 Per-edit LSP dispatch preserves the touch's correlated `unconfirmedServerIds`
 through `RunnerResult` and runner latency assembly. The agent coverage notice
 renders the bounded scanner set before considering a successful primary result,
 so partial diagnostics, including an empty result, never look clean. Reuse the
 existing normalized kind+file coverage-notice dedupe; do not re-derive scanner
 silence after the LSP touch has classified it. (#1867)
+
+The widget projection after `lens_diagnostics mode=full` uses the final
+post-policy, post-suppression summaries, not the confirmed-LSP reconciliation
+loop. That final seam has correlated the LSP, project-scan, delta, and retained
+widget lanes; committing only the earlier confirmed-LSP rows makes a broken
+auxiliary lane hide independent `ast-grep-napi` findings from the widget count.
+Preserve existing per-entry observation times and stamp only newly correlated
+rows with the project scan time. Projected rows must also use the shared
+`widgetDiagnosticUri` normalization seam so their OSC-8 line links match
+`recordDiagnostics` output. (#1888)
 
 Advisory caches must carry immutable capture provenance and validate it again
 at every delivery surface. A finding is current only when session/turn state
@@ -242,6 +282,13 @@ edited file's directory through `DispatchContext.projectRoot` inclusive. Never
 let a descriptor above the session project suppress the fallback; nested module
 descriptors inside the project still gate it. (#1877)
 
+Context-free compiler runners preserve compiler severity but never claim a
+blocking semantic when the invocation lacks the project inputs needed to prove
+that verdict. This applies to standalone javac, C/C++ syntax checks without a
+compile database, `zig build-exe` without build.zig module context, and direct
+elixirc without Mix; project-backed Mix and dotnet builds may still block.
+(#1885)
+
 Mechanical ast-grep rules may expose a `fix:` only when one syntax rewrite is
 unambiguous. Reflect.apply remains diagnostic-only because an own shadowed
 `.apply` changes the obvious rewrite's semantics. Two-argument Reflect.get uses
@@ -268,6 +315,9 @@ record and admitted tally milestones also emit a `degradation_ledger` row throug
 the session remains auditable when no health render reaches the transcript.
 Scanner coverage gaps and stalled notify-inflight barriers use the ledger;
 successful notify drains remain latency-only because they are not degradations.
+Workspace-root path-attribution rollups are separate, memory-only session
+telemetry. They reset on the primary `session_start`, emit once on primary
+shutdown, and secondary shutdown returns before consuming the primary tally.
 Durable rows use the same 20-entry per-kind admission as the summary and emit
 count increments only at powers of two, so the sink remains bounded. Each row
 also carries the ledger generation for session grouping. (#1366, #1292, #1866)
@@ -321,6 +371,11 @@ first client operation with `tests/clients/interleaving-kit.ts`, never sleeps.
 The TypeScript idle default is 20 minutes to preserve warm LSPs across subagent
 bursts; every non-idle removal path must also clear timer ownership. (#1332)
 
+**Known-slow LSP shortcuts yield to completed acquisition.** The spawn-history
+margin is strict and boundary-tested at 2x the effective wait. A known-slow
+sentinel is deferred long enough for queued completion publication, and its
+decision point re-reads live clients because `inFlight` cleanup is asynchronous.
+
 **Path-keyed Tier-3 caches normalize at both boundaries.** Widget LSP server
 roots, startup-scan context keys, and Ruby drive-root memo keys use
 `normalizeMapKey`; equivalent separator/case spellings must share one entry.
@@ -343,6 +398,13 @@ stdout from non-zero exits; process-table callers record that outcome instead
 of parsing partial output as a clean empty result. Sampler timeouts inject the
 reaper's tree-kill-and-verify hook and settle only after its fate is known.
 (#1863, #1864)
+
+**Workspace refresh walks the bounded ancestor cache chain.** A language server
+root can be a nested monorepo member while workspace diagnostics persist under
+the enclosing sweep root. `workspace/diagnostic/refresh` clears the client
+root and each ancestor through the session cwd, so a never-swept member cannot
+leave its prior workspace cache alive; it never walks above that ceiling.
+(#1707)
 
 ## Issue and PR design contract
 
@@ -1248,6 +1310,8 @@ Never write `path.join(cwd, ".pi-lens", ...)` for a project cache — it breaks 
 - `~/.pi-lens/actionable-warnings.log` — NDJSON for the actionable-warnings advisory pipeline (rotates at 1 MiB); events: `report_started`, `lsp_file_checked`, `lsp_file_skipped`, `report_complete`, `advisory_injected`, `advisory_skipped`
 - `~/.pi-lens/probe-cache.json` — tool binary path cache (TTL 24h)
 - `.pi-lens/cache/` — knip, jscpd, madge, gitleaks/govulncheck/trivy/opengrep, dead-code-`<lang>` (#127), todo-baseline, turn-end-findings, actionable-warnings, code-quality-warnings, and project-snapshot caches
+
+**Knip memo freshness (#1873).** `clients/knip-client.ts` keys successful in-memory reuse by canonical project root and `projectSeq`, then validates a bounded metadata signal for `package.json` and the resolved Knip config on every hit. The signal records mtime and size, so external changes to those files invalidate without a tree walk; two `statSync` calls replace a 10–23 second scan. Source-only external edits remain advisory stale until pi observes a write or the session resets.
 - `~/.pi-lens/dead-code.log` — NDJSON, one event per cross-file dead-code scan (#127): language, per-bucket counts, durationMs
 - `.pi-lens/cache/project-snapshot.json` / `.pi-lens/cache/project-snapshot.meta.json` — versioned seq-stamped project snapshot; preserves cached exports, project rules, startup scan/profile metadata, and reverse dependency data
 - `<project-data-dir>/change-log.jsonl` — append-only observed mutation log with project/file sequence numbers
@@ -1940,6 +2004,8 @@ Short, obvious changes may use a subject only. Non-trivial changes get a body.
 Three failures in one day forced this rule. knip died and reported "not available" for weeks, because a timing-out probe logged nothing a reader could distinguish from a missing tool. The opengrep LSP lane starved on every edit while its CLI kept finding real issues, and no record showed the lane losing the race. Five merged fixes could not be verified from telemetry at all, which is why #1432 exists. Each was found by reading code, not logs, long after it started costing us.
 
 Keep the records bounded, use the existing log conventions, and exclude zero-duration decision phases from `lastPhase` attribution.
+
+Verified workspace-root guesses for a missing tool-call attribution are benign host behavior: count them in `clients/path-attribution-telemetry.ts` and emit one `path_attribution_verified_rollup` row at session shutdown. Keep non-existent or otherwise unverified guesses as full `path_attribution_missing` records with `rawFilePath` and `guessedPath`; this uses the session-rollup shape from `clients/bus-events-logger.ts`, not the degradation ledger.
 
 ## Issue triage & labels
 

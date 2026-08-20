@@ -457,6 +457,10 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 		// turn state, no deferred work — and log it so a real incident is
 		// countable rather than silently mis-attributed.
 		const guessedPath = path.resolve(workspaceRoot, rawFilePath);
+		// Existence is not execution evidence: a same-named file can exist in
+		// the workspace while the tool ran in another cwd. Without the recorded
+		// call target and origin cwd there is no comparison to make, so retain the
+		// full record and fail closed.
 		dbg(
 			`path_attribution_missing: no recorded resolution basis for toolCallId=${toolCallId}, refusing relative path ${rawFilePath} (would have guessed ${guessedPath})`,
 		);

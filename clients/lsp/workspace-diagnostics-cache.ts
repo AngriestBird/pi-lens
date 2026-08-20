@@ -156,6 +156,39 @@ export function clearAllWorkspaceDiagnosticsCaches(): void {
 	}
 }
 
+/**
+ * Clear the client root and every ancestor up to the session workspace root.
+ * A language server may identify a nested monorepo member while the sweep
+ * stores that member's files in the enclosing workspace cache. The refresh
+ * request knows the former, so walk only the bounded ancestor chain rather
+ * than writing to unrelated filesystem roots.
+ */
+export function clearWorkspaceDiagnosticsCacheAtAndAbove(
+	cwd: string,
+	ceiling = process.cwd(),
+): void {
+	const root = path.resolve(cwd);
+	const workspaceRoot = path.resolve(ceiling);
+	clearWorkspaceDiagnosticsCache(root);
+	const relative = path.relative(workspaceRoot, root);
+	if (
+		relative.startsWith(".." + path.sep) ||
+		relative === ".." ||
+		path.isAbsolute(relative)
+	) {
+		return;
+	}
+	if (normalizeMapKey(root) === normalizeMapKey(workspaceRoot)) return;
+	let ancestor = path.dirname(root);
+	while (true) {
+		clearWorkspaceDiagnosticsCache(ancestor);
+		if (normalizeMapKey(ancestor) === normalizeMapKey(workspaceRoot)) return;
+		const parent = path.dirname(ancestor);
+		if (parent === ancestor) return;
+		ancestor = parent;
+	}
+}
+
 // #1669 (review round): per-cwd epoch, mirroring
 // `clients/review-graph/builder.ts`'s workspace-cache epoch shape — AGENTS.md's
 // canonical pattern for "a durable commit followed by an out-of-guard mirror

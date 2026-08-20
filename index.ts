@@ -81,6 +81,10 @@ import { wireDispositionBusEmitterGetter } from "./clients/disposition-publish.j
 import { wireFormatEventsBusEmitterGetter } from "./clients/format-events-publish.js";
 import { emitBusEventRollupAtSessionEnd } from "./clients/bus-events-logger.js";
 import {
+	emitVerifiedPathAttributionRollup,
+	resetVerifiedPathAttributionGuessCount,
+} from "./clients/path-attribution-telemetry.js";
+import {
 	consumeAgentNudge,
 	recordCrossProcessTouches,
 	wireAgentNudgeSubscriber,
@@ -1644,6 +1648,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 
 	pi.on("session_start", async (event, ctx) => {
 		const sessionStartMonotonicAt = performance.now();
+		resetVerifiedPathAttributionGuessCount();
 		warmDispatchAtSessionStart();
 		void warmLspService().catch((err) =>
 			logExtension({ subsystem: "lsp", level: "warn", message: `LSP warm failed: ${err}` }),
@@ -2794,6 +2799,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 		// returned before reaching here), since the rollup counters are
 		// process-wide module state a live secondary would still need.
 		emitBusEventRollupAtSessionEnd(runtime.projectRoot);
+		emitVerifiedPathAttributionRollup(runtime.projectRoot);
 		// #1123 item 4: dump active handles AFTER teardown — whatever is still
 		// alive at this point is exactly what would keep a --print/--no-session
 		// process from exiting (the #1097 lesson: what survives IS the leak).

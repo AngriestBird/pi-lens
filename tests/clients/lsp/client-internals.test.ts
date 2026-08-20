@@ -1636,9 +1636,17 @@ describe("publishDiagnostics handler — superseded push guard (cache-poisoning 
 			);
 			expect(unsettled.settledReturn).toBe(false);
 			expect(unsettled.settleSource).toBe("publication");
+			expect(unsettled).toMatchObject({
+				serverId: "typescript",
+				outcome: "published",
+			});
 			expect(pullSequenceEvents[0].durationMs).toBe(0);
 			expect(settled.settledReturn).toBe(true);
 			expect(settled.settleSource).toBe("quiet-window");
+			expect(settled).toMatchObject({
+				serverId: "typescript",
+				outcome: "settled",
+			});
 		});
 
 		it("a first-push settle's durationMs is 0 (no debounce wait), not document age", async () => {
@@ -1822,6 +1830,10 @@ describe("logTypeScriptPullSettle — pull-settle record shape (#1639)", () => {
 		// nowhere near the 90s document age.
 		expect(event.durationMs as number).toBeLessThan(1000);
 		const metadata = event.metadata as Record<string, unknown>;
+		expect(metadata).toMatchObject({
+			serverId: "typescript",
+			outcome: "settled",
+		});
 		// The document age is still recorded, honestly named, in metadata.
 		expect(metadata.elapsedSinceDidOpenMs as number).toBeGreaterThanOrEqual(
 			89_000,
@@ -2639,6 +2651,7 @@ describe("clientRequestWorkspaceDiagnostics — real report parsing", () => {
 		expect(state.connection.sendRequest).toHaveBeenCalledWith(
 			"workspace/diagnostic",
 			{ previousResultIds: [] },
+			expect.anything(),
 		);
 		expect(out).toBeDefined();
 		const byName = (name: string) =>

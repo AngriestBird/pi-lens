@@ -36,7 +36,7 @@ describe("java/csharp fallback runners", () => {
 		);
 	});
 
-	it("parses javac blocking diagnostics for the edited file", async () => {
+	it("keeps standalone javac diagnostics non-blocking", async () => {
 		const env = setupTestEnvironment("pi-lens-javac-runner-");
 		try {
 			const filePath = path.join(env.tmpDir, "src", "App.java");
@@ -55,8 +55,9 @@ describe("java/csharp fallback runners", () => {
 			);
 
 			expect(result.status).toBe("failed");
-			expect(result.semantic).toBe("blocking");
+			expect(result.semantic).toBe("warning");
 			expect(result.diagnostics[0]?.tool).toBe("javac");
+			expect(result.diagnostics[0]?.semantic).toBe("warning");
 			expect(result.diagnostics[0]?.line).toBe(7);
 		} finally {
 			env.cleanup();
@@ -131,8 +132,9 @@ describe("java/csharp fallback runners", () => {
 			} as never);
 
 			expect(result.status).toBe("failed");
-			expect(result.semantic).toBe("blocking");
+			expect(result.semantic).toBe("warning");
 			expect(result.diagnostics[0]?.tool).toBe("cpp-check");
+			expect(result.diagnostics[0]?.semantic).toBe("warning");
 		} finally {
 			env.cleanup();
 		}
