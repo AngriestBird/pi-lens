@@ -242,7 +242,15 @@ site/subject that represents one user-visible degradation, and
 `incrementDegradationCount` when every event contributes to the exact group
 count but health should retain only one updated entry per subject. Both reset
 with the ledger at the session boundary; do not add caller-local duplicate
-sets or count one blocked action at both policy gates. (#1366, #1292)
+sets or count one blocked action at both policy gates. Every accepted once
+record and admitted tally milestones also emit a `degradation_ledger` row through
+`latency.log`; the row carries the bounded kind, subject, and current count, so
+the session remains auditable when no health render reaches the transcript.
+Scanner coverage gaps and stalled notify-inflight barriers use the ledger;
+successful notify drains remain latency-only because they are not degradations.
+Durable rows use the same 20-entry per-kind admission as the summary and emit
+count increments only at powers of two, so the sink remains bounded. Each row
+also carries the ledger generation for session grouping. (#1366, #1292, #1866)
 
 ## Maintaining this file (do this on every commit)
 
