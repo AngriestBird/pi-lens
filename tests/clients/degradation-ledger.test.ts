@@ -6,6 +6,7 @@ vi.mock("../../clients/latency-logger.js", () => ({ logLatency }));
 import {
 	DEGRADATION_ENTRIES_PER_KIND,
 	DEGRADATION_MAX_DISTINCT_KINDS,
+	getDegradationLedgerGeneration,
 	getDegradationSummary,
 	incrementDegradationCount,
 	recordDegradation,
@@ -78,6 +79,7 @@ describe("session degradation ledger", () => {
 				kind: "formatter-failure",
 				subject: "prettier:a.ts",
 				count: 1,
+				ledgerGeneration: getDegradationLedgerGeneration(),
 			},
 		});
 	});
@@ -103,10 +105,49 @@ describe("session degradation ledger", () => {
 
 		expect(logLatency).toHaveBeenCalledTimes(3);
 		expect(logLatency.mock.calls.map(([row]) => row.metadata)).toEqual([
-			{ kind: "formatter-failure", subject: "prettier:a.ts", count: 1 },
-			{ kind: "lsp-diagnostics-timeout", subject: "typescript", count: 1 },
-			{ kind: "lsp-diagnostics-timeout", subject: "typescript", count: 2 },
+			{
+				kind: "formatter-failure",
+				subject: "prettier:a.ts",
+				count: 1,
+				ledgerGeneration: getDegradationLedgerGeneration(),
+			},
+			{
+				kind: "lsp-diagnostics-timeout",
+				subject: "typescript",
+				count: 1,
+				ledgerGeneration: getDegradationLedgerGeneration(),
+			},
+			{
+				kind: "lsp-diagnostics-timeout",
+				subject: "typescript",
+				count: 2,
+				ledgerGeneration: getDegradationLedgerGeneration(),
+			},
 		]);
+	});
+
+	it("bounds durable rows for repeated and distinct subjects", () => {
+		for (let i = 0; i < 100; i++) {
+			incrementDegradationCount({
+				kind: "formatter-failure",
+				subject: "same",
+				reason: "timed out",
+			});
+		}
+		expect(logLatency).toHaveBeenCalledTimes(7);
+		expect(logLatency.mock.calls.map(([row]) => row.metadata.count)).toEqual([
+			1, 2, 4, 8, 16, 32, 64,
+		]);
+
+		resetDegradationLedger();
+		for (let i = 0; i < 100; i++) {
+			recordDegradationOnce({
+				kind: "formatter-failure",
+				subject: `subject-${i}`,
+				reason: "timed out",
+			});
+		}
+		expect(logLatency).toHaveBeenCalledTimes(7 + DEGRADATION_ENTRIES_PER_KIND);
 	});
 
 	it("reset re-arms durable once-recording", () => {
@@ -121,6 +162,9 @@ describe("session degradation ledger", () => {
 
 		expect(logLatency).toHaveBeenCalledTimes(2);
 		expect(logLatency.mock.calls.map(([row]) => row.metadata.count)).toEqual([1, 1]);
+		expect(logLatency.mock.calls[0][0].metadata.ledgerGeneration).not.toBe(
+			logLatency.mock.calls[1][0].metadata.ledgerGeneration,
+		);
 	});
 
 	it("renders a health section only when degraded", () => {
