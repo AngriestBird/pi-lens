@@ -22,6 +22,22 @@ npm test
 
 Pull requests must pass `npm run lint` and `npm test`. CI also runs `npm run check:lockfile` and a production `--omit=dev` build (`npm run build:dist`), so keep `package-lock.json` in sync with `package.json`.
 
+## Local git hooks
+
+`npm install` wires Husky-managed hooks into `.git/config`'s `core.hooksPath`,
+scoped to your clone (each worktree wires its own):
+
+- **pre-commit** — changelog fragment validation (`npm run changelog:check`)
+  plus `npm run lint`. Measured around 4s on this repo.
+- **pre-push** — a build, then targeted `vitest` runs for the changed `.ts`
+  files (never the full suite; see `scripts/pre-push-targeted-tests.mjs`).
+
+Skip either with `PI_LENS_SKIP_HOOKS=1 git commit ...` / `git push ...`.
+Agents and CI set this — their commit cadence is too high for a lint pass on
+every commit, and CI runs the real gates anyway. Humans should leave hooks on;
+they catch the exact class of failure (unused vars, changelog-format
+violations) that used to slip through to CI.
+
 ## What belongs here?
 
 pi-lens is a pi extension that runs automated checks on every file write/edit. Contributions that fit are:

@@ -1,0 +1,6 @@
+if [ "$PI_LENS_SKIP_HOOKS" = "1" ]; then
+  echo "[pre-commit] skipped (PI_LENS_SKIP_HOOKS=1)."
+  exit 0
+fi
+
+npm run changelog:check && npm run lint
