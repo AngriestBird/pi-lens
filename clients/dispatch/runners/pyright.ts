@@ -127,23 +127,75 @@ const pyrightRunner: RunnerDefinition = {
 	},
 };
 
-function parsePyrightOutput(data: any, _filePath: string): Diagnostic[] {
+interface PyrightDiagnostic {
+	severity?: "error" | "warning" | "information";
+	message?: string;
+	file?: string;
+	rule?: string;
+	// #1802 fix round: pyright's `--outputjson` output does NOT have a
+	// top-level `start`. Each diagnostic carries `range: { start, end }`,
+	// and pyright's own docs (docs/command-line.md, "JSON Output") state
+	// range positions are zero-based. `range` is omitted entirely when
+	// pyright has no location to report, so it must stay optional.
+	range?: {
+		start?: { line?: number; character?: number };
+		end?: { line?: number; character?: number };
+	};
+}
+
+/**
+ * Map pyright's own severity vocabulary onto the four-tier `Diagnostic.severity`
+ * (clients/dispatch/types.ts), the same way `normalizeBiomeSeverity` does for
+ * biome-check (#1791) and `normalizeRuleSeverity` does for ast-grep-napi
+ * (#1787). Pyright names its info tier `"information"`; `"error"`/`"warning"`
+ * pass through as-is. An unrecognized value falls back to `"warning"` — the
+ * tier every pyright diagnostic reported at before this fix, so reviving the
+ * info tier never silently demotes an existing finding. Pyright has no
+ * `"hint"` tier in its own vocabulary, so that tier is unreachable here.
+ */
+export function normalizePyrightSeverity(
+	raw: PyrightDiagnostic["severity"] | undefined,
+): Diagnostic["severity"] {
+	switch (raw) {
+		case "error":
+			return "error";
+		case "information":
+			return "info";
+		// "warning" and any unrecognized value fall back below — the tier
+		// every pyright diagnostic reported at before this fix, so reviving
+		// the info tier never silently demotes an existing finding. There is
+		// no separate `case "warning"` branch: it would be redundant with
+		// this default and unprovable as its own branch.
+		default:
+			return "warning";
+	}
+}
+
+export function parsePyrightOutput(data: any, _filePath: string): Diagnostic[] {
 	const diagnostics: Diagnostic[] = [];
 
 	// Pyright JSON output has generalDiagnostics array
-	const generalDiags = data.generalDiagnostics || [];
+	const generalDiags: PyrightDiagnostic[] = data.generalDiagnostics || [];
 
 	for (const diag of generalDiags) {
 		// Skip if not for this file (pyright may output diagnostics for imports)
 		// For now, include all - caller will filter if needed
 
+		// pyright's `range.start.line`/`character` are zero-based (see the
+		// `PyrightDiagnostic` note above); `Diagnostic.line`/`column` are
+		// one-based, the same convention ast-grep-napi and taplo already
+		// convert to (`range.start.line + 1`). `range` itself is omitted when
+		// pyright has nothing to point at, so both fall back to line 1.
+		const start = diag.range?.start;
 		diagnostics.push({
-			id: `pyright-${diag.rule || diag.start?.line || "unknown"}`,
+			id: `pyright-${diag.rule || start?.line || "unknown"}`,
 			message: diag.message || "Type error",
 			filePath: diag.file || _filePath,
-			line: diag.start?.line || 0,
-			column: diag.start?.column || 0,
-			severity: diag.severity === "error" ? "error" : "warning",
+			line: (start?.line ?? 0) + 1,
+			column: (start?.character ?? 0) + 1,
+			severity: normalizePyrightSeverity(diag.severity),
+			// Blocking classification stays error-only — reviving the info tier
+			// must never widen what fails a turn.
 			semantic: diag.severity === "error" ? "blocking" : "warning",
 			tool: "pyright",
 			rule: diag.rule,
