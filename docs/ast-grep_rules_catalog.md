@@ -181,8 +181,8 @@ See [`docs/custom-rules.md`](custom-rules.md) to add your own. Rule sources: `ru
 | `no-new-wrappers-js` | error | pi-lens | Do not use 'new' with wrapper objects — use literal primitives instead |
 | `no-open-redirect-js` | error | pi-lens | Potential open redirect vulnerability — validate redirect URLs |
 | `no-prototype-builtins-js` | error | pi-lens | Use Object.hasOwn() or Object.prototype.hasOwnProperty.call() instead of calling methods directly on the object |
-| `no-reflect-apply-js` | warning | pi-lens | Reflect.apply() — use a typed call (fn.apply(...) or fn(...args)) instead |
-| `no-reflect-get-js` | warning | pi-lens | Reflect.get(obj, key) — use a typed property access (obj.prop or obj[key]) instead |
+| `no-reflect-apply-js` | error | pi-lens | Reflect.apply() — use a typed call (fn.apply(...) or fn(...args)) instead |
+| `no-reflect-get-js` | error | pi-lens | Reflect.get(obj, key) — use a typed property access (obj.prop or obj[key]) instead |
 | `no-single-promise-in-promise-methods-js` | warning | pi-lens | Promise.all/race with a single promise is unnecessary — await it directly |
 | `no-sql-in-code-js` | error | pi-lens | Raw SQL string in code — use query builder or ORM |
 | `no-throw-string-js` | error | pi-lens | Throw Error objects, not strings |
@@ -465,8 +465,8 @@ See [`docs/custom-rules.md`](custom-rules.md) to add your own. Rule sources: `ru
 | `no-prototype-builtins` | error | pi-lens | Use Object.hasOwn() or Object.prototype.hasOwnProperty.call() instead of calling methods directly on the object |
 | `no-prototype-builtins-native` | hint | pi-lens | Use Object.hasOwn() instead of hasOwnProperty() — ES2022 standard |
 | `no-raw-json-store-write` | warning | pi-lens | Use the atomic write seam for JSON stores instead of writeFileSync |
-| `no-reflect-apply` | warning | pi-lens | Reflect.apply() — use a typed call (fn.apply(...) or fn(...args)) instead |
-| `no-reflect-get` | warning | pi-lens | Reflect.get(obj, key) — use a typed property access (obj.prop or obj[key]) instead |
+| `no-reflect-apply` | error | pi-lens | Reflect.apply() — use a typed call (fn.apply(...) or fn(...args)) instead |
+| `no-reflect-get` | error | pi-lens | Reflect.get(obj, key) — use a typed property access (obj.prop or obj[key]) instead |
 | `no-relative-cross-package-import` | info | pi-lens | Avoid relative imports across package boundaries (../../). Use absolute imports (@app/..., @components/...) for better agent reasoning abou… |
 | `no-return-await` | warning | pi-lens | Unnecessary 'await' in return statement — use direct return instead |
 | `no-runtime-typeof` | hint | pi-lens | Runtime 'typeof' check — decode/parse the value at its I/O boundary, then branch on the domain value |
@@ -477,9 +477,9 @@ See [`docs/custom-rules.md`](custom-rules.md) to add your own. Rule sources: `ru
 | `no-throw-string` | error | pi-lens | Throw Error objects, not strings |
 | `no-typeof-undefined` | hint | pi-lens | Use === undefined instead of typeof x === 'undefined' |
 | `no-unimplemented-stub` | warning | pi-lens | Unimplemented stub — function was scaffolded but never completed |
-| `no-unknown-laundering` | warning | pi-lens | type alias to bare 'unknown' — give the alias real shape or inline 'unknown' at the one call site that needs it |
+| `no-unknown-laundering` | error | pi-lens | type alias to bare 'unknown' — give the alias real shape or inline 'unknown' at the one call site that needs it |
 | `no-unknown-parameters` | hint | pi-lens | Parameter typed 'unknown' — decode it at the I/O boundary instead of leaving it unparsed |
-| `no-unknown-returns` | hint | pi-lens | Function returns 'unknown' — parse the value at its boundary and return a named domain type |
+| `no-unknown-returns` | error | pi-lens | Function returns 'unknown' — parse the value at its boundary and return a named domain type |
 | `no-unnecessary-array-flat-depth` | hint | pi-lens | .flat(1) is the default depth — just use .flat() |
 | `no-unsafe-dictionary-any` | error | pi-lens | Record<K, any> — the value type gives callers no contract; use Record<K, unknown> or a real value type |
 | `no-unsafe-dictionary-unknown` | hint | pi-lens | Record<K, unknown> — every read still needs a runtime narrow; prefer a real value type where the shape is known |
