@@ -1082,7 +1082,18 @@ function summarizeDiagnostics(
 		if (diagnostic.stale) continue;
 		if (diagnostic.semantic === "blocking") blocking++;
 		if (diagnostic.severity === "error") errors++;
-		else if (diagnostic.severity === "warning") warnings++;
+		// #1777: `hint` and `info` tally alongside `warning`, matching
+		// `countDiagnostics` in `clients/widget-state.ts` — mode=all reads that
+		// tally and mode=full reads this one, so the two must agree. An exact
+		// `=== "warning"` test scored a hint-only file 0/0/0, the `withIssues`
+		// filter below then dropped it, and mode=full rendered "No issues" for a
+		// file whose own `details` still carried the diagnostic.
+		else if (
+			diagnostic.severity === "warning" ||
+			diagnostic.severity === "hint" ||
+			diagnostic.severity === "info"
+		)
+			warnings++;
 	}
 	return {
 		filePath,

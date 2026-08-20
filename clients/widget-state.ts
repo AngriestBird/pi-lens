@@ -591,7 +591,19 @@ function countDiagnostics(diags: WidgetDiagnostic[]): {
 		if (diagnostic.stale && (diagnostic.staleReason ?? "past-eof") === "past-eof")
 			continue;
 		if (diagnostic.severity === "error") errors++;
-		else if (diagnostic.severity === "warning") warnings++;
+		// #1777: `hint` and `info` tally alongside `warning`. The dispatch path
+		// now preserves all four ast-grep tiers; before, the runner collapsed
+		// them to "warning" here. An exact `=== "warning"` test would drop those
+		// findings out of the footer entirely, so a file with real findings would
+		// render clean. The footer stays a blocking/error/warning summary on
+		// purpose — the tier distinction is rendered by the code-quality-warnings
+		// advisory, not by these counters.
+		else if (
+			diagnostic.severity === "warning" ||
+			diagnostic.severity === "hint" ||
+			diagnostic.severity === "info"
+		)
+			warnings++;
 	}
 	return { blocking, errors, warnings };
 }

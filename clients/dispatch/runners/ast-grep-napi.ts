@@ -484,6 +484,33 @@ function appendDuplicateRuleDiagnostics(
 }
 
 /**
+ * The four tiers `Diagnostic.severity` accepts (clients/dispatch/types.ts).
+ * `YamlRule.severity` is a free-form string straight off disk, so an unknown
+ * or missing value must land somewhere deliberate rather than being cast.
+ */
+const DIAGNOSTIC_SEVERITY_TIERS = new Set<Diagnostic["severity"]>([
+	"error",
+	"warning",
+	"info",
+	"hint",
+]);
+
+/**
+ * Map a rule's declared YAML severity onto a `Diagnostic.severity` tier (#1777).
+ *
+ * A rule that declares nothing, or declares a value pi-lens does not model
+ * (ast-grep also accepts `off`), falls back to `warning` — the tier every such
+ * rule already reported at before #1777, so reviving hint/info never silently
+ * demotes an existing rule.
+ */
+export function normalizeRuleSeverity(
+	raw: string | undefined,
+): Diagnostic["severity"] {
+	const tier = raw as Diagnostic["severity"] | undefined;
+	return tier && DIAGNOSTIC_SEVERITY_TIERS.has(tier) ? tier : "warning";
+}
+
+/**
  * Run the shipped ast-grep YAML ruleset against a parsed file via napi's native
  * engine, applying the same suppression policy (linter/tree-sitter overlap,
  * overly-broad-pattern guard) as the per-edit runner. Extracted so the
@@ -696,7 +723,14 @@ export function evaluateAstGrepRules(
 						range(): { start: { line: number; column: number } };
 					};
 					const range = node.range();
-					const severity = rule.severity === "error" ? "error" : "warning";
+					// #1777: carry the rule's own tier through. The old collapse
+					// (`=== "error" ? "error" : "warning"`) erased hint and info,
+					// so the quiet tier the #1727 anti-slop rules ship at did not
+					// exist anywhere downstream. `Diagnostic.severity` has been
+					// 4-valued all along (clients/dispatch/types.ts). The BLOCKING
+					// gate is unchanged and deliberately narrower: only `error`
+					// blocks, so hint and info stay advisory exactly like warning.
+					const severity = normalizeRuleSeverity(rule.severity);
 					const semantic = severity === "error" ? "blocking" : "warning";
 					const defectClass = classifyDefect(
 						rule.id,
