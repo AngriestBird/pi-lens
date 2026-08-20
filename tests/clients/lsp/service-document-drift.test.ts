@@ -409,6 +409,84 @@ describe("LSPService disk-drift backstop (#1783)", () => {
 			expect(client.received).toEqual([ORIGINAL, SAME_LENGTH_EDIT]);
 		});
 
+		it("does not stamp a record when an auxiliary resync is DEFERRED", async () => {
+			// Third face of the coverage defect. The #1459 gate defers an auxiliary
+			// whose previous write is still outstanding: that server returns from
+			// the write loop EARLY, so it never reaches notifyWriteTimedOutServerIds
+			// and a gate reading only that list stamps full coverage for a view that
+			// received nothing.
+			const previousBudget = process.env.PI_LENS_LSP_NOTIFY_BUDGET_MS;
+			process.env.PI_LENS_LSP_NOTIFY_BUDGET_MS = "50";
+			try {
+				const { LSPService } = await import("../../../clients/lsp/index.js");
+				const service = new LSPService();
+				const primaryOpen = new Set<string>();
+				const auxOpen = new Set<string>();
+				const primary = makeClient(primaryOpen);
+				let wedged = false;
+				const aux = makeClient(auxOpen, {
+					onOpen: async () => {
+						if (wedged) await new Promise(() => {});
+					},
+				});
+				getServersForFileWithConfig.mockReturnValue([
+					makeServer(dir, "typescript", "primary"),
+					makeServer(dir, "opengrep", "auxiliary"),
+				]);
+				createLSPClient
+					.mockResolvedValueOnce(primary)
+					.mockResolvedValueOnce(aux)
+					.mockResolvedValue(primary);
+
+				// C1 lands on both views: a legitimate full-coverage record.
+				await service.touchFile(file, ORIGINAL, {
+					diagnostics: "none",
+					clientScope: "all",
+					source: "lsp_sync",
+				});
+				expect(service._driftTrackedCountForTests()).toBe(1);
+
+				// The auxiliary's next write never settles, so it keeps the #1459
+				// resync slot claimed.
+				wedged = true;
+				const C2 = "export const answer = 2;\n";
+				await fs.writeFile(file, C2, "utf-8");
+				await service.touchFile(file, C2, {
+					diagnostics: "none",
+					clientScope: "all",
+					source: "lsp_sync",
+				});
+
+				// With the slot occupied and no time left to queue, THIS touch's
+				// auxiliary write is deferred rather than attempted.
+				const C3 = "export const answer = 3;\nexport const three = 3;\n";
+				await fs.writeFile(file, C3, "utf-8");
+				await service.touchFile(file, C3, {
+					diagnostics: "none",
+					clientScope: "all",
+					source: "lsp_sync",
+					maxClientWaitMs: 0,
+				});
+
+				// The auxiliary still holds C1, so the record must still describe C1
+				// and the sweep must still see this file as drifted.
+				expect(aux.received).toEqual([ORIGINAL]);
+				const result = await service.sweepDocumentDrift({ force: true });
+
+				expect(result?.candidates).toBe(1);
+				// The heal cannot complete while that scanner is wedged, and it says
+				// so rather than laundering the record.
+				expect(result?.resynced).toBe(0);
+				expect(result?.failed).toBe(1);
+			} finally {
+				if (previousBudget === undefined) {
+					delete process.env.PI_LENS_LSP_NOTIFY_BUDGET_MS;
+				} else {
+					process.env.PI_LENS_LSP_NOTIFY_BUDGET_MS = previousBudget;
+				}
+			}
+		});
+
 		it("paces a 20-file bulk edit even with the wider two-server scope", async () => {
 			const { LSPService } = await import("../../../clients/lsp/index.js");
 			const service = new LSPService();

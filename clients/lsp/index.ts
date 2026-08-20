@@ -3644,11 +3644,19 @@ export class LSPService {
 			// looking. On a partial touch the PREVIOUS record is deliberately kept:
 			// its older `syncedAt` and older fingerprint keep the document eligible,
 			// so the next sweep re-pushes it at full scope instead of going blind.
+			//
+			// BOTH exit lists, not just the timed-out one. The #1459 gate defers an
+			// auxiliary whose previous write is still outstanding, and that server
+			// leaves the write loop early without ever joining
+			// `notifyWriteTimedOutServerIds`. Reading only that list let a deferred
+			// scanner's untouched view be stamped as covered — the same laundering
+			// through a different door.
 			this.recordFullyCoveredSync(
 				filePath,
 				content,
 				spawned,
-				notifyWriteTimedOutServerIds.length === 0,
+				notifyWriteTimedOutServerIds.length === 0 &&
+					notifyDeferredServerIds.length === 0,
 				startedAt,
 			);
 			if (notifyWriteTimedOutServerIds.length > 0) {
