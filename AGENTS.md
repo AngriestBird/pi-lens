@@ -17,6 +17,10 @@ smell warnings count only the current session, or a 24-hour fallback window
 when no session boundary is available; explicit health remains separately
 labeled. (#1432)
 
+Session-start lifecycle hooks must tolerate capability-shaped injected clients.
+Optional reset methods may be absent from test doubles or embedders and must not
+turn session initialization into a failure; concrete clients still reset state.
+
 Advisory caches must carry immutable capture provenance and validate it again
 at every delivery surface. A finding is current only when session/turn state
 matches and every affected file is SHA-256-confirmed (size+mtime is only the

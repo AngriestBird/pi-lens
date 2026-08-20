@@ -1951,7 +1951,10 @@ export async function handleSessionStart(
 	// written before this instant assert findings from a session that is over,
 	// so they must revalidate before they can be served as current again.
 	resetWorkspaceDiagnosticsCacheSession(sessionStartMs);
-	knipClient.resetSessionState();
+	// Some embedders inject a capability-shaped Knip client rather than the
+	// concrete KnipClient. Session reset is an optional lifecycle capability;
+	// its absence must not make session_start fail.
+	knipClient.resetSessionState?.();
 	runtime.resetForSession(sessionStartMs);
 	logLatency({
 		type: "phase",
