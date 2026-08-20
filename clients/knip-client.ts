@@ -27,6 +27,7 @@ import {
 	describeUnavailability,
 } from "./dispatch/runners/utils/availability-policy.js";
 import { spawnFailedWithNoOutput } from "./dispatch/runners/utils/spawn-outcome.js";
+import { formatToolFailure } from "./dispatch/runners/utils/tool-failure.js";
 import { findLocalBinUpwards } from "./package-manager.js";
 import { logSessionStart } from "./sessionstart-logger.js";
 
@@ -520,11 +521,19 @@ export class KnipClient {
 			// nonzero exit with nothing to parse is never a clean run, here or
 			// there.
 			if (spawnFailedWithNoOutput(result, output)) {
-				const stderr = (result.stderr || "").trim();
-				const reason =
-					`knip (${command}, source=${classifyKnipBinary(projectBinary, targetDir)})` +
-					` exited ${result.status} with empty stdout` +
-					(stderr ? `: ${stderr.split("\n")[0].slice(0, 200)}` : "");
+				// #1816: one shared wording, one truncation, signal named. The
+				// binary-source discriminator (#1721's whole point — WHICH knip
+				// ran) survives as a named field rather than as prose.
+				const reason = formatToolFailure({
+					tool: "knip",
+					status: result.status,
+					signal: result.signal,
+					stderr: result.stderr,
+					fields: {
+						command,
+						source: classifyKnipBinary(projectBinary, targetDir),
+					},
+				});
 				this.log(reason);
 				incrementDegradationCount({
 					kind: "runner-empty-result",

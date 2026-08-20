@@ -35,46 +35,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-
-type Listener = (...args: unknown[]) => void;
-
-function makeEmitterStream() {
-	const listeners: Record<string, Listener[]> = {};
-	const stream = {
-		setEncoding: vi.fn(),
-		on: vi.fn((event: string, listener: Listener) => {
-			(listeners[event] ??= []).push(listener);
-			return stream;
-		}),
-		emit(event: string, ...args: unknown[]) {
-			for (const l of listeners[event] ?? []) l(...args);
-		},
-	};
-	return stream;
-}
-
-function makeFakeChild(pid = 4242) {
-	const listeners: Record<string, Listener[]> = {};
-	const child = {
-		pid,
-		killed: false,
-		stdout: makeEmitterStream(),
-		stderr: makeEmitterStream(),
-		kill: vi.fn(() => {
-			child.killed = true;
-			return true;
-		}),
-		on: vi.fn((event: string, listener: Listener) => {
-			(listeners[event] ??= []).push(listener);
-			return child;
-		}),
-		removeListener: vi.fn(),
-		emit(event: string, ...args: unknown[]) {
-			for (const l of listeners[event] ?? []) l(...args);
-		},
-	};
-	return child;
-}
+import { makeFakeChild } from "../support/fake-child.js";
 
 const spawnMock = vi.fn();
 vi.mock("node:child_process", async (importOriginal) => {
@@ -116,7 +77,7 @@ describe("safeSpawnAsync post-exit pipe-idle wait (#1656)", () => {
 	});
 
 	it("releases promptly after exit even when close never fires (daemonized descendant)", async () => {
-		const child = makeFakeChild();
+		const child = makeFakeChild(4242);
 		spawnMock.mockReturnValue(child);
 
 		const resultPromise = safeSpawnAsync("fake-cmd", [], {
@@ -146,7 +107,7 @@ describe("safeSpawnAsync post-exit pipe-idle wait (#1656)", () => {
 	});
 
 	it("stays pending past the idle-grace window while the pipe is still actively written (bounded by the overall cap)", async () => {
-		const child = makeFakeChild();
+		const child = makeFakeChild(4242);
 		spawnMock.mockReturnValue(child);
 
 		const resultPromise = safeSpawnAsync("fake-cmd", [], {
@@ -181,7 +142,7 @@ describe("safeSpawnAsync post-exit pipe-idle wait (#1656)", () => {
 	});
 
 	it("caps the total post-exit wait so a never-quiet descendant can't extend the budget unboundedly", async () => {
-		const child = makeFakeChild();
+		const child = makeFakeChild(4242);
 		spawnMock.mockReturnValue(child);
 
 		const resultPromise = safeSpawnAsync("fake-cmd", [], {
@@ -207,7 +168,7 @@ describe("safeSpawnAsync post-exit pipe-idle wait (#1656)", () => {
 	});
 
 	it("settles right after 'close' instead of paying out the full idle-grace window when nothing holds the child's stdio open (#1673 review F2)", async () => {
-		const child = makeFakeChild();
+		const child = makeFakeChild(4242);
 		spawnMock.mockReturnValue(child);
 
 		const resultPromise = safeSpawnAsync("fake-cmd", [], {

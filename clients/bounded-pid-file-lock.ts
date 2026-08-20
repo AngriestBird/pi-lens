@@ -78,9 +78,19 @@ function quarantineOwnerIsStale(
 	owner: QuarantineLockOwner,
 	staleMs: number,
 ): boolean {
-	return Number.isInteger(owner.pid) && owner.pid > 0 &&
-		Number.isFinite(owner.createdAt) &&
-		(!ownerPidIsLive(owner.pid) || Date.now() - owner.createdAt > staleMs);
+	// #1816: the two staleness signals are INDEPENDENT, and the original
+	// conjunction made the dead-PID one unreachable. An `owner.json` with a
+	// valid PID but a missing or non-numeric `createdAt` (an older writer, a
+	// half-written file, a hand-edited one) short-circuited on the
+	// `Number.isFinite` guard, so a dead owner never reclaimed and the lock
+	// stayed poisoned for the life of the directory. This is
+	// `installer/index.ts:173`'s predicate: a dead PID reclaims regardless of
+	// `createdAt`, and an aged lock reclaims regardless of what the PID says.
+	const pidUsable = Number.isInteger(owner.pid) && owner.pid > 0;
+	if (pidUsable && !ownerPidIsLive(owner.pid)) return true;
+	return (
+		Number.isFinite(owner.createdAt) && Date.now() - owner.createdAt > staleMs
+	);
 }
 
 async function reclaimQuarantineLock(

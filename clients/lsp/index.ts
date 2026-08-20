@@ -8,6 +8,7 @@
  * - Resource cleanup
  */
 
+import { CASCADE_DIAGNOSTICS_TTL_MS } from "../cascade-types.js";
 import * as nodeFs from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -473,7 +474,6 @@ const EARLY_UNBLOCK_GRACE_MS = Math.max(
 		10,
 	) || 400,
 );
-const CASCADE_DIAGNOSTICS_TTL_MS = 240_000;
 export interface SpawnedServer {
 	client: LSPClientInfo;
 	info: LSPServerInfo;

@@ -74,6 +74,13 @@ export interface SpawnResult {
 	stdout: string;
 	stderr: string;
 	status: number | null;
+	/**
+	 * The signal that killed the child, when one did (#1816). Before this the
+	 * signal name lived only inside `error.message`, so no caller could name it
+	 * and every ledger reason rendered a SIGKILLed tool indistinguishably from
+	 * a clean exit. Absent for a normally-exited process.
+	 */
+	signal?: NodeJS.Signals;
 	error?: Error;
 	/** Typed spawn-boundary failure; nonzero tool exits do not populate it. */
 	spawnFailure?: SpawnFailureError;
@@ -1540,6 +1547,9 @@ export async function safeSpawnAsync(
 			const resourceUsage = finishResourceUsage();
 
 			const outputInfo = outputTruncated ? { outputTruncated: true } : {};
+			// #1816: surface the signal name as a field on every path where one
+			// exists, so callers can NAME it instead of scraping `error.message`.
+			const signalInfo = signal ? { signal } : {};
 			if (timedOut) {
 				const cause = new Error(
 					`Process timed out after ${timeout}ms (killed with ${signal || "SIGTERM"})`,
@@ -1550,6 +1560,7 @@ export async function safeSpawnAsync(
 					status: null,
 					error: cause,
 					failure: "timeout",
+					...signalInfo,
 					spawnFailure: new SpawnFailureError("timeout", cause.message, cause),
 					...outputInfo,
 					resourceUsage,
@@ -1562,6 +1573,7 @@ export async function safeSpawnAsync(
 					status: null,
 					error: cause,
 					failure: "aborted",
+					...signalInfo,
 					spawnFailure: new SpawnFailureError("killed", cause.message, cause),
 					...outputInfo,
 					resourceUsage,
@@ -1574,6 +1586,7 @@ export async function safeSpawnAsync(
 					status: null,
 					error: cause,
 					failure: "signal",
+					...signalInfo,
 					spawnFailure: new SpawnFailureError("killed", cause.message, cause),
 					...outputInfo,
 					resourceUsage,

@@ -26,7 +26,11 @@ import {
 	logAvailabilityDecision,
 	startHostStallSampler,
 } from "./dispatch/runners/utils/availability-policy.js";
-import { spawnFailedWithNoOutput } from "./dispatch/runners/utils/spawn-outcome.js";
+import {
+	firstOutputLine,
+	spawnFailedWithNoOutput,
+} from "./dispatch/runners/utils/spawn-outcome.js";
+import { formatToolFailure } from "./dispatch/runners/utils/tool-failure.js";
 
 // --- Types ---
 
@@ -462,7 +466,13 @@ export class PythonDeadCodeClient implements DeadCodeClient {
 			// check (result.error is already handled above, so this reduces to
 			// the `status !== 0` half).
 			if (spawnFailedWithNoOutput(result, output)) {
-				const reason = `vulture exited ${result.status} with empty stdout${stderr ? `: ${stderr.split("\n")[0]}` : " (no stderr)"}`;
+				// #1816: one shared wording, one truncation, signal named.
+				const reason = formatToolFailure({
+					tool: "vulture",
+					status: result.status,
+					signal: result.signal,
+					stderr: result.stderr,
+				});
 				this.log(reason);
 				incrementDegradationCount({
 					kind: "runner-empty-result",
@@ -471,7 +481,7 @@ export class PythonDeadCodeClient implements DeadCodeClient {
 				});
 				return {
 					...emptyResult(this.language),
-					summary: stderr ? `vulture error: ${stderr.split("\n")[0]}` : reason,
+					summary: stderr ? `vulture error: ${firstOutputLine(stderr)}` : reason,
 					durationMs,
 				};
 			}
