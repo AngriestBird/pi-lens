@@ -164,7 +164,7 @@ legitimate idiom) needs two fixtures per bound metavariable, not one:
    exclusion checks the BINDING, not just the pattern's presence somewhere
    in the file.
 
-`rule-tests/no-non-null-assertion-test.yml` is the model: alongside the
+`rules/ast-grep-rules/rule-tests/no-non-null-assertion-test.yml` is the model: alongside the
 get-after-has/pop-after-length valid cases, it fixtures a different-key
 guard, a different-map guard, and an outer-function guard that must NOT
 suppress an inner closure — each one red if the corresponding binding check
