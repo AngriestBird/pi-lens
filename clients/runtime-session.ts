@@ -8,7 +8,10 @@ import { createDeadline, yieldIfOverBudget } from "./cooperative-budget.js";
 import type { DeadCodeClient, DeadCodeResult } from "./dead-code-client.js";
 import { deadCodeIssueCount } from "./dead-code-client.js";
 import { logDeadCodeScan } from "./dead-code-logger.js";
-import { resetDegradationLedger } from "./degradation-ledger.js";
+import {
+	incrementDegradationCount,
+	resetDegradationLedger,
+} from "./degradation-ledger.js";
 import type { DependencyChecker } from "./dependency-checker.js";
 import { getDiagnosticTracker } from "./diagnostic-tracker.js";
 import { resetPsScriptAnalyzerAvailability } from "./dispatch/runners/psscriptanalyzer.js";
@@ -198,6 +201,55 @@ function snapshotSequenceBase(root: string): ProjectSequenceBase | undefined {
 	};
 }
 
+/**
+ * #1785: one bounded ledger record per timed-out sequence read, so a real
+ * occurrence is diagnosable from the ledger alone rather than only from a
+ * `dbg` line that most hosts never surface. Carries the project root and the
+ * on-disk snapshot's age/size (when one exists) — the identity AC1 asks for:
+ * which project, how stale/large the snapshot that got skipped was.
+ */
+function recordSnapshotSequenceTimeout(args: {
+	snapshotRoot: string;
+	snapshotPath: string;
+}): void {
+	let reason = "sequence read timed out; no snapshot on disk";
+	try {
+		const stat = nodeFs.statSync(args.snapshotPath);
+		reason = `sequence read timed out; snapshot age=${Math.round(Date.now() - stat.mtimeMs)}ms size=${stat.size}b`;
+	} catch {
+		// No snapshot on disk yet — the reason above already covers it.
+	}
+	incrementDegradationCount({
+		kind: "snapshot-sequence-read-timeout",
+		subject: args.snapshotRoot,
+		reason,
+	});
+}
+
+/**
+ * #1785: the synchronous freshness check made a conservative call with the
+ * `UNKNOWN_PROJECT_SEQ` sentinel (never hydrate when the real sequence is
+ * unknown). Once the deferred read resolves — a deterministic completion
+ * signal, not a sleep — this re-checks freshness against the now-known
+ * sequence and hydrates late when the snapshot really was current, instead of
+ * leaving the runtime without `cachedExports`/`projectRulesScan` for the rest
+ * of the session.
+ */
+function retroactivelyHydrateAfterDeferredSequence(args: {
+	snapshotRoot: string;
+	runtime: RuntimeCoordinator;
+	dbg: (msg: string) => void;
+}): (latestSeq: ProjectSequenceIndex) => void {
+	return (latestSeq) => {
+		const snapshot = loadProjectSnapshot(args.snapshotRoot);
+		if (!isProjectSnapshotFresh(snapshot, latestSeq.projectSeq)) return;
+		hydrateRuntimeFromProjectSnapshot(args.runtime, snapshot);
+		args.dbg(
+			`session_start: deferred sequence read confirmed snapshot freshness — hydrating cachedExports/projectRulesScan late (seq=${snapshot.seq})`,
+		);
+	};
+}
+
 function loadSnapshotBodyUnlessStale(args: {
 	root: string;
 	currentProjectSeq: number;
@@ -323,8 +375,31 @@ async function readSequenceWithBudget(args: {
 	runtime: RuntimeCoordinator;
 	sessionGeneration: number;
 	dbg: (msg: string) => void;
+	/**
+	 * #1785: the sequence read that timed out is still running in the
+	 * background (see below) and, once it lands, is the FIRST point this
+	 * session ever learns the real project sequence. Without this hook the
+	 * only thing the deferred completion did was reseed `runtime.projectSeq`
+	 * — the snapshot hydration decision made synchronously (with the
+	 * `UNKNOWN_PROJECT_SEQ` sentinel, which can never match) stood for the
+	 * rest of the session even once the real sequence proved the snapshot
+	 * WAS fresh. Called with the resolved sequence so the caller can
+	 * retroactively hydrate; skipped whenever the reseed itself is skipped
+	 * (cross-session move-on or an in-window edit already advanced
+	 * `runtime.projectSeq` — hydrating from the pre-edit snapshot over that
+	 * would silently regress the edit).
+	 */
+	onDeferredSequenceResolved?: (latestSeq: ProjectSequenceIndex) => void;
 }): Promise<{ latestSeq: ProjectSequenceIndex; timedOut: boolean }> {
-	const { snapshotRoot, base, cwd, runtime, sessionGeneration, dbg } = args;
+	const {
+		snapshotRoot,
+		base,
+		cwd,
+		runtime,
+		sessionGeneration,
+		dbg,
+		onDeferredSequenceResolved,
+	} = args;
 	const readPromise = readLatestProjectSequenceAsync(snapshotRoot, base);
 
 	let timeoutHandle: NodeJS.Timeout | undefined;
@@ -392,6 +467,7 @@ async function readSequenceWithBudget(args: {
 				dbg(
 					`session_start: deferred sequence read completed — reseeded projectSeq=${latestSeq.projectSeq} fileSeqEntries=${latestSeq.fileSeqByPath.size}`,
 				);
+				onDeferredSequenceResolved?.(latestSeq);
 			})
 			.catch((err) => {
 				dbg(`session_start: deferred sequence read failed: ${err}`);
@@ -2030,6 +2106,11 @@ export async function handleSessionStart(
 			runtime,
 			sessionGeneration: runtime.sessionGeneration,
 			dbg,
+			onDeferredSequenceResolved: retroactivelyHydrateAfterDeferredSequence({
+				snapshotRoot,
+				runtime,
+				dbg,
+			}),
 		});
 		logLatency({
 			type: "phase",
@@ -2039,6 +2120,12 @@ export async function handleSessionStart(
 			durationMs: Date.now() - sequenceReadStartedAt,
 			metadata: { entries: latestSeq.fileSeqByPath.size, timedOut },
 		});
+		if (timedOut) {
+			recordSnapshotSequenceTimeout({
+				snapshotRoot,
+				snapshotPath: getProjectSnapshotPath(snapshotRoot),
+			});
+		}
 		runtime.seedProjectSequence?.(
 			latestSeq.projectSeq,
 			latestSeq.fileSeqByPath,
@@ -2158,6 +2245,20 @@ export async function handleSessionStart(
 		durationMs: Date.now() - sequenceReadStartedAt,
 		metadata: { entries: latestSeq.fileSeqByPath.size, timedOut },
 	});
+	if (timedOut) {
+		// #1785: instrumentation only here, deliberately no
+		// `onDeferredSequenceResolved` — unlike quick mode's cold path (which
+		// does nothing when the snapshot isn't trusted), full mode's cold path
+		// actively kicks off a real rescan below to rebuild this same state.
+		// Retroactively hydrating from the on-disk snapshot once the deferred
+		// read lands could overwrite that fresher, actively-computed state with
+		// the stale disk copy — a regression, not a fix. See the PR body for the
+		// full reasoning.
+		recordSnapshotSequenceTimeout({
+			snapshotRoot,
+			snapshotPath: getProjectSnapshotPath(snapshotRoot),
+		});
+	}
 	runtime.seedProjectSequence?.(latestSeq.projectSeq, latestSeq.fileSeqByPath);
 	const effectiveSeq = runtime.projectSeq ?? latestSeq.projectSeq;
 	dbg(

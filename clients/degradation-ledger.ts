@@ -154,7 +154,18 @@ export type DegradationKind =
 	 * the binary and exit status so a stuck/corrupted runner is diagnosable
 	 * from the ledger alone.
 	 */
-	| "runner-empty-result";
+	| "runner-empty-result"
+	/**
+	 * `session_start`'s bounded change-log sequence read (#1162) blew its
+	 * budget and a project snapshot existed on disk, but the freshness gate
+	 * could not tell whether that snapshot was current (#1785). Hydration was
+	 * skipped for the synchronous startup path; the deferred read (still
+	 * running in the background) retroactively hydrates the runtime once it
+	 * lands, unless the session had already advanced by then. Subject carries
+	 * the project root so a project that repeatedly starves this read is
+	 * visible in aggregate, not just per-session.
+	 */
+	| "snapshot-sequence-read-timeout";
 
 export interface DegradationRecord {
 	kind: unknown;
