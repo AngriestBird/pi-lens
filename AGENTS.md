@@ -896,7 +896,9 @@ a *second host adapter* alongside `index.ts`. Design rationale + progress: `mcp.
   evaluation marker as its first statement before installing the guard. The
   extension then logs `host_boot`, `extension_eval`, and
   the continuity `extension_loaded` record. Primary session starts pass the host
-  hook/bootstrap timestamps into `handleSessionStart`, which records pre-handler,
+  hook/bootstrap timestamps into `handleSessionStart`, which records the
+  monotonic `host_ready_delay` beside `session_start_total` and marks delays
+  over 30s with `hostStallSuspected`; it also records pre-handler,
   runtime-reset, sequence/snapshot (with bytes/freshness/seq), total, and
   delayed warmup child phases in `latency.log`; concurrent secondaries emit only
   `concurrent_session_bind`. Keep logging fire-and-forget and preserve contiguous

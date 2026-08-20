@@ -166,6 +166,8 @@ describe("startup overhead — interactive path regression guard", () => {
 				bootstrapClientsStartedAt: firedAt,
 				bootstrapClientsDurationMs: 1,
 				sessionReason: "startup",
+				extensionLoadedAt: 100,
+				sessionStartMonotonicAt: 125,
 			});
 
 			const phases = new Map(
@@ -182,8 +184,14 @@ describe("startup overhead — interactive path regression guard", () => {
 					"session_start_sequence_read",
 					"session_start_snapshot_load",
 					"session_start_total",
+					"host_ready_delay",
 				]),
 			);
+			expect(phases.get("host_ready_delay")?.durationMs).toBe(25);
+			expect(phases.get("host_ready_delay")?.metadata).toEqual({
+				hostStallSuspected: false,
+				reason: "startup",
+			});
 			expect(phases.get("session_start_total")?.metadata).toEqual({
 				mode: "quick",
 				reason: "startup",

@@ -26,6 +26,7 @@ export const PI_LENS_LOADED_FROM: "dist" | "source" = import.meta.url.endsWith(
 	: "source";
 
 let loadMs: number | undefined;
+let loadedAtMs: number | undefined;
 
 /**
  * Record the load-complete time. Call once, as the first statement in the
@@ -35,9 +36,15 @@ let loadMs: number | undefined;
  */
 export function markPiLensLoaded(): number {
 	if (loadMs === undefined) {
-		loadMs = Math.round(performance.now());
+		loadedAtMs = performance.now();
+		loadMs = Math.round(loadedAtMs);
 	}
 	return loadMs;
+}
+
+/** Monotonic instant when pi-lens finished loading, for cross-hook spans. */
+export function getPiLensLoadedAtMs(): number | undefined {
+	return loadedAtMs;
 }
 
 /** ms from pi process start to pi-lens load-complete, or undefined if unmarked. */

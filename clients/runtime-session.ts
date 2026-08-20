@@ -113,6 +113,10 @@ interface SessionStartDeps {
 	ctxCwd?: string;
 	/** Host hook timestamp, so total includes work before this handler is entered. */
 	sessionStartFiredAt?: number;
+	/** Monotonic host hook timestamp for the extension-loaded → session_start span. */
+	sessionStartMonotonicAt?: number;
+	/** Monotonic instant when the extension finished loading. */
+	extensionLoadedAt?: number;
 	sessionReason?: string;
 	handlerEnteredAt?: number;
 	bootstrapClientsStartedAt?: number;
@@ -158,6 +162,34 @@ interface SessionStartDeps {
 }
 
 type StartupMode = "full" | "minimal" | "quick";
+
+const HOST_STALL_THRESHOLD_MS = 30_000;
+
+function logHostReadyDelay(
+	deps: SessionStartDeps,
+	cwd: string,
+): void {
+	if (
+		deps.sessionStartMonotonicAt === undefined ||
+		deps.extensionLoadedAt === undefined
+	) {
+		return;
+	}
+	const durationMs = Math.max(
+		0,
+		deps.sessionStartMonotonicAt - deps.extensionLoadedAt,
+	);
+	logLatency({
+		type: "phase",
+		filePath: cwd,
+		phase: "host_ready_delay",
+		durationMs,
+		metadata: {
+			hostStallSuspected: durationMs > HOST_STALL_THRESHOLD_MS,
+			reason: deps.sessionReason,
+		},
+	});
+}
 
 function resolveSnapshotRoot(cwd: string): string {
 	const resolvedCwd = path.resolve(cwd);
@@ -2321,6 +2353,7 @@ export async function handleSessionStart(
 			durationMs: totalDurationMs,
 			metadata: { mode: startupMode, reason: deps.sessionReason },
 		});
+		logHostReadyDelay(deps, cwd);
 		emitSmellsSessionStartLine(dbg, sessionStartMs);
 		return;
 	}
@@ -2747,6 +2780,7 @@ export async function handleSessionStart(
 		durationMs: totalDurationMs,
 		metadata: { mode: startupMode, reason: deps.sessionReason },
 	});
+	logHostReadyDelay(deps, cwd);
 	emitSmellsSessionStartLine(dbg, sessionStartMs);
 }
 

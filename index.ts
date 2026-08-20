@@ -25,6 +25,7 @@ import {
 } from "./clients/extension-mode.js";
 import * as nodeFs from "node:fs";
 import * as path from "node:path";
+import { performance } from "node:perf_hooks";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { createDefaultHostPorts, type HostPorts } from "./clients/host-ports.js";
 import { AstGrepClient } from "./clients/ast-grep-client.js";
@@ -202,6 +203,7 @@ import {
 import {
 	getPiLensEvalMs,
 	markPiLensLoaded,
+	getPiLensLoadedAtMs,
 	PI_LENS_HOST_BOOT_MS,
 	PI_LENS_LOADED_FROM,
 } from "./clients/startup-timing.js";
@@ -242,6 +244,7 @@ function resetDispatchBaselines(cwd?: string): void {
 // First executable statement: every import above has been evaluated, so the
 // full load/transpile cost has been paid. Capture it now.
 const PI_LENS_LOAD_MS = markPiLensLoaded();
+const PI_LENS_LOADED_AT_MS = getPiLensLoadedAtMs();
 const PI_LENS_EVAL_MS = getPiLensEvalMs() ?? 0;
 // Start the event-loop occupancy monitor as early as possible so startup
 // blocks are captured. Native histogram — no per-event overhead. (#192)
@@ -1639,6 +1642,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 	// --- Events ---
 
 	pi.on("session_start", async (event, ctx) => {
+		const sessionStartMonotonicAt = performance.now();
 		warmDispatchAtSessionStart();
 		void warmLspService().catch((err) =>
 			logExtension({ subsystem: "lsp", level: "warn", message: `LSP warm failed: ${err}` }),
@@ -1894,6 +1898,8 @@ function activateExtension(hostPi: ExtensionAPI) {
 			await handleSessionStart({
 				ctxCwd: ctx.cwd,
 				sessionStartFiredAt,
+				sessionStartMonotonicAt,
+				extensionLoadedAt: PI_LENS_LOADED_AT_MS,
 				sessionReason,
 				handlerEnteredAt,
 				bootstrapClientsStartedAt,
