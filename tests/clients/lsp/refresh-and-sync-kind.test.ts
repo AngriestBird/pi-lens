@@ -836,6 +836,45 @@ describe("workspace/diagnostic/refresh reaches an unregistered cwd's on-disk cac
 	});
 });
 
+describe("workspace/diagnostic/refresh reaches a never-swept monorepo cache (#1707)", () => {
+	it("clears the sweep-root cache when the client root is a nested member", async () => {
+		const workspaceRoot = fs.mkdtempSync(
+			path.join(process.cwd(), "pi-lens-refresh-1707-"),
+		);
+		const memberRoot = path.join(workspaceRoot, "packages", "member");
+		fs.mkdirSync(memberRoot, { recursive: true });
+		try {
+			const filePath = path.join(workspaceRoot, "packages", "member", "stale.ts");
+			const { saveWorkspaceDiagnosticsCache, WORKSPACE_DIAGNOSTICS_CACHE_VERSION } =
+				await import("../../../clients/lsp/workspace-diagnostics-cache.js");
+			saveWorkspaceDiagnosticsCache(workspaceRoot, {
+				version: WORKSPACE_DIAGNOSTICS_CACHE_VERSION,
+				entries: {
+					[normalizeMapKey(filePath)]: {
+						diagnostics: [{ message: "stale" } as any],
+						count: 1,
+						mtimeMs: 1,
+						scannedAt: Date.now(),
+						scopeKey: "all|",
+					},
+				},
+			});
+
+			const state = createMockState({ root: memberRoot });
+			setupIncomingHandlers(state, {});
+			const calls = vi.mocked(state.connection.onRequest).mock.calls as unknown as Array<
+				[string, (...args: unknown[]) => unknown]
+			>;
+			const handler = calls.find((c) => c[0] === "workspace/diagnostic/refresh")?.[1];
+			await handler!();
+
+			expect(Object.keys(loadWorkspaceDiagnosticsCache(workspaceRoot)?.entries ?? {})).toHaveLength(0);
+		} finally {
+			fs.rmSync(workspaceRoot, { recursive: true, force: true });
+		}
+	});
+});
+
 describe("createWorkspaceDiagnosticsCacheContext.lookup() honors a mid-sweep clear (#1669 review N4)", () => {
 	it("stops serving pre-refresh entries for the REST of an in-flight sweep, not only at persist() time", async () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-refresh-n4-"));
