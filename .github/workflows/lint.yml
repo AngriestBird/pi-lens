@@ -1,0 +1,135 @@
+name: Lint
+
+# #1844: mechanical lint batch. Four independent, cheap jobs -- each stays
+# well under a minute and needs no `npm install` (actionlint and
+# markdownlint-cli2 are self-contained; osv-scanner reads only package-lock
+# via the SBOM-less lockfile scan). Kept out of ci.yml so a lint finding
+# never blocks on -- or waits behind -- the full install/build/test lanes.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  schedule:
+    # Weekly OSV sweep for advisories published against dependencies already
+    # in the lockfile (not just ones introduced by a PR that touches it).
+    - cron: "0 6 * * 1"
+  workflow_dispatch: {}
+
+permissions: {}
+
+jobs:
+  actionlint:
+    name: actionlint
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      # Pinned release + checksum verification rather than piping a
+      # third-party install script or trusting an unpinned marketplace
+      # action (this repo dogfoods actionlint as a runner -- see
+      # clients/dispatch/runners -- so lint it with the same rigor).
+      - name: Download and verify actionlint v1.7.12 (linux_amd64)
+        run: |
+          set -eu
+          curl -sLO https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
+          echo "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  actionlint_1.7.12_linux_amd64.tar.gz" | sha256sum -c -
+          tar -xzf actionlint_1.7.12_linux_amd64.tar.gz actionlint
+
+      - name: Lint workflows
+        run: ./actionlint -color .github/workflows/*.yml
+
+  pr-title-lint:
+    name: PR title
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+        with:
+          node-version: "22"
+
+      - name: Validate PR title (conventional prefix + issue ref)
+        run: node scripts/check-pr-title.mjs
+
+  markdownlint:
+    name: markdownlint
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+        with:
+          node-version: "22"
+
+      - name: Lint markdown
+        run: npx --yes markdownlint-cli2@0.23.2
+
+  # osv-scan below only runs on a PR that touches package-lock.json (plus
+  # weekly on schedule, see the workflow-level cron). "changed_files_names"
+  # is not a real event-payload field, so the lockfile touch is detected via
+  # git diff here, in a job with no `if:` so it runs on every trigger and
+  # never skips (a skipped `needs` job would skip osv-scan too, including
+  # on schedule -- see the job comment below).
+  detect-lockfile-change:
+    name: Detect lockfile change
+    # osv-scan is scoped to pull_request (lockfile-touching) plus schedule
+    # and workflow_dispatch (full sweep) -- not every push to master.
+    if: github.event_name != 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      changed: ${{ steps.diff.outputs.changed }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        if: github.event_name == 'pull_request'
+        with:
+          persist-credentials: false
+
+      - id: diff
+        run: |
+          set -eu
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            # Non-PR triggers (schedule, workflow_dispatch) always run the
+            # full scan; the gate only applies to PRs.
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git fetch --depth=1 origin "${{ github.event.pull_request.base.sha }}"
+          if git diff --name-only "${{ github.event.pull_request.base.sha }}" HEAD -- package-lock.json | grep -qx package-lock.json; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  osv-scan:
+    name: OSV scan (advisory)
+    needs: [detect-lockfile-change]
+    if: needs.detect-lockfile-change.outputs.changed == 'true'
+    # Advisory to start (see PR body / #1844): the job runs and reports, but
+    # is not wired into required-checks branch protection yet. Promote once
+    # it's proven quiet for a few weeks.
+    permissions:
+      contents: read
+      security-events: write
+    uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable.yml@6e4298ebc4db23e847df9b2e2de2939d6f066c67 # v2.5.1
+    with:
+      scan-args: |-
+        --lockfile=./package-lock.json
