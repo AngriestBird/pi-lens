@@ -58,15 +58,16 @@ describe("anti-slop severity tiers (#1727, #1777)", () => {
 	it("every error-tier anti-slop rule runs in the CI self-scan", () => {
 		// The self-scan is what makes an `error` promotion honest: the rule is
 		// held at zero on pi-lens's own tree by CI, not by a note claiming it
-		// was clean once. `no-unsafe-dictionary-any` and `no-bare-object-param`
-		// are the two pre-existing error rules that predate that wiring; they
-		// are listed here so this assertion names the gap instead of hiding it.
+		// was clean once. #1825 wired the last two holdouts
+		// (`no-unsafe-dictionary-any`, `no-bare-object-param`) in, so this list
+		// is empty; a future error-tier rule that skips the wiring reds here
+		// instead of silently joining an unaudited gap.
 		const selfScanned = new Set(selfScanRuleIds());
 		const errorTier = ANTI_SLOP_TIERS.filter(
 			([, severity]) => severity === "error",
 		).map(([id]) => id);
 		const notWired = errorTier.filter((id) => !selfScanned.has(id));
-		expect(notWired).toEqual(["no-unsafe-dictionary-any", "no-bare-object-param"]);
+		expect(notWired).toEqual([]);
 		expect(selfScanned.has("require-safety-comment-for-as-unknown-as")).toBe(true);
 		expect(selfScanned.has("no-chained-type-assertions")).toBe(true);
 	});
