@@ -70,6 +70,7 @@
 
 import nodeFs from "node:fs";
 import { normalizeMapKey } from "../path-utils.js";
+import { createSingleFlight, type SingleFlight } from "../single-flight.js";
 
 /** Cheap content fingerprint. Same shape as the touch-debounce fingerprint. */
 export function fingerprintDocumentContent(content: string): string {
@@ -153,6 +154,9 @@ export const DRIFT_TRACK_CAP = 512;
 
 const DEFAULT_DRIFT_CHECK_INTERVAL_MS = 10_000;
 
+/** The pass is workspace-wide, so the single-flight registry needs one key. */
+const SWEEP_KEY = "open-document-drift";
+
 /** Minimum gap between two drift passes. Env-tunable; 0 disables the sweep. */
 export function driftCheckIntervalMs(): number {
 	const raw = Number(process.env.PI_LENS_LSP_DRIFT_CHECK_MS);
@@ -199,7 +203,16 @@ export class DocumentDriftTracker {
 	private readonly synced = new Map<string, SyncedDocumentRecord>();
 	private lastSweepAt = 0;
 	private cursor = 0;
-	private inFlight: Promise<DriftSweepResult> | undefined;
+	/**
+	 * At most one pass at a time (#1753's primitive). Callers fire `sweep`
+	 * without awaiting it from hot paths, so an overlapping call must JOIN the
+	 * running pass rather than double the stat load. One key: the pass is
+	 * workspace-wide, not per file. No `generation` hook — `clear()` is called
+	 * from the service reset, and a pass that settles afterwards writes into a
+	 * map the reset already emptied, so there is no successor for it to evict.
+	 */
+	private readonly flight: SingleFlight<DriftSweepResult> =
+		createSingleFlight<DriftSweepResult>();
 
 	get size(): number {
 		return this.synced.size;
@@ -243,7 +256,7 @@ export class DocumentDriftTracker {
 		this.synced.clear();
 		this.cursor = 0;
 		this.lastSweepAt = 0;
-		this.inFlight = undefined;
+		this.flight.clear();
 	}
 
 	/**
@@ -258,24 +271,22 @@ export class DocumentDriftTracker {
 		deps: DriftSweepDeps,
 		options: { force?: boolean } = {},
 	): Promise<DriftSweepResult> {
-		if (this.inFlight) return this.inFlight;
 		const now = deps.now ?? Date.now;
-		const intervalMs = driftCheckIntervalMs();
-		if (!options.force) {
-			if (intervalMs === 0) return SKIPPED;
-			if (now() - this.lastSweepAt < intervalMs) return SKIPPED;
+		// The rate limit and the empty check only decide whether to START a pass.
+		// A caller arriving mid-pass joins it instead, which is the point of the
+		// single-flight registry.
+		if (!this.flight.has(SWEEP_KEY)) {
+			const intervalMs = driftCheckIntervalMs();
+			if (!options.force) {
+				if (intervalMs === 0) return SKIPPED;
+				if (now() - this.lastSweepAt < intervalMs) return SKIPPED;
+			}
+			if (this.synced.size === 0) {
+				this.lastSweepAt = now();
+				return SKIPPED;
+			}
 		}
-		if (this.synced.size === 0) {
-			this.lastSweepAt = now();
-			return SKIPPED;
-		}
-		const run = this.runSweep(deps, now);
-		this.inFlight = run;
-		try {
-			return await run;
-		} finally {
-			this.inFlight = undefined;
-		}
+		return this.flight.run(SWEEP_KEY, () => this.runSweep(deps, now));
 	}
 
 	private async runSweep(
