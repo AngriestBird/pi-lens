@@ -13,18 +13,32 @@ export interface WardenPr {
 	mergeStateStatus: string;
 	autoMergeEnabled: boolean;
 	labels: Set<string>;
+	checksUnknown: boolean;
 	failingRequiredChecks: Array<{ name: string; url?: string }>;
+	unresolvedRequiredChecks: string[];
 }
 
 export type WardenAction =
 	| { type: "add-label"; label: string }
 	| { type: "remove-label"; label: string }
 	| { type: "comment"; body: string }
-	| { type: "update-branch" };
+	| { type: "update-branch" }
+	| { type: "note"; benign: boolean; message: string };
 
-export function fetchOpenPullRequests(fetcher: FetchFn, owner: string, name: string): Promise<WardenPr[]>;
+export interface WardenError {
+	message: string;
+	benign: boolean;
+}
+
+export interface WardenResult {
+	number: number | null;
+	url: string | null;
+	mergeStateStatus: string | null;
+	applied: string[];
+	errors: WardenError[];
+}
+
+export function fetchOpenPullRequests(fetcher: FetchFn, owner: string, name: string): Promise<{ prs: WardenPr[]; errors: string[] }>;
 export function decideActions(pr: WardenPr): WardenAction[];
 export function applyAction(fetcher: FetchFn, owner: string, repo: string, pr: WardenPr, action: WardenAction): Promise<{ ok: boolean; status: number; json(): Promise<unknown> }>;
-export function runWarden(options: { fetcher: FetchFn; owner: string; repo: string }): Promise<
-	Array<{ number: number; url: string; mergeStateStatus: string; applied: string[]; errors: string[] }>
->;
+export function runWarden(options: { fetcher: FetchFn; owner: string; repo: string }): Promise<WardenResult[]>;

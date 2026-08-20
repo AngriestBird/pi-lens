@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { applyAction, CONFLICT_LABEL, decideActions, fetchOpenPullRequests, RED_CI_LABEL, runWarden } from "../../scripts/lib/merge-train-warden.mjs";
+import { applyAction, CONFLICT_LABEL, decideActions, fetchOpenPullRequests, MAX_PAGES, RED_CI_LABEL, runWarden } from "../../scripts/lib/merge-train-warden.mjs";
 
 function pr(overrides: Record<string, unknown> = {}) {
 	return {
@@ -9,7 +9,9 @@ function pr(overrides: Record<string, unknown> = {}) {
 		mergeStateStatus: "CLEAN",
 		autoMergeEnabled: false,
 		labels: new Set<string>(),
+		checksUnknown: false,
 		failingRequiredChecks: [] as Array<{ name: string; url?: string }>,
+		unresolvedRequiredChecks: [] as string[],
 		...overrides,
 	};
 }
@@ -30,9 +32,23 @@ describe("merge-train warden decision logic (#1844)", () => {
 		expect(actions).toEqual([]);
 	});
 
-	it("removes the conflict label once the PR is clean again", () => {
+	it("removes the conflict label once the PR is confirmed clean again", () => {
 		const actions = decideActions(pr({ mergeStateStatus: "CLEAN", labels: new Set([CONFLICT_LABEL]) }));
 		expect(actions).toEqual([{ type: "remove-label", label: CONFLICT_LABEL }]);
+	});
+
+	// Review round 1, F1: GitHub reports UNKNOWN for every open PR for a few
+	// seconds after each push while it recomputes mergeability. Treating that
+	// as "clean again" would strip the label, then immediately re-add it and
+	// re-comment on the very next 10-minute tick.
+	it("takes no conflict action while mergeStateStatus is UNKNOWN, even with the label present", () => {
+		const actions = decideActions(pr({ mergeStateStatus: "UNKNOWN", labels: new Set([CONFLICT_LABEL]) }));
+		expect(actions).toEqual([]);
+	});
+
+	it("takes no conflict action while mergeStateStatus is UNKNOWN and unlabeled", () => {
+		const actions = decideActions(pr({ mergeStateStatus: "UNKNOWN" }));
+		expect(actions).toEqual([]);
 	});
 
 	it("kicks update-branch only when auto-merge is armed AND the PR is BEHIND", () => {
@@ -56,14 +72,43 @@ describe("merge-train warden decision logic (#1844)", () => {
 		expect(actions).toEqual([]);
 	});
 
-	it("removes red-ci once every required check is green again", () => {
-		const actions = decideActions(pr({ failingRequiredChecks: [], labels: new Set([RED_CI_LABEL]) }));
+	it("removes red-ci once every required check has a settled non-failure conclusion", () => {
+		const actions = decideActions(pr({ failingRequiredChecks: [], unresolvedRequiredChecks: [], labels: new Set([RED_CI_LABEL]) }));
 		expect(actions).toEqual([{ type: "remove-label", label: RED_CI_LABEL }]);
 	});
 
-	it("never proposes a merge or a push -- only label, comment, and the sanctioned update-branch kick", () => {
-		const allowed = new Set(["add-label", "remove-label", "comment", "update-branch"]);
-		for (const state of ["DIRTY", "BEHIND", "CLEAN", "BLOCKED", "UNSTABLE"]) {
+	// Review round 1, F3: a re-queued required check reports conclusion null
+	// while it reruns. Reading that as "not failing" (empty
+	// failingRequiredChecks) would flap the label off and re-comment on the
+	// next failure, once per re-run.
+	it("does not remove red-ci while a previously-failing required check is unresolved (re-queued)", () => {
+		const actions = decideActions(pr({ failingRequiredChecks: [], unresolvedRequiredChecks: ["Unit tests"], labels: new Set([RED_CI_LABEL]) }));
+		expect(actions).toEqual([]);
+	});
+
+	// Review round 1, F2: a null/absent statusCheckRollup is missing
+	// information, not evidence of a clean run. Must not silently strip an
+	// existing red-ci label; must record why so "confirmed green" and
+	// "didn't check" stay distinguishable in the run summary (an
+	// empty-vs-errored guard).
+	it("does not remove red-ci when the rollup is unknown, and records why", () => {
+		const actions = decideActions(pr({ checksUnknown: true, failingRequiredChecks: [], unresolvedRequiredChecks: [], labels: new Set([RED_CI_LABEL]) }));
+		expect(actions).toEqual([{ type: "note", benign: true, message: expect.stringContaining("statusCheckRollup missing") }]);
+	});
+
+	it("takes no red-ci action when the rollup is unknown and the PR is not labeled (nothing to protect)", () => {
+		const actions = decideActions(pr({ checksUnknown: true, failingRequiredChecks: [], unresolvedRequiredChecks: [] }));
+		expect(actions).toEqual([]);
+	});
+
+	it("still removes red-ci on a genuinely all-green rollup (checksUnknown false) -- distinct from the unknown-rollup case", () => {
+		const actions = decideActions(pr({ checksUnknown: false, failingRequiredChecks: [], unresolvedRequiredChecks: [], labels: new Set([RED_CI_LABEL]) }));
+		expect(actions).toEqual([{ type: "remove-label", label: RED_CI_LABEL }]);
+	});
+
+	it("never proposes a merge or a push -- only label, comment, note, and the sanctioned update-branch kick", () => {
+		const allowed = new Set(["add-label", "remove-label", "comment", "update-branch", "note"]);
+		for (const state of ["DIRTY", "BEHIND", "CLEAN", "BLOCKED", "UNSTABLE", "UNKNOWN"]) {
 			for (const auto of [true, false]) {
 				const actions = decideActions(pr({ mergeStateStatus: state, autoMergeEnabled: auto, failingRequiredChecks: [{ name: "Unit tests" }] }));
 				for (const action of actions) expect(allowed.has(action.type)).toBe(true);
@@ -87,59 +132,132 @@ function fakeGithub(routes: Record<string, unknown>) {
 	return { fetcher, calls };
 }
 
+function checkRun(name: string, conclusion: string | null, detailsUrl = `https://example/${name}`) {
+	return { __typename: "CheckRun", name, conclusion, detailsUrl };
+}
+
+function graphqlPage(nodes: unknown[], hasNextPage = false, endCursor: string | null = null) {
+	return { data: { repository: { pullRequests: { pageInfo: { hasNextPage, endCursor }, nodes } } } };
+}
+
+function prNode(overrides: Record<string, unknown> = {}) {
+	return {
+		number: 7,
+		url: "https://github.com/acme/repo/pull/7",
+		mergeStateStatus: "DIRTY",
+		autoMergeRequest: null,
+		labels: { nodes: [] },
+		commits: { nodes: [{ commit: { oid: "deadbeef", statusCheckRollup: { contexts: { nodes: [] } } } }] },
+		...overrides,
+	};
+}
+
 describe("merge-train warden GraphQL fetch + REST apply (#1844)", () => {
 	it("normalizes a GraphQL page into flat PR records with failing required checks", async () => {
-		const page = {
-			data: {
-				repository: {
-					pullRequests: {
-						pageInfo: { hasNextPage: false, endCursor: null },
-						nodes: [
-							{
-								number: 7,
-								url: "https://github.com/acme/repo/pull/7",
-								mergeStateStatus: "DIRTY",
-								autoMergeRequest: null,
-								labels: { nodes: [] },
-								commits: {
-									nodes: [
-										{
-											commit: {
-												oid: "deadbeef",
-												statusCheckRollup: {
-													contexts: {
-														nodes: [
-															{ __typename: "CheckRun", name: "Unit tests", conclusion: "FAILURE", detailsUrl: "https://example/run/1" },
-															{ __typename: "CheckRun", name: "Lint & type-check", conclusion: "SUCCESS", detailsUrl: "https://example/run/2" },
-														],
-													},
-												},
-											},
-										},
-									],
+		const page = graphqlPage([
+			prNode({
+				commits: {
+					nodes: [
+						{
+							commit: {
+								oid: "deadbeef",
+								statusCheckRollup: {
+									contexts: { nodes: [checkRun("Unit tests", "FAILURE", "https://example/run/1"), checkRun("Lint & type-check", "SUCCESS", "https://example/run/2")] },
 								},
 							},
-						],
-					},
+						},
+					],
 				},
-			},
-		};
+			}),
+		]);
 		const { fetcher } = fakeGithub({ "POST /graphql": page });
-		const prs = await fetchOpenPullRequests(fetcher, "acme", "repo");
+		const { prs, errors } = await fetchOpenPullRequests(fetcher, "acme", "repo");
+		expect(errors).toEqual([]);
 		expect(prs).toEqual([
 			expect.objectContaining({
 				number: 7,
 				mergeStateStatus: "DIRTY",
 				headSha: "deadbeef",
 				autoMergeEnabled: false,
+				checksUnknown: false,
 				failingRequiredChecks: [{ name: "Unit tests", url: "https://example/run/1" }],
+				unresolvedRequiredChecks: [],
 			}),
 		]);
 	});
 
+	// Review round 1, F5: the required-checks filter must actually filter.
+	// Deleting the `REQUIRED_CHECKS.includes(c.name)` guard in normalizePr
+	// (so any failing check counts, including non-required ones) must turn
+	// this test red.
+	it("ignores a failing check that is not in REQUIRED_CHECKS (e.g. SonarCloud)", async () => {
+		const page = graphqlPage([
+			prNode({
+				commits: {
+					nodes: [{ commit: { oid: "deadbeef", statusCheckRollup: { contexts: { nodes: [checkRun("SonarCloud Code Analysis", "FAILURE")] } } } }],
+				},
+			}),
+		]);
+		const { fetcher } = fakeGithub({ "POST /graphql": page });
+		const { prs } = await fetchOpenPullRequests(fetcher, "acme", "repo");
+		expect(prs[0].failingRequiredChecks).toEqual([]);
+		expect(prs[0].unresolvedRequiredChecks).toEqual(["Unit tests", "Lint & type-check"]);
+	});
+
+	it("marks a required check missing from the rollup as unresolved, not passing", async () => {
+		const page = graphqlPage([prNode({ commits: { nodes: [{ commit: { oid: "deadbeef", statusCheckRollup: { contexts: { nodes: [checkRun("Unit tests", "SUCCESS")] } } } }] } })]);
+		const { fetcher } = fakeGithub({ "POST /graphql": page });
+		const { prs } = await fetchOpenPullRequests(fetcher, "acme", "repo");
+		expect(prs[0].failingRequiredChecks).toEqual([]);
+		expect(prs[0].unresolvedRequiredChecks).toEqual(["Lint & type-check"]);
+	});
+
+	it("marks a re-queued required check (conclusion null) as unresolved", async () => {
+		const page = graphqlPage([prNode({ commits: { nodes: [{ commit: { oid: "deadbeef", statusCheckRollup: { contexts: { nodes: [checkRun("Unit tests", null)] } } } }] } })]);
+		const { fetcher } = fakeGithub({ "POST /graphql": page });
+		const { prs } = await fetchOpenPullRequests(fetcher, "acme", "repo");
+		expect(prs[0].unresolvedRequiredChecks).toContain("Unit tests");
+		expect(prs[0].failingRequiredChecks).toEqual([]);
+	});
+
+	it("flags checksUnknown when statusCheckRollup is null", async () => {
+		const page = graphqlPage([prNode({ commits: { nodes: [{ commit: { oid: "deadbeef", statusCheckRollup: null } }] } })]);
+		const { fetcher } = fakeGithub({ "POST /graphql": page });
+		const { prs } = await fetchOpenPullRequests(fetcher, "acme", "repo");
+		expect(prs[0].checksUnknown).toBe(true);
+	});
+
 	it("bails gracefully on a malformed page instead of throwing", async () => {
 		const { fetcher } = fakeGithub({ "POST /graphql": { data: { repository: { pullRequests: { nodes: "not-an-array" } } } } });
-		await expect(fetchOpenPullRequests(fetcher, "acme", "repo")).resolves.toEqual([]);
+		await expect(fetchOpenPullRequests(fetcher, "acme", "repo")).resolves.toEqual({ prs: [], errors: [] });
+	});
+
+	// Review round 1, F6: GraphQL can return partial `data` alongside
+	// `errors`. This must be skip-and-record, not an uncaught throw out of
+	// the bare top-level await in the CLI entry point.
+	it("records GraphQL errors instead of throwing, keeping any partial data collected", async () => {
+		const { fetcher } = fakeGithub({ "POST /graphql": { data: { repository: { pullRequests: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [prNode({ number: 1 })] } } }, errors: [{ message: "some field errored" }] } });
+		const { prs, errors } = await fetchOpenPullRequests(fetcher, "acme", "repo");
+		expect(prs).toHaveLength(1);
+		expect(errors[0]).toContain("some field errored");
+	});
+
+	it("records a thrown GraphQL request failure instead of propagating", async () => {
+		const fetcher = async () => {
+			throw new Error("network down");
+		};
+		const { prs, errors } = await fetchOpenPullRequests(fetcher, "acme", "repo");
+		expect(prs).toEqual([]);
+		expect(errors[0]).toContain("network down");
+	});
+
+	// Review round 1, F8: pin MAX_PAGES with a fixture that counts calls
+	// against an always-hasNextPage response, so lowering/raising the loop
+	// bound independently of the exported constant turns this red.
+	it("stops paginating at exactly MAX_PAGES calls when every page claims hasNextPage", async () => {
+		const { fetcher, calls } = fakeGithub({ "POST /graphql": graphqlPage([], true, "cursor") });
+		await fetchOpenPullRequests(fetcher, "acme", "repo");
+		expect(calls).toHaveLength(MAX_PAGES);
 	});
 
 	it("applyAction issues the exact REST call for each action type", async () => {
@@ -158,27 +276,35 @@ describe("merge-train warden GraphQL fetch + REST apply (#1844)", () => {
 	});
 
 	it("records one PR's API failure without aborting the sweep over the rest", async () => {
-		const page = {
-			data: {
-				repository: {
-					pullRequests: {
-						pageInfo: { hasNextPage: false, endCursor: null },
-						nodes: [
-							{ number: 1, url: "u1", mergeStateStatus: "DIRTY", autoMergeRequest: null, labels: { nodes: [] }, commits: { nodes: [] } },
-							{ number: 2, url: "u2", mergeStateStatus: "DIRTY", autoMergeRequest: null, labels: { nodes: [] }, commits: { nodes: [] } },
-						],
-					},
-				},
-			},
-		};
+		const page = graphqlPage([prNode({ number: 1, url: "u1" }), prNode({ number: 2, url: "u2" })]);
 		const { fetcher } = fakeGithub({
 			"POST /graphql": page,
-			"POST /repos/acme/repo/issues/1/labels": () => ({ ok: false, status: 422, json: async () => ({}) }),
+			"POST /repos/acme/repo/issues/1/labels": () => ({ ok: false, status: 500, json: async () => ({}) }),
 		});
 		const results = await runWarden({ fetcher, owner: "acme", repo: "repo" });
 		expect(results).toHaveLength(2);
-		expect(results[0].errors.length).toBeGreaterThan(0);
+		expect(results[0].errors).toEqual([{ message: expect.stringContaining("HTTP 500"), benign: false }]);
 		expect(results[1].errors).toEqual([]);
 		expect(results[1].applied).toContain(`add-label:${CONFLICT_LABEL}`);
+	});
+
+	// Review round 1, F4: a closed/deleted PR (404), a racing label add (409),
+	// or an update-branch on a fork with maintainer edits off (422) are
+	// expected noise on a 10-minute cadence -- they must be recorded but must
+	// NOT be counted as a reason for the scheduled run to exit non-zero.
+	it("classifies 404/409/422 REST failures as benign, and everything else as fatal", async () => {
+		const page = graphqlPage([prNode({ number: 1 })]);
+		const { fetcher } = fakeGithub({
+			"POST /graphql": page,
+			"POST /repos/acme/repo/issues/1/labels": () => ({ ok: false, status: 404, json: async () => ({}) }),
+		});
+		const results = await runWarden({ fetcher, owner: "acme", repo: "repo" });
+		expect(results[0].errors).toEqual([{ message: expect.stringContaining("HTTP 404"), benign: true }]);
+	});
+
+	it("records a list-level GraphQL error as its own result entry with number: null", async () => {
+		const { fetcher } = fakeGithub({ "POST /graphql": { data: null, errors: [{ message: "resource not accessible" }] } });
+		const results = await runWarden({ fetcher, owner: "acme", repo: "repo" });
+		expect(results).toEqual([{ number: null, url: null, mergeStateStatus: null, applied: [], errors: [{ message: expect.stringContaining("resource not accessible"), benign: false }] }]);
 	});
 });

@@ -18,6 +18,13 @@ on:
     - cron: "*/10 * * * *"
   workflow_dispatch: {}
 
+# A run still going at the 10-minute mark should finish, not race a fresh
+# one over the same PRs (double-comment risk); the next scheduled tick picks
+# up whatever the first run didn't reach.
+concurrency:
+  group: merge-train-warden
+  cancel-in-progress: false
+
 permissions: {}
 
 jobs:
@@ -27,7 +34,8 @@ jobs:
     permissions:
       contents: read # checkout
       pull-requests: write # label + comment on PRs, call update-branch
-      actions: read # check-run visibility on the head commit
+      actions: read # workflow-run visibility
+      checks: read # check-run conclusions on the head commit (statusCheckRollup)
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       GITHUB_REPOSITORY: ${{ github.repository }}
