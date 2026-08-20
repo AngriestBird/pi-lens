@@ -3,7 +3,11 @@ import * as path from "node:path";
 import { TERRAGRUNT_FILENAMES } from "./file-kinds.js";
 import { logLatency } from "./latency-logger.js";
 import { resolvePackagePath } from "./package-root.js";
-import { findNearestContaining, walkUpDirs } from "./path-utils.js";
+import {
+	findNearestContaining,
+	normalizeMapKey,
+	walkUpDirs,
+} from "./path-utils.js";
 import type { ProjectConventions } from "./project-conventions.js";
 import { loadProjectSnapshotWithoutWordIndex } from "./project-snapshot.js";
 
@@ -2701,10 +2705,18 @@ const COMPILED_CLASSES_DIRS = [
 	path.join("bin", "main"),
 ];
 
-export function hasJavaBuildDescriptor(cwd: string): boolean {
+export function hasJavaBuildDescriptor(cwd: string, ceiling?: string): boolean {
+	const normalizedCeiling = ceiling
+		? normalizeMapKey(path.resolve(ceiling))
+		: undefined;
 	for (const dir of walkUpDirs(cwd)) {
 		if (JAVA_BUILD_DESCRIPTORS.some((d) => fs.existsSync(path.join(dir, d))))
 			return true;
+		if (
+			normalizedCeiling &&
+			normalizeMapKey(path.resolve(dir)) === normalizedCeiling
+		)
+			break;
 	}
 	return false;
 }
