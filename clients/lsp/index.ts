@@ -3272,6 +3272,14 @@ export class LSPService {
 						: 0;
 		}
 		if (spawned.length === 0) {
+			// A bounded caller can lose the client race while the single-flight spawn
+			// it started is still progressing. Preserve that lifecycle evidence in the
+			// touch verdict instead of reclassifying an empty ready set as absence.
+			// `isSpawnInFlight` reads the spawn coordinator's own state and filters to
+			// primary candidates, so this stays coupled to the dedupe mechanism.
+			const failureKind = this.isSpawnInFlight(filePath)
+				? "spawn_in_flight_budget_elapsed"
+				: "no_clients_none_spawning";
 			logLatency({
 				type: "phase",
 				phase: "lsp_touch_file",
@@ -3284,7 +3292,7 @@ export class LSPService {
 					diagnosticsMode,
 					source,
 					maxClientWaitMs: options.maxClientWaitMs,
-					failureKind: "no_clients",
+					failureKind,
 				},
 			});
 			return;

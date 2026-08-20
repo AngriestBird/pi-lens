@@ -4,6 +4,12 @@ Coverage markers are deduped per session by normalized kind, file, and the
 normalized silent-scanner set. A changed set admits a new marker, and a marker
 is appended after primary diagnostics so both remain visible.
 
+Bounded LSP warm touches preserve the spawn coordinator's lifecycle evidence:
+an empty ready-client set reports `spawn_in_flight_budget_elapsed` while a
+matching primary single-flight spawn remains pending, and
+`no_clients_none_spawning` only when none does. Read the existing `inFlight`
+state at the touch verdict; do not add a second pending-warm latch. (#1875)
+
 Post-fix decision observability is durable and bounded: advisory delivery logs
 one `advisory_provenance_decision` per consume, classic TypeScript project
 identity logs every success/failure outcome, deferred mutation drains summarize

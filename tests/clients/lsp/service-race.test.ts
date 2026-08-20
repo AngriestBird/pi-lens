@@ -3,6 +3,7 @@ import { suspendAt } from "../interleaving-kit.js";
 
 const getServersForFileWithConfig = vi.fn();
 const createLSPClient = vi.fn();
+const logLatency = vi.fn();
 
 vi.mock("../../../clients/lsp/config.js", () => ({
 	getServersForFileWithConfig,
@@ -13,11 +14,14 @@ vi.mock("../../../clients/lsp/client.js", () => ({
 	createLSPClient,
 }));
 
+vi.mock("../../../clients/latency-logger.js", () => ({ logLatency }));
+
 describe("LSPService race hardening", () => {
 	beforeEach(() => {
 		vi.resetModules();
 		getServersForFileWithConfig.mockReset();
 		createLSPClient.mockReset();
+		logLatency.mockReset();
 		createLSPClient.mockResolvedValue({
 			isAlive: () => true,
 			shutdown: async () => {},
@@ -121,6 +125,96 @@ describe("LSPService race hardening", () => {
 		await service.shutdown();
 		expect(client.shutdown).toHaveBeenCalledTimes(1);
 		expect(internal.state.clients.size).toBe(0);
+		initialize.restore();
+	});
+
+	it("distinguishes a warm-touch budget miss while its single spawn remains in flight", async () => {
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const service = new LSPService();
+		const client = {
+			serverId: "marksman",
+			isAlive: () => true,
+			shutdown: vi.fn(async () => {}),
+			getOperationSupport: () => ({}),
+			getWorkspaceDiagnosticsSupport: () => ({
+				advertised: false,
+				mode: "push-only" as const,
+				diagnosticProviderKind: "none",
+			}),
+			getAdvertisedCommands: () => [],
+			getRawCapabilityKeys: () => [],
+			notify: { open: vi.fn().mockResolvedValue(undefined) },
+		};
+		const initialize = suspendAt(createLSPClient, async () => client);
+		const spawn = vi.fn(async () => ({
+			process: {
+				process: { killed: false },
+				stdin: {} as any,
+				stdout: {} as any,
+				stderr: {} as any,
+				pid: 1875,
+			},
+		}));
+		getServersForFileWithConfig.mockReturnValue([
+			{
+				id: "marksman",
+				name: "Marksman",
+				extensions: [".md"],
+				root: async () => "C:/repo",
+				spawn,
+			},
+		]);
+
+		const file = "C:/repo/README.md";
+		const firstRead = service.touchFile(file, "# first\n", {
+			diagnostics: "none",
+			clientScope: "primary",
+			maxClientWaitMs: 1,
+			source: "tool_call:read",
+		});
+		await initialize.admitted;
+		expect(await firstRead).toBeUndefined();
+		expect(logLatency).toHaveBeenCalledWith(
+			expect.objectContaining({
+				phase: "lsp_touch_file",
+				metadata: expect.objectContaining({
+					failureKind: "spawn_in_flight_budget_elapsed",
+				}),
+			}),
+		);
+
+		initialize.release();
+		await initialize.completed;
+		const secondRead = await service.touchFile(file, "# first\n", {
+			diagnostics: "none",
+			clientScope: "primary",
+			maxClientWaitMs: 1,
+			source: "tool_call:read",
+		});
+
+		expect(secondRead).toEqual({ diags: [] });
+		expect(spawn).toHaveBeenCalledTimes(1);
+		expect(createLSPClient).toHaveBeenCalledTimes(1);
+		expect(client.notify.open).toHaveBeenCalledTimes(1);
+
+		logLatency.mockClear();
+		getServersForFileWithConfig.mockReturnValue([]);
+		expect(
+			await service.touchFile("C:/repo/notes.unknown", "none\n", {
+				diagnostics: "none",
+				clientScope: "primary",
+				maxClientWaitMs: 1,
+				source: "tool_call:read",
+			}),
+		).toBeUndefined();
+		expect(logLatency).toHaveBeenCalledWith(
+			expect.objectContaining({
+				phase: "lsp_touch_file",
+				metadata: expect.objectContaining({
+					failureKind: "no_clients_none_spawning",
+				}),
+			}),
+		);
 		initialize.restore();
 	});
 
