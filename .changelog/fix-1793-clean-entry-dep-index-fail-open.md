@@ -2,8 +2,7 @@
 section: Fixed
 ---
 
-- **Clean workspace-diagnostics cache entries no longer replay across a
-  dependency edit on a cold session** — A clean entry recorded while a
+- **Clean workspace-diagnostics cache entries no longer replay across a dependency edit on a cold session** — A clean entry recorded while a
   reverse-dependency index was available now refuses to serve on a later
   session that has none, instead of falling back to mtime-only checking. The
   cache used to trust any clean entry's own mtime alone whenever this

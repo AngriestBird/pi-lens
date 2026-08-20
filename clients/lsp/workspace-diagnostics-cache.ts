@@ -85,21 +85,26 @@ export interface WorkspaceDiagnosticsCacheEntry {
 	 */
 	contentHash?: string;
 	/**
-	 * #1793: whether a reverse-dependency index was available (`getImports`
-	 * would have returned an array rather than `undefined`) for THIS SWEEP
-	 * when this entry was recorded. `isEntryFresh` uses this to refuse the
-	 * mtime-only fail-open path on a LATER, index-less session: an entry
+	 * #1793: whether THIS FILE specifically was covered by a reverse-deps
+	 * index (`reverseDepsIndex.imports[key] !== undefined`, NOT merely
+	 * whether some index was loaded this sweep — #1793 review F2: a whole-cwd
+	 * index can exist while this one file was never seen by the
+	 * cascade/session-start scan that built it, and a context-level signal
+	 * would wrongly credit such a file with dependency knowledge it never
+	 * had) when this entry was recorded. `isEntryFresh` uses this to refuse
+	 * the mtime-only fail-open path on a LATER, index-less session: an entry
 	 * recorded while dependency knowledge existed asserted a stronger claim
 	 * than a plain mtime check can back up, and replaying it through the
 	 * weaker check just because the CURRENT session is cold reopens the exact
 	 * gap #1786's review flagged (F4) — a project-wide dependency change
 	 * invisible for as long as the file's own bytes stay untouched. An entry
 	 * recorded while ALSO cold (`false`) never asserted more than mtime-only
-	 * could verify, so it keeps today's fail-open behavior; that residual is
-	 * real but not widened here. Always present on entries written by this
-	 * version — `undefined` marks a pre-#1793 entry and is treated the same
-	 * as `false` (fail open), so no cache-version bump was needed. Optional
-	 * for that same reason — a pre-#1793 entry on disk simply lacks it.
+	 * could verify, so it keeps today's fail-open behavior — accepted, not a
+	 * residual this field reopens (see `classifyWorkspaceDiagnosticsCacheExpiry`'s
+	 * doc comment). Always present on entries written by this version —
+	 * `undefined` marks a pre-#1793 entry and is treated the same as `false`
+	 * (fail open), so no cache-version bump was needed. Optional for that
+	 * same reason — a pre-#1793 entry on disk simply lacks it.
 	 */
 	depIndexAtScan?: boolean;
 }
@@ -293,19 +298,25 @@ export type WorkspaceDiagnosticsCacheExpiryReason = "pre-session" | "max-age";
  * So the re-touch volume this policy adds is bounded by the number of files
  * that previously REPORTED something, not by the size of the repo.
  *
- * RESIDUAL, stated rather than glossed (#1786 review F4, narrowed by #1793):
- * the clean entry's claim is only PARTLY verified. `isEntryFresh` fails OPEN
- * to mtime-only whenever `getImports` returns `undefined` — no
+ * #1786 review F4, closed by #1793: `isEntryFresh` used to fail OPEN to
+ * mtime-only whenever `getImports` returned `undefined` — no
  * reverse-dependency index this session, which is the normal state of a cold
- * session before the cascade has built one. #1793 closes the class for any
- * entry recorded WHILE a dependency index was available (`depIndexAtScan`):
- * such an entry now refuses to serve on a later, index-less session instead
- * of falling back to mtime-only. The gap survives only for an entry recorded
- * on an EQUALLY cold session (`depIndexAtScan` false/absent) — that entry
- * never asserted more than mtime-only could verify in the first place, so
- * there is no stronger claim to hold it to. That narrower residual predates
- * this policy and is not widened by it; it stays re-homed on #1782 rather
- * than being left implied by silence here.
+ * session before the cascade has built one — for EVERY clean entry,
+ * regardless of what it had asserted when it was recorded. #1793 closes that
+ * for any entry recorded WHILE a dependency index was available
+ * (`depIndexAtScan`): such an entry now refuses to serve on a later,
+ * index-less session instead of falling back to mtime-only, and the refused
+ * entry is evicted rather than left to be refused again forever (see the
+ * `lookup` doc comment on the deletion below).
+ *
+ * ACCEPTED, not residual: an entry recorded on an EQUALLY cold session
+ * (`depIndexAtScan` false/absent, including every entry on disk from before
+ * this fix) keeps the mtime-only fallback. It never asserted more than
+ * mtime-only could verify in the first place, so there is nothing stronger
+ * to hold it to — this is exactly the population #1793's acceptance
+ * criteria left alone, not a gap this policy silently reopens. A narrower,
+ * genuinely unowned gap in the per-file dependency check itself (distinct
+ * from this whole-session fail-open path) is filed as #1814.
  *
  * Pure and exported so the policy is unit-testable without a filesystem.
  */
@@ -345,20 +356,24 @@ export function classifyWorkspaceDiagnosticsCacheExpiry(
  * `clients/reverse-deps.ts`'s persisted index yet). That is a real, expected
  * state (a cold session, or a project where the cascade path hasn't run) —
  * we fail OPEN per-file to mtime-only invalidation in that case, UNLESS the
- * entry itself was recorded while a dependency index WAS available
- * (`entry.depIndexAtScan`). #1793: such an entry asserted a stronger claim
- * than mtime-only can back up, so serving it through the weaker check just
- * because THIS session happens to be cold would resurrect the exact blind
- * spot #1786's review flagged (F4) — a project-wide dependency change
- * invisible for as long as the file's own bytes stay untouched. Failing
- * closed there forces one re-touch, which also re-records the entry with
- * this session's OWN `depIndexAtScan`, so the gap self-heals rather than
- * repeating every lookup. An entry recorded on an equally cold session
- * (`depIndexAtScan` false/absent) never made that stronger claim, so it
- * keeps the mtime-only fallback — matching the same blind spot the
- * cheap-tier `project-diagnostics.json` cache already accepts today. Once a
- * reverse-deps index IS available this session, this function upgrades to
- * using it automatically — no separate cache format/version needed.
+ * entry itself was recorded while a dependency index WAS available for THIS
+ * file (`entry.depIndexAtScan` — see its doc comment for the per-file vs
+ * whole-session distinction, #1793 review F2). #1793: such an entry asserted
+ * a stronger claim than mtime-only can back up, so serving it through the
+ * weaker check just because THIS session happens to be cold would resurrect
+ * the exact blind spot #1786's review flagged (F4) — a project-wide
+ * dependency change invisible for as long as the file's own bytes stay
+ * untouched. `lookup` (the sole caller) DELETES an entry this function
+ * refuses for that reason, rather than leaving it to be refused again on
+ * every later cold sweep (#1793 review F3) — see its own doc comment for why
+ * eviction, not a stamp downgrade, bounds the repeat cost. An entry recorded
+ * on an equally cold session (`depIndexAtScan` false/absent) never made that
+ * stronger claim, so it keeps the mtime-only fallback — matching the same
+ * blind spot the cheap-tier `project-diagnostics.json` cache already accepts
+ * today; that is accepted design for #1793's acceptance criteria, not a gap
+ * this function reopens. Once a reverse-deps index IS available this
+ * session, this function upgrades to using it automatically — no separate
+ * cache format/version needed.
  *
  * #1708 sweep: the dependency check below compares a captured `scannedAt`
  * against each dependency's mtime, the same shape `findingPathFreshness`
@@ -511,14 +526,27 @@ export function createWorkspaceDiagnosticsCacheContext(
 	const reverseDepsIndex = loadReverseDependencyIndexFromSnapshot({
 		cwd: root,
 	});
-	// #1793: captured ONCE per context (a reverse-deps index is loaded for the
-	// whole cwd, not per file), so `record` can stamp every entry it writes
-	// this sweep with whether THIS session actually had dependency knowledge.
+	// #1793: whole-session availability — whether ANY reverse-deps index was
+	// loaded for this cwd at all. Used by `isEntryFresh`'s fail-open branch,
+	// which only fires when there is no index whatsoever this session
+	// (`getImports` returns `undefined` only in that case, never for a single
+	// file the index doesn't cover — see `getImports` below).
 	const depIndexAvailable = reverseDepsIndex !== null;
 	const getImports = (filePath: string): string[] | undefined => {
 		if (!reverseDepsIndex) return undefined;
 		return reverseDepsIndex.imports[cacheKeyFor(filePath)] ?? [];
 	};
+	// #1793 review F2: per-FILE knowledge, distinct from `depIndexAvailable`.
+	// A whole-cwd index can exist while a specific file is absent from its
+	// `imports` map (never seen by the cascade/session-start scan that built
+	// it) — `getImports` masks that with `?? []`, so a naive context-level
+	// stamp would mark such a file as having asserted dependency knowledge it
+	// never actually had, inflating the cold-refusal population with files
+	// whose "clean" claim was never cross-checked against dependencies in the
+	// first place. `record` stamps THIS, not `depIndexAvailable`.
+	const hasDepKnowledge = (filePath: string): boolean =>
+		reverseDepsIndex !== null &&
+		reverseDepsIndex.imports[cacheKeyFor(filePath)] !== undefined;
 	// #1095: per-sweep disk-fingerprint memo (per file+mtime) for binding verify.
 	const diskBindingCache = createDiskBindingCache();
 	let dirty = false;
@@ -613,18 +641,28 @@ export function createWorkspaceDiagnosticsCacheContext(
 				);
 				return undefined;
 			}
-			// #1793: count (bounded, drained on flush) the specific refusal
-			// shape distinct from a plain mtime/dependency miss — an entry
-			// that asserted dependency knowledge but can't be revalidated
-			// this session. Two cheap boolean reads, no extra syscall:
-			// `isEntryFresh` below still makes the actual serve/refuse call
-			// (and additionally fails closed on a real mtime drift/deleted
-			// file), so this may very rarely over-count a refusal that also
-			// had an unrelated mtime mismatch — acceptable for a diagnostic
-			// counter, and it never under-counts the case this exists to
-			// surface: this session cannot revalidate what the entry claims.
+			// #1793: an entry that asserted dependency knowledge this session
+			// can't revalidate is DELETED, not merely refused — mirroring the
+			// #1782 age gate just above. Refusing without deleting (the
+			// review's F3 finding) would leave the same stale entry to be
+			// refused again on every LATER cold sweep too, and both
+			// `record()` call sites (`index.ts`, `tools/lsp-diagnostics.ts`)
+			// skip recording an unconfirmed (`timedOut`/`error`) touch — so a
+			// file whose forced re-touch happens to time out would pay that
+			// timeout budget on EVERY sweep forever, whereas pre-fix it
+			// served instantly. Deleting bounds the repeat cost to exactly
+			// what a file that was NEVER cached already costs: one re-touch
+			// attempt per sweep until a CONFIRMED result lands — a real,
+			// accepted, pre-existing cost class, not a new one. The first
+			// confirmed re-touch (this session or a later one) re-records the
+			// file stamped against THAT session's own dependency knowledge,
+			// healing it either way. Two cheap boolean reads, no extra
+			// syscall, checked before the (pricier) mtime/dependency gate.
 			if (entry.depIndexAtScan === true && !depIndexAvailable) {
+				delete entries[key];
+				dirty = true;
 				depIndexColdRefusalCount += 1;
+				return undefined;
 			}
 			if (!isEntryFresh(filePath, entry, getImports)) return undefined;
 			return {
@@ -646,10 +684,12 @@ export function createWorkspaceDiagnosticsCacheContext(
 				mtimeMs,
 				scannedAt: Date.now(),
 				scopeKey,
-				// #1793: stamp whether THIS sweep actually had a
-				// reverse-deps index, so a later cold session can refuse to
-				// revalidate this entry via the weaker mtime-only path.
-				depIndexAtScan: depIndexAvailable,
+				// #1793: stamp whether THIS FILE actually had dependency
+				// knowledge this sweep (not just whether SOME index was
+				// loaded — see `hasDepKnowledge`'s doc comment), so a later
+				// cold session can refuse to revalidate this entry via the
+				// weaker mtime-only path only when that refusal is warranted.
+				depIndexAtScan: hasDepKnowledge(filePath),
 				...(contentHash !== undefined && { contentHash }),
 			};
 			dirty = true;

@@ -373,27 +373,55 @@ describe("WorkspaceDiagnosticsCacheContext (#671)", () => {
 // `isEntryFresh` refuse to serve such an entry via the weaker check just
 // because the CURRENT session happens to be cold.
 describe("dependency-index availability persisted on the entry (#1793)", () => {
-	function seedProjectSnapshotWithReverseDeps(cwd: string): void {
-		// Any project snapshot with either `reverseDeps` or a file `imports`
-		// array makes `loadReverseDependencyIndexFromSnapshot` resolve non-null
-		// (see `buildReverseDependencyIndexFromSnapshot`) — the on-disk shape a
-		// warm session (cascade/session-start has already run) leaves behind.
+	// A snapshot with `files[key].imports` defined makes
+	// `loadReverseDependencyIndexFromSnapshot` resolve non-null AND puts THIS
+	// key into `index.imports` (see `buildReverseDependencyIndexFromSnapshot`)
+	// — the file is actually covered by the index, not merely "an index of
+	// some kind exists this session".
+	function seedProjectSnapshotCoveringFile(cwd: string, filePath: string): void {
+		const key = cacheKeyFor(filePath);
 		saveProjectSnapshot(cwd, {
 			version: PROJECT_SNAPSHOT_VERSION,
 			projectRoot: cwd,
 			generatedAt: new Date().toISOString(),
 			seq: 1,
-			files: {},
+			files: { [key]: { path: key, mtimeMs: 0, size: 0, imports: [], lastSeq: 0 } },
 			symbols: {},
-			reverseDeps: { "/some/other/file.ts": ["/some/importer.ts"] },
+			reverseDeps: {},
 			cachedExports: [],
 		});
 	}
 
-	it("record() stamps depIndexAtScan=true when a reverse-deps index is available this session", () => {
+	// #1793 review F2: an index exists this session (some OTHER file is
+	// covered), but NOT for the file under test — the out-of-snapshot shape
+	// the review flagged. `getImports` masks this with `?? []`, so a
+	// context-level ("was ANY index loaded") stamp would wrongly claim
+	// dependency knowledge for a file the index never actually saw.
+	function seedProjectSnapshotNotCoveringFile(cwd: string): void {
+		saveProjectSnapshot(cwd, {
+			version: PROJECT_SNAPSHOT_VERSION,
+			projectRoot: cwd,
+			generatedAt: new Date().toISOString(),
+			seq: 1,
+			files: {
+				"/some/other/file.ts": {
+					path: "/some/other/file.ts",
+					mtimeMs: 0,
+					size: 0,
+					imports: [],
+					lastSeq: 0,
+				},
+			},
+			symbols: {},
+			reverseDeps: {},
+			cachedExports: [],
+		});
+	}
+
+	it("record() stamps depIndexAtScan=true when THIS FILE is covered by the reverse-deps index", () => {
 		const filePath = path.join(tmp, "a.ts");
 		fs.writeFileSync(filePath, "const a = 1;\n");
-		seedProjectSnapshotWithReverseDeps(tmp);
+		seedProjectSnapshotCoveringFile(tmp, filePath);
 
 		const ctx = createWorkspaceDiagnosticsCacheContext(tmp);
 		ctx.record(filePath, "all|", [], fs.statSync(filePath).mtimeMs);
@@ -402,6 +430,24 @@ describe("dependency-index availability persisted on the entry (#1793)", () => {
 		const persisted = loadWorkspaceDiagnosticsCache(tmp);
 		expect(persisted?.entries[cacheKeyFor(filePath)]?.depIndexAtScan).toBe(
 			true,
+		);
+	});
+
+	// Red on the context-level-stamp version of the fix (#1793 review F2): a
+	// whole-cwd index existing does NOT mean this specific file's clean claim
+	// was ever cross-checked against dependencies.
+	it("record() stamps depIndexAtScan=false when an index exists but does not cover this file", () => {
+		const filePath = path.join(tmp, "a.ts");
+		fs.writeFileSync(filePath, "const a = 1;\n");
+		seedProjectSnapshotNotCoveringFile(tmp);
+
+		const ctx = createWorkspaceDiagnosticsCacheContext(tmp);
+		ctx.record(filePath, "all|", [], fs.statSync(filePath).mtimeMs);
+		ctx.persist();
+
+		const persisted = loadWorkspaceDiagnosticsCache(tmp);
+		expect(persisted?.entries[cacheKeyFor(filePath)]?.depIndexAtScan).toBe(
+			false,
 		);
 	});
 
@@ -514,6 +560,90 @@ describe("dependency-index availability persisted on the entry (#1793)", () => {
 		expect(records[0].metadata.depIndexColdRefusals).toBe(1);
 		vi.doUnmock("../../../clients/latency-logger.js");
 		vi.resetModules();
+	});
+
+	// #1793 review F3 (Probe D shape): both `record()` call sites
+	// (`clients/lsp/index.ts`, `tools/lsp-diagnostics.ts`) skip recording an
+	// UNCONFIRMED (timed-out/errored) touch result. A refusal that only
+	// REFUSES without evicting the entry would leave that same stale,
+	// depIndexAtScan:true entry sitting in the persisted cache forever, to be
+	// refused (and its file force-re-touched) again on every later cold
+	// sweep — paying the touch's timeout budget every single time, when
+	// pre-fix it served instantly. Simulates that exact caller behavior: look
+	// up (refused), then persist WITHOUT ever calling `record()` for the file
+	// (the caller's `continue` on `timedOut`/`error`).
+	it("deletes a cold-refused entry so an UNCONFIRMED forced re-touch does not leave it to be refused forever", () => {
+		const filePath = path.join(tmp, "clean.ts");
+		fs.writeFileSync(filePath, "export const a = 1;\n");
+		const mtimeMs = fs.statSync(filePath).mtimeMs;
+		saveWorkspaceDiagnosticsCache(tmp, {
+			version: WORKSPACE_DIAGNOSTICS_CACHE_VERSION,
+			entries: {
+				[cacheKeyFor(filePath)]: {
+					diagnostics: [],
+					count: 0,
+					mtimeMs,
+					scannedAt: Date.now(),
+					scopeKey: "all|",
+					depIndexAtScan: true,
+				},
+			},
+		});
+
+		const first = createWorkspaceDiagnosticsCacheContext(tmp);
+		expect(first.lookup(filePath, "all|")).toBeUndefined();
+		// The caller's forced re-touch "times out": it never calls record()
+		// for this file, exactly like the `continue` on `result.timedOut` in
+		// both real call sites.
+		first.persist();
+
+		const persisted = loadWorkspaceDiagnosticsCache(tmp);
+		expect(
+			persisted?.entries[cacheKeyFor(filePath)],
+		).toBeUndefined();
+
+		// A second, later cold sweep sees a plain cache miss (genuinely
+		// uncached), not a refusal — same one-touch-per-sweep cost an
+		// always-uncached file already pays, not a compounding cost.
+		const second = createWorkspaceDiagnosticsCacheContext(tmp);
+		expect(second.lookup(filePath, "all|")).toBeUndefined();
+	});
+
+	it("heals once a re-touch DOES confirm, even under the same cold session", () => {
+		const filePath = path.join(tmp, "clean.ts");
+		fs.writeFileSync(filePath, "export const a = 1;\n");
+		const mtimeMs = fs.statSync(filePath).mtimeMs;
+		saveWorkspaceDiagnosticsCache(tmp, {
+			version: WORKSPACE_DIAGNOSTICS_CACHE_VERSION,
+			entries: {
+				[cacheKeyFor(filePath)]: {
+					diagnostics: [],
+					count: 0,
+					mtimeMs,
+					scannedAt: Date.now(),
+					scopeKey: "all|",
+					depIndexAtScan: true,
+				},
+			},
+		});
+
+		const ctx = createWorkspaceDiagnosticsCacheContext(tmp);
+		expect(ctx.lookup(filePath, "all|")).toBeUndefined();
+		// This time the forced re-touch DOES confirm — the caller calls
+		// record() with a fresh result, same as a successful touchFile.
+		ctx.record(filePath, "all|", [], mtimeMs);
+		ctx.persist();
+
+		const persisted = loadWorkspaceDiagnosticsCache(tmp);
+		// Re-recorded under THIS (still cold) session's own knowledge: false,
+		// not the stale true it replaced — so the next lookup fails open to
+		// mtime-only again instead of refusing, and serves instantly.
+		expect(persisted?.entries[cacheKeyFor(filePath)]?.depIndexAtScan).toBe(
+			false,
+		);
+		expect(
+			createWorkspaceDiagnosticsCacheContext(tmp).lookup(filePath, "all|"),
+		).toBeDefined();
 	});
 });
 
