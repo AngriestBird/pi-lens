@@ -21,6 +21,7 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
+import { quoteForWindowsCmd } from "./with-test-lock.mjs";
 
 function readStdin() {
 	try {
@@ -102,8 +103,18 @@ function selectTargetedTests(changed, allTests) {
 	return [...selected];
 }
 
-function runInherit(command, args) {
-	execFileSync(command, args, { stdio: "inherit", shell: process.platform === "win32" });
+// Windows CreateProcess can't exec .cmd shims (npm) directly, so those need
+// `shell: true`; a real executable (node.exe) never does. Passing a separate
+// `args` array alongside `shell: true` is deprecated (DEP0190) because Node
+// just space-joins argv without quoting, so a shimmed command gets one
+// CRT-quoted string instead — mirrors scripts/with-test-lock.mjs's own
+// runCommand fallback.
+function runInherit(command, args, { needsShimShell = false } = {}) {
+	if (needsShimShell && process.platform === "win32") {
+		execFileSync([command, ...args].map(quoteForWindowsCmd).join(" "), { stdio: "inherit", shell: true });
+	} else {
+		execFileSync(command, args, { stdio: "inherit", shell: false });
+	}
 }
 
 function main() {
@@ -111,7 +122,7 @@ function main() {
 	const changed = changedTsFiles(range);
 
 	console.log("[pre-push] building...");
-	runInherit("npm", ["run", "build"]);
+	runInherit("npm", ["run", "build"], { needsShimShell: true });
 
 	if (changed === null || changed.length === 0) {
 		console.log("[pre-push] no TypeScript changes to target; build-only pass complete.");
