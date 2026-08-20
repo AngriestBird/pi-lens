@@ -219,9 +219,13 @@ describe("session_start snapshot meta-gate (#947)", () => {
 			expect(snapshotLoadRecord()).toMatchObject({
 				fresh: false,
 				skippedStale: true,
+				reason: "stale-meta-gate",
 			});
 			expect(dbgLog).toContainEqual(
 				expect.stringContaining("project_snapshot: meta gate stale"),
+			);
+			expect(dbgLog).toContainEqual(
+				"project_snapshot: miss reason=stale-meta-gate",
 			);
 		} finally {
 			env.cleanup();
