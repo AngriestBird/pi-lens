@@ -8,6 +8,7 @@
 
 import * as path from "node:path";
 import { incrementDegradationCount } from "../../degradation-ledger.js";
+import { mapWithConcurrency } from "../../dependency-checker.js";
 import { safeSpawnAsync } from "../../safe-spawn.js";
 import {
 	biomeConfigArgs,
@@ -164,30 +165,6 @@ const BIOME_NO_FIX_PATTERN = /^-\s*No fix available\.\s*$/m;
 const EXPLAIN_CONCURRENCY = 4;
 
 /**
- * Runs `mapper` over `items` with at most `concurrency` in flight at once.
- * Same shape as `mapWithConcurrency` in clients/dependency-checker.ts:237-252
- * — kept as a small local copy rather than an import, since that helper is
- * module-private there and this is the only other call site today.
- */
-async function runWithConcurrency<T>(
-	items: T[],
-	concurrency: number,
-	mapper: (item: T) => Promise<void>,
-): Promise<void> {
-	if (items.length === 0) return;
-	let nextIndex = 0;
-	const workerCount = Math.max(1, Math.min(concurrency, items.length));
-	const worker = async (): Promise<void> => {
-		while (true) {
-			const index = nextIndex++;
-			if (index >= items.length) return;
-			await mapper(items[index]);
-		}
-	};
-	await Promise.all(Array.from({ length: workerCount }, () => worker()));
-}
-
-/**
  * Resolves each rule referenced by `categories` to its fix kind via
  * `biome explain <rule>` — the one place biome's shipped CLI states
  * fixability as structured text (`- Fix: safe|unsafe`, or `- No fix
@@ -219,14 +196,14 @@ export async function resolveBiomeFixKinds(
 	for (const ruleName of ruleNames) {
 		const cacheKey = `${cmd}::${ruleName}`;
 		const cached = biomeFixKindCache.get(cacheKey);
-		if (cached !== undefined) {
-			resolved.set(ruleName, cached);
-		} else {
+		if (cached === undefined) {
 			toResolve.push(ruleName);
+		} else {
+			resolved.set(ruleName, cached);
 		}
 	}
 
-	await runWithConcurrency(toResolve, EXPLAIN_CONCURRENCY, async (ruleName) => {
+	await mapWithConcurrency(toResolve, EXPLAIN_CONCURRENCY, async (ruleName) => {
 		const cacheKey = `${cmd}::${ruleName}`;
 
 		const spawned = await safeSpawnAsync(cmd, ["explain", ruleName], {
