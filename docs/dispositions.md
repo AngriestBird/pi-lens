@@ -83,6 +83,11 @@ never be cleared. Expect to call `lens_diagnostic_mark` twice — once per
 `tool` — when `lens_diagnostics` shows the same line flagged under both
 `gitleaks` and `trivy`.
 
+The 🔴 STOP line's own bracket names which scanners still hold the finding —
+`[gitleaks + trivy]` before either mark, narrowing to `[trivy]` after the
+gitleaks copy clears — so a shrinking bracket, not a vanished blocker, is the
+signal that one copy remains.
+
 ## Telemetry
 
 Every mark (including in-memory `defer`) is appended as NDJSON to

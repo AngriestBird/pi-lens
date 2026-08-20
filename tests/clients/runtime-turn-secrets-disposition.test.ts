@@ -360,3 +360,84 @@ describe("turn_end secrets gate honors dispositions on the STALE arm for trivy s
 		}
 	});
 });
+
+// #1694 fix-round finding F1: the sweep paragraph's original claim — that
+// govulncheck's disposition filter was "already covered by existing
+// govulncheck disposition tests" — was wrong. `govFiltered` filters ONE
+// combined `[...govGate.live, ...govGate.stale]` array (a different shape
+// from the gitleaks/trivy-secrets two-arm split above, but the same defect:
+// a real filter with no regression test). The reviewer proved it live:
+// neutering `govFiltered.kept` back to the raw concatenated array
+// (`clients/runtime-turn.ts:1306`) left 353 tests across 16 files green.
+// This mirrors that exact mutant as the red proof.
+describe("turn_end govulncheck advisory honors dispositions (#1694 F1)", () => {
+	it("re-reports a govulncheck CVE as an advisory when unmarked, then drops it once marked false-positive", async () => {
+		const env = setupTestEnvironment("pi-lens-turnend-govulncheck-");
+		try {
+			const cwd = env.tmpDir;
+			const filePath = path.join(cwd, "main.go");
+			const content = "package main\n\nfunc main() {}\n";
+			fs.writeFileSync(filePath, content);
+
+			const cacheManager = new CacheManager(false);
+			cacheManager.addModifiedRange(filePath, { start: 1, end: 1 }, false, cwd);
+			cacheManager.writeCache(
+				"govulncheck",
+				{
+					success: true,
+					scannedAt: new Date().toISOString(),
+					findings: [
+						{
+							osv: "GO-2024-1234",
+							module: "example.com/vuln",
+							packageName: "example.com/vuln/pkg",
+							fixedVersion: "1.2.3",
+							summary: "test vulnerability",
+							trace: [{ filename: filePath, line: 1 }],
+						},
+					],
+				},
+				cwd,
+			);
+
+			// Baseline: unmarked finding IS an advisory.
+			const runtimeBefore = new RuntimeCoordinator();
+			await handleTurnEnd(makeTurnEndDeps(runtimeBefore, cacheManager, cwd));
+			const before = consumeTurnEndFindings(cacheManager, cwd);
+			const beforeContent = before?.messages[0]?.content ?? "";
+			expect(beforeContent).toContain("GO-2024-1234");
+			expect(beforeContent).toContain("govulncheck");
+
+			// Mark it false-positive using the SAME identity
+			// `govulncheckFindingToProjectDiagnostic` derives (tool="govulncheck",
+			// rule="govulncheck:<osv>") — what an agent would have gotten from
+			// lens_diagnostics and fed straight into lens_diagnostic_mark.
+			markDisposition(
+				cwd,
+				{
+					cwd,
+					filePath,
+					tool: "govulncheck",
+					rule: "govulncheck:GO-2024-1234",
+					message: "Vulnerability GO-2024-1234: test vulnerability (fixed in 1.2.3)",
+					line: 1,
+					content,
+				},
+				"false-positive",
+			);
+
+			cacheManager.addModifiedRange(filePath, { start: 1, end: 1 }, false, cwd);
+			const runtimeAfter = new RuntimeCoordinator();
+			await handleTurnEnd(makeTurnEndDeps(runtimeAfter, cacheManager, cwd));
+			const after = consumeTurnEndFindings(cacheManager, cwd);
+			const afterContent = after?.messages[0]?.content ?? "";
+			expect(afterContent).not.toContain("GO-2024-1234");
+			// #1616 suppressed-bucket rule: the drop must stay visible as a trace,
+			// with per-lane attribution (#1625 review round F4).
+			expect(afterContent).toContain("suppressed by disposition");
+			expect(afterContent).toContain("govulncheck 1");
+		} finally {
+			env.cleanup();
+		}
+	});
+});
