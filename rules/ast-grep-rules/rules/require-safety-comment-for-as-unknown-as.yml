@@ -95,6 +95,19 @@ note: |
   `static`/private-`#name` class fields all parse to the same
   `public_field_definition` kind, so one entry covers all of them.
 
+  2026-08-20 (#1852 review, F1): the same defect shape one more time —
+  an enum member's initializer cast (`enum Foo { A = (x as unknown as
+  T).y }`) has no recognized ancestor either. The member's own kind is
+  `enum_assignment` (probed the same way: `ast-grep scan --rule` against
+  a real `enum`/`const enum`/`export enum` snippet rather than guessing
+  from the export/field precedent). One `enum_assignment` kind entry
+  covers plain, `const`, and `export` enums alike, the same way
+  `public_field_definition` covered every class-field modifier —
+  `enum_assignment` is the member-list node itself, unaffected by
+  keywords on the enclosing `enum_declaration`. `declare enum` members
+  have no initializer expression to cast, so there is nothing to probe
+  there.
+
   Matched pair with `no-chained-type-assertions.yml`. As of 2026-08-20
   the two PARTITION the assertion space instead of overlapping: this
   rule owns `x as unknown as T` (with the `SAFETY:` escape valve); that
@@ -147,6 +160,7 @@ rule:
             - kind: return_statement
             - kind: export_statement
             - kind: public_field_definition
+            - kind: enum_assignment
           follows:
             kind: comment
             regex: 'SAFETY\s*:'
