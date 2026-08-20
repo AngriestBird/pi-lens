@@ -40,7 +40,7 @@ import { logLatency } from "./latency-logger.js";
 import { runLogCleanup } from "./log-cleanup.js";
 import type { LSPShutdownOptions } from "./lsp/client.js";
 import { initLSPConfig, loadLSPConfig } from "./lsp/config.js";
-import { resetWorkspaceDiagnosticsCacheSession } from "./lsp/workspace-diagnostics-cache.js";
+import { resetWorkspaceDiagnosticsCacheSession } from "./lsp/workspace-diagnostics-session.js";
 import { loadLspService } from "./lsp-lazy.js";
 import type { MetricsClient } from "./metrics-client.js";
 import type { OpengrepClient, OpengrepResult } from "./opengrep-client.js";

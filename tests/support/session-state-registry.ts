@@ -75,7 +75,7 @@ import {
 import {
 	resetWorkspaceDiagnosticsCacheSession,
 	workspaceDiagnosticsCacheSessionStart,
-} from "../../clients/lsp/workspace-diagnostics-cache.js";
+} from "../../clients/lsp/workspace-diagnostics-session.js";
 import { removeTempDirSync } from "../clients/test-utils.js";
 
 /**
@@ -467,7 +467,7 @@ export const SESSION_STATE_REGISTRY: SessionStateEntry[] = [
 	},
 	{
 		id: "lsp-workspace-diagnostics-cache:sessionClock",
-		module: "lsp/workspace-diagnostics-cache.ts",
+		module: "lsp/workspace-diagnostics-session.ts",
 		state: "_sessionStartedAt",
 		policy: "session_start",
 		resetName: "resetWorkspaceDiagnosticsCacheSession",

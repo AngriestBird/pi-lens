@@ -31,7 +31,6 @@ import {
 	buildScopeKey,
 	cacheKeyFor,
 	loadWorkspaceDiagnosticsCache,
-	resetWorkspaceDiagnosticsCacheSession,
 } from "../../../clients/lsp/workspace-diagnostics-cache.js";
 import {
 	clearWidgetState,
@@ -39,6 +38,7 @@ import {
 	reconcileScanDiagnostics,
 } from "../../../clients/widget-state.js";
 import { convertLspDiagnostics } from "../../../clients/dispatch/utils/lsp-diagnostics.js";
+import { resetWorkspaceDiagnosticsCacheSession } from "../../../clients/lsp/workspace-diagnostics-session.js";
 import { removeTempDirSync } from "../test-utils.js";
 
 const getServersForFileWithConfig = vi.fn();
@@ -98,7 +98,10 @@ describe("a clean re-answer evicts a cache-served entry (#1782 defect C)", () =>
 		const cacheModule = await import(
 			"../../../clients/lsp/workspace-diagnostics-cache.js"
 		);
-		cacheModule.resetWorkspaceDiagnosticsCacheSession(Date.now() - 60 * 60_000);
+		const sessionModule = await import(
+			"../../../clients/lsp/workspace-diagnostics-session.js"
+		);
+		sessionModule.resetWorkspaceDiagnosticsCacheSession(Date.now() - 60 * 60_000);
 		cacheModule.saveWorkspaceDiagnosticsCache(tmp, {
 			version: cacheModule.WORKSPACE_DIAGNOSTICS_CACHE_VERSION,
 			entries: {
@@ -268,5 +271,164 @@ describe("a clean re-answer evicts a cache-served entry (#1782 defect C)", () =>
 
 		const entry = loadWorkspaceDiagnosticsCache(tmp)?.entries[cacheKeyFor(ghost)];
 		expect(entry?.diagnostics?.[0]?.code).toBe(2339);
+	});
+});
+
+/**
+ * #1786 review F2: the report builder (`clients/lsp/client.ts`) pushes one
+ * output entry per report ITEM with no dedup, so a server that names the same
+ * URI twice produces two entries for one file. The harvest must not let a ZERO
+ * entry win just because a duplicate exists, and must never emit two results
+ * for one file.
+ *
+ * #1786 review F3: the `reanswerFor` membership filter is load-bearing — a
+ * clean report entry for a file that is neither asked about nor served from
+ * cache must not enter the sweep's results at all.
+ */
+describe("duplicate and unrelated report entries (#1786 review F2/F3)", () => {
+	let tmp: string;
+	let ghost: string;
+	let other: string;
+	let stranger: string;
+
+	beforeEach(() => {
+		vi.resetModules();
+		clearWidgetState();
+		getServersForFileWithConfig.mockReset();
+		createLSPClient.mockReset();
+		tmp = fs.mkdtempSync(path.join(os.tmpdir(), "wsd-dup-report-"));
+		fs.mkdirSync(path.join(tmp, ".pi-lens"));
+		process.env.PI_LENS_LSP_WORKSPACE_PULL = "1";
+		ghost = path.join(tmp, "ghost.ts");
+		other = path.join(tmp, "other.ts");
+		// Outside the swept tree, so the sweep never asks about it and it is not
+		// in the cache either.
+		stranger = path.join(tmp, ".pi-lens", "stranger.ts");
+		fs.writeFileSync(ghost, "export const a = 1;\n");
+		fs.writeFileSync(other, "export const b = 2;\n");
+		fs.writeFileSync(stranger, "export const c = 3;\n");
+	});
+
+	afterEach(() => {
+		delete process.env.PI_LENS_LSP_WORKSPACE_PULL;
+		removeTempDirSync(tmp);
+		clearWidgetState();
+		resetWorkspaceDiagnosticsCacheSession();
+	});
+
+	async function seed() {
+		const cacheModule = await import(
+			"../../../clients/lsp/workspace-diagnostics-cache.js"
+		);
+		const sessionModule = await import(
+			"../../../clients/lsp/workspace-diagnostics-session.js"
+		);
+		sessionModule.resetWorkspaceDiagnosticsCacheSession(Date.now() - 60 * 60_000);
+		cacheModule.saveWorkspaceDiagnosticsCache(tmp, {
+			version: cacheModule.WORKSPACE_DIAGNOSTICS_CACHE_VERSION,
+			entries: {
+				[cacheModule.cacheKeyFor(ghost)]: {
+					diagnostics: [ghostDiagnostic()],
+					count: 1,
+					mtimeMs: fs.statSync(ghost).mtimeMs,
+					scannedAt: Date.now() - 60_000,
+					scopeKey: SWEEP_SCOPE,
+				},
+			},
+		});
+	}
+
+	function mockReport(report: Array<{ filePath: string; diagnostics: unknown[] }>) {
+		const tsServer = {
+			id: "typescript",
+			name: "typescript",
+			extensions: [".ts"],
+			root: async () => tmp,
+			spawn: vi.fn(async () => ({ process: {}, source: "test" })),
+		};
+		getServersForFileWithConfig.mockImplementation((fp: string) =>
+			fp.endsWith(".ts") ? [tsServer] : [],
+		);
+		createLSPClient.mockResolvedValue({
+			isAlive: () => true,
+			shutdown: async () => {},
+			serverId: "typescript",
+			root: tmp,
+			getWorkspaceDiagnosticsSupport: () => ({
+				advertised: true,
+				mode: "pull" as const,
+				workspaceDiagnostics: true,
+				diagnosticProviderKind: "object",
+			}),
+			getOperationSupport: () => ({}),
+			notify: { open: vi.fn(async () => {}) },
+			requestWorkspaceDiagnostics: vi.fn(async () => report),
+			waitForDiagnostics: vi.fn().mockResolvedValue(undefined),
+			getDiagnostics: vi.fn(() => []),
+		});
+	}
+
+	it("does not evict when the same file also carries a findings entry (findings first)", async () => {
+		await seed();
+		mockReport([
+			{ filePath: other, diagnostics: [] },
+			{ filePath: ghost, diagnostics: [ghostDiagnostic()] },
+			{ filePath: ghost, diagnostics: [] },
+		]);
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		await new LSPService().runWorkspaceDiagnostics(tmp);
+
+		const entry = loadWorkspaceDiagnosticsCache(tmp)?.entries[cacheKeyFor(ghost)];
+		expect(entry?.diagnostics ?? []).toHaveLength(1);
+	});
+
+	it("does not evict when the same file also carries a findings entry (zero first)", async () => {
+		await seed();
+		mockReport([
+			{ filePath: other, diagnostics: [] },
+			{ filePath: ghost, diagnostics: [] },
+			{ filePath: ghost, diagnostics: [ghostDiagnostic()] },
+		]);
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		await new LSPService().runWorkspaceDiagnostics(tmp);
+
+		const entry = loadWorkspaceDiagnosticsCache(tmp)?.entries[cacheKeyFor(ghost)];
+		expect(entry?.diagnostics ?? []).toHaveLength(1);
+	});
+
+	it("emits exactly one result for a file named twice, both times clean", async () => {
+		await seed();
+		mockReport([
+			{ filePath: other, diagnostics: [] },
+			{ filePath: ghost, diagnostics: [] },
+			{ filePath: ghost, diagnostics: [] },
+		]);
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const results = await new LSPService().runWorkspaceDiagnostics(tmp);
+
+		const forGhost = results.filter(
+			(r) => cacheKeyFor(r.filePath) === cacheKeyFor(ghost),
+		);
+		expect(forGhost).toHaveLength(1);
+		expect(forGhost[0]?.count).toBe(0);
+	});
+
+	it("ignores a clean entry for a file that is neither asked about nor cache-served (F3)", async () => {
+		await seed();
+		mockReport([
+			{ filePath: other, diagnostics: [] },
+			{ filePath: ghost, diagnostics: [] },
+			{ filePath: stranger, diagnostics: [] },
+		]);
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const results = await new LSPService().runWorkspaceDiagnostics(tmp);
+
+		expect(
+			results.some((r) => cacheKeyFor(r.filePath) === cacheKeyFor(stranger)),
+		).toBe(false);
+		// The cache must not gain an entry for it either.
+		expect(
+			loadWorkspaceDiagnosticsCache(tmp)?.entries[cacheKeyFor(stranger)],
+		).toBeUndefined();
 	});
 });

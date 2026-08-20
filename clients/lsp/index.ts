@@ -7337,9 +7337,12 @@ export class LSPService {
 				Math.max(perFileMs, workspacePullBudgetMs()),
 			);
 			if (!report) return undefined;
+			// Last-wins per file: the report builder does not dedup, so a server
+			// naming the same URI twice appears twice in `report` (#1786 review F2).
 			const byPath = new Map<
 				string,
 				{
+					filePath: string;
 					diagnostics: import("./client.js").LSPDiagnostic[];
 					contentHash?: string;
 				}
@@ -7367,13 +7370,33 @@ export class LSPService {
 			// #1782: harvest explicit clean answers for files this group never asked
 			// about but the caller is serving from cache. Same confirmed status as
 			// the mapping above — it is the same report.
+			//
+			// #1786 review F2: iterate `byPath`, not `report`. The report BUILDER
+			// (`clients/lsp/client.ts`'s `requestWorkspaceDiagnostics`) pushes one
+			// output entry per report item with no dedup, so a server that names the
+			// same URI twice yields two entries for one file. Walking the raw list
+			// would emit two results for one file — breaking the caller's
+			// one-result-per-file invariant — and would let a zero-diagnostic
+			// duplicate evict a cached blocker that the SAME report also reports as
+			// still failing. `byPath` is last-wins and unique per file, and
+			// `withFindings` refuses eviction whenever ANY entry for that file
+			// reports findings, whatever the order. Refusing costs a stale entry one
+			// more sweep; evicting on a contradicted answer discards a live blocker.
 			const extraClean: LSPWorkspaceDiagnosticResult[] = [];
 			if (reanswerFor && reanswerFor.size > 0) {
 				const asked = new Set(groupFiles.map((f) => normalizeMapKey(f)));
+				const withFindings = new Set<string>();
 				for (const entry of report) {
-					const key = normalizeMapKey(entry.filePath);
+					if (entry.diagnostics.length > 0) {
+						withFindings.add(normalizeMapKey(entry.filePath));
+					}
+				}
+				for (const [key, entry] of byPath) {
+					// The membership filter is load-bearing: a report names files far
+					// beyond this sweep, and a file nobody asked about and nothing is
+					// replaying has no business entering the sweep's results.
 					if (asked.has(key) || !reanswerFor.has(key)) continue;
-					if (entry.diagnostics.length > 0) continue;
+					if (entry.diagnostics.length > 0 || withFindings.has(key)) continue;
 					extraClean.push({
 						filePath: entry.filePath,
 						diagnostics: [],

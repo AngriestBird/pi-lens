@@ -26,14 +26,16 @@ import {
 	classifyWorkspaceDiagnosticsCacheExpiry,
 	createWorkspaceDiagnosticsCacheContext,
 	loadWorkspaceDiagnosticsCache,
-	resetWorkspaceDiagnosticsCacheSession,
 	saveWorkspaceDiagnosticsCache,
-	workspaceDiagnosticsCacheSessionStart,
 	WORKSPACE_DIAGNOSTICS_CACHE_VERSION,
 	WORKSPACE_DIAGNOSTICS_FINDING_MAX_AGE_MS,
 	type WorkspaceDiagnosticsCacheEntry,
 } from "../../../clients/lsp/workspace-diagnostics-cache.js";
 import type { LSPDiagnostic } from "../../../clients/lsp/client.js";
+import {
+	resetWorkspaceDiagnosticsCacheSession,
+	workspaceDiagnosticsCacheSessionStart,
+} from "../../../clients/lsp/workspace-diagnostics-session.js";
 import { removeTempDirSync } from "../test-utils.js";
 
 const SCOPE = "all|";
@@ -235,8 +237,11 @@ describe("expiry observability (#1782 AC4)", () => {
 		const cacheModule = await import(
 			"../../../clients/lsp/workspace-diagnostics-cache.js"
 		);
+		const sessionModule = await import(
+			"../../../clients/lsp/workspace-diagnostics-session.js"
+		);
 		const start = Date.now();
-		cacheModule.resetWorkspaceDiagnosticsCacheSession(start);
+		sessionModule.resetWorkspaceDiagnosticsCacheSession(start);
 
 		const older = path.join(tmp, "older.ts");
 		const newer = path.join(tmp, "newer.ts");
@@ -333,8 +338,11 @@ describe("runWorkspaceDiagnostics honors the expiry bound end to end (#1782 AC3)
 		const cacheModule = await import(
 			"../../../clients/lsp/workspace-diagnostics-cache.js"
 		);
+		const sessionModule = await import(
+			"../../../clients/lsp/workspace-diagnostics-session.js"
+		);
 		const start = Date.now();
-		cacheModule.resetWorkspaceDiagnosticsCacheSession(start);
+		sessionModule.resetWorkspaceDiagnosticsCacheSession(start);
 		cacheModule.saveWorkspaceDiagnosticsCache(tmpSweep, {
 			version: cacheModule.WORKSPACE_DIAGNOSTICS_CACHE_VERSION,
 			entries: {

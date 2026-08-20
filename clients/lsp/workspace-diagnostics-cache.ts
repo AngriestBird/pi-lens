@@ -8,6 +8,7 @@ import { normalizeMapKey } from "../path-utils.js";
 import { loadReverseDependencyIndexFromSnapshot } from "../reverse-deps.js";
 import { MTIME_DRIFT_TOLERANCE_MS } from "../blocker-freshness.js";
 import { logLatency } from "../latency-logger.js";
+import { workspaceDiagnosticsCacheSessionStart } from "./workspace-diagnostics-session.js";
 import type { LSPDiagnostic } from "./client.js";
 import {
 	createDiskBindingCache,
@@ -241,31 +242,6 @@ export function clearWorkspaceDiagnosticsCache(cwd: string): void {
 // ---------------------------------------------------------------------------
 
 /**
- * #1782: the session clock this cache measures entry age against.
- *
- * Defaults to module-import time so the very first sweep in a cold extension
- * host already treats every entry written by a PREVIOUS process as
- * pre-session (fail-closed). `resetWorkspaceDiagnosticsCacheSession` re-arms
- * it from `handleSessionStart`, because a pi extension host survives
- * `session_start` and a process-lifetime value would pin the first session's
- * clock for the life of the process (AGENTS.md's session-signal-vs-latch
- * screen). Registered in `tests/support/session-state-registry.ts`.
- */
-let _sessionStartedAt = Date.now();
-
-/** Re-arm the session clock. Called by `handleSessionStart`. */
-export function resetWorkspaceDiagnosticsCacheSession(
-	startedAt: number = Date.now(),
-): void {
-	_sessionStartedAt = startedAt;
-}
-
-/** Test/probe accessor for the current session clock. */
-export function workspaceDiagnosticsCacheSessionStart(): number {
-	return _sessionStartedAt;
-}
-
-/**
  * Ceiling on how long a finding-bearing entry may keep serving INSIDE one
  * session. The session bound alone leaves a multi-day session replaying hour-one
  * findings forever; four hours is short enough that a stale blocker cannot
@@ -290,15 +266,24 @@ export type WorkspaceDiagnosticsCacheExpiryReason = "pre-session" | "max-age";
  *   (#1640) were still rendered as fresh `blocking` rows 28 hours and one
  *   session later, because no newer pull ever re-answered those files and
  *   nothing expired them.
- * - A clean entry makes only a NEGATIVE claim, and its whole content is "the
- *   file and its dependencies are unchanged" — precisely what `isEntryFresh`'s
- *   mtime + dependency gates and the #1095 content binding already verify.
- *   Expiring clean entries too would force a full re-touch of every swept file
- *   on the first sweep of every session, which is the exact cost #671 built
- *   this cache to avoid, for no gain in honesty.
+ * - A clean entry makes only a NEGATIVE claim: "the file and its dependencies
+ *   are unchanged". Expiring clean entries too would force a full re-touch of
+ *   every swept file on the first sweep of every session, which is the exact
+ *   cost #671 built this cache to avoid, while the harm it would prevent is a
+ *   missing finding rather than a fabricated blocker.
  *
  * So the re-touch volume this policy adds is bounded by the number of files
  * that previously REPORTED something, not by the size of the repo.
+ *
+ * RESIDUAL, stated rather than glossed (#1786 review F4): the clean entry's
+ * claim is only PARTLY verified. `isEntryFresh` fails OPEN to mtime-only
+ * whenever `getImports` returns `undefined` — no reverse-dependency index this
+ * session, which is the normal state of a cold session before the cascade has
+ * built one. In that state a clean entry of any age serves on its own mtime
+ * alone, with no dependency check, so a project-wide change that flips a file
+ * from clean to failing without touching its bytes stays invisible for as long
+ * as the file is untouched. That gap predates this policy and is not widened by
+ * it; it is re-homed on #1782 rather than being left implied by silence here.
  *
  * Pure and exported so the policy is unit-testable without a filesystem.
  */
@@ -499,15 +484,20 @@ export function createWorkspaceDiagnosticsCacheContext(
 	// a sweep that ages out 400 ghosts emits a single line carrying the count,
 	// the oldest age, and the per-reason split. Flushed from `persist()`, the
 	// end-of-sweep hook both call sites already run.
+	//
+	// #1786 review F6: the counters DRAIN on flush rather than hiding behind a
+	// once-only latch. A latch is correct only while every call site persists
+	// exactly once; draining stays correct when one does not, and it still emits
+	// nothing on a repeat `persist()` with no new expiries, because the count is
+	// back to zero. Bounded either way: one record per batch of expiries, never
+	// one per entry.
 	let expiredCount = 0;
 	let oldestExpiredAgeMs = 0;
 	const expiredByReason: Record<WorkspaceDiagnosticsCacheExpiryReason, number> =
 		{ "pre-session": 0, "max-age": 0 };
-	let expiryReported = false;
 
 	const flushExpiryTelemetry = (): void => {
-		if (expiryReported || expiredCount === 0) return;
-		expiryReported = true;
+		if (expiredCount === 0) return;
 		logLatency({
 			type: "phase",
 			phase: "lsp_workspace_diagnostics_cache_expiry",
@@ -518,10 +508,14 @@ export function createWorkspaceDiagnosticsCacheContext(
 				oldestExpiredAgeMs,
 				preSession: expiredByReason["pre-session"],
 				maxAge: expiredByReason["max-age"],
-				sessionStartedAt: _sessionStartedAt,
+				sessionStartedAt: workspaceDiagnosticsCacheSessionStart(),
 				maxAgeMs: WORKSPACE_DIAGNOSTICS_FINDING_MAX_AGE_MS,
 			},
 		});
+		expiredCount = 0;
+		oldestExpiredAgeMs = 0;
+		expiredByReason["pre-session"] = 0;
+		expiredByReason["max-age"] = 0;
 	};
 
 	return {
@@ -556,7 +550,7 @@ export function createWorkspaceDiagnosticsCacheContext(
 			const expiry = classifyWorkspaceDiagnosticsCacheExpiry(
 				entry,
 				now,
-				_sessionStartedAt,
+				workspaceDiagnosticsCacheSessionStart(),
 			);
 			if (expiry) {
 				delete entries[key];
