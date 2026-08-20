@@ -33,13 +33,21 @@ rule:
 utils:
   duplicate-field:
     matches: is-class-members
+    not:
+      # Anchored on the member's own text (which starts at its first
+      # modifier keyword), not on the single nearest-preceding-sibling
+      # token. `follows: pattern: $$ACCESS` only ever binds the LAST
+      # modifier before the name — for `static async foo() {}` that is
+      # "async", so a `not: regex: static` check nested under that
+      # follows clause never sees "static" and the escape valve never
+      # fires (#1806 audit: 3 FP hits, static factory + same-named
+      # instance method both flagged as duplicates).
+      regex: '^static\b'
     has:
       matches: member-name
       any:
         - follows:
             pattern: $$ACCESS
-            not:
-              regex: static
           not:
             regex: constructor
         - not:
@@ -51,6 +59,17 @@ utils:
     matches: member-name
     follows:
       pattern: $$ACCESS
+    not:
+      # Same fix as duplicate-field, applied to the accessor-pairing
+      # branch: `follows: pattern: $$ACCESS` only binds the NEAREST
+      # preceding modifier token. `static async open() {}` and a plain
+      # `async open() {}` both have "async" as that nearest token, so
+      # without this guard the two look identical to this branch and a
+      # static factory gets paired with its same-named instance method
+      # as a false "duplicate accessor" (#1806 audit).
+      inside:
+        matches: is-class-members
+        regex: '^static\b'
   is-class-members:
     any:
       - kind: method_definition

@@ -2,9 +2,19 @@ id: no-compile-call
 valid:
   - "tree = ast.parse(static_source)"
   - "import ast; ast.literal_eval(data)"
+  - "code = compile('print(1)', '<static>', 'exec')"
+  - "code = compile(ast.parse(source), '<cell>', 'exec')"
+  - |
+    def f(source):
+        module = ast.parse(source, "<cell>", "exec")
+        return compile(module, "<cell>", "exec")
+  - |
+    def f(source):
+        module = ast.parse(source, "<cell>", "exec")
+        body_module = ast.Module(body=module.body[:-1], type_ignores=[])
+        return compile(body_module, "<cell>", "exec")
 invalid:
   - "code = compile(user_input, '<user>', 'exec')"
   - "obj = compile(request.body, '<user>', 'exec')"
   - "code = compile(data + suffix, '<user>', 'exec')"
   - "code = compile(get_source(), '<user>', 'exec')"
-  - "code = compile('print(1)', '<static>', 'exec')"

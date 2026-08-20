@@ -9,14 +9,21 @@ note: |
   network interface, including public ones. Production servers
   should bind to a specific interface or use a reverse proxy.
 
-  Matches any `call` node whose text contains `host=` followed
-  by `0.0.0.0` (within a few characters). Note: `0.0.0.0` in
-  `app.run()` (Flask dev server) is also flagged — for
+  Matches a `.run(...)` / `.listen(...)` / `.serve(...)` call (the
+  server-startup call targets, e.g. `app.run(...)`,
+  `uvicorn.run(...)`, `server.listen(...)`) whose arguments contain
+  `host=` followed by `0.0.0.0` (within a few characters). Note:
+  `0.0.0.0` in `app.run()` (Flask dev server) is also flagged — for
   development, prefer `127.0.0.1`.
 
-  Style: regex on the call node's text. The pattern doesn't
-  anchor at start (the call has the function name first, e.g.
-  `app.run(`); the regex matches anywhere in the call text.
+  Previously the free-text `host…0.0.0.0` regex was checked against
+  ANY `call` node, not just server-startup calls. Any call that
+  happened to have a `host`-named keyword argument set to `"0.0.0.0"`
+  nearby in its text matched too — e.g. a pydantic
+  `Settings.model_construct(gh_proxy_bind_host='0.0.0.0', ...)` test
+  fixture, which constructs a config object and never binds a socket
+  (#1806 audit: 1 confirmed unrelated hit). Anchoring to the call
+  target's method name removes that class of false positive.
 
   The regex uses `.{0,5}` between `host` and `0.0.0.0` to
   accept either `host='0.0.0.0'` (single quote) or
@@ -24,5 +31,10 @@ note: |
 metadata:
   sonar: S8392
 rule:
-  kind: call
-  regex: 'host.{0,5}0\.0\.0\.0'
+  any:
+    - pattern: $SERVER.run($$$ARGS)
+    - pattern: $SERVER.listen($$$ARGS)
+    - pattern: $SERVER.serve($$$ARGS)
+  has:
+    stopBy: end
+    regex: 'host.{0,5}0\.0\.0\.0'

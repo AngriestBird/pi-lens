@@ -9,12 +9,40 @@ note: |
   `compile(source, ...)` with non-literal source compiles arbitrary code
   that may be executed later. If `source` is user-controlled, this is
   a code injection vulnerability.
-  Pattern: matches any compile(...) call. The fixture validates whether
-  the source is a static string vs dynamic — for the lint, we warn on
-  every compile() (safe static compiles are rare and easy to refactor
-  to a module-level constant).
+
+  Static/trusted source is suppressed (the rule's original ship still
+  described this design in prose but the shipped pattern matched every
+  compile() call unconditionally — #1806 audit: 3 FP hits, all in an
+  eval runner's `ast.parse` → `compile` pipeline). A source is trusted
+  when it is:
+    - a string literal (`compile('print(1)', ...)`);
+    - the direct result of an `ast.<method>(...)` call
+      (`compile(ast.parse(source), ...)`); or
+    - a variable assigned from `ast.<method>(...)` earlier in the same
+      function (`module = ast.parse(source); compile(module, ...)`).
+  The third case covers the common "parse once, compile the tree"
+  idiom (including intermediate `ast.Module`/`ast.Expression`
+  reconstructions built from an already-parsed tree) without full
+  dataflow analysis — it is a same-function, same-name reaching-def
+  heuristic, not a cross-function or cross-file one. Anything else
+  (a bare identifier with no such assignment, string concatenation, a
+  call to something other than `ast.*`) is still flagged.
 rule:
-  pattern: compile($$$ARGS)
+  pattern: compile($SRC, $$$REST)
+constraints:
+  SRC:
+    not:
+      any:
+        - kind: string
+        - pattern: ast.$METHOD($$$A)
+        - all:
+            - kind: identifier
+            - inside:
+                stopBy: end
+                kind: function_definition
+                has:
+                  stopBy: end
+                  pattern: $SRC = ast.$METHOD($$$A)
 has_fix: false
 tags:
   - python
