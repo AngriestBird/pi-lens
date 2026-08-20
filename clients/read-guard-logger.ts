@@ -218,7 +218,7 @@ export interface ReadGuardLogEntry {
 	metadata?: Record<string, unknown>;
 }
 
-function shouldLogEvent(event: string): boolean {
+export function shouldLogEvent(event: string): boolean {
 	if (VERBOSE_READ_GUARD_LOG) return true;
 	if (event === "edit_allowed") return LOG_ALLOWED_EDITS;
 	if (event === "range_snapshot_validation") return LOG_SNAPSHOT_VALIDATION;
@@ -238,7 +238,12 @@ function shouldLogEvent(event: string): boolean {
 		event === "edit_post_edit_pipeline_failed" ||
 		event === "edit_batch_summary" ||
 		event === "edit_batch_summary_overflow" ||
-		event === "touched_lines_missing"
+		event === "touched_lines_missing" ||
+		// #1913: read-guard record-cap evictions are rare by construction (only
+		// READ_GUARD_MAX_RECORDS_PER_FILE overflow triggers one), so this trim
+		// record bypasses the per-read verbosity gate — a live eviction
+		// regression must be visible without PI_LENS_READ_GUARD_VERBOSE=1.
+		event === "read_cap_trimmed"
 	);
 }
 
