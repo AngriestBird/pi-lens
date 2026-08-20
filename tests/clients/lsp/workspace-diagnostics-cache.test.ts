@@ -29,6 +29,10 @@ import {
 } from "../../../clients/lsp/workspace-diagnostics-cache.js";
 import { MTIME_DRIFT_TOLERANCE_MS } from "../../../clients/blocker-freshness.js";
 import { hashDiagnosticContent } from "../../../clients/lsp/diagnostic-binding.js";
+import {
+	PROJECT_SNAPSHOT_VERSION,
+	saveProjectSnapshot,
+} from "../../../clients/project-snapshot.js";
 import { removeTempDirSync } from "../test-utils.js";
 
 let tmp: string;
@@ -175,6 +179,39 @@ describe("isEntryFresh (#671)", () => {
 		expect(
 			isEntryFresh(filePath, entry, () => [path.join(tmp, "gone.ts")]),
 		).toBe(false);
+	});
+
+	// #1793: the one remaining path a stale CLEAN verdict survives #1786's
+	// serve-time expiry gate on — an entry recorded WITH dependency knowledge
+	// (a warm session, reverse-deps index built) replayed on a LATER, cold
+	// session (no index this time) used to fall back to mtime-only, so a
+	// dependency edit that flipped the file from clean to failing stayed
+	// invisible for as long as the file's own bytes were untouched.
+	it("is stale (fails closed) when the entry was recorded WITH dependency knowledge but this session has none", () => {
+		const mtimeMs = fs.statSync(filePath).mtimeMs;
+		const entry = makeEntry({
+			mtimeMs,
+			scannedAt: Date.now(),
+			depIndexAtScan: true,
+		});
+		expect(isEntryFresh(filePath, entry, () => undefined)).toBe(false);
+	});
+
+	it("keeps failing OPEN to mtime-only when the entry itself was recorded without dependency knowledge (unchanged residual)", () => {
+		const mtimeMs = fs.statSync(filePath).mtimeMs;
+		const entry = makeEntry({
+			mtimeMs,
+			scannedAt: Date.now(),
+			depIndexAtScan: false,
+		});
+		expect(isEntryFresh(filePath, entry, () => undefined)).toBe(true);
+	});
+
+	it("keeps failing OPEN to mtime-only for a legacy entry with no depIndexAtScan field at all", () => {
+		const mtimeMs = fs.statSync(filePath).mtimeMs;
+		const entry = makeEntry({ mtimeMs, scannedAt: Date.now() });
+		expect(entry.depIndexAtScan).toBeUndefined();
+		expect(isEntryFresh(filePath, entry, () => undefined)).toBe(true);
 	});
 });
 
@@ -326,6 +363,157 @@ describe("WorkspaceDiagnosticsCacheContext (#671)", () => {
 		const third = createWorkspaceDiagnosticsCacheContext(tmp);
 		expect(third.lookup(fileA, "all|")).toBeDefined();
 		expect(third.lookup(fileB, "all|")).toBeDefined();
+	});
+});
+
+// #1793: the #1786 review's F4 residual — a CLEAN entry recorded while a
+// reverse-dependency index was available replayed on a later, index-less
+// session used to fall back to mtime-only with no dependency check at all.
+// Persisting whether dependency knowledge was available AT RECORD TIME lets
+// `isEntryFresh` refuse to serve such an entry via the weaker check just
+// because the CURRENT session happens to be cold.
+describe("dependency-index availability persisted on the entry (#1793)", () => {
+	function seedProjectSnapshotWithReverseDeps(cwd: string): void {
+		// Any project snapshot with either `reverseDeps` or a file `imports`
+		// array makes `loadReverseDependencyIndexFromSnapshot` resolve non-null
+		// (see `buildReverseDependencyIndexFromSnapshot`) — the on-disk shape a
+		// warm session (cascade/session-start has already run) leaves behind.
+		saveProjectSnapshot(cwd, {
+			version: PROJECT_SNAPSHOT_VERSION,
+			projectRoot: cwd,
+			generatedAt: new Date().toISOString(),
+			seq: 1,
+			files: {},
+			symbols: {},
+			reverseDeps: { "/some/other/file.ts": ["/some/importer.ts"] },
+			cachedExports: [],
+		});
+	}
+
+	it("record() stamps depIndexAtScan=true when a reverse-deps index is available this session", () => {
+		const filePath = path.join(tmp, "a.ts");
+		fs.writeFileSync(filePath, "const a = 1;\n");
+		seedProjectSnapshotWithReverseDeps(tmp);
+
+		const ctx = createWorkspaceDiagnosticsCacheContext(tmp);
+		ctx.record(filePath, "all|", [], fs.statSync(filePath).mtimeMs);
+		ctx.persist();
+
+		const persisted = loadWorkspaceDiagnosticsCache(tmp);
+		expect(persisted?.entries[cacheKeyFor(filePath)]?.depIndexAtScan).toBe(
+			true,
+		);
+	});
+
+	it("record() stamps depIndexAtScan=false when no reverse-deps index is available this session", () => {
+		const filePath = path.join(tmp, "a.ts");
+		fs.writeFileSync(filePath, "const a = 1;\n");
+		// No project snapshot seeded: this session is cold, same as today.
+
+		const ctx = createWorkspaceDiagnosticsCacheContext(tmp);
+		ctx.record(filePath, "all|", [], fs.statSync(filePath).mtimeMs);
+		ctx.persist();
+
+		const persisted = loadWorkspaceDiagnosticsCache(tmp);
+		expect(persisted?.entries[cacheKeyFor(filePath)]?.depIndexAtScan).toBe(
+			false,
+		);
+	});
+
+	// Red on pre-fix code: a clean entry recorded WITH dependency knowledge
+	// used to serve on a later, index-less session via the mtime-only
+	// fallback with no dependency check at all.
+	it("a CLEAN entry recorded WITH dependency knowledge does not serve on a later dep-index-less session", () => {
+		const filePath = path.join(tmp, "clean.ts");
+		fs.writeFileSync(filePath, "export const a = 1;\n");
+		const mtimeMs = fs.statSync(filePath).mtimeMs;
+		saveWorkspaceDiagnosticsCache(tmp, {
+			version: WORKSPACE_DIAGNOSTICS_CACHE_VERSION,
+			entries: {
+				[cacheKeyFor(filePath)]: {
+					diagnostics: [],
+					count: 0,
+					mtimeMs,
+					scannedAt: Date.now(),
+					scopeKey: "all|",
+					depIndexAtScan: true,
+				},
+			},
+		});
+
+		// This session has no project snapshot: cold, so getImports() is
+		// undefined for every file — the exact state the entry's depIndexAtScan
+		// says it should NOT be trusted to serve through.
+		const ctx = createWorkspaceDiagnosticsCacheContext(tmp);
+		expect(ctx.lookup(filePath, "all|")).toBeUndefined();
+	});
+
+	it("a CLEAN entry recorded WITHOUT dependency knowledge keeps serving via mtime-only (unchanged residual)", () => {
+		const filePath = path.join(tmp, "clean.ts");
+		fs.writeFileSync(filePath, "export const a = 1;\n");
+		const mtimeMs = fs.statSync(filePath).mtimeMs;
+		saveWorkspaceDiagnosticsCache(tmp, {
+			version: WORKSPACE_DIAGNOSTICS_CACHE_VERSION,
+			entries: {
+				[cacheKeyFor(filePath)]: {
+					diagnostics: [],
+					count: 0,
+					mtimeMs,
+					scannedAt: Date.now(),
+					scopeKey: "all|",
+					depIndexAtScan: false,
+				},
+			},
+		});
+
+		const ctx = createWorkspaceDiagnosticsCacheContext(tmp);
+		expect(ctx.lookup(filePath, "all|")).toBeDefined();
+	});
+
+	it("emits a bounded record when a dep-index-cold refusal fires", async () => {
+		vi.resetModules();
+		const logLatency = vi.fn();
+		vi.doMock("../../../clients/latency-logger.js", async (importOriginal) => ({
+			...(await importOriginal<Record<string, unknown>>()),
+			logLatency,
+		}));
+		const cacheModule = await import(
+			"../../../clients/lsp/workspace-diagnostics-cache.js"
+		);
+
+		const filePath = path.join(tmp, "clean.ts");
+		fs.writeFileSync(filePath, "export const a = 1;\n");
+		const mtimeMs = fs.statSync(filePath).mtimeMs;
+		cacheModule.saveWorkspaceDiagnosticsCache(tmp, {
+			version: cacheModule.WORKSPACE_DIAGNOSTICS_CACHE_VERSION,
+			entries: {
+				[cacheModule.cacheKeyFor(filePath)]: {
+					diagnostics: [],
+					count: 0,
+					mtimeMs,
+					scannedAt: Date.now(),
+					scopeKey: "all|",
+					depIndexAtScan: true,
+				},
+			},
+		});
+
+		const ctx = cacheModule.createWorkspaceDiagnosticsCacheContext(tmp);
+		ctx.lookup(filePath, "all|");
+		ctx.persist();
+		// A second persist() must not double-report.
+		ctx.persist();
+
+		const records = logLatency.mock.calls
+			.map((call) => call[0])
+			.filter(
+				(record: any) =>
+					record?.phase === "lsp_workspace_diagnostics_cache_expiry",
+			);
+		expect(records).toHaveLength(1);
+		expect(records[0].metadata.depIndexColdRefusals).toBe(1);
+		vi.doUnmock("../../../clients/latency-logger.js");
+		vi.resetModules();
 	});
 });
 
