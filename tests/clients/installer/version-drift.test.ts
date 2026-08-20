@@ -174,6 +174,22 @@ vi.mock("node:child_process", () => ({
 	spawnSync: mockSpawnSync,
 }));
 
+// isCommandAvailable (the PATH-walk used to resolve a BARE checkCommand, e.g.
+// "madge") reads `node:fs`'s statSync directly — it never touches the
+// `node:fs/promises` mock above. Mirrors path-walk-memo.test.ts's pattern.
+// Default behavior delegates to the REAL statSync: safeSpawnAsync (used by
+// installTool's npm-install spawn) also calls statSync(cwd) as a preflight,
+// against a real, existing directory — overriding it wholesale would break
+// every install-spawning test in this file, not just the new PATH-walk one.
+const mockStatSync = vi.hoisted(() => vi.fn());
+vi.mock("node:fs", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("node:fs")>();
+	mockStatSync.mockImplementation((...args: Parameters<typeof actual.statSync>) =>
+		actual.statSync(...args),
+	);
+	return { ...actual, statSync: mockStatSync };
+});
+
 import * as path from "node:path";
 import {
 	ensureTool,
@@ -238,9 +254,14 @@ beforeEach(() => {
 	spawnCalls.length = 0;
 	versionOutput.value = "";
 	resetProbeCacheStateForTesting();
+	// A bare-command positive (no fs.access, no probe-cache fallback) does not
+	// self-heal like a fully-qualified one does when fakeAccess() below denies
+	// everything — it would otherwise leak from one test into the next.
+	resetResolvedPathCache();
 	mockFsReadFile.mockRejectedValue(new Error("ENOENT"));
 	mockFsStat.mockResolvedValue({ mtimeMs: Date.now() });
 	fakeAccess(/* nothing */);
+	mockStatSync.mockClear();
 });
 
 afterEach(() => {
@@ -312,6 +333,51 @@ describe("version-pin drift detection (#589)", () => {
 		resetResolvedPathCache();
 		expect(await ensureTool("jscpd")).toBe(JSCPD_BIN);
 		expect(mockFsAccess).toHaveBeenCalledTimes(2);
+	});
+
+	// #1902 review: the test above only proves the reset works for a FULLY
+	// QUALIFIED cached path, which takes the fs.access branch at
+	// installer/index.ts:5015-5018 — a branch that never needed the reset,
+	// because a stale fully-qualified positive is already evicted on its own
+	// the next time fs.access rejects it. resetResolvedPathCache's actual
+	// reason to exist is the BARE-command branch at :5011-5014, where a
+	// checkCommand resolved off PATH (madge here — unpinned npm tool, no
+	// version-drift complication) is cached and returned from the in-memory
+	// session cache with NO fs.access, NO re-probe, and NO way to self-heal
+	// mid-session. Neutering resetResolvedPathCache's body leaves the test
+	// above green but must turn this one red.
+	it("clears the positive path cache for a bare, PATH-resolved tool so the next ensure re-discovers it", async () => {
+		const savedPath = process.env.PATH;
+		process.env.PATH = TEST_HOME;
+		const realStatSync = mockStatSync.getMockImplementation();
+		try {
+			mockStatSync.mockImplementation(() => ({ isFile: () => true, size: 1 }) as never);
+
+			const first = await ensureTool("madge");
+			expect(first).toBe("madge");
+			const statCallsAfterFirst = mockStatSync.mock.calls.length;
+			expect(statCallsAfterFirst).toBeGreaterThan(0);
+
+			// Same-session re-ensure: fast path 1 (session-cache) returns the bare
+			// cached command directly — no fs.access, no fresh PATH walk.
+			const second = await ensureTool("madge");
+			expect(second).toBe("madge");
+			expect(mockStatSync.mock.calls.length).toBe(statCallsAfterFirst);
+
+			resetResolvedPathCache();
+
+			// A fresh session must not trust the stale bare positive — it has to
+			// re-walk PATH, because a bare command has no persistent probe-cache
+			// fallback (updateProbeCache stats the resolved path and swallows a
+			// bare command's ENOENT).
+			const third = await ensureTool("madge");
+			expect(third).toBe("madge");
+			expect(mockStatSync.mock.calls.length).toBeGreaterThan(statCallsAfterFirst);
+		} finally {
+			if (realStatSync) mockStatSync.mockImplementation(realStatSync);
+			if (savedPath === undefined) delete process.env.PATH;
+			else process.env.PATH = savedPath;
+		}
 	});
 
 	it("evicts a cached positive when the resolved binary is deleted", async () => {
