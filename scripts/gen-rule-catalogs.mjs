@@ -120,6 +120,7 @@ function collectAstGrep() {
         id: doc.id,
         language: doc.language,
         severity: doc.severity || "—",
+        fixable: Object.hasOwn(doc, "fix") ? "yes" : "no",
         message: doc.message || doc.note || "",
         source: set.source,
         status: set.status,
@@ -130,10 +131,13 @@ function collectAstGrep() {
 }
 
 function renderAstGrepTable(rules) {
-  const lines = ["| Rule | Severity | Source | Description |", "|---|---|---|---|"];
+  const lines = [
+    "| Rule | Severity | Fixable | Source | Description |",
+    "|---|---|---|---|---|",
+  ];
   for (const r of rules) {
     lines.push(
-      `| \`${r.id}\` | ${r.severity} | ${r.source} | ${cell(r.message)} |`,
+      `| \`${r.id}\` | ${r.severity} | ${r.fixable} | ${r.source} | ${cell(r.message)} |`,
     );
   }
   return lines.join("\n");

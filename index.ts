@@ -173,8 +173,10 @@ import { createProjectReportTool } from "./tools/project-report.js";
 import { createSymbolSearchTool } from "./tools/symbol-search.js";
 import {
 	getLastLoggedPhase,
+	getPhaseForWindow,
 	getRecentLoggedPhases,
 	logLatency,
+	resetCurrentPhaseForSession,
 } from "./clients/latency-logger.js";
 import { emitBounded } from "./clients/bounded-telemetry.js";
 
@@ -1702,6 +1704,19 @@ function activateExtension(hostPi: ExtensionAPI) {
 				return;
 			}
 
+			// #1723 review F4: the in-flight-phase live-bracket map/closed-ring
+			// (clients/latency-logger.ts) is process-shared state, exactly like
+			// the LSP fleet / runtime generation the #473 gate above already
+			// protects — so this reset belongs BEHIND that gate, not before it.
+			// A concurrent secondary's session_start must not wipe brackets a
+			// still-live PARENT activation genuinely has open; only a confirmed
+			// full session start (this line has already returned otherwise) may
+			// assume no sibling activation still owns live brackets in this
+			// process. See `resetCurrentPhaseForSession`'s doc comment for the
+			// accepted cost on the other side (a torn-down secondary's own
+			// bracket goes stale until the next full session start).
+			resetCurrentPhaseForSession();
+
 			// Dynamic tooling (#pi 0.80.x+): put the active tool set back to the
 			// posture this logical conversation had — the always-active baseline
 			// plus exactly the lazy tools (LAZY_TOOL_CATALOG) the model activated
@@ -2321,6 +2336,38 @@ function activateExtension(hostPi: ExtensionAPI) {
 			if (shouldLogLoopBlock(loopMaxMs)) {
 				const lastPhase = getLastLoggedPhase();
 				const recentPhases = getRecentLoggedPhases(3);
+				// #1723 residual, redesigned after review (F1/F2/F3): `lastPhase`/
+				// `recentPhases` above only ever name a phase that already
+				// FINISHED. The motivating case — an 18s synchronous full-scan
+				// block — had no attribution because the phase burning the CPU was
+				// still running when the probe sampled, so it hadn't logged a
+				// completion yet. `getPhaseForWindow` (clients/latency-logger.ts)
+				// checks the block's own time window against both the still-live
+				// brackets dispatcher.ts's `runRunner` keeps open AND a short ring
+				// of recently CLOSED ones — the latter is load-bearing, not
+				// redundant: `phaseFinished` resumes as a microtask, `turn_end` is
+				// scheduled as a macrotask, and microtasks always drain first, so a
+				// genuinely synchronous phase has typically ALREADY closed by the
+				// time this line runs. Checking live brackets alone would read
+				// empty for exactly the case this exists to catch. NOT wired into
+				// the LSP workspace-diagnostics sweep's own touch loop
+				// (clients/lsp/index.ts) — that remains a named, deferred gap (see
+				// the PR body / issue comment), not a silent one.
+				//
+				// #1723 review round 3: this window — [now - loopMaxMs, now] —
+				// assumes the block ENDED right at this sample, which is a
+				// reasonable approximation, not a measured fact (getEventLoopStats
+				// reports the window's max delay, not its precise end instant). A
+				// human reader has `inFlightPhaseStartedAt`/`inFlightPhaseElapsedMs`/
+				// `inFlightPhaseStillRunning` on the record below to judge that
+				// assumption per-block; an automated correlation (#1549) should
+				// account for the same slack rather than treating these window
+				// edges as exact.
+				const blockSampledAtMs = Date.now();
+				const inFlight = getPhaseForWindow(
+					blockSampledAtMs - loopMaxMs,
+					blockSampledAtMs,
+				);
 				const isNewSessionWorst = shouldLogWorstBlock(
 					loopMaxMs,
 					lastLoggedLoopWorstMs,
@@ -2345,6 +2392,10 @@ function activateExtension(hostPi: ExtensionAPI) {
 						lastPhase: lastPhase?.phase,
 						lastPhaseAt: lastPhase?.ts,
 						recentPhases,
+						inFlightPhase: inFlight?.phase,
+						inFlightPhaseStartedAt: inFlight?.startedAt,
+						inFlightPhaseElapsedMs: inFlight?.elapsedMs,
+						inFlightPhaseStillRunning: inFlight?.stillRunning,
 					},
 				});
 				// A system stall must not raise the "new worst genuine block"
