@@ -662,9 +662,9 @@ export interface LSPTouchFileOptions {
  *   notify write or the diagnostics wait itself timed out. Also used for a
  *   group skipped after a failed pre-sweep server warm-up (#744) — the
  *   check was never even attempted, which is inconclusive, not a timeout.
- * - `coverage_gap` — an auxiliary scanner never reported for this touch
- *   (breaker-open, deferred resync, or a silent/cut-off wait — see
- *   `touchCoverageGap`).
+ * - `coverage_gap` — legacy/downstream classification for an auxiliary
+ *   scanner gap. New sweep results carry the lane ids in
+ *   `unconfirmedServerIds` without setting the file-wide `timedOut` verdict.
  * - `service_destroyed` — the LSP service was torn down (`resetLSPService`)
  *   while this sweep was still in flight; the remainder of the sweep never
  *   even attempted a language-server round trip for this file.
@@ -691,15 +691,17 @@ export interface LSPWorkspaceDiagnosticResult {
 	count: number;
 	error?: string;
 	/**
-	 * True when this file's per-file check was NOT confirmed — either
+	 * True when this file's primary per-file check was NOT confirmed — either
 	 * `touchFile`'s own `.inconclusive` flag was set (#570: the notify write
 	 * or the diagnostics wait itself timed out), the OUTER `perFileMs`
 	 * `withDeadline` wrapper never got a result back at all, or the check
 	 * threw. `diagnostics` is a default-empty placeholder in every one of
 	 * those cases, not a confirmed result, and must not be treated as
 	 * "confirmed clean" by any caller reconciling this into cached state
-	 * (#571). Absent/false means the per-file check completed within budget
-	 * AND was confirmed; workspace-pull results (`tryWorkspacePull`) are
+	 * (#571). An auxiliary-only gap is represented separately by
+	 * `unconfirmedServerIds`: answering lanes remain usable, while cache and
+	 * state-replacement consumers still require full coverage. Absent/false
+	 * means the primary check completed within budget; workspace-pull results are
 	 * always confirmed (a pull either returns a real report or the caller
 	 * falls back to per-file, never a silent empty default).
 	 */
@@ -710,6 +712,13 @@ export interface LSPWorkspaceDiagnosticResult {
 	 * produces; absent only on a legacy/test double that predates this field.
 	 */
 	unconfirmedReason?: LSPWorkspaceUnconfirmedReason;
+	/**
+	 * Auxiliary lanes that did not contribute evidence for this file. Their
+	 * absence narrows coverage, but does not invalidate diagnostics returned by
+	 * answering servers. A result carrying this field is usable for delivery,
+	 * but is not eligible to replace the fully-covered workspace cache.
+	 */
+	unconfirmedServerIds?: string[];
 	/**
 	 * #744: true when this file's per-file check was never even attempted
 	 * because its primary language server failed the pre-sweep warm-up (an
@@ -7304,9 +7313,12 @@ export class LSPService {
 				// still never enters the grace wait, but it now derives the SAME evidence
 				// from post-wait state, so a silent auxiliary narrows this scope too
 				// instead of aggregating as a confirmed clean. Every route is gated here.
-				const coverageGap = touchCoverageGap(touchResult).length > 0;
-				const timedOut =
-					touchResult === undefined || inconclusive || coverageGap;
+				const unconfirmedServerIds = touchCoverageGap(touchResult);
+				const coverageGap = unconfirmedServerIds.length > 0;
+				// #1549: the sweep verdict is per answering lane. An auxiliary gap
+				// narrows coverage, but a primary answer remains usable; only absence of
+				// the touch result or a primary-scoped inconclusive verdict poisons it.
+				const timedOut = touchResult === undefined || inconclusive;
 				if (timedOut) timedOutFiles += 1;
 				// #1618: WHY, in priority order — the outer deadline (nothing came
 				// back at all) outranks an inner inconclusive signal, which outranks
@@ -7316,9 +7328,7 @@ export class LSPService {
 						? "budget"
 						: inconclusive
 							? "inconclusive"
-							: coverageGap
-								? "coverage_gap"
-								: undefined;
+							: undefined;
 				// #1104 (shape 5 — AGENTS.md): the touch's content binding is an
 				// EXPLICIT enumerable field on the wrapper now (#1179), so it survives
 				// `applyAuxiliarySuppressions` below rebuilding `.diags` via `.filter()`
@@ -7348,8 +7358,10 @@ export class LSPService {
 					filePath,
 					diagnostics: filteredDiagnostics ?? [],
 					count: filteredDiagnostics?.length ?? 0,
-					timedOut,
-					unconfirmedReason,
+					...(timedOut && { timedOut: true, unconfirmedReason }),
+					...(coverageGap && {
+						unconfirmedServerIds: [...unconfirmedServerIds],
+					}),
 					contentHash: rawBinding?.contentHash,
 					boundToCurrentDisk: rawBinding?.boundToCurrentDisk,
 					writeIndex: writeIndexByPath.get(normalizeMapKey(filePath)),
@@ -7570,6 +7582,16 @@ export class LSPService {
 			const reason = result.unconfirmedReason ?? "budget";
 			unconfirmedByReason[reason] = (unconfirmedByReason[reason] ?? 0) + 1;
 		}
+		const partiallyCoveredFiles = results.filter(
+			(result) => (result.unconfirmedServerIds?.length ?? 0) > 0,
+		).length;
+		// Code-unit comparator (#1883): this list ships as the
+		// `unconfirmedServerIds` field on the `lsp_workspace_diagnostics` record,
+		// so its order must be deterministic across locales — localeCompare is
+		// deliberately avoided.
+		const unconfirmedServerIds = [
+			...new Set(results.flatMap((result) => result.unconfirmedServerIds ?? [])),
+		].sort((a, b) => Number(a > b) - Number(a < b));
 		logLatency({
 			type: "phase",
 			phase: "lsp_workspace_diagnostics",
@@ -7587,6 +7609,8 @@ export class LSPService {
 				maxFiles,
 				timedOutFiles,
 				unconfirmedByReason,
+				partiallyCoveredFiles,
+				...(unconfirmedServerIds.length > 0 && { unconfirmedServerIds }),
 				aborted: signal?.aborted ?? false,
 			},
 		});
@@ -7604,7 +7628,14 @@ export class LSPService {
 		// freshness check; nothing here needs to explicitly evict them).
 		for (const result of results) {
 			const scannedAt = scannedMtimeByFile.get(result.filePath);
-			if (result.error || result.timedOut || scannedAt === undefined) continue;
+			if (
+				result.error ||
+				result.timedOut ||
+				(result.unconfirmedServerIds?.length ?? 0) > 0 ||
+				scannedAt === undefined
+			) {
+				continue;
+			}
 			// #1104: thread the per-result `contentHash` (from either the
 			// `tryWorkspacePull` fast path or a per-file touch's own #1095 binding)
 			// into the cache entry — previously this call never passed one, so

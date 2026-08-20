@@ -38,6 +38,13 @@ chokepoint re-checks the resolved client's `getOperationSupport()` snapshot.
 An unsupported client-layer request throws the `__UNSUPPORTED__` discriminator;
 do not collapse it into the clean empty result returned by a supporting server.
 (#1826)
+
+Workspace-diagnostics per-file sweep verdicts preserve per-server evidence. A
+primary answer remains deliverable when an auxiliary is silent or cut off; the
+result carries that lane in `unconfirmedServerIds` and stays ineligible for the
+fully-covered workspace cache and footer replacement. Never reconstruct the gap
+from a touch-wide timeout: consume `touchFile`'s frozen coverage set. (#1549)
+
 Bounded LSP warm touches preserve the spawn coordinator's lifecycle evidence:
 an empty ready-client set reports `spawn_in_flight_budget_elapsed` while a
 matching primary single-flight spawn remains pending, and
@@ -414,6 +421,13 @@ stdout from non-zero exits; process-table callers record that outcome instead
 of parsing partial output as a clean empty result. Sampler timeouts inject the
 reaper's tree-kill-and-verify hook and settle only after its fate is known.
 (#1863, #1864)
+
+**Session-start availability resets include direct LSP and installer path positives.**
+Direct-LSP negative cooldowns and installer bare-command path positives are
+session facts: the former can recover when a command appears, and the latter
+returns without a spawnability check. `handleSessionStart` clears both behind
+the primary-only session-start guard; the session-state registry records the
+two reset seams. (#1897)
 
 **Workspace refresh walks the bounded ancestor cache chain.** A language server
 root can be a nested monorepo member while workspace diagnostics persist under

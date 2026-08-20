@@ -44,10 +44,12 @@ import { runLogCleanup } from "./log-cleanup.js";
 import type { LSPShutdownOptions } from "./lsp/client.js";
 import { initLSPConfig, loadLSPConfig } from "./lsp/config.js";
 import { resetWorkspaceDiagnosticsCacheSession } from "./lsp/workspace-diagnostics-session.js";
+import { resetDirectLspCommandAvailability } from "./lsp/server.js";
 import { loadLspService } from "./lsp-lazy.js";
 import type { MetricsClient } from "./metrics-client.js";
 import type { OpengrepClient, OpengrepResult } from "./opengrep-client.js";
 import { resetManagedToolRefreshSession } from "./installer/managed-tool-refresh-session.js";
+import { resetResolvedPathCache } from "./installer/index.js";
 import { _resetPackageManagerCache } from "./package-manager.js";
 import { clearFormatterCache } from "./formatters.js";
 import { isAtOrAboveHomeDir } from "./path-utils.js";
@@ -2149,6 +2151,10 @@ export async function handleSessionStart(
 	// from `clearFormatterRuntimeState()`, which runs every turn, so a failing
 	// install re-spawned every turn instead of once per session.
 	resetLazyInstallAttempts();
+	// #1897: direct-LSP negative availability and bare installer paths are
+	// session facts. A command or PATH entry can appear between sessions.
+	resetDirectLspCommandAvailability();
+	resetResolvedPathCache();
 	// #1653: pnpm/yarn/bun/npm's availability latches (package-manager.ts) are
 	// module-local, same #1490/#1535 shape as the two lines above — the
 	// generation counter above does not reach them. Without this line, a
