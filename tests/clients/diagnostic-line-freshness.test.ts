@@ -140,7 +140,7 @@ describe("demotePastEofDiagnostics (#1641)", () => {
 		expect(past.diagnostics[0]?.stale).toBe(true);
 	});
 
-	it("F1 BOUNDARY: an empty file has exactly one addressable line", () => {
+	it("fails OPEN when a zero-byte file is observed mid-write", () => {
 		const env = setup();
 		const filePath = path.join(env.tmpDir, "empty.ts");
 		fs.writeFileSync(filePath, "");
@@ -154,14 +154,37 @@ describe("demotePastEofDiagnostics (#1641)", () => {
 		});
 		expect(line1.diagnostics[0]?.stale).toBeFalsy();
 
-		const line2 = demotePastEofDiagnostics({
+		expect(line1.demotedCount).toBe(0);
+		expect(logLatency).not.toHaveBeenCalled();
+	});
+
+	it("does not turn a zero-byte stat into a high-line verdict, then evaluates real content", () => {
+		const env = setup();
+		const filePath = path.join(env.tmpDir, "mid-write.ts");
+		const content = Array.from({ length: 141 }, (_, i) => `// line ${i + 1}`).join("\n");
+		const diagnostics = [{ line: 141, message: "live diagnostic" } as Diagnostic];
+		fs.writeFileSync(filePath, "");
+
+		const midWrite = demotePastEofDiagnostics({
 			store: "test",
 			cwd: env.tmpDir,
 			filePath,
-			diagnostics: [{ line: 2, message: "past EOF on an empty doc" } as Diagnostic],
+			diagnostics,
 			lineCountCache: createLineCountCache(),
 		});
-		expect(line2.diagnostics[0]?.stale).toBe(true);
+		expect(midWrite.diagnostics[0]?.stale).toBeFalsy();
+		expect(midWrite.demotedCount).toBe(0);
+
+		fs.writeFileSync(filePath, content);
+		const realContent = demotePastEofDiagnostics({
+			store: "test",
+			cwd: env.tmpDir,
+			filePath,
+			diagnostics,
+			lineCountCache: createLineCountCache(),
+		});
+		expect(realContent.diagnostics[0]?.stale).toBeFalsy();
+		expect(realContent.demotedCount).toBe(0);
 	});
 
 	it("emits one diagnostic_past_eof record naming file, cited lines, and actual line count", () => {
@@ -182,6 +205,7 @@ describe("demotePastEofDiagnostics (#1641)", () => {
 		expect(call.phase).toBe("diagnostic_past_eof");
 		expect(call.metadata.store).toBe("lens_diagnostics");
 		expect(call.metadata.file).toBe("short.ts");
+		expect(call.metadata.sizeBytes).toBe(fs.statSync(filePath).size);
 		expect(call.metadata.actualLineCount).toBe(4);
 		expect(call.metadata.demotedCount).toBe(1);
 		expect(call.metadata.sampleCitedLines).toEqual([6]);
