@@ -647,6 +647,177 @@ describe("dependency-index availability persisted on the entry (#1793)", () => {
 	});
 });
 
+// #1814: the #1800/#1793 review's probe F — a narrower, per-file gap
+// `isEntryFresh`'s own dependency loop left open, distinct from the
+// whole-session-absent case #1793/#1800 closed. `getImports` used to mask
+// "this file is absent from an otherwise-present reverse-deps index" with
+// `?? []`, so `isEntryFresh`'s loop iterated zero times over the coerced
+// empty array and returned fresh — indistinguishable from a file the index
+// actually confirmed has zero imports. A session WITH a warm index
+// (`hasDepKnowledge` true for SOME file, so #1793's whole-session refusal
+// never fires) could still fail-open per-file for a file outside that
+// index's own coverage, with no signal at all.
+describe("per-file dependency-index coverage in isEntryFresh (#1814)", () => {
+	function seedSnapshotCovering(cwd: string, coveredKey: string): void {
+		saveProjectSnapshot(cwd, {
+			version: PROJECT_SNAPSHOT_VERSION,
+			projectRoot: cwd,
+			generatedAt: new Date().toISOString(),
+			seq: 1,
+			files: {
+				[coveredKey]: {
+					path: coveredKey,
+					mtimeMs: 0,
+					size: 0,
+					imports: [],
+					lastSeq: 0,
+				},
+			},
+			symbols: {},
+			reverseDeps: {},
+			cachedExports: [],
+		});
+	}
+
+	// Probe F shape: a warm session's index covered g.ts, stamping
+	// depIndexAtScan: true. A LATER session's index exists (so
+	// `hasDepKnowledge` is true for other.ts and #1793's whole-session
+	// refusal doesn't fire) but covers only other.ts, not g.ts.
+	it("does not serve a CLEAN entry whose file is absent from an otherwise-present index (probe F)", () => {
+		const gPath = path.join(tmp, "g.ts");
+		fs.writeFileSync(gPath, "export const g = 1;\n");
+		const mtimeMs = fs.statSync(gPath).mtimeMs;
+		saveWorkspaceDiagnosticsCache(tmp, {
+			version: WORKSPACE_DIAGNOSTICS_CACHE_VERSION,
+			entries: {
+				[cacheKeyFor(gPath)]: {
+					diagnostics: [],
+					count: 0,
+					mtimeMs,
+					scannedAt: Date.now(),
+					scopeKey: "all|",
+					depIndexAtScan: true,
+				},
+			},
+		});
+		seedSnapshotCovering(tmp, cacheKeyFor(path.join(tmp, "other.ts")));
+
+		const ctx = createWorkspaceDiagnosticsCacheContext(tmp);
+		expect(ctx.lookup(gPath, "all|")).toBeUndefined();
+	});
+
+	// Mutation-proof the accepted, unchanged case: a file the CURRENT index
+	// actually covers, with zero imports recorded, still serves — the fix
+	// must distinguish "uncovered" from "covered, zero imports", not just
+	// refuse every depIndexAtScan:true entry outright.
+	it("still serves a CLEAN entry whose file the CURRENT index confirms has zero imports", () => {
+		const gPath = path.join(tmp, "g.ts");
+		fs.writeFileSync(gPath, "export const g = 1;\n");
+		const mtimeMs = fs.statSync(gPath).mtimeMs;
+		saveWorkspaceDiagnosticsCache(tmp, {
+			version: WORKSPACE_DIAGNOSTICS_CACHE_VERSION,
+			entries: {
+				[cacheKeyFor(gPath)]: {
+					diagnostics: [],
+					count: 0,
+					mtimeMs,
+					scannedAt: Date.now(),
+					scopeKey: "all|",
+					depIndexAtScan: true,
+				},
+			},
+		});
+		seedSnapshotCovering(tmp, cacheKeyFor(gPath));
+
+		const ctx = createWorkspaceDiagnosticsCacheContext(tmp);
+		expect(ctx.lookup(gPath, "all|")).toBeDefined();
+	});
+
+	// Mutation-proof the eviction extension: a refusal-without-eviction fix
+	// (returning undefined from isEntryFresh alone, without widening the
+	// `lookup` eviction condition) leaves the stale entry on disk to be
+	// refused — and its file force-re-touched — again on every later cold
+	// sweep, exactly the repeat-cost #1793 review F3 flagged for the
+	// whole-session case. This proves the SAME idiom applies here.
+	it("evicts (not just refuses) a per-file-uncovered depIndexAtScan:true entry", () => {
+		const gPath = path.join(tmp, "g.ts");
+		fs.writeFileSync(gPath, "export const g = 1;\n");
+		const mtimeMs = fs.statSync(gPath).mtimeMs;
+		saveWorkspaceDiagnosticsCache(tmp, {
+			version: WORKSPACE_DIAGNOSTICS_CACHE_VERSION,
+			entries: {
+				[cacheKeyFor(gPath)]: {
+					diagnostics: [],
+					count: 0,
+					mtimeMs,
+					scannedAt: Date.now(),
+					scopeKey: "all|",
+					depIndexAtScan: true,
+				},
+			},
+		});
+		seedSnapshotCovering(tmp, cacheKeyFor(path.join(tmp, "other.ts")));
+
+		const ctx = createWorkspaceDiagnosticsCacheContext(tmp);
+		expect(ctx.lookup(gPath, "all|")).toBeUndefined();
+		ctx.persist();
+
+		const persisted = loadWorkspaceDiagnosticsCache(tmp);
+		expect(persisted?.entries[cacheKeyFor(gPath)]).toBeUndefined();
+	});
+
+	// The refusal population widens (same `depIndexColdRefusals` metric,
+	// same latency.log record #1800 introduced) to also count the per-file
+	// case, not just the whole-session-absent one.
+	it("counts a per-file-uncovered refusal in the same depIndexColdRefusals telemetry as a whole-session refusal", async () => {
+		vi.resetModules();
+		const logLatency = vi.fn();
+		vi.doMock("../../../clients/latency-logger.js", async (importOriginal) => ({
+			...(await importOriginal<Record<string, unknown>>()),
+			logLatency,
+		}));
+		const cacheModule = await import(
+			"../../../clients/lsp/workspace-diagnostics-cache.js"
+		);
+
+		const gPath = path.join(tmp, "g.ts");
+		fs.writeFileSync(gPath, "export const g = 1;\n");
+		const mtimeMs = fs.statSync(gPath).mtimeMs;
+		cacheModule.saveWorkspaceDiagnosticsCache(tmp, {
+			version: cacheModule.WORKSPACE_DIAGNOSTICS_CACHE_VERSION,
+			entries: {
+				[cacheModule.cacheKeyFor(gPath)]: {
+					diagnostics: [],
+					count: 0,
+					mtimeMs,
+					scannedAt: Date.now(),
+					scopeKey: "all|",
+					depIndexAtScan: true,
+				},
+			},
+		});
+		seedSnapshotCovering(
+			tmp,
+			cacheModule.cacheKeyFor(path.join(tmp, "other.ts")),
+		);
+
+		const ctx = cacheModule.createWorkspaceDiagnosticsCacheContext(tmp);
+		ctx.lookup(gPath, "all|");
+		ctx.persist();
+
+		const records = logLatency.mock.calls
+			.map((call) => call[0])
+			.filter(
+				(record: any) =>
+					record?.phase === "lsp_workspace_diagnostics_cache_expiry",
+			);
+		expect(records).toHaveLength(1);
+		expect(records[0].metadata.depIndexColdRefusals).toBe(1);
+		vi.doUnmock("../../../clients/latency-logger.js");
+		vi.resetModules();
+	});
+});
+
 // --- runWorkspaceDiagnostics end-to-end cache behavior ---
 // Mirrors tests/clients/lsp/sweep-warmup.test.ts's fixture style: a fake
 // single-server client whose `waitForDiagnostics` calls are countable, so a
