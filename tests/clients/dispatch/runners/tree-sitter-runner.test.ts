@@ -1,22 +1,12 @@
 import * as path from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { FactStore } from "../../../../clients/dispatch/fact-store.js";
+import { makeRunnerCtx } from "../../../support/runner-ctx.js";
 
 function createCtx(filePath: string, cwdOverride?: string) {
-	return {
-		filePath,
-		cwd: cwdOverride ?? path.dirname(filePath),
-		kind: "jsts",
-		fileRole: "source",
-		pi: { getFlag: () => undefined },
-		autofix: false,
-		deltaMode: true,
+	return makeRunnerCtx(filePath, cwdOverride ?? path.dirname(filePath), {
 		blockingOnly: false,
 		modifiedRanges: undefined,
-		facts: new FactStore(),
-		hasTool: async () => true,
-		log: () => {},
-	};
+	});
 }
 
 async function loadRunnerWithClient(isAvailable: boolean, initResult: boolean) {

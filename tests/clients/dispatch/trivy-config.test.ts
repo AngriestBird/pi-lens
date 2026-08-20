@@ -9,6 +9,7 @@ import {
 	parseTrivyConfigOutput,
 } from "../../../clients/dispatch/runners/trivy-config.js";
 import type { Diagnostic } from "../../../clients/dispatch/types.js";
+import { makeRunnerCtx } from "../../support/runner-ctx.js";
 
 // ── appliesTo — Terraform is in scope, Terragrunt is deliberately excluded ────
 
@@ -66,16 +67,7 @@ function createCtx(
 	filePath: string,
 	cwd: string,
 ) {
-	return {
-		filePath,
-		cwd,
-		kind,
-		pi: { getFlag: () => false },
-		autofix: false,
-		deltaMode: true,
-		hasTool: async () => true,
-		log: () => {},
-	};
+	return makeRunnerCtx(filePath, cwd, { kind });
 }
 
 // Derived (not hardcoded) so the assertions hold on both POSIX and Windows:

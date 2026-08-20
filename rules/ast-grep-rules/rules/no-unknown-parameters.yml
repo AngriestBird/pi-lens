@@ -28,6 +28,28 @@ note: |
   AST-walk does. A union member (`unknown | null`) is not flagged for
   the same "direct annotation only" reason `no-bare-object-param.yml`
   gives.
+
+  2026-08-20 (refs #1727, #1777): CONSIDERED for promotion to `error`,
+  KEPT at `hint`. Four-corpus census, ast-grep CLI 0.45:
+
+  | corpus | hits |
+  |---|---:|
+  | pi-lens `clients/` | 149 |
+  | pi-lens `tests/` | 146 |
+  | pi core `packages/` | 381 (194 outside test paths) |
+  | opencode `packages/` | 678 (522) |
+  | oh-my-pi `packages/` | 2140 (1697) |
+
+  Verdict: structural narrowing was probed and does not reach zero. The
+  type-guard suppression (a parameter inside a function whose return type
+  is a `value is T` predicate) and a parser-name suppression together
+  clear the large predicate/validator block, but the residual is a second
+  legitimate class they cannot touch: opaque-payload SINKS that never
+  parse their argument at all — `setFileFact(path, id, value: unknown)`,
+  `bus(channel, payload: unknown)`, `emitLensEvent(name, payload:
+  unknown)`, `(err: unknown) => …` rejection handlers. `unknown` is the
+  CORRECT parameter type there, and it is syntactically identical to the
+  unparsed-boundary case the rule targets.
 rule:
   kind: predefined_type
   regex: "^unknown$"

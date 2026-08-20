@@ -1613,6 +1613,11 @@ export async function handleSessionStart(
 	//   (an explicit env var still takes highest precedence).
 	// Tunable: PI_LENS_WARMUP_DELAY_MS adjusts the warmup delay.
 	let startupMode = resolveStartupMode();
+	// SAFETY: these two flags are process-lifetime state pi-lens stashes on
+	// `globalThis` so a second extension instance in the same process sees the
+	// first one's warmup. There is no ambient declaration for them, and adding
+	// one would let any module write them. Both are declared OPTIONAL here, so
+	// the reads below are `undefined`-safe on a process where nothing set them.
 	const processGlobals = globalThis as unknown as {
 		__piLensFirstSessionDone?: boolean;
 		__piLensWarmupScheduled?: boolean;
