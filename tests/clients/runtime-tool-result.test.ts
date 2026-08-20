@@ -132,11 +132,66 @@ describe("bash grep searchReads registration", () => {
 				readGuard: { recordRead },
 			} as any);
 
+			// #1904 item 2: a bare `grep -n` shows ONE line, so credit one line.
+			expect(recordRead).toHaveBeenCalledWith(
+				expect.objectContaining({
+					filePath,
+					effectiveOffset: 9,
+					effectiveLimit: 1,
+					searchCredit: {
+						marginBefore: 0,
+						marginAfter: 0,
+						reason: "match-lines-only",
+					},
+				}),
+			);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("credits the context lines a grep -C actually printed", async () => {
+		const env = setupTestEnvironment("pi-lens-grep-context-credit-");
+		try {
+			const filePath = path.join(env.tmpDir, "sample.ts");
+			const sampleLines = Array.from({ length: 20 }, (_, i) => `line${i + 1}`);
+			fs.writeFileSync(filePath, sampleLines.join("\n"));
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			runtime.beginTurn();
+			const recordRead = vi.fn();
+
+			await handleToolResult({
+				event: {
+					toolName: "bash",
+					input: { command: `grep -n -C2 line9 ${filePath}` },
+					details: {},
+					content: [{ type: "text", text: "9:line9" }],
+				},
+				getFlag: () => false,
+				dbg: () => {},
+				runtime,
+				cacheManager: new CacheManager(false),
+				biomeClient: {},
+				ruffClient: {},
+				testRunnerClient: {},
+				metricsClient: {},
+				resetLSPService: () => {},
+				agentBehaviorRecord: () => [],
+				formatBehaviorWarnings: () => "",
+				readGuard: { recordRead },
+			} as any);
+
 			expect(recordRead).toHaveBeenCalledWith(
 				expect.objectContaining({
 					filePath,
 					effectiveOffset: 7,
 					effectiveLimit: 5,
+					searchCredit: {
+						marginBefore: 2,
+						marginAfter: 2,
+						reason: "delivered-context-flags",
+					},
 				}),
 			);
 		} finally {
