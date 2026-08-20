@@ -1829,10 +1829,18 @@ export function applyDynamicCapabilities(state: LSPClientState): void {
  *   for a section it doesn't get must not silently receive unrelated config.
  * Exported for the #983 regression test.
  */
+export type ConfigurationSection =
+	| Record<string, unknown>
+	| unknown[]
+	| string
+	| number
+	| boolean
+	| null;
+
 export function resolveConfigurationSection(
 	initialization: Record<string, unknown> | undefined,
 	section: string | undefined,
-): unknown {
+): ConfigurationSection {
 	if (!initialization) return section ? null : {};
 	if (!section) return initialization;
 	let cur: unknown = initialization;
@@ -1842,7 +1850,7 @@ export function resolveConfigurationSection(
 		}
 		cur = (cur as Record<string, unknown>)[part];
 	}
-	return cur;
+	return cur as ConfigurationSection;
 }
 
 // Exported (only) so tests can invoke the publishDiagnostics notification
