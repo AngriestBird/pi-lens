@@ -50,37 +50,95 @@ export function unrefChildAndPipes(child: ChildProcess): void {
 
 /**
  * Spawn a best-effort, fire-and-forget child, accumulate its full stdout, and
- * resolve with the collected text. Consolidates the spawn → unref →
+ * resolve with the collected text (empty string on a synchronous spawn
+ * failure or an `error` event). Consolidates the spawn → unref →
  * pipe-stdout → `close` plumbing shared by every one-shot OS-process-table
  * query in the codebase — each caller supplies only its command/args/options
  * and does its own output parse. The child + its stdio pipes are `unref`'d
  * here (via `unrefChildAndPipes`) so a settled one-shot `pi --print` process
  * can exit without waiting, and both the unref and the collect plumbing live
  * in exactly ONE place rather than being re-derived at each spawn site.
- * Never rejects. Callers that need to distinguish an empty query from a failed
- * query use `spawnCollectStdoutResult`.
+ * Never rejects — any failure resolves to `""`, which every caller's parse
+ * turns into an empty/absent result (the best-effort contract every caller
+ * here already has).
  */
 export function spawnCollectStdout(
 	command: string,
 	args: string[],
 	options: SpawnOptions,
 ): Promise<string> {
-	return spawnCollectStdoutResult(command, args, options).then((result) => result.stdout);
+	return spawnCollectStdoutResult(command, args, options).then(
+		(result) => result.stdout,
+	);
 }
 
+/**
+ * Why a spawn's stdout is what it is. `""` alone cannot tell "the query ran
+ * and found nothing" from "the query never ran" — the availability invariant
+ * in CLAUDE.md: an empty result must distinguish clean from errored. Callers
+ * that must emit a distinguishable record use `spawnCollectStdoutResult`;
+ * callers that genuinely only want best-effort text keep calling
+ * `spawnCollectStdout`, which is now a thin projection of this same code path
+ * (one implementation, not two).
+ */
 export type SpawnCollectStatus = "ok" | "spawn-error" | "timeout";
 
 export interface SpawnCollectResult {
+	/** Text collected before settle. Partial output is kept on a timeout. */
 	stdout: string;
 	status: SpawnCollectStatus;
+	/** Present only for `spawn-error`. */
 	error?: unknown;
+	/** Present only for `timeout`: what happened to the child that blew it. */
+	timeoutKill?: SpawnTimeoutKill;
 }
 
 export interface SpawnCollectOptions {
+	/**
+	 * Hard upper bound on the child's wall-clock lifetime. On expiry the child
+	 * is terminated, the collected partial stdout is returned, and the status
+	 * is `timeout`. Omitted or non-positive means no bound (the historical
+	 * behavior). The timer is `unref`'d, so it never holds a settled one-shot
+	 * process open.
+	 *
+	 * The bound covers the CHILD, not just the caller: the promise settles
+	 * only after the termination below reports its verdict, so a caller can
+	 * never walk away from a still-running child. Budget accordingly — the
+	 * worst case is `timeoutMs` plus the `onTimeout` handler's own budget.
+	 */
 	timeoutMs?: number;
+	/**
+	 * How to terminate a child that blew `timeoutMs`. Given the child, it must
+	 * terminate it and report whether the process is verifiably gone.
+	 *
+	 * Without this, the default is a bare `child.kill()`: one signal to the
+	 * direct child, no verification, no escalation, and on Windows no tree
+	 * kill — so a `cmd`-wrapped or signal-ignoring grandchild survives. A
+	 * caller that already owns tree-kill-and-verify machinery passes it here
+	 * rather than having this module grow a second copy. That matters most for
+	 * the orphan reaper, whose whole job is not leaking processes: a scanner
+	 * child abandoned by its own sweep is the defect the sweep exists to fix.
+	 *
+	 * This module deliberately has no imports beyond `node:child_process`
+	 * (see the file header), so the machinery is INJECTED, never imported.
+	 */
+	onTimeout?: (child: ChildProcess) => Promise<SpawnTimeoutKill>;
 }
 
-/** Collect stdout while preserving whether an empty result was successful. */
+/**
+ * Fate of a child that blew its timeout. `gone` is verified dead; `alive`
+ * means termination was attempted and the process is still there; `invalid`
+ * means there was no usable pid to act on; `unverified` means it was
+ * signalled without any liveness check (the default handler, and the handler
+ * throwing).
+ */
+export type SpawnTimeoutKill = "gone" | "alive" | "invalid" | "unverified";
+
+/**
+ * `spawnCollectStdout` plus the reason the output is what it is. Same spawn,
+ * unref, collect, settle plumbing; the only additions are an optional hard
+ * timeout and a status discriminator. Never rejects.
+ */
 export function spawnCollectStdoutResult(
 	command: string,
 	args: string[],
@@ -103,17 +161,47 @@ export function spawnCollectStdoutResult(
 			child.stdout?.on("data", (chunk) => {
 				out += chunk.toString();
 			});
-			child.once("error", (error) => settle({ stdout: out, status: "spawn-error", error }));
+			child.once("error", (error) =>
+				settle({ stdout: "", status: "spawn-error", error }),
+			);
 			child.once("close", () => settle({ stdout: out, status: "ok" }));
-			if (collectOptions.timeoutMs && collectOptions.timeoutMs > 0) {
+			const timeoutMs = collectOptions.timeoutMs;
+			if (typeof timeoutMs === "number" && timeoutMs > 0) {
 				timer = setTimeout(() => {
-					try { child.kill(); } catch { /* best effort */ }
-					settle({ stdout: out, status: "timeout" });
-				}, collectOptions.timeoutMs);
+					// Settle only AFTER the child's fate is known. Killing and
+					// resolving in the same tick bounds the caller and abandons the
+					// child, which is the leak this timeout exists to prevent.
+					void terminateTimedOutChild(child, collectOptions.onTimeout).then(
+						(timeoutKill) =>
+							settle({ stdout: out, status: "timeout", timeoutKill }),
+					);
+				}, timeoutMs);
 				timer.unref();
 			}
 		} catch (error) {
 			settle({ stdout: "", status: "spawn-error", error });
 		}
 	});
+}
+
+/** Run the caller's termination handler, or the bare-signal default, and
+ *  never let either throw out of the timeout path. */
+async function terminateTimedOutChild(
+	child: ChildProcess,
+	onTimeout: SpawnCollectOptions["onTimeout"],
+): Promise<SpawnTimeoutKill> {
+	if (onTimeout) {
+		try {
+			return await onTimeout(child);
+		} catch {
+			// A handler that threw did not verify anything.
+			return "unverified";
+		}
+	}
+	try {
+		child.kill();
+	} catch {
+		// best-effort — the child may already be gone
+	}
+	return "unverified";
 }

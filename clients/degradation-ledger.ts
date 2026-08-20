@@ -162,6 +162,53 @@ export type DegradationKind =
 	/** A process-table resource sample failed or timed out; it is unknown. */
 	| "resource-sampler-query-failed"
 	/**
+	 * The registry-independent orphan backstop could not enumerate the OS
+	 * process table (spawn error or scan timeout). Its empty result therefore
+	 * means "did not look", not "found nothing" (#1857 item 2) — the same
+	 * clean-vs-errored discrimination `runner-empty-result` makes for
+	 * shell-out runners.
+	 */
+	| "orphan-backstop-scan-failed"
+	/**
+	 * A backstop kill was attempted and the process was still alive
+	 * afterwards. Subject carries `<binary>#<pid>` so a permanently unkillable
+	 * process is identifiable, instead of counting as a successful reap and
+	 * paying the full sweep again every session (#1857 items 1 and 3).
+	 */
+	| "orphan-backstop-kill-unverified"
+	/**
+	 * A backstop candidate passed every other eligibility test, but the OS
+	 * snapshot reported no usable process creation time. The spawn-grace guard
+	 * could not rule out "spawned seconds ago, not yet registered", so the
+	 * process was spared (#1857 item 4). Without this record the guard would
+	 * be indistinguishable from finding nothing.
+	 */
+	| "orphan-backstop-age-unknown"
+	/**
+	 * Same as `orphan-backstop-kill-unverified`, for the registry-driven
+	 * reaper path, which spelled the identical attempt-counted-as-kill defect
+	 * (#1857 class sweep).
+	 */
+	| "orphan-reap-kill-unverified"
+	/**
+	 * The orphan backstop's OWN process-table scanner blew the scan timeout and
+	 * had to be tree-killed (#1864 review F3). Reason carries the kill verdict,
+	 * so a scanner that survived its own sweep's escalation — an orphan sweep
+	 * leaking an orphan — is visible rather than silent.
+	 */
+	| "orphan-backstop-scanner-escalated"
+	/**
+	 * `session_start`'s bounded change-log sequence read (#1162) blew its
+	 * budget and a project snapshot existed on disk, but the freshness gate
+	 * could not tell whether that snapshot was current (#1785). Hydration was
+	 * skipped for the synchronous startup path; the deferred read (still
+	 * running in the background) retroactively hydrates the runtime once it
+	 * lands, unless the session had already advanced by then. Subject carries
+	 * the project root so a project that repeatedly starves this read is
+	 * visible in aggregate, not just per-session.
+	 */
+	| "snapshot-sequence-read-timeout"
+	/**
 	 * `biome-check.ts`'s `resolveBiomeFixKinds` (#1810) couldn't get a real
 	 * fix-tier verdict for a rule from `biome explain <rule>` — either the
 	 * spawn itself failed/exited nonzero, or it succeeded but the output
