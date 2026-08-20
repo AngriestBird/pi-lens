@@ -4,7 +4,8 @@
  *
  *   - VIEW commands (cat/head/tail/sed -n) → reads, recorded with the exact line
  *     range shown (like the Read tool's delivered range).
- *   - WRITE commands (redirects, tee, sed -i, cp/mv dest, touch) → the agent
+ *   - WRITE commands (redirects, tee, sed -i, cp/mv dest, touch, and explicit
+ *     in-place formatter/fixer targets) → the agent
  *     authored/owns the resulting file, exactly like the Write tool — these are
  *     registered via noteCreatedFile + recordWritten so a follow-up edit is not
  *     blocked.
@@ -167,6 +168,41 @@ function parseCountFlag(token: string): number | undefined {
 
 function commandSegments(command: string): string[][] {
 	return tokenizeShellCommand(command).map((segment) => segment.tokens);
+}
+
+/** Unwrap the common agent-authored `npx <tool>` launcher form. */
+function unwrapCommand(tokens: string[]): { verb: string; args: string[] } {
+	let verb = path.basename(tokens[0] ?? "");
+	let args = tokens.slice(1);
+	if (verb === "npx") {
+		while (args[0] === "-y" || args[0] === "--yes") args = args.slice(1);
+		verb = path.basename(args[0] ?? "");
+		args = args.slice(1);
+	}
+	return { verb, args };
+}
+
+/**
+ * Return source-file operands while excluding values consumed by known options.
+ * This stays deliberately narrower than a general CLI parser: only formatter
+ * options whose values can themselves look like source files belong here.
+ */
+function formatterFileArgs(
+	args: string[],
+	start = 0,
+	valueOptions: ReadonlySet<string> = new Set(),
+): string[] {
+	const files: string[] = [];
+	for (let i = start; i < args.length; i += 1) {
+		const arg = args[i] ?? "";
+		if (valueOptions.has(arg)) {
+			i += 1;
+			continue;
+		}
+		if (arg === "--" || arg.startsWith("-")) continue;
+		files.push(arg);
+	}
+	return files;
 }
 
 /** Find redirect targets without treating quoted `>` characters as syntax. */
@@ -468,7 +504,8 @@ export function extractGrepSearchReadsFromOutput(
  * Extract files a bash command WROTE/created, so the read-guard can treat them
  * as authored by the agent (mirrors the Write tool). Handles:
  *   redirects: `> FILE`, `>> FILE`, `N> FILE`, `&> FILE` (with or without space)
- *   tee [-a] FILE...,  sed -i ... FILE,  cp/mv/install ... DEST,  touch FILE...
+ *   tee [-a] FILE..., sed -i ... FILE, cp/mv/install ... DEST, touch FILE...,
+ *   and common in-place formatter/fixer invocations with explicit file targets.
  *
  * Returns absolute paths. The file need not exist yet (it may be created) —
  * existence is confirmed later by recordWritten at tool_result time.
@@ -498,8 +535,7 @@ export function extractWrittenPathsFromCommand(
 	}
 	for (const tokens of commandSegments(command)) {
 		if (tokens.length === 0) continue;
-		const verb = path.basename(tokens[0] ?? "");
-		const args = tokens.slice(1);
+		const { verb, args } = unwrapCommand(tokens);
 
 		if (verb === "tee" || verb === "touch") {
 			for (const a of args) if (!a.startsWith("-")) add(a);
@@ -516,6 +552,47 @@ export function extractWrittenPathsFromCommand(
 			// flag this same branch already ignores.
 			const files = args.filter((a) => !a.startsWith("-"));
 			if (files.length >= 1) add(files[files.length - 1]); // destination
+		} else if (verb === "biome") {
+			const sub = args[0];
+			if ((sub === "format" || sub === "check") && args.includes("--write")) {
+				for (const file of formatterFileArgs(args, 1, new Set(["--config-path"]))) add(file);
+			}
+		} else if (verb === "prettier" && args.includes("--write")) {
+			for (const file of formatterFileArgs(args, 0, new Set(["--config", "--ignore-path", "--parser", "--plugin"]))) add(file);
+		} else if (verb === "eslint" && args.includes("--fix")) {
+			for (const file of formatterFileArgs(args, 0, new Set(["--config", "--ignore-path", "--parser", "--plugin"]))) add(file);
+		} else if (verb === "ruff") {
+			const sub = args[0];
+			if (sub === "format" || args.includes("--fix")) {
+				const start = sub === "format" || sub === "check" ? 1 : 0;
+				for (const file of formatterFileArgs(args, start, new Set(["--config"]))) add(file);
+			}
+		} else if (verb === "gofmt" && args.includes("-w")) {
+			for (const file of formatterFileArgs(args)) add(file);
+		} else if (verb === "cargo" && args[0] === "fmt") {
+			// Bare cargo fmt is project-scoped and cannot be enumerated without a
+			// filesystem walk. Only explicit rustfmt operands after `--` are safe.
+			const separator = args.indexOf("--");
+			if (separator >= 0) {
+				for (const file of formatterFileArgs(args, separator + 1, new Set(["--edition", "--config-path"]))) add(file);
+			}
+		} else if (verb === "rustfmt") {
+			for (const file of formatterFileArgs(args, 0, new Set(["--edition", "--config-path"]))) add(file);
+		} else if (verb === "black") {
+			for (const file of formatterFileArgs(args, 0, new Set(["--config", "--exclude", "--include", "--line-length", "--target-version"]))) add(file);
+		} else if (verb === "clang-format" && args.includes("-i")) {
+			for (const file of formatterFileArgs(args, 0, new Set(["--style", "--fallback-style", "--assume-filename"]))) add(file);
+		} else if (verb === "dotnet" && args[0] === "format") {
+			// dotnet format is normally solution-scoped. `--include` is the one
+			// invocation form that provides attributable source paths.
+			for (let i = 1; i < args.length; i += 1) {
+				if (args[i] === "--include" && args[i + 1]) {
+					for (const file of (args[i + 1] ?? "").split(",")) add(file);
+					i += 1;
+				} else if (args[i]?.startsWith("--include=")) {
+					for (const file of (args[i] ?? "").slice("--include=".length).split(",")) add(file);
+				}
+			}
 		} else if (verb === "git") {
 			// git ops that REWRITE working-tree files with explicit paths:
 			//   git checkout [<ref>] -- <files>   git restore [opts] <files>
