@@ -24,19 +24,33 @@ Pull requests must pass `npm run lint` and `npm test`. CI also runs `npm run che
 
 ## Local git hooks
 
-`npm install` wires Husky-managed hooks into `.git/config`'s `core.hooksPath`,
-scoped to your clone (each worktree wires its own):
+`npm install` wires Husky-managed hooks:
 
 - **pre-commit** — changelog fragment validation (`npm run changelog:check`)
-  plus `npm run lint`. Measured around 4s on this repo.
+  plus `npm run lint`. Measured around 5.5s on this repo.
 - **pre-push** — a build, then targeted `vitest` runs for the changed `.ts`
   files (never the full suite; see `scripts/pre-push-targeted-tests.mjs`).
+  Waits at most 2 minutes on the shared machine-wide test-suite lock
+  (#1101); if that times out, the push proceeds anyway with a warning —
+  CI runs the real gate either way.
 
-Skip either with `PI_LENS_SKIP_HOOKS=1 git commit ...` / `git push ...`.
-Agents and CI set this — their commit cadence is too high for a lint pass on
-every commit, and CI runs the real gates anyway. Humans should leave hooks on;
-they catch the exact class of failure (unused vars, changelog-format
-violations) that used to slip through to CI.
+`core.hooksPath` is `git config` — shared by every worktree of the same
+clone, not scoped per worktree. What IS per-worktree is `.husky/_` (the
+directory husky installs at that path), which is git-ignored and only
+created by running `npm install` in that specific worktree. A worktree
+where nobody has run `npm install` yet has the hook FILES checked out but
+nothing wired to `core.hooksPath` there, so `git commit`/`git push` silently
+run no hooks. This is accepted behavior, not a bug to route around: hooks
+serve human checkouts, where `npm install` has run; agent worktrees are
+covered by `PI_LENS_SKIP_HOOKS` below regardless, and CI is authoritative
+either way.
+
+Skip either hook with `PI_LENS_SKIP_HOOKS=<anything> git commit ...` /
+`git push ...` (any non-empty value works). Agents and CI should set this —
+their commit cadence across concurrent worktrees is too high for a lint pass
+on every commit, and CI runs the real gates anyway. Humans committing
+directly should leave hooks on; they catch the exact class of failure
+(unused vars, changelog-format violations) that used to slip through to CI.
 
 ## What belongs here?
 

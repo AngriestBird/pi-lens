@@ -1,5 +1,5 @@
-if [ "$PI_LENS_SKIP_HOOKS" = "1" ]; then
-  echo "[pre-commit] skipped (PI_LENS_SKIP_HOOKS=1)."
+if [ -n "$PI_LENS_SKIP_HOOKS" ]; then
+  echo "[pre-commit] skipped (PI_LENS_SKIP_HOOKS is set)."
   exit 0
 fi
 

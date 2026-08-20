@@ -12,9 +12,14 @@
 // (which would also mask a real build failure).
 //
 // Skipped, not attempted, when:
-//   - PI_LENS_SKIP_HOOKS=1        explicit opt-out (agents/CI set this)
-//   - CI=true                     GitHub Actions sets this automatically;
-//                                  CI never commits, hooks buy nothing
+//   - PI_LENS_SKIP_HOOKS is set   explicit opt-out (agents/CI set this) —
+//                                  any non-empty value, same rule the
+//                                  hooks themselves use (.husky/pre-commit,
+//                                  .husky/pre-push)
+//   - CI is set (not "false")     GitHub Actions sets CI=true, but other CI
+//                                  runners set other truthy spellings; treat
+//                                  any non-empty value other than "false" as
+//                                  CI. CI never commits, hooks buy nothing.
 //   - no .git here                consumer install (dependency, tarball) —
 //                                  there is no repo to attach hooks to
 //   - no node_modules/husky       devDependencies weren't installed
@@ -22,9 +27,18 @@
 import { existsSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 
+function isSet(value) {
+	return typeof value === "string" && value.length > 0;
+}
+
+function isCi() {
+	const value = process.env.CI;
+	return isSet(value) && value.trim().toLowerCase() !== "false";
+}
+
 function skipReason() {
-	if (process.env.PI_LENS_SKIP_HOOKS === "1") return "PI_LENS_SKIP_HOOKS=1";
-	if (process.env.CI === "true") return "CI=true";
+	if (isSet(process.env.PI_LENS_SKIP_HOOKS)) return "PI_LENS_SKIP_HOOKS is set";
+	if (isCi()) return "CI is set";
 	if (!existsSync(".git")) return "no .git (not a clone)";
 	if (!existsSync("node_modules/husky/bin.js")) return "husky not installed (production install)";
 	return null;
