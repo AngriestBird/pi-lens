@@ -227,6 +227,9 @@ function describeSnapshotMiss(
 	if (snapshot.seq !== currentProjectSeq) {
 		return `stale(seq=${snapshot.seq}, current=${currentProjectSeq})`;
 	}
+	// Defensive-only arm: parseSnapshot rejects incompatible versions, and a
+	// same-sequence parsed snapshot is fresh. Keep this classification explicit
+	// so a future loader change cannot collapse it into a generic miss.
 	return "incompatible";
 }
 
