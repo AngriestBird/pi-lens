@@ -3,6 +3,7 @@ import * as path from "node:path";
 import { getProjectDataDir } from "../file-utils.js";
 import { writeFileAtomic } from "../atomic-write.js";
 import { readJsonCache } from "../json-cache-read.js";
+import { createGenerationMap } from "../generation-guard.js";
 import { normalizeMapKey } from "../path-utils.js";
 import { loadReverseDependencyIndexFromSnapshot } from "../reverse-deps.js";
 import { MTIME_DRIFT_TOLERANCE_MS } from "../blocker-freshness.js";
@@ -153,18 +154,28 @@ export function clearAllWorkspaceDiagnosticsCaches(): void {
 // see the `state.root` fallback's doc comment on `clearWorkspaceDiagnosticsCache`
 // below and #1707 for that residual gap, tracked rather than silently
 // claimed as solved.
-const _cacheEpochs = new Map<string, number>();
-
-function cacheEpoch(root: string): number {
-	return _cacheEpochs.get(normalizeMapKey(root)) ?? 0;
-}
-
-function bumpCacheEpoch(root: string): number {
-	const key = normalizeMapKey(root);
-	const next = (_cacheEpochs.get(key) ?? 0) + 1;
-	_cacheEpochs.set(key, next);
-	return next;
-}
+//
+// #1754: the per-cwd epochs are the shared `GenerationMap` primitive rather
+// than a hand-rolled Map, so the capture-before-load/check-before-write shape
+// here is the same code the dispatch-availability guards run, and a dropped
+// write is visible in the degradation ledger instead of silent.
+//
+// Two properties this file relies on, both documented on the primitive:
+//
+// - The map issues stamps from ONE monotonic ticket counter, so a cwd dropped
+//   at the retained-key bound reads 0 — a stamp no live handle holds — and its
+//   outstanding contexts report stale. Fail-closed, which for this cache means
+//   "recompute", the same outcome a real refresh produces. The pre-#1754 map
+//   was unbounded; the bound is new and costs at most one extra sweep for a
+//   cwd that fell off the end.
+// - `normalizeMapKey` runs `realpathSync.native` on Windows. A handle re-runs
+//   it only after the map has been invalidated, so an uninterrupted sweep pays
+//   that syscall once at context creation rather than once per `lookup()`, and
+//   an interrupted one pays it per check to stay correct if the cwd's realpath
+//   answer moved.
+const _cacheEpochs = createGenerationMap("workspace-diagnostics-cache", {
+	normalizeKey: normalizeMapKey,
+});
 
 /** Fail-safe on any read/parse/shape problem: return `undefined` so the
  * caller treats a stale/missing/corrupt cache as "nothing cached" — every
@@ -213,7 +224,7 @@ export function clearWorkspaceDiagnosticsCache(cwd: string): void {
 	// Bump FIRST: any sweep context already loaded (whose own `persist()`
 	// hasn't run yet) must observe an epoch mismatch regardless of exactly
 	// when its write lands relative to this clear.
-	bumpCacheEpoch(root);
+	_cacheEpochs.bump(root);
 	try {
 		saveWorkspaceDiagnosticsCache(root, {
 			version: WORKSPACE_DIAGNOSTICS_CACHE_VERSION,
@@ -386,7 +397,7 @@ export function createWorkspaceDiagnosticsCacheContext(
 		_registeredCwds.add(root);
 	}
 	// #1669: captured at load time — see the epoch doc comment above.
-	const epoch = cacheEpoch(root);
+	const epoch = _cacheEpochs.capture(root);
 	const existing = loadWorkspaceDiagnosticsCache(root);
 	const entries: Record<string, WorkspaceDiagnosticsCacheEntry> = {
 		...(existing?.entries ?? {}),
@@ -415,7 +426,7 @@ export function createWorkspaceDiagnosticsCacheContext(
 			// `cacheEpoch` is in-memory only (see its doc comment) — this runs
 			// per file, and a same-process clear always updates memory
 			// synchronously, so this needs no disk read to be authoritative.
-			if (cacheEpoch(root) !== epoch) return undefined;
+			if (!epoch.isCurrent()) return undefined;
 			const entry = entries[cacheKeyFor(filePath)];
 			if (!entry || entry.scopeKey !== scopeKey) return undefined;
 			if (!isEntryFresh(filePath, entry, getImports)) return undefined;
@@ -448,20 +459,24 @@ export function createWorkspaceDiagnosticsCacheContext(
 			// publishing this sweep's (now-stale-relative-to-the-refresh) in-memory
 			// copy would resurrect exactly what the refresh cleared. Drop the
 			// write; the next sweep loads clean and recomputes.
-			if (cacheEpoch(root) !== epoch) {
-				dirty = false;
-				return;
-			}
-			try {
-				saveWorkspaceDiagnosticsCache(root, {
-					version: WORKSPACE_DIAGNOSTICS_CACHE_VERSION,
-					entries,
-				});
-				dirty = false;
-			} catch {
-				// Best-effort: a failed cache write just means the next sweep pays
-				// the full cost again — never worth failing the sweep itself over.
-			}
+			const published = epoch.guardedWrite(root, () => {
+				try {
+					saveWorkspaceDiagnosticsCache(root, {
+						version: WORKSPACE_DIAGNOSTICS_CACHE_VERSION,
+						entries,
+					});
+					return true;
+				} catch {
+					// Best-effort: a failed cache write just means the next sweep pays
+					// the full cost again — never worth failing the sweep itself over.
+					return false;
+				}
+			});
+			// `undefined` means the guard dropped the write as stale: this
+			// in-memory copy is worthless, so stop advertising it as pending.
+			// `false` means the write itself failed, so `dirty` stays set and the
+			// next sweep retries. Same three outcomes as the pre-#1754 guard.
+			if (published !== false) dirty = false;
 		},
 	};
 }

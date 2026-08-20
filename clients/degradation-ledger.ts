@@ -97,6 +97,18 @@ export type DegradationKind =
 	 */
 	| "lsp-nav-late-answer"
 	/**
+	 * A `GenerationHandle.guardedWrite` (`clients/generation-guard.ts`) dropped
+	 * a post-await write because the generation it captured is no longer
+	 * current (#1754) — a session reset, a cache refresh, or a newer request
+	 * for the same key landed while the write's producer was in flight. The
+	 * drop is correct: the write belongs to a world that no longer exists.
+	 * It is recorded because a silently dropped write is indistinguishable
+	 * from a guard that never fires, which is how two hand-rolled versions of
+	 * this guard reached review vacuous. Subject carries the source name and
+	 * the identity of the dropped write.
+	 */
+	| "generation-guard-stale-write"
+	/**
 	 * A shell-out linter/analyzer runner (knip, vulture, jscpd, …) produced no
 	 * usable output — empty stdout, or (for report-file runners) no report
 	 * file — on a NONZERO exit (#1736). The empty-result branches these
