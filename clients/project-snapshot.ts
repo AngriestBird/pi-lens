@@ -463,6 +463,298 @@ function readSnapshotBody(
 	}
 }
 
+/**
+ * Scan a JSON value starting at `start` (skipping any leading whitespace)
+ * and return the index one past its end. Handles strings, objects, arrays,
+ * and bare scalars (numbers/`true`/`false`/`null`) — correctly skipping
+ * nested strings/braces/brackets (respecting `\"` escapes) WITHOUT ever
+ * constructing a JS value for them. This is the primitive
+ * `stripTopLevelJsonKeys` (#1785 F5) is built on: `JSON.parse` has no way to
+ * skip a subtree's construction cost — a reviver only prunes the
+ * already-built result — so avoiding a field's parse cost requires never
+ * handing its text to `JSON.parse` in the first place.
+ */
+function skipJsonValue(text: string, start: number): number {
+	let i = start;
+	while (i < text.length && /\s/.test(text[i]!)) i++;
+	const ch = text[i];
+	if (ch === '"') {
+		i++;
+		while (i < text.length) {
+			if (text[i] === "\\") {
+				i += 2;
+				continue;
+			}
+			if (text[i] === '"') {
+				i++;
+				break;
+			}
+			i++;
+		}
+		return i;
+	}
+	if (ch === "{" || ch === "[") {
+		const open = ch;
+		const close = open === "{" ? "}" : "]";
+		let depth = 0;
+		let inString = false;
+		for (; i < text.length; i++) {
+			const c = text[i];
+			if (inString) {
+				if (c === "\\") {
+					i++;
+					continue;
+				}
+				if (c === '"') inString = false;
+				continue;
+			}
+			if (c === '"') {
+				inString = true;
+				continue;
+			}
+			if (c === open) depth++;
+			else if (c === close) {
+				depth--;
+				if (depth === 0) {
+					i++;
+					break;
+				}
+			}
+		}
+		return i;
+	}
+	// A bare scalar (number/true/false/null): scan to the next structural
+	// character. Every snapshot value is one of the five JSON kinds above, so
+	// this branch only ever fires for those scalars.
+	while (i < text.length && !",}]".includes(text[i]!)) i++;
+	return i;
+}
+
+/**
+ * Reconstruct a JSON object literal with the given top-level keys removed,
+ * without ever materializing their values as JS objects (#1785 F5). Used to
+ * excise the expensive fields — `wordIndex`'s postings graph above all,
+ * `files`/`symbols`/`reverseDeps` too — before `JSON.parse` ever sees them,
+ * so a caller that only needs a few small top-level fields (`seq`,
+ * `cachedExports`, `projectRulesScan`, …) doesn't pay to construct the
+ * fields it's about to discard. Correctness relies only on the writer
+ * (`JSON.stringify(snapshot)`, `clients/gzip-stage-write.ts`) never emitting
+ * pretty-printed/indented output — compact `JSON.stringify` output is what
+ * every persist path in this file produces.
+ */
+function stripTopLevelJsonKeys(
+	text: string,
+	keysToStrip: ReadonlySet<string>,
+): string {
+	const objStart = text.indexOf("{");
+	if (objStart === -1) return text;
+	let out = text.slice(0, objStart + 1);
+	let i = objStart + 1;
+	let wroteField = false;
+	while (i < text.length) {
+		while (i < text.length && /\s/.test(text[i]!)) i++;
+		if (text[i] === "}" || i >= text.length) {
+			out += text.slice(i);
+			break;
+		}
+		if (text[i] === ",") {
+			i++;
+			continue;
+		}
+		const keyStart = i;
+		const keyTextEnd = skipJsonValue(text, keyStart);
+		let key: string;
+		try {
+			key = JSON.parse(text.slice(keyStart, keyTextEnd)) as string;
+		} catch {
+			// Malformed key text — bail out to the untouched original rather
+			// than risk producing invalid JSON; the caller's own JSON.parse
+			// on the result will then fail loudly instead of silently.
+			return text;
+		}
+		let j = keyTextEnd;
+		while (j < text.length && /\s/.test(text[j]!)) j++;
+		// text[j] is ':' for a well-formed object.
+		const valueStart = j + 1;
+		const valueEnd = skipJsonValue(text, valueStart);
+		if (!keysToStrip.has(key)) {
+			out += (wroteField ? "," : "") + text.slice(keyStart, valueEnd);
+			wroteField = true;
+		}
+		i = valueEnd;
+	}
+	return out;
+}
+
+/**
+ * Test-only direct access to the raw-text stripper (#1785 F5). Unlike
+ * asserting on `loadProjectSnapshotExportsAndRules`'s RETURN shape — which
+ * only proves the output omits the heavy fields, not that their parse cost
+ * was ever avoided (the function could strip nothing and still hand-pick 4
+ * fields out of a fully-parsed object) — this lets a test inspect the
+ * INTERMEDIATE text `JSON.parse` actually receives, which is the only way to
+ * prove the expensive fields' text never reached `JSON.parse` at all.
+ */
+export function _stripTopLevelJsonKeysForTests(
+	text: string,
+	keysToStrip: readonly string[],
+): string {
+	return stripTopLevelJsonKeys(text, new Set(keysToStrip));
+}
+
+// A fixed, 4-entry, import-time constant — not per-session accumulating
+// state, so it needs no session_start reset (counted in
+// tests/support/session-state-registry.ts's SESSION_STATE_SYMBOL_COUNTS
+// pin for "project-snapshot.ts", alongside the bounded digest hook below).
+//
+// Adding a key here? Add it to `NARROW_DIGEST_HEAVY_KEY_LITERALS` too (~40
+// lines down) — it's a DELIBERATELY separate, independent list (#1785 F7: a
+// digest that reads its own containsHeavyKey answer off THIS set can't
+// detect this set failing/emptying, so it must not).
+const HEAVY_SNAPSHOT_KEYS: ReadonlySet<string> = new Set([
+	"wordIndex",
+	"files",
+	"symbols",
+	"reverseDeps",
+]);
+
+/** The subset of `ProjectSnapshot` the retroactive-hydration path needs. */
+export interface ProjectSnapshotExportsAndRules {
+	version: typeof PROJECT_SNAPSHOT_VERSION;
+	seq: number;
+	cachedExports: Array<[name: string, filePath: string]>;
+	projectRulesScan?: RuleScanResult;
+}
+
+/**
+ * Test-observable DIGEST of the text `parseExportsAndRulesOnly` hands to
+ * `JSON.parse` — never the text itself. #1785 F6 (review round 4): an
+ * earlier version of this hook retained the full narrowed text at module
+ * scope, unconditionally, with no cap and no reset on the hot path — the
+ * EXACT retention class the narrow loader exists to close, reintroduced by
+ * its own observability hook (measured: 28.2MB retained on a production
+ * body). `session-state-conformance.test.ts`'s registry didn't catch it
+ * because `project-snapshot.ts` carries a file-level exemption written for
+ * the bounded parse caches elsewhere in this file — this variable rode that
+ * exemption instead of declaring its own bound. A length + a "does the text
+ * still contain a heavy key" boolean is everything a test needs to prove the
+ * strip ran, without ever holding the (potentially many-MB) text itself.
+ */
+interface NarrowParseDigest {
+	length: number;
+	containsHeavyKey: boolean;
+}
+// #1785 F7 (review round 5): a FIXED LITERAL list, independent of
+// `HEAVY_SNAPSHOT_KEYS` — the digest below exists to detect a broken/emptied
+// `HEAVY_SNAPSHOT_KEYS`, so deriving `containsHeavyKey` from that same
+// constant makes the check vacuous by construction: empty the set and the
+// stripper strips nothing AND `[...HEAVY_SNAPSHOT_KEYS].some(...)` iterates
+// zero entries and reports `false` — the exact failure mode this hook exists
+// to catch, silently passing. Verified: with the shared-constant version,
+// emptying `HEAVY_SNAPSHOT_KEYS` left 38 tests green instead of red.
+const NARROW_DIGEST_HEAVY_KEY_LITERALS = [
+	"wordIndex",
+	"files",
+	"symbols",
+	"reverseDeps",
+] as const;
+
+let _lastNarrowParseDigestForTests: NarrowParseDigest | undefined;
+export function getLastNarrowParseDigestForTests(): NarrowParseDigest | undefined {
+	return _lastNarrowParseDigestForTests;
+}
+export function resetLastNarrowParseDigestForTests(): void {
+	_lastNarrowParseDigestForTests = undefined;
+}
+
+function parseExportsAndRulesOnly(
+	json: string,
+): ProjectSnapshotExportsAndRules | null {
+	const narrowed = stripTopLevelJsonKeys(json, HEAVY_SNAPSHOT_KEYS);
+	_lastNarrowParseDigestForTests = {
+		length: narrowed.length,
+		containsHeavyKey: NARROW_DIGEST_HEAVY_KEY_LITERALS.some((key) =>
+			narrowed.includes(`"${key}":`),
+		),
+	};
+	const parsed = JSON.parse(narrowed) as Partial<ProjectSnapshot>;
+	if (parsed.version !== PROJECT_SNAPSHOT_VERSION) return null;
+	if (typeof parsed.seq !== "number") return null;
+	if (!Array.isArray(parsed.cachedExports)) return null;
+	return {
+		version: PROJECT_SNAPSHOT_VERSION,
+		seq: parsed.seq,
+		cachedExports: parsed.cachedExports.filter(
+			(entry): entry is [string, string] =>
+				Array.isArray(entry) &&
+				typeof entry[0] === "string" &&
+				typeof entry[1] === "string",
+		),
+		projectRulesScan: parsed.projectRulesScan,
+	};
+}
+
+function readSnapshotExportsAndRulesBody(
+	bodyPath: string,
+	gz: boolean,
+): ProjectSnapshotExportsAndRules | null {
+	try {
+		const json = gz
+			? gunzipSync(fs.readFileSync(bodyPath)).toString("utf-8")
+			: fs.readFileSync(bodyPath, "utf-8");
+		return parseExportsAndRulesOnly(json);
+	} catch (err) {
+		logLatency({
+			type: "phase",
+			phase: "project_snapshot_body_corrupt",
+			filePath: bodyPath,
+			durationMs: 0,
+			metadata: {
+				error: err instanceof Error ? err.message : String(err),
+				narrow: true,
+			},
+		});
+		return null;
+	}
+}
+
+/**
+ * #1785 F5: a narrow counterpart to `loadProjectSnapshot` for callers that
+ * only need `seq`/`version`/`cachedExports`/`projectRulesScan` — critically,
+ * NOT `wordIndex`, `files`, `symbols`, or `reverseDeps`. The full
+ * `loadProjectSnapshot` (even `loadProjectSnapshotWithoutWordIndex`, which
+ * only strips the RETAINED copy AFTER a full parse) pays `gunzip` +
+ * `JSON.parse` for the ENTIRE body regardless — dominated by `wordIndex`'s
+ * postings graph (measured: +200ms warm / +700ms cold on a 29MB body,
+ * 209-278ms on this repo's own 16.7MB snapshot). This function excises the
+ * heavy fields from the raw text BEFORE parsing (`stripTopLevelJsonKeys`),
+ * so their construction cost is never paid at all; the remaining cost is
+ * dominated by `cachedExports` (typically a small array), not the postings.
+ *
+ * Consults the same in-process authoritative-write cache
+ * `loadProjectSnapshotInternal` does, for the same read-your-own-write
+ * reason — a save's in-memory object is cheap to narrow (no parse needed at
+ * all) and must win over a possibly-stale on-disk body exactly like the full
+ * loader.
+ */
+export function loadProjectSnapshotExportsAndRules(
+	cwd: string,
+): ProjectSnapshotExportsAndRules | null {
+	const key = normalizeMapKey(cwd);
+	const body = resolveSnapshotBodyPath(cwd);
+	const authoritative = authoritativeSnapshots.get(key);
+	if (authoritative) {
+		const diskMtime = body ? body.mtimeMs : Number.NEGATIVE_INFINITY;
+		if (diskMtime <= authoritative.knownMtime) {
+			const { version, seq, cachedExports, projectRulesScan } =
+				authoritative.snapshot;
+			return { version, seq, cachedExports, projectRulesScan };
+		}
+	}
+	if (!body) return null;
+	return readSnapshotExportsAndRulesBody(body.path, body.gz);
+}
+
 function loadProjectSnapshotInternal(
 	cwd: string,
 	requireWordIndex: boolean,
@@ -1140,6 +1432,63 @@ export function hydrateRuntimeFromProjectSnapshot(
 		runtime.projectRulesScan = snapshot.projectRulesScan;
 	}
 	runtime.wordIndex = deserializeWordIndex(snapshot.wordIndex);
+}
+
+/**
+ * #1785 F2/F3: additive counterpart to `hydrateRuntimeFromProjectSnapshot`
+ * for a LATE/retroactive hydration attempt — one that runs after other work
+ * may already have populated the runtime for real (e.g. quick mode's
+ * background warmup building a genuine `wordIndex`, docCount > 0). The
+ * unconditional version above is only safe for the FIRST hydration attempt,
+ * made before anything else has run: clearing `cachedExports` is correct
+ * there because there is nothing yet to destroy.
+ *
+ * A late call cannot make that assumption, and `cachedExports` and
+ * `projectRulesScan` are populated by INDEPENDENT tasks from whatever else is
+ * running (nothing else in quick mode touches either), so this guards each
+ * field on its OWN "nothing computed since" check rather than one
+ * all-or-nothing bail-out — the field a concurrent task actually populated is
+ * protected without needlessly withholding the other, still-idle field the
+ * snapshot could still supply. Returns whether it hydrated ANY field, so the
+ * caller can log honestly instead of claiming success when nothing changed.
+ *
+ * #1785 F5: takes ONLY the narrow `{ cachedExports, projectRulesScan }`
+ * shape (see `ProjectSnapshotExportsAndRules`) — deliberately no `wordIndex`
+ * parameter at all, not even an optional one. The retroactive path's
+ * captured/reloaded snapshot always comes from
+ * `loadProjectSnapshotExportsAndRules`, which never parses `wordIndex` in
+ * the first place (avoiding its dominant share of a full body parse's cost —
+ * see that function's doc comment for the measured numbers). This is also
+ * the right behavior, not just a performance shortcut: quick mode's warmup
+ * is the only thing that ever builds a `wordIndex` in this window, and F2's
+ * hazard was this exact late-hydration path nulling that live index from a
+ * disk copy that predated it — removing the parameter removes the hazard by
+ * construction instead of merely guarding against it at runtime.
+ */
+export function hydrateRuntimeFromProjectSnapshotIfIdle(
+	runtime: RuntimeCoordinator,
+	snapshot: Pick<ProjectSnapshot, "cachedExports" | "projectRulesScan">,
+): boolean {
+	let hydratedAnything = false;
+
+	if (runtime.cachedExports.size === 0 && snapshot.cachedExports.length > 0) {
+		runtime.cachedExports.clear();
+		for (const [name, filePath] of snapshot.cachedExports) {
+			runtime.cachedExports.set(name, filePath);
+		}
+		hydratedAnything = true;
+	}
+
+	if (
+		!runtime.projectRulesScan.hasCustomRules &&
+		runtime.projectRulesScan.rules.length === 0 &&
+		snapshot.projectRulesScan
+	) {
+		runtime.projectRulesScan = snapshot.projectRulesScan;
+		hydratedAnything = true;
+	}
+
+	return hydratedAnything;
 }
 
 export function saveRuntimeProjectSnapshot(args: {

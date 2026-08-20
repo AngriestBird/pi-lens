@@ -76,6 +76,38 @@ note: |
   proves a comment is adjacent, never that the comment is true or that
   it describes this cast.
 
+  2026-08-20 (#1847, found in #1843's review): the "one level up from
+  its immediate containing statement" kind list omitted
+  `export_statement` and `public_field_definition`, so a `SAFETY:`
+  comment placed directly above an exported cast (`export const b =
+  (x as unknown as T).y;`) or a class-field cast (`bar: unknown = (x as
+  unknown as T).y;`) could not satisfy the valve — the rule is
+  `error`-tier and semantically `blocking`, so this left no escape for
+  those two shapes. Added both kinds. Verified the containing-statement
+  walk already covers casts nested deeper without a new kind: a cast
+  inside a `static {}` init block or an arrow-function body still
+  resolves to an ancestor `lexical_declaration`/`variable_declaration`
+  already in the list (probed with ast-grep's own `--rule` scan, not
+  reasoning about the grammar from memory), and a `SAFETY:` comment on
+  an `export const` nested inside a `namespace` block clears the valve
+  through the same `export_statement` kind — `stopBy: end` already
+  walks past the namespace wrapper to find it. `readonly`/`abstract`/
+  `static`/private-`#name` class fields all parse to the same
+  `public_field_definition` kind, so one entry covers all of them.
+
+  2026-08-20 (#1852 review, F1): the same defect shape one more time —
+  an enum member's initializer cast (`enum Foo { A = (x as unknown as
+  T).y }`) has no recognized ancestor either. The member's own kind is
+  `enum_assignment` (probed the same way: `ast-grep scan --rule` against
+  a real `enum`/`const enum`/`export enum` snippet rather than guessing
+  from the export/field precedent). One `enum_assignment` kind entry
+  covers plain, `const`, and `export` enums alike, the same way
+  `public_field_definition` covered every class-field modifier —
+  `enum_assignment` is the member-list node itself, unaffected by
+  keywords on the enclosing `enum_declaration`. `declare enum` members
+  have no initializer expression to cast, so there is nothing to probe
+  there.
+
   Matched pair with `no-chained-type-assertions.yml`. As of 2026-08-20
   the two PARTITION the assertion space instead of overlapping: this
   rule owns `x as unknown as T` (with the `SAFETY:` escape valve); that
@@ -126,6 +158,9 @@ rule:
             - kind: lexical_declaration
             - kind: variable_declaration
             - kind: return_statement
+            - kind: export_statement
+            - kind: public_field_definition
+            - kind: enum_assignment
           follows:
             kind: comment
             regex: 'SAFETY\s*:'
