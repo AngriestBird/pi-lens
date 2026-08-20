@@ -990,7 +990,12 @@ describe("ReadGuard", () => {
 
 		// ── #1913: eviction telemetry must survive at default verbosity ──────
 
-		it("emits a bounded read_cap_trimmed record when eviction fires", () => {
+		it("emits exactly one bounded read_cap_trimmed record across many trims", () => {
+			// #1913 review F1: the array is always AT the cap before each push
+			// once it's past 128, so every push past the cap trims exactly 1
+			// record — 300 reads on one hot file trims ~172 times. A naive
+			// "log every trim" design (this test's pre-fix behavior) emits ~172
+			// identical always-on lines; the fix must emit exactly ONE.
 			const env = setupTestEnvironment("read-guard-cap-trim-event-");
 			try {
 				const filePath = path.join(env.tmpDir, "hot.ts");
@@ -999,7 +1004,7 @@ describe("ReadGuard", () => {
 					Array.from({ length: 400 }, (_, i) => `line${i + 1}`).join("\n"),
 				);
 				const guard = createReadGuard("test-session");
-				for (let i = 1; i <= 129; i++) {
+				for (let i = 1; i <= 300; i++) {
 					guard.recordRead(
 						createReadRecord(filePath, {
 							requestedOffset: i,
@@ -1013,15 +1018,85 @@ describe("ReadGuard", () => {
 					.mocked(logReadGuardEvent)
 					.mock.calls.filter(([e]) => e.event === "read_cap_trimmed");
 				expect(trimCalls).toHaveLength(1);
+				// The ONE emitted line is the first trim's own snapshot — an
+				// unbounded design can't be reconciled with a single log line
+				// per session (each trim genuinely evicts only 1 record), so
+				// the running total across all 172 trims lives in
+				// `getTrimStats`, checked below, not in this line.
 				expect(trimCalls[0][0]).toMatchObject({
 					event: "read_cap_trimmed",
 					filePath: normalizeFilePath(filePath),
 					metadata: {
+						trimEventCount: 1,
 						evictedRecordCount: 1,
 						evictedGenuineCount: 1,
 						evictedCreditCount: 0,
-						rawReadCountForFile: 129,
 					},
+				});
+
+				// The running totals across ALL 172 trims stay observable via
+				// getTrimStats even though logging stopped after the first.
+				const stats = guard.getTrimStats(filePath);
+				expect(stats).toEqual({
+					totalEvicted: 172,
+					evictedCreditCount: 0,
+					evictedGenuineCount: 172,
+					trimEventCount: 172,
+				});
+			} finally {
+				env.cleanup();
+			}
+		});
+
+		it("splits evicted credit vs. genuine reads in the trim accumulator", () => {
+			// #1913 review F3: `evictedCreditCount`/`evictedGenuineCount` must
+			// actually discriminate — a no-op'd increment would leave this
+			// green only if every trimmed record happened to be genuine (the
+			// prior test's fixture). Mix search-credit and genuine reads so a
+			// trim spends credits first, then genuine reads, and prove both
+			// counters move.
+			const env = setupTestEnvironment("read-guard-cap-trim-split-");
+			try {
+				const filePath = path.join(env.tmpDir, "hot.ts");
+				fs.writeFileSync(
+					filePath,
+					Array.from({ length: 400 }, (_, i) => `line${i + 1}`).join("\n"),
+				);
+				const guard = createReadGuard("test-session");
+				// 3 search-credit reads, then 130 genuine reads: 133 records vs.
+				// a 128 cap. Eviction spends credits first (3), then 2 genuine
+				// reads, across 5 trim events (each push past the cap trims 1).
+				for (let i = 1; i <= 3; i++) {
+					guard.recordRead(
+						createReadRecord(filePath, {
+							requestedOffset: i,
+							requestedLimit: 1,
+							effectiveOffset: i,
+							effectiveLimit: 1,
+							searchCredit: {
+								marginBefore: 0,
+								marginAfter: 0,
+								reason: "match-lines-only",
+							},
+						}),
+					);
+				}
+				for (let i = 4; i <= 133; i++) {
+					guard.recordRead(
+						createReadRecord(filePath, {
+							requestedOffset: i,
+							requestedLimit: 1,
+							effectiveOffset: i,
+							effectiveLimit: 1,
+						}),
+					);
+				}
+				const stats = guard.getTrimStats(filePath);
+				expect(stats).toEqual({
+					totalEvicted: 5,
+					evictedCreditCount: 3,
+					evictedGenuineCount: 2,
+					trimEventCount: 5,
 				});
 			} finally {
 				env.cleanup();

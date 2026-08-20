@@ -329,6 +329,52 @@ describe("extractGrepSearchReadsFromOutput", () => {
 		]);
 	});
 
+	it("falls back to match-line-only credit when piped through uniq", () => {
+		const a = touchLines("a.ts", 40);
+		// uniq drops adjacent duplicate lines, which can include a repeated
+		// context line — same drop hazard as head/tail (#1913 F4).
+		expect(
+			extractGrepSearchReadsFromOutput(
+				`grep -n -C2 foo ${a} | uniq`,
+				tmp,
+				"9:foo",
+			),
+		).toEqual([
+			{ file: a, startLine: 9, endLine: 9, contextBefore: 0, contextAfter: 0 },
+		]);
+	});
+
+	// ── #1913 review F2: a real `|` must be required, not mere adjacency ─────
+
+	it("keeps full credit when head follows via ; instead of a pipe", () => {
+		const a = touchLines("a.ts", 40);
+		// `head` here runs as its own command, never fed grep's stdout — a
+		// mutant that treats ANY adjacent head/tail as truncating (dropping the
+		// `terminator === "pipe"` check) would wrongly zero this out.
+		expect(
+			extractGrepSearchReadsFromOutput(
+				`grep -n -C2 foo ${a} ; head -1 ${a}`,
+				tmp,
+				"9:foo",
+			),
+		).toEqual([
+			{ file: a, startLine: 9, endLine: 9, contextBefore: 2, contextAfter: 2 },
+		]);
+	});
+
+	it("keeps full credit when head follows via && instead of a pipe", () => {
+		const a = touchLines("a.ts", 40);
+		expect(
+			extractGrepSearchReadsFromOutput(
+				`grep -n -C2 foo ${a} && head -1 ${a}`,
+				tmp,
+				"9:foo",
+			),
+		).toEqual([
+			{ file: a, startLine: 9, endLine: 9, contextBefore: 2, contextAfter: 2 },
+		]);
+	});
+
 	it("credits full context when the command is not piped at all", () => {
 		const a = touchLines("a.ts", 40);
 		expect(

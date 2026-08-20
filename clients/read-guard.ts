@@ -11,6 +11,7 @@
  */
 
 import * as fs from "node:fs";
+import { incrementDegradationCount } from "./degradation-ledger.js";
 import { createFileTime, type FileTime } from "./file-time.js";
 import { hashDiagnosticContent } from "./lsp/diagnostic-binding.js";
 import { normalizeEphemeralMapKey, normalizeFilePath } from "./path-utils.js";
@@ -210,6 +211,20 @@ const READ_GUARD_MAX_FILES = 256;
  * age alone is the wrong order.
  */
 const READ_GUARD_MAX_RECORDS_PER_FILE = 128;
+
+/**
+ * Session-lifetime running totals for one file's record-cap trims (#1913
+ * review F1). Owned per-`ReadGuard`-instance, so it re-arms automatically at
+ * `session_start` along with `this.reads`/`this.edits` — no separate reset to
+ * wire and forget. Queryable via `getTrimStats` even after logging stops
+ * re-emitting (see `recordRead`'s trim block).
+ */
+export interface FileTrimStats {
+	totalEvicted: number;
+	evictedCreditCount: number;
+	evictedGenuineCount: number;
+	trimEventCount: number;
+}
 
 /**
  * Trim a single file's read list to the per-file cap. Returns how many records
@@ -533,6 +548,8 @@ export class ReadGuard {
 	// happened to the file since. Pruned inside `evictFile` so it never
 	// outlives the record it points at.
 	private readonly knownPathIndex = new Map<string, string>();
+	/** Running per-file record-cap trim totals for this session (#1913 F1). */
+	private readonly trimAccumulators = new Map<string, FileTrimStats>();
 	private readonly sessionId: string;
 	private readonly sessionStartMs: number;
 
@@ -708,23 +725,61 @@ export class ReadGuard {
 
 		// #1913: the eviction counters above ride `read_recorded`, which is
 		// gated behind PI_LENS_READ_GUARD_VERBOSE — off by default. That left a
-		// live eviction regression with no trace at default verbosity. Evictions
-		// are rare BY CONSTRUCTION (bounded by READ_GUARD_MAX_RECORDS_PER_FILE
-		// overflowing), so one always-on line per trim event is cheap; emit it
-		// as its own event and add it to read-guard-logger's always-log list
-		// instead of gating it, while every other per-read line stays gated.
+		// live eviction regression with no trace at default verbosity.
+		//
+		// review F1: a naive "emit every trim" fix floods read-guard.log once a
+		// hot file sits past the cap — every later push trims exactly 1 record
+		// (the array is always AT the cap before the push, so `excess` is
+		// always exactly 1), so 300 recordRead calls on one file is ~172
+		// identical always-on lines, and can rotate `edit_blocked` records out
+		// of the 1MB cap. `rawReadCountForFile` also freezes at cap+1 forever,
+		// so a raw per-trim record can't even discriminate thrash severity.
+		//
+		// Fix: emit the read-guard.log line ONCE per file per session, on the
+		// FIRST trim only. `trimAccumulators` still updates on every trim,
+		// queryable via `getTrimStats` — the running totals a health surface or
+		// a future emission point would need are never lost, even though
+		// read-guard.log stops re-announcing them. "Have we already logged
+		// this file's first trim" routes through the degradation ledger's own
+		// rising-edge tally (`incrementDegradationCount` — the pattern
+		// CLAUDE.md names for repeated degradations) instead of a hand-rolled
+		// per-file Set; subsequent trims still call it, so the ledger's own
+		// entry for this (kind, subject) keeps its reason text and count
+		// current for the health/degradation summary even after read-guard.log
+		// goes quiet.
 		if (evictedRecordCount > 0) {
-			logReadGuardEvent({
-				event: "read_cap_trimmed",
-				sessionId: this.sessionId,
-				filePath: storedRecord.filePath,
-				metadata: {
-					evictedRecordCount,
-					evictedCreditCount,
-					evictedGenuineCount,
-					rawReadCountForFile,
-				},
+			const key = storedRecord.filePath;
+			const acc = this.trimAccumulators.get(key) ?? {
+				totalEvicted: 0,
+				evictedCreditCount: 0,
+				evictedGenuineCount: 0,
+				trimEventCount: 0,
+			};
+			acc.totalEvicted += evictedRecordCount;
+			acc.evictedCreditCount += evictedCreditCount;
+			acc.evictedGenuineCount += evictedGenuineCount;
+			acc.trimEventCount += 1;
+			this.trimAccumulators.set(key, acc);
+
+			const isRisingEdge = incrementDegradationCount({
+				kind: "read-guard-record-cap-trim",
+				subject: key,
+				reason: `trim #${acc.trimEventCount}: evicted ${evictedRecordCount} (credit ${evictedCreditCount}, genuine ${evictedGenuineCount})`,
 			});
+			if (isRisingEdge) {
+				logReadGuardEvent({
+					event: "read_cap_trimmed",
+					sessionId: this.sessionId,
+					filePath: storedRecord.filePath,
+					metadata: {
+						trimEventCount: acc.trimEventCount,
+						evictedRecordCount: acc.totalEvicted,
+						evictedCreditCount: acc.evictedCreditCount,
+						evictedGenuineCount: acc.evictedGenuineCount,
+						rawReadCountForFile,
+					},
+				});
+			}
 		}
 
 		// Also update FileTime stamp for this file
@@ -1210,6 +1265,19 @@ export class ReadGuard {
 		const key = this.key(filePath);
 		if (this.reads.has(key)) this.touchFile(key);
 		return this.reads.get(key) ?? [];
+	}
+
+	/**
+	 * Session-lifetime record-cap trim totals for a file (#1913 review F1).
+	 * `recordRead` only writes ONE `read_cap_trimmed` read-guard.log line per
+	 * file per session (on the first trim), so this is the running-totals
+	 * surface for everything after that — the exact split this class already
+	 * computes on every trim, not re-derivable from `getReadHistory` alone
+	 * (which only shows the SURVIVING records, not what was evicted).
+	 */
+	getTrimStats(filePath: string): FileTrimStats | undefined {
+		const stats = this.trimAccumulators.get(this.key(filePath));
+		return stats ? { ...stats } : undefined;
 	}
 
 	/**

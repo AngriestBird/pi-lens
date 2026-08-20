@@ -522,33 +522,43 @@ function parseGrepLineWithoutFile(
 }
 
 /**
- * Verbs that cut a piped stream short by LINE COUNT (#1908): `head`/`tail`
- * (even bare, since both default to a 10-line window) and a `sed` script
- * carrying a `q` command (quits after the addressed line). Either can leave
- * only part of a `grep -C` block's printed context in the command's actual
- * stdout, so a hit that survives the cut cannot be trusted to carry the
- * context grep's flags alone promised.
+ * Verbs that DROP printed lines from a piped stream (#1908, review F4): a
+ * hit that survives such a tail cannot be trusted to still carry the
+ * -A/-B/-C context grep's flags declared, because that context may have
+ * been among the dropped lines. `head`/`tail` drop by position (even bare,
+ * since both default to a 10-line window); `sed` with a `q` command drops
+ * everything after the addressed line; `uniq` drops adjacent duplicate
+ * lines, which can include a context line that happens to repeat.
  *
- * Per-tail credit policy, decided per pipe stage rather than per verb:
- *   - `head`/`tail`/`sed q` downstream of a matching grep → the match-line
- *     survives truncation unpredictably, so credit falls back to
- *     match-line-only (the same conservative default used for unparseable
- *     commands) rather than trusting the declared -A/-B/-C flags.
- *   - `wc`, `sort`, `uniq -c`, and similar STREAM-CONSUMING or reordering
- *     tails need no special case: they replace grep's `file:line:` shaped
- *     lines with a count or reordered text, so `parseGrepOutputSearchReads`
- *     already finds zero (or renumbered-away) matches in the real captured
- *     stdout and credits nothing. Only a verb that can leave an UNMODIFIED
- *     `file:line:` prefix in place while still cutting lines needs handling
- *     here.
+ * The criterion is DROPPING, not "changes grep's output shape" — a review
+ * finding (#1913 F4) caught this file previously conflating the two:
+ *   - `head`/`tail`/`sed q`/`uniq` downstream of a matching grep → some
+ *     printed lines are genuinely gone, so credit falls back to
+ *     match-line-only (the same conservative default already used for
+ *     unparseable commands) rather than trusting the declared flags.
+ *   - `sort` and other REORDER-ONLY filters keep every line grep printed,
+ *     just in a different order — a surviving `file:line:` match still
+ *     carries the full context grep actually printed, so no special case is
+ *     needed (proven by the "still credits full context through a
+ *     non-truncating pipe tail" test below).
+ *   - `wc` and similar filters that REPLACE grep's output entirely (with a
+ *     count, say) leave no `file:line:`-shaped line at all, so
+ *     `parseGrepOutputSearchReads` already finds zero matches in the real
+ *     captured stdout. Also no special case needed, but for the OPPOSITE
+ *     reason from `sort`: nothing survives to credit, rather than
+ *     everything surviving intact.
  *   - A pass-through filter (`cat`, `grep -v`, ...) between grep and a
- *     truncating tail still counts: the walk below follows the whole
- *     pipe chain, not just the immediate next segment.
- *   - Out of scope, deliberately: `sed -n 'Np'`/range-address filtering
- *     without `q` also truncates but isn't in the issue's stated scope
- *     (#1908) — revisit if it recurs in the field.
+ *     dropping tail still counts: the walk below follows the whole pipe
+ *     chain, not just the immediate next segment.
+ *   - Out of scope, deliberately: `sed -n 'Np'` range-address filtering
+ *     without `q`, and `sort -u`, also drop lines but aren't in #1908's
+ *     stated scope — revisit if they recur in the field. Also out of
+ *     scope: a truncating tail hidden inside a subshell/brace-group
+ *     (`( ... )`, `{ ...; }`) or reimplemented in `awk`/`perl` — the shared
+ *     tokenizer this file uses doesn't parse inside those, matching its
+ *     documented "small conservative shell lexer" scope.
  */
-const TRUNCATING_TAIL_VERBS = new Set(["head", "tail"]);
+const LINE_DROPPING_TAIL_VERBS = new Set(["head", "tail", "uniq"]);
 
 function isSedQuitCommand(args: string[]): boolean {
 	for (const arg of args) {
@@ -562,16 +572,19 @@ function isSedQuitCommand(args: string[]): boolean {
 	return false;
 }
 
-function isTruncatingTailCommand(tokens: string[]): boolean {
+function isLineDroppingTailCommand(tokens: string[]): boolean {
 	const verb = path.basename(stripQuotes(tokens[0] ?? ""));
-	if (TRUNCATING_TAIL_VERBS.has(verb)) return true;
+	if (LINE_DROPPING_TAIL_VERBS.has(verb)) return true;
 	if (verb === "sed") return isSedQuitCommand(tokens.slice(1));
 	return false;
 }
 
 /**
  * True when the grep segment starting at `index` feeds — directly or through
- * a chain of pipes — into a truncating tail (#1908).
+ * a chain of pipes — into a line-dropping tail (#1908). Only an unquoted `|`
+ * counts: a `;`/`&&`/`&`-separated command downstream never receives grep's
+ * stdout, so it must not downgrade credit (#1913 F2 — this was previously
+ * unverified by any test that could tell a real pipe from mere adjacency).
  */
 function grepPipesIntoTruncatingTail(
 	segments: ShellCommandSegment[],
@@ -579,7 +592,7 @@ function grepPipesIntoTruncatingTail(
 ): boolean {
 	if (segments[index]?.terminator !== "pipe") return false;
 	for (let j = index + 1; j < segments.length; j++) {
-		if (isTruncatingTailCommand(segments[j].tokens)) return true;
+		if (isLineDroppingTailCommand(segments[j].tokens)) return true;
 		if (segments[j].terminator !== "pipe") return false;
 	}
 	return false;
