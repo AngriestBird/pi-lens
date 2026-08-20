@@ -204,6 +204,7 @@ import {
 	getPiLensEvalMs,
 	markPiLensLoaded,
 	getPiLensLoadedAtMs,
+	consumeHostReadyDelayAnchor,
 	PI_LENS_HOST_BOOT_MS,
 	PI_LENS_LOADED_FROM,
 } from "./clients/startup-timing.js";
@@ -1895,11 +1896,15 @@ function activateExtension(hostPi: ExtensionAPI) {
 			} = await loadBootstrapClients();
 			const bootstrapClientsDurationMs = Date.now() - bootstrapClientsStartedAt;
 			const handlerEnteredAt = Date.now();
+			// Consume the process-lifetime measurement at the first real session
+			// start. Concurrent secondary starts never reach this handler.
+			const emitHostReadyDelay = consumeHostReadyDelayAnchor();
 			await handleSessionStart({
 				ctxCwd: ctx.cwd,
 				sessionStartFiredAt,
 				sessionStartMonotonicAt,
 				extensionLoadedAt: PI_LENS_LOADED_AT_MS,
+				emitHostReadyDelay,
 				sessionReason,
 				handlerEnteredAt,
 				bootstrapClientsStartedAt,

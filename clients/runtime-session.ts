@@ -117,6 +117,8 @@ interface SessionStartDeps {
 	sessionStartMonotonicAt?: number;
 	/** Monotonic instant when the extension finished loading. */
 	extensionLoadedAt?: number;
+	/** True only for the process's first session_start with a load anchor. */
+	emitHostReadyDelay?: boolean;
 	sessionReason?: string;
 	handlerEnteredAt?: number;
 	bootstrapClientsStartedAt?: number;
@@ -170,6 +172,7 @@ function logHostReadyDelay(
 	cwd: string,
 ): void {
 	if (
+		!deps.emitHostReadyDelay ||
 		deps.sessionStartMonotonicAt === undefined ||
 		deps.extensionLoadedAt === undefined
 	) {
@@ -186,6 +189,7 @@ function logHostReadyDelay(
 		durationMs,
 		metadata: {
 			hostStallSuspected: durationMs > HOST_STALL_THRESHOLD_MS,
+			sessionStart: "first-process-session",
 			reason: deps.sessionReason,
 		},
 	});
