@@ -216,6 +216,41 @@ describe("cached grammar wasm never refreshes on a pin bump (#1760)", () => {
 		).toContain("pinned manifest hash");
 	});
 
+	it("re-records a still-stale grammar in a NEW session's ledger (#1801 review F1)", async () => {
+		// The client is a process singleton spanning many sessions
+		// (tree-sitter-shared.ts) — a grammar that is STILL stale after a
+		// session boundary must still show up in the new session's ledger,
+		// mirroring what `reportPoisonedGrammarFile` already does for the
+		// non-wasm case (grammar-poisoned-wasm.test.ts's own "records the
+		// ignored file again after a session boundary" test).
+		const grammarFile = "tree-sitter-across-sessions.wasm";
+		const grammarPath = path.join(env.tmpDir, grammarFile);
+		fs.writeFileSync(grammarPath, OLD_BUILD_WASM);
+		_setGrammarManifestForTests(manifestPinning(grammarFile, NEW_BUILD_WASM));
+
+		const client = await makeClient(env.tmpDir);
+		const countFor = (): number | undefined =>
+			getDegradationSummary().find((g) => g.kind === "grammar-blocked")
+				?.count;
+
+		expect(client.resolveGrammarFile(grammarFile)).toBeUndefined();
+		expect(countFor()).toBe(1);
+		// Same session, same file: one ring slot, no flood.
+		expect(client.resolveGrammarFile(grammarFile)).toBeUndefined();
+		expect(countFor()).toBe(1);
+
+		// A new session starts (handleSessionStart calls resetDegradationLedger
+		// first thing) while the grammar is STILL stale on disk — nothing
+		// re-downloaded it. Pre-fix: `staleGrammarVersionAt`'s memo-hit early
+		// return skipped the report entirely, so the new session's ledger came
+		// back with NO grammar-blocked entry even though the language is still
+		// degraded.
+		resetDegradationLedger();
+		expect(countFor()).toBeUndefined();
+		expect(client.resolveGrammarFile(grammarFile)).toBeUndefined();
+		expect(countFor()).toBe(1);
+	});
+
 	it("skips the staleness check for vendored grammars", async () => {
 		const grammarFile = "tree-sitter-cue.wasm";
 		const grammarPath = path.join(env.tmpDir, grammarFile);
