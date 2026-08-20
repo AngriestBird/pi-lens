@@ -301,7 +301,15 @@ async function detectCandidate(
 	};
 }
 
-/** Drop the PATH verdicts, so a newly installed binary is visible at once. */
+/**
+ * Drop the PATH verdicts, so a newly installed binary is visible at once.
+ *
+ * Module-private on purpose. Clearing the latches alone does NOT re-arm
+ * formatter availability: `getFormattersForFile` answers from `detectionCache`
+ * before it ever probes PATH, so a caller that wants a genuine re-probe must
+ * drop both. `clearFormatterCache` is that pair, and it is the only reset a
+ * session boundary should call (#1895 review round).
+ */
 function resetWhichLatches(): void {
 	whichLatchByCommand.clear();
 	whichTransientCommands.clear();
@@ -1727,6 +1735,16 @@ export async function getFormattersForFile(
 	return enabled;
 }
 
+/**
+ * Re-arm formatter availability: drop both the per-cwd selection cache and the
+ * PATH latches.
+ *
+ * #1895: this is the session-boundary reset. Both halves are required. The
+ * latches decide whether `which` runs at all, but `detectionCache` short-
+ * circuits ahead of them — a same-cwd lookup returns the previous verdict's
+ * formatter names without reaching a probe. Clearing only the latches
+ * therefore re-arms every directory EXCEPT the one the user is working in.
+ */
 export function clearFormatterCache(): void {
 	detectionCache.clear();
 	resetWhichLatches();

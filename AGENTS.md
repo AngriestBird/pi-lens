@@ -73,6 +73,15 @@ Session-start lifecycle hooks must tolerate capability-shaped injected clients.
 Optional reset methods may be absent from test doubles or embedders and must not
 turn session initialization into a failure; concrete clients still reset state.
 
+Formatter PATH availability is session-scoped and must be re-armed in the
+primary `handleSessionStart` reset block beside dispatch availability. Its
+module-local state is not covered by the dispatch generation, and secondary
+session guards must continue to skip both resets. Re-arm through
+`clearFormatterCache`, never the which-latch clear alone: `getFormattersForFile`
+answers a same-cwd lookup from `detectionCache` before it reaches a probe, so
+dropping the latches without the selection cache leaves the previous session's
+verdict standing in the working directory. (#1895)
+
 Per-edit LSP dispatch preserves the touch's correlated `unconfirmedServerIds`
 through `RunnerResult` and runner latency assembly. The agent coverage notice
 renders the bounded scanner set before considering a successful primary result,

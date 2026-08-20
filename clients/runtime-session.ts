@@ -49,6 +49,7 @@ import type { MetricsClient } from "./metrics-client.js";
 import type { OpengrepClient, OpengrepResult } from "./opengrep-client.js";
 import { resetManagedToolRefreshSession } from "./installer/managed-tool-refresh-session.js";
 import { _resetPackageManagerCache } from "./package-manager.js";
+import { clearFormatterCache } from "./formatters.js";
 import { isAtOrAboveHomeDir } from "./path-utils.js";
 import { isPrintMode } from "./print-mode.js";
 import {
@@ -2116,6 +2117,15 @@ export async function handleSessionStart(
 	// the tool for the rest of the process lifetime. Clear it here, same
 	// boundary as the other per-session caches on this line.
 	resetDispatchAvailabilityState();
+	// #1895: formatter PATH verdicts are session-scoped, but they live in
+	// formatters.ts and are not covered by the dispatch generation. Re-arm them
+	// here so a formatter installed or removed between sessions is observed by
+	// the next session. `clearFormatterCache` drops the per-cwd selection cache
+	// as well as the which latches, which is what a real re-probe needs: the
+	// selection cache answers a same-cwd lookup before any probe runs, so
+	// clearing the latches alone would leave the stale verdict standing in the
+	// one directory the user is working in.
+	clearFormatterCache();
 	// #1535: same #1266 pattern, one caller earlier — the `gh auth token` latch
 	// zizmor's spawn reads is process-lived storage whose durability contract is
 	// per SESSION, not per process. Without this, a user who runs `gh auth

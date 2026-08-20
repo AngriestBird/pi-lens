@@ -492,6 +492,15 @@ export const SESSION_STATE_REGISTRY: SessionStateEntry[] = [
 		reason:
 			"The service is torn down and rebuilt per session; this reset is also the seam that carries the sweep hold and TS-repair guard resets.",
 	},
+	{
+		id: "formatters:whichLatches",
+		module: "formatters.ts",
+		state: "whichLatchByCommand, whichTransientCommands, cooldownRecordedForRetryAtMs (cleared together with detectionCache)",
+		policy: "session_start",
+		resetName: "clearFormatterCache",
+		reason:
+			"#1895: formatter PATH availability is session-scoped, but these module-local latches are not covered by the dispatch availability generation. A formatter installed or removed between sessions must be re-probed. The reset is `clearFormatterCache`, not the latch clear alone: `getFormattersForFile` answers a same-cwd lookup from `detectionCache` before it reaches a `which` probe, so dropping the latches without the selection cache re-arms every directory except the working one (review round on PR #1896).",
+	},
 
 	// ── Deliberately not session_start ───────────────────────────────────────
 	{
@@ -523,7 +532,7 @@ export const SESSION_STATE_REGISTRY: SessionStateEntry[] = [
 	{
 		id: "formatters:runtimeState",
 		module: "formatters.ts",
-		state: "whichLatchByCommand, whichTransientCommands, cooldownRecordedForRetryAtMs",
+		state: "detectionCache",
 		policy: "turn_end",
 		resetName: "clearFormatterRuntimeState",
 		reason:
