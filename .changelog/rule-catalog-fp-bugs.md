@@ -2,8 +2,7 @@
 section: Fixed
 ---
 
-- **Eight ast-grep rules stop flagging correct code, without trading false
-  positives for false negatives** — the 2026-08-20 severity audit found
+- **Eight ast-grep rules stop flagging correct code** — the 2026-08-20 severity audit found
   broken escape valves, patterns that crossed function boundaries, and
   content-shape gaps that fired on parameterized queries and static markup.
   A follow-up adversarial review then caught three of the fixes
