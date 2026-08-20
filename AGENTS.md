@@ -1517,7 +1517,7 @@ Every dispatch warning passes through one of two recorders in `clients/pipeline.
 
 | Recorder | Required diagnostic fields | Destination |
 | --- | --- | --- |
-| `recordFromDispatchDiagnostic` | `semantic === "warning"` AND `severity === "warning"` AND (`fixable` OR `fixSuggestion`) | `actionable-warnings.json` — surfaces an advisory and can drive autofix |
+| `recordFromDispatchDiagnostic` | `semantic === "warning"` AND `severity !== "error"` AND (`fixable` OR `fixSuggestion`) | `actionable-warnings.json` — surfaces an advisory and can drive autofix |
 | `recordFromCodeQualityDiagnostic` | `semantic === "warning"` or `"none"` AND `severity !== "error"` AND (no fixable, no fixSuggestion, no autoFixAvailable) | `code-quality-warnings.json` — informational history only |
 
 A runner that wraps a tool with an auto-fix capability **must** propagate `fixable: true` or `fixSuggestion: "<rule-specific guidance>"` per diagnostic — otherwise everything it produces silently goes to code-quality and never reaches the actionable advisory. Severity-`error` diagnostics route to blockers instead, regardless of fixability.
@@ -1527,6 +1527,18 @@ Patterns by tool capability:
 - **Tool exposes per-diagnostic fix metadata** (biome, eslint, ruff, rubocop, shellcheck, oxlint via `--format json` + `help`, ast-grep, tree-sitter via `has_fix`): read it directly, set `fixable: !!fix` or `fixSuggestion: help`.
 - **Tool has `--fix` but no per-warning fix flag** (stylelint, markdownlint): static allowlist of rule IDs documented as deterministically fixable. False positives are worse than false negatives — keep the list conservative.
 - **Tool has no auto-fix** (cpp-check, phpstan, javac, pyright, mypy, go-vet, actionlint, yamllint, etc.): hard-code `fixable: false`. The diagnostic correctly lands in code-quality.
+
+### Severity policy (#1777)
+
+Four tiers, and the dispatch path preserves all four end to end. `clients/dispatch/runners/ast-grep-napi.ts` maps a rule's declared YAML severity straight onto `Diagnostic.severity`; a rule that declares nothing, or declares a value pi-lens does not model, reports at `warning`.
+
+Pick a tier by the evidence behind the rule:
+
+- **`error`** requires a documented zero-false-positive audit in the rule's `note`. Only `error` maps to semantic `blocking` and stops a turn.
+- **`warning`** is a real finding with a known, bounded false-positive rate.
+- **`hint`** and **`info`** are style opinions. They render as advisory text, never block, and lose the report budget to warnings when a report is capped.
+
+Tier governs how loudly a finding renders, not whether its fix is offered: a hint-tier rule with a fix still routes to actionable warnings. Do not re-tier a rule without recording the false-positive census that justifies the move.
 
 When changing a serialized cache that feeds this pipeline (e.g. `clients/cache/rule-cache.ts`), bump `CACHE_VERSION` so old entries invalidate. The tree-sitter rule cache previously stripped `has_fix` on roundtrip, silently demoting every tree-sitter rule with auto-fix to non-fixable on any cache hit (commit `24af518`).
 
