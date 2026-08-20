@@ -74,6 +74,7 @@ import type { CodeQualityWarningsReport } from "../clients/code-quality-warnings
 import {
 	getFileDiagnosticSummaries,
 	type FileDiagnosticSummary,
+	reconcileCorrelatedScanDiagnostics,
 	reconcileScanDiagnostics,
 	reconcileStaleWidgetDependencyBlockers,
 	reconcileStaleWidgetFiles,
@@ -1757,6 +1758,28 @@ async function formatFullMode(
 		cwd,
 		policyMap,
 	);
+	// #1888: the full-mode summary above is the first seam where every
+	// producing lane is correlated. The earlier footer loop intentionally writes
+	// only CONFIRMED LSP results, so an ast-grep backpressure failure left
+	// project-scan (`ast-grep-napi`) findings visible to lens_diagnostics but
+	// absent from the widget. Commit this same post-policy, post-suppression set
+	// to the widget so its human-facing count cannot silently become single-lane.
+	const parsedProjectScanObservedAt = projectSnapshot?.scannedAt
+		? Date.parse(projectSnapshot.scannedAt)
+		: undefined;
+	const projectScanObservedAt =
+		parsedProjectScanObservedAt !== undefined &&
+		Number.isFinite(parsedProjectScanObservedAt)
+		? parsedProjectScanObservedAt
+		: undefined;
+	for (const summary of summaries) {
+		reconcileCorrelatedScanDiagnostics(
+			summary.filePath,
+			summary.diagnostics,
+			nextWriteIndex?.(),
+			projectScanObservedAt,
+		);
+	}
 	const result = formatAllMode(cwd, severity, summaries, {
 		mode: "full",
 		lspFilesChecked: rawLspResults.length,

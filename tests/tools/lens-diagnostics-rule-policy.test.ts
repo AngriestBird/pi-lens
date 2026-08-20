@@ -70,6 +70,7 @@ vi.mock("../../clients/widget-state.js", () => ({
 	reconcileStaleWidgetFiles: async () => 0,
 	reconcileStaleWidgetDependencyBlockers: async () => 0,
 	reconcileScanDiagnostics: vi.fn(),
+	reconcileCorrelatedScanDiagnostics: vi.fn(),
 }));
 
 function makeCacheManager(data: Record<string, unknown> = {}) {

@@ -784,6 +784,40 @@ export function reconcileScanDiagnostics(
 }
 
 /**
+ * Commit the already-correlated result of a full diagnostics scan.
+ *
+ * Unlike {@link reconcileScanDiagnostics}, this seam accepts widget diagnostics
+ * that have already been merged across producing lanes. `lens_diagnostics`
+ * uses it after correlating the confirmed LSP sweep, the cheap project scan,
+ * and retained widget rows. This prevents a broken LSP lane from hiding
+ * independently-produced `ast-grep-napi` findings in the widget count (#1888).
+ * Existing per-entry observation times survive the merge; newly-added project
+ * rows inherit the scan's observation time.
+ */
+export function reconcileCorrelatedScanDiagnostics(
+	filePath: string,
+	diagnostics: WidgetDiagnostic[],
+	writeIndex?: number,
+	observedAt?: number,
+): void {
+	const key = fileMapKey(filePath);
+	if (!diagnosticsWriteGuard.shouldWrite(key, writeIndex)) return;
+	runnerWriteGuard.shouldWrite(key, writeIndex);
+	const observedTs = observedAt ?? Date.now();
+	const correlated = diagnostics.map((diagnostic) => ({
+		...diagnostic,
+		observedAt: diagnostic.observedAt ?? observedTs,
+	}));
+	commitDiagnostics(
+		getOrCreate(filePath, key),
+		filePath,
+		correlated,
+		observedTs,
+		key,
+	);
+}
+
+/**
  * Drop widget entries whose file changed on disk after pi-lens last recorded
  * them (`mtimeMs > touchedAt` → the recorded diagnostics predate the current
  * content → stale) or that no longer exist. Keeps `lens_diagnostics` from

@@ -64,6 +64,7 @@ vi.mock("../../clients/widget-state.js", () => ({
 	getFileDiagnosticSummaries: () => [],
 	reconcileStaleWidgetFiles: async () => 0,
 	reconcileScanDiagnostics: vi.fn(),
+	reconcileCorrelatedScanDiagnostics: vi.fn(),
 }));
 
 beforeEach(() => {

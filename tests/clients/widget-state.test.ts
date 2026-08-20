@@ -14,6 +14,7 @@ import {
 	importWidgetState,
 	isBlocking,
 	reconcileCascadeNeighborLspErrors,
+	reconcileCorrelatedScanDiagnostics,
 	reconcileScanDiagnostics,
 	reconcileStaleWidgetDependencyBlockers,
 	reconcileStaleWidgetFiles,
@@ -218,6 +219,40 @@ describe("getFileDiagnosticSummaries", () => {
 });
 
 describe("widget-state renderWidget", () => {
+	it("counts napi self-scan findings when the correlated LSP lane is unconfirmed (#1888)", () => {
+		const filePath = `${process.cwd()}/coverage-window.ts`;
+		const lspFindings = Array.from({ length: 9 }, (_, index) => ({
+			severity: "error",
+			semantic: "blocking",
+			message: `LSP finding ${index + 1}`,
+			tool: "ast-grep",
+			rule: `lsp-${index + 1}`,
+		}));
+		recordDiagnostics(filePath, lspFindings);
+
+		// This is the real post-correlation widget-state seam used by
+		// lens_diagnostics mode=full. The LSP contribution is retained from the
+		// broken-window state while the independent napi lane contributes three
+		// current findings.
+		reconcileCorrelatedScanDiagnostics(filePath, [
+			...lspFindings,
+			...Array.from({ length: 3 }, (_, index) => ({
+				severity: "error",
+				semantic: "blocking",
+				message: `napi self-scan finding ${index + 1}`,
+				tool: "ast-grep-napi",
+				rule: `napi-${index + 1}`,
+			})),
+		]);
+
+		const header = renderWidget(120, theme)[0] ?? "";
+		expect(header).toContain("12E");
+		expect(getFileDiagnosticSummaries()[0]).toMatchObject({
+			blocking: 12,
+			errors: 12,
+		});
+	});
+
 	it("keeps diagnostic rows within the provided TUI width", () => {
 		const filePath = `${process.cwd()}/index.ts`;
 		recordRunner(filePath, "type-safety", "failed", 2);
