@@ -3,6 +3,7 @@ import { suspendAt } from "../interleaving-kit.js";
 
 const getServersForFileWithConfig = vi.fn();
 const createLSPClient = vi.fn();
+const logLatency = vi.fn();
 
 vi.mock("../../../clients/lsp/config.js", () => ({
 	getServersForFileWithConfig,
@@ -13,11 +14,14 @@ vi.mock("../../../clients/lsp/client.js", () => ({
 	createLSPClient,
 }));
 
+vi.mock("../../../clients/latency-logger.js", () => ({ logLatency }));
+
 describe("LSPService race hardening", () => {
 	beforeEach(() => {
 		vi.resetModules();
 		getServersForFileWithConfig.mockReset();
 		createLSPClient.mockReset();
+		logLatency.mockReset();
 		createLSPClient.mockResolvedValue({
 			isAlive: () => true,
 			shutdown: async () => {},
@@ -124,6 +128,96 @@ describe("LSPService race hardening", () => {
 		initialize.restore();
 	});
 
+	it("distinguishes a warm-touch budget miss while its single spawn remains in flight", async () => {
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const service = new LSPService();
+		const client = {
+			serverId: "marksman",
+			isAlive: () => true,
+			shutdown: vi.fn(async () => {}),
+			getOperationSupport: () => ({}),
+			getWorkspaceDiagnosticsSupport: () => ({
+				advertised: false,
+				mode: "push-only" as const,
+				diagnosticProviderKind: "none",
+			}),
+			getAdvertisedCommands: () => [],
+			getRawCapabilityKeys: () => [],
+			notify: { open: vi.fn().mockResolvedValue(undefined) },
+		};
+		const initialize = suspendAt(createLSPClient, async () => client);
+		const spawn = vi.fn(async () => ({
+			process: {
+				process: { killed: false },
+				stdin: {} as any,
+				stdout: {} as any,
+				stderr: {} as any,
+				pid: 1875,
+			},
+		}));
+		getServersForFileWithConfig.mockReturnValue([
+			{
+				id: "marksman",
+				name: "Marksman",
+				extensions: [".md"],
+				root: async () => "C:/repo",
+				spawn,
+			},
+		]);
+
+		const file = "C:/repo/README.md";
+		const firstRead = service.touchFile(file, "# first\n", {
+			diagnostics: "none",
+			clientScope: "primary",
+			maxClientWaitMs: 1,
+			source: "tool_call:read",
+		});
+		await initialize.admitted;
+		expect(await firstRead).toBeUndefined();
+		expect(logLatency).toHaveBeenCalledWith(
+			expect.objectContaining({
+				phase: "lsp_touch_file",
+				metadata: expect.objectContaining({
+					failureKind: "spawn_in_flight_budget_elapsed",
+				}),
+			}),
+		);
+
+		initialize.release();
+		await initialize.completed;
+		const secondRead = await service.touchFile(file, "# first\n", {
+			diagnostics: "none",
+			clientScope: "primary",
+			maxClientWaitMs: 1,
+			source: "tool_call:read",
+		});
+
+		expect(secondRead).toEqual({ diags: [] });
+		expect(spawn).toHaveBeenCalledTimes(1);
+		expect(createLSPClient).toHaveBeenCalledTimes(1);
+		expect(client.notify.open).toHaveBeenCalledTimes(1);
+
+		logLatency.mockClear();
+		getServersForFileWithConfig.mockReturnValue([]);
+		expect(
+			await service.touchFile("C:/repo/notes.unknown", "none\n", {
+				diagnostics: "none",
+				clientScope: "primary",
+				maxClientWaitMs: 1,
+				source: "tool_call:read",
+			}),
+		).toBeUndefined();
+		expect(logLatency).toHaveBeenCalledWith(
+			expect.objectContaining({
+				phase: "lsp_touch_file",
+				metadata: expect.objectContaining({
+					failureKind: "no_clients_none_spawning",
+				}),
+			}),
+		);
+		initialize.restore();
+	});
+
 	// #1766: a resync caller whose own wait budget expires needs to tell "the
 	// server's first spawn is still running" apart from "the server is up and
 	// stalled". isSpawnInFlight reads the real state.inFlight map — no
@@ -158,18 +252,57 @@ describe("LSPService race hardening", () => {
 		]);
 
 		const file = "C:/repo/new.json";
-		expect(service.isSpawnInFlight(file)).toBe(false);
+		const roots = new Map<string, string>();
+		expect(service.isSpawnInFlight(file, roots)).toBe(false);
 
-		const pending = service.getClientForFile(file);
+		const pending = service.getClientForFile(file, undefined, undefined, roots);
 		await initialize.admitted;
 		// The spawn is now parked mid-initialize, exactly the state a resync
 		// deadline can expire during (#1766's cold-start-vs-wedged race).
-		expect(service.isSpawnInFlight(file)).toBe(true);
+		expect(service.isSpawnInFlight(file, roots)).toBe(true);
 
 		initialize.release();
 		await pending;
-		expect(service.isSpawnInFlight(file)).toBe(false);
+		expect(service.isSpawnInFlight(file, roots)).toBe(false);
 		initialize.restore();
+	});
+
+	it("does not classify another workspace's spawn as in-flight", async () => {
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const service = new LSPService();
+		const internal = service as unknown as {
+			state: { inFlight: Map<string, Promise<undefined>> };
+		};
+		let release!: () => void;
+		const pending = new Promise<undefined>((resolve) => {
+			release = () => resolve(undefined);
+		});
+		internal.state.inFlight.set("marksman:C:/repo-a", pending);
+		getServersForFileWithConfig.mockReturnValue([
+			{
+				id: "marksman",
+				name: "Marksman",
+				extensions: [".md"],
+				root: async () => "C:/repo-b",
+				spawn: vi.fn(async () => undefined),
+			},
+		]);
+
+		await service.touchFile("C:/repo-b/README.md", "# repo b\n", {
+			diagnostics: "none",
+			clientScope: "primary",
+			maxClientWaitMs: 1,
+			source: "tool_call:read",
+		});
+		expect(logLatency).toHaveBeenCalledWith(
+			expect.objectContaining({
+				phase: "lsp_touch_file",
+				metadata: expect.objectContaining({
+					failureKind: "no_clients_none_spawning",
+				}),
+			}),
+		);
+		release();
 	});
 
 	it("isSpawnInFlight is false for a file type with no configured server", () => {
