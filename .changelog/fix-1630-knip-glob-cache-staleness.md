@@ -1,5 +1,0 @@
----
-section: Fixed
----
-
-- **knip no longer reports an export as unused after a new test imports it (refs #1630)** — pi-lens runs knip with its own `--cache-location`, and knip's glob cache only revalidates the directories that contributed a matched file. A directory that matched nothing when the cache was written is never recorded, so a consumer added to it stays invisible to every later cached run: knip keeps reporting the export as unused, and pi-lens renders that stale verdict as fresh. This is what made a dogfood session see an "unused export" warning that a direct `knip` run in the same project did not reproduce. pi-lens now deletes knip's glob cache before each run, which forces a fresh file walk while the module and plugin caches — which carry nearly all of the speed — survive. Measured on this repo with knip 6.4.1: uncached 3.3s, fully cached 1.3s, glob cache dropped 1.4s. Upstream knip fixed the glob cache in 6.28.0; the prune is unconditional because the managed install floats and older versions are still common.

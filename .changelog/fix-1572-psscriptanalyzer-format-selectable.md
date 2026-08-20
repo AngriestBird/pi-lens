@@ -1,5 +1,0 @@
----
-section: Fixed
----
-
-- **`psscriptanalyzer-format` can now be selected for `.ps1`/`.psm1`/`.psd1` files, and honors its settings file (closes #1572)** — `.ps1`'s formatter policy required explicit project config before offering the formatter, but the formatter had no config check at all: no configuration of a PowerShell project could ever select it. A project with a `PSScriptAnalyzerSettings.psd1` (or `ScriptAnalyzerSettings.psd1`) now selects `psscriptanalyzer-format` the same way a `.clang-format` or `stylua.toml` selects its formatter — and the resolved settings file is now passed to `Invoke-Formatter -Settings`, so an opted-in project's declared rules apply instead of the stock ruleset. A new coverage guard asserts every registered formatter is selectable under some configuration, so this shape can't recur silently. `tryLazyInstall`'s unreachable `golangci-lint` arm — golangci-lint already auto-installs through the shared tool-installer seam — was removed rather than wired to a second, redundant install path.

@@ -1,5 +1,0 @@
----
-section: Fixed
----
-
-- **An exit-0 PSScriptAnalyzer run with empty or malformed stdout no longer reports the file as clean (refs #1598, refs #1540)** — `PS_SCRIPT` always writes the literal `[]` marker or a diagnostics array before exiting 0, but `parsePSAnalyzerOutput` treated any unparseable stdout the same as that marker, so a lost or truncated write (a host quirk, not a real clean file) reported `succeeded` with zero diagnostics identically to a genuine clean run. The parser now returns `null` for empty or malformed stdout, distinct from a real `[]`; the runner reads `null` as an unreadable run, logs an `availability_decision` (tool `psscriptanalyzer-stdout`) and a `grammar-blocked` degradation-ledger entry, and skips without latching `-File` off — one bad read is not durable evidence the interpreter is broken, mirroring the nonzero-exit branch's own guard. #1540's fix covered the `-File` nonzero-exit and `status === null` paths in the same function; this covers the exit-0-but-unreadable-stdout gap its review flagged as out of scope.
