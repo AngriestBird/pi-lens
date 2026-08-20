@@ -15,6 +15,7 @@ import {
 	type LspMutationContext,
 } from "../clients/lsp-mutation.js";
 import type { LSPCallHierarchyItem } from "../clients/lsp/client.js";
+import { uriToPath } from "../clients/path-utils.js";
 import { compactRenderResult } from "./render-compact.js";
 import {
 	applyWorkspaceEdit,
@@ -1581,12 +1582,47 @@ export function createLspNavigationTool(
 								"__BADINPUT__ callHierarchyItem parameter required for incomingCalls",
 							);
 						}
+						// #1803 fix-round F1: needsFilePath is false for call-hierarchy
+						// traversal (the operand is callHierarchyItem, not path), so the
+						// shared needsFilePath pre-check at line ~1319 never runs for
+						// this operation — LSPService.incomingCalls' own capability gate
+						// (clients/lsp/index.ts) returns a bare [], which this tool layer
+						// cannot distinguish from "supported server, zero callers found".
+						// Pre-check here, keyed off the item's own uri (the file the
+						// resolved server is scoped to), mirrors
+						// runWorkspaceSymbolOperation's supported-check above: throwing
+						// __UNSUPPORTED__ routes through the catch block below into the
+						// same discriminated isError:true/emptyReason:"unsupported" shape
+						// every other capability-gated operation already reports.
+						supported = operationSupportStatus(
+							operation,
+							await lspService.getOperationSupport(
+								uriToPath(callHierarchyItem.uri),
+							),
+						);
+						if (supported === false) {
+							throw new Error(
+								"__UNSUPPORTED__ Active LSP server does not advertise support for incomingCalls",
+							);
+						}
 						return lspService.incomingCalls(callHierarchyItem);
 					}
 					case "outgoingCalls": {
 						if (!callHierarchyItem) {
 							throw new Error(
 								"__BADINPUT__ callHierarchyItem parameter required for outgoingCalls",
+							);
+						}
+						// #1803 fix-round F1: same pre-check as incomingCalls above.
+						supported = operationSupportStatus(
+							operation,
+							await lspService.getOperationSupport(
+								uriToPath(callHierarchyItem.uri),
+							),
+						);
+						if (supported === false) {
+							throw new Error(
+								"__UNSUPPORTED__ Active LSP server does not advertise support for outgoingCalls",
 							);
 						}
 						return lspService.outgoingCalls(callHierarchyItem);
