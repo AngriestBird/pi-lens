@@ -603,10 +603,14 @@ export function _stripTopLevelJsonKeysForTests(
 }
 
 // A fixed, 4-entry, import-time constant — not per-session accumulating
-// state, so it needs no session_start reset (session-state-conformance's
-// pin, once tests/support/session-state-registry.ts's SESSION_STATE_SYMBOL_COUNTS
-// lands via #1837, should count this file's module-level container total
-// going up by one for this and the bounded digest hook below).
+// state, so it needs no session_start reset (counted in
+// tests/support/session-state-registry.ts's SESSION_STATE_SYMBOL_COUNTS
+// pin for "project-snapshot.ts", alongside the bounded digest hook below).
+//
+// Adding a key here? Add it to `NARROW_DIGEST_HEAVY_KEY_LITERALS` too (~40
+// lines down) — it's a DELIBERATELY separate, independent list (#1785 F7: a
+// digest that reads its own containsHeavyKey answer off THIS set can't
+// detect this set failing/emptying, so it must not).
 const HEAVY_SNAPSHOT_KEYS: ReadonlySet<string> = new Set([
 	"wordIndex",
 	"files",
