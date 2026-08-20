@@ -79,8 +79,15 @@ export interface ActionableWarningsReport {
 		 * `clients/runtime-agent-end.ts` and `tools/lens-diagnostics.ts`, which
 		 * can find a file written by a pi-lens build that predates the field.
 		 * Every reader must tolerate its absence.
+		 *
+		 * No `error` tier here (#1799): `recordFromDispatchDiagnostic` (above)
+		 * routes `severity === "error"` to the blocking path and never admits it
+		 * into `warnings`, so an error-tier count is always 0 and never rendered.
+		 * A reader built against an old cache file that still carries `error` is
+		 * unaffected — the field is simply absent from the parsed object now,
+		 * and nothing here reads it.
 		 */
-		byTier?: { warning: number; info: number; hint: number; error: number };
+		byTier?: { warning: number; info: number; hint: number };
 	};
 }
 
@@ -527,7 +534,6 @@ export async function buildActionableWarningsReport(args: {
 		warnings: merged.length,
 		unsuppressed: unsuppressed.length,
 		byTier: {
-			error: countTier("error"),
 			warning: countTier("warning"),
 			info: countTier("info"),
 			hint: countTier("hint"),
