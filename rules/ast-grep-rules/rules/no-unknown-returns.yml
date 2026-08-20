@@ -27,10 +27,11 @@ note: |
   return-type position; a parameter's `type_annotation` is nested one
   level deeper, inside `required_parameter`/`optional_parameter`, so
   the two never collide. `function_type` (`(x: T) => R`, used in
-  function-type aliases) is the one exception in
+  function-type aliases) was the one exception in
   tree-sitter-typescript's grammar: its return type sits directly after
-  `=>` with no `type_annotation` wrapper at all, so it needs its own
-  branch.
+  `=>` with no `type_annotation` wrapper at all, so it needed its own
+  branch — see the 2026-08-20 #1824 entry below for why that branch is
+  now gone.
 
   2026-08-20 (refs #1727, #1777): CONSIDERED for promotion to `error`,
   KEPT at `hint`. Four-corpus census, ast-grep CLI 0.45:
@@ -56,24 +57,29 @@ note: |
   `function_type` scope question is worth its own issue on its own merits;
   it is a scope correction, not a tier change, and this PR does not make
   it.
+
+  2026-08-20 (#1824, refs #1727, #1815, review round 1 N4): dropped
+  the `function_type` arm named above. A TYPE-POSITION `unknown`
+  return is a legitimate contract ("the caller ignores my result"),
+  not a value-position return that skipped parsing at a boundary. This
+  is a scope correction, not a severity change. Same scan setup,
+  before → after: pi-lens full tree 79 → 23; pi-lens `clients/` +
+  `index.ts` 21 → 9 (see the adopting PR for the four-corpus
+  before/after on the same narrow scope). The value-position arm below
+  is unchanged and is what the rule now exclusively targets.
 rule:
-  any:
-    - kind: predefined_type
-      regex: "^unknown$"
-      inside:
-        kind: type_annotation
-        inside:
-          any:
-            - kind: function_declaration
-            - kind: function_expression
-            - kind: generator_function_declaration
-            - kind: arrow_function
-            - kind: method_signature
-            - kind: method_definition
-            - kind: construct_signature
-            - kind: constructor_type
-            - kind: call_signature
-    - kind: predefined_type
-      regex: "^unknown$"
-      inside:
-        kind: function_type
+  kind: predefined_type
+  regex: "^unknown$"
+  inside:
+    kind: type_annotation
+    inside:
+      any:
+        - kind: function_declaration
+        - kind: function_expression
+        - kind: generator_function_declaration
+        - kind: arrow_function
+        - kind: method_signature
+        - kind: method_definition
+        - kind: construct_signature
+        - kind: constructor_type
+        - kind: call_signature
