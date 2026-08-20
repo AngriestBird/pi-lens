@@ -11,8 +11,20 @@ import {
 	createAvailabilityChecker,
 	resolveToolCommandWithInstallFallback,
 } from "./utils/runner-helpers.js";
+import type { ToolExitCodes } from "./utils/spawn-outcome.js";
+import { skipUnlessToolRan } from "./utils/tool-failure.js";
 
 const sqlfluff = createAvailabilityChecker("sqlfluff", ".exe");
+
+// sqlfluff exit codes (its CLI docs): 0 = clean, 1 = violations found, 2 = a
+// user error that stopped the lint (unknown dialect, unreadable config).
+// Only 2 is a rejected invocation.
+//
+// The exit TABLE is what protects this runner, not the nothing-to-parse rule:
+// sqlfluff writes its user errors to STDOUT, not stderr (live: an unknown
+// dialect prints the error there), so stdout is non-empty and the fallback
+// rule would read the failed run as a run that found nothing.
+const SQLFLUFF_EXIT_CODES: ToolExitCodes = { ran: [1] };
 
 export { hasSqlfluffConfig };
 
@@ -158,6 +170,15 @@ const sqlfluffRunner: RunnerDefinition = {
 			timeout: 20000,
 			cwd,
 		});
+
+		// #1816: this runner read `result.status` zero times, so a user error
+		// fell through `parseSqlfluffOutput`'s JSON catch to zero violations and
+		// reported the SQL file as clean.
+		const skipped = skipUnlessToolRan("sqlfluff", {
+			result,
+			exitCodes: SQLFLUFF_EXIT_CODES,
+		});
+		if (skipped) return skipped;
 
 		const diagnostics = parseSqlfluffOutput(result.stdout ?? "", ctx.filePath);
 		if (diagnostics.length === 0) {

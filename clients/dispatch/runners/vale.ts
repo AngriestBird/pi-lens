@@ -12,6 +12,7 @@ import {
 	createAvailabilityChecker,
 	resolveToolCommandWithInstallFallback,
 } from "./utils/runner-helpers.js";
+import { skipUnlessToolRan } from "./utils/tool-failure.js";
 
 const vale = createAvailabilityChecker("vale", ".exe");
 
@@ -154,6 +155,14 @@ const valeRunner: RunnerDefinition = {
 			["--output", "JSON", ctx.filePath],
 			{ cwd, timeout: 15000 },
 		);
+
+		// #1816: this runner read `result.status` zero times, so a Vale that
+		// rejected its config exited nonzero with an empty stdout, parsed to
+		// zero alerts, and reported clean prose. No exit-code table: Vale's
+		// nonzero codes vary with --minAlertLevel, so the conservative
+		// nothing-to-parse rule is the only safe discriminator here.
+		const skipped = skipUnlessToolRan("vale", { result });
+		if (skipped) return skipped;
 
 		const raw = result.stdout || "";
 		const diagnostics = parseValeOutput(raw, ctx.filePath);

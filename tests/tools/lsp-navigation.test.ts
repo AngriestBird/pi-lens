@@ -602,6 +602,117 @@ describe("lsp_navigation tool", () => {
 		]);
 	});
 
+	// #1803 fix round F1: needsFilePath is false for call-hierarchy traversal,
+	// so the shared capability pre-check (which every path-based operation
+	// gets) never ran for incomingCalls/outgoingCalls — a server that never
+	// advertised callHierarchyProvider produced an INDISTINGUISHABLE-from-
+	// "no callers found" empty array, an error swallowed into a false clean
+	// signal (the empty-distinguishes-clean-from-errored screen). This probe
+	// pair proves both directions: unsupported reports the discriminator,
+	// and a genuinely supporting server with zero callers still reports a
+	// clean empty (not a false "unsupported").
+	it("reports the unsupported discriminator when the server never advertised callHierarchyProvider", async () => {
+		const tool = createLspNavigationTool((flag) => flag === "lens-lsp");
+		(
+			mocked.service as { getOperationSupport: ReturnType<typeof vi.fn> }
+		).getOperationSupport = vi.fn().mockResolvedValue({
+			definition: false,
+			typeDefinition: false,
+			declaration: false,
+			references: false,
+			hover: false,
+			signatureHelp: false,
+			documentSymbol: false,
+			workspaceSymbol: false,
+			codeAction: false,
+			rename: false,
+			implementation: false,
+			callHierarchy: false,
+		});
+		const incomingCallsSpy = (
+			mocked.service as { incomingCalls: ReturnType<typeof vi.fn> }
+		).incomingCalls;
+		const callHierarchyItem = {
+			name: "foo",
+			kind: 12,
+			uri: tmpFileUrl("unsupported.py"),
+			range: {
+				start: { line: 1, character: 0 },
+				end: { line: 1, character: 3 },
+			},
+			selectionRange: {
+				start: { line: 1, character: 0 },
+				end: { line: 1, character: 3 },
+			},
+		};
+
+		const result = await tool.execute(
+			"unsupported-incoming",
+			{ operation: "incomingCalls", callHierarchyItem },
+			new AbortController().signal,
+			null,
+			{ cwd: "." },
+		);
+
+		expect(incomingCallsSpy).not.toHaveBeenCalled();
+		expect(result.isError).toBe(true);
+		expect(result.details?.emptyReason).toBe("unsupported");
+		expect(String(result.content[0]?.text)).toContain(
+			"does not advertise support for incomingCalls",
+		);
+	});
+
+	it("reports a clean empty (not unsupported) when a supporting server finds zero callers", async () => {
+		const tool = createLspNavigationTool((flag) => flag === "lens-lsp");
+		(
+			mocked.service as { getOperationSupport: ReturnType<typeof vi.fn> }
+		).getOperationSupport = vi.fn().mockResolvedValue({
+			definition: false,
+			typeDefinition: false,
+			declaration: false,
+			references: false,
+			hover: false,
+			signatureHelp: false,
+			documentSymbol: false,
+			workspaceSymbol: false,
+			codeAction: false,
+			rename: false,
+			implementation: false,
+			callHierarchy: true,
+		});
+		(
+			mocked.service as { outgoingCalls: ReturnType<typeof vi.fn> }
+		).outgoingCalls = vi.fn().mockResolvedValue([]);
+		const callHierarchyItem = {
+			name: "leaf",
+			kind: 12,
+			uri: tmpFileUrl("supported.py"),
+			range: {
+				start: { line: 1, character: 0 },
+				end: { line: 1, character: 3 },
+			},
+			selectionRange: {
+				start: { line: 1, character: 0 },
+				end: { line: 1, character: 3 },
+			},
+		};
+
+		const result = await tool.execute(
+			"supported-empty-outgoing",
+			{ operation: "outgoingCalls", callHierarchyItem },
+			new AbortController().signal,
+			null,
+			{ cwd: "." },
+		);
+
+		expect(
+			(mocked.service as { outgoingCalls: ReturnType<typeof vi.fn> })
+				.outgoingCalls,
+		).toHaveBeenCalledWith(callHierarchyItem);
+		expect(result.isError).toBeUndefined();
+		expect(result.details?.emptyReason).toBe("no-call-hierarchy-results");
+	});
+
 	it("opens scoped file before workspaceSymbol query", async () => {
 		const tool = createLspNavigationTool((flag) => flag === "lens-lsp");
 		const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-lsp-nav-"));
