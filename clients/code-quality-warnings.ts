@@ -1,10 +1,10 @@
-import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { CacheManager, ModifiedRange } from "./cache-manager.js";
 import type { Diagnostic } from "./dispatch/types.js";
 import { toRunnerDisplayPath } from "./dispatch/runner-context.js";
 import { getProjectDataDir } from "./file-utils.js";
+import { normalizeMessage, stableFindingId } from "./finding-identity.js";
 import { normalizeMapKey } from "./path-utils.js";
 
 export interface CodeQualityWarningRecord {
@@ -91,19 +91,20 @@ const TIER_BUDGET_ORDER: Array<CodeQualityWarningRecord["severity"]> = [
 	"hint",
 ];
 
-function normalizeMessage(message: string): string {
-	return message.replace(/\s+/g, " ").trim().toLowerCase();
-}
-
-function hashText(value: string, length = 10): string {
-	return createHash("sha256").update(value).digest("hex").slice(0, length);
-}
-
-function relativeFile(filePath: string, cwd: string): string {
-	const rel = path.relative(cwd, filePath).replace(/\\/g, "/");
-	return rel && !rel.startsWith("..") ? rel : normalizeMapKey(filePath);
-}
-
+/** #1816: was a local `relativeFile|tool|rule|code|normalizedMessage|line`
+ * hash (raw, non-canonicalized `relativeFile`, 10-char hash), independently
+ * hand-rolled from `actionable-warnings.ts`'s twin and
+ * `diagnostic-dispositions.ts`'s canonicalizing original. Now the shared
+ * `finding-identity.js` builder (canonicalizes `cwd`/`filePath` through
+ * `normalizeMapKey`, hashes to 12 chars). No back-compat migration needed
+ * here: `cq:` ids are never a keyed lookup — `buildCodeQualityWarningsReport`
+ * regenerates the whole report fresh every turn, callers only ever cache and
+ * replay the report wholesale (`tools/lens-diagnostics.ts` reads it via
+ * `cacheManager.readCache<CodeQualityWarningsReport>`, never by `id`), and
+ * `appendCodeQualityWarningsHistory` just append-only-logs the id for
+ * observability, never look it back up. Contrast `actionable-warnings.ts`,
+ * whose `actionable-warning-state.json` DOES key a persisted suppression
+ * store on `aw:` — that one migrates. */
 function createCodeQualityWarningId(args: {
 	cwd: string;
 	filePath: string;
@@ -113,15 +114,17 @@ function createCodeQualityWarningId(args: {
 	message: string;
 	line?: number;
 }): string {
-	const parts = [
-		relativeFile(args.filePath, args.cwd),
-		args.tool ?? "",
-		args.rule ?? "",
-		String(args.code ?? ""),
-		normalizeMessage(args.message),
-		String(args.line ?? ""),
-	];
-	return `cq:${hashText(parts.join("|"))}`;
+	return stableFindingId("cq:", {
+		cwd: args.cwd,
+		filePath: args.filePath,
+		parts: [
+			args.tool,
+			args.rule,
+			args.code,
+			normalizeMessage(args.message),
+			args.line,
+		],
+	});
 }
 
 function categorize(
