@@ -432,6 +432,38 @@ function sha256Hex(data: Buffer): string {
 }
 
 /**
+ * Pinned sha256 for `filename` from `scripts/grammars.lock.json`, or
+ * `undefined` when the manifest is unavailable or has no entry for it — the
+ * same "can't verify" fallback `downloadGrammarDetailed`'s own hash check
+ * already applies. `manifest.grammars[filename]` is keyed by filename
+ * regardless of a `GRAMMAR_SOURCE_OVERRIDES` entry (see the comment on that
+ * check), so a single lookup covers both the aggregator and override cases.
+ *
+ * This is the single source of truth a version bump (`TREE_SITTER_WASMS_VERSION`,
+ * or a `SOURCE_OVERRIDES` entry) reaches through: `--write-manifest` regenerates
+ * the pinned hash for the new build, so a cached file's sha256 no longer
+ * matching this value IS the version-changed signal — no separate "which
+ * version produced this file" bookkeeping is needed (#1760).
+ */
+export function pinnedGrammarHash(filename: string): string | undefined {
+	return loadGrammarManifest()?.grammars[filename];
+}
+
+/**
+ * sha256 of the file at `filePath`, or `undefined` if it cannot be read (does
+ * not exist, a directory, a permission error). Callers that cannot verify
+ * must treat that the same as "no pinned hash" — never as a mismatch, which
+ * would force an unbounded refetch loop against an unreadable path.
+ */
+export function grammarFileSha256(filePath: string): string | undefined {
+	try {
+		return sha256Hex(fs.readFileSync(filePath));
+	} catch {
+		return undefined;
+	}
+}
+
+/**
  * First 12 hex characters of a `sha256:<hex>` digest, for log/ledger/
  * notification strings. Printing the full 64-hex digest on BOTH sides of a
  * mismatch overran the degradation ledger's 200-character field cap (the

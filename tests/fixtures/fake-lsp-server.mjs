@@ -160,7 +160,32 @@ function handle(raw) {
 	}
 
 	// Ignore notifications without id
-	if (data.method === "initialized") return;
+	if (data.method === "initialized") {
+		// #1620 residual: a live-process fixture for "stdin stops draining"
+		// (distinct from FAKE_LSP_NOTIFY_BACKLOG_WEDGE's queue-depth trigger,
+		// which still reads N messages first). Pausing right after the
+		// handshake means every byte the client writes afterward — the padding
+		// notifications AND clientShutdown's own "shutdown"/"exit" writes —
+		// sits unread in the OS pipe buffer. A single small write still
+		// resolves once the OS accepts it into that buffer; only once enough
+		// bytes are queued does a write's own callback stop firing. The test
+		// pads with a few MB of unread traffic first to exhaust that buffer
+		// before exercising clientShutdown.
+		//
+		// `pause()` alone is not enough: with no other active handle, Node
+		// decides the event loop is empty and exits the process right here —
+		// a probe caught this exiting with code 0 within milliseconds, which
+		// then makes every subsequent write fail FAST with EPIPE/EOF instead
+		// of genuinely hanging (a fast rejection, not the unbounded-await
+		// bug). Keep a harmless interval alive so the process (and its stdin
+		// pipe) stays open and unread indefinitely, like a real wedged
+		// server whose main loop is busy elsewhere.
+		if (process.env.FAKE_LSP_WEDGE_STDIN_AFTER_INIT === "1") {
+			process.stdin.pause();
+			setInterval(() => {}, 60_000);
+		}
+		return;
+	}
 	if (data.method === "textDocument/didOpen") {
 		openDocuments.set(
 			data.params?.textDocument?.uri,
