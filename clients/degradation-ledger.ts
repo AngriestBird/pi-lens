@@ -162,6 +162,8 @@ export type DegradationKind =
 	 * from the ledger alone.
 	 */
 	| "runner-empty-result"
+	/** A process-table resource sample failed or timed out; it is unknown. */
+	| "resource-sampler-query-failed"
 	/**
 	 * The registry-independent orphan backstop could not enumerate the OS
 	 * process table (spawn error or scan timeout). Its empty result therefore
