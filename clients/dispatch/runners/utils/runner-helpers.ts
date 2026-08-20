@@ -12,6 +12,10 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { logSessionStart } from "../../../sessionstart-logger.js";
 import { getGlobalPiLensDir } from "../../../file-utils.js";
+import {
+	createGenerationSource,
+	type GenerationHandle,
+} from "../../../generation-guard.js";
 import { PathKeyedMap } from "../../../path-keyed-map.js";
 import {
 	normalizeEphemeralMapKey,
@@ -199,7 +203,7 @@ async function runManagedVerification(
 	candidate: string,
 	stamp: string,
 	priorAttempts: number,
-	generation: number,
+	generation: GenerationHandle,
 ): Promise<ManagedVerdict> {
 	let transient = false;
 	let ok: boolean;
@@ -229,21 +233,20 @@ async function runManagedVerification(
 	// session would hand the new session the old one's cooldown — the exact
 	// re-arm this state clears at `session_start` (#1674 review F5). Same guard
 	// the install seam's in-flight share uses.
-	const currentGeneration = generation === availabilityStateGeneration;
 	if (!ok && transient) {
 		const attempts = priorAttempts + 1;
-		if (currentGeneration) {
+		generation.guardedWrite(stamp, () => {
 			managedBinaryVerdicts.set(stamp, {
 				verdict: "unverified",
 				attempts,
 				retryAtMs: Date.now() + managedVerifyCooldownMs(attempts),
 			});
-		}
+		});
 		return "unverified";
 	}
-	if (currentGeneration) {
+	generation.guardedWrite(stamp, () => {
 		managedBinaryVerdicts.set(stamp, { verdict: ok ? "ok" : "broken" });
-	}
+	});
 	if (!ok) {
 		// Once per shim per session, at the moment the verdict is reached — the
 		// memo answers every later call, so this cannot become per-dispatch spam.
@@ -273,7 +276,7 @@ async function verifyManagedCandidate(
 	}
 	const existing = managedVerifyInFlight.get(stamp);
 	if (existing) return existing;
-	const generation = availabilityStateGeneration;
+	const generation = availabilityGeneration.capture();
 	const probe = runManagedVerification(
 		candidate,
 		stamp,
@@ -282,10 +285,11 @@ async function verifyManagedCandidate(
 	).finally(() => {
 		// A settling old-session probe must not evict the live entry a new
 		// session already started for the same shim (#1674 review F5).
-		if (generation !== availabilityStateGeneration) return;
-		if (managedVerifyInFlight.get(stamp) === probe) {
-			managedVerifyInFlight.delete(stamp);
-		}
+		generation.guardedWrite(stamp, () => {
+			if (managedVerifyInFlight.get(stamp) === probe) {
+				managedVerifyInFlight.delete(stamp);
+			}
+		});
 	});
 	managedVerifyInFlight.set(stamp, probe);
 	return probe;
@@ -511,7 +515,12 @@ const latchedUnavailableByCwd = new PathKeyedMap<Set<string>>(normalizeMapKey);
 // Checkers are created by runner modules and may also be created dynamically.
 // Keep the session reset as a generation rather than retaining every checker
 // reset closure forever.
-let availabilityStateGeneration = 0;
+//
+// #1754: the counter itself is now the shared `GenerationSource` primitive, so
+// the capture-before-await/check-after guards below are one implementation
+// instead of five hand-rolled ones, and a dropped straddling write is visible
+// in the degradation ledger instead of silent.
+const availabilityGeneration = createGenerationSource("dispatch-availability");
 
 function installStateFor(cwd: string, toolId: string): InstallAttemptState {
 	let states = installAttemptsByCwd.get(cwd);
@@ -773,7 +782,7 @@ export function resetDispatchAvailabilityState(): void {
 	managedBinaryVerdicts.clear();
 	managedVerifyInFlight.clear();
 	resetPathWalkMemo();
-	availabilityStateGeneration += 1;
+	availabilityGeneration.bump();
 }
 
 /** What the last probe for a cwd decided, for messaging and telemetry (#1467). */
@@ -822,21 +831,21 @@ export function createAvailabilityChecker(
 	const inFlightByCwd = new PathKeyedMap<Promise<boolean>>(
 		normalizeEphemeralMapKey,
 	);
-	let checkerGeneration = availabilityStateGeneration;
+	let checkerGeneration = availabilityGeneration.current();
 
 	const findCommand = createVenvFinder(command, windowsExt);
 
 	function ensureCurrentGeneration(): void {
-		if (checkerGeneration === availabilityStateGeneration) return;
+		if (checkerGeneration === availabilityGeneration.current()) return;
 		cacheByCwd.clear();
 		inFlightByCwd.clear();
-		checkerGeneration = availabilityStateGeneration;
+		checkerGeneration = availabilityGeneration.current();
 	}
 
 	const reset = (): void => {
 		cacheByCwd.clear();
 		inFlightByCwd.clear();
-		checkerGeneration = availabilityStateGeneration;
+		checkerGeneration = availabilityGeneration.current();
 	};
 
 	function getCache(cwd: string): AvailabilityCache {
@@ -1145,7 +1154,7 @@ export function createCwdCachedProbe(
 	const inFlightByCwd = new PathKeyedMap<Promise<boolean>>(
 		normalizeEphemeralMapKey,
 	);
-	let probeGeneration = availabilityStateGeneration;
+	let probeGeneration = availabilityGeneration.current();
 
 	function clear(): void {
 		latchByCwd.clear();
@@ -1153,9 +1162,9 @@ export function createCwdCachedProbe(
 	}
 
 	function ensureCurrentGeneration(): void {
-		if (probeGeneration === availabilityStateGeneration) return;
+		if (probeGeneration === availabilityGeneration.current()) return;
 		clear();
-		probeGeneration = availabilityStateGeneration;
+		probeGeneration = availabilityGeneration.current();
 	}
 
 	function latchFor(key: string): AvailabilityLatch {
@@ -1306,7 +1315,7 @@ export function createCwdCachedProbe(
 	};
 	cached.reset = (): void => {
 		clear();
-		probeGeneration = availabilityStateGeneration;
+		probeGeneration = availabilityGeneration.current();
 	};
 	return cached;
 }
@@ -1551,15 +1560,19 @@ export function resolveAvailableOrInstall(
 	const existing = byTool.get(toolId);
 	if (existing) return existing;
 
-	const generation = availabilityStateGeneration;
+	// Same capture-before-await guard as the managed-verify seam, via the same
+	// primitive (#1754): a settling old-session transaction must not evict the
+	// entry a NEW session already installed for this (cwd, tool).
+	const generation = availabilityGeneration.capture();
 	const promise = resolveAvailableOrInstallUnshared(checker, toolId, cwd).finally(
 		() => {
-			if (generation !== availabilityStateGeneration) return;
-			const current = resolveInstallInFlightByCwd.get(key);
-			if (current?.get(toolId) === promise) {
-				current.delete(toolId);
-				if (current.size === 0) resolveInstallInFlightByCwd.delete(key);
-			}
+			generation.guardedWrite(`${toolId}@${key}`, () => {
+				const current = resolveInstallInFlightByCwd.get(key);
+				if (current?.get(toolId) === promise) {
+					current.delete(toolId);
+					if (current.size === 0) resolveInstallInFlightByCwd.delete(key);
+				}
+			});
 		},
 	);
 	byTool.set(toolId, promise);
@@ -1674,15 +1687,15 @@ function buildSgLocalBins(): string[] {
 }
 
 let sgAvailableInFlight: Promise<boolean> | null = null;
-let sgAvailabilityGeneration = availabilityStateGeneration;
+let sgAvailabilityGeneration = availabilityGeneration.current();
 
 function ensureCurrentSgGeneration(): void {
-	if (sgAvailabilityGeneration === availabilityStateGeneration) return;
+	if (sgAvailabilityGeneration === availabilityGeneration.current()) return;
 	sgLatch.reset();
 	sgCmd = null;
 	sgCmdArgs = [];
 	sgAvailableInFlight = null;
-	sgAvailabilityGeneration = availabilityStateGeneration;
+	sgAvailabilityGeneration = availabilityGeneration.current();
 }
 
 export async function isSgAvailableAsync(): Promise<boolean> {

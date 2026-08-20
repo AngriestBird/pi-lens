@@ -16,6 +16,7 @@ import {
 import { getProjectIgnoreGlobs } from "./file-utils.js";
 import { findGlobalBinary } from "./package-manager.js";
 import { safeSpawnAsync, type SpawnResult } from "./safe-spawn.js";
+import { createSingleFlight } from "./single-flight.js";
 import {
 	type AvailabilityCause,
 	type ProbeEvidence,
@@ -191,7 +192,11 @@ export class SgRunner {
 	 * restart and paid for an install nobody needed.
 	 */
 	private readonly availabilityLatch = createAvailabilityLatch();
-	private ensureInFlight: Promise<boolean> | null = null;
+	/**
+	 * At-most-one sweep in flight, via the shared primitive (#1753). One
+	 * instance owns one question, so the key is a constant.
+	 */
+	private readonly ensureFlight = createSingleFlight<boolean>();
 	/**
 	 * Whether a DIRECT candidate — one that would have been ast-grep itself —
 	 * failed for a transient reason in the current sweep. Only these block the
@@ -240,24 +245,19 @@ export class SgRunner {
 	/**
 	 * Check if ast-grep CLI is available, auto-install if not.
 	 *
-	 * Re-entrancy safe: concurrent first-time callers share a single
-	 * `ensureInFlight` promise so probing/auto-install isn't duplicated
-	 * across session-start tasks. Mirrors the dedupe pattern in
-	 * `KnipClient.ensureAvailable` and `DependencyChecker.ensureAvailable`.
+	 * Re-entrancy safe: concurrent first-time callers share one flight, so
+	 * probing/auto-install isn't duplicated across session-start tasks. The
+	 * share and the clear-in-finally belong to `singleFlight` (#1753); this
+	 * method owns only the latch short-circuit above it. The sweep-local
+	 * bookkeeping `doEnsureAvailable` resets on entry is untouched — it is
+	 * per-sweep state, not concurrency state.
 	 */
 	async ensureAvailable(): Promise<boolean> {
 		// Fast path: already decided. `read()` returns null when the last verdict
 		// was transient and its cooldown expired, which re-enters the sweep.
 		const memo = this.availabilityLatch.read();
 		if (memo !== null) return memo;
-		if (this.ensureInFlight) return this.ensureInFlight;
-
-		this.ensureInFlight = this.doEnsureAvailable();
-		try {
-			return await this.ensureInFlight;
-		} finally {
-			this.ensureInFlight = null;
-		}
+		return this.ensureFlight.run("ast-grep", () => this.doEnsureAvailable());
 	}
 
 	private async doEnsureAvailable(): Promise<boolean> {

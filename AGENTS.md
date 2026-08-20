@@ -297,7 +297,7 @@ preserved as `cause`. (#1214)
 - **Prove composition with evidence when your PR overlaps an open PR.** Same field, same store, or same render surface as an in-flight PR means: merge that branch locally and run ITS test files on the merged tree. Never conclude compatibility by reasoning about "different structures". That exact reasoning shipped the #1631/#1641 `stale`-semantics collision: three separate semantic collisions (an add/add conflict, a conformance-sweep failure, and a tally-convention disagreement), each resolved by a maintainer commit pushed to the fork PR #1633. When a change adds a second writer to an existing field, add a reason/kind discriminator with per-writer semantics before either PR merges.
 - **Re-home deferred work to an issue, never to another in-flight PR.** A PR is not a tracking surface: its author does not know they are carrying your remainder, and it merges without it. #1664 deferred the inline-blocker gate "to #1633", which shipped without it. Only a bookkeeping audit recovered the loss. The deferral comment names exactly what remains and lands on the issue before you finish.
 - **Any mechanism you cite as precedent carries a `file:line`.** A justification that references "the existing pattern in X" without a checkable location invites fabrication. #1701 justified a correct change with an in-repo relationship that did not exist. Only a reviewer tracing the claim caught it. Reviewers: trace every cited precedent.
-- **Every new failure path emits a bounded record that preserves the discriminating identity.** Route repeats through `recordDegradationOnce`/`incrementDegradationCount`, never a raw per-occurrence log (#1678's orphan spam), and never let aggregation destroy WHICH file/tool/record is stuck (#1705's review probe). State in the PR body which log or ledger record proves the fix works in production — or name the observability gap and file it.
+- **Every new failure path emits a bounded record that preserves the discriminating identity.** Route repeats through `recordDegradationOnce`/`incrementDegradationCount`, never a raw per-occurrence log (#1678's orphan spam), and never let aggregation destroy WHICH file/tool/record is stuck (#1705's review probe). `emitBounded`/`admitBounded` (`clients/bounded-telemetry.ts`) are the sanctioned form: they derive the rising edge from the ledger's own tally, cap per turn, and stamp the identity into the record, and `tests/clients/bounded-telemetry-sweep.test.ts` sweeps failure-path phases registered-or-fail, so a new raw `logLatency` on a failure path needs a stated reason (#1743). State in the PR body which log or ledger record proves the fix works in production — or name the observability gap and file it.
 - **Map blast radius for every code PR.** Before and after editing, use `module_report` on each touched production module with `blastRadius: true`; inspect `callbacks[]`, closures, `usedBy`, entry points, and risk flags, then use `read_symbol`/`read_enclosing` for relevant bodies. The PR must state affected dependents, callbacks/entry points, and the verification plan—or explicitly record that the blast radius is empty/unavailable and why. Re-run this map after conflict resolution or architectural changes. If the change touches a hot path (per-spawn, per-file, per-render), MEASURE the cost delta and state the number. Silent per-call taxes ship otherwise: #1673 added 100 ms to every spawn across 118 call sites, #1687 multiplied a per-file budget, and #1701 cost 14x on the background scan. Every one was caught by a reviewer's measurement. None was stated by its author. `module_report` is a navigable structural/dependent view, not a complete function-level call graph; for call-graph work reuse `clients/call-graph.ts` or LSP incoming/outgoing-call navigation instead of inferring completeness from `usedBy` or `blastRadius`.
 
 ## Contributing
@@ -1517,7 +1517,7 @@ Every dispatch warning passes through one of two recorders in `clients/pipeline.
 
 | Recorder | Required diagnostic fields | Destination |
 | --- | --- | --- |
-| `recordFromDispatchDiagnostic` | `semantic === "warning"` AND `severity === "warning"` AND (`fixable` OR `fixSuggestion`) | `actionable-warnings.json` — surfaces an advisory and can drive autofix |
+| `recordFromDispatchDiagnostic` | `semantic === "warning"` AND `severity !== "error"` AND (`fixable` OR `fixSuggestion`) | `actionable-warnings.json` — surfaces an advisory and can drive autofix |
 | `recordFromCodeQualityDiagnostic` | `semantic === "warning"` or `"none"` AND `severity !== "error"` AND (no fixable, no fixSuggestion, no autoFixAvailable) | `code-quality-warnings.json` — informational history only |
 
 A runner that wraps a tool with an auto-fix capability **must** propagate `fixable: true` or `fixSuggestion: "<rule-specific guidance>"` per diagnostic — otherwise everything it produces silently goes to code-quality and never reaches the actionable advisory. Severity-`error` diagnostics route to blockers instead, regardless of fixability.
@@ -1527,6 +1527,18 @@ Patterns by tool capability:
 - **Tool exposes per-diagnostic fix metadata** (biome, eslint, ruff, rubocop, shellcheck, oxlint via `--format json` + `help`, ast-grep, tree-sitter via `has_fix`): read it directly, set `fixable: !!fix` or `fixSuggestion: help`.
 - **Tool has `--fix` but no per-warning fix flag** (stylelint, markdownlint): static allowlist of rule IDs documented as deterministically fixable. False positives are worse than false negatives — keep the list conservative.
 - **Tool has no auto-fix** (cpp-check, phpstan, javac, pyright, mypy, go-vet, actionlint, yamllint, etc.): hard-code `fixable: false`. The diagnostic correctly lands in code-quality.
+
+### Severity policy (#1777)
+
+Four tiers, and the dispatch path preserves all four end to end. `clients/dispatch/runners/ast-grep-napi.ts` maps a rule's declared YAML severity straight onto `Diagnostic.severity`; a rule that declares nothing, or declares a value pi-lens does not model, reports at `warning`.
+
+Pick a tier by the evidence behind the rule:
+
+- **`error`** requires a documented zero-false-positive audit in the rule's `note`. Only `error` maps to semantic `blocking` and stops a turn.
+- **`warning`** is a real finding with a known, bounded false-positive rate.
+- **`hint`** and **`info`** are style opinions. They render as advisory text, never block, and lose the report budget to warnings when a report is capped.
+
+Tier governs how loudly a finding renders, not whether its fix is offered: a hint-tier rule with a fix still routes to actionable warnings. Do not re-tier a rule without recording the false-positive census that justifies the move.
 
 When changing a serialized cache that feeds this pipeline (e.g. `clients/cache/rule-cache.ts`), bump `CACHE_VERSION` so old entries invalidate. The tree-sitter rule cache previously stripped `has_fix` on roundtrip, silently demoting every tree-sitter rule with auto-fix to non-fixable on any cache hit (commit `24af518`).
 

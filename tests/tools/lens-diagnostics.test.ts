@@ -3115,3 +3115,98 @@ describe("lens_diagnostics disposition read-filter (#755)", () => {
 		expect(String(after.content[0].text)).not.toContain("bad call");
 	});
 });
+
+// ── #1777 severity tiers ──────────────────────────────────────────────────────
+
+// #1777 fix-round F1: `summarizeDiagnostics` tallied `error` and `warning`
+// only, the same shape `clients/widget-state.ts` carried. Once the dispatch
+// path stopped collapsing hint and info into warning, a hint-only file scored
+// 0/0/0 here, the `withIssues` filter dropped it, and mode=full rendered
+// "No issues across 1 file ✓" while its own `details` still carried the
+// diagnostic. mode=all reads widget-state's tally and disagreed.
+describe("lens_diagnostics counts hint-tier findings (#1777)", () => {
+	it("mode=full does not report a hint-only file as clean, and mode=all agrees", async () => {
+		const lspService = {
+			runWorkspaceDiagnostics: vi.fn().mockResolvedValue([
+				{
+					filePath: "/proj/src/hinted.ts",
+					count: 1,
+					diagnostics: [
+						{
+							// LSP severity 4 is `hint` — what the ast-grep auxiliary
+							// server emits for a hint-tier rule.
+							severity: 4,
+							message: "prefer a narrower type",
+							range: {
+								start: { line: 1, character: 0 },
+								end: { line: 1, character: 5 },
+							},
+							source: "ast-grep",
+							code: "no-any-type",
+						},
+					],
+				},
+			]),
+		};
+		const full = await run(makeTool({}, lspService), { mode: "full" });
+		const fullText = String(full.content[0].text);
+
+		expect(fullText).not.toMatch(/No .*issues across/);
+		expect(fullText).toContain("hinted.ts");
+		expect(fullText).toContain("prefer a narrower type");
+
+		// mode=all reads widget-state's own tally. Build its summary from the REAL
+		// widget-state module (this suite mocks it) so the two modes are compared
+		// against ONE tally implementation rather than a hand-written stand-in.
+		const widget = await vi.importActual<
+			typeof import("../../clients/widget-state.js")
+		>("../../clients/widget-state.js");
+		widget.clearWidgetState();
+		widget.recordDiagnostics("/proj/src/hinted.ts", [
+			{
+				severity: "hint",
+				semantic: "warning",
+				message: "prefer a narrower type",
+				line: 2,
+				tool: "ast-grep",
+			},
+		]);
+		mockSummaries.push(...widget.getFileDiagnosticSummaries());
+
+		const all = await run(makeTool({}, lspService), { mode: "all" });
+		const allText = String(all.content[0].text);
+		expect(allText).not.toMatch(/No .*issues across/);
+		expect(allText).toContain("hinted.ts");
+	});
+
+	// The tally widens, the `severity: "error"` filter does not: a hint is still
+	// not an error. Guards against over-widening `withIssues` into "everything
+	// counts".
+	it("keeps a hint-only file out of the severity=error view", async () => {
+		const lspService = {
+			runWorkspaceDiagnostics: vi.fn().mockResolvedValue([
+				{
+					filePath: "/proj/src/hinted.ts",
+					count: 1,
+					diagnostics: [
+						{
+							severity: 4,
+							message: "prefer a narrower type",
+							range: {
+								start: { line: 1, character: 0 },
+								end: { line: 1, character: 5 },
+							},
+							source: "ast-grep",
+							code: "no-any-type",
+						},
+					],
+				},
+			]),
+		};
+		const result = await run(makeTool({}, lspService), {
+			mode: "full",
+			severity: "error",
+		});
+		expect(String(result.content[0].text)).toContain("No error issues across");
+	});
+});
