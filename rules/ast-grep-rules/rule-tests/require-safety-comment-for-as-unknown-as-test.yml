@@ -65,6 +65,30 @@ valid:
   - |
     // SAFETY: both fields document the same upstream payload shape
     export const pair = { a: x as unknown as Foo, b: y as unknown as Foo };
+  # #1870: tree-sitter-typescript calls an object-literal member a `pair`.
+  # A comment directly above that pair is the natural local anchor.
+  - |
+    const config = {
+      // SAFETY: input is validated by the config loader
+      value: input as unknown as string,
+    };
+  - |
+    configure({
+      // SAFETY: input is validated by the config loader
+      value: input as unknown as string,
+    });
+  # Direct comments immediately above casts in array elements and call
+  # arguments are supported by the direct-cast arm.
+  - |
+    const values = [
+      // SAFETY: input is validated by the config loader
+      input as unknown as string,
+    ];
+  - |
+    configure(
+      // SAFETY: input is validated by the config loader
+      input as unknown as string,
+    );
 invalid:
   - "const a = x as unknown as Foo;"
   - |
@@ -125,4 +149,29 @@ invalid:
   - |
     // SAFETY: documents nothing below — an unrelated call sits between
     doSomethingUnrelated();
-    const b = x as unknown as Foo;
+     const b = x as unknown as Foo;
+  # A comment on an unrelated sibling pair must not reach a later pair.
+  - |
+    const config = {
+      unrelated: 1,
+      // SAFETY: this documents a different property
+      other: 2,
+      target: input as unknown as string,
+    };
+  # An outer pair comment must not cross into a nested pair.
+  - |
+    const config = {
+      // SAFETY: only the parent property is validated
+      parent: {
+        nestedTarget: value as unknown as string,
+      },
+    };
+  # A nested pair comment must not travel outward to a parent cast.
+  - |
+    const config = {
+      parent: value as unknown as string,
+      // SAFETY: only the nested property is validated
+      nested: {
+        child: value as unknown as string,
+      },
+    };

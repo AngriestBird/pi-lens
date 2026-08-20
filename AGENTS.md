@@ -215,6 +215,10 @@ fixtures deliberately name the constructor target and trap parameter differently
 The generated ast-grep catalog derives its Fixable yes/no column from each
 rule's top-level `fix:` key. (#1850)
 
+The `require-safety-comment-for-as-unknown-as` valve accepts adjacent comments
+on object-literal `pair` members; array elements, call arguments, JSX
+attributes, class static blocks, and switch cases use the enclosing statement.
+
 Session degradation telemetry owns its dedupe and tally state in
 `clients/degradation-ledger.ts`: use `recordDegradationOnce` for a repeated
 site/subject that represents one user-visible degradation, and
