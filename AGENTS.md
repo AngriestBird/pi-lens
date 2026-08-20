@@ -11,6 +11,13 @@ smell warnings count only the current session, or a 24-hour fallback window
 when no session boundary is available; explicit health remains separately
 labeled. (#1432)
 
+Per-edit LSP dispatch preserves the touch's correlated `unconfirmedServerIds`
+through `RunnerResult` and runner latency assembly. The agent coverage notice
+renders the bounded scanner set before considering a successful primary result,
+so partial diagnostics, including an empty result, never look clean. Reuse the
+existing normalized kind+file coverage-notice dedupe; do not re-derive scanner
+silence after the LSP touch has classified it. (#1867)
+
 Advisory caches must carry immutable capture provenance and validate it again
 at every delivery surface. A finding is current only when session/turn state
 matches and every affected file is SHA-256-confirmed (size+mtime is only the

@@ -491,6 +491,7 @@ export interface RunnerLatency {
 	status: "succeeded" | "failed" | "skipped" | "when_skipped";
 	diagnosticCount: number;
 	semantic: string;
+	unconfirmedServerIds?: readonly string[];
 }
 
 export interface DispatchLatencyReport {
@@ -519,6 +520,29 @@ function buildCoverageNotice(
 		primary.runnerIds.includes(r.runnerId),
 	);
 	if (relevant.length === 0) return undefined;
+
+	// #1867 catalog shape 4: this is correlation, not classification. The LSP
+	// touch already decided which scanner publications were absent for these
+	// bytes; the runner and latency assembly only preserve that exact set.
+	const unconfirmedServerIds = [
+		...new Set(relevant.flatMap((r) => r.unconfirmedServerIds ?? [])),
+	];
+	if (unconfirmedServerIds.length > 0) {
+		const onceKey = `${ctx.kind}:${normalizeMapKey(ctx.filePath)}`;
+		if (coverageNoticeSeen.has(onceKey)) return undefined;
+		coverageNoticeSeen.add(onceKey);
+		const shown = unconfirmedServerIds.slice(0, 4);
+		const remainder = unconfirmedServerIds.length - shown.length;
+		const marker = `${shown.join(", ")}${remainder > 0 ? ` +${remainder}` : ""}`;
+		return {
+			id: `coverage-partial:${ctx.kind}:${path.basename(ctx.filePath)}`,
+			message: `coverage: ${marker} silent — diagnostics are incomplete (not a clean result).`,
+			filePath: ctx.filePath,
+			severity: "warning",
+			semantic: "warning",
+			tool: "pi-lens",
+		};
+	}
 
 	// Check primary runners first
 	const primaryHasCoverage = relevant.some(
@@ -751,6 +775,9 @@ async function runGroup(
 			status: result.status,
 			diagnosticCount: result.diagnostics.length,
 			semantic: result.semantic ?? semantic,
+			...(result.unconfirmedServerIds !== undefined && {
+				unconfirmedServerIds: result.unconfirmedServerIds,
+			}),
 		});
 		logLatency({
 			type: "runner",

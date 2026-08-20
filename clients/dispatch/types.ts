@@ -160,6 +160,8 @@ export interface RunnerResult {
 	failureKind?: string;
 	/** Optional short human-readable detail for the failure (truncated). */
 	failureMessage?: string;
+	/** Correlated scanner ids whose findings are absent from this result. */
+	unconfirmedServerIds?: readonly string[];
 }
 
 // --- Dispatch Context ---
