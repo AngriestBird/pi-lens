@@ -400,6 +400,13 @@ of parsing partial output as a clean empty result. Sampler timeouts inject the
 reaper's tree-kill-and-verify hook and settle only after its fate is known.
 (#1863, #1864)
 
+**Workspace refresh walks the bounded ancestor cache chain.** A language server
+root can be a nested monorepo member while workspace diagnostics persist under
+the enclosing sweep root. `workspace/diagnostic/refresh` clears the client
+root and each ancestor through the session cwd, so a never-swept member cannot
+leave its prior workspace cache alive; it never walks above that ceiling.
+(#1707)
+
 ## Issue and PR design contract
 
 - **Design the state space before coding.** For stateful, ordered, resource-mutating, or security-sensitive work, write the invariants, supported transitions, explicit deferrals, and a cross-product test matrix before implementation. Examples are not enough: cover operation order, preview/apply, validation/normalization/execution seams, failure atomicity, observability bounds, and OS/path/encoding axes. If adversarial review finds repeated cross-product defects, stop patching one symptom at a time and return to the model.
