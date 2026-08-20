@@ -1,7 +1,9 @@
 id: no-unknown-returns
 language: TypeScript
-severity: hint
+severity: error
 message: "Function returns 'unknown' — parse the value at its boundary and return a named domain type"
+metadata:
+  category: pi-lens-self-scan
 note: |
   Adapted from dmmulroy/anti-slop's `no-unknown-returns`
   (src/rules/no-unknown-returns.ts, MIT). Upstream also resolves
@@ -30,7 +32,9 @@ note: |
   function-type aliases) was the one exception in
   tree-sitter-typescript's grammar: its return type sits directly after
   `=>` with no `type_annotation` wrapper at all, so it needed its own
-  branch — see the 2026-08-20 #1824 entry below for why that branch is
+  branch. The #1824 scope correction removed that branch because callback
+  result types describe what callers consume, not an unparsed value crossing
+  a boundary. See the 2026-08-20 #1824 entry below for why that branch is
   now gone.
 
   2026-08-20 (refs #1727, #1777): CONSIDERED for promotion to `error`,
@@ -63,10 +67,27 @@ note: |
   return is a legitimate contract ("the caller ignores my result"),
   not a value-position return that skipped parsing at a boundary. This
   is a scope correction, not a severity change. Same scan setup,
-  before → after: pi-lens full tree 79 → 23; pi-lens `clients/` +
-  `index.ts` 21 → 9 (see the adopting PR for the four-corpus
-  before/after on the same narrow scope). The value-position arm below
-  is unchanged and is what the rule now exclusively targets.
+   before → after: pi-lens full tree 79 → 23; pi-lens `clients/` +
+   `index.ts` 21 → 9 (see the adopting PR for the four-corpus
+   before/after on the same narrow scope). The value-position arm below
+   is unchanged and is what the rule now exclusively targets.
+  2026-08-20 (refs #1856): PROMOTED from `hint` to `error` after the
+  remaining value-position returns were given named domain types or made
+  generic so their pass-through contract stays exact. The pi-lens
+  self-scan is clean at promotion time.
+  Test paths stay excluded: mocks and interleaving controls intentionally
+  return opaque sentinel values, while this rule governs production
+  boundaries whose domain shape is knowable.
+ignores:
+  - "**/*.test.ts"
+  - "**/*.test.tsx"
+  - "**/*.test.mts"
+  - "**/*.test.cts"
+  - "**/*.spec.ts"
+  - "**/*.spec.tsx"
+  - "**/tests/**"
+  - "**/test/**"
+  - "**/__tests__/**"
 rule:
   kind: predefined_type
   regex: "^unknown$"
