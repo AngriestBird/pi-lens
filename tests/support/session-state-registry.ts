@@ -500,9 +500,18 @@ export const SESSION_STATE_REGISTRY: SessionStateEntry[] = [
 			"#1810: the cache maps (biome binary path, rule name) to that rule's real fix tier, read live from `biome explain <rule>`. That answer is a static property of the running binary — it cannot change without a different biome install, which is itself a different cache key — so there is nothing for a session boundary to invalidate. No probe: arming it for real requires spawning the actual biome binary, which this generic registry sweep does not do; `tests/clients/dispatch/runners/biome-check-runner.test.ts`'s dedicated cache/reset tests cover the re-arm behavior with a mocked spawn instead.",
 	},
 	{
-		id: "formatters:runtimeState",
+		id: "formatters:whichLatches",
 		module: "formatters.ts",
 		state: "whichLatchByCommand, whichTransientCommands, cooldownRecordedForRetryAtMs",
+		policy: "session_start",
+		resetName: "resetWhichLatches",
+		reason:
+			"#1895: formatter PATH availability is session-scoped, but these module-local latches are not covered by the dispatch availability generation. A formatter installed or removed between sessions must be re-probed.",
+	},
+	{
+		id: "formatters:runtimeState",
+		module: "formatters.ts",
+		state: "detectionCache",
 		policy: "turn_end",
 		resetName: "clearFormatterRuntimeState",
 		reason:

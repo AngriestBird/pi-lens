@@ -302,7 +302,7 @@ async function detectCandidate(
 }
 
 /** Drop the PATH verdicts, so a newly installed binary is visible at once. */
-function resetWhichLatches(): void {
+export function resetWhichLatches(): void {
 	whichLatchByCommand.clear();
 	whichTransientCommands.clear();
 	cooldownRecordedForRetryAtMs.clear();
