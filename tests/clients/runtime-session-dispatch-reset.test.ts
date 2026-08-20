@@ -23,6 +23,7 @@ vi.mock("../../clients/safe-spawn.js", () => ({
 
 vi.mock("../../clients/installer/index.js", () => ({
 	ensureTool: vi.fn(async () => undefined),
+	resetResolvedPathCache: vi.fn(),
 	// Not spawnable — forces resolveCommandWithInstallFallback down the
 	// install-fallback path (rather than the --version probe path) where
 	// noteInstallFailure/suppression lives.
@@ -143,6 +144,115 @@ describe("dispatch availability suppression is reset at session start (#1266)", 
 		);
 		expect(third).toBeNull();
 		expect(ensureToolMock).toHaveBeenCalledTimes(2);
+	});
+
+	// #1902 review: session-state-conformance.test.ts only proves the registry
+	// KNOWS about resetResolvedPathCache's reset seam (a structural/name check).
+	// Nothing asserted that handleSessionStart's call to it actually fires. The
+	// wiring test above exercises resetResolvedPathCache only indirectly through
+	// ensureTool's mock, so it would stay green even if the
+	// `resetResolvedPathCache()` line at runtime-session.ts:2111 were deleted.
+	it("calls resetResolvedPathCache directly from handleSessionStart", async () => {
+		const installerMod = await import("../../clients/installer/index.js");
+		const resetResolvedPathCacheMock = vi.mocked(
+			installerMod.resetResolvedPathCache,
+		);
+
+		await handleSessionStart(makeDeps(tmpDir));
+
+		expect(resetResolvedPathCacheMock).toHaveBeenCalled();
+	});
+
+	it("re-arms direct-LSP negative availability through handleSessionStart", async () => {
+		const lspServer = await import("../../clients/lsp/server.js");
+		lspServer._markDirectLspCommandUnavailableForTests("appeared-lsp");
+		expect(
+			lspServer.isDirectLspCommandTemporarilyUnavailable("appeared-lsp"),
+		).toBe(true);
+
+		await handleSessionStart(makeDeps(tmpDir));
+
+		expect(
+			lspServer.isDirectLspCommandTemporarilyUnavailable("appeared-lsp"),
+		).toBe(false);
+	});
+
+	// #1895: formatter PATH latches are module-local and therefore are not
+	// advanced by resetDispatchAvailabilityState's generation counter. Drive
+	// the session reset seam, rather than calling resetWhichLatches directly.
+	it("re-probes a latched-missing formatter after handleSessionStart", async () => {
+		const { getFormattersForFile } = await import("../../clients/formatters.js");
+		const filePath = `${tmpDir}/lib.rs`;
+		const nextCwd = `${tmpDir}-next`;
+		const nextFilePath = `${nextCwd}/lib.rs`;
+		const fs = await import("node:fs");
+		fs.mkdirSync(nextCwd);
+		fs.writeFileSync(filePath, "fn main() {}\n");
+		fs.writeFileSync(nextFilePath, "fn main() {}\n");
+		const spawnMod = await import("../../clients/safe-spawn.js");
+		const spawnMock = vi.mocked(spawnMod.safeSpawnAsync);
+		const finder = process.platform === "win32" ? "where" : "which";
+		const rustfmtProbes = () =>
+			spawnMock.mock.calls.filter(
+				(call) =>
+					String(call[0]) === finder &&
+					(call[1] as string[] | undefined)?.[0] === "rustfmt",
+			).length;
+
+		await getFormattersForFile(filePath, tmpDir);
+		const afterFirst = rustfmtProbes();
+		expect(afterFirst).toBeGreaterThan(0);
+		await getFormattersForFile(filePath, tmpDir);
+		expect(rustfmtProbes()).toBe(afterFirst);
+
+		await handleSessionStart(makeDeps(tmpDir));
+
+		await getFormattersForFile(nextFilePath, nextCwd);
+		expect(rustfmtProbes()).toBeGreaterThan(afterFirst);
+	});
+
+	// #1895 review round: the case above uses a NEW cwd, so it never reaches the
+	// per-cwd detection cache. A session replacement in the SAME directory does.
+	// `getFormattersForFile` returns cached formatter NAMES from `detectionCache`
+	// and short-circuits before any `which` probe, so clearing only the which
+	// latches leaves the previous session's verdict in force for the one
+	// directory the user is actually working in. The session reset has to drop
+	// both.
+	it("re-probes a latched-missing formatter in the SAME cwd after handleSessionStart", async () => {
+		const { clearFormatterCache, getFormattersForFile } = await import(
+			"../../clients/formatters.js"
+		);
+		// Arrange only: the module registry is shared across tests in this file,
+		// so the preceding case leaves rustfmt latched. Start from a clean slate
+		// so the seeding step below genuinely probes.
+		clearFormatterCache();
+		const filePath = `${tmpDir}/lib.rs`;
+		const fs = await import("node:fs");
+		fs.writeFileSync(filePath, "fn main() {}\n");
+		const spawnMod = await import("../../clients/safe-spawn.js");
+		const spawnMock = vi.mocked(spawnMod.safeSpawnAsync);
+		const finder = process.platform === "win32" ? "where" : "which";
+		const rustfmtProbes = () =>
+			spawnMock.mock.calls.filter(
+				(call) =>
+					String(call[0]) === finder &&
+					(call[1] as string[] | undefined)?.[0] === "rustfmt",
+			).length;
+
+		// Seed the absent-formatter verdict, and confirm it is genuinely cached:
+		// a second lookup in the same cwd must not re-probe.
+		await getFormattersForFile(filePath, tmpDir);
+		const afterFirst = rustfmtProbes();
+		expect(afterFirst).toBeGreaterThan(0);
+		await getFormattersForFile(filePath, tmpDir);
+		expect(rustfmtProbes()).toBe(afterFirst);
+
+		await handleSessionStart(makeDeps(tmpDir));
+
+		// Same cwd, same file, no config-file edit — the next lookup must probe
+		// PATH again rather than replay the previous session's answer.
+		await getFormattersForFile(filePath, tmpDir);
+		expect(rustfmtProbes()).toBeGreaterThan(afterFirst);
 	});
 
 	// #1490: psscriptanalyzer's interpreter and module verdicts live in
