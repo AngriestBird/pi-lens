@@ -996,6 +996,22 @@ export function getWidgetBlockingFilesForSweep(): Array<{
  * already performs per-diagnostic — this is the single-file entry point the
  * sweep drives once ITS check (not a second implementation of the check) says
  * to. Returns true iff something changed.
+ *
+ * #1790 review F4 (latent): unlike `reconcileStaleWidgetDependencyBlockers`, which
+ * checks drift per-diagnostic against EACH diagnostic's own `observedAt`, this
+ * demotes every currently-blocking LSP diagnostic for the file against the ONE
+ * file-level baseline `getWidgetBlockingFilesForSweep` computed (the earliest
+ * `observedAt` among them) — because the sweep's `detectDrift` contract is
+ * file-level, not per-diagnostic. That is safe ONLY as long as every LSP
+ * diagnostic on a `FileRecord` shares (or is more conservative than) that
+ * earliest stamp, which holds today because every writer that populates
+ * `allDiagnostics` (`recordDiagnostics`, `reconcileCascadeNeighborLspErrors`)
+ * replaces the file's LSP errors wholesale with one `observedAt` per write. If a
+ * future writer ever merges LSP diagnostics with genuinely MIXED per-entry
+ * stamps on one record, this function would over-demote entries observed after
+ * the earliest one drifted — re-derive per-diagnostic (mirroring
+ * `reconcileStaleWidgetDependencyBlockers`) rather than assume the single
+ * baseline still holds.
  */
 export function markWidgetFileBlockersStale(
 	filePath: string,

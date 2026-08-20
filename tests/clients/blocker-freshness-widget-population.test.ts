@@ -167,7 +167,16 @@ describe("blocker freshness sweep — widget-store population (#1790)", () => {
 		expect((getFileDiagnostics(consumer) ?? []).some((d) => isBlocking(d))).toBe(true);
 	});
 
-	it("processes a file present in BOTH stores exactly once (no duplicate gate run)", async () => {
+	// #1790 review F1: the LIVE shape is not a stale widget remnant sitting next to
+	// an inline blocker — every live dispatch writes BOTH stores for the SAME
+	// verdict (`runtime-tool-result.ts`'s inline-blocker write, `pipeline.ts`'s
+	// widget-store write). An earlier revision of this fix DROPPED the widget row
+	// on a duplicate path instead of chaining its demote onto the inline entry's:
+	// the sweep reported `revalidated:1` while the widget's OWN `isBlocking` for
+	// the file still read true — the exact ghost #1790 exists to kill, just moved
+	// one store over. This test asserts the WIDGET row's state, not merely the
+	// sweep's counts, so that regression cannot hide behind a passing count again.
+	it("processes a file present in BOTH stores once, but demotes BOTH stores (F1)", async () => {
 		const dir = makeDir("pi-lens-fresh-widgetpop-dedup-");
 		const consumer = path.join(dir, "consumer.ts");
 		const dep = path.join(dir, "dep.ts");
@@ -178,9 +187,12 @@ describe("blocker freshness sweep — widget-store population (#1790)", () => {
 		);
 
 		const runtime = new RuntimeCoordinator();
+		// A live dispatch writes BOTH stores for the same verdict.
 		runtime.recordInlineBlockers(consumer, "🔴 live blocker", 1, ["lsp"]);
-		// A stale widget-store remnant for the SAME file (e.g. a prior cache reply).
-		recordCacheServedBlocking(consumer, "cached blocking finding", Date.now());
+		recordCacheServedBlocking(consumer, "live blocker", Date.now());
+		expect((getFileDiagnostics(consumer) ?? []).some((d) => isBlocking(d))).toBe(
+			true,
+		);
 
 		driftIntoFuture(dep);
 
@@ -191,6 +203,14 @@ describe("blocker freshness sweep — widget-store population (#1790)", () => {
 		// twice just because it also has a widget-store row.
 		expect(counts.total).toBe(1);
 		expect(counts.revalidated).toBe(1);
+
+		// Both stores must reflect the demotion. The inline blocker...
+		expect(runtime.getInlineBlockersSnapshot()[0]?.stale).toBe(true);
+		// ...AND the widget row it was deduped against — the row a live TUI/footer
+		// render actually reads. Before the F1 fix this stayed `isBlocking: true`.
+		const widgetDiags = getFileDiagnostics(consumer) ?? [];
+		expect(widgetDiags.some((d) => d.stale === true)).toBe(true);
+		expect(widgetDiags.some((d) => isBlocking(d))).toBe(false);
 	});
 
 	it("bounds the added cost to the widget store's own currently-blocking files", async () => {

@@ -45,7 +45,7 @@
  * not a silently-closed one.
  */
 import * as fs from "node:fs";
-import { normalizeMapKey } from "./path-utils.js";
+import { normalizeEphemeralMapKey } from "./path-utils.js";
 import { resolveImportToFiles } from "./review-graph/import-resolvers.js";
 import type { RuntimeCoordinator } from "./runtime-coordinator.js";
 import {
@@ -420,11 +420,17 @@ interface SweepPopulationEntry {
  * serves them out of the advisory channel with a `[stale — re-run to confirm]`
  * marker instead of as an authoritative blocker.
  *
- * #1790: a file present in BOTH stores (e.g. a live dispatch that also left a stale
- * widget-only remnant) is processed ONCE, via its inline-blocker entry — the widget
- * row for that same path is skipped so the sweep's one drift check never runs twice
- * over the same file (one population, the existing gates, per the issue's
- * acceptance criteria).
+ * #1790: a file present in BOTH stores — the common case, since a live dispatch
+ * writes an inline blocker (`runtime-tool-result.ts`) AND a widget-store record
+ * (`pipeline.ts`) for the SAME verdict — is drift-checked ONCE, via its
+ * inline-blocker entry, so the sweep's one drift check never runs twice over the
+ * same file. But `markInlineBlockerStale` only ever touches
+ * `RuntimeCoordinator`'s map, never the widget store; on drift for a duplicated
+ * path, the widget demote is CHAINED onto the inline entry's `demote` (both stores
+ * write) rather than the widget row being silently dropped — the reviewer's F1
+ * probe caught an earlier revision that discarded it: `revalidated:1` while the
+ * widget's own `isBlocking` for the file still read true, the exact ghost #1790
+ * exists to kill.
  *
  * Never throws: any internal failure leaves the entry untouched (existing re-serve
  * behavior) rather than failing the turn end.
@@ -470,14 +476,40 @@ export async function sweepInlineBlockerFreshness(
 		demote: () => runtime.markInlineBlockerStale(entry.filePath, "dependency-drift"),
 	}));
 
-	const inlinePaths = new Set(
-		inlineEntries.map((entry) => normalizeMapKey(entry.filePath)),
-	);
+	// #1790 review F2: dedup key is `normalizeEphemeralMapKey`, not
+	// `normalizeMapKey` — the latter realpaths a live file and walks up the
+	// directory tree for a missing one (measured ~313µs per deleted path, exactly
+	// the population this sweep processes) on a turn-end hot path. The widget
+	// store this population is reconciled against keys on
+	// `normalizeEphemeralMapKey` too (see `widget-state.ts`'s module doc on why
+	// `normalizeMapKey` is wrong for this in-process, single-walk kind of key),
+	// so this also keeps the dedup consistent with the store it is deduping
+	// against, not just cheaper.
+	const inlineByKey = new Map<string, SweepPopulationEntry>();
+	for (const entry of population) {
+		inlineByKey.set(normalizeEphemeralMapKey(entry.filePath), entry);
+	}
 	for (const extra of options?.additionalEntries ?? []) {
-		// One population: a path already covered by an inline-blocker entry is not
-		// added a second time, even though it reached this sweep through a different
-		// store — see the function doc.
-		if (inlinePaths.has(normalizeMapKey(extra.filePath))) continue;
+		const key = normalizeEphemeralMapKey(extra.filePath);
+		const inlineEntry = inlineByKey.get(key);
+		if (inlineEntry) {
+			// #1790 review F1: a duplicated path is counted and drift-checked ONCE
+			// (via the inline entry above), but BOTH stores must record the
+			// verdict — `markInlineBlockerStale` only ever touches
+			// `RuntimeCoordinator`'s map, so without this chain the widget store's
+			// own diagnostic for this file stays fully blocking (`isBlocking` true)
+			// even after the inline entry demotes. Chain, don't replace: either
+			// store's own untouched failure path must not suppress the other's
+			// write.
+			const demoteInline = inlineEntry.demote;
+			const demoteWidget = extra.demote;
+			inlineEntry.demote = () => {
+				const inlineChanged = demoteInline();
+				const widgetChanged = demoteWidget();
+				return inlineChanged || widgetChanged;
+			};
+			continue;
+		}
 		population.push({
 			filePath: extra.filePath,
 			stale: false,
