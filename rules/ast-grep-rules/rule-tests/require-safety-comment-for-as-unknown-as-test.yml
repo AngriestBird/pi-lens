@@ -14,6 +14,18 @@ valid:
   # pattern back to any assertion reds both.
   - 'const c = x as Foo;'
   - 'const d = x as A as B;'
+  # #1870: tree-sitter-typescript calls an object-literal member a `pair`.
+  # A comment directly above that pair is the natural local anchor.
+  - |
+    const config = {
+      // SAFETY: input is validated by the config loader
+      value: input as unknown as string,
+    };
+  - |
+    configure({
+      // SAFETY: input is validated by the config loader
+      value: input as unknown as string,
+    });
 invalid:
   - "const a = x as unknown as Foo;"
   - |
@@ -45,3 +57,11 @@ invalid:
     // SAFETY: documents castA only
     const castA = a as unknown as Foo;
     const castB = b as unknown as Foo;
+  # A comment on an unrelated sibling pair must not reach a later pair.
+  - |
+    const config = {
+      unrelated: 1,
+      // SAFETY: this documents a different property
+      other: 2,
+      target: input as unknown as string,
+    };

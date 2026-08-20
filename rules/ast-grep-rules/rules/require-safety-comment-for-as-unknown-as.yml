@@ -65,16 +65,18 @@ note: |
   `tests/`. The rule is tagged `metadata.category: pi-lens-self-scan`,
   so CI's `npm run astgrep:self-scan` lane keeps it at zero.
 
-  Scope and known gap: a comment is accepted if it directly precedes
-  the assertion as a structural sibling (inline, e.g. `/* SAFETY: ... */
-  x as unknown as T`), OR if it directly precedes the assertion's
-  containing expression/variable/return statement as a structural
-  sibling. Upstream walks an arbitrary number of statement-owner levels
-  looking for ANY preceding comment in the file; this port only checks
-  one level up from the assertion and one level up from its immediate
-  containing statement. There is NO dominance verification: the rule
-  proves a comment is adjacent, never that the comment is true or that
-  it describes this cast.
+  Placement contract: a `SAFETY:` comment may directly precede the cast,
+  its enclosing statement, or an object-literal member (`pair`) containing
+  the cast. For array elements, call arguments, JSX attributes, class static
+  blocks, and switch cases, place the comment on the enclosing statement
+  instead; those container members are not comment anchors for this valve.
+  Inline comments remain valid, for example `/* SAFETY: ... */ x as unknown
+  as T`. Upstream walks an arbitrary number of statement-owner levels looking
+  for ANY preceding comment in the file; this port only checks one level up
+  from the assertion and one level up from its immediate containing
+  statement or supported object member. There is NO dominance verification:
+  the rule proves a comment is adjacent, never that the comment is true or
+  that it describes this cast.
 
   Matched pair with `no-chained-type-assertions.yml`. As of 2026-08-20
   the two PARTITION the assertion space instead of overlapping: this
@@ -126,6 +128,7 @@ rule:
             - kind: lexical_declaration
             - kind: variable_declaration
             - kind: return_statement
+            - kind: pair
           follows:
             kind: comment
             regex: 'SAFETY\s*:'
