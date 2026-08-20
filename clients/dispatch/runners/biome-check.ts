@@ -35,7 +35,32 @@ interface BiomeDiagnostic {
 	tags?: string[];
 }
 
-function parseBiomeJson(
+/**
+ * Map biome's own severity vocabulary onto the four-tier `Diagnostic.severity`
+ * (clients/dispatch/types.ts), the same way `normalizeRuleSeverity` does for
+ * ast-grep-napi post-#1787. Biome names its info tier `"information"`; every
+ * other tier is a direct pass-through. An unrecognized value falls back to
+ * `"warning"` — the tier every biome diagnostic reported at before this fix,
+ * so reviving hint/info never silently demotes an existing finding.
+ */
+export function normalizeBiomeSeverity(
+	raw: BiomeDiagnostic["severity"] | undefined,
+): Diagnostic["severity"] {
+	switch (raw) {
+		case "error":
+			return "error";
+		case "information":
+			return "info";
+		case "hint":
+			return "hint";
+		case "warning":
+			return "warning";
+		default:
+			return "warning";
+	}
+}
+
+export function parseBiomeJson(
 	raw: string,
 	filePath: string,
 ): { diagnostics: Diagnostic[]; parseError?: string } {
@@ -51,7 +76,7 @@ function parseBiomeJson(
 				filePath,
 				line: d.location.start.line,
 				column: d.location.start.column,
-				severity: d.severity === "error" ? "error" : "warning",
+				severity: normalizeBiomeSeverity(d.severity),
 				semantic: d.severity === "error" ? "blocking" : ("warning" as const),
 				tool: "biome",
 				rule: d.category,
