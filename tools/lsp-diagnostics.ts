@@ -1325,7 +1325,12 @@ async function collectFileDiagnosticResult(
 	// result — same false-clean bug class `runWorkspaceDiagnostics`'s cache
 	// wiring guards against. #1095: the entry carries the content fingerprint so a
 	// later lookup can verify it against disk beyond the mtime proxy.
-	if (cacheCtx && scopeKey !== undefined && confirmation !== "unconfirmed") {
+	if (
+		cacheCtx &&
+		scopeKey !== undefined &&
+		confirmation !== "unconfirmed" &&
+		unconfirmedServerIds.length === 0
+	) {
 		cacheCtx.record(
 			file,
 			scopeKey,
