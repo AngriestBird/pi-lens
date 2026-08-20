@@ -231,6 +231,11 @@ It is smart-default and read-only. Rendered-manifest validation (#1283 slice B)
 ships beside it as the separately-gated, OFF-by-default `helm-render` runner —
 see the IaC-misconfig note in the pipeline section.
 
+The javac standalone-file fallback walks for Maven/Gradle descriptors from the
+edited file's directory through `DispatchContext.projectRoot` inclusive. Never
+let a descriptor above the session project suppress the fallback; nested module
+descriptors inside the project still gate it. (#1877)
+
 Mechanical ast-grep rules may expose a `fix:` only when one syntax rewrite is
 unambiguous. Reflect.apply remains diagnostic-only because an own shadowed
 `.apply` changes the obvious rewrite's semantics. Two-argument Reflect.get uses
