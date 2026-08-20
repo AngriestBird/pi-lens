@@ -169,9 +169,12 @@ function withIgnoredFixture<T>(fn: (cwd: string) => Promise<T>): Promise<T> {
 
 // #1799: the compact header (shown in the tool-call row) reads details.totalBlocking
 // / details.totalErrors / details.totalWarnings directly — no execute() call
-// involved. `semantic === "blocking"` iff `severity === "error"` holds
-// codebase-wide, so totalBlocking and totalErrors are always the SAME count;
-// the header must not print both as if they were disjoint problems.
+// involved. `totalBlocking` and `totalErrors` count the SAME findings unless a
+// #1631 dependency-drift demotion has revoked an error's blocking authority
+// (widget-state.ts `isBlocking` vs `countDiagnostics`) while leaving it in the
+// error tally — that's the one case the two totals genuinely disagree. The
+// header must not print both terms for the same findings when blocking > 0,
+// but must still surface drift-demoted errors when blocking === 0.
 describe("lens_diagnostics compact render header", () => {
 	const identityTheme = { fg: (_color: string, text: string) => text, bold: (text: string) => text } as unknown as Theme;
 
@@ -186,7 +189,7 @@ describe("lens_diagnostics compact render header", () => {
 		return (component?.render(200) ?? []).join("\n");
 	}
 
-	it("shows blocking and warnings only — no redundant errors term (#1799)", () => {
+	it("shows blocking and warnings only — no redundant errors term when blocking > 0 (#1799)", () => {
 		const line = renderHeader({
 			mode: "all",
 			totalBlocking: 3,
@@ -197,18 +200,24 @@ describe("lens_diagnostics compact render header", () => {
 		expect(line).toContain("3 blocking");
 		expect(line).toContain("2 warnings");
 		expect(line).not.toMatch(/\b3 errors?\b/);
-		expect(line).not.toContain("·  ·");
 	});
 
-	it("reports clean when blocking and warnings are both zero, even if totalErrors leaks a stale value", () => {
+	// F1 regression: 3 dependency-drift-demoted errors (#1631) have
+	// blocking: 0, errors: 3 by design — isBlocking excludes any stale entry,
+	// but countDiagnostics keeps a drift demotion (unlike past-eof) in the
+	// error tally. An over-corrected fix that drops the errors term entirely
+	// would render this "clean", contradicting the per-file row (3E) and the
+	// TUI footer (●3E). The errors term must still surface when blocking === 0.
+	it("surfaces drift-demoted errors when blocking is 0, instead of reporting clean (#1799 F1)", () => {
 		const line = renderHeader({
 			mode: "all",
 			totalBlocking: 0,
-			totalErrors: 0,
+			totalErrors: 3,
 			totalWarnings: 0,
-			filesWithIssues: 0,
+			filesWithIssues: 1,
 		});
-		expect(line).toContain("clean");
+		expect(line).not.toContain("clean");
+		expect(line).toContain("3 errors");
 	});
 });
 
@@ -2398,6 +2407,25 @@ describe("lens_diagnostics mode=all", () => {
 		const text = String(result.content[0].text);
 		expect(text).toContain("3 blocking");
 		expect(text).not.toMatch(/\b3 errors?\b/);
+	});
+
+	// F1 regression (#1799 fix round): a #1631 dependency-drift demotion
+	// revokes an error's blocking authority (widget-state.ts `isBlocking`
+	// returns false for any stale entry) while `countDiagnostics` keeps it in
+	// the error tally (unlike a past-eof demotion) — so this file summarizes
+	// to blocking: 0, errors: 3 by design, a real disagreement between the two
+	// totals, not a double count. The summary must still surface it instead of
+	// reporting "no issues" — same reasoning as the per-file row's own
+	// `s.errors > 0 && s.blocking === 0` guard.
+	it("summary surfaces drift-demoted errors when blocking is 0, instead of reporting clean (#1799 F1)", async () => {
+		mockSummaries.length = 0;
+		mockSummaries.push(sum("/proj/a.ts", { blocking: 0, errors: 3 }));
+		const result = await run(makeTool(), { mode: "all" });
+		const text = String(result.content[0].text);
+		expect(text).toContain("3 errors");
+		expect(text).not.toContain("No issues");
+		expect(text).not.toContain("✓");
+		expect(result.details).toMatchObject({ totalBlocking: 0, totalErrors: 3 });
 	});
 
 	// ── actual-message exposure (the point of the tool) ───────────────────────────

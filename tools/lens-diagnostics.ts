@@ -308,18 +308,28 @@ export function createLensDiagnosticsTool(
 					return `lens_diagnostics delta — clean${coldSuffix}${failedSuffix}`;
 				return `lens_diagnostics delta — ${aw} actionable · ${cq} quality · ${pd} project${coldSuffix}${failedSuffix}`;
 			}
-			// #1799: `semantic === "blocking"` iff `severity === "error"` holds
-			// codebase-wide, so `totalBlocking` and `totalErrors` always count the
-			// same findings. Render blocking + warnings only — a two-value model,
-			// matching widget-state — instead of double-counting the same errors
-			// under two different labels.
+			// #1799: `semantic === "blocking"` iff `severity === "error"` holds for
+			// RAW classification, but not for the rendered counts — a
+			// dependency-drift demotion (#1631, widget-state.ts `isBlocking` vs
+			// `countDiagnostics`) revokes an error's blocking authority (stale)
+			// while the finding itself stays real evidence, so it lands in
+			// `totalErrors` with `totalBlocking` unchanged. That is the one case
+			// where the two totals genuinely disagree, and it must still render —
+			// otherwise a file with drift-demoted errors reads as "clean". What
+			// must NOT happen is printing both terms for the SAME findings (the
+			// actual #1799 bug), so `errors` renders only when `blocking === 0`,
+			// mirroring the per-file row's own guard below.
 			const b = details?.totalBlocking ?? 0;
+			const e = details?.totalErrors ?? 0;
 			const w = details?.totalWarnings ?? 0;
 			const files = details?.filesWithIssues ?? details?.filesChecked ?? 0;
-			if (b + w === 0) {
+			if (b + e + w === 0) {
 				return `lens_diagnostics ${mode} — clean (${files} files)${coldSuffix}${failedSuffix}`;
 			}
-			return `lens_diagnostics ${mode} — ${b} blocking · ${w} warnings (${files} files)${coldSuffix}${failedSuffix}`;
+			const parts = [`${b} blocking`];
+			if (b === 0 && e > 0) parts.push(`${e} errors`);
+			parts.push(`${w} warnings`);
+			return `lens_diagnostics ${mode} — ${parts.join(" · ")} (${files} files)${coldSuffix}${failedSuffix}`;
 		}),
 		parameters: Type.Object({
 			mode: Type.Optional(
@@ -2331,16 +2341,21 @@ function formatAllMode(
 		totalWarnings += s.warnings;
 	}
 
-	// #1799: `totalErrors` counts the same findings as `totalBlocking` — the
-	// codebase invariant `semantic === "blocking"` iff `severity === "error"`
-	// holds everywhere, so a diagnostic can never land in one total without the
-	// other. Render blocking + warnings only; `totalErrors` stays in `details`
-	// (below) for back-compat consumers, but the rendered summary no longer
-	// prints the same findings twice under two different labels.
+	// #1799: `totalBlocking` and `totalErrors` count the same findings UNLESS a
+	// dependency-drift demotion (#1631) has revoked blocking authority from an
+	// error while leaving it in the error tally (widget-state.ts `isBlocking`
+	// vs `countDiagnostics`) — that's a real, live disagreement between the two
+	// totals, not double-counting. So `errors` renders only when
+	// `blocking === 0`, same guard as the per-file row above: it shows the
+	// drift-demoted findings the blocking line can't, without ever printing the
+	// same findings twice under two labels when blocking > 0.
 	const summary = [
 		`\nSummary (${visibleSummaries.length} files diagnosed this session):`,
 		totalBlocking > 0
 			? `  🔴 ${totalBlocking} blocking error${totalBlocking === 1 ? "" : "s"}`
+			: null,
+		totalBlocking === 0 && totalErrors > 0
+			? `  ${totalErrors} error${totalErrors === 1 ? "" : "s"}`
 			: null,
 		totalWarnings > 0
 			? `  ${totalWarnings} warning${totalWarnings === 1 ? "" : "s"}`
