@@ -39,15 +39,18 @@ note: |
 
      | corpus | total | test-path | non-test | suppressed |
      |---|---:|---:|---:|---:|
-     | pi-lens (`clients/`+`tests/`) | 304 | 288 | 16 | 95% |
+     | pi-lens (`clients/`+`tests/`) | 305 | 289 | 16 | 95% |
      | pi core (`packages/`) | 182 | 155 | 27 | 85% |
      | opencode (`packages/`) | 194 | 154 | 40 | 79% |
      | oh-my-pi (`packages/`) | 1803 | 1644 | 159 | 91% |
 
-     This is a FALSE-NEGATIVE bias, deliberately: a genuine laundering
-     cast written in a test file is now missed. It is a path glob, not a
-     semantic check — ast-grep cannot verify a cast is really a test
-     double, only that it lives under a test path.
+     This is a FALSE-NEGATIVE bias, deliberately, and it is not small:
+     289 uncommented `as unknown as` sites in pi-lens's own `tests/`
+     now raise NO diagnostic at all, where each previously raised an
+     `error` through `no-chained-type-assertions.yml`'s `unknown` arm.
+     The same trade costs 1,644 sites on oh-my-pi. It is a path glob,
+     not a semantic check — ast-grep cannot verify a cast is really a
+     test double, only that it lives under a test path.
 
   2. REPO-SIDE REMEDIATION: the 16 remaining `clients/` sites were read
      individually and each was given a truthful `SAFETY:` comment

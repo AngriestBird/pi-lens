@@ -594,27 +594,36 @@ describe("TreeCache capacity growth for scan working sets (#1715)", () => {
 // interface and forget the array, and the cast silently starts lying.
 describe("tree cache counter keys cover the counter type (#1727)", () => {
 	it("has no counter missing from TREE_CACHE_COUNTER_KEYS", () => {
-		// Compile-time half: `MissingCounterKey` is `never` only while every
-		// key of TreeCacheCounters appears in the array. Drop a key from the
-		// array and `npm run lint` fails on this line.
+		// This assertion is COMPILE-TIME only; the `expect` below just gives
+		// vitest a body. `MissingCounterKey` is `never` exactly while every key
+		// of TreeCacheCounters appears in the array.
 		type MissingCounterKey = Exclude<
 			keyof TreeCacheCounters,
 			(typeof TREE_CACHE_COUNTER_KEYS)[number]
 		>;
-		const missing: MissingCounterKey[] = [];
-		expect(missing).toEqual([]);
+		// The `[T] extends [never]` wrapper is load-bearing. The obvious form,
+		// `const missing: MissingCounterKey[] = []`, is VACUOUS: an empty array
+		// literal is assignable to an array of ANY element type, so it compiles
+		// even when MissingCounterKey is a real key. This form resolves to
+		// `never` — which nothing can be assigned to — the moment a counter is
+		// missing, so `tsc` fails with TS2322. Verified by mutation: dropping
+		// `ghostHistoryDrops` from TREE_CACHE_COUNTER_KEYS reds this line and
+		// leaves the vacuous form green.
+		const _noMissing: [MissingCounterKey] extends [never] ? true : never =
+			true;
+		expect(_noMissing).toBe(true);
 	});
 
-	it("seeds every declared key at zero", () => {
-		// Runtime half: the cast's actual claim is "the returned object has
-		// every counter, all numeric". Drop a key from the array and this reds
-		// on the key set.
+	it("seeds every declared key as a numeric zero", () => {
+		// Deliberately NOT a key-coverage check: both sides of a key comparison
+		// would come from TREE_CACHE_COUNTER_KEYS, which proves nothing. Key
+		// coverage is the compile-time assertion above. What this pins is the
+		// part of the cast that is a runtime claim — that `Object.fromEntries`
+		// produced one entry per key and every value is the number 0, not
+		// `undefined` or a string.
 		const counters = createTreeCacheCounters();
-		expect(Object.keys(counters).sort()).toEqual(
-			[...TREE_CACHE_COUNTER_KEYS].sort(),
-		);
-		expect(Object.values(counters)).toEqual(
-			TREE_CACHE_COUNTER_KEYS.map(() => 0),
-		);
+		const values = Object.values(counters);
+		expect(values).toHaveLength(TREE_CACHE_COUNTER_KEYS.length);
+		expect(values.every((v) => typeof v === "number" && v === 0)).toBe(true);
 	});
 });

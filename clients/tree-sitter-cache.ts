@@ -66,8 +66,9 @@ export function createTreeCacheCounters(): TreeCacheCounters {
 	// every key gets 0, so the result has the full shape. The `satisfies`
 	// clause does NOT check the reverse direction: add a counter to
 	// `TreeCacheCounters` without adding its key here and this cast becomes a
-	// lie, so `tests/clients/tree-sitter-cache.test.ts` pins the reverse
-	// direction: every counter the type declares must come back as 0.
+	// lie. `tests/clients/tree-sitter-cache.test.ts` closes that direction with
+	// a compile-time `[Exclude<keyof TreeCacheCounters, …>] extends [never]`
+	// assertion, so a missing key fails `tsc`, not just the suite.
 	return Object.fromEntries(
 		TREE_CACHE_COUNTER_KEYS.map((key) => [key, 0]),
 	) as unknown as TreeCacheCounters;
