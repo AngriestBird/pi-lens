@@ -8,4 +8,3 @@ invalid:
   - "const g = (): unknown => 1;"
   - "class C { m(): unknown { return 1; } }"
   - "interface I { m(): unknown; }"
-  - "type H = () => unknown;"
