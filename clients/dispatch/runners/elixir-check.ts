@@ -191,7 +191,17 @@ const elixirCheckRunner: RunnerDefinition = {
 		}
 
 		const raw = `${result.stderr || ""}\n${result.stdout || ""}`;
-		const diagnostics = parseElixirOutput(raw, ctx.filePath, cwd);
+		const hasProjectContext = command === "mix";
+		const diagnostics = parseElixirOutput(raw, ctx.filePath, cwd).map((d) =>
+			hasProjectContext
+				? d
+				: {
+						...d,
+						// A direct elixirc invocation cannot resolve Mix dependencies.
+						// Standalone findings inform the agent, but cannot block it.
+						semantic: "warning" as const,
+					},
+		);
 		if (diagnostics.length === 0) {
 			if (result.status && result.status !== 0) {
 				return {
@@ -204,13 +214,13 @@ const elixirCheckRunner: RunnerDefinition = {
 								`${command} exited non-zero without structured diagnostics`,
 							filePath: ctx.filePath,
 							severity: "error",
-							semantic: "blocking",
+							semantic: hasProjectContext ? "blocking" : "warning",
 							tool: "elixir-check",
 							rule: command,
 							fixable: false,
 						},
 					],
-					semantic: "blocking",
+					semantic: hasProjectContext ? "blocking" : "warning",
 				};
 			}
 			return { status: "succeeded", diagnostics: [], semantic: "none" };

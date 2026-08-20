@@ -134,6 +134,34 @@ describe("secondary language fallback runners", () => {
 		}
 	});
 
+	it("keeps context-free zig compiler diagnostics non-blocking", async () => {
+		const env = setupTestEnvironment("pi-lens-zig-contextless-");
+		try {
+			const filePath = path.join(env.tmpDir, "src", "main.zig");
+			fs.mkdirSync(path.dirname(filePath), { recursive: true });
+			fs.writeFileSync(filePath, "pub fn main() void {}\n");
+			safeSpawnAsync.mockResolvedValue({
+				error: null,
+				status: 1,
+				stdout: "",
+				stderr: `${filePath}:2:1: error: unable to load module`,
+			});
+
+			const runner = (await import(
+				"../../../../clients/dispatch/runners/zig-check.js"
+			)).default;
+			const result = await runner.run(
+				createCtx("zig", filePath, env.tmpDir) as never,
+			);
+
+			expect(result.status).toBe("failed");
+			expect(result.semantic).toBe("warning");
+			expect(result.diagnostics[0]?.semantic).toBe("warning");
+		} finally {
+			env.cleanup();
+		}
+	});
+
 	it("surfaces a blocking diagnostic when gleam exits non-zero without structured output", async () => {
 		const env = setupTestEnvironment("pi-lens-gleam-runner-");
 		try {
@@ -192,6 +220,34 @@ describe("secondary language fallback runners", () => {
 			expect(result.status).toBe("failed");
 			expect(result.semantic).toBe("blocking");
 			expect(result.diagnostics[0]?.tool).toBe("elixir-check");
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("keeps standalone elixirc diagnostics non-blocking", async () => {
+		const env = setupTestEnvironment("pi-lens-elixirc-contextless-");
+		try {
+			const filePath = path.join(env.tmpDir, "app.ex");
+			fs.writeFileSync(filePath, "defmodule App do\n");
+			safeSpawnAsync.mockResolvedValue({
+				error: null,
+				status: 1,
+				stdout: "",
+				stderr:
+					"** (CompileError) app.ex:1:1: module Dependency is not loaded",
+			});
+
+			const runner = (await import(
+				"../../../../clients/dispatch/runners/elixir-check.js"
+			)).default;
+			const result = await runner.run(
+				createCtx("elixir", filePath, env.tmpDir) as never,
+			);
+
+			expect(result.status).toBe("succeeded");
+			expect(result.semantic).toBe("warning");
+			expect(result.diagnostics[0]?.semantic).toBe("warning");
 		} finally {
 			env.cleanup();
 		}
