@@ -654,9 +654,9 @@ describe("dependency-index availability persisted on the entry (#1793)", () => {
 // `?? []`, so `isEntryFresh`'s loop iterated zero times over the coerced
 // empty array and returned fresh — indistinguishable from a file the index
 // actually confirmed has zero imports. A session WITH a warm index
-// (`depIndexAvailable === true`, so #1793's whole-session refusal never
-// fires) could still fail-open per-file for a file outside that index's
-// coverage, with no signal at all.
+// (`hasDepKnowledge` true for SOME file, so #1793's whole-session refusal
+// never fires) could still fail-open per-file for a file outside that
+// index's own coverage, with no signal at all.
 describe("per-file dependency-index coverage in isEntryFresh (#1814)", () => {
 	function seedSnapshotCovering(cwd: string, coveredKey: string): void {
 		saveProjectSnapshot(cwd, {
@@ -681,8 +681,8 @@ describe("per-file dependency-index coverage in isEntryFresh (#1814)", () => {
 
 	// Probe F shape: a warm session's index covered g.ts, stamping
 	// depIndexAtScan: true. A LATER session's index exists (so
-	// `depIndexAvailable` is true and #1793's whole-session refusal doesn't
-	// fire) but covers only other.ts, not g.ts.
+	// `hasDepKnowledge` is true for other.ts and #1793's whole-session
+	// refusal doesn't fire) but covers only other.ts, not g.ts.
 	it("does not serve a CLEAN entry whose file is absent from an otherwise-present index (probe F)", () => {
 		const gPath = path.join(tmp, "g.ts");
 		fs.writeFileSync(gPath, "export const g = 1;\n");
