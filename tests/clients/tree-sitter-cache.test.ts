@@ -1,10 +1,13 @@
 import * as fs from "node:fs";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+	createTreeCacheCounters,
 	deriveScanTreeCacheCapacity,
+	TREE_CACHE_COUNTER_KEYS,
 	TREE_CACHE_DEFAULT_MAX_SIZE,
 	TREE_CACHE_SCAN_CAPACITY_CEILING,
 	TreeCache,
+	type TreeCacheCounters,
 } from "../../clients/tree-sitter-cache.js";
 import { createTempFile, setupTestEnvironment } from "./test-utils.js";
 
@@ -579,5 +582,48 @@ describe("TreeCache capacity growth for scan working sets (#1715)", () => {
 		for (const tree of treesByScan[scans - 1]) {
 			expect(tree.delete).not.toHaveBeenCalled();
 		}
+	});
+});
+
+// #1727/#1777: `createTreeCacheCounters` builds its result with
+// `Object.fromEntries(...) as unknown as TreeCacheCounters`. Its SAFETY
+// comment claims the cast holds because TREE_CACHE_COUNTER_KEYS covers every
+// counter. The `as const satisfies readonly (keyof TreeCacheCounters)[]`
+// clause on that array only checks one direction — that no listed key is
+// bogus. Nothing checked the reverse until now: add a counter to the
+// interface and forget the array, and the cast silently starts lying.
+describe("tree cache counter keys cover the counter type (#1727)", () => {
+	it("has no counter missing from TREE_CACHE_COUNTER_KEYS", () => {
+		// This assertion is COMPILE-TIME only; the `expect` below just gives
+		// vitest a body. `MissingCounterKey` is `never` exactly while every key
+		// of TreeCacheCounters appears in the array.
+		type MissingCounterKey = Exclude<
+			keyof TreeCacheCounters,
+			(typeof TREE_CACHE_COUNTER_KEYS)[number]
+		>;
+		// The `[T] extends [never]` wrapper is load-bearing. The obvious form,
+		// `const missing: MissingCounterKey[] = []`, is VACUOUS: an empty array
+		// literal is assignable to an array of ANY element type, so it compiles
+		// even when MissingCounterKey is a real key. This form resolves to
+		// `never` — which nothing can be assigned to — the moment a counter is
+		// missing, so `tsc` fails with TS2322. Verified by mutation: dropping
+		// `ghostHistoryDrops` from TREE_CACHE_COUNTER_KEYS reds this line and
+		// leaves the vacuous form green.
+		const _noMissing: [MissingCounterKey] extends [never] ? true : never =
+			true;
+		expect(_noMissing).toBe(true);
+	});
+
+	it("seeds every declared key as a numeric zero", () => {
+		// Deliberately NOT a key-coverage check: both sides of a key comparison
+		// would come from TREE_CACHE_COUNTER_KEYS, which proves nothing. Key
+		// coverage is the compile-time assertion above. What this pins is the
+		// part of the cast that is a runtime claim — that `Object.fromEntries`
+		// produced one entry per key and every value is the number 0, not
+		// `undefined` or a string.
+		const counters = createTreeCacheCounters();
+		const values = Object.values(counters);
+		expect(values).toHaveLength(TREE_CACHE_COUNTER_KEYS.length);
+		expect(values.every((v) => typeof v === "number" && v === 0)).toBe(true);
 	});
 });
