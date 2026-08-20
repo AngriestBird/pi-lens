@@ -1298,21 +1298,37 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 			: withinPerFileCap
 				? "aggregate-budget-degraded"
 				: "size-capped";
-	if (postMutation) {
-		if (attachAuthoritativeContent && budget) {
-			budget.remaining -= Buffer.byteLength(attachmentText, "utf-8");
-		}
+	// #1590: the pipeline hands up the changed-file data and this layer renders
+	// the sentence, so a size-capped write can no longer carry both "attached
+	// content is authoritative" and "too large to attach". The fallback covers
+	// a post-mutation with no notice data, which must still say re-read.
+	const notice =
+		result.postAutofixNotice ??
+		(postMutation
+			? { targetPath: postMutation.filePath, changedFiles: [] }
+			: undefined);
+	if (postMutation && attachAuthoritativeContent && budget) {
+		budget.remaining -= Buffer.byteLength(attachmentText, "utf-8");
+	}
+	// #1590 review F1: every mutation that produced a notice logs a row,
+	// INCLUDING the `none` decision a format-only change makes. Gating the row
+	// on `postMutation` made a legitimate "nothing was attachable here" verdict
+	// indistinguishable from missing instrumentation, which is the same
+	// empty-vs-errored confusion the read paths already guard against.
+	if (postMutation || notice) {
 		logLatency({
 			type: "phase",
 			phase: "authoritative_content_attachment_decision",
-			filePath: postMutation.filePath,
+			filePath: postMutation?.filePath ?? filePath,
 			durationMs: 0,
 			metadata: {
-				path: postMutation.filePath,
+				path: postMutation?.filePath ?? filePath,
 				bytes: contentBytes,
 				decision: attachmentDecision,
 			},
 		});
+	}
+	if (postMutation) {
 		// #1464: the nudge suppresses exactly the paths this decision
 		// delivered. Same boolean the attachment below reads — the nudge layer
 		// never re-derives the cap or the budget for itself.
@@ -1324,15 +1340,6 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 	const returnedContent = attachAuthoritativeContent
 		? [...event.content, { type: "text", text: attachmentText }]
 		: event.content;
-	// #1590: the pipeline hands up the changed-file data and this layer renders
-	// the sentence, so a size-capped write can no longer carry both "attached
-	// content is authoritative" and "too large to attach". The fallback covers
-	// a post-mutation with no notice data, which must still say re-read.
-	const notice =
-		result.postAutofixNotice ??
-		(postMutation
-			? { targetPath: postMutation.filePath, changedFiles: [] }
-			: undefined);
 	if (notice) {
 		output = `${output ? `${output}\n\n` : ""}${renderPostAutofixNotice(notice, attachmentDecision)}`;
 	}

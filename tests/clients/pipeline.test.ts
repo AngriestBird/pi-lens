@@ -307,6 +307,13 @@ describe("Pipeline", () => {
 			expect(
 				renderPostAutofixNotice(result.postAutofixNotice as never, "none"),
 			).toContain("File was modified by auto-format/fix");
+			// #1590 review F2: a run that changed the file must NOT also report
+			// itself clean. The notice moved a layer up, so the all-clear gate now
+			// has to account for it; without that, `output` falls through to
+			// `buildAllClearOutput` and the same result says "clean" and
+			// "modified".
+			expect(result.output).not.toContain("clean");
+			expect(result.output).toBe("");
 		});
 
 		it("surfaces formatter failures instead of plain clean output", async () => {

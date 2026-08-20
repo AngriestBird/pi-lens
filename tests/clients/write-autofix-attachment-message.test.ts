@@ -24,6 +24,8 @@ import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
 import { handleToolResult } from "../../clients/runtime-tool-result.js";
 import { createTempFile, setupTestEnvironment } from "./test-utils.js";
 
+const logLatency = vi.hoisted(() => vi.fn());
+vi.mock("../../clients/latency-logger.js", () => ({ logLatency }));
 vi.mock("../../clients/dispatch/integration.js", () => ({
 	dispatchLintWithResult: vi.fn(),
 	computeCascadeForFile: vi.fn().mockResolvedValue(undefined),
@@ -51,6 +53,16 @@ function instructions(
 		.filter((text) => !text.startsWith(ATTACHMENT_PREFIX))
 		.flatMap((text) => text.split("\n"))
 		.filter((line) => line.includes("⚠️ **") && line.includes("re-read"));
+}
+
+/** Every attachment-decision telemetry row this tool result logged. */
+function decisionRows(): Array<{ path: string; decision: string }> {
+	return logLatency.mock.calls
+		.map((call) => call[0])
+		.filter(
+			(row) => row.phase === "authoritative_content_attachment_decision",
+		)
+		.map((row) => row.metadata);
 }
 
 /** A biome that "fixes" the file by writing `content` to it. */
@@ -85,6 +97,7 @@ function toolDeps(runtime: RuntimeCoordinator, biomeClient: BiomeClient) {
 
 describe("#1590 post-autofix instruction has one author", () => {
 	beforeEach(() => {
+		logLatency.mockClear();
 		vi.mocked(getLSPService).mockReturnValue({
 			supportsLSP: () => false,
 			hasLSP: async () => false,
@@ -201,6 +214,56 @@ describe("#1590 post-autofix instruction has one author", () => {
 			const degraded = lines.filter((line) => line.includes(AGGREGATE_CLAIM));
 			expect(degraded).toHaveLength(1);
 			expect(degraded[0]).toContain(path.basename(fileB));
+			// One row per path, and the reason is on the row.
+			expect(decisionRows().map((row) => row.decision)).toEqual([
+				"attached",
+				"aggregate-budget-degraded",
+			]);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("a mutation that attached nothing still logs a decision row (#1590 F1)", async () => {
+		const env = setupTestEnvironment("pi-lens-1590-none-");
+		try {
+			// The autofix changed the file and then left no readable content
+			// behind — a fixer that deletes or renames its target. There are
+			// authoritative bytes to talk about, but none to attach, so the
+			// decision is `none`. A missing row here would be indistinguishable
+			// from missing instrumentation.
+			const filePath = createTempFile(env.tmpDir, "gone.ts", "const a=1;\n");
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+
+			const returned = await handleToolResult({
+				...toolDeps(
+					runtime,
+					fixingBiome(() => "unused"),
+				),
+				biomeClient: {
+					isSupportedFile: () => true,
+					ensureAvailable: async () => true,
+					fixFileAsync: async (target: string) => {
+						fs.rmSync(target);
+						return { success: true, changed: true, fixed: 1 };
+					},
+				},
+				event: {
+					toolName: "write",
+					input: { path: filePath },
+					content: [],
+				},
+			} as never);
+
+			const text = (returned?.content ?? [])
+				.map((part) => part.text ?? "")
+				.join("\n");
+			expect(text).not.toContain(ATTACHMENT_PREFIX);
+			expect(text).toContain(NEUTRAL_CLAIM);
+			expect(decisionRows()).toHaveLength(1);
+			expect(decisionRows()[0].decision).toBe("none");
+			expect(decisionRows()[0].path).toContain(path.basename(filePath));
 		} finally {
 			env.cleanup();
 		}
