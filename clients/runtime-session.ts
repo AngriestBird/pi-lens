@@ -8,7 +8,10 @@ import { createDeadline, yieldIfOverBudget } from "./cooperative-budget.js";
 import type { DeadCodeClient, DeadCodeResult } from "./dead-code-client.js";
 import { deadCodeIssueCount } from "./dead-code-client.js";
 import { logDeadCodeScan } from "./dead-code-logger.js";
-import { resetDegradationLedger } from "./degradation-ledger.js";
+import {
+	incrementDegradationCount,
+	resetDegradationLedger,
+} from "./degradation-ledger.js";
 import type { DependencyChecker } from "./dependency-checker.js";
 import { getDiagnosticTracker } from "./diagnostic-tracker.js";
 import { resetPsScriptAnalyzerAvailability } from "./dispatch/runners/psscriptanalyzer.js";
@@ -58,11 +61,14 @@ import {
 	getProjectSnapshotPath,
 	getProjectSnapshotLegacyPath,
 	hydrateRuntimeFromProjectSnapshot,
+	hydrateRuntimeFromProjectSnapshotIfIdle,
 	isProjectSnapshotFresh,
 	isProjectSnapshotMetaStale,
 	loadProjectSnapshot,
+	loadProjectSnapshotExportsAndRules,
 	PROJECT_SNAPSHOT_VERSION,
 	type ProjectSnapshot,
+	type ProjectSnapshotExportsAndRules,
 	readProjectSnapshotMeta,
 	saveRuntimeProjectSnapshot,
 } from "./project-snapshot.js";
@@ -199,6 +205,109 @@ function snapshotSequenceBase(root: string): ProjectSequenceBase | undefined {
 	};
 }
 
+/**
+ * #1785: one bounded ledger record per timed-out sequence read, so a real
+ * occurrence is diagnosable from the ledger alone rather than only from a
+ * `dbg` line that most hosts never surface. Carries the project root and the
+ * on-disk snapshot's age/size (when one exists) — the identity AC1 asks for:
+ * which project, how stale/large the snapshot that got skipped was.
+ */
+function recordSnapshotSequenceTimeout(args: {
+	snapshotRoot: string;
+	snapshotPath: string;
+}): void {
+	let reason = "sequence read timed out; no snapshot on disk";
+	try {
+		const stat = nodeFs.statSync(args.snapshotPath);
+		reason = `sequence read timed out; snapshot age=${Math.round(Date.now() - stat.mtimeMs)}ms size=${stat.size}b`;
+	} catch {
+		// No snapshot on disk yet — the reason above already covers it.
+	}
+	incrementDegradationCount({
+		kind: "snapshot-sequence-read-timeout",
+		subject: args.snapshotRoot,
+		reason,
+	});
+}
+
+/**
+ * #1785: the synchronous freshness check made a conservative call with the
+ * `UNKNOWN_PROJECT_SEQ` sentinel (never hydrate when the real sequence is
+ * unknown). Once the deferred read resolves — a deterministic completion
+ * signal, not a sleep — this re-checks freshness against the now-known
+ * sequence and hydrates late when the snapshot really was current, instead of
+ * leaving the runtime without `cachedExports`/`projectRulesScan` for the rest
+ * of the session.
+ *
+ * #1785 review round F5 (design (a), replacing rounds 1-3's synchronous
+ * capture entirely): quick mode's own cold-start warmup ALREADY loads the
+ * on-disk snapshot for its own purposes — `cachedSnapshot` at the top of the
+ * warmup body, used to reuse a still-fresh `startupScan` verdict — strictly
+ * BEFORE the warmup's own possible save (`saveRuntimeProjectSnapshot`, only
+ * reached when that verdict was NOT fresh). Reusing THAT already-loaded
+ * value costs nothing new: the read was always going to happen regardless of
+ * this fix, and it is guaranteed to predate any overwrite the SAME warmup
+ * invocation might go on to make — a read-before-write invariant of the
+ * warmup's own code, not something this function has to defend against with
+ * a race window of its own. `getWarmupOwnSnapshotRead` is a closure over a
+ * per-`handleSessionStart`-call LOCAL variable (never module-scope — #1785
+ * F6 is exactly the class of bug a module-scope holder here would
+ * reintroduce) that the warmup publishes into once its own read completes.
+ *
+ * When the getter still returns `undefined` — the deferred read resolved
+ * before the warmup got that far (or no warmup was ever armed by this call:
+ * a later quick-mode call in the same process, print mode, full mode) —
+ * there is nothing published yet, so this falls back to a live re-load via
+ * `loadProjectSnapshotExportsAndRules`. That fallback is exactly as safe as
+ * the primary path: if the warmup hasn't reached its own read yet, it
+ * certainly hasn't saved yet either (same invariant), so disk still holds
+ * whatever was there before any warmup activity.
+ *
+ * Both the published value and the fallback re-load are the narrow,
+ * postings-free `ProjectSnapshotExportsAndRules` shape — never the full
+ * `loadProjectSnapshot`. This path only ever hydrates
+ * `cachedExports`/`projectRulesScan`; it can NOT hydrate `wordIndex` even
+ * when the underlying snapshot would otherwise have one, because the narrow
+ * type never carries it. That is intentional, not a regression: F2's hazard
+ * was this exact path nulling a `wordIndex` that quick mode's warmup had, in
+ * the meantime, built for real — the warmup remains the sole source of a
+ * late-arriving `wordIndex` for the interactive path.
+ */
+function retroactivelyHydrateAfterDeferredSequence(args: {
+	getWarmupOwnSnapshotRead: () => ProjectSnapshotExportsAndRules | null | undefined;
+	snapshotRoot: string;
+	runtime: RuntimeCoordinator;
+	dbg: (msg: string) => void;
+}): (latestSeq: ProjectSequenceIndex) => void {
+	return (latestSeq) => {
+		const published = args.getWarmupOwnSnapshotRead();
+		const snapshot =
+			published !== undefined
+				? published
+				: loadProjectSnapshotExportsAndRules(args.snapshotRoot);
+		if (
+			!snapshot ||
+			snapshot.version !== PROJECT_SNAPSHOT_VERSION ||
+			snapshot.seq !== latestSeq.projectSeq
+		) {
+			return;
+		}
+		const hydrated = hydrateRuntimeFromProjectSnapshotIfIdle(
+			args.runtime,
+			snapshot,
+		);
+		if (hydrated) {
+			args.dbg(
+				`session_start: deferred sequence read confirmed snapshot freshness — hydrating cachedExports/projectRulesScan late (seq=${snapshot.seq})`,
+			);
+		} else {
+			args.dbg(
+				`session_start: deferred sequence read confirmed snapshot freshness (seq=${snapshot.seq}), but the runtime already has live state (warmup or another task got there first) — skipping late hydration to avoid clobbering it`,
+			);
+		}
+	};
+}
+
 function loadSnapshotBodyUnlessStale(args: {
 	root: string;
 	currentProjectSeq: number;
@@ -330,8 +439,31 @@ async function readSequenceWithBudget(args: {
 	runtime: RuntimeCoordinator;
 	sessionGeneration: number;
 	dbg: (msg: string) => void;
+	/**
+	 * #1785: the sequence read that timed out is still running in the
+	 * background (see below) and, once it lands, is the FIRST point this
+	 * session ever learns the real project sequence. Without this hook the
+	 * only thing the deferred completion did was reseed `runtime.projectSeq`
+	 * — the snapshot hydration decision made synchronously (with the
+	 * `UNKNOWN_PROJECT_SEQ` sentinel, which can never match) stood for the
+	 * rest of the session even once the real sequence proved the snapshot
+	 * WAS fresh. Called with the resolved sequence so the caller can
+	 * retroactively hydrate; skipped whenever the reseed itself is skipped
+	 * (cross-session move-on or an in-window edit already advanced
+	 * `runtime.projectSeq` — hydrating from the pre-edit snapshot over that
+	 * would silently regress the edit).
+	 */
+	onDeferredSequenceResolved?: (latestSeq: ProjectSequenceIndex) => void;
 }): Promise<{ latestSeq: ProjectSequenceIndex; timedOut: boolean }> {
-	const { snapshotRoot, base, cwd, runtime, sessionGeneration, dbg } = args;
+	const {
+		snapshotRoot,
+		base,
+		cwd,
+		runtime,
+		sessionGeneration,
+		dbg,
+		onDeferredSequenceResolved,
+	} = args;
 	const readPromise = readLatestProjectSequenceAsync(snapshotRoot, base);
 
 	let timeoutHandle: NodeJS.Timeout | undefined;
@@ -399,6 +531,7 @@ async function readSequenceWithBudget(args: {
 				dbg(
 					`session_start: deferred sequence read completed — reseeded projectSeq=${latestSeq.projectSeq} fileSeqEntries=${latestSeq.fileSeqByPath.size}`,
 				);
+				onDeferredSequenceResolved?.(latestSeq);
 			})
 			.catch((err) => {
 				dbg(`session_start: deferred sequence read failed: ${err}`);
@@ -1641,6 +1774,21 @@ export async function handleSessionStart(
 	}
 	processGlobals.__piLensFirstSessionDone = true;
 
+	// #1785 F5 (round 4, design (a)): the warmup timer body below ALREADY
+	// loads the on-disk snapshot for its own purposes (`cachedSnapshot`,
+	// reused for the `startupScan` verdict cache) strictly BEFORE any save it
+	// might go on to make. This LOCAL variable — per-`handleSessionStart`-call,
+	// deliberately NOT module-scope (see #1785 F6) — lets the warmup publish
+	// that already-loaded read (narrowed to exports+rules, never the full
+	// object with `wordIndex`) for `retroactivelyHydrateAfterDeferredSequence`
+	// to reuse at zero additional cost, instead of this call paying for its
+	// own separate synchronous capture (rounds 1-3's approach, reverted here:
+	// see that function's doc comment for the full history). `undefined`
+	// means the warmup hasn't reached its own read yet (or was never armed by
+	// this call at all) — the quick-mode block's retroactive-hydration
+	// callback then falls back to a live re-load instead.
+	let warmupOwnSnapshotRead: ProjectSnapshotExportsAndRules | null | undefined;
+
 	// #1154: quick mode is entered on BOTH `pi -p`/`--print` (a one-shot that
 	// exits right after this turn) and an interactive process's first
 	// session_start (forced quick to protect keystroke latency, then warms
@@ -1691,6 +1839,23 @@ export async function handleSessionStart(
 					// reuse it instead of re-walking a possibly huge tree from
 					// scratch on every single startup.
 					const cachedSnapshot = loadProjectSnapshot(warmupSnapshotRoot);
+					// #1785 F5 (round 4): publish this ALREADY-loaded read — narrowed
+					// to exports+rules, never a reference to `cachedSnapshot` itself
+					// (which carries `wordIndex`/`files`/`symbols`/`reverseDeps`) — for
+					// `retroactivelyHydrateAfterDeferredSequence` to reuse. This read
+					// strictly precedes the warmup's own possible save a few lines
+					// below, so it is guaranteed to reflect disk as it stood before
+					// THIS warmup could have touched it. Zero marginal cost: this read
+					// already happens unconditionally for the `startupScan` verdict
+					// cache below, with or without this fix.
+					warmupOwnSnapshotRead = cachedSnapshot
+						? {
+								version: cachedSnapshot.version,
+								seq: cachedSnapshot.seq,
+								cachedExports: cachedSnapshot.cachedExports,
+								projectRulesScan: cachedSnapshot.projectRulesScan,
+							}
+						: null;
 					const cachedVerdict = cachedSnapshot?.startupScan;
 					let scan: StartupScanContext;
 					if (
@@ -2035,6 +2200,12 @@ export async function handleSessionStart(
 		runtime.projectRoot = cwd;
 		const sequenceReadStartedAt = Date.now();
 		const snapshotRoot = resolveSnapshotRoot(cwd);
+		// #1785 F5 (round 4): the getter closes over `warmupOwnSnapshotRead`
+		// directly (a `let` in this same `handleSessionStart` invocation's
+		// scope), so it reads whatever value is current AT DEFERRED-RESOLVE
+		// TIME — not whatever it was at this wiring instant. See
+		// `retroactivelyHydrateAfterDeferredSequence`'s doc comment for the
+		// full design.
 		const { latestSeq, timedOut } = await readSequenceWithBudget({
 			snapshotRoot,
 			base: snapshotSequenceBase(snapshotRoot),
@@ -2042,6 +2213,12 @@ export async function handleSessionStart(
 			runtime,
 			sessionGeneration: runtime.sessionGeneration,
 			dbg,
+			onDeferredSequenceResolved: retroactivelyHydrateAfterDeferredSequence({
+				getWarmupOwnSnapshotRead: () => warmupOwnSnapshotRead,
+				snapshotRoot,
+				runtime,
+				dbg,
+			}),
 		});
 		logLatency({
 			type: "phase",
@@ -2051,6 +2228,12 @@ export async function handleSessionStart(
 			durationMs: Date.now() - sequenceReadStartedAt,
 			metadata: { entries: latestSeq.fileSeqByPath.size, timedOut },
 		});
+		if (timedOut) {
+			recordSnapshotSequenceTimeout({
+				snapshotRoot,
+				snapshotPath: getProjectSnapshotPath(snapshotRoot),
+			});
+		}
 		runtime.seedProjectSequence?.(
 			latestSeq.projectSeq,
 			latestSeq.fileSeqByPath,
@@ -2179,6 +2362,20 @@ export async function handleSessionStart(
 		durationMs: Date.now() - sequenceReadStartedAt,
 		metadata: { entries: latestSeq.fileSeqByPath.size, timedOut },
 	});
+	if (timedOut) {
+		// #1785: instrumentation only here, deliberately no
+		// `onDeferredSequenceResolved` — unlike quick mode's cold path (which
+		// does nothing when the snapshot isn't trusted), full mode's cold path
+		// actively kicks off a real rescan below to rebuild this same state.
+		// Retroactively hydrating from the on-disk snapshot once the deferred
+		// read lands could overwrite that fresher, actively-computed state with
+		// the stale disk copy — a regression, not a fix. See the PR body for the
+		// full reasoning.
+		recordSnapshotSequenceTimeout({
+			snapshotRoot,
+			snapshotPath: getProjectSnapshotPath(snapshotRoot),
+		});
+	}
 	runtime.seedProjectSequence?.(latestSeq.projectSeq, latestSeq.fileSeqByPath);
 	const effectiveSeq = runtime.projectSeq ?? latestSeq.projectSeq;
 	dbg(
