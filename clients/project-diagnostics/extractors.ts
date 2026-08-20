@@ -99,6 +99,21 @@ export function formatCacheAge(ms: number): string {
 }
 
 /**
+ * #1623 fix-round F5: the full "<age> old" phrase for a cache-read lane.
+ * Every render call site used to append the literal word " old" after
+ * `formatCacheAge` itself, so a corrupt/missing timestamp's "age unknown"
+ * came out as the ungrammatical "age unknown old" — the exact residual the
+ * issue's tracking comment named. "Old" only makes sense once an age is
+ * actually known, so this is the single place that decides whether to say
+ * it, instead of every caller repeating (and occasionally forgetting) the
+ * same guard.
+ */
+export function formatCacheAgeOld(ms: number): string {
+	const age = formatCacheAge(ms);
+	return Number.isFinite(ms) ? `${age} old` : age;
+}
+
+/**
  * #1623 fix-round F1: the shape every availability-verdict accessor added to
  * gitleaks/trivy/opengrep/govulncheck (`SecurityScanClient`), knip
  * (`KnipClient`), madge (`DependencyChecker`), and jscpd (`JscpdClient`)

@@ -1423,12 +1423,16 @@ describe("lens_diagnostics mode=full", () => {
 		).toEqual({ "test-runner": 18 * 60_000 });
 	});
 
-	// #1623 fix-round F4: `CacheManager.readCache` accepts a missing/corrupt
+	// #1623 fix-round F4/F5: `CacheManager.readCache` accepts a missing/corrupt
 	// `meta.timestamp` as a cache HIT (the timestamp only gates staleness),
 	// so a corrupt test-runner-findings cache reaches `formatCacheAge` as
-	// NaN. Pre-fix-round this rendered "test-runner (NaNh old)" — a fabricated
-	// age is a worse honesty gap than the one #1623 exists to close.
-	it("renders 'age unknown' instead of NaN for a cache-read lane with a corrupt age (#1623 fix-round F4)", async () => {
+	// NaN. Pre-F4 this rendered "test-runner (NaNh old)" — a fabricated age is
+	// a worse honesty gap than the one #1623 exists to close. F4 fixed the NaN
+	// but the render call site still appended the literal word " old"
+	// unconditionally, so the result read "test-runner (age unknown old)" —
+	// ungrammatical, and still implying a real age exists. F5 makes "old" only
+	// appear once an age is actually known.
+	it("renders 'age unknown' with no trailing 'old' for a cache-read lane with a corrupt age (#1623 fix-round F5)", async () => {
 		mockSummaries.length = 0;
 		const lspService = {
 			runWorkspaceDiagnostics: vi.fn().mockResolvedValue([]),
@@ -1449,7 +1453,7 @@ describe("lens_diagnostics mode=full", () => {
 		const text = String(result.content[0].text);
 		expect(text).not.toMatch(/NaN/i);
 		expect(text).toContain(
-			"served from cache this call (not re-run): test-runner (age unknown old).",
+			"served from cache this call (not re-run): test-runner (age unknown).",
 		);
 	});
 

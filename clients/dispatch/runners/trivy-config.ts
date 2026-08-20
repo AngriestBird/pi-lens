@@ -36,6 +36,7 @@
  * Refs: #131 (Mode 2)
  */
 
+import { formatToolFailure } from "./utils/tool-failure.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { incrementDegradationCount } from "../../degradation-ledger.js";
@@ -240,19 +241,19 @@ const trivyConfigRunner: RunnerDefinition = {
 		// means a broken trivy invocation can no longer go unnoticed for an
 		// entire lane's lifetime the way this one did (refs #1757).
 		if (result.error || result.status !== 0) {
-			const detail = (
-				result.stderr ||
-				result.error?.message ||
-				result.stdout ||
-				"no output"
-			)
-				.trim()
-				.split("\n")[0]
-				.slice(0, 200);
+			// #1816: one shared wording, one truncation, signal named. `subject`
+			// stays the file path — the discriminating identity a reader needs
+			// is WHICH file trivy stopped covering.
 			incrementDegradationCount({
 				kind: "runner-empty-result",
 				subject: absPath,
-				reason: `trivy config exited ${result.status ?? "spawn-failure"}: ${detail}`,
+				reason: formatToolFailure({
+					tool: "trivy config",
+					status: result.status,
+					signal: result.signal,
+					stderr: result.stderr || result.error?.message,
+					stdout: result.stdout,
+				}),
 			});
 			return { status: "skipped", diagnostics: [], semantic: "none" };
 		}

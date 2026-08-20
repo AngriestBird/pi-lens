@@ -8,6 +8,7 @@
  * - Resource cleanup
  */
 
+import { CASCADE_DIAGNOSTICS_TTL_MS } from "../cascade-types.js";
 import * as nodeFs from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -473,7 +474,6 @@ const EARLY_UNBLOCK_GRACE_MS = Math.max(
 		10,
 	) || 400,
 );
-const CASCADE_DIAGNOSTICS_TTL_MS = 240_000;
 export interface SpawnedServer {
 	client: LSPClientInfo;
 	info: LSPServerInfo;
@@ -6230,6 +6230,11 @@ export class LSPService {
 
 	/**
 	 * Navigation: find incoming calls (callers)
+	 *
+	 * #1803: gated on the target server's advertised `callHierarchyProvider`
+	 * (the same `getOperationSupport().callHierarchy` single source of truth
+	 * populated by `detectOperationSupport` in clients/lsp/client.ts — see
+	 * client.ts:5253). Mirrors the #1789 gate on `workspaceSymbol` above.
 	 */
 	async incomingCalls(item: import("./client.js").LSPCallHierarchyItem) {
 		const spawned = await this.getClientForFile(
@@ -6237,11 +6242,14 @@ export class LSPService {
 			NAV_CLIENT_WAIT_TIMEOUT_MS,
 		);
 		if (!spawned) return [];
+		if (!spawned.client.getOperationSupport().callHierarchy) return [];
 		return spawned.client.incomingCalls(item);
 	}
 
 	/**
 	 * Navigation: find outgoing calls (callees)
+	 *
+	 * #1803: same gate as `incomingCalls` above.
 	 */
 	async outgoingCalls(item: import("./client.js").LSPCallHierarchyItem) {
 		const spawned = await this.getClientForFile(
@@ -6249,6 +6257,7 @@ export class LSPService {
 			NAV_CLIENT_WAIT_TIMEOUT_MS,
 		);
 		if (!spawned) return [];
+		if (!spawned.client.getOperationSupport().callHierarchy) return [];
 		return spawned.client.outgoingCalls(item);
 	}
 
