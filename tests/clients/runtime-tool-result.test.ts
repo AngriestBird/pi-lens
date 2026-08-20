@@ -658,8 +658,15 @@ describe("runtime-tool-result inline behavior warnings", () => {
 				biomeClient: {}, ruffClient: {}, metricsClient: {}, resetLSPService: () => {},
 				agentBehaviorRecord: () => [], formatBehaviorWarnings: () => "",
 			} as any);
-			expect(returned?.content.at(-1)?.text).toContain(fs.readFileSync(filePath, "utf-8"));
-			expect(returned?.content.at(-1)?.text).toContain("authoritative");
+			// #1590: the attachment block carries the bytes and the trailing
+			// notice block states the authority — one sentence, one author.
+			const attachment = returned?.content.find((part) =>
+				part.text?.startsWith("pi-lens applied autofix to"),
+			);
+			expect(attachment?.text).toContain(fs.readFileSync(filePath, "utf-8"));
+			expect(returned?.content.at(-1)?.text).toContain(
+				"is authoritative after autofix",
+			);
 		} finally { env.cleanup(); }
 	});
 

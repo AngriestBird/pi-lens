@@ -1,5 +1,9 @@
 # pi-lens — agent context
 
+Coverage markers are deduped per session by normalized kind, file, and the
+normalized silent-scanner set. A changed set admits a new marker, and a marker
+is appended after primary diagnostics so both remain visible.
+
 Post-fix decision observability is durable and bounded: advisory delivery logs
 one `advisory_provenance_decision` per consume, classic TypeScript project
 identity logs every success/failure outcome, deferred mutation drains summarize
@@ -10,6 +14,13 @@ resolver's ctx source. Automatic
 smell warnings count only the current session, or a 24-hour fallback window
 when no session boundary is available; explicit health remains separately
 labeled. (#1432)
+
+Per-edit LSP dispatch preserves the touch's correlated `unconfirmedServerIds`
+through `RunnerResult` and runner latency assembly. The agent coverage notice
+renders the bounded scanner set before considering a successful primary result,
+so partial diagnostics, including an empty result, never look clean. Reuse the
+existing normalized kind+file coverage-notice dedupe; do not re-derive scanner
+silence after the LSP touch has classified it. (#1867)
 
 Advisory caches must carry immutable capture provenance and validate it again
 at every delivery surface. A finding is current only when session/turn state
@@ -214,6 +225,10 @@ Keep branch metavariables distinct from the outer Proxy-carve-out metavariables;
 fixtures deliberately name the constructor target and trap parameter differently.
 The generated ast-grep catalog derives its Fixable yes/no column from each
 rule's top-level `fix:` key. (#1850)
+
+The `require-safety-comment-for-as-unknown-as` valve accepts adjacent comments
+on object-literal `pair` members; array elements, call arguments, JSX
+attributes, class static blocks, and switch cases use the enclosing statement.
 
 Session degradation telemetry owns its dedupe and tally state in
 `clients/degradation-ledger.ts`: use `recordDegradationOnce` for a repeated

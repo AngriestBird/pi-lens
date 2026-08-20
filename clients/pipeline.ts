@@ -53,6 +53,7 @@ import {
 } from "./file-utils.js";
 import type { FormatService } from "./format-service.js";
 import { logLatency } from "./latency-logger.js";
+import type { PostAutofixNotice } from "./post-autofix-notice.js";
 import { emitLensAnalysisComplete } from "./lens-events.js";
 import { publishFilesTouched } from "./bus-publish.js";
 import {
@@ -353,6 +354,18 @@ export interface PipelineResult {
 	autofixTools?: string[];
 	/** Authoritative bytes after an immediate mutation of the target file. */
 	postMutation?: { filePath: string; content: string; source: "autofix" };
+	/**
+	 * Data for the post-autofix "the file on disk changed" notice (#1590).
+	 *
+	 * The pipeline renders no sentence of its own here. Whether the
+	 * authoritative bytes actually shipped is decided one layer up, in
+	 * `handleToolResult`, which is the only place that sees the per-file
+	 * attachment cap and the per-command aggregate budget. The pipeline
+	 * therefore emits the DATA (display paths it already resolved) and
+	 * `renderPostAutofixNotice` turns it into exactly one sentence under that
+	 * one decision. Present when auto-format or autofix changed content.
+	 */
+	postAutofixNotice?: PostAutofixNotice;
 }
 
 // --- Phase timing helpers ---
@@ -1505,30 +1518,19 @@ export async function runPipeline(
 				: "";
 		output += `\n\n⚠️ Auto-format failed: ${details}${suffix}`;
 	}
-	if (formatChanged || fixedCount > 0) {
-		const changedList = [...piChangedFiles].map((changedFile) =>
-			toRunnerDisplayPath(cwd, changedFile),
-		);
-		const topFiles = changedList
-			.slice(0, 8)
-			.map((f) => "  - " + f)
-			.join("\n");
-		const overflow =
-			changedList.length > 8
-				? "\n  - ... and " + (changedList.length - 8) + " more"
-				: "";
-		const fileList = changedList.length
-			? "\nModified files:\n" + topFiles + overflow
-			: "";
-		const targetHasAuthoritativeAttachment =
-			ctx.autofixMode !== "deferred" &&
-			autofixChangedFiles.some(
-				(changedFile) => path.resolve(changedFile) === path.resolve(filePath),
-			);
-		output += targetHasAuthoritativeAttachment
-			? `\n\n⚠️ **The attached full content for ${toRunnerDisplayPath(cwd, filePath)} is authoritative after autofix. You MUST re-read any other modified side-effect files before editing them.**${fileList}`
-			: `\n\n⚠️ **File was modified by auto-format/fix. You MUST re-read modified file(s) before making any further edits — the content on disk has changed (whitespace, indentation, quotes, or code). Editing from memory will produce mismatches.**${fileList}`;
-	}
+	// #1590: the notice sentence itself is NOT rendered here. This layer cannot
+	// see the attachment cap or the aggregate budget, so it hands the display
+	// paths to `handleToolResult`, which owns the decision and renders the one
+	// sentence with `renderPostAutofixNotice`.
+	const postAutofixNotice: PostAutofixNotice | undefined =
+		formatChanged || fixedCount > 0
+			? {
+					targetPath: toRunnerDisplayPath(cwd, filePath),
+					changedFiles: [...piChangedFiles].map((changedFile) =>
+						toRunnerDisplayPath(cwd, changedFile),
+					),
+				}
+			: undefined;
 	phase.end("dispatch_lint", {
 		hasOutput: !!dispatchResult.output,
 		diagnosticCount: dispatchResult.diagnostics.length,
@@ -1581,7 +1583,10 @@ export async function runPipeline(
 
 	// --- Final timing + all-clear ---
 	const elapsed = Date.now() - pipelineStart;
-	if (!output) {
+	// #1590: `postAutofixNotice` is output this run produces, just rendered a
+	// layer up. Treat it as output here, or a format-only change would newly
+	// gain an "all clear" line it never had while the sentence lived inline.
+	if (!output && !postAutofixNotice) {
 		output = buildAllClearOutput(dispatchResult, elapsed, filePath);
 	}
 
@@ -1671,6 +1676,7 @@ export async function runPipeline(
 		formattersUsed,
 		fixedCount,
 		autofixTools,
+		postAutofixNotice,
 		postMutation:
 			ctx.autofixMode !== "deferred" && autofixChangedFiles.some((f) => path.resolve(f) === path.resolve(filePath)) && fileContent !== undefined
 				? { filePath: path.resolve(filePath), content: fileContent, source: "autofix" }
