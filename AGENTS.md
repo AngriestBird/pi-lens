@@ -4,6 +4,14 @@ Coverage markers are deduped per session by normalized kind, file, and the
 normalized silent-scanner set. A changed set admits a new marker, and a marker
 is appended after primary diagnostics so both remain visible.
 
+No-filePath workspace-scope LSP queries use a request-local attribution
+collector. `lsp_navigation_result` records the serving server id for each
+single-client answer and a fixed-key per-capability contributor map for
+aggregated operation support. Capability snapshot client ids are capped, with
+the full count preserved. Never replace this with shared last-client state;
+concurrent navigation requests must not overwrite each other's attribution.
+(#1854)
+
 Post-fix decision observability is durable and bounded: advisory delivery logs
 one `advisory_provenance_decision` per consume, classic TypeScript project
 identity logs every success/failure outcome, deferred mutation drains summarize

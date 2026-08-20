@@ -52,6 +52,7 @@ import {
 } from "../path-utils.js";
 import type {
 	LSPClientInfo,
+	LSPOperationSupport,
 	LSPPullFailure,
 	LSPShutdownOptions,
 } from "./client.js";
@@ -91,6 +92,27 @@ import {
 	type LSPCapabilitySnapshot,
 } from "./wait-policy/index.js";
 export type { LSPCapabilitySnapshot } from "./wait-policy/index.js";
+
+const WORKSPACE_ATTRIBUTION_CLIENT_CAP = 16;
+
+/**
+ * Request-local attribution for no-filePath workspace queries. The fixed site
+ * and capability keys plus the capped client list keep the caller's existing
+ * latency record bounded. Callers create one collector per request; the
+ * service never stores shared "last client" state that concurrent calls could
+ * overwrite.
+ */
+export interface LSPWorkspaceScopeAttribution {
+	workspaceSymbol?: string;
+	getAdvertisedCommands?: string;
+	executeCommand?: string;
+	getOperationSupport?: {
+		baseClientId: string;
+		contributors: Partial<Record<keyof LSPOperationSupport, string>>;
+	};
+	getCapabilitySnapshots?: { clientIds: string[]; clientCount: number };
+	getWorkspaceDiagnosticsSupport?: string;
+}
 import { raceToCompletion, type PromiseDescriptor } from "./aggregation.js";
 import {
 	applyWorkspaceEdit,
@@ -5677,8 +5699,10 @@ export class LSPService {
 	 */
 	private selectWorkspaceScopeClient(
 		predicate?: (client: LSPClientInfo) => boolean,
-	): LSPClientInfo | undefined {
-		let auxFallback: LSPClientInfo | undefined;
+	): { client: LSPClientInfo; serverId: string } | undefined {
+		let auxFallback:
+			| { client: LSPClientInfo; serverId: string }
+			| undefined;
 		for (const [key, client] of this.state.clients) {
 			if (!client.isAlive()) continue;
 			if (predicate && !predicate(client)) continue;
@@ -5686,10 +5710,10 @@ export class LSPService {
 			const serverId = separator >= 0 ? key.slice(0, separator) : key;
 			const role = LSP_SERVERS.find((s) => s.id === serverId)?.role;
 			if (role === "auxiliary") {
-				if (!auxFallback) auxFallback = client;
+				if (!auxFallback) auxFallback = { client, serverId };
 				continue;
 			}
-			return client;
+			return { client, serverId };
 		}
 		return auxFallback;
 	}
@@ -5711,7 +5735,11 @@ export class LSPService {
 	 * auxiliary; only when none of the spawned clients support it does this
 	 * fall back to `[]`.
 	 */
-	async workspaceSymbol(query: string, filePath?: string) {
+	async workspaceSymbol(
+		query: string,
+		filePath?: string,
+		attribution?: LSPWorkspaceScopeAttribution,
+	) {
 		if (filePath) {
 			const spawned = await this.getClientForFile(
 				filePath,
@@ -5726,7 +5754,8 @@ export class LSPService {
 			(client) => client.getOperationSupport().workspaceSymbol,
 		);
 		if (!target) return [];
-		return target.workspaceSymbol(query);
+		if (attribution) attribution.workspaceSymbol = target.serverId;
+		return target.client.workspaceSymbol(query);
 	}
 
 	/**
@@ -5735,7 +5764,10 @@ export class LSPService {
 	 * a primary over an auxiliary scanner spawned first (#1812 sweep — see
 	 * `selectWorkspaceScopeClient`).
 	 */
-	async getAdvertisedCommands(filePath?: string): Promise<string[]> {
+	async getAdvertisedCommands(
+		filePath?: string,
+		attribution?: LSPWorkspaceScopeAttribution,
+	): Promise<string[]> {
 		if (filePath) {
 			const spawned = await this.getClientForFile(
 				filePath,
@@ -5745,7 +5777,9 @@ export class LSPService {
 			return spawned.client.getAdvertisedCommands();
 		}
 		const first = this.selectWorkspaceScopeClient();
-		return first ? first.getAdvertisedCommands() : [];
+		if (!first) return [];
+		if (attribution) attribution.getAdvertisedCommands = first.serverId;
+		return first.client.getAdvertisedCommands();
 	}
 
 	/**
@@ -5760,6 +5794,7 @@ export class LSPService {
 		command: string,
 		args?: unknown[],
 		mutationContext?: LspMutationContext,
+		attribution?: LSPWorkspaceScopeAttribution,
 	): Promise<{ executed: boolean; result?: unknown; reason?: string }> {
 		if (filePath) {
 			const spawned = await this.getClientForFile(
@@ -5773,7 +5808,8 @@ export class LSPService {
 		}
 		const first = this.selectWorkspaceScopeClient();
 		if (!first) return { executed: false, reason: "no active LSP server" };
-		return first.executeCommand(command, args, mutationContext);
+		if (attribution) attribution.executeCommand = first.serverId;
+		return first.client.executeCommand(command, args, mutationContext);
 	}
 
 	/**
@@ -5842,6 +5878,7 @@ export class LSPService {
 	 */
 	async getOperationSupport(
 		filePath?: string,
+		attribution?: LSPWorkspaceScopeAttribution,
 	): Promise<import("./client.js").LSPOperationSupport | null> {
 		if (filePath) {
 			const spawned = await this.getClientForFile(filePath);
@@ -5855,16 +5892,29 @@ export class LSPService {
 			typeof client.getOperationSupport === "function";
 		const first = this.selectWorkspaceScopeClient(readable);
 		if (!first) return null;
-		const aggregate = { ...first.getOperationSupport() };
+		const aggregate = { ...first.client.getOperationSupport() };
+		const contributors: Partial<Record<keyof LSPOperationSupport, string>> = {};
 		for (const capability of Object.keys(aggregate) as Array<
 			keyof import("./client.js").LSPOperationSupport
 		>) {
-			if (aggregate[capability]) continue;
+			if (aggregate[capability]) {
+				contributors[capability] = first.serverId;
+				continue;
+			}
 			const supporter = this.selectWorkspaceScopeClient(
 				(client) =>
 					readable(client) && Boolean(client.getOperationSupport()[capability]),
 			);
-			if (supporter) aggregate[capability] = true;
+			if (supporter) {
+				aggregate[capability] = true;
+				contributors[capability] = supporter.serverId;
+			}
+		}
+		if (attribution) {
+			attribution.getOperationSupport = {
+				baseClientId: first.serverId,
+				contributors,
+			};
 		}
 		return aggregate;
 	}
@@ -5875,6 +5925,7 @@ export class LSPService {
 	 */
 	async getCapabilitySnapshots(
 		filePath?: string,
+		attribution?: LSPWorkspaceScopeAttribution,
 	): Promise<LSPCapabilitySnapshot[]> {
 		if (this.checkDestroyed()) return [];
 		const snapshots: LSPCapabilitySnapshot[] = [];
@@ -5915,11 +5966,20 @@ export class LSPService {
 				launchVariant: client.getLaunchVariant?.(),
 			});
 		}
+		if (attribution) {
+			attribution.getCapabilitySnapshots = {
+				clientIds: snapshots
+					.slice(0, WORKSPACE_ATTRIBUTION_CLIENT_CAP)
+					.map((snapshot) => snapshot.serverId),
+				clientCount: snapshots.length,
+			};
+		}
 		return snapshots;
 	}
 
 	async getWorkspaceDiagnosticsSupport(
 		filePath?: string,
+		attribution?: LSPWorkspaceScopeAttribution,
 	): Promise<import("./client.js").LSPWorkspaceDiagnosticsSupport | null> {
 		if (filePath) {
 			const spawned = await this.getClientForFile(filePath);
@@ -5931,9 +5991,10 @@ export class LSPService {
 
 		const first = this.selectWorkspaceScopeClient();
 		if (!first) return null;
-		const getter = first.getWorkspaceDiagnosticsSupport;
+		const getter = first.client.getWorkspaceDiagnosticsSupport;
 		if (typeof getter !== "function") return null;
-		return getter();
+		if (attribution) attribution.getWorkspaceDiagnosticsSupport = first.serverId;
+		return getter.call(first.client);
 	}
 
 	/**
