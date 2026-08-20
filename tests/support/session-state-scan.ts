@@ -290,11 +290,19 @@ export const SWEEP_HEURISTIC_LIMITS = [
 
 let cachedCandidates: SessionStateCandidate[] | undefined;
 
-/** Every `clients/` file matching the session-scoped-state code pattern. */
-export function scanSessionStateCandidates(): SessionStateCandidate[] {
-	if (cachedCandidates) return cachedCandidates;
+/**
+ * Every source file under `dir` matching the session-scoped-state code
+ * pattern. Defaults to (and caches) the real `clients/` tree; a caller may
+ * pass an override root to run the same detection against a synthetic
+ * fixture tree — `tests/clients/session-state-conformance.test.ts` uses this
+ * to regression-test the #1817 symbol-count pin against a fixture that
+ * cannot drift out from under the test the way the real tree can.
+ */
+export function scanSessionStateCandidates(dir = CLIENTS_ROOT): SessionStateCandidate[] {
+	const useCache = dir === CLIENTS_ROOT;
+	if (useCache && cachedCandidates) return cachedCandidates;
 	const found: SessionStateCandidate[] = [];
-	for (const absolute of clientSourceFiles()) {
+	for (const absolute of clientSourceFiles(dir)) {
 		// Stripped for the same reason the reachability walk is (R1): a
 		// commented-out declaration or reset export is not one.
 		const source = stripCommentsAndStrings(fs.readFileSync(absolute, "utf8"));
@@ -308,13 +316,13 @@ export function scanSessionStateCandidates(): SessionStateCandidate[] {
 		// seam, which by itself says "this module holds state tests must undo").
 		if (containers.length === 0 && !hasTestOnlyReset) continue;
 		found.push({
-			file: clientsRelative(absolute),
+			file: relativePosix(dir, absolute),
 			containers,
 			resets,
 			hasTestOnlyReset,
 		});
 	}
-	cachedCandidates = found;
+	if (useCache) cachedCandidates = found;
 	return found;
 }
 
