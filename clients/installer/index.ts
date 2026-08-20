@@ -66,6 +66,7 @@ const _installerRequire = createRequire(import.meta.url);
 
 import { createGunzip } from "node:zlib";
 import { TRANSIENT_MAX_COOLDOWN_MS } from "../dispatch/runners/utils/availability-policy.js";
+import { recordDegradationOnce } from "../degradation-ledger.js";
 import { commitDurableStoreAsync } from "../durable-store.js";
 import { getGlobalPiLensDir } from "../file-utils.js";
 import {
@@ -3577,6 +3578,52 @@ export interface ManagedToolRefreshAttempt {
 	declined?: boolean;
 }
 
+export interface ManagedInstallGate {
+	ok: boolean;
+	/** Present only when `ok` is true; the caller must release it when done. */
+	release?: () => Promise<void>;
+	/** Present only when `ok` is false — always a refusal, never a failure. */
+	reason?: string;
+}
+
+/**
+ * The three checks every install-triggering path must clear before touching
+ * `TOOLS_DIR`: the `PI_LENS_DISABLE_TOOL_INSTALL` kill-switch, the
+ * `assertInstallAllowed` project-trust gate (the #1334 S5 boundary), and the
+ * shared install lock — acquired here, released by the caller when its
+ * strategy work finishes.
+ *
+ * Shared by `refreshManagedTool` below (the five non-npm strategies) and
+ * `refreshNpmOne` in `managed-tool-refresh.ts` (#1759 review R2), so a
+ * refusal means the same thing everywhere — a declined, unstamped skip, not
+ * a degradation — regardless of which of the six strategies asked. Before
+ * this was pulled out as its own function, npm's refresh spawned `npm
+ * update` directly with none of these three checks: the kill switch, the
+ * trust gate and the lock governed five strategies and silently exempted
+ * the sixth.
+ */
+export async function acquireManagedInstallGate(
+	context: string,
+): Promise<ManagedInstallGate> {
+	if (process.env.PI_LENS_DISABLE_TOOL_INSTALL === "1") {
+		return {
+			ok: false,
+			reason: "installation disabled by PI_LENS_DISABLE_TOOL_INSTALL=1",
+		};
+	}
+	if (!assertInstallAllowed(context)) {
+		return { ok: false, reason: `project trust: ${projectTrustDenialReason()}` };
+	}
+	// Held for the whole strategy call, not just the final write — a refresh
+	// can race a concurrent `ensureTool` install of the SAME tool into the SAME
+	// managed destination, and both write to `TOOLS_DIR` unlocked otherwise.
+	const lock = await acquireInstallLock();
+	if (!lock.release) {
+		return { ok: false, reason: lock.reason ?? "install lock held" };
+	}
+	return { ok: true, release: lock.release };
+}
+
 /**
  * Re-resolve one non-npm managed tool and, only if its coordinate actually
  * moved, reinstall it (#1747).
@@ -3584,7 +3631,8 @@ export interface ManagedToolRefreshAttempt {
  * Never throws and never removes the installed copy: on any failure the
  * currently installed version keeps serving and the caller records a
  * degradation. npm is NOT handled here — `managed-tool-refresh.ts` owns that
- * path because it needs the package-manager resolver.
+ * path because it needs the package-manager resolver, and gates itself
+ * through `acquireManagedInstallGate` directly.
  *
  * #1759 review F2: this used to call the strategy functions directly, which
  * bypassed every install guard `installTool`/`ensureTool` honor —
@@ -3615,38 +3663,17 @@ export async function refreshManagedTool(
 			reason: `strategy ${tool.installStrategy} is not refreshable here`,
 		};
 	}
+	// Captured into a local so the narrowing above survives the `await` below —
+	// TS drops property narrowing (`tool.installStrategy`) across an `await`,
+	// which would otherwise make the switch look non-exhaustive.
+	const strategy = tool.installStrategy;
 
-	if (process.env.PI_LENS_DISABLE_TOOL_INSTALL === "1") {
-		return {
-			ok: false,
-			unchanged: true,
-			declined: true,
-			reason: "installation disabled by PI_LENS_DISABLE_TOOL_INSTALL=1",
-		};
-	}
-	if (!assertInstallAllowed(`managed tool refresh: ${toolId}`)) {
-		return {
-			ok: false,
-			unchanged: true,
-			declined: true,
-			reason: `project trust: ${projectTrustDenialReason()}`,
-		};
-	}
-
-	// Held for the whole strategy call, not just the final write — a refresh
-	// can race a concurrent `ensureTool` install of the SAME tool into the SAME
-	// managed destination, and both write to `TOOLS_DIR` unlocked otherwise.
-	const lock = await acquireInstallLock();
-	if (!lock.release) {
-		return {
-			ok: false,
-			unchanged: true,
-			declined: true,
-			reason: lock.reason ?? "install lock held",
-		};
+	const gate = await acquireManagedInstallGate(`managed tool refresh: ${toolId}`);
+	if (!gate.ok) {
+		return { ok: false, unchanged: true, declined: true, reason: gate.reason };
 	}
 	try {
-		switch (tool.installStrategy) {
+		switch (strategy) {
 			case "github":
 				return await refreshGitHubManagedTool(tool, known);
 			case "pip":
@@ -3655,9 +3682,15 @@ export async function refreshManagedTool(
 			case "maven":
 			case "archive":
 				return await refreshPinnedManagedTool(tool, known);
+			default:
+				return {
+					ok: false,
+					unchanged: true,
+					reason: `strategy ${strategy} is not refreshable here`,
+				};
 		}
 	} finally {
-		await lock.release();
+		await gate.release?.();
 	}
 }
 
@@ -4075,8 +4108,27 @@ export function resolveArchiveUrl(
  * MICROSECONDS, not "however long the network download and tar extraction
  * take", and a failure on the second rename restores the backup rather than
  * leaving `finalDir` gone.
+ *
+ * Worst case (#1759 review R4): the second rename AND the rollback rename it
+ * triggers both fail (e.g. the volume went read-only mid-swap). `finalDir` is
+ * then genuinely empty and the only surviving copy sits at `finalDir.rollback`
+ * — this function still throws either way, so the caller's install/refresh
+ * reports failure rather than success, and `invalidateManagedToolResolution`
+ * on that failure path (#1759 review F1) is what actually recovers: it drops
+ * the cached resolved path, so the next `ensureTool` probe finds nothing at
+ * `finalDir`, treats the tool as absent, and reinstalls from scratch. The
+ * orphaned `.rollback` directory is NOT reclaimed by that reinstall — it is
+ * only cleaned up the next time `swapExtractedDir` runs a SUCCESSFUL swap for
+ * this same tool (the unconditional `fs.rm(backupDir, ...)` below), so it can
+ * sit on disk for a while. The degradation this records below is what makes
+ * that orphan discoverable rather than a silent leak.
  */
-async function swapExtractedDir(
+// Exported for the rollback-path unit test (#1759 review R3) — the failure
+// this guards is only reachable by making the SECOND rename throw, which a
+// full `installArchiveTool` run has no test-controlled pause point to force
+// without mocking `node:fs` wholesale.
+export async function swapExtractedDir(
+	toolId: string,
 	tmpDir: string,
 	finalDir: string,
 ): Promise<void> {
@@ -4093,7 +4145,22 @@ async function swapExtractedDir(
 		await fs.rename(tmpDir, finalDir);
 	} catch (err) {
 		if (hadPrevious) {
-			await fs.rename(backupDir, finalDir).catch(() => {});
+			try {
+				await fs.rename(backupDir, finalDir);
+			} catch (rollbackErr) {
+				// The double-failure worst case: `finalDir` is empty and the only
+				// surviving copy is the orphan at `backupDir`. Record it — this is
+				// the one path where a swallowed catch here would make that orphan
+				// invisible, not just inconvenient.
+				recordDegradationOnce({
+					kind: "managed-tool-refresh",
+					subject: toolId,
+					reason: `swap rollback failed after a failed install: working copy orphaned at ${backupDir} (${(rollbackErr as Error).message})`,
+				});
+				logSessionStart(
+					`archive-install ${toolId}: swap rollback failed — working copy orphaned at ${backupDir} (${(rollbackErr as Error).message})`,
+				);
+			}
 		}
 		throw err;
 	}
@@ -4216,7 +4283,7 @@ async function installArchiveTool(
 				await fs.rm(tmpExtractDir, { recursive: true, force: true }).catch(() => {});
 				return undefined;
 			}
-			await swapExtractedDir(tmpExtractDir, extractDir);
+			await swapExtractedDir(tool.id, tmpExtractDir, extractDir);
 			logSessionStart(
 				`archive-install ${tool.id}: installed tree bundle → ${extractDir} (extracted ${archiveBuffer.length} bytes)`,
 			);
@@ -4242,7 +4309,7 @@ async function installArchiveTool(
 		}
 		if (!isWindows) await fs.chmod(tmpResolvedInner, 0o750).catch(() => {});
 
-		await swapExtractedDir(tmpExtractDir, extractDir);
+		await swapExtractedDir(tool.id, tmpExtractDir, extractDir);
 
 		// The launcher path inside `extractDir` — stable across every install and
 		// refresh, since `extractDir` itself never changes — computed fresh now

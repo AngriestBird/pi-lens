@@ -53,18 +53,33 @@ const TEST_HOME = vi.hoisted(() => {
 	return dir;
 });
 
-const { spawnMock, sessionLogSpy, httpsGetMock, childSpawnMock } = vi.hoisted(
-	() => ({
+const { spawnMock, sessionLogSpy, httpsGetMock, childSpawnMock, renameMock } =
+	vi.hoisted(() => ({
 		spawnMock: vi.fn(),
 		sessionLogSpy: vi.fn(),
 		httpsGetMock: vi.fn(),
 		childSpawnMock: vi.fn(),
-	}),
-);
+		renameMock: vi.fn(),
+	}));
 
 vi.mock("node:child_process", async (importOriginal) => {
 	const actual = await importOriginal<typeof import("node:child_process")>();
 	return { ...actual, default: actual, spawn: childSpawnMock };
+});
+
+// Every method delegates to the REAL `node:fs/promises` except `rename`,
+// which defaults to the real implementation too but is reconfigurable per
+// test (#1759 review R3/R4). ESM builtins can't be `vi.spyOn`'d at runtime
+// ("Module namespace is not configurable" — ESM's live-binding rule), so the
+// only way to make ONE rename call fail on demand is to mock the module at
+// load time and keep the mock a controllable passthrough by default.
+vi.mock("node:fs/promises", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("node:fs/promises")>();
+	renameMock.mockImplementation(
+		(...args: Parameters<typeof actual.rename>) => actual.rename(...args),
+	);
+	const mocked = { ...actual, rename: renameMock };
+	return { ...mocked, default: mocked };
 });
 
 vi.mock("../../../clients/safe-spawn.js", () => ({
@@ -93,7 +108,9 @@ import {
 	checkProbeCache,
 	getRefreshableManagedTools,
 	resetProbeCacheStateForTesting,
+	swapExtractedDir,
 	TOOLS,
+	updateProbeCache,
 } from "../../../clients/installer/index.js";
 import {
 	getManagedToolRefreshStatePath,
@@ -585,6 +602,37 @@ describe("github strategy", () => {
 		expect(stamp.etag).toBeUndefined();
 	});
 
+	it("drops the cached resolved path after a failed refresh, so a stale answer is not served (#1759 review R5)", async () => {
+		installManagedBin("shfmt");
+		freshenAllExcept("shfmt", {
+			shfmt: {
+				checkedAt: NOW - 8 * DAY_MS,
+				resolutionId: "v3.7.0",
+				version: "v3.7.0",
+			},
+		});
+		// Seed the on-disk resolved-path cache with a decoy path — as if an
+		// earlier, unrelated resolution had cached it — so this test can prove
+		// the failure branch actually EVICTS it, not just that it exists.
+		const decoyPath = path.join(TEST_HOME, "shfmt-decoy-stale-path");
+		fs.writeFileSync(decoyPath, "decoy");
+		await updateProbeCache("shfmt", decoyPath);
+		expect(await checkProbeCache("shfmt")).toBe(decoyPath);
+
+		httpsRoutes.push({
+			match: (url) => url.startsWith("https://api.github.com/"),
+			respond: () => "error",
+		});
+
+		const outcome = await runManagedToolRefresh(NOW);
+
+		expect(outcome.refreshed[0]).toMatchObject({ ok: false });
+		// The pin: a failed refresh must not leave the stale decoy path cached —
+		// the next resolution has to re-probe rather than trust a claim this
+		// attempt just proved outdated.
+		expect(await checkProbeCache("shfmt")).toBeUndefined();
+	});
+
 	it("degrades and stamps a failure — not a throw — when the release body has no assets array (#1759 review F3)", async () => {
 		installManagedBin("shfmt");
 		freshenAllExcept("shfmt", {
@@ -630,6 +678,44 @@ describe("github strategy", () => {
 		expect(nextSessionOutcome.skipped).toBe("nothing-due");
 		expect(apiCalls()).toEqual([]);
 	});
+
+	it.each([
+		["null", "null"],
+		["an array", "[]"],
+		["a bare string", '"just a string"'],
+	])(
+		"degrades and stamps a failure — not a throw — when the release body is %s (#1759 review R5)",
+		async (_label, body) => {
+			installManagedBin("shfmt");
+			freshenAllExcept("shfmt", {
+				shfmt: {
+					checkedAt: NOW - 8 * DAY_MS,
+					resolutionId: "v3.7.0",
+					version: "v3.7.0",
+				},
+			});
+			// `JSON.parse` accepts any of these — none is a parse error — but
+			// `.tag_name` would throw reading off `null`/an array/a string,
+			// uncaught, the same starvation shape F3 already closed for a missing
+			// `assets` array on an otherwise-valid object.
+			httpsRoutes.push({
+				match: (url) => url.startsWith("https://api.github.com/"),
+				respond: () => ({ statusCode: 200, body }),
+			});
+
+			const outcome = await runManagedToolRefresh(NOW);
+
+			expect(outcome.refreshed[0]).toMatchObject({
+				ok: false,
+				changed: false,
+			});
+			expect(degradationCount()).toBe(1);
+			expect(degradationSubjects()).toContain("shfmt");
+			const stamp = readState().shfmt;
+			expect(stamp).toBeDefined();
+			expect(stamp.failed).toBe(true);
+		},
+	);
 
 	it("degrades when the refreshed binary does not run", async () => {
 		installManagedBin("shfmt");
@@ -930,7 +1016,6 @@ describe("archive refresh preserves the working install on failure", () => {
 		// Simulate `tar` refusing a corrupt/truncated archive: the extraction
 		// spawn itself is the one that fails, before any verification step runs.
 		spawnMock.mockImplementation(async (command: string, args: string[]) => {
-			const line = `${command} ${(args ?? []).join(" ")}`;
 			if (
 				/tar(\.exe)?$/i.test(command) ||
 				(args ?? []).some((a) => /\.tgz$|\.zip$/.test(a))
@@ -1005,6 +1090,88 @@ describe("archive refresh preserves the working install on failure", () => {
 		expect(fs.readFileSync(launcherPath, "utf-8")).toBe(
 			"WORKING-SPOTBUGS-BINARY",
 		);
+	});
+});
+
+// --- swapExtractedDir rollback (#1759 review R3/R4) -----------------------
+//
+// `installArchiveTool`'s swap has two renames: the live tree out of the way,
+// then the verified tmp tree into place. A full `installArchiveTool` run has
+// no test-controlled pause point between them, so these tests drive
+// `swapExtractedDir` directly and force the SECOND rename to fail by
+// spying on `node:fs/promises`'s `rename` — the same module object
+// `clients/installer/index.ts` calls through.
+
+describe("swapExtractedDir rollback", () => {
+	it("restores the live directory byte-for-byte when the second rename fails (reviewer V2)", async () => {
+		const finalDir = path.join(TOOLS_DIR, "swap-test-r3");
+		const tmpDir = path.join(TOOLS_DIR, "swap-test-r3-tmp-missing");
+		fs.mkdirSync(finalDir, { recursive: true });
+		fs.writeFileSync(path.join(finalDir, "marker.txt"), "WORKING-CONTENT");
+		// `tmpDir` is deliberately never created: `fs.rename(tmpDir, finalDir)`
+		// (the second rename) throws ENOENT, exactly as a genuine mid-swap
+		// failure would (a killed process, a disk error, a permissions flip).
+
+		await expect(
+			swapExtractedDir("swap-test-tool", tmpDir, finalDir),
+		).rejects.toThrow();
+
+		// The critical assertion: finalDir is back, byte-for-byte, not just
+		// "some directory exists at that path".
+		expect(fs.existsSync(finalDir)).toBe(true);
+		expect(fs.readFileSync(path.join(finalDir, "marker.txt"), "utf-8")).toBe(
+			"WORKING-CONTENT",
+		);
+		// The rollback succeeded, so no orphan is left behind.
+		expect(fs.existsSync(`${finalDir}.rollback`)).toBe(false);
+		expect(degradationCount()).toBe(0);
+	});
+
+	it("records a degradation and logs the orphan path when BOTH renames fail (double-failure worst case, #1759 review R4)", async () => {
+		const finalDir = path.join(TOOLS_DIR, "swap-test-r4");
+		const backupDir = `${finalDir}.rollback`;
+		const tmpDir = path.join(TOOLS_DIR, "swap-test-r4-tmp-missing");
+		fs.mkdirSync(finalDir, { recursive: true });
+		fs.writeFileSync(path.join(finalDir, "marker.txt"), "WORKING-CONTENT");
+
+		// `swapExtractedDir` makes exactly three rename calls in this order:
+		// (1) finalDir -> backupDir — let it succeed for real; (2) tmpDir ->
+		// finalDir, the second rename — fail; (3) the rollback, backupDir ->
+		// finalDir — fail too, reproducing the double-failure worst case.
+		// `mockImplementationOnce` consumes each in order, then falls back to
+		// `renameMock`'s base (real passthrough) implementation for any later
+		// test.
+		renameMock
+			.mockImplementationOnce((...args: [fs.PathLike, fs.PathLike]) =>
+				fs.promises.rename(...args),
+			)
+			.mockImplementationOnce(async () => {
+				throw new Error("simulated: volume went read-only mid-swap");
+			})
+			.mockImplementationOnce(async () => {
+				throw new Error("simulated: rollback rename also failed");
+			});
+
+		await expect(
+			swapExtractedDir("swap-test-tool-r4", tmpDir, finalDir),
+		).rejects.toThrow();
+
+		// The worst case, stated plainly: finalDir is genuinely gone, and the
+		// only surviving copy is the orphan at backupDir.
+		expect(fs.existsSync(finalDir)).toBe(false);
+		expect(fs.existsSync(backupDir)).toBe(true);
+		expect(fs.readFileSync(path.join(backupDir, "marker.txt"), "utf-8")).toBe(
+			"WORKING-CONTENT",
+		);
+		// The pin: a swallowed catch here would make the orphan invisible, not
+		// just inconvenient.
+		expect(degradationCount()).toBe(1);
+		expect(degradationSubjects()).toContain("swap-test-tool-r4");
+		expect(
+			logRows().some(
+				(row) => row.includes("orphaned") && row.includes(backupDir),
+			),
+		).toBe(true);
 	});
 });
 

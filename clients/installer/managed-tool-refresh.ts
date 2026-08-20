@@ -56,6 +56,7 @@ import {
 import { safeSpawnAsync } from "../safe-spawn.js";
 import { logSessionStart } from "../sessionstart-logger.js";
 import {
+	acquireManagedInstallGate,
 	getManagedToolsDir,
 	getRefreshableManagedTools,
 	invalidateManagedToolResolution,
@@ -586,10 +587,46 @@ async function refreshNpmOne(
 	candidate: RefreshCandidate,
 	now: number,
 ): Promise<ManagedToolRefreshResult> {
-	const toolsDir = getManagedToolsDir();
 	// Every npm candidate carries a packageName; `getRefreshableManagedTools`
 	// drops the ones that do not.
 	const packageName = candidate.packageName as string;
+
+	// #1759 review R2: npm used to spawn `npm update` directly, with none of
+	// the kill-switch/trust-gate/lock checks the five other strategies pass
+	// through `refreshManagedTool`. Same primitive, same declined-no-op
+	// semantics as `refreshNonNpmOne`'s `attempt.declined` branch below: a
+	// refusal writes no stamp and records no degradation, so it does not burn
+	// the tool's retry cooldown on a block that has nothing to do with it.
+	const gateStartedAt = Date.now();
+	const gate = await acquireManagedInstallGate(
+		`managed tool refresh: ${candidate.toolId}`,
+	);
+	if (!gate.ok) {
+		logSessionStart(
+			`managed-tool-refresh ${candidate.toolId}: npm refresh declined after ${Date.now() - gateStartedAt}ms (${gate.reason ?? "unknown"}) — no stamp written, retried next session`,
+		);
+		return {
+			toolId: candidate.toolId,
+			strategy: "npm",
+			packageName,
+			changed: false,
+			verified: false,
+			ok: false,
+		};
+	}
+	try {
+		return await performNpmRefresh(candidate, packageName, now);
+	} finally {
+		await gate.release?.();
+	}
+}
+
+async function performNpmRefresh(
+	candidate: RefreshCandidate,
+	packageName: string,
+	now: number,
+): Promise<ManagedToolRefreshResult> {
+	const toolsDir = getManagedToolsDir();
 	const previousVersion = await readInstalledVersion(packageName);
 	const pm = await resolveNodePackageManager(toolsDir);
 	const testNpmScript =
