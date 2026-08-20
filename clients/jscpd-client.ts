@@ -8,6 +8,7 @@
  * Docs: https://github.com/kucherenko/jscpd
  */
 
+import { formatToolFailure } from "./dispatch/runners/utils/tool-failure.js";
 import { createSubsystemLogger } from "./extension-log.js";
 import { incrementDegradationCount } from "./degradation-ledger.js";
 import * as fs from "node:fs";
@@ -342,7 +343,17 @@ export class JscpdClient {
 			const reportPath = path.join(outDir, "jscpd-report.json");
 			if (!fs.existsSync(reportPath)) {
 				if (result.status !== 0) {
-					const reason = `jscpd (${cmd}) exited ${result.status} with no report file: ${(result.stderr || "").trim().split("\n")[0].slice(0, 200) || "no stderr"}`;
+					// #1816: one shared wording, one truncation, signal named.
+					// `reportMissing` is the artifact-tool arm of the same
+					// primitive — the parsed artifact here is a report FILE.
+					const reason = formatToolFailure({
+						tool: "jscpd",
+						status: result.status,
+						signal: result.signal,
+						stderr: result.stderr,
+						reportMissing: true,
+						fields: { command: cmd },
+					});
 					this.log(reason);
 					incrementDegradationCount({
 						kind: "runner-empty-result",
