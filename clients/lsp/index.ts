@@ -2238,7 +2238,9 @@ export class LSPService {
 		const noteSpawnInFlight = (serverId: string): void => {
 			const knownDurationMs = getSuccessfulLspSpawnDurationMs(serverId);
 			if (knownDurationMs !== undefined && knownDurationMs > effectiveMaxWaitMs * 2) {
-				knownSlowResolve?.();
+				// Let a completion microtask already queued by the acquisition win
+				// before the shortcut decision is observed by Promise.race.
+				queueMicrotask(() => knownSlowResolve?.());
 			}
 		};
 
@@ -2338,6 +2340,16 @@ export class LSPService {
 		}
 
 		if (waitResult === knownSlowSentinel) {
+			// `inFlight` is cleared in ensureClientForServer's finally block, so a
+			// settled acquisition can still be present here. Re-read the published
+			// clients at the decision point; a usable client outranks the sentinel.
+			for (const server of servers) {
+				const root = await this.resolveServerRoot(server, filePath);
+				const client = root
+					? this.state.clients.get(`${server.id}:${normalizeMapKey(root)}`)
+					: undefined;
+				if (client?.isAlive()) return { client, info: server };
+			}
 			waitSkipReasons?.add("budget_skipped_known_slow");
 			logLatency({
 				type: "phase",
@@ -3014,6 +3026,16 @@ export class LSPService {
 			});
 			if (!started) return undefined;
 			spawnPromise = started.promise;
+		}
+		// The spawn promise can settle before its entry is removed from inFlight.
+		// Give that completed acquisition precedence over the known-slow shortcut:
+		// the shortcut is only valid while no usable client has been acquired.
+		const completedClient = this.state.clients.get(key);
+		if (completedClient?.isAlive()) {
+			this.unavailableLogged.delete(key);
+			this.clientLastUsedAt.set(key, Date.now());
+			this.scheduleTypeScriptIdleEviction(key);
+			return { client: completedClient, info: server };
 		}
 		onSpawnInFlight?.(server.id);
 

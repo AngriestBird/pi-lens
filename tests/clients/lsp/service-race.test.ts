@@ -284,6 +284,132 @@ describe("LSPService race hardening", () => {
 		initialize.restore();
 	});
 
+	it("returns a client when acquisition completes just before the known-slow shortcut", async () => {
+		vi.useFakeTimers();
+		const { recordSuccessfulLspSpawn } = await import(
+			"../../../clients/lsp/spawn-history.js"
+		);
+		recordSuccessfulLspSpawn("marksman", 1_501);
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const service = new LSPService();
+		const client = {
+			serverId: "marksman",
+			isAlive: () => true,
+			shutdown: vi.fn(async () => {}),
+			getOperationSupport: () => ({}),
+			getWorkspaceDiagnosticsSupport: () => ({
+				advertised: false,
+				mode: "push-only" as const,
+				diagnosticProviderKind: "none",
+			}),
+			getAdvertisedCommands: () => [],
+			getRawCapabilityKeys: () => [],
+			notify: { open: vi.fn().mockResolvedValue(undefined) },
+		};
+		const initialize = suspendAt(createLSPClient, async () => client);
+		const internal = service as unknown as {
+			state: { clients: Map<string, typeof client> };
+		};
+		getServersForFileWithConfig.mockReturnValue([
+			{
+				id: "marksman",
+				name: "Marksman",
+				extensions: [".md"],
+				root: async () => "C:/repo",
+				spawn: vi.fn(async () => {
+					queueMicrotask(() =>
+						internal.state.clients.set("marksman:C:/repo", client),
+					);
+					return {
+					process: {
+						process: { killed: false },
+						stdin: {} as any,
+						stdout: {} as any,
+						stderr: {} as any,
+						pid: 1887,
+					},
+					};
+				}),
+			},
+		]);
+
+		const touch = service.touchFile("C:/repo/README.md", "# ready\n", {
+			diagnostics: "none",
+			clientScope: "primary",
+			maxClientWaitMs: 750,
+			source: "tool_call:read",
+		});
+		await initialize.admitted;
+		initialize.release();
+		await initialize.completed;
+		await expect(touch).resolves.toEqual({ diags: [] });
+		expect(logLatency).not.toHaveBeenCalledWith(
+			expect.objectContaining({
+				phase: "lsp_touch_file",
+				metadata: expect.objectContaining({
+					reason: "budget_skipped_known_slow",
+				}),
+			}),
+		);
+		initialize.restore();
+	});
+
+	it.each([
+		[800, false],
+		[1_501, true],
+	])("applies the strict known-slow margin at %ims", async (history, skipped) => {
+		vi.useFakeTimers();
+		const { recordSuccessfulLspSpawn, _clearSuccessfulLspSpawnHistoryForTests } =
+			await import("../../../clients/lsp/spawn-history.js");
+		_clearSuccessfulLspSpawnHistoryForTests();
+		recordSuccessfulLspSpawn("marksman", history);
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const service = new LSPService();
+		const initialize = suspendAt(createLSPClient, async () => ({
+			isAlive: () => true,
+			shutdown: async () => {},
+		}));
+		getServersForFileWithConfig.mockReturnValue([
+			{
+				id: "marksman",
+				name: "Marksman",
+				extensions: [".md"],
+				root: async () => "C:/repo",
+				spawn: vi.fn(async () => ({
+					process: {
+						process: { killed: false },
+						stdin: {} as any,
+						stdout: {} as any,
+						stderr: {} as any,
+						pid: 1888,
+					},
+				})),
+			},
+		]);
+		const touch = service.touchFile("C:/repo/README.md", "# boundary\n", {
+			diagnostics: "none",
+			clientScope: "primary",
+			maxClientWaitMs: 750,
+			source: "tool_call:read",
+		});
+		await initialize.admitted;
+		if (skipped) {
+			await expect(touch).resolves.toBeUndefined();
+		} else {
+			let settled = false;
+			touch.then(() => {
+				settled = true;
+			});
+			await vi.advanceTimersByTimeAsync(749);
+			expect(settled).toBe(false);
+			await vi.advanceTimersByTimeAsync(1);
+			await expect(touch).resolves.toBeUndefined();
+		}
+		initialize.release();
+		await initialize.completed;
+		initialize.restore();
+	});
+
 	it("keeps the bounded touch wait when the in-flight server has no spawn history", async () => {
 		vi.useFakeTimers();
 		const { LSPService } = await import("../../../clients/lsp/index.js");
