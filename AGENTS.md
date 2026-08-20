@@ -4,13 +4,20 @@ Coverage markers are deduped per session by normalized kind, file, and the
 normalized silent-scanner set. A changed set admits a new marker, and a marker
 is appended after primary diagnostics so both remain visible.
 
+No-filePath workspace-scope LSP queries use a request-local attribution
+collector. `lsp_navigation_result` records the serving server id for each
+single-client answer and a fixed-key per-capability contributor map for
+aggregated operation support. Capability snapshot client ids are capped, with
+the full count preserved. Never replace this with shared last-client state;
+concurrent navigation requests must not overwrite each other's attribution.
+(#1854)
 Bounded LSP warm touches preserve the spawn coordinator's lifecycle evidence:
 an empty ready-client set reports `spawn_in_flight_budget_elapsed` while a
 matching primary single-flight spawn remains pending, and
 `no_clients_none_spawning` only when none does. Read the existing `inFlight`
-state at the touch verdict; correlate the full `serverId:root` key using the
-root resolved by acquisition, and do not add a second pending-warm latch.
-(#1875, #1875 fix round)
+ state at the touch verdict; correlate the full `serverId:root` key using the
+ root resolved by acquisition, and do not add a second pending-warm latch.
+ (#1875, #1875 fix round)
 
 Post-fix decision observability is durable and bounded: advisory delivery logs
 one `advisory_provenance_decision` per consume, classic TypeScript project
