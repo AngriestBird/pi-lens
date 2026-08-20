@@ -35,7 +35,11 @@ import type { EditToolDetails } from "@earendil-works/pi-coding-agent";
 import type { LSPShutdownOptions } from "./lsp/client.js";
 import { notifyExternalFileChange } from "./lsp/index.js";
 import type { MetricsClient } from "./metrics-client.js";
-import { runPipeline, type PipelineResult } from "./pipeline.js";
+import { type PipelineResult, runPipeline } from "./pipeline.js";
+import {
+	type AuthoritativeAttachmentDecision,
+	renderPostAutofixNotice,
+} from "./post-autofix-notice.js";
 import {
 	appendProjectChange,
 	type ProjectChangeRange,
@@ -113,6 +117,17 @@ interface ToolResultDeps {
 	_telemetryParticipantTotal?: number;
 	/** Receipt-time decision preserved across debounce replacement. */
 	_autofixMode?: "immediate" | "deferred";
+	/**
+	 * Internal: authoritative-content bytes still available to this tool result.
+	 *
+	 * A multi-file bash write drives one synthetic `handleToolResult` call per
+	 * written path, and all of those attachments land in ONE tool result. The
+	 * outer call therefore hands every synthetic call the same mutable budget
+	 * object so the attachment decision below reads the per-file cap and the
+	 * shared budget in one expression (#1590). Absent means "no shared budget"
+	 * — a direct write, bounded by the per-file cap alone.
+	 */
+	_attachmentBudget?: { remaining: number };
 }
 
 function parseDiffRanges(diff: string): { start: number; end: number }[] {
@@ -498,7 +513,12 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 	}
 	const behaviorWarnings = agentBehaviorRecord(event.toolName, filePath);
 	const syntheticWriteContent: Array<{ type: string; text?: string }> = [];
-	let syntheticAttachmentBytes = 0;
+	// #1590: one shared authoritative-content budget for every path this bash
+	// command wrote. It is handed DOWN to each synthetic call so the single
+	// attachment decision there sees both limits; nothing re-decides out here.
+	const syntheticAttachmentBudget = {
+		remaining: AUTHORITATIVE_CONTENT_MAX_BYTES,
+	};
 
 	// Bash writes (redirects, tee, sed -i, cp/mv, touch, git checkout/restore) —
 	// these change file content but never go through the edit tool, so bash
@@ -533,60 +553,16 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 				event: { ...event, toolName: "write", input: { path: wp } },
 				_bypassDebounce: true,
 				_autofixMode: autofixMode,
+				_attachmentBudget: syntheticAttachmentBudget,
 			});
 			if (syntheticResult) {
-				// The per-attachment cap bounds each file, but a multi-file bash
-				// write (`sed -i` over globs, `;`-chained rewrites) appends one
-				// attachment per path — share ONE authoritative-content budget
-				// across the whole command so the aggregate tool result stays
-				// bounded too. Past the budget, degrade to the re-read warning.
-				for (const block of syntheticResult.content.slice(
-					event.content.length,
-				)) {
-					const blockBytes =
-						typeof block.text === "string"
-							? Buffer.byteLength(block.text, "utf-8")
-							: 0;
-					const isAuthoritativeAttachment =
-						typeof block.text === "string" &&
-						block.text.startsWith("pi-lens applied autofix to ");
-					if (
-						isAuthoritativeAttachment &&
-						syntheticAttachmentBytes + blockBytes >
-							AUTHORITATIVE_CONTENT_MAX_BYTES
-					) {
-						// S3e (#1432 review): this is the SECOND
-						// `authoritative_content_attachment_decision` row for `wp` —
-						// the synthetic `handleToolResult` call above already logged
-						// an "attached" row for the same path under its per-file
-						// cap. This outer, aggregate-budget row is logged later and
-						// is the one that matches what the caller actually sees
-						// (the re-read warning below, not the attachment), so it
-						// wins for `wp`; the inner "attached" row is a stale
-						// per-file view superseded by this shared-budget decision.
-						logLatency({
-							type: "phase",
-							phase: "authoritative_content_attachment_decision",
-							filePath: wp,
-							durationMs: 0,
-							metadata: { path: wp, bytes: blockBytes, decision: "aggregate-budget-degraded" },
-						});
-						// #1464: re-arm the nudge the inner per-file "attached"
-						// suppressed — this path's bytes are NOT in the result the
-						// caller sees, only the re-read warning below. Same
-						// last-row-wins ordering as the telemetry above.
-						noteAuthoritativeContentAttachment(path.resolve(wp), false);
-						syntheticWriteContent.push({
-							type: "text",
-							text: `⚠️ **File was modified by auto-format/fix. You MUST re-read ${wp} before making any further edits — the aggregate authoritative content for this command is too large to attach.**`,
-						});
-						continue;
-					}
-					if (isAuthoritativeAttachment) {
-						syntheticAttachmentBytes += blockBytes;
-					}
-					syntheticWriteContent.push(block);
-				}
+				// #1590: forward verbatim. The synthetic call already charged the
+				// shared budget above and phrased its own notice from the decision
+				// it made, so a second verdict out here could only contradict it —
+				// which is exactly the defect this shape produced before.
+				syntheticWriteContent.push(
+					...syntheticResult.content.slice(event.content.length),
+				);
 			}
 		}
 		if (event.isError !== true && !getFlag("no-read-guard")) {
@@ -1297,27 +1273,62 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 
 	runtime.reportedThisTurn.add(filePath);
 
+	// --- The ONE authoritative-attachment decision (#1590) ---
+	// Everything downstream — the attached block, the telemetry row, the nudge
+	// suppression, and the notice sentence — reads this single verdict. It is
+	// the only place that sees both limits: the per-file cap and the shared
+	// per-command budget a multi-file bash write threads in.
 	const postMutation = result.postMutation;
-	const attachAuthoritativeContent = postMutation !== undefined &&
-		Buffer.byteLength(postMutation.content, "utf-8") <= AUTHORITATIVE_CONTENT_MAX_BYTES;
-	if (postMutation) {
-		const bytes = Buffer.byteLength(postMutation.content, "utf-8");
-		// S3e (#1432 review): when this call is the synthetic per-file
-		// `handleToolResult` recursion a multi-file bash write drives (see the
-		// bash branch above), the OUTER aggregate-budget loop may log a SECOND
-		// `authoritative_content_attachment_decision` row for this same
-		// `filePath` right after this one, downgrading an "attached" here to
-		// "aggregate-budget-degraded" once the shared budget is exhausted.
-		// Both rows are intentional (this one reflects the per-file cap
-		// decision; the outer one reflects the aggregate-budget decision that
-		// can override it) — the outer row, logged later, wins for that path.
+	const attachmentText = postMutation
+		? `pi-lens applied autofix to ${postMutation.filePath}. The following full content is authoritative for subsequent edits:\n\n${postMutation.content}`
+		: "";
+	const contentBytes = postMutation
+		? Buffer.byteLength(postMutation.content, "utf-8")
+		: 0;
+	const withinPerFileCap = contentBytes <= AUTHORITATIVE_CONTENT_MAX_BYTES;
+	const budget = deps._attachmentBudget;
+	const withinSharedBudget =
+		!budget || Buffer.byteLength(attachmentText, "utf-8") <= budget.remaining;
+	const attachAuthoritativeContent =
+		postMutation !== undefined && withinPerFileCap && withinSharedBudget;
+	const attachmentDecision: AuthoritativeAttachmentDecision = !postMutation
+		? "none"
+		: attachAuthoritativeContent
+			? "attached"
+			: withinPerFileCap
+				? "aggregate-budget-degraded"
+				: "size-capped";
+	// #1590: the pipeline hands up the changed-file data and this layer renders
+	// the sentence, so a size-capped write can no longer carry both "attached
+	// content is authoritative" and "too large to attach". The fallback covers
+	// a post-mutation with no notice data, which must still say re-read.
+	const notice =
+		result.postAutofixNotice ??
+		(postMutation
+			? { targetPath: postMutation.filePath, changedFiles: [] }
+			: undefined);
+	if (postMutation && attachAuthoritativeContent && budget) {
+		budget.remaining -= Buffer.byteLength(attachmentText, "utf-8");
+	}
+	// #1590 review F1: every mutation that produced a notice logs a row,
+	// INCLUDING the `none` decision a format-only change makes. Gating the row
+	// on `postMutation` made a legitimate "nothing was attachable here" verdict
+	// indistinguishable from missing instrumentation, which is the same
+	// empty-vs-errored confusion the read paths already guard against.
+	if (postMutation || notice) {
 		logLatency({
 			type: "phase",
 			phase: "authoritative_content_attachment_decision",
-			filePath: postMutation.filePath,
+			filePath: postMutation?.filePath ?? filePath,
 			durationMs: 0,
-			metadata: { path: postMutation.filePath, bytes, decision: attachAuthoritativeContent ? "attached" : "size-capped" },
+			metadata: {
+				path: postMutation?.filePath ?? filePath,
+				bytes: contentBytes,
+				decision: attachmentDecision,
+			},
 		});
+	}
+	if (postMutation) {
 		// #1464: the nudge suppresses exactly the paths this decision
 		// delivered. Same boolean the attachment below reads — the nudge layer
 		// never re-derives the cap or the budget for itself.
@@ -1327,16 +1338,10 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 		);
 	}
 	const returnedContent = attachAuthoritativeContent
-		? [
-				...event.content,
-				{
-					type: "text",
-					text: `pi-lens applied autofix to ${postMutation!.filePath}. The following full content is authoritative for subsequent edits:\n\n${postMutation!.content}`,
-				},
-			]
+		? [...event.content, { type: "text", text: attachmentText }]
 		: event.content;
-	if (postMutation && !attachAuthoritativeContent) {
-		output = `${output ? `${output}\n\n` : ""}⚠️ **File was modified by auto-format/fix. You MUST re-read ${postMutation.filePath} before making any further edits — the authoritative content is too large to attach.**`;
+	if (notice) {
+		output = `${output ? `${output}\n\n` : ""}${renderPostAutofixNotice(notice, attachmentDecision)}`;
 	}
 
 	if (!output && !result.postMutation) return;
