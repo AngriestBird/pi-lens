@@ -48,6 +48,14 @@ function stripAnsi(value: string): string {
 export interface ShellCommandSegment {
 	tokens: string[];
 	unsupported: boolean;
+	/**
+	 * Set to "pipe" when this segment's output feeds the NEXT segment via an
+	 * unquoted `|` (used by #1908 to detect a truncating pipe tail after
+	 * grep). Undefined for every other terminator (`;`, `&&`, `||`, `&`, EOF)
+	 * — those consumers don't need it and adding cases here is a no-op for
+	 * them.
+	 */
+	terminator?: "pipe";
 }
 
 export function tokenizeShellCommand(command: string): ShellCommandSegment[] {
@@ -63,10 +71,10 @@ export function tokenizeShellCommand(command: string): ShellCommandSegment[] {
 		word = "";
 		atTokenStart = true;
 	};
-	const flushSegment = () => {
+	const flushSegment = (terminator?: "pipe") => {
 		flushWord();
 		if (tokens.length > 0 || unsupported)
-			segments.push({ tokens, unsupported });
+			segments.push({ tokens, unsupported, terminator });
 		tokens = [];
 		unsupported = false;
 		atTokenStart = true;
@@ -131,10 +139,14 @@ export function tokenizeShellCommand(command: string): ShellCommandSegment[] {
 		}
 		if (ch === ";" || ch === "\n" || ch === "|" || ch === "&") {
 			flushWord();
+			let terminator: "pipe" | undefined;
 			if (ch === "|" && next === "|") i++;
 			else if (ch === "&" && next === "&") i++;
-			else if (ch === "|" || ch === "&") unsupported = true;
-			flushSegment();
+			else if (ch === "|") {
+				unsupported = true;
+				terminator = "pipe";
+			} else if (ch === "&") unsupported = true;
+			flushSegment(terminator);
 			continue;
 		}
 		if (ch === "<" || ch === ">") {
@@ -509,6 +521,83 @@ function parseGrepLineWithoutFile(
 	return { file, startLine: lineNumber, endLine: lineNumber };
 }
 
+/**
+ * Verbs that DROP printed lines from a piped stream (#1908, review F4): a
+ * hit that survives such a tail cannot be trusted to still carry the
+ * -A/-B/-C context grep's flags declared, because that context may have
+ * been among the dropped lines. `head`/`tail` drop by position (even bare,
+ * since both default to a 10-line window); `sed` with a `q` command drops
+ * everything after the addressed line; `uniq` drops adjacent duplicate
+ * lines, which can include a context line that happens to repeat.
+ *
+ * The criterion is DROPPING, not "changes grep's output shape" — a review
+ * finding (#1913 F4) caught this file previously conflating the two:
+ *   - `head`/`tail`/`sed q`/`uniq` downstream of a matching grep → some
+ *     printed lines are genuinely gone, so credit falls back to
+ *     match-line-only (the same conservative default already used for
+ *     unparseable commands) rather than trusting the declared flags.
+ *   - `sort` and other REORDER-ONLY filters keep every line grep printed,
+ *     just in a different order — a surviving `file:line:` match still
+ *     carries the full context grep actually printed, so no special case is
+ *     needed (proven by the "still credits full context through a
+ *     non-truncating pipe tail" test below).
+ *   - `wc` and similar filters that REPLACE grep's output entirely (with a
+ *     count, say) leave no `file:line:`-shaped line at all, so
+ *     `parseGrepOutputSearchReads` already finds zero matches in the real
+ *     captured stdout. Also no special case needed, but for the OPPOSITE
+ *     reason from `sort`: nothing survives to credit, rather than
+ *     everything surviving intact.
+ *   - A pass-through filter (`cat`, `grep -v`, ...) between grep and a
+ *     dropping tail still counts: the walk below follows the whole pipe
+ *     chain, not just the immediate next segment.
+ *   - Out of scope, deliberately: `sed -n 'Np'` range-address filtering
+ *     without `q`, and `sort -u`, also drop lines but aren't in #1908's
+ *     stated scope — revisit if they recur in the field. Also out of
+ *     scope: a truncating tail hidden inside a subshell/brace-group
+ *     (`( ... )`, `{ ...; }`) or reimplemented in `awk`/`perl` — the shared
+ *     tokenizer this file uses doesn't parse inside those, matching its
+ *     documented "small conservative shell lexer" scope.
+ */
+const LINE_DROPPING_TAIL_VERBS = new Set(["head", "tail", "uniq"]);
+
+function isSedQuitCommand(args: string[]): boolean {
+	for (const arg of args) {
+		const token = stripQuotes(arg);
+		if (token.startsWith("-")) continue;
+		// A `q` command anchored at the start of the script or after a `;`/
+		// newline separator, optionally preceded by a numeric/`$` address
+		// (`q`, `1q`, `$q`, `1,3p;q`). Deliberately not a full sed parser.
+		if (/(^|[;\n])\s*(\d+|\$)?\s*q\b/.test(token)) return true;
+	}
+	return false;
+}
+
+function isLineDroppingTailCommand(tokens: string[]): boolean {
+	const verb = path.basename(stripQuotes(tokens[0] ?? ""));
+	if (LINE_DROPPING_TAIL_VERBS.has(verb)) return true;
+	if (verb === "sed") return isSedQuitCommand(tokens.slice(1));
+	return false;
+}
+
+/**
+ * True when the grep segment starting at `index` feeds — directly or through
+ * a chain of pipes — into a line-dropping tail (#1908). Only an unquoted `|`
+ * counts: a `;`/`&&`/`&`-separated command downstream never receives grep's
+ * stdout, so it must not downgrade credit (#1913 F2 — this was previously
+ * unverified by any test that could tell a real pipe from mere adjacency).
+ */
+function grepPipesIntoTruncatingTail(
+	segments: ShellCommandSegment[],
+	index: number,
+): boolean {
+	if (segments[index]?.terminator !== "pipe") return false;
+	for (let j = index + 1; j < segments.length; j++) {
+		if (isLineDroppingTailCommand(segments[j].tokens)) return true;
+		if (segments[j].terminator !== "pipe") return false;
+	}
+	return false;
+}
+
 function collectGrepCommandFiles(
 	command: string,
 	cwd: string,
@@ -524,7 +613,14 @@ function collectGrepCommandFiles(
 	// contributing grep printed, so no line is credited that a hit from the
 	// narrowest grep never delivered.
 	let context: GrepContextLines | undefined;
-	for (const tokens of commandSegments(command)) {
+	// #1908: if ANY contributing grep pipes into a truncating tail, fall back
+	// to match-line-only credit for the whole command — the parsed hits carry
+	// no segment identity, so a per-segment override isn't representable in
+	// the aggregate `context` this function returns.
+	let truncated = false;
+	const segments = tokenizeShellCommand(command);
+	for (let i = 0; i < segments.length; i++) {
+		const tokens = segments[i].tokens;
 		const verb = path.basename(stripQuotes(tokens[0] ?? ""));
 		if (verb !== "grep" && verb !== "egrep" && verb !== "fgrep") continue;
 		const args = tokens.slice(1);
@@ -538,11 +634,12 @@ function collectGrepCommandFiles(
 				}
 			: segmentContext;
 		for (const file of extractGrepSearchFiles(args, cwd)) files.add(file);
+		if (grepPipesIntoTruncatingTail(segments, i)) truncated = true;
 	}
 	return {
 		hasLineNumberGrep,
 		files,
-		context: context ?? { before: 0, after: 0 },
+		context: truncated ? { before: 0, after: 0 } : (context ?? { before: 0, after: 0 }),
 	};
 }
 

@@ -232,7 +232,16 @@ export type DegradationKind =
 	 * pi's `agent_settled` window and dogfood logs show gaps up to 52 minutes;
 	 * this kind means a session out-touched that cadence.
 	 */
-	| "cascade-tier3-backlog-evicted";
+	| "cascade-tier3-backlog-evicted"
+	/**
+	 * `read-guard.ts`'s per-file record cap (`READ_GUARD_MAX_RECORDS_PER_FILE`)
+	 * trimmed a file's read history (#1913). A hot file trimmed on every push
+	 * once it's past the cap, so this kind's rising edge gates the matching
+	 * `read_cap_trimmed` read-guard.log line to the first trim and
+	 * power-of-two milestones after it — the ledger's own dedupe, not a
+	 * hand-rolled per-file Set (#1913 review F1).
+	 */
+	| "read-guard-record-cap-trim";
 
 export interface DegradationRecord {
 	kind: unknown;
