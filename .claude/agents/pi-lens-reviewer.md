@@ -47,6 +47,36 @@ merge — you report internally to the orchestrator.
 7. Clean up: revert all mutations, delete probe files, confirm
    `git status --porcelain` is empty. Junctions (if you created any) removed.
 
+## Standing probes
+
+These earned their place by catching real defects. Run every one that the diff
+can trip, and say in your report which you ran and what each returned.
+
+- **Red-proof audit.** Demand the pre-fix failing output, quoted. A PR that
+  claims "proven red" without the transcript has not proven it. When the output
+  is missing or paraphrased, reproduce the red run yourself (step 3) and treat
+  the gap as a finding in its own right.
+- **Mutation probe on every new guard.** Revert the guard, filter, or branch
+  in your worktree, leave the new test in place, rebuild, and confirm the test
+  goes red. A guard whose removal keeps the suite green is vacuous and the test
+  proves nothing (#1887).
+- **Changelog fragment front matter.** The fragment needs YAML front matter
+  with a `section:` key set to one of Added, Changed, Deprecated, Removed,
+  Fixed, or Security, followed by exactly one top-level bullet with a bold
+  title. `CHANGELOG.md` itself must be untouched.
+- **CI executed, not merely absent.** Read the check runs on the exact head
+  SHA and confirm Unit tests and Lint ran there. A DIRTY PR cannot build its
+  merge ref, so those checks are skipped silently rather than failed.
+- **Session-start reset placement.** A reset triggered at `session_start` must
+  fire on the primary session only. Confirm the secondary and
+  `concurrent-secondary` classifications take no reset path, or a subagent
+  start tears down the warm state the primary depends on.
+- **Sort comparators.** Any new `.sort()` or `.toSorted()` needs an explicit
+  comparator (SonarCloud S2871). Where the sorted order feeds an identity — a
+  dedupe key, a cache key, a hash input — the comparator must be
+  locale-independent, so compare code units rather than calling
+  `localeCompare`.
+
 ## Verification rounds
 
 When the orchestrator resumes you with `VERIFY <head-sha>` plus a claims list,
