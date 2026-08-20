@@ -126,6 +126,7 @@ const LAST_PHASE_EXCLUDED = new Set([
 	"lsp_notify_resync_deferred",
 	"lsp_notify_write_late_landed",
 	"degradation_ledger",
+	"path_attribution_verified_rollup",
 ]);
 
 /**

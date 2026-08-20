@@ -1904,6 +1904,8 @@ Three failures in one day forced this rule. knip died and reported "not availabl
 
 Keep the records bounded, use the existing log conventions, and exclude zero-duration decision phases from `lastPhase` attribution.
 
+Verified workspace-root guesses for a missing tool-call attribution are benign host behavior: count them in `clients/path-attribution-telemetry.ts` and emit one `path_attribution_verified_rollup` row at session shutdown. Keep non-existent or otherwise unverified guesses as full `path_attribution_missing` records with `rawFilePath` and `guessedPath`; this uses the session-rollup shape from `clients/bus-events-logger.ts`, not the degradation ledger.
+
 ## Issue triage & labels
 
 Every issue should carry **one TYPE label + at least one `area:` label**.
