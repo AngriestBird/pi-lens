@@ -117,7 +117,19 @@ function refreshTimeoutMs(): number {
 export interface ManagedToolRefreshEntry {
 	/** When this tool's refresh last ran, successful or not. */
 	checkedAt: number;
-	/** Version installed after that run, when it could be read. */
+	/**
+	 * Version installed after that run, when it could be read — the meaning
+	 * differs per strategy (#1759 review F8), and callers displaying this
+	 * value should not assume it is a semver:
+	 *   - npm: the version from the installed package's own `package.json`.
+	 *   - pip/gem: the tool's own `--version` output, probed after the run
+	 *     (there is no manifest pi-lens can read for either).
+	 *   - github: the release tag (`v1.2.3`, `2024.03.01`, whatever the repo
+	 *     tags with) — NOT a parsed semver.
+	 *   - archive/maven: the resolved coordinate itself (the pinned URL or the
+	 *     Maven GAV), same as `resolutionId` — these two strategies have no
+	 *     independent "installed version" to read.
+	 */
 	version?: string;
 	/**
 	 * What the tool's coordinate resolved to at that run — a GitHub release tag,
@@ -476,6 +488,33 @@ async function refreshNonNpmOne(
 	const elapsedMs = Date.now() - startedAt;
 
 	if (!attempt.ok) {
+		if (attempt.declined) {
+			// #1759 review F2: the kill switch or the project-trust gate refused
+			// BEFORE any strategy ran — nothing was touched, so this is not a
+			// failure. No degradation, and deliberately NO stamp: writing one would
+			// apply the 24h retry cooldown to a refusal that has nothing to do with
+			// the tool, delaying its next real attempt after the block lifts.
+			logSessionStart(
+				`managed-tool-refresh ${candidate.toolId}: ${candidate.strategy} refresh declined after ${elapsedMs}ms (${attempt.reason ?? "unknown"}) — no stamp written, retried next session`,
+			);
+			return {
+				toolId: candidate.toolId,
+				strategy: candidate.strategy,
+				...(candidate.packageName !== undefined && {
+					packageName: candidate.packageName,
+				}),
+				previousVersion,
+				currentVersion: previousVersion,
+				changed: false,
+				verified: false,
+				ok: false,
+			};
+		}
+		// A real failure may have left a stale cached path or probe entry behind
+		// (e.g. a partially-cleared install), so the next resolution has to
+		// re-probe rather than trust what it had before this attempt (#1759
+		// review F1 — the npm path already does this on its own failure branch).
+		invalidateManagedToolResolution(candidate.toolId);
 		recordDegradationOnce({
 			kind: "managed-tool-refresh",
 			subject: candidate.toolId,

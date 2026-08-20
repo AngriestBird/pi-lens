@@ -90,6 +90,7 @@ import {
 	resetDegradationLedger,
 } from "../../../clients/degradation-ledger.js";
 import {
+	checkProbeCache,
 	getRefreshableManagedTools,
 	resetProbeCacheStateForTesting,
 	TOOLS,
@@ -99,6 +100,10 @@ import {
 	runManagedToolRefresh,
 } from "../../../clients/installer/managed-tool-refresh.js";
 import { resetManagedToolRefreshSession } from "../../../clients/installer/managed-tool-refresh-session.js";
+import {
+	resetProjectTrust,
+	setProjectTrustState,
+} from "../../../clients/project-trust.js";
 
 const TOOLS_DIR = path.join(TEST_HOME, "tools");
 const BIN_DIR = path.join(TEST_HOME, "bin");
@@ -247,7 +252,7 @@ function routeGitHubRelease(
 	options: { etag?: string; notModified?: boolean } = {},
 ): void {
 	httpsRoutes.push({
-		match: (url) => url.includes("api.github.com"),
+		match: (url) => url.startsWith("https://api.github.com/"),
 		respond: (_url, headers) => {
 			if (options.notModified && headers["If-None-Match"]) {
 				return {
@@ -293,7 +298,7 @@ function assetDownloads(): string[] {
 }
 
 function apiCalls(): string[] {
-	return httpsUrls().filter((url) => url.includes("api.github.com"));
+	return httpsUrls().filter((url) => url.startsWith("https://api.github.com/"));
 }
 
 // --- spawn mock -----------------------------------------------------------
@@ -362,6 +367,7 @@ function freshenAllExcept(
 }
 
 let originalPath: string | undefined;
+let originalDisableToolInstall: string | undefined;
 
 beforeEach(() => {
 	fs.rmSync(TOOLS_DIR, { recursive: true, force: true });
@@ -388,10 +394,25 @@ beforeEach(() => {
 	process.env.PATH = `${fakeBin}${path.delimiter}${originalPath ?? ""}`;
 	delete process.env.PI_LENS_DISABLE_TOOL_REFRESH;
 	delete process.env.PI_LENS_TOOL_REFRESH_MAX_PER_SESSION;
+	// `vitest.config.*` defaults this to "1" globally so an ordinary test run
+	// can never trigger a real install. `refreshManagedTool` now honors that
+	// same kill switch (#1759 review F2), so these tests — which deliberately
+	// exercise the archive/maven/github/pip/gem refresh-and-install paths
+	// against mocked https/spawn — have to opt back in, the same way
+	// `installer-lifecycle.integration.test.ts` does for its child process.
+	originalDisableToolInstall = process.env.PI_LENS_DISABLE_TOOL_INSTALL;
+	process.env.PI_LENS_DISABLE_TOOL_INSTALL = "0";
 });
 
 afterEach(() => {
 	if (originalPath !== undefined) process.env.PATH = originalPath;
+	if (originalDisableToolInstall === undefined) {
+		delete process.env.PI_LENS_DISABLE_TOOL_INSTALL;
+	} else {
+		process.env.PI_LENS_DISABLE_TOOL_INSTALL = originalDisableToolInstall;
+	}
+	delete process.env.PI_LENS_INSTALL_LOCK_TIMEOUT_MS;
+	resetProjectTrust();
 	vi.unstubAllEnvs();
 });
 
@@ -544,7 +565,7 @@ describe("github strategy", () => {
 			},
 		});
 		httpsRoutes.push({
-			match: (url) => url.includes("api.github.com"),
+			match: (url) => url.startsWith("https://api.github.com/"),
 			respond: () => "error",
 		});
 
@@ -562,6 +583,52 @@ describe("github strategy", () => {
 		// A failed run must not persist a validator: replaying it would make the
 		// retry a 304 and skip the install that never happened.
 		expect(stamp.etag).toBeUndefined();
+	});
+
+	it("degrades and stamps a failure — not a throw — when the release body has no assets array (#1759 review F3)", async () => {
+		installManagedBin("shfmt");
+		freshenAllExcept("shfmt", {
+			shfmt: {
+				checkedAt: NOW - 8 * DAY_MS,
+				resolutionId: "v3.7.0",
+				version: "v3.7.0",
+			},
+		});
+		// A 200 with a tag but no `assets` field — not a network error, and not
+		// a shape `JSON.parse` rejects, but one `pickReleaseAsset` used to throw
+		// on (`.assets.find` on `undefined`), uncaught, skipping every stamp
+		// write this candidate would otherwise get.
+		httpsRoutes.push({
+			match: (url) => url.startsWith("https://api.github.com/"),
+			respond: () => ({
+				statusCode: 200,
+				body: JSON.stringify({ tag_name: "v3.12.0" }),
+			}),
+		});
+
+		const outcome = await runManagedToolRefresh(NOW);
+
+		// The run itself never throws out of `runManagedToolRefresh` — it is
+		// reported as an ordinary failed attempt.
+		expect(outcome.refreshed[0]).toMatchObject({ ok: false, changed: false });
+		expect(assetDownloads()).toEqual([]);
+		expect(degradationCount()).toBe(1);
+		expect(degradationSubjects()).toContain("shfmt");
+		// The starvation this closes: a FAILURE stamp applies the 24h retry
+		// cooldown, so the next SESSION does not re-take the one-per-session
+		// slot on the same permanently-malformed release.
+		const stamp = readState().shfmt;
+		expect(stamp).toBeDefined();
+		expect(stamp.failed).toBe(true);
+
+		// One session later (within the 24h retry window), the tool must NOT be
+		// selected again — proving the stamp actually suppresses the retry, not
+		// just that a stamp exists.
+		resetManagedToolRefreshSession();
+		httpsGetMock.mockClear();
+		const nextSessionOutcome = await runManagedToolRefresh(NOW + 60_000);
+		expect(nextSessionOutcome.skipped).toBe("nothing-due");
+		expect(apiCalls()).toEqual([]);
 	});
 
 	it("degrades when the refreshed binary does not run", async () => {
@@ -599,7 +666,7 @@ describe("github strategy", () => {
 			},
 		});
 		httpsRoutes.push({
-			match: (url) => url.includes("api.github.com"),
+			match: (url) => url.startsWith("https://api.github.com/"),
 			respond: () => "error",
 		});
 
@@ -815,7 +882,7 @@ describe("archive and maven strategies compare the registry pin", () => {
 			ktfmt: { checkedAt: NOW - 8 * DAY_MS, resolutionId: `${KTFMT_PIN}-old` },
 		});
 		httpsRoutes.push({
-			match: (url) => url.includes("repo1.maven.org"),
+			match: (url) => url.startsWith("https://repo1.maven.org/"),
 			respond: () => ({ statusCode: 200, body: Buffer.from("jar-bytes") }),
 		});
 
@@ -825,6 +892,182 @@ describe("archive and maven strategies compare the registry pin", () => {
 			httpsUrls().filter((url) => url.includes("ktfmt-0.63")),
 		).toHaveLength(1);
 		expect(readState().ktfmt).toMatchObject({ resolutionId: KTFMT_PIN });
+	});
+});
+
+// --- archive refresh never destroys a working install (#1759 review F1) --
+//
+// The reviewer's exact probe: a working extracted tree, a refresh whose
+// replacement archive is corrupt, and the assertion that the OLD tree
+// survives. The pre-fix code cleared `extractDir` (the live install) before
+// extracting the replacement, so a corrupt download or a failed `tar` left
+// the tool gone — even though the result and the log both claimed the
+// installed version was kept.
+
+describe("archive refresh preserves the working install on failure", () => {
+	it("does not delete the working extracted tree when the replacement archive fails to extract", async () => {
+		// A REAL working install at the final location `installArchiveTool` uses
+		// — not just the `BIN_DIR` shim fixture, which the old code never touched
+		// either and so would not have caught this bug.
+		const extractDir = path.join(TOOLS_DIR, "spotbugs");
+		const launcherPath = path.join(extractDir, "bin", "spotbugs");
+		fs.mkdirSync(path.dirname(launcherPath), { recursive: true });
+		fs.writeFileSync(launcherPath, "WORKING-SPOTBUGS-BINARY");
+		installManagedBin("spotbugs");
+		freshenAllExcept("spotbugs", {
+			spotbugs: {
+				checkedAt: NOW - 8 * DAY_MS,
+				resolutionId: `${SPOTBUGS_PIN}-old`,
+			},
+		});
+		httpsRoutes.push({
+			match: (url) => url === SPOTBUGS_PIN,
+			respond: () => ({
+				statusCode: 200,
+				body: Buffer.from("truncated-corrupt-archive-bytes"),
+			}),
+		});
+		// Simulate `tar` refusing a corrupt/truncated archive: the extraction
+		// spawn itself is the one that fails, before any verification step runs.
+		spawnMock.mockImplementation(async (command: string, args: string[]) => {
+			const line = `${command} ${(args ?? []).join(" ")}`;
+			if (
+				/tar(\.exe)?$/i.test(command) ||
+				(args ?? []).some((a) => /\.tgz$|\.zip$/.test(a))
+			) {
+				return {
+					stdout: "",
+					stderr: "tar: unexpected end of file",
+					status: 1,
+				};
+			}
+			return { stdout: "1.2.3", stderr: "", status: 0 };
+		});
+
+		const outcome = await runManagedToolRefresh(NOW);
+
+		expect(outcome.refreshed[0]).toMatchObject({
+			toolId: "spotbugs",
+			ok: false,
+			changed: false,
+		});
+		// The critical assertion: the pre-existing working binary is still there,
+		// byte-for-byte, not just "some file exists at that path".
+		expect(fs.existsSync(launcherPath)).toBe(true);
+		expect(fs.readFileSync(launcherPath, "utf-8")).toBe(
+			"WORKING-SPOTBUGS-BINARY",
+		);
+		expect(
+			logRows().some(
+				(l) => l.includes("spotbugs") && l.includes("keeping installed"),
+			),
+		).toBe(true);
+		// No leftover scratch directory either.
+		expect(fs.existsSync(`${extractDir}.refresh-tmp`)).toBe(false);
+	});
+
+	it("does not delete the working extracted tree when the replacement archive is missing its launcher", async () => {
+		const extractDir = path.join(TOOLS_DIR, "spotbugs");
+		const launcherPath = path.join(extractDir, "bin", "spotbugs");
+		fs.mkdirSync(path.dirname(launcherPath), { recursive: true });
+		fs.writeFileSync(launcherPath, "WORKING-SPOTBUGS-BINARY");
+		installManagedBin("spotbugs");
+		freshenAllExcept("spotbugs", {
+			spotbugs: {
+				checkedAt: NOW - 8 * DAY_MS,
+				resolutionId: `${SPOTBUGS_PIN}-old`,
+			},
+		});
+		httpsRoutes.push({
+			match: (url) => url === SPOTBUGS_PIN,
+			respond: () => ({
+				statusCode: 200,
+				body: Buffer.from("wrong-platform-archive-bytes"),
+			}),
+		});
+		// `tar` "succeeds" (a wrong-platform or empty archive is still a valid
+		// archive) but writes nothing useful — the launcher this tool needs is
+		// never on disk afterward, in the tmp extraction dir or anywhere else.
+		spawnMock.mockImplementation(async () => ({
+			stdout: "",
+			stderr: "",
+			status: 0,
+		}));
+
+		const outcome = await runManagedToolRefresh(NOW);
+
+		expect(outcome.refreshed[0]).toMatchObject({
+			toolId: "spotbugs",
+			ok: false,
+			changed: false,
+		});
+		expect(fs.existsSync(launcherPath)).toBe(true);
+		expect(fs.readFileSync(launcherPath, "utf-8")).toBe(
+			"WORKING-SPOTBUGS-BINARY",
+		);
+	});
+});
+
+// --- archive tree-bundle refresh records a fresh probe-cache mtime -------
+// (#1759 review F7)
+//
+// `verifyRefreshedArtifact`'s tree-bundle branch has no single binary to run,
+// so it returns `true` without a `--version` probe — but it still has to
+// record the new mtime, or the persisted probe entry keeps the PRE-refresh
+// mtime and forces a full re-resolution on the next dispatch anyway, which
+// defeats the point of caching it.
+
+describe("archive tree-bundle refresh updates the probe cache", () => {
+	it("records a fresh probe-cache entry after a successful tree-bundle reinstall", async () => {
+		const toolId = "powershell-editor-services";
+		const treeMarkerRel = ["PowerShellEditorServices", "Start-EditorServices.ps1"];
+		const extractDir = path.join(TOOLS_DIR, toolId);
+		const markerPath = path.join(extractDir, ...treeMarkerRel);
+		fs.mkdirSync(path.dirname(markerPath), { recursive: true });
+		fs.writeFileSync(markerPath, "# stale bootstrap");
+
+		freshenAllExcept(toolId, {
+			[toolId]: { checkedAt: NOW - 8 * DAY_MS, resolutionId: "stale-url" },
+		});
+
+		const archiveTool = TOOLS.find((t) => t.id === toolId);
+		const pinnedUrl = archiveTool?.archive?.url as string;
+		httpsRoutes.push({
+			match: (url) => url === pinnedUrl,
+			respond: () => ({
+				statusCode: 200,
+				body: Buffer.from("fake-zip-bytes"),
+			}),
+		});
+		// Simulate `tar` genuinely writing the tree marker into whatever `-C`
+		// target the code extracted into — decoupled from any tmp-dir naming
+		// convention, so this exercises the real extract → verify → swap path.
+		spawnMock.mockImplementation(
+			async (_command: string, args: string[]) => {
+				const cIndex = (args ?? []).indexOf("-C");
+				if (cIndex !== -1) {
+					const targetDir = args[cIndex + 1];
+					const written = path.join(TOOLS_DIR, targetDir, ...treeMarkerRel);
+					fs.mkdirSync(path.dirname(written), { recursive: true });
+					fs.writeFileSync(written, "# fresh bootstrap");
+					return { stdout: "", stderr: "", status: 0 };
+				}
+				return { stdout: "1.2.3", stderr: "", status: 0 };
+			},
+		);
+
+		const outcome = await runManagedToolRefresh(NOW);
+
+		expect(outcome.refreshed[0]).toMatchObject({
+			toolId,
+			strategy: "archive",
+			ok: true,
+			changed: true,
+		});
+		expect(fs.readFileSync(markerPath, "utf-8")).toBe("# fresh bootstrap");
+		// The pin: a probe-cache entry now exists for this tool, pointing at the
+		// (post-swap) extract dir.
+		expect(await checkProbeCache(toolId)).toBe(extractDir);
 	});
 });
 
@@ -859,5 +1102,100 @@ describe("one budget across all strategies", () => {
 		await runManagedToolRefresh(NOW);
 
 		expect(installSpawns().length).toBe(first + 1);
+	});
+});
+
+// --- install kill-switch, trust gate, and install lock (#1759 review F2) --
+//
+// `refreshManagedTool` used to call the strategy install functions directly,
+// bypassing every guard `installTool`/`ensureTool` honor: the kill switch,
+// the project-trust gate, and the shared install lock. These tests prove the
+// refresh path now goes through the same three gates BEFORE any strategy
+// runs, and that a refusal is a skip — no network call, no degradation, and
+// no stamp write, so the tool is retried plainly once the block lifts rather
+// than throttled by a 24h failure cooldown that has nothing to do with it.
+
+describe("install kill-switch, trust gate, and install lock", () => {
+	function staleGithubShfmt(): void {
+		installManagedBin("shfmt");
+		freshenAllExcept("shfmt", {
+			shfmt: { checkedAt: NOW - 8 * DAY_MS, resolutionId: "v3.7.0" },
+		});
+		routeGitHubRelease("v3.12.0");
+	}
+
+	it("declines and touches nothing when PI_LENS_DISABLE_TOOL_INSTALL=1", async () => {
+		staleGithubShfmt();
+		process.env.PI_LENS_DISABLE_TOOL_INSTALL = "1";
+
+		const outcome = await runManagedToolRefresh(NOW);
+
+		expect(outcome.refreshed[0]).toMatchObject({ ok: false, changed: false });
+		expect(apiCalls()).toEqual([]);
+		expect(assetDownloads()).toEqual([]);
+		expect(degradationCount()).toBe(0);
+		// The pre-existing stamp is untouched — no failure stamp, no retry
+		// cooldown burned on a refusal that has nothing to do with the tool.
+		expect(readState().shfmt).toEqual({
+			checkedAt: NOW - 8 * DAY_MS,
+			resolutionId: "v3.7.0",
+		});
+		expect(
+			logRows().some(
+				(l) => l.includes("shfmt") && l.includes("declined"),
+			),
+		).toBe(true);
+	});
+
+	it("declines and touches nothing when the host denies project trust", async () => {
+		staleGithubShfmt();
+		setProjectTrustState("untrusted");
+
+		const outcome = await runManagedToolRefresh(NOW);
+
+		expect(outcome.refreshed[0]).toMatchObject({ ok: false, changed: false });
+		expect(apiCalls()).toEqual([]);
+		expect(assetDownloads()).toEqual([]);
+		expect(degradationCount()).toBe(0);
+		expect(readState().shfmt).toEqual({
+			checkedAt: NOW - 8 * DAY_MS,
+			resolutionId: "v3.7.0",
+		});
+	});
+
+	it("proceeds normally on a host with no trust surface (\"unknown\", the default)", async () => {
+		staleGithubShfmt();
+
+		const outcome = await runManagedToolRefresh(NOW);
+
+		expect(outcome.refreshed[0]).toMatchObject({ ok: true });
+		expect(apiCalls().length).toBeGreaterThan(0);
+	});
+
+	it("declines rather than racing a concurrent install holding the shared lock", async () => {
+		staleGithubShfmt();
+		// Short timeout so the test does not wait out the real 150s default.
+		process.env.PI_LENS_INSTALL_LOCK_TIMEOUT_MS = "150";
+		const lockPath = path.join(TOOLS_DIR, ".install.lock");
+		// This process's own pid is always "alive" to the liveness check, and a
+		// fresh createdAt is never judged stale — so the lock holds for the
+		// whole retry window, the same as a genuinely concurrent installer.
+		fs.writeFileSync(
+			lockPath,
+			JSON.stringify({ pid: process.pid, createdAt: Date.now() }),
+		);
+
+		try {
+			const outcome = await runManagedToolRefresh(NOW);
+
+			expect(outcome.refreshed[0]).toMatchObject({
+				ok: false,
+				changed: false,
+			});
+			expect(apiCalls()).toEqual([]);
+			expect(degradationCount()).toBe(0);
+		} finally {
+			fs.rmSync(lockPath, { force: true });
+		}
 	});
 });

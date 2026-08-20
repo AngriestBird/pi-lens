@@ -75,6 +75,7 @@ import {
 import {
 	checkProbeCache,
 	getRefreshableManagedNpmTools,
+	installTool,
 	resetProbeCacheStateForTesting,
 	TOOLS,
 	updateProbeCache,
@@ -951,6 +952,46 @@ describe("install-time stamping (review F4)", () => {
 			"utf-8",
 		);
 		expect(installer).toContain("stampManagedToolInstalled(");
+	});
+
+	it("keeps the version-bearing stamp through a real npm install (#1759 review F4)", async () => {
+		// `vitest.config.*` defaults this to "1" so an ordinary test can never
+		// trigger a real install; `installTool` is exercised here for real
+		// (against the mocked spawn below), so it has to opt back in.
+		const previousDisable = process.env.PI_LENS_DISABLE_TOOL_INSTALL;
+		process.env.PI_LENS_DISABLE_TOOL_INSTALL = "0";
+		try {
+			spawnMock.mockImplementation(
+				async (_command: string, args: string[]) => {
+					if ((args ?? []).includes("install")) {
+						installFixture("knip", "6.32.2");
+						return { stdout: "", stderr: "", status: 0 };
+					}
+					// package-manager availability probe(s)
+					return { stdout: "npm", stderr: "", status: 0 };
+				},
+			);
+
+			const installed = await installTool("knip");
+
+			expect(installed).toBe(true);
+			// `installTool`'s npm case stamps the version directly
+			// (`stampManagedToolInstalled`) BEFORE `finishInstallAttempt` runs its
+			// universal `stampInstallResolution` funnel for every strategy. That
+			// funnel used to re-stamp npm too, with no version (npm never sets
+			// `lastInstallResolutionId`), clobbering the version this test checks
+			// for milliseconds later. `stampInstallResolution` now skips npm.
+			expect(readState().knip).toMatchObject({
+				checkedAt: expect.any(Number),
+				version: "6.32.2",
+			});
+		} finally {
+			if (previousDisable === undefined) {
+				delete process.env.PI_LENS_DISABLE_TOOL_INSTALL;
+			} else {
+				process.env.PI_LENS_DISABLE_TOOL_INSTALL = previousDisable;
+			}
+		}
 	});
 });
 

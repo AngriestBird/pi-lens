@@ -3057,6 +3057,20 @@ async function installGitHubTool(
 		lastInstallResolutionId.set(tool.id, releaseJson.tag_name);
 	}
 
+	// #1759 review F3: a 200 whose body has no `assets` array (an unexpected
+	// GitHub API shape, not a real release) used to reach `pickReleaseAsset`
+	// and throw inside `.find`, uncaught by anything in this function. For the
+	// REFRESH caller that throw skipped every stamp write, so the tool never
+	// got a failure stamp and re-took the one-per-session slot forever. Failing
+	// here, like a missing asset match, keeps this an ordinary "no install"
+	// outcome both callers already handle.
+	if (!Array.isArray(releaseJson.assets)) {
+		logSessionStart(
+			`github-install ${tool.id}: release metadata has no assets array`,
+		);
+		return undefined;
+	}
+
 	const asset =
 		pickReleaseAsset(releaseJson.assets, assetSubstring) ??
 		deriveHashiCorpReleaseAsset(tool, releaseJson.tag_name, assetSubstring);
@@ -3544,10 +3558,23 @@ export interface ManagedToolRefreshAttempt {
 	resolutionId?: string;
 	/** `ETag` to persist and replay as `If-None-Match` next time. */
 	etag?: string;
-	/** Version now installed, when this strategy can read one. */
+	/**
+	 * Version now installed, when this strategy can read one. Per-strategy
+	 * meaning documented once, on `ManagedToolRefreshEntry.version` in
+	 * `managed-tool-refresh.ts` (#1759 review F8) — this field feeds that one
+	 * directly.
+	 */
 	version?: string;
 	/** Failure detail for the ledger, when `ok` is false. */
 	reason?: string;
+	/**
+	 * Refused before any strategy ran — the install kill-switch, the
+	 * project-trust gate, or a held install lock (#1759 review F2). Distinct
+	 * from a real failure: the caller neither degrades nor stamps a refusal,
+	 * so the retry cooldown is not spent on a block that has nothing to do
+	 * with the tool itself.
+	 */
+	declined?: boolean;
 }
 
 /**
@@ -3558,6 +3585,14 @@ export interface ManagedToolRefreshAttempt {
  * currently installed version keeps serving and the caller records a
  * degradation. npm is NOT handled here — `managed-tool-refresh.ts` owns that
  * path because it needs the package-manager resolver.
+ *
+ * #1759 review F2: this used to call the strategy functions directly, which
+ * bypassed every install guard `installTool`/`ensureTool` honor —
+ * `PI_LENS_DISABLE_TOOL_INSTALL`, the `assertInstallAllowed` project-trust
+ * gate (the #1334 S5 boundary), and `acquireInstallLock`. A refresh IS an
+ * install trigger, just an unattended one, so it now passes through the same
+ * three gates before any strategy runs. A refusal is `declined: true`, not a
+ * degradation — see `ManagedToolRefreshAttempt.declined`.
  */
 export async function refreshManagedTool(
 	toolId: string,
@@ -3567,21 +3602,62 @@ export async function refreshManagedTool(
 	if (!tool) {
 		return { ok: false, unchanged: true, reason: "unknown tool id" };
 	}
-	switch (tool.installStrategy) {
-		case "github":
-			return refreshGitHubManagedTool(tool, known);
-		case "pip":
-		case "gem":
-			return refreshPackageManagerManagedTool(tool);
-		case "maven":
-		case "archive":
-			return refreshPinnedManagedTool(tool, known);
-		default:
-			return {
-				ok: false,
-				unchanged: true,
-				reason: `strategy ${tool.installStrategy} is not refreshable here`,
-			};
+	if (
+		tool.installStrategy !== "github" &&
+		tool.installStrategy !== "pip" &&
+		tool.installStrategy !== "gem" &&
+		tool.installStrategy !== "maven" &&
+		tool.installStrategy !== "archive"
+	) {
+		return {
+			ok: false,
+			unchanged: true,
+			reason: `strategy ${tool.installStrategy} is not refreshable here`,
+		};
+	}
+
+	if (process.env.PI_LENS_DISABLE_TOOL_INSTALL === "1") {
+		return {
+			ok: false,
+			unchanged: true,
+			declined: true,
+			reason: "installation disabled by PI_LENS_DISABLE_TOOL_INSTALL=1",
+		};
+	}
+	if (!assertInstallAllowed(`managed tool refresh: ${toolId}`)) {
+		return {
+			ok: false,
+			unchanged: true,
+			declined: true,
+			reason: `project trust: ${projectTrustDenialReason()}`,
+		};
+	}
+
+	// Held for the whole strategy call, not just the final write — a refresh
+	// can race a concurrent `ensureTool` install of the SAME tool into the SAME
+	// managed destination, and both write to `TOOLS_DIR` unlocked otherwise.
+	const lock = await acquireInstallLock();
+	if (!lock.release) {
+		return {
+			ok: false,
+			unchanged: true,
+			declined: true,
+			reason: lock.reason ?? "install lock held",
+		};
+	}
+	try {
+		switch (tool.installStrategy) {
+			case "github":
+				return await refreshGitHubManagedTool(tool, known);
+			case "pip":
+			case "gem":
+				return await refreshPackageManagerManagedTool(tool);
+			case "maven":
+			case "archive":
+				return await refreshPinnedManagedTool(tool, known);
+		}
+	} finally {
+		await lock.release();
 	}
 }
 
@@ -3633,7 +3709,15 @@ async function refreshGitHubManagedTool(
 
 	let release: GitHubReleaseMetadata;
 	try {
-		release = JSON.parse(response.body.toString("utf8"));
+		const parsed: unknown = JSON.parse(response.body.toString("utf8"));
+		// #1759 review F3: `JSON.parse` succeeds on `null`, an array, or a bare
+		// string just as happily as on an object — any of those would throw
+		// reading `.tag_name` below, uncaught, and skip every stamp write this
+		// candidate ever gets. Reject the shape here instead of downstream.
+		if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+			throw new Error("release metadata is not an object");
+		}
+		release = parsed as GitHubReleaseMetadata;
 	} catch (err) {
 		return {
 			ok: false,
@@ -3704,6 +3788,11 @@ async function verifyRefreshedArtifact(
 	installedPath: string,
 ): Promise<boolean> {
 	if (tool.installStrategy === "archive" && !tool.archive?.launcher) {
+		// A tree bundle has no single binary to run — `installArchiveTool` already
+		// confirmed its tree marker — but it still needs its NEW mtime recorded
+		// (#1759 review F7), or the persisted probe entry keeps the pre-refresh
+		// mtime and forces a full re-resolution on the next dispatch anyway.
+		await updateProbeCache(tool.id, installedPath);
 		return true;
 	}
 	if (!(await verifyToolBinary(installedPath))) {
@@ -3974,6 +4063,45 @@ export function resolveArchiveUrl(
 	return typeof spec.url === "function" ? spec.url(platform, arch) : spec.url;
 }
 
+/**
+ * Move a verified-good extracted tree into its final, stable location without
+ * ever leaving `finalDir` empty or missing while a working copy was there
+ * (#1759 review F1).
+ *
+ * Both renames are same-volume directory renames (TOOLS_DIR never spans a
+ * filesystem boundary here), so each one individually is as close to atomic
+ * as the OS gives us. The gap between them — `finalDir` briefly absent — is
+ * unavoidable without OS-level directory-swap support, but it is now
+ * MICROSECONDS, not "however long the network download and tar extraction
+ * take", and a failure on the second rename restores the backup rather than
+ * leaving `finalDir` gone.
+ */
+async function swapExtractedDir(
+	tmpDir: string,
+	finalDir: string,
+): Promise<void> {
+	const backupDir = `${finalDir}.rollback`;
+	await fs.rm(backupDir, { recursive: true, force: true });
+	let hadPrevious = false;
+	try {
+		await fs.rename(finalDir, backupDir);
+		hadPrevious = true;
+	} catch (err) {
+		if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+	}
+	try {
+		await fs.rename(tmpDir, finalDir);
+	} catch (err) {
+		if (hadPrevious) {
+			await fs.rename(backupDir, finalDir).catch(() => {});
+		}
+		throw err;
+	}
+	if (hadPrevious) {
+		await fs.rm(backupDir, { recursive: true, force: true }).catch(() => {});
+	}
+}
+
 async function installArchiveTool(
 	tool: ToolDefinition,
 ): Promise<string | undefined> {
@@ -4008,15 +4136,27 @@ async function installArchiveTool(
 	// `host:path` ("Cannot connect to C:"). Relative paths work for both GNU tar
 	// and Windows bsdtar, so we avoid the GNU-only `--force-local` (which bsdtar
 	// rejects). fs.* calls still use the absolute paths.
+	//
+	// #1759 review F1: extraction and verification happen in a TMP dir, never
+	// in `extractDir` itself. `extractDir` is the location a refresh's caller
+	// (and every prior session) is currently serving from; the old code
+	// `fs.rm`'d it before extraction even started, so a corrupt download or a
+	// failed tar left the tool GONE rather than "kept the installed version" —
+	// exactly the outcome the failure log line claimed did not happen. The
+	// installed copy is now untouched until the replacement is proven good.
 	const extractName = tool.id;
+	const tmpExtractName = `${extractName}.refresh-tmp`;
 	const archiveName = `${tool.id}.download.${spec.kind === "zip" ? "zip" : "tgz"}`;
 	const extractDir = path.join(TOOLS_DIR, extractName);
+	const tmpExtractDir = path.join(TOOLS_DIR, tmpExtractName);
 	const tmpArchive = path.join(TOOLS_DIR, archiveName);
 	try {
 		await fs.mkdir(TOOLS_DIR, { recursive: true });
-		// Clear any prior extraction so a reinstall is clean.
-		await fs.rm(extractDir, { recursive: true, force: true });
-		await fs.mkdir(extractDir, { recursive: true });
+		// Clear any stale tmp dir from an interrupted prior attempt — this is the
+		// SCRATCH location, never the live install, so clearing it never risks the
+		// working copy.
+		await fs.rm(tmpExtractDir, { recursive: true, force: true });
+		await fs.mkdir(tmpExtractDir, { recursive: true });
 		await fs.writeFile(tmpArchive, archiveBuffer);
 
 		// `--strip-components=N` drops N leading path components. Default 1 drops a
@@ -4029,7 +4169,7 @@ async function installArchiveTool(
 			spec.kind === "tgz" ? "-xzf" : "-xf",
 			archiveName,
 			"-C",
-			extractName,
+			tmpExtractName,
 			...(stripComponents > 0 ? [`--strip-components=${stripComponents}`] : []),
 		];
 		// Resolve `tar` to an absolute path on Windows (System32\tar.exe is the
@@ -4053,26 +4193,30 @@ async function installArchiveTool(
 		await fs.rm(tmpArchive, { force: true });
 		if (!extracted.ok) {
 			logSessionStart(
-				`archive-install ${tool.id}: extraction failed: ${extracted.stderr}`,
+				`archive-install ${tool.id}: extraction failed: ${extracted.stderr} — keeping installed version`,
 			);
+			await fs.rm(tmpExtractDir, { recursive: true, force: true }).catch(() => {});
 			return undefined;
 		}
 
 		// Tree bundle (no launcher): the whole extracted tree IS the artifact. Verify
-		// the marker exists and resolve to the extract dir — the consuming server
-		// launches a runtime against a bootstrap inside it (e.g. PSES via pwsh).
+		// the marker exists — in the TMP dir, before it becomes the live one — the
+		// consuming server launches a runtime against a bootstrap inside it (e.g.
+		// PSES via pwsh).
 		if (!spec.launcher) {
-			const marker = spec.treeMarker
-				? path.join(extractDir, ...spec.treeMarker.split("/"))
-				: extractDir;
+			const tmpMarker = spec.treeMarker
+				? path.join(tmpExtractDir, ...spec.treeMarker.split("/"))
+				: tmpExtractDir;
 			try {
-				await fs.access(marker);
+				await fs.access(tmpMarker);
 			} catch {
 				logSessionStart(
-					`archive-install ${tool.id}: tree marker not found at ${marker} after extraction`,
+					`archive-install ${tool.id}: tree marker not found at ${tmpMarker} after extraction — keeping installed version`,
 				);
+				await fs.rm(tmpExtractDir, { recursive: true, force: true }).catch(() => {});
 				return undefined;
 			}
+			await swapExtractedDir(tmpExtractDir, extractDir);
 			logSessionStart(
 				`archive-install ${tool.id}: installed tree bundle → ${extractDir} (extracted ${archiveBuffer.length} bytes)`,
 			);
@@ -4080,21 +4224,31 @@ async function installArchiveTool(
 			return extractDir;
 		}
 
-		// The launcher inside the extracted tree (e.g. bin/spotbugs[.bat]).
-		const innerLauncher = path.join(
-			extractDir,
-			...spec.launcher.split("/").map((p) => p),
-		);
-		const resolvedInner = isWindows ? `${innerLauncher}.bat` : innerLauncher;
+		// The launcher inside the TMP extracted tree (e.g. bin/spotbugs[.bat]),
+		// verified before the tree becomes the live one.
+		const launcherParts = spec.launcher.split("/").map((p) => p);
+		const tmpInnerLauncher = path.join(tmpExtractDir, ...launcherParts);
+		const tmpResolvedInner = isWindows
+			? `${tmpInnerLauncher}.bat`
+			: tmpInnerLauncher;
 		try {
-			await fs.access(resolvedInner);
+			await fs.access(tmpResolvedInner);
 		} catch {
 			logSessionStart(
-				`archive-install ${tool.id}: launcher not found at ${resolvedInner} after extraction`,
+				`archive-install ${tool.id}: launcher not found at ${tmpResolvedInner} after extraction — keeping installed version`,
 			);
+			await fs.rm(tmpExtractDir, { recursive: true, force: true }).catch(() => {});
 			return undefined;
 		}
-		if (!isWindows) await fs.chmod(resolvedInner, 0o750).catch(() => {});
+		if (!isWindows) await fs.chmod(tmpResolvedInner, 0o750).catch(() => {});
+
+		await swapExtractedDir(tmpExtractDir, extractDir);
+
+		// The launcher path inside `extractDir` — stable across every install and
+		// refresh, since `extractDir` itself never changes — computed fresh now
+		// that the swap has put the verified tree there.
+		const innerLauncher = path.join(extractDir, ...launcherParts);
+		const resolvedInner = isWindows ? `${innerLauncher}.bat` : innerLauncher;
 
 		// Thin shim in the managed bin so discovery (findGitHubToolPath) resolves
 		// it like any other managed tool. `call`/`exec` preserves the real
@@ -4122,8 +4276,9 @@ async function installArchiveTool(
 		return shimPath;
 	} catch (err) {
 		await fs.rm(tmpArchive, { force: true }).catch(() => {});
+		await fs.rm(tmpExtractDir, { recursive: true, force: true }).catch(() => {});
 		logSessionStart(
-			`archive-install ${tool.id}: install failed: ${(err as Error).message}`,
+			`archive-install ${tool.id}: install failed: ${(err as Error).message} — keeping installed version`,
 		);
 		return undefined;
 	}
