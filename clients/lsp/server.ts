@@ -331,6 +331,17 @@ const DIRECT_LSP_NEGATIVE_TTL_MS = Math.max(
 const directLspCommandUnavailableUntil = new Map<string, number>();
 const directLspCommandSkipLoggedUntil = new Map<string, number>();
 
+/** Re-arm direct-command availability for the next session. */
+export function resetDirectLspCommandAvailability(): void {
+	directLspCommandUnavailableUntil.clear();
+	directLspCommandSkipLoggedUntil.clear();
+}
+
+/** Test seam for seeding the real negative-cache path. */
+export function _markDirectLspCommandUnavailableForTests(command: string): void {
+	markDirectLspCommandUnavailable(command);
+}
+
 function pruneExpiredDirectLspNegativeEntries(now = Date.now()): void {
 	for (const [command, until] of directLspCommandUnavailableUntil) {
 		if (until <= now) {
