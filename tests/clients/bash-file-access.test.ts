@@ -7,6 +7,7 @@ import {
 	extractGrepSearchReadsFromOutput,
 	extractReadPathsFromCommand,
 	extractWrittenPathsFromCommand,
+	parseGrepContextLines,
 	type ReadSpan,
 } from "../../clients/bash-file-access.js";
 import { removeTempDirSync } from "./test-utils.js";
@@ -141,8 +142,14 @@ describe("extractGrepSearchReadsFromOutput", () => {
 				`${a}:7:foo\n${relB}:12:foo`,
 			),
 		).toEqual([
-			{ file: a, startLine: 7, endLine: 7 },
-			{ file: b, startLine: 12, endLine: 12 },
+			{ file: a, startLine: 7, endLine: 7, contextBefore: 0, contextAfter: 0 },
+			{
+				file: b,
+				startLine: 12,
+				endLine: 12,
+				contextBefore: 0,
+				contextAfter: 0,
+			},
 		]);
 	});
 
@@ -150,7 +157,9 @@ describe("extractGrepSearchReadsFromOutput", () => {
 		const a = touchLines("a.ts", 20);
 		expect(
 			extractGrepSearchReadsFromOutput(`grep -n foo ${a}`, tmp, "9:foo here"),
-		).toEqual([{ file: a, startLine: 9, endLine: 9 }]);
+		).toEqual([
+			{ file: a, startLine: 9, endLine: 9, contextBefore: 0, contextAfter: 0 },
+		]);
 	});
 
 	it("recognizes combined grep flags that include line numbers", () => {
@@ -161,7 +170,15 @@ describe("extractGrepSearchReadsFromOutput", () => {
 				tmp,
 				`${a}:11:foo here`,
 			),
-		).toEqual([{ file: a, startLine: 11, endLine: 11 }]);
+		).toEqual([
+			{
+				file: a,
+				startLine: 11,
+				endLine: 11,
+				contextBefore: 0,
+				contextAfter: 0,
+			},
+		]);
 	});
 
 	it("ignores grep output when -n is absent", () => {
@@ -169,6 +186,107 @@ describe("extractGrepSearchReadsFromOutput", () => {
 		expect(
 			extractGrepSearchReadsFromOutput(`grep foo ${a}`, tmp, `${a}:9:foo`),
 		).toHaveLength(0);
+	});
+
+	// ── #1904 item 2: credit only the lines the grep actually printed ────────
+
+	it("credits no context for a bare grep hit", () => {
+		const a = touchLines("a.ts", 20);
+		expect(
+			extractGrepSearchReadsFromOutput(`grep -n foo ${a}`, tmp, "9:foo"),
+		).toEqual([
+			{ file: a, startLine: 9, endLine: 9, contextBefore: 0, contextAfter: 0 },
+		]);
+	});
+
+	it("credits the context grep -A/-B/-C actually printed", () => {
+		const a = touchLines("a.ts", 40);
+		expect(
+			extractGrepSearchReadsFromOutput(`grep -n -A 3 foo ${a}`, tmp, "9:foo"),
+		).toEqual([
+			{ file: a, startLine: 9, endLine: 9, contextBefore: 0, contextAfter: 3 },
+		]);
+		expect(
+			extractGrepSearchReadsFromOutput(`grep -n -B2 foo ${a}`, tmp, "9:foo"),
+		).toEqual([
+			{ file: a, startLine: 9, endLine: 9, contextBefore: 2, contextAfter: 0 },
+		]);
+		expect(
+			extractGrepSearchReadsFromOutput(
+				`grep -n --context=4 foo ${a}`,
+				tmp,
+				"9:foo",
+			),
+		).toEqual([
+			{ file: a, startLine: 9, endLine: 9, contextBefore: 4, contextAfter: 4 },
+		]);
+	});
+
+	it("reads context flags clustered with other short flags", () => {
+		const a = touchLines("a.ts", 40);
+		expect(
+			extractGrepSearchReadsFromOutput(
+				`grep -rnC2 foo ${a}`,
+				tmp,
+				`${a}:9:foo`,
+			),
+		).toEqual([
+			{ file: a, startLine: 9, endLine: 9, contextBefore: 2, contextAfter: 2 },
+		]);
+	});
+
+	it("credits the narrowest context when a command chains several greps", () => {
+		const a = touchLines("a.ts", 40);
+		expect(
+			extractGrepSearchReadsFromOutput(
+				`grep -nC5 foo ${a} && grep -n bar ${a}`,
+				tmp,
+				`${a}:9:foo`,
+			),
+		).toEqual([
+			{ file: a, startLine: 9, endLine: 9, contextBefore: 0, contextAfter: 0 },
+		]);
+	});
+});
+
+describe("parseGrepContextLines", () => {
+	it("returns zero context for flags that carry no context request", () => {
+		expect(parseGrepContextLines(["-rn", "foo", "src"])).toEqual({
+			before: 0,
+			after: 0,
+		});
+	});
+
+	it("parses attached, separated, long, and bare-number forms", () => {
+		expect(parseGrepContextLines(["-A3"])).toEqual({ before: 0, after: 3 });
+		expect(parseGrepContextLines(["-B", "4"])).toEqual({ before: 4, after: 0 });
+		expect(parseGrepContextLines(["--after-context", "2"])).toEqual({
+			before: 0,
+			after: 2,
+		});
+		expect(parseGrepContextLines(["--before-context=1"])).toEqual({
+			before: 1,
+			after: 0,
+		});
+		expect(parseGrepContextLines(["-5"])).toEqual({ before: 5, after: 5 });
+	});
+
+	it("does not read a pattern or path as a context value", () => {
+		expect(parseGrepContextLines(["-A", "foo", "src/a.ts"])).toEqual({
+			before: 0,
+			after: 0,
+		});
+		expect(parseGrepContextLines(["--", "-C3"])).toEqual({
+			before: 0,
+			after: 0,
+		});
+	});
+
+	it("bounds an absurd context request", () => {
+		expect(parseGrepContextLines(["-C99999"])).toEqual({
+			before: 100,
+			after: 100,
+		});
 	});
 });
 
@@ -190,7 +308,10 @@ describe("extractWrittenPathsFromCommand — bash writes", () => {
 		["git checkout <ref> -- <file>", (f) => `git checkout HEAD~1 -- ${f}`],
 		["git restore <file>", (f) => `git restore ${f}`],
 		["git restore --staged <file>", (f) => `git restore --staged ${f}`],
-		["git mv destination (#1668 review F2)", (f) => `git mv /other/src.ts ${f}`],
+		[
+			"git mv destination (#1668 review F2)",
+			(f) => `git mv /other/src.ts ${f}`,
+		],
 		["biome format --write", (f) => `npx biome format --write ${f}`],
 		["biome check --write", (f) => `biome check --write ${f}`],
 		["prettier --write", (f) => `prettier --write ${f}`],
@@ -222,7 +343,10 @@ describe("extractWrittenPathsFromCommand — bash writes", () => {
 
 	it("git mv source is NOT registered as a write (only the destination)", () => {
 		const dst = pathIn("dst.ts");
-		const r = extractWrittenPathsFromCommand(`git mv /other/src.ts ${dst}`, tmp);
+		const r = extractWrittenPathsFromCommand(
+			`git mv /other/src.ts ${dst}`,
+			tmp,
+		);
 		expect(r).toContain(dst);
 		expect(r).not.toContain("/other/src.ts");
 	});
@@ -250,17 +374,25 @@ describe("extractWrittenPathsFromCommand — bash writes", () => {
 
 	it("does not invent paths for project-scoped formatter invocations", () => {
 		expect(extractWrittenPathsFromCommand("cargo fmt", tmp)).toHaveLength(0);
-		expect(extractWrittenPathsFromCommand("dotnet format", tmp)).toHaveLength(0);
+		expect(extractWrittenPathsFromCommand("dotnet format", tmp)).toHaveLength(
+			0,
+		);
 		expect(extractWrittenPathsFromCommand("rustfmt", tmp)).toHaveLength(0);
 	});
 
 	it("does not register formatter operands without their write flag", () => {
 		const f = pathIn("a.ts");
-		expect(extractWrittenPathsFromCommand(`biome format ${f}`, tmp)).not.toContain(f);
-		expect(extractWrittenPathsFromCommand(`prettier ${f}`, tmp)).not.toContain(f);
+		expect(
+			extractWrittenPathsFromCommand(`biome format ${f}`, tmp),
+		).not.toContain(f);
+		expect(extractWrittenPathsFromCommand(`prettier ${f}`, tmp)).not.toContain(
+			f,
+		);
 		expect(extractWrittenPathsFromCommand(`eslint ${f}`, tmp)).not.toContain(f);
 		expect(extractWrittenPathsFromCommand(`gofmt ${f}`, tmp)).not.toContain(f);
-		expect(extractWrittenPathsFromCommand(`clang-format ${f}`, tmp)).not.toContain(f);
+		expect(
+			extractWrittenPathsFromCommand(`clang-format ${f}`, tmp),
+		).not.toContain(f);
 	});
 });
 
@@ -356,9 +488,9 @@ describe("extractDeletedPathsFromCommand — bash deletes (#1668)", () => {
 	it("unrelated commands (cat, grep, git status) propose nothing", () => {
 		const f = touchLines("a.ts", 1);
 		expect(extractDeletedPathsFromCommand(`cat ${f}`, tmp)).toHaveLength(0);
-		expect(extractDeletedPathsFromCommand(`grep -n foo ${f}`, tmp)).toHaveLength(
-			0,
-		);
+		expect(
+			extractDeletedPathsFromCommand(`grep -n foo ${f}`, tmp),
+		).toHaveLength(0);
 		expect(extractDeletedPathsFromCommand(`git status`, tmp)).toHaveLength(0);
 	});
 });
