@@ -2,6 +2,7 @@
 
 import { logExtension } from "./extension-log.js";
 import { LEDGER_FIELD_MAX, truncateForLedger } from "./ledger-bounds.js";
+import { logLatency } from "./latency-logger.js";
 
 // Re-exported so existing importers keep one name for the ledger's bound.
 export { LEDGER_FIELD_MAX, truncateForLedger };
@@ -32,6 +33,8 @@ export type DegradationKind =
 	| "formatter-failure"
 	| "wasm-abort"
 	| "lsp-diagnostics-timeout"
+	| "lsp-scanner-coverage-gap"
+	| "lsp-notify-inflight-stall"
 	| "bus-stale"
 	| "query-predicates-invalid"
 	| "install-retry-exhausted"
@@ -159,6 +162,44 @@ export type DegradationKind =
 	 * from the ledger alone.
 	 */
 	| "runner-empty-result"
+	/** A process-table resource sample failed or timed out; it is unknown. */
+	| "resource-sampler-query-failed"
+	/**
+	 * The registry-independent orphan backstop could not enumerate the OS
+	 * process table (spawn error or scan timeout). Its empty result therefore
+	 * means "did not look", not "found nothing" (#1857 item 2) — the same
+	 * clean-vs-errored discrimination `runner-empty-result` makes for
+	 * shell-out runners.
+	 */
+	| "orphan-backstop-scan-failed"
+	/**
+	 * A backstop kill was attempted and the process was still alive
+	 * afterwards. Subject carries `<binary>#<pid>` so a permanently unkillable
+	 * process is identifiable, instead of counting as a successful reap and
+	 * paying the full sweep again every session (#1857 items 1 and 3).
+	 */
+	| "orphan-backstop-kill-unverified"
+	/**
+	 * A backstop candidate passed every other eligibility test, but the OS
+	 * snapshot reported no usable process creation time. The spawn-grace guard
+	 * could not rule out "spawned seconds ago, not yet registered", so the
+	 * process was spared (#1857 item 4). Without this record the guard would
+	 * be indistinguishable from finding nothing.
+	 */
+	| "orphan-backstop-age-unknown"
+	/**
+	 * Same as `orphan-backstop-kill-unverified`, for the registry-driven
+	 * reaper path, which spelled the identical attempt-counted-as-kill defect
+	 * (#1857 class sweep).
+	 */
+	| "orphan-reap-kill-unverified"
+	/**
+	 * The orphan backstop's OWN process-table scanner blew the scan timeout and
+	 * had to be tree-killed (#1864 review F3). Reason carries the kill verdict,
+	 * so a scanner that survived its own sweep's escalation — an orphan sweep
+	 * leaking an orphan — is visible rather than silent.
+	 */
+	| "orphan-backstop-scanner-escalated"
 	/**
 	 * `session_start`'s bounded change-log sequence read (#1162) blew its
 	 * budget and a project snapshot existed on disk, but the freshness gate
@@ -222,7 +263,7 @@ export function getDegradationLedgerGeneration(): number {
 	return ledgerGeneration;
 }
 
-export function recordDegradation(record: DegradationRecord): void {
+export function recordDegradation(record: DegradationRecord): boolean {
 	try {
 		const kind = boundedKind(record.kind);
 		const subject = truncateForLedger(record.subject);
@@ -232,15 +273,18 @@ export function recordDegradation(record: DegradationRecord): void {
 			group = { count: 0, entries: [] };
 			groups.set(kind, group);
 		}
+		const admitted = group.entries.length < ENTRIES_PER_KIND;
 		group.count += 1;
 		// Bounded at RECORD time (#1366 review): reasons carry arbitrary error
 		// text; a 10KB message must never become a 10KB health line or a 10KB
 		// retained string.
 		group.entries.push({ subject, reason });
 		if (group.entries.length > ENTRIES_PER_KIND) group.entries.shift();
+		return admitted;
 	} catch (error) {
 		debugLedgerFailure("record", error);
 		// Telemetry must never break the observed path.
+		return false;
 	}
 }
 
@@ -252,7 +296,9 @@ export function recordDegradationOnce(record: DegradationRecord): void {
 		const key = `${kind}\0${subject}`;
 		if (onceKeys.has(key)) return;
 		onceKeys.add(key);
-		recordDegradation({ kind, subject, reason: record.reason });
+		if (recordDegradation({ kind, subject, reason: record.reason })) {
+			logDurableDegradation(kind, subject, 1);
+		}
 	} catch (error) {
 		debugLedgerFailure("record-once", error);
 		// Telemetry must never break the observed path.
@@ -284,24 +330,50 @@ export function incrementDegradationCount(record: DegradationRecord): boolean {
 			group = { count: 0, entries: [] };
 			groups.set(kind, group);
 		}
+		const existing = group.entries.findIndex(
+			(candidate) => candidate.subject === subject,
+		);
+		const admitted = existing >= 0 || group.entries.length < ENTRIES_PER_KIND;
 		group.count += 1;
 		// #1816: append the count AFTER truncation, never before. `reason` is
 		// already bounded above, so re-truncating the concatenation pushed the
 		// suffix past LEDGER_FIELD_MAX and silently ate it — a 200-char reason
 		// lost the one field that says how often the degradation fired.
 		const entry = { subject, reason: `${reason} (count: ${count})` };
-		const existing = group.entries.findIndex(
-			(candidate) => candidate.subject === subject,
-		);
 		if (existing >= 0) group.entries.splice(existing, 1);
 		group.entries.push(entry);
 		if (group.entries.length > ENTRIES_PER_KIND) group.entries.shift();
+		// Durable rows use the summary's admission and emit the first event and
+		// power-of-two milestones only, keeping the sink bounded.
+		if (admitted && isPowerOfTwo(count)) {
+			logDurableDegradation(kind, subject, count);
+		}
 		return count === 1;
 	} catch (error) {
 		debugLedgerFailure("increment", error);
 		// Telemetry must never break the observed path.
 		return false;
 	}
+}
+
+/**
+ * Persist the accepted ledger mutation through the existing rotated NDJSON
+ * latency stream. `logLatency` owns the timestamp, PID, serialization, secret
+ * redaction, and write queue. The subject and kind were already bounded by the
+ * ledger before reaching this seam.
+ */
+function logDurableDegradation(kind: string, subject: string, count: number): void {
+	logLatency({
+		type: "phase",
+		phase: "degradation_ledger",
+		filePath: subject,
+		durationMs: 0,
+		metadata: { kind, subject, count, ledgerGeneration },
+	});
+}
+
+function isPowerOfTwo(value: number): boolean {
+	return value > 0 && (value & (value - 1)) === 0;
 }
 
 function boundedKind(value: unknown): string {

@@ -40,6 +40,10 @@ function summaryFor(kind: string) {
 	return getDegradationSummary().find((group) => group.kind === kind);
 }
 
+function boundedPhaseCalls(): Array<Record<string, unknown>> {
+	return latencyCalls.filter((entry) => entry.phase !== "degradation_ledger");
+}
+
 describe("emitBounded (#1743)", () => {
 	beforeEach(() => {
 		latencyCalls.length = 0;
@@ -63,7 +67,7 @@ describe("emitBounded (#1743)", () => {
 			}
 			// MUTATION PROOF: delete the `if (options.risingEdgePer !== undefined
 			// && !isRisingEdge) return false;` line in admitBounded and this is 5.
-			expect(latencyCalls).toHaveLength(1);
+			expect(boundedPhaseCalls()).toHaveLength(1);
 			// The ledger still holds the exact total, so the four unlogged
 			// repeats are not invisible — they are counted, with identity.
 			expect(summaryFor("lsp-nav-request-timeout")?.count).toBe(5);
@@ -83,7 +87,7 @@ describe("emitBounded (#1743)", () => {
 			emitBounded(PHASE, "hover:/b.ts", { durationMs: 3 }, options);
 			// MUTATION PROOF: key the ledger subject on the phase instead of the
 			// identity and /b.ts is swallowed — this drops to 1.
-			expect(latencyCalls.map((e) => e.filePath)).toEqual([
+			expect(boundedPhaseCalls().map((e) => e.filePath)).toEqual([
 				"hover:/a.ts",
 				"hover:/b.ts",
 			]);
@@ -97,13 +101,13 @@ describe("emitBounded (#1743)", () => {
 			} as const;
 			emitBounded(PHASE, "hover:/a.ts", { durationMs: 1 }, options);
 			emitBounded(PHASE, "hover:/a.ts", { durationMs: 2 }, options);
-			expect(latencyCalls).toHaveLength(1);
+			expect(boundedPhaseCalls()).toHaveLength(1);
 			// `resetDegradationLedger` alone — the seam `handleSessionStart`
 			// already calls. If the helper kept a second latch, this would still
 			// be 1 after the reset, and that latch would be the #1266–#1625 bug.
 			resetDegradationLedger();
 			emitBounded(PHASE, "hover:/a.ts", { durationMs: 3 }, options);
-			expect(latencyCalls).toHaveLength(2);
+			expect(boundedPhaseCalls()).toHaveLength(2);
 		});
 
 		it("emits every occurrence when no rising edge is asked for", () => {
@@ -117,7 +121,7 @@ describe("emitBounded (#1743)", () => {
 			}
 			// The gate must be OPT-IN. If it fired by default, #1713's
 			// every-late-answer contract would silently become once-per-file.
-			expect(latencyCalls).toHaveLength(3);
+			expect(boundedPhaseCalls()).toHaveLength(3);
 		});
 	});
 
@@ -265,7 +269,7 @@ describe("emitBounded (#1743)", () => {
 			});
 			expect([first, second]).toEqual([true, false]);
 			// The batching caller (#1705) writes its own single record.
-			expect(latencyCalls).toHaveLength(0);
+			expect(boundedPhaseCalls()).toHaveLength(0);
 			expect(summaryFor("lsp-nav-request-timeout")?.count).toBe(2);
 		});
 	});
