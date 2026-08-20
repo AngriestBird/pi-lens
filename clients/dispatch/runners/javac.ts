@@ -62,7 +62,9 @@ const javacRunner: RunnerDefinition = {
 		// false blocking diagnostics (#1877). jdtls owns those projects; this
 		// runner keeps its value for standalone files with no build descriptor.
 		// Same shared descriptor walk the SpotBugs gate uses.
-		if (hasJavaBuildDescriptor(path.dirname(absPath))) {
+		if (
+			hasJavaBuildDescriptor(path.dirname(absPath), ctx.projectRoot ?? ctx.cwd)
+		) {
 			ctx.log?.(
 				"javac: skipped — file is inside a Maven/Gradle project; a classpath-less compile would emit false positives",
 			);
