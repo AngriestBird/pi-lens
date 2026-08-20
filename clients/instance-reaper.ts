@@ -461,8 +461,10 @@ async function queryCommandLines(pids: number[]): Promise<Map<number, string>> {
 		{ timeoutMs: BACKSTOP_SCAN_TIMEOUT_MS },
 	);
 	// `ps -p` exits nonzero when NONE of the pids exist, which is a legitimate
-	// clean result here, so only spawn/timeout failures are recorded.
-	noteFailure(result.status);
+	// clean result here, so only spawn/timeout failures are recorded. The
+	// shared collector calls that an exit failure, but this caller's command
+	// contract makes that status the expected empty-table result.
+	if (result.status !== "exit-error") noteFailure(result.status);
 	for (const line of result.stdout.split(/\r?\n/)) {
 		// Linear parse (S8786/S6594: avoid regex backtracking on
 		// attacker-lengthenable ps output) — trim leading whitespace,
@@ -948,7 +950,7 @@ interface ManagedProcessScan {
  * `taskkill /F /T` or a POSIX group kill, then a verified liveness poll. The
  * escalation is recorded with the scanner's identity, never swallowed.
  */
-async function terminateScannerChild(
+export async function terminateScannerChild(
 	child: ChildProcess,
 	options: { verifyAttempts?: number; verifyIntervalMs?: number },
 ): Promise<SpawnTimeoutKill> {
