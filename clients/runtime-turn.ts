@@ -98,6 +98,10 @@ import { sweepInlineBlockerPastEof } from "./blocker-past-eof.js";
 // (widget-state.ts) can use the marker without importing this orchestrator —
 // see clients/stale-marker.ts's doc comment.
 import { STALE_LINE_MARKER } from "./stale-marker.js";
+import {
+	getWidgetBlockingFilesForSweep,
+	markWidgetFileBlockersStale,
+} from "./widget-state.js";
 import type { TestRunnerFindingsCache } from "./project-diagnostics/runner-adapters/runner-findings.js";
 
 interface TurnEndDeps {
@@ -518,7 +522,17 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	// `[stale — re-run to confirm]` advisory instead of re-asserting them at full
 	// authority (#1419 demote-not-drop).
 	const blockerFreshnessStart = Date.now();
-	const blockerFreshness = await sweepInlineBlockerFreshness(runtime, cwd);
+	// #1790: widen the sweep's population with widget-store rows a cache-served
+	// replay populated without ever touching RuntimeCoordinator's inline-blocker
+	// map — see blocker-freshness.ts's `WidgetSweepBlockerEntry` doc for why this
+	// is injected here rather than imported by blocker-freshness.ts itself.
+	const blockerFreshness = await sweepInlineBlockerFreshness(runtime, cwd, {
+		additionalEntries: getWidgetBlockingFilesForSweep().map((row) => ({
+			filePath: row.filePath,
+			recordedAtMs: row.recordedAtMs,
+			demote: () => markWidgetFileBlockersStale(row.filePath, "dependency-drift"),
+		})),
+	});
 	logLatency({
 		type: "phase",
 		toolName: "turn_end",
