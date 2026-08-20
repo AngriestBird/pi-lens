@@ -213,6 +213,104 @@ describe("blocker freshness sweep — widget-store population (#1790)", () => {
 		expect(widgetDiags.some((d) => isBlocking(d))).toBe(false);
 	});
 
+	// #1790 review F5 (P1c): the dependency-drift demotion is a ONE-WAY LATCH for
+	// the session (#1631: "cleared only by a fresh dispatch or confirmed-clean
+	// retire"). Once an inline entry demotes, it stays `stale` and the main sweep
+	// loop short-circuits BEFORE calling `demote()` on every later turn
+	// (`if (entry.stale) { counts.alreadyStale += 1; continue; }`). If the widget
+	// demote for a LATER cache-served row at the same path was chained onto that
+	// already-stale inline entry, it would never fire — a forever-ghost: the
+	// widget row demotes NEVER, on ANY future turn, because the entry it was
+	// chained to never reaches `demote()` again.
+	it("does not create a forever-ghost when a cache-served row lands after the inline entry already latched stale (F5/P1c)", async () => {
+		const dir = makeDir("pi-lens-fresh-widgetpop-alreadystale-");
+		const consumer = path.join(dir, "consumer.ts");
+		const dep = path.join(dir, "dep.ts");
+		fs.writeFileSync(dep, "export const x = 1;\n");
+		fs.writeFileSync(
+			consumer,
+			'import { x } from "./dep.js";\nexport const y = x;\n',
+		);
+
+		const runtime = new RuntimeCoordinator();
+		runtime.recordInlineBlockers(consumer, "🔴 live blocker", 1, ["lsp"]);
+		driftIntoFuture(dep);
+
+		// Turn 1: no widget row yet. The inline entry latches stale, permanently,
+		// per the #1631 one-way-latch contract.
+		const first = await sweepInlineBlockerFreshness(runtime, dir);
+		expect(first.revalidated).toBe(1);
+		expect(runtime.getInlineBlockersSnapshot()[0]?.stale).toBe(true);
+
+		// Turn 2: a cache-served row for the SAME file lands (e.g. a later
+		// workspace-diagnostics cache hit). `dep` is already drifted into the
+		// future relative to this brand-new baseline, so this row is drifted too.
+		recordCacheServedBlocking(consumer, "cached blocking finding", Date.now());
+		expect((getFileDiagnostics(consumer) ?? []).some((d) => isBlocking(d))).toBe(
+			true,
+		);
+
+		const second = await sweepInlineBlockerFreshness(runtime, dir, {
+			additionalEntries: widgetAdditionalEntries(),
+		});
+		// #1790 review F5: the ineligible (already-stale) inline entry and the
+		// eligible widget row are now two separate population rows — the widget
+		// row is NOT silently absorbed into the inline entry's dead-end demote.
+		expect(second.total).toBe(2);
+		expect(second.alreadyStale).toBe(1);
+		expect(second.revalidated).toBe(1);
+
+		const widgetDiags = getFileDiagnostics(consumer) ?? [];
+		expect(widgetDiags.some((d) => d.stale === true)).toBe(true);
+		expect(widgetDiags.some((d) => isBlocking(d))).toBe(false);
+	});
+
+	// #1790 review F5 (P1d): the reviewer's inversion pair. The SAME widget drift
+	// on the SAME file, demoted correctly when it is the ONLY population entry
+	// for that file (see the earlier "counts a cache-served-only..." tests) — but
+	// adding an UNRELATED ast-grep inline blocker on that file (a hardcoded
+	// secret, say — nothing to do with the LSP finding or the drifted import)
+	// must not resurrect the ghost just because the path now collides with an
+	// ineligible inline entry.
+	it("does not resurrect the ghost when an unrelated non-LSP inline blocker shares the same file (F5/P1d)", async () => {
+		const dir = makeDir("pi-lens-fresh-widgetpop-nonlsp-dup-");
+		const consumer = path.join(dir, "consumer.ts");
+		const dep = path.join(dir, "dep.ts");
+		fs.writeFileSync(dep, "export const x = 1;\n");
+		fs.writeFileSync(
+			consumer,
+			'import { x } from "./dep.js";\nexport const y = x;\n',
+		);
+
+		const runtime = new RuntimeCoordinator();
+		// An UNRELATED ast-grep finding on the same file — not LSP, not invalidated
+		// by import drift, and (per #1631 review F4) never demoted by this gate.
+		runtime.recordInlineBlockers(consumer, "🔴 hardcoded secret", 1, [
+			"ast-grep",
+		]);
+		// The cache-served LSP row landed on the SAME file, with its own baseline.
+		recordCacheServedBlocking(consumer, "cached blocking finding", Date.now());
+		driftIntoFuture(dep);
+
+		const counts = await sweepInlineBlockerFreshness(runtime, dir, {
+			additionalEntries: widgetAdditionalEntries(),
+		});
+		// Two separate rows for one file: the ast-grep inline entry (kept, correctly
+		// never eligible for import-drift demotion) and the widget's own LSP row
+		// (independently drift-checked and demoted).
+		expect(counts.total).toBe(2);
+		expect(counts.kept).toBe(1);
+		expect(counts.revalidated).toBe(1);
+
+		// The unrelated ast-grep blocker is untouched.
+		expect(runtime.getInlineBlockersSnapshot()[0]?.stale).toBe(false);
+		// The widget's own LSP row demoted — the ghost does not reappear just
+		// because an unrelated blocker happens to share the file.
+		const widgetDiags = getFileDiagnostics(consumer) ?? [];
+		expect(widgetDiags.some((d) => d.stale === true)).toBe(true);
+		expect(widgetDiags.some((d) => isBlocking(d))).toBe(false);
+	});
+
 	it("bounds the added cost to the widget store's own currently-blocking files", async () => {
 		const dir = makeDir("pi-lens-fresh-widgetpop-bound-");
 		const files: string[] = [];

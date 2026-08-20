@@ -411,6 +411,28 @@ interface SweepPopulationEntry {
 }
 
 /**
+ * Whether a population entry is eligible for the drift check at all — the same
+ * three gates the main sweep loop applies (not already stale, has a timestamp
+ * baseline, all-`"lsp"` sources). Factored out so the #1790 review F5 dedup
+ * decision below (chain vs. separate row) asks the IDENTICAL question the main
+ * loop will ask, rather than a second hand-written approximation of it that
+ * could drift from the real gates.
+ */
+function isEligibleForDriftCheck(entry: {
+	stale: boolean;
+	recordedAtMs: number | undefined;
+	sources: readonly string[] | undefined;
+}): boolean {
+	if (entry.stale) return false;
+	if (entry.recordedAtMs === undefined) return false;
+	return (
+		entry.sources !== undefined &&
+		entry.sources.length > 0 &&
+		entry.sources.every((source) => source === "lsp")
+	);
+}
+
+/**
  * Freshness sweep over every blocking row the widget currently serves — the cached
  * inline blockers (`RuntimeCoordinator`) AND, since #1790, any widget-store row
  * reached only through a cache-served replay (`options.additionalEntries`, injected
@@ -424,13 +446,24 @@ interface SweepPopulationEntry {
  * writes an inline blocker (`runtime-tool-result.ts`) AND a widget-store record
  * (`pipeline.ts`) for the SAME verdict — is drift-checked ONCE, via its
  * inline-blocker entry, so the sweep's one drift check never runs twice over the
- * same file. But `markInlineBlockerStale` only ever touches
- * `RuntimeCoordinator`'s map, never the widget store; on drift for a duplicated
- * path, the widget demote is CHAINED onto the inline entry's `demote` (both stores
- * write) rather than the widget row being silently dropped — the reviewer's F1
- * probe caught an earlier revision that discarded it: `revalidated:1` while the
- * widget's own `isBlocking` for the file still read true, the exact ghost #1790
- * exists to kill.
+ * same file WHEN that inline entry is itself eligible for the check. But
+ * `markInlineBlockerStale` only ever touches `RuntimeCoordinator`'s map, never
+ * the widget store; on drift for a duplicated path, the widget demote is
+ * CHAINED onto the inline entry's `demote` (both stores write) rather than the
+ * widget row being silently dropped — the reviewer's F1 probe caught an earlier
+ * revision that discarded it: `revalidated:1` while the widget's own
+ * `isBlocking` for the file still read true, the exact ghost #1790 exists to
+ * kill.
+ *
+ * #1790 review F5: chaining is conditional on the inline entry actually being
+ * ELIGIBLE for the drift check (`isEligibleForDriftCheck` — not already stale,
+ * timestamped, all-LSP sources). An ineligible inline entry never reaches
+ * `demote()` in the loop below, so chaining onto one is ALSO a silent drop —
+ * just one store removed from F1's. The widget row's eligibility belongs to the
+ * WIDGET STORE, not to whatever inline entry happens to share its file path; an
+ * ineligible duplicate therefore gets its own separate population row instead
+ * of being chained, so a file can legitimately count twice (once per store) when
+ * the two stores disagree on eligibility.
  *
  * Never throws: any internal failure leaves the entry untouched (existing re-serve
  * behavior) rather than failing the turn end.
@@ -492,7 +525,20 @@ export async function sweepInlineBlockerFreshness(
 	for (const extra of options?.additionalEntries ?? []) {
 		const key = normalizeEphemeralMapKey(extra.filePath);
 		const inlineEntry = inlineByKey.get(key);
-		if (inlineEntry) {
+		// #1790 review F5: chaining onto an INELIGIBLE inline entry is a silent
+		// drop, not a merge. The main loop below short-circuits BEFORE ever
+		// calling `demote()` for an already-stale entry (the one-way
+		// dependency-drift latch — a forever-ghost once it fires once), an
+		// unstamped legacy record, or a non-LSP/mixed-sources entry (e.g. an
+		// unrelated ast-grep finding on the same file). Any of those swallows a
+		// chained widget demote even though the widget row is pure-LSP by
+		// construction (`getWidgetBlockingFilesForSweep` only emits LSP-sourced
+		// rows) and carries its OWN baseline. Eligibility belongs to the STORE
+		// the row came from, not the file path two stores happen to share — so
+		// only chain when the inline entry would itself reach `demote()`;
+		// otherwise give the widget row its own population entry so its own
+		// gates and its own drift check decide its own fate.
+		if (inlineEntry && isEligibleForDriftCheck(inlineEntry)) {
 			// #1790 review F1: a duplicated path is counted and drift-checked ONCE
 			// (via the inline entry above), but BOTH stores must record the
 			// verdict — `markInlineBlockerStale` only ever touches
