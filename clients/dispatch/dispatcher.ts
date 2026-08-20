@@ -24,7 +24,7 @@ import { detectFileRole } from "../file-role.js";
 import { isTestFile } from "../file-utils.js";
 import { getPrimaryDispatchGroup } from "../language-policy.js";
 import { resolveLanguageRootForFile } from "../language-profile.js";
-import { logLatency } from "../latency-logger.js";
+import { logLatency, phaseFinished, phaseStarted } from "../latency-logger.js";
 import { isSpawnableCommand } from "../installer/index.js";
 import { normalizeMapKey } from "../path-utils.js";
 import { loadPiLensProjectConfig } from "../project-lens-config.js";
@@ -1108,6 +1108,16 @@ async function runRunner(
 		getRunnerTimeoutFloorMs(),
 	);
 	let timer: ReturnType<typeof setTimeout> | undefined;
+	// #1723: mark this runner as the in-flight phase for the WHOLE race below,
+	// not just the runner's own promise — a synchronous CPU hog inside
+	// `runner.run` (ast-grep-napi, tree-sitter, …) blocks the event loop before
+	// it ever gets to log its own completion, so `recentPhases` (which only
+	// records FINISHED phases) can't name it. `phaseFinished` clears on every
+	// exit from this race (success, runner error, or timeout) via try/finally,
+	// so a `loop_block` sampled after this call returns never sees a stale
+	// pointer. See `phaseStarted`'s doc comment for the identity-token
+	// reasoning and the cost note (negligible next to a runner invocation).
+	const phaseToken = phaseStarted(runner.id);
 	try {
 		const result = await Promise.race([
 			runner.run(ctx).finally(() => clearTimeout(timer)),
@@ -1143,6 +1153,8 @@ async function runRunner(
 			failureKind: message.includes("timed out") ? "timeout" : "exception",
 			failureMessage: message.slice(0, 200),
 		};
+	} finally {
+		phaseFinished(phaseToken);
 	}
 }
 
