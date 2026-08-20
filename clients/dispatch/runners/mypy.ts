@@ -12,8 +12,22 @@ import {
 	createAvailabilityChecker,
 	resolveToolCommandWithInstallFallback,
 } from "./utils/runner-helpers.js";
+import type { ToolExitCodes } from "./utils/spawn-outcome.js";
+import { skipUnlessToolRan } from "./utils/tool-failure.js";
 
 const mypy = createAvailabilityChecker("mypy", "");
+
+// mypy exit codes: 0 = no type errors, 1 = type errors found, 2 = a blocking
+// error. 2 is NOT a rejected invocation on its own — mypy reports a source
+// SYNTAX error under 2 and still writes a normal parsable diagnostic to stdout
+// (verified live against mypy 2.3.1: `syn.py:1: error: Invalid syntax
+// [syntax]`). A bad flag or unreadable config also exits 2, but writes its
+// message to STDERR and leaves stdout empty.
+//
+// So the exit code cannot separate the two, and the STREAM does: the gate below
+// judges "nothing to parse" on stdout alone, while the parser still reads both.
+// The table's remaining job is to reject any OTHER nonzero status.
+const MYPY_EXIT_CODES: ToolExitCodes = { ran: [1, 2] };
 
 // mypy output: file.py:10: error: Incompatible types [assignment]
 //
@@ -88,7 +102,18 @@ const mypyRunner: RunnerDefinition = {
 			{ timeout: 30000, cwd },
 		);
 
+		// #1816: this runner read `result.status` zero times, so an exit-2
+		// config error reported the file as cleanly type-checked. The gate reads
+		// stdout only (see MYPY_EXIT_CODES) so an exit-2 SYNTAX error, which
+		// does write a diagnostic there, still reaches the parser.
 		const raw = `${result.stdout ?? ""}${result.stderr ?? ""}`;
+		const skipped = skipUnlessToolRan("mypy", {
+			result,
+			output: result.stdout,
+			exitCodes: MYPY_EXIT_CODES,
+		});
+		if (skipped) return skipped;
+
 		const diagnostics = parseMypyOutput(raw, ctx.filePath, cwd);
 		if (diagnostics.length === 0) {
 			return { status: "succeeded", diagnostics: [], semantic: "none" };
