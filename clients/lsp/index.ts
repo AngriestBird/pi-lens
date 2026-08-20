@@ -5638,6 +5638,11 @@ export class LSPService {
 			NAV_CLIENT_WAIT_TIMEOUT_MS,
 		);
 		if (!spawned) return [];
+		if (!spawned.client.getOperationSupport().definition) {
+			throw new Error(
+				"__UNSUPPORTED__ Active LSP server does not advertise support for definition",
+			);
+		}
 		return spawned.client.definition(filePath, line, character);
 	}
 
@@ -5650,6 +5655,11 @@ export class LSPService {
 			NAV_CLIENT_WAIT_TIMEOUT_MS,
 		);
 		if (!spawned) return [];
+		if (!spawned.client.getOperationSupport().typeDefinition) {
+			throw new Error(
+				"__UNSUPPORTED__ Active LSP server does not advertise support for typeDefinition",
+			);
+		}
 		return spawned.client.typeDefinition(filePath, line, character);
 	}
 
@@ -5662,6 +5672,11 @@ export class LSPService {
 			NAV_CLIENT_WAIT_TIMEOUT_MS,
 		);
 		if (!spawned) return [];
+		if (!spawned.client.getOperationSupport().declaration) {
+			throw new Error(
+				"__UNSUPPORTED__ Active LSP server does not advertise support for declaration",
+			);
+		}
 		return spawned.client.declaration(filePath, line, character);
 	}
 
@@ -5679,6 +5694,11 @@ export class LSPService {
 			NAV_CLIENT_WAIT_TIMEOUT_MS,
 		);
 		if (!spawned) return [];
+		if (!spawned.client.getOperationSupport().references) {
+			throw new Error(
+				"__UNSUPPORTED__ Active LSP server does not advertise support for references",
+			);
+		}
 		return spawned.client.references(
 			filePath,
 			line,
@@ -5696,6 +5716,11 @@ export class LSPService {
 			NAV_CLIENT_WAIT_TIMEOUT_MS,
 		);
 		if (!spawned) return null;
+		if (!spawned.client.getOperationSupport().hover) {
+			throw new Error(
+				"__UNSUPPORTED__ Active LSP server does not advertise support for hover",
+			);
+		}
 		return spawned.client.hover(filePath, line, character);
 	}
 
@@ -5708,6 +5733,11 @@ export class LSPService {
 			NAV_CLIENT_WAIT_TIMEOUT_MS,
 		);
 		if (!spawned) return null;
+		if (!spawned.client.getOperationSupport().signatureHelp) {
+			throw new Error(
+				"__UNSUPPORTED__ Active LSP server does not advertise support for signatureHelp",
+			);
+		}
 		return spawned.client.signatureHelp(filePath, line, character);
 	}
 
@@ -5720,6 +5750,11 @@ export class LSPService {
 			NAV_CLIENT_WAIT_TIMEOUT_MS,
 		);
 		if (!spawned) return [];
+		if (!spawned.client.getOperationSupport().documentSymbol) {
+			throw new Error(
+				"__UNSUPPORTED__ Active LSP server does not advertise support for documentSymbol",
+			);
+		}
 		return spawned.client.documentSymbol(filePath);
 	}
 
@@ -6063,6 +6098,11 @@ export class LSPService {
 			NAV_CLIENT_WAIT_TIMEOUT_MS,
 		);
 		if (!spawned) return [];
+		if (!spawned.client.getOperationSupport().codeAction) {
+			throw new Error(
+				"__UNSUPPORTED__ Active LSP server does not advertise support for codeAction",
+			);
+		}
 		return spawned.client.codeAction(
 			filePath,
 			line,
@@ -6086,6 +6126,11 @@ export class LSPService {
 			NAV_CLIENT_WAIT_TIMEOUT_MS,
 		);
 		if (!spawned) return null;
+		if (!spawned.client.getOperationSupport().rename) {
+			throw new Error(
+				"__UNSUPPORTED__ Active LSP server does not advertise support for rename",
+			);
+		}
 		return spawned.client.rename(filePath, line, character, newName);
 	}
 
@@ -6398,6 +6443,11 @@ export class LSPService {
 			NAV_CLIENT_WAIT_TIMEOUT_MS,
 		);
 		if (!spawned) return [];
+		if (!spawned.client.getOperationSupport().implementation) {
+			throw new Error(
+				"__UNSUPPORTED__ Active LSP server does not advertise support for implementation",
+			);
+		}
 		return spawned.client.implementation(filePath, line, character);
 	}
 
@@ -6414,6 +6464,11 @@ export class LSPService {
 			NAV_CLIENT_WAIT_TIMEOUT_MS,
 		);
 		if (!spawned) return [];
+		if (!spawned.client.getOperationSupport().callHierarchy) {
+			throw new Error(
+				"__UNSUPPORTED__ Active LSP server does not advertise support for prepareCallHierarchy",
+			);
+		}
 		return spawned.client.prepareCallHierarchy(filePath, line, character);
 	}
 
