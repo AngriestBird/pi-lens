@@ -415,6 +415,13 @@ of parsing partial output as a clean empty result. Sampler timeouts inject the
 reaper's tree-kill-and-verify hook and settle only after its fate is known.
 (#1863, #1864)
 
+**Session-start availability resets include direct LSP and installer path positives.**
+Direct-LSP negative cooldowns and installer bare-command path positives are
+session facts: the former can recover when a command appears, and the latter
+returns without a spawnability check. `handleSessionStart` clears both behind
+the primary-only session-start guard; the session-state registry records the
+two reset seams. (#1897)
+
 **Workspace refresh walks the bounded ancestor cache chain.** A language server
 root can be a nested monorepo member while workspace diagnostics persist under
 the enclosing sweep root. `workspace/diagnostic/refresh` clears the client

@@ -23,6 +23,7 @@ vi.mock("../../clients/safe-spawn.js", () => ({
 
 vi.mock("../../clients/installer/index.js", () => ({
 	ensureTool: vi.fn(async () => undefined),
+	resetResolvedPathCache: vi.fn(),
 	// Not spawnable — forces resolveCommandWithInstallFallback down the
 	// install-fallback path (rather than the --version probe path) where
 	// noteInstallFailure/suppression lives.
@@ -143,6 +144,37 @@ describe("dispatch availability suppression is reset at session start (#1266)", 
 		);
 		expect(third).toBeNull();
 		expect(ensureToolMock).toHaveBeenCalledTimes(2);
+	});
+
+	// #1902 review: session-state-conformance.test.ts only proves the registry
+	// KNOWS about resetResolvedPathCache's reset seam (a structural/name check).
+	// Nothing asserted that handleSessionStart's call to it actually fires. The
+	// wiring test above exercises resetResolvedPathCache only indirectly through
+	// ensureTool's mock, so it would stay green even if the
+	// `resetResolvedPathCache()` line at runtime-session.ts:2111 were deleted.
+	it("calls resetResolvedPathCache directly from handleSessionStart", async () => {
+		const installerMod = await import("../../clients/installer/index.js");
+		const resetResolvedPathCacheMock = vi.mocked(
+			installerMod.resetResolvedPathCache,
+		);
+
+		await handleSessionStart(makeDeps(tmpDir));
+
+		expect(resetResolvedPathCacheMock).toHaveBeenCalled();
+	});
+
+	it("re-arms direct-LSP negative availability through handleSessionStart", async () => {
+		const lspServer = await import("../../clients/lsp/server.js");
+		lspServer._markDirectLspCommandUnavailableForTests("appeared-lsp");
+		expect(
+			lspServer.isDirectLspCommandTemporarilyUnavailable("appeared-lsp"),
+		).toBe(true);
+
+		await handleSessionStart(makeDeps(tmpDir));
+
+		expect(
+			lspServer.isDirectLspCommandTemporarilyUnavailable("appeared-lsp"),
+		).toBe(false);
 	});
 
 	// #1895: formatter PATH latches are module-local and therefore are not
