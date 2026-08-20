@@ -698,9 +698,16 @@ export class ReadGuard {
 		// 2. FileTime check (actual staleness)
 		let ignoredOwnEditStaleness = false;
 		let ignoredHashStaleness = false;
+		let ignoredOldTextResolvedStaleness = false;
 		if (this.fileTime.hasChanged(filePath)) {
 			const lastRead = fileReads[fileReads.length - 1];
-			if (this.canTreatStalenessAsOwnPriorEdit(filePath, lastRead.timestamp)) {
+			if (options?.oldTextResolved === true) {
+				// The host-facing preflight sets this only after oldText resolves to
+				// exactly one span in the live bytes. That content evidence is newer
+				// and stronger than FileTime's coarse external-write signal, matching
+				// the skipSnapshotCheck exception at the later range-stale gate.
+				ignoredOldTextResolvedStaleness = true;
+			} else if (this.canTreatStalenessAsOwnPriorEdit(filePath, lastRead.timestamp)) {
 				ignoredOwnEditStaleness = true;
 			} else if (
 				this.canIgnoreStalenessByHashes(
@@ -850,10 +857,15 @@ export class ReadGuard {
 
 		const verdict = this.allow();
 		this.recordVerdict(filePath, "edit", touchedLines, verdict, {
-			reasonKind: viaSymbol ? "symbol_coverage" : "range_coverage",
+			reasonKind: ignoredOldTextResolvedStaleness
+				? "file_modified_oldtext_unique"
+				: viaSymbol
+					? "symbol_coverage"
+					: "range_coverage",
 			viaSymbol,
 			ignoredOwnEditStaleness,
 			ignoredHashStaleness,
+			oldTextResolved: ignoredOldTextResolvedStaleness,
 		});
 		return verdict;
 	}

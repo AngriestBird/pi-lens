@@ -245,6 +245,56 @@ describe("ReadGuard", () => {
 				env.cleanup();
 			}
 		});
+
+		it("softens file_modified when oldText uniquely resolves against live bytes", () => {
+			const env = setupTestEnvironment("read-guard-oldtext-live-");
+			try {
+				const filePath = path.join(env.tmpDir, "api.ts");
+				fs.writeFileSync(filePath, "alpha\nunique target\nomega\n");
+				const guard = createReadGuard("test-session");
+				guard.recordRead(createReadRecord(filePath, { effectiveLimit: 1 }));
+				fileTimeState.hasChanged = true;
+
+				const verdict = guard.checkEdit(filePath, [2, 2], undefined, {
+					skipSnapshotCheck: true,
+					oldTextResolved: true,
+				});
+
+				expect(verdict.action).toBe("allow");
+				expect(logReadGuardEvent).toHaveBeenCalledWith(
+					expect.objectContaining({
+						event: "edit_allowed",
+						metadata: expect.objectContaining({
+							reasonKind: "file_modified_oldtext_unique",
+							oldTextResolved: true,
+						}),
+					}),
+				);
+			} finally {
+				env.cleanup();
+			}
+		});
+
+		it("keeps file_modified blocked when oldText does not resolve uniquely", () => {
+			const env = setupTestEnvironment("read-guard-oldtext-unresolved-");
+			try {
+				const filePath = path.join(env.tmpDir, "api.ts");
+				fs.writeFileSync(filePath, "alpha\nduplicate\nduplicate\n");
+				const guard = createReadGuard("test-session");
+				guard.recordRead(createReadRecord(filePath, { effectiveLimit: 1 }));
+				fileTimeState.hasChanged = true;
+
+				const verdict = guard.checkEdit(filePath, [2, 2], undefined, {
+					skipSnapshotCheck: false,
+					oldTextResolved: false,
+				});
+
+				expect(verdict.action).toBe("block");
+				expect(verdict.reason).toContain("File modified since read");
+			} finally {
+				env.cleanup();
+			}
+		});
 	});
 
 	describe("Range snapshot validation building blocks", () => {
