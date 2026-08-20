@@ -50,7 +50,7 @@ import {
 	reconcileProjectDiagnosticsSnapshot,
 } from "../clients/project-diagnostics/cache.js";
 import {
-	formatCacheAge,
+	formatCacheAgeOld,
 	formatNotRunEntry,
 } from "../clients/project-diagnostics/extractors.js";
 import type { FreshProjectDiagnosticsResult } from "../clients/project-diagnostics/fresh-fetch.js";
@@ -1971,9 +1971,9 @@ async function formatFullMode(
 		? `\n\ncheap project scan (tree-sitter/fact-rules/ast-grep): not run this call (${NOT_REQUESTED_REASON}).`
 		: options.refreshRunners === "cached"
 			? cheapScanScannedAtMs !== undefined && Number.isFinite(cheapScanScannedAtMs)
-				? `\n\ncheap project scan (tree-sitter/fact-rules/ast-grep): served from cache, ${formatCacheAge(
+				? `\n\ncheap project scan (tree-sitter/fact-rules/ast-grep): served from cache, ${formatCacheAgeOld(
 						Date.now() - cheapScanScannedAtMs,
-					)} old — not re-run this call.`
+					)} — not re-run this call.`
 				: `\n\ncheap project scan (tree-sitter/fact-rules/ast-grep): not run (no cached scan; refresh with refreshRunners=cheap/all to populate).`
 			: "";
 	const abortedNote =
@@ -2008,7 +2008,7 @@ async function formatFullMode(
 	const cachedAgeNote =
 		cachedAgeEntries.length > 0
 			? `\n\nserved from cache this call (not re-run): ${cachedAgeEntries
-					.map(([id, ms]) => `${id} (${formatCacheAge(ms)} old)`)
+					.map(([id, ms]) => `${id} (${formatCacheAgeOld(ms)})`)
 					.join(", ")}.`
 			: "";
 	// coldRunners always lands in details (even when empty) so a caller can

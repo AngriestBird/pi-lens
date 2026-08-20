@@ -184,6 +184,10 @@ changing a rule — never hand-edit the generated catalog.
 
 ## Validating a candidate rule against the REAL engine (not the warm MCP cache)
 
+Live-binary discipline (AGENTS.md shape 16) applies here too: verify parsing
+and match behavior against a real `ast-grep` run before you write it into a
+rule note or a test fixture — a hand-written fixture pins a guess, not a fact.
+
 ```
 
 # inspect how a PATTERN parses → find the node kind you actually need

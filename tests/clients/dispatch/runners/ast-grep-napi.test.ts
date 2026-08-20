@@ -1,7 +1,10 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { FactStore } from "../../../../clients/dispatch/fact-store.js";
+import {
+	makeRunnerCtx,
+	type RunnerCtxOverrides,
+} from "../../../support/runner-ctx.js";
 import { setupTestEnvironment } from "../../test-utils.js";
 
 const { mockAuxiliaryLspAlive, mockResolveAstGrepNativeExe } = vi.hoisted(() => ({
@@ -34,25 +37,16 @@ vi.mock("../../../../clients/package-root.js", () => ({
 	resolvePackagePath: vi.fn().mockReturnValue("/nonexistent/path"),
 }));
 
-function createCtx(filePath: string, overrides: Partial<Record<string, unknown>> = {}) {
-	return {
-		filePath,
-		cwd: path.dirname(filePath),
-		kind: "jsts",
-		fileRole: "source",
-		pi: { getFlag: () => undefined },
-		autofix: false,
-		deltaMode: true,
+function createCtx(filePath: string, overrides: RunnerCtxOverrides = {}) {
+	return makeRunnerCtx(filePath, path.dirname(filePath), {
 		blockingOnly: false,
-		facts: new FactStore(),
 		// Default to the fallback path: the ast-grep LSP supersedes this runner
 		// when its binary is available (#239 Phase 2), so to exercise napi's own
 		// matching we simulate the binary being ABSENT. The gate is tested
 		// explicitly below by overriding hasTool.
 		hasTool: async (cmd: string) => cmd !== "ast-grep",
-		log: () => {},
 		...overrides,
-	};
+	});
 }
 
 describe("ast-grep-napi runner — LSP supersede gate (#239 Phase 2)", () => {

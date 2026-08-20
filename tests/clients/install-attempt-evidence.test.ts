@@ -20,6 +20,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { describeInstallAttempt } from "../../clients/dispatch/runners/utils/availability-policy.js";
+import { withEnv } from "../support/with-env.js";
 
 const { safeSpawnAsync, logLatencySpy } = vi.hoisted(() => ({
 	safeSpawnAsync: vi.fn(),
@@ -44,8 +45,7 @@ vi.mock("../../clients/project-trust.js", () => ({
 }));
 
 let piLensHome: string;
-let previousHome: string | undefined;
-let previousKillSwitch: string | undefined;
+let restoreEnv: () => void;
 
 /** The real installer, loaded fresh so `TOOLS_DIR` picks up `PI_LENS_HOME`. */
 async function installer(): Promise<typeof import("../../clients/installer/index.js")> {
@@ -84,18 +84,14 @@ beforeEach(() => {
 	safeSpawnAsync.mockReset();
 	logLatencySpy.mockReset();
 	piLensHome = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-install-attempt-"));
-	previousHome = process.env.PI_LENS_HOME;
-	previousKillSwitch = process.env.PI_LENS_DISABLE_TOOL_INSTALL;
-	process.env.PI_LENS_HOME = piLensHome;
-	delete process.env.PI_LENS_DISABLE_TOOL_INSTALL;
+	restoreEnv = withEnv({
+		PI_LENS_HOME: piLensHome,
+		PI_LENS_DISABLE_TOOL_INSTALL: undefined,
+	});
 });
 
 afterEach(() => {
-	if (previousHome === undefined) delete process.env.PI_LENS_HOME;
-	else process.env.PI_LENS_HOME = previousHome;
-	if (previousKillSwitch === undefined) {
-		delete process.env.PI_LENS_DISABLE_TOOL_INSTALL;
-	} else process.env.PI_LENS_DISABLE_TOOL_INSTALL = previousKillSwitch;
+	restoreEnv();
 	fs.rmSync(piLensHome, { recursive: true, force: true });
 });
 
