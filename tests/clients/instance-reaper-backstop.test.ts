@@ -21,6 +21,8 @@
  * MOCK's recorded argv, never against `process.platform` behavior.
  */
 
+import * as fs from "node:fs";
+import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 interface SpawnRecord {
@@ -42,6 +44,10 @@ const h = vi.hoisted(() => {
 		hang: boolean;
 		/** pids the fake `process.kill(pid, 0)` probe reports as alive. */
 		alivePids: Set<number>;
+		/** pids handed to every enumeration ("scanner") child spawned. */
+		scannerPids: number[];
+		/** pids that received a bare `child.kill()` rather than a tree kill. */
+		bareKills: number[];
 	} = {
 		registry: [],
 		enabled: true,
@@ -49,7 +55,10 @@ const h = vi.hoisted(() => {
 		spawnError: false,
 		hang: false,
 		alivePids: new Set<number>(),
+		scannerPids: [],
+		bareKills: [],
 	};
+	let nextPid = 90_000;
 	function makeFakeChild(command: string, args: string[]) {
 		spawns.push({ command, args });
 		const stdout = {
@@ -61,12 +70,17 @@ const h = vi.hoisted(() => {
 			unref() {},
 		};
 		const isEnumeration = !command.toLowerCase().includes("taskkill");
+		const pid = nextPid++;
+		if (isEnumeration) state.scannerPids.push(pid);
 		const child = {
+			pid,
 			stdout,
 			stderr: null,
 			stdin: null,
 			unref() {},
-			kill() {},
+			kill() {
+				state.bareKills.push(pid);
+			},
 			on() {
 				return child;
 			},
@@ -182,6 +196,18 @@ beforeEach(() => {
 	h.state.spawnError = false;
 	h.state.hang = false;
 	h.state.alivePids = new Set<number>();
+	h.state.scannerPids.length = 0;
+	h.state.bareKills.length = 0;
+	// Each test gets a fresh cooldown stamp and sweep lock. PI_LENS_HOME is
+	// redirected per worker (tests/support/vitest-setup.ts), so this only ever
+	// touches the worker's own temp dir.
+	fs.rmSync(path.join(process.env.PI_LENS_HOME ?? "", "orphan-backstop.json"), {
+		force: true,
+	});
+	fs.rmSync(path.join(process.env.PI_LENS_HOME ?? "", "orphan-backstop.lock"), {
+		recursive: true,
+		force: true,
+	});
 	resetDegradationLedger();
 	vi.spyOn(process, "kill").mockImplementation(((pid: number) => {
 		if (h.state.alivePids.has(Math.abs(pid))) return true;
@@ -208,7 +234,10 @@ describe("#1857 item 1+3: kill accounting is verified and carries identity", () 
 
 		const outcome = await sweepUntrackedOrphans(FAST);
 
-		expect(outcome).toBe("reaped");
+		// #1864 review F4: this test previously asserted "reaped" for a sweep
+		// that verified NOTHING — the accounting defect this PR exists to fix,
+		// reproduced one level up at the health-check surface.
+		expect(outcome).toBe("unverified");
 		const metadata = backstopMetadata();
 		// Pre-fix this was `killed: 1` — the attempt was the count.
 		expect(metadata.killed).toBe(0);
@@ -263,6 +292,165 @@ describe("#1857 item 1+3: kill accounting is verified and carries identity", () 
 	});
 });
 
+describe("#1864 review F4: the outcome discriminates verified from attempted", () => {
+	function rowsFor(pids: number[]): string {
+		return pids
+			.map((pid) =>
+				enumerationRow({
+					pid,
+					parentPid: 4000,
+					ageMs: 10 * 60 * 1000,
+					command: ORPHAN_COMMAND,
+				}),
+			)
+			.join("\n");
+	}
+
+	it("all kills verified ⇒ reaped", async () => {
+		h.state.stdout = rowsFor([5000, 5001]);
+
+		expect(await sweepUntrackedOrphans(FAST)).toBe("reaped");
+		expect(backstopMetadata().killed).toBe(2);
+		expect(backstopMetadata().killUnverified).toBe(0);
+	});
+
+	it("some verified, some survivors ⇒ partial, never reaped", async () => {
+		h.state.stdout = rowsFor([5000, 5001]);
+		h.state.alivePids = new Set([5001]); // 5001 survives its kill
+
+		expect(await sweepUntrackedOrphans(FAST)).toBe("partial");
+		expect(backstopMetadata().killed).toBe(1);
+		expect(backstopMetadata().killUnverified).toBe(1);
+	});
+
+	it("no kill verified ⇒ unverified, never reaped", async () => {
+		h.state.stdout = rowsFor([5000, 5001]);
+		h.state.alivePids = new Set([5000, 5001]);
+
+		expect(await sweepUntrackedOrphans(FAST)).toBe("unverified");
+		expect(backstopMetadata().killed).toBe(0);
+		expect(backstopMetadata().killUnverified).toBe(2);
+	});
+});
+
+describe("#1864 review F1: concurrent sweeps are mutually exclusive", () => {
+	function lockDir(): string {
+		return path.join(process.env.PI_LENS_HOME ?? "", "orphan-backstop.lock");
+	}
+
+	it("skips with outcome=concurrent while another live process holds the lock", async () => {
+		// A lock owned by a LIVE pid (this process) is not stale, so it cannot
+		// be reclaimed — exactly the state a mid-sweep peer leaves behind.
+		fs.mkdirSync(lockDir(), { recursive: true });
+		fs.writeFileSync(
+			path.join(lockDir(), "owner.json"),
+			JSON.stringify({
+				pid: process.pid,
+				createdAt: Date.now(),
+				token: "peer-sweep",
+			}),
+		);
+		h.state.alivePids = new Set([process.pid]);
+		h.state.stdout = enumerationRow({
+			pid: 5000,
+			parentPid: 4000,
+			ageMs: 10 * 60 * 1000,
+			command: ORPHAN_COMMAND,
+		});
+
+		const outcome = await sweepUntrackedOrphans(FAST);
+
+		expect(outcome).toBe("concurrent");
+		// The whole point: the loser does no work at all.
+		expect(h.spawns).toHaveLength(0);
+	});
+
+	it("two sweeps started together do not both scan", async () => {
+		h.state.stdout = "";
+
+		const [first, second] = await Promise.all([
+			sweepUntrackedOrphans({ verifyAttempts: 1, verifyIntervalMs: 0 }),
+			sweepUntrackedOrphans({ verifyAttempts: 1, verifyIntervalMs: 0 }),
+		]);
+
+		// One works, one is turned away — by the lock or by the winner's stamp.
+		// Either way exactly one enumeration is paid for. Before the lock, both
+		// read "no stamp", both wrote, and both scanned.
+		expect(h.state.scannerPids).toHaveLength(1);
+		expect([first, second].filter((o) => o === "clean")).toHaveLength(1);
+		expect(
+			[first, second].filter((o) => o === "concurrent" || o === "cooldown"),
+		).toHaveLength(1);
+	});
+
+	it("releases the lock, so the next sweep is not locked out forever", async () => {
+		h.state.stdout = "";
+		await sweepUntrackedOrphans(FAST);
+
+		expect(await sweepUntrackedOrphans(FAST)).toBe("clean");
+		expect(h.state.scannerPids).toHaveLength(2);
+	});
+});
+
+describe("#1864 review F2: a grace-spared candidate is re-examined", () => {
+	const FRESH_ROW = () =>
+		enumerationRow({
+			pid: 5000,
+			parentPid: 4000,
+			ageMs: 890,
+			command: ORPHAN_COMMAND,
+		});
+
+	it("arms one follow-up sweep when the grace spared a candidate", async () => {
+		h.state.stdout = FRESH_ROW();
+
+		const outcome = await sweepUntrackedOrphans({
+			...FAST,
+			graceRetryDelayMs: 5,
+		});
+
+		expect(outcome).toBe("clean");
+		expect(backstopMetadata().tooFresh).toBe(1);
+		expect(backstopMetadata().graceRetryInMs).toBe(5);
+
+		// The retry actually runs, and it is NOT blocked by the stamp the first
+		// sweep just wrote.
+		await new Promise((resolve) => setTimeout(resolve, 80));
+		expect(h.state.scannerPids.length).toBeGreaterThanOrEqual(2);
+	});
+
+	it("does not arm a follow-up when nothing was spared", async () => {
+		h.state.stdout = "";
+
+		const outcome = await sweepUntrackedOrphans({
+			...FAST,
+			graceRetryDelayMs: 5,
+		});
+
+		expect(outcome).toBe("clean");
+		expect(backstopMetadata().graceRetryInMs).toBeUndefined();
+		await new Promise((resolve) => setTimeout(resolve, 80));
+		expect(h.state.scannerPids).toHaveLength(1);
+	});
+
+	it("bounds the chain at one: the retry never arms another retry", async () => {
+		h.state.stdout = FRESH_ROW();
+
+		// This IS the follow-up sweep — same options the re-arm passes itself.
+		const outcome = await sweepUntrackedOrphans({
+			...FAST,
+			graceRetryDelayMs: 5,
+			allowGraceRetry: false,
+		});
+
+		expect(outcome).toBe("clean");
+		expect(backstopMetadata().tooFresh).toBe(1);
+		expect(backstopMetadata().graceRetryInMs).toBeUndefined();
+		await new Promise((resolve) => setTimeout(resolve, 80));
+		expect(h.state.scannerPids).toHaveLength(1);
+	});
+});
+
 describe("#1857 item 2: clean, errored, throttled, and disabled are distinguishable", () => {
 	it("a scan that ran and found nothing logs outcome=clean", async () => {
 		h.state.stdout = "";
@@ -300,6 +488,70 @@ describe("#1857 item 2: clean, errored, throttled, and disabled are distinguisha
 		expect(backstopMetadata().scanStatus).toBe("timeout");
 		expect(reasonsFor("orphan-backstop-scan-failed")[0]?.reason).toContain(
 			"timeout",
+		);
+	});
+});
+
+describe("#1864 review F3: the timeout bounds the CHILD, not just the caller", () => {
+	it("tree-kills the timed-out scanner and verifies it, instead of firing one bare signal", async () => {
+		h.state.hang = true;
+
+		const outcome = await sweepUntrackedOrphans({
+			...FAST,
+			scanTimeoutMs: 20,
+		});
+
+		expect(outcome).toBe("error");
+		const scannerPid = h.state.scannerPids[0];
+		expect(scannerPid).toBeDefined();
+		// The reaper's own machinery, not `child.kill()`. On Windows that means
+		// a taskkill spawn for the scanner's pid; on POSIX a process-group
+		// signal. Either way the bare-signal path must NOT have been used.
+		expect(h.state.bareKills).not.toContain(scannerPid);
+		if (isWindows) {
+			const treeKill = h.spawns.find(
+				(spawn) =>
+					spawn.command.toLowerCase().includes("taskkill") &&
+					spawn.args.includes(String(scannerPid)),
+			);
+			expect(treeKill?.args).toEqual(
+				expect.arrayContaining(["/F", "/T", "/PID"]),
+			);
+		}
+		// Verified, and reported — an unverifiable scanner kill must not read
+		// the same as a clean one.
+		expect(backstopMetadata().scannerKill).toBe("gone");
+	});
+
+	it("records the escalation with the scanner's identity", async () => {
+		h.state.hang = true;
+
+		await sweepUntrackedOrphans({ ...FAST, scanTimeoutMs: 20 });
+
+		const reasons = reasonsFor("orphan-backstop-scanner-escalated");
+		expect(reasons).toHaveLength(1);
+		expect(reasons[0].subject).toContain(String(h.state.scannerPids[0]));
+		expect(reasons[0].reason).toContain("gone");
+	});
+
+	it("reports a scanner that SURVIVED its escalation, rather than claiming success", async () => {
+		h.state.hang = true;
+		// The scanner outlives the tree kill: an orphan sweep leaking an orphan.
+		const outcome = await (async () => {
+			const sweep = sweepUntrackedOrphans({ ...FAST, scanTimeoutMs: 200 });
+			// The sweep reaches its spawn only after the lock and stamp I/O, so
+			// wait for the scanner to exist before marking it unkillable.
+			while (h.state.scannerPids.length === 0) {
+				await new Promise((resolve) => setImmediate(resolve));
+			}
+			h.state.alivePids = new Set(h.state.scannerPids);
+			return sweep;
+		})();
+
+		expect(outcome).toBe("error");
+		expect(backstopMetadata().scannerKill).toBe("alive");
+		expect(reasonsFor("orphan-backstop-scanner-escalated")[0]?.reason).toContain(
+			"alive",
 		);
 	});
 

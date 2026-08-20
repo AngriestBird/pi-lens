@@ -63,6 +63,7 @@
  */
 export const STALE_HEARTBEAT_MS = 6 * 60 * 60 * 1000;
 
+import type { ChildProcess } from "node:child_process";
 import { spawn as nodeSpawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -71,8 +72,11 @@ import {
 	type AtomicStageSweepResult,
 	sweepOwnStagingFiles,
 } from "./atomic-write-staging.js";
+import { acquireQuarantinePidFileLock } from "./bounded-pid-file-lock.js";
 import {
+	type SpawnCollectResult,
 	type SpawnCollectStatus,
+	type SpawnTimeoutKill,
 	spawnCollectStdoutResult,
 	unrefChildAndPipes,
 } from "./child-unref.js";
@@ -802,9 +806,17 @@ export function partitionBackstopCandidates(
  *  query pattern). POSIX: `ps -eo pid=,ppid=,args=`, filtered in JS. Returns
  *  `{pid, parentPid, command}` rows. Best-effort: any failure ⇒ []. */
 async function enumerateManagedProcesses(
-	options: { timeoutMs?: number } = {},
+	options: {
+		timeoutMs?: number;
+		verifyAttempts?: number;
+		verifyIntervalMs?: number;
+	} = {},
 ): Promise<ManagedProcessScan> {
 	const timeoutMs = options.timeoutMs ?? BACKSTOP_SCAN_TIMEOUT_MS;
+	const collect = {
+		timeoutMs,
+		onTimeout: (child: ChildProcess) => terminateScannerChild(child, options),
+	};
 	if (isWindows) {
 		// #1857: `Name = '…'` equality replaces eight leading-wildcard
 		// `CommandLine LIKE '%…%'` clauses, and the query now also projects
@@ -832,7 +844,7 @@ async function enumerateManagedProcesses(
 			powershell,
 			["-NoProfile", "-NonInteractive", "-Command", psScript],
 			{ shell: false, windowsHide: true, stdio: ["ignore", "pipe", "ignore"] },
-			{ timeoutMs },
+			collect,
 		);
 		const processes: OsProcessInfo[] = [];
 		for (const line of result.stdout.split(/\r?\n/)) {
@@ -849,7 +861,7 @@ async function enumerateManagedProcesses(
 			if (!Number.isFinite(pid) || pid <= 0) continue;
 			processes.push({ pid, parentPid, command, ageMs });
 		}
-		return narrowToManagedBinaries(processes, result.status);
+		return narrowToManagedBinaries(processes, result);
 	}
 	// POSIX: enumerate everything, filter in JS by managed-name substring —
 	// there is no single-query WQL-style server-side filter available.
@@ -859,7 +871,7 @@ async function enumerateManagedProcesses(
 		posixPsPath(),
 		[...POSIX_PS_ARGS],
 		{ shell: false, stdio: ["ignore", "pipe", "ignore"] },
-		{ timeoutMs },
+		collect,
 	);
 	const processes: OsProcessInfo[] = [];
 	for (const line of result.stdout.split(/\r?\n/)) {
@@ -892,7 +904,7 @@ async function enumerateManagedProcesses(
 		if (!Number.isFinite(pid) || pid <= 0) continue;
 		processes.push({ pid, parentPid, command: args, ageMs });
 	}
-	return narrowToManagedBinaries(processes, result.status);
+	return narrowToManagedBinaries(processes, result);
 }
 
 /**
@@ -905,20 +917,55 @@ async function enumerateManagedProcesses(
  */
 function narrowToManagedBinaries(
 	processes: OsProcessInfo[],
-	status: SpawnCollectStatus,
+	result: SpawnCollectResult,
 ): ManagedProcessScan {
 	return {
 		processes: processes.filter((proc) => matchesManagedBinary(proc.command)),
-		status,
+		status: result.status,
+		timeoutKill: result.timeoutKill,
 	};
 }
 
 /** Outcome of one OS-process enumeration. `status` exists so an empty
  *  `processes` array can be told apart from a scan that never produced
- *  output (#1857 item 2). */
+ *  output (#1857 item 2); `timeoutKill` reports the fate of a scanner child
+ *  that had to be terminated (#1864 review F3). */
 interface ManagedProcessScan {
 	processes: OsProcessInfo[];
 	status: SpawnCollectStatus;
+	timeoutKill?: SpawnTimeoutKill;
+}
+
+/**
+ * Terminate a scanner child that blew the scan timeout, using the reaper's
+ * OWN tree-kill-and-verify machinery (#1864 review F3).
+ *
+ * The previous handler sent one bare signal to the direct child and resolved
+ * in the same tick. On Windows that signal reaches only the `powershell.exe`
+ * we spawned, never a CIM worker beneath it, and nothing checked whether it
+ * died. An orphan sweep that leaks its own scanner is the defect the sweep
+ * exists to fix, so the scanner now gets exactly what an orphan gets:
+ * `taskkill /F /T` or a POSIX group kill, then a verified liveness poll. The
+ * escalation is recorded with the scanner's identity, never swallowed.
+ */
+async function terminateScannerChild(
+	child: ChildProcess,
+	options: { verifyAttempts?: number; verifyIntervalMs?: number },
+): Promise<SpawnTimeoutKill> {
+	const pid = child.pid;
+	const outcome =
+		typeof pid === "number" && pid > 0
+			? await killPidTree(pid, {
+					verifyAttempts: options.verifyAttempts,
+					verifyIntervalMs: options.verifyIntervalMs,
+				})
+			: "invalid";
+	incrementDegradationCount({
+		kind: "orphan-backstop-scanner-escalated",
+		subject: `${isWindows ? "win32-cim" : "posix-ps"}#${pid ?? "no-pid"}`,
+		reason: `scan exceeded its timeout; tree kill reported ${outcome}`,
+	});
+	return outcome;
 }
 
 /** Hard bound on the enumeration child. The 2026-08-20 incident measured the
@@ -1002,6 +1049,18 @@ export function ageMsFromPosixEtime(raw: string): number | undefined {
  * that outlives the cooldown is no worse off than before, when the sweep ran
  * exactly once at its start.
  *
+ * Mutual exclusion (#1864 review F1): the cooldown check and the stamp write
+ * were a read-check-write, and an atomic rename makes each WRITE atomic
+ * without making the PAIR exclusive — two sessions starting together both read
+ * "no stamp", both wrote, and both swept. The claim now runs under
+ * `acquireQuarantinePidFileLock` (clients/bounded-pid-file-lock.ts:179), the
+ * repo's existing async cross-process lock for work that spans awaited I/O.
+ * The lock is taken FIRST and there is exactly ONE cooldown read, inside it,
+ * so check and claim are a single serialized step rather than a pair with a
+ * window between them. A contended sweep skips rather than waits: the loser
+ * has nothing useful to do, and blocking would put a best-effort background
+ * sweep back on somebody's clock.
+ *
  * Never throws — every step is wrapped so a reap failure cannot block or
  * crash the caller (session_start).
  */
@@ -1013,23 +1072,42 @@ export async function sweepUntrackedOrphans(
 		return logBackstopOutcome("disabled", startedAt, {});
 	}
 	const cooldownMs = Math.max(0, options.cooldownMs ?? BACKSTOP_COOLDOWN_MS);
+	let release: (() => Promise<void>) | null = null;
 	try {
-		if (cooldownMs > 0 && !options.force) {
-			const lastSweepAt = await readBackstopStamp();
-			if (lastSweepAt !== undefined && startedAt - lastSweepAt < cooldownMs) {
-				return logBackstopOutcome("cooldown", startedAt, {
-					sinceLastMs: startedAt - lastSweepAt,
-				});
-			}
+		// LOCK FIRST, then read the stamp. The ORDER is the fix. A cooldown
+		// check outside the lock followed by a stamp write inside it is still a
+		// read-check-write: two processes both pass the outside check before
+		// either acquires. Keeping a second check inside the lock as well would
+		// leave the outside one doing nothing a mutation could detect, so there
+		// is exactly ONE check and it lives inside the lock — check and claim
+		// are one serialized step. Locking before an eventual skip costs one
+		// mkdir, on a timer that already fired 30 seconds after session start.
+		release = await acquireBackstopLock();
+		if (release === null) {
+			// Another process holds the sweep right now. Not an error, and not a
+			// cooldown either — a distinct record, because "somebody else is
+			// sweeping" and "we swept recently" have different causes.
+			return logBackstopOutcome("concurrent", startedAt, {});
 		}
-		// Claim the cooldown slot BEFORE the scan, not after: two sessions
-		// starting together must not both pay for the same sweep, and a sweep
-		// that dies mid-scan must not re-run at full cost on every retry.
+
+		const throttled = await isWithinCooldown(Date.now(), cooldownMs, options);
+		if (throttled !== undefined) {
+			return logBackstopOutcome("cooldown", startedAt, {
+				sinceLastMs: throttled,
+			});
+		}
+
+		// Claim the cooldown slot BEFORE the scan, not after: a sweep that dies
+		// mid-scan must not re-run at full cost on every retry.
 		await writeBackstopStamp(startedAt);
 
 		const [registry, scan] = await Promise.all([
 			readInstanceRegistry(),
-			enumerateManagedProcesses({ timeoutMs: options.scanTimeoutMs }),
+			enumerateManagedProcesses({
+				timeoutMs: options.scanTimeoutMs,
+				verifyAttempts: options.verifyAttempts,
+				verifyIntervalMs: options.verifyIntervalMs,
+			}),
 		]);
 
 		if (scan.status !== "ok") {
@@ -1042,6 +1120,7 @@ export async function sweepUntrackedOrphans(
 			});
 			return logBackstopOutcome("error", startedAt, {
 				scanStatus: scan.status,
+				scannerKill: scan.timeoutKill,
 				scanned: scan.processes.length,
 			});
 		}
@@ -1083,8 +1162,10 @@ export async function sweepUntrackedOrphans(
 			});
 		}
 
+		const retryAt = scheduleGraceRetryIfNeeded(partition, options);
+
 		return logBackstopOutcome(
-			killed.length > 0 || unverified.length > 0 ? "reaped" : "clean",
+			classifyKillOutcome(killed.length, unverified.length),
 			startedAt,
 			{
 				scanStatus: scan.status,
@@ -1098,6 +1179,7 @@ export async function sweepUntrackedOrphans(
 				// never answer "which process did we kill?".
 				killedProcesses: killed.slice(0, BACKSTOP_IDENTITY_LOG_LIMIT),
 				unverifiedProcesses: unverified.slice(0, BACKSTOP_IDENTITY_LOG_LIMIT),
+				graceRetryInMs: retryAt,
 			},
 		);
 	} catch (error) {
@@ -1109,30 +1191,71 @@ export async function sweepUntrackedOrphans(
 			reason: `sweep threw: ${error instanceof Error ? error.message : String(error)}`,
 		});
 		return logBackstopOutcome("error", startedAt, { threw: true });
+	} finally {
+		if (release) {
+			await release().catch(() => {
+				// A lock we cannot release goes stale on its own timer.
+			});
+		}
 	}
 }
 
 /**
- * The five distinguishable states of one backstop sweep. Before #1857 the
- * only record was a `{scanned, killed}` line emitted on the reaped path, so
- * "ran and found nothing", "never ran", and "threw" were the same absence.
+ * The distinguishable states of one backstop sweep. Before #1857 the only
+ * record was a `{scanned, killed}` line emitted on the reaped path, so "ran
+ * and found nothing", "never ran", and "threw" were the same absence.
+ *
+ * `reaped` / `partial` / `unverified` exist because collapsing them (#1864
+ * review F4) would reproduce the very defect this work fixes, one level up: a
+ * sweep that attempted one kill and verified none reported `reaped`, so a
+ * health check reading the outcome saw a success where the metadata said
+ * `killed: 0, killUnverified: 1`.
  */
 export type BackstopSweepOutcome =
+	/** Ran, nothing to kill. */
 	| "clean"
+	/** Every eligible process is verifiably gone. */
 	| "reaped"
+	/** Some verified kills, at least one survivor. */
+	| "partial"
+	/** Kills were attempted and NONE could be verified. */
+	| "unverified"
+	/** The scan or the sweep itself failed. */
 	| "error"
+	/** Skipped: swept recently. */
 	| "cooldown"
+	/** Skipped: another process holds the sweep lock right now. */
+	| "concurrent"
+	/** Skipped: the instance registry is off. */
 	| "disabled";
 
+/** Map verified/unverified kill counts onto the outcome. The only place that
+ *  mapping exists. */
+function classifyKillOutcome(
+	killed: number,
+	unverified: number,
+): BackstopSweepOutcome {
+	if (unverified === 0) return killed > 0 ? "reaped" : "clean";
+	return killed > 0 ? "partial" : "unverified";
+}
+
 export interface BackstopSweepOptions {
-	/** Bypass the wall-clock cooldown (tests, and any future explicit
-	 *  user-triggered reap). */
+	/** Bypass the wall-clock cooldown (tests, the grace re-arm, and any future
+	 *  explicit user-triggered reap). Never bypasses the LOCK. */
 	force?: boolean;
 	cooldownMs?: number;
 	graceMs?: number;
 	scanTimeoutMs?: number;
 	verifyAttempts?: number;
 	verifyIntervalMs?: number;
+	/**
+	 * Whether a sweep that spared a candidate under the spawn grace may arm one
+	 * follow-up sweep. Default true; the follow-up itself passes `false`, which
+	 * is what bounds the chain at exactly one retry — no latch, no counter.
+	 */
+	allowGraceRetry?: boolean;
+	/** Override the follow-up delay (tests). */
+	graceRetryDelayMs?: number;
 }
 
 /**
@@ -1152,6 +1275,19 @@ export const BACKSTOP_START_DELAY_MS = 30_000;
 const BACKSTOP_IDENTITY_LOG_LIMIT = 10;
 
 /**
+ * Extra margin on top of the spawn grace before the follow-up sweep runs, so
+ * a candidate that was 1ms too fresh is comfortably past the grace by the
+ * time the retry looks at it again.
+ */
+export const BACKSTOP_GRACE_RETRY_MARGIN_MS = 30_000;
+
+/** How long the sweep lock may be held before another process reclaims it.
+ *  Well above the scan timeout plus the kill budget, and irrelevant when the
+ *  holder dies — the lock reclaims immediately on a dead owner pid
+ *  (clients/bounded-pid-file-lock.ts:90). */
+const BACKSTOP_LOCK_STALE_MS = 120_000;
+
+/**
  * Schedule the backstop sweep OFF the session_start critical path. The timer
  * is `unref`'d, so a settled one-shot `pi --print` exits without waiting and
  * the sweep simply does not happen for that invocation — which is correct: a
@@ -1160,14 +1296,92 @@ const BACKSTOP_IDENTITY_LOG_LIMIT = 10;
  */
 export function scheduleUntrackedOrphanSweep(
 	delayMs: number = BACKSTOP_START_DELAY_MS,
+	options: BackstopSweepOptions = {},
 ): NodeJS.Timeout {
 	const timer = setTimeout(() => {
-		void sweepUntrackedOrphans().catch(() => {
+		void sweepUntrackedOrphans(options).catch(() => {
 			// sweepUntrackedOrphans never rejects; belt-and-braces.
 		});
 	}, Math.max(0, delayMs));
 	timer.unref();
 	return timer;
+}
+
+/**
+ * Arm ONE follow-up sweep when the spawn grace spared a candidate (#1864
+ * review F2).
+ *
+ * Without it, the grace guard could spare an orphan indefinitely: the sweep
+ * runs once per session, a candidate younger than the grace is spared, and a
+ * long-lived session never looks again. That is a regression against the old
+ * always-at-session-start sweep, which at least re-examined the process every
+ * session.
+ *
+ * The retry passes `force` (the cooldown it would otherwise hit is the stamp
+ * this same sweep just wrote) and `allowGraceRetry: false`, so the chain is
+ * exactly one deep. It still takes the lock, so it cannot race a concurrent
+ * sweep. Residual: if the process exits before the timer fires, the spared
+ * candidate waits for the next session's sweep — the retry is unref'd, and a
+ * background reap must never hold a settled one-shot open.
+ *
+ * Returns the delay armed, or undefined when nothing was spared.
+ */
+function scheduleGraceRetryIfNeeded(
+	partition: BackstopPartition,
+	options: BackstopSweepOptions,
+): number | undefined {
+	if (options.allowGraceRetry === false) return undefined;
+	if (partition.tooFresh.length === 0) return undefined;
+	const graceMs = Math.max(0, options.graceMs ?? BACKSTOP_SPAWN_GRACE_MS);
+	const delayMs = Math.max(
+		0,
+		options.graceRetryDelayMs ?? graceMs + BACKSTOP_GRACE_RETRY_MARGIN_MS,
+	);
+	scheduleUntrackedOrphanSweep(delayMs, {
+		...options,
+		force: true,
+		allowGraceRetry: false,
+	});
+	return delayMs;
+}
+
+/** Serialize the sweep across processes. Returns null when another process
+ *  holds it — the caller skips rather than waits (`waitMs: 0`). */
+async function acquireBackstopLock(): Promise<(() => Promise<void>) | null> {
+	try {
+		return await acquireQuarantinePidFileLock(
+			path.join(getGlobalPiLensDir(), "orphan-backstop.lock"),
+			{
+				waitMs: 0,
+				retryMs: 50,
+				staleMs: BACKSTOP_LOCK_STALE_MS,
+				timeoutMessage: "orphan backstop sweep lock contended",
+				onContention: "skip-log",
+				logContention: () => {
+					// The caller emits the `concurrent` record; nothing to add here.
+				},
+			},
+		);
+	} catch {
+		// A lock we cannot even attempt (unwritable global dir) must not disable
+		// the backstop — fall through unlocked, exactly as before this fix.
+		return async () => {};
+	}
+}
+
+/** Milliseconds since the last sweep when the cooldown is in force, else
+ *  undefined. Centralized so the pre-check and the in-lock re-check cannot
+ *  drift apart. */
+async function isWithinCooldown(
+	now: number,
+	cooldownMs: number,
+	options: BackstopSweepOptions,
+): Promise<number | undefined> {
+	if (cooldownMs <= 0 || options.force) return undefined;
+	const lastSweepAt = await readBackstopStamp();
+	if (lastSweepAt === undefined) return undefined;
+	const sinceLastMs = now - lastSweepAt;
+	return sinceLastMs < cooldownMs ? sinceLastMs : undefined;
 }
 
 /** Short, stable identity for one managed process: which binary, which pid.

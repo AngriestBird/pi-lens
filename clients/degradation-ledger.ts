@@ -189,6 +189,13 @@ export type DegradationKind =
 	 */
 	| "orphan-reap-kill-unverified"
 	/**
+	 * The orphan backstop's OWN process-table scanner blew the scan timeout and
+	 * had to be tree-killed (#1864 review F3). Reason carries the kill verdict,
+	 * so a scanner that survived its own sweep's escalation — an orphan sweep
+	 * leaking an orphan — is visible rather than silent.
+	 */
+	| "orphan-backstop-scanner-escalated"
+	/**
 	 * `biome-check.ts`'s `resolveBiomeFixKinds` (#1810) couldn't get a real
 	 * fix-tier verdict for a rule from `biome explain <rule>` — either the
 	 * spawn itself failed/exited nonzero, or it succeeded but the output
