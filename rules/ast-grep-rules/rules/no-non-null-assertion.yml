@@ -23,60 +23,92 @@ note: |
      condition references `$A.length` — again same-array-binding, so a
      length check on a different array does not suppress it.
 
-  Both exclusions are scoped to the nearest enclosing function
-  (`function_declaration`/`method_definition`/`arrow_function`/
-  `function_expression` are themselves members of the "stop here" kind
-  list), not the whole file — an earlier draft that let the search
-  escalate to `program` silently suppressed unrelated hits that
-  happened to reuse common variable names like `m`/`k` in a different
-  function. That draft never shipped; this note records the mistake so
-  a future edit doesn't reintroduce it.
+  Both exclusions are scoped to the nearest enclosing function via a
+  `stopBy` BOUNDARY rule, not the whole file.
 
-  Approximation caveat: ast-grep matches structurally, not
-  semantically. It cannot verify the guard genuinely DOMINATES the use
-  (no intervening mutation of `$M`/`$A` or reassignment of the
-  narrowed variable, no early return between the check and the use
-  that would make the "same function" scope too wide) or that the key
-  is the same value at runtime versus merely the same source text. The
-  suppression is deliberately biased toward false negatives — leaving
-  a real risk unflagged — over false positives, which is the correct
-  bias for a lint the census already showed fires mostly on legitimate
-  code: an occasional missed genuine risk in this class is cheaper than
-  the opinion-density that justified narrowing it in the first place.
+  Review round 1 found two proven defects in the first version of this
+  narrowing, both fixed here:
 
-  Re-census on the narrowed rule, four corpora, hit count before →
-  after:
-  - pi-lens (this repo, `clients/` `tools/` `index.ts`): 43 → 35 (8
-    suppressed, -19%). All 8 verified by hand: `.get()!`-after-`.has()`
+  - **F1 (high):** the original `stopBy: end` on the `inside` relation
+    is a search-DEPTH flag, not a stop condition — it walked ancestors
+    all the way to the file root. The `any:` kind list only chose which
+    ancestor could SATISFY the match; it did not stop the walk. Result:
+    a `.has()`/`.length` guard in an OUTER function suppressed a
+    closure's `!` inside an INNER function, and closures are common in
+    this codebase. Fixed by giving `stopBy` its own RULE (the same
+    function-kind `any:` list) so the ancestor walk halts at the
+    nearest enclosing function no matter what — it can find a
+    satisfying guard there or fail, but it can never look further out.
+  - **F2 (medium):** the `has: pattern: $M.has($K)` search is blind to
+    branch polarity — `if (!m.has(k)) { return m.get(k)!; }` (a REAL
+    bug: the key is proven ABSENT on that branch) was suppressed
+    exactly like `if (m.has(k)) { return m.get(k)!; }` (safe). ast-grep
+    has no dataflow model to tell "guards the branch I'm in" from
+    "guards the branch I'm NOT in," so the fix is a blunter, safer
+    instrument: `not: inside: { kind: unary_expression }` on the `has`
+    pattern removes ANY negated `.has()` call from counting as a guard,
+    full stop. This closes the real-bug shape but also cost one
+    previously-correct suppression: `if (!m.has(k)) return; ...
+    m.get(k)!` (an early-return guard clause, genuinely safe) now flags
+    again, because ast-grep can't distinguish it from the bug shape
+    that shares its `!m.has(k)` syntax. Accepted: the two shapes are
+    structurally identical to a syntax matcher, and re-flagging safe
+    code is cheaper than missing the bug shape. Both directions are
+    fixtured in `rule-tests/no-non-null-assertion-test.yml`.
+
+  Approximation caveat: even after F1/F2, ast-grep matches
+  structurally, not semantically. It cannot verify the guard genuinely
+  DOMINATES the use (no intervening mutation of `$M`/`$A` or
+  reassignment of the narrowed variable) or that the key is the same
+  value at runtime versus merely the same source text. It also can't
+  read branch polarity beyond the single `!` case F2 special-cases —
+  `if (x.has(k) === false)` or `if (x.has(k) ? false : true)` would
+  still slip past undetected. The suppression is deliberately biased
+  toward false negatives — leaving a real risk unflagged — over false
+  positives, which is the correct default bias for a lint the census
+  showed fires mostly on legitimate code; F2 is the one place that
+  bias is deliberately overridden, because a same-branch bug is worse
+  than an unnecessary warning on safe code.
+
+  Re-census on the F1/F2/F5-fixed rule, four corpora, hit count before
+  (no exclusions) → after:
+  - pi-lens (this repo, `clients/` `tools/` `index.ts`): 43 → 36 (7
+    suppressed, -16%). All 7 verified by hand: `.get()!`-after-`.has()`
     guard clauses in `tree-sitter-client.ts` (`loadLanguage`,
     `getParser`) and `review-graph/builder.ts`, plus
     `pop()!`/`shift()!` inside `while (x.length > 0)` loops in
     `call-graph.ts`, `pipeline.ts`, `tree-sitter-client.ts`
     (`bindingNames`), and `review-graph/workspace-modules.ts`.
-  - inspiration-pi: 674 → 650 (24 suppressed, -3.6%).
-  - inspiration-opencode: 1067 → 1057 (10 suppressed, -0.9%).
-  - inspiration-oh-my-pi: 3569 → 3527 (42 suppressed, -1.2%).
+    `project-report.ts:531`'s `indices.get(w)!` was an 8th hit
+    suppressed by the PRE-F2 rule — its only `indices.has(w)` in scope
+    is `if (!indices.has(w))`, i.e. exactly the F2 negation blind spot,
+    and it happened to land on genuinely safe code (the `else` branch
+    where `w` having been visited already implies `indices` has an
+    entry) purely by accident, not because the rule proved anything.
+    The F2 fix removes that accidental suppression along with the real
+    ones, so it correctly flags again post-fix.
+  - inspiration-pi: 674 → 655 (19 suppressed, -2.8%).
+  - inspiration-opencode: 1067 → 1060 (7 suppressed, -0.7%).
+  - inspiration-oh-my-pi: 3569 → 3544 (25 suppressed, -0.7%).
 
-  Honest read of the residual: outside pi-lens's own hand-verified
-  drop, the narrowing removes a small, single-digit-percent slice.
-  pi-lens's own residual 35 is NOT dominated by the genuine
-  cross-boundary-risk class (`dart.getCommand(cwd)!` right after
-  `dart.isAvailableAsync(cwd)`, and similar) — that class accounts for
-  roughly 7 of the 35. The rest (~28) are still legitimate-idiom
-  shaped, just not expressible by these two structural constraints: a
-  property re-asserted after its parent was checked
-  (`r.enclosingSymbol!.name` after `.filter((r) => r.enclosingSymbol)`
-  in `read-guard.ts`), a boolean flag standing in for a narrowed
-  variable, a value narrowed by a ternary rather than `.has()`
-  (`index.forward! ` in `word-index.ts`), and a module-singleton
-  pattern (`format-service.ts`'s `globalFormatService!`). Filed as
-  #1777 follow-up discussion: the residual is still noisier than a
-  bounded-false-positive-rate warning ideally is, but neither of the
-  two remaining unexpressed idiom classes named in review (re-asserted
-  property, boolean flag) has an ast-grep-expressible relational shape
-  — narrowing further would need a rule engine with dataflow, not
+  Honest read of the residual: pi-lens's own residual (36) is NOT
+  dominated by the genuine cross-boundary-risk class
+  (`dart.getCommand(cwd)!` right after `dart.isAvailableAsync(cwd)`,
+  and similar) — that class accounts for roughly 7 of the 36. The rest
+  (~29) are still legitimate-idiom shaped, just not expressible by
+  these two structural constraints: a property re-asserted after its
+  parent was checked (`r.enclosingSymbol!.name` after `.filter((r) =>
+  r.enclosingSymbol)` in `read-guard.ts`), a boolean flag standing in
+  for a narrowed variable, a value narrowed by a ternary rather than
+  `.has()` (`index.forward!` in `word-index.ts`), and a
+  module-singleton pattern (`format-service.ts`'s
+  `globalFormatService!`). Tracked as #1818: the residual is still
+  noisier than a bounded-false-positive-rate warning ideally is, but
+  neither remaining unexpressed idiom class (re-asserted property,
+  boolean flag) has an ast-grep-expressible relational shape —
+  narrowing further would need a rule engine with dataflow, not
   syntax-tree relations. Severity stays `warning` pending that
-  follow-up; revisit hint for the residual there rather than here.
+  follow-up.
 rule:
   pattern: $X!
   not:
@@ -86,7 +118,16 @@ rule:
       - all:
           - pattern: $M.get($K)!
           - inside:
-              stopBy: end
+              # stopBy is a boundary RULE, not a search-depth flag: the
+              # ancestor walk stops at the nearest node matching this
+              # rule, so it can never escalate past the nearest
+              # enclosing function into an outer scope (#1777 F1 fix).
+              stopBy:
+                any:
+                  - kind: function_declaration
+                  - kind: method_definition
+                  - kind: arrow_function
+                  - kind: function_expression
               any:
                 - kind: function_declaration
                 - kind: method_definition
@@ -95,20 +136,39 @@ rule:
               has:
                 stopBy: end
                 pattern: $M.has($K)
+                # Exclude a negated has() check from counting as a guard
+                # (#1777 F2 fix): ast-grep can't read branch polarity, so
+                # this can't tell a `if (!m.has(k)) return;` early-return
+                # guard clause (safe) from `if (!m.has(k)) { ...
+                # m.get(k)! }` (a real bug — the key is proven ABSENT in
+                # that branch). Refusing to treat ANY negated has() as a
+                # guard is the only structural signal available; it
+                # trades a few now-unflagged-turned-flagged early-return
+                # guard clauses for closing the real-bug shape. See the
+                # rule note for the accepted regression.
+                not:
+                  inside:
+                    kind: unary_expression
       - all:
           - any:
               - pattern: $A.pop()!
               - pattern: $A.shift()!
           - inside:
-              stopBy: end
+              # Same stopBy boundary fix as the get/has exclusion above.
+              stopBy:
+                any:
+                  - kind: function_declaration
+                  - kind: method_definition
+                  - kind: arrow_function
+                  - kind: function_expression
+              # No function kinds here (#1777 F5): a function node has no
+              # `condition` field, so it could never satisfy the `has`
+              # check below — the stopBy boundary above already keeps
+              # the walk from escalating past the function regardless.
               any:
                 - kind: while_statement
                 - kind: for_statement
                 - kind: if_statement
-                - kind: function_declaration
-                - kind: method_definition
-                - kind: arrow_function
-                - kind: function_expression
               has:
                 field: condition
                 stopBy: end

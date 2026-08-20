@@ -10,13 +10,6 @@ valid:
         return m.get(k)!;
       }
     }
-  # #1777: get-after-has via an early-return guard clause (the check
-  # and the use are siblings in the same function, not nested).
-  - |
-    function f(m: Map<string, number>, k: string) {
-      if (!m.has(k)) return;
-      return m.get(k)!;
-    }
   # #1777: pop-after-length, same array, in a while loop.
   - |
     function f(stack: number[]) {
@@ -89,4 +82,53 @@ invalid:
       if (arr.length > 0) {
         return x;
       }
+    }
+  # #1777 F1 regression test: a `.has()` guard in an OUTER function must
+  # NOT suppress a `!` inside an INNER closure — the `stopBy` boundary
+  # has to stop the ancestor walk at the nearest enclosing function.
+  # Review round 1 proved the pre-fix rule got this wrong (a guard in
+  # the outer scope suppressed the closure's finding).
+  - |
+    function outer(m: Map<string, number>, k: string) {
+      if (m.has(k)) {
+        // guard lives here, in the OUTER function
+      }
+      return function inner() {
+        return m.get(k)!;
+      };
+    }
+  # #1777 F1 regression test, arrow-closure variant: same outer/inner
+  # split, `.length` guard in the outer function only.
+  - |
+    function outer(arr: number[]) {
+      if (arr.length > 0) {
+        // guard lives here, in the OUTER function
+      }
+      return () => arr.pop()!;
+    }
+  # #1777 F2 regression test: `if (!m.has(k))` guards the branch where
+  # the key is proven ABSENT, so `m.get(k)!` inside that branch is a
+  # real bug, not a narrowed-after-check idiom. ast-grep can't read
+  # branch polarity, so the fix is a blunt one — ANY negated `.has()`
+  # is refused as a guard — but it MUST catch this exact shape, the one
+  # review round 1 named as "the rule's most likely real bug shape."
+  - |
+    function f(m: Map<string, number>, k: string) {
+      if (!m.has(k)) {
+        return m.get(k)!;
+      }
+    }
+  # #1777 F2 accepted regression: this is a genuinely SAFE early-return
+  # guard clause — by the time `m.get(k)!` runs, `!m.has(k)` has already
+  # returned. It was correctly suppressed before the F2 fix. It is NOT
+  # anymore, and that is accepted, not a bug: ast-grep matches this
+  # `if (!m.has(k)) return;` identically to the real-bug shape directly
+  # above (same syntax, opposite control flow), and there is no cheaper
+  # structural signal available to tell them apart. This fixture exists
+  # so the known blind spot has a name and a test, and can't be
+  # mistaken for coverage this rule doesn't have.
+  - |
+    function f(m: Map<string, number>, k: string) {
+      if (!m.has(k)) return;
+      return m.get(k)!;
     }
