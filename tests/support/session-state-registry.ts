@@ -77,6 +77,10 @@ import {
 	workspaceDiagnosticsCacheSessionStart,
 } from "../../clients/lsp/workspace-diagnostics-session.js";
 import { removeTempDirSync } from "../clients/test-utils.js";
+import {
+	consumeHostReadyDelayAnchor,
+	resetHostReadyDelayAnchorForTests,
+} from "../../clients/startup-timing.js";
 
 /**
  * When a piece of state must return to its initial value.
@@ -500,6 +504,23 @@ export const SESSION_STATE_REGISTRY: SessionStateEntry[] = [
 			"#1810: the cache maps (biome binary path, rule name) to that rule's real fix tier, read live from `biome explain <rule>`. That answer is a static property of the running binary — it cannot change without a different biome install, which is itself a different cache key — so there is nothing for a session boundary to invalidate. No probe: arming it for real requires spawning the actual biome binary, which this generic registry sweep does not do; `tests/clients/dispatch/runners/biome-check-runner.test.ts`'s dedicated cache/reset tests cover the re-arm behavior with a mocked spawn instead.",
 	},
 	{
+		id: "startup-timing:hostReadyDelayAnchor",
+		module: "startup-timing.ts",
+		state: "hostReadyDelayAnchorConsumed",
+		policy: "process_lifetime",
+		resetName: "resetHostReadyDelayAnchorForTests",
+		reason:
+			"The load-complete timestamp has meaning only against the first session_start in this process; resetting it at a session boundary would fabricate host stalls from the original process boot.",
+		probe: {
+			arm: () => {
+				resetHostReadyDelayAnchorForTests();
+				consumeHostReadyDelayAnchor();
+			},
+			isArmed: () => consumeHostReadyDelayAnchor(),
+			reset: () => resetHostReadyDelayAnchorForTests(),
+		},
+	},
+	{
 		id: "formatters:runtimeState",
 		module: "formatters.ts",
 		state: "whichLatchByCommand, whichTransientCommands, cooldownRecordedForRetryAtMs",
@@ -724,6 +745,7 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	"sgconfig.ts": 2,
 	"slow-fs.ts": 0,
 	"smells-rollup.ts": 1,
+	"startup-timing.ts": 0,
 	"subagent-mode.ts": 0,
 	"tree-sitter-shared.ts": 0,
 	"tui-fit.ts": 0,
