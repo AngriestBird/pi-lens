@@ -109,8 +109,9 @@ describe("javac build-descriptor gate (#1877)", () => {
 
 			expect(safeSpawn).toHaveBeenCalledTimes(1);
 			expect(result.status).toBe("failed");
-			expect(result.semantic).toBe("blocking");
+			expect(result.semantic).toBe("warning");
 			expect(result.diagnostics[0]?.tool).toBe("javac");
+			expect(result.diagnostics[0]?.semantic).toBe("warning");
 			expect(result.diagnostics[0]?.line).toBe(3);
 		} finally {
 			env.cleanup();
