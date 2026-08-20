@@ -50,7 +50,6 @@ import type { RuntimeCoordinator } from "./runtime-coordinator.js";
 import { syncGitGuardRecord } from "./git-guard.js";
 import { scheduleWordIndexPersist } from "./word-index.js";
 import { RUNTIME_CONFIG } from "./runtime-config.js";
-import { recordVerifiedPathAttributionGuess } from "./path-attribution-telemetry.js";
 
 const AUTHORITATIVE_CONTENT_MAX_BYTES = RUNTIME_CONFIG.pipeline.lspMaxFileBytes;
 
@@ -458,13 +457,10 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 		// turn state, no deferred work — and log it so a real incident is
 		// countable rather than silently mis-attributed.
 		const guessedPath = path.resolve(workspaceRoot, rawFilePath);
-		if (nodeFs.existsSync(guessedPath)) {
-			// A project-relative host path guessed from the workspace root is the
-			// common benign case. Count it for the session rollup, but retain the
-			// detailed row for guesses that do not verify.
-			recordVerifiedPathAttributionGuess();
-			return;
-		}
+		// Existence is not execution evidence: a same-named file can exist in
+		// the workspace while the tool ran in another cwd. Without the recorded
+		// call target and origin cwd there is no comparison to make, so retain the
+		// full record and fail closed.
 		dbg(
 			`path_attribution_missing: no recorded resolution basis for toolCallId=${toolCallId}, refusing relative path ${rawFilePath} (would have guessed ${guessedPath})`,
 		);

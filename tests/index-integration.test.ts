@@ -4,7 +4,7 @@ import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CacheManager } from "../clients/cache-manager.js";
 import { getEffectiveLspIdleResetMs } from "../clients/runtime-turn.js";
-import { createPiMock } from "./support/pi-mock.js";
+import { createPiMock, makeCtx } from "./support/pi-mock.js";
 import { removeTempDirSync } from "./clients/test-utils.js";
 
 // This suite predates the consolidated harness and is written against the
@@ -286,6 +286,74 @@ describe("index.ts integration", () => {
 		shutdown?.({ reason: "quit" }, { cwd: tmpDir });
 
 		expect(emitBusEventRollupAtSessionEnd).toHaveBeenCalledTimes(1);
+	}, INTEGRATION_TIMEOUT_MS);
+
+	it("session_start resets the verified-attribution tally through the event", async () => {
+		const telemetry = await import("../clients/path-attribution-telemetry.js");
+		telemetry.recordVerifiedPathAttributionGuess();
+		const { default: registerExtension } = await import("../index.js");
+		const { pi, handlers } = createMockPi();
+		registerExtension(pi as any);
+		await handlers.session_start?.[0]?.({}, makeCtx({ cwd: tmpDir, sessionId: "primary" }));
+		expect(telemetry.getVerifiedPathAttributionGuessCount()).toBe(0);
+	}, INTEGRATION_TIMEOUT_MS);
+
+	it("primary session_shutdown emits one rollup and clears it, while zero stays silent", async () => {
+		const logLatency = vi.fn();
+		vi.doMock("../clients/latency-logger.js", async (importActual) => ({
+			...(await importActual<typeof import("../clients/latency-logger.js")>()),
+			logLatency,
+		}));
+		const telemetry = await import("../clients/path-attribution-telemetry.js");
+		const { default: registerExtension } = await import("../index.js");
+		const { pi, handlers } = createMockPi();
+		registerExtension(pi as any);
+		const shutdown = handlers.session_shutdown?.[0];
+		telemetry.recordVerifiedPathAttributionGuess();
+		shutdown?.({}, makeCtx({ cwd: tmpDir, sessionId: "primary" }));
+		const rollups = () =>
+			logLatency.mock.calls.filter(
+				([row]) => (row as { phase?: string }).phase === "path_attribution_verified_rollup",
+			);
+		expect(rollups()).toHaveLength(1);
+		expect(rollups()[0][0]).toEqual(
+			expect.objectContaining({ phase: "path_attribution_verified_rollup" }),
+		);
+		expect(telemetry.getVerifiedPathAttributionGuessCount()).toBe(0);
+		logLatency.mockClear();
+		shutdown?.({}, makeCtx({ cwd: tmpDir, sessionId: "primary" }));
+		expect(rollups()).toHaveLength(0);
+	}, INTEGRATION_TIMEOUT_MS);
+
+	it("secondary session_shutdown does not consume the primary tally", async () => {
+		const logLatency = vi.fn();
+		vi.doMock("../clients/latency-logger.js", async (importActual) => ({
+			...(await importActual<typeof import("../clients/latency-logger.js")>()),
+			logLatency,
+		}));
+		const telemetry = await import("../clients/path-attribution-telemetry.js");
+		const { default: registerExtension } = await import("../index.js");
+		const primary = createMockPi();
+		registerExtension(primary.pi as any);
+		await primary.trigger("session_start", {}, makeCtx({ cwd: tmpDir, sessionId: "primary" }));
+		const secondary = createMockPi();
+		registerExtension(secondary.pi as any);
+		await secondary.trigger("session_start", {}, makeCtx({ cwd: tmpDir, sessionId: "secondary" }));
+		telemetry.recordVerifiedPathAttributionGuess();
+		await secondary.trigger("session_shutdown", {}, makeCtx({ cwd: tmpDir, sessionId: "secondary" }));
+		expect(
+			logLatency.mock.calls.filter(
+				([row]) => (row as { phase?: string }).phase === "path_attribution_verified_rollup",
+			),
+		).toHaveLength(0);
+		expect(telemetry.getVerifiedPathAttributionGuessCount()).toBe(1);
+		await primary.trigger("session_shutdown", {}, makeCtx({ cwd: tmpDir, sessionId: "primary" }));
+		expect(
+			logLatency.mock.calls.filter(
+				([row]) => (row as { phase?: string }).phase === "path_attribution_verified_rollup",
+			),
+		).toHaveLength(1);
+		expect(telemetry.getVerifiedPathAttributionGuessCount()).toBe(0);
 	}, INTEGRATION_TIMEOUT_MS);
 
 	it("agent_settled dumps active handles AFTER quiet-window work is scheduled (#1123 item 4)", async () => {

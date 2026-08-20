@@ -1837,7 +1837,7 @@ describe("path attribution across tool_call/tool_result (#1642)", () => {
 		}
 	});
 
-	it("tallies a verified workspace-root guess without a per-event record (#1884)", async () => {
+	it("keeps a same-named workspace-root guess unverified without execution evidence (#1886)", async () => {
 		const env = setupTestEnvironment("pi-lens-attribution-verified-");
 		const previousDataDir = process.env.PILENS_DATA_DIR;
 		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
@@ -1866,11 +1866,12 @@ describe("path attribution across tool_call/tool_result (#1642)", () => {
 				formatBehaviorWarnings: () => "",
 			} as any);
 
-			// MUTATION PROOF: collapsing the existsSync branch into the detailed
-			// path makes this assertion fail because the verified guess is not a
-			// path_attribution_missing event.
-			expect(getVerifiedPathAttributionGuessCount()).toBe(1);
-			expect(logLatency).not.toHaveBeenCalledWith(
+			// A wrong-but-existing same-named file must not verify the guess.
+			// MUTATION PROOF: restoring existence-only verification makes both
+			// assertions fail because the tally increments and the full record is
+			// suppressed.
+			expect(getVerifiedPathAttributionGuessCount()).toBe(0);
+			expect(logLatency).toHaveBeenCalledWith(
 				expect.objectContaining({ phase: "path_attribution_missing" }),
 			);
 		} finally {

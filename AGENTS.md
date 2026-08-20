@@ -279,6 +279,9 @@ record and admitted tally milestones also emit a `degradation_ledger` row throug
 the session remains auditable when no health render reaches the transcript.
 Scanner coverage gaps and stalled notify-inflight barriers use the ledger;
 successful notify drains remain latency-only because they are not degradations.
+Workspace-root path-attribution rollups are separate, memory-only session
+telemetry. They reset on the primary `session_start`, emit once on primary
+shutdown, and secondary shutdown returns before consuming the primary tally.
 Durable rows use the same 20-entry per-kind admission as the summary and emit
 count increments only at powers of two, so the sink remains bounded. Each row
 also carries the ledger generation for session grouping. (#1366, #1292, #1866)

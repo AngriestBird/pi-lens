@@ -2,6 +2,8 @@ import { logLatency } from "./latency-logger.js";
 
 // Verified guesses are expected host behavior, not degradations. Keep their
 // exact session count in memory and publish one bounded row at session end.
+// This tally is intentionally memory-only: a process crash loses its count.
+// The rollup is best-effort session telemetry, not durable accounting.
 let verifiedGuessCount = 0;
 
 export function recordVerifiedPathAttributionGuess(): void {
