@@ -65,7 +65,8 @@ export function tokenizeShellCommand(command: string): ShellCommandSegment[] {
 	};
 	const flushSegment = () => {
 		flushWord();
-		if (tokens.length > 0 || unsupported) segments.push({ tokens, unsupported });
+		if (tokens.length > 0 || unsupported)
+			segments.push({ tokens, unsupported });
 		tokens = [];
 		unsupported = false;
 		atTokenStart = true;
@@ -101,7 +102,7 @@ export function tokenizeShellCommand(command: string): ShellCommandSegment[] {
 			// Windows routinely contain native paths (C:\\src\\file.ts). Preserve
 			// backslashes before ordinary path characters while still honoring
 			// shell escapes and line continuations.
-			if (next === "\n" || /[\s\\'\";$|&<>]/.test(next ?? "")) {
+			if (next === "\n" || /[\s\\'";$|&<>]/.test(next ?? "")) {
 				escaped = true;
 			} else {
 				word += ch;
@@ -373,6 +374,80 @@ const GREP_OPTIONS_WITH_VALUE = new Set([
 	"--context",
 ]);
 
+export interface GrepContextLines {
+	before: number;
+	after: number;
+}
+
+function parseContextValue(
+	inline: string,
+	next: string | undefined,
+): number | undefined {
+	const raw = inline !== "" ? inline : next;
+	if (raw === undefined) return undefined;
+	const n = Number.parseInt(raw, 10);
+	if (!Number.isFinite(n) || n < 0) return undefined;
+	// Bound the credit: a huge -C would credit a whole file from one hit.
+	return Math.min(n, 100);
+}
+
+/**
+ * Read the context lines a `grep` invocation actually PRINTS around each hit
+ * (#1904 item 2). Only these lines were delivered to the model, so only these
+ * may be credited as read. Handles `-A N`, `-A3`, clustered short flags such as
+ * `-rnA3`, `--after-context=N`, the `-B`/`--before-context` mirror, `-C`
+ * (both sides), and the bare `-NUM` form.
+ */
+export function parseGrepContextLines(args: string[]): GrepContextLines {
+	let before = 0;
+	let after = 0;
+	for (let i = 0; i < args.length; i++) {
+		const token = stripQuotes(args[i]);
+		if (token === "--") break;
+		const nextToken =
+			args[i + 1] === undefined ? undefined : stripQuotes(args[i + 1]);
+
+		const long = /^--(after|before)-context(?:=(\d+))?$/.exec(token);
+		if (long) {
+			const value = parseContextValue(long[2] ?? "", nextToken);
+			if (value === undefined) continue;
+			if (long[1] === "after") after = Math.max(after, value);
+			else before = Math.max(before, value);
+			continue;
+		}
+		const longBoth = /^--context(?:=(\d+))?$/.exec(token);
+		if (longBoth) {
+			const value = parseContextValue(longBoth[1] ?? "", nextToken);
+			if (value === undefined) continue;
+			before = Math.max(before, value);
+			after = Math.max(after, value);
+			continue;
+		}
+		// Bare numeric context form: `grep -3 pattern file`.
+		const bare = /^-(\d+)$/.exec(token);
+		if (bare) {
+			const value = parseContextValue(bare[1], undefined);
+			if (value === undefined) continue;
+			before = Math.max(before, value);
+			after = Math.max(after, value);
+			continue;
+		}
+		// Short flags, possibly clustered: the context flag must be LAST in the
+		// cluster because it consumes the remaining characters as its value.
+		const short = /^-[A-Za-z]*([ABC])(\d*)$/.exec(token);
+		if (!short) continue;
+		const value = parseContextValue(short[2], nextToken);
+		if (value === undefined) continue;
+		if (short[1] === "A") after = Math.max(after, value);
+		else if (short[1] === "B") before = Math.max(before, value);
+		else {
+			before = Math.max(before, value);
+			after = Math.max(after, value);
+		}
+	}
+	return { before, after };
+}
+
 function extractGrepSearchFiles(args: string[], cwd: string): string[] {
 	const files: string[] = [];
 	let patternSeen = false;
@@ -437,18 +512,38 @@ function parseGrepLineWithoutFile(
 function collectGrepCommandFiles(
 	command: string,
 	cwd: string,
-): { hasLineNumberGrep: boolean; files: Set<string> } {
+): {
+	hasLineNumberGrep: boolean;
+	files: Set<string>;
+	context: GrepContextLines;
+} {
 	const files = new Set<string>();
 	let hasLineNumberGrep = false;
+	// A command can chain several greps whose output all reaches the model, but
+	// the parsed hits carry no segment identity. Credit the SMALLEST context any
+	// contributing grep printed, so no line is credited that a hit from the
+	// narrowest grep never delivered.
+	let context: GrepContextLines | undefined;
 	for (const tokens of commandSegments(command)) {
 		const verb = path.basename(stripQuotes(tokens[0] ?? ""));
 		if (verb !== "grep" && verb !== "egrep" && verb !== "fgrep") continue;
 		const args = tokens.slice(1);
 		if (!grepHasLineNumbers(args)) continue;
 		hasLineNumberGrep = true;
+		const segmentContext = parseGrepContextLines(args);
+		context = context
+			? {
+					before: Math.min(context.before, segmentContext.before),
+					after: Math.min(context.after, segmentContext.after),
+				}
+			: segmentContext;
 		for (const file of extractGrepSearchFiles(args, cwd)) files.add(file);
 	}
-	return { hasLineNumberGrep, files };
+	return {
+		hasLineNumberGrep,
+		files,
+		context: context ?? { before: 0, after: 0 },
+	};
 }
 
 function dedupePushSearchRead(
@@ -494,10 +589,20 @@ export function extractGrepSearchReadsFromOutput(
 	cwd: string,
 	output: string,
 ): SearchReadLocation[] {
-	const { hasLineNumberGrep, files } = collectGrepCommandFiles(command, cwd);
+	const { hasLineNumberGrep, files, context } = collectGrepCommandFiles(
+		command,
+		cwd,
+	);
 	if (!hasLineNumberGrep) return [];
 	const singleFile = files.size === 1 ? [...files][0] : undefined;
-	return parseGrepOutputSearchReads(output, cwd, singleFile);
+	const locations = parseGrepOutputSearchReads(output, cwd, singleFile);
+	// Only the printed context lines were delivered to the model, so only they
+	// are credited. A bare grep credits its match line alone (#1904 item 2).
+	for (const loc of locations) {
+		loc.contextBefore = context.before;
+		loc.contextAfter = context.after;
+	}
+	return locations;
 }
 
 /**
@@ -531,7 +636,6 @@ export function extractWrittenPathsFromCommand(
 		// attach redirects, otherwise targets would be duplicated harmlessly but
 		// needlessly rescanned.
 		break;
-
 	}
 	for (const tokens of commandSegments(command)) {
 		if (tokens.length === 0) continue;
@@ -555,17 +659,37 @@ export function extractWrittenPathsFromCommand(
 		} else if (verb === "biome") {
 			const sub = args[0];
 			if ((sub === "format" || sub === "check") && args.includes("--write")) {
-				for (const file of formatterFileArgs(args, 1, new Set(["--config-path"]))) add(file);
+				for (const file of formatterFileArgs(
+					args,
+					1,
+					new Set(["--config-path"]),
+				))
+					add(file);
 			}
 		} else if (verb === "prettier" && args.includes("--write")) {
-			for (const file of formatterFileArgs(args, 0, new Set(["--config", "--ignore-path", "--parser", "--plugin"]))) add(file);
+			for (const file of formatterFileArgs(
+				args,
+				0,
+				new Set(["--config", "--ignore-path", "--parser", "--plugin"]),
+			))
+				add(file);
 		} else if (verb === "eslint" && args.includes("--fix")) {
-			for (const file of formatterFileArgs(args, 0, new Set(["--config", "--ignore-path", "--parser", "--plugin"]))) add(file);
+			for (const file of formatterFileArgs(
+				args,
+				0,
+				new Set(["--config", "--ignore-path", "--parser", "--plugin"]),
+			))
+				add(file);
 		} else if (verb === "ruff") {
 			const sub = args[0];
 			if (sub === "format" || args.includes("--fix")) {
 				const start = sub === "format" || sub === "check" ? 1 : 0;
-				for (const file of formatterFileArgs(args, start, new Set(["--config"]))) add(file);
+				for (const file of formatterFileArgs(
+					args,
+					start,
+					new Set(["--config"]),
+				))
+					add(file);
 			}
 		} else if (verb === "gofmt" && args.includes("-w")) {
 			for (const file of formatterFileArgs(args)) add(file);
@@ -574,14 +698,40 @@ export function extractWrittenPathsFromCommand(
 			// filesystem walk. Only explicit rustfmt operands after `--` are safe.
 			const separator = args.indexOf("--");
 			if (separator >= 0) {
-				for (const file of formatterFileArgs(args, separator + 1, new Set(["--edition", "--config-path"]))) add(file);
+				for (const file of formatterFileArgs(
+					args,
+					separator + 1,
+					new Set(["--edition", "--config-path"]),
+				))
+					add(file);
 			}
 		} else if (verb === "rustfmt") {
-			for (const file of formatterFileArgs(args, 0, new Set(["--edition", "--config-path"]))) add(file);
+			for (const file of formatterFileArgs(
+				args,
+				0,
+				new Set(["--edition", "--config-path"]),
+			))
+				add(file);
 		} else if (verb === "black") {
-			for (const file of formatterFileArgs(args, 0, new Set(["--config", "--exclude", "--include", "--line-length", "--target-version"]))) add(file);
+			for (const file of formatterFileArgs(
+				args,
+				0,
+				new Set([
+					"--config",
+					"--exclude",
+					"--include",
+					"--line-length",
+					"--target-version",
+				]),
+			))
+				add(file);
 		} else if (verb === "clang-format" && args.includes("-i")) {
-			for (const file of formatterFileArgs(args, 0, new Set(["--style", "--fallback-style", "--assume-filename"]))) add(file);
+			for (const file of formatterFileArgs(
+				args,
+				0,
+				new Set(["--style", "--fallback-style", "--assume-filename"]),
+			))
+				add(file);
 		} else if (verb === "dotnet" && args[0] === "format") {
 			// dotnet format is normally solution-scoped. `--include` is the one
 			// invocation form that provides attributable source paths.
@@ -590,7 +740,10 @@ export function extractWrittenPathsFromCommand(
 					for (const file of (args[i + 1] ?? "").split(",")) add(file);
 					i += 1;
 				} else if (args[i]?.startsWith("--include=")) {
-					for (const file of (args[i] ?? "").slice("--include=".length).split(",")) add(file);
+					for (const file of (args[i] ?? "")
+						.slice("--include=".length)
+						.split(","))
+						add(file);
 				}
 			}
 		} else if (verb === "git") {

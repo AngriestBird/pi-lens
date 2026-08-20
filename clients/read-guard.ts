@@ -36,6 +36,12 @@ export interface ReadRecord {
 	/** 1-indexed line → content hash captured at read time, used to ignore no-op mtime staleness. */
 	lineHashes?: Record<number, string>;
 	contentBinding?: ReadContentBinding;
+	/**
+	 * Set when the record came from a search hit rather than a real read (#1904).
+	 * States how many context lines were credited around the hit and why, so the
+	 * ledger shows whether coverage rests on lines the model saw or on slack.
+	 */
+	searchCredit?: SearchCredit;
 	turnIndex: number;
 	writeIndex: number;
 	timestamp: number;
@@ -46,6 +52,38 @@ export interface ReadRecord {
 	 */
 	source?: string;
 }
+
+/**
+ * Why a search-hit read credited the lines it did.
+ *  - `match-lines-only`: bare hit; only the printed match lines are credited.
+ *  - `delivered-context-flags`: the search command printed context (grep
+ *    `-A`/`-B`/`-C`), so those lines were delivered and are credited.
+ *  - `caller-margin`: the caller asked for explicit extra slack.
+ */
+export type SearchCreditReason =
+	| "match-lines-only"
+	| "delivered-context-flags"
+	| "caller-margin";
+
+export interface SearchCredit {
+	marginBefore: number;
+	marginAfter: number;
+	reason: SearchCreditReason;
+}
+
+/**
+ * The caller's actual handling of a range-snapshot verdict (#1904 item 1).
+ *  - `enforced-block`: the verdict blocked the edit.
+ *  - `bypassed-content-match`: the verdict said block, but the caller passed
+ *    `skipSnapshotCheck` because the edit was content-validated (oldText).
+ *  - `enforced-pass`: a hash-checked read matched, so the edit passed the gate.
+ *  - `not-decidable`: no candidate read could be hash-checked.
+ */
+export type RangeSnapshotOutcome =
+	| "enforced-block"
+	| "bypassed-content-match"
+	| "enforced-pass"
+	| "not-decidable";
 
 export interface ReadContentBinding {
 	hash: string;
@@ -159,6 +197,60 @@ const READ_HASH_MAX_LINES = Math.max(
  */
 const READ_BINDING_MAX_BYTES = 4 * 1024 * 1024;
 const READ_GUARD_MAX_FILES = 256;
+/**
+ * #1904 item 3: `enforceFileCap` bounds how many FILES the store holds, not how
+ * many records each file holds. One hot file reached 268 hash-bearing records in
+ * 75 minutes, and every record carries a `lineHashes` map, so a long session on
+ * a few files grows without bound. Cap records per file and drop oldest-first.
+ *
+ * Eviction is safe in the blocking direction: it narrows the staleness-rescue
+ * path — a stale edit rescued by an older snapshot that still matches — and can
+ * turn an allow into a "re-read and retry" block. It never turns a block into
+ * an allow. See `enforceRecordCapForFile` for which records go first, and why
+ * age alone is the wrong order.
+ */
+const READ_GUARD_MAX_RECORDS_PER_FILE = 128;
+
+/**
+ * Trim a single file's read list to the per-file cap. Returns how many records
+ * were dropped so the ledger can show the trim.
+ *
+ * Eviction is NOT purely by age. The shape that overflows this cap is
+ * read-once-then-grep-often: one whole-file read followed by hundreds of cheap
+ * search credits. Pure age order evicts that whole-file read first, and it is
+ * the record `canIgnoreStalenessByHashes` needs to rescue an edit after an
+ * unrelated mtime touch. So spend the search credits first, oldest among them
+ * first, and only fall through to genuine reads when the credits run out.
+ * Genuine reads are then evicted oldest-first as before.
+ *
+ * Records are trimmed IN PLACE: `EditRecord.precedingReads` holds a reference
+ * to this same array, so a replacement array would silently detach it.
+ */
+function enforceRecordCapForFile(records: ReadRecord[]): number {
+	if (records.length <= READ_GUARD_MAX_RECORDS_PER_FILE) return 0;
+	const excess = records.length - READ_GUARD_MAX_RECORDS_PER_FILE;
+	const evicted = new Set<number>();
+	for (let i = 0; i < records.length && evicted.size < excess; i++) {
+		if (records[i].searchCredit !== undefined) evicted.add(i);
+	}
+	for (let i = 0; i < records.length && evicted.size < excess; i++) {
+		evicted.add(i);
+	}
+	const kept = records.filter((_, i) => !evicted.has(i));
+	records.length = 0;
+	for (const record of kept) records.push(record);
+	return excess;
+}
+
+/**
+ * #1904 class sweep: `this.edits` is the same shape as `this.reads` — a
+ * per-file array that only ever grows. Its cap sits far above every consumer's
+ * reach, so trimming is inert: `canTreatStalenessAsOwnPriorEdit` reads only the
+ * last record, and `findRelocation`'s window saturates at
+ * RELOCATION_WINDOW_MAX / RELOCATION_WINDOW_PER_EDIT (20) applied edits. Only
+ * `getStats`, a debug surface, sees the older records at all.
+ */
+const READ_GUARD_MAX_EDITS_PER_FILE = 256;
 // Unconsumed reads remain valid until edit or session end, but this high
 // sanity cap prevents a read-only session from growing without bound.
 const READ_GUARD_MAX_UNCONSUMED_FILES = 4096;
@@ -385,7 +477,10 @@ export class ReadGuard {
 	private readonly reads = new Map<string, ReadRecord[]>();
 	private readonly edits = new Map<string, EditRecord[]>();
 	private readonly fileLastUsed = new Map<string, number>();
-	private readonly fileIdleTimers = new Map<string, ReturnType<typeof setTimeout>>();
+	private readonly fileIdleTimers = new Map<
+		string,
+		ReturnType<typeof setTimeout>
+	>();
 	/** Reads remain behavior-gating until the corresponding edit is published. */
 	private readonly consumedReadFiles = new Set<string>();
 	private readonly fileTime: FileTime;
@@ -441,8 +536,13 @@ export class ReadGuard {
 	}
 
 	private idleEvictMs(): number {
-		const value = Number.parseInt(process.env.PI_LENS_READ_GUARD_IDLE_EVICT_MS ?? "", 10);
-		return Number.isSafeInteger(value) && value > 0 ? value : READ_GUARD_IDLE_EVICT_MS_DEFAULT;
+		const value = Number.parseInt(
+			process.env.PI_LENS_READ_GUARD_IDLE_EVICT_MS ?? "",
+			10,
+		);
+		return Number.isSafeInteger(value) && value > 0
+			? value
+			: READ_GUARD_IDLE_EVICT_MS_DEFAULT;
 	}
 
 	private clearFileTimer(filePath: string): void {
@@ -471,13 +571,15 @@ export class ReadGuard {
 		this.clearFileTimer(filePath);
 		// An outstanding read is enforcement state, not a rebuildable cache entry.
 		// It must survive idle time and file-cap pressure until the edit consumes it.
-		if (this.reads.has(filePath) && !this.consumedReadFiles.has(filePath)) return;
+		if (this.reads.has(filePath) && !this.consumedReadFiles.has(filePath))
+			return;
 		const stamp = now;
 		const timer = setTimeout(() => {
 			if (this.fileLastUsed.get(filePath) !== stamp) return;
 			// Never turn an outstanding read into a zero-read block through idle
 			// eviction. Only consumed reads and rebuildable edit history may expire.
-			if (this.reads.has(filePath) && !this.consumedReadFiles.has(filePath)) return;
+			if (this.reads.has(filePath) && !this.consumedReadFiles.has(filePath))
+				return;
 			this.evictFile(filePath);
 		}, this.idleEvictMs());
 		timer.unref?.();
@@ -488,7 +590,10 @@ export class ReadGuard {
 		while (this.reads.size > READ_GUARD_MAX_FILES) {
 			const victim = [...this.reads.keys()]
 				.filter((filePath) => this.consumedReadFiles.has(filePath))
-				.sort((a, b) => (this.fileLastUsed.get(a) ?? 0) - (this.fileLastUsed.get(b) ?? 0))[0];
+				.sort(
+					(a, b) =>
+						(this.fileLastUsed.get(a) ?? 0) - (this.fileLastUsed.get(b) ?? 0),
+				)[0];
 			if (!victim) break;
 			this.evictFile(victim);
 		}
@@ -497,8 +602,7 @@ export class ReadGuard {
 				.filter((filePath) => !this.consumedReadFiles.has(filePath))
 				.sort(
 					(a, b) =>
-						(this.fileLastUsed.get(a) ?? 0) -
-						(this.fileLastUsed.get(b) ?? 0),
+						(this.fileLastUsed.get(a) ?? 0) - (this.fileLastUsed.get(b) ?? 0),
 				)[0];
 			if (!victim) break;
 			// This is a normal read miss: a later edit must require a fresh read,
@@ -519,7 +623,10 @@ export class ReadGuard {
 		// while the file is (presumably) still on disk, so a later
 		// hasKnownPath/forgetPath lookup after an external delete can still
 		// find this entry's real key.
-		this.knownPathIndex.set(normalizeEphemeralMapKey(record.filePath), filePath);
+		this.knownPathIndex.set(
+			normalizeEphemeralMapKey(record.filePath),
+			filePath,
+		);
 		const storedRecord: ReadRecord = {
 			...record,
 			filePath,
@@ -535,6 +642,11 @@ export class ReadGuard {
 		this.consumedReadFiles.delete(storedRecord.filePath);
 		arr.push(storedRecord);
 		this.reads.set(storedRecord.filePath, arr);
+		// Capture BEFORE the trim: `readCountForFile` saturates at the cap once
+		// eviction starts, so it stops showing growth. `rawReadCountForFile` keeps
+		// the real arrival count observable alongside `evictedRecordCount`.
+		const rawReadCountForFile = arr.length;
+		const evictedRecordCount = enforceRecordCapForFile(arr);
 		this.touchFile(storedRecord.filePath);
 		this.enforceFileCap();
 
@@ -558,6 +670,15 @@ export class ReadGuard {
 				hashLineCount: Object.keys(storedRecord.lineHashes ?? {}).length,
 				...(storedRecord.source !== undefined && {
 					source: storedRecord.source,
+				}),
+				...(storedRecord.searchCredit !== undefined && {
+					searchCreditReason: storedRecord.searchCredit.reason,
+					searchCreditMarginBefore: storedRecord.searchCredit.marginBefore,
+					searchCreditMarginAfter: storedRecord.searchCredit.marginAfter,
+				}),
+				...(evictedRecordCount > 0 && {
+					evictedRecordCount,
+					rawReadCountForFile,
 				}),
 			},
 		});
@@ -619,7 +740,8 @@ export class ReadGuard {
 		// Canonicalize once: every map lookup below (and every private helper this
 		// passes filePath to) must agree with how recordRead keyed the read.
 		filePath = this.key(filePath);
-		if (this.reads.has(filePath) || this.edits.has(filePath)) this.touchFile(filePath);
+		if (this.reads.has(filePath) || this.edits.has(filePath))
+			this.touchFile(filePath);
 
 		// Check exemptions
 		if (this.exemptions.has(filePath)) {
@@ -707,7 +829,9 @@ export class ReadGuard {
 				// and stronger than FileTime's coarse external-write signal, matching
 				// the skipSnapshotCheck exception at the later range-stale gate.
 				ignoredOldTextResolvedStaleness = true;
-			} else if (this.canTreatStalenessAsOwnPriorEdit(filePath, lastRead.timestamp)) {
+			} else if (
+				this.canTreatStalenessAsOwnPriorEdit(filePath, lastRead.timestamp)
+			) {
 				ignoredOwnEditStaleness = true;
 			} else if (
 				this.canIgnoreStalenessByHashes(
@@ -751,7 +875,11 @@ export class ReadGuard {
 
 		let viaSymbol = false;
 		for (const range of rangesToCheck) {
-			const snapshotValidation = this.validateRangeSnapshot(filePath, range);
+			const snapshotValidation = this.validateRangeSnapshot(
+				filePath,
+				range,
+				!!options?.skipSnapshotCheck,
+			);
 			const coverage = this.checkCoverage(filePath, range);
 			if (!coverage.covered) {
 				const lastRead = fileReads[fileReads.length - 1];
@@ -1230,6 +1358,12 @@ export class ReadGuard {
 	private validateRangeSnapshot(
 		filePath: string,
 		range: [number, number],
+		/**
+		 * What the CALLER will do with the verdict. `checkEdit` honours
+		 * `skipSnapshotCheck` for content-validated (oldText) edits, so a
+		 * `shouldBlock` verdict may never reach the gate (#1904 item 1).
+		 */
+		snapshotCheckSkipped: boolean,
 	): {
 		status: "match" | "mismatch" | "unavailable";
 		matchingReadIndex: number;
@@ -1302,6 +1436,18 @@ export class ReadGuard {
 			checkedCandidateCount > 0 &&
 			hashUnavailableCandidateCount === 0;
 
+		// `enforced` below states INTENT — whether this validation reached a
+		// decidable verdict. It says nothing about what the caller did with it.
+		// `outcome` states the caller's actual behaviour, which is what an
+		// enforcement rate must be computed from (#1904 item 1).
+		const outcome: RangeSnapshotOutcome = shouldBlock
+			? snapshotCheckSkipped
+				? "bypassed-content-match"
+				: "enforced-block"
+			: status === "match"
+				? "enforced-pass"
+				: "not-decidable";
+
 		logReadGuardEvent({
 			event: "range_snapshot_validation",
 			sessionId: this.sessionId,
@@ -1319,6 +1465,7 @@ export class ReadGuard {
 				missingLines: missingLines.slice(0, 20),
 				mismatchedLines: mismatchedLines.slice(0, 20),
 				enforced: shouldBlock || status === "match",
+				outcome,
 			},
 		});
 
@@ -1588,6 +1735,9 @@ export class ReadGuard {
 			reason: verdict.reason,
 			timestamp: Date.now(),
 		});
+		if (arr.length > READ_GUARD_MAX_EDITS_PER_FILE) {
+			arr.splice(0, arr.length - READ_GUARD_MAX_EDITS_PER_FILE);
+		}
 		this.edits.set(filePath, arr);
 	}
 
