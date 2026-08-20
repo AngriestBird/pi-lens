@@ -1,5 +1,9 @@
 # pi-lens — agent context
 
+Coverage markers are deduped per session by normalized kind, file, and the
+normalized silent-scanner set. A changed set admits a new marker, and a marker
+is appended after primary diagnostics so both remain visible.
+
 Post-fix decision observability is durable and bounded: advisory delivery logs
 one `advisory_provenance_decision` per consume, classic TypeScript project
 identity logs every success/failure outcome, deferred mutation drains summarize

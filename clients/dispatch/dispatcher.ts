@@ -528,7 +528,14 @@ function buildCoverageNotice(
 		...new Set(relevant.flatMap((r) => r.unconfirmedServerIds ?? [])),
 	];
 	if (unconfirmedServerIds.length > 0) {
-		const onceKey = `${ctx.kind}:${normalizeMapKey(ctx.filePath)}`;
+		// The marker describes this exact silent-scanner set. A scanner can
+		// recover while another goes dark on the same file, so the set belongs
+		// in the session dedupe identity rather than only kind and path.
+		const silentScannerSet = [...new Set(unconfirmedServerIds)]
+			.map(normalizeMapKey)
+			.sort()
+			.join(",");
+		const onceKey = `${ctx.kind}:${normalizeMapKey(ctx.filePath)}:${silentScannerSet}`;
 		if (coverageNoticeSeen.has(onceKey)) return undefined;
 		coverageNoticeSeen.add(onceKey);
 		const shown = unconfirmedServerIds.slice(0, 4);

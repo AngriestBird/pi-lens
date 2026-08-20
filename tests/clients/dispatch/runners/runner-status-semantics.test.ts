@@ -356,12 +356,25 @@ describe("runner status/semantic edge cases", () => {
 			const filePath = path.join(env.tmpDir, "main.ts");
 			fs.writeFileSync(filePath, "const x = 1;\n");
 			clearCoverageNoticeState();
-			touchFile.mockResolvedValue(
-				diagsResult([], {
-					confirmation: "partial",
-					unconfirmedServerIds: ["opengrep"],
-				}),
-			);
+			touchFile
+				.mockResolvedValueOnce(
+					diagsResult([], {
+						confirmation: "partial",
+						unconfirmedServerIds: ["opengrep"],
+					}),
+				)
+				.mockResolvedValueOnce(
+					diagsResult([], {
+						confirmation: "partial",
+						unconfirmedServerIds: ["opengrep"],
+					}),
+				)
+				.mockResolvedValueOnce(
+					diagsResult([], {
+						confirmation: "partial",
+						unconfirmedServerIds: ["ast-grep"],
+					}),
+				);
 			const registry = new RunnerRegistry();
 			registry.register(runner);
 			const groups = [{ mode: "all" as const, runnerIds: ["lsp"] }];
@@ -380,6 +393,53 @@ describe("runner status/semantic edge cases", () => {
 				registry,
 			);
 			expect(repeated.output).not.toContain("coverage: opengrep silent");
+
+			const changed = await dispatchForFile(
+				ctx(filePath, env.tmpDir) as never,
+				groups,
+				registry,
+			);
+			expect(changed.output).toContain("coverage: ast-grep silent");
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("renders a primary diagnostic and its scanner coverage marker together (#1867 F2)", async () => {
+		const runner = (await import("../../../../clients/dispatch/runners/lsp.js"))
+			.default;
+		const { clearCoverageNoticeState, dispatchForFile, RunnerRegistry } =
+			await import("../../../../clients/dispatch/dispatcher.js");
+		const env = setupTestEnvironment("pi-lens-lsp-agent-coverage-primary-");
+		try {
+			const filePath = path.join(env.tmpDir, "main.ts");
+			fs.writeFileSync(filePath, "const x = 1;\n");
+			clearCoverageNoticeState();
+			codeAction.mockResolvedValue([]);
+			touchFile.mockResolvedValue(
+				diagsResult(
+					[
+						{
+							severity: 1,
+							message: "Type error",
+							range: {
+								start: { line: 0, character: 0 },
+								end: { line: 0, character: 5 },
+							},
+						},
+					],
+					{ confirmation: "partial", unconfirmedServerIds: ["opengrep"] },
+				),
+			);
+			const registry = new RunnerRegistry();
+			registry.register(runner);
+			const result = await dispatchForFile(
+				ctx(filePath, env.tmpDir) as never,
+				[{ mode: "all" as const, runnerIds: ["lsp"] }],
+				registry,
+			);
+			expect(result.output).toContain("Type error");
+			expect(result.output).toContain("coverage: opengrep silent");
 		} finally {
 			env.cleanup();
 		}
