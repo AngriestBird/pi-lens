@@ -1,6 +1,8 @@
 id: no-unsafe-dictionary-any
 language: TypeScript
 severity: error
+metadata:
+  category: pi-lens-self-scan
 message: "Record<K, any> — the value type gives callers no contract; use Record<K, unknown> or a real value type"
 note: |
   Adapted from dmmulroy/anti-slop's `no-unsafe-dictionary-type`
