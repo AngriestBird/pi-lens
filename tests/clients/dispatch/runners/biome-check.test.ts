@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+	biomeRuleNameFromCategory,
 	normalizeBiomeSeverity,
 	parseBiomeJson as parseBiomeJsonImpl,
 } from "../../../../clients/dispatch/runners/biome-check.js";
@@ -32,7 +33,7 @@ describe("biome-check JSON parser", () => {
 						category: "noShadow",
 						message: "Do not shadow variables",
 						location: {
-							source: "test.ts",
+							path: "test.ts",
 							start: { line: 10, column: 5 },
 							end: { line: 10, column: 8 },
 						},
@@ -67,7 +68,7 @@ describe("biome-check JSON parser", () => {
 						category: "preferOptionalChain",
 						message: "Use optional chaining instead",
 						location: {
-							source: "test.ts",
+							path: "test.ts",
 							start: { line: 5, column: 10 },
 							end: { line: 5, column: 20 },
 						},
@@ -90,7 +91,7 @@ describe("biome-check JSON parser", () => {
 						category: "noUnusedVariables",
 						message: "Unused variable",
 						location: {
-							source: "test.ts",
+							path: "test.ts",
 							start: { line: 1, column: 1 },
 							end: { line: 1, column: 5 },
 						},
@@ -100,7 +101,7 @@ describe("biome-check JSON parser", () => {
 						category: "noConsole",
 						message: "Do not use console",
 						location: {
-							source: "test.ts",
+							path: "test.ts",
 							start: { line: 2, column: 1 },
 							end: { line: 2, column: 8 },
 						},
@@ -140,7 +141,7 @@ describe("biome-check JSON parser", () => {
 						category: "e1",
 						message: "Error",
 						location: {
-							source: "f",
+							path: "f",
 							start: { line: 1, column: 1 },
 							end: { line: 1, column: 1 },
 						},
@@ -150,7 +151,7 @@ describe("biome-check JSON parser", () => {
 						category: "w1",
 						message: "Warning",
 						location: {
-							source: "f",
+							path: "f",
 							start: { line: 2, column: 1 },
 							end: { line: 2, column: 1 },
 						},
@@ -160,7 +161,7 @@ describe("biome-check JSON parser", () => {
 						category: "i1",
 						message: "Info",
 						location: {
-							source: "f",
+							path: "f",
 							start: { line: 3, column: 1 },
 							end: { line: 3, column: 1 },
 						},
@@ -170,7 +171,7 @@ describe("biome-check JSON parser", () => {
 						category: "h1",
 						message: "Hint",
 						location: {
-							source: "f",
+							path: "f",
 							start: { line: 4, column: 1 },
 							end: { line: 4, column: 1 },
 						},
@@ -203,7 +204,7 @@ describe("biome-check JSON parser", () => {
 						category: "i1",
 						message: "Info",
 						location: {
-							source: "f",
+							path: "f",
 							start: { line: 1, column: 1 },
 							end: { line: 1, column: 1 },
 						},
@@ -213,7 +214,7 @@ describe("biome-check JSON parser", () => {
 						category: "h1",
 						message: "Hint",
 						location: {
-							source: "f",
+							path: "f",
 							start: { line: 2, column: 1 },
 							end: { line: 2, column: 1 },
 						},
@@ -234,7 +235,7 @@ describe("biome-check JSON parser", () => {
 						category: "noHardcodedCredentials",
 						message: "Hardcoded credentials",
 						location: {
-							source: "config.ts",
+							path: "config.ts",
 							start: { line: 42, column: 15 },
 							end: { line: 42, column: 30 },
 						},
@@ -245,6 +246,165 @@ describe("biome-check JSON parser", () => {
 			const result = parseBiomeJson(biomeOutput, "/project/config.ts");
 
 			expect(result[0].id).toBe("biome:noHardcodedCredentials:42");
+		});
+	});
+
+	describe("biomeRuleNameFromCategory", () => {
+		it("extracts the bare rule name from a lint category", () => {
+			expect(biomeRuleNameFromCategory("lint/style/useConst")).toBe(
+				"useConst",
+			);
+			expect(
+				biomeRuleNameFromCategory("lint/suspicious/noDuplicateObjectKeys"),
+			).toBe("noDuplicateObjectKeys");
+		});
+
+		it("returns undefined for a non-lint category", () => {
+			// e.g. `assist/source/organizeImports` from `biome check` (never
+			// produced by the `lint` command this runner invokes) or an
+			// internal pseudo-category.
+			expect(
+				biomeRuleNameFromCategory("assist/source/organizeImports"),
+			).toBeUndefined();
+			expect(biomeRuleNameFromCategory(undefined)).toBeUndefined();
+			expect(biomeRuleNameFromCategory("")).toBeUndefined();
+		});
+	});
+
+	describe("parseBiomeJson fixability (#1810)", () => {
+		// Real `biome lint --reporter=json` output, captured 2026-08-20 against
+		// the shipped @biomejs/biome 2.5.7 binary (satisfies package.json's
+		// ^2.4.10) via `node_modules/.bin/biome lint --reporter=json
+		// --config-path=config/biome/core.jsonc`. Confirms the real shape: no
+		// `tags` field, and `location.path` (not `location.source`).
+		const REAL_USE_CONST_OUTPUT = JSON.stringify({
+			summary: {
+				changed: 0,
+				unchanged: 1,
+				matches: 0,
+				errors: 1,
+				warnings: 0,
+				infos: 0,
+			},
+			diagnostics: [
+				{
+					severity: "error",
+					message: "This let declares a variable that is only assigned once.",
+					category: "lint/style/useConst",
+					location: {
+						path: "src/example.ts",
+						start: { line: 1, column: 1 },
+						end: { line: 1, column: 4 },
+					},
+					advices: [
+						{
+							start: { line: 1, column: 5 },
+							end: { line: 1, column: 6 },
+							text: "Safe fix: Use const instead.",
+						},
+					],
+				},
+			],
+			command: "lint",
+		});
+
+		it("carries no `tags` field on a real diagnostic and never crashes reading location.path", () => {
+			const parsed = JSON.parse(REAL_USE_CONST_OUTPUT);
+			expect(parsed.diagnostics[0].tags).toBeUndefined();
+			expect(parsed.diagnostics[0].location.source).toBeUndefined();
+			expect(parsed.diagnostics[0].location.path).toBe("src/example.ts");
+
+			const result = parseBiomeJsonImpl(
+				REAL_USE_CONST_OUTPUT,
+				"/project/src/example.ts",
+			);
+			expect(result.diagnostics).toHaveLength(1);
+			expect(result.diagnostics[0].line).toBe(1);
+			expect(result.diagnostics[0].column).toBe(1);
+		});
+
+		it("marks a diagnostic fixable when its rule resolves to a safe fix", () => {
+			const fixKindByRule = new Map([["useConst", "safe" as const]]);
+			const result = parseBiomeJsonImpl(
+				REAL_USE_CONST_OUTPUT,
+				"/project/src/example.ts",
+				fixKindByRule,
+			);
+
+			expect(result.diagnostics[0].fixable).toBe(true);
+			expect(result.diagnostics[0].autoFixAvailable).toBe(true);
+			expect(result.diagnostics[0].fixKind).toBe("pipeline");
+		});
+
+		it("marks fixable but NOT auto-fixable when the rule's fix is unsafe", () => {
+			const biomeOutput = JSON.stringify({
+				diagnostics: [
+					{
+						severity: "error",
+						message: "Template literals are preferred.",
+						category: "lint/style/useTemplate",
+						location: {
+							path: "src/example.ts",
+							start: { line: 2, column: 11 },
+							end: { line: 2, column: 18 },
+						},
+					},
+				],
+			});
+			const fixKindByRule = new Map([["useTemplate", "unsafe" as const]]);
+			const result = parseBiomeJsonImpl(
+				biomeOutput,
+				"/project/src/example.ts",
+				fixKindByRule,
+			);
+
+			expect(result.diagnostics[0].fixable).toBe(true);
+			// The pipeline's own biomeClient.fixFileAsync never passes --unsafe
+			// (clients/biome-client.ts), so an unsafe fix must never be offered
+			// as something the post-write pipeline will silently apply.
+			expect(result.diagnostics[0].autoFixAvailable).toBe(false);
+			expect(result.diagnostics[0].fixKind).toBe("pipeline");
+		});
+
+		it("stays not-fixable when the rule genuinely has no fix", () => {
+			const biomeOutput = JSON.stringify({
+				diagnostics: [
+					{
+						severity: "error",
+						message: "This condition always evaluates to the same value.",
+						category: "lint/correctness/noConstantCondition",
+						location: {
+							path: "src/example.ts",
+							start: { line: 5, column: 5 },
+							end: { line: 5, column: 9 },
+						},
+					},
+				],
+			});
+			const fixKindByRule = new Map([
+				["noConstantCondition", "none" as const],
+			]);
+			const result = parseBiomeJsonImpl(
+				biomeOutput,
+				"/project/src/example.ts",
+				fixKindByRule,
+			);
+
+			expect(result.diagnostics[0].fixable).toBe(false);
+			expect(result.diagnostics[0].autoFixAvailable).toBe(false);
+			expect(result.diagnostics[0].fixKind).toBeUndefined();
+		});
+
+		it("stays not-fixable (never crashes) when no fixKind map is supplied at all", () => {
+			// Mutation-proofing: deleting the fixKindByRule wiring must not make
+			// every diagnostic silently "fixable" — it must fall back to the old
+			// permanently-false baseline, not the opposite failure mode.
+			const result = parseBiomeJsonImpl(
+				REAL_USE_CONST_OUTPUT,
+				"/project/src/example.ts",
+			);
+			expect(result.diagnostics[0].fixable).toBe(false);
+			expect(result.diagnostics[0].autoFixAvailable).toBe(false);
 		});
 	});
 
