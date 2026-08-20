@@ -36,6 +36,7 @@ function makeDeps(files: Map<string, FakeFile>, now: () => number) {
 			now,
 			resync: async (filePath: string, content: string) => {
 				resynced.push({ filePath, content });
+				return true;
 			},
 			onDrift: (event: {
 				filePath: string;
@@ -124,6 +125,24 @@ describe("DocumentDriftTracker (#1783)", () => {
 		expect(result.candidates).toBe(1);
 		expect(result.resynced).toBe(1);
 		expect(resynced[0]?.content).toBe("const b = 1;\nconst c = 2;\n");
+	});
+
+	it("does not flag a file whose mtime differs only by the sub-ms fraction", async () => {
+		// stat.mtimeMs carries a fraction; Date.now() does not. A file written in
+		// the same millisecond as its sync must not read as drifted forever.
+		const files = new Map<string, FakeFile>([
+			[k("/repo/frac.ts"), { content: "same\n", mtimeMs: SYNCED_AT + 0.1006 }],
+		]);
+		const tracker = new DocumentDriftTracker();
+		tracker.recordSynced(k("/repo/frac.ts"), "same\n", SYNCED_AT);
+		clock = SYNCED_AT + 1_000;
+		const { deps, events } = makeDeps(files, now);
+
+		const result = await tracker.sweep(deps, { force: true });
+
+		expect(result.checked).toBe(1);
+		expect(result.candidates).toBe(0);
+		expect(events).toEqual([]);
 	});
 
 	it("sends nothing when the stat moved but the bytes are identical", async () => {
@@ -296,11 +315,88 @@ describe("DocumentDriftTracker (#1783)", () => {
 		};
 		const first = await tracker.sweep(failing, { force: true });
 		expect(first.resynced).toBe(0);
+		expect(first.failed).toBe(1);
 		clock += 20_000;
 		await tracker.sweep(deps, { force: true });
 
 		expect(attempts).toBe(1);
 		expect(tracker.peek(k("/repo/h.ts"))?.fingerprint).toContain("v1");
+	});
+
+	it("settles a healed file against the observed mtime, so it is not re-read forever", async () => {
+		// A future mtime is the general case of "the stamp must close over the
+		// disk state we saw": stamping with the wall clock alone leaves the record
+		// behind the mtime, and every later pass re-reads the file for nothing.
+		const files = new Map<string, FakeFile>([
+			[k("/repo/settle.ts"), { content: "v1\n", mtimeMs: SYNCED_AT + 5_000 }],
+		]);
+		const tracker = new DocumentDriftTracker();
+		tracker.recordSynced(k("/repo/settle.ts"), "v0\n", SYNCED_AT);
+		clock = SYNCED_AT + 1_000;
+		const { deps } = makeDeps(files, now);
+
+		const first = await tracker.sweep(deps, { force: true });
+		expect(first.resynced).toBe(1);
+
+		clock = SYNCED_AT + 2_000;
+		const second = await tracker.sweep(deps, { force: true });
+
+		expect(second.checked).toBe(1);
+		expect(second.candidates).toBe(0);
+	});
+
+	it("treats a resync that returns false as failed, not healed", async () => {
+		const files = new Map<string, FakeFile>([
+			[k("/repo/j.ts"), { content: "v1\n", mtimeMs: SYNCED_AT + 5 }],
+		]);
+		const tracker = new DocumentDriftTracker();
+		tracker.recordSynced(k("/repo/j.ts"), "v0\n", SYNCED_AT);
+		clock = SYNCED_AT + 1_000;
+		const { deps, events } = makeDeps(files, now);
+
+		// The push returned without throwing, but one view never received the
+		// content. Recording a heal here is the lie F3 exists to prevent.
+		const result = await tracker.sweep(
+			{ ...deps, resync: async () => false },
+			{ force: true },
+		);
+
+		expect(result.resynced).toBe(0);
+		expect(result.failed).toBe(1);
+		expect(events.map((e) => e.disposition)).toEqual(["failed"]);
+		expect(tracker.peek(k("/repo/j.ts"))?.fingerprint).toContain("v0");
+	});
+
+	it("emits the resynced record only AFTER the push landed", async () => {
+		const files = new Map<string, FakeFile>([
+			[k("/repo/order.ts"), { content: "v1\n", mtimeMs: SYNCED_AT + 5 }],
+		]);
+		const tracker = new DocumentDriftTracker();
+		tracker.recordSynced(k("/repo/order.ts"), "v0\n", SYNCED_AT);
+		clock = SYNCED_AT + 1_000;
+		const { deps, events } = makeDeps(files, now);
+		const order: string[] = [];
+
+		await tracker.sweep(
+			{
+				...deps,
+				resync: async () => {
+					order.push("push");
+					return true;
+				},
+				onDrift: (event) => {
+					order.push(`emit:${event.disposition}`);
+					events.push({
+						filePath: event.filePath,
+						disposition: event.disposition,
+						driftAgeMs: event.driftAgeMs,
+					});
+				},
+			},
+			{ force: true },
+		);
+
+		expect(order).toEqual(["push", "emit:resynced"]);
 	});
 
 	it("caps the tracked set and evicts the least recently synced", () => {

@@ -38,6 +38,22 @@
  * this design exists to avoid. The disk-binding contentHash on the read path
  * (`diagnostic-binding.ts`) remains the check for that case.
  *
+ * ## The record is per FILE, so it must claim only full coverage
+ *
+ * A file can be open on several servers at once: the primary language server
+ * plus the cross-cutting auxiliary scanners. One record per file therefore
+ * means one claim about ALL of them. `LSPService.recordFullyCoveredSync` only
+ * stamps when every server that currently holds the document was targeted by
+ * the sync AND every one of those writes landed. A primary-only touch while an
+ * auxiliary holds the document writes nothing, and neither does a touch where
+ * one server's write timed out.
+ *
+ * The resync is the mirror image: it targets every live client holding the
+ * document, so a heal cannot leave one view behind and then stamp the file as
+ * current. On a partial sync the OLD record survives, with an older timestamp
+ * and an older fingerprint, so the document stays eligible instead of going
+ * invisible.
+ *
  * ## Cost and pacing
  *
  * One `stat` per tracked document per pass, at most {@link DRIFT_CHECK_BATCH}
@@ -67,13 +83,25 @@ export interface SyncedDocumentRecord {
 	readonly size: number;
 	/** Fingerprint of that content. Confirms a stat candidate before a resync. */
 	readonly fingerprint: string;
-	/** Wall clock when it landed. The mtime half of the key compares to this. */
+	/**
+	 * The mtime half of the key compares against this.
+	 *
+	 * It is the moment the caller STARTED the sync, not the moment the notify
+	 * write landed. The write can take up to the notify budget, and an untracked
+	 * edit inside that window would be stamped as already-synchronized and stay
+	 * invisible forever. Anchoring on the start — within a millisecond or two of
+	 * the caller's own read of the file — narrows the blind window to the
+	 * caller's read-to-sync gap, which is the smallest this design can make it
+	 * without the caller passing its read timestamp down.
+	 */
 	readonly syncedAt: number;
 }
 
 export type DriftDisposition =
-	/** Stat diverged and the content really changed; a resync was issued. */
+	/** Stat diverged, the content really changed, and the resync completed. */
 	| "resynced"
+	/** The resync was attempted and threw; the old record is kept for a retry. */
+	| "failed"
 	/** Stat diverged but the bytes are identical; the record was re-stamped. */
 	| "unchanged"
 	/** The file is gone or unreadable; the record was dropped. */
@@ -90,6 +118,8 @@ export interface DriftSweepResult {
 	readonly candidates: number;
 	/** Documents actually resynchronized. */
 	readonly resynced: number;
+	/** Resyncs that threw. The old record is kept, so a later pass retries. */
+	readonly failed: number;
 	/** Divergences that turned out to be identical bytes. */
 	readonly unchanged: number;
 	/** Divergences left for a later pass by the per-pass resync cap. */
@@ -106,6 +136,7 @@ const SKIPPED: DriftSweepResult = {
 	checked: 0,
 	candidates: 0,
 	resynced: 0,
+	failed: 0,
 	unchanged: 0,
 	deferred: 0,
 	vanished: 0,
@@ -130,8 +161,20 @@ export function driftCheckIntervalMs(): number {
 }
 
 export interface DriftSweepDeps {
-	/** Re-push disk content to the servers holding this document open. */
-	resync(filePath: string, content: string, driftAgeMs: number): Promise<void>;
+	/**
+	 * Re-push disk content to the servers holding this document open.
+	 *
+	 * Returns whether every one of those views now holds this content. A push
+	 * whose notify write was rejected or timed out returns `false`: the caller
+	 * that owns the sync path swallows those failures to keep an edit moving, so
+	 * "the call returned" is not evidence the heal happened. A `false` (or a
+	 * throw) keeps the OLD record, so a later pass retries.
+	 */
+	resync(
+		filePath: string,
+		content: string,
+		driftAgeMs: number,
+	): Promise<boolean>;
 	/**
 	 * Does a live language server still hold this document open? A record for a
 	 * document nobody holds is dropped, never resynced — that is what keeps the
@@ -167,9 +210,11 @@ export class DocumentDriftTracker {
 	}
 
 	/**
-	 * Record content that actually landed on a language server. Called from the
-	 * same place the touch-debounce entry is written, so a write that timed out
-	 * or rejected leaves no record and the document stays eligible for a resync.
+	 * Record content that landed on EVERY server holding this document.
+	 *
+	 * The caller owns that coverage judgement — see
+	 * `LSPService.recordFullyCoveredSync`. `now` is the moment the sync STARTED,
+	 * not the moment its write landed; see {@link SyncedDocumentRecord.syncedAt}.
 	 */
 	recordSynced(filePath: string, content: string, now = Date.now()): void {
 		const key = normalizeMapKey(filePath);
@@ -284,7 +329,11 @@ export class DocumentDriftTracker {
 
 		let candidates = 0;
 		let vanished = 0;
-		const drifted: Array<{ key: string; record: SyncedDocumentRecord }> = [];
+		const drifted: Array<{
+			key: string;
+			record: SyncedDocumentRecord;
+			mtimeMs: number;
+		}> = [];
 		for (const entry of stats) {
 			const record = this.synced.get(entry.key);
 			if (!record) continue;
@@ -302,16 +351,30 @@ export class DocumentDriftTracker {
 			}
 			// The paired key. Either half alone leaves a real edit undetected.
 			const sizeMoved = entry.stat.size !== record.size;
-			const mtimeMoved = entry.stat.mtimeMs > record.syncedAt;
+			// `Math.floor` because the two clocks have different resolutions:
+			// `stat.mtimeMs` carries a sub-millisecond fraction (…972.1006) while
+			// `Date.now()` is a whole millisecond (…972). Comparing them raw makes
+			// EVERY file written in the same millisecond as its sync a permanent
+			// candidate — a read of that file on every pass, forever, for a
+			// difference of 0.1ms. Flooring costs a blind window of at most one
+			// millisecond, which is inside the read-to-sync gap this key already
+			// cannot see into. Coarse filesystems (FAT 2s, HFS+ 1s) round mtime
+			// DOWN, so they never produce the opposite error.
+			const mtimeMoved = Math.floor(entry.stat.mtimeMs) > record.syncedAt;
 			if (!sizeMoved && !mtimeMoved) continue;
 			candidates += 1;
-			drifted.push({ key: entry.key, record });
+			drifted.push({
+				key: entry.key,
+				record,
+				mtimeMs: entry.stat.mtimeMs,
+			});
 		}
 
 		let resynced = 0;
+		let failed = 0;
 		let unchanged = 0;
 		let deferred = 0;
-		for (const { key, record } of drifted) {
+		for (const { key, record, mtimeMs } of drifted) {
 			const driftAgeMs = Math.max(0, now() - record.syncedAt);
 			if (resynced >= DRIFT_RESYNC_BATCH) {
 				// Paced, not dropped: the cursor already advanced past this file, but
@@ -338,7 +401,7 @@ export class DocumentDriftTracker {
 				// Touched, not changed. Re-stamp so the next pass stops flagging it,
 				// and send nothing: the server's view is already correct.
 				unchanged += 1;
-				this.recordSynced(key, content, now());
+				this.recordSynced(key, content, settledStamp(now(), mtimeMs));
 				deps.onDrift?.({
 					filePath: key,
 					driftAgeMs,
@@ -348,29 +411,55 @@ export class DocumentDriftTracker {
 				});
 				continue;
 			}
+			// Serial on purpose. See the pacing note in this module's header.
+			// The record is emitted AFTER the await, with the outcome the resync
+			// actually had: emitting "resynced" up front logged a completed heal for
+			// a push that then threw, which is exactly the lie a bounded record
+			// exists to prevent.
+			const diskSize = Buffer.byteLength(content, "utf8");
+			let landed = false;
+			try {
+				landed = await deps.resync(key, content, driftAgeMs);
+			} catch {
+				landed = false;
+			}
+			if (!landed) {
+				// A failed resync leaves the OLD record in place, so the next pass
+				// retries this file instead of recording a heal that never happened.
+				failed += 1;
+				deps.onDrift?.({
+					filePath: key,
+					driftAgeMs,
+					disposition: "failed",
+					syncedSize: record.size,
+					diskSize,
+				});
+				continue;
+			}
+			resynced += 1;
+			// Stamp AUTHORITATIVELY, over whatever the sync path recorded. The sync
+			// path anchors on its own start time, which can sit BEHIND the disk mtime
+			// it is reacting to — deliberately, so an edit inside the sync window is
+			// still visible. Left alone, that same record makes this file a candidate
+			// on every later pass: a read per pass, forever, for a heal that already
+			// happened. `settledStamp` closes it against the mtime this pass actually
+			// observed, so a converged file stops being re-read and only a NEWER
+			// mtime reopens it.
+			this.recordSynced(key, content, settledStamp(now(), mtimeMs));
 			deps.onDrift?.({
 				filePath: key,
 				driftAgeMs,
 				disposition: "resynced",
 				syncedSize: record.size,
-				diskSize: Buffer.byteLength(content, "utf8"),
+				diskSize,
 			});
-			// Serial on purpose. See the pacing note in this module's header.
-			try {
-				await deps.resync(key, content, driftAgeMs);
-			} catch {
-				// A failed resync leaves the OLD record in place, so the next pass
-				// retries this file instead of recording a heal that never happened.
-				continue;
-			}
-			resynced += 1;
-			this.recordSynced(key, content, now());
 		}
 
 		return {
 			checked: batch.length,
 			candidates,
 			resynced,
+			failed,
 			unchanged,
 			deferred,
 			vanished,
@@ -378,6 +467,18 @@ export class DocumentDriftTracker {
 			tracked,
 		};
 	}
+}
+
+/**
+ * The timestamp that settles a record against the disk state just observed.
+ *
+ * `Math.ceil` because `stat.mtimeMs` carries a sub-millisecond fraction that
+ * `Date.now()` does not have, and `Math.max` because the clock may already be
+ * past that mtime. The result is the smallest timestamp for which the drift
+ * key reads "in sync" for exactly this disk state and nothing newer.
+ */
+function settledStamp(now: number, observedMtimeMs: number): number {
+	return Math.max(now, Math.ceil(observedMtimeMs));
 }
 
 async function defaultStat(
