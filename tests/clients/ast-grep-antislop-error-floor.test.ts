@@ -32,13 +32,14 @@ const ANTI_SLOP_TIERS: ReadonlyArray<readonly [string, string]> = [
 	["no-bare-object-param", "error"],
 	["no-chained-type-assertions", "error"],
 	["require-safety-comment-for-as-unknown-as", "error"],
+	["no-unknown-laundering", "error"],
+	["no-unknown-returns", "error"],
 	// Considered for the floor on 2026-08-20 and deliberately left at hint.
 	// Each rule's note carries the four-corpus census behind that decision.
 	["no-known-value-widening", "hint"],
 	["no-runtime-typeof", "hint"],
 	["no-shape-in-symbol-names", "hint"],
 	["no-unknown-parameters", "hint"],
-	["no-unknown-returns", "hint"],
 	["no-unsafe-dictionary-unknown", "hint"],
 ];
 
@@ -70,6 +71,8 @@ describe("anti-slop severity tiers (#1727, #1777)", () => {
 		expect(notWired).toEqual([]);
 		expect(selfScanned.has("require-safety-comment-for-as-unknown-as")).toBe(true);
 		expect(selfScanned.has("no-chained-type-assertions")).toBe(true);
+		expect(selfScanned.has("no-unknown-laundering")).toBe(true);
+		expect(selfScanned.has("no-unknown-returns")).toBe(true);
 	});
 
 	it("no hint-tier anti-slop rule is wired into the self-scan", () => {
