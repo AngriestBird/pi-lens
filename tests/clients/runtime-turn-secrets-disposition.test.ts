@@ -441,3 +441,98 @@ describe("turn_end govulncheck advisory honors dispositions (#1694 F1)", () => {
 		}
 	});
 });
+
+// #1813: trivy's own dependency-CVE lane (`TrivyResult.findings`, distinct
+// from the trivy-secret lane covered by #1628 above) has the SAME
+// `filterFindingsByDisposition` wiring (`trivyFindingsFiltered`,
+// runtime-turn.ts:1516-1523) but was never pinned. The #1798 delta-verify
+// proved the gap: neutering `trivyFindingsFiltered.kept` back to the raw
+// `trivyCacheEntry?.data?.findings ?? []` left 407 tests across 18 files
+// green. Unlike the five lanes already covered, this one carries no
+// freshness gate (#1634 — a CVE names a package, not a `file:line`, so
+// `gateFindingsByPathFreshness` has nothing to stat) and can render at
+// either the CRITICAL blocker tier or the advisory tier; this test drives
+// the CRITICAL blocker tier since that is the sharper regression to miss.
+describe("turn_end trivy CVE advisory honors dispositions (#1813)", () => {
+	it("re-reports a trivy CVE as a CRITICAL blocker when unmarked, then drops it once marked false-positive", async () => {
+		const env = setupTestEnvironment("pi-lens-turnend-trivy-cve-");
+		try {
+			const cwd = env.tmpDir;
+			// The CVE finding itself anchors on a manifest/lockfile (`target`),
+			// not a source file — but handleTurnEnd short-circuits when nothing
+			// was touched this turn, so a real edited file still has to be
+			// registered to run the findings pipeline (same technique the
+			// gitleaks/govulncheck cases above use).
+			const filePath = path.join(cwd, "app.ts");
+			fs.writeFileSync(filePath, "export const x = 1;\n");
+			const target = "package-lock.json";
+			const targetPath = path.resolve(cwd, target);
+
+			const cacheManager = new CacheManager(false);
+			cacheManager.addModifiedRange(filePath, { start: 1, end: 1 }, false, cwd);
+			cacheManager.writeCache(
+				"trivy",
+				{
+					success: true,
+					scannedAt: new Date().toISOString(),
+					findings: [
+						{
+							vulnerabilityId: "CVE-2024-9999",
+							pkgName: "left-pad",
+							installedVersion: "1.0.0",
+							fixedVersion: "1.0.1",
+							severity: "CRITICAL",
+							target,
+						},
+					],
+					secrets: [],
+					licenses: [],
+				},
+				cwd,
+			);
+
+			// Baseline: unmarked finding IS a CRITICAL blocker.
+			const runtimeBefore = new RuntimeCoordinator();
+			await handleTurnEnd(makeTurnEndDeps(runtimeBefore, cacheManager, cwd));
+			const before = consumeTurnEndFindings(cacheManager, cwd);
+			const beforeContent = before?.messages[0]?.content ?? "";
+			expect(beforeContent).toContain("STOP — CRITICAL dependency CVEs");
+			expect(beforeContent).toContain("CVE-2024-9999");
+
+			// Mark it false-positive using the SAME identity
+			// `trivyFindingToProjectDiagnostic` derives (tool="trivy",
+			// rule="trivy:<vulnerabilityId>", message
+			// "<severity> vulnerability <id> in <pkg>@<version> (fixed in <fixed>)")
+			// — what an agent would have gotten from lens_diagnostics and fed
+			// straight into lens_diagnostic_mark. No line/content: a CVE finding
+			// has no source line, so the strict anchor falls back to its stable
+			// empty-content hash.
+			markDisposition(
+				cwd,
+				{
+					cwd,
+					filePath: targetPath,
+					tool: "trivy",
+					rule: "trivy:CVE-2024-9999",
+					message:
+						"CRITICAL vulnerability CVE-2024-9999 in left-pad@1.0.0 (fixed in 1.0.1)",
+				},
+				"false-positive",
+			);
+
+			cacheManager.addModifiedRange(filePath, { start: 1, end: 1 }, false, cwd);
+			const runtimeAfter = new RuntimeCoordinator();
+			await handleTurnEnd(makeTurnEndDeps(runtimeAfter, cacheManager, cwd));
+			const after = consumeTurnEndFindings(cacheManager, cwd);
+			const afterContent = after?.messages[0]?.content ?? "";
+			expect(afterContent).not.toContain("CVE-2024-9999");
+			expect(afterContent).not.toContain("STOP — CRITICAL dependency CVEs");
+			// #1616 suppressed-bucket rule: the drop must stay visible as a
+			// trace, with per-lane attribution (#1625 review round F4).
+			expect(afterContent).toContain("suppressed by disposition");
+			expect(afterContent).toContain("trivy 1");
+		} finally {
+			env.cleanup();
+		}
+	});
+});
