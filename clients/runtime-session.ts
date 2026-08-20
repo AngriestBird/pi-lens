@@ -51,6 +51,7 @@ import type { OpengrepClient, OpengrepResult } from "./opengrep-client.js";
 import { resetManagedToolRefreshSession } from "./installer/managed-tool-refresh-session.js";
 import { resetResolvedPathCache } from "./installer/index.js";
 import { _resetPackageManagerCache } from "./package-manager.js";
+import { clearFormatterCache } from "./formatters.js";
 import { isAtOrAboveHomeDir } from "./path-utils.js";
 import { isPrintMode } from "./print-mode.js";
 import {
@@ -115,6 +116,12 @@ interface SessionStartDeps {
 	ctxCwd?: string;
 	/** Host hook timestamp, so total includes work before this handler is entered. */
 	sessionStartFiredAt?: number;
+	/** Monotonic host hook timestamp for the extension-loaded → session_start span. */
+	sessionStartMonotonicAt?: number;
+	/** Monotonic instant when the extension finished loading. */
+	extensionLoadedAt?: number;
+	/** True only for the process's first session_start with a load anchor. */
+	emitHostReadyDelay?: boolean;
 	sessionReason?: string;
 	handlerEnteredAt?: number;
 	bootstrapClientsStartedAt?: number;
@@ -160,6 +167,36 @@ interface SessionStartDeps {
 }
 
 type StartupMode = "full" | "minimal" | "quick";
+
+const HOST_STALL_THRESHOLD_MS = 30_000;
+
+function logHostReadyDelay(
+	deps: SessionStartDeps,
+	cwd: string,
+): void {
+	if (
+		!deps.emitHostReadyDelay ||
+		deps.sessionStartMonotonicAt === undefined ||
+		deps.extensionLoadedAt === undefined
+	) {
+		return;
+	}
+	const durationMs = Math.max(
+		0,
+		deps.sessionStartMonotonicAt - deps.extensionLoadedAt,
+	);
+	logLatency({
+		type: "phase",
+		filePath: cwd,
+		phase: "host_ready_delay",
+		durationMs,
+		metadata: {
+			hostStallSuspected: durationMs > HOST_STALL_THRESHOLD_MS,
+			sessionStart: "first-process-session",
+			reason: deps.sessionReason,
+		},
+	});
+}
 
 function resolveSnapshotRoot(cwd: string): string {
 	const resolvedCwd = path.resolve(cwd);
@@ -2082,6 +2119,15 @@ export async function handleSessionStart(
 	// the tool for the rest of the process lifetime. Clear it here, same
 	// boundary as the other per-session caches on this line.
 	resetDispatchAvailabilityState();
+	// #1895: formatter PATH verdicts are session-scoped, but they live in
+	// formatters.ts and are not covered by the dispatch generation. Re-arm them
+	// here so a formatter installed or removed between sessions is observed by
+	// the next session. `clearFormatterCache` drops the per-cwd selection cache
+	// as well as the which latches, which is what a real re-probe needs: the
+	// selection cache answers a same-cwd lookup before any probe runs, so
+	// clearing the latches alone would leave the stale verdict standing in the
+	// one directory the user is working in.
+	clearFormatterCache();
 	// #1535: same #1266 pattern, one caller earlier — the `gh auth token` latch
 	// zizmor's spawn reads is process-lived storage whose durability contract is
 	// per SESSION, not per process. Without this, a user who runs `gh auth
@@ -2333,6 +2379,7 @@ export async function handleSessionStart(
 			durationMs: totalDurationMs,
 			metadata: { mode: startupMode, reason: deps.sessionReason },
 		});
+		logHostReadyDelay(deps, cwd);
 		emitSmellsSessionStartLine(dbg, sessionStartMs);
 		return;
 	}
@@ -2759,6 +2806,7 @@ export async function handleSessionStart(
 		durationMs: totalDurationMs,
 		metadata: { mode: startupMode, reason: deps.sessionReason },
 	});
+	logHostReadyDelay(deps, cwd);
 	emitSmellsSessionStartLine(dbg, sessionStartMs);
 }
 
