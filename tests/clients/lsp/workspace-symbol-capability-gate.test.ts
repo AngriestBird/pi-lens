@@ -109,3 +109,55 @@ describe("LSPService.workspaceSymbol capability gate (#1789)", () => {
 		expect(result).toEqual([{ name: "greet", kind: 12 }]);
 	});
 });
+
+describe("LSPService.workspaceSymbol supporting-client selection (#1812)", () => {
+	// #1812: the no-filePath branch used to stop at `state.clients`' FIRST
+	// entry by insertion order even after the #1789 gate — so an auxiliary
+	// scanner (ast-grep, opengrep, zizmor, ...) that spawned before the
+	// workspace's supporting primary server still won every query with `[]`
+	// and zero requests, never trying the primary at all. This pins the fix:
+	// the no-filePath branch now keeps scanning past a non-supporting
+	// candidate for one that DOES support workspace/symbol.
+	it("skips a non-supporting auxiliary spawned first and queries a supporting primary spawned second", async () => {
+		const auxOnly = makeFakeClient(false);
+		const primary = makeFakeClient(true);
+		const svc = new LSPService();
+		// Insertion order matters: the auxiliary is the map's first entry.
+		injectClient(svc, "ast-grep:root", auxOnly);
+		injectClient(svc, "typescript:root", primary);
+
+		const result = await svc.workspaceSymbol("greet");
+
+		expect(auxOnly.workspaceSymbol).not.toHaveBeenCalled();
+		expect(primary.workspaceSymbol).toHaveBeenCalledWith("greet");
+		expect(result).toEqual([{ name: "greet", kind: 12 }]);
+	});
+
+	it("falls back to a supporting auxiliary when no primary supports it", async () => {
+		const auxSupporting = makeFakeClient(true);
+		const primaryUnsupported = makeFakeClient(false);
+		const svc = new LSPService();
+		injectClient(svc, "opengrep:root", auxSupporting);
+		injectClient(svc, "typescript:root", primaryUnsupported);
+
+		const result = await svc.workspaceSymbol("greet");
+
+		expect(primaryUnsupported.workspaceSymbol).not.toHaveBeenCalled();
+		expect(auxSupporting.workspaceSymbol).toHaveBeenCalledWith("greet");
+		expect(result).toEqual([{ name: "greet", kind: 12 }]);
+	});
+
+	it("returns [] when NO spawned client supports workspace/symbol", async () => {
+		const auxOnly = makeFakeClient(false);
+		const primaryUnsupported = makeFakeClient(false);
+		const svc = new LSPService();
+		injectClient(svc, "ast-grep:root", auxOnly);
+		injectClient(svc, "typescript:root", primaryUnsupported);
+
+		const result = await svc.workspaceSymbol("greet");
+
+		expect(auxOnly.workspaceSymbol).not.toHaveBeenCalled();
+		expect(primaryUnsupported.workspaceSymbol).not.toHaveBeenCalled();
+		expect(result).toEqual([]);
+	});
+});

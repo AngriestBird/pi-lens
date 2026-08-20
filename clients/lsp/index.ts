@@ -5651,21 +5651,56 @@ export class LSPService {
 	}
 
 	/**
+	 * Resolves "the target client" for a workspace-scope query that has no
+	 * filePath to route through `getClientForFile`. `state.clients` is keyed
+	 * `${serverId}:${root}` in spawn order, not role order, so an auxiliary
+	 * scanner (ast-grep, opengrep, zizmor, ...) that happens to spawn first in
+	 * a polyglot workspace used to win every no-filePath query outright (#1812
+	 * — a supporting primary server spawned later never got a look-in). Scans
+	 * for the first client matching `predicate` (when given), preferring any
+	 * primary (non-`"auxiliary"` role) match over an auxiliary one — the same
+	 * primary-over-auxiliary preference `getClientForFile` encodes via its
+	 * `role !== "auxiliary"` filter (this file, `getClientForFile`) and
+	 * `getAliveServerIds` groups by. Role is read from the map key's
+	 * `serverId` prefix against `LSP_SERVERS`, the single source of truth
+	 * `getCapabilitySnapshots`'s own no-filePath branch already parses the
+	 * same way — never a second, hand-rolled role table. Returns undefined
+	 * only when NO client (primary or auxiliary) matches.
+	 */
+	private selectWorkspaceScopeClient(
+		predicate?: (client: LSPClientInfo) => boolean,
+	): LSPClientInfo | undefined {
+		let auxFallback: LSPClientInfo | undefined;
+		for (const [key, client] of this.state.clients) {
+			if (predicate && !predicate(client)) continue;
+			const separator = key.indexOf(":");
+			const serverId = separator >= 0 ? key.slice(0, separator) : key;
+			const role = LSP_SERVERS.find((s) => s.id === serverId)?.role;
+			if (role === "auxiliary") {
+				if (!auxFallback) auxFallback = client;
+				continue;
+			}
+			return client;
+		}
+		return auxFallback;
+	}
+
+	/**
 	 * Navigation: workspace-wide symbol search
 	 *
 	 * #1789: gated on the target server's advertised `workspaceSymbolProvider`
 	 * (the same `getOperationSupport().workspaceSymbol` single source of truth
 	 * `lsp-document-symbols.ts`'s documentSymbol gate reads — see clients/
-	 * lsp-document-symbols.ts:50). Without a path, "the target server" is
-	 * `this.state.clients`' first entry by insertion order — every spawned
-	 * client, auxiliary scanners (ast-grep, opengrep, zizmor, ...) included,
-	 * not just primary language servers. A workspace with no primary server
-	 * for the query's language (or none spawned yet) can have an auxiliary as
-	 * that first entry, and auxiliaries never advertise workspaceSymbolProvider
-	 * — every such query sent the request anyway and ate a wasted round trip
-	 * per call. Gating here, at the point that resolves and calls the target
-	 * client, closes that regardless of which caller reaches this method (a
-	 * caller-side check elsewhere is a duplicate, not the source of truth).
+	 * lsp-document-symbols.ts:50).
+	 *
+	 * #1812: without a path, the no-filePath branch used to stop at
+	 * `state.clients`' first entry by insertion order regardless of whether it
+	 * supported `workspace/symbol` — an auxiliary spawned first silently ate
+	 * every query with `[]` and zero requests, even when a supporting primary
+	 * server was already spawned too. `selectWorkspaceScopeClient` now scans
+	 * for the first client that DOES support it, preferring a primary over an
+	 * auxiliary; only when none of the spawned clients support it does this
+	 * fall back to `[]`.
 	 */
 	async workspaceSymbol(query: string, filePath?: string) {
 		if (filePath) {
@@ -5678,17 +5713,18 @@ export class LSPService {
 			return spawned.client.workspaceSymbol(query);
 		}
 
-		// Use the first active client for workspace-level queries
-		const clients = Array.from(this.state.clients.values());
-		if (clients.length === 0) return [];
-		const target = clients[0];
-		if (!target.getOperationSupport().workspaceSymbol) return [];
+		const target = this.selectWorkspaceScopeClient(
+			(client) => client.getOperationSupport().workspaceSymbol,
+		);
+		if (!target) return [];
 		return target.workspaceSymbol(query);
 	}
 
 	/**
 	 * Commands advertised for workspace/executeCommand. If filePath is given,
-	 * the server for that file; otherwise the first active client.
+	 * the server for that file; otherwise the first active client, preferring
+	 * a primary over an auxiliary scanner spawned first (#1812 sweep — see
+	 * `selectWorkspaceScopeClient`).
 	 */
 	async getAdvertisedCommands(filePath?: string): Promise<string[]> {
 		if (filePath) {
@@ -5699,14 +5735,16 @@ export class LSPService {
 			if (!spawned) return [];
 			return spawned.client.getAdvertisedCommands();
 		}
-		const first = this.state.clients.values().next().value;
+		const first = this.selectWorkspaceScopeClient();
 		return first ? first.getAdvertisedCommands() : [];
 	}
 
 	/**
 	 * Run a server command via workspace/executeCommand (hardened: allowlisted by
 	 * advertisement in the client). If filePath is given, target that file's
-	 * server; otherwise the first active client.
+	 * server; otherwise the first active client, preferring a primary over an
+	 * auxiliary scanner spawned first (#1812 sweep — see
+	 * `selectWorkspaceScopeClient`).
 	 */
 	async executeCommand(
 		filePath: string | undefined,
@@ -5724,7 +5762,7 @@ export class LSPService {
 			}
 			return spawned.client.executeCommand(command, args, mutationContext);
 		}
-		const first = this.state.clients.values().next().value;
+		const first = this.selectWorkspaceScopeClient();
 		if (!first) return { executed: false, reason: "no active LSP server" };
 		return first.executeCommand(command, args, mutationContext);
 	}
@@ -5772,7 +5810,9 @@ export class LSPService {
 
 	/**
 	 * Capability snapshot for LSP operations.
-	 * If filePath is provided, probes that server; otherwise uses first active client.
+	 * If filePath is provided, probes that server; otherwise uses the first
+	 * active client, preferring a primary over an auxiliary scanner spawned
+	 * first (#1812 sweep — see `selectWorkspaceScopeClient`).
 	 */
 	async getOperationSupport(
 		filePath?: string,
@@ -5785,7 +5825,7 @@ export class LSPService {
 			return getter();
 		}
 
-		const first = this.state.clients.values().next().value;
+		const first = this.selectWorkspaceScopeClient();
 		if (!first) return null;
 		const getter = first.getOperationSupport;
 		if (typeof getter !== "function") return null;
@@ -5852,7 +5892,7 @@ export class LSPService {
 			return getter();
 		}
 
-		const first = this.state.clients.values().next().value;
+		const first = this.selectWorkspaceScopeClient();
 		if (!first) return null;
 		const getter = first.getWorkspaceDiagnosticsSupport;
 		if (typeof getter !== "function") return null;
