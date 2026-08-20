@@ -3027,16 +3027,18 @@ export class LSPService {
 			if (!started) return undefined;
 			spawnPromise = started.promise;
 		}
-		// The spawn promise can settle before its entry is removed from inFlight.
-		// Give that completed acquisition precedence over the known-slow shortcut:
-		// the shortcut is only valid while no usable client has been acquired.
-		const completedClient = this.state.clients.get(key);
-		if (completedClient?.isAlive()) {
-			this.unavailableLogged.delete(key);
-			this.clientLastUsedAt.set(key, Date.now());
-			this.scheduleTypeScriptIdleEviction(key);
-			return { client: completedClient, info: server };
-		}
+		// Announce the in-flight spawn so the caller can skip a doomed touch
+		// wait. The announcement never returns a client and never
+		// short-circuits. A spawn that settles inside the race window is picked
+		// up by getClientForFile, which re-reads `state.clients` at the point it
+		// acts on the shortcut.
+		//
+		// Do NOT add a `state.clients` early return here. This point sits
+		// downstream of the warm-reuse path, the dead-client shutdown, the #1127
+		// give-up latch, the breaker cooldown, and the #1332 idle eviction, so a
+		// return here re-publishes a client every one of those already declined.
+		// It also skips the `finally` below that owns the `inFlight` entry,
+		// which strands the settled promise and stops the server respawning.
 		onSpawnInFlight?.(server.id);
 
 		try {
