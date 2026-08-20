@@ -63,14 +63,24 @@ smell warnings count only the current session, or a 24-hour fallback window
 when no session boundary is available; explicit health remains separately
 labeled. (#1432)
 
+Host-ready delay is a process-lifetime measurement from load-complete to the
+first real `session_start`. The extension consumes that anchor once at the
+entry point; later sessions emit no host-ready phase because no clean
+per-session anchor exists. The session handler receives an explicit first-start
+bit, so session-state resets must not re-arm or reuse this measurement.
+
 Session-start lifecycle hooks must tolerate capability-shaped injected clients.
 Optional reset methods may be absent from test doubles or embedders and must not
 turn session initialization into a failure; concrete clients still reset state.
 
-Formatter PATH which-latches are session-scoped and must be re-armed in the
-primary `handleSessionStart` reset block beside dispatch availability. Their
+Formatter PATH availability is session-scoped and must be re-armed in the
+primary `handleSessionStart` reset block beside dispatch availability. Its
 module-local state is not covered by the dispatch generation, and secondary
-session guards must continue to skip both resets. (#1895)
+session guards must continue to skip both resets. Re-arm through
+`clearFormatterCache`, never the which-latch clear alone: `getFormattersForFile`
+answers a same-cwd lookup from `detectionCache` before it reaches a probe, so
+dropping the latches without the selection cache leaves the previous session's
+verdict standing in the working directory. (#1895)
 
 Per-edit LSP dispatch preserves the touch's correlated `unconfirmedServerIds`
 through `RunnerResult` and runner latency assembly. The agent coverage notice
@@ -1022,7 +1032,9 @@ a *second host adapter* alongside `index.ts`. Design rationale + progress: `mcp.
   evaluation marker as its first statement before installing the guard. The
   extension then logs `host_boot`, `extension_eval`, and
   the continuity `extension_loaded` record. Primary session starts pass the host
-  hook/bootstrap timestamps into `handleSessionStart`, which records pre-handler,
+  hook/bootstrap timestamps into `handleSessionStart`, which records the
+  monotonic `host_ready_delay` beside `session_start_total` and marks delays
+  over 30s with `hostStallSuspected`; it also records pre-handler,
   runtime-reset, sequence/snapshot (with bytes/freshness/seq), total, and
   delayed warmup child phases in `latency.log`; concurrent secondaries emit only
   `concurrent_session_bind`. Keep logging fire-and-forget and preserve contiguous
