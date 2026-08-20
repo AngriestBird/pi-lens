@@ -29,4 +29,6 @@ Deliberately thin. The canonical engineering contract for this repo lives in
   from an issue spec.
 - `.claude/agents/pi-lens-reviewer.md` — role playbook for adversarial
   pre-merge review.
+- `.claude/agents/pi-lens-investigator.md` — role playbook for log forensics
+  and root-causing runtime behavior.
 - `.claude/skills/merge-train/SKILL.md` — the review → verify → merge policy.
