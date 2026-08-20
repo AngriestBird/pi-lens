@@ -27,6 +27,29 @@ note: |
   Scope: same direct-annotation cut as the `any` arm — a `Record<$K,
   unknown>` type reference, matched structurally. Alias resolution and
   type-literal index signatures are out of scope for the same reason.
+
+  2026-08-20 (refs #1727, #1777): CONSIDERED for promotion to `error`,
+  KEPT at `hint`. Four-corpus census, ast-grep CLI 0.45:
+
+  | corpus | hits |
+  |---|---:|
+  | pi-lens `clients/` | 142 |
+  | pi-lens `tests/` | 247 |
+  | pi core `packages/` | 299 (162 outside test paths) |
+  | opencode `packages/` | 533 (392) |
+  | oh-my-pi `packages/` | 2994 (1727) |
+
+  Verdict: promoting this rule would contradict AGENTS.md's own written
+  guidance in the same repository. Smell 3 records `Record<string,
+  unknown>` as the CORRECT contract at this codebase's validator, parser,
+  telemetry, and metadata boundaries. The suppression that would rescue it
+  — "suppress when the enclosing scope narrows the value before use" —
+  needs data flow from the dictionary's declaration to each read, which
+  ast-grep's structural matcher does not do; a syntactic stand-in would be
+  the vacuous guard this repo's review process screens for. The `any` arm
+  (`no-unsafe-dictionary-any.yml`) stays the error-tier member of the
+  pair, and it is clean on pi-lens: `any` turns checking OFF for every
+  property read, which is the discriminator `unknown` does not share.
 rule:
   pattern:
     context: "type T = Record<$K, unknown>;"

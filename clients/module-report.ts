@@ -555,6 +555,14 @@ async function extractFile(
 				let callbacks: ModuleCallbackEntry[] = [];
 				let callbackError: string | undefined;
 				try {
+					// SAFETY: `ModuleReportNode` is this module's own structural
+					// subset of a tree-sitter node: `type`, `text`, `children`,
+					// `parent`, `isNamed`, and the two positions. A real node
+					// implements all of it, but the two types are declared in
+					// unrelated packages so TypeScript sees no relation. The cast
+					// asserts only that structural subset; widen
+					// `ModuleReportNode` past what tree-sitter nodes provide and
+					// it stops holding.
 					callbacks = extractCallbacks(
 						tree.rootNode as unknown as ModuleReportNode,
 						owners,

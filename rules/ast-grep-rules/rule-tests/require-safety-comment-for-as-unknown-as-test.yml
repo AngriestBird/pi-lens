@@ -8,6 +8,12 @@ valid:
   - |
     // SAFETY: arg is validated upstream
     foo(x as unknown as Foo);
+  # 2026-08-20 (#1727/#1777): this rule now owns the `as unknown as` shape
+  # alone, so a single concrete `as` and a concrete CHAIN are both out of scope
+  # here (the chain belongs to no-chained-type-assertions.yml). Widening the
+  # pattern back to any assertion reds both.
+  - 'const c = x as Foo;'
+  - 'const d = x as A as B;'
 invalid:
   - "const a = x as unknown as Foo;"
   - |
@@ -15,3 +21,9 @@ invalid:
   - |
     // some other comment
     const c = x as unknown as Foo;
+  # The comment must actually claim safety. A comment mentioning the word in
+  # prose without the `SAFETY:` marker does not clear it — deleting the
+  # `SAFETY\s*:` regex from the rule reds this case.
+  - |
+    // this cast is safe, trust me
+    const d = x as unknown as Foo;
