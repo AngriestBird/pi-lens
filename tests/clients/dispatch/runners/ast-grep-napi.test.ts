@@ -49,6 +49,24 @@ function createCtx(filePath: string, overrides: RunnerCtxOverrides = {}) {
 	});
 }
 
+function mockWorkingSgLoad(): void {
+	vi.doMock("@ast-grep/napi", () => ({
+		ts: {
+			parse: vi.fn().mockReturnValue({
+				root: () => ({
+					children: () => [],
+					kind: () => "program",
+					range: () => ({
+						start: { line: 0, column: 0 },
+						end: { line: 1, column: 0 },
+					}),
+					findAll: () => [],
+				}),
+			}),
+		},
+	}));
+}
+
 describe("ast-grep-napi runner — LSP supersede gate (#239 Phase 2)", () => {
 	beforeEach(() => {
 		vi.resetModules();
@@ -62,7 +80,7 @@ describe("ast-grep-napi runner — LSP supersede gate (#239 Phase 2)", () => {
 			const filePath = path.join(env.tmpDir, "file.ts");
 			fs.writeFileSync(filePath, "const r = arr.sort();\n"); // would match no-sort-without-comparator
 			mockResolveAstGrepNativeExe.mockReturnValue("/bundled/ast-grep.exe");
-			vi.doMock("@ast-grep/napi", () => ({ ts: { parse: vi.fn() } }));
+			mockWorkingSgLoad();
 			const mod = await import("../../../../clients/dispatch/runners/ast-grep-napi.js");
 			const result = await mod.default.run(
 				createCtx(filePath, { hasTool: async () => false }) as any,
@@ -79,18 +97,7 @@ describe("ast-grep-napi runner — LSP supersede gate (#239 Phase 2)", () => {
 		try {
 			const filePath = path.join(env.tmpDir, "file.ts");
 			fs.writeFileSync(filePath, "const x = 1;\n");
-			vi.doMock("@ast-grep/napi", () => ({
-				ts: {
-					parse: vi.fn().mockReturnValue({
-						root: () => ({
-							children: () => [],
-							kind: () => "program",
-							range: () => ({ start: { line: 0, column: 0 }, end: { line: 1, column: 0 } }),
-							findAll: () => [],
-						}),
-					}),
-				},
-			}));
+			mockWorkingSgLoad();
 			const mod = await import("../../../../clients/dispatch/runners/ast-grep-napi.js");
 			const result = await mod.default.run(
 				createCtx(filePath, { hasTool: async () => false }) as any,
@@ -107,7 +114,7 @@ describe("ast-grep-napi runner — LSP supersede gate (#239 Phase 2)", () => {
 			const filePath = path.join(env.tmpDir, "file.ts");
 			fs.writeFileSync(filePath, "const x = 1;\n");
 			mockAuxiliaryLspAlive.mockResolvedValue(true);
-			vi.doMock("@ast-grep/napi", () => ({ ts: { parse: vi.fn() } }));
+			mockWorkingSgLoad();
 			const mod = await import("../../../../clients/dispatch/runners/ast-grep-napi.js");
 			const result = await mod.default.run(
 				createCtx(filePath, { hasTool: async () => false }) as any,
@@ -307,4 +314,3 @@ describe("unsupported-language skip dedupe (#1371)", () => {
 		expect(emits()).toBe(2);
 	});
 });
-
