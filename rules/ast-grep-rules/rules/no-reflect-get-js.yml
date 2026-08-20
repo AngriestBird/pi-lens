@@ -9,10 +9,15 @@ note: |
   already works. Prefer dot or bracket access.
 
   2026-08-20 (refs #1856): PROMOTED from `warning` to `error` with the
-  same structural Proxy get-trap carve-out as the TypeScript twin.
+  same structural Proxy get-trap carve-out as the TypeScript twin. Both
+  arities remain diagnostic elsewhere, but only the two-argument branch is
+  fixable because a receiver changes access semantics.
 rule:
   all:
-    - pattern: Reflect.get($$$ARGS)
+    - pattern: $CALL
+    - any:
+        - pattern: Reflect.get($OBJ, $KEY)
+        - pattern: Reflect.get($GET_TARGET, $PROP, $RECEIVER)
     - not:
         inside:
           kind: method_definition
@@ -23,3 +28,14 @@ rule:
           inside:
             pattern: new Proxy($TARGET, $HANDLER)
             stopBy: end
+rewriters:
+  - id: rewrite-two-argument-reflect-get-js
+    rule:
+      pattern: Reflect.get($OBJ, $KEY)
+    fix: "$OBJ[$KEY]"
+transform:
+  REWRITTEN:
+    rewrite:
+      rewriters: [rewrite-two-argument-reflect-get-js]
+      source: $CALL
+fix: $REWRITTEN

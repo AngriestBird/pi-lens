@@ -205,6 +205,16 @@ It is smart-default and read-only. Rendered-manifest validation (#1283 slice B)
 ships beside it as the separately-gated, OFF-by-default `helm-render` runner —
 see the IaC-misconfig note in the pipeline section.
 
+Mechanical ast-grep rules may expose a `fix:` only when one syntax rewrite is
+unambiguous. Reflect.apply remains diagnostic-only because an own shadowed
+`.apply` changes the obvious rewrite's semantics. Two-argument Reflect.get uses
+a scoped rewriter; receiver forms remain diagnostic-only. Snapshot fixtures
+under `rules/ast-grep-rules/rule-tests/__snapshots__/` prove generated output.
+Keep branch metavariables distinct from the outer Proxy-carve-out metavariables;
+fixtures deliberately name the constructor target and trap parameter differently.
+The generated ast-grep catalog derives its Fixable yes/no column from each
+rule's top-level `fix:` key. (#1850)
+
 Session degradation telemetry owns its dedupe and tally state in
 `clients/degradation-ledger.ts`: use `recordDegradationOnce` for a repeated
 site/subject that represents one user-visible degradation, and

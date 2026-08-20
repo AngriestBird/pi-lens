@@ -10,11 +10,15 @@ note: |
 
   2026-08-20 (refs #1856): PROMOTED from `warning` to `error`. The
   standard receiver-forwarding call inside an inline `new Proxy` get
-  trap is excluded structurally. All arities remain in scope elsewhere,
-  including a method merely named `get` outside a Proxy call.
+  trap is excluded structurally. Both arities remain in scope elsewhere,
+  including a method merely named `get` outside a Proxy call. Only the
+  two-argument branch is fixable because a receiver changes access semantics.
 rule:
   all:
-    - pattern: Reflect.get($$$ARGS)
+    - pattern: $CALL
+    - any:
+        - pattern: Reflect.get($OBJ, $KEY)
+        - pattern: Reflect.get($GET_TARGET, $PROP, $RECEIVER)
     - not:
         inside:
           kind: method_definition
@@ -25,3 +29,14 @@ rule:
           inside:
             pattern: new Proxy($TARGET, $HANDLER)
             stopBy: end
+rewriters:
+  - id: rewrite-two-argument-reflect-get
+    rule:
+      pattern: Reflect.get($OBJ, $KEY)
+    fix: "$OBJ[$KEY]"
+transform:
+  REWRITTEN:
+    rewrite:
+      rewriters: [rewrite-two-argument-reflect-get]
+      source: $CALL
+fix: $REWRITTEN
