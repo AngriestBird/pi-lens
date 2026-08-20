@@ -65,12 +65,23 @@ const mockSummaries: ReturnType<
 	typeof import("../../clients/widget-state.js")["getFileDiagnosticSummaries"]
 > = [];
 
-vi.mock("../../clients/widget-state.js", () => ({
-	getFileDiagnosticSummaries: () => mockSummaries,
-	reconcileStaleWidgetFiles: async () => 0,
-	reconcileStaleWidgetDependencyBlockers: async () => 0,
-	reconcileScanDiagnostics: vi.fn(),
-}));
+// Spread the real module instead of hand-listing its exports. A full-replace
+// factory silently rots: `tools/lens-diagnostics.ts` imports a NEW widget-state
+// export and every test using this mock dies with "No <name> export is defined
+// on the mock", far from the change that caused it. Only the side-effecting
+// seams below are stubbed; pure helpers such as `widgetDiagnosticUri` stay real.
+vi.mock("../../clients/widget-state.js", async (importOriginal) => {
+	const actual =
+		await importOriginal<typeof import("../../clients/widget-state.js")>();
+	return {
+		...actual,
+		getFileDiagnosticSummaries: () => mockSummaries,
+		reconcileStaleWidgetFiles: async () => 0,
+		reconcileStaleWidgetDependencyBlockers: async () => 0,
+		reconcileScanDiagnostics: vi.fn(),
+		reconcileCorrelatedScanDiagnostics: vi.fn(),
+	};
+});
 
 function makeCacheManager(data: Record<string, unknown> = {}) {
 	return {

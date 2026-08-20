@@ -455,6 +455,18 @@ function toSingleLineMessage(message: string | undefined): string {
 	return (message ?? "").replace(/\s+/g, " ").trim();
 }
 
+/** Build the OSC-8 target used by every stored diagnostic row. */
+export function widgetDiagnosticUri(
+	filePath: string,
+	line?: number,
+	column?: number,
+): string {
+	const base = pathToFileURL(filePath).href;
+	return line != null
+		? `${base}#L${line}${column != null ? `:${column}` : ""}`
+		: base;
+}
+
 export function recordDiagnostics(
 	filePath: string,
 	diagnostics: Array<{
@@ -524,13 +536,8 @@ function normalizeDiagnostics(
 	}>,
 	observedTs: number,
 ): WidgetDiagnostic[] {
-	const base = pathToFileURL(filePath).href;
 	return diagnostics.map((d) => {
 		const rule = d.rule ?? d.id;
-		const uri =
-			d.line != null
-				? `${base}#L${d.line}${d.column != null ? `:${d.column}` : ""}`
-				: base;
 		return {
 			severity: d.severity ?? "info",
 			semantic: d.semantic,
@@ -539,7 +546,7 @@ function normalizeDiagnostics(
 			col: d.column,
 			rule,
 			tool: d.tool,
-			uri,
+			uri: widgetDiagnosticUri(filePath, d.line, d.column),
 			observedAt: observedTs,
 		} satisfies WidgetDiagnostic;
 	});
@@ -781,6 +788,40 @@ export function reconcileScanDiagnostics(
 ): void {
 	if (!confirmed) return;
 	recordDiagnostics(filePath, diagnostics, writeIndex, observedAt);
+}
+
+/**
+ * Commit the already-correlated result of a full diagnostics scan.
+ *
+ * Unlike {@link reconcileScanDiagnostics}, this seam accepts widget diagnostics
+ * that have already been merged across producing lanes. `lens_diagnostics`
+ * uses it after correlating the confirmed LSP sweep, the cheap project scan,
+ * and retained widget rows. This prevents a broken LSP lane from hiding
+ * independently-produced `ast-grep-napi` findings in the widget count (#1888).
+ * Existing per-entry observation times survive the merge; newly-added project
+ * rows inherit the scan's observation time.
+ */
+export function reconcileCorrelatedScanDiagnostics(
+	filePath: string,
+	diagnostics: WidgetDiagnostic[],
+	writeIndex?: number,
+	observedAt?: number,
+): void {
+	const key = fileMapKey(filePath);
+	if (!diagnosticsWriteGuard.shouldWrite(key, writeIndex)) return;
+	runnerWriteGuard.shouldWrite(key, writeIndex);
+	const observedTs = observedAt ?? Date.now();
+	const correlated = diagnostics.map((diagnostic) => ({
+		...diagnostic,
+		observedAt: diagnostic.observedAt ?? observedTs,
+	}));
+	commitDiagnostics(
+		getOrCreate(filePath, key),
+		filePath,
+		correlated,
+		observedTs,
+		key,
+	);
 }
 
 /**
