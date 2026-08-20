@@ -491,6 +491,15 @@ export const SESSION_STATE_REGISTRY: SessionStateEntry[] = [
 
 	// ── Deliberately not session_start ───────────────────────────────────────
 	{
+		id: "biome-check:fixKindCache",
+		module: "dispatch/runners/biome-check.ts",
+		state: "biomeFixKindCache",
+		policy: "process_lifetime",
+		resetName: "_resetBiomeFixKindCacheForTests",
+		reason:
+			"#1810: the cache maps (biome binary path, rule name) to that rule's real fix tier, read live from `biome explain <rule>`. That answer is a static property of the running binary — it cannot change without a different biome install, which is itself a different cache key — so there is nothing for a session boundary to invalidate. No probe: arming it for real requires spawning the actual biome binary, which this generic registry sweep does not do; `tests/clients/dispatch/runners/biome-check-runner.test.ts`'s dedicated cache/reset tests cover the re-arm behavior with a mocked spawn instead.",
+	},
+	{
 		id: "formatters:runtimeState",
 		module: "formatters.ts",
 		state: "whichLatchByCommand, whichTransientCommands, cooldownRecordedForRetryAtMs",
@@ -659,6 +668,7 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	"dispatch/integration.ts": 10,
 	"dispatch/lazy.ts": 0,
 	"dispatch/runners/ast-grep-napi.ts": 5,
+	"dispatch/runners/biome-check.ts": 1,
 	"dispatch/runners/psscriptanalyzer.ts": 2,
 	"dispatch/runners/spotbugs.ts": 0,
 	"dispatch/runners/utils/lazy-installer.ts": 2,

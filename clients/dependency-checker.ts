@@ -234,8 +234,15 @@ async function resolvedCommandIsStale(
 	return !spawnable;
 }
 
-/** Run `mapper` over `items` with at most `concurrency` in flight at once. */
-async function mapWithConcurrency<T>(
+/**
+ * Run `mapper` over `items` with at most `concurrency` in flight at once.
+ * Exported (#1810 review F6) so `clients/dispatch/runners/biome-check.ts`'s
+ * `resolveBiomeFixKinds` can reuse this exact worker-pool shape for its
+ * `biome explain` fan-out instead of carrying a second copy — this file
+ * predates that need but is otherwise unrelated to it; a shared home for
+ * this one helper wasn't worth a whole new module for two call sites.
+ */
+export async function mapWithConcurrency<T>(
 	items: T[],
 	concurrency: number,
 	mapper: (item: T) => Promise<void>,
