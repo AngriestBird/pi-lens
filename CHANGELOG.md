@@ -46,6 +46,8 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Fixed
 
+- **Timed-out pull diagnostics stop aging the LSP server (refs [#1889](https://github.com/apmantza/pi-lens/issues/1889))** — Document and workspace diagnostic pulls now send `$/cancelRequest` when their local deadline expires. Repeated native-TS7 touches no longer leave abandoned requests running and building a server-side backlog; an aging regression test holds outstanding pull work to one across repeated timeouts.
+
 - **TypeScript LSP roots follow governing configs (refs [#1412](https://github.com/apmantza/pi-lens/issues/1412))** — TypeScript and JavaScript files now prefer their nearest `tsconfig.json` or `jsconfig.json` (filtered by extension family — a `.ts` file skips a jsconfig-only directory) while preserving package-boundary client isolation, and classic servers emit bounded, read-only project-association telemetry after the first open. Classic-server tool discovery (`typescript-language-server`, `tsserver.js`) now walks up from a nested config root instead of only checking the root itself. Known accepted tradeoff: honoring nested config roots enlarges the population of roots subject to #1373's pre-existing open-order sensitivity.
 
 - **Post-fix decisions are observable (Closes #1432)** — Add bounded decision telemetry for advisory provenance, TypeScript project identity, deferred mutations, authoritative-content attachment, bus context resolution, and time-scoped smell rollups.

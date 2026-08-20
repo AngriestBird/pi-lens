@@ -154,6 +154,36 @@ describe("#1713 pull-diagnostic timeout emits a latency.log record", () => {
 });
 
 describe("#1713 a late pull answer after abandonment is a bounded, traced discard", () => {
+	it("does not report a cancellation settlement as a late answer", async () => {
+		const state = pullState();
+		state.connection.sendRequest = vi.fn(
+			(
+				method: string,
+				_params: unknown,
+				token?: {
+					onCancellationRequested(listener: () => void): { dispose(): void };
+				},
+			) => {
+				if (method !== "textDocument/diagnostic") {
+					return Promise.resolve(undefined);
+				}
+				return new Promise((_resolve, reject) => {
+					token?.onCancellationRequested(() => {
+						reject(Object.assign(new Error("cancelled"), { code: -32800 }));
+					});
+				});
+			},
+		) as unknown as typeof state.connection.sendRequest;
+
+		await clientWaitForDiagnostics(state, TEST_FILE, 20, { pullOnly: true });
+		await wait(20);
+
+		expect(discardedEvents()).toHaveLength(0);
+		expect(
+			getDegradationSummary().find((g) => g.kind === "lsp-pull-late-answer"),
+		).toBeUndefined();
+	});
+
 	it("fires exactly one discarded record, via the degradation ledger with identity preserved", async () => {
 		const state = pullState();
 		installSendRequest(state, async (method) => {

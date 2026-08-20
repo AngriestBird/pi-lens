@@ -10,6 +10,13 @@ Coverage markers are deduped per session by normalized kind, file, and the
 normalized silent-scanner set. A changed set admits a new marker, and a marker
 is appended after primary diagnostics so both remain visible.
 
+Pull-diagnostics request deadlines send `$/cancelRequest`, but cancellation is
+advisory. While a cancelled request remains unsettled, admission blocks another
+pull for the same path/source. The slot frees only on settlement. Apply this to
+both `textDocument/diagnostic` and `workspace/diagnostic`, including new pull
+entry points, so a server that ignores cancellation cannot accumulate a backlog.
+(#1889)
+
 No-filePath workspace-scope LSP queries use a request-local attribution
 collector. `lsp_navigation_result` records the serving server id for each
 single-client answer and a fixed-key per-capability contributor map for

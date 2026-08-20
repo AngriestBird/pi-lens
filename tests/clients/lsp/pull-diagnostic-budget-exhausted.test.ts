@@ -459,7 +459,7 @@ describe("#1771 a genuine pull timeout counts in the degradation ledger", () => 
 		expect(group?.latestReasons[0]?.subject).toContain(TEST_KEY);
 	});
 
-	it("counts each repeat timeout independently, not a rising-edge-only latch", async () => {
+	it("does not count a blocked repeat while the abandoned request is unsettled", async () => {
 		const state = pullState();
 		installSendRequest(state, (method) =>
 			method !== "textDocument/diagnostic"
@@ -470,11 +470,14 @@ describe("#1771 a genuine pull timeout counts in the degradation ledger", () => 
 		await clientWaitForDiagnostics(state, TEST_FILE, 20, { pullOnly: true });
 		await clientWaitForDiagnostics(state, TEST_FILE, 20, { pullOnly: true });
 
-		expect(timeoutEvents()).toHaveLength(2);
+		// The first timeout occupies the per-source admission slot until its
+		// request settles. The second caller is unavailable without dispatching,
+		// so it is not a second genuine request timeout.
+		expect(timeoutEvents()).toHaveLength(1);
 		const group = getDegradationSummary().find(
 			(g) => g.kind === "lsp-pull-diagnostic-timeout",
 		);
-		expect(group?.count).toBe(2);
+		expect(group?.count).toBe(1);
 	});
 
 	// Mutation guard: a SKIPPED pull (budget already exhausted) must never
