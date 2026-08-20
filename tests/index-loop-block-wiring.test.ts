@@ -27,6 +27,11 @@ vi.mock("../clients/event-loop-monitor.js", async (importActual) => {
 
 // Capture latency writes without touching disk; provide the attribution seam.
 const latencyCalls: Array<Record<string, unknown>> = [];
+// #1723: controllable in-flight-phase stand-in — undefined by default (no
+// phase currently running), overridable per test to simulate a synchronous
+// block sampled WHILE a phase is still executing (recentPhases only ever
+// carries a finished phase, so this seam is the only way turn_end can see it).
+let currentPhaseToReturn: { phase: string; startedAt: string } | undefined;
 vi.mock("../clients/latency-logger.js", async (importActual) => {
 	const actual = await importActual<typeof import("../clients/latency-logger.js")>();
 	return {
@@ -35,6 +40,7 @@ vi.mock("../clients/latency-logger.js", async (importActual) => {
 			latencyCalls.push(entry);
 		},
 		getLastLoggedPhase: () => ({ phase: "graph_build", ts: "2026-08-07T00:00:00.000Z" }),
+		getCurrentPhase: () => currentPhaseToReturn,
 	};
 });
 
@@ -107,6 +113,7 @@ describe("index turn_end loop_block wiring (#1122)", { timeout: LOOP_BLOCK_WIRIN
 		latencyCalls.length = 0;
 		resetSpy.mockClear();
 		statsToReturn = undefined;
+		currentPhaseToReturn = undefined;
 	});
 	afterEach(() => {
 		vi.clearAllMocks();
@@ -210,5 +217,56 @@ describe("index turn_end loop_block wiring (#1122)", { timeout: LOOP_BLOCK_WIRIN
 		expect(logged[1].durationMs).toBe(5000);
 		// Not a new session worst, but still recorded.
 		expect((logged[1].metadata as Record<string, unknown>).worstSoFar).toBe(false);
+	});
+
+	// #1723 residual: the motivating case is a SYNCHRONOUS block, so the phase
+	// actually burning the CPU is still running (and so unlogged) when the
+	// probe samples. `recentPhases`/`lastPhase` name only the PREVIOUS
+	// finished phase — this pins that when a phase is currently in flight, the
+	// loop_block record names IT, with an elapsed time at least the block's
+	// own duration.
+	it("(d) #1723: an in-flight phase is named in the loop_block record, not just the previous finished one", async () => {
+		const startedAt = new Date(Date.now() - 18_270).toISOString();
+		currentPhaseToReturn = { phase: "full_scan_18s", startedAt };
+		statsToReturn = {
+			maxMs: 18270,
+			p99Ms: 0,
+			meanMs: 0,
+			windowWallMs: 32832,
+			windowCpuMs: 21844,
+			suspectSystemStall: false,
+		};
+
+		await fireTurnEnd();
+
+		const logged = loopBlocks();
+		expect(logged).toHaveLength(1);
+		const metadata = logged[0].metadata as Record<string, unknown>;
+		// The previous-finished-phase attribution is untouched (still reported).
+		expect(metadata.lastPhase).toBe("graph_build");
+		// The NEW attribution: what is still running right now.
+		expect(metadata.inFlightPhase).toBe("full_scan_18s");
+		expect(metadata.inFlightPhaseStartedAt).toBe(startedAt);
+		expect(metadata.inFlightPhaseElapsedMs as number).toBeGreaterThanOrEqual(18270);
+	});
+
+	it("(e) #1723: no in-flight phase means the new fields stay undefined instead of a false attribution", async () => {
+		currentPhaseToReturn = undefined;
+		statsToReturn = {
+			maxMs: 5000,
+			p99Ms: 0,
+			meanMs: 0,
+			windowWallMs: 6000,
+			windowCpuMs: 5500,
+			suspectSystemStall: false,
+		};
+
+		await fireTurnEnd();
+
+		const logged = loopBlocks();
+		expect(logged).toHaveLength(1);
+		const metadata = logged[0].metadata as Record<string, unknown>;
+		expect(metadata.inFlightPhase).toBeUndefined();
+		expect(metadata.inFlightPhaseElapsedMs).toBeUndefined();
 	});
 });

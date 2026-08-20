@@ -16,10 +16,14 @@ vi.mock("../../clients/ndjson-logger.js", () => ({
 import {
 	_recentPhasesStorageLengthForTest,
 	_setRecentPhasesForTest,
+	getCurrentPhase,
 	getLastLoggedPhase,
 	getRecentLoggedPhases,
 	logLatency,
+	phaseFinished,
+	phaseStarted,
 	RECENT_PHASE_CAP,
+	resetCurrentPhaseForSession,
 } from "../../clients/latency-logger.js";
 
 describe("latency-logger", () => {
@@ -189,5 +193,75 @@ describe("getRecentLoggedPhases (#1723: bounded attribution ring)", () => {
 		}));
 		_setRecentPhasesForTest(overCapacity);
 		expect(getRecentLoggedPhases(1000)).toHaveLength(RECENT_PHASE_CAP);
+	});
+});
+
+describe("phaseStarted/phaseFinished/getCurrentPhase (#1723 in-flight attribution)", () => {
+	beforeEach(() => {
+		resetCurrentPhaseForSession();
+	});
+
+	it("names the phase as current once started", () => {
+		phaseStarted("astgrep_scan");
+		expect(getCurrentPhase()?.phase).toBe("astgrep_scan");
+	});
+
+	it("clears the slot once the matching finish call fires", () => {
+		const token = phaseStarted("astgrep_scan");
+		phaseFinished(token);
+		expect(getCurrentPhase()).toBeUndefined();
+	});
+
+	// Mutation-proof for the clearing guard itself: if `phaseFinished` were a
+	// no-op (a "never-cleared slot" bug), the assertion above alone wouldn't
+	// distinguish it from a broken implementation that ALSO didn't set
+	// anything — this pins that a phase started BEFORE the finish call is
+	// gone afterward, which only holds if the clear genuinely ran.
+	it("a stale (never-cleared) slot would mis-attribute a later, unrelated block", () => {
+		const token = phaseStarted("full_scan_18s");
+		phaseFinished(token);
+		// A second, unrelated phase starts and finishes quickly.
+		const secondToken = phaseStarted("word_index_build");
+		phaseFinished(secondToken);
+		// If the first finish had failed to clear (or had cleared the WRONG
+		// slot), getCurrentPhase() here could still read "full_scan_18s" long
+		// after it ended, or nothing at all despite word_index_build's own
+		// finish having already run — either way the assertion below is the
+		// one a stale-slot regression breaks.
+		expect(getCurrentPhase()).toBeUndefined();
+	});
+
+	// Identity-token semantics: an EARLIER phase's finish (arriving after a
+	// LATER phase has already started) must not clear the later phase's
+	// still-live slot. Guards the exact overlap `phaseFinished`'s doc comment
+	// calls out — without token comparison, a bare "clear unconditionally"
+	// finish would wipe the wrong phase.
+	it("an out-of-order finish for an earlier phase does not clear a later phase's slot", () => {
+		const earlierToken = phaseStarted("lsp_workspace_diagnostics_touch");
+		const laterToken = phaseStarted("astgrep_scan");
+		// The earlier phase's async tail resolves last and calls its own finish.
+		phaseFinished(earlierToken);
+		expect(getCurrentPhase()?.phase).toBe("astgrep_scan");
+		phaseFinished(laterToken);
+		expect(getCurrentPhase()).toBeUndefined();
+	});
+
+	it("getCurrentPhase carries startedAt for elapsed-time computation", () => {
+		const before = Date.now();
+		phaseStarted("full_scan_18s");
+		const current = getCurrentPhase();
+		expect(current?.startedAt).toEqual(expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/));
+		expect(Date.parse(current!.startedAt)).toBeGreaterThanOrEqual(before);
+	});
+
+	// #1723 session-boundary backstop (catalog: state that must re-arm at
+	// session_start cannot hide behind a process-lifetime latch). Without
+	// this reset, a phase abandoned by a torn-down activation would survive
+	// into the next session and keep mis-attributing every loop_block there.
+	it("resetCurrentPhaseForSession clears a leaked in-flight phase", () => {
+		phaseStarted("full_scan_18s"); // never finished — simulates an abandoned phase
+		expect(getCurrentPhase()).toBeDefined();
+		resetCurrentPhaseForSession();
+		expect(getCurrentPhase()).toBeUndefined();
 	});
 });

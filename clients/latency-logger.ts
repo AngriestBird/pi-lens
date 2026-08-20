@@ -176,6 +176,91 @@ export function _setRecentPhasesForTest(entries: Array<{ phase: string; ts: stri
 	recentPhases = entries;
 }
 
+/** A phase's start marker, and the identity token its own `phaseFinished` call needs. */
+export interface PhaseToken {
+	phase: string;
+	startedAt: string;
+}
+
+/**
+ * The phase currently running, if any (#1723 residual on top of `recentPhases`
+ * above). `recentPhases` only ever names phases that already FINISHED — no
+ * help when the CPU hog causing the block is the phase still in flight, which
+ * is exactly the motivating case (an 18s synchronous full-scan block whose
+ * `recentPhases`/`lastPhase` named the PREVIOUS, unrelated completed phase).
+ * A single slot, not a ring: JS is single-threaded, so at most one phase is
+ * ever actually EXECUTING (as opposed to merely awaiting) at a time — the one
+ * a synchronous block would belong to.
+ */
+let currentPhase: PhaseToken | undefined;
+
+/**
+ * Mark a phase as started. Returns a token the caller must pass back to
+ * `phaseFinished` — identity-based (not name-based) so an interleaved second
+ * call's finish can never clear the wrong phase's start (see `phaseFinished`).
+ * Cheap: one object allocation and one slot write, no scan of any collection
+ * — call-site cost is a single `Date.now()`/`toISOString()` plus an assignment,
+ * negligible next to the runner/phase work it brackets (dispatcher.ts's
+ * per-runner `runRunner` call, this PR's wiring, runs one native scan per
+ * call — orders of magnitude more expensive than this bookkeeping).
+ */
+export function phaseStarted(phase: string): PhaseToken {
+	const token: PhaseToken = { phase, startedAt: new Date().toISOString() };
+	currentPhase = token;
+	return token;
+}
+
+/**
+ * Clear the current-phase slot — but only if it still holds THIS token. Two
+ * phases can overlap (a runner awaiting I/O while another starts executing),
+ * so a bare unconditional clear on finish could wipe a LATER phase's still-
+ * live start out from under it the moment an EARLIER phase's own async tail
+ * resolves. Comparing object identity (not phase name — two calls can share a
+ * name) makes each `phaseStarted`/`phaseFinished` pair self-contained: a
+ * mismatched finish is a no-op, never a false clear.
+ *
+ * Callers MUST pair this with `phaseStarted` via try/finally — an exception
+ * or an abandoned promise that skips this call leaves the slot pointing at a
+ * phase that already ended, silently misattributing every LATER loop_block to
+ * stale work (catalog: a slot that must clear on finish, never left to a
+ * process-lifetime latch). `resetCurrentPhaseForSession` is the session-
+ * boundary backstop for the case where even try/finally doesn't run (a torn-
+ * down activation whose in-flight phase never gets a chance to unwind).
+ */
+export function phaseFinished(token: PhaseToken): void {
+	if (currentPhase === token) {
+		currentPhase = undefined;
+	}
+}
+
+/**
+ * The phase currently executing, if any, with its own `startedAt` so a
+ * consumer can compute elapsed time against "now". Returns undefined when no
+ * phase has an open `phaseStarted`/`phaseFinished` bracket right now.
+ */
+export function getCurrentPhase(): PhaseToken | undefined {
+	return currentPhase;
+}
+
+/**
+ * Session-boundary backstop: unconditionally clears the current-phase slot.
+ * `phaseFinished` is the normal clear path (paired via try/finally at each
+ * call site), but this module's state is process-lifetime, not session-
+ * scoped, so a phase abandoned mid-flight by a torn-down activation (an abort
+ * that skips straight past the `finally`, a session replaced mid-scan) would
+ * otherwise leave `currentPhase` stuck forever — misattributing every
+ * loop_block in every LATER session to that one stale phase. Call
+ * unconditionally from every `session_start`, before any concurrent-secondary
+ * gating, matching this repo's "state that must re-arm at session_start
+ * cannot hide behind a process-lifetime latch" rule. Harmless on a clean
+ * session (the slot is already undefined) and never destructive to a still-
+ * live phase in the SAME activation, since a real in-flight phase re-marks
+ * itself the next time it starts.
+ */
+export function resetCurrentPhaseForSession(): void {
+	currentPhase = undefined;
+}
+
 export function logLatency(entry: LatencyEntry): void {
 	const ts = new Date().toISOString();
 	if (entry.type === "phase" && entry.phase && !LAST_PHASE_EXCLUDED.has(entry.phase)) {

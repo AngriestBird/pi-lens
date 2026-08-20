@@ -16,6 +16,10 @@ import {
 } from "../../../clients/dispatch/dispatcher.js";
 import { FactStore } from "../../../clients/dispatch/fact-store.js";
 import type { RunnerGroup, RunnerResult } from "../../../clients/dispatch/types.js";
+import {
+	getCurrentPhase,
+	resetCurrentPhaseForSession,
+} from "../../../clients/latency-logger.js";
 
 describe("runRunner timeout behavior", () => {
 	let registry: RunnerRegistry;
@@ -173,6 +177,119 @@ describe("runRunner timeout behavior", () => {
 			]);
 
 			expect(result.diagnostics.map((d) => d.id)).toEqual(["b-warn"]);
+		},
+		500,
+	);
+});
+
+// #1723: runRunner is the hot dispatch path a synchronous CPU hog (ast-grep,
+// tree-sitter) blocks the loop from inside — recentPhases only ever names a
+// phase that already FINISHED, so a synchronous block never gets to log its
+// own completion before a loop_block sample can see it. Bracketing the runner
+// call with phaseStarted/phaseFinished (clients/latency-logger.ts) fixes
+// that; these tests pin the bracket's lifecycle at the dispatcher seam.
+describe("runRunner in-flight phase attribution (#1723)", () => {
+	let registry: RunnerRegistry;
+
+	function dispatchForFile(
+		ctx: Parameters<typeof runDispatchForFile>[0],
+		groups: RunnerGroup[],
+	) {
+		return runDispatchForFile(ctx, groups, registry);
+	}
+
+	function createMockContext(filePath: string) {
+		return createDispatchContext(
+			filePath,
+			"/project",
+			{ getFlag: () => false },
+			new FactStore(),
+		);
+	}
+
+	beforeEach(() => {
+		registry = new RunnerRegistry();
+		clearCoverageNoticeState();
+		resetCurrentPhaseForSession();
+	});
+
+	it("names the runner as the in-flight phase while its run() is still executing", async () => {
+		let observedDuringRun: string | undefined;
+		registry.register({
+			id: "astgrep-scan",
+			appliesTo: ["jsts"],
+			priority: 10,
+			enabledByDefault: true,
+			async run(): Promise<RunnerResult> {
+				// Read the slot mid-flight — this is the synthetic stand-in for a
+				// loop_block sample landing while the runner is still running.
+				observedDuringRun = getCurrentPhase()?.phase;
+				return { status: "succeeded", diagnostics: [], semantic: "warning" };
+			},
+		});
+
+		const ctx = createMockContext("test.ts");
+		await dispatchForFile(ctx, [{ mode: "all", runnerIds: ["astgrep-scan"] }]);
+
+		expect(observedDuringRun).toBe("astgrep-scan");
+	});
+
+	it("clears the slot once a successful runner returns", async () => {
+		registry.register({
+			id: "fast-tool",
+			appliesTo: ["jsts"],
+			priority: 10,
+			enabledByDefault: true,
+			async run(): Promise<RunnerResult> {
+				return { status: "succeeded", diagnostics: [], semantic: "warning" };
+			},
+		});
+
+		const ctx = createMockContext("test.ts");
+		await dispatchForFile(ctx, [{ mode: "all", runnerIds: ["fast-tool"] }]);
+
+		expect(getCurrentPhase()).toBeUndefined();
+	});
+
+	// The slot must clear on every exit path, not just the happy one — a
+	// throwing or timed-out runner is exactly the shape most likely to leave a
+	// stale slot if `phaseFinished` weren't in a `finally`.
+	it("clears the slot when the runner throws", async () => {
+		registry.register({
+			id: "exploding",
+			appliesTo: ["jsts"],
+			priority: 10,
+			enabledByDefault: true,
+			timeoutMs: 5_000,
+			async run(): Promise<RunnerResult> {
+				throw new Error("runner blew up");
+			},
+		});
+
+		const ctx = createMockContext("test.ts");
+		await dispatchForFile(ctx, [{ mode: "all", runnerIds: ["exploding"] }]);
+
+		expect(getCurrentPhase()).toBeUndefined();
+	});
+
+	it(
+		"clears the slot when the runner times out",
+		async () => {
+			registry.register({
+				id: "slow-tool",
+				appliesTo: ["jsts"],
+				priority: 10,
+				enabledByDefault: true,
+				timeoutMs: 30,
+				async run(): Promise<RunnerResult> {
+					return new Promise(() => {});
+				},
+			});
+
+			const ctx = createMockContext("test.ts");
+			await dispatchForFile(ctx, [{ mode: "all", runnerIds: ["slow-tool"] }]);
+
+			expect(getCurrentPhase()).toBeUndefined();
 		},
 		500,
 	);

@@ -172,9 +172,11 @@ import {
 import { createProjectReportTool } from "./tools/project-report.js";
 import { createSymbolSearchTool } from "./tools/symbol-search.js";
 import {
+	getCurrentPhase,
 	getLastLoggedPhase,
 	getRecentLoggedPhases,
 	logLatency,
+	resetCurrentPhaseForSession,
 } from "./clients/latency-logger.js";
 import { emitBounded } from "./clients/bounded-telemetry.js";
 
@@ -1637,6 +1639,14 @@ function activateExtension(hostPi: ExtensionAPI) {
 	// --- Events ---
 
 	pi.on("session_start", async (event, ctx) => {
+		// #1723: the in-flight-phase slot is process-lifetime state (see
+		// `resetCurrentPhaseForSession`'s doc comment), so a phase abandoned
+		// mid-flight by a torn-down activation could otherwise survive into a
+		// new session and misattribute every later loop_block to stale work.
+		// Unconditional, before the #473 concurrent-secondary gate below, same
+		// as `warmDispatchAtSessionStart()` — this must re-arm on EVERY
+		// session_start, not only a full one.
+		resetCurrentPhaseForSession();
 		warmDispatchAtSessionStart();
 		void warmLspService().catch((err) =>
 			logExtension({ subsystem: "lsp", level: "warn", message: `LSP warm failed: ${err}` }),
@@ -2321,6 +2331,15 @@ function activateExtension(hostPi: ExtensionAPI) {
 			if (shouldLogLoopBlock(loopMaxMs)) {
 				const lastPhase = getLastLoggedPhase();
 				const recentPhases = getRecentLoggedPhases(3);
+				// #1723 residual: `lastPhase`/`recentPhases` above only ever name a
+				// phase that already FINISHED. The motivating case — an 18s
+				// synchronous full-scan block — had no attribution because the
+				// phase burning the CPU was still running (and so unlogged) when
+				// this sampled. `getCurrentPhase` reads the slot dispatcher.ts's
+				// `runRunner` (and the workspace-diagnostics touch loop) keeps
+				// live for exactly this window; when it is set, it names what is
+				// STILL RUNNING right now, not just what last finished.
+				const inFlightPhase = getCurrentPhase();
 				const isNewSessionWorst = shouldLogWorstBlock(
 					loopMaxMs,
 					lastLoggedLoopWorstMs,
@@ -2345,6 +2364,11 @@ function activateExtension(hostPi: ExtensionAPI) {
 						lastPhase: lastPhase?.phase,
 						lastPhaseAt: lastPhase?.ts,
 						recentPhases,
+						inFlightPhase: inFlightPhase?.phase,
+						inFlightPhaseStartedAt: inFlightPhase?.startedAt,
+						inFlightPhaseElapsedMs: inFlightPhase
+							? Date.now() - Date.parse(inFlightPhase.startedAt)
+							: undefined,
 					},
 				});
 				// A system stall must not raise the "new worst genuine block"
