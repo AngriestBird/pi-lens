@@ -1,5 +1,0 @@
----
-section: Fixed
----
-
-- **agent_end no longer misreads a disabled feature as a missing cache (closes [#1607](https://github.com/apmantza/pi-lens/issues/1607))** — The `actionable_warnings_autofix` reader at `agent_end` read the actionable-warnings cache on every call, but the cache is only ever written when the `lens-actionable-warnings` flag is on. In production that flag is off, so the read always missed and logged "cache missing or expired, skipping fixes" — 428/428 times in the retained log, per a maintainer-supervised forensics pass, always blaming a stale cache instead of the real cause: the writer is disabled. The reader now checks the writer's own flag before attempting a read, so a disabled writer produces no read attempt and no misleading log line. When the flag is on and a read does miss, `CacheManager.inspectCache` (already used by `git-guard.ts` for the same purpose) distinguishes "cache absent" from "cache expired," instead of collapsing both into one ambiguous message.

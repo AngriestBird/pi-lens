@@ -1,5 +1,0 @@
----
-section: Fixed
----
-
-- **Seven more config-gated formatters were unselectable under any project configuration (refs [#1595](https://github.com/apmantza/pi-lens/issues/1595))** — same shape as [#1572](https://github.com/apmantza/pi-lens/issues/1572): commit `038cd1df` set `defaultWhenUnconfigured: false` for `csharpier`, `ormolu`, `taplo`, `terraform`, `swiftformat`, `fantomas`, and `mix` without adding a matching `hasExplicitFormatterConfig` check, so neither selection branch could ever pick them. Each now wires into `EXPLICIT_FORMATTER_CONFIG_CHECKS` against its real config-file convention — `.csharpierrc`, `.ormolu`, `taplo.toml`/`.taplo.toml`, `.swiftformat`, `.fantomasignore`/`.editorconfig`, `.formatter.exs` — or, for `terraform fmt` (which has no config file at all), the `.terraform.lock.hcl` manifest `terraform init` writes as an explicit per-project opt-in marker. `nixfmt` stays unreachable: it has no config surface and no manifest-marker equivalent, so a documented exception replaces the fix.

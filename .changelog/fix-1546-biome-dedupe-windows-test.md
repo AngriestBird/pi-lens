@@ -1,5 +1,0 @@
----
-section: Fixed
----
-
-- **`biome-client-dedupe` test now isolates the in-flight probe dedupe from package-manager spawn count (refs [#1546](https://github.com/apmantza/pi-lens/issues/1546))** — `dedupes concurrent first-time callers to a single probe` armed `safeSpawnAsync` as a one-shot mock, assuming `probeBiome` calls it exactly once. Since #375, `getBiomeBinary` falls through to `findGlobalBinary` when no local or pi-lens-managed biome binary exists, and that helper legitimately probes every installed package manager's global bin dir (`where npm`, `npm config get prefix`, and so on) through the same `safeSpawnAsync` seam. On a machine without a local/managed biome binary — reproduced by moving both aside — those extra calls silently consumed the one-shot mock and `probeBiome` dereferenced the resulting `undefined`. The test now mocks `package-manager.js`'s `findGlobalBinary` to resolve `undefined` directly, the same isolation `biome-install-evidence.test.ts` already uses, so it stays scoped to `ensureAvailable`'s own in-flight dedupe (#120) instead of incidentally depending on how many package managers happen to be findable on the host.

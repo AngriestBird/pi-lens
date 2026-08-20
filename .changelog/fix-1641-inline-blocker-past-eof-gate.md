@@ -1,5 +1,0 @@
----
-section: Fixed
----
-
-- **Turn-end inline blockers now gate on past-EOF lines too (closes #1641)** — the "Unresolved from this turn" blocker re-served at `turn_end` (`RuntimeCoordinator`'s `_pendingInlineBlockers`) could still cite a line beyond the file's current on-disk line count, re-asserted at full blocking authority. #1664 wired the past-EOF gate into every `WidgetDiagnostic` surface (widget-state, `lens_diagnostics`, the TUI render loop) but deferred this one store to #1633, which merged without it. The record now carries the cited lines structurally (captured at write time from the same diagnostics the summary text was rendered from, not re-parsed from that prose later), and a new turn-end sweep (`clients/blocker-past-eof.ts`) demotes a record citing an out-of-bounds line to the `[stale — re-run to confirm]` advisory instead of the authoritative blocker channel — the same demote-not-drop precedent, re-derived fresh every turn end so a transient shrink-then-restore un-demotes on its own. It composes with #1631's dependency-drift gate on the same store via a shared `staleReason` field: each gate only heals demotions it made itself.

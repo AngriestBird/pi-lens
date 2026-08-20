@@ -1,5 +1,0 @@
----
-section: Fixed
----
-
-- **LSP client answers `workspace/diagnostic/refresh` and honors Incremental text sync (refs #1669)** — a server telling us its diagnostics are stale (`workspace/diagnostic/refresh`) previously got `MethodNotFound`; the client now replies `null`, drops every on-disk workspace-diagnostics sweep cache the process has swept under (not just the wrong per-server root marker), clears the same per-document pull state a normal resync already clears for every open document, and proactively re-pulls each open document under pull mode. A `workspace/diagnostic` sweep's `unchanged` report against a resultId basis the client no longer holds now falls back to a real per-file pull instead of silently reporting the file clean. Separately, the client always sent whole-document `didChange` events regardless of the server's negotiated `textDocumentSync.change` kind; an Incremental-only server now receives a single ranged edit spanning its entire previous document (counting CRLF/lone-CR line endings correctly), sent only once the notification is confirmed to have actually reached the transport. `Full`/`None` servers are unaffected.

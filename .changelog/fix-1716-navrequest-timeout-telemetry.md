@@ -1,5 +1,0 @@
----
-section: Fixed
----
-
-- **`navRequest` timeouts are observable again (refs [#1716](https://github.com/apmantza/pi-lens/issues/1716))** — the per-request `withTimeout` around every hover/definition/references/signatureHelp/documentSymbol/workspace-symbol/call-hierarchy request rejected on timeout, and the rejection skipped every settle emit, so a timed-out nav request left no trace at all. `navRequest` is the highest-volume LSP call site (one call per turn, often several), so unlike the `lsp_pull_diagnostic_timeout` fix ([#1713](https://github.com/apmantza/pi-lens/issues/1713)), which logs every timeout, this fix bounds the detailed record to the rising edge — the first timeout, and separately the first late answer, per (method, file) each session — while the degradation-ledger counters (`lsp-nav-request-timeout`, `lsp-nav-late-answer`) still count every occurrence exactly, so a storming server floods neither latency.log nor memory. No behavior change: the timeout path still resolves `undefined` at budget exactly as before; the instrument only observes. Per-request overhead is one extra `Date.now()` call (~125ns) on the success path.

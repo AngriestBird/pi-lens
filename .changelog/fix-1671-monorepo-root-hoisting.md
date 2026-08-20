@@ -1,5 +1,0 @@
----
-section: Fixed
----
-
-- **Monorepo Cargo and Maven projects no longer spawn one heavy LSP server per crate or module (refs [#1671](https://github.com/apmantza/pi-lens/issues/1671))** — rust-analyzer's existing workspace hoist walked up to an ancestor `Cargo.toml`'s `[workspace]` table without ever checking the session ceiling, so a hit above the session cwd could pick a root outside the project boundary; the walk is now bounded the same way `enforceLspRootCeiling` already bounds crate roots. jdtls had no hoisting at all: every Maven module spawned its own server even inside a declared parent build. It now walks up through a chain of `pom.xml` files, hoisting to a parent only when that parent's `<modules>` actually declares the child as a member — an undeclared sibling directory stays independently rooted, and the walk still respects the session ceiling. `NearestRoot`'s doc comment now says plainly that `excludePatterns` skip a directory and keep walking, rather than aborting resolution.

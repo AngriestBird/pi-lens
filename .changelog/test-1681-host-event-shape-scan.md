@@ -1,5 +1,0 @@
----
-section: Changed
----
-
-- **Test fixtures now match the real host's `session_start`/`tool_result` event shape (refs #1681)** — `tests/index-wiring.test.ts` fired `session_start` with `{ sessionId: "wiring-session" }` as the event payload; the real pi host never puts `sessionId` on that event (`packages/coding-agent/src/core/extensions/types.ts:561-568` in the host source — only `type`, `reason`, `previousSessionFile`), and `index.ts`'s own handler already documents this ("the STABLE session id comes from the session manager — the event carries none"). Fixed to `{ reason: "startup" }`, host-faithful, with `sessionId` staying where it belongs: on the mock `ctx` via `makeCtx`. A new scan, `tests/support/host-event-shape-scan.ts` plus its conformance test, pins every `session_start`/`tool_result` fixture repo-wide against `sessionId`/`provider`/`model` ever landing on the event object again — the same drift the umbrella issue's earlier `#1680` fix round hit, now caught mechanically instead of by a human noticing.

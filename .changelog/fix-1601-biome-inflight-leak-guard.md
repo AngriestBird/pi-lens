@@ -1,5 +1,0 @@
----
-section: Fixed
----
-
-- **`BiomeClient`'s in-flight leak guard could not fail (refs #1601)** — the regression test for "the `ensureInFlight` slot doesn't leak after a failed probe" used a probe failure that latches durably, so the second `ensureAvailable()` call short-circuited on the availability memo and never reached the `ensureInFlight` check the test claimed to cover; removing the `finally`-clear it names left the test green. The suite now probes through the one path that actually reaches that check — a transient (timeout) verdict whose cooldown has expired — and is proven red against the described mutation. A second test covers the settled-slot-through-cooldown window directly: two callers racing in as the cooldown opens must share one fresh probe rather than one of them resolving off a leaked settled promise. A sweep of every other `ensureInFlight`-based client (`sg-runner.ts`, `dead-code-client.ts`, `knip-client.ts`, `dependency-checker.ts`, `security-scan-client.ts`, and the shared `toolchain-availability.ts` factory ruff and friends route through) found the same `finally`-clear on all of them; no production code changed.

@@ -1,5 +1,0 @@
----
-section: Fixed
----
-
-- **Tests no longer reset a duplicate copy of the module state they are guarding (closes #1565)** — Vitest resolves an import specifier literally and this repo's runtime is the compiled output, so `x.ts` and `x.js` are two module instances. A test that imported a module's reset or inspection API through `.ts` held a private copy of that module's mutable state: the `beforeEach` reset cleared the copy, the code under test kept reading the compiled original, and the assertion passed without ever exercising the behaviour it claimed to guard. Seventeen test files were reaching the same module both ways, most of them around the availability latches. Every test now imports the compiled `.js` the runtime imports, a new structural guard (`tests/config/module-instance-coverage.test.ts`) fails CI on any new `.ts` specifier for a build-compiled module, and a live regression test proves the session availability reset actually clears the compiled latch. No shipped behaviour changes; the guarded behaviour is now genuinely guarded.
