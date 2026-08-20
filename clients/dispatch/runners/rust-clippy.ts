@@ -253,6 +253,18 @@ export function parseClippyOutput(
 					: rawFile
 				: fallbackPath;
 
+			// #1802 investigated this as a possible severity-collapse instance
+			// (the class #1787 fixed for ast-grep-napi and #1791 fixed for
+			// biome-check). It is not: rustc/clippy's own `Level` enum has
+			// `Note`/`Help` variants, but those are only ever attached as child
+			// annotations (`message.children[].level`) on an existing diagnostic.
+			// A top-level `reason: "compiler-message"` entry that carries a
+			// non-empty `spans` array — the only kind this parser reaches, since
+			// it returns early via `if (!span) continue` above — is always
+			// `"error"` or `"warning"` in practice; global/summary messages like
+			// "N warnings emitted" have empty spans and are already filtered out
+			// by that same early return. So this mapping is a genuine two-valued
+			// pass-through, not a collapse: there is no third tier being lost.
 			diagnostics.push({
 				id: `clippy-${message.code?.code || "unknown"}`,
 				message: message.message || "Clippy warning",
