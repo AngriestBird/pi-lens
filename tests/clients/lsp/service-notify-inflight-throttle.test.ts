@@ -376,6 +376,14 @@ describe("#1714 — sweep notify volume must not out-run an auxiliary", () => {
 			serverId: "ast-grep",
 			outcome: "stalled",
 		});
+		expect(rowsFor("degradation_ledger")).toContainEqual(
+			expect.objectContaining({
+				metadata: expect.objectContaining({
+					kind: "lsp-notify-inflight-stall",
+					subject: expect.stringContaining("ast-grep:"),
+				}),
+			}),
+		);
 	});
 
 	it("keeps the demote-and-respawn self-heal reachable through the ceiling path", async () => {
