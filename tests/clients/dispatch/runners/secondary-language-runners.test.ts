@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { FactStore } from "../../../../clients/dispatch/fact-store.js";
+import { makeRunnerCtx } from "../../../support/runner-ctx.js";
 import { setupTestEnvironment } from "../../test-utils.js";
 
 const safeSpawnAsync = vi.fn();
@@ -30,17 +30,7 @@ function createCtx(
 	filePath: string,
 	cwd: string,
 ) {
-	return {
-		filePath,
-		cwd,
-		kind,
-		pi: { getFlag: () => false },
-		autofix: false,
-		deltaMode: true,
-		facts: new FactStore(),
-		hasTool: async () => true,
-		log: () => {},
-	};
+	return makeRunnerCtx(filePath, cwd, { kind });
 }
 
 describe("secondary language fallback runners", () => {
