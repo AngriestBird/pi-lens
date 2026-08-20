@@ -1,6 +1,8 @@
 id: no-bare-object-param
 language: TypeScript
 severity: error
+metadata:
+  category: pi-lens-self-scan
 message: "Parameter typed bare 'object' — guarantees nothing about shape, use Record<string, unknown> or a real interface"
 note: |
   `object` only tells the compiler "not a primitive" — it doesn't
