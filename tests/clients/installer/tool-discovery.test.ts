@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { withEnv } from "../../support/with-env.js";
 
 vi.unmock("../../../clients/installer/index.js");
 
@@ -240,8 +241,14 @@ async function withEmptyPath<T>(fn: () => Promise<T>): Promise<T> {
 // against the mocked TEST_HOME as originally intended.
 const savedPiLensHome = process.env.PI_LENS_HOME;
 
+// #1816: this file's `afterEach` used to hard-restore the literal "1"
+// instead of whatever was ambient before the file ran — correct only by
+// coincidence (vitest-setup.ts's own default). `withEnv` restores the real
+// prior value.
+let restoreDisableToolInstall: () => void;
+
 beforeEach(() => {
-	delete process.env.PI_LENS_DISABLE_TOOL_INSTALL;
+	restoreDisableToolInstall = withEnv({ PI_LENS_DISABLE_TOOL_INSTALL: undefined });
 	delete process.env.PI_LENS_HOME;
 	vi.clearAllMocks();
 	spawnCalls.length = 0;
@@ -254,7 +261,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-	process.env.PI_LENS_DISABLE_TOOL_INSTALL = "1";
+	restoreDisableToolInstall();
 	delete process.env.PI_LENS_TEST_PLATFORM;
 	delete process.env.PI_LENS_TEST_MODE;
 	delete process.env.PI_LENS_TEST_NPM_SCRIPT;

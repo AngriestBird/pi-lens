@@ -7,7 +7,7 @@ import {
 	hasPackageClause,
 	parseCueVetOutput,
 } from "../../../clients/dispatch/runners/cue-vet.js";
-import type { DispatchContext } from "../../../clients/dispatch/types.js";
+import { makeRunnerCtx } from "../../support/runner-ctx.js";
 
 // ── appliesTo ────────────────────────────────────────────────────────────────
 
@@ -292,17 +292,8 @@ const cueCwd = path.join(os.tmpdir(), "pi-lens-cue-vet-test");
 const cueFile = path.join(cueCwd, "bad.cue");
 const valuesFile = path.join(cueCwd, "values.cue");
 
-function createCtx(filePath: string, cwd: string): DispatchContext {
-	return {
-		filePath,
-		cwd,
-		kind: "cue",
-		pi: { getFlag: () => false },
-		autofix: false,
-		deltaMode: true,
-		hasTool: async () => true,
-		log: () => {},
-	} as unknown as DispatchContext;
+function createCtx(filePath: string, cwd: string) {
+	return makeRunnerCtx(filePath, cwd, { kind: "cue" });
 }
 
 describe("cue-vet run() — real binary output shapes, mocked spawn", () => {

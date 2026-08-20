@@ -34,6 +34,7 @@ import {
 	it,
 	vi,
 } from "vitest";
+import { withEnv } from "../../support/with-env.js";
 
 vi.unmock("../../../clients/installer/index.js");
 
@@ -216,7 +217,7 @@ function degradationCount(): number {
 	);
 }
 
-let originalDisableToolInstall: string | undefined;
+let restoreDisableToolInstall: () => void;
 
 beforeEach(() => {
 	fs.rmSync(TOOLS_DIR, { recursive: true, force: true });
@@ -238,16 +239,11 @@ beforeEach(() => {
 	// this whole file deliberately exercises the npm refresh-and-spawn path
 	// against a mocked `safeSpawnAsync` — so it opts back in, the same way
 	// `managed-tool-refresh-strategies.test.ts` already does.
-	originalDisableToolInstall = process.env.PI_LENS_DISABLE_TOOL_INSTALL;
-	process.env.PI_LENS_DISABLE_TOOL_INSTALL = "0";
+	restoreDisableToolInstall = withEnv({ PI_LENS_DISABLE_TOOL_INSTALL: "0" });
 });
 
 afterEach(() => {
-	if (originalDisableToolInstall === undefined) {
-		delete process.env.PI_LENS_DISABLE_TOOL_INSTALL;
-	} else {
-		process.env.PI_LENS_DISABLE_TOOL_INSTALL = originalDisableToolInstall;
-	}
+	restoreDisableToolInstall();
 	delete process.env.PI_LENS_INSTALL_LOCK_TIMEOUT_MS;
 	resetProjectTrust();
 	vi.unstubAllEnvs();
