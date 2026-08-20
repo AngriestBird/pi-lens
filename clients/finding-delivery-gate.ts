@@ -275,7 +275,10 @@ export const DELIVERY_SURFACES: Record<string, DeliverySurfaceEntry> = {
 		RUNTIME_TURN_FILE,
 		"Turn-end re-surfaced unresolved inline blockers.",
 		["sweepInlineBlockerFreshness"],
-		["sweepInlineBlockerFreshness(runtime, cwd)"],
+		// #1790: the call now passes `additionalEntries` (widget-store rows) as a
+		// third argument, so the literal is the call's opening rather than the
+		// whole single-line invocation.
+		["sweepInlineBlockerFreshness(runtime, cwd, {"],
 		{ evidenceMin: 2 },
 	),
 	// Same two gate calls as the live secrets tier — this tier renders their

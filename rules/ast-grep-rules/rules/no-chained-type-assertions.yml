@@ -1,6 +1,8 @@
 id: no-chained-type-assertions
 language: TypeScript
 severity: error
+metadata:
+  category: pi-lens-self-scan
 message: "Chained type assertion (x as A as B) — stacking assertions with no runtime check between them"
 note: |
   `x as A as B` stacks two assertions with no runtime check between
@@ -42,21 +44,23 @@ note: |
   now a coherent pair: an uncommented `as unknown as` chain is a hard
   error; a `SAFETY:`-commented one is clean; the hint rule keeps
   teaching the convention on every OTHER assertion form.
+
+  2026-08-20 (refs #1727, #1777): the `as unknown as` arm is REMOVED from
+  this rule and delegated wholly to
+  `require-safety-comment-for-as-unknown-as.yml`, which was promoted to
+  `error` in the same change. The two rules previously matched the exact
+  same site list — verified identical on four corpora (16/16 pi-lens
+  `clients/`, 182/182 pi core, 194/194 opencode, and 1803 of this rule's
+  1849 oh-my-pi hits) — so every uncommented `x as unknown as T` raised
+  TWO diagnostics for one defect, one of them semantic-blocking. They now
+  partition the space: that rule owns the `unknown` hop and carries the
+  `SAFETY:` escape valve; this rule owns the concrete `x as A as B`
+  chain, which keeps NO escape valve because it has no legitimate
+  reading. Residual census for the concrete arm alone (2026-08-20):
+  pi-lens 0, pi core 0, opencode 0, oh-my-pi 46. Tagged
+  `metadata.category: pi-lens-self-scan` so CI holds pi-lens's own tree
+  at that zero.
 rule:
-  any:
-    - all:
-        - pattern: $X as unknown as $Y
-        - not:
-            any:
-              - follows: { kind: comment, regex: 'SAFETY\s*:', stopBy: end }
-              - inside:
-                  stopBy: end
-                  any:
-                    - kind: expression_statement
-                    - kind: lexical_declaration
-                    - kind: variable_declaration
-                    - kind: return_statement
-                  follows: { kind: comment, regex: 'SAFETY\s*:', stopBy: end }
-    - all:
-        - pattern: $X as $A as $B
-        - not: { pattern: $X as unknown as $B }
+  all:
+    - pattern: $X as $A as $B
+    - not: { pattern: $X as unknown as $B }
