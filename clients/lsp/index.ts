@@ -5819,9 +5819,26 @@ export class LSPService {
 
 	/**
 	 * Capability snapshot for LSP operations.
-	 * If filePath is provided, probes that server; otherwise uses the first
-	 * active client, preferring a primary over an auxiliary scanner spawned
-	 * first (#1812 sweep — see `selectWorkspaceScopeClient`).
+	 * If filePath is provided, probes that server. Without a filePath the
+	 * snapshot describes the whole workspace, so each capability is ORed
+	 * across every client `selectWorkspaceScopeClient` would consider.
+	 *
+	 * #1846: the no-filePath branch used to report ONE client's capabilities,
+	 * whichever `selectWorkspaceScopeClient()` returned with no predicate. In
+	 * a multi-primary workspace (say `json` spawned before `typescript`), a
+	 * first client that does not advertise `workspaceSymbolProvider` reported
+	 * the operation unsupported even though a later client advertises it. The
+	 * tool layer then refused the call before `workspaceSymbol()` — which
+	 * #1812 taught to find the supporting client — was ever reached
+	 * (tools/lsp-navigation.ts, the `runWorkspaceSymbolOperation` gate).
+	 *
+	 * Each capability resolves through `selectWorkspaceScopeClient` with a
+	 * per-capability predicate, so this answer is built from the SAME liveness
+	 * and primary-over-auxiliary rules that route the operation itself (see
+	 * `selectWorkspaceScopeClient`, this file). A dead client therefore cannot
+	 * contribute a capability nobody can execute. Capabilities the base client
+	 * already reports true are skipped, so the extra scans only run for the
+	 * capabilities it lacks.
 	 */
 	async getOperationSupport(
 		filePath?: string,
@@ -5834,11 +5851,22 @@ export class LSPService {
 			return getter();
 		}
 
-		const first = this.selectWorkspaceScopeClient();
+		const readable = (client: LSPClientInfo) =>
+			typeof client.getOperationSupport === "function";
+		const first = this.selectWorkspaceScopeClient(readable);
 		if (!first) return null;
-		const getter = first.getOperationSupport;
-		if (typeof getter !== "function") return null;
-		return getter();
+		const aggregate = { ...first.getOperationSupport() };
+		for (const capability of Object.keys(aggregate) as Array<
+			keyof import("./client.js").LSPOperationSupport
+		>) {
+			if (aggregate[capability]) continue;
+			const supporter = this.selectWorkspaceScopeClient(
+				(client) =>
+					readable(client) && Boolean(client.getOperationSupport()[capability]),
+			);
+			if (supporter) aggregate[capability] = true;
+		}
+		return aggregate;
 	}
 
 	/**
