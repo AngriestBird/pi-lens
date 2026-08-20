@@ -667,6 +667,7 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	"dispatch/integration.ts": 10,
 	"dispatch/lazy.ts": 0,
 	"dispatch/runners/ast-grep-napi.ts": 5,
+	"dispatch/runners/biome-check.ts": 1,
 	"dispatch/runners/psscriptanalyzer.ts": 2,
 	"dispatch/runners/spotbugs.ts": 0,
 	"dispatch/runners/utils/lazy-installer.ts": 2,
