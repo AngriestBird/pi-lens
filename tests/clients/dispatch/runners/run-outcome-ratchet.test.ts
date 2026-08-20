@@ -38,7 +38,6 @@ const NOT_YET_ON_PRIMITIVE: Record<string, string> = {
 	"eslint.ts": "reads its own exit status; #1737 strangler",
 	"fish-indent.ts": "reads its own exit status; #1737 strangler",
 	"gleam-check.ts": "reads its own exit status; #1737 strangler",
-	"go-vet.ts": "reads its own exit status; #1737 strangler",
 	"golangci-lint.ts": "reads its own exit status; #1737 strangler",
 	"helm-lint.ts": "reads its own exit status; #1737 strangler",
 	"helm-render.ts": "reads its own exit status; #1737 strangler",
@@ -55,7 +54,6 @@ const NOT_YET_ON_PRIMITIVE: Record<string, string> = {
 	"rust-clippy.ts": "reads its own exit status; #1737 strangler",
 	"shellcheck.ts": "reads its own exit status; #1737 strangler",
 	"shfmt.ts": "reads its own exit status; #1737 strangler",
-	"spellcheck.ts": "reads its own exit status; #1737 strangler",
 	"spotbugs.ts": "reads its own exit status; #1737 strangler",
 	"zig-check.ts": "reads its own exit status; #1737 strangler",
 };
@@ -106,12 +104,14 @@ describe("run-outcome primitive ratchet", () => {
 		return fs.existsSync(path.join(RUNNERS_DIR, name));
 	}
 
-	// The seven this PR fixed. Pinning them by name means a revert cannot pass
+	// The nine this PR fixed. Pinning them by name means a revert cannot pass
 	// by quietly adding an exemption instead.
-	it("pins the seven runners #1816 migrated", () => {
+	it("pins the nine runners #1816 migrated", () => {
 		for (const name of [
+			"go-vet.ts",
 			"markdownlint.ts",
 			"mypy.ts",
+			"spellcheck.ts",
 			"sqlfluff.ts",
 			"stylelint.ts",
 			"swiftlint.ts",

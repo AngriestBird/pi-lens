@@ -20,13 +20,17 @@ import { skipUnlessToolRan } from "./utils/tool-failure.js";
 
 const stylelint = createAvailabilityChecker("stylelint", ".cmd");
 
-// stylelint exit codes (its "Exit codes" docs page): 0 = no problems, 2 = lint
-// problems found, 78 = a configuration error. 1 is documented as a fatal error
-// but real invocations (and this repo's own stylelint fixture, see
-// tests/clients/dispatch/runners/stylelint-fixable.test.ts) also report
-// findings under 1, so 1 stays a run. A fatal stylelint under
-// `--formatter json` writes nothing to stdout, so the nothing-to-parse rule
-// still catches it. 78 is the rejection this table exists to name.
+// stylelint exit codes (its "Exit codes" docs page): 0 = no problems, 1 = a
+// fatal error, 2 = lint problems found, 78 = a configuration error.
+//
+// 1 is listed as a run here rather than a rejection. The evidence for that is
+// NOT a live stylelint: it is this repo's own hand-written fixture
+// (tests/clients/dispatch/runners/stylelint-fixable.test.ts), which reports
+// findings under exit 1. Rather than rewrite a fixture whose provenance is
+// unknown, the table keeps 1 permissive. That is safe because a genuinely
+// fatal stylelint under `--formatter json` writes nothing to stdout, so the
+// nothing-to-parse rule still catches it. 78 is the rejection this table
+// exists to name.
 const STYLELINT_EXIT_CODES: ToolExitCodes = { ran: [1, 2] };
 
 interface StylelintWarning {

@@ -19,6 +19,11 @@ const sqlfluff = createAvailabilityChecker("sqlfluff", ".exe");
 // sqlfluff exit codes (its CLI docs): 0 = clean, 1 = violations found, 2 = a
 // user error that stopped the lint (unknown dialect, unreadable config).
 // Only 2 is a rejected invocation.
+//
+// The exit TABLE is what protects this runner, not the nothing-to-parse rule:
+// sqlfluff writes its user errors to STDOUT, not stderr (live: an unknown
+// dialect prints the error there), so stdout is non-empty and the fallback
+// rule would read the failed run as a run that found nothing.
 const SQLFLUFF_EXIT_CODES: ToolExitCodes = { ran: [1] };
 
 export { hasSqlfluffConfig };
@@ -166,9 +171,9 @@ const sqlfluffRunner: RunnerDefinition = {
 			cwd,
 		});
 
-		// #1816: this runner read `result.status` zero times. sqlfluff writes
-		// its user errors to stderr and leaves stdout empty, which parsed to
-		// zero violations and reported the SQL file as clean.
+		// #1816: this runner read `result.status` zero times, so a user error
+		// fell through `parseSqlfluffOutput`'s JSON catch to zero violations and
+		// reported the SQL file as clean.
 		const skipped = skipUnlessToolRan("sqlfluff", {
 			result,
 			exitCodes: SQLFLUFF_EXIT_CODES,

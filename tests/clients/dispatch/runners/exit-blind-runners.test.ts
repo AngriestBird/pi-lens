@@ -25,6 +25,14 @@ vi.mock("../../../../clients/tool-policy.js", () => ({
 	}),
 }));
 
+vi.mock("../../../../clients/go-client.js", () => ({
+	GoClient: class {
+		async findGoPathAsync() {
+			return "go";
+		}
+	},
+}));
+
 vi.mock("../../../../clients/dispatch/runners/utils/runner-helpers.js", () => ({
 	createAvailabilityChecker: (command: string) => ({
 		isAvailable: () => true,
@@ -360,6 +368,161 @@ describe("exit-blind runners no longer report a clean file after a failed run", 
 			expect(
 				group?.latestReasons.find((e) => e.subject === "yamllint")?.reason,
 			).toContain("(count: 25)");
+		} finally {
+			env.cleanup();
+		}
+	});
+	// #1822 review F1 (live-verified, mypy 2.3.1): mypy reports a SOURCE SYNTAX
+	// error under exit 2 and still writes a normal parsable diagnostic to
+	// stdout. A table that called 2 a rejected invocation dropped that
+	// diagnostic and mislabeled a genuine finding in the ledger. The exit code
+	// cannot separate a bad flag from a syntax error; the stream can.
+	it("mypy keeps an exit-2 SYNTAX diagnostic that lands on stdout", async () => {
+		const env = setupTestEnvironment("pi-lens-mypy-syntax-");
+		try {
+			await ledger();
+			const filePath = path.join(env.tmpDir, "syn.py");
+			fs.writeFileSync(filePath, "def (:\n");
+			safeSpawnAsync.mockResolvedValue({
+				// Verbatim live mypy 2.3.1 output for a source syntax error.
+				stdout: "syn.py:1: error: Invalid syntax  [syntax]\n",
+				stderr: "",
+				status: 2,
+			});
+
+			const runner = (
+				await import("../../../../clients/dispatch/runners/mypy.js")
+			).default;
+			const result = await runner.run(
+				createCtx("python", filePath, env.tmpDir) as never,
+			);
+
+			expect(result.status).not.toBe("skipped");
+			expect(result.diagnostics).toHaveLength(1);
+			expect(result.diagnostics[0].rule).toBe("syntax");
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	// #1822 review F2: two runners the first round classified as "correct
+	// today" were the same defect spelled differently.
+	it("spellcheck skips when typos-cli errors with an empty stdout", async () => {
+		const env = setupTestEnvironment("pi-lens-spellcheck-");
+		try {
+			const summary = await ledger();
+			const filePath = path.join(env.tmpDir, "notes.md");
+			fs.writeFileSync(filePath, "Teh quick brown fox.\n");
+			safeSpawnAsync.mockResolvedValue({
+				stdout: "",
+				stderr: "error: failed to read config: unexpected key `nope`",
+				status: 1,
+			});
+
+			const runner = (
+				await import("../../../../clients/dispatch/runners/spellcheck.js")
+			).default;
+			const result = await runner.run(
+				createCtx("markdown", filePath, env.tmpDir) as never,
+			);
+
+			expect(result.status).toBe("skipped");
+			const row = summary
+				.getDegradationSummary()
+				.find((entry) => entry.kind === "runner-empty-result")
+				?.latestReasons.find((e) => e.subject === "spellcheck");
+			expect(row?.reason).toContain("spellcheck");
+			expect(row?.reason).toContain("1");
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("spellcheck still parses typos found under exit 2", async () => {
+		const env = setupTestEnvironment("pi-lens-spellcheck-");
+		try {
+			await ledger();
+			const filePath = path.join(env.tmpDir, "notes.md");
+			fs.writeFileSync(filePath, "Teh quick brown fox.\n");
+			safeSpawnAsync.mockResolvedValue({
+				stdout: JSON.stringify({
+					type: "typo",
+					path: "notes.md",
+					line_num: 1,
+					byte_offset: 0,
+					typo: "Teh",
+					corrections: ["The"],
+				}),
+				stderr: "",
+				status: 2,
+			});
+
+			const runner = (
+				await import("../../../../clients/dispatch/runners/spellcheck.js")
+			).default;
+			const result = await runner.run(
+				createCtx("markdown", filePath, env.tmpDir) as never,
+			);
+
+			expect(result.status).not.toBe("skipped");
+			expect(result.diagnostics.length).toBeGreaterThan(0);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("go-vet skips when the go toolchain never vetted anything", async () => {
+		const env = setupTestEnvironment("pi-lens-go-vet-");
+		try {
+			const summary = await ledger();
+			const filePath = path.join(env.tmpDir, "main.go");
+			fs.writeFileSync(filePath, "package main\n");
+			safeSpawnAsync.mockResolvedValue({
+				stdout: "",
+				stderr:
+					"go: go.mod file not found in current directory or any parent directory; see 'go help modules'\n",
+				status: 1,
+			});
+
+			const runner = (
+				await import("../../../../clients/dispatch/runners/go-vet.js")
+			).default;
+			const result = await runner.run(
+				createCtx("go", filePath, env.tmpDir) as never,
+			);
+
+			expect(result.status).toBe("skipped");
+			const row = summary
+				.getDegradationSummary()
+				.find((entry) => entry.kind === "runner-empty-result")
+				?.latestReasons.find((e) => e.subject === "go-vet");
+			expect(row?.reason).toContain("go.mod file not found");
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("go-vet still parses real vet findings under a nonzero exit", async () => {
+		const env = setupTestEnvironment("pi-lens-go-vet-");
+		try {
+			await ledger();
+			const filePath = path.join(env.tmpDir, "main.go");
+			fs.writeFileSync(filePath, "package main\n");
+			safeSpawnAsync.mockResolvedValue({
+				stdout: "",
+				stderr: `${filePath}:1:1: Printf format %d has arg s of wrong type string\n`,
+				status: 1,
+			});
+
+			const runner = (
+				await import("../../../../clients/dispatch/runners/go-vet.js")
+			).default;
+			const result = await runner.run(
+				createCtx("go", filePath, env.tmpDir) as never,
+			);
+
+			expect(result.status).not.toBe("skipped");
+			expect(result.diagnostics.length).toBeGreaterThan(0);
 		} finally {
 			env.cleanup();
 		}
