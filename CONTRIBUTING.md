@@ -41,9 +41,9 @@ created by running `npm install` in that specific worktree. A worktree
 where nobody has run `npm install` yet has the hook FILES checked out but
 nothing wired to `core.hooksPath` there, so `git commit`/`git push` silently
 run no hooks. This is accepted behavior, not a bug to route around: hooks
-serve human checkouts, where `npm install` has run; agent worktrees are
-covered by `PI_LENS_SKIP_HOOKS` below regardless, and CI is authoritative
-either way.
+serve human checkouts, where `npm install` has run; agent worktrees can opt
+out with `PI_LENS_SKIP_HOOKS` (see below), and CI is authoritative either
+way.
 
 Skip either hook with `PI_LENS_SKIP_HOOKS=<anything> git commit ...` /
 `git push ...` (any non-empty value works). Agents and CI should set this —
