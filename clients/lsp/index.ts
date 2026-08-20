@@ -6661,6 +6661,18 @@ export class LSPService {
 		if (cachedResults.length > 0) {
 			options.onProgress?.(completed, files.length);
 		}
+		// #1782: which files this sweep is REPLAYING from cache, and which of those
+		// a workspace pull then explicitly re-answered clean. A project-wide pull
+		// report names files far beyond the group that asked for it; an explicit
+		// zero-diagnostic answer for a replayed file is authoritative and must
+		// supersede the replay, in the sweep's result list AND on disk. Without
+		// this, a server that re-checked a file and found it clean could not
+		// dislodge the stale entry by any means available to a user — the
+		// 2026-08-20 dogfood's 23:07 record.
+		const cacheServedKeys = new Set(
+			cachedResults.map((result) => normalizeMapKey(result.filePath)),
+		);
+		const supersededCacheKeys = new Set<string>();
 		// Per-file scan mtime captured as each file completes below, so a
 		// confirmed fresh result can be written back into the cache with the
 		// mtime it was ACTUALLY scanned at (not re-stat'd after the fact, which
@@ -7062,9 +7074,22 @@ export class LSPService {
 					workspacePullEnabled &&
 					!group.multiServer
 				) {
-					const pulled = await this.tryWorkspacePull(group.files, perFileMs);
+					const pulled = await this.tryWorkspacePull(
+						group.files,
+						perFileMs,
+						cacheServedKeys,
+					);
 					if (pulled) {
-						for (const result of pulled) {
+						// #1782: an explicit zero-diagnostic answer for a file this
+						// sweep served from cache SUPERSEDES that cached replay. Route
+						// it through the same result list every other answer uses, so
+						// the cache write below overwrites the stale entry and the
+						// footer reconcile in `tools/lens-diagnostics.ts` clears the
+						// widget rows — no second eviction path to keep in step.
+						for (const clean of pulled.extraClean) {
+							supersededCacheKeys.add(normalizeMapKey(clean.filePath));
+						}
+						for (const result of [...pulled.results, ...pulled.extraClean]) {
 							results.push({
 								...result,
 								writeIndex: writeIndexByPath.get(
@@ -7252,7 +7277,17 @@ export class LSPService {
 		}
 		workspaceDiagnosticsCacheCtx.persist();
 
-		return [...cachedResults, ...results].filter(Boolean);
+		// #1782: drop every cached replay a pull answered clean — returning both
+		// would hand the footer reconcile two contradictory results for one file,
+		// and the stale one could win on ordering.
+		const servedCacheResults =
+			supersededCacheKeys.size === 0
+				? cachedResults
+				: cachedResults.filter(
+						(result) =>
+							!supersededCacheKeys.has(normalizeMapKey(result.filePath)),
+					);
+		return [...servedCacheResults, ...results].filter(Boolean);
 	}
 
 	/**
@@ -7260,11 +7295,34 @@ export class LSPService {
 	 * instead of N per-file opens. Returns per-file results (files absent from the
 	 * report are reported clean), or `undefined` when the server doesn't advertise
 	 * workspace pull / the pull fails — the caller then falls back to per-file.
+	 *
+	 * #1782: the report is project-wide, so it routinely names files this group
+	 * never asked about — including files this sweep already served from the
+	 * cache. Those answers used to be dropped on the floor: the mapping below
+	 * only ever looked up `groupFiles`. That is how a server can explicitly
+	 * re-answer a file with ZERO diagnostics while the cache and the widget keep
+	 * rendering its stale blockers, which is what the 2026-08-20 dogfood recorded
+	 * at 23:07. `reanswerFor` opts a caller into those extra answers: pass the
+	 * normalized keys of files served from cache, and any of them the report
+	 * explicitly names with zero diagnostics comes back in `extraClean` as a
+	 * confirmed clean result.
+	 *
+	 * Only an EXPLICIT zero-diagnostic entry qualifies. Absence from the report
+	 * reads as clean for `groupFiles`, which this sweep did ask about, but it is
+	 * genuinely UNKNOWN for a file nobody asked about — a server may report only
+	 * what it re-checked.
 	 */
 	private async tryWorkspacePull(
 		groupFiles: string[],
 		perFileMs: number,
-	): Promise<LSPWorkspaceDiagnosticResult[] | undefined> {
+		reanswerFor?: ReadonlySet<string>,
+	): Promise<
+		| {
+				results: LSPWorkspaceDiagnosticResult[];
+				extraClean: LSPWorkspaceDiagnosticResult[];
+		  }
+		| undefined
+	> {
 		try {
 			const first = groupFiles[0];
 			if (!first) return undefined;
@@ -7279,9 +7337,12 @@ export class LSPService {
 				Math.max(perFileMs, workspacePullBudgetMs()),
 			);
 			if (!report) return undefined;
+			// Last-wins per file: the report builder does not dedup, so a server
+			// naming the same URI twice appears twice in `report` (#1786 review F2).
 			const byPath = new Map<
 				string,
 				{
+					filePath: string;
 					diagnostics: import("./client.js").LSPDiagnostic[];
 					contentHash?: string;
 				}
@@ -7289,7 +7350,7 @@ export class LSPService {
 			for (const entry of report) {
 				byPath.set(normalizeMapKey(entry.filePath), entry);
 			}
-			return groupFiles.map((filePath) => {
+			const results = groupFiles.map((filePath) => {
 				const entry = byPath.get(normalizeMapKey(filePath));
 				const diagnostics = entry?.diagnostics ?? [];
 				// A pull that got here returned a real workspace/diagnostic report
@@ -7306,6 +7367,46 @@ export class LSPService {
 					contentHash: entry?.contentHash,
 				};
 			});
+			// #1782: harvest explicit clean answers for files this group never asked
+			// about but the caller is serving from cache. Same confirmed status as
+			// the mapping above — it is the same report.
+			//
+			// #1786 review F2: iterate `byPath`, not `report`. The report BUILDER
+			// (`clients/lsp/client.ts`'s `requestWorkspaceDiagnostics`) pushes one
+			// output entry per report item with no dedup, so a server that names the
+			// same URI twice yields two entries for one file. Walking the raw list
+			// would emit two results for one file — breaking the caller's
+			// one-result-per-file invariant — and would let a zero-diagnostic
+			// duplicate evict a cached blocker that the SAME report also reports as
+			// still failing. `byPath` is last-wins and unique per file, and
+			// `withFindings` refuses eviction whenever ANY entry for that file
+			// reports findings, whatever the order. Refusing costs a stale entry one
+			// more sweep; evicting on a contradicted answer discards a live blocker.
+			const extraClean: LSPWorkspaceDiagnosticResult[] = [];
+			if (reanswerFor && reanswerFor.size > 0) {
+				const asked = new Set(groupFiles.map((f) => normalizeMapKey(f)));
+				const withFindings = new Set<string>();
+				for (const entry of report) {
+					if (entry.diagnostics.length > 0) {
+						withFindings.add(normalizeMapKey(entry.filePath));
+					}
+				}
+				for (const [key, entry] of byPath) {
+					// The membership filter is load-bearing: a report names files far
+					// beyond this sweep, and a file nobody asked about and nothing is
+					// replaying has no business entering the sweep's results.
+					if (asked.has(key) || !reanswerFor.has(key)) continue;
+					if (entry.diagnostics.length > 0 || withFindings.has(key)) continue;
+					extraClean.push({
+						filePath: entry.filePath,
+						diagnostics: [],
+						count: 0,
+						timedOut: false,
+						contentHash: entry.contentHash,
+					});
+				}
+			}
+			return { results, extraClean };
 		} catch {
 			return undefined;
 		}

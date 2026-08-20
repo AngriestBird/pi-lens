@@ -72,6 +72,10 @@ import {
 	getSharedTreeSitterClient,
 	resetTreeSitterClientLoadState,
 } from "../../clients/tree-sitter-shared.js";
+import {
+	resetWorkspaceDiagnosticsCacheSession,
+	workspaceDiagnosticsCacheSessionStart,
+} from "../../clients/lsp/workspace-diagnostics-session.js";
 import { removeTempDirSync } from "../clients/test-utils.js";
 
 /**
@@ -460,6 +464,20 @@ export const SESSION_STATE_REGISTRY: SessionStateEntry[] = [
 		resetName: "resetClassicTsRepairGuard",
 		reason:
 			"#1570: a repair that failed transiently in an earlier session must not stay latched for the rest of the extension-host process.",
+	},
+	{
+		id: "lsp-workspace-diagnostics-cache:sessionClock",
+		module: "lsp/workspace-diagnostics-session.ts",
+		state: "_sessionStartedAt",
+		policy: "session_start",
+		resetName: "resetWorkspaceDiagnosticsCacheSession",
+		reason:
+			"#1782: the clock that decides whether a cached finding predates this session is worthless if it keeps the first session's value for the life of the extension host.",
+		probe: {
+			arm: () => resetWorkspaceDiagnosticsCacheSession(0),
+			isArmed: () => workspaceDiagnosticsCacheSessionStart() > 0,
+			reset: () => resetWorkspaceDiagnosticsCacheSession(),
+		},
 	},
 	{
 		id: "lsp-index:globalLSPService",
