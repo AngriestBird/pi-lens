@@ -20,6 +20,7 @@ import {
 	getDegradationSummary,
 	resetDegradationLedger,
 } from "../../clients/degradation-ledger.js";
+import { _setGrammarManifestForTests } from "../../clients/grammar-source.js";
 import { removeTempDirSync, setupTestEnvironment } from "./test-utils.js";
 
 const notifyUserDegradation = vi.hoisted(() => vi.fn());
@@ -61,10 +62,22 @@ describe("Language.load failure on a vouched-for file (#1564)", () => {
 	beforeEach(() => {
 		resetDegradationLedger();
 		notifyUserDegradation.mockClear();
+		// These fixtures write ARBITRARY bytes under a real grammar filename
+		// (loadLanguage needs an entry LANGUAGE_TO_GRAMMAR actually maps to) —
+		// nothing here is testing the #1760 pinned-hash staleness check, so an
+		// empty manifest keeps `pinnedGrammarHash` answering "can't verify,
+		// trust it" instead of the fixture bytes tripping a mismatch against
+		// the REAL committed grammars.lock.json entry for tree-sitter-python.wasm.
+		_setGrammarManifestForTests({
+			package: "tree-sitter-wasms",
+			version: "0.0.0-test",
+			grammars: {},
+		});
 	});
 
 	afterEach(() => {
 		vi.restoreAllMocks();
+		_setGrammarManifestForTests(undefined);
 		removeTempDirSync(env.tmpDir);
 	});
 
