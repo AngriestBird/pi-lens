@@ -1,9 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { logExtension } from "../../clients/extension-log.js";
+const logLatency = vi.hoisted(() => vi.fn());
 vi.mock("../../clients/extension-log.js", () => ({ logExtension: vi.fn() }));
+vi.mock("../../clients/latency-logger.js", () => ({ logLatency }));
 import {
 	DEGRADATION_ENTRIES_PER_KIND,
 	DEGRADATION_MAX_DISTINCT_KINDS,
+	getDegradationLedgerGeneration,
 	getDegradationSummary,
 	incrementDegradationCount,
 	recordDegradation,
@@ -15,6 +18,7 @@ import {
 beforeEach(() => {
 	resetDegradationLedger();
 	vi.mocked(logExtension).mockClear();
+	logLatency.mockClear();
 });
 
 describe("session degradation ledger", () => {
@@ -56,6 +60,111 @@ describe("session degradation ledger", () => {
 		expect(failure.count).toBe(1);
 		expect(timeouts.count).toBe(3);
 		expect(timeouts.latestReasons).toEqual([{ subject: "typescript", reason: "diagnostics wait timed out (count: 3)" }]);
+	});
+
+	it("writes one durable row for one once-record", () => {
+		recordDegradationOnce({
+			kind: "formatter-failure",
+			subject: "prettier:a.ts",
+			reason: "timed out",
+		});
+
+		expect(logLatency).toHaveBeenCalledOnce();
+		expect(logLatency).toHaveBeenCalledWith({
+			type: "phase",
+			phase: "degradation_ledger",
+			filePath: "prettier:a.ts",
+			durationMs: 0,
+			metadata: {
+				kind: "formatter-failure",
+				subject: "prettier:a.ts",
+				count: 1,
+				ledgerGeneration: getDegradationLedgerGeneration(),
+			},
+		});
+	});
+
+	it("writes updated counts without duplicating once-records", () => {
+		const once = {
+			kind: "formatter-failure" as const,
+			subject: "prettier:a.ts",
+			reason: "timed out",
+		};
+		recordDegradationOnce(once);
+		recordDegradationOnce(once);
+		incrementDegradationCount({
+			kind: "lsp-diagnostics-timeout",
+			subject: "typescript",
+			reason: "diagnostics wait timed out",
+		});
+		incrementDegradationCount({
+			kind: "lsp-diagnostics-timeout",
+			subject: "typescript",
+			reason: "diagnostics wait timed out",
+		});
+
+		expect(logLatency).toHaveBeenCalledTimes(3);
+		expect(logLatency.mock.calls.map(([row]) => row.metadata)).toEqual([
+			{
+				kind: "formatter-failure",
+				subject: "prettier:a.ts",
+				count: 1,
+				ledgerGeneration: getDegradationLedgerGeneration(),
+			},
+			{
+				kind: "lsp-diagnostics-timeout",
+				subject: "typescript",
+				count: 1,
+				ledgerGeneration: getDegradationLedgerGeneration(),
+			},
+			{
+				kind: "lsp-diagnostics-timeout",
+				subject: "typescript",
+				count: 2,
+				ledgerGeneration: getDegradationLedgerGeneration(),
+			},
+		]);
+	});
+
+	it("bounds durable rows for repeated and distinct subjects", () => {
+		for (let i = 0; i < 100; i++) {
+			incrementDegradationCount({
+				kind: "formatter-failure",
+				subject: "same",
+				reason: "timed out",
+			});
+		}
+		expect(logLatency).toHaveBeenCalledTimes(7);
+		expect(logLatency.mock.calls.map(([row]) => row.metadata.count)).toEqual([
+			1, 2, 4, 8, 16, 32, 64,
+		]);
+
+		resetDegradationLedger();
+		for (let i = 0; i < 100; i++) {
+			recordDegradationOnce({
+				kind: "formatter-failure",
+				subject: `subject-${i}`,
+				reason: "timed out",
+			});
+		}
+		expect(logLatency).toHaveBeenCalledTimes(7 + DEGRADATION_ENTRIES_PER_KIND);
+	});
+
+	it("reset re-arms durable once-recording", () => {
+		const record = {
+			kind: "formatter-failure" as const,
+			subject: "prettier:a.ts",
+			reason: "timed out",
+		};
+		recordDegradationOnce(record);
+		resetDegradationLedger();
+		recordDegradationOnce(record);
+
+		expect(logLatency).toHaveBeenCalledTimes(2);
+		expect(logLatency.mock.calls.map(([row]) => row.metadata.count)).toEqual([1, 1]);
+		expect(logLatency.mock.calls[0][0].metadata.ledgerGeneration).not.toBe(
+			logLatency.mock.calls[1][0].metadata.ledgerGeneration,
+		);
 	});
 
 	it("renders a health section only when degraded", () => {
