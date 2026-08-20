@@ -257,7 +257,7 @@ describe("lsp_navigation tool", () => {
 		expect(
 			(mocked.service as { workspaceSymbol: ReturnType<typeof vi.fn> })
 				.workspaceSymbol,
-		).toHaveBeenCalledWith("ReportProcessor", undefined);
+		).toHaveBeenCalledWith("ReportProcessor", undefined, expect.any(Object));
 	});
 
 	it("executeCommand dry-runs by default and does NOT execute", async () => {
