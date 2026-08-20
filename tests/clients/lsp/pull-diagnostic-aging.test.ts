@@ -28,7 +28,7 @@ describe("#1889 pull request aging", () => {
 		["document", false],
 		["workspace", true],
 	] as const)(
-		"keeps timed-out %s pulls bounded across repeated touches",
+		"keeps timed-out %s pulls bounded when the server ignores cancellation",
 		async (_kind, workspaceDiagnostics) => {
 			const state = pullState(workspaceDiagnostics);
 			let active = 0;
@@ -48,11 +48,9 @@ describe("#1889 pull request aging", () => {
 					if (method !== expected) return Promise.resolve(undefined);
 					active += 1;
 					peakActive = Math.max(peakActive, active);
-					return new Promise<undefined>((resolve) => {
+					return new Promise<undefined>(() => {
 						token?.onCancellationRequested(() => {
 							cancellations += 1;
-							active -= 1;
-							resolve(undefined);
 						});
 					});
 				},
@@ -68,8 +66,8 @@ describe("#1889 pull request aging", () => {
 				}
 			}
 
-			expect(cancellations).toBe(12);
-			expect(active).toBe(0);
+			expect(cancellations).toBe(1);
+			expect(active).toBe(1);
 			expect(peakActive).toBe(1);
 		},
 	);

@@ -922,6 +922,12 @@ export interface LSPClientState {
 	 *  Each request stamps its own number here; a write whose stamp is no longer
 	 *  the newest is dropped. */
 	pullRequestSequences?: Map<string, number>;
+	/** #1889: requests whose caller timed out and sent `$/cancelRequest`, but
+	 *  whose server-side request has not settled yet. Cancellation is advisory:
+	 *  a server may accept it and keep computing. A later pull for the same
+	 *  path/source must not be admitted until this promise settles, or repeated
+	 *  caller deadlines can still build an unbounded server queue. */
+	abandonedPullRequests?: Map<string, Promise<unknown>>;
 	/** #1104: per-path cache of the last `workspace/diagnostic` pull's resultId +
 	 *  diagnostics + content binding, so an `unchanged` report in a LATER pull can
 	 *  inherit the prior basis instead of the record site staying stuck at
@@ -2562,6 +2568,9 @@ async function pullDiagnosticSource(
 	// issued per source, so echoing a syntax id on a semantic request asks the
 	// server to compare against a basis it never handed out.
 	const sourceKey = pullSourceKey(normalizedPath, identifier);
+	if (state.abandonedPullRequests?.has(sourceKey)) {
+		return { status: "unavailable" };
+	}
 	const previousResultId = state.pullResultIds.get(sourceKey);
 	// #1667: the generation this pull was computed against. A resync landing
 	// while the request is in flight bumps it, and every write below is dropped
@@ -2582,6 +2591,7 @@ async function pullDiagnosticSource(
 		Math.min(PULL_REQUEST_TIMEOUT_MS, budgetMs),
 	);
 	const pullAbort = new AbortController();
+	const pullSettlement = { cancelled: false };
 	const requestPromise = safeSendRequest<{
 		kind?: string;
 		resultId?: string;
@@ -2601,6 +2611,7 @@ async function pullDiagnosticSource(
 			...(previousResultId !== undefined && { previousResultId }),
 		},
 		pullAbort.signal,
+		pullSettlement,
 	);
 	try {
 		// withTimeout is the backstop against a hung pull-mode server: without it
@@ -2736,6 +2747,7 @@ async function pullDiagnosticSource(
 			: { status: "clean" };
 	} catch (err) {
 		if (isPullTimeoutError(err, effectiveTimeoutMs)) {
+			trackAbandonedPullRequest(state, sourceKey, requestPromise);
 			pullAbort.abort();
 			recordPullTimeoutTelemetry({
 				scope: normalizedPath,
@@ -2752,11 +2764,27 @@ async function pullDiagnosticSource(
 				subject: sourceKey,
 				requestStartedAt,
 				server: state.serverId,
+				settlement: pullSettlement,
 			});
 		}
 		recordPullFailure(state, "textDocument/diagnostic", err);
 		return { status: "unavailable" };
 	}
+}
+
+function trackAbandonedPullRequest(
+	state: LSPClientState,
+	sourceKey: string,
+	requestPromise: Promise<unknown>,
+): void {
+	if (!state.abandonedPullRequests) state.abandonedPullRequests = new Map();
+	state.abandonedPullRequests.set(sourceKey, requestPromise);
+	const release = () => {
+		if (state.abandonedPullRequests?.get(sourceKey) === requestPromise) {
+			state.abandonedPullRequests.delete(sourceKey);
+		}
+	};
+	requestPromise.then(release, release);
 }
 
 /**
@@ -2847,9 +2875,11 @@ function armLateAnswerTelemetry(args: {
 	subject: string;
 	requestStartedAt: number;
 	server: string;
+	settlement: { cancelled: boolean };
 }): void {
 	args.requestPromise.then(
 		() => {
+			if (args.settlement.cancelled) return;
 			try {
 				const elapsedMs = Date.now() - args.requestStartedAt;
 				// #1743: `emitBounded` counts every late answer in the ledger
@@ -2979,6 +3009,7 @@ export async function clientRequestWorkspaceDiagnostics(
 > {
 	if (!isClientAlive(state)) return undefined;
 	if (!state.workspaceDiagnosticsSupport.workspaceDiagnostics) return undefined;
+	if (state.abandonedPullRequests?.has(WORKSPACE_PULL_SCOPE)) return undefined;
 	// #1104: echo every resultId we hold from a PRIOR pull so the server can
 	// answer `kind: "unchanged"` for files it hasn't recomputed, instead of
 	// resending (and us re-hashing) every file on every sweep.
@@ -3019,6 +3050,7 @@ export async function clientRequestWorkspaceDiagnostics(
 	const workspacePullStartedAt = Date.now();
 	const workspacePullTimeoutMs = Math.max(1, budgetMs);
 	const workspacePullAbort = new AbortController();
+	const workspacePullSettlement = { cancelled: false };
 	const workspaceRequestPromise = safeSendRequest<{
 		items?: Array<{
 			uri?: string;
@@ -3031,6 +3063,7 @@ export async function clientRequestWorkspaceDiagnostics(
 		"workspace/diagnostic",
 		{ previousResultIds },
 		workspacePullAbort.signal,
+		workspacePullSettlement,
 	);
 	try {
 		const report = await withTimeout(
@@ -3162,6 +3195,11 @@ export async function clientRequestWorkspaceDiagnostics(
 		return out;
 	} catch (err) {
 		if (isPullTimeoutError(err, workspacePullTimeoutMs)) {
+			trackAbandonedPullRequest(
+				state,
+				WORKSPACE_PULL_SCOPE,
+				workspaceRequestPromise,
+			);
 			workspacePullAbort.abort();
 			recordPullTimeoutTelemetry({
 				scope: WORKSPACE_PULL_SCOPE,
@@ -3178,6 +3216,7 @@ export async function clientRequestWorkspaceDiagnostics(
 				subject: WORKSPACE_PULL_SCOPE,
 				requestStartedAt: workspacePullStartedAt,
 				server: state.serverId,
+				settlement: workspacePullSettlement,
 			});
 		}
 		recordPullFailure(state, "workspace/diagnostic", err);
@@ -5100,6 +5139,7 @@ async function safeSendRequest<T>(
 	// so a server stops computing a result the agent has already abandoned (#238
 	// Item 1). The rejection that follows is swallowed (treated as `undefined`).
 	signal?: AbortSignal,
+	settlement?: { cancelled: boolean },
 ): Promise<T | undefined> {
 	// Already abandoned before we even sent — don't bother the server.
 	if (signal?.aborted) return undefined;
@@ -5136,9 +5176,12 @@ async function safeSendRequest<T>(
 			try {
 				return (await send()) as T;
 			} catch (err) {
-				if (isStreamError(err) || isCancellationError(err)) {
-					// Stream destroyed, or we cancelled the request on abort — either
-					// way there is no result to return.
+				if (isCancellationError(err)) {
+					if (settlement) settlement.cancelled = true;
+					return undefined;
+				}
+				if (isStreamError(err)) {
+					// Stream destroyed; connection handlers update client state separately.
 					return undefined;
 				}
 				if (isContentModifiedError(err)) {
