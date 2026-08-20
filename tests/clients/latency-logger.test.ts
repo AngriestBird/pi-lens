@@ -748,4 +748,168 @@ describe("getPhaseForWindow tie-break and plausibility floor (#1723 review round
 			vi.useRealTimers();
 		}
 	});
+
+	// #1723 review round 7, S1 (blocker) — the reviewer's "C1" three-candidate
+	// chain. A SINGLE-PASS streaming comparison chains: each accepted
+	// candidate becomes the new `bestFraction`, including a tie-win, and
+	// "near" is not transitive. Three candidates with adjacent fraction gaps
+	// INSIDE the epsilon band but an OUTER gap (first-to-last) OUTSIDE it let
+	// the running best walk across the whole band one hop at a time, so a
+	// single-pass implementation's answer depends on SCAN ORDER. The
+	// two-pass fix (find the true maximum first, then rank only the
+	// candidates within the band OF THAT MAXIMUM) is order-independent by
+	// construction — this test constructs the identical three candidates
+	// with the SAME startedAt/closedAt values in two DIFFERENT close orders
+	// (which flips their position in the closedBracket ring, and so the scan
+	// order `getPhaseForWindow` sees them in) and asserts both orders name
+	// the SAME winner.
+	it("R1/S1 (C1 chain): a three-candidate near-tie chain is decided by the global maximum, not scan order", () => {
+		const t0 = new Date("2026-08-19T20:03:22.575Z").getTime();
+		const windowStartMs = t0;
+		const windowLengthMs = 18_270;
+		const windowEndMs = t0 + windowLengthMs;
+
+		// Overlap in ms, chosen so adjacent fraction gaps (~1/18270 ≈ 5.47e-5)
+		// sit INSIDE FRACTION_TIE_EPSILON (1e-4) while the outer gap
+		// (~2/18270 ≈ 1.10e-4) sits OUTSIDE it. All three elapsedMs values are
+		// ≤ windowLengthMs, so all three share the same windowLengthMs
+		// denominator — a clean, comparable fraction ladder.
+		// candidateA: overlap 10 960 (fraction ≈0.599891) — its gap from the
+		//   TRUE maximum (candidateC, ≈0.600000) is ≈1.095e-4, OUTSIDE the
+		//   epsilon band, so it is correctly EXCLUDED — even though it is
+		//   just as close to candidateB as candidateB is to candidateC. A
+		//   single-pass CHAINED comparison (B accepted as a near-tie of C,
+		//   then A accepted as a near-tie of B) would wrongly let A win.
+		// candidateB: overlap 10 961, elapsedMs 14 000 (fraction ≈0.599945)
+		//   — within the epsilon band of the TRUE maximum (candidateC), and
+		//   the smaller of the two elapsedMs values in that band — the
+		//   correct winner.
+		// candidateC: overlap 10 962, elapsedMs 16 000 (fraction 0.600000)
+		//   — the true maximum fraction, but NOT the winner: candidateB is
+		//   within its band and has a smaller elapsedMs.
+		const candidates = [
+			{ name: "candidateA", overlapMs: 10_960, elapsedMs: 15_000 },
+			{ name: "candidateB", overlapMs: 10_961, elapsedMs: 14_000 },
+			{ name: "candidateC", overlapMs: 10_962, elapsedMs: 16_000 },
+		];
+
+		const runInCloseOrder = (
+			closeOrder: readonly number[],
+		): ReturnType<typeof getPhaseForWindow> => {
+			resetCurrentPhaseForSession();
+			vi.useFakeTimers();
+			try {
+				// Start ALL three first (order doesn't matter for live brackets
+				// here — only close order determines closedBracket ring position).
+				const tokens = candidates.map(({ name, overlapMs, elapsedMs }) => {
+					vi.setSystemTime(windowStartMs - (elapsedMs - overlapMs));
+					return phaseStarted(name);
+				});
+				for (const index of closeOrder) {
+					vi.setSystemTime(windowStartMs + candidates[index].overlapMs);
+					phaseFinished(tokens[index]);
+				}
+				return getPhaseForWindow(windowStartMs, windowEndMs);
+			} finally {
+				vi.useRealTimers();
+			}
+		};
+
+		const forwardOrder = runInCloseOrder([0, 1, 2]); // A, B, C
+		const reverseOrder = runInCloseOrder([2, 1, 0]); // C, B, A
+
+		// Sanity: the fraction ladder is shaped as designed.
+		const fractionOf = (overlapMs: number) => overlapMs / windowLengthMs;
+		expect(
+			Math.abs(fractionOf(10_961) - fractionOf(10_962)),
+		).toBeLessThanOrEqual(1e-4);
+		expect(
+			Math.abs(fractionOf(10_960) - fractionOf(10_962)),
+		).toBeGreaterThan(1e-4);
+
+		expect(forwardOrder?.phase).toBe("candidateB");
+		expect(forwardOrder?.elapsedMs).toBe(14_000);
+		expect(reverseOrder?.phase).toBe("candidateB");
+		expect(reverseOrder?.elapsedMs).toBe(14_000);
+	});
+
+	// #1723 review round 7, S2 — round 6's `best === undefined` branch (now
+	// pass 2's `best === undefined` check) and the `fraction <= 0` guard are
+	// both load-bearing per the reviewer's probes, but neither had a
+	// dedicated regression test: neutering either one leaves the round-6
+	// suite (51/51) green. Pinning both here.
+
+	// The "hatch": a LONE candidate whose fraction is itself within
+	// FRACTION_TIE_EPSILON of the seeded 0 baseline (an extremely thin
+	// sliver of overlap that still clears the N4 floor) must still be
+	// attributed — it is the only, and therefore correct, candidate. Without
+	// pass 2's `best === undefined` escape, this candidate would read as
+	// "near" a best that doesn't exist yet and be silently dropped.
+	it("S2 (hatch): a lone candidate whose fraction is itself near the seeded zero baseline still attributes", () => {
+		vi.useFakeTimers();
+		try {
+			const t0 = new Date("2026-08-19T20:03:22.575Z").getTime();
+			const windowStartMs = t0;
+			const windowEndMs = t0 + 18_270; // floor = 913.5ms
+
+			// elapsedMs 1000 clears the floor; overlap 1ms gives a fraction of
+			// 1/18270 ≈ 5.47e-5 — positive, but within 1e-4 of 0.
+			vi.setSystemTime(windowStartMs - 999);
+			const token = phaseStarted("faint_but_real_signal");
+			vi.setSystemTime(windowStartMs + 1);
+			phaseFinished(token);
+
+			const attribution = getPhaseForWindow(windowStartMs, windowEndMs);
+			expect(attribution?.phase).toBe("faint_but_real_signal");
+			expect(attribution?.elapsedMs).toBe(1_000);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	// The zero-guard: a LONE candidate with EXACTLY zero overlap must NOT
+	// attribute, even though it is the only candidate present and even
+	// though its `elapsedMs` clears the N4 floor.
+	it("S2 (zero-guard): a lone candidate with exactly zero overlap does not attribute", () => {
+		vi.useFakeTimers();
+		try {
+			const t0 = new Date("2026-08-19T20:03:22.575Z").getTime();
+			const windowStartMs = t0;
+			const windowEndMs = t0 + 18_270;
+
+			// Starts exactly when the window ends; elapsedMs 1000 clears the
+			// floor, but the bracket touches the window at a single instant —
+			// zero overlap, not negative.
+			vi.setSystemTime(windowEndMs);
+			const token = phaseStarted("touches_the_edge_only");
+			vi.setSystemTime(windowEndMs + 1_000);
+			phaseFinished(token);
+
+			expect(getPhaseForWindow(windowStartMs, windowEndMs)).toBeUndefined();
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	// The zero-guard's negative-overlap sibling: a LONE candidate entirely
+	// OUTSIDE the window (closed before the window even opened) must not
+	// attribute either.
+	it("S2 (zero-guard): a lone candidate with negative overlap does not attribute", () => {
+		vi.useFakeTimers();
+		try {
+			const t0 = new Date("2026-08-19T20:03:22.575Z").getTime();
+			const windowStartMs = t0;
+			const windowEndMs = t0 + 18_270;
+
+			// Starts and closes entirely before the window opens.
+			vi.setSystemTime(windowStartMs - 2_000);
+			const token = phaseStarted("finished_before_the_window_opened");
+			vi.setSystemTime(windowStartMs - 1_000);
+			phaseFinished(token);
+
+			expect(getPhaseForWindow(windowStartMs, windowEndMs)).toBeUndefined();
+		} finally {
+			vi.useRealTimers();
+		}
+	});
 });

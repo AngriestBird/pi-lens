@@ -367,14 +367,14 @@ const MIN_PLAUSIBLE_ELAPSED_FRACTION = 0.05;
  * fractions tie while their `elapsedMs` differs. See
  * `tests/clients/latency-logger.test.ts` for a constructed example.
  *
- * The tie-break compares within an EPSILON band (`1e-4`), not exact `===`
- * equality (#1723 review round 6, R3). Co-starting — two brackets opening
- * with the identical `startedAt` millisecond string — is the NORMAL path,
- * not an edge case: `dispatchForFile` launches its runner groups via
- * `Promise.all`, and a runner's `when` precondition awaits only microtasks,
- * so this happens routinely. Closed form for a culprit that closes `lag` ms
- * before the sample versus a co-started bracket that stays live: the
- * culprit scores `1 - lag/W`, the co-started bracket scores
+ * The tie-break compares within an EPSILON band (`FRACTION_TIE_EPSILON` =
+ * `1e-4`), not exact `===` equality (#1723 review round 6, R3). Co-starting
+ * — two brackets opening with the identical `startedAt` millisecond string
+ * — is the NORMAL path, not an edge case: `dispatchForFile` launches its
+ * runner groups via `Promise.all`, and a runner's `when` precondition awaits
+ * only microtasks, so this happens routinely. Closed form for a culprit
+ * that closes `lag` ms before the sample versus a co-started bracket that
+ * stays live: the culprit scores `1 - lag/W`, the co-started bracket scores
  * `1/(1 + lag/W)` — the co-started bracket wins by `(lag/W)^2`, which at a
  * real `W` = 18 270ms and `lag` = 5ms is ~7e-8 — far below millisecond
  * timestamp resolution, so an EXACT tie never actually engages and the
@@ -383,24 +383,43 @@ const MIN_PLAUSIBLE_ELAPSED_FRACTION = 0.05;
  * and well below the gap between two genuinely different candidates in every
  * test/probe this module has been checked against.
  *
+ * The tie-break is a TWO-PASS selection over every candidate, not a
+ * single-pass streaming comparison (#1723 review round 7, S1 — a blocker).
+ * A single running `bestFraction`, reassigned on every accepted candidate
+ * INCLUDING a tie-win, chains: "near" is not transitive, so three candidates
+ * at fractions 0.600000 / 0.600080 / 0.600160 (adjacent gaps inside the
+ * epsilon band, but the OUTER gap between the first and third outside it)
+ * let the running best walk across the whole band one hop at a time — the
+ * final answer then depends on SCAN ORDER, reachable at roughly 1.5ms of
+ * overlap difference in an 18s window, which is routine under `Promise.all`
+ * co-start with three or more candidates. Reseeding `bestFraction` via
+ * `Math.max(...)` alone does not fix this — the defect is the chaining
+ * itself, not the seed value. The fix: pass 1 finds the maximum fraction
+ * across ALL candidates (a plain reduction, immune to order); pass 2 keeps
+ * only the candidates within the epsilon band OF THAT MAXIMUM — not of each
+ * other, and not of a running value that could itself have drifted — and
+ * picks the smallest `elapsedMs` among them. Order-independent by
+ * construction: the three-candidate example above always excludes the
+ * first candidate (its gap from the true maximum exceeds the epsilon, even
+ * though its gap from its immediate neighbor does not), regardless of scan
+ * order.
+ *
  * Composes with N4's plausibility floor below in the natural order: the
  * floor FILTERS candidates (an implausibly short bracket is never even a
- * candidate for fraction ranking); fraction then RANKS the survivors. A
+ * candidate for fraction ranking, and never enters the `candidates` array at
+ * all); fraction then RANKS the survivors via the two passes above. A
  * bracket that clears the floor always has a well-defined fraction in (0, 1].
  *
  * A candidate needs a STRICTLY POSITIVE overlap: `if (fraction <= 0) return;`
- * enforces that explicitly. #1723 review N2 deleted an EARLIER such guard as
- * dead code, because `bestFraction` seeded at 0 plus a strict `>` comparison
- * already excluded a non-positive fraction with no help needed. That
- * reasoning no longer holds here: round 6's `best === undefined` branch
- * (below) accepts the very FIRST candidate unconditionally — including one
- * with a zero/negative fraction, absent this guard — so this one is real,
- * not vestigial. `best === undefined` itself exists to fix a DIFFERENT gap:
- * without it, a lone candidate whose fraction happens to be ≤ `1e-4` (an
- * extremely thin sliver of overlap that still cleared the N4 floor) would
- * read as "near" the seeded `bestFraction` of 0 and be silently dropped by
- * neither the `isNewBest` nor `winsTie` branch, even though it is the only —
- * and therefore correct — candidate.
+ * enforces that explicitly, before the candidate is even collected — pass 1's
+ * `maxFraction` is seeded at 0 and only ever updated by a STRICTLY GREATER
+ * value, so without this guard a lone zero-or-negative-fraction candidate
+ * would sit "within the epsilon band of the seeded 0" in pass 2 and be
+ * wrongly attributed. #1723 review N2 deleted an EARLIER version of this
+ * guard as dead code under the round-2 single-pass design, where a strict
+ * `>` comparison against a 0-seeded running best already excluded it with no
+ * help needed — that reasoning does not carry over to the two-pass shape,
+ * where pass 2's job is specifically to find candidates NEAR a seed value.
  *
  * This is the seam that makes the SYNCHRONOUS motivating case attributable at
  * all: the offending phase's `finally` (a microtask) always runs before
@@ -428,6 +447,24 @@ const MIN_PLAUSIBLE_ELAPSED_FRACTION = 0.05;
  * should account for the same slack rather than treating the window edges as
  * exact.
  */
+/**
+ * #1723 review round 6, R3 / round 7, S1: how close two fractions must be to
+ * count as the SAME answer rather than a genuinely different one. See
+ * `getPhaseForWindow`'s doc comment for the closed-form derivation (a
+ * co-started bracket's fraction gap from the true culprit is order
+ * `(lag/W)^2`, ~7e-8 at production scale) and why a single-pass streaming
+ * comparison against this band is NOT enough on its own (S1, below).
+ */
+const FRACTION_TIE_EPSILON = 1e-4;
+
+interface FractionCandidate {
+	phase: string;
+	startedAt: string;
+	stillRunning: boolean;
+	elapsedMs: number;
+	fraction: number;
+}
+
 export function getPhaseForWindow(
 	windowStartMs: number,
 	windowEndMs: number,
@@ -435,8 +472,7 @@ export function getPhaseForWindow(
 	const nowMs = Date.now();
 	const windowLengthMs = windowEndMs - windowStartMs;
 	const minPlausibleElapsedMs = windowLengthMs * MIN_PLAUSIBLE_ELAPSED_FRACTION;
-	let best: PhaseWindowAttribution | undefined;
-	let bestFraction = 0;
+	const candidates: FractionCandidate[] = [];
 
 	const consider = (
 		phase: string,
@@ -454,36 +490,7 @@ export function getPhaseForWindow(
 		// score a perfect, undeserved 1.0.
 		const fraction = overlapMs / Math.max(elapsedMs, windowLengthMs);
 		if (fraction <= 0) return; // no meaningful overlap — never a candidate
-		// #1723 review round 6, R3: an EXACT fraction tie (`===`) almost never
-		// happens once the window's own end is a real wall-clock sample, not a
-		// fake-timer instant. Co-starting is the NORMAL path here, not an edge
-		// case — `dispatchForFile` launches its runner groups via `Promise.all`,
-		// and `runner.when`'s await only yields microtasks, so two brackets
-		// sharing the identical `startedAt` millisecond string is routine, not
-		// rare. Closed form for that shape: a culprit that closes `lag` ms
-		// before the sample scores `1 - lag/W`; a co-started bracket that stays
-		// live scores `1/(1 + lag/W)` — the co-started one wins by
-		// `(lag/W)^2`, which at a real 18 270ms window and a 5ms sampling lag
-		// is ~7e-8: far below millisecond timestamp resolution, so an EXACT `===`
-		// tie-break never engages and the winner is decided by floating-point
-		// rounding noise instead. Comparing within an epsilon band (1e-4, far
-		// above any realistic (lag/W)^2 term but far below a genuinely
-		// different candidate's fraction gap) routes this case through the
-		// SAME elapsedMs discriminator as a true tie, instead of silently
-		// falling through to the (undefined) "greater than" branch.
-		const near = Math.abs(fraction - bestFraction) <= 1e-4;
-		// `best === undefined` on its own handles the very first accepted
-		// candidate — otherwise a lone candidate whose fraction is ITSELF
-		// within 1e-4 of the seeded `bestFraction` (0) would be wrongly read
-		// as "near" a best that doesn't exist yet and dropped by neither
-		// branch below. The `fraction <= 0` guard above is what keeps this
-		// escape hatch from ever accepting a non-candidate as the first "best".
-		const isNewBest = best === undefined || (fraction > bestFraction && !near);
-		const winsTie = best !== undefined && near && elapsedMs < best.elapsedMs;
-		if (isNewBest || winsTie) {
-			bestFraction = fraction;
-			best = { phase, startedAt, stillRunning, elapsedMs };
-		}
+		candidates.push({ phase, startedAt, stillRunning, elapsedMs, fraction });
 	};
 
 	for (const token of liveBrackets.keys()) {
@@ -492,7 +499,49 @@ export function getPhaseForWindow(
 	for (const closed of closedBrackets) {
 		consider(closed.phase, closed.startedAt, Date.parse(closed.closedAt), false);
 	}
-	return best;
+	if (candidates.length === 0) return undefined;
+
+	// #1723 review round 7, S1 (blocker): a single-pass streaming comparison
+	// against `FRACTION_TIE_EPSILON` (round 6's shape) CHAINS — each accepted
+	// candidate becomes the new `bestFraction`, including a tie-win, and
+	// "near" is not transitive. A chain of near-ties whose adjacent gaps sit
+	// inside the epsilon band but whose OUTER gap does not (e.g. three
+	// candidates at fractions 0.600000 / 0.600080 / 0.600160, an 18s window)
+	// lets the running "best" walk across the whole band one hop at a time,
+	// so the final answer depends on SCAN ORDER — reachable at roughly 1.5ms
+	// of overlap difference in an 18s window, routine under `Promise.all`
+	// co-start. `bestFraction = Math.max(...)` alone does NOT fix this: the
+	// bug is the CHAINING, not the seed value.
+	//
+	// Fixed with two independent passes instead, order-independent by
+	// construction:
+	//   Pass 1 finds the MAXIMUM fraction across every candidate — a plain
+	//     reduction, immune to scan order.
+	//   Pass 2 keeps only the candidates within `FRACTION_TIE_EPSILON` OF
+	//     THAT MAXIMUM (not of each other, and not of a running "best" that
+	//     could itself have already drifted) and picks the smallest
+	//     `elapsedMs` among THEM. In the three-candidate example above, only
+	//     the two candidates within the band of the true maximum (0.600160)
+	//     compete; the third, whose gap from the maximum exceeds the epsilon
+	//     even though its gap from its IMMEDIATE neighbor does not, is
+	//     correctly excluded regardless of which order the three were
+	//     scanned in.
+	let maxFraction = 0;
+	for (const candidate of candidates) {
+		if (candidate.fraction > maxFraction) maxFraction = candidate.fraction;
+	}
+	let best: FractionCandidate | undefined;
+	for (const candidate of candidates) {
+		if (Math.abs(candidate.fraction - maxFraction) > FRACTION_TIE_EPSILON) continue;
+		if (best === undefined || candidate.elapsedMs < best.elapsedMs) best = candidate;
+	}
+	if (best === undefined) return undefined;
+	return {
+		phase: best.phase,
+		startedAt: best.startedAt,
+		stillRunning: best.stillRunning,
+		elapsedMs: best.elapsedMs,
+	};
 }
 
 /**

@@ -1,5 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createPiMock } from "./support/pi-mock.js";
+import {
+	getCurrentPhase,
+	phaseStarted,
+} from "../clients/latency-logger.js";
 
 // Wiring guards for the #1122 loop_block probe fix. These live at the index.ts
 // turn_end seam (not the pure classifier) because the two things that broke —
@@ -275,5 +279,43 @@ describe("index turn_end loop_block wiring (#1122)", { timeout: LOOP_BLOCK_WIRIN
 		const metadata = logged[0].metadata as Record<string, unknown>;
 		expect(metadata.inFlightPhase).toBeUndefined();
 		expect(metadata.inFlightPhaseElapsedMs).toBeUndefined();
+	});
+
+	// #1723 review round 7, S3: `resetCurrentPhaseForSession()`'s call site
+	// (index.ts's `session_start` handler, behind the #473 gate) is exactly
+	// the kind of wiring `SESSION_STATE_REGISTRY`'s reachability derivation
+	// cannot see (it walks `handleSessionStart`'s body specifically, and this
+	// call sits BEFORE that function runs — see
+	// `tests/support/session-state-registry.ts`'s exemption note). The
+	// reviewer confirmed that reasoning is correct, but pointed out the
+	// coverage gap it leaves: deleting the call site is invisible to every
+	// existing test (113 stayed green). This test drives the REAL
+	// `session_start` handler (not a direct call to
+	// `resetCurrentPhaseForSession`) to close that gap at the one seam that
+	// can see it.
+	it("(f) #1723 S3: session_start clears a leaked in-flight phase via the real handler", async () => {
+		const { default: registerExtension } = await import("../index.js");
+		const mock = createPiMock({ "lens-lsp": true });
+		registerExtension(mock.asExtensionAPI() as never);
+
+		// Seed a live bracket BEFORE firing session_start — simulates a phase
+		// abandoned by a torn-down activation, per resetCurrentPhaseForSession's
+		// own doc comment.
+		phaseStarted("leaked_before_session_start");
+		expect(getCurrentPhase()).toBeDefined();
+
+		const sessionStart = mock.getHandlers("session_start")[0];
+		expect(sessionStart).toBeTypeOf("function");
+		const sessionCtx = {
+			cwd: process.cwd(),
+			ui: {
+				notify: vi.fn(),
+				setStatus: () => {},
+				theme: { fg: (_c: string, s: string) => s },
+			},
+		};
+		await sessionStart?.({ reason: "new" }, sessionCtx as never);
+
+		expect(getCurrentPhase()).toBeUndefined();
 	});
 });
