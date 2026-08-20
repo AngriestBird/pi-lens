@@ -35,3 +35,10 @@ invalid:
     }
   - |
     class A { async foo() {} async foo() {} }
+  - |
+    class A { static foo() {} static foo() {} }
+  - |
+    class A {
+      static async build() {}
+      static async build() {}
+    }

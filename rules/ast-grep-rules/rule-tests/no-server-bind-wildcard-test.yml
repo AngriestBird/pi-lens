@@ -14,3 +14,6 @@ invalid:
   - 'app.run(host="0.0.0.0", port=8000)'
   - "server.listen(host='0.0.0.0', port=8000)"
   - "app.serve(host='0.0.0.0', port=8000)"
+  - "run(host='0.0.0.0', port=8000)"
+  - "config = uvicorn.Config(app, host='0.0.0.0', port=8000)"
+  - "app.run_server(host='0.0.0.0', port=8000)"

@@ -26,6 +26,14 @@ note: |
   correctly-parameterized DB layer (#1806 audit). Mirrors the Python
   sibling `no-python-sql-string-concat`, which already restricted to
   `binary_operator` concatenation.
+
+  2026-08-20 (review round, refs #1806, low-severity finding): a
+  `binary_expression` where BOTH sides are string literals
+  (`"SELECT * FROM " + "users"`) is compile-time-constant text, not
+  runtime interpolation — nothing to inject. Excluded via a `has:
+  field: left/right, kind: string` check on both operands. A
+  literal-plus-variable concatenation (the actual injection shape)
+  still flags.
 rule:
   all:
     - any:
@@ -39,7 +47,16 @@ rule:
 constraints:
   SQL:
     any:
-      - kind: binary_expression
+      - all:
+          - kind: binary_expression
+          - not:
+              all:
+                - has:
+                    field: left
+                    kind: string
+                - has:
+                    field: right
+                    kind: string
       - all:
           - kind: template_string
           - has:

@@ -7,6 +7,7 @@ valid:
   - 'db.query("INSERT INTO x VALUES (1)")'
   - 'db.query("UPDATE users SET x = 1")'
   - 'db.query("SELECT * FROM users WHERE id = ?", [id])'
+  - 'db.query("SELECT * FROM " + "users")'
 invalid:
   - 'db.query("SELECT * FROM users WHERE id = " + id)'
   - 'db.query("DELETE FROM sessions WHERE token = " + token, [])'

@@ -16,11 +16,24 @@ note: |
   its caller obligations in a `# Safety` doc section instead of wrapping
   its whole body in a redundant `unsafe { ... }` block — the function
   signature IS the unsafe boundary, the doc section is where the
-  contract lives. Mirrors the `SAFETY:`-comment valve already shipped
-  for `no-chained-type-assertions` (same relational shape: `follows` a
-  preceding comment matching the marker, `stopBy: end` to scan back
-  through the doc-comment lines). A function with no `# Safety` section
-  — documented or not — still gets no escape valve.
+  contract lives.
+
+  2026-08-20 (review round, refs #1806): the first ship of this valve
+  used `follows: {stopBy: end, kind: line_comment, regex: '#\s*Safety'}`,
+  copying the `SAFETY:`-comment shape from `no-chained-type-assertions`
+  too literally. `stopBy: end` scans EVERY preceding sibling all the way
+  to the top of the file — one `# Safety` comment ANYWHERE earlier
+  (a stray file-top note, or a doc block that belongs to a DIFFERENT,
+  earlier function) exempted every `unsafe fn` after it. Probe: a
+  documented function followed by two undocumented ones scored 0 hits;
+  the two alone scored 2. Fixed by bounding the backward scan with
+  `stopBy: {not: {kind: line_comment}}` — it stops at the first
+  non-comment sibling, so only the CONTIGUOUS run of `///`/`//` lines
+  directly above the function is searched, never an earlier function's
+  doc block or an unrelated comment further up the file. (This valve
+  shipped with zero corpus hits either side in the original PR —
+  corpus silence isn't proof of correctness; the fixtures below are
+  the whole evidence, deliberately adversarial.)
 rule:
   all:
     - kind: function_item
@@ -33,6 +46,8 @@ rule:
           stopBy: end
     - not:
         follows:
-          stopBy: end
+          stopBy:
+            not:
+              kind: line_comment
           kind: line_comment
           regex: '#\s*Safety'

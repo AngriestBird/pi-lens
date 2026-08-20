@@ -18,17 +18,46 @@ note: |
     - a string literal (`compile('print(1)', ...)`);
     - the direct result of an `ast.<method>(...)` call
       (`compile(ast.parse(source), ...)`); or
-    - a variable assigned from `ast.<method>(...)` earlier in the same
-      function (`module = ast.parse(source); compile(module, ...)`).
+    - a variable of the SAME name assigned from `ast.<method>(...)`
+      SOMEWHERE in the nearest enclosing function
+      (`module = ast.parse(source); compile(module, ...)`).
   The third case covers the common "parse once, compile the tree"
   idiom (including intermediate `ast.Module`/`ast.Expression`
   reconstructions built from an already-parsed tree) without full
-  dataflow analysis — it is a same-function, same-name reaching-def
-  heuristic, not a cross-function or cross-file one. Anything else
-  (a bare identifier with no such assignment, string concatenation, a
-  call to something other than `ast.*`) is still flagged.
+  dataflow analysis. It is honestly a same-scope, same-name,
+  ANY-ORDER heuristic, not real reaching-definitions: it does not
+  check that the `ast.<method>(...)` assignment happens BEFORE the
+  `compile()` call, so a later reassignment to untrusted input
+  (`module = ast.parse(source); module = user_input;
+  compile(module, ...)`) is a known, accepted miss (fixture pins it
+  under `valid:` with an explanatory comment — ast-grep's relational
+  rules can't express statement ordering, only ancestor/descendant/
+  sibling-existence). Anything else (a bare identifier with no such
+  assignment anywhere in scope, string concatenation, a call to
+  something other than `ast.*`) is still flagged.
+
+  2026-08-20 (review round, refs #1806): two follow-up fixes.
+  (1) The "same function" scope was `inside: {stopBy: end, kind:
+  function_definition}`, which climbs the WHOLE ancestor chain and
+  matches the first function_definition ANYWHERE above — including an
+  outer function, past a nested one. A nested function whose own
+  parameter happens to share a name with an outer function's
+  `ast.parse`-derived variable (shadowing, not the same binding) was
+  wrongly trusted. Bounded to the NEAREST enclosing function with
+  `stopBy: {kind: function_definition}` on the `inside` ascent itself
+  (same boundary-rule shape used to scope `no-return-value-in-generator`
+  in this PR's first round) — it stops climbing at the first
+  function_definition found instead of continuing past it.
+  (2) `pattern: compile($SRC, $$$REST)` has a literal comma in its
+  source text, so it never matched the single-argument form
+  `compile(user_input)` — a silent arity regression from the original
+  `compile($$$ARGS)` (any arity). Restored via an explicit `compile($SRC)`
+  alternative, mirroring the `$DB.query($SQL)` / `$DB.query($SQL, $$$REST)`
+  two-arity shape already used in `no-sql-in-code`.
 rule:
-  pattern: compile($SRC, $$$REST)
+  any:
+    - pattern: compile($SRC)
+    - pattern: compile($SRC, $$$REST)
 constraints:
   SRC:
     not:
@@ -38,7 +67,8 @@ constraints:
         - all:
             - kind: identifier
             - inside:
-                stopBy: end
+                stopBy:
+                  kind: function_definition
                 kind: function_definition
                 has:
                   stopBy: end

@@ -38,3 +38,23 @@ invalid:
     unsafe fn no_real_safety_doc() {
         println!("nope");
     }
+  - |
+    // # Safety
+    // This is a stray file-top comment, not attached to any function.
+
+    fn helper() {}
+
+    unsafe fn no_doc_at_all() {
+        println!("bad 1");
+    }
+  - |
+    /// # Safety
+    /// Caller must ensure the pointer is valid.
+    unsafe fn documented_fn(p: *const i32) -> i32 {
+        let x = 1;
+        x
+    }
+
+    unsafe fn undocumented_fn_b() {
+        println!("no doc for me");
+    }
