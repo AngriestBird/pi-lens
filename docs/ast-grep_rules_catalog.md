@@ -510,7 +510,7 @@ See [`docs/custom-rules.md`](custom-rules.md) to add your own. Rule sources: `ru
 | `redos-nested-quantifier` | warning | pi-lens | Nested unbounded quantifier in regex — risks catastrophic backtracking (ReDoS) |
 | `redundant-state` | warning | pi-lens | Redundant state — '$NAME' is only used to return it, inline the value |
 | `require-await` | warning | pi-lens | Async function has no 'await' expression — consider removing 'async' keyword |
-| `require-safety-comment-for-as-unknown-as` | hint | pi-lens | 'x as unknown as T' with no nearby SAFETY: comment — state the invariant TypeScript can't check |
+| `require-safety-comment-for-as-unknown-as` | error | pi-lens | 'x as unknown as T' with no nearby SAFETY: comment — state the invariant TypeScript can't check |
 | `strict-equality` | warning | pi-lens | Use === instead of == |
 | `strict-inequality` | warning | pi-lens | Use !== instead of != |
 | `switch-without-default` | warning | pi-lens | switch has no default clause — values matching no case are silently ignored; add a default (even one that throws) |

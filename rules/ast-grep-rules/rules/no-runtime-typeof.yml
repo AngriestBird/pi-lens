@@ -50,6 +50,28 @@ note: |
   2026-08-19 hit count so a rule that fires thousands of times against
   its own product's source gets its pattern tightened before anyone
   trusts the count on a real target repo.
+
+  2026-08-20 (refs #1727, #1777): CONSIDERED for promotion to `error`,
+  KEPT at `hint`. Four-corpus census, ast-grep CLI 0.45, with the three
+  exemptions above already applied:
+
+  | corpus | hits |
+  |---|---:|
+  | pi-lens `clients/` | 257 |
+  | pi-lens `tests/` | 232 |
+  | pi core `packages/` | 543 (431 outside test paths) |
+  | opencode `packages/` | 1122 (991) |
+  | oh-my-pi `packages/` | 4114 (3239) |
+
+  Verdict: the highest-volume rule in the whole catalog, and the volume is
+  not noise — it is the finding the note already records, that a codebase
+  without a decoding layer answers this rule with an architecture change.
+  The suppression the maintainer's own framing asks for ("suppress a
+  `typeof` whose checked binding comes from a source typed `unknown`")
+  needs the binding's declared type, which is type information ast-grep
+  does not have; the three exemptions here are the closest structural
+  approximation and they still leave 3,239 hits on one corpus. Promoting
+  at this volume would block agent turns across every one of these trees.
 ignores:
   - "**/*.d.ts"
 rule:
