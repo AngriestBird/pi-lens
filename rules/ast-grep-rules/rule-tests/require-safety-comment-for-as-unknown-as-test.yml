@@ -14,6 +14,20 @@ valid:
   # pattern back to any assertion reds both.
   - 'const c = x as Foo;'
   - 'const d = x as A as B;'
+  # #1847: the `inside:` kind list omitted `export_statement`, so a
+  # SAFETY: comment above an EXPORTED cast could not satisfy the valve.
+  # Dropping `export_statement` from the rule's kind list reds this case.
+  - |
+    // SAFETY: node exposes this at runtime, absent from @types/node
+    export const b = (globalThis as unknown as { z: number }).z;
+  # #1847: same gap for a class-field cast — the kind list omitted
+  # `public_field_definition`. Dropping it from the rule's kind list
+  # reds this case.
+  - |
+    class Foo {
+      // SAFETY: server always sends this field at runtime
+      bar: unknown = (globalThis as unknown as { z: number }).z;
+    }
 invalid:
   - "const a = x as unknown as Foo;"
   - |
@@ -45,3 +59,14 @@ invalid:
     // SAFETY: documents castA only
     const castA = a as unknown as Foo;
     const castB = b as unknown as Foo;
+  # #1847: an exported cast with no SAFETY: comment must still flag —
+  # adding `export_statement` to the valve must not turn it into a
+  # blanket exemption for every exported cast.
+  - "export const b = (globalThis as unknown as { z: number }).z;"
+  # #1847: an undocumented class-field cast must still flag — adding
+  # `public_field_definition` to the valve must not exempt every field
+  # cast regardless of a SAFETY: comment.
+  - |
+    class Foo {
+      bar: unknown = (globalThis as unknown as { z: number }).z;
+    }

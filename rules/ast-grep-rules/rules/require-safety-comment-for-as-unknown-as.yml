@@ -76,6 +76,25 @@ note: |
   proves a comment is adjacent, never that the comment is true or that
   it describes this cast.
 
+  2026-08-20 (#1847, found in #1843's review): the "one level up from
+  its immediate containing statement" kind list omitted
+  `export_statement` and `public_field_definition`, so a `SAFETY:`
+  comment placed directly above an exported cast (`export const b =
+  (x as unknown as T).y;`) or a class-field cast (`bar: unknown = (x as
+  unknown as T).y;`) could not satisfy the valve — the rule is
+  `error`-tier and semantically `blocking`, so this left no escape for
+  those two shapes. Added both kinds. Verified the containing-statement
+  walk already covers casts nested deeper without a new kind: a cast
+  inside a `static {}` init block or an arrow-function body still
+  resolves to an ancestor `lexical_declaration`/`variable_declaration`
+  already in the list (probed with ast-grep's own `--rule` scan, not
+  reasoning about the grammar from memory), and a `SAFETY:` comment on
+  an `export const` nested inside a `namespace` block clears the valve
+  through the same `export_statement` kind — `stopBy: end` already
+  walks past the namespace wrapper to find it. `readonly`/`abstract`/
+  `static`/private-`#name` class fields all parse to the same
+  `public_field_definition` kind, so one entry covers all of them.
+
   Matched pair with `no-chained-type-assertions.yml`. As of 2026-08-20
   the two PARTITION the assertion space instead of overlapping: this
   rule owns `x as unknown as T` (with the `SAFETY:` escape valve); that
@@ -126,6 +145,8 @@ rule:
             - kind: lexical_declaration
             - kind: variable_declaration
             - kind: return_statement
+            - kind: export_statement
+            - kind: public_field_definition
           follows:
             kind: comment
             regex: 'SAFETY\s*:'
