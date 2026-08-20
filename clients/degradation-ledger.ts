@@ -10,6 +10,21 @@ export type DegradationKind =
 	| "formatter-skip"
 	| "grammar-blocked"
 	| "lsp-breaker"
+	/**
+	 * A per-file touch skipped a language server because that server is in the
+	 * breaker cooldown or is latched permanently broken (#1743). During an
+	 * outage this fires once per file per touch, so the count here is the exact
+	 * total and only the FIRST skip per (server, file) also writes an
+	 * `lsp_client_skipped_broken` latency.log record.
+	 */
+	| "lsp-client-skipped-broken"
+	/**
+	 * A per-file touch skipped a language server because its direct spawn
+	 * command is temporarily marked unavailable (#1743). Same shape and same
+	 * bounding as `lsp-client-skipped-broken`, but keyed on the command, since
+	 * that is what the availability latch is about.
+	 */
+	| "lsp-client-skipped-unavailable-command"
 	| "formatter-failure"
 	| "wasm-abort"
 	| "lsp-diagnostics-timeout"
@@ -57,6 +72,13 @@ export type DegradationKind =
 	 * so it is discarded — this kind is the only trace that it ever landed.
 	 */
 	| "lsp-pull-late-answer"
+	/**
+	 * A managed npm tool's periodic version refresh did not complete, or the
+	 * refresh state file could not be read (#1730). The tool keeps serving on
+	 * the version already installed — this kind means pi-lens cannot prove that
+	 * version is the newest the tool's declared range permits.
+	 */
+	| "managed-tool-refresh"
 	/**
 	 * `navRequest`'s (`clients/lsp/client.ts`) per-request `withTimeout`
 	 * abandoned a hover/definition/references/etc. request (#1716). Every

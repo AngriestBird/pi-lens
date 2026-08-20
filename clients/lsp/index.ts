@@ -19,6 +19,7 @@ import {
 import { recordLsp } from "../widget-state.js";
 import { applyAuxiliarySuppressions } from "../dispatch/auxiliary-lsp.js";
 import { detectFileRole } from "../file-role.js";
+import { emitBounded } from "../bounded-telemetry.js";
 import { logLatency } from "../latency-logger.js";
 import { logSessionStart } from "../sessionstart-logger.js";
 import {
@@ -2418,16 +2419,27 @@ export class LSPService {
 			server.availabilityKey &&
 			isDirectLspCommandTemporarilyUnavailable(server.availabilityKey)
 		) {
-			logLatency({
-				type: "phase",
-				phase: "lsp_client_skipped_unavailable_command",
-				filePath,
-				durationMs: 0,
-				metadata: {
-					serverId: server.id,
-					command: server.availabilityKey,
+			// #1743: during an outage this path runs once per file per touch,
+			// so a raw write here is a per-file log storm. The ledger counts
+			// every skip exactly, keyed on (command, file); only the first per
+			// pair also writes the detailed record.
+			emitBounded(
+				"lsp_client_skipped_unavailable_command",
+				`${server.availabilityKey}:${normalizeMapKey(filePath)}`,
+				{
+					filePath,
+					durationMs: 0,
+					metadata: {
+						serverId: server.id,
+						command: server.availabilityKey,
+					},
 				},
-			});
+				{
+					ledgerKind: "lsp-client-skipped-unavailable-command",
+					risingEdgePer: "identity",
+					reason: `command ${server.availabilityKey} temporarily unavailable`,
+				},
+			);
 			return undefined;
 		}
 
@@ -2435,16 +2447,26 @@ export class LSPService {
 			return undefined;
 		}
 		if (this.permanentlyBroken.has(key)) {
-			logLatency({
-				type: "phase",
-				phase: "lsp_client_skipped_broken",
-				filePath,
-				durationMs: 0,
-				metadata: {
-					serverId: server.id,
-					permanent: true,
+			// #1743: same per-file-per-touch storm as the unavailable-command
+			// skip above. Identity is (server, file) so a single wedged server
+			// cannot hide which files it is refusing.
+			emitBounded(
+				"lsp_client_skipped_broken",
+				`${server.id}:${normalizeMapKey(filePath)}`,
+				{
+					filePath,
+					durationMs: 0,
+					metadata: {
+						serverId: server.id,
+						permanent: true,
+					},
 				},
-			});
+				{
+					ledgerKind: "lsp-client-skipped-broken",
+					risingEdgePer: "identity",
+					reason: `${server.id} latched permanently broken`,
+				},
+			);
 			return undefined;
 		}
 
@@ -2655,16 +2677,26 @@ export class LSPService {
 
 		const brokenUntil = this.state.broken.get(key);
 		if (typeof brokenUntil === "number" && brokenUntil > Date.now()) {
-			logLatency({
-				type: "phase",
-				phase: "lsp_client_skipped_broken",
-				filePath,
-				durationMs: 0,
-				metadata: {
-					serverId: server.id,
-					retryInMs: Math.max(0, brokenUntil - Date.now()),
+			// #1743: the breaker-cooldown sibling of the permanently-broken skip
+			// above, sharing its identity so an outage produces one record per
+			// (server, file) rather than one per touch.
+			emitBounded(
+				"lsp_client_skipped_broken",
+				`${server.id}:${normalizeMapKey(filePath)}`,
+				{
+					filePath,
+					durationMs: 0,
+					metadata: {
+						serverId: server.id,
+						retryInMs: Math.max(0, brokenUntil - Date.now()),
+					},
 				},
-			});
+				{
+					ledgerKind: "lsp-client-skipped-broken",
+					risingEdgePer: "identity",
+					reason: `${server.id} in breaker cooldown`,
+				},
+			);
 			return undefined;
 		}
 		if (typeof brokenUntil === "number" && brokenUntil <= Date.now()) {
@@ -7188,6 +7220,44 @@ export class LSPService {
 	 */
 	supportsLSP(filePath: string): boolean {
 		return getServersForFileWithConfig(filePath).length > 0;
+	}
+
+	/**
+	 * Check whether the PRIMARY server for this file is currently mid-spawn
+	 * (`state.inFlight`, keyed `${server.id}:${normalizeMapKey(root)}` — see
+	 * :2413). Lets a caller whose own wait budget expires distinguish "the
+	 * server hasn't finished its first spawn yet" from "the server is running
+	 * but slow/wedged" (#1766) — a cold spawn still in flight is not a verdict
+	 * on a server that doesn't exist yet.
+	 *
+	 * Mirrors the `role !== "auxiliary"` filter getClientForFile applies at
+	 * :2146-2148 (kept coupled to that line intentionally): auxiliary servers
+	 * (opengrep, typos, …) spawn routinely and concurrently with an ALREADY
+	 * ALIVE primary (dispatch/runners/lsp.ts's with-auxiliary path fires one
+	 * per edit for most files via TYPOS_EXTENSIONS). Without this filter, an
+	 * unrelated auxiliary spawn would downgrade a genuinely wedged primary to
+	 * a benign "spawn-in-flight" verdict — the worse misreport direction.
+	 *
+	 * Root-blind: the match is a `${server.id}:` PREFIX over inFlight keys, not
+	 * an exact `${server.id}:${root}` match, because root resolution
+	 * (resolveServerRoot) is async and this must stay synchronous for the
+	 * caller's bail path. A same-server spawn in an unrelated workspace root
+	 * also reports true. Rare in practice (this codebase is single-root per
+	 * pi-lens session in the overwhelming common case) and the failure mode is
+	 * the same "downgrade wedged to spawn-in-flight" direction as the
+	 * auxiliary case above — acceptable for a log-wording hint, not a gate.
+	 * Pure lookup — does not spawn or wait for a client.
+	 */
+	isSpawnInFlight(filePath: string): boolean {
+		const servers = getServersForFileWithConfig(filePath).filter(
+			(s) => s.role !== "auxiliary",
+		);
+		if (servers.length === 0) return false;
+		const prefixes = servers.map((server) => `${server.id}:`);
+		for (const key of this.state.inFlight.keys()) {
+			if (prefixes.some((prefix) => key.startsWith(prefix))) return true;
+		}
+		return false;
 	}
 
 	/**

@@ -230,33 +230,149 @@ describe("GenerationMap — keyed independence", () => {
 		expect(handle.isCurrent()).toBe(false);
 	});
 
-	it("forget resets a key to generation 0 without touching others", () => {
+	it("stamps are unique across keys, so no key inherits another's", () => {
 		const map = createGenerationMap("keyed-store");
+		map.capture("/repo/a");
+		map.capture("/repo/b");
 		map.bump("/repo/a");
 		map.bump("/repo/b");
 
+		const stamps = ["/repo/a", "/repo/b"].map((key) => map.current(key));
+		expect(new Set(stamps).size).toBe(2);
+		// 0 is reserved for "holds no stamp" and must never be issued.
+		expect(stamps).not.toContain(0);
+	});
+
+	it("forget drops the key and STALES its outstanding handles", () => {
+		const map = createGenerationMap("keyed-store");
+		const dropped = map.capture("/repo/a");
+		const kept = map.capture("/repo/b");
+		expect(dropped.isCurrent()).toBe(true);
+
 		map.forget("/repo/a");
 
+		// The fail-open hole this design closes: with a per-key counter the
+		// forgotten key would read 0 again, which is exactly what a first-use
+		// handle held, so this handle would read CURRENT and its stale write
+		// would land. `forget` is the documented path for `retirePullSource`.
 		expect(map.current("/repo/a")).toBe(0);
-		expect(map.current("/repo/b")).toBe(1);
+		expect(dropped.isCurrent()).toBe(false);
+		expect(dropped.guardedWrite("entry", () => "wrote")).toBeUndefined();
+		expect(kept.isCurrent()).toBe(true);
+	});
+
+	it("a key re-captured after forget never reuses the dropped stamp", () => {
+		const map = createGenerationMap("keyed-store");
+		const dropped = map.capture("/repo/a");
+		map.forget("/repo/a");
+
+		const revived = map.capture("/repo/a");
+
+		expect(revived.generation).not.toBe(dropped.generation);
+		expect(revived.isCurrent()).toBe(true);
+		expect(dropped.isCurrent()).toBe(false);
 	});
 
 	it("bounds retained keys and fails CLOSED on eviction", () => {
 		const map = createGenerationMap("keyed-store", { maxKeys: 2 });
-		const evicted = map.capture("/repo/a");
-		map.bump("/repo/a");
-		const live = map.capture("/repo/a");
-		expect(live.isCurrent()).toBe(true);
+		// The reviewer's probe. A first-use capture is the common case, and it
+		// is exactly the case a per-key counter got wrong: `hot` would read 0
+		// after eviction, matching a generation-0 handle, and the stale write
+		// would land.
+		const hot = map.capture("/repo/hot");
+		expect(hot.isCurrent()).toBe(true);
 
 		map.bump("/repo/b");
 		map.bump("/repo/c");
 
 		expect(map.size()).toBe(2);
-		expect(map.current("/repo/a")).toBe(0);
-		// The evicted key's handles both read stale — the safe direction. A
-		// generation-0 handle captured BEFORE the bump stays stale too.
-		expect(evicted.isCurrent()).toBe(true); // generation 0 === evicted 0
+		expect(map.current("/repo/hot")).toBe(0);
+		expect(hot.isCurrent()).toBe(false);
+		expect(hot.guardedWrite("entry", () => "wrote")).toBeUndefined();
+	});
+
+	it("an eviction driven by CAPTURE alone still stales the evicted handle", () => {
+		// Eviction can happen with no bump at all: three first-use captures on a
+		// two-key map push the oldest out. The handle's fast path must notice,
+		// or it keeps answering from the stamp it cached at capture time and
+		// reports current for a key the map no longer holds.
+		const map = createGenerationMap("keyed-store", { maxKeys: 2 });
+		const hot = map.capture("/repo/hot");
+		map.capture("/repo/b");
+		map.capture("/repo/c");
+
+		expect(map.size()).toBe(2);
+		expect(map.current("/repo/hot")).toBe(0);
+		expect(hot.isCurrent()).toBe(false);
+		expect(hot.guardedWrite("entry", () => "wrote")).toBeUndefined();
+	});
+
+	it("fails closed for an evicted key that was bumped before eviction too", () => {
+		const map = createGenerationMap("keyed-store", { maxKeys: 2 });
+		map.capture("/repo/hot");
+		map.bump("/repo/hot");
+		const live = map.capture("/repo/hot");
+		expect(live.isCurrent()).toBe(true);
+
+		map.bump("/repo/b");
+		map.bump("/repo/c");
+
 		expect(live.isCurrent()).toBe(false);
+		expect(live.guardedWrite("entry", () => "wrote")).toBeUndefined();
+	});
+});
+
+describe("GenerationMap — a normalizer whose answer moves", () => {
+	// #1754 review F3. `normalizeMapKey` runs `realpathSync.native`, so a key
+	// that does not exist yet normalizes differently once it does. Normalizing
+	// ONCE at capture and never again would let a bump land on the new
+	// spelling while the handle kept reading the old one — reporting current,
+	// and landing a write the bump was supposed to drop.
+	function movingNormalizer(): {
+		normalizeKey: (key: string) => string;
+		settle: () => void;
+	} {
+		let settled = false;
+		return {
+			normalizeKey: (key) => (settled ? key.toLowerCase() : key),
+			settle: () => {
+				settled = true;
+			},
+		};
+	}
+
+	it("re-derives the key after an invalidation, so the bump still stales it", () => {
+		const moving = movingNormalizer();
+		const map = createGenerationMap("moving-store", {
+			normalizeKey: moving.normalizeKey,
+		});
+		const handle = map.capture("/Repo/NewRoot");
+		expect(handle.isCurrent()).toBe(true);
+
+		// The path comes into existence; the normalizer now answers differently.
+		moving.settle();
+		map.bump("/Repo/NewRoot");
+
+		expect(handle.isCurrent()).toBe(false);
+		expect(handle.guardedWrite("entry", () => "wrote")).toBeUndefined();
+	});
+
+	it("does not re-run the normalizer while nothing has been invalidated", () => {
+		let calls = 0;
+		const map = createGenerationMap("counting-store", {
+			normalizeKey: (key) => {
+				calls += 1;
+				return key;
+			},
+		});
+		const handle = map.capture("/repo/a");
+		const afterCapture = calls;
+
+		for (let i = 0; i < 50; i++) expect(handle.isCurrent()).toBe(true);
+
+		// The hot path: an uninterrupted sweep pays the normalizer once, not
+		// once per file. This is the realpath syscall the migration removed.
+		expect(calls).toBe(afterCapture);
 	});
 });
 

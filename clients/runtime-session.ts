@@ -2,6 +2,7 @@ import * as nodeFs from "node:fs";
 import * as path from "node:path";
 import type { AstGrepClient } from "./ast-grep-client.js";
 import type { BiomeClient } from "./biome-client.js";
+import { resetBoundedTelemetry } from "./bounded-telemetry.js";
 import type { CacheManager } from "./cache-manager.js";
 import { createDeadline, yieldIfOverBudget } from "./cooperative-budget.js";
 import type { DeadCodeClient, DeadCodeResult } from "./dead-code-client.js";
@@ -10,10 +11,10 @@ import { logDeadCodeScan } from "./dead-code-logger.js";
 import { resetDegradationLedger } from "./degradation-ledger.js";
 import type { DependencyChecker } from "./dependency-checker.js";
 import { getDiagnosticTracker } from "./diagnostic-tracker.js";
-import { resetDispatchAvailabilityState } from "./dispatch/runners/utils/runner-helpers.js";
+import { resetPsScriptAnalyzerAvailability } from "./dispatch/runners/psscriptanalyzer.js";
 import { resetInstallRetryLatches } from "./dispatch/runners/utils/availability-policy.js";
 import { resetLazyInstallAttempts } from "./dispatch/runners/utils/lazy-installer.js";
-import { resetPsScriptAnalyzerAvailability } from "./dispatch/runners/psscriptanalyzer.js";
+import { resetDispatchAvailabilityState } from "./dispatch/runners/utils/runner-helpers.js";
 import type { FileKind } from "./file-kinds.js";
 import { clearAllSessions as clearFileTimeSessions } from "./file-time.js";
 import {
@@ -43,6 +44,7 @@ import { resetWorkspaceDiagnosticsCacheSession } from "./lsp/workspace-diagnosti
 import { loadLspService } from "./lsp-lazy.js";
 import type { MetricsClient } from "./metrics-client.js";
 import type { OpengrepClient, OpengrepResult } from "./opengrep-client.js";
+import { resetManagedToolRefreshSession } from "./installer/managed-tool-refresh-session.js";
 import { _resetPackageManagerCache } from "./package-manager.js";
 import { isAtOrAboveHomeDir } from "./path-utils.js";
 import { isPrintMode } from "./print-mode.js";
@@ -566,6 +568,52 @@ function firePreinstallDefaults(
 				);
 			});
 	}
+}
+
+/**
+ * Default delay before the managed-tool version refresh runs (#1730). Long
+ * enough that `session_start`, the startup scans, and the tool preinstalls have
+ * all settled — the refresh may spawn one `npm update`, and that must never
+ * compete with the work the user is waiting on.
+ */
+const MANAGED_TOOL_REFRESH_DELAY_MS = 30_000;
+
+/**
+ * Schedule the periodic managed-tool refresh (#1730) on an unref'd background
+ * timer.
+ *
+ * `session_start`'s own cost here is a single `setTimeout` registration: the
+ * refresh module is not even imported until the timer fires. The timer is
+ * unref'd so a one-shot process exits without waiting for it, matching the
+ * warmup timer above. Whether a refresh actually runs is decided inside
+ * `runManagedToolRefresh` against a PERSISTED per-tool stamp, so a launch loop
+ * cannot escalate the weekly cadence.
+ */
+function scheduleManagedToolRefresh(dbg: SessionStartDeps["dbg"]): void {
+	const delayMs = Number(
+		process.env.PI_LENS_TOOL_REFRESH_DELAY_MS ?? MANAGED_TOOL_REFRESH_DELAY_MS,
+	);
+	const timer = setTimeout(() => {
+		void (async () => {
+			try {
+				const refresh = await import("./installer/managed-tool-refresh.js");
+				const outcome = await refresh.runManagedToolRefresh();
+				if (outcome.skipped) {
+					dbg(`session_start tool-refresh: skipped (${outcome.skipped})`);
+					return;
+				}
+				for (const result of outcome.refreshed) {
+					dbg(
+						`session_start tool-refresh: ${result.toolId} ${result.ok ? "ok" : "failed"}` +
+							`${result.changed ? ` ${result.previousVersion ?? "unknown"} → ${result.currentVersion}` : " (unchanged)"}`,
+					);
+				}
+			} catch (err) {
+				dbg(`session_start tool-refresh: error ${err}`);
+			}
+		})();
+	}, Number.isFinite(delayMs) ? delayMs : MANAGED_TOOL_REFRESH_DELAY_MS);
+	timer.unref?.();
 }
 
 async function probePrettierInstall(
@@ -1502,6 +1550,12 @@ export async function handleSessionStart(
 	deps: SessionStartDeps,
 ): Promise<void> {
 	resetDegradationLedger();
+	// #1743: the bounded-telemetry per-turn counters. The rising-edge state is
+	// NOT here — it is the ledger's own tally, reset on the line above. These
+	// counters are keyed by turn index, and a new session restarts turn
+	// numbering at 0, so without this a stale count could survive a session
+	// boundary that happened to land on the same index.
+	resetBoundedTelemetry();
 	const handlerEnteredAt = Date.now();
 	const sessionStartMs = deps.sessionStartFiredAt ?? handlerEnteredAt;
 	const cwdForTelemetry = deps.ctxCwd ?? process.cwd();
@@ -1876,6 +1930,13 @@ export async function handleSessionStart(
 	// pnpm/yarn/bun install done mid-day stayed invisible: a genuine "missing"
 	// verdict from one session latched into the next until a process restart.
 	_resetPackageManagerCache();
+	// #1730: the managed-tool refresh budget is a per-SESSION allowance (at most
+	// one `npm update` per session). Left process-lived, one long-running pi
+	// would refresh a single tool at launch and never look at the other 21
+	// again — the same latch shape as the two lines above. The weekly cadence
+	// itself is NOT reset here: it lives in the persisted per-tool stamp, so
+	// re-arming the budget only restores the session's right to ask.
+	resetManagedToolRefreshSession();
 	// #1123 item 3: a fresh session can re-report smells that a prior session
 	// already surfaced once (see `checkSmellsAndNoteOnce`'s once-per-session gate).
 	resetSmellsSessionState();
@@ -2302,6 +2363,7 @@ export async function handleSessionStart(
 			jstsHeavyScansWillRun,
 			dbg,
 		);
+		scheduleManagedToolRefresh(dbg);
 	}
 
 	if (allowBootstrapTasks) {

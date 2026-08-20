@@ -156,13 +156,24 @@ export function clearAllWorkspaceDiagnosticsCaches(): void {
 // below and #1707 for that residual gap, tracked rather than silently
 // claimed as solved.
 //
-// #1754: the per-cwd counters are the shared `GenerationMap` primitive rather
+// #1754: the per-cwd epochs are the shared `GenerationMap` primitive rather
 // than a hand-rolled Map, so the capture-before-load/check-before-write shape
 // here is the same code the dispatch-availability guards run, and a dropped
-// write is visible in the degradation ledger instead of silent. The primitive
-// bounds the key set (fail-closed: an evicted cwd reads generation 0, so a
-// handle captured at a higher generation reports stale and drops its write,
-// exactly the outcome a real refresh produces).
+// write is visible in the degradation ledger instead of silent.
+//
+// Two properties this file relies on, both documented on the primitive:
+//
+// - The map issues stamps from ONE monotonic ticket counter, so a cwd dropped
+//   at the retained-key bound reads 0 — a stamp no live handle holds — and its
+//   outstanding contexts report stale. Fail-closed, which for this cache means
+//   "recompute", the same outcome a real refresh produces. The pre-#1754 map
+//   was unbounded; the bound is new and costs at most one extra sweep for a
+//   cwd that fell off the end.
+// - `normalizeMapKey` runs `realpathSync.native` on Windows. A handle re-runs
+//   it only after the map has been invalidated, so an uninterrupted sweep pays
+//   that syscall once at context creation rather than once per `lookup()`, and
+//   an interrupted one pays it per check to stay correct if the cwd's realpath
+//   answer moved.
 const _cacheEpochs = createGenerationMap("workspace-diagnostics-cache", {
 	normalizeKey: normalizeMapKey,
 });
