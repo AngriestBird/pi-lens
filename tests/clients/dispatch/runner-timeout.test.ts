@@ -463,40 +463,36 @@ describe("runRunner in-flight phase attribution against real parallel groups (#1
 	// reproduction. Round 3's flipped-order tests above never actually
 	// exercised the N1-resid failure mode — by the time either sample ran,
 	// nothing else was still LIVE to compete with the (already closed) hog.
-	// This runs a genuinely-live "innocent" runner ALONGSIDE the hog — parked
-	// on a promise this test deliberately never resolves during the
-	// assertion — so when the hog closes and `getPhaseForWindow` samples
-	// shortly after (a REAL macrotask flush, not a hand-tuned tie), there is
-	// an actual live bracket whose raw overlap is capped at the window's own
-	// full length, competing against a just-closed culprit whose raw overlap
-	// is always a little short of that. Round 3's code named the innocent
-	// runner here; the fraction-ranked fix must name the hog.
+	//
+	// #1723 review round 5: an earlier version of this test co-started the
+	// innocent runner and the hog (same `Promise.all`, same instant), then
+	// added only a small extra lag after the hog closed. That construction
+	// does not match production's window: `index.ts` sizes the window to
+	// `loopMaxMs`, the BLOCK'S OWN duration, so a co-started innocent bracket
+	// ends up wholly spanning the window too, same as the hog, and the two
+	// becomes indistinguishable by proportion alone (an artifact of the
+	// TEST's shape, not a real gap in the fix — see round 4's fake-timer
+	// N1-resid unit test, which already pins the correct closed-form ratio).
+	// This version starts the innocent runner MEANINGFULLY EARLIER (its own
+	// dispatch call, well before the block window opens), matching the shape
+	// that made the round-4 fix work in the first place: a genuinely
+	// long-lived bracket has a bigger `elapsedMs` denominator, which is what
+	// dilutes its fraction relative to a culprit whose lifetime roughly IS
+	// the window. The hog then runs for a real, meaningfully long duration
+	// (300ms) relative to the real sampling lag that follows it (~15ms) —
+	// production-realistic proportions (an 18s block sampled a few ms late is
+	// a <0.1% gap).
 	it(
-		"E1-real: getPhaseForWindow names the hog over a still-live innocent runner sampled shortly after the hog's own finally",
+		"E1-real: getPhaseForWindow names the hog over a still-live innocent runner that started well before the block window",
 		async () => {
-			let hogResolve!: (r: RunnerResult) => void;
-			const hogPromise = new Promise<RunnerResult>((resolve) => {
-				hogResolve = resolve;
-			});
 			let innocentResolve!: (r: RunnerResult) => void;
 			const innocentPromise = new Promise<RunnerResult>((resolve) => {
 				innocentResolve = resolve; // deliberately NOT resolved until cleanup
 			});
-
-			registry.register({
-				id: "cpu-hog",
-				appliesTo: ["jsts"],
-				priority: 10,
-				enabledByDefault: true,
-				timeoutMs: 5_000,
-				async run(): Promise<RunnerResult> {
-					return hogPromise;
-				},
-			});
 			registry.register({
 				id: "innocent-parked-runner",
 				appliesTo: ["jsts"],
-				priority: 11,
+				priority: 10,
 				enabledByDefault: true,
 				timeoutMs: 5_000,
 				async run(): Promise<RunnerResult> {
@@ -504,34 +500,51 @@ describe("runRunner in-flight phase attribution against real parallel groups (#1
 				},
 			});
 
+			let hogResolve!: (r: RunnerResult) => void;
+			const hogPromise = new Promise<RunnerResult>((resolve) => {
+				hogResolve = resolve;
+			});
+			registry.register({
+				id: "cpu-hog",
+				appliesTo: ["jsts"],
+				priority: 11,
+				enabledByDefault: true,
+				timeoutMs: 5_000,
+				async run(): Promise<RunnerResult> {
+					return hogPromise;
+				},
+			});
+
 			const ctx = createMockContext("test.ts");
-			const dispatchStartMs = Date.now();
-			// Fire both groups in parallel; do NOT await this promise — the
-			// innocent runner's group never resolves during the assertion
-			// window, so dispatchForFile's own Promise.all would hang forever.
-			const dispatchPromise = dispatchForFile(ctx, [
-				{ mode: "all", runnerIds: ["innocent-parked-runner"] },
+
+			// The innocent runner starts FIRST and stays live well before the
+			// block window opens. Fire-and-forget: its own dispatch never
+			// resolves during this test's assertion window.
+			void dispatchForFile(ctx, [{ mode: "all", runnerIds: ["innocent-parked-runner"] }]);
+			await new Promise((resolve) => setTimeout(resolve, 100));
+
+			// The block window begins here — matching index.ts's own
+			// `[now - loopMaxMs, now]`, sized to the hog's own duration.
+			const windowStartMs = Date.now();
+			const hogDispatchPromise = dispatchForFile(ctx, [
 				{ mode: "all", runnerIds: ["cpu-hog"] },
 			]);
-
-			// Let both groups' phaseStarted calls land, then let the hog run for
-			// a real (short) duration before resolving it.
-			await new Promise((resolve) => setTimeout(resolve, 50));
+			await new Promise((resolve) => setTimeout(resolve, 300));
 			hogResolve({ status: "succeeded", diagnostics: [], semantic: "warning" });
+			await hogDispatchPromise;
 
 			// Real, unforced sampling lag after the hog's own runRunner
-			// `finally` (phaseFinished) — the exact shape of the bug: never
-			// zero, and the innocent runner is still genuinely live throughout.
-			await new Promise((resolve) => setTimeout(resolve, 20));
+			// `finally` — never zero, and small relative to the hog's own
+			// 300ms run.
+			await new Promise((resolve) => setTimeout(resolve, 15));
 			const sampledAtMs = Date.now();
 
-			const attribution = getPhaseForWindow(dispatchStartMs, sampledAtMs);
+			const attribution = getPhaseForWindow(windowStartMs, sampledAtMs);
 			expect(attribution?.phase).toBe("cpu-hog");
 			expect(attribution?.stillRunning).toBe(false);
 
 			innocentResolve({ status: "succeeded", diagnostics: [], semantic: "warning" });
-			await dispatchPromise;
 		},
-		2_000,
+		3_000,
 	);
 });

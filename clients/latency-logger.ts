@@ -325,8 +325,8 @@ const MIN_PLAUSIBLE_ELAPSED_FRACTION = 0.05;
  * the decisive finding). A live bracket's end, for overlap purposes, is
  * "now" (it is still running); a closed bracket's end is its own `closedAt`.
  *
- * Ranked by CONTAINMENT FRACTION (`overlapMs / elapsedMs`), not raw overlap
- * (#1723 review round 4, N1 — the actual fix, after round 3's elapsedMs
+ * Ranked by CONTAINMENT FRACTION (`overlapMs / max(elapsedMs, windowLengthMs)`),
+ * not raw overlap (#1723 review round 4, N1 — after round 3's elapsedMs
  * tie-break turned out not to engage in practice). Raw overlap is capped at
  * the window's own length, and a LIVE bracket's end is always `nowMs` — the
  * window's own end — so a long-lived, still-running INNOCENT bracket always
@@ -339,9 +339,33 @@ const MIN_PLAUSIBLE_ELAPSED_FRACTION = 0.05;
  * culprit whose own lifetime roughly IS the window scores close to 1.0
  * regardless of a few milliseconds of sampling lag, while a long-lived
  * innocent bracket that merely CONTAINS the window scores meaningfully
- * lower (its `elapsedMs` denominator is bigger). The round-3 elapsedMs
- * comparison is kept as the tie-break for a genuine FRACTION tie (two
- * candidates scoring identically), not as the primary ranking.
+ * lower (its `elapsedMs` denominator is bigger).
+ *
+ * The denominator is `max(elapsedMs, windowLengthMs)`, not bare `elapsedMs`
+ * (#1723 review round 5, R1 — the fraction metric's own blind spot). A bare
+ * `elapsedMs` denominator meant a SHORT bracket wholly INSIDE the window
+ * scored a perfect, undeserved 1.0 (`overlapMs === elapsedMs` whenever a
+ * bracket never spills past either window edge) and beat a real culprit
+ * whose bracket spans slightly MORE than the window — e.g. a 1s innocent
+ * bracket fully inside an 18.27s window outscored a genuine 19.27s-lifetime
+ * culprit that explains the whole window and then some. Using the WINDOW's
+ * length as a floor on the denominator caps the achievable fraction at
+ * `overlapMs / windowLengthMs` for any bracket no bigger than the window
+ * itself, so a small bracket can no longer out-rank a big one purely by
+ * being small; a bracket LARGER than the window still divides by its own
+ * `elapsedMs`, so the round-4 sampling-lag fix (a big bracket's fraction
+ * tracks how much of ITS OWN lifetime overlaps) is unaffected. Free
+ * improvement noted while verifying this: it also further demotes an N3
+ * leaked bracket when something is competing against it (its `elapsedMs`
+ * denominator, already large, only grows).
+ *
+ * The round-3 elapsedMs comparison is kept as the tie-break for a genuine
+ * FRACTION tie (two candidates scoring identically) — still reachable under
+ * this metric: two brackets that both partially overlap the window by the
+ * SAME amount (`overlapMs` equal) but have different lifetimes both share the
+ * `windowLengthMs` denominator (since both are ≤ the window), so their
+ * fractions tie while their `elapsedMs` differs. See
+ * `tests/clients/latency-logger.test.ts` for a constructed example.
  *
  * Composes with N4's plausibility floor below in the natural order: the
  * floor FILTERS candidates (an implausibly short bracket is never even a
@@ -403,7 +427,11 @@ export function getPhaseForWindow(
 		const elapsedMs = endMs - startMs;
 		if (elapsedMs < minPlausibleElapsedMs) return; // N4: implausibly short to be the cause
 		const overlapMs = Math.min(endMs, windowEndMs) - Math.max(startMs, windowStartMs);
-		const fraction = overlapMs / elapsedMs;
+		// #1723 review round 5, R1: divide by max(elapsedMs, windowLengthMs), not
+		// elapsedMs alone — see the function doc comment for why a bare
+		// elapsedMs denominator let a short bracket wholly INSIDE the window
+		// score a perfect, undeserved 1.0.
+		const fraction = overlapMs / Math.max(elapsedMs, windowLengthMs);
 		const isNewBest = fraction > bestFraction;
 		const winsTie =
 			best !== undefined && fraction === bestFraction && elapsedMs < best.elapsedMs;

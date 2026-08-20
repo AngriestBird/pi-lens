@@ -660,4 +660,92 @@ describe("getPhaseForWindow tie-break and plausibility floor (#1723 review round
 			vi.useRealTimers();
 		}
 	});
+
+	// #1723 review round 5, R1 (blocker) — the reviewer's "F-edge2" shape.
+	// A bare `elapsedMs` denominator gives a bracket wholly INSIDE the
+	// window a perfect, undeserved fraction of 1.0 (`overlapMs === elapsedMs`
+	// whenever nothing spills past either window edge) — and the N4 floor
+	// does not catch it: at 1000ms against an 18 270ms window (5% floor =
+	// 913.5ms), 1000 > 913.5 clears the floor easily. Meanwhile a REAL
+	// culprit whose own bracket is 19 270ms — 1000ms LONGER than the window,
+	// because it started before the window opened — could only ever reach
+	// 18270/19270 ≈ 0.948 under the bare-elapsedMs formula, losing to the
+	// blip's 1.0. Dividing by `max(elapsedMs, windowLengthMs)` instead caps
+	// the blip's fraction at `1000/18270 ≈ 0.055` (the window, not its own
+	// tiny lifetime, sets the denominator once a bracket is no bigger than
+	// the window), while the culprit's fraction is unaffected (its own
+	// `elapsedMs` already exceeds the window). The culprit must win.
+	it("R1 (F-edge2): a 1s innocent bracket wholly inside the window does not beat a 19.27s culprit that spills past it", () => {
+		vi.useFakeTimers();
+		try {
+			const t0 = new Date("2026-08-19T20:03:22.575Z").getTime();
+			const windowStartMs = t0;
+			const windowLengthMs = 18_270;
+			const windowEndMs = t0 + windowLengthMs;
+
+			// Culprit: started 1000ms BEFORE the window opened, closes exactly
+			// at the window's end. elapsedMs 19 270ms; overlap capped at the
+			// full window (18 270ms) since it started outside the window.
+			vi.setSystemTime(windowStartMs - 1_000);
+			const culpritToken = phaseStarted("full_scan_19270ms");
+			vi.setSystemTime(windowEndMs);
+			phaseFinished(culpritToken);
+
+			// Innocent: 1000ms lifetime, wholly INSIDE the window (500ms of
+			// clearance on the near side) — passes the N4 floor (1000 > 913.5)
+			// and, under a bare-elapsedMs denominator, would score a PERFECT
+			// 1.0 fraction purely by virtue of never spilling past either edge.
+			vi.setSystemTime(t0 + 9_000);
+			const innocentToken = phaseStarted("innocent_wholly_inside");
+			vi.setSystemTime(t0 + 10_000);
+			phaseFinished(innocentToken);
+
+			const attribution = getPhaseForWindow(windowStartMs, windowEndMs);
+			expect(attribution?.phase).toBe("full_scan_19270ms");
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	// #1723 review round 5, R2: the round-3 elapsedMs tie-break stays
+	// reachable under fraction ranking — this constructs a genuine one. Two
+	// brackets can share the SAME `overlapMs` against the window while
+	// differing in `elapsedMs`, as long as NEITHER exceeds the window's own
+	// length (both then divide by the same `windowLengthMs` denominator, so
+	// equal overlap means equal fraction). The smaller-`elapsedMs` bracket —
+	// a phase whose lifetime more tightly matches its own overlap, i.e. spent
+	// less of itself OUTSIDE the window — must still win the tie.
+	it("R2: a genuine fraction tie (equal overlap, differing elapsedMs, both ≤ window length) still falls back to the smaller elapsedMs", () => {
+		vi.useFakeTimers();
+		try {
+			const t0 = new Date("2026-08-19T20:03:22.575Z").getTime();
+			const windowStartMs = t0;
+			const windowEndMs = t0 + 18_270;
+
+			// A: starts 1000ms before the window, closes 9000ms in. elapsedMs
+			// 10 000ms, overlap 9000ms (capped at its own close point).
+			vi.setSystemTime(windowStartMs - 1_000);
+			const aToken = phaseStarted("tighter_fit");
+			vi.setSystemTime(windowStartMs + 9_000);
+			phaseFinished(aToken);
+
+			// B: starts 6000ms before the window, closes at the SAME instant as
+			// A. elapsedMs 15 000ms, overlap ALSO 9000ms (same close point, and
+			// still capped at the window's start on the near side) — an exact
+			// overlap tie with A, but a longer lifetime.
+			vi.setSystemTime(windowStartMs - 6_000);
+			const bToken = phaseStarted("looser_fit");
+			vi.setSystemTime(windowStartMs + 9_000);
+			phaseFinished(bToken);
+
+			// Both elapsedMs (10 000, 15 000) are ≤ the window length (18 270),
+			// so both divide by the SAME windowLengthMs denominator — an exact
+			// fraction tie (9000/18270 for each). The tie-break must pick A.
+			const attribution = getPhaseForWindow(windowStartMs, windowEndMs);
+			expect(attribution?.phase).toBe("tighter_fit");
+			expect(attribution?.elapsedMs).toBe(10_000);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
 });
