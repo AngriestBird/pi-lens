@@ -187,7 +187,20 @@ export type DegradationKind =
 	 * reaper path, which spelled the identical attempt-counted-as-kill defect
 	 * (#1857 class sweep).
 	 */
-	| "orphan-reap-kill-unverified";
+	| "orphan-reap-kill-unverified"
+	/**
+	 * `biome-check.ts`'s `resolveBiomeFixKinds` (#1810) couldn't get a real
+	 * fix-tier verdict for a rule from `biome explain <rule>` — either the
+	 * spawn itself failed/exited nonzero, or it succeeded but the output
+	 * matched neither the `- Fix: safe|unsafe` nor `- No fix available.`
+	 * shape (e.g. a biome 1.x install, whose `explain` text differs). Both
+	 * cases resolve the rule to "not fixable" for that one call WITHOUT
+	 * caching the verdict — a poisoned cache entry would make a genuinely
+	 * fixable rule permanently unfixable for the rest of the process. Subject
+	 * carries the rule name so a specific stuck rule (vs. a whole-binary
+	 * mismatch) is diagnosable from the ledger alone.
+	 */
+	| "biome-explain-unavailable";
 
 export interface DegradationRecord {
 	kind: unknown;
