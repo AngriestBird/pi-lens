@@ -67,9 +67,10 @@ note: |
 
   Placement contract: a `SAFETY:` comment may directly precede the cast,
   its enclosing statement, or an object-literal member (`pair`) containing
-  the cast. For array elements, call arguments, JSX attributes, class static
-  blocks, and switch cases, place the comment on the enclosing statement
-  instead; those container members are not comment anchors for this valve.
+  the cast. Array elements and call arguments are also supported through the
+  direct-cast arm when the comment is immediately above the cast expression.
+  JSX attributes, class static blocks, and switch cases are not comment
+  anchors for this valve; place those comments on the enclosing statement.
   Inline comments remain valid, for example `/* SAFETY: ... */ x as unknown
   as T`. Upstream walks an arbitrary number of statement-owner levels looking
   for ANY preceding comment in the file; this port only checks one level up
@@ -103,6 +104,12 @@ note: |
   statement's comment. The "Scope and known gap" note above already
   described this contiguous-comment intent; the shipped pattern didn't
   implement it.
+
+  2026-08-20 (#1870): the pair arm is bounded by the nearest `pair`. An
+  outer object member's SAFETY comment must not suppress a cast in a nested
+  member, and a nested member's comment must not suppress a parent cast.
+  The direct-cast arm remains the precise escape valve for comments adjacent
+  to casts in array elements and call arguments.
 ignores:
   - "**/*.test.ts"
   - "**/*.test.tsx"
@@ -122,7 +129,7 @@ rule:
           regex: 'SAFETY\s*:'
           stopBy: { not: { kind: comment } }
       - inside:
-          stopBy: end
+          stopBy: { kind: pair }
           any:
             - kind: expression_statement
             - kind: lexical_declaration
