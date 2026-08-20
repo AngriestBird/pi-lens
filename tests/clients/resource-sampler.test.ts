@@ -20,6 +20,10 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+	getDegradationSummary,
+	resetDegradationLedger,
+} from "../../clients/degradation-ledger.js";
 
 const pidusageMock = vi.fn();
 vi.mock("pidusage", () => ({
@@ -101,9 +105,14 @@ function setPlatform(platform: NodeJS.Platform): void {
 		configurable: true,
 	});
 }
+function requireMap<T>(result: Map<number, T> | null): Map<number, T> {
+	if (result === null) throw new Error("expected a completed sample");
+	return result;
+}
 afterEach(() => {
 	setPlatform(realPlatform);
 	fakeSpawn = () => makeFakeChild({ stdout: "" });
+	resetDegradationLedger();
 });
 
 describe("UsageAccumulator (pure)", () => {
@@ -190,7 +199,7 @@ describe("sampleProcesses (POSIX / pidusage path)", () => {
 	});
 
 	it("returns an empty map and never calls pidusage for an empty pid list", async () => {
-		const result = await sampleProcesses([]);
+		const result = requireMap(await sampleProcesses([]));
 		expect(result.size).toBe(0);
 		expect(pidusageMock).not.toHaveBeenCalled();
 	});
@@ -201,7 +210,7 @@ describe("sampleProcesses (POSIX / pidusage path)", () => {
 			"222": { cpu: 0, memory: 2048 },
 		});
 
-		const result = await sampleProcesses([111, 222]);
+		const result = requireMap(await sampleProcesses([111, 222]));
 		expect(result.get(111)).toEqual({ cpuPercent: 12.5, rssBytes: 1024 });
 		expect(result.get(222)).toEqual({ cpuPercent: 0, rssBytes: 2048 });
 	});
@@ -209,15 +218,17 @@ describe("sampleProcesses (POSIX / pidusage path)", () => {
 	it("leaves a pid absent from the result when pidusage can't resolve it", async () => {
 		pidusageMock.mockResolvedValue({ "111": { cpu: 5, memory: 512 } });
 
-		const result = await sampleProcesses([111, 999]);
+		const result = requireMap(await sampleProcesses([111, 999]));
 		expect(result.has(111)).toBe(true);
 		expect(result.has(999)).toBe(false);
 	});
 
-	it("never throws when pidusage itself rejects — returns an empty map", async () => {
+	it("treats a rejected pidusage query as unknown, not an empty map", async () => {
 		pidusageMock.mockRejectedValue(new Error("boom"));
 
-		await expect(sampleProcesses([111])).resolves.toEqual(new Map());
+		await expect(sampleProcesses([111])).resolves.toBeNull();
+		expect(getDegradationSummary().find((g) => g.kind === "resource-sampler-query-failed"))
+			.toMatchObject({ latestReasons: [{ subject: "posix-pidusage-process-table" }] });
 	});
 
 	it("de-duplicates and drops invalid pids before sampling", async () => {
@@ -233,6 +244,7 @@ describe("sampleProcesses (Windows / guarded CIM path)", () => {
 		pidusageMock.mockReset();
 		__resetWindowsCpuHistoryForTests();
 		setPlatform("win32");
+		resetDegradationLedger();
 	});
 
 	it("never calls pidusage on Windows — the whole point of the fix", async () => {
@@ -247,7 +259,7 @@ describe("sampleProcesses (Windows / guarded CIM path)", () => {
 		fakeSpawn = () =>
 			makeFakeChild({ stdout: "111,4096,0,0\r\n222,8192,0,0\r\n", code: 0 });
 
-		const result = await sampleProcesses([111, 222]);
+		const result = requireMap(await sampleProcesses([111, 222]));
 		expect(result.get(111)).toEqual({ rssBytes: 4096, cpuPercent: 0 });
 		expect(result.get(222)).toEqual({ rssBytes: 8192, cpuPercent: 0 });
 	});
@@ -258,7 +270,7 @@ describe("sampleProcesses (Windows / guarded CIM path)", () => {
 			vi.setSystemTime(0);
 			// Tick 1: cumulative CPU time = 0 (kernel=0,user=0). Seeds history.
 			fakeSpawn = () => makeFakeChild({ stdout: "111,4096,0,0\r\n", code: 0 });
-			const first = await sampleProcesses([111]);
+			const first = requireMap(await sampleProcesses([111]));
 			expect(first.get(111)).toEqual({ rssBytes: 4096, cpuPercent: 0 });
 
 			// 10s of wall time elapses; the process burned 5s of CPU.
@@ -266,7 +278,7 @@ describe("sampleProcesses (Windows / guarded CIM path)", () => {
 			vi.setSystemTime(10_000);
 			fakeSpawn = () =>
 				makeFakeChild({ stdout: "111,4096,0,50000000\r\n", code: 0 });
-			const second = await sampleProcesses([111]);
+			const second = requireMap(await sampleProcesses([111]));
 			// 5000 ms CPU / 10000 ms wall * 100 = 50%.
 			expect(second.get(111)?.cpuPercent).toBeCloseTo(50);
 			expect(second.get(111)?.rssBytes).toBe(4096);
@@ -292,14 +304,16 @@ describe("sampleProcesses (Windows / guarded CIM path)", () => {
 			throw err;
 		};
 
-		await expect(sampleProcesses([111])).resolves.toBeInstanceOf(Map);
+		await expect(sampleProcesses([111])).resolves.toBeNull();
 		const result = await sampleProcesses([111]);
-		expect(result.size).toBe(0);
+		expect(result).toBeNull();
+		expect(getDegradationSummary().find((g) => g.kind === "resource-sampler-query-failed"))
+			.toMatchObject({ count: 1, latestReasons: [{ subject: "windows-process-table" }] });
 	});
 
 	it("RESOLVES when the child emits an async 'error' event (e.g. ENOENT)", async () => {
 		fakeSpawn = () => makeFakeChild({ emitError: true });
-		await expect(sampleProcesses([111])).resolves.toEqual(new Map());
+		await expect(sampleProcesses([111])).resolves.toBeNull();
 	});
 
 	it("RESOLVES when the child exits non-zero with garbage stdout", async () => {
@@ -308,10 +322,24 @@ describe("sampleProcesses (Windows / guarded CIM path)", () => {
 		await expect(sampleProcesses([111])).resolves.toEqual(new Map());
 	});
 
+	it("does not turn a failed descendant process-table query into an empty tree", async () => {
+		fakeSpawn = () => makeFakeChild({ emitError: true });
+		vi.useFakeTimers();
+		try {
+			const sampler = startSpawnUsageSampler(999, 100);
+			await vi.advanceTimersByTimeAsync(0);
+			expect(sampler.stop()).toBeNull();
+			expect(getDegradationSummary().find((g) => g.kind === "resource-sampler-query-failed"))
+				.toMatchObject({ count: 1, latestReasons: [{ subject: "windows-descendant-process-table" }] });
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
 	it("returns an empty map and never spawns for an empty pid list", async () => {
 		const spy = vi.fn(() => makeFakeChild({ stdout: "" }));
 		fakeSpawn = spy;
-		const result = await sampleProcesses([]);
+		const result = requireMap(await sampleProcesses([]));
 		expect(result.size).toBe(0);
 		expect(spy).not.toHaveBeenCalled();
 	});

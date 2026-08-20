@@ -1934,3 +1934,10 @@ Every issue should carry **one TYPE label + at least one `area:` label**.
   Known gap, accepted not fixed: `pi.events` (a separate bus, not an
   `ExtensionAPI` member) is unwrapped — fine today because every subscriber on
   it is subscribe-only.
+
+Process-table resource samples preserve query outcome. `clients/child-unref.ts`
+`spawnCollectStdoutResult` distinguishes successful empty stdout from
+`spawn-error` and `timeout`. `clients/resource-sampler.ts` returns `null` for
+those failures, so consumers leave usage unknown rather than fabricating zero
+samples, and records one bounded `resource-sampler-query-failed` degradation
+per query subject. (#1863)

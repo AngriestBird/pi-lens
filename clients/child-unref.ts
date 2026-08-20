@@ -50,29 +50,51 @@ export function unrefChildAndPipes(child: ChildProcess): void {
 
 /**
  * Spawn a best-effort, fire-and-forget child, accumulate its full stdout, and
- * resolve with the collected text (empty string on a synchronous spawn
- * failure or an `error` event). Consolidates the spawn → unref →
+ * resolve with the collected text. Consolidates the spawn → unref →
  * pipe-stdout → `close` plumbing shared by every one-shot OS-process-table
  * query in the codebase — each caller supplies only its command/args/options
  * and does its own output parse. The child + its stdio pipes are `unref`'d
  * here (via `unrefChildAndPipes`) so a settled one-shot `pi --print` process
  * can exit without waiting, and both the unref and the collect plumbing live
  * in exactly ONE place rather than being re-derived at each spawn site.
- * Never rejects — any failure resolves to `""`, which every caller's parse
- * turns into an empty/absent result (the best-effort contract every caller
- * here already has).
+ * Never rejects. Callers that need to distinguish an empty query from a failed
+ * query use `spawnCollectStdoutResult`.
  */
 export function spawnCollectStdout(
 	command: string,
 	args: string[],
 	options: SpawnOptions,
 ): Promise<string> {
+	return spawnCollectStdoutResult(command, args, options).then((result) => result.stdout);
+}
+
+export type SpawnCollectStatus = "ok" | "spawn-error" | "timeout";
+
+export interface SpawnCollectResult {
+	stdout: string;
+	status: SpawnCollectStatus;
+	error?: unknown;
+}
+
+export interface SpawnCollectOptions {
+	timeoutMs?: number;
+}
+
+/** Collect stdout while preserving whether an empty result was successful. */
+export function spawnCollectStdoutResult(
+	command: string,
+	args: string[],
+	options: SpawnOptions,
+	collectOptions: SpawnCollectOptions = {},
+): Promise<SpawnCollectResult> {
 	return new Promise((resolve) => {
 		let settled = false;
-		const settle = (value: string) => {
+		let timer: NodeJS.Timeout | undefined;
+		const settle = (result: SpawnCollectResult) => {
 			if (settled) return;
 			settled = true;
-			resolve(value);
+			if (timer) clearTimeout(timer);
+			resolve(result);
 		};
 		try {
 			const child = nodeSpawn(command, args, options);
@@ -81,10 +103,17 @@ export function spawnCollectStdout(
 			child.stdout?.on("data", (chunk) => {
 				out += chunk.toString();
 			});
-			child.once("error", () => settle(""));
-			child.once("close", () => settle(out));
-		} catch {
-			settle("");
+			child.once("error", (error) => settle({ stdout: out, status: "spawn-error", error }));
+			child.once("close", () => settle({ stdout: out, status: "ok" }));
+			if (collectOptions.timeoutMs && collectOptions.timeoutMs > 0) {
+				timer = setTimeout(() => {
+					try { child.kill(); } catch { /* best effort */ }
+					settle({ stdout: out, status: "timeout" });
+				}, collectOptions.timeoutMs);
+				timer.unref();
+			}
+		} catch (error) {
+			settle({ stdout: "", status: "spawn-error", error });
 		}
 	});
 }

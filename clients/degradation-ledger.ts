@@ -159,6 +159,8 @@ export type DegradationKind =
 	 * from the ledger alone.
 	 */
 	| "runner-empty-result"
+	/** A process-table resource sample failed or timed out; it is unknown. */
+	| "resource-sampler-query-failed"
 	/**
 	 * `biome-check.ts`'s `resolveBiomeFixKinds` (#1810) couldn't get a real
 	 * fix-tier verdict for a rule from `biome explain <rule>` — either the
