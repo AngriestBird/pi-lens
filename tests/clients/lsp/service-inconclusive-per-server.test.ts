@@ -353,6 +353,14 @@ describe("#1549 — per-server touch verdict", () => {
 			unansweredServerIds: ["opengrep"],
 			attributedToPrimary: false,
 		});
+		expect(latencyRows("degradation_ledger")).toContainEqual(
+			expect.objectContaining({
+				metadata: expect.objectContaining({
+					kind: "lsp-diagnostics-timeout",
+					subject: "opengrep",
+				}),
+			}),
+		);
 		const touchRow = latencyRows("lsp_touch_file")[0];
 		expect(touchRow?.metadata).toMatchObject({
 			inconclusive: false,

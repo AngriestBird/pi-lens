@@ -1962,6 +1962,13 @@ export class LSPService {
 			outcome: "drained" | "stalled";
 		},
 	): void {
+		if (detail.outcome === "stalled") {
+			incrementDegradationCount({
+				kind: "lsp-notify-inflight-stall",
+				subject: `${entry.info.id}:${normalizeMapKey(filePath)}`,
+				reason: `notify barrier stalled with ${detail.unacked} unacknowledged writes`,
+			});
+		}
 		logLatency({
 			type: "phase",
 			phase: "lsp_notify_inflight_barrier",
@@ -4950,6 +4957,18 @@ export class LSPService {
 			// findings — otherwise the fix would remove the only record of the blackout.
 			auxNoAnswerServerIds.length > 0
 		) {
+			for (const serverId of unconfirmedServerIds) {
+				const reasons = [
+					brokenSkippedServerIds.includes(serverId) && "breaker skip",
+					uncoveredDeferredServerIds.includes(serverId) && "deferred resync",
+					auxNoAnswerServerIds.includes(serverId) && "no diagnostics answer",
+				].filter(Boolean);
+				incrementDegradationCount({
+					kind: "lsp-scanner-coverage-gap",
+					subject: `${serverId}:${normalizedPath}`,
+					reason: reasons.join(", ") || "scanner coverage gap",
+				});
+			}
 			logLatency({
 				type: "phase",
 				phase: "lsp_scanner_coverage_gap",

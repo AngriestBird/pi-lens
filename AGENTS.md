@@ -205,23 +205,19 @@ It is smart-default and read-only. Rendered-manifest validation (#1283 slice B)
 ships beside it as the separately-gated, OFF-by-default `helm-render` runner —
 see the IaC-misconfig note in the pipeline section.
 
-Mechanical ast-grep rules may expose a `fix:` only when one syntax rewrite is
-unambiguous. Reflect.apply remains diagnostic-only because an own shadowed
-`.apply` changes the obvious rewrite's semantics. Two-argument Reflect.get uses
-a scoped rewriter; receiver forms remain diagnostic-only. Snapshot fixtures
-under `rules/ast-grep-rules/rule-tests/__snapshots__/` prove generated output.
-Keep branch metavariables distinct from the outer Proxy-carve-out metavariables;
-fixtures deliberately name the constructor target and trap parameter differently.
-The generated ast-grep catalog derives its Fixable yes/no column from each
-rule's top-level `fix:` key. (#1850)
-
 Session degradation telemetry owns its dedupe and tally state in
 `clients/degradation-ledger.ts`: use `recordDegradationOnce` for a repeated
 site/subject that represents one user-visible degradation, and
 `incrementDegradationCount` when every event contributes to the exact group
 count but health should retain only one updated entry per subject. Both reset
 with the ledger at the session boundary; do not add caller-local duplicate
-sets or count one blocked action at both policy gates. (#1366, #1292)
+sets or count one blocked action at both policy gates. Every accepted once
+record and every tally increment also emits a `degradation_ledger` row through
+`latency.log`; the row carries the bounded kind, subject, and current count, so
+the session remains auditable when no health render reaches the transcript.
+Scanner coverage gaps and stalled notify-inflight barriers use the ledger;
+successful notify drains remain latency-only because they are not degradations.
+(#1366, #1292, #1866)
 
 ## Maintaining this file (do this on every commit)
 

@@ -2,6 +2,7 @@
 
 import { logExtension } from "./extension-log.js";
 import { LEDGER_FIELD_MAX, truncateForLedger } from "./ledger-bounds.js";
+import { logLatency } from "./latency-logger.js";
 
 // Re-exported so existing importers keep one name for the ledger's bound.
 export { LEDGER_FIELD_MAX, truncateForLedger };
@@ -32,6 +33,8 @@ export type DegradationKind =
 	| "formatter-failure"
 	| "wasm-abort"
 	| "lsp-diagnostics-timeout"
+	| "lsp-scanner-coverage-gap"
+	| "lsp-notify-inflight-stall"
 	| "bus-stale"
 	| "query-predicates-invalid"
 	| "install-retry-exhausted"
@@ -242,6 +245,7 @@ export function recordDegradationOnce(record: DegradationRecord): void {
 		if (onceKeys.has(key)) return;
 		onceKeys.add(key);
 		recordDegradation({ kind, subject, reason: record.reason });
+		logDurableDegradation(kind, subject, 1);
 	} catch (error) {
 		debugLedgerFailure("record-once", error);
 		// Telemetry must never break the observed path.
@@ -285,12 +289,29 @@ export function incrementDegradationCount(record: DegradationRecord): boolean {
 		if (existing >= 0) group.entries.splice(existing, 1);
 		group.entries.push(entry);
 		if (group.entries.length > ENTRIES_PER_KIND) group.entries.shift();
+		logDurableDegradation(kind, subject, count);
 		return count === 1;
 	} catch (error) {
 		debugLedgerFailure("increment", error);
 		// Telemetry must never break the observed path.
 		return false;
 	}
+}
+
+/**
+ * Persist the accepted ledger mutation through the existing rotated NDJSON
+ * latency stream. `logLatency` owns the timestamp, PID, serialization, secret
+ * redaction, and write queue. The subject and kind were already bounded by the
+ * ledger before reaching this seam.
+ */
+function logDurableDegradation(kind: string, subject: string, count: number): void {
+	logLatency({
+		type: "phase",
+		phase: "degradation_ledger",
+		filePath: subject,
+		durationMs: 0,
+		metadata: { kind, subject, count },
+	});
 }
 
 function boundedKind(value: unknown): string {
