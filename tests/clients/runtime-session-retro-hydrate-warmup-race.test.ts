@@ -30,6 +30,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ProjectSequenceIndex } from "../../clients/project-changes.js";
 import {
 	loadProjectSnapshot,
+	loadProjectSnapshotExportsAndRules,
 	PROJECT_SNAPSHOT_VERSION,
 	saveProjectSnapshot,
 	type ProjectSnapshot,
@@ -382,6 +383,19 @@ describe("#1785 review round F1 — retroactive hydration survives a warmup save
 				expect(t).toBeGreaterThanOrEqual(afterReturn);
 			}
 			expect(afterReturn).toBeGreaterThanOrEqual(beforeReturn);
+
+			// #1785 F8 (review round 5): the loop above proves nothing on its own
+			// when the array is empty — it just never executes its body. Prove
+			// the recorder seam is actually live (not a renamed/dead export that
+			// would leave the array permanently empty and the loop permanently
+			// vacuous) by calling the loader directly, once, and checking the
+			// array grew.
+			const countBeforeDirectCall =
+				loadProjectSnapshotExportsAndRulesCallTimesMs.length;
+			loadProjectSnapshotExportsAndRules(snapshotRoot);
+			expect(loadProjectSnapshotExportsAndRulesCallTimesMs.length).toBe(
+				countBeforeDirectCall + 1,
+			);
 
 			slow.resolve({ projectSeq: 0, fileSeqByPath: new Map() });
 			await new Promise((resolve) => setTimeout(resolve, 200));

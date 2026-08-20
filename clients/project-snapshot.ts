@@ -640,6 +640,21 @@ interface NarrowParseDigest {
 	length: number;
 	containsHeavyKey: boolean;
 }
+// #1785 F7 (review round 5): a FIXED LITERAL list, independent of
+// `HEAVY_SNAPSHOT_KEYS` — the digest below exists to detect a broken/emptied
+// `HEAVY_SNAPSHOT_KEYS`, so deriving `containsHeavyKey` from that same
+// constant makes the check vacuous by construction: empty the set and the
+// stripper strips nothing AND `[...HEAVY_SNAPSHOT_KEYS].some(...)` iterates
+// zero entries and reports `false` — the exact failure mode this hook exists
+// to catch, silently passing. Verified: with the shared-constant version,
+// emptying `HEAVY_SNAPSHOT_KEYS` left 38 tests green instead of red.
+const NARROW_DIGEST_HEAVY_KEY_LITERALS = [
+	"wordIndex",
+	"files",
+	"symbols",
+	"reverseDeps",
+] as const;
+
 let _lastNarrowParseDigestForTests: NarrowParseDigest | undefined;
 export function getLastNarrowParseDigestForTests(): NarrowParseDigest | undefined {
 	return _lastNarrowParseDigestForTests;
@@ -654,7 +669,7 @@ function parseExportsAndRulesOnly(
 	const narrowed = stripTopLevelJsonKeys(json, HEAVY_SNAPSHOT_KEYS);
 	_lastNarrowParseDigestForTests = {
 		length: narrowed.length,
-		containsHeavyKey: [...HEAVY_SNAPSHOT_KEYS].some((key) =>
+		containsHeavyKey: NARROW_DIGEST_HEAVY_KEY_LITERALS.some((key) =>
 			narrowed.includes(`"${key}":`),
 		),
 	};
