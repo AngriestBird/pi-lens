@@ -859,11 +859,96 @@ describe("ReadGuard", () => {
 				env.cleanup();
 			}
 		});
+
+		it("reports not-decidable when no candidate carries hashes", () => {
+			const env = setupTestEnvironment("read-guard-snapshot-undecidable-");
+			try {
+				const filePath = path.join(env.tmpDir, "api.ts");
+				fs.writeFileSync(filePath, "one\ntwo\nthree\n");
+				const guard = createReadGuard("test-session");
+				// An empty hash map means the read delivered no checkable snapshot.
+				guard.recordRead(
+					createReadRecord(filePath, {
+						effectiveOffset: 1,
+						effectiveLimit: 3,
+						lineHashes: {},
+					}),
+				);
+				vi.mocked(logReadGuardEvent).mockClear();
+
+				expect(guard.checkEdit(filePath, [2, 2]).action).toBe("allow");
+				expect(lastValidationMetadata()).toMatchObject({
+					status: "unavailable",
+					enforced: false,
+					outcome: "not-decidable",
+				});
+			} finally {
+				env.cleanup();
+			}
+		});
 	});
 
 	// ── #1904 item 3: the per-file read store is bounded ─────────────────────
 
 	describe("per-file read record cap", () => {
+		/**
+		 * #1907 review F1: the shape that overflows the cap is read-once-then-
+		 * grep-often. Under pure age order the whole-file read is evicted first,
+		 * and it is the only record whose hashes can rescue the edit after an
+		 * unrelated mtime touch. Search credits must be spent before it.
+		 */
+		it("spends search credits before a genuine read when trimming", () => {
+			const env = setupTestEnvironment("read-guard-cap-credit-first-");
+			try {
+				const filePath = path.join(env.tmpDir, "hot.ts");
+				fs.writeFileSync(
+					filePath,
+					Array.from({ length: 400 }, (_, i) => `line${i + 1}`).join("\n"),
+				);
+				const guard = createReadGuard("test-session");
+				// 1. One whole-file read — the oldest record on the file.
+				guard.recordRead(
+					createReadRecord(filePath, {
+						effectiveOffset: 1,
+						effectiveLimit: 400,
+						requestedOffset: 1,
+						requestedLimit: 400,
+					}),
+				);
+				// 2. 130 search credits, enough to overflow the 128 cap.
+				for (let i = 1; i <= 130; i++) {
+					guard.recordRead(
+						createReadRecord(filePath, {
+							requestedOffset: i,
+							requestedLimit: 1,
+							effectiveOffset: i,
+							effectiveLimit: 1,
+							searchCredit: {
+								marginBefore: 0,
+								marginAfter: 0,
+								reason: "match-lines-only",
+							},
+						}),
+					);
+				}
+				// 3. An unrelated touch makes the file look stale. The surviving
+				// whole-file read's hashes still match, so the edit is rescued.
+				// Under pure age order that read is gone and this edit BLOCKS.
+				fileTimeState.hasChanged = true;
+				expect(guard.checkEdit(filePath, [200, 200]).action).toBe("allow");
+
+				// The mechanism: the whole-file read is the one surviving non-credit.
+				const stored = guard.getReadHistory(filePath);
+				expect(stored.length).toBeLessThanOrEqual(128);
+				expect(
+					stored.filter((r) => r.searchCredit === undefined),
+				).toHaveLength(1);
+			} finally {
+				fileTimeState.hasChanged = false;
+				env.cleanup();
+			}
+		});
+
 		it("bounds records per file and keeps the newest", () => {
 			const env = setupTestEnvironment("read-guard-record-cap-");
 			try {
@@ -888,6 +973,16 @@ describe("ReadGuard", () => {
 				// Oldest-first eviction: the newest read survives, the oldest is gone.
 				expect(stored.at(-1)?.effectiveOffset).toBe(400);
 				expect(stored.some((r) => r.effectiveOffset === 1)).toBe(false);
+				// #1907 review F5: growth stays observable past the cap.
+				const trimEntry = vi
+					.mocked(logReadGuardEvent)
+					.mock.calls.filter(([e]) => e.event === "read_recorded")
+					.at(-1)?.[0];
+				expect(trimEntry?.metadata).toMatchObject({
+					readCountForFile: 128,
+					rawReadCountForFile: 129,
+					evictedRecordCount: 1,
+				});
 			} finally {
 				env.cleanup();
 			}

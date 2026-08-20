@@ -203,23 +203,42 @@ const READ_GUARD_MAX_FILES = 256;
  * 75 minutes, and every record carries a `lineHashes` map, so a long session on
  * a few files grows without bound. Cap records per file and drop oldest-first.
  *
- * Eviction is safe in the blocking direction: the newest records carry the most
- * recent view of the file, so coverage for the lines the agent is working on
- * survives. The old hash records only serve the staleness-rescue path — a stale
- * edit rescued by an older snapshot that still matches — so evicting them
- * narrows a rescue path and can turn an allow into a "re-read and retry" block.
- * It never turns a block into an allow.
+ * Eviction is safe in the blocking direction: it narrows the staleness-rescue
+ * path — a stale edit rescued by an older snapshot that still matches — and can
+ * turn an allow into a "re-read and retry" block. It never turns a block into
+ * an allow. See `enforceRecordCapForFile` for which records go first, and why
+ * age alone is the wrong order.
  */
 const READ_GUARD_MAX_RECORDS_PER_FILE = 128;
 
 /**
- * Trim a single file's read list to the per-file cap, oldest-first. Returns how
- * many records were dropped so the ledger can show the trim.
+ * Trim a single file's read list to the per-file cap. Returns how many records
+ * were dropped so the ledger can show the trim.
+ *
+ * Eviction is NOT purely by age. The shape that overflows this cap is
+ * read-once-then-grep-often: one whole-file read followed by hundreds of cheap
+ * search credits. Pure age order evicts that whole-file read first, and it is
+ * the record `canIgnoreStalenessByHashes` needs to rescue an edit after an
+ * unrelated mtime touch. So spend the search credits first, oldest among them
+ * first, and only fall through to genuine reads when the credits run out.
+ * Genuine reads are then evicted oldest-first as before.
+ *
+ * Records are trimmed IN PLACE: `EditRecord.precedingReads` holds a reference
+ * to this same array, so a replacement array would silently detach it.
  */
 function enforceRecordCapForFile(records: ReadRecord[]): number {
 	if (records.length <= READ_GUARD_MAX_RECORDS_PER_FILE) return 0;
 	const excess = records.length - READ_GUARD_MAX_RECORDS_PER_FILE;
-	records.splice(0, excess);
+	const evicted = new Set<number>();
+	for (let i = 0; i < records.length && evicted.size < excess; i++) {
+		if (records[i].searchCredit !== undefined) evicted.add(i);
+	}
+	for (let i = 0; i < records.length && evicted.size < excess; i++) {
+		evicted.add(i);
+	}
+	const kept = records.filter((_, i) => !evicted.has(i));
+	records.length = 0;
+	for (const record of kept) records.push(record);
 	return excess;
 }
 
@@ -623,6 +642,10 @@ export class ReadGuard {
 		this.consumedReadFiles.delete(storedRecord.filePath);
 		arr.push(storedRecord);
 		this.reads.set(storedRecord.filePath, arr);
+		// Capture BEFORE the trim: `readCountForFile` saturates at the cap once
+		// eviction starts, so it stops showing growth. `rawReadCountForFile` keeps
+		// the real arrival count observable alongside `evictedRecordCount`.
+		const rawReadCountForFile = arr.length;
 		const evictedRecordCount = enforceRecordCapForFile(arr);
 		this.touchFile(storedRecord.filePath);
 		this.enforceFileCap();
@@ -653,7 +676,10 @@ export class ReadGuard {
 					searchCreditMarginBefore: storedRecord.searchCredit.marginBefore,
 					searchCreditMarginAfter: storedRecord.searchCredit.marginAfter,
 				}),
-				...(evictedRecordCount > 0 && { evictedRecordCount }),
+				...(evictedRecordCount > 0 && {
+					evictedRecordCount,
+					rawReadCountForFile,
+				}),
 			},
 		});
 
