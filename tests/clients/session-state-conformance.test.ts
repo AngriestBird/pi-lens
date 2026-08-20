@@ -358,6 +358,22 @@ describe("session-state sweep — coverage", () => {
 		);
 		expect(missing, missing.join("\n")).toEqual([]);
 	});
+
+	// The mirror of the test above (review round 1, G1): a PIN row naming a
+	// file the scan does NOT currently flag is silent dead weight — the pin's
+	// key is folded into `auditSymbolCounts`'s composite id, so a phantom entry
+	// never becomes an `unaccounted` item and `auditRegistry`'s `staleExemptions`
+	// never fires either, because `auditSymbolCounts` never passes exemptions.
+	// Nothing structurally catches a made-up filename without this test.
+	it("every symbol-count pin entry names a file the sweep still flags — no phantom rows", () => {
+		const flaggedFiles = new Set(
+			scanSessionStateCandidates().map((c) => c.file),
+		);
+		const phantom = Object.keys(SESSION_STATE_SYMBOL_COUNTS).filter(
+			(file) => !flaggedFiles.has(file),
+		);
+		expect(phantom, phantom.join("\n")).toEqual([]);
+	});
 });
 
 // #1817: the symbol-count pin's own correctness, against a synthetic fixture

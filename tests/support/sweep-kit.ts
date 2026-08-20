@@ -810,8 +810,9 @@ export function auditSymbolCounts(input: SymbolCountAuditInput): RegistryAudit {
 			input.remediation ??
 			"A file's pinned stateful-symbol count no longer matches what the scan " +
 				"detects. First decide whether the new (or removed) symbol needs its " +
-				"own registry entry, a reset, or an exemption reason — THEN update the " +
-				"pin to the new count.",
+				"own registry entry, a reset, or an exemption reason, or it is an " +
+				"import-time constant the scan cannot distinguish (SWEEP_HEURISTIC_LIMITS " +
+				"item 5) — THEN update the pin to the new count.",
 	});
 }
 

@@ -276,6 +276,19 @@ const TEST_ONLY_RESET = /ForTests?$|ForTesting$/;
  *    frozen lookup table built once at import. That judgment stays in the
  *    registry and in {@link SessionStateExemption}'s reasons.
  *
+ * The #1817 symbol-count pin narrows the FIRST four of these from "invisible"
+ * to "a total the pin table tracks", but it inherits one more blind spot of
+ * its own:
+ *
+ * 6. **Substitution.** Adding one new uncleared container while removing an
+ *    already-covered one leaves the file's total count unchanged, so the pin
+ *    sees nothing. The pin proves the COUNT is deliberate, not that every
+ *    individual symbol behind it still is — a swap that nets to zero is
+ *    invisible to a total the same way it would be to a checksum. Full
+ *    symbol-to-reset attribution (#1817's option (a), not taken here) is the
+ *    only way to close this; the count pin's job is the cheaper, LOUDER
+ *    common case where a symbol is added without one being removed.
+ *
  * The sweep is therefore a floor, not a proof of coverage. It makes a NEW
  * matching file impossible to add without a decision; it does not certify
  * that everything session-scoped is registered.
@@ -286,6 +299,7 @@ export const SWEEP_HEURISTIC_LIMITS = [
 	"state with no reset seam at all",
 	"instance fields on bootstrap-lived singletons",
 	"session-scoped vs import-time-constant semantics",
+	"substitution: add one container, remove another, and the #1817 symbol-count pin sees no change",
 ] as const;
 
 let cachedCandidates: SessionStateCandidate[] | undefined;
