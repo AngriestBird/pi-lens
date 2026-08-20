@@ -138,6 +138,9 @@ type WorkspaceLspDiagnosticResult = {
 	timedOut?: boolean;
 	// #1618: WHY `timedOut` is true — see LSPWorkspaceUnconfirmedReason.
 	unconfirmedReason?: LSPWorkspaceUnconfirmedReason;
+	// Auxiliary lanes that did not answer. Other servers' diagnostics remain
+	// usable, but this result must not replace fully-covered cached/widget state.
+	unconfirmedServerIds?: string[];
 	// #1093: set only for cache-hit results (a replay of an older scan) — the
 	// wall-clock time the diagnostics were originally observed. Threaded into the
 	// footer reconcile so a cache-served mode=full doesn't re-arm the widget's
@@ -1642,6 +1645,12 @@ async function formatFullMode(
 			!result.error &&
 			!mismatchedLspResults.has(result),
 	);
+	const fullyCoveredLspResults = confirmedLspResults.filter(
+		(result) => (result.unconfirmedServerIds?.length ?? 0) === 0,
+	);
+	const partiallyCoveredLspResults = confirmedLspResults.filter(
+		(result) => (result.unconfirmedServerIds?.length ?? 0) > 0,
+	);
 	const unconfirmedLspResults = lspResults.filter(
 		(result) =>
 			result.timedOut ||
@@ -1651,7 +1660,7 @@ async function formatFullMode(
 	// #571: reconcile this scan's fresh, CONFIRMED per-file results into the
 	// footer cache. A footer write is never allowed to fail the tool call, so
 	// any unexpected throw is swallowed.
-	for (const result of confirmedLspResults) {
+	for (const result of fullyCoveredLspResults) {
 		try {
 			// #692: provenance label ONLY — must never affect `rule`/identity (see
 			// `ConvertLspDiagnosticsOptions.scanOrigin`'s doc comment).
@@ -1820,6 +1829,17 @@ async function formatFullMode(
 					.join(
 						", ",
 					)}${unconfirmedLspResults.length > 20 ? ", …" : ""}. These files' LSP contribution is excluded from this result; re-run mode=full to retry them (they may still show findings above from cached/project-runner state).`
+			: "";
+	const uncoveredScannerIds = [
+		...new Set(
+			partiallyCoveredLspResults.flatMap(
+				(result) => result.unconfirmedServerIds ?? [],
+			),
+		),
+	].sort();
+	const auxiliaryCoverageNote =
+		uncoveredScannerIds.length > 0
+			? `\n\n⚠ Auxiliary coverage incomplete: ${uncoveredScannerIds.join(", ")} did not answer for ${partiallyCoveredLspResults.length} file(s). Findings from answering servers are included; this is not a clean verdict for the named scanner lane(s).`
 			: "";
 	// #646: primary-vs-auxiliary split of the raw LSP-sweep findings (before
 	// they're merged into the widget-state summaries below), mirroring
@@ -2049,6 +2069,8 @@ async function formatFullMode(
 			// any files unconfirmed" without re-deriving it from the text.
 			lspFilesConfirmed: confirmedLspResults.length,
 			lspFilesUnconfirmed: unconfirmedLspResults.length,
+			lspFilesPartiallyCovered: partiallyCoveredLspResults.length,
+			unconfirmedLspServerIds: uncoveredScannerIds,
 			unconfirmedLspFiles: unconfirmedLspResults.map(
 				(result) => result.filePath,
 			),
@@ -2100,6 +2122,7 @@ async function formatFullMode(
 						result.content[0].text +
 						note +
 						unconfirmedLspNote +
+						auxiliaryCoverageNote +
 						lspPrimaryVsAuxiliaryNote +
 						coldNote +
 						testRunnerEditScopedNote +
@@ -2132,6 +2155,7 @@ async function formatFullMode(
 		cachedAgeNote ||
 		cheapScanStatusNote ||
 		unconfirmedLspNote ||
+		auxiliaryCoverageNote ||
 		lspPrimaryVsAuxiliaryNote
 	) {
 		return {
@@ -2141,6 +2165,7 @@ async function formatFullMode(
 					text:
 						result.content[0].text +
 						unconfirmedLspNote +
+						auxiliaryCoverageNote +
 						lspPrimaryVsAuxiliaryNote +
 						coldNote +
 						testRunnerEditScopedNote +

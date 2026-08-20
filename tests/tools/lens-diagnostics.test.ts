@@ -691,6 +691,46 @@ describe("lens_diagnostics mode=full", () => {
 		});
 	});
 
+	it("#1549 delivers an answering server's finding while naming only the silent auxiliary lane", async () => {
+		mockSummaries.length = 0;
+		const lspService = {
+			runWorkspaceDiagnostics: vi.fn().mockResolvedValue([
+				{
+					filePath: "/proj/src/partial.ts",
+					diagnostics: [
+						{
+							severity: 1,
+							message: "fast TypeScript answer",
+							range: {
+								start: { line: 0, character: 0 },
+								end: { line: 0, character: 4 },
+							},
+							source: "typescript",
+						},
+					],
+					count: 1,
+					unconfirmedServerIds: ["typos"],
+				},
+			]),
+		};
+
+		const result = await run(makeTool({}, lspService), { mode: "full" });
+		const text = String(result.content[0].text);
+
+		expect(text).toContain("fast TypeScript answer");
+		expect(text).toContain("Auxiliary coverage incomplete: typos");
+		expect(text).not.toContain("LSP sweep: 0 file(s) confirmed");
+		expect(result.details).toMatchObject({
+			lspFilesConfirmed: 1,
+			lspFilesUnconfirmed: 0,
+			lspFilesPartiallyCovered: 1,
+			unconfirmedLspServerIds: ["typos"],
+		});
+		// Partial coverage may be delivered, but it cannot replace a footer
+		// snapshot that may still contain the silent scanner's prior finding.
+		expect(reconcileScanDiagnosticsMock).not.toHaveBeenCalled();
+	});
+
 	it("uses an event-captured repaint when a server becomes ready mid-sweep (#798/#338)", async () => {
 		const repaint = vi.fn();
 		const capture = vi.fn(() => repaint);
