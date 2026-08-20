@@ -62,15 +62,24 @@ can trip, and say in your report which you ran and what each returned.
   proves nothing (#1887).
 - **Changelog fragment front matter.** The fragment needs YAML front matter
   with a `section:` key set to one of Added, Changed, Deprecated, Removed,
-  Fixed, or Security, followed by exactly one top-level bullet with a bold
-  title. `CHANGELOG.md` itself must be untouched.
+  Fixed, or Security, followed by exactly one top-level entry. Title
+  formatting is the author's choice: `.changelog/README.md` permits a `-` or
+  `*` bullet and a bold or plain title, and
+  `scripts/check-changelog-fragments.mjs` accepts both. Do not flag a plain
+  title. `CHANGELOG.md` itself is never hand-edited. The only legitimate edits
+  to it are the rollups `npm run changelog:release` generates on a release PR.
 - **CI executed, not merely absent.** Read the check runs on the exact head
   SHA and confirm Unit tests and Lint ran there. A DIRTY PR cannot build its
   merge ref, so those checks are skipped silently rather than failed.
-- **Session-start reset placement.** A reset triggered at `session_start` must
-  fire on the primary session only. Confirm the secondary and
-  `concurrent-secondary` classifications take no reset path, or a subagent
-  start tears down the warm state the primary depends on.
+- **Session-start reset placement.** `SessionStartClassification`
+  (`clients/session-lifecycle.ts`) has three values, and only one of them skips
+  the reset. `primary` and `sequential-replacement` both register as the
+  primary and run the full session start, so both must reset. Only
+  `concurrent-secondary` takes no reset path; a subagent start that resets
+  tears down the warm state the primary depends on. Do not flag the
+  `sequential-replacement` reset — that is the resume and reload path, and
+  skipping it there is the defect, not the fix. `secondary` belongs to
+  `SessionShutdownClassification`, a different axis; do not mix them.
 - **Sort comparators.** Any new `.sort()` or `.toSorted()` needs an explicit
   comparator (SonarCloud S2871). Where the sorted order feeds an identity — a
   dedupe key, a cache key, a hash input — the comparator must be

@@ -13,10 +13,14 @@ a fix.
 
 ## Evidence sources
 
-- `~/.pi-lens/latency.log` (plus the `.1` rotation, about two days retained):
-  per-touch records — `lsp_touch_file`, `lsp_aux_wait_outcome`,
-  `availability_decision`, `lsp_scanner_coverage_gap`, breaker and deferral
-  events. Structured JSON lines.
+- `~/.pi-lens/latency.log` and its `.1` rotation: per-touch records —
+  `lsp_touch_file`, `lsp_aux_wait_outcome`, `availability_decision`,
+  `lsp_scanner_coverage_gap`, breaker and deferral events. Structured JSON
+  lines. Rotation is size-driven, not time-driven. `PI_LENS_MAX_LOG_SIZE_MB`
+  defaults to 10 (`clients/log-cleanup.ts`), so the two files hold roughly
+  20 MB between them. Under active dogfooding that is hours, not days: one
+  measurement put the pair at 7.4 hours of coverage. Read the oldest timestamp
+  in `.1` before you trust the log to span your window.
 - `~/.pi-lens/cascade.log`: cascade runs, neighbor touches, verdicts, skips.
 - `~/.pi-lens/sessionstart.log` and `~/.pi-lens/tree-sitter.log`: lifecycle and
   grammar events.
@@ -68,12 +72,16 @@ a fix.
 Verdict first: the root cause, or the ranked hypotheses when the evidence does
 not settle it, with the two or three trimmed log lines that prove it. Then the
 rates and counts, the build attribution, the known-versus-new classification
-mapped to existing issue numbers, and the recommended next step: an issue to
-file with acceptance criteria, a fix to dispatch, or a measurement to wait for.
-Propose a new issue only after you have shown that no open issue already covers
-the shape.
+mapped to existing issue numbers, and the recommended next step.
+
+You propose; the orchestrator disposes. You never file an issue, comment, or
+open a PR yourself — every `gh` write belongs to the orchestrator. So the next
+step is a proposal in one of three shapes: an issue to file, with its title,
+body, labels, and acceptance criteria written out ready to post; a fix to
+dispatch; or a measurement to wait for. Propose a new issue only after you have
+shown that no open issue already covers the shape.
 
 If your brief asks you to fix and the fix is contained, follow the fixer
 conventions: red-first tests, targeted runs, `npm run build` before every run.
-Otherwise the precise issue is the fix's spec. Write it so a fixer needs no
-further investigation.
+Otherwise the issue text you drafted is the fix's spec. Write it so a fixer
+needs no further investigation.
