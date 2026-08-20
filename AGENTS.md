@@ -6,6 +6,13 @@ generation may reuse a successful result; explicit fresh-analysis callers omit
 it. Cache hits and executions are separately labeled, and session start clears
 the memo before the startup scan can prime it. (#1868)
 
+Bash write attribution recognizes common in-place formatter and fixer commands
+only when their source-file targets are explicit. Bare project-scoped `cargo
+fmt` and `dotnet format` remain unresolvable without a workspace walk. At the
+read guard's FileTime gate, uniquely resolved live `oldText` is stronger content
+evidence and softens staleness; ambiguous or missing `oldText` never does.
+(#1903)
+
 Coverage markers are deduped per session by normalized kind, file, and the
 normalized silent-scanner set. A changed set admits a new marker, and a marker
 is appended after primary diagnostics so both remain visible.
