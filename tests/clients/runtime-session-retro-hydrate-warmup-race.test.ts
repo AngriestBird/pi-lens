@@ -230,6 +230,20 @@ describe("#1785 review round F1 — retroactive hydration survives a warmup save
 				},
 				{ timeout: 5000, interval: 10 },
 			);
+
+			// #1785 F5: the retroactive-hydration path can no longer touch
+			// wordIndex at all (the narrow capture never carries one) — so once
+			// the warmup's OWN word-index build finishes for real, it must
+			// survive untouched. This is now guaranteed by construction (no
+			// wordIndex parameter exists to clobber it with), but the assertion
+			// stays as an end-to-end insurance policy against a future change
+			// re-wiring the capture back onto the full loader.
+			await vi.waitFor(
+				() => {
+					expect(runtime.wordIndex).not.toBeNull();
+				},
+				{ timeout: 5000, interval: 10 },
+			);
 		} finally {
 			env.cleanup();
 		}

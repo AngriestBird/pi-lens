@@ -33,18 +33,22 @@ import {
 	PROJECT_SNAPSHOT_VERSION,
 	_resetProjectSnapshotParseCacheForTests,
 	_getAuthoritativeSnapshotCacheKeysForTests,
+	_stripTopLevelJsonKeysForTests,
 	buildProjectSnapshotFromRuntime,
 	flushProjectSnapshotPersistsForTests,
 	getProjectSnapshotLegacyPath,
 	getProjectSnapshotMetaPath,
 	getProjectSnapshotPath,
 	getProjectSnapshotPersistErrorForTests,
+	getLastNarrowParseTextForTests,
 	hydrateRuntimeFromProjectSnapshot,
 	hydrateRuntimeFromProjectSnapshotIfIdle,
 	isProjectSnapshotFresh,
 	isProjectSnapshotMetaStale,
 	loadProjectSnapshot,
+	loadProjectSnapshotExportsAndRules,
 	readProjectSnapshotMeta,
+	resetLastNarrowParseTextForTests,
 	resetProjectSnapshotPersistWorkerForTests,
 	setProjectSnapshotGenerationGateForTests,
 	setProjectSnapshotPromotionSeamForTests,
@@ -55,11 +59,7 @@ import {
 } from "../../clients/project-snapshot.js";
 import type { ProjectSnapshot } from "../../clients/project-snapshot.js";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
-import {
-	buildWordIndex,
-	searchWordIndex,
-	serializeWordIndex,
-} from "../../clients/word-index.js";
+import { buildWordIndex, searchWordIndex } from "../../clients/word-index.js";
 import { createTempFile, setupTestEnvironment } from "./test-utils.js";
 import { suspendAt, waitFor } from "./interleaving-kit.js";
 
@@ -268,6 +268,187 @@ describe("project snapshot", () => {
 			expect(loadProjectSnapshot(cwd)?.wordIndex).toBeDefined();
 		}));
 
+	describe("loadProjectSnapshotExportsAndRules (#1785 F5)", () => {
+		it("returns exports/rules/seq/version but never carries a wordIndex, from a genuine cold disk read", () =>
+			withProjectDataDir((cwd) => {
+				const runtime = new RuntimeCoordinator();
+				runtime.seedProjectSequence(0);
+				runtime.cachedExports.set("hot", path.join(cwd, "src/hot.ts"));
+				runtime.wordIndex = buildWordIndex([
+					{
+						path: path.join(cwd, "src/hot.ts"),
+						content: "export function hot() {}",
+					},
+				]);
+				saveRuntimeProjectSnapshot({ cwd, runtime });
+				// Force a genuine disk read (gunzip + the narrow parse), not the
+				// in-process authoritative-write shortcut — this is the case the
+				// measured cold-read numbers (#1785 F5) are about.
+				_resetProjectSnapshotParseCacheForTests();
+
+				const full = loadProjectSnapshot(cwd);
+				expect(full?.wordIndex).toBeDefined();
+
+				const narrow = loadProjectSnapshotExportsAndRules(cwd);
+				expect(narrow?.seq).toBe(0);
+				expect(narrow?.cachedExports).toEqual([
+					["hot", path.join(cwd, "src/hot.ts")],
+				]);
+				// The cost-shaped assertion: the narrow loader must never even
+				// construct a wordIndex value, not just omit a defined one — a
+				// present-but-undefined key would still mean JSON.parse built (and
+				// then discarded) the postings graph, defeating the whole point.
+				expect("wordIndex" in (narrow as object)).toBe(false);
+				expect("files" in (narrow as object)).toBe(false);
+				expect("symbols" in (narrow as object)).toBe(false);
+				expect("reverseDeps" in (narrow as object)).toBe(false);
+			}));
+
+		it("survives cachedExports paths containing quotes, backslashes, and braces (scanner correctness)", () =>
+			withProjectDataDir((cwd) => {
+				const runtime = new RuntimeCoordinator();
+				runtime.seedProjectSequence(0);
+				// Adversarial values for the raw-text scanner: an escaped quote, a
+				// Windows-style backslash path, and literal braces/brackets — all
+				// of which must round-trip through stripTopLevelJsonKeys unharmed.
+				runtime.cachedExports.set(
+					'weird"name',
+					"C:\\Users\\apman\\proj\\{tricky}[file].ts",
+				);
+				runtime.projectRulesScan = {
+					hasCustomRules: true,
+					rules: [
+						{
+							source: "root",
+							name: 'AGENTS "quoted" {braced}.md',
+							filePath: path.join(cwd, "AGENTS.md"),
+							relativePath: "AGENTS.md",
+						},
+					],
+				};
+				runtime.wordIndex = buildWordIndex([
+					{ path: path.join(cwd, "a.ts"), content: "function f() {}" },
+				]);
+				saveRuntimeProjectSnapshot({ cwd, runtime });
+				_resetProjectSnapshotParseCacheForTests();
+
+				const narrow = loadProjectSnapshotExportsAndRules(cwd);
+				expect(narrow?.cachedExports).toEqual([
+					['weird"name', "C:\\Users\\apman\\proj\\{tricky}[file].ts"],
+				]);
+				expect(narrow?.projectRulesScan?.rules[0]?.name).toBe(
+					'AGENTS "quoted" {braced}.md',
+				);
+			}));
+
+		it("matches the full loader's exports/rules/seq/version on a snapshot with no wordIndex at all", () =>
+			withProjectDataDir((cwd) => {
+				const runtime = new RuntimeCoordinator();
+				runtime.seedProjectSequence(3);
+				runtime.cachedExports.set("plain", path.join(cwd, "plain.ts"));
+				saveRuntimeProjectSnapshot({ cwd, runtime });
+				_resetProjectSnapshotParseCacheForTests();
+
+				const full = loadProjectSnapshot(cwd);
+				const narrow = loadProjectSnapshotExportsAndRules(cwd);
+				expect(narrow?.seq).toBe(full?.seq);
+				expect(narrow?.version).toBe(full?.version);
+				expect(narrow?.cachedExports).toEqual(full?.cachedExports);
+			}));
+
+		it("reads its own in-process authoritative write without touching disk (read-your-own-write)", () =>
+			withProjectDataDir((cwd) => {
+				const runtime = new RuntimeCoordinator();
+				runtime.seedProjectSequence(0);
+				runtime.cachedExports.set("fresh", path.join(cwd, "fresh.ts"));
+				saveRuntimeProjectSnapshot({ cwd, runtime });
+				// Deliberately NO `_resetProjectSnapshotParseCacheForTests()` here —
+				// this exercises the authoritative in-process branch.
+				const narrow = loadProjectSnapshotExportsAndRules(cwd);
+				expect(narrow?.cachedExports).toEqual([
+					["fresh", path.join(cwd, "fresh.ts")],
+				]);
+			}));
+
+		it("returns null when nothing has ever been saved", () =>
+			withProjectDataDir((cwd) => {
+				expect(loadProjectSnapshotExportsAndRules(cwd)).toBeNull();
+			}));
+
+		// #1785 F5 review follow-up: the tests above assert on the RETURNED
+		// shape, which is not, by itself, proof that stripping ever ran —
+		// `loadProjectSnapshotExportsAndRules` hand-picks 4 named fields into
+		// its return value regardless, so it would omit `wordIndex` from the
+		// output even if the strip step were deleted entirely and the FULL text
+		// were handed to `JSON.parse`. These two tests instead inspect what
+		// actually reaches `JSON.parse` — the only place the postings graph's
+		// construction cost is paid — so a mutation that disables stripping
+		// (while leaving the return shape untouched) fails them.
+		it("stripTopLevelJsonKeys removes the heavy fields from the TEXT itself, not just the parsed result", () => {
+			const json = JSON.stringify({
+				version: PROJECT_SNAPSHOT_VERSION,
+				projectRoot: "/tmp/proj",
+				generatedAt: "2026-01-01T00:00:00.000Z",
+				seq: 4,
+				files: { "a.ts": { path: "a.ts", mtimeMs: 1, size: 2, lastSeq: 1 } },
+				symbols: { "a.ts": [{ name: "f", kind: "function", filePath: "a.ts" }] },
+				reverseDeps: { "a.ts": ["b.ts"] },
+				cachedExports: [["x", "/tmp/proj/x.ts"]],
+				wordIndex: { docs: ["huge", "postings", "graph"], df: { huge: 1 } },
+				projectRulesScan: { hasCustomRules: false, rules: [] },
+			});
+
+			const stripped = _stripTopLevelJsonKeysForTests(json, [
+				"wordIndex",
+				"files",
+				"symbols",
+				"reverseDeps",
+			]);
+
+			// The heavy fields' TEXT is gone — not merely re-labeled or emptied —
+			// so JSON.parse on this string never constructs them.
+			expect(stripped).not.toContain("wordIndex");
+			expect(stripped).not.toContain("postings");
+			expect(stripped).not.toContain("reverseDeps");
+			expect(stripped).not.toContain('"symbols"');
+			// The result is still valid, complete JSON for everything else.
+			const parsed = JSON.parse(stripped);
+			expect(parsed.seq).toBe(4);
+			expect(parsed.cachedExports).toEqual([["x", "/tmp/proj/x.ts"]]);
+			expect(parsed.projectRulesScan).toEqual({
+				hasCustomRules: false,
+				rules: [],
+			});
+			expect(parsed.wordIndex).toBeUndefined();
+			expect(parsed.files).toBeUndefined();
+		});
+
+		it("the actual loader never hands wordIndex's text to JSON.parse (mutation-proof cost assertion)", () =>
+			withProjectDataDir((cwd) => {
+				const runtime = new RuntimeCoordinator();
+				runtime.seedProjectSequence(0);
+				runtime.cachedExports.set("hot", path.join(cwd, "src/hot.ts"));
+				runtime.wordIndex = buildWordIndex([
+					{
+						path: path.join(cwd, "src/hot.ts"),
+						content: "export function hot() {}",
+					},
+				]);
+				saveRuntimeProjectSnapshot({ cwd, runtime });
+				_resetProjectSnapshotParseCacheForTests();
+				resetLastNarrowParseTextForTests();
+
+				const narrow = loadProjectSnapshotExportsAndRules(cwd);
+
+				expect(narrow?.cachedExports).toEqual([
+					["hot", path.join(cwd, "src/hot.ts")],
+				]);
+				const parsedText = getLastNarrowParseTextForTests();
+				expect(parsedText).toBeDefined();
+				expect(parsedText).not.toContain('"wordIndex"');
+			}));
+	});
+
 	describe("hydrateRuntimeFromProjectSnapshotIfIdle (#1785 F2/F3)", () => {
 		function makeSnapshot(
 			cwd: string,
@@ -287,17 +468,10 @@ describe("project snapshot", () => {
 			};
 		}
 
-		it("hydrates every field when the runtime is fully idle", () =>
+		it("hydrates every field it owns when the runtime is fully idle", () =>
 			withProjectDataDir((cwd) => {
 				const runtime = new RuntimeCoordinator();
-				runtime.wordIndex = null;
-				const snapshot = makeSnapshot(cwd, {
-					wordIndex: serializeWordIndex(
-						buildWordIndex([
-							{ path: path.join(cwd, "a.ts"), content: "function f() {}" },
-						]),
-					),
-				});
+				const snapshot = makeSnapshot(cwd);
 
 				const hydrated = hydrateRuntimeFromProjectSnapshotIfIdle(
 					runtime,
@@ -309,34 +483,16 @@ describe("project snapshot", () => {
 					path.join(cwd, "src/a.ts"),
 				);
 				expect(runtime.projectRulesScan.hasCustomRules).toBe(true);
-				expect(runtime.wordIndex).not.toBeNull();
 			}));
 
-		it("never nulls a live wordIndex from a snapshot with no serialized index (F2, Probe A shape)", () =>
-			withProjectDataDir((cwd) => {
-				const runtime = new RuntimeCoordinator();
-				const liveIndex = buildWordIndex([
-					{ path: path.join(cwd, "live.ts"), content: "function liveFn() {}" },
-				]);
-				runtime.wordIndex = liveIndex;
-				// Captured before the warmup built the live index above — its OWN
-				// wordIndex field is absent, exactly the #1785 Probe A shape.
-				const snapshot = makeSnapshot(cwd, { wordIndex: undefined });
-
-				const hydrated = hydrateRuntimeFromProjectSnapshotIfIdle(
-					runtime,
-					snapshot,
-				);
-
-				// wordIndex is untouched (still the live one, not nulled)...
-				expect(runtime.wordIndex).toBe(liveIndex);
-				// ...but cachedExports was still idle, so it DOES hydrate — proving
-				// the guard is per-field, not one all-or-nothing bail-out.
-				expect(hydrated).toBe(true);
-				expect(runtime.cachedExports.get("fromSnapshot")).toBe(
-					path.join(cwd, "src/a.ts"),
-				);
-			}));
+		// #1785 F5: the function's parameter type is now
+		// `Pick<ProjectSnapshot, "cachedExports" | "projectRulesScan">` — there
+		// is no `wordIndex` parameter to pass at all, so a live `runtime.wordIndex`
+		// can never be nulled by this function BY CONSTRUCTION, not merely by a
+		// runtime guard. `tests/clients/runtime-session-retro-hydrate-warmup-race.test.ts`
+		// proves the end-to-end F2 shape (a real, warmup-built wordIndex survives
+		// the full retroactive-hydration flow) against the actual narrow loader
+		// this function is fed from.
 
 		it("does not clobber a live cachedExports map (F3 guard, mutation check: the guard is load-bearing)", () =>
 			withProjectDataDir((cwd) => {
@@ -383,9 +539,6 @@ describe("project snapshot", () => {
 				const runtime = new RuntimeCoordinator();
 				runtime.cachedExports.set("liveOnly", path.join(cwd, "live.ts"));
 				runtime.projectRulesScan = { hasCustomRules: true, rules: [] };
-				runtime.wordIndex = buildWordIndex([
-					{ path: path.join(cwd, "live.ts"), content: "function liveFn() {}" },
-				]);
 				const snapshot = makeSnapshot(cwd);
 
 				const hydrated = hydrateRuntimeFromProjectSnapshotIfIdle(

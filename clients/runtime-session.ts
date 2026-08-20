@@ -64,8 +64,10 @@ import {
 	isProjectSnapshotFresh,
 	isProjectSnapshotMetaStale,
 	loadProjectSnapshot,
+	loadProjectSnapshotExportsAndRules,
 	PROJECT_SNAPSHOT_VERSION,
 	type ProjectSnapshot,
+	type ProjectSnapshotExportsAndRules,
 	readProjectSnapshotMeta,
 	saveRuntimeProjectSnapshot,
 } from "./project-snapshot.js";
@@ -241,24 +243,34 @@ function recordSnapshotSequenceTimeout(args: {
  * never re-loaded from disk. Quick mode's own cold-start warmup
  * (`PI_LENS_WARMUP_DELAY_MS`, default 2000ms) saves a snapshot built from the
  * LIVE runtime — which, while THIS call's own sequence read is still
- * stalled, has empty `cachedExports`/`wordIndex` — silently overwriting the
- * real on-disk snapshot. The stall window this fix targets (CPU starvation
- * past the sequence-read budget) is exactly the window that can cross the
- * warmup's 2s mark. Re-loading from disk at deferred-resolve time would read
- * whichever of the two versions happened to land last — flaky by
- * construction. The caller captures the snapshot BEFORE the warmup timer is
- * even armed (see `preWarmupSnapshotForRetroHydrate`) whenever THIS call is
- * the one arming it, so this function's decision is immune to anything the
- * warmup does afterward.
+ * stalled, has empty `cachedExports` — silently overwriting the real on-disk
+ * snapshot. The stall window this fix targets (CPU starvation past the
+ * sequence-read budget) is exactly the window that can cross the warmup's 2s
+ * mark. Re-loading from disk at deferred-resolve time would read whichever
+ * of the two versions happened to land last — flaky by construction. The
+ * caller captures the snapshot BEFORE the warmup timer is even armed (see
+ * `preWarmupSnapshotForRetroHydrate`) whenever THIS call is the one arming
+ * it, so this function's decision is immune to anything the warmup does
+ * afterward.
  *
  * When `capturedSnapshot` is `undefined`, THIS call never armed a new warmup
  * (a later quick-mode call in the same process, after an earlier call's
  * warmup already fired) — there is no fresh race for this call to protect
  * against, so it falls back to a live re-load from `snapshotRoot`, same as
  * before this fix.
+ *
+ * #1785 review round F5: both the captured value AND the fallback re-load
+ * use `loadProjectSnapshotExportsAndRules` — the narrow, postings-free
+ * loader — never `loadProjectSnapshot`. This path only ever hydrates
+ * `cachedExports`/`projectRulesScan`; it can NOT hydrate `wordIndex` even
+ * when the captured/reloaded snapshot would otherwise have one, because the
+ * narrow type never carries it. That is intentional, not a regression: F2's
+ * hazard was this exact path nulling a `wordIndex` that quick mode's warmup
+ * had, in the meantime, built for real — the warmup remains the sole source
+ * of a late-arriving `wordIndex` for the interactive path.
  */
 function retroactivelyHydrateAfterDeferredSequence(args: {
-	capturedSnapshot: ProjectSnapshot | null | undefined;
+	capturedSnapshot: ProjectSnapshotExportsAndRules | null | undefined;
 	snapshotRoot: string;
 	runtime: RuntimeCoordinator;
 	dbg: (msg: string) => void;
@@ -267,8 +279,14 @@ function retroactivelyHydrateAfterDeferredSequence(args: {
 		const snapshot =
 			args.capturedSnapshot !== undefined
 				? args.capturedSnapshot
-				: loadProjectSnapshot(args.snapshotRoot);
-		if (!isProjectSnapshotFresh(snapshot, latestSeq.projectSeq)) return;
+				: loadProjectSnapshotExportsAndRules(args.snapshotRoot);
+		if (
+			!snapshot ||
+			snapshot.version !== PROJECT_SNAPSHOT_VERSION ||
+			snapshot.seq !== latestSeq.projectSeq
+		) {
+			return;
+		}
 		const hydrated = hydrateRuntimeFromProjectSnapshotIfIdle(
 			args.runtime,
 			snapshot,
@@ -1740,7 +1758,8 @@ export async function handleSessionStart(
 	}
 	processGlobals.__piLensFirstSessionDone = true;
 
-	// #1785 F1: the on-disk project snapshot as it existed BEFORE this call
+	// #1785 F1: the on-disk project snapshot (narrowed — see #1785 F5 and
+	// `loadProjectSnapshotExportsAndRules`) as it existed BEFORE this call
 	// (if any) armed the cold-start warmup timer below. `undefined` means this
 	// call never arms a NEW warmup (a later session in the process, or full
 	// mode, or print mode) — the quick-mode block below only uses this for
@@ -1750,7 +1769,10 @@ export async function handleSessionStart(
 	// race-free by construction. See the matching comment on
 	// `retroactivelyHydrateAfterDeferredSequence` for why re-loading from
 	// disk later (once the warmup may have already run) is NOT safe.
-	let preWarmupSnapshotForRetroHydrate: ProjectSnapshot | null | undefined;
+	let preWarmupSnapshotForRetroHydrate:
+		| ProjectSnapshotExportsAndRules
+		| null
+		| undefined;
 
 	// #1154: quick mode is entered on BOTH `pi -p`/`--print` (a one-shot that
 	// exits right after this turn) and an interactive process's first
@@ -1772,9 +1794,14 @@ export async function handleSessionStart(
 		const warmupDelayMs = Number(process.env.PI_LENS_WARMUP_DELAY_MS ?? 2000);
 		const warmupCwd = deps.ctxCwd ?? process.cwd();
 		const warmupDbg = deps.dbg;
-		// #1785 F1: capture BEFORE arming the timer two lines down — see the
-		// hoisted `preWarmupSnapshotForRetroHydrate` doc comment above.
-		preWarmupSnapshotForRetroHydrate = loadProjectSnapshot(
+		// #1785 F1/F5: capture BEFORE arming the timer two lines down — see the
+		// hoisted `preWarmupSnapshotForRetroHydrate` doc comment above. The
+		// narrow loader (F5) means this synchronous capture, on the
+		// interactive session_start hot path, costs a small `cachedExports`
+		// array parse — NOT a full body gunzip+parse of `wordIndex`/`files`/
+		// `symbols`/`reverseDeps` (see `loadProjectSnapshotExportsAndRules`'s
+		// own doc comment for the measured numbers this closes out).
+		preWarmupSnapshotForRetroHydrate = loadProjectSnapshotExportsAndRules(
 			resolveSnapshotRoot(warmupCwd),
 		);
 		// #1154: `.unref()` the warmup timer so — even for a warmup that IS
