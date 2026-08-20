@@ -60,11 +60,20 @@ vi.mock("../../clients/project-diagnostics/cache.js", () => ({
 	}),
 }));
 
-vi.mock("../../clients/widget-state.js", () => ({
-	getFileDiagnosticSummaries: () => [],
-	reconcileStaleWidgetFiles: async () => 0,
-	reconcileScanDiagnostics: vi.fn(),
-}));
+// Spread the real module rather than hand-listing its exports; see the same
+// note in tests/tools/lens-diagnostics-rule-policy.test.ts.
+vi.mock("../../clients/widget-state.js", async (importOriginal) => {
+	const actual =
+		await importOriginal<typeof import("../../clients/widget-state.js")>();
+	return {
+		...actual,
+		getFileDiagnosticSummaries: () => [],
+		reconcileStaleWidgetFiles: async () => 0,
+		reconcileStaleWidgetDependencyBlockers: async () => 0,
+		reconcileScanDiagnostics: vi.fn(),
+		reconcileCorrelatedScanDiagnostics: vi.fn(),
+	};
+});
 
 beforeEach(() => {
 	freshFetchMocks.fetchFreshProjectDiagnostics.mockReset();
