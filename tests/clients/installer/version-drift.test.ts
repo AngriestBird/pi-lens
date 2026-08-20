@@ -178,6 +178,7 @@ import * as path from "node:path";
 import {
 	ensureTool,
 	getToolPath,
+	resetResolvedPathCache,
 	resetProbeCacheStateForTesting,
 	TOOLS,
 } from "../../../clients/installer/index.js";
@@ -300,6 +301,17 @@ describe("version-pin drift detection (#589)", () => {
 		expect(second).toBe(JSCPD_BIN);
 		// In-memory resolvedPathCache fast path — no new spawn on the second call.
 		expect(spawnCalls).toHaveLength(0);
+	});
+
+	it("clears the positive path cache so the next ensure rechecks the tool", async () => {
+		fakeAccess(JSCPD_BIN);
+		versionOutput.value = `${JSCPD_PINNED_VERSION}\n`;
+		expect(await ensureTool("jscpd")).toBe(JSCPD_BIN);
+		spawnCalls.length = 0;
+
+		resetResolvedPathCache();
+		expect(await ensureTool("jscpd")).toBe(JSCPD_BIN);
+		expect(mockFsAccess).toHaveBeenCalledTimes(2);
 	});
 
 	it("evicts a cached positive when the resolved binary is deleted", async () => {

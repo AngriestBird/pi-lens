@@ -336,9 +336,16 @@ describe("index.ts integration", () => {
 		const primary = createMockPi();
 		registerExtension(primary.pi as any);
 		await primary.trigger("session_start", {}, makeCtx({ cwd: tmpDir, sessionId: "primary" }));
+		const lspServer = await import("../clients/lsp/server.js");
+		lspServer._markDirectLspCommandUnavailableForTests("secondary-must-not-reset");
 		const secondary = createMockPi();
 		registerExtension(secondary.pi as any);
 		await secondary.trigger("session_start", {}, makeCtx({ cwd: tmpDir, sessionId: "secondary" }));
+		expect(
+			lspServer.isDirectLspCommandTemporarilyUnavailable(
+				"secondary-must-not-reset",
+			),
+		).toBe(true);
 		telemetry.recordVerifiedPathAttributionGuess();
 		await secondary.trigger("session_shutdown", {}, makeCtx({ cwd: tmpDir, sessionId: "secondary" }));
 		expect(

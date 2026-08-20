@@ -457,6 +457,24 @@ export const SESSION_STATE_REGISTRY: SessionStateEntry[] = [
 			"The PATH walk memo must not outlive a session that installed something onto PATH.",
 	},
 	{
+		id: "installer:resolvedPathCache",
+		module: "installer/index.ts",
+		state: "resolvedPathCache",
+		policy: "session_start",
+		resetName: "resetResolvedPathCache",
+		reason:
+			"Bare cached commands return without a spawnability check, so a PATH change between sessions must clear this positive cache.",
+	},
+	{
+		id: "lsp-server:directCommandUnavailable",
+		module: "lsp/server.ts",
+		state: "directLspCommandUnavailableUntil, directLspCommandSkipLoggedUntil",
+		policy: "session_start",
+		resetName: "resetDirectLspCommandAvailability",
+		reason:
+			"A direct-LSP command that appears between sessions must receive a fresh availability probe instead of inheriting the prior negative cooldown.",
+	},
+	{
 		id: "lsp-server:classicTsRepairGuard",
 		module: "lsp/server.ts",
 		state: "the classic-tsserver repair guard",

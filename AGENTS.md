@@ -365,6 +365,13 @@ of parsing partial output as a clean empty result. Sampler timeouts inject the
 reaper's tree-kill-and-verify hook and settle only after its fate is known.
 (#1863, #1864)
 
+**Session-start availability resets include direct LSP and installer path positives.**
+Direct-LSP negative cooldowns and installer bare-command path positives are
+session facts: the former can recover when a command appears, and the latter
+returns without a spawnability check. `handleSessionStart` clears both behind
+the primary-only session-start guard; the session-state registry records the
+two reset seams. (#1897)
+
 ## Issue and PR design contract
 
 - **Design the state space before coding.** For stateful, ordered, resource-mutating, or security-sensitive work, write the invariants, supported transitions, explicit deferrals, and a cross-product test matrix before implementation. Examples are not enough: cover operation order, preview/apply, validation/normalization/execution seams, failure atomicity, observability bounds, and OS/path/encoding axes. If adversarial review finds repeated cross-product defects, stop patching one symptom at a time and return to the model.

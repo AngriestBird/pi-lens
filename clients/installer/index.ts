@@ -1565,6 +1565,11 @@ export function getLastEnsureResolutionSource(
 // Session-lifetime cache: once a tool path is resolved, skip the process-spawn check on subsequent calls.
 const resolvedPathCache = new BoundedLruCache<string, string>(256);
 
+/** Re-arm resolved tool paths when a new session may have changed PATH. */
+export function resetResolvedPathCache(): void {
+	resolvedPathCache.clear();
+}
+
 // --- Persistent probe cache ---
 
 interface ProbeCacheEntry {
@@ -1945,7 +1950,7 @@ export function resetProbeCacheStateForTesting(): void {
 	_probeCacheChangeVersions.clear();
 	_probeCacheChangeGeneration = 0;
 	_probeCacheRetryAttempt = 0;
-	resolvedPathCache.clear();
+	resetResolvedPathCache();
 	ensureInFlight.clear();
 	installFailureReasons.clear();
 	installAttempts.clear();

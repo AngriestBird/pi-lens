@@ -23,6 +23,7 @@ vi.mock("../../clients/safe-spawn.js", () => ({
 
 vi.mock("../../clients/installer/index.js", () => ({
 	ensureTool: vi.fn(async () => undefined),
+	resetResolvedPathCache: vi.fn(),
 	// Not spawnable — forces resolveCommandWithInstallFallback down the
 	// install-fallback path (rather than the --version probe path) where
 	// noteInstallFailure/suppression lives.
@@ -143,6 +144,20 @@ describe("dispatch availability suppression is reset at session start (#1266)", 
 		);
 		expect(third).toBeNull();
 		expect(ensureToolMock).toHaveBeenCalledTimes(2);
+	});
+
+	it("re-arms direct-LSP negative availability through handleSessionStart", async () => {
+		const lspServer = await import("../../clients/lsp/server.js");
+		lspServer._markDirectLspCommandUnavailableForTests("appeared-lsp");
+		expect(
+			lspServer.isDirectLspCommandTemporarilyUnavailable("appeared-lsp"),
+		).toBe(true);
+
+		await handleSessionStart(makeDeps(tmpDir));
+
+		expect(
+			lspServer.isDirectLspCommandTemporarilyUnavailable("appeared-lsp"),
+		).toBe(false);
 	});
 
 	// #1490: psscriptanalyzer's interpreter and module verdicts live in
