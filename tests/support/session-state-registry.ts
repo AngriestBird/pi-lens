@@ -568,6 +568,8 @@ export const EXEMPT_SESSION_STATE_FILES: Readonly<Record<string, string>> = {
 	// --- Host/toolchain derivations: the answer depends on the machine, not on
 	// the session. Re-deriving per session would just re-pay a spawn. ---
 	"lsp/jvm-runtime.ts": "resolved JVM location; a session boundary cannot move it",
+	"lsp/spawn-history.ts":
+		"successful spawn duration history intentionally spans session boundaries within the host process so later sessions can avoid waits that prior evidence proves cannot succeed",
 	"review-graph/git-identity.ts": "git user identity, read once per process",
 	"slow-fs.ts": "measured filesystem-latency classification of the host",
 	"tui-fit.ts": "terminal truncation-behavior probe",
@@ -709,6 +711,7 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	"lsp/config.ts": 1,
 	"lsp/index.ts": 2,
 	"lsp/jvm-runtime.ts": 0,
+	"lsp/spawn-history.ts": 1,
 	"lsp/server.ts": 5,
 	"lsp/workspace-diagnostics-cache.ts": 1,
 	"lsp/workspace-sweep-hold.ts": 1,
