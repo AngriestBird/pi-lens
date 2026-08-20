@@ -58,14 +58,15 @@ note: |
   it is a scope correction, not a tier change, and this PR does not make
   it.
 
-  2026-08-20 (#1824, refs #1727, #1815): dropped the `function_type`
-  arm named above. A TYPE-POSITION `unknown` return is a legitimate
-  contract ("the caller ignores my result"), not a value-position
-  return that skipped parsing at a boundary. This is a scope
-  correction, not a severity change: pi-lens's own tree went from 79
-  hits to 21 under this repo's scan setup (see the adopting PR for the
-  four-corpus before/after). The value-position arm below is
-  unchanged and is what the rule now exclusively targets.
+  2026-08-20 (#1824, refs #1727, #1815, review round 1 N4): dropped
+  the `function_type` arm named above. A TYPE-POSITION `unknown`
+  return is a legitimate contract ("the caller ignores my result"),
+  not a value-position return that skipped parsing at a boundary. This
+  is a scope correction, not a severity change. Same scan setup,
+  before → after: pi-lens full tree 79 → 23; pi-lens `clients/` +
+  `index.ts` 21 → 9 (see the adopting PR for the four-corpus
+  before/after on the same narrow scope). The value-position arm below
+  is unchanged and is what the rule now exclusively targets.
 rule:
   kind: predefined_type
   regex: "^unknown$"

@@ -184,3 +184,43 @@ invalid:
     function f(reads: Array<{ enclosingSymbol?: { name: string } }>) {
       return reads.map((r) => ({ name: r.enclosingSymbol!.name }));
     }
+  # #1818 review round 1, N1: the SAME assertion repeated in BOTH the
+  # consequence AND alternative branches. The consequence instance is
+  # genuinely safe and suppressed; the alternative instance is a real
+  # bug (the condition's property is falsy on that branch) and must
+  # still flag. An `has: field: consequence` EXISTENCE check on the
+  # ternary cannot tell these two instances apart (the consequence
+  # branch's matching text satisfies the check for both); `field:
+  # consequence` as an IDENTITY check on the matched node can.
+  - |
+    function f(o: { y?: { length: number } }) {
+      return o.y ? o.y!.length : o.y!.length;
+    }
+  # #1818 review round 1, N2a: nested ternary. The assertion's NEAREST
+  # ternary is the INNER one, whose own condition (`flag`) does not
+  # match the asserted object/property — so it must still flag, even
+  # though an OUTER ternary's condition happens to match. Proves
+  # `stopBy: kind: ternary_expression` is a real boundary: weakening it
+  # to `end` lets the search escalate past the inner ternary (which
+  # correctly fails) to the outer one (which wrongly succeeds).
+  - |
+    function f(o: { y?: { length: number } }, flag: boolean) {
+      return o.y
+        ? flag
+          ? 1
+          : o.y!.length
+        : 0;
+    }
+  # #1818 review round 1, N2b: filter+map, but the asserted receiver is
+  # an UNRELATED variable, not the map callback's own parameter — must
+  # still flag. Proves the `$M` metavariable binding is load-bearing:
+  # decoupling it (e.g. to an unconstrained parameter name) would make
+  # ANY assertion inside ANY filter-then-map chain's callback body
+  # suppress, regardless of what is actually being asserted.
+  - |
+    function f(
+      rs: Array<{ sym?: { name: string } }>,
+      stray: { sym?: { name: string } },
+    ) {
+      return rs.filter((r) => r.sym).map((m) => stray.sym!.name);
+    }
