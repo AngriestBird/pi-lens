@@ -154,7 +154,7 @@ See [`docs/custom-rules.md`](custom-rules.md) to add your own. Rule sources: `ru
 | `no-array-constructor-js` | warning | pi-lens | Use array literal [] instead of new Array() |
 | `no-array-reverse-mutation-js` | warning | pi-lens | .reverse() mutates the array in place — use toReversed() or slice first |
 | `no-async-promise-executor-js` | error | pi-lens | Promise executor functions should not be async. |
-| `no-await-expression-member-js` | hint | pi-lens | Unnecessary parentheses around await — write await expr.prop directly |
+| `no-await-expression-member-js` | hint | pi-lens | (await expr).prop — do not rewrite to await expr.prop (that reads .prop off the unresolved promise). Keep the parens, or destructure first:… |
 | `no-await-in-promise-all-js` | error | pi-lens | Avoid await inside Promise.all — use Promise.all with an array of promises instead |
 | `no-await-in-promise-methods-js` | warning | pi-lens | Do not await inside Promise.all/allSettled — pass the promises directly |
 | `no-blank-target-js` | warning | pi-lens | Links with target="_blank" must include rel to prevent opener leaks |
@@ -429,7 +429,7 @@ See [`docs/custom-rules.md`](custom-rules.md) to add your own. Rule sources: `ru
 | `no-array-reverse-mutation` | warning | pi-lens | .reverse() mutates the array in place — use toReversed() or slice first |
 | `no-as-any` | warning | pi-lens | Type assertion to 'any' — use proper typing |
 | `no-async-promise-executor` | error | pi-lens | Promise executor functions should not be async. |
-| `no-await-expression-member` | hint | pi-lens | Unnecessary parentheses around await — write await expr.prop directly |
+| `no-await-expression-member` | hint | pi-lens | (await expr).prop — do not rewrite to await expr.prop (that reads .prop off the unresolved promise). Keep the parens, or destructure first:… |
 | `no-await-in-promise-all` | error | pi-lens | Avoid await inside Promise.all — use Promise.all with an array of promises instead |
 | `no-await-in-promise-methods` | warning | pi-lens | Do not await inside Promise.all/allSettled — pass the promises directly |
 | `no-bare-host-path-in-win32-branch` | warning | pi-lens | Use win32 path operations inside a branch committed to Windows path semantics |
@@ -510,7 +510,7 @@ See [`docs/custom-rules.md`](custom-rules.md) to add your own. Rule sources: `ru
 | `redos-nested-quantifier` | warning | pi-lens | Nested unbounded quantifier in regex — risks catastrophic backtracking (ReDoS) |
 | `redundant-state` | warning | pi-lens | Redundant state — '$NAME' is only used to return it, inline the value |
 | `require-await` | warning | pi-lens | Async function has no 'await' expression — consider removing 'async' keyword |
-| `require-safety-comment-for-as-unknown-as` | hint | pi-lens | 'x as unknown as T' with no nearby SAFETY: comment — state the invariant TypeScript can't check |
+| `require-safety-comment-for-as-unknown-as` | error | pi-lens | 'x as unknown as T' with no nearby SAFETY: comment — state the invariant TypeScript can't check |
 | `strict-equality` | warning | pi-lens | Use === instead of == |
 | `strict-inequality` | warning | pi-lens | Use !== instead of != |
 | `switch-without-default` | warning | pi-lens | switch has no default clause — values matching no case are silently ignored; add a default (even one that throws) |

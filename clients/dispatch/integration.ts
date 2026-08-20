@@ -5,6 +5,7 @@
  * with the existing index.ts tool_result handler.
  */
 
+import { CASCADE_DIAGNOSTICS_TTL_MS } from "../cascade-types.js";
 import { getDiagnosticLogger, type LogContext } from "../diagnostic-logger.js";
 import type { FileKind } from "../file-kinds.js";
 import { detectFileKind } from "../file-kinds.js";
@@ -517,7 +518,6 @@ function ensureCascadeTurnScope(turnSeq: number): void {
 	}
 }
 
-const CASCADE_TTL_MS = 240_000;
 const MAX_PER_FILE = RUNTIME_CONFIG.pipeline.cascadeMaxDiagnosticsPerFile;
 const MAX_FILES = RUNTIME_CONFIG.pipeline.cascadeMaxFiles;
 
@@ -1592,7 +1592,7 @@ export async function computeCascadeForFile(
 				? Math.round((Date.now() - entry.ts) / 1000)
 				: undefined;
 			const ttlFresh =
-				entry != null && Date.now() - entry.ts < CASCADE_TTL_MS;
+				entry != null && Date.now() - entry.ts < CASCADE_DIAGNOSTICS_TTL_MS;
 			// #1095: content binding is the INNER gate; TTL stays the outer bound.
 			//   false     → the server's diagnostics were computed against a DIFFERENT
 			//               disk state (e.g. the PRE-fix content) — don't trust or
@@ -1669,7 +1669,7 @@ export async function computeCascadeForFile(
 			// LSP warning on the neighbor is preserved. Keyed by the primary edit's
 			// `writeSeq` so a genuinely newer per-edit write still wins the
 			// WriteOrderingGuard. `observedAt = entry.ts` (the snapshot's own publish
-			// time, up to CASCADE_TTL_MS old) — NOT now() — so replaying an aging
+			// time, up to CASCADE_DIAGNOSTICS_TTL_MS old) — NOT now() — so replaying an aging
 			// snapshot never re-arms the mtime-staleness gate (the same #1092
 			// re-arming defect this PR fixes for cache hits).
 			//
@@ -1709,7 +1709,7 @@ export async function computeCascadeForFile(
 				const passiveEntry = allDiags.get(cacheKey);
 				const hasFreshPassiveErrors =
 					passiveEntry != null &&
-					Date.now() - passiveEntry.ts < CASCADE_TTL_MS &&
+					Date.now() - passiveEntry.ts < CASCADE_DIAGNOSTICS_TTL_MS &&
 					passiveEntry.diags.some((d) => d.severity === 1);
 				const recentlyClean = recentlyCleanNeighborCache.get(cacheKey);
 				if (
@@ -2045,7 +2045,7 @@ export async function computeCascadeForFile(
 				);
 				const entry = allDiags.get(normalizeMapKey(neighborPath));
 				const ttlFresh =
-					entry != null && Date.now() - entry.ts < CASCADE_TTL_MS;
+					entry != null && Date.now() - entry.ts < CASCADE_DIAGNOSTICS_TTL_MS;
 				// #1104: consult binding before trusting a TTL-fresh fallback snapshot —
 				// MATCH #1100/#1095 semantics (false → skip, "unknown" → keep the
 				// pre-#1104 TTL-only behavior, true → use). Without this, a failed
@@ -2380,7 +2380,7 @@ function appendFallbackNeighbors(
 		// above never reach). Ignore filtering (#297) stays separate and above.
 		if (isTestRoleCollateral(diagPath)) continue;
 		if (!nodeFs.existsSync(diagPath)) continue;
-		if (now - ts > CASCADE_TTL_MS) continue;
+		if (now - ts > CASCADE_DIAGNOSTICS_TTL_MS) continue;
 		// #1104: a TTL-fresh entry is not automatically trustworthy — consult
 		// binding the same way the reconcile path (#1100) and the touch-error
 		// fallback above do. `false` → skip (a stale/pre-fix-edit snapshot whose

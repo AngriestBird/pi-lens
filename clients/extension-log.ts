@@ -101,6 +101,11 @@ export function createSubsystemLogger(
 
 /** No-op with the `SubsystemLogger` shape, for the verbose-off branch. */
 export function noopSubsystemLogger(): SubsystemLogger {
+	// SAFETY: `SubsystemLogger` is a callable with `error`/`warn`/`debug`
+	// properties. TypeScript cannot type a function literal that gains its
+	// properties on the following lines, so the cast runs ahead of the three
+	// assignments that complete the shape. Every member of the interface is
+	// assigned before `noop` escapes this function.
 	const noop = (() => {}) as unknown as SubsystemLogger;
 	noop.error = () => {};
 	noop.warn = () => {};
@@ -240,6 +245,13 @@ export function runInConsoleCaptureWindow<T>(fn: () => T): T {
 function inCaptureWindow<T extends ConsoleFn | ((...args: never[]) => unknown)>(
 	fn: T,
 ): T {
+	// SAFETY: the wrapper forwards `this` and every argument to `fn` unchanged
+	// and returns its result unchanged, so it is call-compatible with `T` at
+	// runtime. TypeScript cannot prove that for a generic `T` it did not
+	// construct, because a variadic `(...args: unknown[]) => unknown` is not
+	// assignable to an arbitrary function type. The invariant is the
+	// pass-through itself: change the body to alter arguments or the return
+	// value and this cast stops being true.
 	return function (this: unknown, ...args: unknown[]): unknown {
 		return runInConsoleCaptureWindow(() =>
 			(fn as (...a: unknown[]) => unknown).apply(this, args),
@@ -449,6 +461,11 @@ export function installConsoleGuard(): boolean {
 	if (isTestMode()) return false;
 	if (process.env.PI_LENS_CONSOLE_GUARD === "0") return false;
 	consoleGuardInstalled = true;
+	// SAFETY: re-views `console` as a string-keyed record so the loop below can
+	// read and replace methods by name. `ConsoleMethod` is the union of keys
+	// that exist on `Console`, and each read is guarded by `typeof original ===
+	// "function"` before use, so a host whose console lacks a method is skipped
+	// rather than patched with undefined.
 	const target = console as unknown as Record<ConsoleMethod, unknown>;
 	for (const method of CONSOLE_METHODS) {
 		const original = target[method];
@@ -483,6 +500,10 @@ export function installConsoleGuard(): boolean {
 export function uninstallConsoleGuard(): boolean {
 	if (!consoleGuardInstalled) return false;
 	consoleGuardInstalled = false;
+	// SAFETY: same re-view as `installConsoleGuard`. Only keys this module
+	// recorded in `originalConsoleMethods` at install time are written back,
+	// and only when the current value is still the replacement this module
+	// installed, so a method someone else patched afterwards is left alone.
 	const target = console as unknown as Record<ConsoleMethod, unknown>;
 	for (const [method, original] of originalConsoleMethods) {
 		if (target[method] === installedConsoleMethods.get(method)) {

@@ -1,6 +1,8 @@
 id: require-safety-comment-for-as-unknown-as
 language: TypeScript
-severity: hint
+severity: error
+metadata:
+  category: pi-lens-self-scan
 message: "'x as unknown as T' with no nearby SAFETY: comment — state the invariant TypeScript can't check"
 note: |
   Narrowed port of dmmulroy/anti-slop's
@@ -10,27 +12,58 @@ note: |
   assertion (`as`/angle-bracket), walking up through statement-owner
   node kinds looking for a preceding comment. This port narrows the
   target to `x as unknown as T` specifically — the two-hop cast through
-  `unknown` that `no-chained-type-assertions.yml` (this PR's strict
-  variant) now also flags. The 2026-08-19 audit found 2,180 non-const
-  assertions repo-wide and ZERO `SAFETY:` comments; requiring one on
-  every assertion would mean authoring ~1,750 comments in one PR, most
-  of them in tests where the assertion is fixture shaping, not a real
-  safety claim. `as unknown as` is the form that actually launders
-  evidence (routes through the top type rather than a single verifiable
-  hop), and it is also the exact shape AGENTS.md's defect shape 13
-  already asks for in ad-hoc prose: "when a call site hands the policy
-  an outcome it did NOT derive... justify it in a comment at the call
-  site." This rule makes that existing, unchecked convention checkable
-  for its most evidence-destroying form, without demanding the other
-  ~1,750 non-const assertions retroactively grow comments in this PR.
+  `unknown`. The 2026-08-19 audit found 2,180 non-const assertions
+  repo-wide and ZERO `SAFETY:` comments; requiring one on every
+  assertion would mean authoring ~1,750 comments in one PR. `as unknown
+  as` is the form that actually launders evidence (routes through the
+  top type rather than a single verifiable hop), and it is the exact
+  shape AGENTS.md's defect shape 13 already asks for in prose: "when a
+  call site hands the policy an outcome it did NOT derive... justify it
+  in a comment at the call site." This rule makes that convention
+  checkable for its most evidence-destroying form.
 
-  Shipped at `hint`: pi-lens's own tree has ~267 `as unknown as` sites
-  (this PR's `no-chained-type-assertions.yml` self-scan count) and zero
-  `SAFETY:` comments, so this rule is maximally noisy against pi-lens's
-  own history on day one. Self-scan note: do NOT try to make pi-lens's
-  own tree clean against this rule (#1718's baseline problem, and
-  arguably its own follow-up issue given the size); the adopting PR
-  records the hit count instead.
+  2026-08-20 (refs #1727, #1777): promoted `hint` -> `error`. `error` is
+  the only tier that maps to semantic `blocking`
+  (`clients/dispatch/runners/ast-grep-napi.ts`), so AGENTS.md's severity
+  policy requires a documented zero-false-positive audit here. Two
+  changes make that audit come out clean.
+
+  1. STRUCTURAL SCOPING: test paths are excluded (`ignores:` below). In a
+     test, `x as unknown as T` is almost always a partial test double —
+     reaching into a private field or stubbing the two methods of a
+     surface the subject actually calls. The "invariant TypeScript can't
+     check" there is "this stub covers what the code under test touches",
+     which is the test's own subject matter, not a hidden runtime claim.
+     Four-corpus census (2026-08-20) confirms the shape concentrates in
+     test paths rather than assuming it:
+
+     | corpus | total | test-path | non-test | suppressed |
+     |---|---:|---:|---:|---:|
+     | pi-lens (`clients/`+`tests/`) | 305 | 289 | 16 | 95% |
+     | pi core (`packages/`) | 182 | 155 | 27 | 85% |
+     | opencode (`packages/`) | 194 | 154 | 40 | 79% |
+     | oh-my-pi (`packages/`) | 1803 | 1644 | 159 | 91% |
+
+     This is a FALSE-NEGATIVE bias, deliberately, and it is not small:
+     289 uncommented `as unknown as` sites in pi-lens's own `tests/`
+     now raise NO diagnostic at all, where each previously raised an
+     `error` through `no-chained-type-assertions.yml`'s `unknown` arm.
+     The same trade costs 1,644 sites on oh-my-pi. It is a path glob,
+     not a semantic check — ast-grep cannot verify a cast is really a
+     test double, only that it lives under a test path.
+
+  2. REPO-SIDE REMEDIATION: the 16 remaining `clients/` sites were read
+     individually and each was given a truthful `SAFETY:` comment
+     naming the specific invariant (an optional Node API absent from
+     `@types/node`, a two-phase-init field filled before first read, a
+     `Object.fromEntries` key-type loss, a process-global stash). None
+     was a comment written to silence the rule; where the cast had no
+     justification it was replaced instead
+     (`clients/runtime-context.ts`).
+
+  Post-narrowing census on pi-lens: 0 findings over `clients/` +
+  `tests/`. The rule is tagged `metadata.category: pi-lens-self-scan`,
+  so CI's `npm run astgrep:self-scan` lane keeps it at zero.
 
   Scope and known gap: a comment is accepted if it directly precedes
   the assertion as a structural sibling (inline, e.g. `/* SAFETY: ... */
@@ -39,24 +72,53 @@ note: |
   sibling. Upstream walks an arbitrary number of statement-owner levels
   looking for ANY preceding comment in the file; this port only checks
   one level up from the assertion and one level up from its immediate
-  containing statement — a `SAFETY:` comment several statements above,
-  or attached to an enclosing block/function rather than the specific
-  statement, will not satisfy it. That is a narrower, more conservative
-  match (more likely to ask for a comment that already exists nearby in
-  spirit) rather than a wider one.
+  containing statement. There is NO dominance verification: the rule
+  proves a comment is adjacent, never that the comment is true or that
+  it describes this cast.
 
-  2026-08-20 (review round, refs #1718): `no-chained-type-assertions.yml`
-  now carries the IDENTICAL `SAFETY:` relational check as its own
-  escape valve from `error`, so a site that satisfies THIS hint also
-  clears that hard block — the two rules are a matched pair (this one
-  teaches the convention at `hint`; that one enforces it at `error`
-  once the comment is missing), not two independent checks a caller
-  could satisfy one of and still get blocked by the other.
+  Matched pair with `no-chained-type-assertions.yml`. As of 2026-08-20
+  the two PARTITION the assertion space instead of overlapping: this
+  rule owns `x as unknown as T` (with the `SAFETY:` escape valve); that
+  rule owns the concrete `x as A as B` chain, which has no escape valve
+  because it has no legitimate reading. Before the split both rules
+  matched the identical `as unknown as` site list (verified: 16/16
+  pi-lens, 182/182 pi, 194/194 opencode), so every uncommented site
+  raised two diagnostics for one defect.
+
+  2026-08-20 (#1834): both `follows` checks used `stopBy: end`, which
+  scans EVERY preceding sibling all the way to the top of the enclosing
+  block, not just the comment directly above the cast. A `SAFETY:`
+  comment attached to one cast silently exempted every LATER cast in the
+  same block, including casts on a different subject with no
+  justification of their own. Probe: `// SAFETY: ...` above `const a =
+  (y as unknown as string).length` followed by an undocumented `const b
+  = (x as unknown as string).length` scored 0 hits; `b`'s cast should
+  have been flagged. Fixed the same way as `redundant-unsafe-function`'s
+  identical valve (PR #1821, refs #1806): bound the backward scan with
+  `stopBy: {not: {kind: comment}}`, so it stops at the first non-comment
+  sibling and only ever searches the CONTIGUOUS comment run directly
+  above the cast (or its containing statement), never an earlier
+  statement's comment. The "Scope and known gap" note above already
+  described this contiguous-comment intent; the shipped pattern didn't
+  implement it.
+ignores:
+  - "**/*.test.ts"
+  - "**/*.test.tsx"
+  - "**/*.test.mts"
+  - "**/*.test.cts"
+  - "**/*.spec.ts"
+  - "**/*.spec.tsx"
+  - "**/tests/**"
+  - "**/test/**"
+  - "**/__tests__/**"
 rule:
   pattern: $X as unknown as $Y
   not:
     any:
-      - follows: { kind: comment, regex: 'SAFETY\s*:', stopBy: end }
+      - follows:
+          kind: comment
+          regex: 'SAFETY\s*:'
+          stopBy: { not: { kind: comment } }
       - inside:
           stopBy: end
           any:
@@ -64,4 +126,7 @@ rule:
             - kind: lexical_declaration
             - kind: variable_declaration
             - kind: return_statement
-          follows: { kind: comment, regex: 'SAFETY\s*:', stopBy: end }
+          follows:
+            kind: comment
+            regex: 'SAFETY\s*:'
+            stopBy: { not: { kind: comment } }
