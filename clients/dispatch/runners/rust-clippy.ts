@@ -203,6 +203,51 @@ interface ClippyMessage {
 }
 
 /**
+ * #1802 fix round: the original review claimed rustc/clippy's top-level
+ * `compiler-message.level` is genuinely two-valued (error/warning). A live
+ * `cargo clippy --message-format=json` repro falsified that: rustc_errors's
+ * `Level` serializes SIX values, and top-level messages with a real primary
+ * span are NOT limited to error/warning —
+ *
+ *   - `"error"` — a hard compiler/lint error.
+ *   - `"warning"` — the common clippy-lint case.
+ *   - `"note"` — DOES appear as a top-level message with a non-empty primary
+ *     span (repro: an erroneous-constant note pointing at the offending
+ *     expression), not only as a `message.children[].level` annotation.
+ *   - `"help"` — a top-level suggestion-carrying message.
+ *   - `"failure-note"` — observed with an empty `spans` array, so it is
+ *     already filtered out by the `if (!span) continue` guard below; no
+ *     diagnostic is ever built from it. Verified, not assumed.
+ *   - `"error: internal compiler error"` — an ICE. The old `level === "error"`
+ *     exact-match ternary silently mapped this to `"warning"`, because the
+ *     string doesn't equal `"error"` — an ICE must never be under-reported,
+ *     so it is normalized to `"error"` here explicitly.
+ *
+ * `note`/`help` don't have a `"blocking"`-worthy tier of their own in the
+ * four-valued `Diagnostic.severity`, so they land on the two quiet tiers:
+ * `note` → `hint`, `help` → `info`. Blocking stays derived from the
+ * *normalized* severity (not the raw string), which is what makes the ICE
+ * case blocking too instead of silently passing.
+ */
+export function normalizeClippyLevel(
+	raw: string | undefined,
+): Diagnostic["severity"] {
+	if (raw === "error") return "error";
+	if (
+		typeof raw === "string" &&
+		raw.startsWith("error: internal compiler error")
+	) {
+		return "error";
+	}
+	if (raw === "note") return "hint";
+	if (raw === "help") return "info";
+	// "warning", "failure-note" (unreachable here, see above), and anything
+	// unrecognized fall back to "warning" — the tier every clippy diagnostic
+	// reported at before this fix.
+	return "warning";
+}
+
+/**
  * Find a machine-applicable suggested replacement across the message's spans.
  * Clippy emits one diagnostic per warning but can attach the auto-fix to a
  * span other than the primary one (e.g. a fix that rewrites a use-site AND
@@ -253,26 +298,21 @@ export function parseClippyOutput(
 					: rawFile
 				: fallbackPath;
 
-			// #1802 investigated this as a possible severity-collapse instance
-			// (the class #1787 fixed for ast-grep-napi and #1791 fixed for
-			// biome-check). It is not: rustc/clippy's own `Level` enum has
-			// `Note`/`Help` variants, but those are only ever attached as child
-			// annotations (`message.children[].level`) on an existing diagnostic.
-			// A top-level `reason: "compiler-message"` entry that carries a
-			// non-empty `spans` array — the only kind this parser reaches, since
-			// it returns early via `if (!span) continue` above — is always
-			// `"error"` or `"warning"` in practice; global/summary messages like
-			// "N warnings emitted" have empty spans and are already filtered out
-			// by that same early return. So this mapping is a genuine two-valued
-			// pass-through, not a collapse: there is no third tier being lost.
+			// #1802: preserve clippy's real six-level vocabulary instead of
+			// collapsing it. See `normalizeClippyLevel` above for the verified
+			// mapping and the repro that falsified the original "two-valued"
+			// claim. Blocking is derived from the NORMALIZED severity so an ICE
+			// (`"error: internal compiler error"`) is blocking too, not just an
+			// exact-match `"error"` string.
+			const normalizedSeverity = normalizeClippyLevel(message.level);
 			diagnostics.push({
 				id: `clippy-${message.code?.code || "unknown"}`,
 				message: message.message || "Clippy warning",
 				filePath,
 				line: span.line_start || 0,
 				column: span.column_start || 0,
-				severity: message.level === "error" ? "error" : "warning",
-				semantic: message.level === "error" ? "blocking" : "warning",
+				severity: normalizedSeverity,
+				semantic: normalizedSeverity === "error" ? "blocking" : "warning",
 				tool: "rust-clippy",
 				rule: message.code?.code,
 				defectClass: "correctness",
