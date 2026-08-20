@@ -615,3 +615,105 @@ export const EXEMPT_SESSION_STATE_FILES: Readonly<Record<string, string>> = {
 	"lsp/workspace-diagnostics-cache.ts":
 		"#1669 review F1/F2/N3: a sweep-cwd discovery registry (idempotent — re-registers on every createWorkspaceDiagnosticsCacheContext call) plus a per-cwd cache epoch. Neither needs a session_start reset, but a session boundary is NOT harmless for the registry: a refresh for a cwd this process has not yet swept clears nothing on disk (the review's N3 finding) until that cwd is finally reached, at which point clearWorkspaceDiagnosticsCache's state.root fallback and the epoch's on-disk generation field (durable across the boundary, unlike the in-memory map alone) recover it. A session_start wipe would only widen that window, not close it, so exemption is still correct — the fix is durability at the write site, not a reset seam here.",
 };
+
+/**
+ * SYMBOL-granularity backstop for the file-granular audit above — #1817.
+ *
+ * `EXEMPT_SESSION_STATE_FILES` and `SESSION_STATE_REGISTRY` both answer "is
+ * this FILE accounted for". Neither answers "how many stateful symbols does
+ * the scan see IN it right now" — so a new module-level `Map`/`Set` added
+ * inside a file that already registered or exempted, is invisible to the
+ * coverage sweep. That is exactly #1801 review F1's shape: `staleGrammarVersionAt`
+ * landed on `TreeSitterClient` (backed by the already-registered
+ * `tree-sitter-shared.ts`) with no session_start reset, and the sweep stayed
+ * 55/55 green because the file itself was already accounted for.
+ *
+ * This table pins `scanSessionStateCandidates()`'s `containers.length` for
+ * every file the scan currently flags — registered AND exempted alike, since
+ * an exemption's reason is written against the symbols known at the time it
+ * was granted, and a new symbol arriving under cover of an old exemption is
+ * the same silent-drift shape. A count that no longer matches is not a
+ * failure by itself — it is a REQUIRED stop: decide whether the new symbol
+ * needs a registry entry, a reset, or its own exemption reason, then update
+ * the pinned number here.
+ *
+ * Generated from a full scan at the time this table was written (`node
+ * -e`-style dump of `scanSessionStateCandidates()`, one row per flagged
+ * file). Keep it sorted; the coverage test below diffs it against a live
+ * scan on every run, so a stale or missing entry reds immediately rather than
+ * silently under- or over-counting.
+ */
+export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
+	"agent-nudge.ts": 1,
+	"blocker-freshness.ts": 2,
+	"bounded-telemetry.ts": 2,
+	"bus-events-logger.ts": 1,
+	"bus-publish.ts": 0,
+	"cache-observability.ts": 1,
+	"degradation-ledger.ts": 3,
+	"diagnostic-dispositions.ts": 1,
+	"diagnostic-line-freshness.ts": 1,
+	"diagnostics-publish.ts": 1,
+	"dispatch/dispatcher.ts": 1,
+	"dispatch/integration.ts": 10,
+	"dispatch/lazy.ts": 0,
+	"dispatch/runners/ast-grep-napi.ts": 5,
+	"dispatch/runners/psscriptanalyzer.ts": 2,
+	"dispatch/runners/spotbugs.ts": 0,
+	"dispatch/runners/utils/lazy-installer.ts": 2,
+	"dispatch/runners/utils/runner-helpers.ts": 7,
+	"disposition-publish.ts": 0,
+	"extension-log.ts": 2,
+	"format-events-publish.ts": 0,
+	"formatters.ts": 5,
+	"generated-artifacts.ts": 2,
+	"git-guard.ts": 1,
+	"git-tracked-ignore.ts": 3,
+	"installer/index.ts": 12,
+	"instance-registry.ts": 0,
+	"latency-logger.ts": 1,
+	"lens-config.ts": 1,
+	"lens-events.ts": 0,
+	"lsp-budget.ts": 0,
+	"lsp/cascade-tier.ts": 1,
+	"lsp/client.ts": 2,
+	"lsp/config.ts": 1,
+	"lsp/index.ts": 2,
+	"lsp/jvm-runtime.ts": 0,
+	"lsp/server.ts": 5,
+	"lsp/workspace-diagnostics-cache.ts": 1,
+	"lsp/workspace-sweep-hold.ts": 1,
+	"mcp/analyze.ts": 1,
+	"mcp/session.ts": 2,
+	"module-report-lsp.ts": 1,
+	"ndjson-logger.ts": 0,
+	"package-manager.ts": 2,
+	"project-changes.ts": 0,
+	"project-lens-config.ts": 3,
+	"project-report.ts": 1,
+	"project-scale.ts": 0,
+	"project-snapshot.ts": 5,
+	"project-trust.ts": 1,
+	"quiet-window-config.ts": 0,
+	"quiet-window.ts": 0,
+	"recent-touches.ts": 1,
+	"review-graph/builder.ts": 17,
+	"review-graph/git-identity.ts": 0,
+	"review-graph/shared-extraction-ir.ts": 1,
+	"review-graph/workspace-modules.ts": 2,
+	"runtime-config.ts": 0,
+	"runtime-tool-result.ts": 3,
+	"safe-spawn.ts": 3,
+	"session-lifecycle.ts": 0,
+	"sgconfig.ts": 2,
+	"slow-fs.ts": 0,
+	"smells-rollup.ts": 1,
+	"subagent-mode.ts": 0,
+	"tree-sitter-shared.ts": 0,
+	"tui-fit.ts": 0,
+	"warm-attach.ts": 0,
+	"widget-state.ts": 2,
+	"word-index.ts": 2,
+	"workspace-topology.ts": 2,
+	"zizmor-config.ts": 0,
+};
