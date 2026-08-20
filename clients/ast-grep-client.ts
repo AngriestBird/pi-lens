@@ -811,11 +811,13 @@ message: found
 
 		const errors = diags.filter((d) => d.severity === "error");
 		const warnings = diags.filter((d) => d.severity === "warning");
+		const infos = diags.filter((d) => d.severity === "info");
 		const hints = diags.filter((d) => d.severity === "hint");
 
 		let output = `[ast-grep] ${diags.length} structural issue(s)`;
 		if (errors.length) output += ` — ${errors.length} error(s)`;
 		if (warnings.length) output += ` — ${warnings.length} warning(s)`;
+		if (infos.length) output += ` — ${infos.length} info(s)`;
 		if (hints.length) output += ` — ${hints.length} hint(s)`;
 		output += ":\n";
 
