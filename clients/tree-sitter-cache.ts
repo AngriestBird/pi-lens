@@ -59,6 +59,15 @@ export const TREE_CACHE_COUNTER_KEYS = [
 ] as const satisfies readonly (keyof TreeCacheCounters)[];
 
 export function createTreeCacheCounters(): TreeCacheCounters {
+	// SAFETY: `Object.fromEntries` returns `Record<string, number>` — it cannot
+	// prove the key set. `TREE_CACHE_COUNTER_KEYS` is declared `as const
+	// satisfies readonly (keyof TreeCacheCounters)[]`, so the compiler already
+	// rejects a key that is not a counter; every counter is a `number` and
+	// every key gets 0, so the result has the full shape. The `satisfies`
+	// clause does NOT check the reverse direction: add a counter to
+	// `TreeCacheCounters` without adding its key here and this cast becomes a
+	// lie, so `tests/clients/tree-sitter-cache.test.ts` pins the reverse
+	// direction: every counter the type declares must come back as 0.
 	return Object.fromEntries(
 		TREE_CACHE_COUNTER_KEYS.map((key) => [key, 0]),
 	) as unknown as TreeCacheCounters;

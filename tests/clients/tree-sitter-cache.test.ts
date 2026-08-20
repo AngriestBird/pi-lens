@@ -1,10 +1,13 @@
 import * as fs from "node:fs";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+	createTreeCacheCounters,
 	deriveScanTreeCacheCapacity,
+	TREE_CACHE_COUNTER_KEYS,
 	TREE_CACHE_DEFAULT_MAX_SIZE,
 	TREE_CACHE_SCAN_CAPACITY_CEILING,
 	TreeCache,
+	type TreeCacheCounters,
 } from "../../clients/tree-sitter-cache.js";
 import { createTempFile, setupTestEnvironment } from "./test-utils.js";
 
@@ -579,5 +582,39 @@ describe("TreeCache capacity growth for scan working sets (#1715)", () => {
 		for (const tree of treesByScan[scans - 1]) {
 			expect(tree.delete).not.toHaveBeenCalled();
 		}
+	});
+});
+
+// #1727/#1777: `createTreeCacheCounters` builds its result with
+// `Object.fromEntries(...) as unknown as TreeCacheCounters`. Its SAFETY
+// comment claims the cast holds because TREE_CACHE_COUNTER_KEYS covers every
+// counter. The `as const satisfies readonly (keyof TreeCacheCounters)[]`
+// clause on that array only checks one direction — that no listed key is
+// bogus. Nothing checked the reverse until now: add a counter to the
+// interface and forget the array, and the cast silently starts lying.
+describe("tree cache counter keys cover the counter type (#1727)", () => {
+	it("has no counter missing from TREE_CACHE_COUNTER_KEYS", () => {
+		// Compile-time half: `MissingCounterKey` is `never` only while every
+		// key of TreeCacheCounters appears in the array. Drop a key from the
+		// array and `npm run lint` fails on this line.
+		type MissingCounterKey = Exclude<
+			keyof TreeCacheCounters,
+			(typeof TREE_CACHE_COUNTER_KEYS)[number]
+		>;
+		const missing: MissingCounterKey[] = [];
+		expect(missing).toEqual([]);
+	});
+
+	it("seeds every declared key at zero", () => {
+		// Runtime half: the cast's actual claim is "the returned object has
+		// every counter, all numeric". Drop a key from the array and this reds
+		// on the key set.
+		const counters = createTreeCacheCounters();
+		expect(Object.keys(counters).sort()).toEqual(
+			[...TREE_CACHE_COUNTER_KEYS].sort(),
+		);
+		expect(Object.values(counters)).toEqual(
+			TREE_CACHE_COUNTER_KEYS.map(() => 0),
+		);
 	});
 });

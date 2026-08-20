@@ -1244,6 +1244,12 @@ function getMergedDiagnosticsForPath(
 	state: LSPClientState,
 	normalizedPath: string,
 ): LSPDiagnostic[] {
+	// SAFETY: `diagnostics` is the pre-split field name that older states (and
+	// older embedders holding a state built before `pushDiagnostics` existed)
+	// still carry. It is absent from `LSPClientState` on purpose — new code
+	// must not write it. The cast declares it OPTIONAL, so the read below is
+	// still `undefined`-guarded and a state without it falls through to the
+	// current field.
 	const legacy = state as unknown as {
 		diagnostics?: Map<string, LSPDiagnostic[]>;
 	};
@@ -1484,6 +1490,10 @@ export function clearDiagnosticsForPath(
 	state: LSPClientState,
 	normalizedPath: string,
 ): void {
+	// SAFETY: same pre-split field names as `getMergedDiagnosticsForPath`.
+	// Clearing must cover the legacy maps too, or a state that still carries
+	// them replays a stale diagnostic after the clear. Both are declared
+	// OPTIONAL, so every use below is `?.`-guarded on a state that lacks them.
 	const legacy = state as unknown as {
 		diagnostics?: Map<string, LSPDiagnostic[]>;
 		diagnosticTimestamps?: Map<string, number>;
@@ -4277,6 +4287,15 @@ export async function createLSPClient(options: {
 	const diagnosticEmitter = new EventEmitter();
 	diagnosticEmitter.setMaxListeners(50);
 
+	// SAFETY: three fields below are seeded `undefined as unknown as T` because
+	// they cannot be built here. `workspaceDiagnosticsSupport` and
+	// `operationSupport` are derived from the server's `initialize` result, and
+	// `watchQueue`'s flush closure needs `state` itself. Each is assigned
+	// in this same function before `state` reaches any caller:
+	// `state.watchQueue` on the statement immediately after this literal, and
+	// the two capability fields right after the `initialize` handshake
+	// returns. Reorder that and the fields are genuinely `undefined` at their
+	// declared non-optional types.
 	const state: LSPClientState = {
 		isConnected: true,
 		isDestroyed: false,
