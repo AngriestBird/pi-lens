@@ -7145,6 +7145,44 @@ export class LSPService {
 	}
 
 	/**
+	 * Check whether the PRIMARY server for this file is currently mid-spawn
+	 * (`state.inFlight`, keyed `${server.id}:${normalizeMapKey(root)}` — see
+	 * :2413). Lets a caller whose own wait budget expires distinguish "the
+	 * server hasn't finished its first spawn yet" from "the server is running
+	 * but slow/wedged" (#1766) — a cold spawn still in flight is not a verdict
+	 * on a server that doesn't exist yet.
+	 *
+	 * Mirrors the `role !== "auxiliary"` filter getClientForFile applies at
+	 * :2146-2148 (kept coupled to that line intentionally): auxiliary servers
+	 * (opengrep, typos, …) spawn routinely and concurrently with an ALREADY
+	 * ALIVE primary (dispatch/runners/lsp.ts's with-auxiliary path fires one
+	 * per edit for most files via TYPOS_EXTENSIONS). Without this filter, an
+	 * unrelated auxiliary spawn would downgrade a genuinely wedged primary to
+	 * a benign "spawn-in-flight" verdict — the worse misreport direction.
+	 *
+	 * Root-blind: the match is a `${server.id}:` PREFIX over inFlight keys, not
+	 * an exact `${server.id}:${root}` match, because root resolution
+	 * (resolveServerRoot) is async and this must stay synchronous for the
+	 * caller's bail path. A same-server spawn in an unrelated workspace root
+	 * also reports true. Rare in practice (this codebase is single-root per
+	 * pi-lens session in the overwhelming common case) and the failure mode is
+	 * the same "downgrade wedged to spawn-in-flight" direction as the
+	 * auxiliary case above — acceptable for a log-wording hint, not a gate.
+	 * Pure lookup — does not spawn or wait for a client.
+	 */
+	isSpawnInFlight(filePath: string): boolean {
+		const servers = getServersForFileWithConfig(filePath).filter(
+			(s) => s.role !== "auxiliary",
+		);
+		if (servers.length === 0) return false;
+		const prefixes = servers.map((server) => `${server.id}:`);
+		for (const key of this.state.inFlight.keys()) {
+			if (prefixes.some((prefix) => key.startsWith(prefix))) return true;
+		}
+		return false;
+	}
+
+	/**
 	 * Check whether an LSP client is already alive for a file.
 	 * Lightweight — does not spawn or wait for a client.
 	 */

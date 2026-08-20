@@ -64,6 +64,11 @@ import {
 	resetInstallRetryLatches,
 } from "../../clients/dispatch/runners/utils/availability-policy.js";
 import {
+	managedToolRefreshesThisSession,
+	reserveManagedToolRefreshSlot,
+	resetManagedToolRefreshSession,
+} from "../../clients/installer/managed-tool-refresh-session.js";
+import {
 	getSharedTreeSitterClient,
 	resetTreeSitterClientLoadState,
 } from "../../clients/tree-sitter-shared.js";
@@ -199,13 +204,13 @@ export const SESSION_STATE_REGISTRY: SessionStateEntry[] = [
 			"#1615: the once-per-correction memo that suppresses repeat compensating rows is a per-session claim, so a new session must be able to log its own correction.",
 	},
 	{
-		id: "runner-helpers:availabilityStateGeneration",
+		id: "runner-helpers:availabilityGeneration",
 		module: "dispatch/runners/utils/runner-helpers.ts",
-		state: "availabilityStateGeneration",
+		state: "availabilityGeneration",
 		policy: "session_start",
 		resetName: "resetDispatchAvailabilityState",
 		reason:
-			"The generation counter is how every cwd-cached probe latch (eslint, clippy, and the rest of createCwdCachedProbe's users) re-arms without holding a reset closure per checker — one counter, not a parallel list of resets.",
+			"The generation counter is how every cwd-cached probe latch (eslint, clippy, and the rest of createCwdCachedProbe's users) re-arms without holding a reset closure per checker — one counter, not a parallel list of resets. #1754 made it a GenerationSource; resetDispatchAvailabilityState still owns the bump.",
 	},
 	{
 		id: "availability-policy:installRetryLatches",
@@ -228,6 +233,22 @@ export const SESSION_STATE_REGISTRY: SessionStateEntry[] = [
 			},
 			isArmed: () => probeLatch === undefined || !probeLatch.isInstallExhausted(),
 			reset: () => resetInstallRetryLatches(),
+		},
+	},
+	{
+		id: "managed-tool-refresh-session:refreshesThisSession",
+		module: "installer/managed-tool-refresh-session.ts",
+		state: "refreshesThisSession",
+		policy: "session_start",
+		resetName: "resetManagedToolRefreshSession",
+		reason:
+			"#1730: the managed-tool refresh budget is one `npm update` per SESSION; left process-lived, a long-running pi refreshes one tool at launch and never revisits the other 21. The weekly per-tool cadence is deliberately NOT reset here — it lives in the persisted stamp, so re-arming the budget only restores the session's right to ask.",
+		probe: {
+			arm: () => {
+				reserveManagedToolRefreshSlot(1);
+			},
+			isArmed: () => managedToolRefreshesThisSession() === 0,
+			reset: () => resetManagedToolRefreshSession(),
 		},
 	},
 	{

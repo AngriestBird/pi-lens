@@ -114,6 +114,36 @@ describe("LSP per-file skip records are bounded (#1743)", () => {
 		expect(await ledgerCount("lsp-client-skipped-broken")).toBe(3);
 	});
 
+	it("writes one lsp_client_skipped_broken per file on the breaker-cooldown path too", async () => {
+		// The #1743 verify round found this gap: the two cases above drive only
+		// `permanentlyBroken` and the unavailable-command latch, so the THIRD
+		// emit site — the ordinary breaker cooldown, and the highest-volume of
+		// the three — had its rising edge unproven. Deleting `risingEdgePer`
+		// from that site alone left the whole `tests/clients/lsp/` directory
+		// green. The sibling breaker test could not catch it either: it asserts
+		// a ledger COUNT, which increments whether or not the edge gates the
+		// record.
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const service = new LSPService();
+		const internal = service as unknown as {
+			state: { broken: Map<string, number> };
+		};
+		const server = fakeServer("opengrep");
+		getServersForFileWithConfig.mockReturnValue([server]);
+		// A cooldown far enough out that all three touches land inside it.
+		internal.state.broken.set(
+			`opengrep:${normalizeMapKey(FIXTURE_ROOT)}`,
+			Date.now() + 600_000,
+		);
+
+		for (let touch = 0; touch < 3; touch++) {
+			expect(await service.getClientForFile(FIXTURE_FILE)).toBeUndefined();
+		}
+
+		expect(recordsFor("lsp_client_skipped_broken")).toHaveLength(1);
+		expect(await ledgerCount("lsp-client-skipped-broken")).toBe(3);
+	});
+
 	it("gives a second file its own record, so one file cannot mask another", async () => {
 		const { LSPService } = await import("../../../clients/lsp/index.js");
 		const service = new LSPService();

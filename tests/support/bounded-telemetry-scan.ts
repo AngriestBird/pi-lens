@@ -12,6 +12,8 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 
+import { stripSource } from "./sweep-kit.js";
+
 export interface EmissionSite {
 	/** Repo-relative path, forward slashes, so findings read the same on any OS. */
 	file: string;
@@ -65,8 +67,10 @@ const OUTCOME_SUFFIX =
  *
  * Kept to `skip`/`skipped` deliberately. Those are the outcomes this repo
  * qualifies with a trailing reason; a general "outcome word anywhere" rule
- * would match throughput phases like `lsp_timeout_budget_resolved`, whose
- * subject happens to be a failure concept.
+ * would match a throughput phase whose SUBJECT happens to be a failure
+ * concept. No such phase exists today — `lsp_timeout_budget_resolved` in the
+ * sweep's self-test is a hypothetical name, written to pin the boundary
+ * before a real one arrives.
  */
 const OUTCOME_INFIX = /_skipped?_/;
 
@@ -83,7 +87,14 @@ export function scanEmissionSites(repoRoot: string): EmissionSite[] {
 }
 
 /** Exported for the sweep's own self-test: scan one source string. */
-export function scanSource(source: string, file: string): EmissionSite[] {
+export function scanSource(raw: string, file: string): EmissionSite[] {
+	// #1755's shared kit owns the comment/string stripper, so this sweep gets
+	// the comment-laundering defense instead of re-deriving it. `strings:
+	// "keep"` is the deliberate half: a phase name IS a string literal, so
+	// blanking string contents would blind the scanner to every phase it
+	// exists to read. Blanking preserves offsets and newlines, so the line
+	// numbers this reports still point at the real source.
+	const source = stripSource(raw, { strings: "keep" });
 	const sites: EmissionSite[] = [];
 	for (const callee of CALLEES) {
 		// `\b` alone would let `recordLogLatency(` match; require the callee to
