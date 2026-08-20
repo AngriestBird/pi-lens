@@ -11,6 +11,7 @@ import {
 } from "../../clients/diagnostic-dispositions.js";
 import { resetProjectLensConfigCache } from "../../clients/project-lens-config.js";
 import { removeTempDirSync } from "../clients/test-utils.js";
+import type { Theme } from "@earendil-works/pi-coding-agent";
 
 const projectDiagnosticsMocks = vi.hoisted(() => ({
 	scanProjectDiagnostics: vi.fn(),
@@ -163,6 +164,53 @@ function withIgnoredFixture<T>(fn: (cwd: string) => Promise<T>): Promise<T> {
 		resetProjectLensConfigCache();
 	});
 }
+
+// ── compact render header ────────────────────────────────────────────────────
+
+// #1799: the compact header (shown in the tool-call row) reads details.totalBlocking
+// / details.totalErrors / details.totalWarnings directly — no execute() call
+// involved. `semantic === "blocking"` iff `severity === "error"` holds
+// codebase-wide, so totalBlocking and totalErrors are always the SAME count;
+// the header must not print both as if they were disjoint problems.
+describe("lens_diagnostics compact render header", () => {
+	const identityTheme = { fg: (_color: string, text: string) => text, bold: (text: string) => text } as unknown as Theme;
+
+	function renderHeader(details: Record<string, unknown>) {
+		const tool = makeTool();
+		const component = tool.renderResult?.(
+			{ content: [{ type: "text", text: "" }], details, isError: false },
+			{ expanded: false },
+			identityTheme,
+			{ args: { mode: "all" }, lastComponent: undefined },
+		);
+		return (component?.render(200) ?? []).join("\n");
+	}
+
+	it("shows blocking and warnings only — no redundant errors term (#1799)", () => {
+		const line = renderHeader({
+			mode: "all",
+			totalBlocking: 3,
+			totalErrors: 3,
+			totalWarnings: 2,
+			filesWithIssues: 1,
+		});
+		expect(line).toContain("3 blocking");
+		expect(line).toContain("2 warnings");
+		expect(line).not.toMatch(/\b3 errors?\b/);
+		expect(line).not.toContain("·  ·");
+	});
+
+	it("reports clean when blocking and warnings are both zero, even if totalErrors leaks a stale value", () => {
+		const line = renderHeader({
+			mode: "all",
+			totalBlocking: 0,
+			totalErrors: 0,
+			totalWarnings: 0,
+			filesWithIssues: 0,
+		});
+		expect(line).toContain("clean");
+	});
+});
 
 // ── schema ────────────────────────────────────────────────────────────────────
 
@@ -2337,6 +2385,19 @@ describe("lens_diagnostics mode=all", () => {
 			totalErrors: 3,
 			totalWarnings: 4,
 		});
+	});
+
+	// #1799: `semantic === "blocking"` iff `severity === "error"` holds
+	// codebase-wide, so every error-severity finding is ALSO a blocking one —
+	// the rendered summary must not print the same 3 findings once as
+	// "blocking" and again as "errors", which would read as 6 problems.
+	it("summary renders blocking count once, not doubled as a separate errors line (#1799)", async () => {
+		mockSummaries.length = 0;
+		mockSummaries.push(sum("/proj/a.ts", { blocking: 3, errors: 3 }));
+		const result = await run(makeTool(), { mode: "all" });
+		const text = String(result.content[0].text);
+		expect(text).toContain("3 blocking");
+		expect(text).not.toMatch(/\b3 errors?\b/);
 	});
 
 	// ── actual-message exposure (the point of the tool) ───────────────────────────

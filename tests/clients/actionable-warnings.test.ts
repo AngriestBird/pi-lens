@@ -234,11 +234,14 @@ describe("actionable warnings", () => {
 				includeLspCodeActions: false,
 			});
 			expect(report.summary.byTier).toMatchObject({
-				error: 0,
 				warning: 1,
 				info: 0,
 				hint: 2,
 			});
+			// #1799: `error` severity never reaches `warnings` (recordFromDispatchDiagnostic
+			// routes it to the blocking path), so `byTier` no longer carries a vestigial
+			// always-0 `error` field.
+			expect(report.summary.byTier).not.toHaveProperty("error");
 			expect(formatActionableWarningsAdvisory(report)).toContain(
 				"2 of those are hint/info tier",
 			);

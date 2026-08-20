@@ -308,14 +308,18 @@ export function createLensDiagnosticsTool(
 					return `lens_diagnostics delta — clean${coldSuffix}${failedSuffix}`;
 				return `lens_diagnostics delta — ${aw} actionable · ${cq} quality · ${pd} project${coldSuffix}${failedSuffix}`;
 			}
+			// #1799: `semantic === "blocking"` iff `severity === "error"` holds
+			// codebase-wide, so `totalBlocking` and `totalErrors` always count the
+			// same findings. Render blocking + warnings only — a two-value model,
+			// matching widget-state — instead of double-counting the same errors
+			// under two different labels.
 			const b = details?.totalBlocking ?? 0;
-			const e = details?.totalErrors ?? 0;
 			const w = details?.totalWarnings ?? 0;
 			const files = details?.filesWithIssues ?? details?.filesChecked ?? 0;
-			if (b + e + w === 0) {
+			if (b + w === 0) {
 				return `lens_diagnostics ${mode} — clean (${files} files)${coldSuffix}${failedSuffix}`;
 			}
-			return `lens_diagnostics ${mode} — ${b} blocking · ${e} errors · ${w} warnings (${files} files)${coldSuffix}${failedSuffix}`;
+			return `lens_diagnostics ${mode} — ${b} blocking · ${w} warnings (${files} files)${coldSuffix}${failedSuffix}`;
 		}),
 		parameters: Type.Object({
 			mode: Type.Optional(
@@ -2327,13 +2331,16 @@ function formatAllMode(
 		totalWarnings += s.warnings;
 	}
 
+	// #1799: `totalErrors` counts the same findings as `totalBlocking` — the
+	// codebase invariant `semantic === "blocking"` iff `severity === "error"`
+	// holds everywhere, so a diagnostic can never land in one total without the
+	// other. Render blocking + warnings only; `totalErrors` stays in `details`
+	// (below) for back-compat consumers, but the rendered summary no longer
+	// prints the same findings twice under two different labels.
 	const summary = [
 		`\nSummary (${visibleSummaries.length} files diagnosed this session):`,
 		totalBlocking > 0
 			? `  🔴 ${totalBlocking} blocking error${totalBlocking === 1 ? "" : "s"}`
-			: null,
-		totalErrors > 0
-			? `  ${totalErrors} error${totalErrors === 1 ? "" : "s"}`
 			: null,
 		totalWarnings > 0
 			? `  ${totalWarnings} warning${totalWarnings === 1 ? "" : "s"}`
