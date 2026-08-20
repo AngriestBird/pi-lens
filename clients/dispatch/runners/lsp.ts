@@ -251,15 +251,18 @@ const lspRunner: RunnerDefinition = {
 				// timer, or silent with nothing published for this content — so this
 				// empty merged result is missing whatever that scanner would have said.
 				// A hung OR silent opengrep must not read as a clean bill of health on
-				// the security lane. `RunnerResult` has no channel for "clean for these servers,
-				// unknown for those", so the only honest verdict this seam can express
-				// for an EMPTY result is "not checked" — which is what "skipped" means
-				// here, and it lets the coverage notice say so once. Nothing is thrown
-				// away: the primary answered with zero findings, so there is nothing to
+				// the security lane. The empty result remains skipped, while the correlated
+				// server ids let the coverage notice name the missing scanners once. Nothing
+				// is thrown away: the primary answered with zero findings, so there is nothing to
 				// report; when it DOES have findings the branches below still report
 				// them (see the non-empty path), which is how a trustworthy primary
 				// stays trustworthy under an auxiliary that never reported.
-				return { status: "skipped", diagnostics: [], semantic: "none" };
+				return {
+					status: "skipped",
+					diagnostics: [],
+					semantic: "none",
+					unconfirmedServerIds: [...unconfirmedServerIds],
+				};
 			}
 			return {
 				status: "succeeded",
@@ -384,6 +387,9 @@ const lspRunner: RunnerDefinition = {
 			failureKind: hasErrors ? "blocking_diagnostics" : undefined,
 			diagnostics: keptDiagnostics,
 			semantic: resultSemantic,
+			...(unconfirmedServerIds.length > 0 && {
+				unconfirmedServerIds: [...unconfirmedServerIds],
+			}),
 		};
 	},
 };
