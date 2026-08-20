@@ -37,14 +37,23 @@
     // docs/features.md intentionally skips an h2 in one section; not worth
     // renumbering headings repo-wide for a brand-new lint pass.
     "MD001": false,
-    // Repo mixes `_underscore_`/`__underscore__` and `*asterisk*` emphasis
+    // Repo mixes `_underscore_` and `*asterisk*` single-marker emphasis
     // across docs written by different authors over time.
     "MD049": false,
+    // Same author-style mix as MD049, for `__underscore__`/`**asterisk**`
+    // bold (docs/tree-sitter_rules_catalog.md uses underscore bold
+    // throughout its rule descriptions).
     "MD050": false,
     // A handful of long-form design docs (lsp-latency-benchmark.md) quote
     // multi-paragraph benchmark output inside blockquotes with blank lines.
     "MD028": false,
+    // docs/servercapabilities.md has a genuine double-blank-line gap
+    // between sections; not worth a one-line docs edit for a brand-new
+    // lint pass.
     "MD012": false,
+    // docs/servercapabilities.md has emphasis markers with a leading space
+    // (", _ text_") in prose describing punctuation-adjacent terms; a false
+    // positive for how the sentence reads, not a formatting mistake.
     "MD037": false,
     // "#NNN" issue references routinely land at the start of a wrapped
     // line in prose (e.g. "structured options,\n#771)") -- these are never
@@ -54,8 +63,17 @@
     // AGENTS.md and docs/api-ports-inventory.md use tab-indented tables/data
     // blocks (copy-pasted from tool output).
     "MD010": false,
+    // docs/ast-grep_rules_catalog.md is a generated rule catalog; its table
+    // cells embed raw rule-message text (e.g. a trailing "`" before a
+    // space) that trips this rule as a side effect of the content, not the
+    // markdown structure.
     "MD038": false,
+    // Same generated catalog: a table cell containing literal code like
+    // "split(sep)[n]" parses as reversed-link syntax by coincidence.
     "MD011": false,
+    // docs/audit1.md has fenced code blocks immediately followed by a list
+    // item with no blank line -- a deliberate compact layout, not a
+    // formatting slip.
     "MD031": false
   },
   "globs": ["**/*.md"],

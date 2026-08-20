@@ -60,8 +60,8 @@ parsed by `parseWordIndexQuery` (`clients/word-index.ts`) before tokenization:
 Example: `lang:jsts file:clients/ -file:test rank`. Multiple positive filters
 of the SAME key OR together; different keys AND; negations always subtract.
 Filters are applied as a `fileFilter` predicate BEFORE BM25/priors/centrality
-scoring (same seam as the pre-existing `paths`/`lang` structured options, #771),
-so a surviving file's score is unaffected by filtering. An unrecognized
+scoring (same seam as the pre-existing `paths`/`lang` structured options,
+#771), so a surviving file's score is unaffected by filtering. An unrecognized
 `key:` token passes through as an ordinary search term (colon-bearing terms
 like `std::vector`, URLs, and Windows paths search normally). Only a
 recognized key with a bad value — an unrecognized `lang:` kind — throws

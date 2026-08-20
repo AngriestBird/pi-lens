@@ -11,13 +11,17 @@ on:
     branches: [master]
   pull_request:
     branches: [master]
+    # Default types omit "edited". Without it, retitling a PR to fix a
+    # PR-title-lint failure replays the STALE payload from the original
+    # "opened" event instead of re-running against the new title (#1917
+    # review F3).
+    types: [opened, synchronize, reopened, edited]
 
 permissions: {}
 
 jobs:
   actionlint:
     name: actionlint
-    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -37,8 +41,11 @@ jobs:
           echo "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  actionlint_1.7.12_linux_amd64.tar.gz" | sha256sum -c -
           tar -xzf actionlint_1.7.12_linux_amd64.tar.gz actionlint
 
+      # Bare invocation (no *.yml glob): actionlint auto-discovers every
+      # workflow under .github/workflows/, including a future .yaml
+      # extension the glob would silently miss (#1917 review F5).
       - name: Lint workflows
-        run: ./actionlint -color .github/workflows/*.yml
+        run: ./actionlint -color
 
   pr-title-lint:
     name: PR title

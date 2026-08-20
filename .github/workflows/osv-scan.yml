@@ -59,11 +59,11 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-    # Advisory to start (see PR body / #1844): the job runs and reports, but
-    # isn't wired into required-checks branch protection yet. Promote once
-    # it's proven quiet for a few weeks. continue-on-error keeps a real
-    # finding from blocking merges while advisory.
-    continue-on-error: true
+    # Advisory to start (see PR body / #1844): this job is NOT wired into
+    # required-checks branch protection, so it never blocks a merge on its
+    # own. That's exactly why it must NOT use continue-on-error -- a real
+    # finding should show as a red advisory check a reviewer can see and
+    # choose to act on, not a silently-green one (#1917 review F2).
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -79,5 +79,16 @@ jobs:
           echo "f9f25499a2c8cc367b3af45df2ea7eeca7fbccceab9c35079968f4b3652194be  osv-scanner_linux_amd64" | sha256sum -c -
           chmod +x osv-scanner_linux_amd64
 
+      # Markdown-format output is written straight to the job summary so a
+      # finding is visible from the PR's checks tab without opening logs
+      # (#1917 review F2). The scan itself still exits non-zero on a real
+      # finding -- captured via $? (not piped, so no PIPESTATUS needed) and
+      # re-raised after the summary write so the job reports red.
       - name: Scan package-lock.json
-        run: ./osv-scanner_linux_amd64 --lockfile=./package-lock.json
+        run: |
+          set +e
+          ./osv-scanner_linux_amd64 --format=markdown --lockfile=./package-lock.json > osv-scan-result.md
+          status=$?
+          set -e
+          cat osv-scan-result.md >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
