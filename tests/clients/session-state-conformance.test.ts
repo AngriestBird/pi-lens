@@ -18,10 +18,14 @@
  * from the same kit.
  */
 
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
 	EXEMPT_SESSION_STATE_FILES,
 	SESSION_STATE_REGISTRY,
+	SESSION_STATE_SYMBOL_COUNTS,
 	_resetRegistryProbeState,
 } from "../support/session-state-registry.js";
 import {
@@ -33,7 +37,7 @@ import {
 	sessionStartResetNames,
 	stripCommentsAndStrings,
 } from "../support/session-state-scan.js";
-import { auditRegistry } from "../support/sweep-kit.js";
+import { auditRegistry, auditSymbolCounts } from "../support/sweep-kit.js";
 
 afterEach(() => _resetRegistryProbeState());
 
@@ -320,5 +324,176 @@ describe("session-state sweep — coverage", () => {
 		expect(SWEEP_HEURISTIC_LIMITS.length).toBeGreaterThanOrEqual(5);
 		expect(SWEEP_HEURISTIC_LIMITS.join(" ")).toContain("closure");
 		expect(SWEEP_HEURISTIC_LIMITS.join(" ")).toContain("no reset seam");
+	});
+
+	// #1817: file-granular coverage above cannot see a NEW stateful symbol
+	// landing inside a file that already registered or exempted — the #1801
+	// review F1 shape. This pins each flagged file's detected-symbol COUNT and
+	// diffs it against a live scan every run, so a new (or removed) module-level
+	// Map/Set/PathKeyedMap changes the file's id and reds as an unaccounted item.
+	it("every flagged file's stateful-symbol count matches its pin (#1817)", () => {
+		const counts: Record<string, number> = {};
+		for (const candidate of scanSessionStateCandidates()) {
+			counts[candidate.file] = candidate.containers.length;
+		}
+		const { problems } = auditSymbolCounts({
+			sweepName: "session-state symbol-count pin",
+			counts,
+			pinned: SESSION_STATE_SYMBOL_COUNTS,
+		});
+		if (problems.length > 0) expect.fail(problems.join("\n\n"));
+	});
+
+	it("the symbol-count pin names every file the sweep currently flags", () => {
+		// The pin table is only a backstop if it actually covers the flagged
+		// population — an entry silently missing from SESSION_STATE_SYMBOL_COUNTS
+		// would make that file's count invisible rather than pinned. Distinct
+		// from the drift check above: that one proves the NUMBERS agree, this one
+		// proves every flagged FILE has a number to agree with in the first place.
+		const flaggedFiles = new Set(
+			scanSessionStateCandidates().map((c) => c.file),
+		);
+		const missing = [...flaggedFiles].filter(
+			(file) => !Object.hasOwn(SESSION_STATE_SYMBOL_COUNTS, file),
+		);
+		expect(missing, missing.join("\n")).toEqual([]);
+	});
+
+	// The mirror of the test above (review round 1, G1): a PIN row naming a
+	// file the scan does NOT currently flag is silent dead weight — the pin's
+	// key is folded into `auditSymbolCounts`'s composite id, so a phantom entry
+	// never becomes an `unaccounted` item and `auditRegistry`'s `staleExemptions`
+	// never fires either, because `auditSymbolCounts` never passes exemptions.
+	// Nothing structurally catches a made-up filename without this test.
+	it("every symbol-count pin entry names a file the sweep still flags — no phantom rows", () => {
+		const flaggedFiles = new Set(
+			scanSessionStateCandidates().map((c) => c.file),
+		);
+		const phantom = Object.keys(SESSION_STATE_SYMBOL_COUNTS).filter(
+			(file) => !flaggedFiles.has(file),
+		);
+		expect(phantom, phantom.join("\n")).toEqual([]);
+	});
+});
+
+// #1817: the symbol-count pin's own correctness, against a synthetic fixture
+// tree rather than the real clients/ tree — so the regression cannot hide
+// behind whatever clients/ happens to contain today, the same discipline the
+// R1/S1 walker probes above use.
+describe("session-state sweep — symbol-count pin regression (#1817)", () => {
+	function withFixtureTree(
+		files: Record<string, string>,
+		run: (dir: string) => void,
+	): void {
+		const dir = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-session-state-symbol-pin-"),
+		);
+		try {
+			for (const [name, contents] of Object.entries(files)) {
+				fs.writeFileSync(path.join(dir, name), contents);
+			}
+			run(dir);
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	}
+
+	const REGISTERED_FILE_BEFORE = [
+		"const existingLatch = new Map<string, string>();",
+		"",
+		"export function resetExistingLatch(): void {",
+		"\texistingLatch.clear();",
+		"}",
+		"",
+	].join("\n");
+
+	// The #1801 F1 shape exactly: a SECOND, uncleared module-level Map added
+	// inside a file that already carries a registered container + reset.
+	const REGISTERED_FILE_AFTER = [
+		REGISTERED_FILE_BEFORE,
+		"const newUnclearedLatch = new Map<string, string>();",
+		"",
+	].join("\n");
+
+	it("file-level coverage alone cannot see the new symbol landing in an already-registered file", () => {
+		withFixtureTree(
+			{ "already-registered.ts": REGISTERED_FILE_AFTER },
+			(dir) => {
+				const candidates = scanSessionStateCandidates(dir);
+				expect(candidates.map((c) => c.file)).toEqual([
+					"already-registered.ts",
+				]);
+				expect(candidates[0].containers).toEqual([
+					"existingLatch",
+					"newUnclearedLatch",
+				]);
+				// This is the bug #1817 reports: the FILE is still registered, so a
+				// file-granular audit reads clean even though a second, uncleared
+				// latch landed inside it.
+				const fileLevel = auditRegistry({
+					sweepName: "fixture file-level audit",
+					flagged: candidates.map((c) => c.file),
+					registered: ["already-registered.ts"],
+				});
+				expect(fileLevel.problems).toEqual([]);
+			},
+		);
+	});
+
+	it("the symbol-count pin reds when a registered file's detected-symbol count drifts", () => {
+		withFixtureTree(
+			{ "already-registered.ts": REGISTERED_FILE_AFTER },
+			(dir) => {
+				const candidates = scanSessionStateCandidates(dir);
+				const counts: Record<string, number> = {};
+				for (const c of candidates) counts[c.file] = c.containers.length;
+
+				// Pin captured BEFORE the second latch landed — one container, as
+				// REGISTERED_FILE_BEFORE has.
+				const pinAudit = auditSymbolCounts({
+					sweepName: "fixture symbol-count audit",
+					counts,
+					pinned: { "already-registered.ts": 1 },
+				});
+				expect(pinAudit.problems.length).toBeGreaterThan(0);
+				expect(pinAudit.unaccounted).toEqual(["already-registered.ts@2"]);
+			},
+		);
+	});
+
+	it("the symbol-count pin passes when the live count matches the pin", () => {
+		withFixtureTree(
+			{ "already-registered.ts": REGISTERED_FILE_BEFORE },
+			(dir) => {
+				const candidates = scanSessionStateCandidates(dir);
+				const counts: Record<string, number> = {};
+				for (const c of candidates) counts[c.file] = c.containers.length;
+				const pinAudit = auditSymbolCounts({
+					sweepName: "fixture symbol-count audit",
+					counts,
+					pinned: { "already-registered.ts": 1 },
+				});
+				expect(pinAudit.problems).toEqual([]);
+			},
+		);
+	});
+
+	it("also reds when a symbol is REMOVED without updating the pin", () => {
+		withFixtureTree(
+			{ "already-registered.ts": REGISTERED_FILE_BEFORE },
+			(dir) => {
+				const candidates = scanSessionStateCandidates(dir);
+				const counts: Record<string, number> = {};
+				for (const c of candidates) counts[c.file] = c.containers.length;
+				const pinAudit = auditSymbolCounts({
+					sweepName: "fixture symbol-count audit",
+					counts,
+					// Pin still claims 2, as if a symbol had been removed without
+					// updating the table.
+					pinned: { "already-registered.ts": 2 },
+				});
+				expect(pinAudit.problems.length).toBeGreaterThan(0);
+			},
+		);
 	});
 });
