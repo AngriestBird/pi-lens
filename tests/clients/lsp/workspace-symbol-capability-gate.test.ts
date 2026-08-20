@@ -74,4 +74,38 @@ describe("LSPService.workspaceSymbol capability gate (#1789)", () => {
 		expect(primary.workspaceSymbol).toHaveBeenCalledWith("greet");
 		expect(result).toEqual([{ name: "greet", kind: 12 }]);
 	});
+
+	// F1 (review round): the filePath branch resolves its own target via
+	// getClientForFile, independent of the no-filePath "first active client"
+	// branch above — a separate guard, at a separate line, with a separate
+	// reachable path (openFileBestEffort can spawn a NEW client between the
+	// tool layer's own capability read and this service call landing, so the
+	// server this branch actually calls is not guaranteed to be the one the
+	// caller already checked). Deleting this guard must fail this test even
+	// though the no-filePath tests above stay green.
+	it("does not call workspaceSymbol on the filePath-resolved client when it lacks support", async () => {
+		const resolved = makeFakeClient(false);
+		const svc = new LSPService();
+		svc.getClientForFile = vi
+			.fn()
+			.mockResolvedValue({ client: resolved, info: {} });
+
+		const result = await svc.workspaceSymbol("greet", "C:/repo/main.ts");
+
+		expect(resolved.workspaceSymbol).not.toHaveBeenCalled();
+		expect(result).toEqual([]);
+	});
+
+	it("still calls workspaceSymbol on the filePath-resolved client when it advertises support", async () => {
+		const resolved = makeFakeClient(true);
+		const svc = new LSPService();
+		svc.getClientForFile = vi
+			.fn()
+			.mockResolvedValue({ client: resolved, info: {} });
+
+		const result = await svc.workspaceSymbol("greet", "C:/repo/main.ts");
+
+		expect(resolved.workspaceSymbol).toHaveBeenCalledWith("greet");
+		expect(result).toEqual([{ name: "greet", kind: 12 }]);
+	});
 });
