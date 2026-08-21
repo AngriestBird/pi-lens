@@ -112,6 +112,17 @@ const oxlintRunner: RunnerDefinition = {
 		}
 
 		if (diagnostics.length === 0) {
+			// Read BEFORE reporting "succeeded" — a config (root's or a nested
+			// one nearer the file, per oxlint's own discovery) that ignores this
+			// file reports the same empty diagnostics array a clean file does.
+			// "succeeded"/"none" would say "we checked, it's clean"; this file
+			// was never checked at all.
+			if (parseOxlintFileCount(stdout) === 0) {
+				ctx.log(
+					"oxlint: 0 files matched (ignorePatterns/nested config excluded this file) — skipping, not reporting clean",
+				);
+				return { status: "skipped", diagnostics: [], semantic: "none" };
+			}
 			return { status: "succeeded", diagnostics: [], semantic: "none" };
 		}
 
@@ -151,6 +162,30 @@ interface OxlintJsonDiagnostic {
 
 interface OxlintJsonReport {
 	diagnostics?: OxlintJsonDiagnostic[];
+	number_of_files?: number;
+}
+
+/**
+ * `number_of_files: 0` is oxlint's own signal that its config (nested
+ * discovery walks up from `ctx.filePath` and stops at the NEAREST
+ * `.oxlintrc.json`/`ignorePatterns`, not necessarily the repo root's) excluded
+ * this file entirely — "No files found to lint." That report has the SAME
+ * empty `diagnostics` array a genuinely clean file produces, so without
+ * reading this field, config-excluded and clean are indistinguishable (the
+ * AGENTS.md empty-result invariant). Returns `undefined` when the field is
+ * absent or the JSON did not parse — callers must not treat that as zero.
+ */
+function parseOxlintFileCount(raw: string): number | undefined {
+	const trimmed = raw.trim();
+	if (!trimmed.startsWith("{")) return undefined;
+	try {
+		const parsed = JSON.parse(trimmed) as OxlintJsonReport;
+		return typeof parsed.number_of_files === "number"
+			? parsed.number_of_files
+			: undefined;
+	} catch {
+		return undefined;
+	}
 }
 
 // Oxlint codes look like "eslint(no-debugger)" or "oxc(approx-constant)".

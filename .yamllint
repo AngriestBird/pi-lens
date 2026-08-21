@@ -1,4 +1,3 @@
----
 # yamllint config (dogfood activation, refs #1844). Scopes yamllint to the
 # YAML a human actually maintains here — GitHub Actions workflows and
 # top-level config — and tunes rules so the CURRENT tree passes at error
@@ -24,9 +23,11 @@ ignore: |
 rules:
   line-length:
     # GitHub Actions `run:`/`if:` lines routinely exceed 80 columns (up to
-    # 253 in this tree's workflows); the default max would error on nearly
-    # every workflow file for a style choice this repo hasn't made.
-    max: 260
+    # 253 in this tree's workflows) — a style choice this repo hasn't made,
+    # not a real defect. Same precedent as the oxlint/typos configs in this
+    # PR: downgrade to advisory rather than raise the threshold and lose the
+    # check's ability to flag a genuinely runaway line.
+    level: warning
   document-start:
     # Existing workflows and config YAML don't start with `---`; not worth
     # a mass rewrite to satisfy a style preference this repo hasn't made.

@@ -370,4 +370,52 @@ describe("oxlint runner", () => {
 			env.cleanup();
 		}
 	});
+
+	it("reports a config-excluded file as skipped, not succeeded (dogfood #1985 review F2b)", async () => {
+		// Nested-config discovery means a file under a directory with its own
+		// `.oxlintrc.json` ignorePatterns — or covered by a parent config's
+		// ignorePatterns — makes oxlint report `number_of_files: 0` and an empty
+		// `diagnostics` array. That is the SAME shape as a genuinely clean file:
+		// zero diagnostics. Without reading `number_of_files`, "config excluded
+		// this file" and "this file has no findings" are indistinguishable — the
+		// AGENTS.md empty-result invariant (an empty result must distinguish
+		// clean from errored/excluded).
+		const env = setupTestEnvironment("pi-lens-oxlint-excluded-");
+		try {
+			const filePath = path.join(env.tmpDir, "sample.ts");
+			fs.writeFileSync(filePath, "const unused = 1;\n");
+
+			safeSpawnAsync.mockResolvedValueOnce({
+				error: null,
+				status: 1,
+				stdout: JSON.stringify({
+					diagnostics: [],
+					number_of_files: 0,
+					number_of_rules: 96,
+					threads_count: 16,
+					start_time: 0.01,
+				}),
+				stderr: "",
+			});
+
+			const runner = (
+				await import("../../../../clients/dispatch/runners/oxlint.js")
+			).default;
+			const log = vi.fn();
+			const result = await runner.run({
+				...createCtx(filePath, env.tmpDir),
+				hasTool: async () => false,
+				log,
+			} as never);
+
+			expect(result.status).toBe("skipped");
+			expect(result.semantic).toBe("none");
+			expect(result.diagnostics).toHaveLength(0);
+			expect(log).toHaveBeenCalledWith(
+				expect.stringContaining("oxlint"),
+			);
+		} finally {
+			env.cleanup();
+		}
+	});
 });
