@@ -19,8 +19,6 @@
  * Or: npm install -g typos-cli (if wrapped)
  */
 
-import type { ToolExitCodes } from "./utils/spawn-outcome.js";
-import { skipUnlessToolRan } from "./utils/tool-failure.js";
 import { safeSpawnAsync } from "../../safe-spawn.js";
 import { PRIORITY } from "../priorities.js";
 import type {
@@ -30,6 +28,8 @@ import type {
 	RunnerResult,
 } from "../types.js";
 import { createAvailabilityChecker } from "./utils/runner-helpers.js";
+import type { ToolExitCodes } from "./utils/spawn-outcome.js";
+import { parseToolRun } from "./utils/tool-failure.js";
 
 const typos = createAvailabilityChecker("typos", ".exe");
 
@@ -129,22 +129,20 @@ const spellcheckRunner: RunnerDefinition = {
 		// (unreadable config, bad argument). The `status === 2 || stdout` test
 		// below is false for exit 1 with an empty stdout, so a failed run was
 		// reported as a clean file. Only 0 and 2 are runs.
-		const skipped = skipUnlessToolRan("spellcheck", {
-			result,
-			exitCodes: TYPOS_EXIT_CODES,
-		});
-		if (skipped) return skipped;
+		//
+		// #1948: parse through the shared seam so an exit-2 run whose JSON lines
+		// yield nothing leaves a record. `parseOutput` keeps the historical
+		// split: the gate judges "did it run" on stdout, the parser reads both
+		// streams.
+		const run = parseToolRun(
+			"spellcheck",
+			{ result, exitCodes: TYPOS_EXIT_CODES },
+			(out) => parseTyposOutput(out, ctx.filePath),
+			{ parseOutput: `${result.stdout ?? ""}${result.stderr ?? ""}` },
+		);
+		if (run.skipped) return run.skipped;
 
-		// typos-cli exits with code 2 if typos found, 0 if clean
-		const hasTypos = result.status === 2 || result.stdout?.trim();
-
-		if (!hasTypos) {
-			return { status: "succeeded", diagnostics: [], semantic: "none" };
-		}
-
-		// Parse diagnostics
-		const raw = result.stdout + result.stderr;
-		const diagnostics = parseTyposOutput(raw, ctx.filePath);
+		const diagnostics = run.diagnostics;
 
 		if (diagnostics.length === 0) {
 			return { status: "succeeded", diagnostics: [], semantic: "none" };

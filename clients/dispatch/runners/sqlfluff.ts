@@ -12,7 +12,7 @@ import {
 	resolveToolCommandWithInstallFallback,
 } from "./utils/runner-helpers.js";
 import type { ToolExitCodes } from "./utils/spawn-outcome.js";
-import { skipUnlessToolRan } from "./utils/tool-failure.js";
+import { parseToolRun } from "./utils/tool-failure.js";
 
 const sqlfluff = createAvailabilityChecker("sqlfluff", ".exe");
 
@@ -153,7 +153,7 @@ const sqlfluffRunner: RunnerDefinition = {
 		}
 
 		let cmd: string | null = null;
-		if (await (sqlfluff.isAvailableAsync(cwd))) {
+		if (await sqlfluff.isAvailableAsync(cwd)) {
 			cmd = sqlfluff.getCommand(cwd);
 		} else {
 			cmd = await resolveToolCommandWithInstallFallback(cwd, "sqlfluff");
@@ -161,10 +161,19 @@ const sqlfluffRunner: RunnerDefinition = {
 
 		if (!cmd) return { status: "skipped", diagnostics: [], semantic: "none" };
 
-		const args = ["lint", "--format", "json", ctx.filePath];
+		// #1937: this used to be `args.splice(2, 0, "--dialect", "ansi")` on
+		// `["lint", "--format", "json", file]`, which inserts BETWEEN the flag
+		// and its value and yields `lint --format --dialect ansi json file`.
+		// sqlfluff rejects `--dialect` as the value of `--format` and exits 2,
+		// so every SQL project WITHOUT a .sqlfluff — exactly the case this
+		// dialect default exists to serve — was never linted. Built in order
+		// rather than patched by index, and pinned by the argv-tie assertion
+		// in runners/captured-real-output.test.ts.
+		const args = ["lint", "--format", "json"];
 		if (!hasConfig) {
-			args.splice(2, 0, "--dialect", "ansi");
+			args.push("--dialect", "ansi");
 		}
+		args.push(ctx.filePath);
 
 		const result = await safeSpawnAsync(cmd, args, {
 			timeout: 20000,
@@ -174,13 +183,17 @@ const sqlfluffRunner: RunnerDefinition = {
 		// #1816: this runner read `result.status` zero times, so a user error
 		// fell through `parseSqlfluffOutput`'s JSON catch to zero violations and
 		// reported the SQL file as clean.
-		const skipped = skipUnlessToolRan("sqlfluff", {
-			result,
-			exitCodes: SQLFLUFF_EXIT_CODES,
-		});
-		if (skipped) return skipped;
+		// #1948: sqlfluff exit 1 with a JSON report we read nothing out of is a
+		// parser break, not a clean file.
+		const run = parseToolRun(
+			"sqlfluff",
+			{ result, exitCodes: SQLFLUFF_EXIT_CODES },
+			(out) => parseSqlfluffOutput(out, ctx.filePath),
+			{ parseOutput: result.stdout ?? "" },
+		);
+		if (run.skipped) return run.skipped;
 
-		const diagnostics = parseSqlfluffOutput(result.stdout ?? "", ctx.filePath);
+		const diagnostics = run.diagnostics;
 		if (diagnostics.length === 0) {
 			return { status: "succeeded", diagnostics: [], semantic: "none" };
 		}

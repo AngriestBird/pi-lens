@@ -2399,6 +2399,41 @@ function setupConnectionLifecycle(
 			});
 		}
 	});
+
+	// #1969: the exit CAUSE, in the degradation ledger.
+	//
+	// The `exit` log above is one latency.log line per death. That line is
+	// necessary but not sufficient: an ast-grep child died 14 times in one day
+	// with `code=1` and empty stderr, and the only thing visible downstream was
+	// 19 `lsp_client_skipped_broken` cooldowns and 32 coverage gaps — fallout
+	// with no cause attached. The ledger is what a session-end health read
+	// looks at, so the cause belongs there too, counted per server.
+	//
+	// `close` rather than `exit`: `close` fires only after the child's stdio
+	// streams have drained, so "stderr was empty" is a statement about the
+	// server rather than a race against the pipe. `exit` can arrive first with
+	// stderr still buffered.
+	//
+	// Gated on `shutdownRequested` exactly as the exit log is — an eviction or
+	// an ordinary teardown is not a degradation and must not be recorded.
+	// `incrementDegradationCount` counts every occurrence and retains the
+	// latest reason per server, so a server dying in a loop shows as one entry
+	// with an honest count rather than N entries.
+	state.lspProcess.process.on("close", (code, signal) => {
+		if (state.shutdownRequested) return;
+		try {
+			const stderrTail = recentStderr(20);
+			incrementDegradationCount({
+				kind: "lsp-server-unexpected-close",
+				subject: state.serverId,
+				reason:
+					`closed unprompted: code=${code ?? "none"} signal=${signal ?? "none"} ` +
+					`stderr=${stderrTail.length > 0 ? `present(${stderrTail.length}b)` : "empty"} root=${state.root}`,
+			});
+		} catch {
+			// Telemetry must never break the observed path.
+		}
+	});
 }
 
 /**
@@ -4081,13 +4116,87 @@ function armNavLateAnswerTelemetry(args: {
 	);
 }
 
+/**
+ * #1969: pick the request the liveness probe may send to THIS server.
+ *
+ * The probe only needs a round-trip, so any request works — but it must be one
+ * the server advertised. #1277 originally hardcoded `workspace/symbol` because
+ * it needs no open document, and treated `MethodNotFound` as proof of life.
+ * That rationale is sound for the round-trip, and wrong as a default: a server
+ * that does not implement the method logs an error for every probe. ast-grep's
+ * tower_lsp backend wrote "got a 'workspace/symbol' request, but it is not
+ * implemented" on each one, and its `code=1` deaths clustered after them
+ * (#1969). pi-lens must not keep pushing an unimplemented method at a server
+ * just to learn it is awake.
+ *
+ * The ladder, best first:
+ *  1. `workspace/symbol` when `workspaceSymbolProvider` is advertised — the
+ *     #1277 probe, unchanged, and still needs no open document.
+ *  2. `textDocument/documentSymbol` on an already-open document when
+ *     `documentSymbolProvider` is advertised. Read-only, scoped to a document
+ *     the server already has, and cheap.
+ *  3. `textDocument/hover` at the start of an already-open document when
+ *     `hoverProvider` is advertised. This step is what keeps ast-grep covered:
+ *     `docs/servercapabilities.md:53` records its advertised set as
+ *     codeActionProvider, executeCommandProvider, hoverProvider and
+ *     textDocumentSync — no symbol provider of either kind. #1714's own
+ *     measurement (clients/lsp/index.ts, `paceAuxNotify`) timed hover against
+ *     the real ast-grep binary at 1 ms idle and 2086 ms behind 30 `didOpen`s,
+ *     the same ordering proof it recorded for `workspace/symbol`. So the
+ *     notify throttle keeps a real barrier here, not a hollow one.
+ *  4. Nothing. The caller then reports liveness from process and connection
+ *     state alone, and records that it did.
+ *
+ * `MethodNotFound`-counts-as-alive still holds for every probe: dynamic
+ * registration can retract a capability after `initialize`, and an error reply
+ * is still a reply. What changes is that pi-lens no longer PROVOKES that error
+ * on every probe.
+ */
+function chooseLivenessProbe(
+	state: LSPClientState,
+): { method: string; params: unknown } | undefined {
+	if (state.operationSupport?.workspaceSymbol === true) {
+		return {
+			method: "workspace/symbol",
+			params: { query: LIVENESS_PING_QUERY },
+		};
+	}
+	const openUri = firstOpenDocumentUri(state);
+	if (openUri === undefined) return undefined;
+	if (state.operationSupport?.documentSymbol === true) {
+		return {
+			method: "textDocument/documentSymbol",
+			params: { textDocument: { uri: openUri } },
+		};
+	}
+	if (state.operationSupport?.hover === true) {
+		return {
+			method: "textDocument/hover",
+			params: {
+				textDocument: { uri: openUri },
+				position: { line: 0, character: 0 },
+			},
+		};
+	}
+	return undefined;
+}
+
+/** URI of any document this client currently holds open, if it holds one. */
+function firstOpenDocumentUri(state: LSPClientState): string | undefined {
+	for (const normalizedPath of state.openDocuments) {
+		const uri = state.openDocumentUris?.get(normalizedPath);
+		if (uri !== undefined) return uri;
+	}
+	return undefined;
+}
+
 // #1277: cheap liveness round-trip used by the silent-clean gates in
 // `index.ts`. `isAlive()`/`checkAlive()` only look at process/connection
 // state — a server that accepted the notify write and then wedged (still
 // running, connection still open, just never replying) reads as "alive" by
 // those checks even though it will never answer anything again. This sends a
-// real request (`workspace/symbol`, chosen because it needs no open document)
-// and reports whether the connection round-tripped it — success, a genuine
+// real request (see `chooseLivenessProbe` for which, #1969) and reports
+// whether the connection round-tripped it — success, a genuine
 // protocol-level error (e.g. MethodNotFound), and a stream-destroyed/
 // cancelled response (safeSendRequest swallows those to `undefined`, so the
 // final `isClientAlive` re-check is what catches "died mid-flight") ALL count
@@ -4099,11 +4208,31 @@ async function clientPingLiveness(
 	timeoutMs: number = LIVENESS_PING_TIMEOUT_MS,
 ): Promise<boolean> {
 	if (!isClientAlive(state)) return false;
+	const probe = chooseLivenessProbe(state);
+	if (probe === undefined) {
+		// #1969: no advertised method to probe with, so this answer comes from
+		// process and connection state alone — exactly the checks the probe
+		// exists to strengthen. Say so in the ledger rather than let a weaker
+		// verdict pass as the strong one. Rising edge per server, via the
+		// ledger's own tally; the count carries the repeats.
+		try {
+			incrementDegradationCount({
+				kind: "lsp-liveness-probe-unsupported",
+				subject: state.serverId,
+				reason:
+					"no advertised request method to probe with (no " +
+					"workspaceSymbolProvider, and no open document with " +
+					"documentSymbolProvider or hoverProvider); liveness from " +
+					"process and connection state only",
+			});
+		} catch {
+			// Telemetry must never break the observed path.
+		}
+		return isClientAlive(state);
+	}
 	try {
 		await withTimeout(
-			safeSendRequest(state.connection, "workspace/symbol", {
-				query: LIVENESS_PING_QUERY,
-			}),
+			safeSendRequest(state.connection, probe.method, probe.params),
 			timeoutMs,
 		);
 	} catch (err) {
@@ -4593,6 +4722,18 @@ export async function createLSPClient(options: {
 			initializeTimeoutMs,
 		);
 	} catch (err) {
+		// #1969: claim this kill BEFORE issuing it. `setupConnectionLifecycle`
+		// ran above, so its `exit` and `close` handlers are already armed on
+		// this child, and both read `state.shutdownRequested` to tell a crash
+		// from a teardown we asked for. The kill below is one we asked for.
+		// Without this line it reported as an unprompted death, fabricating a
+		// `lsp-server-unexpected-close` entry reading
+		// "code=1 signal=none stderr=empty" — character for character the
+		// ast-grep signature this issue exists to make trustworthy — every time
+		// a server merely failed to complete its handshake. It also silenced a
+		// false `lsp_server_unexpected_exit` latency line that this path has
+		// been writing since the #615 follow-up.
+		state.shutdownRequested = true;
 		// Hard-kill the hung process so it doesn't become a zombie.
 		// SIGTERM alone is unreliable on Windows for cmd.exe/PowerShell trees.
 		const pid = lspProcess.pid;

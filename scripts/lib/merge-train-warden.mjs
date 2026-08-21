@@ -33,6 +33,7 @@ query($owner: String!, $name: String!, $after: String) {
         url
         mergeStateStatus
         autoMergeRequest { enabledAt }
+        isCrossRepository
         labels(first: 50) { nodes { name } }
         commits(last: 1) {
           nodes {
@@ -113,6 +114,12 @@ function normalizePr(node) {
     headSha: headCommit?.oid,
     mergeStateStatus: node.mergeStateStatus,
     autoMergeEnabled: Boolean(node.autoMergeRequest),
+    // isCrossRepository is GitHub's own fork signal: true when the PR's head
+    // repository differs from this (base) repository. update-branch's PUT
+    // creates a commit ON the head branch, so a fork-owned head is the
+    // expected 403 case -- the workflow token can label/comment on the PR
+    // without ever having write access to someone else's repository (#1959).
+    isFork: Boolean(node.isCrossRepository),
     labels,
     checksUnknown,
     failingRequiredChecks,
@@ -214,6 +221,26 @@ export function decideActions(pr) {
   return actions;
 }
 
+// update-branch's 403 nuance (#1959): a 403 on a fork-owned PR is the
+// workflow token correctly lacking write access to someone else's
+// repository -- expected, not a bug, so it is recorded as a distinct benign
+// outcome rather than folded into the generic BENIGN_HTTP_STATUSES set (a
+// blanket 403->benign would also swallow the real bug this issue reports: a
+// 403 on an OWN-branch PR means the token itself lacks contents: write, and
+// that must stay loud and fail the run. Every other action/status pair falls
+// through to the existing benign-status set unchanged.
+//
+// Pure and separate from decideActions on purpose: decideActions decides
+// WHAT to do (never sees HTTP responses); this decides how to read a
+// response AFTER the fact, so it is unit-testable without a network mock,
+// same as decideActions.
+export function classifyActionFailure(action, pr, status) {
+  if (action.type === "update-branch" && status === 403 && pr.isFork) {
+    return { benign: true, outcome: "update-branch-forbidden-fork" };
+  }
+  return { benign: BENIGN_HTTP_STATUSES.has(status), outcome: null };
+}
+
 async function restJson(fetcher, method, url, body) {
   const response = await fetcher(url, {
     method,
@@ -277,8 +304,10 @@ export async function runWarden({ fetcher, owner, repo }) {
       try {
         const response = await applyAction(fetcher, owner, repo, pr, action);
         if (!response.ok) {
-          const message = `${action.type} ${action.label ?? ""} -> HTTP ${response.status}`.trim();
-          errors.push({ message, benign: BENIGN_HTTP_STATUSES.has(response.status) });
+          const classification = classifyActionFailure(action, pr, response.status);
+          const suffix = classification.outcome ? ` (${classification.outcome})` : "";
+          const message = `${action.type} ${action.label ?? ""} -> HTTP ${response.status}${suffix}`.trim();
+          errors.push({ message, benign: classification.benign });
         } else {
           applied.push(action.type + (action.label ? `:${action.label}` : ""));
         }

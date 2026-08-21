@@ -370,20 +370,26 @@ async function scanFileMajorRules(
 			// phase-major scans.
 			durationMs: Date.now() - startedAt - astGrepDurationMs,
 			stats,
+			// #1935 review: ast-grep's own cost is often a scan's most expensive
+			// phase (production evidence: 13168ms over 86 files, the single
+			// biggest contributor). Its duration is subtracted above so it stays
+			// comparable to the historical phase-major scans; carry it here too
+			// so it stays visible SOMEWHERE instead of disappearing when the
+			// vacuous `project_diagnostics_ast_grep_scan` cache_stats record
+			// (below) was removed.
+			astGrep: { durationMs: astGrepDurationMs, fileCount: astGrepFilesScanned },
 		});
 	});
-	await client.withParseCacheMeasurement(
-		async () => {},
-		(stats) => {
-			logTreeSitterCacheStats({
-				scope: "project_diagnostics_ast_grep_scan",
-				filePath: cwd,
-				fileCount: astGrepFilesScanned,
-				durationMs: astGrepDurationMs,
-				stats,
-			});
-		},
-	);
+	// #1935: no `project_diagnostics_ast_grep_scan` cache_stats record here.
+	// `scanAstGrepFile` parses through ast-grep-napi's own `lang.parse()` — a
+	// separate native engine, not `TreeSitterClient`'s WASM `TreeCache` — so a
+	// cache_stats record for this scope would always read all-zero (0
+	// lookups, 0 hits, every counter 0) no matter how the scan behaves. That
+	// was a vacuous observability record, not a real one: it looked like a
+	// signal but could never carry information. `astGrepDurationMs` and
+	// `astGrepFilesScanned` still feed the `project_diagnostics_scan` record
+	// above (`astGrep` sub-field), so this cost stays observable without a
+	// second, always-zero record to carry it.
 	return { treeSitter, factRules, astGrep, filesScanned, wasmAborted };
 }
 

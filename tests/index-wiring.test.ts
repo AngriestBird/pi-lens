@@ -18,7 +18,7 @@ import {
 } from "../clients/degradation-ledger.js";
 import { _resetSessionLifecycleForTests } from "../clients/session-lifecycle.js";
 import { makeSessionStartEvent } from "./support/host-event-factory.js";
-import { createPiMock, makeCtx } from "./support/pi-mock.js";
+import { createPiMock, makeCtx, makeStaleCtx } from "./support/pi-mock.js";
 import { removeTempDirSync } from "./clients/test-utils.js";
 
 // #643: the dynamic-tool-deactivation call now runs inside the session_start
@@ -878,5 +878,174 @@ describe("index.ts extension wiring", () => {
 			expect(out).toContain("Machine-wide active log window");
 			expect(out).toContain("wiring-fixture: p50 100ms, p99 100ms, n=3");
 		});
+	});
+});
+
+/**
+ * #1925 — class siblings of the `agent_settled` stale-ctx crash (#1924/PR
+ * #1921).
+ *
+ * pi invalidates a captured event ctx when the session is replaced
+ * (`newSession`/`fork`/`switchSession`/`reload`). An event already queued when
+ * that happens still reaches pi-lens, carrying the DEAD ctx. Four handlers read
+ * a ctx property before any guard, so the SDK's `assertActive()` throw escaped
+ * into the host.
+ *
+ * Each test below drives one real registration through `createPiMock` with a
+ * ctx whose every accessor throws the SDK message, and asserts two things: the
+ * handler resolves rather than rejecting, and the skip is VISIBLE in the
+ * degradation ledger. Together they prove the shared wrapper
+ * (`clients/session-event-guard.ts`) is actually applied to each `pi.on` site —
+ * an unwrapped registration reds its own case. The ledger half is what keeps
+ * each guard mutation-proof: a guard that swallowed the throw silently would
+ * still pass the "does not reject" half.
+ */
+describe("stale extension ctx tolerance in event handlers (#1925)", () => {
+	beforeEach(() => {
+		_resetSessionLifecycleForTests();
+		resetBusPublishForTests();
+		resetDegradationLedger();
+	});
+	afterEach(() => {
+		_resetSessionLifecycleForTests();
+		resetBusPublishForTests();
+		resetDegradationLedger();
+	});
+
+	/** The ledger entry a stale-ctx skip must leave behind, for one handler. */
+	function expectStaleSkipRecorded(handler: string): void {
+		const group = getDegradationSummary().find(
+			(entry) => entry.kind === "extension-ctx-stale",
+		);
+		expect(
+			group,
+			`${handler} skipped a stale ctx without recording it in the degradation ledger`,
+		).toBeDefined();
+		expect(group?.latestReasons.map((reason) => reason.subject)).toContain(
+			handler,
+		);
+	}
+
+	const CASES: Array<{ event: string; payload: unknown }> = [
+		{
+			event: "tool_result",
+			payload: { toolName: "edit", input: { path: "a.ts" } },
+		},
+		{ event: "turn_start", payload: {} },
+		{ event: "agent_end", payload: { messages: [] } },
+		{ event: "turn_end", payload: {} },
+		{ event: "agent_settled", payload: {} },
+		// #1929: both of these already SURVIVED a stale ctx before the fix — each
+		// had a total try/catch — so the "resolves" half passes either way. The
+		// ledger half is the whole test. Without the wrapper the skip is logged as
+		// `session_start crashed: …` / `context event error: …` and counted
+		// nowhere, so `expectStaleSkipRecorded` is what reds on pre-fix code.
+		{ event: "session_start", payload: makeSessionStartEvent() },
+		{ event: "context", payload: { messages: [] } },
+	];
+
+	for (const { event, payload } of CASES) {
+		it(`tolerates and records a stale ctx delivered to ${event}`, async () => {
+			const pi = createPiMock();
+			extension(pi.asExtensionAPI());
+
+			await expect(
+				pi.emit(event, payload, makeStaleCtx()),
+			).resolves.not.toThrow();
+
+			expectStaleSkipRecorded(event);
+		});
+	}
+
+	it("hands the host its own message list back when context gets a stale ctx (#1929)", async () => {
+		// `context` is the one wrapped handler whose return value the host
+		// consumes. The stale path must answer `undefined` — pi's "this extension
+		// contributed nothing" — so the host keeps the transcript it already had.
+		// Any other value (a partial injection, an echoed array) would change what
+		// pi builds the request from at the exact moment pi-lens knows least.
+		const pi = createPiMock();
+		extension(pi.asExtensionAPI());
+		const existing = [{ role: "user", content: "keep me" }];
+
+		const result = await pi.emit(
+			"context",
+			{ messages: existing },
+			makeStaleCtx(),
+		);
+
+		expect(result).toBeUndefined();
+		expect(existing).toEqual([{ role: "user", content: "keep me" }]);
+		expectStaleSkipRecorded("context");
+	});
+
+	/**
+	 * A ctx that PASSES the pre-dispatch probe and dies afterwards (#1929).
+	 *
+	 * `makeStaleCtx` is dead on arrival, so the wrapper's probe catches it and
+	 * the handler never runs. The other half of the race is a swap that lands
+	 * while the handler is already inside its own body. `session_start` and
+	 * `context` each wrap their body in a total catch, so without an explicit
+	 * rethrow that catch eats the stale throw and the wrapper never sees it.
+	 */
+	function makeCtxThatDiesMidHandler() {
+		const ctx = makeCtx({ sessionId: "dies-mid-handler" });
+		ctx.isIdle = () => true;
+		Object.defineProperty(ctx, "cwd", {
+			configurable: true,
+			get() {
+				throw new Error(
+					"This extension ctx is stale after session replacement or reload",
+				);
+			},
+		});
+		return ctx;
+	}
+
+	for (const { event, payload } of [
+		{ event: "session_start", payload: makeSessionStartEvent() },
+		{ event: "context", payload: { messages: [] } },
+	]) {
+		it(`hands a MID-handler stale throw to the wrapper from ${event} (#1929)`, async () => {
+			const pi = createPiMock();
+			extension(pi.asExtensionAPI());
+
+			await expect(
+				pi.emit(event, payload, makeCtxThatDiesMidHandler()),
+			).resolves.not.toThrow();
+
+			// Without the rethrow this passes the "resolves" half and records
+			// nothing: the handler's own catch logs `… crashed` / `… event error`
+			// and the class stays invisible.
+			expectStaleSkipRecorded(event);
+			expect(
+				getDegradationSummary().find(
+					(entry) => entry.kind === "extension-ctx-stale",
+				)?.latestReasons[0]?.reason,
+			).toContain("mid-handler");
+		});
+	}
+
+	it("keeps a NON-stale handler failure loud instead of absorbing it", async () => {
+		// The guard classifies by message. An unrelated throw must still escape,
+		// and must never be counted as a stale-ctx skip — that would turn every
+		// handler bug into silence.
+		const pi = createPiMock();
+		extension(pi.asExtensionAPI());
+		const ctx = makeCtx();
+		Object.defineProperty(ctx, "signal", {
+			configurable: true,
+			get() {
+				throw new Error("boom: not a stale ctx");
+			},
+		});
+
+		await expect(
+			pi.emit("tool_result", { toolName: "edit" }, ctx),
+		).rejects.toThrow("boom: not a stale ctx");
+		expect(
+			getDegradationSummary().find(
+				(entry) => entry.kind === "extension-ctx-stale",
+			),
+		).toBeUndefined();
 	});
 });

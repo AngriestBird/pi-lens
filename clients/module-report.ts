@@ -1937,14 +1937,24 @@ export async function moduleReport(
 	let graph: ReviewGraph | undefined;
 	let graphFileCap: number | undefined;
 	let callGraphIdentity: CallGraphCacheIdentity | undefined;
+	// #1961 review F4: the blind read now serves a snapshot stamped at a
+	// different commit. project_report says so in its trust notes; this report
+	// reads through the SAME accessor, so without this it would present the
+	// other branch's importers and call edges as current, under a builtAt that
+	// looks fresh. Computed per call, never cached.
+	let revisionDriftNote: string | undefined;
 	try {
 		const {
 			getCachedReviewGraph,
 			getReviewGraphCacheIdentity,
 			getReviewGraphSizeSkipVerdict,
+			getReviewGraphRevisionDrift,
+			formatReviewGraphRevisionDriftNote,
 		} = await import("./review-graph/builder.js");
 		graph = getCachedReviewGraph(cwd);
 		graphFileCap = getReviewGraphSizeSkipVerdict(cwd)?.maxFileCount;
+		const drift = graph ? getReviewGraphRevisionDrift(cwd) : undefined;
+		if (drift) revisionDriftNote = formatReviewGraphRevisionDriftNote(drift);
 		callGraphIdentity = graph
 			? (() => {
 					const identity = getReviewGraphCacheIdentity(cwd, graph);
@@ -1982,6 +1992,9 @@ export async function moduleReport(
 	const api = topLevel.filter((entry) => entry.exported);
 	const internal = topLevel.filter((entry) => !entry.exported);
 	const warnings: string[] = [...(extractionWarnings ?? [])];
+	// Every graph-derived section below (who-uses-this, blast radius, call
+	// edges) came from the served snapshot, so the caveat belongs with them.
+	if (revisionDriftNote) warnings.push(revisionDriftNote);
 	if (callbackError) {
 		warnings.push(`Failed to extract callbacks: ${callbackError}`);
 		logLatency({

@@ -12,7 +12,7 @@ import {
 	createAvailabilityChecker,
 	resolveToolCommandWithInstallFallback,
 } from "./utils/runner-helpers.js";
-import { spawnFailedWithNoOutput } from "./utils/spawn-outcome.js";
+import { parseToolRun } from "./utils/tool-failure.js";
 
 const htmlhint = createAvailabilityChecker("htmlhint");
 
@@ -73,7 +73,7 @@ const htmlhintRunner: RunnerDefinition = {
 		}
 
 		let cmd: string | null = null;
-		if (await (htmlhint.isAvailableAsync(cwd))) {
+		if (await htmlhint.isAvailableAsync(cwd)) {
 			cmd = htmlhint.getCommand(cwd);
 		} else {
 			cmd = await resolveToolCommandWithInstallFallback(cwd, "htmlhint");
@@ -96,12 +96,15 @@ const htmlhintRunner: RunnerDefinition = {
 			{ cwd },
 		);
 
+		// #1948: htmlhint exits 1 when it finds errors and prints them in `unix`
+		// format on stdout. Zero parsed out of a nonzero exit is a parser break.
 		const output = result.stdout || result.stderr || "";
-		if (spawnFailedWithNoOutput(result, output)) {
-			return { status: "skipped", diagnostics: [], semantic: "none" };
-		}
+		const run = parseToolRun("htmlhint", { result, output }, (out) =>
+			parseHtmlhintOutput(out, ctx.filePath),
+		);
+		if (run.skipped) return run.skipped;
 
-		const diagnostics = parseHtmlhintOutput(output, ctx.filePath);
+		const diagnostics = run.diagnostics;
 
 		if (diagnostics.length === 0) {
 			return { status: "succeeded", diagnostics: [], semantic: "none" };

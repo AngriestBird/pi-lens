@@ -3,6 +3,7 @@
 import { logExtension } from "./extension-log.js";
 import { LEDGER_FIELD_MAX, truncateForLedger } from "./ledger-bounds.js";
 import { logLatency } from "./latency-logger.js";
+import { getSinkWriteFailures, resetSinkWriteFailures } from "./ndjson-logger.js";
 
 // Re-exported so existing importers keep one name for the ledger's bound.
 export { LEDGER_FIELD_MAX, truncateForLedger };
@@ -30,6 +31,27 @@ export type DegradationKind =
 	 * that is what the availability latch is about.
 	 */
 	| "lsp-client-skipped-unavailable-command"
+	/**
+	 * A warm-only client lookup (`getWarmClientForFile`) found no live client
+	 * for a file that HAS a language server with a resolvable root (#1934).
+	 * Subject is the candidate `serverId:root` set, so the ledger still answers
+	 * which server and root the pool is cold for after the detailed records
+	 * stop. Not every miss is a fault — the first touch of a project is always
+	 * one — but the COUNT is the pool-miss signal that `lsp_client_selected`
+	 * cannot carry, since the warm-only callers never reach selection.
+	 */
+	| "lsp-warm-client-missing"
+	/**
+	 * The blind review-graph read (`getCachedReviewGraph`) either DROPPED a
+	 * persisted snapshot because its git stamp names a different worktree, or
+	 * SERVED one whose stamp names a different HEAD (#1961). Subject is
+	 * `<verdict>:<cwd>`, so the ledger still answers which workspace and which
+	 * verdict after the detailed `review-graph.log` records stop. Every caller of
+	 * that accessor (module_report, lens-engine, project_report) can reach it on
+	 * every call, so only the FIRST occurrence per (verdict, cwd) also writes a
+	 * record; the count here is the exact total.
+	 */
+	| "review-graph-snapshot-read"
 	| "formatter-failure"
 	| "wasm-abort"
 	| "lsp-diagnostics-timeout"
@@ -57,6 +79,14 @@ export type DegradationKind =
 	 * this kind means the total guard absorbed one (#1655 item 1).
 	 */
 	| "tool-call-handler-throw"
+	/**
+	 * A session event reached a pi-lens handler on a ctx the SDK had already
+	 * invalidated by a session replacement or reload, so the handler was
+	 * skipped (#1925). Subject is the EVENT NAME, so the ledger still answers
+	 * which handler is being skipped after the detailed records stop.
+	 * `clients/session-event-guard.ts` is the only writer.
+	 */
+	| "extension-ctx-stale"
 	/**
 	 * A tool-event path did not resolve to an existing file, and pi's own
 	 * unicode/spacing variant ladder did not find it either (#1655 item 5).
@@ -139,6 +169,38 @@ export type DegradationKind =
 	 */
 	| "lsp-pull-skipped-budget-exhausted"
 	/**
+	 * A language-server child process CLOSED without pi-lens having asked it to
+	 * (#1969). `clientShutdown()` sets `state.shutdownRequested`, so evictions
+	 * and ordinary teardown never reach this kind — only a mid-session death.
+	 *
+	 * The record exists because the fallout of such a death is highly visible
+	 * (`lsp_client_skipped_broken` cooldowns, `lsp-scanner-coverage-gap`) while
+	 * the CAUSE was not: an ast-grep child exited with `code=1` and EMPTY
+	 * stderr 14 times in one day and left no cause record anywhere. Subject is
+	 * the `serverId`, so the ledger answers WHICH server keeps dying; the
+	 * reason carries the exit code, the signal, and whether stderr carried
+	 * anything, which is the discrimination between "the server told us why"
+	 * and "it went dark".
+	 *
+	 * Written on the process `close` event rather than `exit`: `close` fires
+	 * only after the child's stdio streams have drained, so "stderr was empty"
+	 * is a fact about the server rather than a race with the pipe.
+	 */
+	| "lsp-server-unexpected-close"
+	/**
+	 * A liveness probe (`clientPingLiveness`, `clients/lsp/client.ts`) found no
+	 * request method the server advertises that it could safely probe with, so
+	 * it reported liveness from process and connection state alone (#1969).
+	 *
+	 * This matters because the probe exists precisely to catch what those two
+	 * checks miss: a server still running, connection still open, that will
+	 * never reply again. For a server in this state the probe is weaker than it
+	 * looks, and that must be visible rather than assumed. Subject is the
+	 * `serverId`, so the ledger names which servers are trusted on the weaker
+	 * check.
+	 */
+	| "lsp-liveness-probe-unsupported"
+	/**
 	 * A `GenerationHandle.guardedWrite` (`clients/generation-guard.ts`) dropped
 	 * a post-await write because the generation it captured is no longer
 	 * current (#1754) — a session reset, a cache refresh, or a newer request
@@ -162,6 +224,18 @@ export type DegradationKind =
 	 * from the ledger alone.
 	 */
 	| "runner-empty-result"
+	/**
+	 * A shell-out runner's tool DID produce output, exited nonzero, and the
+	 * runner's parser extracted ZERO diagnostics from it (#1948). The adjacent
+	 * `runner-empty-result` covers "the tool produced nothing"; this covers
+	 * "the tool produced something the runner could not read", which is how
+	 * five parser bugs (vale #1933; taplo, stylelint, phpstan #1946; sqlfluff)
+	 * reported clean files for months while their CLIs were reporting errors.
+	 * Subject is the tool id; the reason names the exit status, the output
+	 * length, and the first output line, so the ledger alone answers "is this
+	 * file clean, or did the parser fail to read it?".
+	 */
+	| "runner-parsed-nothing"
 	/** A process-table resource sample failed or timed out; it is unknown. */
 	| "resource-sampler-query-failed"
 	/**
@@ -241,7 +315,36 @@ export type DegradationKind =
 	 * power-of-two milestones after it — the ledger's own dedupe, not a
 	 * hand-rolled per-file Set (#1913 review F1).
 	 */
-	| "read-guard-record-cap-trim";
+	| "read-guard-record-cap-trim"
+	/**
+	 * A demoted finding was RETIRED from a delivery store instead of being
+	 * re-served (#1944). Raised when the cited file shrank past the
+	 * coordinates the finding is pinned to, so no re-run can ever confirm it.
+	 * The subject carries the discriminating identity — `<store>:<file>` — so
+	 * aggregation still answers "which file stopped being served, and from
+	 * which store". Counted rather than once-per-session: a session can retire
+	 * many findings, and the count is the number the observability question
+	 * actually asks.
+	 */
+	| "demoted-finding-retired"
+	/**
+	 * `ndjson-logger.ts`'s shared file-sink lost a write even after its one
+	 * reopen-and-retry (#1970) — the pi-analyze #15 shape, catching the
+	 * `ERR_STREAM_DESTROYED` writes that were vanishing silently after a sink
+	 * died mid-session. Subject is the sink's absolute path, so a specific
+	 * dying log (latency.log vs tree-sitter.log vs extension.log, …) is
+	 * diagnosable instead of one anonymous "logging broke" signal. This kind
+	 * is never written via `recordDegradation`/`recordDegradationOnce`/
+	 * `incrementDegradationCount` like every other kind above: it is folded
+	 * into `getDegradationSummary()` at READ time from
+	 * `ndjson-logger.ts`'s own in-memory tally, deliberately bypassing this
+	 * module's usual durable-row emission (`logDurableDegradation`, which
+	 * writes through `logLatency`/latency.log). Recording a lost write by
+	 * writing ANOTHER line through the very sink that just lost a write is
+	 * the recursion this design avoids — see `ndjson-logger.ts`'s
+	 * `writeFailures` doc comment.
+	 */
+	| "log-sink-write-failure";
 
 export interface DegradationRecord {
 	kind: unknown;
@@ -402,12 +505,30 @@ function boundedKind(value: unknown): string {
 }
 
 export function getDegradationSummary(): DegradationGroup[] {
-	return [...groups.entries()].map(([kind, group]) => ({
+	const summary = [...groups.entries()].map(([kind, group]) => ({
 		kind,
 		count: group.count,
 		droppedCount: group.count - group.entries.length,
 		latestReasons: group.entries.map((entry) => ({ ...entry })),
 	}));
+	// Folded in at read time, not written into `groups` (#1970) — see the
+	// `log-sink-write-failure` doc comment on `DegradationKind` for why this
+	// kind never goes through `recordDegradation`.
+	const sinkFailures = getSinkWriteFailures();
+	if (sinkFailures.length > 0) {
+		summary.push({
+			kind: "log-sink-write-failure",
+			count: sinkFailures.reduce((total, sink) => total + sink.droppedCount, 0),
+			droppedCount: 0,
+			latestReasons: sinkFailures.map((sink) => ({
+				subject: truncateForLedger(sink.file),
+				reason: truncateForLedger(
+					`${sink.droppedCount} dropped write(s) after reopen-retry failed`,
+				),
+			})),
+		});
+	}
+	return summary;
 }
 
 function isRenderableSummary(value: unknown): value is DegradationGroup[] {
@@ -462,6 +583,10 @@ export function resetDegradationLedger(): void {
 	onceKeys.clear();
 	tallies.clear();
 	ledgerGeneration++;
+	// #1970, catalog shape 17: the sink write-failure tally is a
+	// process-lifetime latch too — it re-arms alongside the rest of the
+	// ledger rather than surviving past the session that observed it.
+	resetSinkWriteFailures();
 }
 
 export const DEGRADATION_ENTRIES_PER_KIND = ENTRIES_PER_KIND;

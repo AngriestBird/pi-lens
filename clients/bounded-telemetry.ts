@@ -81,11 +81,25 @@ export const BOUNDED_TELEMETRY_PHASES = [
 	/** #1743 review: the same skip, for a temporarily unavailable command. */
 	"lsp_client_skipped_unavailable_command",
 	/**
+	 * #1934: `getWarmClientForFile` found no live client for a file that has at
+	 * least one language server with a resolvable root. Its callers run per
+	 * file (the cascade quiet window, read expansion, `hasWarmLSP`), so it is
+	 * rising-edge per candidate (server, root) set, with the ledger holding the
+	 * exact count.
+	 */
+	"lsp_warm_client_missing",
+	/**
 	 * #1723: an event-loop block at or above the floor. Not a degradation, so
 	 * no ledger kind; bounded by call cadence (one `turn_end` runs it once per
 	 * turn) rather than by an option here.
 	 */
 	"loop_block",
+	/**
+	 * #1925: a session event skipped because its ctx was invalidated by a
+	 * session replacement or reload. A replaced session can drain a whole
+	 * queue of them, so it is rising-edge per event name.
+	 */
+	"session_event_stale_ctx_skip",
 ] as const;
 
 export type BoundedPhase = (typeof BOUNDED_TELEMETRY_PHASES)[number];

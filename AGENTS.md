@@ -70,6 +70,23 @@ smell warnings count only the current session, or a 24-hour fallback window
 when no session boundary is available; explicit health remains separately
 labeled. (#1432)
 
+A new context-injection surface delivers append-only. It appends after the
+transcript, or splices immediately before a plain trailing user prompt, and it
+never rewrites `messages[0]`. It batches to one injection per settle or turn
+boundary, never one per finding. It never holds the turn boundary open near the
+provider cache TTL. It emits a `cache_context` record naming its own per-source
+share of the payload, so a mixed injection stays attributable. The evidence
+comes from a 2026-08-21 audit of 63 sessions and 2,288 turns. It measured a
+94.2% prompt-cache hit rate and a byte-stable prefix. Even so, 34
+zero-`cacheRead` turns carried 35.1% of all fresh input. Those turns had a
+median inter-turn gap of 166s against 9s everywhere else, so idle time at the
+boundary, not injection volume, is the dominant cost. `cache_usage` now carries
+`interTurnGapMs` and a `cacheMissCause` verdict, so a new surface's cost is
+readable from the log instead of reconstructed by hand. Measure any such gap to
+REQUEST time, never to the response that follows it: generation time is not
+idle time, and folding it in inflates a TTL verdict about threefold.
+(#1016, #1071)
+
 Host-ready delay is a process-lifetime measurement from load-complete to the
 first real `session_start`. The extension consumes that anchor once at the
 entry point; later sessions emit no host-ready phase because no clean
@@ -446,7 +463,7 @@ leave its prior workspace cache alive; it never walks above that ceiling.
   - Active voice, present tense.
   - One idea per sentence, roughly 20-25 words. Split any sentence over ~30 words.
   - Consistent terminology: never swap synonyms for the same thing.
-  - Sentence-case headings. Plain words. No idioms or colloquialisms. No "please". Oxford comma.
+  - Sentence-case headings. Plain words. No idioms or colloquialisms. No `please`. Oxford comma.
   - No em-dash chains or nested parentheticals.
   - Commits: tpope style on top of the conventional prefix. Imperative subject of 50 characters or fewer, blank line, 72-column body stating what and why.
   - Issue references live in the PR TITLE. Use `closes` only when every acceptance criterion is met. Otherwise use `refs` plus an issue comment naming the remainder.
@@ -1333,7 +1350,7 @@ Never write `path.join(cwd, ".pi-lens", ...)` for a project cache — it breaks 
 - `~/.pi-lens/cascade.log` — NDJSON cascade graph/neighbor diagnostics, including reverse-dependency cache refresh/load/merge events (`phase: "reverse_deps_cache"`)
 - `~/.pi-lens/review-graph.log` — NDJSON review-graph build and persistence outcomes; lifecycle entries carry bounded build/persist generations, per-build captured sequence/mode, counts/timestamps, explicit partial-persistence coverage, process identity, and coalescing/supersession/fallback status without source contents. `latency.log` keeps only the separate persistence timing phase; do not duplicate this lifecycle metadata there.
 - `~/.pi-lens/latency.log` — NDJSON per-runner timings. Every new entry includes a logger-owned writer `pid`; `/lens-perf` (#767, `clients/performance-report.ts`) uses `pid` plus `RuntimeCoordinator.sessionStartedAt` to isolate the current process session from the machine-global log, and separately shows independent top-five p50/p99 rankings for the machine-wide active window's positive-duration `type:"phase"` records (`toolName/phase` when a tool name exists, linear-interpolated percentiles). `handleSessionStart` logs `session_start_total` on quick and full paths plus `session_start_scan_context_compute` around the actual sync/background scan-context walk, so the startup regression that motivated #767 is visible. The command flushes this process's buffered writer first, streams at most the newest `PI_LENS_MAX_LOG_SIZE_MB` (default 10MB, the same threshold that rotates the log), chunk-yields every 500 parsed lines, keeps at most the newest 20,000 phase samples, discards a partial first line after a tail seek, reports both caps, and skips malformed NDJSON lines rather than turning one partial append into an empty report. Ast-grep unsupported-language telemetry is deduped by language for the session and reports only a bounded rule-ID sample; `npm run logs:smells` excludes temp/scratchpad/heap-corpus paths by default and reports excluded-row counts, with repeatable `--exclude <glob>` overrides.
-- `~/.pi-lens/latency.log` `cache_context` records are the privacy-preserving request-side context audit: the `pi-lens-context-handler` observed stage, injection sources/placement, bounded counts/sizes, and hashes only. Content/structural hash truncation is explicit and yields `unknown`, never an exact unchanged claim. `cache_prefix_break` remains a local first-message stability signal, not proof of a provider cache miss; `cache_usage` is provider-reported, has no request-id correlation, and its `RuntimeCoordinator` turn is process-global (concurrent secondary sessions omit it).
+- `~/.pi-lens/latency.log` `cache_context` records are the privacy-preserving request-side context audit: the `pi-lens-context-handler` observed stage, injection sources/placement, bounded counts/sizes, and hashes only. Content/structural hash truncation is explicit and yields `unknown`, never an exact unchanged claim. `cache_prefix_break` remains a local first-message stability signal, not proof of a provider cache miss; `cache_usage` is provider-reported, has no request-id correlation, and its `RuntimeCoordinator` turn is process-global (concurrent secondary sessions omit it). Since #1071, `cache_context` also carries `injectionSourceBreakdown` (per-source message count, chars, bytes, and an estimated token count), and `cache_usage` carries `interTurnGapMs` plus a `cacheMissCause` verdict of `ttl-expired`, `prefix-broke`, `partial-eviction`, or `unknown`. The token figures use a documented four-chars-per-token estimate, flagged as `injectedTokenBasis`, and are never provider-measured. A `cacheMissCause` of `null` means there is nothing to explain; `unknown` is the explicit no-local-explanation verdict. The TTL threshold defaults to 60s and is overridable via `PI_LENS_PROVIDER_CACHE_TTL_MS`. The gap is measured to REQUEST time, the `context` call, not to the `message_end` that follows it, because the provider looks the cache up when the request arrives; `gapBasis` reports which endpoint produced the value, and `message-end-fallback` means no `context` call was seen for that turn and the value still includes generation time. A provider with no prompt cache at all reads `unknown` forever: every turn is a zero read against a zero baseline. Distinguish that case by `cacheWrite`, which also stays zero when the provider never caches, unlike a genuine expiry where the turn rewrites the cache.
 - `~/.pi-lens/tree-sitter.log` — NDJSON tree-sitter runner activity plus aggregate `cache_stats` entries for project-diagnostics and full review-graph phases; scope-isolated measurements include lookup/miss reasons, capacity misses, evictions, parser invocations/time, and resident source bytes/lines
 - `~/.pi-lens/extension.log` — NDJSON extension-wide diagnostics, including project-trust refusal/transition telemetry and the #1338 console-guard net for migrated or transitively emitted console writes
 - `~/.pi-lens/read-guard.log` — NDJSON for every read-guard verdict, autopatch, and preflight block (rotates at 1 MiB); key events: `edit_blocked`, `edit_warned`, `edit_preflight_blocked`, `oldtext_not_found`, `oldtext_trailing_ws_autopatched`, `oldtext_indent_autopatched`, `oldtext_escape_autopatched`
@@ -2010,7 +2027,7 @@ Short, obvious changes may use a subject only. Non-trivial changes get a body.
 
 ### Documentation and prose style
 
-**Prose in docs, changelog, and PR descriptions follows the [Google developer documentation style guide](https://developers.google.com/style) and [Simplified Technical English (ASD-STE100) principles](https://asd-ste100.org/), framed by Zinsser's four principles from *On Writing Well*: simplicity, brevity, clarity, and humanity.** Zinsser is the spirit; the two guides below are the mechanics. This is a principles-only adoption of ASD-STE100, a proprietary aerospace controlled-language specification; it does not adopt its licensed word list. Apply this standard to `README`, `docs/`, `AGENTS.md`, changelog entries, and PR bodies:
+**Prose in docs, changelog, and PR descriptions follows the [Google developer documentation style guide](https://developers.google.com/style) and [Simplified Technical English (ASD-STE100) principles](https://asd-ste100.org/), framed by Zinsser's four principles from *On Writing Well*: simplicity, brevity, clarity, and humanity.** Zinsser is the spirit; the two guides below are the mechanics. This is a principles-only adoption of ASD-STE100, a proprietary aerospace controlled-language specification; it does not adopt its licensed word list. Apply this standard to `README`, `docs/`, `AGENTS.md`, changelog entries, PR bodies, issue bodies, and issue and PR comments:
 
 - Use active voice and present tense.
 - Use second person (`you`) for instructions. Use the imperative for procedure steps.
@@ -2019,9 +2036,22 @@ Short, obvious changes may use a subject only. Non-trivial changes get a body.
 - Use sentence case for headings.
 - Define an acronym on first use. Prefer a plain word over jargon when one exists.
 - Avoid gerund or noun pile-ups and ambiguous constructions. Avoid `please`. Use the Oxford comma.
-- These rules are machine-checkable. Pi-lens ships a config-gated Vale runner (`clients/dispatch/runners/vale.js`). A `.vale.ini` with the Google style package would enforce this section automatically; track that separately.
+- Limit em-dashes to one per paragraph, and prefer zero in anything posted to GitHub. Use periods, colons, and commas instead. Do not nest parentheticals. A sentence that wants two dashes wants to be two sentences.
+- These rules are machine-checkable. Pi-lens ships a config-gated Vale runner (`clients/dispatch/runners/vale.js`). A `.vale.ini` with the Google style package would enforce this section automatically; tracked as the Vale lane of #1844's mechanical wave.
 
 **The standard also governs how agents talk to the maintainer.** Chat replies, status updates, and reports follow the same Zinsser frame. Lead with the outcome. Strip words that do no work. Prefer short sentences over dense em-dash chains. Clarity beats brevity when they conflict. Write like a person, not a system emitting a report.
+
+### Issue bodies
+
+**Every agent- or maintainer-authored issue follows one shape, in this order.** Each part is one short section or a few sentences, not a form to pad. Contributor issues filed through the GitHub UI follow the forms in `.github/ISSUE_TEMPLATE/` instead; triage maps them onto this shape when an agent picks them up.
+
+1. Evidence first. Measured numbers, quoted output, exact paths, and file:line references. The reader must see the defect before any interpretation of it.
+2. Root cause, or a hypothesis labeled as one. Never present a guess as a finding.
+3. Acceptance criteria that a test can decide. "Each handler tolerates a stale ctx, with one probe test per handler, red on pre-fix code" decides; "improve robustness" does not.
+4. The observability record. Name the log record that proves the behavior after the fix ships, or name the gap (see the observability assessment section).
+5. Cross-links. Name class siblings, the defect shape when it matches the catalog, and any PR or review that produced the evidence.
+
+Label at creation with type and area. Keep the language rules above: short sentences, and no em-dashes except as the label separator in a bullet list.
 
 ## Observability assessment
 
