@@ -139,6 +139,10 @@ import {
 import { handleSessionStart } from "./clients/runtime-session.js";
 import { handleToolCall } from "./clients/runtime-tool-call.js";
 import {
+	isStaleExtensionCtxError,
+	wrapSessionEventHandler,
+} from "./clients/session-event-guard.js";
+import {
 	classifyCurrentSessionEmission,
 	decideSessionStart,
 	decrementSecondarySessionCount,
@@ -436,23 +440,6 @@ logLatency({
 // No-op log function (verbose console logging was removed with lens-verbose flag)
 function log(_msg: string) {
 	// Previously tied to --lens-verbose flag, now disabled
-}
-
-/**
- * The pi SDK invalidates a captured `pi`/command ctx after a session
- * replacement or reload (ctx.newSession/fork/switchSession/reload); every later
- * `pi.*` call then throws with this signature (installed SDK:
- * core/extensions/loader.js `assertActive`). We match by message — not `===` a
- * captured instance — so a fire-and-forget task that races a session swap can
- * recognise the benign stale-ctx throw and degrade to a no-op. Substring-matched
- * on the stable "stale after session replacement or reload" phrase so it
- * survives incidental wording changes around it.
- */
-function isStaleExtensionCtxError(err: unknown): boolean {
-	return (
-		err instanceof Error &&
-		err.message.includes("stale after session replacement or reload")
-	);
 }
 
 // --- State ---
@@ -2087,7 +2074,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 
 	// Real-time feedback on file writes/edits
 	// biome-ignore lint/suspicious/noExplicitAny: pi.on overload mismatch for tool_result event type
-	(pi as any).on("tool_result", async (event: any, ctx: any) => {
+	const onToolResult = async (event: any, ctx: any) => {
 		rememberOwnEventCtx(ctx);
 		if (!lensEnabled) return;
 		updateRuntimeIdentityFromCtx(ctx);
@@ -2141,11 +2128,17 @@ function activateExtension(hostPi: ExtensionAPI) {
 		} finally {
 			setAmbientAbortSignal(undefined);
 		}
-	});
+	};
+	// biome-ignore lint/suspicious/noExplicitAny: pi.on overload mismatch for tool_result event type
+	(pi as any).on(
+		"tool_result",
+		wrapSessionEventHandler("tool_result", onToolResult, { dbg }),
+	);
 
 	// --- Turn end: batch jscpd/madge on collected files, then clear state ---
 	// Clear cascade snapshot at start of each new turn so stale data never leaks
-	pi.on("turn_start", (_event: any, ctx) => {
+	// biome-ignore lint/suspicious/noExplicitAny: heterogeneous pi event ctx shapes
+	const onTurnStart = (_event: any, ctx: any) => {
 		rememberOwnEventCtx(ctx);
 		// Trust can change without a new session. Re-adopt before this turn can
 		// reach any install-capable or LSP-spawn path.
@@ -2196,7 +2189,8 @@ function activateExtension(hostPi: ExtensionAPI) {
 			.catch((err) => {
 				dbg(`turn_start: cross-process nudge read failed: ${err}`);
 			});
-	});
+	};
+	pi.on("turn_start", wrapSessionEventHandler("turn_start", onTurnStart, { dbg }));
 
 	// #1654: `agent_end` fires every time pi's internal `_runAgentPrompt` loop
 	// finishes A run — including a run that is about to auto-retry or resume
@@ -2299,14 +2293,19 @@ function activateExtension(hostPi: ExtensionAPI) {
 		}
 	}
 
-	pi.on("agent_end", async (_event, ctx) => {
+	// biome-ignore lint/suspicious/noExplicitAny: heterogeneous pi event ctx shapes
+	const onAgentEnd = async (_event: any, ctx: any) => {
 		if (!lensEnabled) return;
 		// Esc/abort during the debounce flush kills in-flight children. The
 		// deferred-format/autofix drain no longer runs from this handler at
 		// all (#1654 — see the module comment above); its own abort/requeue
 		// handling is wired at the `agent_settled` registration below instead.
-		setAmbientAbortSignal((ctx as { signal?: AbortSignal })?.signal);
 		try {
+			// Inside the try so the `finally` below covers it: reading
+			// `ctx.signal` is itself a guarded SDK accessor that can throw when a
+			// session replacement lands after the guard's pre-dispatch probe
+			// (#1925).
+			setAmbientAbortSignal((ctx as { signal?: AbortSignal })?.signal);
 			// Ensure any pipeline still queued in the debounce window finishes
 			// before agent_end runs — otherwise project change-log entries and
 			// modified ranges this turn produced may not be reflected yet. This
@@ -2317,19 +2316,27 @@ function activateExtension(hostPi: ExtensionAPI) {
 			await flushDebouncedToolResults();
 			ctx.ui && updateLspStatus(ctx.ui.setStatus, ctx.ui.theme);
 		} catch (agentEndErr) {
+			// The stale-ctx class has ONE classifier and one record, in
+			// clients/session-event-guard.ts. Rethrow so the wrapper around this
+			// registration owns it, instead of a second copy here logging it as a
+			// crash (#1925).
+			if (isStaleExtensionCtxError(agentEndErr)) throw agentEndErr;
 			dbg(`agent_end crashed: ${agentEndErr}`);
 			dbg(`agent_end crash stack: ${(agentEndErr as Error).stack}`);
 		} finally {
 			setAmbientAbortSignal(undefined);
 		}
-	});
+	};
+	pi.on("agent_end", wrapSessionEventHandler("agent_end", onAgentEnd, { dbg }));
 
-	pi.on("turn_end", async (_event: any, ctx) => {
+	// biome-ignore lint/suspicious/noExplicitAny: heterogeneous pi event ctx shapes
+	const onTurnEnd = async (_event: any, ctx: any) => {
 		if (!lensEnabled) return;
 		// Esc/abort during the turn-end flush (knip/madge/tests + debounced
 		// dispatch) kills in-flight children instead of waiting out their timeout.
-		setAmbientAbortSignal((ctx as { signal?: AbortSignal })?.signal);
 		try {
+			// Inside the try for the same reason as `agent_end` above (#1925).
+			setAmbientAbortSignal((ctx as { signal?: AbortSignal })?.signal);
 			const repaintLspStatus = captureLspStatusRepaint(ctx);
 			// Persist every event-loop block over the floor to latency.log,
 			// attributed to this turn, so freezes are queryable across sessions
@@ -2531,12 +2538,15 @@ function activateExtension(hostPi: ExtensionAPI) {
 			// is idle and sendMessage takes the safe append branch. The
 			// collector accumulates across the run's turns until then.
 		} catch (turnEndErr) {
+			// One classifier for the stale-ctx class — see `agent_end` above.
+			if (isStaleExtensionCtxError(turnEndErr)) throw turnEndErr;
 			dbg(`turn_end crashed: ${turnEndErr}`);
 			dbg(`turn_end crash stack: ${(turnEndErr as Error).stack}`);
 		} finally {
 			setAmbientAbortSignal(undefined);
 		}
-	});
+	};
+	pi.on("turn_end", wrapSessionEventHandler("turn_end", onTurnEnd, { dbg }));
 
 	// --- Quiet window (#483): pi 0.80.6 agent_settled — fires once the whole
 	// agent run (incl. any retry/continue loop) is fully idle, on both normal
@@ -2687,64 +2697,67 @@ function activateExtension(hostPi: ExtensionAPI) {
 			});
 		});
 	}
+	const onAgentSettled = async (_event: unknown, ctx: DeferredDrainCtx) => {
+		if (!lensEnabled) return;
+		// #1654: the #1387 deferred-format/autofix drain runs HERE, not at
+		// agent_end — see `runDeferredMutationDrain`'s doc comment above.
+		// Awaited (unlike the quiet-window tasks below): this mirrors the
+		// user-facing latency the drain already had pre-#1654 (it used to
+		// block `agent_end` the same way), just correctly gated on true
+		// settlement instead of firing mid-retry. A throw here must not
+		// skip the quiet window below.
+		//
+		// Review round 1 (F1): `agent_settled` fires on an ABORTED run too
+		// (ESC), and `ctx.signal` on that firing still reflects the
+		// aborted controller. `handleAgentEnd`'s abort/requeue branches
+		// (clients/runtime-agent-end.ts) read the ambient signal via
+		// `getAmbientAbortSignal()`, not a parameter — exactly like
+		// `agent_end`/`turn_end` already do around their own work — so an
+		// ESC-aborted settle must set it here too, or every queued record
+		// gets FORMATTED instead of requeued (an inversion of the #1642
+		// harm this issue exists to fix) and the requeue branches become
+		// production-unreachable.
+		try {
+			setAmbientAbortSignal(ctx?.signal);
+			try {
+				await runDeferredMutationDrain(ctx);
+			} catch (drainErr) {
+				// #1924 classified the stale-ctx case inline here. #1925 moved the
+				// classifier and its record to clients/session-event-guard.ts, so
+				// this site only declines to swallow it: rethrow, and the wrapper
+				// around the registration skips the run and counts it.
+				if (isStaleExtensionCtxError(drainErr)) throw drainErr;
+				dbg(`agent_settled deferred_mutation_drain crashed: ${drainErr}`);
+			} finally {
+				setAmbientAbortSignal(undefined);
+			}
+			const cwd = ctx?.cwd;
+			void runQuietWindow({
+				runtime,
+				dbg,
+				cwd,
+			}).catch((err) => {
+				dbg(`quiet_window crashed: ${err}`);
+			});
+			// #1123 item 4: dump active handles AFTER the quiet-window work is
+			// scheduled — the #1097-class leak (a stray ref'd timer surviving
+			// past settle) is only visible once whatever settle itself queued is
+			// already in flight. No-op unless PI_LENS_DEBUG_HANDLES=1.
+			dumpActiveHandles("agent_settled");
+		} catch (settledErr) {
+			setAmbientAbortSignal(undefined);
+			throw settledErr;
+		}
+	};
 	try {
+		// #1925: #1924's inline stale-ctx guard moved onto the shared wrapper
+		// (clients/session-event-guard.ts), so `agent_settled` is a consumer of
+		// the central path rather than the one handler with its own copy of the
+		// policy. Behavior is unchanged — the run is skipped and nothing throws
+		// into the host — and the skip is now counted in the degradation ledger.
 		(pi as any).on(
 			"agent_settled",
-			async (_event: unknown, ctx: DeferredDrainCtx) => {
-				if (!lensEnabled) return;
-				// #1654: the #1387 deferred-format/autofix drain runs HERE, not at
-				// agent_end — see `runDeferredMutationDrain`'s doc comment above.
-				// Awaited (unlike the quiet-window tasks below): this mirrors the
-				// user-facing latency the drain already had pre-#1654 (it used to
-				// block `agent_end` the same way), just correctly gated on true
-				// settlement instead of firing mid-retry. A throw here must not
-				// skip the quiet window below.
-				//
-				// Review round 1 (F1): `agent_settled` fires on an ABORTED run too
-				// (ESC), and `ctx.signal` on that firing still reflects the
-				// aborted controller. `handleAgentEnd`'s abort/requeue branches
-				// (clients/runtime-agent-end.ts) read the ambient signal via
-				// `getAmbientAbortSignal()`, not a parameter — exactly like
-				// `agent_end`/`turn_end` already do around their own work — so an
-				// ESC-aborted settle must set it here too, or every queued record
-				// gets FORMATTED instead of requeued (an inversion of the #1642
-				// harm this issue exists to fix) and the requeue branches become
-				// production-unreachable.
-				try {
-					setAmbientAbortSignal(ctx?.signal);
-					try {
-						await runDeferredMutationDrain(ctx);
-					} catch (drainErr) {
-						if (isStaleExtensionCtxError(drainErr)) {
-							dbg("agent_settled deferred_mutation_drain skipped: session context is stale");
-							return;
-						}
-						dbg(`agent_settled deferred_mutation_drain crashed: ${drainErr}`);
-					} finally {
-						setAmbientAbortSignal(undefined);
-					}
-					const cwd = ctx?.cwd;
-					void runQuietWindow({
-						runtime,
-						dbg,
-						cwd,
-					}).catch((err) => {
-						dbg(`quiet_window crashed: ${err}`);
-					});
-					// #1123 item 4: dump active handles AFTER the quiet-window work is
-					// scheduled — the #1097-class leak (a stray ref'd timer surviving
-					// past settle) is only visible once whatever settle itself queued is
-					// already in flight. No-op unless PI_LENS_DEBUG_HANDLES=1.
-					dumpActiveHandles("agent_settled");
-				} catch (settledErr) {
-					setAmbientAbortSignal(undefined);
-					if (isStaleExtensionCtxError(settledErr)) {
-						dbg("agent_settled skipped: session context was replaced or reloaded");
-						return;
-					}
-					throw settledErr;
-				}
-			},
+			wrapSessionEventHandler("agent_settled", onAgentSettled, { dbg }),
 		);
 	} catch (registerErr) {
 		dbg(`agent_settled registration failed (older pi host?): ${registerErr}`);

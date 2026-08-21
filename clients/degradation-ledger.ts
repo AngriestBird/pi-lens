@@ -58,6 +58,14 @@ export type DegradationKind =
 	 */
 	| "tool-call-handler-throw"
 	/**
+	 * A session event reached a pi-lens handler on a ctx the SDK had already
+	 * invalidated by a session replacement or reload, so the handler was
+	 * skipped (#1925). Subject is the EVENT NAME, so the ledger still answers
+	 * which handler is being skipped after the detailed records stop.
+	 * `clients/session-event-guard.ts` is the only writer.
+	 */
+	| "extension-ctx-stale"
+	/**
 	 * A tool-event path did not resolve to an existing file, and pi's own
 	 * unicode/spacing variant ladder did not find it either (#1655 item 5).
 	 * The issue names this `path_variant_unresolved`; the ledger's kind
