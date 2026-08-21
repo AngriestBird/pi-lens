@@ -897,6 +897,50 @@ export class RuntimeCoordinator {
 	}
 
 	/**
+	 * #1944: retire a past-EOF demotion after its ONE degraded delivery.
+	 *
+	 * The past-EOF gate demotes and re-arms, but nothing ever retired the
+	 * record, so a blocker whose file shrank past the cited lines re-served on
+	 * every turn end for the rest of the session — measured live at 80+
+	 * minutes on session 01a0234c. The re-serve is unbounded, not the six
+	 * turns the first evidence window suggested.
+	 *
+	 * It is unbounded because the record cannot resolve itself. The two
+	 * clearing events (`clearInlineBlockers` on a later dispatch of the same
+	 * path, `retireInlineBlockerOnConfirmedClean` on a fresh clean verdict)
+	 * both need the file to be looked at again, and the agent has no reason to
+	 * look: the coordinates it was handed do not exist. "Re-run to confirm" is
+	 * an instruction this record makes impossible to follow.
+	 *
+	 * So the delivery surface retires it after serving it once, degraded. That
+	 * is a DROP, which #1419's demote-not-drop rule normally forbids; the
+	 * exception is narrow and stated here. The finding was already delivered
+	 * this turn with its dead coordinates annotated, and what remains is a
+	 * message pinned to a line the file does not have. `deadLines` is required
+	 * and must be non-empty, so a record stale for any OTHER reason, or
+	 * past-EOF with no identified dead line, still stands.
+	 *
+	 * @returns true when an entry was retired — the caller records it, so the
+	 * suppression is never silent (#1432 Gap 1).
+	 */
+	retireDemotedPastEofBlocker(
+		filePath: string,
+		deadLines: readonly number[],
+	): boolean {
+		if (deadLines.length === 0) return false;
+		const key = path.resolve(filePath);
+		const existing = this._pendingInlineBlockers.get(key);
+		if (!existing) return false;
+		// Only this gate's own demotion. A dependency-drift demotion (#1631)
+		// keeps in-bounds coordinates the agent CAN re-run against, so it stays
+		// in the store until a fresh verdict clears it.
+		if (!existing.stale) return false;
+		if ((existing.staleReason ?? "past-eof") !== "past-eof") return false;
+		this._pendingInlineBlockers.delete(key);
+		return true;
+	}
+
+	/**
 	 * Retire a file's inline blocker because a FRESH, content-bound diagnostic
 	 * verdict proved it gone (#1561).
 	 *
