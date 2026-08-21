@@ -169,6 +169,38 @@ export type DegradationKind =
 	 */
 	| "lsp-pull-skipped-budget-exhausted"
 	/**
+	 * A language-server child process CLOSED without pi-lens having asked it to
+	 * (#1969). `clientShutdown()` sets `state.shutdownRequested`, so evictions
+	 * and ordinary teardown never reach this kind — only a mid-session death.
+	 *
+	 * The record exists because the fallout of such a death is highly visible
+	 * (`lsp_client_skipped_broken` cooldowns, `lsp-scanner-coverage-gap`) while
+	 * the CAUSE was not: an ast-grep child exited with `code=1` and EMPTY
+	 * stderr 14 times in one day and left no cause record anywhere. Subject is
+	 * the `serverId`, so the ledger answers WHICH server keeps dying; the
+	 * reason carries the exit code, the signal, and whether stderr carried
+	 * anything, which is the discrimination between "the server told us why"
+	 * and "it went dark".
+	 *
+	 * Written on the process `close` event rather than `exit`: `close` fires
+	 * only after the child's stdio streams have drained, so "stderr was empty"
+	 * is a fact about the server rather than a race with the pipe.
+	 */
+	| "lsp-server-unexpected-close"
+	/**
+	 * A liveness probe (`clientPingLiveness`, `clients/lsp/client.ts`) found no
+	 * request method the server advertises that it could safely probe with, so
+	 * it reported liveness from process and connection state alone (#1969).
+	 *
+	 * This matters because the probe exists precisely to catch what those two
+	 * checks miss: a server still running, connection still open, that will
+	 * never reply again. For a server in this state the probe is weaker than it
+	 * looks, and that must be visible rather than assumed. Subject is the
+	 * `serverId`, so the ledger names which servers are trusted on the weaker
+	 * check.
+	 */
+	| "lsp-liveness-probe-unsupported"
+	/**
 	 * A `GenerationHandle.guardedWrite` (`clients/generation-guard.ts`) dropped
 	 * a post-await write because the generation it captured is no longer
 	 * current (#1754) — a session reset, a cache refresh, or a newer request
