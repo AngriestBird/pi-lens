@@ -47,7 +47,7 @@ const UNWRAPPED_HANDLER_REASONS: Readonly<Record<string, string>> = {
 	session_shutdown:
 		"Every ctx read is already inside a try/catch or behind noteSessionShutdown's probe, and skipping teardown on an inconclusive probe would leak the LSP fleet.",
 	context:
-		"Its total catch already absorbs a stale read, and this handler must return the host's message list, so a wrapper short-circuiting to `undefined` would change what pi builds context from. Tracked separately for the observability half.",
+		"Its total catch already absorbs a stale read, and this handler must return the host's message list, so a wrapper short-circuiting to `undefined` would change what pi builds context from. The observability half is tracked in #1929.",
 };
 
 /** One `pi.on("<event>", ...)` registration found in index.ts. */
