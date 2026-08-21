@@ -36,17 +36,18 @@ pi-lens gives AI coding agents fast, language-aware feedback while they write/ed
 
 ## Architecture
 
-Most lifecycle events enter through one wrapper, which drops events that arrive
-on a replaced session. `tool_call` and `session_start` predate that wrapper and
-still register raw. Events fan out into the edit-time lane and the LSP lane.
-Both lanes write into the findings stores. Nothing reaches the agent from those
-stores until a freshness gate or an explicit age label clears it.
+Most lifecycle events enter through one wrapper, which drops and counts events
+that arrive on a replaced session. `tool_call` registers raw: it delegates
+straight to a handler that owns its own total guard. Events fan out into the
+edit-time lane and the LSP lane. Both lanes write into the findings stores.
+Nothing reaches the agent from those stores until a freshness gate or an
+explicit age label clears it.
 
 ```mermaid
 flowchart TD
     subgraph host["pi host"]
         HOST["Host events<br/>tool_call, tool_result, turn_start/end,<br/>session_start/shutdown, agent_end, context"]
-        WRAP["Stale-ctx wrapper<br/>skips and counts events on a replaced session<br/>tool_result, turn_start, turn_end, agent_end, agent_settled"]
+        WRAP["Stale-ctx wrapper<br/>skips and counts events on a replaced session<br/>tool_result, turn_start, turn_end, agent_end,<br/>agent_settled, session_start, context"]
     end
 
     subgraph guards["Guards"]
@@ -89,7 +90,7 @@ flowchart TD
     HOST --> WRAP
     HOST -->|tool_call, raw| RG
     HOST -->|tool_call, raw| GG
-    HOST -->|session_start, raw| SESSION
+    WRAP -->|session_start| SESSION
     WRAP -->|tool_result| PIPE
     WRAP -->|tool_result, records reads and writes| RG
     SESSION --> POOL
