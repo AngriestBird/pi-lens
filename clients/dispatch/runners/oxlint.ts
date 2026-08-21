@@ -129,7 +129,7 @@ const oxlintRunner: RunnerDefinition = {
 		// delivery pipeline regardless of `status` — dispatcher.ts buckets by
 		// each diagnostic's own `semantic`, so a warning stays a warning.
 		return {
-			status: hasBlocking ? "failed" : result.status === 0 ? "succeeded" : "failed",
+			status: !hasBlocking && result.status === 0 ? "succeeded" : "failed",
 			diagnostics,
 			semantic: hasBlocking ? "blocking" : "warning",
 		};
