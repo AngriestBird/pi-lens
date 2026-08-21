@@ -184,6 +184,42 @@ describe("lsp_client_selected outcome discriminator (#1934)", () => {
 		}
 	});
 
+	// #1934 verify round: a decline write must SHADOW the previous attempt's
+	// verdict. Only a successful spawn deletes the map entry, so a key that
+	// failed once carries "failed" until something overwrites it. If a later
+	// clientless exit forgets to write, that stale "failed" is what the
+	// selection reads, and a policy decline inherits the earlier failure's
+	// label. This drives failure, then cooldown expiry, then trust refusal on
+	// the same key. The shutdown-mid-spawn and shutdown-mid-initialize
+	// declines in `spawnClient` are the same mechanism on the same map; they
+	// are not separately driven here because reaching them needs a shutdown
+	// raced against an in-flight spawn, which buys no coverage this test does
+	// not already give.
+	it("shadows a stale failed verdict when the next attempt declines", async () => {
+		const trust = await import("../../../clients/project-trust.js");
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const service = new LSPService();
+		try {
+			spawnBehavior = async () => {
+				throw new Error("spawn refused");
+			};
+			expect(await service.getClientForFile("/repo/a.ts")).toBeUndefined();
+			expect(selectionOutcomes()).toEqual(["spawn-failure"]);
+
+			// Past the 15s breaker cooldown, so the next touch reaches a spawn
+			// rather than taking the `lsp_client_skipped_broken` early return.
+			vi.setSystemTime(new Date("2026-08-21T06:01:00Z"));
+			// The host now refuses the binary. That exit sets no cooldown and is
+			// a policy decline, so the selection must stay silent.
+			trust.setProjectTrustState("untrusted");
+			expect(await service.getClientForFile("/repo/b.ts")).toBeUndefined();
+			expect(selectionOutcomes()).toEqual(["spawn-failure"]);
+		} finally {
+			trust.resetProjectTrust();
+			await service.shutdown({ processExiting: true });
+		}
+	});
+
 	// #1934 review F1. The "binary unavailable while installs are disabled"
 	// branch sets a 15s cooldown, yet it is a POLICY decline by its own
 	// comment: no ladder, no permanent latch, because the binary may appear on
