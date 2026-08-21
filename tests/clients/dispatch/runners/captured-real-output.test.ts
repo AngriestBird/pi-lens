@@ -109,6 +109,7 @@ const RUNNER_DESCRIPTORS: Record<string, { module: string; kind: string }> = {
 	taplo: { module: "taplo", kind: "toml" },
 	terragrunt: { module: "terragrunt", kind: "terragrunt" },
 	tflint: { module: "tflint", kind: "terraform" },
+	vale: { module: "vale", kind: "markdown" },
 	yamllint: { module: "yamllint", kind: "yaml" },
 };
 

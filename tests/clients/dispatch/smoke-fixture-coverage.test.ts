@@ -125,10 +125,6 @@ const EXEMPT = new Map<string, string>([
 		"helm-render",
 		"opt-in: helm.renderValidation.enabled is off by default because rendering executes chart templates",
 	],
-	[
-		"vale",
-		"pending: #1933 lands the parser fix together with its own real-bytes fixture; this slot is that PR's to fill",
-	],
 ]);
 
 function liveFixtureRunnerIds(): Set<string> {
@@ -239,6 +235,15 @@ describe("smoke-fixture coverage", () => {
 			bad,
 			`alternate exemption(s) with no covered primary:\n${bad.join("\n")}`,
 		).toEqual([]);
+	});
+
+	// The map holds no `pending` entry right now, so the loop below would pass
+	// on an empty set. Exercise the rule directly first, otherwise the guard
+	// silently stops being a guard the moment the last pending entry clears.
+	it("the `pending` rule rejects a reference-free deferral", () => {
+		const parsed = parseExemptionReason("pending: someone will get to it");
+		expect(parsed?.category).toBe("pending");
+		expect(/#\d+/.test(parsed?.detail ?? "")).toBe(false);
 	});
 
 	it("every `pending` exemption references the issue that closes it", () => {
