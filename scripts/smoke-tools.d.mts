@@ -7,6 +7,11 @@ export interface SmokeFixture {
 	targets?: string[];
 	tools?: string[];
 	expectDiagnostic?: boolean;
+	/**
+	 * In the tier-1 parser lane (#1937): the tool installs as a pip/npm package
+	 * or a single GitHub-release binary, with no language toolchain step.
+	 */
+	tier1?: boolean;
 }
 export interface LspFixture {
 	lang: string;
@@ -74,6 +79,8 @@ export function matchDiagnosticMessages(
 	pattern: string,
 	diags: readonly SmokeDiagnostic[] | undefined,
 ): SmokeDiagnostic[];
+/** Fixtures flagged `tier1` — the scheduled parser lane's selection. */
+export function tier1Fixtures(): SmokeFixture[];
 export const FIXTURES: SmokeFixture[];
 export const LSP_FIXTURES: LspFixture[];
 export const FORMAT_FIXTURES: FormatFixture[];

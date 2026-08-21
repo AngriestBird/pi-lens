@@ -86,11 +86,15 @@ describe("taplo runner", () => {
 			const filePath = path.join(env.tmpDir, "config.toml");
 			fs.writeFileSync(filePath, "a = 1\n");
 			lspPrimaryCoversFile.mockReturnValue(true);
+			// A clean taplo run: exit 0, nothing on stdout, only tracing on
+			// stderr. The literal here used to be `{"errors":[]}`, a JSON
+			// envelope taplo has never emitted (#1937).
 			safeSpawn.mockReturnValue({
 				error: null,
 				status: 0,
-				stdout: JSON.stringify({ errors: [] }),
-				stderr: "",
+				stdout: "",
+				stderr:
+					" INFO taplo:lint_files:collect_files: found files total=1 excluded=0",
 			});
 
 			const runner = (
@@ -129,11 +133,15 @@ describe("taplo runner", () => {
 			const shimName = process.platform === "win32" ? "taplo.cmd" : "taplo";
 			const shim = path.join(binDir, shimName);
 			fs.writeFileSync(shim, "#!/bin/sh\nexit 0\n");
+			// A clean taplo run: exit 0, nothing on stdout, only tracing on
+			// stderr. The literal here used to be `{"errors":[]}`, a JSON
+			// envelope taplo has never emitted (#1937).
 			safeSpawn.mockReturnValue({
 				error: null,
 				status: 0,
-				stdout: JSON.stringify({ errors: [] }),
-				stderr: "",
+				stdout: "",
+				stderr:
+					" INFO taplo:lint_files:collect_files: found files total=1 excluded=0",
 			});
 
 			const runner = (
@@ -154,18 +162,25 @@ describe("taplo runner", () => {
 		try {
 			const filePath = path.join(env.tmpDir, "config.toml");
 			fs.writeFileSync(filePath, "a = 1\n");
+			// Genuinely silent: neither stream carries anything. This case used
+			// to put `error: invalid schema reference` on stderr and still
+			// expect a skip, which only held because the runner read stdout
+			// only. Real taplo reports on stderr (#1937), so that string is a
+			// finding, not silence.
 			safeSpawn.mockReturnValue({
 				error: null,
 				status: 1,
 				stdout: "",
-				stderr: "error: invalid schema reference",
+				stderr: "",
 			});
 
 			const runner = (
 				await import("../../../../clients/dispatch/runners/taplo.js")
 			).default;
 
-			const result = await runner.run(createTomlCtx(filePath, env.tmpDir) as never);
+			const result = await runner.run(
+				createTomlCtx(filePath, env.tmpDir) as never,
+			);
 
 			expect(result.status).toBe("skipped");
 			expect(result.diagnostics).toEqual([]);

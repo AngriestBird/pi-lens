@@ -18,11 +18,23 @@ const phpstan = createAvailabilityChecker("phpstan", ".phar");
 interface PhpstanError {
 	message: string;
 	line: number | null;
-	ignorable: boolean;
+	ignorable?: boolean;
+	/** phpstan 1.10+ error identifier, e.g. "return.type". */
+	identifier?: string;
 }
 
+/**
+ * Real `phpstan analyse --error-format=json` output, verified against phpstan
+ * 2.2.8 — see tests/fixtures/runner-output/phpstan/real.captured.json.
+ *
+ * `errors` is the error COUNT, a number; the findings live in `messages`. This
+ * parser read `errors` as the array (#1937), so `for...of` threw on a number,
+ * the catch swallowed it, and a configured phpstan project reported zero
+ * findings while the CLI exited 1 — the #1933 vale shape.
+ */
 interface PhpstanFileErrors {
-	errors: PhpstanError[];
+	errors: number;
+	messages: PhpstanError[];
 }
 
 interface PhpstanOutput {
@@ -51,7 +63,7 @@ export function parsePhpstanJson(
 						? file
 						: path.resolve(cwd, file)
 					: fallbackPath;
-			for (const err of fileErrors.errors ?? []) {
+			for (const err of fileErrors?.messages ?? []) {
 				diagnostics.push({
 					id: `phpstan:${err.line ?? 1}:${err.message.slice(0, 40)}`,
 					message: err.message,
@@ -61,7 +73,7 @@ export function parsePhpstanJson(
 					severity: "error",
 					semantic: "blocking",
 					tool: "phpstan",
-					rule: "phpstan",
+					rule: err.identifier || "phpstan",
 					fixable: false,
 				});
 			}
@@ -74,8 +86,7 @@ export function parsePhpstanJson(
 }
 
 async function resolvePhpstan(cwd: string): Promise<string | null> {
-	if (await (phpstan.isAvailableAsync(cwd)))
-		return phpstan.getCommand(cwd);
+	if (await phpstan.isAvailableAsync(cwd)) return phpstan.getCommand(cwd);
 	return resolveVendorToolCommand(cwd, "phpstan", ".bat");
 }
 
@@ -116,7 +127,11 @@ const phpstanRunner: RunnerDefinition = {
 			return { status: "succeeded", diagnostics: [], semantic: "none" };
 		}
 
-		const diagnostics = parsePhpstanJson(result.stdout ?? "", ctx.filePath, cwd);
+		const diagnostics = parsePhpstanJson(
+			result.stdout ?? "",
+			ctx.filePath,
+			cwd,
+		);
 		if (diagnostics.length === 0) {
 			return { status: "succeeded", diagnostics: [], semantic: "none" };
 		}

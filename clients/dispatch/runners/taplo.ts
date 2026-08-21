@@ -18,36 +18,66 @@ import { spawnFailedWithNoOutput } from "./utils/spawn-outcome.js";
 
 const taplo = createAvailabilityChecker("taplo", ".exe");
 
-interface TaploError {
-	range?: { start: { line: number; col: number } };
-	message: string;
-	kind: string;
-}
+/**
+ * Parse `taplo lint` output (#1937).
+ *
+ * This parser used to `JSON.parse` a `{ errors: [{ range, message, kind }] }`
+ * envelope that taplo has never emitted, fed by a `--output=json` flag taplo
+ * has never accepted. Real taplo rejected the flag with exit 2 and a usage
+ * error, the JSON parse threw, the catch returned [], and malformed TOML was
+ * reported clean. Same shape as the vale parser in #1933.
+ *
+ * Real taplo 0.10.0 writes codespan diagnostics to STDERR, interleaved with
+ * uppercase tracing lines:
+ *
+ *     error: invalid TOML
+ *       ┌─ /path/to/bad.toml:2:9
+ *       │
+ *     2 │   [package
+ *
+ * Verified against tests/fixtures/runner-output/taplo/real.captured.json.
+ */
+export function parseTaploOutput(raw: string, filePath: string): Diagnostic[] {
+	const diagnostics: Diagnostic[] = [];
+	const lines = (raw ?? "").split(/\r?\n/);
 
-interface TaploResult {
-	errors?: TaploError[];
-}
+	for (let i = 0; i < lines.length; i++) {
+		// Lowercase `error:`/`warning:` starts a diagnostic. taplo's tracing
+		// lines are uppercase (`ERROR taplo:lint_files: ...`) and carry no
+		// location, so a case-sensitive match keeps them out.
+		const header = lines[i].match(/^\s*(error|warning):\s*(.+?)\s*$/);
+		if (!header) continue;
+		const [, severityWord, summary] = header;
 
-function parseTaploOutput(raw: string, filePath: string): Diagnostic[] {
-	try {
-		const parsed = JSON.parse(raw) as TaploResult;
-		const errors = parsed.errors ?? [];
+		// The location arrives on a following `┌─ file:line:col` line. Scan a
+		// short window rather than assuming adjacency: taplo puts a gutter line
+		// between them in some layouts.
+		let line = 1;
+		let column = 1;
+		for (let j = i + 1; j < Math.min(i + 4, lines.length); j++) {
+			const location = lines[j].match(/┌─+\s*.*:(\d+):(\d+)\s*$/);
+			if (!location) continue;
+			line = Number.parseInt(location[1], 10) || 1;
+			column = Number.parseInt(location[2], 10) || 1;
+			break;
+		}
 
-		return errors.map((err, idx) => ({
-			id: `taplo-${err.kind}-${err.range?.start.line ?? idx}`,
-			message: `[${err.kind}] ${err.message}`,
+		const severity = severityWord === "warning" ? "warning" : "error";
+		diagnostics.push({
+			id: `taplo-${severity}-${line}-${column}`,
+			message: summary,
 			filePath,
-			line: (err.range?.start.line ?? 0) + 1,
-			column: (err.range?.start.col ?? 0) + 1,
-			severity: "error" as const,
-			semantic: "blocking" as const,
+			line,
+			column,
+			severity,
+			semantic: severity === "error" ? "blocking" : "warning",
 			tool: "taplo",
-			rule: err.kind,
+			rule: `taplo/${severity}`,
 			fixable: false,
-		}));
-	} catch {
-		return [];
+		});
 	}
+
+	return diagnostics;
 }
 
 const taploRunner: RunnerDefinition = {
@@ -83,7 +113,7 @@ const taploRunner: RunnerDefinition = {
 		// different extension, so it stays as the checker's fallback only.
 		let cmd: string | null = findLocalBinUpwards("taplo", cwd) ?? null;
 		if (!cmd) {
-			if (await (taplo.isAvailableAsync(cwd))) {
+			if (await taplo.isAvailableAsync(cwd)) {
 				cmd = taplo.getCommand(cwd);
 			} else {
 				cmd = await resolveToolCommandWithInstallFallback(cwd, "taplo");
@@ -93,17 +123,24 @@ const taploRunner: RunnerDefinition = {
 		if (!cmd) return { status: "skipped", diagnostics: [], semantic: "none" };
 
 		const absPath = path.resolve(cwd, ctx.filePath);
+		// #1937: `--output=json` is not a taplo flag. taplo rejected it with a
+		// usage error, so this runner never linted anything. `--colors never`
+		// keeps ANSI escapes out of the bytes the parser reads.
 		const result = await safeSpawnAsync(
 			cmd,
-			["check", "--output=json", absPath],
+			["check", "--colors", "never", absPath],
 			{ cwd, timeout: 15000 },
 		);
 
-		if (spawnFailedWithNoOutput(result)) {
+		// taplo reports on stderr and leaves stdout empty, so the
+		// "nothing to parse" test must read the same string the parser gets —
+		// otherwise every real run looks like a failed spawn.
+		const raw = result.stderr?.trim() ? result.stderr : (result.stdout ?? "");
+		if (spawnFailedWithNoOutput(result, raw)) {
 			return { status: "skipped", diagnostics: [], semantic: "none" };
 		}
 
-		const diagnostics = parseTaploOutput(result.stdout || "", ctx.filePath);
+		const diagnostics = parseTaploOutput(raw, ctx.filePath);
 		if (diagnostics.length === 0) {
 			return { status: "succeeded", diagnostics: [], semantic: "none" };
 		}
