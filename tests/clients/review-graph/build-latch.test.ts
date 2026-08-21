@@ -161,6 +161,79 @@ describe("buildOrUpdateGraph in-flight dedupe (#1962)", () => {
 	});
 });
 
+describe("dedupe key folds every caller's cwd spelling (#1962 review F2)", () => {
+	/**
+	 * A textual variant of `dir` that the FILESYSTEM agrees is the same
+	 * directory, or `undefined` when this filesystem has no such variant.
+	 *
+	 * Probed, never derived from `process.platform` (catalog shape 2). On
+	 * Windows the separator is interchangeable, so the backslash spelling is a
+	 * real second spelling of one directory — the one `runtime-session.ts:1562`,
+	 * `lens-map.ts:1243`, and `mcp/cli.ts:59` actually hand in. On POSIX a
+	 * backslash is an ordinary filename character, so that spelling names a
+	 * DIFFERENT path and asserting on it would be wrong, not merely useless.
+	 */
+	function separatorVariant(dir: string): string | undefined {
+		// Try BOTH spellings and keep whichever differs from what we were handed
+		// and still resolves to a directory. `mkdtempSync` returns the host's
+		// native separator, so hardcoding one direction would compare a string
+		// with itself and assert nothing.
+		for (const candidate of [dir.replaceAll("\\", "/"), dir.replaceAll("/", "\\")]) {
+			if (candidate === dir) continue;
+			try {
+				if (fs.statSync(candidate).isDirectory()) return candidate;
+			} catch {
+				// Not a path on this filesystem — try the other spelling.
+			}
+		}
+		return undefined;
+	}
+
+	it("a dot-segment spelling lands on the same in-flight key", async () => {
+		const cwd = tmpProject();
+		setEnv("PILENS_DATA_DIR", path.join(cwd, "data"));
+		// Built by CONCATENATION, not `path.join` — join collapses `..` itself,
+		// which would make this assertion true without the fix doing anything.
+		// `<dir>/src/..` names the same directory on every OS, so this half runs
+		// on Linux CI as well as Windows and cannot pass by being skipped.
+		const detour = `${cwd}/src/..`;
+		expect(detour).not.toBe(cwd);
+		expect(fs.statSync(detour).isDirectory()).toBe(true);
+
+		const build = buildOrUpdateGraph(cwd, [], new FactStore());
+		expect(isGraphBuildInFlight(detour)).toBe(true);
+		// The same fold in the other direction: a build STARTED under the detour
+		// spelling is the one a normalized caller joins.
+		expect(buildOrUpdateGraph(detour, [], new FactStore())).toBe(build);
+		await build;
+		expect(isGraphBuildInFlight(detour)).toBe(false);
+	});
+
+	it("a separator variant lands on the same in-flight key when the filesystem says it is one directory", async () => {
+		const cwd = tmpProject();
+		setEnv("PILENS_DATA_DIR", path.join(cwd, "data"));
+		const variant = separatorVariant(cwd);
+		if (variant === undefined) {
+			// No second spelling exists on this filesystem, so there is nothing to
+			// fold. Assert the premise rather than passing vacuously — and the
+			// dot-segment case above still covers this OS.
+			expect(path.sep).toBe("/");
+			return;
+		}
+		expect(variant).not.toBe(cwd);
+
+		// PRE-FIX: the raw callers' spelling and project_report's normalized one
+		// produced two keys, so one workspace held two live `_buildCache` entries
+		// — two concurrent full builds, the #256 OOM shape — and the in-flight
+		// probe answered about a key no other caller used.
+		const build = buildOrUpdateGraph(variant, [], new FactStore());
+		expect(isGraphBuildInFlight(cwd)).toBe(true);
+		expect(buildOrUpdateGraph(cwd, [], new FactStore())).toBe(build);
+		await build;
+		expect(isGraphBuildInFlight(variant)).toBe(false);
+	});
+});
+
 describe("project_report retry claim (#1962)", () => {
 	/** Wait until the fire-and-forget background build has reached a verdict. */
 	async function settleBackgroundBuild(cwd: string): Promise<void> {
@@ -222,6 +295,41 @@ describe("project_report retry claim (#1962)", () => {
 		expect(report.lastBuildAttempt?.outcome).toBe("running");
 		expect(report.lastBuildAttempt?.when).not.toBe(firstAttempt?.when);
 		await settleBackgroundBuild(cwd);
+	});
+
+	it("says a build is already running when an EXTERNAL build absorbed the call (#1962 review F1)", async () => {
+		const cwd = tmpProject();
+		setEnv("PILENS_DATA_DIR", path.join(cwd, "data"));
+		setEnv("PI_LENS_REVIEW_GRAPH_MAX_FILES", "1");
+		setEnv("PI_LENS_REVIEW_GRAPH_SIZE_SKIP_TTL_MS", "1");
+		_resetReviewGraphSizeSkipTtlForTests();
+
+		// Establish a terminal prior attempt, so the hint takes the branch that
+		// names the previous failure.
+		await projectReport(cwd);
+		await settleBackgroundBuild(cwd);
+		_resetReviewGraphSizeSkipVerdictsForTests();
+		expect(getLastReviewGraphBuildAttempt(cwd)?.outcome).toBe("skipped");
+
+		// A build started OUTSIDE project_report — the edit pipeline, lens-map, or
+		// the MCP CLI — and is still pending. project_report's own
+		// `inFlightGraphBuilds` guard knows nothing about it, so only the
+		// builder's in-flight probe can tell the truth here.
+		const gate = deferSourceWalk();
+		const external = buildOrUpdateGraph(cwd, [], new FactStore());
+		await gate.waitForCalls(1);
+		_resetProjectReportBuildGuardForTests();
+		expect(isGraphBuildInFlight(cwd)).toBe(true);
+
+		const report = await projectReport(cwd);
+		// MUTATION PROOF for `deduped ? "already_running" : "started"`: force it
+		// to "started" and this call claims it kicked off a build that it did not.
+		expect(report.hint).toContain("A build is already running");
+		expect(report.hint).not.toContain("A retry was started.");
+		expect(report.hint).not.toContain("kicked off");
+
+		gate.release(0);
+		await external;
 	});
 });
 

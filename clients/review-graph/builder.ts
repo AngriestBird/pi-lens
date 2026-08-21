@@ -66,13 +66,16 @@ import {
 import { withTreeSitterRoot } from "../tree-sitter-shared.js";
 import { incrementDegradationCount } from "../degradation-ledger.js";
 import { resolveGitIdentity } from "./git-identity.js";
+import {
+	formatReviewGraphRevisionDriftNote,
+	type ReviewGraphRevisionDrift,
+} from "./revision-drift.js";
 import { buildSymbolId } from "./symbol-id.js";
 import type {
 	ReviewGraph,
 	ReviewGraphEdge,
 	ReviewGraphNode,
 	ReviewGraphPersistCoverage,
-	ReviewGraphRevisionDrift,
 } from "./types.js";
 import type { SymbolKind, SymbolRef } from "../symbol-types.js";
 import type {
@@ -187,6 +190,16 @@ interface WorkspaceGraphCacheEntry {
 		fastPathSinceVerify?: number;
 		/** #459: generation of this entry's graph content — see ReviewGraph.buildGeneration. */
 		buildGeneration?: number;
+		/**
+		 * #1961: `gitStamp.headCommit` of the DISK SNAPSHOT this entry was
+		 * hydrated from, when the blind read served one. Absent on an entry built
+		 * in-process — that graph has no stamped revision to differ from.
+		 *
+		 * Only the stamped commit is stored. The drift PAIR is derived per call by
+		 * `getReviewGraphRevisionDrift`, because the current HEAD half is true
+		 * only at the instant it is read (#1961 review F3).
+		 */
+		snapshotStampedHead?: string;
 		lastUsedAt: number;
 		idleTimer?: ReturnType<typeof setTimeout>;
 }
@@ -213,12 +226,38 @@ function clearWorkspaceGraphTimer(entry: { idleTimer?: ReturnType<typeof setTime
 	entry.idleTimer = undefined;
 }
 
+/**
+ * The canonical workspace identity for a `_buildCache` key (#1962 review F2).
+ *
+ * `path.resolve` collapses `.`/`..` segments and anchors a relative path on
+ * every OS; `normalizeMapKey` folds separator and casing, and it does that by
+ * probing the filesystem (`realpathSync.native`) rather than branching on
+ * `process.platform`. Both steps are idempotent, so feeding this an
+ * already-canonical key — which the two read sites below do — returns it
+ * unchanged.
+ */
+function buildCacheWorkspaceKey(cwd: string): string {
+	return normalizeMapKey(path.resolve(cwd));
+}
+
+/**
+ * The workspace half of an existing `_buildCache` key. `buildCacheKey`
+ * canonicalizes that half at construction, so this is a plain split.
+ */
+function buildCacheKeyWorkspace(buildKey: string): string | undefined {
+	const separator = buildKey.indexOf("|");
+	return separator >= 0 ? buildKey.slice(0, separator) : undefined;
+}
+
 function evictWorkspaceGraph(key: string, entry: WorkspaceGraphCacheEntry): void {
 	if (_workspaceGraphCache.get(key) !== entry) return;
 	clearWorkspaceGraphTimer(entry);
+	// `key` is a workspace-cache key; run it through the build-key derivation so
+	// both sides of this comparison are canonical the same way. Idempotent, so
+	// an already-canonical key passes through untouched (#1962 review F2).
+	const buildWorkspace = buildCacheWorkspaceKey(key);
 	for (const buildKey of _buildCache.keys()) {
-		const separator = buildKey.indexOf("|");
-		if (separator >= 0 && normalizeMapKey(buildKey.slice(0, separator)) === key) {
+		if (buildCacheKeyWorkspace(buildKey) === buildWorkspace) {
 			_buildCache.delete(buildKey);
 		}
 	}
@@ -414,8 +453,12 @@ export function clearReviewGraphWorkspaceCache(cwd?: string): void {
 		_sizeSkipVerdicts.clear();
 	} else {
 		const normalized = normalizeMapKey(cwd);
+		// Compare the key's WORKSPACE half only, both sides canonicalized the same
+		// way. The old form normalized the whole key, changed-file list included,
+		// which is neither meaningful nor cheap (#1962 review F2).
+		const buildWorkspace = buildCacheWorkspaceKey(cwd);
 		for (const key of _buildCache.keys()) {
-			if (normalizeMapKey(key).startsWith(`${normalized}|`)) {
+			if (buildCacheKeyWorkspace(key) === buildWorkspace) {
 				_buildCache.delete(key);
 			}
 		}
@@ -652,9 +695,41 @@ export function getCachedReviewGraph(cwd: string): ReviewGraph | undefined {
 		fileSignatures: disk.fileSignatures,
 		fileHashes: disk.fileHashes,
 		graph: disk.graph,
+		// Durable half of the drift fact. The current-HEAD half is never cached
+		// beside it — see getReviewGraphRevisionDrift (#1961 review F3).
+		...(disk.stampedHead ? { snapshotStampedHead: disk.stampedHead } : {}),
 	});
 	return disk.graph;
 }
+
+/**
+ * Revision drift for `cwd`'s currently cached graph, computed NOW (#1961).
+ *
+ * Returns the stamped/current commit pair when the warm entry came from a disk
+ * snapshot whose stamp names a commit other than the worktree's HEAD at this
+ * instant, and `undefined` otherwise — including the case where HEAD has moved
+ * BACK to the stamped commit, which resolves the drift and must clear the note.
+ *
+ * Derived, never stored: caching the pair is what made the first version of
+ * this feature report a commit that had since stopped being HEAD, and keep
+ * reporting drift after it was resolved. Callers ask on every render.
+ */
+export function getReviewGraphRevisionDrift(
+	cwd: string,
+): ReviewGraphRevisionDrift | undefined {
+	const entry = _workspaceGraphCache.get(normalizeMapKey(cwd));
+	const stampedHead = entry?.snapshotStampedHead;
+	if (!stampedHead) return undefined;
+	const current = resolveGitIdentity(cwd);
+	// Unresolvable identity is "can't tell", never "drifted" — the same
+	// fail-open rule loadPersistedGraph applies to the worktree check.
+	if (!current || current.headCommit === stampedHead) return undefined;
+	return { stampedHead, currentHead: current.headCommit };
+}
+
+// Re-exported so a consumer that already imports the builder dynamically
+// (module_report) gets the accessor and its renderer from one place (#1961).
+export { formatReviewGraphRevisionDriftNote };
 
 function makeCtx(
 	filePath: string,
@@ -1279,11 +1354,13 @@ function loadPersistedGraph(
 	fileHashes: Map<string, string>;
 	graph: ReviewGraph;
 	/**
-	 * Set when the snapshot's stamp names a different HEAD than the current
-	 * worktree. Computed only under `verifyWorktreeIdentity` — the build path
+	 * `gitStamp.headCommit` of the snapshot just loaded, when it names a commit
+	 * other than the current HEAD. The durable half of the drift fact — the
+	 * caller stores this and pairs it with a freshly resolved HEAD per render
+	 * (#1961 review F3). Set only under `verifyWorktreeIdentity`; the build path
 	 * content-verifies downstream and has no use for it.
 	 */
-	revisionDrift?: ReviewGraphRevisionDrift;
+	stampedHead?: string;
 } | null {
 	const cacheDir = path.join(getProjectDataDir(cwd), "cache");
 	const cachePath = path.join(cacheDir, GRAPH_CACHE_FILENAME);
@@ -1315,11 +1392,11 @@ function loadPersistedGraph(
 		// reached this data dir through slug reuse, so it describes another tree
 		// and nothing downstream would catch it — this read is blind. What goes:
 		// the `headCommit` equality drop. A revision difference is now REPORTED
-		// (`revisionDrift` below → `computeTrust`'s note) instead of hiding the
-		// graph. Any resolution failure (non-git, unreadable HEAD) yields undefined
-		// from resolveGitIdentity — "can't verify," not a mismatch, so it does not
-		// drop the snapshot.
-		let revisionDrift: ReviewGraphRevisionDrift | undefined;
+		// (`stampedHead` below → `getReviewGraphRevisionDrift` → computeTrust and
+		// module_report) instead of hiding the graph. Any resolution failure
+		// (non-git, unreadable HEAD) yields undefined from resolveGitIdentity —
+		// "can't verify," not a mismatch, so it does not drop the snapshot.
+		let stampedHead: string | undefined;
 		if (opts?.verifyWorktreeIdentity && data.gitStamp) {
 			const current = resolveGitIdentity(cwd);
 			if (current && current.worktreeRoot !== data.gitStamp.worktreeRoot) {
@@ -1327,10 +1404,7 @@ function loadPersistedGraph(
 				return null;
 			}
 			if (current && current.headCommit !== data.gitStamp.headCommit) {
-				revisionDrift = {
-					stampedHead: data.gitStamp.headCommit,
-					currentHead: current.headCommit,
-				};
+				stampedHead = data.gitStamp.headCommit;
 				logSnapshotReadVerdict(cwd, "snapshot_read_drifted", "head_moved");
 			}
 		}
@@ -1345,7 +1419,6 @@ function loadPersistedGraph(
 			symbolNodesByFile: new Map(),
 			changedSymbolsByFile: new Map(),
 			persistCoverage: data.coverage,
-			...(revisionDrift ? { snapshotRevisionDrift: revisionDrift } : {}),
 		};
 		rebuildIndexes(graph);
 		return {
@@ -1353,7 +1426,7 @@ function loadPersistedGraph(
 			fileSignatures: new Map(data.fileSignatures ?? []),
 			fileHashes: new Map(data.fileHashes ?? []),
 			graph,
-			...(revisionDrift ? { revisionDrift } : {}),
+			...(stampedHead ? { stampedHead } : {}),
 		};
 	} catch {
 		return null;
@@ -5053,9 +5126,26 @@ async function _doBuildGraph(
 	return graph;
 }
 
-/** The one place the in-flight dedupe key is derived. */
+/**
+ * The one place the in-flight dedupe key is derived — and the one place its
+ * workspace half is normalized (#1962 review F2).
+ *
+ * The key used to interpolate the caller's RAW `cwd`. Callers hand in whatever
+ * path they hold: `runtime-session.ts:1562`, `lens-map.ts:1243`, and
+ * `mcp/cli.ts:59` pass an unnormalized root, while project_report's trigger
+ * passes `normalizeMapKey(path.resolve(cwd))`. On Windows those differ by
+ * separator and casing alone, so ONE workspace produced two live `_buildCache`
+ * entries: two concurrent full builds of the same repo (the #256 two-build OOM
+ * shape), and an `isGraphBuildInFlight` probe that answered about a key nobody
+ * else used. Folding here makes every caller land on one key without any of
+ * them having to know that.
+ *
+ * The derivation lives in {@link buildCacheWorkspaceKey}, which the two sites
+ * that read build keys BACK also use, so write and read agree by construction
+ * rather than by coincidence.
+ */
 function buildCacheKey(cwd: string, changedFiles: string[]): string {
-	return `${cwd}|${[...changedFiles].sort((a, b) => a.localeCompare(b)).join(",")}`;
+	return `${buildCacheWorkspaceKey(cwd)}|${[...changedFiles].sort((a, b) => a.localeCompare(b)).join(",")}`;
 }
 
 /**

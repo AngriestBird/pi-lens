@@ -11,6 +11,7 @@ import {
 	flushReviewGraphPersistsForTests,
 	getCachedReviewGraph,
 	getLastGraphBuildInfo,
+	getReviewGraphRevisionDrift,
 	_resetCwdWorktreeMismatchLogForTests,
 } from "../../clients/review-graph/builder.js";
 import {
@@ -145,10 +146,77 @@ describe("review-graph snapshot git stamp (#300)", () => {
 		clearReviewGraphWorkspaceCache();
 		const served = getCachedReviewGraph(cwd);
 		expect(served).toBeDefined();
-		expect(served?.snapshotRevisionDrift).toEqual({
+		expect(getReviewGraphRevisionDrift(cwd)).toEqual({
 			stampedHead: "a".repeat(40),
 			currentHead: "b".repeat(40),
 		});
+	});
+
+	it("recomputes drift per call as HEAD keeps moving (#1961 review F3)", async () => {
+		const cwd = tmpDir();
+		process.env.PILENS_DATA_DIR = path.join(cwd, "data");
+		makeFakeRepo(cwd, "a".repeat(40));
+
+		await buildOrUpdateGraph(cwd, [], new FactStore());
+		flushReviewGraphPersistsForTests();
+		await waitForFile(
+			path.join(getProjectDataDir(cwd), "cache", "review-graph.json.gz"),
+		);
+
+		_resetGitIdentityCacheForTests();
+		setHead(cwd, "b".repeat(40));
+		clearReviewGraphWorkspaceCache();
+		expect(getCachedReviewGraph(cwd)).toBeDefined();
+		expect(getReviewGraphRevisionDrift(cwd)?.currentHead).toBe("b".repeat(40));
+
+		// HEAD moves AGAIN while the same snapshot stays warm in the workspace
+		// cache. A pair cached beside the graph would still name bbb — a commit
+		// that stopped being HEAD.
+		_resetGitIdentityCacheForTests();
+		setHead(cwd, "c".repeat(40));
+		expect(getCachedReviewGraph(cwd)).toBeDefined();
+		expect(getReviewGraphRevisionDrift(cwd)).toEqual({
+			stampedHead: "a".repeat(40),
+			currentHead: "c".repeat(40),
+		});
+	});
+
+	it("clears the drift once HEAD returns to the stamped commit (#1961 review F3)", async () => {
+		const cwd = tmpDir();
+		process.env.PILENS_DATA_DIR = path.join(cwd, "data");
+		makeFakeRepo(cwd, "a".repeat(40));
+
+		await buildOrUpdateGraph(cwd, [], new FactStore());
+		flushReviewGraphPersistsForTests();
+		await waitForFile(
+			path.join(getProjectDataDir(cwd), "cache", "review-graph.json.gz"),
+		);
+
+		_resetGitIdentityCacheForTests();
+		setHead(cwd, "b".repeat(40));
+		clearReviewGraphWorkspaceCache();
+		expect(getCachedReviewGraph(cwd)).toBeDefined();
+		expect(getReviewGraphRevisionDrift(cwd)).toBeDefined();
+
+		// `git checkout -` back to the stamped commit resolves the drift. A stored
+		// pair would keep claiming it for the life of the cache entry.
+		_resetGitIdentityCacheForTests();
+		setHead(cwd, "a".repeat(40));
+		expect(getCachedReviewGraph(cwd)).toBeDefined();
+		expect(getReviewGraphRevisionDrift(cwd)).toBeUndefined();
+	});
+
+	it("reports no drift for a graph built in-process (#1961)", async () => {
+		const cwd = tmpDir();
+		process.env.PILENS_DATA_DIR = path.join(cwd, "data");
+		makeFakeRepo(cwd, "a".repeat(40));
+
+		await buildOrUpdateGraph(cwd, [], new FactStore());
+		// A warm in-process entry has no stamped snapshot behind it, so a HEAD
+		// move says nothing and must not manufacture a caveat.
+		_resetGitIdentityCacheForTests();
+		setHead(cwd, "b".repeat(40));
+		expect(getReviewGraphRevisionDrift(cwd)).toBeUndefined();
 	});
 
 	it("read path DROPS a snapshot stamped for a different worktree (#300)", async () => {
