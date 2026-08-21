@@ -236,5 +236,5 @@ export const UNBOUNDED_FAILURE_PHASE_REASONS: Record<string, string> = {
 	review_graph_size_skip:
 		"One record per graph build, which is already the coarsest unit of review-graph work.",
 	session_start_skipped_steps:
-		"One record per quick-mode session_start, and quick mode is forced at most once per interactive process (plus once per explicit `-p`/`--print` one-shot) — the same once-per-lifecycle-event cadence as `agent_end_concurrent_secondary_skip` above, pinned by tests/clients/runtime-session-quick-mode-observability.test.ts.",
+		"One record per session_start, and only on the quick-mode path — the same once-per-lifecycle-event cadence as `agent_end_concurrent_secondary_skip` above, pinned by tests/clients/runtime-session-quick-mode-observability.test.ts.",
 };

@@ -48,6 +48,12 @@ vi.mock("../../clients/installer/index.js", () => ({
 import { handleSessionStart } from "../../clients/runtime-session.js";
 import { removeTempDirSync, setupTestEnvironment } from "./test-utils.js";
 
+// The full path runs a REAL (unmocked) handleSessionStart body, same as
+// tests/index-integration.test.ts's integration cases — vitest's default
+// 5000ms timed out once in six under batch contention. Same constant name and
+// value as that file's INTEGRATION_TIMEOUT_MS.
+const INTEGRATION_TIMEOUT_MS = 45_000;
+
 function setStartupMode(mode: "full" | "quick"): () => void {
 	const prev = process.env.PI_LENS_STARTUP_MODE;
 	process.env.PI_LENS_STARTUP_MODE = mode;
@@ -155,11 +161,15 @@ describe("quick-mode session_start skip observability (#1911)", () => {
 		);
 	});
 
-	it("never emits the record on the full path, where those steps actually run instead of being skipped", async () => {
-		restoreStartupMode = setStartupMode("full");
+	it(
+		"never emits the record on the full path, where those steps actually run instead of being skipped",
+		async () => {
+			restoreStartupMode = setStartupMode("full");
 
-		await handleSessionStart(makeDeps(tmpDir));
+			await handleSessionStart(makeDeps(tmpDir));
 
-		expect(skippedStepsRecords()).toEqual([]);
-	});
+			expect(skippedStepsRecords()).toEqual([]);
+		},
+		INTEGRATION_TIMEOUT_MS,
+	);
 });
