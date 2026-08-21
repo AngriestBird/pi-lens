@@ -80,6 +80,18 @@ export const CAPTURES = [
 		argv: ["--format", "json", "bad.js"],
 	},
 	{
+		// #1947 — oxlint exits 0 when every finding is warning severity (its
+		// default). No .oxlintrc.json override here, unlike js-oxlint-error,
+		// so the capture pins the exit-0-with-findings case #1946 deliberately
+		// left uncaptured.
+		runner: "oxlint",
+		case: "warning-exit-zero",
+		tool: "oxlint",
+		workspace: smoke("js-oxlint-warning"),
+		file: "bad.js",
+		argv: ["--format", "json", "bad.js"],
+	},
+	{
 		runner: "php-lint",
 		tool: "php",
 		workspace: smoke("php"),
