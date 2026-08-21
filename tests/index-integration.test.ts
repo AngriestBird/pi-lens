@@ -534,6 +534,44 @@ describe("index.ts integration", () => {
 			// finally-block clear).
 			expect(getAmbientAbortSignal()).toBeUndefined();
 		}, INTEGRATION_TIMEOUT_MS);
+
+		it("agent_settled resolves (does not crash with extension_error) when the ctx has gone stale after a session replacement (#1924)", async () => {
+			// #1924: a session replace/reload (ctx.newSession/fork/switchSession/
+			// reload) invalidates the captured ctx mid-run. The next
+			// `agent_settled` firing hands the handler a ctx whose every
+			// property getter throws the SDK's stale-ctx signature. Pre-fix,
+			// `setAmbientAbortSignal(ctx?.signal)` ran with no enclosing
+			// try/catch, so that throw propagated straight out of the async
+			// handler and the host logged an `extension_error`. Post-fix, the
+			// whole body is wrapped and `isStaleExtensionCtxError` degrades it
+			// to a no-op.
+			const handleAgentEndMock = vi.fn(async () => undefined);
+			mockDrainDeps(handleAgentEndMock);
+
+			const { default: registerExtension } = await import("../index.js");
+			const { getAmbientAbortSignal } = await import(
+				"../clients/safe-spawn.js"
+			);
+			const { pi, handlers } = createMockPi();
+			registerExtension(pi as any);
+
+			const STALE_MSG =
+				"This extension ctx is stale after session replacement or reload";
+			const staleCtx = {};
+			for (const prop of ["signal", "cwd", "ui", "sessionManager"]) {
+				Object.defineProperty(staleCtx, prop, {
+					enumerable: true,
+					get() {
+						throw new Error(STALE_MSG);
+					},
+				});
+			}
+
+			const settled = handlers.agent_settled?.[0];
+			expect(settled).toBeTypeOf("function");
+			await expect(settled?.({}, staleCtx)).resolves.toBeUndefined();
+			expect(getAmbientAbortSignal()).toBeUndefined();
+		}, INTEGRATION_TIMEOUT_MS);
 	});
 
 	it("idle LSP reset repaints the footer to Inactive (detached 240s timer)", async () => {
