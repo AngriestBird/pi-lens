@@ -93,11 +93,13 @@ const oxlintRunner: RunnerDefinition = {
 			timeout: 30000,
 		});
 
-		// Oxlint returns non-zero when issues found
-		if (result.status === 0) {
-			return { status: "succeeded", diagnostics: [], semantic: "none" };
-		}
-
+		// Oxlint exits 0 whenever nothing at ERROR severity was found — that
+		// includes a run that found only warnings, its own default severity
+		// (#1947). A run that found nothing at all also exits 0, but still
+		// prints a report with an empty `diagnostics` array, so parsing
+		// unconditionally and branching on the parsed count (below) tells the
+		// two apart instead of the exit code discarding the warning case.
+		//
 		// Parse JSON output. Fall back to the unix-format parser if JSON parsing
 		// fails (older oxlint versions, malformed stderr noise, etc.) — keeps the
 		// runner producing diagnostics even when the structured-fix metadata is
