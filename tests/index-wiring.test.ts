@@ -18,7 +18,7 @@ import {
 } from "../clients/degradation-ledger.js";
 import { _resetSessionLifecycleForTests } from "../clients/session-lifecycle.js";
 import { makeSessionStartEvent } from "./support/host-event-factory.js";
-import { createPiMock, makeCtx } from "./support/pi-mock.js";
+import { createPiMock, makeCtx, makeStaleCtx } from "./support/pi-mock.js";
 import { removeTempDirSync } from "./clients/test-utils.js";
 
 // #643: the dynamic-tool-deactivation call now runs inside the session_start
@@ -878,5 +878,99 @@ describe("index.ts extension wiring", () => {
 			expect(out).toContain("Machine-wide active log window");
 			expect(out).toContain("wiring-fixture: p50 100ms, p99 100ms, n=3");
 		});
+	});
+});
+
+/**
+ * #1925 — class siblings of the `agent_settled` stale-ctx crash (#1924/PR
+ * #1921).
+ *
+ * pi invalidates a captured event ctx when the session is replaced
+ * (`newSession`/`fork`/`switchSession`/`reload`). An event already queued when
+ * that happens still reaches pi-lens, carrying the DEAD ctx. Four handlers read
+ * a ctx property before any guard, so the SDK's `assertActive()` throw escaped
+ * into the host.
+ *
+ * Each test below drives one real registration through `createPiMock` with a
+ * ctx whose every accessor throws the SDK message, and asserts two things: the
+ * handler resolves rather than rejecting, and the skip is VISIBLE in the
+ * degradation ledger. Together they prove the shared wrapper
+ * (`clients/session-event-guard.ts`) is actually applied to each `pi.on` site —
+ * an unwrapped registration reds its own case. The ledger half is what keeps
+ * each guard mutation-proof: a guard that swallowed the throw silently would
+ * still pass the "does not reject" half.
+ */
+describe("stale extension ctx tolerance in event handlers (#1925)", () => {
+	beforeEach(() => {
+		_resetSessionLifecycleForTests();
+		resetBusPublishForTests();
+		resetDegradationLedger();
+	});
+	afterEach(() => {
+		_resetSessionLifecycleForTests();
+		resetBusPublishForTests();
+		resetDegradationLedger();
+	});
+
+	/** The ledger entry a stale-ctx skip must leave behind, for one handler. */
+	function expectStaleSkipRecorded(handler: string): void {
+		const group = getDegradationSummary().find(
+			(entry) => entry.kind === "extension-ctx-stale",
+		);
+		expect(
+			group,
+			`${handler} skipped a stale ctx without recording it in the degradation ledger`,
+		).toBeDefined();
+		expect(group?.latestReasons.map((reason) => reason.subject)).toContain(
+			handler,
+		);
+	}
+
+	const CASES: Array<{ event: string; payload: unknown }> = [
+		{
+			event: "tool_result",
+			payload: { toolName: "edit", input: { path: "a.ts" } },
+		},
+		{ event: "turn_start", payload: {} },
+		{ event: "agent_end", payload: { messages: [] } },
+		{ event: "turn_end", payload: {} },
+		{ event: "agent_settled", payload: {} },
+	];
+
+	for (const { event, payload } of CASES) {
+		it(`tolerates and records a stale ctx delivered to ${event}`, async () => {
+			const pi = createPiMock();
+			extension(pi.asExtensionAPI());
+
+			await expect(
+				pi.emit(event, payload, makeStaleCtx()),
+			).resolves.not.toThrow();
+
+			expectStaleSkipRecorded(event);
+		});
+	}
+
+	it("keeps a NON-stale handler failure loud instead of absorbing it", async () => {
+		// The guard classifies by message. An unrelated throw must still escape,
+		// and must never be counted as a stale-ctx skip — that would turn every
+		// handler bug into silence.
+		const pi = createPiMock();
+		extension(pi.asExtensionAPI());
+		const ctx = makeCtx();
+		Object.defineProperty(ctx, "signal", {
+			configurable: true,
+			get() {
+				throw new Error("boom: not a stale ctx");
+			},
+		});
+
+		await expect(
+			pi.emit("tool_result", { toolName: "edit" }, ctx),
+		).rejects.toThrow("boom: not a stale ctx");
+		expect(
+			getDegradationSummary().find(
+				(entry) => entry.kind === "extension-ctx-stale",
+			),
+		).toBeUndefined();
 	});
 });

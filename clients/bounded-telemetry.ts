@@ -86,6 +86,12 @@ export const BOUNDED_TELEMETRY_PHASES = [
 	 * turn) rather than by an option here.
 	 */
 	"loop_block",
+	/**
+	 * #1925: a session event skipped because its ctx was invalidated by a
+	 * session replacement or reload. A replaced session can drain a whole
+	 * queue of them, so it is rising-edge per event name.
+	 */
+	"session_event_stale_ctx_skip",
 ] as const;
 
 export type BoundedPhase = (typeof BOUNDED_TELEMETRY_PHASES)[number];
