@@ -236,16 +236,46 @@ export function recordOutstandingCascadeTouch(entry: OutstandingTouch): void {
 	}
 }
 
-/** Test-only: clear the outstanding-touch registry between test cases. */
-export function _resetOutstandingCascadeTouchesForTests(): void {
+/**
+ * #1910: session-boundary reset for the outstanding-touch registry and its
+ * sweep-scoped `_expiredSinceLastSweep`/`_evictedSinceLastSweep` counters.
+ * Both predate #1899 and were never wired into `handleSessionStart` — a
+ * session replacement inherited the prior session's outstanding touches, and
+ * a stray eviction/expiry landing between a sweep and the boundary attributed
+ * its count to the NEXT session's first reconcile gauge. Wired primary-only,
+ * same as every other entry in that reset block: a concurrently-live
+ * secondary never reaches `handleSessionStart` at all (the #473 guard in
+ * index.ts), so it can never race this reset against the still-live
+ * primary's outstanding touches.
+ */
+export function resetCascadeTierSessionState(): void {
 	_outstandingTouches.clear();
 	_expiredSinceLastSweep = 0;
 	_evictedSinceLastSweep = 0;
 }
 
+/** Test-only: clear the outstanding-touch registry between test cases. */
+export function _resetOutstandingCascadeTouchesForTests(): void {
+	resetCascadeTierSessionState();
+}
+
 /** Test-only: peek at the registry without mutating it. */
 export function _getOutstandingCascadeTouchesForTests(): OutstandingTouch[] {
 	return [...(_outstandingTouches.values() as Iterable<OutstandingTouch>)];
+}
+
+/**
+ * Test-only: peek at the sweep-scoped expired/evicted counters without
+ * mutating them. Exists so a probe of `resetCascadeTierSessionState` can
+ * assert on THESE counters directly, rather than only on the registry map —
+ * a future counter added here and left out of the reset would otherwise
+ * stay invisible to any probe that only checks the map went empty.
+ */
+export function _getCascadeTierSweepCountersForTests(): {
+	expired: number;
+	evicted: number;
+} {
+	return { expired: _expiredSinceLastSweep, evicted: _evictedSinceLastSweep };
 }
 
 /**
