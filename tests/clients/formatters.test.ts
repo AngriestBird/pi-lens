@@ -1488,8 +1488,10 @@ describe("oxfmt formatter — detection and policy selection", () => {
 		makeFakeExe(bin);
 		const filePath = fileIn(tmpDir, "index.ts");
 		const cmd = await oxfmtFormatter.resolveCommand!(filePath, tmpDir);
-		expect(cmd?.[0]).toBe(bin);
-		expect(cmd?.[1]).toBe(filePath);
+		// #1844 F1: the unmatched-pattern flag sits between the binary and the
+		// path, so a file the oxfmt config ignores is a clean no-op rather than
+		// an exit-2 formatting failure.
+		expect(cmd).toEqual([bin, "--no-error-on-unmatched-pattern", filePath]);
 	});
 
 	it("detected via vite-plus in devDependencies", async () => {

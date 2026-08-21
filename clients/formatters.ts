@@ -868,9 +868,36 @@ export const prettierFormatter: FormatterInfo = {
 	},
 };
 
+/**
+ * Turns "no target files left after ignore rules" into a clean exit 0.
+ *
+ * oxfmt is offered for every extension in `OXFMT_SUPPORTED_EXTENSIONS` as soon
+ * as a config exists, but a config's `ignorePatterns` can exclude any of them.
+ * Handed a path it has been told to ignore, oxfmt 0.64.0 exits 2 with
+ * "Expected at least one target file. All matched files may have been excluded
+ * by ignore rules." Under the #1337 strict default that reads as a formatting
+ * failure, so a user whose oxfmt config ignores (say) Markdown sees an error on
+ * every Markdown edit.
+ *
+ * Same class as biome's "No files were processed in the specified paths", and
+ * the same fix: ask the tool not to treat an empty target set as an error,
+ * rather than teaching `formatFile` to forgive an exit code. This is the
+ * narrower repair — a flag cannot mask anything else, whereas status- or
+ * message-keyed leniency would have to be trusted to stay tight across oxfmt
+ * releases. Verified against oxfmt 0.64.0: with the flag, an ignored path exits
+ * 0 untouched, a normal file is still rewritten, and an unparseable file still
+ * exits 2. `tests/clients/dispatch/oxfmt-ignored-file-noop.test.ts` pins all
+ * three against the real binary.
+ *
+ * The flag also silences a genuinely missing file, which `formatFile` never
+ * reaches: it reads the file before it spawns anything, so a missing path
+ * fails there.
+ */
+const OXFMT_NO_ERROR_ON_UNMATCHED = "--no-error-on-unmatched-pattern";
+
 export const oxfmtFormatter: FormatterInfo = {
 	name: "oxfmt",
-	command: ["oxfmt", "$FILE"],
+	command: ["oxfmt", OXFMT_NO_ERROR_ON_UNMATCHED, "$FILE"],
 	// #1337 audit: oxfmt (and the `vp fmt --write` path) publish no exit-code
 	// table. `--write` is the default and `--check` is the separate verification
 	// mode, so there is no documented nonzero-on-reformat. Absent a documented
@@ -878,15 +905,18 @@ export const oxfmtFormatter: FormatterInfo = {
 	// mode of guessing wrong the other way is a silent no-op (#1336).
 	async resolveCommand(filePath, cwd) {
 		if (hasVitePlusConfig(cwd)) {
+			// No unmatched-pattern flag here: this is `vp`, a different CLI with
+			// its own arguments. Whether `vp fmt` has the same empty-target
+			// behavior is unverified, so nothing is claimed about it.
 			const localVp = await findInNodeModules("vp", cwd);
 			if (localVp) return [localVp, "fmt", filePath, "--write"];
 			const globalVp = await which("vp");
 			if (globalVp) return [globalVp, "fmt", filePath, "--write"];
 		}
 		const local = await findInNodeModules("oxfmt", cwd);
-		if (local) return [local, filePath];
+		if (local) return [local, OXFMT_NO_ERROR_ON_UNMATCHED, filePath];
 		const found = await which("oxfmt");
-		if (found) return [found, filePath];
+		if (found) return [found, OXFMT_NO_ERROR_ON_UNMATCHED, filePath];
 		return null;
 	},
 	// Single source of truth: OXFMT_SUPPORTED_EXTENSIONS in tool-policy.ts.
