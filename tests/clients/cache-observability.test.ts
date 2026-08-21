@@ -116,7 +116,6 @@ describe("cache-observability — context observations (#1018 follow-up)", () =>
 			turnIndex: 3,
 			injectionEnabled: false,
 			existingMessages: [{ role: "user", content: "private prompt" }],
-			prefixObservation: "baseline",
 		});
 
 		expect(latencyEntries).toHaveLength(1);
@@ -134,11 +133,13 @@ describe("cache-observability — context observations (#1018 follow-up)", () =>
 				existingMessageCount: 1,
 				resultMessageCount: 1,
 				placement: "none",
-				prefixObservation: "baseline",
-				prefixBaseline: true,
-				firstMessageChanged: false,
 			},
 		});
+		// #1938: the prefix/first-message pair was removed — it always reported
+		// "unknown" past 64 messages. `cache_prefix_break` is the surviving
+		// first-message stability signal.
+		expect(latencyEntries[0].metadata).not.toHaveProperty("prefixObservation");
+		expect(latencyEntries[0].metadata).not.toHaveProperty("firstMessageChange");
 		expect(latencyEntries[0].metadata?.observationId).toMatch(/^ctx-/);
 	});
 
@@ -187,7 +188,6 @@ describe("cache-observability — context observations (#1018 follow-up)", () =>
 				existingMessages: existing,
 				resultMessages: result,
 				placement,
-				prefixObservation: "unchanged",
 			});
 			const metadata = latencyEntries[0].metadata;
 			expect(metadata?.placement).toBe(placement);
@@ -200,39 +200,37 @@ describe("cache-observability — context observations (#1018 follow-up)", () =>
 		},
 	);
 
-	it("distinguishes a prefix baseline from a later actual first-message change", () => {
+	it("cache_prefix_break still distinguishes a baseline from a later first-message change (#1938: cache_context no longer echoes this)", () => {
 		const first = { role: "user", content: "first" };
 		const changed = { role: "user", content: "changed" };
 		const baseline = observeCachePrefix([first], 0, "s");
+		expect(baseline).toBe("baseline");
 		observeCacheContext({
 			sessionId: "s",
 			turnIndex: 0,
 			injectionEnabled: false,
 			existingMessages: [first],
-			prefixObservation: baseline,
 		});
 		const actualChange = observeCachePrefix([changed], 1, "s");
+		expect(actualChange).toBe("changed");
 		observeCacheContext({
 			sessionId: "s",
 			turnIndex: 1,
 			injectionEnabled: false,
 			existingMessages: [changed],
-			prefixObservation: actualChange,
 		});
 
+		// #1938: cache_context records no longer carry prefixObservation /
+		// prefixBaseline — that pair reported "unknown" on 97% of real records.
 		const observations = latencyEntries.filter(
 			(entry) => entry.phase === "cache_context",
 		);
-		expect(observations[0].metadata).toMatchObject({
-			prefixObservation: "baseline",
-			prefixBaseline: true,
-		});
-		expect(observations[1].metadata).toMatchObject({
-			prefixObservation: "changed",
-			prefixBaseline: false,
-			firstMessageChanged: false,
-		});
-		// The existing signal remains the provider-independent local change signal.
+		for (const observation of observations) {
+			expect(observation.metadata).not.toHaveProperty("prefixObservation");
+			expect(observation.metadata).not.toHaveProperty("prefixBaseline");
+		}
+		// The surviving signal is the provider-independent local change signal,
+		// still emitted directly by observeCachePrefix.
 		expect(
 			latencyEntries.find(
 				(entry) =>
@@ -274,7 +272,7 @@ describe("cache-observability — context observations (#1018 follow-up)", () =>
 		);
 	});
 
-	it("reports unknown rather than unchanged when the bounded first-message hash truncates a suffix", () => {
+	it("still reports an honest sequenceHashTruncated flag for an oversized message, without an unknown prefixObservation/firstMessageChange pair (#1938)", () => {
 		const existing = {
 			role: "user",
 			content: `${"a".repeat(2048)}-suffix-a`,
@@ -289,22 +287,56 @@ describe("cache-observability — context observations (#1018 follow-up)", () =>
 			injectionEnabled: false,
 			existingMessages: [existing],
 			resultMessages: [changedSuffix],
-			prefixObservation: "unchanged",
 		});
 
-		const metadata = latencyEntries[0].metadata;
+		const metadata = latencyEntries[0].metadata as Record<string, unknown>;
 		expect(metadata).toMatchObject({
 			observedStage: "pi-lens-context-handler",
-			firstMessageChanged: null,
-			firstMessageChange: "unknown",
-			firstMessageHashTruncated: true,
 			sequenceContentHashTruncated: true,
-			prefixHashTruncated: true,
-			prefixContentHashTruncated: true,
-			prefixObservation: "unknown",
-			prefixObservationUnknown: true,
-			prefixBaseline: null,
 		});
+		// The removed pair must not resurface under any name.
+		expect(metadata).not.toHaveProperty("firstMessageChanged");
+		expect(metadata).not.toHaveProperty("firstMessageChange");
+		expect(metadata).not.toHaveProperty("firstMessageHashTruncated");
+		expect(metadata).not.toHaveProperty("beforeFirstMessageHash");
+		expect(metadata).not.toHaveProperty("afterFirstMessageHash");
+		expect(metadata).not.toHaveProperty("prefixHashTruncated");
+		expect(metadata).not.toHaveProperty("prefixContentHashTruncated");
+		expect(metadata).not.toHaveProperty("prefixMessageCountTruncated");
+		expect(metadata).not.toHaveProperty("beforePrefixHash");
+		expect(metadata).not.toHaveProperty("afterPrefixHash");
+		expect(metadata).not.toHaveProperty("prefixObservation");
+		expect(metadata).not.toHaveProperty("prefixObservationUnknown");
+		expect(metadata).not.toHaveProperty("prefixBaseline");
+	});
+
+	it("does not force prefixObservation/firstMessageChange to unknown on a 200-message transcript (#1938)", () => {
+		const existingMessages = Array.from({ length: 200 }, (_, i) => ({
+			role: i % 2 === 0 ? "user" : "assistant",
+			content: `message ${i}`,
+		}));
+		observeCacheContext({
+			sessionId: "s",
+			turnIndex: 100,
+			injectionEnabled: false,
+			existingMessages,
+		});
+
+		const metadata = latencyEntries[0].metadata as Record<string, unknown>;
+		// Either the field reports a real value (never "unknown"), or it has been
+		// removed from the record entirely — both satisfy the #1938 acceptance
+		// criterion. What it must never do is silently report "unknown" just
+		// because the transcript is long, which is what pre-fix code does past
+		// MAX_HASHED_MESSAGES (64) messages. This repo's chosen fix removes the
+		// field outright (see the module doc), so assert that directly too.
+		if ("prefixObservation" in metadata) {
+			expect(metadata.prefixObservation).not.toBe("unknown");
+		}
+		if ("firstMessageChange" in metadata) {
+			expect(metadata.firstMessageChange).not.toBe("unknown");
+		}
+		expect(metadata).not.toHaveProperty("prefixObservation");
+		expect(metadata).not.toHaveProperty("firstMessageChange");
 	});
 
 	it("marks a secondary context observation without a session-local turn", () => {

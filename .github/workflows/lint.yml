@@ -1,7 +1,7 @@
 name: Lint
 
-# #1844: mechanical lint batch. Three independent, cheap jobs -- each stays
-# well under a minute and needs no `npm install` (actionlint and
+# #1844: mechanical lint batch. Four independent, cheap jobs -- each stays
+# well under a minute and needs no `npm install` (actionlint, vale, and
 # markdownlint-cli2 are self-contained). Kept out of ci.yml so a lint
 # finding never blocks on -- or waits behind -- the full install/build/test
 # lanes. The OSV scan lives in its own osv-scan.yml (see that file for why).
@@ -90,3 +90,35 @@ jobs:
 
       - name: Lint markdown
         run: ./node_modules/.bin/markdownlint-cli2
+
+  vale:
+    name: Vale prose lint (advisory)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    # Advisory to start (see PR body / #1844): not wired into required-checks
+    # branch protection, so it never blocks a merge on its own. No
+    # continue-on-error, for the same reason osv-scan.yml gives -- a real
+    # finding should show as a red advisory check a reviewer can see, not a
+    # silently-green one.
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      # Pinned release + checksum verification, matching the actionlint job
+      # above. The style package itself (.vale/styles/Google/) is vendored
+      # in the repo, not fetched via `vale sync` -- this step is the only
+      # network access the job makes.
+      - name: Download and verify vale v3.9.6 (Linux_64-bit)
+        run: |
+          set -eu
+          curl -sLO --proto '=https' --tlsv1.2 https://github.com/errata-ai/vale/releases/download/v3.9.6/vale_3.9.6_Linux_64-bit.tar.gz
+          echo "dd8519d9bdf381a3b1a30f1df7f6e589b69ec1e38a495e4bd9af8e450703dde0  vale_3.9.6_Linux_64-bit.tar.gz" | sha256sum -c -
+          tar -xzf vale_3.9.6_Linux_64-bit.tar.gz vale
+
+      # Explicit path list, not a bare invocation: .vale.ini's BasedOnStyles
+      # section already scopes which paths get styles applied, but vale
+      # still needs paths on the command line to know what to walk.
+      - name: Lint prose
+        run: ./vale docs AGENTS.md CLAUDE.md README.md CONTRIBUTING.md .claude/agents .changelog

@@ -460,7 +460,7 @@ leave its prior workspace cache alive; it never walks above that ceiling.
   - Active voice, present tense.
   - One idea per sentence, roughly 20-25 words. Split any sentence over ~30 words.
   - Consistent terminology: never swap synonyms for the same thing.
-  - Sentence-case headings. Plain words. No idioms or colloquialisms. No "please". Oxford comma.
+  - Sentence-case headings. Plain words. No idioms or colloquialisms. No `please`. Oxford comma.
   - No em-dash chains or nested parentheticals.
   - Commits: tpope style on top of the conventional prefix. Imperative subject of 50 characters or fewer, blank line, 72-column body stating what and why.
   - Issue references live in the PR TITLE. Use `closes` only when every acceptance criterion is met. Otherwise use `refs` plus an issue comment naming the remainder.

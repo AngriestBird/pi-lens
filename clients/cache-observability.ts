@@ -14,7 +14,14 @@
  *      transformation, placement, injection sources, and privacy-preserving
  *      hashes. This is what pi-lens observed locally, not the final provider
  *      request after other context handlers have run and not a provider cache
- *      result.
+ *      result. #1938: this record used to also carry a `prefixObservation` /
+ *      `firstMessageChange` pair derived from a SEPARATE bounded hash of the
+ *      pre-injection prefix (capped at `MAX_HASHED_MESSAGES` messages /
+ *      `MAX_HASHED_CONTENT_CHARS` chars). Every real session's transcript
+ *      exceeds that cap almost immediately, so the pair reported "unknown" on
+ *      97% of records — dead weight in every record, answering nothing. The
+ *      pair is removed; signal 3 below (`cache_prefix_break`) already covers
+ *      first-message stability with an unbounded hash and never truncates.
  *
  *   3. Request-side prefix stability (`cache_prefix_break`) — a content hash of
  *      `messages[0]` observed on every `context` call. After #1016 the first
@@ -508,42 +515,6 @@ function sessionKey(sessionId?: string): string {
 	return sessionId?.trim() ? sessionId.trim() : NO_SESSION_KEY;
 }
 
-function prefixLengthForPlacement(
-	placement: CacheContextPlacement,
-	messageCount: number,
-): number {
-	if (placement === "insert-before-final") {
-		return Math.max(0, messageCount - 1);
-	}
-	if (placement === "prepend") return 0;
-	return messageCount;
-}
-
-function resolvePrefixObservation(
-	truncated: boolean,
-	observation?: CachePrefixObservation,
-): CachePrefixObservation | "unknown" {
-	if (truncated) return "unknown";
-	return observation ?? "empty";
-}
-
-function prefixBaselineForObservation(
-	observation: CachePrefixObservation | "unknown",
-): boolean | null {
-	if (observation === "baseline") return true;
-	if (observation === "empty" || observation === "unknown") return null;
-	return false;
-}
-
-function firstMessageChangeFor(
-	truncated: boolean,
-	before: string | null,
-	after: string | null,
-): "unknown" | "changed" | "unchanged" {
-	if (truncated) return "unknown";
-	return before !== after ? "changed" : "unchanged";
-}
-
 /**
  * Log one bounded request-side observation for every `context` call. This is
  * deliberately a separate phase from `cache_prefix_break`: it describes the
@@ -569,7 +540,6 @@ export function observeCacheContext(args: {
 	 */
 	injectionSlices?: ReadonlyArray<CacheContextInjectionSlice>;
 	placement?: CacheContextPlacement;
-	prefixObservation?: CachePrefixObservation;
 	dbg?: (msg: string) => void;
 }): void {
 	try {
@@ -585,42 +555,6 @@ export function observeCacheContext(args: {
 		const placement = args.placement ?? "none";
 		const beforeSequence = hashMessageSequence(existingMessages);
 		const afterSequence = hashMessageSequence(resultMessages);
-		const beforePrefixLength = prefixLengthForPlacement(
-			placement,
-			existingMessages.length,
-		);
-		const afterPrefixLength = Math.min(
-			beforePrefixLength,
-			resultMessages.length,
-		);
-		const beforePrefix = hashMessageSequence(
-			existingMessages.slice(0, beforePrefixLength),
-		);
-		const afterPrefix = hashMessageSequence(
-			resultMessages.slice(0, afterPrefixLength),
-		);
-		const beforeFirstSequence = existingMessages.length
-			? hashMessageSequence([existingMessages[0]])
-			: undefined;
-		const afterFirstSequence = resultMessages.length
-			? hashMessageSequence([resultMessages[0]])
-			: undefined;
-		const beforeFirst = beforeFirstSequence?.hash ?? null;
-		const afterFirst = afterFirstSequence?.hash ?? null;
-		const firstMessageHashTruncated =
-			beforeFirstSequence?.truncated === true ||
-			beforeFirstSequence?.contentTruncated === true ||
-			afterFirstSequence?.truncated === true ||
-			afterFirstSequence?.contentTruncated === true;
-		const prefixHashTruncated =
-			beforePrefix.truncated ||
-			afterPrefix.truncated ||
-			beforePrefix.contentTruncated ||
-			afterPrefix.contentTruncated;
-		const prefixObservation = resolvePrefixObservation(
-			prefixHashTruncated,
-			args.prefixObservation,
-		);
 		const sizes = measureInjectedMessages(injectedMessages);
 		// Per-source split of a mixed payload (#1071 AC 2). The old record named
 		// which sources fired but attributed cost by CALL, so a turn carrying
@@ -684,24 +618,8 @@ export function observeCacheContext(args: {
 				),
 				messageCountCapped,
 				placement,
-				prefixObservation,
-				prefixObservationUnknown: prefixObservation === "unknown",
-				prefixBaseline: prefixBaselineForObservation(prefixObservation),
-				firstMessageChanged: firstMessageHashTruncated
-					? null
-					: beforeFirst !== afterFirst,
-				firstMessageChange: firstMessageChangeFor(
-					firstMessageHashTruncated,
-					beforeFirst,
-					afterFirst,
-				),
-				firstMessageHashTruncated,
-				beforeFirstMessageHash: beforeFirst,
-				afterFirstMessageHash: afterFirst,
 				beforeSequenceHash: beforeSequence.hash,
 				afterSequenceHash: afterSequence.hash,
-				beforePrefixHash: beforePrefix.hash,
-				afterPrefixHash: afterPrefix.hash,
 				sequenceHashTruncated:
 					beforeSequence.truncated ||
 					afterSequence.truncated ||
@@ -711,11 +629,6 @@ export function observeCacheContext(args: {
 					beforeSequence.truncated || afterSequence.truncated,
 				sequenceContentHashTruncated:
 					beforeSequence.contentTruncated || afterSequence.contentTruncated,
-				prefixHashTruncated,
-				prefixMessageCountTruncated:
-					beforePrefix.truncated || afterPrefix.truncated,
-				prefixContentHashTruncated:
-					beforePrefix.contentTruncated || afterPrefix.contentTruncated,
 			},
 		});
 	} catch (err) {
