@@ -1069,9 +1069,14 @@ async function collectWorkspaceDiagnosticFiles(
 				if (ignoreMatcher.isIgnored(full, true)) continue;
 				await walk(full);
 			} else if (
+				// #1974: the getServersForFileWithConfig lookup (an in-memory
+				// extension/pathFilter match against the registered LSP servers) is
+				// cheap relative to isIgnored's per-call minimatch pattern compile,
+				// so it gates first — the same order-independent shape as the four
+				// walkers fixed for #1974.
 				entry.isFile() &&
-				!ignoreMatcher.isIgnored(full, false) &&
-				getServersForFileWithConfig(full).length > 0
+				getServersForFileWithConfig(full).length > 0 &&
+				!ignoreMatcher.isIgnored(full, false)
 			) {
 				files.push(full);
 			}
