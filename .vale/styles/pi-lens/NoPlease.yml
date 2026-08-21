@@ -1,0 +1,7 @@
+extends: existence
+message: "Avoid \"please\" in instructions; state the action directly (imperative mood)."
+link: "https://developers.google.com/style/word-list"
+level: warning
+ignorecase: true
+tokens:
+  - '\bplease\b'
