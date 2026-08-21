@@ -180,6 +180,18 @@ export type DegradationKind =
 	 * from the ledger alone.
 	 */
 	| "runner-empty-result"
+	/**
+	 * A shell-out runner's tool DID produce output, exited nonzero, and the
+	 * runner's parser extracted ZERO diagnostics from it (#1948). The adjacent
+	 * `runner-empty-result` covers "the tool produced nothing"; this covers
+	 * "the tool produced something the runner could not read", which is how
+	 * five parser bugs (vale #1933; taplo, stylelint, phpstan #1946; sqlfluff)
+	 * reported clean files for months while their CLIs were reporting errors.
+	 * Subject is the tool id; the reason names the exit status, the output
+	 * length, and the first output line, so the ledger alone answers "is this
+	 * file clean, or did the parser fail to read it?".
+	 */
+	| "runner-parsed-nothing"
 	/** A process-table resource sample failed or timed out; it is unknown. */
 	| "resource-sampler-query-failed"
 	/**

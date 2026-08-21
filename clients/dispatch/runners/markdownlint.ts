@@ -15,7 +15,7 @@ import {
 	resolveToolCommandWithInstallFallback,
 } from "./utils/runner-helpers.js";
 import type { ToolExitCodes } from "./utils/spawn-outcome.js";
-import { skipUnlessToolRan } from "./utils/tool-failure.js";
+import { parseToolRun } from "./utils/tool-failure.js";
 
 const markdownlint = createAvailabilityChecker("markdownlint-cli2", ".cmd");
 
@@ -117,7 +117,7 @@ const markdownlintRunner: RunnerDefinition = {
 			return { status: "skipped", diagnostics: [], semantic: "none" };
 		}
 		let cmd: string | null = null;
-		if (await (markdownlint.isAvailableAsync(cwd))) {
+		if (await markdownlint.isAvailableAsync(cwd)) {
 			cmd = markdownlint.getCommand(cwd);
 		} else {
 			cmd = await resolveToolCommandWithInstallFallback(cwd, "markdownlint");
@@ -138,14 +138,16 @@ const markdownlintRunner: RunnerDefinition = {
 		// reported as a clean Markdown file. An empty result must distinguish
 		// clean from errored.
 		const raw = `${result.stdout ?? ""}${result.stderr ?? ""}`;
-		const skipped = skipUnlessToolRan("markdownlint", {
-			result,
-			output: raw,
-			exitCodes: MARKDOWNLINT_EXIT_CODES,
-		});
-		if (skipped) return skipped;
+		// #1948: one seam for both gates — the tool produced nothing, and the
+		// tool produced something the parser could not read.
+		const run = parseToolRun(
+			"markdownlint",
+			{ result, output: raw, exitCodes: MARKDOWNLINT_EXIT_CODES },
+			(out) => parseMarkdownlintOutput(out, ctx.filePath),
+		);
+		if (run.skipped) return run.skipped;
 
-		const diagnostics = parseMarkdownlintOutput(raw, ctx.filePath);
+		const diagnostics = run.diagnostics;
 		if (diagnostics.length === 0) {
 			return { status: "succeeded", diagnostics: [], semantic: "none" };
 		}
