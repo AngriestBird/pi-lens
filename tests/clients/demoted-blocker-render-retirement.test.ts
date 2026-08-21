@@ -176,6 +176,32 @@ describe("degradeDemotedFindingBody (#1944)", () => {
 		expect(lines[1]).toBe("  package.json — outdated lockfile (STOP the build)");
 	});
 
+	/**
+	 * #1944 verify round, Edge-D. `formatDiagnostics` opens its output with a
+	 * newline, and it omits `L<n>` for a lineless diagnostic — so a body can
+	 * reach here starting blank AND carrying no cited row. A naive "first line
+	 * is the banner" rule degrades the empty string and leaves the real header
+	 * at full authority. Production is saved from that today only by an
+	 * undocumented `.trim()` one call upstream; this module claims to own the
+	 * rule, so it must hold on its own input.
+	 */
+	it("skips leading blank lines when no cited row exists (Edge-D)", () => {
+		const summary = [
+			"",
+			"🔴 STOP — 1 issue(s) must be fixed:",
+			"  package.json — outdated lockfile (STOP the build)",
+		].join("\n");
+		const result = degradeDemotedFindingBody(summary);
+		const lines = result.body.split("\n");
+		expect(lines[0]).toBe("");
+		// The real header is degraded even though it is not line zero.
+		expect(lines[1]).not.toContain("STOP");
+		expect(lines[1]).not.toContain("must be fixed");
+		expect(result.authorityMarkersRemoved).toBe(1);
+		// The content line below it still survives verbatim.
+		expect(lines[2]).toBe("  package.json — outdated lockfile (STOP the build)");
+	});
+
 	it("leaves a body with no authority vocabulary alone", () => {
 		const plain = "  L4: something mild.";
 		const result = degradeDemotedFindingBody(plain);

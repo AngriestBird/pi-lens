@@ -76,21 +76,34 @@ const CITED_LINE_RE = /^([^\S\n]*)L(\d+)\b/;
  * Split a rendered body into its BANNER region and its CONTENT region
  * (#1944 review F1).
  *
- * Every producer of a body this module degrades — `formatDiagnostics`
- * (`clients/dispatch/utils/format-utils.ts`) and `buildEnrichedBlockerOutput`
- * (`clients/pipeline.ts`) — emits the same shape: a header, then one
- * `  L<n>: <message>` row per diagnostic, then indented continuations
- * (`→ snippet`, `💡 Fix: …`) and an optional `… and N more` tail. So the
- * first cited-line row is the boundary: everything above it is ours to
- * rewrite, everything from it down is the findings' own words.
+ * The body this module degrades is `InlineBlockerRecord.summary`, and its one
+ * producer is `formatDiagnostics(inlineBlockers, "blocking")`
+ * (`clients/dispatch/utils/format-utils.ts`), reaching the store as
+ * `dispatchResult.blockerOutput` -> `PipelineResult.inlineBlockerSummary` ->
+ * `recordInlineBlockers`. (`buildEnrichedBlockerOutput` in
+ * `clients/pipeline.ts` renders the same shape with code snippets, but it
+ * feeds the TOOL-RESULT output shown inline during the write, not this
+ * stored summary. #1944 review round: naming it here as a producer was
+ * wrong.) The shape is a header, then one `  L<n>: <message>` row per
+ * diagnostic, then indented continuations (`💡 Fix: …`) and an optional
+ * `… and N more` tail. So the first cited-line row is the boundary:
+ * everything above it is ours to rewrite, everything from it down is the
+ * findings' own words.
  *
- * A body with no cited row at all (a runner that reported no line) has only
- * its FIRST line treated as banner. That is the conservative choice: it
- * degrades the one line a header can occupy and leaves every message intact.
+ * A body with no cited row at all — `formatDiagnostics` omits `L<n>` for a
+ * lineless diagnostic — falls back to the first NON-BLANK line. Leading
+ * blanks must be skipped rather than counted (#1944 verify round, Edge-D):
+ * `formatDiagnostics` opens its output with a newline, so a naive "first
+ * line is the banner" rule degrades an empty string and leaves the real
+ * header at full authority. Production is currently saved from that only by
+ * an undocumented `.trim()` at `clients/pipeline.ts` (`inlineBlockerSummary`),
+ * and this module claims to own the rule, so it must hold on its own input.
  */
 function splitBannerRegion(lines: string[]): { bannerEnd: number } {
 	const firstCitedRow = lines.findIndex((line) => CITED_LINE_RE.test(line));
-	return { bannerEnd: firstCitedRow === -1 ? 1 : firstCitedRow };
+	if (firstCitedRow !== -1) return { bannerEnd: firstCitedRow };
+	const firstNonBlank = lines.findIndex((line) => line.trim() !== "");
+	return { bannerEnd: firstNonBlank === -1 ? 0 : firstNonBlank + 1 };
 }
 
 /**
