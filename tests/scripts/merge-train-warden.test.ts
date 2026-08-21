@@ -327,12 +327,21 @@ describe("merge-train warden GraphQL fetch + REST apply (#1844)", () => {
 	// error stream, not just the pure classifyActionFailure unit above.
 	it("records an update-branch 403 on a fork-owned BEHIND PR as benign with the fork outcome, not a failure", async () => {
 		const page = graphqlPage([prNode({ number: 1, mergeStateStatus: "BEHIND", autoMergeRequest: { enabledAt: "2026-01-01" }, isCrossRepository: true })]);
-		const { fetcher } = fakeGithub({
+		const { fetcher, calls } = fakeGithub({
 			"POST /graphql": page,
 			"PUT /repos/acme/repo/pulls/1/update-branch": () => ({ ok: false, status: 403, json: async () => ({}) }),
 		});
 		const results = await runWarden({ fetcher, owner: "acme", repo: "repo" });
 		expect(results[0].errors).toEqual([{ message: expect.stringContaining("update-branch-forbidden-fork"), benign: true }]);
+		// Review round 2, F2: this is the wiring guard for isFork itself.
+		// Deleting `isCrossRepository` from PR_QUERY leaves normalizePr's
+		// `Boolean(node.isCrossRepository)` silently reading `undefined` as
+		// `false` on every real PR -- the whole fork branch above would then
+		// go dead in production while every one of these tests (which fake
+		// the GraphQL response by hand) stays green. Assert the query text
+		// itself requests the field, so removing it fails here first.
+		const graphqlCall = calls.find((c) => c.url.endsWith("/graphql"));
+		expect(String((graphqlCall?.body as { query?: string } | undefined)?.query)).toContain("isCrossRepository");
 	});
 
 	it("records an update-branch 403 on an own-branch BEHIND PR as a fatal failure", async () => {
