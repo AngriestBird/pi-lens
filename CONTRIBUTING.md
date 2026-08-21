@@ -282,7 +282,7 @@ pi-lens hooks run on pi's event loop. Read the "Performance" section of `AGENTS.
 
 pi-lens is released under the [MIT License](LICENSE). By contributing, you agree that your contributions will be licensed under the same terms.
 
-This project follows the [Contributor Covenant Code of Conduct](CODE_OF_CONDUCT.md). Please read it before participating.
+This project follows the [Contributor Covenant Code of Conduct](CODE_OF_CONDUCT.md). Read it before participating.
 
 If you land a pull request or report an issue that gets resolved, we'll add you to the [contributors table](README.md#contributors-) via [all-contributors](https://allcontributors.org/). If the all-contributors bot is installed, maintainers can comment `@all-contributors please add @username for code,bug`; otherwise update `.all-contributorsrc` and regenerate the table with `npx all-contributors-cli generate`. Keep `wrapperTemplate` absent from `.all-contributorsrc`: the CLI inserts invalid `</tr><br />` separators whenever that option is present.
 
