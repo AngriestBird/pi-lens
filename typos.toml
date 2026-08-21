@@ -1,0 +1,87 @@
+# pi-lens spellcheck config (dogfood activation, refs #1844).
+#
+# The typos runner (clients/dispatch/runners/spellcheck.ts) only checks
+# whether the `typos` binary is on PATH — see the PR body for that gap. But
+# this file's mere PRESENCE also flips a second gate: `clients/typos-config.ts`
+# treats a repo-local typos config as the team's deliberate opt-in to let
+# typos-lsp spelling findings BLOCK instead of staying advisory. So this file
+# is not just tuning; it changes severity, which is why every exclusion below
+# carries a reason instead of being a blanket dictionary import.
+#
+# Verified with typos-cli 1.49.0 (real binary run, not tuned to silence — see
+# the PR body for the planted-violation proof and the full sweep of what
+# `typos .` reported on the current tree before this file existed).
+
+[files]
+extend-exclude = [
+    # Historical record. CLAUDE.md forbids hand-editing CHANGELOG.md, so a
+    # typo inside an old entry can never be "fixed" without breaking that
+    # rule — exclude the file instead of fighting it entry by entry.
+    "CHANGELOG.md",
+    # Vendored CodeRabbit ast-grep rule pack, pinned at an upstream commit
+    # (AGENTS.md "Rule catalogs") — not pi-lens's prose to correct.
+    "rules/ast-grep-rules/coderabbit/**",
+    # Generated FROM the rule files above (AGENTS.md: "edit the rule files,
+    # not the docs") and truncated mid-word by the table generator ("objec…",
+    # "Thi…"), so most hits here are ellipsis artifacts, not misspellings —
+    # plus it inherits any real vendored typo ("insufficent") it doesn't own.
+    "docs/ast-grep_rules_catalog.md",
+    # Runner fixtures deliberately contain typos to exercise the
+    # spellcheck/biome parsers themselves (same #1917/#1933 precedent as
+    # .oxlintrc.json's tests/fixtures exclude) — the typos ARE the test data.
+    "tests/fixtures/**",
+    # Runner/rule tests assert on captured typo output for the same reason.
+    "tests/clients/dispatch/**",
+    # Docstring documents an intentional "recieve" -> "receive" example of
+    # what the runner corrects. Excluding the one file beats allowlisting the
+    # word globally, which would defeat typos' own purpose on real "recieve"
+    # typos elsewhere.
+    "clients/dispatch/runners/spellcheck.ts",
+]
+
+[default.extend-words]
+# "mis-cased" / "mis-parses" / "mis-attribution" / "mis-resolves" /
+# "mis-offers" — a hyphenated "mis-" prefix this codebase's prose uses
+# routinely; typos' tokenizer splits it into a bare "mis" token and flags it.
+mis = "mis"
+# ".edn" (Clojure EDN format), a real file-kind extension
+# (clients/file-kinds.ts, clients/formatters.ts), not a truncation of "end".
+edn = "edn"
+# HashiCorp brand abbreviation inside camelCase identifiers like
+# `hashiCorpReleaseProduct` (clients/installer/index.ts, tests).
+hashi = "hashi"
+# Valid English spelling, already allowlisted for typos-lsp's bundled
+# default (rules/typos/_typos.toml, #967) — repeated here so the same
+# tolerance applies once a project-local config supersedes the bundle.
+unparseable = "unparseable"
+dito = "dito"
+# Valid English variant of "overridable" (CHANGELOG's own vocabulary).
+overrideable = "overrideable"
+# Substring of "non-enumerables" (clients/dispatch/integration.ts).
+enumerables = "enumerables"
+# Substring of "coreutils" (clients/installer/index.ts).
+coreutil = "coreutil"
+# Plural-noun usage ("no bypassing criticals"), not a misspelling
+# (clients/trivy-client.ts).
+criticals = "criticals"
+# Substring of the identifier `boundaryCalle`
+# (clients/dispatch/rules/unsafe-boundary.ts).
+calle = "calle"
+# "invalid mode (e.g. \"immedaite\")" is a deliberate example of a bad
+# config value, in both the source comment (clients/lens-config.ts) and its
+# test (tests/clients/lens-config.test.ts) — not a real typo to fix.
+immedaite = "immedaite"
+# "PnP" (Yarn Plug'n'Play) splits into "Pn" + "P" (clients/sg-runner.ts).
+pn = "pn"
+# `caf2ee8` is a git commit-hash fragment in a code comment
+# (tests/index-integration.test.ts), not the word "calf".
+caf = "caf"
+# `(ba+)+` is a regex literal used as a ReDoS example (rules/ast-grep-rules,
+# skills docs), not the word "by"/"be".
+ba = "ba"
+# All-contributors table entry — a real contributor's surname
+# (README.md), not "Stubs".
+stubbs = "stubbs"
+# "ERRORs" used as a verb ("the typescript grammar ERRORs on JSX") splits
+# into "ERRO" + "s" (clients/project-diagnostics/scanner.ts).
+erro = "erro"
