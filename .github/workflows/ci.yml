@@ -191,9 +191,10 @@ jobs:
       # which is the regression this job exists to catch (#1926).
       - name: Supply host-provided packages the way pi does (#1926)
         run: | # zizmor: ignore[adhoc-packages]
-          ARGS=$(node scripts/supply-host-provided-deps.mjs --install-args)
-          echo "Supplying: $ARGS"
-          npm install --no-save --no-audit --no-fund $ARGS
+          SUPPLY=scripts/supply-host-provided-deps.mjs
+          read -ra HOST_PKGS <<< "$(node "$SUPPLY" --install-args)"
+          echo "Supplying: ${HOST_PKGS[*]}"
+          npm install --no-save --no-audit --no-fund "${HOST_PKGS[@]}"
 
       - name: Verify dist built and the compiled entry loads
         run: |
@@ -234,9 +235,10 @@ jobs:
           node scripts/check-prod-install-shape.mjs
           # Then supply them, as pi does, so the load check can still see a
           # genuinely missing dep instead of stopping at the first host package.
-          ARGS=$(node scripts/supply-host-provided-deps.mjs --install-args)
-          echo "Supplying: $ARGS"
-          npm install --no-save --no-audit --no-fund $ARGS
+          SUPPLY=scripts/supply-host-provided-deps.mjs
+          read -ra HOST_PKGS <<< "$(node "$SUPPLY" --install-args)"
+          echo "Supplying: ${HOST_PKGS[*]}"
+          npm install --no-save --no-audit --no-fund "${HOST_PKGS[@]}"
           ALLOW=$(node scripts/supply-host-provided-deps.mjs --allow-pattern)
           node dist/index.js 2>&1 | tee /tmp/gh-load.txt || true
           if grep -q "ERR_MODULE_NOT_FOUND\|Cannot find module" /tmp/gh-load.txt \
@@ -420,10 +422,11 @@ jobs:
         shell: bash
         run: | # zizmor: ignore[adhoc-packages]
           INSTALL_DIR=$(npm root -g)/pi-lens
-          ARGS=$(node scripts/supply-host-provided-deps.mjs --install-args)
-          echo "Supplying: $ARGS"
+          SUPPLY=scripts/supply-host-provided-deps.mjs
+          read -ra HOST_PKGS <<< "$(node "$SUPPLY" --install-args)"
+          echo "Supplying: ${HOST_PKGS[*]}"
           npm install --no-save --no-audit --no-fund \
-            --prefix "$INSTALL_DIR" $ARGS
+            --prefix "$INSTALL_DIR" "${HOST_PKGS[@]}"
 
       - name: Verify extension entry loads (catches missing node_modules deps)
         shell: bash
