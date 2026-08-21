@@ -140,11 +140,22 @@ function handle(raw) {
 					...(process.env.FAKE_LSP_POSITION_ENCODING
 						? { positionEncoding: process.env.FAKE_LSP_POSITION_ENCODING }
 						: {}),
-					hoverProvider: true,
+					// #1969: capability knobs, so a test can build a server that
+					// advertises no symbol provider — the ast-grep shape, where
+					// the old ungated `workspace/symbol` liveness probe wrote an
+					// unimplemented-method error into the server on every ping.
+					// Default stays "advertise everything", as it always was.
+					...(process.env.FAKE_LSP_NO_HOVER === "1"
+						? {}
+						: { hoverProvider: true }),
 					definitionProvider: true,
 					referencesProvider: true,
-					documentSymbolProvider: true,
-					workspaceSymbolProvider: true,
+					...(process.env.FAKE_LSP_NO_DOCUMENT_SYMBOL === "1"
+						? {}
+						: { documentSymbolProvider: true }),
+					...(process.env.FAKE_LSP_NO_WORKSPACE_SYMBOL === "1"
+						? {}
+						: { workspaceSymbolProvider: true }),
 					codeActionProvider: { resolveProvider: true },
 					executeCommandProvider: {
 						commands: ["fake.doThing", "fake.applyEdit"],
@@ -161,6 +172,15 @@ function handle(raw) {
 
 	// Ignore notifications without id
 	if (data.method === "initialized") {
+		// #1969: die mid-session with a chosen exit code and NOTHING on stderr —
+		// the exact ast-grep shape (code=1, empty stderr) whose cause used to
+		// leave no record. Silent by construction: this path writes no stderr.
+		if (process.env.FAKE_LSP_SELF_EXIT_CODE) {
+			const code = Number(process.env.FAKE_LSP_SELF_EXIT_CODE);
+			const delayMs = Number(process.env.FAKE_LSP_SELF_EXIT_DELAY_MS ?? "50");
+			setTimeout(() => process.exit(code), delayMs);
+			return;
+		}
 		// #1620 residual: a live-process fixture for "stdin stops draining"
 		// (distinct from FAKE_LSP_NOTIFY_BACKLOG_WEDGE's queue-depth trigger,
 		// which still reads N messages first). Pausing right after the
