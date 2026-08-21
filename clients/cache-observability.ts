@@ -23,7 +23,6 @@
  *      pair is removed; signal 3 below (`cache_prefix_break`) already covers
  *      first-message stability with an unbounded hash and never truncates.
  *
-
  *   3. Request-side prefix stability (`cache_prefix_break`) — a content hash of
  *      `messages[0]` observed on every `context` call. After #1016 the first
  *      message must stay byte-stable across a whole session; a logged CHANGE

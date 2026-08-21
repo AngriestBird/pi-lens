@@ -282,8 +282,13 @@ describe("cache-observability — context observations (#1018 follow-up)", () =>
 		expect(metadata).not.toHaveProperty("firstMessageChanged");
 		expect(metadata).not.toHaveProperty("firstMessageChange");
 		expect(metadata).not.toHaveProperty("firstMessageHashTruncated");
+		expect(metadata).not.toHaveProperty("beforeFirstMessageHash");
+		expect(metadata).not.toHaveProperty("afterFirstMessageHash");
 		expect(metadata).not.toHaveProperty("prefixHashTruncated");
 		expect(metadata).not.toHaveProperty("prefixContentHashTruncated");
+		expect(metadata).not.toHaveProperty("prefixMessageCountTruncated");
+		expect(metadata).not.toHaveProperty("beforePrefixHash");
+		expect(metadata).not.toHaveProperty("afterPrefixHash");
 		expect(metadata).not.toHaveProperty("prefixObservation");
 		expect(metadata).not.toHaveProperty("prefixObservationUnknown");
 		expect(metadata).not.toHaveProperty("prefixBaseline");
