@@ -12,7 +12,7 @@ import {
 	createAvailabilityChecker,
 	resolveToolCommandWithInstallFallback,
 } from "./utils/runner-helpers.js";
-import { spawnFailedWithNoOutput } from "./utils/spawn-outcome.js";
+import { parseToolRun } from "./utils/tool-failure.js";
 
 const hadolint = createAvailabilityChecker("hadolint", ".exe");
 
@@ -65,7 +65,7 @@ const hadolintRunner: RunnerDefinition = {
 		}
 
 		let cmd: string | null = null;
-		if (await (hadolint.isAvailableAsync(cwd))) {
+		if (await hadolint.isAvailableAsync(cwd)) {
 			cmd = hadolint.getCommand(cwd);
 		} else {
 			cmd = await resolveToolCommandWithInstallFallback(cwd, "hadolint");
@@ -81,12 +81,15 @@ const hadolintRunner: RunnerDefinition = {
 			{ cwd },
 		);
 
-		if (spawnFailedWithNoOutput(result)) {
-			return { status: "skipped", diagnostics: [], semantic: "none" };
-		}
+		// #1948: hadolint runs with `--no-fail`, so it exits 0 even when it finds
+		// something. A nonzero exit therefore means hadolint itself failed, and
+		// zero parsed diagnostics out of whatever it printed is a parser break.
+		const run = parseToolRun("hadolint", { result }, (out) =>
+			parseHadolintOutput(out, ctx.filePath),
+		);
+		if (run.skipped) return run.skipped;
 
-		const output = result.stdout || "";
-		const diagnostics = parseHadolintOutput(output, ctx.filePath);
+		const diagnostics = run.diagnostics;
 
 		if (diagnostics.length === 0) {
 			return { status: "succeeded", diagnostics: [], semantic: "none" };

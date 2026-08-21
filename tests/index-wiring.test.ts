@@ -935,6 +935,13 @@ describe("stale extension ctx tolerance in event handlers (#1925)", () => {
 		{ event: "agent_end", payload: { messages: [] } },
 		{ event: "turn_end", payload: {} },
 		{ event: "agent_settled", payload: {} },
+		// #1929: both of these already SURVIVED a stale ctx before the fix — each
+		// had a total try/catch — so the "resolves" half passes either way. The
+		// ledger half is the whole test. Without the wrapper the skip is logged as
+		// `session_start crashed: …` / `context event error: …` and counted
+		// nowhere, so `expectStaleSkipRecorded` is what reds on pre-fix code.
+		{ event: "session_start", payload: makeSessionStartEvent() },
+		{ event: "context", payload: { messages: [] } },
 	];
 
 	for (const { event, payload } of CASES) {
@@ -947,6 +954,74 @@ describe("stale extension ctx tolerance in event handlers (#1925)", () => {
 			).resolves.not.toThrow();
 
 			expectStaleSkipRecorded(event);
+		});
+	}
+
+	it("hands the host its own message list back when context gets a stale ctx (#1929)", async () => {
+		// `context` is the one wrapped handler whose return value the host
+		// consumes. The stale path must answer `undefined` — pi's "this extension
+		// contributed nothing" — so the host keeps the transcript it already had.
+		// Any other value (a partial injection, an echoed array) would change what
+		// pi builds the request from at the exact moment pi-lens knows least.
+		const pi = createPiMock();
+		extension(pi.asExtensionAPI());
+		const existing = [{ role: "user", content: "keep me" }];
+
+		const result = await pi.emit(
+			"context",
+			{ messages: existing },
+			makeStaleCtx(),
+		);
+
+		expect(result).toBeUndefined();
+		expect(existing).toEqual([{ role: "user", content: "keep me" }]);
+		expectStaleSkipRecorded("context");
+	});
+
+	/**
+	 * A ctx that PASSES the pre-dispatch probe and dies afterwards (#1929).
+	 *
+	 * `makeStaleCtx` is dead on arrival, so the wrapper's probe catches it and
+	 * the handler never runs. The other half of the race is a swap that lands
+	 * while the handler is already inside its own body. `session_start` and
+	 * `context` each wrap their body in a total catch, so without an explicit
+	 * rethrow that catch eats the stale throw and the wrapper never sees it.
+	 */
+	function makeCtxThatDiesMidHandler() {
+		const ctx = makeCtx({ sessionId: "dies-mid-handler" });
+		ctx.isIdle = () => true;
+		Object.defineProperty(ctx, "cwd", {
+			configurable: true,
+			get() {
+				throw new Error(
+					"This extension ctx is stale after session replacement or reload",
+				);
+			},
+		});
+		return ctx;
+	}
+
+	for (const { event, payload } of [
+		{ event: "session_start", payload: makeSessionStartEvent() },
+		{ event: "context", payload: { messages: [] } },
+	]) {
+		it(`hands a MID-handler stale throw to the wrapper from ${event} (#1929)`, async () => {
+			const pi = createPiMock();
+			extension(pi.asExtensionAPI());
+
+			await expect(
+				pi.emit(event, payload, makeCtxThatDiesMidHandler()),
+			).resolves.not.toThrow();
+
+			// Without the rethrow this passes the "resolves" half and records
+			// nothing: the handler's own catch logs `… crashed` / `… event error`
+			// and the class stays invisible.
+			expectStaleSkipRecorded(event);
+			expect(
+				getDegradationSummary().find(
+					(entry) => entry.kind === "extension-ctx-stale",
+				)?.latestReasons[0]?.reason,
+			).toContain("mid-handler");
 		});
 	}
 

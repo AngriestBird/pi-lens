@@ -12,7 +12,7 @@ import {
 	createAvailabilityChecker,
 	resolveToolCommandWithInstallFallback,
 } from "./utils/runner-helpers.js";
-import { skipUnlessToolRan } from "./utils/tool-failure.js";
+import { parseToolRun } from "./utils/tool-failure.js";
 
 const vale = createAvailabilityChecker("vale", ".exe");
 
@@ -141,7 +141,7 @@ const valeRunner: RunnerDefinition = {
 		}
 
 		let cmd: string | null = null;
-		if (await (vale.isAvailableAsync(cwd))) {
+		if (await vale.isAvailableAsync(cwd)) {
 			cmd = vale.getCommand(cwd);
 		} else {
 			cmd = await resolveToolCommandWithInstallFallback(cwd, "vale");
@@ -161,11 +161,16 @@ const valeRunner: RunnerDefinition = {
 		// zero alerts, and reported clean prose. No exit-code table: Vale's
 		// nonzero codes vary with --minAlertLevel, so the conservative
 		// nothing-to-parse rule is the only safe discriminator here.
-		const skipped = skipUnlessToolRan("vale", { result });
-		if (skipped) return skipped;
+		//
+		// #1948: `parseToolRun` adds the second gate. Vale's `Data.Files`
+		// envelope bug produced exactly this shape — exit 1, a full JSON
+		// report on stdout, zero alerts parsed — and left no record.
+		const run = parseToolRun("vale", { result }, (raw) =>
+			parseValeOutput(raw, ctx.filePath),
+		);
+		if (run.skipped) return run.skipped;
 
-		const raw = result.stdout || "";
-		const diagnostics = parseValeOutput(raw, ctx.filePath);
+		const diagnostics = run.diagnostics;
 
 		if (diagnostics.length === 0) {
 			return { status: "succeeded", diagnostics: [], semantic: "none" };
