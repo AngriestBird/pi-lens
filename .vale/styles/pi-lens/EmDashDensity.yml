@@ -9,5 +9,9 @@ nonword: true
 # whose third-plus em dash pairs with neither flagged one, and it fires once
 # per qualifying pair rather than reporting a true per-paragraph count. Good
 # enough as an advisory nudge against em-dash chains; not a hard gate.
+# `scope: paragraph` also means this never sees a blockquote's paragraphs
+# (Vale's paragraph selector doesn't descend into `>` blocks), so a
+# two-em-dash paragraph quoted inside a blockquote is silently skipped
+# (#1933 review F6).
 tokens:
   - '—[\s\S]*—'
