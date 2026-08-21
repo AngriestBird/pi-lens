@@ -762,15 +762,16 @@ export function _resetProjectReportBuildGuardForTests(): void {
  */
 type BackgroundBuildTrigger = "started" | "already_running";
 
-interface BackgroundBuildDeps {
-	buildOrUpdateGraph: (
-		cwd: string,
-		changedFiles: string[],
-		facts: FactStore,
-	) => Promise<unknown>;
-	isGraphBuildInFlight: (cwd: string, changedFiles?: string[]) => boolean;
-	FactStore: new () => FactStore;
-}
+/**
+ * The builder entry points the trigger needs, taken from the module's own
+ * types rather than re-declared here, so a signature change cannot drift past
+ * this call site. `projectReport` already imports the builder dynamically (to
+ * keep the module graph acyclic) and hands the pair in.
+ */
+type BackgroundBuildDeps = Pick<
+	typeof import("./review-graph/builder.js"),
+	"buildOrUpdateGraph" | "isGraphBuildInFlight"
+> & { FactStore: new () => FactStore };
 
 function triggerBackgroundGraphBuild(
 	cwd: string,
