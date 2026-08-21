@@ -175,7 +175,28 @@ describe("turn-end past-EOF gate for inline blockers (#1641)", () => {
 		}
 	});
 
-	it("re-arms: a transient shrink-then-restore un-demotes on the next turn end", async () => {
+	/**
+	 * #1944 SUPERSEDES the cross-turn arm of #1641's re-arm property, and this
+	 * test encodes the replacement contract.
+	 *
+	 * #1641 kept a past-EOF demotion in the store indefinitely so a
+	 * shrink-then-restore could un-demote it. Live measurement (session
+	 * 01a0234c) showed the cost of "indefinitely": the record re-served on
+	 * every turn end for 80+ minutes, carrying full blocker authority in its
+	 * body and citing lines the file no longer had. #1944 delivers such a
+	 * record ONCE, degraded, then retires it.
+	 *
+	 * What that gives up, stated plainly: an out-of-band restore — the file
+	 * grows back past the cited line WITHOUT going through pi-lens's write
+	 * path — no longer resurrects the old verdict. A restore that DOES go
+	 * through the write path re-dispatches the file and records a fresh
+	 * verdict, which is better evidence than the retired one. The lost case is
+	 * re-asserting a verdict at full authority over content nothing re-scanned.
+	 *
+	 * The gate itself still re-arms rather than latching: nothing marks the
+	 * FILE as permanently suspect, so the next dispatch of it starts clean.
+	 */
+	it("retires a delivered past-EOF demotion instead of re-arming it (#1944)", async () => {
 		const env = setupTestEnvironment("pi-lens-past-eof-turnend-rearm-");
 		try {
 			const runtime = new RuntimeCoordinator();
@@ -213,8 +234,10 @@ describe("turn-end past-EOF gate for inline blockers (#1641)", () => {
 				"[stale — re-run to confirm]",
 			);
 
-			// The file grows back past the cited line — no latch, the gate must
-			// re-derive from current disk state on the next turn end. Re-touch the
+			// #1944: the record was retired by the delivery above.
+			expect(runtime.getInlineBlockersSnapshot()).toHaveLength(0);
+
+			// The file grows back past the cited line, out of band. Re-touch the
 			// turn-modified bookkeeping too: `handleTurnEnd` early-returns (and
 			// leaves the previous cached findings untouched) when it sees no
 			// modified files this turn, which a second `handleTurnEnd` call
@@ -237,9 +260,12 @@ describe("turn-end past-EOF gate for inline blockers (#1641)", () => {
 			await handleTurnEnd(
 				makeTurnEndDeps(runtime, cacheManager, { ctxCwd: env.tmpDir }),
 			);
+			// No resurrection: the retired verdict does not come back at full
+			// authority just because the coordinates exist again. Only a fresh
+			// dispatch of the file can put a blocker back in the store.
+			expect(runtime.getInlineBlockersSnapshot()).toHaveLength(0);
 			const healedContent = readTurnEndContent(cacheManager, env.tmpDir);
-			expect(healedContent).toContain("Unresolved from this turn");
-			expect(healedContent).not.toContain("[stale — re-run to confirm]");
+			expect(healedContent).not.toContain("Unresolved from this turn");
 		} finally {
 			env.cleanup();
 		}

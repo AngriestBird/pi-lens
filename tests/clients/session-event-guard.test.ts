@@ -16,6 +16,7 @@ import {
 import {
 	isStaleExtensionCtxError,
 	wrapSessionEventHandler,
+	wrapSessionEventHandlerWithResult,
 } from "../../clients/session-event-guard.js";
 import { makeStaleCtx, STALE_CTX_MESSAGE } from "../support/pi-mock.js";
 
@@ -146,6 +147,108 @@ describe("wrapSessionEventHandler (#1925)", () => {
 
 		expect(() => guarded({} as never, makeStaleCtx() as never)).not.toThrow();
 		expect(staleGroup()?.count).toBe(1);
+	});
+});
+
+/**
+ * The value-returning variant (#1929).
+ *
+ * `context` must hand pi a message list on the live path, so it could not use
+ * the void wrapper: a skip resolving to `undefined` was a guess about what
+ * `undefined` means to the host, not a stated decision. This variant makes the
+ * stale-path value an explicit argument. These tests use a SENTINEL fallback,
+ * not `undefined`, so a wrapper that quietly hardcodes `undefined` again reds
+ * here rather than passing by coincidence.
+ */
+describe("wrapSessionEventHandlerWithResult (#1929)", () => {
+	const FALLBACK = { fallback: true } as const;
+
+	beforeEach(() => {
+		resetDegradationLedger();
+	});
+
+	function guard(handler: (event: unknown, ctx: unknown) => unknown) {
+		return wrapSessionEventHandlerWithResult<unknown, unknown, unknown>(
+			"context",
+			handler,
+			{ onStaleResult: () => FALLBACK },
+		);
+	}
+
+	it("returns the handler's own value on a live ctx and calls no fallback", () => {
+		const onStaleResult = vi.fn(() => ({ messages: ["fallback"] }));
+		const guarded = wrapSessionEventHandlerWithResult<
+			unknown,
+			unknown,
+			{ messages: string[] }
+		>("context", () => ({ messages: ["injected"] }), { onStaleResult });
+
+		expect(guarded({}, liveCtx())).toEqual({ messages: ["injected"] });
+		expect(onStaleResult).not.toHaveBeenCalled();
+		expect(staleGroup()).toBeUndefined();
+	});
+
+	it("returns the STATED fallback, not undefined, when the ctx probes stale", () => {
+		const handler = vi.fn();
+		const guarded = guard(handler);
+
+		expect(guarded({}, makeStaleCtx())).toBe(FALLBACK);
+		expect(handler).not.toHaveBeenCalled();
+		expect(staleGroup()?.latestReasons[0]?.reason).toContain("pre-dispatch");
+	});
+
+	it("returns the stated fallback for a stale throw racing in mid-handler", () => {
+		const guarded = guard(() => {
+			throw new Error(STALE_CTX_MESSAGE);
+		});
+
+		expect(guarded({}, liveCtx())).toBe(FALLBACK);
+		expect(staleGroup()?.latestReasons[0]?.reason).toContain("mid-handler");
+	});
+
+	it("resolves an async stale rejection to the stated fallback", async () => {
+		const guarded = guard(async () => {
+			throw new Error(STALE_CTX_MESSAGE);
+		});
+
+		await expect(guarded({}, liveCtx())).resolves.toBe(FALLBACK);
+		expect(staleGroup()?.latestReasons[0]?.reason).toContain("mid-handler");
+	});
+
+	it("gives the fallback the EVENT and never the ctx that just died", () => {
+		// The ctx is the thing that proved dead. Passing it to the fallback would
+		// put a throwing accessor inside the guard that exists to absorb it.
+		const onStaleResult = vi.fn(() => FALLBACK);
+		const guarded = wrapSessionEventHandlerWithResult<unknown, unknown, unknown>(
+			"context",
+			vi.fn(),
+			{ onStaleResult },
+		);
+		const event = { messages: [{ role: "user", content: "keep me" }] };
+
+		expect(guarded(event, makeStaleCtx())).toBe(FALLBACK);
+		expect(onStaleResult).toHaveBeenCalledTimes(1);
+		expect(onStaleResult).toHaveBeenCalledWith(event);
+	});
+
+	it("keeps a NON-stale failure loud and records nothing", async () => {
+		const syncGuarded = guard(() => {
+			throw new Error("boom");
+		});
+		const asyncGuarded = guard(async () => {
+			throw new Error("boom");
+		});
+
+		expect(() => syncGuarded({}, liveCtx())).toThrow("boom");
+		await expect(asyncGuarded({}, liveCtx())).rejects.toThrow("boom");
+		expect(staleGroup()).toBeUndefined();
+	});
+
+	it("records under its own event name, like the void wrapper", () => {
+		guard(vi.fn())({}, makeStaleCtx());
+
+		expect(staleGroup()?.count).toBe(1);
+		expect(staleGroup()?.latestReasons[0]?.subject).toBe("context");
 	});
 });
 

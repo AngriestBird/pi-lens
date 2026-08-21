@@ -19,6 +19,10 @@
  * registers 12 handlers today. A regex that stops matching one of them, the
  * way the first draft missed the `on?.()` form, drops the count and reds here
  * instead of quietly excusing the handler it can no longer see.
+ *
+ * #1929 moved `session_start` and `context` out of the exemption table and into
+ * the wrapper, so seven registrations are wrapped and five carry a reason. The
+ * registration count is unchanged: neither handler was added or removed.
  */
 
 import * as fs from "node:fs";
@@ -51,14 +55,10 @@ const UNWRAPPED_HANDLER_REASONS: Readonly<Record<string, string>> = {
 		"Registered with no ctx parameter at all; it reads only pi-lens's own in-process state.",
 	tool_call:
 		"Delegates straight to handleToolCall, which already owns a total guard recording `tool-call-handler-throw` (clients/runtime-tool-call.ts); the registration body itself reads no ctx property.",
-	session_start:
-		"The ctx delivered here belongs to the session being announced, built moments earlier, so it cannot be one invalidated before delivery. The two calls that run BEFORE the handler's try (rememberOwnEventCtx, refreshCtxDerivedPlumbing, index.ts:1646-1647) read no ctx property: the first null-checks and stores the reference, the second only captures it in a closure.",
 	session_shutdown:
 		"Every ctx read is already inside a try/catch or behind noteSessionShutdown's probe, and skipping teardown on an inconclusive probe would leak the LSP fleet.",
 	message_end:
-		"The handler body is a total try/catch, and its only ctx readers are getStableSessionId (its own try/catch, index.ts:328) and classifyCurrentSessionEmission (probe-based, reads no ctx property). Nothing throws. The skip is unrecorded, which is the same observability gap as #1929.",
-	context:
-		"This handler must return the host's message list, so a wrapper short-circuiting to `undefined` would change what pi builds context from. Its two pre-try ctx readers (getStableSessionId and classifyCurrentSessionEmission, index.ts:2912-2913) are individually safe rather than covered by the try at :2947. The observability half is tracked in #1929.",
+		"The handler body is a total try/catch, and its only ctx readers are getStableSessionId (its own try/catch, index.ts:328) and classifyCurrentSessionEmission (probe-based, reads no ctx property). Nothing throws and nothing is skipped: a stale ctx degrades the cache_usage row to an unattributed sessionId instead. Wrapping it would DROP a row whose `message` payload is still valid, so the fix is a bounded attribution record, not a skip. Tracked in #1956.",
 };
 
 /** One `pi.on("<event>", ...)` registration found in index.ts. */
@@ -103,7 +103,14 @@ function scanRegistrations(): Registration[] {
 			event,
 			line: source.slice(0, match.index).split("\n").length,
 			// The wrapper must name the SAME event, or the ledger subject lies.
-			wrapped: args.includes(`wrapSessionEventHandler("${event}"`),
+			// Both entry points count (#1929): `wrapSessionEventHandlerWithResult`
+			// is the same policy with a stated stale-path value, for a handler
+			// whose return the host consumes. Matched with a regex rather than a
+			// substring because the formatter puts the event name on its own line
+			// once the call gets long enough.
+			wrapped: new RegExp(
+				`wrapSessionEventHandler(?:WithResult)?\\s*\\(\\s*"${event}"`,
+			).test(args),
 		});
 		match = opener.exec(source);
 	}
@@ -135,14 +142,14 @@ describe("session-event stale-ctx guard sweep (#1925)", () => {
 			scannedCount: registrations.length,
 			minScanned: 12,
 			remediation:
-				"Wrap it with wrapSessionEventHandler(<event>, handler, { dbg }) from clients/session-event-guard.ts, or add the event to UNWRAPPED_HANDLER_REASONS with the mechanism that makes a stale ctx unreachable for it.",
+				"Wrap it with wrapSessionEventHandler(<event>, handler, { dbg }) from clients/session-event-guard.ts — or wrapSessionEventHandlerWithResult(<event>, handler, { dbg, onStaleResult }) when the host consumes the handler's return value — or add the event to UNWRAPPED_HANDLER_REASONS with the mechanism that makes a stale ctx unreachable for it.",
 		});
 		expect(audit.problems).toEqual([]);
 	});
 
-	it("keeps the five known-reachable handlers wrapped", () => {
-		// The population #1925 fixed, pinned by name: an unwrap shows up here
-		// even if someone also adds a reason for it.
+	it("keeps the seven known-reachable handlers wrapped", () => {
+		// The population #1925 fixed plus the two #1929 added, pinned by name: an
+		// unwrap shows up here even if someone also adds a reason for it.
 		const wrapped = new Set(
 			registrations
 				.filter((entry) => entry.wrapped)
@@ -154,6 +161,8 @@ describe("session-event stale-ctx guard sweep (#1925)", () => {
 			"agent_end",
 			"turn_end",
 			"agent_settled",
+			"session_start",
+			"context",
 		]) {
 			expect(wrapped, `${event} lost its stale-ctx wrapper`).toContain(event);
 		}

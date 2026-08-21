@@ -93,11 +93,13 @@ const oxlintRunner: RunnerDefinition = {
 			timeout: 30000,
 		});
 
-		// Oxlint returns non-zero when issues found
-		if (result.status === 0) {
-			return { status: "succeeded", diagnostics: [], semantic: "none" };
-		}
-
+		// Oxlint exits 0 whenever nothing at ERROR severity was found — that
+		// includes a run that found only warnings, its own default severity
+		// (#1947). A run that found nothing at all also exits 0, but still
+		// prints a report with an empty `diagnostics` array, so parsing
+		// unconditionally and branching on the parsed count (below) tells the
+		// two apart instead of the exit code discarding the warning case.
+		//
 		// Parse JSON output. Fall back to the unix-format parser if JSON parsing
 		// fails (older oxlint versions, malformed stderr noise, etc.) — keeps the
 		// runner producing diagnostics even when the structured-fix metadata is
@@ -114,8 +116,20 @@ const oxlintRunner: RunnerDefinition = {
 		}
 
 		const hasBlocking = diagnostics.some((d) => d.semantic === "blocking");
+		// A warning-only result on exit 0 is oxlint's normal outcome, not a
+		// failure: exit 0 means nothing hit ERROR severity. `status: "failed"`
+		// here would stop this arm from reporting "succeeded", which breaks two
+		// things downstream — plan.ts's ["eslint", "oxlint", "biome-check-json"]
+		// fallback group only stops at the first `status: "succeeded"` runner
+		// (dispatcher.ts's `runGroup`), so biome-check-json would run again on
+		// every warning-only save (extra spawns, a possible install, duplicate
+		// findings); and it would mismatch the sibling convention (biome-check,
+		// golangci-lint, rubocop) of keying `status` off blocking severity, not
+		// off the tool's raw exit code. The findings themselves still reach the
+		// delivery pipeline regardless of `status` — dispatcher.ts buckets by
+		// each diagnostic's own `semantic`, so a warning stays a warning.
 		return {
-			status: "failed",
+			status: !hasBlocking && result.status === 0 ? "succeeded" : "failed",
 			diagnostics,
 			semantic: hasBlocking ? "blocking" : "warning",
 		};
