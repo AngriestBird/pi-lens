@@ -700,7 +700,7 @@ export const EXEMPT_SESSION_STATE_FILES: Readonly<Record<string, string>> = {
 	"dispatch/lazy.ts": "the lazy dispatch-integration import cell",
 	"extension-log.ts": "console-method guard installation",
 	"cache-observability.ts":
-		"cache-prefix observation, already keyed by session id and cleared per session by its own caller",
+		"cache-prefix observation and, since #1071, per-session miss-attribution state; both are keyed by session id, bounded by the same LRU cap, and cleared per session by their own caller (clearCachePrefixSession)",
 
 	// --- Turn- or call-scoped working state: shorter-lived than a session, so
 	// a session_start reset would be redundant, not missing. ---
@@ -760,7 +760,8 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	"bounded-telemetry.ts": 2,
 	"bus-events-logger.ts": 1,
 	"bus-publish.ts": 0,
-	"cache-observability.ts": 1,
+	// #1071 added the per-session miss-attribution ledger (1 → 2).
+	"cache-observability.ts": 2,
 	"degradation-ledger.ts": 3,
 	"diagnostic-dispositions.ts": 1,
 	"diagnostic-line-freshness.ts": 1,
