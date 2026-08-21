@@ -34,6 +34,95 @@ pi-lens gives AI coding agents fast, language-aware feedback while they write/ed
 - MCP server (experimental) so Claude Code or any MCP client can drive the
   same diagnostics/read-substitute tools pi-lens exposes to pi
 
+## Architecture
+
+Host events enter through one wrapper. They fan out into the edit-time lane and
+the LSP lane. Both lanes write into the findings stores. Nothing reaches the
+agent until a freshness gate or an explicit age label clears it.
+
+```mermaid
+flowchart TD
+    subgraph host["pi host"]
+        HOST["Host events<br/>tool_call, tool_result, turn_start/end,<br/>session_start/shutdown, context"]
+        WRAP["Stale-ctx wrapper<br/>skips and counts events on a replaced session"]
+    end
+
+    subgraph guards["Guards"]
+        RG["Read-guard<br/>blocks edits that lack prior reading"]
+        GG["Git-guard<br/>holds commit/push while findings stay unresolved"]
+    end
+
+    subgraph edit["Edit-time lane"]
+        PIPE["Post-write pipeline<br/>secrets, format, autofix, sync, lint, tests"]
+        PLAN["Dispatch plan<br/>per file kind, per capability group"]
+        RUN["Runners<br/>format, lint, types, security, smells, docs"]
+        STRUCT["Structural rules<br/>tree-sitter queries and ast-grep"]
+    end
+
+    subgraph lsp["LSP lane"]
+        POOL["Client pool<br/>warm reuse, idle eviction"]
+        DIAGS["File and workspace diagnostics"]
+        CASC["Impact cascade<br/>tiered wait policy"]
+    end
+
+    STORES["Findings stores<br/>widget state, warning caches, project snapshot"]
+
+    subgraph gate["Freshness gating"]
+        FRESH["Path freshness<br/>mtime vs scan time, past-EOF, dependency drift"]
+        DISPO["Dispositions<br/>false-positive, suppress, defer, flagged"]
+        LABEL["Explicit age label<br/>for findings no path gate can check"]
+    end
+
+    subgraph deliver["Delivery surfaces"]
+        TURN["Turn-end findings injection"]
+        WIDGET["Widget and footer tally"]
+        TOOLS["lens_diagnostics tool"]
+        NUDGE["Agent nudges"]
+    end
+
+    SESSION["Session lifecycle<br/>primary, sequential replacement, concurrent secondary"]
+    SINKS["Observability sinks<br/>latency.log, degradation ledger, bounded telemetry,<br/>cache observability, cascade and tree-sitter logs"]
+
+    HOST --> WRAP
+    WRAP -->|tool_call| RG
+    WRAP -->|tool_call| GG
+    WRAP -->|tool_result| PIPE
+    WRAP -->|session_start| SESSION
+    SESSION --> POOL
+    SESSION --> STORES
+    PIPE --> PLAN
+    PLAN --> RUN
+    PLAN --> STRUCT
+    PIPE --> POOL
+    POOL --> DIAGS
+    DIAGS --> CASC
+    RUN --> STORES
+    STRUCT --> STORES
+    DIAGS --> STORES
+    CASC --> STORES
+    STORES --> FRESH
+    STORES --> LABEL
+    FRESH --> DISPO
+    DISPO --> TURN
+    DISPO --> WIDGET
+    DISPO --> TOOLS
+    LABEL --> TURN
+    LABEL --> NUDGE
+    TURN --> GG
+    WRAP --> SINKS
+    PIPE --> SINKS
+    POOL --> SINKS
+    RG --> SINKS
+    GG --> SINKS
+    FRESH --> SINKS
+```
+
+Architecture-level view, updated when a lane changes. Per-tool inventories live
+in [features](docs/features.md) and
+[language coverage](docs/language-coverage.md). Today the edit-time lane carries
+45+ runner modules over 35+ file kinds, and the LSP lane speaks to a dozen-plus
+language servers.
+
 ## Install
 
 ```bash
