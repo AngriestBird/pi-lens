@@ -371,7 +371,7 @@ describe("oxlint runner", () => {
 		}
 	});
 
-	it("reports a config-excluded file as skipped, not succeeded (dogfood #1985 review F2b)", async () => {
+	it("reports a config-excluded file as skipped, not succeeded (dogfood #1985 review F2b/R2)", async () => {
 		// Nested-config discovery means a file under a directory with its own
 		// `.oxlintrc.json` ignorePatterns — or covered by a parent config's
 		// ignorePatterns — makes oxlint report `number_of_files: 0` and an empty
@@ -380,21 +380,34 @@ describe("oxlint runner", () => {
 		// this file" and "this file has no findings" are indistinguishable — the
 		// AGENTS.md empty-result invariant (an empty result must distinguish
 		// clean from errored/excluded).
+		//
+		// #1985 review round 2: a hand-built `JSON.stringify({...})` double
+		// passed against a parser that bailed on real bytes, because real
+		// oxlint prints a "No files found to lint." BANNER LINE to stdout
+		// BEFORE the JSON when `number_of_files` is 0 — the #1946 fixture
+		// discipline exists for exactly this gap. This is the VERBATIM stdout
+		// `npx oxlint@1.79.0 --format json <excluded-file>` produced (exit 1,
+		// stderr empty), captured against a real `.oxlintrc.json` with
+		// `ignorePatterns` covering the target file.
 		const env = setupTestEnvironment("pi-lens-oxlint-excluded-");
 		try {
 			const filePath = path.join(env.tmpDir, "sample.ts");
 			fs.writeFileSync(filePath, "const unused = 1;\n");
 
+			const CAPTURED_NO_FILES_STDOUT =
+				"No files found to lint. Please check your paths and ignore patterns.\n" +
+				'{ "diagnostics": [],\n' +
+				'              "number_of_files": 0,\n' +
+				'              "number_of_rules": 96,\n' +
+				'              "threads_count": 16,\n' +
+				'              "start_time": 0.009533\n' +
+				"            }\n" +
+				"            ";
+
 			safeSpawnAsync.mockResolvedValueOnce({
 				error: null,
 				status: 1,
-				stdout: JSON.stringify({
-					diagnostics: [],
-					number_of_files: 0,
-					number_of_rules: 96,
-					threads_count: 16,
-					start_time: 0.01,
-				}),
+				stdout: CAPTURED_NO_FILES_STDOUT,
 				stderr: "",
 			});
 
