@@ -21,10 +21,27 @@
  *
  * #1924 fixed that for `agent_settled` with an inline try/catch. #1925 found
  * four more handlers with the same shape. Five inline copies of one policy is
- * the parallel-state defect AGENTS.md names, so the policy lives here instead
- * and every session-event registration in `index.ts` goes through
- * {@link wrapSessionEventHandler}. `agent_settled` is a consumer of this path,
- * not a special case.
+ * the parallel-state defect AGENTS.md names, so the policy lives here instead.
+ * `agent_settled` is a consumer of this path, not a special case.
+ *
+ * ## What this module actually covers
+ *
+ * Not every `pi.on` registration in `index.ts` goes through here, and the doc
+ * used to read as if they all did. Seven do today:
+ *
+ * - {@link wrapSessionEventHandler} — `tool_result`, `turn_start`,
+ *   `agent_end`, `turn_end`, `agent_settled` (#1925) and `session_start`
+ *   (#1929). All six return nothing, so a skipped event resolving to
+ *   `undefined` is exactly their own early-exit value.
+ * - {@link wrapSessionEventHandlerWithResult} — `context` (#1929), which must
+ *   hand the host back a message list on the live path.
+ *
+ * Five registrations stay unwrapped on purpose: `resources_discover`,
+ * `session_before_fork`, `tool_call`, `session_shutdown`, and `message_end`.
+ * `tests/clients/session-event-guard-sweep.test.ts` is the source of truth for
+ * that split. It scans every registration in `index.ts` and reds unless the
+ * handler is wrapped or carries a written reason, so this paragraph can go
+ * stale but the contract cannot.
  *
  * The wrapper does three things and nothing else:
  *
@@ -114,20 +131,17 @@ function isThenable(value: unknown): value is PromiseLike<unknown> {
 }
 
 /**
- * Wrap one `pi.on` handler so a stale ctx becomes an observable no-op instead
- * of a throw into the host.
- *
- * The returned function keeps the handler's own signature and its return
- * value, so a wrapped registration is a drop-in for the bare one. A skipped
- * event resolves to `undefined`, which is what every one of pi-lens's session
- * handlers already returns on its early-exit paths.
+ * The one policy. Both public wrappers are this function with a different
+ * stale-path value, so the probe point, the classification, and the record can
+ * never drift apart between a void handler and a value-returning one.
  */
-export function wrapSessionEventHandler<H extends SessionEventHandler>(
+function guardSessionEvent<E, C, R>(
 	eventName: string,
-	handler: H,
-	options: SessionEventGuardOptions = {},
-): H {
-	const skip = (detectedAt: StaleDetectionPoint): undefined => {
+	handler: (event: E, ctx: C) => R,
+	onStaleResult: (event: E) => Awaited<R>,
+	options: SessionEventGuardOptions,
+): (event: E, ctx: C) => R {
+	const skip = (event: E, detectedAt: StaleDetectionPoint): Awaited<R> => {
 		recordStaleSkip(eventName, detectedAt);
 		try {
 			options.dbg?.(
@@ -136,29 +150,87 @@ export function wrapSessionEventHandler<H extends SessionEventHandler>(
 		} catch {
 			// A debug sink must never decide whether an event is handled.
 		}
-		return undefined;
+		return onStaleResult(event);
 	};
 
-	const guarded = (event: never, ctx: never): ReturnType<H> | undefined => {
+	return (event: E, ctx: C): R => {
 		// `false` is the only confirmed verdict. `undefined` means the probe
 		// could not tell, and an inconclusive probe must dispatch.
-		if (probeCtxActive(ctx) === false) return skip("pre-dispatch");
+		if (probeCtxActive(ctx) === false)
+			return skip(event, "pre-dispatch") as unknown as R;
 		try {
-			const result = handler(event, ctx) as ReturnType<H>;
+			const result = handler(event, ctx);
 			if (isThenable(result)) {
 				// Recover the rejection in place. The host awaits the same promise
 				// it would have awaited anyway; it just resolves instead.
 				return Promise.resolve(result).catch((err: unknown) => {
-					if (isStaleExtensionCtxError(err)) return skip("mid-handler");
+					if (isStaleExtensionCtxError(err)) return skip(event, "mid-handler");
 					throw err;
-				}) as ReturnType<H>;
+				}) as unknown as R;
 			}
 			return result;
 		} catch (err) {
-			if (isStaleExtensionCtxError(err)) return skip("mid-handler");
+			if (isStaleExtensionCtxError(err))
+				return skip(event, "mid-handler") as unknown as R;
 			throw err;
 		}
 	};
+}
 
-	return guarded as H;
+/**
+ * Wrap one `pi.on` handler so a stale ctx becomes an observable no-op instead
+ * of a throw into the host.
+ *
+ * The returned function keeps the handler's own signature and its return
+ * value, so a wrapped registration is a drop-in for the bare one. A skipped
+ * event resolves to `undefined`, which is what every handler wrapped this way
+ * already returns on its early-exit paths.
+ *
+ * Use {@link wrapSessionEventHandlerWithResult} when `undefined` is NOT the
+ * handler's own no-op value.
+ */
+export function wrapSessionEventHandler<H extends SessionEventHandler>(
+	eventName: string,
+	handler: H,
+	options: SessionEventGuardOptions = {},
+): H {
+	return guardSessionEvent<never, never, unknown>(
+		eventName,
+		handler,
+		() => undefined,
+		options,
+	) as H;
+}
+
+export interface SessionEventResultGuardOptions<E, R>
+	extends SessionEventGuardOptions {
+	/**
+	 * The value the host receives when the event is skipped. It takes the
+	 * EVENT, never the ctx: the ctx is the thing that just proved dead, and
+	 * reading it here would throw inside the guard that exists to absorb that
+	 * throw.
+	 *
+	 * State the value deliberately per event. `context` returns `undefined`,
+	 * pi's "this extension contributed nothing" answer, so the host keeps its
+	 * own message list untouched — never a partially built injection.
+	 */
+	onStaleResult: (event: E) => Awaited<R>;
+}
+
+/**
+ * {@link wrapSessionEventHandler} for a handler whose return value the host
+ * consumes (#1929).
+ *
+ * The live path returns exactly what the handler returned. The stale path
+ * returns `onStaleResult(event)` instead of assuming `undefined`, so a handler
+ * whose no-op value is something else does not get one silently substituted.
+ * Probe, classification, and the bounded record are identical to the void
+ * wrapper's — they are the same function underneath.
+ */
+export function wrapSessionEventHandlerWithResult<E, C, R>(
+	eventName: string,
+	handler: (event: E, ctx: C) => R,
+	options: SessionEventResultGuardOptions<E, R>,
+): (event: E, ctx: C) => R {
+	return guardSessionEvent(eventName, handler, options.onStaleResult, options);
 }
