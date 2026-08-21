@@ -2710,26 +2710,40 @@ function activateExtension(hostPi: ExtensionAPI) {
 				// gets FORMATTED instead of requeued (an inversion of the #1642
 				// harm this issue exists to fix) and the requeue branches become
 				// production-unreachable.
-				setAmbientAbortSignal(ctx?.signal);
 				try {
-					await runDeferredMutationDrain(ctx);
-				} catch (drainErr) {
-					dbg(`agent_settled deferred_mutation_drain crashed: ${drainErr}`);
-				} finally {
+					setAmbientAbortSignal(ctx?.signal);
+					try {
+						await runDeferredMutationDrain(ctx);
+					} catch (drainErr) {
+						if (isStaleExtensionCtxError(drainErr)) {
+							dbg("agent_settled deferred_mutation_drain skipped: session context is stale");
+							return;
+						}
+						dbg(`agent_settled deferred_mutation_drain crashed: ${drainErr}`);
+					} finally {
+						setAmbientAbortSignal(undefined);
+					}
+					const cwd = ctx?.cwd;
+					void runQuietWindow({
+						runtime,
+						dbg,
+						cwd,
+					}).catch((err) => {
+						dbg(`quiet_window crashed: ${err}`);
+					});
+					// #1123 item 4: dump active handles AFTER the quiet-window work is
+					// scheduled — the #1097-class leak (a stray ref'd timer surviving
+					// past settle) is only visible once whatever settle itself queued is
+					// already in flight. No-op unless PI_LENS_DEBUG_HANDLES=1.
+					dumpActiveHandles("agent_settled");
+				} catch (settledErr) {
 					setAmbientAbortSignal(undefined);
+					if (isStaleExtensionCtxError(settledErr)) {
+						dbg("agent_settled skipped: session context was replaced or reloaded");
+						return;
+					}
+					throw settledErr;
 				}
-				void runQuietWindow({
-					runtime,
-					dbg,
-					cwd: ctx?.cwd,
-				}).catch((err) => {
-					dbg(`quiet_window crashed: ${err}`);
-				});
-				// #1123 item 4: dump active handles AFTER the quiet-window work is
-				// scheduled — the #1097-class leak (a stray ref'd timer surviving
-				// past settle) is only visible once whatever settle itself queued is
-				// already in flight. No-op unless PI_LENS_DEBUG_HANDLES=1.
-				dumpActiveHandles("agent_settled");
 			},
 		);
 	} catch (registerErr) {
