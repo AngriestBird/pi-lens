@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { RunnerGroup } from "../../../../clients/dispatch/types.js";
 import { makeRunnerCtx } from "../../../support/runner-ctx.js";
 import { setupTestEnvironment } from "../../test-utils.js";
 
@@ -92,6 +93,138 @@ describe("oxlint runner", () => {
 				line: 1,
 				fixSuggestion: "Replace console.log with a logger",
 			});
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("reports exit-0 warning findings as succeeded, not failed (#1947, #1955 review F1)", async () => {
+		const env = setupTestEnvironment("pi-lens-oxlint-warning-exit-zero-");
+		try {
+			const filePath = path.join(env.tmpDir, "sample.ts");
+			fs.writeFileSync(filePath, "const unused = 1;\n");
+
+			// oxlint exits 0 whenever nothing reaches error severity, so a
+			// warning-only report — its default severity — arrives at exit 0.
+			safeSpawnAsync.mockResolvedValueOnce({
+				error: null,
+				status: 0,
+				stdout: JSON.stringify({
+					diagnostics: [
+						{
+							message: "Variable 'unused' is declared but never used",
+							code: "eslint(no-unused-vars)",
+							severity: "warning",
+							help: "Consider removing this declaration",
+							filename: filePath,
+							labels: [{ span: { line: 1, column: 7 } }],
+						},
+					],
+				}),
+				stderr: "",
+			});
+
+			const runner = (
+				await import("../../../../clients/dispatch/runners/oxlint.js")
+			).default;
+			const result = await runner.run({ ...createCtx(filePath, env.tmpDir), hasTool: async () => false } as never);
+
+			// status MUST be "succeeded", not "failed": plan.ts's
+			// ["eslint", "oxlint", "biome-check-json"] fallback group
+			// (dispatcher.ts runGroup) only stops at the first runner reporting
+			// `status: "succeeded"`. A "failed" status here would let
+			// biome-check-json run again on the same file for a mere warning —
+			// extra spawns, a possible install, duplicate findings.
+			expect(result.status).toBe("succeeded");
+			expect(result.semantic).toBe("warning");
+			expect(result.diagnostics).toHaveLength(1);
+			expect(result.diagnostics[0]).toMatchObject({
+				tool: "oxlint",
+				rule: "no-unused-vars",
+				severity: "warning",
+				semantic: "warning",
+			});
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("a warning-only exit-0 run stops plan.ts's jsts fallback group at oxlint (#1955 review F1)", async () => {
+		const env = setupTestEnvironment("pi-lens-oxlint-fallback-stop-");
+		try {
+			const filePath = path.join(env.tmpDir, "sample.ts");
+			fs.writeFileSync(filePath, "const unused = 1;\n");
+
+			safeSpawnAsync.mockResolvedValue({
+				error: null,
+				status: 0,
+				stdout: JSON.stringify({
+					diagnostics: [
+						{
+							message: "Variable 'unused' is declared but never used",
+							code: "eslint(no-unused-vars)",
+							severity: "warning",
+							filename: filePath,
+							labels: [{ span: { line: 1, column: 7 } }],
+						},
+					],
+				}),
+				stderr: "",
+			});
+
+			const oxlintRunner = (
+				await import("../../../../clients/dispatch/runners/oxlint.js")
+			).default;
+			const { dispatchForFile, RunnerRegistry } = await import(
+				"../../../../clients/dispatch/dispatcher.js"
+			);
+
+			// eslint has no config in this workspace, so the real eslint runner
+			// would skip — stand in with the same status so the fallback chain
+			// reaches oxlint exactly as plan.ts's
+			// ["eslint", "oxlint", "biome-check-json"] group would.
+			const biomeCalls: number[] = [];
+			const registry = new RunnerRegistry();
+			registry.register({
+				id: "eslint",
+				appliesTo: ["jsts"],
+				priority: 1,
+				enabledByDefault: true,
+				async run() {
+					return { status: "skipped", diagnostics: [], semantic: "none" };
+				},
+			});
+			registry.register({ ...oxlintRunner, priority: 2 });
+			registry.register({
+				id: "biome-check-json",
+				appliesTo: ["jsts"],
+				priority: 3,
+				enabledByDefault: true,
+				async run() {
+					biomeCalls.push(Date.now());
+					return { status: "succeeded", diagnostics: [], semantic: "none" };
+				},
+			});
+
+			const groups: RunnerGroup[] = [
+				{
+					mode: "fallback",
+					runnerIds: ["eslint", "oxlint", "biome-check-json"],
+				},
+			];
+			const ctx = {
+				...createCtx(filePath, env.tmpDir),
+				hasTool: async () => false,
+			};
+
+			const result = await dispatchForFile(ctx as never, groups, registry);
+
+			// The regression this pins: a "failed" status on oxlint's warning-only
+			// exit-0 result would NOT stop a fallback group (dispatcher.ts's
+			// runGroup only stops at "succeeded"), so biome-check-json would run
+			// too — extra spawns, a possible install, duplicate findings.
+			expect(biomeCalls).toHaveLength(0);
+			expect(result.warnings.some((w) => w.tool === "oxlint")).toBe(true);
 		} finally {
 			env.cleanup();
 		}

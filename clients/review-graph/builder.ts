@@ -4865,6 +4865,15 @@ async function _doBuildGraph(
 	const graph = resumed?.graph ?? createEmptyGraph();
 	const filesToExtract = resumed?.remaining ?? filesToBuild;
 	const treeSitterClient = getSharedTreeSitterClient();
+	// #1941: grow the tree cache to span THIS pass's actual per-parse working
+	// set before parsing starts — filesToExtract, not filesToBuild. On a cold
+	// build they're the same array; on a resumed build filesToExtract is only
+	// the checkpoint's remaining (unprocessed) files, since resumed files are
+	// reused from the checkpoint graph and never re-parsed here. Sizing to
+	// filesToBuild on a resume would over-grow the cache for files this pass
+	// never touches. Same #1715 pattern as scanner.ts:147 — monotonic and
+	// ceiling-bounded inside ensureTreeCacheCapacity itself.
+	treeSitterClient?.ensureTreeCacheCapacity(filesToExtract.length);
 	const extractionStartedAt = Date.now();
 	// Seeded with the reused files' hashes on resume so the completed snapshot
 	// still records a hash for every file (needed by #202 incremental next time).
