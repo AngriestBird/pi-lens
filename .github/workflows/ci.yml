@@ -185,22 +185,30 @@ jobs:
       - name: Verify no host-provided package was vendored (#1926)
         run: node scripts/check-prod-install-shape.mjs
 
+      # ...and now put them there. `node dist/index.js` is not pi, so without
+      # these two the entry throws on the FIRST one it imports and the load
+      # check below never reaches a genuinely missing dep like minimatch —
+      # which is the regression this job exists to catch (#1926).
+      - name: Supply host-provided packages the way pi does (#1926)
+        run: | # zizmor: ignore[adhoc-packages]
+          ARGS=$(node scripts/supply-host-provided-deps.mjs --install-args)
+          echo "Supplying: $ARGS"
+          npm install --no-save --no-audit --no-fund $ARGS
+
       - name: Verify dist built and the compiled entry loads
         run: |
           test -f dist/index.js || \
             (echo "ERROR: dist/index.js not built under --omit=dev (TS2688? prepare/build:dist failed)" && exit 1)
-          node dist/index.js 2>&1 | tee /tmp/load.txt || true
           # ERR_MODULE_NOT_FOUND = a runtime dep was wrongly in devDependencies.
-          # The host-provided packages are peers pi supplies at runtime; outside
-          # pi they are absent, so plain `node dist/index.js` cannot resolve the
-          # first one it imports. That single miss is expected (#1926). The
-          # allowlist is derived from the same list bundle-dist.mjs uses.
-          HOST_PROVIDED=$(node --input-type=module -e \
-            "const m = await import('./scripts/lib/host-provided-deps.mjs'); console.log(m.HOST_PROVIDED_PACKAGES.join('|'))")
+          # The type-only host SDK stays absent by design, so its miss is
+          # allowed. The allowlist derives from the same list bundle-dist.mjs
+          # uses, so it cannot drift from the dependency shape (#1926).
+          ALLOW=$(node scripts/supply-host-provided-deps.mjs --allow-pattern)
+          node dist/index.js 2>&1 | tee /tmp/load.txt || true
           if grep -q "ERR_MODULE_NOT_FOUND\|Cannot find module" /tmp/load.txt \
-             && ! grep -Eq "$HOST_PROVIDED" /tmp/load.txt; then
+             && ! grep -Eq "$ALLOW" /tmp/load.txt; then
             echo "FAILED: missing runtime module under --omit=dev"
-            echo "(host-provided allowlist: $HOST_PROVIDED)"
+            echo "(host-provided allowlist: $ALLOW)"
             cat /tmp/load.txt
             exit 1
           fi
@@ -224,11 +232,15 @@ jobs:
           # #1926: the clean clone is the shape real users get. Assert pi's
           # host-provided packages were not vendored into it.
           node scripts/check-prod-install-shape.mjs
+          # Then supply them, as pi does, so the load check can still see a
+          # genuinely missing dep instead of stopping at the first host package.
+          ARGS=$(node scripts/supply-host-provided-deps.mjs --install-args)
+          echo "Supplying: $ARGS"
+          npm install --no-save --no-audit --no-fund $ARGS
+          ALLOW=$(node scripts/supply-host-provided-deps.mjs --allow-pattern)
           node dist/index.js 2>&1 | tee /tmp/gh-load.txt || true
-          HOST_PROVIDED=$(node --input-type=module -e \
-            "const m = await import('./scripts/lib/host-provided-deps.mjs'); console.log(m.HOST_PROVIDED_PACKAGES.join('|'))")
           if grep -q "ERR_MODULE_NOT_FOUND\|Cannot find module" /tmp/gh-load.txt \
-             && ! grep -Eq "$HOST_PROVIDED" /tmp/gh-load.txt; then
+             && ! grep -Eq "$ALLOW" /tmp/gh-load.txt; then
             echo "FAILED: missing runtime module from a clean GitHub-style install"
             cat /tmp/gh-load.txt
             exit 1
@@ -390,21 +402,48 @@ jobs:
           INSTALL_DIR=$(npm root -g)/pi-lens
           node scripts/check-extensions.mjs "$INSTALL_DIR"
 
+      # #1926: the tarball must not vendor a package pi already supplies. This
+      # runs from the checkout against the GLOBAL install the earlier step made,
+      # so it inspects what a real `pi install npm:pi-lens` produces.
+      - name: Verify no host-provided package shipped in the tarball (#1926)
+        shell: bash
+        run: node scripts/check-prod-install-shape.mjs "$(npm root -g)/pi-lens"
+
+      # ...and having proved they are absent, put them there, because the next
+      # step is a bare `node` and bare node is not pi. pi resolves these two
+      # specifiers from its own runtime; without them the entry throws at import
+      # and neither the load check nor the #182 dist check below proves
+      # anything. Names and ranges come from scripts/lib/host-provided-deps.mjs,
+      # never hardcoded here. The type-only host SDK is deliberately NOT
+      # installed (Windows MAX_PATH, #1334 S6).
+      - name: Supply host-provided packages the way pi does (#1926)
+        shell: bash
+        run: | # zizmor: ignore[adhoc-packages]
+          INSTALL_DIR=$(npm root -g)/pi-lens
+          ARGS=$(node scripts/supply-host-provided-deps.mjs --install-args)
+          echo "Supplying: $ARGS"
+          npm install --no-save --no-audit --no-fund \
+            --prefix "$INSTALL_DIR" $ARGS
+
       - name: Verify extension entry loads (catches missing node_modules deps)
         shell: bash
         run: |
+          # Build the allowlist BEFORE leaving the checkout: the global install
+          # ships no scripts/, so the module is only reachable from here.
+          ALLOW=$(node scripts/supply-host-provided-deps.mjs --allow-pattern)
           INSTALL_DIR=$(npm root -g)/pi-lens
           cd "$INSTALL_DIR"
           # Simulate how pi loads the extension: compiled entry, loaded by node.
-          # ERR_MODULE_NOT_FOUND = missing dep (e.g. 'minimatch') → fail.
-          # Any other error is expected in CI (no pi API available) → pass.
-          # pi-coding-agent is host-provided; absence is expected.
+          # ERR_MODULE_NOT_FOUND = missing dep (e.g. 'minimatch') → fail. That
+          # is this check's whole job, so a miss OUTSIDE the host-provided list
+          # still fails. Any other error is expected in CI (no pi API) → pass.
           ENTRY=$(node -p "require('./package.json').pi.extensions[0]")
           echo "Loading entry: $ENTRY"
+          echo "Host-provided allowlist: $ALLOW"
           node "$ENTRY" 2>&1 | tee /tmp/load-output.txt || true
           if grep -q "ERR_MODULE_NOT_FOUND\|Cannot find module" \
                /tmp/load-output.txt \
-             && ! grep -q "pi-coding-agent" /tmp/load-output.txt; then
+             && ! grep -Eq "$ALLOW" /tmp/load-output.txt; then
             echo "FAILED: missing module dependency detected"
             cat /tmp/load-output.txt
             exit 1

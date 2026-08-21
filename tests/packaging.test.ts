@@ -4,6 +4,8 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
 	HOST_PROVIDED_PACKAGES,
+	HOST_PROVIDED_RUNTIME_PACKAGES,
+	HOST_PROVIDED_TYPE_ONLY_PACKAGES,
 	LAZY_NATIVE_PACKAGES,
 } from "../scripts/lib/host-provided-deps.mjs";
 
@@ -128,6 +130,55 @@ describe("host-provided packages are not vendored (#1926)", () => {
 		// Guards the guard: an emptied HOST_PROVIDED_PACKAGES would make every
 		// per-package assertion below vacuously pass.
 		expect(HOST_PROVIDED_PACKAGES.length).toBeGreaterThan(0);
+	});
+
+	it("splits host-provided packages into runtime and type-only, with no overlap", () => {
+		// CI installs the RUNTIME half before a bare `node dist/index.js` smoke
+		// check, because bare node is not pi. It must never install the type-only
+		// half: that tree's nested paths exceed Windows MAX_PATH (#1334 S6). A
+		// package landing in both halves, or in neither, breaks that split.
+		expect(HOST_PROVIDED_RUNTIME_PACKAGES.length).toBeGreaterThan(0);
+		expect(HOST_PROVIDED_TYPE_ONLY_PACKAGES.length).toBeGreaterThan(0);
+		const overlap = HOST_PROVIDED_RUNTIME_PACKAGES.filter((name) =>
+			HOST_PROVIDED_TYPE_ONLY_PACKAGES.includes(name),
+		);
+		expect(overlap, "a package cannot be both runtime and type-only").toEqual(
+			[],
+		);
+		expect([...HOST_PROVIDED_PACKAGES].sort()).toEqual(
+			[
+				...HOST_PROVIDED_RUNTIME_PACKAGES,
+				...HOST_PROVIDED_TYPE_ONLY_PACKAGES,
+			].sort(),
+		);
+	});
+
+	it("value-imported host packages are the runtime half, not the type-only half", () => {
+		// Derived from source. A `clients/deps/*.ts` seam that value-imports a
+		// host package proves that package must exist at runtime, so CI has to
+		// supply it. Listing it as type-only instead would make the smoke check
+		// allow a real load failure.
+		const seamDir = path.join(root, "clients", "deps");
+		for (const file of fs.readdirSync(seamDir)) {
+			if (!file.endsWith(".ts")) continue;
+			const text = fs.readFileSync(path.join(seamDir, file), "utf8");
+			for (const line of text.split("\n")) {
+				if (/^\s*(?:import|export)\s+type\b/.test(line)) continue;
+				const m = line.match(
+					/^\s*(?:import|export)\b[^;"']*\bfrom\s*["']([^"'.][^"']*)["']/,
+				);
+				const name = m?.[1];
+				if (!name || !HOST_PROVIDED_PACKAGES.includes(name)) continue;
+				expect(
+					HOST_PROVIDED_TYPE_ONLY_PACKAGES.includes(name),
+					`${name} is value-imported by ${file}, so it cannot be type-only`,
+				).toBe(false);
+				expect(
+					HOST_PROVIDED_RUNTIME_PACKAGES.includes(name),
+					`${name} is value-imported by ${file}, so it belongs in the runtime half`,
+				).toBe(true);
+			}
+		}
 	});
 
 	it("lists every dep seam package that nothing installs", () => {

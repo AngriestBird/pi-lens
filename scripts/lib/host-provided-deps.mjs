@@ -33,11 +33,33 @@
  * against the built dist entry, so this list cannot drift from what ships.
  */
 
-/** Packages pi resolves from its own embedded runtime. */
-export const HOST_PROVIDED_PACKAGES = Object.freeze([
+/**
+ * Host-provided packages the extension VALUE-imports. pi resolves these bare
+ * specifiers at runtime, so the compiled entry cannot load without them.
+ * Outside pi — a bare `node dist/index.js` in a CI smoke check — nothing
+ * supplies them, so a job that wants a FULL load has to install them first, the
+ * way pi does. `scripts/supply-host-provided-deps.mjs` does that.
+ */
+export const HOST_PROVIDED_RUNTIME_PACKAGES = Object.freeze([
 	"typebox",
-	"@earendil-works/pi-coding-agent",
 	"@earendil-works/pi-tui",
+]);
+
+/**
+ * Host-provided packages the extension imports TYPE-ONLY. pi does not resolve
+ * these for an extension at all, which is why every runtime helper pi-lens
+ * needs from the host SDK is inlined instead; `tests/host-sdk-type-only.test.ts`
+ * enforces that (#1334 S6). Never install one of these to make a load succeed:
+ * the transitive tree has nested paths that exceed Windows MAX_PATH.
+ */
+export const HOST_PROVIDED_TYPE_ONLY_PACKAGES = Object.freeze([
+	"@earendil-works/pi-coding-agent",
+]);
+
+/** Everything pi supplies, so pi-lens must never declare it a dependency. */
+export const HOST_PROVIDED_PACKAGES = Object.freeze([
+	...HOST_PROVIDED_RUNTIME_PACKAGES,
+	...HOST_PROVIDED_TYPE_ONLY_PACKAGES,
 ]);
 
 /** Native/wasm packages dynamic-imported by absolute path at call time. */
