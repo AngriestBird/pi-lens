@@ -9,11 +9,16 @@
  * A NEW `pi.on` registration now reds until its author either wraps it or
  * writes down why the handler cannot be reached by a dead ctx.
  *
- * The scan is CALL-SHAPED (the #1692 lesson, via `tests/support/sweep-kit.ts`):
- * it strips comments, finds `on("<event>"` calls, reads their balanced
- * argument text, and asks whether that text wraps the SAME event name — a
- * copy-pasted wrapper naming a different event would mislabel the ledger, so
- * it fails too.
+ * The scan is CALL-SHAPED (the #1692 lesson, via `tests/support/sweep-kit.ts`).
+ * It strips comments, finds `on("<event>"` and `on?.("<event>"` calls, reads
+ * their balanced argument text, and asks whether that text wraps the SAME
+ * event name. A copy-pasted wrapper naming a different event would mislabel
+ * the ledger subject, so it fails too.
+ *
+ * The declared floor of 12 is the second half of the emptiness guard. index.ts
+ * registers 12 handlers today. A regex that stops matching one of them, the
+ * way the first draft missed the `on?.()` form, drops the count and reds here
+ * instead of quietly excusing the handler it can no longer see.
  */
 
 import * as fs from "node:fs";
@@ -22,7 +27,11 @@ import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
-import { assertNonEmptyScan, auditRegistry, stripSource } from "../support/sweep-kit.js";
+import {
+	assertNonEmptyScan,
+	auditRegistry,
+	stripSource,
+} from "../support/sweep-kit.js";
 
 const REPO_ROOT = path.resolve(
 	path.dirname(fileURLToPath(import.meta.url)),
@@ -43,11 +52,13 @@ const UNWRAPPED_HANDLER_REASONS: Readonly<Record<string, string>> = {
 	tool_call:
 		"Delegates straight to handleToolCall, which already owns a total guard recording `tool-call-handler-throw` (clients/runtime-tool-call.ts); the registration body itself reads no ctx property.",
 	session_start:
-		"The ctx delivered here belongs to the session being announced, constructed moments earlier, so it cannot be one invalidated before delivery; the handler also has a total catch around every ctx read.",
+		"The ctx delivered here belongs to the session being announced, built moments earlier, so it cannot be one invalidated before delivery. The two calls that run BEFORE the handler's try (rememberOwnEventCtx, refreshCtxDerivedPlumbing, index.ts:1646-1647) read no ctx property: the first null-checks and stores the reference, the second only captures it in a closure.",
 	session_shutdown:
 		"Every ctx read is already inside a try/catch or behind noteSessionShutdown's probe, and skipping teardown on an inconclusive probe would leak the LSP fleet.",
+	message_end:
+		"The handler body is a total try/catch, and its only ctx readers are getStableSessionId (its own try/catch, index.ts:328) and classifyCurrentSessionEmission (probe-based, reads no ctx property). Nothing throws. The skip is unrecorded, which is the same observability gap as #1929.",
 	context:
-		"Its total catch already absorbs a stale read, and this handler must return the host's message list, so a wrapper short-circuiting to `undefined` would change what pi builds context from. The observability half is tracked in #1929.",
+		"This handler must return the host's message list, so a wrapper short-circuiting to `undefined` would change what pi builds context from. Its two pre-try ctx readers (getStableSessionId and classifyCurrentSessionEmission, index.ts:2912-2913) are individually safe rather than covered by the try at :2947. The observability half is tracked in #1929.",
 };
 
 /** One `pi.on("<event>", ...)` registration found in index.ts. */
@@ -78,7 +89,12 @@ function scanRegistrations(): Registration[] {
 		{ strings: "keep" },
 	);
 	const found: Registration[] = [];
-	const opener = /(?<![A-Za-z0-9_$])on\s*\(\s*"([a-z_]+)"/g;
+	// The optional-call form matters, not just `on(`. index.ts registers newer
+	// host events as `(pi as any).on?.("message_end", …)`, and the comment above
+	// that site recommends the idiom for the next one. A scan that only saw
+	// `on(` would let every future defensive registration through unseen, which
+	// is the exact gap this sweep exists to close.
+	const opener = /(?<![A-Za-z0-9_$])on\s*(?:\?\.)?\s*\(\s*"([a-z_]+)"/g;
 	let match = opener.exec(source);
 	while (match !== null) {
 		const event = match[1];
@@ -98,7 +114,11 @@ describe("session-event stale-ctx guard sweep (#1925)", () => {
 	const registrations = scanRegistrations();
 
 	it("finds the real registrations, so a broken scan cannot pass vacuously", () => {
-		assertNonEmptyScan("session-event registration scan", registrations.length, 10);
+		assertNonEmptyScan(
+			"session-event registration scan",
+			registrations.length,
+			12,
+		);
 		expect(registrations.map((entry) => entry.event)).toContain("turn_end");
 	});
 
@@ -113,7 +133,7 @@ describe("session-event stale-ctx guard sweep (#1925)", () => {
 				.map((entry) => entry.event),
 			exemptions: UNWRAPPED_HANDLER_REASONS,
 			scannedCount: registrations.length,
-			minScanned: 10,
+			minScanned: 12,
 			remediation:
 				"Wrap it with wrapSessionEventHandler(<event>, handler, { dbg }) from clients/session-event-guard.ts, or add the event to UNWRAPPED_HANDLER_REASONS with the mechanism that makes a stale ctx unreachable for it.",
 		});
@@ -124,7 +144,9 @@ describe("session-event stale-ctx guard sweep (#1925)", () => {
 		// The population #1925 fixed, pinned by name: an unwrap shows up here
 		// even if someone also adds a reason for it.
 		const wrapped = new Set(
-			registrations.filter((entry) => entry.wrapped).map((entry) => entry.event),
+			registrations
+				.filter((entry) => entry.wrapped)
+				.map((entry) => entry.event),
 		);
 		for (const event of [
 			"tool_result",

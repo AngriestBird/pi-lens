@@ -8,7 +8,16 @@
  * (`core/extensions/loader.js` in the installed
  * `@earendil-works/pi-coding-agent`). An event already queued when the swap
  * happens still reaches pi-lens, carrying the dead ctx, and the first
- * unguarded `ctx.signal` / `ctx.ui` / `ctx.cwd` read throws into the host.
+ * unguarded `ctx.signal` / `ctx.ui` / `ctx.cwd` read throws.
+ *
+ * That throw does not escape into pi's loop. `ExtensionRunner.emit` wraps every
+ * handler call in a try/catch and routes the error to `emitError`
+ * (`core/extensions/runner.js:586-606` in the installed SDK), so the throw
+ * surfaces as an extension error report against pi-lens. The report names the
+ * wrong cause. It reads as a pi-lens handler bug when the real event is a
+ * benign race with a session swap, it says nothing about which handler keeps
+ * losing, and it counts nothing. This wrapper converts that noisy misattributed
+ * error into a counted, bounded, attributable skip.
  *
  * #1924 fixed that for `agent_settled` with an inline try/catch. #1925 found
  * four more handlers with the same shape. Five inline copies of one policy is
