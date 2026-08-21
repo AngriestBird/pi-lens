@@ -59,6 +59,17 @@ export interface BlockerPastEofCounts {
 	/** Falling edge this turn — a prior past-EOF demotion healed (the file's
 	 * line count grew back past the cited line). */
 	healed: number;
+	/**
+	 * #1944: the cited lines the file no longer has, keyed by the record's
+	 * display path. Computed here because this sweep already holds the file's
+	 * current line count; the delivery surface would otherwise re-stat the
+	 * file, or worse, re-parse the coordinate back out of the rendered summary
+	 * (the re-derivation-vs-correlation screen). Populated for EVERY record
+	 * this gate found past EOF, whether the demotion is this turn's rising
+	 * edge or an earlier one the gate re-affirmed — it re-arms every turn, it
+	 * does not latch.
+	 */
+	deadLinesByPath: Map<string, number[]>;
 }
 
 export interface BlockerPastEofOptions {
@@ -87,6 +98,7 @@ export function sweepInlineBlockerPastEof(
 		checked: 0,
 		demoted: 0,
 		healed: 0,
+		deadLinesByPath: new Map<string, number[]>(),
 	};
 	const resync = options?.resync ?? resyncDocumentOnPastEof;
 
@@ -131,6 +143,19 @@ export function sweepInlineBlockerPastEof(
 			// The record cites any of its lines being past EOF as a whole-record
 			// demotion — one summary string, not one flag per line.
 			const isPastEof = diagnostics.some((d) => d.stale);
+			if (isPastEof) {
+				// #1944: record WHICH cited lines died, before the transition check
+				// below short-circuits. A record demoted on an earlier turn does not
+				// transition, yet its dead lines are exactly what the delivery
+				// surface must annotate and retire on.
+				counts.deadLinesByPath.set(
+					entry.filePath,
+					diagnostics
+						.filter((d) => d.stale)
+						.map((d) => d.line)
+						.filter((line): line is number => typeof line === "number"),
+				);
+			}
 			const transitioned = runtime.setInlineBlockerPastEofStale(
 				entry.filePath,
 				isPastEof,

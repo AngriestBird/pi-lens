@@ -97,6 +97,11 @@ import { sweepInlineBlockerPastEof } from "./blocker-past-eof.js";
 // #1631 review V2: moved to its own leaf module so a low-level store
 // (widget-state.ts) can use the marker without importing this orchestrator —
 // see clients/stale-marker.ts's doc comment.
+import { incrementDegradationCount } from "./degradation-ledger.js";
+import {
+	degradeDemotedFindingBody,
+	formatRetirementNote,
+} from "./demoted-finding-render.js";
 import { STALE_LINE_MARKER } from "./stale-marker.js";
 import {
 	getWidgetBlockingFilesForSweep,
@@ -551,15 +556,39 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	// Re-surface inline blockers from this turn that the agent didn't fix.
 	// These were shown inline during write/edit but the agent moved on without resolving them.
 	const unresolvedBlockers = runtime.getInlineBlockersSnapshot();
+	/** #1944: past-EOF demotions retired after their single degraded delivery. */
+	let demotedFindingsRetired = 0;
 	for (const { filePath: bPath, summary, stale } of unresolvedBlockers) {
 		const displayPath = toRunnerDisplayPath(cwd, bPath);
 		if (stale) {
 			// #1631: demoted — out of the authoritative blocker channel and into the
 			// advisory channel with a stale marker, so the agent is told to re-run
 			// rather than pressured by a verdict that may already be resolved.
+			//
+			// #1944: the CHANNEL change is not enough. Until this call the advisory
+			// embedded the blocker body verbatim, so the agent read "🔴 STOP — 11
+			// issue(s) must be fixed" with dead line numbers under a hedge line it
+			// ignored. Degrade the body itself, and — when the file shrank past the
+			// cited lines, so no re-run can ever confirm it — retire the record
+			// after this ONE delivery instead of re-serving it for the rest of the
+			// session.
+			const deadLines = blockerPastEof.deadLinesByPath.get(bPath) ?? [];
+			const degraded = degradeDemotedFindingBody(summary, { deadLines });
+			const retired = runtime.retireDemotedPastEofBlocker(bPath, deadLines);
+			if (retired) {
+				demotedFindingsRetired += 1;
+				// Bounded by the ledger's own per-kind/subject tally, and the subject
+				// keeps the discriminating identity (which store, which file).
+				incrementDegradationCount({
+					kind: "demoted-finding-retired",
+					subject: `inline-blocker:${displayPath}`,
+					reason: `file shrank past cited line(s) ${deadLines.join(", ")}; retired after one degraded delivery`,
+				});
+			}
 			// @delivery-surface: runtime-turn:unresolved-inline-blocker
 			advisoryParts.push(
-				`${STALE_LINE_MARKER} ${displayPath}:\n${summary}`,
+				`${STALE_LINE_MARKER} ${displayPath}:\n${degraded.body}` +
+					(retired ? `\n${formatRetirementNote(deadLines)}` : ""),
 			);
 		} else {
 			// @delivery-surface: runtime-turn:unresolved-inline-blocker
@@ -2355,6 +2384,18 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	runtime.fixedThisTurn.clear();
 	runtime.clearActionableWarnings();
 	runtime.clearCodeQualityWarnings();
+	if (demotedFindingsRetired > 0) {
+		// #1944: the retired payload must not survive as a SUPPRESSION key.
+		// `turn-end-findings-last` holds a content signature used to silence a
+		// duplicate re-prompt; live evidence found the demoted payload still on
+		// disk 80+ minutes after the file shrank. It is not a delivery source —
+		// `runtime-context.ts` never reads it, and the read at the top of this
+		// function is gated on the current `sessionId`, so it cannot resurrect
+		// the finding in a later session. It CAN, however, silence a genuinely
+		// new report of content the store no longer holds. Drop it with the
+		// record it describes.
+		cacheManager.clearCache("turn-end-findings-last", cwd);
+	}
 	logLatency({
 		type: "tool_result",
 		toolName: "turn_end",
@@ -2374,6 +2415,11 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			blockerSections: blockerParts.length,
 			staleSecretSections: staleSecretParts.length,
 			advisorySections: advisoryParts.length,
+			// #1944 AC3: an empty advisory section on its own cannot say whether
+			// the turn had nothing to report or dropped something. This counter
+			// answers that from latency.log even when the payload is empty, and
+			// the payload itself carries the retirement note when it is not.
+			demotedFindingsRetired,
 		},
 	});
 	resetFormatService();
