@@ -505,6 +505,31 @@ export interface SpawnedServer {
 	info: LSPServerInfo;
 }
 
+/**
+ * #1934: what the client pool actually did to serve one selection.
+ *
+ * `lsp_client_selected` fired 5601 times in a 20.8h window carrying only
+ * `{serverId, candidateCount}`, so nothing in the log said whether the pool
+ * reused a warm client or paid for a language-server spawn. The only estimate
+ * was a cross-record inference against `lsp_launch_candidate_success`, which
+ * has a different denominator, so a regression that halved pool reuse was
+ * invisible. This rides ON the existing record: one record, one denominator,
+ * reuse rate = `warm-reuse / (warm-reuse + cold-spawn)`.
+ *
+ * `spawn-failure` and `declined` are deliberately separate values, per the
+ * availability invariant: an ERRORED acquisition (the spawn ran and the
+ * breaker cooled the key down) must not read the same as a CLEAN decline
+ * (no root, breaker already open, host trust refused, capacity, shutdown).
+ * `declined` never reaches `lsp_client_selected` — those paths already have
+ * their own records (`lsp_client_unavailable`, `lsp_client_skipped_broken`,
+ * `lsp_client_skipped_unavailable_command`).
+ */
+export type LSPClientAcquisitionOutcome =
+	| "warm-reuse"
+	| "cold-spawn"
+	| "spawn-failure"
+	| "declined";
+
 // #1621: a rename-propagation notify failure now records WHY it failed —
 // `timedOut` (the notify write never settled inside its budget) is distinct
 // from `rejected` (the send itself errored) — so an empty failure list still
@@ -2256,13 +2281,26 @@ export class LSPService {
 		const withBudget = async (): Promise<SpawnedServer | undefined> => {
 			if (servers.length === 0) return undefined;
 
+			// #1934: the first server whose acquisition ERRORED, as opposed to
+			// cleanly declining. Kept so a selection that served nobody still
+			// says which server the pool actually tried and failed to spawn.
+			let erroredServerId: string | undefined;
+
 			// Try each matching server
 			for (const server of servers) {
+				// A box, not a `let`: control-flow analysis cannot see the callback
+				// write and would narrow a plain local to its initializer.
+				const acquisition: { outcome: LSPClientAcquisitionOutcome } = {
+					outcome: "declined",
+				};
 				const spawned = await this.ensureClientForServer(
 					filePath,
 					server,
 					resolvedRoots,
 					noteSpawnInFlight,
+					(reported) => {
+						acquisition.outcome = reported;
+					},
 				);
 				if (spawned) {
 					logLatency({
@@ -2273,10 +2311,37 @@ export class LSPService {
 						metadata: {
 							serverId: server.id,
 							candidateCount: servers.length,
+							// Emitted RAW, never coerced to a "safe" value: a served
+							// client always reports `warm-reuse` or `cold-spawn`, so a
+							// `declined` here would be a real reporting bug and must be
+							// visible in the log rather than laundered into a lie.
+							outcome: acquisition.outcome,
 						},
 					});
 					return spawned;
 				}
+				if (acquisition.outcome === "spawn-failure") {
+					erroredServerId ??= server.id;
+				}
+			}
+
+			if (erroredServerId !== undefined) {
+				// Same record, same denominator as the two served outcomes. Bounded
+				// by the LSP breaker, not by a latch: a spawn failure always cools
+				// the (server, root) key down, so the next touch takes the
+				// `lsp_client_skipped_broken` early return and reports `declined`
+				// instead of reaching here again until the cooldown expires.
+				logLatency({
+					type: "phase",
+					phase: "lsp_client_selected",
+					filePath,
+					durationMs: 0,
+					metadata: {
+						serverId: erroredServerId,
+						candidateCount: servers.length,
+						outcome: "spawn-failure" satisfies LSPClientAcquisitionOutcome,
+					},
+				});
 			}
 
 			const unavailable = (
@@ -2466,6 +2531,10 @@ export class LSPService {
 	): Promise<SpawnedServer | undefined> {
 		if (this.checkDestroyed()) return undefined;
 		const servers = getServersForFileWithConfig(filePath);
+		// #1934: the (server, root) pairs that COULD have served this file and
+		// were cold. A server with no resolvable root is not a pool miss — it
+		// never had a slot to miss — so it stays out of this list.
+		const missed: string[] = [];
 		for (const server of servers) {
 			const root = await this.resolveServerRoot(server, filePath);
 			if (!root) continue;
@@ -2474,6 +2543,32 @@ export class LSPService {
 			if (existing?.isAlive()) {
 				return { client: existing, info: server };
 			}
+			missed.push(key);
+		}
+		// #1934: an empty `missed` means "this file has no language server here",
+		// which is the normal answer for most reads and must not be logged as a
+		// pool miss. Callers run per file in the cascade quiet window and on the
+		// read-expansion path, so a raw record would be a per-file log storm:
+		// the ledger counts every miss exactly and only the FIRST per candidate
+		// set also writes the detailed record.
+		if (missed.length > 0) {
+			emitBounded(
+				"lsp_warm_client_missing",
+				missed.join(","),
+				{
+					filePath,
+					durationMs: 0,
+					metadata: {
+						serverIds: missed.map((key) => key.slice(0, key.indexOf(":"))),
+						roots: missed.map((key) => key.slice(key.indexOf(":") + 1)),
+					},
+				},
+				{
+					ledgerKind: "lsp-warm-client-missing",
+					risingEdgePer: "identity",
+					reason: `no warm client for ${missed.join(",")}`,
+				},
+			);
 		}
 		return undefined;
 	}
@@ -2699,11 +2794,31 @@ export class LSPService {
 		this.documentDrift.recordSynced(filePath, content, at);
 	}
 
+	/**
+	 * #1934: did THIS acquisition's spawn attempt error, or did it decline
+	 * cleanly? Read immediately after awaiting the spawn promise. Every genuine
+	 * spawn/initialize failure cools the key down or latches it permanently
+	 * (see `spawnClient`), and the breaker check upstream in
+	 * `ensureClientForServer` has already deleted any EXPIRED cooldown and
+	 * returned early on a live one. So a future-dated cooldown at this point
+	 * can only have been set by the attempt we just awaited.
+	 *
+	 * The paths that return undefined WITHOUT cooling the key down are policy
+	 * or lifecycle, not server failure — host trust refusal, a shutdown that
+	 * landed mid-spawn, capacity — and they read `false` here on purpose.
+	 */
+	private spawnAttemptErrored(key: string): boolean {
+		if (this.permanentlyBroken.has(key)) return true;
+		const brokenUntil = this.state.broken.get(key);
+		return typeof brokenUntil === "number" && brokenUntil > Date.now();
+	}
+
 	private async ensureClientForServer(
 		filePath: string,
 		server: LSPServerInfo,
 		resolvedRoots?: Map<string, string>,
 		onSpawnInFlight?: (serverId: string) => void,
+		onOutcome?: (outcome: LSPClientAcquisitionOutcome) => void,
 	): Promise<SpawnedServer | undefined> {
 		const handoff = this.generationHandoff;
 		if (handoff) {
@@ -2792,6 +2907,10 @@ export class LSPService {
 					);
 					this.warmStartLogged.add(key);
 				}
+				// #1934: the pool paid nothing. This is the outcome the reuse rate
+				// is built from, so it is reported on the ONE path that returns a
+				// client without spawning.
+				onOutcome?.("warm-reuse");
 				return { client: existing, info: server };
 			}
 			// Dead client — was previously alive, now needs respawn
@@ -3051,7 +3170,22 @@ export class LSPService {
 		onSpawnInFlight?.(server.id);
 
 		try {
-			return await spawnPromise;
+			const spawned = await spawnPromise;
+			// #1934: a client here cost a process, whether this caller started the
+			// spawn or joined another caller's in-flight promise. Either way the
+			// selection was NOT served from the warm pool.
+			onOutcome?.(
+				spawned
+					? "cold-spawn"
+					: this.spawnAttemptErrored(key)
+						? "spawn-failure"
+						: "declined",
+			);
+			return spawned;
+		} catch (err) {
+			// A throwing spawn promise is an errored acquisition by definition.
+			onOutcome?.("spawn-failure");
+			throw err;
 		} finally {
 			if (this.state.inFlight.get(key) === spawnPromise) {
 				this.state.inFlight.delete(key);
