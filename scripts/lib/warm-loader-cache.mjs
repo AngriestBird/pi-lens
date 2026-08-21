@@ -97,16 +97,23 @@ export function expectedCacheFileName(entry) {
  *
  *   - the cache directory is not writable. jiti's `prepareCacheDir` catches
  *     that, sets `fsCache` to false, and transforms in memory from then on.
- *   - jiti imported the entry natively. `tryNative` skips the transform
- *     entirely, so nothing is cached. That path is reachable whenever the
- *     entry's imports resolve, which makes an unverified warm's success
- *     CONTINGENT on native resolution failing — a condition this script neither
- *     controls nor observes.
+ *   - the entry imported natively and nothing needed transforming. For an
+ *     async-imported ESM `.js` file jiti's `evalModule` attempts a native
+ *     import UNCONDITIONALLY, and only falls back to the transform when that
+ *     import rejects. So the cache exists at all because native import fails in
+ *     a real `--omit=dev` install, where the host-provided specifiers do not
+ *     resolve. That is the same reason pi's own load transforms the bundle,
+ *     which is why the warm and pi agree — but it is a property of the
+ *     environment, not of this script.
  *   - a cache entry exists but does not match the source. jiti validates the
  *     body against a trailing version-and-source-hash marker, so a stale or
  *     truncated file is a miss for pi and the session pays the transform.
  *
- * Checking the file is what turns "the import returned" into "pi will hit".
+ * Checking the file is what turns "the import returned" into "the warm's own
+ * jiti cached this entry, with these versions". It is not a promise about pi:
+ * pi-side drift shows up as a version delta between this record and pi's, which
+ * is a thing to read from the log, not something an install can detect.
+ * An absent entry always warrants a look, never a shrug.
  *
  * @param {object} args
  * @param {string} args.cacheDir
@@ -128,11 +135,12 @@ export function verifyCacheEntry({ cacheDir, fileName, source, fsDeps }) {
 				transformVersion: null,
 			};
 		}
+		// Deliberately generic. Several routes end here — a native import that
+		// needed no transform, a transform that threw before the write — and this
+		// check cannot tell them apart, so it does not name one.
 		return {
 			ok: false,
-			reason:
-				"jiti wrote no cache entry — it imported the entry natively, so the " +
-				"transform was never cached",
+			reason: `no cache entry was written: ${fileName}`,
 			transformVersion: null,
 		};
 	}

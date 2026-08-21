@@ -179,10 +179,10 @@ export async function main() {
 		const ms = Date.now() - started;
 		const relative = path.relative(root, entry);
 
-		// The import returning proves nothing. Three exit-0 paths leave no usable
-		// entry — an unwritable cache directory, a native import that skips the
-		// transform, and a stale file that fails jiti's marker check — so read the
-		// file back before claiming the session is warm.
+		// The import returning proves nothing. Several exit-0 paths leave no usable
+		// entry — an unwritable cache directory, an import that never reached the
+		// transform, a stale file that fails jiti's marker check — so read the file
+		// back before claiming anything was cached.
 		const verdict = verifyCacheEntry({
 			cacheDir,
 			fileName: cacheFile,

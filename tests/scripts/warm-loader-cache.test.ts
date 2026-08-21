@@ -147,10 +147,13 @@ describe("the warm is verified, not assumed (#1926)", () => {
 		expect(verdict.reason).toContain("not writable");
 	});
 
-	it("reports the native-import bypass, where nothing is cached at all", () => {
-		// jiti's tryNative path skips the transform. An unverified warm's success
-		// is contingent on native resolution FAILING, which this script neither
-		// controls nor observes — so it has to check.
+	it("reports a missing entry without naming a cause it cannot establish", () => {
+		// Several routes end with no file: a native import that needed no
+		// transform, or a transform that threw before the write. This check cannot
+		// tell them apart, so the reason stays generic. It still warrants a look —
+		// jiti attempts the native import for an async ESM `.js` unconditionally,
+		// and the cache exists only because that import fails in a real
+		// --omit=dev install.
 		const verdict = verifyCacheEntry({
 			cacheDir: "/cache",
 			fileName: "dist-index.abc12345.mjs",
@@ -158,7 +161,8 @@ describe("the warm is verified, not assumed (#1926)", () => {
 			fsDeps: { ...writable, existsSync: () => false, readFileSync: () => "" },
 		});
 		expect(verdict.ok).toBe(false);
-		expect(verdict.reason).toContain("natively");
+		expect(verdict.reason).toContain("no cache entry was written");
+		expect(verdict.reason).not.toContain("natively");
 	});
 
 	it("reports an entry whose marker does not match the built source", () => {
