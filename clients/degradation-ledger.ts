@@ -489,8 +489,10 @@ export function getDegradationSummary(): DegradationGroup[] {
 			count: sinkFailures.reduce((total, sink) => total + sink.droppedCount, 0),
 			droppedCount: 0,
 			latestReasons: sinkFailures.map((sink) => ({
-				subject: sink.file,
-				reason: `${sink.droppedCount} dropped write(s) after reopen-retry failed`,
+				subject: truncateForLedger(sink.file),
+				reason: truncateForLedger(
+					`${sink.droppedCount} dropped write(s) after reopen-retry failed`,
+				),
 			})),
 		});
 	}

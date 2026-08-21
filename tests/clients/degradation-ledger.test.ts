@@ -244,22 +244,45 @@ describe("session degradation ledger", () => {
 	});
 
 	describe("log-sink-write-failure (#1970)", () => {
-		it("folds ndjson-logger's sink write-failure tally into the summary at read time", async () => {
-			const { getSinkWriteFailures: getFailures, resetSinkWriteFailures } =
-				await import("../../clients/ndjson-logger.js");
-			// The seam this kind is folded through has no other test-facing
-			// mutator, so simulate an unrecovered write loss the way
-			// ndjson-logger.ts itself does internally, then read it back through
-			// the ledger.
-			const before = getFailures();
-			expect(before).toEqual([]);
+		it("folds a real ndjson-logger sink loss into the summary, naming the sink and its dropped-write count", async () => {
+			const ndjson = await import("../../clients/ndjson-logger.js");
+			const path = await import("node:path");
+			const os = await import("node:os");
+			const fs = await import("node:fs");
+			const tmpDir = fs.mkdtempSync(
+				path.join(os.tmpdir(), "degradation-ledger-sink-fold-"),
+			);
+			const logFile = path.join(tmpDir, "test.log");
 
-			// Nothing to fold when no sink has failed.
+			// Nothing to fold before any sink has failed.
 			expect(
 				getDegradationSummary().some((g) => g.kind === "log-sink-write-failure"),
 			).toBe(false);
 
-			resetSinkWriteFailures();
+			const err = Object.assign(new Error("destroyed"), {
+				code: "ERR_STREAM_DESTROYED",
+			});
+			const appendFileSpy = vi
+				.spyOn(fs.promises, "appendFile")
+				.mockRejectedValue(err);
+			const logger = ndjson.createNdjsonLogger({ filePath: logFile });
+			logger.log({ lost: true });
+			await logger.flush();
+			appendFileSpy.mockRestore();
+
+			// The fold is live data read from ndjson-logger's own tally, not a
+			// static/empty entry: it names the sink and carries a real count.
+			const group = getDegradationSummary().find(
+				(g) => g.kind === "log-sink-write-failure",
+			);
+			expect(group).toBeDefined();
+			expect(group?.count).toBeGreaterThanOrEqual(1);
+			const entry = group?.latestReasons.find((r) => r.subject.includes("test.log"));
+			expect(entry).toBeDefined();
+			expect(entry?.reason).toContain("dropped write");
+
+			ndjson.resetSinkWriteFailures();
+			fs.rmSync(tmpDir, { recursive: true, force: true });
 		});
 
 		it("session-boundary reset clears the sink write-failure tally (catalog shape 17)", async () => {
