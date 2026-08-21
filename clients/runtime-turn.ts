@@ -517,7 +517,9 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			total: blockerPastEof.total,
 			checked: blockerPastEof.checked,
 			demoted: blockerPastEof.demoted,
-			healed: blockerPastEof.healed,
+			// #1944 review F3: `healed` is gone. Retirement makes the falling edge
+			// unreachable on this store, so the field could only ever log zero —
+			// see `BlockerPastEofCounts`.
 		},
 	});
 

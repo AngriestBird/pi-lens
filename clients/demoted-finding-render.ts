@@ -37,6 +37,14 @@ export const DEAD_LINE_ANNOTATION = "(line no longer exists)";
  * This table is the single source of truth for the rule. A surface must not
  * hand-roll its own "strip the STOP" pass — that is how #1631, #1641, and
  * #1664 each ended up with a different answer to the same question.
+ *
+ * POSITION-ANCHORED (#1944 review F1). These patterns run over the BANNER
+ * region only, never the whole body. Diagnostic messages are arbitrary text
+ * from arbitrary runners, and they legitimately contain both tokens: the
+ * reviewer's probe turned ts(2304) `Cannot find name 'STOP'` into `Cannot
+ * find name 'Previously flagged'`, and mangled an English "must be fixed"
+ * inside a rule message. Rewriting a finding's own words is a worse defect
+ * than the banner it was cleaning up. See `splitBannerRegion`.
  */
 const AUTHORITY_REWRITES: ReadonlyArray<readonly [RegExp, string]> = [
 	[
@@ -65,6 +73,27 @@ export interface DegradedFindingBody {
 const CITED_LINE_RE = /^([^\S\n]*)L(\d+)\b/;
 
 /**
+ * Split a rendered body into its BANNER region and its CONTENT region
+ * (#1944 review F1).
+ *
+ * Every producer of a body this module degrades — `formatDiagnostics`
+ * (`clients/dispatch/utils/format-utils.ts`) and `buildEnrichedBlockerOutput`
+ * (`clients/pipeline.ts`) — emits the same shape: a header, then one
+ * `  L<n>: <message>` row per diagnostic, then indented continuations
+ * (`→ snippet`, `💡 Fix: …`) and an optional `… and N more` tail. So the
+ * first cited-line row is the boundary: everything above it is ours to
+ * rewrite, everything from it down is the findings' own words.
+ *
+ * A body with no cited row at all (a runner that reported no line) has only
+ * its FIRST line treated as banner. That is the conservative choice: it
+ * degrades the one line a header can occupy and leaves every message intact.
+ */
+function splitBannerRegion(lines: string[]): { bannerEnd: number } {
+	const firstCitedRow = lines.findIndex((line) => CITED_LINE_RE.test(line));
+	return { bannerEnd: firstCitedRow === -1 ? 1 : firstCitedRow };
+}
+
+/**
  * Degrade one demoted finding's rendered body.
  *
  * Two independent transforms, deliberately separable so each can be proven by
@@ -83,23 +112,30 @@ export function degradeDemotedFindingBody(
 	const deadLines = new Set(options.deadLines ?? []);
 	let authorityMarkersRemoved = 0;
 
-	let body = summary;
-	for (const [pattern, replacement] of AUTHORITY_REWRITES) {
-		body = body.replace(pattern, (...args) => {
-			authorityMarkersRemoved += 1;
-			// Expand `$n` against this match's capture groups by hand. A nested
-			// `String.replace` with the SAME global regex would clobber the
-			// outer call's `lastIndex` mid-iteration.
-			return replacement.replace(/\$(\d)/g, (_, digit: string) =>
-				String(args[Number(digit)] ?? ""),
-			);
-		});
-	}
+	const sourceLines = summary.split("\n");
+	const { bannerEnd } = splitBannerRegion(sourceLines);
+	const degradedLines = sourceLines.map((line, index) => {
+		// Content rows keep every character. Only the banner region is ours.
+		if (index >= bannerEnd) return line;
+		let rewritten = line;
+		for (const [pattern, replacement] of AUTHORITY_REWRITES) {
+			rewritten = rewritten.replace(pattern, (...args) => {
+				authorityMarkersRemoved += 1;
+				// Expand `$n` against this match's capture groups by hand. A nested
+				// `String.replace` with the SAME global regex would clobber the
+				// outer call's `lastIndex` mid-iteration.
+				return replacement.replace(/\$(\d)/g, (_, digit: string) =>
+					String(args[Number(digit)] ?? ""),
+				);
+			});
+		}
+		return rewritten;
+	});
 
+	let body = degradedLines.join("\n");
 	const deadLinesAnnotated: number[] = [];
 	if (deadLines.size > 0) {
-		body = body
-			.split("\n")
+		body = degradedLines
 			.map((line) => {
 				const hit = CITED_LINE_RE.exec(line);
 				if (!hit) return line;

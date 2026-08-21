@@ -135,6 +135,47 @@ describe("degradeDemotedFindingBody (#1944)", () => {
 		expect(result.deadLinesAnnotated).toEqual([376]);
 	});
 
+	/**
+	 * #1944 review F1. The rewrites used to run over the whole body, so a
+	 * diagnostic's own words got edited: ts(2304) "Cannot find name 'STOP'"
+	 * came out as "Cannot find name 'Previously flagged'". A finding's message
+	 * is arbitrary text from an arbitrary runner and must survive verbatim.
+	 */
+	it("never rewrites a diagnostic's own words, only the banner", () => {
+		const summary = [
+			"🔴 STOP — 2 issue(s) must be fixed:",
+			"  L12: Cannot find name 'STOP'.",
+			"  L14: This layout must be fixed before the release.",
+			"    💡 Fix: STOP using the deprecated helper",
+		].join("\n");
+
+		const result = degradeDemotedFindingBody(summary, { deadLines: [12] });
+		const lines = result.body.split("\n");
+
+		// The banner is degraded.
+		expect(lines[0]).not.toContain("STOP");
+		expect(lines[0]).not.toContain("must be fixed");
+		// Every content line survives, token for token.
+		expect(lines[1]).toBe(
+			`  L12 ${DEAD_LINE_ANNOTATION}: Cannot find name 'STOP'.`,
+		);
+		expect(lines[2]).toBe("  L14: This layout must be fixed before the release.");
+		expect(lines[3]).toBe("    💡 Fix: STOP using the deprecated helper");
+		// Exactly one rewrite fired — the banner's.
+		expect(result.authorityMarkersRemoved).toBe(1);
+	});
+
+	it("treats only the first line as banner when no cited row exists", () => {
+		const summary = [
+			"🔴 STOP — issues must be fixed:",
+			"  package.json — outdated lockfile (STOP the build)",
+		].join("\n");
+		const result = degradeDemotedFindingBody(summary);
+		const lines = result.body.split("\n");
+		expect(lines[0]).not.toContain("STOP");
+		expect(lines[1]).toBe("  package.json — outdated lockfile (STOP the build)");
+	});
+
 	it("leaves a body with no authority vocabulary alone", () => {
 		const plain = "  L4: something mild.";
 		const result = degradeDemotedFindingBody(plain);
@@ -318,6 +359,84 @@ describe("turn-end demoted blocker (#1944)", () => {
 			// No dead lines to annotate: the cited coordinate is still in bounds.
 			expect(content).not.toContain(DEAD_LINE_ANNOTATION);
 			expect(content).not.toContain("Retired after this delivery");
+		} finally {
+			env.cleanup();
+		}
+	});
+});
+
+/**
+ * #1944 review F2. The integration tests above exercise only the ACCEPTING
+ * path through `retireDemotedPastEofBlocker`, so each of its three rejection
+ * guards was individually vacuous — deleting any one of them left the whole
+ * file green. These four tests hit the method directly, one per guard, so a
+ * deleted guard reds its own test and names itself in the failure.
+ *
+ * The `staleReason` guard is unreachable from today's only caller (the sweep
+ * skips drift-demoted records before the delivery loop ever sees them). It
+ * stays, and is tested, because it is the thing standing between a future
+ * caller change and silently dropping a drift record whose coordinates the
+ * agent can still act on.
+ */
+describe("retireDemotedPastEofBlocker guards (#1944)", () => {
+	function seed(tmpDir: string): {
+		runtime: RuntimeCoordinator;
+		target: string;
+	} {
+		const runtime = new RuntimeCoordinator();
+		const target = path.join(tmpDir, "guard.ts");
+		fs.writeFileSync(target, "const a = 1;\n");
+		runtime.recordInlineBlockers(target, BLOCKER_SUMMARY, 1, ["lsp"], [310]);
+		return { runtime, target };
+	}
+
+	it("retires when every condition holds", () => {
+		const env = setupTestEnvironment("pi-lens-1944-guard-ok-");
+		try {
+			const { runtime, target } = seed(env.tmpDir);
+			expect(runtime.setInlineBlockerPastEofStale(target, true)).toBe(true);
+			expect(runtime.retireDemotedPastEofBlocker(target, [310])).toBe(true);
+			expect(runtime.getInlineBlockersSnapshot()).toHaveLength(0);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("rejects an empty dead-line list — nothing proved the coordinates gone", () => {
+		const env = setupTestEnvironment("pi-lens-1944-guard-lines-");
+		try {
+			const { runtime, target } = seed(env.tmpDir);
+			runtime.setInlineBlockerPastEofStale(target, true);
+			expect(runtime.retireDemotedPastEofBlocker(target, [])).toBe(false);
+			expect(runtime.getInlineBlockersSnapshot()).toHaveLength(1);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("rejects a record that is not demoted at all", () => {
+		const env = setupTestEnvironment("pi-lens-1944-guard-live-");
+		try {
+			const { runtime, target } = seed(env.tmpDir);
+			// Never demoted: a LIVE blocker must never be retired by this path.
+			expect(runtime.getInlineBlockersSnapshot()[0]?.stale).toBeFalsy();
+			expect(runtime.retireDemotedPastEofBlocker(target, [310])).toBe(false);
+			expect(runtime.getInlineBlockersSnapshot()).toHaveLength(1);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("rejects a dependency-drift demotion — its coordinates are still in bounds", () => {
+		const env = setupTestEnvironment("pi-lens-1944-guard-drift-");
+		try {
+			const { runtime, target } = seed(env.tmpDir);
+			expect(runtime.markInlineBlockerStale(target, "dependency-drift")).toBe(
+				true,
+			);
+			expect(runtime.retireDemotedPastEofBlocker(target, [310])).toBe(false);
+			const survivor = runtime.getInlineBlockersSnapshot()[0];
+			expect(survivor?.staleReason).toBe("dependency-drift");
 		} finally {
 			env.cleanup();
 		}
