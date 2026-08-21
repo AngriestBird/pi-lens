@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { LatencyEntry } from "../../clients/latency-logger.js";
 
 const latencyEntries = vi.hoisted(() => [] as LatencyEntry[]);
@@ -7,7 +7,9 @@ vi.mock("../../clients/latency-logger.js", () => ({
 }));
 
 import {
+	_resetProviderCacheTtlForTests,
 	clearCachePrefixSession,
+	DEFAULT_PROVIDER_CACHE_TTL_MS,
 	logCacheUsage,
 	observeCacheContext,
 	observeCachePrefix,
@@ -42,6 +44,9 @@ function assistantMessage(overrides?: Record<string, unknown>) {
 describe("cache-observability — response-side usage (#1018)", () => {
 	beforeEach(() => {
 		latencyEntries.length = 0;
+		// #1071 keeps per-session attribution state in the same module, so a test
+		// that logs usage must not leak a gap baseline into the next one.
+		resetCachePrefixObservation();
 	});
 
 	it("logs one cache_usage record for an assistant message that carries usage", () => {
@@ -61,6 +66,15 @@ describe("cache-observability — response-side usage (#1018)", () => {
 					input: 1200,
 					output: 340,
 					cost: 0.037,
+					interTurnGapMs: null,
+					gapBasis: "no-prior-turn",
+					cacheMissCause: null,
+					cacheMissKind: null,
+					cacheTtlThresholdMs: DEFAULT_PROVIDER_CACHE_TTL_MS,
+					priorCacheRead: null,
+					injectedCharsSinceLastTurn: 0,
+					newTranscriptCharsSinceLastTurn: 0,
+					attributionCharsCapped: false,
 				},
 			},
 		]);
@@ -163,25 +177,24 @@ describe("cache-observability — context observations (#1018 follow-up)", () =>
 				sessionId: "s",
 				turnIndex: 1,
 				injectionEnabled: true,
-				injectionSources: [
-					"session-guidance",
-					"turn-findings",
-					"test-findings",
-					"agent-nudge",
+				injectionSlices: [
+					{
+						source: "session-guidance",
+						messages: [{ role: "user", content: "injected" }],
+					},
+					{ source: "turn-findings", messages: [] },
+					{ source: "test-findings", messages: [] },
+					{ source: "agent-nudge", messages: [] },
 				],
-				injectedMessages: [{ role: "user", content: "injected" }],
 				existingMessages: existing,
 				resultMessages: result,
 				placement,
 			});
 			const metadata = latencyEntries[0].metadata;
 			expect(metadata?.placement).toBe(placement);
-			expect(metadata?.injectionSources).toEqual([
-				"session-guidance",
-				"turn-findings",
-				"test-findings",
-				"agent-nudge",
-			]);
+			// Empty slices are not contributors: the derived source list names only
+			// what actually produced a message (#1071).
+			expect(metadata?.injectionSources).toEqual(["session-guidance"]);
 			expect(metadata?.injectedMessageCount).toBe(1);
 			expect(metadata?.existingMessageCount).toBe(existing.length);
 			expect(metadata?.resultMessageCount).toBe(result.length);
@@ -234,8 +247,12 @@ describe("cache-observability — context observations (#1018 follow-up)", () =>
 			sessionId: "s",
 			turnIndex: 2,
 			injectionEnabled: true,
-			injectionSources: ["turn-findings"],
-			injectedMessages: [{ role: "user", content: privateText }],
+			injectionSlices: [
+				{
+					source: "turn-findings",
+					messages: [{ role: "user", content: privateText }],
+				},
+			],
 			existingMessages: Array.from({ length: 70 }, (_, i) => ({
 				role: "user",
 				content: `m${i}`,
@@ -535,5 +552,501 @@ describe("cache-observability — request-side prefix stability (#1018)", () => 
 		expect(() => observeCachePrefix([], 0, SID)).not.toThrow();
 		expect(() => observeCachePrefix(undefined, 0, SID)).not.toThrow();
 		expect(latencyEntries).toHaveLength(0);
+	});
+});
+
+describe("cache-observability — miss attribution (#1071)", () => {
+	const BASE_MS = 1_700_000_000_000;
+
+	function usageMessage(cacheRead: number, input: number) {
+		return assistantMessage({
+			usage: { input, output: 10, cacheRead, cacheWrite: 0 },
+		});
+	}
+
+	function logUsage(cacheRead: number, input: number, sessionId = "attr") {
+		logCacheUsage(usageMessage(cacheRead, input), undefined, {
+			sessionId,
+			turnIndex: 0,
+		});
+	}
+
+	function lastUsageMetadata(): Record<string, unknown> {
+		const usageEntries = latencyEntries.filter(
+			(entry) => entry.phase === "cache_usage",
+		);
+		return (usageEntries[usageEntries.length - 1]?.metadata ?? {}) as Record<
+			string,
+			unknown
+		>;
+	}
+
+	/**
+	 * Fire a bare `context` observation. This is REQUEST time: the moment the
+	 * provider looks the prompt cache up, and the endpoint the gap measures to.
+	 */
+	function observeRequest(sessionId = "attr") {
+		observeCacheContext({
+			sessionId,
+			turnIndex: 0,
+			injectionEnabled: false,
+			existingMessages: [{ role: "user", content: "prompt" }],
+		});
+	}
+
+	/** Feed one `context` observation so the ledger sees real injected content. */
+	function observeInjection(chars: number, sessionId = "attr") {
+		observeCacheContext({
+			sessionId,
+			turnIndex: 0,
+			injectionEnabled: true,
+			existingMessages: [{ role: "user", content: "prompt" }],
+			resultMessages: [{ role: "user", content: "prompt" }],
+			injectionSlices: [
+				{
+					source: "turn-findings",
+					messages: [{ role: "user", content: "x".repeat(chars) }],
+				},
+			],
+			placement: "insert-before-final",
+		});
+	}
+
+	beforeEach(() => {
+		latencyEntries.length = 0;
+		resetCachePrefixObservation();
+		_resetProviderCacheTtlForTests();
+		delete process.env.PI_LENS_PROVIDER_CACHE_TTL_MS;
+		vi.useFakeTimers();
+		vi.setSystemTime(BASE_MS);
+	});
+
+	afterEach(() => {
+		vi.useRealTimers();
+		delete process.env.PI_LENS_PROVIDER_CACHE_TTL_MS;
+		_resetProviderCacheTtlForTests();
+	});
+
+	it("returns no verdict for the first record in a session", () => {
+		logUsage(0, 5_000);
+		expect(lastUsageMetadata()).toMatchObject({
+			interTurnGapMs: null,
+			cacheMissCause: null,
+			cacheMissKind: null,
+			priorCacheRead: null,
+		});
+	});
+
+	it("measures the gap to request time, not to the message_end that follows", () => {
+		logUsage(8_000, 100);
+		vi.setSystemTime(BASE_MS + 4_000);
+		observeRequest();
+		// 5s of generation follows the request. It is not idle time.
+		vi.setSystemTime(BASE_MS + 9_000);
+		logUsage(8_100, 100);
+		expect(lastUsageMetadata()).toMatchObject({
+			interTurnGapMs: 4_000,
+			gapBasis: "request-time",
+			priorCacheRead: 8_000,
+			cacheMissCause: null,
+		});
+	});
+
+	it("does not read a short idle plus a long generation as ttl-expired", () => {
+		// The reviewer's probe: 10s idle, then 70s of generation. The message-end
+		// basis would measure 80s and fire ttl-expired; the request-time basis
+		// measures the 10s that actually elapsed before the cache lookup.
+		logUsage(8_000, 100);
+		vi.setSystemTime(BASE_MS + 10_000);
+		observeRequest();
+		vi.setSystemTime(BASE_MS + 80_000);
+		logUsage(0, 9_000);
+		expect(lastUsageMetadata()).toMatchObject({
+			interTurnGapMs: 10_000,
+			gapBasis: "request-time",
+			cacheMissCause: "unknown",
+		});
+	});
+
+	it("falls back to the message-end delta when no context call arrived", () => {
+		logUsage(8_000, 100);
+		vi.setSystemTime(BASE_MS + 70_000);
+		logUsage(0, 9_000);
+		expect(lastUsageMetadata()).toMatchObject({
+			interTurnGapMs: 70_000,
+			gapBasis: "message-end-fallback",
+			cacheMissCause: "ttl-expired",
+		});
+	});
+
+	it("clears the request stamp at each turn boundary", () => {
+		logUsage(8_000, 100);
+		vi.setSystemTime(BASE_MS + 1_000);
+		observeRequest();
+		vi.setSystemTime(BASE_MS + 2_000);
+		logUsage(8_000, 100);
+		expect(lastUsageMetadata()).toMatchObject({ gapBasis: "request-time" });
+		// No context call this turn: the previous turn's stamp must not be reused.
+		vi.setSystemTime(BASE_MS + 3_000);
+		logUsage(8_000, 100);
+		expect(lastUsageMetadata()).toMatchObject({
+			gapBasis: "message-end-fallback",
+			interTurnGapMs: 1_000,
+		});
+	});
+
+	it("attributes a zero read after a long idle gap to ttl-expired", () => {
+		logUsage(8_000, 100);
+		vi.setSystemTime(BASE_MS + 166_000);
+		observeRequest();
+		vi.setSystemTime(BASE_MS + 170_000);
+		logUsage(0, 9_000);
+		expect(lastUsageMetadata()).toMatchObject({
+			cacheMissCause: "ttl-expired",
+			cacheMissKind: "zero-read",
+			interTurnGapMs: 166_000,
+			gapBasis: "request-time",
+			cacheTtlThresholdMs: DEFAULT_PROVIDER_CACHE_TTL_MS,
+		});
+	});
+
+	it("treats a request-time gap exactly at the threshold as expired and one below it as not", () => {
+		logUsage(8_000, 100, "boundary-at");
+		vi.setSystemTime(BASE_MS + DEFAULT_PROVIDER_CACHE_TTL_MS);
+		observeRequest("boundary-at");
+		vi.setSystemTime(BASE_MS + DEFAULT_PROVIDER_CACHE_TTL_MS + 3_000);
+		logUsage(0, 9_000, "boundary-at");
+		expect(lastUsageMetadata()).toMatchObject({
+			cacheMissCause: "ttl-expired",
+			gapBasis: "request-time",
+			interTurnGapMs: DEFAULT_PROVIDER_CACHE_TTL_MS,
+		});
+
+		vi.setSystemTime(BASE_MS);
+		logUsage(8_000, 100, "boundary-below");
+		vi.setSystemTime(BASE_MS + DEFAULT_PROVIDER_CACHE_TTL_MS - 1);
+		observeRequest("boundary-below");
+		vi.setSystemTime(BASE_MS + DEFAULT_PROVIDER_CACHE_TTL_MS + 3_000);
+		logUsage(0, 100, "boundary-below");
+		expect(lastUsageMetadata()).toMatchObject({
+			cacheMissCause: "unknown",
+			gapBasis: "request-time",
+			interTurnGapMs: DEFAULT_PROVIDER_CACHE_TTL_MS - 1,
+		});
+	});
+
+	it("honors the configured threshold instead of the default", () => {
+		process.env.PI_LENS_PROVIDER_CACHE_TTL_MS = "1000";
+		_resetProviderCacheTtlForTests();
+		logUsage(8_000, 100);
+		vi.setSystemTime(BASE_MS + 2_000);
+		observeRequest();
+		vi.setSystemTime(BASE_MS + 2_500);
+		logUsage(0, 9_000);
+		expect(lastUsageMetadata()).toMatchObject({
+			cacheMissCause: "ttl-expired",
+			cacheTtlThresholdMs: 1_000,
+		});
+	});
+
+	it("attributes a miss after a first-message change to prefix-broke", () => {
+		logUsage(8_000, 100);
+		observeCachePrefix([{ role: "user", content: "first" }], 0, "attr");
+		observeCachePrefix([{ role: "user", content: "rewritten" }], 1, "attr");
+		vi.setSystemTime(BASE_MS + 5_000);
+		logUsage(0, 9_000);
+		expect(lastUsageMetadata()).toMatchObject({
+			cacheMissCause: "prefix-broke",
+			cacheMissKind: "zero-read",
+		});
+	});
+
+	it("prefers the observed prefix break over the idle-gap heuristic", () => {
+		logUsage(8_000, 100);
+		observeCachePrefix([{ role: "user", content: "first" }], 0, "attr");
+		observeCachePrefix([{ role: "user", content: "rewritten" }], 1, "attr");
+		vi.setSystemTime(BASE_MS + 600_000);
+		logUsage(0, 9_000);
+		expect(lastUsageMetadata()).toMatchObject({
+			cacheMissCause: "prefix-broke",
+		});
+	});
+
+	it("re-arms the prefix-break flag after each usage record", () => {
+		logUsage(8_000, 100);
+		observeCachePrefix([{ role: "user", content: "first" }], 0, "attr");
+		observeCachePrefix([{ role: "user", content: "rewritten" }], 1, "attr");
+		logUsage(0, 9_000);
+		expect(lastUsageMetadata()).toMatchObject({
+			cacheMissCause: "prefix-broke",
+		});
+		logUsage(0, 9_000);
+		expect(lastUsageMetadata()).toMatchObject({ cacheMissCause: "unknown" });
+	});
+
+	it("attributes a low read with fresh input far above new content to partial-eviction", () => {
+		logUsage(8_000, 100);
+		observeInjection(200);
+		vi.setSystemTime(BASE_MS + 1_000);
+		logUsage(3_000, 20_000);
+		expect(lastUsageMetadata()).toMatchObject({
+			cacheMissCause: "partial-eviction",
+			cacheMissKind: "low-read",
+			priorCacheRead: 8_000,
+			injectedCharsSinceLastTurn: 200,
+			attributionCharsCapped: false,
+		});
+	});
+
+	it("does not call it eviction when fresh input matches the new content", () => {
+		logUsage(8_000, 100);
+		observeInjection(8_000);
+		vi.setSystemTime(BASE_MS + 1_000);
+		logUsage(3_000, 900);
+		expect(lastUsageMetadata()).toMatchObject({
+			cacheMissCause: "unknown",
+			cacheMissKind: "low-read",
+		});
+	});
+
+	it("suppresses the eviction verdict when the char accumulators were capped", () => {
+		logUsage(8_000, 100);
+		observeInjection(40_000);
+		vi.setSystemTime(BASE_MS + 1_000);
+		logUsage(3_000, 900_000);
+		expect(lastUsageMetadata()).toMatchObject({
+			cacheMissCause: "unknown",
+			cacheMissKind: "low-read",
+			attributionCharsCapped: true,
+		});
+	});
+
+	it("keeps partial-eviction reachable when an ordinary tool result lands", () => {
+		// #1071 review round 1, F2: transcript growth used to run through the
+		// 16 KiB injection cap, so one routine 20,000-char tool result latched
+		// attributionCharsCapped and suppressed the verdict.
+		logUsage(8_000, 100);
+		observeCacheContext({
+			sessionId: "attr",
+			turnIndex: 0,
+			injectionEnabled: true,
+			existingMessages: [{ role: "user", content: "prompt" }],
+		});
+		observeCacheContext({
+			sessionId: "attr",
+			turnIndex: 1,
+			injectionEnabled: true,
+			existingMessages: [
+				{ role: "user", content: "prompt" },
+				{ role: "toolResult", content: "t".repeat(20_000) },
+			],
+			injectionSlices: [
+				{
+					source: "turn-findings",
+					messages: [{ role: "user", content: "f".repeat(200) }],
+				},
+			],
+			placement: "insert-before-final",
+		});
+		vi.setSystemTime(BASE_MS + 1_000);
+		logUsage(3_000, 30_000);
+		expect(lastUsageMetadata()).toMatchObject({
+			cacheMissCause: "partial-eviction",
+			cacheMissKind: "low-read",
+			newTranscriptCharsSinceLastTurn: 20_000,
+			injectedCharsSinceLastTurn: 200,
+			attributionCharsCapped: false,
+		});
+	});
+
+	it("drops the baseline when a usage record carries no readable cacheRead", () => {
+		// The gap would be one turn long while the baseline was two turns old, so
+		// the stored baseline is cleared rather than carried (#1071 review, F4).
+		logUsage(8_000, 100);
+		logCacheUsage(
+			assistantMessage({ usage: { input: 100, output: 10, cacheWrite: 0 } }),
+			undefined,
+			{ sessionId: "attr", turnIndex: 0 },
+		);
+		expect(lastUsageMetadata()).toMatchObject({ priorCacheRead: 8_000 });
+		vi.setSystemTime(BASE_MS + 600_000);
+		logUsage(0, 9_000);
+		expect(lastUsageMetadata()).toMatchObject({
+			priorCacheRead: null,
+			cacheMissCause: null,
+			cacheMissKind: null,
+		});
+	});
+
+	it("reports no verdict for a healthy read", () => {
+		logUsage(8_000, 100);
+		vi.setSystemTime(BASE_MS + 600_000);
+		logUsage(7_000, 100);
+		expect(lastUsageMetadata()).toMatchObject({
+			cacheMissCause: null,
+			cacheMissKind: null,
+		});
+	});
+
+	it("resets the per-turn char accumulators at each usage record", () => {
+		logUsage(8_000, 100);
+		observeInjection(200);
+		logUsage(8_000, 100);
+		expect(lastUsageMetadata()).toMatchObject({
+			injectedCharsSinceLastTurn: 200,
+		});
+		logUsage(8_000, 100);
+		expect(lastUsageMetadata()).toMatchObject({
+			injectedCharsSinceLastTurn: 0,
+			newTranscriptCharsSinceLastTurn: 0,
+		});
+	});
+
+	it("counts transcript growth between context observations", () => {
+		logUsage(8_000, 100);
+		observeCacheContext({
+			sessionId: "attr",
+			turnIndex: 0,
+			injectionEnabled: false,
+			existingMessages: [{ role: "user", content: "1234" }],
+		});
+		observeCacheContext({
+			sessionId: "attr",
+			turnIndex: 1,
+			injectionEnabled: false,
+			existingMessages: [
+				{ role: "user", content: "1234" },
+				{ role: "user", content: "567890" },
+			],
+		});
+		logUsage(8_000, 100);
+		expect(lastUsageMetadata()).toMatchObject({
+			newTranscriptCharsSinceLastTurn: 6,
+		});
+	});
+
+	it("keeps attribution state per session", () => {
+		logUsage(8_000, 100, "session-a");
+		vi.setSystemTime(BASE_MS + 600_000);
+		logUsage(0, 9_000, "session-b");
+		expect(lastUsageMetadata()).toMatchObject({
+			sessionId: "session-b",
+			interTurnGapMs: null,
+			cacheMissCause: null,
+		});
+	});
+
+	it("drops attribution state when a session shuts down", () => {
+		logUsage(8_000, 100);
+		clearCachePrefixSession("attr");
+		vi.setSystemTime(BASE_MS + 600_000);
+		logUsage(0, 9_000);
+		expect(lastUsageMetadata()).toMatchObject({
+			interTurnGapMs: null,
+			cacheMissCause: null,
+			priorCacheRead: null,
+		});
+	});
+});
+
+describe("cache-observability — per-source injection attribution (#1071)", () => {
+	beforeEach(() => {
+		latencyEntries.length = 0;
+		resetCachePrefixObservation();
+	});
+
+	it("splits a mixed payload by contributing source", () => {
+		observeCacheContext({
+			sessionId: "mixed",
+			turnIndex: 1,
+			injectionEnabled: true,
+			existingMessages: [{ role: "user", content: "prompt" }],
+			resultMessages: [{ role: "user", content: "prompt" }],
+			injectionSlices: [
+				{
+					source: "turn-findings",
+					messages: [{ role: "user", content: "12345678" }],
+				},
+				{
+					source: "agent-nudge",
+					messages: [
+						{ role: "user", content: "abc" },
+						{ role: "user", content: "de" },
+					],
+				},
+			],
+			placement: "insert-before-final",
+		});
+
+		const metadata = latencyEntries[0].metadata as Record<string, unknown>;
+		expect(metadata.injectionSourceBreakdown).toEqual([
+			{
+				source: "turn-findings",
+				messageCount: 1,
+				chars: 8,
+				bytes: 8,
+				estimatedTokens: 2,
+				countsCapped: false,
+			},
+			{
+				source: "agent-nudge",
+				messageCount: 2,
+				chars: 5,
+				bytes: 5,
+				estimatedTokens: 2,
+				countsCapped: false,
+			},
+		]);
+		expect(metadata.injectionSources).toEqual(["turn-findings", "agent-nudge"]);
+		expect(metadata.injectedChars).toBe(13);
+		expect(metadata.injectedEstimatedTokens).toBe(4);
+		expect(metadata.injectionOccurred).toBe(true);
+	});
+
+	it("labels the token figure as an estimate, never as provider usage", () => {
+		observeCacheContext({
+			sessionId: "mixed",
+			turnIndex: 1,
+			injectionEnabled: true,
+			injectionSlices: [
+				{
+					source: "test-findings",
+					messages: [{ role: "user", content: "ab" }],
+				},
+			],
+		});
+		expect(latencyEntries[0].metadata?.injectedTokenBasis).toBe(
+			"chars-per-token-4-estimate-not-provider-measured",
+		);
+	});
+
+	it("reports no injection and no sources for an empty payload", () => {
+		observeCacheContext({
+			sessionId: "mixed",
+			turnIndex: 2,
+			injectionEnabled: true,
+			injectionSlices: [{ source: "turn-findings", messages: [] }],
+		});
+		const metadata = latencyEntries[0].metadata as Record<string, unknown>;
+		expect(metadata.injectionOccurred).toBe(false);
+		expect(metadata.injectionSources).toEqual([]);
+		expect(metadata.injectionSourceBreakdown).toEqual([]);
+	});
+
+	it("keeps the per-source split free of injected content", () => {
+		observeCacheContext({
+			sessionId: "mixed",
+			turnIndex: 3,
+			injectionEnabled: true,
+			injectionSlices: [
+				{
+					source: "turn-findings",
+					messages: [{ role: "user", content: "SECRET_FINDING_TEXT" }],
+				},
+			],
+		});
+		expect(JSON.stringify(latencyEntries[0].metadata)).not.toContain(
+			"SECRET_FINDING_TEXT",
+		);
 	});
 });
