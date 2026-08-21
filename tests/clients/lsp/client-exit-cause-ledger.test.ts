@@ -38,6 +38,32 @@ function closeGroup() {
 	);
 }
 
+/**
+ * Resolve once the child has emitted `close` AND the listeners registered
+ * before ours have run.
+ *
+ * This is the anti-vacuity signal for every "records NOTHING" test here. The
+ * handler under test hangs off `close`, so waiting on anything earlier proves
+ * nothing: `exit` fires BEFORE `close`, so a wait on `exitCode`/`signalCode`
+ * can return while the handler has not run yet, and the assertion that follows
+ * passes for the wrong reason. That is exactly how the first version of the
+ * initialize-timeout test went green against unfixed code.
+ *
+ * Attach BEFORE triggering the teardown: a `once` listener added after the
+ * event has already fired never resolves. Node dispatches listeners in
+ * registration order, and production's handler is installed during
+ * `createLSPClient`, so by the time this one runs the ledger write has either
+ * happened or been correctly skipped. The extra macrotask hop covers handlers
+ * that defer their own work.
+ */
+function awaitChildClose(child: {
+	once: (event: "close", listener: () => void) => unknown;
+}): Promise<void> {
+	return new Promise<void>((resolve) => {
+		child.once("close", () => setTimeout(resolve, 0));
+	});
+}
+
 describe("LSP client — unexpected close records its cause (#1969)", () => {
 	let client:
 		| Awaited<
@@ -110,13 +136,54 @@ describe("LSP client — unexpected close records its cause (#1969)", () => {
 			root: process.cwd(),
 		});
 
+		// Attach BEFORE the teardown, so the event cannot be missed.
+		const closed = awaitChildClose(proc.process);
 		await client.shutdown();
 		client = undefined;
+		await closed;
 
-		// Let the child actually exit and its `close` handler run. Without the
-		// wait this would pass vacuously.
-		await new Promise((resolve) => setTimeout(resolve, 500));
-		expect(proc.process.exitCode !== null || proc.process.killed).toBe(true);
+		// The handler ran and declined to record. Note what this does NOT check:
+		// `proc.process.killed`. `killProcessTree` kills the process GROUP via
+		// `process.kill(-pid)` (clients/lsp/client.ts:1139-1145 documents this),
+		// which never sets the child handle's `killed` flag, and a signal-killed
+		// child keeps `exitCode === null` with only `signalCode` set. The first
+		// version of this test asserted on `killed`, passed on Windows, and went
+		// red on Linux CI — catalog shape 2, a host-dependent assertion.
+		expect(closeGroup()).toBeUndefined();
+	}, 15_000);
+
+	// #1969 review F2. `setupConnectionLifecycle` arms the close handler BEFORE
+	// `initialize` is sent, so the initialize-timeout catch's own
+	// `killProcessTree` runs against a live handler. That kill is ours, and
+	// until the fix it never said so: the ledger gained an entry reading
+	// "code=1 signal=none stderr=empty", character for character the ast-grep
+	// signature this issue exists to make trustworthy. A server that merely
+	// failed its handshake would have been indistinguishable from one that
+	// crashed mid-session.
+	//
+	// Mutation guard for `state.shutdownRequested = true` in that catch:
+	// deleting that line reds this test.
+	it("records NOTHING when OUR OWN initialize-timeout kill tears the child down", async () => {
+		const { createLSPClient } = await import("../../../clients/lsp/client.js");
+		const { launchLSP } = await import("../../../clients/lsp/launch.js");
+
+		const proc = await launchLSP(process.execPath, [FAKE_SERVER_PATH], {
+			cwd: process.cwd(),
+			// Never answers `initialize`, so `withTimeout` fires and the catch
+			// below kills the child.
+			env: { FAKE_LSP_IGNORE_INITIALIZE: "1" },
+		});
+
+		const closed = awaitChildClose(proc.process);
+		await expect(
+			createLSPClient({
+				serverId: "fake",
+				process: proc,
+				root: process.cwd(),
+				initializeTimeoutMs: 300,
+			}),
+		).rejects.toThrow();
+		await closed;
 
 		expect(closeGroup()).toBeUndefined();
 	}, 15_000);

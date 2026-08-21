@@ -4722,6 +4722,18 @@ export async function createLSPClient(options: {
 			initializeTimeoutMs,
 		);
 	} catch (err) {
+		// #1969: claim this kill BEFORE issuing it. `setupConnectionLifecycle`
+		// ran above, so its `exit` and `close` handlers are already armed on
+		// this child, and both read `state.shutdownRequested` to tell a crash
+		// from a teardown we asked for. The kill below is one we asked for.
+		// Without this line it reported as an unprompted death, fabricating a
+		// `lsp-server-unexpected-close` entry reading
+		// "code=1 signal=none stderr=empty" — character for character the
+		// ast-grep signature this issue exists to make trustworthy — every time
+		// a server merely failed to complete its handshake. It also silenced a
+		// false `lsp_server_unexpected_exit` latency line that this path has
+		// been writing since the #615 follow-up.
+		state.shutdownRequested = true;
 		// Hard-kill the hung process so it doesn't become a zombie.
 		// SIGTERM alone is unreliable on Windows for cmd.exe/PowerShell trees.
 		const pid = lspProcess.pid;

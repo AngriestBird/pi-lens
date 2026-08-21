@@ -117,6 +117,33 @@ describe("liveness probe — capability gated (#1969)", () => {
 		expect(unsupportedGroup()).toBeUndefined();
 	}, 15_000);
 
+	// #1969 review F3: rung 2's own mutation guard. Without this the rung was
+	// vacuous — deleting the whole `documentSymbol` branch left the suite green,
+	// because every other test either takes rung 1 or falls past rung 2 to hover.
+	it("uses textDocument/documentSymbol when documentSymbolProvider is advertised but workspaceSymbolProvider is not", async () => {
+		client = await startClient({ FAKE_LSP_NO_WORKSPACE_SYMBOL: "1" });
+		const filePath = path.join(process.cwd(), "liveness-probe-rung2.ts");
+		await client.notify.open(
+			filePath,
+			"const probed = true;\n",
+			"typescript",
+			false,
+			true,
+		);
+
+		const sendRequest = vi.spyOn(client.connection, "sendRequest");
+		const alive = await client.pingLiveness?.(2_000);
+
+		const methods = sendRequest.mock.calls.map((call) => call[0]);
+		expect(methods).toContain("textDocument/documentSymbol");
+		expect(methods).not.toContain("workspace/symbol");
+		// Rung 2 must WIN over rung 3, not merely be reachable. Deleting rung 2
+		// falls through to hover, which this catches.
+		expect(methods).not.toContain("textDocument/hover");
+		expect(alive).toBe(true);
+		expect(unsupportedGroup()).toBeUndefined();
+	}, 15_000);
+
 	// The ast-grep rung: no symbol provider of either kind, but hoverProvider
 	// and an open document, so the round-trip #1714's notify throttle depends
 	// on survives — without provoking an unimplemented-method error.
