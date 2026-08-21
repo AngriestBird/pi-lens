@@ -2020,13 +2020,13 @@ Short, obvious changes may use a subject only. Non-trivial changes get a body.
 - Define an acronym on first use. Prefer a plain word over jargon when one exists.
 - Avoid gerund or noun pile-ups and ambiguous constructions. Avoid `please`. Use the Oxford comma.
 - Limit em-dashes to one per paragraph, and prefer zero in anything posted to GitHub. Use periods, colons, and commas instead. Do not nest parentheticals. A sentence that wants two dashes wants to be two sentences.
-- These rules are machine-checkable. Pi-lens ships a config-gated Vale runner (`clients/dispatch/runners/vale.js`). A `.vale.ini` with the Google style package would enforce this section automatically; track that separately.
+- These rules are machine-checkable. Pi-lens ships a config-gated Vale runner (`clients/dispatch/runners/vale.js`). A `.vale.ini` with the Google style package would enforce this section automatically; tracked as the Vale lane of #1844's mechanical wave.
 
 **The standard also governs how agents talk to the maintainer.** Chat replies, status updates, and reports follow the same Zinsser frame. Lead with the outcome. Strip words that do no work. Prefer short sentences over dense em-dash chains. Clarity beats brevity when they conflict. Write like a person, not a system emitting a report.
 
 ### Issue bodies
 
-**Every issue follows one shape, in this order.** Each part is one short section or a few sentences, not a form to pad.
+**Every agent- or maintainer-authored issue follows one shape, in this order.** Each part is one short section or a few sentences, not a form to pad. Contributor issues filed through the GitHub UI follow the forms in `.github/ISSUE_TEMPLATE/` instead; triage maps them onto this shape when an agent picks them up.
 
 1. Evidence first. Measured numbers, quoted output, exact paths, and file:line references. The reader must see the defect before any interpretation of it.
 2. Root cause, or a hypothesis labeled as one. Never present a guess as a finding.
@@ -2034,7 +2034,7 @@ Short, obvious changes may use a subject only. Non-trivial changes get a body.
 4. The observability record. Name the log record that proves the behavior after the fix ships, or name the gap (see the observability assessment section).
 5. Cross-links. Name class siblings, the defect shape when it matches the catalog, and any PR or review that produced the evidence.
 
-Label at creation with type and area. Keep the language rules above: short sentences, and no em-dashes outside list markers.
+Label at creation with type and area. Keep the language rules above: short sentences, and no em-dashes except as the label separator in a bullet list.
 
 ## Observability assessment
 
