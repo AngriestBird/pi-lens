@@ -315,8 +315,17 @@ describe("finding-delivery-gate enumeration (#1634)", () => {
 	it("RED PROOF: a surface with a third mode is rejected, not silently accepted", () => {
 		const bypassRegistry: Record<string, DeliverySurfaceEntry> = {
 			...DELIVERY_SURFACES,
-			// @ts-expect-error deliberately malformed for the red-proof
-			"synthetic:bypass": { mode: "bypass", file: "nowhere.ts", description: "x", evidence: [] },
+			// Deliberately malformed for the red-proof. The @ts-expect-error sits
+			// on the offending property, not on the object literal: a formatter
+			// that wraps this literal across lines moves the reported error to
+			// the `mode` line and turns an object-level directive into TS2578.
+			"synthetic:bypass": {
+				// @ts-expect-error "bypass" is not a valid delivery mode
+				mode: "bypass",
+				file: "nowhere.ts",
+				description: "x",
+				evidence: [],
+			},
 		};
 		expect(() => assertNoDeliveryBypass(bypassRegistry)).toThrow(/synthetic:bypass/);
 	});
