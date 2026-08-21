@@ -258,7 +258,10 @@ const trivyConfigRunner: RunnerDefinition = {
 			return { status: "skipped", diagnostics: [], semantic: "none" };
 		}
 
-		const diagnostics = parseTrivyConfigOutput(result.stdout || "", ctx.filePath);
+		const diagnostics = parseTrivyConfigOutput(
+			result.stdout || "",
+			ctx.filePath,
+		);
 		if (diagnostics.length === 0) {
 			return { status: "succeeded", diagnostics: [], semantic: "none" };
 		}

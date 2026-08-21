@@ -46,7 +46,8 @@ vi.mock(
 			>();
 		return {
 			...actual,
-			fetchFreshProjectDiagnostics: freshFetchMocks.fetchFreshProjectDiagnostics,
+			fetchFreshProjectDiagnostics:
+				freshFetchMocks.fetchFreshProjectDiagnostics,
 		};
 	},
 );
@@ -75,7 +76,7 @@ vi.mock("../../clients/project-diagnostics/cache.js", () => ({
 // ── Mock widget state ─────────────────────────────────────────────────────────
 
 const mockSummaries: ReturnType<
-	typeof import("../../clients/widget-state.js")["getFileDiagnosticSummaries"]
+	(typeof import("../../clients/widget-state.js"))["getFileDiagnosticSummaries"]
 > = [];
 
 let mockStaleDropped = 0;
@@ -85,9 +86,8 @@ const reconcileScanDiagnosticsMock = vi.fn();
 const reconcileCorrelatedScanDiagnosticsMock = vi.fn();
 
 vi.mock("../../clients/widget-state.js", async (importOriginal) => {
-	const actual = await importOriginal<
-		typeof import("../../clients/widget-state.js")
-	>();
+	const actual =
+		await importOriginal<typeof import("../../clients/widget-state.js")>();
 	return {
 		...actual,
 		getFileDiagnosticSummaries: () => mockSummaries,
@@ -104,12 +104,16 @@ vi.mock("../../clients/widget-state.js", async (importOriginal) => {
 // below); only its resync side effect is mocked here so a demoted-line test
 // never reaches into the real LSP service / spawns a real language server.
 const resyncDocumentOnPastEofMock = vi.hoisted(() => vi.fn());
-vi.mock("../../clients/diagnostic-line-freshness.js", async (importOriginal) => {
-	const actual = await importOriginal<
-		typeof import("../../clients/diagnostic-line-freshness.js")
-	>();
-	return { ...actual, resyncDocumentOnPastEof: resyncDocumentOnPastEofMock };
-});
+vi.mock(
+	"../../clients/diagnostic-line-freshness.js",
+	async (importOriginal) => {
+		const actual =
+			await importOriginal<
+				typeof import("../../clients/diagnostic-line-freshness.js")
+			>();
+		return { ...actual, resyncDocumentOnPastEof: resyncDocumentOnPastEofMock };
+	},
+);
 
 beforeEach(() => {
 	projectDiagnosticsMocks.scanProjectDiagnostics.mockReset();
@@ -187,7 +191,10 @@ function withIgnoredFixture<T>(fn: (cwd: string) => Promise<T>): Promise<T> {
 // header must not print both terms for the same findings when blocking > 0,
 // but must still surface drift-demoted errors when blocking === 0.
 describe("lens_diagnostics compact render header", () => {
-	const identityTheme = { fg: (_color: string, text: string) => text, bold: (text: string) => text } as unknown as Theme;
+	const identityTheme = {
+		fg: (_color: string, text: string) => text,
+		bold: (text: string) => text,
+	} as unknown as Theme;
 
 	function renderHeader(details: Record<string, unknown>) {
 		const tool = makeTool();
@@ -420,27 +427,29 @@ describe("lens_diagnostics mode=delta", () => {
 			projectDiagnosticsMocks.loadProjectDiagnosticsSnapshot.mockReturnValue(
 				undefined,
 			);
-			projectDiagnosticsMocks.loadProjectDiagnosticsDeltaReport.mockReturnValue({
-				version: 1,
-				cwd,
-				generatedAt,
-				sessionId: "session-1",
-				turnIndex: 3,
-				diagnostics: [
-					{
-						filePath,
-						line: 12,
-						severity: "error",
-						semantic: "blocking",
-						tool: "knip",
-						runner: "knip",
-						rule: "knip:unlisted",
-						message: "Unlisted dependency lodash",
-						source: "project-scan",
-					},
-				],
-				sources: ["knip"],
-			});
+			projectDiagnosticsMocks.loadProjectDiagnosticsDeltaReport.mockReturnValue(
+				{
+					version: 1,
+					cwd,
+					generatedAt,
+					sessionId: "session-1",
+					turnIndex: 3,
+					diagnostics: [
+						{
+							filePath,
+							line: 12,
+							severity: "error",
+							semantic: "blocking",
+							tool: "knip",
+							runner: "knip",
+							rule: "knip:unlisted",
+							message: "Unlisted dependency lodash",
+							source: "project-scan",
+						},
+					],
+					sources: ["knip"],
+				},
+			);
 
 			const result = await run(makeTool(), { mode: "delta" }, cwd);
 			const text = String(result.content[0].text);
@@ -455,7 +464,9 @@ describe("lens_diagnostics mode=delta", () => {
 	});
 
 	it("#1634 review round R3: demotes a project-diagnostics-delta finding whose file was edited after the report was generated", async () => {
-		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-diag-delta-stale-"));
+		const cwd = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-diag-delta-stale-"),
+		);
 		try {
 			const filePath = path.join(cwd, "src", "drift.ts");
 			fs.mkdirSync(path.dirname(filePath), { recursive: true });
@@ -467,27 +478,29 @@ describe("lens_diagnostics mode=delta", () => {
 			projectDiagnosticsMocks.loadProjectDiagnosticsSnapshot.mockReturnValue(
 				undefined,
 			);
-			projectDiagnosticsMocks.loadProjectDiagnosticsDeltaReport.mockReturnValue({
-				version: 1,
-				cwd,
-				generatedAt,
-				sessionId: "session-1",
-				turnIndex: 3,
-				diagnostics: [
-					{
-						filePath,
-						line: 12,
-						severity: "error",
-						semantic: "blocking",
-						tool: "knip",
-						runner: "knip",
-						rule: "knip:unlisted",
-						message: "Unlisted dependency lodash",
-						source: "project-scan",
-					},
-				],
-				sources: ["knip"],
-			});
+			projectDiagnosticsMocks.loadProjectDiagnosticsDeltaReport.mockReturnValue(
+				{
+					version: 1,
+					cwd,
+					generatedAt,
+					sessionId: "session-1",
+					turnIndex: 3,
+					diagnostics: [
+						{
+							filePath,
+							line: 12,
+							severity: "error",
+							semantic: "blocking",
+							tool: "knip",
+							runner: "knip",
+							rule: "knip:unlisted",
+							message: "Unlisted dependency lodash",
+							source: "project-scan",
+						},
+					],
+					sources: ["knip"],
+				},
+			);
 
 			const result = await run(makeTool(), { mode: "delta" }, cwd);
 			const text = String(result.content[0].text);
@@ -509,32 +522,36 @@ describe("lens_diagnostics mode=delta", () => {
 	});
 
 	it("#1634 review round R3: drops a project-diagnostics-delta finding whose cited file no longer exists", async () => {
-		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-diag-delta-gone-"));
+		const cwd = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-diag-delta-gone-"),
+		);
 		try {
 			projectDiagnosticsMocks.loadProjectDiagnosticsSnapshot.mockReturnValue(
 				undefined,
 			);
-			projectDiagnosticsMocks.loadProjectDiagnosticsDeltaReport.mockReturnValue({
-				version: 1,
-				cwd,
-				generatedAt: new Date().toISOString(),
-				sessionId: "session-1",
-				turnIndex: 3,
-				diagnostics: [
-					{
-						filePath: path.join(cwd, "src", "gone.ts"),
-						line: 12,
-						severity: "error",
-						semantic: "blocking",
-						tool: "knip",
-						runner: "knip",
-						rule: "knip:unlisted",
-						message: "vanished project finding",
-						source: "project-scan",
-					},
-				],
-				sources: ["knip"],
-			});
+			projectDiagnosticsMocks.loadProjectDiagnosticsDeltaReport.mockReturnValue(
+				{
+					version: 1,
+					cwd,
+					generatedAt: new Date().toISOString(),
+					sessionId: "session-1",
+					turnIndex: 3,
+					diagnostics: [
+						{
+							filePath: path.join(cwd, "src", "gone.ts"),
+							line: 12,
+							severity: "error",
+							semantic: "blocking",
+							tool: "knip",
+							runner: "knip",
+							rule: "knip:unlisted",
+							message: "vanished project finding",
+							source: "project-scan",
+						},
+					],
+					sources: ["knip"],
+				},
+			);
 
 			const result = await run(makeTool(), { mode: "delta" }, cwd);
 			const text = String(result.content[0].text);
@@ -760,10 +777,7 @@ describe("lens_diagnostics mode=full", () => {
 		});
 		const lspService = {
 			runWorkspaceDiagnostics: vi.fn(
-				async (
-					_cwd: string,
-					options: { onServerReady?: () => void },
-				) => {
+				async (_cwd: string, options: { onServerReady?: () => void }) => {
 					await sweepReleased;
 					options.onServerReady?.();
 					return [];
@@ -787,13 +801,7 @@ describe("lens_diagnostics mode=full", () => {
 			},
 		};
 
-		const execution = tool.execute(
-			"1",
-			{ mode: "full" },
-			undefined,
-			null,
-			ctx,
-		);
+		const execution = tool.execute("1", { mode: "full" }, undefined, null, ctx);
 		await vi.waitFor(() => expect(capture).toHaveBeenCalledWith(ctx));
 		sessionActive = false;
 		releaseSweep();
@@ -1097,9 +1105,11 @@ describe("lens_diagnostics mode=full", () => {
 
 	it("does not surface an unconfirmed note when every LSP result is confirmed (#630)", async () => {
 		const lspService = {
-			runWorkspaceDiagnostics: vi.fn().mockResolvedValue([
-				{ filePath: "/proj/src/clean.ts", diagnostics: [], count: 0 },
-			]),
+			runWorkspaceDiagnostics: vi
+				.fn()
+				.mockResolvedValue([
+					{ filePath: "/proj/src/clean.ts", diagnostics: [], count: 0 },
+				]),
 		};
 		const result = await run(makeTool({}, lspService), { mode: "full" });
 		const text = String(result.content[0].text);
@@ -1214,7 +1224,9 @@ describe("lens_diagnostics mode=full", () => {
 	});
 
 	it("honors inline `# pi-lens-ignore` like mode=all (#442)", async () => {
-		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-diag-suppress-"));
+		const cwd = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-diag-suppress-"),
+		);
 		resetProjectLensConfigCache();
 		try {
 			const file = path.join(cwd, "app.py");
@@ -1609,9 +1621,8 @@ describe("lens_diagnostics mode=full", () => {
 	// must guard non-finite input directly, not merely appear to via callers
 	// that happen to pass finite numbers.
 	it("formatCacheAge renders 'age unknown' for non-finite input (#1623 fix-round F4)", async () => {
-		const { formatCacheAge } = await import(
-			"../../clients/project-diagnostics/extractors.js"
-		);
+		const { formatCacheAge } =
+			await import("../../clients/project-diagnostics/extractors.js");
 		expect(formatCacheAge(Number.NaN)).toBe("age unknown");
 		expect(formatCacheAge(Number.POSITIVE_INFINITY)).toBe("age unknown");
 		expect(formatCacheAge(18 * 60_000)).toBe("18m");
@@ -1629,7 +1640,14 @@ describe("lens_diagnostics mode=full", () => {
 				totalLines: 1,
 				percentage: 1,
 				clones: [
-					{ fileA: "src/a.ts", startA: 1, fileB: "src/b.ts", startB: 2, lines: 5, tokens: 9 },
+					{
+						fileA: "src/a.ts",
+						startA: 1,
+						fileB: "src/b.ts",
+						startB: 2,
+						lines: 5,
+						tokens: 9,
+					},
 				],
 			},
 		});
@@ -1639,9 +1657,15 @@ describe("lens_diagnostics mode=full", () => {
 			() => lspService as any,
 		);
 
-		const result = await tool.execute("1", { mode: "full" }, new AbortController().signal, null, {
-			cwd: "/proj",
-		});
+		const result = await tool.execute(
+			"1",
+			{ mode: "full" },
+			new AbortController().signal,
+			null,
+			{
+				cwd: "/proj",
+			},
+		);
 
 		expect(String(result.content[0].text)).not.toContain("Duplicate code");
 		expect(cm.readCache).not.toHaveBeenCalledWith("jscpd-ts", "/proj");
@@ -1861,15 +1885,13 @@ describe("lens_diagnostics mode=full", () => {
 			expect.arrayContaining(["gitleaks", "knip", "trivy", "govulncheck"]),
 		);
 		expect(
-			(result.details as { coldReasons?: Record<string, string> })
-				.coldReasons?.gitleaks,
+			(result.details as { coldReasons?: Record<string, string> }).coldReasons
+				?.gitleaks,
 		).toMatch(/refreshRunners not requested/);
 		// #585: without refreshRunners opting in, the (expensive) fresh-fetch of
 		// the heavyweight analyzers must still never run — only the rendering
 		// of that skip changed, not the (deliberately cheap) behavior itself.
-		expect(
-			freshFetchMocks.fetchFreshProjectDiagnostics,
-		).not.toHaveBeenCalled();
+		expect(freshFetchMocks.fetchFreshProjectDiagnostics).not.toHaveBeenCalled();
 	});
 
 	it("mode=full refreshRunners=cached triggers the analyzer fresh-fetch for the resolved cwd (#585)", async () => {
@@ -1896,12 +1918,14 @@ describe("lens_diagnostics mode=full", () => {
 		mockSummaries.length = 0;
 		let capturedLspSignal: AbortSignal | undefined;
 		const lspService = {
-			runWorkspaceDiagnostics: vi.fn().mockImplementation(
-				async (_cwd: string, opts: { signal?: AbortSignal }) => {
-					capturedLspSignal = opts.signal;
-					return [];
-				},
-			),
+			runWorkspaceDiagnostics: vi
+				.fn()
+				.mockImplementation(
+					async (_cwd: string, opts: { signal?: AbortSignal }) => {
+						capturedLspSignal = opts.signal;
+						return [];
+					},
+				),
 		};
 		await run(makeTool({}, lspService), {
 			mode: "full",
@@ -1942,7 +1966,8 @@ describe("lens_diagnostics mode=full", () => {
 			(result.details as { analyzersAborted?: boolean }).analyzersAborted,
 		).toBe(true);
 		expect(
-			(result.details as { analyzersAbortedIds?: string[] }).analyzersAbortedIds,
+			(result.details as { analyzersAbortedIds?: string[] })
+				.analyzersAbortedIds,
 		).toEqual(["trivy"]);
 	});
 
@@ -2119,7 +2144,9 @@ describe("lens_diagnostics mode=full", () => {
 				},
 			],
 		});
-		const lspService = { runWorkspaceDiagnostics: vi.fn().mockResolvedValue([]) };
+		const lspService = {
+			runWorkspaceDiagnostics: vi.fn().mockResolvedValue([]),
+		};
 
 		const result = await run(makeTool({}, lspService), {
 			mode: "full",
@@ -2299,7 +2326,9 @@ describe("lens_diagnostics mode=all", () => {
 		});
 
 		it("RED CASE: demotes a cached diagnostic citing a line past the file's current EOF", async () => {
-			const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-diag-past-eof-"));
+			const cwd = fs.mkdtempSync(
+				path.join(os.tmpdir(), "pi-lens-diag-past-eof-"),
+			);
 			try {
 				const filePath = path.join(cwd, "kilo.ts");
 				// 6 addressable lines on disk — the widget cache still carries a
@@ -2338,7 +2367,9 @@ describe("lens_diagnostics mode=all", () => {
 		});
 
 		it("does not touch a diagnostic whose cited line is still within the current file", async () => {
-			const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-diag-eof-ok-"));
+			const cwd = fs.mkdtempSync(
+				path.join(os.tmpdir(), "pi-lens-diag-eof-ok-"),
+			);
 			try {
 				const filePath = path.join(cwd, "fine.ts");
 				fs.writeFileSync(filePath, "a\nb\nc\nd\ne\n");
@@ -2376,7 +2407,9 @@ describe("lens_diagnostics mode=all", () => {
 			// dropped is not being served to the agent, so it must never trigger a
 			// resync or a `diagnostic_past_eof` record on THIS call — those are
 			// side effects reserved for findings that are actually delivered.
-			const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-diag-eof-policy-"));
+			const cwd = fs.mkdtempSync(
+				path.join(os.tmpdir(), "pi-lens-diag-eof-policy-"),
+			);
 			try {
 				fs.writeFileSync(
 					path.join(cwd, ".pi-lens.json"),
@@ -2979,7 +3012,11 @@ describe("lens_diagnostics paths", () => {
 			const outside = path.join(cwd, "outside.ts");
 			mockSummaries.push(sum(inside, { warnings: 1 }));
 			mockSummaries.push(sum(outside, { blocking: 1 }));
-			const result = await run(makeTool(), { mode: "all", paths: [subdir] }, cwd);
+			const result = await run(
+				makeTool(),
+				{ mode: "all", paths: [subdir] },
+				cwd,
+			);
 			const text = String(result.content[0].text);
 			expect(text).toContain("keep.ts");
 			expect(text).not.toContain("outside.ts");
@@ -3059,14 +3096,12 @@ describe("lens_diagnostics honors the turn abort (ctx.signal)", () => {
 	});
 });
 
-
 describe("lens_diagnostics wall-clock ceiling (never-hang guarantee)", () => {
 	it("stops mode=full and marks timedOut when the wall-clock budget is exceeded", async () => {
 		vi.resetModules();
 		process.env.PI_LENS_LENS_DIAGNOSTICS_FULL_TIMEOUT_MS = "1";
-		const { createLensDiagnosticsTool: freshCreate } = await import(
-			"../../tools/lens-diagnostics.js"
-		);
+		const { createLensDiagnosticsTool: freshCreate } =
+			await import("../../tools/lens-diagnostics.js");
 		const lspService = {
 			// Outlast the 1ms ceiling so it fires before the sweep returns.
 			runWorkspaceDiagnostics: vi.fn(async () => {

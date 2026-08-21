@@ -408,7 +408,10 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		);
 		return;
 	}
-	if (access === "available" && (turnState.files || turnState.owner || turnState.sessionId)) {
+	if (
+		access === "available" &&
+		(turnState.files || turnState.owner || turnState.sessionId)
+	) {
 		dbg("turn_end: evicting stale turn-state owner");
 		cacheManager.clearTurnState(cwd, currentOwner);
 		turnState = cacheManager.readTurnState(cwd);
@@ -537,7 +540,8 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		additionalEntries: getWidgetBlockingFilesForSweep().map((row) => ({
 			filePath: row.filePath,
 			recordedAtMs: row.recordedAtMs,
-			demote: () => markWidgetFileBlockersStale(row.filePath, "dependency-drift"),
+			demote: () =>
+				markWidgetFileBlockersStale(row.filePath, "dependency-drift"),
 		})),
 	});
 	logLatency({
@@ -761,7 +765,9 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				neighborCount: uniqueNeighborFiles.length,
 				metadata: {
 					neighborFiles: uniqueNeighborFiles.slice(0, 10),
-					suggestedTestFiles: testSuggestions.slice(0, 10).map((s) => s.testFile),
+					suggestedTestFiles: testSuggestions
+						.slice(0, 10)
+						.map((s) => s.testFile),
 					runner: testSuggestions[0]?.runner,
 					truncated: testSuggestions.length > 10,
 					zeroSuggestions: testSuggestions.length === 0,
@@ -1044,9 +1050,13 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			);
 			knipMeta = { skipped: true, reason: prevKnip.data.summary };
 		} else {
-			const knipResult = await knipClient.analyze(cwd, getKnipIgnorePatterns(), {
-				projectSeq: runtime.projectSeq,
-			});
+			const knipResult = await knipClient.analyze(
+				cwd,
+				getKnipIgnorePatterns(),
+				{
+					projectSeq: runtime.projectSeq,
+				},
+			);
 			// Never overwrite a good scan with a failure (#925, #1467): the last
 			// good result stays until a new successful scan replaces it.
 			const knipWouldPoison = wouldPoisonCache(prevKnip, knipResult);
@@ -1583,8 +1593,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		};
 		if (critical.length) {
 			const shown = critical.slice(0, 5);
-			let report =
-				`🔴 STOP — CRITICAL dependency CVEs (trivy, ${trivyAgeLabel}). Upgrade before shipping:\n`;
+			let report = `🔴 STOP — CRITICAL dependency CVEs (trivy, ${trivyAgeLabel}). Upgrade before shipping:\n`;
 			for (const f of shown) report += fmt(f);
 			if (critical.length > shown.length) {
 				report += `  … and ${critical.length - shown.length} more\n`;
@@ -1611,8 +1620,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	const licenses = trivyCacheEntry?.data?.licenses ?? [];
 	if (licenses.length) {
 		const shown = licenses.slice(0, 5);
-		let report =
-			`📜 Dependency license risk (trivy, ${trivyAgeLabel}) — review for compliance:\n`;
+		let report = `📜 Dependency license risk (trivy, ${trivyAgeLabel}) — review for compliance:\n`;
 		for (const l of shown) {
 			const cat = l.category ? `, ${l.category}` : "";
 			report += `  ${l.pkgName} — ${l.license} (${l.severity}${cat})\n`;
@@ -1798,11 +1806,16 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 						generation: testRunGeneration,
 						files: provenanceFiles,
 					});
-					const superseded = launchedFrom.revision.sessionId !== publishedAgainst.revision.sessionId ||
-						launchedFrom.revision.projectSeq !== publishedAgainst.revision.projectSeq ||
-						launchedFrom.revision.turnIndex !== publishedAgainst.revision.turnIndex ||
-						launchedFrom.files.some((file, index) =>
-							publishedAgainst.files[index]?.sha256 !== file.sha256 ||
+					const superseded =
+						launchedFrom.revision.sessionId !==
+							publishedAgainst.revision.sessionId ||
+						launchedFrom.revision.projectSeq !==
+							publishedAgainst.revision.projectSeq ||
+						launchedFrom.revision.turnIndex !==
+							publishedAgainst.revision.turnIndex ||
+						launchedFrom.files.some(
+							(file, index) =>
+								publishedAgainst.files[index]?.sha256 !== file.sha256 ||
 								publishedAgainst.files[index]?.path !== file.path,
 						);
 					// #628: the turn advancing while tests ran no longer means the
@@ -1863,10 +1876,11 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 						}
 					}
 					if (failures.length > 0) {
-						const currentGeneration = cacheManager.readCache<TestRunnerFindingsCache>(
-							"test-runner-findings",
-							cwd,
-						)?.data?.testRunGeneration;
+						const currentGeneration =
+							cacheManager.readCache<TestRunnerFindingsCache>(
+								"test-runner-findings",
+								cwd,
+							)?.data?.testRunGeneration;
 						if (
 							currentGeneration !== undefined &&
 							currentGeneration > testRunGeneration
@@ -1893,7 +1907,10 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 							},
 							cwd,
 						);
-						if (getFlag("lens-guard") && firedSessionId === runtime.telemetrySessionId) {
+						if (
+							getFlag("lens-guard") &&
+							firedSessionId === runtime.telemetrySessionId
+						) {
 							// #1524: `&& !value.error` — a runner-error result has
 							// `failed === 0` (the suite never ran, so nothing could
 							// fail), but it is not a pass. Without the filter it
@@ -1989,77 +2006,77 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			);
 		} else {
 			try {
-				const { impact, formatImpact, parseSymbolKey } = await import("./call-graph.js");
-				const { callGraphImpactToProjectDiagnostics } = await import(
-					"./project-diagnostics/runner-adapters/call-graph-impact.js"
-				);
-			const impactLines: string[] = [];
+				const { impact, formatImpact, parseSymbolKey } =
+					await import("./call-graph.js");
+				const { callGraphImpactToProjectDiagnostics } =
+					await import("./project-diagnostics/runner-adapters/call-graph-impact.js");
+				const impactLines: string[] = [];
 				const impactFindings: {
 					calleeKey: string;
 					results: ReturnType<typeof impact>;
 				}[] = [];
-			for (const filePath of files.slice(0, 5)) {
-				// Turn-state files may be cwd-relative while graph keys are absolute,
-				// and persisted graphs can contain either slash style/casing. Compare
-				// through the shared normalized path seam; keep the original filePath
-				// only for display and diagnostics.
+				for (const filePath of files.slice(0, 5)) {
+					// Turn-state files may be cwd-relative while graph keys are absolute,
+					// and persisted graphs can contain either slash style/casing. Compare
+					// through the shared normalized path seam; keep the original filePath
+					// only for display and diagnostics.
 					const changedFileKey = normalizeMapKey(
 						resolveRunnerPath(cwd, filePath),
 					);
 					const fileCallerKeys = [...runtime.callGraph.callers.keys()].filter(
 						(k) => {
-					const graphFilePath = parseSymbolKey(k).filePath;
+							const graphFilePath = parseSymbolKey(k).filePath;
 							return (
 								normalizeMapKey(resolveRunnerPath(cwd, graphFilePath)) ===
 								changedFileKey
 							);
 						},
 					);
-				for (const calleeKey of fileCallerKeys.slice(0, 3)) {
-					// #1080: drop KNOWN test-role callers BEFORE both the human advisory
-					// (formatImpact below) and the persisted delta (impactFindings →
-					// callGraphImpactToProjectDiagnostics) — the advisory is rendered
-					// first, so the filter must reach the shared `results` set that feeds
-					// both. A test caller supplied by an old/fixture/expanded graph must
-					// appear in neither surface. Fail-open: an unparseable/unclassifiable
-					// key is retained (the adapter re-applies the same predicate).
-					const results = impact(runtime.callGraph, calleeKey).filter((r) => {
-						const callerFile = parseSymbolKey(r.symbolKey).filePath;
-						return (
-							!callerFile ||
-							!isTestRoleCollateral(resolveRunnerPath(cwd, callerFile))
-						);
-					});
-					if (results.length > 0) {
-						impactFindings.push({ calleeKey, results });
-						const summary = formatImpact(results, cwd);
-						if (summary)
+					for (const calleeKey of fileCallerKeys.slice(0, 3)) {
+						// #1080: drop KNOWN test-role callers BEFORE both the human advisory
+						// (formatImpact below) and the persisted delta (impactFindings →
+						// callGraphImpactToProjectDiagnostics) — the advisory is rendered
+						// first, so the filter must reach the shared `results` set that feeds
+						// both. A test caller supplied by an old/fixture/expanded graph must
+						// appear in neither surface. Fail-open: an unparseable/unclassifiable
+						// key is retained (the adapter re-applies the same predicate).
+						const results = impact(runtime.callGraph, calleeKey).filter((r) => {
+							const callerFile = parseSymbolKey(r.symbolKey).filePath;
+							return (
+								!callerFile ||
+								!isTestRoleCollateral(resolveRunnerPath(cwd, callerFile))
+							);
+						});
+						if (results.length > 0) {
+							impactFindings.push({ calleeKey, results });
+							const summary = formatImpact(results, cwd);
+							if (summary)
 								impactLines.push(
 									`  ${parseSymbolKey(calleeKey).symbolName ?? calleeKey}: ${summary}`,
 								);
+						}
 					}
 				}
-			}
-			if (impactLines.length > 0) {
-				// @delivery-surface: runtime-turn:call-graph-advisory
-				advisoryParts.push(
-					`📊 Call-graph impact (changed symbols have callers):\n${impactLines.join("\n")}`,
-				);
-			}
-			if (impactFindings.length > 0) {
-				const impactDiagnostics = callGraphImpactToProjectDiagnostics(
-					cwd,
-					impactFindings,
-				);
-				if (impactDiagnostics.length > 0) {
-					projectDiagnosticsDelta.push(...impactDiagnostics);
-					projectDiagnosticsSources.add("call-graph");
+				if (impactLines.length > 0) {
+					// @delivery-surface: runtime-turn:call-graph-advisory
+					advisoryParts.push(
+						`📊 Call-graph impact (changed symbols have callers):\n${impactLines.join("\n")}`,
+					);
 				}
+				if (impactFindings.length > 0) {
+					const impactDiagnostics = callGraphImpactToProjectDiagnostics(
+						cwd,
+						impactFindings,
+					);
+					if (impactDiagnostics.length > 0) {
+						projectDiagnosticsDelta.push(...impactDiagnostics);
+						projectDiagnosticsSources.add("call-graph");
+					}
+				}
+				// Non-fatal — call graph is best-effort
+			} catch {
+				// Non-fatal — call graph is best-effort
 			}
-			// Non-fatal — call graph is best-effort
-		} catch {
-			// Non-fatal — call graph is best-effort
-		}
 		}
 	}
 
@@ -2241,11 +2258,14 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 					writeGitGuardRecord(cacheManager, runtime, cwd, {
 						...(existingGuard as TurnEndFindingsCache),
 						content,
-						blockerContent: blockerParts.length > 0
-							? capTurnEndMessage(blockerParts.join("\n\n"))
-							: undefined,
-						hasBlockers: blockerParts.length > 0 || existingGuard.testFailures === true,
-						blockingFiles: blockerParts.length > 0 ? existingGuard.affectedFiles : undefined,
+						blockerContent:
+							blockerParts.length > 0
+								? capTurnEndMessage(blockerParts.join("\n\n"))
+								: undefined,
+						hasBlockers:
+							blockerParts.length > 0 || existingGuard.testFailures === true,
+						blockingFiles:
+							blockerParts.length > 0 ? existingGuard.affectedFiles : undefined,
 						projectSeqStart: runtime.turnStartProjectSeq,
 						projectSeqEnd: runtime.projectSeq,
 						fileSeqByPath: Object.fromEntries(
@@ -2276,8 +2296,8 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			>("turn-end-findings", cwd)?.data;
 			const blockingContent =
 				blockerParts.length > 0
-				? capTurnEndMessage(blockerParts.join("\n\n"))
-				: undefined;
+					? capTurnEndMessage(blockerParts.join("\n\n"))
+					: undefined;
 			const affectedFiles = [
 				...(existingGuard?.affectedFiles ?? []),
 				...files.map((file) => resolveRunnerPath(cwd, file)),
@@ -2308,8 +2328,9 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		} else {
 			const allAffectedFiles = [
 				...files.map((file) => resolveRunnerPath(cwd, file)),
-				...cascadeResults.flatMap((result) => result.neighbors
-					.filter((neighbor) => neighbor.diagnostics.length > 0)
+				...cascadeResults.flatMap((result) =>
+					result.neighbors
+						.filter((neighbor) => neighbor.diagnostics.length > 0)
 						.map((neighbor) => resolveRunnerPath(cwd, neighbor.filePath)),
 				),
 			];
@@ -2322,19 +2343,19 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			cacheManager.writeCache(
 				"turn-end-findings",
 				{
-				content,
-				affectedFiles,
-				affectedFilesTruncated,
-				provenance: snapshotAdvisoryProvenance({
-					cwd,
-					runtime,
-					generation: 0,
+					content,
+					affectedFiles,
+					affectedFilesTruncated,
+					provenance: snapshotAdvisoryProvenance({
+						cwd,
+						runtime,
+						generation: 0,
 						files: affectedFiles.map((file) => ({
 							path: file,
 							role: "affected" as const,
 						})),
-					truncated: affectedFilesTruncated,
-				}),
+						truncated: affectedFilesTruncated,
+					}),
 				},
 				cwd,
 			);

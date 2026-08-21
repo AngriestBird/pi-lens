@@ -138,12 +138,14 @@ describe("fetchFreshProjectDiagnostics (#585)", () => {
 	it("runs knip fresh and writes its result to cache", async () => {
 		const cacheManager = makeCacheManager();
 		const clients = makeClients({
-			knipIssues: [
-				{ type: "file", name: "dead.ts", file: "dead.ts" },
-			],
+			knipIssues: [{ type: "file", name: "dead.ts", file: "dead.ts" }],
 		});
 
-		const result = await fetchFreshProjectDiagnostics(cacheManager, tmp, clients);
+		const result = await fetchFreshProjectDiagnostics(
+			cacheManager,
+			tmp,
+			clients,
+		);
 
 		expect(clients.knipClient.analyze).toHaveBeenCalledTimes(1);
 		expect(cacheManager.writeCache).toHaveBeenCalledWith(
@@ -167,7 +169,11 @@ describe("fetchFreshProjectDiagnostics (#585)", () => {
 			},
 		});
 
-		const result = await fetchFreshProjectDiagnostics(cacheManager, tmp, clients);
+		const result = await fetchFreshProjectDiagnostics(
+			cacheManager,
+			tmp,
+			clients,
+		);
 
 		expect(result.failed).toEqual([
 			{ id: "knip", summary: "knip process failed" },
@@ -260,7 +266,11 @@ describe("fetchFreshProjectDiagnostics (#585)", () => {
 		const cacheManager = makeCacheManager();
 		const clients = makeClients({ jscpdAvailable: false });
 
-		const result = await fetchFreshProjectDiagnostics(cacheManager, tmp, clients);
+		const result = await fetchFreshProjectDiagnostics(
+			cacheManager,
+			tmp,
+			clients,
+		);
 
 		expect(clients.jscpdClient.scan).not.toHaveBeenCalled();
 		expect(result.cold).toContain("jscpd");
@@ -295,7 +305,11 @@ describe("fetchFreshProjectDiagnostics (#585)", () => {
 			},
 		});
 
-		const result = await fetchFreshProjectDiagnostics(cacheManager, tmp, clients);
+		const result = await fetchFreshProjectDiagnostics(
+			cacheManager,
+			tmp,
+			clients,
+		);
 
 		expect(clients.jscpdClient.scan).toHaveBeenCalledWith(
 			path.resolve(tmp),
@@ -321,14 +335,22 @@ describe("fetchFreshProjectDiagnostics (#585)", () => {
 	it("persists the present madge result for downstream diagnostics", async () => {
 		const cacheManager = makeCacheManager();
 		const madgeResult = {
-			circular: [[path.join(tmp, "src", "a.ts"), path.join(tmp, "src", "b.ts")]],
+			circular: [
+				[path.join(tmp, "src", "a.ts"), path.join(tmp, "src", "b.ts")],
+			],
 			count: 1,
 		};
 		const clients = makeClients({ madgeAvailable: true, madgeResult });
 
-		const result = await fetchFreshProjectDiagnostics(cacheManager, tmp, clients);
+		const result = await fetchFreshProjectDiagnostics(
+			cacheManager,
+			tmp,
+			clients,
+		);
 
-		expect(clients.depChecker.scanProject).toHaveBeenCalledWith(path.resolve(tmp));
+		expect(clients.depChecker.scanProject).toHaveBeenCalledWith(
+			path.resolve(tmp),
+		);
 		expect(cacheManager.writeCache).toHaveBeenCalledWith(
 			"madge",
 			madgeResult,
@@ -344,7 +366,11 @@ describe("fetchFreshProjectDiagnostics (#585)", () => {
 		const cacheManager = makeCacheManager();
 		const clients = makeClients();
 
-		const result = await fetchFreshProjectDiagnostics(cacheManager, tmp, clients);
+		const result = await fetchFreshProjectDiagnostics(
+			cacheManager,
+			tmp,
+			clients,
+		);
 
 		expect(clients.govulncheckClient.analyze).not.toHaveBeenCalled();
 		expect(clients.trivyClient.scan).not.toHaveBeenCalled();
@@ -358,7 +384,11 @@ describe("fetchFreshProjectDiagnostics (#585)", () => {
 		const cacheManager = makeCacheManager();
 		const clients = makeClients();
 
-		const result = await fetchFreshProjectDiagnostics(cacheManager, tmp, clients);
+		const result = await fetchFreshProjectDiagnostics(
+			cacheManager,
+			tmp,
+			clients,
+		);
 
 		expect(clients.gitleaksClient.scan).not.toHaveBeenCalled();
 		expect(result.cold).toContain("gitleaks");
@@ -374,7 +404,11 @@ describe("fetchFreshProjectDiagnostics (#585)", () => {
 		const cacheManager = makeCacheManager();
 		const clients = makeClients();
 
-		const result = await fetchFreshProjectDiagnostics(cacheManager, tmp, clients);
+		const result = await fetchFreshProjectDiagnostics(
+			cacheManager,
+			tmp,
+			clients,
+		);
 
 		expect(result.coldReasons?.gitleaks).toMatch(/not a git repository/i);
 		expect(result.coldReasons?.govulncheck).toMatch(/go\.mod/i);
@@ -407,7 +441,11 @@ describe("fetchFreshProjectDiagnostics (#585)", () => {
 			retryAtMs,
 		});
 
-		const result = await fetchFreshProjectDiagnostics(cacheManager, tmp, clients);
+		const result = await fetchFreshProjectDiagnostics(
+			cacheManager,
+			tmp,
+			clients,
+		);
 
 		expect(result.coldReasons?.jscpd).toMatch(/retry cooldown \(\d+s\)/);
 		expect(result.coldReasons?.jscpd).not.toMatch(/binary unavailable/i);
@@ -430,10 +468,16 @@ describe("fetchFreshProjectDiagnostics (#585)", () => {
 				clients.govulncheckClient.ensureAvailable as ReturnType<typeof vi.fn>
 			).mockResolvedValue(false);
 
-			const result = await fetchFreshProjectDiagnostics(cacheManager, tmp, clients);
+			const result = await fetchFreshProjectDiagnostics(
+				cacheManager,
+				tmp,
+				clients,
+			);
 
 			expect(result.coldReasons?.govulncheck).toMatch(/not trusted/i);
-			expect(result.coldReasons?.govulncheck).not.toMatch(/binary unavailable/i);
+			expect(result.coldReasons?.govulncheck).not.toMatch(
+				/binary unavailable/i,
+			);
 		} finally {
 			resetProjectTrust();
 		}
@@ -446,13 +490,19 @@ describe("fetchFreshProjectDiagnostics (#585)", () => {
 		fs.mkdirSync(path.join(tmp, ".git"));
 		const cacheManager = makeCacheManager();
 		const clients = makeClients();
-		(clients.gitleaksClient.scan as ReturnType<typeof vi.fn>).mockResolvedValue({
-			success: true,
-			findings: [{ ruleId: "aws-key", file: "a.ts", startLine: 1 }],
-			scannedAt: "now",
-		});
+		(clients.gitleaksClient.scan as ReturnType<typeof vi.fn>).mockResolvedValue(
+			{
+				success: true,
+				findings: [{ ruleId: "aws-key", file: "a.ts", startLine: 1 }],
+				scannedAt: "now",
+			},
+		);
 
-		const result = await fetchFreshProjectDiagnostics(cacheManager, tmp, clients);
+		const result = await fetchFreshProjectDiagnostics(
+			cacheManager,
+			tmp,
+			clients,
+		);
 
 		expect(clients.gitleaksClient.scan).toHaveBeenCalledTimes(1);
 		expect(clients.gitleaksClient.scan).toHaveBeenCalledWith(
@@ -473,13 +523,19 @@ describe("fetchFreshProjectDiagnostics (#585)", () => {
 		fs.writeFileSync(path.join(tmp, ".gitleaksignore"), "");
 		const cacheManager = makeCacheManager();
 		const clients = makeClients();
-		(clients.gitleaksClient.scan as ReturnType<typeof vi.fn>).mockResolvedValue({
-			success: true,
-			findings: [],
-			scannedAt: "now",
-		});
+		(clients.gitleaksClient.scan as ReturnType<typeof vi.fn>).mockResolvedValue(
+			{
+				success: true,
+				findings: [],
+				scannedAt: "now",
+			},
+		);
 
-		const result = await fetchFreshProjectDiagnostics(cacheManager, tmp, clients);
+		const result = await fetchFreshProjectDiagnostics(
+			cacheManager,
+			tmp,
+			clients,
+		);
 
 		expect(clients.gitleaksClient.scan).toHaveBeenCalledTimes(1);
 		// A clean scan (no findings) doesn't land in `runners` by design (that
@@ -506,14 +562,20 @@ describe("fetchFreshProjectDiagnostics (#585)", () => {
 			const { file, content } = seedGitRepoWithFinding();
 			const cacheManager = makeCacheManager();
 			const clients = makeClients();
-			(clients.gitleaksClient.scan as ReturnType<typeof vi.fn>).mockResolvedValue({
+			(
+				clients.gitleaksClient.scan as ReturnType<typeof vi.fn>
+			).mockResolvedValue({
 				success: true,
 				findings: [{ ruleId: "generic-api-key", file: "a.ts", startLine: 1 }],
 				scannedAt: "now",
 			});
 
 			// Pre-fix baseline: unmarked finding is reported.
-			const before = await fetchFreshProjectDiagnostics(cacheManager, tmp, clients);
+			const before = await fetchFreshProjectDiagnostics(
+				cacheManager,
+				tmp,
+				clients,
+			);
 			expect(before.diagnostics).toHaveLength(1);
 			expect(before.dispositionSuppressed ?? 0).toBe(0);
 
@@ -531,7 +593,11 @@ describe("fetchFreshProjectDiagnostics (#585)", () => {
 				"false-positive",
 			);
 
-			const after = await fetchFreshProjectDiagnostics(cacheManager, tmp, clients);
+			const after = await fetchFreshProjectDiagnostics(
+				cacheManager,
+				tmp,
+				clients,
+			);
 			expect(after.diagnostics).toHaveLength(0);
 			expect(after.dispositionSuppressed).toBe(1);
 		});
@@ -548,7 +614,9 @@ describe("fetchFreshProjectDiagnostics (#585)", () => {
 			const { file } = seedGitRepoWithFinding();
 			const cacheManager = makeCacheManager();
 			const clients = makeClients();
-			(clients.gitleaksClient.scan as ReturnType<typeof vi.fn>).mockResolvedValue({
+			(
+				clients.gitleaksClient.scan as ReturnType<typeof vi.fn>
+			).mockResolvedValue({
 				success: true,
 				findings: [{ ruleId: "generic-api-key", file: "a.ts", startLine: 1 }],
 				scannedAt: "now",
@@ -567,14 +635,22 @@ describe("fetchFreshProjectDiagnostics (#585)", () => {
 				},
 				"false-positive",
 			);
-			const suppressed = await fetchFreshProjectDiagnostics(cacheManager, tmp, clients);
+			const suppressed = await fetchFreshProjectDiagnostics(
+				cacheManager,
+				tmp,
+				clients,
+			);
 			expect(suppressed.diagnostics).toHaveLength(0);
 
 			// The line is rewritten (still triggers the same rule at the same
 			// file:line) — the strict anchor's line-content hash no longer
 			// matches the mark, so gitleaks re-reporting it is a FRESH finding.
 			fs.writeFileSync(file, "const clientId = 'still-not-a-real-secret';\n");
-			const restored = await fetchFreshProjectDiagnostics(cacheManager, tmp, clients);
+			const restored = await fetchFreshProjectDiagnostics(
+				cacheManager,
+				tmp,
+				clients,
+			);
 			expect(restored.diagnostics).toHaveLength(1);
 			expect(restored.dispositionSuppressed ?? 0).toBe(0);
 		});
@@ -585,7 +661,9 @@ describe("fetchFreshProjectDiagnostics (#585)", () => {
 			fs.writeFileSync(path.join(tmp, "main.go"), content);
 			const cacheManager = makeCacheManager();
 			const clients = makeClients();
-			(clients.govulncheckClient.analyze as ReturnType<typeof vi.fn>).mockResolvedValue({
+			(
+				clients.govulncheckClient.analyze as ReturnType<typeof vi.fn>
+			).mockResolvedValue({
 				success: true,
 				findings: [
 					{
@@ -597,7 +675,11 @@ describe("fetchFreshProjectDiagnostics (#585)", () => {
 				scannedAt: "now",
 			});
 
-			const before = await fetchFreshProjectDiagnostics(cacheManager, tmp, clients);
+			const before = await fetchFreshProjectDiagnostics(
+				cacheManager,
+				tmp,
+				clients,
+			);
 			expect(before.diagnostics).toHaveLength(1);
 
 			markDisposition(
@@ -607,14 +689,19 @@ describe("fetchFreshProjectDiagnostics (#585)", () => {
 					filePath: path.resolve(tmp, "main.go"),
 					tool: "govulncheck",
 					rule: "govulncheck:GO-2024-0001",
-					message: "Vulnerability GO-2024-0001: reachable vulnerable dependency",
+					message:
+						"Vulnerability GO-2024-0001: reachable vulnerable dependency",
 					line: 1,
 					content,
 				},
 				"suppress",
 			);
 
-			const after = await fetchFreshProjectDiagnostics(cacheManager, tmp, clients);
+			const after = await fetchFreshProjectDiagnostics(
+				cacheManager,
+				tmp,
+				clients,
+			);
 			expect(after.diagnostics).toHaveLength(0);
 			expect(after.dispositionSuppressed).toBe(1);
 		});
@@ -678,7 +765,11 @@ describe("fetchFreshProjectDiagnostics (#585)", () => {
 			secrets: [{ ruleId: "generic-api-key", file: "a.ts", line: 1 }],
 		});
 
-		const before = await fetchFreshProjectDiagnostics(cacheManager, tmp, clients);
+		const before = await fetchFreshProjectDiagnostics(
+			cacheManager,
+			tmp,
+			clients,
+		);
 		expect(before.runners).toContain("trivy");
 		expect(before.diagnostics).toContainEqual(
 			expect.objectContaining({
@@ -701,7 +792,11 @@ describe("fetchFreshProjectDiagnostics (#585)", () => {
 			"false-positive",
 		);
 
-		const after = await fetchFreshProjectDiagnostics(cacheManager, tmp, clients);
+		const after = await fetchFreshProjectDiagnostics(
+			cacheManager,
+			tmp,
+			clients,
+		);
 		expect(after.diagnostics).not.toContainEqual(
 			expect.objectContaining({ rule: "trivy-secret:generic-api-key" }),
 		);
@@ -716,25 +811,31 @@ describe("fetchFreshProjectDiagnostics (#585)", () => {
 	it("surfaces opengrep findings (ERROR→blocking, CWE-tagged) and caches them (#585)", async () => {
 		const cacheManager = makeCacheManager();
 		const clients = makeClients();
-		(clients.opengrepClient.scan as ReturnType<typeof vi.fn>).mockResolvedValue({
-			success: true,
-			scannedAt: "now",
-			findings: [
-				{
-					checkId: "python.lang.security.audit.subprocess-shell-true",
-					path: "src/run.py",
-					startLine: 7,
-					startCol: 3,
-					endLine: 7,
-					endCol: 20,
-					message: "shell=True is dangerous",
-					severity: "ERROR",
-					cwe: ["CWE-78: OS Command Injection"],
-				},
-			],
-		});
+		(clients.opengrepClient.scan as ReturnType<typeof vi.fn>).mockResolvedValue(
+			{
+				success: true,
+				scannedAt: "now",
+				findings: [
+					{
+						checkId: "python.lang.security.audit.subprocess-shell-true",
+						path: "src/run.py",
+						startLine: 7,
+						startCol: 3,
+						endLine: 7,
+						endCol: 20,
+						message: "shell=True is dangerous",
+						severity: "ERROR",
+						cwe: ["CWE-78: OS Command Injection"],
+					},
+				],
+			},
+		);
 
-		const result = await fetchFreshProjectDiagnostics(cacheManager, tmp, clients);
+		const result = await fetchFreshProjectDiagnostics(
+			cacheManager,
+			tmp,
+			clients,
+		);
 
 		// Structurally always-on: no static project gate, only an availability
 		// probe — the scan runs even on a bare tmp dir with no manifest/marker.
@@ -767,7 +868,11 @@ describe("fetchFreshProjectDiagnostics (#585)", () => {
 			clients.opengrepClient.ensureAvailable as ReturnType<typeof vi.fn>
 		).mockResolvedValue(false);
 
-		const result = await fetchFreshProjectDiagnostics(cacheManager, tmp, clients);
+		const result = await fetchFreshProjectDiagnostics(
+			cacheManager,
+			tmp,
+			clients,
+		);
 
 		expect(clients.opengrepClient.scan).not.toHaveBeenCalled();
 		expect(result.cold).toContain("opengrep");
@@ -783,7 +888,10 @@ describe("fetchFreshProjectDiagnostics (#585)", () => {
 	it("surfaces cached test-runner findings via mode=full without re-running the suite (#1004)", async () => {
 		const cacheManager = makeCacheManager();
 		fs.mkdirSync(path.join(tmp, "src"), { recursive: true });
-		fs.writeFileSync(path.join(tmp, "src/foo.test.ts"), "test('foo', () => {});\n");
+		fs.writeFileSync(
+			path.join(tmp, "src/foo.test.ts"),
+			"test('foo', () => {});\n",
+		);
 		const testResult = {
 			file: path.join(path.resolve(tmp), "src/foo.test.ts"),
 			runner: "vitest",
@@ -808,7 +916,12 @@ describe("fetchFreshProjectDiagnostics (#585)", () => {
 			(scanner: string) => {
 				if (scanner === "test-runner-findings") {
 					return {
-						data: { content: "FAIL", stale: false, results: [testResult], provenance },
+						data: {
+							content: "FAIL",
+							stale: false,
+							results: [testResult],
+							provenance,
+						},
 						meta: { timestamp: new Date().toISOString() },
 					};
 				}
@@ -817,7 +930,11 @@ describe("fetchFreshProjectDiagnostics (#585)", () => {
 		);
 		const clients = makeClients();
 
-		const result = await fetchFreshProjectDiagnostics(cacheManager, tmp, clients);
+		const result = await fetchFreshProjectDiagnostics(
+			cacheManager,
+			tmp,
+			clients,
+		);
 
 		// Cache-read only — no client method exists to "run" test-runner here,
 		// and this must NOT write back to the cache (nothing fresher to write).
@@ -851,8 +968,9 @@ describe("fetchFreshProjectDiagnostics (#585)", () => {
 			undefined,
 			{ runtime: new RuntimeCoordinator() },
 		);
-		expect(mismatched.diagnostics.find((d) => d.tool === "test-runner"))
-			.toMatchObject({ severity: "info", semantic: "none" });
+		expect(
+			mismatched.diagnostics.find((d) => d.tool === "test-runner"),
+		).toMatchObject({ severity: "info", semantic: "none" });
 	});
 
 	// #1004 review follow-up (honesty gap, #533): test-runner's cache can be
@@ -883,7 +1001,11 @@ describe("fetchFreshProjectDiagnostics (#585)", () => {
 		);
 		const clients = makeClients();
 
-		const result = await fetchFreshProjectDiagnostics(cacheManager, tmp, clients);
+		const result = await fetchFreshProjectDiagnostics(
+			cacheManager,
+			tmp,
+			clients,
+		);
 
 		const diag = result.diagnostics.find((d) => d.tool === "test-runner");
 		expect(diag?.message).toMatch(/^\[stale/);
@@ -893,7 +1015,11 @@ describe("fetchFreshProjectDiagnostics (#585)", () => {
 		const cacheManager = makeCacheManager();
 		const clients = makeClients();
 
-		const result = await fetchFreshProjectDiagnostics(cacheManager, tmp, clients);
+		const result = await fetchFreshProjectDiagnostics(
+			cacheManager,
+			tmp,
+			clients,
+		);
 
 		expect(result.cold).toContain("test-runner");
 		expect(result.runners).not.toContain("test-runner");
@@ -910,7 +1036,13 @@ describe("fetchFreshProjectDiagnostics (#585)", () => {
 				language: "python",
 				summary: "",
 				unusedExports: [
-					{ category: "export", kind: "func", name: "x", file: "z.py", line: 9 },
+					{
+						category: "export",
+						kind: "func",
+						name: "x",
+						file: "z.py",
+						line: 9,
+					},
 				],
 				unusedFiles: [],
 				unusedDeps: [],
@@ -922,7 +1054,11 @@ describe("fetchFreshProjectDiagnostics (#585)", () => {
 			pythonClient,
 		];
 
-		const result = await fetchFreshProjectDiagnostics(cacheManager, tmp, clients);
+		const result = await fetchFreshProjectDiagnostics(
+			cacheManager,
+			tmp,
+			clients,
+		);
 
 		expect(pythonClient.detect).toHaveBeenCalledWith(path.resolve(tmp));
 		expect(pythonClient.analyze).toHaveBeenCalledTimes(1);
@@ -959,7 +1095,10 @@ describe("fetchFreshProjectDiagnostics (#585)", () => {
 			"govulncheckClient",
 			"trivyClient",
 		] as const) {
-			const c = clients[key] as unknown as Record<string, ReturnType<typeof vi.fn>>;
+			const c = clients[key] as unknown as Record<
+				string,
+				ReturnType<typeof vi.fn>
+			>;
 			for (const methodName of ["analyze", "scan", "scanProject"]) {
 				if (c[methodName]) {
 					const original = c[methodName].getMockImplementation() as

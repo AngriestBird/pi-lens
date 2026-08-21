@@ -28,7 +28,12 @@ function makeServer(id: string, root = "C:/repo") {
 		root: async () => root,
 		spawn: vi.fn(async () => ({
 			process: {
-				process: { killed: false, kill: vi.fn(), on: vi.fn(), removeListener: vi.fn() },
+				process: {
+					killed: false,
+					kill: vi.fn(),
+					on: vi.fn(),
+					removeListener: vi.fn(),
+				},
 				stdin: { on: vi.fn(), off: vi.fn(), write: vi.fn() },
 				stdout: { on: vi.fn(), off: vi.fn(), pipe: vi.fn() },
 				stderr: { on: vi.fn(), off: vi.fn() },
@@ -122,7 +127,10 @@ describe("LSPService.notifyExternalFileChange (#1668)", () => {
 		await service.notifyExternalFileChange(FILE, 3);
 
 		expect(primaryClient.notify.watchedFileChange).toHaveBeenCalledTimes(1);
-		expect(primaryClient.notify.watchedFileChange).toHaveBeenCalledWith(FILE, 3);
+		expect(primaryClient.notify.watchedFileChange).toHaveBeenCalledWith(
+			FILE,
+			3,
+		);
 		expect(auxClient.notify.watchedFileChange).toHaveBeenCalledTimes(1);
 		expect(auxClient.notify.watchedFileChange).toHaveBeenCalledWith(FILE, 3);
 	});

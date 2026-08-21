@@ -29,7 +29,9 @@ vi.mock("../../clients/user-notify.js", () => ({ notifyUserDegradation }));
 /** A genuinely valid wasm preamble — passes `hasWasmMagic`/`fileHasWasmMagic`
  * while being nowhere near a real grammar's byte count, standing in for a
  * connection that dropped right after the header. */
-const TRUNCATED_WASM = Buffer.from([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]);
+const TRUNCATED_WASM = Buffer.from([
+	0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+]);
 const OTHER_VALID_WASM = Buffer.from([
 	0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0xde, 0xad,
 ]);
@@ -45,9 +47,8 @@ type LoadLanguageClient = {
 };
 
 async function makeClient(dir: string): Promise<LoadLanguageClient> {
-	const { TreeSitterClient } = await import(
-		"../../clients/tree-sitter-client.js"
-	);
+	const { TreeSitterClient } =
+		await import("../../clients/tree-sitter-client.js");
 	const client = new TreeSitterClient() as unknown as LoadLanguageClient;
 	client.grammarsDir = dir;
 	vi.spyOn(client, "grammarSourceDirs").mockReturnValue([dir]);
@@ -88,7 +89,9 @@ describe("Language.load failure on a vouched-for file (#1564)", () => {
 		fs.writeFileSync(grammarPath, TRUNCATED_WASM);
 
 		const client = await makeClient(env.tmpDir);
-		const decodeError = new Error("Code section extends past end of the module");
+		const decodeError = new Error(
+			"Code section extends past end of the module",
+		);
 		client.LanguageLoader = { load: vi.fn().mockRejectedValue(decodeError) };
 
 		const result = await client.loadLanguage("python");
@@ -114,7 +117,9 @@ describe("Language.load failure on a vouched-for file (#1564)", () => {
 		fs.writeFileSync(grammarPath, TRUNCATED_WASM);
 
 		const client = await makeClient(env.tmpDir);
-		const decodeError = new Error("Code section extends past end of the module");
+		const decodeError = new Error(
+			"Code section extends past end of the module",
+		);
 		client.LanguageLoader = { load: vi.fn().mockRejectedValue(decodeError) };
 
 		// Resolve once BEFORE the load failure: the preamble check alone passes
@@ -151,7 +156,9 @@ describe("Language.load failure on a vouched-for file (#1564)", () => {
 
 		const client = await makeClient(env.tmpDir);
 		client.LanguageLoader = {
-			load: vi.fn().mockRejectedValue(new Error("Aborted(native code called abort())")),
+			load: vi
+				.fn()
+				.mockRejectedValue(new Error("Aborted(native code called abort())")),
 		};
 
 		const result = await client.loadLanguage("python");

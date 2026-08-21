@@ -85,7 +85,9 @@ export function isToolCallEventType<T extends string>(
  * identity at all under any known field; callers decide their own safe
  * default for that case rather than treat a generated id as a match.
  */
-export function resolveToolCallCorrelationId(event: unknown): string | undefined {
+export function resolveToolCallCorrelationId(
+	event: unknown,
+): string | undefined {
 	const value = (event ?? {}) as Record<string, unknown>;
 	for (const candidate of [
 		value.toolCallId,

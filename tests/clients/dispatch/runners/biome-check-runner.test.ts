@@ -155,9 +155,7 @@ describe("biome-check runner", () => {
 				await import("../../../../clients/dispatch/runners/biome-check.js")
 			).default;
 
-			const result = await runner.run(
-				createCtx(filePath, env.tmpDir) as never,
-			);
+			const result = await runner.run(createCtx(filePath, env.tmpDir) as never);
 
 			expect(result.diagnostics).toHaveLength(1);
 			expect(result.diagnostics[0].fixable).toBe(true);
@@ -233,9 +231,7 @@ describe("biome-check runner", () => {
 				await import("../../../../clients/dispatch/runners/biome-check.js")
 			).default;
 
-			const result = await runner.run(
-				createCtx(filePath, env.tmpDir) as never,
-			);
+			const result = await runner.run(createCtx(filePath, env.tmpDir) as never);
 
 			expect(result.diagnostics).toHaveLength(1);
 			expect(result.diagnostics[0].fixable).toBe(false);
@@ -252,9 +248,8 @@ describe("resolveBiomeFixKinds (#1810)", () => {
 	});
 
 	it("caches a resolved rule and does not re-spawn 'explain' for it", async () => {
-		const { resolveBiomeFixKinds } = await import(
-			"../../../../clients/dispatch/runners/biome-check.js"
-		);
+		const { resolveBiomeFixKinds } =
+			await import("../../../../clients/dispatch/runners/biome-check.js");
 		const cmd = `biome-cache-test-${Math.random()}`;
 
 		safeSpawnAsync.mockResolvedValue({
@@ -280,9 +275,8 @@ describe("resolveBiomeFixKinds (#1810)", () => {
 	});
 
 	it("never caches a transient explain-spawn failure (must retry, not poison as unfixable)", async () => {
-		const { resolveBiomeFixKinds } = await import(
-			"../../../../clients/dispatch/runners/biome-check.js"
-		);
+		const { resolveBiomeFixKinds } =
+			await import("../../../../clients/dispatch/runners/biome-check.js");
 		const cmd = `biome-transient-test-${Math.random()}`;
 
 		safeSpawnAsync.mockResolvedValueOnce({
@@ -312,9 +306,8 @@ describe("resolveBiomeFixKinds (#1810)", () => {
 	});
 
 	it("caches a genuine 'No fix available.' verdict and does not re-spawn (#1810 review F2)", async () => {
-		const { resolveBiomeFixKinds } = await import(
-			"../../../../clients/dispatch/runners/biome-check.js"
-		);
+		const { resolveBiomeFixKinds } =
+			await import("../../../../clients/dispatch/runners/biome-check.js");
 		const cmd = `biome-nofix-cache-test-${Math.random()}`;
 
 		safeSpawnAsync.mockResolvedValue({
@@ -342,9 +335,8 @@ describe("resolveBiomeFixKinds (#1810)", () => {
 	});
 
 	it("never caches an unparseable explain output — fails closed without poisoning (#1810 review F1)", async () => {
-		const { resolveBiomeFixKinds } = await import(
-			"../../../../clients/dispatch/runners/biome-check.js"
-		);
+		const { resolveBiomeFixKinds } =
+			await import("../../../../clients/dispatch/runners/biome-check.js");
 		const cmd = `biome-unparseable-test-${Math.random()}`;
 
 		// Shaped like a biome 1.x `explain` answer might be: no "- Fix:" or
@@ -377,12 +369,10 @@ describe("resolveBiomeFixKinds (#1810)", () => {
 	});
 
 	it("records a bounded degradation on explain spawn failure (#1810 review F4)", async () => {
-		const { resolveBiomeFixKinds } = await import(
-			"../../../../clients/dispatch/runners/biome-check.js"
-		);
-		const { getDegradationSummary, resetDegradationLedger } = await import(
-			"../../../../clients/degradation-ledger.js"
-		);
+		const { resolveBiomeFixKinds } =
+			await import("../../../../clients/dispatch/runners/biome-check.js");
+		const { getDegradationSummary, resetDegradationLedger } =
+			await import("../../../../clients/degradation-ledger.js");
 		resetDegradationLedger();
 		const cmd = `biome-degradation-test-${Math.random()}`;
 
@@ -398,18 +388,16 @@ describe("resolveBiomeFixKinds (#1810)", () => {
 		const group = summary.find((g) => g.kind === "biome-explain-unavailable");
 		expect(group).toBeDefined();
 		expect(group?.count).toBeGreaterThanOrEqual(1);
-		expect(
-			group?.latestReasons.some((r) => r.subject === "useConst"),
-		).toBe(true);
+		expect(group?.latestReasons.some((r) => r.subject === "useConst")).toBe(
+			true,
+		);
 	});
 
 	it("records a bounded degradation on unparseable explain output too (#1810 review F1/F4)", async () => {
-		const { resolveBiomeFixKinds } = await import(
-			"../../../../clients/dispatch/runners/biome-check.js"
-		);
-		const { getDegradationSummary, resetDegradationLedger } = await import(
-			"../../../../clients/degradation-ledger.js"
-		);
+		const { resolveBiomeFixKinds } =
+			await import("../../../../clients/dispatch/runners/biome-check.js");
+		const { getDegradationSummary, resetDegradationLedger } =
+			await import("../../../../clients/degradation-ledger.js");
 		resetDegradationLedger();
 		const cmd = `biome-degradation-unparseable-test-${Math.random()}`;
 
@@ -424,15 +412,14 @@ describe("resolveBiomeFixKinds (#1810)", () => {
 		const summary = getDegradationSummary();
 		const group = summary.find((g) => g.kind === "biome-explain-unavailable");
 		expect(group).toBeDefined();
-		expect(
-			group?.latestReasons.some((r) => r.subject === "useTemplate"),
-		).toBe(true);
+		expect(group?.latestReasons.some((r) => r.subject === "useTemplate")).toBe(
+			true,
+		);
 	});
 
 	it("caps concurrent 'explain' spawns rather than firing them all at once (#1810 review F6)", async () => {
-		const { resolveBiomeFixKinds } = await import(
-			"../../../../clients/dispatch/runners/biome-check.js"
-		);
+		const { resolveBiomeFixKinds } =
+			await import("../../../../clients/dispatch/runners/biome-check.js");
 		const cmd = `biome-concurrency-test-${Math.random()}`;
 		const ruleCount = 12;
 		let inFlight = 0;
@@ -468,9 +455,8 @@ describe("resolveBiomeFixKinds (#1810)", () => {
 	});
 
 	it("no-ops without spawning when there are no categories at all (#1810 review F7)", async () => {
-		const { resolveBiomeFixKinds } = await import(
-			"../../../../clients/dispatch/runners/biome-check.js"
-		);
+		const { resolveBiomeFixKinds } =
+			await import("../../../../clients/dispatch/runners/biome-check.js");
 		const cmd = `biome-empty-test-${Math.random()}`;
 
 		const resolved = await resolveBiomeFixKinds(cmd, "/cwd", []);

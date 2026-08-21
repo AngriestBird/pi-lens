@@ -121,7 +121,6 @@ function cwdIsUnresolvableSync(cwd: string | undefined): boolean {
 	}
 }
 
-
 /**
  * Best-effort presence probe used ONLY to disambiguate ENOENT when the cwd is
  * ALSO unresolvable (#1340 review): a genuinely missing tool must classify as
@@ -134,7 +133,12 @@ function cwdIsUnresolvableSync(cwd: string | undefined): boolean {
 function commandProbablyPresent(command: string): boolean | "ambiguous" {
 	const exts =
 		process.platform === "win32"
-			? ["", ...(process.env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD").split(";").filter(Boolean)]
+			? [
+					"",
+					...(process.env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD")
+						.split(";")
+						.filter(Boolean),
+				]
 			: [""];
 	const existsWithExt = (base: string): boolean => {
 		for (const ext of exts) {
@@ -239,7 +243,8 @@ export async function classifySpawnFailure(
 ): Promise<SpawnFailureError> {
 	const cause = toError(error);
 	const needsCwdProbe = errorCode(cause) === "ENOENT";
-	const cwdUnresolvable = needsCwdProbe && (await cwdIsUnresolvable(options.cwd));
+	const cwdUnresolvable =
+		needsCwdProbe && (await cwdIsUnresolvable(options.cwd));
 	return classifyWithCwdFlag(cause, options, cwdUnresolvable);
 }
 
@@ -1263,12 +1268,12 @@ export async function safeSpawnAsync(
 			void classifySpawnFailure(cause, { command, cwd: options?.cwd }).then(
 				(spawnFailure) =>
 					resolve({
-				stdout: "",
-				stderr: "",
-				status: null,
-				error: cause,
-				failure: "spawn",
-				spawnFailure,
+						stdout: "",
+						stderr: "",
+						status: null,
+						error: cause,
+						failure: "spawn",
+						spawnFailure,
 					}),
 			);
 			return;
@@ -1664,7 +1669,9 @@ export async function safeSpawnAsync(
 				});
 			if (controlFailure) finish(controlFailure);
 			else {
-				void classifySpawnFailure(err, { command, cwd: options?.cwd }).then(finish);
+				void classifySpawnFailure(err, { command, cwd: options?.cwd }).then(
+					finish,
+				);
 			}
 		});
 	});

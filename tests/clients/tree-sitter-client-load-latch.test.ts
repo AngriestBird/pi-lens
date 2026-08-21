@@ -53,9 +53,8 @@ describe("TreeSitterClient.init() web-tree-sitter load latch (#1592)", () => {
 			},
 		}));
 
-		const { TreeSitterClient } = await import(
-			"../../clients/tree-sitter-client.js"
-		);
+		const { TreeSitterClient } =
+			await import("../../clients/tree-sitter-client.js");
 		const client = new TreeSitterClient();
 
 		const first = await client.init();
@@ -83,9 +82,8 @@ describe("TreeSitterClient.init() web-tree-sitter load latch (#1592)", () => {
 			},
 		}));
 
-		const { TreeSitterClient } = await import(
-			"../../clients/tree-sitter-client.js"
-		);
+		const { TreeSitterClient } =
+			await import("../../clients/tree-sitter-client.js");
 		const client = new TreeSitterClient();
 
 		await client.init();
@@ -122,9 +120,8 @@ describe("TreeSitterClient.init() web-tree-sitter load latch (#1592)", () => {
 			},
 		}));
 
-		const { TreeSitterClient } = await import(
-			"../../clients/tree-sitter-client.js"
-		);
+		const { TreeSitterClient } =
+			await import("../../clients/tree-sitter-client.js");
 		const client = new TreeSitterClient();
 		// biome-ignore lint/suspicious/noExplicitAny: poke a private for the probe
 		vi.spyOn(client as any, "resolveWebTreeSitterAsset").mockReturnValue(
@@ -156,9 +153,8 @@ describe("TreeSitterClient.init() web-tree-sitter load latch (#1592)", () => {
 			},
 		}));
 
-		const { TreeSitterClient } = await import(
-			"../../clients/tree-sitter-client.js"
-		);
+		const { TreeSitterClient } =
+			await import("../../clients/tree-sitter-client.js");
 		const client = new TreeSitterClient();
 
 		await client.init();
@@ -176,9 +172,8 @@ describe("TreeSitterClient.init() web-tree-sitter load latch (#1592)", () => {
 			},
 		}));
 
-		const { TreeSitterClient } = await import(
-			"../../clients/tree-sitter-client.js"
-		);
+		const { TreeSitterClient } =
+			await import("../../clients/tree-sitter-client.js");
 		const client = new TreeSitterClient();
 
 		await client.init();
@@ -203,9 +198,8 @@ describe("TreeSitterClient.init() web-tree-sitter load latch (#1592)", () => {
 			},
 		}));
 
-		const { TreeSitterClient } = await import(
-			"../../clients/tree-sitter-client.js"
-		);
+		const { TreeSitterClient } =
+			await import("../../clients/tree-sitter-client.js");
 		const client = new TreeSitterClient();
 
 		await client.init();

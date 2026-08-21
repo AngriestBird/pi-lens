@@ -17,10 +17,11 @@ import {
 export type ProjectSnapshotPersistWorkerRequest = GzipStageWorkerRequest;
 export type ProjectSnapshotPersistWorkerResult = GzipStageWorkerResult;
 
-serveGzipStageWorker<ProjectSnapshotPersistWorkerRequest, ProjectSnapshotPersistWorkerResult>(
-	(request) => ({
-		id: request.id,
-		generation: request.generation,
-		stagePath: request.stagePath,
-	}),
-);
+serveGzipStageWorker<
+	ProjectSnapshotPersistWorkerRequest,
+	ProjectSnapshotPersistWorkerResult
+>((request) => ({
+	id: request.id,
+	generation: request.generation,
+	stagePath: request.stagePath,
+}));

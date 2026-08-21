@@ -19,10 +19,9 @@ vi.mock("../../clients/warm-attach.js", () => ({
 }));
 
 vi.mock("../../clients/lsp/index.js", async () => {
-	const actual =
-		await vi.importActual<typeof import("../../clients/lsp/index.js")>(
-			"../../clients/lsp/index.js",
-		);
+	const actual = await vi.importActual<
+		typeof import("../../clients/lsp/index.js")
+	>("../../clients/lsp/index.js");
 	return { ...actual, getLSPService: () => mocked.service };
 });
 

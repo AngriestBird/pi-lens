@@ -94,11 +94,26 @@ function makeDeps(ctxCwd: string) {
 			ensureAvailable: async () => false,
 			scanExports: async () => new Map(),
 		},
-		biomeClient: { isAvailable: () => false, ensureAvailable: async () => false },
-		ruffClient: { isAvailable: () => false, ensureAvailable: async () => false },
-		knipClient: { isAvailable: () => false, ensureAvailable: async () => false },
-		jscpdClient: { isAvailable: () => false, ensureAvailable: async () => false },
-		depChecker: { isAvailable: () => false, ensureAvailable: async () => false },
+		biomeClient: {
+			isAvailable: () => false,
+			ensureAvailable: async () => false,
+		},
+		ruffClient: {
+			isAvailable: () => false,
+			ensureAvailable: async () => false,
+		},
+		knipClient: {
+			isAvailable: () => false,
+			ensureAvailable: async () => false,
+		},
+		jscpdClient: {
+			isAvailable: () => false,
+			ensureAvailable: async () => false,
+		},
+		depChecker: {
+			isAvailable: () => false,
+			ensureAvailable: async () => false,
+		},
 		testRunnerClient: {
 			detectRunner: () => ({ runner: "vitest", config: null }),
 			runTestFile: () => ({ failed: 1, error: false }),
@@ -180,7 +195,8 @@ describe("cascade tier-3 registry is reset at session_start (#1910)", () => {
 					getWarmClientForFile: vi.fn().mockResolvedValue(undefined),
 				}) as never,
 		);
-		const task = registerQuietWindowTask.mock.calls[0][1] as () => Promise<void>;
+		const task = registerQuietWindowTask.mock
+			.calls[0][1] as () => Promise<void>;
 		await task();
 		expect(sweepGauge().metadata).toMatchObject({
 			count: 0,

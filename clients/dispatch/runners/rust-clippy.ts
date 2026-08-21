@@ -57,7 +57,9 @@ const clippyAvailabilityByCargo = new Map<
 	ReturnType<typeof makeClippyProbe>
 >();
 function getClippyProbe(cargoExe: string) {
-	return clippyAvailabilityByCargo.get(cargoExe) ?? refreshClippyProbe(cargoExe);
+	return (
+		clippyAvailabilityByCargo.get(cargoExe) ?? refreshClippyProbe(cargoExe)
+	);
 }
 
 /** Replace the cached probe so a post-install state is observed. */

@@ -95,7 +95,13 @@ const gitleaksStaleReplay = defineTurnScenario({
  * install has to be found through the real home directory and put on PATH.
  */
 const managedKnipBinDir = (() => {
-	const dir = path.join(os.homedir(), ".pi-lens", "tools", "node_modules", ".bin");
+	const dir = path.join(
+		os.homedir(),
+		".pi-lens",
+		"tools",
+		"node_modules",
+		".bin",
+	);
 	return fs.existsSync(dir) ? dir : null;
 })();
 
@@ -165,7 +171,10 @@ const knipStaleCache = defineTurnScenario({
 				"export function assertSafeForCmdShell(s: string): string { return s; }\n" +
 					'export function used(): string { return "x"; }\n',
 			);
-			h.write("src/index.ts", 'import { used } from "./util.js";\nconsole.log(used());\n');
+			h.write(
+				"src/index.ts",
+				'import { used } from "./util.js";\nconsole.log(used());\n',
+			);
 			// `tests/` exists but matches nothing when the cache is written — the
 			// exact shape knip's glob cache failed to revalidate.
 			fs.mkdirSync(h.pathOf("tests"), { recursive: true });
@@ -258,7 +267,7 @@ const dependencyDriftReplay = defineTurnScenario({
 const provenanceFileSetBlindSpot = defineTurnScenario({
 	id: "advisory-provenance-file-set",
 	incident:
-		"a whole-graph advisory kept validating as \"current\" because provenance only captured the declaring file, never the consumer set whose change made the claim false",
+		'a whole-graph advisory kept validating as "current" because provenance only captured the declaring file, never the consumer set whose change made the claim false',
 	issue: "#1630 (analysis section); no fix issue of its own yet",
 	pendingOn:
 		"unfixed — provenance validates only the captured file set, so a change outside it cannot be seen",

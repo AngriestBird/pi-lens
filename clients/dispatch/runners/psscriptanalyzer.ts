@@ -108,7 +108,7 @@ function notePsDecision(
 				cause: AvailabilityCause;
 				elapsedMs: number;
 				hostStallMs: number;
-			},
+		  },
 ): void {
 	let retryAfterMs: number | undefined;
 	if (verdict.available) {
@@ -165,10 +165,14 @@ async function resolvePowerShellCmd(): Promise<string | null> {
 	// is durable but is NOT a missing install, and reporting it as one both sends
 	// the user to install PowerShell they already have and fabricates the cause in
 	// `availability_decision`. Only an all-candidates ENOENT sweep is `missing`.
-	let transient: { outcome: AvailabilityOutcome; cause: AvailabilityCause } | null =
-		null;
-	let rejected: { outcome: AvailabilityOutcome; cause: AvailabilityCause } | null =
-		null;
+	let transient: {
+		outcome: AvailabilityOutcome;
+		cause: AvailabilityCause;
+	} | null = null;
+	let rejected: {
+		outcome: AvailabilityOutcome;
+		cause: AvailabilityCause;
+	} | null = null;
 	let elapsedTotalMs = 0;
 	let stallTotalMs = 0;
 	for (const candidate of ["pwsh", "powershell"]) {
@@ -249,8 +253,7 @@ async function checkModuleAvailable(cmd: string): Promise<boolean> {
 	// two probes all arrive with an error and no status, and calling those
 	// "PSScriptAnalyzer is not installed" latched PowerShell analysis off for the
 	// session on hosts where the module was present the whole time.
-	const moduleAbsent =
-		result.status === 1 && !result.failure && !result.error;
+	const moduleAbsent = result.status === 1 && !result.failure && !result.error;
 	const classified = classifyProbeFailure(result, {
 		hostStallMs,
 		...(moduleAbsent && { unclassifiedFailureOutcome: "missing" as const }),
@@ -298,7 +301,11 @@ function parsePSAnalyzerOutput(
 		.map((item) => {
 			const sev = (item.Severity ?? "Warning").toLowerCase();
 			const severity: "error" | "warning" | "info" =
-				(sev === "error" || sev === "parseerror") ? "error" : (sev === "information" ? "info" : "warning");
+				sev === "error" || sev === "parseerror"
+					? "error"
+					: sev === "information"
+						? "info"
+						: "warning";
 			const rule = item.RuleName ?? "PSScriptAnalyzer";
 			return {
 				id: `psscriptanalyzer-${rule}-${item.Line}`,
@@ -355,8 +362,10 @@ const psScriptAnalyzerRunner: RunnerDefinition = {
 			const result = await spawnPs(cmd, [
 				"-NoProfile",
 				"-NonInteractive",
-				"-File", tmpScript,
-				"-FilePath", absPath,
+				"-File",
+				tmpScript,
+				"-FilePath",
+				absPath,
 			]);
 			const hostStallMs = sampler.stop();
 			const elapsedMs = Date.now() - startedAt;
@@ -461,9 +470,7 @@ const psScriptAnalyzerRunner: RunnerDefinition = {
 				// than latched. It must still never be read as a clean file
 				// (#1598): empty/malformed stdout on a successful exit is a lost
 				// or truncated write, not evidence of zero diagnostics.
-				const unreadableReason = result.stdout.trim()
-					? "unparseable"
-					: "empty";
+				const unreadableReason = result.stdout.trim() ? "unparseable" : "empty";
 				logAvailabilityDecision({
 					tool: "psscriptanalyzer-stdout",
 					verdict: "unavailable",

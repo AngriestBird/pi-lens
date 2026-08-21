@@ -172,7 +172,12 @@ describe("SgRunner", () => {
 				// as the npx command.
 				safeSpawnAsync.mockImplementation(async (cmd: string) => {
 					if (cmd === "npx") {
-						return { status: 0, error: null, stdout: "ast-grep 0.42.1", stderr: "" };
+						return {
+							status: 0,
+							error: null,
+							stdout: "ast-grep 0.42.1",
+							stderr: "",
+						};
 					}
 					return {
 						status: null,
@@ -302,7 +307,8 @@ describe("SgRunner", () => {
 					status: 1,
 					error: undefined,
 					stdout: matchJson,
-					stderr: "Error: 1 error(s) found in code.\nHelp: Scan succeeded and found error level diagnostics in the codebase.",
+					stderr:
+						"Error: 1 error(s) found in code.\nHelp: Scan succeeded and found error level diagnostics in the codebase.",
 				});
 				const { SgRunner } = await import("../../clients/sg-runner.js");
 				const result = await new SgRunner().tempScanDetailedAsync(
@@ -323,9 +329,7 @@ describe("SgRunner", () => {
 		it("rejects a status-1 JSON scalar/null stdout as a failure (no phantom match)", async () => {
 			// tryParseSgMatches only accepts an array or object — a JSON scalar
 			// (e.g. an error report serialized as `null`) must not become a match.
-			const root = fs.mkdtempSync(
-				path.join(os.tmpdir(), "pi-lens-sg-scalar-"),
-			);
+			const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-sg-scalar-"));
 			try {
 				safeSpawnAsync.mockResolvedValueOnce({
 					status: 1,

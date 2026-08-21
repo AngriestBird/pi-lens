@@ -7,10 +7,12 @@ import {
 } from "../../../support/runner-ctx.js";
 import { setupTestEnvironment } from "../../test-utils.js";
 
-const { mockAuxiliaryLspAlive, mockResolveAstGrepNativeExe } = vi.hoisted(() => ({
-	mockAuxiliaryLspAlive: vi.fn().mockResolvedValue(false),
-	mockResolveAstGrepNativeExe: vi.fn().mockReturnValue(undefined),
-}));
+const { mockAuxiliaryLspAlive, mockResolveAstGrepNativeExe } = vi.hoisted(
+	() => ({
+		mockAuxiliaryLspAlive: vi.fn().mockResolvedValue(false),
+		mockResolveAstGrepNativeExe: vi.fn().mockReturnValue(undefined),
+	}),
+);
 
 vi.mock("../../../../clients/lsp/index.js", () => ({
 	isAuxiliaryLspAlive: mockAuxiliaryLspAlive,
@@ -81,7 +83,8 @@ describe("ast-grep-napi runner — LSP supersede gate (#239 Phase 2)", () => {
 			fs.writeFileSync(filePath, "const r = arr.sort();\n"); // would match no-sort-without-comparator
 			mockResolveAstGrepNativeExe.mockReturnValue("/bundled/ast-grep.exe");
 			mockWorkingSgLoad();
-			const mod = await import("../../../../clients/dispatch/runners/ast-grep-napi.js");
+			const mod =
+				await import("../../../../clients/dispatch/runners/ast-grep-napi.js");
 			const result = await mod.default.run(
 				createCtx(filePath, { hasTool: async () => false }) as any,
 			);
@@ -98,7 +101,8 @@ describe("ast-grep-napi runner — LSP supersede gate (#239 Phase 2)", () => {
 			const filePath = path.join(env.tmpDir, "file.ts");
 			fs.writeFileSync(filePath, "const x = 1;\n");
 			mockWorkingSgLoad();
-			const mod = await import("../../../../clients/dispatch/runners/ast-grep-napi.js");
+			const mod =
+				await import("../../../../clients/dispatch/runners/ast-grep-napi.js");
 			const result = await mod.default.run(
 				createCtx(filePath, { hasTool: async () => false }) as any,
 			);
@@ -115,7 +119,8 @@ describe("ast-grep-napi runner — LSP supersede gate (#239 Phase 2)", () => {
 			fs.writeFileSync(filePath, "const x = 1;\n");
 			mockAuxiliaryLspAlive.mockResolvedValue(true);
 			mockWorkingSgLoad();
-			const mod = await import("../../../../clients/dispatch/runners/ast-grep-napi.js");
+			const mod =
+				await import("../../../../clients/dispatch/runners/ast-grep-napi.js");
 			const result = await mod.default.run(
 				createCtx(filePath, { hasTool: async () => false }) as any,
 			);
@@ -151,7 +156,8 @@ describe("ast-grep-napi runner — skip paths", () => {
 				html: { parse: vi.fn() },
 			}));
 
-			const mod = await import("../../../../clients/dispatch/runners/ast-grep-napi.js");
+			const mod =
+				await import("../../../../clients/dispatch/runners/ast-grep-napi.js");
 			const runner = mod.default;
 			const result = await runner.run(createCtx(filePath) as any);
 			expect(result.status).toBe("skipped");
@@ -170,7 +176,8 @@ describe("ast-grep-napi runner — skip paths", () => {
 				throw new Error("module not found");
 			});
 
-			const mod = await import("../../../../clients/dispatch/runners/ast-grep-napi.js");
+			const mod =
+				await import("../../../../clients/dispatch/runners/ast-grep-napi.js");
 			const runner = mod.default;
 			const result = await runner.run(createCtx(filePath) as any);
 			expect(result.status).toBe("skipped");
@@ -189,7 +196,8 @@ describe("ast-grep-napi runner — skip paths", () => {
 			html: { parse: vi.fn() },
 		}));
 
-		const mod = await import("../../../../clients/dispatch/runners/ast-grep-napi.js");
+		const mod =
+			await import("../../../../clients/dispatch/runners/ast-grep-napi.js");
 		const runner = mod.default;
 		const result = await runner.run(createCtx("/nonexistent/file.ts") as any);
 		expect(result.status).toBe("skipped");
@@ -205,7 +213,10 @@ describe("ast-grep-napi runner — skip paths", () => {
 				root: vi.fn().mockReturnValue({
 					children: vi.fn().mockReturnValue([]),
 					kind: vi.fn().mockReturnValue("program"),
-					range: vi.fn().mockReturnValue({ start: { line: 0, column: 0 }, end: { line: 1, column: 0 } }),
+					range: vi.fn().mockReturnValue({
+						start: { line: 0, column: 0 },
+						end: { line: 1, column: 0 },
+					}),
 					findAll: vi.fn().mockReturnValue([]),
 				}),
 			});
@@ -218,7 +229,8 @@ describe("ast-grep-napi runner — skip paths", () => {
 				html: { parse: mockParse },
 			}));
 
-			const mod = await import("../../../../clients/dispatch/runners/ast-grep-napi.js");
+			const mod =
+				await import("../../../../clients/dispatch/runners/ast-grep-napi.js");
 			const runner = mod.default;
 			const result = await runner.run(createCtx(filePath) as any);
 			expect(result.diagnostics).toHaveLength(0);
@@ -243,9 +255,8 @@ describe("ast-grep-napi runner — real shipped rule", () => {
 		try {
 			const filePath = path.join(env.tmpDir, "file.ts");
 			fs.writeFileSync(filePath, "const sorted = values.sort();\n");
-			const mod = await import(
-				"../../../../clients/dispatch/runners/ast-grep-napi.js"
-			);
+			const mod =
+				await import("../../../../clients/dispatch/runners/ast-grep-napi.js");
 			expect(await mod.loadSg()).toBeDefined();
 
 			const result = await mod.default.run(
@@ -268,7 +279,8 @@ describe("ast-grep-napi runner — real shipped rule", () => {
 describe("ast-grep-napi runner — metadata", () => {
 	it("has expected runner id and appliesTo", async () => {
 		vi.resetModules();
-		const mod = await import("../../../../clients/dispatch/runners/ast-grep-napi.js");
+		const mod =
+			await import("../../../../clients/dispatch/runners/ast-grep-napi.js");
 		const runner = mod.default;
 		expect(runner.id).toBe("ast-grep-napi");
 		expect(runner.appliesTo).toContain("jsts");
@@ -293,12 +305,16 @@ describe("unsupported-language skip dedupe (#1371)", () => {
 			message: "m",
 			rule: { pattern: "foo" },
 		};
-		vi.doMock("../../../../clients/dispatch/runners/yaml-rule-parser.js", async (importOriginal) => ({
-			...(await importOriginal<Record<string, unknown>>()),
-			loadYamlRules: () => [kotlinRule],
-			loadYamlRulesFresh: () => [kotlinRule],
-		}));
-		const mod = await import("../../../../clients/dispatch/runners/ast-grep-napi.js");
+		vi.doMock(
+			"../../../../clients/dispatch/runners/yaml-rule-parser.js",
+			async (importOriginal) => ({
+				...(await importOriginal<Record<string, unknown>>()),
+				loadYamlRules: () => [kotlinRule],
+				loadYamlRulesFresh: () => [kotlinRule],
+			}),
+		);
+		const mod =
+			await import("../../../../clients/dispatch/runners/ast-grep-napi.js");
 		mod.resetAstGrepUnsupportedLanguageLog();
 		const root = { findAll: () => [] };
 		const emits = () =>

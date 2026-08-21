@@ -74,9 +74,8 @@ describe("clientShutdown against a real wedged child process (#1620)", () => {
 	it("settles within the shutdown budget, kills the pid, and deregisters it", async () => {
 		const { createLSPClient } = await import("../../../clients/lsp/client.js");
 		const { launchLSP } = await import("../../../clients/lsp/launch.js");
-		const { removeLspChild } = await import(
-			"../../../clients/instance-registry.js"
-		);
+		const { removeLspChild } =
+			await import("../../../clients/instance-registry.js");
 		const removeSpy = vi.spyOn(
 			await import("../../../clients/instance-registry.js"),
 			"removeLspChild",
@@ -154,9 +153,10 @@ describe("clientShutdown against a real wedged child process (#1620)", () => {
 			}
 			await new Promise((resolve) => setTimeout(resolve, 25));
 		}
-		expect(alive, `pid ${pid} must not still be alive after clientShutdown`).toBe(
-			false,
-		);
+		expect(
+			alive,
+			`pid ${pid} must not still be alive after clientShutdown`,
+		).toBe(false);
 
 		removeSpy.mockRestore();
 		void removeLspChild;

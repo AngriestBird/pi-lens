@@ -80,9 +80,8 @@ async function spawnedCommand(): Promise<string> {
 }
 
 async function toolchainRows(): Promise<string[]> {
-	const { logSessionStart } = await import(
-		"../../clients/sessionstart-logger.js"
-	);
+	const { logSessionStart } =
+		await import("../../clients/sessionstart-logger.js");
 	return vi
 		.mocked(logSessionStart)
 		.mock.calls.map((c) => String(c[0]))
@@ -92,9 +91,8 @@ async function toolchainRows(): Promise<string[]> {
 describe("knip project-toolchain resolution (#1721)", () => {
 	beforeEach(async () => {
 		const { safeSpawnAsync } = await import("../../clients/safe-spawn.js");
-		const { logSessionStart } = await import(
-			"../../clients/sessionstart-logger.js"
-		);
+		const { logSessionStart } =
+			await import("../../clients/sessionstart-logger.js");
 		vi.mocked(safeSpawnAsync).mockClear();
 		vi.mocked(logSessionStart).mockClear();
 	});

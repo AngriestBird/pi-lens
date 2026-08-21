@@ -293,7 +293,14 @@ describe("project diagnostics adapters", () => {
 			totalLines: 100,
 			percentage: 18,
 			clones: [
-				{ fileA: "src/a.ts", startA: 42, fileB: "src/b.ts", startB: 80, lines: 18, tokens: 120 },
+				{
+					fileA: "src/a.ts",
+					startA: 42,
+					fileB: "src/b.ts",
+					startB: 80,
+					lines: 18,
+					tokens: 120,
+				},
 			],
 		});
 
@@ -368,8 +375,16 @@ describe("project diagnostics adapters", () => {
 			{
 				calleeKey: "src/b.ts:changedFn",
 				results: [
-					{ symbolKey: "src/a.ts:directCaller", depth: 1, severity: "WillBreak" },
-					{ symbolKey: "src/c.ts:indirectCaller", depth: 2, severity: "MayBreak" },
+					{
+						symbolKey: "src/a.ts:directCaller",
+						depth: 1,
+						severity: "WillBreak",
+					},
+					{
+						symbolKey: "src/c.ts:indirectCaller",
+						depth: 2,
+						severity: "MayBreak",
+					},
 					{ symbolKey: "src/d.ts:farCaller", depth: 3, severity: "Review" },
 				],
 			},
@@ -411,13 +426,21 @@ describe("project diagnostics adapters", () => {
 			{
 				calleeKey: "src/b.ts:changedFnOne",
 				results: [
-					{ symbolKey: "src/a.ts:sharedCaller", depth: 2, severity: "MayBreak" },
+					{
+						symbolKey: "src/a.ts:sharedCaller",
+						depth: 2,
+						severity: "MayBreak",
+					},
 				],
 			},
 			{
 				calleeKey: "src/b.ts:changedFnTwo",
 				results: [
-					{ symbolKey: "src/a.ts:sharedCaller", depth: 1, severity: "WillBreak" },
+					{
+						symbolKey: "src/a.ts:sharedCaller",
+						depth: 1,
+						severity: "WillBreak",
+					},
 				],
 			},
 		]);
@@ -511,7 +534,10 @@ describe("project diagnostics adapters", () => {
 				},
 			],
 		});
-		expect(diags[0]).toMatchObject({ severity: "warning", semantic: "warning" });
+		expect(diags[0]).toMatchObject({
+			severity: "warning",
+			semantic: "warning",
+		});
 		expect(diags[1]).toMatchObject({ severity: "info", semantic: "warning" });
 	});
 
@@ -581,7 +607,8 @@ describe("project diagnostics adapters", () => {
 			severity: "warning",
 			runner: "trivy",
 			rule: "trivy:CVE-2024-9",
-			message: "HIGH vulnerability CVE-2024-9 in lodash@4.17.20 (fixed in 4.17.21)",
+			message:
+				"HIGH vulnerability CVE-2024-9 in lodash@4.17.20 (fixed in 4.17.21)",
 		});
 		expect(diag.line).toBeUndefined();
 	});
@@ -646,12 +673,24 @@ describe("project diagnostics adapters", () => {
 			language: "python",
 			summary: "",
 			unusedExports: [
-				{ category: "export", kind: "function", name: "foo", file: "a.py", line: 4 },
+				{
+					category: "export",
+					kind: "function",
+					name: "foo",
+					file: "a.py",
+					line: 4,
+				},
 			],
 			unusedFiles: [],
 			unusedDeps: [],
 			unlistedDeps: [
-				{ category: "unlisted", kind: "import", name: "requests", file: "b.py", line: 1 },
+				{
+					category: "unlisted",
+					kind: "import",
+					name: "requests",
+					file: "b.py",
+					line: 1,
+				},
 			],
 		});
 		expect(diags).toHaveLength(2);

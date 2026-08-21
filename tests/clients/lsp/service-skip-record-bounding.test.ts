@@ -77,9 +77,8 @@ const recordsFor = (phase: string) =>
  * service, so both share one instance.
  */
 async function ledgerCount(kind: string): Promise<number> {
-	const { getDegradationSummary } = await import(
-		"../../../clients/degradation-ledger.js"
-	);
+	const { getDegradationSummary } =
+		await import("../../../clients/degradation-ledger.js");
 	return (
 		getDegradationSummary().find((group) => group.kind === kind)?.count ?? 0
 	);
@@ -99,9 +98,7 @@ describe("LSP per-file skip records are bounded (#1743)", () => {
 		const internal = service as unknown as { permanentlyBroken: Set<string> };
 		const server = fakeServer("opengrep");
 		getServersForFileWithConfig.mockReturnValue([server]);
-		internal.permanentlyBroken.add(
-			`opengrep:${normalizeMapKey(FIXTURE_ROOT)}`,
-		);
+		internal.permanentlyBroken.add(`opengrep:${normalizeMapKey(FIXTURE_ROOT)}`);
 
 		for (let touch = 0; touch < 3; touch++) {
 			expect(await service.getClientForFile(FIXTURE_FILE)).toBeUndefined();
@@ -150,9 +147,7 @@ describe("LSP per-file skip records are bounded (#1743)", () => {
 		const internal = service as unknown as { permanentlyBroken: Set<string> };
 		const server = fakeServer("opengrep");
 		getServersForFileWithConfig.mockReturnValue([server]);
-		internal.permanentlyBroken.add(
-			`opengrep:${normalizeMapKey(FIXTURE_ROOT)}`,
-		);
+		internal.permanentlyBroken.add(`opengrep:${normalizeMapKey(FIXTURE_ROOT)}`);
 
 		await service.getClientForFile(FIXTURE_FILE);
 		await service.getClientForFile(FIXTURE_FILE);
@@ -177,12 +172,10 @@ describe("LSP per-file skip records are bounded (#1743)", () => {
 		}
 
 		// Pre-fix: 3.
-		expect(
-			recordsFor("lsp_client_skipped_unavailable_command"),
-		).toHaveLength(1);
-		expect(await ledgerCount("lsp-client-skipped-unavailable-command")).toBe(
-			3,
+		expect(recordsFor("lsp_client_skipped_unavailable_command")).toHaveLength(
+			1,
 		);
+		expect(await ledgerCount("lsp-client-skipped-unavailable-command")).toBe(3);
 	});
 
 	it("stamps the identity into every skip record", async () => {
@@ -191,9 +184,7 @@ describe("LSP per-file skip records are bounded (#1743)", () => {
 		const internal = service as unknown as { permanentlyBroken: Set<string> };
 		const server = fakeServer("opengrep");
 		getServersForFileWithConfig.mockReturnValue([server]);
-		internal.permanentlyBroken.add(
-			`opengrep:${normalizeMapKey(FIXTURE_ROOT)}`,
-		);
+		internal.permanentlyBroken.add(`opengrep:${normalizeMapKey(FIXTURE_ROOT)}`);
 
 		await service.getClientForFile(FIXTURE_FILE);
 

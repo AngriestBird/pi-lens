@@ -86,11 +86,16 @@ function hasProjectJscpdConfig(cwd: string): boolean {
 	return false;
 }
 
-const jscpdAvailability = createAvailabilityChecker("jscpd", "", ["--version"], {
-	probeTimeout: 1500,
-	// One definition of the managed-shim fast path, shared with knip (#1476).
-	fastPath: () => findManagedNodeToolBinary("jscpd"),
-});
+const jscpdAvailability = createAvailabilityChecker(
+	"jscpd",
+	"",
+	["--version"],
+	{
+		probeTimeout: 1500,
+		// One definition of the managed-shim fast path, shared with knip (#1476).
+		fastPath: () => findManagedNodeToolBinary("jscpd"),
+	},
+);
 
 // --- Client ---
 
@@ -314,7 +319,12 @@ export class JscpdClient {
 					".",
 					...(hasConfig
 						? []
-						: ["--min-lines", String(minLines), "--min-tokens", String(minTokens)]),
+						: [
+								"--min-lines",
+								String(minLines),
+								"--min-tokens",
+								String(minTokens),
+							]),
 					"--reporters",
 					"json",
 					"--output",

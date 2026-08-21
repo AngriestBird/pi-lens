@@ -28,9 +28,8 @@ vi.mock("../../../../clients/dispatch/runners/utils/runner-helpers.js", () => ({
 }));
 
 async function runJavac(filePath: string, cwd: string) {
-	const runner = (
-		await import("../../../../clients/dispatch/runners/javac.js")
-	).default;
+	const runner = (await import("../../../../clients/dispatch/runners/javac.js"))
+		.default;
 	return runner.run(makeRunnerCtx(filePath, cwd, { kind: "java" }) as never);
 }
 

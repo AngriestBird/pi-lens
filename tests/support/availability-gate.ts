@@ -398,7 +398,10 @@ function hasVersionFlagText(text: string): boolean {
 function findMemo(
 	facts: Omit<UnitFacts, "name">,
 	moduleDecls: Map<string, Decl>,
-	options: { policyHandleOnly?: boolean; policyHandles?: Map<string, string> } = {},
+	options: {
+		policyHandleOnly?: boolean;
+		policyHandles?: Map<string, string>;
+	} = {},
 ): string | null {
 	// `policyHandleOnly` asks the narrower question that decides ROUTING
 	// INHERITANCE (#1552): does this unit park a POLICY HANDLE of its own — a
@@ -646,7 +649,10 @@ function readImports(root: SgNode): {
 function readModuleDecls(root: SgNode): Map<string, Decl> {
 	const decls = new Map<string, Decl>();
 	for (const stmt of topLevelUnits(root)) {
-		if (stmt.kind() !== "lexical_declaration" && stmt.kind() !== "variable_declaration") {
+		if (
+			stmt.kind() !== "lexical_declaration" &&
+			stmt.kind() !== "variable_declaration"
+		) {
 			continue;
 		}
 		for (const child of stmt.children()) {
@@ -707,7 +713,8 @@ function topLevelUnits(root: SgNode): SgNode[] {
 				);
 			if (inner) node = inner;
 		}
-		if (node.kind() === "import_statement" || node.kind() === "comment") continue;
+		if (node.kind() === "import_statement" || node.kind() === "comment")
+			continue;
 		units.push(node);
 	}
 	return units;
@@ -790,7 +797,9 @@ function propagateProbeReach(
 	// Whether a unit spawns on its OWN, captured before propagation starts. A
 	// unit that owns its spawn owns its classification too, so it never inherits
 	// a neighbour's routing (that separation is why the gate judges per unit).
-	const ownSpawn = new Map(units.map((unit) => [unit.facts, unit.facts.spawns]));
+	const ownSpawn = new Map(
+		units.map((unit) => [unit.facts, unit.facts.spawns]),
+	);
 	// WHITELIST (#1552): a unit may only inherit a callee's routing when its OWN
 	// memo is itself traceable to a policy factory — a handle, not a hand-rolled
 	// latch. The inverse (blacklist "not recognisably boolean") let anything

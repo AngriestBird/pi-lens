@@ -174,9 +174,8 @@ async function runTool(
 	runtime: { retireInlineBlockerOnConfirmedClean: (...a: any[]) => boolean },
 	retires: RetireCall[],
 ): Promise<any> {
-	const { createLspDiagnosticsTool } = await import(
-		"../../tools/lsp-diagnostics.js"
-	);
+	const { createLspDiagnosticsTool } =
+		await import("../../tools/lsp-diagnostics.js");
 	let token = 100;
 	const tool = createLspDiagnosticsTool(
 		() => ++token,
@@ -211,9 +210,8 @@ describe("#1561 lsp_diagnostics retires a stale inline blocker", () => {
 	>;
 
 	beforeEach(async () => {
-		const { RuntimeCoordinator } = await import(
-			"../../clients/runtime-coordinator.js"
-		);
+		const { RuntimeCoordinator } =
+			await import("../../clients/runtime-coordinator.js");
 		getServersForFileWithConfig.mockReset();
 		createLSPClient.mockReset();
 		reconcileScanDiagnosticsMock.mockReset();
@@ -502,4 +500,3 @@ describe("#1561 lsp_diagnostics retires a stale inline blocker", () => {
 		expect(runtime.getInlineBlockersSnapshot()).toHaveLength(0);
 	});
 });
-

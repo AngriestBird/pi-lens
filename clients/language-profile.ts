@@ -108,7 +108,8 @@ const ROOT_MARKERS_BY_KIND: Partial<Record<FileKind, readonly string[]>> = {
 };
 
 function hasProjectMarker(projectRoot: string, marker: string): boolean {
-	if (!marker.includes("*")) return fs.existsSync(path.join(projectRoot, marker));
+	if (!marker.includes("*"))
+		return fs.existsSync(path.join(projectRoot, marker));
 	try {
 		return direntsHaveMarkerGlobMatch(
 			fs.readdirSync(projectRoot, { withFileTypes: true }),
@@ -125,7 +126,10 @@ function hasProjectMarker(projectRoot: string, marker: string): boolean {
 // must not pollute the no-arg cache. The synchronous getSourceFiles() call
 // inside this function does the same expensive ignoreMatcher-driven walk
 // as resolveStartupScanContext, so the same memo strategy applies.
-const languageProfileCache = new BoundedLruCache<string, ProjectLanguageProfile>(32);
+const languageProfileCache = new BoundedLruCache<
+	string,
+	ProjectLanguageProfile
+>(32);
 
 export function detectProjectLanguageProfile(
 	projectRoot: string,
@@ -351,7 +355,12 @@ export async function collectSourceFilesForWarmup(
 			if (entry.isDirectory()) {
 				// Never checked symlinks — always follows them (unlike
 				// source-filter.ts's collectSourceFiles*, refs #191).
-				if (!shouldRecurseIntoDir(entry, fullPath, { ignoreMatcher, followSymlinks: true })) {
+				if (
+					!shouldRecurseIntoDir(entry, fullPath, {
+						ignoreMatcher,
+						followSymlinks: true,
+					})
+				) {
 					continue;
 				}
 				stack.push(fullPath);

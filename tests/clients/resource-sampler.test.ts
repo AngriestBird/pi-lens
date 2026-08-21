@@ -244,8 +244,13 @@ describe("sampleProcesses (POSIX / pidusage path)", () => {
 		pidusageMock.mockRejectedValue(new Error("boom"));
 
 		await expect(sampleProcesses([111])).resolves.toBeNull();
-		expect(getDegradationSummary().find((g) => g.kind === "resource-sampler-query-failed"))
-			.toMatchObject({ latestReasons: [{ subject: "posix-pidusage-process-table" }] });
+		expect(
+			getDegradationSummary().find(
+				(g) => g.kind === "resource-sampler-query-failed",
+			),
+		).toMatchObject({
+			latestReasons: [{ subject: "posix-pidusage-process-table" }],
+		});
 	});
 
 	it("de-duplicates and drops invalid pids before sampling", async () => {
@@ -265,8 +270,7 @@ describe("sampleProcesses (Windows / guarded CIM path)", () => {
 	});
 
 	it("never calls pidusage on Windows — the whole point of the fix", async () => {
-		fakeSpawn = () =>
-			makeFakeChild({ stdout: "111,1024,0,0\r\n", code: 0 });
+		fakeSpawn = () => makeFakeChild({ stdout: "111,1024,0,0\r\n", code: 0 });
 		await sampleProcesses([111]);
 		expect(pidusageMock).not.toHaveBeenCalled();
 	});
@@ -324,8 +328,14 @@ describe("sampleProcesses (Windows / guarded CIM path)", () => {
 		await expect(sampleProcesses([111])).resolves.toBeNull();
 		const result = await sampleProcesses([111]);
 		expect(result).toBeNull();
-		expect(getDegradationSummary().find((g) => g.kind === "resource-sampler-query-failed"))
-			.toMatchObject({ count: 1, latestReasons: [{ subject: "windows-process-table" }] });
+		expect(
+			getDegradationSummary().find(
+				(g) => g.kind === "resource-sampler-query-failed",
+			),
+		).toMatchObject({
+			count: 1,
+			latestReasons: [{ subject: "windows-process-table" }],
+		});
 	});
 
 	it("RESOLVES when the child emits an async 'error' event (e.g. ENOENT)", async () => {
@@ -337,11 +347,19 @@ describe("sampleProcesses (Windows / guarded CIM path)", () => {
 		fakeSpawn = () =>
 			makeFakeChild({ stdout: "not-a-csv-line\r\n<<broken>>\r\n", code: 1 });
 		await expect(sampleProcesses([111])).resolves.toBeNull();
-		expect(getDegradationSummary().find((g) => g.kind === "resource-sampler-query-failed"))
-			.toMatchObject({
-				count: 1,
-				latestReasons: [{ subject: "windows-process-table", reason: "process-table query exit-error (exit code 1)" }],
-			});
+		expect(
+			getDegradationSummary().find(
+				(g) => g.kind === "resource-sampler-query-failed",
+			),
+		).toMatchObject({
+			count: 1,
+			latestReasons: [
+				{
+					subject: "windows-process-table",
+					reason: "process-table query exit-error (exit code 1)",
+				},
+			],
+		});
 	});
 
 	it("does not settle a timed-out sampler query until the tree-kill hook reports the child's fate", async () => {
@@ -371,8 +389,14 @@ describe("sampleProcesses (Windows / guarded CIM path)", () => {
 			const sampler = startSpawnUsageSampler(999, 100);
 			await vi.advanceTimersByTimeAsync(0);
 			expect(sampler.stop()).toBeNull();
-			expect(getDegradationSummary().find((g) => g.kind === "resource-sampler-query-failed"))
-				.toMatchObject({ count: 1, latestReasons: [{ subject: "windows-descendant-process-table" }] });
+			expect(
+				getDegradationSummary().find(
+					(g) => g.kind === "resource-sampler-query-failed",
+				),
+			).toMatchObject({
+				count: 1,
+				latestReasons: [{ subject: "windows-descendant-process-table" }],
+			});
 		} finally {
 			vi.useRealTimers();
 		}

@@ -26,7 +26,10 @@ import {
 	getServersForFileWithConfig,
 	primaryServerId,
 } from "../clients/lsp/config.js";
-import { combineAbortSignals, withDeadline } from "../clients/deadline-utils.js";
+import {
+	combineAbortSignals,
+	withDeadline,
+} from "../clients/deadline-utils.js";
 import {
 	applyAuxiliarySuppressions,
 	retagAuxiliaryDiagnostics,
@@ -41,12 +44,13 @@ import {
 	type TouchFileResult,
 } from "../clients/lsp/diagnostic-binding.js";
 import { classifyCascadeWaitTier } from "../clients/lsp/wait-policy/index.js";
-import {
-	attemptTsserverSyncDiagnostics,
-} from "../clients/lsp/tsserver-sync.js";
+import { attemptTsserverSyncDiagnostics } from "../clients/lsp/tsserver-sync.js";
 import { convertLspDiagnostics } from "../clients/dispatch/utils/lsp-diagnostics.js";
 import { demoteInferredProjectDiagnostics } from "../clients/lsp/inferred-project.js";
-import { isBlocking, reconcileScanDiagnostics } from "../clients/widget-state.js";
+import {
+	isBlocking,
+	reconcileScanDiagnostics,
+} from "../clients/widget-state.js";
 import { baseName, compactRenderResult } from "./render-compact.js";
 import { makeProgressReporter, scanningSummaryLine } from "./scan-progress.js";
 import {
@@ -431,8 +435,7 @@ export function createLspDiagnosticsTool(
 			}
 			const count =
 				details?.totalDiagnostics ?? details?.diagnostics?.length ?? 0;
-			const target =
-				baseName(details?.filePath ?? args.path) || "workspace";
+			const target = baseName(details?.filePath ?? args.path) || "workspace";
 			const files = details?.filesChecked ?? details?.filesScanned;
 			const scope =
 				typeof files === "number" && files > 1
@@ -448,8 +451,7 @@ export function createLspDiagnosticsTool(
 			if (unconfirmedFiles > 0) {
 				const cleanFiles = details?.cleanFiles ?? 0;
 				const timedOutFiles = details?.timedOutFiles ?? 0;
-				const suffix =
-					timedOutFiles > 0 ? ` (${timedOutFiles} timed out)` : "";
+				const suffix = timedOutFiles > 0 ? ` (${timedOutFiles} timed out)` : "";
 				return `lsp_diagnostics${scope} — ${count} ${noun} · ${cleanFiles} clean · ${unconfirmedFiles} unconfirmed${suffix}`;
 			}
 			const outcomeCounts = details?.outcomeCounts;
@@ -538,7 +540,10 @@ export function createLspDiagnosticsTool(
 			const signal = combineAbortSignals(_signal, ctx.signal);
 			// Stream a throttled progress bar for batch/directory scans (opaque for
 			// seconds-to-minutes otherwise).
-			const onProgress = makeProgressReporter(onUpdate, "Scanning LSP diagnostics");
+			const onProgress = makeProgressReporter(
+				onUpdate,
+				"Scanning LSP diagnostics",
+			);
 			const typedParams = params as {
 				path?: string;
 				paths?: string[];
@@ -576,10 +581,12 @@ export function createLspDiagnosticsTool(
 			if (Array.isArray(typedParams.paths) && typedParams.paths.length > 0) {
 				if (typedParams.paths.length > MAX_BATCH_FILES) {
 					return {
-						content: [{
-							type: "text" as const,
-							text: `paths accepts at most ${MAX_BATCH_FILES} files; received ${typedParams.paths.length}.`,
-						}],
+						content: [
+							{
+								type: "text" as const,
+								text: `paths accepts at most ${MAX_BATCH_FILES} files; received ${typedParams.paths.length}.`,
+							},
+						],
 						isError: true,
 						details: { mode: "batch", filesChecked: 0 },
 					};
@@ -590,7 +597,12 @@ export function createLspDiagnosticsTool(
 				);
 				if (rawPaths.length !== typedParams.paths.length) {
 					return {
-						content: [{ type: "text" as const, text: "paths must contain non-empty file paths." }],
+						content: [
+							{
+								type: "text" as const,
+								text: "paths must contain non-empty file paths.",
+							},
+						],
 						isError: true,
 						details: { mode: "batch", filesChecked: 0 },
 					};
@@ -599,7 +611,9 @@ export function createLspDiagnosticsTool(
 				// path before grouping so Windows separators and dot segments cannot
 				// change cache/group identity. Explicit lists never enter the walker.
 				const absPaths = rawPaths.map((entry) =>
-					path.normalize(path.isAbsolute(entry) ? entry : path.resolve(cwd, entry)),
+					path.normalize(
+						path.isAbsolute(entry) ? entry : path.resolve(cwd, entry),
+					),
 				);
 				return runBatchFileDiagnostics(absPaths, severity, lspService, {
 					concurrency,
@@ -1595,7 +1609,9 @@ function tallyConfirmation(results: FileDiagnosticResult[]): {
 	return { clean, unconfirmed, timedOut };
 }
 
-function classifyBatchFileOutcome(result: FileDiagnosticResult): BatchFileOutcome {
+function classifyBatchFileOutcome(
+	result: FileDiagnosticResult,
+): BatchFileOutcome {
 	if (result.error) return "failed";
 	// A timed-out/unconfirmed answer may contain partial findings, but it cannot
 	// honestly be called a complete findings result. Keep the raw findings for
@@ -1611,7 +1627,10 @@ function classifyBatchFileOutcome(result: FileDiagnosticResult): BatchFileOutcom
 	return "clean";
 }
 
-function inconclusiveBatchResult(file: string, reason: string): FileDiagnosticResult {
+function inconclusiveBatchResult(
+	file: string,
+	reason: string,
+): FileDiagnosticResult {
 	return {
 		file,
 		diagnostics: [],
@@ -1629,7 +1648,10 @@ function inconclusiveBatchResult(file: string, reason: string): FileDiagnosticRe
  * but the reason differs and misreporting a timeout as "server can't confirm
  * clean" would itself be misleading.
  */
-function unconfirmedReasonClause(unconfirmed: number, timedOut: number): string {
+function unconfirmedReasonClause(
+	unconfirmed: number,
+	timedOut: number,
+): string {
 	const silent = unconfirmed - timedOut;
 	if (timedOut > 0 && silent > 0) {
 		return (
@@ -1722,9 +1744,13 @@ async function collectBatchDiagnostics(
 								resolve(undefined);
 								return;
 							}
-							options.signal?.addEventListener("abort", () => resolve(undefined), {
-								once: true,
-							});
+							options.signal?.addEventListener(
+								"abort",
+								() => resolve(undefined),
+								{
+									once: true,
+								},
+							);
 						}),
 					])
 				: await bounded;
@@ -1761,9 +1787,19 @@ async function collectBatchDiagnostics(
 		result.outcome = classifyBatchFileOutcome(result);
 	}
 	const outcomeCounts = Object.fromEntries(
-		(["clean", "findings", "unsupported", "unavailable", "failed", "inconclusive"] as const).map(
-			(outcome) => [outcome, results.filter((result) => result.outcome === outcome).length],
-		),
+		(
+			[
+				"clean",
+				"findings",
+				"unsupported",
+				"unavailable",
+				"failed",
+				"inconclusive",
+			] as const
+		).map((outcome) => [
+			outcome,
+			results.filter((result) => result.outcome === outcome).length,
+		]),
 	) as Record<BatchFileOutcome, number>;
 	// Per-file primary-server lookup so a flattened multi-file `display` list
 	// can still be split into "primary findings" vs "auxiliary findings" —
@@ -1941,7 +1977,12 @@ async function runDirectoryDiagnostics(
 
 	const isIgnored = projectIgnorePredicate(absPath);
 	for (const [ext, exts] of Object.entries(LANG_EXTENSIONS)) {
-		collectedFiles = await collectFiles(absPath, exts, MAX_FILES + 1, isIgnored);
+		collectedFiles = await collectFiles(
+			absPath,
+			exts,
+			MAX_FILES + 1,
+			isIgnored,
+		);
 		if (collectedFiles.length > 0) {
 			extension = ext;
 			break;

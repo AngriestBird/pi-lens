@@ -33,12 +33,12 @@ export interface CascadeResult {
 
 /** Why a cascade run produced no formatted output. */
 export type CascadeSkipReason =
-	| "blockers"    // primary file had blocking diagnostics
-	| "non_code"    // file kind not eligible for cascade
+	| "blockers" // primary file had blocking diagnostics
+	| "non_code" // file kind not eligible for cascade
 	| "no_neighbors" // reverse-dep lookup found no importing files
-	| "clean"       // neighbors found but none had new diagnostics
+	| "clean" // neighbors found but none had new diagnostics
 	| "indeterminate" // #1023: impact could NOT be computed (degraded/cold/missing-node graph) — surfaced as an honest advisory, never as a silent all-clear
-	| "error";      // the deferred compute rejected (never surfaced inline)
+	| "error"; // the deferred compute rejected (never surfaced inline)
 
 /**
  * Always-present result of one computeCascadeForFile invocation.

@@ -152,9 +152,13 @@ describe("TreeSitterClient query-cache Tier-2 bounds (#1389)", () => {
 		const previous = process.env.PI_LENS_TREE_SITTER_QUERY_CACHE_CAP;
 		process.env.PI_LENS_TREE_SITTER_QUERY_CACHE_CAP = "8";
 		try {
-			const { TreeSitterClient } = await import("../../clients/tree-sitter-client.js");
+			const { TreeSitterClient } =
+				await import("../../clients/tree-sitter-client.js");
 			const client = new TreeSitterClient() as any;
-			const values = Array.from({ length: 9 }, (_, i) => ({ query: { delete: vi.fn() }, i }));
+			const values = Array.from({ length: 9 }, (_, i) => ({
+				query: { delete: vi.fn() },
+				i,
+			}));
 			for (let i = 0; i < 8; i++) client.cacheQuery(`q${i}`, values[i]);
 			client.queryCache.get("q0");
 			client.queryCache.delete("q0");
@@ -166,7 +170,8 @@ describe("TreeSitterClient query-cache Tier-2 bounds (#1389)", () => {
 			expect(client.queryCache.has("q1")).toBe(true);
 			expect(values[1].query.delete).toHaveBeenCalledTimes(1);
 		} finally {
-			if (previous === undefined) delete process.env.PI_LENS_TREE_SITTER_QUERY_CACHE_CAP;
+			if (previous === undefined)
+				delete process.env.PI_LENS_TREE_SITTER_QUERY_CACHE_CAP;
 			else process.env.PI_LENS_TREE_SITTER_QUERY_CACHE_CAP = previous;
 		}
 	});
@@ -391,7 +396,10 @@ describe("TreeCache statistics (#675)", () => {
 		expect(cache.get("z.ts", "z", "typescript")).toBeNull(); // never seen: cold
 		expect(cache.get("a.ts", "a", "typescript")).toBeNull(); // evicted, same content: capacity
 
-		expect(cache.getStats()).toMatchObject({ coldMisses: 1, capacityMisses: 1 });
+		expect(cache.getStats()).toMatchObject({
+			coldMisses: 1,
+			capacityMisses: 1,
+		});
 	});
 });
 
@@ -495,7 +503,10 @@ describe("TreeCache capacity growth for scan working sets (#1715)", () => {
 		}
 
 		expect(hits).toBe(fileCount);
-		expect(cache.getStats()).toMatchObject({ capacityMisses: 0, coldMisses: 0 });
+		expect(cache.getStats()).toMatchObject({
+			capacityMisses: 0,
+			coldMisses: 0,
+		});
 	});
 
 	describe("deriveScanTreeCacheCapacity", () => {
@@ -510,7 +521,9 @@ describe("TreeCache capacity growth for scan working sets (#1715)", () => {
 
 		it("targets the file count when it fits under the ceiling", () => {
 			delete process.env.PI_LENS_TREE_SITTER_CACHE_SCAN_CAP;
-			expect(deriveScanTreeCacheCapacity(110, TREE_CACHE_DEFAULT_MAX_SIZE)).toBe(110);
+			expect(
+				deriveScanTreeCacheCapacity(110, TREE_CACHE_DEFAULT_MAX_SIZE),
+			).toBe(110);
 		});
 
 		it("never targets below the interactive default, even for a tiny scan", () => {
@@ -534,7 +547,9 @@ describe("TreeCache capacity growth for scan working sets (#1715)", () => {
 
 		it("respects an operator's PI_LENS_TREE_SITTER_CACHE_SCAN_CAP override", () => {
 			process.env.PI_LENS_TREE_SITTER_CACHE_SCAN_CAP = "75";
-			expect(deriveScanTreeCacheCapacity(1000, TREE_CACHE_DEFAULT_MAX_SIZE)).toBe(75);
+			expect(
+				deriveScanTreeCacheCapacity(1000, TREE_CACHE_DEFAULT_MAX_SIZE),
+			).toBe(75);
 		});
 
 		it("ignores a malformed override and falls back to the hard ceiling", () => {
@@ -673,8 +688,7 @@ describe("tree cache counter keys cover the counter type (#1727)", () => {
 		// missing, so `tsc` fails with TS2322. Verified by mutation: dropping
 		// `ghostHistoryDrops` from TREE_CACHE_COUNTER_KEYS reds this line and
 		// leaves the vacuous form green.
-		const _noMissing: [MissingCounterKey] extends [never] ? true : never =
-			true;
+		const _noMissing: [MissingCounterKey] extends [never] ? true : never = true;
 		expect(_noMissing).toBe(true);
 	});
 

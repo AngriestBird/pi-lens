@@ -178,7 +178,10 @@ describe("dedupe key folds every caller's cwd spelling (#1962 review F2)", () =>
 		// and still resolves to a directory. `mkdtempSync` returns the host's
 		// native separator, so hardcoding one direction would compare a string
 		// with itself and assert nothing.
-		for (const candidate of [dir.replaceAll("\\", "/"), dir.replaceAll("/", "\\")]) {
+		for (const candidate of [
+			dir.replaceAll("\\", "/"),
+			dir.replaceAll("/", "\\"),
+		]) {
 			if (candidate === dir) continue;
 			try {
 				if (fs.statSync(candidate).isDirectory()) return candidate;

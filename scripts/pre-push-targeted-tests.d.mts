@@ -16,6 +16,9 @@ export interface TargetedTestSelection {
 	totalBeforeCap: number;
 }
 
-export function selectTargetedTests(changed: string[], allTests: string[]): TargetedTestSelection;
+export function selectTargetedTests(
+	changed: string[],
+	allTests: string[],
+): TargetedTestSelection;
 
 export function main(): Promise<number>;

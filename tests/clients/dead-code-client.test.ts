@@ -28,7 +28,10 @@ const REPO_ROOT = path.resolve(
 	path.dirname(fileURLToPath(import.meta.url)),
 	"../..",
 );
-const PY_FIXTURE = path.join(REPO_ROOT, "tests/fixtures/dead-code/python-project");
+const PY_FIXTURE = path.join(
+	REPO_ROOT,
+	"tests/fixtures/dead-code/python-project",
+);
 
 // Real vulture 2.16 output (Windows + POSIX path forms both covered).
 const VULTURE_OUTPUT = [
@@ -117,7 +120,8 @@ describe("PythonDeadCodeClient resolveProjectRoot (pin, refs #625)", () => {
 			const nested = path.join(tmpDir, "src", "pkg");
 			fs.mkdirSync(nested, { recursive: true });
 
-			const client = new PythonDeadCodeClient() as unknown as ResolveProjectRoot;
+			const client =
+				new PythonDeadCodeClient() as unknown as ResolveProjectRoot;
 			expect(client.resolveProjectRoot(nested)).toBe(tmpDir);
 		} finally {
 			cleanup();
@@ -135,7 +139,8 @@ describe("PythonDeadCodeClient resolveProjectRoot (pin, refs #625)", () => {
 			fs.mkdirSync(nested, { recursive: true });
 			fs.writeFileSync(path.join(ancestor, "setup.py"), "");
 
-			const client = new PythonDeadCodeClient() as unknown as ResolveProjectRoot;
+			const client =
+				new PythonDeadCodeClient() as unknown as ResolveProjectRoot;
 			expect(client.resolveProjectRoot(nested, home)).toBeNull();
 		} finally {
 			removeTempDirSync(tmpRoot);
@@ -151,7 +156,8 @@ describe("PythonDeadCodeClient resolveProjectRoot (pin, refs #625)", () => {
 			fs.mkdirSync(home, { recursive: true });
 			fs.writeFileSync(path.join(home, "tox.ini"), "");
 
-			const client = new PythonDeadCodeClient() as unknown as ResolveProjectRoot;
+			const client =
+				new PythonDeadCodeClient() as unknown as ResolveProjectRoot;
 			expect(client.resolveProjectRoot(home, home)).toBeNull();
 		} finally {
 			removeTempDirSync(tmpRoot);
@@ -169,7 +175,8 @@ describe("PythonDeadCodeClient resolveProjectRoot (pin, refs #625)", () => {
 			fs.mkdirSync(path.join(repoRoot, ".git"), { recursive: true });
 			fs.mkdirSync(nested, { recursive: true });
 
-			const client = new PythonDeadCodeClient() as unknown as ResolveProjectRoot;
+			const client =
+				new PythonDeadCodeClient() as unknown as ResolveProjectRoot;
 			expect(client.resolveProjectRoot(nested)).toBeNull();
 		} finally {
 			cleanup();
@@ -184,7 +191,8 @@ describe("PythonDeadCodeClient resolveProjectRoot (pin, refs #625)", () => {
 			const nested = path.join(tmpRoot, "deep", "nowhere");
 			fs.mkdirSync(nested, { recursive: true });
 
-			const client = new PythonDeadCodeClient() as unknown as ResolveProjectRoot;
+			const client =
+				new PythonDeadCodeClient() as unknown as ResolveProjectRoot;
 			const resolved = client.resolveProjectRoot(nested);
 			expect(resolved).not.toBe(nested);
 		} finally {
@@ -242,7 +250,9 @@ describe("dead-code turn delta helpers", () => {
 
 	it("keys an issue by category/file/name so a moved symbol is not new", () => {
 		expect(deadCodeIssueKey(issue("a", 1))).toBe("export:mod.py:a");
-		expect(deadCodeIssueKey(issue("a", 1))).toBe(deadCodeIssueKey(issue("a", 2)));
+		expect(deadCodeIssueKey(issue("a", 1))).toBe(
+			deadCodeIssueKey(issue("a", 2)),
+		);
 	});
 });
 

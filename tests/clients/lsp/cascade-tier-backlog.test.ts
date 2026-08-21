@@ -213,7 +213,8 @@ describe("backlog gauge", () => {
 					getWarmClientForFile: vi.fn().mockResolvedValue(undefined),
 				}) as never,
 		);
-		const task = registerQuietWindowTask.mock.calls[0][1] as () => Promise<void>;
+		const task = registerQuietWindowTask.mock
+			.calls[0][1] as () => Promise<void>;
 		await task();
 
 		expect(sweepGauge().metadata).toMatchObject({
@@ -238,16 +239,15 @@ describe("backlog gauge", () => {
 					getWarmClientForFile: vi
 						.fn()
 						.mockImplementation(async (filePath: string) =>
-							filePath.endsWith("a.ts")
-								? undefined
-								: warm("typescript", []),
+							filePath.endsWith("a.ts") ? undefined : warm("typescript", []),
 						),
 				}) as never,
 		);
 		record("C:/repo/a.ts", touchedAt);
 		record("C:/repo/b.ts", touchedAt);
 
-		const task = registerQuietWindowTask.mock.calls[0][1] as () => Promise<void>;
+		const task = registerQuietWindowTask.mock
+			.calls[0][1] as () => Promise<void>;
 		await task();
 
 		const metadata = sweepGauge().metadata;

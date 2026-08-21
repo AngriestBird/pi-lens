@@ -39,9 +39,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import {
-	_resetTrackedFilesCacheForTests,
-} from "../../clients/git-tracked-ignore.js";
+import { _resetTrackedFilesCacheForTests } from "../../clients/git-tracked-ignore.js";
 import {
 	classifyAndFilterFindings,
 	type GitleaksFinding,
@@ -242,7 +240,10 @@ describe("gitleaksFindingToProjectDiagnostic — pathStatus observability (#1562
 	it("demotes a pathStatus:'scratch' finding to info/none, never blocking", () => {
 		const diag = gitleaksFindingToProjectDiagnostic(
 			"/repo",
-			finding({ file: ".pi/greedysearch-sources/doc.md", pathStatus: "scratch" }),
+			finding({
+				file: ".pi/greedysearch-sources/doc.md",
+				pathStatus: "scratch",
+			}),
 		);
 		expect(diag.severity).toBe("info");
 		expect(diag.semantic).toBe("none");
@@ -284,7 +285,7 @@ describe("writeScopedGitleaksConfig — placeholder allowlist + secrets-lane pat
 		const env = setupTestEnvironment("pi-lens-gitleaks-cfg-local-");
 		try {
 			const localConfigPath = path.join(env.tmpDir, ".gitleaks.toml");
-			fs.writeFileSync(localConfigPath, "title = \"custom\"\n");
+			fs.writeFileSync(localConfigPath, 'title = "custom"\n');
 			const configPath = writeScopedGitleaksConfig(outDir, env.tmpDir);
 			const toml = fs.readFileSync(configPath, "utf-8");
 			expect(toml).not.toContain("useDefault = true");

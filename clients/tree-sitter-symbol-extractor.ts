@@ -732,7 +732,8 @@ export class TreeSitterSymbolExtractor {
 
 	async init(): Promise<boolean> {
 		try {
-			if (!(await this.client.isLanguageSupported(this.languageId))) return false;
+			if (!(await this.client.isLanguageSupported(this.languageId)))
+				return false;
 			const language = this.client.getLanguage(this.languageId);
 			if (!language) return false;
 
@@ -972,7 +973,9 @@ export class TreeSitterSymbolExtractor {
 			...(visibility ? { visibility } : {}),
 			...(decorators.length > 0 ? { decorators } : {}),
 			...(isAsync ? { isAsync: true } : {}),
-			...(docInfo ? { doc: docInfo.text, docStartLine: docInfo.startLine } : {}),
+			...(docInfo
+				? { doc: docInfo.text, docStartLine: docInfo.startLine }
+				: {}),
 		};
 	}
 
@@ -1050,7 +1053,8 @@ export class TreeSitterSymbolExtractor {
 		while (cursor >= 0 && isComment(siblings[cursor])) {
 			const candidate = siblings[cursor];
 			const gapRows =
-				boundaryRow !== undefined && typeof candidate.endPosition?.row === "number"
+				boundaryRow !== undefined &&
+				typeof candidate.endPosition?.row === "number"
 					? boundaryRow - candidate.endPosition.row
 					: 0;
 			if (gapRows > 1) break; // separated by a blank line — not attached
@@ -1150,7 +1154,10 @@ export class TreeSitterSymbolExtractor {
 		const isDeco = (n: any) =>
 			!!n && TreeSitterSymbolExtractor.DECORATOR_NODE_KINDS.has(n.type);
 		const text = (n: any): string => {
-			const first = String(n?.text ?? "").split(/\r?\n/, 1)[0]?.trim() ?? "";
+			const first =
+				String(n?.text ?? "")
+					.split(/\r?\n/, 1)[0]
+					?.trim() ?? "";
 			return first.length > 120 ? `${first.slice(0, 117)}…` : first;
 		};
 		const out: string[] = [];
@@ -1168,7 +1175,9 @@ export class TreeSitterSymbolExtractor {
 		// `modifiers` container (Java/Kotlin).
 		for (const child of node.children ?? []) {
 			if (isDeco(child)) out.push(text(child));
-			else if (TreeSitterSymbolExtractor.MODIFIERS_CONTAINER_KINDS.has(child?.type)) {
+			else if (
+				TreeSitterSymbolExtractor.MODIFIERS_CONTAINER_KINDS.has(child?.type)
+			) {
 				for (const gc of child.children ?? []) {
 					if (isDeco(gc)) out.push(text(gc));
 				}
@@ -1195,7 +1204,10 @@ export class TreeSitterSymbolExtractor {
 				// biome-ignore lint/suspicious/noExplicitAny: Node type
 				refNode = capture.node as any;
 				if (captureName.startsWith("type")) referenceKind = "type";
-				else if (captureName.startsWith("call") || captureName.startsWith("new")) {
+				else if (
+					captureName.startsWith("call") ||
+					captureName.startsWith("new")
+				) {
 					referenceKind = "call";
 				}
 			}
@@ -1203,7 +1215,10 @@ export class TreeSitterSymbolExtractor {
 				// biome-ignore lint/suspicious/noExplicitAny: Node type
 				refNode = capture.node as any;
 				if (captureName.startsWith("type")) referenceKind = "type";
-				else if (captureName.startsWith("call") || captureName.startsWith("new")) {
+				else if (
+					captureName.startsWith("call") ||
+					captureName.startsWith("new")
+				) {
 					referenceKind = "call";
 				}
 			}

@@ -332,13 +332,21 @@ async function runTurnEndNow(
 
 	const outcome: TurnEndOutcome = deferredDelivery
 		? {
-				turnEnd: joinMessages(peekTurnEndFindings(ctx.cacheManager, cwd, ctx.runtime, true)),
-				tests: joinMessages(peekTestFindings(ctx.cacheManager, cwd, ctx.runtime, true)),
+				turnEnd: joinMessages(
+					peekTurnEndFindings(ctx.cacheManager, cwd, ctx.runtime, true),
+				),
+				tests: joinMessages(
+					peekTestFindings(ctx.cacheManager, cwd, ctx.runtime, true),
+				),
 				filesRegistered: registered,
 			}
 		: {
-				turnEnd: joinMessages(consumeTurnEndFindings(ctx.cacheManager, cwd, ctx.runtime)),
-				tests: joinMessages(consumeTestFindings(ctx.cacheManager, cwd, ctx.runtime)),
+				turnEnd: joinMessages(
+					consumeTurnEndFindings(ctx.cacheManager, cwd, ctx.runtime),
+				),
+				tests: joinMessages(
+					consumeTestFindings(ctx.cacheManager, cwd, ctx.runtime),
+				),
 				filesRegistered: registered,
 			};
 
@@ -430,8 +438,12 @@ function runTurnEndForIpcNow(cwd: string): Promise<TurnEndDelivery> {
 
 		const ctx = await getMcpSessionContext();
 		const cachedOutcome: TurnEndOutcome = {
-			turnEnd: joinMessages(peekTurnEndFindings(ctx.cacheManager, cwd, ctx.runtime, true)),
-			tests: joinMessages(peekTestFindings(ctx.cacheManager, cwd, ctx.runtime, true)),
+			turnEnd: joinMessages(
+				peekTurnEndFindings(ctx.cacheManager, cwd, ctx.runtime, true),
+			),
+			tests: joinMessages(
+				peekTestFindings(ctx.cacheManager, cwd, ctx.runtime, true),
+			),
 			filesRegistered: 0,
 		};
 		const transaction = hasTurnEndFindings(cachedOutcome)

@@ -188,8 +188,7 @@ function pruneInactiveFileRecords(now = Date.now()): void {
 	const victims = [...files.entries()]
 		.filter(
 			([, rec]) =>
-				now - rec.touchedAt > ACTIVE_FILE_IDLE_MS &&
-				!hasLiveDiagnostic(rec),
+				now - rec.touchedAt > ACTIVE_FILE_IDLE_MS && !hasLiveDiagnostic(rec),
 		)
 		.sort(([, a], [, b]) => a.touchedAt - b.touchedAt);
 	for (const [key] of victims) {
@@ -307,7 +306,9 @@ function migrateEntryStamps(
 	});
 }
 
-export function importWidgetState(state: PersistedWidgetState | undefined): boolean {
+export function importWidgetState(
+	state: PersistedWidgetState | undefined,
+): boolean {
 	// Accept any known-or-older version and migrate (#1186): reject a missing
 	// snapshot, a missing/non-numeric `version` (NaN/undefined/null — the
 	// pre-#1186 guard `version !== WIDGET_STATE_VERSION` rejected these, and
@@ -367,7 +368,9 @@ export function importWidgetState(state: PersistedWidgetState | undefined): bool
 			// current session never observed (and same-mtime fixes would never
 			// clear it). Successes rehydrate as before.
 			formatters: new Map(
-				(f.formatters ?? []).filter(([, outcome]) => outcome?.success !== false),
+				(f.formatters ?? []).filter(
+					([, outcome]) => outcome?.success !== false,
+				),
 			),
 			diagnostics: migrateEntryStamps(f.diagnostics, recordTouchedAt),
 			allDiagnostics: migratedAllDiagnostics,
@@ -595,7 +598,10 @@ function countDiagnostics(diags: WidgetDiagnostic[]): {
 		// A dependency-drift demotion (#1631 criterion 3) is different: the
 		// finding itself is still real evidence, only its BLOCKING authority is
 		// revoked until re-confirmed, so it stays in the error/warning tally.
-		if (diagnostic.stale && (diagnostic.staleReason ?? "past-eof") === "past-eof")
+		if (
+			diagnostic.stale &&
+			(diagnostic.staleReason ?? "past-eof") === "past-eof"
+		)
 			continue;
 		if (diagnostic.severity === "error") errors++;
 		// #1777: `hint` and `info` tally alongside `warning`. The dispatch path
@@ -640,7 +646,10 @@ function countDiagnostics(diags: WidgetDiagnostic[]): {
  * only when `demotedCount` (which counts RISING edges only, for telemetry)
  * is nonzero.
  */
-function applyPastEofGate(rec: FileRecord, lineCountCache?: LineCountCache): void {
+function applyPastEofGate(
+	rec: FileRecord,
+	lineCountCache?: LineCountCache,
+): void {
 	if (rec.allDiagnostics.length === 0) return;
 	const { diagnostics } = demotePastEofDiagnostics({
 		store: "widget-state",
@@ -662,7 +671,10 @@ function freshestObservation(
 ): number {
 	let newest: number | undefined;
 	for (const d of diags) {
-		if (d.observedAt != null && (newest === undefined || d.observedAt > newest)) {
+		if (
+			d.observedAt != null &&
+			(newest === undefined || d.observedAt > newest)
+		) {
 			newest = d.observedAt;
 		}
 	}
@@ -679,7 +691,9 @@ function freshestObservation(
  * errors-only LSP re-check is entitled to replace.
  */
 function isLspErrorEntry(d: WidgetDiagnostic): boolean {
-	return d.tool === "lsp" && (d.semantic === "blocking" || d.severity === "error");
+	return (
+		d.tool === "lsp" && (d.semantic === "blocking" || d.severity === "error")
+	);
 }
 
 /**
@@ -730,7 +744,11 @@ export function reconcileCascadeNeighborLspErrors(
 	// keeping the newer preserved one, instead of dropping the whole record.
 	const observedTs = observedAt ?? Date.now();
 	const rec = getOrCreate(filePath);
-	const incoming = normalizeDiagnostics(filePath, lspErrorDiagnostics, observedTs);
+	const incoming = normalizeDiagnostics(
+		filePath,
+		lspErrorDiagnostics,
+		observedTs,
+	);
 	const preserved = rec.allDiagnostics.filter((d) => !isLspErrorEntry(d));
 	commitDiagnostics(rec, filePath, [...incoming, ...preserved], observedTs);
 }
@@ -872,7 +890,11 @@ export async function reconcileStaleWidgetFiles(): Promise<number> {
 			// pre-#1186 record) inherits the record's `touchedAt`. Tolerance matches
 			// the Windows host-clock skew rationale above.
 			const survivors = rec.allDiagnostics.filter(
-				(d) => !(mtimeMs > (d.observedAt ?? rec.touchedAt) + MTIME_DRIFT_TOLERANCE_MS),
+				(d) =>
+					!(
+						mtimeMs >
+						(d.observedAt ?? rec.touchedAt) + MTIME_DRIFT_TOLERANCE_MS
+					),
 			);
 			if (survivors.length === rec.allDiagnostics.length) {
 				return { mapKey, action: "keep" as const }; // nothing stale
@@ -955,10 +977,16 @@ export async function reconcileStaleWidgetDependencyBlockers(
 		// invalidated by that shape of drift. Documented trade: a non-LSP blocking
 		// finding on a file with drifted imports stays fully authoritative until its own
 		// content changes or it is explicitly re-run.
-		if (!rec.allDiagnostics.some((d) => isBlocking(d) && d.tool === "lsp")) continue;
+		if (!rec.allDiagnostics.some((d) => isBlocking(d) && d.tool === "lsp"))
+			continue;
 		let importMtimes: Array<{ path: string; mtimeMs: number }> = [];
 		try {
-			const result = await collectForwardImportMtimes(cwd, rec.filePath, undefined, turnIndex);
+			const result = await collectForwardImportMtimes(
+				cwd,
+				rec.filePath,
+				undefined,
+				turnIndex,
+			);
 			importMtimes = result.mtimes;
 			if (result.truncated) truncatedImports += 1;
 		} catch {
@@ -975,7 +1003,11 @@ export async function reconcileStaleWidgetDependencyBlockers(
 			// across 200 writes; #1491/#1498 precedent for the same host-clock skew).
 			// +1ms produced 42 false demotions in 50 runs on Windows; +50ms clears the
 			// measured skew while staying far below the gap between real edits.
-			if (importMtimes.some((im) => im.mtimeMs > baseline + MTIME_DRIFT_TOLERANCE_MS)) {
+			if (
+				importMtimes.some(
+					(im) => im.mtimeMs > baseline + MTIME_DRIFT_TOLERANCE_MS,
+				)
+			) {
 				d.stale = true;
 				d.staleReason = "dependency-drift";
 				changed = true;
@@ -1020,9 +1052,11 @@ export function getWidgetBlockingFilesForSweep(): Array<{
 		for (const d of rec.allDiagnostics) {
 			if (!isBlocking(d) || d.tool !== "lsp") continue;
 			const observedAt = d.observedAt ?? rec.touchedAt;
-			if (earliest === undefined || observedAt < earliest) earliest = observedAt;
+			if (earliest === undefined || observedAt < earliest)
+				earliest = observedAt;
 		}
-		if (earliest !== undefined) out.push({ filePath: rec.filePath, recordedAtMs: earliest });
+		if (earliest !== undefined)
+			out.push({ filePath: rec.filePath, recordedAtMs: earliest });
 	}
 	return out;
 }
@@ -1151,7 +1185,9 @@ export function getFileDiagnosticSummaries(): FileDiagnosticSummary[] {
  * stay identical to the write-side fold, or a file recorded under one form
  * would silently read as `undefined` under another (e.g. via bus-publish).
  */
-export function getFileDiagnostics(filePath: string): WidgetDiagnostic[] | undefined {
+export function getFileDiagnostics(
+	filePath: string,
+): WidgetDiagnostic[] | undefined {
 	const rec = files.get(fileMapKey(filePath));
 	if (!rec) return undefined;
 	applyPastEofGate(rec);
@@ -1279,7 +1315,8 @@ export function renderWidget(
 	// the footer entirely instead of demoting visibly. `isBlockingOrDemoted` keeps
 	// it in the list; the per-entry render below distinguishes the two with a
 	// dimmed marker instead of the red dot.
-	const isBlockingOrDemoted = (d: WidgetDiagnostic) => isBlocking(d) || d.stale === true;
+	const isBlockingOrDemoted = (d: WidgetDiagnostic) =>
+		isBlocking(d) || d.stale === true;
 	const withBlocking = recencySorted.filter((r) =>
 		r.diagnostics.some(isBlockingOrDemoted),
 	);
@@ -1313,7 +1350,10 @@ export function renderWidget(
 			const rule = d.rule ? dim(` ${d.rule}`) : "";
 			const staleTag = d.stale ? dim(` ${STALE_LINE_MARKER}`) : "";
 			const prefix = `   ${d.stale ? dim("○") : red("●")} ${loc}${rule}  `;
-			const msgWidth = Math.max(1, w - visibleWidth(prefix) - visibleWidth(staleTag));
+			const msgWidth = Math.max(
+				1,
+				w - visibleWidth(prefix) - visibleWidth(staleTag),
+			);
 			const msg = fitLine(d.message, msgWidth, "…");
 			lines.push(fitLine(`${prefix}${msg}${staleTag}`, w));
 		}
@@ -1401,7 +1441,9 @@ function formatFileRowVertical(
 		(failedFormatters.length > 0
 			? red(` fmt-failed:${failedFormatters.join(",")}`)
 			: "") +
-		(changedFormatters.length > 0 ? dim(` fmt:${changedFormatters.join(",")}`) : "");
+		(changedFormatters.length > 0
+			? dim(` fmt:${changedFormatters.join(",")}`)
+			: "");
 	return ` ${dot} ${base}  ${dim(runnerNames)}${formatMark}${counts}`;
 }
 
@@ -1554,7 +1596,11 @@ function hasFailedFormatter(rec: FileRecord): boolean {
 }
 
 function shouldRenderFile(rec: FileRecord): boolean {
-	return rec.hasFinalDiagnosticsSnapshot || hasChangedFormatter(rec) || hasFailedFormatter(rec);
+	return (
+		rec.hasFinalDiagnosticsSnapshot ||
+		hasChangedFormatter(rec) ||
+		hasFailedFormatter(rec)
+	);
 }
 
 function hasLiveDiagnostic(rec: FileRecord): boolean {

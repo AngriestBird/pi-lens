@@ -40,7 +40,8 @@ function skipReason() {
 	if (isSet(process.env.PI_LENS_SKIP_HOOKS)) return "PI_LENS_SKIP_HOOKS is set";
 	if (isCi()) return "CI is set";
 	if (!existsSync(".git")) return "no .git (not a clone)";
-	if (!existsSync("node_modules/husky/bin.js")) return "husky not installed (production install)";
+	if (!existsSync("node_modules/husky/bin.js"))
+		return "husky not installed (production install)";
 	return null;
 }
 
@@ -51,7 +52,9 @@ if (reason) {
 }
 
 try {
-	execFileSync(process.execPath, ["node_modules/husky/bin.js"], { stdio: "inherit" });
+	execFileSync(process.execPath, ["node_modules/husky/bin.js"], {
+		stdio: "inherit",
+	});
 } catch (error) {
 	// Best-effort: a broken git-hooks install must never fail `npm install`.
 	console.warn(

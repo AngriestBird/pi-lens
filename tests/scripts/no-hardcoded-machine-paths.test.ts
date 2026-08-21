@@ -82,15 +82,45 @@ describe("no hardcoded machine paths in scripts/ or package.json (#1728)", () =>
 	// profiles despite this docstring's "ANY" claim -- these cases pin all
 	// seven shapes so that gap can't reopen silently.
 	it.each([
-		["Windows C: drive, forward slash", 'const X = "C:/Users/someone/Desktop/whatever";', "C:/Users/someone"],
-		["Windows C: drive, backslash", 'const X = "C:\\Users\\someone\\Desktop\\whatever";', "C:\\Users\\someone"],
-		["Windows non-C: drive letter", 'const X = "D:/Users/someone/Desktop/whatever";', "D:/Users/someone"],
-		["Windows drive letter, lowercase + lowercase Users", 'const X = "c:/users/someone/Desktop";', "c:/users/someone"],
-		["Windows drive letter, all-caps USERS", 'const X = "C:\\USERS\\someone\\Desktop";', "C:\\USERS\\someone"],
-		["Linux home directory", 'const X = "/home/someone/Desktop/whatever";', "/home/someone"],
-		["macOS home directory", 'const X = "/Users/someone/Desktop/whatever";', "/Users/someone"],
+		[
+			"Windows C: drive, forward slash",
+			'const X = "C:/Users/someone/Desktop/whatever";',
+			"C:/Users/someone",
+		],
+		[
+			"Windows C: drive, backslash",
+			'const X = "C:\\Users\\someone\\Desktop\\whatever";',
+			"C:\\Users\\someone",
+		],
+		[
+			"Windows non-C: drive letter",
+			'const X = "D:/Users/someone/Desktop/whatever";',
+			"D:/Users/someone",
+		],
+		[
+			"Windows drive letter, lowercase + lowercase Users",
+			'const X = "c:/users/someone/Desktop";',
+			"c:/users/someone",
+		],
+		[
+			"Windows drive letter, all-caps USERS",
+			'const X = "C:\\USERS\\someone\\Desktop";',
+			"C:\\USERS\\someone",
+		],
+		[
+			"Linux home directory",
+			'const X = "/home/someone/Desktop/whatever";',
+			"/home/someone",
+		],
+		[
+			"macOS home directory",
+			'const X = "/Users/someone/Desktop/whatever";',
+			"/Users/someone",
+		],
 	])("flags a synthetic %s literal", (_label, source, expected) => {
-		expect([...source.matchAll(USER_PROFILE_PATH_RE)].map((m) => m[0])).toEqual([expected]);
+		expect([...source.matchAll(USER_PROFILE_PATH_RE)].map((m) => m[0])).toEqual(
+			[expected],
+		);
 	});
 
 	it("no script under scripts/ hardcodes an author-machine path outside the reviewed allowlist", () => {
@@ -116,7 +146,10 @@ describe("no hardcoded machine paths in scripts/ or package.json (#1728)", () =>
 	it("every allowlist entry still exists and still contains the literal it excuses (a stale entry is dead weight, not a screen)", () => {
 		for (const rel of Object.keys(ALLOWLIST)) {
 			const full = path.join(REPO_ROOT, rel);
-			expect(fs.existsSync(full), `${rel} no longer exists -- remove its allowlist entry`).toBe(true);
+			expect(
+				fs.existsSync(full),
+				`${rel} no longer exists -- remove its allowlist entry`,
+			).toBe(true);
 			const hits = findHardcodedMachinePaths(full);
 			expect(
 				hits.length > 0,

@@ -211,7 +211,9 @@ export interface LabeledDeliverySurface extends DeliverySurfaceBase {
 	ageSource: string;
 }
 
-export type DeliverySurfaceEntry = GatedDeliverySurface | LabeledDeliverySurface;
+export type DeliverySurfaceEntry =
+	| GatedDeliverySurface
+	| LabeledDeliverySurface;
 
 /**
  * The enumeration (#1634 criterion 1): every surface that renders findings to
@@ -250,7 +252,9 @@ function gated(
 	description: string,
 	gates: string[],
 	evidence: string[],
-	extra: Partial<Pick<GatedDeliverySurface, "status" | "partialReason" | "evidenceMin">> = {},
+	extra: Partial<
+		Pick<GatedDeliverySurface, "status" | "partialReason" | "evidenceMin">
+	> = {},
 ): GatedDeliverySurface {
 	return { mode: "gated", file, description, gates, evidence, ...extra };
 }
@@ -264,7 +268,15 @@ function labeled(
 	evidence: string[] = [],
 	extra: Partial<Pick<LabeledDeliverySurface, "status" | "partialReason">> = {},
 ): LabeledDeliverySurface {
-	return { mode: "labeled", file, description, reason, ageSource, evidence, ...extra };
+	return {
+		mode: "labeled",
+		file,
+		description,
+		reason,
+		ageSource,
+		evidence,
+		...extra,
+	};
 }
 
 const RUNTIME_TURN_FILE = "clients/runtime-turn.ts";
@@ -413,7 +425,8 @@ export const DELIVERY_SURFACES: Record<string, DeliverySurfaceEntry> = {
 		[],
 		{
 			status: "partial",
-			partialReason: "Same cascade carry-over caveat as runtime-turn:cascade-blocker.",
+			partialReason:
+				"Same cascade carry-over caveat as runtime-turn:cascade-blocker.",
 		},
 	),
 	"runtime-turn:call-graph-advisory": labeled(
@@ -434,8 +447,16 @@ export const DELIVERY_SURFACES: Record<string, DeliverySurfaceEntry> = {
 	"lens-diagnostics:mode-full": gated(
 		LENS_DIAGNOSTICS_FILE,
 		"`lens_diagnostics mode=full` report.",
-		["applyDispositions", "applyRulePolicy", "reconcileProjectDiagnosticsSnapshot"],
-		["applyDispositions(", "applyRulePolicy(", "reconcileProjectDiagnosticsSnapshot("],
+		[
+			"applyDispositions",
+			"applyRulePolicy",
+			"reconcileProjectDiagnosticsSnapshot",
+		],
+		[
+			"applyDispositions(",
+			"applyRulePolicy(",
+			"reconcileProjectDiagnosticsSnapshot(",
+		],
 	),
 	"lens-diagnostics:mode-all": gated(
 		LENS_DIAGNOSTICS_FILE,
@@ -486,7 +507,10 @@ export const DELIVERY_SURFACES: Record<string, DeliverySurfaceEntry> = {
 	),
 };
 
-function assertPartialStatusHasReason(id: string, entry: DeliverySurfaceEntry): void {
+function assertPartialStatusHasReason(
+	id: string,
+	entry: DeliverySurfaceEntry,
+): void {
 	if (entry.status === "partial" && !entry.partialReason) {
 		throw new Error(
 			`finding-delivery-gate: surface "${id}" is status=partial but names no partialReason`,
@@ -494,7 +518,10 @@ function assertPartialStatusHasReason(id: string, entry: DeliverySurfaceEntry): 
 	}
 }
 
-function assertGatedShapeIsWellFormed(id: string, entry: GatedDeliverySurface): void {
+function assertGatedShapeIsWellFormed(
+	id: string,
+	entry: GatedDeliverySurface,
+): void {
 	if (!Array.isArray(entry.gates) || entry.gates.length === 0) {
 		throw new Error(
 			`finding-delivery-gate: surface "${id}" is mode=gated but names no gate`,
@@ -507,7 +534,10 @@ function assertGatedShapeIsWellFormed(id: string, entry: GatedDeliverySurface): 
 	}
 }
 
-function assertLabeledShapeIsWellFormed(id: string, entry: LabeledDeliverySurface): void {
+function assertLabeledShapeIsWellFormed(
+	id: string,
+	entry: LabeledDeliverySurface,
+): void {
 	if (!entry.reason || !entry.ageSource) {
 		throw new Error(
 			`finding-delivery-gate: surface "${id}" is mode=labeled but is missing reason/ageSource`,

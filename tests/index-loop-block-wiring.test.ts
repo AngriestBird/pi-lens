@@ -1,9 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createPiMock } from "./support/pi-mock.js";
-import {
-	getCurrentPhase,
-	phaseStarted,
-} from "../clients/latency-logger.js";
+import { getCurrentPhase, phaseStarted } from "../clients/latency-logger.js";
 
 // Wiring guards for the #1122 loop_block probe fix. These live at the index.ts
 // turn_end seam (not the pure classifier) because the two things that broke —
@@ -20,7 +17,8 @@ import {
 let statsToReturn: unknown;
 const resetSpy = vi.fn();
 vi.mock("../clients/event-loop-monitor.js", async (importActual) => {
-	const actual = await importActual<typeof import("../clients/event-loop-monitor.js")>();
+	const actual =
+		await importActual<typeof import("../clients/event-loop-monitor.js")>();
 	return {
 		...actual,
 		startEventLoopMonitor: vi.fn(),
@@ -36,16 +34,25 @@ const latencyCalls: Array<Record<string, unknown>> = [];
 // overridable per test to simulate `getPhaseForWindow` finding a live OR
 // recently-closed bracket that overlaps the block's own time window.
 let phaseForWindowToReturn:
-	| { phase: string; startedAt: string; stillRunning: boolean; elapsedMs: number }
+	| {
+			phase: string;
+			startedAt: string;
+			stillRunning: boolean;
+			elapsedMs: number;
+	  }
 	| undefined;
 vi.mock("../clients/latency-logger.js", async (importActual) => {
-	const actual = await importActual<typeof import("../clients/latency-logger.js")>();
+	const actual =
+		await importActual<typeof import("../clients/latency-logger.js")>();
 	return {
 		...actual,
 		logLatency: (entry: Record<string, unknown>) => {
 			latencyCalls.push(entry);
 		},
-		getLastLoggedPhase: () => ({ phase: "graph_build", ts: "2026-08-07T00:00:00.000Z" }),
+		getLastLoggedPhase: () => ({
+			phase: "graph_build",
+			ts: "2026-08-07T00:00:00.000Z",
+		}),
 		getPhaseForWindow: () => phaseForWindowToReturn,
 	};
 });
@@ -113,209 +120,225 @@ async function fireTurnEnd() {
 // solo run observed.
 const LOOP_BLOCK_WIRING_TIMEOUT_MS = 30_000;
 
-describe("index turn_end loop_block wiring (#1122)", { timeout: LOOP_BLOCK_WIRING_TIMEOUT_MS }, () => {
-	beforeEach(() => {
-		vi.resetModules();
-		latencyCalls.length = 0;
-		resetSpy.mockClear();
-		statsToReturn = undefined;
-		phaseForWindowToReturn = undefined;
-	});
-	afterEach(() => {
-		vi.clearAllMocks();
-	});
+describe(
+	"index turn_end loop_block wiring (#1122)",
+	{ timeout: LOOP_BLOCK_WIRING_TIMEOUT_MS },
+	() => {
+		beforeEach(() => {
+			vi.resetModules();
+			latencyCalls.length = 0;
+			resetSpy.mockClear();
+			statsToReturn = undefined;
+			phaseForWindowToReturn = undefined;
+		});
+		afterEach(() => {
+			vi.clearAllMocks();
+		});
 
-	it("(a) calls resetEventLoopMonitor at turn_end so the window is per-turn", async () => {
-		statsToReturn = {
-			maxMs: 0,
-			p99Ms: 0,
-			meanMs: 0,
-			windowWallMs: 0,
-			windowCpuMs: 0,
-			suspectSystemStall: false,
-		};
-		await fireTurnEnd();
-		// Fails on master: master's turn_end never resets the histogram.
-		expect(resetSpy).toHaveBeenCalledTimes(1);
-	});
+		it("(a) calls resetEventLoopMonitor at turn_end so the window is per-turn", async () => {
+			statsToReturn = {
+				maxMs: 0,
+				p99Ms: 0,
+				meanMs: 0,
+				windowWallMs: 0,
+				windowCpuMs: 0,
+				suspectSystemStall: false,
+			};
+			await fireTurnEnd();
+			// Fails on master: master's turn_end never resets the histogram.
+			expect(resetSpy).toHaveBeenCalledTimes(1);
+		});
 
-	it("(b) a suspectSystemStall block does not raise the high-water, so a later genuine block still logs", async () => {
-		// resetModules is per-test, so re-import once and drive two turns against
-		// the SAME module instance to exercise the cross-turn high-water.
-		const { default: registerExtension } = await import("../index.js");
-		const mock = createPiMock({ "lens-lsp": true });
-		registerExtension(mock.asExtensionAPI() as never);
-		const turnEnd = mock.getHandlers("turn_end")[0];
+		it("(b) a suspectSystemStall block does not raise the high-water, so a later genuine block still logs", async () => {
+			// resetModules is per-test, so re-import once and drive two turns against
+			// the SAME module instance to exercise the cross-turn high-water.
+			const { default: registerExtension } = await import("../index.js");
+			const mock = createPiMock({ "lens-lsp": true });
+			registerExtension(mock.asExtensionAPI() as never);
+			const turnEnd = mock.getHandlers("turn_end")[0];
 
-		// Turn 1: a 300s "block" tagged as a system stall.
-		statsToReturn = {
-			maxMs: 300000,
-			p99Ms: 0,
-			meanMs: 0,
-			windowWallMs: 300000,
-			windowCpuMs: 200,
-			suspectSystemStall: true,
-		};
-		await turnEnd?.({}, turnCtx as never);
+			// Turn 1: a 300s "block" tagged as a system stall.
+			statsToReturn = {
+				maxMs: 300000,
+				p99Ms: 0,
+				meanMs: 0,
+				windowWallMs: 300000,
+				windowCpuMs: 200,
+				suspectSystemStall: true,
+			};
+			await turnEnd?.({}, turnCtx as never);
 
-		// Turn 2: a genuine 5s block, far below the stall but a real worst.
-		statsToReturn = {
-			maxMs: 5000,
-			p99Ms: 0,
-			meanMs: 0,
-			windowWallMs: 8000,
-			windowCpuMs: 6000,
-			suspectSystemStall: false,
-		};
-		await turnEnd?.({}, turnCtx as never);
+			// Turn 2: a genuine 5s block, far below the stall but a real worst.
+			statsToReturn = {
+				maxMs: 5000,
+				p99Ms: 0,
+				meanMs: 0,
+				windowWallMs: 8000,
+				windowCpuMs: 6000,
+				suspectSystemStall: false,
+			};
+			await turnEnd?.({}, turnCtx as never);
 
-		const logged = loopBlocks();
-		// The stall logged (tagged) but did NOT poison the high-water, so the
-		// genuine 5s block logged too. On master the stall sets the high-water to
-		// 300000 and the 5s block is suppressed → only ONE loop_block.
-		expect(logged).toHaveLength(2);
-		expect(logged[0].durationMs).toBe(300000);
-		expect((logged[0].metadata as Record<string, unknown>).suspectSystemStall).toBe(true);
-		expect(logged[1].durationMs).toBe(5000);
-		expect((logged[1].metadata as Record<string, unknown>).suspectSystemStall).toBe(false);
-		// Attribution is carried through.
-		expect((logged[1].metadata as Record<string, unknown>).lastPhase).toBe("graph_build");
-	});
+			const logged = loopBlocks();
+			// The stall logged (tagged) but did NOT poison the high-water, so the
+			// genuine 5s block logged too. On master the stall sets the high-water to
+			// 300000 and the 5s block is suppressed → only ONE loop_block.
+			expect(logged).toHaveLength(2);
+			expect(logged[0].durationMs).toBe(300000);
+			expect(
+				(logged[0].metadata as Record<string, unknown>).suspectSystemStall,
+			).toBe(true);
+			expect(logged[1].durationMs).toBe(5000);
+			expect(
+				(logged[1].metadata as Record<string, unknown>).suspectSystemStall,
+			).toBe(false);
+			// Attribution is carried through.
+			expect((logged[1].metadata as Record<string, unknown>).lastPhase).toBe(
+				"graph_build",
+			);
+		});
 
-	it("(c) #1723: logs a block below the session's prior worst, not only new maxima", async () => {
-		const { default: registerExtension } = await import("../index.js");
-		const mock = createPiMock({ "lens-lsp": true });
-		registerExtension(mock.asExtensionAPI() as never);
-		const turnEnd = mock.getHandlers("turn_end")[0];
+		it("(c) #1723: logs a block below the session's prior worst, not only new maxima", async () => {
+			const { default: registerExtension } = await import("../index.js");
+			const mock = createPiMock({ "lens-lsp": true });
+			registerExtension(mock.asExtensionAPI() as never);
+			const turnEnd = mock.getHandlers("turn_end")[0];
 
-		// Turn 1: a genuine 15s block sets the session high-water.
-		statsToReturn = {
-			maxMs: 15000,
-			p99Ms: 0,
-			meanMs: 0,
-			windowWallMs: 16000,
-			windowCpuMs: 15500,
-			suspectSystemStall: false,
-		};
-		await turnEnd?.({}, turnCtx as never);
+			// Turn 1: a genuine 15s block sets the session high-water.
+			statsToReturn = {
+				maxMs: 15000,
+				p99Ms: 0,
+				meanMs: 0,
+				windowWallMs: 16000,
+				windowCpuMs: 15500,
+				suspectSystemStall: false,
+			};
+			await turnEnd?.({}, turnCtx as never);
 
-		// Turn 2: a genuine 5s block — well above the 60ms floor, but far below
-		// the 15000ms high-water plus its 25ms delta. Pre-#1723 code gates the
-		// LOG itself on "beats the high-water", so this block was silently
-		// dropped: shouldLogWorstBlock(5000, 15000) is false. That is exactly the
-		// gap #1723 reports — every sub-maximum block after a session's first
-		// large one was invisible, so a loop_block-vs-pull-timeout correlation
-		// couldn't be checked.
-		statsToReturn = {
-			maxMs: 5000,
-			p99Ms: 0,
-			meanMs: 0,
-			windowWallMs: 6000,
-			windowCpuMs: 5500,
-			suspectSystemStall: false,
-		};
-		await turnEnd?.({}, turnCtx as never);
+			// Turn 2: a genuine 5s block — well above the 60ms floor, but far below
+			// the 15000ms high-water plus its 25ms delta. Pre-#1723 code gates the
+			// LOG itself on "beats the high-water", so this block was silently
+			// dropped: shouldLogWorstBlock(5000, 15000) is false. That is exactly the
+			// gap #1723 reports — every sub-maximum block after a session's first
+			// large one was invisible, so a loop_block-vs-pull-timeout correlation
+			// couldn't be checked.
+			statsToReturn = {
+				maxMs: 5000,
+				p99Ms: 0,
+				meanMs: 0,
+				windowWallMs: 6000,
+				windowCpuMs: 5500,
+				suspectSystemStall: false,
+			};
+			await turnEnd?.({}, turnCtx as never);
 
-		const logged = loopBlocks();
-		expect(logged).toHaveLength(2);
-		expect(logged[0].durationMs).toBe(15000);
-		expect((logged[0].metadata as Record<string, unknown>).worstSoFar).toBe(true);
-		expect(logged[1].durationMs).toBe(5000);
-		// Not a new session worst, but still recorded.
-		expect((logged[1].metadata as Record<string, unknown>).worstSoFar).toBe(false);
-	});
+			const logged = loopBlocks();
+			expect(logged).toHaveLength(2);
+			expect(logged[0].durationMs).toBe(15000);
+			expect((logged[0].metadata as Record<string, unknown>).worstSoFar).toBe(
+				true,
+			);
+			expect(logged[1].durationMs).toBe(5000);
+			// Not a new session worst, but still recorded.
+			expect((logged[1].metadata as Record<string, unknown>).worstSoFar).toBe(
+				false,
+			);
+		});
 
-	// #1723 residual: the motivating case is a SYNCHRONOUS block, so the phase
-	// actually burning the CPU is still running (and so unlogged) when the
-	// probe samples. `recentPhases`/`lastPhase` name only the PREVIOUS
-	// finished phase — this pins that when a phase is currently in flight, the
-	// loop_block record names IT, with an elapsed time at least the block's
-	// own duration.
-	it("(d) #1723: an in-flight phase is named in the loop_block record, not just the previous finished one", async () => {
-		const startedAt = new Date(Date.now() - 18_270).toISOString();
-		phaseForWindowToReturn = {
-			phase: "full_scan_18s",
-			startedAt,
-			stillRunning: true,
-			elapsedMs: 18270,
-		};
-		statsToReturn = {
-			maxMs: 18270,
-			p99Ms: 0,
-			meanMs: 0,
-			windowWallMs: 32832,
-			windowCpuMs: 21844,
-			suspectSystemStall: false,
-		};
+		// #1723 residual: the motivating case is a SYNCHRONOUS block, so the phase
+		// actually burning the CPU is still running (and so unlogged) when the
+		// probe samples. `recentPhases`/`lastPhase` name only the PREVIOUS
+		// finished phase — this pins that when a phase is currently in flight, the
+		// loop_block record names IT, with an elapsed time at least the block's
+		// own duration.
+		it("(d) #1723: an in-flight phase is named in the loop_block record, not just the previous finished one", async () => {
+			const startedAt = new Date(Date.now() - 18_270).toISOString();
+			phaseForWindowToReturn = {
+				phase: "full_scan_18s",
+				startedAt,
+				stillRunning: true,
+				elapsedMs: 18270,
+			};
+			statsToReturn = {
+				maxMs: 18270,
+				p99Ms: 0,
+				meanMs: 0,
+				windowWallMs: 32832,
+				windowCpuMs: 21844,
+				suspectSystemStall: false,
+			};
 
-		await fireTurnEnd();
+			await fireTurnEnd();
 
-		const logged = loopBlocks();
-		expect(logged).toHaveLength(1);
-		const metadata = logged[0].metadata as Record<string, unknown>;
-		// The previous-finished-phase attribution is untouched (still reported).
-		expect(metadata.lastPhase).toBe("graph_build");
-		// The NEW attribution: what is still running right now.
-		expect(metadata.inFlightPhase).toBe("full_scan_18s");
-		expect(metadata.inFlightPhaseStartedAt).toBe(startedAt);
-		expect(metadata.inFlightPhaseElapsedMs as number).toBeGreaterThanOrEqual(18270);
-	});
+			const logged = loopBlocks();
+			expect(logged).toHaveLength(1);
+			const metadata = logged[0].metadata as Record<string, unknown>;
+			// The previous-finished-phase attribution is untouched (still reported).
+			expect(metadata.lastPhase).toBe("graph_build");
+			// The NEW attribution: what is still running right now.
+			expect(metadata.inFlightPhase).toBe("full_scan_18s");
+			expect(metadata.inFlightPhaseStartedAt).toBe(startedAt);
+			expect(metadata.inFlightPhaseElapsedMs as number).toBeGreaterThanOrEqual(
+				18270,
+			);
+		});
 
-	it("(e) #1723: no in-flight phase means the new fields stay undefined instead of a false attribution", async () => {
-		phaseForWindowToReturn = undefined;
-		statsToReturn = {
-			maxMs: 5000,
-			p99Ms: 0,
-			meanMs: 0,
-			windowWallMs: 6000,
-			windowCpuMs: 5500,
-			suspectSystemStall: false,
-		};
+		it("(e) #1723: no in-flight phase means the new fields stay undefined instead of a false attribution", async () => {
+			phaseForWindowToReturn = undefined;
+			statsToReturn = {
+				maxMs: 5000,
+				p99Ms: 0,
+				meanMs: 0,
+				windowWallMs: 6000,
+				windowCpuMs: 5500,
+				suspectSystemStall: false,
+			};
 
-		await fireTurnEnd();
+			await fireTurnEnd();
 
-		const logged = loopBlocks();
-		expect(logged).toHaveLength(1);
-		const metadata = logged[0].metadata as Record<string, unknown>;
-		expect(metadata.inFlightPhase).toBeUndefined();
-		expect(metadata.inFlightPhaseElapsedMs).toBeUndefined();
-	});
+			const logged = loopBlocks();
+			expect(logged).toHaveLength(1);
+			const metadata = logged[0].metadata as Record<string, unknown>;
+			expect(metadata.inFlightPhase).toBeUndefined();
+			expect(metadata.inFlightPhaseElapsedMs).toBeUndefined();
+		});
 
-	// #1723 review round 7, S3: `resetCurrentPhaseForSession()`'s call site
-	// (index.ts's `session_start` handler, behind the #473 gate) is exactly
-	// the kind of wiring `SESSION_STATE_REGISTRY`'s reachability derivation
-	// cannot see (it walks `handleSessionStart`'s body specifically, and this
-	// call sits BEFORE that function runs — see
-	// `tests/support/session-state-registry.ts`'s exemption note). The
-	// reviewer confirmed that reasoning is correct, but pointed out the
-	// coverage gap it leaves: deleting the call site is invisible to every
-	// existing test (113 stayed green). This test drives the REAL
-	// `session_start` handler (not a direct call to
-	// `resetCurrentPhaseForSession`) to close that gap at the one seam that
-	// can see it.
-	it("(f) #1723 S3: session_start clears a leaked in-flight phase via the real handler", async () => {
-		const { default: registerExtension } = await import("../index.js");
-		const mock = createPiMock({ "lens-lsp": true });
-		registerExtension(mock.asExtensionAPI() as never);
+		// #1723 review round 7, S3: `resetCurrentPhaseForSession()`'s call site
+		// (index.ts's `session_start` handler, behind the #473 gate) is exactly
+		// the kind of wiring `SESSION_STATE_REGISTRY`'s reachability derivation
+		// cannot see (it walks `handleSessionStart`'s body specifically, and this
+		// call sits BEFORE that function runs — see
+		// `tests/support/session-state-registry.ts`'s exemption note). The
+		// reviewer confirmed that reasoning is correct, but pointed out the
+		// coverage gap it leaves: deleting the call site is invisible to every
+		// existing test (113 stayed green). This test drives the REAL
+		// `session_start` handler (not a direct call to
+		// `resetCurrentPhaseForSession`) to close that gap at the one seam that
+		// can see it.
+		it("(f) #1723 S3: session_start clears a leaked in-flight phase via the real handler", async () => {
+			const { default: registerExtension } = await import("../index.js");
+			const mock = createPiMock({ "lens-lsp": true });
+			registerExtension(mock.asExtensionAPI() as never);
 
-		// Seed a live bracket BEFORE firing session_start — simulates a phase
-		// abandoned by a torn-down activation, per resetCurrentPhaseForSession's
-		// own doc comment.
-		phaseStarted("leaked_before_session_start");
-		expect(getCurrentPhase()).toBeDefined();
+			// Seed a live bracket BEFORE firing session_start — simulates a phase
+			// abandoned by a torn-down activation, per resetCurrentPhaseForSession's
+			// own doc comment.
+			phaseStarted("leaked_before_session_start");
+			expect(getCurrentPhase()).toBeDefined();
 
-		const sessionStart = mock.getHandlers("session_start")[0];
-		expect(sessionStart).toBeTypeOf("function");
-		const sessionCtx = {
-			cwd: process.cwd(),
-			ui: {
-				notify: vi.fn(),
-				setStatus: () => {},
-				theme: { fg: (_c: string, s: string) => s },
-			},
-		};
-		await sessionStart?.({ reason: "new" }, sessionCtx as never);
+			const sessionStart = mock.getHandlers("session_start")[0];
+			expect(sessionStart).toBeTypeOf("function");
+			const sessionCtx = {
+				cwd: process.cwd(),
+				ui: {
+					notify: vi.fn(),
+					setStatus: () => {},
+					theme: { fg: (_c: string, s: string) => s },
+				},
+			};
+			await sessionStart?.({ reason: "new" }, sessionCtx as never);
 
-		expect(getCurrentPhase()).toBeUndefined();
-	});
-});
+			expect(getCurrentPhase()).toBeUndefined();
+		});
+	},
+);

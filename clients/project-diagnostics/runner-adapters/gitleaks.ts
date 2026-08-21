@@ -20,7 +20,9 @@ export function gitleaksFindingToProjectDiagnostic(
 	// #1562 observability criterion: surface the git status right in the
 	// finding's message so a triage is a read, not a re-derivation. Omitted
 	// when git itself degraded (`pathStatus` undefined) rather than guessed.
-	const statusSuffix = finding.pathStatus ? ` [git: ${finding.pathStatus}]` : "";
+	const statusSuffix = finding.pathStatus
+		? ` [git: ${finding.pathStatus}]`
+		: "";
 	const isScratch = finding.pathStatus === "scratch";
 	return {
 		filePath: path.isAbsolute(finding.file)

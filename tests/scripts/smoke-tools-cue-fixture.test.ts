@@ -89,15 +89,19 @@ describe("expectMessageMatch decides on message text, not handshake", () => {
 	});
 
 	it("matches the diagnostic real cuelsp publishes for this fixture", () => {
-		expect(matchDiagnosticMessages(pattern, [realCuelspDiagnostic])).toHaveLength(
-			1,
-		);
+		expect(
+			matchDiagnosticMessages(pattern, [realCuelspDiagnostic]),
+		).toHaveLength(1);
 	});
 
 	it("does not match an unrelated diagnostic", () => {
 		expect(
 			matchDiagnosticMessages(pattern, [
-				{ source: "cue", severity: 1, message: "conflicting values int and string" },
+				{
+					source: "cue",
+					severity: 1,
+					message: "conflicting values int and string",
+				},
 			]),
 		).toHaveLength(0);
 	});

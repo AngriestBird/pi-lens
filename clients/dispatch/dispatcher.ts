@@ -205,7 +205,10 @@ export async function checkToolAvailability(
 				(facts.getSessionFact<number>(transientAttemptsKey(command)) ?? 0) + 1;
 			facts.setSessionFact(transientAttemptsKey(command), attempts);
 			retryAfterMs = transientRetryDelayMs(attempts, cause);
-			facts.setSessionFact(transientRetryKey(command), Date.now() + retryAfterMs);
+			facts.setSessionFact(
+				transientRetryKey(command),
+				Date.now() + retryAfterMs,
+			);
 		} else {
 			facts.setSessionFact(key, false);
 			facts.setSessionFact(transientAttemptsKey(command), 0);
@@ -374,7 +377,6 @@ function dedupeOverlappingDiagnostics(diagnostics: Diagnostic[]): Diagnostic[] {
 
 	return [...byKey.values()];
 }
-
 
 function suppressLintOverlapsWithLsp(diagnostics: Diagnostic[]): Diagnostic[] {
 	const lspBySpanClass = new Set<string>();

@@ -57,7 +57,8 @@ function recordQueryFailure(
 	status: string,
 	exitCode?: number | null,
 ): void {
-	const exitReason = status === "exit-error" ? ` (exit code ${exitCode ?? "unknown"})` : "";
+	const exitReason =
+		status === "exit-error" ? ` (exit code ${exitCode ?? "unknown"})` : "";
 	recordDegradationOnce({
 		kind: "resource-sampler-query-failed",
 		subject,
@@ -125,13 +126,16 @@ export function walkDescendantPids(
  * tick lets the sampler aggregate the pids that are actually doing the work.
  * Mirrors the identity-verification CIM queries in clients/instance-reaper.ts.
  */
-async function findDescendantPidsWindows(rootPid: number): Promise<number[] | null> {
-	if (!runningOnWindows() || !Number.isFinite(rootPid) || rootPid <= 0) return [];
+async function findDescendantPidsWindows(
+	rootPid: number,
+): Promise<number[] | null> {
+	if (!runningOnWindows() || !Number.isFinite(rootPid) || rootPid <= 0)
+		return [];
 	// One WQL query pulls every process's (pid, parentPid) pair; walk the BFS
 	// in JS rather than issuing N queries for N tree levels.
 	const psScript =
 		"Get-CimInstance Win32_Process " +
-		'| Select-Object -Property ProcessId,ParentProcessId ' +
+		"| Select-Object -Property ProcessId,ParentProcessId " +
 		'| ForEach-Object { "$($_.ProcessId),$($_.ParentProcessId)" }';
 	const powershell = path.join(
 		process.env.SystemRoot ?? String.raw`C:\Windows`,

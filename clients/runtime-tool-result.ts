@@ -19,7 +19,11 @@ import { publishFormatQueued } from "./format-events-publish.js";
 import { isPathIgnoredByProject } from "./file-utils.js";
 import type { ReadGuard } from "./read-guard.js";
 import { getFormatService } from "./format-service.js";
-import { isExternalOrVendorFile, normalizeEphemeralMapKey, pathsEqual } from "./path-utils.js";
+import {
+	isExternalOrVendorFile,
+	normalizeEphemeralMapKey,
+	pathsEqual,
+} from "./path-utils.js";
 import { PathKeyedMap } from "./path-keyed-map.js";
 import { resolveLanguageRootForFile } from "./language-profile.js";
 import { logLatency } from "./latency-logger.js";
@@ -273,7 +277,8 @@ function scheduleDebounced(
 	if (existing) {
 		clearTimeout(existing.timer);
 		const incomingId =
-			deps._telemetryParticipantIds?.[0] ?? getReadGuardCorrelationId(deps.event);
+			deps._telemetryParticipantIds?.[0] ??
+			getReadGuardCorrelationId(deps.event);
 		const priorIds = existing.latestDeps._telemetryParticipantIds ?? [];
 		existing.latestDeps = {
 			...deps,
@@ -306,8 +311,9 @@ function scheduleDebounced(
 		resolveFn = res;
 		rejectFn = rej;
 	});
-	const initialParticipantIds =
-		deps._telemetryParticipantIds ?? [getReadGuardCorrelationId(deps.event)];
+	const initialParticipantIds = deps._telemetryParticipantIds ?? [
+		getReadGuardCorrelationId(deps.event),
+	];
 	const entry: DebouncedEntry = {
 		timer: setTimeout(() => {
 			debouncedPipelines.delete(filePath);
@@ -447,7 +453,11 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 	let resolutionBasis: string;
 	if (attribution) {
 		resolutionBasis = attribution.originCwd;
-	} else if (toolCallId !== undefined && rawFilePath && !path.isAbsolute(rawFilePath)) {
+	} else if (
+		toolCallId !== undefined &&
+		rawFilePath &&
+		!path.isAbsolute(rawFilePath)
+	) {
 		// A real correlation id existed (the host DOES support one) but no
 		// attribution was recorded under it — evicted, cleared because the
 		// call was blocked before it could execute, or simply never seen by
@@ -548,7 +558,8 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 		);
 		for (const wp of written) {
 			if (!getFlag("no-read-guard")) deps.readGuard?.recordWritten(wp);
-			const receipt = (runtime as Partial<RuntimeCoordinator>).recordMutationToolReceipt;
+			const receipt = (runtime as Partial<RuntimeCoordinator>)
+				.recordMutationToolReceipt;
 			const autofixMode = receipt
 				? receipt.call(runtime, wp, "write").autofixMode
 				: "immediate";
@@ -572,7 +583,8 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 		if (event.isError !== true && !getFlag("no-read-guard")) {
 			for (const span of extractReadPathsFromCommand(command, workspaceRoot)) {
 				if (isExternalOrVendorFile(span.filePath, workspaceRoot)) continue;
-				if (isPathIgnoredByProject(span.filePath, workspaceRoot, false)) continue;
+				if (isPathIgnoredByProject(span.filePath, workspaceRoot, false))
+					continue;
 				deps.readGuard?.recordRead({
 					filePath: span.filePath,
 					requestedOffset: span.offset,
@@ -717,9 +729,11 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 
 	// Must happen before debounce admission: latestDeps intentionally retains only
 	// the latest event, but write -> edit is a sticky turn transition.
-	const receipt = (runtime as Partial<RuntimeCoordinator>).recordMutationToolReceipt;
+	const receipt = (runtime as Partial<RuntimeCoordinator>)
+		.recordMutationToolReceipt;
 	const autofixMode = deps._bypassDebounce
-		? (deps._autofixMode ?? (event.toolName === "edit" ? "deferred" : "immediate"))
+		? (deps._autofixMode ??
+			(event.toolName === "edit" ? "deferred" : "immediate"))
 		: receipt
 			? receipt.call(runtime, filePath, event.toolName).autofixMode
 			: event.toolName === "edit"
@@ -941,8 +955,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 			},
 			// The settle clock is live because the deferred cascade may reach its
 			// budget derivation before or after turn_end starts waiting.
-			turnEndCascadeSettleStart: () =>
-				runtime.getTurnEndCascadeSettleStart(),
+			turnEndCascadeSettleStart: () => runtime.getTurnEndCascadeSettleStart(),
 			// #348 phase 2: live reference so the deferred cascade can update the
 			// warm word index in place at the same seam as the graph rebuild.
 			// `runtime.wordIndex` is read fresh (not captured) via this closure-free
@@ -1103,11 +1116,21 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 	}
 
 	let autofixNewlyQueued = false;
-	if (!result.isError && autofixMode === "deferred" && nodeFs.existsSync(filePath)) {
+	if (
+		!result.isError &&
+		autofixMode === "deferred" &&
+		nodeFs.existsSync(filePath)
+	) {
 		autofixNewlyQueued =
 			(runtime as Partial<RuntimeCoordinator>).deferMutation?.call(
-				runtime, filePath, dispatchCwd, event.toolName, turnStateCwd,
-				"autofix", deps.sessionId, resolutionBasis,
+				runtime,
+				filePath,
+				dispatchCwd,
+				event.toolName,
+				turnStateCwd,
+				"autofix",
+				deps.sessionId,
+				resolutionBasis,
 			) ?? false;
 		dbg(`tool_result: queued deferred autofix for ${filePath}`);
 	}
@@ -1150,7 +1173,13 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 		}
 	}
 	if (autofixNewlyQueued && !formatQueued) {
-		publishFormatQueued({ filePath, cwd: dispatchCwd, tool: event.toolName, kinds: ["autofix"], dbg });
+		publishFormatQueued({
+			filePath,
+			cwd: dispatchCwd,
+			tool: event.toolName,
+			kinds: ["autofix"],
+			dbg,
+		});
 	}
 
 	for (const changedFile of result.changedFiles ?? []) {

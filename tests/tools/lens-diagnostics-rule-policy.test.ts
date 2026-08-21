@@ -37,7 +37,8 @@ vi.mock(
 			>();
 		return {
 			...actual,
-			fetchFreshProjectDiagnostics: freshFetchMocks.fetchFreshProjectDiagnostics,
+			fetchFreshProjectDiagnostics:
+				freshFetchMocks.fetchFreshProjectDiagnostics,
 		};
 	},
 );
@@ -62,7 +63,7 @@ vi.mock("../../clients/project-diagnostics/cache.js", () => ({
 }));
 
 const mockSummaries: ReturnType<
-	typeof import("../../clients/widget-state.js")["getFileDiagnosticSummaries"]
+	(typeof import("../../clients/widget-state.js"))["getFileDiagnosticSummaries"]
 > = [];
 
 // Spread the real module instead of hand-listing its exports. A full-replace
@@ -759,7 +760,11 @@ describe("lens_diagnostics rule policy — mode=full (active scan)", () => {
 		});
 
 		const result = await run(
-			makeTool(tmpDir, {}, { runWorkspaceDiagnostics: vi.fn().mockResolvedValue([]) }),
+			makeTool(
+				tmpDir,
+				{},
+				{ runWorkspaceDiagnostics: vi.fn().mockResolvedValue([]) },
+			),
 			{ mode: "full", refreshRunners: "cached" },
 			tmpDir,
 		);

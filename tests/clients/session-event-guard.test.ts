@@ -219,11 +219,11 @@ describe("wrapSessionEventHandlerWithResult (#1929)", () => {
 		// The ctx is the thing that proved dead. Passing it to the fallback would
 		// put a throwing accessor inside the guard that exists to absorb it.
 		const onStaleResult = vi.fn(() => FALLBACK);
-		const guarded = wrapSessionEventHandlerWithResult<unknown, unknown, unknown>(
-			"context",
-			vi.fn(),
-			{ onStaleResult },
-		);
+		const guarded = wrapSessionEventHandlerWithResult<
+			unknown,
+			unknown,
+			unknown
+		>("context", vi.fn(), { onStaleResult });
 		const event = { messages: [{ role: "user", content: "keep me" }] };
 
 		expect(guarded(event, makeStaleCtx())).toBe(FALLBACK);

@@ -113,7 +113,15 @@ describe("scratch-tree-policy — secrets-lane tier is narrower than walker-pari
 		expect(
 			isUnderSecretsLaneScratchTree(".pi/greedysearch-sources/cline-docs.md"),
 		).toBe(true);
-		for (const scratchDir of [".claude", ".codex", ".agents", "node_modules", ".git", ".next", "venv"]) {
+		for (const scratchDir of [
+			".claude",
+			".codex",
+			".agents",
+			"node_modules",
+			".git",
+			".next",
+			"venv",
+		]) {
 			expect(isUnderSecretsLaneScratchTree(`${scratchDir}/some/file.txt`)).toBe(
 				true,
 			);

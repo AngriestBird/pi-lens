@@ -3,7 +3,10 @@
 const MAX_SERVER_HISTORIES = 64;
 const successfulSpawnDurationMs = new Map<string, number>();
 
-export function recordSuccessfulLspSpawn(serverId: string, durationMs: number): void {
+export function recordSuccessfulLspSpawn(
+	serverId: string,
+	durationMs: number,
+): void {
 	if (!Number.isFinite(durationMs) || durationMs < 0) return;
 	successfulSpawnDurationMs.delete(serverId);
 	successfulSpawnDurationMs.set(serverId, durationMs);
@@ -14,7 +17,9 @@ export function recordSuccessfulLspSpawn(serverId: string, durationMs: number): 
 	}
 }
 
-export function getSuccessfulLspSpawnDurationMs(serverId: string): number | undefined {
+export function getSuccessfulLspSpawnDurationMs(
+	serverId: string,
+): number | undefined {
 	return successfulSpawnDurationMs.get(serverId);
 }
 

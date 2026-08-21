@@ -76,9 +76,8 @@ type EnsureGrammarClient = {
 };
 
 async function makeClient(dir: string): Promise<EnsureGrammarClient> {
-	const { TreeSitterClient } = await import(
-		"../../clients/tree-sitter-client.js"
-	);
+	const { TreeSitterClient } =
+		await import("../../clients/tree-sitter-client.js");
 	const client = new TreeSitterClient() as unknown as EnsureGrammarClient;
 	client.grammarsDir = dir;
 	vi.spyOn(client, "grammarSourceDirs").mockReturnValue([dir]);
@@ -230,8 +229,7 @@ describe("cached grammar wasm never refreshes on a pin bump (#1760)", () => {
 
 		const client = await makeClient(env.tmpDir);
 		const countFor = (): number | undefined =>
-			getDegradationSummary().find((g) => g.kind === "grammar-blocked")
-				?.count;
+			getDegradationSummary().find((g) => g.kind === "grammar-blocked")?.count;
 
 		expect(client.resolveGrammarFile(grammarFile)).toBeUndefined();
 		expect(countFor()).toBe(1);

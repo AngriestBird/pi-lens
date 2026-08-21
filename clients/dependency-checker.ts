@@ -77,8 +77,10 @@ export function parseMadgeSkips(stderr: string): {
 	const headerIdx = lines.findIndex((l) => /Skipped\s+\d+\s+file/i.test(l));
 	if (headerIdx === -1) return { total: 0, local: [] };
 	const total =
-		Number.parseInt(lines[headerIdx].match(/Skipped\s+(\d+)/i)?.[1] ?? "0", 10) ||
-		0;
+		Number.parseInt(
+			lines[headerIdx].match(/Skipped\s+(\d+)/i)?.[1] ?? "0",
+			10,
+		) || 0;
 	const specifiers = lines
 		.slice(headerIdx + 1)
 		.map((l) => l.trim())
@@ -321,9 +323,7 @@ export class DependencyChecker {
 	private static readonly instances = new Set<WeakRef<DependencyChecker>>();
 
 	constructor(verbose = false) {
-		this.log = verbose
-			? createSubsystemLogger("deps")
-			: () => {};
+		this.log = verbose ? createSubsystemLogger("deps") : () => {};
 		DependencyChecker.instances.add(new WeakRef(this));
 	}
 
@@ -585,7 +585,11 @@ export class DependencyChecker {
 
 		// Fast path: neither mtime NOR size moved (#1105 — size guards the
 		// mtime-preserving content change that mtime alone would miss).
-		if (cached && cached.timestamp >= stat.mtimeMs && cached.size === stat.size) {
+		if (
+			cached &&
+			cached.timestamp >= stat.mtimeMs &&
+			cached.size === stat.size
+		) {
 			return false;
 		}
 
@@ -773,7 +777,12 @@ export class DependencyChecker {
 				);
 			}
 
-			return { ok: true, circular, circularFiles, localSkips: skips.local.length };
+			return {
+				ok: true,
+				circular,
+				circularFiles,
+				localSkips: skips.local.length,
+			};
 		} catch (err: any) {
 			this.log(`Check error: ${err.message}`);
 			return { ok: false };
@@ -960,8 +969,10 @@ export class DependencyChecker {
 			}
 			const spawnResult = spawnResults.get(entry.normalized);
 			const durationMs = spawnDurations.get(entry.normalized) ?? 0;
-			if (durationMs >= MADGE_STATS_TARGET_MIN_DURATION_MS &&
-				stats.targets.length < MADGE_STATS_TARGET_CAP) {
+			if (
+				durationMs >= MADGE_STATS_TARGET_MIN_DURATION_MS &&
+				stats.targets.length < MADGE_STATS_TARGET_CAP
+			) {
 				stats.targets.push({
 					file: path.relative(projectRoot, entry.normalized),
 					durationMs,

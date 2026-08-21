@@ -82,10 +82,7 @@ export abstract class SecurityScanClient<TResult> {
 	 * `elapsedMs` is whatever the caller measured (an install attempt's duration);
 	 * there is no probe here, so it is 0 unless the caller has something real.
 	 */
-	private logDurableAbsence(
-		evidence?: ProbeEvidence,
-		elapsedMs = 0,
-	): void {
+	private logDurableAbsence(evidence?: ProbeEvidence, elapsedMs = 0): void {
 		logAvailabilityDecision({
 			tool: this.toolName,
 			verdict: "unavailable",
@@ -114,9 +111,7 @@ export abstract class SecurityScanClient<TResult> {
 		protected readonly toolName: string,
 		verbose = false,
 	) {
-		this.log = verbose
-			? createSubsystemLogger(toolName)
-			: () => {};
+		this.log = verbose ? createSubsystemLogger(toolName) : () => {};
 	}
 
 	/**
@@ -295,9 +290,8 @@ export abstract class SecurityScanClient<TResult> {
 			return false;
 		}
 		this.log(`${this.toolName} not found, attempting auto-install`);
-		const { ensureTool, getInstallAttempt } = await import(
-			"./installer/index.js"
-		);
+		const { ensureTool, getInstallAttempt } =
+			await import("./installer/index.js");
 		const installStartedAt = Date.now();
 		const installed = await ensureTool(this.toolName);
 		if (!installed) {

@@ -40,7 +40,8 @@ describe("instance-registry", () => {
 	}
 
 	it("registerInstance creates a fresh entry for this pid", async () => {
-		const { registerInstance } = await import("../../clients/instance-registry.js");
+		const { registerInstance } =
+			await import("../../clients/instance-registry.js");
 		await registerInstance("/some/project");
 
 		const raw = fs.readFileSync(registryFilePath(), "utf-8");
@@ -56,7 +57,8 @@ describe("instance-registry", () => {
 		vi.stubEnv("PI_SUBAGENT_CHILD_AGENT", "reviewer");
 		vi.stubEnv("PI_SUBAGENT_PARENT_PID", "12345");
 		vi.stubEnv("PI_SUBAGENT_RUN_ID", "run-822");
-		const { registerInstance } = await import("../../clients/instance-registry.js");
+		const { registerInstance } =
+			await import("../../clients/instance-registry.js");
 
 		await registerInstance("/some/project");
 
@@ -74,7 +76,8 @@ describe("instance-registry", () => {
 		vi.stubEnv("PI_SUBAGENT_CHILD_AGENT", "");
 		vi.stubEnv("PI_SUBAGENT_PARENT_PID", "");
 		vi.stubEnv("PI_SUBAGENT_RUN_ID", "");
-		const { registerInstance } = await import("../../clients/instance-registry.js");
+		const { registerInstance } =
+			await import("../../clients/instance-registry.js");
 
 		await registerInstance("/some/project");
 
@@ -110,12 +113,10 @@ describe("instance-registry", () => {
 			JSON.stringify({ instances: [oldEntry, newEntry] }),
 			"utf-8",
 		);
-		const { readInstanceRegistry, registerInstance } = await import(
-			"../../clients/instance-registry.js"
-		);
-		const { decideOrphanReaping } = await import(
-			"../../clients/instance-reaper.js"
-		);
+		const { readInstanceRegistry, registerInstance } =
+			await import("../../clients/instance-registry.js");
+		const { decideOrphanReaping } =
+			await import("../../clients/instance-reaper.js");
 
 		const before = await readInstanceRegistry();
 		expect(before).toHaveLength(2);
@@ -124,7 +125,9 @@ describe("instance-registry", () => {
 
 		const after = await readInstanceRegistry();
 		expect(after).toHaveLength(3);
-		expect(after.find((entry) => entry.pid === oldEntry.pid)?.subagent).toBeUndefined();
+		expect(
+			after.find((entry) => entry.pid === oldEntry.pid)?.subagent,
+		).toBeUndefined();
 		expect(after.find((entry) => entry.pid === newEntry.pid)?.subagent).toEqual(
 			newEntry.subagent,
 		);
@@ -132,7 +135,8 @@ describe("instance-registry", () => {
 	});
 
 	it("registerInstance overwrites (not duplicates) this pid's prior entry", async () => {
-		const { registerInstance } = await import("../../clients/instance-registry.js");
+		const { registerInstance } =
+			await import("../../clients/instance-registry.js");
 		await registerInstance("/first/root");
 		await registerInstance("/second/root");
 
@@ -142,7 +146,8 @@ describe("instance-registry", () => {
 	});
 
 	it("writes atomically via tmp-<pid> + rename (no tmp file left behind, no torn write)", async () => {
-		const { registerInstance } = await import("../../clients/instance-registry.js");
+		const { registerInstance } =
+			await import("../../clients/instance-registry.js");
 		await registerInstance("/atomic/project");
 
 		const entries = fs.readdirSync(dir);
@@ -154,7 +159,8 @@ describe("instance-registry", () => {
 		fs.mkdirSync(dir, { recursive: true });
 		fs.writeFileSync(registryFilePath(), "{not valid json!!", "utf-8");
 
-		const { registerInstance } = await import("../../clients/instance-registry.js");
+		const { registerInstance } =
+			await import("../../clients/instance-registry.js");
 		await expect(registerInstance("/recovered/project")).resolves.not.toThrow();
 
 		const parsed = JSON.parse(fs.readFileSync(registryFilePath(), "utf-8"));
@@ -162,9 +168,8 @@ describe("instance-registry", () => {
 	});
 
 	it("missing registry file on first read/write does not throw", async () => {
-		const { registerInstance, readInstanceRegistry } = await import(
-			"../../clients/instance-registry.js"
-		);
+		const { registerInstance, readInstanceRegistry } =
+			await import("../../clients/instance-registry.js");
 		expect(fs.existsSync(registryFilePath())).toBe(false);
 		await expect(registerInstance("/fresh/project")).resolves.not.toThrow();
 		const instances = await readInstanceRegistry();
@@ -196,7 +201,10 @@ describe("instance-registry", () => {
 		it.each([
 			["zero bytes", ""],
 			["truncated to an opening brace", "{"],
-			["mid-JSON torn tail", validPayload.slice(0, Math.floor(validPayload.length / 2))],
+			[
+				"mid-JSON torn tail",
+				validPayload.slice(0, Math.floor(validPayload.length / 2)),
+			],
 			["truncated to a single valid-JSON scalar (wrong shape)", "0"],
 		])("recovers legibly from a torn registry (%s)", async (_label, torn) => {
 			fs.mkdirSync(dir, { recursive: true });
@@ -210,12 +218,10 @@ describe("instance-registry", () => {
 			// degradation-ledger.js would be a DIFFERENT instance from the one
 			// instance-registry.js's own fresh import resolves to (AGENTS.md
 			// defect shape 14).
-			const { readInstanceRegistry, registerInstance } = await import(
-				"../../clients/instance-registry.js"
-			);
-			const { getDegradationSummary } = await import(
-				"../../clients/degradation-ledger.js"
-			);
+			const { readInstanceRegistry, registerInstance } =
+				await import("../../clients/instance-registry.js");
+			const { getDegradationSummary } =
+				await import("../../clients/degradation-ledger.js");
 
 			// No throw escapes, and the torn bytes are never half-trusted into a
 			// wrong-but-valid partial state — the read degrades to empty exactly
@@ -238,12 +244,10 @@ describe("instance-registry", () => {
 
 		it("stays silent on a genuinely missing file (clean start, not an error)", async () => {
 			expect(fs.existsSync(registryFilePath())).toBe(false);
-			const { readInstanceRegistry } = await import(
-				"../../clients/instance-registry.js"
-			);
-			const { getDegradationSummary } = await import(
-				"../../clients/degradation-ledger.js"
-			);
+			const { readInstanceRegistry } =
+				await import("../../clients/instance-registry.js");
+			const { getDegradationSummary } =
+				await import("../../clients/degradation-ledger.js");
 
 			const instances = await readInstanceRegistry();
 
@@ -257,12 +261,10 @@ describe("instance-registry", () => {
 			fs.mkdirSync(dir, { recursive: true });
 			fs.writeFileSync(registryFilePath(), "{not valid json!!", "utf-8");
 
-			const { readInstanceRegistry } = await import(
-				"../../clients/instance-registry.js"
-			);
-			const { getDegradationSummary } = await import(
-				"../../clients/degradation-ledger.js"
-			);
+			const { readInstanceRegistry } =
+				await import("../../clients/instance-registry.js");
+			const { getDegradationSummary } =
+				await import("../../clients/degradation-ledger.js");
 
 			await readInstanceRegistry();
 			await readInstanceRegistry();
@@ -306,8 +308,12 @@ describe("instance-registry", () => {
 	});
 
 	it("removeLspChild drops the child by pid", async () => {
-		const { registerInstance, recordLspChild, removeLspChild, readInstanceRegistry } =
-			await import("../../clients/instance-registry.js");
+		const {
+			registerInstance,
+			recordLspChild,
+			removeLspChild,
+			readInstanceRegistry,
+		} = await import("../../clients/instance-registry.js");
 		await registerInstance("/proj");
 		await recordLspChild({ pid: 222, serverId: "typescript", command: "c" });
 		await removeLspChild(222);
@@ -330,8 +336,12 @@ describe("instance-registry", () => {
 			// documents — concurrent same-process writers still need to serialize
 			// themselves at the caller's read-modify-write seam).
 			const atomicWrite = await import("../../clients/atomic-write.js");
-			const { registerInstance, recordLspChild, removeLspChild, readInstanceRegistry } =
-				await import("../../clients/instance-registry.js");
+			const {
+				registerInstance,
+				recordLspChild,
+				removeLspChild,
+				readInstanceRegistry,
+			} = await import("../../clients/instance-registry.js");
 			await registerInstance("/proj");
 			await recordLspChild({ pid: 111, serverId: "ast-grep", command: "a" });
 
@@ -352,9 +362,7 @@ describe("instance-registry", () => {
 						// read-modify-write first.
 						await gate;
 					}
-					return realWrite(
-						...(args as Parameters<typeof realWrite>),
-					);
+					return realWrite(...(args as Parameters<typeof realWrite>));
 				});
 
 			// Kick off both without awaiting either individually: pre-fix, each
@@ -384,8 +392,12 @@ describe("instance-registry", () => {
 		});
 
 		it("removeLspChild refuses to drop a pid whose recorded marker no longer matches (recycled-pid guard)", async () => {
-			const { registerInstance, recordLspChild, removeLspChild, readInstanceRegistry } =
-				await import("../../clients/instance-registry.js");
+			const {
+				registerInstance,
+				recordLspChild,
+				removeLspChild,
+				readInstanceRegistry,
+			} = await import("../../clients/instance-registry.js");
 			await registerInstance("/proj");
 			await recordLspChild({
 				pid: 444,
@@ -396,21 +408,26 @@ describe("instance-registry", () => {
 
 			// A caller holding a stale marker for a pid that's since been
 			// recycled onto a differently-marked child must never remove it.
-			await removeLspChild(444, "C:\\temp\\pi-lens-ast-grep\\stale.sgconfig.yml");
+			await removeLspChild(
+				444,
+				"C:\\temp\\pi-lens-ast-grep\\stale.sgconfig.yml",
+			);
 			let instances = await readInstanceRegistry();
 			expect(instances[0].lspChildren.map((c) => c.pid)).toContain(444);
 
 			// The correct marker still removes it.
-			await removeLspChild(444, "C:\\temp\\pi-lens-ast-grep\\new-spawn.sgconfig.yml");
+			await removeLspChild(
+				444,
+				"C:\\temp\\pi-lens-ast-grep\\new-spawn.sgconfig.yml",
+			);
 			instances = await readInstanceRegistry();
 			expect(instances[0].lspChildren.map((c) => c.pid)).not.toContain(444);
 		});
 	});
 
 	it("recordLspChild works even without a prior registerInstance (synthesizes a minimal entry)", async () => {
-		const { recordLspChild, readInstanceRegistry } = await import(
-			"../../clients/instance-registry.js"
-		);
+		const { recordLspChild, readInstanceRegistry } =
+			await import("../../clients/instance-registry.js");
 		await recordLspChild({ pid: 333, serverId: "python", command: "d" });
 
 		const instances = await readInstanceRegistry();
@@ -456,10 +473,18 @@ describe("instance-registry", () => {
 	});
 
 	it("updateHeartbeat applies childUsage onto matching lspChildren by pid", async () => {
-		const { registerInstance, recordLspChild, updateHeartbeat, readInstanceRegistry } =
-			await import("../../clients/instance-registry.js");
+		const {
+			registerInstance,
+			recordLspChild,
+			updateHeartbeat,
+			readInstanceRegistry,
+		} = await import("../../clients/instance-registry.js");
 		await registerInstance("/proj");
-		await recordLspChild({ pid: 4001, serverId: "typescript", command: "tsserver" });
+		await recordLspChild({
+			pid: 4001,
+			serverId: "typescript",
+			command: "tsserver",
+		});
 		await recordLspChild({ pid: 4002, serverId: "ast-grep", command: "sg" });
 
 		await updateHeartbeat({
@@ -481,8 +506,12 @@ describe("instance-registry", () => {
 	});
 
 	it("updateHeartbeat's childUsage for a pid no longer in lspChildren is silently ignored", async () => {
-		const { registerInstance, recordLspChild, updateHeartbeat, readInstanceRegistry } =
-			await import("../../clients/instance-registry.js");
+		const {
+			registerInstance,
+			recordLspChild,
+			updateHeartbeat,
+			readInstanceRegistry,
+		} = await import("../../clients/instance-registry.js");
 		await registerInstance("/proj");
 		await recordLspChild({ pid: 5001, serverId: "python", command: "pyright" });
 
@@ -506,14 +535,14 @@ describe("instance-registry", () => {
 	});
 
 	it("deregisterInstance on an already-empty registry is a safe no-op", async () => {
-		const { deregisterInstance } = await import("../../clients/instance-registry.js");
+		const { deregisterInstance } =
+			await import("../../clients/instance-registry.js");
 		expect(() => deregisterInstance()).not.toThrow();
 	});
 
 	it("cross-form project roots (backslash vs forward-slash) normalize to the same entry", async () => {
-		const { registerInstance, readInstanceRegistry } = await import(
-			"../../clients/instance-registry.js"
-		);
+		const { registerInstance, readInstanceRegistry } =
+			await import("../../clients/instance-registry.js");
 		await registerInstance("C:\\foo\\bar");
 		const first = (await readInstanceRegistry())[0].projectRoot;
 
@@ -526,9 +555,8 @@ describe("instance-registry", () => {
 
 	describe("computeResourceFootprint / getResourceFootprint (#620)", () => {
 		it("computeResourceFootprint is pure: aggregates host + lspChildren across instances", async () => {
-			const { computeResourceFootprint } = await import(
-				"../../clients/instance-registry.js"
-			);
+			const { computeResourceFootprint } =
+				await import("../../clients/instance-registry.js");
 			const footprint = computeResourceFootprint([
 				{
 					pid: 1,
@@ -581,9 +609,8 @@ describe("instance-registry", () => {
 		});
 
 		it("computeResourceFootprint on an empty registry returns all-zero totals", async () => {
-			const { computeResourceFootprint } = await import(
-				"../../clients/instance-registry.js"
-			);
+			const { computeResourceFootprint } =
+				await import("../../clients/instance-registry.js");
 			const footprint = computeResourceFootprint([]);
 			expect(footprint).toEqual({
 				instanceCount: 0,
@@ -595,10 +622,18 @@ describe("instance-registry", () => {
 		});
 
 		it("getResourceFootprint reads the live registry and aggregates it end-to-end", async () => {
-			const { registerInstance, recordLspChild, updateHeartbeat, getResourceFootprint } =
-				await import("../../clients/instance-registry.js");
+			const {
+				registerInstance,
+				recordLspChild,
+				updateHeartbeat,
+				getResourceFootprint,
+			} = await import("../../clients/instance-registry.js");
 			await registerInstance("/proj");
-			await recordLspChild({ pid: 7001, serverId: "typescript", command: "tsserver" });
+			await recordLspChild({
+				pid: 7001,
+				serverId: "typescript",
+				command: "tsserver",
+			});
 			await updateHeartbeat({
 				cpuPercent: 10,
 				childUsage: { 7001: { rssBytes: 999, cpuPercent: 2 } },
@@ -614,9 +649,8 @@ describe("instance-registry", () => {
 		// --- #735: dead-pid registry entries must not report as live instances ---
 
 		it("computeResourceFootprint drops instances whose pid is confirmed dead when isPidAlive is supplied", async () => {
-			const { computeResourceFootprint } = await import(
-				"../../clients/instance-registry.js"
-			);
+			const { computeResourceFootprint } =
+				await import("../../clients/instance-registry.js");
 			const deadPid = process.pid + 100_003;
 			const registry = [
 				{
@@ -651,9 +685,8 @@ describe("instance-registry", () => {
 		});
 
 		it("computeResourceFootprint applies no filtering when isPidAlive is omitted (pure default, unchanged pre-#735 behavior)", async () => {
-			const { computeResourceFootprint } = await import(
-				"../../clients/instance-registry.js"
-			);
+			const { computeResourceFootprint } =
+				await import("../../clients/instance-registry.js");
 			const registry = [
 				{
 					pid: 99999,
@@ -674,11 +707,19 @@ describe("instance-registry", () => {
 		});
 
 		it("getResourceFootprint excludes a dead-pid instance and opportunistically prunes it from the registry file", async () => {
-			const { registerInstance, recordLspChild, getResourceFootprint, readInstanceRegistry } =
-				await import("../../clients/instance-registry.js");
+			const {
+				registerInstance,
+				recordLspChild,
+				getResourceFootprint,
+				readInstanceRegistry,
+			} = await import("../../clients/instance-registry.js");
 			const deadPid = process.pid + 100_000;
 			await registerInstance("/proj");
-			await recordLspChild({ pid: 7002, serverId: "typescript", command: "tsserver" });
+			await recordLspChild({
+				pid: 7002,
+				serverId: "typescript",
+				command: "tsserver",
+			});
 
 			// Simulate a second, hard-killed instance's stale registry entry by
 			// writing directly to the registry file (bypassing registerInstance,
@@ -720,9 +761,8 @@ describe("instance-registry", () => {
 		});
 
 		it("getResourceFootprint leaves the registry untouched when every pid is alive", async () => {
-			const { registerInstance, getResourceFootprint, readInstanceRegistry } = await import(
-				"../../clients/instance-registry.js"
-			);
+			const { registerInstance, getResourceFootprint, readInstanceRegistry } =
+				await import("../../clients/instance-registry.js");
 			await registerInstance("/proj");
 
 			const footprint = await getResourceFootprint(() => true);

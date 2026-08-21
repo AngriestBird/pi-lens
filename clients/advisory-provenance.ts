@@ -81,7 +81,10 @@ function snapshotOne(
 
 export function snapshotAdvisoryProvenance(args: {
 	cwd: string;
-	runtime: Pick<RuntimeCoordinator, "telemetrySessionId" | "projectSeq" | "turnIndex">;
+	runtime: Pick<
+		RuntimeCoordinator,
+		"telemetrySessionId" | "projectSeq" | "turnIndex"
+	>;
 	generation: number;
 	files: Array<{ path: string; role: AdvisoryFileRole }>;
 	capturedAt?: number;
@@ -113,39 +116,64 @@ function isFiniteNumber(value: unknown): value is number {
 }
 
 function isCapturedHash(value: unknown): value is string {
-	return typeof value === "string" &&
-		(/^[a-f0-9]{64}$/.test(value) || value === "missing" || value.startsWith("unreadable:"));
+	return (
+		typeof value === "string" &&
+		(/^[a-f0-9]{64}$/.test(value) ||
+			value === "missing" ||
+			value.startsWith("unreadable:"))
+	);
 }
 
 function isWellFormed(value: unknown): value is AdvisoryProvenance {
 	if (!value || typeof value !== "object") return false;
 	const record = value as Partial<AdvisoryProvenance>;
 	const revision = record.revision;
-	return !!revision && typeof revision.sessionId === "string" &&
-		isFiniteNumber(revision.projectSeq) && isFiniteNumber(revision.turnIndex) &&
-		isFiniteNumber(revision.generation) && isFiniteNumber(revision.capturedAt) &&
-		Array.isArray(record.files) && record.files.length > 0 && record.files.every((file) =>
-			!!file && typeof file.path === "string" &&
-			(file.role === "source" || file.role === "test" || file.role === "affected") &&
-			isFiniteNumber(file.mtimeMs) && isFiniteNumber(file.size) &&
-			isCapturedHash(file.sha256)
-		);
+	return (
+		!!revision &&
+		typeof revision.sessionId === "string" &&
+		isFiniteNumber(revision.projectSeq) &&
+		isFiniteNumber(revision.turnIndex) &&
+		isFiniteNumber(revision.generation) &&
+		isFiniteNumber(revision.capturedAt) &&
+		Array.isArray(record.files) &&
+		record.files.length > 0 &&
+		record.files.every(
+			(file) =>
+				!!file &&
+				typeof file.path === "string" &&
+				(file.role === "source" ||
+					file.role === "test" ||
+					file.role === "affected") &&
+				isFiniteNumber(file.mtimeMs) &&
+				isFiniteNumber(file.size) &&
+				isCapturedHash(file.sha256),
+		)
+	);
 }
 
 export function validateAdvisoryProvenance(
 	record: { provenance?: unknown },
 	cwd: string,
-	runtime?: Pick<RuntimeCoordinator, "telemetrySessionId" | "projectSeq" | "turnIndex">,
+	runtime?: Pick<
+		RuntimeCoordinator,
+		"telemetrySessionId" | "projectSeq" | "turnIndex"
+	>,
 ): AdvisoryValidation {
 	if (!isWellFormed(record.provenance)) {
-		return { status: "unknown", reasons: ["malformed-or-legacy-provenance"], allFilesDeleted: false, changedPathCount: 0 };
+		return {
+			status: "unknown",
+			reasons: ["malformed-or-legacy-provenance"],
+			allFilesDeleted: false,
+			changedPathCount: 0,
+		};
 	}
 	const provenance = record.provenance;
 	const reasons: string[] = [];
 	let unknown = provenance.truncated === true;
 	if (unknown) reasons.push("truncated-provenance");
 	if (runtime) {
-		if (provenance.revision.sessionId !== runtime.telemetrySessionId) reasons.push("session-mismatch");
+		if (provenance.revision.sessionId !== runtime.telemetrySessionId)
+			reasons.push("session-mismatch");
 	}
 	let deletedFiles = 0;
 	const changedPaths = new Set<string>();
@@ -163,8 +191,7 @@ export function validateAdvisoryProvenance(
 					reasons.push(`missing:${advisoryPathKey(resolved, cwd)}`);
 					changedPaths.add(advisoryPathKey(resolved, cwd));
 				}
-			}
-			else {
+			} else {
 				unknown = true;
 				reasons.push(`unreadable:${advisoryPathKey(resolved, cwd)}:${code}`);
 				changedPaths.add(advisoryPathKey(resolved, cwd));
@@ -192,12 +219,24 @@ export function validateAdvisoryProvenance(
 		} else if (currentHash !== captured.sha256) {
 			reasons.push(`content-changed:${advisoryPathKey(resolved, cwd)}`);
 		}
-		if (reasons.length > reasonsBefore) changedPaths.add(advisoryPathKey(resolved, cwd));
+		if (reasons.length > reasonsBefore)
+			changedPaths.add(advisoryPathKey(resolved, cwd));
 	}
 	const allFilesDeleted = deletedFiles === provenance.files.length;
-	if (unknown) return { status: "unknown", reasons, allFilesDeleted, changedPathCount: changedPaths.size };
+	if (unknown)
+		return {
+			status: "unknown",
+			reasons,
+			allFilesDeleted,
+			changedPathCount: changedPaths.size,
+		};
 	return reasons.length > 0
-		? { status: "superseded", reasons, allFilesDeleted, changedPathCount: changedPaths.size }
+		? {
+				status: "superseded",
+				reasons,
+				allFilesDeleted,
+				changedPathCount: changedPaths.size,
+			}
 		: { status: "current", reasons: [], allFilesDeleted, changedPathCount: 0 };
 }
 
@@ -342,7 +381,9 @@ export function findingPathFreshness(
 }
 
 /** Existence-only probe. Retained for callers that have no scan timestamp. */
-export function findingPathExistence(resolvedPath: string): FindingPathExistence {
+export function findingPathExistence(
+	resolvedPath: string,
+): FindingPathExistence {
 	return findingPathFreshness(resolvedPath) as FindingPathExistence;
 }
 
@@ -603,6 +644,7 @@ function emitStaleLineDemoteRecord<T>(
 }
 
 export function provenanceStamp(provenance: unknown): string {
-	if (!isWellFormed(provenance)) return "session unknown / turn unknown / generation unknown";
+	if (!isWellFormed(provenance))
+		return "session unknown / turn unknown / generation unknown";
 	return `session ${provenance.revision.sessionId} / turn ${provenance.revision.turnIndex} / generation ${provenance.revision.generation}`;
 }

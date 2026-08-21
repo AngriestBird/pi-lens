@@ -17,7 +17,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { removeTempDirSync, setupTestEnvironment } from "./test-utils.js";
 
 const safeSpawnAsync = vi.fn(
-	async (..._args: unknown[]): Promise<{
+	async (
+		..._args: unknown[]
+	): Promise<{
 		error: Error | null;
 		status: number | null;
 		stdout: string;
@@ -57,9 +59,8 @@ describe("PythonDeadCodeClient (vulture) — project-first resolution (#1731)", 
 		const venvVulture = path.join(venvBin, isWin ? "vulture.exe" : "vulture");
 		fs.writeFileSync(venvVulture, "");
 
-		const { PythonDeadCodeClient } = await import(
-			"../../clients/dead-code-client.js"
-		);
+		const { PythonDeadCodeClient } =
+			await import("../../clients/dead-code-client.js");
 		const client = new PythonDeadCodeClient() as unknown as {
 			ensureAvailable(root?: string): Promise<boolean>;
 		};
@@ -79,9 +80,8 @@ describe("PythonDeadCodeClient (vulture) — project-first resolution (#1731)", 
 			"[tool.vulture]\nmin_confidence = 80\nexclude = ['migrations/']\n",
 		);
 
-		const { PythonDeadCodeClient } = await import(
-			"../../clients/dead-code-client.js"
-		);
+		const { PythonDeadCodeClient } =
+			await import("../../clients/dead-code-client.js");
 		const client = new PythonDeadCodeClient() as unknown as {
 			runAnalyze(root: string): Promise<unknown>;
 		};
@@ -100,9 +100,8 @@ describe("PythonDeadCodeClient (vulture) — project-first resolution (#1731)", 
 		const env = setupTestEnvironment("pi-lens-vulture-noconfig-");
 		tmpDirs.push(env.tmpDir);
 
-		const { PythonDeadCodeClient } = await import(
-			"../../clients/dead-code-client.js"
-		);
+		const { PythonDeadCodeClient } =
+			await import("../../clients/dead-code-client.js");
 		const client = new PythonDeadCodeClient() as unknown as {
 			runAnalyze(root: string): Promise<unknown>;
 		};

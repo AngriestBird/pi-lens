@@ -134,25 +134,27 @@ function expandWorkspacePattern(cwd: string, pattern: string): string[] {
 		return [];
 	}
 	const ignoreMatcher = getProjectIgnoreMatcher(cwd);
-	return entries
-		.filter((entry) => {
-			const fullPath = path.join(baseDir, entry.name);
-			return (
-				entry.isDirectory() &&
-				!isExcludedDirName(entry.name) &&
-				!ignoreMatcher.isIgnored(fullPath, true)
-			);
-		})
-		// Bound the manifest-probe fan-out so a pathological single directory
-		// can't trigger an unbounded existsSync sweep (#262).
-		.slice(0, MAX_WORKSPACE_CANDIDATES)
-		.map((entry) => path.join(baseDir, entry.name))
-		.filter(
-			(root) =>
-				fs.existsSync(path.join(root, "package.json")) ||
-				fs.existsSync(path.join(root, "Cargo.toml")) ||
-				fs.existsSync(path.join(root, "go.mod")),
-		);
+	return (
+		entries
+			.filter((entry) => {
+				const fullPath = path.join(baseDir, entry.name);
+				return (
+					entry.isDirectory() &&
+					!isExcludedDirName(entry.name) &&
+					!ignoreMatcher.isIgnored(fullPath, true)
+				);
+			})
+			// Bound the manifest-probe fan-out so a pathological single directory
+			// can't trigger an unbounded existsSync sweep (#262).
+			.slice(0, MAX_WORKSPACE_CANDIDATES)
+			.map((entry) => path.join(baseDir, entry.name))
+			.filter(
+				(root) =>
+					fs.existsSync(path.join(root, "package.json")) ||
+					fs.existsSync(path.join(root, "Cargo.toml")) ||
+					fs.existsSync(path.join(root, "go.mod")),
+			)
+	);
 }
 
 function depsFromPackageJson(pkgJson: PackageJson): string[] {

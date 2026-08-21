@@ -47,30 +47,15 @@ export type FileKind =
 	| "terragrunt" // Terragrunt
 	| "toml" // TOML
 	| "yaml" // YAML
-	| "zig" // Zig
-	;
+	| "zig"; // Zig
 
 // --- Extension Maps ---
 
 export const KIND_EXTENSIONS: Record<FileKind, readonly string[]> = {
-	clojure: [
-		".clj",
-		".cljc",
-		".cljs",
-		".edn",
-	],
-	cmake: [
-		".cmake",
-	],
-	csharp: [
-		".cs",
-	],
-	css: [
-		".css",
-		".less",
-		".sass",
-		".scss",
-	],
+	clojure: [".clj", ".cljc", ".cljs", ".edn"],
+	cmake: [".cmake"],
+	csharp: [".cs"],
+	css: [".css", ".less", ".sass", ".scss"],
 	cue: [".cue"],
 	// From llvm-project/clang/lib/Driver/Types.cpp clang::driver::types::lookupTypeForExtension:
 	cxx: [
@@ -107,49 +92,18 @@ export const KIND_EXTENSIONS: Record<FileKind, readonly string[]> = {
 		".cl",
 		".clcpp",
 	],
-	dart: [
-		".dart",
-	],
-	docker: [
-		".dockerfile",
-	],
-	elixir: [
-		".ex",
-		".exs",
-	],
-	fish: [
-		".fish",
-	],
-	fsharp: [
-		".fs",
-		".fsi",
-		".fsx",
-	],
-	gleam: [
-		".gleam",
-	],
-	go: [
-		".go",
-	],
-	haskell: [
-		".hs",
-		".lhs",
-	],
-	"helm-template": [
-		".tpl",
-	],
-	html: [
-		".htm",
-		".html",
-	],
-	java: [
-		".java",
-	],
-	json: [
-		".json",
-		".json5",
-		".jsonc",
-	],
+	dart: [".dart"],
+	docker: [".dockerfile"],
+	elixir: [".ex", ".exs"],
+	fish: [".fish"],
+	fsharp: [".fs", ".fsi", ".fsx"],
+	gleam: [".gleam"],
+	go: [".go"],
+	haskell: [".hs", ".lhs"],
+	"helm-template": [".tpl"],
+	html: [".htm", ".html"],
+	java: [".java"],
+	json: [".json", ".json5", ".jsonc"],
 	jsts: [
 		".cjs",
 		".cts",
@@ -162,75 +116,25 @@ export const KIND_EXTENSIONS: Record<FileKind, readonly string[]> = {
 		".tsx",
 		".vue",
 	],
-	kotlin: [
-		".kt",
-		".kts",
-	],
-	lua: [
-		".lua",
-	],
-	markdown: [
-		".md",
-		".mdx",
-	],
-	nix: [
-		".nix",
-	],
-	ocaml: [
-		".ml",
-		".mli",
-	],
-	php: [
-		".php",
-	],
-	powershell: [
-		".ps1",
-		".psm1",
-		".psd1",
-	],
-	prisma: [
-		".prisma",
-	],
-	python: [
-		".py",
-		".pyi",
-	],
-	ruby: [
-		".gemspec",
-		".rake",
-		".rb",
-		".ru",
-	],
-	rust: [
-		".rs",
-	],
-	shell: [
-		".bash",
-		".sh",
-		".zsh",
-	],
-	sql: [
-		".sql",
-	],
-	swift: [
-		".swift",
-	],
-	terraform: [
-		".tf",
-		".tfvars",
-	],
+	kotlin: [".kt", ".kts"],
+	lua: [".lua"],
+	markdown: [".md", ".mdx"],
+	nix: [".nix"],
+	ocaml: [".ml", ".mli"],
+	php: [".php"],
+	powershell: [".ps1", ".psm1", ".psd1"],
+	prisma: [".prisma"],
+	python: [".py", ".pyi"],
+	ruby: [".gemspec", ".rake", ".rb", ".ru"],
+	rust: [".rs"],
+	shell: [".bash", ".sh", ".zsh"],
+	sql: [".sql"],
+	swift: [".swift"],
+	terraform: [".tf", ".tfvars"],
 	terragrunt: [],
-	toml: [
-		".toml",
-	],
-	yaml: [
-		".yaml",
-		".yml",
-	],
-	zig: [
-		".zig",
-		".zon",
-	],
+	toml: [".toml"],
+	yaml: [".yaml", ".yml"],
+	zig: [".zig", ".zon"],
 };
 
 /** Return whether a path has an extension registered for the given file kind. */
@@ -244,7 +148,9 @@ export function hasKindExtension(filePath: string, kind: FileKind): boolean {
 // embedded-language contents are not valid inputs for these tree-sitter facts.
 // Keep that one policy decision here so the function and import providers agree.
 const JSTS_FACT_EXTENSIONS = new Set(
-	KIND_EXTENSIONS.jsts.filter((extension) => ![".vue", ".svelte"].includes(extension)),
+	KIND_EXTENSIONS.jsts.filter(
+		(extension) => ![".vue", ".svelte"].includes(extension),
+	),
 );
 
 /** Whether the JS/TS fact providers should parse this path. */

@@ -56,7 +56,10 @@ describe("demotePastEofDiagnostics (#1641)", () => {
 		// 402-line file, matching the live #1641 forensic case's line count.
 		// No trailing newline, so wc-l-style and LSP-addressable counts agree.
 		const filePath = path.join(env.tmpDir, "kilo.ts");
-		fs.writeFileSync(filePath, Array.from({ length: 402 }, (_, i) => `// line ${i + 1}`).join("\n"));
+		fs.writeFileSync(
+			filePath,
+			Array.from({ length: 402 }, (_, i) => `// line ${i + 1}`).join("\n"),
+		);
 
 		const diagnostics: Diagnostic[] = [
 			{ line: 396, message: "kilo is defined here — still valid" },
@@ -149,7 +152,9 @@ describe("demotePastEofDiagnostics (#1641)", () => {
 			store: "test",
 			cwd: env.tmpDir,
 			filePath,
-			diagnostics: [{ line: 1, message: "position 0,0 on an empty doc" } as Diagnostic],
+			diagnostics: [
+				{ line: 1, message: "position 0,0 on an empty doc" } as Diagnostic,
+			],
 			lineCountCache: createLineCountCache(),
 		});
 		expect(line1.diagnostics[0]?.stale).toBeFalsy();
@@ -161,8 +166,13 @@ describe("demotePastEofDiagnostics (#1641)", () => {
 	it("does not turn a zero-byte stat into a high-line verdict, then evaluates real content", () => {
 		const env = setup();
 		const filePath = path.join(env.tmpDir, "mid-write.ts");
-		const content = Array.from({ length: 141 }, (_, i) => `// line ${i + 1}`).join("\n");
-		const diagnostics = [{ line: 141, message: "live diagnostic" } as Diagnostic];
+		const content = Array.from(
+			{ length: 141 },
+			(_, i) => `// line ${i + 1}`,
+		).join("\n");
+		const diagnostics = [
+			{ line: 141, message: "live diagnostic" } as Diagnostic,
+		];
 		fs.writeFileSync(filePath, "");
 
 		const midWrite = demotePastEofDiagnostics({
@@ -255,7 +265,9 @@ describe("demotePastEofDiagnostics (#1641)", () => {
 			store: "test",
 			cwd: env.tmpDir,
 			filePath,
-			diagnostics: [{ line: 50, stale: true, message: "still past EOF" } as Diagnostic],
+			diagnostics: [
+				{ line: 50, stale: true, message: "still past EOF" } as Diagnostic,
+			],
 			lineCountCache: createLineCountCache(),
 		});
 
@@ -277,7 +289,9 @@ describe("demotePastEofDiagnostics (#1641)", () => {
 			store: "test",
 			cwd: env.tmpDir,
 			filePath,
-			diagnostics: [{ line: 5, message: "a real blocking error" } as Diagnostic],
+			diagnostics: [
+				{ line: 5, message: "a real blocking error" } as Diagnostic,
+			],
 			lineCountCache: cache,
 		});
 		expect(before.diagnostics[0]?.stale).toBeFalsy();
@@ -288,7 +302,11 @@ describe("demotePastEofDiagnostics (#1641)", () => {
 		// SAME mtime, which would defeat the mtime-keyed cache for reasons
 		// unrelated to what this test verifies.
 		fs.writeFileSync(filePath, "a\nb\n"); // 3 addressable lines — line 5 now past EOF
-		fs.utimesSync(filePath, new Date(Date.now() + 1000), new Date(Date.now() + 1000));
+		fs.utimesSync(
+			filePath,
+			new Date(Date.now() + 1000),
+			new Date(Date.now() + 1000),
+		);
 		const shrunk = demotePastEofDiagnostics({
 			store: "test",
 			cwd: env.tmpDir,
@@ -302,7 +320,11 @@ describe("demotePastEofDiagnostics (#1641)", () => {
 		// The file is restored (formatter/checkout completes) — same content,
 		// mtime moves again.
 		fs.writeFileSync(filePath, "a\nb\nc\nd\ne\n"); // back to 6 addressable lines
-		fs.utimesSync(filePath, new Date(Date.now() + 2000), new Date(Date.now() + 2000));
+		fs.utimesSync(
+			filePath,
+			new Date(Date.now() + 2000),
+			new Date(Date.now() + 2000),
+		);
 		const restored = demotePastEofDiagnostics({
 			store: "test",
 			cwd: env.tmpDir,
@@ -322,7 +344,11 @@ describe("demotePastEofDiagnostics (#1641)", () => {
 		const cache = createLineCountCache();
 
 		fs.writeFileSync(filePath, "a\n"); // shrink — line 3 now past EOF
-		fs.utimesSync(filePath, new Date(Date.now() + 1000), new Date(Date.now() + 1000));
+		fs.utimesSync(
+			filePath,
+			new Date(Date.now() + 1000),
+			new Date(Date.now() + 1000),
+		);
 		const shrunk = demotePastEofDiagnostics({
 			store: "test",
 			cwd: env.tmpDir,
@@ -337,7 +363,11 @@ describe("demotePastEofDiagnostics (#1641)", () => {
 		resync.mockClear();
 
 		fs.writeFileSync(filePath, "a\nb\n"); // restore
-		fs.utimesSync(filePath, new Date(Date.now() + 2000), new Date(Date.now() + 2000));
+		fs.utimesSync(
+			filePath,
+			new Date(Date.now() + 2000),
+			new Date(Date.now() + 2000),
+		);
 		const restored = demotePastEofDiagnostics({
 			store: "test",
 			cwd: env.tmpDir,
@@ -430,7 +460,11 @@ describe("getCachedLineCount cost discipline (#1641)", () => {
 		const stat = fs.statSync(filePath);
 
 		const cache = createLineCountCache();
-		cache.set(filePath, { mtimeMs: stat.mtimeMs, size: stat.size, lineCount: 999 });
+		cache.set(filePath, {
+			mtimeMs: stat.mtimeMs,
+			size: stat.size,
+			lineCount: 999,
+		});
 		expect(getCachedLineCount(filePath, cache)).toBe(999);
 	});
 

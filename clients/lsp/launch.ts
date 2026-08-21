@@ -21,10 +21,7 @@ import { getGlobalPiLensDir } from "../file-utils.js";
 import { isFullyQualified } from "../path-utils.js";
 import { findGlobalBinary } from "../package-manager.js";
 import { redactSecrets } from "../redact/secrets.js";
-import {
-	classifySpawnFailure,
-	SpawnFailureError,
-} from "../safe-spawn.js";
+import { classifySpawnFailure, SpawnFailureError } from "../safe-spawn.js";
 import { getRubyVersionDirNamesAsync } from "./ruby-drive-dirs.js";
 
 export interface LSPProcess {
@@ -228,7 +225,10 @@ export function isCmdShimValid(cmdPath: string): boolean {
 	try {
 		const content = fs.readFileSync(cmdPath, "utf-8");
 		// npm cmd shim pattern: "%~dp0\..\<relpath>" or "%~dp0/<relpath>"
-		// biome-ignore format: regex char-class \- must stay escaped — formatter strips it
+		// The `-` ends the char class, where it is a literal and needs no escape.
+		// oxfmt formats this repository (#1844) and rewrites no regex literal, so
+		// this line needs no suppression; the directive oxfmt honors, if one is
+		// ever needed here, is `// prettier-ignore`.
 		const match = content.match(
 			/"%~dp0[/\\]\.\.[/\\]((?:[\w./@-]|\\)+\.(?:mjs|cjs|js))"/i,
 		);
@@ -262,7 +262,8 @@ function bypassPs1OnWindows(
 	// npm-generated PS1 pattern: "$basedir/../<package>/bin/cli.js"
 	try {
 		const content = fs.readFileSync(ps1Path, "utf-8");
-		// biome-ignore format: regex char-class \- must stay escaped — formatter strips it
+		// Same char class as isCmdShimValid above, and the same note: the trailing
+		// `-` is a literal, and oxfmt leaves regex literals alone.
 		const match = content.match(
 			/"\$basedir[/\\]\.\.[/\\]((?:[\w./@-]|\\)+\.(?:mjs|cjs|js))"/i,
 		);
@@ -587,7 +588,7 @@ export async function launchLSP(
 	} catch (err) {
 		// If spawn failed with simple command, try npm global
 		if (
-		!isFullyQualified(command) &&
+			!isFullyQualified(command) &&
 			!command.includes(path.sep) &&
 			!command.includes("/")
 		) {
@@ -648,10 +649,10 @@ export async function launchLSP(
 						reject(
 							detail
 								? new SpawnFailureError(
-									failure.kind,
-									`${failure.message}${detail}`,
-									failure.cause,
-								)
+										failure.kind,
+										`${failure.message}${detail}`,
+										failure.cause,
+									)
 								: failure,
 						);
 					});

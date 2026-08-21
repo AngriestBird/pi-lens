@@ -64,7 +64,9 @@ export function isBuildCompiled(target: string, excluded: string[]): boolean {
 	if (target.startsWith("../") || path.isAbsolute(target)) return false;
 	if (!/\.(?:ts|mts|cts|tsx)$/.test(target)) return false;
 	if (/\.d\.(?:ts|mts|cts)$/.test(target)) return false;
-	return !excluded.some((entry) => target === entry || target.startsWith(`${entry}/`));
+	return !excluded.some(
+		(entry) => target === entry || target.startsWith(`${entry}/`),
+	);
 }
 
 /**
@@ -104,7 +106,10 @@ export function testSourceFiles(dir = path.join(repoRoot, "tests")): string[] {
 		const relative = toPosix(path.relative(repoRoot, entryPath));
 		// Mirrors vitest.config.ts's sharedExclude: fixture projects and the
 		// live suite's copied-out temp projects are inputs, not repo tests.
-		if (relative === "tests/fixtures" || relative.startsWith("tests/native-ts7-live-")) {
+		if (
+			relative === "tests/fixtures" ||
+			relative.startsWith("tests/native-ts7-live-")
+		) {
 			return [];
 		}
 		if (entry.isDirectory()) return testSourceFiles(entryPath);
@@ -122,7 +127,10 @@ export function scanDualInstanceImports(): DualInstanceImport[] {
 		for (const specifier of importSpecifiers(source)) {
 			if (!specifier.startsWith(".")) continue;
 			const target = toPosix(
-				path.relative(repoRoot, path.resolve(path.dirname(absolute), specifier)),
+				path.relative(
+					repoRoot,
+					path.resolve(path.dirname(absolute), specifier),
+				),
 			);
 			if (!isBuildCompiled(target, excluded)) continue;
 			found.push({ file, specifier, target });

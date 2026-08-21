@@ -86,9 +86,8 @@ describe("lazy-import seam eviction (#1570)", () => {
 			return { __stub: "dispatch-integration" };
 		});
 
-		const { loadDispatchIntegration } = await import(
-			"../../clients/dispatch/lazy.js"
-		);
+		const { loadDispatchIntegration } =
+			await import("../../clients/dispatch/lazy.js");
 
 		await expect(loadDispatchIntegration()).rejects.toMatchObject({
 			cause: expect.objectContaining({

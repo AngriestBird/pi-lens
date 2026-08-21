@@ -308,7 +308,13 @@ function readState(cwd: string): DispositionStateFile {
 			return stateCache.state;
 		}
 		const empty: DispositionStateFile = {};
-		stateCache = { path: p, missing: true, mtimeMs: -1, size: -1, state: empty };
+		stateCache = {
+			path: p,
+			missing: true,
+			mtimeMs: -1,
+			size: -1,
+			state: empty,
+		};
 		return empty;
 	}
 	if (
@@ -324,7 +330,9 @@ function readState(cwd: string): DispositionStateFile {
 	try {
 		const parsed = JSON.parse(fs.readFileSync(p, "utf-8")) as unknown;
 		state =
-			parsed && typeof parsed === "object" ? (parsed as DispositionStateFile) : {};
+			parsed && typeof parsed === "object"
+				? (parsed as DispositionStateFile)
+				: {};
 	} catch {
 		// Now that writeState is tmp+rename atomic, a torn read (another process
 		// mid-write) can no longer land here — this only fires on genuine
@@ -500,16 +508,26 @@ export function markDisposition(
 	const existing = readState(cwd).dispositions?.[anchor];
 	if (disposition === "defer") {
 		deferredThisSession.add(deferredKey(cwd, anchor));
-		emitMarkTelemetry(cwd, target, disposition, anchor, reason, existing, identity);
+		emitMarkTelemetry(
+			cwd,
+			target,
+			disposition,
+			anchor,
+			reason,
+			existing,
+			identity,
+		);
 		return anchor;
 	}
 
 	const now = new Date().toISOString();
 	const capturesFixContext = disposition === "flagged";
 	const lineText = capturesFixContext
-		? (target.content?.split(/\r?\n/)[
-				target.line !== undefined ? target.line - 1 : -1
-			] ?? existing?.lineText)?.trim()
+		? (
+				target.content?.split(/\r?\n/)[
+					target.line !== undefined ? target.line - 1 : -1
+				] ?? existing?.lineText
+			)?.trim()
 		: existing?.lineText;
 	const entry: DispositionEntry = {
 		disposition,
@@ -520,7 +538,15 @@ export function markDisposition(
 		lineText,
 	};
 	commitDisposition(cwd, anchor, entry);
-	emitMarkTelemetry(cwd, target, disposition, anchor, reason, existing, identity);
+	emitMarkTelemetry(
+		cwd,
+		target,
+		disposition,
+		anchor,
+		reason,
+		existing,
+		identity,
+	);
 	return anchor;
 }
 

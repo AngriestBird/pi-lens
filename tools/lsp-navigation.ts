@@ -320,7 +320,6 @@ type SymbolMatch = {
 	range?: Record<string, unknown>;
 };
 
-
 function symbolKindLabel(kind: number | undefined): string {
 	// Single source of truth for LSP SymbolKind names (#883 doctrine; the
 	// Sonar-flagged duplicate table lived here). Navigation keeps its own
@@ -1511,11 +1510,9 @@ export function createLspNavigationTool(
 								edit,
 							};
 						}
-						const applied = await applyWorkspaceEdit(
-							edit,
-							ctx.cwd || ".",
-							{ mutationContext },
-						);
+						const applied = await applyWorkspaceEdit(edit, ctx.cwd || ".", {
+							mutationContext,
+						});
 						for (const touchedFile of applied.files) {
 							try {
 								await openFileBestEffort(lspService, touchedFile, false);
@@ -1723,10 +1720,10 @@ export function createLspNavigationTool(
 						(result as { applied?: unknown }).applied === false
 							? "failed"
 							: operation === "executeCommand" &&
-								result &&
-								typeof result === "object" &&
-								"executed" in result &&
-								(result as { executed?: unknown }).executed === false
+								  result &&
+								  typeof result === "object" &&
+								  "executed" in result &&
+								  (result as { executed?: unknown }).executed === false
 								? "failed"
 								: "skipped";
 					recordLspMutationOutcome(mutationContext, outcome);

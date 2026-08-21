@@ -154,7 +154,10 @@ const KEYWORDS_BEFORE_REGEX = new Set([
  * check reads the `f` of `typeof /x()/` as an identifier, calls the regex a
  * division, and leaves a phantom call visible to the scan.
  */
-export function stripSource(source: string, options: StripOptions = {}): string {
+export function stripSource(
+	source: string,
+	options: StripOptions = {},
+): string {
 	const blankStrings = (options.strings ?? "blank") === "blank";
 	const out = source.split("");
 	const blank = (index: number) => {
@@ -365,7 +368,10 @@ export function auditRegistry(input: RegistryAuditInput): RegistryAudit {
 	// glob, #1718's nonexistent machine path. "Scanned plenty, matched nothing"
 	// means the DETECTOR broke while the walk stayed healthy. Same symptom, two
 	// causes, so they must not share a message.
-	if (input.minScanned !== undefined && (input.scannedCount ?? 0) < input.minScanned) {
+	if (
+		input.minScanned !== undefined &&
+		(input.scannedCount ?? 0) < input.minScanned
+	) {
 		problems.push(
 			`${input.sweepName}: the scan LOOKED AT ${input.scannedCount ?? 0} source item(s), ` +
 				`below the declared floor of ${input.minScanned} — the walk itself is broken ` +
@@ -595,7 +601,10 @@ export function findUnregisteredSeams(
 }
 
 /** 1-based line numbers in `strippedSource` where `needle` occurs. */
-export function occurrenceLines(strippedSource: string, needle: string): number[] {
+export function occurrenceLines(
+	strippedSource: string,
+	needle: string,
+): number[] {
 	const out: number[] = [];
 	strippedSource.split("\n").forEach((line, i) => {
 		if (line.includes(needle)) out.push(i + 1);
@@ -717,7 +726,8 @@ export function checkSeamEvidence(input: SeamEvidenceInput): string[] {
 	if (seamsForId.length === 0) return problems;
 	const back = input.back ?? DEFAULT_EVIDENCE_WINDOW.back;
 	const forward = input.forward ?? DEFAULT_EVIDENCE_WINDOW.forward;
-	const proximity = input.calleeProximity ?? DEFAULT_EVIDENCE_WINDOW.calleeProximity;
+	const proximity =
+		input.calleeProximity ?? DEFAULT_EVIDENCE_WINDOW.calleeProximity;
 	const capacity = input.capacity ?? 1;
 	const callees = input.callees ?? [];
 	const whole = input.strippedLines.join("\n");
@@ -742,7 +752,12 @@ export function checkSeamEvidence(input: SeamEvidenceInput): string[] {
 			}
 			if (callees.length > 0 && !needle.includes("(")) {
 				const satisfied = callees.some((callee) =>
-					hasNearbyCallSite(input.strippedLines, claimed - 1, callee, proximity),
+					hasNearbyCallSite(
+						input.strippedLines,
+						claimed - 1,
+						callee,
+						proximity,
+					),
 				);
 				if (!satisfied) {
 					problems.push(
@@ -800,8 +815,12 @@ export function auditSymbolCounts(input: SymbolCountAuditInput): RegistryAudit {
 	const key = (file: string, count: number) => `${file}@${count}`;
 	return auditRegistry({
 		sweepName: input.sweepName,
-		flagged: Object.entries(input.counts).map(([file, count]) => key(file, count)),
-		registered: Object.entries(input.pinned).map(([file, count]) => key(file, count)),
+		flagged: Object.entries(input.counts).map(([file, count]) =>
+			key(file, count),
+		),
+		registered: Object.entries(input.pinned).map(([file, count]) =>
+			key(file, count),
+		),
 		// Count-drift is a supplementary check layered on a coverage sweep that
 		// already declares its own scanned/flagged floors — a second emptiness
 		// floor here would just duplicate that message under a different name.

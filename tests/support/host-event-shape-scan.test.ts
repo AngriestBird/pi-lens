@@ -29,7 +29,10 @@ describe("host event-shape scan (#1681)", () => {
 			'await pi.emit("session_start", { reason: "startup", sessionId: "x" }, ctx);',
 		);
 		expect(violations).toEqual([
-			expect.objectContaining({ eventType: "session_start", field: "sessionId" }),
+			expect.objectContaining({
+				eventType: "session_start",
+				field: "sessionId",
+			}),
 		]);
 	});
 

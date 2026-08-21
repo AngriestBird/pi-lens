@@ -119,7 +119,11 @@ async function resolveCompiler(
 	const clCmd = clChecker.getCommand(cwd);
 	if (clCmd) {
 		// Already probed in a previous turn and resolved.
-		return { command: clCmd, args: ["/nologo", "/Zs", absPath], flavor: "msvc" };
+		return {
+			command: clCmd,
+			args: ["/nologo", "/Zs", absPath],
+			flavor: "msvc",
+		};
 	}
 	const clProbe = await safeSpawnAsync("cl", [], { timeout: 5000 });
 	if (!clProbe.error && clProbe.status !== null) {

@@ -76,40 +76,48 @@ async function driveTurns(count: number) {
 // tests/clients/ast-grep-rule-precedence-followups.test.ts:210).
 const MEMORY_SAMPLE_WIRING_TIMEOUT_MS = 30_000;
 
-describe("index turn_end memory_sample wiring (#1123 item 2)", {
-	timeout: MEMORY_SAMPLE_WIRING_TIMEOUT_MS,
-}, () => {
-	beforeEach(() => {
-		vi.resetModules();
-		latencyCalls.length = 0;
-	});
-	afterEach(() => {
-		vi.clearAllMocks();
-	});
+describe(
+	"index turn_end memory_sample wiring (#1123 item 2)",
+	{
+		timeout: MEMORY_SAMPLE_WIRING_TIMEOUT_MS,
+	},
+	() => {
+		beforeEach(() => {
+			vi.resetModules();
+			latencyCalls.length = 0;
+		});
+		afterEach(() => {
+			vi.clearAllMocks();
+		});
 
-	it("emits nothing before turn 10 (runtime.turnIndex bumped by turn_start)", async () => {
-		await driveTurns(9);
-		expect(memorySamples()).toHaveLength(0);
-	});
+		it("emits nothing before turn 10 (runtime.turnIndex bumped by turn_start)", async () => {
+			await driveTurns(9);
+			expect(memorySamples()).toHaveLength(0);
+		});
 
-	it("emits exactly one memory_sample on turn 10, with process + subsystems metadata", async () => {
-		await driveTurns(10);
-		const samples = memorySamples();
-		expect(samples).toHaveLength(1);
-		expect(samples[0].durationMs).toBe(0);
-		const metadata = samples[0].metadata as Record<string, unknown>;
-		expect(metadata.turnIndex).toBe(10);
-		expect(metadata.process).toBeDefined();
-		expect(metadata.subsystems).toBeDefined();
-		const proc = metadata.process as Record<string, number>;
-		expect(proc.rssBytes).toBeGreaterThan(0);
-	});
+		it("emits exactly one memory_sample on turn 10, with process + subsystems metadata", async () => {
+			await driveTurns(10);
+			const samples = memorySamples();
+			expect(samples).toHaveLength(1);
+			expect(samples[0].durationMs).toBe(0);
+			const metadata = samples[0].metadata as Record<string, unknown>;
+			expect(metadata.turnIndex).toBe(10);
+			expect(metadata.process).toBeDefined();
+			expect(metadata.subsystems).toBeDefined();
+			const proc = metadata.process as Record<string, number>;
+			expect(proc.rssBytes).toBeGreaterThan(0);
+		});
 
-	it("emits again on turn 20 but not on turns 11-19 (cadence, not a one-shot)", async () => {
-		await driveTurns(20);
-		const samples = memorySamples();
-		expect(samples).toHaveLength(2);
-		expect((samples[0].metadata as Record<string, unknown>).turnIndex).toBe(10);
-		expect((samples[1].metadata as Record<string, unknown>).turnIndex).toBe(20);
-	});
-});
+		it("emits again on turn 20 but not on turns 11-19 (cadence, not a one-shot)", async () => {
+			await driveTurns(20);
+			const samples = memorySamples();
+			expect(samples).toHaveLength(2);
+			expect((samples[0].metadata as Record<string, unknown>).turnIndex).toBe(
+				10,
+			);
+			expect((samples[1].metadata as Record<string, unknown>).turnIndex).toBe(
+				20,
+			);
+		});
+	},
+);

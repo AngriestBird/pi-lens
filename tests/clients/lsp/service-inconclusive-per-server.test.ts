@@ -516,9 +516,8 @@ describe("#1549 — per-server touch verdict", () => {
 		await touchOnce(service, "const x = 1;", { collectDiagnostics: false });
 
 		const ready = [
-			...(
-				service as unknown as { state: { demonstratedReady: Set<string> } }
-			).state.demonstratedReady,
+			...(service as unknown as { state: { demonstratedReady: Set<string> } })
+				.state.demonstratedReady,
 		].join(" ");
 		expect(ready).toContain("ts-primary");
 		expect(ready).not.toContain("opengrep");

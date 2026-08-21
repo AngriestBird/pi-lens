@@ -48,14 +48,11 @@ vi.mock("../../../../clients/degradation-ledger.js", () => ({
  * run fails on the latch, not on missing test scaffolding.
  */
 async function loadRunner(): Promise<{
-	run: (
-		ctx: never,
-	) => Promise<{ status: string; diagnostics: unknown[] }>;
+	run: (ctx: never) => Promise<{ status: string; diagnostics: unknown[] }>;
 }> {
 	vi.resetModules();
-	const mod = await import(
-		"../../../../clients/dispatch/runners/psscriptanalyzer.js"
-	);
+	const mod =
+		await import("../../../../clients/dispatch/runners/psscriptanalyzer.js");
 	return mod.default;
 }
 
@@ -259,7 +256,9 @@ describe("psscriptanalyzer availability (#1490)", () => {
 		// nothing was learned about the module. Latching it as "not installed"
 		// disabled PowerShell analysis for the session on hosts that had it.
 		safeSpawnAsync.mockImplementation(async (_cmd: string, args: string[]) =>
-			args.some((arg) => arg.includes("Get-Module")) ? spawnUnknownResult : ok(),
+			args.some((arg) => arg.includes("Get-Module"))
+				? spawnUnknownResult
+				: ok(),
 		);
 		expect((await runner.run(ctx())).status).toBe("skipped");
 		expect(

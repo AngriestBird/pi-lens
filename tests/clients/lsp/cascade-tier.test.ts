@@ -49,7 +49,13 @@ const TOUCH_TS = NOW_BASE - 1_000;
 const PUBLISH_TS = NOW_BASE;
 
 function server(id: string, role?: "language" | "auxiliary") {
-	return { id, name: id, extensions: [".ts"], root: async () => "C:/repo", role };
+	return {
+		id,
+		name: id,
+		extensions: [".ts"],
+		root: async () => "C:/repo",
+		role,
+	};
 }
 
 describe("classifyCascadeWaitTier", () => {
@@ -96,9 +102,9 @@ describe("classifyCascadeWaitTier", () => {
 				launchVariant: "classic" as const,
 			},
 		];
-		expect(
-			mod.classifyCascadeWaitTier({} as any, FILE, snapshots as any),
-		).toBe("tier3-silent");
+		expect(mod.classifyCascadeWaitTier({} as any, FILE, snapshots as any)).toBe(
+			"tier3-silent",
+		);
 	});
 
 	// #541/#558: PR #541 (2026-07-11) briefly classified native-ts7 as
@@ -123,9 +129,9 @@ describe("classifyCascadeWaitTier", () => {
 				launchVariant: "native-ts7" as const,
 			},
 		];
-		expect(
-			mod.classifyCascadeWaitTier({} as any, FILE, snapshots as any),
-		).toBe("collect-later");
+		expect(mod.classifyCascadeWaitTier({} as any, FILE, snapshots as any)).toBe(
+			"collect-later",
+		);
 	});
 
 	it("keeps the shared native-ts7 server policy on waits outside cascade", () => {
@@ -156,9 +162,9 @@ describe("classifyCascadeWaitTier", () => {
 				// no launchVariant field at all
 			},
 		];
-		expect(
-			mod.classifyCascadeWaitTier({} as any, FILE, snapshots as any),
-		).toBe("tier3-silent");
+		expect(mod.classifyCascadeWaitTier({} as any, FILE, snapshots as any)).toBe(
+			"tier3-silent",
+		);
 	});
 
 	it("classifies a pull-mode server as pull-capable", () => {
@@ -173,9 +179,9 @@ describe("classifyCascadeWaitTier", () => {
 				rawCapabilityKeys: [],
 			},
 		];
-		expect(
-			mod.classifyCascadeWaitTier({} as any, FILE, snapshots as any),
-		).toBe("pull-capable");
+		expect(mod.classifyCascadeWaitTier({} as any, FILE, snapshots as any)).toBe(
+			"pull-capable",
+		);
 	});
 
 	it("classifies a push-only server WITHOUT silentOnClean (e.g. pyright, tier 2) as waits", () => {
@@ -190,9 +196,9 @@ describe("classifyCascadeWaitTier", () => {
 				rawCapabilityKeys: [],
 			},
 		];
-		expect(
-			mod.classifyCascadeWaitTier({} as any, FILE, snapshots as any),
-		).toBe("waits");
+		expect(mod.classifyCascadeWaitTier({} as any, FILE, snapshots as any)).toBe(
+			"waits",
+		);
 	});
 
 	it("fails safe to waits when there's no live snapshot for the primary server yet", () => {
@@ -229,9 +235,9 @@ describe("classifyCascadeWaitTier", () => {
 			},
 		];
 		// The auxiliary snapshot (opengrep) must not be mistaken for the primary's.
-		expect(
-			mod.classifyCascadeWaitTier({} as any, FILE, snapshots as any),
-		).toBe("tier3-silent");
+		expect(mod.classifyCascadeWaitTier({} as any, FILE, snapshots as any)).toBe(
+			"tier3-silent",
+		);
 	});
 });
 
@@ -294,9 +300,7 @@ describe("outstanding touch registry + reconcile", () => {
 			getWarmClientForFile: vi
 				.fn()
 				.mockResolvedValue(
-					warmClient("typescript", [
-						[FILE, [{ message: "err" }], AFTER_TOUCH],
-					]),
+					warmClient("typescript", [[FILE, [{ message: "err" }], AFTER_TOUCH]]),
 				),
 		};
 
@@ -322,9 +326,7 @@ describe("outstanding touch registry + reconcile", () => {
 		const lspService = {
 			getWarmClientForFile: vi
 				.fn()
-				.mockResolvedValue(
-					warmClient("typescript", [[FILE, [], AFTER_TOUCH]]),
-				),
+				.mockResolvedValue(warmClient("typescript", [[FILE, [], AFTER_TOUCH]])),
 		};
 
 		const outcomes = await mod.reconcileOutstandingCascadeTouches(
@@ -390,9 +392,7 @@ describe("outstanding touch registry + reconcile", () => {
 		const lspService = {
 			getWarmClientForFile: vi
 				.fn()
-				.mockResolvedValue(
-					warmClient("typescript", [[FILE, [], TOUCHED_AT]]),
-				),
+				.mockResolvedValue(warmClient("typescript", [[FILE, [], TOUCHED_AT]])),
 		};
 
 		const outcomes = await mod.reconcileOutstandingCascadeTouches(
@@ -551,10 +551,14 @@ describe("registerCascadeTierReconcileTask", () => {
 	// cascade.log. The sweep now always emits its gauge.
 	it("the registered task emits a zero gauge when the registry is empty", async () => {
 		logCascade.mockClear();
-		mod.registerCascadeTierReconcileTask(() => ({
-			getWarmClientForFile: vi.fn(),
-		}) as any);
-		const task = registerQuietWindowTask.mock.calls[0][1] as () => Promise<void>;
+		mod.registerCascadeTierReconcileTask(
+			() =>
+				({
+					getWarmClientForFile: vi.fn(),
+				}) as any,
+		);
+		const task = registerQuietWindowTask.mock
+			.calls[0][1] as () => Promise<void>;
 		await expect(task()).resolves.toBeUndefined();
 
 		expect(logCascade).toHaveBeenCalledWith(
@@ -583,7 +587,10 @@ describe("registerCascadeTierReconcileTask", () => {
 					new Map([
 						[
 							normalizeMapKey("C:/repo/neighbor.ts"),
-							{ diags: [{ message: "cold neighbor err", severity: 1 }], ts: PUBLISH_TS },
+							{
+								diags: [{ message: "cold neighbor err", severity: 1 }],
+								ts: PUBLISH_TS,
+							},
 						],
 					]),
 				),
@@ -598,7 +605,8 @@ describe("registerCascadeTierReconcileTask", () => {
 			serverId: "typescript",
 			touchedAt: TOUCH_TS,
 		});
-		const task = registerQuietWindowTask.mock.calls[0][1] as () => Promise<void>;
+		const task = registerQuietWindowTask.mock
+			.calls[0][1] as () => Promise<void>;
 		await task();
 
 		expect(onResolvedFound).toHaveBeenCalledTimes(1);
@@ -619,11 +627,16 @@ describe("registerCascadeTierReconcileTask", () => {
 		const warm = {
 			client: {
 				serverId: "typescript",
-				getAllDiagnostics: vi.fn().mockReturnValue(
-					new Map([
-						[normalizeMapKey("C:/repo/neighbor.ts"), { diags: [], ts: PUBLISH_TS }],
-					]),
-				),
+				getAllDiagnostics: vi
+					.fn()
+					.mockReturnValue(
+						new Map([
+							[
+								normalizeMapKey("C:/repo/neighbor.ts"),
+								{ diags: [], ts: PUBLISH_TS },
+							],
+						]),
+					),
 			},
 		};
 		mod.registerCascadeTierReconcileTask(
@@ -635,7 +648,8 @@ describe("registerCascadeTierReconcileTask", () => {
 			serverId: "typescript",
 			touchedAt: TOUCH_TS,
 		});
-		const task = registerQuietWindowTask.mock.calls[0][1] as () => Promise<void>;
+		const task = registerQuietWindowTask.mock
+			.calls[0][1] as () => Promise<void>;
 		await task();
 
 		expect(onResolvedFound).not.toHaveBeenCalled();
@@ -652,11 +666,16 @@ describe("registerCascadeTierReconcileTask", () => {
 		const warm = {
 			client: {
 				serverId: "typescript",
-				getAllDiagnostics: vi.fn().mockReturnValue(
-					new Map([
-						[normalizeMapKey("C:/repo/neighbor.ts"), { diags: [], ts: PUBLISH_TS }],
-					]),
-				),
+				getAllDiagnostics: vi
+					.fn()
+					.mockReturnValue(
+						new Map([
+							[
+								normalizeMapKey("C:/repo/neighbor.ts"),
+								{ diags: [], ts: PUBLISH_TS },
+							],
+						]),
+					),
 			},
 		};
 		mod.registerCascadeTierReconcileTask(
@@ -668,7 +687,8 @@ describe("registerCascadeTierReconcileTask", () => {
 			serverId: "typescript",
 			touchedAt: TOUCH_TS,
 		});
-		const task = registerQuietWindowTask.mock.calls[0][1] as () => Promise<void>;
+		const task = registerQuietWindowTask.mock
+			.calls[0][1] as () => Promise<void>;
 		await task();
 
 		expect(onResolvedFound).not.toHaveBeenCalled();
@@ -700,7 +720,8 @@ describe("registerCascadeTierReconcileTask", () => {
 			serverId: "typescript",
 			touchedAt: TOUCH_TS,
 		});
-		const task = registerQuietWindowTask.mock.calls[0][1] as () => Promise<void>;
+		const task = registerQuietWindowTask.mock
+			.calls[0][1] as () => Promise<void>;
 		await task();
 
 		expect(onResolvedClean).not.toHaveBeenCalled();

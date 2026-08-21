@@ -66,65 +66,66 @@ query($owner: String!, $name: String!, $after: String) {
 // a throw would crash the bare top-level await in the CLI entry point and
 // lose the whole run's summary instead of skipping the affected page.
 async function graphql(fetcher, query, variables) {
-  const response = await fetcher("https://api.github.com/graphql", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ query, variables }),
-  });
-  if (!response.ok) throw new Error(`GitHub GraphQL API ${response.status}`);
-  return response.json();
+	const response = await fetcher("https://api.github.com/graphql", {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ query, variables }),
+	});
+	if (!response.ok) throw new Error(`GitHub GraphQL API ${response.status}`);
+	return response.json();
 }
 
 function normalizePr(node) {
-  const labels = new Set((node.labels?.nodes ?? []).map((l) => l.name));
-  const headCommit = node.commits?.nodes?.[0]?.commit;
-  const rollup = headCommit?.statusCheckRollup;
-  // A null/absent rollup (review round 1, F2) is NOT the same as "zero
-  // failing checks" -- it means GitHub hasn't told us anything about the
-  // head commit's checks yet (permissions gap, brand-new commit, API hiccup).
-  // Collapsing that to "clean" would strip an existing red-ci label on pure
-  // absence of information. checksUnknown lets decideActions distinguish
-  // "confirmed no failures" from "we don't know".
-  const checksUnknown = rollup == null;
-  const contexts = rollup?.contexts?.nodes ?? [];
-  const checkRunsByName = new Map();
-  for (const c of contexts) {
-    if (c.__typename === "CheckRun") checkRunsByName.set(c.name, c);
-  }
-  const failingRequiredChecks = [];
-  // A required check that hasn't reported yet (absent from the rollup) or is
-  // mid-run (conclusion null: queued/in-progress/re-queued) is UNRESOLVED,
-  // not "not failing" (review round 1, F3). Only a settled non-FAILURE
-  // conclusion counts as positive evidence of passing.
-  //
-  // The REQUIRED_CHECKS loop below is the ONLY filter that keeps a failing
-  // non-required check (e.g. SonarCloud) from tripping red-ci (review round
-  // 1, F5) -- it looks up exactly the required names, ignoring every other
-  // key checkRunsByName may hold.
-  const unresolvedRequiredChecks = [];
-  for (const name of REQUIRED_CHECKS) {
-    const run = checkRunsByName.get(name);
-    if (!run) unresolvedRequiredChecks.push(name);
-    else if (run.conclusion === "FAILURE") failingRequiredChecks.push({ name, url: run.detailsUrl });
-    else if (!run.conclusion) unresolvedRequiredChecks.push(name);
-  }
-  return {
-    number: node.number,
-    url: node.url,
-    headSha: headCommit?.oid,
-    mergeStateStatus: node.mergeStateStatus,
-    autoMergeEnabled: Boolean(node.autoMergeRequest),
-    // isCrossRepository is GitHub's own fork signal: true when the PR's head
-    // repository differs from this (base) repository. update-branch's PUT
-    // creates a commit ON the head branch, so a fork-owned head is the
-    // expected 403 case -- the workflow token can label/comment on the PR
-    // without ever having write access to someone else's repository (#1959).
-    isFork: Boolean(node.isCrossRepository),
-    labels,
-    checksUnknown,
-    failingRequiredChecks,
-    unresolvedRequiredChecks,
-  };
+	const labels = new Set((node.labels?.nodes ?? []).map((l) => l.name));
+	const headCommit = node.commits?.nodes?.[0]?.commit;
+	const rollup = headCommit?.statusCheckRollup;
+	// A null/absent rollup (review round 1, F2) is NOT the same as "zero
+	// failing checks" -- it means GitHub hasn't told us anything about the
+	// head commit's checks yet (permissions gap, brand-new commit, API hiccup).
+	// Collapsing that to "clean" would strip an existing red-ci label on pure
+	// absence of information. checksUnknown lets decideActions distinguish
+	// "confirmed no failures" from "we don't know".
+	const checksUnknown = rollup == null;
+	const contexts = rollup?.contexts?.nodes ?? [];
+	const checkRunsByName = new Map();
+	for (const c of contexts) {
+		if (c.__typename === "CheckRun") checkRunsByName.set(c.name, c);
+	}
+	const failingRequiredChecks = [];
+	// A required check that hasn't reported yet (absent from the rollup) or is
+	// mid-run (conclusion null: queued/in-progress/re-queued) is UNRESOLVED,
+	// not "not failing" (review round 1, F3). Only a settled non-FAILURE
+	// conclusion counts as positive evidence of passing.
+	//
+	// The REQUIRED_CHECKS loop below is the ONLY filter that keeps a failing
+	// non-required check (e.g. SonarCloud) from tripping red-ci (review round
+	// 1, F5) -- it looks up exactly the required names, ignoring every other
+	// key checkRunsByName may hold.
+	const unresolvedRequiredChecks = [];
+	for (const name of REQUIRED_CHECKS) {
+		const run = checkRunsByName.get(name);
+		if (!run) unresolvedRequiredChecks.push(name);
+		else if (run.conclusion === "FAILURE")
+			failingRequiredChecks.push({ name, url: run.detailsUrl });
+		else if (!run.conclusion) unresolvedRequiredChecks.push(name);
+	}
+	return {
+		number: node.number,
+		url: node.url,
+		headSha: headCommit?.oid,
+		mergeStateStatus: node.mergeStateStatus,
+		autoMergeEnabled: Boolean(node.autoMergeRequest),
+		// isCrossRepository is GitHub's own fork signal: true when the PR's head
+		// repository differs from this (base) repository. update-branch's PUT
+		// creates a commit ON the head branch, so a fork-owned head is the
+		// expected 403 case -- the workflow token can label/comment on the PR
+		// without ever having write access to someone else's repository (#1959).
+		isFork: Boolean(node.isCrossRepository),
+		labels,
+		checksUnknown,
+		failingRequiredChecks,
+		unresolvedRequiredChecks,
+	};
 }
 
 /**
@@ -135,25 +136,30 @@ function normalizePr(node) {
  * -- never throw out of this function (review round 1, F6).
  */
 export async function fetchOpenPullRequests(fetcher, owner, name) {
-  const prs = [];
-  const errors = [];
-  let after;
-  for (let page = 0; page < MAX_PAGES; page++) {
-    let payload;
-    try {
-      payload = await graphql(fetcher, PR_QUERY, { owner, name, after });
-    } catch (error) {
-      errors.push(`GraphQL request failed: ${error instanceof Error ? error.message : String(error)}`);
-      break;
-    }
-    if (payload?.errors?.length) errors.push(`GraphQL errors: ${payload.errors.map((e) => e.message).join("; ")}`);
-    const connection = payload?.data?.repository?.pullRequests;
-    if (!connection || !Array.isArray(connection.nodes)) break;
-    for (const node of connection.nodes) prs.push(normalizePr(node));
-    if (!connection.pageInfo?.hasNextPage) break;
-    after = connection.pageInfo.endCursor;
-  }
-  return { prs, errors };
+	const prs = [];
+	const errors = [];
+	let after;
+	for (let page = 0; page < MAX_PAGES; page++) {
+		let payload;
+		try {
+			payload = await graphql(fetcher, PR_QUERY, { owner, name, after });
+		} catch (error) {
+			errors.push(
+				`GraphQL request failed: ${error instanceof Error ? error.message : String(error)}`,
+			);
+			break;
+		}
+		if (payload?.errors?.length)
+			errors.push(
+				`GraphQL errors: ${payload.errors.map((e) => e.message).join("; ")}`,
+			);
+		const connection = payload?.data?.repository?.pullRequests;
+		if (!connection || !Array.isArray(connection.nodes)) break;
+		for (const node of connection.nodes) prs.push(normalizePr(node));
+		if (!connection.pageInfo?.hasNextPage) break;
+		after = connection.pageInfo.endCursor;
+	}
+	return { prs, errors };
 }
 
 /**
@@ -166,59 +172,66 @@ export async function fetchOpenPullRequests(fetcher, owner, name) {
  * carries no separate marker to scan for (review round 1, F9).
  */
 export function decideActions(pr) {
-  const actions = [];
-  const isDirty = pr.mergeStateStatus === "DIRTY";
-  // Recovery requires a POSITIVELY KNOWN non-DIRTY state (review round 1,
-  // F1). GitHub reports mergeStateStatus: UNKNOWN for every open PR for a
-  // few seconds after each push while it recomputes mergeability -- treating
-  // that as "clean again" would strip the conflict label and then
-  // immediately re-add it plus re-comment on the very next tick.
-  const isConfirmedNotDirty = pr.mergeStateStatus !== "DIRTY" && pr.mergeStateStatus !== "UNKNOWN";
-  const hasConflictLabel = pr.labels.has(CONFLICT_LABEL);
-  if (isDirty && !hasConflictLabel) {
-    actions.push({ type: "add-label", label: CONFLICT_LABEL });
-    actions.push({
-      type: "comment",
-      body: "This PR is merge-conflicted; required checks are silently skipped until resolved.",
-    });
-  } else if (isConfirmedNotDirty && hasConflictLabel) {
-    actions.push({ type: "remove-label", label: CONFLICT_LABEL });
-  }
-  // mergeStateStatus: UNKNOWN + label present falls through both branches
-  // above: no action either direction, by construction.
+	const actions = [];
+	const isDirty = pr.mergeStateStatus === "DIRTY";
+	// Recovery requires a POSITIVELY KNOWN non-DIRTY state (review round 1,
+	// F1). GitHub reports mergeStateStatus: UNKNOWN for every open PR for a
+	// few seconds after each push while it recomputes mergeability -- treating
+	// that as "clean again" would strip the conflict label and then
+	// immediately re-add it plus re-comment on the very next tick.
+	const isConfirmedNotDirty =
+		pr.mergeStateStatus !== "DIRTY" && pr.mergeStateStatus !== "UNKNOWN";
+	const hasConflictLabel = pr.labels.has(CONFLICT_LABEL);
+	if (isDirty && !hasConflictLabel) {
+		actions.push({ type: "add-label", label: CONFLICT_LABEL });
+		actions.push({
+			type: "comment",
+			body: "This PR is merge-conflicted; required checks are silently skipped until resolved.",
+		});
+	} else if (isConfirmedNotDirty && hasConflictLabel) {
+		actions.push({ type: "remove-label", label: CONFLICT_LABEL });
+	}
+	// mergeStateStatus: UNKNOWN + label present falls through both branches
+	// above: no action either direction, by construction.
 
-  if (pr.autoMergeEnabled && pr.mergeStateStatus === "BEHIND") {
-    actions.push({ type: "update-branch" });
-  }
+	if (pr.autoMergeEnabled && pr.mergeStateStatus === "BEHIND") {
+		actions.push({ type: "update-branch" });
+	}
 
-  const hasRedCiLabel = pr.labels.has(RED_CI_LABEL);
-  if (pr.checksUnknown) {
-    // Can't tell clean from errored (review round 1, F2): never strip an
-    // existing red-ci label on missing data, and record why so the run
-    // summary distinguishes "confirmed green" from "didn't check".
-    if (hasRedCiLabel) {
-      actions.push({
-        type: "note",
-        benign: true,
-        message: `PR #${pr.number}: statusCheckRollup missing on the head commit; red-ci recovery check skipped this run`,
-      });
-    }
-  } else if (pr.failingRequiredChecks.length > 0 && !hasRedCiLabel) {
-    actions.push({ type: "add-label", label: RED_CI_LABEL });
-    const lines = pr.failingRequiredChecks.map((c) => `- **${c.name}** failed${c.url ? ` — ${c.url}` : ""}`);
-    actions.push({
-      type: "comment",
-      body: `A required check is failing on the current head:\n\n${lines.join("\n")}`,
-    });
-  } else if (pr.failingRequiredChecks.length === 0 && pr.unresolvedRequiredChecks.length === 0 && hasRedCiLabel) {
-    // Only remove once every required check has a SETTLED non-failure
-    // conclusion. A re-queued check (conclusion null) stays in
-    // unresolvedRequiredChecks, so this branch does not fire and the label
-    // does not flap while the re-run is in flight (review round 1, F3).
-    actions.push({ type: "remove-label", label: RED_CI_LABEL });
-  }
+	const hasRedCiLabel = pr.labels.has(RED_CI_LABEL);
+	if (pr.checksUnknown) {
+		// Can't tell clean from errored (review round 1, F2): never strip an
+		// existing red-ci label on missing data, and record why so the run
+		// summary distinguishes "confirmed green" from "didn't check".
+		if (hasRedCiLabel) {
+			actions.push({
+				type: "note",
+				benign: true,
+				message: `PR #${pr.number}: statusCheckRollup missing on the head commit; red-ci recovery check skipped this run`,
+			});
+		}
+	} else if (pr.failingRequiredChecks.length > 0 && !hasRedCiLabel) {
+		actions.push({ type: "add-label", label: RED_CI_LABEL });
+		const lines = pr.failingRequiredChecks.map(
+			(c) => `- **${c.name}** failed${c.url ? ` — ${c.url}` : ""}`,
+		);
+		actions.push({
+			type: "comment",
+			body: `A required check is failing on the current head:\n\n${lines.join("\n")}`,
+		});
+	} else if (
+		pr.failingRequiredChecks.length === 0 &&
+		pr.unresolvedRequiredChecks.length === 0 &&
+		hasRedCiLabel
+	) {
+		// Only remove once every required check has a SETTLED non-failure
+		// conclusion. A re-queued check (conclusion null) stays in
+		// unresolvedRequiredChecks, so this branch does not fire and the label
+		// does not flap while the re-run is in flight (review round 1, F3).
+		actions.push({ type: "remove-label", label: RED_CI_LABEL });
+	}
 
-  return actions;
+	return actions;
 }
 
 // update-branch's 403 nuance (#1959): a 403 on a fork-owned PR is the
@@ -235,19 +248,22 @@ export function decideActions(pr) {
 // response AFTER the fact, so it is unit-testable without a network mock,
 // same as decideActions.
 export function classifyActionFailure(action, pr, status) {
-  if (action.type === "update-branch" && status === 403 && pr.isFork) {
-    return { benign: true, outcome: "update-branch-forbidden-fork" };
-  }
-  return { benign: BENIGN_HTTP_STATUSES.has(status), outcome: null };
+	if (action.type === "update-branch" && status === 403 && pr.isFork) {
+		return { benign: true, outcome: "update-branch-forbidden-fork" };
+	}
+	return { benign: BENIGN_HTTP_STATUSES.has(status), outcome: null };
 }
 
 async function restJson(fetcher, method, url, body) {
-  const response = await fetcher(url, {
-    method,
-    headers: { accept: "application/vnd.github+json", "content-type": "application/json" },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
-  return response;
+	const response = await fetcher(url, {
+		method,
+		headers: {
+			accept: "application/vnd.github+json",
+			"content-type": "application/json",
+		},
+		body: body === undefined ? undefined : JSON.stringify(body),
+	});
+	return response;
 }
 
 /**
@@ -257,19 +273,32 @@ async function restJson(fetcher, method, url, body) {
  * call and are recorded directly by runWarden.
  */
 export async function applyAction(fetcher, owner, repo, pr, action) {
-  const base = `https://api.github.com/repos/${owner}/${repo}`;
-  switch (action.type) {
-    case "add-label":
-      return restJson(fetcher, "POST", `${base}/issues/${pr.number}/labels`, { labels: [action.label] });
-    case "remove-label":
-      return restJson(fetcher, "DELETE", `${base}/issues/${pr.number}/labels/${encodeURIComponent(action.label)}`);
-    case "comment":
-      return restJson(fetcher, "POST", `${base}/issues/${pr.number}/comments`, { body: action.body });
-    case "update-branch":
-      return restJson(fetcher, "PUT", `${base}/pulls/${pr.number}/update-branch`, { expected_head_sha: pr.headSha });
-    default:
-      throw new Error(`unknown warden action type: ${action.type}`);
-  }
+	const base = `https://api.github.com/repos/${owner}/${repo}`;
+	switch (action.type) {
+		case "add-label":
+			return restJson(fetcher, "POST", `${base}/issues/${pr.number}/labels`, {
+				labels: [action.label],
+			});
+		case "remove-label":
+			return restJson(
+				fetcher,
+				"DELETE",
+				`${base}/issues/${pr.number}/labels/${encodeURIComponent(action.label)}`,
+			);
+		case "comment":
+			return restJson(fetcher, "POST", `${base}/issues/${pr.number}/comments`, {
+				body: action.body,
+			});
+		case "update-branch":
+			return restJson(
+				fetcher,
+				"PUT",
+				`${base}/pulls/${pr.number}/update-branch`,
+				{ expected_head_sha: pr.headSha },
+			);
+		default:
+			throw new Error(`unknown warden action type: ${action.type}`);
+	}
 }
 
 /**
@@ -281,41 +310,61 @@ export async function applyAction(fetcher, owner, repo, pr, action) {
  * scheduled run itself to go red; anything else is a real failure.
  */
 export async function runWarden({ fetcher, owner, repo }) {
-  const { prs, errors: listErrors } = await fetchOpenPullRequests(fetcher, owner, repo);
-  const results = [];
-  if (listErrors.length > 0) {
-    results.push({
-      number: null,
-      url: null,
-      mergeStateStatus: null,
-      applied: [],
-      errors: listErrors.map((message) => ({ message, benign: false })),
-    });
-  }
-  for (const pr of prs) {
-    const actions = decideActions(pr);
-    const applied = [];
-    const errors = [];
-    for (const action of actions) {
-      if (action.type === "note") {
-        errors.push({ message: action.message, benign: action.benign ?? true });
-        continue;
-      }
-      try {
-        const response = await applyAction(fetcher, owner, repo, pr, action);
-        if (!response.ok) {
-          const classification = classifyActionFailure(action, pr, response.status);
-          const suffix = classification.outcome ? ` (${classification.outcome})` : "";
-          const message = `${action.type} ${action.label ?? ""} -> HTTP ${response.status}${suffix}`.trim();
-          errors.push({ message, benign: classification.benign });
-        } else {
-          applied.push(action.type + (action.label ? `:${action.label}` : ""));
-        }
-      } catch (error) {
-        errors.push({ message: `${action.type} -> ${error instanceof Error ? error.message : String(error)}`, benign: false });
-      }
-    }
-    results.push({ number: pr.number, url: pr.url, mergeStateStatus: pr.mergeStateStatus, applied, errors });
-  }
-  return results;
+	const { prs, errors: listErrors } = await fetchOpenPullRequests(
+		fetcher,
+		owner,
+		repo,
+	);
+	const results = [];
+	if (listErrors.length > 0) {
+		results.push({
+			number: null,
+			url: null,
+			mergeStateStatus: null,
+			applied: [],
+			errors: listErrors.map((message) => ({ message, benign: false })),
+		});
+	}
+	for (const pr of prs) {
+		const actions = decideActions(pr);
+		const applied = [];
+		const errors = [];
+		for (const action of actions) {
+			if (action.type === "note") {
+				errors.push({ message: action.message, benign: action.benign ?? true });
+				continue;
+			}
+			try {
+				const response = await applyAction(fetcher, owner, repo, pr, action);
+				if (!response.ok) {
+					const classification = classifyActionFailure(
+						action,
+						pr,
+						response.status,
+					);
+					const suffix = classification.outcome
+						? ` (${classification.outcome})`
+						: "";
+					const message =
+						`${action.type} ${action.label ?? ""} -> HTTP ${response.status}${suffix}`.trim();
+					errors.push({ message, benign: classification.benign });
+				} else {
+					applied.push(action.type + (action.label ? `:${action.label}` : ""));
+				}
+			} catch (error) {
+				errors.push({
+					message: `${action.type} -> ${error instanceof Error ? error.message : String(error)}`,
+					benign: false,
+				});
+			}
+		}
+		results.push({
+			number: pr.number,
+			url: pr.url,
+			mergeStateStatus: pr.mergeStateStatus,
+			applied,
+			errors,
+		});
+	}
+	return results;
 }

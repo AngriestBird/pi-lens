@@ -34,10 +34,16 @@ describe("jscpd-client", () => {
 	beforeEach(async () => {
 		const safeSpawnMod = await import("../../clients/safe-spawn.js");
 		vi.mocked(safeSpawnMod.safeSpawnAsync).mockClear();
-		vi.mocked(safeSpawnMod.safeSpawnAsync).mockResolvedValue({ error: undefined, status: 0, stdout: "", stderr: "" });
+		vi.mocked(safeSpawnMod.safeSpawnAsync).mockResolvedValue({
+			error: undefined,
+			status: 0,
+			stdout: "",
+			stderr: "",
+		});
 		ensureTool.mockReset();
 		findNodeToolBinary.mockReset();
-		const helpers = await import("../../clients/dispatch/runners/utils/runner-helpers.js");
+		const helpers =
+			await import("../../clients/dispatch/runners/utils/runner-helpers.js");
 		helpers.resetDispatchAvailabilityState();
 		findNodeToolBinary.mockResolvedValue(null);
 	});
@@ -52,9 +58,10 @@ describe("jscpd-client", () => {
 		// a bare "/fake/managed/jscpd" silently fails the client's
 		// `isFullyQualified(resolved)` gate and the client falls through to
 		// npx instead of the managed path (#1491).
-		const managed = process.platform === "win32"
-			? String.raw`C:\fake\managed\jscpd.exe`
-			: "/fake/managed/jscpd";
+		const managed =
+			process.platform === "win32"
+				? String.raw`C:\fake\managed\jscpd.exe`
+				: "/fake/managed/jscpd";
 		try {
 			fs.writeFileSync(path.join(tmpDir, "src.ts"), "const x = 1;\n");
 			ensureTool.mockResolvedValue(managed);
@@ -67,7 +74,12 @@ describe("jscpd-client", () => {
 					stdout: "",
 					stderr: "",
 				})
-				.mockResolvedValue({ error: undefined, status: 0, stdout: "", stderr: "" });
+				.mockResolvedValue({
+					error: undefined,
+					status: 0,
+					stdout: "",
+					stderr: "",
+				});
 			const result = await new JscpdClient().scan(tmpDir);
 			expect(result.success).toBe(true);
 			expect(vi.mocked(safeSpawnMod.safeSpawnAsync).mock.calls[1]?.[0]).toBe(
@@ -94,7 +106,8 @@ describe("jscpd-client", () => {
 		expect(ensureTool).toHaveBeenCalledTimes(1);
 		await client.ensureAvailable();
 		expect(ensureTool).toHaveBeenCalledTimes(1);
-		const helpers = await import("../../clients/dispatch/runners/utils/runner-helpers.js");
+		const helpers =
+			await import("../../clients/dispatch/runners/utils/runner-helpers.js");
 		helpers.resetDispatchAvailabilityState();
 		ensureTool.mockResolvedValue("jscpd");
 		expect(await client.ensureAvailable()).toBe(true);
@@ -280,7 +293,9 @@ describe("jscpd-client", () => {
 			vi.mocked(safeSpawnMod.safeSpawnAsync).mockClear();
 
 			// cwd IS the home directory.
-			const result = await client.scan(tmpDir, 5, 50, true, { homeDir: tmpDir });
+			const result = await client.scan(tmpDir, 5, 50, true, {
+				homeDir: tmpDir,
+			});
 
 			expect(result.success).toBe(false);
 			expect(result.clones).toEqual([]);
@@ -430,7 +445,11 @@ describe("jscpd-client", () => {
 			fs.writeFileSync(srcFile, "export const x = 1;\n");
 			fs.writeFileSync(
 				path.join(tmpDir, ".jscpd.json"),
-				JSON.stringify({ minLines: 10, minTokens: 100, ignore: ["**/vendor/**"] }),
+				JSON.stringify({
+					minLines: 10,
+					minTokens: 100,
+					ignore: ["**/vendor/**"],
+				}),
 			);
 
 			const client = new JscpdClient(false) as unknown as {

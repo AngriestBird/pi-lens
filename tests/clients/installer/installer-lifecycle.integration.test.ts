@@ -31,15 +31,15 @@ function writeFakeNpm(dir: string): {
 			'fs.appendFileSync(process.env.FAKE_NPM_COUNTER, "install\\n");',
 			'if (process.env.FAKE_NPM_SLOW === "1") {',
 			' const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });',
-			' fs.writeFileSync(process.env.FAKE_NPM_CHILD_PID, String(child.pid));',
-			' setInterval(() => {}, 1000);',
-			'} else {',
+			" fs.writeFileSync(process.env.FAKE_NPM_CHILD_PID, String(child.pid));",
+			" setInterval(() => {}, 1000);",
+			"} else {",
 			' const bin = path.join(process.env.PI_LENS_HOME, "tools", "node_modules", ".bin");',
-			' fs.mkdirSync(bin, { recursive: true });',
+			" fs.mkdirSync(bin, { recursive: true });",
 			process.platform === "win32"
 				? ' fs.writeFileSync(path.join(bin, "oxlint.cmd"), "@echo off\\r\\necho oxlint 1.0.0\\r\\n");'
 				: ' fs.writeFileSync(path.join(bin, "oxlint"), "#!/bin/sh\\necho oxlint 1.0.0\\n", { mode: 0o750 });',
-			'}',
+			"}",
 		].join("\n"),
 	);
 	if (process.platform === "win32") {
@@ -149,7 +149,9 @@ describe("installer process lifecycle (#945)", () => {
 		const results = await Promise.all([runEnsure(env), runEnsure(env)]);
 		expect(results.map((result) => result.code)).toEqual([0, 0]);
 		expect(fs.existsSync(counter), JSON.stringify(results)).toBe(true);
-		expect(fs.readFileSync(counter, "utf8").trim().split(/\r?\n/)).toHaveLength(1);
+		expect(fs.readFileSync(counter, "utf8").trim().split(/\r?\n/)).toHaveLength(
+			1,
+		);
 		expect(results.every((result) => /oxlint/.test(result.stdout))).toBe(true);
 	});
 

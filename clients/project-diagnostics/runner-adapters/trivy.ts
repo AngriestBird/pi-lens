@@ -17,7 +17,9 @@ export function trivyFindingToProjectDiagnostic(
 			? finding.target
 			: path.resolve(cwd, finding.target)
 		: cwd;
-	const version = finding.installedVersion ? `@${finding.installedVersion}` : "";
+	const version = finding.installedVersion
+		? `@${finding.installedVersion}`
+		: "";
 	const fix = finding.fixedVersion ? ` (fixed in ${finding.fixedVersion})` : "";
 	return {
 		filePath,

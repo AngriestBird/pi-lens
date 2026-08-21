@@ -37,7 +37,8 @@ const REAL_WARNING_SUGGESTION_OUTPUT = JSON.stringify({
 			Check: "Google.Headings",
 			Description: "",
 			Link: "https://developers.google.com/style/capitalization#capitalization-in-titles-and-headings",
-			Message: "'pi-lens — agent context' should use sentence-style capitalization.",
+			Message:
+				"'pi-lens — agent context' should use sentence-style capitalization.",
 			Severity: "warning",
 			Match: "pi-lens — agent context",
 			Line: 1,

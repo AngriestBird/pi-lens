@@ -89,10 +89,11 @@ describe("GenerationSource — straddle", () => {
 		first.guardedWrite("tool-a", () => "x");
 		second.guardedWrite("tool-b", () => "x");
 
-		expect(staleWrites().map((entry) => entry.subject).sort()).toEqual([
-			"straddle-store:tool-a",
-			"straddle-store:tool-b",
-		]);
+		expect(
+			staleWrites()
+				.map((entry) => entry.subject)
+				.sort(),
+		).toEqual(["straddle-store:tool-a", "straddle-store:tool-b"]);
 	});
 });
 

@@ -498,7 +498,9 @@ export function classifyProbeFailure(
  * `unref`'d and cleared on the single settle path, so it can never hold a
  * print-mode process open (recurring defect shape 4).
  */
-export function startHostStallSampler(intervalMs = 100): { stop: () => number } {
+export function startHostStallSampler(intervalMs = 100): {
+	stop: () => number;
+} {
 	let stallMs = 0;
 	let last = Date.now();
 	let stopped = false;

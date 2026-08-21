@@ -101,7 +101,14 @@ describe("resyncLspFile — bounded pre-dispatch LSP sync", () => {
 			() => new Promise(() => {}), // touch never resolves within the test
 			() => true, // the target server's spawn is still unresolved
 		);
-		await resyncLspFile("/proj/new.json", "content", true, false, getFlag, dbgSpy);
+		await resyncLspFile(
+			"/proj/new.json",
+			"content",
+			true,
+			false,
+			getFlag,
+			dbgSpy,
+		);
 
 		const joined = dbgCalls.join("\n");
 		expect(joined).toContain("spawn-in-flight");

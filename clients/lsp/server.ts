@@ -8,12 +8,7 @@
  */
 
 import { existsSync, mkdirSync } from "node:fs";
-import {
-	access,
-	readFile,
-	readdir,
-	stat,
-} from "node:fs/promises";
+import { access, readFile, readdir, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import {
@@ -40,7 +35,10 @@ import {
 	getToolPath,
 } from "../installer/index.js";
 import { resolveOpengrepConfig } from "../opengrep-config.js";
-import { isZizmorAuditTarget, resolveZizmorGitHubToken } from "../zizmor-config.js";
+import {
+	isZizmorAuditTarget,
+	resolveZizmorGitHubToken,
+} from "../zizmor-config.js";
 import { logLatency } from "../latency-logger.js";
 import { logSessionStart } from "../sessionstart-logger.js";
 import { findLocalSgconfig, resolveBaselineSgconfig } from "../sgconfig.js";
@@ -179,9 +177,11 @@ function hasFixtureConvention(dir: string): boolean {
 	// Go treats any directory named testdata as fixture data by convention. The
 	// exclusion is intentionally ancestor-wide so nested fixture projects cannot
 	// become independent LSP roots, but the segment match itself stays exact.
-	if (segments.some((segment) => FIXTURE_ROOT_SEGMENTS.has(segment))) return true;
+	if (segments.some((segment) => FIXTURE_ROOT_SEGMENTS.has(segment)))
+		return true;
 	return segments.some(
-		(segment, index) => segment === "tests" && segments[index + 1] === "fixtures",
+		(segment, index) =>
+			segment === "tests" && segments[index + 1] === "fixtures",
 	);
 }
 
@@ -201,7 +201,8 @@ async function findGitBoundary(dir: string): Promise<string | undefined> {
 
 async function isExcludedLspRoot(dir: string): Promise<boolean> {
 	const candidate = path.resolve(dir);
-	if (hasFixtureConvention(candidate) || hasAtomicStageSegment(candidate)) return true;
+	if (hasFixtureConvention(candidate) || hasAtomicStageSegment(candidate))
+		return true;
 	const gitRoot = await findGitBoundary(candidate);
 	if (!gitRoot || gitRoot === candidate) return false;
 	// Avoid constructing the matcher when the project has no positive ignore rules.
@@ -210,7 +211,9 @@ async function isExcludedLspRoot(dir: string): Promise<boolean> {
 	return isPathIgnoredByProject(candidate, gitRoot, true);
 }
 
-async function nearestNonExcludedFallbackRoot(candidate: string): Promise<string> {
+async function nearestNonExcludedFallbackRoot(
+	candidate: string,
+): Promise<string> {
 	if (!(await isExcludedLspRoot(candidate))) return path.resolve(candidate);
 	let current = path.dirname(path.resolve(candidate));
 	const fsRoot = path.parse(current).root;
@@ -338,7 +341,9 @@ export function resetDirectLspCommandAvailability(): void {
 }
 
 /** Test seam for seeding the real negative-cache path. */
-export function _markDirectLspCommandUnavailableForTests(command: string): void {
+export function _markDirectLspCommandUnavailableForTests(
+	command: string,
+): void {
 	markDirectLspCommandUnavailable(command);
 }
 
@@ -528,8 +533,8 @@ export async function resolveAndLaunch(
 		);
 		trackRuntimeFailure(failure.err);
 	}
-	const hasOnlyRepairableCandidateFailures = candidateFailures.every((failure) =>
-		hasSpawnFailureKind(failure.err, "tool-not-found"),
+	const hasOnlyRepairableCandidateFailures = candidateFailures.every(
+		(failure) => hasSpawnFailureKind(failure.err, "tool-not-found"),
 	);
 	if (!hasOnlyRepairableCandidateFailures) {
 		if (lastRuntimeFailure) throw lastRuntimeFailure;
@@ -1690,7 +1695,9 @@ function isTsFamilyFile(file: string): boolean {
 }
 
 function tsConfigMarkersForFile(file: string): readonly string[] {
-	return isTsFamilyFile(file) ? (["tsconfig.json"] as const) : TS_CONFIG_MARKERS;
+	return isTsFamilyFile(file)
+		? (["tsconfig.json"] as const)
+		: TS_CONFIG_MARKERS;
 }
 
 // Two detector instances (not one parameterized by file) so each keeps its own
@@ -2089,7 +2096,9 @@ export const GoServer: LSPServerInfo = {
 	},
 };
 
-async function readTextFileOrUndefined(filePath: string): Promise<string | undefined> {
+async function readTextFileOrUndefined(
+	filePath: string,
+): Promise<string | undefined> {
 	try {
 		return await readFile(filePath, "utf-8");
 	} catch {
@@ -2111,7 +2120,9 @@ function extractTomlTableSection(content: string, tableName: string): string {
 	if (!match) return "";
 	const rest = content.slice(match.index + match[0].length);
 	const nextHeading = rest.match(/^\[{1,2}[^\]]+\]{1,2}[ \t]*(?:#.*)?$/m);
-	return nextHeading?.index !== undefined ? rest.slice(0, nextHeading.index) : rest;
+	return nextHeading?.index !== undefined
+		? rest.slice(0, nextHeading.index)
+		: rest;
 }
 
 function parseTomlStringArray(content: string, key: string): string[] {
@@ -2119,8 +2130,8 @@ function parseTomlStringArray(content: string, key: string): string[] {
 		new RegExp(`^[ \\t]*${key}[ \\t]*=[ \\t]*\\[([\\s\\S]*?)\\]`, "m"),
 	);
 	if (!match) return [];
-	return [...match[1].matchAll(/"([^"]*)"|'([^']*)'/g)].map(
-		(m) => (m[1] ?? m[2] ?? "").trim(),
+	return [...match[1].matchAll(/"([^"]*)"|'([^']*)'/g)].map((m) =>
+		(m[1] ?? m[2] ?? "").trim(),
 	);
 }
 
@@ -2152,7 +2163,10 @@ function segmentGlobToRegExpSource(segment: string): string {
  * deliberately out of #1671's scope: the common, and the issue's fixture,
  * shape is an explicit fixed-depth `members` list.
  */
-function matchesCargoWorkspacePattern(pattern: string, relativePath: string): boolean {
+function matchesCargoWorkspacePattern(
+	pattern: string,
+	relativePath: string,
+): boolean {
 	const normalized = pattern.replace(/\/+$/, "");
 	if (normalized.includes("**")) return false;
 	const patternSegments = normalized.split("/");
@@ -2187,15 +2201,27 @@ function cargoWorkspaceDeclaresMember(
 	parentDir: string,
 	childDir: string,
 ): boolean {
-	const relativePath = path.relative(parentDir, childDir).split(path.sep).join("/");
+	const relativePath = path
+		.relative(parentDir, childDir)
+		.split(path.sep)
+		.join("/");
 	if (relativePath === "" || relativePath.startsWith("..")) return false;
-	const workspaceSection = extractTomlTableSection(workspaceContent, "workspace");
+	const workspaceSection = extractTomlTableSection(
+		workspaceContent,
+		"workspace",
+	);
 	const excluded = parseTomlStringArray(workspaceSection, "exclude");
-	if (excluded.some((pattern) => matchesCargoWorkspacePattern(pattern, relativePath))) {
+	if (
+		excluded.some((pattern) =>
+			matchesCargoWorkspacePattern(pattern, relativePath),
+		)
+	) {
 		return false;
 	}
 	const members = parseTomlStringArray(workspaceSection, "members");
-	return members.some((pattern) => matchesCargoWorkspacePattern(pattern, relativePath));
+	return members.some((pattern) =>
+		matchesCargoWorkspacePattern(pattern, relativePath),
+	);
 }
 
 /**
@@ -2206,7 +2232,10 @@ function cargoWorkspaceDeclaresMember(
  * `file` is outside the session (isolated tests, out-of-session API callers),
  * enforceLspRootCeiling is a no-op, so the walk is left unbounded (`undefined`).
  */
-function sessionHoistCeiling(sessionCwd: string, file: string): string | undefined {
+function sessionHoistCeiling(
+	sessionCwd: string,
+	file: string,
+): string | undefined {
 	return isSameOrWithin(path.resolve(sessionCwd), path.resolve(file))
 		? path.resolve(sessionCwd)
 		: undefined;
@@ -2234,7 +2263,10 @@ function RustWorkspaceRoot(): RootFunction {
 			if (parent === current || parent === fsRoot) break;
 			const parentCargoPath = path.join(parent, "Cargo.toml");
 			const parentCargoContent = await readTextFileOrUndefined(parentCargoPath);
-			if (parentCargoContent !== undefined && /^\s*\[workspace\]/m.test(parentCargoContent)) {
+			if (
+				parentCargoContent !== undefined &&
+				/^\s*\[workspace\]/m.test(parentCargoContent)
+			) {
 				// Test membership against the ORIGINAL crate dir (`root`), never the
 				// walk cursor (`current`, which may already have climbed through
 				// gap directories that have no Cargo.toml of their own) — a
@@ -2289,12 +2321,15 @@ async function declaresMavenModule(
 		const modulesBlock = content.match(/<modules>([\s\S]*?)<\/modules>/);
 		if (!modulesBlock) return false;
 		const resolvedChild = path.resolve(childDir);
-		for (const match of modulesBlock[1].matchAll(/<module>\s*([^<]+?)\s*<\/module>/g)) {
+		for (const match of modulesBlock[1].matchAll(
+			/<module>\s*([^<]+?)\s*<\/module>/g,
+		)) {
 			// Case-insensitive / realpath-aware compare (#1671 F8): a declared
 			// `<module>Foo</module>` must still match a directory actually named
 			// `foo` on a case-insensitive filesystem, the same class of check the
 			// rest of this codebase does via `pathsEqual` (#1139/#1150).
-			if (pathsEqual(path.resolve(parentDir, match[1]), resolvedChild)) return true;
+			if (pathsEqual(path.resolve(parentDir, match[1]), resolvedChild))
+				return true;
 		}
 		return false;
 	} catch {
@@ -2303,7 +2338,11 @@ async function declaresMavenModule(
 }
 
 function JavaWorkspaceRoot(): RootFunction {
-	const moduleRoot = createRootDetector(["pom.xml", "build.gradle", ".classpath"]);
+	const moduleRoot = createRootDetector([
+		"pom.xml",
+		"build.gradle",
+		".classpath",
+	]);
 	return async (file: string): Promise<string | undefined> => {
 		const root = await moduleRoot(file);
 		if (!root) return undefined;
@@ -3480,7 +3519,9 @@ const TYPOS_EXTENSIONS: readonly string[] = Array.from(
 // be injected alongside ours (see findLocalTyposConfig below): honoring an
 // existing project config means injecting NOTHING, letting typos-lsp read the
 // project's file untouched.
-function typosInitialization(root: string): Record<string, unknown> | undefined {
+function typosInitialization(
+	root: string,
+): Record<string, unknown> | undefined {
 	const localConfig = findLocalTyposConfig(root);
 	if (localConfig) {
 		logLatency({
@@ -3495,7 +3536,12 @@ function typosInitialization(root: string): Record<string, unknown> | undefined 
 		);
 		return undefined;
 	}
-	const configPath = resolvePackagePath(import.meta.url, "rules", "typos", "_typos.toml");
+	const configPath = resolvePackagePath(
+		import.meta.url,
+		"rules",
+		"typos",
+		"_typos.toml",
+	);
 	logLatency({
 		type: "phase",
 		phase: "typos_config_resolved",

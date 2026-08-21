@@ -18,7 +18,7 @@ describe("firstOutputLine", () => {
 		);
 	});
 
-	it("strips the carriage return that split(\"\\n\")[0] left behind", () => {
+	it('strips the carriage return that split("\\n")[0] left behind', () => {
 		expect(firstOutputLine("first\r\nsecond")).toBe("first");
 	});
 
@@ -67,9 +67,9 @@ describe("classifyRunOutcome", () => {
 	});
 
 	it("calls a null status with no error did-not-run, never a clean run", () => {
-		expect(classifyRunOutcome({ result: spawnResult({ status: null }) }).kind).toBe(
-			"did-not-run",
-		);
+		expect(
+			classifyRunOutcome({ result: spawnResult({ status: null }) }).kind,
+		).toBe("did-not-run");
 	});
 
 	// A null status is decisive on its own: a process that never reported an

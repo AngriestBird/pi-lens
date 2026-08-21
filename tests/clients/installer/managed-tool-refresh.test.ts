@@ -1029,7 +1029,10 @@ describe("install kill-switch, trust gate, and install lock", () => {
 		// No stamp write: the tool is retried plainly once the block lifts,
 		// rather than throttled by a 24h failure cooldown that has nothing to
 		// do with it.
-		expect(readState().knip).toEqual({ checkedAt: NOW - 8 * DAY_MS, version: "6.4.1" });
+		expect(readState().knip).toEqual({
+			checkedAt: NOW - 8 * DAY_MS,
+			version: "6.4.1",
+		});
 		expect(
 			logRows().some((row) => row.includes("knip") && row.includes("declined")),
 		).toBe(true);

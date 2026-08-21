@@ -184,8 +184,8 @@ vi.mock("node:child_process", () => ({
 const mockStatSync = vi.hoisted(() => vi.fn());
 vi.mock("node:fs", async (importOriginal) => {
 	const actual = await importOriginal<typeof import("node:fs")>();
-	mockStatSync.mockImplementation((...args: Parameters<typeof actual.statSync>) =>
-		actual.statSync(...args),
+	mockStatSync.mockImplementation(
+		(...args: Parameters<typeof actual.statSync>) => actual.statSync(...args),
 	);
 	return { ...actual, statSync: mockStatSync };
 });
@@ -248,7 +248,9 @@ const savedPiLensHome = process.env.PI_LENS_HOME;
 let restoreDisableToolInstall: () => void;
 
 beforeEach(() => {
-	restoreDisableToolInstall = withEnv({ PI_LENS_DISABLE_TOOL_INSTALL: undefined });
+	restoreDisableToolInstall = withEnv({
+		PI_LENS_DISABLE_TOOL_INSTALL: undefined,
+	});
 	delete process.env.PI_LENS_HOME;
 	vi.clearAllMocks();
 	spawnCalls.length = 0;
@@ -351,7 +353,9 @@ describe("version-pin drift detection (#589)", () => {
 		process.env.PATH = TEST_HOME;
 		const realStatSync = mockStatSync.getMockImplementation();
 		try {
-			mockStatSync.mockImplementation(() => ({ isFile: () => true, size: 1 }) as never);
+			mockStatSync.mockImplementation(
+				() => ({ isFile: () => true, size: 1 }) as never,
+			);
 
 			const first = await ensureTool("madge");
 			expect(first).toBe("madge");
@@ -372,7 +376,9 @@ describe("version-pin drift detection (#589)", () => {
 			// bare command's ENOENT).
 			const third = await ensureTool("madge");
 			expect(third).toBe("madge");
-			expect(mockStatSync.mock.calls.length).toBeGreaterThan(statCallsAfterFirst);
+			expect(mockStatSync.mock.calls.length).toBeGreaterThan(
+				statCallsAfterFirst,
+			);
 		} finally {
 			if (realStatSync) mockStatSync.mockImplementation(realStatSync);
 			if (savedPath === undefined) delete process.env.PATH;

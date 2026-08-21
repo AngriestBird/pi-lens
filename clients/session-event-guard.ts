@@ -213,8 +213,10 @@ export function wrapSessionEventHandler<H extends SessionEventHandler>(
 	) as H;
 }
 
-export interface SessionEventResultGuardOptions<E, R>
-	extends SessionEventGuardOptions {
+export interface SessionEventResultGuardOptions<
+	E,
+	R,
+> extends SessionEventGuardOptions {
 	/**
 	 * The value the host receives when the event is skipped. It takes the
 	 * EVENT, never the ctx: the ctx is the thing that just proved dead, and

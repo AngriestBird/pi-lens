@@ -278,7 +278,11 @@ export async function fetchFreshProjectDiagnostics(
 		coldReasons[id] = reason;
 	}
 
-	function record(id: string, adapted: ProjectDiagnostic[], elapsedMs: number): void {
+	function record(
+		id: string,
+		adapted: ProjectDiagnostic[],
+		elapsedMs: number,
+	): void {
 		timings[id] = (timings[id] ?? 0) + elapsedMs;
 		const kept = applyDispositionsMultiFile(
 			adapted,
@@ -644,7 +648,11 @@ export async function fetchFreshProjectDiagnostics(
 				Date.now() - new Date(cached.meta.timestamp).getTime();
 			record(
 				"test-runner",
-				testRunnerFindingsToProjectDiagnostics(cached.data, analysisRoot, options.runtime),
+				testRunnerFindingsToProjectDiagnostics(
+					cached.data,
+					analysisRoot,
+					options.runtime,
+				),
 				Date.now() - startMs,
 			);
 		}),

@@ -40,7 +40,8 @@ export const MAX_SELECTED_TESTS = 25;
 
 // Matches `from "…"`, `import("…")`, and `require("…")` — the three ways a
 // vitest file (or a module it imports) pulls in another module.
-const IMPORT_SPECIFIER_RE = /(?:from\s+|import\(|require\()\s*["']([^"']+)["']/g;
+const IMPORT_SPECIFIER_RE =
+	/(?:from\s+|import\(|require\()\s*["']([^"']+)["']/g;
 
 function toPosix(file) {
 	return file.split(path.sep).join("/");
@@ -71,7 +72,9 @@ export function resolveDiffRange() {
 
 export function changedTsFiles(range) {
 	try {
-		const out = execFileSync("git", ["diff", "--name-only", range], { encoding: "utf8" });
+		const out = execFileSync("git", ["diff", "--name-only", range], {
+			encoding: "utf8",
+		});
 		return out
 			.split("\n")
 			.map((line) => line.trim())
@@ -170,11 +173,18 @@ export function selectTargetedTests(changed, allTests) {
 		for (const test of matches) selected.add(test);
 	}
 
-	const unmatched = changed.filter((file) => !file.endsWith(".test.ts") && perFile.get(file).size === 0);
+	const unmatched = changed.filter(
+		(file) => !file.endsWith(".test.ts") && perFile.get(file).size === 0,
+	);
 	const totalBeforeCap = selected.size;
 	const capped = totalBeforeCap > MAX_SELECTED_TESTS;
 
-	return { selected: capped ? [] : [...selected], unmatched, capped, totalBeforeCap };
+	return {
+		selected: capped ? [] : [...selected],
+		unmatched,
+		capped,
+		totalBeforeCap,
+	};
 }
 
 // Windows CreateProcess can't exec .cmd shims (npm) directly, so those need
@@ -185,7 +195,10 @@ export function selectTargetedTests(changed, allTests) {
 // runCommand fallback.
 function runInherit(command, args, { needsShimShell = false } = {}) {
 	if (needsShimShell && process.platform === "win32") {
-		execFileSync([command, ...args].map(quoteForWindowsCmd).join(" "), { stdio: "inherit", shell: true });
+		execFileSync([command, ...args].map(quoteForWindowsCmd).join(" "), {
+			stdio: "inherit",
+			shell: true,
+		});
 	} else {
 		execFileSync(command, args, { stdio: "inherit", shell: false });
 	}
@@ -203,9 +216,13 @@ const LOCK_TIMEOUT_RE = /timed out after \d+ms waiting for test-suite lock/;
 // a skipped local run); a real test failure must still block the push.
 function runTargetedTests(selected) {
 	return new Promise((resolve) => {
-		const child = spawn(process.execPath, ["scripts/with-test-lock.mjs", "--", "vitest", "run", ...selected], {
-			stdio: ["ignore", "inherit", "pipe"],
-		});
+		const child = spawn(
+			process.execPath,
+			["scripts/with-test-lock.mjs", "--", "vitest", "run", ...selected],
+			{
+				stdio: ["ignore", "inherit", "pipe"],
+			},
+		);
 		let stderrBuffer = "";
 		child.stderr.on("data", (chunk) => {
 			process.stderr.write(chunk);
@@ -229,14 +246,20 @@ export async function main() {
 	runInherit("npm", ["run", "build"], { needsShimShell: true });
 
 	if (changed === null || changed.length === 0) {
-		console.log("[pre-push] no TypeScript changes to target; build-only pass complete.");
+		console.log(
+			"[pre-push] no TypeScript changes to target; build-only pass complete.",
+		);
 		return 0;
 	}
 
 	const allTests = collectTestFiles("tests");
-	const { selected, unmatched, capped, totalBeforeCap } = selectTargetedTests(changed, allTests);
+	const { selected, unmatched, capped, totalBeforeCap } = selectTargetedTests(
+		changed,
+		allTests,
+	);
 
-	for (const file of unmatched) console.log(`[pre-push] no tests matched ${file}`);
+	for (const file of unmatched)
+		console.log(`[pre-push] no tests matched ${file}`);
 
 	if (capped) {
 		console.warn(
@@ -246,7 +269,9 @@ export async function main() {
 	}
 
 	if (selected.length === 0) {
-		console.log(`[pre-push] no test files matched ${changed.length} changed .ts file(s); build-only pass complete.`);
+		console.log(
+			`[pre-push] no test files matched ${changed.length} changed .ts file(s); build-only pass complete.`,
+		);
 		return 0;
 	}
 
@@ -263,7 +288,9 @@ export async function main() {
 		return 0;
 	}
 	if (error) {
-		console.warn(`[pre-push] could not run targeted tests (${error.message}); letting the push proceed. CI runs the real gate.`);
+		console.warn(
+			`[pre-push] could not run targeted tests (${error.message}); letting the push proceed. CI runs the real gate.`,
+		);
 		return 0;
 	}
 	return code;
@@ -289,7 +316,9 @@ if (isEntryPoint()) {
 			process.exitCode = code;
 		})
 		.catch((error) => {
-			console.error(`[pre-push] ${error instanceof Error ? error.stack || error.message : error}`);
+			console.error(
+				`[pre-push] ${error instanceof Error ? error.stack || error.message : error}`,
+			);
 			process.exitCode = 1;
 		});
 }

@@ -59,7 +59,9 @@ export const GRAMMAR_SOURCE_OVERRIDES: Record<string, GrammarSourceOverride> = {
 
 /** The URL a grammar wasm is fetched from (override if any, else the aggregator). */
 export function grammarSourceUrl(filename: string): string {
-	return GRAMMAR_SOURCE_OVERRIDES[filename]?.url ?? `${GRAMMAR_CDN_BASE}/${filename}`;
+	return (
+		GRAMMAR_SOURCE_OVERRIDES[filename]?.url ?? `${GRAMMAR_CDN_BASE}/${filename}`
+	);
 }
 
 /**
@@ -125,7 +127,9 @@ export function isVendoredGrammar(filename: string): boolean {
  * would otherwise return the generic RETRYABLE environment verdict, hiding a
  * missing vendored asset behind a transient-looking download failure.
  */
-export function vendoredGrammarRefusal(filename: string): GrammarDownloadResult {
+export function vendoredGrammarRefusal(
+	filename: string,
+): GrammarDownloadResult {
 	return {
 		ok: false,
 		retryable: false,
@@ -373,7 +377,11 @@ let cachedManifest: GrammarManifest | null | undefined;
  * repo checkout and an installed npm package resolve it correctly.
  */
 function grammarManifestPath(): string {
-	return path.join(getPackageRoot(import.meta.url), "scripts", "grammars.lock.json");
+	return path.join(
+		getPackageRoot(import.meta.url),
+		"scripts",
+		"grammars.lock.json",
+	);
 }
 
 /**

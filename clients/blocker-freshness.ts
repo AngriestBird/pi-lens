@@ -226,7 +226,11 @@ async function resolveForwardImportsMemoized(
 	} catch {
 		imports = [];
 	}
-	importResolutionMemo.set(filePath, { mtimeMs: sig.mtimeMs, size: sig.size, imports });
+	importResolutionMemo.set(filePath, {
+		mtimeMs: sig.mtimeMs,
+		size: sig.size,
+		imports,
+	});
 	return imports;
 }
 
@@ -331,7 +335,11 @@ export async function collectForwardImportMtimes(
 	noteImportResolutionMemoTurn(turnIndex);
 	let imports: string[] = [];
 	try {
-		imports = await resolveForwardImportsMemoized(cwd, filePath, resolveForwardImports);
+		imports = await resolveForwardImportsMemoized(
+			cwd,
+			filePath,
+			resolveForwardImports,
+		);
 	} catch {
 		imports = [];
 	}
@@ -380,7 +388,10 @@ async function detectDrift(
 ): Promise<DriftResult> {
 	const drifted: string[] = [];
 	const ownMtimeMs = await statMtimeMs(filePath);
-	if (ownMtimeMs !== undefined && ownMtimeMs > recordedAtMs + MTIME_DRIFT_TOLERANCE_MS) {
+	if (
+		ownMtimeMs !== undefined &&
+		ownMtimeMs > recordedAtMs + MTIME_DRIFT_TOLERANCE_MS
+	) {
 		drifted.push(filePath);
 	}
 	const { mtimes, truncated } = await collectForwardImportMtimes(
@@ -506,7 +517,8 @@ export async function sweepInlineBlockerFreshness(
 		stale: entry.stale ?? false,
 		recordedAtMs: entry.recordedAtMs,
 		sources: entry.sources,
-		demote: () => runtime.markInlineBlockerStale(entry.filePath, "dependency-drift"),
+		demote: () =>
+			runtime.markInlineBlockerStale(entry.filePath, "dependency-drift"),
 	}));
 
 	// #1790 review F2: dedup key is `normalizeEphemeralMapKey`, not

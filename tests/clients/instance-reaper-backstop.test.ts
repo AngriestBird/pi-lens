@@ -169,7 +169,9 @@ function enumerationRow(proc: {
 }
 
 function reasonsFor(kind: string): Array<{ subject: string; reason: string }> {
-	return getDegradationSummary().find((g) => g.kind === kind)?.latestReasons ?? [];
+	return (
+		getDegradationSummary().find((g) => g.kind === kind)?.latestReasons ?? []
+	);
 }
 
 function lastBackstopRecord(): Record<string, unknown> | undefined {
@@ -553,9 +555,9 @@ describe("#1864 review F3: the timeout bounds the CHILD, not just the caller", (
 
 		expect(outcome).toBe("error");
 		expect(backstopMetadata().scannerKill).toBe("alive");
-		expect(reasonsFor("orphan-backstop-scanner-escalated")[0]?.reason).toContain(
-			"alive",
-		);
+		expect(
+			reasonsFor("orphan-backstop-scanner-escalated")[0]?.reason,
+		).toContain("alive");
 	});
 
 	it("a disabled registry logs outcome=disabled and spawns nothing", async () => {
@@ -713,9 +715,9 @@ describe("#1857: cost containment", () => {
 	it("the deferral timer is unref'd, so a settled one-shot process still exits", () => {
 		const timer = scheduleUntrackedOrphanSweep(60_000);
 		try {
-			expect(
-				(timer as unknown as { hasRef?: () => boolean }).hasRef?.(),
-			).toBe(false);
+			expect((timer as unknown as { hasRef?: () => boolean }).hasRef?.()).toBe(
+				false,
+			);
 		} finally {
 			clearTimeout(timer);
 		}

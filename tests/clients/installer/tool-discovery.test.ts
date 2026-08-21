@@ -178,7 +178,10 @@ const mockHttpsGet = vi.hoisted(() => (url: unknown) => {
 	};
 	return req;
 });
-vi.mock("node:https", () => ({ default: { get: mockHttpsGet }, get: mockHttpsGet }));
+vi.mock("node:https", () => ({
+	default: { get: mockHttpsGet },
+	get: mockHttpsGet,
+}));
 
 // #1276: `finishInstallAttempt` calls this on a successful install, mirroring
 // `resetSafeSpawnWindowsCommandCache` right above it. Mocked so the wiring
@@ -248,7 +251,9 @@ const savedPiLensHome = process.env.PI_LENS_HOME;
 let restoreDisableToolInstall: () => void;
 
 beforeEach(() => {
-	restoreDisableToolInstall = withEnv({ PI_LENS_DISABLE_TOOL_INSTALL: undefined });
+	restoreDisableToolInstall = withEnv({
+		PI_LENS_DISABLE_TOOL_INSTALL: undefined,
+	});
 	delete process.env.PI_LENS_HOME;
 	vi.clearAllMocks();
 	spawnCalls.length = 0;
@@ -475,9 +480,8 @@ describe("ensureTool allowInstall policy", () => {
 
 describe("ensureTool force-reinstall", () => {
 	it("does not return the stale cached path after forceReinstall", async () => {
-		const { updateProbeCache } = await import(
-			"../../../clients/installer/index.js"
-		);
+		const { updateProbeCache } =
+			await import("../../../clients/installer/index.js");
 		// Use a path that can't collide with a real tool on PATH
 		const stalePath = "/fake/stale/rust-analyzer";
 

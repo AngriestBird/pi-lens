@@ -55,7 +55,9 @@ export interface MemoryProcessUsage {
 
 /** PURE: reshape Node's `process.memoryUsage()` into this module's field
  *  names — testable without touching the real process. */
-export function toMemoryProcessUsage(mem: NodeJS.MemoryUsage): MemoryProcessUsage {
+export function toMemoryProcessUsage(
+	mem: NodeJS.MemoryUsage,
+): MemoryProcessUsage {
 	return {
 		rssBytes: mem.rss,
 		heapUsedBytes: mem.heapUsed,

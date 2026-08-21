@@ -199,7 +199,9 @@ describe("sweep-kit: stripSource", () => {
 	});
 
 	it("a value-position regex is still lexed as a regex (the R2 fix must not overshoot)", () => {
-		const stripped = stripSource('const safe = arg.replace(/"/g, \'""\');\nconst x = 1;\n');
+		const stripped = stripSource(
+			'const safe = arg.replace(/"/g, \'""\');\nconst x = 1;\n',
+		);
 		expect(stripped).toContain("const x = 1;");
 	});
 
@@ -262,11 +264,16 @@ describe("sweep-kit: auditRegistry", () => {
 	it("flags an item that is neither registered nor exempted", () => {
 		const audit = auditRegistry(base);
 		expect(audit.unaccounted).toEqual(["c.ts"]);
-		expect(audit.problems.join("\n")).toContain("neither registered nor exempted");
+		expect(audit.problems.join("\n")).toContain(
+			"neither registered nor exempted",
+		);
 	});
 
 	it("appends the caller's remediation to the unaccounted message", () => {
-		const audit = auditRegistry({ ...base, remediation: "Register it or exempt it." });
+		const audit = auditRegistry({
+			...base,
+			remediation: "Register it or exempt it.",
+		});
 		expect(audit.problems.join("\n")).toContain("Register it or exempt it.");
 	});
 
@@ -340,7 +347,9 @@ describe("sweep-kit: auditRegistry", () => {
 			sweepName: "probe sweep",
 			flagged: ["toString", "real-item"],
 			registered: ["real-item"],
-			exemptions: { toString: "a genuinely reviewed exemption, spelled out here" },
+			exemptions: {
+				toString: "a genuinely reviewed exemption, spelled out here",
+			},
 		});
 		expect(audit.unaccounted).toEqual([]);
 		expect(audit.reasonlessExemptions).toEqual([]);
@@ -368,7 +377,9 @@ describe("sweep-kit: auditRegistry", () => {
 		expect(deadWalk.problems.join("\n")).toContain("LOOKED AT 0 source item");
 		expect(deadDetector.problems.join("\n")).not.toContain("LOOKED AT");
 		expect(deadDetector.problems.join("\n")).toContain("flagged 0 item");
-		expect(deadWalk.problems.join("\n")).not.toBe(deadDetector.problems.join("\n"));
+		expect(deadWalk.problems.join("\n")).not.toBe(
+			deadDetector.problems.join("\n"),
+		);
 	});
 
 	it("F4: a healthy walk above its floor adds no walk problem", () => {
@@ -416,11 +427,15 @@ describe("sweep-kit: auditRegistry", () => {
 
 describe("sweep-kit: assertNonEmptyScan", () => {
 	it("throws on zero", () => {
-		expect(() => assertNonEmptyScan("probe", 0)).toThrow(/below the declared floor/);
+		expect(() => assertNonEmptyScan("probe", 0)).toThrow(
+			/below the declared floor/,
+		);
 	});
 
 	it("throws below an explicit floor", () => {
-		expect(() => assertNonEmptyScan("probe", 9, 10)).toThrow(/below the declared floor/);
+		expect(() => assertNonEmptyScan("probe", 9, 10)).toThrow(
+			/below the declared floor/,
+		);
 	});
 
 	it("passes at the floor", () => {
@@ -444,7 +459,10 @@ describe("sweep-kit: seam and tag binding", () => {
 	});
 
 	it("binds a tag on the immediately preceding non-blank line", () => {
-		const source = ["// @delivery-surface: real-id", 'advisoryParts.push("x");'].join("\n");
+		const source = [
+			"// @delivery-surface: real-id",
+			'advisoryParts.push("x");',
+		].join("\n");
 		const tagged = scanTaggedSeams(source, SEAM_PATTERN, TAG);
 		expect(tagged).toHaveLength(1);
 		expect(tagged[0].ids).toEqual(["real-id"]);
@@ -489,13 +507,21 @@ describe("sweep-kit: seam and tag binding", () => {
 			"// @delivery-surface: totally-made-up",
 			'advisoryParts.push("x");',
 		].join("\n");
-		const problems = findUnregisteredSeams(source, SEAM_PATTERN, TAG, registry, "REGISTRY");
+		const problems = findUnregisteredSeams(
+			source,
+			SEAM_PATTERN,
+			TAG,
+			registry,
+			"REGISTRY",
+		);
 		expect(problems[0]).toContain("not in REGISTRY");
 	});
 
 	it("a seam-shaped call inside a comment is not a seam", () => {
 		const source = "// advisoryParts.push(x) — for reference only";
-		expect(findUnregisteredSeams(source, SEAM_PATTERN, TAG, registry)).toEqual([]);
+		expect(findUnregisteredSeams(source, SEAM_PATTERN, TAG, registry)).toEqual(
+			[],
+		);
 	});
 
 	// #1755 review F2: an unbounded blank-line skip binds a tag eight blank
@@ -522,7 +548,9 @@ describe("sweep-kit: seam and tag binding", () => {
 			"",
 			'advisoryParts.push("one blank line below its tag");',
 		].join("\n");
-		expect(scanTaggedSeams(source, SEAM_PATTERN, TAG)[0].ids).toEqual(["real-id"]);
+		expect(scanTaggedSeams(source, SEAM_PATTERN, TAG)[0].ids).toEqual([
+			"real-id",
+		]);
 
 		const farSource = [
 			"// @delivery-surface: real-id",
@@ -533,7 +561,8 @@ describe("sweep-kit: seam and tag binding", () => {
 		].join("\n");
 		expect(scanTaggedSeams(farSource, SEAM_PATTERN, TAG)[0].ids).toEqual([]);
 		expect(
-			scanTaggedSeams(farSource, SEAM_PATTERN, TAG, Number.POSITIVE_INFINITY)[0].ids,
+			scanTaggedSeams(farSource, SEAM_PATTERN, TAG, Number.POSITIVE_INFINITY)[0]
+				.ids,
 		).toEqual(["real-id"]);
 	});
 
@@ -563,7 +592,9 @@ describe("sweep-kit: seam and tag binding", () => {
 
 	it("bindTagsToSeams reports no ids when the seam is the first line", () => {
 		const seams = [{ line: 1, text: 'advisoryParts.push("x");' }];
-		expect(bindTagsToSeams('advisoryParts.push("x");', seams, TAG)[0].ids).toEqual([]);
+		expect(
+			bindTagsToSeams('advisoryParts.push("x");', seams, TAG)[0].ids,
+		).toEqual([]);
 	});
 });
 
@@ -572,7 +603,9 @@ describe("sweep-kit: evidence assignment", () => {
 	const gates = ["gateFindingsByPathFreshness"];
 
 	const check = (rawSource: string) => {
-		const strippedLines = stripSource(rawSource, { strings: "keep" }).split("\n");
+		const strippedLines = stripSource(rawSource, { strings: "keep" }).split(
+			"\n",
+		);
 		return checkSeamEvidence({
 			id: "real-id",
 			taggedSeams: scanTaggedSeams(rawSource, SEAM_PATTERN, TAG),
@@ -711,7 +744,9 @@ describe("sweep-kit: assignNearestExclusive primitives", () => {
 	it("hasNearbyCallSite requires the call SHAPE, not the bare name", () => {
 		const lines = ["const x = gateFindings;", 'store: "gitleaks"'];
 		expect(hasNearbyCallSite(lines, 1, "gateFindings", 3)).toBe(false);
-		expect(hasNearbyCallSite(["gateFindings(", 'store: "x"'], 1, "gateFindings", 3)).toBe(true);
+		expect(
+			hasNearbyCallSite(["gateFindings(", 'store: "x"'], 1, "gateFindings", 3),
+		).toBe(true);
 	});
 
 	it("hasNearbyCallSite respects the proximity bound", () => {

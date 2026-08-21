@@ -109,7 +109,11 @@ describe("actionable warnings", () => {
 			});
 			const persisted = JSON.parse(
 				fs.readFileSync(
-					path.join(getProjectDataDir(cwd), "cache", "actionable-warning-state.json"),
+					path.join(
+						getProjectDataDir(cwd),
+						"cache",
+						"actionable-warning-state.json",
+					),
 					"utf8",
 				),
 			) as { warnings: Record<string, { status?: string; reason?: string }> };

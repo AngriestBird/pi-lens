@@ -118,9 +118,9 @@ export function sourceTwinCandidates(filePath: string): string[] {
 			: ext === ".cjs"
 				? [".cts", ".ts", ".tsx", ".mts"]
 				: ext === ".jsx"
-					// Deliberately retain the broad fallback: a .jsx next to a .ts
-					// is treated as a build artifact even without a .tsx sibling.
-					? [".tsx", ".ts", ".mts", ".cts"]
+					? // Deliberately retain the broad fallback: a .jsx next to a .ts
+						// is treated as a build artifact even without a .tsx sibling.
+						[".tsx", ".ts", ".mts", ".cts"]
 					: ext === ".js"
 						? [".ts", ".tsx", ".mts", ".cts"]
 						: [];
@@ -467,7 +467,9 @@ function shouldSkipGeneratedOrArtifact(
 		"includeGenerated" | "includeDeclarationFiles" | "inspectGeneratedHeaders"
 	>,
 ): boolean {
-	return classifySkipGeneratedOrArtifact(filePath, options).verdict === "generated";
+	return (
+		classifySkipGeneratedOrArtifact(filePath, options).verdict === "generated"
+	);
 }
 
 /**
@@ -503,7 +505,10 @@ export function findSourceSibling(
 	const dir = getDir(filePath);
 	const base = getBasename(filePath);
 	for (const [sourceExt, shadowedExts] of Object.entries(SOURCE_PRECEDENCE)) {
-		if (!sourceExtsForCompiledExt(sourceExt).length && shadowedExts.includes(ext)) {
+		if (
+			!sourceExtsForCompiledExt(sourceExt).length &&
+			shadowedExts.includes(ext)
+		) {
 			const siblingPath = path.join(dir, base + sourceExt);
 			if (probeExists(siblingPath, probeCache)) return siblingPath;
 		}
@@ -518,7 +523,10 @@ export function findSourceSibling(
  * Omit for the original, uncached behavior.
  */
 function sourceExtsForCompiledExt(sourceExt: string): string[] {
-	return sourceExt === ".ts" || sourceExt === ".tsx" || sourceExt === ".mts" || sourceExt === ".cts"
+	return sourceExt === ".ts" ||
+		sourceExt === ".tsx" ||
+		sourceExt === ".mts" ||
+		sourceExt === ".cts"
 		? [sourceExt]
 		: [];
 }

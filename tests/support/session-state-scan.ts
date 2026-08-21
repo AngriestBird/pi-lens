@@ -312,7 +312,9 @@ let cachedCandidates: SessionStateCandidate[] | undefined;
  * to regression-test the #1817 symbol-count pin against a fixture that
  * cannot drift out from under the test the way the real tree can.
  */
-export function scanSessionStateCandidates(dir = CLIENTS_ROOT): SessionStateCandidate[] {
+export function scanSessionStateCandidates(
+	dir = CLIENTS_ROOT,
+): SessionStateCandidate[] {
 	const useCache = dir === CLIENTS_ROOT;
 	if (useCache && cachedCandidates) return cachedCandidates;
 	const found: SessionStateCandidate[] = [];

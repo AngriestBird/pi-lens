@@ -211,7 +211,8 @@ export const SESSION_STATE_REGISTRY: SessionStateEntry[] = [
 	{
 		id: "runner-helpers:correctedAvailabilityByCwd",
 		module: "dispatch/runners/utils/runner-helpers.ts",
-		state: "correctedAvailabilityByCwd, installAttemptsByCwd, resolveInstallInFlightByCwd",
+		state:
+			"correctedAvailabilityByCwd, installAttemptsByCwd, resolveInstallInFlightByCwd",
 		policy: "session_start",
 		resetName: "resetDispatchAvailabilityState",
 		reason:
@@ -245,7 +246,8 @@ export const SESSION_STATE_REGISTRY: SessionStateEntry[] = [
 					});
 				}
 			},
-			isArmed: () => probeLatch === undefined || !probeLatch.isInstallExhausted(),
+			isArmed: () =>
+				probeLatch === undefined || !probeLatch.isInstallExhausted(),
 			reset: () => resetInstallRetryLatches(),
 		},
 	},
@@ -273,8 +275,7 @@ export const SESSION_STATE_REGISTRY: SessionStateEntry[] = [
 		resetName: "_resetDeferredForTests",
 		reason:
 			"A `defer` mark suppresses a diagnostic for THIS session by design; carrying it into the next session hides a finding nobody deferred.",
-		gap:
-			"Not wired: the only reset is the test-only seam, so a deferred diagnostic stays suppressed for the life of the PROCESS rather than the session. PR #1625 has now merged and did NOT close this (review round R1, S5): it scoped the Set's key per project and re-signed isDeferredThisSession, but added no session_start reset. The gap survives it and still needs an owner.",
+		gap: "Not wired: the only reset is the test-only seam, so a deferred diagnostic stays suppressed for the life of the PROCESS rather than the session. PR #1625 has now merged and did NOT close this (review round R1, S5): it scoped the Set's key per project and re-signed isDeferredThisSession, but added no session_start reset. The gap survives it and still needs an owner.",
 		probe: {
 			arm: () => {
 				const cwd = scratchCwd();
@@ -519,7 +520,8 @@ export const SESSION_STATE_REGISTRY: SessionStateEntry[] = [
 	{
 		id: "formatters:whichLatches",
 		module: "formatters.ts",
-		state: "whichLatchByCommand, whichTransientCommands, cooldownRecordedForRetryAtMs (cleared together with detectionCache)",
+		state:
+			"whichLatchByCommand, whichTransientCommands, cooldownRecordedForRetryAtMs (cleared together with detectionCache)",
 		policy: "session_start",
 		resetName: "clearFormatterCache",
 		reason:
@@ -528,7 +530,8 @@ export const SESSION_STATE_REGISTRY: SessionStateEntry[] = [
 	{
 		id: "cascade-tier:outstandingTouches",
 		module: "lsp/cascade-tier.ts",
-		state: "_outstandingTouches, _expiredSinceLastSweep, _evictedSinceLastSweep",
+		state:
+			"_outstandingTouches, _expiredSinceLastSweep, _evictedSinceLastSweep",
 		policy: "session_start",
 		resetName: "resetCascadeTierSessionState",
 		reason:
@@ -649,16 +652,20 @@ export function _resetRegistryProbeState(): void {
 export const EXEMPT_SESSION_STATE_FILES: Readonly<Record<string, string>> = {
 	// --- Host/toolchain derivations: the answer depends on the machine, not on
 	// the session. Re-deriving per session would just re-pay a spawn. ---
-	"lsp/jvm-runtime.ts": "resolved JVM location; a session boundary cannot move it",
+	"lsp/jvm-runtime.ts":
+		"resolved JVM location; a session boundary cannot move it",
 	"lsp/spawn-history.ts":
 		"successful spawn duration history intentionally spans session boundaries within the host process so later sessions can avoid waits that prior evidence proves cannot succeed",
 	"review-graph/git-identity.ts": "git user identity, read once per process",
 	"slow-fs.ts": "measured filesystem-latency classification of the host",
 	"tui-fit.ts": "terminal truncation-behavior probe",
-	"project-scale.ts": "project-scale base measurement, recomputed on its own inputs",
-	"sgconfig.ts": "bundled ast-grep rule snapshots and baselines, shipped with the extension",
+	"project-scale.ts":
+		"project-scale base measurement, recomputed on its own inputs",
+	"sgconfig.ts":
+		"bundled ast-grep rule snapshots and baselines, shipped with the extension",
 	"dispatch/runners/spotbugs.ts": "SpotBugs installation lookup, host-derived",
-	"generated-artifacts.ts": "generated-file classification derived from path patterns",
+	"generated-artifacts.ts":
+		"generated-file classification derived from path patterns",
 	"git-tracked-ignore.ts":
 		"git tracked/ignored sets, invalidated by their own mtime checks rather than by the session boundary",
 	"blocker-freshness.ts":
@@ -672,13 +679,16 @@ export const EXEMPT_SESSION_STATE_FILES: Readonly<Record<string, string>> = {
 	// whose own loader owns invalidation. A stale value here is a config read,
 	// not a session verdict about a tool. ---
 	"runtime-config.ts": "env-derived runner timeout floor",
-	"subagent-mode.ts": "subagent-mode flag, fixed for the process by construction",
-	"lsp-budget.ts": "cross-process LSP budget decision, re-read on its own cadence",
+	"subagent-mode.ts":
+		"subagent-mode flag, fixed for the process by construction",
+	"lsp-budget.ts":
+		"cross-process LSP budget decision, re-read on its own cadence",
 	"lsp/config.ts": "LSP config in-flight dedupe, per-load not per-session",
 	"module-report-lsp.ts": "module-report LSP config memo",
 	"project-lens-config.ts":
 		"project .pi-lens config cache with its own mtime-based invalidation",
-	"lens-config.ts": "global config warn-once set, tied to the config file it warned about",
+	"lens-config.ts":
+		"global config warn-once set, tied to the config file it warned about",
 	"instance-registry.ts": "instance-registry enablement flag",
 	"session-lifecycle.ts":
 		"the session_start decision seam itself — it is the boundary, not state behind it",
@@ -689,7 +699,8 @@ export const EXEMPT_SESSION_STATE_FILES: Readonly<Record<string, string>> = {
 	"lens-events.ts": "lens event publisher registration",
 	"disposition-publish.ts": "disposition publisher registration",
 	"format-events-publish.ts": "format event publisher registration",
-	"diagnostics-publish.ts": "diagnostics publisher registration and dirty-path dedupe",
+	"diagnostics-publish.ts":
+		"diagnostics publisher registration and dirty-path dedupe",
 	"bus-events-logger.ts": "bus event rollup counters, an observability tally",
 	"ndjson-logger.ts": "registered log-file paths",
 	"latency-logger.ts":
@@ -707,11 +718,15 @@ export const EXEMPT_SESSION_STATE_FILES: Readonly<Record<string, string>> = {
 	"agent-nudge.ts":
 		"the nudge accumulator deliberately spans runs by design (see its own doc comment)",
 	"git-guard.ts": "git-guard turn state, cleared on the turn path",
-	"runtime-tool-result.ts": "in-flight pipeline and last-analyzed memo, per file and per call",
-	"recent-touches.ts": "the recent-touch cursor, consumed and advanced per read",
-	"widget-state.ts": "widget render state, rebuilt from the sources it displays",
+	"runtime-tool-result.ts":
+		"in-flight pipeline and last-analyzed memo, per file and per call",
+	"recent-touches.ts":
+		"the recent-touch cursor, consumed and advanced per read",
+	"widget-state.ts":
+		"widget render state, rebuilt from the sources it displays",
 	"word-index.ts": "word-index build guard, per build",
-	"mcp/analyze.ts": "warm word-index cache keyed by path with its own freshness check",
+	"mcp/analyze.ts":
+		"warm word-index cache keyed by path with its own freshness check",
 	"mcp/session.ts":
 		"MCP turn-end delivery chain, drained per turn; its session context is replaced, not accumulated",
 	"project-report.ts": "project-report build guard, per build",
@@ -719,8 +734,10 @@ export const EXEMPT_SESSION_STATE_FILES: Readonly<Record<string, string>> = {
 		"snapshot parse caches keyed by content, invalidated by the snapshot generation they were built from",
 	"review-graph/shared-extraction-ir.ts":
 		"extraction IR keyed by cwd and file, invalidated by the graph build that produced it",
-	"lsp/client.ts": "per-connection request bookkeeping, torn down with the connection",
-	"project-changes.ts": "change-log sequence fold counter, an observability tally",
+	"lsp/client.ts":
+		"per-connection request bookkeeping, torn down with the connection",
+	"project-changes.ts":
+		"change-log sequence fold counter, an observability tally",
 	"project-trust.ts":
 		"install-refusal warn-once set, tied to the trust decision rather than the session",
 	"lsp/workspace-diagnostics-cache.ts":

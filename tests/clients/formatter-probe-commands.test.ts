@@ -32,7 +32,10 @@ vi.mock("../../clients/latency-logger.js", () => ({
 	getLastLoggedPhase: () => undefined,
 }));
 
-import { ALL_FORMATTERS, clearFormatterCache } from "../../clients/formatters.js";
+import {
+	ALL_FORMATTERS,
+	clearFormatterCache,
+} from "../../clients/formatters.js";
 
 /**
  * Binaries a formatter's `detect()` probes BESIDES its own `command[0]`, with

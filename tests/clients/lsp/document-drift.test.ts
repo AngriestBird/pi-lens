@@ -27,8 +27,11 @@ interface FakeFile {
 
 function makeDeps(files: Map<string, FakeFile>, now: () => number) {
 	const resynced: Array<{ filePath: string; content: string }> = [];
-	const events: Array<{ filePath: string; disposition: string; driftAgeMs: number }> =
-		[];
+	const events: Array<{
+		filePath: string;
+		disposition: string;
+		driftAgeMs: number;
+	}> = [];
 	return {
 		resynced,
 		events,
@@ -190,7 +193,10 @@ describe("DocumentDriftTracker (#1783)", () => {
 		}
 		// One bulk operation, identical mtimes — exactly the forensics' shape.
 		for (const [key, file] of files) {
-			files.set(key, { content: `${file.content}changed\n`, mtimeMs: SYNCED_AT + 5 });
+			files.set(key, {
+				content: `${file.content}changed\n`,
+				mtimeMs: SYNCED_AT + 5,
+			});
 		}
 		clock = SYNCED_AT + 2_000;
 		const { deps, resynced, events } = makeDeps(files, now);
@@ -214,7 +220,10 @@ describe("DocumentDriftTracker (#1783)", () => {
 			tracker.recordSynced(key, `v0-${i}\n`, SYNCED_AT);
 		}
 		for (const [key, file] of files) {
-			files.set(key, { content: `${file.content}changed\n`, mtimeMs: SYNCED_AT + 5 });
+			files.set(key, {
+				content: `${file.content}changed\n`,
+				mtimeMs: SYNCED_AT + 5,
+			});
 		}
 		clock = SYNCED_AT + 2_000;
 		const { deps, resynced } = makeDeps(files, now);
@@ -406,7 +415,9 @@ describe("DocumentDriftTracker (#1783)", () => {
 		}
 		expect(tracker.size).toBe(DRIFT_TRACK_CAP);
 		expect(tracker.peek(k("/repo/cap-0.ts"))).toBeUndefined();
-		expect(tracker.peek(k(`/repo/cap-${DRIFT_TRACK_CAP + 4}.ts`))).toBeDefined();
+		expect(
+			tracker.peek(k(`/repo/cap-${DRIFT_TRACK_CAP + 4}.ts`)),
+		).toBeDefined();
 	});
 
 	it("joins an in-flight pass instead of doubling the stat load", async () => {

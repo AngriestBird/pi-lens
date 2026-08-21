@@ -31,18 +31,19 @@ import { TRANSIENT_BASE_COOLDOWN_MS } from "../../clients/dispatch/runners/utils
  * the module silently resets nothing.
  */
 async function resetDispatchAvailabilityState(): Promise<void> {
-	const helpers = await import(
-		"../../clients/dispatch/runners/utils/runner-helpers.js"
-	);
+	const helpers =
+		await import("../../clients/dispatch/runners/utils/runner-helpers.js");
 	helpers.resetDispatchAvailabilityState();
 }
 
-const { safeSpawnAsync, safeSpawn, ensureTool, logLatency } = vi.hoisted(() => ({
-	safeSpawnAsync: vi.fn(),
-	safeSpawn: vi.fn(),
-	ensureTool: vi.fn(),
-	logLatency: vi.fn(),
-}));
+const { safeSpawnAsync, safeSpawn, ensureTool, logLatency } = vi.hoisted(
+	() => ({
+		safeSpawnAsync: vi.fn(),
+		safeSpawn: vi.fn(),
+		ensureTool: vi.fn(),
+		logLatency: vi.fn(),
+	}),
+);
 
 vi.mock("../../clients/latency-logger.js", async (importOriginal) => {
 	const actual =
@@ -138,10 +139,7 @@ function advancePastSecondCooldown(): void {
  * exactly; everything else (bare `ast-grep`/`sg` and any absolute
  * `node_modules/.bin` path this host happens to have) is the "preferred" tier.
  */
-function routeTiers(options: {
-	preferred: unknown;
-	npx: unknown;
-}): void {
+function routeTiers(options: { preferred: unknown; npx: unknown }): void {
 	safeSpawnAsync.mockImplementation(async (cmd: string) =>
 		cmd === "npx" ? options.npx : options.preferred,
 	);
@@ -162,9 +160,7 @@ afterEach(async () => {
 
 describe("shared ast-grep memo: a stalled preferred tier is provisional (#1568)", () => {
 	async function loadHelpers() {
-		return await import(
-			"../../clients/dispatch/runners/utils/runner-helpers.js"
-		);
+		return await import("../../clients/dispatch/runners/utils/runner-helpers.js");
 	}
 
 	it("uses npx now, then hands the session back to ast-grep after the cooldown", async () => {
@@ -335,9 +331,8 @@ describe("SgRunner.doEnsureAvailable: a stalled DIRECT tier is provisional (#156
 		// explicitly the fallback, so its stall says nothing about a winner that
 		// is a genuine binary. Marking that win provisional would re-sweep the
 		// slow npx forever — the regression #1489 already fixed once.
-		const { findGlobalBinary } = await import(
-			"../../clients/package-manager.js"
-		);
+		const { findGlobalBinary } =
+			await import("../../clients/package-manager.js");
 		vi.mocked(findGlobalBinary).mockResolvedValue(
 			"/global/bin/ast-grep" as never,
 		);

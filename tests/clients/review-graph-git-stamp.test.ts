@@ -104,9 +104,15 @@ describe("review-graph snapshot git stamp (#300)", () => {
 		const identity = resolveGitIdentity(cwd);
 		expect(identity?.headCommit).toBe("a".repeat(40));
 
-		const cachePath = path.join(getProjectDataDir(cwd), "cache", "review-graph.json.gz");
+		const cachePath = path.join(
+			getProjectDataDir(cwd),
+			"cache",
+			"review-graph.json.gz",
+		);
 		await waitForFile(cachePath);
-		const raw = JSON.parse(gunzipSync(fs.readFileSync(cachePath)).toString("utf-8"));
+		const raw = JSON.parse(
+			gunzipSync(fs.readFileSync(cachePath)).toString("utf-8"),
+		);
 		expect(raw.gitStamp).toBeDefined();
 		expect(raw.gitStamp.headCommit).toBe("a".repeat(40));
 		expect(raw.gitStamp.worktreeRoot).toBe(identity?.worktreeRoot);
@@ -115,7 +121,9 @@ describe("review-graph snapshot git stamp (#300)", () => {
 		// "cached" for an unchanged empty file set), not dropped.
 		clearReviewGraphWorkspaceCache();
 		await buildOrUpdateGraph(cwd, [], facts);
-		const raw2 = JSON.parse(gunzipSync(fs.readFileSync(cachePath)).toString("utf-8"));
+		const raw2 = JSON.parse(
+			gunzipSync(fs.readFileSync(cachePath)).toString("utf-8"),
+		);
 		expect(raw2.gitStamp.headCommit).toBe("a".repeat(40));
 	});
 
@@ -129,9 +137,15 @@ describe("review-graph snapshot git stamp (#300)", () => {
 		await buildOrUpdateGraph(cwd, [], facts);
 		flushReviewGraphPersistsForTests();
 
-		const cachePath = path.join(getProjectDataDir(cwd), "cache", "review-graph.json.gz");
+		const cachePath = path.join(
+			getProjectDataDir(cwd),
+			"cache",
+			"review-graph.json.gz",
+		);
 		await waitForFile(cachePath);
-		const before = JSON.parse(gunzipSync(fs.readFileSync(cachePath)).toString("utf-8"));
+		const before = JSON.parse(
+			gunzipSync(fs.readFileSync(cachePath)).toString("utf-8"),
+		);
 		expect(before.gitStamp.headCommit).toBe("a".repeat(40));
 
 		// A plain `git commit`: HEAD moves, files are untouched. No git binary
@@ -226,15 +240,24 @@ describe("review-graph snapshot git stamp (#300)", () => {
 
 		await buildOrUpdateGraph(cwd, [], new FactStore());
 		flushReviewGraphPersistsForTests();
-		const cachePath = path.join(getProjectDataDir(cwd), "cache", "review-graph.json.gz");
+		const cachePath = path.join(
+			getProjectDataDir(cwd),
+			"cache",
+			"review-graph.json.gz",
+		);
 		await waitForFile(cachePath);
 
 		// Rewrite the persisted stamp so it names ANOTHER tree, the way a reused
 		// data-dir slug would. Nothing downstream of this read content-verifies,
 		// so serving it would hand back a different project's graph.
-		const data = JSON.parse(gunzipSync(fs.readFileSync(cachePath)).toString("utf-8"));
+		const data = JSON.parse(
+			gunzipSync(fs.readFileSync(cachePath)).toString("utf-8"),
+		);
 		data.gitStamp.worktreeRoot = `${data.gitStamp.worktreeRoot}-other`;
-		fs.writeFileSync(cachePath, gzipSync(Buffer.from(JSON.stringify(data), "utf-8")));
+		fs.writeFileSync(
+			cachePath,
+			gzipSync(Buffer.from(JSON.stringify(data), "utf-8")),
+		);
 
 		const spy = vi.spyOn(reviewGraphLogger, "logReviewGraph");
 		clearReviewGraphWorkspaceCache();
@@ -365,9 +388,15 @@ describe("review-graph snapshot git stamp (#300)", () => {
 		await expect(buildOrUpdateGraph(cwd, [], facts)).resolves.toBeDefined();
 		flushReviewGraphPersistsForTests();
 
-		const cachePath = path.join(getProjectDataDir(cwd), "cache", "review-graph.json.gz");
+		const cachePath = path.join(
+			getProjectDataDir(cwd),
+			"cache",
+			"review-graph.json.gz",
+		);
 		await waitForFile(cachePath);
-		const raw = JSON.parse(gunzipSync(fs.readFileSync(cachePath)).toString("utf-8"));
+		const raw = JSON.parse(
+			gunzipSync(fs.readFileSync(cachePath)).toString("utf-8"),
+		);
 		expect(raw.gitStamp).toBeUndefined();
 
 		clearReviewGraphWorkspaceCache();

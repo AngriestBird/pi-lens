@@ -30,7 +30,9 @@ export function combineAbortSignals(
 			controller.abort((s as AbortSignal & { reason?: unknown }).reason);
 			break;
 		}
-		s.addEventListener("abort", () => controller.abort(s.reason), { once: true });
+		s.addEventListener("abort", () => controller.abort(s.reason), {
+			once: true,
+		});
 	}
 	return controller.signal;
 }
@@ -58,7 +60,12 @@ export interface DeadlineOptions {
 // keeps the precise `Promise<T>` return; any undefined-producing mode is `T | undefined`.
 export function withDeadline<T>(
 	promise: Promise<T>,
-	options: { ms?: number; deadlineAt?: number; onTimeout?: "reject"; onReject?: "propagate" },
+	options: {
+		ms?: number;
+		deadlineAt?: number;
+		onTimeout?: "reject";
+		onReject?: "propagate";
+	},
 ): Promise<T>;
 export function withDeadline<T>(
 	promise: Promise<T>,

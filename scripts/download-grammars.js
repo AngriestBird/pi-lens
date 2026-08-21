@@ -59,11 +59,15 @@ export const VENDORED_GRAMMARS = {
 export const VENDORED_DIR = "vendor/grammars";
 /** The package a grammar's sidecar records (override or the global aggregator). */
 export function expectedPackage(filename, manifest) {
-    return manifest.overrides?.[filename]?.package ?? SOURCE_OVERRIDES[filename]?.package ?? manifest.package;
+    return (manifest.overrides?.[filename]?.package ??
+        SOURCE_OVERRIDES[filename]?.package ??
+        manifest.package);
 }
 /** The version a grammar's sidecar records (override or the global aggregator). */
 export function expectedVersion(filename, manifest) {
-    return manifest.overrides?.[filename]?.version ?? SOURCE_OVERRIDES[filename]?.version ?? manifest.version;
+    return (manifest.overrides?.[filename]?.version ??
+        SOURCE_OVERRIDES[filename]?.version ??
+        manifest.version);
 }
 export const GRAMMARS = [
     // Core typed languages
@@ -227,7 +231,9 @@ async function regenerateManifest() {
         package: PACKAGE,
         version: TREE_SITTER_WASMS_VERSION,
         grammars: sorted,
-        ...(Object.keys(SOURCE_OVERRIDES).length ? { overrides: SOURCE_OVERRIDES } : {}),
+        ...(Object.keys(SOURCE_OVERRIDES).length
+            ? { overrides: SOURCE_OVERRIDES }
+            : {}),
         // Re-emitted from the map above, not copied from the old manifest: a
         // `--write-manifest` run on a tree-sitter-wasms bump must not silently
         // drop the committed grammars' provenance, which would leave the guard

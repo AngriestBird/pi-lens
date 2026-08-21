@@ -156,9 +156,10 @@ describe("trivy-config run() — terraform pass-through", () => {
 	it("treats a nonzero exit with non-empty (unparseable) stdout as errored, never clean, and records it", async () => {
 		safeSpawnAsync.mockResolvedValue({
 			status: 1,
-			stdout: "Scan config files for misconfigurations\n\nUsage:\n  trivy config [flags] DIR\n".repeat(
-				40,
-			),
+			stdout:
+				"Scan config files for misconfigurations\n\nUsage:\n  trivy config [flags] DIR\n".repeat(
+					40,
+				),
 			stderr: "FATAL	Fatal error	unknown flag: --no-progress",
 		});
 
@@ -250,7 +251,10 @@ describe("trivy-config run() — CloudFormation content gate", () => {
 	// make trivy-config spawn on every package.json/tsconfig.json in a repo.
 	it("skips a generic (non-CloudFormation) json file without spawning trivy", async () => {
 		const file = path.join(cfnCwd, "package.json");
-		fs.writeFileSync(file, JSON.stringify({ name: "not-cfn", version: "1.0.0" }));
+		fs.writeFileSync(
+			file,
+			JSON.stringify({ name: "not-cfn", version: "1.0.0" }),
+		);
 
 		const runner = (
 			await import("../../../clients/dispatch/runners/trivy-config.js")
@@ -331,7 +335,9 @@ describe("looksLikeCloudFormationTemplate", () => {
 
 	it("does NOT match plain yaml/json with no CFN signal", () => {
 		expect(
-			looksLikeCloudFormationTemplate("name: CI\non: [push]\njobs:\n  build:\n"),
+			looksLikeCloudFormationTemplate(
+				"name: CI\non: [push]\njobs:\n  build:\n",
+			),
 		).toBe(false);
 		expect(
 			looksLikeCloudFormationTemplate(JSON.stringify({ name: "not-cfn" })),

@@ -213,11 +213,11 @@ describe("Dispatch Integration", () => {
 				{ projectRoot: "/repo" },
 			);
 
-		const ctx = vi.mocked(dispatchForFile).mock.calls.at(-1)?.[0];
-		expect(ctx?.cwd).toBe(
-			normalizeMapKey(path.resolve("/repo/packages/pkg-a")),
-		);
-		expect(ctx?.projectRoot).toBe(normalizeMapKey(path.resolve("/repo")));
+			const ctx = vi.mocked(dispatchForFile).mock.calls.at(-1)?.[0];
+			expect(ctx?.cwd).toBe(
+				normalizeMapKey(path.resolve("/repo/packages/pkg-a")),
+			);
+			expect(ctx?.projectRoot).toBe(normalizeMapKey(path.resolve("/repo")));
 		});
 
 		it("passes telemetryModel/telemetryProvider through to createDispatchContext (#1448)", async () => {

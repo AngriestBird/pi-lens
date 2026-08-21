@@ -26,9 +26,10 @@ import {
 import { setupTestEnvironment } from "../../test-utils.js";
 
 vi.mock("../../../../clients/installer/index.js", async (importOriginal) => {
-	const actual = await importOriginal<
-		typeof import("../../../../clients/installer/index.js")
-	>();
+	const actual =
+		await importOriginal<
+			typeof import("../../../../clients/installer/index.js")
+		>();
 	return { ...actual, verifyToolBinary: vi.fn().mockResolvedValue(true) };
 });
 
@@ -94,9 +95,7 @@ describe("dispatch-availability stale-write subjects (#1754 review F6)", () => {
 	});
 
 	it("names the shim stamp when a managed verification straddles a reset", async () => {
-		const installerMod = await import(
-			"../../../../clients/installer/index.js"
-		);
+		const installerMod = await import("../../../../clients/installer/index.js");
 		const env = setupTestEnvironment("pi-lens-genguard-managed-");
 		try {
 			process.env.PI_LENS_HOME = env.tmpDir;
@@ -104,7 +103,13 @@ describe("dispatch-availability stale-write subjects (#1754 review F6)", () => {
 			resetDegradationLedger();
 			const shim =
 				process.platform === "win32"
-					? path.join(env.tmpDir, "tools", "node_modules", ".bin", "subjtool.cmd")
+					? path.join(
+							env.tmpDir,
+							"tools",
+							"node_modules",
+							".bin",
+							"subjtool.cmd",
+						)
 					: path.join(env.tmpDir, "tools", "node_modules", ".bin", "subjtool");
 			fs.mkdirSync(path.dirname(shim), { recursive: true });
 			fs.writeFileSync(shim, "#!/bin/sh\nexit 0\n");

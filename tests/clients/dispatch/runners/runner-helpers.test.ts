@@ -28,10 +28,11 @@ const { logSessionStartSpy, logLatencySpy } = vi.hoisted(() => ({
 	logLatencySpy: vi.fn(),
 }));
 
-const missingSpawnFailure = () => ({
-	kind: "tool-not-found" as const,
-	cause: Object.assign(new Error("missing"), { code: "ENOENT" }),
-}) as never;
+const missingSpawnFailure = () =>
+	({
+		kind: "tool-not-found" as const,
+		cause: Object.assign(new Error("missing"), { code: "ENOENT" }),
+	}) as never;
 
 vi.mock("../../../../clients/sessionstart-logger.js", () => ({
 	logSessionStart: logSessionStartSpy,
@@ -416,7 +417,9 @@ describe("runner-helpers availability checker", () => {
 			stdout: "",
 			stderr: "",
 			status: null,
-			error: Object.assign(new Error("spawn missing ENOENT"), { code: "ENOENT" }),
+			error: Object.assign(new Error("spawn missing ENOENT"), {
+				code: "ENOENT",
+			}),
 			failure: "spawn",
 			spawnFailure: missingSpawnFailure(),
 		});
@@ -455,7 +458,9 @@ describe("runner-helpers availability checker", () => {
 			stdout: "",
 			stderr: "",
 			status: null,
-			error: Object.assign(new Error("spawn missing ENOENT"), { code: "ENOENT" }),
+			error: Object.assign(new Error("spawn missing ENOENT"), {
+				code: "ENOENT",
+			}),
 			failure: "spawn",
 			spawnFailure: missingSpawnFailure(),
 		});
@@ -681,9 +686,10 @@ describe("createVenvFinder: managed tools dir (#1638)", () => {
 			// install. Post-fix, the managed dir is checked first.
 			const cwdWithNoVenv = setupTestEnvironment("pi-lens-no-venv-");
 			try {
-				const resolved = await createVenvFinder("pyright", ".exe")(
-					cwdWithNoVenv.tmpDir,
-				);
+				const resolved = await createVenvFinder(
+					"pyright",
+					".exe",
+				)(cwdWithNoVenv.tmpDir);
 				expect(resolved).toBe(managedBin);
 			} finally {
 				cwdWithNoVenv.cleanup();
@@ -723,7 +729,10 @@ describe("createVenvFinder: managed tools dir (#1638)", () => {
 			// resolver itself never needs a spawn to find the managed binary —
 			// unlike the pre-fix bare-name fallback, which only "finds" the tool
 			// via a `safeSpawnAsync` round trip that has to fail first.
-			const resolved = await createVenvFinder("managedtool", ".exe")(env.tmpDir);
+			const resolved = await createVenvFinder(
+				"managedtool",
+				".exe",
+			)(env.tmpDir);
 			expect(resolved).toBe(managedBin);
 			expect(safeSpawnMod.safeSpawnAsync).not.toHaveBeenCalled();
 		} finally {
@@ -748,7 +757,9 @@ describe("createVenvFinder: managed tools dir (#1638)", () => {
 	it("falls back to the bare command when neither venv nor managed dir has it", async () => {
 		const env = setupTestEnvironment("pi-lens-no-venv-no-managed-");
 		try {
-			const resolved = await createVenvFinder("totally-unknown-tool")(env.tmpDir);
+			const resolved = await createVenvFinder("totally-unknown-tool")(
+				env.tmpDir,
+			);
 			expect(resolved).toBe("totally-unknown-tool");
 		} finally {
 			env.cleanup();
@@ -785,7 +796,9 @@ describe("resolveToolCommandWithInstallFallback / resolveCommandArgsWithInstallF
 	it("resolveToolCommandWithInstallFallback: probe-ENOENT-then-fallback-success logs two rows, last available", async () => {
 		const installerMod = await import("../../../../clients/installer/index.js");
 		vi.mocked(installerMod.isSpawnableCommand).mockResolvedValue(false);
-		vi.mocked(installerMod.ensureTool).mockResolvedValue("/managed/bin/stylelint");
+		vi.mocked(installerMod.ensureTool).mockResolvedValue(
+			"/managed/bin/stylelint",
+		);
 		vi.mocked(installerMod.getInstallAttempt).mockReturnValue({
 			outcome: "succeeded",
 			at: Date.now(),
@@ -795,7 +808,8 @@ describe("resolveToolCommandWithInstallFallback / resolveCommandArgsWithInstallF
 		// The runner's own checker probes first (mirrors markdownlint.ts:113-116)
 		// and latches "unavailable" — row 1.
 		const checker = createAvailabilityChecker("stylelint");
-		const { safeSpawnAsync } = await import("../../../../clients/safe-spawn.js");
+		const { safeSpawnAsync } =
+			await import("../../../../clients/safe-spawn.js");
 		vi.mocked(safeSpawnAsync).mockResolvedValue({
 			stdout: "",
 			stderr: "",
@@ -840,7 +854,9 @@ describe("resolveToolCommandWithInstallFallback / resolveCommandArgsWithInstallF
 		const installerMod = await import("../../../../clients/installer/index.js");
 		const safeSpawnMod = await import("../../../../clients/safe-spawn.js");
 		vi.mocked(installerMod.isSpawnableCommand).mockResolvedValue(false);
-		vi.mocked(installerMod.ensureTool).mockResolvedValue("/managed/bin/rubocop");
+		vi.mocked(installerMod.ensureTool).mockResolvedValue(
+			"/managed/bin/rubocop",
+		);
 		vi.mocked(installerMod.getInstallAttempt).mockReturnValue({
 			outcome: "succeeded",
 			at: Date.now(),
@@ -876,7 +892,9 @@ describe("resolveToolCommandWithInstallFallback / resolveCommandArgsWithInstallF
 	it("tags a project-trust-declined resolution as declined, never cache", async () => {
 		const installerMod = await import("../../../../clients/installer/index.js");
 		vi.mocked(installerMod.isSpawnableCommand).mockResolvedValue(false);
-		vi.mocked(installerMod.ensureTool).mockResolvedValue("/managed/bin/stylelint");
+		vi.mocked(installerMod.ensureTool).mockResolvedValue(
+			"/managed/bin/stylelint",
+		);
 		// The trust-gate branch in `ensureTool` records "declined" AFTER its own
 		// discovery pass, regardless of what that pass found (installer/index.ts).
 		vi.mocked(installerMod.getInstallAttempt).mockReturnValue({
@@ -886,7 +904,9 @@ describe("resolveToolCommandWithInstallFallback / resolveCommandArgsWithInstallF
 		});
 		// Even if discovery found the binary on PATH this call, "declined" must
 		// win — a policy refusal is not a cache hit (#1636 review carry-over).
-		vi.mocked(installerMod.getLastEnsureResolutionSource).mockReturnValue("path");
+		vi.mocked(installerMod.getLastEnsureResolutionSource).mockReturnValue(
+			"path",
+		);
 
 		const resolved = await resolveToolCommandWithInstallFallback(
 			process.cwd(),
@@ -907,11 +927,15 @@ describe("resolveToolCommandWithInstallFallback / resolveCommandArgsWithInstallF
 	it("tags a plain PATH/managed-dir discovery as path, never cache", async () => {
 		const installerMod = await import("../../../../clients/installer/index.js");
 		vi.mocked(installerMod.isSpawnableCommand).mockResolvedValue(false);
-		vi.mocked(installerMod.ensureTool).mockResolvedValue("/managed/bin/stylelint");
+		vi.mocked(installerMod.ensureTool).mockResolvedValue(
+			"/managed/bin/stylelint",
+		);
 		// No attempt recorded (getToolPath found it directly — installer/index.ts's
 		// "already installed" branch never calls `noteInstallAttempt`).
 		vi.mocked(installerMod.getInstallAttempt).mockReturnValue(undefined);
-		vi.mocked(installerMod.getLastEnsureResolutionSource).mockReturnValue("path");
+		vi.mocked(installerMod.getLastEnsureResolutionSource).mockReturnValue(
+			"path",
+		);
 
 		await resolveToolCommandWithInstallFallback(process.cwd(), "stylelint");
 
@@ -929,7 +953,9 @@ describe("resolveToolCommandWithInstallFallback / resolveCommandArgsWithInstallF
 		const installerMod = await import("../../../../clients/installer/index.js");
 		const safeSpawnMod = await import("../../../../clients/safe-spawn.js");
 		vi.mocked(installerMod.isSpawnableCommand).mockResolvedValue(false);
-		vi.mocked(installerMod.ensureTool).mockResolvedValue("/managed/bin/stylelint");
+		vi.mocked(installerMod.ensureTool).mockResolvedValue(
+			"/managed/bin/stylelint",
+		);
 		vi.mocked(installerMod.getInstallAttempt)
 			.mockReturnValueOnce({ outcome: "succeeded", at: Date.now() })
 			.mockReturnValue(undefined);
@@ -997,7 +1023,9 @@ describe("compensating row: the memo burns only on a genuine correction (#1657)"
 		const installerMod = await import("../../../../clients/installer/index.js");
 		const safeSpawnMod = await import("../../../../clients/safe-spawn.js");
 		vi.mocked(installerMod.isSpawnableCommand).mockResolvedValue(false);
-		vi.mocked(installerMod.ensureTool).mockResolvedValue("/managed/bin/stylelint");
+		vi.mocked(installerMod.ensureTool).mockResolvedValue(
+			"/managed/bin/stylelint",
+		);
 		vi.mocked(installerMod.getInstallAttempt).mockReturnValue({
 			outcome: "succeeded",
 			at: Date.now(),
@@ -1027,7 +1055,9 @@ describe("compensating row: the memo burns only on a genuine correction (#1657)"
 	it("repeat no-latch emissions still log at most one row per pair", async () => {
 		const installerMod = await import("../../../../clients/installer/index.js");
 		vi.mocked(installerMod.isSpawnableCommand).mockResolvedValue(false);
-		vi.mocked(installerMod.ensureTool).mockResolvedValue("/managed/bin/stylelint");
+		vi.mocked(installerMod.ensureTool).mockResolvedValue(
+			"/managed/bin/stylelint",
+		);
 		vi.mocked(installerMod.getInstallAttempt).mockReturnValue(undefined);
 		const cwd = process.cwd();
 
@@ -1044,7 +1074,9 @@ describe("compensating row: the memo burns only on a genuine correction (#1657)"
 		const installerMod = await import("../../../../clients/installer/index.js");
 		const safeSpawnMod = await import("../../../../clients/safe-spawn.js");
 		vi.mocked(installerMod.isSpawnableCommand).mockResolvedValue(false);
-		vi.mocked(installerMod.ensureTool).mockResolvedValue("/managed/bin/stylelint");
+		vi.mocked(installerMod.ensureTool).mockResolvedValue(
+			"/managed/bin/stylelint",
+		);
 		vi.mocked(installerMod.getInstallAttempt).mockReturnValue(undefined);
 		vi.mocked(safeSpawnMod.safeSpawnAsync).mockResolvedValue(missingProbe);
 		const checker = createAvailabilityChecker("stylelint");
@@ -1064,7 +1096,9 @@ describe("compensating row: the memo burns only on a genuine correction (#1657)"
 		const installerMod = await import("../../../../clients/installer/index.js");
 		const safeSpawnMod = await import("../../../../clients/safe-spawn.js");
 		vi.mocked(installerMod.isSpawnableCommand).mockResolvedValue(false);
-		vi.mocked(installerMod.ensureTool).mockResolvedValue("/managed/bin/stylelint");
+		vi.mocked(installerMod.ensureTool).mockResolvedValue(
+			"/managed/bin/stylelint",
+		);
 		vi.mocked(installerMod.getInstallAttempt).mockReturnValue(undefined);
 		vi.mocked(safeSpawnMod.safeSpawnAsync).mockResolvedValue(missingProbe);
 		const cwd = process.cwd();
@@ -1097,7 +1131,9 @@ describe("compensating row: the memo burns only on a genuine correction (#1657)"
 		const installerMod = await import("../../../../clients/installer/index.js");
 		const safeSpawnMod = await import("../../../../clients/safe-spawn.js");
 		vi.mocked(installerMod.isSpawnableCommand).mockResolvedValue(false);
-		vi.mocked(installerMod.ensureTool).mockResolvedValue("/managed/bin/stylelint");
+		vi.mocked(installerMod.ensureTool).mockResolvedValue(
+			"/managed/bin/stylelint",
+		);
 		vi.mocked(installerMod.getInstallAttempt).mockReturnValue(undefined);
 		const cwd = process.cwd();
 
@@ -1130,7 +1166,9 @@ describe("compensating row: the memo burns only on a genuine correction (#1657)"
 		const installerMod = await import("../../../../clients/installer/index.js");
 		const safeSpawnMod = await import("../../../../clients/safe-spawn.js");
 		vi.mocked(installerMod.isSpawnableCommand).mockResolvedValue(false);
-		vi.mocked(installerMod.ensureTool).mockResolvedValue("/managed/bin/stylelint");
+		vi.mocked(installerMod.ensureTool).mockResolvedValue(
+			"/managed/bin/stylelint",
+		);
 		vi.mocked(installerMod.getInstallAttempt).mockReturnValue(undefined);
 		const cwd = process.cwd();
 		const checker = createAvailabilityChecker("stylelint");
@@ -1171,16 +1209,18 @@ describe("compensating row: the memo burns only on a genuine correction (#1657)"
 		const safeSpawnMod = await import("../../../../clients/safe-spawn.js");
 		const command = path.join(path.sep, "usr", "local", "bin", "stylelint");
 		vi.mocked(installerMod.isSpawnableCommand).mockResolvedValue(false);
-		vi.mocked(installerMod.ensureTool).mockResolvedValue("/managed/bin/stylelint");
+		vi.mocked(installerMod.ensureTool).mockResolvedValue(
+			"/managed/bin/stylelint",
+		);
 		vi.mocked(installerMod.getInstallAttempt).mockReturnValue(undefined);
 		vi.mocked(safeSpawnMod.safeSpawnAsync).mockResolvedValue(missingProbe);
 		const cwd = process.cwd();
 
 		// The checker's own name IS the resolved path, so the latched row is
 		// recorded under that path — never under "stylelint".
-		expect(
-			await createAvailabilityChecker(command).isAvailableAsync(cwd),
-		).toBe(false);
+		expect(await createAvailabilityChecker(command).isAvailableAsync(cwd)).toBe(
+			false,
+		);
 		await resolveCommandWithInstallFallback(command, "stylelint", cwd);
 
 		const available = availabilityDecisions().filter(
@@ -1199,7 +1239,9 @@ describe("compensating row: the memo burns only on a genuine correction (#1657)"
 	it("clears the latch record on the shared cwd probe's available verdict", async () => {
 		const installerMod = await import("../../../../clients/installer/index.js");
 		vi.mocked(installerMod.isSpawnableCommand).mockResolvedValue(false);
-		vi.mocked(installerMod.ensureTool).mockResolvedValue("/managed/bin/stylelint");
+		vi.mocked(installerMod.ensureTool).mockResolvedValue(
+			"/managed/bin/stylelint",
+		);
 		vi.mocked(installerMod.getInstallAttempt).mockReturnValue(undefined);
 		const cwd = process.cwd();
 
@@ -1243,7 +1285,9 @@ describe("compensating row: the memo burns only on a genuine correction (#1657)"
 		const installerMod = await import("../../../../clients/installer/index.js");
 		const safeSpawnMod = await import("../../../../clients/safe-spawn.js");
 		vi.mocked(installerMod.isSpawnableCommand).mockResolvedValue(false);
-		vi.mocked(installerMod.ensureTool).mockResolvedValue("/managed/bin/stylelint");
+		vi.mocked(installerMod.ensureTool).mockResolvedValue(
+			"/managed/bin/stylelint",
+		);
 		vi.mocked(installerMod.getInstallAttempt).mockReturnValue(undefined);
 		vi.mocked(safeSpawnMod.safeSpawnAsync).mockResolvedValue(missingProbe);
 		const cwd = process.cwd();
@@ -1304,9 +1348,10 @@ describe("managed shim resolution verifies the binary (#1657)", () => {
 
 			const cwdWithNoVenv = setupTestEnvironment("pi-lens-managed-broken-cwd-");
 			try {
-				const resolved = await createVenvFinder("brokentool", ".exe")(
-					cwdWithNoVenv.tmpDir,
-				);
+				const resolved = await createVenvFinder(
+					"brokentool",
+					".exe",
+				)(cwdWithNoVenv.tmpDir);
 				expect(resolved).toBe("brokentool");
 			} finally {
 				cwdWithNoVenv.cleanup();
@@ -1337,9 +1382,10 @@ describe("managed shim resolution verifies the binary (#1657)", () => {
 				"pi-lens-managed-transient-cwd-",
 			);
 			try {
-				const resolved = await createVenvFinder("stalledtool", ".exe")(
-					cwdWithNoVenv.tmpDir,
-				);
+				const resolved = await createVenvFinder(
+					"stalledtool",
+					".exe",
+				)(cwdWithNoVenv.tmpDir);
 				expect(resolved).toBe(shim);
 			} finally {
 				cwdWithNoVenv.cleanup();

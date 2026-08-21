@@ -81,7 +81,11 @@ export function spawnCollectStdout(
  * `spawnCollectStdout`, which is now a thin projection of this same code path
  * (one implementation, not two).
  */
-export type SpawnCollectStatus = "ok" | "spawn-error" | "exit-error" | "timeout";
+export type SpawnCollectStatus =
+	| "ok"
+	| "spawn-error"
+	| "exit-error"
+	| "timeout";
 
 export interface SpawnCollectResult {
 	/** Text collected before settle. Partial output is kept on a timeout. */
@@ -168,17 +172,19 @@ export function spawnCollectStdoutResult(
 			child.once("error", (error) =>
 				settle({ stdout: "", status: "spawn-error", error }),
 			);
-			child.once("close", (code: number | null, signal: NodeJS.Signals | null) =>
-				settle(
-					code === 0 && signal === null
-						? { stdout: out, status: "ok" }
-						: {
-							stdout: "",
-							status: "exit-error",
-							exitCode: code,
-							exitSignal: signal,
-						},
-				),
+			child.once(
+				"close",
+				(code: number | null, signal: NodeJS.Signals | null) =>
+					settle(
+						code === 0 && signal === null
+							? { stdout: out, status: "ok" }
+							: {
+									stdout: "",
+									status: "exit-error",
+									exitCode: code,
+									exitSignal: signal,
+								},
+					),
 			);
 			const timeoutMs = collectOptions.timeoutMs;
 			if (typeof timeoutMs === "number" && timeoutMs > 0) {

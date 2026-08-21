@@ -15,7 +15,10 @@
 import * as nodeFs from "node:fs";
 import * as path from "node:path";
 import type { PiLensFlagSource } from "./lens-config.js";
-import { findNearestContaining, normalizeEphemeralMapKey } from "./path-utils.js";
+import {
+	findNearestContaining,
+	normalizeEphemeralMapKey,
+} from "./path-utils.js";
 import {
 	recordFromDispatchDiagnostic,
 	type ActionableWarningRecord,
@@ -169,7 +172,9 @@ async function snapshotDirInto(
 // Exported for the event-loop occupancy guard (#361/#368): an O(files) walk on
 // the tool_result autofix path, bounded by AUTOFIX_CHANGED_FILE_SCAN_LIMIT and
 // chunk-yielding every SNAPSHOT_YIELD_EVERY files so it never blocks the TUI.
-export async function snapshotProjectFiles(root: string): Promise<FileSnapshot> {
+export async function snapshotProjectFiles(
+	root: string,
+): Promise<FileSnapshot> {
 	const snapshot: FileSnapshot = new Map();
 	const projectRoot = path.resolve(root);
 	const ignoreMatcher = getProjectIgnoreMatcher(projectRoot);
@@ -180,7 +185,13 @@ export async function snapshotProjectFiles(root: string): Promise<FileSnapshot> 
 	const stack = [projectRoot];
 	const counter = { n: 0 };
 	while (stack.length > 0 && snapshot.size < AUTOFIX_CHANGED_FILE_SCAN_LIMIT) {
-		await snapshotDirInto(stack.pop()!, ignoreMatcher, stack, snapshot, counter);
+		await snapshotDirInto(
+			stack.pop()!,
+			ignoreMatcher,
+			stack,
+			snapshot,
+			counter,
+		);
 	}
 	return snapshot;
 }
@@ -578,7 +589,10 @@ async function tryKtlintFix(filePath: string, cwd: string): Promise<number> {
 
 // golangci-lint/detekt/ktfmt have no TOOL_COMMAND_SPEC; resolve via availability
 // checkers like their runners do.
-const golangciAutofixChecker = createAvailabilityChecker("golangci-lint", ".exe");
+const golangciAutofixChecker = createAvailabilityChecker(
+	"golangci-lint",
+	".exe",
+);
 const detektAutofixChecker = createAvailabilityChecker("detekt", ".bat");
 const ktfmtAutofixChecker = createAvailabilityChecker("ktfmt", ".bat");
 
@@ -586,13 +600,20 @@ async function tryKtfmtFix(filePath: string, cwd: string): Promise<number> {
 	// Config-first: the autofix policy only reaches here when the project opted
 	// into ktfmt, so resolveAvailableOrInstall honors that gate. ktfmt writes the
 	// formatted file in place and exits 0; treat any byte change as the fix.
-	const cmd = await resolveAvailableOrInstall(ktfmtAutofixChecker, "ktfmt", cwd);
+	const cmd = await resolveAvailableOrInstall(
+		ktfmtAutofixChecker,
+		"ktfmt",
+		cwd,
+	);
 	if (!cmd) return 0;
 	const absPath = path.resolve(cwd, filePath);
 	return detectFileChangedAfterCommand(filePath, cmd, [absPath], cwd, [0]);
 }
 
-async function tryGolangciLintFix(filePath: string, cwd: string): Promise<number> {
+async function tryGolangciLintFix(
+	filePath: string,
+	cwd: string,
+): Promise<number> {
 	// Config-first: the autofix policy only reaches here when a .golangci.* config
 	// exists. resolveAvailableOrInstall honors that gate (won't auto-install a
 	// config-first tool). golangci-lint exits non-zero when issues remain after
@@ -628,7 +649,10 @@ async function tryDetektFix(filePath: string, cwd: string): Promise<number> {
 	);
 }
 
-async function tryMarkdownlintFix(filePath: string, cwd: string): Promise<number> {
+async function tryMarkdownlintFix(
+	filePath: string,
+	cwd: string,
+): Promise<number> {
 	const cmd = await resolveToolCommandWithInstallFallback(cwd, "markdownlint");
 	if (!cmd) return 0;
 	// Shared config-args seam (#1247): the lint runner consumes the same
@@ -648,7 +672,13 @@ async function tryMarkdownlintFix(filePath: string, cwd: string): Promise<number
 async function tryOxlintFix(filePath: string, cwd: string): Promise<number> {
 	const cmd = await resolveToolCommandWithInstallFallback(cwd, "oxlint");
 	if (!cmd) return 0;
-	return detectFileChangedAfterCommand(filePath, cmd, ["--fix", filePath], cwd, [1]);
+	return detectFileChangedAfterCommand(
+		filePath,
+		cmd,
+		["--fix", filePath],
+		cwd,
+		[1],
+	);
 }
 
 async function tryRustClippyFix(filePath: string): Promise<string[]> {
@@ -1125,11 +1155,11 @@ function toPilensDiagnosticEntry(d: Diagnostic): PilensDiagnosticEntry {
 	return entry;
 }
 
-	type DispatchResult = Awaited<
-		ReturnType<
-			(typeof import("./dispatch/integration.js"))["dispatchLintWithResult"]
-		>
-	>;
+type DispatchResult = Awaited<
+	ReturnType<
+		(typeof import("./dispatch/integration.js"))["dispatchLintWithResult"]
+	>
+>;
 function buildAllClearOutput(
 	_dispatchResult: DispatchResult,
 	elapsed: number,
@@ -1338,14 +1368,15 @@ export async function runPipeline(
 	if (ctx.autofixMode === "deferred") {
 		autofixSkipReason = "deferred_to_agent_end";
 		dbg(`autofix: deferred until agent_end for ${filePath}`);
-	} else ({
-		fixedCount,
-		autofixTools,
-		attemptedTools,
-		changedFiles: autofixChangedFiles,
-		needsContentRefresh: fixRefresh,
-		skipReason: autofixSkipReason,
-	} = await runAutofix(filePath, cwd, getFlag, dbg, deps, getFlagSource));
+	} else
+		({
+			fixedCount,
+			autofixTools,
+			attemptedTools,
+			changedFiles: autofixChangedFiles,
+			needsContentRefresh: fixRefresh,
+			skipReason: autofixSkipReason,
+		} = await runAutofix(filePath, cwd, getFlag, dbg, deps, getFlagSource));
 	for (const changedFile of autofixChangedFiles) {
 		piChangedFiles.add(path.resolve(changedFile));
 	}
@@ -1442,7 +1473,9 @@ export async function runPipeline(
 				files: [
 					{
 						path: absPath,
-						diagnostics: dispatchResult.diagnostics.map(toPilensDiagnosticEntry),
+						diagnostics: dispatchResult.diagnostics.map(
+							toPilensDiagnosticEntry,
+						),
 					},
 				],
 				dbg,
@@ -1559,9 +1592,9 @@ export async function runPipeline(
 				fileContent,
 				wordIndex: ctx.wordIndex,
 				onWordIndexUpdated: ctx.onWordIndexUpdated,
-			}).then((run) => ({ ...run, origin: cascadeOrigin }))
-			.catch(
-				(err): import("./cascade-types.js").CascadeRun => {
+			})
+				.then((run) => ({ ...run, origin: cascadeOrigin }))
+				.catch((err): import("./cascade-types.js").CascadeRun => {
 					dbg(`cascade compute failed for ${filePath}: ${err}`);
 					return {
 						filePath,
@@ -1578,8 +1611,7 @@ export async function runPipeline(
 							detail: "cascade computation failed",
 						},
 					};
-				},
-			);
+				});
 
 	// --- Final timing + all-clear ---
 	const elapsed = Date.now() - pipelineStart;
@@ -1678,8 +1710,16 @@ export async function runPipeline(
 		autofixTools,
 		postAutofixNotice,
 		postMutation:
-			ctx.autofixMode !== "deferred" && autofixChangedFiles.some((f) => path.resolve(f) === path.resolve(filePath)) && fileContent !== undefined
-				? { filePath: path.resolve(filePath), content: fileContent, source: "autofix" }
+			ctx.autofixMode !== "deferred" &&
+			autofixChangedFiles.some(
+				(f) => path.resolve(f) === path.resolve(filePath),
+			) &&
+			fileContent !== undefined
+				? {
+						filePath: path.resolve(filePath),
+						content: fileContent,
+						source: "autofix",
+					}
 				: undefined,
 	};
 }

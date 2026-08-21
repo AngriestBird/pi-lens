@@ -168,14 +168,22 @@ describe("#1569 transient-tainted probe-cache entries", () => {
 		const sixMinutesAgo = Date.now() - 6 * 60 * 1000;
 		mockFsReadFile.mockResolvedValue(
 			JSON.stringify({
-				ruff: { path: "/sibling/ruff", mtimeMs: 1, cachedAt: sixMinutesAgo, transient: true },
+				ruff: {
+					path: "/sibling/ruff",
+					mtimeMs: 1,
+					cachedAt: sixMinutesAgo,
+					transient: true,
+				},
 			}),
 		);
 
 		await updateProbeCache(TOOL_ID, EXE_PATH);
 		await flushProbeCache();
 
-		const [, content] = mockWriteFileAtomicAsync.mock.calls[0] as [string, string];
+		const [, content] = mockWriteFileAtomicAsync.mock.calls[0] as [
+			string,
+			string,
+		];
 		expect(JSON.parse(content).ruff).toBeUndefined();
 	});
 

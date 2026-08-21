@@ -330,17 +330,20 @@ describe("#1459 — sweep fan-out must not black out a scanner silently", () => 
 		).toHaveLength(1);
 		// The EXACT list on a deferral row, not just membership: a deferred touch
 		// names the one scanner it does not speak for and nothing else.
-		const deferredRow = gapRows.find((row) =>
-			(row.metadata as { deferredResyncServerIds?: string[] })
-				?.deferredResyncServerIds,
+		const deferredRow = gapRows.find(
+			(row) =>
+				(row.metadata as { deferredResyncServerIds?: string[] })
+					?.deferredResyncServerIds,
 		);
 		expect(deferredRow?.metadata).toMatchObject({
 			deferredResyncServerIds: ["opengrep"],
 			source: "cascade",
 		});
 		// And the exact list on the late-write row, through its own door.
-		const lateWriteRow = gapRows.find((row) =>
-			(row.metadata as { auxNoAnswerServerIds?: string[] })?.auxNoAnswerServerIds,
+		const lateWriteRow = gapRows.find(
+			(row) =>
+				(row.metadata as { auxNoAnswerServerIds?: string[] })
+					?.auxNoAnswerServerIds,
 		);
 		expect(lateWriteRow?.metadata).toMatchObject({
 			auxNoAnswerServerIds: ["opengrep"],
@@ -493,8 +496,9 @@ describe("#1459 — sweep fan-out must not black out a scanner silently", () => 
 			makeServer("typescript"),
 			makeServer("opengrep", "auxiliary"),
 		]);
-		createLSPClient.mockImplementation(async (options: { serverId?: string }) =>
-			options?.serverId === "opengrep" ? aux : primary,
+		createLSPClient.mockImplementation(
+			async (options: { serverId?: string }) =>
+				options?.serverId === "opengrep" ? aux : primary,
 		);
 
 		const files = ["a.ts", "b.ts", "c.ts", "d.ts", "e.ts", "f.ts"].map(
@@ -650,8 +654,9 @@ describe("#1459 — sweep fan-out must not black out a scanner silently", () => 
 			makeServer("typescript"),
 			makeServer("opengrep", "auxiliary"),
 		]);
-		createLSPClient.mockImplementation(async (options: { serverId?: string }) =>
-			options?.serverId === "opengrep" ? aux : primary,
+		createLSPClient.mockImplementation(
+			async (options: { serverId?: string }) =>
+				options?.serverId === "opengrep" ? aux : primary,
 		);
 
 		const touchOptions = {
@@ -669,8 +674,11 @@ describe("#1459 — sweep fan-out must not black out a scanner silently", () => 
 
 		const outcomes = rowsFor("lsp_aux_wait_outcome").flatMap(
 			(row) =>
-				(row.metadata as { outcomes?: Array<{ serverId: string; outcome: string }> })
-					?.outcomes ?? [],
+				(
+					row.metadata as {
+						outcomes?: Array<{ serverId: string; outcome: string }>;
+					}
+				)?.outcomes ?? [],
 		);
 		const opengrepOutcomes = outcomes
 			.filter((entry) => entry.serverId === "opengrep")
@@ -698,8 +706,9 @@ describe("#1459 — sweep fan-out must not black out a scanner silently", () => 
 			makeServer("typescript"),
 			makeServer("opengrep", "auxiliary"),
 		]);
-		createLSPClient.mockImplementation(async (options: { serverId?: string }) =>
-			options?.serverId === "opengrep" ? aux : primary,
+		createLSPClient.mockImplementation(
+			async (options: { serverId?: string }) =>
+				options?.serverId === "opengrep" ? aux : primary,
 		);
 
 		const files = ["a.ts", "b.ts"].map((f) => `${ROOT}/${f}`);
@@ -729,9 +738,8 @@ describe("#1459 — sweep fan-out must not black out a scanner silently", () => 
 	// a gap for a file the scanner demonstrably covered).
 	it("a deferred scanner that already published these exact bytes stays covered", async () => {
 		const { LSPService } = await import("../../../clients/lsp/index.js");
-		const { hashDiagnosticContent } = await import(
-			"../../../clients/lsp/diagnostic-binding.js"
-		);
+		const { hashDiagnosticContent } =
+			await import("../../../clients/lsp/diagnostic-binding.js");
 		const service = new LSPService();
 
 		const storedFinding = makeDiagnostic("stored scanner finding");
@@ -744,7 +752,10 @@ describe("#1459 — sweep fan-out must not black out a scanner silently", () => 
 			),
 			getDiagnosticBinding: vi.fn((filePath: string) =>
 				filePath.endsWith("b.ts")
-					? { contentHash: hashDiagnosticContent("two"), boundToCurrentDisk: true }
+					? {
+							contentHash: hashDiagnosticContent("two"),
+							boundToCurrentDisk: true,
+						}
 					: undefined,
 			),
 		};
@@ -753,8 +764,9 @@ describe("#1459 — sweep fan-out must not black out a scanner silently", () => 
 			makeServer("typescript"),
 			makeServer("opengrep", "auxiliary"),
 		]);
-		createLSPClient.mockImplementation(async (options: { serverId?: string }) =>
-			options?.serverId === "opengrep" ? auxWithBinding : primary,
+		createLSPClient.mockImplementation(
+			async (options: { serverId?: string }) =>
+				options?.serverId === "opengrep" ? auxWithBinding : primary,
 		);
 
 		const touchOptions = {
@@ -879,7 +891,10 @@ describe("#1586 — deferred-door coverage is judged at merge time", () => {
 	 * sent. Its wait still never resolves early (`"never"`), because a scanner that
 	 * was not sent THIS touch's bytes cannot answer this touch's wait.
 	 */
-	function makeLatePublishingAux(writeMs: number, publishedContentHash: string) {
+	function makeLatePublishingAux(
+		writeMs: number,
+		publishedContentHash: string,
+	) {
 		const base = makeClient("opengrep", writeMs, [], "never");
 		let published = false;
 		return {
@@ -926,8 +941,9 @@ describe("#1586 — deferred-door coverage is judged at merge time", () => {
 			makeServer("typescript"),
 			makeServer("opengrep", "auxiliary"),
 		]);
-		createLSPClient.mockImplementation(async (options: { serverId?: string }) =>
-			options?.serverId === "opengrep" ? aux : primary,
+		createLSPClient.mockImplementation(
+			async (options: { serverId?: string }) =>
+				options?.serverId === "opengrep" ? aux : primary,
 		);
 
 		const touchOptions = {
@@ -953,9 +969,8 @@ describe("#1586 — deferred-door coverage is judged at merge time", () => {
 	it.each(["with-auxiliary", "all"] as const)(
 		"%s: a deferred scanner bound to these bytes at merge time keeps its findings and is not named",
 		async (clientScope) => {
-			const { hashDiagnosticContent } = await import(
-				"../../../clients/lsp/diagnostic-binding.js"
-			);
+			const { hashDiagnosticContent } =
+				await import("../../../clients/lsp/diagnostic-binding.js");
 			const { deferredResult } = await runDeferredPublishRace(
 				clientScope,
 				hashDiagnosticContent(CONTENT),
@@ -980,9 +995,8 @@ describe("#1586 — deferred-door coverage is judged at merge time", () => {
 	it.each(["with-auxiliary", "all"] as const)(
 		"%s: a deferred scanner bound to OTHER bytes stays dropped and named",
 		async (clientScope) => {
-			const { hashDiagnosticContent } = await import(
-				"../../../clients/lsp/diagnostic-binding.js"
-			);
+			const { hashDiagnosticContent } =
+				await import("../../../clients/lsp/diagnostic-binding.js");
 			// The honest case, and the guard against un-narrowing on a timer: the
 			// scanner published, but for the PREVIOUS revision. Its findings carry
 			// that revision's line numbers and must not ride out as this touch's
@@ -1012,9 +1026,8 @@ describe("#1586 — deferred-door coverage is judged at merge time", () => {
 			// merge-time predicate and left the wait-outcome door on the pre-notify
 			// snapshot, so the touch named a scanner whose findings it had just
 			// merged. Naming and merging must agree, whichever door reached first.
-			const { hashDiagnosticContent } = await import(
-				"../../../clients/lsp/diagnostic-binding.js"
-			);
+			const { hashDiagnosticContent } =
+				await import("../../../clients/lsp/diagnostic-binding.js");
 			const { holdingResult } = await runDeferredPublishRace(
 				clientScope,
 				hashDiagnosticContent(CONTENT),
@@ -1038,9 +1051,8 @@ describe("#1586 — deferred-door coverage is judged at merge time", () => {
 		// in the union precisely because a landed write erases the evidence. A door
 		// that keeps only the live half passes every other probe in this file.
 		const { LSPService } = await import("../../../clients/lsp/index.js");
-		const { hashDiagnosticContent } = await import(
-			"../../../clients/lsp/diagnostic-binding.js"
-		);
+		const { hashDiagnosticContent } =
+			await import("../../../clients/lsp/diagnostic-binding.js");
 		const service = new LSPService();
 
 		const storedFinding = makeDiagnostic("previously published finding");
@@ -1052,7 +1064,9 @@ describe("#1586 — deferred-door coverage is judged at merge time", () => {
 			...auxBase,
 			getDiagnostics: vi.fn(() => (cacheCleared ? [] : [storedFinding])),
 			getDiagnosticBinding: vi.fn(() =>
-				cacheCleared ? undefined : { contentHash: hashDiagnosticContent(CONTENT) },
+				cacheCleared
+					? undefined
+					: { contentHash: hashDiagnosticContent(CONTENT) },
 			),
 			notify: {
 				...auxBase.notify,
@@ -1073,8 +1087,9 @@ describe("#1586 — deferred-door coverage is judged at merge time", () => {
 			makeServer("typescript"),
 			makeServer("opengrep", "auxiliary"),
 		]);
-		createLSPClient.mockImplementation(async (options: { serverId?: string }) =>
-			options?.serverId === "opengrep" ? aux : primary,
+		createLSPClient.mockImplementation(
+			async (options: { serverId?: string }) =>
+				options?.serverId === "opengrep" ? aux : primary,
 		);
 
 		const touchOptions = {
@@ -1096,7 +1111,9 @@ describe("#1586 — deferred-door coverage is judged at merge time", () => {
 		expect(rowsFor("lsp_notify_resync_deferred")).toHaveLength(1);
 		// The live read is empty by now — only the pre-notify snapshot can cover it.
 		expect(aux.getDiagnosticBinding()).toBeUndefined();
-		expect(deferredResult?.unconfirmedServerIds ?? []).not.toContain("opengrep");
+		expect(deferredResult?.unconfirmedServerIds ?? []).not.toContain(
+			"opengrep",
+		);
 		expect(deferredResult?.confirmation).toBe("confirmed");
 		// Carried in from the snapshot, since the live cache is empty by now.
 		expect(deferredResult?.diags.map((d) => d.message)).toContain(
@@ -1158,9 +1175,8 @@ describe("#1586 — deferred-door coverage is judged at merge time", () => {
 
 	it("stale-write door: a publication landing after the merge cannot un-name the drop", async () => {
 		const { LSPService } = await import("../../../clients/lsp/index.js");
-		const { hashDiagnosticContent } = await import(
-			"../../../clients/lsp/diagnostic-binding.js"
-		);
+		const { hashDiagnosticContent } =
+			await import("../../../clients/lsp/diagnostic-binding.js");
 		const service = new LSPService();
 
 		// The write is charged as timed out (3x the budget), so the merge drops the
@@ -1173,8 +1189,9 @@ describe("#1586 — deferred-door coverage is judged at merge time", () => {
 			makeServer("typescript"),
 			makeServer("opengrep", "auxiliary"),
 		]);
-		createLSPClient.mockImplementation(async (options: { serverId?: string }) =>
-			options?.serverId === "opengrep" ? aux : primary,
+		createLSPClient.mockImplementation(
+			async (options: { serverId?: string }) =>
+				options?.serverId === "opengrep" ? aux : primary,
 		);
 
 		const touch = service.touchFile(FILE, CONTENT, {
@@ -1188,7 +1205,9 @@ describe("#1586 — deferred-door coverage is judged at merge time", () => {
 		const result = (await touch) as TouchResult;
 
 		// The drop stands — that decision was made and cannot be unmade here.
-		expect(result?.diags.map((d) => d.message)).not.toContain(POST_MERGE_FINDING);
+		expect(result?.diags.map((d) => d.message)).not.toContain(
+			POST_MERGE_FINDING,
+		);
 		// So the touch must still say it does not speak for the scanner.
 		expect(result?.unconfirmedServerIds).toContain("opengrep");
 		expect(result?.confirmation).toBe("partial");
@@ -1204,9 +1223,8 @@ describe("#1586 — deferred-door coverage is judged at merge time", () => {
 
 	it("deferred door: a publication landing after the merge cannot un-name the drop", async () => {
 		const { LSPService } = await import("../../../clients/lsp/index.js");
-		const { hashDiagnosticContent } = await import(
-			"../../../clients/lsp/diagnostic-binding.js"
-		);
+		const { hashDiagnosticContent } =
+			await import("../../../clients/lsp/diagnostic-binding.js");
 		const service = new LSPService();
 
 		const { primary, aux } = makePostMergePublishPair(
@@ -1217,8 +1235,9 @@ describe("#1586 — deferred-door coverage is judged at merge time", () => {
 			makeServer("typescript"),
 			makeServer("opengrep", "auxiliary"),
 		]);
-		createLSPClient.mockImplementation(async (options: { serverId?: string }) =>
-			options?.serverId === "opengrep" ? aux : primary,
+		createLSPClient.mockImplementation(
+			async (options: { serverId?: string }) =>
+				options?.serverId === "opengrep" ? aux : primary,
 		);
 
 		const touchOptions = {
@@ -1295,9 +1314,8 @@ describe("#1586 — deferred-door coverage is judged at merge time", () => {
 	 * is the only signal.
 	 */
 	it("F3: the merged binding carries a deferred-but-covered scanner's fingerprint", async () => {
-		const { hashDiagnosticContent } = await import(
-			"../../../clients/lsp/diagnostic-binding.js"
-		);
+		const { hashDiagnosticContent } =
+			await import("../../../clients/lsp/diagnostic-binding.js");
 		const contentHash = hashDiagnosticContent(CONTENT);
 		const { deferredResult } = await runDeferredPublishRace(
 			"with-auxiliary",
@@ -1306,9 +1324,7 @@ describe("#1586 — deferred-door coverage is judged at merge time", () => {
 
 		// Sanity check first: the scanner's findings really did merge (F1's
 		// guarantee) — otherwise a missing fingerprint would be unsurprising.
-		expect(deferredResult?.diags.map((d) => d.message)).toContain(
-			LATE_FINDING,
-		);
+		expect(deferredResult?.diags.map((d) => d.message)).toContain(LATE_FINDING);
 		expect(
 			(deferredResult as unknown as { binding?: { contentHash?: string } })
 				?.binding?.contentHash,
@@ -1351,9 +1367,8 @@ describe("#1586 review round (FIND-1) — publication lands between the aux wait
 
 	it("does not name a scanner the merge kept", async () => {
 		const { LSPService } = await import("../../../clients/lsp/index.js");
-		const { hashDiagnosticContent } = await import(
-			"../../../clients/lsp/diagnostic-binding.js"
-		);
+		const { hashDiagnosticContent } =
+			await import("../../../clients/lsp/diagnostic-binding.js");
 		const service = new LSPService();
 		const hash = hashDiagnosticContent(CONTENT);
 
@@ -1377,8 +1392,9 @@ describe("#1586 review round (FIND-1) — publication lands between the aux wait
 			makeServer("typescript"),
 			makeServer("opengrep", "auxiliary"),
 		]);
-		createLSPClient.mockImplementation(async (options: { serverId?: string }) =>
-			options?.serverId === "opengrep" ? aux : primary,
+		createLSPClient.mockImplementation(
+			async (options: { serverId?: string }) =>
+				options?.serverId === "opengrep" ? aux : primary,
 		);
 
 		const touch = service.touchFile(FILE, CONTENT, {

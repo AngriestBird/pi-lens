@@ -31,7 +31,12 @@ import {
 } from "../../../../clients/dispatch/runners/ast-grep-napi.js";
 
 const RULES_DIR = path.join(process.cwd(), "rules", "ast-grep-rules", "rules");
-const TEST_DIR = path.join(process.cwd(), "rules", "ast-grep-rules", "rule-tests");
+const TEST_DIR = path.join(
+	process.cwd(),
+	"rules",
+	"ast-grep-rules",
+	"rule-tests",
+);
 
 interface RawRule {
 	id?: string;
@@ -53,7 +58,9 @@ function loadRawRules(): { file: string; doc: RawRule }[] {
 		.filter((f) => f.endsWith(".yml"))
 		.map((file) => ({
 			file,
-			doc: yaml.load(fs.readFileSync(path.join(RULES_DIR, file), "utf8")) as RawRule,
+			doc: yaml.load(
+				fs.readFileSync(path.join(RULES_DIR, file), "utf8"),
+			) as RawRule,
 		}))
 		.filter((r) => r.doc && r.doc.id && r.doc.rule);
 }

@@ -171,10 +171,7 @@ type StartupMode = "full" | "minimal" | "quick";
 
 const HOST_STALL_THRESHOLD_MS = 30_000;
 
-function logHostReadyDelay(
-	deps: SessionStartDeps,
-	cwd: string,
-): void {
+function logHostReadyDelay(deps: SessionStartDeps, cwd: string): void {
 	if (
 		!deps.emitHostReadyDelay ||
 		deps.sessionStartMonotonicAt === undefined ||
@@ -314,7 +311,10 @@ function recordSnapshotSequenceTimeout(args: {
  * late-arriving `wordIndex` for the interactive path.
  */
 function retroactivelyHydrateAfterDeferredSequence(args: {
-	getWarmupOwnSnapshotRead: () => ProjectSnapshotExportsAndRules | null | undefined;
+	getWarmupOwnSnapshotRead: () =>
+		| ProjectSnapshotExportsAndRules
+		| null
+		| undefined;
 	snapshotRoot: string;
 	runtime: RuntimeCoordinator;
 	dbg: (msg: string) => void;
@@ -397,9 +397,7 @@ function logProjectSnapshotProbe(args: {
 			`project_snapshot: loaded seq=${args.snapshot.seq} exports=${args.snapshot.cachedExports.length} files=${Object.keys(args.snapshot.files ?? {}).length} reverseDeps=${Object.keys(args.snapshot.reverseDeps ?? {}).length} startupScan=${Boolean(args.snapshot.startupScan)} languageProfile=${Boolean(args.snapshot.languageProfile)}`,
 		);
 	} else {
-		args.dbg(
-			`project_snapshot: miss reason=${args.missReason}`,
-		);
+		args.dbg(`project_snapshot: miss reason=${args.missReason}`);
 	}
 }
 
@@ -773,26 +771,29 @@ function scheduleManagedToolRefresh(dbg: SessionStartDeps["dbg"]): void {
 	const delayMs = Number(
 		process.env.PI_LENS_TOOL_REFRESH_DELAY_MS ?? MANAGED_TOOL_REFRESH_DELAY_MS,
 	);
-	const timer = setTimeout(() => {
-		void (async () => {
-			try {
-				const refresh = await import("./installer/managed-tool-refresh.js");
-				const outcome = await refresh.runManagedToolRefresh();
-				if (outcome.skipped) {
-					dbg(`session_start tool-refresh: skipped (${outcome.skipped})`);
-					return;
+	const timer = setTimeout(
+		() => {
+			void (async () => {
+				try {
+					const refresh = await import("./installer/managed-tool-refresh.js");
+					const outcome = await refresh.runManagedToolRefresh();
+					if (outcome.skipped) {
+						dbg(`session_start tool-refresh: skipped (${outcome.skipped})`);
+						return;
+					}
+					for (const result of outcome.refreshed) {
+						dbg(
+							`session_start tool-refresh: ${result.toolId} ${result.ok ? "ok" : "failed"}` +
+								`${result.changed ? ` ${result.previousVersion ?? "unknown"} → ${result.currentVersion}` : " (unchanged)"}`,
+						);
+					}
+				} catch (err) {
+					dbg(`session_start tool-refresh: error ${err}`);
 				}
-				for (const result of outcome.refreshed) {
-					dbg(
-						`session_start tool-refresh: ${result.toolId} ${result.ok ? "ok" : "failed"}` +
-							`${result.changed ? ` ${result.previousVersion ?? "unknown"} → ${result.currentVersion}` : " (unchanged)"}`,
-					);
-				}
-			} catch (err) {
-				dbg(`session_start tool-refresh: error ${err}`);
-			}
-		})();
-	}, Number.isFinite(delayMs) ? delayMs : MANAGED_TOOL_REFRESH_DELAY_MS);
+			})();
+		},
+		Number.isFinite(delayMs) ? delayMs : MANAGED_TOOL_REFRESH_DELAY_MS,
+	);
 	timer.unref?.();
 }
 
@@ -1025,9 +1026,8 @@ async function buildOrRefreshWordIndex(args: {
 	// implementation backs this task, the quick-mode warmup call below, AND the
 	// stateless cold-query background trigger in word-index.ts — a bound/skip
 	// -rule change lands once, not in three copies.
-	const { buildWordIndexAsync, collectWordIndexDocs } = await import(
-		"./word-index.js"
-	);
+	const { buildWordIndexAsync, collectWordIndexDocs } =
+		await import("./word-index.js");
 	const docs = await collectWordIndexDocs(
 		analysisRoot,
 		() => runtime.isCurrentSession(sessionGeneration),
@@ -1550,9 +1550,8 @@ function scheduleStartupScans(
 			extractSymbolsAndRefsFromGraph,
 			getReviewGraphCacheIdentity,
 		} = await import("./review-graph/builder.js");
-		const { buildCallGraph, saveCallGraph, loadCallGraph } = await import(
-			"./call-graph.js"
-		);
+		const { buildCallGraph, saveCallGraph, loadCallGraph } =
+			await import("./call-graph.js");
 		if (!runtime.isCurrentSession(sessionGeneration)) return;
 		const startMs = Date.now();
 		// Build (or hydrate) the canonical review graph first. The call graph is a

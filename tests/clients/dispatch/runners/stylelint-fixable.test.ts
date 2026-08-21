@@ -21,9 +21,8 @@ vi.mock("../../../../clients/dispatch/runners/utils/runner-helpers.js", () => ({
 }));
 
 vi.mock("../../../../clients/tool-policy.js", async (importOriginal) => {
-	const actual = await importOriginal<
-		typeof import("../../../../clients/tool-policy.js")
-	>();
+	const actual =
+		await importOriginal<typeof import("../../../../clients/tool-policy.js")>();
 	return {
 		...actual,
 		getLinterPolicyForCwd: () => null,

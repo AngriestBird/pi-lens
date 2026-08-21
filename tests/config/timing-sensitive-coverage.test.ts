@@ -11,7 +11,10 @@ import { toPosix } from "../../clients/path-utils.js";
 // commenting an entry out of the .ts left the imported list unchanged).
 import vitestConfig from "../../vitest.config.ts";
 
-const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+const repoRoot = path.resolve(
+	path.dirname(fileURLToPath(import.meta.url)),
+	"../..",
+);
 
 // Deliberate exception, defined ONCE and used for both directions of the
 // check below: these tests validate the sampler itself with synthetic
@@ -37,12 +40,18 @@ function testFiles(dir: string): string[] {
 function timingSensitiveInclude(): string[] {
 	const projects: unknown = vitestConfig.test?.projects;
 	if (!Array.isArray(projects)) {
-		throw new Error("vitest.config.ts default export has no test.projects array");
+		throw new Error(
+			"vitest.config.ts default export has no test.projects array",
+		);
 	}
 	const project = projects
-		.map((entry) => (entry as { test?: { name?: unknown; include?: unknown } })?.test)
+		.map(
+			(entry) =>
+				(entry as { test?: { name?: unknown; include?: unknown } })?.test,
+		)
 		.find((test) => test?.name === "timing-sensitive");
-	if (!project) throw new Error('vitest.config.ts has no project named "timing-sensitive"');
+	if (!project)
+		throw new Error('vitest.config.ts has no project named "timing-sensitive"');
 	const include = project.include;
 	if (!Array.isArray(include) || include.length === 0) {
 		throw new Error('the "timing-sensitive" project has no include list');
@@ -74,19 +83,27 @@ describe("timing-sensitive Vitest project coverage", () => {
 		const included = timingSensitiveInclude();
 		const timingFiles = testFiles(path.join(repoRoot, "tests"))
 			.map((file) => toPosix(path.relative(repoRoot, file)))
-			.filter((file) => isTimingSensitive(fs.readFileSync(path.join(repoRoot, file), "utf8")));
+			.filter((file) =>
+				isTimingSensitive(fs.readFileSync(path.join(repoRoot, file), "utf8")),
+			);
 
 		// Reverse check: a renamed or deleted test must not leave a dead glob
 		// behind — a stale entry silently stops phasing anything at all.
 		const dead = [...included, ...timingMeasurementOnly].filter(
 			(file) => !fs.existsSync(path.join(repoRoot, file)),
 		);
-		expect(dead, "timing-sensitive include entries must exist on disk").toEqual([]);
+		expect(dead, "timing-sensitive include entries must exist on disk").toEqual(
+			[],
+		);
 
 		const unexpected = timingFiles.filter(
-			(file) => !included.includes(file) && !timingMeasurementOnly.includes(file),
+			(file) =>
+				!included.includes(file) && !timingMeasurementOnly.includes(file),
 		);
-		expect(unexpected, "sampler/cpuUsage tests must be in timingSensitiveInclude").toEqual([]);
+		expect(
+			unexpected,
+			"sampler/cpuUsage tests must be in timingSensitiveInclude",
+		).toEqual([]);
 
 		const staleExceptions = timingMeasurementOnly.filter(
 			(file) => !timingFiles.includes(file),

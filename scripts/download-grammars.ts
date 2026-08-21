@@ -112,13 +112,27 @@ export interface GrammarSidecar {
 }
 
 /** The package a grammar's sidecar records (override or the global aggregator). */
-export function expectedPackage(filename: string, manifest: GrammarManifest): string {
-	return manifest.overrides?.[filename]?.package ?? SOURCE_OVERRIDES[filename]?.package ?? manifest.package;
+export function expectedPackage(
+	filename: string,
+	manifest: GrammarManifest,
+): string {
+	return (
+		manifest.overrides?.[filename]?.package ??
+		SOURCE_OVERRIDES[filename]?.package ??
+		manifest.package
+	);
 }
 
 /** The version a grammar's sidecar records (override or the global aggregator). */
-export function expectedVersion(filename: string, manifest: GrammarManifest): string {
-	return manifest.overrides?.[filename]?.version ?? SOURCE_OVERRIDES[filename]?.version ?? manifest.version;
+export function expectedVersion(
+	filename: string,
+	manifest: GrammarManifest,
+): string {
+	return (
+		manifest.overrides?.[filename]?.version ??
+		SOURCE_OVERRIDES[filename]?.version ??
+		manifest.version
+	);
 }
 
 export const GRAMMARS: string[] = [
@@ -228,7 +242,10 @@ function grammarUrl(version: string, filename: string): string {
 	return SOURCE_OVERRIDES[filename]?.url ?? `${baseUrl(version)}/${filename}`;
 }
 
-async function fetchGrammar(version: string, filename: string): Promise<Buffer> {
+async function fetchGrammar(
+	version: string,
+	filename: string,
+): Promise<Buffer> {
 	const res = await fetch(grammarUrl(version, filename));
 	if (!res.ok) throw new Error(`HTTP ${res.status} fetching ${filename}`);
 	return Buffer.from(await res.arrayBuffer());
@@ -288,7 +305,9 @@ function parseArgs(argv: string[]): {
 
 /** Regenerate grammars.lock.json by fetching every grammar and hashing it. */
 async function regenerateManifest(): Promise<void> {
-	console.error(`Regenerating manifest from ${PACKAGE}@${TREE_SITTER_WASMS_VERSION} …`);
+	console.error(
+		`Regenerating manifest from ${PACKAGE}@${TREE_SITTER_WASMS_VERSION} …`,
+	);
 	const grammars: Record<string, string> = {};
 	for (const g of GRAMMARS) {
 		grammars[g] = sha256(await fetchGrammar(TREE_SITTER_WASMS_VERSION, g));
@@ -303,7 +322,9 @@ async function regenerateManifest(): Promise<void> {
 		package: PACKAGE,
 		version: TREE_SITTER_WASMS_VERSION,
 		grammars: sorted,
-		...(Object.keys(SOURCE_OVERRIDES).length ? { overrides: SOURCE_OVERRIDES } : {}),
+		...(Object.keys(SOURCE_OVERRIDES).length
+			? { overrides: SOURCE_OVERRIDES }
+			: {}),
 		// Re-emitted from the map above, not copied from the old manifest: a
 		// `--write-manifest` run on a tree-sitter-wasms bump must not silently
 		// drop the committed grammars' provenance, which would leave the guard

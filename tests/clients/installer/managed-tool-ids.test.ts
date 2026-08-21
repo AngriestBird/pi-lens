@@ -21,8 +21,11 @@ const MANAGED_LSP_TOOL_IDS = [
 
 describe("installer managed tool coverage", () => {
 	it("has installer definitions for all managed LSP tool IDs", async () => {
-		const { isKnownToolId } = await import("../../../clients/installer/index.js");
-		const missing = MANAGED_LSP_TOOL_IDS.filter((toolId) => !isKnownToolId(toolId));
+		const { isKnownToolId } =
+			await import("../../../clients/installer/index.js");
+		const missing = MANAGED_LSP_TOOL_IDS.filter(
+			(toolId) => !isKnownToolId(toolId),
+		);
 		expect(missing).toEqual([]);
 	});
 

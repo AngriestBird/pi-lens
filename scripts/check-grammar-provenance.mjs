@@ -47,18 +47,24 @@ const wasmFiles = fs
 for (const filename of wasmFiles) {
 	const expected = manifest.grammars[filename];
 	if (!expected) {
-		problems.push(`${filename}: present but not in the manifest (unknown grammar)`);
+		problems.push(
+			`${filename}: present but not in the manifest (unknown grammar)`,
+		);
 		continue;
 	}
 	const wasmPath = path.join(grammarsDir, filename);
 	const actual = sha256(fs.readFileSync(wasmPath));
 	if (actual !== expected) {
-		problems.push(`${filename}: bytes hash ${actual}, manifest expects ${expected}`);
+		problems.push(
+			`${filename}: bytes hash ${actual}, manifest expects ${expected}`,
+		);
 	}
 
 	const sidecarPath = sidecarPathFor(wasmPath);
 	if (!fs.existsSync(sidecarPath)) {
-		problems.push(`${filename}: missing provenance sidecar (${path.basename(sidecarPath)})`);
+		problems.push(
+			`${filename}: missing provenance sidecar (${path.basename(sidecarPath)})`,
+		);
 		continue;
 	}
 	let meta;
@@ -75,14 +81,18 @@ for (const filename of wasmFiles) {
 		);
 	}
 	if (meta.sha256 !== expected) {
-		problems.push(`${filename}: sidecar hash ${meta.sha256} != manifest ${expected}`);
+		problems.push(
+			`${filename}: sidecar hash ${meta.sha256} != manifest ${expected}`,
+		);
 	}
 }
 
 // The bundled core must actually be present — guards a prepare that shipped nothing.
 for (const filename of CORE) {
 	if (!wasmFiles.includes(filename)) {
-		problems.push(`${filename}: bundled core grammar missing from ${grammarsDir}/`);
+		problems.push(
+			`${filename}: bundled core grammar missing from ${grammarsDir}/`,
+		);
 	}
 }
 
@@ -97,7 +107,9 @@ for (const filename of vendoredNames) {
 	const expected = VENDORED_GRAMMARS[filename];
 	const wasmPath = path.join(VENDORED_DIR, filename);
 	if (!fs.existsSync(wasmPath)) {
-		problems.push(`${filename}: committed grammar missing from ${VENDORED_DIR}/`);
+		problems.push(
+			`${filename}: committed grammar missing from ${VENDORED_DIR}/`,
+		);
 		continue;
 	}
 	const actual = sha256(fs.readFileSync(wasmPath));

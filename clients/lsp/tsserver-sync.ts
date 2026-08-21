@@ -181,7 +181,8 @@ export function classifyProjectInfo(body: unknown): TsserverProjectIdentity {
 export async function probeTsserverProjectIdentity(
 	options: TsserverProjectIdentityProbeOptions,
 ): Promise<void> {
-	const normalizedFile = options.normalizedFile ?? normalizeMapKey(options.file);
+	const normalizedFile =
+		options.normalizedFile ?? normalizeMapKey(options.file);
 	const startedAt = Date.now();
 	// Logging starts only once a probe is actually eligible and attempted:
 	// ineligible servers (wrong serverId/launchVariant, no command channel) and
@@ -189,11 +190,23 @@ export async function probeTsserverProjectIdentity(
 	// bare return keeps them out of the telemetry stream entirely instead of
 	// writing an `lsp_typescript_project_identity` row per didOpen on every
 	// server (python, go, opengrep, ...).
-	const logOutcome = (outcome: "ok" | "not-executed" | "no-response" | "unsuccessful" | "threw", metadata: Record<string, unknown> = {}) => logLatency({
-		type: "phase", phase: "lsp_typescript_project_identity", filePath: normalizedFile,
-		durationMs: Date.now() - startedAt,
-		metadata: { serverId: options.serverId, launchVariant: options.launchVariant, clientRoot: options.clientRoot, outcome, ...metadata },
-	});
+	const logOutcome = (
+		outcome: "ok" | "not-executed" | "no-response" | "unsuccessful" | "threw",
+		metadata: Record<string, unknown> = {},
+	) =>
+		logLatency({
+			type: "phase",
+			phase: "lsp_typescript_project_identity",
+			filePath: normalizedFile,
+			durationMs: Date.now() - startedAt,
+			metadata: {
+				serverId: options.serverId,
+				launchVariant: options.launchVariant,
+				clientRoot: options.clientRoot,
+				outcome,
+				...metadata,
+			},
+		});
 	if (
 		options.serverId !== "typescript" ||
 		options.launchVariant !== "classic" ||
@@ -209,12 +222,21 @@ export async function probeTsserverProjectIdentity(
 			TSSERVER_REQUEST_COMMAND,
 			["projectInfo", { file: options.file, needFileNameList: false }],
 		);
-		if (!outcome.executed) { logOutcome("not-executed"); return; }
+		if (!outcome.executed) {
+			logOutcome("not-executed");
+			return;
+		}
 		const response = outcome.result as
 			| { success?: boolean; body?: unknown }
 			| undefined;
-		if (!response) { logOutcome("no-response"); return; }
-		if (response.success !== true) { logOutcome("unsuccessful"); return; }
+		if (!response) {
+			logOutcome("no-response");
+			return;
+		}
+		if (response.success !== true) {
+			logOutcome("unsuccessful");
+			return;
+		}
 		const identity = classifyProjectInfo(response.body);
 		logLatency({
 			type: "phase",

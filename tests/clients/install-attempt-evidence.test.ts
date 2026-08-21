@@ -48,7 +48,9 @@ let piLensHome: string;
 let restoreEnv: () => void;
 
 /** The real installer, loaded fresh so `TOOLS_DIR` picks up `PI_LENS_HOME`. */
-async function installer(): Promise<typeof import("../../clients/installer/index.js")> {
+async function installer(): Promise<
+	typeof import("../../clients/installer/index.js")
+> {
 	vi.resetModules();
 	return import("../../clients/installer/index.js");
 }
@@ -65,7 +67,9 @@ function plantFishLspBinary(): void {
 	const binDir = path.join(piLensHome, "tools", "node_modules", ".bin");
 	fs.mkdirSync(binDir, { recursive: true });
 	const isWin = process.platform === "win32";
-	for (const name of isWin ? ["fish-lsp.cmd", "fish-lsp.exe", "fish-lsp"] : ["fish-lsp"]) {
+	for (const name of isWin
+		? ["fish-lsp.cmd", "fish-lsp.exe", "fish-lsp"]
+		: ["fish-lsp"]) {
 		fs.writeFileSync(path.join(binDir, name), "#!/bin/sh\nexit 0\n", {
 			mode: 0o755,
 		});
@@ -83,7 +87,9 @@ function lastInstallEvidence(): Record<string, unknown> | undefined {
 beforeEach(() => {
 	safeSpawnAsync.mockReset();
 	logLatencySpy.mockReset();
-	piLensHome = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-install-attempt-"));
+	piLensHome = fs.mkdtempSync(
+		path.join(os.tmpdir(), "pi-lens-install-attempt-"),
+	);
 	restoreEnv = withEnv({
 		PI_LENS_HOME: piLensHome,
 		PI_LENS_DISABLE_TOOL_INSTALL: undefined,
@@ -187,9 +193,8 @@ describe("the installer records what its attempt did (#1500)", () => {
 describe("the row a reader sees matches what the install did (#1500)", () => {
 	async function probeAndInstall(): Promise<void> {
 		vi.resetModules();
-		const { SecurityScanClient } = await import(
-			"../../clients/security-scan-client.js"
-		);
+		const { SecurityScanClient } =
+			await import("../../clients/security-scan-client.js");
 		class FakeScanClient extends SecurityScanClient<string[]> {
 			constructor() {
 				// fish-lsp is a real npm-strategy tool id, so the installer takes its

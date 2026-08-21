@@ -54,7 +54,9 @@ vi.mock("../../clients/user-notify.js", () => ({ notifyUserDegradation }));
  * shape #1548's own tests use, but short enough to stand in for a connection
  * that dropped after the preamble. Passes `hasWasmMagic` while being nowhere
  * near a real grammar's byte count. */
-const TRUNCATED_WASM = new Uint8Array([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]);
+const TRUNCATED_WASM = new Uint8Array([
+	0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+]);
 
 function sha256Of(bytes: Uint8Array): string {
 	return `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
@@ -95,7 +97,8 @@ describe("truncated-but-magic-valid grammar download (#1564)", () => {
 						// A hash that does NOT match TRUNCATED_WASM's real digest —
 						// simulating the pinned manifest describing the FULL grammar
 						// while the CDN only delivered a prefix of it.
-						[grammarFile]: "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+						[grammarFile]:
+							"sha256:0000000000000000000000000000000000000000000000000000000000000000",
 					},
 				}),
 			);

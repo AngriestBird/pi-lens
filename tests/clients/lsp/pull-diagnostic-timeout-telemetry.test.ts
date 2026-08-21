@@ -117,7 +117,9 @@ describe("#1713 pull-diagnostic timeout emits a latency.log record", () => {
 		// durationMs is the request's own elapsed time at the moment it was
 		// abandoned — bounded near the budget, not the mock's full 300ms delay.
 		expect(event.durationMs as number).toBeGreaterThanOrEqual(0);
-		expect(event.durationMs as number).toBeLessThan(Date.now() - startedAt + 50);
+		expect(event.durationMs as number).toBeLessThan(
+			Date.now() - startedAt + 50,
+		);
 	});
 
 	it("carries hadPreviousResultId: true when a prior pull left a resultId", async () => {
@@ -226,7 +228,9 @@ describe("#1713 a late pull answer after abandonment is a bounded, traced discar
 		await wait(120);
 
 		expect(discardedEvents()).toHaveLength(0);
-		expect(getDegradationSummary().find((g) => g.kind === "lsp-pull-late-answer")).toBeUndefined();
+		expect(
+			getDegradationSummary().find((g) => g.kind === "lsp-pull-late-answer"),
+		).toBeUndefined();
 	});
 
 	it("records each repeat occurrence independently, preserving identity — not per-repeat spam suppression", async () => {

@@ -272,7 +272,9 @@ export interface PastEofGateResult<T> {
  * unchanged persistent demotion doesn't re-log or re-resync on every render.
  * Never throws, never mutates the input array.
  */
-export function demotePastEofDiagnostics<T extends PastEofDiagnosticLike>(args: {
+export function demotePastEofDiagnostics<
+	T extends PastEofDiagnosticLike,
+>(args: {
 	/** Serving surface name as it appears in telemetry, e.g. `"lens_diagnostics"`. */
 	store: string;
 	cwd: string;
@@ -305,7 +307,11 @@ export function demotePastEofDiagnostics<T extends PastEofDiagnosticLike>(args: 
 		const isPastEof = typeof d.line === "number" && d.line > lineCount;
 		if (isPastEof === !!d.stale) return d; // no transition either direction
 		if (isPastEof) risingEdgeLines.push(d.line as number);
-		return { ...d, stale: isPastEof, staleReason: isPastEof ? "past-eof" : undefined };
+		return {
+			...d,
+			stale: isPastEof,
+			staleReason: isPastEof ? "past-eof" : undefined,
+		};
 	});
 	if (risingEdgeLines.length === 0) {
 		return { diagnostics: out, demotedCount: 0 };

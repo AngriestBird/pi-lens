@@ -99,9 +99,9 @@ describe("project-trust policy gates", () => {
 	});
 
 	it("adopts from a ctx and latches the result", () => {
-		expect(adoptProjectTrustFromContext({ isProjectTrusted: () => false })).toBe(
-			"untrusted",
-		);
+		expect(
+			adoptProjectTrustFromContext({ isProjectTrusted: () => false }),
+		).toBe("untrusted");
 		expect(getProjectTrustState()).toBe("untrusted");
 
 		// A later session_start on a trusted cwd must lift the gate again.

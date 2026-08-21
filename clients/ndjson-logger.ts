@@ -181,14 +181,14 @@ if (isSharedWriterState(existingGlobalState)) {
 	existingGlobalState.version = NDJSON_GLOBAL_STATE_VERSION;
 	ndjsonGlobalState = existingGlobalState;
 } else if (existingGlobalState === undefined) {
-	ndjsonGlobalState = (globalStateHost[NDJSON_GLOBAL_STATE_KEY] = {
+	ndjsonGlobalState = globalStateHost[NDJSON_GLOBAL_STATE_KEY] = {
 		schema: NDJSON_GLOBAL_STATE_SCHEMA,
 		version: NDJSON_GLOBAL_STATE_VERSION,
 		writers: new Map<string, NdjsonWriterState>(),
 		exitFlushers: new Set<() => void>(),
 		exitHandlerRegistered: false,
 		registeredLogFiles: new Set<string>(),
-	});
+	};
 } else if (isLegacyGlobalState(existingGlobalState)) {
 	// Do not mutate or replace this state: its private queues and exit flusher
 	// closures are not observable, so adopting it would falsely claim safety.
@@ -264,7 +264,8 @@ export function getSinkWriteFailures(): SinkWriteFailureSummary[] {
  */
 export function resetSinkWriteFailures(): void {
 	if (!ndjsonGlobalState) return;
-	for (const state of ndjsonGlobalState.writers.values()) state.writeFailures = 0;
+	for (const state of ndjsonGlobalState.writers.values())
+		state.writeFailures = 0;
 }
 
 function requireCurrentGlobalState(): NdjsonGlobalState {
@@ -296,10 +297,11 @@ function assertCompatibleWriterOptions(
 	maxBytes?: number,
 	backupPath?: string,
 ): void {
-	if (existing.maxBytes === maxBytes && existing.backupPath === backupPath) return;
+	if (existing.maxBytes === maxBytes && existing.backupPath === backupPath)
+		return;
 	throw new Error(
 		`createNdjsonLogger: incompatible options for shared path ${existing.file}; ` +
-		`the first writer's maxBytes/backupPath must be reused`,
+			`the first writer's maxBytes/backupPath must be reused`,
 	);
 }
 
@@ -485,11 +487,10 @@ async function drainLoop(state: NdjsonWriterState): Promise<void> {
 			item.kind === "line"
 				? state.queue.findIndex((queued) => queued.kind === "truncate")
 				: 0;
-		const pendingEnd = truncateIndex === -1 ? state.queue.length : truncateIndex;
+		const pendingEnd =
+			truncateIndex === -1 ? state.queue.length : truncateIndex;
 		const pending =
-			item.kind === "truncate"
-				? [item]
-				: state.queue.slice(0, pendingEnd);
+			item.kind === "truncate" ? [item] : state.queue.slice(0, pendingEnd);
 		state.inFlightBatch = pending;
 		const writeBatch = async (): Promise<void> => {
 			if (item.kind === "truncate") {

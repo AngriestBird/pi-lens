@@ -26,19 +26,45 @@ describe("RuntimeCoordinator", () => {
 		const runtime = new RuntimeCoordinator();
 		const filePath = path.resolve("src/sticky.ts");
 
-		expect(runtime.recordMutationToolReceipt(filePath, "write").autofixMode).toBe("immediate");
-		expect(runtime.recordMutationToolReceipt(filePath, "edit").autofixMode).toBe("deferred");
-		expect(runtime.recordMutationToolReceipt(filePath, "write").autofixMode).toBe("deferred");
+		expect(
+			runtime.recordMutationToolReceipt(filePath, "write").autofixMode,
+		).toBe("immediate");
+		expect(
+			runtime.recordMutationToolReceipt(filePath, "edit").autofixMode,
+		).toBe("deferred");
+		expect(
+			runtime.recordMutationToolReceipt(filePath, "write").autofixMode,
+		).toBe("deferred");
 
 		runtime.beginTurn();
-		expect(runtime.recordMutationToolReceipt(filePath, "write").autofixMode).toBe("immediate");
+		expect(
+			runtime.recordMutationToolReceipt(filePath, "write").autofixMode,
+		).toBe("immediate");
 	});
 
 	it("coalesces autofix and format kinds on one owner-scoped path record", () => {
 		const runtime = new RuntimeCoordinator();
 		const filePath = path.resolve("src/coalesced.ts");
-		expect(runtime.deferMutation(filePath, process.cwd(), "edit", process.cwd(), "autofix", "owner")).toBe(true);
-		expect(runtime.deferMutation(filePath, process.cwd(), "edit", process.cwd(), "format", "owner")).toBe(true);
+		expect(
+			runtime.deferMutation(
+				filePath,
+				process.cwd(),
+				"edit",
+				process.cwd(),
+				"autofix",
+				"owner",
+			),
+		).toBe(true);
+		expect(
+			runtime.deferMutation(
+				filePath,
+				process.cwd(),
+				"edit",
+				process.cwd(),
+				"format",
+				"owner",
+			),
+		).toBe(true);
 
 		const [record] = runtime.consumeDeferredFormatFiles();
 		expect(record.kinds).toEqual(new Set(["autofix", "format"]));
@@ -48,10 +74,24 @@ describe("RuntimeCoordinator", () => {
 	it("merges independently requeued kinds and tool names for one path", () => {
 		const runtime = new RuntimeCoordinator();
 		const filePath = path.resolve("src/requeued.ts");
-		runtime.deferMutation(filePath, process.cwd(), "write", process.cwd(), "autofix");
+		runtime.deferMutation(
+			filePath,
+			process.cwd(),
+			"write",
+			process.cwd(),
+			"autofix",
+		);
 		const [claimed] = runtime.consumeDeferredFormatFiles();
-		runtime.requeueDeferredMutations([{ ...claimed, kinds: new Set(["autofix"]), toolNames: new Set(["write"]) }]);
-		runtime.requeueDeferredMutations([{ ...claimed, kinds: new Set(["format"]), toolNames: new Set(["edit"]) }]);
+		runtime.requeueDeferredMutations([
+			{
+				...claimed,
+				kinds: new Set(["autofix"]),
+				toolNames: new Set(["write"]),
+			},
+		]);
+		runtime.requeueDeferredMutations([
+			{ ...claimed, kinds: new Set(["format"]), toolNames: new Set(["edit"]) },
+		]);
 
 		const [requeued] = runtime.consumeDeferredFormatFiles();
 		expect(requeued.kinds).toEqual(new Set(["autofix", "format"]));
@@ -61,9 +101,23 @@ describe("RuntimeCoordinator", () => {
 	it("merges a requeued phase into a newer record queued during the drain", () => {
 		const runtime = new RuntimeCoordinator();
 		const filePath = path.resolve("src/newer.ts");
-		runtime.deferMutation(filePath, "old-cwd", "write", "old-root", "autofix", "old-owner");
+		runtime.deferMutation(
+			filePath,
+			"old-cwd",
+			"write",
+			"old-root",
+			"autofix",
+			"old-owner",
+		);
 		const [claimed] = runtime.consumeDeferredFormatFiles();
-		runtime.deferMutation(filePath, "new-cwd", "edit", "new-root", "format", "new-owner");
+		runtime.deferMutation(
+			filePath,
+			"new-cwd",
+			"edit",
+			"new-root",
+			"format",
+			"new-owner",
+		);
 		runtime.requeueDeferredMutations([claimed]);
 
 		const [record] = runtime.consumeDeferredFormatFiles();
@@ -110,7 +164,10 @@ describe("RuntimeCoordinator", () => {
 	describe("telemetry model/provider identity (#1448)", () => {
 		it("exposes the raw model id separately from the combined display string", () => {
 			const runtime = new RuntimeCoordinator();
-			runtime.setTelemetryIdentity({ model: "claude-sonnet-4-5", provider: "anthropic" });
+			runtime.setTelemetryIdentity({
+				model: "claude-sonnet-4-5",
+				provider: "anthropic",
+			});
 
 			expect(runtime.telemetryModelId).toBe("claude-sonnet-4-5");
 			expect(runtime.telemetryProviderId).toBe("anthropic");
@@ -159,7 +216,10 @@ describe("RuntimeCoordinator", () => {
 
 		it("resetForSession clears the raw model/provider identity", () => {
 			const runtime = new RuntimeCoordinator();
-			runtime.setTelemetryIdentity({ model: "claude-sonnet-4-5", provider: "anthropic" });
+			runtime.setTelemetryIdentity({
+				model: "claude-sonnet-4-5",
+				provider: "anthropic",
+			});
 
 			runtime.resetForSession();
 
@@ -224,7 +284,9 @@ describe("RuntimeCoordinator", () => {
 	describe("inline blockers reconcile against disk (#1245)", () => {
 		it("drops a blocker whose file no longer exists from the snapshot", () => {
 			const runtime = new RuntimeCoordinator();
-			const dir = mkdtempSync(path.join(tmpdir(), "pi-lens-blocker-reconcile-"));
+			const dir = mkdtempSync(
+				path.join(tmpdir(), "pi-lens-blocker-reconcile-"),
+			);
 			const file = path.join(dir, "stale.ts");
 			writeFileSync(file, "export const x = 1;\n");
 			try {
@@ -266,7 +328,9 @@ describe("RuntimeCoordinator", () => {
 			try {
 				runtime.recordInlineBlockers(file, "blocker A");
 				expect(runtime.getInlineBlockersSnapshot()).toHaveLength(1);
-				expect(runtime.getInlineBlockersSnapshot()[0].summary).toBe("blocker A");
+				expect(runtime.getInlineBlockersSnapshot()[0].summary).toBe(
+					"blocker A",
+				);
 			} finally {
 				rmSync(dir, { recursive: true, force: true });
 			}
@@ -279,7 +343,9 @@ describe("RuntimeCoordinator", () => {
 			// invalidation path (re-dispatch of the SAME path, #1245's existence
 			// check) covers that, so the verdict is never re-taken.
 			const runtime = new RuntimeCoordinator();
-			const dir = mkdtempSync(path.join(tmpdir(), "pi-lens-blocker-crossfile-"));
+			const dir = mkdtempSync(
+				path.join(tmpdir(), "pi-lens-blocker-crossfile-"),
+			);
 			const testFile = path.join(dir, "provider.test.ts");
 			const provider = path.join(dir, "provider.ts");
 			writeFileSync(testFile, "import './provider.ts';\n");

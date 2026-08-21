@@ -265,7 +265,9 @@ export function noteAuthoritativeContentAttachment(
 
 export interface WireAgentNudgeSubscriberArgs {
 	/** `pi.events` from the extension API, or undefined on older hosts. */
-	events: { on?: (channel: string, handler: (data: unknown) => void) => () => void } | undefined;
+	events:
+		| { on?: (channel: string, handler: (data: unknown) => void) => () => void }
+		| undefined;
 	/** Resolve the live ReadGuard lazily (session-scoped, created on first use). */
 	getReadGuard: () => ReadGuard | undefined;
 	dbg?: (msg: string) => void;

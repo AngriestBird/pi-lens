@@ -49,9 +49,7 @@ function canonicalize(value: unknown, root: string): unknown {
 	return JSON.parse(
 		JSON.stringify(value, (_key, nested) =>
 			typeof nested === "string"
-				? nested
-						.replaceAll(root, "<root>")
-						.replaceAll(normalizedRoot, "<root>")
+				? nested.replaceAll(root, "<root>").replaceAll(normalizedRoot, "<root>")
 				: nested,
 		),
 	) as unknown;
@@ -90,7 +88,8 @@ function makeRoot(prefix: string, files: Record<string, string>): string {
 const SOURCES: Record<string, string> = {
 	"src/a.ts": "export const alpha = 1;\n",
 	"src/b.ts": "import { alpha } from './a';\nexport const beta = alpha;\n",
-	"src/c.ts": "import { beta } from './b';\nexport function gamma() { return beta; }\n",
+	"src/c.ts":
+		"import { beta } from './b';\nexport function gamma() { return beta; }\n",
 	"src/d.ts": "export function delta() { return 4; }\n",
 	"src/e.ts": "import { gamma } from './c';\nexport const eps = gamma();\n",
 	"src/f.ts": "import { delta } from './d';\nexport const zeta = delta();\n",
@@ -127,11 +126,7 @@ describe("review-graph resumable checkpoint (#936 limit 2)", () => {
 		delete process.env.PI_LENS_GRAPH_CHECKPOINT_TEST_STOP_AFTER;
 		clearReviewGraphWorkspaceCache(resumeRoot);
 		clearGraphCache();
-		const resumed = await buildOrUpdateGraph(
-			resumeRoot,
-			[],
-			new FactStore(),
-		);
+		const resumed = await buildOrUpdateGraph(resumeRoot, [], new FactStore());
 
 		const cold = await coldBuild(SOURCES);
 		expect(graphShape(resumed, resumeRoot)).toEqual(

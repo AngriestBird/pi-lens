@@ -528,9 +528,9 @@ describe("R8 — aux grace: touchFile with-auxiliary path", () => {
 			diagnostics: "document",
 		});
 		await vi.advanceTimersByTimeAsync(2110);
-		expect((await next)?.diags.map((diagnostic) => diagnostic.message)).toContain(
-			"late aux finding",
-		);
+		expect(
+			(await next)?.diags.map((diagnostic) => diagnostic.message),
+		).toContain("late aux finding");
 	});
 
 	it("rejects a late auxiliary publication when the next read changes content", async () => {
@@ -822,9 +822,8 @@ describe("R8 — aux grace: raceToCompletion per-role unit tests", () => {
 	});
 
 	it("completes at primary+auxGrace when primary fast and aux slow", async () => {
-		const { raceToCompletion } = await import(
-			"../../../clients/lsp/aggregation.js"
-		);
+		const { raceToCompletion } =
+			await import("../../../clients/lsp/aggregation.js");
 
 		const fast = new Promise<{ id: string; count: number }>((resolve) =>
 			setTimeout(() => resolve({ id: "primary", count: 1 }), 100),
@@ -856,9 +855,8 @@ describe("R8 — aux grace: raceToCompletion per-role unit tests", () => {
 	});
 
 	it("includes aux result when it answers within auxGrace", async () => {
-		const { raceToCompletion } = await import(
-			"../../../clients/lsp/aggregation.js"
-		);
+		const { raceToCompletion } =
+			await import("../../../clients/lsp/aggregation.js");
 
 		const fast = new Promise<{ id: string; count: number }>((resolve) =>
 			setTimeout(() => resolve({ id: "primary", count: 1 }), 100),
@@ -889,9 +887,8 @@ describe("R8 — aux grace: raceToCompletion per-role unit tests", () => {
 	});
 
 	it("primary-only path: aux grace timer never fires", async () => {
-		const { raceToCompletion } = await import(
-			"../../../clients/lsp/aggregation.js"
-		);
+		const { raceToCompletion } =
+			await import("../../../clients/lsp/aggregation.js");
 		const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
 
 		const p1 = new Promise<{ id: string; count: number }>((resolve) =>
@@ -928,9 +925,8 @@ describe("R8 — aux grace: raceToCompletion per-role unit tests", () => {
 	});
 
 	it("slow primary: aux settling early does not finalize the race early", async () => {
-		const { raceToCompletion } = await import(
-			"../../../clients/lsp/aggregation.js"
-		);
+		const { raceToCompletion } =
+			await import("../../../clients/lsp/aggregation.js");
 
 		// Aux resolves fast; primary is slow.
 		const primary = new Promise<{ id: string; count: number }>((resolve) =>
@@ -1028,9 +1024,7 @@ describe("#1470 — cut-off auxiliary honesty", () => {
 			makeAuxServer("opengrep"),
 		]);
 		createLSPClient
-			.mockResolvedValueOnce(
-				makeClient(800, [], { serverId: "ts-primary" }),
-			)
+			.mockResolvedValueOnce(makeClient(800, [], { serverId: "ts-primary" }))
 			.mockResolvedValueOnce(
 				makeClient(auxDelayMs, auxDiags, { serverId: "opengrep" }),
 			);
@@ -1339,10 +1333,9 @@ describe("#1470 — cut-off auxiliary honesty", () => {
 	});
 
 	it("an auxiliary that PUBLISHES within grace still yields an unqualified confirmation", async () => {
-		const { result, outcome } = await probe(
-			900,
-			[makeDiagnostic("aux finding")],
-		);
+		const { result, outcome } = await probe(900, [
+			makeDiagnostic("aux finding"),
+		]);
 		expect(outcome).toBe("answered");
 		expect(result?.confirmation).toBe("confirmed");
 		expect(result?.unconfirmedServerIds).toBeUndefined();
@@ -1424,7 +1417,7 @@ describe("#1470 — cut-off auxiliary honesty", () => {
  * assertion below reads `"confirmed"` and no `lsp_aux_wait_outcome` row exists at
  * all.
  */
-describe("#1533 — silent auxiliary honesty on clientScope \"all\"", () => {
+describe('#1533 — silent auxiliary honesty on clientScope "all"', () => {
 	beforeEach(() => {
 		vi.useFakeTimers();
 		vi.resetModules();
@@ -1480,7 +1473,11 @@ describe("#1533 — silent auxiliary honesty on clientScope \"all\"", () => {
 			([entry]) => entry.phase === "lsp_aux_wait_outcome",
 		)?.[0];
 		const outcomes = row?.metadata?.outcomes as
-			| Array<{ serverId: string; outcome: string; publishedThisContent?: boolean }>
+			| Array<{
+					serverId: string;
+					outcome: string;
+					publishedThisContent?: boolean;
+			  }>
 			| undefined;
 		return { result, row, outcomes, outcome: outcomes?.[0]?.outcome };
 	}
@@ -1501,7 +1498,7 @@ describe("#1533 — silent auxiliary honesty on clientScope \"all\"", () => {
 		).toContain("primary error");
 	});
 
-	it("emits an lsp_aux_wait_outcome row for the \"all\" scope, tagged as the aggregate producer", async () => {
+	it('emits an lsp_aux_wait_outcome row for the "all" scope, tagged as the aggregate producer', async () => {
 		// The issue's observability criterion: the field-data analysis from #1493's
 		// review must cover this lane too, and a query must be able to tell the two
 		// producers apart.
@@ -1573,16 +1570,17 @@ describe("#1533 — silent auxiliary honesty on clientScope \"all\"", () => {
 			makePrimaryServer("ts-primary"),
 			makeAuxServer("opengrep"),
 		]);
-		createLSPClient.mockImplementation(async (options: { serverId?: string }) =>
-			options?.serverId === "opengrep"
-				? {
-						...makeClient(900, [], { serverId: "opengrep" }),
-						getDiagnosticBinding: vi.fn(() => ({
-							contentHash: hashDiagnosticContent(content),
-							boundToCurrentDisk: true,
-						})),
-					}
-				: makeClient(100, [], { serverId: "ts-primary" }),
+		createLSPClient.mockImplementation(
+			async (options: { serverId?: string }) =>
+				options?.serverId === "opengrep"
+					? {
+							...makeClient(900, [], { serverId: "opengrep" }),
+							getDiagnosticBinding: vi.fn(() => ({
+								contentHash: hashDiagnosticContent(content),
+								boundToCurrentDisk: true,
+							})),
+						}
+					: makeClient(100, [], { serverId: "ts-primary" }),
 		);
 
 		const touch = service.touchFile(FILE, content, {
@@ -1616,10 +1614,11 @@ describe("#1533 — silent auxiliary honesty on clientScope \"all\"", () => {
 			makePrimaryServer("ts-primary"),
 			makeAuxServer("opengrep"),
 		]);
-		createLSPClient.mockImplementation(async (options: { serverId?: string }) =>
-			options?.serverId === "opengrep"
-				? makeClient(900, [], { serverId: "opengrep" })
-				: makeClient(100, [], { serverId: "ts-primary" }),
+		createLSPClient.mockImplementation(
+			async (options: { serverId?: string }) =>
+				options?.serverId === "opengrep"
+					? makeClient(900, [], { serverId: "opengrep" })
+					: makeClient(100, [], { serverId: "ts-primary" }),
 		);
 
 		const touch = service.touchFile(FILE, "excluded", {
@@ -1760,10 +1759,11 @@ describe("#1533 — silent auxiliary honesty on clientScope \"all\"", () => {
 			makePrimaryServer("ts-primary"),
 			makeAuxServer("opengrep"),
 		]);
-		createLSPClient.mockImplementation(async (options: { serverId?: string }) =>
-			options?.serverId === "opengrep"
-				? makeClient(5000, [], { serverId: "opengrep" })
-				: makeClient(100, [], { serverId: "ts-primary" }),
+		createLSPClient.mockImplementation(
+			async (options: { serverId?: string }) =>
+				options?.serverId === "opengrep"
+					? makeClient(5000, [], { serverId: "opengrep" })
+					: makeClient(100, [], { serverId: "ts-primary" }),
 		);
 
 		const touch = service.touchFile(FILE, "per-edit", {
@@ -1814,8 +1814,9 @@ describe("#1533 — silent auxiliary honesty on clientScope \"all\"", () => {
 			makePrimaryServer("rust-analyzer", ".rs"),
 			makeAuxServer("typos", ".rs"),
 		]);
-		createLSPClient.mockImplementation(async (options: { serverId?: string }) =>
-			options?.serverId === "typos" ? auxClient : primaryClient,
+		createLSPClient.mockImplementation(
+			async (options: { serverId?: string }) =>
+				options?.serverId === "typos" ? auxClient : primaryClient,
 		);
 
 		const touch = service.touchFile(file, "fn main() {}", {
@@ -1937,8 +1938,9 @@ describe("#1533 — silent auxiliary honesty on clientScope \"all\"", () => {
 			makePrimaryServer("ts-primary"),
 			makeAuxServer("opengrep"),
 		]);
-		createLSPClient.mockImplementation(async (options: { serverId?: string }) =>
-			options?.serverId === "opengrep" ? auxClient : primaryClient,
+		createLSPClient.mockImplementation(
+			async (options: { serverId?: string }) =>
+				options?.serverId === "opengrep" ? auxClient : primaryClient,
 		);
 
 		const touchOptions = {
@@ -1968,10 +1970,11 @@ describe("#1533 — silent auxiliary honesty on clientScope \"all\"", () => {
 			makePrimaryServer("ts-primary"),
 			makeAuxServer("opengrep"),
 		]);
-		createLSPClient.mockImplementation(async (options: { serverId?: string }) =>
-			options?.serverId === "opengrep"
-				? makeClient(900, [], { serverId: "opengrep" })
-				: makeClient(100, [], { serverId: "ts-primary" }),
+		createLSPClient.mockImplementation(
+			async (options: { serverId?: string }) =>
+				options?.serverId === "opengrep"
+					? makeClient(900, [], { serverId: "opengrep" })
+					: makeClient(100, [], { serverId: "ts-primary" }),
 		);
 
 		const startedAt = Date.now();

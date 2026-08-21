@@ -6,7 +6,10 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { minimatch } from "./deps/minimatch.js";
-import { collectTrackedFiles, getTrackedFilesSnapshot } from "./git-tracked-ignore.js";
+import {
+	collectTrackedFiles,
+	getTrackedFilesSnapshot,
+} from "./git-tracked-ignore.js";
 import {
 	getGlobalIgnorePatterns,
 	getPiLensGlobalConfigPath,
@@ -297,7 +300,10 @@ export function readGitignorePatterns(
 ): GitignorePattern[] {
 	const gitignorePath = path.join(rootDir, ".gitignore");
 	try {
-		return parseGitignoreContent(fs.readFileSync(gitignorePath, "utf-8"), layer);
+		return parseGitignoreContent(
+			fs.readFileSync(gitignorePath, "utf-8"),
+			layer,
+		);
 	} catch {
 		return [];
 	}

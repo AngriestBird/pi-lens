@@ -34,7 +34,12 @@ export type NodePackageManager = "npm" | "pnpm" | "yarn" | "bun";
  * missing). npm first for maximum compatibility; bun last. A project lockfile
  * always overrides this order.
  */
-const PREFERENCE: readonly NodePackageManager[] = ["npm", "pnpm", "yarn", "bun"];
+const PREFERENCE: readonly NodePackageManager[] = [
+	"npm",
+	"pnpm",
+	"yarn",
+	"bun",
+];
 
 function onWindows(): boolean {
 	return process.platform === "win32";
@@ -284,7 +289,10 @@ export function runScriptArgs(script: string): string[] {
 }
 
 /** Human-readable "run script" command for display (bare manager name). */
-export function formatRunScript(pm: NodePackageManager, script: string): string {
+export function formatRunScript(
+	pm: NodePackageManager,
+	script: string,
+): string {
 	return `${pm} run ${script}`;
 }
 
@@ -341,7 +349,10 @@ export function updateArgs(
  * binary is found again by `allAvailableGlobalBinDirs`, which covers every
  * manager's global bin dir.
  */
-export function globalInstallArgs(pm: NodePackageManager, pkg: string): string[] {
+export function globalInstallArgs(
+	pm: NodePackageManager,
+	pkg: string,
+): string[] {
 	switch (pm) {
 		case "yarn":
 			return ["global", "add", pkg];

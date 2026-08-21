@@ -23,22 +23,41 @@ beforeEach(() => {
 
 describe("session degradation ledger", () => {
 	it("groups kinds and returns detached latest reasons", () => {
-		recordDegradation({ kind: "spawn-failure", subject: "a", reason: "denied" });
-		recordDegradation({ kind: "trust-refusal", subject: "b", reason: "untrusted" });
-		recordDegradation({ kind: "spawn-failure", subject: "c", reason: "bad cwd" });
+		recordDegradation({
+			kind: "spawn-failure",
+			subject: "a",
+			reason: "denied",
+		});
+		recordDegradation({
+			kind: "trust-refusal",
+			subject: "b",
+			reason: "untrusted",
+		});
+		recordDegradation({
+			kind: "spawn-failure",
+			subject: "c",
+			reason: "bad cwd",
+		});
 		const summary = getDegradationSummary();
 		expect(summary.map(({ kind, count }) => ({ kind, count }))).toEqual([
 			{ kind: "spawn-failure", count: 2 },
 			{ kind: "trust-refusal", count: 1 },
 		]);
-		expect(summary[0].latestReasons.at(-1)).toEqual({ subject: "c", reason: "bad cwd" });
+		expect(summary[0].latestReasons.at(-1)).toEqual({
+			subject: "c",
+			reason: "bad cwd",
+		});
 		summary[0].latestReasons[0].reason = "mutated";
 		expect(getDegradationSummary()[0].latestReasons[0].reason).toBe("denied");
 	});
 
 	it("bounds retained entries per kind while counting beyond the cap", () => {
 		for (let i = 0; i < DEGRADATION_ENTRIES_PER_KIND + 7; i++) {
-			recordDegradation({ kind: "formatter-skip", subject: `f${i}`, reason: `r${i}` });
+			recordDegradation({
+				kind: "formatter-skip",
+				subject: `f${i}`,
+				reason: `r${i}`,
+			});
 		}
 		const [group] = getDegradationSummary();
 		expect(group.count).toBe(DEGRADATION_ENTRIES_PER_KIND + 7);
@@ -48,18 +67,28 @@ describe("session degradation ledger", () => {
 	});
 
 	it("dedupes once-records and tallies repeated events into one subject entry", () => {
-		const formatter = { kind: "formatter-failure" as const, subject: "prettier:a.ts", reason: "timed out" };
+		const formatter = {
+			kind: "formatter-failure" as const,
+			subject: "prettier:a.ts",
+			reason: "timed out",
+		};
 		recordDegradationOnce(formatter);
 		recordDegradationOnce(formatter);
-		for (let i = 0; i < 3; i++) incrementDegradationCount({
-			kind: "lsp-diagnostics-timeout",
-			subject: "typescript",
-			reason: "diagnostics wait timed out",
-		});
+		for (let i = 0; i < 3; i++)
+			incrementDegradationCount({
+				kind: "lsp-diagnostics-timeout",
+				subject: "typescript",
+				reason: "diagnostics wait timed out",
+			});
 		const [failure, timeouts] = getDegradationSummary();
 		expect(failure.count).toBe(1);
 		expect(timeouts.count).toBe(3);
-		expect(timeouts.latestReasons).toEqual([{ subject: "typescript", reason: "diagnostics wait timed out (count: 3)" }]);
+		expect(timeouts.latestReasons).toEqual([
+			{
+				subject: "typescript",
+				reason: "diagnostics wait timed out (count: 3)",
+			},
+		]);
 	});
 
 	it("writes one durable row for one once-record", () => {
@@ -161,7 +190,9 @@ describe("session degradation ledger", () => {
 		recordDegradationOnce(record);
 
 		expect(logLatency).toHaveBeenCalledTimes(2);
-		expect(logLatency.mock.calls.map(([row]) => row.metadata.count)).toEqual([1, 1]);
+		expect(logLatency.mock.calls.map(([row]) => row.metadata.count)).toEqual([
+			1, 1,
+		]);
 		expect(logLatency.mock.calls[0][0].metadata.ledgerGeneration).not.toBe(
 			logLatency.mock.calls[1][0].metadata.ledgerGeneration,
 		);
@@ -169,7 +200,11 @@ describe("session degradation ledger", () => {
 
 	it("renders a health section only when degraded", () => {
 		expect(renderDegradationLines()).toEqual([]);
-		recordDegradation({ kind: "grammar-blocked", subject: "swift.wasm", reason: "runtime unsafe" });
+		recordDegradation({
+			kind: "grammar-blocked",
+			subject: "swift.wasm",
+			reason: "runtime unsafe",
+		});
 		expect(renderDegradationLines()).toEqual([
 			"Degradations:",
 			"  ⚠ grammar-blocked: 1 — swift.wasm: runtime unsafe",
@@ -177,7 +212,11 @@ describe("session degradation ledger", () => {
 	});
 
 	it("renders newly wired degradation kinds", () => {
-		recordDegradation({ kind: "formatter-failure", subject: "prettier:a.ts", reason: "timed out" });
+		recordDegradation({
+			kind: "formatter-failure",
+			subject: "prettier:a.ts",
+			reason: "timed out",
+		});
 		expect(renderDegradationLines().at(-1)).toContain("formatter-failure: 1");
 	});
 
@@ -199,8 +238,20 @@ describe("session degradation ledger", () => {
 	});
 
 	it("normalizes undefined subjects without breaking either recording path", () => {
-		expect(() => recordDegradation({ kind: "spawn-failure", subject: undefined, reason: undefined })).not.toThrow();
-		expect(() => incrementDegradationCount({ kind: "lsp-diagnostics-timeout", subject: undefined, reason: undefined })).not.toThrow();
+		expect(() =>
+			recordDegradation({
+				kind: "spawn-failure",
+				subject: undefined,
+				reason: undefined,
+			}),
+		).not.toThrow();
+		expect(() =>
+			incrementDegradationCount({
+				kind: "lsp-diagnostics-timeout",
+				subject: undefined,
+				reason: undefined,
+			}),
+		).not.toThrow();
 		expect(getDegradationSummary()).toEqual([
 			{
 				kind: "spawn-failure",
@@ -221,7 +272,9 @@ describe("session degradation ledger", () => {
 		for (let i = 0; i < 100; i++) {
 			recordDegradation({ kind: `garbage-${i}`, subject: "s", reason: "r" });
 		}
-		expect(getDegradationSummary()).toHaveLength(DEGRADATION_MAX_DISTINCT_KINDS);
+		expect(getDegradationSummary()).toHaveLength(
+			DEGRADATION_MAX_DISTINCT_KINDS,
+		);
 		expect(() => renderDegradationLines()).not.toThrow();
 
 		resetDegradationLedger();
@@ -230,18 +283,48 @@ describe("session degradation ledger", () => {
 	});
 
 	it("swallows failures caused by corrupted telemetry input", () => {
-		const corrupted = { toString: () => { throw new Error("corrupted ledger value"); } };
-		expect(() => recordDegradation({ kind: "spawn-failure", subject: corrupted, reason: "ignored" })).not.toThrow();
-		expect(() => recordDegradationOnce({ kind: "spawn-failure", subject: corrupted, reason: "ignored" })).not.toThrow();
-		expect(() => incrementDegradationCount({ kind: "spawn-failure", subject: "ok", reason: corrupted })).not.toThrow();
-		expect(vi.mocked(logExtension).mock.calls.filter(([entry]) =>
-		entry.level === "debug" && entry.subsystem === "degradation-ledger",
-	)).toHaveLength(3);
+		const corrupted = {
+			toString: () => {
+				throw new Error("corrupted ledger value");
+			},
+		};
+		expect(() =>
+			recordDegradation({
+				kind: "spawn-failure",
+				subject: corrupted,
+				reason: "ignored",
+			}),
+		).not.toThrow();
+		expect(() =>
+			recordDegradationOnce({
+				kind: "spawn-failure",
+				subject: corrupted,
+				reason: "ignored",
+			}),
+		).not.toThrow();
+		expect(() =>
+			incrementDegradationCount({
+				kind: "spawn-failure",
+				subject: "ok",
+				reason: corrupted,
+			}),
+		).not.toThrow();
+		expect(
+			vi
+				.mocked(logExtension)
+				.mock.calls.filter(
+					([entry]) =>
+						entry.level === "debug" && entry.subsystem === "degradation-ledger",
+				),
+		).toHaveLength(3);
 	});
 
-	it.each([null, undefined, { malformed: true }, [{ kind: "bad" }]])("renders malformed summary %p as empty", (summary) => {
-		expect(renderDegradationLines(summary)).toEqual([]);
-	});
+	it.each([null, undefined, { malformed: true }, [{ kind: "bad" }]])(
+		"renders malformed summary %p as empty",
+		(summary) => {
+			expect(renderDegradationLines(summary)).toEqual([]);
+		},
+	);
 
 	describe("log-sink-write-failure (#1970)", () => {
 		it("folds a real ndjson-logger sink loss into the summary, naming the sink and its dropped-write count", async () => {
@@ -256,7 +339,9 @@ describe("session degradation ledger", () => {
 
 			// Nothing to fold before any sink has failed.
 			expect(
-				getDegradationSummary().some((g) => g.kind === "log-sink-write-failure"),
+				getDegradationSummary().some(
+					(g) => g.kind === "log-sink-write-failure",
+				),
 			).toBe(false);
 
 			const err = Object.assign(new Error("destroyed"), {
@@ -277,7 +362,9 @@ describe("session degradation ledger", () => {
 			);
 			expect(group).toBeDefined();
 			expect(group?.count).toBeGreaterThanOrEqual(1);
-			const entry = group?.latestReasons.find((r) => r.subject.includes("test.log"));
+			const entry = group?.latestReasons.find((r) =>
+				r.subject.includes("test.log"),
+			);
 			expect(entry).toBeDefined();
 			expect(entry?.reason).toContain("dropped write");
 
@@ -307,13 +394,17 @@ describe("session degradation ledger", () => {
 			appendFileSpy.mockRestore();
 
 			expect(
-				getDegradationSummary().some((g) => g.kind === "log-sink-write-failure"),
+				getDegradationSummary().some(
+					(g) => g.kind === "log-sink-write-failure",
+				),
 			).toBe(true);
 
 			resetDegradationLedger();
 
 			expect(
-				getDegradationSummary().some((g) => g.kind === "log-sink-write-failure"),
+				getDegradationSummary().some(
+					(g) => g.kind === "log-sink-write-failure",
+				),
 			).toBe(false);
 
 			fs.rmSync(tmpDir, { recursive: true, force: true });

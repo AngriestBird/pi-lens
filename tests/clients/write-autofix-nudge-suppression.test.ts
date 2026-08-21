@@ -96,7 +96,10 @@ function toolDeps(runtime: RuntimeCoordinator) {
  * where `clients/pipeline.ts` publishes it (inside `runPipeline`, before the
  * attachment decision runs), and hand back the same `postMutation` shape.
  */
-function mockPipelineAutofix(cwd: string, content: (filePath: string) => string) {
+function mockPipelineAutofix(
+	cwd: string,
+	content: (filePath: string) => string,
+) {
 	return async (ctx: { filePath: string; autofixMode?: string }) => {
 		const absolute = path.resolve(ctx.filePath);
 		const immediate = ctx.autofixMode !== "deferred";
@@ -135,9 +138,15 @@ describe("#1464 write-path autofix nudge suppression", () => {
 		const { runPipeline } = await import("../../clients/pipeline.js");
 		const env = setupTestEnvironment("pi-lens-1464-attached-");
 		try {
-			const filePath = createTempFile(env.tmpDir, "src/app.ts", "const a = 1;\n");
+			const filePath = createTempFile(
+				env.tmpDir,
+				"src/app.ts",
+				"const a = 1;\n",
+			);
 			vi.mocked(runPipeline).mockImplementation(
-				mockPipelineAutofix(env.tmpDir, (p) => fs.readFileSync(p, "utf-8")) as never,
+				mockPipelineAutofix(env.tmpDir, (p) =>
+					fs.readFileSync(p, "utf-8"),
+				) as never,
 			);
 			const runtime = new RuntimeCoordinator();
 			runtime.projectRoot = env.tmpDir;
@@ -228,7 +237,11 @@ describe("#1464 write-path autofix nudge suppression", () => {
 		const { runPipeline } = await import("../../clients/pipeline.js");
 		const env = setupTestEnvironment("pi-lens-1464-deferred-");
 		try {
-			const filePath = createTempFile(env.tmpDir, "src/later.ts", "const a = 1;\n");
+			const filePath = createTempFile(
+				env.tmpDir,
+				"src/later.ts",
+				"const a = 1;\n",
+			);
 			vi.mocked(runPipeline).mockImplementation(
 				mockPipelineAutofix(env.tmpDir, () => "unused") as never,
 			);
@@ -239,7 +252,9 @@ describe("#1464 write-path autofix nudge suppression", () => {
 				...toolDeps(runtime),
 				event: { toolName: "edit", input: { path: filePath }, content: [] },
 			} as never);
-			expect(vi.mocked(runPipeline).mock.calls[0][0].autofixMode).toBe("deferred");
+			expect(vi.mocked(runPipeline).mock.calls[0][0].autofixMode).toBe(
+				"deferred",
+			);
 			expect(
 				returned?.content?.some((part) =>
 					part.text?.startsWith("pi-lens applied autofix to"),

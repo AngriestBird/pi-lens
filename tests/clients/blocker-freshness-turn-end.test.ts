@@ -22,7 +22,10 @@ vi.mock("../../clients/latency-logger.js", async (importOriginal) => {
 
 import { CacheManager } from "../../clients/cache-manager.js";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
-import { cancelLSPIdleReset, handleTurnEnd } from "../../clients/runtime-turn.js";
+import {
+	cancelLSPIdleReset,
+	handleTurnEnd,
+} from "../../clients/runtime-turn.js";
 import { setupTestEnvironment } from "./test-utils.js";
 
 const EMPTY_KNIP_RESULT = {

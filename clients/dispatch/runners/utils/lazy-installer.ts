@@ -160,7 +160,9 @@ export function resetLazyInstallAttempts(): void {
 /** Why a call declined to spawn, when it declined. */
 type Suppression = "succeeded" | "cooling" | "held";
 
-function suppressionFor(state: LazyInstallState | undefined): Suppression | null {
+function suppressionFor(
+	state: LazyInstallState | undefined,
+): Suppression | null {
 	if (!state) return null;
 	if (state.fact.outcome === "succeeded") return "succeeded";
 	if (state.retryAtMs === 0) return "held";

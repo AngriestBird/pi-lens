@@ -79,11 +79,26 @@ function makeDeps(ctxCwd: string, dbg: (msg: string) => void = () => {}) {
 			ensureAvailable: async () => false,
 			scanExports: async () => new Map(),
 		},
-		biomeClient: { isAvailable: () => false, ensureAvailable: async () => false },
-		ruffClient: { isAvailable: () => false, ensureAvailable: async () => false },
-		knipClient: { isAvailable: () => false, ensureAvailable: async () => false },
-		jscpdClient: { isAvailable: () => false, ensureAvailable: async () => false },
-		depChecker: { isAvailable: () => false, ensureAvailable: async () => false },
+		biomeClient: {
+			isAvailable: () => false,
+			ensureAvailable: async () => false,
+		},
+		ruffClient: {
+			isAvailable: () => false,
+			ensureAvailable: async () => false,
+		},
+		knipClient: {
+			isAvailable: () => false,
+			ensureAvailable: async () => false,
+		},
+		jscpdClient: {
+			isAvailable: () => false,
+			ensureAvailable: async () => false,
+		},
+		depChecker: {
+			isAvailable: () => false,
+			ensureAvailable: async () => false,
+		},
 		testRunnerClient: {
 			detectRunner: () => null,
 			runTestFile: () => ({ failed: 0, error: false }),
@@ -109,7 +124,10 @@ function seedSnapshot(cwd: string, seq: number): void {
 	const seedRuntime = new RuntimeCoordinator();
 	seedRuntime.seedProjectSequence(seq);
 	seedRuntime.cachedExports.set("makeThing", path.join(cwd, "src", "a.ts"));
-	saveProjectSnapshot(cwd, buildProjectSnapshotFromRuntime({ cwd, runtime: seedRuntime }));
+	saveProjectSnapshot(
+		cwd,
+		buildProjectSnapshotFromRuntime({ cwd, runtime: seedRuntime }),
+	);
 }
 
 function snapshotBodyReads(): number {
@@ -356,21 +374,17 @@ describe("session_start snapshot meta-gate (#947)", () => {
 	it.each(["quick", "full"] as const)(
 		"%s mode classifies a parsed different-sequence body on both delivery surfaces",
 		async (mode) => {
-			await assertMissReasonInMode(
-				mode,
-				"stale(seq=5, current=0)",
-				(cwd) => {
-					seedSnapshot(cwd, 5);
-					const metaPath = getProjectSnapshotMetaPath(cwd);
-					const meta = JSON.parse(fs.readFileSync(metaPath, "utf8")) as {
-						seq: number;
-						sequenceIndex?: { projectSeq?: number };
-					};
-					meta.seq = 0;
-					if (meta.sequenceIndex) meta.sequenceIndex.projectSeq = 0;
-					fs.writeFileSync(metaPath, JSON.stringify(meta));
-				},
-			);
+			await assertMissReasonInMode(mode, "stale(seq=5, current=0)", (cwd) => {
+				seedSnapshot(cwd, 5);
+				const metaPath = getProjectSnapshotMetaPath(cwd);
+				const meta = JSON.parse(fs.readFileSync(metaPath, "utf8")) as {
+					seq: number;
+					sequenceIndex?: { projectSeq?: number };
+				};
+				meta.seq = 0;
+				if (meta.sequenceIndex) meta.sequenceIndex.projectSeq = 0;
+				fs.writeFileSync(metaPath, JSON.stringify(meta));
+			});
 		},
 	);
 });

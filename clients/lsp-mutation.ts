@@ -122,7 +122,8 @@ function combineResults(results: AppliedWorkspaceEdit[]): {
 		create += result.operationCounts.create;
 		rename += result.operationCounts.rename;
 		deleteCount += result.operationCounts.delete;
-		for (const index of result.appliedOperationIndexes) appliedIndexes.push(index);
+		for (const index of result.appliedOperationIndexes)
+			appliedIndexes.push(index);
 		for (const file of result.files) {
 			if (!files.has(file)) {
 				files.add(file);
@@ -162,10 +163,10 @@ function uniqueDetails(
 			range:
 				previous.range && detail.range
 					? {
-						start: Math.min(previous.range.start, detail.range.start),
-						end: Math.max(previous.range.end, detail.range.end),
-					}
-					: previous.range ?? detail.range,
+							start: Math.min(previous.range.start, detail.range.start),
+							end: Math.max(previous.range.end, detail.range.end),
+						}
+					: (previous.range ?? detail.range),
 			importsChanged: previous.importsChanged || detail.importsChanged,
 		});
 	}
@@ -194,7 +195,9 @@ function bookkeepLspMutation(
 			try {
 				context.readGuard.recordWritten(filePath);
 			} catch (err) {
-				context.dbg?.(`lsp mutation read-guard stamp failed for ${filePath}: ${err}`);
+				context.dbg?.(
+					`lsp mutation read-guard stamp failed for ${filePath}: ${err}`,
+				);
 			}
 		}
 		const runtime = context.runtime;
@@ -212,7 +215,9 @@ function bookkeepLspMutation(
 					changedRange: detail.range,
 				});
 			} catch (err) {
-				context.dbg?.(`lsp mutation project change append failed for ${filePath}: ${err}`);
+				context.dbg?.(
+					`lsp mutation project change append failed for ${filePath}: ${err}`,
+				);
 			}
 		}
 		if (context.cacheManager) {
@@ -225,7 +230,9 @@ function bookkeepLspMutation(
 					runtime?.telemetrySessionId,
 				);
 			} catch (err) {
-				context.dbg?.(`lsp mutation modified-range tracking failed for ${filePath}: ${err}`);
+				context.dbg?.(
+					`lsp mutation modified-range tracking failed for ${filePath}: ${err}`,
+				);
 			}
 		}
 		if (context.recordAutofix && context.source === "autofix") {
@@ -263,8 +270,7 @@ function telemetryFor(
 		{ length: Math.min(rejectedTotal, MAX_SAMPLES) },
 		(_, index) => ({ index, code: "write_failed" as const }),
 	);
-	const status =
-		options.status ?? (appliedTotal > 0 ? "success" : "skipped");
+	const status = options.status ?? (appliedTotal > 0 ? "success" : "skipped");
 	const editBatchSummary = createReadGuardEditBatchSummary({
 		requestedIndexes,
 		requestedTotal,

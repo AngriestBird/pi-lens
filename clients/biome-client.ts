@@ -89,9 +89,7 @@ export class BiomeClient {
 	private log: (msg: string) => void;
 
 	constructor(verbose = false) {
-		this.log = verbose
-			? createSubsystemLogger("biome")
-			: () => {};
+		this.log = verbose ? createSubsystemLogger("biome") : () => {};
 	}
 
 	/**
@@ -165,11 +163,7 @@ export class BiomeClient {
 		return { cmd: "npx", args: ["@biomejs/biome"] };
 	}
 
-	private async spawnBiomeAsync(
-		args: string[],
-		timeout = 15000,
-		cwd?: string,
-	) {
+	private async spawnBiomeAsync(args: string[], timeout = 15000, cwd?: string) {
 		const { cmd, args: prefix } = await this.getBiomeBinary(cwd);
 		return safeSpawnAsync(cmd, [...prefix, ...args], { timeout, cwd });
 	}
@@ -319,7 +313,9 @@ export class BiomeClient {
 			...(Object.keys(evidence).length > 0 && { evidence }),
 		});
 		if (resolved.outcome === "transient") {
-			this.log("biome availability probe timed out; will retry (not installing)");
+			this.log(
+				"biome availability probe timed out; will retry (not installing)",
+			);
 		}
 		return false;
 	}
@@ -402,5 +398,4 @@ export class BiomeClient {
 			};
 		}
 	}
-
 }

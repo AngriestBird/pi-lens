@@ -431,9 +431,8 @@ describe("recordParsedNothing rule (#1948)", () => {
 
 	async function helper() {
 		const summary = await ledger();
-		const mod = await import(
-			"../../../../clients/dispatch/runners/utils/tool-failure.js"
-		);
+		const mod =
+			await import("../../../../clients/dispatch/runners/utils/tool-failure.js");
 		return { summary, recordParsedNothing: mod.recordParsedNothing };
 	}
 

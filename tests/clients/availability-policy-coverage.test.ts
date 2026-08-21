@@ -602,12 +602,12 @@ describe("availability policy coverage (#1476)", () => {
 			`,
 			"clients/two-latches.ts",
 		);
-		expect(units.filter((unit) => !unit.governed).map((unit) => unit.unit)).toEqual(
-			["isSecondToolAvailable"],
-		);
-		expect(units.filter((unit) => unit.governed).map((unit) => unit.unit)).toEqual(
-			["MigratedClient"],
-		);
+		expect(
+			units.filter((unit) => !unit.governed).map((unit) => unit.unit),
+		).toEqual(["isSecondToolAvailable"]);
+		expect(
+			units.filter((unit) => unit.governed).map((unit) => unit.unit),
+		).toEqual(["MigratedClient"]);
 	});
 
 	it("follows a probe that lives one helper away from the latch", async () => {

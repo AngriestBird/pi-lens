@@ -97,10 +97,7 @@ describe("parsePyrightOutput", () => {
 		// line 0/column 0, because the parser read a top-level `start` field
 		// real pyright output never sets. line 2 (0-based) / character 4
 		// (0-based) must become line 3 / column 5.
-		const diags = parsePyrightOutput(
-			makeData("warning"),
-			"/proj/example.py",
-		);
+		const diags = parsePyrightOutput(makeData("warning"), "/proj/example.py");
 		expect(diags[0].line).toBe(3);
 		expect(diags[0].column).toBe(5);
 	});

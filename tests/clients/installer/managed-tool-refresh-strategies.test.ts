@@ -76,8 +76,8 @@ vi.mock("node:child_process", async (importOriginal) => {
 // load time and keep the mock a controllable passthrough by default.
 vi.mock("node:fs/promises", async (importOriginal) => {
 	const actual = await importOriginal<typeof import("node:fs/promises")>();
-	renameMock.mockImplementation(
-		(...args: Parameters<typeof actual.rename>) => actual.rename(...args),
+	renameMock.mockImplementation((...args: Parameters<typeof actual.rename>) =>
+		actual.rename(...args),
 	);
 	const mocked = { ...actual, rename: renameMock };
 	return { ...mocked, default: mocked };
@@ -1183,7 +1183,10 @@ describe("swapExtractedDir rollback", () => {
 describe("archive tree-bundle refresh updates the probe cache", () => {
 	it("records a fresh probe-cache entry after a successful tree-bundle reinstall", async () => {
 		const toolId = "powershell-editor-services";
-		const treeMarkerRel = ["PowerShellEditorServices", "Start-EditorServices.ps1"];
+		const treeMarkerRel = [
+			"PowerShellEditorServices",
+			"Start-EditorServices.ps1",
+		];
 		const extractDir = path.join(TOOLS_DIR, toolId);
 		const markerPath = path.join(extractDir, ...treeMarkerRel);
 		fs.mkdirSync(path.dirname(markerPath), { recursive: true });
@@ -1205,19 +1208,17 @@ describe("archive tree-bundle refresh updates the probe cache", () => {
 		// Simulate `tar` genuinely writing the tree marker into whatever `-C`
 		// target the code extracted into — decoupled from any tmp-dir naming
 		// convention, so this exercises the real extract → verify → swap path.
-		spawnMock.mockImplementation(
-			async (_command: string, args: string[]) => {
-				const cIndex = (args ?? []).indexOf("-C");
-				if (cIndex !== -1) {
-					const targetDir = args[cIndex + 1];
-					const written = path.join(TOOLS_DIR, targetDir, ...treeMarkerRel);
-					fs.mkdirSync(path.dirname(written), { recursive: true });
-					fs.writeFileSync(written, "# fresh bootstrap");
-					return { stdout: "", stderr: "", status: 0 };
-				}
-				return { stdout: "1.2.3", stderr: "", status: 0 };
-			},
-		);
+		spawnMock.mockImplementation(async (_command: string, args: string[]) => {
+			const cIndex = (args ?? []).indexOf("-C");
+			if (cIndex !== -1) {
+				const targetDir = args[cIndex + 1];
+				const written = path.join(TOOLS_DIR, targetDir, ...treeMarkerRel);
+				fs.mkdirSync(path.dirname(written), { recursive: true });
+				fs.writeFileSync(written, "# fresh bootstrap");
+				return { stdout: "", stderr: "", status: 0 };
+			}
+			return { stdout: "1.2.3", stderr: "", status: 0 };
+		});
 
 		const outcome = await runManagedToolRefresh(NOW);
 
@@ -1304,9 +1305,7 @@ describe("install kill-switch, trust gate, and install lock", () => {
 			resolutionId: "v3.7.0",
 		});
 		expect(
-			logRows().some(
-				(l) => l.includes("shfmt") && l.includes("declined"),
-			),
+			logRows().some((l) => l.includes("shfmt") && l.includes("declined")),
 		).toBe(true);
 	});
 
@@ -1326,7 +1325,7 @@ describe("install kill-switch, trust gate, and install lock", () => {
 		});
 	});
 
-	it("proceeds normally on a host with no trust surface (\"unknown\", the default)", async () => {
+	it('proceeds normally on a host with no trust surface ("unknown", the default)', async () => {
 		staleGithubShfmt();
 
 		const outcome = await runManagedToolRefresh(NOW);

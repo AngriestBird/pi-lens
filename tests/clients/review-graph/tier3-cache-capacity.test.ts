@@ -127,9 +127,9 @@ describe("Tier-3 checkpoint resume sizes the cache to the RESUMING pass, not the
 		// Session A: killed mid-build after `stopAfter` files, having written
 		// a checkpoint (same seam as tests/clients/review-graph/checkpoint-resume.test.ts).
 		process.env.PI_LENS_GRAPH_CHECKPOINT_TEST_STOP_AFTER = String(stopAfter);
-		await expect(
-			buildOrUpdateGraph(root, [], new FactStore()),
-		).rejects.toThrow(/checkpoint_test_abort/);
+		await expect(buildOrUpdateGraph(root, [], new FactStore())).rejects.toThrow(
+			/checkpoint_test_abort/,
+		);
 		delete process.env.PI_LENS_GRAPH_CHECKPOINT_TEST_STOP_AFTER;
 
 		// Session B: a new process would start with a cold tree cache — reset

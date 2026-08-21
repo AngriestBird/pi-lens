@@ -81,7 +81,11 @@ describe("widget-store dependency freshness gate (#1631)", () => {
 		);
 
 		// The verdict was observed 60s ago; the dependency is fixed AFTER that.
-		recordBlocking(consumer, "No exported member 'gitEnv'", Date.now() - 60_000);
+		recordBlocking(
+			consumer,
+			"No exported member 'gitEnv'",
+			Date.now() - 60_000,
+		);
 		expect(
 			(getFileDiagnostics(consumer) ?? []).some((d) => isBlocking(d)),
 		).toBe(true);

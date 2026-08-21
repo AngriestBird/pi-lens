@@ -111,7 +111,8 @@ function eventArgLiteral(
 		if (source[i] === "{") depth++;
 		else if (source[i] === "}") {
 			depth--;
-			if (depth === 0) return { text: source.slice(openBrace, i + 1), start: openBrace };
+			if (depth === 0)
+				return { text: source.slice(openBrace, i + 1), start: openBrace };
 		}
 	}
 	return undefined;
@@ -137,7 +138,8 @@ export function scanSourceForHostEventShapeViolations(
 	// the same LENGTH and line breaks as `raw` (that invariant is the whole
 	// point of the shared stripper), so an index found in one lines up in the
 	// other — the brace match and field search below run on `stripped`.
-	const callSite = /\.emit\(\s*["'](session_start|tool_call|tool_result|agent_end|agent_settled)["']/g;
+	const callSite =
+		/\.emit\(\s*["'](session_start|tool_call|tool_result|agent_end|agent_settled)["']/g;
 	for (const match of raw.matchAll(callSite)) {
 		const eventType = match[1] as (typeof EVENT_TYPES)[number];
 		const literal = eventArgLiteral(stripped, match.index + match[0].length);

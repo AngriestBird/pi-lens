@@ -32,9 +32,7 @@ vi.mock("../../../../clients/tool-policy.js", async (importOriginal) => {
 		// the predicate module-internally — route the builder through the mock
 		// so "config present → no --config" still holds (#1247 review P1b).
 		markdownlintConfigArgs: (cwd: string) =>
-			hasMarkdownlintConfigMock()
-				? []
-				: actual.markdownlintConfigArgs(cwd),
+			hasMarkdownlintConfigMock() ? [] : actual.markdownlintConfigArgs(cwd),
 	};
 });
 

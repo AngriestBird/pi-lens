@@ -90,12 +90,7 @@ export interface TrivyResult {
 	summary?: string;
 }
 
-export type TrivySeverity =
-	| "CRITICAL"
-	| "HIGH"
-	| "MEDIUM"
-	| "LOW"
-	| "UNKNOWN";
+export type TrivySeverity = "CRITICAL" | "HIGH" | "MEDIUM" | "LOW" | "UNKNOWN";
 
 const EMPTY_RESULT: Omit<TrivyResult, "scannedAt"> = {
 	success: false,
@@ -420,8 +415,7 @@ export function parseTrivyReport(raw: string): TrivyFinding[] {
 						: undefined,
 				severity: normalizeSeverity(v.Severity),
 				title: typeof v.Title === "string" ? v.Title : undefined,
-				primaryUrl:
-					typeof v.PrimaryURL === "string" ? v.PrimaryURL : undefined,
+				primaryUrl: typeof v.PrimaryURL === "string" ? v.PrimaryURL : undefined,
 				target,
 			});
 		}

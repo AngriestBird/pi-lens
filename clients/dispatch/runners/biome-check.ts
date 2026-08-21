@@ -327,7 +327,10 @@ const biomeCheckJsonRunner: RunnerDefinition = {
 				diagnostics: [
 					{
 						id: "biome:parse-error:1",
-						message: "Biome JSON parse failed: " + parsed.parseError + (preview ? " (output preview: " + preview + ")" : ""),
+						message:
+							"Biome JSON parse failed: " +
+							parsed.parseError +
+							(preview ? " (output preview: " + preview + ")" : ""),
 						filePath: ctx.filePath,
 						line: 1,
 						column: 1,

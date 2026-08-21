@@ -75,9 +75,9 @@ describe("trivy-config runner (integration, real trivy binary)", () => {
 				// scanned anything). Post-fix: real findings come back.
 				expect(result.status).not.toBe("skipped");
 				expect(result.diagnostics.length).toBeGreaterThan(0);
-				expect(
-					result.diagnostics.some((d) => d.rule?.startsWith("AWS-")),
-				).toBe(true);
+				expect(result.diagnostics.some((d) => d.rule?.startsWith("AWS-"))).toBe(
+					true,
+				);
 				expect(result.diagnostics.every((d) => d.tool === "trivy-config")).toBe(
 					true,
 				);

@@ -326,7 +326,9 @@ export function countSourceFilesWithinLimit(
 // depends only on the file tree shape and ignore rules — both of which
 // are also captured by the project snapshot freshness check upstream —
 // in-process memoisation is safe for the duration of a single pi process.
-const startupScanContextCache = new BoundedLruCache<string, StartupScanContext>(32);
+const startupScanContextCache = new BoundedLruCache<string, StartupScanContext>(
+	32,
+);
 
 function startupScanCacheKey(cwd: string, options: StartupScanOptions): string {
 	return [
@@ -346,7 +348,10 @@ export function resolveStartupScanContext(
 	const cacheKey = startupScanCacheKey(cwd, options);
 	const cached = startupScanContextCache.get(cacheKey);
 	if (cached) return cached;
-	const result = { ...computeStartupScanContext(cwd, options), computedAt: Date.now() };
+	const result = {
+		...computeStartupScanContext(cwd, options),
+		computedAt: Date.now(),
+	};
 	startupScanContextCache.set(cacheKey, result);
 	return result;
 }

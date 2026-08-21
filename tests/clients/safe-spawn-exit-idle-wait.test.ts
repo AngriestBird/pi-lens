@@ -39,14 +39,12 @@ import { makeFakeChild } from "../support/fake-child.js";
 
 const spawnMock = vi.fn();
 vi.mock("node:child_process", async (importOriginal) => {
-	const actual =
-		await importOriginal<typeof import("node:child_process")>();
+	const actual = await importOriginal<typeof import("node:child_process")>();
 	return { ...actual, spawn: spawnMock };
 });
 
-const { safeSpawnAsync, setAmbientAbortSignal } = await import(
-	"../../clients/safe-spawn.js"
-);
+const { safeSpawnAsync, setAmbientAbortSignal } =
+	await import("../../clients/safe-spawn.js");
 
 describe("safeSpawnAsync post-exit pipe-idle wait (#1656)", () => {
 	const realPlatform = process.platform;

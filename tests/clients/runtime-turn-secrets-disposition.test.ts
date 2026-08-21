@@ -419,7 +419,8 @@ describe("turn_end govulncheck advisory honors dispositions (#1694 F1)", () => {
 					filePath,
 					tool: "govulncheck",
 					rule: "govulncheck:GO-2024-1234",
-					message: "Vulnerability GO-2024-1234: test vulnerability (fixed in 1.2.3)",
+					message:
+						"Vulnerability GO-2024-1234: test vulnerability (fixed in 1.2.3)",
 					line: 1,
 					content,
 				},

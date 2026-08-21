@@ -57,7 +57,15 @@ function projectWith(files: Record<string, string>): string {
  * to `queryResponder`, which individual tests set to answer those queries.
  */
 let queryResponder:
-	| ((cmd: string, args: string[]) => Promise<{ stdout: string; stderr: string; status: number | null; error?: Error }>)
+	| ((
+			cmd: string,
+			args: string[],
+	  ) => Promise<{
+			stdout: string;
+			stderr: string;
+			status: number | null;
+			error?: Error;
+	  }>)
 	| null = null;
 /** Every non-probe (query) call `onlyAvailable`'s mock forwarded — asserts on this, not on `safeSpawnAsync` overall, since the availability probe itself now spawns too. */
 let queryCalls: Array<{ cmd: string; args: string[] }> = [];
@@ -66,7 +74,12 @@ function setQueryResponder(
 	responder: (
 		cmd: string,
 		args: string[],
-	) => Promise<{ stdout: string; stderr: string; status: number | null; error?: Error }>,
+	) => Promise<{
+		stdout: string;
+		stderr: string;
+		status: number | null;
+		error?: Error;
+	}>,
 ): void {
 	queryResponder = responder;
 }
@@ -210,11 +223,17 @@ describe("command builders", () => {
 
 	it("installArgs threads ignore-scripts and npm-only legacy-peer-deps", () => {
 		expect(
-			installArgs("npm", "biome", { ignoreScripts: true, legacyPeerDeps: true }),
+			installArgs("npm", "biome", {
+				ignoreScripts: true,
+				legacyPeerDeps: true,
+			}),
 		).toEqual(["install", "--ignore-scripts", "--legacy-peer-deps", "biome"]);
 		// legacy-peer-deps is silently dropped for non-npm managers.
 		expect(
-			installArgs("bun", "biome", { ignoreScripts: true, legacyPeerDeps: true }),
+			installArgs("bun", "biome", {
+				ignoreScripts: true,
+				legacyPeerDeps: true,
+			}),
 		).toEqual(["add", "--ignore-scripts", "biome"]);
 	});
 
@@ -250,17 +269,25 @@ describe("command builders", () => {
 
 	it("globalInstallArgs spells the global install per manager", () => {
 		expect(globalInstallArgs("npm", "typescript-language-server")).toEqual([
-			"install", "-g", "typescript-language-server",
+			"install",
+			"-g",
+			"typescript-language-server",
 		]);
 		expect(globalInstallArgs("pnpm", "typescript-language-server")).toEqual([
-			"add", "-g", "typescript-language-server",
+			"add",
+			"-g",
+			"typescript-language-server",
 		]);
 		expect(globalInstallArgs("bun", "typescript-language-server")).toEqual([
-			"add", "-g", "typescript-language-server",
+			"add",
+			"-g",
+			"typescript-language-server",
 		]);
 		// yarn classic uses `global add`.
 		expect(globalInstallArgs("yarn", "typescript-language-server")).toEqual([
-			"global", "add", "typescript-language-server",
+			"global",
+			"add",
+			"typescript-language-server",
 		]);
 	});
 
@@ -366,7 +393,11 @@ describe("allAvailableGlobalBinDirs", () => {
 						status: null,
 						error: cause,
 						failure: "timeout" as const,
-						spawnFailure: new SpawnFailureError("timeout", cause.message, cause),
+						spawnFailure: new SpawnFailureError(
+							"timeout",
+							cause.message,
+							cause,
+						),
 					};
 				}
 				// yarn, bun: genuinely absent.

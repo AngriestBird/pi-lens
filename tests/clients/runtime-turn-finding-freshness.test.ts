@@ -89,7 +89,11 @@ function setupSecretTurn(prefix: string) {
 }
 
 /** Write a secret-bearing file and stamp its mtime relative to the scan. */
-function writeSecretFile(cwd: string, relative: string, mtimeMs: number): string {
+function writeSecretFile(
+	cwd: string,
+	relative: string,
+	mtimeMs: number,
+): string {
 	const file = path.join(cwd, relative);
 	fs.mkdirSync(path.dirname(file), { recursive: true });
 	fs.writeFileSync(file, "const k = 'AKIA...';\n");
@@ -104,13 +108,18 @@ async function turnEndContent(
 	cwd: string,
 ): Promise<string> {
 	await handleTurnEnd(makeTurnEndDeps(runtime, cacheManager, { ctxCwd: cwd }));
-	return consumeTurnEndFindings(cacheManager, cwd)?.messages?.[0]?.content ?? "";
+	return (
+		consumeTurnEndFindings(cacheManager, cwd)?.messages?.[0]?.content ?? ""
+	);
 }
 
 beforeEach(() => logLatency.mockReset());
 
 /** The `turn_end` tool_result telemetry row from the last handled turn. */
-function turnEndResult(): { result?: string; metadata?: Record<string, unknown> } {
+function turnEndResult(): {
+	result?: string;
+	metadata?: Record<string, unknown>;
+} {
 	const calls = logLatency.mock.calls
 		.map((call) => call[0] as Record<string, unknown>)
 		.filter((e) => e.type === "tool_result" && e.toolName === "turn_end");
@@ -351,7 +360,8 @@ describe("turn_end govulncheck stale call-site gate (#1622 sibling sweep)", () =
 	}
 
 	it("strips the cached call-site line when the file was edited after the scan", async () => {
-		const { env, runtime, cacheManager } = setupSecretTurn("pi-lens-gov-stale-");
+		const { env, runtime, cacheManager } =
+			setupSecretTurn("pi-lens-gov-stale-");
 		try {
 			const goFile = writeSecretFile(
 				env.tmpDir,
@@ -372,7 +382,8 @@ describe("turn_end govulncheck stale call-site gate (#1622 sibling sweep)", () =
 	});
 
 	it("keeps the call-site line for an unmodified file", async () => {
-		const { env, runtime, cacheManager } = setupSecretTurn("pi-lens-gov-fresh-");
+		const { env, runtime, cacheManager } =
+			setupSecretTurn("pi-lens-gov-fresh-");
 		try {
 			const goFile = writeSecretFile(
 				env.tmpDir,

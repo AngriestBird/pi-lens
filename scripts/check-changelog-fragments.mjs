@@ -14,9 +14,11 @@
 import { validateChangelogEntries } from "./rollup-changelog.mjs";
 
 try {
-  const entries = validateChangelogEntries();
-  console.log(`changelog fragments OK (${entries.length} entr${entries.length === 1 ? "y" : "ies"} in .changelog/)`);
+	const entries = validateChangelogEntries();
+	console.log(
+		`changelog fragments OK (${entries.length} entr${entries.length === 1 ? "y" : "ies"} in .changelog/)`,
+	);
 } catch (error) {
-  console.error(error instanceof Error ? error.message : String(error));
-  process.exitCode = 1;
+	console.error(error instanceof Error ? error.message : String(error));
+	process.exitCode = 1;
 }
