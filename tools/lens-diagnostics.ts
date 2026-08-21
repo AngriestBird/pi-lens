@@ -523,8 +523,14 @@ function formatProjectDeltaDiagnostic(
 	diagnostic: ProjectDiagnostic,
 	stale: boolean,
 ): string {
-	const marker =
-		diagnostic.semantic === "blocking" || diagnostic.severity === "error"
+	// #1944: a demoted row loses the authority marker along with its
+	// coordinate. It kept the 🔴 while its line was replaced by the stale
+	// marker, which is the same "changed the channel, not the body" defect the
+	// turn-end advisory carried — `formatFullMode` (this file, the `d.stale`
+	// arm of its marker) already drops the marker for exactly this reason.
+	const marker = stale
+		? "○"
+		: diagnostic.semantic === "blocking" || diagnostic.severity === "error"
 			? "🔴"
 			: "ℹ";
 	const rule = diagnostic.rule ?? diagnostic.code ?? diagnostic.runner;
