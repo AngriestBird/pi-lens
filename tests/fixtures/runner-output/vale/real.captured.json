@@ -4,6 +4,11 @@
 		"tool": "vale",
 		"version": "3.9.6",
 		"command": "vale --output JSON bad.md",
+		"argv": [
+			"--output",
+			"JSON",
+			"bad.md"
+		],
 		"workspace": "tests/fixtures/tool-smoke/vale",
 		"platform": "win32-x64",
 		"capturedAt": "2026-08-21"

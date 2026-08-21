@@ -4,6 +4,9 @@
 		"tool": "markdownlint",
 		"version": "0.23.0",
 		"command": "markdownlint bad.md",
+		"argv": [
+			"bad.md"
+		],
 		"workspace": "tests/fixtures/tool-smoke/markdown",
 		"platform": "win32-x64",
 		"capturedAt": "2026-08-21"

@@ -43,6 +43,8 @@ export interface CapturedProvenance {
 	tool: string;
 	version: string;
 	command: string;
+	/** The exact argv, lossless where `command` is not (quoted tokens). */
+	argv: string[];
 	workspace: string;
 	platform: string;
 	capturedAt: string;
@@ -118,6 +120,19 @@ export function provenanceProblems(fixture: CapturedOutput): string[] {
 	) {
 		problems.push(
 			`${fixture.relPath}: provenance.platform "${p.platform}" is not <node-platform>-<arch>`,
+		);
+	}
+	// `argv` is what the argv-tie assertion compares against. Splitting
+	// `command` back on whitespace loses a quoted token like `{{json .}}`, so
+	// the array is the authoritative record and must be present.
+	const argv = p.argv;
+	if (
+		!Array.isArray(argv) ||
+		argv.length === 0 ||
+		argv.some((token) => typeof token !== "string")
+	) {
+		problems.push(
+			`${fixture.relPath}: provenance.argv must be a non-empty array of strings — it is what ties the fixture to the runner's invocation`,
 		);
 	}
 	if (fixture.exitCode === undefined) {

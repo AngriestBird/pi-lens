@@ -4,6 +4,10 @@
 		"tool": "shfmt",
 		"version": "3.13.1",
 		"command": "shfmt --diff bad.sh",
+		"argv": [
+			"--diff",
+			"bad.sh"
+		],
 		"workspace": "tests/fixtures/tool-smoke/shell",
 		"platform": "win32-x64",
 		"capturedAt": "2026-08-21"

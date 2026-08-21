@@ -2,8 +2,13 @@
 	"provenance": {
 		"runner": "spellcheck",
 		"tool": "typos",
-		"version": "1.42.2",
+		"version": "1.49.0",
 		"command": "typos --format json notes.md",
+		"argv": [
+			"--format",
+			"json",
+			"notes.md"
+		],
 		"workspace": "tests/fixtures/tool-smoke/typos-aux",
 		"platform": "win32-x64",
 		"capturedAt": "2026-08-21"

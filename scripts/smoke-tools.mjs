@@ -18,6 +18,8 @@
  *                      parser read an envelope taplo has never emitted.
  *   --tier1:           narrow to the fixtures whose tools need no language
  *                      toolchain, for the scheduled parser lane.
+ *   --min-pass=N:      exit nonzero when fewer than N rows passed, so a run
+ *                      where every install failed cannot report green.
  *
  * LSP handshake layer (--lsp): for each LSP fixture, drives the SAME production
  * entry the lsp runner uses (`LSPService.touchFile`, with a generous cold-spawn
@@ -1220,6 +1222,7 @@ function parseArgs(argv) {
 	let format = false;
 	let autofix = false;
 	let tier1 = false;
+	let minPass = null;
 	for (const arg of argv) {
 		if (arg === "--step2") step2 = true;
 		else if (arg === "--verbose" || arg === "-v") verbose = true;
@@ -1227,10 +1230,22 @@ function parseArgs(argv) {
 		else if (arg === "--lsp") lsp = true;
 		else if (arg === "--format") format = true;
 		else if (arg === "--tier1") tier1 = true;
+		else if (arg.startsWith("--min-pass="))
+			minPass = Number.parseInt(arg.slice("--min-pass=".length), 10);
 		else if (arg === "--autofix") autofix = true;
 		else langs.push(arg);
 	}
-	return { langs, step2, verbose, install, lsp, format, autofix, tier1 };
+	return {
+		langs,
+		step2,
+		verbose,
+		install,
+		lsp,
+		format,
+		autofix,
+		tier1,
+		minPass,
+	};
 }
 
 const TMP_PREFIX = "pi-lens-smoke-";
@@ -1367,6 +1382,25 @@ async function ensureSmokeLombokJar(workspace, verbose) {
 	fs.mkdirSync(path.dirname(dest), { recursive: true });
 	fs.copyFileSync(cached, dest);
 	return dest;
+}
+
+/**
+ * The message for a run that passed too few rows, or null when the floor holds.
+ *
+ * An unavailable tool reports the harmless-looking warning state, never a
+ * failure, so a run where EVERY install failed exits 0 with a clean report —
+ * an unspawnable prober delivering a durable green verdict, which is the shape
+ * AGENTS.md tells us to screen for. `--min-pass` is the floor that separates
+ * "one tool could not install tonight", still a warning, from "the lane
+ * installed nothing and proved nothing", which must be red.
+ */
+export function passFloorBreach(rows, minPass) {
+	if (minPass === null || minPass === undefined) return null;
+	const passed = rows.filter((r) => r.state === "pass").length;
+	if (passed >= minPass) return null;
+	const unavailable = rows.filter((r) => r.state === "skip").length;
+	return `
+✗ pass floor: ${passed} runner(s) passed, at least ${minPass} required (${unavailable} unavailable). A lane that installs nothing proves nothing — treat this as red, not as flaky tooling.`;
 }
 
 /** Classify one target runner's outcome against the Step-1 bar. */
@@ -2040,8 +2074,17 @@ async function runAutofixSmoke({ langs, install, verbose }) {
 }
 
 async function main() {
-	const { langs, step2, verbose, install, lsp, format, autofix, tier1 } =
-		parseArgs(process.argv.slice(2));
+	const {
+		langs,
+		step2,
+		verbose,
+		install,
+		lsp,
+		format,
+		autofix,
+		tier1,
+		minPass,
+	} = parseArgs(process.argv.slice(2));
 
 	// Clean leftovers from prior runs (their file locks are released now).
 	const swept = sweepLeftovers();
@@ -2174,14 +2217,13 @@ async function main() {
 		}
 	}
 
-	process.exit(
-		report(
-			rows,
-			step2 ? "Step 2 (spawn + diagnostic)" : "Step 1 (spawn + exit clean)",
-		) > 0
-			? 1
-			: 0,
+	const failures = report(
+		rows,
+		step2 ? "Step 2 (spawn + diagnostic)" : "Step 1 (spawn + exit clean)",
 	);
+	const floorBreach = passFloorBreach(rows, minPass);
+	if (floorBreach) console.error(floorBreach);
+	process.exit(failures > 0 || floorBreach ? 1 : 0);
 }
 
 // Run main() only when executed directly, not when imported (the

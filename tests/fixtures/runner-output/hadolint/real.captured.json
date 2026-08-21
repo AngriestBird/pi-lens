@@ -4,6 +4,12 @@
 		"tool": "hadolint",
 		"version": "2.14.0",
 		"command": "hadolint --format json --no-fail Dockerfile",
+		"argv": [
+			"--format",
+			"json",
+			"--no-fail",
+			"Dockerfile"
+		],
 		"workspace": "tests/fixtures/tool-smoke/dockerfile",
 		"platform": "win32-x64",
 		"capturedAt": "2026-08-21"

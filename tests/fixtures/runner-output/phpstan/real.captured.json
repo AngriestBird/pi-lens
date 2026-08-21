@@ -4,6 +4,12 @@
 		"tool": "phpstan",
 		"version": "2.2.8",
 		"command": "phpstan analyse --error-format=json --no-progress bad.php",
+		"argv": [
+			"analyse",
+			"--error-format=json",
+			"--no-progress",
+			"bad.php"
+		],
 		"workspace": "tests/fixtures/tool-smoke/phpstan",
 		"platform": "win32-x64",
 		"capturedAt": "2026-08-21"

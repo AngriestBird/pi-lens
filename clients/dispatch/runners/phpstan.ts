@@ -79,6 +79,33 @@ export function parsePhpstanJson(
 			}
 		}
 
+		// #1937 round 2: the top-level `errors[]` array carries phpstan's
+		// FILE-INDEPENDENT findings — internal errors, and ignore patterns that
+		// matched nothing. A run can report `totals.errors: 1` with `files: {}`
+		// and exit 1, and reading only `files` turned that into zero
+		// diagnostics: the same defect class as the `errors`-vs-`messages` bug
+		// above, one level up. Pinned by
+		// tests/fixtures/runner-output/phpstan/top-level-errors.captured.json.
+		//
+		// These have no file or line, so they attach to the edited file at line
+		// 1. That is the honest placement: the reader needs to see them, and
+		// there is nowhere truer to put them.
+		for (const message of output.errors ?? []) {
+			if (typeof message !== "string" || !message.trim()) continue;
+			diagnostics.push({
+				id: `phpstan:global:${message.slice(0, 40)}`,
+				message,
+				filePath: fallbackPath,
+				line: 1,
+				column: 1,
+				severity: "error",
+				semantic: "blocking",
+				tool: "phpstan",
+				rule: "phpstan/analysis",
+				fixable: false,
+			});
+		}
+
 		return diagnostics;
 	} catch {
 		return [];

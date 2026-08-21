@@ -4,6 +4,11 @@
 		"tool": "actionlint",
 		"version": "1.7.12",
 		"command": "actionlint -format {{json .}} .github/workflows/ci.yml",
+		"argv": [
+			"-format",
+			"{{json .}}",
+			".github/workflows/ci.yml"
+		],
 		"workspace": "tests/fixtures/tool-smoke/actionlint",
 		"platform": "win32-x64",
 		"capturedAt": "2026-08-21"

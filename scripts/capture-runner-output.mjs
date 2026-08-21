@@ -131,19 +131,73 @@ export function needsShell(bin, platform = process.platform) {
 	return !/\.exe$/i.test(bin);
 }
 
-/** Quote one argv entry for cmd.exe, which sees a single concatenated string. */
+/** Characters that force an argv entry to be quoted before cmd.exe sees it. */
+const NEEDS_QUOTING = /[\s"{}^&|<>()%!]/;
+
+/**
+ * Quote one argv entry for a Windows command line.
+ *
+ * Implements the CommandLineToArgvW rules rather than "escape the quotes"
+ * (#1937 round 2): backslashes are literal EXCEPT before a double quote, where
+ * 2n backslashes produce n backslashes and a delimiting quote, and 2n+1
+ * produce n backslashes and a literal quote. The previous version escaped `"`
+ * and left `\` alone, so an argument ending in a backslash — a Windows
+ * directory path, routinely — had its closing quote escaped and swallowed the
+ * next argument. CodeQL flags that shape as incomplete sanitization, correctly.
+ *
+ * Written as a scan rather than chained regex replaces so there is one pass
+ * over the string and no ordering hazard between the two escapes.
+ */
 export function quoteForShell(arg) {
-	return /[\s"{}^&|<>()]/.test(arg) ? `"${arg.replace(/"/g, '\\"')}"` : arg;
+	const text = String(arg);
+	if (text.length > 0 && !NEEDS_QUOTING.test(text)) return text;
+
+	let quoted = '"';
+	let pendingBackslashes = 0;
+	for (const character of text) {
+		if (character === "\\") {
+			pendingBackslashes++;
+			continue;
+		}
+		if (character === '"') {
+			// Double the run, then escape the quote itself.
+			quoted += `${"\\".repeat(pendingBackslashes * 2 + 1)}"`;
+			pendingBackslashes = 0;
+			continue;
+		}
+		quoted += `${"\\".repeat(pendingBackslashes)}${character}`;
+		pendingBackslashes = 0;
+	}
+	// A trailing run abuts the closing quote, so it must be doubled too.
+	quoted += `${"\\".repeat(pendingBackslashes * 2)}"`;
+	return quoted;
+}
+
+/**
+ * The executable path as the shell should see it.
+ *
+ * `shell: true` hands the path to a shell, and which shell that is depends on
+ * the environment: cmd.exe normally, but `sh` when the run started from Git
+ * Bash. `sh` reads each `\` in `C:\tools\phpstan.bat` as an escape and hands
+ * the program `C:toolsphpstan.bat`. Windows accepts forward slashes in a path,
+ * and no shell treats them specially, so normalise before quoting.
+ */
+export function shellBinPath(bin) {
+	return quoteForShell(String(bin).replace(/\\/g, "/"));
 }
 
 function spawnCaptured(bin, args, cwd, shellOverride) {
 	const shell = shellOverride ?? needsShell(bin);
-	return spawnSync(bin, shell ? args.map(quoteForShell) : args, {
-		cwd,
-		encoding: "utf8",
-		shell,
-		maxBuffer: 32 * 1024 * 1024,
-	});
+	return spawnSync(
+		shell ? shellBinPath(bin) : bin,
+		shell ? args.map(quoteForShell) : args,
+		{
+			cwd,
+			encoding: "utf8",
+			shell,
+			maxBuffer: 32 * 1024 * 1024,
+		},
+	);
 }
 
 function main() {
@@ -188,6 +242,12 @@ function main() {
 			tool,
 			version,
 			command: [tool, ...rest].join(" "),
+			// The argv as an ARRAY as well as a string. The string is for
+			// humans; splitting it back on whitespace is lossy for a quoted
+			// argument like `{{json .}}`, and the argv-tie assertion in
+			// runners/captured-real-output.test.ts needs the exact tokens in
+			// the exact order to notice a runner's invocation drifting.
+			argv: rest,
 			workspace: path
 				.relative(repoRoot, opts.workspace ? path.resolve(opts.workspace) : cwd)
 				.replace(/\\/g, "/"),

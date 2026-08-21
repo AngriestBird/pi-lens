@@ -52,7 +52,11 @@ vi.mock("../../../../clients/tool-policy.js", async (importOriginal) => ({
 	markdownlintConfigArgs: () => [],
 	hasMypyConfig: () => true,
 	hasPhpstanConfig: () => true,
-	hasSqlfluffConfig: () => true,
+	// Left real: sqlfluff's config presence CHANGES its argv (an unconfigured
+	// project gets `--dialect ansi`), so forcing it open would make the argv
+	// tie assert against an invocation the fixture never captured.
+	hasSqlfluffConfig: (cwd: string) =>
+		fs.existsSync(path.join(cwd, ".sqlfluff")),
 	hasStylelintConfig: () => true,
 	hasYamllintConfig: () => true,
 	getAutofixCapability: () => ({
@@ -112,6 +116,22 @@ const RUNNER_DESCRIPTORS: Record<string, { module: string; kind: string }> = {
 	vale: { module: "vale", kind: "markdown" },
 	yamllint: { module: "yamllint", kind: "yaml" },
 };
+
+/**
+ * True when every token of `needle` appears in `haystack` in the same relative
+ * order. Membership alone is not enough: sqlfluff's #1937 argv bug reordered
+ * `--dialect` into the middle of `--format json` while keeping every token.
+ */
+function isOrderedSubsequence(
+	needle: readonly string[],
+	haystack: readonly string[],
+): boolean {
+	let cursor = 0;
+	for (const token of haystack) {
+		if (cursor < needle.length && token === needle[cursor]) cursor++;
+	}
+	return cursor === needle.length;
+}
 
 function createCtx(kind: string, filePath: string, cwd: string) {
 	return {
@@ -193,6 +213,37 @@ describe("captured real-binary output", () => {
 				const result = await runner.run(
 					createCtx(descriptor.kind, filePath, env.tmpDir) as never,
 				);
+
+				// Argv tie. Captured bytes are evidence about THIS runner only
+				// while the runner still asks the tool for them the same way.
+				// The mock answers whatever the runner spawns, so without this
+				// a flag the tool would reject — the taplo bug exactly —
+				// replays green forever.
+				//
+				// Order matters, not just membership: sqlfluff's #1937 bug put
+				// `--dialect` BETWEEN `--format` and its value, and every token
+				// was still present. So the recorded argv must appear as an
+				// ordered subsequence. File paths are dropped, because the
+				// runner resolves them to absolute and the capture did not.
+				const fileTokens = new Set([
+					fixture.file,
+					path.basename(fixture.file),
+					fixture.file.replace(/\\/g, "/"),
+				]);
+				const recorded = (fixture.provenance.argv ?? []).filter(
+					(token) => !fileTokens.has(token),
+				);
+				const spawnedArgvs = safeSpawnAsync.mock.calls.map(
+					(call) => (call[1] ?? []) as string[],
+				);
+				expect(
+					spawnedArgvs.length,
+					`${runnerId} never spawned anything, so the captured bytes prove nothing`,
+				).toBeGreaterThan(0);
+				expect(
+					spawnedArgvs.some((argv) => isOrderedSubsequence(recorded, argv)),
+					`${runnerId} spawned none of ${JSON.stringify(spawnedArgvs)} carrying its fixture's argv ${JSON.stringify(recorded)} in order. Either the runner's invocation drifted from \`${fixture.provenance.command}\`, or the fixture and the scripts/capture-runner-fixtures.mjs manifest need updating to the new argv.`,
+				).toBe(true);
 
 				expect(
 					result.diagnostics.length,

@@ -27,7 +27,11 @@ import { describe, expect, it } from "vitest";
 import { RunnerRegistry } from "../../../clients/dispatch/dispatcher.js";
 import { registerDefaultRunners } from "../../../clients/dispatch/runners/index.js";
 // Typed via scripts/smoke-tools.d.mts (the harness itself is plain ESM JS).
-import { FIXTURES, tier1Fixtures } from "../../../scripts/smoke-tools.mjs";
+import {
+	FIXTURES,
+	passFloorBreach,
+	tier1Fixtures,
+} from "../../../scripts/smoke-tools.mjs";
 import {
 	CAPTURED_OUTPUT_DIR,
 	listCapturedOutputs,
@@ -109,13 +113,19 @@ const EXEMPT = new Map<string, string>([
 		"cpp-check",
 		"toolchain: shells out to the platform C/C++ compiler (cl, gcc, or clang); output shape is compiler-specific and no compiler is guaranteed in dev or CI",
 	],
+	// swiftlint and fish-indent are NOT `platform` exemptions: swift.org ships
+	// a Windows toolchain and fish is apt-installable on the CI image. The
+	// operative fact is that neither is on the image today, which is
+	// `toolchain`. swiftlint additionally carries an inline literal in
+	// exit-blind-runners.test.ts, and `toolchain` is not an escape from that
+	// rule, so it is filed as `pending` against the issue that captures it.
 	[
 		"swiftlint",
-		"platform: needs the Swift toolchain, which has no Windows build and is not installed on the Linux CI image",
+		"pending: #1937 captures it on a CI image carrying the Swift toolchain; ubuntu-latest ships neither swift nor swiftlint today",
 	],
 	[
 		"fish-indent",
-		"platform: ships with the fish shell, which has no Windows build",
+		"toolchain: ships inside the fish shell, which is apt-installable but absent from the CI image and unavailable on the Windows dev host",
 	],
 	[
 		"trivy-config",
@@ -159,6 +169,59 @@ function parseExemptionReason(
 	return { category: match[1], detail: match[2].trim() };
 }
 
+/**
+ * Everything wrong with a set of exemptions, as human-readable strings.
+ *
+ * Taken as a parameter rather than closing over `EXEMPT` so the rules can be
+ * exercised against a synthetic map. Without that, a rule with no matching
+ * entry in the real map — `pending` has none most of the time — is a loop over
+ * an empty set that passes no matter what it says (#1937 round 2). The tests
+ * below run this same function on both.
+ */
+function exemptionProblems(
+	exempt: Iterable<[string, string]>,
+	covered: ReadonlySet<string>,
+): string[] {
+	const problems: string[] = [];
+	for (const [id, reason] of exempt) {
+		const parsed = parseExemptionReason(reason);
+		if (!parsed) {
+			problems.push(
+				`${id}: reason is not "<category>: <detail>" — got "${reason}"`,
+			);
+			continue;
+		}
+		if (!(parsed.category in EXEMPTION_CATEGORIES)) {
+			problems.push(
+				`${id}: unknown category "${parsed.category}" (allowed: ${Object.keys(EXEMPTION_CATEGORIES).join(", ")})`,
+			);
+		}
+		if (parsed.detail.length < 20) {
+			problems.push(
+				`${id}: detail "${parsed.detail}" is too short to explain why real output is unreachable`,
+			);
+		}
+		// `alternate` is the easiest category to abuse: two uncovered runners
+		// can name each other and neither ever meets a binary.
+		if (parsed.category === "alternate") {
+			const primary = parsed.detail.split(/[\s,;]/)[0];
+			if (!covered.has(primary)) {
+				problems.push(
+					`${id}: names "${primary}" as its primary, but that runner has no live or captured fixture either`,
+				);
+			}
+		}
+		// `pending` is the only category that expires, so it must name the
+		// issue or PR that removes it.
+		if (parsed.category === "pending" && !/#\d+/.test(parsed.detail)) {
+			problems.push(
+				`${id}: a pending exemption must reference the issue or PR that removes it — got "${parsed.detail}"`,
+			);
+		}
+	}
+	return problems;
+}
+
 describe("smoke-fixture coverage", () => {
 	it("every registered runner has real tool output or an explicit exemption", () => {
 		const covered = coveredRunnerIds();
@@ -192,74 +255,55 @@ describe("smoke-fixture coverage", () => {
 		).toEqual([]);
 	});
 
-	it("every exemption names a known category", () => {
-		const bad: string[] = [];
-		for (const [id, reason] of EXEMPT) {
-			const parsed = parseExemptionReason(reason);
-			if (!parsed) {
-				bad.push(
-					`${id}: reason is not "<category>: <detail>" — got "${reason}"`,
-				);
-				continue;
-			}
-			if (!(parsed.category in EXEMPTION_CATEGORIES)) {
-				bad.push(
-					`${id}: unknown category "${parsed.category}" (allowed: ${Object.keys(EXEMPTION_CATEGORIES).join(", ")})`,
-				);
-			}
-			if (parsed.detail.length < 20) {
-				bad.push(
-					`${id}: detail "${parsed.detail}" is too short to explain why real output is unreachable`,
-				);
-			}
-		}
-		expect(bad, `malformed exemption(s):\n${bad.join("\n")}`).toEqual([]);
+	it("every exemption is well formed under the shared rules", () => {
+		const problems = exemptionProblems(EXEMPT, coveredRunnerIds());
+		expect(problems, `malformed exemption(s): ${problems.join(" | ")}`).toEqual(
+			[],
+		);
 	});
 
-	// "alternate" is the easiest category to abuse: two uncovered runners can
-	// name each other and neither ever meets a binary.
-	it("every `alternate` exemption names a covered primary", () => {
-		const covered = coveredRunnerIds();
-		const bad: string[] = [];
-		for (const [id, reason] of EXEMPT) {
-			const parsed = parseExemptionReason(reason);
-			if (parsed?.category !== "alternate") continue;
-			const primary = parsed.detail.split(/[\s,;]/)[0];
-			if (!covered.has(primary)) {
-				bad.push(
-					`${id}: names "${primary}" as its primary, but that runner has no live or captured fixture either`,
-				);
-			}
-		}
+	// The rules above are only as good as their coverage of cases the real map
+	// does not currently contain. Run the SAME function over a synthetic map so
+	// each rule is proven to fire, rather than proven to loop over nothing.
+	it("the shared rules reject every malformed shape", () => {
+		const covered = new Set(["oxlint"]);
+		const reject = (id: string, reason: string, expected: RegExp) => {
+			const problems = exemptionProblems([[id, reason]], covered);
+			expect(problems, `expected "${reason}" to be rejected`).toHaveLength(1);
+			expect(problems[0]).toMatch(expected);
+		};
+
+		reject("a", "no fixture yet", /not "<category>: <detail>"/);
+		reject(
+			"b",
+			"someday: we will get to this eventually, honestly",
+			/unknown category "someday"/,
+		);
+		reject("c", "platform: too short", /too short/);
+		reject(
+			"d",
+			"alternate: detekt is the primary here and covers this language",
+			/names "detekt" as its primary/,
+		);
+		reject(
+			"e",
+			"pending: someone will get around to capturing this one",
+			/must reference the issue or PR/,
+		);
+
+		// The well-formed shapes must pass, so the rules are not simply
+		// rejecting everything.
 		expect(
-			bad,
-			`alternate exemption(s) with no covered primary:\n${bad.join("\n")}`,
-		).toEqual([]);
-	});
-
-	// The map holds no `pending` entry right now, so the loop below would pass
-	// on an empty set. Exercise the rule directly first, otherwise the guard
-	// silently stops being a guard the moment the last pending entry clears.
-	it("the `pending` rule rejects a reference-free deferral", () => {
-		const parsed = parseExemptionReason("pending: someone will get to it");
-		expect(parsed?.category).toBe("pending");
-		expect(/#\d+/.test(parsed?.detail ?? "")).toBe(false);
-	});
-
-	it("every `pending` exemption references the issue that closes it", () => {
-		const bad: string[] = [];
-		for (const [id, reason] of EXEMPT) {
-			const parsed = parseExemptionReason(reason);
-			if (parsed?.category !== "pending") continue;
-			if (!/#\d+/.test(parsed.detail)) {
-				bad.push(
-					`${id}: a pending exemption must reference the issue or PR that removes it — got "${parsed.detail}"`,
-				);
-			}
-		}
-		expect(
-			bad,
-			`pending exemption(s) with no reference:\n${bad.join("\n")}`,
+			exemptionProblems(
+				[
+					["f", "alternate: oxlint is the JS/TS lint primary for this kind"],
+					[
+						"g",
+						"pending: #1937 captures it once the toolchain is on the image",
+					],
+				],
+				covered,
+			),
 		).toEqual([]);
 	});
 });
@@ -414,5 +458,46 @@ describe("tier-1 parser lane", () => {
 			positional,
 			`${workflowPath} names languages inline (${positional.join(", ")}) — that list duplicates the \`tier1\` flags in scripts/smoke-tools.mjs and will drift`,
 		).toEqual([]);
+	});
+
+	/**
+	 * An unavailable tool reports the warning state, never a failure, so a run
+	 * where every install failed exits 0 with a clean report. That is an
+	 * unspawnable prober delivering a durable green verdict. `--min-pass` is
+	 * the floor that makes mass unavailability red while a single missing tool
+	 * stays a visible warning.
+	 */
+	it("the workflow sets a pass floor that tracks the tier-1 fixture rows", () => {
+		const declared = workflow.match(/--min-pass=(\d+)/)?.[1];
+		expect(
+			declared,
+			`${workflowPath} sets no --min-pass, so a run where every tool failed to install would exit 0`,
+		).toBeDefined();
+
+		const targets = tier1Fixtures().flatMap((fx) => fx.targets ?? []);
+		// 80% of the tier-1 targets. Below that the lane is not measuring the
+		// tier it claims to; above it, one tool missing on a given night is
+		// still allowed through as a warning.
+		const required = Math.floor(targets.length * 0.8);
+		expect(
+			Number(declared),
+			`--min-pass=${declared} is too low for ${targets.length} tier-1 target(s) — it must be at least ${required}, so adding fixtures without raising the floor reds here`,
+		).toBeGreaterThanOrEqual(required);
+		expect(
+			Number(declared),
+			`--min-pass=${declared} exceeds the ${targets.length} tier-1 target(s), so the lane can never pass`,
+		).toBeLessThanOrEqual(targets.length);
+	});
+
+	it("the pass floor fires on mass unavailability and holds otherwise", () => {
+		const unavailable = [
+			{ state: "skip" as const },
+			{ state: "skip" as const },
+			{ state: "pass" as const },
+		];
+		expect(passFloorBreach(unavailable, 3)).toMatch(/pass floor/);
+		expect(passFloorBreach(unavailable, 1)).toBeNull();
+		// No floor declared is the pre-existing behaviour, unchanged.
+		expect(passFloorBreach(unavailable, null)).toBeNull();
 	});
 });

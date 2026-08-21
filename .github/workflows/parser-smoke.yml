@@ -60,4 +60,11 @@ jobs:
         run: npm run build:dist
 
       - name: Tier-1 parsers against real binaries
-        run: node scripts/smoke-tools.mjs --step2 --tier1 --install --verbose
+        # --min-pass is the floor that keeps a green verdict honest. An
+        # unavailable tool reports a warning, never a failure, so without it a
+        # run where every install failed would exit 0 having proved nothing.
+        # Raise it when tier 1 grows; the coverage test holds it to the fixture
+        # count so it cannot silently rot.
+        run: >-
+          node scripts/smoke-tools.mjs --step2 --tier1 --install --verbose
+          --min-pass=10

@@ -4,6 +4,11 @@
 		"tool": "tflint",
 		"version": "0.61.0",
 		"command": "tflint --format=json --no-color --filter=bad.tf",
+		"argv": [
+			"--format=json",
+			"--no-color",
+			"--filter=bad.tf"
+		],
 		"workspace": "tests/fixtures/tool-smoke/terraform",
 		"platform": "win32-x64",
 		"capturedAt": "2026-08-21"

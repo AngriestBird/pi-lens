@@ -1,4 +1,5 @@
 import * as path from "node:path";
+import { incrementDegradationCount } from "../../degradation-ledger.js";
 import { findLocalBinUpwards } from "../../package-manager.js";
 import { safeSpawnAsync } from "../../safe-spawn.js";
 import { getLinterPolicyForCwd } from "../../tool-policy.js";
@@ -14,9 +15,36 @@ import {
 	lspPrimaryCoversFile,
 	resolveToolCommandWithInstallFallback,
 } from "./utils/runner-helpers.js";
-import { spawnFailedWithNoOutput } from "./utils/spawn-outcome.js";
+import type { ToolExitCodes } from "./utils/spawn-outcome.js";
+import { skipUnlessToolRan } from "./utils/tool-failure.js";
 
 const taplo = createAvailabilityChecker("taplo", ".exe");
+
+// Verified against taplo 0.10.0: 0 = clean, 1 = the file is invalid (lint
+// findings, or a schema it could not load), 2 = clap rejected the invocation.
+//
+// #1937 round 2: the parser fix alone turned the old silent-clean into a false
+// BLOCKING diagnostic. clap prints `error: unexpected argument '--output'
+// found`, which starts with the same lowercase `error:` a real taplo
+// diagnostic does, so a mistyped flag would have reddened every valid TOML
+// file. Both readings are wrong; the exit code is what separates them.
+const TAPLO_EXIT_CODES: ToolExitCodes = { ran: [1] };
+
+/**
+ * True when taplo failed the file but the parser extracted nothing from its
+ * output.
+ *
+ * taplo exits 1 only when a file is invalid, and it does not always draw a
+ * codespan block when it does: a schema it could not load is reported through
+ * its tracing output alone. Reporting that file as clean is #1816's shape, so
+ * this case skips and leaves a ledger row instead.
+ */
+export function taploFailedWithoutDiagnostics(
+	status: number | null,
+	diagnosticCount: number,
+): boolean {
+	return diagnosticCount === 0 && status !== 0;
+}
 
 /**
  * Parse `taplo lint` output (#1937).
@@ -36,6 +64,13 @@ const taplo = createAvailabilityChecker("taplo", ".exe");
  *     2 │   [package
  *
  * Verified against tests/fixtures/runner-output/taplo/real.captured.json.
+ *
+ * A header alone is NOT enough to emit a diagnostic. The codespan location
+ * line must follow it. clap's own failures start with the same lowercase
+ * `error:` and carry no location, so without that requirement a rejected
+ * invocation becomes a blocking finding on line 1 of a perfectly valid file
+ * (#1937 round 2). The exit-code table in the runner is the primary guard;
+ * this is the structural one, and each covers a case the other does not.
  */
 export function parseTaploOutput(raw: string, filePath: string): Diagnostic[] {
 	const diagnostics: Diagnostic[] = [];
@@ -43,8 +78,8 @@ export function parseTaploOutput(raw: string, filePath: string): Diagnostic[] {
 
 	for (let i = 0; i < lines.length; i++) {
 		// Lowercase `error:`/`warning:` starts a diagnostic. taplo's tracing
-		// lines are uppercase (`ERROR taplo:lint_files: ...`) and carry no
-		// location, so a case-sensitive match keeps them out.
+		// lines are uppercase (`ERROR taplo:lint_files: ...`), so a
+		// case-sensitive match keeps them out.
 		const header = lines[i].match(/^\s*(error|warning):\s*(.+?)\s*$/);
 		if (!header) continue;
 		const [, severityWord, summary] = header;
@@ -52,7 +87,7 @@ export function parseTaploOutput(raw: string, filePath: string): Diagnostic[] {
 		// The location arrives on a following `┌─ file:line:col` line. Scan a
 		// short window rather than assuming adjacency: taplo puts a gutter line
 		// between them in some layouts.
-		let line = 1;
+		let line: number | null = null;
 		let column = 1;
 		for (let j = i + 1; j < Math.min(i + 4, lines.length); j++) {
 			const location = lines[j].match(/┌─+\s*.*:(\d+):(\d+)\s*$/);
@@ -61,6 +96,7 @@ export function parseTaploOutput(raw: string, filePath: string): Diagnostic[] {
 			column = Number.parseInt(location[2], 10) || 1;
 			break;
 		}
+		if (line === null) continue;
 
 		const severity = severityWord === "warning" ? "warning" : "error";
 		diagnostics.push({
@@ -136,11 +172,22 @@ const taploRunner: RunnerDefinition = {
 		// "nothing to parse" test must read the same string the parser gets —
 		// otherwise every real run looks like a failed spawn.
 		const raw = result.stderr?.trim() ? result.stderr : (result.stdout ?? "");
-		if (spawnFailedWithNoOutput(result, raw)) {
-			return { status: "skipped", diagnostics: [], semantic: "none" };
-		}
+		const skipped = skipUnlessToolRan("taplo", {
+			result,
+			output: raw,
+			exitCodes: TAPLO_EXIT_CODES,
+		});
+		if (skipped) return skipped;
 
 		const diagnostics = parseTaploOutput(raw, ctx.filePath);
+		if (taploFailedWithoutDiagnostics(result.status, diagnostics.length)) {
+			incrementDegradationCount({
+				kind: "runner-empty-result",
+				subject: "taplo",
+				reason: `taplo exited ${result.status} declaring the file invalid but produced no parseable diagnostic`,
+			});
+			return { status: "skipped", diagnostics: [], semantic: "none" };
+		}
 		if (diagnostics.length === 0) {
 			return { status: "succeeded", diagnostics: [], semantic: "none" };
 		}
