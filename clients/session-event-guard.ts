@@ -157,12 +157,21 @@ function guardSessionEvent<E, C, R>(
 		// `false` is the only confirmed verdict. `undefined` means the probe
 		// could not tell, and an inconclusive probe must dispatch.
 		if (probeCtxActive(ctx) === false)
+			// SAFETY: `R` is the handler's declared return type, which is either a
+			// plain value or a promise of one. `skip` yields `Awaited<R>`, the
+			// settled form. TypeScript cannot see that a host awaiting an `R` is
+			// equally satisfied by the settled value, but every `pi.on` caller
+			// either awaits the result or ignores it, so both forms behave the
+			// same at the call site. The same reasoning covers the two casts
+			// below.
 			return skip(event, "pre-dispatch") as unknown as R;
 		try {
 			const result = handler(event, ctx);
 			if (isThenable(result)) {
 				// Recover the rejection in place. The host awaits the same promise
 				// it would have awaited anyway; it just resolves instead.
+				// SAFETY: the recovered promise settles to `Awaited<R>`, which the
+				// host consumes exactly as it would an `R` — see the note above.
 				return Promise.resolve(result).catch((err: unknown) => {
 					if (isStaleExtensionCtxError(err)) return skip(event, "mid-handler");
 					throw err;
@@ -171,6 +180,8 @@ function guardSessionEvent<E, C, R>(
 			return result;
 		} catch (err) {
 			if (isStaleExtensionCtxError(err))
+				// SAFETY: a synchronous handler's `R` is already its settled form,
+				// so `Awaited<R>` and `R` coincide here — see the note above.
 				return skip(event, "mid-handler") as unknown as R;
 			throw err;
 		}
