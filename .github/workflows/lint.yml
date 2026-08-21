@@ -79,5 +79,14 @@ jobs:
         with:
           node-version: "22"
 
+      # SonarCloud S6505 (#1917 review, deferred; fixed here): `npx` can
+      # install AND execute a package's lifecycle scripts. `--ignore-scripts`
+      # closes that vector; `--no-save` keeps this from touching the repo's
+      # real package.json/package-lock.json (verified locally on a bare
+      # checkout -- no node_modules, no prior install -- that both files are
+      # byte-identical to HEAD after this command). Version stays pinned.
+      - name: Install markdownlint-cli2 (no npx, no lifecycle scripts)
+        run: npm install --no-save --no-audit --no-fund --ignore-scripts markdownlint-cli2@0.23.2
+
       - name: Lint markdown
-        run: npx --yes markdownlint-cli2@0.23.2
+        run: ./node_modules/.bin/markdownlint-cli2
