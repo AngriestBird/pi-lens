@@ -11,7 +11,7 @@ import {
 	createAvailabilityChecker,
 	resolveToolCommandWithInstallFallback,
 } from "./utils/runner-helpers.js";
-import { skipUnlessToolRan } from "./utils/tool-failure.js";
+import { parseToolRun } from "./utils/tool-failure.js";
 
 const yamllint = createAvailabilityChecker("yamllint", ".exe");
 
@@ -61,7 +61,7 @@ const yamllintRunner: RunnerDefinition = {
 		}
 
 		let cmd: string | null = null;
-		if (await (yamllint.isAvailableAsync(cwd))) {
+		if (await yamllint.isAvailableAsync(cwd)) {
 			cmd = yamllint.getCommand(cwd);
 		} else {
 			cmd = await resolveToolCommandWithInstallFallback(cwd, "yamllint");
@@ -83,13 +83,17 @@ const yamllintRunner: RunnerDefinition = {
 		// and tracebacks. So the gate judges "nothing to parse" on stdout alone,
 		// while the parser still reads both streams.
 		const raw = `${result.stdout ?? ""}${result.stderr ?? ""}`;
-		const skipped = skipUnlessToolRan("yamllint", {
-			result,
-			output: result.stdout,
-		});
-		if (skipped) return skipped;
+		// #1948: classify on stdout as before, parse both streams as before, and
+		// record when a failing run yields nothing.
+		const run = parseToolRun(
+			"yamllint",
+			{ result, output: result.stdout },
+			(out) => parseYamllintParsable(out, ctx.filePath),
+			{ parseOutput: raw },
+		);
+		if (run.skipped) return run.skipped;
 
-		const diagnostics = parseYamllintParsable(raw, ctx.filePath);
+		const diagnostics = run.diagnostics;
 		if (diagnostics.length === 0) {
 			return { status: "succeeded", diagnostics: [], semantic: "none" };
 		}

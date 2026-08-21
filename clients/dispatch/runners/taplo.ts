@@ -1,5 +1,4 @@
 import * as path from "node:path";
-import { incrementDegradationCount } from "../../degradation-ledger.js";
 import { findLocalBinUpwards } from "../../package-manager.js";
 import { safeSpawnAsync } from "../../safe-spawn.js";
 import { getLinterPolicyForCwd } from "../../tool-policy.js";
@@ -16,7 +15,7 @@ import {
 	resolveToolCommandWithInstallFallback,
 } from "./utils/runner-helpers.js";
 import type { ToolExitCodes } from "./utils/spawn-outcome.js";
-import { skipUnlessToolRan } from "./utils/tool-failure.js";
+import { parseToolRun } from "./utils/tool-failure.js";
 
 const taplo = createAvailabilityChecker("taplo", ".exe");
 
@@ -29,22 +28,6 @@ const taplo = createAvailabilityChecker("taplo", ".exe");
 // diagnostic does, so a mistyped flag would have reddened every valid TOML
 // file. Both readings are wrong; the exit code is what separates them.
 const TAPLO_EXIT_CODES: ToolExitCodes = { ran: [1] };
-
-/**
- * True when taplo failed the file but the parser extracted nothing from its
- * output.
- *
- * taplo exits 1 only when a file is invalid, and it does not always draw a
- * codespan block when it does: a schema it could not load is reported through
- * its tracing output alone. Reporting that file as clean is #1816's shape, so
- * this case skips and leaves a ledger row instead.
- */
-export function taploFailedWithoutDiagnostics(
-	status: number | null,
-	diagnosticCount: number,
-): boolean {
-	return diagnosticCount === 0 && status !== 0;
-}
 
 /** `error: <summary>` or `warning: <summary>` at the head of a codespan block. */
 const HEADER_PATTERN = /^\s*(error|warning):(.*)$/;
@@ -190,22 +173,22 @@ const taploRunner: RunnerDefinition = {
 		// "nothing to parse" test must read the same string the parser gets —
 		// otherwise every real run looks like a failed spawn.
 		const raw = result.stderr?.trim() ? result.stderr : (result.stdout ?? "");
-		const skipped = skipUnlessToolRan("taplo", {
-			result,
-			output: raw,
-			exitCodes: TAPLO_EXIT_CODES,
-		});
-		if (skipped) return skipped;
+		//
+		// taplo exits 1 only when a file is INVALID, and it does not always draw
+		// a codespan block when it does: a schema it could not load is reported
+		// through its tracing output alone. Claiming that file clean would be an
+		// outright lie, so taplo opts into `skipWhenParsedNothing` (#1948). This
+		// replaces a hand-rolled per-runner copy of the same rule, which wrote
+		// its own `runner-empty-result` row with its own wording.
+		const run = parseToolRun(
+			"taplo",
+			{ result, output: raw, exitCodes: TAPLO_EXIT_CODES },
+			(out) => parseTaploOutput(out, ctx.filePath),
+			{ skipWhenParsedNothing: true },
+		);
+		if (run.skipped) return run.skipped;
 
-		const diagnostics = parseTaploOutput(raw, ctx.filePath);
-		if (taploFailedWithoutDiagnostics(result.status, diagnostics.length)) {
-			incrementDegradationCount({
-				kind: "runner-empty-result",
-				subject: "taplo",
-				reason: `taplo exited ${result.status} declaring the file invalid but produced no parseable diagnostic`,
-			});
-			return { status: "skipped", diagnostics: [], semantic: "none" };
-		}
+		const diagnostics = run.diagnostics;
 		if (diagnostics.length === 0) {
 			return { status: "succeeded", diagnostics: [], semantic: "none" };
 		}

@@ -60,7 +60,9 @@ export function formatToolFailure(input: ToolFailureInput): string {
 
 	const missing = input.reportMissing ? "no report file" : "no output";
 	const detail =
-		firstOutputLine(input.stderr) || firstOutputLine(input.stdout) || "no stderr";
+		firstOutputLine(input.stderr) ||
+		firstOutputLine(input.stdout) ||
+		"no stderr";
 
 	return truncateForLedger(`${identity} ${what} with ${missing}: ${detail}`);
 }
@@ -110,4 +112,158 @@ export function skipUnlessToolRan(
 		reason: formatRunOutcomeFailure(tool, outcome, fields),
 	});
 	return { status: "skipped", diagnostics: [], semantic: "none" };
+}
+
+/**
+ * The record a runner leaves when its parser read NOTHING out of output the
+ * tool did produce (#1948).
+ *
+ * `skipUnlessToolRan` covers the adjacent case: the tool produced no output at
+ * all. The hole it leaves is the one that hid five parser bugs for months —
+ * vale (#1933), taplo, stylelint, phpstan (#1946), sqlfluff. Each received a
+ * real report, extracted zero diagnostics from it, and reported "succeeded, 0
+ * diagnostics", which is byte-for-byte what a genuinely clean file records.
+ * A reader could not answer "is this file clean, or did the parser fail?".
+ *
+ * THE RULE: record only when the exit status is NONZERO, the output handed to
+ * the parser is non-empty, and the parse yielded zero diagnostics. A nonzero
+ * exit is the tool asserting something is wrong; extracting nothing from that
+ * assertion means our reader disagrees with the tool, and one of the two is
+ * broken.
+ *
+ * Exit 0 with zero parsed is deliberately NOT recorded, even with non-empty
+ * output: that is the overwhelmingly common clean save. Linters print summary
+ * banners, empty JSON arrays, and progress noise on a clean run, so a row per
+ * clean save would drown the ledger and bury the real signal.
+ *
+ * FALSE NEGATIVES this rule accepts, stated plainly:
+ *   - A tool that reports findings under exit 0. `vale` does this by default
+ *     (nonzero only on its own errors), so a future vale parser break that
+ *     coincides with exit 0 stays invisible here. The #1933 break did exit 1.
+ *   - A tool whose parser breaks only for a SUBSET of findings still reports
+ *     the ones it can read, so `parsedCount` is nonzero and nothing records.
+ *
+ * FALSE POSITIVES it accepts: a runner that legitimately parses zero
+ * diagnostics out of a failing run — `go-vet` exits nonzero for a SIBLING
+ * file's problem and then filters to the edited file. Such runners stay off
+ * this helper rather than being special-cased inside it; see the runner-family
+ * table in `tests/clients/dispatch/runners/parsed-nothing-sweep.test.ts`.
+ *
+ * Bounded by `incrementDegradationCount`: one latest-reason entry per
+ * (kind, subject) with an exact tally, so a permanently broken parser costs
+ * ONE ledger row and not one per dispatched file. `subject` is the tool id
+ * because a parser break is a property of the tool and our reader of it, not
+ * of the project it ran in; aggregating on the tool keeps exactly the identity
+ * a reader needs ("which tool is stuck") while staying bounded across every
+ * workspace in the session.
+ *
+ * @returns true when a row was recorded.
+ */
+export function recordParsedNothing(input: {
+	tool: string;
+	/** Process exit status, or null when none arrived. */
+	status: number | null;
+	/** EXACTLY the string handed to the parser. */
+	output: string;
+	/** How many diagnostics the parser extracted from `output`. */
+	parsedCount: number;
+	fields?: ToolFailureInput["fields"];
+}): boolean {
+	const { tool, status, output, parsedCount } = input;
+	// Three conjuncts, one per clause of the rule above. Each is separately
+	// load-bearing and separately tested: `parsedCount` keeps a run that DID
+	// yield findings silent, `status` keeps the clean-save case silent (0 and a
+	// never-arrived null alike — neither is a tool asserting a problem), and
+	// `output` keeps "the tool said nothing at all" with `runner-empty-result`
+	// rather than double-recording it here.
+	if (parsedCount > 0) return false;
+	if (!status) return false;
+	const text = output ?? "";
+	if (!text.trim()) return false;
+
+	const entries = Object.entries(input.fields ?? {}).filter(
+		([, value]) => value !== undefined && value !== "",
+	);
+	const identity = entries.length
+		? `${tool} (${entries.map(([key, value]) => `${key}=${value}`).join(", ")})`
+		: tool;
+
+	incrementDegradationCount({
+		kind: "runner-parsed-nothing",
+		subject: tool,
+		reason: truncateForLedger(
+			`${identity} exited ${status} with ${text.length} chars of output but the parser read 0 diagnostics: ${
+				firstOutputLine(text) || "no first line"
+			}`,
+		),
+	});
+	return true;
+}
+
+export interface ParseToolRunOptions {
+	fields?: ToolFailureInput["fields"];
+	/**
+	 * The exact string to hand the parser, when it differs from the string the
+	 * outcome classifier judged (`input.output`, else stdout). `spellcheck`
+	 * parses stdout+stderr but classifies on stdout alone, and changing what it
+	 * classifies would widen its "did it run" verdict.
+	 */
+	parseOutput?: string;
+	/**
+	 * Return `skipped` — rather than letting the caller report a clean file —
+	 * when the run failed and the parser read nothing. Opt-in per tool: it is
+	 * correct only where a nonzero exit means "this file is bad", so claiming
+	 * clean would be an outright lie (taplo). Elsewhere the record alone is the
+	 * fix, and the status stays whatever the runner decided.
+	 */
+	skipWhenParsedNothing?: boolean;
+}
+
+export interface ParsedToolRun<D> {
+	/** Non-null when the runner must return it verbatim and stop. */
+	skipped: RunnerResult | null;
+	diagnostics: D[];
+	/** True when this run tripped the #1948 rule above. */
+	parsedNothing: boolean;
+}
+
+/**
+ * The one seam a runner uses to go from a spawn result to diagnostics (#1948).
+ *
+ * It composes the two gates that must BOTH hold before a runner may claim a
+ * clean file: `skipUnlessToolRan` (the tool produced nothing — #1816) and
+ * `recordParsedNothing` (the tool produced something the parser could not
+ * read). Runners call this instead of calling `skipUnlessToolRan` and then
+ * parsing on their own, so the second gate cannot be forgotten by whoever
+ * writes runner 53. `tests/clients/dispatch/runners/parsed-nothing-sweep.test.ts`
+ * enforces that.
+ */
+export function parseToolRun<D>(
+	tool: string,
+	input: ClassifyRunOutcomeInput,
+	parse: (output: string) => readonly D[],
+	options: ParseToolRunOptions = {},
+): ParsedToolRun<D> {
+	const skipped = skipUnlessToolRan(tool, input, options.fields);
+	if (skipped) return { skipped, diagnostics: [], parsedNothing: false };
+
+	const output =
+		options.parseOutput ?? input.output ?? input.result.stdout ?? "";
+	const diagnostics = [...parse(output)];
+	const parsedNothing = recordParsedNothing({
+		tool,
+		status: input.result.status ?? null,
+		output,
+		parsedCount: diagnostics.length,
+		fields: options.fields,
+	});
+
+	if (parsedNothing && options.skipWhenParsedNothing) {
+		return {
+			skipped: { status: "skipped", diagnostics: [], semantic: "none" },
+			diagnostics: [],
+			parsedNothing,
+		};
+	}
+	return { skipped: null, diagnostics, parsedNothing };
 }
