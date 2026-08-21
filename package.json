@@ -125,6 +125,7 @@
     "@types/pidusage": "^2.0.5",
     "@vitest/coverage-v8": "^4.1.5",
     "husky": "^9.1.7",
+    "oxlint": "1.79.0",
     "typebox": "^1.0.0",
     "typescript": "^7.0.2",
     "typescript-language-server": "^5.1.3",

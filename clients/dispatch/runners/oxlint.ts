@@ -112,6 +112,17 @@ const oxlintRunner: RunnerDefinition = {
 		}
 
 		if (diagnostics.length === 0) {
+			// Read BEFORE reporting "succeeded" — a config (root's or a nested
+			// one nearer the file, per oxlint's own discovery) that ignores this
+			// file reports the same empty diagnostics array a clean file does.
+			// "succeeded"/"none" would say "we checked, it's clean"; this file
+			// was never checked at all.
+			if (parseOxlintFileCount(stdout) === 0) {
+				ctx.log(
+					"oxlint: 0 files matched (ignorePatterns/nested config excluded this file) — skipping, not reporting clean",
+				);
+				return { status: "skipped", diagnostics: [], semantic: "none" };
+			}
 			return { status: "succeeded", diagnostics: [], semantic: "none" };
 		}
 
@@ -151,6 +162,39 @@ interface OxlintJsonDiagnostic {
 
 interface OxlintJsonReport {
 	diagnostics?: OxlintJsonDiagnostic[];
+	number_of_files?: number;
+}
+
+/**
+ * `number_of_files: 0` is oxlint's own signal that its config (nested
+ * discovery walks up from `ctx.filePath` and stops at the NEAREST
+ * `.oxlintrc.json`/`ignorePatterns`, not necessarily the repo root's) excluded
+ * this file entirely — "No files found to lint." That report has the SAME
+ * empty `diagnostics` array a genuinely clean file produces, so without
+ * reading this field, config-excluded and clean are indistinguishable (the
+ * AGENTS.md empty-result invariant). Returns `undefined` when the field is
+ * absent or the JSON did not parse — callers must not treat that as zero.
+ *
+ * Real oxlint 1.79.0 prints "No files found to lint. Please check your paths
+ * and ignore patterns." to STDOUT BEFORE the JSON report in this exact case —
+ * confirmed against a real capture (#1985 review round 2), not assumed. An
+ * earlier version of this function trusted `stdout.trim().startsWith("{")`
+ * and bailed on that banner line every time, so the guard this function
+ * exists for never actually fired in production. Finding the first `{` and
+ * parsing from there survives the banner; a raw string with no `{` at all
+ * (a crash, a wholly different error format) still returns `undefined`.
+ */
+function parseOxlintFileCount(raw: string): number | undefined {
+	const jsonStart = raw.indexOf("{");
+	if (jsonStart === -1) return undefined;
+	try {
+		const parsed = JSON.parse(raw.slice(jsonStart)) as OxlintJsonReport;
+		return typeof parsed.number_of_files === "number"
+			? parsed.number_of_files
+			: undefined;
+	} catch {
+		return undefined;
+	}
 }
 
 // Oxlint codes look like "eslint(no-debugger)" or "oxc(approx-constant)".

@@ -68,7 +68,7 @@ const FACT_RULE_EXTENSIONS = new Set([
 // The base is the shared per-edit resolver (EXT_TO_LANG — the single
 // ext→grammar-id authority), so c/cpp/csharp/php/css and the .tsx→tsx /
 // .jsx→javascript nuances can never drift from the per-edit path. `.tsx` resolves
-// to the tsx grammar (not typescript: the typescript grammar ERRORs on JSX);
+// to the tsx grammar (not typescript: the typescript grammar ERRORs on JSX); // spellchecker:disable-line
 // typescript RULES still apply because `queriesForLanguage(...)` below merges the
 // typescript rule set onto tsx.
 //

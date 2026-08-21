@@ -150,7 +150,17 @@ describe("no-nested-links real dispatch parity (#1077)", () => {
 			(diagnostic) => diagnostic.rule === "no-nested-links",
 		);
 		expect(twoChainDiagnostics).toHaveLength(2);
-		expect(twoChainsResult.result.blockers).toHaveLength(2);
+		// Scoped to the rule under test, not "every blocker in the file" (#1985
+		// review round 2): TWO_SAME_LINE_CHAINS is two adjacent top-level JSX
+		// elements with no wrapping fragment — real, syntactically invalid TSX
+		// that a JS/TS lint runner (oxlint, once dogfooded on this repo) blocks
+		// on independently of no-nested-links. This test's subject is
+		// no-nested-links, not the fixture's general TSX validity.
+		expect(
+			twoChainsResult.result.blockers.filter(
+				(blocker) => blocker.rule === "no-nested-links",
+			),
+		).toHaveLength(2);
 		expect(twoChainDiagnostics.map((diagnostic) => diagnostic.column)).toEqual([
 			16, 122,
 		]);
