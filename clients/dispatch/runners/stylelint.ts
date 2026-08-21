@@ -16,7 +16,7 @@ import {
 	resolveToolCommandWithInstallFallback,
 } from "./utils/runner-helpers.js";
 import type { ToolExitCodes } from "./utils/spawn-outcome.js";
-import { skipUnlessToolRan } from "./utils/tool-failure.js";
+import { parseToolRun } from "./utils/tool-failure.js";
 
 const stylelint = createAvailabilityChecker("stylelint", ".cmd");
 
@@ -180,14 +180,16 @@ const stylelintRunner: RunnerDefinition = {
 		// config error (or an exit-1 crash) fell through parseStylelintJson's
 		// catch to zero diagnostics and reported a clean stylesheet.
 		const raw = stylelintReport(result.stdout, result.stderr);
-		const skipped = skipUnlessToolRan("stylelint", {
-			result,
-			output: raw,
-			exitCodes: STYLELINT_EXIT_CODES,
-		});
-		if (skipped) return skipped;
+		// #1948: the stdout-vs-stderr report bug landed here as exit 2 plus a
+		// full JSON report and zero parsed warnings. That now leaves a record.
+		const run = parseToolRun(
+			"stylelint",
+			{ result, output: raw, exitCodes: STYLELINT_EXIT_CODES },
+			(out) => parseStylelintJson(out, ctx.filePath),
+		);
+		if (run.skipped) return run.skipped;
 
-		const diagnostics = parseStylelintJson(raw, ctx.filePath);
+		const diagnostics = run.diagnostics;
 		if (diagnostics.length === 0) {
 			return { status: "succeeded", diagnostics: [], semantic: "none" };
 		}

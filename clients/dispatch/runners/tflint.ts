@@ -2,18 +2,18 @@ import * as path from "node:path";
 import { safeSpawnAsync } from "../../safe-spawn.js";
 import { getLinterPolicyForCwd } from "../../tool-policy.js";
 import { findNearestDirWithAnyBasename } from "../../workspace-topology.js";
-import {
-	createAvailabilityChecker,
-	resolveAvailableOrInstall,
-} from "./utils/runner-helpers.js";
-import { spawnFailedWithNoOutput } from "./utils/spawn-outcome.js";
+import { PRIORITY } from "../priorities.js";
 import type {
 	Diagnostic,
 	DispatchContext,
 	RunnerDefinition,
 	RunnerResult,
 } from "../types.js";
-import { PRIORITY } from "../priorities.js";
+import {
+	createAvailabilityChecker,
+	resolveAvailableOrInstall,
+} from "./utils/runner-helpers.js";
+import { parseToolRun } from "./utils/tool-failure.js";
 
 const tflint = createAvailabilityChecker("tflint", ".exe");
 
@@ -87,7 +87,7 @@ const tflintRunner: RunnerDefinition = {
 		}
 
 		let cmd: string | null = null;
-		if (await (tflint.isAvailableAsync(cwd))) {
+		if (await tflint.isAvailableAsync(cwd)) {
 			cmd = tflint.getCommand(cwd);
 		} else {
 			const managed = await resolveAvailableOrInstall(tflint, "tflint", cwd);
@@ -111,11 +111,17 @@ const tflintRunner: RunnerDefinition = {
 			timeout: 30000,
 		});
 
-		if (spawnFailedWithNoOutput(result)) {
-			return { status: "skipped", diagnostics: [], semantic: "none" };
-		}
+		// #1948: tflint exits nonzero and writes its JSON report to stdout, so a
+		// nonzero exit whose report yields zero diagnostics is a parser break,
+		// not a clean file. No exit-code table: tflint's nonzero codes are not
+		// verified against a real binary here, so the conservative
+		// nothing-to-parse rule stays the only discriminator.
+		const run = parseToolRun("tflint", { result }, (out) =>
+			parseTflintOutput(out, ctx.filePath),
+		);
+		if (run.skipped) return run.skipped;
 
-		const diagnostics = parseTflintOutput(result.stdout || "", ctx.filePath);
+		const diagnostics = run.diagnostics;
 		if (diagnostics.length === 0) {
 			return { status: "succeeded", diagnostics: [], semantic: "none" };
 		}

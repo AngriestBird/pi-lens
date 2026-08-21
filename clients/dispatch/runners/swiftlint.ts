@@ -11,7 +11,7 @@ import {
 	createAvailabilityChecker,
 	resolveToolCommandWithInstallFallback,
 } from "./utils/runner-helpers.js";
-import { skipUnlessToolRan } from "./utils/tool-failure.js";
+import { parseToolRun } from "./utils/tool-failure.js";
 
 const swiftlint = createAvailabilityChecker("swiftlint", ".exe");
 
@@ -162,9 +162,7 @@ const swiftlintRunner: RunnerDefinition = {
 		const cwd = ctx.cwd || process.cwd();
 
 		let cmd: string | null = null;
-		if (
-			await (swiftlint.isAvailableAsync(cwd))
-		) {
+		if (await swiftlint.isAvailableAsync(cwd)) {
 			cmd = swiftlint.getCommand(cwd);
 		} else {
 			cmd = await resolveToolCommandWithInstallFallback(cwd, "swiftlint");
@@ -184,12 +182,14 @@ const swiftlintRunner: RunnerDefinition = {
 		// stably enough to call any of them a rejection, so classification
 		// rests on the conservative rule — a nonzero exit with nothing to parse
 		// never ran.
-		const skipped = skipUnlessToolRan("swiftlint", { result });
-		if (skipped) return skipped;
+		// SwiftLint exits non-zero on violations — stdout still has the JSON, so
+		// a nonzero exit whose JSON yields nothing is a parser break (#1948).
+		const run = parseToolRun("swiftlint", { result }, (out) =>
+			parseSwiftLintOutput(out, ctx.filePath),
+		);
+		if (run.skipped) return run.skipped;
 
-		// SwiftLint exits non-zero on violations — stdout still has the JSON
-		const raw = result.stdout || "";
-		const diagnostics = parseSwiftLintOutput(raw, ctx.filePath);
+		const diagnostics = run.diagnostics;
 
 		if (diagnostics.length === 0) {
 			return { status: "succeeded", diagnostics: [], semantic: "none" };

@@ -12,6 +12,13 @@ import {
 	createAvailabilityChecker,
 	resolveVendorToolCommand,
 } from "./utils/runner-helpers.js";
+import type { ToolExitCodes } from "./utils/spawn-outcome.js";
+import { parseToolRun } from "./utils/tool-failure.js";
+
+// phpstan's documented exit codes: 0 = no errors, 1 = errors found, 2 = a
+// fatal/internal error that stopped the analysis. Only 1 is a run that carries
+// findings.
+const PHPSTAN_EXIT_CODES: ToolExitCodes = { ran: [1] };
 
 const phpstan = createAvailabilityChecker("phpstan", ".phar");
 
@@ -146,19 +153,20 @@ const phpstanRunner: RunnerDefinition = {
 			{ timeout: 30000, cwd },
 		);
 
-		// phpstan exits 0 = no errors, 1 = errors found, 2 = fatal
-		if (result.status === 2 || result.error) {
-			return { status: "skipped", diagnostics: [], semantic: "none" };
-		}
-		if (result.status === 0) {
-			return { status: "succeeded", diagnostics: [], semantic: "none" };
-		}
-
-		const diagnostics = parsePhpstanJson(
-			result.stdout ?? "",
-			ctx.filePath,
-			cwd,
+		// phpstan exits 0 = no errors, 1 = errors found, 2 = fatal. The fatal
+		// case used to return `skipped` silently; routing it through the shared
+		// seam keeps that verdict and adds the bounded `runner-empty-result` row
+		// (#1816), and the exit-1 case now also records when the JSON report
+		// parses to nothing (#1948) — the shape the error-count-as-array bug had.
+		const run = parseToolRun(
+			"phpstan",
+			{ result, exitCodes: PHPSTAN_EXIT_CODES },
+			(out) => parsePhpstanJson(out, ctx.filePath, cwd),
+			{ parseOutput: result.stdout ?? "" },
 		);
+		if (run.skipped) return run.skipped;
+
+		const diagnostics = run.diagnostics;
 		if (diagnostics.length === 0) {
 			return { status: "succeeded", diagnostics: [], semantic: "none" };
 		}

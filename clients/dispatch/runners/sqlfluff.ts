@@ -12,7 +12,7 @@ import {
 	resolveToolCommandWithInstallFallback,
 } from "./utils/runner-helpers.js";
 import type { ToolExitCodes } from "./utils/spawn-outcome.js";
-import { skipUnlessToolRan } from "./utils/tool-failure.js";
+import { parseToolRun } from "./utils/tool-failure.js";
 
 const sqlfluff = createAvailabilityChecker("sqlfluff", ".exe");
 
@@ -183,13 +183,17 @@ const sqlfluffRunner: RunnerDefinition = {
 		// #1816: this runner read `result.status` zero times, so a user error
 		// fell through `parseSqlfluffOutput`'s JSON catch to zero violations and
 		// reported the SQL file as clean.
-		const skipped = skipUnlessToolRan("sqlfluff", {
-			result,
-			exitCodes: SQLFLUFF_EXIT_CODES,
-		});
-		if (skipped) return skipped;
+		// #1948: sqlfluff exit 1 with a JSON report we read nothing out of is a
+		// parser break, not a clean file.
+		const run = parseToolRun(
+			"sqlfluff",
+			{ result, exitCodes: SQLFLUFF_EXIT_CODES },
+			(out) => parseSqlfluffOutput(out, ctx.filePath),
+			{ parseOutput: result.stdout ?? "" },
+		);
+		if (run.skipped) return run.skipped;
 
-		const diagnostics = parseSqlfluffOutput(result.stdout ?? "", ctx.filePath);
+		const diagnostics = run.diagnostics;
 		if (diagnostics.length === 0) {
 			return { status: "succeeded", diagnostics: [], semantic: "none" };
 		}
