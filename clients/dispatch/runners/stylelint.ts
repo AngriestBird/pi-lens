@@ -27,11 +27,37 @@ const stylelint = createAvailabilityChecker("stylelint", ".cmd");
 // NOT a live stylelint: it is this repo's own hand-written fixture
 // (tests/clients/dispatch/runners/stylelint-fixable.test.ts), which reports
 // findings under exit 1. Rather than rewrite a fixture whose provenance is
-// unknown, the table keeps 1 permissive. That is safe because a genuinely
-// fatal stylelint under `--formatter json` writes nothing to stdout, so the
-// nothing-to-parse rule still catches it. 78 is the rejection this table
+// unknown, the table keeps 1 permissive. 78 is the rejection this table
 // exists to name.
+//
+// #1937 corrected the safety argument that used to sit here: it claimed a
+// fatal stylelint "writes nothing to stdout", which is true but useless,
+// because a stylelint that DID find problems writes nothing to stdout either.
+// `stylelintReport` below is what now separates the two.
 const STYLELINT_EXIT_CODES: ToolExitCodes = { ran: [1, 2] };
+
+/**
+ * The JSON report out of a stylelint run, whichever stream carried it (#1937).
+ *
+ * stylelint 16+ writes the formatted report to STDERR whenever the run
+ * "errored" — which is every run that found an error-severity warning, i.e.
+ * every run with something to say. Reading stdout alone parsed nothing and
+ * called the stylesheet clean, the #1933 vale shape. Verified against
+ * stylelint 17.8.0 in tests/fixtures/runner-output/stylelint/.
+ *
+ * Only a stream that actually starts a JSON array counts. A crash's stack
+ * trace on stderr must stay "nothing to parse" so #1816's empty-result skip
+ * still fires instead of reporting a clean file.
+ */
+export function stylelintReport(
+	stdout: string | undefined,
+	stderr: string | undefined,
+): string {
+	for (const stream of [stdout, stderr]) {
+		if (stream?.trimStart().startsWith("[")) return stream;
+	}
+	return "";
+}
 
 interface StylelintWarning {
 	line: number;
@@ -136,9 +162,7 @@ const stylelintRunner: RunnerDefinition = {
 		}
 
 		let cmd: string | null = null;
-		if (
-			await (stylelint.isAvailableAsync(cwd))
-		) {
+		if (await stylelint.isAvailableAsync(cwd)) {
 			cmd = stylelint.getCommand(cwd);
 		} else {
 			cmd = await resolveToolCommandWithInstallFallback(cwd, "stylelint");
@@ -155,13 +179,14 @@ const stylelintRunner: RunnerDefinition = {
 		// #1816: this runner read `result.status` zero times, so an exit-78
 		// config error (or an exit-1 crash) fell through parseStylelintJson's
 		// catch to zero diagnostics and reported a clean stylesheet.
+		const raw = stylelintReport(result.stdout, result.stderr);
 		const skipped = skipUnlessToolRan("stylelint", {
 			result,
+			output: raw,
 			exitCodes: STYLELINT_EXIT_CODES,
 		});
 		if (skipped) return skipped;
 
-		const raw = result.stdout ?? "";
 		const diagnostics = parseStylelintJson(raw, ctx.filePath);
 		if (diagnostics.length === 0) {
 			return { status: "succeeded", diagnostics: [], semantic: "none" };
