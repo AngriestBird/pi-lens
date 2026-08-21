@@ -363,6 +363,60 @@ describe("index.ts integration", () => {
 		expect(telemetry.getVerifiedPathAttributionGuessCount()).toBe(0);
 	}, INTEGRATION_TIMEOUT_MS);
 
+	// #1910: the tier-3 cascade outstanding-touch registry (clients/lsp/
+	// cascade-tier.ts) is process-shared runtime state, same #473 shape as the
+	// active-tool set and the direct-LSP latch above. A concurrently-live
+	// secondary's session_start must not wipe the still-live primary's
+	// outstanding touches out from under it.
+	it("primary session_start clears the cascade tier-3 registry, a concurrent secondary's does not", async () => {
+		// The earlier "session_start handler passes working ensureTool closure
+		// into handleSessionStart" case in this file `vi.doMock`s
+		// runtime-session.js and never `vi.doUnmock`s it (only line ~1584, in a
+		// different describe block, ever does) — `vi.doMock` registrations
+		// outlive `vi.resetModules()`, so without this explicit unmock this test
+		// would run against that STUBBED handleSessionStart (a no-op) whenever
+		// it happens to execute after that one, and pass for the wrong reason
+		// (nothing ever resets anything). This test needs the REAL handler.
+		// Same leak, second module: the same earlier test also `vi.doMock`s
+		// installer/index.js with a partial export set (missing
+		// `resetPathWalkMemo`, which `resetDispatchAvailabilityState` — reached
+		// from `handleSessionStart` — needs) and never unmocks it either.
+		vi.doUnmock("../clients/runtime-session.js");
+		vi.doUnmock("../clients/installer/index.js");
+		const { default: registerExtension } = await import("../index.js");
+		const cascadeTier = await import("../clients/lsp/cascade-tier.js");
+		cascadeTier._resetOutstandingCascadeTouchesForTests();
+
+		const primary = createMockPi();
+		registerExtension(primary.pi as any);
+		await primary.trigger("session_start", {}, makeCtx({ cwd: tmpDir, sessionId: "primary" }));
+
+		// Seed a touch the still-live primary is tracking.
+		cascadeTier.recordOutstandingCascadeTouch({
+			filePath: `${tmpDir}/neighbor.ts`,
+			serverId: "typescript",
+			touchedAt: Date.now(),
+		});
+		expect(
+			cascadeTier._getOutstandingCascadeTouchesForTests().length,
+		).toBeGreaterThan(0);
+
+		// A concurrently-live secondary binds in the same process (the #473
+		// shape) — its session_start must return at the concurrent-secondary
+		// guard, above the reset block, and leave the primary's touch alone.
+		const secondary = createMockPi();
+		registerExtension(secondary.pi as any);
+		await secondary.trigger("session_start", {}, makeCtx({ cwd: tmpDir, sessionId: "secondary" }));
+		expect(
+			cascadeTier._getOutstandingCascadeTouchesForTests().length,
+		).toBeGreaterThan(0);
+
+		// A genuine primary session replacement, by contrast, DOES clear it —
+		// the whole point of #1910 wiring the reset into handleSessionStart.
+		await primary.trigger("session_start", {}, makeCtx({ cwd: tmpDir, sessionId: "primary" }));
+		expect(cascadeTier._getOutstandingCascadeTouchesForTests()).toEqual([]);
+	}, INTEGRATION_TIMEOUT_MS);
+
 	it("agent_settled dumps active handles AFTER quiet-window work is scheduled (#1123 item 4)", async () => {
 		// #1097's leak (a stray ref'd timer) only surfaces once whatever
 		// agent_settled itself queues is already in flight, so the dump must
