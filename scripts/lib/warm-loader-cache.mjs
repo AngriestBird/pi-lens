@@ -40,6 +40,132 @@
  * nothing; it can never hand pi the wrong code.
  */
 
+import { createHash, getFips } from "node:crypto";
+
+/**
+ * Mirror of jiti's `utils_hash`: md5 truncated to `length` hex characters, or
+ * sha256 where FIPS mode forbids md5. jiti makes the same substitution, so the
+ * two agree on every machine.
+ *
+ * @param {string} text
+ * @param {number} [length]
+ * @returns {string}
+ */
+export function jitiHash(text, length = 8) {
+	let fips = false;
+	try {
+		fips = Boolean(getFips?.());
+	} catch {
+		fips = false;
+	}
+	return createHash(fips ? "sha256" : "md5")
+		.update(text)
+		.digest("hex")
+		.slice(0, length);
+}
+
+/**
+ * The cache file jiti writes for an async import of `entry`.
+ *
+ * Mirror of jiti's `getCache` naming:
+ * `<basename(dirname(file))>-<basename up to the first dot>.<hash(file)>.mjs`.
+ * jiti hashes the POSIX-normalised absolute path, so the separators are
+ * converted here. The drive-letter case is left exactly as the caller resolved
+ * it, because jiti does not touch it either. Verified against pi's own cache
+ * directory: the md5 of the dogfood install's forward-slashed entry path,
+ * truncated to 8 characters, is the `db18768f` in the
+ * `dist-index.db18768f.mjs` pi had already written.
+ *
+ * @param {string} entry absolute path to the extension entry
+ * @returns {string}
+ */
+export function expectedCacheFileName(entry) {
+	const posix = entry.split("\\").join("/");
+	const segments = posix.split("/");
+	const base = segments.pop() ?? posix;
+	const parent = segments.pop() ?? "";
+	const dot = base.indexOf(".");
+	const stem = dot <= 0 ? base : base.slice(0, dot);
+	return `${parent}-${stem}.${jitiHash(posix)}.mjs`;
+}
+
+/**
+ * Did the warm actually leave a cache entry pi can use?
+ *
+ * Elapsed time is not evidence. jiti can return from an import having written
+ * nothing, and every such path exits 0:
+ *
+ *   - the cache directory is not writable. jiti's `prepareCacheDir` catches
+ *     that, sets `fsCache` to false, and transforms in memory from then on.
+ *   - jiti imported the entry natively. `tryNative` skips the transform
+ *     entirely, so nothing is cached. That path is reachable whenever the
+ *     entry's imports resolve, which makes an unverified warm's success
+ *     CONTINGENT on native resolution failing — a condition this script neither
+ *     controls nor observes.
+ *   - a cache entry exists but does not match the source. jiti validates the
+ *     body against a trailing version-and-source-hash marker, so a stale or
+ *     truncated file is a miss for pi and the session pays the transform.
+ *
+ * Checking the file is what turns "the import returned" into "pi will hit".
+ *
+ * @param {object} args
+ * @param {string} args.cacheDir
+ * @param {string} args.fileName
+ * @param {string} args.source contents of the entry, for the marker check
+ * @param {object} args.fsDeps
+ * @param {(p: string) => boolean} args.fsDeps.existsSync
+ * @param {(p: string) => string} args.fsDeps.readFileSync
+ * @param {(p: string) => boolean} args.fsDeps.isWritable
+ * @returns {{ok: boolean, reason: string | null, transformVersion: string | null}}
+ */
+export function verifyCacheEntry({ cacheDir, fileName, source, fsDeps }) {
+	const file = `${cacheDir}/${fileName}`;
+	if (!fsDeps.existsSync(file)) {
+		if (!fsDeps.isWritable(cacheDir)) {
+			return {
+				ok: false,
+				reason: `cache directory is not writable: ${cacheDir}`,
+				transformVersion: null,
+			};
+		}
+		return {
+			ok: false,
+			reason:
+				"jiti wrote no cache entry — it imported the entry natively, so the " +
+				"transform was never cached",
+			transformVersion: null,
+		};
+	}
+	let body;
+	try {
+		body = fsDeps.readFileSync(file);
+	} catch (err) {
+		const message = err instanceof Error ? err.message : String(err);
+		return {
+			ok: false,
+			reason: `cache entry unreadable: ${message}`,
+			transformVersion: null,
+		};
+	}
+	const marker = /\/\* v([^-\s]+)-([0-9a-f]+) \*\/\s*$/.exec(body);
+	if (!marker) {
+		return {
+			ok: false,
+			reason: "cache entry has no jiti version marker — pi will re-transform",
+			transformVersion: null,
+		};
+	}
+	if (marker[2] !== jitiHash(source, marker[2].length)) {
+		return {
+			ok: false,
+			reason:
+				"cache entry does not match the built entry — pi will re-transform",
+			transformVersion: marker[1],
+		};
+	}
+	return { ok: true, reason: null, transformVersion: marker[1] };
+}
+
 /**
  * Mirror of jiti's `prepareCacheDir` fallback branch.
  *

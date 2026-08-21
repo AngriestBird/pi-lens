@@ -1,4 +1,6 @@
+import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -6,11 +8,15 @@ import { HOST_PROVIDED_PACKAGES } from "../../scripts/lib/host-provided-deps.mjs
 import {
 	appendBounded,
 	buildStubAliases,
+	expectedCacheFileName,
 	INSTALL_LOG_MAX_LINES,
+	jitiHash,
 	resolveJitiCacheDir,
 	STUB_TARGET,
+	verifyCacheEntry,
 	warmSkipReason,
 } from "../../scripts/lib/warm-loader-cache.mjs";
+import { run } from "../../scripts/warm-loader-cache.mjs";
 
 // #1926 remainder. pi loads pi-lens through jiti, which Babel-transforms the
 // ~4MB dist bundle and caches the result. The first session after a `git:`
@@ -86,6 +92,119 @@ describe("jiti cache directory mirrors pi's loader (#1926)", () => {
 		// only while the script sits in a directory with no node_modules sibling.
 		expect(warmScript).toContain("resolveJitiCacheDir");
 		expect(warmScript).toContain("fsCache: cacheDir");
+	});
+});
+
+describe("the warm is verified, not assumed (#1926)", () => {
+	// Elapsed time is not evidence. Three exit-0 paths leave no usable entry, and
+	// an unverified script records "warmed" for all three.
+	const marker = (source: string) => ` /* v9-${jitiHash(source, 16)} */\n`;
+	const writable = { isWritable: () => true };
+
+	it("derives jiti's cache filename from the POSIX path", () => {
+		// Pinned against pi's own cache directory: this exact name is the file pi
+		// had already written for the dogfood install.
+		expect(
+			expectedCacheFileName(
+				"C:\\Users\\apman\\.pi\\agent\\git\\github.com\\apmantza\\pi-lens\\dist\\index.js",
+			),
+		).toBe("dist-index.db18768f.mjs");
+		expect(expectedCacheFileName("/home/u/pi-lens/dist/index.js")).toMatch(
+			/^dist-index\.[0-9a-f]{8}\.mjs$/,
+		);
+	});
+
+	it("accepts an entry whose marker matches the built source", () => {
+		const source = "export default () => {};";
+		expect(
+			verifyCacheEntry({
+				cacheDir: "/cache",
+				fileName: "dist-index.abc12345.mjs",
+				source,
+				fsDeps: {
+					...writable,
+					existsSync: () => true,
+					readFileSync: () => `transformed${marker(source)}`,
+				},
+			}),
+		).toEqual({ ok: true, reason: null, transformVersion: "9" });
+	});
+
+	it("reports an unwritable cache directory", () => {
+		// jiti's prepareCacheDir catches the write failure, sets fsCache to false,
+		// and transforms in memory. The import still returns.
+		const verdict = verifyCacheEntry({
+			cacheDir: "/cache",
+			fileName: "dist-index.abc12345.mjs",
+			source: "x",
+			fsDeps: {
+				existsSync: () => false,
+				readFileSync: () => "",
+				isWritable: () => false,
+			},
+		});
+		expect(verdict.ok).toBe(false);
+		expect(verdict.reason).toContain("not writable");
+	});
+
+	it("reports the native-import bypass, where nothing is cached at all", () => {
+		// jiti's tryNative path skips the transform. An unverified warm's success
+		// is contingent on native resolution FAILING, which this script neither
+		// controls nor observes — so it has to check.
+		const verdict = verifyCacheEntry({
+			cacheDir: "/cache",
+			fileName: "dist-index.abc12345.mjs",
+			source: "x",
+			fsDeps: { ...writable, existsSync: () => false, readFileSync: () => "" },
+		});
+		expect(verdict.ok).toBe(false);
+		expect(verdict.reason).toContain("natively");
+	});
+
+	it("reports an entry whose marker does not match the built source", () => {
+		const verdict = verifyCacheEntry({
+			cacheDir: "/cache",
+			fileName: "dist-index.abc12345.mjs",
+			source: "the new bundle",
+			fsDeps: {
+				...writable,
+				existsSync: () => true,
+				readFileSync: () => `stale${marker("the old bundle")}`,
+			},
+		});
+		expect(verdict.ok).toBe(false);
+		expect(verdict.reason).toContain("re-transform");
+		expect(verdict.transformVersion).toBe("9");
+	});
+
+	it("reports an entry with no marker at all, against the real filesystem", () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "warm-corrupt-"));
+		const fileName = "dist-index.abc12345.mjs";
+		fs.writeFileSync(path.join(dir, fileName), "truncated output, no marker");
+		const verdict = verifyCacheEntry({
+			cacheDir: dir.split("\\").join("/"),
+			fileName,
+			source: "x",
+			fsDeps: {
+				existsSync: (p: string) => fs.existsSync(p),
+				readFileSync: (p: string) => fs.readFileSync(p, "utf8"),
+				isWritable: () => true,
+			},
+		});
+		expect(verdict.ok).toBe(false);
+		expect(verdict.reason).toContain("no jiti version marker");
+	});
+
+	it("the script records not_cached rather than warmed when the check fails", () => {
+		expect(warmScript).toContain("verifyCacheEntry");
+		expect(warmScript).toContain('status: "not_cached"');
+	});
+
+	it("the record carries the jiti version and the expected cache filename", () => {
+		// A host jiti bump changes the marker, so every warm silently becomes a
+		// cold session. Both fields make that diagnosable from one log line.
+		expect(warmScript).toContain("jitiVersion: version");
+		expect(warmScript).toContain("cacheFile");
 	});
 });
 
@@ -187,9 +306,58 @@ describe("prepare chain keeps load-bearing steps load-bearing (#1926)", () => {
 		expect(prepare).not.toContain("|| true");
 	});
 
-	it("the warm script never exits non-zero", () => {
-		expect(warmScript).not.toMatch(/process\.exit\((?!0\))/);
-		expect(warmScript).toContain("catch");
+	it("a thrown body leaves the exit code at 0 and still records the failure", async () => {
+		// Behavioural, not a regex over the source. `prepare` chains with `&&`, so
+		// a non-zero exit here would abort the install after a successful build.
+		const logFile = path.join(
+			fs.mkdtempSync(path.join(os.tmpdir(), "warm-run-")),
+			"install.log",
+		);
+		const previousLog = process.env.PI_LENS_INSTALL_LOG;
+		const previousExit = process.exitCode;
+		process.env.PI_LENS_INSTALL_LOG = logFile;
+		process.exitCode = 0;
+		try {
+			await run(() => {
+				throw new Error("injected warm failure");
+			});
+			expect(process.exitCode ?? 0).toBe(0);
+			const written = JSON.parse(
+				fs.readFileSync(logFile, "utf8").trim().split("\n").at(-1) as string,
+			);
+			expect(written.status).toBe("failed");
+			expect(written.reason).toContain("injected warm failure");
+		} finally {
+			process.exitCode = previousExit;
+			if (previousLog === undefined) delete process.env.PI_LENS_INSTALL_LOG;
+			else process.env.PI_LENS_INSTALL_LOG = previousLog;
+		}
+	});
+
+	it("running the script as a command exits 0 and writes a record", () => {
+		// Pins the `invokedDirectly` guard. If it stopped matching, the prepare
+		// step would silently do nothing and every install would stay cold.
+		const logFile = path.join(
+			fs.mkdtempSync(path.join(os.tmpdir(), "warm-cli-")),
+			"install.log",
+		);
+		execFileSync(
+			process.execPath,
+			[path.join(root, "scripts", "warm-loader-cache.mjs")],
+			{
+				env: {
+					...process.env,
+					PI_LENS_INSTALL_LOG: logFile,
+					PI_LENS_SKIP_WARM_CACHE: "1",
+				},
+				stdio: "ignore",
+			},
+		);
+		const written = JSON.parse(
+			fs.readFileSync(logFile, "utf8").trim().split("\n").at(-1) as string,
+		);
+		expect(written.event).toBe("warm_loader_cache");
+		expect(written.status).toBe("skipped");
 	});
 
 	it("ships both warm modules in the tarball", () => {

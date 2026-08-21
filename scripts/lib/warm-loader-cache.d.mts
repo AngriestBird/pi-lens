@@ -1,3 +1,18 @@
+export declare function jitiHash(text: string, length?: number): string;
+
+export declare function expectedCacheFileName(entry: string): string;
+
+export declare function verifyCacheEntry(args: {
+	cacheDir: string;
+	fileName: string;
+	source: string;
+	fsDeps: {
+		existsSync: (p: string) => boolean;
+		readFileSync: (p: string) => string;
+		isWritable: (p: string) => boolean;
+	};
+}): { ok: boolean; reason: string | null; transformVersion: string | null };
+
 export declare function resolveJitiCacheDir(deps: {
 	tmpdir: () => string;
 	env: Record<string, string | undefined>;

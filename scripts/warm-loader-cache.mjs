@@ -30,7 +30,9 @@ import { HOST_PROVIDED_PACKAGES } from "./lib/host-provided-deps.mjs";
 import {
 	appendBounded,
 	buildStubAliases,
+	expectedCacheFileName,
 	resolveJitiCacheDir,
+	verifyCacheEntry,
 	warmSkipReason,
 } from "./lib/warm-loader-cache.mjs";
 
@@ -46,13 +48,17 @@ function log(message) {
  *
  * pi's install output scrolls away, so without this there is no record that the
  * warm ran, was skipped, or failed. One bounded line per install keeps the
- * question answerable after the fact.
+ * question answerable after the fact. `PI_LENS_INSTALL_LOG` redirects the file,
+ * which is how the tests read the record back.
  */
 function record(entry) {
 	try {
-		const dir = path.join(os.homedir(), ".pi-lens");
-		fs.mkdirSync(dir, { recursive: true });
-		const file = path.join(dir, "install.log");
+		const override = process.env.PI_LENS_INSTALL_LOG;
+		const file =
+			typeof override === "string" && override.length > 0
+				? override
+				: path.join(os.homedir(), ".pi-lens", "install.log");
+		fs.mkdirSync(path.dirname(file), { recursive: true });
 		const existing = fs.existsSync(file)
 			? fs.readFileSync(file, "utf8").split("\n")
 			: [];
@@ -97,7 +103,37 @@ async function loadCreateJiti() {
 	return undefined;
 }
 
-async function main() {
+/**
+ * The installed jiti's version, so a host jiti bump — which changes the marker
+ * and silently turns every warm into a cold session — is diagnosable from the
+ * record rather than from a bisect.
+ */
+function jitiVersion() {
+	try {
+		const url = import.meta.resolve
+			? import.meta.resolve("jiti/package.json")
+			: pathToFileURL(require.resolve("jiti/package.json")).href;
+		return JSON.parse(fs.readFileSync(fileURLToPath(url), "utf8")).version;
+	} catch {
+		return null;
+	}
+}
+
+/** Real-filesystem probes for `verifyCacheEntry`. */
+const fsDeps = {
+	existsSync: (p) => fs.existsSync(p),
+	readFileSync: (p) => fs.readFileSync(p, "utf8"),
+	isWritable: (p) => {
+		try {
+			fs.accessSync(p, fs.constants.W_OK);
+			return true;
+		} catch {
+			return false;
+		}
+	},
+};
+
+export async function main() {
 	const entries = extensionEntries();
 	const createJiti = await loadCreateJiti();
 	const skip = warmSkipReason({
@@ -119,9 +155,11 @@ async function main() {
 		join: path.join,
 	});
 	const alias = buildStubAliases(HOST_PROVIDED_PACKAGES);
+	const version = jitiVersion();
 
 	for (const entry of entries) {
 		const started = Date.now();
+		const cacheFile = expectedCacheFileName(entry);
 		const jiti = createJiti(pathToFileURL(entry).href, {
 			// Mirror pi's loader: no in-process module cache, aliases present.
 			// Neither affects the transform or the cache key, but staying close to
@@ -140,15 +178,56 @@ async function main() {
 		}
 		const ms = Date.now() - started;
 		const relative = path.relative(root, entry);
-		log(`warmed ${relative} in ${ms}ms (cache: ${cacheDir})`);
-		record({ status: "warmed", entry: relative, ms, cacheDir });
+
+		// The import returning proves nothing. Three exit-0 paths leave no usable
+		// entry — an unwritable cache directory, a native import that skips the
+		// transform, and a stale file that fails jiti's marker check — so read the
+		// file back before claiming the session is warm.
+		const verdict = verifyCacheEntry({
+			cacheDir,
+			fileName: cacheFile,
+			source: fs.readFileSync(entry, "utf8"),
+			fsDeps,
+		});
+		const common = {
+			entry: relative,
+			ms,
+			cacheDir,
+			cacheFile,
+			jitiVersion: version,
+		};
+		if (verdict.ok) {
+			log(`warmed ${relative} in ${ms}ms (cache: ${cacheDir}/${cacheFile})`);
+			record({
+				status: "warmed",
+				...common,
+				transformVersion: verdict.transformVersion,
+			});
+			continue;
+		}
+		log(`not cached: ${relative} after ${ms}ms — ${verdict.reason}`);
+		record({ status: "not_cached", ...common, reason: verdict.reason });
 	}
 }
 
-try {
-	await main();
-} catch (err) {
-	const message = err instanceof Error ? err.message : String(err);
-	log(`skipped: ${message}`);
-	record({ status: "failed", reason: message });
+/**
+ * Run `work`, absorbing any failure. Exported so a test can inject a throwing
+ * body and assert the process still exits 0 and still leaves a record.
+ */
+export async function run(work = main) {
+	try {
+		await work();
+	} catch (err) {
+		const message = err instanceof Error ? err.message : String(err);
+		log(`failed: ${message}`);
+		record({ status: "failed", reason: message });
+	}
+}
+
+const invokedPath = process.argv[1];
+const invokedDirectly =
+	typeof invokedPath === "string" &&
+	pathToFileURL(path.resolve(invokedPath)).href === import.meta.url;
+if (invokedDirectly) {
+	await run();
 }
