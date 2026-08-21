@@ -12,7 +12,14 @@
  *   Step 1 (default):  each target tool SPAWNS and EXITS CLEANLY
  *                      (no timeout/exception/server_error).
  *   Step 2 (--step2):  additionally, the tool PRODUCES A PARSEABLE DIAGNOSTIC
- *                      on the fixture's known defect.
+ *                      on the fixture's known defect. This is the assertion a
+ *                      runner parser written from documentation fails (#1937):
+ *                      Step 1 passed the taplo runner for months while its
+ *                      parser read an envelope taplo has never emitted.
+ *   --tier1:           narrow to the fixtures whose tools need no language
+ *                      toolchain, for the scheduled parser lane.
+ *   --min-pass=N:      exit nonzero when fewer than N rows passed, so a run
+ *                      where every install failed cannot report green.
  *
  * LSP handshake layer (--lsp): for each LSP fixture, drives the SAME production
  * entry the lsp runner uses (`LSPService.touchFile`, with a generous cold-spawn
@@ -26,7 +33,7 @@
  * deliberately mis-formatted file. The lint dispatch path never runs formatters.
  *
  * Usage:
- *   node scripts/smoke-tools.mjs [lang ...] [--step2] [--install] [--verbose]
+ *   node scripts/smoke-tools.mjs [lang ...] [--step2] [--tier1] [--install] [--verbose]
  *   node scripts/smoke-tools.mjs --lsp [lang ...] [--install] [--verbose]
  *   node scripts/smoke-tools.mjs --format [lang ...] [--install] [--verbose]
  *
@@ -59,6 +66,21 @@ export function matchDiagnosticMessages(pattern, diags) {
 }
 
 /**
+ * Fixtures in the tier-1 parser lane (#1937): the ones whose tools install as a
+ * pip package, an npm package, or a single GitHub-release binary, with no
+ * language toolchain step. Those are the tools a scheduled job can install
+ * quickly and reproducibly, so they are the ones whose parsers can be held to
+ * "a planted violation MUST produce findings" on every run.
+ *
+ * Derived from the `tier1` flag on the fixture rows below. The scheduled
+ * workflow calls `--step2 --tier1` and names no languages of its own — a list
+ * in the workflow would be a second copy of this one.
+ */
+export function tier1Fixtures() {
+	return FIXTURES.filter((f) => f.tier1 === true);
+}
+
+/**
  * One minimal real project per language. `targets` are the runner ids whose
  * tool we are smoke-testing; `expectDiagnostic` is the fixture's known defect
  * (used by --step2).
@@ -78,6 +100,7 @@ const FIXTURES = [
 		file: "bad.py",
 		targets: ["ruff-lint"],
 		tools: ["ruff", "pyright"],
+		tier1: true,
 		expectDiagnostic: true,
 	},
 	{
@@ -86,6 +109,7 @@ const FIXTURES = [
 		file: "bad.yaml",
 		targets: ["yamllint"],
 		tools: ["yamllint", "yaml-language-server"],
+		tier1: true,
 		expectDiagnostic: true,
 	},
 	{
@@ -102,6 +126,7 @@ const FIXTURES = [
 		file: "bad.js",
 		targets: ["oxlint"],
 		tools: ["oxlint", "typescript-language-server"],
+		tier1: true,
 		expectDiagnostic: true,
 	},
 	{
@@ -110,6 +135,7 @@ const FIXTURES = [
 		file: "bad.md",
 		targets: ["markdownlint"],
 		tools: ["markdownlint"],
+		tier1: true,
 		expectDiagnostic: true,
 	},
 	{
@@ -118,6 +144,7 @@ const FIXTURES = [
 		file: "bad.sh",
 		targets: ["shellcheck", "shfmt"],
 		tools: ["shellcheck", "shfmt", "bash-language-server"],
+		tier1: true,
 		expectDiagnostic: true,
 	},
 	{
@@ -126,6 +153,7 @@ const FIXTURES = [
 		file: "bad.css",
 		targets: ["stylelint"],
 		tools: ["stylelint", "vscode-css-languageserver"],
+		tier1: true,
 		expectDiagnostic: true,
 	},
 	{
@@ -134,6 +162,7 @@ const FIXTURES = [
 		file: "bad.html",
 		targets: ["htmlhint"],
 		tools: ["htmlhint", "vscode-html-languageserver-bin"],
+		tier1: true,
 		expectDiagnostic: true,
 	},
 	{
@@ -142,6 +171,7 @@ const FIXTURES = [
 		file: "bad.toml",
 		targets: ["taplo"],
 		tools: ["taplo"],
+		tier1: true,
 		expectDiagnostic: true,
 	},
 	{
@@ -150,6 +180,7 @@ const FIXTURES = [
 		file: "bad.sql",
 		targets: ["sqlfluff"],
 		tools: ["sqlfluff"],
+		tier1: true,
 		expectDiagnostic: true,
 	},
 	{
@@ -158,6 +189,7 @@ const FIXTURES = [
 		file: "Dockerfile",
 		targets: ["hadolint"],
 		tools: ["hadolint", "dockerfile-language-server-nodejs"],
+		tier1: true,
 		expectDiagnostic: true,
 	},
 	{
@@ -166,6 +198,7 @@ const FIXTURES = [
 		file: "bad.tf",
 		targets: ["tflint"],
 		tools: ["tflint", "terraform-ls"],
+		tier1: true,
 		expectDiagnostic: true,
 	},
 	// Toolchain-dependent (run only where the language toolchain is present —
@@ -449,7 +482,8 @@ const LSP_FIXTURES = [
 		lang: "powershell",
 		dir: "tests/fixtures/tool-smoke/powershell",
 		file: "bad.ps1",
-		serverHint: "PowerShell Editor Services (pwsh Start-EditorServices.ps1 -Stdio)",
+		serverHint:
+			"PowerShell Editor Services (pwsh Start-EditorServices.ps1 -Stdio)",
 		tools: ["powershell-editor-services"],
 	},
 	// Capability-matrix fixtures (#240): one fixture per remaining registered
@@ -1187,16 +1221,31 @@ function parseArgs(argv) {
 	let lsp = false;
 	let format = false;
 	let autofix = false;
+	let tier1 = false;
+	let minPass = null;
 	for (const arg of argv) {
 		if (arg === "--step2") step2 = true;
 		else if (arg === "--verbose" || arg === "-v") verbose = true;
 		else if (arg === "--install") install = true;
 		else if (arg === "--lsp") lsp = true;
 		else if (arg === "--format") format = true;
+		else if (arg === "--tier1") tier1 = true;
+		else if (arg.startsWith("--min-pass="))
+			minPass = Number.parseInt(arg.slice("--min-pass=".length), 10);
 		else if (arg === "--autofix") autofix = true;
 		else langs.push(arg);
 	}
-	return { langs, step2, verbose, install, lsp, format, autofix };
+	return {
+		langs,
+		step2,
+		verbose,
+		install,
+		lsp,
+		format,
+		autofix,
+		tier1,
+		minPass,
+	};
 }
 
 const TMP_PREFIX = "pi-lens-smoke-";
@@ -1333,6 +1382,25 @@ async function ensureSmokeLombokJar(workspace, verbose) {
 	fs.mkdirSync(path.dirname(dest), { recursive: true });
 	fs.copyFileSync(cached, dest);
 	return dest;
+}
+
+/**
+ * The message for a run that passed too few rows, or null when the floor holds.
+ *
+ * An unavailable tool reports the harmless-looking warning state, never a
+ * failure, so a run where EVERY install failed exits 0 with a clean report —
+ * an unspawnable prober delivering a durable green verdict, which is the shape
+ * AGENTS.md tells us to screen for. `--min-pass` is the floor that separates
+ * "one tool could not install tonight", still a warning, from "the lane
+ * installed nothing and proved nothing", which must be red.
+ */
+export function passFloorBreach(rows, minPass) {
+	if (minPass === null || minPass === undefined) return null;
+	const passed = rows.filter((r) => r.state === "pass").length;
+	if (passed >= minPass) return null;
+	const unavailable = rows.filter((r) => r.state === "skip").length;
+	return `
+✗ pass floor: ${passed} runner(s) passed, at least ${minPass} required (${unavailable} unavailable). A lane that installs nothing proves nothing — treat this as red, not as flaky tooling.`;
 }
 
 /** Classify one target runner's outcome against the Step-1 bar. */
@@ -2006,9 +2074,17 @@ async function runAutofixSmoke({ langs, install, verbose }) {
 }
 
 async function main() {
-	const { langs, step2, verbose, install, lsp, format, autofix } = parseArgs(
-		process.argv.slice(2),
-	);
+	const {
+		langs,
+		step2,
+		verbose,
+		install,
+		lsp,
+		format,
+		autofix,
+		tier1,
+		minPass,
+	} = parseArgs(process.argv.slice(2));
 
 	// Clean leftovers from prior runs (their file locks are released now).
 	const swept = sweepLeftovers();
@@ -2060,11 +2136,17 @@ async function main() {
 		({ ensureTool } = await import(pathToFileURL(installerEntry).href));
 	}
 
+	// `--tier1` narrows to the fixtures whose tools install without a language
+	// toolchain (#1937). The list lives on the fixtures themselves, so the
+	// scheduled lane that consumes it holds no second copy to drift from.
+	const pool = tier1 ? tier1Fixtures() : FIXTURES;
 	const selected = langs.length
-		? FIXTURES.filter((f) => langs.includes(f.lang))
-		: FIXTURES;
+		? pool.filter((f) => langs.includes(f.lang))
+		: pool;
 	if (selected.length === 0) {
-		console.error(`No fixtures matched: ${langs.join(", ")}`);
+		console.error(
+			`No fixtures matched: ${langs.join(", ") || (tier1 ? "--tier1" : "(all)")}`,
+		);
 		process.exit(2);
 	}
 
@@ -2135,14 +2217,13 @@ async function main() {
 		}
 	}
 
-	process.exit(
-		report(
-			rows,
-			step2 ? "Step 2 (spawn + diagnostic)" : "Step 1 (spawn + exit clean)",
-		) > 0
-			? 1
-			: 0,
+	const failures = report(
+		rows,
+		step2 ? "Step 2 (spawn + diagnostic)" : "Step 1 (spawn + exit clean)",
 	);
+	const floorBreach = passFloorBreach(rows, minPass);
+	if (floorBreach) console.error(floorBreach);
+	process.exit(failures > 0 || floorBreach ? 1 : 0);
 }
 
 // Run main() only when executed directly, not when imported (the
@@ -2157,4 +2238,4 @@ if (invokedDirectly) {
 	});
 }
 
-export { FIXTURES, LSP_FIXTURES, FORMAT_FIXTURES, AUTOFIX_FIXTURES };
+export { AUTOFIX_FIXTURES, FIXTURES, FORMAT_FIXTURES, LSP_FIXTURES };

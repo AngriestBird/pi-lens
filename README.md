@@ -34,6 +34,111 @@ pi-lens gives AI coding agents fast, language-aware feedback while they write/ed
 - MCP server (experimental) so Claude Code or any MCP client can drive the
   same diagnostics/read-substitute tools pi-lens exposes to pi
 
+## Architecture
+
+Most lifecycle events enter through one wrapper, which drops events that arrive
+on a replaced session. `tool_call` and `session_start` predate that wrapper and
+still register raw. Events fan out into the edit-time lane and the LSP lane.
+Both lanes write into the findings stores. Nothing reaches the agent from those
+stores until a freshness gate or an explicit age label clears it.
+
+```mermaid
+flowchart TD
+    subgraph host["pi host"]
+        HOST["Host events<br/>tool_call, tool_result, turn_start/end,<br/>session_start/shutdown, agent_end, context"]
+        WRAP["Stale-ctx wrapper<br/>skips and counts events on a replaced session<br/>tool_result, turn_start, turn_end, agent_end, agent_settled"]
+    end
+
+    subgraph guards["Guards"]
+        RG["Read-guard<br/>blocks edits that lack prior reading"]
+        GG["Git-guard<br/>holds commit/push while findings stay unresolved"]
+    end
+
+    subgraph edit["Edit-time lane"]
+        PIPE["Post-write pipeline<br/>secrets, format, autofix, sync, lint, tests"]
+        PLAN["Dispatch plan<br/>per file kind, per capability group"]
+        RUN["Runners<br/>format, lint, types, security, smells, docs"]
+        STRUCT["Structural rules<br/>tree-sitter queries and ast-grep"]
+        BUS["files-touched bus<br/>tells extensions which paths moved"]
+    end
+
+    subgraph lsp["LSP lane"]
+        POOL["Client pool<br/>warm reuse, idle eviction"]
+        DIAGS["File and workspace diagnostics"]
+        CASC["Impact cascade<br/>tiered wait policy"]
+    end
+
+    STORES["Findings stores<br/>widget state, warning caches, project snapshot"]
+
+    subgraph gate["Freshness gating"]
+        FRESH["Path freshness<br/>mtime vs scan time, past-EOF, dependency drift"]
+        DISPO["Dispositions<br/>false-positive, suppress, defer, flagged"]
+        LABEL["Explicit age label<br/>for findings no path gate can check"]
+    end
+
+    subgraph deliver["Delivery surfaces"]
+        TURN["Turn-end findings injection"]
+        WIDGET["Widget and footer tally"]
+        TOOLS["lens_diagnostics tool"]
+        NUDGE["Agent nudges"]
+    end
+
+    SESSION["Session lifecycle<br/>primary, sequential replacement, concurrent secondary"]
+    SINKS["Observability sinks<br/>latency.log, degradation ledger, bounded telemetry,<br/>cache observability, cascade and tree-sitter logs"]
+
+    HOST --> WRAP
+    HOST -->|tool_call, raw| RG
+    HOST -->|tool_call, raw| GG
+    HOST -->|session_start, raw| SESSION
+    WRAP -->|tool_result| PIPE
+    WRAP -->|tool_result, records reads and writes| RG
+    SESSION --> POOL
+    SESSION --> STORES
+    PIPE --> PLAN
+    PLAN --> RUN
+    PLAN --> STRUCT
+    PIPE --> POOL
+    PIPE --> BUS
+    POOL --> DIAGS
+    DIAGS --> CASC
+    RUN --> STORES
+    STRUCT --> STORES
+    DIAGS --> STORES
+    CASC --> STORES
+    BUS --> NUDGE
+    RG -->|read and edit history filter| NUDGE
+    STORES --> FRESH
+    STORES --> LABEL
+    FRESH --> DISPO
+    DISPO --> TURN
+    DISPO --> WIDGET
+    DISPO --> TOOLS
+    LABEL --> TURN
+    TURN --> GG
+    WRAP --> SINKS
+    PIPE --> SINKS
+    RUN --> SINKS
+    STRUCT --> SINKS
+    POOL --> SINKS
+    CASC --> SINKS
+    RG --> SINKS
+    GG --> SINKS
+    FRESH --> SINKS
+```
+
+Architecture-level view, updated when a lane changes. Per-tool inventories live
+in [features](docs/features.md) and
+[language coverage](docs/language-coverage.md). Today the edit-time lane carries
+45+ runner modules over 35+ file kinds, and the LSP lane speaks to a dozen-plus
+language servers.
+
+The gating box is an abstraction, not a call order. Freshness covers several
+independent mechanisms: path freshness against scan time, past-EOF line checks,
+and forward-import dependency drift. Dispositions are one more filter alongside
+them, not a second stage every finding walks through. Read the box as "a finding
+passes the gates that apply to it", and see `clients/finding-delivery-gate.ts`
+for the per-surface contract.
+
 ## Install
 
 ```bash
