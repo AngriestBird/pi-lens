@@ -494,6 +494,15 @@ describe("lens_diagnostics mode=delta", () => {
 			expect(text).toContain("Unlisted dependency lodash");
 			expect(text).not.toContain("L12");
 			expect(text).toContain("stale — re-run to confirm");
+			// #1944: the row lost its coordinate but kept the 🔴 authority
+			// marker — the same "changed the channel, not the body" defect the
+			// turn-end advisory carried. `formatFullMode` already drops the
+			// marker for a demoted row; this arm now matches it.
+			const demotedRow = text
+				.split("\n")
+				.find((line) => line.includes("Unlisted dependency lodash"));
+			expect(demotedRow).toBeDefined();
+			expect(demotedRow).not.toContain("🔴");
 		} finally {
 			removeTempDirSync(cwd);
 		}

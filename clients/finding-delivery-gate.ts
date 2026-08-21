@@ -77,6 +77,28 @@
  * rendering convention every gated surface reuses — a store must not invent
  * its own "stale" wording.
  *
+ * #1944 completes the rule: demotion must change the BODY, not only the
+ * channel and the coordinate. A demoted body carries no STOP banner and no
+ * "must be fixed" imperative, and a cited line the file no longer has renders
+ * as `L<n> (line no longer exists)`. `clients/demoted-finding-render.ts`
+ * (`degradeDemotedFindingBody`) is the one implementation for surfaces that
+ * deliver a RENDERED BODY — the turn-end advisory tier. Per-row surfaces
+ * (`clients/widget-state.ts`, `tools/lens-diagnostics.ts`) have no body to
+ * degrade; they satisfy the same rule by dropping the authority marker
+ * alongside the coordinate.
+ *
+ * ── Retirement (#1944) ────────────────────────────────────────────────────
+ * Demote-not-drop assumes the agent CAN re-run to confirm. A past-EOF
+ * demotion breaks that assumption: the file shrank past the cited lines, so
+ * no re-run can ever speak to them, and the record re-served on every turn
+ * end for the life of the session. Such a record is delivered ONCE, degraded,
+ * then retired (`RuntimeCoordinator.retireDemotedPastEofBlocker`). The
+ * suppression is recorded in the degradation ledger under
+ * `demoted-finding-retired`, whose subject keeps the store and file, and the
+ * delivered payload says so in its own words — so an empty advisory section
+ * can only mean "nothing to say". Dependency-drift demotions keep in-bounds
+ * coordinates the agent can act on and are NOT retired.
+ *
  * ── Explicit lag labels (the non-gated escape hatch) ──────────────────────
  * A store that cannot afford the freshness/disposition stack — because it
  * has no cited per-file path to stat (a package-pinned finding like a trivy
