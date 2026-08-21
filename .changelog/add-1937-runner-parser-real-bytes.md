@@ -1,0 +1,5 @@
+---
+section: Added
+---
+
+- **Runner parsers are now held to real binary output (refs #1937)** — a parser written from documentation can be wrong in a way no hand-authored test sees, because the test asserts the same imagined shape. Captured real-bytes fixtures now live in `tests/fixtures/runner-output/`, each with a machine-generated provenance header naming the tool, version, and exact argv; a replay suite feeds those bytes through the runner, fails when the parser finds nothing, and fails when the runner's invocation drifts from the argv the fixture recorded. The sweep found four live instances: taplo spawned a `--output=json` flag taplo rejects, stylelint read stdout while stylelint 16+ reports on stderr, phpstan read the error COUNT as if it were the error array and discarded its file-independent findings entirely, and sqlfluff inserted `--dialect` between `--format` and its value so no unconfigured SQL project was ever linted. A scheduled `parser-smoke` lane now runs the tier-1 tools' real binaries over a planted violation, with a pass floor so a run that installed nothing cannot report green.
