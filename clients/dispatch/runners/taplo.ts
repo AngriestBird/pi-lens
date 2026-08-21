@@ -46,6 +46,15 @@ export function taploFailedWithoutDiagnostics(
 	return diagnosticCount === 0 && status !== 0;
 }
 
+/** `error: <summary>` or `warning: <summary>` at the head of a codespan block. */
+const HEADER_PATTERN = /^\s*(error|warning):(.*)$/;
+
+/** The box-drawing lead taplo puts on a codespan location line. */
+const LOCATION_LEAD = "┌─";
+
+/** The `:line:column` tail of a codespan location line. */
+const LOCATION_PATTERN = /:(\d+):(\d+)$/;
+
 /**
  * Parse `taplo lint` output (#1937).
  *
@@ -80,9 +89,17 @@ export function parseTaploOutput(raw: string, filePath: string): Diagnostic[] {
 		// Lowercase `error:`/`warning:` starts a diagnostic. taplo's tracing
 		// lines are uppercase (`ERROR taplo:lint_files: ...`), so a
 		// case-sensitive match keeps them out.
-		const header = lines[i].match(/^\s*(error|warning):\s*(.+?)\s*$/);
+		//
+		// Both patterns below trim in code rather than with a trailing `\s*`,
+		// and the location one tests for its box-drawing lead separately
+		// instead of skipping to it with `.*`. Either shape backtracks
+		// super-linearly on a long line, and this parser reads bytes a third
+		// party wrote.
+		const header = HEADER_PATTERN.exec(lines[i].trimEnd());
 		if (!header) continue;
-		const [, severityWord, summary] = header;
+		const severityWord = header[1];
+		const summary = header[2].trim();
+		if (!summary) continue;
 
 		// The location arrives on a following `┌─ file:line:col` line. Scan a
 		// short window rather than assuming adjacency: taplo puts a gutter line
@@ -90,7 +107,8 @@ export function parseTaploOutput(raw: string, filePath: string): Diagnostic[] {
 		let line: number | null = null;
 		let column = 1;
 		for (let j = i + 1; j < Math.min(i + 4, lines.length); j++) {
-			const location = lines[j].match(/┌─+\s*.*:(\d+):(\d+)\s*$/);
+			if (!lines[j].includes(LOCATION_LEAD)) continue;
+			const location = LOCATION_PATTERN.exec(lines[j].trimEnd());
 			if (!location) continue;
 			line = Number.parseInt(location[1], 10) || 1;
 			column = Number.parseInt(location[2], 10) || 1;

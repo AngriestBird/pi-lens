@@ -53,8 +53,16 @@ jobs:
         with:
           python-version: '3.12'
 
+      # `npm ci --ignore-scripts` rather than `npm install`: the lockfile pins
+      # every resolved version, and no dependency lifecycle script runs in a job
+      # that goes on to download and execute third-party binaries. Skipping
+      # scripts also skips `prepare`, so the two steps it would have run are
+      # spelled out below.
       - name: Install dependencies
-        run: npm install --no-audit --no-fund
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Download core grammars
+        run: node scripts/download-grammars.js --core --dest grammars
 
       - name: Build dist
         run: npm run build:dist

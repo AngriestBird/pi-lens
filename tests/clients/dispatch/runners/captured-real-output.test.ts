@@ -190,7 +190,16 @@ describe("captured real-binary output", () => {
 		const descriptor = RUNNER_DESCRIPTORS[runnerId];
 		if (!descriptor) continue;
 
-		it(`${runnerId} parses findings out of ${fixture.provenance.tool} ${fixture.provenance.version} output`, async () => {
+		// `vi.resetModules()` gives every case a fresh module graph, so each one
+		// re-imports the whole runner tree. On a cold cache — the first run
+		// after `npm run build` rewrites the compiled .js — a late case has
+		// been observed taking over six seconds, which the 5s default turns
+		// into a timeout that reads like a parser failure. The budget is
+		// generous because this suite spawns nothing; a real assertion failure
+		// still reds immediately.
+		it(`${runnerId} parses findings out of ${fixture.provenance.tool} ${fixture.provenance.version} output`, {
+			timeout: 30000,
+		}, async () => {
 			const env = setupTestEnvironment(`pi-lens-captured-${runnerId}-`);
 			try {
 				// The provenance names the repo workspace the bytes came from, so
