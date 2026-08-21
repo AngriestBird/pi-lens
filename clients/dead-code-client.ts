@@ -183,9 +183,7 @@ export class PythonDeadCodeClient implements DeadCodeClient {
 	private log: (msg: string) => void;
 
 	constructor(verbose = false) {
-		this.log = verbose
-			? createSubsystemLogger("dead-code:python")
-			: () => {};
+		this.log = verbose ? createSubsystemLogger("dead-code:python") : () => {};
 	}
 
 	private get minConfidence(): number {
@@ -251,14 +249,19 @@ export class PythonDeadCodeClient implements DeadCodeClient {
 	 * (#1731, discipline B — the same venv-first shape sqlfluff's binary
 	 * resolution already uses, `runner-helpers.ts` `createVenvFinder`).
 	 */
-	private venvCandidates(root: string): Array<{ cmd: string; prefix: string[] }> {
+	private venvCandidates(
+		root: string,
+	): Array<{ cmd: string; prefix: string[] }> {
 		const isWin = process.platform === "win32";
 		const relPaths = isWin
 			? [
 					path.join(".venv", "Scripts", "vulture.exe"),
 					path.join("venv", "Scripts", "vulture.exe"),
 				]
-			: [path.join(".venv", "bin", "vulture"), path.join("venv", "bin", "vulture")];
+			: [
+					path.join(".venv", "bin", "vulture"),
+					path.join("venv", "bin", "vulture"),
+				];
 		return relPaths
 			.map((rel) => path.join(root, rel))
 			.filter((full) => fs.existsSync(full))
@@ -481,7 +484,9 @@ export class PythonDeadCodeClient implements DeadCodeClient {
 				});
 				return {
 					...emptyResult(this.language),
-					summary: stderr ? `vulture error: ${firstOutputLine(stderr)}` : reason,
+					summary: stderr
+						? `vulture error: ${firstOutputLine(stderr)}`
+						: reason,
 					durationMs,
 				};
 			}
@@ -550,9 +555,7 @@ export function deadCodeIssues(result: DeadCodeResult): DeadCodeIssue[] {
  * one real finding produced four false ones (#1477, #1483). Shared by
  * knip's per-turn delta in runtime-turn.ts so the rule lives in one place.
  */
-export function stableFindingKey(
-	...parts: Array<string | undefined>
-): string {
+export function stableFindingKey(...parts: Array<string | undefined>): string {
 	return parts.map((part) => part ?? "").join(":");
 }
 

@@ -266,7 +266,9 @@ describe("startup overhead — interactive path regression guard", () => {
 				emitHostReadyDelay: false,
 			});
 
-			expect(latencyEntries.filter((e) => e.phase === "host_ready_delay")).toHaveLength(1);
+			expect(
+				latencyEntries.filter((e) => e.phase === "host_ready_delay"),
+			).toHaveLength(1);
 		} finally {
 			env.cleanup();
 			restoreMode();
@@ -276,26 +278,31 @@ describe("startup overhead — interactive path regression guard", () => {
 	it.each([
 		[30_000, false],
 		[30_001, true],
-	])("marks a %ims host-ready delay as stalled=%s", async (durationMs, stalled) => {
-		const env = setupTestEnvironment("pi-lens-overhead-boundary-");
-		const restoreMode = setStartupMode("quick");
-		try {
-			await handleSessionStart({
-				...makeDeps(env.tmpDir),
-				extensionLoadedAt: 100,
-				sessionStartMonotonicAt: 100 + durationMs,
-				emitHostReadyDelay: true,
-			});
-			const entry = latencyEntries.find((e) => e.phase === "host_ready_delay");
-			expect(entry?.durationMs).toBe(durationMs);
-			expect(entry?.metadata).toEqual(
-				expect.objectContaining({ hostStallSuspected: stalled }),
-			);
-		} finally {
-			env.cleanup();
-			restoreMode();
-		}
-	});
+	])(
+		"marks a %ims host-ready delay as stalled=%s",
+		async (durationMs, stalled) => {
+			const env = setupTestEnvironment("pi-lens-overhead-boundary-");
+			const restoreMode = setStartupMode("quick");
+			try {
+				await handleSessionStart({
+					...makeDeps(env.tmpDir),
+					extensionLoadedAt: 100,
+					sessionStartMonotonicAt: 100 + durationMs,
+					emitHostReadyDelay: true,
+				});
+				const entry = latencyEntries.find(
+					(e) => e.phase === "host_ready_delay",
+				);
+				expect(entry?.durationMs).toBe(durationMs);
+				expect(entry?.metadata).toEqual(
+					expect.objectContaining({ hostStallSuspected: stalled }),
+				);
+			} finally {
+				env.cleanup();
+				restoreMode();
+			}
+		},
+	);
 
 	it(`full mode self-reports within ${FULL_MODE_BUDGET_MS}ms`, async () => {
 		const env = setupTestEnvironment("pi-lens-overhead-full-");
@@ -320,7 +327,9 @@ describe("startup overhead — interactive path regression guard", () => {
 			const reported = extractReportedMs(dbgLog);
 			expect(reported).not.toBeNull();
 			expect(reported).toBeLessThan(FULL_MODE_BUDGET_MS);
-			expect(latencyEntries.find((entry) => entry.phase === "host_ready_delay")).toMatchObject({
+			expect(
+				latencyEntries.find((entry) => entry.phase === "host_ready_delay"),
+			).toMatchObject({
 				durationMs: 25,
 				metadata: { sessionStart: "first-process-session" },
 			});

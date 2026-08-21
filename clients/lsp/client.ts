@@ -3838,9 +3838,9 @@ async function clientShutdownOnce(
 				shutdownOutcome: options.fast
 					? "fast"
 					: shutdownRequestTimedOut ||
-							exitNotifyTimedOut ||
-							shutdownRequestUndelivered ||
-							exitNotifyUndelivered
+						  exitNotifyTimedOut ||
+						  shutdownRequestUndelivered ||
+						  exitNotifyUndelivered
 						? "forced"
 						: "graceful",
 			},
@@ -4741,17 +4741,19 @@ export async function createLSPClient(options: {
 		// A child registered above (recordLspChild) but never reaching a healthy
 		// createLSPClient return must still be deregistered here — otherwise the
 		// registry keeps a stale entry for a process we just killed.
-		void removeLspChild(pid, extractSpawnMarker(lspProcess.args)).catch((err) => {
-			// best-effort — a stale registry entry is harmless (the reaper's
-			// liveness check will find it dead on the next sweep regardless)
-			logLatency({
-				type: "phase",
-				phase: "lsp_registry_write_failed",
-				filePath: "",
-				durationMs: 0,
-				metadata: { op: "remove", pid, error: String(err) },
-			});
-		});
+		void removeLspChild(pid, extractSpawnMarker(lspProcess.args)).catch(
+			(err) => {
+				// best-effort — a stale registry entry is harmless (the reaper's
+				// liveness check will find it dead on the next sweep regardless)
+				logLatency({
+					type: "phase",
+					phase: "lsp_registry_write_failed",
+					filePath: "",
+					durationMs: 0,
+					metadata: { op: "remove", pid, error: String(err) },
+				});
+			},
+		);
 		setTimeout(() => {
 			// #1114: gate on the process's own observed `exitCode`/`signalCode`,
 			// not `.killed` — `killProcessTree` above signals the POSIX process

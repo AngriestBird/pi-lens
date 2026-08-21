@@ -128,8 +128,13 @@ describe("BiomeClient — per-cwd binary resolution (#121)", () => {
 		// Simulate what `doEnsureAvailable()` sets after auto-installing for some
 		// EARLIER cwd this session — a real absolute path, unrelated to
 		// `subPackageRoot`.
-		(client as unknown as { autoInstalledBinaryPath: string | null }).autoInstalledBinaryPath =
-			path.join(os.tmpdir(), "pi-lens-managed-biome", "biome");
+		(
+			client as unknown as { autoInstalledBinaryPath: string | null }
+		).autoInstalledBinaryPath = path.join(
+			os.tmpdir(),
+			"pi-lens-managed-biome",
+			"biome",
+		);
 
 		const resolved = await (
 			client as unknown as {

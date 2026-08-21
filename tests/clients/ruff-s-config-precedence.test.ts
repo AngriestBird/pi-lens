@@ -82,7 +82,7 @@ describe("ruff S rules vs config-first precedence (#1757, real ruff)", () => {
 				// pi-lens tool policy honors (#1247).
 				fs.writeFileSync(
 					path.join(tmpDir, "pyproject.toml"),
-					"[tool.ruff]\n[tool.ruff.lint]\nselect = [\"F\"]\n",
+					'[tool.ruff]\n[tool.ruff.lint]\nselect = ["F"]\n',
 				);
 				const filePath = path.join(tmpDir, "secret.py");
 				fs.writeFileSync(filePath, HARDCODED_PASSWORD_SOURCE);

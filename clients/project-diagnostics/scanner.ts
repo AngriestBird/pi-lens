@@ -15,7 +15,8 @@ import { isTestFile } from "../file-utils.js";
 import { isAtOrAboveHomeDir } from "../path-utils.js";
 import { getProjectDiagnosticsScannerMaxFiles } from "../project-scale.js";
 import { captureReviewGraphStructuralIr } from "../review-graph/builder.js";
-import { publishReviewGraphFileIr,
+import {
+	publishReviewGraphFileIr,
 	reviewGraphIrContentHash,
 } from "../review-graph/shared-extraction-ir.js";
 import {
@@ -377,7 +378,10 @@ async function scanFileMajorRules(
 			// so it stays visible SOMEWHERE instead of disappearing when the
 			// vacuous `project_diagnostics_ast_grep_scan` cache_stats record
 			// (below) was removed.
-			astGrep: { durationMs: astGrepDurationMs, fileCount: astGrepFilesScanned },
+			astGrep: {
+				durationMs: astGrepDurationMs,
+				fileCount: astGrepFilesScanned,
+			},
 		});
 	});
 	// #1935: no `project_diagnostics_ast_grep_scan` cache_stats record here.

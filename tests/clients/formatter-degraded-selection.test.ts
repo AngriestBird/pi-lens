@@ -247,7 +247,9 @@ describe("the poison guard sees every binary a detect probed (#1539)", () => {
 		safeSpawnAsync.mockImplementation(pathLookups({ rubocop: "stall" }));
 		expect(await names(dirA.cwd, dirA.filePath)).toEqual([]);
 
-		const dirB = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-degraded-rb-bare-"));
+		const dirB = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-degraded-rb-bare-"),
+		);
 		const bareFile = path.join(dirB, "bare.rb");
 		fs.writeFileSync(bareFile, "puts 1\n");
 		logLatencySpy.mockClear();

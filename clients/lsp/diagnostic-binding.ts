@@ -367,8 +367,7 @@ export function auxiliaryCoverageGap(
 ): string[] {
 	return evidence
 		.filter(
-			(aux) =>
-				aux.outcome !== "answered" && aux.publishedThisContent !== true,
+			(aux) => aux.outcome !== "answered" && aux.publishedThisContent !== true,
 		)
 		.map((aux) => aux.serverId);
 }

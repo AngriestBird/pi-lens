@@ -105,9 +105,9 @@ describe("classifyWorkspaceDiagnosticsCacheExpiry — the policy, in isolation",
 	});
 
 	it("expires a finding-bearing entry recorded before the session started", () => {
-		expect(classifyWorkspaceDiagnosticsCacheExpiry(findingEntry(now - 1), now, now)).toBe(
-			"pre-session",
-		);
+		expect(
+			classifyWorkspaceDiagnosticsCacheExpiry(findingEntry(now - 1), now, now),
+		).toBe("pre-session");
 	});
 
 	it("keeps a finding-bearing entry recorded after the session started", () => {
@@ -119,7 +119,11 @@ describe("classifyWorkspaceDiagnosticsCacheExpiry — the policy, in isolation",
 	it("expires a finding-bearing entry that aged past the in-session ceiling", () => {
 		const scannedAt = now - WORKSPACE_DIAGNOSTICS_FINDING_MAX_AGE_MS - 1;
 		expect(
-			classifyWorkspaceDiagnosticsCacheExpiry(findingEntry(scannedAt), now, scannedAt),
+			classifyWorkspaceDiagnosticsCacheExpiry(
+				findingEntry(scannedAt),
+				now,
+				scannedAt,
+			),
 		).toBe("max-age");
 	});
 
@@ -234,12 +238,10 @@ describe("expiry observability (#1782 AC4)", () => {
 			...(await importOriginal<Record<string, unknown>>()),
 			logLatency,
 		}));
-		const cacheModule = await import(
-			"../../../clients/lsp/workspace-diagnostics-cache.js"
-		);
-		const sessionModule = await import(
-			"../../../clients/lsp/workspace-diagnostics-session.js"
-		);
+		const cacheModule =
+			await import("../../../clients/lsp/workspace-diagnostics-cache.js");
+		const sessionModule =
+			await import("../../../clients/lsp/workspace-diagnostics-session.js");
 		const start = Date.now();
 		sessionModule.resetWorkspaceDiagnosticsCacheSession(start);
 
@@ -277,8 +279,7 @@ describe("expiry observability (#1782 AC4)", () => {
 		const records = logLatency.mock.calls
 			.map((call) => call[0])
 			.filter(
-				(record) =>
-					record?.phase === "lsp_workspace_diagnostics_cache_expiry",
+				(record) => record?.phase === "lsp_workspace_diagnostics_cache_expiry",
 			);
 		expect(records).toHaveLength(1);
 		expect(records[0].metadata.expiredEntries).toBe(2);
@@ -312,7 +313,9 @@ describe("session clock re-arm (#1782)", () => {
 		// session's value for the life of the extension host and the entry keeps
 		// serving forever — the process-lifetime-latch shape this guards.
 		resetWorkspaceDiagnosticsCacheSession(Date.now() + 1);
-		expect(workspaceDiagnosticsCacheSessionStart()).toBeGreaterThan(sessionStart);
+		expect(workspaceDiagnosticsCacheSessionStart()).toBeGreaterThan(
+			sessionStart,
+		);
 		expect(
 			createWorkspaceDiagnosticsCacheContext(tmp).lookup(filePath, SCOPE),
 		).toBeUndefined();
@@ -335,12 +338,10 @@ describe("runWorkspaceDiagnostics honors the expiry bound end to end (#1782 AC3)
 		const file = path.join(tmpSweep, "ghost.ts");
 		fs.writeFileSync(file, "export const a = 1;\n");
 		const scopeKey = buildScopeKey("all", ["opengrep"]);
-		const cacheModule = await import(
-			"../../../clients/lsp/workspace-diagnostics-cache.js"
-		);
-		const sessionModule = await import(
-			"../../../clients/lsp/workspace-diagnostics-session.js"
-		);
+		const cacheModule =
+			await import("../../../clients/lsp/workspace-diagnostics-cache.js");
+		const sessionModule =
+			await import("../../../clients/lsp/workspace-diagnostics-session.js");
 		const start = Date.now();
 		sessionModule.resetWorkspaceDiagnosticsCacheSession(start);
 		cacheModule.saveWorkspaceDiagnosticsCache(tmpSweep, {

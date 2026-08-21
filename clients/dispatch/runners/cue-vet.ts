@@ -223,14 +223,18 @@ export function directoryScopeUnavailable(raw: string): boolean {
 export function hasPackageClause(content: string): boolean {
 	for (const line of content.split(/\r?\n/)) {
 		const trimmed = line.trim();
-		if (!trimmed || trimmed.startsWith("//") || trimmed.startsWith("@")) continue;
+		if (!trimmed || trimmed.startsWith("//") || trimmed.startsWith("@"))
+			continue;
 		return /^package\s+[A-Za-z_]\w*\b/.test(trimmed);
 	}
 	return false;
 }
 
 /** `.\bad.cue`, `./bad.cue`, and `bad.cue` all name the same file. */
-function locationMatchesFile(location: CueVetLocation, fileName: string): boolean {
+function locationMatchesFile(
+	location: CueVetLocation,
+	fileName: string,
+): boolean {
 	const normalized = location.file.replace(/\\/g, "/").replace(/^\.\//, "");
 	return path.posix.basename(normalized) === fileName;
 }
@@ -392,7 +396,9 @@ const cueVetRunner: RunnerDefinition = {
 			if (
 				!spawnFailedWithNoOutput(result, `${result.stdout}${result.stderr}`) &&
 				result.status !== 0 &&
-				directoryScopeUnavailable(`${result.stdout || ""}${result.stderr || ""}`)
+				directoryScopeUnavailable(
+					`${result.stdout || ""}${result.stderr || ""}`,
+				)
 			) {
 				// F6: the directory holds two+ DIFFERENTLY-packaged files (the
 				// touched file has its own valid package, but the directory as a

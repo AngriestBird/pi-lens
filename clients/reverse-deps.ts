@@ -31,11 +31,11 @@ export function rankFilesByReverseDependencyCentrality(
 		...Object.keys(index.importedBy),
 	]);
 	return [...files].sort((a, b) => {
-		const fanIn = (index.importedBy[b]?.length ?? 0) -
-			(index.importedBy[a]?.length ?? 0);
+		const fanIn =
+			(index.importedBy[b]?.length ?? 0) - (index.importedBy[a]?.length ?? 0);
 		if (fanIn !== 0) return fanIn;
-		const fanOut = (index.imports[b]?.length ?? 0) -
-			(index.imports[a]?.length ?? 0);
+		const fanOut =
+			(index.imports[b]?.length ?? 0) - (index.imports[a]?.length ?? 0);
 		return fanOut || a.localeCompare(b);
 	});
 }
@@ -151,7 +151,10 @@ export function patchReverseDependencyIndex(
 			imports[file] = newTargets;
 			importedBy[file] ??= [];
 			for (const target of newTargets) {
-				importedBy[target] = sortedUnique([...(importedBy[target] ?? []), file]);
+				importedBy[target] = sortedUnique([
+					...(importedBy[target] ?? []),
+					file,
+				]);
 			}
 		} else {
 			delete imports[file];

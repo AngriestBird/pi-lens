@@ -75,7 +75,9 @@ beforeEach(() => {
 describe("package-manager availability (#1496)", () => {
 	it("pins a successful probe: the declared manager resolves", async () => {
 		safeSpawnAsync.mockImplementation(async (cmd: string, args: string[]) =>
-			cmd === finder() && args[0] === "pnpm" ? okResult("pnpm") : notFoundResult,
+			cmd === finder() && args[0] === "pnpm"
+				? okResult("pnpm")
+				: notFoundResult,
 		);
 		const { resolveNodePackageManager, _resetPackageManagerCache } =
 			await import("../../clients/package-manager.js");
@@ -142,7 +144,9 @@ describe("package-manager availability (#1496)", () => {
 		// Now pnpm is reachable again (the stall passed) and the cooldown expires.
 		advancePastCooldown();
 		safeSpawnAsync.mockImplementation(async (cmd: string, args: string[]) =>
-			cmd === finder() && args[0] === "pnpm" ? okResult("pnpm") : notFoundResult,
+			cmd === finder() && args[0] === "pnpm"
+				? okResult("pnpm")
+				: notFoundResult,
 		);
 
 		// Pre-fix: the timeout latched `false` for pnpm for the life of the

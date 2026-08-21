@@ -257,11 +257,16 @@ describe("exit-blind runners no longer report a clean file after a failed run", 
 				expect(result.status).toBe("skipped");
 				expect(result.diagnostics).toEqual([]);
 
-				const group = summary.getDegradationSummary().find(
-					(entry) => entry.kind === "runner-empty-result",
+				const group = summary
+					.getDegradationSummary()
+					.find((entry) => entry.kind === "runner-empty-result");
+				expect(
+					group,
+					"expected a runner-empty-result ledger row",
+				).toBeDefined();
+				const row = group?.latestReasons.find(
+					(e) => e.subject === testCase.tool,
 				);
-				expect(group, "expected a runner-empty-result ledger row").toBeDefined();
-				const row = group?.latestReasons.find((e) => e.subject === testCase.tool);
 				expect(row, `expected a ledger row for ${testCase.tool}`).toBeDefined();
 				expect(row?.reason).toContain(testCase.tool);
 				expect(row?.reason).toContain(String(testCase.failure.status));
@@ -329,10 +334,12 @@ describe("exit-blind runners no longer report a clean file after a failed run", 
 				);
 
 				expect(result.status).toBe("skipped");
-				const group = summary.getDegradationSummary().find(
-					(entry) => entry.kind === "runner-empty-result",
+				const group = summary
+					.getDegradationSummary()
+					.find((entry) => entry.kind === "runner-empty-result");
+				const row = group?.latestReasons.find(
+					(e) => e.subject === testCase.tool,
 				);
-				const row = group?.latestReasons.find((e) => e.subject === testCase.tool);
 				expect(row?.reason).toContain("SIGKILL");
 			} finally {
 				env.cleanup();
@@ -359,12 +366,12 @@ describe("exit-blind runners no longer report a clean file after a failed run", 
 			for (let i = 0; i < 25; i += 1) {
 				await runner.run(createCtx("yaml", filePath, env.tmpDir) as never);
 			}
-			const group = summary.getDegradationSummary().find(
-				(entry) => entry.kind === "runner-empty-result",
-			);
-			expect(group?.latestReasons.filter((e) => e.subject === "yamllint")).toHaveLength(
-				1,
-			);
+			const group = summary
+				.getDegradationSummary()
+				.find((entry) => entry.kind === "runner-empty-result");
+			expect(
+				group?.latestReasons.filter((e) => e.subject === "yamllint"),
+			).toHaveLength(1);
 			expect(group?.count).toBe(25);
 			expect(
 				group?.latestReasons.find((e) => e.subject === "yamllint")?.reason,

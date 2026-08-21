@@ -124,8 +124,14 @@ describe("blocker freshness sweep — widget-store population (#1790)", () => {
 		// Verdict observed 60s ago, replayed from cache — the dependency's real fix
 		// (or, per #1782/#1786, the cache simply outliving its own validity) lands
 		// after that.
-		recordCacheServedBlocking(consumer, "No exported member 'gitEnv'", Date.now() - 60_000);
-		expect((getFileDiagnostics(consumer) ?? []).some((d) => isBlocking(d))).toBe(true);
+		recordCacheServedBlocking(
+			consumer,
+			"No exported member 'gitEnv'",
+			Date.now() - 60_000,
+		);
+		expect(
+			(getFileDiagnostics(consumer) ?? []).some((d) => isBlocking(d)),
+		).toBe(true);
 
 		driftIntoFuture(dep);
 
@@ -164,7 +170,9 @@ describe("blocker freshness sweep — widget-store population (#1790)", () => {
 		expect(counts.total).toBe(1);
 		expect(counts.kept).toBe(1);
 		expect(counts.revalidated).toBe(0);
-		expect((getFileDiagnostics(consumer) ?? []).some((d) => isBlocking(d))).toBe(true);
+		expect(
+			(getFileDiagnostics(consumer) ?? []).some((d) => isBlocking(d)),
+		).toBe(true);
 	});
 
 	// #1790 review F1: the LIVE shape is not a stale widget remnant sitting next to
@@ -190,9 +198,9 @@ describe("blocker freshness sweep — widget-store population (#1790)", () => {
 		// A live dispatch writes BOTH stores for the same verdict.
 		runtime.recordInlineBlockers(consumer, "🔴 live blocker", 1, ["lsp"]);
 		recordCacheServedBlocking(consumer, "live blocker", Date.now());
-		expect((getFileDiagnostics(consumer) ?? []).some((d) => isBlocking(d))).toBe(
-			true,
-		);
+		expect(
+			(getFileDiagnostics(consumer) ?? []).some((d) => isBlocking(d)),
+		).toBe(true);
 
 		driftIntoFuture(dep);
 
@@ -246,9 +254,9 @@ describe("blocker freshness sweep — widget-store population (#1790)", () => {
 		// workspace-diagnostics cache hit). `dep` is already drifted into the
 		// future relative to this brand-new baseline, so this row is drifted too.
 		recordCacheServedBlocking(consumer, "cached blocking finding", Date.now());
-		expect((getFileDiagnostics(consumer) ?? []).some((d) => isBlocking(d))).toBe(
-			true,
-		);
+		expect(
+			(getFileDiagnostics(consumer) ?? []).some((d) => isBlocking(d)),
+		).toBe(true);
 
 		const second = await sweepInlineBlockerFreshness(runtime, dir, {
 			additionalEntries: widgetAdditionalEntries(),

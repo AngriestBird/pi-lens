@@ -149,14 +149,18 @@ function describeMissingNode(
 	let sameStemTwin: string | undefined;
 	for (const known of graph.fileNodes.keys()) {
 		const knownLastSlash = known.lastIndexOf("/");
-		const knownDir = knownLastSlash === -1 ? "" : known.slice(0, knownLastSlash);
+		const knownDir =
+			knownLastSlash === -1 ? "" : known.slice(0, knownLastSlash);
 		const knownBase = known.slice(knownLastSlash + 1);
 		if (knownDir === dir) {
 			sameDirFileCount += 1;
 			sameDirSibling ??= known;
 			// A same-stem twin in the same directory is the strongest hint —
 			// an extension/compiled-twin resolution miss rather than an absent file.
-			if (sameStemTwin === undefined && knownBase.replace(/\.[^./]*$/, "") === stem) {
+			if (
+				sameStemTwin === undefined &&
+				knownBase.replace(/\.[^./]*$/, "") === stem
+			) {
 				sameStemTwin = known;
 			}
 		}

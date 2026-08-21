@@ -16,7 +16,9 @@ describe("TypeScript diagnostic strategies (#1412)", () => {
 	it("keeps classic first-push seeding but stabilizes native TS7 pushes", () => {
 		expect(getStrategy("typescript", "classic").seedFirstPush).toBe(true);
 		expect(getStrategy("typescript", "native-ts7").seedFirstPush).toBe(false);
-		expect(getStrategy("typescript", "native-ts7").debounceMs).toBeGreaterThan(0);
+		expect(getStrategy("typescript", "native-ts7").debounceMs).toBeGreaterThan(
+			0,
+		);
 	});
 });
 
@@ -49,7 +51,9 @@ describe("resolveAstGrepNativeExe", () => {
 	});
 
 	it("returns undefined for an unsupported platform", () => {
-		expect(resolveAstGrepNativeExe("aix" as NodeJS.Platform, "x64")).toBeUndefined();
+		expect(
+			resolveAstGrepNativeExe("aix" as NodeJS.Platform, "x64"),
+		).toBeUndefined();
 	});
 
 	it("returns undefined for an unsupported arch on a supported platform", () => {

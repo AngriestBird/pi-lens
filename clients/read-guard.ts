@@ -685,8 +685,11 @@ export class ReadGuard {
 		// eviction starts, so it stops showing growth. `rawReadCountForFile` keeps
 		// the real arrival count observable alongside `evictedRecordCount`.
 		const rawReadCountForFile = arr.length;
-		const { evictedCount: evictedRecordCount, evictedCreditCount, evictedGenuineCount } =
-			enforceRecordCapForFile(arr);
+		const {
+			evictedCount: evictedRecordCount,
+			evictedCreditCount,
+			evictedGenuineCount,
+		} = enforceRecordCapForFile(arr);
 		this.touchFile(storedRecord.filePath);
 		this.enforceFileCap();
 

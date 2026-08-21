@@ -264,9 +264,11 @@ describe("workspace sweep hold (#1618 review round 1)", () => {
 				["5000", undefined],
 			];
 			for (const [fullMs, budgetMs] of overrides) {
-				if (fullMs === undefined) delete process.env.PI_LENS_LENS_DIAGNOSTICS_FULL_TIMEOUT_MS;
+				if (fullMs === undefined)
+					delete process.env.PI_LENS_LENS_DIAGNOSTICS_FULL_TIMEOUT_MS;
 				else process.env.PI_LENS_LENS_DIAGNOSTICS_FULL_TIMEOUT_MS = fullMs;
-				if (budgetMs === undefined) delete process.env.PI_LENS_LSP_BUDGET_IDLE_TIMEOUT_MS;
+				if (budgetMs === undefined)
+					delete process.env.PI_LENS_LSP_BUDGET_IDLE_TIMEOUT_MS;
 				else process.env.PI_LENS_LSP_BUDGET_IDLE_TIMEOUT_MS = budgetMs;
 
 				const floor = getFullScanWallClockMs() + SWEEP_IDLE_SAFETY_MARGIN_MS;
@@ -274,9 +276,11 @@ describe("workspace sweep hold (#1618 review round 1)", () => {
 				expect(effective).toBeGreaterThanOrEqual(floor);
 			}
 		} finally {
-			if (savedFull === undefined) delete process.env.PI_LENS_LENS_DIAGNOSTICS_FULL_TIMEOUT_MS;
+			if (savedFull === undefined)
+				delete process.env.PI_LENS_LENS_DIAGNOSTICS_FULL_TIMEOUT_MS;
 			else process.env.PI_LENS_LENS_DIAGNOSTICS_FULL_TIMEOUT_MS = savedFull;
-			if (savedBudget === undefined) delete process.env.PI_LENS_LSP_BUDGET_IDLE_TIMEOUT_MS;
+			if (savedBudget === undefined)
+				delete process.env.PI_LENS_LSP_BUDGET_IDLE_TIMEOUT_MS;
 			else process.env.PI_LENS_LSP_BUDGET_IDLE_TIMEOUT_MS = savedBudget;
 			delete process.env.PI_SUBAGENT_CHILD;
 			_resetSubagentModeForTests();

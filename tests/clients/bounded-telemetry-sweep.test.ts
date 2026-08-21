@@ -174,14 +174,12 @@ describe("bounded-telemetry scanner self-test", () => {
 		const laundered = scanSource(
 			[
 				'// logLatency({ phase: "probe_comment_timeout" });',
-				"/* logLatency({ phase: \"probe_block_comment_failed\" }); */",
+				'/* logLatency({ phase: "probe_block_comment_failed" }); */',
 				'logLatency({ type: "phase", phase: "probe_real_timeout" });',
 			].join("\n"),
 			"laundered.ts",
 		);
-		expect(laundered.map((site) => site.phase)).toEqual([
-			"probe_real_timeout",
-		]);
+		expect(laundered.map((site) => site.phase)).toEqual(["probe_real_timeout"]);
 	});
 
 	it("does not match an identifier that merely ends in the callee name", () => {
@@ -223,9 +221,9 @@ describe("bounded-telemetry scanner self-test", () => {
 		// `lsp_client_skipped_unavailable_command` ends in `_command`, so no
 		// suffix-anchored rule can see it — that is how two real unbounded
 		// per-file records hid from the first pass.
-		expect(
-			isFailureShapedPhase("lsp_client_skipped_unavailable_command"),
-		).toBe(true);
+		expect(isFailureShapedPhase("lsp_client_skipped_unavailable_command")).toBe(
+			true,
+		);
 		expect(isFailureShapedPhase("lsp_sweep_group_skipped_warmup")).toBe(true);
 		// The infix rule stays narrow: an outcome word appearing anywhere would
 		// sweep throughput phases whose SUBJECT is a failure concept.

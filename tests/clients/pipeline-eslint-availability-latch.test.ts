@@ -70,7 +70,13 @@ describe("eslint autofix availability latch (#1494)", () => {
 	}
 
 	const fix = () =>
-		runAutofix(filePath, env.tmpDir, () => undefined, () => {}, deps() as never);
+		runAutofix(
+			filePath,
+			env.tmpDir,
+			() => undefined,
+			() => {},
+			deps() as never,
+		);
 
 	const versionCalls = () =>
 		safeSpawnAsync.mock.calls.filter((call) =>

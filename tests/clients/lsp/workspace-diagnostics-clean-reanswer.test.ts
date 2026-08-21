@@ -79,7 +79,6 @@ describe("a clean re-answer evicts a cache-served entry (#1782 defect C)", () =>
 		other = path.join(tmp, "other.ts");
 		fs.writeFileSync(ghost, "export const a = 1;\n");
 		fs.writeFileSync(other, "export const b = 2;\n");
-
 	});
 
 	/**
@@ -95,13 +94,13 @@ describe("a clean re-answer evicts a cache-served entry (#1782 defect C)", () =>
 	 * clean re-answer can dislodge it.
 	 */
 	async function seedGhostEntry() {
-		const cacheModule = await import(
-			"../../../clients/lsp/workspace-diagnostics-cache.js"
+		const cacheModule =
+			await import("../../../clients/lsp/workspace-diagnostics-cache.js");
+		const sessionModule =
+			await import("../../../clients/lsp/workspace-diagnostics-session.js");
+		sessionModule.resetWorkspaceDiagnosticsCacheSession(
+			Date.now() - 60 * 60_000,
 		);
-		const sessionModule = await import(
-			"../../../clients/lsp/workspace-diagnostics-session.js"
-		);
-		sessionModule.resetWorkspaceDiagnosticsCacheSession(Date.now() - 60 * 60_000);
 		cacheModule.saveWorkspaceDiagnosticsCache(tmp, {
 			version: cacheModule.WORKSPACE_DIAGNOSTICS_CACHE_VERSION,
 			entries: {
@@ -162,7 +161,8 @@ describe("a clean re-answer evicts a cache-served entry (#1782 defect C)", () =>
 		const { LSPService } = await import("../../../clients/lsp/index.js");
 		await new LSPService().runWorkspaceDiagnostics(tmp);
 
-		const entry = loadWorkspaceDiagnosticsCache(tmp)?.entries[cacheKeyFor(ghost)];
+		const entry =
+			loadWorkspaceDiagnosticsCache(tmp)?.entries[cacheKeyFor(ghost)];
 		// Pre-fix: the pull's answer for `ghost` was discarded because `ghost` was
 		// not in the touch group, so the entry survived with its blocker intact.
 		expect(entry?.diagnostics ?? []).toHaveLength(0);
@@ -175,7 +175,9 @@ describe("a clean re-answer evicts a cache-served entry (#1782 defect C)", () =>
 		const { LSPService } = await import("../../../clients/lsp/index.js");
 		const results = await new LSPService().runWorkspaceDiagnostics(tmp);
 
-		const forGhost = results.filter((r) => cacheKeyFor(r.filePath) === cacheKeyFor(ghost));
+		const forGhost = results.filter(
+			(r) => cacheKeyFor(r.filePath) === cacheKeyFor(ghost),
+		);
 		// Two contradictory results for one file would let the stale one win on
 		// ordering downstream, so the cached replay must be dropped, not merely
 		// accompanied.
@@ -226,7 +228,8 @@ describe("a clean re-answer evicts a cache-served entry (#1782 defect C)", () =>
 		const { LSPService } = await import("../../../clients/lsp/index.js");
 		await new LSPService().runWorkspaceDiagnostics(tmp);
 
-		const entry = loadWorkspaceDiagnosticsCache(tmp)?.entries[cacheKeyFor(ghost)];
+		const entry =
+			loadWorkspaceDiagnosticsCache(tmp)?.entries[cacheKeyFor(ghost)];
 		expect(entry?.diagnostics ?? []).toHaveLength(1);
 	});
 
@@ -260,7 +263,10 @@ describe("a clean re-answer evicts a cache-served entry (#1782 defect C)", () =>
 			notify: { open: vi.fn(async () => {}) },
 			requestWorkspaceDiagnostics: vi.fn(async () => [
 				{ filePath: other, diagnostics: [] },
-				{ filePath: ghost, diagnostics: [{ ...ghostDiagnostic(), code: 9999 }] },
+				{
+					filePath: ghost,
+					diagnostics: [{ ...ghostDiagnostic(), code: 9999 }],
+				},
 			]),
 			waitForDiagnostics: vi.fn().mockResolvedValue(undefined),
 			getDiagnostics: vi.fn(() => []),
@@ -269,7 +275,8 @@ describe("a clean re-answer evicts a cache-served entry (#1782 defect C)", () =>
 		const { LSPService } = await import("../../../clients/lsp/index.js");
 		await new LSPService().runWorkspaceDiagnostics(tmp);
 
-		const entry = loadWorkspaceDiagnosticsCache(tmp)?.entries[cacheKeyFor(ghost)];
+		const entry =
+			loadWorkspaceDiagnosticsCache(tmp)?.entries[cacheKeyFor(ghost)];
 		expect(entry?.diagnostics?.[0]?.code).toBe(2339);
 	});
 });
@@ -317,13 +324,13 @@ describe("duplicate and unrelated report entries (#1786 review F2/F3)", () => {
 	});
 
 	async function seed() {
-		const cacheModule = await import(
-			"../../../clients/lsp/workspace-diagnostics-cache.js"
+		const cacheModule =
+			await import("../../../clients/lsp/workspace-diagnostics-cache.js");
+		const sessionModule =
+			await import("../../../clients/lsp/workspace-diagnostics-session.js");
+		sessionModule.resetWorkspaceDiagnosticsCacheSession(
+			Date.now() - 60 * 60_000,
 		);
-		const sessionModule = await import(
-			"../../../clients/lsp/workspace-diagnostics-session.js"
-		);
-		sessionModule.resetWorkspaceDiagnosticsCacheSession(Date.now() - 60 * 60_000);
 		cacheModule.saveWorkspaceDiagnosticsCache(tmp, {
 			version: cacheModule.WORKSPACE_DIAGNOSTICS_CACHE_VERSION,
 			entries: {
@@ -338,7 +345,9 @@ describe("duplicate and unrelated report entries (#1786 review F2/F3)", () => {
 		});
 	}
 
-	function mockReport(report: Array<{ filePath: string; diagnostics: unknown[] }>) {
+	function mockReport(
+		report: Array<{ filePath: string; diagnostics: unknown[] }>,
+	) {
 		const tsServer = {
 			id: "typescript",
 			name: "typescript",
@@ -378,7 +387,8 @@ describe("duplicate and unrelated report entries (#1786 review F2/F3)", () => {
 		const { LSPService } = await import("../../../clients/lsp/index.js");
 		await new LSPService().runWorkspaceDiagnostics(tmp);
 
-		const entry = loadWorkspaceDiagnosticsCache(tmp)?.entries[cacheKeyFor(ghost)];
+		const entry =
+			loadWorkspaceDiagnosticsCache(tmp)?.entries[cacheKeyFor(ghost)];
 		expect(entry?.diagnostics ?? []).toHaveLength(1);
 	});
 
@@ -392,7 +402,8 @@ describe("duplicate and unrelated report entries (#1786 review F2/F3)", () => {
 		const { LSPService } = await import("../../../clients/lsp/index.js");
 		await new LSPService().runWorkspaceDiagnostics(tmp);
 
-		const entry = loadWorkspaceDiagnosticsCache(tmp)?.entries[cacheKeyFor(ghost)];
+		const entry =
+			loadWorkspaceDiagnosticsCache(tmp)?.entries[cacheKeyFor(ghost)];
 		expect(entry?.diagnostics ?? []).toHaveLength(1);
 	});
 

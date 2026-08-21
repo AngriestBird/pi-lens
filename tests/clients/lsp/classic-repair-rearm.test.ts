@@ -46,7 +46,9 @@ const IS_WIN = process.platform === "win32";
 /** Same fixture shape as server-policy.test.ts: a managed tools tree whose
  * TypeScript version and tsserver.js presence the caller controls. */
 function createManagedTypeScriptTree(label: string) {
-	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), `pi-lens-ts-rearm-${label}-`));
+	const tmp = fs.mkdtempSync(
+		path.join(os.tmpdir(), `pi-lens-ts-rearm-${label}-`),
+	);
 	dirs.push(tmp);
 	fs.writeFileSync(path.join(tmp, "package.json"), "{}\n");
 
@@ -115,9 +117,8 @@ afterEach(() => {
 describe("classic TypeScript repair guard re-arms at session_start (#1570)", () => {
 	it("retries the repair after resetLSPService({reason: 'session_start'}), not just once per process", async () => {
 		const { resetLSPService } = await import("../../../clients/lsp/index.js");
-		const { TypeScriptServer, _resetClassicTsRepairForTests } = await import(
-			"../../../clients/lsp/server.js"
-		);
+		const { TypeScriptServer, _resetClassicTsRepairForTests } =
+			await import("../../../clients/lsp/server.js");
 		_resetClassicTsRepairForTests();
 
 		const tree = createManagedTypeScriptTree("rearm");
@@ -162,9 +163,8 @@ describe("classic TypeScript repair guard re-arms at session_start (#1570)", () 
 
 	it("does not re-arm the repair guard for a non-session_start reset (e.g. pipeline_crash)", async () => {
 		const { resetLSPService } = await import("../../../clients/lsp/index.js");
-		const { TypeScriptServer, _resetClassicTsRepairForTests } = await import(
-			"../../../clients/lsp/server.js"
-		);
+		const { TypeScriptServer, _resetClassicTsRepairForTests } =
+			await import("../../../clients/lsp/server.js");
 		_resetClassicTsRepairForTests();
 
 		const tree = createManagedTypeScriptTree("no-rearm");

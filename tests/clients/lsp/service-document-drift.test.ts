@@ -28,7 +28,12 @@ vi.mock("../../../clients/lsp/client.js", () => ({ createLSPClient }));
 
 function makeFakeProcess() {
 	return {
-		process: { killed: false, kill: vi.fn(), on: vi.fn(), removeListener: vi.fn() },
+		process: {
+			killed: false,
+			kill: vi.fn(),
+			on: vi.fn(),
+			removeListener: vi.fn(),
+		},
 		stdin: { on: vi.fn(), off: vi.fn(), write: vi.fn() },
 		stdout: { on: vi.fn(), off: vi.fn(), pipe: vi.fn() },
 		stderr: { on: vi.fn(), off: vi.fn() },
@@ -67,7 +72,8 @@ function makeClient(
 		serverId: "typescript",
 		isAlive: () => true,
 		shutdown: vi.fn(async () => {}),
-		isDocumentOpen: (filePath: string) => openDocuments.has(path.resolve(filePath)),
+		isDocumentOpen: (filePath: string) =>
+			openDocuments.has(path.resolve(filePath)),
 		getWorkspaceDiagnosticsSupport: () => ({
 			advertised: false,
 			mode: "push-only" as const,
@@ -156,9 +162,8 @@ describe("LSPService disk-drift backstop (#1783)", () => {
 
 	it("emits a bounded record naming the file and the drift age", async () => {
 		const { service } = await primeService();
-		const { getDegradationSummary, resetDegradationLedger } = await import(
-			"../../../clients/degradation-ledger.js"
-		);
+		const { getDegradationSummary, resetDegradationLedger } =
+			await import("../../../clients/degradation-ledger.js");
 		resetDegradationLedger();
 
 		await bulkEditOnDisk();
@@ -516,7 +521,11 @@ describe("LSPService disk-drift backstop (#1783)", () => {
 			}
 			// One bulk operation across all 20.
 			for (const [i, target] of files.entries()) {
-				await fs.writeFile(target, `export const v${i} = 1; // edited\n`, "utf-8");
+				await fs.writeFile(
+					target,
+					`export const v${i} = 1; // edited\n`,
+					"utf-8",
+				);
 			}
 
 			const before = primary.received.length + aux.received.length;
@@ -532,7 +541,8 @@ describe("LSPService disk-drift backstop (#1783)", () => {
 			let healed = first?.resynced ?? 0;
 			let passes = 1;
 			while (healed < 20 && passes < 12) {
-				healed += (await service.sweepDocumentDrift({ force: true }))?.resynced ?? 0;
+				healed +=
+					(await service.sweepDocumentDrift({ force: true }))?.resynced ?? 0;
 				passes += 1;
 			}
 			expect(healed).toBe(20);
@@ -541,9 +551,8 @@ describe("LSPService disk-drift backstop (#1783)", () => {
 
 		it("reports a failed resync as failed, never as healed", async () => {
 			const { service, client } = await primeService();
-			const { getDegradationSummary, resetDegradationLedger } = await import(
-				"../../../clients/degradation-ledger.js"
-			);
+			const { getDegradationSummary, resetDegradationLedger } =
+				await import("../../../clients/degradation-ledger.js");
 			resetDegradationLedger();
 			client.notify.open = vi.fn(async () => {
 				throw new Error("server died");

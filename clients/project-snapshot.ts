@@ -260,7 +260,9 @@ const SNAPSHOT_PARSE_CACHE_MAX = 4;
 const SNAPSHOT_PARSE_CACHE_MAX_BYTES = 24 * 1024 * 1024;
 const snapshotParseCache = new Map<string, SnapshotParseCacheEntry>();
 
-function withoutWordIndex(snapshot: ProjectSnapshot | null): ProjectSnapshot | null {
+function withoutWordIndex(
+	snapshot: ProjectSnapshot | null,
+): ProjectSnapshot | null {
 	if (!snapshot?.wordIndex) return snapshot;
 	const { wordIndex: _releasedPostings, ...stripped } = snapshot;
 	return stripped;
@@ -313,11 +315,18 @@ const PROJECT_SNAPSHOT_MAX_WARM_ROOTS = 8;
 const PROJECT_SNAPSHOT_IDLE_EVICT_MS_DEFAULT = 20 * 60_000;
 
 function projectSnapshotIdleEvictMs(): number {
-	const value = Number.parseInt(process.env.PI_LENS_PROJECT_SNAPSHOT_IDLE_EVICT_MS ?? "", 10);
-	return Number.isSafeInteger(value) && value > 0 ? value : PROJECT_SNAPSHOT_IDLE_EVICT_MS_DEFAULT;
+	const value = Number.parseInt(
+		process.env.PI_LENS_PROJECT_SNAPSHOT_IDLE_EVICT_MS ?? "",
+		10,
+	);
+	return Number.isSafeInteger(value) && value > 0
+		? value
+		: PROJECT_SNAPSHOT_IDLE_EVICT_MS_DEFAULT;
 }
 
-function clearAuthoritativeSnapshotTimer(entry: AuthoritativeSnapshotEntry): void {
+function clearAuthoritativeSnapshotTimer(
+	entry: AuthoritativeSnapshotEntry,
+): void {
 	if (entry.idleTimer) clearTimeout(entry.idleTimer);
 	entry.idleTimer = undefined;
 }
@@ -328,25 +337,37 @@ function deleteAuthoritativeSnapshot(key: string): void {
 	authoritativeSnapshots.delete(key);
 }
 
-function scheduleAuthoritativeSnapshotEviction(key: string, entry: AuthoritativeSnapshotEntry): void {
+function scheduleAuthoritativeSnapshotEviction(
+	key: string,
+	entry: AuthoritativeSnapshotEntry,
+): void {
 	clearAuthoritativeSnapshotTimer(entry);
 	const generation = entry.lastUsedAt;
 	entry.idleTimer = setTimeout(() => {
 		entry.idleTimer = undefined;
-		if (authoritativeSnapshots.get(key) !== entry || entry.lastUsedAt !== generation) return;
+		if (
+			authoritativeSnapshots.get(key) !== entry ||
+			entry.lastUsedAt !== generation
+		)
+			return;
 		deleteAuthoritativeSnapshot(key);
 	}, projectSnapshotIdleEvictMs());
 	entry.idleTimer.unref?.();
 }
 
-function touchAuthoritativeSnapshot(key: string, entry: AuthoritativeSnapshotEntry): void {
+function touchAuthoritativeSnapshot(
+	key: string,
+	entry: AuthoritativeSnapshotEntry,
+): void {
 	entry.lastUsedAt = Date.now();
 	scheduleAuthoritativeSnapshotEviction(key, entry);
 }
 
 function enforceAuthoritativeSnapshotCap(): void {
 	while (authoritativeSnapshots.size > PROJECT_SNAPSHOT_MAX_WARM_ROOTS) {
-		const victim = [...authoritativeSnapshots.entries()].sort(([, a], [, b]) => a.lastUsedAt - b.lastUsedAt)[0];
+		const victim = [...authoritativeSnapshots.entries()].sort(
+			([, a], [, b]) => a.lastUsedAt - b.lastUsedAt,
+		)[0];
 		if (!victim) return;
 		clearAuthoritativeSnapshotTimer(victim[1]);
 		deleteAuthoritativeSnapshot(victim[0]);
@@ -363,7 +384,8 @@ export function _getAuthoritativeSnapshotCacheKeysForTests(): string[] {
 /** Test hook: drop all cached parses + authoritative writes (per-worker isolation). */
 export function _resetProjectSnapshotParseCacheForTests(): void {
 	snapshotParseCache.clear();
-	for (const entry of authoritativeSnapshots.values()) clearAuthoritativeSnapshotTimer(entry);
+	for (const entry of authoritativeSnapshots.values())
+		clearAuthoritativeSnapshotTimer(entry);
 	authoritativeSnapshots.clear();
 }
 
@@ -660,7 +682,9 @@ const NARROW_DIGEST_HEAVY_KEY_LITERALS = [
 ] as const;
 
 let _lastNarrowParseDigestForTests: NarrowParseDigest | undefined;
-export function getLastNarrowParseDigestForTests(): NarrowParseDigest | undefined {
+export function getLastNarrowParseDigestForTests():
+	| NarrowParseDigest
+	| undefined {
 	return _lastNarrowParseDigestForTests;
 }
 export function resetLastNarrowParseDigestForTests(): void {

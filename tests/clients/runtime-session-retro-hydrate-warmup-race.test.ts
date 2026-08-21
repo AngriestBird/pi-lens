@@ -103,11 +103,26 @@ function makeDeps(ctxCwd: string, runtime: RuntimeCoordinator) {
 			ensureAvailable: async () => false,
 			scanExports: async () => new Map(),
 		},
-		biomeClient: { isAvailable: () => false, ensureAvailable: async () => false },
-		ruffClient: { isAvailable: () => false, ensureAvailable: async () => false },
-		knipClient: { isAvailable: () => false, ensureAvailable: async () => false },
-		jscpdClient: { isAvailable: () => false, ensureAvailable: async () => false },
-		depChecker: { isAvailable: () => false, ensureAvailable: async () => false },
+		biomeClient: {
+			isAvailable: () => false,
+			ensureAvailable: async () => false,
+		},
+		ruffClient: {
+			isAvailable: () => false,
+			ensureAvailable: async () => false,
+		},
+		knipClient: {
+			isAvailable: () => false,
+			ensureAvailable: async () => false,
+		},
+		jscpdClient: {
+			isAvailable: () => false,
+			ensureAvailable: async () => false,
+		},
+		depChecker: {
+			isAvailable: () => false,
+			ensureAvailable: async () => false,
+		},
 		testRunnerClient: {
 			detectRunner: () => null,
 			runTestFile: () => ({ failed: 0, error: false }),
@@ -180,7 +195,8 @@ describe("#1785 review round F1 — retroactive hydration survives a warmup save
 		if (prevWarmupDelay === undefined)
 			delete process.env.PI_LENS_WARMUP_DELAY_MS;
 		else process.env.PI_LENS_WARMUP_DELAY_MS = prevWarmupDelay;
-		if (prevColdStart === undefined) delete process.env.PI_LENS_COLD_START_QUICK;
+		if (prevColdStart === undefined)
+			delete process.env.PI_LENS_COLD_START_QUICK;
 		else process.env.PI_LENS_COLD_START_QUICK = prevColdStart;
 		if (prevDataDir === undefined) delete process.env.PILENS_DATA_DIR;
 		else process.env.PILENS_DATA_DIR = prevDataDir;

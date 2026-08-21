@@ -69,7 +69,9 @@ describe("anti-slop severity tiers (#1727, #1777)", () => {
 		).map(([id]) => id);
 		const notWired = errorTier.filter((id) => !selfScanned.has(id));
 		expect(notWired).toEqual([]);
-		expect(selfScanned.has("require-safety-comment-for-as-unknown-as")).toBe(true);
+		expect(selfScanned.has("require-safety-comment-for-as-unknown-as")).toBe(
+			true,
+		);
 		expect(selfScanned.has("no-chained-type-assertions")).toBe(true);
 		expect(selfScanned.has("no-unknown-laundering")).toBe(true);
 		expect(selfScanned.has("no-unknown-returns")).toBe(true);
@@ -109,7 +111,11 @@ const FIXTURE = [
 	"",
 ].join("\n");
 
-function scanFixtureTree(): Array<{ ruleId: string; file: string; line: number }> {
+function scanFixtureTree(): Array<{
+	ruleId: string;
+	file: string;
+	line: number;
+}> {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pilens-errorfloor-"));
 	try {
 		fs.mkdirSync(path.join(dir, "src"), { recursive: true });
@@ -180,7 +186,9 @@ d("the as-unknown-as pair, on a synthetic tree outside pi-lens (#1727)", () => {
 		]);
 		expect(byLine.get("src/prod.ts:6")).toEqual(["no-chained-type-assertions"]);
 		for (const [key, ruleIds] of byLine) {
-			expect(ruleIds.length, `${key} reported by ${ruleIds.join(", ")}`).toBe(1);
+			expect(ruleIds.length, `${key} reported by ${ruleIds.join(", ")}`).toBe(
+				1,
+			);
 		}
 	});
 });

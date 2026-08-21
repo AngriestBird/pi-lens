@@ -26,7 +26,9 @@ export interface SessionStartEventFixture {
 export function makeSessionStartEvent(
 	overrides: Partial<SessionStartEventFixture> = {},
 ): SessionStartEventFixture {
-	const event: SessionStartEventFixture = { reason: overrides.reason ?? "startup" };
+	const event: SessionStartEventFixture = {
+		reason: overrides.reason ?? "startup",
+	};
 	if (overrides.previousSessionFile !== undefined) {
 		event.previousSessionFile = overrides.previousSessionFile;
 	}

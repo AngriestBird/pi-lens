@@ -98,10 +98,7 @@ export async function tryLazyInstallFormatterTool(
  * stock command there is exactly the stock-style imposition the fix bans.
  */
 export const SKIP_FORMATTING = "skip-formatting" as const;
-export type ResolvedFormatterCommand =
-	| string[]
-	| null
-	| typeof SKIP_FORMATTING;
+export type ResolvedFormatterCommand = string[] | null | typeof SKIP_FORMATTING;
 
 export interface FormatterInfo {
 	name: string;
@@ -614,7 +611,8 @@ const EXPLICIT_FORMATTER_CONFIG_CHECKS = new Map<
 	["biome", (cwd) => hasBiomeConfig(cwd)],
 	[
 		"prettier",
-		(cwd) => hasPrettierConfig(cwd) || hasNearestPackageJsonField(cwd, "prettier"),
+		(cwd) =>
+			hasPrettierConfig(cwd) || hasNearestPackageJsonField(cwd, "prettier"),
 	],
 	// .svelte is conditional beyond "an oxfmt config exists": oxfmt requires the
 	// `svelte` package installed AND the config's `svelte` flag enabled
@@ -667,7 +665,9 @@ function hasExplicitFormatterConfig(
 	cwd: string,
 	ext: string,
 ): boolean {
-	return EXPLICIT_FORMATTER_CONFIG_CHECKS.get(formatterName)?.(cwd, ext) ?? false;
+	return (
+		EXPLICIT_FORMATTER_CONFIG_CHECKS.get(formatterName)?.(cwd, ext) ?? false
+	);
 }
 
 // Exported for the "every registered formatter is selectable" coverage guard
@@ -694,7 +694,10 @@ async function indentationArgs(
 	tool: "biome" | "prettier" | "ruff" | "shfmt",
 	cwd: string,
 ): Promise<string[] | null> {
-	if (await hasEditorConfig(cwd) || hasExplicitFormatterConfig(tool, cwd, path.extname(filePath))) {
+	if (
+		(await hasEditorConfig(cwd)) ||
+		hasExplicitFormatterConfig(tool, cwd, path.extname(filePath))
+	) {
 		return [];
 	}
 	let content: string;
@@ -706,9 +709,16 @@ async function indentationArgs(
 	}
 	if (!hasDetectableIndentation(content)) return null;
 	const indentation = detectIndentation(content);
-	if (tool === "shfmt") return indentation.style === "tab" ? ["-i", "0"] : ["-i", String(indentation.width)];
+	if (tool === "shfmt")
+		return indentation.style === "tab"
+			? ["-i", "0"]
+			: ["-i", String(indentation.width)];
 	if (tool === "prettier") {
-		return [indentation.style === "tab" ? "--use-tabs" : "--no-use-tabs", "--tab-width", String(indentation.width)];
+		return [
+			indentation.style === "tab" ? "--use-tabs" : "--no-use-tabs",
+			"--tab-width",
+			String(indentation.width),
+		];
 	}
 	if (tool === "ruff") {
 		// `ruff format` has NO --indent-style/--indent-width flags (it errors with
@@ -722,7 +732,12 @@ async function indentationArgs(
 			`format.indent-style='${indentation.style}'`,
 		];
 	}
-	return ["--indent-style", indentation.style, "--indent-width", String(indentation.width)];
+	return [
+		"--indent-style",
+		indentation.style,
+		"--indent-width",
+		String(indentation.width),
+	];
 }
 
 /**
@@ -1010,7 +1025,10 @@ export const shfmtFormatter: FormatterInfo = {
 		if (styleArgs === null) return SKIP_FORMATTING;
 		const inPath = await which("shfmt");
 		if (inPath) return [inPath, "-w", ...styleArgs, filePath];
-		return resolveManagedSmartDefaultCommand("shfmt", filePath, ["-w", ...styleArgs]);
+		return resolveManagedSmartDefaultCommand("shfmt", filePath, [
+			"-w",
+			...styleArgs,
+		]);
 	},
 	async detect(_cwd: string) {
 		if ((await which("shfmt")) !== null) return true;
@@ -1218,9 +1236,13 @@ export const csharpierFormatter: FormatterInfo = {
 		}
 		// CSharpier 0.x: invoked through the dotnet driver.
 		if ((await which("dotnet")) !== null) {
-			const legacy = await safeSpawnAsync("dotnet", ["csharpier", "--version"], {
-				timeout: 5000,
-			});
+			const legacy = await safeSpawnAsync(
+				"dotnet",
+				["csharpier", "--version"],
+				{
+					timeout: 5000,
+				},
+			);
 			if (!legacy.error && legacy.status === 0) {
 				return ["dotnet", "csharpier", filePath];
 			}
@@ -1369,7 +1391,10 @@ export const cueFormatter: FormatterInfo = {
  * stock `CodeFormatting` ruleset regardless of what it declared — the same
  * stock-style imposition #1144 banned for the other config-first formatters.
  */
-function psScriptAnalyzerCommand(filePath: string, settingsPath?: string): string {
+function psScriptAnalyzerCommand(
+	filePath: string,
+	settingsPath?: string,
+): string {
 	// PowerShell single-quoted strings escape an apostrophe by doubling it.
 	const quoted = filePath.replace(/'/g, "''");
 	const settingsArg = settingsPath
@@ -1485,37 +1510,97 @@ const detectionCache = new BoundedLruCache<
 // Kotlin/Spotless gradle files, sqlfluff's setup.cfg, and oxfmt's
 // vite-plus.json / additional vite.config extensions).
 const FORMATTER_CONFIG_FILES = [
-	"package.json", "biome.json", "biome.jsonc", ".prettierrc", ".prettierrc.json",
-	".prettierrc.yml", ".prettierrc.yaml", ".prettierrc.js", ".prettierrc.cjs",
-	".prettierrc.mjs", "prettier.config.js", "prettier.config.cjs", "prettier.config.mjs",
-	"prettier.config.ts", "pyproject.toml", "ruff.toml", ".ruff.toml", "black.toml",
-	".black", "tox.ini", "setup.cfg", "requirements.txt", "Pipfile", ".sqlfluff", ".rubocop.yml", ".rubocop.yaml", "Gemfile", ".clang-format",
-	"_clang-format", ".php-cs-fixer.php", ".php-cs-fixer.dist.php", "stylua.toml",
-	".stylua.toml", ".ocamlformat", ".editorconfig", ".google-java-format",
-	".ktfmt", ".ktfmt.kts", "build.gradle.kts", "build.gradle", "settings.gradle.kts", "settings.gradle",
-	".cljfmt.edn", "cljfmt.edn", ".cljfmt",
-	".cmake-format", ".cmake-format.yaml", ".cmake-format.yml", ".cmake-format.json", ".cmake-format.py",
-	"cmake-format.py", "cmake-format.yaml", "cmake-format.yml",
-	"oxfmt.toml", ".oxfmtrc.json", "vite-plus.json",
-	"vite.config.ts", "vite.config.mts", "vite.config.cts", "vite.config.js", "vite.config.mjs", "vite.config.cjs",
-	"PSScriptAnalyzerSettings.psd1", "ScriptAnalyzerSettings.psd1",
+	"package.json",
+	"biome.json",
+	"biome.jsonc",
+	".prettierrc",
+	".prettierrc.json",
+	".prettierrc.yml",
+	".prettierrc.yaml",
+	".prettierrc.js",
+	".prettierrc.cjs",
+	".prettierrc.mjs",
+	"prettier.config.js",
+	"prettier.config.cjs",
+	"prettier.config.mjs",
+	"prettier.config.ts",
+	"pyproject.toml",
+	"ruff.toml",
+	".ruff.toml",
+	"black.toml",
+	".black",
+	"tox.ini",
+	"setup.cfg",
+	"requirements.txt",
+	"Pipfile",
+	".sqlfluff",
+	".rubocop.yml",
+	".rubocop.yaml",
+	"Gemfile",
+	".clang-format",
+	"_clang-format",
+	".php-cs-fixer.php",
+	".php-cs-fixer.dist.php",
+	"stylua.toml",
+	".stylua.toml",
+	".ocamlformat",
+	".editorconfig",
+	".google-java-format",
+	".ktfmt",
+	".ktfmt.kts",
+	"build.gradle.kts",
+	"build.gradle",
+	"settings.gradle.kts",
+	"settings.gradle",
+	".cljfmt.edn",
+	"cljfmt.edn",
+	".cljfmt",
+	".cmake-format",
+	".cmake-format.yaml",
+	".cmake-format.yml",
+	".cmake-format.json",
+	".cmake-format.py",
+	"cmake-format.py",
+	"cmake-format.yaml",
+	"cmake-format.yml",
+	"oxfmt.toml",
+	".oxfmtrc.json",
+	"vite-plus.json",
+	"vite.config.ts",
+	"vite.config.mts",
+	"vite.config.cts",
+	"vite.config.js",
+	"vite.config.mjs",
+	"vite.config.cjs",
+	"PSScriptAnalyzerSettings.psd1",
+	"ScriptAnalyzerSettings.psd1",
 	// #1595 sweep additions.
-	".csharpierrc", ".csharpierrc.json", ".csharpierrc.yaml", ".csharpierrc.yml",
-	".ormolu", "taplo.toml", ".taplo.toml", ".terraform.lock.hcl", ".swiftformat",
-	".fantomasignore", ".formatter.exs",
+	".csharpierrc",
+	".csharpierrc.json",
+	".csharpierrc.yaml",
+	".csharpierrc.yml",
+	".ormolu",
+	"taplo.toml",
+	".taplo.toml",
+	".terraform.lock.hcl",
+	".swiftformat",
+	".fantomasignore",
+	".formatter.exs",
 ];
 
 async function formatterConfigSignature(cwd: string): Promise<string> {
 	const paths = await findUp(FORMATTER_CONFIG_FILES, cwd);
 	const parts = await Promise.all(
-		paths.sort((a, b) => a.localeCompare(b)).map(async (filePath) => {
-			try {
-				const stat = await fs.stat(filePath);
-				return `${filePath}:${stat.mtimeMs}:${stat.size}`;
-			} catch {
-				return `${filePath}:missing`;
-			}
-		}),
+		paths
+			.sort((a, b) => a.localeCompare(b))
+			.map(async (filePath) => {
+				try {
+					const stat = await fs.stat(filePath);
+					return `${filePath}:${stat.mtimeMs}:${stat.size}`;
+				} catch {
+					return `${filePath}:missing`;
+				}
+			}),
 	);
 	return parts.join("|");
 }
@@ -1623,7 +1708,10 @@ export async function getFormattersForFile(
 		}
 	} else {
 		for (const formatter of candidateFormatters) {
-			const { detected, error, outcome } = await detectCandidate(formatter, cwd);
+			const { detected, error, outcome } = await detectCandidate(
+				formatter,
+				cwd,
+			);
 			candidateOutcomes.push(outcome);
 			if (error !== undefined) {
 				// pi-lens-ignore: missing-error-propagation — optional formatter detection, skip on failure
@@ -1780,7 +1868,9 @@ const HAS_BOX_DRAWING = /[\u2500-\u257F]/;
  * Skips blank lines, pure box-drawing rules, and short banner headings; strips
  * ANSI colour so the message stays readable in a plain-text surface.
  */
-export function firstDiagnosticLine(text: string | undefined): string | undefined {
+export function firstDiagnosticLine(
+	text: string | undefined,
+): string | undefined {
 	for (const raw of (text ?? "").split("\n")) {
 		const line = raw.replace(ANSI_ESCAPE, "").trimEnd();
 		const stripped = line.replace(BOX_DRAWING_GLOBAL, "").trim();
@@ -1811,7 +1901,9 @@ async function resolveFormatterCommand(
 		: null;
 	if (resolved === SKIP_FORMATTING) return SKIP_FORMATTING;
 	if (resolved !== null) return resolved;
-	const fallback = formatter.command.map((c) => c.replace("$FILE", absolutePath));
+	const fallback = formatter.command.map((c) =>
+		c.replace("$FILE", absolutePath),
+	);
 	// Trust gate on the install-capable static fallback (#1334 S5): npx can
 	// DOWNLOAD packages, so an untrusted project treats the fallback as
 	// unavailable -- a skip, not a formatter failure; may converge next turn.

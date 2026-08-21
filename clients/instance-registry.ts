@@ -37,10 +37,7 @@ import { getGlobalPiLensDir } from "./file-utils.js";
 // import is actually invoked.
 import { realIsPidAlive } from "./instance-reaper.js";
 import { normalizeFilePath } from "./path-utils.js";
-import {
-	getSubagentIdentity,
-	isSubagentSession,
-} from "./subagent-mode.js";
+import { getSubagentIdentity, isSubagentSession } from "./subagent-mode.js";
 
 export interface LspChildEntry {
 	pid: number;
@@ -259,7 +256,9 @@ export interface HeartbeatPatch {
 
 /** Update this process's heartbeat/rss (and, since #620, host CPU% + live
  *  LSP children's rss/CPU%). Cheap — safe to call every turn end. */
-export async function updateHeartbeat(patch: HeartbeatPatch = {}): Promise<void> {
+export async function updateHeartbeat(
+	patch: HeartbeatPatch = {},
+): Promise<void> {
 	if (!isInstanceRegistryEnabled()) return;
 	const pid = process.pid;
 	const file = await readRegistryAsync();
@@ -558,7 +557,9 @@ export async function getResourceFootprint(
 ): Promise<ResourceFootprint> {
 	const instances = await readInstanceRegistry();
 	const deadPids = new Set(
-		instances.filter((instance) => !isPidAlive(instance.pid)).map((instance) => instance.pid),
+		instances
+			.filter((instance) => !isPidAlive(instance.pid))
+			.map((instance) => instance.pid),
 	);
 	if (deadPids.size > 0) {
 		// Fire-and-forget: a health-report read must never block on, or fail

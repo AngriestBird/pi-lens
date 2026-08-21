@@ -62,10 +62,8 @@ describe("LSPService.touchFile collectDiagnostics", () => {
 
 	it("uses pull-only diagnostics for a pull-capable server under budget pressure", async () => {
 		const { LSPService } = await import("../../../clients/lsp/index.js");
-		const {
-			checkCrossProcessLspBudget,
-			_resetLspBudgetDecisionForTests,
-		} = await import("../../../clients/lsp-budget.js");
+		const { checkCrossProcessLspBudget, _resetLspBudgetDecisionForTests } =
+			await import("../../../clients/lsp-budget.js");
 		const previousCeiling = process.env.PI_LENS_LSP_BUDGET_CEILING;
 		process.env.PI_LENS_LSP_BUDGET_CEILING = "1";
 		const service = new LSPService();

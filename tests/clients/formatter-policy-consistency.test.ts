@@ -61,7 +61,8 @@ const extensionPolicyNamePairs = [...FORMATTER_POLICY_BY_EXTENSION].flatMap(
 	([ext, policy]) => policy.formatterNames.map((name) => ({ ext, name })),
 );
 const filenamePolicyNamePairs = [...FORMATTER_POLICY_BY_FILENAME].flatMap(
-	([filename, policy]) => policy.formatterNames.map((name) => ({ filename, name })),
+	([filename, policy]) =>
+		policy.formatterNames.map((name) => ({ filename, name })),
 );
 const defaultFormatterEntries = [
 	...[...FORMATTER_POLICY_BY_EXTENSION].map(([key, policy]) => ({
@@ -160,7 +161,8 @@ describe("formatter ↔ policy consistency (#1135)", () => {
 
 	it("every policy defaultFormatter maps to a real formatter definition (extension + filename policies; #1135 comment: terragrunt-hcl)", () => {
 		expectClean(defaultFormatterEntries, ({ kind, key, defaultFormatter }) => {
-			if (!defaultFormatter || formatterByName.has(defaultFormatter)) return null;
+			if (!defaultFormatter || formatterByName.has(defaultFormatter))
+				return null;
 			return `${kind} policy ${key} has defaultFormatter "${defaultFormatter}" with no formatter definition`;
 		});
 	});
@@ -207,7 +209,10 @@ describe("formatter ↔ policy consistency (#1135)", () => {
 			if (!policy) {
 				return `exclusion "${pair}" is decorative: there is no ${ext} policy to exclude ${name} from`;
 			}
-			if (policy.formatterNames.length === 0 || policy.formatterNames.includes(name)) {
+			if (
+				policy.formatterNames.length === 0 ||
+				policy.formatterNames.includes(name)
+			) {
 				return `exclusion "${pair}" is unnecessary: the ${ext} policy [${policy.formatterNames.join(", ")}] already offers ${name} — remove the exclusion`;
 			}
 			return null;
@@ -222,7 +227,9 @@ describe("formatter ↔ policy consistency (#1135)", () => {
 		for (const { ext } of definitionExtensionPairs) {
 			if (!FORMATTER_POLICY_BY_EXTENSION.has(ext)) actualNoPolicy.add(ext);
 		}
-		expect([...actualNoPolicy].sort()).toEqual([...NO_POLICY_FALLBACK_EXTS].sort());
+		expect([...actualNoPolicy].sort()).toEqual(
+			[...NO_POLICY_FALLBACK_EXTS].sort(),
+		);
 	});
 });
 
@@ -266,7 +273,11 @@ function isFormatterSelectable(name: string, policy: FormatterPolicy): boolean {
 }
 
 /** Every (policy-location, formatterName) pair to check, across both maps. */
-function allPolicyFormatterPairs(): { where: string; name: string; policy: FormatterPolicy }[] {
+function allPolicyFormatterPairs(): {
+	where: string;
+	name: string;
+	policy: FormatterPolicy;
+}[] {
 	const pairs: { where: string; name: string; policy: FormatterPolicy }[] = [];
 	for (const [ext, policy] of FORMATTER_POLICY_BY_EXTENSION) {
 		for (const name of policy.formatterNames) {

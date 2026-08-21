@@ -138,7 +138,12 @@ describe("fetchTsserverProjectIdentity — probe channel (#1645 F1)", () => {
 			result: { success: true, body: INFERRED_BODY },
 		}));
 		const identity = await fetchTsserverProjectIdentity(
-			{ executeCommand, getAdvertisedCommands: vi.fn(async () => ["typescript.tsserverRequest"]) },
+			{
+				executeCommand,
+				getAdvertisedCommands: vi.fn(async () => [
+					"typescript.tsserverRequest",
+				]),
+			},
 			"/proj/tests/a.test.ts",
 		);
 		expect(identity).toBeUndefined();

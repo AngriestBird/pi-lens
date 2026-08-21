@@ -151,7 +151,11 @@ describe("filterToTouchedFile (#1522 review round 1, F1)", () => {
 		);
 		// Touching the primary offender.
 		expect(filterToTouchedFile(errors, "bad-values.cue")).toEqual([
-			expect.objectContaining({ filePath: "bad-values.cue", line: 3, column: 11 }),
+			expect.objectContaining({
+				filePath: "bad-values.cue",
+				line: 3,
+				column: 11,
+			}),
 		]);
 		// Touching the implicated sibling — still a real signal, at ITS location.
 		expect(filterToTouchedFile(errors, "schema.cue")).toEqual([
@@ -208,7 +212,9 @@ describe("filterToTouchedFile (#1522 review round 1, F1)", () => {
 		expect(diagnostics).toHaveLength(2);
 		expect(diagnostics?.some((d) => d.line === 3 && d.column === 4)).toBe(true);
 		expect(
-			diagnostics?.some((d) => d.message.includes("some instances are incomplete")),
+			diagnostics?.some((d) =>
+				d.message.includes("some instances are incomplete"),
+			),
 		).toBe(true);
 	});
 });
@@ -484,7 +490,8 @@ describe("cue-vet run() — real binary output shapes, mocked spawn", () => {
 		safeSpawnAsync
 			.mockResolvedValueOnce({
 				status: 1,
-				stdout: 'found packages "alpha" (alpha.cue) and "beta" (beta.cue) in "."\n',
+				stdout:
+					'found packages "alpha" (alpha.cue) and "beta" (beta.cue) in "."\n',
 				stderr: "",
 			})
 			.mockResolvedValueOnce({ status: 0, stdout: "", stderr: "" });
@@ -635,7 +642,8 @@ describe("cue-vet run() — real binary output shapes, mocked spawn", () => {
 			// Pathological: real cue never prints on success, but this pins the
 			// guard against a hypothetical false match rather than trusting exit
 			// code alone.
-			stdout: 'found packages "alpha" (alpha.cue) and "beta" (beta.cue) in "."\n',
+			stdout:
+				'found packages "alpha" (alpha.cue) and "beta" (beta.cue) in "."\n',
 			stderr: "",
 		});
 		const cueVetRunner = (

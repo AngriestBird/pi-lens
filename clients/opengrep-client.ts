@@ -199,7 +199,9 @@ export class OpengrepClient extends SecurityScanClient<OpengrepResult> {
 				};
 			}
 
-			const findings = parseOpengrepReport(fs.readFileSync(reportPath, "utf-8"));
+			const findings = parseOpengrepReport(
+				fs.readFileSync(reportPath, "utf-8"),
+			);
 			return {
 				success: true,
 				findings,

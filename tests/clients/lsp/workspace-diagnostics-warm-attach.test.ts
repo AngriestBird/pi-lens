@@ -121,18 +121,15 @@ describe("runWorkspaceDiagnostics warm attach sweeps (#822)", () => {
 		});
 
 		expect(results[0]?.unconfirmedServerIds).toEqual(["typos"]);
-		const { cacheKeyFor, loadWorkspaceDiagnosticsCache } = await import(
-			"../../../clients/lsp/workspace-diagnostics-cache.js"
-		);
+		const { cacheKeyFor, loadWorkspaceDiagnosticsCache } =
+			await import("../../../clients/lsp/workspace-diagnostics-cache.js");
 		expect(
 			loadWorkspaceDiagnosticsCache(tmp)?.entries[cacheKeyFor(file)],
 		).toBeUndefined();
 	});
 
 	it("promotes after an IPC failure and completes that file and the remainder locally", async () => {
-		const files = ["a.ts", "b.ts", "c.ts"].map((name) =>
-			path.join(tmp, name),
-		);
+		const files = ["a.ts", "b.ts", "c.ts"].map((name) => path.join(tmp, name));
 		for (const file of files) fs.writeFileSync(file, "const x = 1;\n");
 		let attachedCalls = 0;
 		tryWarmAttachedDiagnostics.mockImplementation(async (file: string) => {

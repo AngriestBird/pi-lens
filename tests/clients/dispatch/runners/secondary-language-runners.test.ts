@@ -55,9 +55,9 @@ describe("secondary language fallback runners", () => {
 				stderr: "dart analyze failed unexpectedly",
 			});
 
-			const runner = (await import(
-				"../../../../clients/dispatch/runners/dart-analyze.js"
-			)).default;
+			const runner = (
+				await import("../../../../clients/dispatch/runners/dart-analyze.js")
+			).default;
 
 			const result = await runner.run(
 				createCtx("dart", filePath, env.tmpDir) as never,
@@ -88,9 +88,9 @@ describe("secondary language fallback runners", () => {
 				stderr: `warning|static_warning|unused_import|${filePath}|2|1|1|Unused import`,
 			});
 
-			const runner = (await import(
-				"../../../../clients/dispatch/runners/dart-analyze.js"
-			)).default;
+			const runner = (
+				await import("../../../../clients/dispatch/runners/dart-analyze.js")
+			).default;
 
 			const result = await runner.run(
 				createCtx("dart", filePath, env.tmpDir) as never,
@@ -118,9 +118,9 @@ describe("secondary language fallback runners", () => {
 				stderr: "zig failed before emitting diagnostics",
 			});
 
-			const runner = (await import(
-				"../../../../clients/dispatch/runners/zig-check.js"
-			)).default;
+			const runner = (
+				await import("../../../../clients/dispatch/runners/zig-check.js")
+			).default;
 
 			const result = await runner.run(
 				createCtx("zig", filePath, env.tmpDir) as never,
@@ -147,9 +147,9 @@ describe("secondary language fallback runners", () => {
 				stderr: `${filePath}:2:1: error: unable to load module`,
 			});
 
-			const runner = (await import(
-				"../../../../clients/dispatch/runners/zig-check.js"
-			)).default;
+			const runner = (
+				await import("../../../../clients/dispatch/runners/zig-check.js")
+			).default;
 			const result = await runner.run(
 				createCtx("zig", filePath, env.tmpDir) as never,
 			);
@@ -176,9 +176,9 @@ describe("secondary language fallback runners", () => {
 				stderr: "gleam check failed unexpectedly",
 			});
 
-			const runner = (await import(
-				"../../../../clients/dispatch/runners/gleam-check.js"
-			)).default;
+			const runner = (
+				await import("../../../../clients/dispatch/runners/gleam-check.js")
+			).default;
 
 			const result = await runner.run(
 				createCtx("gleam", filePath, env.tmpDir) as never,
@@ -197,7 +197,10 @@ describe("secondary language fallback runners", () => {
 		try {
 			const filePath = path.join(env.tmpDir, "lib", "app.ex");
 			fs.mkdirSync(path.dirname(filePath), { recursive: true });
-			fs.writeFileSync(path.join(env.tmpDir, "mix.exs"), "defmodule Demo.MixProject do end\n");
+			fs.writeFileSync(
+				path.join(env.tmpDir, "mix.exs"),
+				"defmodule Demo.MixProject do end\n",
+			);
 			fs.writeFileSync(filePath, "defmodule App do\n");
 
 			// mix availability is now answered by the mocked createAvailabilityChecker
@@ -209,9 +212,9 @@ describe("secondary language fallback runners", () => {
 				stderr: "** (SyntaxError) lib/app.ex:1:1: unexpected end of file",
 			});
 
-			const runner = (await import(
-				"../../../../clients/dispatch/runners/elixir-check.js"
-			)).default;
+			const runner = (
+				await import("../../../../clients/dispatch/runners/elixir-check.js")
+			).default;
 
 			const result = await runner.run(
 				createCtx("elixir", filePath, env.tmpDir) as never,
@@ -234,13 +237,12 @@ describe("secondary language fallback runners", () => {
 				error: null,
 				status: 1,
 				stdout: "",
-				stderr:
-					"** (CompileError) app.ex:1:1: module Dependency is not loaded",
+				stderr: "** (CompileError) app.ex:1:1: module Dependency is not loaded",
 			});
 
-			const runner = (await import(
-				"../../../../clients/dispatch/runners/elixir-check.js"
-			)).default;
+			const runner = (
+				await import("../../../../clients/dispatch/runners/elixir-check.js")
+			).default;
 			const result = await runner.run(
 				createCtx("elixir", filePath, env.tmpDir) as never,
 			);

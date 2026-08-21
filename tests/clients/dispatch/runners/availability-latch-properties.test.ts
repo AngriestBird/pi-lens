@@ -74,7 +74,11 @@ function mulberry32(seed: number): () => number {
 	};
 }
 
-function randInt(rng: () => number, minInclusive: number, maxInclusive: number): number {
+function randInt(
+	rng: () => number,
+	minInclusive: number,
+	maxInclusive: number,
+): number {
 	return minInclusive + Math.floor(rng() * (maxInclusive - minInclusive + 1));
 }
 
@@ -90,7 +94,11 @@ function chance(rng: () => number, probability: number): boolean {
 
 /** Shapes `classifyProbeFailure` recognizes as transient by construction. */
 const TRANSIENT_SHAPES: ReadonlyArray<() => ProbeFailureShape> = [
-	() => ({ status: null, failure: "timeout", spawnFailure: { kind: "timeout" } }),
+	() => ({
+		status: null,
+		failure: "timeout",
+		spawnFailure: { kind: "timeout" },
+	}),
 	() => ({ status: null, failure: "aborted" }),
 	() => ({ status: null, failure: "signal" }),
 	() => ({ status: null, spawnFailure: { kind: "killed" } }),
@@ -211,7 +219,9 @@ describe("availability latch: state-machine property tests (#1609)", () => {
 			): void {
 				if (outcome !== "transient") model.sawOnlyTransientEvidence = false;
 				const opts =
-					operationClass === "install" ? { operationClass: "install" as const } : undefined;
+					operationClass === "install"
+						? { operationClass: "install" as const }
+						: undefined;
 				const delay = latch.noteUnavailable(outcome, cause, opts);
 
 				if (isLatchingOutcome(outcome)) {
@@ -224,11 +234,14 @@ describe("availability latch: state-machine property tests (#1609)", () => {
 				if (operationClass === "install") {
 					model.installAttempts += 1;
 					const expected = installRetryDelayMs(model.installAttempts);
-					expect(delay, ctx(step, "install-ladder-matches-oracle")).toBe(expected);
+					expect(delay, ctx(step, "install-ladder-matches-oracle")).toBe(
+						expected,
+					);
 					if (expected === 0) {
-						expect(latch.isInstallExhausted(), ctx(step, "install-exhausted-flag")).toBe(
-							true,
-						);
+						expect(
+							latch.isInstallExhausted(),
+							ctx(step, "install-exhausted-flag"),
+						).toBe(true);
 						// Mirrors the real call-site convention (govulncheck-client.ts): call
 						// recordDegradationOnce on every exhausted decision, and let the
 						// ledger's own once-per-key dedup collapse repeats within the episode.
@@ -239,16 +252,27 @@ describe("availability latch: state-machine property tests (#1609)", () => {
 						});
 						model.ledgerHadExhaustionThisEpisode = true;
 					} else {
-						expect(delay, ctx(step, "install-ladder-positive")).toBeGreaterThan(0);
-						expect(delay, ctx(step, "install-ladder-capped")).toBeLessThanOrEqual(
-							Math.max(...INSTALL_TRANSIENT_COOLDOWNS_MS),
+						expect(delay, ctx(step, "install-ladder-positive")).toBeGreaterThan(
+							0,
 						);
+						expect(
+							delay,
+							ctx(step, "install-ladder-capped"),
+						).toBeLessThanOrEqual(Math.max(...INSTALL_TRANSIENT_COOLDOWNS_MS));
 					}
 				} else {
 					model.probeAttempts += 1;
-					const expected = transientRetryDelayMs(model.probeAttempts, cause, maxCooldownMs);
-					expect(delay, ctx(step, "probe-ladder-matches-oracle")).toBe(expected);
-					expect(delay, ctx(step, "probe-ladder-capped")).toBeLessThanOrEqual(maxCooldownMs);
+					const expected = transientRetryDelayMs(
+						model.probeAttempts,
+						cause,
+						maxCooldownMs,
+					);
+					expect(delay, ctx(step, "probe-ladder-matches-oracle")).toBe(
+						expected,
+					);
+					expect(delay, ctx(step, "probe-ladder-capped")).toBeLessThanOrEqual(
+						maxCooldownMs,
+					);
 					recordNonStallProbeDelay(step, cause, delay);
 				}
 			}
@@ -263,12 +287,17 @@ describe("availability latch: state-machine property tests (#1609)", () => {
 			 * deliberate flat 5 s softening, a separate subsequence from the
 			 * escalating one (see `transientRetryDelayMs`'s doc comment).
 			 */
-			function recordNonStallProbeDelay(step: number, cause: AvailabilityCause, delay: number): void {
+			function recordNonStallProbeDelay(
+				step: number,
+				cause: AvailabilityCause,
+				delay: number,
+			): void {
 				if (cause === "host-stall") return;
 				if (model.lastNonStallProbeDelay !== null) {
-					expect(delay, ctx(step, "probe-ladder-monotone-vs-previous-actual")).toBeGreaterThanOrEqual(
-						model.lastNonStallProbeDelay,
-					);
+					expect(
+						delay,
+						ctx(step, "probe-ladder-monotone-vs-previous-actual"),
+					).toBeGreaterThanOrEqual(model.lastNonStallProbeDelay);
 				}
 				model.lastNonStallProbeDelay = delay;
 			}
@@ -289,8 +318,15 @@ describe("availability latch: state-machine property tests (#1609)", () => {
 				// noteAvailable() may clear it. Pairs with invariant 2/4: the ONLY
 				// escape hatches are re-arm and recovery, never the clock.
 				const exhausted = latch.isInstallExhausted();
-				if (exhausted || outcome === "missing" || outcome === "non-installable") {
-					expect(latch.read(), ctx(step, `${tag}:durable-time-independent`)).toBe(false);
+				if (
+					exhausted ||
+					outcome === "missing" ||
+					outcome === "non-installable"
+				) {
+					expect(
+						latch.read(),
+						ctx(step, `${tag}:durable-time-independent`),
+					).toBe(false);
 				}
 
 				// Invariant 1's other half (#1609 review F1): a durable-missing verdict
@@ -299,8 +335,15 @@ describe("availability latch: state-machine property tests (#1609)", () => {
 				// re-probe), not stay `false` forever. This is the canonical
 				// #1467/#1490 defect: a transient failure surviving as a permanent
 				// "unavailable" because nothing ever asked read() to reconsider it.
-				if (outcome === "transient" && !exhausted && Date.now() >= latch.getRetryAtMs()) {
-					expect(latch.read(), ctx(step, `${tag}:transient-rearms-past-cooldown`)).toBeNull();
+				if (
+					outcome === "transient" &&
+					!exhausted &&
+					Date.now() >= latch.getRetryAtMs()
+				) {
+					expect(
+						latch.read(),
+						ctx(step, `${tag}:transient-rearms-past-cooldown`),
+					).toBeNull();
 				}
 
 				// read() is idempotent absent an intervening event or time advance.
@@ -317,9 +360,17 @@ describe("availability latch: state-machine property tests (#1609)", () => {
 				model.lastNonStallProbeDelay = null;
 				// Invariant 4: recovery reachable from every state.
 				expect(latch.read(), ctx(step, "heal-reads-true")).toBe(true);
-				expect(latch.getOutcome(), ctx(step, "heal-outcome-success")).toBe("success");
-				expect(latch.isInstallExhausted(), ctx(step, "heal-clears-exhaustion")).toBe(false);
-				expect(latch.isProvisional(), ctx(step, "heal-clears-provisional")).toBe(false);
+				expect(latch.getOutcome(), ctx(step, "heal-outcome-success")).toBe(
+					"success",
+				);
+				expect(
+					latch.isInstallExhausted(),
+					ctx(step, "heal-clears-exhaustion"),
+				).toBe(false);
+				expect(
+					latch.isProvisional(),
+					ctx(step, "heal-clears-provisional"),
+				).toBe(false);
 			}
 
 			function doSessionRearm(step: number): void {
@@ -336,7 +387,10 @@ describe("availability latch: state-machine property tests (#1609)", () => {
 				expect(latch.read(), ctx(step, "rearm-read-null")).toBeNull();
 				expect(latch.getOutcome(), ctx(step, "rearm-outcome-null")).toBeNull();
 				expect(latch.getCause(), ctx(step, "rearm-cause-null")).toBeNull();
-				expect(latch.isInstallExhausted(), ctx(step, "rearm-not-exhausted")).toBe(false);
+				expect(
+					latch.isInstallExhausted(),
+					ctx(step, "rearm-not-exhausted"),
+				).toBe(false);
 				expect(latch.getRetryAtMs(), ctx(step, "rearm-retry-zero")).toBe(0);
 			}
 
@@ -349,8 +403,14 @@ describe("availability latch: state-machine property tests (#1609)", () => {
 				if (wasExhausted) {
 					// syncInstallGeneration clears the WHOLE verdict when the state IS
 					// the exhausted verdict (#1497 review F1).
-					expect(afterSync, ctx(step, "install-bump-clears-whole-verdict")).toBeNull();
-					expect(latch.getOutcome(), ctx(step, "install-bump-outcome-null")).toBeNull();
+					expect(
+						afterSync,
+						ctx(step, "install-bump-clears-whole-verdict"),
+					).toBeNull();
+					expect(
+						latch.getOutcome(),
+						ctx(step, "install-bump-outcome-null"),
+					).toBeNull();
 					model.probeAttempts = 0;
 					model.installAttempts = 0;
 					model.sawOnlyTransientEvidence = true;
@@ -376,26 +436,36 @@ describe("availability latch: state-machine property tests (#1609)", () => {
 					const shape = pick(rng, TRANSIENT_SHAPES)();
 					const stalled = chance(rng, 0.4);
 					const hostStallMs = stalled
-						? randInt(rng, HOST_STALL_EVIDENCE_MS, HOST_STALL_EVIDENCE_MS + 3000)
+						? randInt(
+								rng,
+								HOST_STALL_EVIDENCE_MS,
+								HOST_STALL_EVIDENCE_MS + 3000,
+							)
 						: randInt(rng, 0, HOST_STALL_EVIDENCE_MS - 100);
-					const { outcome, cause } = classifyProbeFailure(shape, { hostStallMs });
-					expect(outcome, ctx(step, "transient-shape-classifies-transient")).toBe(
-						"transient",
-					);
+					const { outcome, cause } = classifyProbeFailure(shape, {
+						hostStallMs,
+					});
+					expect(
+						outcome,
+						ctx(step, "transient-shape-classifies-transient"),
+					).toBe("transient");
 					trace.push(`transient(${cause},${operationClass})`);
 					applyFailure(step, outcome, cause, operationClass);
 				} else if (roll < 0.24) {
 					// Genuinely missing tool.
 					const { outcome, cause } = classifyProbeFailure(missingShape());
-					expect(outcome, ctx(step, "missing-shape-classifies-missing")).toBe("missing");
+					expect(outcome, ctx(step, "missing-shape-classifies-missing")).toBe(
+						"missing",
+					);
 					trace.push("missing");
 					applyFailure(step, outcome, cause, operationClass);
 				} else if (roll < 0.3) {
 					// Present tool that genuinely rejects its probe args — durable, correctly.
 					const { outcome, cause } = classifyProbeFailure(rejectingShape());
-					expect(outcome, ctx(step, "reject-shape-classifies-non-installable")).toBe(
-						"non-installable",
-					);
+					expect(
+						outcome,
+						ctx(step, "reject-shape-classifies-non-installable"),
+					).toBe("non-installable");
 					trace.push("reject");
 					applyFailure(step, outcome, cause, operationClass);
 				} else if (roll < 0.38) {
@@ -403,7 +473,9 @@ describe("availability latch: state-machine property tests (#1609)", () => {
 					const { outcome, cause } = classifyProbeFailure(unknownShape(), {
 						unclassifiedFailureOutcome: "transient",
 					});
-					expect(outcome, ctx(step, "unknown-shape-downgrade-honored")).toBe("transient");
+					expect(outcome, ctx(step, "unknown-shape-downgrade-honored")).toBe(
+						"transient",
+					);
 					trace.push(`unknown-downgraded(${operationClass})`);
 					applyFailure(step, outcome, cause, operationClass);
 				} else if (roll < 0.46) {
@@ -415,10 +487,16 @@ describe("availability latch: state-machine property tests (#1609)", () => {
 					// install-class ladder exactly like noteAvailable() does, even though
 					// the probe-class ladder keeps escalating (the win didn't come for free).
 					model.installAttempts = 0;
-					const expected = transientRetryDelayMs(model.probeAttempts, cause, maxCooldownMs);
+					const expected = transientRetryDelayMs(
+						model.probeAttempts,
+						cause,
+						maxCooldownMs,
+					);
 					expect(delay, ctx(step, "provisional-matches-oracle")).toBe(expected);
 					expect(latch.read(), ctx(step, "provisional-serves-true")).toBe(true);
-					expect(latch.isProvisional(), ctx(step, "provisional-flag-set")).toBe(true);
+					expect(latch.isProvisional(), ctx(step, "provisional-flag-set")).toBe(
+						true,
+					);
 					recordNonStallProbeDelay(step, cause, delay);
 					trace.push(`provisional(${cause})`);
 				} else if (roll < 0.56) {
@@ -432,7 +510,8 @@ describe("availability latch: state-machine property tests (#1609)", () => {
 				} else if (roll < 0.76) {
 					// Time advance to just past the effective cooldown.
 					const gate = latch.getRetryAtMs();
-					const delta = gate > Date.now() ? gate - Date.now() + 1 : randInt(rng, 1, 500);
+					const delta =
+						gate > Date.now() ? gate - Date.now() + 1 : randInt(rng, 1, 500);
 					vi.setSystemTime(new Date(Date.now() + delta));
 					trace.push("advance-past-cooldown");
 				} else if (roll < 0.82) {
@@ -464,11 +543,14 @@ describe("availability latch: state-machine property tests (#1609)", () => {
 			// (roughly) half the runs each, rather than almost never.
 			for (
 				let i = 0;
-				i < INSTALL_TRANSIENT_COOLDOWNS_MS.length + 2 && !latch.isInstallExhausted();
+				i < INSTALL_TRANSIENT_COOLDOWNS_MS.length + 2 &&
+				!latch.isInstallExhausted();
 				i += 1
 			) {
 				const shape = TRANSIENT_SHAPES[0]();
-				const { outcome, cause } = classifyProbeFailure(shape, { hostStallMs: 0 });
+				const { outcome, cause } = classifyProbeFailure(shape, {
+					hostStallMs: 0,
+				});
 				trace.push("tail-install-transient");
 				applyFailure(STEPS_PER_RUN, outcome, cause, "install");
 			}
@@ -495,7 +577,9 @@ describe("availability latch: state-machine property tests (#1609)", () => {
 			// episode is bounded by session-start resets (which reset the ledger
 			// alongside the latch): "Once per session, matching the latch's own
 			// lifetime: both re-arm at session_start."
-			const group = getDegradationSummary().find((entry) => entry.kind === LEDGER_KIND);
+			const group = getDegradationSummary().find(
+				(entry) => entry.kind === LEDGER_KIND,
+			);
 			const expectedCount = model.ledgerHadExhaustionThisEpisode ? 1 : 0;
 			expect(
 				group?.count ?? 0,

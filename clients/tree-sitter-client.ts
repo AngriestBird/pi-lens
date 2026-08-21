@@ -134,8 +134,7 @@ export interface TreeSitterParserCounters {
 }
 
 export interface TreeSitterParseCacheStats
-	extends TreeCacheStats,
-		TreeSitterParserCounters {}
+	extends TreeCacheStats, TreeSitterParserCounters {}
 
 type ParseCacheMeasurement = TreeCacheCounters & TreeSitterParserCounters;
 
@@ -401,20 +400,32 @@ export class TreeSitterClient {
 	private static readonly QUERY_BATCH_CACHE_MAX_ENTRIES = 256;
 
 	private queryCacheCap(): number {
-		const value = Number.parseInt(process.env.PI_LENS_TREE_SITTER_QUERY_CACHE_CAP ?? "", 10);
-		return Number.isSafeInteger(value) && value > 0 ? value : TreeSitterClient.QUERY_CACHE_MAX_ENTRIES;
+		const value = Number.parseInt(
+			process.env.PI_LENS_TREE_SITTER_QUERY_CACHE_CAP ?? "",
+			10,
+		);
+		return Number.isSafeInteger(value) && value > 0
+			? value
+			: TreeSitterClient.QUERY_CACHE_MAX_ENTRIES;
 	}
 
 	private queryBatchCacheCap(): number {
-		const value = Number.parseInt(process.env.PI_LENS_TREE_SITTER_QUERY_BATCH_CACHE_CAP ?? "", 10);
-		return Number.isSafeInteger(value) && value > 0 ? value : TreeSitterClient.QUERY_BATCH_CACHE_MAX_ENTRIES;
+		const value = Number.parseInt(
+			process.env.PI_LENS_TREE_SITTER_QUERY_BATCH_CACHE_CAP ?? "",
+			10,
+		);
+		return Number.isSafeInteger(value) && value > 0
+			? value
+			: TreeSitterClient.QUERY_BATCH_CACHE_MAX_ENTRIES;
 	}
 
 	private cacheQuery(key: string, value: any): void {
 		this.queryCache.delete(key);
 		this.queryCache.set(key, value);
 		while (this.queryCache.size > this.queryCacheCap()) {
-			const oldest = this.queryCache.entries().next().value as [string, any] | undefined;
+			const oldest = this.queryCache.entries().next().value as
+				| [string, any]
+				| undefined;
 			if (!oldest) break;
 			this.queryCache.delete(oldest[0]);
 			oldest[1]?.query?.delete?.();
@@ -425,7 +436,9 @@ export class TreeSitterClient {
 		this.queryBatchCache.delete(key);
 		this.queryBatchCache.set(key, value);
 		while (this.queryBatchCache.size > this.queryBatchCacheCap()) {
-			const oldest = this.queryBatchCache.entries().next().value as [string, QueryBatch | null] | undefined;
+			const oldest = this.queryBatchCache.entries().next().value as
+				| [string, QueryBatch | null]
+				| undefined;
 			if (!oldest) break;
 			this.queryBatchCache.delete(oldest[0]);
 			oldest[1]?.query?.delete?.();
@@ -2303,9 +2316,7 @@ export class TreeSitterClient {
 			}
 		}
 		// JavaScript attaches it to the switch body as the case's next sibling.
-		const siblings = (caseNode.parent?.children ?? []).filter(
-			(c) => c.isNamed,
-		);
+		const siblings = (caseNode.parent?.children ?? []).filter((c) => c.isNamed);
 		const index = siblings.findIndex(
 			(c) => c.startIndex === caseNode.startIndex,
 		);
@@ -2388,9 +2399,7 @@ export class TreeSitterClient {
 				(c) => c.type === "finally_clause",
 			);
 			if (tryTerminates) {
-				return catches.every((c) =>
-					this.statementTerminates(c, depth + 1),
-				);
+				return catches.every((c) => this.statementTerminates(c, depth + 1));
 			}
 			return !!fin && this.statementTerminates(fin, depth + 1);
 		}
@@ -2607,7 +2616,11 @@ export class TreeSitterClient {
 
 		// Ambiguous (shadowed/duplicated), reassigned anywhere, or backed by a
 		// non-const binding somewhere in the file: refuse to resolve.
-		if (hasNonConstBinding || hasReassignment || constDeclarators.length !== 1) {
+		if (
+			hasNonConstBinding ||
+			hasReassignment ||
+			constDeclarators.length !== 1
+		) {
 			return null;
 		}
 		return constDeclarators[0].childForFieldName?.("value") ?? null;
@@ -2832,9 +2845,9 @@ export class TreeSitterClient {
 				this.importedAs(ctorName, rootNode) === "URL");
 		if (!isUrlCtor) return false;
 
-		const args = (value.childForFieldName?.("arguments")?.children ?? []).filter(
-			(c) => c.isNamed && c.type !== "comment",
-		);
+		const args = (
+			value.childForFieldName?.("arguments")?.children ?? []
+		).filter((c) => c.isNamed && c.type !== "comment");
 		if (args.length === 0) return false;
 		// First arg (relative path / full URL) must be a literal.
 		if (!this.isFixedUrlLiteralExpr(args[0])) return false;
@@ -2975,9 +2988,7 @@ export class TreeSitterClient {
 							);
 						const name =
 							opening?.childForFieldName?.("name") ??
-							opening?.children?.find(
-								(child) => child.type === "identifier",
-							);
+							opening?.children?.find((child) => child.type === "identifier");
 						return name?.text === "a";
 					};
 
@@ -3011,8 +3022,7 @@ export class TreeSitterClient {
 					}
 					return false;
 				} catch (error) {
-					const reason =
-						error instanceof Error ? error.message : String(error);
+					const reason = error instanceof Error ? error.message : String(error);
 					this.reportPostFilterFailure(
 						postFilter,
 						`tree walk failed${reason ? `: ${reason}` : ""}`,
@@ -3067,7 +3077,11 @@ export class TreeSitterClient {
 					const method = captures.METHOD?.text ?? "";
 					if (!body || !method) return true;
 					const stack = [body];
-					for (let visited = 0; stack.length > 0 && visited < 10_000; visited++) {
+					for (
+						let visited = 0;
+						stack.length > 0 && visited < 10_000;
+						visited++
+					) {
 						const node = stack.pop();
 						if (!node) break;
 						if (
@@ -3091,7 +3105,11 @@ export class TreeSitterClient {
 					const assertionNames =
 						/^(?:assert\w*|fail|verify|expect|check|assume\w*)$/i;
 					const stack = [body];
-					for (let visited = 0; stack.length > 0 && visited < 10_000; visited++) {
+					for (
+						let visited = 0;
+						stack.length > 0 && visited < 10_000;
+						visited++
+					) {
 						const node = stack.pop();
 						if (!node) break;
 						if (node.type === "method_invocation") {
@@ -3127,11 +3145,13 @@ export class TreeSitterClient {
 					// (U+0008), not a regex word-boundary escape — that requires
 					// the literal two-character sequence `\\b`. The identifier
 					// itself must also be regex-escaped (#1089 P2).
-					const resourceWord = new RegExp(
-						`\\b${escapeRegExp(resource)}\\b`,
-					);
+					const resourceWord = new RegExp(`\\b${escapeRegExp(resource)}\\b`);
 					const stack = [scope];
-					for (let visited = 0; stack.length > 0 && visited < 10_000; visited++) {
+					for (
+						let visited = 0;
+						stack.length > 0 && visited < 10_000;
+						visited++
+					) {
 						const node = stack.pop();
 						if (!node) break;
 						if (
@@ -3164,7 +3184,11 @@ export class TreeSitterClient {
 						: undefined;
 					if (!declaration) return true;
 					const stack = [declaration];
-					for (let visited = 0; stack.length > 0 && visited < 10_000; visited++) {
+					for (
+						let visited = 0;
+						stack.length > 0 && visited < 10_000;
+						visited++
+					) {
 						const node = stack.pop();
 						if (!node) break;
 						// Any conditional or loop construct is a plausible base-case
@@ -3457,9 +3481,7 @@ export class TreeSitterClient {
 				// biome-ignore lint/suspicious/noExplicitAny: AST iteration
 				const hasExceptionSpec = clauseNode.children.some((c: any) => {
 					if (!c.isNamed) return false;
-					return (
-						c.type !== "block"
-					);
+					return c.type !== "block";
 				});
 				// Fire ONLY when bare (no exception spec)
 				return !hasExceptionSpec;

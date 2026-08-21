@@ -3617,7 +3617,10 @@ export async function acquireManagedInstallGate(
 		};
 	}
 	if (!assertInstallAllowed(context)) {
-		return { ok: false, reason: `project trust: ${projectTrustDenialReason()}` };
+		return {
+			ok: false,
+			reason: `project trust: ${projectTrustDenialReason()}`,
+		};
 	}
 	// Held for the whole strategy call, not just the final write — a refresh
 	// can race a concurrent `ensureTool` install of the SAME tool into the SAME
@@ -3673,7 +3676,9 @@ export async function refreshManagedTool(
 	// which would otherwise make the switch look non-exhaustive.
 	const strategy = tool.installStrategy;
 
-	const gate = await acquireManagedInstallGate(`managed tool refresh: ${toolId}`);
+	const gate = await acquireManagedInstallGate(
+		`managed tool refresh: ${toolId}`,
+	);
 	if (!gate.ok) {
 		return { ok: false, unchanged: true, declined: true, reason: gate.reason };
 	}
@@ -4267,7 +4272,9 @@ async function installArchiveTool(
 			logSessionStart(
 				`archive-install ${tool.id}: extraction failed: ${extracted.stderr} — keeping installed version`,
 			);
-			await fs.rm(tmpExtractDir, { recursive: true, force: true }).catch(() => {});
+			await fs
+				.rm(tmpExtractDir, { recursive: true, force: true })
+				.catch(() => {});
 			return undefined;
 		}
 
@@ -4285,7 +4292,9 @@ async function installArchiveTool(
 				logSessionStart(
 					`archive-install ${tool.id}: tree marker not found at ${tmpMarker} after extraction — keeping installed version`,
 				);
-				await fs.rm(tmpExtractDir, { recursive: true, force: true }).catch(() => {});
+				await fs
+					.rm(tmpExtractDir, { recursive: true, force: true })
+					.catch(() => {});
 				return undefined;
 			}
 			await swapExtractedDir(tool.id, tmpExtractDir, extractDir);
@@ -4309,7 +4318,9 @@ async function installArchiveTool(
 			logSessionStart(
 				`archive-install ${tool.id}: launcher not found at ${tmpResolvedInner} after extraction — keeping installed version`,
 			);
-			await fs.rm(tmpExtractDir, { recursive: true, force: true }).catch(() => {});
+			await fs
+				.rm(tmpExtractDir, { recursive: true, force: true })
+				.catch(() => {});
 			return undefined;
 		}
 		if (!isWindows) await fs.chmod(tmpResolvedInner, 0o750).catch(() => {});
@@ -4348,7 +4359,9 @@ async function installArchiveTool(
 		return shimPath;
 	} catch (err) {
 		await fs.rm(tmpArchive, { force: true }).catch(() => {});
-		await fs.rm(tmpExtractDir, { recursive: true, force: true }).catch(() => {});
+		await fs
+			.rm(tmpExtractDir, { recursive: true, force: true })
+			.catch(() => {});
 		logSessionStart(
 			`archive-install ${tool.id}: install failed: ${(err as Error).message} — keeping installed version`,
 		);
@@ -4753,9 +4766,8 @@ async function finishInstallAttempt(
 		// (dependency-checker.js already imports this module dynamically for the
 		// same reason).
 		try {
-			const { resetMadgeManagedPathMemo } = await import(
-				"../dependency-checker.js"
-			);
+			const { resetMadgeManagedPathMemo } =
+				await import("../dependency-checker.js");
 			resetMadgeManagedPathMemo();
 		} catch (err) {
 			logSessionStart(

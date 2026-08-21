@@ -110,7 +110,9 @@ function parseElixirOutput(
 					diagnostics.push({
 						id: `elixir-check-${severity}-${lineStr}-${colStr || "1"}`,
 						message:
-							severity === "error" ? `[error] ${message.trim()}` : message.trim(),
+							severity === "error"
+								? `[error] ${message.trim()}`
+								: message.trim(),
 						filePath,
 						line: Number.parseInt(lineStr, 10) || 1,
 						column: Number.parseInt(colStr || "1", 10) || 1,
@@ -134,7 +136,8 @@ function parseElixirOutput(
 		if (!matchesTarget(sourcePath)) continue;
 		diagnostics.push({
 			id: `elixir-check-${severity}-${lineStr}-${colStr || "1"}`,
-			message: severity === "error" ? `[error] ${message.trim()}` : message.trim(),
+			message:
+				severity === "error" ? `[error] ${message.trim()}` : message.trim(),
 			filePath,
 			line: Number.parseInt(lineStr, 10) || 1,
 			column: Number.parseInt(colStr || "1", 10) || 1,

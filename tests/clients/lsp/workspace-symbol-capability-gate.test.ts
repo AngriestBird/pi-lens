@@ -17,9 +17,7 @@ import { describe, expect, it, vi } from "vitest";
 import { LSPService } from "../../../clients/lsp/index.js";
 
 function makeFakeClient(supportsWorkspaceSymbol: boolean, alive = true) {
-	const workspaceSymbol = vi.fn(async () => [
-		{ name: "greet", kind: 12 },
-	]);
+	const workspaceSymbol = vi.fn(async () => [{ name: "greet", kind: 12 }]);
 	return {
 		workspaceSymbol,
 		isAlive: () => alive,

@@ -15,7 +15,10 @@ import {
 	dispatchForFile as runDispatchForFile,
 } from "../../../clients/dispatch/dispatcher.js";
 import { FactStore } from "../../../clients/dispatch/fact-store.js";
-import type { RunnerGroup, RunnerResult } from "../../../clients/dispatch/types.js";
+import type {
+	RunnerGroup,
+	RunnerResult,
+} from "../../../clients/dispatch/types.js";
 import {
 	getCurrentPhase,
 	getPhaseForWindow,
@@ -47,32 +50,28 @@ describe("runRunner timeout behavior", () => {
 		clearCoverageNoticeState();
 	});
 
-	it(
-		"fires at runner-level timeoutMs, not the 30 s global default",
-		async () => {
-			// runner never resolves — only the dispatcher timeout can settle this
-			registry.register({
-				id: "slow-tool",
-				appliesTo: ["jsts"],
-				priority: 10,
-				enabledByDefault: true,
-				timeoutMs: 30,
-				async run(): Promise<RunnerResult> {
-					return new Promise(() => {});
-				},
-			});
+	it("fires at runner-level timeoutMs, not the 30 s global default", async () => {
+		// runner never resolves — only the dispatcher timeout can settle this
+		registry.register({
+			id: "slow-tool",
+			appliesTo: ["jsts"],
+			priority: 10,
+			enabledByDefault: true,
+			timeoutMs: 30,
+			async run(): Promise<RunnerResult> {
+				return new Promise(() => {});
+			},
+		});
 
-			const ctx = createMockContext("test.ts");
-			const result = await dispatchForFile(ctx, [
-				{ mode: "all", runnerIds: ["slow-tool"] },
-			]);
+		const ctx = createMockContext("test.ts");
+		const result = await dispatchForFile(ctx, [
+			{ mode: "all", runnerIds: ["slow-tool"] },
+		]);
 
-			// timed out → no diagnostics, no blockers
-			expect(result.diagnostics).toHaveLength(0);
-			expect(result.hasBlockers).toBe(false);
-		},
-		500,
-	);
+		// timed out → no diagnostics, no blockers
+		expect(result.diagnostics).toHaveLength(0);
+		expect(result.hasBlockers).toBe(false);
+	}, 500);
 
 	it("does not cut off a runner that finishes before its timeoutMs", async () => {
 		registry.register({
@@ -108,80 +107,73 @@ describe("runRunner timeout behavior", () => {
 		expect(result.diagnostics[0].id).toBe("fast-warn");
 	});
 
-	it(
-		"returns failed/empty when the runner throws before its timeoutMs",
-		async () => {
-			registry.register({
-				id: "exploding",
-				appliesTo: ["jsts"],
-				priority: 10,
-				enabledByDefault: true,
-				timeoutMs: 5_000,
-				async run(): Promise<RunnerResult> {
-					throw new Error("runner blew up");
-				},
-			});
+	it("returns failed/empty when the runner throws before its timeoutMs", async () => {
+		registry.register({
+			id: "exploding",
+			appliesTo: ["jsts"],
+			priority: 10,
+			enabledByDefault: true,
+			timeoutMs: 5_000,
+			async run(): Promise<RunnerResult> {
+				throw new Error("runner blew up");
+			},
+		});
 
-			const ctx = createMockContext("test.ts");
-			const result = await dispatchForFile(ctx, [
-				{ mode: "all", runnerIds: ["exploding"] },
-			]);
+		const ctx = createMockContext("test.ts");
+		const result = await dispatchForFile(ctx, [
+			{ mode: "all", runnerIds: ["exploding"] },
+		]);
 
-			expect(result.diagnostics).toHaveLength(0);
-			expect(result.hasBlockers).toBe(false);
-		},
-	);
+		expect(result.diagnostics).toHaveLength(0);
+		expect(result.hasBlockers).toBe(false);
+	});
 
-	it(
-		"slow runner times out while fast runner in the same group still returns its diagnostics",
-		async () => {
-			// slow-a never resolves — times out at 30 ms
-			registry.register({
-				id: "slow-a",
-				appliesTo: ["jsts"],
-				priority: 10,
-				enabledByDefault: true,
-				timeoutMs: 30,
-				async run(): Promise<RunnerResult> {
-					return new Promise(() => {});
-				},
-			});
+	it("slow runner times out while fast runner in the same group still returns its diagnostics", async () => {
+		// slow-a never resolves — times out at 30 ms
+		registry.register({
+			id: "slow-a",
+			appliesTo: ["jsts"],
+			priority: 10,
+			enabledByDefault: true,
+			timeoutMs: 30,
+			async run(): Promise<RunnerResult> {
+				return new Promise(() => {});
+			},
+		});
 
-			// fast-b resolves immediately
-			registry.register({
-				id: "fast-b",
-				appliesTo: ["jsts"],
-				priority: 11,
-				enabledByDefault: true,
-				timeoutMs: 5_000,
-				async run(): Promise<RunnerResult> {
-					return {
-						status: "succeeded",
-						diagnostics: [
-							{
-								id: "b-warn",
-								message: "from fast-b",
-								filePath: "test.ts",
-								severity: "warning",
-								semantic: "warning",
-								tool: "fast-b",
-							},
-						],
-						semantic: "warning",
-					};
-				},
-			});
+		// fast-b resolves immediately
+		registry.register({
+			id: "fast-b",
+			appliesTo: ["jsts"],
+			priority: 11,
+			enabledByDefault: true,
+			timeoutMs: 5_000,
+			async run(): Promise<RunnerResult> {
+				return {
+					status: "succeeded",
+					diagnostics: [
+						{
+							id: "b-warn",
+							message: "from fast-b",
+							filePath: "test.ts",
+							severity: "warning",
+							semantic: "warning",
+							tool: "fast-b",
+						},
+					],
+					semantic: "warning",
+				};
+			},
+		});
 
-			const ctx = createMockContext("test.ts");
-			const result = await dispatchForFile(ctx, [
-				// mode "all" runs both; slow-a times out, fast-b succeeds
-				{ mode: "all", runnerIds: ["slow-a", "fast-b"] },
-			]);
+		const ctx = createMockContext("test.ts");
+		const result = await dispatchForFile(ctx, [
+			// mode "all" runs both; slow-a times out, fast-b succeeds
+			{ mode: "all", runnerIds: ["slow-a", "fast-b"] },
+		]);
 
-			expect(result.diagnostics.map((d) => d.id)).toEqual(["b-warn"]);
-		},
-		500,
-	);
+		expect(result.diagnostics.map((d) => d.id)).toEqual(["b-warn"]);
+	}, 500);
 });
 
 // #1723: runRunner is the hot dispatch path a synchronous CPU hog (ast-grep,
@@ -274,27 +266,23 @@ describe("runRunner in-flight phase attribution (#1723)", () => {
 		expect(getCurrentPhase()).toBeUndefined();
 	});
 
-	it(
-		"clears the slot when the runner times out",
-		async () => {
-			registry.register({
-				id: "slow-tool",
-				appliesTo: ["jsts"],
-				priority: 10,
-				enabledByDefault: true,
-				timeoutMs: 30,
-				async run(): Promise<RunnerResult> {
-					return new Promise(() => {});
-				},
-			});
+	it("clears the slot when the runner times out", async () => {
+		registry.register({
+			id: "slow-tool",
+			appliesTo: ["jsts"],
+			priority: 10,
+			enabledByDefault: true,
+			timeoutMs: 30,
+			async run(): Promise<RunnerResult> {
+				return new Promise(() => {});
+			},
+		});
 
-			const ctx = createMockContext("test.ts");
-			await dispatchForFile(ctx, [{ mode: "all", runnerIds: ["slow-tool"] }]);
+		const ctx = createMockContext("test.ts");
+		await dispatchForFile(ctx, [{ mode: "all", runnerIds: ["slow-tool"] }]);
 
-			expect(getCurrentPhase()).toBeUndefined();
-		},
-		500,
-	);
+		expect(getCurrentPhase()).toBeUndefined();
+	}, 500);
 });
 
 // #1723 review round: the earlier single-slot design was probe-proven wrong
@@ -371,7 +359,10 @@ describe("runRunner in-flight phase attribution against real parallel groups (#1
 		const dispatchStartMs = Date.now();
 		const dispatchPromise = dispatchForFile(
 			ctx,
-			groupOrder.map((runnerId) => ({ mode: "all" as const, runnerIds: [runnerId] })),
+			groupOrder.map((runnerId) => ({
+				mode: "all" as const,
+				runnerIds: [runnerId],
+			})),
 		);
 
 		// Flush a REAL macrotask (50ms, not 0) so the idle group's whole
@@ -389,75 +380,69 @@ describe("runRunner in-flight phase attribution against real parallel groups (#1
 		return { duringHog, afterHog };
 	}
 
-	it(
-		"names the CPU hog via getPhaseForWindow when the hog's group is listed first",
-		async () => {
-			const { duringHog, afterHog } = await runParallelHogAndIdle(["cpu-hog", "idle"]);
-			expect(duringHog?.phase).toBe("cpu-hog");
-			expect(duringHog?.stillRunning).toBe(true);
-			// Once the hog also finishes, it is still the right answer — now as
-			// a CLOSED bracket rather than a live one (the closed-ring half of
-			// getPhaseForWindow, not just the live-map half).
-			expect(afterHog?.phase).toBe("cpu-hog");
-			expect(afterHog?.stillRunning).toBe(false);
-		},
-		2_000,
-	);
+	it("names the CPU hog via getPhaseForWindow when the hog's group is listed first", async () => {
+		const { duringHog, afterHog } = await runParallelHogAndIdle([
+			"cpu-hog",
+			"idle",
+		]);
+		expect(duringHog?.phase).toBe("cpu-hog");
+		expect(duringHog?.stillRunning).toBe(true);
+		// Once the hog also finishes, it is still the right answer — now as
+		// a CLOSED bracket rather than a live one (the closed-ring half of
+		// getPhaseForWindow, not just the live-map half).
+		expect(afterHog?.phase).toBe("cpu-hog");
+		expect(afterHog?.stillRunning).toBe(false);
+	}, 2_000);
 
-	it(
-		"names the CPU hog via getPhaseForWindow when the IDLE runner's group is listed first (flipped order)",
-		async () => {
-			const { duringHog, afterHog } = await runParallelHogAndIdle(["idle", "cpu-hog"]);
-			expect(duringHog?.phase).toBe("cpu-hog");
-			expect(duringHog?.stillRunning).toBe(true);
-			expect(afterHog?.phase).toBe("cpu-hog");
-			expect(afterHog?.stillRunning).toBe(false);
-		},
-		2_000,
-	);
+	it("names the CPU hog via getPhaseForWindow when the IDLE runner's group is listed first (flipped order)", async () => {
+		const { duringHog, afterHog } = await runParallelHogAndIdle([
+			"idle",
+			"cpu-hog",
+		]);
+		expect(duringHog?.phase).toBe("cpu-hog");
+		expect(duringHog?.stillRunning).toBe(true);
+		expect(afterHog?.phase).toBe("cpu-hog");
+		expect(afterHog?.stillRunning).toBe(false);
+	}, 2_000);
 
-	it(
-		"getCurrentPhase (test seam) agrees with getPhaseForWindow while the hog is still live",
-		async () => {
-			let hogResolve!: (r: RunnerResult) => void;
-			const hogPromise = new Promise<RunnerResult>((resolve) => {
-				hogResolve = resolve;
-			});
-			registry.register({
-				id: "cpu-hog",
-				appliesTo: ["jsts"],
-				priority: 10,
-				enabledByDefault: true,
-				timeoutMs: 5_000,
-				async run(): Promise<RunnerResult> {
-					return hogPromise;
-				},
-			});
-			registry.register({
-				id: "idle",
-				appliesTo: ["jsts"],
-				priority: 11,
-				enabledByDefault: true,
-				async run(): Promise<RunnerResult> {
-					return { status: "succeeded", diagnostics: [], semantic: "warning" };
-				},
-			});
+	it("getCurrentPhase (test seam) agrees with getPhaseForWindow while the hog is still live", async () => {
+		let hogResolve!: (r: RunnerResult) => void;
+		const hogPromise = new Promise<RunnerResult>((resolve) => {
+			hogResolve = resolve;
+		});
+		registry.register({
+			id: "cpu-hog",
+			appliesTo: ["jsts"],
+			priority: 10,
+			enabledByDefault: true,
+			timeoutMs: 5_000,
+			async run(): Promise<RunnerResult> {
+				return hogPromise;
+			},
+		});
+		registry.register({
+			id: "idle",
+			appliesTo: ["jsts"],
+			priority: 11,
+			enabledByDefault: true,
+			async run(): Promise<RunnerResult> {
+				return { status: "succeeded", diagnostics: [], semantic: "warning" };
+			},
+		});
 
-			const ctx = createMockContext("test.ts");
-			const dispatchPromise = dispatchForFile(ctx, [
-				{ mode: "all", runnerIds: ["cpu-hog"] },
-				{ mode: "all", runnerIds: ["idle"] },
-			]);
-			await new Promise((resolve) => setTimeout(resolve, 50));
+		const ctx = createMockContext("test.ts");
+		const dispatchPromise = dispatchForFile(ctx, [
+			{ mode: "all", runnerIds: ["cpu-hog"] },
+			{ mode: "all", runnerIds: ["idle"] },
+		]);
+		await new Promise((resolve) => setTimeout(resolve, 50));
 
-			expect(getCurrentPhase()?.phase).toBe("cpu-hog");
+		expect(getCurrentPhase()?.phase).toBe("cpu-hog");
 
-			hogResolve({ status: "succeeded", diagnostics: [], semantic: "warning" });
-			await dispatchPromise;
-			expect(getCurrentPhase()).toBeUndefined();
-		},
-		2_000,
-	);
+		hogResolve({ status: "succeeded", diagnostics: [], semantic: "warning" });
+		await dispatchPromise;
+		expect(getCurrentPhase()).toBeUndefined();
+	}, 2_000);
 
 	// #1723 review round 4, N1 (E1-real): the LOAD-BEARING dispatcher-level
 	// reproduction. Round 3's flipped-order tests above never actually
@@ -483,71 +468,73 @@ describe("runRunner in-flight phase attribution against real parallel groups (#1
 	// duration (300ms) relative to the real sampling lag that follows it
 	// (~15ms) — production-realistic proportions (an 18s block sampled a few
 	// ms late is a <0.1% gap).
-	it(
-		"E1-real: getPhaseForWindow names the hog over a still-live innocent runner that started well before the block window",
-		async () => {
-			let innocentResolve!: (r: RunnerResult) => void;
-			const innocentPromise = new Promise<RunnerResult>((resolve) => {
-				innocentResolve = resolve; // deliberately NOT resolved until cleanup
-			});
-			registry.register({
-				id: "innocent-parked-runner",
-				appliesTo: ["jsts"],
-				priority: 10,
-				enabledByDefault: true,
-				timeoutMs: 5_000,
-				async run(): Promise<RunnerResult> {
-					return innocentPromise;
-				},
-			});
+	it("E1-real: getPhaseForWindow names the hog over a still-live innocent runner that started well before the block window", async () => {
+		let innocentResolve!: (r: RunnerResult) => void;
+		const innocentPromise = new Promise<RunnerResult>((resolve) => {
+			innocentResolve = resolve; // deliberately NOT resolved until cleanup
+		});
+		registry.register({
+			id: "innocent-parked-runner",
+			appliesTo: ["jsts"],
+			priority: 10,
+			enabledByDefault: true,
+			timeoutMs: 5_000,
+			async run(): Promise<RunnerResult> {
+				return innocentPromise;
+			},
+		});
 
-			let hogResolve!: (r: RunnerResult) => void;
-			const hogPromise = new Promise<RunnerResult>((resolve) => {
-				hogResolve = resolve;
-			});
-			registry.register({
-				id: "cpu-hog",
-				appliesTo: ["jsts"],
-				priority: 11,
-				enabledByDefault: true,
-				timeoutMs: 5_000,
-				async run(): Promise<RunnerResult> {
-					return hogPromise;
-				},
-			});
+		let hogResolve!: (r: RunnerResult) => void;
+		const hogPromise = new Promise<RunnerResult>((resolve) => {
+			hogResolve = resolve;
+		});
+		registry.register({
+			id: "cpu-hog",
+			appliesTo: ["jsts"],
+			priority: 11,
+			enabledByDefault: true,
+			timeoutMs: 5_000,
+			async run(): Promise<RunnerResult> {
+				return hogPromise;
+			},
+		});
 
-			const ctx = createMockContext("test.ts");
+		const ctx = createMockContext("test.ts");
 
-			// The innocent runner starts FIRST and stays live well before the
-			// block window opens. Fire-and-forget: its own dispatch never
-			// resolves during this test's assertion window.
-			void dispatchForFile(ctx, [{ mode: "all", runnerIds: ["innocent-parked-runner"] }]);
-			await new Promise((resolve) => setTimeout(resolve, 100));
+		// The innocent runner starts FIRST and stays live well before the
+		// block window opens. Fire-and-forget: its own dispatch never
+		// resolves during this test's assertion window.
+		void dispatchForFile(ctx, [
+			{ mode: "all", runnerIds: ["innocent-parked-runner"] },
+		]);
+		await new Promise((resolve) => setTimeout(resolve, 100));
 
-			// The block window begins here — matching index.ts's own
-			// `[now - loopMaxMs, now]`, sized to the hog's own duration.
-			const windowStartMs = Date.now();
-			const hogDispatchPromise = dispatchForFile(ctx, [
-				{ mode: "all", runnerIds: ["cpu-hog"] },
-			]);
-			await new Promise((resolve) => setTimeout(resolve, 300));
-			hogResolve({ status: "succeeded", diagnostics: [], semantic: "warning" });
-			await hogDispatchPromise;
+		// The block window begins here — matching index.ts's own
+		// `[now - loopMaxMs, now]`, sized to the hog's own duration.
+		const windowStartMs = Date.now();
+		const hogDispatchPromise = dispatchForFile(ctx, [
+			{ mode: "all", runnerIds: ["cpu-hog"] },
+		]);
+		await new Promise((resolve) => setTimeout(resolve, 300));
+		hogResolve({ status: "succeeded", diagnostics: [], semantic: "warning" });
+		await hogDispatchPromise;
 
-			// Real, unforced sampling lag after the hog's own runRunner
-			// `finally` — never zero, and small relative to the hog's own
-			// 300ms run.
-			await new Promise((resolve) => setTimeout(resolve, 15));
-			const sampledAtMs = Date.now();
+		// Real, unforced sampling lag after the hog's own runRunner
+		// `finally` — never zero, and small relative to the hog's own
+		// 300ms run.
+		await new Promise((resolve) => setTimeout(resolve, 15));
+		const sampledAtMs = Date.now();
 
-			const attribution = getPhaseForWindow(windowStartMs, sampledAtMs);
-			expect(attribution?.phase).toBe("cpu-hog");
-			expect(attribution?.stillRunning).toBe(false);
+		const attribution = getPhaseForWindow(windowStartMs, sampledAtMs);
+		expect(attribution?.phase).toBe("cpu-hog");
+		expect(attribution?.stillRunning).toBe(false);
 
-			innocentResolve({ status: "succeeded", diagnostics: [], semantic: "warning" });
-		},
-		3_000,
-	);
+		innocentResolve({
+			status: "succeeded",
+			diagnostics: [],
+			semantic: "warning",
+		});
+	}, 3_000);
 
 	// #1723 review round 6, R4 (process finding): round 5 REMOVED this
 	// construction and called co-starting "an artifact of the test's shape"
@@ -652,11 +639,18 @@ describe("runRunner in-flight phase attribution against real parallel groups (#1
 			const sampledAtMs = coStartMs + loopMaxMs + lagMs;
 			vi.setSystemTime(sampledAtMs);
 
-			const attribution = getPhaseForWindow(sampledAtMs - loopMaxMs, sampledAtMs);
+			const attribution = getPhaseForWindow(
+				sampledAtMs - loopMaxMs,
+				sampledAtMs,
+			);
 			expect(attribution?.phase).toBe("cpu-hog");
 			expect(attribution?.stillRunning).toBe(false);
 
-			innocentResolve({ status: "succeeded", diagnostics: [], semantic: "warning" });
+			innocentResolve({
+				status: "succeeded",
+				diagnostics: [],
+				semantic: "warning",
+			});
 		} finally {
 			vi.useRealTimers();
 		}

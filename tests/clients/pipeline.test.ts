@@ -24,7 +24,10 @@ import { renderPostAutofixNotice } from "../../clients/post-autofix-notice.js";
 import { loadPiLensProjectConfig } from "../../clients/project-lens-config.js";
 import type { RuffClient } from "../../clients/ruff-client.js";
 import { TestRunnerClient } from "../../clients/test-runner-client.js";
-import { getDegradationSummary, resetDegradationLedger } from "../../clients/degradation-ledger.js";
+import {
+	getDegradationSummary,
+	resetDegradationLedger,
+} from "../../clients/degradation-ledger.js";
 import { createTempFile, setupTestEnvironment } from "../clients/test-utils.js";
 import {
 	_resetForTests as resetBusPublish,
@@ -61,9 +64,8 @@ describe("Pipeline", () => {
 		mockLSPService = createMockLSPService();
 		vi.mocked(getLSPService).mockReturnValue(mockLSPService as any);
 		vi.mocked(dispatchLintWithResult).mockReset();
-		const { resetFormatService } = await import(
-			"../../clients/format-service.js"
-		);
+		const { resetFormatService } =
+			await import("../../clients/format-service.js");
 		resetFormatService();
 	});
 
@@ -362,7 +364,9 @@ describe("Pipeline", () => {
 				expect.objectContaining({
 					kind: "formatter-failure",
 					count: 1,
-					latestReasons: [{ subject: "prettier:format-fails.ts", reason: "timed out" }],
+					latestReasons: [
+						{ subject: "prettier:format-fails.ts", reason: "timed out" },
+					],
 				}),
 			]);
 			expect(result.output).not.toMatch(/^✓ .*clean/);
@@ -398,7 +402,7 @@ describe("Pipeline", () => {
 			resetBusPublish();
 		});
 
-		it("publishes reason:\"format\" with the fixed file's path when immediate format changes content", async () => {
+		it('publishes reason:"format" with the fixed file\'s path when immediate format changes content', async () => {
 			const filePath = createTempFile(tmpDir, "unformatted.ts", "const x=1");
 			vi.mocked(dispatchLintWithResult).mockResolvedValue({
 				diagnostics: [],
@@ -451,7 +455,7 @@ describe("Pipeline", () => {
 			);
 		});
 
-		it("publishes reason:\"autofix\" with the fixed file's path when an autofix tool changes content", async () => {
+		it('publishes reason:"autofix" with the fixed file\'s path when an autofix tool changes content', async () => {
 			const filePath = createTempFile(tmpDir, "messy.ts", "const x=1");
 			vi.mocked(dispatchLintWithResult).mockResolvedValue({
 				diagnostics: [],
@@ -638,7 +642,11 @@ describe("Pipeline", () => {
 		});
 
 		it("does not publish when there are no diagnostics and the file was never dirty", async () => {
-			const filePath = createTempFile(tmpDir, "clean-diag.ts", "const x = 1;\n");
+			const filePath = createTempFile(
+				tmpDir,
+				"clean-diag.ts",
+				"const x = 1;\n",
+			);
 			vi.mocked(dispatchLintWithResult).mockResolvedValue({
 				diagnostics: [],
 				blockers: [],
@@ -996,7 +1004,11 @@ describe("Pipeline", () => {
 			// against `values.yaml:150`. That line describes different content
 			// than the file this record's past-EOF gate will check, so it must
 			// never be attributed to THIS file's record (#1641 review F2).
-			const filePath = createTempFile(tmpDir, "templates/deploy.yaml", "a: 1\n");
+			const filePath = createTempFile(
+				tmpDir,
+				"templates/deploy.yaml",
+				"a: 1\n",
+			);
 			const otherChartFile = path.join(tmpDir, "values.yaml");
 			vi.mocked(dispatchLintWithResult).mockResolvedValue({
 				diagnostics: [],

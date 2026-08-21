@@ -59,7 +59,9 @@ import { EXCLUDED_DIRS, getExcludedDirGlobs } from "./file-utils.js";
 /** Directory-name entries only — drops glob entries (e.g. `*.dSYM`) that a
  * bare directory-name/regex exclude can't express. */
 function literalExcludedDirNames(): string[] {
-	return EXCLUDED_DIRS.filter((name) => !name.includes("*") && !name.includes("?"));
+	return EXCLUDED_DIRS.filter(
+		(name) => !name.includes("*") && !name.includes("?"),
+	);
 }
 
 /**

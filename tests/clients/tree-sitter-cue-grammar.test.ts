@@ -15,7 +15,15 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import {
+	afterAll,
+	afterEach,
+	beforeAll,
+	describe,
+	expect,
+	it,
+	vi,
+} from "vitest";
 import {
 	downloadGrammarDetailed,
 	isVendoredGrammar,
@@ -162,7 +170,6 @@ describe("vendored grammars are never downloaded", () => {
 	it("still downloads a normal grammar through the CDN path", () => {
 		expect(isVendoredGrammar("tree-sitter-python.wasm")).toBe(false);
 	});
-
 });
 
 /**
@@ -196,9 +203,8 @@ describe("a missing vendored grammar on a host with no writable dir (#1520 F5)",
 		client: FetchGrammarClient;
 		recorded: Array<{ file: string; detail: string; retryable: boolean }>;
 	}> {
-		const { TreeSitterClient } = await import(
-			"../../clients/tree-sitter-client.js"
-		);
+		const { TreeSitterClient } =
+			await import("../../clients/tree-sitter-client.js");
 		const client = new TreeSitterClient() as unknown as FetchGrammarClient;
 		// The host the fix names: nothing on disk, and no writable dir anywhere.
 		client.grammarsDir = "";

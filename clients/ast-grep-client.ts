@@ -174,9 +174,7 @@ export class AstGrepClient {
 			(fs.existsSync(projectRuleDir)
 				? projectRuleDir
 				: resolvePackagePath(import.meta.url, "rules"));
-		this.log = verbose
-			? createSubsystemLogger("ast-grep")
-			: () => {};
+		this.log = verbose ? createSubsystemLogger("ast-grep") : () => {};
 		this.ruleManager = new AstGrepRuleManager(this.ruleDir, this.log);
 		this.runner = new SgRunner(verbose);
 	}

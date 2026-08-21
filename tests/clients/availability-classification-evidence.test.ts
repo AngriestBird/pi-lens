@@ -250,9 +250,8 @@ describe("govulncheck's own durable-absence arms (#1500)", () => {
 	async function govulncheck(): Promise<{
 		ensureAvailable(): Promise<boolean>;
 	}> {
-		const { GovulncheckClient } = await import(
-			"../../clients/govulncheck-client.js"
-		);
+		const { GovulncheckClient } =
+			await import("../../clients/govulncheck-client.js");
 		return new GovulncheckClient();
 	}
 
@@ -289,14 +288,13 @@ describe("govulncheck's own durable-absence arms (#1500)", () => {
 	});
 
 	it("records a durable `go install` failure as an attempt that failed", async () => {
-		safeSpawnAsync.mockImplementation(
-			async (cmd: string, args: string[]) => {
-				if (cmd !== "go") return notFoundResult;
-				if (args[0] === "version") return { stdout: "go1.22", stderr: "", status: 0 };
-				// `go install` ran and refused: module not found, compile error.
-				return { stdout: "", stderr: "no required module provides", status: 1 };
-			},
-		);
+		safeSpawnAsync.mockImplementation(async (cmd: string, args: string[]) => {
+			if (cmd !== "go") return notFoundResult;
+			if (args[0] === "version")
+				return { stdout: "go1.22", stderr: "", status: 0 };
+			// `go install` ran and refused: module not found, compile error.
+			return { stdout: "", stderr: "no required module provides", status: 1 };
+		});
 
 		expect(await (await govulncheck()).ensureAvailable()).toBe(false);
 		const last = decisions()[decisions().length - 1];
@@ -353,9 +351,8 @@ describe("govulncheck's compensating available rows (#1606)", () => {
 	async function govulncheck(): Promise<{
 		ensureAvailable(): Promise<boolean>;
 	}> {
-		const { GovulncheckClient } = await import(
-			"../../clients/govulncheck-client.js"
-		);
+		const { GovulncheckClient } =
+			await import("../../clients/govulncheck-client.js");
 		return new GovulncheckClient();
 	}
 
@@ -395,7 +392,11 @@ describe("govulncheck's compensating available rows (#1606)", () => {
 			outcome: "success",
 			cause: "ok",
 			classifiedBy: "caller",
-			evidence: { install: "succeeded", binary: "govulncheck", source: "go-install" },
+			evidence: {
+				install: "succeeded",
+				binary: "govulncheck",
+				source: "go-install",
+			},
 		});
 	});
 

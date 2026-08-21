@@ -52,9 +52,9 @@ describe("normalizeClippyLevel", () => {
 	});
 
 	it("maps an internal compiler error to error, never under-reporting", () => {
-		expect(
-			normalizeClippyLevel("error: internal compiler error"),
-		).toBe("error");
+		expect(normalizeClippyLevel("error: internal compiler error")).toBe(
+			"error",
+		);
 	});
 
 	it("falls back to warning for an unrecognized value", () => {

@@ -60,7 +60,10 @@ describe("terragrunt runner", () => {
 			const nestedDir = path.join(env.tmpDir, "infra", "stack");
 			fs.mkdirSync(nestedDir, { recursive: true });
 			const filePath = path.join(nestedDir, "terragrunt.hcl");
-			fs.writeFileSync(filePath, 'include "root" {\n  path = find_in_parent_folders()\n}\n');
+			fs.writeFileSync(
+				filePath,
+				'include "root" {\n  path = find_in_parent_folders()\n}\n',
+			);
 
 			// Clean unit: terragrunt v1.1.2 prints NOTHING (empty stdout, exit 0).
 			safeSpawnAsync.mockResolvedValue({
@@ -180,7 +183,7 @@ describe("terragrunt runner", () => {
 			const filePath = path.join(env.tmpDir, "terragrunt.hcl");
 			fs.writeFileSync(
 				filePath,
-				"locals {\n  region = \"us-east-1\"\n}\n\ninputs = {\n  region = local.does_not_exist\n}\n",
+				'locals {\n  region = "us-east-1"\n}\n\ninputs = {\n  region = local.does_not_exist\n}\n',
 			);
 
 			// No `error`: findings are a normal nonzero exit, not a spawn failure.
@@ -202,7 +205,8 @@ describe("terragrunt runner", () => {
 							highlight_end_offset: 31,
 						},
 						summary: "Unsupported attribute",
-						detail: 'This object does not have an attribute named "does_not_exist".',
+						detail:
+							'This object does not have an attribute named "does_not_exist".',
 						severity: "error",
 					},
 				]),
@@ -471,12 +475,18 @@ describe("terragrunt runner", () => {
 					{
 						severity: 2,
 						summary: "unused local",
-						range: { filename: "terragrunt.hcl", start: { line: 1, column: 1 } },
+						range: {
+							filename: "terragrunt.hcl",
+							start: { line: 1, column: 1 },
+						},
 					},
 					{
 						severity: 1,
 						summary: "invalid block",
-						range: { filename: "terragrunt.hcl", start: { line: 4, column: 1 } },
+						range: {
+							filename: "terragrunt.hcl",
+							start: { line: 4, column: 1 },
+						},
 					},
 				]),
 				stderr: "",
@@ -491,10 +501,9 @@ describe("terragrunt runner", () => {
 			expect(result.status).toBe("failed");
 			expect(result.semantic).toBe("blocking");
 			expect(result.diagnostics).toHaveLength(2);
-			expect(result.diagnostics.map((d: { severity: string }) => d.severity)).toEqual([
-				"warning",
-				"error",
-			]);
+			expect(
+				result.diagnostics.map((d: { severity: string }) => d.severity),
+			).toEqual(["warning", "error"]);
 		} finally {
 			env.cleanup();
 		}
@@ -612,9 +621,8 @@ describe("terragrunt runner", () => {
 
 describe("parseTerragruntOutput", () => {
 	async function parse(raw: string, filePath = "/repo/terragrunt.hcl") {
-		const { parseTerragruntOutput } = await import(
-			"../../../../clients/dispatch/runners/terragrunt.js"
-		);
+		const { parseTerragruntOutput } =
+			await import("../../../../clients/dispatch/runners/terragrunt.js");
 		return parseTerragruntOutput(raw, filePath);
 	}
 
@@ -673,7 +681,10 @@ describe("parseTerragruntOutput", () => {
 				{
 					severity: 1,
 					summary: "parent problem",
-					range: { filename: "../terragrunt.hcl", start: { line: 9, column: 1 } },
+					range: {
+						filename: "../terragrunt.hcl",
+						start: { line: 9, column: 1 },
+					},
 				},
 			]),
 			"/repo/infra/stack/terragrunt.hcl",
@@ -716,7 +727,11 @@ describe("parseTerragruntOutput", () => {
 	it("keeps diagnostics that carry no range.filename", async () => {
 		const diagnostics = await parse(
 			JSON.stringify([
-				{ severity: 1, summary: "unit-level", range: { start: { line: 2, column: 5 } } },
+				{
+					severity: 1,
+					summary: "unit-level",
+					range: { start: { line: 2, column: 5 } },
+				},
 			]),
 		);
 		expect(diagnostics).toHaveLength(1);
@@ -736,22 +751,33 @@ describe("parseTerragruntOutput", () => {
 	});
 
 	it("maps numeric severity 2 to a non-blocking warning", async () => {
-		const diagnostics = await parse(JSON.stringify([{ severity: 2, summary: "w" }]));
-		expect(diagnostics[0]).toMatchObject({ severity: "warning", semantic: "warning" });
+		const diagnostics = await parse(
+			JSON.stringify([{ severity: 2, summary: "w" }]),
+		);
+		expect(diagnostics[0]).toMatchObject({
+			severity: "warning",
+			semantic: "warning",
+		});
 	});
 
 	it("matches string severity case-insensitively", async () => {
 		const diagnostics = await parse(
 			JSON.stringify([{ severity: "ERROR", summary: "e" }]),
 		);
-		expect(diagnostics[0]).toMatchObject({ severity: "error", semantic: "blocking" });
+		expect(diagnostics[0]).toMatchObject({
+			severity: "error",
+			semantic: "blocking",
+		});
 	});
 
 	it("treats unknown string severities as warning", async () => {
 		const diagnostics = await parse(
 			JSON.stringify([{ severity: "info", summary: "i" }]),
 		);
-		expect(diagnostics[0]).toMatchObject({ severity: "warning", semantic: "warning" });
+		expect(diagnostics[0]).toMatchObject({
+			severity: "warning",
+			semantic: "warning",
+		});
 	});
 
 	// The dispatcher dedupes on filePath:line:column:defectClass:(rule||id) and
@@ -760,8 +786,16 @@ describe("parseTerragruntOutput", () => {
 	it("gives two findings at the same position distinct ids", async () => {
 		const diagnostics = await parse(
 			JSON.stringify([
-				{ severity: 1, summary: "unsupported block", range: { start: { line: 4, column: 2 } } },
-				{ severity: 1, summary: "unknown attribute", range: { start: { line: 4, column: 2 } } },
+				{
+					severity: 1,
+					summary: "unsupported block",
+					range: { start: { line: 4, column: 2 } },
+				},
+				{
+					severity: 1,
+					summary: "unknown attribute",
+					range: { start: { line: 4, column: 2 } },
+				},
 			]),
 		);
 		expect(diagnostics).toHaveLength(2);
@@ -770,17 +804,25 @@ describe("parseTerragruntOutput", () => {
 
 	it("changes the id when the message at a line changes", async () => {
 		const before = await parse(
-			JSON.stringify([{ severity: 1, summary: "was this", range: { start: { line: 4 } } }]),
+			JSON.stringify([
+				{ severity: 1, summary: "was this", range: { start: { line: 4 } } },
+			]),
 		);
 		const after = await parse(
-			JSON.stringify([{ severity: 1, summary: "now that", range: { start: { line: 4 } } }]),
+			JSON.stringify([
+				{ severity: 1, summary: "now that", range: { start: { line: 4 } } },
+			]),
 		);
 		expect(after[0].id).not.toBe(before[0].id);
 	});
 
 	it("keeps the id stable for the same finding across runs", async () => {
 		const payload = JSON.stringify([
-			{ severity: 1, summary: "unsupported block", range: { start: { line: 4, column: 2 } } },
+			{
+				severity: 1,
+				summary: "unsupported block",
+				range: { start: { line: 4, column: 2 } },
+			},
 		]);
 		expect((await parse(payload))[0].id).toBe((await parse(payload))[0].id);
 	});

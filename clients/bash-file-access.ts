@@ -639,7 +639,9 @@ function collectGrepCommandFiles(
 	return {
 		hasLineNumberGrep,
 		files,
-		context: truncated ? { before: 0, after: 0 } : (context ?? { before: 0, after: 0 }),
+		context: truncated
+			? { before: 0, after: 0 }
+			: (context ?? { before: 0, after: 0 }),
 	};
 }
 

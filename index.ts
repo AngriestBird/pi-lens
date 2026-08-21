@@ -27,7 +27,10 @@ import * as nodeFs from "node:fs";
 import * as path from "node:path";
 import { performance } from "node:perf_hooks";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { createDefaultHostPorts, type HostPorts } from "./clients/host-ports.js";
+import {
+	createDefaultHostPorts,
+	type HostPorts,
+} from "./clients/host-ports.js";
 import { AstGrepClient } from "./clients/ast-grep-client.js";
 import { loadBootstrapClients } from "./clients/bootstrap.js";
 import { CacheManager } from "./clients/cache-manager.js";
@@ -60,7 +63,10 @@ import {
 	sessionStartMode,
 } from "./clients/session-state-store.js";
 import { getDiagnosticTracker } from "./clients/diagnostic-tracker.js";
-import { warmDispatchIntegration, loadDispatchIntegration } from "./clients/dispatch/lazy.js";
+import {
+	warmDispatchIntegration,
+	loadDispatchIntegration,
+} from "./clients/dispatch/lazy.js";
 import {
 	getFormatService,
 	resetFormatService,
@@ -239,11 +245,17 @@ type DispatchIntegration = Awaited<ReturnType<typeof loadDispatchIntegration>>;
 let loadedDispatchIntegration: DispatchIntegration | undefined;
 
 function warmDispatchAtSessionStart(): void {
-	void warmDispatchIntegration().then((integration) => {
-		loadedDispatchIntegration = integration;
-	}).catch((err) => {
-		logExtension({ subsystem: "dispatch", level: "warn", message: `dispatch warm failed: ${err}` });
-	});
+	void warmDispatchIntegration()
+		.then((integration) => {
+			loadedDispatchIntegration = integration;
+		})
+		.catch((err) => {
+			logExtension({
+				subsystem: "dispatch",
+				level: "warn",
+				message: `dispatch warm failed: ${err}`,
+			});
+		});
 }
 
 function resetDispatchBaselines(cwd?: string): void {
@@ -394,17 +406,31 @@ export function createHostPorts(
 			// their per-subsystem files, NOT extension.log) is S4 scope; this
 			// placeholder exists so the interface is complete for contract tests.
 			sink: (subsystem) => (entry) =>
-				logExtension({ subsystem, level: "debug", message: "host sink entry", metadata: { entry } }),
+				logExtension({
+					subsystem,
+					level: "debug",
+					message: "host sink entry",
+					metadata: { entry },
+				}),
 		},
 		emit: { bus: emit },
 		status: { set: (name, value) => context()?.ui?.setStatus?.(name, value) },
-		spawn: { abortSignal: () => context()?.signal, isAllowed: assertInstallAllowed },
+		spawn: {
+			abortSignal: () => context()?.signal,
+			isAllowed: assertInstallAllowed,
+		},
 		render: { invalidate: () => options.getRenderInvalidator?.()?.() },
 		session: { id: () => getStableSessionId(context()) },
-		workspace: { cwd: () => context()?.cwd, projectRoot: () => options.getProjectRoot?.() },
+		workspace: {
+			cwd: () => context()?.cwd,
+			projectRoot: () => options.getProjectRoot?.(),
+		},
 		flags: { get: (name) => pi.getFlag(name) },
 		tools: {
-			has: async (name) => typeof (pi as unknown as { getTool?: (tool: string) => unknown }).getTool?.(name) !== "undefined",
+			has: async (name) =>
+				typeof (
+					pi as unknown as { getTool?: (tool: string) => unknown }
+				).getTool?.(name) !== "undefined",
 			getActive: () => activeTools.getActiveTools?.() ?? [],
 			setActive: (names) => activeTools.setActiveTools?.(names),
 		},
@@ -454,7 +480,9 @@ const runtime = new RuntimeCoordinator();
 // have it read the CURRENT activation's pi/flag closures through this
 // holder, refreshed on every activation — never a stale captured `pi`.
 let _readBridgeRegistered = false;
-let _readBridgeGetFlag: ((name: string) => boolean | string | undefined) | undefined;
+let _readBridgeGetFlag:
+	| ((name: string) => boolean | string | undefined)
+	| undefined;
 let _turnSummaryEmitRegistered = false;
 let _turnSummaryEmitCtx:
 	| {
@@ -772,7 +800,8 @@ function activateExtension(hostPi: ExtensionAPI) {
 			peekWriteIndex: () => runtime.peekWriteIndex(),
 			isRecordable(filePath: string): boolean {
 				if (_readBridgeGetFlag?.("no-read-guard")) return false;
-				if (isPathIgnoredByProject(filePath, runtime.projectRoot, false)) return false;
+				if (isPathIgnoredByProject(filePath, runtime.projectRoot, false))
+					return false;
 				if (isExternalOrVendorFile(filePath, runtime.projectRoot)) return false;
 				return true;
 			},
@@ -969,9 +998,8 @@ function activateExtension(hostPi: ExtensionAPI) {
 		description:
 			"Show Technical Debt Index (TDI) and project health trend. Usage: /lens-tdi",
 		handler: async (_args, ctx) => {
-			const { loadHistory, computeTDI } = await import(
-				"./clients/metrics-history.js"
-			);
+			const { loadHistory, computeTDI } =
+				await import("./clients/metrics-history.js");
 			const history = loadHistory();
 			const tdi = computeTDI(history);
 
@@ -1508,10 +1536,13 @@ function activateExtension(hostPi: ExtensionAPI) {
 			readGuard: runtime.readGuard,
 			dbg,
 		}),
-		createLensDiagnosticMarkTool(() => runtime.projectRoot, () => ({
-			model: runtime.telemetryModelId,
-			provider: runtime.telemetryProviderId,
-		})),
+		createLensDiagnosticMarkTool(
+			() => runtime.projectRoot,
+			() => ({
+				model: runtime.telemetryModelId,
+				provider: runtime.telemetryProviderId,
+			}),
+		),
 	];
 	const LAZY_TOOL_CATALOG: ActivatableToolInfo[] = [
 		{
@@ -1565,7 +1596,8 @@ function activateExtension(hostPi: ExtensionAPI) {
 			deferredToolSupport: (ctx) => {
 				try {
 					return supportsDeferredTools(
-						(ctx as { model?: Parameters<typeof supportsDeferredTools>[0] })?.model,
+						(ctx as { model?: Parameters<typeof supportsDeferredTools>[0] })
+							?.model,
 					);
 				} catch {
 					return false;
@@ -1657,10 +1689,18 @@ function activateExtension(hostPi: ExtensionAPI) {
 				resetVerifiedPathAttributionGuessCount();
 				warmDispatchAtSessionStart();
 				void warmLspService().catch((err) =>
-					logExtension({ subsystem: "lsp", level: "warn", message: `LSP warm failed: ${err}` }),
+					logExtension({
+						subsystem: "lsp",
+						level: "warn",
+						message: `LSP warm failed: ${err}`,
+					}),
 				);
 				void warmFormatters().catch((err) =>
-					logExtension({ subsystem: "format", level: "warn", message: `formatter warm failed: ${err}` }),
+					logExtension({
+						subsystem: "format",
+						level: "warn",
+						message: `formatter warm failed: ${err}`,
+					}),
 				);
 				rememberOwnEventCtx(ctx);
 				refreshCtxDerivedPlumbing();
@@ -1776,7 +1816,8 @@ function activateExtension(hostPi: ExtensionAPI) {
 						) {
 							// A fresh conversation starts with no activation memory; a
 							// rebuild inherits the parent's.
-							if (isFreshSessionStart(sessionReason)) rememberedLazyTools.clear();
+							if (isFreshSessionStart(sessionReason))
+								rememberedLazyTools.clear();
 							const lazyNames = new Set(LAZY_TOOL_CATALOG.map((t) => t.name));
 							const plan = planToolSet(
 								piWithActiveTools.getActiveTools(),
@@ -1792,8 +1833,11 @@ function activateExtension(hostPi: ExtensionAPI) {
 										? "fresh_session_lazy_deactivation"
 										: "session_rebuild_restore",
 									deferralApplies: supportsDeferredTools(
-										(ctx as { model?: Parameters<typeof supportsDeferredTools>[0] })
-											?.model,
+										(
+											ctx as {
+												model?: Parameters<typeof supportsDeferredTools>[0];
+											}
+										)?.model,
 									),
 								});
 							}
@@ -1905,7 +1949,8 @@ function activateExtension(hostPi: ExtensionAPI) {
 						rustClient,
 						deadCodeClients,
 					} = await loadBootstrapClients();
-					const bootstrapClientsDurationMs = Date.now() - bootstrapClientsStartedAt;
+					const bootstrapClientsDurationMs =
+						Date.now() - bootstrapClientsStartedAt;
 					const handlerEnteredAt = Date.now();
 					// Consume the process-lifetime measurement at the first real session
 					// start. Concurrent secondary starts never reach this handler.
@@ -1967,7 +2012,10 @@ function activateExtension(hostPi: ExtensionAPI) {
 					// a brand-new session has a fresh id with no file (→ clean), a
 					// resumed/launched one has its prior file (→ rehydrate).
 					const reasonLabel = sessionReason ?? "startup";
-					const startMode = sessionStartMode(sessionReason, !!pendingForkSnapshot);
+					const startMode = sessionStartMode(
+						sessionReason,
+						!!pendingForkSnapshot,
+					);
 					if (startMode === "fork" && pendingForkSnapshot) {
 						// Branch the forked session from the source's in-memory snapshot, then
 						// persist it under the new session id so the fork owns its own copy.
@@ -1978,9 +2026,12 @@ function activateExtension(hostPi: ExtensionAPI) {
 						// #1041: adopt the source session's read history (staleness-reconciled
 						// against current disk) so the fork isn't zero-read-blocked on files
 						// the parent already read.
-						let forkReadImport: { imported: number; dropped: number } | undefined;
+						let forkReadImport:
+							| { imported: number; dropped: number }
+							| undefined;
 						if (pendingForkReadGuard) {
-							forkReadImport = runtime.readGuard.importState(pendingForkReadGuard);
+							forkReadImport =
+								runtime.readGuard.importState(pendingForkReadGuard);
 							pendingForkReadGuard = undefined;
 						}
 						if (stableSessionId) {
@@ -2021,7 +2072,8 @@ function activateExtension(hostPi: ExtensionAPI) {
 									persisted.widget,
 									persisted.savedAt,
 								);
-								const dropped = persisted.widget.files.length - fresh.files.length;
+								const dropped =
+									persisted.widget.files.length - fresh.files.length;
 								importWidgetState(fresh);
 								// #1041: rehydrate the read-before-edit guard's read-set on the
 								// SAME path so the first post-resume edit of a previously-read
@@ -2044,7 +2096,9 @@ function activateExtension(hostPi: ExtensionAPI) {
 								);
 							}
 						} else {
-							dbg(`session_start: ${reasonLabel} — no stable session id (clean)`);
+							dbg(
+								`session_start: ${reasonLabel} — no stable session id (clean)`,
+							);
 						}
 					}
 
@@ -2218,7 +2272,10 @@ function activateExtension(hostPi: ExtensionAPI) {
 				dbg(`turn_start: cross-process nudge read failed: ${err}`);
 			});
 	};
-	pi.on("turn_start", wrapSessionEventHandler("turn_start", onTurnStart, { dbg }));
+	pi.on(
+		"turn_start",
+		wrapSessionEventHandler("turn_start", onTurnStart, { dbg }),
+	);
 
 	// #1654: `agent_end` fires every time pi's internal `_runAgentPrompt` loop
 	// finishes A run — including a run that is about to auto-retry or resume
@@ -2274,7 +2331,9 @@ function activateExtension(hostPi: ExtensionAPI) {
 		};
 	};
 
-	async function runDeferredMutationDrain(ctx: DeferredDrainCtx): Promise<void> {
+	async function runDeferredMutationDrain(
+		ctx: DeferredDrainCtx,
+	): Promise<void> {
 		const currentSessionId = getStableSessionId(ctx);
 		// #791 defense-in-depth: mirrors how session_start already skips
 		// handleSessionStart for a concurrent in-process secondary
@@ -2300,8 +2359,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 		}
 		await handleAgentEnd({
 			ctxCwd: ctx.cwd,
-			getFlag: (name: string, filePath?: string) =>
-				getLensFlag(name, filePath),
+			getFlag: (name: string, filePath?: string) => getLensFlag(name, filePath),
 			getFlagSource: (name: string, filePath?: string) =>
 				getLensFlagSource(name, filePath),
 			notify: (msg, level) => notifyUi(ctx, msg, level),
@@ -2501,7 +2559,9 @@ function activateExtension(hostPi: ExtensionAPI) {
 					// window — turn_end already knows exactly when this session
 					// began, so admitted rows are scoped to it, not to a day-wide
 					// guess that could straddle multiple sessions.
-					for (const note of checkSmellsAndNoteOnce(countRecentSmells(undefined, runtime.sessionStartedAt))) {
+					for (const note of checkSmellsAndNoteOnce(
+						countRecentSmells(undefined, runtime.sessionStartedAt),
+					)) {
 						notifyUi(ctx, note, "warning");
 					}
 				} catch {
@@ -2937,7 +2997,9 @@ function activateExtension(hostPi: ExtensionAPI) {
 		wrapSessionEventHandlerWithResult(
 			"context",
 			async (
-				event: { messages?: Array<{ role: string; content: unknown }> } | unknown,
+				event:
+					| { messages?: Array<{ role: string; content: unknown }> }
+					| unknown,
 				ctx: { cwd?: string },
 			) => {
 				// #1018: context telemetry deliberately runs even when the lens or its
@@ -2946,7 +3008,10 @@ function activateExtension(hostPi: ExtensionAPI) {
 					(event as { messages?: Array<{ role: string; content: unknown }> })
 						?.messages ?? [];
 				const prefixSessionId = getStableSessionId(ctx);
-				const sessionRole = classifyCurrentSessionEmission(ctx, prefixSessionId);
+				const sessionRole = classifyCurrentSessionEmission(
+					ctx,
+					prefixSessionId,
+				);
 				// #1938: `observeCachePrefix` still owns the unbounded, always-accurate
 				// `cache_prefix_break` signal below. Its return value used to be threaded
 				// into `observeCacheContext` as `prefixObservation`, but that field was
@@ -2959,7 +3024,8 @@ function activateExtension(hostPi: ExtensionAPI) {
 					sessionRole,
 					dbg,
 				);
-				const effectiveInjectionEnabled = lensEnabled && contextInjectionEnabled;
+				const effectiveInjectionEnabled =
+					lensEnabled && contextInjectionEnabled;
 				let telemetryLogged = false;
 				const logContextObservation = (
 					resultMessages: Array<{ role: string; content: unknown }>,
@@ -2992,8 +3058,15 @@ function activateExtension(hostPi: ExtensionAPI) {
 						return;
 					}
 
-					const turnEndFindings = consumeTurnEndFindings(cacheManager, cwd, runtime);
-					const sessionGuidance = consumeSessionStartGuidance(cacheManager, cwd);
+					const turnEndFindings = consumeTurnEndFindings(
+						cacheManager,
+						cwd,
+						runtime,
+					);
+					const sessionGuidance = consumeSessionStartGuidance(
+						cacheManager,
+						cwd,
+					);
 					const testFindings = consumeTestFindings(cacheManager, cwd, runtime);
 					const agentNudge = consumeAgentNudge(dbg);
 					const sourceMessages = [
@@ -3027,11 +3100,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 					// emit empty input (fe0ed5da: OpenAI Responses fails on empty input).
 					if (existingMessages.length === 0) {
 						const resultMessages = [...injectedMessages];
-						logContextObservation(
-							resultMessages,
-							"prepend",
-							sourceMessages,
-						);
+						logContextObservation(resultMessages, "prepend", sourceMessages);
 						return { messages: resultMessages };
 					}
 
@@ -3045,11 +3114,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 						// adjacency AND leaves the entire prior transcript as an untouched
 						// cache prefix.
 						const resultMessages = [...existingMessages, ...injectedMessages];
-						logContextObservation(
-							resultMessages,
-							"append",
-							sourceMessages,
-						);
+						logContextObservation(resultMessages, "append", sourceMessages);
 						return { messages: resultMessages };
 					}
 

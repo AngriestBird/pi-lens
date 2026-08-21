@@ -193,7 +193,10 @@ describe("buildOrUpdateGraph — Promise dedup cache", () => {
 		const facts = new FactStore();
 		const cwd = tmpDir();
 		const file = path.join(cwd, "drift.ts");
-		fs.writeFileSync(file, "export function driftExample() {\n\treturn 1;\n}\n");
+		fs.writeFileSync(
+			file,
+			"export function driftExample() {\n\treturn 1;\n}\n",
+		);
 
 		await buildOrUpdateGraph(cwd, [file], facts);
 		expect(getLastGraphBuildInfo().reused).toBe(false); // full build

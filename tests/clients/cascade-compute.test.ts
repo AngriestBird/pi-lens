@@ -125,9 +125,8 @@ describe("computeCascadeForFile", () => {
 		mocks.formatImpactCascade.mockReset().mockReturnValue("impact header");
 		mocks.getLSPService.mockReset();
 		mocks.logCascade.mockReset();
-		const { resetDispatchBaselines } = await import(
-			"../../clients/dispatch/integration.js"
-		);
+		const { resetDispatchBaselines } =
+			await import("../../clients/dispatch/integration.js");
 		resetDispatchBaselines();
 	}, 30_000);
 
@@ -156,9 +155,8 @@ describe("computeCascadeForFile", () => {
 				getDiagnostics: vi.fn(),
 			});
 
-			const { computeCascadeForFile } = await import(
-				"../../clients/dispatch/integration.js"
-			);
+			const { computeCascadeForFile } =
+				await import("../../clients/dispatch/integration.js");
 			const result = await computeCascadeForFile(primary, env.tmpDir, {
 				turnSeq: 1,
 				writeSeq: 1,
@@ -213,9 +211,8 @@ describe("computeCascadeForFile", () => {
 				getDiagnostics: vi.fn(),
 			});
 
-			const { computeCascadeForFile } = await import(
-				"../../clients/dispatch/integration.js"
-			);
+			const { computeCascadeForFile } =
+				await import("../../clients/dispatch/integration.js");
 			const result = await computeCascadeForFile(primary, env.tmpDir, {
 				turnSeq: 1,
 				writeSeq: 1,
@@ -250,9 +247,8 @@ describe("computeCascadeForFile", () => {
 				getDiagnostics: vi.fn(),
 			});
 
-			const { computeCascadeForFile } = await import(
-				"../../clients/dispatch/integration.js"
-			);
+			const { computeCascadeForFile } =
+				await import("../../clients/dispatch/integration.js");
 			const run = await computeCascadeForFile(primary, env.tmpDir, {
 				turnSeq: 1,
 				writeSeq: 1,
@@ -328,9 +324,8 @@ describe("computeCascadeForFile", () => {
 				references,
 			});
 
-			const { computeCascadeForFile } = await import(
-				"../../clients/dispatch/integration.js"
-			);
+			const { computeCascadeForFile } =
+				await import("../../clients/dispatch/integration.js");
 			const result = await computeCascadeForFile(primary, env.tmpDir, {
 				turnSeq: 1,
 				writeSeq: 1,
@@ -420,9 +415,8 @@ describe("computeCascadeForFile", () => {
 				references,
 			});
 
-			const { computeCascadeForFile } = await import(
-				"../../clients/dispatch/integration.js"
-			);
+			const { computeCascadeForFile } =
+				await import("../../clients/dispatch/integration.js");
 			const result = await computeCascadeForFile(primary, env.tmpDir, {
 				turnSeq: 1,
 				writeSeq: 1,
@@ -448,16 +442,17 @@ describe("computeCascadeForFile", () => {
 			fs.writeFileSync(primary, "class User: pass\n");
 			fs.writeFileSync(neighbor, "from model import User\n");
 			mocks.computeImpactCascade.mockReturnValue(impact(primary, [neighbor]));
-			const touchFile = vi.fn().mockResolvedValue({ diags: [lspError("python broken")] });
+			const touchFile = vi
+				.fn()
+				.mockResolvedValue({ diags: [lspError("python broken")] });
 			mocks.getLSPService.mockReturnValue({
 				getAllDiagnostics: vi.fn().mockResolvedValue(new Map()),
 				touchFile,
 				getDiagnostics: vi.fn(),
 			});
 
-			const { computeCascadeForFile } = await import(
-				"../../clients/dispatch/integration.js"
-			);
+			const { computeCascadeForFile } =
+				await import("../../clients/dispatch/integration.js");
 			const result = await computeCascadeForFile(primary, env.tmpDir, {
 				turnSeq: 1,
 				writeSeq: 1,
@@ -529,9 +524,8 @@ describe("computeCascadeForFile", () => {
 				getDiagnostics: vi.fn(),
 			});
 
-			const { computeCascadeForFile } = await import(
-				"../../clients/dispatch/integration.js"
-			);
+			const { computeCascadeForFile } =
+				await import("../../clients/dispatch/integration.js");
 			await computeCascadeForFile(primary, env.tmpDir, {
 				turnSeq: 1,
 				writeSeq: 2,
@@ -593,9 +587,8 @@ describe("computeCascadeForFile", () => {
 				getDiagnostics: vi.fn(),
 			});
 
-			const { computeCascadeForFile } = await import(
-				"../../clients/dispatch/integration.js"
-			);
+			const { computeCascadeForFile } =
+				await import("../../clients/dispatch/integration.js");
 			const result = await computeCascadeForFile(primary, env.tmpDir, {
 				turnSeq: 1,
 				writeSeq: 1,
@@ -667,9 +660,8 @@ describe("computeCascadeForFile", () => {
 				getDiagnostics: vi.fn(),
 			});
 
-			const { computeCascadeForFile } = await import(
-				"../../clients/dispatch/integration.js"
-			);
+			const { computeCascadeForFile } =
+				await import("../../clients/dispatch/integration.js");
 			const result = await computeCascadeForFile(primary, env.tmpDir, {
 				turnSeq: 1,
 				writeSeq: 1,
@@ -734,9 +726,8 @@ describe("computeCascadeForFile", () => {
 				getDiagnostics: vi.fn(),
 			});
 
-			const { computeCascadeForFile } = await import(
-				"../../clients/dispatch/integration.js"
-			);
+			const { computeCascadeForFile } =
+				await import("../../clients/dispatch/integration.js");
 			const result = await computeCascadeForFile(primary, env.tmpDir, {
 				turnSeq: 1,
 				writeSeq: 1,
@@ -797,12 +788,10 @@ describe("computeCascadeForFile", () => {
 				getDiagnostics: vi.fn(),
 			});
 
-			const { computeCascadeForFile } = await import(
-				"../../clients/dispatch/integration.js"
-			);
-			const { _getOutstandingCascadeTouchesForTests } = await import(
-				"../../clients/lsp/cascade-tier.js"
-			);
+			const { computeCascadeForFile } =
+				await import("../../clients/dispatch/integration.js");
+			const { _getOutstandingCascadeTouchesForTests } =
+				await import("../../clients/lsp/cascade-tier.js");
 
 			const result = await computeCascadeForFile(primary, env.tmpDir, {
 				turnSeq: 1,
@@ -865,9 +854,8 @@ describe("computeCascadeForFile", () => {
 
 			const { computeCascadeForFile, resetDispatchBaselines: _reset } =
 				await import("../../clients/dispatch/integration.js");
-			const { _resetTierAwareCascadeEnabledForTests } = await import(
-				"../../clients/lsp/cascade-tier.js"
-			);
+			const { _resetTierAwareCascadeEnabledForTests } =
+				await import("../../clients/lsp/cascade-tier.js");
 			_resetTierAwareCascadeEnabledForTests();
 
 			await computeCascadeForFile(primary, env.tmpDir, {
@@ -890,9 +878,8 @@ describe("computeCascadeForFile", () => {
 			} else {
 				process.env.PI_LENS_TIER_AWARE_CASCADE = original;
 			}
-			const { _resetTierAwareCascadeEnabledForTests } = await import(
-				"../../clients/lsp/cascade-tier.js"
-			);
+			const { _resetTierAwareCascadeEnabledForTests } =
+				await import("../../clients/lsp/cascade-tier.js");
 			_resetTierAwareCascadeEnabledForTests();
 		}
 	});
@@ -924,15 +911,12 @@ describe("computeCascadeForFile", () => {
 				getDiagnostics: vi.fn(),
 			});
 
-			const { computeCascadeForFile } = await import(
-				"../../clients/dispatch/integration.js"
-			);
+			const { computeCascadeForFile } =
+				await import("../../clients/dispatch/integration.js");
 			const {
 				_getOutstandingCascadeTouchesForTests,
 				reconcileOutstandingCascadeTouches,
-			} = await import(
-				"../../clients/lsp/cascade-tier.js"
-			);
+			} = await import("../../clients/lsp/cascade-tier.js");
 			await computeCascadeForFile(primary, env.tmpDir, {
 				turnSeq: 1,
 				writeSeq: 1,
@@ -1012,9 +996,8 @@ describe("computeCascadeForFile", () => {
 				getDiagnostics: vi.fn(),
 			});
 
-			const { computeCascadeForFile } = await import(
-				"../../clients/dispatch/integration.js"
-			);
+			const { computeCascadeForFile } =
+				await import("../../clients/dispatch/integration.js");
 
 			// First cascade: a confirmed clean touch seeds recentlyCleanNeighborCache.
 			await computeCascadeForFile(primary, env.tmpDir, {
@@ -1068,9 +1051,8 @@ describe("computeCascadeForFile", () => {
 				getDiagnostics: vi.fn(),
 			});
 
-			const { computeCascadeForFile } = await import(
-				"../../clients/dispatch/integration.js"
-			);
+			const { computeCascadeForFile } =
+				await import("../../clients/dispatch/integration.js");
 
 			await computeCascadeForFile(primary, env.tmpDir, {
 				turnSeq: 1,
@@ -1161,9 +1143,8 @@ describe("computeCascadeForFile", () => {
 				getDiagnostics: vi.fn(),
 			});
 
-			const { computeCascadeForFile } = await import(
-				"../../clients/dispatch/integration.js"
-			);
+			const { computeCascadeForFile } =
+				await import("../../clients/dispatch/integration.js");
 
 			// Setup run: seeds recentlyCleanNeighborCache (neighborClean, a
 			// confirmed clean touch) at turnSeq=1/writeSeq=1.
@@ -1246,9 +1227,8 @@ describe("computeCascadeForFile", () => {
 				getDiagnostics: vi.fn(),
 			});
 
-			const { computeCascadeForFile } = await import(
-				"../../clients/dispatch/integration.js"
-			);
+			const { computeCascadeForFile } =
+				await import("../../clients/dispatch/integration.js");
 			await computeCascadeForFile(primary, env.tmpDir, {
 				turnSeq: 1,
 				writeSeq: 1,
@@ -1323,9 +1303,8 @@ describe("computeCascadeForFile", () => {
 			impact(fixture.primary, fixture.neighbors),
 		);
 		try {
-			const { computeCascadeForFile } = await import(
-				"../../clients/dispatch/integration.js"
-			);
+			const { computeCascadeForFile } =
+				await import("../../clients/dispatch/integration.js");
 			const run = await computeCascadeForFile(fixture.primary, env.tmpDir, {
 				turnSeq: 1,
 				writeSeq: 1,
@@ -1358,9 +1337,8 @@ describe("computeCascadeForFile", () => {
 			impact(fixture.primary, fixture.neighbors),
 		);
 		try {
-			const { computeCascadeForFile } = await import(
-				"../../clients/dispatch/integration.js"
-			);
+			const { computeCascadeForFile } =
+				await import("../../clients/dispatch/integration.js");
 			await computeCascadeForFile(fixture.primary, env.tmpDir, {
 				turnSeq: 1,
 				writeSeq: 1,
@@ -1394,9 +1372,8 @@ describe("computeCascadeForFile", () => {
 			impact(fixture.primary, fixture.neighbors),
 		);
 		try {
-			const { computeCascadeForFile } = await import(
-				"../../clients/dispatch/integration.js"
-			);
+			const { computeCascadeForFile } =
+				await import("../../clients/dispatch/integration.js");
 			await computeCascadeForFile(fixture.primary, env.tmpDir, {
 				turnSeq: 1,
 				writeSeq: 1,
@@ -1427,9 +1404,8 @@ describe("computeCascadeForFile", () => {
 			return impact(fixture.primary, fixture.neighbors);
 		});
 		try {
-			const { computeCascadeForFile } = await import(
-				"../../clients/dispatch/integration.js"
-			);
+			const { computeCascadeForFile } =
+				await import("../../clients/dispatch/integration.js");
 			await computeCascadeForFile(fixture.primary, env.tmpDir, {
 				turnSeq: 1,
 				writeSeq: 1,
@@ -1455,9 +1431,8 @@ describe("computeCascadeForFile", () => {
 		// here means the derivation narrowed the walk, not that the stub did.
 		const clock = chargePrelude(0, impact(fixture.primary, fixture.neighbors));
 		try {
-			const { computeCascadeForFile } = await import(
-				"../../clients/dispatch/integration.js"
-			);
+			const { computeCascadeForFile } =
+				await import("../../clients/dispatch/integration.js");
 			await computeCascadeForFile(fixture.primary, env.tmpDir, {
 				turnSeq: 1,
 				writeSeq: 1,
@@ -1487,9 +1462,8 @@ describe("computeCascadeForFile", () => {
 		const fixture = budgetFixture(env.tmpDir, 41);
 		const clock = chargePrelude(0, impact(fixture.primary, fixture.neighbors));
 		try {
-			const { computeCascadeForFile } = await import(
-				"../../clients/dispatch/integration.js"
-			);
+			const { computeCascadeForFile } =
+				await import("../../clients/dispatch/integration.js");
 			await computeCascadeForFile(fixture.primary, env.tmpDir, {
 				turnSeq: 1,
 				writeSeq: 1,
@@ -1537,9 +1511,8 @@ describe("computeCascadeForFile", () => {
 				getDiagnostics: vi.fn(),
 			});
 
-			const { computeCascadeForFile } = await import(
-				"../../clients/dispatch/integration.js"
-			);
+			const { computeCascadeForFile } =
+				await import("../../clients/dispatch/integration.js");
 			const result = await computeCascadeForFile(primary, env.tmpDir, {
 				turnSeq: 1,
 				writeSeq: 1,
@@ -1580,9 +1553,8 @@ describe("computeCascadeForFile", () => {
 				getDiagnostics: vi.fn(),
 			});
 
-			const { computeCascadeForFile } = await import(
-				"../../clients/dispatch/integration.js"
-			);
+			const { computeCascadeForFile } =
+				await import("../../clients/dispatch/integration.js");
 			const first = await computeCascadeForFile(primary, env.tmpDir, {
 				turnSeq: 1,
 				writeSeq: 1,
@@ -1625,9 +1597,8 @@ describe("computeCascadeForFile", () => {
 				getDiagnostics: vi.fn(),
 			});
 
-			const { computeCascadeForFile, resetDispatchBaselines } = await import(
-				"../../clients/dispatch/integration.js"
-			);
+			const { computeCascadeForFile, resetDispatchBaselines } =
+				await import("../../clients/dispatch/integration.js");
 			resetDispatchBaselines();
 
 			mocks.computeImpactCascade.mockReturnValueOnce(
@@ -1695,9 +1666,8 @@ describe("computeCascadeForFile", () => {
 				getDiagnostics: vi.fn(),
 			});
 
-			const { computeCascadeForFile } = await import(
-				"../../clients/dispatch/integration.js"
-			);
+			const { computeCascadeForFile } =
+				await import("../../clients/dispatch/integration.js");
 			const result = await computeCascadeForFile(primary, env.tmpDir, {
 				turnSeq: 1,
 				writeSeq: 1,
@@ -1746,9 +1716,8 @@ describe("computeCascadeForFile", () => {
 				getDiagnostics: vi.fn(),
 			});
 
-			const { computeCascadeForFile } = await import(
-				"../../clients/dispatch/integration.js"
-			);
+			const { computeCascadeForFile } =
+				await import("../../clients/dispatch/integration.js");
 			const result = await computeCascadeForFile(primary, env.tmpDir, {
 				turnSeq: 1,
 				writeSeq: 1,
@@ -1807,9 +1776,8 @@ describe("computeCascadeForFile", () => {
 				getDiagnostics: vi.fn(),
 			});
 
-			const { computeCascadeForFile } = await import(
-				"../../clients/dispatch/integration.js"
-			);
+			const { computeCascadeForFile } =
+				await import("../../clients/dispatch/integration.js");
 			const result = await computeCascadeForFile(primary, env.tmpDir, {
 				turnSeq: 1,
 				writeSeq: 1,
@@ -1905,9 +1873,8 @@ describe("computeCascadeForFile", () => {
 				references,
 			});
 
-			const { computeCascadeForFile } = await import(
-				"../../clients/dispatch/integration.js"
-			);
+			const { computeCascadeForFile } =
+				await import("../../clients/dispatch/integration.js");
 			const result = await computeCascadeForFile(primary, env.tmpDir, {
 				turnSeq: 1,
 				writeSeq: 1,
@@ -1971,9 +1938,8 @@ describe("computeCascadeForFile", () => {
 				getDiagnostics: vi.fn(),
 			});
 
-			const { computeCascadeForFile } = await import(
-				"../../clients/dispatch/integration.js"
-			);
+			const { computeCascadeForFile } =
+				await import("../../clients/dispatch/integration.js");
 			const result = await computeCascadeForFile(primary, env.tmpDir, {
 				turnSeq: 1,
 				writeSeq: 1,
@@ -2015,9 +1981,8 @@ describe("computeCascadeForFile", () => {
 				getDiagnostics: vi.fn(),
 			});
 
-			const { computeCascadeForFile } = await import(
-				"../../clients/dispatch/integration.js"
-			);
+			const { computeCascadeForFile } =
+				await import("../../clients/dispatch/integration.js");
 			const run = await computeCascadeForFile(primary, env.tmpDir, {
 				turnSeq: 1,
 				writeSeq: 1,
@@ -2048,9 +2013,8 @@ describe("computeCascadeForFile", () => {
 				getDiagnostics: vi.fn(),
 			});
 
-			const { computeCascadeForFile } = await import(
-				"../../clients/dispatch/integration.js"
-			);
+			const { computeCascadeForFile } =
+				await import("../../clients/dispatch/integration.js");
 			const run = await computeCascadeForFile(primary, env.tmpDir, {
 				turnSeq: 1,
 				writeSeq: 1,
@@ -2089,9 +2053,8 @@ describe("computeCascadeForFile", () => {
 				getDiagnostics: vi.fn(),
 			});
 
-			const { computeCascadeForFile } = await import(
-				"../../clients/dispatch/integration.js"
-			);
+			const { computeCascadeForFile } =
+				await import("../../clients/dispatch/integration.js");
 			const run = await computeCascadeForFile(primary, env.tmpDir, {
 				turnSeq: 1,
 				writeSeq: 1,
@@ -2123,12 +2086,10 @@ describe("computeCascadeForFile", () => {
 				getDiagnostics: vi.fn(),
 			});
 
-			const { computeCascadeForFile } = await import(
-				"../../clients/dispatch/integration.js"
-			);
-			const { _setLastGraphBuildInfoForTests } = await import(
-				"../../clients/review-graph/builder.js"
-			);
+			const { computeCascadeForFile } =
+				await import("../../clients/dispatch/integration.js");
+			const { _setLastGraphBuildInfoForTests } =
+				await import("../../clients/review-graph/builder.js");
 			_setLastGraphBuildInfoForTests({
 				reused: false,
 				mode: "skipped",
@@ -2184,12 +2145,10 @@ describe("computeCascadeForFile", () => {
 					getDiagnostics: vi.fn(),
 				});
 
-				const { computeCascadeForFile } = await import(
-					"../../clients/dispatch/integration.js"
-				);
-				const { recordDiagnostics, getFileDiagnostics } = await import(
-					"../../clients/widget-state.js"
-				);
+				const { computeCascadeForFile } =
+					await import("../../clients/dispatch/integration.js");
+				const { recordDiagnostics, getFileDiagnostics } =
+					await import("../../clients/widget-state.js");
 
 				// A stale LSP footer entry for the neighbor, left over from before the
 				// fix (the per-edit LSP runner tags language-server findings tool:"lsp").
@@ -2229,16 +2188,16 @@ describe("computeCascadeForFile", () => {
 				mocks.computeImpactCascade.mockReturnValue(impact(primary, [neighbor]));
 				mocks.getLSPService.mockReturnValue({
 					getAllDiagnostics: vi.fn().mockResolvedValue(new Map()),
-					touchFile: vi.fn().mockResolvedValue({ diags: [lspError("python broken")] }),
+					touchFile: vi
+						.fn()
+						.mockResolvedValue({ diags: [lspError("python broken")] }),
 					getDiagnostics: vi.fn(),
 				});
 
-				const { computeCascadeForFile } = await import(
-					"../../clients/dispatch/integration.js"
-				);
-				const { getFileDiagnostics } = await import(
-					"../../clients/widget-state.js"
-				);
+				const { computeCascadeForFile } =
+					await import("../../clients/dispatch/integration.js");
+				const { getFileDiagnostics } =
+					await import("../../clients/widget-state.js");
 
 				await computeCascadeForFile(primary, env.tmpDir, {
 					turnSeq: 1,
@@ -2271,12 +2230,10 @@ describe("computeCascadeForFile", () => {
 					getDiagnostics: vi.fn(),
 				});
 
-				const { computeCascadeForFile } = await import(
-					"../../clients/dispatch/integration.js"
-				);
-				const { recordDiagnostics, getFileDiagnostics } = await import(
-					"../../clients/widget-state.js"
-				);
+				const { computeCascadeForFile } =
+					await import("../../clients/dispatch/integration.js");
+				const { recordDiagnostics, getFileDiagnostics } =
+					await import("../../clients/widget-state.js");
 
 				// A real prior confirmed-dirty entry that must survive.
 				recordDiagnostics(
@@ -2310,16 +2267,16 @@ describe("computeCascadeForFile", () => {
 				// No snapshot → cold-snapshot touch path; touch confirms an error.
 				mocks.getLSPService.mockReturnValue({
 					getAllDiagnostics: vi.fn().mockResolvedValue(new Map()),
-					touchFile: vi.fn().mockResolvedValue({ diags: [lspError("cascade result")] }),
+					touchFile: vi
+						.fn()
+						.mockResolvedValue({ diags: [lspError("cascade result")] }),
 					getDiagnostics: vi.fn(),
 				});
 
-				const { computeCascadeForFile, resetDispatchBaselines } = await import(
-					"../../clients/dispatch/integration.js"
-				);
-				const { recordDiagnostics, getFileDiagnostics } = await import(
-					"../../clients/widget-state.js"
-				);
+				const { computeCascadeForFile, resetDispatchBaselines } =
+					await import("../../clients/dispatch/integration.js");
+				const { recordDiagnostics, getFileDiagnostics } =
+					await import("../../clients/widget-state.js");
 
 				// A NEWER per-edit LSP-error record for the neighbor (writeIndex 10).
 				recordDiagnostics(
@@ -2378,16 +2335,16 @@ describe("computeCascadeForFile", () => {
 				// it the same way here.
 				mocks.getLSPService.mockReturnValue({
 					getAllDiagnostics: vi.fn().mockResolvedValue(new Map()),
-					touchFile: vi.fn().mockResolvedValue({ diags: [], inconclusive: true }),
+					touchFile: vi
+						.fn()
+						.mockResolvedValue({ diags: [], inconclusive: true }),
 					getDiagnostics: vi.fn(),
 				});
 
-				const { computeCascadeForFile, getDispatchCascadeCacheStats } = await import(
-					"../../clients/dispatch/integration.js"
-				);
-				const { recordDiagnostics, getFileDiagnostics } = await import(
-					"../../clients/widget-state.js"
-				);
+				const { computeCascadeForFile, getDispatchCascadeCacheStats } =
+					await import("../../clients/dispatch/integration.js");
+				const { recordDiagnostics, getFileDiagnostics } =
+					await import("../../clients/widget-state.js");
 
 				// A live LSP error already recorded for the neighbor.
 				recordDiagnostics(
@@ -2436,14 +2393,12 @@ describe("computeCascadeForFile", () => {
 				// empty for a lapsed budget is now a non-empty honest note. Assert it
 				// through the turn-end seam, not just the formatter: a marker that
 				// never reaches the agent's message is not an honesty improvement.
-				const { RuntimeCoordinator } = await import(
-					"../../clients/runtime-coordinator.js"
-				);
+				const { RuntimeCoordinator } =
+					await import("../../clients/runtime-coordinator.js");
 				const { CacheManager } = await import("../../clients/cache-manager.js");
 				const { handleTurnEnd } = await import("../../clients/runtime-turn.js");
-				const { consumeTurnEndFindings } = await import(
-					"../../clients/runtime-context.js"
-				);
+				const { consumeTurnEndFindings } =
+					await import("../../clients/runtime-context.js");
 				const runtime = new RuntimeCoordinator();
 				const cacheManager = new CacheManager(false);
 				cacheManager.addModifiedRange(
@@ -2513,9 +2468,8 @@ describe("computeCascadeForFile", () => {
 
 				const { computeCascadeForFile, getDispatchCascadeCacheStats } =
 					await import("../../clients/dispatch/integration.js");
-				const { recordDiagnostics, getFileDiagnostics } = await import(
-					"../../clients/widget-state.js"
-				);
+				const { recordDiagnostics, getFileDiagnostics } =
+					await import("../../clients/widget-state.js");
 
 				recordDiagnostics(
 					neighbor,
@@ -2580,9 +2534,8 @@ describe("computeCascadeForFile", () => {
 					getDiagnostics: vi.fn(),
 				});
 
-				const { computeCascadeForFile } = await import(
-					"../../clients/dispatch/integration.js"
-				);
+				const { computeCascadeForFile } =
+					await import("../../clients/dispatch/integration.js");
 				await computeCascadeForFile(primary, env.tmpDir, {
 					turnSeq: 1,
 					writeSeq: 5,
@@ -2622,9 +2575,8 @@ describe("computeCascadeForFile", () => {
 					getDiagnostics: vi.fn(),
 				});
 
-				const { computeCascadeForFile } = await import(
-					"../../clients/dispatch/integration.js"
-				);
+				const { computeCascadeForFile } =
+					await import("../../clients/dispatch/integration.js");
 				await computeCascadeForFile(primary, env.tmpDir, {
 					turnSeq: 1,
 					writeSeq: 5,
@@ -2679,9 +2631,8 @@ describe("computeCascadeForFile", () => {
 					getDiagnostics: vi.fn(),
 				});
 
-				const { computeCascadeForFile } = await import(
-					"../../clients/dispatch/integration.js"
-				);
+				const { computeCascadeForFile } =
+					await import("../../clients/dispatch/integration.js");
 				const run = await computeCascadeForFile(primary, env.tmpDir, {
 					turnSeq: 1,
 					writeSeq: 5,
@@ -2723,12 +2674,10 @@ describe("computeCascadeForFile", () => {
 					getDiagnostics: vi.fn(),
 				});
 
-				const { computeCascadeForFile } = await import(
-					"../../clients/dispatch/integration.js"
-				);
-				const { recordDiagnostics, getFileDiagnostics } = await import(
-					"../../clients/widget-state.js"
-				);
+				const { computeCascadeForFile } =
+					await import("../../clients/dispatch/integration.js");
+				const { recordDiagnostics, getFileDiagnostics } =
+					await import("../../clients/widget-state.js");
 
 				// The neighbor's live footer state: a biome error (a source the cascade
 				// never re-checks) AND an LSP error (which it does).
@@ -2775,24 +2724,24 @@ describe("computeCascadeForFile", () => {
 				// error — a valid, confirmed observation, but an AGING one.
 				const snapshotTs = Date.now() - 20_000;
 				mocks.getLSPService.mockReturnValue({
-					getAllDiagnostics: vi.fn().mockResolvedValue(
-						new Map([
-							[
-								neighbor.split(path.sep).join("/"),
-								{ diags: [lspError("snapshot error")], ts: snapshotTs },
-							],
-						]),
-					),
+					getAllDiagnostics: vi
+						.fn()
+						.mockResolvedValue(
+							new Map([
+								[
+									neighbor.split(path.sep).join("/"),
+									{ diags: [lspError("snapshot error")], ts: snapshotTs },
+								],
+							]),
+						),
 					touchFile: vi.fn(),
 					getDiagnostics: vi.fn(),
 				});
 
-				const { computeCascadeForFile } = await import(
-					"../../clients/dispatch/integration.js"
-				);
-				const { getFileDiagnostics, reconcileStaleWidgetFiles } = await import(
-					"../../clients/widget-state.js"
-				);
+				const { computeCascadeForFile } =
+					await import("../../clients/dispatch/integration.js");
+				const { getFileDiagnostics, reconcileStaleWidgetFiles } =
+					await import("../../clients/widget-state.js");
 
 				await computeCascadeForFile(primary, env.tmpDir, {
 					turnSeq: 1,
@@ -2842,12 +2791,10 @@ describe("computeCascadeForFile", () => {
 					getDiagnostics: vi.fn(),
 				});
 
-				const { computeCascadeForFile } = await import(
-					"../../clients/dispatch/integration.js"
-				);
-				const { recordDiagnostics, getFileDiagnostics } = await import(
-					"../../clients/widget-state.js"
-				);
+				const { computeCascadeForFile } =
+					await import("../../clients/dispatch/integration.js");
+				const { recordDiagnostics, getFileDiagnostics } =
+					await import("../../clients/widget-state.js");
 
 				// The neighbor already carries this opengrep finding, correctly tagged
 				// and advisory (semantic "warning"), from its own per-edit dispatch.
@@ -2904,28 +2851,28 @@ describe("computeCascadeForFile", () => {
 				// TTL-fresh snapshot still carrying the PRE-fix error, but the server's
 				// view has diverged from disk (boundToCurrentDisk: false).
 				mocks.getLSPService.mockReturnValue({
-					getAllDiagnostics: vi.fn().mockResolvedValue(
-						new Map([
-							[
-								neighbor.split(path.sep).join("/"),
-								withBinding(
-									{ diags: [lspError("pre-fix error")], ts: Date.now() },
-									false,
-								),
-							],
-						]),
-					),
+					getAllDiagnostics: vi
+						.fn()
+						.mockResolvedValue(
+							new Map([
+								[
+									neighbor.split(path.sep).join("/"),
+									withBinding(
+										{ diags: [lspError("pre-fix error")], ts: Date.now() },
+										false,
+									),
+								],
+							]),
+						),
 					// The neighbor is actually clean now — a confirmed active re-check.
 					touchFile: vi.fn().mockResolvedValue({ diags: [] }),
 					getDiagnostics: vi.fn(),
 				});
 
-				const { computeCascadeForFile } = await import(
-					"../../clients/dispatch/integration.js"
-				);
-				const { getFileDiagnostics } = await import(
-					"../../clients/widget-state.js"
-				);
+				const { computeCascadeForFile } =
+					await import("../../clients/dispatch/integration.js");
+				const { getFileDiagnostics } =
+					await import("../../clients/widget-state.js");
 
 				const result = await computeCascadeForFile(primary, env.tmpDir, {
 					turnSeq: 1,
@@ -2942,7 +2889,10 @@ describe("computeCascadeForFile", () => {
 				expect(lsp.touchFile).toHaveBeenCalledWith(
 					neighbor,
 					expect.any(String),
-					expect.objectContaining({ source: "cascade", clientScope: "primary" }),
+					expect.objectContaining({
+						source: "cascade",
+						clientScope: "primary",
+					}),
 				);
 				// The stale snapshot error must not survive as a cascade neighbor result.
 				expect(
@@ -2984,12 +2934,10 @@ describe("computeCascadeForFile", () => {
 					getDiagnostics: vi.fn(),
 				});
 
-				const { computeCascadeForFile } = await import(
-					"../../clients/dispatch/integration.js"
-				);
-				const { getFileDiagnostics } = await import(
-					"../../clients/widget-state.js"
-				);
+				const { computeCascadeForFile } =
+					await import("../../clients/dispatch/integration.js");
+				const { getFileDiagnostics } =
+					await import("../../clients/widget-state.js");
 
 				const result = await computeCascadeForFile(primary, env.tmpDir, {
 					turnSeq: 1,
@@ -3020,27 +2968,27 @@ describe("computeCascadeForFile", () => {
 				mocks.computeImpactCascade.mockReturnValue(impact(primary, [neighbor]));
 				const touchFile = vi.fn();
 				mocks.getLSPService.mockReturnValue({
-					getAllDiagnostics: vi.fn().mockResolvedValue(
-						new Map([
-							[
-								neighbor.split(path.sep).join("/"),
-								withBinding(
-									{ diags: [lspError("bound-true error")], ts: Date.now() },
-									true,
-								),
-							],
-						]),
-					),
+					getAllDiagnostics: vi
+						.fn()
+						.mockResolvedValue(
+							new Map([
+								[
+									neighbor.split(path.sep).join("/"),
+									withBinding(
+										{ diags: [lspError("bound-true error")], ts: Date.now() },
+										true,
+									),
+								],
+							]),
+						),
 					touchFile,
 					getDiagnostics: vi.fn(),
 				});
 
-				const { computeCascadeForFile } = await import(
-					"../../clients/dispatch/integration.js"
-				);
-				const { getFileDiagnostics } = await import(
-					"../../clients/widget-state.js"
-				);
+				const { computeCascadeForFile } =
+					await import("../../clients/dispatch/integration.js");
+				const { getFileDiagnostics } =
+					await import("../../clients/widget-state.js");
 
 				const result = await computeCascadeForFile(primary, env.tmpDir, {
 					turnSeq: 1,
@@ -3070,24 +3018,20 @@ describe("computeCascadeForFile", () => {
 				// a diverged disk state) — NOT a confirmed clean, exactly like
 				// `inconclusive`. #1179: the real `touchFile` carries `binding` as an
 				// EXPLICIT enumerable field on the wrapper (survives a `.diags` copy).
-				const touchFile = vi
-					.fn()
-					.mockImplementation(async () => ({
-						diags: [],
-						binding: { boundToCurrentDisk: false },
-					}));
+				const touchFile = vi.fn().mockImplementation(async () => ({
+					diags: [],
+					binding: { boundToCurrentDisk: false },
+				}));
 				mocks.getLSPService.mockReturnValue({
 					getAllDiagnostics: vi.fn().mockResolvedValue(new Map()),
 					touchFile,
 					getDiagnostics: vi.fn(),
 				});
 
-				const { computeCascadeForFile } = await import(
-					"../../clients/dispatch/integration.js"
-				);
-				const { recordDiagnostics, getFileDiagnostics } = await import(
-					"../../clients/widget-state.js"
-				);
+				const { computeCascadeForFile } =
+					await import("../../clients/dispatch/integration.js");
+				const { recordDiagnostics, getFileDiagnostics } =
+					await import("../../clients/widget-state.js");
 
 				// A live prior LSP error the bound-false clean touch must NOT wipe.
 				recordDiagnostics(
@@ -3168,20 +3112,17 @@ describe("computeCascadeForFile", () => {
 							],
 						]),
 					),
-					touchFile: vi
-						.fn()
-						.mockImplementation(async (filePath: string) => {
-							if (filePath === rejectedNeighbor) {
-								throw new Error("touch failed");
-							}
-							return { diags: [lspError("confirmed live error")] };
-						}),
+					touchFile: vi.fn().mockImplementation(async (filePath: string) => {
+						if (filePath === rejectedNeighbor) {
+							throw new Error("touch failed");
+						}
+						return { diags: [lspError("confirmed live error")] };
+					}),
 					getDiagnostics: vi.fn(),
 				});
 
-				const { computeCascadeForFile } = await import(
-					"../../clients/dispatch/integration.js"
-				);
+				const { computeCascadeForFile } =
+					await import("../../clients/dispatch/integration.js");
 				const result = await computeCascadeForFile(primary, env.tmpDir, {
 					turnSeq: 1,
 					writeSeq: 1,
@@ -3233,9 +3174,8 @@ describe("computeCascadeForFile", () => {
 					getDiagnostics: vi.fn(),
 				});
 
-				const { computeCascadeForFile } = await import(
-					"../../clients/dispatch/integration.js"
-				);
+				const { computeCascadeForFile } =
+					await import("../../clients/dispatch/integration.js");
 				const result = await computeCascadeForFile(primary, env.tmpDir, {
 					turnSeq: 1,
 					writeSeq: 1,
@@ -3289,9 +3229,8 @@ describe("computeCascadeForFile", () => {
 					getDiagnostics: vi.fn(),
 				});
 
-				const { computeCascadeForFile } = await import(
-					"../../clients/dispatch/integration.js"
-				);
+				const { computeCascadeForFile } =
+					await import("../../clients/dispatch/integration.js");
 				const result = await computeCascadeForFile(primary, env.tmpDir, {
 					turnSeq: 1,
 					writeSeq: 1,
@@ -3340,9 +3279,8 @@ describe("computeCascadeForFile", () => {
 					getDiagnostics: vi.fn(),
 				});
 
-				const { computeCascadeForFile } = await import(
-					"../../clients/dispatch/integration.js"
-				);
+				const { computeCascadeForFile } =
+					await import("../../clients/dispatch/integration.js");
 				const result = await computeCascadeForFile(primary, env.tmpDir, {
 					turnSeq: 1,
 					writeSeq: 1,
@@ -3387,9 +3325,8 @@ describe("computeCascadeForFile", () => {
 					getDiagnostics: vi.fn(),
 				});
 
-				const { computeCascadeForFile } = await import(
-					"../../clients/dispatch/integration.js"
-				);
+				const { computeCascadeForFile } =
+					await import("../../clients/dispatch/integration.js");
 				const result = await computeCascadeForFile(primary, env.tmpDir, {
 					turnSeq: 1,
 					writeSeq: 1,

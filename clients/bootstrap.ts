@@ -79,9 +79,8 @@ async function logBootstrapFailures(
 		});
 	}
 	try {
-		const { collectInstallDiagnostics, formatInstallDiagnostics } = await import(
-			"./install-diagnostics.js"
-		);
+		const { collectInstallDiagnostics, formatInstallDiagnostics } =
+			await import("./install-diagnostics.js");
 		logExtension({
 			subsystem: "bootstrap",
 			message: formatInstallDiagnostics(
@@ -152,11 +151,26 @@ export function loadBootstrapClients(): Promise<BootstrapClients> {
 			agentBehaviorClient,
 			deadCodeClients,
 		] = await Promise.all([
-			load("ruff", async () => new (await import("./ruff-client.js")).RuffClient()),
-			load("biome", async () => new (await import("./biome-client.js")).BiomeClient()),
-			load("knip", async () => new (await import("./knip-client.js")).KnipClient()),
-			load("todo", async () => new (await import("./todo-scanner.js")).TodoScanner()),
-			load("jscpd", async () => new (await import("./jscpd-client.js")).JscpdClient()),
+			load(
+				"ruff",
+				async () => new (await import("./ruff-client.js")).RuffClient(),
+			),
+			load(
+				"biome",
+				async () => new (await import("./biome-client.js")).BiomeClient(),
+			),
+			load(
+				"knip",
+				async () => new (await import("./knip-client.js")).KnipClient(),
+			),
+			load(
+				"todo",
+				async () => new (await import("./todo-scanner.js")).TodoScanner(),
+			),
+			load(
+				"jscpd",
+				async () => new (await import("./jscpd-client.js")).JscpdClient(),
+			),
 			load(
 				"dependency-checker",
 				async () =>
@@ -186,21 +200,27 @@ export function loadBootstrapClients(): Promise<BootstrapClients> {
 				"gitleaks",
 				async () => new (await import("./gitleaks-client.js")).GitleaksClient(),
 			),
-			load("trivy", async () => new (await import("./trivy-client.js")).TrivyClient()),
+			load(
+				"trivy",
+				async () => new (await import("./trivy-client.js")).TrivyClient(),
+			),
 			load(
 				"opengrep",
-				async () =>
-					new (await import("./opengrep-client.js")).OpengrepClient(),
+				async () => new (await import("./opengrep-client.js")).OpengrepClient(),
 			),
-			load("rust", async () => new (await import("./rust-client.js")).RustClient()),
+			load(
+				"rust",
+				async () => new (await import("./rust-client.js")).RustClient(),
+			),
 			load(
 				"agent-behavior",
 				async () =>
-					new (await import("./agent-behavior-client.js")).AgentBehaviorClient(),
+					new (
+						await import("./agent-behavior-client.js")
+					).AgentBehaviorClient(),
 			),
-			loadList(
-				"dead-code",
-				async () => (await import("./dead-code-client.js")).getDeadCodeClients(),
+			loadList("dead-code", async () =>
+				(await import("./dead-code-client.js")).getDeadCodeClients(),
 			),
 		]);
 

@@ -29,7 +29,9 @@ const scriptVersion = scriptSrc.match(
 )?.[1];
 const scriptGrammars = [
 	...new Set(
-		[...scriptSrc.matchAll(/"(tree-sitter-[a-z0-9_]+\.wasm)"/g)].map((m) => m[1]),
+		[...scriptSrc.matchAll(/"(tree-sitter-[a-z0-9_]+\.wasm)"/g)].map(
+			(m) => m[1],
+		),
 	),
 ];
 

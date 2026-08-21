@@ -444,7 +444,10 @@ export function isEntryFresh(
 	}
 	for (const dep of imports) {
 		try {
-			if (fs.statSync(dep).mtimeMs > entry.scannedAt + MTIME_DRIFT_TOLERANCE_MS) {
+			if (
+				fs.statSync(dep).mtimeMs >
+				entry.scannedAt + MTIME_DRIFT_TOLERANCE_MS
+			) {
 				return false;
 			}
 		} catch {

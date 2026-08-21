@@ -632,9 +632,7 @@ export async function buildActionableWarningsReport(args: {
 	// strip it before the report leaves this function, so it never lands in
 	// the `.pi-lens/cache/actionable-warnings.json` cache file or any
 	// agent-facing rendering of a warning record.
-	const reportWarnings = merged.map(
-		({ legacyId: _legacyId, ...rest }) => rest,
-	);
+	const reportWarnings = merged.map(({ legacyId: _legacyId, ...rest }) => rest);
 	const byFile = new Map<string, ActionableWarningRecord[]>();
 	for (const warning of reportWarnings) {
 		const arr = byFile.get(warning.filePath) ?? [];
@@ -868,7 +866,8 @@ export async function applyConservativeActionableWarningFixes(args: {
 		skipped: [],
 	};
 	const changedFiles = new Set<string>();
-	const appliedResults: Array<Awaited<ReturnType<typeof applyWorkspaceEdit>>> = [];
+	const appliedResults: Array<Awaited<ReturnType<typeof applyWorkspaceEdit>>> =
+		[];
 	let failedCount = 0;
 	const lspService = getLSPService();
 	const maxFixes = Math.max(0, args.maxFixes ?? 5);
@@ -930,7 +929,12 @@ export async function applyConservativeActionableWarningFixes(args: {
 					edit,
 					args.cwd,
 					args.mutationContext
-						? { mutationContext: { ...args.mutationContext, emitSummary: false } }
+						? {
+								mutationContext: {
+									...args.mutationContext,
+									emitSummary: false,
+								},
+							}
 						: undefined,
 				);
 				appliedResults.push(applied);
@@ -938,11 +942,17 @@ export async function applyConservativeActionableWarningFixes(args: {
 				summary.applied++;
 			} catch (err) {
 				failedCount++;
-				const partial = (err as { appliedWorkspaceEdit?: Awaited<ReturnType<typeof applyWorkspaceEdit>> })
-					.appliedWorkspaceEdit;
+				const partial = (
+					err as {
+						appliedWorkspaceEdit?: Awaited<
+							ReturnType<typeof applyWorkspaceEdit>
+						>;
+					}
+				).appliedWorkspaceEdit;
 				if (partial) {
 					appliedResults.push(partial);
-					for (const changedFile of partial.files) changedFiles.add(changedFile);
+					for (const changedFile of partial.files)
+						changedFiles.add(changedFile);
 				}
 				const message = err instanceof Error ? err.message : String(err);
 				args.dbg?.(
@@ -953,13 +963,21 @@ export async function applyConservativeActionableWarningFixes(args: {
 		}
 	}
 	summary.changedFiles = [...changedFiles];
-	if (args.mutationContext && (summary.considered > 0 || appliedResults.length > 0)) {
+	if (
+		args.mutationContext &&
+		(summary.considered > 0 || appliedResults.length > 0)
+	) {
 		recordLspMutationBatch(args.mutationContext, {
 			results: appliedResults,
 			considered: summary.considered,
 			completed: summary.applied,
 			failedCount,
-			status: failedCount > 0 ? "failed" : appliedResults.length > 0 ? "success" : "skipped",
+			status:
+				failedCount > 0
+					? "failed"
+					: appliedResults.length > 0
+						? "success"
+						: "skipped",
 			bookkeep: false,
 		});
 	}

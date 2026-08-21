@@ -80,22 +80,31 @@ describe("bash grep searchReads registration", () => {
 			const base = {
 				getFlag: () => false,
 				dbg: () => {},
-				runtime: Object.assign(new RuntimeCoordinator(), { projectRoot: env.tmpDir }),
+				runtime: Object.assign(new RuntimeCoordinator(), {
+					projectRoot: env.tmpDir,
+				}),
 				cacheManager: new CacheManager(false),
-				biomeClient: {}, ruffClient: {}, metricsClient: {}, resetLSPService: () => {},
-				agentBehaviorRecord: () => [], formatBehaviorWarnings: () => "",
+				biomeClient: {},
+				ruffClient: {},
+				metricsClient: {},
+				resetLSPService: () => {},
+				agentBehaviorRecord: () => [],
+				formatBehaviorWarnings: () => "",
 				readGuard: { recordRead },
 			} as any;
 			await handleToolResult({
 				...base,
 				event: {
-					toolName: "bash", isError: true,
+					toolName: "bash",
+					isError: true,
 					input: { command: `grep -n two ${filePath}; false` },
 					content: [{ type: "text", text: `${filePath}:2:two` }],
 				},
 			});
 			expect(recordRead).not.toHaveBeenCalled();
-		} finally { env.cleanup(); }
+		} finally {
+			env.cleanup();
+		}
 	});
 
 	it("records grep -n output lines as read-guard search reads", async () => {
@@ -205,7 +214,10 @@ describe("bash external-delete detection (#1668)", () => {
 		notifyExternalFileChange.mockClear();
 	});
 
-	function makeBase(env: { tmpDir: string }, readGuardOverrides: Record<string, unknown> = {}) {
+	function makeBase(
+		env: { tmpDir: string },
+		readGuardOverrides: Record<string, unknown> = {},
+	) {
 		return {
 			getFlag: () => false,
 			dbg: () => {},
@@ -698,24 +710,41 @@ describe("runtime-tool-result inline behavior warnings", () => {
 		const { runPipeline } = await import("../../clients/pipeline.js");
 		const env = setupTestEnvironment("pi-lens-runtime-tool-post-mutation-");
 		try {
-			const filePath = createTempFile(env.tmpDir, "src/app.ts", "const value = 1;\n");
+			const filePath = createTempFile(
+				env.tmpDir,
+				"src/app.ts",
+				"const value = 1;\n",
+			);
 			vi.mocked(runPipeline).mockResolvedValue({
 				output: "",
 				hasBlockers: false,
 				isError: false,
 				fileModified: true,
 				changedFiles: [filePath],
-				postMutation: { filePath, content: fs.readFileSync(filePath, "utf-8"), source: "autofix" },
+				postMutation: {
+					filePath,
+					content: fs.readFileSync(filePath, "utf-8"),
+					source: "autofix",
+				},
 			});
 			const runtime = new RuntimeCoordinator();
 			runtime.projectRoot = env.tmpDir;
 			const returned = await handleToolResult({
-				event: { toolName: "write", input: { path: filePath }, content: [{ type: "text", text: "base" }] },
+				event: {
+					toolName: "write",
+					input: { path: filePath },
+					content: [{ type: "text", text: "base" }],
+				},
 				getFlag: () => false,
-				dbg: () => {}, runtime,
+				dbg: () => {},
+				runtime,
 				cacheManager: { addModifiedRange: () => {}, readTurnState: () => ({}) },
-				biomeClient: {}, ruffClient: {}, metricsClient: {}, resetLSPService: () => {},
-				agentBehaviorRecord: () => [], formatBehaviorWarnings: () => "",
+				biomeClient: {},
+				ruffClient: {},
+				metricsClient: {},
+				resetLSPService: () => {},
+				agentBehaviorRecord: () => [],
+				formatBehaviorWarnings: () => "",
 			} as any);
 			// #1590: the attachment block carries the bytes and the trailing
 			// notice block states the authority — one sentence, one author.
@@ -726,33 +755,63 @@ describe("runtime-tool-result inline behavior warnings", () => {
 			expect(returned?.content.at(-1)?.text).toContain(
 				"is authoritative after autofix",
 			);
-		} finally { env.cleanup(); }
+		} finally {
+			env.cleanup();
+		}
 	});
 
 	it("runs bash synthetic writes immediately and returns authoritative content", async () => {
 		const { runPipeline } = await import("../../clients/pipeline.js");
 		const env = setupTestEnvironment("pi-lens-runtime-tool-bash-write-");
 		try {
-			const filePath = createTempFile(env.tmpDir, "bash.ts", "const bash = true;\n");
+			const filePath = createTempFile(
+				env.tmpDir,
+				"bash.ts",
+				"const bash = true;\n",
+			);
 			vi.mocked(runPipeline).mockImplementation(async (ctx) => ({
-				output: "", hasBlockers: false, isError: false, fileModified: true,
+				output: "",
+				hasBlockers: false,
+				isError: false,
+				fileModified: true,
 				changedFiles: [filePath],
-				postMutation: ctx.autofixMode === "immediate"
-					? { filePath, content: fs.readFileSync(filePath, "utf-8"), source: "autofix" }
-					: undefined,
+				postMutation:
+					ctx.autofixMode === "immediate"
+						? {
+								filePath,
+								content: fs.readFileSync(filePath, "utf-8"),
+								source: "autofix",
+							}
+						: undefined,
 			}));
 			const runtime = new RuntimeCoordinator();
 			runtime.projectRoot = env.tmpDir;
 			const returned = await handleToolResult({
-				event: { toolName: "bash", input: { command: `echo x > "${filePath}"` }, content: [{ type: "text", text: "bash ok" }] },
-				getFlag: () => false, dbg: () => {}, runtime,
+				event: {
+					toolName: "bash",
+					input: { command: `echo x > "${filePath}"` },
+					content: [{ type: "text", text: "bash ok" }],
+				},
+				getFlag: () => false,
+				dbg: () => {},
+				runtime,
 				cacheManager: { addModifiedRange: () => {}, readTurnState: () => ({}) },
-				biomeClient: {}, ruffClient: {}, metricsClient: {}, resetLSPService: () => {},
-				agentBehaviorRecord: () => [], formatBehaviorWarnings: () => "",
+				biomeClient: {},
+				ruffClient: {},
+				metricsClient: {},
+				resetLSPService: () => {},
+				agentBehaviorRecord: () => [],
+				formatBehaviorWarnings: () => "",
 			} as any);
-			expect(vi.mocked(runPipeline).mock.calls[0][0].autofixMode).toBe("immediate");
-			expect(returned?.content.some((part) => part.text?.includes("authoritative"))).toBe(true);
-		} finally { env.cleanup(); }
+			expect(vi.mocked(runPipeline).mock.calls[0][0].autofixMode).toBe(
+				"immediate",
+			);
+			expect(
+				returned?.content.some((part) => part.text?.includes("authoritative")),
+			).toBe(true);
+		} finally {
+			env.cleanup();
+		}
 	});
 
 	it("shares one authoritative-content budget across a multi-file bash write", async () => {
@@ -767,18 +826,35 @@ describe("runtime-tool-result inline behavior warnings", () => {
 			const fileA = createTempFile(env.tmpDir, "budget-a.ts", bigContent);
 			const fileB = createTempFile(env.tmpDir, "budget-b.ts", bigContent);
 			vi.mocked(runPipeline).mockImplementation(async (ctx) => ({
-				output: "", hasBlockers: false, isError: false, fileModified: true,
+				output: "",
+				hasBlockers: false,
+				isError: false,
+				fileModified: true,
 				changedFiles: [ctx.filePath],
-				postMutation: { filePath: ctx.filePath, content: bigContent, source: "autofix" },
+				postMutation: {
+					filePath: ctx.filePath,
+					content: bigContent,
+					source: "autofix",
+				},
 			}));
 			const runtime = new RuntimeCoordinator();
 			runtime.projectRoot = env.tmpDir;
 			const returned = await handleToolResult({
-				event: { toolName: "bash", input: { command: `echo x > "${fileA}"; echo x > "${fileB}"` }, content: [] },
-				getFlag: () => false, dbg: () => {}, runtime,
+				event: {
+					toolName: "bash",
+					input: { command: `echo x > "${fileA}"; echo x > "${fileB}"` },
+					content: [],
+				},
+				getFlag: () => false,
+				dbg: () => {},
+				runtime,
 				cacheManager: { addModifiedRange: () => {}, readTurnState: () => ({}) },
-				biomeClient: {}, ruffClient: {}, metricsClient: {}, resetLSPService: () => {},
-				agentBehaviorRecord: () => [], formatBehaviorWarnings: () => "",
+				biomeClient: {},
+				ruffClient: {},
+				metricsClient: {},
+				resetLSPService: () => {},
+				agentBehaviorRecord: () => [],
+				formatBehaviorWarnings: () => "",
 			} as any);
 			const authoritative = returned?.content.filter((part) =>
 				part.text?.startsWith("pi-lens applied autofix to"),
@@ -788,32 +864,66 @@ describe("runtime-tool-result inline behavior warnings", () => {
 			);
 			expect(authoritative).toHaveLength(1);
 			expect(warnings).toHaveLength(1);
-		} finally { env.cleanup(); }
+		} finally {
+			env.cleanup();
+		}
 	});
 
 	it("demotes a bash write followed by an edit through the handler", async () => {
 		const { runPipeline } = await import("../../clients/pipeline.js");
-		const formatEventsPublish = await import("../../clients/format-events-publish.js");
+		const formatEventsPublish =
+			await import("../../clients/format-events-publish.js");
 		const env = setupTestEnvironment("pi-lens-runtime-tool-bash-edit-");
 		try {
-			const filePath = createTempFile(env.tmpDir, "bash-edit.ts", "let value = 1;\n");
-			vi.mocked(runPipeline).mockResolvedValue({ output: "", hasBlockers: false, isError: false, fileModified: false });
+			const filePath = createTempFile(
+				env.tmpDir,
+				"bash-edit.ts",
+				"let value = 1;\n",
+			);
+			vi.mocked(runPipeline).mockResolvedValue({
+				output: "",
+				hasBlockers: false,
+				isError: false,
+				fileModified: false,
+			});
 			const runtime = new RuntimeCoordinator();
 			runtime.projectRoot = env.tmpDir;
 			const emit = vi.fn();
 			formatEventsPublish.wireFormatEventsBusEmitter(emit);
 			const base = {
-				getFlag: () => false, dbg: () => {}, runtime,
+				getFlag: () => false,
+				dbg: () => {},
+				runtime,
 				cacheManager: { addModifiedRange: () => {}, readTurnState: () => ({}) },
-				biomeClient: {}, ruffClient: {}, metricsClient: {}, resetLSPService: () => {},
-				agentBehaviorRecord: () => [], formatBehaviorWarnings: () => "",
+				biomeClient: {},
+				ruffClient: {},
+				metricsClient: {},
+				resetLSPService: () => {},
+				agentBehaviorRecord: () => [],
+				formatBehaviorWarnings: () => "",
 			} as any;
-			await handleToolResult({ ...base, event: { toolName: "bash", input: { command: `echo x > "${filePath}"` }, content: [] } });
+			await handleToolResult({
+				...base,
+				event: {
+					toolName: "bash",
+					input: { command: `echo x > "${filePath}"` },
+					content: [],
+				},
+			});
 			fs.writeFileSync(filePath, "let value = 2;\n");
-			await handleToolResult({ ...base, event: { toolName: "edit", input: { path: filePath }, content: [] } });
-			expect(vi.mocked(runPipeline).mock.calls.map((call) => call[0].autofixMode)).toEqual(["immediate", "deferred"]);
-			expect(runtime.consumeDeferredFormatFiles()[0].kinds).toEqual(new Set(["format", "autofix"]));
-			expect(emit.mock.calls.at(-1)?.[1]).toMatchObject({ kinds: ["autofix", "format"] });
+			await handleToolResult({
+				...base,
+				event: { toolName: "edit", input: { path: filePath }, content: [] },
+			});
+			expect(
+				vi.mocked(runPipeline).mock.calls.map((call) => call[0].autofixMode),
+			).toEqual(["immediate", "deferred"]);
+			expect(runtime.consumeDeferredFormatFiles()[0].kinds).toEqual(
+				new Set(["format", "autofix"]),
+			);
+			expect(emit.mock.calls.at(-1)?.[1]).toMatchObject({
+				kinds: ["autofix", "format"],
+			});
 		} finally {
 			formatEventsPublish._resetFormatEventsPublishForTests();
 			env.cleanup();
@@ -824,25 +934,46 @@ describe("runtime-tool-result inline behavior warnings", () => {
 		const { runPipeline } = await import("../../clients/pipeline.js");
 		const env = setupTestEnvironment("pi-lens-runtime-tool-fixed-alias-");
 		try {
-			const filePath = createTempFile(env.tmpDir, "src/alias.ts", "let alias = 1;\n");
+			const filePath = createTempFile(
+				env.tmpDir,
+				"src/alias.ts",
+				"let alias = 1;\n",
+			);
 			let aliasPath = filePath.toUpperCase();
 			if (!fs.existsSync(aliasPath)) {
 				aliasPath = path.join(env.tmpDir, "alias-link.ts");
 				fs.symlinkSync(filePath, aliasPath, "file");
 			}
-			const runtime = new RuntimeCoordinator(); runtime.projectRoot = env.tmpDir;
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
 			runtime.recordMutationToolReceipt(filePath, "write");
 			runtime.fixedThisTurn.add(filePath);
 			vi.mocked(runPipeline).mockImplementation(async (_ctx, deps) => {
 				expect(deps.fixedThisTurn.has(filePath)).toBe(false);
-				return { output: "", hasBlockers: false, isError: false, fileModified: false };
+				return {
+					output: "",
+					hasBlockers: false,
+					isError: false,
+					fileModified: false,
+				};
 			});
 			await handleToolResult({
-				event: { toolName: "edit", input: { path: aliasPath }, content: [] }, getFlag: () => false, dbg: () => {}, runtime,
-				cacheManager: { addModifiedRange: () => {}, readTurnState: () => ({}) }, biomeClient: {}, ruffClient: {}, metricsClient: {}, resetLSPService: () => {}, agentBehaviorRecord: () => [], formatBehaviorWarnings: () => "",
+				event: { toolName: "edit", input: { path: aliasPath }, content: [] },
+				getFlag: () => false,
+				dbg: () => {},
+				runtime,
+				cacheManager: { addModifiedRange: () => {}, readTurnState: () => ({}) },
+				biomeClient: {},
+				ruffClient: {},
+				metricsClient: {},
+				resetLSPService: () => {},
+				agentBehaviorRecord: () => [],
+				formatBehaviorWarnings: () => "",
 			} as any);
 			expect(vi.mocked(runPipeline)).toHaveBeenCalledTimes(1);
-		} finally { env.cleanup(); }
+		} finally {
+			env.cleanup();
+		}
 	});
 
 	it("queues format with deferred autofix under --immediate-format", async () => {
@@ -850,17 +981,33 @@ describe("runtime-tool-result inline behavior warnings", () => {
 		const env = setupTestEnvironment("pi-lens-runtime-tool-immediate-format-");
 		try {
 			const filePath = createTempFile(env.tmpDir, "flag.ts", "let flag = 1;\n");
-			vi.mocked(runPipeline).mockResolvedValue({ output: "", hasBlockers: false, isError: false, fileModified: false });
-			const runtime = new RuntimeCoordinator(); runtime.projectRoot = env.tmpDir;
+			vi.mocked(runPipeline).mockResolvedValue({
+				output: "",
+				hasBlockers: false,
+				isError: false,
+				fileModified: false,
+			});
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
 			await handleToolResult({
 				event: { toolName: "edit", input: { path: filePath }, content: [] },
-				getFlag: (name: string) => name === "immediate-format", dbg: () => {}, runtime,
+				getFlag: (name: string) => name === "immediate-format",
+				dbg: () => {},
+				runtime,
 				cacheManager: { addModifiedRange: () => {}, readTurnState: () => ({}) },
-				biomeClient: {}, ruffClient: {}, metricsClient: {}, resetLSPService: () => {},
-				agentBehaviorRecord: () => [], formatBehaviorWarnings: () => "",
+				biomeClient: {},
+				ruffClient: {},
+				metricsClient: {},
+				resetLSPService: () => {},
+				agentBehaviorRecord: () => [],
+				formatBehaviorWarnings: () => "",
 			} as any);
-			expect(runtime.consumeDeferredFormatFiles()[0].kinds).toEqual(new Set(["autofix", "format"]));
-		} finally { env.cleanup(); }
+			expect(runtime.consumeDeferredFormatFiles()[0].kinds).toEqual(
+				new Set(["autofix", "format"]),
+			);
+		} finally {
+			env.cleanup();
+		}
 	});
 
 	it("does not attach authoritative content above the LSP byte limit", async () => {
@@ -873,29 +1020,88 @@ describe("runtime-tool-result inline behavior warnings", () => {
 			const boundaryContent = "x".repeat(2 * 1024 * 1024);
 			const content = `${boundaryContent}x`;
 			vi.mocked(runPipeline)
-				.mockResolvedValueOnce({ output: "", hasBlockers: false, isError: false, fileModified: true, changedFiles: [boundaryPath], postMutation: { filePath: boundaryPath, content: boundaryContent, source: "autofix" } })
-				.mockResolvedValueOnce({ output: "", hasBlockers: false, isError: false, fileModified: true, changedFiles: [filePath], postMutation: { filePath, content, source: "autofix" } });
-			const runtime = new RuntimeCoordinator(); runtime.projectRoot = env.tmpDir;
+				.mockResolvedValueOnce({
+					output: "",
+					hasBlockers: false,
+					isError: false,
+					fileModified: true,
+					changedFiles: [boundaryPath],
+					postMutation: {
+						filePath: boundaryPath,
+						content: boundaryContent,
+						source: "autofix",
+					},
+				})
+				.mockResolvedValueOnce({
+					output: "",
+					hasBlockers: false,
+					isError: false,
+					fileModified: true,
+					changedFiles: [filePath],
+					postMutation: { filePath, content, source: "autofix" },
+				});
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
 			const boundaryReturned = await handleToolResult({
-				event: { toolName: "write", input: { path: boundaryPath }, content: [] }, getFlag: () => false, dbg: () => {}, runtime,
-				cacheManager: { addModifiedRange: () => {}, readTurnState: () => ({}) }, biomeClient: {}, ruffClient: {}, metricsClient: {}, resetLSPService: () => {}, agentBehaviorRecord: () => [], formatBehaviorWarnings: () => "",
+				event: {
+					toolName: "write",
+					input: { path: boundaryPath },
+					content: [],
+				},
+				getFlag: () => false,
+				dbg: () => {},
+				runtime,
+				cacheManager: { addModifiedRange: () => {}, readTurnState: () => ({}) },
+				biomeClient: {},
+				ruffClient: {},
+				metricsClient: {},
+				resetLSPService: () => {},
+				agentBehaviorRecord: () => [],
+				formatBehaviorWarnings: () => "",
 			} as any);
 			const returned = await handleToolResult({
-				event: { toolName: "write", input: { path: filePath }, content: [] }, getFlag: () => false, dbg: () => {}, runtime,
-				cacheManager: { addModifiedRange: () => {}, readTurnState: () => ({}) }, biomeClient: {}, ruffClient: {}, metricsClient: {}, resetLSPService: () => {}, agentBehaviorRecord: () => [], formatBehaviorWarnings: () => "",
+				event: { toolName: "write", input: { path: filePath }, content: [] },
+				getFlag: () => false,
+				dbg: () => {},
+				runtime,
+				cacheManager: { addModifiedRange: () => {}, readTurnState: () => ({}) },
+				biomeClient: {},
+				ruffClient: {},
+				metricsClient: {},
+				resetLSPService: () => {},
+				agentBehaviorRecord: () => [],
+				formatBehaviorWarnings: () => "",
 			} as any);
-			expect(boundaryReturned?.content.some((part) => part.text?.includes(boundaryContent))).toBe(true);
-			expect(returned?.content.some((part) => part.text?.includes(content))).toBe(false);
+			expect(
+				boundaryReturned?.content.some((part) =>
+					part.text?.includes(boundaryContent),
+				),
+			).toBe(true);
+			expect(
+				returned?.content.some((part) => part.text?.includes(content)),
+			).toBe(false);
 			expect(returned?.content.at(-1)?.text).toContain("too large to attach");
-			expect(logLatency).toHaveBeenCalledWith(expect.objectContaining({
-				phase: "authoritative_content_attachment_decision",
-				metadata: expect.objectContaining({ bytes: boundaryContent.length, decision: "attached" }),
-			}));
-			expect(logLatency).toHaveBeenCalledWith(expect.objectContaining({
-				phase: "authoritative_content_attachment_decision",
-				metadata: expect.objectContaining({ bytes: content.length, decision: "size-capped" }),
-			}));
-		} finally { env.cleanup(); }
+			expect(logLatency).toHaveBeenCalledWith(
+				expect.objectContaining({
+					phase: "authoritative_content_attachment_decision",
+					metadata: expect.objectContaining({
+						bytes: boundaryContent.length,
+						decision: "attached",
+					}),
+				}),
+			);
+			expect(logLatency).toHaveBeenCalledWith(
+				expect.objectContaining({
+					phase: "authoritative_content_attachment_decision",
+					metadata: expect.objectContaining({
+						bytes: content.length,
+						decision: "size-capped",
+					}),
+				}),
+			);
+		} finally {
+			env.cleanup();
+		}
 	});
 
 	it("publishes pilens:format:queued only when deferFormat reports a NEW queue entry (#673)", async () => {
@@ -906,9 +1112,8 @@ describe("runtime-tool-result inline behavior warnings", () => {
 			isError: false,
 			fileModified: false,
 		});
-		const formatEventsPublish = await import(
-			"../../clients/format-events-publish.js"
-		);
+		const formatEventsPublish =
+			await import("../../clients/format-events-publish.js");
 
 		const env = setupTestEnvironment("pi-lens-runtime-tool-format-queued-");
 		try {
@@ -1404,7 +1609,10 @@ describe("runtime-tool-result inline behavior warnings", () => {
 				formatBehaviorWarnings: () => "",
 			} as any);
 
-			expect(resetLSPService).toHaveBeenCalledWith({ fast: true, reason: "pipeline_crash" });
+			expect(resetLSPService).toHaveBeenCalledWith({
+				fast: true,
+				reason: "pipeline_crash",
+			});
 		} finally {
 			env.cleanup();
 		}
@@ -1702,7 +1910,9 @@ describe("path attribution across tool_call/tool_result (#1642)", () => {
 			// and correctly recognized IT as gitignored — proving the basis
 			// correction, not a stale skip flag, is what protects the parent.
 			expect(dbg).toHaveBeenCalledWith(
-				expect.stringContaining(`tool_result: skipping gitignored file ${worktreeFile}`),
+				expect.stringContaining(
+					`tool_result: skipping gitignored file ${worktreeFile}`,
+				),
 			);
 			// No deferred-format work for EITHER file, and the parent checkout
 			// is untouched — that is exactly what dirtied the live checkout in
@@ -1803,10 +2013,17 @@ describe("path attribution across tool_call/tool_result (#1642)", () => {
 			// A blocked call never gets a paired tool_result — the host never
 			// lets the tool execute. Reproduce a block via the duplicate-export
 			// guard (cachedExports), the simplest deterministic block path.
-			createTempFile(env.tmpDir, "src/dupe.ts", "export const unrelated = 0;\n");
+			createTempFile(
+				env.tmpDir,
+				"src/dupe.ts",
+				"export const unrelated = 0;\n",
+			);
 			const runtime = new RuntimeCoordinator();
 			runtime.projectRoot = env.tmpDir;
-			runtime.cachedExports.set("existing", path.join(env.tmpDir, "src/elsewhere.ts"));
+			runtime.cachedExports.set(
+				"existing",
+				path.join(env.tmpDir, "src/elsewhere.ts"),
+			);
 			const toolCallId = "call-blocked";
 
 			const result = await handleToolCall({
@@ -1954,7 +2171,11 @@ describe("path attribution across tool_call/tool_result (#1642)", () => {
 			const callId = "callid-not-toolcallid";
 
 			await handleToolCall({
-				event: { callId, toolName: "write", input: { path: "src/app.ts", content: "x\n" } },
+				event: {
+					callId,
+					toolName: "write",
+					input: { path: "src/app.ts", content: "x\n" },
+				},
 				ctx: { cwd: worktreeDir },
 				lensEnabled: true,
 				getFlag: (name: string) => name === "no-lsp",
@@ -2028,7 +2249,11 @@ describe("path attribution across tool_call/tool_result (#1642)", () => {
 			runtime.projectRoot = env.tmpDir;
 
 			const callDeps = (toolCallId: string, cwd: string) => ({
-				event: { toolCallId, toolName: "write", input: { path: "src/app.ts", content: "x\n" } },
+				event: {
+					toolCallId,
+					toolName: "write",
+					input: { path: "src/app.ts", content: "x\n" },
+				},
 				ctx: { cwd },
 				lensEnabled: true,
 				getFlag: (name: string) => name === "no-lsp",

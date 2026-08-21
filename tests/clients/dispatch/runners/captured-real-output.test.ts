@@ -197,84 +197,88 @@ describe("captured real-binary output", () => {
 		// into a timeout that reads like a parser failure. The budget is
 		// generous because this suite spawns nothing; a real assertion failure
 		// still reds immediately.
-		it(`${runnerId} parses findings out of ${fixture.provenance.tool} ${fixture.provenance.version} output`, {
-			timeout: 30000,
-		}, async () => {
-			const env = setupTestEnvironment(`pi-lens-captured-${runnerId}-`);
-			try {
-				// The provenance names the repo workspace the bytes came from, so
-				// the replay runs against the same planted violation the capture did.
-				const source = path.join(repoRoot, fixture.provenance.workspace);
-				fs.cpSync(source, env.tmpDir, { recursive: true });
-				const filePath = path.join(env.tmpDir, fixture.file);
-				expect(
-					fs.existsSync(filePath),
-					`${fixture.relPath}: ${fixture.provenance.workspace}/${fixture.file} is missing`,
-				).toBe(true);
-
-				safeSpawnAsync.mockResolvedValue(materialize(fixture, env.tmpDir));
-
-				const runner = (
-					await import(
-						`../../../../clients/dispatch/runners/${descriptor.module}.js`
-					)
-				).default;
-				const result = await runner.run(
-					createCtx(descriptor.kind, filePath, env.tmpDir) as never,
-				);
-
-				// Argv tie. Captured bytes are evidence about THIS runner only
-				// while the runner still asks the tool for them the same way.
-				// The mock answers whatever the runner spawns, so without this
-				// a flag the tool would reject — the taplo bug exactly —
-				// replays green forever.
-				//
-				// Order matters, not just membership: sqlfluff's #1937 bug put
-				// `--dialect` BETWEEN `--format` and its value, and every token
-				// was still present. So the recorded argv must appear as an
-				// ordered subsequence. File paths are dropped, because the
-				// runner resolves them to absolute and the capture did not.
-				const fileTokens = new Set([
-					fixture.file,
-					path.basename(fixture.file),
-					fixture.file.replace(/\\/g, "/"),
-				]);
-				const recorded = (fixture.provenance.argv ?? []).filter(
-					(token) => !fileTokens.has(token),
-				);
-				const spawnedArgvs = safeSpawnAsync.mock.calls.map(
-					(call) => (call[1] ?? []) as string[],
-				);
-				expect(
-					spawnedArgvs.length,
-					`${runnerId} never spawned anything, so the captured bytes prove nothing`,
-				).toBeGreaterThan(0);
-				expect(
-					spawnedArgvs.some((argv) => isOrderedSubsequence(recorded, argv)),
-					`${runnerId} spawned none of ${JSON.stringify(spawnedArgvs)} carrying its fixture's argv ${JSON.stringify(recorded)} in order. Either the runner's invocation drifted from \`${fixture.provenance.command}\`, or the fixture and the scripts/capture-runner-fixtures.mjs manifest need updating to the new argv.`,
-				).toBe(true);
-
-				expect(
-					result.diagnostics.length,
-					`${runnerId} parsed 0 diagnostics out of real ${fixture.provenance.tool} ${fixture.provenance.version} output (exit ${fixture.exitCode}). Re-capture with \`${fixture.provenance.command}\` and fix the parser.`,
-				).toBeGreaterThan(0);
-				expect(result.status).not.toBe("skipped");
-				for (const diagnostic of result.diagnostics as Array<
-					Record<string, unknown>
-				>) {
+		it(
+			`${runnerId} parses findings out of ${fixture.provenance.tool} ${fixture.provenance.version} output`,
+			{
+				timeout: 30000,
+			},
+			async () => {
+				const env = setupTestEnvironment(`pi-lens-captured-${runnerId}-`);
+				try {
+					// The provenance names the repo workspace the bytes came from, so
+					// the replay runs against the same planted violation the capture did.
+					const source = path.join(repoRoot, fixture.provenance.workspace);
+					fs.cpSync(source, env.tmpDir, { recursive: true });
+					const filePath = path.join(env.tmpDir, fixture.file);
 					expect(
-						diagnostic.message,
-						`${runnerId} emitted a blank message`,
-					).toBeTruthy();
-					expect(
-						typeof diagnostic.line === "number" &&
-							(diagnostic.line as number) >= 1,
-						`${runnerId} emitted a non-positive line number: ${String(diagnostic.line)}`,
+						fs.existsSync(filePath),
+						`${fixture.relPath}: ${fixture.provenance.workspace}/${fixture.file} is missing`,
 					).toBe(true);
+
+					safeSpawnAsync.mockResolvedValue(materialize(fixture, env.tmpDir));
+
+					const runner = (
+						await import(
+							`../../../../clients/dispatch/runners/${descriptor.module}.js`
+						)
+					).default;
+					const result = await runner.run(
+						createCtx(descriptor.kind, filePath, env.tmpDir) as never,
+					);
+
+					// Argv tie. Captured bytes are evidence about THIS runner only
+					// while the runner still asks the tool for them the same way.
+					// The mock answers whatever the runner spawns, so without this
+					// a flag the tool would reject — the taplo bug exactly —
+					// replays green forever.
+					//
+					// Order matters, not just membership: sqlfluff's #1937 bug put
+					// `--dialect` BETWEEN `--format` and its value, and every token
+					// was still present. So the recorded argv must appear as an
+					// ordered subsequence. File paths are dropped, because the
+					// runner resolves them to absolute and the capture did not.
+					const fileTokens = new Set([
+						fixture.file,
+						path.basename(fixture.file),
+						fixture.file.replace(/\\/g, "/"),
+					]);
+					const recorded = (fixture.provenance.argv ?? []).filter(
+						(token) => !fileTokens.has(token),
+					);
+					const spawnedArgvs = safeSpawnAsync.mock.calls.map(
+						(call) => (call[1] ?? []) as string[],
+					);
+					expect(
+						spawnedArgvs.length,
+						`${runnerId} never spawned anything, so the captured bytes prove nothing`,
+					).toBeGreaterThan(0);
+					expect(
+						spawnedArgvs.some((argv) => isOrderedSubsequence(recorded, argv)),
+						`${runnerId} spawned none of ${JSON.stringify(spawnedArgvs)} carrying its fixture's argv ${JSON.stringify(recorded)} in order. Either the runner's invocation drifted from \`${fixture.provenance.command}\`, or the fixture and the scripts/capture-runner-fixtures.mjs manifest need updating to the new argv.`,
+					).toBe(true);
+
+					expect(
+						result.diagnostics.length,
+						`${runnerId} parsed 0 diagnostics out of real ${fixture.provenance.tool} ${fixture.provenance.version} output (exit ${fixture.exitCode}). Re-capture with \`${fixture.provenance.command}\` and fix the parser.`,
+					).toBeGreaterThan(0);
+					expect(result.status).not.toBe("skipped");
+					for (const diagnostic of result.diagnostics as Array<
+						Record<string, unknown>
+					>) {
+						expect(
+							diagnostic.message,
+							`${runnerId} emitted a blank message`,
+						).toBeTruthy();
+						expect(
+							typeof diagnostic.line === "number" &&
+								(diagnostic.line as number) >= 1,
+							`${runnerId} emitted a non-positive line number: ${String(diagnostic.line)}`,
+						).toBe(true);
+					}
+				} finally {
+					env.cleanup();
 				}
-			} finally {
-				env.cleanup();
-			}
-		});
+			},
+		);
 	}
 });

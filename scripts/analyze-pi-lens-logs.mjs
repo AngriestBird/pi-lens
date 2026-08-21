@@ -25,7 +25,11 @@ import { minimatch } from "minimatch";
 const DEFAULT_ROOT = path.join(os.homedir(), ".pi-lens");
 const DEFAULT_SINCE = "2d";
 const DEFAULT_LIMIT = 12;
-const DEFAULT_EXCLUDE_GLOBS = ["**/AppData/Local/Temp/claude/**", "**/heap-corpus*/**", "**/.plegma/work/**"];
+const DEFAULT_EXCLUDE_GLOBS = [
+	"**/AppData/Local/Temp/claude/**",
+	"**/heap-corpus*/**",
+	"**/.plegma/work/**",
+];
 
 const args = parseArgs(process.argv.slice(2));
 const root = path.resolve(expandHome(args.root ?? DEFAULT_ROOT));
@@ -36,7 +40,11 @@ const outputJson = Boolean(args.json);
 const includeArchived = Boolean(args.archived);
 const excludeGlobs = [
 	...DEFAULT_EXCLUDE_GLOBS,
-	...(Array.isArray(args.exclude) ? args.exclude : args.exclude ? [args.exclude] : []),
+	...(Array.isArray(args.exclude)
+		? args.exclude
+		: args.exclude
+			? [args.exclude]
+			: []),
 ];
 
 const thresholds = {
@@ -390,10 +398,7 @@ async function analyzeLatency(files, state) {
 							// Vintage-attribution fallback: no `unconfirmedByReason` means
 							// this line predates #1618 — the absent field IS the signal,
 							// not proof every file here was really a budget timeout.
-							ws.unconfirmedByReason.inc(
-								"budget (pre-#1618 build)",
-								timedOut,
-							);
+							ws.unconfirmedByReason.inc("budget (pre-#1618 build)", timedOut);
 						}
 						state.smellTotals.inc("lsp-workspace-file-timeouts");
 						pushTop(
@@ -708,7 +713,9 @@ async function analyzeActionableWarnings(files, state) {
 				state.actionable.reports++;
 				const summary = meta.summary ?? {};
 				state.actionable.suppressed += Number(summary.suppressed ?? 0);
-				state.actionable.autoFixEligible += Number(summary.autoFixEligible ?? 0);
+				state.actionable.autoFixEligible += Number(
+					summary.autoFixEligible ?? 0,
+				);
 			}
 			if (event === "advisory_injected") {
 				state.actionable.injected++;
@@ -758,8 +765,12 @@ async function analyzeAstGrepTools(files, state) {
 						tool,
 						errorKind: entry.errorKind,
 						durationMs: entry.durationMs,
-						message: String(entry.errorRaw ?? "").replace(/\s+/g, " ").slice(0, 180),
-						pattern: String(entry.pattern ?? "").replace(/\s+/g, " ").slice(0, 80),
+						message: String(entry.errorRaw ?? "")
+							.replace(/\s+/g, " ")
+							.slice(0, 180),
+						pattern: String(entry.pattern ?? "")
+							.replace(/\s+/g, " ")
+							.slice(0, 80),
 					},
 					limit * 3,
 					(a, b) => String(b.ts).localeCompare(String(a.ts)),
@@ -773,7 +784,9 @@ async function analyzeAstGrepTools(files, state) {
 						tool,
 						durationMs: entry.durationMs,
 						matchCount: entry.matchCount,
-						pattern: String(entry.pattern ?? "").replace(/\s+/g, " ").slice(0, 80),
+						pattern: String(entry.pattern ?? "")
+							.replace(/\s+/g, " ")
+							.slice(0, 80),
 					},
 					limit * 3,
 					byDuration,
@@ -810,7 +823,8 @@ async function analyzeWorklog(files, state) {
 			if (entry.autoFixed) row.autoFixed += 1;
 			state.worklog.byRuleModel.set(key, row);
 			state.worklog.byModel.inc(model || "(unknown)");
-			if (entry.autoFixed) state.worklog.byModelAutoFixed.inc(model || "(unknown)");
+			if (entry.autoFixed)
+				state.worklog.byModelAutoFixed.inc(model || "(unknown)");
 			state.worklog.byProvider.inc(provider || "(unknown)");
 		});
 	}
@@ -842,7 +856,9 @@ function isExcludedEntry(entry) {
 
 function pathValues(value, key = "") {
 	if (typeof value === "string") {
-		return /(file|path|cwd|root|project)/i.test(key) ? [normalizePath(value)] : [];
+		return /(file|path|cwd|root|project)/i.test(key)
+			? [normalizePath(value)]
+			: [];
 	}
 	if (!value || typeof value !== "object") return [];
 	return Object.entries(value).flatMap(([childKey, child]) =>
@@ -1259,7 +1275,9 @@ function buildReport(state) {
 		"lsp-workspace-file-timeouts",
 		smellCount("lsp-workspace-file-timeouts"),
 		`Full LSP sweeps produced an unconfirmed file (${ws.timedOutFilesTotal} files across ${ws.timedOutSweeps} sweeps)` +
-			(unconfirmedReasonBreakdown ? ` — by reason: ${unconfirmedReasonBreakdown}` : ""),
+			(unconfirmedReasonBreakdown
+				? ` — by reason: ${unconfirmedReasonBreakdown}`
+				: ""),
 		ws.sweeps.slice(0, limit),
 	);
 

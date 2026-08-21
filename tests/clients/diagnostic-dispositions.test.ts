@@ -112,15 +112,15 @@ describe("cross-process disposition commits (#1202)", () => {
 		vi.resetModules();
 		const writerB = await import("../../clients/diagnostic-dispositions.js");
 		_setBeforeDispositionCommitForTests(() => {
-			writerB.markDisposition(
-				cwd(),
-				interleaved,
-				"flagged",
-				"writer B",
-			);
+			writerB.markDisposition(cwd(), interleaved, "flagged", "writer B");
 			maskSiblingReplacement = true;
 		});
-		const firstAnchor = markDisposition(cwd(), first, "false-positive", "first");
+		const firstAnchor = markDisposition(
+			cwd(),
+			first,
+			"false-positive",
+			"first",
+		);
 		_setDispositionStatForTests(null);
 		const persisted = JSON.parse(fs.readFileSync(statePath(), "utf8")) as {
 			dispositions: Record<string, { disposition: string; reason?: string }>;
@@ -370,9 +370,9 @@ describe("markDisposition + applyDispositions (#690)", () => {
 		);
 		expect(applyDispositions([diag], cwd(), filePath(), content)).toEqual([]);
 		const editedContent = "const target = good();\n";
-		expect(
-			applyDispositions([diag], cwd(), filePath(), editedContent),
-		).toEqual([diag]);
+		expect(applyDispositions([diag], cwd(), filePath(), editedContent)).toEqual(
+			[diag],
+		);
 	});
 
 	it("false-positive survives whitespace-only changes and unrelated-lines-above insertions", () => {
@@ -389,7 +389,12 @@ describe("markDisposition + applyDispositions (#690)", () => {
 		const shiftedDiag = { ...diag, line: 2 };
 		const withInsertedLineAbove = "// unrelated\nconst target = bad();\n";
 		expect(
-			applyDispositions([shiftedDiag], cwd(), filePath(), withInsertedLineAbove),
+			applyDispositions(
+				[shiftedDiag],
+				cwd(),
+				filePath(),
+				withInsertedLineAbove,
+			),
 		).toEqual([]);
 	});
 
@@ -400,7 +405,12 @@ describe("markDisposition + applyDispositions (#690)", () => {
 			"flagged",
 		);
 		const editedContent = "const target = bad(1, 2, 3);\n";
-		const { weak } = anchorsForDiagnostic(cwd(), filePath(), diag, editedContent);
+		const { weak } = anchorsForDiagnostic(
+			cwd(),
+			filePath(),
+			diag,
+			editedContent,
+		);
 		expect(getDisposition(cwd(), weak)?.disposition).toBe("flagged");
 	});
 
@@ -604,7 +614,12 @@ describe("F1 (#1625 review round): blocking findings require a STRICT anchor to 
 		const finding1 = secret(1);
 		const finding2 = secret(2);
 		markDisposition(cwd(), { ...finding1, content }, "suppress");
-		const kept = applyDispositions([finding1, finding2], cwd(), filePath(), content);
+		const kept = applyDispositions(
+			[finding1, finding2],
+			cwd(),
+			filePath(),
+			content,
+		);
 		expect(kept).toEqual([finding1, finding2]);
 	});
 
@@ -612,7 +627,12 @@ describe("F1 (#1625 review round): blocking findings require a STRICT anchor to 
 		const finding1 = secret(1);
 		const finding2 = secret(2);
 		markDisposition(cwd(), { ...finding1, content }, "defer");
-		const kept = applyDispositions([finding1, finding2], cwd(), filePath(), content);
+		const kept = applyDispositions(
+			[finding1, finding2],
+			cwd(),
+			filePath(),
+			content,
+		);
 		expect(kept).toEqual([finding1, finding2]);
 	});
 
@@ -620,7 +640,12 @@ describe("F1 (#1625 review round): blocking findings require a STRICT anchor to 
 		const finding1 = secret(1);
 		const finding2 = secret(2);
 		markDisposition(cwd(), { ...finding1, content }, "false-positive");
-		const kept = applyDispositions([finding1, finding2], cwd(), filePath(), content);
+		const kept = applyDispositions(
+			[finding1, finding2],
+			cwd(),
+			filePath(),
+			content,
+		);
 		expect(kept).toEqual([finding2]);
 	});
 
@@ -628,7 +653,12 @@ describe("F1 (#1625 review round): blocking findings require a STRICT anchor to 
 		const warning1 = { ...secret(1), semantic: "warning" as const };
 		const warning2 = { ...secret(2), semantic: "warning" as const };
 		markDisposition(cwd(), { ...warning1, content }, "suppress");
-		const kept = applyDispositions([warning1, warning2], cwd(), filePath(), content);
+		const kept = applyDispositions(
+			[warning1, warning2],
+			cwd(),
+			filePath(),
+			content,
+		);
 		// Weak suppress still collapses both non-blocking findings — F1 only
 		// tightens the blocking tier, it doesn't touch existing behavior here.
 		expect(kept).toEqual([]);
@@ -678,14 +708,14 @@ describe("F3 (#1625 review round): deferredThisSession is scoped per-project, no
 		markDisposition(projectA, { ...findingA, content }, "defer");
 
 		// Project A's own finding IS deferred.
-		expect(applyDispositions([findingA], projectA, findingA.filePath, content)).toEqual(
-			[],
-		);
+		expect(
+			applyDispositions([findingA], projectA, findingA.filePath, content),
+		).toEqual([]);
 		// Project B's finding — same relative path, tool, rule, message — must
 		// NOT be affected by project A's defer.
-		expect(applyDispositions([findingB], projectB, findingB.filePath, content)).toEqual(
-			[findingB],
-		);
+		expect(
+			applyDispositions([findingB], projectB, findingB.filePath, content),
+		).toEqual([findingB]);
 	});
 
 	it("isDeferredThisSession requires the SAME cwd the defer was made under", () => {
@@ -736,7 +766,12 @@ describe("anchor path-form stability (#1024 — write raw vs read normalized)", 
 		// there but never alias — which surfaced as a CI failure on #1024's PR.)
 		if (!fs.existsSync(rawFile)) return;
 
-		const diag = { tool: "eslint", rule: "no-bad", message: "bad call", line: 1 };
+		const diag = {
+			tool: "eslint",
+			rule: "no-bad",
+			message: "bad call",
+			line: 1,
+		};
 		markDisposition(
 			projectDir,
 			{ cwd: projectDir, filePath: rawFile, ...diag, content },
@@ -747,7 +782,12 @@ describe("anchor path-form stability (#1024 — write raw vs read normalized)", 
 		// normalized-form read derives `sub/a.ts`, so the mark is not found and the
 		// diagnostic survives (kept === [diag]). Post-fix both derive the same
 		// canonical anchor, so the mark is found and the diagnostic is suppressed.
-		const kept = applyDispositions([diag], normalizedCwd, normalizedFile, content);
+		const kept = applyDispositions(
+			[diag],
+			normalizedCwd,
+			normalizedFile,
+			content,
+		);
 		expect(kept).toEqual([]);
 	});
 });
@@ -813,7 +853,10 @@ describe("mark telemetry (#690 — NDJSON log + pilens:diagnostic:disposition)",
 	const content = "const target = bad();\n";
 	const diag = { tool: "eslint", rule: "no-bad", message: "bad call", line: 1 };
 
-	function mark(disposition: "false-positive" | "suppress" | "defer" | "flagged", reason?: string) {
+	function mark(
+		disposition: "false-positive" | "suppress" | "defer" | "flagged",
+		reason?: string,
+	) {
 		return markDisposition(
 			cwd(),
 			{ cwd: cwd(), filePath: filePath(), ...diag, content },

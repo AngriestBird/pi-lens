@@ -415,7 +415,8 @@ export class GovulncheckClient extends SecurityScanClient<GovulncheckResult> {
 			{
 				...describeProbeEvidence(reprobe, "govulncheck"),
 				install: "succeeded",
-				installReason: "installed binary not found on PATH, $GOBIN or $GOPATH/bin",
+				installReason:
+					"installed binary not found on PATH, $GOBIN or $GOPATH/bin",
 			},
 			{ elapsedMs: Date.now() - reprobeStartedAt },
 		);
@@ -486,8 +487,7 @@ export class GovulncheckClient extends SecurityScanClient<GovulncheckResult> {
 			return {
 				...EMPTY_RESULT,
 				scannedAt,
-				summary:
-					err instanceof Error ? err.message.slice(0, 200) : String(err),
+				summary: err instanceof Error ? err.message.slice(0, 200) : String(err),
 			};
 		}
 	}
@@ -542,7 +542,8 @@ export function parseGovulncheckJson(stream: string): GovulncheckFinding[] {
 				module: packageName,
 				fixedVersion,
 				summary: asOsv.osv.summary ?? asOsv.osv.details,
-				url: asOsv.osv.database_specific?.url ?? affected?.database_specific?.url,
+				url:
+					asOsv.osv.database_specific?.url ?? affected?.database_specific?.url,
 			});
 		}
 	}

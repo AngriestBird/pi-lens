@@ -491,7 +491,9 @@ describe("getFormattersForFile — policy selection", () => {
 		const filePath = fileIn(tmpDir, "README.md");
 		expect(await getFormattersForFile(filePath, tmpDir)).toEqual([]);
 		createTempFile(tmpDir, ".prettierrc", "{}\n");
-		expect((await getFormattersForFile(filePath, tmpDir)).map((f) => f.name)).toEqual(["prettier"]);
+		expect(
+			(await getFormattersForFile(filePath, tmpDir)).map((f) => f.name),
+		).toEqual(["prettier"]);
 	});
 
 	it("does not force a formatter for unconfigured SQL files", async () => {
@@ -551,7 +553,9 @@ describe("getFormattersForFile — policy selection", () => {
 		for (let invocation = 0; invocation < 5; invocation += 1) {
 			const formatters = await getFormattersForFile(filePath, fixtureRoot);
 			expect(formatters.map((formatter) => formatter.name)).toEqual(["ktlint"]);
-			expect(formatters.some((formatter) => formatter.name === "ktfmt")).toBe(false);
+			expect(formatters.some((formatter) => formatter.name === "ktfmt")).toBe(
+				false,
+			);
 		}
 	});
 
@@ -587,7 +591,10 @@ describe("getFormattersForFile — policy selection", () => {
 			"build.gradle.kts",
 			"spotless {\n  kotlin {\n    ktfmt()\n  }\n}\n",
 		);
-		const formatters = await getFormattersForFile(fileIn(tmpDir, "App.kt"), tmpDir);
+		const formatters = await getFormattersForFile(
+			fileIn(tmpDir, "App.kt"),
+			tmpDir,
+		);
 		expect(formatters.map((formatter) => formatter.name)).toEqual(["ktfmt"]);
 	});
 
@@ -909,7 +916,7 @@ describe("getFormattersForFile — policy selection", () => {
 				name: "mix",
 				ext: ".ex",
 				configFile: ".formatter.exs",
-				content: "[inputs: [\"{mix,.formatter}.exs\"]]\n",
+				content: '[inputs: ["{mix,.formatter}.exs"]]\n',
 			},
 		];
 
@@ -1113,7 +1120,11 @@ describe("getFormattersForFile — policy selection", () => {
 	});
 
 	it("enables fantomas when .editorconfig is present", async () => {
-		createTempFile(tmpDir, ".editorconfig", "[*.fs]\nfsharp_space_before_uppercase_invocation = true\n");
+		createTempFile(
+			tmpDir,
+			".editorconfig",
+			"[*.fs]\nfsharp_space_before_uppercase_invocation = true\n",
+		);
 		const filePath = fileIn(tmpDir, "Program.fs");
 		const formatters = await getFormattersForFile(filePath, tmpDir);
 		expect(formatters.map((f) => f.name)).toEqual(["fantomas"]);
@@ -1126,7 +1137,11 @@ describe("getFormattersForFile — policy selection", () => {
 	});
 
 	it("enables mix when .formatter.exs is present", async () => {
-		createTempFile(tmpDir, ".formatter.exs", "[inputs: [\"{mix,.formatter}.exs\"]]\n");
+		createTempFile(
+			tmpDir,
+			".formatter.exs",
+			'[inputs: ["{mix,.formatter}.exs"]]\n',
+		);
 		const filePath = fileIn(tmpDir, "mix.ex");
 		const formatters = await getFormattersForFile(filePath, tmpDir);
 		expect(formatters.map((f) => f.name)).toEqual(["mix"]);
@@ -1158,7 +1173,9 @@ describe("getFormattersForFile — policy selection", () => {
 			expect(await getFormattersForFile(filePath, tmpDir)).toEqual([]);
 			createTempFile(tmpDir, "PSScriptAnalyzerSettings.psd1", "@{}\n");
 			const formatters = await getFormattersForFile(filePath, tmpDir);
-			expect(formatters.map((f) => f.name)).toEqual(["psscriptanalyzer-format"]);
+			expect(formatters.map((f) => f.name)).toEqual([
+				"psscriptanalyzer-format",
+			]);
 		});
 
 		it("google-java-format: .google-java-format created after the first call is picked up", async () => {
@@ -1230,7 +1247,12 @@ describe("getFormattersForFile — policy selection", () => {
 			["terraform", "main.tf", ".terraform.lock.hcl", "\n"],
 			["swiftformat", "Main.swift", ".swiftformat", "--indent 4\n"],
 			["fantomas", "Program.fs", ".fantomasignore", "\n"],
-			["mix", "mix.ex", ".formatter.exs", "[inputs: [\"{mix,.formatter}.exs\"]]\n"],
+			[
+				"mix",
+				"mix.ex",
+				".formatter.exs",
+				'[inputs: ["{mix,.formatter}.exs"]]\n',
+			],
 		] as const)(
 			"%s: %s created after the first call is picked up",
 			async (formatterName, fileName, configFile, configContent) => {
@@ -1517,14 +1539,17 @@ describe("oxfmt formatter — detection and policy selection", () => {
 			[f, "oxfmt.toml", "# oxfmt config\n"] as const,
 			[f, ".oxfmtrc.json", "{}\n"] as const,
 		]),
-	)("includes oxfmt for %s when %s is present", async (fileName, configFile, configContent) => {
-		createTempFile(tmpDir, configFile, configContent);
-		const formatters = await getFormattersForFile(
-			fileIn(tmpDir, fileName),
-			tmpDir,
-		);
-		expect(formatters.map((f) => f.name)).toContain("oxfmt");
-	});
+	)(
+		"includes oxfmt for %s when %s is present",
+		async (fileName, configFile, configContent) => {
+			createTempFile(tmpDir, configFile, configContent);
+			const formatters = await getFormattersForFile(
+				fileIn(tmpDir, fileName),
+				tmpDir,
+			);
+			expect(formatters.map((f) => f.name)).toContain("oxfmt");
+		},
+	);
 });
 
 // ---------------------------------------------------------------------------
@@ -1546,18 +1571,17 @@ describe("oxfmt formatter — .svelte conditional gate (#1134)", () => {
 		dir: string,
 		devDependencies: Record<string, string>,
 	): void {
-		createTempFile(
-			dir,
-			"package.json",
-			JSON.stringify({ devDependencies }),
-		);
+		createTempFile(dir, "package.json", JSON.stringify({ devDependencies }));
 	}
 
 	it("offers oxfmt for Component.svelte with the issue's exact fixture shape", async () => {
 		writePackageJson(tmpDir, { oxfmt: "^0.54.0", svelte: "^5.0.0" });
 		createTempFile(tmpDir, ".oxfmtrc.json", JSON.stringify({ svelte: true }));
 
-		const formatters = await getFormattersForFile(svelteComponent(tmpDir), tmpDir);
+		const formatters = await getFormattersForFile(
+			svelteComponent(tmpDir),
+			tmpDir,
+		);
 		expect(formatters.map((f) => f.name)).toEqual(["oxfmt"]);
 	});
 
@@ -1565,7 +1589,10 @@ describe("oxfmt formatter — .svelte conditional gate (#1134)", () => {
 		writePackageJson(tmpDir, { oxfmt: "^0.54.0", svelte: "^5.0.0" });
 		createTempFile(tmpDir, "oxfmt.toml", "svelte = true\n");
 
-		const formatters = await getFormattersForFile(svelteComponent(tmpDir), tmpDir);
+		const formatters = await getFormattersForFile(
+			svelteComponent(tmpDir),
+			tmpDir,
+		);
 		expect(formatters.map((f) => f.name)).toEqual(["oxfmt"]);
 	});
 
@@ -1573,7 +1600,10 @@ describe("oxfmt formatter — .svelte conditional gate (#1134)", () => {
 		writePackageJson(tmpDir, { oxfmt: "^0.54.0" });
 		createTempFile(tmpDir, ".oxfmtrc.json", JSON.stringify({ svelte: true }));
 
-		const formatters = await getFormattersForFile(svelteComponent(tmpDir), tmpDir);
+		const formatters = await getFormattersForFile(
+			svelteComponent(tmpDir),
+			tmpDir,
+		);
 		expect(formatters.map((f) => f.name)).not.toContain("oxfmt");
 	});
 
@@ -1581,7 +1611,10 @@ describe("oxfmt formatter — .svelte conditional gate (#1134)", () => {
 		writePackageJson(tmpDir, { oxfmt: "^0.54.0", svelte: "^5.0.0" });
 		createTempFile(tmpDir, ".oxfmtrc.json", "{}\n");
 
-		const formatters = await getFormattersForFile(svelteComponent(tmpDir), tmpDir);
+		const formatters = await getFormattersForFile(
+			svelteComponent(tmpDir),
+			tmpDir,
+		);
 		expect(formatters.map((f) => f.name)).not.toContain("oxfmt");
 	});
 
@@ -1589,7 +1622,10 @@ describe("oxfmt formatter — .svelte conditional gate (#1134)", () => {
 		writePackageJson(tmpDir, { oxfmt: "^0.54.0", svelte: "^5.0.0" });
 		createTempFile(tmpDir, ".oxfmtrc.json", JSON.stringify({ svelte: false }));
 
-		const formatters = await getFormattersForFile(svelteComponent(tmpDir), tmpDir);
+		const formatters = await getFormattersForFile(
+			svelteComponent(tmpDir),
+			tmpDir,
+		);
 		expect(formatters.map((f) => f.name)).not.toContain("oxfmt");
 	});
 
@@ -1597,14 +1633,20 @@ describe("oxfmt formatter — .svelte conditional gate (#1134)", () => {
 		writePackageJson(tmpDir, { oxfmt: "^0.54.0", svelte: "^5.0.0" });
 		createTempFile(tmpDir, "oxfmt.toml", "# oxfmt config\n");
 
-		const formatters = await getFormattersForFile(svelteComponent(tmpDir), tmpDir);
+		const formatters = await getFormattersForFile(
+			svelteComponent(tmpDir),
+			tmpDir,
+		);
 		expect(formatters.map((f) => f.name)).not.toContain("oxfmt");
 	});
 
 	it("does NOT offer oxfmt for Component.svelte with neither the package nor the config flag", async () => {
 		writePackageJson(tmpDir, { oxfmt: "^0.54.0" });
 
-		const formatters = await getFormattersForFile(svelteComponent(tmpDir), tmpDir);
+		const formatters = await getFormattersForFile(
+			svelteComponent(tmpDir),
+			tmpDir,
+		);
 		expect(formatters.map((f) => f.name)).not.toContain("oxfmt");
 	});
 
@@ -1612,7 +1654,10 @@ describe("oxfmt formatter — .svelte conditional gate (#1134)", () => {
 		writePackageJson(tmpDir, { oxfmt: "^0.54.0" });
 		createTempFile(tmpDir, "oxfmt.toml", "# oxfmt config\n");
 
-		const formatters = await getFormattersForFile(fileIn(tmpDir, "index.ts"), tmpDir);
+		const formatters = await getFormattersForFile(
+			fileIn(tmpDir, "index.ts"),
+			tmpDir,
+		);
 		expect(formatters.map((f) => f.name)).toContain("oxfmt");
 	});
 });
@@ -1626,9 +1671,8 @@ describe("oxfmt formatter — .svelte conditional gate (#1134)", () => {
 
 describe("oxfmt extension registries stay in sync (#1134)", () => {
 	it("oxfmtFormatter.extensions matches tool-policy's OXFMT_SUPPORTED_EXTENSIONS exactly", async () => {
-		const { OXFMT_SUPPORTED_EXTENSIONS } = await import(
-			"../../clients/tool-policy.js"
-		);
+		const { OXFMT_SUPPORTED_EXTENSIONS } =
+			await import("../../clients/tool-policy.js");
 		expect(new Set(oxfmtFormatter.extensions)).toEqual(
 			OXFMT_SUPPORTED_EXTENSIONS,
 		);

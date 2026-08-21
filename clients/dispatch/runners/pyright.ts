@@ -47,7 +47,7 @@ const pyrightRunner: RunnerDefinition = {
 		let cmd: string | null = null;
 
 		// Strategy 1: Check cached availability (fast path)
-		if (await (pyright.isAvailableAsync(cwd))) {
+		if (await pyright.isAvailableAsync(cwd)) {
 			cmd = pyright.getCommand(cwd);
 		}
 
@@ -110,7 +110,7 @@ const pyrightRunner: RunnerDefinition = {
 						? "warning"
 						: "none",
 			};
-		// pi-lens-ignore: missing-error-propagation
+			// pi-lens-ignore: missing-error-propagation
 		} catch {
 			logExtension({
 				subsystem: "runner:pyright",

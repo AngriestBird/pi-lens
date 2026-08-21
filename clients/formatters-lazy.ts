@@ -2,8 +2,8 @@
 import { createLazyImport } from "./lazy-import.js";
 
 type FormatterModule = typeof import("./formatters.js");
-const lazyFormatters = createLazyImport<FormatterModule>(() =>
-	import("./formatters.js"),
+const lazyFormatters = createLazyImport<FormatterModule>(
+	() => import("./formatters.js"),
 );
 
 export function warmFormatters(): Promise<FormatterModule> {

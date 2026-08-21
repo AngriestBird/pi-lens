@@ -20,7 +20,9 @@ vi.mock("../../clients/safe-spawn.js", () => ({
 
 describe("PythonDeadCodeClient.runAnalyze exit-code discipline (#1736 sweep)", () => {
 	it("reports a nonzero exit with empty stdout AND empty stderr as errored, never clean", async () => {
-		const { tmpDir, cleanup } = setupTestEnvironment("pi-lens-vulture-silent-crash-");
+		const { tmpDir, cleanup } = setupTestEnvironment(
+			"pi-lens-vulture-silent-crash-",
+		);
 		try {
 			const client = new PythonDeadCodeClient(false) as unknown as {
 				resolved: { cmd: string; prefix: string[] } | null;
@@ -52,11 +54,15 @@ describe("PythonDeadCodeClient.runAnalyze exit-code discipline (#1736 sweep)", (
 	});
 
 	it("still reports a genuine clean run (exit 0, empty stdout) as clean", async () => {
-		const { tmpDir, cleanup } = setupTestEnvironment("pi-lens-vulture-genuine-clean-");
+		const { tmpDir, cleanup } = setupTestEnvironment(
+			"pi-lens-vulture-genuine-clean-",
+		);
 		try {
 			const client = new PythonDeadCodeClient(false) as unknown as {
 				resolved: { cmd: string; prefix: string[] } | null;
-				runAnalyze: (root: string) => Promise<{ success: boolean; summary: string }>;
+				runAnalyze: (
+					root: string,
+				) => Promise<{ success: boolean; summary: string }>;
 			};
 			client.resolved = { cmd: "vulture", prefix: [] };
 

@@ -59,9 +59,7 @@ function instructions(
 function decisionRows(): Array<{ path: string; decision: string }> {
 	return logLatency.mock.calls
 		.map((call) => call[0])
-		.filter(
-			(row) => row.phase === "authoritative_content_attachment_decision",
-		)
+		.filter((row) => row.phase === "authoritative_content_attachment_decision")
 		.map((row) => row.metadata);
 }
 
@@ -128,7 +126,10 @@ describe("#1590 post-autofix instruction has one author", () => {
 			runtime.projectRoot = env.tmpDir;
 
 			const returned = await handleToolResult({
-				...toolDeps(runtime, fixingBiome(() => oversized)),
+				...toolDeps(
+					runtime,
+					fixingBiome(() => oversized),
+				),
 				event: {
 					toolName: "write",
 					input: { path: filePath },
@@ -156,7 +157,10 @@ describe("#1590 post-autofix instruction has one author", () => {
 			runtime.projectRoot = env.tmpDir;
 
 			const returned = await handleToolResult({
-				...toolDeps(runtime, fixingBiome(() => "const a = 1;\n")),
+				...toolDeps(
+					runtime,
+					fixingBiome(() => "const a = 1;\n"),
+				),
 				event: {
 					toolName: "write",
 					input: { path: filePath },
@@ -190,7 +194,10 @@ describe("#1590 post-autofix instruction has one author", () => {
 			runtime.projectRoot = env.tmpDir;
 
 			const returned = await handleToolResult({
-				...toolDeps(runtime, fixingBiome(() => big)),
+				...toolDeps(
+					runtime,
+					fixingBiome(() => big),
+				),
 				event: {
 					toolName: "bash",
 					input: { command: `echo x > "${fileA}"; echo x > "${fileB}"` },

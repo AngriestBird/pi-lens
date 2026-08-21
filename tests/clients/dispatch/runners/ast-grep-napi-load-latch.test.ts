@@ -58,9 +58,8 @@ describe("ast-grep napi load latch (#1567)", () => {
 			},
 		}));
 
-		const mod = await import(
-			"../../../../clients/dispatch/runners/ast-grep-napi.js"
-		);
+		const mod =
+			await import("../../../../clients/dispatch/runners/ast-grep-napi.js");
 
 		// The per-edit fallback runner and the session-start scanner both call
 		// loadSg() independently — simulate the race by calling it twice before
@@ -83,9 +82,8 @@ describe("ast-grep napi load latch (#1567)", () => {
 			});
 		});
 
-		const mod = await import(
-			"../../../../clients/dispatch/runners/ast-grep-napi.js"
-		);
+		const mod =
+			await import("../../../../clients/dispatch/runners/ast-grep-napi.js");
 
 		// Previous session: the addon load fails for a genuine reason and
 		// holds.
@@ -112,9 +110,8 @@ describe("ast-grep napi load latch (#1567)", () => {
 				});
 			});
 
-			const mod = await import(
-				"../../../../clients/dispatch/runners/ast-grep-napi.js"
-			);
+			const mod =
+				await import("../../../../clients/dispatch/runners/ast-grep-napi.js");
 
 			expect(await mod.loadSg()).toBeUndefined();
 
@@ -146,9 +143,8 @@ describe("ast-grep napi load latch (#1567)", () => {
 			);
 		});
 
-		const mod = await import(
-			"../../../../clients/dispatch/runners/ast-grep-napi.js"
-		);
+		const mod =
+			await import("../../../../clients/dispatch/runners/ast-grep-napi.js");
 
 		expect(await mod.loadSg()).toBeUndefined();
 
@@ -156,9 +152,8 @@ describe("ast-grep napi load latch (#1567)", () => {
 		// the SAME degradation-ledger module instance `ast-grep-napi.js` itself
 		// imported — a static top-level import here would bind an EARLIER
 		// instance from before the reset and silently observe nothing.
-		const { getDegradationSummary } = await import(
-			"../../../../clients/degradation-ledger.js"
-		);
+		const { getDegradationSummary } =
+			await import("../../../../clients/degradation-ledger.js");
 		const summary = getDegradationSummary();
 		const group = summary.find((g) => g.kind === "ast-grep-napi-unavailable");
 		expect(group).toBeDefined();
@@ -175,15 +170,13 @@ describe("ast-grep napi load latch (#1567)", () => {
 			});
 		});
 
-		const mod = await import(
-			"../../../../clients/dispatch/runners/ast-grep-napi.js"
-		);
+		const mod =
+			await import("../../../../clients/dispatch/runners/ast-grep-napi.js");
 
 		expect(await mod.loadSg()).toBeUndefined();
 
-		const { getDegradationSummary } = await import(
-			"../../../../clients/degradation-ledger.js"
-		);
+		const { getDegradationSummary } =
+			await import("../../../../clients/degradation-ledger.js");
 		const summary = getDegradationSummary();
 		const group = summary.find((g) => g.kind === "ast-grep-napi-unavailable");
 		expect(group?.latestReasons[0]?.reason).toContain("transient");
@@ -202,15 +195,13 @@ describe("ast-grep napi load latch (#1567)", () => {
 			});
 		});
 
-		const mod = await import(
-			"../../../../clients/dispatch/runners/ast-grep-napi.js"
-		);
+		const mod =
+			await import("../../../../clients/dispatch/runners/ast-grep-napi.js");
 
 		expect(await mod.loadSg()).toBeUndefined();
 
-		const { getDegradationSummary } = await import(
-			"../../../../clients/degradation-ledger.js"
-		);
+		const { getDegradationSummary } =
+			await import("../../../../clients/degradation-ledger.js");
 		const summary = getDegradationSummary();
 		const group = summary.find((g) => g.kind === "ast-grep-napi-unavailable");
 		expect(group?.latestReasons[0]?.reason).toContain(

@@ -940,9 +940,9 @@ describe("ReadGuard", () => {
 				// The mechanism: the whole-file read is the one surviving non-credit.
 				const stored = guard.getReadHistory(filePath);
 				expect(stored.length).toBeLessThanOrEqual(128);
-				expect(
-					stored.filter((r) => r.searchCredit === undefined),
-				).toHaveLength(1);
+				expect(stored.filter((r) => r.searchCredit === undefined)).toHaveLength(
+					1,
+				);
 			} finally {
 				fileTimeState.hasChanged = false;
 				env.cleanup();

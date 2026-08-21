@@ -260,7 +260,10 @@ async function buildHeartbeatResourcePatch(): Promise<HeartbeatPatch> {
 		const usage = await sampleProcesses([process.pid, ...childPids]);
 		if (usage === null) return {};
 
-		const childUsage: Record<number, { rssBytes?: number; cpuPercent?: number }> = {};
+		const childUsage: Record<
+			number,
+			{ rssBytes?: number; cpuPercent?: number }
+		> = {};
 		for (const pid of childPids) {
 			const sample = usage.get(pid);
 			if (sample) childUsage[pid] = sample;

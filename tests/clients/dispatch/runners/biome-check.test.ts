@@ -266,9 +266,7 @@ describe("biome-check JSON parser", () => {
 
 	describe("biomeRuleNameFromCategory", () => {
 		it("extracts the bare rule name from a lint category", () => {
-			expect(biomeRuleNameFromCategory("lint/style/useConst")).toBe(
-				"useConst",
-			);
+			expect(biomeRuleNameFromCategory("lint/style/useConst")).toBe("useConst");
 			expect(
 				biomeRuleNameFromCategory("lint/suspicious/noDuplicateObjectKeys"),
 			).toBe("noDuplicateObjectKeys");
@@ -396,9 +394,7 @@ describe("biome-check JSON parser", () => {
 					},
 				],
 			});
-			const fixKindByRule = new Map([
-				["noConstantCondition", "none" as const],
-			]);
+			const fixKindByRule = new Map([["noConstantCondition", "none" as const]]);
 			const result = parseBiomeJsonImpl(
 				biomeOutput,
 				"/project/src/example.ts",
@@ -437,9 +433,9 @@ describe("biome-check JSON parser", () => {
 		});
 
 		it("falls back to warning for an unrecognized value", () => {
-			expect(
-				normalizeBiomeSeverity(undefined as unknown as "warning"),
-			).toBe("warning");
+			expect(normalizeBiomeSeverity(undefined as unknown as "warning")).toBe(
+				"warning",
+			);
 		});
 
 		it("no longer recognizes the never-real 'information' spelling (#1810 F3)", () => {
@@ -447,9 +443,9 @@ describe("biome-check JSON parser", () => {
 			// "information", this assertion is the one that reds — it pins the
 			// exact pre-fix defect (a real "info" diagnostic silently promoted
 			// to "warning") as a still-failing case for the wrong spelling.
-			expect(
-				normalizeBiomeSeverity("information" as unknown as "info"),
-			).toBe("warning");
+			expect(normalizeBiomeSeverity("information" as unknown as "info")).toBe(
+				"warning",
+			);
 		});
 	});
 

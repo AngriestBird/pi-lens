@@ -214,7 +214,10 @@ async function deriveGhCliToken(): Promise<string | undefined> {
  * can't drift on which fields get set.
  */
 function recordGhTokenUnavailable(
-	{ outcome, cause }: { outcome: AvailabilityOutcome; cause: AvailabilityCause },
+	{
+		outcome,
+		cause,
+	}: { outcome: AvailabilityOutcome; cause: AvailabilityCause },
 	elapsedMs: number,
 	hostStallMs: number,
 ): undefined {
@@ -312,7 +315,10 @@ export async function resolveZizmorGitHubToken(): Promise<string | undefined> {
 					"zizmor gh-token latch: transient outcome with no cause (invariant violated)",
 				);
 			}
-			const retryAfterMs = Math.max(0, ghTokenLatch.getRetryAtMs() - Date.now());
+			const retryAfterMs = Math.max(
+				0,
+				ghTokenLatch.getRetryAtMs() - Date.now(),
+			);
 			recordZizmorOfflineDegradation(
 				`gh auth token still cooling down (${cause}); serving cached offline verdict, retry allowed in ${Math.round(retryAfterMs / 1000)}s`,
 			);

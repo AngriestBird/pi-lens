@@ -95,9 +95,8 @@ describe("lsp_client_selected outcome discriminator (#1934)", () => {
 			},
 		]);
 		createLSPClient.mockImplementation(() => fakeClient(alive));
-		({ resetDegradationLedger } = await import(
-			"../../../clients/degradation-ledger.js"
-		));
+		({ resetDegradationLedger } =
+			await import("../../../clients/degradation-ledger.js"));
 		resetDegradationLedger();
 	});
 

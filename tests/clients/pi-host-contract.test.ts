@@ -115,7 +115,10 @@ describe("#1655 item 1 — a throwing tool_call handler must not block the tool"
 	it("pi's emitToolCall really has no per-handler catch (the premise)", () => {
 		const runner = readHostSource(path.join("core", "extensions", "runner.js"));
 		const emitToolCall = runner.slice(runner.indexOf("async emitToolCall("));
-		const body = emitToolCall.slice(0, emitToolCall.indexOf("async emitUserBash("));
+		const body = emitToolCall.slice(
+			0,
+			emitToolCall.indexOf("async emitUserBash("),
+		);
 		expect(body).toContain("await handler(event, ctx)");
 		expect(body).not.toContain("catch");
 
@@ -285,8 +288,12 @@ describe("#1655 item 2 — pi-lens must not type tool_result fields pi never set
 			path.join(repoRoot, "clients", "runtime-tool-call.ts"),
 			"utf-8",
 		);
-		expect(source).not.toMatch(/provider: \(event as \{ provider\?: string \}\)/);
-		expect(source).not.toMatch(/sessionId: \(event as \{ sessionId\?: string \}\)/);
+		expect(source).not.toMatch(
+			/provider: \(event as \{ provider\?: string \}\)/,
+		);
+		expect(source).not.toMatch(
+			/sessionId: \(event as \{ sessionId\?: string \}\)/,
+		);
 	});
 });
 
@@ -372,12 +379,13 @@ describe("#1655 item 4 — the tool cwd basis", () => {
 		expect(schema).toContain("command:");
 		expect(schema).not.toContain("cwd:");
 	});
-
 });
 
 describe("#1655 item 5 — pi's unicode path-variant ladder", () => {
 	it("pins the host ladder this mirrors", () => {
-		const hostPaths = readHostSource(path.join("core", "tools", "path-utils.js"));
+		const hostPaths = readHostSource(
+			path.join("core", "tools", "path-utils.js"),
+		);
 		expect(hostPaths).toContain("tryMacOSScreenshotPath");
 		expect(hostPaths).toContain("tryNFDVariant");
 		expect(hostPaths).toContain("tryCurlyQuoteVariant");
@@ -528,7 +536,9 @@ describe("#1655 item 5 — pi's unicode path-variant ladder", () => {
  */
 describe("#1655 review F1 — the base resolution pi runs BEFORE the ladder", () => {
 	it("pins that pi's read resolver starts from resolveToCwd, not a bare resolve", () => {
-		const hostPaths = readHostSource(path.join("core", "tools", "path-utils.js"));
+		const hostPaths = readHostSource(
+			path.join("core", "tools", "path-utils.js"),
+		);
 		const resolveRead = hostPaths.slice(
 			hostPaths.indexOf("export function resolveReadPath("),
 		);
@@ -552,7 +562,9 @@ describe("#1655 review F1 — the base resolution pi runs BEFORE the ladder", ()
 
 	it("folds pi's unicode space class exactly", () => {
 		// Every code point in pi's UNICODE_SPACES, and nothing outside it.
-		for (const code of [0x00a0, 0x2000, 0x2005, 0x200a, 0x202f, 0x205f, 0x3000]) {
+		for (const code of [
+			0x00a0, 0x2000, 0x2005, 0x200a, 0x202f, 0x205f, 0x3000,
+		]) {
 			expect(
 				normalizeHostToolPath(`a${String.fromCharCode(code)}b`, {
 					normalizeUnicodeSpaces: true,
@@ -674,7 +686,9 @@ describe("#1655 review F1 — the base resolution pi runs BEFORE the ladder", ()
 				(entry) => entry.kind === "path-variant-unresolved",
 			);
 			expect(group?.count).toBe(1);
-			expect(group?.latestReasons.at(-1)?.reason).toContain("no variant differed");
+			expect(group?.latestReasons.at(-1)?.reason).toContain(
+				"no variant differed",
+			);
 		} finally {
 			env.cleanup();
 		}

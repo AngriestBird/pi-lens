@@ -470,7 +470,8 @@ describe("LSPService circuit breaker — windowed-rate trip (#1142)", () => {
 		expect(internal.runtimeExitCounts.get(key) ?? 0).toBe(0);
 		// Exactly TRIP_COUNT spawns happened before give-up.
 		expect(server.getSpawnCount()).toBe(TRIP_COUNT);
-		const { getDegradationSummary } = await import("../../../clients/degradation-ledger.js");
+		const { getDegradationSummary } =
+			await import("../../../clients/degradation-ledger.js");
 		const summary = getDegradationSummary();
 		// The breaker records the trip exactly once, under this key. Filtered to
 		// the breaker kind rather than compared against the whole summary: #1743
@@ -548,7 +549,10 @@ describe("LSPService circuit breaker — windowed-rate trip (#1142)", () => {
 		const { LSPService } = await import("../../../clients/lsp/index.js");
 		const service = new LSPService();
 		const internal = service as unknown as {
-			state: { broken: Map<string, number>; clientSpawnedAt: Map<string, number> };
+			state: {
+				broken: Map<string, number>;
+				clientSpawnedAt: Map<string, number>;
+			};
 			runtimeExitWindow: Map<string, number[]>;
 			permanentlyBroken: Set<string>;
 		};
@@ -591,7 +595,10 @@ describe("LSPService circuit breaker — windowed-rate trip (#1142)", () => {
 		const { LSPService } = await import("../../../clients/lsp/index.js");
 		const service = new LSPService();
 		const internal = service as unknown as {
-			state: { broken: Map<string, number>; clientSpawnedAt: Map<string, number> };
+			state: {
+				broken: Map<string, number>;
+				clientSpawnedAt: Map<string, number>;
+			};
 			runtimeExitWindow: Map<string, number[]>;
 			permanentlyBroken: Set<string>;
 		};
@@ -683,7 +690,10 @@ describe("LSPService circuit breaker — windowed-rate trip (#1142)", () => {
 		const { LSPService } = await import("../../../clients/lsp/index.js");
 		const service = new LSPService();
 		const internal = service as unknown as {
-			state: { broken: Map<string, number>; clientSpawnedAt: Map<string, number> };
+			state: {
+				broken: Map<string, number>;
+				clientSpawnedAt: Map<string, number>;
+			};
 			runtimeExitWindow: Map<string, number[]>;
 			runtimeExitCounts: Map<string, number>;
 			permanentlyBroken: Set<string>;

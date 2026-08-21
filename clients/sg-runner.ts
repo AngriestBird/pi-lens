@@ -237,9 +237,7 @@ export class SgRunner {
 	private sweepDurablyMissing: string[] = [];
 
 	constructor(verbose = false) {
-		this.log = verbose
-			? createSubsystemLogger("sg-runner")
-			: () => {};
+		this.log = verbose ? createSubsystemLogger("sg-runner") : () => {};
 	}
 
 	/**
@@ -283,7 +281,10 @@ export class SgRunner {
 		if (pathCommand) {
 			this.sgPath = pathCommand.cmd;
 			this.sgArgsPrefix = pathCommand.argsPrefix;
-			this.noteAvailable(startedAt, `ast-grep found on PATH: ${pathCommand.cmd}`);
+			this.noteAvailable(
+				startedAt,
+				`ast-grep found on PATH: ${pathCommand.cmd}`,
+			);
 			return true;
 		}
 
@@ -296,7 +297,10 @@ export class SgRunner {
 			if (globalBin && (await this.probeCommand(globalBin, []))) {
 				this.sgPath = globalBin;
 				this.sgArgsPrefix = [];
-				this.noteAvailable(startedAt, `ast-grep found in global bin: ${globalBin}`);
+				this.noteAvailable(
+					startedAt,
+					`ast-grep found in global bin: ${globalBin}`,
+				);
 				return true;
 			}
 		}
@@ -321,7 +325,10 @@ export class SgRunner {
 			if (brewBinary) {
 				this.sgPath = brewBinary;
 				this.sgArgsPrefix = [];
-				this.noteAvailable(startedAt, `ast-grep found via Homebrew: ${brewBinary}`);
+				this.noteAvailable(
+					startedAt,
+					`ast-grep found via Homebrew: ${brewBinary}`,
+				);
 				return true;
 			}
 		}
@@ -379,7 +386,10 @@ export class SgRunner {
 		if (installed.outcome === "success") {
 			this.sgPath = installed.value;
 			this.sgArgsPrefix = [];
-			this.noteAvailable(startedAt, `ast-grep auto-installed: ${installed.value}`);
+			this.noteAvailable(
+				startedAt,
+				`ast-grep auto-installed: ${installed.value}`,
+			);
 			return true;
 		}
 
@@ -633,7 +643,11 @@ export class SgRunner {
 	}
 
 	private async probeCommandCandidates(
-		candidates: Array<{ cmd: string; argsPrefix: string[]; fallback?: boolean }>,
+		candidates: Array<{
+			cmd: string;
+			argsPrefix: string[];
+			fallback?: boolean;
+		}>,
 	): Promise<{ cmd: string; argsPrefix: string[] } | undefined> {
 		for (const candidate of candidates) {
 			if (

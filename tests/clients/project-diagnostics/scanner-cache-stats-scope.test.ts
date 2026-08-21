@@ -20,7 +20,12 @@ import { removeTempDirSync } from "../test-utils.js";
 // files). `project_diagnostics_scan` now carries that as an `astGrep`
 // sub-field, so capture the full call, not just the scope string.
 const calls = vi.hoisted(
-	() => [] as Array<Parameters<typeof import("../../../clients/tree-sitter-logger.js").logTreeSitterCacheStats>[0]>,
+	() =>
+		[] as Array<
+			Parameters<
+				typeof import("../../../clients/tree-sitter-logger.js").logTreeSitterCacheStats
+			>[0]
+		>,
 );
 
 vi.mock("../../../clients/tree-sitter-logger.js", async (importOriginal) => {

@@ -978,7 +978,9 @@ export const BACKSTOP_SCAN_TIMEOUT_MS = 5_000;
 /** The one command-line match rule, shared by both platforms' parsers. */
 function matchesManagedBinary(command: string): boolean {
 	const lower = command.toLowerCase();
-	return MANAGED_BINARY_NAMES.some((name) => lower.includes(name.toLowerCase()));
+	return MANAGED_BINARY_NAMES.some((name) =>
+		lower.includes(name.toLowerCase()),
+	);
 }
 
 /**
@@ -1002,7 +1004,10 @@ function parseNonNegativeMs(raw: string): number | undefined {
  * would make the whole backstop silently return zero rows, and this is the
  * one part of the fix that cannot be checked from a Windows dev machine.
  */
-export const POSIX_PS_ARGS: readonly string[] = ["-eo", "pid=,ppid=,etime=,args="];
+export const POSIX_PS_ARGS: readonly string[] = [
+	"-eo",
+	"pid=,ppid=,etime=,args=",
+];
 
 /** Parse `ps -o etime` output: `[[dd-]hh:]mm:ss`. Returns undefined for any
  *  shape the column did not produce (a `ps` without the column emits the
@@ -1021,9 +1026,7 @@ export function ageMsFromPosixEtime(raw: string): number | undefined {
 	if (parts.some((part) => !Number.isFinite(part))) return undefined;
 	const [hours, minutes, seconds] =
 		parts.length === 3 ? parts : [0, parts[0], parts[1]];
-	return (
-		((days * 24 + hours) * 60 * 60 + minutes * 60 + seconds) * 1000
-	);
+	return ((days * 24 + hours) * 60 * 60 + minutes * 60 + seconds) * 1000;
 }
 
 /**
@@ -1300,11 +1303,14 @@ export function scheduleUntrackedOrphanSweep(
 	delayMs: number = BACKSTOP_START_DELAY_MS,
 	options: BackstopSweepOptions = {},
 ): NodeJS.Timeout {
-	const timer = setTimeout(() => {
-		void sweepUntrackedOrphans(options).catch(() => {
-			// sweepUntrackedOrphans never rejects; belt-and-braces.
-		});
-	}, Math.max(0, delayMs));
+	const timer = setTimeout(
+		() => {
+			void sweepUntrackedOrphans(options).catch(() => {
+				// sweepUntrackedOrphans never rejects; belt-and-braces.
+			});
+		},
+		Math.max(0, delayMs),
+	);
 	timer.unref();
 	return timer;
 }
@@ -1592,7 +1598,10 @@ export async function pruneDeadInstances(deadPids: Set<number>): Promise<void> {
 		);
 		if (remaining.length === parsed.instances.length) return;
 		await fs.promises.mkdir(getGlobalPiLensDir(), { recursive: true });
-		await writeFileAtomicAsync(target, JSON.stringify({ instances: remaining }));
+		await writeFileAtomicAsync(
+			target,
+			JSON.stringify({ instances: remaining }),
+		);
 	} catch {
 		// best-effort
 	}

@@ -54,8 +54,12 @@ describe("test imports bind the compiled module instance (#1565)", () => {
 
 	it("keeps the exception list honest", () => {
 		const present = new Set(scanDualInstanceImports().map(importKey));
-		const stale = [...reviewedExceptions.keys()].filter((key) => !present.has(key));
-		expect(stale, "reviewed exceptions must still be live .ts imports").toEqual([]);
+		const stale = [...reviewedExceptions.keys()].filter(
+			(key) => !present.has(key),
+		);
+		expect(stale, "reviewed exceptions must still be live .ts imports").toEqual(
+			[],
+		);
 	});
 
 	it("detects the hazard it claims to detect", () => {

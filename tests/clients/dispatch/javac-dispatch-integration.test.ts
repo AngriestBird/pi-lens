@@ -170,7 +170,9 @@ describe("javac dispatcher integration (#1877)", () => {
 	});
 });
 
-function createJavaRegistry(lspReady: () => boolean = () => false): RunnerRegistry {
+function createJavaRegistry(
+	lspReady: () => boolean = () => false,
+): RunnerRegistry {
 	const registry = new RunnerRegistry();
 	registry.register({
 		id: "lsp",

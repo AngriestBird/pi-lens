@@ -52,10 +52,8 @@ async function releaseQuarantineLock(
 			renamed = true;
 			break;
 		} catch (error) {
-			if (
-				(error as NodeJS.ErrnoException).code !== "ENOENT" ||
-				attempt === 2
-			) return;
+			if ((error as NodeJS.ErrnoException).code !== "ENOENT" || attempt === 2)
+				return;
 			await new Promise<void>((resolve) => setImmediate(resolve));
 		}
 	}
@@ -146,7 +144,9 @@ async function tryAcquireQuarantineLock(
 					"utf8",
 				);
 			} catch (error) {
-				await fsp.rm(lockPath, { recursive: true, force: true }).catch(() => {});
+				await fsp
+					.rm(lockPath, { recursive: true, force: true })
+					.catch(() => {});
 				throw error;
 			}
 			return () => releaseQuarantineLock(lockPath, owner.token);
@@ -166,7 +166,8 @@ async function tryAcquireQuarantineLock(
 				stale = true;
 			}
 		}
-		if (!stale || !(await reclaimQuarantineLock(lockPath, staleMs))) return null;
+		if (!stale || !(await reclaimQuarantineLock(lockPath, staleMs)))
+			return null;
 	}
 	return null;
 }
@@ -189,10 +190,11 @@ export async function acquireQuarantinePidFileLock(
 ): Promise<(() => Promise<void>) | null>;
 export async function acquireQuarantinePidFileLock(
 	lockPath: string,
-	options: QuarantinePidFileLockOptions & (
-		| { onContention?: "throw" }
-		| { onContention: "skip-log"; logContention: () => void }
-	),
+	options: QuarantinePidFileLockOptions &
+		(
+			| { onContention?: "throw" }
+			| { onContention: "skip-log"; logContention: () => void }
+		),
 ): Promise<(() => Promise<void>) | null> {
 	const deadline = Date.now() + options.waitMs;
 	for (;;) {
@@ -240,10 +242,11 @@ export function acquireBoundedPidFileLock(
 ): (() => void) | null;
 export function acquireBoundedPidFileLock(
 	lockPath: string,
-	options: BoundedPidFileLockOptions & (
-		| { onContention?: "throw" }
-		| { onContention: "skip-log"; logContention: () => void }
-	),
+	options: BoundedPidFileLockOptions &
+		(
+			| { onContention?: "throw" }
+			| { onContention: "skip-log"; logContention: () => void }
+		),
 ): (() => void) | null {
 	const token = `${process.pid}:${Date.now()}:${randomUUID()}`;
 	const deadline = Date.now() + options.waitMs;

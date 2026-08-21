@@ -42,9 +42,8 @@ describe("oxlint runner", () => {
 	});
 
 	it("does not skip test files (#576) — real correctness findings matter there too", async () => {
-		const { default: oxlintRunner } = await import(
-			"../../../../clients/dispatch/runners/oxlint.js"
-		);
+		const { default: oxlintRunner } =
+			await import("../../../../clients/dispatch/runners/oxlint.js");
 		expect(oxlintRunner.skipTestFiles).toBe(false);
 	});
 
@@ -77,7 +76,10 @@ describe("oxlint runner", () => {
 			).default;
 
 			// hasTool returns false → triggers resolveToolCommandWithInstallFallback → ensureTool
-			const result = await runner.run({ ...createCtx(filePath, env.tmpDir), hasTool: async () => false } as never);
+			const result = await runner.run({
+				...createCtx(filePath, env.tmpDir),
+				hasTool: async () => false,
+			} as never);
 
 			expect(ensureTool).toHaveBeenCalledWith("oxlint");
 			expect(safeSpawnAsync).toHaveBeenCalledWith(
@@ -127,7 +129,10 @@ describe("oxlint runner", () => {
 			const runner = (
 				await import("../../../../clients/dispatch/runners/oxlint.js")
 			).default;
-			const result = await runner.run({ ...createCtx(filePath, env.tmpDir), hasTool: async () => false } as never);
+			const result = await runner.run({
+				...createCtx(filePath, env.tmpDir),
+				hasTool: async () => false,
+			} as never);
 
 			// status MUST be "succeeded", not "failed": plan.ts's
 			// ["eslint", "oxlint", "biome-check-json"] fallback group
@@ -175,9 +180,8 @@ describe("oxlint runner", () => {
 			const oxlintRunner = (
 				await import("../../../../clients/dispatch/runners/oxlint.js")
 			).default;
-			const { dispatchForFile, RunnerRegistry } = await import(
-				"../../../../clients/dispatch/dispatcher.js"
-			);
+			const { dispatchForFile, RunnerRegistry } =
+				await import("../../../../clients/dispatch/dispatcher.js");
 
 			// eslint has no config in this workspace, so the real eslint runner
 			// would skip — stand in with the same status so the fallback chain
@@ -326,7 +330,10 @@ describe("oxlint runner", () => {
 			const runner = (
 				await import("../../../../clients/dispatch/runners/oxlint.js")
 			).default;
-			const result = await runner.run({ ...createCtx(filePath, env.tmpDir), hasTool: async () => false } as never);
+			const result = await runner.run({
+				...createCtx(filePath, env.tmpDir),
+				hasTool: async () => false,
+			} as never);
 
 			expect(result.semantic).toBe("blocking");
 			expect(result.diagnostics[0]).toMatchObject({
@@ -356,7 +363,10 @@ describe("oxlint runner", () => {
 			const runner = (
 				await import("../../../../clients/dispatch/runners/oxlint.js")
 			).default;
-			const result = await runner.run({ ...createCtx(filePath, env.tmpDir), hasTool: async () => false } as never);
+			const result = await runner.run({
+				...createCtx(filePath, env.tmpDir),
+				hasTool: async () => false,
+			} as never);
 
 			expect(result.status).toBe("failed");
 			expect(result.diagnostics[0]).toMatchObject({

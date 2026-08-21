@@ -170,7 +170,9 @@ describe("agent-nudge — inline context nudge for out-of-view mutations (#485)"
 
 		expect(consumeAgentNudge()).toBeDefined();
 		const phase = logLatency.mock.calls
-			.map((c) => c[0] as { phase?: string; metadata?: Record<string, unknown> })
+			.map(
+				(c) => c[0] as { phase?: string; metadata?: Record<string, unknown> },
+			)
 			.find((e) => e.phase === "agent_nudge");
 		expect(phase?.metadata).toMatchObject({
 			filesTotal: 1,
@@ -185,7 +187,9 @@ describe("agent-nudge — inline context nudge for out-of-view mutations (#485)"
 		bus.emit(touchedPayload({ paths: ["/repo/src/z.ts"] }));
 		expect(consumeAgentNudge()).toBeDefined();
 		const phase2 = logLatency.mock.calls
-			.map((c) => c[0] as { phase?: string; metadata?: Record<string, unknown> })
+			.map(
+				(c) => c[0] as { phase?: string; metadata?: Record<string, unknown> },
+			)
 			.find((e) => e.phase === "agent_nudge");
 		expect(phase2?.metadata).toMatchObject({ filesFiltered: 0 });
 	});
@@ -235,7 +239,9 @@ describe("agent-nudge — inline context nudge for out-of-view mutations (#485)"
 		const result = consumeAgentNudge();
 		expect(result).toBeDefined();
 		// Exactly one file counted despite three events.
-		expect(result?.messages[0].content).toMatch(/^\[pi-lens automated context.*\] pi-lens: 1 file/);
+		expect(result?.messages[0].content).toMatch(
+			/^\[pi-lens automated context.*\] pi-lens: 1 file/,
+		);
 	});
 
 	it("caps the visible name list at 5 and summarizes the rest as 'and N more'", () => {
@@ -253,7 +259,9 @@ describe("agent-nudge — inline context nudge for out-of-view mutations (#485)"
 		expect(content).toContain("8 file(s)");
 		expect(content).toContain("and 3 more");
 		// Only 5 concrete names should appear before the "and N more" tail.
-		const nameCount = paths.filter((p) => content.includes(p.split("/").pop() as string)).length;
+		const nameCount = paths.filter((p) =>
+			content.includes(p.split("/").pop() as string),
+		).length;
 		expect(nameCount).toBe(5);
 	});
 
@@ -279,8 +287,22 @@ describe("agent-nudge — inline context nudge for out-of-view mutations (#485)"
 		wireAgentNudgeSubscriber({ events: bus, getReadGuard: () => guard });
 
 		expect(() => bus.emit(null)).not.toThrow();
-		expect(() => bus.emit({ v: 2, source: "pi-lens", reason: "autofix", paths: ["/repo/src/a.ts"] })).not.toThrow();
-		expect(() => bus.emit({ v: 1, source: "someone-else", reason: "autofix", paths: ["/repo/src/a.ts"] })).not.toThrow();
+		expect(() =>
+			bus.emit({
+				v: 2,
+				source: "pi-lens",
+				reason: "autofix",
+				paths: ["/repo/src/a.ts"],
+			}),
+		).not.toThrow();
+		expect(() =>
+			bus.emit({
+				v: 1,
+				source: "someone-else",
+				reason: "autofix",
+				paths: ["/repo/src/a.ts"],
+			}),
+		).not.toThrow();
 
 		expect(consumeAgentNudge()).toBeUndefined();
 	});
@@ -324,7 +346,9 @@ describe("agent-nudge — inline context nudge for out-of-view mutations (#485)"
 		expect(result).toBeDefined();
 		expect(result?.messages[0].content).toContain("pi-lens");
 		expect(result?.messages[0].content).toContain("a.ts");
-		expect(result?.messages[0].content).toContain("working-tree changes to these are expected");
+		expect(result?.messages[0].content).toContain(
+			"working-tree changes to these are expected",
+		);
 	});
 
 	it("never publishes back to the bus (read-only subscriber)", () => {
@@ -461,7 +485,9 @@ describe("agent-nudge — inline context nudge for out-of-view mutations (#485)"
 
 			expect(consumeAgentNudge()).toBeDefined();
 			const phase = logLatency.mock.calls
-				.map((c) => c[0] as { phase?: string; metadata?: Record<string, unknown> })
+				.map(
+					(c) => c[0] as { phase?: string; metadata?: Record<string, unknown> },
+				)
 				.find((e) => e.phase === "agent_nudge");
 			expect(phase?.metadata).toMatchObject({
 				originLocal: 1,
@@ -605,7 +631,9 @@ describe("agent-nudge — inline context nudge for out-of-view mutations (#485)"
 
 			expect(consumeAgentNudge()).toBeDefined();
 			const phase = logLatency.mock.calls
-				.map((c) => c[0] as { phase?: string; metadata?: Record<string, unknown> })
+				.map(
+					(c) => c[0] as { phase?: string; metadata?: Record<string, unknown> },
+				)
 				.find((e) => e.phase === "agent_nudge");
 			expect(phase?.metadata).toMatchObject({
 				filesTotal: 1,
@@ -621,7 +649,9 @@ describe("agent-nudge — inline context nudge for out-of-view mutations (#485)"
 
 			expect(consumeAgentNudge()).toBeUndefined();
 			const phase = logLatency.mock.calls
-				.map((c) => c[0] as { phase?: string; metadata?: Record<string, unknown> })
+				.map(
+					(c) => c[0] as { phase?: string; metadata?: Record<string, unknown> },
+				)
 				.find((e) => e.phase === "agent_nudge");
 			expect(phase?.metadata).toMatchObject({
 				filesTotal: 0,

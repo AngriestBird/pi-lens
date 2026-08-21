@@ -90,7 +90,9 @@ const managerMissingResult = {
 const advance = (ms: number) => vi.setSystemTime(new Date(Date.now() + ms));
 
 /** Minimal deps for the real `handleSessionStart`, per the #1266 test's shape. */
-function makeSessionStartDeps(ctxCwd: string): Parameters<
+function makeSessionStartDeps(
+	ctxCwd: string,
+): Parameters<
 	typeof import("../../clients/runtime-session.js").handleSessionStart
 >[0] {
 	const unavailable = {
@@ -168,9 +170,8 @@ describe("a transient lazy-install failure is retried (#1537)", () => {
 
 	it("retries the formatter seam after the cooldown", async () => {
 		// The second copy of the shape. A fix in one is not a fix.
-		const { tryLazyInstallFormatterTool } = await import(
-			"../../clients/formatters.js"
-		);
+		const { tryLazyInstallFormatterTool } =
+			await import("../../clients/formatters.js");
 		const cwd = freshCwd();
 		safeSpawnAsync.mockResolvedValue(failedResult);
 
@@ -204,7 +205,11 @@ describe("a transient lazy-install failure is retried (#1537)", () => {
 		const cwd = freshCwd();
 		safeSpawnAsync.mockResolvedValue(timedOutResult);
 
-		for (let attempt = 1; attempt <= INSTALL_TRANSIENT_MAX_ATTEMPTS; attempt++) {
+		for (
+			let attempt = 1;
+			attempt <= INSTALL_TRANSIENT_MAX_ATTEMPTS;
+			attempt++
+		) {
 			expect(await tryLazyInstall("rust-clippy", cwd)).toBe(false);
 			advance(installRetryDelayMs(attempt) + 1);
 		}
@@ -255,9 +260,8 @@ describe("only a session boundary clears a lazy-install hold (#1537 review F1)",
 		// code managed one, and the InstallAttemptFact was wiped at the same
 		// moment. A transient failure meant a full 180 s install per turn — the
 		// #1497 storm this fix cites in its own docstring.
-		const { clearFormatterRuntimeState } = await import(
-			"../../clients/formatters.js"
-		);
+		const { clearFormatterRuntimeState } =
+			await import("../../clients/formatters.js");
 		const cwd = freshCwd();
 		safeSpawnAsync.mockResolvedValue(managerMissingResult);
 		expect(await tryLazyInstall("rubocop", cwd)).toBe(false);
@@ -277,9 +281,8 @@ describe("only a session boundary clears a lazy-install hold (#1537 review F1)",
 		// helper works when called directly, never that production calls it at the
 		// right boundary (the #1266 lesson, and the pattern
 		// `runtime-session-dispatch-reset.test.ts` established).
-		const { handleSessionStart } = await import(
-			"../../clients/runtime-session.js"
-		);
+		const { handleSessionStart } =
+			await import("../../clients/runtime-session.js");
 		const cwd = freshCwd();
 		safeSpawnAsync.mockResolvedValue(managerMissingResult);
 		expect(await tryLazyInstall("rubocop", cwd)).toBe(false);
@@ -394,9 +397,8 @@ describe("the two seams share one hold per tool+cwd (#1537 review F4)", () => {
 		// A deliberate consequence of merging the copies, pinned so it cannot drift
 		// back silently: `gem install rubocop` is a MACHINE-GLOBAL install, so the
 		// second seam asking for the same one must be suppressed, not run again.
-		const { tryLazyInstallFormatterTool } = await import(
-			"../../clients/formatters.js"
-		);
+		const { tryLazyInstallFormatterTool } =
+			await import("../../clients/formatters.js");
 		const cwd = freshCwd();
 		safeSpawnAsync.mockResolvedValue(managerMissingResult);
 
@@ -409,16 +411,18 @@ describe("the two seams share one hold per tool+cwd (#1537 review F4)", () => {
 		// Sharing a hold while the options depended on WHICH caller happened to
 		// spawn first made cancellation semantics nondeterministic. The options are
 		// a property of the tool now, so both orders produce the same spawn.
-		const { tryLazyInstallFormatterTool } = await import(
-			"../../clients/formatters.js"
-		);
+		const { tryLazyInstallFormatterTool } =
+			await import("../../clients/formatters.js");
 		safeSpawnAsync.mockResolvedValue(okResult);
 
 		// Distinct cwds, so each seam actually spawns; `cwd` is the one option that
 		// legitimately differs, so it is excluded from the comparison.
 		const spawnShape = () => {
 			const call = safeSpawnAsync.mock.calls.at(-1);
-			const { cwd: _cwd, ...options } = (call?.[2] ?? {}) as Record<string, unknown>;
+			const { cwd: _cwd, ...options } = (call?.[2] ?? {}) as Record<
+				string,
+				unknown
+			>;
 			return { command: call?.[0], args: call?.[1], options };
 		};
 
@@ -480,9 +484,8 @@ describe("lazy-install state re-arms and is readable (#1537)", () => {
 		// provisional, so `detect()` — and therefore this install — is reached on
 		// every save. The ladder has to be sized against that caller, not against a
 		// once-per-session one. 40 saves a minute apart, one 5-minute rung.
-		const { tryLazyInstallFormatterTool } = await import(
-			"../../clients/formatters.js"
-		);
+		const { tryLazyInstallFormatterTool } =
+			await import("../../clients/formatters.js");
 		const cwd = freshCwd();
 		safeSpawnAsync.mockResolvedValue(failedResult);
 		expect(await tryLazyInstallFormatterTool("rubocop", cwd)).toBe(false);
@@ -495,7 +498,9 @@ describe("lazy-install state re-arms and is readable (#1537)", () => {
 		}
 		// 40 minutes of saves against a 5/10-minute ladder that gives up: the three
 		// attempts the ladder allows, and then nothing.
-		expect(safeSpawnAsync).toHaveBeenCalledTimes(INSTALL_TRANSIENT_MAX_ATTEMPTS);
+		expect(safeSpawnAsync).toHaveBeenCalledTimes(
+			INSTALL_TRANSIENT_MAX_ATTEMPTS,
+		);
 	});
 
 	it("reports the attempt in #1534's vocabulary, for install evidence", async () => {
@@ -504,15 +509,17 @@ describe("lazy-install state re-arms and is readable (#1537)", () => {
 		// turns it into the `availability_decision` record's install evidence.
 		const cwd = freshCwd();
 		expect(getLazyInstallAttempt("rubocop", cwd)).toBeUndefined();
-		expect(describeInstallAttempt(getLazyInstallAttempt("rubocop", cwd))).toEqual(
-			{ install: "not-attempted" },
-		);
+		expect(
+			describeInstallAttempt(getLazyInstallAttempt("rubocop", cwd)),
+		).toEqual({ install: "not-attempted" });
 
 		safeSpawnAsync.mockResolvedValue(failedResult);
 		await tryLazyInstall("rubocop", cwd);
 		const attempt = getLazyInstallAttempt("rubocop", cwd);
 		expect(attempt?.outcome).toBe("failed");
-		expect(describeInstallAttempt(attempt)).toMatchObject({ install: "failed" });
+		expect(describeInstallAttempt(attempt)).toMatchObject({
+			install: "failed",
+		});
 		expect(describeInstallAttempt(attempt).installReason).toContain(
 			"network is unreachable",
 		);

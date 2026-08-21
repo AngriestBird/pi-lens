@@ -152,7 +152,8 @@ const MAIN_KIND_EXTENSIONS: string[] = Array.from(MAIN_KINDS).flatMap(
 	(kind) => KIND_EXTENSIONS[kind as keyof typeof KIND_EXTENSIONS] ?? [],
 );
 /** The bounded, source-filtered extension set shared by graph cache readers. */
-export const REVIEW_GRAPH_SOURCE_EXTENSIONS: readonly string[] = MAIN_KIND_EXTENSIONS;
+export const REVIEW_GRAPH_SOURCE_EXTENSIONS: readonly string[] =
+	MAIN_KIND_EXTENSIONS;
 const CHANGED_SYMBOLS_PREFIX = "session.reviewGraph.changedSymbols:";
 const extractorCache = new Map<string, TreeSitterSymbolExtractor | null>();
 
@@ -173,35 +174,35 @@ const extractorCache = new Map<string, TreeSitterSymbolExtractor | null>();
 // operation's, not the process's.
 const _buildCache = new Map<string, Promise<ReviewGraph>>();
 interface WorkspaceGraphCacheEntry {
-		signature: string;
-		fileSignatures: Map<string, string>;
-		fileHashes?: Map<string, string>;
-		graph: ReviewGraph;
-		/**
-		 * The RuntimeCoordinator projectSeq at the time this entry was built (#451).
-		 * Only set on entries built in-process with a seqHint present. An entry
-		 * hydrated from the disk snapshot has none ⇒ no seq fast path for it until a
-		 * seq-hinted build records one.
-		 */
-		builtAtProjectSeq?: number;
-		/** Wall-clock of the last full walk+stat verify — bounds staleness vs external edits (#451). */
-		lastFullVerifyMs?: number;
-		/** Count of consecutive seq fast-path builds since the last full verify (#451). */
-		fastPathSinceVerify?: number;
-		/** #459: generation of this entry's graph content — see ReviewGraph.buildGeneration. */
-		buildGeneration?: number;
-		/**
-		 * #1961: `gitStamp.headCommit` of the DISK SNAPSHOT this entry was
-		 * hydrated from, when the blind read served one. Absent on an entry built
-		 * in-process — that graph has no stamped revision to differ from.
-		 *
-		 * Only the stamped commit is stored. The drift PAIR is derived per call by
-		 * `getReviewGraphRevisionDrift`, because the current HEAD half is true
-		 * only at the instant it is read (#1961 review F3).
-		 */
-		snapshotStampedHead?: string;
-		lastUsedAt: number;
-		idleTimer?: ReturnType<typeof setTimeout>;
+	signature: string;
+	fileSignatures: Map<string, string>;
+	fileHashes?: Map<string, string>;
+	graph: ReviewGraph;
+	/**
+	 * The RuntimeCoordinator projectSeq at the time this entry was built (#451).
+	 * Only set on entries built in-process with a seqHint present. An entry
+	 * hydrated from the disk snapshot has none ⇒ no seq fast path for it until a
+	 * seq-hinted build records one.
+	 */
+	builtAtProjectSeq?: number;
+	/** Wall-clock of the last full walk+stat verify — bounds staleness vs external edits (#451). */
+	lastFullVerifyMs?: number;
+	/** Count of consecutive seq fast-path builds since the last full verify (#451). */
+	fastPathSinceVerify?: number;
+	/** #459: generation of this entry's graph content — see ReviewGraph.buildGeneration. */
+	buildGeneration?: number;
+	/**
+	 * #1961: `gitStamp.headCommit` of the DISK SNAPSHOT this entry was
+	 * hydrated from, when the blind read served one. Absent on an entry built
+	 * in-process — that graph has no stamped revision to differ from.
+	 *
+	 * Only the stamped commit is stored. The drift PAIR is derived per call by
+	 * `getReviewGraphRevisionDrift`, because the current HEAD half is true
+	 * only at the instant it is read (#1961 review F3).
+	 */
+	snapshotStampedHead?: string;
+	lastUsedAt: number;
+	idleTimer?: ReturnType<typeof setTimeout>;
 }
 const _workspaceGraphCache = new Map<string, WorkspaceGraphCacheEntry>();
 const REVIEW_GRAPH_MAX_WARM_WORKSPACES = 8;
@@ -217,11 +218,18 @@ function workspaceCacheEpoch(key: string): number {
 }
 
 function reviewGraphIdleEvictMs(): number {
-	const value = Number.parseInt(process.env.PI_LENS_REVIEW_GRAPH_IDLE_EVICT_MS ?? "", 10);
-	return Number.isSafeInteger(value) && value > 0 ? value : REVIEW_GRAPH_IDLE_EVICT_MS_DEFAULT;
+	const value = Number.parseInt(
+		process.env.PI_LENS_REVIEW_GRAPH_IDLE_EVICT_MS ?? "",
+		10,
+	);
+	return Number.isSafeInteger(value) && value > 0
+		? value
+		: REVIEW_GRAPH_IDLE_EVICT_MS_DEFAULT;
 }
 
-function clearWorkspaceGraphTimer(entry: { idleTimer?: ReturnType<typeof setTimeout> }): void {
+function clearWorkspaceGraphTimer(entry: {
+	idleTimer?: ReturnType<typeof setTimeout>;
+}): void {
 	if (entry.idleTimer) clearTimeout(entry.idleTimer);
 	entry.idleTimer = undefined;
 }
@@ -249,7 +257,10 @@ function buildCacheKeyWorkspace(buildKey: string): string | undefined {
 	return separator >= 0 ? buildKey.slice(0, separator) : undefined;
 }
 
-function evictWorkspaceGraph(key: string, entry: WorkspaceGraphCacheEntry): void {
+function evictWorkspaceGraph(
+	key: string,
+	entry: WorkspaceGraphCacheEntry,
+): void {
 	if (_workspaceGraphCache.get(key) !== entry) return;
 	clearWorkspaceGraphTimer(entry);
 	// `key` is a workspace-cache key; run it through the build-key derivation so
@@ -265,12 +276,19 @@ function evictWorkspaceGraph(key: string, entry: WorkspaceGraphCacheEntry): void
 	_workspaceGraphCache.delete(key);
 }
 
-function scheduleWorkspaceGraphEviction(key: string, entry: WorkspaceGraphCacheEntry): void {
+function scheduleWorkspaceGraphEviction(
+	key: string,
+	entry: WorkspaceGraphCacheEntry,
+): void {
 	clearWorkspaceGraphTimer(entry);
 	const epoch = workspaceCacheEpoch(key);
 	entry.idleTimer = setTimeout(() => {
 		entry.idleTimer = undefined;
-		if (_workspaceGraphCache.get(key) !== entry || workspaceCacheEpoch(key) !== epoch) return;
+		if (
+			_workspaceGraphCache.get(key) !== entry ||
+			workspaceCacheEpoch(key) !== epoch
+		)
+			return;
 		evictWorkspaceGraph(key, entry);
 	}, reviewGraphIdleEvictMs());
 	entry.idleTimer.unref?.();
@@ -283,13 +301,22 @@ function touchWorkspaceGraph(key: string): void {
 	scheduleWorkspaceGraphEviction(key, entry);
 }
 
-function setWorkspaceGraph(key: string, entry: Omit<WorkspaceGraphCacheEntry, "lastUsedAt" | "idleTimer">, epoch?: number): boolean {
+function setWorkspaceGraph(
+	key: string,
+	entry: Omit<WorkspaceGraphCacheEntry, "lastUsedAt" | "idleTimer">,
+	epoch?: number,
+): boolean {
 	if (epoch !== undefined && workspaceCacheEpoch(key) !== epoch) return false;
-	const resident: WorkspaceGraphCacheEntry = { ...entry, lastUsedAt: Date.now() };
+	const resident: WorkspaceGraphCacheEntry = {
+		...entry,
+		lastUsedAt: Date.now(),
+	};
 	_workspaceGraphCache.set(key, resident);
 	scheduleWorkspaceGraphEviction(key, resident);
 	while (_workspaceGraphCache.size > REVIEW_GRAPH_MAX_WARM_WORKSPACES) {
-		const victim = [..._workspaceGraphCache.entries()].sort(([, a], [, b]) => a.lastUsedAt - b.lastUsedAt)[0];
+		const victim = [..._workspaceGraphCache.entries()].sort(
+			([, a], [, b]) => a.lastUsedAt - b.lastUsedAt,
+		)[0];
 		if (!victim) break;
 		evictWorkspaceGraph(victim[0], victim[1]);
 	}
@@ -447,7 +474,8 @@ export function clearGraphCache(): void {
 export function clearReviewGraphWorkspaceCache(cwd?: string): void {
 	if (cwd === undefined) {
 		_buildCache.clear();
-		for (const entry of _workspaceGraphCache.values()) clearWorkspaceGraphTimer(entry);
+		for (const entry of _workspaceGraphCache.values())
+			clearWorkspaceGraphTimer(entry);
 		_workspaceGraphCache.clear();
 		_workspaceCacheEpoch++;
 		_sizeSkipVerdicts.clear();
@@ -464,7 +492,10 @@ export function clearReviewGraphWorkspaceCache(cwd?: string): void {
 		}
 		const entry = _workspaceGraphCache.get(normalized);
 		if (entry) clearWorkspaceGraphTimer(entry);
-		_workspaceCacheEpochs.set(normalized, (_workspaceCacheEpochs.get(normalized) ?? 0) + 1);
+		_workspaceCacheEpochs.set(
+			normalized,
+			(_workspaceCacheEpochs.get(normalized) ?? 0) + 1,
+		);
 		_workspaceGraphCache.delete(normalized);
 		_sizeSkipVerdicts.delete(normalized);
 	}
@@ -572,15 +603,21 @@ export function getReviewGraphCacheIdentity(
 	// stored instance — anything else unstamped must not resolve an identity
 	// (e.g. the size-skip empty graph racing a hydrated entry).
 	if (graph) {
-		if (cached.buildGeneration === undefined && graph.buildGeneration === undefined) {
+		if (
+			cached.buildGeneration === undefined &&
+			graph.buildGeneration === undefined
+		) {
 			if (cached.graph !== graph) return undefined;
 		} else if (cached.buildGeneration !== graph.buildGeneration) {
 			return undefined;
 		}
 	}
 	const version = graph?.version ?? cached.graph.version;
-	if (typeof version !== "string" || version.length === 0 ||
-		typeof cached.signature !== "string") {
+	if (
+		typeof version !== "string" ||
+		version.length === 0 ||
+		typeof cached.signature !== "string"
+	) {
 		return undefined;
 	}
 	return { version, signature: cached.signature };
@@ -1378,7 +1415,8 @@ function loadPersistedGraph(
 			typeof data.builtAt !== "string" ||
 			!Array.isArray(data.nodes) ||
 			!Array.isArray(data.edges)
-		) return null;
+		)
+			return null;
 		if (data.coverage?.partial && !opts?.allowPartial) return null;
 		// #1961: ONE verification policy across both load paths — verify tree
 		// IDENTITY, never revision. A HEAD move says nothing about file contents,
@@ -1400,7 +1438,11 @@ function loadPersistedGraph(
 		if (opts?.verifyWorktreeIdentity && data.gitStamp) {
 			const current = resolveGitIdentity(cwd);
 			if (current && current.worktreeRoot !== data.gitStamp.worktreeRoot) {
-				logSnapshotReadVerdict(cwd, "snapshot_read_dropped", "worktree_mismatch");
+				logSnapshotReadVerdict(
+					cwd,
+					"snapshot_read_dropped",
+					"worktree_mismatch",
+				);
 				return null;
 			}
 			if (current && current.headCommit !== data.gitStamp.headCommit) {
@@ -1700,7 +1742,7 @@ function capGraphForPersist(
 		...(options.sourceFilesTruncated ||
 		graph.persistCoverage?.sourceFilesTruncated
 			? { sourceFilesTruncated: true as const }
-		: {}),
+			: {}),
 		...(graph.persistCoverage?.inProgress ? { inProgress: true as const } : {}),
 	};
 	const capped: ReviewGraph = {
@@ -2481,7 +2523,9 @@ function reviewGraphCheckpointPath(cwd: string): string {
  * only reuses a checkpoint built under the same ignore state. */
 function hashIgnoredIds(ignoredIds: ReadonlySet<string> | undefined): string {
 	if (ignoredIds === undefined) return "unavailable";
-	const joined = [...ignoredIds].sort((a, b) => a.localeCompare(b)).join("\u0000");
+	const joined = [...ignoredIds]
+		.sort((a, b) => a.localeCompare(b))
+		.join("\u0000");
 	return createHash("sha256").update(joined).digest("hex");
 }
 
@@ -3129,7 +3173,8 @@ function localImportToFile(
 				(relative.length === 2 || relative.startsWith(`..${path.sep}`))) ||
 			path.isAbsolute(relative) ||
 			!fs.existsSync(candidate)
-		) continue;
+		)
+			continue;
 		const normalized = normalizeMapKey(candidate);
 		if (ignoredIds?.has(normalized)) continue;
 		return normalized;
@@ -3214,7 +3259,8 @@ function addJsTsFile(
 		facts.getFileFact<string>(normalized, "file.functionFactsCoverage") ??
 		"unavailable";
 	const importCoverage =
-		facts.getFileFact<string>(normalized, "file.importFactsCoverage") ?? "unavailable";
+		facts.getFileFact<string>(normalized, "file.importFactsCoverage") ??
+		"unavailable";
 	addNode(graph, {
 		id: fileNodeId,
 		kind: "file",
@@ -3575,11 +3621,13 @@ export async function captureReviewGraphStructuralIr(
 		const parsed = await withTreeSitterRoot(filePath, content, () => true);
 		if (!parsed.parsed) return { complete: false };
 		const functionCoverage: ReviewGraphExtractionStatus =
-			(facts.getFileFact<string>(filePath, "file.functionFactsCoverage") as ReviewGraphExtractionStatus | undefined) ??
-			"unavailable";
+			(facts.getFileFact<string>(filePath, "file.functionFactsCoverage") as
+				| ReviewGraphExtractionStatus
+				| undefined) ?? "unavailable";
 		const importCoverage: ReviewGraphExtractionStatus =
-			(facts.getFileFact<string>(filePath, "file.importFactsCoverage") as ReviewGraphExtractionStatus | undefined) ??
-			"unavailable";
+			(facts.getFileFact<string>(filePath, "file.importFactsCoverage") as
+				| ReviewGraphExtractionStatus
+				| undefined) ?? "unavailable";
 		const coverage = {
 			definitions: functionCoverage,
 			references: functionCoverage,
@@ -4073,8 +4121,16 @@ async function addFileToGraph(
 					"file.functionSummaries",
 					sharedIr.functionSummaries,
 				);
-				facts.setFileFact(file, "file.functionFactsCoverage", sharedIr.coverage.calls);
-				facts.setFileFact(file, "file.importFactsCoverage", sharedIr.coverage.imports);
+				facts.setFileFact(
+					file,
+					"file.functionFactsCoverage",
+					sharedIr.coverage.calls,
+				);
+				facts.setFileFact(
+					file,
+					"file.importFactsCoverage",
+					sharedIr.coverage.imports,
+				);
 			} else {
 				await ensureReviewGraphFacts(file, cwd, facts, contentOverride);
 			}
@@ -4357,14 +4413,18 @@ async function tryIncrementalFromCache(
 		for (const file of ctx.normalizedChanged) {
 			upsertChangedSymbols(graph, ctx.facts, file);
 		}
-		setWorkspaceGraph(ctx.normalizedCwd, {
-			signature: ctx.signature,
-			fileSignatures: new Map(ctx.fileSignatures),
-			fileHashes: hashes,
-			graph: cloneGraph(cached.graph),
-			buildGeneration: generation,
-			...verifiedCacheFields(ctx.seqAtBuildStart),
-		}, ctx.cacheEpoch);
+		setWorkspaceGraph(
+			ctx.normalizedCwd,
+			{
+				signature: ctx.signature,
+				fileSignatures: new Map(ctx.fileSignatures),
+				fileHashes: hashes,
+				graph: cloneGraph(cached.graph),
+				buildGeneration: generation,
+				...verifiedCacheFields(ctx.seqAtBuildStart),
+			},
+			ctx.cacheEpoch,
+		);
 		// #260: pure drift leaves the graph unchanged — don't rewrite the disk blob.
 		setGraphBuildInfo(graph, {
 			reused: true,
@@ -4396,14 +4456,18 @@ async function tryIncrementalFromCache(
 	// #459: real re-extract ⇒ new generation.
 	const generation = ++_graphGenerationCounter;
 	graph.buildGeneration = generation;
-	setWorkspaceGraph(ctx.normalizedCwd, {
-		signature: ctx.signature,
-		fileSignatures: new Map(ctx.fileSignatures),
-		fileHashes: hashes,
-		graph,
-		buildGeneration: generation,
-		...verifiedCacheFields(ctx.seqAtBuildStart),
-	}, ctx.cacheEpoch);
+	setWorkspaceGraph(
+		ctx.normalizedCwd,
+		{
+			signature: ctx.signature,
+			fileSignatures: new Map(ctx.fileSignatures),
+			fileHashes: hashes,
+			graph,
+			buildGeneration: generation,
+			...verifiedCacheFields(ctx.seqAtBuildStart),
+		},
+		ctx.cacheEpoch,
+	);
 	const persistReason = persistGraph(
 		ctx.cwd,
 		ctx.signature,
@@ -4599,18 +4663,22 @@ async function trySeqFastpath(
 	// #459: real re-extract ⇒ new generation.
 	const generation = ++_graphGenerationCounter;
 	graph.buildGeneration = generation;
-	setWorkspaceGraph(normalizedCwd, {
-		signature: nextSignature,
-		fileSignatures: nextSignatures,
-		fileHashes: hashes,
-		graph,
-		buildGeneration: generation,
-		// Build-start seq, not stamp-time: see verifiedCacheFields — a bump that
-		// interleaved during updateGraphFiles' awaits must be re-diffed next build.
-		builtAtProjectSeq: seqAtBuildStart,
-		lastFullVerifyMs: cached.lastFullVerifyMs,
-		fastPathSinceVerify: sinceVerify + 1,
-	}, cacheEpoch);
+	setWorkspaceGraph(
+		normalizedCwd,
+		{
+			signature: nextSignature,
+			fileSignatures: nextSignatures,
+			fileHashes: hashes,
+			graph,
+			buildGeneration: generation,
+			// Build-start seq, not stamp-time: see verifiedCacheFields — a bump that
+			// interleaved during updateGraphFiles' awaits must be re-diffed next build.
+			builtAtProjectSeq: seqAtBuildStart,
+			lastFullVerifyMs: cached.lastFullVerifyMs,
+			fastPathSinceVerify: sinceVerify + 1,
+		},
+		cacheEpoch,
+	);
 	const persistReason = persistGraph(
 		cwd,
 		nextSignature,
@@ -4880,14 +4948,18 @@ async function _doBuildGraph(
 		// process's derived caches don't exist here; in-process derived caches from
 		// before a workspace-cache clear must not match it).
 		const generation = ++_graphGenerationCounter;
-		setWorkspaceGraph(normalizedCwd, {
-			signature,
-			fileSignatures: new Map(fileSignatures),
-			fileHashes: diskCached.fileHashes,
-			graph: cloneGraph(diskCached.graph),
-			buildGeneration: generation,
-			...verifiedCacheFields(seqAtBuildStart),
-		}, cacheEpoch);
+		setWorkspaceGraph(
+			normalizedCwd,
+			{
+				signature,
+				fileSignatures: new Map(fileSignatures),
+				fileHashes: diskCached.fileHashes,
+				graph: cloneGraph(diskCached.graph),
+				buildGeneration: generation,
+				...verifiedCacheFields(seqAtBuildStart),
+			},
+			cacheEpoch,
+		);
 		setGraphBuildInfo(graph, {
 			reused: true,
 			mode: "cached",
@@ -5089,14 +5161,18 @@ async function _doBuildGraph(
 	// Keep the content generation on the persisted snapshot instance too, so
 	// scheduled persistence logs join the same graph identity as build success.
 	graphSnapshot.buildGeneration = generation;
-	setWorkspaceGraph(normalizedCwd, {
-		signature,
-		fileSignatures: new Map(fileSignatures),
-		fileHashes,
-		graph: graphSnapshot,
-		buildGeneration: generation,
-		...verifiedCacheFields(seqAtBuildStart),
-	}, cacheEpoch);
+	setWorkspaceGraph(
+		normalizedCwd,
+		{
+			signature,
+			fileSignatures: new Map(fileSignatures),
+			fileHashes,
+			graph: graphSnapshot,
+			buildGeneration: generation,
+			...verifiedCacheFields(seqAtBuildStart),
+		},
+		cacheEpoch,
+	);
 	const persistReason = persistGraph(
 		cwd,
 		signature,
@@ -5301,13 +5377,20 @@ export function extractSymbolsAndRefsFromGraph(graph: ReviewGraph): {
 		unsupportedEvidence: 0,
 		sameFileEvidence: 0,
 		duplicateEvidence: 0,
-		complete: graph.persistCoverage?.partial !== true && graph.persistCoverage?.inProgress !== true,
+		complete:
+			graph.persistCoverage?.partial !== true &&
+			graph.persistCoverage?.inProgress !== true,
 		languages: {},
 	};
 
-	const numberMetadata = (node: ReviewGraphNode | undefined, key: string): number | undefined => {
+	const numberMetadata = (
+		node: ReviewGraphNode | undefined,
+		key: string,
+	): number | undefined => {
 		const value = node?.metadata?.[key];
-		return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+		return typeof value === "number" && Number.isFinite(value)
+			? value
+			: undefined;
 	};
 	const symbolKind = (node: ReviewGraphNode): SymbolKind => {
 		switch (node.symbolKind) {
@@ -5356,33 +5439,46 @@ export function extractSymbolsAndRefsFromGraph(graph: ReviewGraph): {
 
 		const fromNode = graph.nodes.get(edge.from);
 		const targetNode = graph.nodes.get(edge.to);
-		const callerFile = fromNode?.kind === "symbol"
-			? fromNode.filePath
-			: fromNode?.kind === "file"
+		const callerFile =
+			fromNode?.kind === "symbol"
 				? fromNode.filePath
-				: edge.from.startsWith("file:")
-					? edge.from.slice("file:".length)
-					: undefined;
+				: fromNode?.kind === "file"
+					? fromNode.filePath
+					: edge.from.startsWith("file:")
+						? edge.from.slice("file:".length)
+						: undefined;
 		if (!callerFile) {
 			coverage.unsupportedEvidence++;
 			continue;
 		}
 		const metadata = edge.metadata ?? {};
-		const referenceKind = edge.kind === "calls"
-			? "call"
-			: metadata.referenceKind === "call"
+		const referenceKind =
+			edge.kind === "calls"
 				? "call"
-				: metadata.referenceKind === "type"
-					? "type"
-					: "unknown";
-		const resolution = edge.resolution ?? (targetNode && !targetNode.metadata?.unresolvedName ? "exact" : "unresolved");
+				: metadata.referenceKind === "call"
+					? "call"
+					: metadata.referenceKind === "type"
+						? "type"
+						: "unknown";
+		const resolution =
+			edge.resolution ??
+			(targetNode && !targetNode.metadata?.unresolvedName
+				? "exact"
+				: "unresolved");
 		const targetSymbol = nodeSymbols.get(edge.to);
-		const targetName = targetNode?.symbolName ??
+		const targetName =
+			targetNode?.symbolName ??
 			(edge.to.startsWith("symbol-name:")
 				? edge.to.slice("symbol-name:".length)
 				: undefined);
-		const line = typeof metadata.line === "number" ? metadata.line : numberMetadata(fromNode, "line") ?? 1;
-		const column = typeof metadata.column === "number" ? metadata.column : numberMetadata(fromNode, "column") ?? 1;
+		const line =
+			typeof metadata.line === "number"
+				? metadata.line
+				: (numberMetadata(fromNode, "line") ?? 1);
+		const column =
+			typeof metadata.column === "number"
+				? metadata.column
+				: (numberMetadata(fromNode, "column") ?? 1);
 		addRef({
 			symbolId: targetName ? `${callerFile}:${targetName}` : edge.to,
 			filePath: callerFile,
@@ -5402,7 +5498,11 @@ export function extractSymbolsAndRefsFromGraph(graph: ReviewGraph): {
 
 		if (referenceKind === "type") coverage.typeOnlyEvidence++;
 		else if (referenceKind !== "call") coverage.unsupportedEvidence++;
-		else if (!targetSymbol || resolution === "name-only" || resolution === "unresolved") {
+		else if (
+			!targetSymbol ||
+			resolution === "name-only" ||
+			resolution === "unresolved"
+		) {
 			coverage.unresolvedEvidence++;
 		} else {
 			coverage.eligibleEvidence++;
@@ -5415,36 +5515,37 @@ export function extractSymbolsAndRefsFromGraph(graph: ReviewGraph): {
 	// also unavailable: old/synthetic file nodes cannot prove that definitions,
 	// references, or the TS/TSX warm function facts were attempted successfully.
 	let sawRelevantFileNode = false;
-		for (const node of graph.nodes.values()) {
-			if (node.kind !== "file") continue;
-			sawRelevantFileNode = true;
-			const extraction = node.metadata?.extractionCoverage as
-				| Record<string, "complete" | "partial" | "unavailable" | undefined>
-				| undefined;
-			const statuses = extraction ? Object.values(extraction) : [];
-			const languageStatus = !extraction || statuses.length === 0 || statuses.includes("unavailable")
+	for (const node of graph.nodes.values()) {
+		if (node.kind !== "file") continue;
+		sawRelevantFileNode = true;
+		const extraction = node.metadata?.extractionCoverage as
+			| Record<string, "complete" | "partial" | "unavailable" | undefined>
+			| undefined;
+		const statuses = extraction ? Object.values(extraction) : [];
+		const languageStatus =
+			!extraction || statuses.length === 0 || statuses.includes("unavailable")
 				? "unavailable"
 				: statuses.includes("partial")
 					? "partial"
 					: "complete";
-			if (languageStatus !== "complete") coverage.complete = false;
-			if (node.language) {
-				const prior = coverage.languages![node.language];
-				coverage.languages![node.language] =
-					prior === "unavailable" || languageStatus === "unavailable"
-						? "unavailable"
-						: prior === "partial" || languageStatus === "partial"
-							? "partial"
-							: languageStatus;
-			}
+		if (languageStatus !== "complete") coverage.complete = false;
+		if (node.language) {
+			const prior = coverage.languages![node.language];
+			coverage.languages![node.language] =
+				prior === "unavailable" || languageStatus === "unavailable"
+					? "unavailable"
+					: prior === "partial" || languageStatus === "partial"
+						? "partial"
+						: languageStatus;
 		}
-		// A graph with symbols/evidence but no file coverage metadata is a
-		// synthetic/legacy shape that cannot prove which source files were
-		// actually extracted. Do not let it masquerade as a complete scan.
-		// No file node means there is no bounded source/extractor coverage to
-		// justify a clean empty call graph (including an entirely empty or
-		// external-only synthetic graph).
-		if (!sawRelevantFileNode) coverage.complete = false;
+	}
+	// A graph with symbols/evidence but no file coverage metadata is a
+	// synthetic/legacy shape that cannot prove which source files were
+	// actually extracted. Do not let it masquerade as a complete scan.
+	// No file node means there is no bounded source/extractor coverage to
+	// justify a clean empty call graph (including an entirely empty or
+	// external-only synthetic graph).
+	if (!sawRelevantFileNode) coverage.complete = false;
 
-		return { allSymbols, allRefs, coverage };
+	return { allSymbols, allRefs, coverage };
 }

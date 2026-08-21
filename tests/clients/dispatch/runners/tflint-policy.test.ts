@@ -10,7 +10,9 @@ const getLinterPolicyForCwd = vi.fn();
 
 vi.mock("../../../../clients/safe-spawn.js", () => ({ safeSpawnAsync }));
 vi.mock("../../../../clients/installer/index.js", () => ({ ensureTool }));
-vi.mock("../../../../clients/tool-policy.js", () => ({ getLinterPolicyForCwd }));
+vi.mock("../../../../clients/tool-policy.js", () => ({
+	getLinterPolicyForCwd,
+}));
 
 vi.mock("../../../../clients/dispatch/runners/utils/runner-helpers.js", () => ({
 	createAvailabilityChecker: (command: string) => ({

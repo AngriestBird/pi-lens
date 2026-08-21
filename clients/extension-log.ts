@@ -196,9 +196,7 @@ let moduleLoadWindowOpen = false;
  * the same as an empty store, so it reads as "no window" rather than throwing.
  */
 export function isConsoleCaptureActive(): boolean {
-	return (
-		moduleLoadWindowOpen || consoleCaptureStorage?.getStore() === true
-	);
+	return moduleLoadWindowOpen || consoleCaptureStorage?.getStore() === true;
 }
 
 /**
@@ -275,7 +273,9 @@ function inCaptureWindow<T extends ConsoleFn | ((...args: never[]) => unknown)>(
  * the terminal.
  */
 function isCaptureSeam(prop: PropertyKey): boolean {
-	return prop === "on" || (typeof prop === "string" && prop.startsWith("register"));
+	return (
+		prop === "on" || (typeof prop === "string" && prop.startsWith("register"))
+	);
 }
 
 /**
@@ -385,7 +385,11 @@ export function withConsoleCaptureWindows<T extends object>(api: T): T {
 			// value instead of tripping that invariant (S2a) — a frozen host API
 			// loses the capture window for that member, but keeps working.
 			const descriptor = Reflect.getOwnPropertyDescriptor(target, prop);
-			if (descriptor && descriptor.writable === false && descriptor.configurable === false) {
+			if (
+				descriptor &&
+				descriptor.writable === false &&
+				descriptor.configurable === false
+			) {
 				return descriptor.value;
 			}
 			const cached = wrapperCache.get(prop);

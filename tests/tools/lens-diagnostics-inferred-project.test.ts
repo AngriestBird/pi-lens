@@ -31,9 +31,10 @@ const freshFetchMocks = vi.hoisted(() => ({
 vi.mock(
 	"../../clients/project-diagnostics/fresh-fetch.js",
 	async (importOriginal) => {
-		const actual = await importOriginal<
-			typeof import("../../clients/project-diagnostics/fresh-fetch.js")
-		>();
+		const actual =
+			await importOriginal<
+				typeof import("../../clients/project-diagnostics/fresh-fetch.js")
+			>();
 		return {
 			...actual,
 			fetchFreshProjectDiagnostics:

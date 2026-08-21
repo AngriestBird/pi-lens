@@ -39,7 +39,10 @@ import {
 } from "../../clients/demoted-finding-render.js";
 import { _resetSharedLineCountCacheForTests } from "../../clients/diagnostic-line-freshness.js";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
-import { cancelLSPIdleReset, handleTurnEnd } from "../../clients/runtime-turn.js";
+import {
+	cancelLSPIdleReset,
+	handleTurnEnd,
+} from "../../clients/runtime-turn.js";
 import { setupTestEnvironment } from "./test-utils.js";
 
 const EMPTY_KNIP_RESULT = {
@@ -159,7 +162,9 @@ describe("degradeDemotedFindingBody (#1944)", () => {
 		expect(lines[1]).toBe(
 			`  L12 ${DEAD_LINE_ANNOTATION}: Cannot find name 'STOP'.`,
 		);
-		expect(lines[2]).toBe("  L14: This layout must be fixed before the release.");
+		expect(lines[2]).toBe(
+			"  L14: This layout must be fixed before the release.",
+		);
 		expect(lines[3]).toBe("    💡 Fix: STOP using the deprecated helper");
 		// Exactly one rewrite fired — the banner's.
 		expect(result.authorityMarkersRemoved).toBe(1);
@@ -173,7 +178,9 @@ describe("degradeDemotedFindingBody (#1944)", () => {
 		const result = degradeDemotedFindingBody(summary);
 		const lines = result.body.split("\n");
 		expect(lines[0]).not.toContain("STOP");
-		expect(lines[1]).toBe("  package.json — outdated lockfile (STOP the build)");
+		expect(lines[1]).toBe(
+			"  package.json — outdated lockfile (STOP the build)",
+		);
 	});
 
 	/**
@@ -199,7 +206,9 @@ describe("degradeDemotedFindingBody (#1944)", () => {
 		expect(lines[1]).not.toContain("must be fixed");
 		expect(result.authorityMarkersRemoved).toBe(1);
 		// The content line below it still survives verbatim.
-		expect(lines[2]).toBe("  package.json — outdated lockfile (STOP the build)");
+		expect(lines[2]).toBe(
+			"  package.json — outdated lockfile (STOP the build)",
+		);
 	});
 
 	it("leaves a body with no authority vocabulary alone", () => {
@@ -215,12 +224,21 @@ describe("turn-end demoted blocker (#1944)", () => {
 	 * Set up a file that shrank past its cited lines, with the blocker record
 	 * still in the store. Returns the target path.
 	 */
-	function seedShrunkBlocker(runtime: RuntimeCoordinator, tmpDir: string): string {
+	function seedShrunkBlocker(
+		runtime: RuntimeCoordinator,
+		tmpDir: string,
+	): string {
 		const target = path.join(tmpDir, "provider-helper.ts");
 		// 3 lines now; the record cites 310 and 376.
 		fs.writeFileSync(target, "const a = 1;\nconst b = 2;\nexport { a, b };\n");
 		runtime.bumpFileSeq(target);
-		runtime.recordInlineBlockers(target, BLOCKER_SUMMARY, 1, ["lsp"], [310, 376]);
+		runtime.recordInlineBlockers(
+			target,
+			BLOCKER_SUMMARY,
+			1,
+			["lsp"],
+			[310, 376],
+		);
 		return target;
 	}
 
@@ -356,7 +374,10 @@ describe("turn-end demoted blocker (#1944)", () => {
 			runtime.beginTurn();
 			const cacheManager = new CacheManager(false);
 			const target = path.join(env.tmpDir, "in-bounds.ts");
-			fs.writeFileSync(target, "const a = 1;\nconst b = 2;\nexport { a, b };\n");
+			fs.writeFileSync(
+				target,
+				"const a = 1;\nconst b = 2;\nexport { a, b };\n",
+			);
 			runtime.bumpFileSeq(target);
 			runtime.recordInlineBlockers(target, BLOCKER_SUMMARY, 1, ["lsp"], [2]);
 			// The drift gate's own demotion, on an IN-BOUNDS cited line.

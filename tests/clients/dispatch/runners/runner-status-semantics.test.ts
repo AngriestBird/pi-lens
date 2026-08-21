@@ -547,17 +547,19 @@ describe("runner status/semantic edge cases", () => {
 
 			hasLSP.mockResolvedValue(true);
 			openFile.mockResolvedValue(undefined);
-			touchFile.mockResolvedValue(diagsResult([
-				{
-					severity: 1,
-					message: "Type 'number' is not assignable to type 'string'.",
-					range: {
-						start: { line: 0, character: 6 },
-						end: { line: 0, character: 7 },
+			touchFile.mockResolvedValue(
+				diagsResult([
+					{
+						severity: 1,
+						message: "Type 'number' is not assignable to type 'string'.",
+						range: {
+							start: { line: 0, character: 6 },
+							end: { line: 0, character: 7 },
+						},
+						code: "2322",
 					},
-					code: "2322",
-				},
-			])); 
+				]),
+			);
 			codeAction.mockResolvedValue([
 				{ title: "Change type of 'a' to 'number'", kind: "quickfix" },
 				{ title: "Convert number to string", kind: "quickfix" },
@@ -664,28 +666,30 @@ describe("runner status/semantic edge cases", () => {
 			fs.writeFileSync(filePath, "const x = 1;\n");
 
 			supportsLSP.mockReturnValue(true);
-			touchFile.mockResolvedValue(diagsResult([
-				{
-					severity: 2,
-					message: "ast-grep finding",
-					range: {
-						start: { line: 0, character: 0 },
-						end: { line: 0, character: 1 },
+			touchFile.mockResolvedValue(
+				diagsResult([
+					{
+						severity: 2,
+						message: "ast-grep finding",
+						range: {
+							start: { line: 0, character: 0 },
+							end: { line: 0, character: 1 },
+						},
+						code: "no-javascript-url",
+						source: "ast-grep",
 					},
-					code: "no-javascript-url",
-					source: "ast-grep",
-				},
-				{
-					severity: 2,
-					message: "opengrep finding",
-					range: {
-						start: { line: 0, character: 0 },
-						end: { line: 0, character: 1 },
+					{
+						severity: 2,
+						message: "opengrep finding",
+						range: {
+							start: { line: 0, character: 0 },
+							end: { line: 0, character: 1 },
+						},
+						code: "some-rule",
+						source: "Semgrep",
 					},
-					code: "some-rule",
-					source: "Semgrep",
-				},
-			])); 
+				]),
+			);
 
 			const result = await runner.run(
 				ctx(filePath, env.tmpDir, { fileRole: "test" }) as never,
@@ -706,18 +710,20 @@ describe("runner status/semantic edge cases", () => {
 			fs.writeFileSync(filePath, "const x = 1;\n");
 
 			supportsLSP.mockReturnValue(true);
-			touchFile.mockResolvedValue(diagsResult([
-				{
-					severity: 2,
-					message: "ast-grep finding",
-					range: {
-						start: { line: 0, character: 0 },
-						end: { line: 0, character: 1 },
+			touchFile.mockResolvedValue(
+				diagsResult([
+					{
+						severity: 2,
+						message: "ast-grep finding",
+						range: {
+							start: { line: 0, character: 0 },
+							end: { line: 0, character: 1 },
+						},
+						code: "no-javascript-url",
+						source: "ast-grep",
 					},
-					code: "no-javascript-url",
-					source: "ast-grep",
-				},
-			])); 
+				]),
+			);
 
 			const result = await runner.run(ctx(filePath, env.tmpDir) as never);
 			expect(result.diagnostics).toHaveLength(1);
@@ -737,17 +743,19 @@ describe("runner status/semantic edge cases", () => {
 
 			hasLSP.mockResolvedValue(true);
 			openFile.mockResolvedValue(undefined);
-			touchFile.mockResolvedValue(diagsResult([
-				{
-					severity: 1,
-					message: "Type 'number' is not assignable to type 'string'.",
-					range: {
-						start: { line: 0, character: 6 },
-						end: { line: 0, character: 7 },
+			touchFile.mockResolvedValue(
+				diagsResult([
+					{
+						severity: 1,
+						message: "Type 'number' is not assignable to type 'string'.",
+						range: {
+							start: { line: 0, character: 6 },
+							end: { line: 0, character: 7 },
+						},
+						code: "2322",
 					},
-					code: "2322",
-				},
-			])); 
+				]),
+			);
 			codeAction.mockResolvedValue([
 				{ title: "Move to a new file", kind: "refactor.move.newFile" },
 			]);
@@ -776,16 +784,18 @@ describe("runner status/semantic edge cases", () => {
 			hasLSP.mockResolvedValue(true);
 			openFile.mockResolvedValue(undefined);
 			touchFile.mockResolvedValue(
-				diagsResult([0, 1, 2].map((line) => ({
-					severity: 1,
-					message: "Type 'number' is not assignable to type 'string'.",
-					range: {
-						start: { line, character: 6 },
-						end: { line, character: 7 },
-					},
-					code: "2322",
-				})),
-			)); 
+				diagsResult(
+					[0, 1, 2].map((line) => ({
+						severity: 1,
+						message: "Type 'number' is not assignable to type 'string'.",
+						range: {
+							start: { line, character: 6 },
+							end: { line, character: 7 },
+						},
+						code: "2322",
+					})),
+				),
+			);
 			// Assert concurrency by observed overlap (max in-flight lookups), not
 			// wall-clock — elapsed-time bounds flake under parallel vitest load.
 			// Sequential awaits would never have more than 1 lookup in flight.

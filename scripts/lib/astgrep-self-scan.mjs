@@ -155,7 +155,9 @@ export function runSelfScan({
 		// "scanned zero files" and trip the dead-scan guard for the wrong
 		// reason.
 		scannedFileCount: scannedMatch ? Number(scannedMatch[1]) : undefined,
-		effectiveRuleCount: effectiveRuleMatch ? Number(effectiveRuleMatch[1]) : undefined,
+		effectiveRuleCount: effectiveRuleMatch
+			? Number(effectiveRuleMatch[1])
+			: undefined,
 		stderr: stderrText,
 	};
 }

@@ -22,7 +22,8 @@ vi.mock("../../clients/installer/index.js", () => ({
 describe("RuffClient.ensureAvailable() — in-flight dedupe (#120)", () => {
 	beforeEach(async () => {
 		vi.resetAllMocks();
-		const helpers = await import("../../clients/dispatch/runners/utils/runner-helpers.js");
+		const helpers =
+			await import("../../clients/dispatch/runners/utils/runner-helpers.js");
 		helpers.resetDispatchAvailabilityState();
 		ensureTool.mockResolvedValue(null);
 	});
@@ -83,7 +84,12 @@ describe("RuffClient.ensureAvailable() — in-flight dedupe (#120)", () => {
 				stdout: "",
 				stderr: "",
 			})
-			.mockResolvedValue({ status: 0, error: undefined, stdout: "[]", stderr: "" });
+			.mockResolvedValue({
+				status: 0,
+				error: undefined,
+				stdout: "[]",
+				stderr: "",
+			});
 		ensureTool.mockResolvedValue(managed);
 		const { RuffClient } = await import("../../clients/ruff-client.js");
 		const client = new RuffClient();
@@ -92,10 +98,9 @@ describe("RuffClient.ensureAvailable() — in-flight dedupe (#120)", () => {
 		fs.writeFileSync(file, "x = 1\n");
 		try {
 			await client.fixFileAsync(file);
-			expect(safeSpawnAsync.mock.calls.slice(1).map((call) => call[0])).toEqual([
-				managed,
-				managed,
-			]);
+			expect(safeSpawnAsync.mock.calls.slice(1).map((call) => call[0])).toEqual(
+				[managed, managed],
+			);
 		} finally {
 			fs.rmSync(file, { force: true });
 		}
@@ -116,7 +121,8 @@ describe("RuffClient.ensureAvailable() — in-flight dedupe (#120)", () => {
 		expect(ensureTool).toHaveBeenCalledTimes(1);
 		await client.ensureAvailable();
 		expect(ensureTool).toHaveBeenCalledTimes(1);
-		const helpers = await import("../../clients/dispatch/runners/utils/runner-helpers.js");
+		const helpers =
+			await import("../../clients/dispatch/runners/utils/runner-helpers.js");
 		helpers.resetDispatchAvailabilityState();
 		ensureTool.mockResolvedValue("ruff");
 		expect(await client.ensureAvailable()).toBe(true);

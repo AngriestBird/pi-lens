@@ -1084,10 +1084,12 @@ const helmRenderRunner: RunnerDefinition = {
 
 		const existing = inFlightByChartRoot.get(chartRoot);
 		if (existing) return existing;
-		const promise = renderAndValidate(chartRoot, cwd, ctx.filePath).finally(() => {
-			if (inFlightByChartRoot.get(chartRoot) === promise)
-				inFlightByChartRoot.delete(chartRoot);
-		});
+		const promise = renderAndValidate(chartRoot, cwd, ctx.filePath).finally(
+			() => {
+				if (inFlightByChartRoot.get(chartRoot) === promise)
+					inFlightByChartRoot.delete(chartRoot);
+			},
+		);
 		inFlightByChartRoot.set(chartRoot, promise);
 		return promise;
 	},

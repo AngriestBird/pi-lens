@@ -227,7 +227,10 @@ export async function demoteInferredProjectSweepResults<
 			out.push(result);
 			continue;
 		}
-		if (identityCache.size >= INFERRED_PROJECT_PROBE_BUDGET && !identityCache.has(result.filePath)) {
+		if (
+			identityCache.size >= INFERRED_PROJECT_PROBE_BUDGET &&
+			!identityCache.has(result.filePath)
+		) {
 			budgetExhausted = true;
 			out.push(result);
 			continue;

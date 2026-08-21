@@ -94,11 +94,26 @@ function makeDeps(ctxCwd: string) {
 			ensureAvailable: async () => false,
 			scanExports: async () => new Map(),
 		},
-		biomeClient: { isAvailable: () => false, ensureAvailable: async () => false },
-		ruffClient: { isAvailable: () => false, ensureAvailable: async () => false },
-		knipClient: { isAvailable: () => false, ensureAvailable: async () => false },
-		jscpdClient: { isAvailable: () => false, ensureAvailable: async () => false },
-		depChecker: { isAvailable: () => false, ensureAvailable: async () => false },
+		biomeClient: {
+			isAvailable: () => false,
+			ensureAvailable: async () => false,
+		},
+		ruffClient: {
+			isAvailable: () => false,
+			ensureAvailable: async () => false,
+		},
+		knipClient: {
+			isAvailable: () => false,
+			ensureAvailable: async () => false,
+		},
+		jscpdClient: {
+			isAvailable: () => false,
+			ensureAvailable: async () => false,
+		},
+		depChecker: {
+			isAvailable: () => false,
+			ensureAvailable: async () => false,
+		},
 		testRunnerClient: {
 			detectRunner: () => ({ runner: "vitest", config: null }),
 			runTestFile: () => ({ failed: 1, error: false }),

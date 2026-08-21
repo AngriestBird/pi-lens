@@ -75,11 +75,26 @@ function makeDeps(ctxCwd: string) {
 			ensureAvailable: async () => false,
 			scanExports: async () => new Map(),
 		},
-		biomeClient: { isAvailable: () => false, ensureAvailable: async () => false },
-		ruffClient: { isAvailable: () => false, ensureAvailable: async () => false },
-		knipClient: { isAvailable: () => false, ensureAvailable: async () => false },
-		jscpdClient: { isAvailable: () => false, ensureAvailable: async () => false },
-		depChecker: { isAvailable: () => false, ensureAvailable: async () => false },
+		biomeClient: {
+			isAvailable: () => false,
+			ensureAvailable: async () => false,
+		},
+		ruffClient: {
+			isAvailable: () => false,
+			ensureAvailable: async () => false,
+		},
+		knipClient: {
+			isAvailable: () => false,
+			ensureAvailable: async () => false,
+		},
+		jscpdClient: {
+			isAvailable: () => false,
+			ensureAvailable: async () => false,
+		},
+		depChecker: {
+			isAvailable: () => false,
+			ensureAvailable: async () => false,
+		},
 		testRunnerClient: {
 			detectRunner: () => ({ runner: "vitest", config: null }),
 			runTestFile: () => ({ failed: 1, error: false }),
@@ -107,9 +122,8 @@ describe("dispatch availability suppression is reset at session start (#1266)", 
 	});
 
 	it("retries a suppressed tool's install after handleSessionStart, not just after calling the reset helper directly", async () => {
-		const { resolveCommandWithInstallFallback } = await import(
-			"../../clients/dispatch/runners/utils/runner-helpers.js"
-		);
+		const { resolveCommandWithInstallFallback } =
+			await import("../../clients/dispatch/runners/utils/runner-helpers.js");
 		const installerMod = await import("../../clients/installer/index.js");
 		const ensureToolMock = vi.mocked(installerMod.ensureTool);
 		ensureToolMock.mockResolvedValue(undefined);
@@ -181,7 +195,8 @@ describe("dispatch availability suppression is reset at session start (#1266)", 
 	// advanced by resetDispatchAvailabilityState's generation counter. Drive
 	// the session reset seam, rather than calling resetWhichLatches directly.
 	it("re-probes a latched-missing formatter after handleSessionStart", async () => {
-		const { getFormattersForFile } = await import("../../clients/formatters.js");
+		const { getFormattersForFile } =
+			await import("../../clients/formatters.js");
 		const filePath = `${tmpDir}/lib.rs`;
 		const nextCwd = `${tmpDir}-next`;
 		const nextFilePath = `${nextCwd}/lib.rs`;
@@ -219,9 +234,8 @@ describe("dispatch availability suppression is reset at session start (#1266)", 
 	// directory the user is actually working in. The session reset has to drop
 	// both.
 	it("re-probes a latched-missing formatter in the SAME cwd after handleSessionStart", async () => {
-		const { clearFormatterCache, getFormattersForFile } = await import(
-			"../../clients/formatters.js"
-		);
+		const { clearFormatterCache, getFormattersForFile } =
+			await import("../../clients/formatters.js");
 		// Arrange only: the module registry is shared across tests in this file,
 		// so the preceding case leaves rustfmt latched. Start from a clean slate
 		// so the seeding step below genuinely probes.
@@ -297,9 +311,8 @@ describe("dispatch availability suppression is reset at session start (#1266)", 
 		try {
 			const spawnMod = await import("../../clients/safe-spawn.js");
 			const spawnMock = vi.mocked(spawnMod.safeSpawnAsync);
-			const { INSTALL_TRANSIENT_COOLDOWNS_MS } = await import(
-				"../../clients/dispatch/runners/utils/availability-policy.js"
-			);
+			const { INSTALL_TRANSIENT_COOLDOWNS_MS } =
+				await import("../../clients/dispatch/runners/utils/availability-policy.js");
 			spawnMock.mockImplementation((async (cmd: unknown, args: unknown) => {
 				const argv = Array.isArray(args) ? args.join(" ") : "";
 				if (String(cmd) === "go" && argv.startsWith("version"))
@@ -332,9 +345,8 @@ describe("dispatch availability suppression is reset at session start (#1266)", 
 						args[0] === "install",
 				).length;
 
-			const { GovulncheckClient } = await import(
-				"../../clients/govulncheck-client.js"
-			);
+			const { GovulncheckClient } =
+				await import("../../clients/govulncheck-client.js");
 			const client = new GovulncheckClient(false);
 			for (const cooldown of [0, ...INSTALL_TRANSIENT_COOLDOWNS_MS]) {
 				vi.setSystemTime(new Date(Date.now() + cooldown + 1));
@@ -376,9 +388,8 @@ describe("dispatch availability suppression is reset at session start (#1266)", 
 			return { stdout: "npm\n", stderr: "", status: 0 };
 		}) as never);
 
-		const { resolveNodePackageManager } = await import(
-			"../../clients/package-manager.js"
-		);
+		const { resolveNodePackageManager } =
+			await import("../../clients/package-manager.js");
 		const fs = await import("node:fs");
 		const path = await import("node:path");
 		fs.writeFileSync(path.join(tmpDir, "pnpm-lock.yaml"), "");

@@ -21,10 +21,7 @@ import { getGlobalPiLensDir } from "../file-utils.js";
 import { isFullyQualified } from "../path-utils.js";
 import { findGlobalBinary } from "../package-manager.js";
 import { redactSecrets } from "../redact/secrets.js";
-import {
-	classifySpawnFailure,
-	SpawnFailureError,
-} from "../safe-spawn.js";
+import { classifySpawnFailure, SpawnFailureError } from "../safe-spawn.js";
 import { getRubyVersionDirNamesAsync } from "./ruby-drive-dirs.js";
 
 export interface LSPProcess {
@@ -587,7 +584,7 @@ export async function launchLSP(
 	} catch (err) {
 		// If spawn failed with simple command, try npm global
 		if (
-		!isFullyQualified(command) &&
+			!isFullyQualified(command) &&
 			!command.includes(path.sep) &&
 			!command.includes("/")
 		) {
@@ -648,10 +645,10 @@ export async function launchLSP(
 						reject(
 							detail
 								? new SpawnFailureError(
-									failure.kind,
-									`${failure.message}${detail}`,
-									failure.cause,
-								)
+										failure.kind,
+										`${failure.message}${detail}`,
+										failure.cause,
+									)
 								: failure,
 						);
 					});

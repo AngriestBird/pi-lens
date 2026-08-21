@@ -26,7 +26,11 @@ import {
 	selfScanRuleIds,
 } from "../../scripts/lib/astgrep-self-scan.mjs";
 
-const WRAPPER_PATH = path.join(repoRoot(), "scripts", "run-astgrep-pi-lens.mjs");
+const WRAPPER_PATH = path.join(
+	repoRoot(),
+	"scripts",
+	"run-astgrep-pi-lens.mjs",
+);
 
 interface WrapperRun {
 	status: number;
@@ -56,7 +60,11 @@ function runWrapper(args: string[], env?: Record<string, string>): WrapperRun {
 		});
 		return { status: 0, stdout, stderr: "" };
 	} catch (e) {
-		const err = e as { status?: number | null; stdout?: string; stderr?: string };
+		const err = e as {
+			status?: number | null;
+			stdout?: string;
+			stderr?: string;
+		};
 		return {
 			status: err.status ?? 1,
 			stdout: err.stdout ?? "",
@@ -94,10 +102,7 @@ d("pi-lens self-scan (#1718)", () => {
 		const untriaged = result.findings.filter(
 			(f) => !baseline.has(findingSignature(f)),
 		);
-		expect(
-			untriaged,
-			JSON.stringify(untriaged, null, 2),
-		).toEqual([]);
+		expect(untriaged, JSON.stringify(untriaged, null, 2)).toEqual([]);
 	});
 
 	it("scans a nonzero file count (a dead scan must not read as clean)", () => {
@@ -181,7 +186,9 @@ d("pi-lens self-scan (#1718)", () => {
 		});
 
 		it("exits NONZERO through the wrapper on a synthetic untriaged violation", () => {
-			const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pilens-selfscan-wrapper-"));
+			const dir = fs.mkdtempSync(
+				path.join(os.tmpdir(), "pilens-selfscan-wrapper-"),
+			);
 			try {
 				fs.writeFileSync(
 					path.join(dir, "violation.ts"),

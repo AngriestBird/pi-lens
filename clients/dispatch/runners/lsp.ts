@@ -36,10 +36,7 @@ import {
 	tryWarmAttachedCodeActions,
 	tryWarmAttachedDiagnostics,
 } from "../../warm-attach.js";
-import {
-	contentHash,
-	WARM_CODE_ACTION_LOOKUP_LIMIT,
-} from "../../mcp/ipc.js";
+import { contentHash, WARM_CODE_ACTION_LOOKUP_LIMIT } from "../../mcp/ipc.js";
 
 const LSP_MAX_FILE_BYTES = RUNTIME_CONFIG.pipeline.lspMaxFileBytes;
 const LSP_MAX_FILE_LINES = RUNTIME_CONFIG.pipeline.lspMaxFileLines;
@@ -170,14 +167,15 @@ const lspRunner: RunnerDefinition = {
 						}),
 					}
 				: await lspService.touchFile(ctx.filePath, content, {
-				diagnostics: "document",
-				collectDiagnostics: true,
-				clientScope: auxiliaryServerIds.length > 0 ? "with-auxiliary" : "primary",
-				auxiliaryServerIds,
-				maxClientWaitMs: LSP_SPAWN_BUDGET_MS,
-				maxDiagnosticsWaitMs: LSP_DIAGNOSTICS_WAIT_MS,
-				source: "dispatch-lsp-runner",
-			});
+						diagnostics: "document",
+						collectDiagnostics: true,
+						clientScope:
+							auxiliaryServerIds.length > 0 ? "with-auxiliary" : "primary",
+						auxiliaryServerIds,
+						maxClientWaitMs: LSP_SPAWN_BUDGET_MS,
+						maxDiagnosticsWaitMs: LSP_DIAGNOSTICS_WAIT_MS,
+						source: "dispatch-lsp-runner",
+					});
 			if (touched === undefined) {
 				lspClientReady = false;
 			} else {
@@ -333,25 +331,27 @@ const lspRunner: RunnerDefinition = {
 				});
 			}
 		} else {
-			await Promise.all(blockingDiagIndexes.map(async ({ d, idx }) => {
-				try {
-					const start = d.range.start;
-					const end = d.range.end ?? d.range.start;
-					const actions = await lspService.codeAction(
-						ctx.filePath,
-						start.line,
-						start.character,
-						end.line,
-						end.character,
-					);
-					const suggestion = buildCodeActionSuggestion(actions);
-					if (suggestion) {
-						fixSuggestionByIndex.set(idx, suggestion);
+			await Promise.all(
+				blockingDiagIndexes.map(async ({ d, idx }) => {
+					try {
+						const start = d.range.start;
+						const end = d.range.end ?? d.range.start;
+						const actions = await lspService.codeAction(
+							ctx.filePath,
+							start.line,
+							start.character,
+							end.line,
+							end.character,
+						);
+						const suggestion = buildCodeActionSuggestion(actions);
+						if (suggestion) {
+							fixSuggestionByIndex.set(idx, suggestion);
+						}
+					} catch {
+						// Best-effort enrichment only; base diagnostics remain authoritative.
 					}
-				} catch {
-					// Best-effort enrichment only; base diagnostics remain authoritative.
-				}
-			}));
+				}),
+			);
 		}
 
 		const diagnostics: Diagnostic[] = convertLspDiagnostics(

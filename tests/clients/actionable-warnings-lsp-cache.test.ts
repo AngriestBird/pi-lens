@@ -22,7 +22,9 @@ let cachedForHash: string | undefined = undefined;
 const getLastKnownDiagnostics = vi.fn(
 	(_filePath: string, expectedContentHash?: string) => {
 		if (expectedContentHash !== undefined && cachedForHash !== undefined) {
-			return expectedContentHash === cachedForHash ? lastKnownReturn : undefined;
+			return expectedContentHash === cachedForHash
+				? lastKnownReturn
+				: undefined;
 		}
 		return lastKnownReturn;
 	},
@@ -61,9 +63,8 @@ afterEach(() => {
 });
 
 async function buildReport(args: { dispatchWarnings?: never[] } = {}) {
-	const { buildActionableWarningsReport } = await import(
-		"../../clients/actionable-warnings.js"
-	);
+	const { buildActionableWarningsReport } =
+		await import("../../clients/actionable-warnings.js");
 	return buildActionableWarningsReport({
 		cwd: tmpDir,
 		sessionId: "lens-test",
@@ -255,10 +256,7 @@ describe("actionable-warning-state.json migration — LSP two-turn probe (review
 
 		const findLspWarning = (report: {
 			files: Array<{ warnings: Array<{ tool: string; suppressed: boolean }> }>;
-		}) =>
-			report.files
-				.flatMap((f) => f.warnings)
-				.find((w) => w.tool === "lsp");
+		}) => report.files.flatMap((f) => f.warnings).find((w) => w.tool === "lsp");
 
 		const turn1 = await buildReport();
 		const turn1Warning = findLspWarning(turn1);

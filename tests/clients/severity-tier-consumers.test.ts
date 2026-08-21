@@ -147,12 +147,11 @@ describe("code-quality warnings render the hint and info tiers distinctly (#1777
 				[1, "hint"],
 				[2, "hint"],
 			] as const
-		).map(
-			([line, severity]) =>
-				recordFromCodeQualityDiagnostic(
-					makeDiagnostic(severity, { line, message: `${severity} ${line}` }),
-					cwd,
-				)!,
+		).map(([line, severity]) =>
+			recordFromCodeQualityDiagnostic(
+				makeDiagnostic(severity, { line, message: `${severity} ${line}` }),
+				cwd,
+			)!,
 		);
 		const report = buildCodeQualityWarningsReport({
 			cwd,

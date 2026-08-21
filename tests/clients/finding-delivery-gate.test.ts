@@ -168,7 +168,8 @@ function scanUntaggedOrMistaggedSeams(
 
 const RUNTIME_TURN_SEAM_PATTERN =
 	/\b(blockerParts|advisoryParts|staleSecretParts)\.push\(/;
-const LENS_DIAGNOSTICS_MODE_FN_PATTERN = /^(?:async\s+)?function\s+format\w*Mode\(/;
+const LENS_DIAGNOSTICS_MODE_FN_PATTERN =
+	/^(?:async\s+)?function\s+format\w*Mode\(/;
 
 describe("finding-delivery-gate real seam scan (#1634 review F2)", () => {
 	const registryIds = new Set(Object.keys(DELIVERY_SURFACES));
@@ -192,10 +193,18 @@ describe("finding-delivery-gate real seam scan (#1634 review F2)", () => {
 	});
 
 	it("found at least one real seam in each scanned file (the scan itself is not a false negative)", () => {
-		const runtimeTurnStripped = stripCommentsAndStrings(source("clients/runtime-turn.ts"));
-		const lensDiagStripped = stripCommentsAndStrings(source("tools/lens-diagnostics.ts"));
-		expect(findSeams(runtimeTurnStripped, RUNTIME_TURN_SEAM_PATTERN).length).toBeGreaterThan(15);
-		expect(findSeams(lensDiagStripped, LENS_DIAGNOSTICS_MODE_FN_PATTERN).length).toBeGreaterThanOrEqual(3);
+		const runtimeTurnStripped = stripCommentsAndStrings(
+			source("clients/runtime-turn.ts"),
+		);
+		const lensDiagStripped = stripCommentsAndStrings(
+			source("tools/lens-diagnostics.ts"),
+		);
+		expect(
+			findSeams(runtimeTurnStripped, RUNTIME_TURN_SEAM_PATTERN).length,
+		).toBeGreaterThan(15);
+		expect(
+			findSeams(lensDiagStripped, LENS_DIAGNOSTICS_MODE_FN_PATTERN).length,
+		).toBeGreaterThanOrEqual(3);
 	});
 
 	// RED PROOF (F2): reproduces the reviewer's exact mutant — a brand-new
@@ -327,7 +336,9 @@ describe("finding-delivery-gate enumeration (#1634)", () => {
 				evidence: [],
 			},
 		};
-		expect(() => assertNoDeliveryBypass(bypassRegistry)).toThrow(/synthetic:bypass/);
+		expect(() => assertNoDeliveryBypass(bypassRegistry)).toThrow(
+			/synthetic:bypass/,
+		);
 	});
 
 	it("RED PROOF: a gated surface that names zero gates is rejected", () => {
@@ -341,7 +352,9 @@ describe("finding-delivery-gate enumeration (#1634)", () => {
 				evidence: ["x"],
 			},
 		};
-		expect(() => assertNoDeliveryBypass(bypassRegistry)).toThrow(/synthetic:empty-gate/);
+		expect(() => assertNoDeliveryBypass(bypassRegistry)).toThrow(
+			/synthetic:empty-gate/,
+		);
 	});
 
 	it("RED PROOF: a gated surface that names zero evidence is rejected", () => {
@@ -355,7 +368,9 @@ describe("finding-delivery-gate enumeration (#1634)", () => {
 				evidence: [],
 			},
 		};
-		expect(() => assertNoDeliveryBypass(bypassRegistry)).toThrow(/names no evidence/);
+		expect(() => assertNoDeliveryBypass(bypassRegistry)).toThrow(
+			/names no evidence/,
+		);
 	});
 
 	it("RED PROOF: a labeled surface missing reason/ageSource is rejected", () => {
@@ -370,7 +385,9 @@ describe("finding-delivery-gate enumeration (#1634)", () => {
 				evidence: [],
 			},
 		};
-		expect(() => assertNoDeliveryBypass(bypassRegistry)).toThrow(/synthetic:bare-label/);
+		expect(() => assertNoDeliveryBypass(bypassRegistry)).toThrow(
+			/synthetic:bare-label/,
+		);
 	});
 
 	it("RED PROOF: a non-live labeled surface with no evidence is rejected", () => {
@@ -385,7 +402,9 @@ describe("finding-delivery-gate enumeration (#1634)", () => {
 				evidence: [],
 			},
 		};
-		expect(() => assertNoDeliveryBypass(bypassRegistry)).toThrow(/names no evidence/);
+		expect(() => assertNoDeliveryBypass(bypassRegistry)).toThrow(
+			/names no evidence/,
+		);
 	});
 
 	it("RED PROOF: status=partial with no partialReason is rejected", () => {
@@ -401,7 +420,9 @@ describe("finding-delivery-gate enumeration (#1634)", () => {
 				status: "partial",
 			},
 		};
-		expect(() => assertNoDeliveryBypass(bypassRegistry)).toThrow(/status=partial/);
+		expect(() => assertNoDeliveryBypass(bypassRegistry)).toThrow(
+			/status=partial/,
+		);
 	});
 });
 
@@ -529,7 +550,10 @@ const REGION_FORWARD_WINDOW = 10;
 const CALLEE_PROXIMITY_LINES = 3;
 
 /** 1-based line numbers in `strippedWholeSource` where `needle` occurs. */
-function occurrenceLinesOf(strippedWholeSource: string, needle: string): number[] {
+function occurrenceLinesOf(
+	strippedWholeSource: string,
+	needle: string,
+): number[] {
 	const out: number[] = [];
 	strippedWholeSource.split("\n").forEach((l, i) => {
 		if (l.includes(needle)) out.push(i + 1);
@@ -637,7 +661,12 @@ function checkRuntimeTurnSeamEvidenceExclusive(
 			// is its own callee proof.
 			if (entry.mode === "gated" && !needle.includes("(")) {
 				const satisfied = entry.gates.some((gate) =>
-					hasNearbyCallSite(wholeStrippedLines, claimed - 1, gate, CALLEE_PROXIMITY_LINES),
+					hasNearbyCallSite(
+						wholeStrippedLines,
+						claimed - 1,
+						gate,
+						CALLEE_PROXIMITY_LINES,
+					),
 				);
 				if (!satisfied) {
 					problems.push(
@@ -682,7 +711,12 @@ function checkEvidenceInScope(
 			const occurrenceLines = findLineIndexes(scopeStrippedLines, needle);
 			const satisfied = occurrenceLines.some((lineIdx) =>
 				entry.gates.some((gate) =>
-					hasNearbyCallSite(scopeStrippedLines, lineIdx, gate, CALLEE_PROXIMITY_LINES),
+					hasNearbyCallSite(
+						scopeStrippedLines,
+						lineIdx,
+						gate,
+						CALLEE_PROXIMITY_LINES,
+					),
 				),
 			);
 			if (!satisfied) {
@@ -699,21 +733,38 @@ function checkEvidenceInScope(
 
 describe("finding-delivery-gate evidence ground-truth (#1634 review F1/R1b/R1c/R2)", () => {
 	const runtimeTurnRaw = source("clients/runtime-turn.ts");
-	const runtimeTurnStrippedLines = stripCommentsOnly(runtimeTurnRaw).split("\n");
-	const allRuntimeTurnSeams = scanTaggedSeams(runtimeTurnRaw, RUNTIME_TURN_SEAM_PATTERN);
+	const runtimeTurnStrippedLines =
+		stripCommentsOnly(runtimeTurnRaw).split("\n");
+	const allRuntimeTurnSeams = scanTaggedSeams(
+		runtimeTurnRaw,
+		RUNTIME_TURN_SEAM_PATTERN,
+	);
 
 	for (const [id, entry] of Object.entries(DELIVERY_SURFACES)) {
 		if (entry.evidence.length === 0) continue;
 		const isRuntimeTurn = entry.file === "clients/runtime-turn.ts";
 
-		it(isRuntimeTurn
-			? `"${id}" evidence is exclusively claimed by its own tagged seam(s) (R1b/R1c/R2)`
-			: `"${id}" evidence is present in ${entry.file} (comments stripped)`, () => {
-			const problems = isRuntimeTurn
-				? checkRuntimeTurnSeamEvidenceExclusive(id, entry, allRuntimeTurnSeams, runtimeTurnStrippedLines)
-				: checkEvidenceInScope(id, entry, source(entry.file).split("\n"), entry.file);
-			expect(problems, problems.join("\n")).toEqual([]);
-		});
+		it(
+			isRuntimeTurn
+				? `"${id}" evidence is exclusively claimed by its own tagged seam(s) (R1b/R1c/R2)`
+				: `"${id}" evidence is present in ${entry.file} (comments stripped)`,
+			() => {
+				const problems = isRuntimeTurn
+					? checkRuntimeTurnSeamEvidenceExclusive(
+							id,
+							entry,
+							allRuntimeTurnSeams,
+							runtimeTurnStrippedLines,
+						)
+					: checkEvidenceInScope(
+							id,
+							entry,
+							source(entry.file).split("\n"),
+							entry.file,
+						);
+				expect(problems, problems.join("\n")).toEqual([]);
+			},
+		);
 	}
 
 	// Explicit, named proof that exclusivity is scoped PER ID, not global —
@@ -767,14 +818,19 @@ let report = \`CRITICAL dependency CVEs (trivy, \${trivyAgeLabel}). Upgrade befo
 `;
 		const strippedFixture = stripCommentsOnly(fixedFixture);
 		const evidence = "CRITICAL dependency CVEs (trivy, ${trivyAgeLabel}";
-		expect(countOccurrences(strippedFixture, evidence)).toBeGreaterThanOrEqual(1);
+		expect(countOccurrences(strippedFixture, evidence)).toBeGreaterThanOrEqual(
+			1,
+		);
 	});
 
 	// RED PROOF (R1b, far case): an ungated seam tagged with a real id, FAR
 	// (beyond the lookback window) from that id's real evidence, must still
 	// be caught — no candidate pair exists at all.
 	it("RED PROOF (far): a rogue seam tagged with a real id, beyond the lookback window, is caught", () => {
-		const filler = Array.from({ length: REGION_BACK_WINDOW + 20 }, (_, i) => `// filler ${i}`);
+		const filler = Array.from(
+			{ length: REGION_BACK_WINDOW + 20 },
+			(_, i) => `// filler ${i}`,
+		);
 		const rogueLines = [
 			'const gitleaksGate = gateFindingsByPathFreshness({ store: "gitleaks" });',
 			...filler,
@@ -804,8 +860,10 @@ let report = \`CRITICAL dependency CVEs (trivy, \${trivyAgeLabel}). Upgrade befo
 	// seam — real or rogue — unsatisfied, so the overall check still reds
 	// whenever two same-id seams compete for one occurrence.
 	it("RED PROOF (near): a rogue seam placed CLOSER than the real seam to the same evidence is caught", () => {
-		const realGateLine = 'const gitleaksGate = gateFindingsByPathFreshness({ store: "gitleaks" });';
-		const spacer = (n: number) => Array.from({ length: n }, (_, i) => `// spacer ${i}`);
+		const realGateLine =
+			'const gitleaksGate = gateFindingsByPathFreshness({ store: "gitleaks" });';
+		const spacer = (n: number) =>
+			Array.from({ length: n }, (_, i) => `// spacer ${i}`);
 		const rogueLines = [
 			realGateLine,
 			...spacer(69), // rogue sits 69 lines from the real gate — inside the window

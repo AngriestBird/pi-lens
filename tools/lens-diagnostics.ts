@@ -23,7 +23,10 @@ import {
 import { applyInlineSuppressions } from "../clients/dispatch/inline-suppressions.js";
 import { gateFindingsByPathFreshness } from "../clients/advisory-provenance.js";
 import { normalizeRuleId } from "../clients/dispatch/rule-id-normalize.js";
-import { applyRulePolicy, rulePolicyMapFromConfig } from "../clients/dispatch/rule-policy.js";
+import {
+	applyRulePolicy,
+	rulePolicyMapFromConfig,
+} from "../clients/dispatch/rule-policy.js";
 import { loadPiLensProjectConfig } from "../clients/project-lens-config.js";
 import { compactRenderResult } from "./render-compact.js";
 import { combineAbortSignals } from "../clients/deadline-utils.js";
@@ -127,7 +130,6 @@ type LSPServiceLike = ReturnType<typeof getLSPService> & {
 		},
 	) => Promise<WorkspaceLspDiagnosticResult[]>;
 };
-
 
 type WorkspaceLspDiagnosticResult = {
 	filePath: string;
@@ -389,7 +391,7 @@ export function createLensDiagnosticsTool(
 						`Restrict any mode to an explicit file/directory list (max ${MAX_PATHS_ENTRIES} entries; ` +
 						"more errors instead of silently truncating). Entries may be relative " +
 						"(resolved against cwd) or absolute, and a directory entry matches all " +
-						"files under it (e.g. \"src/\"). mode=delta/all are a pure post-filter " +
+						'files under it (e.g. "src/"). mode=delta/all are a pure post-filter ' +
 						"of cached/session state — they can only show findings for files pi-lens " +
 						"has already dispatched, so an unseen file shows nothing (use mode=full " +
 						"for an active scan). mode=full actively scans exactly these paths (LSP " +
@@ -588,7 +590,9 @@ function appendProjectDiagnosticsDeltaLines(
 		const rel = path.relative(cwd, filePath);
 		if (!lines.includes(rel)) lines.push(rel);
 		for (const diagnostic of fileDiagnostics) {
-			lines.push(formatProjectDeltaDiagnostic(diagnostic, staleSet.has(diagnostic)));
+			lines.push(
+				formatProjectDeltaDiagnostic(diagnostic, staleSet.has(diagnostic)),
+			);
 		}
 	}
 	return diagnostics.length;
@@ -617,8 +621,7 @@ function filterDeltaReportDispositions(
 				[projectDiagnosticToWidget(d, d.filePath)],
 				cwd,
 				d.filePath,
-			)
-				.length === 1,
+			).length === 1,
 	);
 	const policyKept = applyRulePolicy(kept, policyMap);
 	if (policyKept.length === report.diagnostics.length) return report;
@@ -657,7 +660,8 @@ function applyDeltaFreshnessGate<W extends DispositionCandidate>(
 	if (!generatedAt) return files;
 	const flat: Array<{ filePath: string; warning: W }> = [];
 	for (const file of files) {
-		for (const warning of file.warnings) flat.push({ filePath: file.filePath, warning });
+		for (const warning of file.warnings)
+			flat.push({ filePath: file.filePath, warning });
 	}
 	if (flat.length === 0) return files;
 	const gated = gateFindingsByPathFreshness({
@@ -1010,7 +1014,10 @@ function applyProjectRulePolicy<T extends { diagnostics: ProjectDiagnostic[] }>(
 	policyMap: ReturnType<typeof rulePolicyMapFromConfig>,
 ): T | undefined {
 	if (!value) return undefined;
-	return { ...value, diagnostics: applyRulePolicy(value.diagnostics, policyMap) };
+	return {
+		...value,
+		diagnostics: applyRulePolicy(value.diagnostics, policyMap),
+	};
 }
 
 /** A diagnostic counts as error-like when it blocks or has error severity.
@@ -1142,7 +1149,10 @@ function summarizeDiagnostics(
 // #1618: sentence form used when exactly one reason accounts for every
 // unconfirmed file — mirrors the pre-#1618 two-case ternary's phrasing so
 // existing single-reason callers see unchanged text.
-const UNCONFIRMED_REASON_SENTENCE: Record<LSPWorkspaceUnconfirmedReason, string> = {
+const UNCONFIRMED_REASON_SENTENCE: Record<
+	LSPWorkspaceUnconfirmedReason,
+	string
+> = {
 	budget: "check didn't complete within budget",
 	inconclusive:
 		"check was inconclusive (notify-write or diagnostics wait timed out)",
@@ -1159,7 +1169,10 @@ const UNCONFIRMED_REASON_SENTENCE: Record<LSPWorkspaceUnconfirmedReason, string>
 // Short per-reason label used only when MORE than one reason is present, so
 // the note can still say "N timed out, M errored" instead of collapsing to
 // one sentence that can't carry two counts.
-const UNCONFIRMED_REASON_COUNT_LABEL: Record<LSPWorkspaceUnconfirmedReason, string> = {
+const UNCONFIRMED_REASON_COUNT_LABEL: Record<
+	LSPWorkspaceUnconfirmedReason,
+	string
+> = {
 	budget: "timed out",
 	inconclusive: "inconclusive",
 	coverage_gap: "coverage gap",
@@ -1226,7 +1239,9 @@ function formatUnconfirmedReasonClause(
 		return UNCONFIRMED_REASON_SENTENCE[entries[0][0]];
 	}
 	return entries
-		.map(([reason, count]) => `${count} ${UNCONFIRMED_REASON_COUNT_LABEL[reason]}`)
+		.map(
+			([reason, count]) => `${count} ${UNCONFIRMED_REASON_COUNT_LABEL[reason]}`,
+		)
 		.join(", ");
 }
 
@@ -1296,9 +1311,10 @@ function formatLspServerBreakdown(
  * down `formatFullMode`) so it doesn't disturb the existing merge/dedup
  * logic those summaries feed into.
  */
-function tallyLspPrimaryVsAuxiliary(
-	results: WorkspaceLspDiagnosticResult[],
-): { primary: number; auxiliary: number } {
+function tallyLspPrimaryVsAuxiliary(results: WorkspaceLspDiagnosticResult[]): {
+	primary: number;
+	auxiliary: number;
+} {
 	let primary = 0;
 	let auxiliary = 0;
 	for (const result of results) {
@@ -1416,7 +1432,12 @@ async function applyInlineSuppressionsToSummaries(
 			// per-edit dispatch path applies (dispatcher.ts) — mode=full merges in
 			// diagnostics from a fresh LSP sweep/project scan that never went
 			// through that path, so without this a disposed finding reappears here.
-			const kept = applyDispositions(inlineKept, cwd, summary.filePath, content);
+			const kept = applyDispositions(
+				inlineKept,
+				cwd,
+				summary.filePath,
+				content,
+			);
 			// Project rule policy (`.pi-lens.json` `rules.<id>.disable`/`select`).
 			// Applied after inline suppression / disposition so the policy's
 			// output-only filtering affects the same surface the per-edit path
@@ -1429,7 +1450,12 @@ async function applyInlineSuppressionsToSummaries(
 			for (const d of policyKept) {
 				// flagged is weak-anchored (module doc, diagnostic-dispositions.ts) so
 				// the tag survives incidental edits to the flagged line itself.
-				const { weak } = anchorsForDiagnostic(cwd, summary.filePath, d, content);
+				const { weak } = anchorsForDiagnostic(
+					cwd,
+					summary.filePath,
+					d,
+					content,
+				);
 				if (getDisposition(cwd, weak)?.disposition === "flagged") {
 					(d as { flagged?: boolean }).flagged = true;
 				}
@@ -1591,7 +1617,9 @@ async function formatFullMode(
 	);
 	const analyzersPromise = projectRunnersRequested
 		? loadBootstrapClients().then((clients) =>
-				fetchFreshProjectDiagnostics(cacheManager, cwd, clients, signal, { runtime: options.runtime }),
+				fetchFreshProjectDiagnostics(cacheManager, cwd, clients, signal, {
+					runtime: options.runtime,
+				}),
 			)
 		: Promise.resolve<FreshProjectDiagnosticsResult>({
 				diagnostics: [],
@@ -1658,9 +1686,7 @@ async function formatFullMode(
 	// output (#630).
 	const confirmedLspResults = lspResults.filter(
 		(result) =>
-			!result.timedOut &&
-			!result.error &&
-			!mismatchedLspResults.has(result),
+			!result.timedOut && !result.error && !mismatchedLspResults.has(result),
 	);
 	const fullyCoveredLspResults = confirmedLspResults.filter(
 		(result) => (result.unconfirmedServerIds?.length ?? 0) === 0,
@@ -1670,9 +1696,7 @@ async function formatFullMode(
 	);
 	const unconfirmedLspResults = lspResults.filter(
 		(result) =>
-			result.timedOut ||
-			result.error ||
-			mismatchedLspResults.has(result),
+			result.timedOut || result.error || mismatchedLspResults.has(result),
 	);
 	// #571: reconcile this scan's fresh, CONFIRMED per-file results into the
 	// footer cache. A footer write is never allowed to fail the tool call, so
@@ -1795,8 +1819,8 @@ async function formatFullMode(
 	const projectScanObservedAt =
 		parsedProjectScanObservedAt !== undefined &&
 		Number.isFinite(parsedProjectScanObservedAt)
-		? parsedProjectScanObservedAt
-		: undefined;
+			? parsedProjectScanObservedAt
+			: undefined;
 	for (const summary of summaries) {
 		reconcileCorrelatedScanDiagnostics(
 			summary.filePath,
@@ -1966,7 +1990,9 @@ async function formatFullMode(
 		failedAnalyzers.length > 0
 			? `\n\nfailed (ran, but no trustworthy result): ${failedAnalyzers
 					.map(({ id, summary }) => `${id} — ${summary}`)
-					.join(", ")}. These analyzers were not cached and will be retried; absence of their findings is NOT a clean verdict.`
+					.join(
+						", ",
+					)}. These analyzers were not cached and will be retried; absence of their findings is NOT a clean verdict.`
 			: "";
 	// #1617: the #1616 suppressed-bucket rule applied to mode=full — a finding
 	// an agent/user marked false-positive/won't-fix now drops out of
@@ -2033,7 +2059,8 @@ async function formatFullMode(
 	const cheapScanStatusNote = !projectRunnersRequested
 		? `\n\ncheap project scan (tree-sitter/fact-rules/ast-grep): not run this call (${NOT_REQUESTED_REASON}).`
 		: options.refreshRunners === "cached"
-			? cheapScanScannedAtMs !== undefined && Number.isFinite(cheapScanScannedAtMs)
+			? cheapScanScannedAtMs !== undefined &&
+				Number.isFinite(cheapScanScannedAtMs)
 				? `\n\ncheap project scan (tree-sitter/fact-rules/ast-grep): served from cache, ${formatCacheAgeOld(
 						Date.now() - cheapScanScannedAtMs,
 					)} — not re-run this call.`
@@ -2273,7 +2300,11 @@ function formatAllMode(
 	const dispositioned = isFullMode
 		? summaries
 		: summaries.map((s) => {
-				const kept = applyWeakDispositions(s.diagnostics ?? [], cwd, s.filePath);
+				const kept = applyWeakDispositions(
+					s.diagnostics ?? [],
+					cwd,
+					s.filePath,
+				);
 				const policyKept = applyRulePolicy(kept, policyMap);
 				if (
 					policyKept.length === kept.length &&
@@ -2360,9 +2391,7 @@ function formatAllMode(
 		if (!s.hasFinalSnapshot) parts.push(`(pending)`);
 		const staleCount = (s.diagnostics ?? []).filter((d) => d.stale).length;
 		if (staleCount > 0) {
-			parts.push(
-				`${staleCount} stale — re-run to confirm`,
-			);
+			parts.push(`${staleCount} stale — re-run to confirm`);
 		}
 		lines.push(`${rel}  ${parts.join("  ")}`);
 

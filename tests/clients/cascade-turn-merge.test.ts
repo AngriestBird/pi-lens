@@ -213,8 +213,8 @@ describe("cascade turn-end merge", () => {
 			);
 			await turnEnd();
 			const content =
-				consumeTurnEndFindings(cacheManager, env.tmpDir)?.messages[0]?.content ??
-				"";
+				consumeTurnEndFindings(cacheManager, env.tmpDir)?.messages[0]
+					?.content ?? "";
 			expect(content).toContain("consumer.ts");
 			expect(content).toContain("late high-fanout error");
 		} finally {
@@ -241,9 +241,8 @@ describe("cascade turn-end merge", () => {
 			recordOutstandingCascadeTouch,
 			reconcileOutstandingCascadeTouches,
 		} = await import("../../clients/lsp/cascade-tier.js");
-		const { buildResolvedFoundCascadeRun } = await import(
-			"../../clients/cascade-format.js"
-		);
+		const { buildResolvedFoundCascadeRun } =
+			await import("../../clients/cascade-format.js");
 		const { normalizeMapKey } = await import("../../clients/path-utils.js");
 		_resetOutstandingCascadeTouchesForTests();
 		try {
@@ -285,8 +284,8 @@ describe("cascade turn-end merge", () => {
 			);
 			await turnEnd();
 			expect(
-				consumeTurnEndFindings(cacheManager, env.tmpDir)?.messages[0]?.content ??
-					"",
+				consumeTurnEndFindings(cacheManager, env.tmpDir)?.messages[0]
+					?.content ?? "",
 			).not.toContain("neighbor.ts");
 
 			// --- Quiet window after turn 1: the pull result finally lands.
@@ -342,8 +341,8 @@ describe("cascade turn-end merge", () => {
 			);
 			await turnEnd();
 			const content =
-				consumeTurnEndFindings(cacheManager, env.tmpDir)?.messages[0]?.content ??
-				"";
+				consumeTurnEndFindings(cacheManager, env.tmpDir)?.messages[0]
+					?.content ?? "";
 			expect(content).toContain("neighbor.ts");
 			expect(content).toContain("late native TS7 error");
 
@@ -357,8 +356,8 @@ describe("cascade turn-end merge", () => {
 			);
 			await turnEnd();
 			expect(
-				consumeTurnEndFindings(cacheManager, env.tmpDir)?.messages[0]?.content ??
-					"",
+				consumeTurnEndFindings(cacheManager, env.tmpDir)?.messages[0]
+					?.content ?? "",
 			).not.toContain("late native TS7 error");
 		} finally {
 			_resetOutstandingCascadeTouchesForTests();
@@ -452,8 +451,8 @@ describe("cascade turn-end merge", () => {
 			);
 			await turnEnd();
 			expect(
-				consumeTurnEndFindings(cacheManager, env.tmpDir)?.messages[0]?.content ??
-					"",
+				consumeTurnEndFindings(cacheManager, env.tmpDir)?.messages[0]
+					?.content ?? "",
 			).not.toContain("neighbor.ts");
 
 			runtime.appendCascadeRun({
@@ -469,8 +468,8 @@ describe("cascade turn-end merge", () => {
 			runtime.beginTurn();
 			await turnEnd();
 			const turn2Content =
-				consumeTurnEndFindings(cacheManager, env.tmpDir)?.messages[0]?.content ??
-				"";
+				consumeTurnEndFindings(cacheManager, env.tmpDir)?.messages[0]
+					?.content ?? "";
 
 			// --- Turn 3 (edit): if turn 2 already delivered it, turn 3 must NOT
 			// see it again (exactly-once). If turn 2 did not deliver it, turn 3
@@ -485,8 +484,8 @@ describe("cascade turn-end merge", () => {
 			);
 			await turnEnd();
 			const turn3Content =
-				consumeTurnEndFindings(cacheManager, env.tmpDir)?.messages[0]?.content ??
-				"";
+				consumeTurnEndFindings(cacheManager, env.tmpDir)?.messages[0]
+					?.content ?? "";
 
 			const deliveredOnce =
 				(turn2Content.includes("late carried error") ? 1 : 0) +
@@ -550,8 +549,8 @@ describe("cascade turn-end merge", () => {
 			} as any);
 
 			const content =
-				consumeTurnEndFindings(cacheManager, env.tmpDir)?.messages[0]?.content ??
-				"";
+				consumeTurnEndFindings(cacheManager, env.tmpDir)?.messages[0]
+					?.content ?? "";
 			expect(content).toContain("unrelated-write-survives");
 		} finally {
 			env.cleanup();
@@ -608,8 +607,8 @@ describe("cascade turn-end merge", () => {
 			} as any);
 
 			const content =
-				consumeTurnEndFindings(cacheManager, env.tmpDir)?.messages[0]?.content ??
-				"";
+				consumeTurnEndFindings(cacheManager, env.tmpDir)?.messages[0]
+					?.content ?? "";
 			expect(content).not.toContain("superseded-by-own-write");
 			expect(logCascadeMock).toHaveBeenCalledWith(
 				expect.objectContaining({
@@ -1069,8 +1068,8 @@ describe("cascade turn-end merge", () => {
 			// The record fired means the section reached blockerParts — confirm
 			// the text was actually queued, the precondition the record proves.
 			const content =
-				consumeTurnEndFindings(cacheManager, env.tmpDir)?.messages[0]?.content ??
-				"";
+				consumeTurnEndFindings(cacheManager, env.tmpDir)?.messages[0]
+					?.content ?? "";
 			expect(content).toContain("injected error");
 
 			expect(logCascadeMock).toHaveBeenCalledWith(

@@ -31,7 +31,10 @@ vi.mock("../../clients/latency-logger.js", async (importOriginal) => {
 import { CacheManager } from "../../clients/cache-manager.js";
 import { _resetSharedLineCountCacheForTests } from "../../clients/diagnostic-line-freshness.js";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
-import { cancelLSPIdleReset, handleTurnEnd } from "../../clients/runtime-turn.js";
+import {
+	cancelLSPIdleReset,
+	handleTurnEnd,
+} from "../../clients/runtime-turn.js";
 import { setupTestEnvironment } from "./test-utils.js";
 
 const EMPTY_KNIP_RESULT = {
@@ -295,9 +298,8 @@ describe("turn-end past-EOF gate for inline blockers (#1641)", () => {
 			expect(before.stale).toBe(true);
 			expect(before.staleReason).toBe("dependency-drift");
 
-			const { sweepInlineBlockerPastEof } = await import(
-				"../../clients/blocker-past-eof.js"
-			);
+			const { sweepInlineBlockerPastEof } =
+				await import("../../clients/blocker-past-eof.js");
 			const counts = sweepInlineBlockerPastEof(runtime, env.tmpDir);
 			expect(counts.checked).toBe(0);
 

@@ -43,14 +43,14 @@ describe("LSPService race hardening", () => {
 		const initialize = suspendAt(createLSPClient, async () => client);
 
 		const spawn = vi.fn(async () => ({
-				process: {
-					process: { killed: false },
-					stdin: {} as any,
-					stdout: {} as any,
-					stderr: {} as any,
-					pid: 123,
-				},
-			}));
+			process: {
+				process: { killed: false },
+				stdin: {} as any,
+				stdout: {} as any,
+				stderr: {} as any,
+				pid: 123,
+			},
+		}));
 
 		getServersForFileWithConfig.mockReturnValue([
 			{
@@ -80,14 +80,14 @@ describe("LSPService race hardening", () => {
 		const { LSPService } = await import("../../../clients/lsp/index.js");
 		const service = new LSPService();
 		const spawn = vi.fn(async () => ({
-				process: {
-					process: { killed: false },
-					stdin: {} as any,
-					stdout: {} as any,
-					stderr: {} as any,
-					pid: 321,
-				},
-			}));
+			process: {
+				process: { killed: false },
+				stdin: {} as any,
+				stdout: {} as any,
+				stderr: {} as any,
+				pid: 321,
+			},
+		}));
 		const client = {
 			isAlive: () => true,
 			shutdown: vi.fn(async () => {}),
@@ -220,9 +220,8 @@ describe("LSPService race hardening", () => {
 
 	it("skips a doomed touch wait when spawn history identifies the in-flight server as slow", async () => {
 		vi.useFakeTimers();
-		const { recordSuccessfulLspSpawn } = await import(
-			"../../../clients/lsp/spawn-history.js"
-		);
+		const { recordSuccessfulLspSpawn } =
+			await import("../../../clients/lsp/spawn-history.js");
 		recordSuccessfulLspSpawn("marksman", 6_000);
 		const { LSPService } = await import("../../../clients/lsp/index.js");
 		const service = new LSPService();
@@ -286,9 +285,8 @@ describe("LSPService race hardening", () => {
 
 	it("returns a client when acquisition completes just before the known-slow shortcut", async () => {
 		vi.useFakeTimers();
-		const { recordSuccessfulLspSpawn } = await import(
-			"../../../clients/lsp/spawn-history.js"
-		);
+		const { recordSuccessfulLspSpawn } =
+			await import("../../../clients/lsp/spawn-history.js");
 		recordSuccessfulLspSpawn("marksman", 1_501);
 		const { LSPService } = await import("../../../clients/lsp/index.js");
 		const service = new LSPService();
@@ -321,13 +319,13 @@ describe("LSPService race hardening", () => {
 						internal.state.clients.set("marksman:C:/repo", client),
 					);
 					return {
-					process: {
-						process: { killed: false },
-						stdin: {} as any,
-						stdout: {} as any,
-						stderr: {} as any,
-						pid: 1887,
-					},
+						process: {
+							process: { killed: false },
+							stdin: {} as any,
+							stdout: {} as any,
+							stderr: {} as any,
+							pid: 1887,
+						},
 					};
 				}),
 			},
@@ -357,58 +355,63 @@ describe("LSPService race hardening", () => {
 	it.each([
 		[800, false],
 		[1_501, true],
-	])("applies the strict known-slow margin at %ims", async (history, skipped) => {
-		vi.useFakeTimers();
-		const { recordSuccessfulLspSpawn, _clearSuccessfulLspSpawnHistoryForTests } =
-			await import("../../../clients/lsp/spawn-history.js");
-		_clearSuccessfulLspSpawnHistoryForTests();
-		recordSuccessfulLspSpawn("marksman", history);
-		const { LSPService } = await import("../../../clients/lsp/index.js");
-		const service = new LSPService();
-		const initialize = suspendAt(createLSPClient, async () => ({
-			isAlive: () => true,
-			shutdown: async () => {},
-		}));
-		getServersForFileWithConfig.mockReturnValue([
-			{
-				id: "marksman",
-				name: "Marksman",
-				extensions: [".md"],
-				root: async () => "C:/repo",
-				spawn: vi.fn(async () => ({
-					process: {
-						process: { killed: false },
-						stdin: {} as any,
-						stdout: {} as any,
-						stderr: {} as any,
-						pid: 1888,
-					},
-				})),
-			},
-		]);
-		const touch = service.touchFile("C:/repo/README.md", "# boundary\n", {
-			diagnostics: "none",
-			clientScope: "primary",
-			maxClientWaitMs: 750,
-			source: "tool_call:read",
-		});
-		await initialize.admitted;
-		if (skipped) {
-			await expect(touch).resolves.toBeUndefined();
-		} else {
-			let settled = false;
-			touch.then(() => {
-				settled = true;
+	])(
+		"applies the strict known-slow margin at %ims",
+		async (history, skipped) => {
+			vi.useFakeTimers();
+			const {
+				recordSuccessfulLspSpawn,
+				_clearSuccessfulLspSpawnHistoryForTests,
+			} = await import("../../../clients/lsp/spawn-history.js");
+			_clearSuccessfulLspSpawnHistoryForTests();
+			recordSuccessfulLspSpawn("marksman", history);
+			const { LSPService } = await import("../../../clients/lsp/index.js");
+			const service = new LSPService();
+			const initialize = suspendAt(createLSPClient, async () => ({
+				isAlive: () => true,
+				shutdown: async () => {},
+			}));
+			getServersForFileWithConfig.mockReturnValue([
+				{
+					id: "marksman",
+					name: "Marksman",
+					extensions: [".md"],
+					root: async () => "C:/repo",
+					spawn: vi.fn(async () => ({
+						process: {
+							process: { killed: false },
+							stdin: {} as any,
+							stdout: {} as any,
+							stderr: {} as any,
+							pid: 1888,
+						},
+					})),
+				},
+			]);
+			const touch = service.touchFile("C:/repo/README.md", "# boundary\n", {
+				diagnostics: "none",
+				clientScope: "primary",
+				maxClientWaitMs: 750,
+				source: "tool_call:read",
 			});
-			await vi.advanceTimersByTimeAsync(749);
-			expect(settled).toBe(false);
-			await vi.advanceTimersByTimeAsync(1);
-			await expect(touch).resolves.toBeUndefined();
-		}
-		initialize.release();
-		await initialize.completed;
-		initialize.restore();
-	});
+			await initialize.admitted;
+			if (skipped) {
+				await expect(touch).resolves.toBeUndefined();
+			} else {
+				let settled = false;
+				touch.then(() => {
+					settled = true;
+				});
+				await vi.advanceTimersByTimeAsync(749);
+				expect(settled).toBe(false);
+				await vi.advanceTimersByTimeAsync(1);
+				await expect(touch).resolves.toBeUndefined();
+			}
+			initialize.release();
+			await initialize.completed;
+			initialize.restore();
+		},
+	);
 
 	it("keeps the bounded touch wait when the in-flight server has no spawn history", async () => {
 		vi.useFakeTimers();
@@ -702,7 +705,8 @@ describe("LSPService race hardening", () => {
 			expect(createLSPClient).not.toHaveBeenCalled();
 		} finally {
 			now.mockRestore();
-			if (savedDisable === undefined) delete process.env.PI_LENS_DISABLE_LSP_INSTALL;
+			if (savedDisable === undefined)
+				delete process.env.PI_LENS_DISABLE_LSP_INSTALL;
 			else process.env.PI_LENS_DISABLE_LSP_INSTALL = savedDisable;
 		}
 	}, 15000);

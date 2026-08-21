@@ -34,6 +34,8 @@ describe("docs/features.md counts match the registries", () => {
 	});
 
 	it("quotes the real formatter count", () => {
-		expect(claimedCount(/\*\*(\d+) formatters\*\*/)).toBe(ALL_FORMATTERS.length);
+		expect(claimedCount(/\*\*(\d+) formatters\*\*/)).toBe(
+			ALL_FORMATTERS.length,
+		);
 	});
 });

@@ -17,7 +17,10 @@ import type { FormatService } from "./format-service.js";
 import { logLatency } from "./latency-logger.js";
 import { isPathIgnoredByProject } from "./file-utils.js";
 import { admitBounded, emitBounded } from "./bounded-telemetry.js";
-import { newLspMutationCorrelationId, type LspMutationContext } from "./lsp-mutation.js";
+import {
+	newLspMutationCorrelationId,
+	type LspMutationContext,
+} from "./lsp-mutation.js";
 import {
 	getGlobalActionableWarningMaxFixes,
 	type PiLensFlagSource,
@@ -66,7 +69,10 @@ interface AgentEndDeps {
 	getFormatService: () => FormatService;
 	biomeClient?: BiomeClient;
 	ruffClient?: RuffClient;
-	getAutofixClients?: () => Promise<{ biomeClient: BiomeClient; ruffClient: RuffClient }>;
+	getAutofixClients?: () => Promise<{
+		biomeClient: BiomeClient;
+		ruffClient: RuffClient;
+	}>;
 	/**
 	 * The STABLE pi session id for the ctx this `agent_end` fired on. Used to
 	 * scope the deferred-format drain to records this session actually
@@ -148,7 +154,11 @@ export async function handleAgentEnd({
 	// from "M files failed to format".
 	const requeue = (
 		pending: Parameters<RuntimeCoordinator["requeueDeferredMutations"]>[0],
-		reason: "abort" | "autofix-failed" | "format-failed" | "clients-unavailable",
+		reason:
+			| "abort"
+			| "autofix-failed"
+			| "format-failed"
+			| "clients-unavailable",
 	): void => {
 		if (pending.length === 0) return;
 		const kinds = new Set<"autofix" | "format">();
@@ -251,15 +261,15 @@ export async function handleAgentEnd({
 					toolName: "agent_end",
 					durationMs: 0,
 					metadata: {
-					fileCount: firstSeenOrphans.length,
-					staleAfterMs,
-					currentOriginCwd: ctxCwd ?? runtime.projectRoot,
-					files: firstSeenOrphans.map((r) => ({
-						filePath: r.filePath,
-						originCwd: r.originCwd,
-						ownerSessionId: r.ownerSessionId,
-						queuedTurnIndex: r.queuedTurnIndex,
-						ageMs: Date.now() - r.lastTouchedAt,
+						fileCount: firstSeenOrphans.length,
+						staleAfterMs,
+						currentOriginCwd: ctxCwd ?? runtime.projectRoot,
+						files: firstSeenOrphans.map((r) => ({
+							filePath: r.filePath,
+							originCwd: r.originCwd,
+							ownerSessionId: r.ownerSessionId,
+							queuedTurnIndex: r.queuedTurnIndex,
+							ageMs: Date.now() - r.lastTouchedAt,
 						})),
 					},
 				},
@@ -326,11 +336,21 @@ export async function handleAgentEnd({
 	// autofix reaches the final edited state first and formatting stabilizes it.
 	const ambientSignal = getAmbientAbortSignal();
 	const executedAutofixScopes = new Set<string>();
-	const autofixRecords = records.filter((candidate) => candidate.kinds.has("autofix"));
-	if (autofixRecords.length > 0 && (!biomeClient || !ruffClient) && getAutofixClients) {
+	const autofixRecords = records.filter((candidate) =>
+		candidate.kinds.has("autofix"),
+	);
+	if (
+		autofixRecords.length > 0 &&
+		(!biomeClient || !ruffClient) &&
+		getAutofixClients
+	) {
 		({ biomeClient, ruffClient } = await getAutofixClients());
 	}
-	for (let autofixIndex = 0; autofixIndex < autofixRecords.length; autofixIndex++) {
+	for (
+		let autofixIndex = 0;
+		autofixIndex < autofixRecords.length;
+		autofixIndex++
+	) {
 		const record = autofixRecords[autofixIndex];
 		if (ambientSignal?.aborted) {
 			requeue(
@@ -350,7 +370,16 @@ export async function handleAgentEnd({
 		}
 		if (!biomeClient || !ruffClient) {
 			dbg(`agent_end deferred_autofix: clients unavailable for ${filePath}`);
-			requeue([{ ...record, kinds: new Set(["autofix"]), toolNames: new Set(record.toolNames) }], "clients-unavailable");
+			requeue(
+				[
+					{
+						...record,
+						kinds: new Set(["autofix"]),
+						toolNames: new Set(record.toolNames),
+					},
+				],
+				"clients-unavailable",
+			);
 			continue;
 		}
 		const policy = getAutofixPolicyForFile(filePath, {
@@ -365,9 +394,10 @@ export async function handleAgentEnd({
 			hasKtfmtConfig: hasKtfmtConfig(record.cwd),
 			hasKtlintConfig: hasKtlintConfig(record.cwd),
 		});
-		const scopeKey = policy?.scope && policy.scope !== "file"
-			? `${policy.defaultTool ?? "unknown"}:${path.resolve(record.cwd)}`
-			: `${policy?.defaultTool ?? "unknown"}:${filePath}`;
+		const scopeKey =
+			policy?.scope && policy.scope !== "file"
+				? `${policy.defaultTool ?? "unknown"}:${path.resolve(record.cwd)}`
+				: `${policy?.defaultTool ?? "unknown"}:${filePath}`;
 		if (executedAutofixScopes.has(scopeKey)) continue;
 		executedAutofixScopes.add(scopeKey);
 		try {
@@ -383,10 +413,22 @@ export async function handleAgentEnd({
 			for (const changed of result.changedFiles) {
 				const changedPath = path.resolve(changed);
 				deferredAutofixChanged.add(changedPath);
-				for (const tool of tools) deferredAutofixFixes.push({ path: changedPath, tool, kind: "autofix" });
+				for (const tool of tools)
+					deferredAutofixFixes.push({
+						path: changedPath,
+						tool,
+						kind: "autofix",
+					});
 				if (!nodeFs.existsSync(changedPath)) continue;
-				recordProjectChange({ runtime, cwd: record.turnStateCwd, filePath: changedPath, source: "autofix", dbg });
-				if (!getFlag("no-read-guard")) runtime.readGuard.recordWritten(changedPath);
+				recordProjectChange({
+					runtime,
+					cwd: record.turnStateCwd,
+					filePath: changedPath,
+					source: "autofix",
+					dbg,
+				});
+				if (!getFlag("no-read-guard"))
+					runtime.readGuard.recordWritten(changedPath);
 				const content = nodeFs.readFileSync(changedPath, "utf-8");
 				cacheManager.addModifiedRange(
 					changedPath,
@@ -400,7 +442,16 @@ export async function handleAgentEnd({
 		} catch (err) {
 			const message = err instanceof Error ? err.message : String(err);
 			summary.failed.push({ filePath, errors: [message] });
-			requeue([{ ...record, kinds: new Set(["autofix"]), toolNames: new Set(record.toolNames) }], "autofix-failed");
+			requeue(
+				[
+					{
+						...record,
+						kinds: new Set(["autofix"]),
+						toolNames: new Set(record.toolNames),
+					},
+				],
+				"autofix-failed",
+			);
 		}
 	}
 	if (deferredAutofixFixes.length > 0) {
@@ -447,20 +498,22 @@ export async function handleAgentEnd({
 		});
 	}
 
-	const formatRecords = records.filter((record) => record.kinds.has("format")).filter((record) => {
-		const disabled = !!getFlag("no-autoformat", record.filePath);
-		if (disabled) {
-			const source = getFlagSource?.("no-autoformat", record.filePath);
-			dbg(
-				`agent_end deferred_format: skipping ${record.filePath} (--no-autoformat${source ? `, source=${source}` : ""})`,
-			);
-			summary.skipped.push({
-				filePath: record.filePath,
-				reason: "no-autoformat",
-			});
-		}
-		return !disabled;
-	});
+	const formatRecords = records
+		.filter((record) => record.kinds.has("format"))
+		.filter((record) => {
+			const disabled = !!getFlag("no-autoformat", record.filePath);
+			if (disabled) {
+				const source = getFlagSource?.("no-autoformat", record.filePath);
+				dbg(
+					`agent_end deferred_format: skipping ${record.filePath} (--no-autoformat${source ? `, source=${source}` : ""})`,
+				);
+				summary.skipped.push({
+					filePath: record.filePath,
+					reason: "no-autoformat",
+				});
+			}
+			return !disabled;
+		});
 
 	if (formatRecords.length > 0) {
 		// Formatter subprocesses are independent across files, so retain bounded
@@ -514,11 +567,13 @@ export async function handleAgentEnd({
 		);
 		if (ambientSignal?.aborted) {
 			requeue(
-				formatRecords.filter((_, index) => !started.has(index)).map((record) => ({
-					...record,
-					kinds: new Set(["format" as const]),
-					toolNames: new Set(record.toolNames),
-				})),
+				formatRecords
+					.filter((_, index) => !started.has(index))
+					.map((record) => ({
+						...record,
+						kinds: new Set(["format" as const]),
+						toolNames: new Set(record.toolNames),
+					})),
 				"abort",
 			);
 		}
@@ -529,7 +584,11 @@ export async function handleAgentEnd({
 			const { record, filePath, fileStart } = entry;
 			if (entry.missing) {
 				dbg(`agent_end deferred_format skipped missing file: ${filePath}`);
-				if (!summary.skipped.some((item) => item.filePath === filePath && item.reason === "missing")) {
+				if (
+					!summary.skipped.some(
+						(item) => item.filePath === filePath && item.reason === "missing",
+					)
+				) {
 					summary.skipped.push({ filePath, reason: "missing" });
 				}
 				continue;
@@ -537,7 +596,16 @@ export async function handleAgentEnd({
 			if (entry.error) {
 				dbg(`agent_end deferred_format failed for ${filePath}: ${entry.error}`);
 				summary.failed.push({ filePath, errors: [entry.error] });
-				requeue([{ ...record, kinds: new Set(["format"]), toolNames: new Set(record.toolNames) }], "format-failed");
+				requeue(
+					[
+						{
+							...record,
+							kinds: new Set(["format"]),
+							toolNames: new Set(record.toolNames),
+						},
+					],
+					"format-failed",
+				);
 				continue;
 			}
 			const result = entry.result;
@@ -547,7 +615,16 @@ export async function handleAgentEnd({
 
 			if (result.formatFailures.length > 0) {
 				summary.failed.push({ filePath, errors: result.formatFailures });
-				requeue([{ ...record, kinds: new Set(["format"]), toolNames: new Set(record.toolNames) }], "format-failed");
+				requeue(
+					[
+						{
+							...record,
+							kinds: new Set(["format"]),
+							toolNames: new Set(record.toolNames),
+						},
+					],
+					"format-failed",
+				);
 			}
 
 			if (result.formatChanged) {
@@ -686,10 +763,7 @@ export async function handleAgentEnd({
 				// `.pi-lens.json` `ignore` entry cannot protect a prose file
 				// (CHANGELOG.md / AGENTS.md) from being rewritten here.
 				if (
-					isPathIgnoredByProject(
-						file.filePath,
-						ctxCwd ?? runtime.projectRoot,
-					)
+					isPathIgnoredByProject(file.filePath, ctxCwd ?? runtime.projectRoot)
 				) {
 					dbg(
 						`agent_end actionable_warnings_autofix: skipped ${file.filePath} (ignored by project)`,
@@ -773,7 +847,10 @@ export async function handleAgentEnd({
 					cacheManager,
 					readGuard: getFlag("no-read-guard") ? undefined : runtime.readGuard,
 					recordAutofix: getFlag("lens-turn-summary")
-						? (filePath) => runtime.turnSummary.recordAutofix(filePath, { tool: "lsp-quickfix" })
+						? (filePath) =>
+								runtime.turnSummary.recordAutofix(filePath, {
+									tool: "lsp-quickfix",
+								})
 						: undefined,
 					dbg,
 				};
@@ -817,7 +894,9 @@ export async function handleAgentEnd({
 					);
 				}
 			} else {
-				dbg("agent_end actionable_warnings_autofix: fresh report, 0 autofix-eligible warnings, skipping")
+				dbg(
+					"agent_end actionable_warnings_autofix: fresh report, 0 autofix-eligible warnings, skipping",
+				);
 			}
 		}
 	}
@@ -832,7 +911,9 @@ export async function handleAgentEnd({
 			autofixRecords: autofixRecords.length,
 			formatRecords: formatRecords.length,
 			coalescedPaths: records.length,
-			requeuedKinds: [...requeuedKinds].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)),
+			requeuedKinds: [...requeuedKinds].sort((a, b) =>
+				a < b ? -1 : a > b ? 1 : 0,
+			),
 		},
 	});
 	logLatency({

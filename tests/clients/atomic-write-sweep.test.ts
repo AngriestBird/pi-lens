@@ -35,9 +35,10 @@ describe("atomic-write sweep (#1609 layer a)", () => {
 		const violations = scans
 			.map((scan) => ({
 				file: scan.file,
-				sites: scan.file in EXEMPT_RAW_WRITE_FILES
-					? []
-					: scan.sites.filter((s) => !s.transientTarget),
+				sites:
+					scan.file in EXEMPT_RAW_WRITE_FILES
+						? []
+						: scan.sites.filter((s) => !s.transientTarget),
 			}))
 			.filter((v) => v.sites.length > 0);
 
@@ -82,8 +83,7 @@ describe("atomic-write sweep (#1609 layer a)", () => {
 			// registryPath() is the real target; tmpData only LOOKS temp-shaped
 			// because it shares the line — judging the whole line (the pre-fix
 			// behavior) would wrongly clear this as scratch.
-			const source =
-				'fs.writeFileSync(registryPath(), tmpData);\n';
+			const source = "fs.writeFileSync(registryPath(), tmpData);\n";
 			const sites = findRawWriteSites("smuggle-f2.ts", source);
 			expect(sites).toHaveLength(1);
 			expect(sites[0].transientTarget).toBe(false);
@@ -113,7 +113,7 @@ describe("atomic-write sweep (#1609 layer a)", () => {
 		});
 
 		it("F3: the fs/fsp fallback still matches when a file imports neither name", () => {
-			const source = 'fsp.writeFile(destPath, buf);\n';
+			const source = "fsp.writeFile(destPath, buf);\n";
 			const sites = findRawWriteSites("smuggle-f3-fallback.ts", source);
 			expect(sites).toHaveLength(1);
 		});

@@ -43,39 +43,45 @@ function runPs(): Promise<{ stdout: string; code: number | null }> {
 	});
 }
 
-describe.skipIf(!hasPs)("#1857: the real ps accepts the etime column vector", () => {
-	it("exits zero and returns rows whose third column parses as an age", async () => {
-		const { stdout, code } = await runPs();
+describe.skipIf(!hasPs)(
+	"#1857: the real ps accepts the etime column vector",
+	() => {
+		it("exits zero and returns rows whose third column parses as an age", async () => {
+			const { stdout, code } = await runPs();
 
-		expect(code).toBe(0);
-		const rows = stdout.split("\n").filter((line) => line.trim().length > 0);
-		expect(rows.length).toBeGreaterThan(0);
+			expect(code).toBe(0);
+			const rows = stdout.split("\n").filter((line) => line.trim().length > 0);
+			expect(rows.length).toBeGreaterThan(0);
 
-		// Every row must yield a usable age. A `ps` that silently dropped the
-		// column would put the command line in the third token, which
-		// `ageMsFromPosixEtime` rejects — and a rejected age means the grace
-		// guard spares everything, i.e. a dead backstop.
-		const ages = rows.map((row) => {
-			const tokens = row.trim().split(/\s+/);
-			return ageMsFromPosixEtime(tokens[2] ?? "");
+			// Every row must yield a usable age. A `ps` that silently dropped the
+			// column would put the command line in the third token, which
+			// `ageMsFromPosixEtime` rejects — and a rejected age means the grace
+			// guard spares everything, i.e. a dead backstop.
+			const ages = rows.map((row) => {
+				const tokens = row.trim().split(/\s+/);
+				return ageMsFromPosixEtime(tokens[2] ?? "");
+			});
+			const usable = ages.filter((age) => typeof age === "number");
+			expect(usable.length).toBe(rows.length);
 		});
-		const usable = ages.filter((age) => typeof age === "number");
-		expect(usable.length).toBe(rows.length);
-	});
 
-	it("reports this test process as younger than a day", async () => {
-		const { stdout } = await runPs();
-		const mine = stdout
-			.split("\n")
-			.map((row) => row.trim().split(/\s+/))
-			.find((tokens) => Number(tokens[0]) === process.pid);
+		it("reports this test process as younger than a day", async () => {
+			const { stdout } = await runPs();
+			const mine = stdout
+				.split("\n")
+				.map((row) => row.trim().split(/\s+/))
+				.find((tokens) => Number(tokens[0]) === process.pid);
 
-		expect(mine, "the test process must appear in ps -e output").toBeDefined();
-		const ageMs = ageMsFromPosixEtime(mine?.[2] ?? "");
-		expect(typeof ageMs).toBe("number");
-		expect(ageMs).toBeLessThan(24 * 60 * 60 * 1000);
-	});
-});
+			expect(
+				mine,
+				"the test process must appear in ps -e output",
+			).toBeDefined();
+			const ageMs = ageMsFromPosixEtime(mine?.[2] ?? "");
+			expect(typeof ageMs).toBe("number");
+			expect(ageMs).toBeLessThan(24 * 60 * 60 * 1000);
+		});
+	},
+);
 
 describe("ageMsFromPosixEtime", () => {
 	it("parses every etime shape ps emits", () => {

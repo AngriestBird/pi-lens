@@ -101,7 +101,8 @@ const HAND_ROLLED_GENERATION_GUARDS: Readonly<Record<string, string>> = {
 // on through `?.`/`.` accessors made `beforeFirstSequence?.truncated ===` look
 // like a generation compare — noise that would have made this list unusable.
 // A generation-named identifier on the LEFT of the comparison.
-const GENERATION_LHS = /[\w$]*(?:generation|epoch|sequence)[\w$]*\s*(?:===|!==)/i;
+const GENERATION_LHS =
+	/[\w$]*(?:generation|epoch|sequence)[\w$]*\s*(?:===|!==)/i;
 // ...or on the RIGHT, where the left side is often a `map.get(key) ?? 0`.
 const GENERATION_RHS =
 	/(?:===|!==)\s*(?:[\w$]+[?.]+)*[\w$]*(?:generation|epoch|sequence)[\w$]*\s*(?:[;)&|,]|$)/im;
@@ -168,7 +169,11 @@ describe("generation-guard ratchet (#1754)", () => {
 		// because "walked 0 files" and "walked 400 and matched 0" are different
 		// bugs with different fixes.
 		assertNonEmptyScan("generation-guard sweep: files walked", scanned, 200);
-		assertNonEmptyScan("generation-guard sweep: files flagged", flagged.length, 8);
+		assertNonEmptyScan(
+			"generation-guard sweep: files flagged",
+			flagged.length,
+			8,
+		);
 	});
 
 	it("every hand-rolled generation guard is accounted for", () => {

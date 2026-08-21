@@ -67,7 +67,9 @@ function awaitChildClose(child: {
 describe("LSP client — unexpected close records its cause (#1969)", () => {
 	let client:
 		| Awaited<
-				ReturnType<typeof import("../../../clients/lsp/client.js").createLSPClient>
+				ReturnType<
+					typeof import("../../../clients/lsp/client.js").createLSPClient
+				>
 		  >
 		| undefined;
 

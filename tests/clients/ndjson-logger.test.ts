@@ -15,7 +15,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // consumed them (e.g. after the retry-removal mutation probe) to leak into
 // whichever test runs next.
 const fsMockState = vi.hoisted(() => ({
-	realAppendFileSync: undefined as unknown as typeof import("node:fs").appendFileSync,
+	realAppendFileSync:
+		undefined as unknown as typeof import("node:fs").appendFileSync,
 }));
 vi.mock("node:fs", async (importOriginal) => {
 	const actual = await importOriginal<typeof import("node:fs")>();
@@ -47,7 +48,9 @@ afterEach(() => {
 	// `mockImplementationOnce` entries a test left unconsumed, then the real
 	// implementation is restored as the default so every other test's writes
 	// still land on disk.
-	const appendFileSync = fs.appendFileSync as unknown as ReturnType<typeof vi.fn>;
+	const appendFileSync = fs.appendFileSync as unknown as ReturnType<
+		typeof vi.fn
+	>;
 	appendFileSync.mockReset();
 	if (fsMockState.realAppendFileSync) {
 		appendFileSync.mockImplementation(fsMockState.realAppendFileSync);
@@ -488,9 +491,9 @@ describe("createNdjsonLogger", () => {
 			vi.resetModules();
 			const freshModule = await import("../../clients/ndjson-logger.js");
 			expect(freshModule._exitFlushersForTest()).toContain(legacyFlusher);
-			expect(() => freshModule.createNdjsonLogger({ filePath: logFile })).toThrow(
-				/pre-7e4b9120.*private queues/,
-			);
+			expect(() =>
+				freshModule.createNdjsonLogger({ filePath: logFile }),
+			).toThrow(/pre-7e4b9120.*private queues/);
 		} finally {
 			globalHost[key] = previous;
 			vi.resetModules();
@@ -645,9 +648,8 @@ describe("createNdjsonLogger", () => {
 		});
 
 		it("a lost write's loss is observable through the degradation ledger (pilens_health)", async () => {
-			const { getDegradationSummary, resetDegradationLedger } = await import(
-				"../../clients/degradation-ledger.js"
-			);
+			const { getDegradationSummary, resetDegradationLedger } =
+				await import("../../clients/degradation-ledger.js");
 			resetDegradationLedger();
 			const err = new Error(
 				"Cannot call write after a stream was destroyed",
@@ -664,7 +666,9 @@ describe("createNdjsonLogger", () => {
 			expect(group).toBeDefined();
 			expect(group?.count).toBeGreaterThanOrEqual(1);
 			expect(
-				group?.latestReasons.some((entry) => entry.subject.includes("test.log")),
+				group?.latestReasons.some((entry) =>
+					entry.subject.includes("test.log"),
+				),
 			).toBe(true);
 
 			resetDegradationLedger();

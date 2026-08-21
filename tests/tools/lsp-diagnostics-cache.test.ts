@@ -30,10 +30,9 @@ vi.mock("../../clients/lsp/config.js", () => ({
 }));
 
 vi.mock("../../clients/lsp/index.js", async () => {
-	const actual =
-		await vi.importActual<typeof import("../../clients/lsp/index.js")>(
-			"../../clients/lsp/index.js",
-		);
+	const actual = await vi.importActual<
+		typeof import("../../clients/lsp/index.js")
+	>("../../clients/lsp/index.js");
 	return {
 		...actual,
 		getLSPService: () => mocked.service,
@@ -100,10 +99,12 @@ describe("lsp_diagnostics batch — workspace-diagnostics cache (#671)", () => {
 		);
 		if (!fs.existsSync(cacheFile)) return {};
 		return (
-			JSON.parse(fs.readFileSync(cacheFile, "utf8")) as {
-				entries?: Record<string, { mtimeMs: number }>;
-			}
-		).entries ?? {};
+			(
+				JSON.parse(fs.readFileSync(cacheFile, "utf8")) as {
+					entries?: Record<string, { mtimeMs: number }>;
+				}
+			).entries ?? {}
+		);
 	}
 
 	async function runBatch(paths: string[]) {
@@ -186,7 +187,10 @@ describe("lsp_diagnostics batch — workspace-diagnostics cache (#671)", () => {
 		const diag = {
 			severity: 1,
 			message: "boom",
-			range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } },
+			range: {
+				start: { line: 0, character: 0 },
+				end: { line: 0, character: 1 },
+			},
 			source: "typescript",
 		};
 		touchFile.mockResolvedValueOnce({ diags: [diag] });
@@ -215,7 +219,10 @@ describe("lsp_diagnostics batch — workspace-diagnostics cache (#671)", () => {
 		const diag = {
 			severity: 1,
 			message: "boom",
-			range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } },
+			range: {
+				start: { line: 0, character: 0 },
+				end: { line: 0, character: 1 },
+			},
 			source: "typescript",
 		};
 		touchFile.mockResolvedValueOnce({
@@ -329,7 +336,10 @@ describe("lsp_diagnostics batch — workspace-diagnostics cache (#671)", () => {
 		const diag = {
 			severity: 1,
 			message: "boom",
-			range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } },
+			range: {
+				start: { line: 0, character: 0 },
+				end: { line: 0, character: 1 },
+			},
 			source: "typescript",
 		};
 		touchFile.mockResolvedValueOnce({ diags: [diag] });

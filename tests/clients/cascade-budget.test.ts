@@ -144,9 +144,8 @@ describe("deriveCascadeNeighbourBudget", () => {
 		// rescue band; they asked for a bigger cap, and it disarmed silently.
 		process.env.PI_LENS_CASCADE_NEIGHBOUR_BUDGET = "60";
 		try {
-			const { resetDegradationLedger, getDegradationSummary } = await import(
-				"../../clients/degradation-ledger.js"
-			);
+			const { resetDegradationLedger, getDegradationSummary } =
+				await import("../../clients/degradation-ledger.js");
 			resetDegradationLedger();
 			const freshBudget = await import("../../clients/cascade-budget.js");
 			expect(freshBudget.CASCADE_NEIGHBOUR_BUDGET).toBe(60);
@@ -185,13 +184,13 @@ describe("deriveCascadeNeighbourBudget", () => {
 		// gives a still-pending compute another 15 s at agent_settled. That is
 		// why the past-rescue zone can afford to stay wide, so it belongs on the
 		// record rather than being invisible.
-		expect(deriveCascadeNeighbourBudget({ elapsedMs: 0 }).deliveryWindowMs).toBe(
-			20_000,
-		);
+		expect(
+			deriveCascadeNeighbourBudget({ elapsedMs: 0 }).deliveryWindowMs,
+		).toBe(20_000);
 		setEnv("PI_LENS_QUIET_WINDOW_WAIT_MS", "3000");
-		expect(deriveCascadeNeighbourBudget({ elapsedMs: 0 }).deliveryWindowMs).toBe(
-			8000,
-		);
+		expect(
+			deriveCascadeNeighbourBudget({ elapsedMs: 0 }).deliveryWindowMs,
+		).toBe(8000);
 	});
 
 	it("does not count a drain that PI_LENS_QUIET_WINDOW=0 has switched off", () => {
@@ -202,9 +201,9 @@ describe("deriveCascadeNeighbourBudget", () => {
 		// by 15 s of drain that is never going to happen.
 		setEnv("PI_LENS_QUIET_WINDOW", "0");
 		_resetQuietWindowEnabledForTests();
-		expect(deriveCascadeNeighbourBudget({ elapsedMs: 0 }).deliveryWindowMs).toBe(
-			5000,
-		);
+		expect(
+			deriveCascadeNeighbourBudget({ elapsedMs: 0 }).deliveryWindowMs,
+		).toBe(5000);
 	});
 
 	it("clamps a floor set above the ceiling down to the ceiling", () => {
@@ -222,9 +221,9 @@ describe("deriveCascadeNeighbourBudget", () => {
 	});
 
 	it("treats a non-finite or negative elapsed as no time spent", () => {
-		expect(deriveCascadeNeighbourBudget({ elapsedMs: Number.NaN })).toMatchObject(
-			{ budget: CASCADE_NEIGHBOUR_BUDGET, zone: "fits" },
-		);
+		expect(
+			deriveCascadeNeighbourBudget({ elapsedMs: Number.NaN }),
+		).toMatchObject({ budget: CASCADE_NEIGHBOUR_BUDGET, zone: "fits" });
 		expect(deriveCascadeNeighbourBudget({ elapsedMs: -1000 })).toMatchObject({
 			budget: CASCADE_NEIGHBOUR_BUDGET,
 			zone: "fits",

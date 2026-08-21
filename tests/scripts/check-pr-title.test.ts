@@ -14,7 +14,9 @@ describe("PR title lint (#1844)", () => {
 	});
 
 	it("accepts a scoped prefix", () => {
-		expect(lintPrTitle("feat(lsp): add native fallback (closes #456)")).toMatchObject({
+		expect(
+			lintPrTitle("feat(lsp): add native fallback (closes #456)"),
+		).toMatchObject({
 			valid: true,
 		});
 	});
@@ -57,10 +59,15 @@ describe("PR title lint (#1844)", () => {
 	it("reports both errors when both are missing", () => {
 		const result = lintPrTitle("repair the cache");
 		expect(result.valid).toBe(false);
-		expect(result.errors).toEqual([MISSING_PREFIX_MESSAGE, MISSING_ISSUE_REF_MESSAGE]);
+		expect(result.errors).toEqual([
+			MISSING_PREFIX_MESSAGE,
+			MISSING_ISSUE_REF_MESSAGE,
+		]);
 	});
 
 	it("accepts a cross-repo style issue ref count in the title (# followed by digits only)", () => {
-		expect(lintPrTitle("fix: repair cache #123")).toMatchObject({ valid: true });
+		expect(lintPrTitle("fix: repair cache #123")).toMatchObject({
+			valid: true,
+		});
 	});
 });

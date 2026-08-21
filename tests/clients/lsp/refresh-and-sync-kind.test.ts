@@ -34,7 +34,10 @@ import { createMockState } from "./mock-client-state.js";
 const TEST_FILE = "/project/app.ts";
 const TEST_KEY = normalizeMapKey(TEST_FILE);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const FAKE_SERVER_PATH = path.join(__dirname, "../../fixtures/fake-lsp-server.mjs");
+const FAKE_SERVER_PATH = path.join(
+	__dirname,
+	"../../fixtures/fake-lsp-server.mjs",
+);
 
 describe("workspace/diagnostic/refresh handler (#1669)", () => {
 	it("registers a handler that replies null and clears workspacePullResultCache", async () => {
@@ -47,11 +50,15 @@ describe("workspace/diagnostic/refresh handler (#1669)", () => {
 		});
 		setupIncomingHandlers(state, {});
 
-		const calls = vi.mocked(state.connection.onRequest).mock.calls as unknown as Array<
-			[string, (...args: unknown[]) => unknown]
-		>;
-		const registered = calls.find((c) => c[0] === "workspace/diagnostic/refresh");
-		expect(registered, "workspace/diagnostic/refresh handler registered").toBeDefined();
+		const calls = vi.mocked(state.connection.onRequest).mock
+			.calls as unknown as Array<[string, (...args: unknown[]) => unknown]>;
+		const registered = calls.find(
+			(c) => c[0] === "workspace/diagnostic/refresh",
+		);
+		expect(
+			registered,
+			"workspace/diagnostic/refresh handler registered",
+		).toBeDefined();
 
 		const reply = await registered![1]();
 		expect(reply).toBeNull();
@@ -60,7 +67,9 @@ describe("workspace/diagnostic/refresh handler (#1669)", () => {
 	});
 
 	it("also clears the persisted workspace-diagnostics cache on disk", async () => {
-		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-refresh-cache-"));
+		const root = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-refresh-cache-"),
+		);
 		// Pre-populate the persisted sweep cache the way a REAL sweep would —
 		// through `createWorkspaceDiagnosticsCacheContext`, which is also what
 		// registers `root` as a cwd `clearAllWorkspaceDiagnosticsCaches` (#1669
@@ -76,10 +85,11 @@ describe("workspace/diagnostic/refresh handler (#1669)", () => {
 
 		const state = createMockState({ root });
 		setupIncomingHandlers(state, {});
-		const calls = vi.mocked(state.connection.onRequest).mock.calls as unknown as Array<
-			[string, (...args: unknown[]) => unknown]
-		>;
-		const handler = calls.find((c) => c[0] === "workspace/diagnostic/refresh")?.[1];
+		const calls = vi.mocked(state.connection.onRequest).mock
+			.calls as unknown as Array<[string, (...args: unknown[]) => unknown]>;
+		const handler = calls.find(
+			(c) => c[0] === "workspace/diagnostic/refresh",
+		)?.[1];
 		expect(handler).toBeDefined();
 
 		await handler!();
@@ -114,9 +124,16 @@ describe("outgoing didChange honors the negotiated sync kind (#1669)", () => {
 		contentChanges: Array<{ range?: unknown; text: string }>;
 	} {
 		const calls = vi.mocked(state.connection.sendNotification).mock.calls;
-		const call = [...calls].reverse().find((c) => c[0] === "textDocument/didChange");
-		expect(call, "a textDocument/didChange notification was sent").toBeDefined();
-		return call![1] as { contentChanges: Array<{ range?: unknown; text: string }> };
+		const call = [...calls]
+			.reverse()
+			.find((c) => c[0] === "textDocument/didChange");
+		expect(
+			call,
+			"a textDocument/didChange notification was sent",
+		).toBeDefined();
+		return call![1] as {
+			contentChanges: Array<{ range?: unknown; text: string }>;
+		};
 	}
 
 	it("Full sync kind: unchanged whole-document event", async () => {
@@ -183,7 +200,9 @@ describe("outgoing didChange honors the negotiated sync kind (#1669)", () => {
 		// `{ text }`. Checking that this call retained `text` for the path
 		// proves the self-heal is genuine: the NEXT change for this path now
 		// has a basis to diff against, per `buildContentChanges`'s doc comment.
-		expect(state.documentContentHashes.get(TEST_KEY)?.text).toBe("const y = 2;");
+		expect(state.documentContentHashes.get(TEST_KEY)?.text).toBe(
+			"const y = 2;",
+		);
 	});
 
 	it("recordSentContent binding stays consistent with what was sent under Incremental", async () => {
@@ -211,16 +230,18 @@ describe("outgoing didChange honors the negotiated sync kind (#1669)", () => {
 		const calls = vi.mocked(state.connection.sendNotification).mock.calls;
 		const didOpen = calls.find((c) => c[0] === "textDocument/didOpen");
 		expect(didOpen).toBeDefined();
-		expect((didOpen![1] as { textDocument: { text: string } }).textDocument.text).toBe(
-			"const x = 1;",
-		);
+		expect(
+			(didOpen![1] as { textDocument: { text: string } }).textDocument.text,
+		).toBe("const x = 1;");
 		// #1669 review F5: didOpen always sending full text is unchanged
 		// behavior on BOTH sides of the fix, so the assertion above alone
 		// can't tell a real Incremental wire-up from a no-op one. What IS new
 		// under Incremental is that `recordSentContent` retains the text so a
 		// FOLLOWING didChange has a basis to diff against — assert that here,
 		// on the open path specifically.
-		expect(state.documentContentHashes.get(TEST_KEY)?.text).toBe("const x = 1;");
+		expect(state.documentContentHashes.get(TEST_KEY)?.text).toBe(
+			"const x = 1;",
+		);
 	});
 
 	it("counts a lone-CR line ending as a real line break, not part of the previous line (#1669 review F6)", async () => {
@@ -309,7 +330,14 @@ describe("workspace/diagnostic/refresh clears per-document pull state and re-pul
 		state.openDocumentUris!.set(TEST_KEY, pathToFileURL(TEST_FILE).href);
 		state.pullResultIds.set(TEST_KEY, "stale-result-id");
 		state.documentPullDiagnostics.set(TEST_KEY, [
-			{ message: "stale", severity: 1, range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } } } as any,
+			{
+				message: "stale",
+				severity: 1,
+				range: {
+					start: { line: 0, character: 0 },
+					end: { line: 0, character: 1 },
+				},
+			} as any,
 		]);
 		state.diagnosticBindings.set(TEST_KEY, { contentHash: "stale-hash" });
 		state.diagnosticsVersionsByPath.set(TEST_KEY, 5);
@@ -321,10 +349,11 @@ describe("workspace/diagnostic/refresh clears per-document pull state and re-pul
 		});
 
 		setupIncomingHandlers(state, {});
-		const calls = vi.mocked(state.connection.onRequest).mock.calls as unknown as Array<
-			[string, (...args: unknown[]) => unknown]
-		>;
-		const handler = calls.find((c) => c[0] === "workspace/diagnostic/refresh")?.[1];
+		const calls = vi.mocked(state.connection.onRequest).mock
+			.calls as unknown as Array<[string, (...args: unknown[]) => unknown]>;
+		const handler = calls.find(
+			(c) => c[0] === "workspace/diagnostic/refresh",
+		)?.[1];
 		expect(handler).toBeDefined();
 
 		await handler!();
@@ -351,7 +380,10 @@ describe("workspace/diagnostic/refresh clears per-document pull state and re-pul
 		const pullCall = vi
 			.mocked(state.connection.sendRequest)
 			.mock.calls.find((c) => c[0] === "textDocument/diagnostic");
-		expect(pullCall, "textDocument/diagnostic was requested for the open doc").toBeDefined();
+		expect(
+			pullCall,
+			"textDocument/diagnostic was requested for the open doc",
+		).toBeDefined();
 	});
 
 	it("does not re-pull under push-only mode (a pull request there would just be refused)", async () => {
@@ -361,10 +393,11 @@ describe("workspace/diagnostic/refresh clears per-document pull state and re-pul
 		state.pullResultIds.set(TEST_KEY, "stale-result-id");
 
 		setupIncomingHandlers(state, {});
-		const calls = vi.mocked(state.connection.onRequest).mock.calls as unknown as Array<
-			[string, (...args: unknown[]) => unknown]
-		>;
-		const handler = calls.find((c) => c[0] === "workspace/diagnostic/refresh")?.[1];
+		const calls = vi.mocked(state.connection.onRequest).mock
+			.calls as unknown as Array<[string, (...args: unknown[]) => unknown]>;
+		const handler = calls.find(
+			(c) => c[0] === "workspace/diagnostic/refresh",
+		)?.[1];
 
 		await handler!();
 		await Promise.resolve();
@@ -425,7 +458,10 @@ describe("clientRequestWorkspaceDiagnostics: unchanged report with no cached bas
 
 		const out = await clientRequestWorkspaceDiagnostics(state, 5000);
 
-		expect(out, "workspace/diagnostic pull must not fail outright").toBeDefined();
+		expect(
+			out,
+			"workspace/diagnostic pull must not fail outright",
+		).toBeDefined();
 		const entry = out!.find((r) => normalizeMapKey(r.filePath) === TEST_KEY);
 		// Pre-fix, `continue` on a missing `prior` basis dropped this file from
 		// `out` entirely — indistinguishable from a genuinely clean file to
@@ -498,9 +534,9 @@ describe("clientRequestWorkspaceDiagnostics unchanged-fallback shares ONE deadli
 		// many incidental Date.now() calls happen around it.
 		const baseTime = 1_700_000_000_000;
 		let elapsedOffset = 0;
-		const dateNowSpy = vi.spyOn(Date, "now").mockImplementation(
-			() => baseTime + elapsedOffset,
-		);
+		const dateNowSpy = vi
+			.spyOn(Date, "now")
+			.mockImplementation(() => baseTime + elapsedOffset);
 
 		vi.mocked(state.connection.sendRequest).mockImplementation(
 			async (method: unknown, params?: unknown) => {
@@ -546,7 +582,9 @@ describe("clientRequestWorkspaceDiagnostics unchanged-fallback shares ONE deadli
 			).toBe(uri1);
 			// file2 must not silently read as clean either — it was never asked.
 			expect(
-				out!.find((r) => normalizeMapKey(r.filePath) === normalizeMapKey(file2)),
+				out!.find(
+					(r) => normalizeMapKey(r.filePath) === normalizeMapKey(file2),
+				),
 			).toBeUndefined();
 		} finally {
 			dateNowSpy.mockRestore();
@@ -588,10 +626,11 @@ describe("workspace/diagnostic/refresh caps simultaneous re-pulls (#1669 review 
 		);
 
 		setupIncomingHandlers(state, {});
-		const calls = vi.mocked(state.connection.onRequest).mock.calls as unknown as Array<
-			[string, (...args: unknown[]) => unknown]
-		>;
-		const handler = calls.find((c) => c[0] === "workspace/diagnostic/refresh")?.[1];
+		const calls = vi.mocked(state.connection.onRequest).mock
+			.calls as unknown as Array<[string, (...args: unknown[]) => unknown]>;
+		const handler = calls.find(
+			(c) => c[0] === "workspace/diagnostic/refresh",
+		)?.[1];
 		const reply = await handler!();
 		// #1669 review N2: the reply must not wait on the re-pulls at all.
 		expect(reply).toBeNull();
@@ -648,10 +687,11 @@ describe("workspace/diagnostic/refresh coalesces a burst into one trailing rerun
 		);
 
 		setupIncomingHandlers(state, {});
-		const calls = vi.mocked(state.connection.onRequest).mock.calls as unknown as Array<
-			[string, (...args: unknown[]) => unknown]
-		>;
-		const handler = calls.find((c) => c[0] === "workspace/diagnostic/refresh")?.[1];
+		const calls = vi.mocked(state.connection.onRequest).mock
+			.calls as unknown as Array<[string, (...args: unknown[]) => unknown]>;
+		const handler = calls.find(
+			(c) => c[0] === "workspace/diagnostic/refresh",
+		)?.[1];
 		expect(handler).toBeDefined();
 
 		// The real trigger the review names: a watch-mode rebuild or a `git
@@ -735,10 +775,11 @@ describe("workspace/diagnostic/refresh coalesces a burst into one trailing rerun
 		);
 
 		setupIncomingHandlers(state, {});
-		const calls = vi.mocked(state.connection.onRequest).mock.calls as unknown as Array<
-			[string, (...args: unknown[]) => unknown]
-		>;
-		const handler = calls.find((c) => c[0] === "workspace/diagnostic/refresh")?.[1];
+		const calls = vi.mocked(state.connection.onRequest).mock
+			.calls as unknown as Array<[string, (...args: unknown[]) => unknown]>;
+		const handler = calls.find(
+			(c) => c[0] === "workspace/diagnostic/refresh",
+		)?.[1];
 		expect(handler).toBeDefined();
 
 		// Initial refresh — starts the pool on the next tick.
@@ -792,8 +833,10 @@ describe("workspace/diagnostic/refresh reaches an unregistered cwd's on-disk cac
 			// from `clearAllWorkspaceDiagnosticsCaches`'s point of view, exactly
 			// the "refresh arrives before any sweep this process" scenario).
 			const filePath = path.join(root, "stale.ts");
-			const { saveWorkspaceDiagnosticsCache, WORKSPACE_DIAGNOSTICS_CACHE_VERSION } =
-				await import("../../../clients/lsp/workspace-diagnostics-cache.js");
+			const {
+				saveWorkspaceDiagnosticsCache,
+				WORKSPACE_DIAGNOSTICS_CACHE_VERSION,
+			} = await import("../../../clients/lsp/workspace-diagnostics-cache.js");
 			saveWorkspaceDiagnosticsCache(root, {
 				version: WORKSPACE_DIAGNOSTICS_CACHE_VERSION,
 				entries: {
@@ -815,10 +858,11 @@ describe("workspace/diagnostic/refresh reaches an unregistered cwd's on-disk cac
 			// alone (registry-only) would clear nothing here.
 			const state = createMockState({ root });
 			setupIncomingHandlers(state, {});
-			const calls = vi.mocked(state.connection.onRequest).mock.calls as unknown as Array<
-				[string, (...args: unknown[]) => unknown]
-			>;
-			const handler = calls.find((c) => c[0] === "workspace/diagnostic/refresh")?.[1];
+			const calls = vi.mocked(state.connection.onRequest).mock
+				.calls as unknown as Array<[string, (...args: unknown[]) => unknown]>;
+			const handler = calls.find(
+				(c) => c[0] === "workspace/diagnostic/refresh",
+			)?.[1];
 			await handler!();
 
 			// Pre-fix: still 1 stale entry — nothing ever reached this cwd's file.
@@ -844,9 +888,16 @@ describe("workspace/diagnostic/refresh reaches a never-swept monorepo cache (#17
 		const memberRoot = path.join(workspaceRoot, "packages", "member");
 		fs.mkdirSync(memberRoot, { recursive: true });
 		try {
-			const filePath = path.join(workspaceRoot, "packages", "member", "stale.ts");
-			const { saveWorkspaceDiagnosticsCache, WORKSPACE_DIAGNOSTICS_CACHE_VERSION } =
-				await import("../../../clients/lsp/workspace-diagnostics-cache.js");
+			const filePath = path.join(
+				workspaceRoot,
+				"packages",
+				"member",
+				"stale.ts",
+			);
+			const {
+				saveWorkspaceDiagnosticsCache,
+				WORKSPACE_DIAGNOSTICS_CACHE_VERSION,
+			} = await import("../../../clients/lsp/workspace-diagnostics-cache.js");
 			saveWorkspaceDiagnosticsCache(workspaceRoot, {
 				version: WORKSPACE_DIAGNOSTICS_CACHE_VERSION,
 				entries: {
@@ -862,13 +913,18 @@ describe("workspace/diagnostic/refresh reaches a never-swept monorepo cache (#17
 
 			const state = createMockState({ root: memberRoot });
 			setupIncomingHandlers(state, {});
-			const calls = vi.mocked(state.connection.onRequest).mock.calls as unknown as Array<
-				[string, (...args: unknown[]) => unknown]
-			>;
-			const handler = calls.find((c) => c[0] === "workspace/diagnostic/refresh")?.[1];
+			const calls = vi.mocked(state.connection.onRequest).mock
+				.calls as unknown as Array<[string, (...args: unknown[]) => unknown]>;
+			const handler = calls.find(
+				(c) => c[0] === "workspace/diagnostic/refresh",
+			)?.[1];
 			await handler!();
 
-			expect(Object.keys(loadWorkspaceDiagnosticsCache(workspaceRoot)?.entries ?? {})).toHaveLength(0);
+			expect(
+				Object.keys(
+					loadWorkspaceDiagnosticsCache(workspaceRoot)?.entries ?? {},
+				),
+			).toHaveLength(0);
 		} finally {
 			fs.rmSync(workspaceRoot, { recursive: true, force: true });
 		}
@@ -879,16 +935,20 @@ describe("createWorkspaceDiagnosticsCacheContext.lookup() honors a mid-sweep cle
 	it("stops serving pre-refresh entries for the REST of an in-flight sweep, not only at persist() time", async () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-refresh-n4-"));
 		try {
-			const { clearWorkspaceDiagnosticsCache } = await import(
-				"../../../clients/lsp/workspace-diagnostics-cache.js"
-			);
+			const { clearWorkspaceDiagnosticsCache } =
+				await import("../../../clients/lsp/workspace-diagnostics-cache.js");
 			const filePath = path.join(root, "a.ts");
 			fs.writeFileSync(filePath, "const a = 1;\n");
 			const mtimeMs = fs.statSync(filePath).mtimeMs;
 
 			// A sweep starts and records+persists a fresh entry for `a.ts`.
 			const ctx = createWorkspaceDiagnosticsCacheContext(root);
-			ctx.record(filePath, "all|", [{ message: "pre-refresh" } as any], mtimeMs);
+			ctx.record(
+				filePath,
+				"all|",
+				[{ message: "pre-refresh" } as any],
+				mtimeMs,
+			);
 			ctx.persist();
 			// This SAME sweep's `entries` map still holds `a.ts` in memory — the
 			// next lookup would normally hit it (isEntryFresh only checks mtime,
@@ -937,11 +997,14 @@ describe("negotiateSyncKind through the real createLSPClient init path (#1669 re
 			root: process.cwd(),
 		});
 		try {
-			const received: Array<{ contentChanges: Array<{ range?: unknown; text: string }> }> =
-				[];
+			const received: Array<{
+				contentChanges: Array<{ range?: unknown; text: string }>;
+			}> = [];
 			client.connection.onNotification(
 				"$/test/didChangeReceived",
-				(params: { contentChanges: Array<{ range?: unknown; text: string }> }) => {
+				(params: {
+					contentChanges: Array<{ range?: unknown; text: string }>;
+				}) => {
 					received.push(params);
 				},
 			);
@@ -976,16 +1039,22 @@ describe("negotiateSyncKind through the real createLSPClient init path (#1669 re
 			root: process.cwd(),
 		});
 		try {
-			const received: Array<{ contentChanges: Array<{ range?: unknown; text: string }> }> =
-				[];
+			const received: Array<{
+				contentChanges: Array<{ range?: unknown; text: string }>;
+			}> = [];
 			client.connection.onNotification(
 				"$/test/didChangeReceived",
-				(params: { contentChanges: Array<{ range?: unknown; text: string }> }) => {
+				(params: {
+					contentChanges: Array<{ range?: unknown; text: string }>;
+				}) => {
 					received.push(params);
 				},
 			);
 
-			const filePath = path.join(os.tmpdir(), "pi-lens-sync-kind-real-init-full.ts");
+			const filePath = path.join(
+				os.tmpdir(),
+				"pi-lens-sync-kind-real-init-full.ts",
+			);
 			await client.notify.open(filePath, "const x = 1;\n", "typescript");
 			await client.notify.change(filePath, "const x = 1;\nconst y = 2;\n");
 

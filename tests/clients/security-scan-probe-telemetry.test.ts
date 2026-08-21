@@ -15,19 +15,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TRANSIENT_BASE_COOLDOWN_MS } from "../../clients/dispatch/runners/utils/availability-policy.js";
 
-const {
-	safeSpawnAsync,
-	safeSpawn,
-	ensureTool,
-	getInstallAttempt,
-	logLatency,
-} = vi.hoisted(() => ({
-	safeSpawnAsync: vi.fn(),
-	safeSpawn: vi.fn(),
-	ensureTool: vi.fn(),
-	getInstallAttempt: vi.fn(),
-	logLatency: vi.fn(),
-}));
+const { safeSpawnAsync, safeSpawn, ensureTool, getInstallAttempt, logLatency } =
+	vi.hoisted(() => ({
+		safeSpawnAsync: vi.fn(),
+		safeSpawn: vi.fn(),
+		ensureTool: vi.fn(),
+		getInstallAttempt: vi.fn(),
+		logLatency: vi.fn(),
+	}));
 
 // Spread the real module: only `logLatency` is intercepted, so the rest of
 // the import graph (including availability-policy's logAvailabilityDecision,

@@ -3,8 +3,8 @@ import { createLazyImport } from "../lazy-import.js";
 
 type DispatchIntegration = typeof import("./integration.js");
 
-const lazyIntegration = createLazyImport<DispatchIntegration>(() =>
-	import("./integration.js"),
+const lazyIntegration = createLazyImport<DispatchIntegration>(
+	() => import("./integration.js"),
 );
 
 /** Start loading the runner graph once; callers may fire-and-forget this. */

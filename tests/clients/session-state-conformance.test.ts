@@ -49,9 +49,10 @@ describe("session-state registry — shape", () => {
 
 	it("every entry states a reason", () => {
 		for (const entry of SESSION_STATE_REGISTRY) {
-			expect(entry.reason.length, `${entry.id} needs a real reason`).toBeGreaterThan(
-				30,
-			);
+			expect(
+				entry.reason.length,
+				`${entry.id} needs a real reason`,
+			).toBeGreaterThan(30);
 		}
 	});
 
@@ -59,12 +60,16 @@ describe("session-state registry — shape", () => {
 		const definitions = resetNameDefinitions();
 		for (const entry of SESSION_STATE_REGISTRY) {
 			const files = definitions.get(entry.resetName);
-			expect(files, `${entry.id}: no exported ${entry.resetName}`).toBeDefined();
+			expect(
+				files,
+				`${entry.id}: no exported ${entry.resetName}`,
+			).toBeDefined();
 			// A duplicated reset name would make the reachability walk below
 			// ambiguous — it resolves by name, so two definitions is a real hazard.
-			expect(files, `${entry.id}: ${entry.resetName} is defined twice`).toHaveLength(
-				1,
-			);
+			expect(
+				files,
+				`${entry.id}: ${entry.resetName} is defined twice`,
+			).toHaveLength(1);
 		}
 	});
 });
@@ -304,7 +309,10 @@ describe("session-state sweep — coverage", () => {
 
 	it("the sweep still flags files — an empty scan must fail, not read as clean", () => {
 		const { flaggedCount, problems } = audit();
-		expect(problems.filter((p) => p.includes("declared floor")), problems.join("\n")).toEqual([]);
+		expect(
+			problems.filter((p) => p.includes("declared floor")),
+			problems.join("\n"),
+		).toEqual([]);
 		expect(flaggedCount).toBeGreaterThanOrEqual(40);
 	});
 

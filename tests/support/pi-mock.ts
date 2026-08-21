@@ -123,7 +123,11 @@ export interface PiMock {
 	/** Run every handler registered for `event`; return the last defined result. */
 	emit(event: string, payload?: unknown, ctx?: unknown): Promise<unknown>;
 	/** Invoke a registered command's handler. */
-	runCommand(name: string, args?: string, ctx?: ExtensionCommandContext): Promise<void>;
+	runCommand(
+		name: string,
+		args?: string,
+		ctx?: ExtensionCommandContext,
+	): Promise<void>;
 	/** Cast to the host type for `extension(pi.asExtensionAPI())`. */
 	asExtensionAPI(): ExtensionAPI;
 }

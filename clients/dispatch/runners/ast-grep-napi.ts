@@ -396,10 +396,7 @@ export function ruleLanguageForFile(
 	}
 }
 
-export function getLang(
-	filePath: string,
-	sgModule: AstGrepNapi,
-) {
+export function getLang(filePath: string, sgModule: AstGrepNapi) {
 	const ext = path.extname(filePath).toLowerCase();
 	switch (ext) {
 		case ".ts":
@@ -554,7 +551,8 @@ export function evaluateAstGrepRules(
 			newlyUnsupported.clear();
 			return;
 		}
-		for (const [language] of firstSeenLanguages) unsupportedLanguageLog.add(language);
+		for (const [language] of firstSeenLanguages)
+			unsupportedLanguageLog.add(language);
 		logLatency({
 			type: "phase",
 			phase: "astgrep_napi_unsupported_rules_skipped",

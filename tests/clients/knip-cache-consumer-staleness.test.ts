@@ -63,7 +63,12 @@ describe("knip cache consumer-import staleness (#1630)", () => {
 				fs.mkdirSync(path.join(tmpDir, "tests"), { recursive: true });
 				fs.writeFileSync(
 					path.join(tmpDir, "package.json"),
-					JSON.stringify({ name: "knip-1630", version: "1.0.0", private: true, type: "module" }),
+					JSON.stringify({
+						name: "knip-1630",
+						version: "1.0.0",
+						private: true,
+						type: "module",
+					}),
 				);
 				fs.writeFileSync(
 					path.join(tmpDir, "knip.json"),

@@ -138,7 +138,10 @@ export interface TurnEndView {
 
 function splitTurnEndView(text: string): TurnEndView {
 	const all = text
-		? text.split("\n\n").map((s) => s.trim()).filter(Boolean)
+		? text
+				.split("\n\n")
+				.map((s) => s.trim())
+				.filter(Boolean)
 		: [];
 	// `consumeTurnEndFindings` prepends its framing header as its own
 	// `\n\n`-separated block. Peel it off before tiering, or every turn appears
@@ -150,7 +153,8 @@ function splitTurnEndView(text: string): TurnEndView {
 		framing,
 		sections,
 		blockers: sections.filter(
-			(s) => !s.startsWith(ADVISORY_LABEL) && !s.startsWith(ACTION_NEEDED_PREFIX),
+			(s) =>
+				!s.startsWith(ADVISORY_LABEL) && !s.startsWith(ACTION_NEEDED_PREFIX),
 		),
 		actionNeeded: sections.filter((s) => s.startsWith(ACTION_NEEDED_PREFIX)),
 		advisories: sections.filter((s) => s.startsWith(ADVISORY_LABEL)),
@@ -159,7 +163,8 @@ function splitTurnEndView(text: string): TurnEndView {
 }
 
 /** A knip run's result, minus the fields no scenario has ever needed to state. */
-export type ScenarioKnipResult = Partial<KnipResult> & Pick<KnipResult, "issues">;
+export type ScenarioKnipResult = Partial<KnipResult> &
+	Pick<KnipResult, "issues">;
 
 const EMPTY_KNIP: KnipResult = {
 	success: true,

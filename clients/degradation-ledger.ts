@@ -3,7 +3,10 @@
 import { logExtension } from "./extension-log.js";
 import { LEDGER_FIELD_MAX, truncateForLedger } from "./ledger-bounds.js";
 import { logLatency } from "./latency-logger.js";
-import { getSinkWriteFailures, resetSinkWriteFailures } from "./ndjson-logger.js";
+import {
+	getSinkWriteFailures,
+	resetSinkWriteFailures,
+} from "./ndjson-logger.js";
 
 // Re-exported so existing importers keep one name for the ledger's bound.
 export { LEDGER_FIELD_MAX, truncateForLedger };
@@ -483,7 +486,11 @@ export function incrementDegradationCount(record: DegradationRecord): boolean {
  * redaction, and write queue. The subject and kind were already bounded by the
  * ledger before reaching this seam.
  */
-function logDurableDegradation(kind: string, subject: string, count: number): void {
+function logDurableDegradation(
+	kind: string,
+	subject: string,
+	count: number,
+): void {
 	logLatency({
 		type: "phase",
 		phase: "degradation_ledger",

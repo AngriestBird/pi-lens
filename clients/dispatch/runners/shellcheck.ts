@@ -157,7 +157,7 @@ const shellcheckRunner: RunnerDefinition = {
 		}
 
 		let cmd: string | null = null;
-		if (await (shellcheck.isAvailableAsync(cwd))) {
+		if (await shellcheck.isAvailableAsync(cwd)) {
 			cmd = shellcheck.getCommand(cwd);
 		} else {
 			const managed = await resolveAvailableOrInstall(

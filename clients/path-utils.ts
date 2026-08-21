@@ -236,7 +236,10 @@ export function normalizeMapKey(filePath: string): string {
  * Linux native paths aren't Windows-shaped) is never selected, so same-OS
  * native paths are unchanged either way.
  */
-export function toProjectRelativePath(filePath: string, projectRoot: string): string {
+export function toProjectRelativePath(
+	filePath: string,
+	projectRoot: string,
+): string {
 	const p = isWindowsPath(filePath) ? win32 : path;
 	if (!p.isAbsolute(filePath)) return filePath.replace(/\\/g, "/");
 	const relative = p.relative(p.resolve(projectRoot), filePath);

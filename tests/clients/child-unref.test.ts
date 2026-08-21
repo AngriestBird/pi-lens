@@ -3,7 +3,8 @@ import { describe, expect, it, vi } from "vitest";
 const spawnMock = vi.hoisted(() => vi.fn());
 vi.mock("node:child_process", () => ({ spawn: spawnMock }));
 
-const { spawnCollectStdoutResult } = await import("../../clients/child-unref.js");
+const { spawnCollectStdoutResult } =
+	await import("../../clients/child-unref.js");
 
 function fakeChild() {
 	const stdout = { on: vi.fn(), unref: vi.fn() };
@@ -41,15 +42,28 @@ describe("spawnCollectStdoutResult", () => {
 		const fake = fakeChild();
 		spawnMock.mockReturnValueOnce(fake.child);
 		let release!: (outcome: "gone") => void;
-		const resultPromise = spawnCollectStdoutResult("tool", [], {}, {
-			timeoutMs: 1,
-			onTimeout: () => new Promise<"gone">((resolve) => { release = resolve; }),
-		});
+		const resultPromise = spawnCollectStdoutResult(
+			"tool",
+			[],
+			{},
+			{
+				timeoutMs: 1,
+				onTimeout: () =>
+					new Promise<"gone">((resolve) => {
+						release = resolve;
+					}),
+			},
+		);
 		let settled = false;
-		void resultPromise.then(() => { settled = true; });
+		void resultPromise.then(() => {
+			settled = true;
+		});
 		await new Promise((resolve) => setTimeout(resolve, 5));
 		expect(settled).toBe(false);
 		release("gone");
-		expect(await resultPromise).toMatchObject({ status: "timeout", timeoutKill: "gone" });
+		expect(await resultPromise).toMatchObject({
+			status: "timeout",
+			timeoutKill: "gone",
+		});
 	});
 });

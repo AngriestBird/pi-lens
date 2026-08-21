@@ -97,8 +97,7 @@ export function getReadGuardCorrelationId(event: unknown): string {
 		const sanitized = sanitizeCorrelationId(candidate);
 		if (sanitized) return sanitized;
 	}
-	generatedCorrelationCounter =
-		(generatedCorrelationCounter + 1) % 1_000_000;
+	generatedCorrelationCounter = (generatedCorrelationCounter + 1) % 1_000_000;
 	return `rg-${Date.now().toString(36)}-${generatedCorrelationCounter}`;
 }
 
@@ -142,8 +141,8 @@ export function createReadGuardEditBatchSummary(args: {
 }): ReadGuardEditBatchSummary {
 	const requestedSource = validIndexes(args.requestedIndexes);
 	const resolvedSource = validIndexes(args.resolvedIndexes ?? []);
-	const rejectedSource = (args.rejectedReasons ?? []).filter((entry) =>
-		Number.isInteger(entry.index) && entry.index >= 0,
+	const rejectedSource = (args.rejectedReasons ?? []).filter(
+		(entry) => Number.isInteger(entry.index) && entry.index >= 0,
 	);
 	const appliedSource = validIndexes(args.appliedIndexes ?? []);
 	const requestedIndexes = boundedEditIndexes(requestedSource);
@@ -188,9 +187,11 @@ export function createReadGuardEditBatchSummary(args: {
 		participantIds,
 		participantTotal: args.participantTotal ?? participantSource.length,
 		participantIdsTruncated:
-			(args.participantTotal ?? participantSource.length) > participantIds.length,
+			(args.participantTotal ?? participantSource.length) >
+			participantIds.length,
 		indexesTruncated:
-			(args.requestedTotal ?? requestedSource.length) > requestedIndexes.length ||
+			(args.requestedTotal ?? requestedSource.length) >
+				requestedIndexes.length ||
 			(args.resolvedTotal ?? resolvedSource.length) > resolvedIndexes.length ||
 			(args.rejectedTotal ?? rejectedSource.length) > rejectedIndexes.length ||
 			(args.appliedTotal ?? appliedSource.length) > appliedIndexes.length,
@@ -296,7 +297,10 @@ function boundTelemetryValue(
 	const output: Record<string, unknown> = {};
 	let truncated = false;
 	const arrayTotals: Record<string, number> = {};
-	for (const [key, child] of Object.entries(value).slice(0, MAX_TELEMETRY_KEYS)) {
+	for (const [key, child] of Object.entries(value).slice(
+		0,
+		MAX_TELEMETRY_KEYS,
+	)) {
 		const bounded = boundTelemetryValue(
 			child,
 			pathName ? `${pathName}.${key}` : key,

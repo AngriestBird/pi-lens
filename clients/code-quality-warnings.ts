@@ -329,26 +329,24 @@ export function appendCodeQualityWarningsHistory(
 	report: CodeQualityWarningsReport,
 ): void {
 	const warnings = report.files.flatMap((file) =>
-		file.warnings.map(
-			(warning): CodeQualityWarningsHistoryEntry => ({
-				timestamp: report.generatedAt,
-				sessionId: report.sessionId,
-				turnIndex: report.turnIndex,
-				projectSeq: report.projectSeqEnd,
-				filePath: warning.filePath,
-				displayPath: warning.displayPath,
-				fileSeq: file.fileSeq,
-				line: warning.line,
-				column: warning.column,
-				severity: warning.severity,
-				tool: warning.tool,
-				rule: warning.rule,
-				code: warning.code,
-				message: warning.message,
-				category: warning.category,
-				warningId: warning.id,
-			}),
-		),
+		file.warnings.map((warning): CodeQualityWarningsHistoryEntry => ({
+			timestamp: report.generatedAt,
+			sessionId: report.sessionId,
+			turnIndex: report.turnIndex,
+			projectSeq: report.projectSeqEnd,
+			filePath: warning.filePath,
+			displayPath: warning.displayPath,
+			fileSeq: file.fileSeq,
+			line: warning.line,
+			column: warning.column,
+			severity: warning.severity,
+			tool: warning.tool,
+			rule: warning.rule,
+			code: warning.code,
+			message: warning.message,
+			category: warning.category,
+			warningId: warning.id,
+		})),
 	);
 	if (warnings.length === 0) return;
 	const historyPath = getCodeQualityWarningsHistoryPath(cwd);

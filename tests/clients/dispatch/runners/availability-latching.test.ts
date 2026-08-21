@@ -166,7 +166,11 @@ describe("availability seam: transient failures do not latch (#1467)", () => {
 		expect(installRetryDelayMs(INSTALL_TRANSIENT_MAX_ATTEMPTS)).toBe(0);
 		expect(installRetryDelayMs(50)).toBe(0);
 		// Every attempt BELOW the ceiling is funded; the two numbers cannot drift.
-		for (let attempt = 1; attempt < INSTALL_TRANSIENT_MAX_ATTEMPTS; attempt += 1) {
+		for (
+			let attempt = 1;
+			attempt < INSTALL_TRANSIENT_MAX_ATTEMPTS;
+			attempt += 1
+		) {
 			expect(installRetryDelayMs(attempt)).toBeGreaterThan(0);
 		}
 	});
@@ -174,9 +178,14 @@ describe("availability seam: transient failures do not latch (#1467)", () => {
 	it("writes one availability decision record per verdict", async () => {
 		const safeSpawnMod = await import("../../../../clients/safe-spawn.js");
 		vi.mocked(safeSpawnMod.safeSpawnAsync).mockResolvedValue(timeoutResult());
-		const checker = createAvailabilityChecker("telemetrytool", "", ["--version"], {
-			probeTimeout: 1500,
-		});
+		const checker = createAvailabilityChecker(
+			"telemetrytool",
+			"",
+			["--version"],
+			{
+				probeTimeout: 1500,
+			},
+		);
 
 		await checker.isAvailableAsync(process.cwd());
 		await checker.isAvailableAsync(process.cwd());
@@ -230,12 +239,16 @@ describe("availability policy: cause taxonomy and messages (#1467)", () => {
 			cause: "probe-timeout",
 			evidence: timeoutEvidence,
 		});
-		expect(classifyProbeFailure(timeoutResult(), { hostStallMs: 4618 })).toEqual({
+		expect(
+			classifyProbeFailure(timeoutResult(), { hostStallMs: 4618 }),
+		).toEqual({
 			outcome: "transient",
 			cause: "host-stall",
 			evidence: timeoutEvidence,
 		});
-		expect(classifyProbeFailure(missingResult(), { hostStallMs: 4618 })).toEqual({
+		expect(
+			classifyProbeFailure(missingResult(), { hostStallMs: 4618 }),
+		).toEqual({
 			outcome: "missing",
 			cause: "not-found",
 			evidence: {
@@ -270,7 +283,9 @@ describe("availability policy: cause taxonomy and messages (#1467)", () => {
 			outcome: "missing",
 			cause: "not-found",
 		});
-		expect(missing).toBe("Knip not available. Install with: npm install -D knip");
+		expect(missing).toBe(
+			"Knip not available. Install with: npm install -D knip",
+		);
 	});
 
 	it("names the host stall in the message when the loop, not the tool, stalled", () => {
@@ -375,9 +390,9 @@ describe("availability latch: shared client-side memo (#1467)", () => {
 		// The third consecutive timeout reaches the ceiling: the verdict becomes
 		// terminal for the session (a returned 0 means latched) and no cooldown
 		// expiry ever re-arms it…
-		expect(
-			latch.noteUnavailable("transient", "probe-timeout", install),
-		).toBe(0);
+		expect(latch.noteUnavailable("transient", "probe-timeout", install)).toBe(
+			0,
+		);
 		expect(INSTALL_TRANSIENT_MAX_ATTEMPTS).toBe(3);
 		expect(latch.read()).toBe(false);
 		vi.setSystemTime(new Date(Date.now() + 3_600_000));
@@ -432,7 +447,9 @@ describe("availability latch: shared client-side memo (#1467)", () => {
 		for (let i = 1; i < INSTALL_TRANSIENT_MAX_ATTEMPTS; i += 1) {
 			latch.noteUnavailable("transient", "probe-timeout", install);
 		}
-		expect(latch.noteUnavailable("transient", "probe-timeout", install)).toBe(0);
+		expect(latch.noteUnavailable("transient", "probe-timeout", install)).toBe(
+			0,
+		);
 
 		// The failures WERE transient, so the outcome stays transient — which is
 		// why the cause has to carry the terminal-ness. Without it the message
@@ -551,7 +568,9 @@ describe.each([
 			// Explicit latch/log agreement (#1610 review angle 1, reapplied here):
 			// the value the ~16 callers act on and the verdict this row logs must
 			// say the same thing.
-			expect(Boolean(resolved)).toBe(records[1].metadata.verdict === "available");
+			expect(Boolean(resolved)).toBe(
+				records[1].metadata.verdict === "available",
+			);
 		});
 	},
 );
@@ -682,8 +701,8 @@ describe("resolveAvailableOrInstall compensating row: failure path agreement (#1
 		);
 		expect(Boolean(resolved)).toBe(available.length > 0);
 		expect(available).toHaveLength(0);
-		expect(records.some((record) => record.metadata.verdict === "unavailable")).toBe(
-			true,
-		);
+		expect(
+			records.some((record) => record.metadata.verdict === "unavailable"),
+		).toBe(true);
 	});
 });

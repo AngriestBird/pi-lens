@@ -237,7 +237,9 @@ export class RuntimeCoordinator {
 	private _complexityBaselines = new Map<string, FileComplexity>();
 	private readonly _fixedThisTurn = new PathKeyedMap<true>(normalizeMapKey);
 	private readonly _writtenThisTurn = new PathKeyedMap<true>(normalizeMapKey);
-	private readonly _autofixDemotedThisTurn = new PathKeyedMap<true>(normalizeMapKey);
+	private readonly _autofixDemotedThisTurn = new PathKeyedMap<true>(
+		normalizeMapKey,
+	);
 	private readonly _reportedThisTurn = new Set<string>();
 	private _projectRulesScan: RuleScanResult = {
 		rules: [],
@@ -276,9 +278,8 @@ export class RuntimeCoordinator {
 	callGraph: FunctionCallGraph | null = null;
 	wordIndex: WordIndex | null = null;
 	private _readGuard: ReadGuard | null = null;
-	private readonly _pendingDeferredMutations = new PathKeyedMap<DeferredMutationRecord>(
-		normalizeMapKey,
-	);
+	private readonly _pendingDeferredMutations =
+		new PathKeyedMap<DeferredMutationRecord>(normalizeMapKey);
 	/** tool_call → tool_result path-attribution correlation (#1642). */
 	private readonly _toolCallAttributions = new BoundedLruCache<
 		string,
@@ -387,10 +388,11 @@ export class RuntimeCoordinator {
 		const summaries = this.getInlineBlockersSnapshot()
 			.map((entry) => entry.summary.trim())
 			.filter(Boolean);
-		this._gitGuardSummary = (summaries[0] ?? firstLine ?? "Unresolved blockers detected").slice(
-			0,
-			160,
-		);
+		this._gitGuardSummary = (
+			summaries[0] ??
+			firstLine ??
+			"Unresolved blockers detected"
+		).slice(0, 160);
 	}
 
 	get gitGuardHasBlockers(): boolean {
@@ -540,10 +542,7 @@ export class RuntimeCoordinator {
 	 * a fresh random id), so the stable id — when pi provides one via
 	 * `ctx.sessionManager.getSessionId()` — wins and survives a quit→resume.
 	 */
-	setSessionLifecycle(args: {
-		sessionId?: string;
-		reason?: string;
-	}): void {
+	setSessionLifecycle(args: { sessionId?: string; reason?: string }): void {
 		if (args.sessionId && args.sessionId.trim()) {
 			this._telemetrySessionId = args.sessionId.trim();
 			this._hasStableSessionId = true;
@@ -730,7 +729,8 @@ export class RuntimeCoordinator {
 	 */
 	getTurnEndCascadeSettleStart(): number | undefined {
 		let latest: number | undefined;
-		for (const start of this._turnEndCascadeSettleStarts.values()) latest = start;
+		for (const start of this._turnEndCascadeSettleStarts.values())
+			latest = start;
 		return latest;
 	}
 
@@ -759,8 +759,11 @@ export class RuntimeCoordinator {
 			// Track per-promise settlement so promises still in flight at the cap can be
 			// carried over. A settled entry records its run; an unsettled one is re-parked.
 			const tracked = pending.map((p) => {
-				const entry: { done: boolean; run?: CascadeRun; promise: Promise<CascadeRun> } =
-					{ done: false, promise: p };
+				const entry: {
+					done: boolean;
+					run?: CascadeRun;
+					promise: Promise<CascadeRun>;
+				} = { done: false, promise: p };
 				entry.promise = p.then((run) => {
 					entry.done = true;
 					entry.run = run;
@@ -886,7 +889,8 @@ export class RuntimeCoordinator {
 		const existing = this._pendingInlineBlockers.get(key);
 		if (!existing) return false;
 		if (existing.stale && existing.staleReason !== "past-eof") return false;
-		const currentlyPastEof = !!existing.stale && existing.staleReason === "past-eof";
+		const currentlyPastEof =
+			!!existing.stale && existing.staleReason === "past-eof";
 		if (currentlyPastEof === isPastEof) return false;
 		this._pendingInlineBlockers.set(key, {
 			...existing,
@@ -1014,8 +1018,7 @@ export class RuntimeCoordinator {
 		// Existence-checking the display path and rebuilding survivors avoids
 		// the key-mismatch entirely; live survivors re-set to identical keys
 		// (both realpath), so only the stale entries are dropped.
-		const survivors: Array<[string, InlineBlockerRecord]> =
-			[];
+		const survivors: Array<[string, InlineBlockerRecord]> = [];
 		for (const [displayPath, value] of this._pendingInlineBlockers.entries()) {
 			if (fs.existsSync(displayPath)) survivors.push([displayPath, value]);
 		}
@@ -1144,9 +1147,7 @@ export class RuntimeCoordinator {
 	 * An expired entry (older than `TOOL_CALL_ATTRIBUTION_TTL_MS`) is treated
 	 * as a miss and removed rather than returned — see the constant's doc.
 	 */
-	takeToolCallAttribution(
-		toolCallId: string,
-	): ToolCallAttribution | undefined {
+	takeToolCallAttribution(toolCallId: string): ToolCallAttribution | undefined {
 		const attribution = this._toolCallAttributions.get(toolCallId);
 		if (attribution === undefined) return undefined;
 		this._toolCallAttributions.delete(toolCallId);
@@ -1329,7 +1330,8 @@ export class RuntimeCoordinator {
 			const existing = this._pendingDeferredMutations.get(key);
 			if (existing) {
 				for (const kind of record.kinds) existing.kinds.add(kind);
-				for (const toolName of record.toolNames) existing.toolNames.add(toolName);
+				for (const toolName of record.toolNames)
+					existing.toolNames.add(toolName);
 				continue;
 			}
 			this._pendingDeferredMutations.set(key, {
@@ -1403,11 +1405,13 @@ export function readHostModelIdentity(ctx: unknown): {
 	provider?: string;
 } {
 	try {
-		const model = (ctx as { model?: { id?: unknown; provider?: unknown } } | null)
-			?.model;
+		const model = (
+			ctx as { model?: { id?: unknown; provider?: unknown } } | null
+		)?.model;
 		return {
 			model: typeof model?.id === "string" ? model.id : undefined,
-			provider: typeof model?.provider === "string" ? model.provider : undefined,
+			provider:
+				typeof model?.provider === "string" ? model.provider : undefined,
 		};
 	} catch {
 		return {};

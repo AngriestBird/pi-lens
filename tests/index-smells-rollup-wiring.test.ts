@@ -86,63 +86,66 @@ function smellNotifyCalls() {
 // red pre-fix at 5222ms (over the 5000ms default) — see #1778.
 const SMELLS_ROLLUP_WIRING_TIMEOUT_MS = 30_000;
 
-describe("index turn_end smells-rollup wiring (#1123 item 3)", {
-	timeout: SMELLS_ROLLUP_WIRING_TIMEOUT_MS,
-}, () => {
-	beforeEach(async () => {
-		vi.resetModules();
-		notify.mockClear();
-		countRecentSmells.mockClear();
-		mockedCounts = { staleCtxEmitFailed: 0, opengrepRespawn: 0 };
-		const { resetSmellsSessionState } = await import(
-			"../clients/smells-rollup.js"
-		);
-		resetSmellsSessionState();
-	});
-	afterEach(() => {
-		vi.clearAllMocks();
-	});
+describe(
+	"index turn_end smells-rollup wiring (#1123 item 3)",
+	{
+		timeout: SMELLS_ROLLUP_WIRING_TIMEOUT_MS,
+	},
+	() => {
+		beforeEach(async () => {
+			vi.resetModules();
+			notify.mockClear();
+			countRecentSmells.mockClear();
+			mockedCounts = { staleCtxEmitFailed: 0, opengrepRespawn: 0 };
+			const { resetSmellsSessionState } =
+				await import("../clients/smells-rollup.js");
+			resetSmellsSessionState();
+		});
+		afterEach(() => {
+			vi.clearAllMocks();
+		});
 
-	it("checks nothing before the interval (turn 19)", async () => {
-		mockedCounts = { staleCtxEmitFailed: 99, opengrepRespawn: 99 };
-		await driveTurns(19);
-		expect(smellNotifyCalls()).toHaveLength(0);
-	});
+		it("checks nothing before the interval (turn 19)", async () => {
+			mockedCounts = { staleCtxEmitFailed: 99, opengrepRespawn: 99 };
+			await driveTurns(19);
+			expect(smellNotifyCalls()).toHaveLength(0);
+		});
 
-	it("notifies once when a smell is at/above threshold on the check turn (20)", async () => {
-		mockedCounts = { staleCtxEmitFailed: 5, opengrepRespawn: 0 };
-		await driveTurns(20);
-		const calls = smellNotifyCalls();
-		expect(calls).toHaveLength(1);
-		expect(String(calls[0][0])).toContain("stale-ctx emit_failed");
-		expect(calls[0][1]).toBe("warning");
-	});
+		it("notifies once when a smell is at/above threshold on the check turn (20)", async () => {
+			mockedCounts = { staleCtxEmitFailed: 5, opengrepRespawn: 0 };
+			await driveTurns(20);
+			const calls = smellNotifyCalls();
+			expect(calls).toHaveLength(1);
+			expect(String(calls[0][0])).toContain("stale-ctx emit_failed");
+			expect(calls[0][1]).toBe("warning");
+		});
 
-	it("passes the in-process session start, not the 24h fallback (S3c, #1432 review)", async () => {
-		mockedCounts = { staleCtxEmitFailed: 5, opengrepRespawn: 0 };
-		const before = Date.now();
-		await driveTurns(20);
-		const after = Date.now();
-		expect(countRecentSmells).toHaveBeenCalled();
-		const [rootArg, sessionStartArg] = countRecentSmells.mock.calls.at(-1)!;
-		expect(rootArg).toBeUndefined();
-		expect(sessionStartArg).toBeTypeOf("number");
-		// The session (and thus its recorded start) is created inside
-		// driveTurns, so it falls within [before, after] — nowhere near a
-		// 24h-ago fallback value.
-		expect(sessionStartArg as number).toBeGreaterThanOrEqual(before);
-		expect(sessionStartArg as number).toBeLessThanOrEqual(after);
-	});
+		it("passes the in-process session start, not the 24h fallback (S3c, #1432 review)", async () => {
+			mockedCounts = { staleCtxEmitFailed: 5, opengrepRespawn: 0 };
+			const before = Date.now();
+			await driveTurns(20);
+			const after = Date.now();
+			expect(countRecentSmells).toHaveBeenCalled();
+			const [rootArg, sessionStartArg] = countRecentSmells.mock.calls.at(-1)!;
+			expect(rootArg).toBeUndefined();
+			expect(sessionStartArg).toBeTypeOf("number");
+			// The session (and thus its recorded start) is created inside
+			// driveTurns, so it falls within [before, after] — nowhere near a
+			// 24h-ago fallback value.
+			expect(sessionStartArg as number).toBeGreaterThanOrEqual(before);
+			expect(sessionStartArg as number).toBeLessThanOrEqual(after);
+		});
 
-	it("does not notify again on turn 40 for a smell already notified this session", async () => {
-		mockedCounts = { staleCtxEmitFailed: 5, opengrepRespawn: 0 };
-		await driveTurns(40);
-		expect(smellNotifyCalls()).toHaveLength(1);
-	});
+		it("does not notify again on turn 40 for a smell already notified this session", async () => {
+			mockedCounts = { staleCtxEmitFailed: 5, opengrepRespawn: 0 };
+			await driveTurns(40);
+			expect(smellNotifyCalls()).toHaveLength(1);
+		});
 
-	it("does not notify when every count stays below threshold", async () => {
-		mockedCounts = { staleCtxEmitFailed: 1, opengrepRespawn: 1 };
-		await driveTurns(20);
-		expect(smellNotifyCalls()).toHaveLength(0);
-	});
-});
+		it("does not notify when every count stays below threshold", async () => {
+			mockedCounts = { staleCtxEmitFailed: 1, opengrepRespawn: 1 };
+			await driveTurns(20);
+			expect(smellNotifyCalls()).toHaveLength(0);
+		});
+	},
+);

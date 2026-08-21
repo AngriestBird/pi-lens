@@ -138,7 +138,11 @@ describe.runIf(process.platform === "win32")(
 				{
 					timeout: 5000,
 					cwd: fixtureDir,
-					env: { PATH: managedPath, Path: managedPath, PATHEXT: ".COM;.CMD;.EXE" },
+					env: {
+						PATH: managedPath,
+						Path: managedPath,
+						PATHEXT: ".COM;.CMD;.EXE",
+					},
 				},
 			);
 			expect(result.error).toBeUndefined();
@@ -180,12 +184,10 @@ describe.runIf(process.platform === "win32")(
 			expect(result.stdout).toBe("");
 		});
 
-		it('(c) an arg containing a literal quote targeting a .cmd shim is rejected loudly, nothing spawned', async () => {
+		it("(c) an arg containing a literal quote targeting a .cmd shim is rejected loudly, nothing spawned", async () => {
 			const result = await safeSpawnAsync(echoArgsCmd, ['embedded"quote']);
 			expect(result.error).toBeDefined();
-			expect(result.error?.message).toContain(
-				JSON.stringify('embedded"quote'),
-			);
+			expect(result.error?.message).toContain(JSON.stringify('embedded"quote'));
 			expect(result.status).toBeNull();
 			expect(result.stdout).toBe("");
 		});

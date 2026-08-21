@@ -7,7 +7,8 @@ const { serviceHolder, logLatency } = vi.hoisted(() => ({
 
 vi.mock("../../clients/latency-logger.js", () => ({ logLatency }));
 vi.mock("../../clients/lsp/index.js", async (importOriginal) => {
-	const actual = await importOriginal<typeof import("../../clients/lsp/index.js")>();
+	const actual =
+		await importOriginal<typeof import("../../clients/lsp/index.js")>();
 	return { ...actual, getLSPService: () => serviceHolder.current };
 });
 

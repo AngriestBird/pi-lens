@@ -138,72 +138,82 @@ describe("pruneDeadInstances", () => {
 // the worst contended run observed, including CI's weaker 4-core runner.
 const PRUNE_CONCURRENCY_TIMEOUT_MS = 30_000;
 
-describe("concurrent pruneDeadInstances on one registry (#1217)", {
-	timeout: PRUNE_CONCURRENCY_TIMEOUT_MS,
-}, () => {
-	const ITERATIONS = 40;
-	// BOTH results have to be large, and differ in size: the tear comes from two
-	// writers overlapping INSIDE the shared inode (the second `open(O_TRUNC)`s
-	// while the first is mid-write, and each fd carries its own offset), not
-	// from the rename alone. Pairing a big result with a tiny one does not
-	// reproduce it — the tiny writer is long finished before the big one starts,
-	// and the big writer then simply overwrites the whole file with its own
-	// complete content. Each writer also reads and parses the same ~2 MB file
-	// first, which desynchronizes them further, so the payloads must be big
-	// enough that the writes still overlap after that. ~2 MB vs ~1 MB here;
-	// #1205 measured its Linux reproduction at 21/40 on the same scale.
-	const TOTAL = 1200;
-	const PAD = 1600;
-	const EVENS = Array.from({ length: TOTAL / 2 }, (_, n) => (n + 1) * 2);
+describe(
+	"concurrent pruneDeadInstances on one registry (#1217)",
+	{
+		timeout: PRUNE_CONCURRENCY_TIMEOUT_MS,
+	},
+	() => {
+		const ITERATIONS = 40;
+		// BOTH results have to be large, and differ in size: the tear comes from two
+		// writers overlapping INSIDE the shared inode (the second `open(O_TRUNC)`s
+		// while the first is mid-write, and each fd carries its own offset), not
+		// from the rename alone. Pairing a big result with a tiny one does not
+		// reproduce it — the tiny writer is long finished before the big one starts,
+		// and the big writer then simply overwrites the whole file with its own
+		// complete content. Each writer also reads and parses the same ~2 MB file
+		// first, which desynchronizes them further, so the payloads must be big
+		// enough that the writes still overlap after that. ~2 MB vs ~1 MB here;
+		// #1205 measured its Linux reproduction at 21/40 on the same scale.
+		const TOTAL = 1200;
+		const PAD = 1600;
+		const EVENS = Array.from({ length: TOTAL / 2 }, (_, n) => (n + 1) * 2);
 
-	it("always publishes a parseable registry that is one of the two results", async () => {
-		const outcomes: string[] = [];
-		for (let i = 0; i < ITERATIONS; i++) {
+		it("always publishes a parseable registry that is one of the two results", async () => {
+			const outcomes: string[] = [];
+			for (let i = 0; i < ITERATIONS; i++) {
+				seedRegistry(TOTAL, PAD);
+				// One prune drops a single pid (~2 MB result); the other drops every
+				// even pid (~1 MB result).
+				const pruneOne = new Set([2]);
+				const pruneEvens = new Set(EVENS);
+				// Alternate launch order so neither writer is systematically first.
+				const [first, second] =
+					i % 2 === 0 ? [pruneOne, pruneEvens] : [pruneEvens, pruneOne];
+				const settling = Promise.all([
+					pruneDeadInstances(first),
+					pruneDeadInstances(second),
+				]);
+				inFlight = settling;
+				await settling;
+				inFlight = null;
+
+				const raw = fs.readFileSync(registryPath, "utf-8");
+				let pids: number[];
+				try {
+					pids = (JSON.parse(raw).instances as InstanceEntry[]).map(
+						(e) => e.pid,
+					);
+				} catch {
+					outcomes.push(`UNPARSABLE(len=${raw.length})`);
+					continue;
+				}
+				// Either writer may win — but the winner's whole result must be
+				// published, never one spliced into the other.
+				if (pids.length === TOTAL - 1 && !pids.includes(2))
+					outcomes.push("ONE_PRUNED");
+				else if (pids.length === TOTAL / 2 && pids.every((p) => p % 2 === 1))
+					outcomes.push("EVENS_PRUNED");
+				else outcomes.push(`HYBRID(entries=${pids.length}, len=${raw.length})`);
+			}
+			expect(
+				outcomes.filter(
+					(o) => o.startsWith("HYBRID") || o.startsWith("UNPARS"),
+				),
+			).toEqual([]);
+		});
+
+		it("leaves no staging files behind after concurrent prunes", async () => {
 			seedRegistry(TOTAL, PAD);
-			// One prune drops a single pid (~2 MB result); the other drops every
-			// even pid (~1 MB result).
-			const pruneOne = new Set([2]);
-			const pruneEvens = new Set(EVENS);
-			// Alternate launch order so neither writer is systematically first.
-			const [first, second] =
-				i % 2 === 0 ? [pruneOne, pruneEvens] : [pruneEvens, pruneOne];
-			const settling = Promise.all([
-				pruneDeadInstances(first),
-				pruneDeadInstances(second),
-			]);
+			const settling = Promise.all(
+				Array.from({ length: 8 }, (_, i) =>
+					pruneDeadInstances(new Set([i + 2])),
+				),
+			);
 			inFlight = settling;
 			await settling;
 			inFlight = null;
-
-			const raw = fs.readFileSync(registryPath, "utf-8");
-			let pids: number[];
-			try {
-				pids = (JSON.parse(raw).instances as InstanceEntry[]).map((e) => e.pid);
-			} catch {
-				outcomes.push(`UNPARSABLE(len=${raw.length})`);
-				continue;
-			}
-			// Either writer may win — but the winner's whole result must be
-			// published, never one spliced into the other.
-			if (pids.length === TOTAL - 1 && !pids.includes(2))
-				outcomes.push("ONE_PRUNED");
-			else if (pids.length === TOTAL / 2 && pids.every((p) => p % 2 === 1))
-				outcomes.push("EVENS_PRUNED");
-			else outcomes.push(`HYBRID(entries=${pids.length}, len=${raw.length})`);
-		}
-		expect(
-			outcomes.filter((o) => o.startsWith("HYBRID") || o.startsWith("UNPARS")),
-		).toEqual([]);
-	});
-
-	it("leaves no staging files behind after concurrent prunes", async () => {
-		seedRegistry(TOTAL, PAD);
-		const settling = Promise.all(
-			Array.from({ length: 8 }, (_, i) => pruneDeadInstances(new Set([i + 2]))),
-		);
-		inFlight = settling;
-		await settling;
-		inFlight = null;
-		expect(stageLeftovers()).toEqual([]);
-	});
-});
+			expect(stageLeftovers()).toEqual([]);
+		});
+	},
+);

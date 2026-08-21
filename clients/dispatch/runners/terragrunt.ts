@@ -1,6 +1,7 @@
 import * as path from "node:path";
 import { safeSpawnAsync } from "../../safe-spawn.js";
-import { pathsEqual } from "../../path-utils.js";import { getLinterPolicyForCwd } from "../../tool-policy.js";
+import { pathsEqual } from "../../path-utils.js";
+import { getLinterPolicyForCwd } from "../../tool-policy.js";
 import { PRIORITY } from "../priorities.js";
 import type {
 	Diagnostic,

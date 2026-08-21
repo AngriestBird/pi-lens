@@ -47,7 +47,8 @@ describe("knip-client", () => {
 			// present behind it for Windows PATH/PATHEXT resolution.
 			const separator = process.platform === "win32" ? ";" : ":";
 			const projectBin = path.join(tmpDir, "node_modules", ".bin");
-			const childPath = spawnOptions?.env?.PATH ?? spawnOptions?.env?.Path ?? "";
+			const childPath =
+				spawnOptions?.env?.PATH ?? spawnOptions?.env?.Path ?? "";
 			const childPathEntries = childPath.split(separator);
 			const managedPath = (await getToolEnvironment()).PATH ?? "";
 			const managedEntries = managedPath.split(separator);
@@ -105,10 +106,12 @@ describe("knip-client", () => {
 			// The prune must land BEFORE knip starts, not after it finishes —
 			// otherwise the very run being fixed still reads the stale glob.
 			let globCacheExistedAtSpawn = true;
-			vi.mocked(safeSpawnMod.safeSpawnAsync).mockImplementationOnce(async () => {
-				globCacheExistedAtSpawn = fs.existsSync(globCache);
-				return { status: 0, stdout: "", stderr: "" };
-			});
+			vi.mocked(safeSpawnMod.safeSpawnAsync).mockImplementationOnce(
+				async () => {
+					globCacheExistedAtSpawn = fs.existsSync(globCache);
+					return { status: 0, stdout: "", stderr: "" };
+				},
+			);
 
 			const client = new KnipClient(false) as unknown as {
 				runAnalyze: (d: string) => Promise<unknown>;
@@ -153,7 +156,10 @@ describe("knip-client", () => {
 			const home = path.join(ancestor, "home");
 			const nested = path.join(home, "empty-folder");
 			fs.mkdirSync(nested, { recursive: true });
-			fs.writeFileSync(path.join(ancestor, "package.json"), '{"name":"parent"}');
+			fs.writeFileSync(
+				path.join(ancestor, "package.json"),
+				'{"name":"parent"}',
+			);
 
 			const client = new KnipClient(false) as unknown as {
 				resolveProjectRoot: (
@@ -212,7 +218,9 @@ describe("knip-client", () => {
 	it("returns null when no project markers exist up the tree", () => {
 		// Regression: previously fell back to startDir, causing knip to scan
 		// arbitrary directories like $HOME when run from a bare cwd.
-		const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-knip-none-"));
+		const tmpRoot = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-knip-none-"),
+		);
 		try {
 			const nested = path.join(tmpRoot, "deep", "nowhere");
 			fs.mkdirSync(nested, { recursive: true });
@@ -398,7 +406,9 @@ describe("knip-client", () => {
 		{ name: "changed sequence", nextSeq: 8, reset: false },
 		{ name: "session reset", nextSeq: 7, reset: true },
 	])("re-executes after $name", async ({ nextSeq, reset }) => {
-		const { tmpDir, cleanup } = setupTestEnvironment("pi-lens-knip-memo-change-");
+		const { tmpDir, cleanup } = setupTestEnvironment(
+			"pi-lens-knip-memo-change-",
+		);
 		try {
 			fs.writeFileSync(path.join(tmpDir, "package.json"), '{"name":"demo"}');
 			const client = new KnipClient(false);
@@ -414,7 +424,9 @@ describe("knip-client", () => {
 			};
 			const run = vi
 				.spyOn(
-					client as unknown as { runAnalyze: (dir: string) => Promise<unknown> },
+					client as unknown as {
+						runAnalyze: (dir: string) => Promise<unknown>;
+					},
 					"runAnalyze",
 				)
 				.mockResolvedValue(result);
@@ -438,7 +450,9 @@ describe("knip-client", () => {
 			vi.spyOn(client, "ensureAvailable").mockResolvedValue(true);
 			const run = vi
 				.spyOn(
-					client as unknown as { runAnalyze: (dir: string) => Promise<unknown> },
+					client as unknown as {
+						runAnalyze: (dir: string) => Promise<unknown>;
+					},
 					"runAnalyze",
 				)
 				.mockResolvedValue({
@@ -464,7 +478,9 @@ describe("knip-client", () => {
 	});
 
 	it("invalidates the memo when an external package change does not advance projectSeq", async () => {
-		const { tmpDir, cleanup } = setupTestEnvironment("pi-lens-knip-memo-external-");
+		const { tmpDir, cleanup } = setupTestEnvironment(
+			"pi-lens-knip-memo-external-",
+		);
 		try {
 			const packagePath = path.join(tmpDir, "package.json");
 			fs.writeFileSync(packagePath, '{"name":"demo"}');
@@ -472,7 +488,9 @@ describe("knip-client", () => {
 			vi.spyOn(client, "ensureAvailable").mockResolvedValue(true);
 			const run = vi
 				.spyOn(
-					client as unknown as { runAnalyze: (dir: string) => Promise<unknown> },
+					client as unknown as {
+						runAnalyze: (dir: string) => Promise<unknown>;
+					},
 					"runAnalyze",
 				)
 				.mockResolvedValue({
@@ -568,7 +586,10 @@ describe("knip-client", () => {
 				JSON.stringify({
 					name: "demo",
 					overrides: { "brace-expansion": "^2.0.0" },
-					devDependencies: { "brace-expansion": "^2.0.0", "real-unused": "^1.0.0" },
+					devDependencies: {
+						"brace-expansion": "^2.0.0",
+						"real-unused": "^1.0.0",
+					},
 				}),
 			);
 
@@ -614,7 +635,9 @@ describe("knip-client", () => {
 		// Empirically (knip 6.4.1), a genuinely clean run ALWAYS prints
 		// `{"issues":[]}` on exit 0 — empty stdout only pairs with a nonzero
 		// exit, so this combination is unambiguous evidence of a failed run.
-		const { tmpDir, cleanup } = setupTestEnvironment("pi-lens-knip-broken-shim-");
+		const { tmpDir, cleanup } = setupTestEnvironment(
+			"pi-lens-knip-broken-shim-",
+		);
 		try {
 			fs.writeFileSync(path.join(tmpDir, "package.json"), '{"name":"demo"}');
 
@@ -644,11 +667,13 @@ describe("knip-client", () => {
 		}
 	});
 
-	it("still reports a genuine clean run (exit 0, {\"issues\":[]}) as clean (#1736)", async () => {
+	it('still reports a genuine clean run (exit 0, {"issues":[]}) as clean (#1736)', async () => {
 		// Inversion check (the #1700 lesson): prove the discriminator doesn't
 		// misclassify a REAL clean run. knip 6.4.1 verified live: exit 0 always
 		// prints `{"issues":[]}`, never truly empty stdout.
-		const { tmpDir, cleanup } = setupTestEnvironment("pi-lens-knip-genuine-clean-");
+		const { tmpDir, cleanup } = setupTestEnvironment(
+			"pi-lens-knip-genuine-clean-",
+		);
 		try {
 			fs.writeFileSync(path.join(tmpDir, "package.json"), '{"name":"demo"}');
 
@@ -661,7 +686,9 @@ describe("knip-client", () => {
 			} as never);
 
 			const client = new KnipClient(false) as unknown as {
-				runAnalyze: (d: string) => Promise<{ success: boolean; issues: unknown[] }>;
+				runAnalyze: (
+					d: string,
+				) => Promise<{ success: boolean; issues: unknown[] }>;
 			};
 			const result = await client.runAnalyze(tmpDir);
 
@@ -674,7 +701,9 @@ describe("knip-client", () => {
 	});
 
 	it("still parses a genuine findings run that exits nonzero (knip exits 1 when it finds issues) (#1736)", async () => {
-		const { tmpDir, cleanup } = setupTestEnvironment("pi-lens-knip-genuine-findings-");
+		const { tmpDir, cleanup } = setupTestEnvironment(
+			"pi-lens-knip-genuine-findings-",
+		);
 		try {
 			fs.writeFileSync(path.join(tmpDir, "package.json"), '{"name":"demo"}');
 
@@ -683,13 +712,17 @@ describe("knip-client", () => {
 				error: null,
 				status: 1,
 				stdout: JSON.stringify({
-					issues: [{ file: "unused-file.js", files: [{ name: "unused-file.js" }] }],
+					issues: [
+						{ file: "unused-file.js", files: [{ name: "unused-file.js" }] },
+					],
 				}),
 				stderr: "",
 			} as never);
 
 			const client = new KnipClient(false) as unknown as {
-				runAnalyze: (d: string) => Promise<{ success: boolean; issues: unknown[] }>;
+				runAnalyze: (
+					d: string,
+				) => Promise<{ success: boolean; issues: unknown[] }>;
 			};
 			const result = await client.runAnalyze(tmpDir);
 

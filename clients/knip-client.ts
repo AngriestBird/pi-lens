@@ -119,7 +119,9 @@ export function readOverridePinnedPackageNames(targetDir: string): Set<string> {
 
 	const collectKeys = (value: unknown): void => {
 		if (!value || typeof value !== "object" || Array.isArray(value)) return;
-		for (const [key, nested] of Object.entries(value as Record<string, unknown>)) {
+		for (const [key, nested] of Object.entries(
+			value as Record<string, unknown>,
+		)) {
 			names.add(key);
 			collectKeys(nested);
 		}
@@ -212,7 +214,9 @@ export function classifyKnipBinary(
 ): KnipBinarySource {
 	if (binary === null) return "managed-or-path";
 	const relative = path.relative(path.resolve(targetDir), path.resolve(binary));
-	return relative === "" || relative.startsWith("..") || path.isAbsolute(relative)
+	return relative === "" ||
+		relative.startsWith("..") ||
+		path.isAbsolute(relative)
 		? "global"
 		: "project";
 }
@@ -295,9 +299,7 @@ export class KnipClient {
 	private readonly recordedToolchains = new Set<string>();
 
 	constructor(verbose = false) {
-		this.log = verbose
-			? createSubsystemLogger("knip")
-			: () => {};
+		this.log = verbose ? createSubsystemLogger("knip") : () => {};
 	}
 
 	/** Re-arm content-keyed reuse at the session boundary. */
@@ -326,7 +328,13 @@ export class KnipClient {
 	): string | null {
 		return findNearestMarkerRoot(
 			startDir,
-			["package.json", "knip.json", "knip.ts", "knip.config.js", "knip.config.ts"],
+			[
+				"package.json",
+				"knip.json",
+				"knip.ts",
+				"knip.config.js",
+				"knip.config.ts",
+			],
 			{ boundaries: [".git", ".hg", ".svn"], homeDir: homeDirOverride },
 		);
 	}
@@ -439,7 +447,9 @@ export class KnipClient {
 			completed?.projectSeq === options.projectSeq &&
 			this.matchesMemoSignal(targetDir, completed.signal)
 		) {
-			this.log(`Analysis cache hit for ${key} at projectSeq ${options.projectSeq}`);
+			this.log(
+				`Analysis cache hit for ${key} at projectSeq ${options.projectSeq}`,
+			);
 			return { ...completed.result, execution: "cache" };
 		}
 
@@ -491,7 +501,9 @@ export class KnipClient {
 	private readMemoSignal(targetDir: string): KnipMemoSignal {
 		const config = resolveProjectKnipConfig(targetDir);
 		return {
-			packageJson: this.readMemoFileSignal(path.join(targetDir, "package.json")),
+			packageJson: this.readMemoFileSignal(
+				path.join(targetDir, "package.json"),
+			),
 			config:
 				config && config !== "package.json#knip"
 					? this.readMemoFileSignal(path.join(targetDir, config))
@@ -499,13 +511,21 @@ export class KnipClient {
 		};
 	}
 
-	private matchesMemoSignal(targetDir: string, signal: KnipMemoSignal): boolean {
+	private matchesMemoSignal(
+		targetDir: string,
+		signal: KnipMemoSignal,
+	): boolean {
 		const current = {
-			packageJson: this.readMemoFileSignal(path.join(targetDir, "package.json")),
-			config: signal.config ? this.readMemoFileSignal(signal.config.path) : null,
+			packageJson: this.readMemoFileSignal(
+				path.join(targetDir, "package.json"),
+			),
+			config: signal.config
+				? this.readMemoFileSignal(signal.config.path)
+				: null,
 		};
 		return (
-			JSON.stringify(current.packageJson) === JSON.stringify(signal.packageJson) &&
+			JSON.stringify(current.packageJson) ===
+				JSON.stringify(signal.packageJson) &&
 			JSON.stringify(current.config) === JSON.stringify(signal.config)
 		);
 	}
@@ -536,7 +556,11 @@ export class KnipClient {
 		//    uncached 3.3s, fully cached 1.3s, glob-cache-dropped 1.4s. The glob
 		//    cache is worth ~0.1s of the ~2.0s the cache saves, so dropping it
 		//    buys correctness for almost nothing.
-		const cacheLocation = path.join(getProjectDataDir(targetDir), "cache", "knip");
+		const cacheLocation = path.join(
+			getProjectDataDir(targetDir),
+			"cache",
+			"knip",
+		);
 
 		// knip (verified against 6.26.0) silently fails to persist the cache when
 		// `--cache-location` points at a directory that doesn't exist yet: its
@@ -603,7 +627,9 @@ export class KnipClient {
 		// error), so `status !== 0 && !output.trim()` is unambiguous evidence
 		// of a failed run, never a clean one.
 		const output = result.stdout || "";
-		this.log(`Knip output length: ${output.length}, exit status: ${result.status}`);
+		this.log(
+			`Knip output length: ${output.length}, exit status: ${result.status}`,
+		);
 		if (output.length < 500) {
 			this.log(`Knip output sample: ${output}`);
 		}
@@ -747,7 +773,8 @@ export class KnipClient {
 
 		const isPinnedDepIssue = (issue: KnipIssue): boolean =>
 			(issue.type === "dependency" || issue.type === "devDependency") &&
-			(pinned.has(issue.name) || (!!issue.package && pinned.has(issue.package)));
+			(pinned.has(issue.name) ||
+				(!!issue.package && pinned.has(issue.package)));
 
 		const issues = result.issues.filter((issue) => !isPinnedDepIssue(issue));
 		const unusedDeps = result.unusedDeps.filter(

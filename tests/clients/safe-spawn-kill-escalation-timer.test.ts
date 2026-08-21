@@ -31,14 +31,12 @@ import { makeFakeChild } from "../support/fake-child.js";
 
 const spawnMock = vi.fn();
 vi.mock("node:child_process", async (importOriginal) => {
-	const actual =
-		await importOriginal<typeof import("node:child_process")>();
+	const actual = await importOriginal<typeof import("node:child_process")>();
 	return { ...actual, spawn: spawnMock };
 });
 
-const { safeSpawnAsync, setAmbientAbortSignal } = await import(
-	"../../clients/safe-spawn.js"
-);
+const { safeSpawnAsync, setAmbientAbortSignal } =
+	await import("../../clients/safe-spawn.js");
 
 describe("safeSpawnAsync — non-Windows kill escalation timer cleanup (#1109)", () => {
 	const realPlatform = process.platform;
@@ -70,19 +68,21 @@ describe("safeSpawnAsync — non-Windows kill escalation timer cleanup (#1109)",
 		const clearedHandles = new Set<unknown>();
 		const realSetTimeout = global.setTimeout;
 		const realClearTimeout = global.clearTimeout;
-		vi.spyOn(global, "setTimeout").mockImplementation(
-			((fn: (...args: unknown[]) => void, ms?: number, ...args: unknown[]) => {
-				const handle = realSetTimeout(fn as never, ms, ...args);
-				if (ms === 1000) escalationHandles.push(handle);
-				return handle;
-			}) as typeof setTimeout,
-		);
-		vi.spyOn(global, "clearTimeout").mockImplementation(
-			((handle: Parameters<typeof clearTimeout>[0]) => {
-				clearedHandles.add(handle);
-				return realClearTimeout(handle);
-			}) as typeof clearTimeout,
-		);
+		vi.spyOn(global, "setTimeout").mockImplementation(((
+			fn: (...args: unknown[]) => void,
+			ms?: number,
+			...args: unknown[]
+		) => {
+			const handle = realSetTimeout(fn as never, ms, ...args);
+			if (ms === 1000) escalationHandles.push(handle);
+			return handle;
+		}) as typeof setTimeout);
+		vi.spyOn(global, "clearTimeout").mockImplementation(((
+			handle: Parameters<typeof clearTimeout>[0],
+		) => {
+			clearedHandles.add(handle);
+			return realClearTimeout(handle);
+		}) as typeof clearTimeout);
 
 		const controller = new AbortController();
 		const resultPromise = safeSpawnAsync("fake-cmd", [], {
@@ -132,19 +132,21 @@ describe("safeSpawnAsync — non-Windows kill escalation timer cleanup (#1109)",
 		const clearedHandles = new Set<unknown>();
 		const realSetTimeout = global.setTimeout;
 		const realClearTimeout = global.clearTimeout;
-		vi.spyOn(global, "setTimeout").mockImplementation(
-			((fn: (...args: unknown[]) => void, ms?: number, ...args: unknown[]) => {
-				const handle = realSetTimeout(fn as never, ms, ...args);
-				if (ms === 1000) escalationHandles.push(handle);
-				return handle;
-			}) as typeof setTimeout,
-		);
-		vi.spyOn(global, "clearTimeout").mockImplementation(
-			((handle: Parameters<typeof clearTimeout>[0]) => {
-				clearedHandles.add(handle);
-				return realClearTimeout(handle);
-			}) as typeof clearTimeout,
-		);
+		vi.spyOn(global, "setTimeout").mockImplementation(((
+			fn: (...args: unknown[]) => void,
+			ms?: number,
+			...args: unknown[]
+		) => {
+			const handle = realSetTimeout(fn as never, ms, ...args);
+			if (ms === 1000) escalationHandles.push(handle);
+			return handle;
+		}) as typeof setTimeout);
+		vi.spyOn(global, "clearTimeout").mockImplementation(((
+			handle: Parameters<typeof clearTimeout>[0],
+		) => {
+			clearedHandles.add(handle);
+			return realClearTimeout(handle);
+		}) as typeof clearTimeout);
 
 		const controller = new AbortController();
 		const resultPromise = safeSpawnAsync("fake-cmd", [], {

@@ -277,8 +277,9 @@ describe("eslint runner: a stalled probe does not disable the runner (#1494)", (
 		safeSpawnAsync.mockImplementation(async (_cmd: string, args: string[]) =>
 			args.includes("--version") ? timeoutResult() : okResult("[]"),
 		);
-		const runner = (await import("../../../../clients/dispatch/runners/eslint.js"))
-			.default;
+		const runner = (
+			await import("../../../../clients/dispatch/runners/eslint.js")
+		).default;
 		const ctx = { cwd, filePath } as never;
 
 		expect((await runner.run(ctx)).status).toBe("skipped");
@@ -309,8 +310,9 @@ describe("credo runner: a stalled probe does not disable the runner (#1494)", ()
 				? timeoutResult()
 				: okResult(JSON.stringify({ issues: [] })),
 		);
-		const runner = (await import("../../../../clients/dispatch/runners/credo.js"))
-			.default;
+		const runner = (
+			await import("../../../../clients/dispatch/runners/credo.js")
+		).default;
 		const ctx = { cwd, filePath } as never;
 
 		expect((await runner.run(ctx)).status).toBe("skipped");
@@ -381,7 +383,9 @@ describe("rust-clippy runner: a stalled probe does not disable the runner (#1494
 		const runner = (
 			await import("../../../../clients/dispatch/runners/rust-clippy.js")
 		).default;
-		expect((await runner.run({ cwd, filePath } as never)).status).toBe("skipped");
+		expect((await runner.run({ cwd, filePath } as never)).status).toBe(
+			"skipped",
+		);
 		expect(tryLazyInstall).toHaveBeenCalledWith("rust-clippy", cwd);
 
 		const decision = decisions().find(

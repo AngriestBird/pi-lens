@@ -77,7 +77,12 @@ describe("loadWorkspaceDiagnosticsCache / saveWorkspaceDiagnosticsCache (#671)",
 	});
 
 	it("fails open on a corrupt cache file", () => {
-		const cacheFile = path.join(tmp, ".pi-lens", "cache", "lsp-workspace-diagnostics.json");
+		const cacheFile = path.join(
+			tmp,
+			".pi-lens",
+			"cache",
+			"lsp-workspace-diagnostics.json",
+		);
 		fs.mkdirSync(path.dirname(cacheFile), { recursive: true });
 		fs.writeFileSync(cacheFile, "{ not json");
 		expect(loadWorkspaceDiagnosticsCache(tmp)).toBeUndefined();
@@ -92,7 +97,12 @@ describe("loadWorkspaceDiagnosticsCache / saveWorkspaceDiagnosticsCache (#671)",
 	});
 
 	it("fails open when entries is missing/malformed", () => {
-		const cacheFile = path.join(tmp, ".pi-lens", "cache", "lsp-workspace-diagnostics.json");
+		const cacheFile = path.join(
+			tmp,
+			".pi-lens",
+			"cache",
+			"lsp-workspace-diagnostics.json",
+		);
 		fs.mkdirSync(path.dirname(cacheFile), { recursive: true });
 		fs.writeFileSync(
 			cacheFile,
@@ -135,9 +145,7 @@ describe("isEntryFresh (#671)", () => {
 		const scannedAt = Date.now() - 10_000; // entry recorded 10s ago
 		const entry = makeEntry({ mtimeMs, scannedAt });
 		// Dependency's current mtime is "now" — after scannedAt.
-		expect(
-			isEntryFresh(filePath, entry, () => [depPath]),
-		).toBe(false);
+		expect(isEntryFresh(filePath, entry, () => [depPath])).toBe(false);
 	});
 
 	it("stays fresh when every dependency is older than the entry's scannedAt", () => {
@@ -217,7 +225,9 @@ describe("isEntryFresh (#671)", () => {
 
 describe("buildScopeKey / cacheKeyFor (#671)", () => {
 	it("produces a stable key independent of exclude-list ordering", () => {
-		expect(buildScopeKey("all", ["b", "a"])).toBe(buildScopeKey("all", ["a", "b"]));
+		expect(buildScopeKey("all", ["b", "a"])).toBe(
+			buildScopeKey("all", ["a", "b"]),
+		);
 	});
 
 	it("distinguishes scopes that differ in clientScope or exclusions", () => {
@@ -274,7 +284,10 @@ describe("WorkspaceDiagnosticsCacheContext (#671)", () => {
 			{
 				severity: 1 as const,
 				message: "boom",
-				range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } },
+				range: {
+					start: { line: 0, character: 0 },
+					end: { line: 0, character: 1 },
+				},
 			},
 		];
 
@@ -378,14 +391,19 @@ describe("dependency-index availability persisted on the entry (#1793)", () => {
 	// key into `index.imports` (see `buildReverseDependencyIndexFromSnapshot`)
 	// — the file is actually covered by the index, not merely "an index of
 	// some kind exists this session".
-	function seedProjectSnapshotCoveringFile(cwd: string, filePath: string): void {
+	function seedProjectSnapshotCoveringFile(
+		cwd: string,
+		filePath: string,
+	): void {
 		const key = cacheKeyFor(filePath);
 		saveProjectSnapshot(cwd, {
 			version: PROJECT_SNAPSHOT_VERSION,
 			projectRoot: cwd,
 			generatedAt: new Date().toISOString(),
 			seq: 1,
-			files: { [key]: { path: key, mtimeMs: 0, size: 0, imports: [], lastSeq: 0 } },
+			files: {
+				[key]: { path: key, mtimeMs: 0, size: 0, imports: [], lastSeq: 0 },
+			},
 			symbols: {},
 			reverseDeps: {},
 			cachedExports: [],
@@ -523,9 +541,8 @@ describe("dependency-index availability persisted on the entry (#1793)", () => {
 			...(await importOriginal<Record<string, unknown>>()),
 			logLatency,
 		}));
-		const cacheModule = await import(
-			"../../../clients/lsp/workspace-diagnostics-cache.js"
-		);
+		const cacheModule =
+			await import("../../../clients/lsp/workspace-diagnostics-cache.js");
 
 		const filePath = path.join(tmp, "clean.ts");
 		fs.writeFileSync(filePath, "export const a = 1;\n");
@@ -598,9 +615,7 @@ describe("dependency-index availability persisted on the entry (#1793)", () => {
 		first.persist();
 
 		const persisted = loadWorkspaceDiagnosticsCache(tmp);
-		expect(
-			persisted?.entries[cacheKeyFor(filePath)],
-		).toBeUndefined();
+		expect(persisted?.entries[cacheKeyFor(filePath)]).toBeUndefined();
 
 		// A second, later cold sweep sees a plain cache miss (genuinely
 		// uncached), not a refusal — same one-touch-per-sweep cost an
@@ -776,9 +791,8 @@ describe("per-file dependency-index coverage in isEntryFresh (#1814)", () => {
 			...(await importOriginal<Record<string, unknown>>()),
 			logLatency,
 		}));
-		const cacheModule = await import(
-			"../../../clients/lsp/workspace-diagnostics-cache.js"
-		);
+		const cacheModule =
+			await import("../../../clients/lsp/workspace-diagnostics-cache.js");
 
 		const gPath = path.join(tmp, "g.ts");
 		fs.writeFileSync(gPath, "export const g = 1;\n");

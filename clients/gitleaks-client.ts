@@ -426,8 +426,7 @@ export class GitleaksClient extends SecurityScanClient<GitleaksResult> {
 			return {
 				...EMPTY_RESULT,
 				scannedAt,
-				summary:
-					err instanceof Error ? err.message.slice(0, 200) : String(err),
+				summary: err instanceof Error ? err.message.slice(0, 200) : String(err),
 			};
 		} finally {
 			try {

@@ -73,7 +73,7 @@ const javacRunner: RunnerDefinition = {
 			return { status: "skipped", diagnostics: [], semantic: "none" };
 		}
 
-		if (!(await (javac.isAvailableAsync(cwd)))) {
+		if (!(await javac.isAvailableAsync(cwd))) {
 			return { status: "skipped", diagnostics: [], semantic: "none" };
 		}
 

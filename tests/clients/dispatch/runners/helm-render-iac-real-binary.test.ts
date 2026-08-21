@@ -97,7 +97,9 @@ describe("helm-render runIacPass (integration, real trivy binary, #1757)", () =>
 				);
 				expect(diagnostics.length).toBeGreaterThan(0);
 				expect(
-					diagnostics.some((d) => d.rule?.startsWith("KSV") || d.rule?.startsWith("AVD")),
+					diagnostics.some(
+						(d) => d.rule?.startsWith("KSV") || d.rule?.startsWith("AVD"),
+					),
 				).toBe(true);
 			} finally {
 				fs.rmSync(cwd, { recursive: true, force: true });

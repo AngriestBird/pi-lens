@@ -66,7 +66,10 @@ function currentFileFingerprint(filePath: string): string {
 	}
 }
 
-function capAffectedFiles(files: string[], cwd: string): {
+function capAffectedFiles(
+	files: string[],
+	cwd: string,
+): {
 	files: string[];
 	truncated: boolean;
 } {
@@ -83,7 +86,8 @@ function hasCompleteBlockingProvenance(
 	blockingFiles: unknown,
 	cwd: string,
 ): blockingFiles is string[] {
-	if (typeof blockerContent !== "string" || blockerContent.length === 0) return false;
+	if (typeof blockerContent !== "string" || blockerContent.length === 0)
+		return false;
 	if (!Array.isArray(blockingFiles) || blockingFiles.length === 0) return false;
 	if (
 		blockingFiles.some(
@@ -120,7 +124,9 @@ function getShellCommand(input: unknown): string {
 
 function executableName(value: string): string {
 	const normalized = value.replace(/\\/g, "/");
-	let name = (normalized.slice(normalized.lastIndexOf("/") + 1) ?? "").toLowerCase();
+	let name = (
+		normalized.slice(normalized.lastIndexOf("/") + 1) ?? ""
+	).toLowerCase();
 	// Shell launchers are commonly supplied as resolved Windows paths or as
 	// PATHEXT-qualified names. Guard classification must happen after the same
 	// basename/extension normalization for every wrapper family.
@@ -184,7 +190,7 @@ function canonicalizeGuardCommand(command: string): string {
 		const positional = command.slice(i).match(/^\$IFS(?:\$[0-9]+)?/)?.[0];
 		if (parameter || positional) {
 			result += " ";
-		i += (parameter ?? positional ?? "").length - 1;
+			i += (parameter ?? positional ?? "").length - 1;
 			continue;
 		}
 		result += ch;
@@ -202,7 +208,10 @@ function canonicalizeGuardCommand(command: string): string {
 		collapsed += ch;
 		if (!quote && (ch === "'" || ch === '"')) {
 			quote = ch === "'" ? "single" : "double";
-		} else if ((quote === "single" && ch === "'") || (quote === "double" && ch === '"')) {
+		} else if (
+			(quote === "single" && ch === "'") ||
+			(quote === "double" && ch === '"')
+		) {
 			quote = undefined;
 		}
 	}
@@ -297,13 +306,18 @@ function containsGuardedSubstitution(command: string, depth: number): boolean {
 				: command.startsWith(">(", i)
 					? delimitedSubstitutionBody(command, i, ">(", ")")
 					: ch === "`"
-						? { body: command.slice(i + 1, command.indexOf("`", i + 1)), end: command.indexOf("`", i + 1) }
+						? {
+								body: command.slice(i + 1, command.indexOf("`", i + 1)),
+								end: command.indexOf("`", i + 1),
+							}
 						: undefined;
 		if (substitution && substitution.end >= 0) {
 			const nested = canonicalizeGuardCommand(substitution.body);
 			if (
 				containsGuardedSubstitution(nested, depth + 1) ||
-				tokenizeShellCommand(nested).some((segment) => containsCommitOrPush(segment.tokens, depth + 1))
+				tokenizeShellCommand(nested).some((segment) =>
+					containsCommitOrPush(segment.tokens, depth + 1),
+				)
 			) {
 				return true;
 			}
@@ -338,7 +352,9 @@ function containsCommitOrPush(tokens: string[], depth: number): boolean {
 	// git token in their arguments is not an indirect executable invocation.
 	// `$(git push)` is execution and must block; `"git push"` as literal text
 	// is allowed. Substitutions are screened before this text-consumer escape.
-	if (["echo", "printf", "grep"].includes(executableName(commandTokens[0] ?? ""))) {
+	if (
+		["echo", "printf", "grep"].includes(executableName(commandTokens[0] ?? ""))
+	) {
 		return false;
 	}
 	const gitIndex = commandTokens.findIndex((token) => isGitExecutable(token));
@@ -359,13 +375,28 @@ function containsCommitOrPush(tokens: string[], depth: number): boolean {
 		]);
 		while (i < gitTokens.length && gitTokens[i].startsWith("-")) {
 			const option = gitTokens[i];
-			if (["--help", "-h", "--version", "-v", "-V"].includes(option)) return false;
-			if (option === "--") return gitTokens[i + 1] === "commit" || gitTokens[i + 1] === "push";
-			if (["-C", "-c"].some((prefix) => option.startsWith(prefix) && option.length > prefix.length)) {
+			if (["--help", "-h", "--version", "-v", "-V"].includes(option))
+				return false;
+			if (option === "--")
+				return gitTokens[i + 1] === "commit" || gitTokens[i + 1] === "push";
+			if (
+				["-C", "-c"].some(
+					(prefix) =>
+						option.startsWith(prefix) && option.length > prefix.length,
+				)
+			) {
 				i += 1;
 				continue;
 			}
-			if (["--config-env", "--git-dir", "--work-tree", "--exec-path", "--namespace"].some((prefix) => option.startsWith(`${prefix}=`))) {
+			if (
+				[
+					"--config-env",
+					"--git-dir",
+					"--work-tree",
+					"--exec-path",
+					"--namespace",
+				].some((prefix) => option.startsWith(`${prefix}=`))
+			) {
 				i += 1;
 				continue;
 			}
@@ -376,14 +407,18 @@ function containsCommitOrPush(tokens: string[], depth: number): boolean {
 	}
 	const leadingExecutable = commandTokens[0] ?? "";
 	const knownCommandStringWrapper =
-		isShellWrapper(leadingExecutable) || isCommandStringWrapper(leadingExecutable);
+		isShellWrapper(leadingExecutable) ||
+		isCommandStringWrapper(leadingExecutable);
 	if (!knownCommandStringWrapper) {
 		// Unknown launchers are a fail-closed boundary only when they explicitly
 		// accept a command string. Re-tokenizing the value keeps literal mentions
 		// such as `myprog -c "echo git push"` out of the guarded-command path.
-		const unknownSwitchIndex = commandTokens.slice(1).findIndex((token) =>
-			(token.startsWith("-") || token.startsWith("/")) && token.length > 1,
-		);
+		const unknownSwitchIndex = commandTokens
+			.slice(1)
+			.findIndex(
+				(token) =>
+					(token.startsWith("-") || token.startsWith("/")) && token.length > 1,
+			);
 		if (unknownSwitchIndex < 0) return false;
 		const commandIndex = unknownSwitchIndex + 2;
 		if (commandIndex >= commandTokens.length) return false;
@@ -421,7 +456,10 @@ function containsCommitOrPush(tokens: string[], depth: number): boolean {
 }
 
 /** Analyze actual executable invocations, not substrings in shell text. */
-export function isGitCommitOrPushAttempt(toolName: string, input: unknown): boolean {
+export function isGitCommitOrPushAttempt(
+	toolName: string,
+	input: unknown,
+): boolean {
 	if (toolName !== "bash") return false;
 	const command = getShellCommand(input);
 	if (!command) return false;
@@ -452,8 +490,11 @@ function isTurnEndFindingsCache(value: unknown): value is TurnEndFindingsCache {
 		) &&
 		!!record.fileContentHashes &&
 		typeof record.fileContentHashes === "object" &&
-		Object.values(record.fileContentHashes).every((hash) => typeof hash === "string") &&
-		(record.affectedFilesTruncated === undefined || typeof record.affectedFilesTruncated === "boolean") &&
+		Object.values(record.fileContentHashes).every(
+			(hash) => typeof hash === "string",
+		) &&
+		(record.affectedFilesTruncated === undefined ||
+			typeof record.affectedFilesTruncated === "boolean") &&
 		(record.blockingFiles === undefined || Array.isArray(record.blockingFiles))
 	);
 }
@@ -492,13 +533,18 @@ export function writeGitGuardRecord(
 		cwd,
 		runtime,
 		generation: 0,
-		files: capped.files.map((file) => ({ path: file, role: "affected" as const })),
+		files: capped.files.map((file) => ({
+			path: file,
+			role: "affected" as const,
+		})),
 		truncated: capped.truncated,
 	});
-	const fileContentHashes = Object.fromEntries(currentProvenance.files.map((file) => [
-		guardPathKey(file.path, cwd),
-		file.sha256,
-	]));
+	const fileContentHashes = Object.fromEntries(
+		currentProvenance.files.map((file) => [
+			guardPathKey(file.path, cwd),
+			file.sha256,
+		]),
+	);
 	const data: TurnEndFindingsCache = {
 		...record,
 		affectedFiles: capped.files,
@@ -537,7 +583,11 @@ function logDecision(
 	});
 }
 
-function unknown(cwd: string, reasonCategory: string, metadata = {}): GuardDecision {
+function unknown(
+	cwd: string,
+	reasonCategory: string,
+	metadata = {},
+): GuardDecision {
 	logDecision(cwd, "unknown", reasonCategory, metadata);
 	return {
 		block: true,
@@ -624,16 +674,24 @@ export function syncGitGuardRecord(
 	for (const [filePath, seq] of runtime.getFileSeqEntries?.() ?? []) {
 		fileSeqByPath[guardPathKey(filePath, cwd)] = seq;
 	}
-	const inlineFiles = entries.map((entry) => resolveGuardPath(entry.filePath, cwd));
+	const inlineFiles = entries.map((entry) =>
+		resolveGuardPath(entry.filePath, cwd),
+	);
 	const existingBlockingFiles = existing?.blockingFiles ?? [];
 	const provenanceComplete = existing?.blockerContent
-		? hasCompleteBlockingProvenance(existing.blockerContent, existingBlockingFiles, cwd)
+		? hasCompleteBlockingProvenance(
+				existing.blockerContent,
+				existingBlockingFiles,
+				cwd,
+			)
 		: true;
 	if (existing?.blockerContent && !provenanceComplete) {
 		markCacheUnknown(runtime, "blocking_provenance_untrusted");
 		return;
 	}
-	const editedKey = editedFilePath ? guardPathKey(editedFilePath, cwd) : undefined;
+	const editedKey = editedFilePath
+		? guardPathKey(editedFilePath, cwd)
+		: undefined;
 	const testFiles = existing?.testFailureFiles ?? [];
 	const remainingBlockingFiles =
 		editedKey && existingBlockingFiles.length > 0
@@ -673,7 +731,10 @@ export function syncGitGuardRecord(
 				: existing?.blockerContent;
 	const hasTestFailures = existing?.testFailures === true;
 	const hasBlockers = !!blockerContent || hasTestFailures;
-	const content = [blockerContent, hasTestFailures ? existing?.testFailureContent : undefined]
+	const content = [
+		blockerContent,
+		hasTestFailures ? existing?.testFailureContent : undefined,
+	]
 		.filter((value): value is string => !!value)
 		.join("\n\n");
 	if (!hasBlockers && !content) {
@@ -716,8 +777,11 @@ export function mergeGitGuardTestFailure(
 	const testFailureFiles = [
 		...(existing?.testFailureFiles ?? []),
 		...failedFiles,
-	].filter((file, index, all) =>
-		all.findIndex((candidate) => guardPathKey(candidate, cwd) === guardPathKey(file, cwd)) === index,
+	].filter(
+		(file, index, all) =>
+			all.findIndex(
+				(candidate) => guardPathKey(candidate, cwd) === guardPathKey(file, cwd),
+			) === index,
 	);
 	writeGitGuardRecord(cacheManager, runtime, cwd, {
 		content: [blockerContent, content].filter(Boolean).join("\n\n"),
@@ -747,9 +811,10 @@ export function clearGitGuardTestFailure(
 	const existing = cacheRecord(cacheManager, cwd);
 	if (!existing?.testFailures) return;
 	const passedKeys = new Set(
-		(passedFiles.length > 0 ? passedFiles : existing.testFailureFiles ?? []).map(
-			(file) => guardPathKey(file, cwd),
-		),
+		(passedFiles.length > 0
+			? passedFiles
+			: (existing.testFailureFiles ?? [])
+		).map((file) => guardPathKey(file, cwd)),
 	);
 	const remainingFiles = (existing.testFailureFiles ?? []).filter(
 		(file) => !passedKeys.has(guardPathKey(file, cwd)),
@@ -765,7 +830,9 @@ export function clearGitGuardTestFailure(
 	const affectedFiles = existing.affectedFiles.filter(
 		(file) =>
 			blockingKeys.has(guardPathKey(file, cwd)) ||
-			remainingFiles.some((testFile) => guardPathKey(testFile, cwd) === guardPathKey(file, cwd)),
+			remainingFiles.some(
+				(testFile) => guardPathKey(testFile, cwd) === guardPathKey(file, cwd),
+			),
 	);
 	writeGitGuardRecord(cacheManager, runtime, cwd, {
 		...existing,
@@ -773,14 +840,17 @@ export function clearGitGuardTestFailure(
 		blockerContent,
 		affectedFiles,
 		testFailures: remainingFiles.length > 0,
-		testFailureContent: remainingFiles.length > 0 ? existing.testFailureContent : undefined,
+		testFailureContent:
+			remainingFiles.length > 0 ? existing.testFailureContent : undefined,
 		testFailureFiles: remainingFiles.length > 0 ? remainingFiles : undefined,
 		hasBlockers: !!blockerContent || remainingFiles.length > 0,
 		sessionId: runtime.telemetrySessionId,
 		projectSeqStart: runtime.turnStartProjectSeq,
 		projectSeqEnd: runtime.projectSeq,
 		fileSeqByPath: Object.fromEntries(
-			runtime.getFileSeqEntries().map(([filePath, seq]) => [guardPathKey(filePath, cwd), seq]),
+			runtime
+				.getFileSeqEntries()
+				.map(([filePath, seq]) => [guardPathKey(filePath, cwd), seq]),
 		),
 		fileContentHashes: {},
 	});
@@ -795,7 +865,9 @@ export function evaluateGitGuard(
 		logDecision(cwd, "blocked", "runtime_blockers", {
 			projectSeq: runtime.projectSeq,
 		});
-		const detail = runtime.gitGuardSummary ? `\n${runtime.gitGuardSummary}` : "";
+		const detail = runtime.gitGuardSummary
+			? `\n${runtime.gitGuardSummary}`
+			: "";
 		return {
 			block: true,
 			reason: `🔴 COMMIT BLOCKED (--lens-guard): unresolved blockers must be fixed before commit/push.${detail}\nRun lens_diagnostics mode=all for full details, then commit again.`,
@@ -844,7 +916,9 @@ export function evaluateGitGuard(
 			return unknown(cwd, "file_sequence_mismatch", { file: resolved });
 		}
 		try {
-			if (!isPathIgnoredByProject(resolved, runtime.projectRoot || cwd, false)) {
+			if (
+				!isPathIgnoredByProject(resolved, runtime.projectRoot || cwd, false)
+			) {
 				const currentHash = currentFileFingerprint(resolved);
 				if (currentHash !== "missing") {
 					liveFiles.push(resolved);
@@ -868,7 +942,11 @@ export function evaluateGitGuard(
 	}
 	// A deleted/ignored affected file has been resolved; no stale blocker is
 	// allowed to survive solely because its old path remains in the record.
-	if (record.hasBlockers && liveFiles.length === 0 && record.affectedFiles.length > 0) {
+	if (
+		record.hasBlockers &&
+		liveFiles.length === 0 &&
+		record.affectedFiles.length > 0
+	) {
 		logDecision(cwd, "allowed", "affected_files_resolved", {
 			projectSeq: record.projectSeqEnd,
 		});

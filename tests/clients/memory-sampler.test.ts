@@ -62,7 +62,9 @@ describe("toMemoryProcessUsage (pure reshape)", () => {
 	});
 });
 
-function fakeMem(overrides: Partial<NodeJS.MemoryUsage> = {}): NodeJS.MemoryUsage {
+function fakeMem(
+	overrides: Partial<NodeJS.MemoryUsage> = {},
+): NodeJS.MemoryUsage {
 	return {
 		rss: 300 * 1024 * 1024,
 		heapTotal: 150 * 1024 * 1024,
@@ -88,7 +90,9 @@ describe("collectMemorySampleSubsystems (O(1)/O(bounded-cache-size) live reads)"
 				return m;
 			})(),
 			forward: (() => {
-				const m = new PathKeyedMap<Map<string, number>>(normalizeEphemeralMapKey);
+				const m = new PathKeyedMap<Map<string, number>>(
+					normalizeEphemeralMapKey,
+				);
 				m.set("a.ts", new Map([["foo", 1]]));
 				return m;
 			})(),
@@ -98,12 +102,18 @@ describe("collectMemorySampleSubsystems (O(1)/O(bounded-cache-size) live reads)"
 			fileSizes: new PathKeyedMap<number>(normalizeEphemeralMapKey),
 		};
 		const subsystems = collectMemorySampleSubsystems(wordIndex);
-		expect(subsystems.wordIndex).toEqual({ docs: 1, postings: 1, forwardEntries: 1 });
+		expect(subsystems.wordIndex).toEqual({
+			docs: 1,
+			postings: 1,
+			forwardEntries: 1,
+		});
 	});
 
 	it("reviewGraph/dispatchCaches mirror the live accessors exactly (no extra reads)", () => {
 		const subsystems = collectMemorySampleSubsystems(null);
-		expect(subsystems.reviewGraph).toEqual(getReviewGraphWorkspaceCacheSnapshot());
+		expect(subsystems.reviewGraph).toEqual(
+			getReviewGraphWorkspaceCacheSnapshot(),
+		);
 		expect(subsystems.dispatchCaches).toEqual(getDispatchCascadeCacheStats());
 	});
 
@@ -112,10 +122,14 @@ describe("collectMemorySampleSubsystems (O(1)/O(bounded-cache-size) live reads)"
 		expect(subsystems.reviewGraph.cacheEntries).toBeGreaterThanOrEqual(0);
 		expect(subsystems.reviewGraph.totalNodes).toBeGreaterThanOrEqual(0);
 		expect(subsystems.reviewGraph.totalEdges).toBeGreaterThanOrEqual(0);
-		expect(subsystems.dispatchCaches.recentlyCleanNeighborCacheSize).toBeGreaterThanOrEqual(0);
+		expect(
+			subsystems.dispatchCaches.recentlyCleanNeighborCacheSize,
+		).toBeGreaterThanOrEqual(0);
 		if (subsystems.treeSitter) {
 			expect(subsystems.treeSitter.languagesLoaded).toBeGreaterThanOrEqual(0);
-			expect(subsystems.treeSitter.treeCacheTotalBytes).toBeGreaterThanOrEqual(0);
+			expect(subsystems.treeSitter.treeCacheTotalBytes).toBeGreaterThanOrEqual(
+				0,
+			);
 		}
 	});
 });

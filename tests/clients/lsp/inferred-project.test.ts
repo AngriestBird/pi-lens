@@ -51,7 +51,8 @@ describe("classifyProjectInfo (#1640 detection contract)", () => {
 
 	it("names a real tsconfig project configured", () => {
 		expect(
-			classifyProjectInfo({ configFileName: "/proj/tsconfig.json" }).projectKind,
+			classifyProjectInfo({ configFileName: "/proj/tsconfig.json" })
+				.projectKind,
 		).toBe("configured");
 	});
 
@@ -203,7 +204,10 @@ describe("demoteInferredProjectDiagnostics", () => {
 describe("demoteInferredProjectSweepResults", () => {
 	it("probes each file once and rebuilds only the demoted results", async () => {
 		const service = makeService(INFERRED_BODY);
-		const untouched = { filePath: "/proj/tests/unit/b.test.ts", diagnostics: [] };
+		const untouched = {
+			filePath: "/proj/tests/unit/b.test.ts",
+			diagnostics: [],
+		};
 		const results = [
 			{ filePath: "/proj/tests/unit/a.test.ts", diagnostics: [tsError()] },
 			untouched,
