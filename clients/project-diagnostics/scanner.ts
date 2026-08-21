@@ -160,7 +160,6 @@ async function scanFileMajorRules(
 	const astGrep: ProjectDiagnostic[] = [];
 	const sgModule = await loadSg();
 	let phaseOneFilesScanned = 0;
-	let astGrepFilesScanned = 0;
 	let astGrepDurationMs = 0;
 	// #891: only fully completed files count — a wasm abort mid-file leaves that
 	// file out, so the caller can report a truncated filesScanned honestly.
@@ -247,7 +246,6 @@ async function scanFileMajorRules(
 		} catch {
 			// Project scans are best-effort; one unparsable file must not abort the tool.
 		} finally {
-			astGrepFilesScanned++;
 			astGrepDurationMs += Date.now() - startedAt;
 		}
 	};
@@ -372,18 +370,15 @@ async function scanFileMajorRules(
 			stats,
 		});
 	});
-	await client.withParseCacheMeasurement(
-		async () => {},
-		(stats) => {
-			logTreeSitterCacheStats({
-				scope: "project_diagnostics_ast_grep_scan",
-				filePath: cwd,
-				fileCount: astGrepFilesScanned,
-				durationMs: astGrepDurationMs,
-				stats,
-			});
-		},
-	);
+	// #1935: no `project_diagnostics_ast_grep_scan` cache_stats record here.
+	// `scanAstGrepFile` parses through ast-grep-napi's own `lang.parse()` — a
+	// separate native engine, not `TreeSitterClient`'s WASM `TreeCache` — so a
+	// cache_stats record for this scope would always read all-zero (0
+	// lookups, 0 hits, every counter 0) no matter how the scan behaves. That
+	// was a vacuous observability record, not a real one: it looked like a
+	// signal but could never carry information. `astGrepDurationMs` still
+	// feeds the `project_diagnostics_scan` record above (subtracted so that
+	// duration stays comparable to the historical phase-major scans).
 	return { treeSitter, factRules, astGrep, filesScanned, wasmAborted };
 }
 

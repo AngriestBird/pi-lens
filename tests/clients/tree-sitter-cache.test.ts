@@ -583,6 +583,39 @@ describe("TreeCache capacity growth for scan working sets (#1715)", () => {
 			expect(tree.delete).not.toHaveBeenCalled();
 		}
 	});
+
+	// #1935: growing the cache to fit a scan's working set trades a bigger
+	// entry-count ceiling for more resident memory — `treeCacheTotalBytes`
+	// (the source-byte sum `memory_sample` reports, `getStats().totalBytes`
+	// here) must stay a bounded number, not climb without limit as a project
+	// grows past the cache's capacity. `TREE_CACHE_SCAN_CAPACITY_CEILING`
+	// (500 entries) is the enforcement point: this test offers far more files
+	// than the ceiling and pins that resident bytes stay capped at
+	// ceiling * per-file size, proving the cap bounds bytes, not just count.
+	it("bounds treeCacheTotalBytes at the scan ceiling even when a project offers far more files than it holds (#1935)", () => {
+		const cache = new TreeCache(TREE_CACHE_DEFAULT_MAX_SIZE);
+		// Representative of the #1715 heap-cost measurement (~3.6KB synthetic
+		// TypeScript sources).
+		const perFileBytes = 3600;
+		const content = "x".repeat(perFileBytes);
+		// A project many times larger than the hard ceiling — e.g. a 1500-file
+		// monorepo — so the cache must evict, not just grow unboundedly.
+		const totalFilesOffered = TREE_CACHE_SCAN_CAPACITY_CEILING * 3;
+		cache.setMaxSize(
+			deriveScanTreeCacheCapacity(totalFilesOffered, cache.getMaxSize()),
+		);
+		expect(cache.getMaxSize()).toBe(TREE_CACHE_SCAN_CAPACITY_CEILING);
+
+		for (let i = 0; i < totalFilesOffered; i++) {
+			cache.set(`f${i}.ts`, content, "typescript", fakeTree());
+		}
+
+		const stats = cache.getStats();
+		expect(stats.size).toBe(TREE_CACHE_SCAN_CAPACITY_CEILING);
+		const capBytes = TREE_CACHE_SCAN_CAPACITY_CEILING * perFileBytes;
+		expect(stats.totalBytes).toBeLessThanOrEqual(capBytes);
+		expect(stats.totalBytes).toBe(capBytes);
+	});
 });
 
 // #1727/#1777: `createTreeCacheCounters` builds its result with
