@@ -35,9 +35,13 @@
  */
 
 import * as path from "node:path";
+import type { FactStore } from "./dispatch/fact-store.js";
 import { normalizeMapKey, toProjectRelativePath } from "./path-utils.js";
 import { loadProjectSnapshotWithoutWordIndex } from "./project-snapshot.js";
-import type { ReviewGraph } from "./review-graph/types.js";
+import type {
+	ReviewGraph,
+	ReviewGraphRevisionDrift,
+} from "./review-graph/types.js";
 
 export interface ProjectReportOptions {
 	/** Scales every ranked list's cap (default 10). A single knob, per #773's
@@ -79,6 +83,13 @@ export interface ProjectReportTrust {
 	/** True when the graph is older than a "trust this without a refresh"
 	 * threshold. */
 	stale: boolean;
+	/**
+	 * #1961: present when the served snapshot was persisted at a different
+	 * commit than the current HEAD. The read path verifies tree identity, not
+	 * revision, so a revision difference is reported here rather than hiding
+	 * the graph. Absent on an in-process graph and on a matching snapshot.
+	 */
+	revisionDrift?: ReviewGraphRevisionDrift;
 	/** True when coverage is low enough that whole subsystems may be
 	 * invisible to every other section below. */
 	lowCoverage: boolean;
@@ -318,6 +329,17 @@ function computeTrust(graph: ReviewGraph, cwd: string): ProjectReportTrust {
 		graph.persistCoverage?.partial === true;
 
 	const notes: string[] = [];
+	// #1961: the blind read now SERVES a snapshot stamped at a different HEAD
+	// rather than dropping it. Age alone would not catch a branch switch made
+	// minutes ago, so the revision difference gets its own note. Short commit
+	// ids only — nothing path-shaped.
+	const drift = graph.snapshotRevisionDrift;
+	if (drift) {
+		notes.push(
+			`Graph was built at commit ${drift.stampedHead.slice(0, 8)}; HEAD is now ${drift.currentHead.slice(0, 8)}. ` +
+				"Sections below reflect the earlier revision — run pilens_rebuild or re-analyze to refresh.",
+		);
+	}
 	if (stale) {
 		const ageMin = Math.round(ageMs / 60_000);
 		notes.push(
@@ -358,6 +380,7 @@ function computeTrust(graph: ReviewGraph, cwd: string): ProjectReportTrust {
 			sampleSize,
 		},
 		stale,
+		...(drift ? { revisionDrift: drift } : {}),
 		lowCoverage,
 		persistCoverage: graph.persistCoverage?.partial
 			? graph.persistCoverage
@@ -728,22 +751,46 @@ export function _resetProjectReportBuildGuardForTests(): void {
 	inFlightGraphBuilds.clear();
 }
 
-function triggerBackgroundGraphBuild(cwd: string): boolean {
+/**
+ * What the cold-path trigger actually did, so the hint can say it honestly
+ * (#1962). "started" means THIS call began a build; "already_running" means a
+ * build for the same workspace was already in flight and absorbed the call.
+ * Before #1962 the caller only knew whether it had added a key to
+ * `inFlightGraphBuilds`, and reported "a retry was started" on the strength of
+ * that — while the builder's dedupe cache returned a settled promise and no
+ * build ran at all.
+ */
+type BackgroundBuildTrigger = "started" | "already_running";
+
+interface BackgroundBuildDeps {
+	buildOrUpdateGraph: (
+		cwd: string,
+		changedFiles: string[],
+		facts: FactStore,
+	) => Promise<unknown>;
+	isGraphBuildInFlight: (cwd: string, changedFiles?: string[]) => boolean;
+	FactStore: new () => FactStore;
+}
+
+function triggerBackgroundGraphBuild(
+	cwd: string,
+	deps: BackgroundBuildDeps,
+): BackgroundBuildTrigger {
 	const key = normalizeMapKey(path.resolve(cwd));
-	if (inFlightGraphBuilds.has(key)) return false;
+	if (inFlightGraphBuilds.has(key)) return "already_running";
+	// Ask the builder, not just this module's own guard: a build kicked off by
+	// the edit pipeline or another reader never touches `inFlightGraphBuilds`.
+	// The probe and the call are in ONE synchronous block on purpose — awaiting
+	// between them (the pre-#1962 dynamic imports did) reopens the race.
+	const deduped = deps.isGraphBuildInFlight(key, []);
 	inFlightGraphBuilds.add(key);
-	void (async () => {
-		try {
-			const { buildOrUpdateGraph } = await import("./review-graph/builder.js");
-			const { FactStore } = await import("./dispatch/fact-store.js");
-			await buildOrUpdateGraph(key, [], new FactStore());
-		} catch {
+	const build = deps
+		.buildOrUpdateGraph(key, [], new deps.FactStore())
+		.catch(() => {
 			// buildOrUpdateGraph records the durable failure and surfaced status.
-		} finally {
-			inFlightGraphBuilds.delete(key);
-		}
-	})();
-	return true;
+		});
+	void build.finally(() => inFlightGraphBuilds.delete(key));
+	return deduped ? "already_running" : "started";
 }
 
 // --- entry point ---------------------------------------------------------------
@@ -765,6 +812,8 @@ export async function projectReport(
 		getCachedReviewGraph,
 		getReviewGraphSizeSkipVerdict,
 		getLastReviewGraphBuildAttempt,
+		buildOrUpdateGraph,
+		isGraphBuildInFlight,
 	} = await import("./review-graph/builder.js");
 	let graph: ReviewGraph | undefined;
 	try {
@@ -798,18 +847,35 @@ export async function projectReport(
 			};
 		}
 		const previousAttempt = getLastReviewGraphBuildAttempt(cwd);
-		const kickedOff = triggerBackgroundGraphBuild(cwd);
-		const lastBuildAttempt =
-			previousAttempt ?? getLastReviewGraphBuildAttempt(cwd);
+		const { FactStore } = await import("./dispatch/fact-store.js");
+		const trigger = triggerBackgroundGraphBuild(cwd, {
+			buildOrUpdateGraph,
+			isGraphBuildInFlight,
+			FactStore,
+		});
+		const started = trigger === "started";
+		// #1962: report the attempt that is CURRENT. When this call started a
+		// build, `buildOrUpdateGraph` has already recorded a fresh `running`
+		// attempt synchronously, and the previous outcome belongs in the hint
+		// text, not in a field labelled "last attempt". When no build started,
+		// the earlier attempt genuinely IS the current one.
+		const lastBuildAttempt = started
+			? (getLastReviewGraphBuildAttempt(cwd) ?? previousAttempt)
+			: previousAttempt;
+		const terminal =
+			previousAttempt?.outcome === "failed" ||
+			previousAttempt?.outcome === "skipped";
 		return {
 			available: false,
-			hint:
-				lastBuildAttempt?.outcome === "failed" ||
-				lastBuildAttempt?.outcome === "skipped"
-					? `Review graph unavailable: ${lastBuildAttempt.reason ?? lastBuildAttempt.outcome}. A retry was ${kickedOff ? "started" : "not started"}.`
-					: kickedOff
-						? "No review graph cached for this workspace yet — a build was kicked off in the background; retry this call shortly."
-						: "No review graph cached for this workspace yet — the background build is still running; retry this call shortly.",
+			hint: terminal
+				? `Review graph unavailable: ${previousAttempt?.reason ?? previousAttempt?.outcome}. ${
+						started
+							? "A retry was started."
+							: "A build is already running; retry this call shortly."
+					}`
+				: started
+					? "No review graph cached for this workspace yet — a build was kicked off in the background; retry this call shortly."
+					: "No review graph cached for this workspace yet — the background build is still running; retry this call shortly.",
 			...(lastBuildAttempt ? { lastBuildAttempt } : {}),
 			...(view ? { view } : {}),
 		};

@@ -1,0 +1,5 @@
+---
+section: Fixed
+---
+
+- **A settled review-graph build no longer suppresses every later build, and `project_report` only claims a retry when one started (closes #1962)** — `buildOrUpdateGraph`'s dedupe cache deleted its entry on rejection only, so a settled promise for a skipped or completed build answered every later call for the same key for the rest of the process. Only the dispatch pipeline's per-invocation `clearGraphCache()` ever removed it, and the background build `project_report` kicks off never goes through the pipeline: four calls over 37s produced one `build_started` record and three "A retry was started." messages with no retry behind them. The entry now lives only while its build is pending, so genuine concurrency still dedupes and a settled build never latches. `project_report` asks the builder whether a build is already in flight before it claims one started, and reports the current attempt rather than replaying the first one as if it were fresh. A `.pi-lens.json` at the repo root raises `reviewGraph.maxFiles` above pi-lens's own 1001 source files, so the tool works on this repo at all.

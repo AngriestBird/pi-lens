@@ -110,6 +110,27 @@ export interface ReviewGraph {
 	 * paths that never reuse (mode "skipped") ⇒ derived caches must rebuild.
 	 */
 	buildGeneration?: number;
+	/**
+	 * #1961: set on a snapshot the BLIND read path served even though the
+	 * snapshot's git stamp names a different HEAD than the current one. The read
+	 * path verifies tree IDENTITY, never revision (see `loadPersistedGraph`), so
+	 * the revision difference is reported instead of hiding the graph. Never
+	 * persisted and never carried by `cloneGraph` — it describes one read of one
+	 * snapshot, not the graph content.
+	 */
+	snapshotRevisionDrift?: ReviewGraphRevisionDrift;
+}
+
+/**
+ * Bounded revision-drift evidence: two commit ids, nothing path-shaped. Enough
+ * for `computeTrust` to say "built at a different commit" and for a reader to
+ * correlate with `review-graph.log`.
+ */
+export interface ReviewGraphRevisionDrift {
+	/** `gitStamp.headCommit` recorded when the snapshot was persisted. */
+	stampedHead: string;
+	/** The worktree's HEAD at read time. */
+	currentHead: string;
 }
 
 export interface ReviewGraphPersistCoverage {
