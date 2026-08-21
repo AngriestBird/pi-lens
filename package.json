@@ -19,6 +19,8 @@
     "bundle:dist": "node scripts/bundle-dist.mjs",
     "prepare": "npm run build:dist && node scripts/download-grammars.js --core --dest grammars && node scripts/setup-git-hooks.mjs && node scripts/warm-loader-cache.mjs",
     "lint": "tsc --project tsconfig.json",
+    "fmt": "oxfmt",
+    "fmt:check": "oxfmt --check",
     "watch": "tsc --watch",
     "test": "node scripts/with-test-lock.mjs -- vitest run",
     "test:unit": "node scripts/with-test-lock.mjs -- vitest run",

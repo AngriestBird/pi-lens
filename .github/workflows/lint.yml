@@ -96,13 +96,17 @@ jobs:
           version=$(node -p "require('./package.json').devDependencies.oxfmt")
           npm install --no-save --no-audit --no-fund --ignore-scripts "oxfmt@${version}"
 
-      # Bare invocation: `.oxfmtrc.json` is the single source of truth for
-      # both which files are in scope and how they are formatted, so CI and a
-      # developer's local `oxfmt` see the same scope. oxfmt also honors
-      # .gitignore by default, which keeps dist/ and the compiled clients/*.js
-      # out.
+      # `npm run fmt:check` rather than a second spelling of the command:
+      # package.json defines the check once, so a contributor running it
+      # locally runs exactly what CI runs. npm puts node_modules/.bin on PATH,
+      # so this still resolves the pinned binary, and never npx.
+      #
+      # No path arguments: `.oxfmtrc.json` is the single source of truth for
+      # both which files are in scope and how they are formatted. oxfmt also
+      # honors .gitignore by default, which keeps dist/ and the compiled
+      # clients/*.js out.
       - name: Check formatting
-        run: ./node_modules/.bin/oxfmt --check
+        run: npm run fmt:check
 
   markdownlint:
     name: markdownlint

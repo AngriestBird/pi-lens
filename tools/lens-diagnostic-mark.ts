@@ -388,11 +388,11 @@ export function createLensDiagnosticMarkTool(
 			if (disposition === "suppress") {
 				let updated: string;
 				try {
-					// biome-ignore lint/style/noNonNullAssertion: validated above
 					updated = insertSuppressComment(
 						content,
 						absPath,
 						verifiedLine,
+						// biome-ignore lint/style/noNonNullAssertion: validated above
 						rule!,
 					);
 				} catch (err) {
