@@ -664,9 +664,13 @@ function classifyEntry(
 		return { recurseInto: fullPath };
 	}
 	if (entry.isFile()) {
-		if (ignoreMatcher.isIgnored(fullPath, false)) return {};
+		// #1974: extension gate before isIgnored — isIgnored recompiles minimatch
+		// patterns per ancestor dir per call, so a large ignored-but-not-dir-
+		// prunable pile (e.g. wal/*.log) should never pay that cost for files
+		// the extension gate would have dropped anyway.
 		const ext = path.extname(entry.name).toLowerCase();
 		if (!extensions.has(ext)) return {};
+		if (ignoreMatcher.isIgnored(fullPath, false)) return {};
 		// Skip if this is a build artifact or generated/codegen output.
 		// #1107: counted separately (both are observability-only — neither
 		// changes what gets skipped) so an invisible coverage hole (a real

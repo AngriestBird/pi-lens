@@ -356,9 +356,14 @@ export async function collectSourceFilesForWarmup(
 				}
 				stack.push(fullPath);
 			} else if (entry.isFile()) {
-				if (ignoreMatcher.isIgnored(fullPath, false)) continue;
+				// #1974: cheap extension gate before the ignore matcher — isIgnored is
+				// O(ancestorDirs x patterns) with a per-call minimatch regex compile
+				// (0.68-0.93ms/file, measured), so pay it only for files that already
+				// pass the extension check. A large ignored-but-not-dir-prunable pile
+				// (e.g. wal/*.log) otherwise pays the full isIgnored cost per file.
 				const ext = path.extname(entry.name).toLowerCase();
 				if (!WARMUP_SOURCE_EXTS.has(ext)) continue;
+				if (ignoreMatcher.isIgnored(fullPath, false)) continue;
 				matchedSeen += 1;
 				const bucket = WARMUP_CODE_EXTS.has(ext) ? codeOut : nonCodeOut;
 				// Per-category hard cap — language detection only needs

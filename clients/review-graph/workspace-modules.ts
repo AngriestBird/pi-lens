@@ -574,10 +574,12 @@ export function getModuleSourceFiles(
 				continue;
 			}
 			if (!entry.isFile()) continue;
+			// #1974: extension gate before isIgnored — isIgnored recompiles
+			// minimatch patterns per ancestor dir per call, so it should only run
+			// for files the cheap extension check already flags as source.
+			if (!SOURCE_EXTS.has(path.extname(entry.name).toLowerCase())) continue;
 			if (ignoreMatcher.isIgnored(fullPath, false)) continue;
-			if (SOURCE_EXTS.has(path.extname(entry.name).toLowerCase())) {
-				files.push(normalizeMapKey(fullPath));
-			}
+			files.push(normalizeMapKey(fullPath));
 		}
 	};
 	visit(root, 0);
