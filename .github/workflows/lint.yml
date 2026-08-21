@@ -65,6 +65,45 @@ jobs:
       - name: Validate PR title (conventional prefix + issue ref)
         run: node scripts/check-pr-title.mjs
 
+  oxfmt:
+    name: oxfmt format check (advisory)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    # Advisory to start, same posture as the vale job below: not in
+    # required-checks branch protection, so a finding never blocks a merge on
+    # its own. No continue-on-error -- a real finding must show as a red
+    # advisory check a reviewer can see, not a silently-green one.
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+        with:
+          node-version: "22"
+
+      # The version comes from the `oxfmt` devDependency, which package.json
+      # pins exactly. The workflow holds no second copy of the version to
+      # drift out of sync (the single-source-of-truth rule). A full `npm ci`
+      # would also pin it, but costs this lane its "no install" cheapness for
+      # a single binary. `--ignore-scripts` blocks lifecycle-script execution
+      # (SonarCloud S6505, the #1923 posture); `--no-save` keeps the command
+      # off the repo's package.json and package-lock.json. No npx.
+      - name: Install oxfmt (version pinned by the devDependency)
+        run: |
+          set -eu
+          version=$(node -p "require('./package.json').devDependencies.oxfmt")
+          npm install --no-save --no-audit --no-fund --ignore-scripts "oxfmt@${version}"
+
+      # Bare invocation: `.oxfmtrc.json` is the single source of truth for
+      # both which files are in scope and how they are formatted, so CI and a
+      # developer's local `oxfmt` see the same scope. oxfmt also honors
+      # .gitignore by default, which keeps dist/ and the compiled clients/*.js
+      # out.
+      - name: Check formatting
+        run: ./node_modules/.bin/oxfmt --check
+
   markdownlint:
     name: markdownlint
     runs-on: ubuntu-latest
