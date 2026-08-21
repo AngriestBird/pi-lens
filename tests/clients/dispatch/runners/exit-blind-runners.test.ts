@@ -175,25 +175,26 @@ const CASES: Case[] = [
 		content: "Some prose.\n",
 		extraFiles: { ".vale.ini": "StylesPath = styles\n" },
 		failure: { status: 1, stderr: "E100 [vale] runtime error" },
+		// #1933 review F1: real `vale --output JSON` is a flat map keyed by the
+		// linted path, not `{ Data: { Files: [...] } }` -- the shape this fixture
+		// used to hand-write, which happened to match the also-wrong parser and
+		// so never caught the bug (AGENTS.md defect shape 16 and shape 7:
+		// unverified tool-output claim baked into a fixture nobody checked
+		// against a real binary). `Span` replaces the nonexistent "Column"
+		// field, matching a captured real run (see tests/clients/dispatch/
+		// runners/vale.test.ts for the full fixture provenance).
 		findings: {
 			status: 1,
 			stdout: JSON.stringify({
-				Data: {
-					Files: [
-						{
-							Path: "doc.md",
-							Alerts: [
-								{
-									Line: 1,
-									Column: 1,
-									Severity: "warning",
-									Message: "Wordy",
-									Check: "Vale.Terms",
-								},
-							],
-						},
-					],
-				},
+				"doc.md": [
+					{
+						Line: 1,
+						Span: [1, 6],
+						Severity: "warning",
+						Message: "Wordy",
+						Check: "Vale.Terms",
+					},
+				],
 			}),
 		},
 	},

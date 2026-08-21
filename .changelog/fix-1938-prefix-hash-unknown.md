@@ -1,0 +1,5 @@
+---
+section: Fixed
+---
+
+- **`cache_context` no longer logs an unusable `unknown` prefix pair on nearly every record (closes #1938)** — `prefixObservation` and `firstMessageChange` were computed from a hash of the pre-injection prefix capped at 64 messages / 2,048 characters. Any transcript past that cap set `prefixHashTruncated`, which forced both fields to `"unknown"`. Every real session outgrows the cap within the first few turns, so the pair reported `unknown` on 97.2% and 7.6% of records respectively — cost without signal. This PR removes the whole family that existed only to support that pair: `prefixObservation`, `prefixObservationUnknown`, `prefixBaseline`, `firstMessageChanged`, `firstMessageChange`, `firstMessageHashTruncated`, `beforeFirstMessageHash`, `afterFirstMessageHash`, `beforePrefixHash`, `afterPrefixHash`, `prefixHashTruncated`, `prefixMessageCountTruncated`, `prefixContentHashTruncated` — 13 fields in all. `cache_prefix_break` already tracks first-message stability with an unbounded hash and never truncates; it remains the source of truth for cache-prefix breaks.

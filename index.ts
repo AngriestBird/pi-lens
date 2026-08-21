@@ -2911,7 +2911,12 @@ function activateExtension(hostPi: ExtensionAPI) {
 					?.messages ?? [];
 			const prefixSessionId = getStableSessionId(ctx);
 			const sessionRole = classifyCurrentSessionEmission(ctx, prefixSessionId);
-			const prefixObservation = observeCachePrefix(
+			// #1938: `observeCachePrefix` still owns the unbounded, always-accurate
+			// `cache_prefix_break` signal below. Its return value used to be threaded
+			// into `observeCacheContext` as `prefixObservation`, but that field was
+			// removed there (see the cache-observability.ts module doc) — the call
+			// stays for its `cache_prefix_break` side effect only.
+			observeCachePrefix(
 				existingMessages,
 				runtime.turnIndex,
 				prefixSessionId,
@@ -2940,7 +2945,6 @@ function activateExtension(hostPi: ExtensionAPI) {
 					injectionSources,
 					injectedMessages,
 					placement,
-					prefixObservation,
 					dbg,
 				});
 			};
