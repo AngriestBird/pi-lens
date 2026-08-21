@@ -56,9 +56,38 @@ export interface BlockerPastEofCounts {
 	checked: number;
 	/** Rising edge this turn — demoted for citing a line past current EOF. */
 	demoted: number;
-	/** Falling edge this turn — a prior past-EOF demotion healed (the file's
-	 * line count grew back past the cited line). */
-	healed: number;
+	/**
+	 * #1944 review F3: there is no `healed` counter here anymore, and this
+	 * comment is the record of why.
+	 *
+	 * #1641 counted a falling edge — a prior past-EOF demotion un-demoted
+	 * because the file grew back past the cited line. #1944 makes that edge
+	 * structurally unreachable for this store: `handleTurnEnd` runs this sweep
+	 * and then, with no early return in between, delivers and RETIRES every
+	 * record the sweep found past EOF. A demoted record never survives to a
+	 * second sweep, so the counter could only ever report zero.
+	 *
+	 * Verified, not assumed: `sweepInlineBlockerPastEof` has exactly one
+	 * production caller (`clients/runtime-turn.ts`) over exactly one store.
+	 * The SHARED gate it delegates to, `demotePastEofDiagnostics`
+	 * (`clients/diagnostic-line-freshness.ts`), still heals normally on the
+	 * widget and `lens_diagnostics` surfaces, which are re-derived per
+	 * dispatch and are not retired here. A counter that can only be zero is a
+	 * lie about what the code does.
+	 */
+	/**
+	 * #1944: the cited lines the file no longer has, keyed by the record's
+	 * `filePath` as the store holds it (the display path passed to
+	 * `recordInlineBlockers`, NOT a resolved or normalized key — the delivery
+	 * loop looks it up with the same value it reads off the snapshot).
+	 * Computed here because this sweep already holds the file's current line
+	 * count; the delivery surface would otherwise re-stat the file, or worse,
+	 * re-parse the coordinate back out of the rendered summary (the
+	 * re-derivation-vs-correlation screen). Populated for EVERY record this
+	 * gate found past EOF, whether the demotion is this turn's rising edge or
+	 * an earlier one the gate re-affirmed.
+	 */
+	deadLinesByPath: Map<string, number[]>;
 }
 
 export interface BlockerPastEofOptions {
@@ -86,7 +115,7 @@ export function sweepInlineBlockerPastEof(
 		total: 0,
 		checked: 0,
 		demoted: 0,
-		healed: 0,
+		deadLinesByPath: new Map<string, number[]>(),
 	};
 	const resync = options?.resync ?? resyncDocumentOnPastEof;
 
@@ -131,16 +160,29 @@ export function sweepInlineBlockerPastEof(
 			// The record cites any of its lines being past EOF as a whole-record
 			// demotion — one summary string, not one flag per line.
 			const isPastEof = diagnostics.some((d) => d.stale);
+			if (isPastEof) {
+				// #1944: record WHICH cited lines died, before the transition check
+				// below short-circuits. A record demoted on an earlier turn does not
+				// transition, yet its dead lines are exactly what the delivery
+				// surface must annotate and retire on.
+				counts.deadLinesByPath.set(
+					entry.filePath,
+					diagnostics
+						.filter((d) => d.stale)
+						.map((d) => d.line)
+						.filter((line): line is number => typeof line === "number"),
+				);
+			}
 			const transitioned = runtime.setInlineBlockerPastEofStale(
 				entry.filePath,
 				isPastEof,
 			);
 			if (!transitioned) continue;
-			if (isPastEof) {
-				counts.demoted += 1;
-			} else {
-				counts.healed += 1;
-			}
+			// Only the rising edge is countable here — see `BlockerPastEofCounts`
+			// for why the falling edge cannot occur on this store anymore. The
+			// call below still un-demotes, so the STORE stays honest even though
+			// nothing can observe the transition.
+			if (isPastEof) counts.demoted += 1;
 		} catch {
 			// Per-entry failure: leave the entry as-is.
 		}
