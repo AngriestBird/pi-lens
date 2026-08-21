@@ -112,6 +112,12 @@ export interface ReviewGraph {
 	buildGeneration?: number;
 }
 
+// #1961: revision-drift evidence lives in its own import-free module, so the
+// consumers that load the builder dynamically can still share one wording.
+// Re-exported here because `types.ts` is where review-graph types are looked
+// for.
+export type { ReviewGraphRevisionDrift } from "./revision-drift.js";
+
 export interface ReviewGraphPersistCoverage {
 	partial: boolean;
 	cap: number;
