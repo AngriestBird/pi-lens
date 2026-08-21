@@ -170,6 +170,59 @@ describe("lsp_client_selected outcome discriminator (#1934)", () => {
 		}
 	});
 
+	it("names a spawn failure when the binary is absent and installs are allowed", async () => {
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const service = new LSPService();
+		try {
+			// `spawn` RESOLVES undefined rather than throwing: the second of the
+			// two genuine failure branches, on the exponential breaker ladder.
+			spawnBehavior = async () => undefined;
+			expect(await service.getClientForFile("/repo/a.ts")).toBeUndefined();
+			expect(selectionOutcomes()).toEqual(["spawn-failure"]);
+		} finally {
+			await service.shutdown({ processExiting: true });
+		}
+	});
+
+	// #1934 review F1. The "binary unavailable while installs are disabled"
+	// branch sets a 15s cooldown, yet it is a POLICY decline by its own
+	// comment: no ladder, no permanent latch, because the binary may appear on
+	// PATH later in the same session. Inferring the outcome from breaker state
+	// therefore mislabeled it as a spawn failure, once per 15s per
+	// (server, root) for the whole session — roughly 5000 mislabeled records a
+	// day with PI_LENS_DISABLE_LSP_INSTALL=1 or an untrusted project.
+	it("reports a decline, not a failure, when the binary is absent with installs disabled", async () => {
+		const previous = process.env.PI_LENS_DISABLE_LSP_INSTALL;
+		process.env.PI_LENS_DISABLE_LSP_INSTALL = "1";
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const service = new LSPService();
+		try {
+			spawnBehavior = async () => undefined;
+			expect(await service.getClientForFile("/repo/a.ts")).toBeUndefined();
+			expect(selectionOutcomes()).toEqual([]);
+
+			// The bound must hold in THIS configuration, not just the default
+			// one. Walk past the flat cooldown three times: the spawn is retried
+			// each time and declines each time, and the record stays silent.
+			for (const [index, file] of ["b", "c", "d"].entries()) {
+				vi.setSystemTime(
+					new Date(Date.UTC(2026, 7, 21, 6, 0, 0) + (index + 1) * 60_000),
+				);
+				expect(
+					await service.getClientForFile(`/repo/${file}.ts`),
+				).toBeUndefined();
+			}
+			expect(selectionOutcomes()).toEqual([]);
+		} finally {
+			await service.shutdown({ processExiting: true });
+			if (previous === undefined) {
+				delete process.env.PI_LENS_DISABLE_LSP_INSTALL;
+			} else {
+				process.env.PI_LENS_DISABLE_LSP_INSTALL = previous;
+			}
+		}
+	});
+
 	it("reports no outcome record when no server matches the file", async () => {
 		const { LSPService } = await import("../../../clients/lsp/index.js");
 		const service = new LSPService();
