@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { applyAction, CONFLICT_LABEL, decideActions, fetchOpenPullRequests, MAX_PAGES, RED_CI_LABEL, runWarden } from "../../scripts/lib/merge-train-warden.mjs";
+import { applyAction, classifyActionFailure, CONFLICT_LABEL, decideActions, fetchOpenPullRequests, MAX_PAGES, RED_CI_LABEL, runWarden } from "../../scripts/lib/merge-train-warden.mjs";
 
 function pr(overrides: Record<string, unknown> = {}) {
 	return {
@@ -8,6 +8,7 @@ function pr(overrides: Record<string, unknown> = {}) {
 		headSha: "abc123",
 		mergeStateStatus: "CLEAN",
 		autoMergeEnabled: false,
+		isFork: false,
 		labels: new Set<string>(),
 		checksUnknown: false,
 		failingRequiredChecks: [] as Array<{ name: string; url?: string }>,
@@ -104,6 +105,26 @@ describe("merge-train warden decision logic (#1844)", () => {
 	it("still removes red-ci on a genuinely all-green rollup (checksUnknown false) -- distinct from the unknown-rollup case", () => {
 		const actions = decideActions(pr({ checksUnknown: false, failingRequiredChecks: [], unresolvedRequiredChecks: [], labels: new Set([RED_CI_LABEL]) }));
 		expect(actions).toEqual([{ type: "remove-label", label: RED_CI_LABEL }]);
+	});
+
+	// #1959: a 403 on update-branch means two very different things depending
+	// on whose branch it is. Deleting the `pr.isFork` check here (so every
+	// update-branch 403 reads as benign) must turn the own-branch case below
+	// red -- that is the mutation-proof screen for this branch.
+	it("classifies an update-branch 403 on a fork-owned PR as the distinct benign fork outcome", () => {
+		const result = classifyActionFailure({ type: "update-branch" }, pr({ isFork: true }), 403);
+		expect(result).toEqual({ benign: true, outcome: "update-branch-forbidden-fork" });
+	});
+
+	it("classifies an update-branch 403 on an own-branch PR as fatal, not benign", () => {
+		const result = classifyActionFailure({ type: "update-branch" }, pr({ isFork: false }), 403);
+		expect(result).toEqual({ benign: false, outcome: null });
+	});
+
+	it("leaves every other action/status pair on the existing benign-status set", () => {
+		expect(classifyActionFailure({ type: "add-label", label: CONFLICT_LABEL }, pr({ isFork: true }), 403)).toEqual({ benign: false, outcome: null });
+		expect(classifyActionFailure({ type: "update-branch" }, pr({ isFork: true }), 422)).toEqual({ benign: true, outcome: null });
+		expect(classifyActionFailure({ type: "update-branch" }, pr({ isFork: false }), 404)).toEqual({ benign: true, outcome: null });
 	});
 
 	it("never proposes a merge or a push -- only label, comment, note, and the sanctioned update-branch kick", () => {
@@ -300,6 +321,37 @@ describe("merge-train warden GraphQL fetch + REST apply (#1844)", () => {
 		});
 		const results = await runWarden({ fetcher, owner: "acme", repo: "repo" });
 		expect(results[0].errors).toEqual([{ message: expect.stringContaining("HTTP 404"), benign: true }]);
+	});
+
+	// #1959, AC2: the run-level classification must actually reach runWarden's
+	// error stream, not just the pure classifyActionFailure unit above.
+	it("records an update-branch 403 on a fork-owned BEHIND PR as benign with the fork outcome, not a failure", async () => {
+		const page = graphqlPage([prNode({ number: 1, mergeStateStatus: "BEHIND", autoMergeRequest: { enabledAt: "2026-01-01" }, isCrossRepository: true })]);
+		const { fetcher, calls } = fakeGithub({
+			"POST /graphql": page,
+			"PUT /repos/acme/repo/pulls/1/update-branch": () => ({ ok: false, status: 403, json: async () => ({}) }),
+		});
+		const results = await runWarden({ fetcher, owner: "acme", repo: "repo" });
+		expect(results[0].errors).toEqual([{ message: expect.stringContaining("update-branch-forbidden-fork"), benign: true }]);
+		// Review round 2, F2: this is the wiring guard for isFork itself.
+		// Deleting `isCrossRepository` from PR_QUERY leaves normalizePr's
+		// `Boolean(node.isCrossRepository)` silently reading `undefined` as
+		// `false` on every real PR -- the whole fork branch above would then
+		// go dead in production while every one of these tests (which fake
+		// the GraphQL response by hand) stays green. Assert the query text
+		// itself requests the field, so removing it fails here first.
+		const graphqlCall = calls.find((c) => c.url.endsWith("/graphql"));
+		expect(String((graphqlCall?.body as { query?: string } | undefined)?.query)).toContain("isCrossRepository");
+	});
+
+	it("records an update-branch 403 on an own-branch BEHIND PR as a fatal failure", async () => {
+		const page = graphqlPage([prNode({ number: 1, mergeStateStatus: "BEHIND", autoMergeRequest: { enabledAt: "2026-01-01" }, isCrossRepository: false })]);
+		const { fetcher } = fakeGithub({
+			"POST /graphql": page,
+			"PUT /repos/acme/repo/pulls/1/update-branch": () => ({ ok: false, status: 403, json: async () => ({}) }),
+		});
+		const results = await runWarden({ fetcher, owner: "acme", repo: "repo" });
+		expect(results[0].errors).toEqual([{ message: expect.stringContaining("HTTP 403"), benign: false }]);
 	});
 
 	it("records a list-level GraphQL error as its own result entry with number: null", async () => {

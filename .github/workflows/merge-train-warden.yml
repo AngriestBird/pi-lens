@@ -31,9 +31,14 @@ jobs:
   warden:
     name: Sweep open PRs
     runs-on: ubuntu-latest
+    # contents: write is for the PUT pulls/N/update-branch call, not checkout:
+    # that endpoint has GitHub create a merge commit ON the PR branch, which
+    # needs write access to repository contents -- pull-requests: write alone
+    # (which only covers labels/comments/the PR object itself) 403s on it
+    # (#1959).
     permissions:
-      contents: read # checkout
-      pull-requests: write # label + comment on PRs, call update-branch
+      contents: write # checkout, and the update-branch merge-commit kick
+      pull-requests: write # label + comment on PRs
       actions: read # workflow-run visibility
       checks: read # check-run conclusions on the head commit (statusCheckRollup)
     env:
