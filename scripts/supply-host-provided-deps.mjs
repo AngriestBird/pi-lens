@@ -14,10 +14,16 @@
  *   --install-args   the runtime packages plus their required ranges, ready to
  *                    pass to `npm install`. Only the VALUE-imported ones: the
  *                    type-only host SDK must never be installed (MAX_PATH).
- *   --allow-pattern  an ERE alternation of every host-provided package, for a
- *                    smoke step that allows their absence but must still fail on
- *                    any OTHER missing module. That failure mode is the check's
- *                    whole purpose; it caught the bundled-minimatch class once.
+ *   --allow-pattern  an ERE alternation of the TYPE-ONLY host packages, for the
+ *                    smoke step's missing-module grep. Only the type-only ones,
+ *                    deliberately: every caller supplies the runtime ones first,
+ *                    so a runtime host package still missing at load IS a
+ *                    failure and the grep must catch it. Allowing the whole
+ *                    host-provided set would make that step unable to fail —
+ *                    bare node would always die at the first host import and the
+ *                    allowlist would always match. The step's purpose is to fail
+ *                    on an unresolved dependency; it caught the minimatch class
+ *                    once.
  *
  * USAGE
  *   npm install --no-save $(node scripts/supply-host-provided-deps.mjs --install-args)
@@ -27,15 +33,15 @@ import { readFileSync } from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-	HOST_PROVIDED_PACKAGES,
 	HOST_PROVIDED_RUNTIME_PACKAGES,
+	HOST_PROVIDED_TYPE_ONLY_PACKAGES,
 } from "./lib/host-provided-deps.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const mode = process.argv[2];
 
 if (mode === "--allow-pattern") {
-	console.log(HOST_PROVIDED_PACKAGES.join("|"));
+	console.log(HOST_PROVIDED_TYPE_ONLY_PACKAGES.join("|"));
 	process.exit(0);
 }
 

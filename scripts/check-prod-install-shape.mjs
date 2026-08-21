@@ -44,7 +44,23 @@ const vendored = HOST_PROVIDED_PACKAGES.filter((name) =>
 	existsSync(path.join(modules, ...name.split("/"))),
 );
 
+// A development tree installs devDependencies, and the host-provided packages
+// ARE devDependencies, so they are present and SHOULD be. Say so instead of
+// reporting a failure a developer cannot act on. Detect the tree by a
+// devDependency nothing else installs.
+const looksLikeDevTree = existsSync(path.join(modules, "vitest"));
+
 if (vendored.length > 0) {
+	if (looksLikeDevTree) {
+		console.error(
+			"[install-shape] SKIPPED: this looks like a development install " +
+				"(node_modules/vitest is present), where the host-provided packages " +
+				"are expected as devDependencies. This check targets a PRODUCTION " +
+				"install — `npm install --omit=dev`, or a packed tarball — which is " +
+				"what CI runs it against (#1926).",
+		);
+		process.exit(0);
+	}
 	console.error(
 		"[install-shape] FAILED: a production install vendored host-provided " +
 			"package(s), which pi already supplies:",

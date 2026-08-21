@@ -132,6 +132,21 @@ describe("host-provided packages are not vendored (#1926)", () => {
 		expect(HOST_PROVIDED_PACKAGES.length).toBeGreaterThan(0);
 	});
 
+	it("ships the shared list, because install-selftest.mjs imports it", () => {
+		// scripts/install-selftest.mjs runs FROM THE INSTALLED PACKAGE in the
+		// install-smoke job (`require.resolve("pi-lens/scripts/install-selftest.mjs")`)
+		// and imports the list to subtract host-provided specifiers. If the module
+		// is not in files[], that import throws in the tarball and the whole
+		// selftest dies (#1926).
+		const files = pkg.files ?? [];
+		expect(files).toContain("scripts/lib/host-provided-deps.mjs");
+		const selftest = fs.readFileSync(
+			path.join(root, "scripts", "install-selftest.mjs"),
+			"utf8",
+		);
+		expect(selftest).toContain("lib/host-provided-deps.mjs");
+	});
+
 	it("splits host-provided packages into runtime and type-only, with no overlap", () => {
 		// CI installs the RUNTIME half before a bare `node dist/index.js` smoke
 		// check, because bare node is not pi. It must never install the type-only
