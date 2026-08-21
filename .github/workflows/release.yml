@@ -41,9 +41,11 @@ jobs:
             SHOULD_RELEASE=true
           fi
 
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "should_release=$SHOULD_RELEASE" >> "$GITHUB_OUTPUT"
+          {
+            echo "version=$VERSION"
+            echo "tag=$TAG"
+            echo "should_release=$SHOULD_RELEASE"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Verify bump PR rolled up changelog entries
         if: steps.meta.outputs.should_release == 'true'

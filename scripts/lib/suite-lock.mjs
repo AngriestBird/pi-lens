@@ -310,6 +310,12 @@ export async function acquireTestLock(options = {}) {
 
 			const now = Date.now();
 			if (timeoutMs > 0 && now - start > timeoutMs) {
+				// Message shape is pinned: tests/scripts/suite-lock.test.ts:233
+				// asserts against it directly, and scripts/pre-push-targeted-tests.mjs
+				// greps a caller's stderr for "timed out after \d+ms waiting for
+				// test-suite lock" to tell a lock timeout (push proceeds, #1804 F2)
+				// apart from a real test failure (push blocks). Reword both call
+				// sites together with this string.
 				throw new Error(
 					`timed out after ${timeoutMs}ms waiting for test-suite lock held by ${describeOwner(owner)}`,
 				);

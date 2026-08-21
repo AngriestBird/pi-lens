@@ -1,0 +1,83 @@
+name: Lint
+
+# #1844: mechanical lint batch. Three independent, cheap jobs -- each stays
+# well under a minute and needs no `npm install` (actionlint and
+# markdownlint-cli2 are self-contained). Kept out of ci.yml so a lint
+# finding never blocks on -- or waits behind -- the full install/build/test
+# lanes. The OSV scan lives in its own osv-scan.yml (see that file for why).
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+    # Default types omit "edited". Without it, retitling a PR to fix a
+    # PR-title-lint failure replays the STALE payload from the original
+    # "opened" event instead of re-running against the new title (#1917
+    # review F3).
+    types: [opened, synchronize, reopened, edited]
+
+permissions: {}
+
+jobs:
+  actionlint:
+    name: actionlint
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      # Pinned release + checksum verification rather than piping a
+      # third-party install script or trusting an unpinned marketplace
+      # action (this repo dogfoods actionlint as a runner -- see
+      # clients/dispatch/runners -- so lint it with the same rigor).
+      - name: Download and verify actionlint v1.7.12 (linux_amd64)
+        run: |
+          set -eu
+          curl -sLO --proto '=https' --tlsv1.2 https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
+          echo "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  actionlint_1.7.12_linux_amd64.tar.gz" | sha256sum -c -
+          tar -xzf actionlint_1.7.12_linux_amd64.tar.gz actionlint
+
+      # Bare invocation (no *.yml glob): actionlint auto-discovers every
+      # workflow under .github/workflows/, including a future .yaml
+      # extension the glob would silently miss (#1917 review F5).
+      - name: Lint workflows
+        run: ./actionlint -color
+
+  pr-title-lint:
+    name: PR title
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+        with:
+          node-version: "22"
+
+      - name: Validate PR title (conventional prefix + issue ref)
+        run: node scripts/check-pr-title.mjs
+
+  markdownlint:
+    name: markdownlint
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+        with:
+          node-version: "22"
+
+      - name: Lint markdown
+        run: npx --yes markdownlint-cli2@0.23.2
