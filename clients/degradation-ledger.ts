@@ -3,6 +3,7 @@
 import { logExtension } from "./extension-log.js";
 import { LEDGER_FIELD_MAX, truncateForLedger } from "./ledger-bounds.js";
 import { logLatency } from "./latency-logger.js";
+import { getSinkWriteFailures, resetSinkWriteFailures } from "./ndjson-logger.js";
 
 // Re-exported so existing importers keep one name for the ledger's bound.
 export { LEDGER_FIELD_MAX, truncateForLedger };
@@ -325,7 +326,25 @@ export type DegradationKind =
 	 * many findings, and the count is the number the observability question
 	 * actually asks.
 	 */
-	| "demoted-finding-retired";
+	| "demoted-finding-retired"
+	/**
+	 * `ndjson-logger.ts`'s shared file-sink lost a write even after its one
+	 * reopen-and-retry (#1970) — the pi-analyze #15 shape, catching the
+	 * `ERR_STREAM_DESTROYED` writes that were vanishing silently after a sink
+	 * died mid-session. Subject is the sink's absolute path, so a specific
+	 * dying log (latency.log vs tree-sitter.log vs extension.log, …) is
+	 * diagnosable instead of one anonymous "logging broke" signal. This kind
+	 * is never written via `recordDegradation`/`recordDegradationOnce`/
+	 * `incrementDegradationCount` like every other kind above: it is folded
+	 * into `getDegradationSummary()` at READ time from
+	 * `ndjson-logger.ts`'s own in-memory tally, deliberately bypassing this
+	 * module's usual durable-row emission (`logDurableDegradation`, which
+	 * writes through `logLatency`/latency.log). Recording a lost write by
+	 * writing ANOTHER line through the very sink that just lost a write is
+	 * the recursion this design avoids — see `ndjson-logger.ts`'s
+	 * `writeFailures` doc comment.
+	 */
+	| "log-sink-write-failure";
 
 export interface DegradationRecord {
 	kind: unknown;
@@ -486,12 +505,30 @@ function boundedKind(value: unknown): string {
 }
 
 export function getDegradationSummary(): DegradationGroup[] {
-	return [...groups.entries()].map(([kind, group]) => ({
+	const summary = [...groups.entries()].map(([kind, group]) => ({
 		kind,
 		count: group.count,
 		droppedCount: group.count - group.entries.length,
 		latestReasons: group.entries.map((entry) => ({ ...entry })),
 	}));
+	// Folded in at read time, not written into `groups` (#1970) — see the
+	// `log-sink-write-failure` doc comment on `DegradationKind` for why this
+	// kind never goes through `recordDegradation`.
+	const sinkFailures = getSinkWriteFailures();
+	if (sinkFailures.length > 0) {
+		summary.push({
+			kind: "log-sink-write-failure",
+			count: sinkFailures.reduce((total, sink) => total + sink.droppedCount, 0),
+			droppedCount: 0,
+			latestReasons: sinkFailures.map((sink) => ({
+				subject: truncateForLedger(sink.file),
+				reason: truncateForLedger(
+					`${sink.droppedCount} dropped write(s) after reopen-retry failed`,
+				),
+			})),
+		});
+	}
+	return summary;
 }
 
 function isRenderableSummary(value: unknown): value is DegradationGroup[] {
@@ -546,6 +583,10 @@ export function resetDegradationLedger(): void {
 	onceKeys.clear();
 	tallies.clear();
 	ledgerGeneration++;
+	// #1970, catalog shape 17: the sink write-failure tally is a
+	// process-lifetime latch too — it re-arms alongside the rest of the
+	// ledger rather than surviving past the session that observed it.
+	resetSinkWriteFailures();
 }
 
 export const DEGRADATION_ENTRIES_PER_KIND = ENTRIES_PER_KIND;

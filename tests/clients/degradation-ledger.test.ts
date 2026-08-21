@@ -242,4 +242,81 @@ describe("session degradation ledger", () => {
 	it.each([null, undefined, { malformed: true }, [{ kind: "bad" }]])("renders malformed summary %p as empty", (summary) => {
 		expect(renderDegradationLines(summary)).toEqual([]);
 	});
+
+	describe("log-sink-write-failure (#1970)", () => {
+		it("folds a real ndjson-logger sink loss into the summary, naming the sink and its dropped-write count", async () => {
+			const ndjson = await import("../../clients/ndjson-logger.js");
+			const path = await import("node:path");
+			const os = await import("node:os");
+			const fs = await import("node:fs");
+			const tmpDir = fs.mkdtempSync(
+				path.join(os.tmpdir(), "degradation-ledger-sink-fold-"),
+			);
+			const logFile = path.join(tmpDir, "test.log");
+
+			// Nothing to fold before any sink has failed.
+			expect(
+				getDegradationSummary().some((g) => g.kind === "log-sink-write-failure"),
+			).toBe(false);
+
+			const err = Object.assign(new Error("destroyed"), {
+				code: "ERR_STREAM_DESTROYED",
+			});
+			const appendFileSpy = vi
+				.spyOn(fs.promises, "appendFile")
+				.mockRejectedValue(err);
+			const logger = ndjson.createNdjsonLogger({ filePath: logFile });
+			logger.log({ lost: true });
+			await logger.flush();
+			appendFileSpy.mockRestore();
+
+			// The fold is live data read from ndjson-logger's own tally, not a
+			// static/empty entry: it names the sink and carries a real count.
+			const group = getDegradationSummary().find(
+				(g) => g.kind === "log-sink-write-failure",
+			);
+			expect(group).toBeDefined();
+			expect(group?.count).toBeGreaterThanOrEqual(1);
+			const entry = group?.latestReasons.find((r) => r.subject.includes("test.log"));
+			expect(entry).toBeDefined();
+			expect(entry?.reason).toContain("dropped write");
+
+			ndjson.resetSinkWriteFailures();
+			fs.rmSync(tmpDir, { recursive: true, force: true });
+		});
+
+		it("session-boundary reset clears the sink write-failure tally (catalog shape 17)", async () => {
+			const ndjson = await import("../../clients/ndjson-logger.js");
+			const path = await import("node:path");
+			const os = await import("node:os");
+			const fs = await import("node:fs");
+			const tmpDir = fs.mkdtempSync(
+				path.join(os.tmpdir(), "degradation-ledger-sink-"),
+			);
+			const logFile = path.join(tmpDir, "test.log");
+			const appendFileSpy = vi
+				.spyOn(fs.promises, "appendFile")
+				.mockRejectedValue(
+					Object.assign(new Error("destroyed"), {
+						code: "ERR_STREAM_DESTROYED",
+					}),
+				);
+			const logger = ndjson.createNdjsonLogger({ filePath: logFile });
+			logger.log({ lost: true });
+			await logger.flush();
+			appendFileSpy.mockRestore();
+
+			expect(
+				getDegradationSummary().some((g) => g.kind === "log-sink-write-failure"),
+			).toBe(true);
+
+			resetDegradationLedger();
+
+			expect(
+				getDegradationSummary().some((g) => g.kind === "log-sink-write-failure"),
+			).toBe(false);
+
+			fs.rmSync(tmpDir, { recursive: true, force: true });
+		});
+	});
 });
