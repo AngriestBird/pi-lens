@@ -137,17 +137,27 @@ export function skipUnlessToolRan(
  * clean save would drown the ledger and bury the real signal.
  *
  * FALSE NEGATIVES this rule accepts, stated plainly:
- *   - A tool that reports findings under exit 0. `vale` does this by default
- *     (nonzero only on its own errors), so a future vale parser break that
- *     coincides with exit 0 stays invisible here. The #1933 break did exit 1.
+ *   - A tool that reports findings under exit 0. `swiftlint` is the live
+ *     example among the adopters: a warning-only run exits 0 and still writes
+ *     a full JSON array, so a swiftlint parser break that never trips a
+ *     nonzero exit stays invisible here. (`vale` also exits 0 on findings by
+ *     default, but its actual #1933 break exited 1, so it is not the example.)
+ *     This gap is deliberate and is NOT closed by adding an output-length
+ *     threshold for exit 0. That class belongs to the captured-fixture lane —
+ *     `tests/clients/dispatch/runners/captured-real-output.test.ts` pins each
+ *     parser against real recorded binary output, which catches a broken
+ *     parser directly instead of guessing from output size. A length
+ *     threshold here would fire on every clean run of every tool that prints
+ *     a summary banner.
  *   - A tool whose parser breaks only for a SUBSET of findings still reports
  *     the ones it can read, so `parsedCount` is nonzero and nothing records.
  *
  * FALSE POSITIVES it accepts: a runner that legitimately parses zero
  * diagnostics out of a failing run — `go-vet` exits nonzero for a SIBLING
- * file's problem and then filters to the edited file. Such runners stay off
- * this helper rather than being special-cased inside it; see the runner-family
- * table in `tests/clients/dispatch/runners/parsed-nothing-sweep.test.ts`.
+ * file's problem and then filters to the edited file, and `terragrunt` does
+ * the same across a unit directory. Such runners stay off this helper rather
+ * than being special-cased inside it; see the runner-family registries in
+ * `tests/clients/dispatch/runners/parsed-nothing-sweep.test.ts`.
  *
  * Bounded by `incrementDegradationCount`: one latest-reason entry per
  * (kind, subject) with an exact tally, so a permanently broken parser costs

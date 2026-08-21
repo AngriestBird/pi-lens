@@ -55,6 +55,8 @@ vi.mock("../../../../clients/dispatch/runners/utils/runner-helpers.js", () => ({
 		toolId,
 	findLocalBinUpwards: () => null,
 	lspPrimaryCoversFile: () => false,
+	resolveAvailableOrInstall: async (_checker: unknown, toolId: string) =>
+		toolId,
 }));
 
 function createCtx(kind: string, filePath: string, cwd: string) {
@@ -299,6 +301,123 @@ describe("runner-parsed-nothing (#1948)", () => {
 			const { row } = parsedNothingRow(summary, "taplo");
 			expect(row?.reason).toContain("exited 1");
 			expect(row?.reason).toContain("failed to load schema");
+		} finally {
+			env.cleanup();
+		}
+	});
+});
+
+/**
+ * Round 2, finding F1. The first sweep watched `skipUnlessToolRan` alone, so
+ * six runners on `spawnFailedWithNoOutput` opted out silently. Two of them
+ * carried the live hole. These two cases pin the hole shut with real output
+ * shapes, not with the sweep's static scan.
+ */
+describe("runners that reached the gate through spawnFailedWithNoOutput (#1948 F1)", () => {
+	beforeEach(() => {
+		vi.resetModules();
+		safeSpawnAsync.mockReset();
+		getLinterPolicyForCwd.mockReset();
+		getLinterPolicyForCwd.mockReturnValue(null);
+	});
+
+	// Real `tflint --format=json` payload for a plugin or config failure: the
+	// report IS valid JSON with an empty `issues` array and a populated
+	// `errors` array the parser never reads. Exit 1, 0 diagnostics, reported
+	// clean Terraform.
+	const TFLINT_ERROR_REPORT = JSON.stringify({
+		issues: [],
+		errors: [
+			{
+				message:
+					'Failed to load plugin "aws"; plugin binary not found in .tflint.d',
+			},
+		],
+	});
+
+	it("tflint records when its JSON carries errors the parser never reads", async () => {
+		const env = setupTestEnvironment("pi-lens-1948-tflint-");
+		try {
+			const summary = await ledger();
+			const filePath = path.join(env.tmpDir, "main.tf");
+			fs.writeFileSync(filePath, 'resource "null_resource" "a" {}\n');
+			safeSpawnAsync.mockResolvedValue({
+				stdout: TFLINT_ERROR_REPORT,
+				stderr: "",
+				status: 1,
+			});
+			const runner = (
+				await import("../../../../clients/dispatch/runners/tflint.js")
+			).default;
+			const result = await runner.run(
+				createCtx("terraform", filePath, env.tmpDir) as never,
+			);
+
+			expect(result.diagnostics).toEqual([]);
+			const { row } = parsedNothingRow(summary, "tflint");
+			expect(
+				row,
+				"expected a runner-parsed-nothing row for tflint",
+			).toBeDefined();
+			expect(row?.reason).toContain("exited 1");
+			expect(row?.reason).toContain("Failed to load plugin");
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("tflint records NOTHING on a clean exit-0 report", async () => {
+		const env = setupTestEnvironment("pi-lens-1948-tflint-clean-");
+		try {
+			const summary = await ledger();
+			const filePath = path.join(env.tmpDir, "main.tf");
+			fs.writeFileSync(filePath, 'resource "null_resource" "a" {}\n');
+			safeSpawnAsync.mockResolvedValue({
+				stdout: JSON.stringify({ issues: [], errors: [] }),
+				stderr: "",
+				status: 0,
+			});
+			const runner = (
+				await import("../../../../clients/dispatch/runners/tflint.js")
+			).default;
+			const result = await runner.run(
+				createCtx("terraform", filePath, env.tmpDir) as never,
+			);
+
+			expect(result.status).toBe("succeeded");
+			expect(parsedNothingRow(summary, "tflint").group).toBeUndefined();
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("detekt records when a config failure yields no parsable finding", async () => {
+		const env = setupTestEnvironment("pi-lens-1948-detekt-");
+		try {
+			const summary = await ledger();
+			fs.writeFileSync(path.join(env.tmpDir, "detekt.yml"), "build:\n");
+			const filePath = path.join(env.tmpDir, "Main.kt");
+			fs.writeFileSync(filePath, "fun main() {}\n");
+			safeSpawnAsync.mockResolvedValue({
+				stdout: "",
+				stderr:
+					'Exception in thread "main" InvalidConfig: Run failed with 1 invalid config property.\n',
+				status: 1,
+			});
+			const runner = (
+				await import("../../../../clients/dispatch/runners/detekt.js")
+			).default;
+			const result = await runner.run(
+				createCtx("kotlin", filePath, env.tmpDir) as never,
+			);
+
+			expect(result.diagnostics).toEqual([]);
+			const { row } = parsedNothingRow(summary, "detekt");
+			expect(
+				row,
+				"expected a runner-parsed-nothing row for detekt",
+			).toBeDefined();
+			expect(row?.reason).toContain("invalid config property");
 		} finally {
 			env.cleanup();
 		}
