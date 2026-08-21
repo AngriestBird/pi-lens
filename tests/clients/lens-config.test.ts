@@ -653,7 +653,7 @@ describe("global pi-lens config", () => {
 			const home = makeTempHome();
 			const badPath = writeConfig(
 				home,
-				JSON.stringify({ format: { mode: "immedaite" } }),
+				JSON.stringify({ format: { mode: "immedaite" } }), // spellchecker:disable-line
 			);
 			expect(loadPiLensGlobalConfig(badPath)).toEqual({
 				format: { mode: undefined },

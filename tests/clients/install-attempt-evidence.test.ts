@@ -58,18 +58,18 @@ async function installer(): Promise<
 const npmOk = { stdout: "", stderr: "", status: 0 };
 const npmFailed = {
 	stdout: "",
-	stderr: "npm error 404 Not Found - GET https://registry.npmjs.org/oxlint",
+	stderr: "npm error 404 Not Found - GET https://registry.npmjs.org/fish-lsp",
 	status: 1,
 };
 
 /** Plant the binary an npm install is expected to leave behind. */
-function plantOxlintBinary(): void {
+function plantFishLspBinary(): void {
 	const binDir = path.join(piLensHome, "tools", "node_modules", ".bin");
 	fs.mkdirSync(binDir, { recursive: true });
 	const isWin = process.platform === "win32";
 	for (const name of isWin
-		? ["oxlint.cmd", "oxlint.exe", "oxlint"]
-		: ["oxlint"]) {
+		? ["fish-lsp.cmd", "fish-lsp.exe", "fish-lsp"]
+		: ["fish-lsp"]) {
 		fs.writeFileSync(path.join(binDir, name), "#!/bin/sh\nexit 0\n", {
 			mode: 0o755,
 		});
@@ -107,8 +107,8 @@ describe("the installer records what its attempt did (#1500)", () => {
 		safeSpawnAsync.mockResolvedValue(npmFailed);
 		const { ensureTool, getInstallAttempt } = await installer();
 
-		expect(await ensureTool("oxlint")).toBeUndefined();
-		const attempt = getInstallAttempt("oxlint");
+		expect(await ensureTool("fish-lsp")).toBeUndefined();
+		const attempt = getInstallAttempt("fish-lsp");
 		expect(attempt?.outcome).toBe("declined");
 		expect(describeInstallAttempt(attempt)).toMatchObject({
 			install: "not-attempted",
@@ -120,9 +120,11 @@ describe("the installer records what its attempt did (#1500)", () => {
 		safeSpawnAsync.mockResolvedValue(npmFailed);
 		const { ensureTool, getInstallAttempt } = await installer();
 
-		expect(await ensureTool("oxlint", { allowInstall: false })).toBeUndefined();
-		expect(getInstallAttempt("oxlint")?.outcome).toBe("declined");
-		expect(describeInstallAttempt(getInstallAttempt("oxlint")).install).toBe(
+		expect(
+			await ensureTool("fish-lsp", { allowInstall: false }),
+		).toBeUndefined();
+		expect(getInstallAttempt("fish-lsp")?.outcome).toBe("declined");
+		expect(describeInstallAttempt(getInstallAttempt("fish-lsp")).install).toBe(
 			"not-attempted",
 		);
 	});
@@ -133,8 +135,8 @@ describe("the installer records what its attempt did (#1500)", () => {
 		safeSpawnAsync.mockResolvedValue(npmFailed);
 		const { ensureTool, getInstallAttempt } = await installer();
 
-		expect(await ensureTool("oxlint")).toBeUndefined();
-		const attempt = getInstallAttempt("oxlint");
+		expect(await ensureTool("fish-lsp")).toBeUndefined();
+		const attempt = getInstallAttempt("fish-lsp");
 		expect(attempt?.outcome).toBe("failed");
 		expect(describeInstallAttempt(attempt)).toMatchObject({
 			install: "failed",
@@ -144,15 +146,15 @@ describe("the installer records what its attempt did (#1500)", () => {
 	it("a successful install records succeeded", async () => {
 		safeSpawnAsync.mockImplementation(async () => {
 			// The install "downloads" the package: plant what npm would leave.
-			plantOxlintBinary();
+			plantFishLspBinary();
 			return npmOk;
 		});
 		const { ensureTool, getInstallAttempt } = await installer();
 
-		const resolved = await ensureTool("oxlint");
+		const resolved = await ensureTool("fish-lsp");
 		expect(resolved).toBeDefined();
-		expect(getInstallAttempt("oxlint")?.outcome).toBe("succeeded");
-		expect(describeInstallAttempt(getInstallAttempt("oxlint")).install).toBe(
+		expect(getInstallAttempt("fish-lsp")?.outcome).toBe("succeeded");
+		expect(describeInstallAttempt(getInstallAttempt("fish-lsp")).install).toBe(
 			"succeeded",
 		);
 	});
@@ -163,8 +165,8 @@ describe("the installer records what its attempt did (#1500)", () => {
 		safeSpawnAsync.mockResolvedValue(npmFailed);
 		const { ensureTool, getInstallAttempt } = await installer();
 
-		expect(await ensureTool("oxlint")).toBeUndefined();
-		const attempt = getInstallAttempt("oxlint");
+		expect(await ensureTool("fish-lsp")).toBeUndefined();
+		const attempt = getInstallAttempt("fish-lsp");
 		expect(attempt?.outcome).toBe("declined");
 		expect(describeInstallAttempt(attempt)).toMatchObject({
 			install: "not-attempted",
@@ -175,7 +177,7 @@ describe("the installer records what its attempt did (#1500)", () => {
 
 	it("no attempt at all reads as not-attempted", async () => {
 		const { getInstallAttempt } = await installer();
-		expect(getInstallAttempt("oxlint")).toBeUndefined();
+		expect(getInstallAttempt("fish-lsp")).toBeUndefined();
 		expect(describeInstallAttempt(undefined)).toEqual({
 			install: "not-attempted",
 		});
@@ -195,9 +197,9 @@ describe("the row a reader sees matches what the install did (#1500)", () => {
 			await import("../../clients/security-scan-client.js");
 		class FakeScanClient extends SecurityScanClient<string[]> {
 			constructor() {
-				// oxlint is a real npm-strategy tool id, so the installer takes its
+				// fish-lsp is a real npm-strategy tool id, so the installer takes its
 				// genuine path rather than bailing on an unknown id.
-				super("oxlint");
+				super("fish-lsp");
 			}
 			protected doEnsureAvailable(): Promise<boolean> {
 				return this.ensureViaInstaller(["--version"]);
@@ -213,7 +215,7 @@ describe("the row a reader sees matches what the install did (#1500)", () => {
 			stdout: "",
 			stderr: "",
 			status: null,
-			error: Object.assign(new Error("spawn oxlint ENOENT"), {
+			error: Object.assign(new Error("spawn fish-lsp ENOENT"), {
 				code: "ENOENT",
 			}),
 			failure: "spawn",
@@ -231,7 +233,7 @@ describe("the row a reader sees matches what the install did (#1500)", () => {
 					stdout: "",
 					stderr: "",
 					status: null,
-					error: Object.assign(new Error("spawn oxlint ENOENT"), {
+					error: Object.assign(new Error("spawn fish-lsp ENOENT"), {
 						code: "ENOENT",
 					}),
 					failure: "spawn",

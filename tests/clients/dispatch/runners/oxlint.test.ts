@@ -380,4 +380,63 @@ describe("oxlint runner", () => {
 			env.cleanup();
 		}
 	});
+
+	it("reports a config-excluded file as skipped, not succeeded (dogfood #1985 review F2b/R2)", async () => {
+		// Nested-config discovery means a file under a directory with its own
+		// `.oxlintrc.json` ignorePatterns — or covered by a parent config's
+		// ignorePatterns — makes oxlint report `number_of_files: 0` and an empty
+		// `diagnostics` array. That is the SAME shape as a genuinely clean file:
+		// zero diagnostics. Without reading `number_of_files`, "config excluded
+		// this file" and "this file has no findings" are indistinguishable — the
+		// AGENTS.md empty-result invariant (an empty result must distinguish
+		// clean from errored/excluded).
+		//
+		// #1985 review round 2: a hand-built `JSON.stringify({...})` double
+		// passed against a parser that bailed on real bytes, because real
+		// oxlint prints a "No files found to lint." BANNER LINE to stdout
+		// BEFORE the JSON when `number_of_files` is 0 — the #1946 fixture
+		// discipline exists for exactly this gap. This is the VERBATIM stdout
+		// `npx oxlint@1.79.0 --format json <excluded-file>` produced (exit 1,
+		// stderr empty), captured against a real `.oxlintrc.json` with
+		// `ignorePatterns` covering the target file.
+		const env = setupTestEnvironment("pi-lens-oxlint-excluded-");
+		try {
+			const filePath = path.join(env.tmpDir, "sample.ts");
+			fs.writeFileSync(filePath, "const unused = 1;\n");
+
+			const CAPTURED_NO_FILES_STDOUT =
+				"No files found to lint. Please check your paths and ignore patterns.\n" +
+				'{ "diagnostics": [],\n' +
+				'              "number_of_files": 0,\n' +
+				'              "number_of_rules": 96,\n' +
+				'              "threads_count": 16,\n' +
+				'              "start_time": 0.009533\n' +
+				"            }\n" +
+				"            ";
+
+			safeSpawnAsync.mockResolvedValueOnce({
+				error: null,
+				status: 1,
+				stdout: CAPTURED_NO_FILES_STDOUT,
+				stderr: "",
+			});
+
+			const runner = (
+				await import("../../../../clients/dispatch/runners/oxlint.js")
+			).default;
+			const log = vi.fn();
+			const result = await runner.run({
+				...createCtx(filePath, env.tmpDir),
+				hasTool: async () => false,
+				log,
+			} as never);
+
+			expect(result.status).toBe("skipped");
+			expect(result.semantic).toBe("none");
+			expect(result.diagnostics).toHaveLength(0);
+			expect(log).toHaveBeenCalledWith(expect.stringContaining("oxlint"));
+		} finally {
+			env.cleanup();
+		}
+	});
 });

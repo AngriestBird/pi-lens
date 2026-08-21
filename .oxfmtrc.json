@@ -10,6 +10,7 @@
 		"vendor/**",
 		"**/*.captured.*",
 		".all-contributorsrc",
+		".yamllint",
 		"scripts/download-grammars.js",
 		"**/*.json",
 		"**/*.jsonc",
