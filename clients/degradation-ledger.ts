@@ -41,6 +41,17 @@ export type DegradationKind =
 	 * cannot carry, since the warm-only callers never reach selection.
 	 */
 	| "lsp-warm-client-missing"
+	/**
+	 * The blind review-graph read (`getCachedReviewGraph`) either DROPPED a
+	 * persisted snapshot because its git stamp names a different worktree, or
+	 * SERVED one whose stamp names a different HEAD (#1961). Subject is
+	 * `<verdict>:<cwd>`, so the ledger still answers which workspace and which
+	 * verdict after the detailed `review-graph.log` records stop. Every caller of
+	 * that accessor (module_report, lens-engine, project_report) can reach it on
+	 * every call, so only the FIRST occurrence per (verdict, cwd) also writes a
+	 * record; the count here is the exact total.
+	 */
+	| "review-graph-snapshot-read"
 	| "formatter-failure"
 	| "wasm-abort"
 	| "lsp-diagnostics-timeout"
