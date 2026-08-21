@@ -160,6 +160,7 @@ async function scanFileMajorRules(
 	const astGrep: ProjectDiagnostic[] = [];
 	const sgModule = await loadSg();
 	let phaseOneFilesScanned = 0;
+	let astGrepFilesScanned = 0;
 	let astGrepDurationMs = 0;
 	// #891: only fully completed files count — a wasm abort mid-file leaves that
 	// file out, so the caller can report a truncated filesScanned honestly.
@@ -246,6 +247,7 @@ async function scanFileMajorRules(
 		} catch {
 			// Project scans are best-effort; one unparsable file must not abort the tool.
 		} finally {
+			astGrepFilesScanned++;
 			astGrepDurationMs += Date.now() - startedAt;
 		}
 	};
@@ -368,6 +370,14 @@ async function scanFileMajorRules(
 			// phase-major scans.
 			durationMs: Date.now() - startedAt - astGrepDurationMs,
 			stats,
+			// #1935 review: ast-grep's own cost is often a scan's most expensive
+			// phase (production evidence: 13168ms over 86 files, the single
+			// biggest contributor). Its duration is subtracted above so it stays
+			// comparable to the historical phase-major scans; carry it here too
+			// so it stays visible SOMEWHERE instead of disappearing when the
+			// vacuous `project_diagnostics_ast_grep_scan` cache_stats record
+			// (below) was removed.
+			astGrep: { durationMs: astGrepDurationMs, fileCount: astGrepFilesScanned },
 		});
 	});
 	// #1935: no `project_diagnostics_ast_grep_scan` cache_stats record here.
@@ -376,9 +386,10 @@ async function scanFileMajorRules(
 	// cache_stats record for this scope would always read all-zero (0
 	// lookups, 0 hits, every counter 0) no matter how the scan behaves. That
 	// was a vacuous observability record, not a real one: it looked like a
-	// signal but could never carry information. `astGrepDurationMs` still
-	// feeds the `project_diagnostics_scan` record above (subtracted so that
-	// duration stays comparable to the historical phase-major scans).
+	// signal but could never carry information. `astGrepDurationMs` and
+	// `astGrepFilesScanned` still feed the `project_diagnostics_scan` record
+	// above (`astGrep` sub-field), so this cost stays observable without a
+	// second, always-zero record to carry it.
 	return { treeSitter, factRules, astGrep, filesScanned, wasmAborted };
 }
 

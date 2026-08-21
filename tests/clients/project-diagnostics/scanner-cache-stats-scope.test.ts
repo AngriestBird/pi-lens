@@ -13,7 +13,15 @@ import { removeTempDirSync } from "../test-utils.js";
 // scan does — so the scanner must never emit one. Wrap the real logger (not a
 // bare `vi.fn()`) so this test proves the SCOPE the scanner emits, not just
 // that logging happened.
-const calls = vi.hoisted(() => [] as Array<{ scope: string }>);
+//
+// Review round (F1): removing that phantom scope also silently dropped the
+// ONE real thing it carried — ast-grep's own duration and file count, often
+// a scan's most expensive phase (production evidence: 13168ms over 86
+// files). `project_diagnostics_scan` now carries that as an `astGrep`
+// sub-field, so capture the full call, not just the scope string.
+const calls = vi.hoisted(
+	() => [] as Array<Parameters<typeof import("../../../clients/tree-sitter-logger.js").logTreeSitterCacheStats>[0]>,
+);
 
 vi.mock("../../../clients/tree-sitter-logger.js", async (importOriginal) => {
 	const actual =
@@ -25,7 +33,7 @@ vi.mock("../../../clients/tree-sitter-logger.js", async (importOriginal) => {
 		logTreeSitterCacheStats: (
 			options: Parameters<typeof actual.logTreeSitterCacheStats>[0],
 		) => {
-			calls.push({ scope: options.scope });
+			calls.push(options);
 			return actual.logTreeSitterCacheStats(options);
 		},
 	};
@@ -54,5 +62,15 @@ describe("scanProjectDiagnostics cache_stats scopes (#1935)", () => {
 		expect(scopes).toContain("project_diagnostics_scan");
 		// The vacuous, always-zero record must not.
 		expect(scopes).not.toContain("project_diagnostics_ast_grep_scan");
+
+		// F1 (review): the removed scope's only real content — ast-grep's own
+		// duration and file count — must survive as a sub-field on the
+		// surviving record, not disappear.
+		const diagnosticsScanCall = calls.find(
+			(c) => c.scope === "project_diagnostics_scan",
+		);
+		expect(diagnosticsScanCall?.astGrep).toBeDefined();
+		expect(diagnosticsScanCall?.astGrep?.fileCount).toBe(1);
+		expect(diagnosticsScanCall?.astGrep?.durationMs).toBeGreaterThanOrEqual(0);
 	}, 30000);
 });

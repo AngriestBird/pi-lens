@@ -590,14 +590,24 @@ describe("TreeCache capacity growth for scan working sets (#1715)", () => {
 	// here) must stay a bounded number, not climb without limit as a project
 	// grows past the cache's capacity. `TREE_CACHE_SCAN_CAPACITY_CEILING`
 	// (500 entries) is the enforcement point: this test offers far more files
-	// than the ceiling and pins that resident bytes stay capped at
-	// ceiling * per-file size, proving the cap bounds bytes, not just count.
-	it("bounds treeCacheTotalBytes at the scan ceiling even when a project offers far more files than it holds (#1935)", () => {
+	// than the ceiling and pins that resident bytes stay bounded by realistic
+	// per-file sizes, proving the entry-count cap also bounds bytes.
+	it("bounds treeCacheTotalBytes at the scan ceiling using realistic, varying per-file sizes (#1935)", () => {
 		const cache = new TreeCache(TREE_CACHE_DEFAULT_MAX_SIZE);
-		// Representative of the #1715 heap-cost measurement (~3.6KB synthetic
-		// TypeScript sources).
-		const perFileBytes = 3600;
-		const content = "x".repeat(perFileBytes);
+		// Realistic per-file source sizes observed in production (#1935 review
+		// round): 12.4KB-36KB, not one repeated size. A uniform fixture makes
+		// the byte assertion arithmetically forced by the entry-count
+		// assertion (every entry contributes the same amount, so the total is
+		// just `size * perFileBytes` and can't fail independently) and
+		// understates the real worst case. Cycle through a deterministic,
+		// non-uniform spread so the resident-byte sum carries information the
+		// entry-count assertion above doesn't already give away.
+		const minFileBytes = 12_400;
+		const maxFileBytes = 36_000;
+		const span = maxFileBytes - minFileBytes;
+		const sizeFor = (i: number): number =>
+			minFileBytes + Math.floor((span * ((i * 37) % 101)) / 100);
+
 		// A project many times larger than the hard ceiling — e.g. a 1500-file
 		// monorepo — so the cache must evict, not just grow unboundedly.
 		const totalFilesOffered = TREE_CACHE_SCAN_CAPACITY_CEILING * 3;
@@ -606,15 +616,36 @@ describe("TreeCache capacity growth for scan working sets (#1715)", () => {
 		);
 		expect(cache.getMaxSize()).toBe(TREE_CACHE_SCAN_CAPACITY_CEILING);
 
+		const sizesOffered: number[] = [];
 		for (let i = 0; i < totalFilesOffered; i++) {
-			cache.set(`f${i}.ts`, content, "typescript", fakeTree());
+			const bytes = sizeFor(i);
+			sizesOffered.push(bytes);
+			cache.set(`f${i}.ts`, "x".repeat(bytes), "typescript", fakeTree());
 		}
 
 		const stats = cache.getStats();
 		expect(stats.size).toBe(TREE_CACHE_SCAN_CAPACITY_CEILING);
-		const capBytes = TREE_CACHE_SCAN_CAPACITY_CEILING * perFileBytes;
-		expect(stats.totalBytes).toBeLessThanOrEqual(capBytes);
-		expect(stats.totalBytes).toBe(capBytes);
+
+		// Eviction here is pure FIFO (no `get()` re-insertions reorder
+		// recency), so the resident set is exactly the LAST `ceiling` entries
+		// offered. Sum their sizes independently of the varying-size fixture
+		// above: this fails on its own if eviction keeps the wrong entries,
+		// double-counts, or the cap is missing entirely.
+		const expectedResidentBytes = sizesOffered
+			.slice(-TREE_CACHE_SCAN_CAPACITY_CEILING)
+			.reduce((sum, bytes) => sum + bytes, 0);
+		expect(stats.totalBytes).toBe(expectedResidentBytes);
+
+		// Blast radius (#1935 review): `TreeCache` enforces NO per-entry byte
+		// cap — only the entry-count ceiling (`fileSize` is accounted, never
+		// limited). At these realistic per-file sizes the 500-entry ceiling
+		// means 6-18MB of resident source bytes worst case, not the ~1.8MB a
+		// uniform ~3.6KB fixture would have implied. State the range plainly
+		// rather than let the fixture understate it.
+		const worstCaseFloor = TREE_CACHE_SCAN_CAPACITY_CEILING * minFileBytes;
+		const worstCaseCeiling = TREE_CACHE_SCAN_CAPACITY_CEILING * maxFileBytes;
+		expect(stats.totalBytes).toBeGreaterThanOrEqual(worstCaseFloor);
+		expect(stats.totalBytes).toBeLessThanOrEqual(worstCaseCeiling);
 	});
 });
 
