@@ -116,8 +116,20 @@ const oxlintRunner: RunnerDefinition = {
 		}
 
 		const hasBlocking = diagnostics.some((d) => d.semantic === "blocking");
+		// A warning-only result on exit 0 is oxlint's normal outcome, not a
+		// failure: exit 0 means nothing hit ERROR severity. `status: "failed"`
+		// here would stop this arm from reporting "succeeded", which breaks two
+		// things downstream — plan.ts's ["eslint", "oxlint", "biome-check-json"]
+		// fallback group only stops at the first `status: "succeeded"` runner
+		// (dispatcher.ts's `runGroup`), so biome-check-json would run again on
+		// every warning-only save (extra spawns, a possible install, duplicate
+		// findings); and it would mismatch the sibling convention (biome-check,
+		// golangci-lint, rubocop) of keying `status` off blocking severity, not
+		// off the tool's raw exit code. The findings themselves still reach the
+		// delivery pipeline regardless of `status` — dispatcher.ts buckets by
+		// each diagnostic's own `semantic`, so a warning stays a warning.
 		return {
-			status: "failed",
+			status: hasBlocking ? "failed" : result.status === 0 ? "succeeded" : "failed",
 			diagnostics,
 			semantic: hasBlocking ? "blocking" : "warning",
 		};
