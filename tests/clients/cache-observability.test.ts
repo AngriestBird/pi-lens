@@ -67,6 +67,7 @@ describe("cache-observability — response-side usage (#1018)", () => {
 					output: 340,
 					cost: 0.037,
 					interTurnGapMs: null,
+					gapBasis: "no-prior-turn",
 					cacheMissCause: null,
 					cacheMissKind: null,
 					cacheTtlThresholdMs: DEFAULT_PROVIDER_CACHE_TTL_MS,
@@ -580,6 +581,19 @@ describe("cache-observability — miss attribution (#1071)", () => {
 		>;
 	}
 
+	/**
+	 * Fire a bare `context` observation. This is REQUEST time: the moment the
+	 * provider looks the prompt cache up, and the endpoint the gap measures to.
+	 */
+	function observeRequest(sessionId = "attr") {
+		observeCacheContext({
+			sessionId,
+			turnIndex: 0,
+			injectionEnabled: false,
+			existingMessages: [{ role: "user", content: "prompt" }],
+		});
+	}
+
 	/** Feed one `context` observation so the ledger sees real injected content. */
 	function observeInjection(chars: number, sessionId = "attr") {
 		observeCacheContext({
@@ -623,44 +637,100 @@ describe("cache-observability — miss attribution (#1071)", () => {
 		});
 	});
 
-	it("records the inter-turn gap between consecutive message_end records", () => {
+	it("measures the gap to request time, not to the message_end that follows", () => {
 		logUsage(8_000, 100);
 		vi.setSystemTime(BASE_MS + 4_000);
+		observeRequest();
+		// 5s of generation follows the request. It is not idle time.
+		vi.setSystemTime(BASE_MS + 9_000);
 		logUsage(8_100, 100);
 		expect(lastUsageMetadata()).toMatchObject({
 			interTurnGapMs: 4_000,
+			gapBasis: "request-time",
 			priorCacheRead: 8_000,
 			cacheMissCause: null,
+		});
+	});
+
+	it("does not read a short idle plus a long generation as ttl-expired", () => {
+		// The reviewer's probe: 10s idle, then 70s of generation. The message-end
+		// basis would measure 80s and fire ttl-expired; the request-time basis
+		// measures the 10s that actually elapsed before the cache lookup.
+		logUsage(8_000, 100);
+		vi.setSystemTime(BASE_MS + 10_000);
+		observeRequest();
+		vi.setSystemTime(BASE_MS + 80_000);
+		logUsage(0, 9_000);
+		expect(lastUsageMetadata()).toMatchObject({
+			interTurnGapMs: 10_000,
+			gapBasis: "request-time",
+			cacheMissCause: "unknown",
+		});
+	});
+
+	it("falls back to the message-end delta when no context call arrived", () => {
+		logUsage(8_000, 100);
+		vi.setSystemTime(BASE_MS + 70_000);
+		logUsage(0, 9_000);
+		expect(lastUsageMetadata()).toMatchObject({
+			interTurnGapMs: 70_000,
+			gapBasis: "message-end-fallback",
+			cacheMissCause: "ttl-expired",
+		});
+	});
+
+	it("clears the request stamp at each turn boundary", () => {
+		logUsage(8_000, 100);
+		vi.setSystemTime(BASE_MS + 1_000);
+		observeRequest();
+		vi.setSystemTime(BASE_MS + 2_000);
+		logUsage(8_000, 100);
+		expect(lastUsageMetadata()).toMatchObject({ gapBasis: "request-time" });
+		// No context call this turn: the previous turn's stamp must not be reused.
+		vi.setSystemTime(BASE_MS + 3_000);
+		logUsage(8_000, 100);
+		expect(lastUsageMetadata()).toMatchObject({
+			gapBasis: "message-end-fallback",
+			interTurnGapMs: 1_000,
 		});
 	});
 
 	it("attributes a zero read after a long idle gap to ttl-expired", () => {
 		logUsage(8_000, 100);
 		vi.setSystemTime(BASE_MS + 166_000);
+		observeRequest();
+		vi.setSystemTime(BASE_MS + 170_000);
 		logUsage(0, 9_000);
 		expect(lastUsageMetadata()).toMatchObject({
 			cacheMissCause: "ttl-expired",
 			cacheMissKind: "zero-read",
 			interTurnGapMs: 166_000,
+			gapBasis: "request-time",
 			cacheTtlThresholdMs: DEFAULT_PROVIDER_CACHE_TTL_MS,
 		});
 	});
 
-	it("treats a gap exactly at the threshold as expired and one below it as not", () => {
+	it("treats a request-time gap exactly at the threshold as expired and one below it as not", () => {
 		logUsage(8_000, 100, "boundary-at");
 		vi.setSystemTime(BASE_MS + DEFAULT_PROVIDER_CACHE_TTL_MS);
+		observeRequest("boundary-at");
+		vi.setSystemTime(BASE_MS + DEFAULT_PROVIDER_CACHE_TTL_MS + 3_000);
 		logUsage(0, 9_000, "boundary-at");
 		expect(lastUsageMetadata()).toMatchObject({
 			cacheMissCause: "ttl-expired",
+			gapBasis: "request-time",
 			interTurnGapMs: DEFAULT_PROVIDER_CACHE_TTL_MS,
 		});
 
 		vi.setSystemTime(BASE_MS);
 		logUsage(8_000, 100, "boundary-below");
 		vi.setSystemTime(BASE_MS + DEFAULT_PROVIDER_CACHE_TTL_MS - 1);
+		observeRequest("boundary-below");
+		vi.setSystemTime(BASE_MS + DEFAULT_PROVIDER_CACHE_TTL_MS + 3_000);
 		logUsage(0, 100, "boundary-below");
 		expect(lastUsageMetadata()).toMatchObject({
 			cacheMissCause: "unknown",
+			gapBasis: "request-time",
 			interTurnGapMs: DEFAULT_PROVIDER_CACHE_TTL_MS - 1,
 		});
 	});
@@ -670,6 +740,8 @@ describe("cache-observability — miss attribution (#1071)", () => {
 		_resetProviderCacheTtlForTests();
 		logUsage(8_000, 100);
 		vi.setSystemTime(BASE_MS + 2_000);
+		observeRequest();
+		vi.setSystemTime(BASE_MS + 2_500);
 		logUsage(0, 9_000);
 		expect(lastUsageMetadata()).toMatchObject({
 			cacheMissCause: "ttl-expired",
@@ -746,6 +818,63 @@ describe("cache-observability — miss attribution (#1071)", () => {
 			cacheMissCause: "unknown",
 			cacheMissKind: "low-read",
 			attributionCharsCapped: true,
+		});
+	});
+
+	it("keeps partial-eviction reachable when an ordinary tool result lands", () => {
+		// #1071 review round 1, F2: transcript growth used to run through the
+		// 16 KiB injection cap, so one routine 20,000-char tool result latched
+		// attributionCharsCapped and suppressed the verdict.
+		logUsage(8_000, 100);
+		observeCacheContext({
+			sessionId: "attr",
+			turnIndex: 0,
+			injectionEnabled: true,
+			existingMessages: [{ role: "user", content: "prompt" }],
+		});
+		observeCacheContext({
+			sessionId: "attr",
+			turnIndex: 1,
+			injectionEnabled: true,
+			existingMessages: [
+				{ role: "user", content: "prompt" },
+				{ role: "toolResult", content: "t".repeat(20_000) },
+			],
+			injectionSlices: [
+				{
+					source: "turn-findings",
+					messages: [{ role: "user", content: "f".repeat(200) }],
+				},
+			],
+			placement: "insert-before-final",
+		});
+		vi.setSystemTime(BASE_MS + 1_000);
+		logUsage(3_000, 30_000);
+		expect(lastUsageMetadata()).toMatchObject({
+			cacheMissCause: "partial-eviction",
+			cacheMissKind: "low-read",
+			newTranscriptCharsSinceLastTurn: 20_000,
+			injectedCharsSinceLastTurn: 200,
+			attributionCharsCapped: false,
+		});
+	});
+
+	it("drops the baseline when a usage record carries no readable cacheRead", () => {
+		// The gap would be one turn long while the baseline was two turns old, so
+		// the stored baseline is cleared rather than carried (#1071 review, F4).
+		logUsage(8_000, 100);
+		logCacheUsage(
+			assistantMessage({ usage: { input: 100, output: 10, cacheWrite: 0 } }),
+			undefined,
+			{ sessionId: "attr", turnIndex: 0 },
+		);
+		expect(lastUsageMetadata()).toMatchObject({ priorCacheRead: 8_000 });
+		vi.setSystemTime(BASE_MS + 600_000);
+		logUsage(0, 9_000);
+		expect(lastUsageMetadata()).toMatchObject({
+			priorCacheRead: null,
+			cacheMissCause: null,
+			cacheMissKind: null,
 		});
 	});
 

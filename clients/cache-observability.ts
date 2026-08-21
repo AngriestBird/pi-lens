@@ -143,6 +143,11 @@ const CHARS_PER_ESTIMATED_TOKEN = 4;
 /**
  * Idle gap after which a provider prompt cache entry is assumed expired.
  *
+ * The gap this is compared against is measured to REQUEST time, not to the
+ * `message_end` that follows it — see {@link resolveInterTurnGap}. The provider
+ * looks the cache up when the request arrives, so the response's own generation
+ * time is not idle time and must not count toward expiry.
+ *
  * Evidence (2026-08-21 KV-cache investigation, 63 sessions, 2,288 turns): the
  * 34 zero-`cacheRead` turns had a MEDIAN inter-turn gap of 166s, against 9s for
  * every other turn. Those 34 turns carried 6.96M fresh input tokens, 35.1% of
@@ -183,8 +188,23 @@ const PARTIAL_EVICTION_INPUT_FACTOR = 4;
  */
 const PARTIAL_EVICTION_MIN_FRESH_TOKENS = 512;
 
-/** Cap on the per-session character accumulators used for attribution. */
+/**
+ * Cap on the per-session character accumulators used for attribution, and on a
+ * single transcript-growth measurement feeding them.
+ *
+ * This is deliberately NOT `MAX_INJECTED_CHARS`. That 16 KiB cap exists to keep
+ * the reported injection size small, and pi-lens injections average about 2.7
+ * estimated tokens per turn, so it is never reached in practice. Transcript
+ * growth is a different population: one ordinary tool result can add 20,000
+ * characters in a single turn. Measuring growth through the injection cap
+ * latched `attributionCharsCapped` on a routine turn and suppressed the
+ * `partial-eviction` verdict, which made the verdict near-unreachable (#1071
+ * review round 1, F2).
+ */
 const MAX_ATTRIBUTION_CHARS = 262_144;
+
+/** Byte companion to {@link MAX_ATTRIBUTION_CHARS}, at four bytes per char. */
+const MAX_ATTRIBUTION_BYTES = 1_048_576;
 
 /**
  * Per-session state that turns two independent records into one verdict: the
@@ -195,6 +215,13 @@ const MAX_ATTRIBUTION_CHARS = 262_144;
 interface SessionAttributionState {
 	/** `Date.now()` of the previous `cache_usage` record for this session. */
 	lastUsageAtMs?: number;
+	/**
+	 * `Date.now()` of the most recent `context` observation since that record.
+	 * This is REQUEST time, the moment the provider performs its cache lookup.
+	 * Cleared at every usage record, so a turn whose request pi-lens never saw
+	 * cannot inherit an earlier turn's request timestamp.
+	 */
+	lastContextAtMs?: number;
 	/** Previous record's `cacheRead`, the baseline a shortfall is measured against. */
 	lastCacheRead?: number;
 	/** A `cache_prefix_break` CHANGE fired since the previous usage record. */
@@ -257,7 +284,7 @@ function recordContextAttribution(
 		state.lastObservedMessageCount ?? existingMessages.length,
 		existingMessages.length,
 	);
-	const grown = measureInjectedMessages(existingMessages.slice(baseline));
+	const grown = measureTranscriptGrowth(existingMessages.slice(baseline));
 	state.injectedCharsSinceLastUsage = Math.min(
 		MAX_ATTRIBUTION_CHARS,
 		state.injectedCharsSinceLastUsage + injectedSize.chars,
@@ -277,6 +304,55 @@ function recordContextAttribution(
 		state.attributionCharsCapped = true;
 	}
 	state.lastObservedMessageCount = existingMessages.length;
+	// #1071 review round 1, F1: this handler runs at REQUEST time, which is when
+	// the provider looks the prompt cache up. Stamping it here is what lets the
+	// gap exclude the response's own generation time.
+	state.lastContextAtMs = Date.now();
+}
+
+/**
+ * Which clock the reported gap was measured to.
+ *
+ * `request-time` is the accurate basis: the provider looks the prompt cache up
+ * when the request arrives, so idle time ends at the `context` call.
+ * `message-end-fallback` means no `context` observation arrived for this turn,
+ * so the only available endpoint was this record itself, and the value INCLUDES
+ * the response's own generation time. `no-prior-turn` means there is no earlier
+ * record to measure from.
+ */
+export type CacheGapBasis =
+	| "request-time"
+	| "message-end-fallback"
+	| "no-prior-turn";
+
+/**
+ * Idle milliseconds before this turn's provider request.
+ *
+ * Measuring `message_end` to `message_end` would fold the response's own
+ * generation time into the gap, and generation dominates: over a real corpus
+ * the median generation time is 7,407 ms against a median true idle of 228 ms,
+ * a factor of 30. At the 60s threshold, 8.7% of consecutive pairs measure over
+ * on the message-end basis while only 3.3% were truly idle over. That is a 3.4x
+ * inflation of `ttl-expired`, which would have confirmed the investigation's
+ * hypothesis by construction (#1071 review round 1, F1).
+ */
+function resolveInterTurnGap(
+	state: SessionAttributionState,
+	nowMs: number,
+): { gapMs: number | null; basis: CacheGapBasis } {
+	if (state.lastUsageAtMs === undefined) {
+		return { gapMs: null, basis: "no-prior-turn" };
+	}
+	if (state.lastContextAtMs !== undefined) {
+		return {
+			gapMs: Math.max(0, state.lastContextAtMs - state.lastUsageAtMs),
+			basis: "request-time",
+		};
+	}
+	return {
+		gapMs: Math.max(0, nowMs - state.lastUsageAtMs),
+		basis: "message-end-fallback",
+	};
 }
 
 function estimateTokens(chars: number): number {
@@ -468,28 +544,52 @@ function hashMessageSequence(messages: ReadonlyArray<ContextMessageLike>): {
 	};
 }
 
-function messageTextSize(content: unknown): { chars: number; bytes: number } {
+/** Per-measurement bounds, so the caller picks the population's own cap. */
+interface MeasureLimits {
+	maxChars: number;
+	maxBytes: number;
+}
+
+/** Bounds for reporting an injected payload's size in the record. */
+const INJECTED_LIMITS: MeasureLimits = {
+	maxChars: MAX_INJECTED_CHARS,
+	maxBytes: MAX_INJECTED_BYTES,
+};
+
+/** Bounds for the transcript-growth accumulator that feeds the verdict. */
+const TRANSCRIPT_LIMITS: MeasureLimits = {
+	maxChars: MAX_ATTRIBUTION_CHARS,
+	maxBytes: MAX_ATTRIBUTION_BYTES,
+};
+
+function messageTextSize(
+	content: unknown,
+	limits: MeasureLimits,
+): { chars: number; bytes: number } {
 	if (typeof content === "string") {
-		const chars = Math.min(content.length, MAX_INJECTED_CHARS);
+		const chars = Math.min(content.length, limits.maxChars);
 		return {
 			chars,
 			bytes: Math.min(
 				Buffer.byteLength(content.slice(0, chars), "utf8"),
-				MAX_INJECTED_BYTES,
+				limits.maxBytes,
 			),
 		};
 	}
 	const bounded = boundedHashValue(content);
 	return {
-		chars: Math.min(bounded.length, MAX_INJECTED_CHARS),
+		chars: Math.min(bounded.length, limits.maxChars),
 		bytes: Math.min(
-			Buffer.byteLength(bounded.slice(0, MAX_INJECTED_CHARS), "utf8"),
-			MAX_INJECTED_BYTES,
+			Buffer.byteLength(bounded.slice(0, limits.maxChars), "utf8"),
+			limits.maxBytes,
 		),
 	};
 }
 
-function measureInjectedMessages(messages: ReadonlyArray<ContextMessageLike>): {
+function measureMessages(
+	messages: ReadonlyArray<ContextMessageLike>,
+	limits: MeasureLimits,
+): {
 	chars: number;
 	bytes: number;
 	capped: boolean;
@@ -499,16 +599,39 @@ function measureInjectedMessages(messages: ReadonlyArray<ContextMessageLike>): {
 	const measuredCount = Math.min(messages.length, MAX_REPORTED_MESSAGES);
 	for (let i = 0; i < measuredCount; i++) {
 		const message = messages[i];
-		const size = messageTextSize(message?.content);
-		chars = Math.min(MAX_INJECTED_CHARS, chars + size.chars);
-		bytes = Math.min(MAX_INJECTED_BYTES, bytes + size.bytes);
-		if (chars === MAX_INJECTED_CHARS || bytes === MAX_INJECTED_BYTES) break;
+		const size = messageTextSize(message?.content, limits);
+		chars = Math.min(limits.maxChars, chars + size.chars);
+		bytes = Math.min(limits.maxBytes, bytes + size.bytes);
+		if (chars === limits.maxChars || bytes === limits.maxBytes) break;
 	}
 	return {
 		chars,
 		bytes,
-		capped: chars >= MAX_INJECTED_CHARS || bytes >= MAX_INJECTED_BYTES,
+		capped: chars >= limits.maxChars || bytes >= limits.maxBytes,
 	};
+}
+
+/** Size of an injected payload, bounded for reporting. */
+function measureInjectedMessages(messages: ReadonlyArray<ContextMessageLike>): {
+	chars: number;
+	bytes: number;
+	capped: boolean;
+} {
+	return measureMessages(messages, INJECTED_LIMITS);
+}
+
+/**
+ * Size of the transcript's own growth, bounded far higher. A routine tool
+ * result is an order of magnitude past the injection cap, and measuring it
+ * through that cap made `partial-eviction` near-unreachable (#1071 review
+ * round 1, F2).
+ */
+function measureTranscriptGrowth(messages: ReadonlyArray<ContextMessageLike>): {
+	chars: number;
+	bytes: number;
+	capped: boolean;
+} {
+	return measureMessages(messages, TRANSCRIPT_LIMITS);
 }
 
 function sessionKey(sessionId?: string): string {
@@ -658,16 +781,13 @@ export function logCacheUsage(
 		const usage = msg.usage;
 		if (!usage || typeof usage !== "object") return;
 		const u = usage as AssistantUsageLike;
-		// #1071: attribute the shortfall in-process. The inter-turn gap is a delta
-		// between consecutive `message_end` records in the SAME session, derived
-		// from state this module already keeps, so nothing re-reads latency.log.
+		// #1071: attribute the shortfall in-process, from state this module already
+		// keeps, so nothing re-reads latency.log.
 		const attributionKey = sessionKey(context?.sessionId);
 		const state = attributionFor(attributionKey);
 		const nowMs = Date.now();
-		const interTurnGapMs =
-			state.lastUsageAtMs === undefined
-				? null
-				: Math.max(0, nowMs - state.lastUsageAtMs);
+		const gap = resolveInterTurnGap(state, nowMs);
+		const interTurnGapMs = gap.gapMs;
 		const ttlMs = getProviderCacheTtlMs();
 		const estimatedNewTokens = estimateTokens(
 			state.injectedCharsSinceLastUsage +
@@ -692,13 +812,22 @@ export function logCacheUsage(
 		// This record is the turn boundary: reset the per-turn accumulators and
 		// re-arm the prefix-break flag so the next verdict describes the NEXT gap.
 		state.lastUsageAtMs = nowMs;
-		if (typeof u.cacheRead === "number" && Number.isFinite(u.cacheRead)) {
-			state.lastCacheRead = u.cacheRead;
-		}
+		// A record whose `cacheRead` is absent or non-finite carries no baseline.
+		// Clear the stored one rather than keeping it: the next turn's gap would be
+		// one turn long while its baseline was two turns old, and a verdict built
+		// on that mismatch is worse than no verdict (#1071 review round 1, F4).
+		state.lastCacheRead =
+			typeof u.cacheRead === "number" && Number.isFinite(u.cacheRead)
+				? u.cacheRead
+				: undefined;
 		state.prefixBrokeSinceLastUsage = false;
 		state.injectedCharsSinceLastUsage = 0;
 		state.newTranscriptCharsSinceLastUsage = 0;
 		state.attributionCharsCapped = false;
+		// Clear the request stamp too: the next turn measures from ITS request, and
+		// a turn whose `context` call pi-lens never saw must fall back rather than
+		// reuse this one.
+		state.lastContextAtMs = undefined;
 		logLatency({
 			type: "phase",
 			filePath: "<pi-lens>",
@@ -713,10 +842,11 @@ export function logCacheUsage(
 				output: u.output,
 				// `Usage.cost` is a breakdown object; the total is the headline number.
 				cost: u.cost?.total,
-				// Milliseconds since the previous `message_end` in this session, or
-				// null for the first record. This is the field the 2026-08-21
+				// Idle milliseconds before this turn's request, or null for the first
+				// record in the session. This is the field the 2026-08-21
 				// investigation had to reconstruct by hand-joining timestamps.
 				interTurnGapMs,
+				gapBasis: gap.basis,
 				// null means "nothing to explain", not "cause unknown"; `unknown` is
 				// the explicit no-local-explanation verdict.
 				cacheMissCause: verdict?.cause ?? null,
