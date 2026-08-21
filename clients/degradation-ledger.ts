@@ -259,7 +259,18 @@ export type DegradationKind =
 	 * power-of-two milestones after it — the ledger's own dedupe, not a
 	 * hand-rolled per-file Set (#1913 review F1).
 	 */
-	| "read-guard-record-cap-trim";
+	| "read-guard-record-cap-trim"
+	/**
+	 * A demoted finding was RETIRED from a delivery store instead of being
+	 * re-served (#1944). Raised when the cited file shrank past the
+	 * coordinates the finding is pinned to, so no re-run can ever confirm it.
+	 * The subject carries the discriminating identity — `<store>:<file>` — so
+	 * aggregation still answers "which file stopped being served, and from
+	 * which store". Counted rather than once-per-session: a session can retire
+	 * many findings, and the count is the number the observability question
+	 * actually asks.
+	 */
+	| "demoted-finding-retired";
 
 export interface DegradationRecord {
 	kind: unknown;
