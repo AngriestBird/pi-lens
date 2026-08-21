@@ -22,12 +22,20 @@
  *      flags that something (pi-lens or otherwise) broke the cache prefix. This
  *      remains a local observation, never a provider cache-miss claim.
  *
+ * #1071 adds miss ATTRIBUTION on top of those three, without a new phase. Each
+ * `cache_usage` record carries the inter-turn gap and a `cacheMissCause`
+ * verdict, and each `cache_context` record splits a mixed injection payload by
+ * contributing source. Both ride records that already fire once per turn, and
+ * both derive from state this module already keeps in process — nothing reads
+ * latency.log back.
+ *
  * All paths are defensive: `usage` (and its fields) may be absent on older
  * hosts or non-assistant messages, so every access is guarded and the handlers
  * never throw — on error they `dbg(...)` and no-op, like the other index.ts
  * event handlers.
  */
 import { createHash } from "node:crypto";
+import { lazyEnvNumber } from "./env-utils.js";
 import { logLatency } from "./latency-logger.js";
 
 /** Shape we defensively read off an assistant `AgentMessage` (see pi-ai types). */
@@ -72,7 +80,28 @@ export type CachePrefixObservation =
 	| "changed"
 	| "empty";
 
+/**
+ * Why a turn read less from the provider prompt cache than the turn before it
+ * (#1071, 2026-08-21 investigation). A verdict is an ATTRIBUTION of a locally
+ * observable cause, never a provider statement: the provider reports token
+ * counts only, so `unknown` is a real and expected answer.
+ */
+export type CacheMissCause =
+	| "ttl-expired"
+	| "prefix-broke"
+	| "partial-eviction"
+	| "unknown";
+
+/** Which shape of shortfall triggered the verdict. */
+export type CacheMissKind = "zero-read" | "low-read";
+
 type ContextMessageLike = { role?: unknown; content?: unknown };
+
+/** One source's share of a mixed injection payload (#1071). */
+export interface CacheContextInjectionSlice {
+	source: CacheContextInjectionSource;
+	messages: ReadonlyArray<ContextMessageLike>;
+}
 
 interface CacheUsageContext {
 	sessionId?: string;
@@ -95,6 +124,230 @@ const MAX_REPORTED_MESSAGES = 10_000;
 const MAX_INJECTED_CHARS = 16_384;
 const MAX_INJECTED_BYTES = 65_536;
 let contextObservationCounter = 0;
+
+/**
+ * Documented deterministic char→token estimate. Four characters per token is
+ * the same ratio #1071's issue body used to size the sampled injections. It is
+ * an ESTIMATE: never present a value derived from it as provider-measured
+ * usage.
+ */
+const CHARS_PER_ESTIMATED_TOKEN = 4;
+
+/**
+ * Idle gap after which a provider prompt cache entry is assumed expired.
+ *
+ * Evidence (2026-08-21 KV-cache investigation, 63 sessions, 2,288 turns): the
+ * 34 zero-`cacheRead` turns had a MEDIAN inter-turn gap of 166s, against 9s for
+ * every other turn. Those 34 turns carried 6.96M fresh input tokens, 35.1% of
+ * all fresh input in the window. 60s sits between the two populations and
+ * matches the documented 5-minute-minus-safety-margin behavior of the shortest
+ * provider TTL tier we run against. Override with
+ * `PI_LENS_PROVIDER_CACHE_TTL_MS` when a provider's TTL differs.
+ */
+export const DEFAULT_PROVIDER_CACHE_TTL_MS = 60_000;
+const _providerCacheTtl = lazyEnvNumber(
+	"PI_LENS_PROVIDER_CACHE_TTL_MS",
+	DEFAULT_PROVIDER_CACHE_TTL_MS,
+);
+export const getProviderCacheTtlMs = _providerCacheTtl.get;
+export const _resetProviderCacheTtlForTests = _providerCacheTtl._resetForTests;
+
+/**
+ * A turn counts as "anomalously low" when it reads back less than half of what
+ * the previous turn read. The investigation's partial-break population (90
+ * turns, upper-bounded at 2.7M tokens) was selected by exactly this shape: a
+ * non-zero `cacheRead` well below the prior turn's, which a zero-read filter
+ * misses entirely.
+ */
+const LOW_CACHE_READ_RATIO = 0.5;
+
+/**
+ * Fresh input must exceed the estimated new content by this factor before a
+ * shortfall reads as provider-side eviction rather than as our own payload.
+ * The investigation upper-bounds a whole session's injections at ~2.7 tokens
+ * per turn, so fresh input several times the measured new content cannot be
+ * explained by what pi-lens added.
+ */
+const PARTIAL_EVICTION_INPUT_FACTOR = 4;
+
+/**
+ * Floor for the same rule, so a turn with almost no new content does not read
+ * as eviction on a handful of tokens.
+ */
+const PARTIAL_EVICTION_MIN_FRESH_TOKENS = 512;
+
+/** Cap on the per-session character accumulators used for attribution. */
+const MAX_ATTRIBUTION_CHARS = 262_144;
+
+/**
+ * Per-session state that turns two independent records into one verdict: the
+ * `context` observations describe what pi-lens added, and the `message_end`
+ * usage describes what the provider charged. Both already run per turn, so
+ * attribution rides them rather than adding a phase.
+ */
+interface SessionAttributionState {
+	/** `Date.now()` of the previous `cache_usage` record for this session. */
+	lastUsageAtMs?: number;
+	/** Previous record's `cacheRead`, the baseline a shortfall is measured against. */
+	lastCacheRead?: number;
+	/** A `cache_prefix_break` CHANGE fired since the previous usage record. */
+	prefixBrokeSinceLastUsage: boolean;
+	/** Characters pi-lens injected since the previous usage record. */
+	injectedCharsSinceLastUsage: number;
+	/** Characters of transcript growth observed since the previous usage record. */
+	newTranscriptCharsSinceLastUsage: number;
+	/** Either accumulator hit a bound, so the estimate is a floor, not a total. */
+	attributionCharsCapped: boolean;
+	/** Transcript length at the previous `context` observation. */
+	lastObservedMessageCount?: number;
+}
+
+const attributionBySession = new Map<string, SessionAttributionState>();
+
+function newAttributionState(): SessionAttributionState {
+	return {
+		prefixBrokeSinceLastUsage: false,
+		injectedCharsSinceLastUsage: 0,
+		newTranscriptCharsSinceLastUsage: 0,
+		attributionCharsCapped: false,
+	};
+}
+
+/**
+ * Fetch (creating if absent) one session's attribution state, refreshing LRU
+ * recency and evicting the oldest entries past the cap — same bounding as
+ * {@link recordSessionHash}, so a long-lived process cycling through sessions
+ * cannot grow this map without limit.
+ */
+function attributionFor(key: string): SessionAttributionState {
+	const existing = attributionBySession.get(key);
+	const state = existing ?? newAttributionState();
+	attributionBySession.delete(key);
+	attributionBySession.set(key, state);
+	while (attributionBySession.size > MAX_TRACKED_SESSIONS) {
+		const oldest = attributionBySession.keys().next().value;
+		if (oldest === undefined) break;
+		attributionBySession.delete(oldest);
+	}
+	return state;
+}
+
+/**
+ * Fold one `context` observation into the session's attribution state: how much
+ * pi-lens injected, and how much the transcript itself grew since the previous
+ * observation. The transcript delta is what the "far above the injected and new
+ * content" rule measures fresh input against. The first observation in a
+ * session only anchors the message-count baseline, because there is no earlier
+ * point to measure growth from.
+ */
+function recordContextAttribution(
+	key: string,
+	existingMessages: ReadonlyArray<ContextMessageLike>,
+	injectedSize: { chars: number; capped: boolean },
+): void {
+	const state = attributionFor(key);
+	const baseline = Math.min(
+		state.lastObservedMessageCount ?? existingMessages.length,
+		existingMessages.length,
+	);
+	const grown = measureInjectedMessages(existingMessages.slice(baseline));
+	state.injectedCharsSinceLastUsage = Math.min(
+		MAX_ATTRIBUTION_CHARS,
+		state.injectedCharsSinceLastUsage + injectedSize.chars,
+	);
+	state.newTranscriptCharsSinceLastUsage = Math.min(
+		MAX_ATTRIBUTION_CHARS,
+		state.newTranscriptCharsSinceLastUsage + grown.chars,
+	);
+	if (
+		injectedSize.capped ||
+		grown.capped ||
+		state.injectedCharsSinceLastUsage >= MAX_ATTRIBUTION_CHARS ||
+		state.newTranscriptCharsSinceLastUsage >= MAX_ATTRIBUTION_CHARS
+	) {
+		// The accumulators are now floors, not totals. The verdict rules must not
+		// treat a floor as a measured value.
+		state.attributionCharsCapped = true;
+	}
+	state.lastObservedMessageCount = existingMessages.length;
+}
+
+function estimateTokens(chars: number): number {
+	return Math.ceil(chars / CHARS_PER_ESTIMATED_TOKEN);
+}
+
+/**
+ * Classify a turn's prompt-cache shortfall. Returns `null` when there is
+ * nothing to explain: no prior usage record in this session (the first turn
+ * legitimately reads nothing), an unreadable `cacheRead`, or a healthy read.
+ *
+ * Rules, in the order they are applied, each stated with the evidence behind
+ * it (2026-08-21 investigation, 63 sessions, 2,288 turns, 94.2% overall hit
+ * rate):
+ *
+ *   1. `prefix-broke` — a `cache_prefix_break` CHANGE fired in this session
+ *      since the previous usage record. This is a DIRECT local observation of
+ *      the cause, so it outranks the timing heuristics below. The window was
+ *      byte-stable throughout, so this verdict should stay rare; if it does
+ *      not, #1016's fix has regressed.
+ *   2. `ttl-expired` — the gap since the previous usage record reached the
+ *      provider TTL threshold. The 34 zero-read turns had a median gap of 166s
+ *      against 9s elsewhere, and carried 35.1% of all fresh input.
+ *   3. `partial-eviction` — a non-zero but low read, where fresh input runs far
+ *      above the new content we measured. pi-lens injections average ~2.7
+ *      estimated tokens per turn, so they cannot account for a multiple of the
+ *      measured content; the remainder is provider-side eviction, typically at
+ *      a context limit. Suppressed when the character accumulators were capped,
+ *      because a floor estimate would manufacture the verdict.
+ *   4. `unknown` — a real shortfall with no local explanation. Reported, never
+ *      guessed at.
+ */
+function classifyCacheMiss(args: {
+	cacheRead: number | undefined;
+	input: number;
+	priorCacheRead: number | undefined;
+	interTurnGapMs: number | null;
+	ttlMs: number;
+	prefixBroke: boolean;
+	estimatedNewTokens: number;
+	attributionCharsCapped: boolean;
+}): { kind: CacheMissKind; cause: CacheMissCause } | null {
+	const { cacheRead, priorCacheRead } = args;
+	if (typeof cacheRead !== "number" || !Number.isFinite(cacheRead)) return null;
+	// No baseline turn in this session: a first turn reads zero because nothing
+	// is cached yet, not because anything went wrong.
+	if (typeof priorCacheRead !== "number" || !Number.isFinite(priorCacheRead)) {
+		return null;
+	}
+	let kind: CacheMissKind;
+	if (cacheRead === 0) {
+		kind = "zero-read";
+	} else if (
+		priorCacheRead > 0 &&
+		cacheRead < priorCacheRead * LOW_CACHE_READ_RATIO
+	) {
+		kind = "low-read";
+	} else {
+		return null;
+	}
+
+	if (args.prefixBroke) return { kind, cause: "prefix-broke" };
+	if (args.interTurnGapMs !== null && args.interTurnGapMs >= args.ttlMs) {
+		return { kind, cause: "ttl-expired" };
+	}
+	if (
+		kind === "low-read" &&
+		!args.attributionCharsCapped &&
+		args.input >
+			Math.max(
+				PARTIAL_EVICTION_MIN_FRESH_TOKENS,
+				args.estimatedNewTokens * PARTIAL_EVICTION_INPUT_FACTOR,
+			)
+	) {
+		return { kind, cause: "partial-eviction" };
+	}
+	return { kind, cause: "unknown" };
+}
 
 interface BoundedHashState {
 	contentTruncated: boolean;
@@ -308,8 +561,13 @@ export function observeCacheContext(args: {
 	sessionRole?: "primary" | "concurrent-secondary";
 	turnIndex: number;
 	injectionEnabled: boolean;
-	injectionSources?: ReadonlyArray<CacheContextInjectionSource>;
-	injectedMessages?: ReadonlyArray<ContextMessageLike>;
+	/**
+	 * The payload, split by contributing source. This is the SINGLE source of
+	 * truth for the record's `injectionSources`, counts, and sizes: the flat
+	 * message list and the source-name list are both derived here, so a caller
+	 * cannot report a source it did not actually contribute (#1071).
+	 */
+	injectionSlices?: ReadonlyArray<CacheContextInjectionSlice>;
 	placement?: CacheContextPlacement;
 	prefixObservation?: CachePrefixObservation;
 	dbg?: (msg: string) => void;
@@ -317,7 +575,13 @@ export function observeCacheContext(args: {
 	try {
 		const existingMessages = args.existingMessages ?? [];
 		const resultMessages = args.resultMessages ?? existingMessages;
-		const injectedMessages = args.injectedMessages ?? [];
+		// Drop empty slices before deriving anything: a source that contributed
+		// no message is not a contributor, and listing it would overstate the
+		// payload's provenance.
+		const injectionSlices = (args.injectionSlices ?? []).filter(
+			(slice) => slice.messages.length > 0,
+		);
+		const injectedMessages = injectionSlices.flatMap((slice) => slice.messages);
 		const placement = args.placement ?? "none";
 		const beforeSequence = hashMessageSequence(existingMessages);
 		const afterSequence = hashMessageSequence(resultMessages);
@@ -358,9 +622,28 @@ export function observeCacheContext(args: {
 			args.prefixObservation,
 		);
 		const sizes = measureInjectedMessages(injectedMessages);
+		// Per-source split of a mixed payload (#1071 AC 2). The old record named
+		// which sources fired but attributed cost by CALL, so a turn carrying
+		// turn-findings plus an agent nudge was one undivided number.
+		const sourceBreakdown = injectionSlices.map((slice) => {
+			const sliceSize = measureInjectedMessages(slice.messages);
+			return {
+				source: slice.source,
+				messageCount: Math.min(slice.messages.length, MAX_REPORTED_MESSAGES),
+				chars: sliceSize.chars,
+				bytes: sliceSize.bytes,
+				estimatedTokens: estimateTokens(sliceSize.chars),
+				countsCapped: sliceSize.capped,
+			};
+		});
 		const messageCountCapped =
 			existingMessages.length > MAX_REPORTED_MESSAGES ||
 			resultMessages.length > MAX_REPORTED_MESSAGES;
+		recordContextAttribution(
+			sessionKey(args.sessionId),
+			existingMessages,
+			sizes,
+		);
 
 		logLatency({
 			type: "phase",
@@ -377,7 +660,9 @@ export function observeCacheContext(args: {
 					? { turnScope: SECONDARY_TURN_SCOPE }
 					: { turnIndex: args.turnIndex, turnScope: PROCESS_TURN_SCOPE }),
 				injectionEnabled: args.injectionEnabled,
-				injectionSources: Array.from(args.injectionSources ?? []),
+				injectionSources: sourceBreakdown.map((entry) => entry.source),
+				injectionSourceBreakdown: sourceBreakdown,
+				injectionOccurred: injectedMessages.length > 0,
 				injectedMessageCount: Math.min(
 					injectedMessages.length,
 					MAX_REPORTED_MESSAGES,
@@ -386,6 +671,8 @@ export function observeCacheContext(args: {
 					injectedMessages.length > MAX_REPORTED_MESSAGES,
 				injectedChars: sizes.chars,
 				injectedBytes: sizes.bytes,
+				injectedEstimatedTokens: estimateTokens(sizes.chars),
+				injectedTokenBasis: "chars-per-token-4-estimate-not-provider-measured",
 				injectedCountsCapped: sizes.capped,
 				existingMessageCount: Math.min(
 					existingMessages.length,
@@ -458,6 +745,47 @@ export function logCacheUsage(
 		const usage = msg.usage;
 		if (!usage || typeof usage !== "object") return;
 		const u = usage as AssistantUsageLike;
+		// #1071: attribute the shortfall in-process. The inter-turn gap is a delta
+		// between consecutive `message_end` records in the SAME session, derived
+		// from state this module already keeps, so nothing re-reads latency.log.
+		const attributionKey = sessionKey(context?.sessionId);
+		const state = attributionFor(attributionKey);
+		const nowMs = Date.now();
+		const interTurnGapMs =
+			state.lastUsageAtMs === undefined
+				? null
+				: Math.max(0, nowMs - state.lastUsageAtMs);
+		const ttlMs = getProviderCacheTtlMs();
+		const estimatedNewTokens = estimateTokens(
+			state.injectedCharsSinceLastUsage +
+				state.newTranscriptCharsSinceLastUsage,
+		);
+		const verdict = classifyCacheMiss({
+			cacheRead: u.cacheRead,
+			input: typeof u.input === "number" ? u.input : 0,
+			priorCacheRead: state.lastCacheRead,
+			interTurnGapMs,
+			ttlMs,
+			prefixBroke: state.prefixBrokeSinceLastUsage,
+			estimatedNewTokens,
+			attributionCharsCapped: state.attributionCharsCapped,
+		});
+		const priorCacheRead =
+			typeof state.lastCacheRead === "number" ? state.lastCacheRead : null;
+		const injectedCharsSinceLastTurn = state.injectedCharsSinceLastUsage;
+		const newTranscriptCharsSinceLastTurn =
+			state.newTranscriptCharsSinceLastUsage;
+		const attributionCharsCapped = state.attributionCharsCapped;
+		// This record is the turn boundary: reset the per-turn accumulators and
+		// re-arm the prefix-break flag so the next verdict describes the NEXT gap.
+		state.lastUsageAtMs = nowMs;
+		if (typeof u.cacheRead === "number" && Number.isFinite(u.cacheRead)) {
+			state.lastCacheRead = u.cacheRead;
+		}
+		state.prefixBrokeSinceLastUsage = false;
+		state.injectedCharsSinceLastUsage = 0;
+		state.newTranscriptCharsSinceLastUsage = 0;
+		state.attributionCharsCapped = false;
 		logLatency({
 			type: "phase",
 			filePath: "<pi-lens>",
@@ -472,6 +800,19 @@ export function logCacheUsage(
 				output: u.output,
 				// `Usage.cost` is a breakdown object; the total is the headline number.
 				cost: u.cost?.total,
+				// Milliseconds since the previous `message_end` in this session, or
+				// null for the first record. This is the field the 2026-08-21
+				// investigation had to reconstruct by hand-joining timestamps.
+				interTurnGapMs,
+				// null means "nothing to explain", not "cause unknown"; `unknown` is
+				// the explicit no-local-explanation verdict.
+				cacheMissCause: verdict?.cause ?? null,
+				cacheMissKind: verdict?.kind ?? null,
+				cacheTtlThresholdMs: ttlMs,
+				priorCacheRead,
+				injectedCharsSinceLastTurn,
+				newTranscriptCharsSinceLastTurn,
+				attributionCharsCapped,
 				...(context
 					? {
 							// MessageEndEvent has no request/context id in the host API. These
@@ -622,6 +963,9 @@ export function observeCachePrefix(
 			return "baseline";
 		}
 		if (currentHash !== previousHash) {
+			// #1071: arm the direct-cause flag the next `cache_usage` verdict reads.
+			// A locally observed prefix change outranks the timing heuristics.
+			attributionFor(key).prefixBrokeSinceLastUsage = true;
 			logLatency({
 				type: "phase",
 				filePath: "<pi-lens>",
@@ -658,9 +1002,18 @@ export function observeCachePrefix(
 export function clearCachePrefixSession(sessionId?: string): void {
 	const key = sessionKey(sessionId);
 	prefixHashBySession.delete(key);
+	// The miss-attribution state has the same lifetime and the same reason to be
+	// reclaimed at session end; leaving it would let a reused session id inherit
+	// a stale gap baseline and a stale prefix-break flag.
+	attributionBySession.delete(key);
 }
 
-/** Clear all per-session prefix hashes. For tests / session boundaries. */
+/**
+ * Clear all per-session prefix hashes and miss-attribution state. For tests and
+ * session boundaries. Both maps are cleared together so a test can never start
+ * with a half-reset session.
+ */
 export function resetCachePrefixObservation(): void {
 	prefixHashBySession.clear();
+	attributionBySession.clear();
 }
