@@ -30,6 +30,16 @@ export type DegradationKind =
 	 * that is what the availability latch is about.
 	 */
 	| "lsp-client-skipped-unavailable-command"
+	/**
+	 * A warm-only client lookup (`getWarmClientForFile`) found no live client
+	 * for a file that HAS a language server with a resolvable root (#1934).
+	 * Subject is the candidate `serverId:root` set, so the ledger still answers
+	 * which server and root the pool is cold for after the detailed records
+	 * stop. Not every miss is a fault — the first touch of a project is always
+	 * one — but the COUNT is the pool-miss signal that `lsp_client_selected`
+	 * cannot carry, since the warm-only callers never reach selection.
+	 */
+	| "lsp-warm-client-missing"
 	| "formatter-failure"
 	| "wasm-abort"
 	| "lsp-diagnostics-timeout"
