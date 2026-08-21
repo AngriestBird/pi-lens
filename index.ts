@@ -203,6 +203,7 @@ import {
 	supportsDeferredTools,
 } from "./clients/tool-set-policy.js";
 import {
+	type CacheContextInjectionSlice,
 	clearCachePrefixSession,
 	logCacheUsage,
 	observeCacheContext,
@@ -2928,10 +2929,11 @@ function activateExtension(hostPi: ExtensionAPI) {
 			const logContextObservation = (
 				resultMessages: Array<{ role: string; content: unknown }>,
 				placement: "prepend" | "insert-before-final" | "append" | "none",
-				injectionSources: Array<
-					"session-guidance" | "turn-findings" | "test-findings" | "agent-nudge"
-				>,
-				injectedMessages: Array<{ role: string; content: unknown }>,
+				// #1071: the per-source slices ARE the telemetry input. The source
+				// name list and the flat message list are both derived from them
+				// inside observeCacheContext, so this call site cannot report a
+				// source that contributed nothing.
+				injectionSlices: ReadonlyArray<CacheContextInjectionSlice>,
 			) => {
 				if (telemetryLogged) return;
 				telemetryLogged = true;
@@ -2942,8 +2944,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 					sessionRole,
 					turnIndex: runtime.turnIndex,
 					injectionEnabled: effectiveInjectionEnabled,
-					injectionSources,
-					injectedMessages,
+					injectionSlices,
 					placement,
 					dbg,
 				});
@@ -2952,7 +2953,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 				const cwd = ctx.cwd ?? process.cwd();
 
 				if (!effectiveInjectionEnabled) {
-					logContextObservation(existingMessages, "none", [], []);
+					logContextObservation(existingMessages, "none", []);
 					return;
 				}
 
@@ -2981,9 +2982,8 @@ function activateExtension(hostPi: ExtensionAPI) {
 				const injectedMessages = sourceMessages.flatMap(
 					(source) => source.messages,
 				);
-				const injectionSources = sourceMessages.map((source) => source.source);
 				if (injectedMessages.length === 0) {
-					logContextObservation(existingMessages, "none", [], []);
+					logContextObservation(existingMessages, "none", []);
 					return;
 				}
 
@@ -2995,8 +2995,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 					logContextObservation(
 						resultMessages,
 						"prepend",
-						injectionSources,
-						injectedMessages,
+						sourceMessages,
 					);
 					return { messages: resultMessages };
 				}
@@ -3014,8 +3013,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 					logContextObservation(
 						resultMessages,
 						"append",
-						injectionSources,
-						injectedMessages,
+						sourceMessages,
 					);
 					return { messages: resultMessages };
 				}
@@ -3030,13 +3028,12 @@ function activateExtension(hostPi: ExtensionAPI) {
 				logContextObservation(
 					resultMessages,
 					"insert-before-final",
-					injectionSources,
-					injectedMessages,
+					sourceMessages,
 				);
 				return { messages: resultMessages };
 			} catch (err) {
 				if (!telemetryLogged)
-					logContextObservation(existingMessages, "none", [], []);
+					logContextObservation(existingMessages, "none", []);
 				dbg(`context event error: ${err}`);
 			}
 		},
