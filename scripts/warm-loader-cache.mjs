@@ -1,0 +1,154 @@
+#!/usr/bin/env node
+// scripts/warm-loader-cache.mjs (#1926)
+//
+// Pay pi's jiti transform of dist/index.js at install time, so no interactive
+// session pays it.
+//
+// pi loads an extension with jiti, which Babel-transforms the entry and caches
+// the result under <tmpdir>/jiti. pi-lens's entry is a ~4MB esbuild bundle, so
+// the transform is the dominant startup cost exactly once per build: the first
+// session after a `git:` install or update measured 4847ms of `module import`,
+// against 138ms once the cache is warm. `prepare` has just built that bundle,
+// so this script transforms it through the same jiti and writes the same cache
+// entry pi will read.
+//
+// See scripts/lib/warm-loader-cache.mjs for why the entry this writes is the
+// entry pi reads — the cache key, the transform-version marker that makes a
+// mismatch a miss instead of a corruption, and the measurement that proved the
+// output byte-identical to pi's own.
+//
+// POSTURE: best-effort, last in the chain, always exit 0. `prepare` also runs
+// `build:dist` and `download-grammars`, which consumers depend on and which
+// MUST fail loudly. A cache warm is an optimisation and must never share their
+// failure path — the same split `scripts/setup-git-hooks.mjs` makes (#1804).
+import * as fs from "node:fs";
+import { createRequire } from "node:module";
+import * as os from "node:os";
+import * as path from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { HOST_PROVIDED_PACKAGES } from "./lib/host-provided-deps.mjs";
+import {
+	appendBounded,
+	buildStubAliases,
+	resolveJitiCacheDir,
+	warmSkipReason,
+} from "./lib/warm-loader-cache.mjs";
+
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const require = createRequire(import.meta.url);
+
+function log(message) {
+	process.stderr.write(`[warm-loader-cache] ${message}\n`);
+}
+
+/**
+ * Append one JSONL record to ~/.pi-lens/install.log.
+ *
+ * pi's install output scrolls away, so without this there is no record that the
+ * warm ran, was skipped, or failed. One bounded line per install keeps the
+ * question answerable after the fact.
+ */
+function record(entry) {
+	try {
+		const dir = path.join(os.homedir(), ".pi-lens");
+		fs.mkdirSync(dir, { recursive: true });
+		const file = path.join(dir, "install.log");
+		const existing = fs.existsSync(file)
+			? fs.readFileSync(file, "utf8").split("\n")
+			: [];
+		const line = JSON.stringify({
+			ts: new Date().toISOString(),
+			event: "warm_loader_cache",
+			...entry,
+		});
+		fs.writeFileSync(file, `${appendBounded(existing, line).join("\n")}\n`);
+	} catch {
+		// The log is diagnostic. Losing it must not change the install outcome.
+	}
+}
+
+/** Entries pi will load, read from the manifest rather than hardcoded. */
+function extensionEntries() {
+	try {
+		const pkg = JSON.parse(
+			fs.readFileSync(path.join(root, "package.json"), "utf8"),
+		);
+		return (pkg.pi?.extensions ?? []).map((entry) => path.resolve(root, entry));
+	} catch {
+		return [];
+	}
+}
+
+async function loadCreateJiti() {
+	// `jiti/static` is the subpath pi's loader imports, and it is export-mapped
+	// for `import` only — `require.resolve` reports it as not exported. Resolve
+	// it the ESM way, and fall back to the package root for older runtimes.
+	for (const specifier of ["jiti/static", "jiti"]) {
+		try {
+			const url = import.meta.resolve
+				? import.meta.resolve(specifier)
+				: pathToFileURL(require.resolve(specifier)).href;
+			const mod = await import(url);
+			if (typeof mod.createJiti === "function") return mod.createJiti;
+		} catch {
+			// Try the next specifier; absence is a skip, not a failure.
+		}
+	}
+	return undefined;
+}
+
+async function main() {
+	const entries = extensionEntries();
+	const createJiti = await loadCreateJiti();
+	const skip = warmSkipReason({
+		env: process.env,
+		distEntryExists:
+			entries.length > 0 && entries.every((e) => fs.existsSync(e)),
+		jitiResolvable: typeof createJiti === "function",
+	});
+	if (skip) {
+		log(`skipped: ${skip}`);
+		record({ status: "skipped", reason: skip });
+		return;
+	}
+
+	const cacheDir = resolveJitiCacheDir({
+		tmpdir: os.tmpdir,
+		env: process.env,
+		cwd: process.cwd,
+		join: path.join,
+	});
+	const alias = buildStubAliases(HOST_PROVIDED_PACKAGES);
+
+	for (const entry of entries) {
+		const started = Date.now();
+		const jiti = createJiti(pathToFileURL(entry).href, {
+			// Mirror pi's loader: no in-process module cache, aliases present.
+			// Neither affects the transform or the cache key, but staying close to
+			// pi's call keeps the two easy to compare.
+			moduleCache: false,
+			fsCache: cacheDir,
+			alias,
+		});
+		try {
+			// jiti writes the cache entry BEFORE it evaluates the module, so the
+			// warm is complete even though evaluation then fails on the first
+			// host-provided import — those only resolve inside pi.
+			await jiti.import(entry, { default: true });
+		} catch {
+			// Expected. Evaluation is not the goal; the transform is.
+		}
+		const ms = Date.now() - started;
+		const relative = path.relative(root, entry);
+		log(`warmed ${relative} in ${ms}ms (cache: ${cacheDir})`);
+		record({ status: "warmed", entry: relative, ms, cacheDir });
+	}
+}
+
+try {
+	await main();
+} catch (err) {
+	const message = err instanceof Error ? err.message : String(err);
+	log(`skipped: ${message}`);
+	record({ status: "failed", reason: message });
+}

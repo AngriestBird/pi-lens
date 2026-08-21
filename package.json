@@ -17,7 +17,7 @@
     "build": "tsc --project tsconfig.build.json",
     "build:dist": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && npx --yes -p typescript@7.0.2 tsc --project tsconfig.dist.json --noCheck && npm run bundle:dist",
     "bundle:dist": "node scripts/bundle-dist.mjs",
-    "prepare": "npm run build:dist && node scripts/download-grammars.js --core --dest grammars && node scripts/setup-git-hooks.mjs",
+    "prepare": "npm run build:dist && node scripts/download-grammars.js --core --dest grammars && node scripts/setup-git-hooks.mjs && node scripts/warm-loader-cache.mjs",
     "lint": "tsc --project tsconfig.json",
     "watch": "tsc --watch",
     "test": "node scripts/with-test-lock.mjs -- vitest run",
@@ -81,6 +81,8 @@
     "scripts/analyze-pi-lens-logs.mjs",
     "scripts/install-selftest.mjs",
     "scripts/lib/host-provided-deps.mjs",
+    "scripts/lib/warm-loader-cache.mjs",
+    "scripts/warm-loader-cache.mjs",
     "scripts/rpc-load-check.mjs",
     "README.md",
     "CHANGELOG.md",
@@ -112,6 +114,7 @@
     }
   },
   "optionalDependencies": {
+    "jiti": "^2.7.0",
     "web-tree-sitter": "0.25.10"
   },
   "devDependencies": {
