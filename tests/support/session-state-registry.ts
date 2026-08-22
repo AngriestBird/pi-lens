@@ -83,6 +83,10 @@ import {
 	workspaceDiagnosticsCacheSessionStart,
 } from "../../clients/lsp/workspace-diagnostics-session.js";
 import { removeTempDirSync } from "../clients/test-utils.js";
+import { clearFormatterCache } from "../../clients/formatters.js";
+import * as formattersModule from "../../clients/formatters.js";
+import { resetZizmorTokenAvailability } from "../../clients/zizmor-config.js";
+import * as zizmorConfigModule from "../../clients/zizmor-config.js";
 import {
 	consumeHostReadyDelayAnchor,
 	resetHostReadyDelayAnchorForTests,
@@ -393,7 +397,22 @@ export const SESSION_STATE_REGISTRY: SessionStateEntry[] = [
 		policy: "session_start",
 		resetName: "resetZizmorTokenAvailability",
 		reason:
-			"#1535: a user who runs `gh auth login` between sessions must not read the previous session's `no token` verdict.",
+			"#1535: a user who runs `gh auth token` between sessions must not read the previous session's `no token` verdict.",
+		probe: {
+			arm: () => {
+				zizmorConfigModule
+					._getZizmorTokenLatchForTests()
+					.noteUnavailable("missing", "not-found");
+			},
+			isArmed: () => {
+				// A latched "missing" verdict reads false; a reset latch reads null
+				// (unknown — must re-probe). Clean means the verdict is forgotten.
+				return (
+					zizmorConfigModule._getZizmorTokenLatchForTests().read() === null
+				);
+			},
+			reset: () => resetZizmorTokenAvailability(),
+		},
 	},
 	{
 		id: "lazy-installer:attempts",
@@ -526,6 +545,35 @@ export const SESSION_STATE_REGISTRY: SessionStateEntry[] = [
 		resetName: "clearFormatterCache",
 		reason:
 			"#1895: formatter PATH availability is session-scoped, but these module-local latches are not covered by the dispatch availability generation. A formatter installed or removed between sessions must be re-probed. The reset is `clearFormatterCache`, not the latch clear alone: `getFormattersForFile` answers a same-cwd lookup from `detectionCache` before it reaches a `which` probe, so dropping the latches without the selection cache re-arms every directory except the working one (review round on PR #1896).",
+		probe: {
+			// Arms all FOUR pieces of state the reset claims to cover — the three
+			// latch maps AND the selection cache. A probe that armed only the
+			// latches would stay green if a future cache were added and left out
+			// of `clearFormatterCache`; that omission is precisely the #1895 bug.
+			arm: () => {
+				const ns = getFormattersInternals();
+				ns.whichLatchByCommand.set("pi-lens-probe-cmd", {
+					latch: createAvailabilityLatch({ maxCooldownMs: 1_000 }),
+					resolved: null,
+				});
+				ns.whichTransientCommands.add("pi-lens-probe-transient");
+				ns.cooldownRecordedForRetryAtMs.set("pi-lens-probe-cmd", Date.now());
+				ns.detectionCache.set("/pi-lens-probe-cwd", {
+					signature: "session-state-registry-probe",
+					entries: new Map(),
+				});
+			},
+			isArmed: () => {
+				const ns = getFormattersInternals();
+				return (
+					ns.whichLatchByCommand.size === 0 &&
+					ns.whichTransientCommands.size === 0 &&
+					ns.cooldownRecordedForRetryAtMs.size === 0 &&
+					ns.detectionCache.size === 0
+				);
+			},
+			reset: () => clearFormatterCache(),
+		},
 	},
 	{
 		id: "cascade-tier:outstandingTouches",
@@ -617,6 +665,15 @@ export const SESSION_STATE_REGISTRY: SessionStateEntry[] = [
 let probeLatch: ReturnType<typeof createAvailabilityLatch> | undefined;
 let probeDeferredAnchor: string | undefined;
 let probeDeferredCwd: string | undefined;
+
+/**
+ * Module-private formatter state behind #1895's reset, exposed through the
+ * module's `_getFormatterResetStateForTests` hook — namespace casts cannot
+ * see non-exported bindings, so the hook is the only honest access.
+ */
+function getFormattersInternals() {
+	return formattersModule._getFormatterResetStateForTests();
+}
 
 /**
  * Read the defer set. `cwd` is part of the key since #1625: a weak anchor

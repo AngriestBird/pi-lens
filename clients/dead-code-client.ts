@@ -397,11 +397,16 @@ export class PythonDeadCodeClient implements DeadCodeClient {
 		const key = path.resolve(root);
 		const existing = this.inFlight.get(key);
 		if (existing) return existing;
-		const promise = this.runAnalyze(key).finally(() =>
-			this.inFlight.delete(key),
-		);
-		this.inFlight.set(key, promise);
-		return promise;
+		const promise = this.runAnalyze(key);
+		const wrapped = promise.finally(() => {
+			// Identity-guarded release (#1968, #1967's pattern): delete only if
+			// THIS build is still the registered one. A bare delete-by-key lets
+			// a late-settling build A evict a live build B that replaced the
+			// entry mid-flight, and the next caller starts a duplicate.
+			if (this.inFlight.get(key) === wrapped) this.inFlight.delete(key);
+		});
+		this.inFlight.set(key, wrapped);
+		return wrapped;
 	}
 
 	/**

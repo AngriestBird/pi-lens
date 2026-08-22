@@ -114,6 +114,42 @@ describe("fireResetAt", () => {
 		expect(await seam("npm", ["update", "-p"])).toBe("update+-p");
 		expect(seam).toHaveBeenCalledWith("npm", ["update", "-p"]);
 	});
+
+	it("`when` targets the Nth matching call of a multi-purpose seam (#1838 adoption)", async () => {
+		const order: string[] = [];
+		// One spawn mock serving version probes AND updates — the
+		// managed-tool-refresh shape that motivated the option.
+		const seam = vi.fn(async (cmd: string, args: string[]) => {
+			order.push(args[0] ?? cmd);
+			return "ok";
+		});
+		const hook = vi.fn(() => order.push("HOOK"));
+
+		fireResetAt(seam, hook, {
+			when: (_cmd, args) => args.includes("update"),
+		});
+
+		await seam("npm", ["--version"]); // non-matching: no hook
+		expect(hook).not.toHaveBeenCalled();
+
+		await seam("npm", ["update"]); // 1st match: fires inside
+		await seam("npm", ["update"]); // 2nd match: exactly-once holds
+		expect(hook).toHaveBeenCalledTimes(1);
+		expect(order).toEqual(["--version", "HOOK", "update", "update"]);
+
+		// Composes with atCall: the 2nd MATCHING call, not the 2nd overall.
+		order.length = 0;
+		const second = vi.fn(async (_c: string, args: string[]) => args[0]);
+		const lateHook = vi.fn();
+		fireResetAt(second, lateHook, {
+			atCall: 2,
+			when: (_cmd, args) => args.includes("update"),
+		});
+		await second("npm", ["update"]);
+		expect(lateHook).not.toHaveBeenCalled();
+		await second("npm", ["update"]);
+		expect(lateHook).toHaveBeenCalledTimes(1);
+	});
 });
 
 describe("starveBudget", () => {

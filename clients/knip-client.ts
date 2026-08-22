@@ -470,23 +470,26 @@ export class KnipClient {
 			return existing;
 		}
 
-		const promise = this.runAnalyze(key)
-			.then((result) => {
-				const executed = { ...result, execution: "executed" as const };
-				if (result.success && options.projectSeq !== undefined) {
-					this.completedByProject.set(key, {
-						projectSeq: options.projectSeq,
-						result: executed,
-						signal: this.readMemoSignal(key),
-					});
-				}
-				return executed;
-			})
-			.finally(() => {
-				this.inFlight.delete(key);
-			});
-		this.inFlight.set(key, promise);
-		return promise;
+		const promise = this.runAnalyze(key).then((result) => {
+			const executed = { ...result, execution: "executed" as const };
+			if (result.success && options.projectSeq !== undefined) {
+				this.completedByProject.set(key, {
+					projectSeq: options.projectSeq,
+					result: executed,
+					signal: this.readMemoSignal(key),
+				});
+			}
+			return executed;
+		});
+		// Identity-guarded release (#1968, #1967's pattern): delete only if
+		// THIS build is still the registered one. A bare delete-by-key lets a
+		// late-settling build A evict a live build B that replaced the entry
+		// mid-flight, and the next caller starts a duplicate.
+		const wrapped = promise.finally(() => {
+			if (this.inFlight.get(key) === wrapped) this.inFlight.delete(key);
+		});
+		this.inFlight.set(key, wrapped);
+		return wrapped;
 	}
 
 	private readMemoFileSignal(filePath: string): KnipMemoFileSignal | null {

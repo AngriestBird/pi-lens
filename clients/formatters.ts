@@ -1868,6 +1868,31 @@ export function clearFormatterCache(): void {
 	resetWhichLatches();
 }
 
+/**
+ * Test-only internals access for the session-state registry probe (#1895):
+ * the conformance suite must arm all four pieces of state this reset claims
+ * to cover and prove none survives.
+ */
+export function _getFormatterResetStateForTests(): {
+	whichLatchByCommand: Map<
+		string,
+		{ latch: AvailabilityLatch; resolved: string | null }
+	>;
+	whichTransientCommands: Set<string>;
+	cooldownRecordedForRetryAtMs: Map<string, number>;
+	detectionCache: BoundedLruCache<
+		string,
+		{ signature: string; entries: Map<string, string[]> }
+	>;
+} {
+	return {
+		whichLatchByCommand,
+		whichTransientCommands,
+		cooldownRecordedForRetryAtMs,
+		detectionCache,
+	};
+}
+
 export function clearFormatterRuntimeState(): void {
 	detectionCache.clear();
 	resetWhichLatches();
