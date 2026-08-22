@@ -2,6 +2,30 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+const activationToolFactoryOverride = vi.hoisted(() => ({
+	enabled: false,
+	description: undefined as string | undefined,
+}));
+
+vi.mock("../tools/activate-tools.js", async (importOriginal) => {
+	const actual =
+		await importOriginal<typeof import("../tools/activate-tools.js")>();
+	return {
+		...actual,
+		createActivateToolsTool: (
+			...args: Parameters<typeof actual.createActivateToolsTool>
+		) => {
+			const tool = actual.createActivateToolsTool(...args);
+			if (!activationToolFactoryOverride.enabled) return tool;
+			return {
+				...tool,
+				description: activationToolFactoryOverride.description,
+			};
+		},
+	};
+});
+
 import { CacheManager } from "../clients/cache-manager.js";
 import { snapshotAdvisoryProvenance } from "../clients/advisory-provenance.js";
 import { getLatencyLogPath } from "../clients/latency-logger.js";
@@ -93,6 +117,24 @@ const EXPECTED_TOOLS = [
 	"module_report",
 	"read_symbol",
 	"read_enclosing",
+];
+const ALWAYS_ACTIVE_TOOLS = [
+	"lens_diagnostics",
+	"lsp_diagnostics",
+	"symbol_search",
+	"project_report",
+	"module_report",
+	"read_symbol",
+	"read_enclosing",
+];
+const ACTIVATION_TOOLS = ["pi_lens_activate_tools"];
+const LAZY_TOOLS = [
+	"ast_grep_search",
+	"ast_grep_replace",
+	"ast_grep_outline",
+	"ast_grep_dump",
+	"lsp_navigation",
+	"lens_diagnostic_mark",
 ];
 const EXPECTED_HOOKS = [
 	"resources_discover",
@@ -339,6 +381,56 @@ describe("index.ts extension wiring", () => {
 	});
 
 	describe("registration", () => {
+		// #1988: validate metadata at the same host boundary that exposed the
+		// failure. Keep the matrix across both registration-time feature flags and
+		// assert each registration group so a bypassed group cannot hide behind a
+		// passing helper-only test.
+		it.each([
+			{ compactToolLine: false, supportsActiveTools: false },
+			{ compactToolLine: false, supportsActiveTools: true },
+			{ compactToolLine: true, supportsActiveTools: false },
+			{ compactToolLine: true, supportsActiveTools: true },
+		])(
+			"registers non-empty descriptions through the host seam (compact=$compactToolLine, dynamic=$supportsActiveTools)",
+			({ compactToolLine, supportsActiveTools }) => {
+				activationToolFactoryOverride.enabled = true;
+				activationToolFactoryOverride.description = undefined;
+				try {
+					const pi = createPiMock(
+						compactToolLine ? { "lens-compact-tool-line": true } : {},
+						{ supportsActiveTools },
+					);
+					extension(pi.asExtensionAPI());
+					expect(
+						(pi.getTool("pi_lens_activate_tools") as { description?: unknown })
+							.description,
+					).toBe("Use the pi_lens_activate_tools tool.");
+
+					for (const [group, names] of Object.entries({
+						alwaysActive: ALWAYS_ACTIVE_TOOLS,
+						activation: ACTIVATION_TOOLS,
+						lazy: LAZY_TOOLS,
+					})) {
+						for (const name of names) {
+							expect(pi.getTool(name), `${group} tool: ${name}`).toBeDefined();
+						}
+					}
+
+					for (const [name, tool] of pi.tools) {
+						const description = (tool as { description?: unknown }).description;
+						expect(description, `description: ${name}`).toBeTypeOf("string");
+						expect(
+							(description as string).trim(),
+							`description: ${name}`,
+						).not.toBe("");
+					}
+				} finally {
+					activationToolFactoryOverride.enabled = false;
+					activationToolFactoryOverride.description = undefined;
+				}
+			},
+		);
+
 		it("registers every expected flag, command, tool, and lifecycle hook", () => {
 			const pi = createPiMock();
 			extension(pi.asExtensionAPI());
