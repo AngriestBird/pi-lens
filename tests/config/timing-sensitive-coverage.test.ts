@@ -113,4 +113,32 @@ describe("timing-sensitive Vitest project coverage", () => {
 			"escape-hatch entries must still be sampler/cpuUsage tests",
 		).toEqual([]);
 	});
+
+	// #1920: the "wall-clock-budget" project's entries are likewise excluded
+	// from the default project, so a renamed or deleted member would silently
+	// stop running ANYWHERE (excluded from default, absent from its phase).
+	// Existence-only check on purpose: membership is a curated budget list,
+	// not derivable from an import marker.
+	it("wall-clock-budget include entries exist on disk (#1920)", () => {
+		const projects: unknown = vitestConfig.test?.projects;
+		const project = (Array.isArray(projects) ? projects : [])
+			.map(
+				(entry) =>
+					(entry as { test?: { name?: unknown; include?: unknown } })?.test,
+			)
+			.find((test) => test?.name === "wall-clock-budget");
+		expect(
+			project,
+			'vitest.config.ts has no project named "wall-clock-budget"',
+		).toBeTruthy();
+		const include = project!.include;
+		expect(
+			Array.isArray(include) && include.length > 0,
+			'"wall-clock-budget" has no include list',
+		).toBe(true);
+		const dead = (include as unknown[])
+			.map((entry) => toPosix(String(entry)))
+			.filter((file) => !fs.existsSync(path.join(repoRoot, file)));
+		expect(dead, "wall-clock-budget entries must exist on disk").toEqual([]);
+	});
 });
