@@ -7,7 +7,9 @@ import { getToolEnvironment } from "../../clients/installer/index.js";
 import {
 	KnipClient,
 	readOverridePinnedPackageNames,
+	type KnipResult,
 } from "../../clients/knip-client.js";
+import { gatedPromise } from "../support/fault-injection.js";
 import { removeTempDirSync, setupTestEnvironment } from "./test-utils.js";
 
 vi.mock("../../clients/safe-spawn.js", () => ({
@@ -761,5 +763,81 @@ describe("knip-client", () => {
 		expect(byName.get("OldHelper")).toBe("export");
 		expect(byName.get("Color.Mauve")).toBe("enumMember");
 		expect(result.unusedExports).toHaveLength(2);
+	});
+});
+
+/**
+ * In-flight ABA release (#1968, kit-driven white-box probe). Same mechanism as
+ * the dead-code twin: the second writer is simulated directly because public
+ * API alone cannot interleave it. Red on the pre-fix bare `.finally` delete.
+ */
+describe("in-flight ABA release (#1968)", () => {
+	const tick = () => new Promise((resolve) => setImmediate(resolve));
+
+	interface Internals {
+		resolveProjectRoot: (cwd?: string) => string | null;
+		ensureAvailable: () => Promise<boolean>;
+		runAnalyze: (key: string) => Promise<KnipResult>;
+		inFlight: Map<string, Promise<KnipResult>>;
+	}
+
+	function emptyResult(): KnipResult {
+		return {
+			success: true,
+			issues: [],
+			unusedExports: [],
+			unusedFiles: [],
+			unusedDeps: [],
+			unlistedDeps: [],
+			summary: "",
+		};
+	}
+
+	it("a late-settling build does not evict its mid-flight successor", async () => {
+		const client = new KnipClient(false);
+		const internals = client as unknown as Internals;
+		vi.spyOn(internals, "resolveProjectRoot").mockReturnValue("/probe-root");
+		vi.spyOn(internals, "ensureAvailable").mockResolvedValue(true);
+		const gateA = gatedPromise<KnipResult>();
+		let analyzeCalls = 0;
+		vi.spyOn(internals, "runAnalyze").mockImplementation(() => {
+			analyzeCalls += 1;
+			return analyzeCalls === 1
+				? gateA.promise
+				: gatedPromise<KnipResult>().promise;
+		});
+
+		void client.analyze("/probe-root"); // build A in flight
+		await tick();
+		expect(internals.inFlight.size).toBe(1);
+		const key = [...internals.inFlight.keys()][0]!;
+
+		const successor = gatedPromise<KnipResult>();
+		internals.inFlight.set(key, successor.promise);
+
+		gateA.resolve(emptyResult());
+		await tick();
+		await tick();
+
+		expect(internals.inFlight.get(key)).toBe(successor.promise);
+		void client.analyze("/probe-root");
+		await tick();
+		// Only build A ever ran: B was registered by the simulated second
+		// writer, and the third caller shared it instead of starting a build.
+		expect(analyzeCalls).toBe(1);
+
+		successor.resolve(emptyResult());
+	});
+
+	it("a normally-settling build still cleans up its own entry", async () => {
+		const client = new KnipClient(false);
+		const internals = client as unknown as Internals;
+		vi.spyOn(internals, "resolveProjectRoot").mockReturnValue("/probe-root");
+		vi.spyOn(internals, "ensureAvailable").mockResolvedValue(true);
+		vi.spyOn(internals, "runAnalyze").mockResolvedValue(emptyResult());
+
+		await client.analyze("/probe-root");
+		await tick();
+		expect(internals.inFlight.size).toBe(0);
 	});
 });
