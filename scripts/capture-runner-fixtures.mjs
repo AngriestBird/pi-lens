@@ -58,6 +58,23 @@ export const CAPTURES = [
 		argv: ["--format", "json", "--no-fail", "Dockerfile"],
 	},
 	{
+		// #1839/#1994 — pins the CORRECTED --rules argv (comma-separated ruleid
+		// list) producing findings on exit 1. The pre-fix runner fed --rules a
+		// JSON object, which left zero rules enabled and exited 0 clean on any
+		// file.
+		runner: "htmlhint",
+		tool: "htmlhint",
+		workspace: smoke("html"),
+		file: "bad.html",
+		argv: [
+			"--rules",
+			"tag-pair,attr-no-duplication,tagname-lowercase,spec-char-escape,id-unique",
+			"--format",
+			"unix",
+			"bad.html",
+		],
+	},
+	{
 		runner: "markdownlint",
 		tool: "markdownlint",
 		bin: "markdownlint-cli2",

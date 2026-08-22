@@ -100,6 +100,7 @@ const RUNNER_DESCRIPTORS: Record<string, { module: string; kind: string }> = {
 	eslint: { module: "eslint", kind: "jsts" },
 	"biome-check-json": { module: "biome-check", kind: "jsts" },
 	hadolint: { module: "hadolint", kind: "docker" },
+	htmlhint: { module: "htmlhint", kind: "html" },
 	markdownlint: { module: "markdownlint", kind: "markdown" },
 	mypy: { module: "mypy", kind: "python" },
 	oxlint: { module: "oxlint", kind: "jsts" },

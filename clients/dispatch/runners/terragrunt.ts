@@ -14,6 +14,7 @@ import {
 	resolveAvailableOrInstall,
 } from "./utils/runner-helpers.js";
 import { spawnFailedWithNoOutput } from "./utils/spawn-outcome.js";
+import { finishParsedRun } from "./utils/tool-failure.js";
 
 const terragrunt = createAvailabilityChecker("terragrunt", ".exe");
 
@@ -191,16 +192,19 @@ const terragruntRunner: RunnerDefinition = {
 			ctx.filePath,
 			absPath,
 		);
-		if (diagnostics.length === 0) {
-			return { status: "succeeded", diagnostics: [], semantic: "none" };
-		}
-
-		const hasErrors = diagnostics.some((d) => d.severity === "error");
-		return {
-			status: hasErrors ? "failed" : "succeeded",
+		return finishParsedRun({
+			tool: "terragrunt",
+			ctx,
+			result,
 			diagnostics,
-			semantic: hasErrors ? "blocking" : "warning",
-		};
+			classify: (diagnostics) => {
+				const hasErrors = diagnostics.some((d) => d.severity === "error");
+				return {
+					status: hasErrors ? "failed" : "succeeded",
+					semantic: hasErrors ? "blocking" : "warning",
+				};
+			},
+		});
 	},
 };
 
