@@ -43,7 +43,9 @@ vi.mock("../../../../clients/tool-policy.js", async (importOriginal) => ({
 	hasEslintConfig: () => true,
 	hasMypyConfig: () => true,
 	hasPhpstanConfig: () => true,
-	hasSqlfluffConfig: () => fs.existsSync(path.join("/dev/null", ".sqlfluff")),
+	// Deliberately false on EVERY platform (not a /dev/null accident): the
+	// no-config branch is what the battery must exercise, stated as intent.
+	hasSqlfluffConfig: () => false,
 	hasStylelintConfig: () => true,
 	hasYamllintConfig: () => true,
 	getAutofixCapability: () => ({
@@ -188,9 +190,9 @@ const BATTERY: Array<{
  * a reviewed decision, not a baseline to grow into.
  */
 const JUSTIFIED_CLEAN_WITH_BYTES = new Set<string>([
-	// eslint: exit 0 is the ONLY clean signal it trusts after #1954; these
-	// cases are exit 0 by construction. Nonzero-exit eslint prose parses as a
-	// parse-error finding, never clean. (placeholder — see first-run table)
+	// Empty by design after the #1839 fix wave: every first-pass violation was
+	// FIXED rather than justified, so any future entry here must carry its own
+	// reviewed reason and a tracking reference.
 ]);
 
 function createCtx(kind: string, filePath: string, cwd: string) {

@@ -282,7 +282,7 @@ export function parseToolRun<D>(
  * The shared tail for CLI lint runners that spawn a tool, parse structured
  * findings, and map them to a result (#1839 consolidation).
  *
- * Twelve runners hand-rolled this branch and all twelve copies had the same
+ * Thirteen runner files hand-rolled this branch and every copy had the same
  * defect: on a NONZERO exit whose output failed to parse (or parsed to
  * nothing), they reported `succeeded` with zero diagnostics — "we checked,
  * it's clean" — while the tool was saying it found problems or errored. The
