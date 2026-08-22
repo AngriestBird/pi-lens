@@ -370,7 +370,7 @@ describe("terragrunt runner", () => {
 		}
 	});
 
-	it("returns no diagnostics for malformed JSON", async () => {
+	it("surfaces malformed JSON as failed with a parse-error, never clean", async () => {
 		const env = setupTestEnvironment("pi-lens-terragrunt-runner-");
 		try {
 			const filePath = path.join(env.tmpDir, "terragrunt.hcl");
@@ -389,8 +389,15 @@ describe("terragrunt runner", () => {
 
 			const result = await runner.run(createCtx(filePath, env.tmpDir) as never);
 
-			expect(result.status).toBe("succeeded");
-			expect(result.diagnostics).toEqual([]);
+			// #1839: exit 1 whose output cannot be parsed is an unreadable report
+			// of problems — never a clean result.
+			expect(result.status).toBe("failed");
+			expect(result.diagnostics).toHaveLength(1);
+			expect(result.diagnostics[0]).toMatchObject({
+				id: "terragrunt:parse-error:1",
+				severity: "warning",
+				semantic: "warning",
+			});
 		} finally {
 			env.cleanup();
 		}

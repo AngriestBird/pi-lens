@@ -22,6 +22,7 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { FactStore } from "../../../../clients/dispatch/fact-store.js";
 import { setupTestEnvironment } from "../../test-utils.js";
@@ -93,6 +94,7 @@ const RUNNER_DESCRIPTORS: Record<string, { module: string; kind: string }> = {
 	sqlfluff: { module: "sqlfluff", kind: "sql" },
 	stylelint: { module: "stylelint", kind: "css" },
 	taplo: { module: "taplo", kind: "toml" },
+	terragrunt: { module: "terragrunt", kind: "terragrunt" },
 	tflint: { module: "tflint", kind: "terraform" },
 	vale: { module: "vale", kind: "markdown" },
 	yamllint: { module: "yamllint", kind: "yaml" },
@@ -195,6 +197,47 @@ const JUSTIFIED_CLEAN_WITH_BYTES = new Set<string>([
 	// reviewed reason and a tracking reference.
 ]);
 
+/**
+ * Spawning runners the battery does NOT fuzz yet, with reasons (#1839).
+ *
+ * The ratchet below makes this population explicit: a NEW spawning runner
+ * fails until it gets a descriptor or an entry here. Burn-down (converting
+ * these into descriptors, which means verifying each tool's real exit/output
+ * contract first — AGENTS.md shape 16) is #1839's follow-up work.
+ */
+const BATTERY_EXEMPT: Record<string, string> = {
+	"cpp-check.ts": "not yet fuzzed; #1839 burn-down",
+	"credo.ts": "not yet fuzzed; #1839 burn-down",
+	"cue-vet.ts": "not yet fuzzed; #1839 burn-down",
+	"dart-analyze.ts": "not yet fuzzed; #1839 burn-down",
+	"detekt.ts": "not yet fuzzed; #1839 burn-down",
+	"dotnet-build.ts": "not yet fuzzed; #1839 burn-down",
+	"elixir-check.ts": "not yet fuzzed; #1839 burn-down",
+	"fish-indent.ts": "not yet fuzzed; #1839 burn-down",
+	"gleam-check.ts": "not yet fuzzed; #1839 burn-down",
+	"go-vet.ts": "not yet fuzzed; #1839 burn-down",
+	"golangci-lint.ts": "not yet fuzzed; #1839 burn-down",
+	"helm-lint.ts": "not yet fuzzed; #1839 burn-down",
+	"helm-render.ts":
+		"renders chart templates - side-effecting argv; needs its own safety review before battery admission",
+	"javac.ts": "not yet fuzzed; #1839 burn-down",
+	"ktlint.ts": "not yet fuzzed; #1839 burn-down",
+	"php-lint.ts": "not yet fuzzed; #1839 burn-down",
+	"prisma-validate.ts": "not yet fuzzed; #1839 burn-down",
+	"psscriptanalyzer.ts": "not yet fuzzed; #1839 burn-down",
+	"rubocop.ts": "not yet fuzzed; #1839 burn-down",
+	"ruff.ts": "not yet fuzzed; #1839 burn-down",
+	"rust-clippy.ts": "not yet fuzzed; #1839 burn-down",
+	"spotbugs.ts":
+		"flag-gated via withSpotbugsGroup; needs a gate-open mock before admission",
+	"swiftlint.ts": "not yet fuzzed; #1839 burn-down",
+	"trivy-config.ts":
+		"opt-in via trivy.enabled plus project trust; needs both gates mocked open before admission",
+	"zig-check.ts": "not yet fuzzed; #1839 burn-down",
+};
+
+const NON_RUNNER_FILES = new Set(["index.ts", "utils.ts"]);
+
 function createCtx(kind: string, filePath: string, cwd: string) {
 	return {
 		filePath,
@@ -224,6 +267,53 @@ describe("runner-parser garbage battery (#1839)", () => {
 	it("battery is non-trivial", () => {
 		expect(BATTERY.length).toBeGreaterThanOrEqual(10);
 		expect(Object.keys(RUNNER_DESCRIPTORS).length).toBeGreaterThanOrEqual(15);
+	});
+
+	// The self-extending guard (#1839): every runner that spawns a child
+	// process must be either FUZZED by this battery or explicitly exempted
+	// with a reason. A new spawning runner file fails here until someone makes
+	// a deliberate admission decision — the battery cannot silently stop at
+	// today's population the way the captured-replay suite once did.
+	it("every spawning runner is fuzzed or explicitly exempted", () => {
+		const runnersDir = path.resolve(
+			path.dirname(fileURLToPath(import.meta.url)),
+			"../../../../clients/dispatch/runners",
+		);
+		const spawning = fs
+			.readdirSync(runnersDir)
+			.filter((name) => name.endsWith(".ts") && !NON_RUNNER_FILES.has(name))
+			.filter((name) => {
+				// Same detection idiom as run-outcome-ratchet: any safeSpawn
+				// reference means a child process is in play.
+				return /safeSpawn/.test(
+					fs.readFileSync(path.join(runnersDir, name), "utf8"),
+				);
+			})
+			.map((name) => name.replace(/\.ts$/, ""));
+
+		const unhandled = spawning.filter((id) => {
+			if (BATTERY_EXEMPT[`${id}.ts`]) return false;
+			// Covered when the id OR the descriptor's module basename matches:
+			// some runners are fuzzed under their registered id, which differs
+			// from the file name (biome-check.ts → "biome-check-json").
+			if (id in RUNNER_DESCRIPTORS) return false;
+			return !Object.values(RUNNER_DESCRIPTORS).some((d) => d.module === id);
+		});
+		expect(
+			unhandled,
+			`spawning runner(s) missing from the garbage battery — add a RUNNER_DESCRIPTORS entry (and verify its classification invariants hold) or a BATTERY_EXEMPT entry with a reason`,
+		).toEqual([]);
+
+		// Reverse check: an exemption or descriptor for a deleted file must be
+		// removed, so neither list can accumulate dead entries.
+		const onDisk = new Set(spawning);
+		const staleExemptions = Object.keys(BATTERY_EXEMPT)
+			.map((name) => name.replace(/\.ts$/, ""))
+			.filter((id) => !onDisk.has(id));
+		expect(
+			staleExemptions,
+			"BATTERY_EXEMPT entries must exist on disk",
+		).toEqual([]);
 	});
 
 	for (const [runnerId, descriptor] of Object.entries(RUNNER_DESCRIPTORS)) {
