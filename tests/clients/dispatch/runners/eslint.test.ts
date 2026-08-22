@@ -7,13 +7,10 @@ import { setupTestEnvironment } from "../../test-utils.js";
 
 const safeSpawnAsync = vi.fn();
 
-vi.mock(
-	"../../../../clients/safe-spawn.js",
-	async (importOriginal) => ({
-		...(await importOriginal<Record<string, unknown>>()),
-		safeSpawnAsync,
-	}),
-);
+vi.mock("../../../../clients/safe-spawn.js", async (importOriginal) => ({
+	...(await importOriginal<Record<string, unknown>>()),
+	safeSpawnAsync,
+}));
 
 // The eslint runner resolves its binary and probes availability through
 // runner-helpers; both are environment, not behavior under test (#448). The
@@ -131,9 +128,8 @@ describe("eslint runner", () => {
 			const eslintRunner = (
 				await import("../../../../clients/dispatch/runners/eslint.js")
 			).default;
-			const { dispatchForFile, RunnerRegistry } = await import(
-				"../../../../clients/dispatch/dispatcher.js"
-			);
+			const { dispatchForFile, RunnerRegistry } =
+				await import("../../../../clients/dispatch/dispatcher.js");
 
 			// plan.ts's real jsts lint group is a fallback chain:
 			// ["eslint", "oxlint", "biome-check-json"]. A warning-only exit-0
