@@ -50,6 +50,7 @@ vi.mock("../../../../clients/tool-policy.js", async (importOriginal) => ({
 	...(await importOriginal<Record<string, unknown>>()),
 	getLinterPolicyForCwd,
 	markdownlintConfigArgs: () => [],
+	hasEslintConfig: () => true,
 	hasMypyConfig: () => true,
 	hasPhpstanConfig: () => true,
 	// Left real: sqlfluff's config presence CHANGES its argv (an unconfigured
@@ -96,6 +97,7 @@ vi.mock(
  */
 const RUNNER_DESCRIPTORS: Record<string, { module: string; kind: string }> = {
 	actionlint: { module: "actionlint", kind: "yaml" },
+	eslint: { module: "eslint", kind: "jsts" },
 	"biome-check-json": { module: "biome-check", kind: "jsts" },
 	hadolint: { module: "hadolint", kind: "docker" },
 	markdownlint: { module: "markdownlint", kind: "markdown" },

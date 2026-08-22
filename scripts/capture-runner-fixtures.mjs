@@ -92,6 +92,18 @@ export const CAPTURES = [
 		argv: ["--format", "json", "bad.js"],
 	},
 	{
+		// #1954 — ESLint also exits 0 when every finding is warning severity
+		// (--max-warnings unset). No rule in modern @eslint/js recommended
+		// ships at "warn" anymore, so js-eslint-warning's config downgrades
+		// no-unused-vars explicitly — still the exit-0-with-findings shape.
+		runner: "eslint",
+		case: "warning-exit-zero",
+		tool: "eslint",
+		workspace: smoke("js-eslint-warning"),
+		file: "bad.js",
+		argv: ["--format", "json", "--no-error-on-unmatched-pattern", "bad.js"],
+	},
+	{
 		runner: "php-lint",
 		tool: "php",
 		workspace: smoke("php"),
