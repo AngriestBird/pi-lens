@@ -5,6 +5,7 @@ import { incrementDegradationCount } from "./degradation-ledger.js";
 import {
 	type AvailabilityCause,
 	type AvailabilityOutcome,
+	type AvailabilityLatch,
 	classifyProbeFailure,
 	createAvailabilityLatch,
 	logAvailabilityDecision,
@@ -104,6 +105,15 @@ const GH_TOKEN_PROBE_TIMEOUT_MS = 5000;
 export function resetZizmorTokenAvailability(): void {
 	ghTokenLatch.reset();
 	cachedToken = undefined;
+}
+
+/**
+ * Test-only internals access for the session-state registry probe (#1535):
+ * the conformance suite arms a latched "missing" verdict and proves the
+ * session reset forgets it.
+ */
+export function _getZizmorTokenLatchForTests(): AvailabilityLatch {
+	return ghTokenLatch;
 }
 
 /** Test-only alias — kept so existing tests don't need a rename. */
