@@ -35,6 +35,7 @@ import {
 	vi,
 } from "vitest";
 import { exploreInterleavings } from "../../support/reset-explorer.js";
+import { fireResetAt } from "../../support/fault-injection.js";
 import { withEnv } from "../../support/with-env.js";
 
 vi.unmock("../../../clients/installer/index.js");
@@ -598,10 +599,13 @@ describe("a session start mid-run does not extend the run (review R2-F1)", () =>
 				return { stdout: "npm", stderr: "", status: 0 };
 			}
 			sawUpdate += 1;
-			// A `/new` arrives while npm is still running. This is the ordinary
-			// case: the spawn budget is 120s and a session start costs nothing.
-			resetManagedToolRefreshSession();
 			return { stdout: "", stderr: "", status: 0 };
+		});
+		// A `/new` arrives while npm is still running (#1746 R2-F1): the reset
+		// fires INSIDE the update spawn via the fault-injection kit, before its
+		// result is consumed.
+		fireResetAt(spawnMock, resetManagedToolRefreshSession, {
+			when: (_c, args) => args.includes("update"),
 		});
 
 		await runManagedToolRefresh(NOW);
@@ -618,12 +622,20 @@ describe("a session start mid-run does not extend the run (review R2-F1)", () =>
 			if (!args.includes("update")) {
 				return { stdout: "npm", stderr: "", status: 0 };
 			}
-			// Three sessions start while this one update runs.
-			resetManagedToolRefreshSession();
-			resetManagedToolRefreshSession();
-			resetManagedToolRefreshSession();
 			return { stdout: "", stderr: "", status: 0 };
 		});
+		// Three sessions start while this one update runs — modeled as one
+		// mid-flight hook firing the reset three times back to-back, which is
+		// observationally identical for the budget under test.
+		fireResetAt(
+			spawnMock,
+			() => {
+				resetManagedToolRefreshSession();
+				resetManagedToolRefreshSession();
+				resetManagedToolRefreshSession();
+			},
+			{ when: (_c, args) => args.includes("update") },
+		);
 
 		await runManagedToolRefresh(NOW);
 
