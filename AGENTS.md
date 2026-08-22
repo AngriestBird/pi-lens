@@ -1,4 +1,11 @@
 # pi-lens — agent context
+Tool metadata is normalized at the final `pi.registerTool` boundary in
+`clients/tool-definition.ts`. Keep this seam around the complete active/lazy/
+activation-tool registration list: child sessions and wrapped/lazy factories
+must never expose a tool with a missing, empty, or whitespace-only description.
+Regression coverage exercises the real host registration seam across compact
+rendering and dynamic-tool support both on and off; helper-only tests do not
+prove that every registration group reaches the normalizer.
 
 Knip's dispatch memo is instance-owned and keyed by canonical project root plus
 the runtime's monotonic project sequence. Only callers that supply that content
@@ -1601,7 +1608,7 @@ pi installs git extensions with **`npm install --omit=dev`** (and omits peers). 
 The GitHub release body is derived from the curated `CHANGELOG.md` section for that version — **not** an auto-generated PR-title list. The version-bump PR runs `npm run changelog:release`, so the rolled CHANGELOG and deleted entry files pass normal CI and required checks before merge. At tag time, `release.yml` only verifies that the version heading exists and `.changelog/` has no pending entries, then runs `scripts/changelog-extract.mjs "$VERSION" --summary` and posts it via `gh release create --notes-file`; it never mutates or pushes changelog state. Contributor credits are appended immediately afterward.
 
 - **Add one `.changelog/<branch-or-slug>-<short-desc>.md` entry IN the PR, not after merge.** Use YAML front matter with any Keep a Changelog category (`Added`, `Changed`, `Deprecated`, `Removed`, `Fixed`, `Security`) and exactly one top-level `-` or `*` entry; bold/plain, em-dash/period/no-separator styles and multiline continuation content are accepted. See [.changelog/README.md](.changelog/README.md). Entry files are the PR-time authoring seam; `CHANGELOG.md` remains the release source of truth after bump-time rollup.
-- **Author PR notes only as `.changelog/*.md` entries, never by adding bullets directly under `[Unreleased]` in `CHANGELOG.md`.** The entry front matter selects its Keep a Changelog category; bump-time `renderBody` groups and merges categories automatically.
+- **Author PR notes only as `.changelog/*.md` entries, never by adding bullets directly under `[Unreleased]` in `CHANGELOG.md`; in fragments and any legacy `[Unreleased]` content, keep each complete bold title on one physical line, including refs inside the bold span when present.** `tests/scripts/changelog.test.ts` and `npm run changelog:check` reject wrapping because release-note summarization can truncate or mangle it.
 - **At version-bump time, run `npm run changelog:release`** (`scripts/changelog-release.mjs`): this is the rollup entry point. It folds both the populated `## [Unreleased]` content and all validated `.changelog/*.md` entries into `## [X.Y.Z] - <date>` directly below a fresh empty `[Unreleased]`, in Keep a Changelog order, and deletes consumed entry files. Re-running for the same version is idempotent. Version defaults to `package.json`, date to today. This command does not run in `release.yml`.
 - **Parsing/summary logic** lives once in `scripts/lib/changelog.mjs` (`extractSection` matches the bracket label, ignores the `- <date>` suffix, takes the FIRST of a duplicated label; `summarizeSection` condenses to grouped titles). Guarded by `tests/scripts/changelog.test.ts`, which also asserts every `v3.*` tag has a non-empty section.
 - **Retroactive fix:** `npm run release:backfill-notes` (`scripts/backfill-github-releases.mjs`) sets every existing GitHub release body from its CHANGELOG section (summary by default; `--full` for the whole prose). Dry-run by default; `--apply` to write; skips (never blanks) releases with no section. All 35 v3.8.x releases were backfilled this way.

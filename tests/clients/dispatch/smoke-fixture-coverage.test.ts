@@ -86,10 +86,6 @@ const EXEMPT = new Map<string, string>([
 		"structural: in-process napi engine; real-engine coverage via ast-grep-rule-tests plus the sonar and utils-block suites",
 	],
 	[
-		"eslint",
-		"alternate: oxlint is the JS/TS lint primary; eslint runs only with an eslint config and is exercised by the --autofix lane",
-	],
-	[
 		"credo",
 		"alternate: elixir-check is the Elixir primary; credo is the config-gated alternate",
 	],
