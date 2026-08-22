@@ -219,6 +219,37 @@ describe("eslint runner", () => {
 		}
 	});
 
+	it("does not parse stderr noise on a healthy exit-0 run (#1954 review P3)", async () => {
+		const env = setupTestEnvironment("pi-lens-eslint-stderr-gating-");
+		try {
+			const filePath = path.join(env.tmpDir, "sample.ts");
+			fs.writeFileSync(filePath, "export const ok = 1;\n");
+
+			// Exit 0 with empty stdout and deprecation-style chatter on stderr.
+			// The old `stdout || stderr` fallback would feed that prose to the
+			// JSON parser and fabricate a parse-error finding on a clean save;
+			// stderr only feeds the parser when a FAILING run's stdout went
+			// missing. Pins clients/dispatch/runners/eslint.ts:157-160.
+			safeSpawnAsync.mockResolvedValue({
+				error: null,
+				status: 0,
+				stdout: "",
+				stderr: "Warning: You are using an unsupported version of Node.js\n",
+			});
+
+			const runner = (
+				await import("../../../../clients/dispatch/runners/eslint.js")
+			).default;
+			const result = await runner.run(createCtx(filePath, env.tmpDir) as never);
+
+			expect(result.status).toBe("succeeded");
+			expect(result.semantic).toBe("none");
+			expect(result.diagnostics).toHaveLength(0);
+		} finally {
+			env.cleanup();
+		}
+	});
+
 	it("reports a clean exit-0 run as succeeded with no findings", async () => {
 		const env = setupTestEnvironment("pi-lens-eslint-clean-");
 		try {
