@@ -265,6 +265,10 @@ pi-lens hooks run on pi's event loop. Read the "Performance" section of `AGENTS.
 ## Testing notes
 
 - Tests use Vitest; mocks via `vi.mock` / `vi.hoisted`.
+- For fault-injection probes (wedged child pipes, deterministic seam delays,
+  starved budgets, mid-seam session resets), use `tests/support/fault-injection.ts`
+  (#1838) instead of rebuilding those fixtures per suite.
+- For suspension/interleaving control over a mocked seam, use `tests/clients/interleaving-kit.ts`.
 - Many tests import compiled `.js`. After editing `.ts`, run `npm run build` before `npm test`.
 - The build-freshness guard (`tests/support/check-build-freshness.ts`) will fail fast if source `.ts` is newer than its `.js`.
 - For extension wiring tests, use `tests/support/pi-mock.ts`.
