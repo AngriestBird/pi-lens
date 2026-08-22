@@ -115,13 +115,24 @@ export function delayInside<T extends (...args: any[]) => Promise<unknown>>(
 // fireResetAt — fire a lifecycle hook from INSIDE a mocked seam
 // ---------------------------------------------------------------------------
 
-export interface FireResetAtOptions {
+export interface FireResetAtOptions<
+	T extends (...args: any[]) => Promise<unknown> = (
+		...args: any[]
+	) => Promise<unknown>,
+> {
 	/**
 	 * Which call of the mock fires the hook (1-based). Calls before it never
 	 * fire; calls after it proceed normally without firing again.
 	 * Default 1.
 	 */
 	atCall?: number;
+	/**
+	 * Restrict firing to calls whose arguments match. Combined with
+ `atCall`, the Nth MATCHING call fires. With a multi-purpose seam
+	 * (one spawn mock serving version probes and updates), this targets the
+	 * interesting call without hard-coding its positional index.
+	 */
+	when?: (...args: Parameters<T>) => boolean;
 }
 
 /**
@@ -140,13 +151,16 @@ export function fireResetAt<T extends (...args: any[]) => Promise<unknown>>(
 		getMockImplementation(): T | undefined;
 	},
 	hook: () => void,
-	options?: FireResetAtOptions,
+	options?: FireResetAtOptions<T>,
 ): void {
 	const atCall = options?.atCall ?? 1;
+	const matches = options?.when;
 	const original = mock.getMockImplementation() as T | undefined;
 	let call = 0;
 	let fired = false;
 	mock.mockImplementation((async (...args: Parameters<T>): Promise<unknown> => {
+		if (matches && !matches(...args))
+			return original ? original(...args) : undefined;
 		call += 1;
 		if (call === atCall && !fired) {
 			fired = true;
