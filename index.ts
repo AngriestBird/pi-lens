@@ -239,6 +239,7 @@ import {
 } from "./clients/event-loop-monitor.js";
 import { logSessionStart } from "./clients/sessionstart-logger.js";
 import { logConcurrentSessionBind } from "./clients/session-start-observability.js";
+import { normalizeToolDefinition } from "./clients/tool-definition.js";
 import { warmFormatters } from "./clients/formatters-lazy.js";
 
 type DispatchIntegration = Awaited<ReturnType<typeof loadDispatchIntegration>>;
@@ -1624,7 +1625,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 		? wrapToolsForCompactLine(toolsToRegister as any)
 		: toolsToRegister) {
 		try {
-			pi.registerTool(tool as any);
+			pi.registerTool(normalizeToolDefinition(tool) as any);
 		} catch {
 			// another extension already registered a tool with this name
 		}

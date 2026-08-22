@@ -14,6 +14,11 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Fixed
 
+- **Registered tools now always have descriptions in child/subagent sessions
+  (refs #1988)** — the final registration boundary fills missing, empty, and
+  whitespace-only descriptions for active, lazy, activation, and wrapped tool
+  definitions.
+
 ### Security
 
 ## [4.1.1] - 2026-08-21

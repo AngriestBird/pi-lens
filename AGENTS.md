@@ -1,4 +1,11 @@
 # pi-lens — agent context
+Tool metadata is normalized at the final `pi.registerTool` boundary in
+`clients/tool-definition.ts`. Keep this seam around the complete active/lazy/
+activation-tool registration list: child sessions and wrapped/lazy factories
+must never expose a tool with a missing, empty, or whitespace-only description.
+Regression coverage exercises the real host registration seam across compact
+rendering and dynamic-tool support both on and off; helper-only tests do not
+prove that every registration group reaches the normalizer.
 
 Knip's dispatch memo is instance-owned and keyed by canonical project root plus
 the runtime's monotonic project sequence. Only callers that supply that content
