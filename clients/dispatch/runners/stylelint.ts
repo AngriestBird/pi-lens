@@ -193,10 +193,8 @@ const stylelintRunner: RunnerDefinition = {
 		const diagnostics = run.diagnostics;
 		return finishParsedRun({
 			tool: "stylelint",
-			filePath: ctx.filePath,
-			status: result.status ?? null,
-			stdout: result.stdout,
-			stderr: result.stderr,
+			ctx,
+			result,
 			diagnostics,
 		});
 	},

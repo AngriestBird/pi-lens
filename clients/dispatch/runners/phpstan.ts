@@ -170,10 +170,8 @@ const phpstanRunner: RunnerDefinition = {
 		const diagnostics = run.diagnostics;
 		return finishParsedRun({
 			tool: "phpstan",
-			filePath: ctx.filePath,
-			status: result.status ?? null,
-			stdout: result.stdout,
-			stderr: result.stderr,
+			ctx,
+			result,
 			diagnostics,
 			classify: () => ({ status: "failed", semantic: "blocking" }),
 		});

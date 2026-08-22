@@ -204,10 +204,8 @@ const shellcheckRunner: RunnerDefinition = {
 
 		return finishParsedRun({
 			tool: "shellcheck",
-			filePath: ctx.filePath,
-			status: result.status ?? null,
-			stdout: result.stdout,
-			stderr: result.stderr,
+			ctx,
+			result,
 			diagnostics,
 		});
 	},

@@ -94,10 +94,8 @@ const pyrightRunner: RunnerDefinition = {
 			// failed + parse-error; exit 0 stays clean.
 			return finishParsedRun({
 				tool: "pyright",
-				filePath: ctx.filePath,
-				status: result.status ?? null,
-				stdout: result.stdout,
-				stderr: result.stderr,
+				ctx,
+				result,
 				diagnostics: [],
 			});
 		}
@@ -108,10 +106,8 @@ const pyrightRunner: RunnerDefinition = {
 
 			return finishParsedRun({
 				tool: "pyright",
-				filePath: ctx.filePath,
-				status: result.status ?? null,
-				stdout: result.stdout,
-				stderr: result.stderr,
+				ctx,
+				result,
 				diagnostics,
 				classify: (diagnostics) => {
 					const hasErrors = diagnostics.some((d) => d.severity === "error");

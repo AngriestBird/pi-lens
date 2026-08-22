@@ -151,10 +151,8 @@ const markdownlintRunner: RunnerDefinition = {
 		const diagnostics = run.diagnostics;
 		return finishParsedRun({
 			tool: "markdownlint",
-			filePath: ctx.filePath,
-			status: result.status ?? null,
-			stdout: result.stdout,
-			stderr: result.stderr,
+			ctx,
+			result,
 			diagnostics,
 			classify: () => ({ status: "succeeded", semantic: "warning" }),
 		});

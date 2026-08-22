@@ -136,10 +136,8 @@ const oxlintRunner: RunnerDefinition = {
 			) {
 				return finishParsedRun({
 					tool: "oxlint",
-					filePath: ctx.filePath,
-					status: result.status ?? null,
-					stdout,
-					stderr: result.stderr,
+					ctx,
+					result,
 					diagnostics,
 				});
 			}
@@ -160,10 +158,8 @@ const oxlintRunner: RunnerDefinition = {
 		// each diagnostic's own `semantic`, so a warning stays a warning.
 		return finishParsedRun({
 			tool: "oxlint",
-			filePath: ctx.filePath,
-			status: result.status ?? null,
-			stdout,
-			stderr: result.stderr,
+			ctx,
+			result,
 			diagnostics,
 			classify: (diagnostics) => {
 				const hasBlocking = diagnostics.some((d) => d.semantic === "blocking");

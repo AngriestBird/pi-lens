@@ -346,10 +346,8 @@ const biomeCheckJsonRunner: RunnerDefinition = {
 
 		return finishParsedRun({
 			tool: "biome",
-			filePath: ctx.filePath,
-			status: checkResult.status ?? null,
-			stdout: checkResult.stdout,
-			stderr: checkResult.stderr,
+			ctx,
+			result: checkResult,
 			diagnostics: parsed.diagnostics,
 		});
 	},

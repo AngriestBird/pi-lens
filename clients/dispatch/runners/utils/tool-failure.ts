@@ -4,7 +4,7 @@
  */
 import { incrementDegradationCount } from "../../../degradation-ledger.js";
 import { truncateForLedger } from "../../../ledger-bounds.js";
-import type { Diagnostic, RunnerResult } from "../../types.js";
+import type { Diagnostic, DispatchContext, RunnerResult } from "../../types.js";
 import {
 	type ClassifyRunOutcomeInput,
 	classifyRunOutcome,
@@ -303,11 +303,14 @@ export function parseToolRun<D>(
 export interface FinishParsedRunInput {
 	/** The tool as a reader would name it — used in the parse-error finding. */
 	tool: string;
-	filePath: string;
-	/** Process exit status (`null` when the spawn never produced one). */
-	status: number | null;
-	stdout?: string | undefined;
-	stderr?: string | undefined;
+	/** Only `filePath` is read from the context. */
+	ctx: Pick<DispatchContext, "filePath">;
+	/** The spawn result whose exit/output the findings came from. */
+	result: {
+		status?: number | null;
+		stdout?: string | undefined;
+		stderr?: string | undefined;
+	};
 	diagnostics: Diagnostic[];
 	/**
 	 * Override the default findings mapping when the runner's convention
@@ -320,17 +323,18 @@ export interface FinishParsedRunInput {
 }
 
 export function finishParsedRun(input: FinishParsedRunInput): RunnerResult {
-	const raw = `${input.stdout ?? ""}${input.stderr ?? ""}`;
+	const raw = `${input.result.stdout ?? ""}${input.result.stderr ?? ""}`;
+	const status = input.result.status ?? null;
 
 	if (input.diagnostics.length === 0) {
-		if ((input.status ?? 0) !== 0 && raw.trim().length > 0) {
+		if (status !== 0 && raw.trim().length > 0) {
 			return {
 				status: "failed",
 				diagnostics: [
 					{
 						id: `${input.tool}:parse-error:1`,
-						message: `${input.tool} exited ${input.status} but its output could not be parsed`,
-						filePath: input.filePath,
+						message: `${input.tool} exited ${status} but its output could not be parsed`,
+						filePath: input.ctx.filePath,
 						line: 1,
 						column: 1,
 						severity: "warning",

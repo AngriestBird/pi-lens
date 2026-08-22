@@ -197,10 +197,8 @@ const sqlfluffRunner: RunnerDefinition = {
 		const diagnostics = run.diagnostics;
 		return finishParsedRun({
 			tool: "sqlfluff",
-			filePath: ctx.filePath,
-			status: result.status ?? null,
-			stdout: result.stdout,
-			stderr: result.stderr,
+			ctx,
+			result,
 			diagnostics,
 			classify: () => ({ status: "failed", semantic: "warning" }),
 		});

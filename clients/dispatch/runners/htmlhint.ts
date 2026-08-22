@@ -118,10 +118,8 @@ const htmlhintRunner: RunnerDefinition = {
 		const diagnostics = run.diagnostics;
 		return finishParsedRun({
 			tool: "htmlhint",
-			filePath: ctx.filePath,
-			status: result.status ?? null,
-			stdout: result.stdout,
-			stderr: result.stderr,
+			ctx,
+			result,
 			diagnostics,
 			classify: (diagnostics) => {
 				const hasErrors = diagnostics.some((d) => d.severity === "error");
