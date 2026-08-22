@@ -10,6 +10,7 @@ import {
 	_resetProviderCacheTtlForTests,
 	clearCachePrefixSession,
 	DEFAULT_PROVIDER_CACHE_TTL_MS,
+	emitCacheUsageSummaryAtSessionEnd,
 	logCacheUsage,
 	observeCacheContext,
 	observeCachePrefix,
@@ -61,15 +62,24 @@ describe("cache-observability — response-side usage (#1018)", () => {
 				metadata: {
 					provider: "anthropic",
 					model: "claude-opus-4",
+					providerIdentityHash: expect.stringMatching(/^[a-f0-9]{64}$/),
+					modelIdentityHash: expect.stringMatching(/^[a-f0-9]{64}$/),
+					providerIdentityStatus: "complete",
+					modelIdentityStatus: "complete",
+					providerIdentityTruncated: false,
+					modelIdentityTruncated: false,
 					cacheRead: 8000,
 					cacheWrite: 512,
 					input: 1200,
 					output: 340,
 					cost: 0.037,
+					providerUsageMalformedFields: [],
 					interTurnGapMs: null,
 					gapBasis: "no-prior-turn",
 					cacheMissCause: null,
 					cacheMissKind: null,
+					cacheMissUnknownReason: null,
+					modelProviderChanged: false,
 					cacheTtlThresholdMs: DEFAULT_PROVIDER_CACHE_TTL_MS,
 					priorCacheRead: null,
 					injectedCharsSinceLastTurn: 0,
@@ -633,6 +643,7 @@ describe("cache-observability — miss attribution (#1071)", () => {
 			interTurnGapMs: null,
 			cacheMissCause: null,
 			cacheMissKind: null,
+			cacheMissUnknownReason: "no-prior-sample",
 			priorCacheRead: null,
 		});
 	});
@@ -665,17 +676,19 @@ describe("cache-observability — miss attribution (#1071)", () => {
 			interTurnGapMs: 10_000,
 			gapBasis: "request-time",
 			cacheMissCause: "unknown",
+			cacheMissUnknownReason: "no-local-explanation",
 		});
 	});
 
-	it("falls back to the message-end delta when no context call arrived", () => {
+	it("reports missing request correlation instead of inferring ttl from message-end time", () => {
 		logUsage(8_000, 100);
 		vi.setSystemTime(BASE_MS + 70_000);
 		logUsage(0, 9_000);
 		expect(lastUsageMetadata()).toMatchObject({
 			interTurnGapMs: 70_000,
 			gapBasis: "message-end-fallback",
-			cacheMissCause: "ttl-expired",
+			cacheMissCause: "unknown",
+			cacheMissUnknownReason: "request-correlation-unavailable",
 		});
 	});
 
@@ -761,6 +774,115 @@ describe("cache-observability — miss attribution (#1071)", () => {
 		});
 	});
 
+	it("attributes a shortfall across a provider or model switch", () => {
+		logUsage(8_000, 100);
+		observeRequest();
+		logCacheUsage(usageMessage(0, 9_000), undefined, {
+			sessionId: "attr",
+			turnIndex: 1,
+		});
+		// Change the identity on the next request; the preceding zero remains a
+		// normal same-provider observation and establishes the comparison point.
+		observeRequest();
+		logCacheUsage(
+			assistantMessage({
+				provider: "openai",
+				model: "gpt-5",
+				usage: { input: 9_000, output: 10, cacheRead: 0, cacheWrite: 0 },
+			}),
+			undefined,
+			{ sessionId: "attr", turnIndex: 2 },
+		);
+		expect(lastUsageMetadata()).toMatchObject({
+			cacheMissCause: "model-provider-changed",
+			cacheMissKind: "zero-read",
+			modelProviderChanged: true,
+		});
+	});
+
+	it("keeps a directly observed model switch above truncated request evidence", () => {
+		logUsage(8_000, 100);
+		observeCacheContext({
+			sessionId: "attr",
+			turnIndex: 1,
+			injectionEnabled: false,
+			existingMessages: [{ role: "user", content: "x".repeat(3_000) }],
+		});
+		logCacheUsage(
+			assistantMessage({
+				provider: "openai",
+				model: "gpt-5",
+				usage: { input: 9_000, output: 10, cacheRead: 0, cacheWrite: 0 },
+			}),
+			undefined,
+			{ sessionId: "attr", turnIndex: 1 },
+		);
+		expect(lastUsageMetadata()).toMatchObject({
+			cacheMissCause: "model-provider-changed",
+			cacheMissUnknownReason: null,
+		});
+	});
+
+	it("fails closed when provider/model evidence is unavailable", () => {
+		logUsage(8_000, 100);
+		observeRequest();
+		logCacheUsage(
+			assistantMessage({
+				provider: undefined,
+				model: undefined,
+				usage: { input: 9_000, output: 10, cacheRead: 0, cacheWrite: 0 },
+			}),
+			undefined,
+			{ sessionId: "attr", turnIndex: 1 },
+		);
+		expect(lastUsageMetadata()).toMatchObject({
+			cacheMissCause: "unknown",
+			cacheMissUnknownReason: "model-provider-unavailable",
+		});
+	});
+
+	it("does not infer ttl when provider/model identity is unavailable", () => {
+		logUsage(8_000, 100);
+		vi.setSystemTime(BASE_MS + DEFAULT_PROVIDER_CACHE_TTL_MS);
+		observeRequest();
+		logCacheUsage(
+			assistantMessage({
+				provider: undefined,
+				model: undefined,
+				usage: { input: 9_000, output: 10, cacheRead: 0, cacheWrite: 0 },
+			}),
+			undefined,
+			{ sessionId: "attr", turnIndex: 1 },
+		);
+		expect(lastUsageMetadata()).toMatchObject({
+			cacheMissCause: "unknown",
+			cacheMissUnknownReason: "model-provider-unavailable",
+		});
+	});
+
+	it("does not infer partial eviction when provider/model identity is unavailable", () => {
+		logUsage(8_000, 100);
+		observeInjection(200);
+		logCacheUsage(
+			assistantMessage({
+				provider: undefined,
+				model: undefined,
+				usage: {
+					input: 20_000,
+					output: 10,
+					cacheRead: 3_000,
+					cacheWrite: 0,
+				},
+			}),
+			undefined,
+			{ sessionId: "attr", turnIndex: 1 },
+		);
+		expect(lastUsageMetadata()).toMatchObject({
+			cacheMissCause: "unknown",
+			cacheMissUnknownReason: "model-provider-unavailable",
+		});
+	});
+
 	it("prefers the observed prefix break over the idle-gap heuristic", () => {
 		logUsage(8_000, 100);
 		observeCachePrefix([{ role: "user", content: "first" }], 0, "attr");
@@ -769,6 +891,31 @@ describe("cache-observability — miss attribution (#1071)", () => {
 		logUsage(0, 9_000);
 		expect(lastUsageMetadata()).toMatchObject({
 			cacheMissCause: "prefix-broke",
+		});
+	});
+
+	it("keeps a direct prefix break above missing identity and truncated request evidence", () => {
+		logUsage(8_000, 100);
+		observeCachePrefix([{ role: "user", content: "first" }], 0, "attr");
+		observeCachePrefix([{ role: "user", content: "rewritten" }], 1, "attr");
+		observeCacheContext({
+			sessionId: "attr",
+			turnIndex: 1,
+			injectionEnabled: false,
+			existingMessages: [{ role: "user", content: "x".repeat(3_000) }],
+		});
+		logCacheUsage(
+			assistantMessage({
+				provider: undefined,
+				model: undefined,
+				usage: { input: 9_000, output: 10, cacheRead: 0, cacheWrite: 0 },
+			}),
+			undefined,
+			{ sessionId: "attr", turnIndex: 1 },
+		);
+		expect(lastUsageMetadata()).toMatchObject({
+			cacheMissCause: "prefix-broke",
+			cacheMissUnknownReason: null,
 		});
 	});
 
@@ -806,7 +953,327 @@ describe("cache-observability — miss attribution (#1071)", () => {
 		expect(lastUsageMetadata()).toMatchObject({
 			cacheMissCause: "unknown",
 			cacheMissKind: "low-read",
+			cacheMissUnknownReason: "no-local-explanation",
 		});
+	});
+
+	it("does not manufacture partial eviction from non-finite provider input", () => {
+		logUsage(8_000, 100);
+		observeRequest();
+		logCacheUsage(
+			assistantMessage({
+				usage: {
+					input: Number.POSITIVE_INFINITY,
+					output: 10,
+					cacheRead: 3_000,
+					cacheWrite: 0,
+				},
+			}),
+			undefined,
+			{ sessionId: "attr", turnIndex: 1 },
+		);
+		expect(lastUsageMetadata()).toMatchObject({
+			cacheMissCause: "unknown",
+			cacheMissKind: "low-read",
+			cacheMissUnknownReason: "malformed-provider-usage",
+			input: null,
+			providerUsageMalformedFields: ["input"],
+		});
+	});
+
+	it("distinguishes malformed cacheRead from an absent provider field", () => {
+		logCacheUsage(
+			assistantMessage({
+				usage: {
+					input: 100,
+					output: 10,
+					cacheRead: Number.NaN,
+					cacheWrite: 0,
+				},
+			}),
+			undefined,
+			{ sessionId: "attr", turnIndex: 0 },
+		);
+		expect(lastUsageMetadata()).toMatchObject({
+			cacheRead: null,
+			cacheMissCause: null,
+			cacheMissUnknownReason: "malformed-provider-usage",
+			providerUsageMalformedFields: ["cacheRead"],
+		});
+		emitCacheUsageSummaryAtSessionEnd("attr", "primary");
+		const summary = latencyEntries.find(
+			(entry) => entry.phase === "cache_usage_summary",
+		)?.metadata as Record<string, unknown>;
+		expect(summary.unknownEvidenceReasons).toMatchObject({
+			"malformed-provider-usage": 1,
+		});
+	});
+
+	it("sanitizes every logged malformed numeric field with a fixed bounded field list", () => {
+		logCacheUsage(
+			assistantMessage({
+				usage: {
+					input: Number.POSITIVE_INFINITY,
+					output: Number.NaN,
+					cacheRead: -1,
+					cacheWrite: Number.NEGATIVE_INFINITY,
+					cost: { total: Number.NaN },
+				},
+			}),
+			undefined,
+			{ sessionId: "attr", turnIndex: 0 },
+		);
+		const metadata = lastUsageMetadata();
+		expect(metadata).toMatchObject({
+			input: null,
+			output: null,
+			cacheRead: null,
+			cacheWrite: null,
+			cost: null,
+			cacheMissUnknownReason: "malformed-provider-usage",
+			providerUsageMalformedFields: [
+				"input",
+				"output",
+				"cacheRead",
+				"cacheWrite",
+				"cost.total",
+			],
+		});
+		expect(JSON.stringify(metadata)).not.toMatch(/Infinity|NaN/);
+	});
+
+	it("distinguishes a provider-reported miss despite a stable local prefix", () => {
+		logUsage(8_000, 100);
+		observeCachePrefix([{ role: "user", content: "first" }], 0, "attr");
+		observeRequest();
+		logUsage(0, 9_000);
+		expect(lastUsageMetadata()).toMatchObject({
+			cacheMissCause: "unknown",
+			cacheMissKind: "zero-read",
+			cacheMissUnknownReason: "provider-reported-zero-stable-prefix",
+		});
+	});
+
+	it("distinguishes a provider-reported low read despite a stable local prefix", () => {
+		logUsage(8_000, 100);
+		observeCachePrefix([{ role: "user", content: "first" }], 0, "attr");
+		observeRequest();
+		logUsage(3_000, 100);
+		expect(lastUsageMetadata()).toMatchObject({
+			cacheMissCause: "unknown",
+			cacheMissKind: "low-read",
+			cacheMissUnknownReason: "provider-reported-low-read-stable-prefix",
+		});
+	});
+
+	it("does not claim stable-prefix evidence when the bounded sequence hash truncated", () => {
+		logUsage(8_000, 100);
+		observeCacheContext({
+			sessionId: "attr",
+			turnIndex: 1,
+			injectionEnabled: false,
+			existingMessages: [{ role: "user", content: "x".repeat(3_000) }],
+		});
+		logUsage(0, 9_000);
+		expect(lastUsageMetadata()).toMatchObject({
+			cacheMissCause: "unknown",
+			cacheMissUnknownReason: "sequence-hash-truncated",
+		});
+	});
+
+	it("does not infer ttl when request sequence evidence truncated", () => {
+		logUsage(8_000, 100);
+		vi.setSystemTime(BASE_MS + DEFAULT_PROVIDER_CACHE_TTL_MS);
+		observeCacheContext({
+			sessionId: "attr",
+			turnIndex: 1,
+			injectionEnabled: false,
+			existingMessages: [{ role: "user", content: "x".repeat(3_000) }],
+		});
+		logUsage(0, 9_000);
+		expect(lastUsageMetadata()).toMatchObject({
+			cacheMissCause: "unknown",
+			cacheMissUnknownReason: "sequence-hash-truncated",
+		});
+	});
+
+	it("does not infer partial eviction when request sequence evidence truncated", () => {
+		logUsage(8_000, 100);
+		observeCacheContext({
+			sessionId: "attr",
+			turnIndex: 1,
+			injectionEnabled: false,
+			existingMessages: [{ role: "user", content: "x".repeat(3_000) }],
+		});
+		logUsage(3_000, 20_000);
+		expect(lastUsageMetadata()).toMatchObject({
+			cacheMissCause: "unknown",
+			cacheMissUnknownReason: "sequence-hash-truncated",
+		});
+	});
+
+	const incompleteContextCases = [
+		[
+			"cyclic content",
+			() => {
+				const value: Record<string, unknown> = {};
+				value.self = value;
+				return value;
+			},
+		],
+		[
+			"a throwing enumerable getter",
+			() => {
+				const value: Record<string, unknown> = {};
+				Object.defineProperty(value, "secret", {
+					enumerable: true,
+					get: () => {
+						throw new Error("unreadable");
+					},
+				});
+				return value;
+			},
+		],
+		[
+			"an unreadable proxy",
+			() =>
+				new Proxy(
+					{},
+					{
+						ownKeys: () => {
+							throw new Error("unreadable");
+						},
+					},
+				),
+		],
+	] as const;
+
+	it.each(incompleteContextCases)(
+		"fails ttl closed when context hashing sees %s",
+		(_label, make) => {
+			logUsage(8_000, 100);
+			vi.setSystemTime(BASE_MS + DEFAULT_PROVIDER_CACHE_TTL_MS);
+			observeCacheContext({
+				sessionId: "attr",
+				turnIndex: 1,
+				injectionEnabled: false,
+				existingMessages: [{ role: "user", content: make() }],
+			});
+			const contextMetadata = [...latencyEntries]
+				.reverse()
+				.find((entry) => entry.phase === "cache_context")?.metadata;
+			expect(contextMetadata?.sequenceHashIncomplete).toBe(true);
+			logUsage(0, 9_000);
+			expect(lastUsageMetadata()).toMatchObject({
+				cacheMissCause: "unknown",
+				cacheMissUnknownReason: "request-evidence-incomplete",
+			});
+		},
+	);
+
+	it.each(incompleteContextCases)(
+		"fails partial eviction closed when context hashing sees %s",
+		(_label, make) => {
+			logUsage(8_000, 100);
+			observeCacheContext({
+				sessionId: "attr",
+				turnIndex: 1,
+				injectionEnabled: false,
+				existingMessages: [{ role: "user", content: make() }],
+			});
+			const contextMetadata = [...latencyEntries]
+				.reverse()
+				.find((entry) => entry.phase === "cache_context")?.metadata;
+			expect(contextMetadata?.sequenceHashIncomplete).toBe(true);
+			logUsage(3_000, 20_000);
+			expect(lastUsageMetadata()).toMatchObject({
+				cacheMissCause: "unknown",
+				cacheMissUnknownReason: "request-evidence-incomplete",
+			});
+		},
+	);
+
+	it.each(["provider", "model"] as const)(
+		"compares the full %s identity when values differ only after the log cap",
+		(field) => {
+			const shared = "x".repeat(200);
+			const firstIdentity = `${shared}PRIVATE_SUFFIX_A`;
+			const secondIdentity = `${shared}PRIVATE_SUFFIX_B`;
+			logCacheUsage(
+				assistantMessage({
+					[field]: firstIdentity,
+					usage: { input: 100, output: 10, cacheRead: 8_000, cacheWrite: 0 },
+				}),
+				undefined,
+				{ sessionId: "attr", turnIndex: 0 },
+			);
+			const first = lastUsageMetadata();
+			observeRequest();
+			logCacheUsage(
+				assistantMessage({
+					[field]: secondIdentity,
+					usage: { input: 9_000, output: 10, cacheRead: 0, cacheWrite: 0 },
+				}),
+				undefined,
+				{ sessionId: "attr", turnIndex: 1 },
+			);
+			const second = lastUsageMetadata();
+			expect(second).toMatchObject({
+				cacheMissCause: "model-provider-changed",
+				[`${field}IdentityTruncated`]: true,
+			});
+			expect(second[field]).toBe(shared);
+			expect(second[`${field}IdentityHash`]).toMatch(/^[a-f0-9]{64}$/);
+			expect(second[`${field}IdentityHash`]).not.toBe(
+				first[`${field}IdentityHash`],
+			);
+			expect(JSON.stringify(second)).not.toContain("PRIVATE_SUFFIX_B");
+		},
+	);
+
+	it("separates missing-id primary and secondary buckets and fails correlation closed", () => {
+		logCacheUsage(usageMessage(8_000, 100), undefined, {
+			sessionRole: "primary",
+			turnIndex: 0,
+		});
+		observeCacheContext({
+			sessionRole: "primary",
+			turnIndex: 1,
+			injectionEnabled: false,
+			existingMessages: [{ role: "user", content: "prompt" }],
+		});
+		logCacheUsage(usageMessage(0, 9_000), undefined, {
+			sessionRole: "primary",
+			turnIndex: 1,
+		});
+		expect(lastUsageMetadata()).toMatchObject({
+			priorCacheRead: 8_000,
+			cacheMissCause: "unknown",
+			cacheMissUnknownReason: "request-correlation-unavailable",
+		});
+
+		logCacheUsage(usageMessage(0, 9_000), undefined, {
+			sessionRole: "concurrent-secondary",
+		});
+		expect(lastUsageMetadata()).toMatchObject({
+			priorCacheRead: null,
+			cacheMissCause: null,
+			cacheMissUnknownReason: "no-prior-sample",
+			turnScope: "unavailable-concurrent-secondary",
+		});
+
+		emitCacheUsageSummaryAtSessionEnd(undefined, "primary");
+		emitCacheUsageSummaryAtSessionEnd(undefined, "concurrent-secondary");
+		const summaries = latencyEntries
+			.filter((entry) => entry.phase === "cache_usage_summary")
+			.map((entry) => entry.metadata);
+		expect(summaries).toEqual([
+			expect.objectContaining({ sessionRole: "primary", usageRecords: 2 }),
+			expect.objectContaining({
+				sessionRole: "concurrent-secondary",
+				usageRecords: 1,
+			}),
+		]);
 	});
 
 	it("suppresses the eviction verdict when the char accumulators were capped", () => {
@@ -821,10 +1288,11 @@ describe("cache-observability — miss attribution (#1071)", () => {
 		});
 	});
 
-	it("keeps partial-eviction reachable when an ordinary tool result lands", () => {
+	it("keeps partial-eviction reachable when a large complete tool-result batch lands", () => {
 		// #1071 review round 1, F2: transcript growth used to run through the
-		// 16 KiB injection cap, so one routine 20,000-char tool result latched
-		// attributionCharsCapped and suppressed the verdict.
+		// 16 KiB injection cap, so a routine 20,000-char tool-result batch latched
+		// attributionCharsCapped and suppressed the verdict. Split it into bounded
+		// messages here so #1996's independent sequence-completeness gate is open.
 		logUsage(8_000, 100);
 		observeCacheContext({
 			sessionId: "attr",
@@ -838,7 +1306,10 @@ describe("cache-observability — miss attribution (#1071)", () => {
 			injectionEnabled: true,
 			existingMessages: [
 				{ role: "user", content: "prompt" },
-				{ role: "toolResult", content: "t".repeat(20_000) },
+				...Array.from({ length: 10 }, () => ({
+					role: "toolResult",
+					content: "t".repeat(2_000),
+				})),
 			],
 			injectionSlices: [
 				{
@@ -868,13 +1339,17 @@ describe("cache-observability — miss attribution (#1071)", () => {
 			undefined,
 			{ sessionId: "attr", turnIndex: 0 },
 		);
-		expect(lastUsageMetadata()).toMatchObject({ priorCacheRead: 8_000 });
+		expect(lastUsageMetadata()).toMatchObject({
+			priorCacheRead: 8_000,
+			cacheMissUnknownReason: "cache-read-unavailable",
+		});
 		vi.setSystemTime(BASE_MS + 600_000);
 		logUsage(0, 9_000);
 		expect(lastUsageMetadata()).toMatchObject({
 			priorCacheRead: null,
 			cacheMissCause: null,
 			cacheMissKind: null,
+			cacheMissUnknownReason: "no-prior-sample",
 		});
 	});
 
@@ -946,6 +1421,55 @@ describe("cache-observability — miss attribution (#1071)", () => {
 			cacheMissCause: null,
 			priorCacheRead: null,
 		});
+	});
+
+	it("emits one bounded fixed-key summary and retires the session state", () => {
+		logUsage(8_000, 100, "summary");
+		vi.setSystemTime(BASE_MS + DEFAULT_PROVIDER_CACHE_TTL_MS);
+		observeRequest("summary");
+		logUsage(0, 9_000, "summary");
+		observeCachePrefix([{ role: "user", content: "first" }], 2, "summary");
+		observeRequest("summary");
+		logUsage(0, 9_000, "summary");
+
+		emitCacheUsageSummaryAtSessionEnd("summary", "primary");
+		const summaryEntries = latencyEntries.filter(
+			(entry) => entry.phase === "cache_usage_summary",
+		);
+		expect(summaryEntries).toHaveLength(1);
+		expect(summaryEntries[0]?.metadata).toEqual({
+			version: 1,
+			sessionId: "summary",
+			sessionRole: "primary",
+			usageRecords: 3,
+			cacheHits: 1,
+			missObservations: 2,
+			cacheMissCauses: {
+				"ttl-expired": 1,
+				"prefix-broke": 0,
+				"partial-eviction": 0,
+				"model-provider-changed": 0,
+				unknown: 1,
+			},
+			unknownEvidenceReasons: {
+				"no-prior-sample": 0,
+				"cache-read-unavailable": 0,
+				"malformed-provider-usage": 0,
+				"request-correlation-unavailable": 0,
+				"request-evidence-incomplete": 0,
+				"sequence-hash-truncated": 0,
+				"model-provider-unavailable": 0,
+				"provider-reported-zero-stable-prefix": 1,
+				"provider-reported-low-read-stable-prefix": 0,
+				"no-local-explanation": 0,
+			},
+		});
+		expect(JSON.stringify(summaryEntries[0]?.metadata)).not.toContain("first");
+
+		emitCacheUsageSummaryAtSessionEnd("summary", "primary");
+		expect(
+			latencyEntries.filter((entry) => entry.phase === "cache_usage_summary"),
+		).toHaveLength(1);
 	});
 });
 

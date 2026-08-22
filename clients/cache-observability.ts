@@ -29,12 +29,18 @@
  *      flags that something (pi-lens or otherwise) broke the cache prefix. This
  *      remains a local observation, never a provider cache-miss claim.
  *
- * #1071 adds miss ATTRIBUTION on top of those three, without a new phase. Each
- * `cache_usage` record carries the inter-turn gap and a `cacheMissCause`
- * verdict, and each `cache_context` record splits a mixed injection payload by
- * contributing source. Both ride records that already fire once per turn, and
- * both derive from state this module already keeps in process — nothing reads
- * latency.log back.
+ * #1071 adds miss ATTRIBUTION on top of those three. Each `cache_usage` record
+ * carries the inter-turn gap and a `cacheMissCause` verdict, and each
+ * `cache_context` record splits a mixed injection payload by contributing
+ * source. #1996 makes every unexplained miss name the absent/conflicting
+ * evidence and emits one fixed-key `cache_usage_summary` at session shutdown.
+ * Heuristic causes require complete request hashing and full provider/model
+ * identity evidence. Identity comparison uses SHA-256 over the full normalized
+ * value while logs retain only a bounded display prefix; malformed numeric
+ * usage is sanitized before it reaches JSON metadata.
+ * The per-turn records still ride events that already fire once per turn, and
+ * all attribution derives from bounded in-process state — nothing reads
+ * latency.log back or serializes transcript content.
  *
  * All paths are defensive: `usage` (and its fields) may be absent on older
  * hosts or non-assistant messages, so every access is guarded and the handlers
@@ -44,24 +50,6 @@
 import { createHash } from "node:crypto";
 import { lazyEnvNumber } from "./env-utils.js";
 import { logLatency } from "./latency-logger.js";
-
-/** Shape we defensively read off an assistant `AgentMessage` (see pi-ai types). */
-interface AssistantUsageLike {
-	input?: number;
-	output?: number;
-	cacheRead?: number;
-	cacheWrite?: number;
-	cacheWrite1h?: number;
-	reasoning?: number;
-	totalTokens?: number;
-	cost?: {
-		input?: number;
-		output?: number;
-		cacheRead?: number;
-		cacheWrite?: number;
-		total?: number;
-	};
-}
 
 interface AssistantMessageLike {
 	role?: unknown;
@@ -97,7 +85,21 @@ export type CacheMissCause =
 	| "ttl-expired"
 	| "prefix-broke"
 	| "partial-eviction"
+	| "model-provider-changed"
 	| "unknown";
+
+/** Why a miss could not be assigned a local cause (#1996). */
+export type CacheMissUnknownReason =
+	| "no-prior-sample"
+	| "cache-read-unavailable"
+	| "malformed-provider-usage"
+	| "request-correlation-unavailable"
+	| "request-evidence-incomplete"
+	| "sequence-hash-truncated"
+	| "model-provider-unavailable"
+	| "provider-reported-zero-stable-prefix"
+	| "provider-reported-low-read-stable-prefix"
+	| "no-local-explanation";
 
 /** Which shape of shortfall triggered the verdict. */
 export type CacheMissKind = "zero-read" | "low-read";
@@ -114,6 +116,14 @@ interface CacheUsageContext {
 	sessionId?: string;
 	sessionRole?: "primary" | "concurrent-secondary";
 	turnIndex?: number;
+}
+
+export interface CacheUsageSessionSummary {
+	usageRecords: number;
+	cacheHits: number;
+	missObservations: number;
+	cacheMissCauses: Record<CacheMissCause, number>;
+	unknownEvidenceReasons: Record<CacheMissUnknownReason, number>;
 }
 
 /** RuntimeCoordinator's counter is process-global when sessions share a host. */
@@ -226,6 +236,12 @@ interface SessionAttributionState {
 	lastCacheRead?: number;
 	/** A `cache_prefix_break` CHANGE fired since the previous usage record. */
 	prefixBrokeSinceLastUsage: boolean;
+	/** A prefix baseline or unchanged observation was seen since the usage record. */
+	prefixStableSinceLastUsage: boolean;
+	/** A bounded context sequence hash lost content or message coverage. */
+	sequenceHashTruncatedSinceLastUsage: boolean;
+	/** Request hashing encountered cycles, throwing getters, or unreadable data. */
+	requestEvidenceIncompleteSinceLastUsage: boolean;
 	/** Characters pi-lens injected since the previous usage record. */
 	injectedCharsSinceLastUsage: number;
 	/** Characters of transcript growth observed since the previous usage record. */
@@ -234,6 +250,46 @@ interface SessionAttributionState {
 	attributionCharsCapped: boolean;
 	/** Transcript length at the previous `context` observation. */
 	lastObservedMessageCount?: number;
+	/** Full-identity SHA-256 evidence from the previous usage record. */
+	lastProviderIdentityHash?: string;
+	lastModelIdentityHash?: string;
+	/** Bounded process-local session summary, emitted at session shutdown. */
+	summary: CacheUsageSessionSummary;
+}
+
+function emptyCacheMissCauses(): Record<CacheMissCause, number> {
+	return {
+		"ttl-expired": 0,
+		"prefix-broke": 0,
+		"partial-eviction": 0,
+		"model-provider-changed": 0,
+		unknown: 0,
+	};
+}
+
+function emptyUnknownEvidenceReasons(): Record<CacheMissUnknownReason, number> {
+	return {
+		"no-prior-sample": 0,
+		"cache-read-unavailable": 0,
+		"malformed-provider-usage": 0,
+		"request-correlation-unavailable": 0,
+		"request-evidence-incomplete": 0,
+		"sequence-hash-truncated": 0,
+		"model-provider-unavailable": 0,
+		"provider-reported-zero-stable-prefix": 0,
+		"provider-reported-low-read-stable-prefix": 0,
+		"no-local-explanation": 0,
+	};
+}
+
+function newCacheUsageSummary(): CacheUsageSessionSummary {
+	return {
+		usageRecords: 0,
+		cacheHits: 0,
+		missObservations: 0,
+		cacheMissCauses: emptyCacheMissCauses(),
+		unknownEvidenceReasons: emptyUnknownEvidenceReasons(),
+	};
 }
 
 const attributionBySession = new Map<string, SessionAttributionState>();
@@ -241,9 +297,13 @@ const attributionBySession = new Map<string, SessionAttributionState>();
 function newAttributionState(): SessionAttributionState {
 	return {
 		prefixBrokeSinceLastUsage: false,
+		prefixStableSinceLastUsage: false,
+		sequenceHashTruncatedSinceLastUsage: false,
+		requestEvidenceIncompleteSinceLastUsage: false,
 		injectedCharsSinceLastUsage: 0,
 		newTranscriptCharsSinceLastUsage: 0,
 		attributionCharsCapped: false,
+		summary: newCacheUsageSummary(),
 	};
 }
 
@@ -359,10 +419,72 @@ function estimateTokens(chars: number): number {
 	return Math.ceil(chars / CHARS_PER_ESTIMATED_TOKEN);
 }
 
+function readableTokenCount(value: unknown): number | undefined {
+	return typeof value === "number" && Number.isFinite(value) && value >= 0
+		? value
+		: undefined;
+}
+
+type NumericEvidenceStatus = "available" | "absent" | "malformed";
+
+interface NumericEvidence {
+	value?: number;
+	status: NumericEvidenceStatus;
+}
+
+function readNumericEvidence(
+	record: Record<string, unknown>,
+	key: string,
+): NumericEvidence {
+	let raw: unknown;
+	try {
+		raw = record[key];
+	} catch {
+		return { status: "malformed" };
+	}
+	if (raw === undefined) return { status: "absent" };
+	const value = readableTokenCount(raw);
+	return value === undefined
+		? { status: "malformed" }
+		: { status: "available", value };
+}
+
+const MAX_LOGGED_IDENTITY_CHARS = 200;
+
+interface IdentityEvidence {
+	display?: string;
+	hash?: string;
+	status: "complete" | "truncated" | "unavailable";
+}
+
 /**
- * Classify a turn's prompt-cache shortfall. Returns `null` when there is
- * nothing to explain: no prior usage record in this session (the first turn
- * legitimately reads nothing), an unreadable `cacheRead`, or a healthy read.
+ * Keep the human-readable identity bounded while comparing a SHA-256 digest of
+ * the FULL normalized value. Comparing the display prefix would make two long
+ * provider/model ids that differ after the cap collide (#1996 review).
+ */
+function identityEvidence(value: unknown): IdentityEvidence {
+	if (typeof value !== "string") return { status: "unavailable" };
+	const normalized = value.trim();
+	if (!normalized) return { status: "unavailable" };
+	const truncated = normalized.length > MAX_LOGGED_IDENTITY_CHARS;
+	return {
+		display: normalized.slice(0, MAX_LOGGED_IDENTITY_CHARS),
+		hash: createHash("sha256").update(normalized).digest("hex"),
+		status: truncated ? "truncated" : "complete",
+	};
+}
+
+interface CacheMissVerdict {
+	kind: CacheMissKind;
+	cause: CacheMissCause;
+	unknownReason?: CacheMissUnknownReason;
+}
+
+/**
+ * Classify a turn's prompt-cache shortfall. Returns `null` when no comparable
+ * miss exists: no prior readable usage record or a healthy read. The caller
+ * separately records why an unreadable/first zero sample could not be
+ * classified, so those evidence gaps remain visible in the session summary.
  *
  * Rules, in the order they are applied, each stated with the evidence behind
  * it (2026-08-21 investigation, 63 sessions, 2,288 turns, 94.2% overall hit
@@ -373,33 +495,49 @@ function estimateTokens(chars: number): number {
  *      the cause, so it outranks the timing heuristics below. The window was
  *      byte-stable throughout, so this verdict should stay rare; if it does
  *      not, #1016's fix has regressed.
- *   2. `ttl-expired` — the gap since the previous usage record reached the
- *      provider TTL threshold. The 34 zero-read turns had a median gap of 166s
- *      against 9s elsewhere, and carried 35.1% of all fresh input.
- *   3. `partial-eviction` — a non-zero but low read, where fresh input runs far
+ *   2. `model-provider-changed` — both adjacent identities were present and
+ *      differ. This is direct local evidence and outranks timing heuristics.
+ *   3. Evidence gates — heuristic causes require a REQUEST-time observation,
+ *      a complete bounded sequence hash, adjacent full provider/model identity,
+ *      and well-formed provider usage numbers.
+ *      Missing evidence returns a specific unknown reason; it never lets a
+ *      plausible but unproved heuristic win.
+ *   4. `ttl-expired` — a REQUEST-time gap reached the configured provider TTL.
+ *      A message-end fallback includes generation time and cannot prove this.
+ *   5. `partial-eviction` — a non-zero but low read, where fresh input runs far
  *      above the new content we measured. pi-lens injections average ~2.7
  *      estimated tokens per turn, so they cannot account for a multiple of the
  *      measured content; the remainder is provider-side eviction, typically at
  *      a context limit. Suppressed when the character accumulators were capped,
  *      because a floor estimate would manufacture the verdict.
- *   4. `unknown` — a real shortfall with no local explanation. Reported, never
- *      guessed at.
+ *   6. `unknown` — a real shortfall with no local explanation. A bounded
+ *      `cacheMissUnknownReason` names the missing or conflicting evidence;
+ *      provider behavior is never guessed.
  */
 function classifyCacheMiss(args: {
 	cacheRead: number | undefined;
 	input: number;
 	priorCacheRead: number | undefined;
 	interTurnGapMs: number | null;
+	gapBasis: CacheGapBasis;
 	ttlMs: number;
 	prefixBroke: boolean;
+	prefixStable: boolean;
+	sequenceHashTruncated: boolean;
+	requestEvidenceIncomplete: boolean;
+	stableSessionIdentity: boolean;
+	modelProviderChanged: boolean;
+	modelProviderEvidenceAvailable: boolean;
+	providerUsageMalformed: boolean;
 	estimatedNewTokens: number;
 	attributionCharsCapped: boolean;
-}): { kind: CacheMissKind; cause: CacheMissCause } | null {
-	const { cacheRead, priorCacheRead } = args;
-	if (typeof cacheRead !== "number" || !Number.isFinite(cacheRead)) return null;
+}): CacheMissVerdict | null {
+	const cacheRead = readableTokenCount(args.cacheRead);
+	if (cacheRead === undefined) return null;
 	// No baseline turn in this session: a first turn reads zero because nothing
 	// is cached yet, not because anything went wrong.
-	if (typeof priorCacheRead !== "number" || !Number.isFinite(priorCacheRead)) {
+	const priorCacheRead = readableTokenCount(args.priorCacheRead);
+	if (priorCacheRead === undefined) {
 		return null;
 	}
 	let kind: CacheMissKind;
@@ -414,7 +552,62 @@ function classifyCacheMiss(args: {
 		return null;
 	}
 
+	// A missing stable session id makes every cross-event baseline ambiguous. Do
+	// not let the shared fallback bucket turn another session's evidence into a
+	// cause claim (#1996 concurrent primary/secondary invariant).
+	if (!args.stableSessionIdentity) {
+		return {
+			kind,
+			cause: "unknown",
+			unknownReason: "request-correlation-unavailable",
+		};
+	}
 	if (args.prefixBroke) return { kind, cause: "prefix-broke" };
+	if (args.modelProviderChanged) {
+		return { kind, cause: "model-provider-changed" };
+	}
+	// TTL and transcript-growth claims need the request-side context observation.
+	// A response-time fallback includes generation and can only explain why the
+	// verdict stayed unknown; it cannot establish cache expiry.
+	if (args.gapBasis !== "request-time") {
+		return {
+			kind,
+			cause: "unknown",
+			unknownReason: "request-correlation-unavailable",
+		};
+	}
+	// TTL and eviction are heuristics. They are only evidence-backed if the
+	// bounded request observation is complete and both adjacent usage records
+	// identify the same provider/model. Otherwise an unseen prompt or identity
+	// change remains a competing explanation, so classification must fail closed.
+	if (args.requestEvidenceIncomplete) {
+		return {
+			kind,
+			cause: "unknown",
+			unknownReason: "request-evidence-incomplete",
+		};
+	}
+	if (args.sequenceHashTruncated) {
+		return {
+			kind,
+			cause: "unknown",
+			unknownReason: "sequence-hash-truncated",
+		};
+	}
+	if (args.providerUsageMalformed) {
+		return {
+			kind,
+			cause: "unknown",
+			unknownReason: "malformed-provider-usage",
+		};
+	}
+	if (!args.modelProviderEvidenceAvailable) {
+		return {
+			kind,
+			cause: "unknown",
+			unknownReason: "model-provider-unavailable",
+		};
+	}
 	if (args.interTurnGapMs !== null && args.interTurnGapMs >= args.ttlMs) {
 		return { kind, cause: "ttl-expired" };
 	}
@@ -429,11 +622,72 @@ function classifyCacheMiss(args: {
 	) {
 		return { kind, cause: "partial-eviction" };
 	}
-	return { kind, cause: "unknown" };
+	if (args.prefixStable) {
+		return {
+			kind,
+			cause: "unknown",
+			unknownReason:
+				kind === "zero-read"
+					? "provider-reported-zero-stable-prefix"
+					: "provider-reported-low-read-stable-prefix",
+		};
+	}
+	return {
+		kind,
+		cause: "unknown",
+		unknownReason: "no-local-explanation",
+	};
+}
+
+function recordCacheUsageSummary(args: {
+	state: SessionAttributionState;
+	cacheRead: number | undefined;
+	priorCacheRead: number | undefined;
+	verdict: CacheMissVerdict | null;
+	unknownReason?: CacheMissUnknownReason;
+}): void {
+	const summary = args.state.summary;
+	summary.usageRecords += 1;
+	let unknownReasonRecorded = false;
+	if (args.unknownReason === "malformed-provider-usage") {
+		summary.unknownEvidenceReasons["malformed-provider-usage"] += 1;
+		unknownReasonRecorded = true;
+	}
+	if (args.cacheRead === undefined) {
+		if (!unknownReasonRecorded) {
+			summary.unknownEvidenceReasons["cache-read-unavailable"] += 1;
+		}
+		return;
+	}
+	if (args.priorCacheRead === undefined) {
+		if (args.cacheRead === 0) {
+			summary.missObservations += 1;
+			if (!unknownReasonRecorded) {
+				summary.unknownEvidenceReasons["no-prior-sample"] += 1;
+			}
+		} else {
+			summary.cacheHits += 1;
+		}
+		return;
+	}
+	if (!args.verdict) {
+		summary.cacheHits += 1;
+		return;
+	}
+	summary.missObservations += 1;
+	summary.cacheMissCauses[args.verdict.cause] += 1;
+	if (
+		args.verdict.cause === "unknown" &&
+		args.unknownReason &&
+		!unknownReasonRecorded
+	) {
+		summary.unknownEvidenceReasons[args.unknownReason] += 1;
+	}
 }
 
 interface BoundedHashState {
 	contentTruncated: boolean;
+	incomplete: boolean;
 }
 
 function boundedHashScalar(value: unknown, state: BoundedHashState): string {
@@ -492,15 +746,18 @@ function boundedHashValue(
 	seen = new Set<object>(),
 	state?: BoundedHashState,
 ): string {
-	const hashState = state ?? { contentTruncated: false };
+	const hashState = state ?? { contentTruncated: false, incomplete: false };
 	if (value === null || typeof value !== "object") {
 		return boundedHashScalar(value, hashState);
 	}
 	if (depth >= 3) {
 		hashState.contentTruncated = true;
-		return Object.prototype.toString.call(value);
+		return "[depth-limit]";
 	}
-	if (seen.has(value)) return "[cycle]";
+	if (seen.has(value)) {
+		hashState.incomplete = true;
+		return "[cycle]";
+	}
 	seen.add(value);
 	try {
 		if (Array.isArray(value)) {
@@ -513,6 +770,7 @@ function boundedHashValue(
 			hashState,
 		);
 	} catch {
+		hashState.incomplete = true;
 		return "[unreadable]";
 	} finally {
 		seen.delete(value);
@@ -523,24 +781,55 @@ function hashMessageSequence(messages: ReadonlyArray<ContextMessageLike>): {
 	hash: string;
 	truncated: boolean;
 	contentTruncated: boolean;
+	incomplete: boolean;
 } {
 	const hash = createHash("sha256");
-	const state: BoundedHashState = { contentTruncated: false };
-	hash.update(`message-count:${messages.length};`);
-	const sampled = Math.min(messages.length, MAX_HASHED_MESSAGES);
+	const state: BoundedHashState = {
+		contentTruncated: false,
+		incomplete: false,
+	};
+	let messageCount: number;
+	try {
+		messageCount = messages.length;
+		if (!Number.isSafeInteger(messageCount) || messageCount < 0) {
+			throw new Error("invalid message count");
+		}
+	} catch {
+		state.incomplete = true;
+		hash.update("message-count:[unreadable];");
+		return {
+			hash: hash.digest("hex"),
+			truncated: false,
+			contentTruncated: false,
+			incomplete: true,
+		};
+	}
+	hash.update(`message-count:${messageCount};`);
+	const sampled = Math.min(messageCount, MAX_HASHED_MESSAGES);
 	for (let i = 0; i < sampled; i++) {
-		const message = messages[i];
 		const seen = new Set<object>();
+		let role: unknown;
+		let content: unknown;
+		try {
+			const message = messages[i];
+			role = message?.role;
+			content = message?.content;
+		} catch {
+			state.incomplete = true;
+			role = "[unreadable]";
+			content = "[unreadable]";
+		}
 		hash.update(
-			`${i}|role:${boundedHashValue(message?.role, 0, seen, state)}|content:${boundedHashValue(message?.content, 0, seen, state)};`,
+			`${i}|role:${boundedHashValue(role, 0, seen, state)}|content:${boundedHashValue(content, 0, seen, state)};`,
 		);
 	}
-	const truncated = messages.length > sampled;
+	const truncated = messageCount > sampled;
 	if (truncated) hash.update(`truncated-after:${sampled};`);
 	return {
 		hash: hash.digest("hex"),
 		truncated,
 		contentTruncated: state.contentTruncated,
+		incomplete: state.incomplete,
 	};
 }
 
@@ -576,7 +865,10 @@ function messageTextSize(
 			),
 		};
 	}
-	const bounded = boundedHashValue(content);
+	const bounded = boundedHashValue(content, 0, new Set<object>(), {
+		contentTruncated: false,
+		incomplete: false,
+	});
 	return {
 		chars: Math.min(bounded.length, limits.maxChars),
 		bytes: Math.min(
@@ -639,6 +931,21 @@ function sessionKey(sessionId?: string): string {
 }
 
 /**
+ * A stable host session id is the only safe cross-event identity. When it is
+ * absent, keep primary and concurrent-secondary observations in separate
+ * buckets and let classification fail closed instead of allowing a secondary
+ * to overwrite the primary's baseline.
+ */
+function attributionKey(
+	sessionId?: string,
+	sessionRole?: "primary" | "concurrent-secondary",
+): string {
+	const key = sessionKey(sessionId);
+	if (key !== NO_SESSION_KEY) return key;
+	return `${sessionRole ?? "unknown"}:${key}`;
+}
+
+/**
  * Log one bounded request-side observation for every `context` call. This is
  * deliberately a separate phase from `cache_prefix_break`: it describes the
  * messages pi-lens saw and returned from its own context handler, not the final
@@ -697,10 +1004,20 @@ export function observeCacheContext(args: {
 			existingMessages.length > MAX_REPORTED_MESSAGES ||
 			resultMessages.length > MAX_REPORTED_MESSAGES;
 		recordContextAttribution(
-			sessionKey(args.sessionId),
+			attributionKey(args.sessionId, args.sessionRole),
 			existingMessages,
 			sizes,
 		);
+		const state = attributionFor(
+			attributionKey(args.sessionId, args.sessionRole),
+		);
+		state.sequenceHashTruncatedSinceLastUsage ||=
+			beforeSequence.truncated ||
+			beforeSequence.contentTruncated ||
+			afterSequence.truncated ||
+			afterSequence.contentTruncated;
+		state.requestEvidenceIncompleteSinceLastUsage ||=
+			beforeSequence.incomplete || afterSequence.incomplete;
 
 		logLatency({
 			type: "phase",
@@ -752,9 +1069,23 @@ export function observeCacheContext(args: {
 					beforeSequence.truncated || afterSequence.truncated,
 				sequenceContentHashTruncated:
 					beforeSequence.contentTruncated || afterSequence.contentTruncated,
+				sequenceHashIncomplete:
+					beforeSequence.incomplete || afterSequence.incomplete,
 			},
 		});
 	} catch (err) {
+		// The context event still occurred at request time. Preserve that clock but
+		// fail the evidence closed so a later usage row cannot infer TTL/eviction
+		// from an observation whose hashing/measurement never completed.
+		try {
+			const state = attributionFor(
+				attributionKey(args.sessionId, args.sessionRole),
+			);
+			state.lastContextAtMs = Date.now();
+			state.requestEvidenceIncompleteSinceLastUsage = true;
+		} catch {
+			// The outer contract is no-throw; there is no safe attribution key left.
+		}
 		args.dbg?.(`cache-context: failed to log context observation: ${err}`);
 	}
 }
@@ -780,31 +1111,117 @@ export function logCacheUsage(
 		if (msg.role !== "assistant") return;
 		const usage = msg.usage;
 		if (!usage || typeof usage !== "object") return;
-		const u = usage as AssistantUsageLike;
+		// SAFETY: `usage` is verified non-null object above; widening to an
+		// indexable record is only so the numeric-evidence readers can probe
+		// each field defensively. Every read re-validates its own type.
+		const usageRecord = usage as unknown as Record<string, unknown>;
 		// #1071: attribute the shortfall in-process, from state this module already
 		// keeps, so nothing re-reads latency.log.
-		const attributionKey = sessionKey(context?.sessionId);
-		const state = attributionFor(attributionKey);
+		const stateKey = attributionKey(context?.sessionId, context?.sessionRole);
+		const state = attributionFor(stateKey);
 		const nowMs = Date.now();
 		const gap = resolveInterTurnGap(state, nowMs);
 		const interTurnGapMs = gap.gapMs;
 		const ttlMs = getProviderCacheTtlMs();
+		const inputEvidence = readNumericEvidence(usageRecord, "input");
+		const outputEvidence = readNumericEvidence(usageRecord, "output");
+		const cacheReadEvidence = readNumericEvidence(usageRecord, "cacheRead");
+		const cacheWriteEvidence = readNumericEvidence(usageRecord, "cacheWrite");
+		let costEvidence: NumericEvidence;
+		try {
+			const cost = usageRecord.cost;
+			costEvidence =
+				cost === undefined
+					? { status: "absent" }
+					: cost && typeof cost === "object"
+						? readNumericEvidence(cost as Record<string, unknown>, "total")
+						: { status: "malformed" };
+		} catch {
+			costEvidence = { status: "malformed" };
+		}
+		const usageEvidenceFields: ReadonlyArray<
+			readonly [string, NumericEvidence]
+		> = [
+			["input", inputEvidence],
+			["output", outputEvidence],
+			["cacheRead", cacheReadEvidence],
+			["cacheWrite", cacheWriteEvidence],
+			["cost.total", costEvidence],
+		];
+		const malformedProviderUsageFields = usageEvidenceFields
+			.filter(([, evidence]) => evidence.status === "malformed")
+			.map(([field]) => field);
+		const providerUsageMalformed = malformedProviderUsageFields.length > 0;
+		const cacheRead = cacheReadEvidence.value;
+		const priorCacheReadValue = readableTokenCount(state.lastCacheRead);
+		// SAFETY: `msg` passed the AssistantMessageLike role check above; the
+		// record view backs only the guarded identity-field probes below, each
+		// re-validated by `identityEvidence` at its own boundary.
+		const messageRecord = msg as unknown as Record<string, unknown>;
+		const safeMessageField = (key: string): IdentityEvidence => {
+			try {
+				return identityEvidence(messageRecord[key]);
+			} catch {
+				return { status: "unavailable" };
+			}
+		};
+		const currentProvider = safeMessageField("provider");
+		const responseModel = safeMessageField("responseModel");
+		const currentModel =
+			responseModel.hash !== undefined
+				? responseModel
+				: safeMessageField("model");
+		const modelProviderEvidenceAvailable = Boolean(
+			currentProvider.hash &&
+			currentModel.hash &&
+			state.lastProviderIdentityHash &&
+			state.lastModelIdentityHash,
+		);
+		const modelProviderChanged = Boolean(
+			modelProviderEvidenceAvailable &&
+			(currentProvider.hash !== state.lastProviderIdentityHash ||
+				currentModel.hash !== state.lastModelIdentityHash),
+		);
 		const estimatedNewTokens = estimateTokens(
 			state.injectedCharsSinceLastUsage +
 				state.newTranscriptCharsSinceLastUsage,
 		);
 		const verdict = classifyCacheMiss({
-			cacheRead: u.cacheRead,
-			input: typeof u.input === "number" ? u.input : 0,
-			priorCacheRead: state.lastCacheRead,
+			cacheRead,
+			// Missing/malformed input cannot prove fresh-input pressure. The explicit
+			// malformed gate below also keeps every heuristic fail-closed.
+			input: inputEvidence.value ?? 0,
+			priorCacheRead: priorCacheReadValue,
 			interTurnGapMs,
+			gapBasis: gap.basis,
 			ttlMs,
 			prefixBroke: state.prefixBrokeSinceLastUsage,
+			prefixStable: state.prefixStableSinceLastUsage,
+			sequenceHashTruncated: state.sequenceHashTruncatedSinceLastUsage,
+			requestEvidenceIncomplete: state.requestEvidenceIncompleteSinceLastUsage,
+			stableSessionIdentity: sessionKey(context?.sessionId) !== NO_SESSION_KEY,
+			modelProviderChanged,
+			modelProviderEvidenceAvailable,
+			providerUsageMalformed,
 			estimatedNewTokens,
 			attributionCharsCapped: state.attributionCharsCapped,
 		});
-		const priorCacheRead =
-			typeof state.lastCacheRead === "number" ? state.lastCacheRead : null;
+		const unknownReason: CacheMissUnknownReason | undefined =
+			providerUsageMalformed
+				? "malformed-provider-usage"
+				: cacheRead === undefined
+					? "cache-read-unavailable"
+					: priorCacheReadValue === undefined && cacheRead === 0
+						? "no-prior-sample"
+						: verdict?.unknownReason;
+		recordCacheUsageSummary({
+			state,
+			cacheRead,
+			priorCacheRead: priorCacheReadValue,
+			verdict,
+			unknownReason,
+		});
+		const priorCacheRead = priorCacheReadValue ?? null;
 		const injectedCharsSinceLastTurn = state.injectedCharsSinceLastUsage;
 		const newTranscriptCharsSinceLastTurn =
 			state.newTranscriptCharsSinceLastUsage;
@@ -816,11 +1233,13 @@ export function logCacheUsage(
 		// Clear the stored one rather than keeping it: the next turn's gap would be
 		// one turn long while its baseline was two turns old, and a verdict built
 		// on that mismatch is worse than no verdict (#1071 review round 1, F4).
-		state.lastCacheRead =
-			typeof u.cacheRead === "number" && Number.isFinite(u.cacheRead)
-				? u.cacheRead
-				: undefined;
+		state.lastCacheRead = cacheRead;
+		state.lastProviderIdentityHash = currentProvider.hash;
+		state.lastModelIdentityHash = currentModel.hash;
 		state.prefixBrokeSinceLastUsage = false;
+		state.prefixStableSinceLastUsage = false;
+		state.sequenceHashTruncatedSinceLastUsage = false;
+		state.requestEvidenceIncompleteSinceLastUsage = false;
 		state.injectedCharsSinceLastUsage = 0;
 		state.newTranscriptCharsSinceLastUsage = 0;
 		state.attributionCharsCapped = false;
@@ -834,14 +1253,21 @@ export function logCacheUsage(
 			phase: "cache_usage",
 			durationMs: 0,
 			metadata: {
-				provider: typeof msg.provider === "string" ? msg.provider : undefined,
-				model: typeof msg.model === "string" ? msg.model : undefined,
-				cacheRead: u.cacheRead,
-				cacheWrite: u.cacheWrite,
-				input: u.input,
-				output: u.output,
+				provider: currentProvider.display,
+				model: currentModel.display,
+				providerIdentityHash: currentProvider.hash,
+				modelIdentityHash: currentModel.hash,
+				providerIdentityStatus: currentProvider.status,
+				modelIdentityStatus: currentModel.status,
+				providerIdentityTruncated: currentProvider.status === "truncated",
+				modelIdentityTruncated: currentModel.status === "truncated",
+				cacheRead: cacheReadEvidence.value ?? null,
+				cacheWrite: cacheWriteEvidence.value ?? null,
+				input: inputEvidence.value ?? null,
+				output: outputEvidence.value ?? null,
 				// `Usage.cost` is a breakdown object; the total is the headline number.
-				cost: u.cost?.total,
+				cost: costEvidence.value ?? null,
+				providerUsageMalformedFields: malformedProviderUsageFields,
 				// Idle milliseconds before this turn's request, or null for the first
 				// record in the session. This is the field the 2026-08-21
 				// investigation had to reconstruct by hand-joining timestamps.
@@ -851,6 +1277,8 @@ export function logCacheUsage(
 				// the explicit no-local-explanation verdict.
 				cacheMissCause: verdict?.cause ?? null,
 				cacheMissKind: verdict?.kind ?? null,
+				cacheMissUnknownReason: unknownReason ?? null,
+				modelProviderChanged,
 				cacheTtlThresholdMs: ttlMs,
 				priorCacheRead,
 				injectedCharsSinceLastTurn,
@@ -927,9 +1355,10 @@ const MAX_TRACKED_SESSIONS = 32;
 const prefixHashBySession = new Map<string, string>();
 
 /**
- * Bucket key used when no session id is available (undefined/empty). Degrades
- * gracefully to the old single-var semantics — one shared baseline — rather than
- * throwing or dropping the signal.
+ * Reported key used when no session id is available (undefined/empty). Internal
+ * attribution additionally separates primary and concurrent-secondary roles;
+ * neither role may overwrite the other's baseline when stable identity is
+ * absent.
  */
 const NO_SESSION_KEY = "<no-session>";
 
@@ -962,10 +1391,10 @@ function recordSessionHash(key: string, hash: string): void {
  * baseline. (`runtime.telemetrySessionId` cannot be used here: per the #473
  * guard a concurrent secondary skips `updateRuntimeIdentityFromEvent`, so that
  * process-global singleton stays pinned to the PARENT — it would collapse
- * parent and subagent onto one baseline.) Residual limitation: if the host ever
- * does NOT supply a stable id, all such sessions collapse onto `NO_SESSION_KEY`
- * and behave like the old single-var (a concurrent subagent could then still
- * cross-contaminate) — accepted as graceful degradation, not silently perfect.
+ * parent and subagent onto one baseline.) If the host does NOT supply a stable
+ * id, primary and secondary roles still use separate fallback buckets, but
+ * multiple same-role sessions cannot be correlated. Miss attribution therefore
+ * fails closed with `request-correlation-unavailable`.
  *
  * Does nothing on an empty transcript (nothing to anchor a prefix to yet).
  */
@@ -980,13 +1409,16 @@ export function observeCachePrefix(
 		if (!messages || messages.length === 0) return "empty";
 		const first = messages[0];
 		if (!first || typeof first !== "object") return "empty";
-		const key = sessionKey(sessionId);
+		const key = attributionKey(sessionId, sessionRole);
+		const reportedSessionId = sessionKey(sessionId);
 		const currentHash = hashFirstMessage(first);
 		const previousHash = prefixHashBySession.get(key);
+		const state = attributionFor(key);
 		if (previousHash === undefined) {
 			// Baseline: record this session's starting prefix so a later break has a
 			// reference point in the log. `previousHash: null` marks the baseline.
 			recordSessionHash(key, currentHash);
+			state.prefixStableSinceLastUsage = true;
 			logLatency({
 				type: "phase",
 				filePath: "<pi-lens>",
@@ -999,7 +1431,7 @@ export function observeCachePrefix(
 					previousHash: null,
 					currentHash,
 					baseline: true,
-					sessionId: key,
+					sessionId: reportedSessionId,
 					sessionRole,
 				},
 			});
@@ -1008,7 +1440,8 @@ export function observeCachePrefix(
 		if (currentHash !== previousHash) {
 			// #1071: arm the direct-cause flag the next `cache_usage` verdict reads.
 			// A locally observed prefix change outranks the timing heuristics.
-			attributionFor(key).prefixBrokeSinceLastUsage = true;
+			state.prefixBrokeSinceLastUsage = true;
+			state.prefixStableSinceLastUsage = false;
 			logLatency({
 				type: "phase",
 				filePath: "<pi-lens>",
@@ -1020,10 +1453,13 @@ export function observeCachePrefix(
 						: { turnIndex, turnScope: PROCESS_TURN_SCOPE }),
 					previousHash,
 					currentHash,
-					sessionId: key,
+					sessionId: reportedSessionId,
 					sessionRole,
 				},
 			});
+		}
+		if (currentHash === previousHash) {
+			state.prefixStableSinceLastUsage = true;
 		}
 		// Refresh recency (and update the stored hash after a break) so an active
 		// session stays warm in the LRU and isn't evicted while still in use.
@@ -1036,18 +1472,53 @@ export function observeCachePrefix(
 }
 
 /**
- * Drop a single session's prefix baseline. Called from the `session_shutdown`
- * handler (primary path only — the concurrent-secondary guard there returns
- * first, and the LRU cap backstops any secondary entry left behind) so an ended
- * conversation's entry is reclaimed promptly rather than only when the LRU
- * evicts it. Idempotent and never throws.
+ * Drop a single session's prefix baseline and attribution state. Called from
+ * both role-specific `session_shutdown` paths so an ended conversation is
+ * reclaimed promptly rather than only when the LRU evicts it. Idempotent and
+ * never throws.
  */
-export function clearCachePrefixSession(sessionId?: string): void {
-	const key = sessionKey(sessionId);
+export function clearCachePrefixSession(
+	sessionId?: string,
+	sessionRole?: "primary" | "concurrent-secondary",
+): void {
+	const key = attributionKey(sessionId, sessionRole);
 	prefixHashBySession.delete(key);
 	// The miss-attribution state has the same lifetime and the same reason to be
 	// reclaimed at session end; leaving it would let a reused session id inherit
 	// a stale gap baseline and a stale prefix-break flag.
+	attributionBySession.delete(key);
+}
+
+/**
+ * Emit one bounded session summary and retire its attribution state. The
+ * summary contains fixed-key counters only; it never serializes transcript or
+ * context content. A session with no usage records emits nothing.
+ */
+export function emitCacheUsageSummaryAtSessionEnd(
+	sessionId?: string,
+	sessionRole?: "primary" | "concurrent-secondary",
+): void {
+	const key = attributionKey(sessionId, sessionRole);
+	const state = attributionBySession.get(key);
+	if (!state || state.summary.usageRecords === 0) return;
+	logLatency({
+		type: "phase",
+		filePath: "<pi-lens>",
+		phase: "cache_usage_summary",
+		durationMs: 0,
+		metadata: {
+			version: 1,
+			sessionId: sessionKey(sessionId),
+			sessionRole,
+			usageRecords: state.summary.usageRecords,
+			cacheHits: state.summary.cacheHits,
+			missObservations: state.summary.missObservations,
+			cacheMissCauses: { ...state.summary.cacheMissCauses },
+			unknownEvidenceReasons: {
+				...state.summary.unknownEvidenceReasons,
+			},
+		},
+	});
 	attributionBySession.delete(key);
 }
 
