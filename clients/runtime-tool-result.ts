@@ -3,6 +3,12 @@ import * as nodeFs from "node:fs";
 import * as path from "node:path";
 import { noteAuthoritativeContentAttachment } from "./agent-nudge.js";
 import {
+	captureFileStats,
+	diffFileStats,
+	getOpaqueSnapshotStore,
+} from "./opaque-mutation-scan.js";
+import { normalizeMapKey } from "./path-utils.js";
+import {
 	extractReadPathsFromCommand,
 	extractDeletedPathsFromCommand,
 	extractGrepSearchReadsFromOutput,
@@ -115,6 +121,8 @@ interface ToolResultDeps {
 	 * Do not pass from external callers.
 	 */
 	_bypassDebounce?: boolean;
+	/** #2000: overrides the change-log source for this synthetic dispatch. */
+	_mutationSourceOverride?: ProjectChangeSource;
 	/** Internal bounded provenance carried through debounce/coalescing. */
 	_telemetryParticipantIds?: string[];
 	_telemetryParticipantTotal?: number;
@@ -540,15 +548,55 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 		typeof (event.input as { command?: unknown }).command === "string"
 	) {
 		const command = (event.input as { command: string }).command;
-		const written = extractWrittenPathsFromCommand(
-			command,
-			workspaceRoot,
-		).filter(
-			(wp) =>
-				event.isError !== true &&
-				!isExternalOrVendorFile(wp, workspaceRoot) &&
-				!isPathIgnoredByProject(wp, workspaceRoot, false),
-		);
+		const recognized = extractWrittenPathsFromCommand(command, workspaceRoot);
+		// #2000 phase 2: when the extractor recognizes NOTHING, the command is
+		// opaque-candidate — recover its actual changed set by diffing the pre
+		// snapshot taken at tool_call. Partial writes that landed before a
+		// nonzero exit ARE attributed (the files changed and the agent authored
+		// them) — a deliberate divergence from the isError filter above, which
+		// exists for restore semantics where attribution would lie.
+		let opaquePaths: string[] = [];
+		if (recognized.length === 0 && workspaceRoot && !getFlag("no-read-guard")) {
+			const scanRoot = workspaceRoot;
+			const started = Date.now();
+			const outcome = await captureFileStats(scanRoot);
+			const pending = getOpaqueSnapshotStore().take(
+				`${normalizeMapKey(path.resolve(scanRoot))}:${runtime.sessionGeneration}`,
+			);
+			if (pending && !outcome.unknownReason) {
+				opaquePaths = diffFileStats(pending, outcome.snapshot ?? new Map());
+			} else {
+				logLatency({
+					type: "phase",
+					phase: "opaque_mutation_coverage_unknown",
+					filePath: command.slice(0, 80),
+					durationMs: Date.now() - started,
+					result:
+						outcome.unknownReason ?? (pending ? "ok" : "no-pending-snapshot"),
+				});
+			}
+			if (opaquePaths.length > 0) {
+				logLatency({
+					type: "phase",
+					phase: "opaque_mutation_recovered",
+					filePath: opaquePaths.slice(0, 5).join(","),
+					durationMs: Date.now() - started,
+					result: `changed:${opaquePaths.length}`,
+				});
+			}
+		}
+		// wp iterates opaquePaths VERBATIM (already normalizeMapKey keys), so the
+		// set must hold those exact strings - no re-resolution.
+		const opaqueSet = new Set(opaquePaths);
+		const written = [
+			...recognized.filter(
+				(wp) =>
+					event.isError !== true &&
+					!isExternalOrVendorFile(wp, workspaceRoot) &&
+					!isPathIgnoredByProject(wp, workspaceRoot, false),
+			),
+			...opaquePaths,
+		];
 		for (const wp of written) {
 			if (!getFlag("no-read-guard")) deps.readGuard?.recordWritten(wp);
 			const receipt = (runtime as Partial<RuntimeCoordinator>)
@@ -556,12 +604,16 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 			const autofixMode = receipt
 				? receipt.call(runtime, wp, "write").autofixMode
 				: "immediate";
+			// Recovered opaque writes carry their own source so the change log
+			// distinguishes them from parsed writes (auditable in production).
+			const isOpaque = opaqueSet.has(wp);
 			const syntheticResult = await handleToolResult({
 				...deps,
 				event: { ...event, toolName: "write", input: { path: wp } },
 				_bypassDebounce: true,
 				_autofixMode: autofixMode,
 				_attachmentBudget: syntheticAttachmentBudget,
+				_mutationSourceOverride: isOpaque ? "opaque-script" : undefined,
 			});
 			if (syntheticResult) {
 				// #1590: forward verbatim. The synthetic call already charged the
@@ -902,7 +954,9 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 		runtime,
 		cwd: turnStateCwd,
 		filePath,
-		source: sourceForToolName(event.toolName, event.details),
+		source:
+			deps._mutationSourceOverride ??
+			sourceForToolName(event.toolName, event.details),
 		changedRange: singleRange(modifiedRanges),
 		dbg,
 	});
