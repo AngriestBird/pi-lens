@@ -88,6 +88,11 @@ import * as formattersModule from "../../clients/formatters.js";
 import { resetZizmorTokenAvailability } from "../../clients/zizmor-config.js";
 import * as zizmorConfigModule from "../../clients/zizmor-config.js";
 import {
+	isInSpawnTimeoutCooldown,
+	noteSpawnTimeout,
+	resetSpawnTimeoutCooldowns,
+} from "../../clients/spawn-timeout-cooldown.js";
+import {
 	consumeHostReadyDelayAnchor,
 	resetHostReadyDelayAnchorForTests,
 } from "../../clients/startup-timing.js";
@@ -535,6 +540,26 @@ export const SESSION_STATE_REGISTRY: SessionStateEntry[] = [
 		resetName: "resetLSPService",
 		reason:
 			"The service is torn down and rebuilt per session; this reset is also the seam that carries the sweep hold and TS-repair guard resets.",
+	},
+	{
+		id: "spawn-timeout-cooldown:latches",
+		module: "spawn-timeout-cooldown.ts",
+		state: "timedOutByCommand",
+		policy: "session_start",
+		resetName: "resetSpawnTimeoutCooldowns",
+		reason:
+			"#1995: a wedged command's post-timeout cooldown is session-scoped - a hot loop of edits must not hand the same .cmd shim a second budget, but a NEW session may retry because the executable or its environment may have changed.",
+		probe: {
+			arm: () => {
+				noteSpawnTimeout({
+					tool: "markdownlint",
+					command: "/pi-lens-probe-cmd",
+					phase: "lint",
+				});
+			},
+			isArmed: () => !isInSpawnTimeoutCooldown("/pi-lens-probe-cmd"),
+			reset: () => resetSpawnTimeoutCooldowns(),
+		},
 	},
 	{
 		id: "formatters:whichLatches",
