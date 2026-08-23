@@ -70,6 +70,50 @@ export function hasSpawnFailureKind(
 	);
 }
 
+/**
+ * #2010: derive teardown evidence from observed timestamps.
+ *
+ * Pure by design so every branch is deterministically unit-testable,
+ * including the natural-exit-at-budget-expiry race where the timeout
+ * callback arms a kill against an already-dead child.
+ *
+ * - No recorded kill start (the guard saw the child already dying), no
+ *   observed death at all, or death PREDATING the kill start: the child
+ *   left on its own -> "exited", ms 0. Claiming a kill we cannot
+ *   distinguish from a natural exit would be invented evidence.
+ * - Death observed after the kill started: "escalate-kill" when the
+ *   SIGKILL escalation fired, otherwise "killed-by-signal"; ms is the
+ *   observed gap (floor 0 - clock jitter must never produce a negative).
+ */
+export function resolveTeardownOutcome(input: {
+	killStartedAtMs?: number;
+	deathObservedAtMs?: number;
+	escalated: boolean;
+}):
+	| {
+			ms: number;
+			outcome: "exited" | "killed-by-signal" | "escalate-kill";
+	  }
+	| undefined {
+	// Another path (abort / output-limit) owns this death: emitting teardown
+	// evidence here would describe a kill this timeout didn't perform.
+	if (
+		input.killStartedAtMs === undefined ||
+		input.deathObservedAtMs === undefined
+	) {
+		return undefined;
+	}
+	// True natural-exit race: the child beat the budget-expired kill by a
+	// hair - death observed before (or exactly at) the kill start.
+	if (input.deathObservedAtMs <= input.killStartedAtMs) {
+		return { ms: 0, outcome: "exited" };
+	}
+	return {
+		ms: Math.max(0, input.deathObservedAtMs - input.killStartedAtMs),
+		outcome: input.escalated ? "escalate-kill" : "killed-by-signal",
+	};
+}
+
 export interface SpawnResult {
 	stdout: string;
 	stderr: string;
@@ -86,6 +130,23 @@ export interface SpawnResult {
 	spawnFailure?: SpawnFailureError;
 	/** Structured failure reason; nonzero exit statuses are not spawn failures. */
 	failure?: SpawnFailureKind;
+	/**
+	 * #2010: how the process tree died after the spawn's OWN timeout budget
+	 * expired - present on that path only. `ms` is wall-clock from budget
+	 * expiry to observed tree death, measured separately from the budget so
+	 * a slow teardown is visible rather than folded into "how long the tool
+	 * ran". `outcome`: the child beat the signal ("exited"), the first
+	 * signal ended it ("killed-by-signal"), or the SIGKILL escalation fired
+	 * ("escalate-kill"). Platform note: on Windows taskkill /F is always
+	 * forceful and arms no escalation timer, so "escalate-kill" is
+	 * POSIX-only; forced Windows kills report "killed-by-signal" despite no
+	 * signal being delivered - the name describes the semantic tier
+	 * (first-tier vs escalated force), not the OS mechanism.
+	 */
+	timeoutTeardown?: {
+		ms: number;
+		outcome: "exited" | "killed-by-signal" | "escalate-kill";
+	};
 	/** True when stdout or stderr was capped before process completion. */
 	outputTruncated?: boolean;
 	/** Peak/average CPU%+RSS sampled across this spawn's lifetime (#620).
@@ -1109,6 +1170,15 @@ export async function safeSpawnAsync(
 		// a ref'd 1s timer that outlives the child it was escalating against
 		// would keep a one-shot `pi --print` process alive for up to 1s.
 		let escalationTimer: ReturnType<typeof setTimeout> | undefined;
+		let teardownStartedAtMs: number | undefined;
+		let teardownEscalated = false;
+		// #2010: teardown evidence for the spawn's OWN timeout. The wall clock
+		// starts when the budget expires and the tree-kill is issued, and stops
+		// when the process tree is observed dead (`await killPromise` settles)
+		// - measured SEPARATELY from the budget itself, so a slow teardown is
+		// visible instead of silently inflating "how long the tool ran".
+		// `teardownEscalated` names whether SIGTERM sufficed or the SIGKILL
+		// escalation fired (POSIX; Windows taskkill /F is always forceful).
 		// #1114: `child.killed` is set by Node the moment `kill()` successfully
 		// SENDS a signal, not when the child actually dies — so gating the
 		// escalation on `!child.killed` right after a successful `SIGTERM` send
@@ -1328,7 +1398,10 @@ export async function safeSpawnAsync(
 			} else {
 				child.kill("SIGTERM");
 				escalationTimer = setTimeout(() => {
-					if (!closed) child.kill("SIGKILL");
+					if (!closed) {
+						teardownEscalated = true;
+						child.kill("SIGKILL");
+					}
 				}, 1000);
 			}
 		};
@@ -1381,8 +1454,14 @@ export async function safeSpawnAsync(
 		// boolean here, before any await, means `waitForPipeIdle` can check
 		// "did close already happen" synchronously the moment it runs.
 		let closeSeen = false;
+		// #2010: WHEN death was observed - the stop-clock for teardown evidence
+		// and the discriminator for its outcome. A close that predates the
+		// budget-expired kill means the child exited on its own ("exited"), no
+		// matter that the timer callback raced and armed a kill anyway.
+		let closedAtMs: number | undefined;
 		child.on("close", () => {
 			closeSeen = true;
+			closedAtMs ??= Date.now();
 		});
 
 		// Timeout handling - KILL the process, don't just abandon it
@@ -1390,6 +1469,7 @@ export async function safeSpawnAsync(
 			timedOut = true;
 			if (!killed && !child.killed) {
 				killed = true;
+				teardownStartedAtMs = Date.now();
 				killPromise = killTree();
 			}
 		}, timeout);
@@ -1559,6 +1639,15 @@ export async function safeSpawnAsync(
 				const cause = new Error(
 					`Process timed out after ${timeout}ms (killed with ${signal || "SIGTERM"})`,
 				);
+				// #2010: teardown evidence lives ONLY on the timeout path - it
+				// describes how long the tree took to die after the budget
+				// expired, and how it died ("exited" = the child beat the signal;
+				// "killed-by-signal" / "escalate-kill" = how WE ended it).
+				const timeoutTeardown = resolveTeardownOutcome({
+					killStartedAtMs: teardownStartedAtMs,
+					deathObservedAtMs: closedAtMs,
+					escalated: teardownEscalated,
+				});
 				resolve({
 					stdout,
 					stderr,
@@ -1566,6 +1655,7 @@ export async function safeSpawnAsync(
 					error: cause,
 					failure: "timeout",
 					...signalInfo,
+					...(timeoutTeardown && { timeoutTeardown }),
 					spawnFailure: new SpawnFailureError("timeout", cause.message, cause),
 					...outputInfo,
 					resourceUsage,
