@@ -82,9 +82,15 @@ describe("verifyToolBinary (#2015)", () => {
 		// The writer IGNORES SIGTERM (#2027 round-1): surviving a soft group
 		// TERM proves the SIGKILL escalation reaches the group even after the
 		// direct child has exited.
+		// CodeQL js/bad-code-sanitization: the marker path is NOT interpolated
+		// into the generated code - writer.cjs derives it from its own
+		// __dirname (it lives in binDir), so no taint reaches the embedded
+		// source.
 		fs.writeFileSync(
 			writer,
-			`process.on('SIGTERM', () => {});setTimeout(() => require('fs').writeFileSync(${JSON.stringify(marker)}, 'survived'), 6000);`,
+			"process.on('SIGTERM', () => {});" +
+				"setTimeout(() => require('fs').writeFileSync(" +
+				"require('path').join(__dirname, 'grandchild-survived.marker'), 'survived'), 6000);",
 			"utf8",
 		);
 		// CodeQL js/bad-code-sanitization: strip every character cmd.exe / sh
