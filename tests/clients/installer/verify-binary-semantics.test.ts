@@ -79,15 +79,22 @@ describe("verifyToolBinary (#2015)", () => {
 		// safeSpawnAsync's tree-kill kills the whole tree -> no marker.
 		const marker = path.join(binDir, "grandchild-survived.marker");
 		const writer = path.join(binDir, "writer.cjs");
+		// The writer IGNORES SIGTERM (#2027 round-1): surviving a soft group
+		// TERM proves the SIGKILL escalation reaches the group even after the
+		// direct child has exited.
 		fs.writeFileSync(
 			writer,
-			`setTimeout(() => require('fs').writeFileSync(${JSON.stringify(marker)}, 'survived'), 6000);`,
+			`process.on('SIGTERM', () => {});setTimeout(() => require('fs').writeFileSync(${JSON.stringify(marker)}, 'survived'), 6000);`,
 			"utf8",
 		);
+		// CodeQL js/bad-code-sanitization: strip every character cmd.exe / sh
+		// treat as special so the interpolated paths are provably inert. Our
+		// mkdtemp paths already satisfy the allowlist, so behavior is unchanged.
+		const safeWriter = writer.replace(/[^A-Za-z0-9_\\/. :-]/g, "_");
 		const body =
 			process.platform === "win32"
-				? `start "" /b node "${writer}"\r\nping -n 4 127.0.0.1 >nul`
-				: `node "${writer}" &\nsleep 3`;
+				? `start "" /b node "${safeWriter}"\r\nping -n 4 127.0.0.1 >nul`
+				: `node "${safeWriter}" &\nsleep 3`;
 		const bin = writeShim("slow-tool", body);
 		const transient = vi.fn();
 		const started = Date.now();
@@ -98,16 +105,12 @@ describe("verifyToolBinary (#2015)", () => {
 		expect(transient).toHaveBeenCalledTimes(1);
 
 		// Poll past the grandchild's scheduled write (+6s): no marker = the
-		// whole TREE died with the budget. Windows asserts this (taskkill /T).
-		// POSIX: killPidTreeSync kills only the direct child today - the
-		// grandchild legitimately survives (#2026) - so scope the assertion
-		// to Windows until safe-spawn gains group-kill, and never let a known
-		// platform gap read as a flake.
-		if (process.platform === "win32") {
-			for (let waited = 0; waited < 7_000; waited += 250) {
-				await new Promise((r) => setTimeout(r, 250));
-				expect(fs.existsSync(marker)).toBe(false);
-			}
+		// whole TREE died with the budget. Asserted on BOTH platforms:
+		// Windows via taskkill /T, POSIX via #2026 group-kill (detached
+		// spawn + negative-pid signal).
+		for (let waited = 0; waited < 7_000; waited += 250) {
+			await new Promise((r) => setTimeout(r, 250));
+			expect(fs.existsSync(marker)).toBe(false);
 		}
 	}, 25_000);
 });
