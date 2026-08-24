@@ -79,6 +79,7 @@ const EXPECTED_SURFACE_IDS = [
 	"git-guard:commit-blocked",
 	"read-guard-tool-lines:preflight-errors",
 	"agent-behavior:thrashing-notice",
+	"tool-call:duplicate-export-blocker",
 ].sort();
 
 // ── Real seam scan (#1634 review F2) ────────────────────────────────────────
