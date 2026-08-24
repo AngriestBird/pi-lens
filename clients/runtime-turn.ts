@@ -74,6 +74,7 @@ import {
 import { knipIssuesToProjectDiagnostics } from "./project-diagnostics/runner-adapters/knip.js";
 import type { ProjectDiagnostic } from "./project-diagnostics/types.js";
 import { applyDispositionsMultiFile } from "./diagnostic-dispositions.js";
+import * as fs from "node:fs";
 import { logLatency } from "./latency-logger.js";
 import {
 	getLspBudgetIdleTimeoutMs,
@@ -1757,9 +1758,20 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				);
 			}
 		}
-		if (targets.length > 0) {
+		// #2028: existence-probe before firing. The candidate set can include
+		// paths whose conventional test file was deleted in a prior turn (the
+		// change-log retains both create and delete entries), producing
+		// "Test file not found" noise for tests that no longer exist.
+		const existingTargets = targets.filter((t) => fs.existsSync(t.testFile));
+		const droppedCount = targets.length - existingTargets.length;
+		if (droppedCount > 0) {
 			dbg(
-				`turn_end: firing ${targets.length} test target(s) async (non-blocking)`,
+				`turn_end: dropped ${droppedCount} test target(s) whose files no longer exist`,
+			);
+		}
+		if (existingTargets.length > 0) {
+			dbg(
+				`turn_end: firing ${existingTargets.length} test target(s) async (non-blocking)`,
 			);
 			const firedAtTurn = runtime.turnIndex;
 			const firedSessionId = runtime.telemetrySessionId;
@@ -1773,7 +1785,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 					path: candidate.abs,
 					role: "source" as const,
 				})),
-				...targets.map((target) => ({
+				...existingTargets.map((target) => ({
 					path: target.testFile,
 					role: "test" as const,
 				})),
@@ -1790,7 +1802,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				cwd,
 			);
 			Promise.allSettled(
-				targets.map((t) =>
+				existingTargets.map((t) =>
 					testRunnerClient.runTestFileAsync(
 						t.testFile,
 						cwd,
