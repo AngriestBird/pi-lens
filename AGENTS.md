@@ -1322,6 +1322,7 @@ All pi packages are `@earendil-works/*` (migrated from `@mariozechner/*` in 0.74
   - Verify a merge actually hit master before moving on: `git show origin/master:<file> | grep <new-symbol>` — not just the PR's "merged" badge.
 - **When told (or when you observe) that a PR merged, fast-forward local `master` immediately — don't ask first.** `git fetch origin master && git merge --ff-only origin/master` (check `git status --short` beforehand as usual; leave any unrelated stray modified files untouched). This is pre-authorized standing behavior, not a per-instance confirmation.
 - Lint gate is `tsc` (`npm run lint`); the repo has **no biome config or CI biome gate**, so biome's default formatting is *not* enforced — don't repo-wide reformat. Run the full suite (`npm test`) before pushing; `npm run build` first if stale JS may shadow source edits.
+- **Format gate is `oxfmt` (`npm run fmt:check`) and it must run before EVERY commit and push.** The deferred-format lane drains at `agent_end`, so a violation pushed MID-TURN escapes ahead of the formatter and reds the CI advisory (seen repeatedly 2026-08-23/24: three pushes raced the drain). Files written by scripts (bash/python heredocs) are especially exposed — write tools on Windows emit CRLF that oxfmt rejects as mixed EOL. If you skip hooks on a push (`PI_LENS_SKIP_HOOKS=1`), run `fmt:check` manually anyway.
 
 ## Issue triage (standing rule)
 
