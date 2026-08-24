@@ -553,6 +553,12 @@ export const DELIVERY_SURFACES: Record<string, DeliverySurfaceEntry> = {
 			"no cached findings are replayed, so there is no staleness window.",
 		"live",
 	),
+	"tool-call:duplicate-export-blocker": labeled(
+		"clients/runtime-tool-call.ts",
+		"Duplicate-export STOP rejection returned inline with the failed edit.",
+		"Synchronous preflight rejection computed per edit attempt; no stored state.",
+		"live",
+	),
 	"agent-behavior:thrashing-notice": labeled(
 		"clients/agent-behavior-client.ts",
 		"In-result thrashing/blind-write detection notice.",
