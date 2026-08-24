@@ -702,7 +702,9 @@ describe("github strategy", () => {
 			if ((args ?? []).includes("--version")) {
 				return { stdout: "", stderr: "cannot execute", status: 126 };
 			}
-			return baseSpawn?.(command, args) ?? { stdout: "1.2.3", stderr: "", status: 0 };
+			return (
+				baseSpawn?.(command, args) ?? { stdout: "1.2.3", stderr: "", status: 0 }
+			);
 		});
 
 		const outcome = await runManagedToolRefresh(NOW);

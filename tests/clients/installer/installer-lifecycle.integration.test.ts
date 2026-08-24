@@ -159,35 +159,45 @@ describe("installer process lifecycle (#945)", () => {
 		REAL_PROCESS_TIMEOUT_MS,
 	);
 
-	it("serializes two processes so exactly one package-manager install runs", async () => {
-		const root = tempDir();
-		const home = path.join(root, "home");
-		const { counter, script } = writeFakeNpm(root);
-		const env = testEnv(home, counter, script);
-		const results = await Promise.all([runEnsure(env), runEnsure(env)]);
-		expect(results.map((result) => result.code)).toEqual([0, 0]);
-		expect(fs.existsSync(counter), JSON.stringify(results)).toBe(true);
-		expect(fs.readFileSync(counter, "utf8").trim().split(/\r?\n/)).toHaveLength(
-			1,
-		);
-		expect(results.every((result) => /oxlint/.test(result.stdout))).toBe(true);
-	}, REAL_PROCESS_TIMEOUT_MS);
+	it(
+		"serializes two processes so exactly one package-manager install runs",
+		async () => {
+			const root = tempDir();
+			const home = path.join(root, "home");
+			const { counter, script } = writeFakeNpm(root);
+			const env = testEnv(home, counter, script);
+			const results = await Promise.all([runEnsure(env), runEnsure(env)]);
+			expect(results.map((result) => result.code)).toEqual([0, 0]);
+			expect(fs.existsSync(counter), JSON.stringify(results)).toBe(true);
+			expect(
+				fs.readFileSync(counter, "utf8").trim().split(/\r?\n/),
+			).toHaveLength(1);
+			expect(results.every((result) => /oxlint/.test(result.stdout))).toBe(
+				true,
+			);
+		},
+		REAL_PROCESS_TIMEOUT_MS,
+	);
 
-	it("reports disabled installation and never spawns the package manager", async () => {
-		const root = tempDir();
-		const home = path.join(root, "home");
-		const { counter, script } = writeFakeNpm(root);
-		const result = await runEnsure({
-			...testEnv(home, counter, script),
-			PI_LENS_DISABLE_TOOL_INSTALL: "1",
-		});
-		expect(result.code).toBe(0);
-		const payload = JSON.parse(result.stdout) as { reason?: string };
-		expect(payload.reason).toBe(
-			"installation disabled by PI_LENS_DISABLE_TOOL_INSTALL=1",
-		);
-		expect(fs.existsSync(counter)).toBe(false);
-	}, REAL_PROCESS_TIMEOUT_MS);
+	it(
+		"reports disabled installation and never spawns the package manager",
+		async () => {
+			const root = tempDir();
+			const home = path.join(root, "home");
+			const { counter, script } = writeFakeNpm(root);
+			const result = await runEnsure({
+				...testEnv(home, counter, script),
+				PI_LENS_DISABLE_TOOL_INSTALL: "1",
+			});
+			expect(result.code).toBe(0);
+			const payload = JSON.parse(result.stdout) as { reason?: string };
+			expect(payload.reason).toBe(
+				"installation disabled by PI_LENS_DISABLE_TOOL_INSTALL=1",
+			);
+			expect(fs.existsSync(counter)).toBe(false);
+		},
+		REAL_PROCESS_TIMEOUT_MS,
+	);
 
 	it("ordinary Vitest execution has tool installation disabled", () => {
 		expect(process.env.PI_LENS_DISABLE_TOOL_INSTALL).toBe("1");
