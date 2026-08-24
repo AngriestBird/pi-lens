@@ -138,7 +138,7 @@ export function logTreeSitterDiagnostic(entry: {
 		...(entry.languageId ? { languageId: entry.languageId } : {}),
 		status: entry.level ?? "error",
 		reason: entry.message,
-		metadata: { subsystem: entry.subsystem, ...(entry.metadata ?? {}) },
+		metadata: { subsystem: entry.subsystem, ...entry.metadata },
 	});
 }
 

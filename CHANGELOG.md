@@ -16,7 +16,7 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Security
 
-## [4.1.1] - 2026-08-21
+## [4.1.2] - 2026-08-24
 
 ### Added
 
@@ -43,6 +43,52 @@ All notable changes to pi-lens will be documented in this file.
   `npm install` on error.
 
 - **latency.log now says whether the LSP pool reused a client or spawned one (closes #1934)** — `lsp_client_selected` fired 5601 times in a 20.8h dogfood window carrying only `{serverId, candidateCount}`, so nothing in the log said whether the pool served a warm client or paid for a language-server spawn. This is the most expensive cache in pi-lens: a miss costs a process. The only estimate was a cross-record inference against `lsp_launch_candidate_success`, which counts something else, so a regression that halved pool reuse was invisible. The record now carries an `outcome` field with one of three values on the same record and the same denominator. `warm-reuse` means the pool served an already-connected client. `cold-spawn` means this selection waited on a spawn, whether it started that spawn or joined one already in flight, so a session-start burst where many files wait on the same spawn reads as several cold spawns and deflates the apparent reuse rate for that window. `spawn-failure` means a spawn ran and failed. Reuse rate is `warm-reuse / (warm-reuse + cold-spawn)`. A spawn failure is deliberately distinct from a clean decline: no root, a breaker already open, host trust refused, or a binary absent while installs are disabled. Declines emit no outcome record and keep their existing ones, so `lsp_client_unavailable` and the `outcome` field can both describe the same event and are counted separately. `getWarmClientForFile`, the warm-only lookup the cascade quiet window and read expansion call per file, previously returned `undefined` and emitted nothing; it now emits a bounded `lsp_warm_client_missing` record naming the candidate server and root, rising-edge per candidate set with the exact count in the degradation ledger.
+
+- **Dogfood sessions on pi-lens's own repo now activate the oxlint, spellcheck, yamllint, and taplo runner lanes (refs #1844)** — four new root config files (`.oxlintrc.json`, `typos.toml`, `.yamllint`, `taplo.toml`) opt pi-lens's own repository into linters it already ships for every other project. `.oxlintrc.json` pins `oxlint` as a new exact-version devDependency (1.79.0, matching the runner's tested fixture), makes oxlint this repo's sole preferred JS/TS lint runner (dropping the `biome-check-json` fallback — that IS the dogfood intent), and excludes the fixture directories that carry no config override of their own; oxlint's nested-config discovery still finds the two fixture directories that deliberately escalate severity for the runner's own smoke tests, so those stay as they are. The oxlint runner also now tells a config-excluded file (`number_of_files: 0`) apart from a genuinely clean one, reporting `skipped` instead of a false `succeeded`. `typos.toml` allowlists evidenced false positives (a routine "mis-" prefix, HashiCorp's brand abbreviation, and similar); its presence enables typos-lsp's blocking opt-in, but findings stay advisory in practice since typos-lsp's own default diagnostic severity is warning. `.yamllint` scopes yamllint to hand-authored YAML (GitHub Actions workflows, top-level config), downgrades line-length to a warning rather than raising its threshold, and defuses the `on:` truthy false positive. `taplo.toml` activates both the TOML linter and the `taplo fmt` autofix formatter, and this PR runs that formatter once so activation doesn't start the lane red. Markdown linting was already live via the pre-existing `.markdownlint-cli2.jsonc` (since #1917) — confirmed with a real `markdownlint-cli2` run, no new config needed.
+
+- **Memory-sample observability upgrades (refs #1999)** — The periodic
+  `memory_sample` latency.log line gains three fields. `peakWorkingSetBytes`
+  records the OS high-water working set from `process.resourceUsage().maxRSS`,
+  so an idle-moment rss sample can be told apart from true growth (on Windows
+  libuv backs both counters with one `GetProcessMemoryInfo()` call: rss reads
+  current `WorkingSetSize`, maxRSS reads `PeakWorkingSetSize`). A rising-edge
+  cadence tightens sampling from every 10 turns to every turn while heapUsed
+  grows more than 20% between samples, reverting once growth stabilizes; the
+  state resets at each primary session start. Each sample now also carries
+  session age, session start time, and turn count, so growth-vs-age curves are
+  plottable from logs alone. The `/lens-health` memory line shows peak WS when
+  known.
+
+- **Opaque-write recovery for bash commands (refs #2000 phase 2)** — commands the path extractor does not recognize (python/node/perl/PowerShell internal writes) now get a bounded pre/post stat diff of the project source universe. Recovered files are attributed to the read guard as agent-authored and dispatched through the mutation seam, with explicit coverage-unknown telemetry instead of silent gaps.
+
+- **Collect-later delivery for slow auxiliary LSP servers (closes #2001, refs #2002)** —
+  When an auxiliary scanner such as opengrep misses its aux-grace window,
+  pi-lens now marks the file and server pair in a bounded pending store
+  instead of dropping the scanner's eventual findings. The next turn end
+  probes the auxiliary's client cache through a read-only seam,
+  freshness-gates the result against the mark timestamp, and delivers
+  survivors as a `Late auxiliary diagnostics` advisory. A cited file that was
+  edited or deleted since the mark drops its findings, and both drop arms are
+  counted in the new `late_auxiliary_findings` latency record.
+
+- **Freshness kernel: one comparator, one verdict type for staleness gates (closes #1739)** — `clients/freshness.ts` owns the mtime-vs-reference comparison and shared drift tolerance that six stores had independently reimplemented (three copies carried the identical #1710/#1711 tolerance defect). `freshnessFromMtime` returns an explicit verdict (`fresh` / `stale: modified-after-reference` / `indeterminate: no-mtime-evidence`) so each caller keeps its own no-evidence policy while sharing the comparison. A registered-or-fail sweep fails on any new out-of-kernel mtime-vs-reference comparison in `clients/`.
+
+- **Shared fault-injection test kit (closes #1838)** — `tests/support/fault-injection.ts` promotes the bespoke fault probes reviewers kept rebuilding by hand into four one-call primitives: `spawnWedgedChild` (a real child whose stdin pipe is genuinely full — the #1811 fixture generalized, with its fail-fast-instead-of-hang trap asserted against), `delayInside` (deterministic completion delay inside any mocked async seam), `fireResetAt` (fire a lifecycle hook from inside a seam's implementation at a chosen call — the #1746-R2-F1 shape), and `starveBudget` plus `gatedPromise` (the tiny-budget starvation repro). Every primitive carries its own fidelity test in `fault-injection.test.ts`, so a neutered primitive goes red in CI instead of silently weakening every consumer.
+
+- **Adversarial garbage battery for every CLI lint runner (closes #1839)** — Twenty runners now meet a 12-case battery of hostile outputs (truncated JSON, usage prose on the findings stream, unknown severities, hostile numbers) under format-blind invariants: never crash, never emit malformed diagnostics, never report clean on a nonzero exit carrying bytes. The first pass found 79 violations of that last invariant across 14 runners — all fixed by consolidating their identical tails onto one shared `finishParsedRun` seam. Also fixes htmlhint's `--rules` flag being fed JSON (the tool wants a ruleid list), which left zero rules enabled so every file read clean.
+
+### Changed
+
+- **pi-lens formats its own TypeScript with oxfmt (refs #1844)** — The
+  repository now carries an `.oxfmtrc.json` and an `oxfmt` devDependency, and
+  an advisory `oxfmt --check` job runs in CI. Because `hasOxfmtConfig` gates
+  the oxfmt formatter on exactly that config file, a pi-lens session opened on
+  this repository now dispatches oxfmt as the format runner for edited
+  TypeScript and JavaScript files.
+
+- **Opaque-write recovery goes git-first (refs #2000)** — inside a git worktree the pre side records only a timestamp and `git status --porcelain` plus an mtime window answers what changed, with no file-universe cap: recovery now works on any repo size, including large monorepos where the stat-walk previously degraded every command to coverage-unknown. The bounded stat-diff path remains for small non-git trees.
+
+- **ONE mutation seam: `RuntimeCoordinator.recordProjectMutation` (refs #2000 phase 1)** — the triplicated bump+change-log pairing (runtime-tool-result, runtime-agent-end, lsp-mutation) is consolidated onto one seam that bumps the seq store, appends a bounded attributed receipt ring (`getMutationsSince`, cap 512 with a surfaced dropped-count), and appends the durable change-log entry. Consumers derive touched-files answers from one store instead of three hand-copied pairings; phase 2's opaque-write recovery feeds the same seam.
 
 ### Fixed
 
@@ -105,6 +151,55 @@ All notable changes to pi-lens will be documented in this file.
 - **Log writer reopens and retries once on a failed write instead of dropping records silently (refs #1970)** — `ndjson-logger.ts` is the shared write-plumbing behind every NDJSON sink (`latency.log`, `extension.log`, `tree-sitter.log`, `cascade.log`, `word-index.log`, `review-graph.log`, and any other `createNdjsonLogger` caller). This hardens the sink against reachable `appendFile` failures (ENOENT after the parent directory is deleted, EBUSY/EPERM under a syncing OneDrive folder or antivirus lock, EMFILE, ENOSPC) — the specific `ERR_STREAM_DESTROYED` reports that motivated this issue were root-caused to a different process's persistent-stream logger, not this sink, but the reachable-failure classes above land here today with no recovery and no observability. A write that throws now gets one reopen-and-retry (re-verify the parent directory, then retry the write once) before it counts as a loss, matching the `pi-analyze#15` shape. An unrecovered write is counted in a per-sink, in-memory tally (`writeFailures`) rather than thrown or silently discarded, and `degradation-ledger.ts` folds that tally into `getDegradationSummary()` at READ time under a new `log-sink-write-failure` kind — so `pilens_health` names the sink and the dropped-write count. The fold happens by reading ndjson-logger's own tally, never by writing a durable ledger row back through the sink that just failed, so a permanently dead sink cannot recurse into an unbounded chain of self-reporting writes. The tally resets alongside the rest of the ledger at `session_start`.
 
 - **Warmup and workspace-scan walkers gate by file extension before consulting the ignore matcher, cutting a 31.7s stall to sub-second on repos with large ignored file piles (closes #1974, reported by @0xkite)** — `isIgnored` recompiles minimatch patterns per ancestor directory on every call; a runtime-output directory like `wal/` holding tens of thousands of `.log` files, gitignored only by a file-level `*.log` pattern (so the directory itself is never pruned), forced every one of those files through that cost. Six walkers checked `isIgnored` before their own cheap extension gate, paying the expensive check for files the gate would have dropped anyway: `collectSourceFilesForWarmup` (`language-profile.ts`, the reported 31.7s case), `JscpdClient.hasSourceFilesRecursive` (`jscpd-client.ts`), `classifyEntry` (`source-filter.ts`), `makeSourceCountVisitor` (`startup-scan.ts`), `getModuleSourceFiles` (`review-graph/workspace-modules.ts`), and `collectWorkspaceDiagnosticFiles` (`lsp/index.ts`). All six now run their extension (or LSP-server) gate first; output is unchanged, since both gates still have to pass to keep a file — only the order changed. A repo-wide sweep of all 14 files that call `isIgnored` found `tree-sitter-client.ts` and `tools/lsp-diagnostics.ts` already extension-first, and cleared the remaining per-event/no-ext-gate sites by construction; see the PR body for the full per-site table.
+
+- **oxfmt no longer fails on a file its own config ignores (refs #1844)** —
+  pi-lens offers oxfmt for every extension oxfmt supports, so in a project
+  whose oxfmt config carries `ignorePatterns`, oxfmt was selected for files it
+  then refused to touch. It exits 2 with "Expected at least one target file",
+  which the strict exit-code posture read as a formatting failure, so every
+  edit to an ignored file surfaced an error. pi-lens now passes
+  `--no-error-on-unmatched-pattern`, which makes an empty target set a clean
+  no-op. Every other nonzero exit, including an unparseable file, still fails.
+
+- **ESLint warnings are no longer discarded (closes #1954)** — The eslint runner treated every exit 0 as "nothing found". ESLint exits 0 whenever no rule reaches error severity, so a run that produced only warning-severity findings was thrown away silently. The runner now parses stdout unconditionally and surfaces the findings; a clean file still reports clean, and exit 2 stays an unavailable skip.
+
+- **Registered tools now always have descriptions in child/subagent sessions (closes #1988)** — the final registration boundary fills missing, empty, and
+  whitespace-only descriptions for active, lazy, activation, and wrapped tool
+  definitions.
+
+- **mode=full no longer replays stale mid-edit blockers (refs #1993)** — a confirmed, fully-covered LSP sweep is now authoritative for its files: widget-store diagnostics captured from a since-fixed broken intermediate state are retired instead of rendering as current 🔴 blockers beside a clean sweep. Unconfirmed or timed-out sweeps keep the fail-open behavior.
+
+- **Cache-miss attribution stays useful in long sessions (closes #1996)** — classify full model/provider identities and split unexplained or malformed cache evidence by bounded reason, with fail-closed request hashing, activation-owned primary/secondary isolation, sanitized numeric metadata, and a per-session cause summary.
+
+- **Project snapshots no longer rewrite unchanged same-generation bodies (closes #1997)** — Persistence now coalesces concurrent requests and computes semantic identity on its worker before gzip or staging. Same-generation content changes and failed-write repairs still publish.
+
+- **Classify oxlint no-match results as expected skips (closes #1998)**. Oxlint now carries `no-files-matched` through runner telemetry without emitting an extension error or claiming the file is clean. A single fail-closed state machine validates process completion, exit status, stderr, the captured banner, and every JSON summary field's type and range; truncated, malformed, wrong-status, or error-bearing lookalikes retain failure or unconfirmed telemetry.
+
+- **Project-snapshot persistence validates gzip body integrity before skipping (closes #2008)** —
+  The skip decision trusted the meta sidecar and a fingerprint match alone, so a torn or
+  truncated gzip under an intact meta kept winning unchanged-dedupe and stayed canonical until
+  the project sequence advanced. The meta sidecar now records the on-disk gz byte length
+  (`gzBytes`) at every successful persist, and the dedupe baselines compare it against a live
+  stat: a size mismatch, or a legacy meta without the field, withholds the dedupe fingerprints
+  so the pending save republishes and rewrites the body. A skip that would honor evidence
+  failing this gate between dispatch and promotion is refused and rewritten synchronously.
+  Detections emit one `project_snapshot_body_integrity` latency record plus a bounded
+  `snapshot-integrity` degradation-ledger entry per corrupted body path. The baselines read is
+  also now a pure read: its in-process seeding write moved to the single dispatch seam that
+  owns the persist lifecycle.
+
+- **Installer verify loop broken at the root (closes #2015)** — `verifyToolBinary` now spawns through `safeSpawnAsync` (tree-kill on timeout, typed kill-reason) instead of raw spawn whose SIGTERM orphaned grandchild node processes on Windows `.cmd` shims. A killed/inconclusive prober no longer counts as a verdict: the freshly installed binary is KEPT for cheap re-probe instead of deleted, ending the install/verify/reinstall churn (23 SIGTERMs and 4 cleanups observed in one day).
+
+- **Windows `.cmd`/`.bat` spawns no longer fail when System32 is absent from the child PATH (closes #2023)** — The cmd.exe wrapper prefixed every spawn
+  with a bare `chcp 65001 &&`. When the child environment's PATH could not
+  resolve `chcp.com`, the lookup failed and `&&` short-circuited, so the whole
+  spawn exited 1 with empty output. chcp is now invoked via its pinned
+  `%SystemRoot%\System32\chcp.com` absolute path and chained with `&`, so a
+  code-page failure can never suppress the real command.
+
+- **Register remaining agent-facing delivery surfaces (#2028)** — The per-edit 🔴 STOP block now drops blockers whose cited file no longer exists, so a deleted file's stale blocker no longer re-blocks the agent with no remediation. All five previously unregistered surfaces (stop blocker, `lsp_diagnostics` output, git-guard verdicts, read-guard preflight errors, thrashing notices) are registered in the finding-delivery gate registry.
+
+- **Wall-clock budget tests get a quiet serial phase (closes #1920)** — Five test files asserting real elapsed-time budgets ran inside the default project's fork storm, measuring scheduler contention instead of code speed (`startup-overhead` measured 659-2321ms against a 500ms budget under load, green solo every time). They now run in a dedicated fully-serialized `wall-clock-budget` Vitest project that phases dead last on a quiet host. A coverage guard keeps the new include list from silently dropping renamed files.
 
 ## [4.1.0] - 2026-08-20
 
