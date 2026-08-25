@@ -272,8 +272,37 @@ interface GitStatusEntry {
 	absPath: string;
 }
 
+const UNMERGED_PORCELAIN_STATUSES = new Set([
+	"DD",
+	"AU",
+	"UD",
+	"UA",
+	"DU",
+	"AA",
+	"UU",
+]);
+const ORDINARY_INDEX_STATUSES = new Set(["M", "A", "D", "R", "C", "T"]);
+const ORDINARY_WORKTREE_STATUSES = new Set(["M", "D", "T"]);
+
 function isUnmergedStatus(status: string): boolean {
-	return ["DD", "AU", "UD", "UA", "DU", "AA", "UU"].includes(status);
+	return UNMERGED_PORCELAIN_STATUSES.has(status);
+}
+
+/** Git status --porcelain v1 permits only these two-character XY pairs. */
+function isValidPorcelainV1Status(status: string): boolean {
+	if (status === "??" || status === "!!" || isUnmergedStatus(status)) {
+		return true;
+	}
+
+	const [indexStatus, worktreeStatus] = status;
+	if (!indexStatus || !worktreeStatus) return false;
+	if (indexStatus === " ") {
+		return ORDINARY_WORKTREE_STATUSES.has(worktreeStatus);
+	}
+	return (
+		ORDINARY_INDEX_STATUSES.has(indexStatus) &&
+		(worktreeStatus === " " || ORDINARY_WORKTREE_STATUSES.has(worktreeStatus))
+	);
 }
 
 /**
@@ -327,7 +356,7 @@ export async function recoverOpaqueChangesViaGit(
 		}
 		const status = token.slice(0, 2);
 		const relPath = token.slice(3);
-		if (!/^[ MADRCTU?!]{2}$/.test(status) || !relPath) {
+		if (!isValidPorcelainV1Status(status) || !relPath) {
 			return {
 				verdict: "unknown",
 				paths: [],
