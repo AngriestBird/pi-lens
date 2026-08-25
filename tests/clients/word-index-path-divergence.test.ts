@@ -25,7 +25,9 @@ import * as fs from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
 	buildWordIndex,
+	countWordIndexPostingEntries,
 	refreshWordIndexIncrementally,
+	serializeWordIndex,
 	updateWordIndexDocument,
 	wordIndexKey,
 } from "../../clients/word-index.js";
@@ -35,6 +37,38 @@ import { createTempFile, setupTestEnvironment } from "./test-utils.js";
 const NORMALIZER_FOLDS_CASE = wordIndexKey("A.ts") === wordIndexKey("a.ts");
 
 describe("word-index build/update key convergence (#1025 item #2)", () => {
+	it("serializes folded walk spellings without dropping postings", () => {
+		const index = buildWordIndex([
+			{ path: "walk\\alpha.ts", content: "foldedToken" },
+			{ path: "walk/alpha.ts", content: "foldedToken" },
+		]);
+		// Two walk spellings fold to one path key. Simulate the older producer's
+		// missing table row while retaining the folded walk entry.
+		index.fileTable.clear();
+		index.docLengths.clear();
+		index.docLengths.set("walk\\alpha.ts", 1);
+		// The serializer's spelling fallback must retain both in-memory entries.
+		const serializedEntries = serializeWordIndex(index).postings.reduce(
+			(total, [, flat]) => total + flat.length / 2,
+			0,
+		);
+		expect(serializedEntries).toBe(countWordIndexPostingEntries(index));
+	});
+
+	it("serializes folded walk spellings with the live file table intact", () => {
+		const index = buildWordIndex([
+			{ path: "walk\\alpha.ts", content: "firstWalkToken" },
+			{ path: "walk/alpha.ts", content: "secondWalkToken" },
+		]);
+		const serialized = serializeWordIndex(index);
+		const tokens = new Set(serialized.postings.map(([token]) => token));
+		expect(tokens.has("firstwalktoken")).toBe(true);
+		expect(tokens.has("secondwalktoken")).toBe(true);
+		expect(
+			serialized.postings.reduce((n, [, flat]) => n + flat.length / 2, 0),
+		).toBe(countWordIndexPostingEntries(index));
+	});
+
 	it("separator-divergent build vs edit forms collapse to one entry (all platforms)", () => {
 		// BUILD keys the doc with a backslash separator (as a Windows walk would).
 		const index = buildWordIndex([
