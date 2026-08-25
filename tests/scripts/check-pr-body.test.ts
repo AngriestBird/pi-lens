@@ -67,8 +67,46 @@ describe("PR body lint (#1844)", () => {
 		});
 	});
 
+	it("counts a fenced red-run transcript as Tests content", () => {
+		const transcript = body.replace(
+			"Targeted tests pass.",
+			"```text\nFAIL tests/scripts/check-pr-body.test.ts\n```",
+		);
+		expect(lintPrBody(transcript)).toMatchObject({ valid: true });
+	});
+
+	it("does not count a fenced heading as a required section", () => {
+		expect(
+			lintPrBody(
+				"Summary\nOpening context.\n\n```md\n## Tests\nquoted heading\n```\n\n## Blast radius\nNone.\n\n## Class sweep\nDone.\n\n## Observability\nRecorded.",
+			),
+		).toMatchObject({ valid: false });
+	});
+
+	it.each([
+		["unchecked", "- [ ] item", false],
+		["checked", "- [x] item", true],
+	])("handles %s-only sections", (_name, item, valid) => {
+		const result = lintPrBody(body.replace("Targeted tests pass.", item));
+		expect(result.valid).toBe(valid);
+	});
+
+	it("accepts H3 and H4 section headings", () => {
+		const h3 = body.replaceAll("## ", "### ");
+		expect(lintPrBody(h3)).toMatchObject({ valid: true });
+	});
+
+	it("keeps headings before an unterminated fence visible", () => {
+		const unclosed = body + "\n\n```text\nunterminated transcript";
+		expect(lintPrBody(unclosed)).toMatchObject({ valid: true });
+	});
+
 	it("guards null body input", () => {
-		expect(lintPrBody(null as unknown as string).valid).toBe(false);
+		const result = lintPrBody(null as unknown as string);
+		expect(result.valid).toBe(false);
+		expect(result.errors).toContain(
+			"PR body is missing a Summary section. See .github/PULL_REQUEST_TEMPLATE.md.",
+		);
 	});
 
 	it("accepts an opening paragraph instead of a Summary heading", () => {

@@ -14,7 +14,7 @@ const REQUIRED_SECTIONS = [
 	"Class sweep",
 	"Observability",
 ];
-const HEADING = /^##\s+(.+?)\s*$/;
+const HEADING = /^#{2,4}\s+(.+?)\s*$/;
 
 // Fleet census from the review of 11 bodies: ## OBSERVABILITY x5,
 // ## what changed x6, ## verification x7, and ## Summary x1. “What changed”
@@ -22,6 +22,7 @@ const HEADING = /^##\s+(.+?)\s*$/;
 // Tests. Heading matching is deliberately case-insensitive.
 const SECTION_SYNONYMS = new Map([
 	["summary", "summary"],
+	["problem", "summary"],
 	["what changed", "summary"],
 	["what changed and why", "summary"],
 	["what changed / why", "summary"],
@@ -45,7 +46,7 @@ function hasSection(heading, section) {
 
 function sourceWithoutFencedBlocks(source) {
 	let fenced = false;
-	return String(source)
+	return String(source ?? "")
 		.split(/\r?\n/)
 		.map((line) => {
 			if (/^\s*```/.test(line)) {
@@ -70,6 +71,8 @@ function templatePlaceholderLines() {
 			continue;
 		}
 		const value = line.trim();
+		// Exact placeholder matching is intentionally advisory: paste-and-tweak
+		// residuals can evade it when a contributor changes one word.
 		if (current && value && !/^[-*+] \[ \]/.test(value)) {
 			if (!placeholders.has(current)) placeholders.set(current, new Set());
 			placeholders.get(current).add(value);
@@ -88,6 +91,7 @@ function hasRealContent(lines, section, placeholders) {
 
 /** Check the structural PR-body contract, including answered sections. */
 export function lintPrBody(body = "") {
+	const rawLines = String(body ?? "").split(/\r?\n/);
 	const lines = sourceWithoutFencedBlocks(body).split(/\r?\n/);
 	const headings = [];
 	for (let index = 0; index < lines.length; index += 1) {
@@ -96,6 +100,7 @@ export function lintPrBody(body = "") {
 			headings.push({
 				index,
 				name: match[1],
+				level: match[0].match(/^#+/)[0].length,
 				section: SECTION_SYNONYMS.get(match[1].trim().toLowerCase()),
 			});
 	}
@@ -103,9 +108,13 @@ export function lintPrBody(body = "") {
 	const errors = [];
 	const summary = headings.find((heading) => hasSection(heading, "summary"));
 	const firstHeading = headings[0]?.index ?? lines.length;
+	const nextSectionHeading = (heading) =>
+		headings.find(
+			(candidate) =>
+				candidate.index > heading.index && candidate.level <= heading.level,
+		);
 	const summaryEnd = summary
-		? (headings.find((candidate) => candidate.index > summary.index)?.index ??
-			lines.length)
+		? (nextSectionHeading(summary)?.index ?? lines.length)
 		: 0;
 	if (
 		(!summary ||
@@ -127,14 +136,12 @@ export function lintPrBody(body = "") {
 			errors.push(sectionMessage(name, "is missing"));
 			continue;
 		}
-		const nextHeading = headings.find(
-			(candidate) => candidate.index > heading.index,
-		);
-		const content = lines.slice(
+		const nextHeading = nextSectionHeading(heading);
+		const rawContent = rawLines.slice(
 			heading.index + 1,
 			nextHeading?.index ?? lines.length,
 		);
-		if (!hasRealContent(content, name.toLowerCase(), placeholders))
+		if (!hasRealContent(rawContent, name.toLowerCase(), placeholders))
 			errors.push(
 				sectionMessage(name, "has no content before the next heading"),
 			);
