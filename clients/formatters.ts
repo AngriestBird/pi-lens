@@ -100,6 +100,16 @@ export async function tryLazyInstallFormatterTool(
 export const SKIP_FORMATTING = "skip-formatting" as const;
 export type ResolvedFormatterCommand = string[] | null | typeof SKIP_FORMATTING;
 
+/**
+ * #1940: what formatter selection actually did to answer one file.
+ *
+ * `formatter_selected` fired only on a detection-cache miss, so cache hit rate
+ * was invisible and a cache-churning regression had no baseline. Emitting on
+ * both hit and miss with an explicit `outcome` discriminator gives hit rate
+ * from one record family with one denominator (`hit / (hit + miss)`).
+ */
+export type FormatterSelectionOutcome = "hit" | "miss";
+
 export interface FormatterInfo {
 	name: string;
 	command: string[]; // Command with $FILE placeholder — used as fallback
@@ -1674,6 +1684,21 @@ export async function getFormattersForFile(
 
 	if (cached.entries.has(cacheKey)) {
 		const enabledNames = cached.entries.get(cacheKey);
+		const selectedFormatterName =
+			enabledNames && enabledNames.length > 0 ? enabledNames[0] : null;
+		logLatency({
+			type: "phase",
+			phase: "formatter_selected",
+			filePath: filePath,
+			durationMs: 0,
+			metadata: {
+				formatter: selectedFormatterName,
+				reason: "cache",
+				cached: true,
+				outcome: "hit" satisfies FormatterSelectionOutcome,
+				cwd,
+			},
+		});
 		if (!enabledNames || enabledNames.length === 0) return [];
 		// Return cached formatters by name (preserves priority order)
 		return ALL_FORMATTERS.filter((f) => enabledNames.includes(f.name));
@@ -1833,6 +1858,7 @@ export async function getFormattersForFile(
 		metadata: {
 			formatter: selected?.name ?? null,
 			reason: selectionReason,
+			outcome: "miss" satisfies FormatterSelectionOutcome,
 			cwd,
 			...(provisional && {
 				cached: false,
