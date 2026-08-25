@@ -244,6 +244,11 @@ export function getDirectoryMarkers(dir: string): DirectoryMarkers {
 		chartYamlPath: resolveMarker("Chart.yaml"),
 	};
 	const entry: DirCacheEntry = { dirMtimeMs, markers, lastUsedAt: Date.now() };
+	const outgoing = dirMarkerCache.get(resolvedDir);
+	if (outgoing?.idleTimer !== undefined) {
+		clearTimeout(outgoing.idleTimer);
+		outgoing.idleTimer = undefined;
+	}
 	dirMarkerCache.set(resolvedDir, entry);
 	touchDirMarker(resolvedDir, entry);
 	while (dirMarkerCache.size > TOPOLOGY_MAX_DIR_ENTRIES) {
@@ -318,6 +323,11 @@ function walkToNearestMatch(
 		dirMtimes,
 		lastUsedAt: Date.now(),
 	};
+	const outgoing = walkCache.get(key);
+	if (outgoing?.idleTimer !== undefined) {
+		clearTimeout(outgoing.idleTimer);
+		outgoing.idleTimer = undefined;
+	}
 	walkCache.set(key, entry);
 	touchWalk(key, entry);
 	while (walkCache.size > TOPOLOGY_MAX_WALK_ENTRIES) {
