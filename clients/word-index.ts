@@ -329,6 +329,27 @@ function appendWordIndexPostings(
 	return tokenLineCounts;
 }
 
+function commitWordIndexDocumentReplacement(
+	index: WordIndex,
+	doc: { path: string; content: string },
+	perTokenHits: Map<string, number[]>,
+	docLength: number,
+	startedAt: number,
+): void {
+	const tokenLineCounts = appendWordIndexPostings(
+		index,
+		doc.path,
+		perTokenHits,
+	);
+	index.docLengths.set(doc.path, docLength);
+	index.forward!.set(doc.path, tokenLineCounts);
+	index.fileMtimes.set(doc.path, -1);
+	index.fileSizes.set(doc.path, Buffer.byteLength(doc.content, "utf-8"));
+	index.totalTokens += docLength;
+	index.docCount += 1;
+	recordWordIndexReplacement(index, startedAt);
+}
+
 function indexWordLine(
 	index: WordIndex,
 	filePath: string,
@@ -338,18 +359,13 @@ function indexWordLine(
 ): number {
 	const lineTokens = tokenizeLine(line);
 	const seenOnLine = new Set<string>();
-	const perTokenHits = new Map<string, number[]>();
 	for (const token of lineTokens) {
 		if (seenOnLine.has(token)) continue;
 		seenOnLine.add(token);
-		perTokenHits.set(token, [lineNumber]);
-	}
-	for (const [token, count] of appendWordIndexPostings(
-		index,
-		filePath,
-		perTokenHits,
-	)) {
-		tokenLineCounts.set(token, (tokenLineCounts.get(token) ?? 0) + count);
+		const arr = index.postings.get(token);
+		if (arr) arr.push({ file: filePath, line: lineNumber });
+		else index.postings.set(token, [{ file: filePath, line: lineNumber }]);
+		tokenLineCounts.set(token, (tokenLineCounts.get(token) ?? 0) + 1);
 	}
 	return lineTokens.length;
 }
@@ -375,13 +391,14 @@ function indexWordDocument(
 	index: WordIndex,
 	doc: WordIndexInputDocument,
 ): void {
+	const internedFile = internWordIndexFile(index, doc.path);
 	const lines = doc.content.split(/\r?\n/);
 	const tokenLineCounts = new Map<string, number>();
 	let docLength = 0;
 	for (let i = 0; i < lines.length; i += 1) {
 		docLength += indexWordLine(
 			index,
-			doc.path,
+			internedFile,
 			lines[i],
 			i + 1,
 			tokenLineCounts,
@@ -411,12 +428,19 @@ export async function buildWordIndexAsync(
 	const deadline = createDeadline(WORD_INDEX_BUILD_YIELD_BUDGET_MS);
 	for (const doc of files) {
 		if (!shouldContinue()) throw new Error("word index build superseded");
+		const internedFile = internWordIndexFile(index, doc.path);
 		const lines = doc.content.split(/\r?\n/);
 		const tokenLineCounts = new Map<string, number>();
 		let docLength = 0;
 		for (let i = 0; i < lines.length; i += 1) {
 			const line = lines[i];
-			docLength += indexWordLine(index, doc.path, line, i + 1, tokenLineCounts);
+			docLength += indexWordLine(
+				index,
+				internedFile,
+				line,
+				i + 1,
+				tokenLineCounts,
+			);
 			if (
 				line.length >= WORD_INDEX_LONG_LINE_YIELD_CHARS ||
 				deadline.expired()
@@ -520,29 +544,18 @@ export function updateWordIndexDocument(
 		}
 	}
 
-	const tokenLineCounts = appendWordIndexPostings(
-		index,
-		doc.path,
-		perTokenHits,
-	);
-
-	index.docLengths.set(doc.path, docLength);
-	index.forward.set(doc.path, tokenLineCounts);
 	// Per-edit callers generally already have content but not a stat. -1 is an
 	// impossible real mtime, so it deliberately makes the document stale at the
 	// next startup refresh (`-1 !== realMtime` always) — unlike 0, which is a
 	// legal on-disk mtime (SOURCE_DATE_EPOCH=0, archive extraction) and would
 	// collide, leaving such a file never re-tokenized (#958 review F2).
-	index.fileMtimes.set(doc.path, -1);
-	// Size is likewise recorded for the #1105 mtime+size refresh gate. The -1
-	// mtime already forces a re-read next session, so this value only keeps the
-	// map dense (parallel to fileMtimes); store the real byte length so a
-	// deserialize→reserialize round-trip before any refresh carries a truthful
-	// size rather than a placeholder.
-	index.fileSizes.set(doc.path, Buffer.byteLength(doc.content, "utf-8"));
-	index.totalTokens += docLength;
-	index.docCount += 1;
-	recordWordIndexReplacement(index, startedAt);
+	commitWordIndexDocumentReplacement(
+		index,
+		doc,
+		perTokenHits,
+		docLength,
+		startedAt,
+	);
 	return true;
 }
 
@@ -684,18 +697,13 @@ async function updateWordIndexDocumentAsyncUnsafe(
 	);
 	if (!shouldContinue()) throw new Error("word index refresh superseded");
 	if (removal) commitWordIndexDocumentRemoval(index, doc.path, removal);
-	const tokenLineCounts = appendWordIndexPostings(
+	commitWordIndexDocumentReplacement(
 		index,
-		doc.path,
+		doc,
 		perTokenHits,
+		docLength,
+		startedAt,
 	);
-	index.docLengths.set(doc.path, docLength);
-	index.forward.set(doc.path, tokenLineCounts);
-	index.fileMtimes.set(doc.path, -1);
-	index.fileSizes.set(doc.path, Buffer.byteLength(doc.content, "utf-8"));
-	index.totalTokens += docLength;
-	index.docCount += 1;
-	recordWordIndexReplacement(index, startedAt);
 	return true;
 }
 

@@ -2260,3 +2260,10 @@ Process-table resource samples preserve query outcome. `clients/child-unref.ts`
 those failures, so consumers leave usage unknown rather than fabricating zero
 samples, and records one bounded `resource-sampler-query-failed` degradation
 per query subject. (#1863)
+
+Interned word-index replacements share one commit tail. The synchronous and
+cooperative document-update paths call one helper for append, forward and
+freshness metadata, aggregate counters, and replacement telemetry. Keep the
+bulk `indexWordLine` loop direct: routing each token through the batch append
+helper allocates a map and one-element array per token and is not needed for
+the interning invariant.

@@ -826,7 +826,8 @@ export const EXEMPT_SESSION_STATE_FILES: Readonly<Record<string, string>> = {
 		"the recent-touch cursor, consumed and advanced per read",
 	"widget-state.ts":
 		"widget render state, rebuilt from the sources it displays",
-	"word-index.ts": "word-index build guard, per build",
+	"word-index.ts":
+		"word-index build guard, per build; asyncWordIndexOperations queue is keyed by WordIndex and self-deletes in finally, so it needs no reset",
 	"mcp/analyze.ts":
 		"warm word-index cache keyed by path with its own freshness check",
 	"mcp/session.ts":
@@ -954,7 +955,7 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	"tui-fit.ts": 0,
 	"warm-attach.ts": 0,
 	"widget-state.ts": 2,
-	"word-index.ts": 2,
+	"word-index.ts": 3,
 	"workspace-topology.ts": 2,
 	"zizmor-config.ts": 0,
 };
