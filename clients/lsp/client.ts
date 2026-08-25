@@ -403,6 +403,10 @@ export interface LSPClientInfo {
 	>;
 	/** Capability snapshot for navigation/edit operations */
 	getOperationSupport(): LSPOperationSupport;
+	/** File-operation registrations rejected during initialize parsing. */
+	getMalformedFileOperationRegistrations(): ReadonlySet<
+		"willRename" | "didRename"
+	>;
 	/** Commands the server advertised for workspace/executeCommand (the allowlist) */
 	getAdvertisedCommands(): string[];
 	/** Top-level keys of the raw ServerCapabilities advertised at initialize —
@@ -5042,6 +5046,10 @@ export async function createLSPClient(options: {
 			return state.operationSupport;
 		},
 
+		getMalformedFileOperationRegistrations() {
+			return state.fileOperationMalformedRegistrations ?? new Set();
+		},
+
 		getAdvertisedCommands() {
 			return [...state.advertisedCommands];
 		},
@@ -5248,13 +5256,6 @@ export async function createLSPClient(options: {
 		async willRenameFiles(oldFilePath, newFilePath) {
 			if (!isClientAlive(state)) return null;
 			if (!state.operationSupport.willRenameFiles) {
-				recordDegradationOnce({
-					kind: "lsp-capability-skip",
-					subject: `${state.serverId}:workspace/willRenameFiles`,
-					reason: state.fileOperationMalformedRegistrations?.has("willRename")
-						? "malformed-registration"
-						: "no-registration",
-				});
 				return null;
 			}
 			// #1971 review: the server registered WHICH paths it cares about.

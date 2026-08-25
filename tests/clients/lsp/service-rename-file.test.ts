@@ -3,6 +3,10 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
 import { describe, expect, it, vi } from "vitest";
+import {
+	getDegradationSummary,
+	resetDegradationLedger,
+} from "../../../clients/degradation-ledger.js";
 import { LSPService } from "../../../clients/lsp/index.js";
 import { normalizeMapKey } from "../../../clients/path-utils.js";
 import { removeTempDirSync } from "../test-utils.js";
@@ -16,6 +20,7 @@ type MockRenameClient = {
 	notify: { open: ReturnType<typeof vi.fn> };
 	willRenameFiles: ReturnType<typeof vi.fn>;
 	getOperationSupport: ReturnType<typeof vi.fn>;
+	getMalformedFileOperationRegistrations: ReturnType<typeof vi.fn>;
 	didRenameFiles: ReturnType<typeof vi.fn>;
 };
 
@@ -32,6 +37,7 @@ function makeClient(root: string, edit: unknown): MockRenameClient {
 			willRenameFiles: true,
 			didRenameFiles: true,
 		})),
+		getMalformedFileOperationRegistrations: vi.fn(() => new Set()),
 		didRenameFiles: vi.fn(async () => undefined),
 	};
 }
@@ -110,6 +116,45 @@ describe("LSPService.renameFile", () => {
 			expect(secondary.willRenameFiles).toHaveBeenCalledWith(oldPath, newPath);
 			expect(primary.didRenameFiles).toHaveBeenCalledWith(oldPath, newPath);
 			expect(secondary.didRenameFiles).toHaveBeenCalledWith(oldPath, newPath);
+		} finally {
+			removeTempDirSync(tmpDir);
+		}
+	});
+
+	it("records malformed registration skips at both service gates", async () => {
+		resetDegradationLedger();
+		const tmpDir = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-lsp-rename-file-"),
+		);
+		const oldPath = path.join(tmpDir, "old.ts");
+		const newPath = path.join(tmpDir, "new.ts");
+		fs.writeFileSync(oldPath, "export const value = 1;\n", "utf-8");
+		const malformed = makeClient(tmpDir, null);
+		malformed.getOperationSupport.mockReturnValue({
+			willRenameFiles: false,
+			didRenameFiles: false,
+		});
+		malformed.getMalformedFileOperationRegistrations.mockReturnValue(
+			new Set(["willRename", "didRename"]),
+		);
+		const service = new LSPService();
+		addClient(service, "malformed", tmpDir, malformed);
+
+		try {
+			const result = await service.renameFile(oldPath, newPath, {
+				cwd: tmpDir,
+				apply: true,
+			});
+			expect(result.applied).toBe(true);
+			expect(malformed.willRenameFiles).not.toHaveBeenCalled();
+			expect(malformed.didRenameFiles).not.toHaveBeenCalled();
+			const reasons = getDegradationSummary()
+				.find((group) => group.kind === "lsp-capability-skip")
+				?.latestReasons.map((entry) => entry.reason);
+			expect(reasons).toEqual([
+				"malformed-registration",
+				"malformed-registration",
+			]);
 		} finally {
 			removeTempDirSync(tmpDir);
 		}

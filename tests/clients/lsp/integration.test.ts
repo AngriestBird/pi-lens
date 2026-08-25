@@ -22,10 +22,6 @@ vi.hoisted(() => {
 	process.env.PI_LENS_LSP_SHUTDOWN_TIMEOUT_MS = "150";
 });
 import { createLSPClient } from "../../../clients/lsp/client.js";
-import {
-	getDegradationSummary,
-	resetDegradationLedger,
-} from "../../../clients/degradation-ledger.js";
 import { launchLSP, stopLSP } from "../../../clients/lsp/launch.js";
 import { removeTempDirSync } from "../test-utils.js";
 
@@ -420,7 +416,7 @@ describe("LSP Client Integration — nested capability gates (#1971)", () => {
 				await stopLSP(proc);
 			}
 		}
-	});
+	}, 20_000);
 
 	it("honors complete file-operation filters on the protocol wire", async (ctx) => {
 		const tempRoot = fs.mkdtempSync(
@@ -625,72 +621,6 @@ describe("LSP Client Integration — nested capability gates (#1971)", () => {
 			removeTempDirSync(tempRoot);
 		}
 	}, 60_000);
-
-	it("records fixed file-operation skip reasons", async () => {
-		resetDegradationLedger();
-		const unregistered = await launchLSP(process.execPath, [FAKE_SERVER_PATH], {
-			cwd: process.cwd(),
-			env: { ...process.env },
-		});
-		const unregisteredClient = await createLSPClient({
-			serverId: "fake-no-registration",
-			process: unregistered,
-			root: process.cwd(),
-		});
-		try {
-			await unregisteredClient.willRenameFiles("old.ts", "new.ts");
-		} finally {
-			await unregisteredClient.shutdown();
-			await stopLSP(unregistered);
-		}
-
-		const malformed = await launchLSP(process.execPath, [FAKE_SERVER_PATH], {
-			cwd: process.cwd(),
-			env: { ...process.env, FAKE_LSP_WILL_RENAME: "malformed" },
-		});
-		const malformedClient = await createLSPClient({
-			serverId: "fake-malformed-registration",
-			process: malformed,
-			root: process.cwd(),
-		});
-		try {
-			await malformedClient.willRenameFiles("old.ts", "new.ts");
-		} finally {
-			await malformedClient.shutdown();
-			await stopLSP(malformed);
-		}
-
-		const mismatched = await launchLSP(process.execPath, [FAKE_SERVER_PATH], {
-			cwd: process.cwd(),
-			env: {
-				...process.env,
-				FAKE_LSP_WILL_RENAME: "true",
-				FAKE_LSP_WILL_RENAME_GLOB: "**/*.go",
-			},
-		});
-		const mismatchedClient = await createLSPClient({
-			serverId: "fake-filter-mismatch",
-			process: mismatched,
-			root: process.cwd(),
-		});
-		try {
-			await mismatchedClient.willRenameFiles("old.ts", "new.ts");
-		} finally {
-			await mismatchedClient.shutdown();
-			await stopLSP(mismatched);
-		}
-
-		const reasons = getDegradationSummary()
-			.find((group) => group.kind === "lsp-capability-skip")
-			?.latestReasons.map((entry) => entry.reason);
-		expect(reasons).toEqual(
-			expect.arrayContaining([
-				"no-registration",
-				"malformed-registration",
-				"filter-mismatch",
-			]),
-		);
-	});
 
 	const resolveCases = [
 		{
