@@ -282,8 +282,13 @@ describe("vitest.config.ts wiring (#2042)", () => {
 		}
 	});
 
-	it("leaves a local run on the pre-#2042 posture", () => {
-		const budget = resolveTestWorkerBudget({ ...currentHost(), ci: false });
+	it("matches the resolver on whatever host is running it", () => {
+		// The ambient resolution, CI or not. Deliberately NOT forced to `ci: false`
+		// — the config reads the real `process.env.CI`, so pinning the expectation
+		// to the local branch asserts a posture the config was never asked for and
+		// fails on CI (it did, run 32899910007: expected 3 to equal "50%"). The
+		// local posture itself is asserted against the resolver directly, above.
+		const budget = resolveTestWorkerBudget(currentHost());
 		expect(project("default").maxWorkers).toEqual(budget.maxWorkers);
 		expect(project("default").execArgv).toEqual([
 			`--max-old-space-size=${budget.heapMb}`,
