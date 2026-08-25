@@ -65,6 +65,28 @@ jobs:
       - name: Validate PR title (conventional prefix + issue ref)
         run: node scripts/check-pr-title.mjs
 
+  pr-body-lint:
+    name: PR body (advisory)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    # Advisory to start: this job is not in required-checks branch protection.
+    # A finding stays visible as a red check without blocking a merge.
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+        with:
+          node-version: "22"
+
+      - name: Validate PR body structure
+        run: node scripts/check-pr-body.mjs
+
   oxfmt:
     name: oxfmt format check (advisory)
     runs-on: ubuntu-latest
