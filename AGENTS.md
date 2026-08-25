@@ -123,7 +123,9 @@ session guards must continue to skip both resets. Re-arm through
 `clearFormatterCache`, never the which-latch clear alone: `getFormattersForFile`
 answers a same-cwd lookup from `detectionCache` before it reaches a probe, so
 dropping the latches without the selection cache leaves the previous session's
-verdict standing in the working directory. (#1895)
+verdict standing in the working directory. Formatter selection emits
+`formatter_selected` with `outcome: "hit" | "miss"` on both cache hits and
+re-detections so hit rate is computable from `latency.log`. (#1895, #1940)
 
 Per-edit LSP dispatch preserves the touch's correlated `unconfirmedServerIds`
 through `RunnerResult` and runner latency assembly. The agent coverage notice
