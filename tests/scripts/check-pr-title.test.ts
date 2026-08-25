@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	MISSING_ISSUE_REF_MESSAGE,
 	MISSING_PREFIX_MESSAGE,
@@ -11,6 +11,10 @@ const payloadPr = {
 	title: "fix: stale payload title",
 	body: "Refs #2083",
 };
+
+afterEach(() => {
+	vi.unstubAllEnvs();
+});
 
 describe("PR title lint (#1844)", () => {
 	it("accepts a conventional prefix with an issue ref in the title", () => {
@@ -81,9 +85,9 @@ describe("PR title lint (#1844)", () => {
 
 describe("live PR title resolution (#2083)", () => {
 	it("uses the live title when it differs from the event payload", async () => {
-		process.env.GITHUB_API_URL = "https://api.github.test";
-		process.env.GITHUB_REPOSITORY = "apmantza/pi-lens";
-		process.env.GITHUB_TOKEN = "test-token";
+		vi.stubEnv("GITHUB_API_URL", "https://api.github.test");
+		vi.stubEnv("GITHUB_REPOSITORY", "apmantza/pi-lens");
+		vi.stubEnv("GITHUB_TOKEN", "test-token");
 		const fetchImpl = vi.fn().mockResolvedValue(
 			new Response(
 				JSON.stringify({ title: "fix: current title (refs #2083)" }),
@@ -109,6 +113,9 @@ describe("live PR title resolution (#2083)", () => {
 	});
 
 	it("uses the live invalid title instead of a compliant payload title", async () => {
+		vi.stubEnv("GITHUB_API_URL", "https://api.github.test");
+		vi.stubEnv("GITHUB_REPOSITORY", "apmantza/pi-lens");
+		vi.stubEnv("GITHUB_TOKEN", "test-token");
 		const fetchImpl = vi.fn().mockResolvedValue(
 			new Response(JSON.stringify({ title: "needs a prefix (#2083)" }), {
 				status: 200,
@@ -124,6 +131,9 @@ describe("live PR title resolution (#2083)", () => {
 	});
 
 	it("falls back to the payload title and warns when fetching fails", async () => {
+		vi.stubEnv("GITHUB_API_URL", "https://api.github.test");
+		vi.stubEnv("GITHUB_REPOSITORY", "apmantza/pi-lens");
+		vi.stubEnv("GITHUB_TOKEN", "test-token");
 		const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
 		const fetchImpl = vi.fn().mockRejectedValue(new Error("network down"));
 
@@ -134,5 +144,62 @@ describe("live PR title resolution (#2083)", () => {
 			expect.stringContaining("network down"),
 		);
 		warning.mockRestore();
+	});
+
+	it("falls back with an annotation when GitHub returns a non-2xx response", async () => {
+		vi.stubEnv("GITHUB_API_URL", "https://api.github.test");
+		vi.stubEnv("GITHUB_REPOSITORY", "apmantza/pi-lens");
+		vi.stubEnv("GITHUB_TOKEN", "test-token");
+		const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+		const fetchImpl = vi
+			.fn()
+			.mockResolvedValue(new Response("forbidden", { status: 403 }));
+
+		await expect(resolveLivePrTitle(payloadPr, fetchImpl)).resolves.toBe(
+			payloadPr.title,
+		);
+		expect(warning).toHaveBeenCalledWith(
+			expect.stringContaining("::warning::"),
+		);
+		expect(warning).toHaveBeenCalledWith(expect.stringContaining("HTTP 403"));
+	});
+
+	it("falls back with an annotation when the response has no string title", async () => {
+		vi.stubEnv("GITHUB_API_URL", "https://api.github.test");
+		vi.stubEnv("GITHUB_REPOSITORY", "apmantza/pi-lens");
+		vi.stubEnv("GITHUB_TOKEN", "test-token");
+		const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+		const fetchImpl = vi
+			.fn()
+			.mockResolvedValue(
+				new Response(JSON.stringify({ title: 2083 }), { status: 200 }),
+			);
+
+		await expect(resolveLivePrTitle(payloadPr, fetchImpl)).resolves.toBe(
+			payloadPr.title,
+		);
+		expect(warning).toHaveBeenCalledWith(
+			expect.stringContaining("::warning::"),
+		);
+		expect(warning).toHaveBeenCalledWith(
+			expect.stringContaining("response has no title"),
+		);
+	});
+
+	it("falls back with an annotation when GITHUB_TOKEN is unset", async () => {
+		vi.stubEnv("GITHUB_TOKEN", "");
+		const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+		const fetchImpl = vi.fn();
+
+		await expect(resolveLivePrTitle(payloadPr, fetchImpl)).resolves.toBe(
+			payloadPr.title,
+		);
+		expect(fetchImpl).not.toHaveBeenCalled();
+		expect(warning).toHaveBeenCalledWith(
+			expect.stringContaining("::warning::"),
+		);
+		expect(warning).toHaveBeenCalledWith(
+			expect.stringContaining("GITHUB_TOKEN is missing"),
+		);
 	});
 });

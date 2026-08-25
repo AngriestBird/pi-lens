@@ -47,11 +47,10 @@ export async function resolveLivePrTitle(
 	const token = process.env.GITHUB_TOKEN;
 	if (!token) {
 		console.warn(
-			"PR title live fetch failed: GITHUB_TOKEN is missing; using event payload title",
+			"::warning::PR title live fetch failed: GITHUB_TOKEN is missing; using event payload title",
 		);
 		return fallbackTitle;
 	}
-
 	try {
 		const apiUrl = process.env.GITHUB_API_URL;
 		const repository = process.env.GITHUB_REPOSITORY;
@@ -61,6 +60,7 @@ export async function resolveLivePrTitle(
 		const response = await fetchImpl(
 			`${apiUrl}/repos/${repository}/pulls/${payloadPr.number}`,
 			{
+				signal: AbortSignal.timeout(10_000),
 				headers: {
 					Authorization: `Bearer ${token}`,
 					Accept: "application/vnd.github+json",
@@ -78,7 +78,7 @@ export async function resolveLivePrTitle(
 	} catch (error) {
 		const reason = error instanceof Error ? error.message : String(error);
 		console.warn(
-			`PR title live fetch failed: ${reason}; using event payload title`,
+			`::warning::PR title live fetch failed: ${reason}; using event payload title`,
 		);
 		return fallbackTitle;
 	}
