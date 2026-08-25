@@ -19,6 +19,7 @@ import {
 	flushReviewGraphPersistsForTests,
 	getCachedReviewGraph,
 	getGraphSourceFiles,
+	_resetReviewGraphSourcePathMemoForTests,
 	getLastGraphBuildInfo,
 	_setReviewGraphEntryCounterForTests,
 	isReviewGraphMigrationNeeded,
@@ -198,6 +199,25 @@ describe("review graph service", () => {
 			if (previousMaxBytes === undefined)
 				delete process.env.PI_LENS_REVIEW_GRAPH_MAX_FILE_BYTES;
 			else process.env.PI_LENS_REVIEW_GRAPH_MAX_FILE_BYTES = previousMaxBytes;
+			env.cleanup();
+		}
+	});
+
+	it("memoizes raw source spellings across consecutive builds (#2072)", async () => {
+		const env = setupTestEnvironment("pi-lens-review-graph-source-memo-");
+		try {
+			createTempFile(env.tmpDir, "src/a.ts", "export const a = 1;\n");
+			createTempFile(env.tmpDir, "src/b.ts", "export const b = 2;\n");
+			_resetReviewGraphSourcePathMemoForTests();
+
+			const first = await getGraphSourceFiles(env.tmpDir);
+			const second = await getGraphSourceFiles(env.tmpDir);
+
+			expect(first.pathNormalizeCalls).toBe(first.files.length);
+			expect(second.pathNormalizeCalls).toBe(0);
+			expect(second.files).toEqual(first.files);
+		} finally {
+			_resetReviewGraphSourcePathMemoForTests();
 			env.cleanup();
 		}
 	});

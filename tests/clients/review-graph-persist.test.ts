@@ -417,6 +417,7 @@ describe("review-graph persist circuit-breaker (#260)", () => {
 		expect(succeeded?.observability?.persistence?.generation).toBe(
 			scheduled?.observability?.persistence?.generation,
 		);
+		expect(succeeded?.durationMs).toEqual(expect.any(Number));
 		const completed = vi
 			.mocked(logReviewGraph)
 			.mock.calls.find(([entry]) => entry.phase === "build_succeeded")?.[0];

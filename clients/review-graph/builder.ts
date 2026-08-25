@@ -36,6 +36,7 @@ import {
 } from "../path-utils.js";
 import { collectProjectSourceFilesWithBudgetAsync } from "../project-scan-policy.js";
 import { getReviewGraphMaxFilesDerived } from "../project-scale.js";
+import { BoundedLruCache } from "../bounded-cache.js";
 import {
 	jsTsCandidatePaths,
 	resolveAliasedImport,
@@ -156,6 +157,57 @@ export const REVIEW_GRAPH_SOURCE_EXTENSIONS: readonly string[] =
 	MAIN_KIND_EXTENSIONS;
 const CHANGED_SYMBOLS_PREFIX = "session.reviewGraph.changedSymbols:";
 const extractorCache = new Map<string, TreeSitterSymbolExtractor | null>();
+const REVIEW_GRAPH_MAX_WARM_WORKSPACES = 8;
+
+// Walker output is raw, so its spelling still needs the canonical path seam.
+// Keep that expensive raw-to-canonical step per project across builds, bounded
+// like TestRunnerClient's instance-lifetime canonicalRootMemo (#2058). A new
+// spelling is resolved once; repeated builds reuse the result. The project
+// memo is bounded and workspace-cache clears provide a freshness boundary.
+const REVIEW_GRAPH_SOURCE_PATH_MEMO_ENTRIES = 16_384;
+const _sourcePathMemos = new Map<string, BoundedLruCache<string, string>>();
+const _sourcePathNormalizeCalls = new Map<string, number>();
+
+function sourcePathMemo(cwd: string): BoundedLruCache<string, string> {
+	const key = path.resolve(cwd);
+	const existing = _sourcePathMemos.get(key);
+	if (existing) return existing;
+	const memo = new BoundedLruCache<string, string>(
+		REVIEW_GRAPH_SOURCE_PATH_MEMO_ENTRIES,
+	);
+	_sourcePathMemos.set(key, memo);
+	while (_sourcePathMemos.size > REVIEW_GRAPH_MAX_WARM_WORKSPACES) {
+		const oldest = _sourcePathMemos.keys().next().value;
+		if (oldest === undefined) break;
+		_sourcePathMemos.delete(oldest);
+		_sourcePathNormalizeCalls.delete(oldest);
+	}
+	return memo;
+}
+
+function normalizeGraphSourcePath(cwd: string, raw: string): string {
+	const memo = sourcePathMemo(cwd);
+	const cached = memo.get(raw);
+	if (cached !== undefined) return cached;
+	const normalized = normalizeMapKey(raw);
+	memo.set(raw, normalized);
+	_sourcePathNormalizeCalls.set(
+		path.resolve(cwd),
+		(_sourcePathNormalizeCalls.get(path.resolve(cwd)) ?? 0) + 1,
+	);
+	return normalized;
+}
+
+export function _getReviewGraphSourcePathNormalizeCallsForTests(
+	cwd: string,
+): number {
+	return _sourcePathNormalizeCalls.get(path.resolve(cwd)) ?? 0;
+}
+
+export function _resetReviewGraphSourcePathMemoForTests(): void {
+	_sourcePathMemos.clear();
+	_sourcePathNormalizeCalls.clear();
+}
 
 // IN-FLIGHT Promise cache: deduplicates CONCURRENT buildOrUpdateGraph calls for
 // the same (cwd, changedFiles). A separate workspace cache below preserves the
@@ -205,7 +257,6 @@ interface WorkspaceGraphCacheEntry {
 	idleTimer?: ReturnType<typeof setTimeout>;
 }
 const _workspaceGraphCache = new Map<string, WorkspaceGraphCacheEntry>();
-const REVIEW_GRAPH_MAX_WARM_WORKSPACES = 8;
 const REVIEW_GRAPH_IDLE_EVICT_MS_DEFAULT = 20 * 60_000;
 // A workspace-wide clear must invalidate builds for workspaces that are not
 // resident yet, too. This process-wide component therefore survives cache
@@ -365,6 +416,7 @@ export type GraphBuildInfo = {
 	skipReason?: string;
 	sourceFileCount?: number;
 	sourceFileCountTruncated?: boolean;
+	pathNormalizeCalls?: number;
 	maxFileCount?: number;
 	/** Reason the graph was successfully built but persisted only partially. */
 	persistReason?: string;
@@ -392,6 +444,7 @@ function graphLogMetadata(
 		mode?: ReviewGraphBuildMode;
 		sourceFileCount?: number;
 		sourceFileCountTruncated?: boolean;
+		pathNormalizeCalls?: number;
 	} = {},
 ): ReviewGraphBuildMetadata {
 	return makeReviewGraphBuildMetadata(graph, options);
@@ -477,6 +530,8 @@ export function clearReviewGraphWorkspaceCache(cwd?: string): void {
 		for (const entry of _workspaceGraphCache.values())
 			clearWorkspaceGraphTimer(entry);
 		_workspaceGraphCache.clear();
+		_sourcePathMemos.clear();
+		_sourcePathNormalizeCalls.clear();
 		_workspaceCacheEpoch++;
 		_sizeSkipVerdicts.clear();
 	} else {
@@ -497,6 +552,8 @@ export function clearReviewGraphWorkspaceCache(cwd?: string): void {
 			(_workspaceCacheEpochs.get(normalized) ?? 0) + 1,
 		);
 		_workspaceGraphCache.delete(normalized);
+		_sourcePathMemos.delete(path.resolve(cwd));
+		_sourcePathNormalizeCalls.delete(path.resolve(cwd));
 		_sizeSkipVerdicts.delete(normalized);
 	}
 	_lastGraphBuildInfo = { reused: false, mode: "full", graphChanged: true };
@@ -1184,6 +1241,8 @@ export function getReviewGraphSizeSkipVerdict(
 
 interface GraphSourceFilesResult {
 	files: string[];
+	/** Cache misses in the raw-walker path normalizer for this build. */
+	pathNormalizeCalls: number;
 	/** Number of source files represented by this walk; a lower bound when truncated. */
 	sourceFileCount: number;
 	/** Per-build file cap captured before the asynchronous walk begins. */
@@ -1210,6 +1269,9 @@ export function _setReviewGraphEntryCounterForTests(
 export async function getGraphSourceFiles(
 	cwd: string,
 ): Promise<GraphSourceFilesResult> {
+	const sourceMemoKey = path.resolve(cwd);
+	const normalizeCallsBefore =
+		_sourcePathNormalizeCalls.get(sourceMemoKey) ?? 0;
 	// Async, chunked-yield walk (identical output to the sync collector) so the
 	// per-edit cascade graph rebuild doesn't block the event loop on a large repo.
 	//
@@ -1250,6 +1312,9 @@ export async function getGraphSourceFiles(
 		// so the caller's `length > maxGraphFiles` check still trips.
 		return {
 			files: collected,
+			pathNormalizeCalls:
+				(_sourcePathNormalizeCalls.get(sourceMemoKey) ?? 0) -
+				normalizeCallsBefore,
 			sourceFileCount: collected.length,
 			maxFileCount: maxGraphFiles,
 			entryBudgetExceeded,
@@ -1258,7 +1323,7 @@ export async function getGraphSourceFiles(
 	const result: string[] = [];
 	let sinceYield = 0;
 	for (const raw of collected) {
-		const file = normalizeMapKey(raw);
+		const file = normalizeGraphSourcePath(cwd, raw);
 		const kind = detectFileKind(file);
 		// isWithinReviewGraphSizeLimit does a statSync per file — yield periodically
 		// so the size-limit filter (one stat each) can't hold the loop in one burst.
@@ -1280,6 +1345,9 @@ export async function getGraphSourceFiles(
 	}
 	return {
 		files: result,
+		pathNormalizeCalls:
+			(_sourcePathNormalizeCalls.get(sourceMemoKey) ?? 0) -
+			normalizeCallsBefore,
 		sourceFileCount: result.length,
 		maxFileCount: maxGraphFiles,
 		entryBudgetExceeded,
@@ -1647,10 +1715,7 @@ function countRetainedSourceFiles(
 	sourceFilePaths?: Iterable<string>,
 ): number {
 	if (sourceFilePaths === undefined) return graph.fileNodes.size;
-	const sourceKeys = new Set<string>();
-	for (const filePath of sourceFilePaths) {
-		sourceKeys.add(normalizeMapKey(filePath));
-	}
+	const sourceKeys = new Set(sourceFilePaths);
 	let retained = 0;
 	for (const filePath of sourceKeys) {
 		if (graph.fileNodes.has(filePath)) retained++;
@@ -1804,6 +1869,7 @@ function logPersistSuccess(
 	logReviewGraph({
 		cwd: key,
 		phase: "persist_succeeded",
+		durationMs: stats.serializeMs + stats.writeMs,
 		elements: pending.elementCount,
 		...stats,
 		observability: persistObservability(pending, {
@@ -3084,6 +3150,7 @@ export function flushReviewGraphPersist(
 		logReviewGraph({
 			cwd,
 			phase: "persist_succeeded",
+			durationMs: performance.now() - startedAt,
 			elements: pending.elementCount,
 			rawBytes,
 			gzBytes: gzip.byteLength,
@@ -4798,6 +4865,7 @@ async function _doBuildGraph(
 	const sourceCollection = await getGraphSourceFiles(cwd);
 	const filesToBuild = sourceCollection.files;
 	const sourceFileCount = sourceCollection.sourceFileCount;
+	const pathNormalizeCalls = sourceCollection.pathNormalizeCalls;
 	const sourceFilesTruncated = sourceCollection.entryBudgetExceeded;
 	const ignoredIds = await ignoredIdsPromise;
 	const maxGraphFiles = sourceCollection.maxFileCount;
@@ -4856,6 +4924,7 @@ async function _doBuildGraph(
 			sourceFileCountTruncated:
 				sourceFilesTruncated || filesToBuild.length > maxGraphFiles,
 			maxFileCount: maxGraphFiles,
+			pathNormalizeCalls,
 			seqFastpathFallback,
 			// #459: a fresh empty graph is returned every call on this path (never
 			// persisted/reused) — treat it as changed so dependents never trust stale
@@ -5197,6 +5266,7 @@ async function _doBuildGraph(
 		mode: "full",
 		sourceFileCount,
 		sourceFileCountTruncated: sourceFilesTruncated,
+		pathNormalizeCalls,
 		seqFastpathFallback,
 		...(persistReason ? { persistReason } : {}),
 		graphChanged: true,
@@ -5293,6 +5363,7 @@ export function buildOrUpdateGraph(
 							mode: buildInfo.mode,
 							sourceFileCount: buildInfo.sourceFileCount,
 							sourceFileCountTruncated: buildInfo.sourceFileCountTruncated,
+							pathNormalizeCalls: buildInfo.pathNormalizeCalls,
 						}),
 					},
 				});
@@ -5314,6 +5385,7 @@ export function buildOrUpdateGraph(
 							mode: buildInfo.mode,
 							sourceFileCount: buildInfo.sourceFileCount,
 							sourceFileCountTruncated: buildInfo.sourceFileCountTruncated,
+							pathNormalizeCalls: buildInfo.pathNormalizeCalls,
 						}),
 					},
 				});
