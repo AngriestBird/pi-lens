@@ -74,6 +74,12 @@ export interface WordIndexLogEntry {
 	truncated?: boolean;
 	/** Distinct token count (postings.size) — index breadth at a glance. */
 	tokens?: number;
+	/** Total in-memory posting entries (sum of posting-array lengths). */
+	postingEntries?: number;
+	/** Aggregate per-edit replacement cost for the pending turn/burst. */
+	replacementCount?: number;
+	totalReplacementMs?: number;
+	maxReplacementMs?: number;
 	/** Incremental: docs re-tokenized because their mtime changed. */
 	refreshed?: number;
 	/** Incremental: docs removed because they left the current file set. */
