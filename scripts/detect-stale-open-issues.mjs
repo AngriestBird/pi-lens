@@ -15,15 +15,22 @@ const runUrl =
 	process.env.GITHUB_SERVER_URL && process.env.GITHUB_RUN_ID
 		? `${process.env.GITHUB_SERVER_URL}/${repository}/actions/runs/${process.env.GITHUB_RUN_ID}`
 		: undefined;
-const { candidates, truncatedCommits } = await detectStaleOpenIssues({
-	fetcher: defaultFetcher(token),
-	repository,
+const { candidates, truncatedCommits, priorityCoverage } =
+	await detectStaleOpenIssues({
+		fetcher: defaultFetcher(token),
+		repository,
+	});
+const summary = formatSummary(candidates, {
+	runUrl,
+	truncatedCommits,
+	priorityCoverage,
 });
-const summary = formatSummary(candidates, { runUrl, truncatedCommits });
 console.log(summary);
 if (process.env.GITHUB_STEP_SUMMARY)
 	appendFileSync(process.env.GITHUB_STEP_SUMMARY, `${summary}\n`);
-if (candidates.length > 0) {
+const hasPriorityGaps =
+	priorityCoverage.zero.length > 0 || priorityCoverage.multiple.length > 0;
+if (candidates.length > 0 || hasPriorityGaps) {
 	const headers = {
 		accept: "application/vnd.github+json",
 		authorization: `Bearer ${token}`,

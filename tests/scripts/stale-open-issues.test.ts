@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+	checkPriorityCoverage,
 	detectStaleOpenIssues,
 	formatSummary,
 	MAX_COMMIT_DETAILS,
@@ -146,5 +147,129 @@ describe("stale open-issue detector (#1323)", () => {
 		expect(formatSummary([], { runUrl: "https://example/run" })).toContain(
 			"never closes issues",
 		);
+	});
+});
+
+describe("priority label coverage (#1676)", () => {
+	it("flags an open issue with zero priority:* labels", () => {
+		const issues = [
+			{
+				number: 1,
+				title: "no priority",
+				html_url: "https://github.com/acme/repo/issues/1",
+				labels: [{ name: "bug" }],
+			},
+		];
+		const { zero, multiple } = checkPriorityCoverage(issues);
+		expect(zero).toEqual([expect.objectContaining({ number: 1 })]);
+		expect(multiple).toEqual([]);
+	});
+
+	it("does not flag an open issue with exactly one priority:* label", () => {
+		const issues = [
+			{
+				number: 2,
+				title: "one priority",
+				html_url: "https://github.com/acme/repo/issues/2",
+				labels: [{ name: "bug" }, { name: "priority:p2" }],
+			},
+		];
+		const { zero, multiple } = checkPriorityCoverage(issues);
+		expect(zero).toEqual([]);
+		expect(multiple).toEqual([]);
+	});
+
+	it("flags an open issue with more than one priority:* label", () => {
+		const issues = [
+			{
+				number: 3,
+				title: "two priorities",
+				html_url: "https://github.com/acme/repo/issues/3",
+				labels: [{ name: "priority:p1" }, { name: "priority:p2" }],
+			},
+		];
+		const { zero, multiple } = checkPriorityCoverage(issues);
+		expect(zero).toEqual([]);
+		expect(multiple).toEqual([expect.objectContaining({ number: 3 })]);
+	});
+
+	it("treats labels that merely contain 'priority' but aren't priority:* as zero coverage", () => {
+		const issues = [
+			{
+				number: 4,
+				title: "decoy label",
+				html_url: "https://github.com/acme/repo/issues/4",
+				labels: [{ name: "high-priority" }, { name: "not-priority:p1" }],
+			},
+		];
+		const { zero, multiple } = checkPriorityCoverage(issues);
+		expect(zero).toEqual([expect.objectContaining({ number: 4 })]);
+		expect(multiple).toEqual([]);
+	});
+
+	it("ignores pull requests when checking priority coverage", () => {
+		const issues = [
+			{
+				number: 5,
+				title: "a pull request",
+				html_url: "https://github.com/acme/repo/pull/5",
+				pull_request: {},
+				labels: [],
+			},
+		];
+		const { zero, multiple } = checkPriorityCoverage(issues);
+		expect(zero).toEqual([]);
+		expect(multiple).toEqual([]);
+	});
+
+	it("accepts plain-string labels, not only label objects", () => {
+		const issues = [
+			{ number: 6, title: "string label", labels: ["priority:p3"] },
+		];
+		const { zero, multiple } = checkPriorityCoverage(issues);
+		expect(zero).toEqual([]);
+		expect(multiple).toEqual([]);
+	});
+
+	it("sorts both lists by issue number", () => {
+		const issues = [
+			{ number: 20, title: "b", labels: [] },
+			{ number: 7, title: "a", labels: [] },
+		];
+		const { zero } = checkPriorityCoverage(issues);
+		expect(zero.map((issue) => issue.number)).toEqual([7, 20]);
+	});
+});
+
+describe("formatSummary priority coverage section", () => {
+	it("lists zero- and multiple-priority issues by number and title", () => {
+		const summary = formatSummary([], {
+			priorityCoverage: {
+				zero: [
+					{
+						number: 8,
+						title: "missing priority",
+						html_url: "https://github.com/acme/repo/issues/8",
+					},
+				],
+				multiple: [
+					{
+						number: 9,
+						title: "double priority",
+						html_url: "https://github.com/acme/repo/issues/9",
+					},
+				],
+			},
+		});
+		expect(summary).toContain("Priority label coverage");
+		expect(summary).toContain("#8");
+		expect(summary).toContain("missing priority");
+		expect(summary).toContain("#9");
+		expect(summary).toContain("double priority");
+	});
+
+	it("omits the priority coverage section when not provided (byte-identical for existing callers)", () => {
+		const before = formatSummary([], { runUrl: "https://example/run" });
+		expect(before).not.toContain("Priority label coverage");
 	});
 });
