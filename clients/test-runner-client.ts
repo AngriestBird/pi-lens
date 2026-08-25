@@ -21,7 +21,7 @@ import { createSubsystemLogger } from "./extension-log.js";
 import { detectFileRole } from "./file-role.js";
 import { findGlobalBinary } from "./package-manager.js";
 import { PathKeyedMap } from "./path-keyed-map.js";
-import { normalizeMapKey } from "./path-utils.js";
+import { normalizeEphemeralMapKey, normalizeMapKey } from "./path-utils.js";
 import { isMeasuredDuration, toMeasuredDurationMs } from "./run-duration.js";
 import { safeSpawn, safeSpawnAsync } from "./safe-spawn.js";
 
@@ -318,6 +318,22 @@ function canonicalFailedPath(filePath: string): string {
 	}
 }
 
+function canonicalProjectRoot(cwd: string): string {
+	const absolute = path.resolve(cwd);
+	try {
+		return normalizeEphemeralMapKey(fs.realpathSync.native(absolute));
+	} catch {
+		return normalizeEphemeralMapKey(absolute);
+	}
+}
+
+const MAX_CANONICAL_ROOT_MEMO_ENTRIES = 512;
+
+interface RunnerAvailability {
+	available: boolean;
+	evidencePath?: string;
+}
+
 function filesystemErrorCode(error: unknown): string | undefined {
 	if (
 		error !== null &&
@@ -332,7 +348,15 @@ function filesystemErrorCode(error: unknown): string | undefined {
 
 export class TestRunnerClient {
 	private log: (msg: string) => void;
-	private availableRunners: Map<string, boolean> = new Map();
+	// This is an instance-lifetime memo: a symlink retargeted mid-session keeps
+	// its old resolution until a new client instance. That is acceptable because
+	// round 2's evidence re-validation already handles verdict-level staleness
+	// (positive verdicts re-stat their config file). Keep the memo bounded so
+	// pathological spelling churn cannot grow it without limit.
+	private canonicalRootMemo = new Map<string, string>();
+	private availableRunners = new PathKeyedMap<Map<string, RunnerAvailability>>(
+		normalizeEphemeralMapKey,
+	);
 	private failedTestsByRunner = new Map<
 		string,
 		PathKeyedMap<PathKeyedMap<FailedTargetEntry>>
@@ -345,15 +369,54 @@ export class TestRunnerClient {
 	// or it couldn't be parsed in the simple shape we look for" — callers
 	// treat that as "no additional signal" and fall back to naming-convention
 	// detection only.
-	private vitestTestGlobsCache: Map<
-		string,
-		{ include?: string[]; exclude?: string[] } | null
-	> = new Map();
+	private vitestTestGlobsCache = new PathKeyedMap<{
+		include?: string[];
+		exclude?: string[];
+	} | null>(normalizeEphemeralMapKey);
 
 	constructor(verbose = false, options: TestRunnerClientOptions = {}) {
 		this.log = verbose ? createSubsystemLogger("test-runner") : () => {};
 		this.statFailedTarget =
 			options.statFailedTarget ?? ((filePath) => void fs.statSync(filePath));
+	}
+
+	private getCanonicalProjectRoot(cwd: string): string {
+		const cached = this.canonicalRootMemo.get(cwd);
+		if (cached !== undefined) return cached;
+
+		const canonical = canonicalProjectRoot(cwd);
+		if (this.canonicalRootMemo.size >= MAX_CANONICAL_ROOT_MEMO_ENTRIES) {
+			const oldest = this.canonicalRootMemo.keys().next().value;
+			if (oldest !== undefined) this.canonicalRootMemo.delete(oldest);
+		}
+		this.canonicalRootMemo.set(cwd, canonical);
+		return canonical;
+	}
+
+	private getRunnerAvailability(
+		byRunner: Map<string, RunnerAvailability> | undefined,
+		runner: string,
+	): boolean | undefined {
+		const cached = byRunner?.get(runner);
+		if (!cached) return undefined;
+		if (
+			cached.available &&
+			cached.evidencePath !== undefined &&
+			!fs.existsSync(cached.evidencePath)
+		) {
+			byRunner?.delete(runner);
+			return undefined;
+		}
+		return cached.available;
+	}
+
+	private setRunnerAvailability(
+		byRunner: Map<string, RunnerAvailability>,
+		runner: string,
+		available: boolean,
+		evidencePath?: string,
+	): void {
+		byRunner.set(runner, { available, evidencePath });
 	}
 
 	/**
@@ -367,23 +430,32 @@ export class TestRunnerClient {
 		cwd: string,
 		sourceFilePath?: string,
 	): { runner: string; config: RunnerConfig } | null {
+		const rootKey = this.getCanonicalProjectRoot(cwd);
+		let byRunner = this.availableRunners.get(rootKey);
+		if (!byRunner) {
+			byRunner = new Map();
+			this.availableRunners.set(rootKey, byRunner);
+		}
 		// Priority 1: Config files
 		for (const [name, config] of Object.entries(RUNNERS)) {
-			const cacheKey = `${cwd}:${name}:config`;
-			if (this.availableRunners.has(cacheKey)) {
-				if (this.availableRunners.get(cacheKey)) {
+			const cached = this.getRunnerAvailability(byRunner, name);
+			if (cached !== undefined) {
+				if (cached) {
 					return { runner: name, config };
 				}
 				continue;
 			}
 
+			let configEvidencePath: string | undefined;
 			const found = config.configFiles.some((cf) => {
 				if (name === "pytest" && cf === "pyproject.toml") {
 					const pyprojectPath = path.join(cwd, cf);
 					if (!fs.existsSync(pyprojectPath)) return false;
 					try {
 						const pyproject = fs.readFileSync(pyprojectPath, "utf-8");
-						return pyproject.includes("[tool.pytest.ini_options]");
+						const matches = pyproject.includes("[tool.pytest.ini_options]");
+						if (matches) configEvidencePath = pyprojectPath;
+						return matches;
 					} catch {
 						return false;
 					}
@@ -397,15 +469,20 @@ export class TestRunnerClient {
 							...composer.require,
 							...composer["require-dev"],
 						};
-						return Boolean(allDeps["phpunit/phpunit"]);
+						const matches = Boolean(allDeps["phpunit/phpunit"]);
+						if (matches) configEvidencePath = composerPath;
+						return matches;
 					} catch {
 						return false;
 					}
 				}
-				return fs.existsSync(path.join(cwd, cf));
+				const candidate = path.join(cwd, cf);
+				const matches = fs.existsSync(candidate);
+				if (matches) configEvidencePath = candidate;
+				return matches;
 			});
 
-			this.availableRunners.set(cacheKey, found);
+			this.setRunnerAvailability(byRunner, name, found, configEvidencePath);
 			if (found) {
 				this.log(`Detected runner via config: ${name}`);
 				return { runner: name, config };
@@ -423,17 +500,17 @@ export class TestRunnerClient {
 			// Check for vitest first (more specific than jest)
 			if (allDeps.vitest) {
 				this.log("Detected vitest in package.json");
-				this.availableRunners.set(`${cwd}:vitest:config`, true);
+				this.setRunnerAvailability(byRunner, "vitest", true, packageJsonPath);
 				return { runner: "vitest", config: RUNNERS.vitest };
 			}
 			if (allDeps.jest) {
 				this.log("Detected jest in package.json");
-				this.availableRunners.set(`${cwd}:jest:config`, true);
+				this.setRunnerAvailability(byRunner, "jest", true, packageJsonPath);
 				return { runner: "jest", config: RUNNERS.jest };
 			}
 			if (allDeps.pytest || allDeps["pytest-cov"]) {
 				this.log("Detected pytest in package.json (unusual)");
-				this.availableRunners.set(`${cwd}:pytest:config`, true);
+				this.setRunnerAvailability(byRunner, "pytest", true, packageJsonPath);
 				return { runner: "pytest", config: RUNNERS.pytest };
 			}
 		} catch (err) {
@@ -628,8 +705,10 @@ export class TestRunnerClient {
 	parseVitestTestGlobs(
 		cwd: string,
 	): { include?: string[]; exclude?: string[] } | null {
-		if (this.vitestTestGlobsCache.has(cwd)) {
-			return this.vitestTestGlobsCache.get(cwd) ?? null;
+		const rootKey = this.getCanonicalProjectRoot(cwd);
+		const cached = this.vitestTestGlobsCache.get(rootKey);
+		if (cached !== undefined) {
+			return cached;
 		}
 
 		// .mts isn't in RUNNERS.vitest.configFiles (that list drives runner
@@ -658,7 +737,7 @@ export class TestRunnerClient {
 			}
 		}
 
-		this.vitestTestGlobsCache.set(cwd, result);
+		this.vitestTestGlobsCache.set(rootKey, result);
 		return result;
 	}
 

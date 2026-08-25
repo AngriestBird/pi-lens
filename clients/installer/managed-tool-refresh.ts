@@ -353,6 +353,7 @@ export interface RefreshCandidate {
 	packageName?: string;
 	/** npm only — what `refreshNpmOne` verifies after `npm update`. */
 	binaryName?: string;
+	checkArgs: string[];
 }
 
 /**
@@ -372,6 +373,7 @@ async function installedRefreshCandidates(): Promise<RefreshCandidate[]> {
 		candidates.push({
 			toolId: tool.toolId,
 			strategy: tool.strategy,
+			checkArgs: tool.checkArgs,
 			...(tool.packageName !== undefined && { packageName: tool.packageName }),
 			...(tool.binaryName !== undefined && { binaryName: tool.binaryName }),
 		});
@@ -708,7 +710,13 @@ async function performNpmRefresh(
 	// drops npm entries that do not.
 	const binaryName = candidate.binaryName as string;
 	const binPath = resolveManagedNpmBinPath(binaryName);
-	const verified = await verifyToolBinary(binPath);
+	const verified = await verifyToolBinary(
+		binPath,
+		undefined,
+		undefined,
+		10000,
+		candidate.checkArgs,
+	);
 	if (!verified) {
 		recordDegradationOnce({
 			kind: "managed-tool-refresh",
