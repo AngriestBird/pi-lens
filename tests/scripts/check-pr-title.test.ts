@@ -1,9 +1,16 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
 	MISSING_ISSUE_REF_MESSAGE,
 	MISSING_PREFIX_MESSAGE,
 	lintPrTitle,
+	resolveLivePrTitle,
 } from "../../scripts/check-pr-title.mjs";
+
+const payloadPr = {
+	number: 2083,
+	title: "fix: stale payload title",
+	body: "Refs #2083",
+};
 
 describe("PR title lint (#1844)", () => {
 	it("accepts a conventional prefix with an issue ref in the title", () => {
@@ -69,5 +76,63 @@ describe("PR title lint (#1844)", () => {
 		expect(lintPrTitle("fix: repair cache #123")).toMatchObject({
 			valid: true,
 		});
+	});
+});
+
+describe("live PR title resolution (#2083)", () => {
+	it("uses the live title when it differs from the event payload", async () => {
+		process.env.GITHUB_API_URL = "https://api.github.test";
+		process.env.GITHUB_REPOSITORY = "apmantza/pi-lens";
+		process.env.GITHUB_TOKEN = "test-token";
+		const fetchImpl = vi.fn().mockResolvedValue(
+			new Response(
+				JSON.stringify({ title: "fix: current title (refs #2083)" }),
+				{
+					status: 200,
+					headers: { "content-type": "application/json" },
+				},
+			),
+		);
+
+		const title = await resolveLivePrTitle(payloadPr, fetchImpl);
+		expect(title).toBe("fix: current title (refs #2083)");
+		expect(lintPrTitle(title).valid).toBe(true);
+		expect(fetchImpl).toHaveBeenCalledWith(
+			"https://api.github.test/repos/apmantza/pi-lens/pulls/2083",
+			expect.objectContaining({
+				headers: {
+					Authorization: "Bearer test-token",
+					Accept: "application/vnd.github+json",
+				},
+			}),
+		);
+	});
+
+	it("uses the live invalid title instead of a compliant payload title", async () => {
+		const fetchImpl = vi.fn().mockResolvedValue(
+			new Response(JSON.stringify({ title: "needs a prefix (#2083)" }), {
+				status: 200,
+			}),
+		);
+
+		const title = await resolveLivePrTitle(
+			{ ...payloadPr, title: "fix: payload title (refs #2083)" },
+			fetchImpl,
+		);
+		expect(title).toBe("needs a prefix (#2083)");
+		expect(lintPrTitle(title).valid).toBe(false);
+	});
+
+	it("falls back to the payload title and warns when fetching fails", async () => {
+		const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+		const fetchImpl = vi.fn().mockRejectedValue(new Error("network down"));
+
+		await expect(resolveLivePrTitle(payloadPr, fetchImpl)).resolves.toBe(
+			payloadPr.title,
+		);
+		expect(warning).toHaveBeenCalledWith(
+			expect.stringContaining("network down"),
+		);
+		warning.mockRestore();
 	});
 });
