@@ -917,6 +917,10 @@ export interface LSPClientState {
 		string,
 		{ version: number; hash: string; text?: string }
 	>;
+	/** #2065: full Incremental-sync text is an LRU-like bounded subset of the
+	 * per-path content-binding map. The binding remains after text eviction. */
+	incrementalTextRetainedEntries?: number;
+	incrementalTextRetainedBytes?: number;
 	/** #1095: the content binding for the diagnostics currently stored for a path
 	 *  — {version, contentHash} of the document those diagnostics were computed
 	 *  against. Set only when the accepted publish carried a version; a version-
@@ -1053,6 +1057,27 @@ export interface LSPClientState {
 	 * the state literal, like `workspaceDiagnosticsSupport`.
 	 */
 	watchQueue: WatchedFilesQueue;
+}
+
+/** #2065: bound both the path count and UTF-16 heap represented by retained
+ * Incremental-sync text. The map keeps the newest sent paths when evicting. */
+export const MAX_INCREMENTAL_TEXT_RETAINED_ENTRIES = 128;
+export const MAX_INCREMENTAL_TEXT_RETAINED_BYTES = 64 * 1024 * 1024;
+
+const activeLspClients = new Set<LSPClientState>();
+
+export function getLspDocumentTextRetentionSnapshot(): {
+	clients: number;
+	entries: number;
+	bytes: number;
+} {
+	let entries = 0;
+	let bytes = 0;
+	for (const state of activeLspClients) {
+		entries += state.incrementalTextRetainedEntries ?? 0;
+		bytes += state.incrementalTextRetainedBytes ?? 0;
+	}
+	return { clients: activeLspClients.size, entries, bytes };
 }
 
 function isClientAlive(state: LSPClientState): boolean {
@@ -1709,6 +1734,21 @@ function recordSentContent(
 	version: number,
 	content: string,
 ): void {
+	const previous = state.documentContentHashes.get(normalizedPath);
+	if (previous?.text !== undefined) {
+		state.incrementalTextRetainedEntries = Math.max(
+			0,
+			(state.incrementalTextRetainedEntries ?? 1) - 1,
+		);
+		state.incrementalTextRetainedBytes = Math.max(
+			0,
+			(state.incrementalTextRetainedBytes ?? previous.text.length * 2) -
+				previous.text.length * 2,
+		);
+	}
+	// Map insertion order is the sent-text recency order. Reinsert an existing
+	// path so a frequently edited document is not evicted ahead of a stale one.
+	state.documentContentHashes.delete(normalizedPath);
 	state.documentContentHashes.set(normalizedPath, {
 		version,
 		hash: hashDiagnosticContent(content),
@@ -1719,6 +1759,37 @@ function recordSentContent(
 			text: content,
 		}),
 	});
+	if (state.syncKind === TEXT_DOCUMENT_SYNC_KIND_INCREMENTAL) {
+		state.incrementalTextRetainedEntries =
+			(state.incrementalTextRetainedEntries ?? 0) + 1;
+		state.incrementalTextRetainedBytes =
+			(state.incrementalTextRetainedBytes ?? 0) + content.length * 2;
+		while (
+			(state.incrementalTextRetainedEntries ?? 0) >
+				MAX_INCREMENTAL_TEXT_RETAINED_ENTRIES ||
+			(state.incrementalTextRetainedBytes ?? 0) >
+				MAX_INCREMENTAL_TEXT_RETAINED_BYTES
+		) {
+			const oldest = [...state.documentContentHashes.entries()].find(
+				([, binding]) => binding.text !== undefined,
+			);
+			if (!oldest) break;
+			const [oldestPath, binding] = oldest;
+			state.documentContentHashes.set(oldestPath, {
+				version: binding.version,
+				hash: binding.hash,
+			});
+			state.incrementalTextRetainedEntries = Math.max(
+				0,
+				(state.incrementalTextRetainedEntries ?? 1) - 1,
+			);
+			state.incrementalTextRetainedBytes = Math.max(
+				0,
+				(state.incrementalTextRetainedBytes ?? 0) -
+					(binding.text?.length ?? 0) * 2,
+			);
+		}
+	}
 	// #1641 criterion 3: the in-memory document's version + content length AT
 	// SEND TIME, so a later "diagnostic cited a line past current disk EOF"
 	// record (`diagnostic_past_eof`, clients/diagnostic-line-freshness.ts) can be
@@ -3702,6 +3773,21 @@ export async function closeDocument(
 	// harmless and cheap) — mirror openDocuments' own per-close cleanup so it
 	// doesn't grow unbounded across a long session's worth of open/close churn.
 	state.projectIdentityProbedFiles?.delete(normalizedPath);
+	const retained = state.documentContentHashes.get(normalizedPath);
+	if (retained?.text !== undefined) {
+		state.incrementalTextRetainedEntries = Math.max(
+			0,
+			(state.incrementalTextRetainedEntries ?? 1) - 1,
+		);
+		state.incrementalTextRetainedBytes = Math.max(
+			0,
+			(state.incrementalTextRetainedBytes ?? retained.text.length * 2) -
+				retained.text.length * 2,
+		);
+	}
+	// Keep the hash/version binding only while the document is open; the full
+	// text is needed for the next edit, never after didClose (#2065).
+	state.documentContentHashes.delete(normalizedPath);
 	clearDiagnosticsForPath(state, normalizedPath);
 }
 
@@ -3856,6 +3942,7 @@ async function clientShutdownOnce(
 			}
 		}
 	} finally {
+		activeLspClients.delete(state);
 		disposeClientConnection(state);
 		const pid = state.lspProcess.pid;
 		logLatency({
@@ -4715,6 +4802,8 @@ export async function createLSPClient(options: {
 		documentVersions: new Map(),
 		diagnosticDocVersions: new Map(),
 		documentContentHashes: new Map(),
+		incrementalTextRetainedEntries: 0,
+		incrementalTextRetainedBytes: 0,
 		diagnosticBindings: new Map(),
 		pullResultIds: new Map(),
 		documentPullDiagnosticsBySource: new Map(),
@@ -4747,6 +4836,7 @@ export async function createLSPClient(options: {
 		// SAFETY: state construction completes before the flush closure can run.
 		watchQueue: undefined as unknown as WatchedFilesQueue,
 	};
+	activeLspClients.add(state);
 
 	// #271: batch per-file workspace/didChangeWatchedFiles into one notification
 	// per debounce window, so an N-file turn re-indexes the server once, not N×.

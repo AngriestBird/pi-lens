@@ -213,6 +213,9 @@ describe("collectMemorySampleSubsystems (O(1)/O(bounded-cache-size) live reads)"
 
 	it("every numeric field is non-negative and finite (plausibility, not exact values)", () => {
 		const subsystems = collectMemorySampleSubsystems(null);
+		expect(subsystems.lsp.clients).toBeGreaterThanOrEqual(0);
+		expect(subsystems.lsp.incrementalTextEntries).toBeGreaterThanOrEqual(0);
+		expect(subsystems.lsp.incrementalTextBytes).toBeGreaterThanOrEqual(0);
 		expect(subsystems.reviewGraph.cacheEntries).toBeGreaterThanOrEqual(0);
 		expect(subsystems.reviewGraph.totalNodes).toBeGreaterThanOrEqual(0);
 		expect(subsystems.reviewGraph.totalEdges).toBeGreaterThanOrEqual(0);

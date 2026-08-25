@@ -11,11 +11,13 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
 	clientRequestWorkspaceDiagnostics,
+	closeDocument,
 	createLSPClient,
 	handleNotifyChange,
 	handleNotifyOpen,
 	setupIncomingHandlers,
 	type LSPClientState,
+	MAX_INCREMENTAL_TEXT_RETAINED_ENTRIES,
 } from "../../../clients/lsp/client.js";
 import { launchLSP, stopLSP } from "../../../clients/lsp/launch.js";
 import { normalizeMapKey } from "../../../clients/path-utils.js";
@@ -266,6 +268,78 @@ describe("outgoing didChange honors the negotiated sync kind (#1669)", () => {
 			start: { line: 0, character: 0 },
 			end: { line: 1, character: "line1".length },
 		});
+	});
+
+	it("#2065 bounds and tears down Incremental full-text retention", async () => {
+		const incremental = createMockState({ syncKind: 2 });
+		const paths = Array.from(
+			{ length: MAX_INCREMENTAL_TEXT_RETAINED_ENTRIES * 2 },
+			(_, index) => `/project/retention-${index}.ts`,
+		);
+		for (const filePath of paths) {
+			const key = normalizeMapKey(filePath);
+			incremental.openDocuments.add(key);
+			await handleNotifyChange(incremental, filePath, `text-${filePath}`);
+		}
+		const textEntries = () =>
+			[...incremental.documentContentHashes.values()].filter(
+				(binding) => binding.text !== undefined,
+			).length;
+		expect(textEntries()).toBeLessThanOrEqual(
+			MAX_INCREMENTAL_TEXT_RETAINED_ENTRIES,
+		);
+		expect(incremental.incrementalTextRetainedBytes).toBeLessThanOrEqual(
+			64 * 1024 * 1024,
+		);
+
+		for (const filePath of paths) await closeDocument(incremental, filePath);
+		expect(textEntries()).toBe(0);
+		expect(incremental.incrementalTextRetainedBytes).toBe(0);
+
+		const full = createMockState({ syncKind: 1 });
+		for (const filePath of paths.slice(0, 3)) {
+			const key = normalizeMapKey(filePath);
+			full.openDocuments.add(key);
+			await handleNotifyChange(full, filePath, `text-${filePath}`);
+		}
+		expect(
+			[...full.documentContentHashes.values()].filter(
+				(binding) => binding.text !== undefined,
+			).length,
+		).toBe(0);
+		expect(full.incrementalTextRetainedBytes).toBe(0);
+		for (const filePath of paths.slice(0, 3))
+			await closeDocument(full, filePath);
+		expect(full.documentContentHashes.size).toBe(0);
+	});
+
+	it("#2065 preserves an incremental edit round trip for retained text", async () => {
+		const state = createMockState({ syncKind: 2 });
+		state.openDocuments.add(TEST_KEY);
+		state.documentVersions.set(TEST_KEY, 0);
+		await handleNotifyChange(state, TEST_FILE, "before\ncontent");
+		await handleNotifyChange(state, TEST_FILE, "after\ncontent");
+		const calls = vi.mocked(state.connection.sendNotification).mock.calls;
+		const change = calls.filter(
+			(call) => call[0] === "textDocument/didChange",
+		)[1];
+		const params = change[1] as {
+			contentChanges: Array<{
+				range?: {
+					start: { line: number; character: number };
+					end: { line: number; character: number };
+				};
+				text: string;
+			}>;
+		};
+		const edit = params.contentChanges[0];
+		expect(edit.range).toEqual({
+			start: { line: 0, character: 0 },
+			end: { line: 1, character: "content".length },
+		});
+		const previous = "before\ncontent";
+		const applied = `${previous.slice(0, 0)}${edit.text}`;
+		expect(applied).toBe("after\ncontent");
 	});
 });
 
