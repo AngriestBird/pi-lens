@@ -72,10 +72,15 @@ import {
 } from "./diagnostic-binding.js";
 import {
 	getServersForFileWithConfig,
-	getSessionRootsForTelemetry,
 	getServerInitOverride,
-	isOutsideAllSessionRoots,
 } from "./config.js";
+// #2052: deliberately NOT taken from `config.js`. This module's import surface
+// from `config.js` is mirrored by explicit `vi.mock` factories in ~58 test
+// files, so every new symbol taken from there breaks all of them.
+import {
+	getSessionRootsForTelemetry,
+	isOutsideAllSessionRoots,
+} from "./session-roots.js";
 import { getLanguageId } from "./language.js";
 import type { LSPServerInfo } from "./server.js";
 import {

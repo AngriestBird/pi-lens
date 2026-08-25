@@ -29,19 +29,15 @@ import { removeTempDirSync } from "../test-utils.js";
 const getServersForFileWithConfig = vi.fn();
 const createLSPClient = vi.fn();
 
-// Partial mock: the REAL registry predicate stays in play (that is the
-// behavior under test), only server selection is stubbed so no language
-// server is spawned.
-vi.mock("../../../clients/lsp/config.js", async () => {
-	const actual = await vi.importActual<
-		typeof import("../../../clients/lsp/config.js")
-	>("../../../clients/lsp/config.js");
-	return {
-		...actual,
-		getServersForFileWithConfig,
-		getServerInitOverride: () => undefined,
-	};
-});
+// Only server selection is stubbed, so no language server is spawned. The
+// session-root registry lives in its own unmocked module, so the REAL
+// predicate decides the decline — that is the behavior under test. That
+// `initLSPConfig` populates that registry is pinned separately in
+// tests/clients/lsp/root-coalescing.test.ts, which mocks nothing.
+vi.mock("../../../clients/lsp/config.js", () => ({
+	getServersForFileWithConfig,
+	getServerInitOverride: () => undefined,
+}));
 vi.mock("../../../clients/lsp/client.js", () => ({ createLSPClient }));
 
 describe("#2052 sweep over a foreign root does not report or cache a clean", () => {
@@ -63,11 +59,6 @@ describe("#2052 sweep over a foreign root does not report or cache a clean", () 
 		fs.writeFileSync(path.join(foreignDir, "tsconfig.json"), "{}\n");
 		foreignFile = path.join(foreignDir, "app.ts");
 		fs.writeFileSync(foreignFile, "export const a: number = 1;\n");
-
-		const config = await import("../../../clients/lsp/config.js");
-		config.resetLSPConfigStateForTests();
-		// Only sessionDir is a session root. foreignDir is not.
-		await config.initLSPConfig(sessionDir);
 
 		const tsServer = {
 			id: "typescript",
@@ -92,17 +83,37 @@ describe("#2052 sweep over a foreign root does not report or cache a clean", () 
 		});
 	});
 
+	/**
+	 * Build the module graph for ONE test, then declare the session root inside
+	 * it. `vi.resetModules()` gives each test a fresh graph, so the registry
+	 * must be populated through the SAME graph that `index.js` closes over —
+	 * registering in `beforeEach` instead let a later test reuse an earlier
+	 * test's `index.js` instance pointing at a registry that was already reset.
+	 */
+	async function loadServiceWithSession() {
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		// Imported AFTER index.js so both resolve to the same module instance in
+		// this test's graph. Registering via a separately-resolved copy (for
+		// example through `vi.importActual`) populates a DIFFERENT instance, and
+		// the service then reads an empty registry and serves the file.
+		const roots = await import("../../../clients/lsp/session-roots.js");
+		roots.resetSessionRootsForTests();
+		// Only sessionDir is a session root. foreignDir is not.
+		roots.registerSessionRoot(sessionDir);
+		return new LSPService();
+	}
+
 	afterEach(async () => {
-		const config = await import("../../../clients/lsp/config.js");
-		config.resetLSPConfigStateForTests();
+		const roots = await import("../../../clients/lsp/session-roots.js");
+		roots.resetSessionRootsForTests();
 		removeTempDirSync(sessionDir);
 		removeTempDirSync(foreignDir);
 		resetWorkspaceDiagnosticsCacheSession();
 	});
 
 	it("marks the foreign file unconfirmed with reason outside_project_root", async () => {
-		const { LSPService } = await import("../../../clients/lsp/index.js");
-		const results = await new LSPService().runWorkspaceDiagnostics(foreignDir);
+		const service = await loadServiceWithSession();
+		const results = await service.runWorkspaceDiagnostics(foreignDir);
 
 		const result = results.find(
 			(r) => cacheKeyFor(r.filePath) === cacheKeyFor(foreignFile),
@@ -115,8 +126,8 @@ describe("#2052 sweep over a foreign root does not report or cache a clean", () 
 	});
 
 	it("does not write the declined file into the workspace cache", async () => {
-		const { LSPService } = await import("../../../clients/lsp/index.js");
-		await new LSPService().runWorkspaceDiagnostics(foreignDir);
+		const service = await loadServiceWithSession();
+		await service.runWorkspaceDiagnostics(foreignDir);
 
 		const cached =
 			loadWorkspaceDiagnosticsCache(foreignDir)?.entries[

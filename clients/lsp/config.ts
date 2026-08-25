@@ -54,7 +54,10 @@ import path from "node:path";
 import { BoundedLruCache } from "../bounded-cache.js";
 import { getGlobalPiLensDir } from "../file-utils.js";
 import { launchLSP } from "./launch.js";
-import { isSameOrWithin } from "./server.js";
+import {
+	registerSessionRoot,
+	resetSessionRootsForTests,
+} from "./session-roots.js";
 import {
 	createRootDetector,
 	LSP_SERVERS,
@@ -249,53 +252,6 @@ function isSameOrChildPath(filePath: string, candidateRoot: string): boolean {
 	return filePath.startsWith(`${candidateRoot}${path.sep}`);
 }
 
-/**
- * #2052: is `filePath` outside EVERY initialized session cwd?
- *
- * `workspaceConfigs` is the session-cwd registry — `initLSPConfig` is the one
- * writer, and every entry point funnels through it (`index.ts`'s
- * `ensureLSPConfigInitialized`, `mcp/server.ts`'s `ensureReady`,
- * `clients/runtime-session.ts`, `clients/lens-engine.ts`). Deriving the
- * predicate from this map instead of a parallel hand-maintained set keeps ONE
- * source of truth for "which roots does this process serve", so a second
- * `initLSPConfig` cwd cannot silently stop being served.
- *
- * Two properties this shape buys, both of which a last-writer-wins latch lost:
- *
- *  - MULTI-CWD. A process that initialized projA and then projB serves BOTH.
- *    A latch would have left projA's files reading as foreign the moment projB
- *    initialized.
- *  - FAIL-OPEN. An EMPTY registry (initLSPConfig never ran, or
- *    `resetLSPConfigStateForTests` cleared it) declines NOTHING. Callers that
- *    never declared a session — isolated tests, API consumers, an
- *    initialization race — degrade to the pre-#2052 clamp instead of having
- *    `process.cwd()` silently gate a decline. Declining is a hard refusal to
- *    answer, so it must require positive evidence that a session exists and
- *    this file is outside it, never the absence of evidence.
- */
-export function isOutsideAllSessionRoots(filePath: string): boolean {
-	const resolvedFilePath = path.resolve(filePath);
-	let sawRegisteredRoot = false;
-	for (const [root] of workspaceConfigs) {
-		sawRegisteredRoot = true;
-		if (isSameOrWithin(root, resolvedFilePath)) return false;
-	}
-	return sawRegisteredRoot;
-}
-
-/**
- * #2052: the initialized session cwds, for the decline telemetry record's
- * "ceiling" field. Sorted with a code-unit comparator so the emitted string is
- * deterministic across locales (#1883), and capped because the record is
- * bounded — a process with many roots must not emit an unbounded path list.
- */
-export function getSessionRootsForTelemetry(limit = 4): string[] {
-	return [...workspaceConfigs]
-		.map(([root]) => root)
-		.sort((a, b) => Number(a > b) - Number(a < b))
-		.slice(0, limit);
-}
-
 function getConfigForFile(filePath: string): RegisteredLSPConfig {
 	const resolvedFilePath = path.resolve(filePath);
 	let bestMatch: { root: string; config: RegisteredLSPConfig } | undefined;
@@ -316,6 +272,10 @@ function getConfigForFile(filePath: string): RegisteredLSPConfig {
  */
 export async function initLSPConfig(cwd: string): Promise<void> {
 	const normalizedCwd = normalizeWorkspacePath(cwd);
+	// #2052: this cwd is now a served session root. Registered BEFORE the
+	// in-flight dedup return below, so a concurrent duplicate init still
+	// registers it rather than returning early with the root unrecorded.
+	registerSessionRoot(normalizedCwd);
 
 	const existing = configInFlight.get(normalizedCwd);
 	if (existing) return existing;
@@ -445,6 +405,9 @@ export function getServerInitOverride(
 
 export function resetLSPConfigStateForTests(): void {
 	workspaceConfigs.clear();
+	// Reset both together: a cleared config store beside a live session-root
+	// registry would decline files for roots nothing can serve any more.
+	resetSessionRootsForTests();
 }
 
 // Re-export with config support
