@@ -696,6 +696,13 @@ Unsupported pull responses are also recognized by the standard message-only
 variants (`method not found`, `unknown method`, and `unsupported method`).
 Status consumers receive detached, 200-character-bounded failure entries.
 
+LSP file-operation registrations retain their validated filter arrays through
+client state. Both rename send boundaries match the old and new file URIs by
+scheme, glob, explicit file/folder kind, and `ignoreCase`; entity kind comes
+from a live old/new path stat probe, never the host OS. Malformed registrations
+and unsupported URI schemes fail closed. Capability-skip evidence uses the
+fixed reasons `no-registration` and `filter-mismatch`. (#2049)
+
 The git guard classifies wrapper launchers only after basename/PATHEXT
 normalization, and strips shell escapes only from command-verb tokens; path
 arguments retain the shared lexer’s Windows-backslash behavior. Failed bash

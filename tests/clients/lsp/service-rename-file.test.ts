@@ -142,7 +142,7 @@ describe("LSPService.renameFile", () => {
 		});
 		unsupported.getOperationSupport.mockReturnValue({
 			willRenameFiles: false,
-			didRenameFiles: true,
+			didRenameFiles: false,
 		});
 		const service = new LSPService();
 		addClient(service, "typescript", tmpDir, supporting);
@@ -156,6 +156,7 @@ describe("LSPService.renameFile", () => {
 			expect(result.applied).toBe(true);
 			expect(supporting.willRenameFiles).toHaveBeenCalledWith(oldPath, newPath);
 			expect(unsupported.willRenameFiles).not.toHaveBeenCalled();
+			expect(unsupported.didRenameFiles).not.toHaveBeenCalled();
 			expect(fs.readFileSync(importPath, "utf-8")).toBe(
 				"import { value } from './new';\n",
 			);

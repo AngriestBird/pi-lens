@@ -10,7 +10,7 @@
 
 import { spawn as nodeSpawn } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { access, readFile } from "node:fs/promises";
+import { access, readFile, stat } from "node:fs/promises";
 import * as os from "node:os";
 import { pathToFileURL } from "node:url";
 import { emitBounded } from "../bounded-telemetry.js";
@@ -5234,25 +5234,28 @@ export async function createLSPClient(options: {
 				recordDegradationOnce({
 					kind: "lsp-capability-skip",
 					subject: `${state.serverId}:workspace/willRenameFiles`,
-					reason:
-						"server did not advertise workspace.fileOperations.willRename",
+					reason: "no-registration",
 				});
 				return null;
 			}
 			// #1971 review: the server registered WHICH paths it cares about.
 			// Sending outside those filters asks a question the server never
 			// signed up to answer.
+			const oldUri = pathToFileURL(oldFilePath).href;
+			const newUri = pathToFileURL(newFilePath).href;
 			if (
-				!fileOperationFiltersMatch(
+				!(await fileOperationFiltersMatch(
 					state.fileOperationFilters?.willRename,
+					oldUri,
+					newUri,
 					oldFilePath,
 					newFilePath,
-				)
+				))
 			) {
 				recordDegradationOnce({
 					kind: "lsp-capability-skip",
 					subject: `${state.serverId}:workspace/willRenameFiles:filter`,
-					reason: "rename paths do not match the server's registered filters",
+					reason: "filter-mismatch",
 				});
 				return null;
 			}
@@ -5262,8 +5265,8 @@ export async function createLSPClient(options: {
 				{
 					files: [
 						{
-							oldUri: pathToFileURL(oldFilePath).href,
-							newUri: pathToFileURL(newFilePath).href,
+							oldUri,
+							newUri,
 						},
 					],
 				},
@@ -5277,31 +5280,35 @@ export async function createLSPClient(options: {
 				recordDegradationOnce({
 					kind: "lsp-capability-skip",
 					subject: `${state.serverId}:workspace/didRenameFiles`,
-					reason: "server did not advertise workspace.fileOperations.didRename",
+					reason: "no-registration",
 				});
 				return;
 			}
 			// #1971 review: same registration-filter discipline as willRename —
 			// the server only signed up to hear about matching paths.
+			const wireOldUri = oldUri ?? pathToFileURL(oldFilePath).href;
+			const wireNewUri = newUri ?? pathToFileURL(newFilePath).href;
 			if (
-				!fileOperationFiltersMatch(
+				!(await fileOperationFiltersMatch(
 					state.fileOperationFilters?.didRename,
+					wireOldUri,
+					wireNewUri,
 					oldFilePath,
 					newFilePath,
-				)
+				))
 			) {
 				recordDegradationOnce({
 					kind: "lsp-capability-skip",
 					subject: `${state.serverId}:workspace/didRenameFiles:filter`,
-					reason: "rename paths do not match the server's registered filters",
+					reason: "filter-mismatch",
 				});
 				return;
 			}
 			await safeSendNotification(state.connection, "workspace/didRenameFiles", {
 				files: [
 					{
-						oldUri: oldUri ?? pathToFileURL(oldFilePath).href,
-						newUri: newUri ?? pathToFileURL(newFilePath).href,
+						oldUri: wireOldUri,
+						newUri: wireNewUri,
 					},
 				],
 			});
@@ -5620,7 +5627,7 @@ function isCapabilityRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function isFileOperationRegistrationOptions(value: unknown): boolean {
-	return isCapabilityRecord(value) && Array.isArray(value.filters);
+	return parseFileOperationFilters(value) !== undefined;
 }
 
 /** One parsed `FileOperationFilter` from a registration-options object. */
@@ -5653,17 +5660,35 @@ function parseFileOperationFilters(
 		) {
 			return undefined;
 		}
+		if (
+			entry.scheme !== undefined &&
+			(typeof entry.scheme !== "string" ||
+				entry.scheme.trim() === "" ||
+				!/^[A-Za-z][A-Za-z0-9+.-]*$/.test(entry.scheme))
+		) {
+			return undefined;
+		}
 		const matches = pattern.matches;
+		if (matches !== undefined && matches !== "file" && matches !== "folder") {
+			return undefined;
+		}
+		if (pattern.options !== undefined && !isCapabilityRecord(pattern.options)) {
+			return undefined;
+		}
 		const options = isCapabilityRecord(pattern.options)
 			? pattern.options
 			: undefined;
+		if (
+			options?.ignoreCase !== undefined &&
+			typeof options.ignoreCase !== "boolean"
+		) {
+			return undefined;
+		}
 		filters.push({
-			scheme: typeof entry.scheme === "string" ? entry.scheme : undefined,
+			scheme: entry.scheme?.toLowerCase(),
 			glob: pattern.glob,
 			matches: matches === "file" || matches === "folder" ? matches : undefined,
-			ignoreCase:
-				options?.ignoreCase === true ||
-				(options?.ignoreCase !== false && process.platform === "win32"),
+			ignoreCase: options?.ignoreCase === true,
 		});
 	}
 	return filters;
@@ -5671,36 +5696,72 @@ function parseFileOperationFilters(
 
 /**
  * Whether ANY parsed filter expresses interest in either path of a rename.
- * Conservative by design: a filter whose scheme differs from the path's, that
- * declares `matches: "folder"` for our file-rename operations, or whose glob
- * matches neither the posix path nor the basename, counts as no interest. A
- * registration with ZERO parsable filters also matches nothing (fail closed).
+ * Conservative by design: unsupported URI schemes, an unresolved explicit
+ * file/folder kind, malformed URIs, and zero filters all match nothing.
  */
-function fileOperationFiltersMatch(
+async function fileOperationFiltersMatch(
 	filters: LSPFileOperationFilter[] | undefined,
+	oldUri: string,
+	newUri: string,
 	oldFilePath: string,
 	newFilePath: string,
-): boolean {
+): Promise<boolean> {
 	if (!filters || filters.length === 0) return false;
-	const candidates = [oldFilePath, newFilePath].flatMap((p) => {
-		const posix = p.replace(/\\/g, "/");
-		return [posix, posix.split("/").at(-1) ?? posix];
-	});
+	const candidates = [oldUri, newUri].flatMap(fileOperationUriCandidates);
+	if (candidates.length === 0) return false;
+	const entityKind = await probeRenameEntityKind(oldFilePath, newFilePath);
 	for (const filter of filters) {
-		// pi-lens only ever renames local files (pathToFileURL); a registration
-		// scoped to another scheme expresses no interest in them.
 		if (filter.scheme !== undefined && filter.scheme !== "file") continue;
-		if (filter.matches === "folder") continue;
+		if (filter.matches !== undefined && filter.matches !== entityKind) continue;
 		for (const candidate of candidates) {
-			if (
-				minimatch(candidate, filter.glob, {
-					nocase: filter.ignoreCase,
-					dot: true,
-				})
-			) {
-				return true;
+			try {
+				if (
+					minimatch(candidate, filter.glob, {
+						nocase: filter.ignoreCase,
+						dot: true,
+					})
+				) {
+					return true;
+				}
+			} catch {
+				// Malformed glob implementations must never widen server fan-out.
 			}
 		}
 	}
 	return false;
+}
+
+function fileOperationUriCandidates(uri: string): string[] {
+	let parsed: URL;
+	try {
+		parsed = new URL(uri);
+	} catch {
+		return [];
+	}
+	// pi-lens performs local filesystem renames only. Even when a caller supplies
+	// preserved URI spelling, another scheme cannot describe that operation.
+	if (parsed.protocol.toLowerCase() !== "file:") return [];
+	let uriPath: string;
+	try {
+		uriPath = decodeURIComponent(parsed.pathname).replace(/\\/g, "/");
+	} catch {
+		return [];
+	}
+	return [uriPath, uriPath.split("/").at(-1) ?? uriPath];
+}
+
+async function probeRenameEntityKind(
+	oldFilePath: string,
+	newFilePath: string,
+): Promise<"file" | "folder" | undefined> {
+	for (const filePath of [oldFilePath, newFilePath]) {
+		try {
+			const info = await stat(filePath);
+			return info.isDirectory() ? "folder" : "file";
+		} catch {
+			// Before the rename the old path normally exists; after it, the new path
+			// does. Probe both instead of deriving behavior from the host OS.
+		}
+	}
+	return undefined;
 }

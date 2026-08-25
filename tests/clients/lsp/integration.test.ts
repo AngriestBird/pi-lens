@@ -22,6 +22,10 @@ vi.hoisted(() => {
 	process.env.PI_LENS_LSP_SHUTDOWN_TIMEOUT_MS = "150";
 });
 import { createLSPClient } from "../../../clients/lsp/client.js";
+import {
+	getDegradationSummary,
+	resetDegradationLedger,
+} from "../../../clients/degradation-ledger.js";
 import { launchLSP, stopLSP } from "../../../clients/lsp/launch.js";
 import { removeTempDirSync } from "../test-utils.js";
 
@@ -416,6 +420,219 @@ describe("LSP Client Integration — nested capability gates (#1971)", () => {
 				await stopLSP(proc);
 			}
 		}
+	});
+
+	it("honors complete file-operation filters on the protocol wire", async () => {
+		const tempRoot = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lsp-rename-filter-"),
+		);
+		const oldFile = path.join(tempRoot, "OLD.TS");
+		const newFile = path.join(tempRoot, "NEW.TS");
+		const oldFolder = path.join(tempRoot, "old-folder");
+		const newFolder = path.join(tempRoot, "new-folder");
+		fs.writeFileSync(oldFile, "export {};\n");
+		fs.mkdirSync(oldFolder);
+
+		const filter = (
+			glob: unknown,
+			extra: Record<string, unknown> = {},
+		): Record<string, unknown> => ({
+			scheme: "file",
+			pattern: { glob, ...extra },
+		});
+		const cases: Array<{
+			name: string;
+			filters: unknown;
+			oldPath?: string;
+			newPath?: string;
+			oldUri?: string;
+			newUri?: string;
+			sent: boolean;
+			registered?: boolean;
+		}> = [
+			{
+				name: "mixed filters match when one complete filter matches",
+				filters: [
+					filter("**/*.go"),
+					filter("**/*.ts", { options: { ignoreCase: true } }),
+				],
+				sent: true,
+			},
+			{
+				name: "ignoreCase defaults to false independent of host",
+				filters: [filter("**/*.ts")],
+				sent: false,
+			},
+			{
+				name: "folder kind matches a probed folder",
+				filters: [filter("**/old-folder", { matches: "folder" })],
+				oldPath: oldFolder,
+				newPath: newFolder,
+				sent: true,
+			},
+			{
+				name: "file kind rejects a probed folder",
+				filters: [filter("**/old-folder", { matches: "file" })],
+				oldPath: oldFolder,
+				newPath: newFolder,
+				sent: false,
+			},
+			{
+				name: "unsupported URI scheme fails closed",
+				filters: [{ scheme: "untitled", pattern: { glob: "**/*.ts" } }],
+				oldUri: "untitled:///OLD.TS",
+				newUri: "untitled:///NEW.TS",
+				sent: false,
+			},
+			{
+				name: "omitted scheme matches a supported file URI",
+				filters: [{ pattern: { glob: "**/*.TS" } }],
+				sent: true,
+			},
+			{
+				name: "empty scheme is malformed",
+				filters: [{ scheme: "", pattern: { glob: "**/*.TS" } }],
+				sent: false,
+				registered: false,
+			},
+			{
+				name: "invalid matches value is malformed",
+				filters: [filter("**/*.TS", { matches: "document" })],
+				sent: false,
+				registered: false,
+			},
+			{
+				name: "invalid options are malformed",
+				filters: [filter("**/*.TS", { options: { ignoreCase: "yes" } })],
+				sent: false,
+				registered: false,
+			},
+		];
+
+		try {
+			for (const operation of ["will", "did"] as const) {
+				for (const testCase of cases) {
+					const envKey =
+						operation === "will"
+							? "FAKE_LSP_WILL_RENAME_FILTERS"
+							: "FAKE_LSP_DID_RENAME_FILTERS";
+					const launched = await launchLSP(
+						process.execPath,
+						[FAKE_SERVER_PATH],
+						{
+							cwd: tempRoot,
+							env: {
+								...process.env,
+								FAKE_LSP_WILL_RENAME: "true",
+								FAKE_LSP_DID_RENAME: "true",
+								[envKey]: JSON.stringify(testCase.filters),
+								...(operation === "will"
+									? { FAKE_LSP_ECHO_REQUEST_METHODS: "1" }
+									: { FAKE_LSP_ECHO_NOTIFY_METHODS: "1" }),
+							},
+						},
+					);
+					const filteredClient = await createLSPClient({
+						serverId: `fake-${operation}-${testCase.name}`,
+						process: launched,
+						root: tempRoot,
+					});
+					const received: string[] = [];
+					filteredClient.connection.onNotification(
+						operation === "will"
+							? "$/test/requestReceived"
+							: "$/test/notifyReceived",
+						(params: { method: string }) => {
+							received.push(params.method);
+						},
+					);
+					try {
+						expect(
+							filteredClient.getOperationSupport()[
+								operation === "will" ? "willRenameFiles" : "didRenameFiles"
+							],
+							`${operation}: ${testCase.name} registration`,
+						).toBe(testCase.registered ?? true);
+						const oldPath = testCase.oldPath ?? oldFile;
+						const newPath = testCase.newPath ?? newFile;
+						if (operation === "will") {
+							await filteredClient.willRenameFiles(oldPath, newPath);
+						} else {
+							await filteredClient.didRenameFiles(
+								oldPath,
+								newPath,
+								testCase.oldUri,
+								testCase.newUri,
+							);
+						}
+						const method = `workspace/${operation}RenameFiles`;
+						const graceMs = testCase.sent ? 5000 : 300;
+						for (
+							let i = 0;
+							i < graceMs / 25 && !received.includes(method);
+							i++
+						) {
+							await new Promise((resolve) => setTimeout(resolve, 25));
+						}
+						expect(
+							received.includes(method),
+							`${operation}: ${testCase.name}`,
+						).toBe(testCase.sent);
+					} finally {
+						await filteredClient.shutdown();
+						await stopLSP(launched);
+					}
+				}
+			}
+		} finally {
+			removeTempDirSync(tempRoot);
+		}
+	}, 60_000);
+
+	it("records fixed file-operation skip reasons", async () => {
+		resetDegradationLedger();
+		const unregistered = await launchLSP(process.execPath, [FAKE_SERVER_PATH], {
+			cwd: process.cwd(),
+			env: { ...process.env },
+		});
+		const unregisteredClient = await createLSPClient({
+			serverId: "fake-no-registration",
+			process: unregistered,
+			root: process.cwd(),
+		});
+		try {
+			await unregisteredClient.willRenameFiles("old.ts", "new.ts");
+		} finally {
+			await unregisteredClient.shutdown();
+			await stopLSP(unregistered);
+		}
+
+		const mismatched = await launchLSP(process.execPath, [FAKE_SERVER_PATH], {
+			cwd: process.cwd(),
+			env: {
+				...process.env,
+				FAKE_LSP_WILL_RENAME: "true",
+				FAKE_LSP_WILL_RENAME_GLOB: "**/*.go",
+			},
+		});
+		const mismatchedClient = await createLSPClient({
+			serverId: "fake-filter-mismatch",
+			process: mismatched,
+			root: process.cwd(),
+		});
+		try {
+			await mismatchedClient.willRenameFiles("old.ts", "new.ts");
+		} finally {
+			await mismatchedClient.shutdown();
+			await stopLSP(mismatched);
+		}
+
+		const reasons = getDegradationSummary()
+			.find((group) => group.kind === "lsp-capability-skip")
+			?.latestReasons.map((entry) => entry.reason);
+		expect(reasons).toEqual(
+			expect.arrayContaining(["no-registration", "filter-mismatch"]),
+		);
 	});
 
 	const resolveCases = [

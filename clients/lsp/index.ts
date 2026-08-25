@@ -6524,7 +6524,7 @@ export class LSPService {
 			recordDegradationOnce({
 				kind: "lsp-capability-skip",
 				subject: `${serverId}:workspace/willRenameFiles`,
-				reason: "server did not advertise workspace.fileOperations.willRename",
+				reason: "no-registration",
 			});
 			return false;
 		});
@@ -6733,8 +6733,7 @@ export class LSPService {
 					recordDegradationOnce({
 						kind: "lsp-capability-skip",
 						subject: `${serverId}:workspace/didRenameFiles`,
-						reason:
-							"server did not advertise workspace.fileOperations.didRename",
+						reason: "no-registration",
 					});
 					return;
 				}
