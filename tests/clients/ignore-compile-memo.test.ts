@@ -128,14 +128,10 @@ describe("#1976 compiled-glob memo", () => {
 			// below.
 			expect(matcher.isIgnored(path.join(sub1, "a.snap"))).toBe(true);
 			expect(matcher.isIgnored(path.join(sub1, "profiles"), true)).toBe(true);
-			expect(matcher.isIgnored(path.join(sub1, "profiles", "x.ts"))).toBe(
-				true,
-			);
+			expect(matcher.isIgnored(path.join(sub1, "profiles", "x.ts"))).toBe(true);
 			// Sibling subtree: sub1's patterns must NOT apply there.
 			expect(matcher.isIgnored(path.join(sub2, "a.snap"))).toBe(false);
-			expect(matcher.isIgnored(path.join(sub2, "profiles"), true)).toBe(
-				false,
-			);
+			expect(matcher.isIgnored(path.join(sub2, "profiles"), true)).toBe(false);
 			expect(matcher.isIgnored(path.join(sub2, "profiles", "x.ts"))).toBe(
 				false,
 			);
@@ -156,7 +152,10 @@ describe("#1976 compiled-glob memo", () => {
 			fs.mkdirSync(sub1);
 			fs.mkdirSync(sub2);
 			fs.writeFileSync(path.join(sub1, ".gitignore"), "*.gen.ts\n");
-			fs.writeFileSync(path.join(sub2, ".gitignore"), "*.gen.ts\n!keep.gen.ts\n");
+			fs.writeFileSync(
+				path.join(sub2, ".gitignore"),
+				"*.gen.ts\n!keep.gen.ts\n",
+			);
 
 			// sub1 first: the compiled `*.gen.ts` / `**/*.gen.ts` globs are
 			// now warm and shared across subtrees — the VERDICT must not be.

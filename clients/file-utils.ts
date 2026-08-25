@@ -405,6 +405,11 @@ function buildProjectIgnoreMatcher(
 	// function), and — critically — it's only ever paid for paths a pattern
 	// already flagged as ignored, so it doesn't reintroduce the per-file cost
 	// this memo exists to avoid for the common (not-ignored) case.
+	const patternMemo = new Map<
+		string,
+		{ ignored: boolean; layer: GitignorePatternLayer | undefined }
+	>();
+
 	// Compile expanded gitignore globs once per matcher instance. Relative-path
 	// resolution remains outside this cache, so nested ignore scopes cannot leak
 	// verdicts between sibling trees. The instance lifetime bounds this map.
@@ -421,11 +426,6 @@ function buildProjectIgnoreMatcher(
 		}
 		return compiled.match(value);
 	};
-
-	const patternMemo = new Map<
-		string,
-		{ ignored: boolean; layer: GitignorePatternLayer | undefined }
-	>();
 
 	// #703 perf follow-up: `normalizeEphemeralMapKey` (cheap slash-fold +
 	// Windows-lowercase, zero fs I/O), NOT `normalizeMapKey` (realpath-backed).
