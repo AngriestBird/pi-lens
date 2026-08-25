@@ -628,7 +628,7 @@ export const TOOLS: ToolDefinition[] = [
 		id: "helm",
 		name: "Helm",
 		checkCommand: "helm",
-		// unverified against real binary (shape 16) — do not wire until probed
+		// intended: version --short — unverified against real binary (shape 16), do not wire until probed
 		checkArgs: ["--version"],
 		installStrategy: "github",
 		binaryName: "helm",
@@ -940,7 +940,7 @@ export const TOOLS: ToolDefinition[] = [
 		id: "spotbugs",
 		name: "SpotBugs",
 		checkCommand: "spotbugs",
-		// unverified against real binary (shape 16) — do not wire until probed
+		// intended: -version — unverified against real binary (shape 16), do not wire until probed
 		checkArgs: ["--version"],
 		installStrategy: "archive",
 		binaryName: "spotbugs",
@@ -1185,7 +1185,7 @@ export const TOOLS: ToolDefinition[] = [
 		id: "gitleaks",
 		name: "gitleaks",
 		checkCommand: "gitleaks",
-		// unverified against real binary (shape 16) — do not wire until probed
+		// intended: version — unverified against real binary (shape 16), do not wire until probed
 		checkArgs: ["--version"],
 		installStrategy: "github",
 		binaryName: "gitleaks",
@@ -1297,7 +1297,7 @@ export const TOOLS: ToolDefinition[] = [
 		id: "terraform-ls",
 		name: "terraform-ls",
 		checkCommand: "terraform-ls",
-		// unverified against real binary (shape 16) — do not wire until probed
+		// intended: version — unverified against real binary (shape 16), do not wire until probed
 		checkArgs: ["--version"],
 		installStrategy: "github",
 		binaryName: "terraform-ls",
@@ -3607,6 +3607,7 @@ async function probeManagedToolVersion(
 	try {
 		const result = await safeSpawnAsync(cached.path, tool.checkArgs, {
 			timeout: 10_000,
+			input: "",
 			ignoreAmbientSignal: true,
 			resourceLabel: `tool-refresh-version:${tool.id}`,
 		});

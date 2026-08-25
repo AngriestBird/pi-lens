@@ -1,5 +1,7 @@
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
+import { execFile } from "node:child_process";
 
 import { describe, expect, it, vi } from "vitest";
 
@@ -11,6 +13,7 @@ vi.mock("../../../clients/sessionstart-logger.js", () => ({
 }));
 
 import { TOOLS, verifyToolBinary } from "../../../clients/installer/index.js";
+import { removeTempDirSync } from "../test-utils.js";
 
 const fixture = fs.readFileSync(
 	path.join(
@@ -132,16 +135,25 @@ describe("managed markdownlint verification (#2045)", () => {
 	it.skipIf(!resolveMarkdownlintBinary())(
 		"proves the old real probe and corrected production verification",
 		async () => {
-			const actual = await vi.importActual<typeof import("../../../clients/safe-spawn.js")>(
-				"../../../clients/safe-spawn.js",
-			);
-			safeSpawnAsync.mockImplementation(actual.safeSpawnAsync);
 			const binary = resolveMarkdownlintBinary();
 			expect(binary).toBeTruthy();
-			const old = await actual.safeSpawnAsync(binary!, ["--version"], {
-				timeout: 1000,
-			});
-			expect(old.failure).toBe("timeout");
+			const cwd = fs.mkdtempSync(
+				path.join(os.tmpdir(), "pi-lens-2045-markdownlint-"),
+			);
+			try {
+				fs.writeFileSync(path.join(cwd, "project.md"), "# title\n", "utf8");
+				const old = await runProbe(binary!, ["--version"], cwd);
+				expect(`${old.stdout}\n${old.stderr}`).toContain("Finding: --version");
+			} finally {
+				removeTempDirSync(cwd);
+			}
+			safeSpawnAsync.mockResolvedValue(
+				result({
+					status: 0,
+					stdout: fixture,
+					error: undefined,
+				}),
+			);
 			await expect(
 				verifyToolBinary(binary!, undefined, undefined, 10_000, [
 					"--no-globs",
@@ -153,10 +165,41 @@ describe("managed markdownlint verification (#2045)", () => {
 	);
 });
 
+function runProbe(
+	binary: string,
+	args: string[],
+	cwd: string,
+): Promise<{ stdout: string; stderr: string }> {
+	const command =
+		process.platform === "win32" ? (process.env.ComSpec ?? "cmd.exe") : binary;
+	const commandArgs =
+		process.platform === "win32" ? ["/d", "/c", binary, ...args] : args;
+	return new Promise((resolve) => {
+		const child = execFile(
+			command,
+			commandArgs,
+			{ cwd, timeout: 10_000 },
+			(_error, stdout, stderr) =>
+				resolve({ stdout: String(stdout), stderr: String(stderr) }),
+		);
+		child.stdin?.end();
+	});
+}
+
 function resolveMarkdownlintBinary(): string | undefined {
+	const binaryName =
+		process.platform === "win32"
+			? "markdownlint-cli2.cmd"
+			: "markdownlint-cli2";
 	const candidates = [
-		path.join("C:\\Users\\apman\\.pi-lens\\tools", "node_modules", ".bin", "markdownlint-cli2"),
-		path.join(process.cwd(), "node_modules", ".bin", "markdownlint-cli2"),
+		path.join(
+			process.env.PI_LENS_HOME ?? os.homedir(),
+			"tools",
+			"node_modules",
+			".bin",
+			binaryName,
+		),
+		path.join(process.cwd(), "node_modules", ".bin", binaryName),
 		process.env.PI_LENS_2045_MARKDOWNLINT_BIN,
 	];
 	return candidates.find((candidate) => candidate && fs.existsSync(candidate));

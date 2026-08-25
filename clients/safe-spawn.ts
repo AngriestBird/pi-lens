@@ -1375,6 +1375,7 @@ export async function safeSpawnAsync(
 		// Keep historical open stdin by default. An opted-in payload is written
 		// completely and followed by EOF; input: "" closes stdin immediately.
 		if (options?.input !== undefined) {
+			child.stdin?.on("error", () => {});
 			child.stdin?.end(options.input);
 		}
 		if (child.pid && (posixProcessGroup || options?.lifetimeCoupled)) {
