@@ -156,6 +156,12 @@ function handle(raw) {
 				glob: process.env[globEnv] ?? globDefault,
 			},
 		});
+		const renameFilters = (operation, globEnv, globDefault) => {
+			const encoded = process.env[`FAKE_LSP_${operation}_FILTERS`];
+			return encoded === undefined
+				? [renameFilter(globEnv, globDefault)]
+				: JSON.parse(encoded);
+		};
 		const codeActionProvider =
 			process.env.FAKE_LSP_CODE_ACTION_PROVIDER === "false"
 				? { resolveProvider: false }
@@ -170,24 +176,22 @@ function handle(raw) {
 				? {
 						willRename: clientSupportsWillRename
 							? {
-									filters: [
-										renameFilter(
-											"FAKE_LSP_WILL_RENAME_GLOB",
-											"**/*",
-										),
-									],
+									filters: renameFilters(
+										"WILL_RENAME",
+										"FAKE_LSP_WILL_RENAME_GLOB",
+										"**/*",
+									),
 								}
 							: undefined,
 						...(process.env.FAKE_LSP_DID_RENAME === "true" &&
 						clientSupportsDidRename
 							? {
 									didRename: {
-										filters: [
-											renameFilter(
-												"FAKE_LSP_DID_RENAME_GLOB",
-												"**/*",
-											),
-										],
+										filters: renameFilters(
+											"DID_RENAME",
+											"FAKE_LSP_DID_RENAME_GLOB",
+											"**/*",
+										),
 									},
 								  }
 							: {}),

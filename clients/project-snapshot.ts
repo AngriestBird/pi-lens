@@ -1817,6 +1817,9 @@ export function saveProjectSnapshot(
 		knownMtime,
 		lastUsedAt: Date.now(),
 	};
+	const previousAuthoritativeEntry = authoritativeSnapshots.get(key);
+	if (previousAuthoritativeEntry)
+		clearAuthoritativeSnapshotTimer(previousAuthoritativeEntry);
 	authoritativeSnapshots.set(key, authoritativeEntry);
 	scheduleAuthoritativeSnapshotEviction(key, authoritativeEntry);
 	enforceAuthoritativeSnapshotCap();

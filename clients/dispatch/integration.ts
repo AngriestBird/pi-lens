@@ -708,6 +708,11 @@ function setReverseDepsEntry(
 	entry: Omit<ReverseDepsCacheEntry, "lastUsedAt" | "idleTimer">,
 	armIdleTimer = true,
 ): void {
+	const previous = reverseDepsIndexCache.get(key);
+	if (previous?.idleTimer !== undefined) {
+		clearTimeout(previous.idleTimer);
+		previous.idleTimer = undefined;
+	}
 	const resident: ReverseDepsCacheEntry = { ...entry, lastUsedAt: Date.now() };
 	reverseDepsIndexCache.set(key, resident);
 	touchReverseDepsEntry(key, resident, armIdleTimer);
