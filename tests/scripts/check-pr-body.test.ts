@@ -1,5 +1,6 @@
-import { describe, expect, it } from "vitest";
-import { lintPrBody } from "../../scripts/check-pr-body.mjs";
+import { readFileSync } from "node:fs";
+import { describe, expect, it, afterEach, vi } from "vitest";
+import { lintPrBody, resolveLivePrBody } from "../../scripts/check-pr-body.mjs";
 
 const body = `Summary\nOpening context.\n\n## Tests\nTargeted tests pass.\n\n## Blast radius\nNo runtime module touched.\n\n## Class sweep\nWhole-tree grep completed.\n\n## Observability\nThe advisory check run is the record.`;
 
@@ -39,10 +40,35 @@ describe("PR body lint (#1844)", () => {
 		).toMatchObject({ valid: true });
 	});
 
-	it("ignores fix-round sections", () => {
+	it("does not let Fix round headings satisfy required sections", () => {
 		expect(
-			lintPrBody(`${body}\n\n## Fix round 2\nReview history.`),
+			lintPrBody("## Fix round 1\nOnly review history here."),
+		).toMatchObject({
+			valid: false,
+		});
+	});
+
+	it("rejects the unfilled template", () => {
+		const template = readFileSync(".github/PULL_REQUEST_TEMPLATE.md", "utf8");
+		expect(lintPrBody(template)).toMatchObject({ valid: false });
+	});
+
+	it("accepts case-insensitive fleet synonyms", () => {
+		expect(
+			lintPrBody(
+				"## WHAT CHANGED AND WHY\nReal summary.\n\n## verification\nRan tests.\n\n## BLAST RADIUS\nNone.\n\n## CLASS SWEEP\nDone.\n\n## OBSERVABILITY\nRecorded.",
+			),
 		).toMatchObject({ valid: true });
+	});
+
+	it("ignores fenced headings and fenced template instructions", () => {
+		expect(lintPrBody("```md\n## Tests\nInstructions\n```\n")).toMatchObject({
+			valid: false,
+		});
+	});
+
+	it("guards null body input", () => {
+		expect(lintPrBody(null as unknown as string).valid).toBe(false);
 	});
 
 	it("accepts an opening paragraph instead of a Summary heading", () => {
@@ -57,5 +83,64 @@ describe("PR body lint (#1844)", () => {
 		expect(
 			lintPrBody(body.replace("Summary\nOpening context.\n\n", "")),
 		).toMatchObject({ valid: false });
+	});
+});
+
+describe("live PR body resolution (#2085)", () => {
+	const payloadPr = { number: 2085, body: "fallback" };
+
+	afterEach(() => vi.unstubAllEnvs());
+
+	it("uses the live body and API URL", async () => {
+		vi.stubEnv("GITHUB_API_URL", "https://api.github.test");
+		vi.stubEnv("GITHUB_REPOSITORY", "apmantza/pi-lens");
+		vi.stubEnv("GITHUB_TOKEN", "test-token");
+		const fetchImpl = vi
+			.fn()
+			.mockResolvedValue(
+				new Response(JSON.stringify({ body: "live" }), { status: 200 }),
+			);
+		expect(await resolveLivePrBody(payloadPr, fetchImpl)).toBe("live");
+		expect(fetchImpl).toHaveBeenCalledWith(
+			"https://api.github.test/repos/apmantza/pi-lens/pulls/2085",
+			expect.objectContaining({ signal: expect.any(AbortSignal) }),
+		);
+	});
+
+	it.each([
+		[
+			"non-2xx",
+			new Response("denied", { status: 403 }),
+			"GitHub API returned 403",
+		],
+		[
+			"malformed shape",
+			new Response(JSON.stringify({ body: 42 }), { status: 200 }),
+			"no body",
+		],
+	])("falls back and warns for %s", async (_name, response, reason) => {
+		vi.stubEnv("GITHUB_API_URL", "https://api.github.test");
+		vi.stubEnv("GITHUB_REPOSITORY", "apmantza/pi-lens");
+		vi.stubEnv("GITHUB_TOKEN", "test-token");
+		const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+		const fetchImpl = vi.fn().mockResolvedValue(response);
+		expect(await resolveLivePrBody(payloadPr, fetchImpl)).toBe("fallback");
+		expect(warning).toHaveBeenCalledWith(
+			expect.stringContaining("::warning::"),
+		);
+		expect(warning).toHaveBeenCalledWith(expect.stringContaining(reason));
+		warning.mockRestore();
+	});
+
+	it("falls back without a token and does not fetch", async () => {
+		vi.stubEnv("GITHUB_TOKEN", "");
+		const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+		const fetchImpl = vi.fn();
+		expect(await resolveLivePrBody(payloadPr, fetchImpl)).toBe("fallback");
+		expect(fetchImpl).not.toHaveBeenCalled();
+		expect(warning).toHaveBeenCalledWith(
+			expect.stringContaining("GITHUB_TOKEN is not set"),
+		);
+		warning.mockRestore();
 	});
 });

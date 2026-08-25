@@ -74,7 +74,9 @@ jobs:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     permissions:
+      contents: read
       pull-requests: read
+    timeout-minutes: 5
     # Advisory to start: this job is not in required-checks branch protection.
     # A finding stays visible as a red check without blocking a merge.
     env:

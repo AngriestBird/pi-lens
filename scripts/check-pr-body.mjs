@@ -1,7 +1,13 @@
 import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const TEMPLATE_PATH = ".github/PULL_REQUEST_TEMPLATE.md";
+const TEMPLATE_FILE = resolve(
+	dirname(fileURLToPath(import.meta.url)),
+	"..",
+	TEMPLATE_PATH,
+);
 const REQUIRED_SECTIONS = [
 	"Tests",
 	"Blast radius",
@@ -9,74 +15,149 @@ const REQUIRED_SECTIONS = [
 	"Observability",
 ];
 const HEADING = /^##\s+(.+?)\s*$/;
-const FIX_ROUND = /^Fix round\s+\d+$/i;
+
+// Fleet census from the review of 11 bodies: ## OBSERVABILITY x5,
+// ## what changed x6, ## verification x7, and ## Summary x1. “What changed”
+// (with or without “and why”) satisfies Summary; “Verification” satisfies
+// Tests. Heading matching is deliberately case-insensitive.
+const SECTION_SYNONYMS = new Map([
+	["summary", "summary"],
+	["what changed", "summary"],
+	["what changed and why", "summary"],
+	["what changed / why", "summary"],
+	["what changed / why / verification", ["summary", "tests"]],
+	["tests", "tests"],
+	["verification", "tests"],
+	["blast radius", "blast radius"],
+	["class sweep", "class sweep"],
+	["observability", "observability"],
+]);
 
 function sectionMessage(name, detail) {
 	return `PR body ${detail} "## ${name}". See ${TEMPLATE_PATH}.`;
 }
 
-/** Check the structural PR-body contract. Content is intentionally not judged. */
+function hasSection(heading, section) {
+	return Array.isArray(heading?.section)
+		? heading.section.includes(section)
+		: heading?.section === section;
+}
+
+function sourceWithoutFencedBlocks(source) {
+	let fenced = false;
+	return String(source)
+		.split(/\r?\n/)
+		.map((line) => {
+			if (/^\s*```/.test(line)) {
+				fenced = !fenced;
+				return "";
+			}
+			return fenced ? "" : line;
+		})
+		.join("\n");
+}
+
+function templatePlaceholderLines() {
+	const lines = sourceWithoutFencedBlocks(
+		readFileSync(TEMPLATE_FILE, "utf8"),
+	).split(/\r?\n/);
+	const placeholders = new Map();
+	let current;
+	for (const line of lines) {
+		const heading = HEADING.exec(line);
+		if (heading) {
+			current = SECTION_SYNONYMS.get(heading[1].trim().toLowerCase());
+			continue;
+		}
+		const value = line.trim();
+		if (current && value && !/^[-*+] \[ \]/.test(value)) {
+			if (!placeholders.has(current)) placeholders.set(current, new Set());
+			placeholders.get(current).add(value);
+		}
+	}
+	return placeholders;
+}
+
+function hasRealContent(lines, section, placeholders) {
+	const templateLines = placeholders.get(section) ?? new Set();
+	return lines.some((line) => {
+		const value = line.trim();
+		return value && !/^[-*+] \[ \]/.test(value) && !templateLines.has(value);
+	});
+}
+
+/** Check the structural PR-body contract, including answered sections. */
 export function lintPrBody(body = "") {
-	const lines = String(body).split(/\r?\n/);
+	const lines = sourceWithoutFencedBlocks(body).split(/\r?\n/);
 	const headings = [];
 	for (let index = 0; index < lines.length; index += 1) {
 		const match = HEADING.exec(lines[index]);
-		if (match) headings.push({ index, name: match[1] });
+		if (match)
+			headings.push({
+				index,
+				name: match[1],
+				section: SECTION_SYNONYMS.get(match[1].trim().toLowerCase()),
+			});
 	}
-	const ignoredRanges = headings
-		.filter(({ name }) => FIX_ROUND.test(name))
-		.map((heading) => ({
-			start: heading.index,
-			end:
-				headings.find((candidate) => candidate.index > heading.index)?.index ??
-				lines.length,
-		}));
-	const isIgnored = (index) =>
-		ignoredRanges.some(({ start, end }) => index >= start && index < end);
-
+	const placeholders = templatePlaceholderLines();
 	const errors = [];
-	const summary = headings.find(({ name }) => name === "Summary");
+	const summary = headings.find((heading) => hasSection(heading, "summary"));
 	const firstHeading = headings[0]?.index ?? lines.length;
-	if (!summary && !lines.slice(0, firstHeading).some((line) => line.trim())) {
+	const summaryEnd = summary
+		? (headings.find((candidate) => candidate.index > summary.index)?.index ??
+			lines.length)
+		: 0;
+	if (
+		(!summary ||
+			!hasRealContent(
+				lines.slice(summary.index + 1, summaryEnd),
+				"summary",
+				placeholders,
+			)) &&
+		!hasRealContent(lines.slice(0, firstHeading), "summary", placeholders)
+	) {
 		errors.push(`PR body is missing a Summary section. See ${TEMPLATE_PATH}.`);
 	}
 
 	for (const name of REQUIRED_SECTIONS) {
-		const heading = headings.find((candidate) => candidate.name === name);
+		const heading = headings.find((candidate) =>
+			hasSection(candidate, name.toLowerCase()),
+		);
 		if (!heading) {
 			errors.push(sectionMessage(name, "is missing"));
 			continue;
 		}
 		const nextHeading = headings.find(
-			(candidate) =>
-				candidate.index > heading.index && !FIX_ROUND.test(candidate.name),
+			(candidate) => candidate.index > heading.index,
 		);
-		const content = lines
-			.slice(heading.index + 1, nextHeading?.index ?? lines.length)
-			.filter((_, offset) => !isIgnored(heading.index + 1 + offset));
-		if (!content.some((line) => line.trim())) {
+		const content = lines.slice(
+			heading.index + 1,
+			nextHeading?.index ?? lines.length,
+		);
+		if (!hasRealContent(content, name.toLowerCase(), placeholders))
 			errors.push(
 				sectionMessage(name, "has no content before the next heading"),
 			);
-		}
 	}
-
 	return { valid: errors.length === 0, errors };
 }
 
-function eventPayload() {
-	const eventPath = process.env.GITHUB_EVENT_PATH;
-	if (!eventPath) throw new Error("GITHUB_EVENT_PATH is required");
-	return JSON.parse(readFileSync(eventPath, "utf8"));
-}
-
-async function liveBody(repository, number, fallback) {
+export async function resolveLivePrBody(
+	payloadPr,
+	fetchImpl = globalThis.fetch,
+) {
+	const fallback = payloadPr.body ?? "";
 	try {
 		const token = process.env.GITHUB_TOKEN;
 		if (!token) throw new Error("GITHUB_TOKEN is not set");
-		const response = await fetch(
-			`https://api.github.com/repos/${repository}/pulls/${number}`,
+		const apiUrl = process.env.GITHUB_API_URL;
+		const repository = process.env.GITHUB_REPOSITORY;
+		if (!apiUrl || !repository)
+			throw new Error("GITHUB_API_URL or GITHUB_REPOSITORY is missing");
+		const response = await fetchImpl(
+			`${apiUrl}/repos/${repository}/pulls/${payloadPr.number}`,
 			{
+				signal: AbortSignal.timeout(10_000),
 				headers: {
 					Accept: "application/vnd.github+json",
 					Authorization: `Bearer ${token}`,
@@ -91,24 +172,23 @@ async function liveBody(repository, number, fallback) {
 		return data.body;
 	} catch (error) {
 		console.warn(
-			`Warning: could not fetch the live PR body; using the event payload instead (${error instanceof Error ? error.message : error}).`,
+			`::warning::Could not fetch the live PR body; using the event payload instead (${error instanceof Error ? error.message : error}).`,
 		);
 		return fallback;
 	}
 }
 
+function eventPayload() {
+	const eventPath = process.env.GITHUB_EVENT_PATH;
+	if (!eventPath) throw new Error("GITHUB_EVENT_PATH is required");
+	return JSON.parse(readFileSync(eventPath, "utf8"));
+}
+
 async function lintPullRequestEvent() {
-	const event = eventPayload();
-	const pullRequest = event.pull_request;
-	const repository = process.env.GITHUB_REPOSITORY;
-	if (!pullRequest || !repository)
+	const pullRequest = eventPayload().pull_request;
+	if (!pullRequest || !process.env.GITHUB_REPOSITORY)
 		throw new Error("Pull request event and GITHUB_REPOSITORY are required");
-	const body = await liveBody(
-		repository,
-		pullRequest.number,
-		pullRequest.body ?? "",
-	);
-	const result = lintPrBody(body);
+	const result = lintPrBody(await resolveLivePrBody(pullRequest));
 	if (!result.valid) {
 		for (const error of result.errors) console.error(error);
 		process.exitCode = 1;

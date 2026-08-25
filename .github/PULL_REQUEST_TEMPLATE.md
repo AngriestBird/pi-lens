@@ -6,8 +6,8 @@ criterion is complete.
 
 Closes #NNN — only when every acceptance criterion is met. Otherwise Refs
 #NNN AND comment on the issue naming exactly what remains (deferral hygiene).
-The reference must ALSO be in the PR title — the title becomes the merge-
-commit subject.
+The reference must ALSO be in the PR title — the title becomes the
+merge-commit subject.
 
 ## Type of change
 
