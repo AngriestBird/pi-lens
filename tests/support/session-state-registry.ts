@@ -40,6 +40,12 @@ import {
 	resetBoundedTelemetry,
 } from "../../clients/bounded-telemetry.js";
 import {
+	getLastLiveMessageEndSessionId,
+	noteLiveMessageEndSessionId,
+	resetMessageEndAttribution,
+	rotateMessageEndAttribution,
+} from "../../clients/message-end-attribution.js";
+import {
 	getDegradationSummary,
 	recordDegradationOnce,
 	resetDegradationLedger,
@@ -136,6 +142,8 @@ export interface SessionStateEntry {
 	 * one the static reachability walk can see.
 	 */
 	resetName: string;
+	/** Optional session-start transition when the full reset is not the boundary operation. */
+	sessionStartResetName?: string;
 	/** Why this policy is the right one. One sentence, in the author's words. */
 	reason: string;
 	/**
@@ -160,6 +168,27 @@ function scratchCwd(): string {
 }
 
 export const SESSION_STATE_REGISTRY: SessionStateEntry[] = [
+	{
+		id: "message-end-attribution:two-slot-anchor",
+		module: "message-end-attribution.ts",
+		state: "lastStableSessionId, previousSessionId",
+		policy: "session_start",
+		resetName: "resetMessageEndAttribution",
+		sessionStartResetName: "rotateMessageEndAttribution",
+		reason:
+			"#1956 R3: session_start rotates the live anchor into one bounded previous slot because a stale message_end can drain after replacement; the full registry reset clears both slots.",
+		probe: {
+			// Arm BOTH slots: the getter's ?? fallback reads previous, so a
+			// reset that leaks previousSessionId fails isArmed (#1956 R9).
+			arm: () => {
+				noteLiveMessageEndSessionId("session-state-probe-prev");
+				rotateMessageEndAttribution();
+				noteLiveMessageEndSessionId("session-state-probe");
+			},
+			isArmed: () => getLastLiveMessageEndSessionId() === undefined,
+			reset: () => resetMessageEndAttribution(),
+		},
+	},
 	// ── #1743 bounded-telemetry helper ───────────────────────────────
 	{
 		id: "bounded-telemetry:turnCounts",
@@ -487,7 +516,8 @@ export const SESSION_STATE_REGISTRY: SessionStateEntry[] = [
 	{
 		id: "review-graph-builder:workspaceGraphCache",
 		module: "review-graph/builder.ts",
-		state: "_workspaceGraphCache, _workspaceCacheEpochs",
+		state:
+			"_workspaceGraphCache, _workspaceCacheEpochs, _sourcePathMemos, _sourcePathNormalizeCalls",
 		policy: "session_start",
 		resetName: "clearReviewGraphWorkspaceCache",
 		reason:
@@ -826,7 +856,8 @@ export const EXEMPT_SESSION_STATE_FILES: Readonly<Record<string, string>> = {
 		"the recent-touch cursor, consumed and advanced per read",
 	"widget-state.ts":
 		"widget render state, rebuilt from the sources it displays",
-	"word-index.ts": "word-index build guard, per build",
+	"word-index.ts":
+		"word-index build guard, per build; asyncWordIndexOperations queue is keyed by WordIndex and self-deletes in finally, so it needs no reset",
 	"mcp/analyze.ts":
 		"warm word-index cache keyed by path with its own freshness check",
 	"mcp/session.ts":
@@ -941,7 +972,7 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	"quiet-window-config.ts": 0,
 	"quiet-window.ts": 0,
 	"recent-touches.ts": 1,
-	"review-graph/builder.ts": 17,
+	"review-graph/builder.ts": 18,
 	"review-graph/git-identity.ts": 0,
 	"review-graph/shared-extraction-ir.ts": 1,
 	"review-graph/workspace-modules.ts": 2,
@@ -960,7 +991,7 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	"tui-fit.ts": 0,
 	"warm-attach.ts": 0,
 	"widget-state.ts": 2,
-	"word-index.ts": 2,
+	"word-index.ts": 3,
 	"workspace-topology.ts": 2,
 	"zizmor-config.ts": 0,
 };

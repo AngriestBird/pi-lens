@@ -229,10 +229,11 @@ describe("session-state registry — session_start wiring", () => {
 
 	for (const entry of SESSION_STATE_REGISTRY) {
 		if (entry.policy !== "session_start" || entry.gap) continue;
-		it(`${entry.id}: ${entry.resetName} runs at session_start`, () => {
+		const sessionStartName = entry.sessionStartResetName ?? entry.resetName;
+		it(`${entry.id}: ${sessionStartName} runs at session_start`, () => {
 			expect(
-				wired.has(entry.resetName),
-				`${entry.resetName} is not reachable from handleSessionStart. ` +
+				wired.has(sessionStartName),
+				`${sessionStartName} is not reachable from handleSessionStart. ` +
 					"Either wire it in, or change the entry's policy and say why.",
 			).toBe(true);
 		});
@@ -246,8 +247,8 @@ describe("session-state registry — session_start wiring", () => {
 		it(`${entry.id}: the declared gap is still real`, () => {
 			expect(entry.gap && entry.gap.length).toBeGreaterThan(40);
 			expect(
-				wired.has(entry.resetName),
-				`${entry.resetName} IS wired at session_start now — delete this entry's ` +
+				wired.has(entry.sessionStartResetName ?? entry.resetName),
+				`${entry.sessionStartResetName ?? entry.resetName} IS wired at session_start now — delete this entry's ` +
 					"`gap` field; the registry must not keep claiming a fixed bug.",
 			).toBe(false);
 		});

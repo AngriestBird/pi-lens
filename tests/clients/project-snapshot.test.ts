@@ -537,6 +537,34 @@ describe("project snapshot", () => {
 			vi.useRealTimers();
 		}));
 
+	it("keeps one live idle-eviction timer per replacement", () =>
+		withProjectDataDir((cwd) => {
+			vi.useFakeTimers();
+			vi.stubEnv("PI_LENS_PROJECT_SNAPSHOT_IDLE_EVICT_MS", "100000");
+			const snapshot: ProjectSnapshot = {
+				version: PROJECT_SNAPSHOT_VERSION,
+				projectRoot: cwd,
+				generatedAt: new Date().toISOString(),
+				seq: 0,
+				files: {},
+				symbols: {},
+				reverseDeps: {},
+				cachedExports: [],
+			};
+			const before = vi.getTimerCount();
+			try {
+				for (let i = 0; i < 20; i++)
+					saveProjectSnapshot(cwd, {
+						...snapshot,
+						seq: i,
+						generatedAt: new Date(Date.now() + i).toISOString(),
+					});
+				expect(vi.getTimerCount() - before).toBe(1);
+			} finally {
+				vi.useRealTimers();
+			}
+		}));
+
 	it("embeds the derived sequence index in BOTH the body and the meta sidecar (#1019)", () =>
 		withProjectDataDir((cwd) => {
 			// A runtime with a real per-file sequence state at seq=3.

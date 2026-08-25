@@ -21,6 +21,7 @@ import {
 	repoRoot,
 	scanDualInstanceImports,
 } from "../support/module-instance-scan.js";
+import { assertNonEmptyScan } from "../support/sweep-kit.js";
 
 /**
  * Reviewed exceptions: `file -> target`, each with the reason it is safe.
@@ -42,9 +43,13 @@ const reviewedExceptions = new Map<string, string>([
 
 describe("test imports bind the compiled module instance (#1565)", () => {
 	it("no test reaches a build-compiled module through a .ts specifier", () => {
-		const violations = scanDualInstanceImports().filter(
+		const scanned = scanDualInstanceImports();
+		const violations = scanned.filter(
 			(entry) => !reviewedExceptions.has(importKey(entry)),
 		);
+		// Calibration: 1 dual-instance import on 2026-08-26; this guard stays
+		// at 1 because the population is intentionally a single known exception.
+		assertNonEmptyScan("module-instance scan", scanned.length, 1);
 
 		expect(
 			violations.map((entry) => `${entry.file}: ${entry.specifier}`).sort(),

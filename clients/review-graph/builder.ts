@@ -36,6 +36,7 @@ import {
 } from "../path-utils.js";
 import { collectProjectSourceFilesWithBudgetAsync } from "../project-scan-policy.js";
 import { getReviewGraphMaxFilesDerived } from "../project-scale.js";
+import { BoundedLruCache } from "../bounded-cache.js";
 import {
 	jsTsCandidatePaths,
 	resolveAliasedImport,
@@ -156,6 +157,68 @@ export const REVIEW_GRAPH_SOURCE_EXTENSIONS: readonly string[] =
 	MAIN_KIND_EXTENSIONS;
 const CHANGED_SYMBOLS_PREFIX = "session.reviewGraph.changedSymbols:";
 const extractorCache = new Map<string, TreeSitterSymbolExtractor | null>();
+const REVIEW_GRAPH_MAX_WARM_WORKSPACES = 8;
+
+// Walker output is raw, so its spelling still needs the canonical path seam.
+// Keep that expensive raw-to-canonical step per project across builds, bounded
+// like TestRunnerClient's instance-lifetime canonicalRootMemo (#2058). A new
+// spelling is resolved once; repeated builds reuse the result. The project
+// memo is bounded and workspace-cache clears provide a freshness boundary.
+const REVIEW_GRAPH_SOURCE_PATH_MEMO_ENTRIES = 16_384;
+interface SourcePathMemo {
+	cache: BoundedLruCache<string, string>;
+	normalizeCalls: { value: number };
+}
+const _sourcePathMemos = new Map<string, SourcePathMemo>();
+
+function sourcePathMemo(cwd: string): SourcePathMemo {
+	const key = normalizeMapKey(path.resolve(cwd));
+	const existing = _sourcePathMemos.get(key);
+	if (existing) {
+		// The workspace map is also bounded LRU; a hit must refresh its recency.
+		_sourcePathMemos.delete(key);
+		_sourcePathMemos.set(key, existing);
+		return existing;
+	}
+	const memo: SourcePathMemo = {
+		cache: new BoundedLruCache<string, string>(
+			REVIEW_GRAPH_SOURCE_PATH_MEMO_ENTRIES,
+		),
+		normalizeCalls: { value: 0 },
+	};
+	_sourcePathMemos.set(key, memo);
+	while (_sourcePathMemos.size > REVIEW_GRAPH_MAX_WARM_WORKSPACES) {
+		const oldest = _sourcePathMemos.keys().next().value;
+		if (oldest === undefined) break;
+		_sourcePathMemos.delete(oldest);
+	}
+	return memo;
+}
+
+function normalizeGraphSourcePath(memo: SourcePathMemo, raw: string): string {
+	const cached = memo.cache.get(raw);
+	if (cached !== undefined) return cached;
+	const normalized = normalizeMapKey(raw);
+	// A missing file is normalized through resolveNonExisting, which lowercases
+	// its tail. It may be recreated with different casing before the next build,
+	// so never make that spelling a process-lifetime memo entry (#2072 F2).
+	if (fs.existsSync(raw)) memo.cache.set(raw, normalized);
+	memo.normalizeCalls.value++;
+	return normalized;
+}
+
+export function _getReviewGraphSourcePathNormalizeCallsForTests(
+	cwd: string,
+): number {
+	return (
+		_sourcePathMemos.get(normalizeMapKey(path.resolve(cwd)))?.normalizeCalls
+			.value ?? 0
+	);
+}
+
+export function _resetReviewGraphSourcePathMemoForTests(): void {
+	_sourcePathMemos.clear();
+}
 
 // IN-FLIGHT Promise cache: deduplicates CONCURRENT buildOrUpdateGraph calls for
 // the same (cwd, changedFiles). A separate workspace cache below preserves the
@@ -205,7 +268,6 @@ interface WorkspaceGraphCacheEntry {
 	idleTimer?: ReturnType<typeof setTimeout>;
 }
 const _workspaceGraphCache = new Map<string, WorkspaceGraphCacheEntry>();
-const REVIEW_GRAPH_MAX_WARM_WORKSPACES = 8;
 const REVIEW_GRAPH_IDLE_EVICT_MS_DEFAULT = 20 * 60_000;
 // A workspace-wide clear must invalidate builds for workspaces that are not
 // resident yet, too. This process-wide component therefore survives cache
@@ -272,6 +334,7 @@ function evictWorkspaceGraph(
 			_buildCache.delete(buildKey);
 		}
 	}
+	_sourcePathMemos.delete(key);
 	_workspaceCacheEpochs.set(key, (_workspaceCacheEpochs.get(key) ?? 0) + 1);
 	_workspaceGraphCache.delete(key);
 }
@@ -307,6 +370,8 @@ function setWorkspaceGraph(
 	epoch?: number,
 ): boolean {
 	if (epoch !== undefined && workspaceCacheEpoch(key) !== epoch) return false;
+	const previous = _workspaceGraphCache.get(key);
+	if (previous) clearWorkspaceGraphTimer(previous);
 	const resident: WorkspaceGraphCacheEntry = {
 		...entry,
 		lastUsedAt: Date.now(),
@@ -365,6 +430,7 @@ export type GraphBuildInfo = {
 	skipReason?: string;
 	sourceFileCount?: number;
 	sourceFileCountTruncated?: boolean;
+	pathNormalizeCalls?: number;
 	maxFileCount?: number;
 	/** Reason the graph was successfully built but persisted only partially. */
 	persistReason?: string;
@@ -392,6 +458,7 @@ function graphLogMetadata(
 		mode?: ReviewGraphBuildMode;
 		sourceFileCount?: number;
 		sourceFileCountTruncated?: boolean;
+		pathNormalizeCalls?: number;
 	} = {},
 ): ReviewGraphBuildMetadata {
 	return makeReviewGraphBuildMetadata(graph, options);
@@ -477,6 +544,7 @@ export function clearReviewGraphWorkspaceCache(cwd?: string): void {
 		for (const entry of _workspaceGraphCache.values())
 			clearWorkspaceGraphTimer(entry);
 		_workspaceGraphCache.clear();
+		_sourcePathMemos.clear();
 		_workspaceCacheEpoch++;
 		_sizeSkipVerdicts.clear();
 	} else {
@@ -497,6 +565,7 @@ export function clearReviewGraphWorkspaceCache(cwd?: string): void {
 			(_workspaceCacheEpochs.get(normalized) ?? 0) + 1,
 		);
 		_workspaceGraphCache.delete(normalized);
+		_sourcePathMemos.delete(normalized);
 		_sizeSkipVerdicts.delete(normalized);
 	}
 	_lastGraphBuildInfo = { reused: false, mode: "full", graphChanged: true };
@@ -550,6 +619,18 @@ export function _getReviewGraphWorkspaceCacheKeysForTests(): string[] {
 	return [..._workspaceGraphCache.entries()]
 		.sort(([, a], [, b]) => a.lastUsedAt - b.lastUsedAt)
 		.map(([key]) => key);
+}
+
+/** Test-only replacement seam for the workspace idle-eviction family. */
+export function _setReviewGraphWorkspaceEntryForTests(
+	key: string,
+	graph: ReviewGraph,
+): void {
+	setWorkspaceGraph(key, {
+		signature: "test",
+		fileSignatures: new Map(),
+		graph,
+	});
 }
 
 export function _getReviewGraphCacheStateForTests(cwd: string):
@@ -1184,6 +1265,8 @@ export function getReviewGraphSizeSkipVerdict(
 
 interface GraphSourceFilesResult {
 	files: string[];
+	/** Cache misses in the raw-walker path normalizer for this build. */
+	pathNormalizeCalls: number;
 	/** Number of source files represented by this walk; a lower bound when truncated. */
 	sourceFileCount: number;
 	/** Per-build file cap captured before the asynchronous walk begins. */
@@ -1210,6 +1293,8 @@ export function _setReviewGraphEntryCounterForTests(
 export async function getGraphSourceFiles(
 	cwd: string,
 ): Promise<GraphSourceFilesResult> {
+	const sourceMemo = sourcePathMemo(cwd);
+	const normalizeCallsBefore = sourceMemo.normalizeCalls.value;
 	// Async, chunked-yield walk (identical output to the sync collector) so the
 	// per-edit cascade graph rebuild doesn't block the event loop on a large repo.
 	//
@@ -1250,6 +1335,8 @@ export async function getGraphSourceFiles(
 		// so the caller's `length > maxGraphFiles` check still trips.
 		return {
 			files: collected,
+			pathNormalizeCalls:
+				sourceMemo.normalizeCalls.value - normalizeCallsBefore,
 			sourceFileCount: collected.length,
 			maxFileCount: maxGraphFiles,
 			entryBudgetExceeded,
@@ -1258,7 +1345,7 @@ export async function getGraphSourceFiles(
 	const result: string[] = [];
 	let sinceYield = 0;
 	for (const raw of collected) {
-		const file = normalizeMapKey(raw);
+		const file = normalizeGraphSourcePath(sourceMemo, raw);
 		const kind = detectFileKind(file);
 		// isWithinReviewGraphSizeLimit does a statSync per file — yield periodically
 		// so the size-limit filter (one stat each) can't hold the loop in one burst.
@@ -1280,6 +1367,7 @@ export async function getGraphSourceFiles(
 	}
 	return {
 		files: result,
+		pathNormalizeCalls: sourceMemo.normalizeCalls.value - normalizeCallsBefore,
 		sourceFileCount: result.length,
 		maxFileCount: maxGraphFiles,
 		entryBudgetExceeded,
@@ -1647,10 +1735,7 @@ function countRetainedSourceFiles(
 	sourceFilePaths?: Iterable<string>,
 ): number {
 	if (sourceFilePaths === undefined) return graph.fileNodes.size;
-	const sourceKeys = new Set<string>();
-	for (const filePath of sourceFilePaths) {
-		sourceKeys.add(normalizeMapKey(filePath));
-	}
+	const sourceKeys = new Set(sourceFilePaths);
 	let retained = 0;
 	for (const filePath of sourceKeys) {
 		if (graph.fileNodes.has(filePath)) retained++;
@@ -1786,6 +1871,7 @@ function logPersistSuccess(
 		gzBytes: number;
 		serializeMs: number;
 		writeMs: number;
+		durationMs: number;
 		offloaded: boolean;
 	},
 	workerState: {
@@ -1798,7 +1884,7 @@ function logPersistSuccess(
 		type: "phase",
 		phase: "review_graph_persist",
 		filePath: pending.cachePath,
-		durationMs: stats.serializeMs + stats.writeMs,
+		durationMs: stats.durationMs,
 		metadata: { elements: pending.elementCount, ...stats },
 	});
 	logReviewGraph({
@@ -1806,6 +1892,7 @@ function logPersistSuccess(
 		phase: "persist_succeeded",
 		elements: pending.elementCount,
 		...stats,
+		durationMs: stats.durationMs,
 		observability: persistObservability(pending, {
 			status: "succeeded",
 			workerStarted: workerState.started,
@@ -1825,6 +1912,7 @@ function writePendingOnMainThread(
 		fallbackReason?: string;
 	} = { started: false, completed: false },
 ): void {
+	const persistStarted = performance.now();
 	const serializeStarted = performance.now();
 	try {
 		const json = JSON.stringify(persistedData(pending));
@@ -1845,6 +1933,7 @@ function writePendingOnMainThread(
 				gzBytes: gzip.byteLength,
 				serializeMs,
 				writeMs: performance.now() - writeStarted,
+				durationMs: performance.now() - persistStarted,
 				offloaded: false,
 			},
 			{
@@ -1941,7 +2030,8 @@ function handleWorkerResult(result: ReviewGraphPersistWorkerResult): void {
 		result.rawBytes === undefined ||
 		result.gzBytes === undefined ||
 		result.serializeMs === undefined ||
-		result.writeMs === undefined
+		result.writeMs === undefined ||
+		result.durationMs === undefined
 	) {
 		fs.rm(result.stagePath, { force: true }, () => {});
 		writePendingOnMainThread(
@@ -1969,6 +2059,7 @@ function handleWorkerResult(result: ReviewGraphPersistWorkerResult): void {
 				gzBytes: result.gzBytes,
 				serializeMs: result.serializeMs,
 				writeMs: result.writeMs,
+				durationMs: result.durationMs,
 				offloaded: true,
 			},
 			{ started: true, completed: true },
@@ -3084,6 +3175,7 @@ export function flushReviewGraphPersist(
 		logReviewGraph({
 			cwd,
 			phase: "persist_succeeded",
+			durationMs: performance.now() - startedAt,
 			elements: pending.elementCount,
 			rawBytes,
 			gzBytes: gzip.byteLength,
@@ -4798,6 +4890,7 @@ async function _doBuildGraph(
 	const sourceCollection = await getGraphSourceFiles(cwd);
 	const filesToBuild = sourceCollection.files;
 	const sourceFileCount = sourceCollection.sourceFileCount;
+	const pathNormalizeCalls = sourceCollection.pathNormalizeCalls;
 	const sourceFilesTruncated = sourceCollection.entryBudgetExceeded;
 	const ignoredIds = await ignoredIdsPromise;
 	const maxGraphFiles = sourceCollection.maxFileCount;
@@ -4856,6 +4949,7 @@ async function _doBuildGraph(
 			sourceFileCountTruncated:
 				sourceFilesTruncated || filesToBuild.length > maxGraphFiles,
 			maxFileCount: maxGraphFiles,
+			pathNormalizeCalls,
 			seqFastpathFallback,
 			// #459: a fresh empty graph is returned every call on this path (never
 			// persisted/reused) — treat it as changed so dependents never trust stale
@@ -5197,6 +5291,7 @@ async function _doBuildGraph(
 		mode: "full",
 		sourceFileCount,
 		sourceFileCountTruncated: sourceFilesTruncated,
+		pathNormalizeCalls,
 		seqFastpathFallback,
 		...(persistReason ? { persistReason } : {}),
 		graphChanged: true,
@@ -5293,6 +5388,7 @@ export function buildOrUpdateGraph(
 							mode: buildInfo.mode,
 							sourceFileCount: buildInfo.sourceFileCount,
 							sourceFileCountTruncated: buildInfo.sourceFileCountTruncated,
+							pathNormalizeCalls: buildInfo.pathNormalizeCalls,
 						}),
 					},
 				});
@@ -5314,6 +5410,7 @@ export function buildOrUpdateGraph(
 							mode: buildInfo.mode,
 							sourceFileCount: buildInfo.sourceFileCount,
 							sourceFileCountTruncated: buildInfo.sourceFileCountTruncated,
+							pathNormalizeCalls: buildInfo.pathNormalizeCalls,
 						}),
 					},
 				});
