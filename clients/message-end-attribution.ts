@@ -21,7 +21,12 @@ export function getLastLiveMessageEndSessionId(): string | undefined {
  * so retain exactly one prior anchor while making room for the replacement.
  */
 export function rotateMessageEndAttribution(): void {
-	previousSessionId = lastStableSessionId;
+	// Keep the prior anchor when no live message_end arrived this session:
+	// two back-to-back boundaries (reload/resume re-announcing) must not
+	// erase the only id a still-queued stale drain can use (#1956 R10).
+	if (lastStableSessionId !== undefined) {
+		previousSessionId = lastStableSessionId;
+	}
 	lastStableSessionId = undefined;
 }
 

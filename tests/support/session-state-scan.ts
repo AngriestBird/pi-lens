@@ -188,7 +188,7 @@ export function sessionStartResetNames(): Set<string> {
 	}
 
 	const isReset = (name: string) =>
-		(RESET_NAME.test(name) || name === "rotateMessageEndAttribution") &&
+		(RESET_NAME.test(name) || /^rotate[A-Z]/.test(name)) &&
 		!BUILTIN_CLEARS.has(name);
 	const reached = new Set<string>();
 	const queue = bareCalls(entry).filter(isReset);

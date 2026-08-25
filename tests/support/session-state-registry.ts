@@ -43,6 +43,7 @@ import {
 	getLastLiveMessageEndSessionId,
 	noteLiveMessageEndSessionId,
 	resetMessageEndAttribution,
+	rotateMessageEndAttribution,
 } from "../../clients/message-end-attribution.js";
 import {
 	getDegradationSummary,
@@ -177,7 +178,13 @@ export const SESSION_STATE_REGISTRY: SessionStateEntry[] = [
 		reason:
 			"#1956 R3: session_start rotates the live anchor into one bounded previous slot because a stale message_end can drain after replacement; the full registry reset clears both slots.",
 		probe: {
-			arm: () => noteLiveMessageEndSessionId("session-state-probe"),
+			// Arm BOTH slots: the getter's ?? fallback reads previous, so a
+			// reset that leaks previousSessionId fails isArmed (#1956 R9).
+			arm: () => {
+				noteLiveMessageEndSessionId("session-state-probe-prev");
+				rotateMessageEndAttribution();
+				noteLiveMessageEndSessionId("session-state-probe");
+			},
 			isArmed: () => getLastLiveMessageEndSessionId() === undefined,
 			reset: () => resetMessageEndAttribution(),
 		},
