@@ -77,6 +77,13 @@ smell warnings count only the current session, or a 24-hour fallback window
 when no session boundary is available; explicit health remains separately
 labeled. (#1432)
 
+Message-end attribution uses a bounded two-slot session anchor. A primary
+`session_start` rotates `lastStableSessionId` into `previousSessionId` because
+queued stale events from the replaced session can drain after the boundary;
+stale attribution reads the live slot, then the previous slot, then `unknown`.
+The exported full reset clears both slots, while the session-start seam only
+rotates them. (#1956 R3)
+
 A new context-injection surface delivers append-only. It appends after the
 transcript, or splices immediately before a plain trailing user prompt, and it
 never rewrites `messages[0]`. It batches to one injection per settle or turn
@@ -376,6 +383,12 @@ record and admitted tally milestones also emit a `degradation_ledger` row throug
 the session remains auditable when no health render reaches the transcript.
 Scanner coverage gaps and stalled notify-inflight barriers use the ledger;
 successful notify drains remain latency-only because they are not degradations.
+The `message_end` handler uses `cache-usage-attribution-stale` (subject
+`message_end`) when a confirmed-stale ctx strips the stable id from a
+`cache_usage` row — the row still writes, so the degraded ATTRIBUTION is the
+degradation, never the row itself (#1956). Its durable ledger row carries the
+active primary session id (or `unknown`), and the row write must precede the
+best-effort ledger increment so a ledger failure cannot drop provider usage.
 Workspace-root path-attribution rollups are separate, memory-only session
 telemetry. They reset on the primary `session_start`, emit once on primary
 shutdown, and secondary shutdown returns before consuming the primary tally.
@@ -491,6 +504,8 @@ leave its prior workspace cache alive; it never walks above that ceiling.
 (#1707)
 
 ## Issue and PR design contract
+
+Message-end stale attribution anchors the session id when a live ctx is handled, not when the stale event drains: replacement can make the active id point at the wrong session. The anchor resets from `handleSessionStart` and is covered by the session-state registry; stale rows use its last live value or `unknown`. Durable degradation metadata truncates every value and retains only a bounded caller-key prefix, reporting dropped keys while reserved row fields win. (#1956 R2)
 
 - **Design the state space before coding.** For stateful, ordered, resource-mutating, or security-sensitive work, write the invariants, supported transitions, explicit deferrals, and a cross-product test matrix before implementation. Examples are not enough: cover operation order, preview/apply, validation/normalization/execution seams, failure atomicity, observability bounds, and OS/path/encoding axes. If adversarial review finds repeated cross-product defects, stop patching one symptom at a time and return to the model.
 - **Concurrency tests wait on the right clock.** Use `tests/clients/interleaving-kit.ts` for suspension and polling: every suspension belongs in `try/finally` with `release()` plus `restore()`, and waits on worker-thread or child-process progress must use the wall-time default. A custom tick yield is only valid for progress guaranteed to occur on the current event loop. Prefer a suspended call's `completed` promise over draining unrelated global work, and reset in-memory mirrors before asserting on durable disk state.

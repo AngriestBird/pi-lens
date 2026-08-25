@@ -40,6 +40,12 @@ import {
 	resetBoundedTelemetry,
 } from "../../clients/bounded-telemetry.js";
 import {
+	getLastLiveMessageEndSessionId,
+	noteLiveMessageEndSessionId,
+	resetMessageEndAttribution,
+	rotateMessageEndAttribution,
+} from "../../clients/message-end-attribution.js";
+import {
 	getDegradationSummary,
 	recordDegradationOnce,
 	resetDegradationLedger,
@@ -136,6 +142,8 @@ export interface SessionStateEntry {
 	 * one the static reachability walk can see.
 	 */
 	resetName: string;
+	/** Optional session-start transition when the full reset is not the boundary operation. */
+	sessionStartResetName?: string;
 	/** Why this policy is the right one. One sentence, in the author's words. */
 	reason: string;
 	/**
@@ -160,6 +168,27 @@ function scratchCwd(): string {
 }
 
 export const SESSION_STATE_REGISTRY: SessionStateEntry[] = [
+	{
+		id: "message-end-attribution:two-slot-anchor",
+		module: "message-end-attribution.ts",
+		state: "lastStableSessionId, previousSessionId",
+		policy: "session_start",
+		resetName: "resetMessageEndAttribution",
+		sessionStartResetName: "rotateMessageEndAttribution",
+		reason:
+			"#1956 R3: session_start rotates the live anchor into one bounded previous slot because a stale message_end can drain after replacement; the full registry reset clears both slots.",
+		probe: {
+			// Arm BOTH slots: the getter's ?? fallback reads previous, so a
+			// reset that leaks previousSessionId fails isArmed (#1956 R9).
+			arm: () => {
+				noteLiveMessageEndSessionId("session-state-probe-prev");
+				rotateMessageEndAttribution();
+				noteLiveMessageEndSessionId("session-state-probe");
+			},
+			isArmed: () => getLastLiveMessageEndSessionId() === undefined,
+			reset: () => resetMessageEndAttribution(),
+		},
+	},
 	// ── #1743 bounded-telemetry helper ───────────────────────────────
 	{
 		id: "bounded-telemetry:turnCounts",
