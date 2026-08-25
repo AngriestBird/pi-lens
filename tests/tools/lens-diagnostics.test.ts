@@ -1070,6 +1070,40 @@ describe("lens_diagnostics mode=full", () => {
 		});
 	});
 
+	// #2052 fix round 1 (F4d): a file outside every registered session root is
+	// declined before any server is asked. The full sweep must name that
+	// explicitly and must never let its empty placeholder read as clean.
+	it("renders an outside-project-root decline as unconfirmed, never as clean or a timeout (#2052)", async () => {
+		const lspService = {
+			runWorkspaceDiagnostics: vi.fn().mockResolvedValue([
+				{ filePath: "/proj/src/local.ts", diagnostics: [], count: 0 },
+				{
+					filePath: "/tmp/pi-agent-abc/src/foreign.ts",
+					diagnostics: [],
+					count: 0,
+					timedOut: true,
+					unconfirmedReason: "outside_project_root",
+				},
+			]),
+		};
+		const result = await run(makeTool({}, lspService), { mode: "full" });
+		const text = String(result.content[0].text);
+
+		expect(text).toContain("foreign.ts");
+		expect(text).toMatch(/unconfirmed/i);
+		// Pre-fix the sweep handed this file back as a confirmed clean, so it
+		// counted toward `lspFilesConfirmed` and never appeared in the note.
+		expect(text).toContain("outside every initialized session project root");
+		// A decline is permanent for this path — telling the reader it ran out
+		// of budget would send them into an infinite retry.
+		expect(text).not.toContain("within budget");
+		expect(result.details).toMatchObject({
+			lspFilesConfirmed: 1,
+			lspFilesUnconfirmed: 1,
+			unconfirmedLspFiles: ["/tmp/pi-agent-abc/src/foreign.ts"],
+		});
+	});
+
 	// #1618 review round 2: `findFullScanBindingMismatches` discovers a stale
 	// binding (`boundToCurrentDisk: false`) AFTER the sweep already returned
 	// the result as confirmed — no `.timedOut`, no `.error`, no

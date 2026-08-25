@@ -102,6 +102,11 @@ import {
 	consumeHostReadyDelayAnchor,
 	resetHostReadyDelayAnchorForTests,
 } from "../../clients/startup-timing.js";
+import {
+	isOutsideAllSessionRoots,
+	registerSessionRoot,
+	resetSessionRootsForTests,
+} from "../../clients/lsp/session-roots.js";
 
 /**
  * When a piece of state must return to its initial value.
@@ -709,6 +714,26 @@ export const SESSION_STATE_REGISTRY: SessionStateEntry[] = [
 			"#1810: the cache maps (biome binary path, rule name) to that rule's real fix tier, read live from `biome explain <rule>`. That answer is a static property of the running binary — it cannot change without a different biome install, which is itself a different cache key — so there is nothing for a session boundary to invalidate. No probe: arming it for real requires spawning the actual biome binary, which this generic registry sweep does not do; `tests/clients/dispatch/runners/biome-check-runner.test.ts`'s dedicated cache/reset tests cover the re-arm behavior with a mocked spawn instead.",
 	},
 	{
+		id: "lsp-session-roots:sessionRoots",
+		module: "lsp/session-roots.ts",
+		state: "sessionRoots",
+		policy: "process_lifetime",
+		resetName: "resetSessionRootsForTests",
+		reason:
+			"#2052: the set of project roots this PROCESS serves. A root enters it when `initLSPConfig` runs for that cwd, and that same call warms an LSP client fleet rooted there which stays alive for the process, not the session. Clearing at session_start would decline files for roots that are still being served, and it could not self-heal: `ensureLSPConfigInitialized` (index.ts) dedupes on `_lspConfigInitializedCwds`, so it would not re-run `initLSPConfig` for an already-initialized cwd and the root would never re-register. Accumulating roots is also the SAFE direction here — an extra registered root only means a file is served as it was before #2052, whereas a missing root means a hard refusal to answer.",
+		probe: {
+			arm: () => {
+				resetSessionRootsForTests();
+				registerSessionRoot("/pi-lens-probe/session-root");
+			},
+			// Post-reset shape is an EMPTY registry, which by the fail-open rule
+			// declines nothing — so no path reads as outside-all-roots.
+			isArmed: () =>
+				!isOutsideAllSessionRoots("/pi-lens-probe/elsewhere/file.ts"),
+			reset: () => resetSessionRootsForTests(),
+		},
+	},
+	{
 		id: "startup-timing:hostReadyDelayAnchor",
 		module: "startup-timing.ts",
 		state: "hostReadyDelayAnchorConsumed",
@@ -953,6 +978,7 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	"opaque-mutation-scan.ts": 3,
 	"lsp/pending-aux-coverage.ts": 1,
 	"lsp/jvm-runtime.ts": 0,
+	"lsp/session-roots.ts": 1,
 	"lsp/spawn-history.ts": 1,
 	"lsp/server.ts": 5,
 	"lsp/workspace-diagnostics-cache.ts": 1,

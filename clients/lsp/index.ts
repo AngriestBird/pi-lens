@@ -74,6 +74,13 @@ import {
 	getServersForFileWithConfig,
 	getServerInitOverride,
 } from "./config.js";
+// #2052: deliberately NOT taken from `config.js`. This module's import surface
+// from `config.js` is mirrored by explicit `vi.mock` factories in ~58 test
+// files, so every new symbol taken from there breaks all of them.
+import {
+	getSessionRootsForTelemetry,
+	isOutsideAllSessionRoots,
+} from "./session-roots.js";
 import { getLanguageId } from "./language.js";
 import type { LSPServerInfo } from "./server.js";
 import {
@@ -709,7 +716,15 @@ export type LSPWorkspaceUnconfirmedReason =
 	| "coverage_gap"
 	| "service_destroyed"
 	| "error"
-	| "binding_mismatch";
+	| "binding_mismatch"
+	// #2052: the file lies outside every initialized session cwd, so no client
+	// was asked at all. NOT a timeout and NOT a clean result: the sweep has no
+	// evidence about this file either way. It shares `timedOut: true` with the
+	// other members purely because that flag is what excludes a result from the
+	// workspace-cache write-back — persisting a declined file as confirmed
+	// clean would replay a false clean on every later sweep, which is the whole
+	// defect #2052 exists to close.
+	| "outside_project_root";
 
 export interface LSPWorkspaceDiagnosticResult {
 	filePath: string;
@@ -1095,6 +1110,7 @@ export class LSPService {
 	private readonly workspaceProbeLogged = new Set<string>();
 	/** Per-service immutable root-boundary verdicts; root detectors cache hits too. */
 	private readonly projectBoundaryCache = new Map<string, Promise<boolean>>();
+	/** Foreign roots are recorded once per normalized root for this service/session. */
 	private readonly warmStartLogged = new Set<string>();
 	private readonly optionalFailureLogged = new Set<string>();
 	/** Server/root pairs that already emitted unavailable for the current occurrence. */
@@ -1326,6 +1342,13 @@ export class LSPService {
 	): Promise<string | undefined> {
 		const candidate = await server.root(filePath);
 		if (!candidate) return undefined;
+		// #2052: a file outside EVERY initialized session cwd gets no client at
+		// all. The ceiling below is unchanged (`process.cwd()`, as before this
+		// issue) and still only clamps files that are actually inside it —
+		// `enforceLspRootCeiling` returns the root untouched for an out-of-ceiling
+		// file. So this gate is the ONLY new refusal, and it consults the
+		// registry, not a single cwd.
+		if (isOutsideAllSessionRoots(filePath)) return undefined;
 		const root = enforceLspRootCeiling(candidate, process.cwd(), filePath);
 		if (normalizeMapKey(root) === normalizeMapKey(process.cwd())) return root;
 
@@ -3562,6 +3585,11 @@ export class LSPService {
 		}
 		const startedAt = Date.now();
 		const normalizedPath = normalizeMapKey(filePath);
+		const outsideRoot = await this.findOutsideProjectRoot(filePath);
+		if (outsideRoot) {
+			this.recordOutsideRootDecline(filePath, outsideRoot, "touchFile");
+			return { diags: [], skipReason: "outside-project-root" };
+		}
 		// #1783: every path that asks a language server anything comes through
 		// here, so this is where the disk-drift backstop gets its heartbeat.
 		// Deliberately NOT awaited: the sweep is rate-limited to one pass per
@@ -5638,6 +5666,67 @@ export class LSPService {
 	}
 
 	/**
+	 * #2052: the file's nearest marker root, but ONLY when the file is outside
+	 * every initialized session cwd. Returns undefined (no decline) otherwise.
+	 *
+	 * The cheap registry test runs FIRST so an in-session file — the hot path —
+	 * pays one bounded map walk and never the `server.root()` filesystem walks.
+	 */
+	private async findOutsideProjectRoot(
+		filePath: string,
+	): Promise<string | undefined> {
+		if (!isOutsideAllSessionRoots(filePath)) return undefined;
+		const candidates = await Promise.all(
+			getServersForFileWithConfig(filePath).map((server) =>
+				server.root(filePath),
+			),
+		);
+		return candidates.find((candidate): candidate is string =>
+			Boolean(candidate),
+		);
+	}
+
+	/**
+	 * #2052: one bounded record per normalized foreign root per session.
+	 *
+	 * `operation` is a PARAMETER, not a constant: `touchFile` and
+	 * `getDiagnostics` both decline here, and a record that always claimed
+	 * "touchFile" would erase which call site actually refused — the
+	 * discriminating identity a bounded record has to preserve. The ledger's
+	 * rising edge is keyed on the root, so many files under one foreign root
+	 * still collapse to a single detailed row.
+	 */
+	private recordOutsideRootDecline(
+		filePath: string,
+		nearestRoot: string,
+		operation: "touchFile" | "getDiagnostics",
+	): void {
+		const root = normalizeMapKey(nearestRoot);
+		const sessionRoots = getSessionRootsForTelemetry()
+			.map((sessionRoot) => normalizeMapKey(sessionRoot))
+			.join(", ");
+		emitBounded(
+			"lsp_capability_skip",
+			root,
+			{
+				filePath: normalizeMapKey(filePath),
+				durationMs: 0,
+				metadata: {
+					operation,
+					nearestMarkerRoot: root,
+					sessionRoots,
+					identity: root,
+				},
+			},
+			{
+				ledgerKind: "lsp-capability-skip",
+				risingEdgePer: "identity",
+				reason: `declined LSP root outside session cwd: ${root}`,
+			},
+		);
+	}
+
+	/**
 	 * Get diagnostics for a file
 	 */
 	getDiagnosticsHealth(filePath: string): LSPDiagnosticsHealth | undefined {
@@ -5680,6 +5769,11 @@ export class LSPService {
 		diagnosticsMode: LSPDiagnosticsMode = "full",
 	): Promise<import("./client.js").LSPDiagnostic[]> {
 		const normalizedPath = normalizeMapKey(filePath);
+		const outsideRoot = await this.findOutsideProjectRoot(filePath);
+		if (outsideRoot) {
+			this.recordOutsideRootDecline(filePath, outsideRoot, "getDiagnostics");
+			return [];
+		}
 		if (this.checkDestroyed()) {
 			this.lastDiagnosticsHealth.set(normalizedPath, {
 				health: "destroyed",
@@ -7626,20 +7720,37 @@ export class LSPService {
 				// instead of aggregating as a confirmed clean. Every route is gated here.
 				const unconfirmedServerIds = touchCoverageGap(touchResult);
 				const coverageGap = unconfirmedServerIds.length > 0;
+				// #2052: the touch DECLINED this file — it is outside every
+				// initialized session cwd, so nothing was asked and `diags` is an
+				// empty placeholder, not an observation. Before this, the sweep
+				// never read `skipReason`, so a declined foreign file fell through
+				// as `timedOut: false` with zero diagnostics: reported CONFIRMED
+				// CLEAN, and then written into the workspace cache by the record
+				// loop below, which replays that false clean on every later sweep.
+				const declinedOutsideRoot =
+					touchResult?.skipReason === "outside-project-root";
 				// #1549: the sweep verdict is per answering lane. An auxiliary gap
 				// narrows coverage, but a primary answer remains usable; only absence of
 				// the touch result or a primary-scoped inconclusive verdict poisons it.
-				const timedOut = touchResult === undefined || inconclusive;
+				const timedOut =
+					touchResult === undefined || inconclusive || declinedOutsideRoot;
 				if (timedOut) timedOutFiles += 1;
 				// #1618: WHY, in priority order — the outer deadline (nothing came
 				// back at all) outranks an inner inconclusive signal, which outranks
 				// a narrower auxiliary coverage gap.
+				// #2052: `outside_project_root` is checked FIRST among the reasons a
+				// touch produced no observation. A declined file cannot be
+				// `inconclusive` (nothing was asked, so nothing timed out), and
+				// rendering it as "didn't complete within budget" would tell the
+				// reader to retry a request that will always be refused.
 				const unconfirmedReason: LSPWorkspaceUnconfirmedReason | undefined =
 					touchResult === undefined
 						? "budget"
-						: inconclusive
-							? "inconclusive"
-							: undefined;
+						: declinedOutsideRoot
+							? "outside_project_root"
+							: inconclusive
+								? "inconclusive"
+								: undefined;
 				// #1104 (shape 5 — AGENTS.md): the touch's content binding is an
 				// EXPLICIT enumerable field on the wrapper now (#1179), so it survives
 				// `applyAuxiliarySuppressions` below rebuilding `.diags` via `.filter()`

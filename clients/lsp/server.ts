@@ -111,7 +111,18 @@ const PROJECT_BOUNDARY_MARKERS = [
 // with FALLBACK_PROJECT_MARKERS, the shared fallback root-policy marker set.
 const loggedRootCeilingClamps = new Set<string>();
 
-function isSameOrWithin(ancestor: string, candidate: string): boolean {
+/**
+ * Path-shape-aware containment test: is `candidate` the same path as
+ * `ancestor`, or inside it?
+ *
+ * Exported so the session-cwd registry (`clients/lsp/config.ts`) and the
+ * foreign-root decline gate (`clients/lsp/index.ts`) test containment with the
+ * SAME comparator the root ceiling uses. A second hand-rolled `path.relative`
+ * helper alongside this one is how the two drift apart on Windows-shaped
+ * paths (shape 2 / #1150): `path.isAbsolute("C:\\repo")` is false on POSIX, so
+ * a host-default comparator silently mis-answers a win32 path on Linux CI.
+ */
+export function isSameOrWithin(ancestor: string, candidate: string): boolean {
 	const windowsShaped = isWindowsPath(ancestor) || isWindowsPath(candidate);
 	const pathApi = windowsShaped ? path.win32 : path;
 	const relative = pathApi.relative(

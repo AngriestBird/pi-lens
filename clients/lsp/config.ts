@@ -55,6 +55,10 @@ import { BoundedLruCache } from "../bounded-cache.js";
 import { getGlobalPiLensDir } from "../file-utils.js";
 import { launchLSP } from "./launch.js";
 import {
+	registerSessionRoot,
+	resetSessionRootsForTests,
+} from "./session-roots.js";
+import {
 	createRootDetector,
 	LSP_SERVERS,
 	type LSPServerInfo,
@@ -268,6 +272,10 @@ function getConfigForFile(filePath: string): RegisteredLSPConfig {
  */
 export async function initLSPConfig(cwd: string): Promise<void> {
 	const normalizedCwd = normalizeWorkspacePath(cwd);
+	// #2052: this cwd is now a served session root. Registered BEFORE the
+	// in-flight dedup return below, so a concurrent duplicate init still
+	// registers it rather than returning early with the root unrecorded.
+	registerSessionRoot(normalizedCwd);
 
 	const existing = configInFlight.get(normalizedCwd);
 	if (existing) return existing;
@@ -397,6 +405,9 @@ export function getServerInitOverride(
 
 export function resetLSPConfigStateForTests(): void {
 	workspaceConfigs.clear();
+	// Reset both together: a cleared config store beside a live session-root
+	// registry would decline files for roots nothing can serve any more.
+	resetSessionRootsForTests();
 }
 
 // Re-export with config support
