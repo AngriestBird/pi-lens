@@ -836,24 +836,28 @@ function isIgnoredCascadeNeighbor(filePath: string, cwd: string): boolean {
  *
  * Race safety against a build-in-progress: this function body is entirely
  * synchronous (no `await` anywhere in it) and is called synchronously at
- * `computeCascadeForFile`'s entry, before its own `await buildOrUpdateGraph`.
+ * `computeCascadeForFile`'s entry, before its own `await buildOrUpdateGraph`;
+ * the seam body is synchronous, although the caller awaits it.
  * Node is single-threaded, so two overlapping cascades (#450's unawaited
  * concurrency) can never interleave mid-mutation here — each call runs to
- * completion in one turn. The only cross-build hazard is a full session-start
- * rebuild REPLACING `runtime.wordIndex` with a new object between the caller
+ * completion in one turn. The async variants exist for cooperative bulk
+ * refreshes, but must not be used from unawaited concurrent callers: the
+ * reviewer's 300-document probe lost 1,719 postings during an 8 ms yield
+ * before the async path was serialized. The only cross-build hazard is a full
+ * session-start rebuild REPLACING `runtime.wordIndex` with a new object between the caller
  * reading `runtime.wordIndex` (in runtime-tool-result.ts, also synchronous)
  * and this function receiving it — in that case this call simply mutates
  * whichever index object it was handed (old or new), and the other one is
  * abandoned/superseded, never corrupted. No queue, no lock: the simplest rule
  * that is still provably correct.
  */
-function updateWordIndexForCascade(args: {
+async function updateWordIndexForCascade(args: {
 	wordIndex?: WordIndex | null;
 	filePath: string;
 	content?: string;
 	onUpdated?: (index: WordIndex) => void;
 	dbg?: (msg: string) => void;
-}): void {
+}): Promise<void> {
 	const { wordIndex, filePath, content, onUpdated, dbg } = args;
 	if (!wordIndex || !wordIndex.forward) return;
 	if (content === undefined) return;
@@ -982,7 +986,7 @@ export async function computeCascadeForFile(
 		// The old hazard — this update silently orphaning a SECOND entry next to the
 		// walker's original-cased one — is now structurally impossible at the map
 		// layer, so this seam no longer has to hand-match the build path's key shape.
-		updateWordIndexForCascade({
+		await updateWordIndexForCascade({
 			wordIndex,
 			filePath: nodePath.resolve(filePath),
 			content: fileContent,
