@@ -332,7 +332,9 @@ function filesystemErrorCode(error: unknown): string | undefined {
 
 export class TestRunnerClient {
 	private log: (msg: string) => void;
-	private availableRunners: Map<string, boolean> = new Map();
+	private availableRunners = new PathKeyedMap<Map<string, boolean>>(
+		normalizeMapKey,
+	);
 	private failedTestsByRunner = new Map<
 		string,
 		PathKeyedMap<PathKeyedMap<FailedTargetEntry>>
@@ -345,15 +347,35 @@ export class TestRunnerClient {
 	// or it couldn't be parsed in the simple shape we look for" — callers
 	// treat that as "no additional signal" and fall back to naming-convention
 	// detection only.
-	private vitestTestGlobsCache: Map<
-		string,
-		{ include?: string[]; exclude?: string[] } | null
-	> = new Map();
+	private vitestTestGlobsCache = new PathKeyedMap<{
+		include?: string[];
+		exclude?: string[];
+	} | null>(normalizeMapKey);
 
 	constructor(verbose = false, options: TestRunnerClientOptions = {}) {
 		this.log = verbose ? createSubsystemLogger("test-runner") : () => {};
 		this.statFailedTarget =
 			options.statFailedTarget ?? ((filePath) => void fs.statSync(filePath));
+	}
+
+	private getRunnerAvailability(
+		cwd: string,
+		runner: string,
+	): boolean | undefined {
+		return this.availableRunners.get(cwd)?.get(runner);
+	}
+
+	private setRunnerAvailability(
+		cwd: string,
+		runner: string,
+		available: boolean,
+	): void {
+		let byRunner = this.availableRunners.get(cwd);
+		if (!byRunner) {
+			byRunner = new Map();
+			this.availableRunners.set(cwd, byRunner);
+		}
+		byRunner.set(runner, available);
 	}
 
 	/**
@@ -369,9 +391,9 @@ export class TestRunnerClient {
 	): { runner: string; config: RunnerConfig } | null {
 		// Priority 1: Config files
 		for (const [name, config] of Object.entries(RUNNERS)) {
-			const cacheKey = `${cwd}:${name}:config`;
-			if (this.availableRunners.has(cacheKey)) {
-				if (this.availableRunners.get(cacheKey)) {
+			const cached = this.getRunnerAvailability(cwd, name);
+			if (cached !== undefined) {
+				if (cached) {
 					return { runner: name, config };
 				}
 				continue;
@@ -405,7 +427,7 @@ export class TestRunnerClient {
 				return fs.existsSync(path.join(cwd, cf));
 			});
 
-			this.availableRunners.set(cacheKey, found);
+			this.setRunnerAvailability(cwd, name, found);
 			if (found) {
 				this.log(`Detected runner via config: ${name}`);
 				return { runner: name, config };
@@ -423,17 +445,17 @@ export class TestRunnerClient {
 			// Check for vitest first (more specific than jest)
 			if (allDeps.vitest) {
 				this.log("Detected vitest in package.json");
-				this.availableRunners.set(`${cwd}:vitest:config`, true);
+				this.setRunnerAvailability(cwd, "vitest", true);
 				return { runner: "vitest", config: RUNNERS.vitest };
 			}
 			if (allDeps.jest) {
 				this.log("Detected jest in package.json");
-				this.availableRunners.set(`${cwd}:jest:config`, true);
+				this.setRunnerAvailability(cwd, "jest", true);
 				return { runner: "jest", config: RUNNERS.jest };
 			}
 			if (allDeps.pytest || allDeps["pytest-cov"]) {
 				this.log("Detected pytest in package.json (unusual)");
-				this.availableRunners.set(`${cwd}:pytest:config`, true);
+				this.setRunnerAvailability(cwd, "pytest", true);
 				return { runner: "pytest", config: RUNNERS.pytest };
 			}
 		} catch (err) {
