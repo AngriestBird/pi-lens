@@ -170,7 +170,6 @@ interface SourcePathMemo {
 	normalizeCalls: { value: number };
 }
 const _sourcePathMemos = new Map<string, SourcePathMemo>();
-const _sourcePathNormalizeCalls = new Map<string, { value: number }>();
 
 function sourcePathMemo(cwd: string): SourcePathMemo {
 	const key = normalizeMapKey(path.resolve(cwd));
@@ -188,12 +187,10 @@ function sourcePathMemo(cwd: string): SourcePathMemo {
 		normalizeCalls: { value: 0 },
 	};
 	_sourcePathMemos.set(key, memo);
-	_sourcePathNormalizeCalls.set(key, memo.normalizeCalls);
 	while (_sourcePathMemos.size > REVIEW_GRAPH_MAX_WARM_WORKSPACES) {
 		const oldest = _sourcePathMemos.keys().next().value;
 		if (oldest === undefined) break;
 		_sourcePathMemos.delete(oldest);
-		_sourcePathNormalizeCalls.delete(oldest);
 	}
 	return memo;
 }
@@ -221,7 +218,6 @@ export function _getReviewGraphSourcePathNormalizeCallsForTests(
 
 export function _resetReviewGraphSourcePathMemoForTests(): void {
 	_sourcePathMemos.clear();
-	_sourcePathNormalizeCalls.clear();
 }
 
 // IN-FLIGHT Promise cache: deduplicates CONCURRENT buildOrUpdateGraph calls for
@@ -339,7 +335,6 @@ function evictWorkspaceGraph(
 		}
 	}
 	_sourcePathMemos.delete(key);
-	_sourcePathNormalizeCalls.delete(key);
 	_workspaceCacheEpochs.set(key, (_workspaceCacheEpochs.get(key) ?? 0) + 1);
 	_workspaceGraphCache.delete(key);
 }
@@ -550,7 +545,6 @@ export function clearReviewGraphWorkspaceCache(cwd?: string): void {
 			clearWorkspaceGraphTimer(entry);
 		_workspaceGraphCache.clear();
 		_sourcePathMemos.clear();
-		_sourcePathNormalizeCalls.clear();
 		_workspaceCacheEpoch++;
 		_sizeSkipVerdicts.clear();
 	} else {
@@ -572,7 +566,6 @@ export function clearReviewGraphWorkspaceCache(cwd?: string): void {
 		);
 		_workspaceGraphCache.delete(normalized);
 		_sourcePathMemos.delete(normalized);
-		_sourcePathNormalizeCalls.delete(normalized);
 		_sizeSkipVerdicts.delete(normalized);
 	}
 	_lastGraphBuildInfo = { reused: false, mode: "full", graphChanged: true };

@@ -76,6 +76,40 @@ async function waitForFile(p: string, attempts = 20): Promise<boolean> {
 }
 
 describe("review-graph persist circuit-breaker (#260)", () => {
+	it("does not re-normalize a warm graph's persisted source paths (#2072 AC1)", async () => {
+		const env = makeEnv();
+		try {
+			const source = createTempFile(
+				env.tmpDir,
+				"src/warm.ts",
+				"export const warm = 1;\n",
+			);
+			await buildOrUpdateGraph(env.tmpDir, [], new FactStore());
+			flushReviewGraphPersistsForTests();
+			await waitForReviewGraphPersistsForTests();
+			fs.writeFileSync(source, "export const warm = 2;\n");
+			const realpath = fs.realpathSync.native;
+			const realpathNative = vi.spyOn(fs.realpathSync, "native");
+			const stacks: string[] = [];
+			realpathNative.mockImplementation((...args) => {
+				stacks.push(new Error().stack ?? "");
+				return realpath(...args);
+			});
+			realpathNative.mockClear();
+			await buildOrUpdateGraph(
+				env.tmpDir,
+				[path.resolve(source)],
+				new FactStore(),
+			);
+			expect(
+				stacks.filter((stack) => stack.includes("countRetainedSourceFiles")),
+			).toHaveLength(0);
+			realpathNative.mockRestore();
+		} finally {
+			env.cleanup();
+		}
+	}, 30_000);
+
 	it("preserves mixed-case source coverage in a persisted graph (#2072 F2/F3 AC3)", async () => {
 		const env = makeEnv();
 		try {
@@ -446,7 +480,9 @@ describe("review-graph persist circuit-breaker (#260)", () => {
 		expect(succeeded?.observability?.persistence?.generation).toBe(
 			scheduled?.observability?.persistence?.generation,
 		);
-		expect(succeeded?.durationMs).toEqual(expect.any(Number));
+		expect(succeeded?.durationMs).toBeGreaterThan(
+			(succeeded?.serializeMs ?? 0) + (succeeded?.writeMs ?? 0),
+		);
 		const completed = vi
 			.mocked(logReviewGraph)
 			.mock.calls.find(([entry]) => entry.phase === "build_succeeded")?.[0];

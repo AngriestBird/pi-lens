@@ -93,6 +93,9 @@ export async function writeGzipStageFile(
 	testDelayMs?: number,
 	options?: GzipStageWriteOptions,
 ): Promise<GzipStageWriteMetrics> {
+	// Worker-path duration starts inside this stage, so it includes the worker's
+	// test delay, serialization, gzip, and rename, but excludes postMessage queue
+	// latency. Main-thread callers measure from their inclusive persist entry.
 	const startedAt = performance.now();
 	const tmpPath = stagePathFor(stagePath);
 	try {

@@ -222,6 +222,48 @@ describe("review graph service", () => {
 		}
 	});
 
+	it("recomputes a recreated mixed-case spelling after a missing walk entry (#2072 F2/F3)", async () => {
+		const env = setupTestEnvironment("pi-lens-review-graph-source-memo-ghost-");
+		const victim = path.join(env.tmpDir, "src", "MiXeD-victim.ts");
+		let visited = 0;
+		try {
+			for (let i = 0; i < 301; i++) {
+				createTempFile(
+					env.tmpDir,
+					`src/${i === 0 ? "MiXeD-victim" : `file-${String(i).padStart(3, "0")}`}.ts`,
+					`export const value${i} = ${i};\n`,
+				);
+			}
+			_resetReviewGraphSourcePathMemoForTests();
+			_setReviewGraphEntryCounterForTests(() => {
+				visited++;
+				// src/ plus the 301 files: delete the victim after the walker has
+				// collected its raw spelling, but before normalization begins.
+				if (visited === 302) fs.rmSync(victim, { force: true });
+			});
+			await getGraphSourceFiles(env.tmpDir);
+			expect(visited).toBeGreaterThanOrEqual(302);
+			expect(fs.existsSync(victim)).toBe(false);
+			createTempFile(
+				env.tmpDir,
+				"src/MiXeD-victim.ts",
+				"export const value = 1;\n",
+			);
+			_setReviewGraphEntryCounterForTests();
+			const freshSources = await getGraphSourceFiles(env.tmpDir);
+			expect(freshSources.files).toContain(normalizeMapKey(victim));
+			const second = await buildOrUpdateGraph(env.tmpDir, [], new FactStore());
+			expect(second.persistCoverage?.persistedFiles).toBe(
+				second.persistCoverage?.totalFiles,
+			);
+			expect(second.fileNodes.has(normalizeMapKey(victim))).toBe(true);
+		} finally {
+			_setReviewGraphEntryCounterForTests();
+			_resetReviewGraphSourcePathMemoForTests();
+			env.cleanup();
+		}
+	}, 30_000);
+
 	it("keeps a walk's normalize counter stable across workspace eviction (#2072 F4)", async () => {
 		const env = setupTestEnvironment(
 			"pi-lens-review-graph-source-memo-eviction-",
@@ -247,7 +289,7 @@ describe("review graph service", () => {
 			});
 			const warm = await getGraphSourceFiles(env.tmpDir);
 			await Promise.all(evictions);
-			expect(warm.pathNormalizeCalls).toBeGreaterThanOrEqual(0);
+			expect(warm.pathNormalizeCalls).toBe(warm.files.length);
 		} finally {
 			_setReviewGraphEntryCounterForTests();
 			_resetReviewGraphSourcePathMemoForTests();
