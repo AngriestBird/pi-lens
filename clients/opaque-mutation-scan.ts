@@ -74,6 +74,7 @@ export type OpaqueUnknownReason =
 	| "entry-budget-exceeded"
 	| "no-git"
 	| "git-failed"
+	| "git-status-parse-failed"
 	| "no-pending-snapshot";
 
 export interface CaptureOutcome {
@@ -256,14 +257,34 @@ export interface GitRecoveryOutcome {
 	scannedCount: number;
 }
 
+/** Narrow failure-only policy for Git integration commands. */
+export interface GitRecoveryOptions {
+	/**
+	 * When a failed merge, rebase, or cherry-pick leaves unmerged index entries,
+	 * omit clean index-only paths brought in by the other side. Paths with a
+	 * worktree status and every unmerged path remain eligible.
+	 */
+	excludeIndexOnlyWhenUnmerged?: boolean;
+}
+
+interface GitStatusEntry {
+	status: string;
+	absPath: string;
+}
+
+function isUnmergedStatus(status: string): boolean {
+	return ["DD", "AU", "UD", "UA", "DU", "AA", "UU"].includes(status);
+}
+
 /**
  * Files dirty in the working tree whose mtime falls inside
  * [startedAt - tolerance, now]. Porcelain -z parsing handles renames
- * (the NEW path is reported; the old path token is skipped).
+ * (the NEW path is reported; the old path token is skipped before filtering).
  */
 export async function recoverOpaqueChangesViaGit(
 	root: string,
 	startedAt: number,
+	options: GitRecoveryOptions = {},
 ): Promise<GitRecoveryOutcome> {
 	const result = await safeSpawnAsync(
 		"git",
@@ -278,25 +299,64 @@ export async function recoverOpaqueChangesViaGit(
 			scannedCount: 0,
 		};
 	}
-	const floorMs = startedAt - OPAQUE_MTIME_TOLERANCE_MS;
 	const raw = result.stdout ?? "";
-	const tokens = raw.split("\0");
-	const paths: string[] = [];
+	if (raw && !raw.endsWith("\0")) {
+		return {
+			verdict: "unknown",
+			paths: [],
+			unknownReason: "git-status-parse-failed",
+			scannedCount: 0,
+		};
+	}
+	const entries: GitStatusEntry[] = [];
 	let skipNext = false; // rename's OLD path follows its NEW path
-	for (const token of tokens) {
+	for (const token of raw.split("\0")) {
 		if (!token) continue;
 		if (skipNext) {
 			skipNext = false;
 			continue;
 		}
 		// Each entry: two status chars, one space, then the path.
-		if (token.length < 4 || token[2] !== " ") continue;
+		if (token.length < 4 || token[2] !== " ") {
+			return {
+				verdict: "unknown",
+				paths: [],
+				unknownReason: "git-status-parse-failed",
+				scannedCount: 0,
+			};
+		}
 		const status = token.slice(0, 2);
 		const relPath = token.slice(3);
+		if (!/^[ MADRCTU?!]{2}$/.test(status) || !relPath) {
+			return {
+				verdict: "unknown",
+				paths: [],
+				unknownReason: "git-status-parse-failed",
+				scannedCount: 0,
+			};
+		}
 		if (status.includes("R") || status.includes("C")) skipNext = true;
-		const abs = path.resolve(root, relPath);
+		entries.push({ status, absPath: path.resolve(root, relPath) });
+	}
+	if (skipNext) {
+		return {
+			verdict: "unknown",
+			paths: [],
+			unknownReason: "git-status-parse-failed",
+			scannedCount: 0,
+		};
+	}
+
+	const hasUnmerged = entries.some((entry) => isUnmergedStatus(entry.status));
+	const candidates =
+		options.excludeIndexOnlyWhenUnmerged && hasUnmerged
+			? entries.filter((entry) => entry.status[1] !== " ")
+			: entries;
+	const floorMs = startedAt - OPAQUE_MTIME_TOLERANCE_MS;
+	const paths: string[] = [];
+	for (const { absPath } of candidates) {
 		try {
-			const stat = await fs.promises.stat(abs);
+			const stat = await fs.promises.stat(absPath);
 			if (
 				stat.isFile() &&
 				freshnessFromMtime({ mtimeMs: stat.mtimeMs, referenceMs: floorMs })
@@ -304,7 +364,7 @@ export async function recoverOpaqueChangesViaGit(
 			) {
 				// Kernel "stale" = modified AFTER the window floor - exactly the
 				// writes this command may have authored.
-				paths.push(normalizeMapKey(abs));
+				paths.push(normalizeMapKey(absPath));
 			}
 		} catch {
 			// Deleted or vanished: deletions are deliberately unreported.

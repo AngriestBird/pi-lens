@@ -222,6 +222,38 @@ describe("recoverOpaqueChangesViaGit (real git repo)", () => {
 		expect(outcome.paths).toEqual([]);
 	});
 
+	it("excludes clean incoming index paths after a conflicted merge", async () => {
+		const imported = path.join(repoDir, "src", "imported.ts");
+		const added = path.join(repoDir, "src", "added.ts");
+		const conflict = path.join(repoDir, "src", "base.ts");
+		execSync("git checkout -qb incoming", { cwd: repoDir });
+		fs.writeFileSync(imported, "imported\n", "utf8");
+		fs.writeFileSync(added, "added\n", "utf8");
+		fs.writeFileSync(conflict, "incoming\n", "utf8");
+		execSync("git add -A && git commit -qm incoming", { cwd: repoDir });
+		execSync("git checkout -q master", { cwd: repoDir });
+		fs.writeFileSync(conflict, "local\n", "utf8");
+		execSync("git add -A && git commit -qm local", { cwd: repoDir });
+
+		const startedAt = Date.now();
+		expect(() => execSync("git merge incoming", { cwd: repoDir })).toThrow();
+		const worktreeSide = path.join(repoDir, "src", "worktree-side.ts");
+		fs.writeFileSync(worktreeSide, "worktree side\n", "utf8");
+
+		const outcome = await recoverOpaqueChangesViaGit(repoDir, startedAt, {
+			excludeIndexOnlyWhenUnmerged: true,
+		});
+		expect(outcome.verdict).toBe("recovered");
+		expect(outcome.paths).toEqual(
+			expect.arrayContaining([
+				normalizeMapKey(conflict),
+				normalizeMapKey(worktreeSide),
+			]),
+		);
+		expect(outcome.paths).not.toContain(normalizeMapKey(imported));
+		expect(outcome.paths).not.toContain(normalizeMapKey(added));
+	});
+
 	it(
 		"end-to-end: node child write is recovered as opaque-script in the change log",
 		{ timeout: 15_000 },
@@ -469,5 +501,91 @@ describe("partial-recognition recovery (#2000 PR-B)", () => {
 		} finally {
 			fs.rmSync(scriptFile, { force: true });
 		}
+	});
+});
+
+describe("failed Git integration recovery dispatch", () => {
+	let repoDir = "";
+
+	beforeEach(() => {
+		repoDir = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-opaque-integration-"),
+		);
+		execSync("git init -q", { cwd: repoDir });
+		execSync("git config user.email t@t.local", { cwd: repoDir });
+		execSync("git config user.name t", { cwd: repoDir });
+		fs.mkdirSync(path.join(repoDir, "src"), { recursive: true });
+		fs.writeFileSync(path.join(repoDir, "src", "conflict.ts"), "base\n");
+		fs.writeFileSync(path.join(repoDir, "src", "imported.ts"), "base\n");
+		execSync("git add -A && git commit -qm base", { cwd: repoDir });
+	});
+
+	afterEach(() => removeTempDirSync(repoDir));
+
+	it("does not synthesize dispatches for clean incoming merge paths", async () => {
+		const conflict = path.join(repoDir, "src", "conflict.ts");
+		const imported = path.join(repoDir, "src", "imported.ts");
+		const added = path.join(repoDir, "src", "added.ts");
+		execSync("git checkout -qb incoming", { cwd: repoDir });
+		fs.writeFileSync(conflict, "incoming\n");
+		fs.writeFileSync(imported, "incoming\n");
+		fs.writeFileSync(added, "added\n");
+		execSync("git add -A && git commit -qm incoming", { cwd: repoDir });
+		execSync("git checkout -q master", { cwd: repoDir });
+		fs.writeFileSync(conflict, "local\n");
+		execSync("git add -A && git commit -qm local", { cwd: repoDir });
+
+		const runtime = new RuntimeCoordinator();
+		runtime.projectRoot = repoDir;
+		runtime.setTelemetryIdentity({ sessionId: "failed-integration" });
+		const command = "git merge incoming";
+		const toolCallDeps = {
+			event: { toolName: "bash", input: { command } },
+			ctx: { cwd: repoDir },
+			lensEnabled: true,
+			getFlag: () => false,
+			dbg: () => {},
+			runtime,
+			cacheManager: new CacheManager(false),
+			ensureLSPConfigInitialized: async () => {},
+			updateLspStatus: () => {},
+			resetLSPService: () => {},
+		} as Parameters<typeof handleToolCall>[0];
+		const toolResultDeps = {
+			event: {
+				toolName: "bash",
+				isError: true,
+				input: { command },
+				content: [{ type: "text", text: "merge conflict" }],
+			},
+			getFlag: () => false,
+			dbg: () => {},
+			runtime,
+			cacheManager: new CacheManager(false),
+			biomeClient: {},
+			ruffClient: {},
+			testRunnerClient: {},
+			metricsClient: {},
+			resetLSPService: () => {},
+			agentBehaviorRecord: () => [],
+			formatBehaviorWarnings: () => "",
+		} as unknown as Parameters<typeof handleToolResult>[0];
+		const { runPipeline } = await import("../../clients/pipeline.js");
+		vi.mocked(runPipeline).mockClear();
+
+		await handleToolCall(toolCallDeps);
+		expect(() => execSync(command, { cwd: repoDir })).toThrow();
+		const worktreeSide = path.join(repoDir, "src", "worktree-side.ts");
+		fs.writeFileSync(worktreeSide, "worktree side\n");
+		await handleToolResult(toolResultDeps);
+
+		const dispatched = vi
+			.mocked(runPipeline)
+			.mock.calls.map(([ctx]) => String(ctx?.filePath));
+		expect(dispatched).toEqual(
+			expect.arrayContaining([conflict, worktreeSide]),
+		);
+		expect(dispatched).not.toContain(imported);
+		expect(dispatched).not.toContain(added);
 	});
 });
