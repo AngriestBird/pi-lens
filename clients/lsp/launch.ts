@@ -144,7 +144,16 @@ function readWindowsRegistryPath(): string {
 				"-Command",
 				"[System.Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [System.Environment]::GetEnvironmentVariable('Path','User')",
 			],
-			{ timeout: 3000, encoding: "utf8" },
+			{
+				timeout: 3000,
+				encoding: "utf8",
+				// #2095 sibling: execFileSync inherits stderr to the parent by
+				// default (only stdout is captured into `out`), so a failed
+				// powershell.exe launch would print raw diagnostics into the pi
+				// TUI even though the surrounding catch already reports "unknown"
+				// PATH. Pipe stderr instead of inheriting it.
+				stdio: ["ignore", "pipe", "ignore"],
+			},
 		);
 		return out.trim();
 	} catch {
