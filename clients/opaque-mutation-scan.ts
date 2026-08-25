@@ -459,6 +459,10 @@ export async function recoverOpaqueChangesViaGit(
 		// REFUSE to start against a dirty index, so no agent-staged file can be
 		// sitting here (#2060 F5, probed on git 2.55). An unknown-but-well-formed
 		// pair is NOT classified as incoming - capture wins when in doubt.
+		// Scope: the refusal argument covers content staged BEFORE the
+		// integration started. Content staged mid-call, after the conflict
+		// began, is indistinguishable from incoming and is excluded too; the
+		// excluded count below is the visibility for that edge.
 		// A blank Y already excludes every unmerged pair (all seven are two
 		// letters), so this needs no separate unmerged term.
 		candidates = entries.filter((entry) => {
