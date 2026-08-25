@@ -31,7 +31,7 @@ function sweepShapeFiles(): string[] {
 			const raw = fs.readFileSync(file, "utf8");
 			const source = stripSource(raw);
 			const enumerates =
-				/(?:fs\.readdirSync|(?<![A-Za-z0-9_$])readdirSync|fs\.promises\.readdir|globSync|listSourceFiles|clientSourceFiles)/.test(
+				/(?:fs\.readdirSync|(?<![A-Za-z0-9_$])readdirSync|fs\.promises\.readdir|(?<![A-Za-z0-9_$.])readdir(?!Sync)|globSync|listSourceFiles|clientSourceFiles)/.test(
 					source,
 				) ||
 				/(?:assertNonEmptyScan|auditRegistry|scanDualInstanceImports|LSP_SERVERS|LSP_FIXTURES|ALL_FORMATTERS|DYNAMIC_OR_EXEMPT|isTimingSensitive|scanHostEventShapeViolations)/.test(
@@ -69,7 +69,8 @@ const DECLARED_EXCEPTIONS: Readonly<Record<string, string>> = {
 	"tests/clients/debug-heap.test.ts":
 		"heap diagnostic cases, not a production population sweep",
 	"tests/clients/delivery-surface-ratchet.test.ts":
-		"delivery fixtures, not a production population sweep",
+		"carries its own declared floor at the 'ratchet floor: at least one " +
+		"advisory-marker file detected' check (count >= 3)",
 	"tests/clients/deps-centralization.test.ts":
 		"dependency relation cases, not a production population sweep",
 	"tests/clients/diagnostic-dispositions.test.ts":
@@ -102,8 +103,6 @@ const DECLARED_EXCEPTIONS: Readonly<Record<string, string>> = {
 		"edit behavior cases, not a production population sweep",
 	"tests/clients/lsp/ruby-drive-dirs.test.ts":
 		"path behavior cases, not a production population sweep",
-	"tests/clients/managed-tool-seam-coverage.test.ts":
-		"managed-tool seam cases, not a production population sweep",
 	"tests/clients/pi-host-contract.test.ts":
 		"host contract cases, not a production population sweep",
 	"tests/clients/project-diagnostics/scanner.test.ts":
@@ -127,7 +126,8 @@ const DECLARED_EXCEPTIONS: Readonly<Record<string, string>> = {
 	"tests/packaging.test.ts":
 		"packaging behavior cases, not a production population sweep",
 	"tests/scripts/no-hardcoded-machine-paths.test.ts":
-		"path policy cases, not a production population sweep",
+		"carries its own declared floor at the 'scans a nonzero number of " +
+		"script files' check (files.length > 10)",
 	"tests/scripts/rollup-changelog.test.ts":
 		"changelog behavior cases, not a production population sweep",
 	"tests/scripts/smoke-tools-cue-fixture.test.ts":
@@ -160,13 +160,18 @@ describe("registered-or-fail sweep floors", () => {
 			flagged: files,
 			registered,
 			exemptions: DECLARED_EXCEPTIONS,
-			// Calibration: 780 test files walked on 2026-08-26; half is 390,
-			// rounded up to the documented 400 floor.
+			// Calibration: 781 test files walked on 2026-08-26 (fix round 2, post
+			// master-merge); half is 391, rounded up to the documented 400 floor.
 			scannedCount,
 			minScanned: 400,
-			// Calibration: this census flags 13 sweep-shaped files today; half
-			// is 20. Recalibrate from the census when the suite grows materially.
-			minFlagged: 20,
+			// Calibration: this census flags 55 sweep-shaped files on 2026-08-26
+			// (fix round 2) -- 10 registered via assertNonEmptyScan/minScanned, 45
+			// declared exceptions. Half of 55 rounded up is 28. Earlier figures
+			// (13 in this comment, 40 in the PR body table) were both stale by the
+			// time the exception list finished growing to 46 entries in round 1.
+			// Recalibrate by reading this test's OWN measured numbers, not by
+			// copying a figure from a comment or a PR body.
+			minFlagged: 28,
 			minReasonLength: 20,
 		});
 		expect(audit.problems, audit.problems.join("\n")).toEqual([]);
