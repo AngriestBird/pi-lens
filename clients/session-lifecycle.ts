@@ -37,6 +37,11 @@ let activeCtx: unknown | undefined;
 let activeSessionId: string | undefined;
 let secondarySessionCount = 0;
 
+/** The stable id of the currently registered primary session, if known. */
+export function getActiveSessionId(): string | undefined {
+	return activeSessionId;
+}
+
 export type SessionStartClassification =
 	| "primary"
 	| "sequential-replacement"

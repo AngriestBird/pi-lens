@@ -113,6 +113,23 @@ describe("session degradation ledger", () => {
 		});
 	});
 
+	it("carries record metadata on durable ledger rows", () => {
+		incrementDegradationCount({
+			kind: "cache-usage-attribution-stale",
+			subject: "message_end",
+			reason: "missing session id",
+			metadata: { sessionId: "session-one" },
+		});
+
+		expect(logLatency).toHaveBeenCalledWith(
+			expect.objectContaining({
+				metadata: expect.objectContaining({
+					sessionId: "session-one",
+				}),
+			}),
+		);
+	});
+
 	it("writes updated counts without duplicating once-records", () => {
 		const once = {
 			kind: "formatter-failure" as const,

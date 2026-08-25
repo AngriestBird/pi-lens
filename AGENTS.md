@@ -377,7 +377,9 @@ successful notify drains remain latency-only because they are not degradations.
 The `message_end` handler uses `cache-usage-attribution-stale` (subject
 `message_end`) when a confirmed-stale ctx strips the stable id from a
 `cache_usage` row — the row still writes, so the degraded ATTRIBUTION is the
-degradation, never the row itself (#1956).
+degradation, never the row itself (#1956). Its durable ledger row carries the
+active primary session id (or `unknown`), and the row write must precede the
+best-effort ledger increment so a ledger failure cannot drop provider usage.
 Workspace-root path-attribution rollups are separate, memory-only session
 telemetry. They reset on the primary `session_start`, emit once on primary
 shutdown, and secondary shutdown returns before consuming the primary tally.

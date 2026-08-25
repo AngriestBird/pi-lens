@@ -382,6 +382,7 @@ export interface DegradationRecord {
 	kind: unknown;
 	subject: unknown;
 	reason: unknown;
+	metadata?: Record<string, unknown>;
 }
 
 export interface DegradationGroup {
@@ -450,7 +451,7 @@ export function recordDegradationOnce(record: DegradationRecord): void {
 		if (onceKeys.has(key)) return;
 		onceKeys.add(key);
 		if (recordDegradation({ kind, subject, reason: record.reason })) {
-			logDurableDegradation(kind, subject, 1);
+			logDurableDegradation(kind, subject, 1, record.metadata);
 		}
 	} catch (error) {
 		debugLedgerFailure("record-once", error);
@@ -499,7 +500,7 @@ export function incrementDegradationCount(record: DegradationRecord): boolean {
 		// Durable rows use the summary's admission and emit the first event and
 		// power-of-two milestones only, keeping the sink bounded.
 		if (admitted && isPowerOfTwo(count)) {
-			logDurableDegradation(kind, subject, count);
+			logDurableDegradation(kind, subject, count, record.metadata);
 		}
 		return count === 1;
 	} catch (error) {
@@ -519,13 +520,14 @@ function logDurableDegradation(
 	kind: string,
 	subject: string,
 	count: number,
+	metadata?: Record<string, unknown>,
 ): void {
 	logLatency({
 		type: "phase",
 		phase: "degradation_ledger",
 		filePath: subject,
 		durationMs: 0,
-		metadata: { kind, subject, count, ledgerGeneration },
+		metadata: { ...metadata, kind, subject, count, ledgerGeneration },
 	});
 }
 

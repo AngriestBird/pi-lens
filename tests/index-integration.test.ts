@@ -2448,4 +2448,127 @@ describe("#484 turn-summary emit at the agent_settled quiet window", () => {
 		},
 		INTEGRATION_TIMEOUT_MS,
 	);
+
+	it(
+		"message_end does not record attribution degradation for a live ctx",
+		async () => {
+			const logCacheUsage = vi.fn();
+			vi.doMock("../clients/cache-observability.js", async (importActual) => ({
+				...(await importActual<
+					typeof import("../clients/cache-observability.js")
+				>()),
+				logCacheUsage,
+			}));
+			const { default: registerExtension } = await import("../index.js");
+			const primary = createMockPi();
+			registerExtension(primary.pi as any);
+			await primary.trigger("message_end", { message: { role: "assistant" } }, makeCtx());
+			const { getDegradationSummary } = await import(
+				"../clients/degradation-ledger.js"
+			);
+			expect(logCacheUsage).toHaveBeenCalledOnce();
+			expect(
+				getDegradationSummary().find(
+					(group) => group.kind === "cache-usage-attribution-stale",
+				),
+			).toBeUndefined();
+		},
+		INTEGRATION_TIMEOUT_MS,
+	);
+
+	it(
+		"message_end does not record attribution degradation for an inconclusive ctx",
+		async () => {
+			const logCacheUsage = vi.fn();
+			vi.doMock("../clients/cache-observability.js", async (importActual) => ({
+				...(await importActual<
+					typeof import("../clients/cache-observability.js")
+				>()),
+				logCacheUsage,
+			}));
+			const { default: registerExtension } = await import("../index.js");
+			const primary = createMockPi();
+			registerExtension(primary.pi as any);
+			await primary.trigger("message_end", { message: { role: "assistant" } }, { cwd: "/x" });
+			const { getDegradationSummary } = await import(
+				"../clients/degradation-ledger.js"
+			);
+			expect(logCacheUsage).toHaveBeenCalledOnce();
+			expect(
+				getDegradationSummary().find(
+					(group) => group.kind === "cache-usage-attribution-stale",
+				),
+			).toBeUndefined();
+		},
+		INTEGRATION_TIMEOUT_MS,
+	);
+
+	it(
+		"message_end ledger metadata identifies the active session, with an unknown fallback",
+		async () => {
+			const logCacheUsage = vi.fn();
+			const incrementDegradationCount = vi.fn();
+			vi.doMock("../clients/cache-observability.js", async (importActual) => ({
+				...(await importActual<
+					typeof import("../clients/cache-observability.js")
+				>()),
+				logCacheUsage,
+			}));
+			vi.doMock("../clients/degradation-ledger.js", async (importActual) => ({
+				...(await importActual<
+					typeof import("../clients/degradation-ledger.js")
+				>()),
+				incrementDegradationCount,
+			}));
+			const { default: registerExtension } = await import("../index.js");
+			const { registerPrimarySession } = await import(
+				"../clients/session-lifecycle.js"
+			);
+			const primary = createMockPi();
+			registerExtension(primary.pi as any);
+			registerPrimarySession({}, "session-one");
+			await primary.trigger("message_end", { message: { role: "assistant" } }, makeStaleCtx());
+			registerPrimarySession({}, "session-two");
+			await primary.trigger("message_end", { message: { role: "assistant" } }, makeStaleCtx());
+			registerPrimarySession({}, undefined);
+			await primary.trigger("message_end", { message: { role: "assistant" } }, makeStaleCtx());
+			expect(incrementDegradationCount.mock.calls.map(([record]) => record.metadata)).toEqual([
+				{ sessionId: "session-one" },
+				{ sessionId: "session-two" },
+				{ sessionId: "unknown" },
+			]);
+		},
+		INTEGRATION_TIMEOUT_MS,
+	);
+
+	it(
+		"message_end still writes cache_usage when ledger counting throws",
+		async () => {
+			const logCacheUsage = vi.fn();
+			vi.doMock("../clients/cache-observability.js", async (importActual) => ({
+				...(await importActual<
+					typeof import("../clients/cache-observability.js")
+				>()),
+				logCacheUsage,
+			}));
+			vi.doMock("../clients/degradation-ledger.js", async (importActual) => ({
+				...(await importActual<
+					typeof import("../clients/degradation-ledger.js")
+				>()),
+				incrementDegradationCount: vi.fn(() => {
+					throw new Error("ledger unavailable");
+				}),
+			}));
+			const { default: registerExtension } = await import("../index.js");
+			const primary = createMockPi();
+			registerExtension(primary.pi as any);
+			await primary.trigger(
+				"message_end",
+				{ message: { role: "assistant", usage: { input: 1, output: 1 } } },
+				makeStaleCtx(),
+			);
+			expect(logCacheUsage).toHaveBeenCalledOnce();
+		},
+		INTEGRATION_TIMEOUT_MS,
+	);
 });
