@@ -358,6 +358,8 @@ function setWorkspaceGraph(
 	epoch?: number,
 ): boolean {
 	if (epoch !== undefined && workspaceCacheEpoch(key) !== epoch) return false;
+	const previous = _workspaceGraphCache.get(key);
+	if (previous) clearWorkspaceGraphTimer(previous);
 	const resident: WorkspaceGraphCacheEntry = {
 		...entry,
 		lastUsedAt: Date.now(),
@@ -607,6 +609,18 @@ export function _getReviewGraphWorkspaceCacheKeysForTests(): string[] {
 	return [..._workspaceGraphCache.entries()]
 		.sort(([, a], [, b]) => a.lastUsedAt - b.lastUsedAt)
 		.map(([key]) => key);
+}
+
+/** Test-only replacement seam for the workspace idle-eviction family. */
+export function _setReviewGraphWorkspaceEntryForTests(
+	key: string,
+	graph: ReviewGraph,
+): void {
+	setWorkspaceGraph(key, {
+		signature: "test",
+		fileSignatures: new Map(),
+		graph,
+	});
 }
 
 export function _getReviewGraphCacheStateForTests(cwd: string):

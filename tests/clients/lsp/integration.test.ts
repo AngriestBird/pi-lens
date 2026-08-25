@@ -416,7 +416,211 @@ describe("LSP Client Integration — nested capability gates (#1971)", () => {
 				await stopLSP(proc);
 			}
 		}
-	});
+	}, 20_000);
+
+	it("honors complete file-operation filters on the protocol wire", async () => {
+		const tempRoot = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lsp-rename-filter-"),
+		);
+		const oldFile = path.join(tempRoot, "OLD.TS");
+		const newFile = path.join(tempRoot, "NEW.TS");
+		const oldFolder = path.join(tempRoot, "old-folder");
+		const newFolder = path.join(tempRoot, "new-folder");
+		const nestedDir = path.join(tempRoot, "a", "b");
+		const nestedOldFile = path.join(nestedDir, "old.ts");
+		const nestedNewFile = path.join(nestedDir, "new.ts");
+		fs.writeFileSync(oldFile, "export {};\n");
+		fs.mkdirSync(oldFolder);
+		fs.mkdirSync(nestedDir, { recursive: true });
+		fs.writeFileSync(nestedOldFile, "export {};\n");
+
+		const filter = (
+			glob: unknown,
+			extra: Record<string, unknown> = {},
+		): Record<string, unknown> => ({
+			scheme: "file",
+			pattern: { glob, ...extra },
+		});
+		const cases: Array<{
+			name: string;
+			filters: unknown;
+			oldPath?: string;
+			newPath?: string;
+			oldUri?: string;
+			newUri?: string;
+			sent: boolean;
+			registered?: boolean;
+		}> = [
+			{
+				name: "mixed filters match when one complete filter matches",
+				filters: [
+					filter("**/*.go"),
+					filter("**/*.ts", { options: { ignoreCase: true } }),
+				],
+				sent: true,
+			},
+			{
+				name: "ignoreCase defaults to false independent of host",
+				filters: [filter("**/*.ts")],
+				sent: false,
+			},
+			{
+				name: "basename does not widen a nested path glob",
+				filters: [filter("*.ts")],
+				oldPath: nestedOldFile,
+				newPath: nestedNewFile,
+				sent: false,
+			},
+			{
+				name: "folder kind matches a probed folder",
+				filters: [filter("**/old-folder", { matches: "folder" })],
+				oldPath: oldFolder,
+				newPath: newFolder,
+				sent: true,
+			},
+			{
+				name: "file kind rejects a probed folder",
+				filters: [filter("**/old-folder", { matches: "file" })],
+				oldPath: oldFolder,
+				newPath: newFolder,
+				sent: false,
+			},
+			{
+				name: "unsupported URI scheme fails closed",
+				filters: [{ scheme: "untitled", pattern: { glob: "**/*.ts" } }],
+				oldUri: "untitled:///OLD.TS",
+				newUri: "untitled:///NEW.TS",
+				sent: false,
+			},
+			{
+				name: "unsupported wire URI scheme fails closed without filter scheme",
+				filters: [{ pattern: { glob: "**/*.ts" } }],
+				oldUri: "vscode-vfs://host/old.ts",
+				newUri: "vscode-vfs://host/new.ts",
+				sent: false,
+			},
+			{
+				name: "omitted scheme matches a supported file URI",
+				filters: [{ pattern: { glob: "**/*.TS" } }],
+				sent: true,
+			},
+			{
+				name: "empty scheme is malformed",
+				filters: [{ scheme: "", pattern: { glob: "**/*.TS" } }],
+				sent: false,
+				registered: false,
+			},
+			{
+				name: "invalid matches value is malformed",
+				filters: [filter("**/*.TS", { matches: "document" })],
+				sent: false,
+				registered: false,
+			},
+			{
+				name: "invalid options are malformed",
+				filters: [filter("**/*.TS", { options: { ignoreCase: "yes" } })],
+				sent: false,
+				registered: false,
+			},
+		];
+		let symlinkPaths: { oldPath: string; newPath: string } | undefined;
+		try {
+			const oldLink = path.join(tempRoot, "old-link");
+			const newLink = path.join(tempRoot, "new-link");
+			fs.symlinkSync(oldFolder, oldLink, "junction");
+			symlinkPaths = { oldPath: oldLink, newPath: newLink };
+		} catch {
+			// Symlink-specific coverage is omitted when the platform denies creation;
+			// the non-symlink protocol matrix still runs below.
+		}
+		if (symlinkPaths) {
+			cases.push({
+				name: "matches file treats a directory symlink as the renamed entity",
+				filters: [filter("**/old-link", { matches: "file" })],
+				...symlinkPaths,
+				sent: true,
+			});
+		}
+
+		try {
+			for (const operation of ["will", "did"] as const) {
+				for (const testCase of cases) {
+					const envKey =
+						operation === "will"
+							? "FAKE_LSP_WILL_RENAME_FILTERS"
+							: "FAKE_LSP_DID_RENAME_FILTERS";
+					const launched = await launchLSP(
+						process.execPath,
+						[FAKE_SERVER_PATH],
+						{
+							cwd: tempRoot,
+							env: {
+								...process.env,
+								FAKE_LSP_WILL_RENAME: "true",
+								FAKE_LSP_DID_RENAME: "true",
+								[envKey]: JSON.stringify(testCase.filters),
+								...(operation === "will"
+									? { FAKE_LSP_ECHO_REQUEST_METHODS: "1" }
+									: { FAKE_LSP_ECHO_NOTIFY_METHODS: "1" }),
+							},
+						},
+					);
+					const filteredClient = await createLSPClient({
+						serverId: `fake-${operation}-${testCase.name}`,
+						process: launched,
+						root: tempRoot,
+					});
+					const received: string[] = [];
+					filteredClient.connection.onNotification(
+						operation === "will"
+							? "$/test/requestReceived"
+							: "$/test/notifyReceived",
+						(params: { method: string }) => {
+							received.push(params.method);
+						},
+					);
+					try {
+						expect(
+							filteredClient.getOperationSupport()[
+								operation === "will" ? "willRenameFiles" : "didRenameFiles"
+							],
+							`${operation}: ${testCase.name} registration`,
+						).toBe(testCase.registered ?? true);
+						const oldPath = testCase.oldPath ?? oldFile;
+						const newPath = testCase.newPath ?? newFile;
+						if (operation === "will") {
+							await filteredClient.willRenameFiles(oldPath, newPath);
+						} else {
+							await filteredClient.didRenameFiles(
+								oldPath,
+								newPath,
+								testCase.oldUri,
+								testCase.newUri,
+							);
+						}
+						const method = `workspace/${operation}RenameFiles`;
+						const graceMs = testCase.sent ? 5000 : 300;
+						for (
+							let i = 0;
+							i < graceMs / 25 && !received.includes(method);
+							i++
+						) {
+							await new Promise((resolve) => setTimeout(resolve, 25));
+						}
+						expect(
+							received.includes(method),
+							`${operation}: ${testCase.name}`,
+						).toBe(testCase.sent);
+					} finally {
+						await filteredClient.shutdown();
+						await stopLSP(launched);
+					}
+				}
+			}
+		} finally {
+			removeTempDirSync(tempRoot);
+		}
+	}, 60_000);
 
 	const resolveCases = [
 		{
