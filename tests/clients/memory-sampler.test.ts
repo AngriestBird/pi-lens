@@ -10,6 +10,9 @@
  * shared with the rest of the suite.
  */
 
+import * as os from "node:os";
+import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import { beforeEach, describe, expect, it } from "vitest";
 import {
 	buildMemorySample,
@@ -29,6 +32,14 @@ import { getDispatchCascadeCacheStats } from "../../clients/dispatch/integration
 import type { WordIndex } from "../../clients/word-index.js";
 import { PathKeyedMap } from "../../clients/path-keyed-map.js";
 import { normalizeEphemeralMapKey } from "../../clients/path-utils.js";
+import { createLSPClient } from "../../clients/lsp/client.js";
+import { launchLSP, stopLSP } from "../../clients/lsp/launch.js";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const FAKE_SERVER_PATH = path.join(
+	__dirname,
+	"../fixtures/fake-lsp-server.mjs",
+);
 
 describe("shouldEmitMemorySample (cadence)", () => {
 	it("is false on turn 0 (nothing meaningful resident yet)", () => {
@@ -215,6 +226,9 @@ describe("collectMemorySampleSubsystems (O(1)/O(bounded-cache-size) live reads)"
 
 	it("every numeric field is non-negative and finite (plausibility, not exact values)", () => {
 		const subsystems = collectMemorySampleSubsystems(null);
+		expect(subsystems.lsp.clients).toBeGreaterThanOrEqual(0);
+		expect(subsystems.lsp.incrementalTextEntries).toBeGreaterThanOrEqual(0);
+		expect(subsystems.lsp.incrementalTextBytes).toBeGreaterThanOrEqual(0);
 		expect(subsystems.reviewGraph.cacheEntries).toBeGreaterThanOrEqual(0);
 		expect(subsystems.reviewGraph.totalNodes).toBeGreaterThanOrEqual(0);
 		expect(subsystems.reviewGraph.totalEdges).toBeGreaterThanOrEqual(0);
@@ -228,6 +242,39 @@ describe("collectMemorySampleSubsystems (O(1)/O(bounded-cache-size) live reads)"
 			);
 		}
 	});
+
+	it("#2065 fix round 1 F6: reports a REAL client's retained bytes, not just a mock's structural zero (#2065)", async () => {
+		// The "non-negative" test above never proves the lsp fields are actually
+		// wired: every state it reads from is either freshly booted or a plain
+		// mock that never enters `activeLspClients`, so `clients`/
+		// `incrementalTextEntries`/`incrementalTextBytes` all read 0 whether or
+		// not the plumbing works. A real client with known retained text is the
+		// only way to prove a positive value flows through.
+		const proc = await launchLSP(process.execPath, [FAKE_SERVER_PATH], {
+			cwd: process.cwd(),
+			env: { ...process.env, FAKE_LSP_SYNC_KIND: "2" }, // Incremental
+		});
+		const client = await createLSPClient({
+			serverId: "memory-sample-real",
+			process: proc,
+			root: process.cwd(),
+		});
+		try {
+			const filePath = path.join(os.tmpdir(), "pi-lens-memory-sample-real.ts");
+			const content = "x".repeat(1000);
+			await client.notify.open(filePath, content, "typescript");
+
+			const subsystems = collectMemorySampleSubsystems(null);
+			expect(subsystems.lsp.clients).toBeGreaterThan(0);
+			expect(subsystems.lsp.incrementalTextEntries).toBeGreaterThan(0);
+			expect(subsystems.lsp.incrementalTextBytes).toBeGreaterThanOrEqual(
+				content.length * 2,
+			);
+		} finally {
+			await client.shutdown().catch(() => {});
+			await stopLSP(proc).catch(() => {});
+		}
+	}, 15_000);
 });
 
 describe("buildMemorySample", () => {

@@ -76,6 +76,8 @@ export function createMockState(
 		documentVersions: new Map(),
 		diagnosticDocVersions: new Map(),
 		documentContentHashes: new Map(),
+		incrementalTextRetainedEntries: 0,
+		incrementalTextRetainedBytes: 0,
 		diagnosticBindings: new Map(),
 		pullResultIds: new Map(),
 		workspacePullResultCache: new Map(),

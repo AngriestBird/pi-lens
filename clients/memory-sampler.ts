@@ -34,6 +34,7 @@ import type { WordIndex } from "./word-index.js";
 import { getSharedTreeSitterClient } from "./tree-sitter-shared.js";
 import { getReviewGraphWorkspaceCacheSnapshot } from "./review-graph/builder.js";
 import { getDispatchCascadeCacheStats } from "./dispatch/integration.js";
+import { getLspDocumentTextRetentionSnapshot } from "./lsp/client.js";
 
 /** Every N turns, emit one `memory_sample` latency.log line (#1123 item 2). */
 export const MEMORY_SAMPLE_TURN_INTERVAL = 10;
@@ -146,6 +147,11 @@ export function toMemoryProcessUsage(
 }
 
 export interface MemorySampleSubsystems {
+	lsp: {
+		clients: number;
+		incrementalTextEntries: number;
+		incrementalTextBytes: number;
+	};
 	reviewGraph: {
 		cacheEntries: number;
 		totalNodes: number;
@@ -216,6 +222,14 @@ export function collectMemorySampleSubsystems(
 	const dispatchCaches = getDispatchCascadeCacheStats();
 
 	return {
+		lsp: (() => {
+			const retention = getLspDocumentTextRetentionSnapshot();
+			return {
+				clients: retention.clients,
+				incrementalTextEntries: retention.entries,
+				incrementalTextBytes: retention.bytes,
+			};
+		})(),
 		reviewGraph,
 		wordIndex: wordIndex
 			? {

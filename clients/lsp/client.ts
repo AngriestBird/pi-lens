@@ -917,6 +917,18 @@ export interface LSPClientState {
 		string,
 		{ version: number; hash: string; text?: string }
 	>;
+	/** #2065: full Incremental-sync text is an LRU-like bounded subset of the
+	 * per-path content-binding map. The binding remains after text eviction. */
+	incrementalTextRetainedEntries?: number;
+	incrementalTextRetainedBytes?: number;
+	/** #2065 fix round 1 F5: insertion-ordered set of paths that currently bear
+	 * retained Incremental text, oldest first — a parallel index into
+	 * `documentContentHashes` so eviction can find the oldest text-bearing
+	 * entry in O(1) instead of spreading and scanning every path (including
+	 * already-stripped ones) on every didChange past the cap. Kept in lockstep
+	 * with `documentContentHashes`'s `text` field: added when text is
+	 * (re)written, removed when text is stripped or the path closes. */
+	incrementalTextBearingPaths?: Set<string>;
 	/** #1095: the content binding for the diagnostics currently stored for a path
 	 *  — {version, contentHash} of the document those diagnostics were computed
 	 *  against. Set only when the accepted publish carried a version; a version-
@@ -1055,6 +1067,61 @@ export interface LSPClientState {
 	watchQueue: WatchedFilesQueue;
 }
 
+/** #2065: bound both the path count and UTF-16 heap represented by retained
+ * Incremental-sync text. The map keeps the newest sent paths when evicting. */
+export const MAX_INCREMENTAL_TEXT_RETAINED_ENTRIES = 128;
+export const MAX_INCREMENTAL_TEXT_RETAINED_BYTES = 64 * 1024 * 1024;
+
+/**
+ * #2065 fix round 1: a PROJECTION registry, not a second source of truth for
+ * "which clients are live" — its only job is letting `memory-sampler.ts`
+ * total retained-text bytes across clients without importing `LSPService`.
+ * Considered projecting straight off `LSPService.state.clients` (the
+ * manager's own client map, `clients/lsp/index.ts`) instead of keeping this
+ * Set at all, and rejected it for two reasons:
+ *   1. Import direction: `clients/lsp/index.ts` imports THIS file, not the
+ *      reverse, so reading `LSPService.state.clients` from here (or from
+ *      `memory-sampler.ts`, which every other snapshot in that module reaches
+ *      by importing the owning subsystem directly, e.g.
+ *      `getReviewGraphWorkspaceCacheSnapshot`, `getDispatchCascadeCacheStats`)
+ *      means importing the higher-level manager from the lower-level client
+ *      module — a layering inversion, not a cycle fix.
+ *   2. `LSPService.state.clients` is ITSELF only lazily reconciled against
+ *      real client death — a crashed client's slot is noticed and evicted on
+ *      the next `getClientForFile` attach, not at crash time (see
+ *      `markExitedIfUnset`'s docstring above). Projecting off it would not
+ *      give memory-sampler any more real-time accuracy than this Set; it
+ *      would just move the same "who deregisters, and when" question onto a
+ *      larger, higher-risk surface (the manager's routing map) for no gain.
+ *
+ * What makes this safe to keep as a second collection: it has exactly ONE
+ * lifecycle seam. `spawnClient` is the only writer that adds (below), and
+ * `disposeClientConnection` is the only writer that removes — and that
+ * function is itself the single convergence point every permanent-death path
+ * (`connection.onError`, `connection.onClose`, the process `exit` handler,
+ * and `clientShutdownOnce`'s `finally`) already funnels through, guarded by
+ * the same `connectionDisposed` idempotency flag that gates the connection
+ * teardown itself. Membership can therefore never drift from "has this
+ * client's connection been torn down" — there is nowhere else in the file
+ * that can flip a client from alive to permanently dead without going
+ * through `disposeClientConnection`.
+ */
+const activeLspClients = new Set<LSPClientState>();
+
+export function getLspDocumentTextRetentionSnapshot(): {
+	clients: number;
+	entries: number;
+	bytes: number;
+} {
+	let entries = 0;
+	let bytes = 0;
+	for (const state of activeLspClients) {
+		entries += state.incrementalTextRetainedEntries ?? 0;
+		bytes += state.incrementalTextRetainedBytes ?? 0;
+	}
+	return { clients: activeLspClients.size, entries, bytes };
+}
+
 function isClientAlive(state: LSPClientState): boolean {
 	return (
 		state.isConnected && !state.isDestroyed && !state.lspProcess.process.killed
@@ -1064,6 +1131,13 @@ function isClientAlive(state: LSPClientState): boolean {
 function disposeClientConnection(state: LSPClientState): void {
 	if (state.connectionDisposed) return;
 	state.connectionDisposed = true;
+	// #2065 fix round 1: this is the ONE place every permanent-death path
+	// converges (onError, onClose, the process 'exit' handler, and
+	// clientShutdownOnce's finally) — see setupConnectionLifecycle below and
+	// clientShutdownOnce. Deregistering here, guarded by the idempotency flag
+	// above, means a crash that never re-attaches still frees its retained
+	// text instead of pinning it for the rest of the process lifetime.
+	activeLspClients.delete(state);
 	try {
 		state.connection.dispose();
 	} catch {
@@ -1709,6 +1783,31 @@ function recordSentContent(
 	version: number,
 	content: string,
 ): void {
+	const previous = state.documentContentHashes.get(normalizedPath);
+	if (previous?.text !== undefined) {
+		state.incrementalTextRetainedEntries = Math.max(
+			0,
+			(state.incrementalTextRetainedEntries ?? 1) - 1,
+		);
+		state.incrementalTextRetainedBytes = Math.max(
+			0,
+			(state.incrementalTextRetainedBytes ?? previous.text.length * 2) -
+				previous.text.length * 2,
+		);
+		// #2065 fix round 1 F5: the path is about to be rewritten below (and
+		// possibly re-marked text-bearing) — drop the stale membership first so
+		// the reinsert further down lands at the END of the recency order
+		// instead of leaving a duplicate-free but stale position.
+		state.incrementalTextBearingPaths?.delete(normalizedPath);
+	}
+	// #2065 fix round 1 F5: eviction recency now lives in
+	// `incrementalTextBearingPaths` (above/below), not this map's own
+	// insertion order — no remaining reader iterates `documentContentHashes`
+	// for order (every other site below is a keyed `.get`/`.delete`). The
+	// reinsert is kept anyway so a log or future debug dump that DOES walk
+	// this map in insertion order still reads "most recently sent last",
+	// matching the aux set it mirrors, rather than a stale mixed order.
+	state.documentContentHashes.delete(normalizedPath);
 	state.documentContentHashes.set(normalizedPath, {
 		version,
 		hash: hashDiagnosticContent(content),
@@ -1719,6 +1818,47 @@ function recordSentContent(
 			text: content,
 		}),
 	});
+	if (state.syncKind === TEXT_DOCUMENT_SYNC_KIND_INCREMENTAL) {
+		state.incrementalTextRetainedEntries =
+			(state.incrementalTextRetainedEntries ?? 0) + 1;
+		state.incrementalTextRetainedBytes =
+			(state.incrementalTextRetainedBytes ?? 0) + content.length * 2;
+		// #2065 fix round 1 F5: track membership in the same insertion (=
+		// recency) order as `documentContentHashes` itself, so eviction below
+		// never needs to spread and scan the full content-binding map —
+		// including paths whose text was already stripped — just to find the
+		// oldest text-bearing one.
+		if (!state.incrementalTextBearingPaths) {
+			state.incrementalTextBearingPaths = new Set();
+		}
+		state.incrementalTextBearingPaths.add(normalizedPath);
+		while (
+			(state.incrementalTextRetainedEntries ?? 0) >
+				MAX_INCREMENTAL_TEXT_RETAINED_ENTRIES ||
+			(state.incrementalTextRetainedBytes ?? 0) >
+				MAX_INCREMENTAL_TEXT_RETAINED_BYTES
+		) {
+			const oldestPath = state.incrementalTextBearingPaths
+				?.values()
+				.next().value;
+			if (oldestPath === undefined) break;
+			const binding = state.documentContentHashes.get(oldestPath);
+			state.incrementalTextBearingPaths.delete(oldestPath);
+			if (!binding || binding.text === undefined) continue;
+			state.documentContentHashes.set(oldestPath, {
+				version: binding.version,
+				hash: binding.hash,
+			});
+			state.incrementalTextRetainedEntries = Math.max(
+				0,
+				(state.incrementalTextRetainedEntries ?? 1) - 1,
+			);
+			state.incrementalTextRetainedBytes = Math.max(
+				0,
+				(state.incrementalTextRetainedBytes ?? 0) - binding.text.length * 2,
+			);
+		}
+	}
 	// #1641 criterion 3: the in-memory document's version + content length AT
 	// SEND TIME, so a later "diagnostic cited a line past current disk EOF"
 	// record (`diagnostic_past_eof`, clients/diagnostic-line-freshness.ts) can be
@@ -3702,7 +3842,50 @@ export async function closeDocument(
 	// harmless and cheap) — mirror openDocuments' own per-close cleanup so it
 	// doesn't grow unbounded across a long session's worth of open/close churn.
 	state.projectIdentityProbedFiles?.delete(normalizedPath);
+	const retained = state.documentContentHashes.get(normalizedPath);
+	if (retained?.text !== undefined) {
+		state.incrementalTextRetainedEntries = Math.max(
+			0,
+			(state.incrementalTextRetainedEntries ?? 1) - 1,
+		);
+		state.incrementalTextRetainedBytes = Math.max(
+			0,
+			(state.incrementalTextRetainedBytes ?? retained.text.length * 2) -
+				retained.text.length * 2,
+		);
+		// #2065 fix round 2 N1: `recordSentContent` and the eviction loop both
+		// delete from `incrementalTextBearingPaths` when they strip a path's
+		// text, but neither runs on close — this was the missing third writer.
+		// Without it, a closed path's membership in the aux set survives
+		// forever: below the 128-entry/64 MiB cap the eviction loop that would
+		// otherwise clean it up never runs at all, so the set grows by one
+		// stale entry per open/close cycle with nothing ever draining it — the
+		// exact unbounded-per-path-store class #2065 exists to close, just
+		// moved into the aux index instead of the byte-retention count itself.
+		state.incrementalTextBearingPaths?.delete(normalizedPath);
+	}
+	// Keep the hash/version binding only while the document is open; the full
+	// text is needed for the next edit, never after didClose (#2065).
+	state.documentContentHashes.delete(normalizedPath);
 	clearDiagnosticsForPath(state, normalizedPath);
+	// #2065 fix round 2 (reverts fix round 1 F4): `pullGenerations` is the
+	// eighth per-path map in this family, but it is deliberately NOT cleared
+	// here — the same reasoning `clearDiagnosticsForPath` already documents
+	// above for `pullRequestSequences` applies to this counter too, and fix
+	// round 1's F4 missed it. `pullGenerationFor` defaults a missing entry to
+	// `0`, so deleting the entry on close resets the counter. A pull already
+	// in flight before the close captured its generation BEFORE this close's
+	// `clearDiagnosticsForPath` bump above ran. If the document is closed and
+	// reopened before that in-flight pull's write lands, deleting the entry
+	// here would let the counter read back as `0` again — the exact value the
+	// stale write's stale captured generation equals — so the write-time
+	// `!== generation` check at its call site would wrongly accept a stale
+	// answer computed against the pre-close content. Leaving the counter
+	// monotonic and un-reset keeps every pre-close capture permanently
+	// distinguishable from whatever the counter reads afterward, no matter how
+	// many closes or reopens happen in between. The cost is one integer per
+	// path that outlives the document's open lifetime — negligible next to
+	// correctness here.
 }
 
 /**
@@ -3856,6 +4039,9 @@ async function clientShutdownOnce(
 			}
 		}
 	} finally {
+		// #2065 fix round 1: deregistration now lives in disposeClientConnection
+		// itself (the convergence point for every crash/dispose path, not just
+		// this graceful one) — see its comment.
 		disposeClientConnection(state);
 		const pid = state.lspProcess.pid;
 		logLatency({
@@ -4715,6 +4901,9 @@ export async function createLSPClient(options: {
 		documentVersions: new Map(),
 		diagnosticDocVersions: new Map(),
 		documentContentHashes: new Map(),
+		incrementalTextRetainedEntries: 0,
+		incrementalTextBearingPaths: new Set(),
+		incrementalTextRetainedBytes: 0,
 		diagnosticBindings: new Map(),
 		pullResultIds: new Map(),
 		documentPullDiagnosticsBySource: new Map(),
@@ -4747,6 +4936,7 @@ export async function createLSPClient(options: {
 		// SAFETY: state construction completes before the flush closure can run.
 		watchQueue: undefined as unknown as WatchedFilesQueue,
 	};
+	activeLspClients.add(state);
 
 	// #271: batch per-file workspace/didChangeWatchedFiles into one notification
 	// per debounce window, so an N-file turn re-indexes the server once, not N×.
