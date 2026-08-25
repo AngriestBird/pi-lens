@@ -5,6 +5,7 @@ import {
 	defaultFetcher,
 	detectStaleOpenIssues,
 	formatSummary,
+	shouldPost,
 } from "./lib/stale-open-issues.mjs";
 
 const repository = process.env.GITHUB_REPOSITORY;
@@ -28,9 +29,7 @@ const summary = formatSummary(candidates, {
 console.log(summary);
 if (process.env.GITHUB_STEP_SUMMARY)
 	appendFileSync(process.env.GITHUB_STEP_SUMMARY, `${summary}\n`);
-const hasPriorityGaps =
-	priorityCoverage.zero.length > 0 || priorityCoverage.multiple.length > 0;
-if (candidates.length > 0 || hasPriorityGaps) {
+if (shouldPost({ candidates, priorityCoverage })) {
 	const headers = {
 		accept: "application/vnd.github+json",
 		authorization: `Bearer ${token}`,

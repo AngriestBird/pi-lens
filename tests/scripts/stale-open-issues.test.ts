@@ -6,6 +6,7 @@ import {
 	MAX_COMMIT_DETAILS,
 	MAX_PAGES,
 	PAGE_SIZE,
+	shouldPost,
 } from "../../scripts/lib/stale-open-issues.mjs";
 
 function fakeGithub(data: Record<string, unknown>) {
@@ -271,5 +272,25 @@ describe("formatSummary priority coverage section", () => {
 	it("omits the priority coverage section when not provided (byte-identical for existing callers)", () => {
 		const before = formatSummary([], { runUrl: "https://example/run" });
 		expect(before).not.toContain("Priority label coverage");
+	});
+});
+
+describe("shouldPost (#1676 fix round)", () => {
+	it("posts when priority gaps exist even with zero stale candidates", () => {
+		expect(
+			shouldPost({
+				candidates: [],
+				priorityCoverage: { zero: [{ number: 1, title: "x" }], multiple: [] },
+			}),
+		).toBe(true);
+	});
+
+	it("stays silent when there are neither stale candidates nor priority gaps", () => {
+		expect(
+			shouldPost({
+				candidates: [],
+				priorityCoverage: { zero: [], multiple: [] },
+			}),
+		).toBe(false);
 	});
 });

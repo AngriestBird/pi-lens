@@ -201,6 +201,17 @@ export function formatSummary(
 	return lines.join("\n");
 }
 
+// #1676 fix round: the comment-posting decision was inline and untested --
+// reverting it to the old candidates-only gate left the suite green. Naming
+// it lets a mutation on either half of the OR fail a test.
+export function shouldPost({ candidates, priorityCoverage }) {
+	return (
+		candidates.length > 0 ||
+		priorityCoverage.zero.length > 0 ||
+		priorityCoverage.multiple.length > 0
+	);
+}
+
 export function defaultFetcher(token) {
 	return (url, init) =>
 		fetch(url, {

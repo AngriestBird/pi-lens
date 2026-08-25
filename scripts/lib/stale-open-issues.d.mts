@@ -25,6 +25,10 @@ export interface PriorityCoverage {
 export function checkPriorityCoverage(
 	issues: PriorityLabeledIssue[],
 ): PriorityCoverage;
+export function shouldPost(options: {
+	candidates: StaleIssueCandidate[];
+	priorityCoverage: PriorityCoverage;
+}): boolean;
 export function detectStaleOpenIssues(options: {
 	fetcher: (
 		url: string,
