@@ -60,10 +60,13 @@ describe("TestRunnerClient project-root caches (#2048)", () => {
 		expect(client.parseVitestTestGlobs(root)).toEqual(firstGlobs);
 	});
 
-	it("shares caches across a confirmed Windows separator and case alias", () => {
+	it("shares caches across a confirmed Windows separator and case alias", (ctx) => {
 		const { root } = makeProject();
 		const alias = existingWindowsAlias(root);
-		if (!alias) return;
+		if (!alias) {
+			ctx.skip();
+			return;
+		}
 
 		const client = new TestRunnerClient();
 		expect(client.detectRunner(alias)).toBeNull();

@@ -438,6 +438,11 @@ decision point re-reads live clients because `inFlight` cleanup is asynchronous.
 **Path-keyed Tier-3 caches normalize at both boundaries.** Widget LSP server
 roots, startup-scan context keys, and Ruby drive-root memo keys use
 `normalizeMapKey`; equivalent separator/case spellings must share one entry.
+Test-runner project-root caches additionally canonicalize through guarded
+`realpathSync.native` on every platform. Canonical aliases share availability
+verdicts, so cached positive verdicts retain their config evidence path and
+must be discarded when that file disappears; canonicalize once per public
+hot-path call, not once per runner lookup.
 Widget file-record cardinality eviction is render-aware: only idle records with
 no live diagnostic may be evicted. Formatter detection signatures include
 formatter config metadata, and tsconfig-path signatures include recursive

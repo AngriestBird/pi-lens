@@ -318,6 +318,20 @@ function canonicalFailedPath(filePath: string): string {
 	}
 }
 
+function canonicalProjectRoot(cwd: string): string {
+	const absolute = path.resolve(cwd);
+	try {
+		return normalizeMapKey(fs.realpathSync.native(absolute));
+	} catch {
+		return normalizeMapKey(absolute);
+	}
+}
+
+interface RunnerAvailability {
+	available: boolean;
+	evidencePath?: string;
+}
+
 function filesystemErrorCode(error: unknown): string | undefined {
 	if (
 		error !== null &&
@@ -332,7 +346,7 @@ function filesystemErrorCode(error: unknown): string | undefined {
 
 export class TestRunnerClient {
 	private log: (msg: string) => void;
-	private availableRunners = new PathKeyedMap<Map<string, boolean>>(
+	private availableRunners = new PathKeyedMap<Map<string, RunnerAvailability>>(
 		normalizeMapKey,
 	);
 	private failedTestsByRunner = new Map<
@@ -359,23 +373,35 @@ export class TestRunnerClient {
 	}
 
 	private getRunnerAvailability(
-		cwd: string,
+		rootKey: string,
 		runner: string,
 	): boolean | undefined {
-		return this.availableRunners.get(cwd)?.get(runner);
+		const byRunner = this.availableRunners.get(rootKey);
+		const cached = byRunner?.get(runner);
+		if (!cached) return undefined;
+		if (
+			cached.available &&
+			cached.evidencePath !== undefined &&
+			!fs.existsSync(cached.evidencePath)
+		) {
+			byRunner?.delete(runner);
+			return undefined;
+		}
+		return cached.available;
 	}
 
 	private setRunnerAvailability(
-		cwd: string,
+		rootKey: string,
 		runner: string,
 		available: boolean,
+		evidencePath?: string,
 	): void {
-		let byRunner = this.availableRunners.get(cwd);
+		let byRunner = this.availableRunners.get(rootKey);
 		if (!byRunner) {
 			byRunner = new Map();
-			this.availableRunners.set(cwd, byRunner);
+			this.availableRunners.set(rootKey, byRunner);
 		}
-		byRunner.set(runner, available);
+		byRunner.set(runner, { available, evidencePath });
 	}
 
 	/**
@@ -389,9 +415,10 @@ export class TestRunnerClient {
 		cwd: string,
 		sourceFilePath?: string,
 	): { runner: string; config: RunnerConfig } | null {
+		const rootKey = canonicalProjectRoot(cwd);
 		// Priority 1: Config files
 		for (const [name, config] of Object.entries(RUNNERS)) {
-			const cached = this.getRunnerAvailability(cwd, name);
+			const cached = this.getRunnerAvailability(rootKey, name);
 			if (cached !== undefined) {
 				if (cached) {
 					return { runner: name, config };
@@ -399,13 +426,16 @@ export class TestRunnerClient {
 				continue;
 			}
 
+			let configEvidencePath: string | undefined;
 			const found = config.configFiles.some((cf) => {
 				if (name === "pytest" && cf === "pyproject.toml") {
 					const pyprojectPath = path.join(cwd, cf);
 					if (!fs.existsSync(pyprojectPath)) return false;
 					try {
 						const pyproject = fs.readFileSync(pyprojectPath, "utf-8");
-						return pyproject.includes("[tool.pytest.ini_options]");
+						const matches = pyproject.includes("[tool.pytest.ini_options]");
+						if (matches) configEvidencePath = pyprojectPath;
+						return matches;
 					} catch {
 						return false;
 					}
@@ -419,15 +449,20 @@ export class TestRunnerClient {
 							...composer.require,
 							...composer["require-dev"],
 						};
-						return Boolean(allDeps["phpunit/phpunit"]);
+						const matches = Boolean(allDeps["phpunit/phpunit"]);
+						if (matches) configEvidencePath = composerPath;
+						return matches;
 					} catch {
 						return false;
 					}
 				}
-				return fs.existsSync(path.join(cwd, cf));
+				const candidate = path.join(cwd, cf);
+				const matches = fs.existsSync(candidate);
+				if (matches) configEvidencePath = candidate;
+				return matches;
 			});
 
-			this.setRunnerAvailability(cwd, name, found);
+			this.setRunnerAvailability(rootKey, name, found, configEvidencePath);
 			if (found) {
 				this.log(`Detected runner via config: ${name}`);
 				return { runner: name, config };
@@ -445,17 +480,17 @@ export class TestRunnerClient {
 			// Check for vitest first (more specific than jest)
 			if (allDeps.vitest) {
 				this.log("Detected vitest in package.json");
-				this.setRunnerAvailability(cwd, "vitest", true);
+				this.setRunnerAvailability(rootKey, "vitest", true, packageJsonPath);
 				return { runner: "vitest", config: RUNNERS.vitest };
 			}
 			if (allDeps.jest) {
 				this.log("Detected jest in package.json");
-				this.setRunnerAvailability(cwd, "jest", true);
+				this.setRunnerAvailability(rootKey, "jest", true, packageJsonPath);
 				return { runner: "jest", config: RUNNERS.jest };
 			}
 			if (allDeps.pytest || allDeps["pytest-cov"]) {
 				this.log("Detected pytest in package.json (unusual)");
-				this.setRunnerAvailability(cwd, "pytest", true);
+				this.setRunnerAvailability(rootKey, "pytest", true, packageJsonPath);
 				return { runner: "pytest", config: RUNNERS.pytest };
 			}
 		} catch (err) {
@@ -650,8 +685,9 @@ export class TestRunnerClient {
 	parseVitestTestGlobs(
 		cwd: string,
 	): { include?: string[]; exclude?: string[] } | null {
-		if (this.vitestTestGlobsCache.has(cwd)) {
-			return this.vitestTestGlobsCache.get(cwd) ?? null;
+		const rootKey = canonicalProjectRoot(cwd);
+		if (this.vitestTestGlobsCache.has(rootKey)) {
+			return this.vitestTestGlobsCache.get(rootKey) ?? null;
 		}
 
 		// .mts isn't in RUNNERS.vitest.configFiles (that list drives runner
@@ -680,7 +716,7 @@ export class TestRunnerClient {
 			}
 		}
 
-		this.vitestTestGlobsCache.set(cwd, result);
+		this.vitestTestGlobsCache.set(rootKey, result);
 		return result;
 	}
 
