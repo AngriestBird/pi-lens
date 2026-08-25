@@ -1,11 +1,18 @@
 import { execFileSync } from "node:child_process";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+	_resetTrackedFilesCacheForTests,
 	_resetUntrackedIgnoredCacheForTests,
+	collectTrackedFiles,
 	collectUntrackedIgnoredIds,
 	parseUntrackedIgnoredOutput,
 } from "../../clients/git-tracked-ignore.js";
+import {
+	getDegradationSummary,
+	resetDegradationLedger,
+} from "../../clients/degradation-ledger.js";
 import { normalizeMapKey } from "../../clients/path-utils.js";
+import * as safeSpawn from "../../clients/safe-spawn.js";
 import { createTempFile, setupTestEnvironment } from "./test-utils.js";
 
 describe("parseUntrackedIgnoredOutput", () => {
@@ -22,9 +29,13 @@ describe("parseUntrackedIgnoredOutput", () => {
 describe("collectUntrackedIgnoredIds (#694)", () => {
 	beforeEach(() => {
 		_resetUntrackedIgnoredCacheForTests();
+		_resetTrackedFilesCacheForTests();
+		resetDegradationLedger();
 	});
 	afterEach(() => {
 		_resetUntrackedIgnoredCacheForTests();
+		_resetTrackedFilesCacheForTests();
+		vi.restoreAllMocks();
 	});
 
 	function initGitRepo(cwd: string): void {
@@ -61,6 +72,36 @@ describe("collectUntrackedIgnoredIds (#694)", () => {
 			env.cleanup();
 		}
 	});
+
+	it.each([
+		["untracked-ignored", collectUntrackedIgnoredIds],
+		["tracked", collectTrackedFiles],
+	] as const)(
+		"fails closed when %s git ls-files output is truncated",
+		async (site, collect) => {
+			vi.spyOn(safeSpawn, "safeSpawnAsync").mockResolvedValue({
+				stdout: "partial/path.ts\n",
+				stderr: "",
+				status: 0,
+				outputTruncated: true,
+			});
+
+			expect(await collect(process.cwd())).toBeUndefined();
+			expect(getDegradationSummary()).toEqual([
+				{
+					kind: "git-tracked-ignore-truncated",
+					count: 1,
+					droppedCount: 0,
+					latestReasons: [
+						{
+							subject: `git-ls-files:${site}`,
+							reason: "safeSpawnAsync capped git ls-files stdout",
+						},
+					],
+				},
+			]);
+		},
+	);
 
 	it("degrades to undefined (no throw) outside a git repo", async () => {
 		const env = setupTestEnvironment("pi-lens-git-tracked-ignore-nogit-");

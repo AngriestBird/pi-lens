@@ -34,8 +34,19 @@
 
 import * as path from "node:path";
 import { isExcludedDirName } from "./file-utils.js";
+import { recordDegradationOnce } from "./degradation-ledger.js";
 import { normalizeEphemeralMapKey, normalizeMapKey } from "./path-utils.js";
 import { safeSpawnAsync } from "./safe-spawn.js";
+
+function recordTruncatedLsFiles(
+	parseSite: "untracked-ignored" | "tracked",
+): void {
+	recordDegradationOnce({
+		kind: "git-tracked-ignore-truncated",
+		subject: `git-ls-files:${parseSite}`,
+		reason: "safeSpawnAsync capped git ls-files stdout",
+	});
+}
 
 /**
  * Parses `git ls-files --others --ignored --exclude-standard` output
@@ -74,6 +85,10 @@ async function fetchUntrackedIgnoredIds(
 			{ cwd, timeout: 10_000, resourceLabel: "git-tracked-ignore" },
 		);
 		if (result.error || result.status !== 0) return undefined;
+		if (result.outputTruncated === true) {
+			recordTruncatedLsFiles("untracked-ignored");
+			return undefined;
+		}
 		return parseUntrackedIgnoredOutput(result.stdout, cwd);
 	} catch {
 		return undefined;
@@ -166,6 +181,10 @@ async function fetchTrackedFiles(
 			resourceLabel: "git-tracked-ignore",
 		});
 		if (result.error || result.status !== 0) return undefined;
+		if (result.outputTruncated === true) {
+			recordTruncatedLsFiles("tracked");
+			return undefined;
+		}
 		return parseTrackedFilesOutput(result.stdout, cwd);
 	} catch {
 		return undefined;
