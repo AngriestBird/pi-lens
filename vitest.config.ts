@@ -1,4 +1,9 @@
+import * as os from "node:os";
 import { defineConfig } from "vitest/config";
+import {
+	formatTestWorkerBudget,
+	resolveTestWorkerBudget,
+} from "./scripts/lib/worker-budget.mjs";
 
 // Applies to globalSetup as well as workers: ordinary tests never install tools.
 process.env.PI_LENS_DISABLE_TOOL_INSTALL ??= "1";
@@ -48,35 +53,59 @@ const sharedGlobalSetup = [
 
 const sharedSetupFiles = ["./tests/support/vitest-setup.ts"];
 
-// Local runs: cap forks at half the cores (measured 2026-07-29 on a
-// 16-core host, post dead-wait removal: 8 forks ≈ 40s / 9-11 GB peak
-// RSS; 6 forks ≈ 44s / 8 GB; the old uncapped 15 forks gave the same
-// memory for a slower wall). CI keeps vitest's default — its 4-core
-// runner has no worker headroom to give back. Memory-constrained runs:
-// PI_LENS_TEST_MAX_WORKERS=6.
-const sharedMaxWorkers = process.env.CI
-	? undefined
-	: Number(process.env.PI_LENS_TEST_MAX_WORKERS) || "50%";
+// Fork concurrency and per-fork heap ceiling both come from ONE resolver
+// (scripts/lib/worker-budget.mjs), which sizes them against the host's
+// real memory. Before #2042 they were two constants tuned on a 32-core / 68 GB
+// dev host and applied verbatim to CI, where `maxWorkers` fell back to
+// vitest's `availableParallelism() - 1` and bounded worker COUNT while per-fork
+// peak RSS — the axis that actually grows, and native rather than V8 heap — was
+// bounded by nothing. That is how the Unit-tests job got SIGKILLed (exit 137)
+// with no failing assertion. Local runs keep the measured 2026-07-29 posture
+// (8 forks ≈ 40s / 9-11 GB peak RSS; 6 forks ≈ 44s / 8 GB); memory-constrained
+// local runs still use PI_LENS_TEST_MAX_WORKERS=6.
+const testHost = {
+	totalMemMb: Math.round(os.totalmem() / (1024 * 1024)),
+	cpus: os.availableParallelism?.() ?? os.cpus().length,
+	ci: Boolean(process.env.CI),
+	workerOverride: Number(process.env.PI_LENS_TEST_MAX_WORKERS) || undefined,
+	heapOverride: Number(process.env.PI_LENS_TEST_WORKER_HEAP_MB) || undefined,
+};
+const testBudget = resolveTestWorkerBudget(testHost);
+if (testHost.ci) {
+	// One line naming the host and the decision. Without it an exit 137 says
+	// nothing about what the run was allowed to use.
+	console.log(formatTestWorkerBudget(testHost, testBudget));
+}
 
-// Worker heap headroom: the full suite occasionally died with a "Worker
+const sharedMaxWorkers = testBudget.maxWorkers;
+
+// Worker heap headroom (#2042 note first: this ceiling is now DERIVED from the
+// host by the budget resolver above, not the flat 4096 that the paragraph below
+// describes — on a 68 GB dev host it still resolves to 4096, so the reasoning
+// stands unchanged there; on a small CI runner it shrinks, and a fork that
+// blows the smaller ceiling dies with Node's own heap-limit report naming the
+// FILE, which is a far better failure than the OS killing the whole run).
+//
+// The full suite occasionally died with a "Worker
 // exited unexpectedly" + a `node::GetNodeReport` dump. That report is emitted
 // by Node's OWN fatal-error handler (V8 heap-limit reached) — an external OS
 // OOM-kill SIGKILLs with no dump — so the crash is a single long-lived worker
 // hitting its own V8 heap ceiling, not system memory exhaustion (32-core /
 // 68 GB host). With `isolate: true` (vitest's default) each worker's module
 // registry is reset per file, so the native addons (the many tree-sitter
-// grammars + @ast-grep/napi) are re-loaded file-after-file and their off- and
-// on-heap buffers accumulate in the reused worker until a heavy worker tips
-// over. `execArgv` passes --max-old-space-size to every spawned worker,
-// giving that headroom WITHOUT capping worker count (no CI slowdown);
-// aggregate risk is negligible (workers never all peak at once, and 4 GB ×
-// workers ≪ host RAM). Tune via PI_LENS_TEST_WORKER_HEAP_MB. NOTE: Vitest 4
+// grammars + @ast-grep/napi) are re-loaded and re-compiled file after file.
+// CORRECTION (#2042, measured 2026-08-25): this paragraph used to say those
+// buffers "accumulate in the reused worker". They do not — Vitest 4's forks
+// pool with `isolate: true` spawns a FRESH child process per test file (20
+// files at `maxWorkers: 1` produced 20 distinct pids), so a fork's peak is its
+// own file's peak and nothing carries over. The cost is per-file, not
+// cumulative; it is simply large for the tail (p99 1405 MB, max 2267 MB).
+// `execArgv` passes --max-old-space-size to every spawned worker.
+// Tune via PI_LENS_TEST_WORKER_HEAP_MB. NOTE: Vitest 4
 // flattened the config — `execArgv` is a direct `test` field (the v3
 // `poolOptions.forks.execArgv` nesting no longer exists and is silently
 // ignored).
-const sharedExecArgv = [
-	`--max-old-space-size=${process.env.PI_LENS_TEST_WORKER_HEAP_MB || 4096}`,
-];
+const sharedExecArgv = [`--max-old-space-size=${testBudget.heapMb}`];
 
 // Tier 1 fix (#902): these files all transitively drive real tree-sitter
 // grammar parses (via clients/review-graph/builder.js or the project-diagnostics
@@ -272,7 +301,11 @@ export default defineConfig({
 					// concurrency knobs were unified into the top-level
 					// `maxWorkers` (applies to whichever pool is active; this repo
 					// uses the default `forks` pool everywhere).
-					maxWorkers: 2,
+					// #2042: 2 locally, but derived on CI — these files carry the
+					// suite's largest native footprints (measured 3345 MB and 3853 MB
+					// peak RSS), so two at once is a bigger bite than a small runner
+					// has to give.
+					maxWorkers: testBudget.heavyMaxWorkers,
 					// Distinct groupOrder is required whenever projects have
 					// different `maxWorkers` (Vitest 4 throws otherwise). Side
 					// effect: scheduling groups run as sequential PHASES (group 0
