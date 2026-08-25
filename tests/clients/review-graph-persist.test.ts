@@ -76,6 +76,35 @@ async function waitForFile(p: string, attempts = 20): Promise<boolean> {
 }
 
 describe("review-graph persist circuit-breaker (#260)", () => {
+	it("preserves mixed-case source coverage in a persisted graph (#2072 F2/F3 AC3)", async () => {
+		const env = makeEnv();
+		try {
+			createTempFile(env.tmpDir, "src/MiXeD.ts", "export const mixed = 1;\n");
+			createTempFile(env.tmpDir, "src/other.ts", "export const other = 2;\n");
+			const built = await buildOrUpdateGraph(env.tmpDir, [], new FactStore());
+			flushReviewGraphPersistsForTests();
+			await waitForReviewGraphPersistsForTests();
+			const raw = JSON.parse(
+				gunzipSync(fs.readFileSync(cachePathFor(env.tmpDir))).toString("utf-8"),
+			);
+			expect(raw.coverage).toEqual(
+				expect.objectContaining({
+					partial: false,
+					totalFiles: built.fileNodes.size,
+					persistedFiles: built.fileNodes.size,
+				}),
+			);
+			expect(raw.fileSignatures).toEqual(
+				expect.arrayContaining(
+					[...built.fileNodes.keys()].map((filePath) =>
+						expect.arrayContaining([filePath]),
+					),
+				),
+			);
+		} finally {
+			env.cleanup();
+		}
+	});
 	it("defaults to the measured 500,000-element ceiling (#936)", () => {
 		expect(GRAPH_PERSIST_MAX_ELEMENTS_DEFAULT).toBe(500_000);
 	});

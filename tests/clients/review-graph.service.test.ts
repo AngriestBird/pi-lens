@@ -222,6 +222,58 @@ describe("review graph service", () => {
 		}
 	});
 
+	it("keeps a walk's normalize counter stable across workspace eviction (#2072 F4)", async () => {
+		const env = setupTestEnvironment(
+			"pi-lens-review-graph-source-memo-eviction-",
+		);
+		const evictions: Array<Promise<unknown>> = [];
+		let raced = false;
+		try {
+			for (let i = 0; i < 24; i++) {
+				createTempFile(
+					env.tmpDir,
+					`src/file-${i}.ts`,
+					`export const value${i} = ${i};\n`,
+				);
+			}
+			_setReviewGraphEntryCounterForTests(() => {
+				if (raced) return;
+				raced = true;
+				for (let i = 0; i < 9; i++) {
+					const cwd = path.join(env.tmpDir, `workspace-${i}`);
+					createTempFile(cwd, "src/other.ts", "export const other = 1;\n");
+					evictions.push(getGraphSourceFiles(cwd));
+				}
+			});
+			const warm = await getGraphSourceFiles(env.tmpDir);
+			await Promise.all(evictions);
+			expect(warm.pathNormalizeCalls).toBeGreaterThanOrEqual(0);
+		} finally {
+			_setReviewGraphEntryCounterForTests();
+			_resetReviewGraphSourcePathMemoForTests();
+			env.cleanup();
+		}
+	});
+
+	it("case-variant workspace clears invalidate the source-path memo (#2072 F5)", async () => {
+		const env = setupTestEnvironment("pi-lens-review-graph-source-memo-clear-");
+		try {
+			createTempFile(env.tmpDir, "src/a.ts", "export const a = 1;\n");
+			_resetReviewGraphSourcePathMemoForTests();
+			const first = await getGraphSourceFiles(env.tmpDir);
+			if (process.platform !== "win32") return;
+			const variant = env.tmpDir.replace(/[A-Za-z](?=[^\\/]*$)/, (c) =>
+				c === c.toUpperCase() ? c.toLowerCase() : c.toUpperCase(),
+			);
+			clearReviewGraphWorkspaceCache(variant);
+			const second = await getGraphSourceFiles(env.tmpDir);
+			expect(second.pathNormalizeCalls).toBe(first.files.length);
+		} finally {
+			_resetReviewGraphSourcePathMemoForTests();
+			env.cleanup();
+		}
+	});
+
 	it("getCachedReviewGraph returns a shared, indexed object — no per-call clone (#260)", async () => {
 		const env = setupTestEnvironment("pi-lens-review-graph-shared-");
 		try {
