@@ -730,6 +730,13 @@ Unsupported pull responses are also recognized by the standard message-only
 variants (`method not found`, `unknown method`, and `unsupported method`).
 Status consumers receive detached, 200-character-bounded failure entries.
 
+LSP file-operation registrations retain their validated filter arrays through
+client state. Both rename send boundaries match the old and new file URIs by
+scheme, glob, explicit file/folder kind, and `ignoreCase`; entity kind comes
+from a live old/new path stat probe, never the host OS. Malformed registrations
+and unsupported URI schemes fail closed. Capability-skip evidence uses the
+fixed reasons `no-registration` and `filter-mismatch`. (#2049)
+
 The git guard classifies wrapper launchers only after basename/PATHEXT
 normalization, and strips shell escapes only from command-verb tokens; path
 arguments retain the shared lexer’s Windows-backslash behavior. Failed bash
@@ -2283,6 +2290,13 @@ Process-table resource samples preserve query outcome. `clients/child-unref.ts`
 those failures, so consumers leave usage unknown rather than fabricating zero
 samples, and records one bounded `resource-sampler-query-failed` degradation
 per query subject. (#1863)
+
+File-operation rename filters match only the decoded URI path, never a basename
+fallback. Unsupported wire URI schemes fail closed; entity-kind probes are
+conditional on a filter declaring `matches` and use `lstat` so symlinks are
+classified as the renamed entity. Parsed filters and operation capability stay
+an invariant: filters undefined means the capability is absent; malformed
+initialize options are separately labeled in capability-skip telemetry.
 
 Test-runner availability and Vitest-glob caches canonicalize each public cwd
 once, then use `normalizeEphemeralMapKey` because their keys are already
