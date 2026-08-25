@@ -281,27 +281,51 @@ const UNMERGED_PORCELAIN_STATUSES = new Set([
 	"AA",
 	"UU",
 ]);
-const ORDINARY_INDEX_STATUSES = new Set(["M", "A", "D", "R", "C", "T"]);
-const ORDINARY_WORKTREE_STATUSES = new Set(["M", "D", "T"]);
+/**
+ * Git's Porcelain v1 ordinary-status table, not a Cartesian product. A clean
+ * index permits worktree M/T/D plus intent-to-add A. M/T/A/R/C may pair with
+ * blank/M/T/D; staged deletion is only D<space>. Broaden only with Git docs
+ * and a real-status probe, because impossible pairs must fail closed here.
+ */
+const LEGAL_ORDINARY_PORCELAIN_STATUSES = new Set([
+	" M",
+	" T",
+	" D",
+	" A",
+	"M ",
+	"MM",
+	"MT",
+	"MD",
+	"T ",
+	"TM",
+	"TT",
+	"TD",
+	"A ",
+	"AM",
+	"AT",
+	"AD",
+	"D ",
+	"R ",
+	"RM",
+	"RT",
+	"RD",
+	"C ",
+	"CM",
+	"CT",
+	"CD",
+]);
 
 function isUnmergedStatus(status: string): boolean {
 	return UNMERGED_PORCELAIN_STATUSES.has(status);
 }
 
-/** Git status --porcelain v1 permits only these two-character XY pairs. */
+/** Git status --porcelain v1 permits only documented two-character XY pairs. */
 function isValidPorcelainV1Status(status: string): boolean {
-	if (status === "??" || status === "!!" || isUnmergedStatus(status)) {
-		return true;
-	}
-
-	const [indexStatus, worktreeStatus] = status;
-	if (!indexStatus || !worktreeStatus) return false;
-	if (indexStatus === " ") {
-		return ORDINARY_WORKTREE_STATUSES.has(worktreeStatus);
-	}
 	return (
-		ORDINARY_INDEX_STATUSES.has(indexStatus) &&
-		(worktreeStatus === " " || ORDINARY_WORKTREE_STATUSES.has(worktreeStatus))
+		status === "??" ||
+		status === "!!" ||
+		isUnmergedStatus(status) ||
+		LEGAL_ORDINARY_PORCELAIN_STATUSES.has(status)
 	);
 }
 

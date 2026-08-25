@@ -5,13 +5,34 @@ vi.mock("../../clients/safe-spawn.js", () => ({ safeSpawnAsync }));
 
 import { recoverOpaqueChangesViaGit } from "../../clients/opaque-mutation-scan.js";
 
+// Mirrors Git's documented Porcelain v1 ordinary matrix. Keep this explicit:
+// a Cartesian product accepts impossible staged-deletion pairs such as DM/DT.
 const ORDINARY_STATUSES = [
-	...(["M", "A", "D", "R", "C", "T"] as const).flatMap((indexStatus) =>
-		([" ", "M", "D", "T"] as const).map(
-			(worktreeStatus) => `${indexStatus}${worktreeStatus}`,
-		),
-	),
-	...(["M", "D", "T"] as const).map((worktreeStatus) => ` ${worktreeStatus}`),
+	" M",
+	" T",
+	" D",
+	" A", // intent-to-add from `git add -N`
+	"M ",
+	"MM",
+	"MT",
+	"MD",
+	"T ",
+	"TM",
+	"TT",
+	"TD",
+	"A ",
+	"AM",
+	"AT",
+	"AD",
+	"D ",
+	"R ",
+	"RM",
+	"RT",
+	"RD",
+	"C ",
+	"CM",
+	"CT",
+	"CD",
 ];
 
 function porcelainOutput(statuses: string[]): string {
@@ -53,6 +74,8 @@ describe("opaque Git status parsing", () => {
 		["unsupported unmerged index state", "U "],
 		["unsupported unmerged worktree state", " U"],
 		["blank status", "  "],
+		["staged deletion paired with worktree modification", "DM"],
+		["staged deletion paired with worktree type change", "DT"],
 		["unsupported ordinary state", "MR"],
 	])("rejects %s status %j as unknown", async (_label, status) => {
 		safeSpawnAsync.mockResolvedValue({

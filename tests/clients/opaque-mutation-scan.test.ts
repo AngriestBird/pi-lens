@@ -8,7 +8,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { execSync } from "node:child_process";
+import { execFileSync, execSync } from "node:child_process";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // The synthetic-write dispatch runs the full per-edit pipeline; point it at
@@ -208,6 +208,27 @@ describe("recoverOpaqueChangesViaGit (real git repo)", () => {
 		expect(outcome.paths).toContain(
 			normalizeMapKey(path.join(repoDir, "src", "new.ts")),
 		);
+	});
+
+	it("recovers a fresh intent-to-add entry from git add -N", async () => {
+		const intentPath = path.join(repoDir, "src", "intent.ts");
+		const startedAt = Date.now();
+		fs.writeFileSync(intentPath, "intent\n", "utf8");
+		execSync("git add -N -- src/intent.ts", { cwd: repoDir });
+
+		const rawStatus = execFileSync("git", ["status", "--porcelain", "-z"], {
+			cwd: repoDir,
+			encoding: "utf8",
+		});
+		expect(rawStatus).toBe(" A src/intent.ts\0");
+
+		await expect(
+			recoverOpaqueChangesViaGit(repoDir, startedAt),
+		).resolves.toEqual({
+			verdict: "recovered",
+			paths: [normalizeMapKey(intentPath)],
+			scannedCount: 1,
+		});
 	});
 
 	it("excludes files last written BEFORE the window floor", async () => {
