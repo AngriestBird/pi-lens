@@ -40,6 +40,12 @@ import {
 	resetBoundedTelemetry,
 } from "../../clients/bounded-telemetry.js";
 import {
+	getLastLiveMessageEndSessionId,
+	noteLiveMessageEndSessionId,
+	resetMessageEndAttribution,
+	rotateMessageEndAttribution,
+} from "../../clients/message-end-attribution.js";
+import {
 	getDegradationSummary,
 	recordDegradationOnce,
 	resetDegradationLedger,
@@ -136,6 +142,8 @@ export interface SessionStateEntry {
 	 * one the static reachability walk can see.
 	 */
 	resetName: string;
+	/** Optional session-start transition when the full reset is not the boundary operation. */
+	sessionStartResetName?: string;
 	/** Why this policy is the right one. One sentence, in the author's words. */
 	reason: string;
 	/**
@@ -160,6 +168,27 @@ function scratchCwd(): string {
 }
 
 export const SESSION_STATE_REGISTRY: SessionStateEntry[] = [
+	{
+		id: "message-end-attribution:two-slot-anchor",
+		module: "message-end-attribution.ts",
+		state: "lastStableSessionId, previousSessionId",
+		policy: "session_start",
+		resetName: "resetMessageEndAttribution",
+		sessionStartResetName: "rotateMessageEndAttribution",
+		reason:
+			"#1956 R3: session_start rotates the live anchor into one bounded previous slot because a stale message_end can drain after replacement; the full registry reset clears both slots.",
+		probe: {
+			// Arm BOTH slots: the getter's ?? fallback reads previous, so a
+			// reset that leaks previousSessionId fails isArmed (#1956 R9).
+			arm: () => {
+				noteLiveMessageEndSessionId("session-state-probe-prev");
+				rotateMessageEndAttribution();
+				noteLiveMessageEndSessionId("session-state-probe");
+			},
+			isArmed: () => getLastLiveMessageEndSessionId() === undefined,
+			reset: () => resetMessageEndAttribution(),
+		},
+	},
 	// ── #1743 bounded-telemetry helper ───────────────────────────────
 	{
 		id: "bounded-telemetry:turnCounts",
@@ -914,7 +943,11 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	"lsp/index.ts": 2,
 	// #2000 phase 2: the pending-baseline store (one slot per cwd:generation)
 	// plus the process-global Symbol.for slot; cleared via resetOpaqueMutationState.
-	"opaque-mutation-scan.ts": 1,
+	// #2060: 1 -> 3 for UNMERGED_PORCELAIN_STATUSES and
+	// LEGAL_ORDINARY_PORCELAIN_STATUSES. Both are frozen-by-convention lookup
+	// tables of Git's documented porcelain matrix — import-time constants with
+	// no session identity, so they need no reset (SWEEP_HEURISTIC_LIMITS item 5).
+	"opaque-mutation-scan.ts": 3,
 	"lsp/pending-aux-coverage.ts": 1,
 	"lsp/jvm-runtime.ts": 0,
 	"lsp/spawn-history.ts": 1,
@@ -942,7 +975,9 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	"review-graph/shared-extraction-ir.ts": 1,
 	"review-graph/workspace-modules.ts": 2,
 	"runtime-config.ts": 0,
-	"runtime-tool-result.ts": 3,
+	// #2060: 3 -> 5 for GIT_INTEGRATION_SUBCOMMANDS and
+	// GIT_GLOBAL_OPTIONS_WITH_VALUE — command-shape vocabulary, not state.
+	"runtime-tool-result.ts": 5,
 	"safe-spawn.ts": 3,
 	"session-lifecycle.ts": 0,
 	"sgconfig.ts": 2,
