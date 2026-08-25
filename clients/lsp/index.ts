@@ -6519,9 +6519,18 @@ export class LSPService {
 		const activeClients = this.activeClientsForCwd(cwd, priorityServerIds);
 		const willRenameFailures: Array<{ serverId: string; error: string }> = [];
 		const didRenameFailures: RenameNotifyFailure[] = [];
+		const willRenameClients = activeClients.filter(({ serverId, client }) => {
+			if (client.getOperationSupport().willRenameFiles === true) return true;
+			recordDegradationOnce({
+				kind: "lsp-capability-skip",
+				subject: `${serverId}:workspace/willRenameFiles`,
+				reason: "server did not advertise workspace.fileOperations.willRename",
+			});
+			return false;
+		});
 
 		const willResults = await Promise.all(
-			activeClients.map(async ({ serverId, client }) => {
+			willRenameClients.map(async ({ serverId, client }) => {
 				try {
 					return {
 						serverId,
@@ -6543,7 +6552,7 @@ export class LSPService {
 					(failure) => failure.serverId === result.serverId,
 				),
 		);
-		if (activeClients.length > 0 && successfulWillResults.length === 0) {
+		if (willRenameClients.length > 0 && successfulWillResults.length === 0) {
 			throw new Error(
 				`workspace/willRenameFiles failed for all active LSP servers: ${willRenameFailures.map((failure) => `${failure.serverId}: ${failure.error}`).join("; ")}`,
 			);
@@ -6717,6 +6726,18 @@ export class LSPService {
 
 		await Promise.all(
 			activeClients.map(async ({ serverId, client }) => {
+				// #1971 review: didRename has its own registration. A server that
+				// never asked for didRenameFiles notifications must not receive
+				// them — same chokepoint discipline as the willRename preflight.
+				if (client.getOperationSupport().didRenameFiles !== true) {
+					recordDegradationOnce({
+						kind: "lsp-capability-skip",
+						subject: `${serverId}:workspace/didRenameFiles`,
+						reason:
+							"server did not advertise workspace.fileOperations.didRename",
+					});
+					return;
+				}
 				const opened = openDocuments.find(
 					(entry) => entry.serverId === serverId,
 				);

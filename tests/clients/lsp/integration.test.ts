@@ -78,6 +78,8 @@ describe("LSP Client Integration", () => {
 		expect(support.documentSymbol).toBe(true);
 		expect(support.workspaceSymbol).toBe(true);
 		expect(support.codeAction).toBe(true);
+		expect(support.codeActionResolve).toBe(true);
+		expect(support.willRenameFiles).toBe(false);
 		expect(support.callHierarchy).toBe(false);
 	});
 
@@ -212,6 +214,271 @@ describe("LSP Client Integration", () => {
 		await client!.shutdown();
 		expect(client!.isAlive()).toBe(false);
 	});
+});
+
+describe("LSP Client Integration — nested capability gates (#1971)", () => {
+	const capabilityCases = [
+		{ name: "absent", env: {}, supported: false },
+		{ name: "false", env: { FAKE_LSP_WILL_RENAME: "false" }, supported: false },
+		{
+			name: "malformed",
+			env: { FAKE_LSP_WILL_RENAME: "malformed" },
+			supported: false,
+		},
+		{
+			name: "object without filters",
+			env: { FAKE_LSP_WILL_RENAME: "empty-object" },
+			supported: false,
+		},
+		{ name: "present", env: { FAKE_LSP_WILL_RENAME: "true" }, supported: true },
+	] as const;
+
+	it.each(capabilityCases)(
+		"sends workspace/willRenameFiles only when nested capability is $name",
+		async ({ env, supported }) => {
+			const proc = await launchLSP(process.execPath, [FAKE_SERVER_PATH], {
+				cwd: process.cwd(),
+				env: {
+					...process.env,
+					...env,
+					FAKE_LSP_ECHO_REQUEST_METHODS: "1",
+				},
+			});
+			const client = await createLSPClient({
+				serverId: "fake-rename-capability",
+				process: proc,
+				root: process.cwd(),
+			});
+			const received: string[] = [];
+			client.connection.onNotification(
+				"$/test/requestReceived",
+				(params: { method: string }) => {
+					received.push(params.method);
+				},
+			);
+			try {
+				const result = await client.willRenameFiles(
+					path.join(process.cwd(), "old.ts"),
+					path.join(process.cwd(), "new.ts"),
+				);
+				await new Promise((resolve) => setImmediate(resolve));
+				expect(client.getOperationSupport().willRenameFiles).toBe(supported);
+				expect(result).toBeNull();
+				expect(received).toEqual(
+					supported ? ["workspace/willRenameFiles"] : [],
+				);
+			} finally {
+				await client.shutdown();
+				await stopLSP(proc);
+			}
+		},
+	);
+
+	it("sends didRenameFiles only when didRename is registered and filters match", async () => {
+		const cases: Array<{
+			name: string;
+			env: Record<string, string>;
+			sent: boolean;
+		}> = [
+			{
+				name: "not registered",
+				env: {},
+				sent: false,
+			},
+			{
+				name: "registered with matching glob",
+				env: { FAKE_LSP_DID_RENAME: "true" },
+				sent: true,
+			},
+			{
+				name: "registered but glob excludes the paths",
+				env: {
+					FAKE_LSP_DID_RENAME: "true",
+					FAKE_LSP_DID_RENAME_GLOB: "**/*.go",
+				},
+				sent: false,
+			},
+		];
+
+		for (const { name, env, sent } of cases) {
+			const proc = await launchLSP(process.execPath, [FAKE_SERVER_PATH], {
+				cwd: process.cwd(),
+				env: {
+					...process.env,
+					...env,
+					FAKE_LSP_WILL_RENAME: "true",
+					FAKE_LSP_ECHO_NOTIFY_METHODS: "1",
+				},
+			});
+			const client = await createLSPClient({
+				serverId: "fake-did-rename-capability",
+				process: proc,
+				root: process.cwd(),
+			});
+			const notified: string[] = [];
+			client.connection.onNotification(
+				"$/test/notifyReceived",
+				(params: { method: string }) => {
+					notified.push(params.method);
+				},
+			);
+			try {
+				await client.notify.open(
+					path.join(process.cwd(), "doc.ts"),
+					"greet();",
+					"typescript",
+				);
+				notified.length = 0;
+				await client.didRenameFiles(
+					path.join(process.cwd(), "old.ts"),
+					path.join(process.cwd(), "new.ts"),
+				);
+				// A notification has no awaitable reply, so the echo's stdio
+				// round-trip needs several event-loop turns — a single
+				// setImmediate yield cannot cover it. Poll until the echo
+				// arrives; for the negative cases, give the pipe a bounded
+				// grace window before asserting nothing was sent.
+				const graceMs = sent ? 5000 : 500;
+				for (
+					let i = 0;
+					i < graceMs / 25 && !notified.includes("workspace/didRenameFiles");
+					i++
+				) {
+					await new Promise((r) => setTimeout(r, 25));
+				}
+				// Support reflects REGISTRATION at initialize time (a static
+				// capability fact); the per-path FILTER decision happens at
+				// send time, so the glob case suppresses the send without
+				// un-advertising support.
+				expect(client.getOperationSupport().didRenameFiles, name).toBe(
+					env.FAKE_LSP_DID_RENAME === "true",
+				);
+				expect(notified.includes("workspace/didRenameFiles"), name).toBe(sent);
+			} finally {
+				await client.shutdown();
+				await stopLSP(proc);
+			}
+		}
+	}, 20_000); // so a regression fails on an ASSERTION, not this timeout. // Three real server launches plus a bounded echo round-trip; generous
+
+	it("applies willRename filter matching before sending the preflight request", async () => {
+		const cases = [
+			{ glob: undefined as string | undefined, sent: true },
+			{ glob: "**/*.ts", sent: true },
+			{ glob: "**/*.go", sent: false },
+		] as const;
+
+		for (const { glob, sent } of cases) {
+			const proc = await launchLSP(process.execPath, [FAKE_SERVER_PATH], {
+				cwd: process.cwd(),
+				env: {
+					...process.env,
+					FAKE_LSP_WILL_RENAME: "true",
+					...(glob ? { FAKE_LSP_WILL_RENAME_GLOB: glob } : {}),
+					FAKE_LSP_ECHO_REQUEST_METHODS: "1",
+				},
+			});
+			const client = await createLSPClient({
+				serverId: "fake-will-rename-filter",
+				process: proc,
+				root: process.cwd(),
+			});
+			const received: string[] = [];
+			client.connection.onNotification(
+				"$/test/requestReceived",
+				(params: { method: string }) => {
+					received.push(params.method);
+				},
+			);
+			try {
+				const result = await client.willRenameFiles(
+					path.join(process.cwd(), "old.ts"),
+					path.join(process.cwd(), "new.ts"),
+				);
+				// Same bounded-poll rationale as the didRename matrix above: the
+				// echo notification rides the stdio round-trip and can land after
+				// one event-loop turn under load.
+				const graceMs = sent ? 5000 : 500;
+				for (
+					let i = 0;
+					i < graceMs / 25 && !received.includes("workspace/willRenameFiles");
+					i++
+				) {
+					await new Promise((r) => setTimeout(r, 25));
+				}
+				expect(result, `glob=${glob ?? "default"}`).toBeNull();
+				expect(
+					received.includes("workspace/willRenameFiles"),
+					`glob=${glob ?? "default"}`,
+				).toBe(sent);
+			} finally {
+				await client.shutdown();
+				await stopLSP(proc);
+			}
+		}
+	});
+
+	const resolveCases = [
+		{
+			name: "absent",
+			env: { FAKE_LSP_NO_CODE_ACTION_RESOLVE: "1" },
+			supported: false,
+		},
+		{
+			name: "false",
+			env: { FAKE_LSP_CODE_ACTION_PROVIDER: "false" },
+			supported: false,
+		},
+		{
+			name: "malformed",
+			env: { FAKE_LSP_CODE_ACTION_PROVIDER: "malformed" },
+			supported: false,
+		},
+		{ name: "present", env: {}, supported: true },
+	] as const;
+
+	it.each(resolveCases)(
+		"sends codeAction/resolve only when resolveProvider is $name",
+		async ({ env, supported }) => {
+			const proc = await launchLSP(process.execPath, [FAKE_SERVER_PATH], {
+				cwd: process.cwd(),
+				env: {
+					...process.env,
+					...env,
+					FAKE_LSP_ECHO_REQUEST_METHODS: "1",
+				},
+			});
+			const client = await createLSPClient({
+				serverId: "fake-code-action-capability",
+				process: proc,
+				root: process.cwd(),
+			});
+			const received: string[] = [];
+			client.connection.onNotification(
+				"$/test/requestReceived",
+				(params: { method: string }) => {
+					received.push(params.method);
+				},
+			);
+			try {
+				const filePath = path.join(process.cwd(), "resolve.ts");
+				await client.notify.open(filePath, "greet();", "typescript");
+				const actions = await client.codeAction(filePath, 0, 0, 0, 5);
+				await new Promise((resolve) => setImmediate(resolve));
+				expect(client.getOperationSupport().codeActionResolve).toBe(supported);
+				if (supported) expect(actions[0]?.edit).toBeDefined();
+				else expect(actions[0]?.edit).toBeUndefined();
+				expect(received).toEqual(
+					supported
+						? ["textDocument/codeAction", "codeAction/resolve"]
+						: ["textDocument/codeAction"],
+				);
+			} finally {
+				await client.shutdown();
+				await stopLSP(proc);
+			}
+		},
+	);
 });
 
 describe("LSP Client Integration — cold start", () => {
