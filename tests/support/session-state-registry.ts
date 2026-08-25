@@ -516,7 +516,8 @@ export const SESSION_STATE_REGISTRY: SessionStateEntry[] = [
 	{
 		id: "review-graph-builder:workspaceGraphCache",
 		module: "review-graph/builder.ts",
-		state: "_workspaceGraphCache, _workspaceCacheEpochs",
+		state:
+			"_workspaceGraphCache, _workspaceCacheEpochs, _sourcePathMemos, _sourcePathNormalizeCalls",
 		policy: "session_start",
 		resetName: "clearReviewGraphWorkspaceCache",
 		reason:
@@ -971,7 +972,7 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	"quiet-window-config.ts": 0,
 	"quiet-window.ts": 0,
 	"recent-touches.ts": 1,
-	"review-graph/builder.ts": 17,
+	"review-graph/builder.ts": 18,
 	"review-graph/git-identity.ts": 0,
 	"review-graph/shared-extraction-ir.ts": 1,
 	"review-graph/workspace-modules.ts": 2,

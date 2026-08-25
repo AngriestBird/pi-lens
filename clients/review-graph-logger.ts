@@ -33,6 +33,8 @@ export interface ReviewGraphBuildMetadata {
 	sourceFiles?: number;
 	/** True when sourceFiles is a lower bound from a truncated source walk. */
 	sourceFilesTruncated?: boolean;
+	/** Raw walker spellings that missed the bounded canonical-path memo. */
+	pathNormalizeCalls?: number;
 	nodes: number;
 	edges: number;
 	/** Exact complete-vs-partial coverage of the persisted graph snapshot. */
@@ -65,6 +67,7 @@ export interface ReviewGraphBuildMetadataOptions {
 	mode?: ReviewGraphBuildMode;
 	sourceFileCount?: number;
 	sourceFileCountTruncated?: boolean;
+	pathNormalizeCalls?: number;
 }
 
 /**
@@ -100,6 +103,9 @@ export function makeReviewGraphBuildMetadata(
 		graph.persistCoverage?.sourceFilesTruncated
 			? { sourceFilesTruncated: true }
 			: {}),
+		...(options.pathNormalizeCalls === undefined
+			? {}
+			: { pathNormalizeCalls: options.pathNormalizeCalls }),
 		nodes: graph.nodes.size,
 		edges: graph.edges.length,
 		...(graph.persistCoverage
