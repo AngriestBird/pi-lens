@@ -273,7 +273,48 @@ function delimitedSubstitutionBody(
 	return undefined;
 }
 
-function containsGuardedSubstitution(command: string, depth: number): boolean {
+/**
+ * Which git verbs a guard cares about (#2007).
+ *
+ * The wrapper, substitution, `$IFS`, PATHEXT, and text-consumer analysis
+ * below took several review rounds to get right. A second guard that needs
+ * the same "is this an actual git invocation, and which verb" answer must
+ * reuse that analysis rather than grow a parallel lexer, so the classifier
+ * takes the verb question as a parameter and keeps everything else shared.
+ */
+export interface GitVerbMatcher {
+	/** Stable id for telemetry and tests. */
+	readonly id: string;
+	/**
+	 * True when `verb` in git command position, with `argsAfterVerb`
+	 * following it, is an operation this guard governs.
+	 */
+	readonly matchesVerb: (
+		verb: string,
+		argsAfterVerb: readonly string[],
+	) => boolean;
+	/**
+	 * True when ANY non-leading (indirect) `git` token matches unconditionally.
+	 * The commit/push guard is a policy gate an agent may want to evade, so
+	 * unknown launchers fail closed there. A guard that protects the agent
+	 * from its own accident sets this false and falls back to "an indirect
+	 * git whose argv also carries a governed verb" — see
+	 * `clients/shared-checkout-guard.ts`.
+	 */
+	readonly indirectAlwaysMatches: boolean;
+}
+
+const COMMIT_PUSH_MATCHER: GitVerbMatcher = {
+	id: "commit-push",
+	matchesVerb: (verb) => verb === "commit" || verb === "push",
+	indirectAlwaysMatches: true,
+};
+
+function containsGuardedSubstitution(
+	command: string,
+	depth: number,
+	matcher: GitVerbMatcher,
+): boolean {
 	if (depth > 3) return false;
 	let quote: "single" | "double" | undefined;
 	let escaped = false;
@@ -314,9 +355,9 @@ function containsGuardedSubstitution(command: string, depth: number): boolean {
 		if (substitution && substitution.end >= 0) {
 			const nested = canonicalizeGuardCommand(substitution.body);
 			if (
-				containsGuardedSubstitution(nested, depth + 1) ||
+				containsGuardedSubstitution(nested, depth + 1, matcher) ||
 				tokenizeShellCommand(nested).some((segment) =>
-					containsCommitOrPush(segment.tokens, depth + 1),
+					containsGuardedGitVerb(segment.tokens, depth + 1, matcher),
 				)
 			) {
 				return true;
@@ -327,7 +368,11 @@ function containsGuardedSubstitution(command: string, depth: number): boolean {
 	return false;
 }
 
-function containsCommitOrPush(tokens: string[], depth: number): boolean {
+function containsGuardedGitVerb(
+	tokens: string[],
+	depth: number,
+	matcher: GitVerbMatcher,
+): boolean {
 	if (depth > 3 || tokens.length === 0) return false;
 	let commandTokens = tokens;
 	while (/^[A-Za-z_][A-Za-z0-9_]*=/.test(commandTokens[0] ?? "")) {
@@ -344,7 +389,7 @@ function containsCommitOrPush(tokens: string[], depth: number): boolean {
 		if (runIndex >= 0 && runIndex + 1 < commandTokens.length) {
 			const nestedCommand = commandTokens.slice(runIndex + 2).join(" ");
 			return tokenizeShellCommand(canonicalizeGuardCommand(nestedCommand)).some(
-				(segment) => containsCommitOrPush(segment.tokens, depth + 1),
+				(segment) => containsGuardedGitVerb(segment.tokens, depth + 1, matcher),
 			);
 		}
 	}
@@ -361,7 +406,20 @@ function containsCommitOrPush(tokens: string[], depth: number): boolean {
 	if (gitIndex >= 0) {
 		// Any non-leading git invocation is indirect. Do not maintain a wrapper
 		// or flag allowlist: unknown launchers are the security boundary here.
-		if (gitIndex > 0) return true;
+		if (gitIndex > 0) {
+			if (matcher.indirectAlwaysMatches) return true;
+			// #2007: a guard that protects the agent from its own accident must
+			// not decline `xargs git status`. Keep the indirect path armed only
+			// when the argv also carries a governed verb, so the evasion surface
+			// stays narrow without blocking every read-only indirect git.
+			const indirectTokens = commandTokens.slice(gitIndex + 1);
+			return indirectTokens.some((token, offset) =>
+				matcher.matchesVerb(
+					normalizeGuardVerbToken(token),
+					indirectTokens.slice(offset + 1),
+				),
+			);
+		}
 		const gitTokens = commandTokens.slice(gitIndex);
 		let i = 1;
 		const takesValue = new Set([
@@ -378,7 +436,10 @@ function containsCommitOrPush(tokens: string[], depth: number): boolean {
 			if (["--help", "-h", "--version", "-v", "-V"].includes(option))
 				return false;
 			if (option === "--")
-				return gitTokens[i + 1] === "commit" || gitTokens[i + 1] === "push";
+				return matcher.matchesVerb(
+					gitTokens[i + 1] ?? "",
+					gitTokens.slice(i + 2),
+				);
 			if (
 				["-C", "-c"].some(
 					(prefix) =>
@@ -403,7 +464,10 @@ function containsCommitOrPush(tokens: string[], depth: number): boolean {
 			i += takesValue.has(option) ? 2 : 1;
 		}
 		const verbs = expandGuardVerbToken(gitTokens[i] ?? "");
-		return verbs.length === 1 && (verbs[0] === "commit" || verbs[0] === "push");
+		return (
+			verbs.length === 1 &&
+			matcher.matchesVerb(verbs[0], gitTokens.slice(i + 1))
+		);
 	}
 	const leadingExecutable = commandTokens[0] ?? "";
 	const knownCommandStringWrapper =
@@ -424,7 +488,7 @@ function containsCommitOrPush(tokens: string[], depth: number): boolean {
 		if (commandIndex >= commandTokens.length) return false;
 		const nestedCommand = commandTokens.slice(commandIndex).join(" ");
 		return tokenizeShellCommand(canonicalizeGuardCommand(nestedCommand)).some(
-			(segment) => containsCommitOrPush(segment.tokens, depth + 1),
+			(segment) => containsGuardedGitVerb(segment.tokens, depth + 1, matcher),
 		);
 	}
 	const lower = commandTokens.slice(1).map((token) => token.toLowerCase());
@@ -451,23 +515,39 @@ function containsCommitOrPush(tokens: string[], depth: number): boolean {
 	if (commandTokens[commandIndex] === "--") commandIndex += 1;
 	const nestedCommand = commandTokens.slice(commandIndex).join(" ");
 	return tokenizeShellCommand(canonicalizeGuardCommand(nestedCommand)).some(
-		(segment) => containsCommitOrPush(segment.tokens, depth + 1),
+		(segment) => containsGuardedGitVerb(segment.tokens, depth + 1, matcher),
 	);
 }
 
-/** Analyze actual executable invocations, not substrings in shell text. */
-export function isGitCommitOrPushAttempt(
+/**
+ * Analyze actual executable invocations, not substrings in shell text.
+ *
+ * Shared entry point for every guard that needs "is this bash input really a
+ * git invocation of a verb I govern" (#2007). The verb question is the only
+ * parameter; wrapper, substitution, and text-consumer analysis are identical
+ * for all callers by construction.
+ */
+export function detectGuardedGitVerb(
 	toolName: string,
 	input: unknown,
+	matcher: GitVerbMatcher,
 ): boolean {
 	if (toolName !== "bash") return false;
 	const command = getShellCommand(input);
 	if (!command) return false;
 	const canonical = canonicalizeGuardCommand(command);
-	if (containsGuardedSubstitution(canonical, 0)) return true;
+	if (containsGuardedSubstitution(canonical, 0, matcher)) return true;
 	return tokenizeShellCommand(canonical).some((segment) =>
-		containsCommitOrPush(segment.tokens, 0),
+		containsGuardedGitVerb(segment.tokens, 0, matcher),
 	);
+}
+
+/** The #1063 commit gate's own question. */
+export function isGitCommitOrPushAttempt(
+	toolName: string,
+	input: unknown,
+): boolean {
+	return detectGuardedGitVerb(toolName, input, COMMIT_PUSH_MATCHER);
 }
 
 function isTurnEndFindingsCache(value: unknown): value is TurnEndFindingsCache {

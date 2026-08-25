@@ -1,0 +1,281 @@
+/**
+ * Shared-checkout WIP guard (#2007).
+ *
+ * THE HAZARD. Several agent sessions can run against ONE checkout. Nothing
+ * in git binds a session to a directory, so when one session runs
+ * `git checkout <branch>`, git overwrites the tracked files another live
+ * session was editing. The work is not recoverable: it was never committed
+ * and never stashed. The reported incident lost uncommitted edits to three
+ * files between two observations minutes apart.
+ *
+ * THE ANSWER IS REFUSAL, NOT RESCUE. An auto-stash would be invisible
+ * machinery that moves another session's work somewhere it did not ask for,
+ * and `git stash` is repo-global across worktrees, so the rescue would be a
+ * second instance of the same defect. This guard instead DECLINES the
+ * command and says who else is here. The operator resolves it the way the
+ * design contract already says to: commit, or take a dedicated
+ * `git worktree`.
+ *
+ * THREE FACTS MUST ALL HOLD BEFORE ANYTHING IS DECLINED, cheapest first:
+ *
+ *   1. The bash input really invokes a git verb that rewrites the working
+ *      tree. Pure string work, no I/O — see `WORKTREE_MUTATING_GIT_MATCHER`.
+ *   2. Another live pi-lens session is registered on this same root.
+ *      `selectLivePeerInstances` (clients/instance-registry.ts) is the single
+ *      source of truth for that question; warm-attach reads the same
+ *      predicate. No peer means no shared checkout and nothing to protect.
+ *   3. The working tree actually carries uncommitted work. A clean tree can
+ *      be switched freely.
+ *
+ * That ordering is the cost story: the two `git` probes run only after a
+ * genuine worktree-mutating command in a genuinely shared checkout, which is
+ * rare. Ordinary bash traffic pays one string classification.
+ *
+ * UNKNOWN IS NOT CLEAN (catalog shape 10). When `git status` cannot answer,
+ * the guard declines with its OWN reason rather than assuming the tree is
+ * clean, and records a counted degradation so a repeatedly broken probe is
+ * visible instead of silently permissive.
+ *
+ * NO LATCHES HERE (catalog shape 17). Every decision is recomputed from the
+ * registry and the tree. Repeat-suppression for telemetry lives in the
+ * degradation ledger, which already re-arms at `session_start`.
+ */
+
+import { emitBounded } from "./bounded-telemetry.js";
+import { detectGuardedGitVerb, type GitVerbMatcher } from "./git-guard.js";
+import {
+	type InstanceEntry,
+	readInstanceRegistry,
+	selectLivePeerInstances,
+} from "./instance-registry.js";
+import { realIsPidAlive } from "./instance-reaper.js";
+import { logLatency } from "./latency-logger.js";
+import { isGitWorktree } from "./opaque-mutation-scan.js";
+import { normalizeFilePath } from "./path-utils.js";
+import { safeSpawnAsync } from "./safe-spawn.js";
+
+/** Verbs that rewrite tracked files unconditionally. */
+const ALWAYS_MUTATING_VERBS: ReadonlySet<string> = new Set([
+	"checkout",
+	"switch",
+	"restore",
+	"merge",
+	"rebase",
+	"pull",
+	"cherry-pick",
+	"revert",
+]);
+
+/** `git reset` touches the working tree only in these modes. */
+const RESET_WORKTREE_MODES: ReadonlySet<string> = new Set([
+	"--hard",
+	"--merge",
+	"--keep",
+]);
+
+/** `git stash` subcommands that only read. Everything else moves files. */
+const READ_ONLY_STASH_SUBCOMMANDS: ReadonlySet<string> = new Set([
+	"list",
+	"show",
+]);
+
+const CLEAN_DRY_RUN_FLAGS: ReadonlySet<string> = new Set(["-n", "--dry-run"]);
+
+/**
+ * The verb question for the shared-checkout guard. Every other part of the
+ * classification (wrappers, `$IFS`, substitutions, PATHEXT, text consumers)
+ * is the #1063 git-guard machinery, reused rather than re-implemented.
+ *
+ * `indirectAlwaysMatches` is FALSE here on purpose. The commit gate is a
+ * policy an agent may want to evade, so it fails closed on any indirect
+ * `git`. This guard protects an agent from its own accident, so failing
+ * closed on `xargs git status` would cost far more than it saves; the
+ * indirect path stays armed only when the argv also carries a governed verb.
+ *
+ * DELIBERATELY OUT OF SCOPE: `git apply` and `git am`. They add the caller's
+ * own patch on top of the tree and fail loudly into `.rej` files rather than
+ * discarding tracked content wholesale, and `git apply` is the sanctioned
+ * replacement for the forbidden `git stash`. Blocking it would push
+ * operators back toward stash.
+ */
+export const WORKTREE_MUTATING_GIT_MATCHER: GitVerbMatcher = {
+	id: "worktree-mutating",
+	indirectAlwaysMatches: false,
+	matchesVerb(verb, argsAfterVerb) {
+		if (ALWAYS_MUTATING_VERBS.has(verb)) return true;
+		if (verb === "reset") {
+			return argsAfterVerb.some((arg) => RESET_WORKTREE_MODES.has(arg));
+		}
+		if (verb === "stash") {
+			const subcommand = argsAfterVerb.find((arg) => !arg.startsWith("-"));
+			return (
+				subcommand === undefined || !READ_ONLY_STASH_SUBCOMMANDS.has(subcommand)
+			);
+		}
+		if (verb === "clean") {
+			return !argsAfterVerb.some((arg) => CLEAN_DRY_RUN_FLAGS.has(arg));
+		}
+		return false;
+	},
+};
+
+/** True when this bash input runs a git verb that rewrites tracked files. */
+export function isWorktreeMutatingGitAttempt(
+	toolName: string,
+	input: unknown,
+): boolean {
+	return detectGuardedGitVerb(toolName, input, WORKTREE_MUTATING_GIT_MATCHER);
+}
+
+/**
+ * `dirty` and `clean` are answers. `unknown` means git could not tell us,
+ * which is NOT the same as clean and must never be collapsed into it.
+ */
+export type WorkingTreeState = "dirty" | "clean" | "unknown";
+
+/**
+ * Ask git whether the working tree carries uncommitted work.
+ *
+ * Deliberately narrower than `recoverOpaqueChangesViaGit`: that function
+ * answers WHICH files changed inside a time window and stats each one, which
+ * drops deletions and costs one stat per entry. Here the only question is
+ * whether ANY entry exists, so a truncated listing is still a definite
+ * `dirty` — a prefix of dirt is dirt.
+ */
+export async function probeWorkingTreeState(
+	root: string,
+): Promise<WorkingTreeState> {
+	const result = await safeSpawnAsync(
+		"git",
+		["status", "--porcelain", "--untracked-files=all"],
+		{ cwd: root, timeout: 5000 },
+	);
+	if (result.error || (result.status !== 0 && result.status !== null)) {
+		return "unknown";
+	}
+	if (result.outputTruncated === true) return "dirty";
+	return (result.stdout ?? "").trim().length > 0 ? "dirty" : "clean";
+}
+
+export interface SharedCheckoutDecision {
+	block: boolean;
+	/** True when the refusal comes from an unanswerable probe, not from WIP. */
+	unknown?: boolean;
+	reason?: string;
+}
+
+/** Seams the tests replace. Production uses every default. */
+export interface SharedCheckoutGuardDeps {
+	readRegistry?: () => Promise<InstanceEntry[]>;
+	isPidAlive?: (pid: number) => boolean;
+	now?: number;
+	isGitRepo?: (root: string) => Promise<boolean>;
+	probeWorkingTree?: (root: string) => Promise<WorkingTreeState>;
+}
+
+function logAllow(root: string, reasonCategory: string): void {
+	logLatency({
+		type: "phase",
+		toolName: "shared-checkout-guard",
+		phase: "shared_checkout_guard_allow",
+		filePath: root,
+		durationMs: 0,
+		metadata: { decision: "allowed", reasonCategory },
+	});
+}
+
+function describePeers(peers: readonly InstanceEntry[]): string {
+	const pids = peers.slice(0, 4).map((peer) => peer.pid);
+	const suffix = peers.length > pids.length ? ", …" : "";
+	return `${peers.length} other live pi-lens session${
+		peers.length === 1 ? "" : "s"
+	} (pid ${pids.join(", ")}${suffix})`;
+}
+
+/**
+ * Decide whether one worktree-mutating git command may run here.
+ *
+ * Never throws: a registry read that fails yields an empty peer list, which
+ * reads as "no shared checkout" and allows. That direction is deliberate —
+ * the registry is observability substrate and an outage of it must not
+ * start refusing every branch switch on every machine.
+ */
+export async function evaluateSharedCheckoutGuard(
+	toolName: string,
+	input: unknown,
+	cwd: string,
+	deps: SharedCheckoutGuardDeps = {},
+): Promise<SharedCheckoutDecision> {
+	if (!isWorktreeMutatingGitAttempt(toolName, input)) return { block: false };
+	const root = normalizeFilePath(cwd);
+	let peers: InstanceEntry[];
+	try {
+		const entries = await (deps.readRegistry ?? readInstanceRegistry)();
+		peers = selectLivePeerInstances(
+			entries,
+			cwd,
+			deps.now ?? Date.now(),
+			deps.isPidAlive ?? realIsPidAlive,
+		);
+	} catch {
+		logAllow(root, "registry_unreadable");
+		return { block: false };
+	}
+	if (peers.length === 0) {
+		logAllow(root, "no_peer_session");
+		return { block: false };
+	}
+	if (!(await (deps.isGitRepo ?? isGitWorktree)(cwd))) {
+		logAllow(root, "not_a_git_worktree");
+		return { block: false };
+	}
+	const state = await (deps.probeWorkingTree ?? probeWorkingTreeState)(cwd);
+	if (state === "clean") {
+		logAllow(root, "working_tree_clean");
+		return { block: false };
+	}
+	if (state === "unknown") {
+		emitBounded(
+			"shared_checkout_probe_failed",
+			root,
+			{
+				toolName: "shared-checkout-guard",
+				durationMs: 0,
+				metadata: { decision: "blocked", peerCount: peers.length },
+			},
+			{
+				ledgerKind: "shared-checkout-probe",
+				risingEdgePer: "identity",
+				reason: "git status could not report working-tree state",
+			},
+		);
+		return {
+			block: true,
+			unknown: true,
+			reason:
+				"🔴 WORKING-TREE CHANGE BLOCKED (--lens-checkout-guard): git could not report whether this checkout has uncommitted work, and it is shared with " +
+				`${describePeers(peers)}. Re-run the command once git answers, or take a dedicated git worktree.`,
+		};
+	}
+	emitBounded(
+		"shared_checkout_switch_blocked",
+		root,
+		{
+			toolName: "shared-checkout-guard",
+			durationMs: 0,
+			metadata: { decision: "blocked", peerCount: peers.length },
+		},
+		{
+			ledgerKind: "shared-checkout-wip",
+			risingEdgePer: "identity",
+			reason: "worktree-mutating git command declined on a shared checkout",
+		},
+	);
+	return {
+		block: true,
+		reason:
+			"🔴 WORKING-TREE CHANGE BLOCKED (--lens-checkout-guard): this checkout has uncommitted changes and is shared with " +
+			`${describePeers(peers)}. The command would discard work that may not be yours. ` +
+			"Commit the changes first, or run this in a dedicated git worktree.",
+	};
+}

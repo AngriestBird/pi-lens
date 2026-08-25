@@ -35,7 +35,7 @@ import { getGlobalPiLensDir } from "./file-utils.js";
 // use on both sides happens inside function bodies, never at module-
 // evaluation time, so both modules are fully initialized before either
 // import is actually invoked.
-import { realIsPidAlive } from "./instance-reaper.js";
+import { realIsPidAlive, STALE_HEARTBEAT_MS } from "./instance-reaper.js";
 import { normalizeFilePath } from "./path-utils.js";
 import { getSubagentIdentity, isSubagentSession } from "./subagent-mode.js";
 
@@ -428,6 +428,43 @@ export function deregisterInstance(): void {
 	const remaining = file.instances.filter((entry) => entry.pid !== pid);
 	if (remaining.length === file.instances.length) return; // nothing to remove
 	writeRegistrySync({ instances: remaining });
+}
+
+/**
+ * Every OTHER live pi-lens process registered against the same project root,
+ * oldest first (#2007).
+ *
+ * "Live" is the registry's own three-part answer, not a guess: a different
+ * pid, an OS-confirmed alive pid, and a parseable heartbeat inside
+ * `STALE_HEARTBEAT_MS`. This is the single predicate for "am I sharing this
+ * directory with someone" — `selectWarmAttachIncumbent` picks the oldest
+ * entry it returns, and the shared-checkout guard asks whether it returns
+ * anything at all. Both must move together if the liveness rule changes.
+ *
+ * Roots are compared after `normalizeFilePath`, the same form
+ * `registerInstance` writes, so drive-letter case and separators cannot make
+ * a peer invisible (catalog shape 1).
+ *
+ * Best-effort by construction: the caller supplies the entries, so a failed
+ * registry read is the caller's empty list, which reads as "no known peer".
+ */
+export function selectLivePeerInstances(
+	entries: readonly InstanceEntry[],
+	root: string,
+	now: number = Date.now(),
+	isPidAlive: (pid: number) => boolean = realIsPidAlive,
+): InstanceEntry[] {
+	const normalizedRoot = normalizeFilePath(root);
+	return entries
+		.filter(
+			(entry) =>
+				entry.pid !== process.pid &&
+				entry.projectRoot === normalizedRoot &&
+				isPidAlive(entry.pid) &&
+				Number.isFinite(Date.parse(entry.heartbeatAt)) &&
+				now - Date.parse(entry.heartbeatAt) <= STALE_HEARTBEAT_MS,
+		)
+		.sort((a, b) => Date.parse(a.startedAt) - Date.parse(b.startedAt));
 }
 
 // --- Resource footprint aggregation (#620) ----------------------------------

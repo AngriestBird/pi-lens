@@ -1,0 +1,424 @@
+/**
+ * Shared-checkout WIP guard (#2007).
+ *
+ * The incident: several agent sessions shared one checkout, one ran
+ * `git checkout <branch>`, and three files of another session's uncommitted
+ * work vanished unrecoverably.
+ *
+ * Every guard the fix adds is pinned INDEPENDENTLY, with the mutation that
+ * reds it named in a comment. The four are: the command classification, the
+ * live-peer requirement, the dirty-tree requirement, and the unknown-is-not-
+ * clean rule. A compensating pair would let one deletion pass unnoticed
+ * (#1733's lesson), so no test stands in for another.
+ *
+ * `probeWorkingTreeState` is exercised against the REAL `git` binary in a
+ * real temp repo (catalog shape 16): a hand-written porcelain fixture would
+ * only pin our guess about git's output.
+ */
+
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
+
+const latencyCalls: Array<Record<string, unknown>> = [];
+vi.mock("../../clients/latency-logger.js", async (importActual) => {
+	const actual =
+		await importActual<typeof import("../../clients/latency-logger.js")>();
+	return {
+		...actual,
+		logLatency: (entry: Record<string, unknown>) => {
+			latencyCalls.push(entry);
+		},
+	};
+});
+
+import {
+	getDegradationSummary,
+	resetDegradationLedger,
+} from "../../clients/degradation-ledger.js";
+import { isGitCommitOrPushAttempt } from "../../clients/git-guard.js";
+import type { InstanceEntry } from "../../clients/instance-registry.js";
+import { selectLivePeerInstances } from "../../clients/instance-registry.js";
+import {
+	evaluateSharedCheckoutGuard,
+	isWorktreeMutatingGitAttempt,
+	probeWorkingTreeState,
+	type SharedCheckoutGuardDeps,
+	type WorkingTreeState,
+} from "../../clients/shared-checkout-guard.js";
+import { normalizeFilePath } from "../../clients/path-utils.js";
+import { safeSpawnAsync } from "../../clients/safe-spawn.js";
+
+const ROOT = "/shared/checkout";
+
+function bash(command: string): { command: string } {
+	return { command };
+}
+
+function phaseCalls(phase: string): Array<Record<string, unknown>> {
+	return latencyCalls.filter((entry) => entry.phase === phase);
+}
+
+function summaryFor(kind: string) {
+	return getDegradationSummary().find((group) => group.kind === kind);
+}
+
+function peer(overrides: Partial<InstanceEntry> = {}): InstanceEntry {
+	return {
+		pid: process.pid + 1,
+		startedAt: new Date(1_000).toISOString(),
+		projectRoot: normalizeFilePath(ROOT),
+		lspChildren: [],
+		lspChildCount: 0,
+		rssBytes: 0,
+		heartbeatAt: new Date(2_000).toISOString(),
+		...overrides,
+	};
+}
+
+/** All seams stubbed: a live peer, a real repo, and a dirty tree. */
+function deps(
+	overrides: Partial<SharedCheckoutGuardDeps> = {},
+	probeSpy?: { calls: number },
+): SharedCheckoutGuardDeps {
+	return {
+		readRegistry: async () => [peer()],
+		isPidAlive: () => true,
+		now: 3_000,
+		isGitRepo: async () => true,
+		probeWorkingTree: async (): Promise<WorkingTreeState> => {
+			if (probeSpy) probeSpy.calls += 1;
+			return "dirty";
+		},
+		...overrides,
+	};
+}
+
+describe("worktree-mutating git classification (#2007)", () => {
+	it("recognizes every verb that rewrites tracked files", () => {
+		for (const command of [
+			"git checkout main",
+			"git checkout -b feature",
+			"git checkout -- clients/dispatcher.ts",
+			"git switch master",
+			"git restore .",
+			"git reset --hard HEAD",
+			"git reset --merge",
+			"git reset --keep origin/master",
+			"git stash",
+			"git stash push -m wip",
+			"git stash pop",
+			"git clean -fd",
+			"git merge origin/master",
+			"git rebase master",
+			"git pull",
+			"git cherry-pick abc123",
+			"git revert abc123",
+		]) {
+			expect(isWorktreeMutatingGitAttempt("bash", bash(command)), command).toBe(
+				true,
+			);
+		}
+	});
+
+	it("leaves read-only and index-only git alone", () => {
+		for (const command of [
+			"git status",
+			"git log --oneline",
+			"git diff",
+			"git add .",
+			"git commit -m x",
+			"git push origin master",
+			// Soft/mixed reset moves HEAD and the index, never the worktree.
+			"git reset HEAD~1",
+			"git reset --soft HEAD~1",
+			"git stash list",
+			"git stash show",
+			"git clean -n",
+			"git clean --dry-run",
+			"git --help checkout",
+			'echo "git checkout main"',
+			"npm run build",
+		]) {
+			expect(isWorktreeMutatingGitAttempt("bash", bash(command)), command).toBe(
+				false,
+			);
+		}
+	});
+
+	it("inherits the #1063 wrapper and substitution analysis instead of re-parsing", () => {
+		// MUTATION PROOF for the reuse decision: a hand-rolled `startsWith("git ")`
+		// classifier passes the plain cases above and reds on every line here.
+		for (const command of [
+			"sh -c 'git checkout main'",
+			'bash -lc "git switch master"',
+			"cmd /c git reset --hard",
+			"pwsh -Command git clean -fd",
+			"echo $(git checkout main)",
+			"git${IFS}checkout${IFS}main",
+			"GIT_DIR=.git git checkout main",
+			"git -C /elsewhere checkout main",
+		]) {
+			expect(isWorktreeMutatingGitAttempt("bash", bash(command)), command).toBe(
+				true,
+			);
+		}
+	});
+
+	it("narrows the indirect-git fail-closed rule to governed verbs only", () => {
+		// The commit gate is a policy an agent may evade, so ANY indirect git
+		// fails closed there. This guard protects the agent from an accident,
+		// so a read-only indirect git must stay usable.
+		expect(isGitCommitOrPushAttempt("bash", bash("xargs git status"))).toBe(
+			true,
+		);
+		expect(isWorktreeMutatingGitAttempt("bash", bash("xargs git status"))).toBe(
+			false,
+		);
+		// MUTATION PROOF: make `indirectAlwaysMatches` irrelevant by returning
+		// false for every indirect git and this line reds.
+		expect(
+			isWorktreeMutatingGitAttempt("bash", bash("xargs git checkout main")),
+		).toBe(true);
+	});
+
+	it("only classifies bash tool input", () => {
+		expect(
+			isWorktreeMutatingGitAttempt("write", bash("git checkout main")),
+		).toBe(false);
+		expect(isWorktreeMutatingGitAttempt("bash", {})).toBe(false);
+	});
+
+	it("keeps the commit/push gate's own answers unchanged after the refactor", () => {
+		expect(isGitCommitOrPushAttempt("bash", bash('git commit -m "x"'))).toBe(
+			true,
+		);
+		expect(isGitCommitOrPushAttempt("bash", bash("git push origin main"))).toBe(
+			true,
+		);
+		expect(isGitCommitOrPushAttempt("bash", bash("git checkout main"))).toBe(
+			false,
+		);
+		expect(isGitCommitOrPushAttempt("bash", bash('echo "git push"'))).toBe(
+			false,
+		);
+	});
+});
+
+describe("live-peer selection (#2007)", () => {
+	it("counts only another pid, alive, on this root, with a fresh heartbeat", () => {
+		const entries = [
+			peer(),
+			peer({ pid: process.pid }), // this process is not its own peer
+			peer({ pid: process.pid + 2, projectRoot: normalizeFilePath("/other") }),
+			peer({ pid: process.pid + 3, heartbeatAt: "not-a-date" }),
+		];
+		const live = selectLivePeerInstances(entries, ROOT, 3_000, () => true);
+		expect(live.map((entry) => entry.pid)).toEqual([process.pid + 1]);
+	});
+
+	it("drops a dead pid and a stale heartbeat", () => {
+		expect(
+			selectLivePeerInstances([peer()], ROOT, 3_000, () => false),
+		).toHaveLength(0);
+		expect(
+			selectLivePeerInstances(
+				[peer()],
+				ROOT,
+				Date.parse("2100-01-01T00:00:00Z"),
+				() => true,
+			),
+		).toHaveLength(0);
+	});
+});
+
+describe("evaluateSharedCheckoutGuard (#2007)", () => {
+	beforeEach(() => {
+		latencyCalls.length = 0;
+		resetDegradationLedger();
+	});
+
+	it("declines a branch switch when a live peer shares this dirty checkout", async () => {
+		const decision = await evaluateSharedCheckoutGuard(
+			"bash",
+			bash("git checkout main"),
+			ROOT,
+			deps(),
+		);
+		// MUTATION PROOF: return `{ block: false }` from the dirty branch and
+		// this is the only test that reds — the incident ships again.
+		expect(decision.block).toBe(true);
+		expect(decision.unknown).toBeUndefined();
+		expect(decision.reason).toContain(`pid ${process.pid + 1}`);
+		expect(decision.reason).toContain("uncommitted changes");
+	});
+
+	it("allows the same command when no other session is here", async () => {
+		const probeSpy = { calls: 0 };
+		const decision = await evaluateSharedCheckoutGuard(
+			"bash",
+			bash("git checkout main"),
+			ROOT,
+			deps({ readRegistry: async () => [] }, probeSpy),
+		);
+		// MUTATION PROOF: delete the peer check and this reds — every solo
+		// session's branch switch would be declined.
+		expect(decision.block).toBe(false);
+		// The probe is the expensive part; a peerless checkout must not pay it.
+		expect(probeSpy.calls).toBe(0);
+		expect(
+			phaseCalls("shared_checkout_guard_allow")[0]?.metadata,
+		).toMatchObject({ reasonCategory: "no_peer_session" });
+	});
+
+	it("allows the same command when the shared checkout is clean", async () => {
+		const decision = await evaluateSharedCheckoutGuard(
+			"bash",
+			bash("git checkout main"),
+			ROOT,
+			deps({ probeWorkingTree: async () => "clean" }),
+		);
+		// MUTATION PROOF: drop the `clean` branch and every shared checkout
+		// becomes unswitchable, which would get the flag turned off.
+		expect(decision.block).toBe(false);
+		expect(
+			phaseCalls("shared_checkout_guard_allow")[0]?.metadata,
+		).toMatchObject({ reasonCategory: "working_tree_clean" });
+	});
+
+	it("declines on an UNKNOWN probe rather than assuming clean", async () => {
+		const decision = await evaluateSharedCheckoutGuard(
+			"bash",
+			bash("git reset --hard"),
+			ROOT,
+			deps({ probeWorkingTree: async () => "unknown" }),
+		);
+		// MUTATION PROOF (catalog shape 10): collapse `unknown` into `clean`
+		// and this reds while every other test stays green.
+		expect(decision.block).toBe(true);
+		expect(decision.unknown).toBe(true);
+		expect(decision.reason).toContain("could not report");
+		expect(summaryFor("shared-checkout-probe")?.count).toBe(1);
+		expect(phaseCalls("shared_checkout_probe_failed")).toHaveLength(1);
+	});
+
+	it("never touches the registry for a command that cannot rewrite the tree", async () => {
+		let registryReads = 0;
+		const decision = await evaluateSharedCheckoutGuard(
+			"bash",
+			bash("git status"),
+			ROOT,
+			deps({
+				readRegistry: async () => {
+					registryReads += 1;
+					return [peer()];
+				},
+			}),
+		);
+		expect(decision.block).toBe(false);
+		// MUTATION PROOF for the cost story: move the classification below the
+		// registry read and this reds. Every bash command would pay file I/O.
+		expect(registryReads).toBe(0);
+		expect(latencyCalls).toHaveLength(0);
+	});
+
+	it("allows when the shared directory is not a git worktree", async () => {
+		const probeSpy = { calls: 0 };
+		const decision = await evaluateSharedCheckoutGuard(
+			"bash",
+			bash("git checkout main"),
+			ROOT,
+			deps({ isGitRepo: async () => false }, probeSpy),
+		);
+		expect(decision.block).toBe(false);
+		expect(probeSpy.calls).toBe(0);
+	});
+
+	it("allows when the registry itself cannot be read", async () => {
+		const decision = await evaluateSharedCheckoutGuard(
+			"bash",
+			bash("git checkout main"),
+			ROOT,
+			deps({
+				readRegistry: async () => {
+					throw new Error("registry unreadable");
+				},
+			}),
+		);
+		// A registry outage must not start refusing branch switches machine-wide.
+		expect(decision.block).toBe(false);
+		expect(
+			phaseCalls("shared_checkout_guard_allow")[0]?.metadata,
+		).toMatchObject({ reasonCategory: "registry_unreadable" });
+	});
+
+	it("counts every repeat while logging one detailed record per checkout", async () => {
+		for (let i = 0; i < 4; i++) {
+			await evaluateSharedCheckoutGuard(
+				"bash",
+				bash("git switch other"),
+				ROOT,
+				deps(),
+			);
+		}
+		expect(phaseCalls("shared_checkout_switch_blocked")).toHaveLength(1);
+		// The ledger keeps the exact total, and its subject says WHICH checkout
+		// is contended — aggregation that lost that identity would be the
+		// failure AGENTS.md names.
+		expect(summaryFor("shared-checkout-wip")?.count).toBe(4);
+		expect(
+			summaryFor("shared-checkout-wip")?.latestReasons.at(-1)?.subject,
+		).toBe(normalizeFilePath(ROOT));
+	});
+
+	it("re-arms at the session boundary rather than latching for the process", async () => {
+		await evaluateSharedCheckoutGuard(
+			"bash",
+			bash("git checkout main"),
+			ROOT,
+			deps(),
+		);
+		expect(phaseCalls("shared_checkout_switch_blocked")).toHaveLength(1);
+		// MUTATION PROOF (catalog shape 17): replace the ledger's rising edge
+		// with a module-level `Set` and this stays at 1 after the reset.
+		resetDegradationLedger();
+		await evaluateSharedCheckoutGuard(
+			"bash",
+			bash("git checkout main"),
+			ROOT,
+			deps(),
+		);
+		expect(phaseCalls("shared_checkout_switch_blocked")).toHaveLength(2);
+	});
+});
+
+describe("probeWorkingTreeState against the real git binary (#2007)", () => {
+	const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-2007-"));
+
+	afterAll(() => {
+		fs.rmSync(tmpRoot, { recursive: true, force: true });
+	});
+
+	it("reports clean, then dirty, then unknown outside a repo", async () => {
+		const repo = path.join(tmpRoot, "repo");
+		fs.mkdirSync(repo, { recursive: true });
+		const init = await safeSpawnAsync("git", ["init", "-q"], {
+			cwd: repo,
+			timeout: 20000,
+		});
+		if (init.error || init.status !== 0) {
+			throw new Error(`git init unavailable: ${init.error ?? init.status}`);
+		}
+		expect(await probeWorkingTreeState(repo)).toBe("clean");
+
+		fs.writeFileSync(path.join(repo, "wip.ts"), "export const a = 1;\n");
+		// An UNTRACKED file is work too — this is exactly what the incident lost.
+		expect(await probeWorkingTreeState(repo)).toBe("dirty");
+
+		const outside = path.join(tmpRoot, "not-a-repo");
+		fs.mkdirSync(outside, { recursive: true });
+		// git exits non-zero outside a repo. That is UNKNOWN, not clean.
+		expect(await probeWorkingTreeState(outside)).toBe("unknown");
+	});
+});
