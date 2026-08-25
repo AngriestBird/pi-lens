@@ -628,7 +628,8 @@ export const TOOLS: ToolDefinition[] = [
 		id: "helm",
 		name: "Helm",
 		checkCommand: "helm",
-		checkArgs: ["version", "--short"],
+		// intended: version --short — unverified against real binary (shape 16), do not wire until probed
+		checkArgs: ["--version"],
 		installStrategy: "github",
 		binaryName: "helm",
 		github: {
@@ -728,7 +729,9 @@ export const TOOLS: ToolDefinition[] = [
 		id: "markdownlint",
 		name: "markdownlint-cli2",
 		checkCommand: "markdownlint-cli2",
-		checkArgs: ["--version"],
+		// `--version` is interpreted as a file glob by markdownlint-cli2. Use
+		// stdin with globs disabled so verification cannot scan the workspace.
+		checkArgs: ["--no-globs", "-"],
 		installStrategy: "npm",
 		packageName: "markdownlint-cli2",
 		binaryName: "markdownlint-cli2",
@@ -937,7 +940,8 @@ export const TOOLS: ToolDefinition[] = [
 		id: "spotbugs",
 		name: "SpotBugs",
 		checkCommand: "spotbugs",
-		checkArgs: ["-version"],
+		// intended: -version — unverified against real binary (shape 16), do not wire until probed
+		checkArgs: ["--version"],
 		installStrategy: "archive",
 		binaryName: "spotbugs",
 		archive: {
@@ -1181,7 +1185,8 @@ export const TOOLS: ToolDefinition[] = [
 		id: "gitleaks",
 		name: "gitleaks",
 		checkCommand: "gitleaks",
-		checkArgs: ["version"],
+		// intended: version — unverified against real binary (shape 16), do not wire until probed
+		checkArgs: ["--version"],
 		installStrategy: "github",
 		binaryName: "gitleaks",
 		github: {
@@ -1292,7 +1297,8 @@ export const TOOLS: ToolDefinition[] = [
 		id: "terraform-ls",
 		name: "terraform-ls",
 		checkCommand: "terraform-ls",
-		checkArgs: ["version"],
+		// intended: version — unverified against real binary (shape 16), do not wire until probed
+		checkArgs: ["--version"],
 		installStrategy: "github",
 		binaryName: "terraform-ls",
 		github: {
@@ -1363,6 +1369,7 @@ export const TOOLS: ToolDefinition[] = [
 		id: "cue",
 		name: "CUE",
 		checkCommand: "cue",
+		// Probed locally with CUE v0.17.1: `cue version` exits 0.
 		checkArgs: ["version"],
 		installStrategy: "github",
 		binaryName: "cue",
@@ -2094,7 +2101,7 @@ function extractVersionToken(output: string): string | undefined {
 const lastManagedInstallVersion = new Map<string, string>();
 
 /**
- * Verify a tool binary actually works by running --version
+ * Verify a tool binary actually works by running its configured checkArgs.
  * This catches broken symlinks, partial installs, and corrupted binaries.
  * `onVersionOutput`, when provided, receives the raw stdout on a successful
  * (exit 0) probe — used to piggyback version-pin drift detection onto this
@@ -2123,6 +2130,7 @@ export async function verifyToolBinary(
 	 * the expiry as transient rather than as a verdict (#1657).
 	 */
 	timeoutMs = 10000,
+	verificationArgs: string[] = ["--version"],
 ): Promise<boolean> {
 	// #2015: safeSpawnAsync instead of raw spawn. Raw spawn's timeout
 	// SIGTERMed only cmd.exe on Windows (.cmd shims run shell:true), orphaning
@@ -2153,12 +2161,15 @@ export async function verifyToolBinary(
 	void useShell;
 
 	try {
-		const result = await safeSpawnAsync(execPath, ["--version"], {
+		const result = await safeSpawnAsync(execPath, verificationArgs, {
 			timeout: timeoutMs,
+			input: "",
 		});
 		const output = `${result.stdout}\n${result.stderr}`;
 		if (result.status === 0 && !result.error) {
-			debugLog(`Verified: ${binPath} (version: ${result.stdout.trim()})`);
+			debugLog(
+				`Verified: ${binPath} (${verificationArgs.join(" ")}: ${result.stdout.trim()})`,
+			);
 			onVersionOutput?.(result.stdout);
 			return true;
 		}
@@ -2171,8 +2182,15 @@ export async function verifyToolBinary(
 		// A kill (timeout fired) or spawn-boundary failure is a stall, not a
 		// verdict from the binary (#1569 transient semantics).
 		if (result.signal !== undefined || result.spawnFailure) onTransient?.();
+		const kind =
+			result.spawnFailure?.kind ??
+			(result.signal
+				? `killed-signal=${result.signal}`
+				: result.error
+					? "spawn-error"
+					: "exit-nonzero");
 		logSessionStart(
-			`auto-install verify: failed for ${binPath} (kind=${result.signal ? `killed-signal=${result.signal}` : result.error ? "spawn-error" : "exit-nonzero"}${result.status !== null ? `, exit=${result.status}` : ""})`,
+			`auto-install verify: failed for ${binPath} (kind=${kind}${result.status !== null ? `, exit=${result.status}` : ""})`,
 		);
 		return false;
 	} catch (err) {
@@ -2271,7 +2289,11 @@ export async function getAllToolStatuses(): Promise<ToolStatus[]> {
 
 		// 2. Check npm global
 		if (tool.installStrategy === "npm") {
-			const npmPath = await findNpmGlobalToolPath(tool.binaryName || tool.id);
+			const npmPath = await findNpmGlobalToolPath(
+				tool.binaryName || tool.id,
+				undefined,
+				tool.checkArgs,
+			);
 			if (npmPath) {
 				status.installed = true;
 				status.source = "npm-global";
@@ -2283,7 +2305,11 @@ export async function getAllToolStatuses(): Promise<ToolStatus[]> {
 
 		// 3. Check pip user install
 		if (tool.installStrategy === "pip") {
-			const pipPath = await findPipUserToolPath(tool.binaryName || tool.id);
+			const pipPath = await findPipUserToolPath(
+				tool.binaryName || tool.id,
+				undefined,
+				tool.checkArgs,
+			);
 			if (pipPath) {
 				status.installed = true;
 				status.source = "pip-user";
@@ -2325,7 +2351,15 @@ export async function getAllToolStatuses(): Promise<ToolStatus[]> {
 			installerPlatform() === "win32" ? `${localBase}.cmd` : localBase;
 		try {
 			await fs.access(localPath);
-			if (await verifyToolBinary(localPath)) {
+			if (
+				await verifyToolBinary(
+					localPath,
+					undefined,
+					undefined,
+					10000,
+					tool.checkArgs,
+				)
+			) {
 				status.installed = true;
 				status.source = "pi-lens-auto";
 				status.path = localPath;
@@ -2515,7 +2549,15 @@ async function getToolPathResolved(
 		const cmdPath = `${localBase}.cmd`;
 		try {
 			await fs.access(cmdPath);
-			if (await verifyToolBinary(cmdPath, recordVersion, onTransient)) {
+			if (
+				await verifyToolBinary(
+					cmdPath,
+					recordVersion,
+					onTransient,
+					10000,
+					tool.checkArgs,
+				)
+			) {
 				return cmdPath;
 			}
 			logSessionStart(
@@ -2529,7 +2571,15 @@ async function getToolPathResolved(
 		const exePath = `${localBase}.exe`;
 		try {
 			await fs.access(exePath);
-			if (await verifyToolBinary(exePath, recordVersion, onTransient)) {
+			if (
+				await verifyToolBinary(
+					exePath,
+					recordVersion,
+					onTransient,
+					10000,
+					tool.checkArgs,
+				)
+			) {
 				return exePath;
 			}
 			logSessionStart(
@@ -2542,7 +2592,15 @@ async function getToolPathResolved(
 	if (installerPlatform() !== "win32") {
 		try {
 			await fs.access(localBase);
-			if (await verifyToolBinary(localBase, recordVersion, onTransient)) {
+			if (
+				await verifyToolBinary(
+					localBase,
+					recordVersion,
+					onTransient,
+					10000,
+					tool.checkArgs,
+				)
+			) {
 				return localBase;
 			}
 			logSessionStart(
@@ -2561,7 +2619,13 @@ async function getToolPathResolved(
 		const platformBin = resolvePlatformPackageBinary(tool);
 		if (
 			platformBin &&
-			(await verifyToolBinary(platformBin, undefined, onTransient))
+			(await verifyToolBinary(
+				platformBin,
+				undefined,
+				onTransient,
+				10000,
+				tool.checkArgs,
+			))
 		) {
 			logSessionStart(
 				`auto-install ${toolId}: resolved platform-package binary at ${platformBin}`,
@@ -2595,6 +2659,7 @@ async function getToolPathResolved(
 		const npmPath = await findNpmGlobalToolPath(
 			tool.binaryName || tool.id,
 			onTransient,
+			tool.checkArgs,
 		);
 		if (npmPath) {
 			return npmPath;
@@ -2606,6 +2671,7 @@ async function getToolPathResolved(
 		const pipPath = await findPipUserToolPath(
 			tool.binaryName || tool.id,
 			onTransient,
+			tool.checkArgs,
 		);
 		if (pipPath) {
 			return pipPath;
@@ -2675,6 +2741,7 @@ function getArchiveBinaryCandidates(
 async function findNpmGlobalToolPath(
 	binaryName: string,
 	onTransient?: () => void,
+	verificationArgs: string[] = ["--version"],
 ): Promise<string | undefined> {
 	const isWindows = process.platform === "win32";
 	const binDirs = await getNpmGlobalBinCandidates(onTransient);
@@ -2690,7 +2757,15 @@ async function findNpmGlobalToolPath(
 		for (const candidate of candidates) {
 			try {
 				await fs.access(candidate);
-				if (await verifyToolBinary(candidate, undefined, onTransient)) {
+				if (
+					await verifyToolBinary(
+						candidate,
+						undefined,
+						onTransient,
+						10000,
+						verificationArgs,
+					)
+				) {
 					return candidate;
 				}
 			} catch {
@@ -2738,6 +2813,7 @@ async function getNpmGlobalBinCandidates(
 async function findPipUserToolPath(
 	binaryName: string,
 	onTransient?: () => void,
+	verificationArgs: string[] = ["--version"],
 ): Promise<string | undefined> {
 	const isWindows = process.platform === "win32";
 	const userBaseCandidates = await getPythonUserBaseCandidates();
@@ -2772,7 +2848,15 @@ async function findPipUserToolPath(
 			for (const candidate of candidates) {
 				try {
 					await fs.access(candidate);
-					if (await verifyToolBinary(candidate, undefined, onTransient)) {
+					if (
+						await verifyToolBinary(
+							candidate,
+							undefined,
+							onTransient,
+							10000,
+							verificationArgs,
+						)
+					) {
 						return candidate;
 					}
 				} catch {
@@ -3339,6 +3423,7 @@ export type ManagedToolStrategy = ToolDefinition["installStrategy"];
 export interface RefreshableManagedTool {
 	toolId: string;
 	strategy: ManagedToolStrategy;
+	checkArgs: string[];
 	packageName?: string;
 	/** npm only — what `installNpmTool` verifies after an install or update. */
 	binaryName?: string;
@@ -3393,6 +3478,7 @@ export function getRefreshableManagedTools(): RefreshableManagedTool[] {
 				refreshable.push({
 					toolId: tool.id,
 					strategy: "npm",
+					checkArgs: tool.checkArgs,
 					packageName: tool.packageName,
 					binaryName: tool.binaryName,
 				});
@@ -3404,13 +3490,18 @@ export function getRefreshableManagedTools(): RefreshableManagedTool[] {
 				refreshable.push({
 					toolId: tool.id,
 					strategy: tool.installStrategy,
+					checkArgs: tool.checkArgs,
 					packageName: tool.packageName,
 				});
 				break;
 			}
 			case "github": {
 				if (!tool.github) continue;
-				refreshable.push({ toolId: tool.id, strategy: "github" });
+				refreshable.push({
+					toolId: tool.id,
+					strategy: "github",
+					checkArgs: tool.checkArgs,
+				});
 				break;
 			}
 			case "maven": {
@@ -3418,6 +3509,7 @@ export function getRefreshableManagedTools(): RefreshableManagedTool[] {
 				refreshable.push({
 					toolId: tool.id,
 					strategy: "maven",
+					checkArgs: tool.checkArgs,
 					pinnedCoordinate: mavenCoordinate(tool.maven),
 				});
 				break;
@@ -3431,6 +3523,7 @@ export function getRefreshableManagedTools(): RefreshableManagedTool[] {
 				refreshable.push({
 					toolId: tool.id,
 					strategy: "archive",
+					checkArgs: tool.checkArgs,
 					pinnedCoordinate: url,
 				});
 				break;
@@ -3514,6 +3607,7 @@ async function probeManagedToolVersion(
 	try {
 		const result = await safeSpawnAsync(cached.path, tool.checkArgs, {
 			timeout: 10_000,
+			input: "",
 			ignoreAmbientSignal: true,
 			resourceLabel: `tool-refresh-version:${tool.id}`,
 		});
@@ -3816,9 +3910,17 @@ async function verifyRefreshedArtifact(
 		await updateProbeCache(tool.id, installedPath);
 		return true;
 	}
-	if (!(await verifyToolBinary(installedPath))) {
+	if (
+		!(await verifyToolBinary(
+			installedPath,
+			undefined,
+			undefined,
+			10000,
+			tool.checkArgs,
+		))
+	) {
 		logSessionStart(
-			`managed-tool-refresh ${tool.id}: refreshed artifact at ${installedPath} failed its --version check`,
+			`managed-tool-refresh ${tool.id}: refreshed artifact at ${installedPath} failed its verification check`,
 		);
 		return false;
 	}
@@ -4350,6 +4452,7 @@ async function installArchiveTool(
 async function installNpmTool(
 	packageName: string,
 	binaryName: string,
+	verificationArgs: string[] = ["--version"],
 ): Promise<string | undefined> {
 	try {
 		// Ensure tools directory exists
@@ -4455,9 +4558,15 @@ async function installNpmTool(
 		let lastAttemptTransient = false;
 		for (let attempt = 1; attempt <= 3; attempt++) {
 			lastAttemptTransient = false;
-			isValid = await verifyToolBinary(binPath, undefined, () => {
-				lastAttemptTransient = true;
-			});
+			isValid = await verifyToolBinary(
+				binPath,
+				undefined,
+				() => {
+					lastAttemptTransient = true;
+				},
+				10000,
+				verificationArgs,
+			);
 			if (isValid) break;
 			if (attempt < 3) {
 				logSessionStart(
@@ -4809,7 +4918,11 @@ export async function installTool(toolId: string): Promise<boolean> {
 		switch (tool.installStrategy) {
 			case "npm": {
 				if (!tool.packageName || !tool.binaryName) return false;
-				const npmPath = await installNpmTool(tool.packageName, tool.binaryName);
+				const npmPath = await installNpmTool(
+					tool.packageName,
+					tool.binaryName,
+					tool.checkArgs,
+				);
 				if (npmPath !== undefined) {
 					// #1746 review F4: an install just resolved this package's range
 					// against the registry, so record it as freshly checked. Otherwise a
