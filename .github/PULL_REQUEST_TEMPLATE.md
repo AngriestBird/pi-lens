@@ -54,4 +54,4 @@ State affected dependents for each touched production module (from `module_repor
 
 ## Class sweep
 
-If this PR fixes or files a defect: name the defect class/shape and record which sibling sites were swept (grep + what was found OK). "Class of size 1" requires the grep that proves it.
+If this PR fixes or files a defect: name the defect class/shape and record which sibling sites were swept (grep + what was found OK). "Class of size 1" requires the grep that proves it. End a population sweep with a consolidation verdict: fold the family onto one seam (issue ref) or state why it stays distributed.

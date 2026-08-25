@@ -128,19 +128,24 @@ describe("word-index observability (#958)", () => {
 		try {
 			const {
 				buildWordIndex,
+				updateWordIndexDocument,
 				scheduleWordIndexPersist,
 				flushWordIndexPersistsForTests,
 			} = await import("../../clients/word-index.js");
 			const index = buildWordIndex([
 				{ path: "a.ts", content: "export const alpha = 1;" },
 			]);
+			updateWordIndexDocument(index, {
+				path: "a.ts",
+				content: "export const alpha = 2;",
+			});
 
 			scheduleWordIndexPersist(env.tmpDir, index);
 			flushWordIndexPersistsForTests();
 			await flushMicrotasks();
 
 			const ok = logSpy.mock.calls.find(
-				(c) => c[0]?.phase === "persist_succeeded",
+				(c) => c[0]?.phase === "persist_succeeded" && c[0]?.cwd === env.tmpDir,
 			);
 			expect(ok).toBeDefined();
 			expect(ok?.[0]).toEqual(
@@ -149,12 +154,48 @@ describe("word-index observability (#958)", () => {
 					trigger: "per_edit",
 					indexedFileCount: 1,
 					tokens: expect.any(Number),
+					postingEntries: expect.any(Number),
+					replacementCount: 1,
+					totalReplacementMs: expect.any(Number),
+					maxReplacementMs: expect.any(Number),
 				}),
 			);
 			// And no persist_failed on the success path.
 			expect(
 				logSpy.mock.calls.find((c) => c[0]?.phase === "persist_failed"),
 			).toBeUndefined();
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("resets replacementCount between successful persist records", async () => {
+		const env = setupTestEnvironment("pi-lens-word-replacement-reset-");
+		try {
+			const {
+				buildWordIndex,
+				updateWordIndexDocument,
+				scheduleWordIndexPersist,
+				flushWordIndexPersistsForTests,
+			} = await import("../../clients/word-index.js");
+			const index = buildWordIndex([{ path: "a.ts", content: "alpha" }]);
+			updateWordIndexDocument(index, { path: "a.ts", content: "beta" });
+			scheduleWordIndexPersist(env.tmpDir, index);
+			flushWordIndexPersistsForTests();
+			await flushMicrotasks();
+			scheduleWordIndexPersist(env.tmpDir, index);
+			flushWordIndexPersistsForTests();
+			await flushMicrotasks();
+			const records = logSpy.mock.calls
+				.map((call) => call[0])
+				.filter(
+					(record) =>
+						record?.phase === "persist_succeeded" && record?.cwd === env.tmpDir,
+				);
+			expect(records).toHaveLength(2);
+			expect(records[1]).toEqual(
+				expect.objectContaining({ replacementCount: 0 }),
+			);
 		} finally {
 			env.cleanup();
 		}

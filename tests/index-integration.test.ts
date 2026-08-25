@@ -4,8 +4,12 @@ import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CacheManager } from "../clients/cache-manager.js";
 import { getEffectiveLspIdleResetMs } from "../clients/runtime-turn.js";
-import { createPiMock, makeCtx } from "./support/pi-mock.js";
+import { createPiMock, makeCtx, makeStaleCtx } from "./support/pi-mock.js";
 import { removeTempDirSync } from "./clients/test-utils.js";
+
+const r6Mocks = vi.hoisted(() => ({
+	incrementDegradationCount: vi.fn(),
+}));
 
 // This suite predates the consolidated harness and is written against the
 // legacy `{ pi, handlers, commands }` shape. Adapt the canonical createPiMock
@@ -2382,6 +2386,264 @@ describe("#484 turn-summary emit at the agent_settled quiet window", () => {
 				"concurrent-secondary",
 			);
 			expect(resetLSPService).not.toHaveBeenCalled();
+		},
+		INTEGRATION_TIMEOUT_MS,
+	);
+
+	it(
+		"message_end on a stale ctx records the attribution degrade without skipping the cache_usage row (#1956)",
+		async () => {
+			const logCacheUsage = vi.fn();
+			vi.doMock("../clients/cache-observability.js", async (importActual) => ({
+				...(await importActual<
+					typeof import("../clients/cache-observability.js")
+				>()),
+				logCacheUsage,
+			}));
+			const resetLSPService = vi.fn();
+			vi.doMock("../clients/lsp/index.js", () => ({
+				getLSPService: () => ({
+					touchFile: vi.fn(),
+					getAliveClientCount: () => 0,
+					getAliveServerIds: () => [],
+				}),
+				resetLSPService,
+			}));
+
+			const { default: registerExtension } = await import("../index.js");
+			const primary = createMockPi();
+			registerExtension(primary.pi as any);
+
+			// A stale ctx (session replaced/reloaded): `getStableSessionId`
+			// returns undefined, `probeCtxActive` confirms staleness, and the
+			// handler must BOTH keep writing the cache_usage row AND record the
+			// attribution degrade in the ledger.
+			await primary.trigger(
+				"message_end",
+				{
+					message: {
+						role: "assistant",
+						provider: "provider",
+						model: "model",
+						usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+					},
+				},
+				makeStaleCtx(),
+			);
+
+			// The row keeps writing — this is a degrade, not a skip.
+			expect(logCacheUsage).toHaveBeenCalledWith(
+				expect.anything(),
+				expect.any(Function),
+				expect.objectContaining({ sessionId: undefined }),
+			);
+
+			// The attribution loss is recorded: the same degradation-ledger
+			// instance index.ts writes through must now carry the group, keyed
+			// by event name so aggregation answers WHICH handler lost its id.
+			const { getDegradationSummary } =
+				await import("../clients/degradation-ledger.js");
+			const group = getDegradationSummary().find(
+				(g) => g.kind === "cache-usage-attribution-stale",
+			);
+			expect(group).toBeDefined();
+			expect(group?.count).toBe(1);
+			expect(group?.latestReasons[0].subject).toBe("message_end");
+		},
+		INTEGRATION_TIMEOUT_MS,
+	);
+
+	it(
+		"message_end does not record attribution degradation for a live ctx",
+		async () => {
+			const logCacheUsage = vi.fn();
+			vi.doMock("../clients/cache-observability.js", async (importActual) => ({
+				...(await importActual<
+					typeof import("../clients/cache-observability.js")
+				>()),
+				logCacheUsage,
+			}));
+			const { default: registerExtension } = await import("../index.js");
+			const primary = createMockPi();
+			registerExtension(primary.pi as any);
+			await primary.trigger(
+				"message_end",
+				{ message: { role: "assistant" } },
+				makeCtx(),
+			);
+			const { getDegradationSummary } =
+				await import("../clients/degradation-ledger.js");
+			expect(logCacheUsage).toHaveBeenCalledOnce();
+			expect(
+				getDegradationSummary().find(
+					(group) => group.kind === "cache-usage-attribution-stale",
+				),
+			).toBeUndefined();
+		},
+		INTEGRATION_TIMEOUT_MS,
+	);
+
+	it(
+		"message_end does not record attribution degradation for an inconclusive ctx",
+		async () => {
+			const logCacheUsage = vi.fn();
+			vi.doMock("../clients/cache-observability.js", async (importActual) => ({
+				...(await importActual<
+					typeof import("../clients/cache-observability.js")
+				>()),
+				logCacheUsage,
+			}));
+			const { default: registerExtension } = await import("../index.js");
+			const primary = createMockPi();
+			registerExtension(primary.pi as any);
+			await primary.trigger(
+				"message_end",
+				{ message: { role: "assistant" } },
+				{ cwd: "/x" },
+			);
+			const { getDegradationSummary } =
+				await import("../clients/degradation-ledger.js");
+			expect(logCacheUsage).toHaveBeenCalledOnce();
+			expect(
+				getDegradationSummary().find(
+					(group) => group.kind === "cache-usage-attribution-stale",
+				),
+			).toBeUndefined();
+		},
+		INTEGRATION_TIMEOUT_MS,
+	);
+
+	it(
+		"message_end stale attribution uses the last live ctx session, not the replacement",
+		async () => {
+			const logCacheUsage = vi.fn();
+			const incrementDegradationCount = vi.fn();
+			vi.doMock("../clients/cache-observability.js", async (importActual) => ({
+				...(await importActual<
+					typeof import("../clients/cache-observability.js")
+				>()),
+				logCacheUsage,
+			}));
+			vi.doMock("../clients/degradation-ledger.js", async (importActual) => ({
+				...(await importActual<
+					typeof import("../clients/degradation-ledger.js")
+				>()),
+				incrementDegradationCount,
+			}));
+			const { default: registerExtension } = await import("../index.js");
+			const { registerPrimarySession } =
+				await import("../clients/session-lifecycle.js");
+			const primary = createMockPi();
+			registerExtension(primary.pi as any);
+			registerPrimarySession({}, "session-one");
+			const liveCtx = makeCtx({ sessionId: "session-one" });
+			await primary.trigger(
+				"message_end",
+				{ message: { role: "assistant" } },
+				liveCtx,
+			);
+			registerPrimarySession({}, "session-two");
+			await primary.trigger(
+				"message_end",
+				{ message: { role: "assistant" } },
+				makeStaleCtx(),
+			);
+			expect(incrementDegradationCount).toHaveBeenCalledWith(
+				expect.objectContaining({ metadata: { sessionId: "session-one" } }),
+			);
+			expect(incrementDegradationCount).toHaveBeenCalledTimes(1);
+		},
+		INTEGRATION_TIMEOUT_MS,
+	);
+
+	it(
+		"message_end stale attribution survives the real session_start rotation",
+		async () => {
+			const logCacheUsage = vi.fn();
+			r6Mocks.incrementDegradationCount.mockClear();
+			vi.doMock("../clients/cache-observability.js", async (importActual) => ({
+				...(await importActual<
+					typeof import("../clients/cache-observability.js")
+				>()),
+				logCacheUsage,
+			}));
+			vi.doMock("../clients/degradation-ledger.js", async (importActual) => ({
+				...(await importActual<
+					typeof import("../clients/degradation-ledger.js")
+				>()),
+				incrementDegradationCount: r6Mocks.incrementDegradationCount,
+			}));
+			vi.doMock("../clients/lsp/index.js", () => ({
+				getLSPService: () => ({
+					touchFile: vi.fn(),
+					getAliveClientCount: () => 0,
+					getAliveServerIds: () => [],
+				}),
+				resetLSPService: vi.fn(),
+			}));
+
+			const { default: registerExtension } = await import("../index.js");
+			const primary = createMockPi();
+			registerExtension(primary.pi as any);
+			const sessionA = makeCtx({ cwd: tmpDir, sessionId: "SESSION-A" });
+			await primary.trigger("session_start", {}, sessionA);
+			await primary.trigger(
+				"message_end",
+				{ message: { role: "assistant" } },
+				sessionA,
+			);
+
+			// The real session-start guard sees the replaced A context as stale, so
+			// B is a primary replacement and handleSessionStart performs its reset.
+			(sessionA.isIdle as () => unknown) = () => {
+				throw new Error("stale after session replacement");
+			};
+			const sessionB = makeCtx({ cwd: tmpDir, sessionId: "SESSION-B" });
+			await primary.trigger("session_start", {}, sessionB);
+			await primary.trigger(
+				"message_end",
+				{ message: { role: "assistant" } },
+				makeStaleCtx(),
+			);
+
+			expect(r6Mocks.incrementDegradationCount).toHaveBeenCalledWith(
+				expect.objectContaining({
+					metadata: { sessionId: "SESSION-A" },
+				}),
+			);
+			expect(r6Mocks.incrementDegradationCount).toHaveBeenCalledTimes(1);
+			expect(logCacheUsage).toHaveBeenCalledTimes(2);
+		},
+		INTEGRATION_TIMEOUT_MS,
+	);
+
+	it(
+		"message_end still writes cache_usage when ledger counting throws",
+		async () => {
+			const logCacheUsage = vi.fn();
+			vi.doMock("../clients/cache-observability.js", async (importActual) => ({
+				...(await importActual<
+					typeof import("../clients/cache-observability.js")
+				>()),
+				logCacheUsage,
+			}));
+			vi.doMock("../clients/degradation-ledger.js", async (importActual) => ({
+				...(await importActual<
+					typeof import("../clients/degradation-ledger.js")
+				>()),
+				incrementDegradationCount: vi.fn(() => {
+					throw new Error("ledger unavailable");
+				}),
+			}));
+			const { default: registerExtension } = await import("../index.js");
+			const primary = createMockPi();
+			registerExtension(primary.pi as any);
+			await primary.trigger(
+				"message_end",
+				{ message: { role: "assistant", usage: { input: 1, output: 1 } } },
+				makeStaleCtx(),
+			);
+			expect(logCacheUsage).toHaveBeenCalledOnce();
 		},
 		INTEGRATION_TIMEOUT_MS,
 	);
