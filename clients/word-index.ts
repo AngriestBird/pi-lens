@@ -53,6 +53,8 @@ export const wordIndexKey = normalizeEphemeralMapKey;
 export interface WordIndex {
 	/** token → postings (one entry per (file,line) the token appears on). */
 	postings: Map<string, WordHit[]>;
+	/** Canonical file key → one shared display string used by every posting. */
+	fileTable: Map<string, string>;
 	/**
 	 * file → number of indexed tokens (document length, for BM25 normalization).
 	 * Path-keyed via {@link wordIndexKey} ({@link PathKeyedMap}) so build-form and
@@ -94,6 +96,8 @@ export interface WordIndex {
 	 * discipline forbids.
 	 */
 	fileSizes: PathKeyedMap<number>;
+	/** Bounded scalar aggregate for the current persist window. */
+	replacementStats?: { count: number; totalMs: number; maxMs: number };
 }
 
 export interface RankedFile {
@@ -272,6 +276,7 @@ const WORD_INDEX_LONG_LINE_YIELD_CHARS = 4096;
 function createEmptyWordIndex(truncated: boolean): WordIndex {
 	return {
 		postings: new Map<string, WordHit[]>(),
+		fileTable: new Map<string, string>(),
 		docLengths: new PathKeyedMap<number>(wordIndexKey),
 		totalTokens: 0,
 		docCount: 0,
@@ -279,7 +284,70 @@ function createEmptyWordIndex(truncated: boolean): WordIndex {
 		forward: new PathKeyedMap<Map<string, number>>(wordIndexKey),
 		fileMtimes: new PathKeyedMap<number>(wordIndexKey),
 		fileSizes: new PathKeyedMap<number>(wordIndexKey),
+		replacementStats: { count: 0, totalMs: 0, maxMs: 0 },
 	};
+}
+
+export function countWordIndexPostingEntries(index: WordIndex): number {
+	let count = 0;
+	for (const hits of index.postings.values()) count += hits.length;
+	return count;
+}
+
+function recordWordIndexReplacement(index: WordIndex, startedAt: number): void {
+	const stats = index.replacementStats ?? { count: 0, totalMs: 0, maxMs: 0 };
+	const durationMs = Math.max(0, Date.now() - startedAt);
+	stats.count += 1;
+	stats.totalMs += durationMs;
+	stats.maxMs = Math.max(stats.maxMs, durationMs);
+	index.replacementStats = stats;
+}
+
+/** Intern a document path once per index; posting removal compares this identity. */
+function internWordIndexFile(index: WordIndex, filePath: string): string {
+	const key = wordIndexKey(filePath);
+	const existing = index.fileTable.get(key);
+	if (existing !== undefined) return existing;
+	index.fileTable.set(key, filePath);
+	return filePath;
+}
+
+function appendWordIndexPostings(
+	index: WordIndex,
+	filePath: string,
+	perTokenHits: Map<string, number[]>,
+): Map<string, number> {
+	const internedFile = internWordIndexFile(index, filePath);
+	const tokenLineCounts = new Map<string, number>();
+	for (const [token, lineNumbers] of perTokenHits) {
+		tokenLineCounts.set(token, lineNumbers.length);
+		const hits = lineNumbers.map((line) => ({ file: internedFile, line }));
+		const arr = index.postings.get(token);
+		if (arr) arr.push(...hits);
+		else index.postings.set(token, hits);
+	}
+	return tokenLineCounts;
+}
+
+function commitWordIndexDocumentReplacement(
+	index: WordIndex,
+	doc: { path: string; content: string },
+	perTokenHits: Map<string, number[]>,
+	docLength: number,
+	startedAt: number,
+): void {
+	const tokenLineCounts = appendWordIndexPostings(
+		index,
+		doc.path,
+		perTokenHits,
+	);
+	index.docLengths.set(doc.path, docLength);
+	index.forward!.set(doc.path, tokenLineCounts);
+	index.fileMtimes.set(doc.path, -1);
+	index.fileSizes.set(doc.path, Buffer.byteLength(doc.content, "utf-8"));
+	index.totalTokens += docLength;
+	index.docCount += 1;
+	recordWordIndexReplacement(index, startedAt);
 }
 
 function indexWordLine(
@@ -323,13 +391,14 @@ function indexWordDocument(
 	index: WordIndex,
 	doc: WordIndexInputDocument,
 ): void {
+	const internedFile = internWordIndexFile(index, doc.path);
 	const lines = doc.content.split(/\r?\n/);
 	const tokenLineCounts = new Map<string, number>();
 	let docLength = 0;
 	for (let i = 0; i < lines.length; i += 1) {
 		docLength += indexWordLine(
 			index,
-			doc.path,
+			internedFile,
 			lines[i],
 			i + 1,
 			tokenLineCounts,
@@ -359,12 +428,19 @@ export async function buildWordIndexAsync(
 	const deadline = createDeadline(WORD_INDEX_BUILD_YIELD_BUDGET_MS);
 	for (const doc of files) {
 		if (!shouldContinue()) throw new Error("word index build superseded");
+		const internedFile = internWordIndexFile(index, doc.path);
 		const lines = doc.content.split(/\r?\n/);
 		const tokenLineCounts = new Map<string, number>();
 		let docLength = 0;
 		for (let i = 0; i < lines.length; i += 1) {
 			const line = lines[i];
-			docLength += indexWordLine(index, doc.path, line, i + 1, tokenLineCounts);
+			docLength += indexWordLine(
+				index,
+				internedFile,
+				line,
+				i + 1,
+				tokenLineCounts,
+			);
 			if (
 				line.length >= WORD_INDEX_LONG_LINE_YIELD_CHARS ||
 				deadline.expired()
@@ -403,10 +479,12 @@ export function removeWordIndexDocument(
 	// (`sub/a.ts`) on a case-insensitive FS and lingers as a stale posting
 	// (the #1025 item #2 bug this fix closes).
 	const removedKey = wordIndexKey(filePath);
+	const removedFile = index.fileTable.get(removedKey);
+	if (removedFile === undefined) return false;
 	for (const token of tokenLineCounts.keys()) {
 		const arr = index.postings.get(token);
 		if (!arr) continue;
-		const next = arr.filter((hit) => wordIndexKey(hit.file) !== removedKey);
+		const next = arr.filter((hit) => hit.file !== removedFile);
 		if (next.length > 0) index.postings.set(token, next);
 		else index.postings.delete(token);
 	}
@@ -416,6 +494,7 @@ export function removeWordIndexDocument(
 	index.forward.delete(filePath);
 	index.fileMtimes.delete(filePath);
 	index.fileSizes.delete(filePath);
+	index.fileTable.delete(removedKey);
 	index.totalTokens -= docLength;
 	index.docCount = Math.max(0, index.docCount - 1);
 	return true;
@@ -439,6 +518,7 @@ export function updateWordIndexDocument(
 	doc: { path: string; content: string },
 ): boolean {
 	if (!index.forward) return false;
+	const startedAt = Date.now();
 
 	// Remove the old contribution first (no-op if this is a brand new doc).
 	if (index.forward.has(doc.path)) {
@@ -464,31 +544,18 @@ export function updateWordIndexDocument(
 		}
 	}
 
-	const tokenLineCounts = new Map<string, number>();
-	for (const [token, lineNumbers] of perTokenHits) {
-		tokenLineCounts.set(token, lineNumbers.length);
-		const hits = lineNumbers.map((line) => ({ file: doc.path, line }));
-		const arr = index.postings.get(token);
-		if (arr) arr.push(...hits);
-		else index.postings.set(token, hits);
-	}
-
-	index.docLengths.set(doc.path, docLength);
-	index.forward.set(doc.path, tokenLineCounts);
 	// Per-edit callers generally already have content but not a stat. -1 is an
 	// impossible real mtime, so it deliberately makes the document stale at the
 	// next startup refresh (`-1 !== realMtime` always) — unlike 0, which is a
 	// legal on-disk mtime (SOURCE_DATE_EPOCH=0, archive extraction) and would
 	// collide, leaving such a file never re-tokenized (#958 review F2).
-	index.fileMtimes.set(doc.path, -1);
-	// Size is likewise recorded for the #1105 mtime+size refresh gate. The -1
-	// mtime already forces a re-read next session, so this value only keeps the
-	// map dense (parallel to fileMtimes); store the real byte length so a
-	// deserialize→reserialize round-trip before any refresh carries a truthful
-	// size rather than a placeholder.
-	index.fileSizes.set(doc.path, Buffer.byteLength(doc.content, "utf-8"));
-	index.totalTokens += docLength;
-	index.docCount += 1;
+	commitWordIndexDocumentReplacement(
+		index,
+		doc,
+		perTokenHits,
+		docLength,
+		startedAt,
+	);
 	return true;
 }
 
@@ -496,6 +563,26 @@ type StagedWordIndexRemoval = {
 	postings: Map<string, WordHit[] | undefined>;
 	docLength: number;
 };
+
+const asyncWordIndexOperations = new WeakMap<WordIndex, Promise<void>>();
+
+function enqueueAsyncWordIndexOperation<T>(
+	index: WordIndex,
+	operation: () => Promise<T>,
+): Promise<T> {
+	const previous = asyncWordIndexOperations.get(index) ?? Promise.resolve();
+	const run = previous.catch(() => undefined).then(operation);
+	const settled = run.then(
+		() => undefined,
+		() => undefined,
+	);
+	asyncWordIndexOperations.set(index, settled);
+	return run.finally(() => {
+		if (asyncWordIndexOperations.get(index) === settled) {
+			asyncWordIndexOperations.delete(index);
+		}
+	});
+}
 
 async function stageWordIndexDocumentRemoval(
 	index: WordIndex,
@@ -506,6 +593,8 @@ async function stageWordIndexDocumentRemoval(
 	const tokenLineCounts = index.forward.get(filePath);
 	if (!tokenLineCounts) return undefined;
 	const removedKey = wordIndexKey(filePath);
+	const removedFile = index.fileTable.get(removedKey);
+	if (removedFile === undefined) return undefined;
 	const postings = new Map<string, WordHit[] | undefined>();
 	const deadline = createDeadline(WORD_INDEX_BUILD_YIELD_BUDGET_MS);
 	for (const token of tokenLineCounts.keys()) {
@@ -514,7 +603,7 @@ async function stageWordIndexDocumentRemoval(
 		if (!arr) continue;
 		const next: WordHit[] = [];
 		for (const hit of arr) {
-			if (wordIndexKey(hit.file) !== removedKey) next.push(hit);
+			if (hit.file !== removedFile) next.push(hit);
 			if (deadline.expired() && (await yieldIfOverBudget(deadline))) {
 				if (!shouldContinue()) throw new Error("word index refresh superseded");
 			}
@@ -537,6 +626,7 @@ function commitWordIndexDocumentRemoval(
 	index.forward?.delete(filePath);
 	index.fileMtimes.delete(filePath);
 	index.fileSizes.delete(filePath);
+	index.fileTable.delete(wordIndexKey(filePath));
 	index.totalTokens -= staged.docLength;
 	index.docCount = Math.max(0, index.docCount - 1);
 }
@@ -547,15 +637,17 @@ export async function removeWordIndexDocumentAsync(
 	filePath: string,
 	shouldContinue: () => boolean = () => true,
 ): Promise<boolean> {
-	const staged = await stageWordIndexDocumentRemoval(
-		index,
-		filePath,
-		shouldContinue,
-	);
-	if (!staged) return false;
-	if (!shouldContinue()) throw new Error("word index refresh superseded");
-	commitWordIndexDocumentRemoval(index, filePath, staged);
-	return true;
+	return enqueueAsyncWordIndexOperation(index, async () => {
+		const staged = await stageWordIndexDocumentRemoval(
+			index,
+			filePath,
+			shouldContinue,
+		);
+		if (!staged) return false;
+		if (!shouldContinue()) throw new Error("word index refresh superseded");
+		commitWordIndexDocumentRemoval(index, filePath, staged);
+		return true;
+	});
 }
 
 /** Cooperative replacement whose old/new state is committed without an await. */
@@ -564,7 +656,18 @@ export async function updateWordIndexDocumentAsync(
 	doc: { path: string; content: string },
 	shouldContinue: () => boolean = () => true,
 ): Promise<boolean> {
+	return enqueueAsyncWordIndexOperation(index, () =>
+		updateWordIndexDocumentAsyncUnsafe(index, doc, shouldContinue),
+	);
+}
+
+async function updateWordIndexDocumentAsyncUnsafe(
+	index: WordIndex,
+	doc: { path: string; content: string },
+	shouldContinue: () => boolean,
+): Promise<boolean> {
 	if (!index.forward) return false;
+	const startedAt = Date.now();
 	const removal = index.forward.has(doc.path)
 		? await stageWordIndexDocumentRemoval(index, doc.path, shouldContinue)
 		: undefined;
@@ -594,20 +697,13 @@ export async function updateWordIndexDocumentAsync(
 	);
 	if (!shouldContinue()) throw new Error("word index refresh superseded");
 	if (removal) commitWordIndexDocumentRemoval(index, doc.path, removal);
-	const tokenLineCounts = new Map<string, number>();
-	for (const [token, lineNumbers] of perTokenHits) {
-		tokenLineCounts.set(token, lineNumbers.length);
-		const hits = lineNumbers.map((line) => ({ file: doc.path, line }));
-		const arr = index.postings.get(token);
-		if (arr) arr.push(...hits);
-		else index.postings.set(token, hits);
-	}
-	index.docLengths.set(doc.path, docLength);
-	index.forward.set(doc.path, tokenLineCounts);
-	index.fileMtimes.set(doc.path, -1);
-	index.fileSizes.set(doc.path, Buffer.byteLength(doc.content, "utf-8"));
-	index.totalTokens += docLength;
-	index.docCount += 1;
+	commitWordIndexDocumentReplacement(
+		index,
+		doc,
+		perTokenHits,
+		docLength,
+		startedAt,
+	);
 	return true;
 }
 
@@ -1467,7 +1563,10 @@ export const WORD_INDEX_FORMAT_VERSION = 2;
 export function serializeWordIndex(index: WordIndex): SerializedWordIndex {
 	const files = [...index.docLengths.keys()];
 	const fileIndex = new Map<string, number>();
-	files.forEach((file, i) => fileIndex.set(file, i));
+	files.forEach((file, i) => {
+		const interned = index.fileTable.get(wordIndexKey(file)) ?? file;
+		fileIndex.set(interned, i);
+	});
 
 	const postings: Array<[string, number[]]> = [];
 	for (const [token, hits] of index.postings) {
@@ -1517,6 +1616,11 @@ export function deserializeWordIndex(
 		return null;
 	}
 	const docLengths = new PathKeyedMap<number>(wordIndexKey);
+	const fileTable = new Map<string, string>();
+	data.files.forEach((file) => fileTable.set(wordIndexKey(file), file));
+	const internedFiles = data.files.map(
+		(file) => fileTable.get(wordIndexKey(file)) ?? file,
+	);
 	const fileMtimes = new PathKeyedMap<number>(wordIndexKey);
 	const fileSizes = new PathKeyedMap<number>(wordIndexKey);
 	data.files.forEach((file, i) =>
@@ -1543,7 +1647,7 @@ export function deserializeWordIndex(
 		if (typeof token !== "string" || !Array.isArray(flat)) continue;
 		const hits: WordHit[] = [];
 		for (let i = 0; i + 1 < flat.length; i += 2) {
-			const file = data.files[flat[i]];
+			const file = internedFiles[flat[i]];
 			const line = flat[i + 1];
 			if (typeof file === "string" && typeof line === "number") {
 				hits.push({ file, line });
@@ -1574,6 +1678,7 @@ export function deserializeWordIndex(
 
 	return {
 		postings,
+		fileTable,
 		docLengths,
 		totalTokens: typeof data.totalTokens === "number" ? data.totalTokens : 0,
 		docCount: data.files.length,
@@ -1686,6 +1791,7 @@ export function triggerBackgroundWordIndexBuild(
 				durationMs: Date.now() - startMs,
 				indexedFileCount: index.docCount,
 				tokens: index.postings.size,
+				postingEntries: countWordIndexPostingEntries(index),
 				truncated: index.truncated,
 				skipped: docs.skipped,
 			});
@@ -1756,6 +1862,7 @@ async function writeWordIndexSnapshot(
 	index: WordIndex,
 	dbg?: (msg: string) => void,
 ): Promise<void> {
+	const persistStartedAt = Date.now();
 	try {
 		const {
 			loadProjectSnapshot,
@@ -1787,9 +1894,15 @@ async function writeWordIndexSnapshot(
 			phase: "persist_succeeded",
 			cwd: path.resolve(cwd),
 			trigger: "per_edit",
+			durationMs: Date.now() - persistStartedAt,
 			indexedFileCount: index.docCount,
 			tokens: index.postings.size,
+			postingEntries: countWordIndexPostingEntries(index),
+			replacementCount: index.replacementStats?.count ?? 0,
+			totalReplacementMs: index.replacementStats?.totalMs ?? 0,
+			maxReplacementMs: index.replacementStats?.maxMs ?? 0,
 		});
+		index.replacementStats = { count: 0, totalMs: 0, maxMs: 0 };
 	} catch (err) {
 		dbg?.(`word-index persist: failed: ${err}`);
 		// M3, #958: a swallowed persist means every LATER symbol_search reads a
