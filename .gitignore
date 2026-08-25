@@ -55,6 +55,7 @@ migrate-*.js
 !tests/fixtures/changelog-entries/*.md
 !.changelog/*.md
 !AGENTS.md
+!HISTORY.md
 !README.md
 !CHANGELOG.md
 !CODE_OF_CONDUCT.md
