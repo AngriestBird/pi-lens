@@ -440,6 +440,11 @@ decision point re-reads live clients because `inFlight` cleanup is asynchronous.
 **Path-keyed Tier-3 caches normalize at both boundaries.** Widget LSP server
 roots, startup-scan context keys, and Ruby drive-root memo keys use
 `normalizeMapKey`; equivalent separator/case spellings must share one entry.
+Test-runner project-root caches additionally canonicalize through guarded
+`realpathSync.native` on every platform. Canonical aliases share availability
+verdicts, so cached positive verdicts retain their config evidence path and
+must be discarded when that file disappears; canonicalize once per public
+hot-path call, not once per runner lookup.
 Widget file-record cardinality eviction is render-aware: only idle records with
 no live diagnostic may be evicted. Formatter detection signatures include
 formatter config metadata, and tsconfig-path signatures include recursive
@@ -2251,3 +2256,9 @@ Process-table resource samples preserve query outcome. `clients/child-unref.ts`
 those failures, so consumers leave usage unknown rather than fabricating zero
 samples, and records one bounded `resource-sampler-query-failed` degradation
 per query subject. (#1863)
+
+Test-runner availability and Vitest-glob caches canonicalize each public cwd
+once, then use `normalizeEphemeralMapKey` because their keys are already
+canonical and process-local. `detectRunner` hoists the outer availability-map
+lookup before the runner loop and uses the nested plain `Map`; glob-cache
+lookups use one `get`, not `has` plus `get`. (#2048)
