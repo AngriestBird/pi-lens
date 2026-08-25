@@ -73,4 +73,6 @@ Name the defect class or shape and record a pattern sweep across the WHOLE
 tree — `clients/`, `tools/`, `mcp/`, `scripts/`, `index.ts`, never
 `clients/` alone — plus a population sweep with a per-member verdict when
 the site belongs to an enumerable family. Cite AGENTS.md's defect-shape
-catalog. "Class of size 1" requires the grep that proves it.
+catalog. "Class of size 1" requires the grep that proves it. End a
+population sweep with a consolidation verdict: fold the family onto one
+seam (issue ref) or state why it stays distributed.

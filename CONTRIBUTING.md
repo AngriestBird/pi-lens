@@ -293,3 +293,13 @@ If you land a pull request or report an issue that gets resolved, we'll add you 
 ## Questions?
 
 Open a discussion issue or ask in the project's issue tracker. Keep it concrete and reference the files you're working with.
+
+## Issue priority labels
+
+Every open issue carries one `priority:*` label:
+
+- `priority:p1` — scheduled next; a p1 bug blocks the next release.
+- `priority:p2` — the normal queue, batched into themed waves.
+- `priority:p3` — opportunistic; a good place to start contributing, especially together with `help wanted`.
+
+Pick from `priority:p2` and `priority:p3` (with `help wanted`) if you are looking for something to work on, and say so on the issue so work is not duplicated.
