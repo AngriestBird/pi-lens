@@ -849,6 +849,17 @@ The session-start smells rollup still uses bounded tail reads, but its session-s
 
 ### Project intelligence: review graph, snapshots, word index
 
+**Word-index postings intern their document identity (#2067).** The in-memory
+posting entry keeps the index-owned shared file string, while `fileTable` maps
+the canonical `wordIndexKey` to that string. Removal and async refresh compare
+posting identities; they must never call `wordIndexKey(hit.file)`. Snapshot wire
+format v2 remains `[fileIdx, line]`; load rebuilds the table and shared refs.
+The cascade per-edit seam deliberately uses the synchronous replacement variant:
+unawaited concurrent cascades must not yield across a wholesale posting snapshot.
+Cooperative async variants are serialized per index and remain for bulk refresh.
+When touching this seam, keep posting-entry counts and replacement-cost scalars
+in word-index telemetry. #2069 intentionally builds on this prerequisite.
+
 MCP warm word indexes are bounded per root in `clients/mcp/analyze.ts`: callers
 must acquire/release a lease around every use, because idle and LRU eviction
 must never retire an index mid-query. Idle timers are generation-owned,

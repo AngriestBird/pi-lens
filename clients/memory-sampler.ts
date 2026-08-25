@@ -160,6 +160,7 @@ export interface MemorySampleSubsystems {
 	/** `null` when no word index has been built yet this session. */
 	wordIndex: {
 		docs: number;
+		fileTable: number;
 		postings: number;
 		forwardEntries: number;
 	} | null;
@@ -233,6 +234,7 @@ export function collectMemorySampleSubsystems(
 		wordIndex: wordIndex
 			? {
 					docs: wordIndex.docLengths.size,
+					fileTable: wordIndex.fileTable.size,
 					postings: wordIndex.postings.size,
 					forwardEntries: wordIndex.forward?.size ?? 0,
 				}
