@@ -14,6 +14,7 @@ import {
 	extractDeletedPathsFromCommand,
 	extractGrepSearchReadsFromOutput,
 	extractWrittenPathsFromCommand,
+	tokenizeShellCommand,
 } from "./bash-file-access.js";
 import type { BiomeClient } from "./biome-client.js";
 import {
@@ -62,6 +63,71 @@ import { scheduleWordIndexPersist } from "./word-index.js";
 import { RUNTIME_CONFIG } from "./runtime-config.js";
 
 const AUTHORITATIVE_CONTENT_MAX_BYTES = RUNTIME_CONFIG.pipeline.lspMaxFileBytes;
+
+/**
+ * Git subcommands that import ANOTHER commit's content into the index. The
+ * whole family, with a verdict for each (#2060):
+ * - merge, rebase, cherry-pick, pull, revert, am: IN. Each stages the other
+ *   side's clean files beside the unmerged ones. `pull` is fetch+merge and
+ *   `am --3way` reaches the same unmerged state, both probed on git 2.55.
+ * - stash pop / stash apply: OUT. A conflicted pop leaves `M ` entries too,
+ *   but that content is the agent's OWN stashed work. Excluding it would
+ *   destroy exactly what opaque recovery exists to capture.
+ * - checkout -m: OUT. Its "incoming" side is the agent's local modifications
+ *   carried across the switch, so the same reasoning applies.
+ * - apply -3 / --3way: OUT. The patch is normally one the agent wrote, and
+ *   `apply` is far more often used without conflicts, so the narrower default
+ *   is to keep capturing.
+ * Membership only ARMS the filter; it still needs a real unmerged entry to do
+ * anything, so a non-integration use of a listed subcommand is inert.
+ */
+const GIT_INTEGRATION_SUBCOMMANDS = new Set([
+	"merge",
+	"rebase",
+	"cherry-pick",
+	"pull",
+	"revert",
+	"am",
+]);
+const GIT_GLOBAL_OPTIONS_WITH_VALUE = new Set([
+	"-C",
+	"-c",
+	"--config-env",
+	"--git-dir",
+	"--namespace",
+	"--work-tree",
+]);
+
+/**
+ * Failed integration commands are the one opaque-recovery case where Git's
+ * index contains changes made by the other branch rather than the agent.
+ * Keep this narrow: ordinary scripts and successful Git operations retain the
+ * normal recovery contract.
+ */
+export function isFailedGitIntegrationCommand(
+	command: string,
+	isError: boolean | undefined,
+): boolean {
+	if (isError !== true) return false;
+	return tokenizeShellCommand(command).some(({ tokens, unsupported }) => {
+		if (unsupported) return false;
+		const executable = path.win32
+			.basename(tokens[0] ?? "")
+			.toLowerCase()
+			.replace(/\.(?:cmd|exe)$/, "");
+		if (executable !== "git") return false;
+		for (let index = 1; index < tokens.length; index += 1) {
+			const token = tokens[index] ?? "";
+			if (GIT_GLOBAL_OPTIONS_WITH_VALUE.has(token)) {
+				index += 1;
+				continue;
+			}
+			if (token.startsWith("-")) continue;
+			return GIT_INTEGRATION_SUBCOMMANDS.has(token);
+		}
+		return false;
+	});
+}
 
 /**
  * The `tool_result` payload pi-lens actually receives.
@@ -594,6 +660,12 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 				const recovery = await recoverOpaqueChangesViaGit(
 					scanRoot,
 					pending.startedAt,
+					{
+						excludeIndexOnlyWhenUnmerged: isFailedGitIntegrationCommand(
+							command,
+							event.isError,
+						),
+					},
 				);
 				if (recovery.verdict === "recovered") {
 					opaquePaths = recovery.paths.filter(
@@ -601,10 +673,33 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 							!isExternalOrVendorFile(p, scanRoot) &&
 							!isPathIgnoredByProject(p, scanRoot, false),
 					);
-				} else if (recovery.verdict === "unknown" && recognized.length > 0) {
-					// Git hiccup on a partially-recognized command: the
-					// remainder's coverage is unknown, never clean-by-default.
+				} else if (recovery.verdict === "unknown") {
+					// #2060: deliberately WIDER than the old `recognized.length > 0`
+					// guard. A fully opaque command whose probe failed is the shape
+					// whose coverage is least knowable, and it used to record
+					// nothing at all.
 					unknownReason = recovery.unknownReason;
+				}
+				// #2060: both counts are bounded (one record per tool_result, no
+				// per-path logging) and exist because filtering is invisible in
+				// production otherwise - the dropped paths simply never appear.
+				if ((recovery.excludedIncomingCount ?? 0) > 0) {
+					logLatency({
+						type: "phase",
+						phase: "opaque_mutation_incoming_excluded",
+						filePath: command.slice(0, 80),
+						durationMs: Date.now() - started,
+						result: `excluded:${recovery.excludedIncomingCount}`,
+					});
+				}
+				if ((recovery.unknownStatusCount ?? 0) > 0) {
+					logLatency({
+						type: "phase",
+						phase: "opaque_mutation_status_pair_unknown",
+						filePath: command.slice(0, 80),
+						durationMs: Date.now() - started,
+						result: `kept:${recovery.unknownStatusCount}`,
+					});
 				}
 			} else if (pending.stats) {
 				const outcome = await captureFileStats(scanRoot, {

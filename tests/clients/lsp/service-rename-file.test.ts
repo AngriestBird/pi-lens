@@ -7,7 +7,9 @@ import {
 	getDegradationSummary,
 	resetDegradationLedger,
 } from "../../../clients/degradation-ledger.js";
+import { createLSPClient } from "../../../clients/lsp/client.js";
 import { LSPService } from "../../../clients/lsp/index.js";
+import { launchLSP, stopLSP } from "../../../clients/lsp/launch.js";
 import { normalizeMapKey } from "../../../clients/path-utils.js";
 import { removeTempDirSync } from "../test-utils.js";
 
@@ -159,6 +161,81 @@ describe("LSPService.renameFile", () => {
 			removeTempDirSync(tmpDir);
 		}
 	});
+
+	it("connects initialize registration parsing to the real service gates", async () => {
+		const cases = [
+			{
+				name: "malformed willRename",
+				env: { FAKE_LSP_WILL_RENAME: "malformed" },
+				expected: ["malformed-registration", "no-registration"],
+			},
+			{
+				name: "malformed didRename",
+				env: {
+					FAKE_LSP_WILL_RENAME: "true",
+					FAKE_LSP_DID_RENAME: "true",
+					FAKE_LSP_DID_RENAME_FILTERS: JSON.stringify([{ scheme: "" }]),
+				},
+				expected: ["malformed-registration"],
+			},
+			{
+				name: "capability absent",
+				env: {},
+				expected: ["no-registration", "no-registration"],
+			},
+			{
+				name: "well-formed non-matching filters",
+				env: {
+					FAKE_LSP_WILL_RENAME: "true",
+					FAKE_LSP_DID_RENAME: "true",
+					FAKE_LSP_WILL_RENAME_GLOB: "**/*.go",
+					FAKE_LSP_DID_RENAME_GLOB: "**/*.go",
+				},
+				expected: ["filter-mismatch", "filter-mismatch"],
+			},
+		] as const;
+
+		for (const testCase of cases) {
+			resetDegradationLedger();
+			const tmpDir = fs.mkdtempSync(
+				path.join(os.tmpdir(), "pi-lens-lsp-real-rename-"),
+			);
+			const oldPath = path.join(tmpDir, "old.ts");
+			const newPath = path.join(tmpDir, "new.ts");
+			fs.writeFileSync(oldPath, "export const value = 1;\n", "utf-8");
+			const proc = await launchLSP(
+				process.execPath,
+				[path.join(process.cwd(), "tests/fixtures/fake-lsp-server.mjs")],
+				{ cwd: process.cwd(), env: { ...process.env, ...testCase.env } },
+			);
+			const client = await createLSPClient({
+				serverId: `real-${testCase.name}`,
+				process: proc,
+				root: tmpDir,
+			});
+			const service = new LSPService();
+			addClient(
+				service,
+				`real-${testCase.name}`,
+				tmpDir,
+				client as unknown as MockRenameClient,
+			);
+			try {
+				await service.renameFile(oldPath, newPath, {
+					cwd: tmpDir,
+					apply: true,
+				});
+				const reasons = getDegradationSummary()
+					.find((group) => group.kind === "lsp-capability-skip")
+					?.latestReasons.map((entry) => entry.reason);
+				expect(reasons, testCase.name).toEqual([...testCase.expected]);
+			} finally {
+				await client.shutdown().catch(() => {});
+				await stopLSP(proc).catch(() => {});
+				removeTempDirSync(tmpDir);
+			}
+		}
+	}, 30_000);
 
 	it("skips unsupported willRenameFiles clients while retaining supporting edits", async () => {
 		const tmpDir = fs.mkdtempSync(

@@ -418,7 +418,7 @@ describe("LSP Client Integration — nested capability gates (#1971)", () => {
 		}
 	}, 20_000);
 
-	it("honors complete file-operation filters on the protocol wire", async (ctx) => {
+	it("honors complete file-operation filters on the protocol wire", async () => {
 		const tempRoot = fs.mkdtempSync(
 			path.join(os.tmpdir(), "pi-lsp-rename-filter-"),
 		);
@@ -530,8 +530,8 @@ describe("LSP Client Integration — nested capability gates (#1971)", () => {
 			fs.symlinkSync(oldFolder, oldLink, "junction");
 			symlinkPaths = { oldPath: oldLink, newPath: newLink };
 		} catch {
-			ctx.skip();
-			return;
+			// Symlink-specific coverage is omitted when the platform denies creation;
+			// the non-symlink protocol matrix still runs below.
 		}
 		if (symlinkPaths) {
 			cases.push({

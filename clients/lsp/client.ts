@@ -5255,9 +5255,6 @@ export async function createLSPClient(options: {
 
 		async willRenameFiles(oldFilePath, newFilePath) {
 			if (!isClientAlive(state)) return null;
-			if (!state.operationSupport.willRenameFiles) {
-				return null;
-			}
 			// #1971 review: the server registered WHICH paths it cares about.
 			// Sending outside those filters asks a question the server never
 			// signed up to answer.
