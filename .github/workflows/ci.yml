@@ -125,6 +125,15 @@ jobs:
       - name: Ast-grep self-scan
         run: npm run astgrep:self-scan
 
+      # #2042: the size of the box the fork pool is budgeted against. The suite
+      # was OOM-killed here repeatedly and no log line said how much memory the
+      # runner actually had, so every diagnosis started from a guess.
+      - name: Runner capacity
+        run: |
+          echo "nproc=$(nproc)"
+          free -m
+          cat /sys/fs/cgroup/memory.max 2>/dev/null || true
+
       - name: Run tests
         env:
           # Spawn-heavy MCP smokes retain a 20s local deadline but need room
@@ -136,7 +145,12 @@ jobs:
           # never contention to serialize — skip it explicitly rather than
           # relying on it being harmless.
           PI_LENS_TEST_NO_LOCK: '1'
-        run: npm test
+        # #2042: the wrapper changes nothing about what runs and forwards the
+        # child's exit code unchanged. It prints the host's memory low-water
+        # mark and a verdict line, so the next `Killed npm test` / exit 137 —
+        # which carries no failing assertion and reads as infrastructure noise —
+        # arrives with a number attached.
+        run: node scripts/with-memory-watch.mjs -- npm test
 
   # Simulates pi's real install path: a `git:` install runs `npm install
   # --omit=dev`, which triggers `prepare` → `build:dist` FROM SOURCE with the

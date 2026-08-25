@@ -61,4 +61,12 @@ describe("dispatch coverage", () => {
 			`plan references unregistered runner id(s): ${phantom.join(", ")}`,
 		).toEqual([]);
 	});
+
+	it("every dynamic/exempt runner is still registered", () => {
+		const registered = new Set(registeredRunnerIds());
+		const stale = [...DYNAMIC_OR_EXEMPT].filter((id) => !registered.has(id));
+		// DYNAMIC_OR_EXEMPT may legitimately become empty as dispatch becomes
+		// statically representable. Keep the stale-entry check below.
+		expect(stale, "dynamic/exempt entries must name live runners").toEqual([]);
+	});
 });

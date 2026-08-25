@@ -16,6 +16,8 @@ export type DegradationKind =
 	| "mode-suppression"
 	| "ts-idle-eviction"
 	| "spawn-failure"
+	/** A git ls-files collection was truncated before parsing completed (#2075). */
+	| "git-tracked-ignore-truncated"
 	| "formatter-skip"
 	| "grammar-blocked"
 	| "lsp-breaker"
