@@ -64,7 +64,31 @@ import { RUNTIME_CONFIG } from "./runtime-config.js";
 
 const AUTHORITATIVE_CONTENT_MAX_BYTES = RUNTIME_CONFIG.pipeline.lspMaxFileBytes;
 
-const GIT_INTEGRATION_SUBCOMMANDS = new Set(["merge", "rebase", "cherry-pick"]);
+/**
+ * Git subcommands that import ANOTHER commit's content into the index. The
+ * whole family, with a verdict for each (#2060):
+ * - merge, rebase, cherry-pick, pull, revert, am: IN. Each stages the other
+ *   side's clean files beside the unmerged ones. `pull` is fetch+merge and
+ *   `am --3way` reaches the same unmerged state, both probed on git 2.55.
+ * - stash pop / stash apply: OUT. A conflicted pop leaves `M ` entries too,
+ *   but that content is the agent's OWN stashed work. Excluding it would
+ *   destroy exactly what opaque recovery exists to capture.
+ * - checkout -m: OUT. Its "incoming" side is the agent's local modifications
+ *   carried across the switch, so the same reasoning applies.
+ * - apply -3 / --3way: OUT. The patch is normally one the agent wrote, and
+ *   `apply` is far more often used without conflicts, so the narrower default
+ *   is to keep capturing.
+ * Membership only ARMS the filter; it still needs a real unmerged entry to do
+ * anything, so a non-integration use of a listed subcommand is inert.
+ */
+const GIT_INTEGRATION_SUBCOMMANDS = new Set([
+	"merge",
+	"rebase",
+	"cherry-pick",
+	"pull",
+	"revert",
+	"am",
+]);
 const GIT_GLOBAL_OPTIONS_WITH_VALUE = new Set([
 	"-C",
 	"-c",
@@ -80,7 +104,7 @@ const GIT_GLOBAL_OPTIONS_WITH_VALUE = new Set([
  * Keep this narrow: ordinary scripts and successful Git operations retain the
  * normal recovery contract.
  */
-function isFailedGitIntegrationCommand(
+export function isFailedGitIntegrationCommand(
 	command: string,
 	isError: boolean | undefined,
 ): boolean {
@@ -650,9 +674,32 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 							!isPathIgnoredByProject(p, scanRoot, false),
 					);
 				} else if (recovery.verdict === "unknown") {
-					// A malformed or failed status probe leaves recovery coverage
-					// unknown for every command shape, never implicitly clean.
+					// #2060: deliberately WIDER than the old `recognized.length > 0`
+					// guard. A fully opaque command whose probe failed is the shape
+					// whose coverage is least knowable, and it used to record
+					// nothing at all.
 					unknownReason = recovery.unknownReason;
+				}
+				// #2060: both counts are bounded (one record per tool_result, no
+				// per-path logging) and exist because filtering is invisible in
+				// production otherwise - the dropped paths simply never appear.
+				if ((recovery.excludedIncomingCount ?? 0) > 0) {
+					logLatency({
+						type: "phase",
+						phase: "opaque_mutation_incoming_excluded",
+						filePath: command.slice(0, 80),
+						durationMs: Date.now() - started,
+						result: `excluded:${recovery.excludedIncomingCount}`,
+					});
+				}
+				if ((recovery.unknownStatusCount ?? 0) > 0) {
+					logLatency({
+						type: "phase",
+						phase: "opaque_mutation_status_pair_unknown",
+						filePath: command.slice(0, 80),
+						durationMs: Date.now() - started,
+						result: `kept:${recovery.unknownStatusCount}`,
+					});
 				}
 			} else if (pending.stats) {
 				const outcome = await captureFileStats(scanRoot, {
