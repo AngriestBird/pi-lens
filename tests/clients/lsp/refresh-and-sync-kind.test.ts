@@ -296,6 +296,14 @@ describe("outgoing didChange honors the negotiated sync kind (#1669)", () => {
 		for (const filePath of paths) await closeDocument(incremental, filePath);
 		expect(textEntries()).toBe(0);
 		expect(incremental.incrementalTextRetainedBytes).toBe(0);
+		// #2065 fix round 2 N1: `incrementalTextBearingPaths` is an AUX index
+		// mirroring which paths currently bear text — it must be empty once
+		// every path is closed, exactly like `documentContentHashes` above.
+		// Pre-fix, closeDocument never deleted from this Set at all: entries
+		// that were still text-bearing at close time (i.e. never evicted by
+		// the cap) stayed in the Set forever, an unbounded per-path leak of
+		// the same class this PR exists to close.
+		expect(incremental.incrementalTextBearingPaths?.size ?? -1).toBe(0);
 
 		const full = createMockState({ syncKind: 1 });
 		for (const filePath of paths.slice(0, 3)) {
@@ -376,17 +384,6 @@ describe("outgoing didChange honors the negotiated sync kind (#1669)", () => {
 		// NOT re-touched, and keeps paths[0] alive.
 		expect(hasText(paths[0])).toBe(true);
 		expect(hasText(paths[1])).toBe(false);
-	});
-
-	it("#2065 fix round 1 F4: closeDocument clears the eighth per-path map, pullGenerations", async () => {
-		const state = createMockState({ syncKind: 2 });
-		state.openDocuments.add(TEST_KEY);
-		state.pullGenerations = state.pullGenerations ?? new Map();
-		state.pullGenerations.set(TEST_KEY, 3);
-
-		await closeDocument(state, TEST_FILE);
-
-		expect(state.pullGenerations.has(TEST_KEY)).toBe(false);
 	});
 
 	it("#2065 preserves an incremental edit round trip for retained text", async () => {

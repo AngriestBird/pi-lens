@@ -3853,18 +3853,39 @@ export async function closeDocument(
 			(state.incrementalTextRetainedBytes ?? retained.text.length * 2) -
 				retained.text.length * 2,
 		);
+		// #2065 fix round 2 N1: `recordSentContent` and the eviction loop both
+		// delete from `incrementalTextBearingPaths` when they strip a path's
+		// text, but neither runs on close — this was the missing third writer.
+		// Without it, a closed path's membership in the aux set survives
+		// forever: below the 128-entry/64 MiB cap the eviction loop that would
+		// otherwise clean it up never runs at all, so the set grows by one
+		// stale entry per open/close cycle with nothing ever draining it — the
+		// exact unbounded-per-path-store class #2065 exists to close, just
+		// moved into the aux index instead of the byte-retention count itself.
+		state.incrementalTextBearingPaths?.delete(normalizedPath);
 	}
 	// Keep the hash/version binding only while the document is open; the full
 	// text is needed for the next edit, never after didClose (#2065).
 	state.documentContentHashes.delete(normalizedPath);
 	clearDiagnosticsForPath(state, normalizedPath);
-	// #2065 fix round 1 F4: `pullGenerations` is the eighth per-path map in this
-	// family and was the one omission from the close sweep. The bump inside
-	// `clearDiagnosticsForPath` above already invalidates any pull still in
-	// flight for this path; deleting the entry afterward is safe because a
-	// future read defaults to 0 (`pullGenerationFor`), and any late write's
-	// captured (bumped, non-zero) generation still fails that equality check.
-	state.pullGenerations?.delete(normalizedPath);
+	// #2065 fix round 2 (reverts fix round 1 F4): `pullGenerations` is the
+	// eighth per-path map in this family, but it is deliberately NOT cleared
+	// here — the same reasoning `clearDiagnosticsForPath` already documents
+	// above for `pullRequestSequences` applies to this counter too, and fix
+	// round 1's F4 missed it. `pullGenerationFor` defaults a missing entry to
+	// `0`, so deleting the entry on close resets the counter. A pull already
+	// in flight before the close captured its generation BEFORE this close's
+	// `clearDiagnosticsForPath` bump above ran. If the document is closed and
+	// reopened before that in-flight pull's write lands, deleting the entry
+	// here would let the counter read back as `0` again — the exact value the
+	// stale write's stale captured generation equals — so the write-time
+	// `!== generation` check at its call site would wrongly accept a stale
+	// answer computed against the pre-close content. Leaving the counter
+	// monotonic and un-reset keeps every pre-close capture permanently
+	// distinguishable from whatever the counter reads afterward, no matter how
+	// many closes or reopens happen in between. The cost is one integer per
+	// path that outlives the document's open lifetime — negligible next to
+	// correctness here.
 }
 
 /**
