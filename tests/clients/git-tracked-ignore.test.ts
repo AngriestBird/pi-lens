@@ -82,7 +82,7 @@ describe("collectUntrackedIgnoredIds (#694)", () => {
 			vi.spyOn(safeSpawn, "safeSpawnAsync").mockResolvedValue({
 				stdout: "partial/path.ts\n",
 				stderr: "",
-				status: 0,
+				status: 1,
 				outputTruncated: true,
 			});
 
@@ -102,6 +102,25 @@ describe("collectUntrackedIgnoredIds (#694)", () => {
 			]);
 		},
 	);
+
+	it.each([
+		["untracked-ignored", collectUntrackedIgnoredIds],
+		["tracked", collectTrackedFiles],
+	] as const)("caps %s git ls-files stdout", async (_site, collect) => {
+		const spawn = vi.spyOn(safeSpawn, "safeSpawnAsync").mockResolvedValue({
+			stdout: "tracked/path.ts\n",
+			stderr: "",
+			status: 0,
+		});
+
+		await collect(process.cwd());
+
+		expect(spawn).toHaveBeenCalledWith(
+			"git",
+			expect.any(Array),
+			expect.objectContaining({ maxOutputBytes: 16 * 1024 * 1024 }),
+		);
+	});
 
 	it("degrades to undefined (no throw) outside a git repo", async () => {
 		const env = setupTestEnvironment("pi-lens-git-tracked-ignore-nogit-");

@@ -48,6 +48,10 @@ function recordTruncatedLsFiles(
 	});
 }
 
+// A real listing in this repository is about 133 KiB. Cap pathological
+// repositories at 16 MiB so safeSpawnAsync cannot retain unbounded stdout.
+const MAX_LS_FILES_OUTPUT_BYTES = 16 * 1024 * 1024;
+
 /**
  * Parses `git ls-files --others --ignored --exclude-standard` output
  * (repo-relative paths, one per line) into normalized map-key file ids.
@@ -82,13 +86,18 @@ async function fetchUntrackedIgnoredIds(
 		const result = await safeSpawnAsync(
 			"git",
 			["ls-files", "--others", "--ignored", "--exclude-standard"],
-			{ cwd, timeout: 10_000, resourceLabel: "git-tracked-ignore" },
+			{
+				cwd,
+				timeout: 10_000,
+				maxOutputBytes: MAX_LS_FILES_OUTPUT_BYTES,
+				resourceLabel: "git-tracked-ignore",
+			},
 		);
-		if (result.error || result.status !== 0) return undefined;
 		if (result.outputTruncated === true) {
 			recordTruncatedLsFiles("untracked-ignored");
 			return undefined;
 		}
+		if (result.error || result.status !== 0) return undefined;
 		return parseUntrackedIgnoredOutput(result.stdout, cwd);
 	} catch {
 		return undefined;
@@ -178,13 +187,14 @@ async function fetchTrackedFiles(
 		const result = await safeSpawnAsync("git", ["ls-files"], {
 			cwd,
 			timeout: 10_000,
+			maxOutputBytes: MAX_LS_FILES_OUTPUT_BYTES,
 			resourceLabel: "git-tracked-ignore",
 		});
-		if (result.error || result.status !== 0) return undefined;
 		if (result.outputTruncated === true) {
 			recordTruncatedLsFiles("tracked");
 			return undefined;
 		}
+		if (result.error || result.status !== 0) return undefined;
 		return parseTrackedFilesOutput(result.stdout, cwd);
 	} catch {
 		return undefined;
