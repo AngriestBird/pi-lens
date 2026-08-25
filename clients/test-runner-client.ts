@@ -21,7 +21,7 @@ import { createSubsystemLogger } from "./extension-log.js";
 import { detectFileRole } from "./file-role.js";
 import { findGlobalBinary } from "./package-manager.js";
 import { PathKeyedMap } from "./path-keyed-map.js";
-import { normalizeMapKey } from "./path-utils.js";
+import { normalizeEphemeralMapKey, normalizeMapKey } from "./path-utils.js";
 import { isMeasuredDuration, toMeasuredDurationMs } from "./run-duration.js";
 import { safeSpawn, safeSpawnAsync } from "./safe-spawn.js";
 
@@ -321,9 +321,9 @@ function canonicalFailedPath(filePath: string): string {
 function canonicalProjectRoot(cwd: string): string {
 	const absolute = path.resolve(cwd);
 	try {
-		return normalizeMapKey(fs.realpathSync.native(absolute));
+		return normalizeEphemeralMapKey(fs.realpathSync.native(absolute));
 	} catch {
-		return normalizeMapKey(absolute);
+		return normalizeEphemeralMapKey(absolute);
 	}
 }
 
@@ -347,7 +347,7 @@ function filesystemErrorCode(error: unknown): string | undefined {
 export class TestRunnerClient {
 	private log: (msg: string) => void;
 	private availableRunners = new PathKeyedMap<Map<string, RunnerAvailability>>(
-		normalizeMapKey,
+		normalizeEphemeralMapKey,
 	);
 	private failedTestsByRunner = new Map<
 		string,
@@ -364,7 +364,7 @@ export class TestRunnerClient {
 	private vitestTestGlobsCache = new PathKeyedMap<{
 		include?: string[];
 		exclude?: string[];
-	} | null>(normalizeMapKey);
+	} | null>(normalizeEphemeralMapKey);
 
 	constructor(verbose = false, options: TestRunnerClientOptions = {}) {
 		this.log = verbose ? createSubsystemLogger("test-runner") : () => {};
@@ -373,10 +373,9 @@ export class TestRunnerClient {
 	}
 
 	private getRunnerAvailability(
-		rootKey: string,
+		byRunner: Map<string, RunnerAvailability> | undefined,
 		runner: string,
 	): boolean | undefined {
-		const byRunner = this.availableRunners.get(rootKey);
 		const cached = byRunner?.get(runner);
 		if (!cached) return undefined;
 		if (
@@ -391,16 +390,11 @@ export class TestRunnerClient {
 	}
 
 	private setRunnerAvailability(
-		rootKey: string,
+		byRunner: Map<string, RunnerAvailability>,
 		runner: string,
 		available: boolean,
 		evidencePath?: string,
 	): void {
-		let byRunner = this.availableRunners.get(rootKey);
-		if (!byRunner) {
-			byRunner = new Map();
-			this.availableRunners.set(rootKey, byRunner);
-		}
 		byRunner.set(runner, { available, evidencePath });
 	}
 
@@ -416,9 +410,14 @@ export class TestRunnerClient {
 		sourceFilePath?: string,
 	): { runner: string; config: RunnerConfig } | null {
 		const rootKey = canonicalProjectRoot(cwd);
+		let byRunner = this.availableRunners.get(rootKey);
+		if (!byRunner) {
+			byRunner = new Map();
+			this.availableRunners.set(rootKey, byRunner);
+		}
 		// Priority 1: Config files
 		for (const [name, config] of Object.entries(RUNNERS)) {
-			const cached = this.getRunnerAvailability(rootKey, name);
+			const cached = this.getRunnerAvailability(byRunner, name);
 			if (cached !== undefined) {
 				if (cached) {
 					return { runner: name, config };
@@ -462,7 +461,7 @@ export class TestRunnerClient {
 				return matches;
 			});
 
-			this.setRunnerAvailability(rootKey, name, found, configEvidencePath);
+			this.setRunnerAvailability(byRunner, name, found, configEvidencePath);
 			if (found) {
 				this.log(`Detected runner via config: ${name}`);
 				return { runner: name, config };
@@ -480,17 +479,17 @@ export class TestRunnerClient {
 			// Check for vitest first (more specific than jest)
 			if (allDeps.vitest) {
 				this.log("Detected vitest in package.json");
-				this.setRunnerAvailability(rootKey, "vitest", true, packageJsonPath);
+				this.setRunnerAvailability(byRunner, "vitest", true, packageJsonPath);
 				return { runner: "vitest", config: RUNNERS.vitest };
 			}
 			if (allDeps.jest) {
 				this.log("Detected jest in package.json");
-				this.setRunnerAvailability(rootKey, "jest", true, packageJsonPath);
+				this.setRunnerAvailability(byRunner, "jest", true, packageJsonPath);
 				return { runner: "jest", config: RUNNERS.jest };
 			}
 			if (allDeps.pytest || allDeps["pytest-cov"]) {
 				this.log("Detected pytest in package.json (unusual)");
-				this.setRunnerAvailability(rootKey, "pytest", true, packageJsonPath);
+				this.setRunnerAvailability(byRunner, "pytest", true, packageJsonPath);
 				return { runner: "pytest", config: RUNNERS.pytest };
 			}
 		} catch (err) {
@@ -686,8 +685,9 @@ export class TestRunnerClient {
 		cwd: string,
 	): { include?: string[]; exclude?: string[] } | null {
 		const rootKey = canonicalProjectRoot(cwd);
-		if (this.vitestTestGlobsCache.has(rootKey)) {
-			return this.vitestTestGlobsCache.get(rootKey) ?? null;
+		const cached = this.vitestTestGlobsCache.get(rootKey);
+		if (cached !== undefined) {
+			return cached;
 		}
 
 		// .mts isn't in RUNNERS.vitest.configFiles (that list drives runner

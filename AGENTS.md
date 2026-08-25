@@ -2254,3 +2254,9 @@ Process-table resource samples preserve query outcome. `clients/child-unref.ts`
 those failures, so consumers leave usage unknown rather than fabricating zero
 samples, and records one bounded `resource-sampler-query-failed` degradation
 per query subject. (#1863)
+
+Test-runner availability and Vitest-glob caches canonicalize each public cwd
+once, then use `normalizeEphemeralMapKey` because their keys are already
+canonical and process-local. `detectRunner` hoists the outer availability-map
+lookup before the runner loop and uses the nested plain `Map`; glob-cache
+lookups use one `get`, not `has` plus `get`. (#2048)
