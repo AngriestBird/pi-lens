@@ -522,13 +522,36 @@ function logDurableDegradation(
 	count: number,
 	metadata?: Record<string, unknown>,
 ): void {
+	const boundedMetadata = boundLedgerMetadata(metadata);
 	logLatency({
 		type: "phase",
 		phase: "degradation_ledger",
 		filePath: subject,
 		durationMs: 0,
-		metadata: { ...metadata, kind, subject, count, ledgerGeneration },
+		metadata: {
+			...boundedMetadata,
+			kind,
+			subject,
+			count,
+			ledgerGeneration,
+		},
 	});
+}
+
+const MAX_METADATA_KEYS = 8;
+
+function boundLedgerMetadata(
+	metadata: Record<string, unknown> | undefined,
+): Record<string, string | number> {
+	if (!metadata) return {};
+	const entries = Object.entries(metadata);
+	const kept = entries.slice(0, MAX_METADATA_KEYS);
+	const bounded = Object.fromEntries(
+		kept.map(([key, value]) => [key, truncateForLedger(value)]),
+	) as Record<string, string | number>;
+	const dropped = entries.length - kept.length;
+	if (dropped > 0) bounded.metadataDropped = dropped;
+	return bounded;
 }
 
 function isPowerOfTwo(value: number): boolean {

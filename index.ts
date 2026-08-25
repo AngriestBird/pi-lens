@@ -156,7 +156,6 @@ import {
 	classifyCurrentSessionEmission,
 	decideSessionStart,
 	decrementSecondarySessionCount,
-	getActiveSessionId,
 	noteSessionShutdown,
 	probeCtxActive,
 } from "./clients/session-lifecycle.js";
@@ -200,6 +199,10 @@ import {
 	resetCurrentPhaseForSession,
 } from "./clients/latency-logger.js";
 import { emitBounded } from "./clients/bounded-telemetry.js";
+import {
+	getLastLiveMessageEndSessionId,
+	noteLiveMessageEndSessionId,
+} from "./clients/message-end-attribution.js";
 
 /**
  * Identity for the `loop_block` record (#1743). An event-loop block is a
@@ -3001,31 +3004,31 @@ function activateExtension(hostPi: ExtensionAPI) {
 				// rows at the first and power-of-two milestones). Never a skip,
 				// and never recorded for a LIVE ctx that merely lacks a session
 				// id — `probeCtxActive` returning `false` is the proof.
-				const staleCtx = probeCtxActive(ctx) === false;
-				if (staleCtx) {
-					const degradation = {
-						kind: "cache-usage-attribution-stale",
-						subject: "message_end",
-						reason:
-							"message_end met a stale extension ctx; cache_usage row wrote without a stable session id",
-						metadata: { sessionId: getActiveSessionId() ?? "unknown" },
-					};
-					// Keep the stale-only guard narrow: live and inconclusive probes
-					// must not be classified as attribution loss.
-					logCacheUsage((event as { message?: unknown })?.message, dbg, {
-						sessionId,
-						sessionRole: classifyOwnedSessionEmission(ctx, sessionId),
-						turnIndex: runtime.turnIndex,
-					});
-					// The cache_usage row is priority; this is best-effort.
-					incrementDegradationCount(degradation);
-					return;
+				const ctxActive = probeCtxActive(ctx);
+				const staleCtx = ctxActive === false;
+				if (ctxActive === true) {
+					noteLiveMessageEndSessionId(sessionId);
 				}
 				logCacheUsage((event as { message?: unknown })?.message, dbg, {
 					sessionId,
 					sessionRole: classifyOwnedSessionEmission(ctx, sessionId),
 					turnIndex: runtime.turnIndex,
 				});
+				if (staleCtx) {
+					const degradation = {
+						kind: "cache-usage-attribution-stale",
+						subject: "message_end",
+						reason:
+							"message_end met a stale extension ctx; cache_usage row wrote without a stable session id",
+						metadata: {
+							sessionId: getLastLiveMessageEndSessionId() ?? "unknown",
+						},
+					};
+					// Keep the stale-only guard narrow: live and inconclusive probes
+					// must not be classified as attribution loss.
+					// The cache_usage row is priority; this is best-effort.
+					incrementDegradationCount(degradation);
+				}
 			} catch (err) {
 				dbg(`message_end handler error: ${err}`);
 			}

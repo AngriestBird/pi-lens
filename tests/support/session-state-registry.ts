@@ -40,6 +40,11 @@ import {
 	resetBoundedTelemetry,
 } from "../../clients/bounded-telemetry.js";
 import {
+	getLastLiveMessageEndSessionId,
+	noteLiveMessageEndSessionId,
+	resetMessageEndAttribution,
+} from "../../clients/message-end-attribution.js";
+import {
 	getDegradationSummary,
 	recordDegradationOnce,
 	resetDegradationLedger,
@@ -160,6 +165,20 @@ function scratchCwd(): string {
 }
 
 export const SESSION_STATE_REGISTRY: SessionStateEntry[] = [
+	{
+		id: "message-end-attribution:lastStableSessionId",
+		module: "message-end-attribution.ts",
+		state: "lastStableSessionId",
+		policy: "session_start",
+		resetName: "resetMessageEndAttribution",
+		reason:
+			"#1956 R2: a stale message_end drains after its ctx is replaced; the attribution anchor belongs to the last live ctx and cannot survive the next session boundary.",
+		probe: {
+			arm: () => noteLiveMessageEndSessionId("session-state-probe"),
+			isArmed: () => getLastLiveMessageEndSessionId() === undefined,
+			reset: () => resetMessageEndAttribution(),
+		},
+	},
 	// ── #1743 bounded-telemetry helper ───────────────────────────────
 	{
 		id: "bounded-telemetry:turnCounts",

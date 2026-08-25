@@ -3,6 +3,7 @@ import * as path from "node:path";
 import type { AstGrepClient } from "./ast-grep-client.js";
 import type { BiomeClient } from "./biome-client.js";
 import { resetBoundedTelemetry } from "./bounded-telemetry.js";
+import { resetMessageEndAttribution } from "./message-end-attribution.js";
 import type { CacheManager } from "./cache-manager.js";
 import { createDeadline, yieldIfOverBudget } from "./cooperative-budget.js";
 import type { DeadCodeClient, DeadCodeResult } from "./dead-code-client.js";
@@ -1739,6 +1740,9 @@ export async function handleSessionStart(
 	// numbering at 0, so without this a stale count could survive a session
 	// boundary that happened to land on the same index.
 	resetBoundedTelemetry();
+	// #1956 R2: stale message_end events drain after replacement, so retain only
+	// the last id observed on a live ctx and re-arm that anchor per session.
+	resetMessageEndAttribution();
 	const handlerEnteredAt = Date.now();
 	const sessionStartMs = deps.sessionStartFiredAt ?? handlerEnteredAt;
 	const cwdForTelemetry = deps.ctxCwd ?? process.cwd();

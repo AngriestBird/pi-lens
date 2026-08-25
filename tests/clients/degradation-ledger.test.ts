@@ -121,10 +121,39 @@ describe("session degradation ledger", () => {
 			metadata: { sessionId: "session-one" },
 		});
 
+		expect(logLatency).toHaveBeenCalledWith({
+			type: "phase",
+			phase: "degradation_ledger",
+			filePath: "message_end",
+			durationMs: 0,
+			metadata: {
+				sessionId: "session-one",
+				kind: "cache-usage-attribution-stale",
+				subject: "message_end",
+				count: 1,
+				ledgerGeneration: getDegradationLedgerGeneration(),
+			},
+		});
+	});
+
+	it("bounds metadata values and key count on durable ledger rows", () => {
+		incrementDegradationCount({
+			kind: "cache-usage-attribution-stale",
+			subject: "message_end",
+			reason: "missing session id",
+			metadata: Object.fromEntries(
+				Array.from({ length: 10 }, (_, index) => [
+					`field${index}`,
+					index === 0 ? "x".repeat(500) : `value-${index}`,
+				]),
+			),
+		});
+
 		expect(logLatency).toHaveBeenCalledWith(
 			expect.objectContaining({
 				metadata: expect.objectContaining({
-					sessionId: "session-one",
+					field0: `${"x".repeat(200)}…`,
+					metadataDropped: 2,
 				}),
 			}),
 		);

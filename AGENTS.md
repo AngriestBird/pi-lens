@@ -480,6 +480,8 @@ leave its prior workspace cache alive; it never walks above that ceiling.
 
 ## Issue and PR design contract
 
+Message-end stale attribution anchors the session id when a live ctx is handled, not when the stale event drains: replacement can make the active id point at the wrong session. The anchor resets from `handleSessionStart` and is covered by the session-state registry; stale rows use its last live value or `unknown`. Durable degradation metadata truncates every value and retains only a bounded caller-key prefix, reporting dropped keys while reserved row fields win. (#1956 R2)
+
 - **Design the state space before coding.** For stateful, ordered, resource-mutating, or security-sensitive work, write the invariants, supported transitions, explicit deferrals, and a cross-product test matrix before implementation. Examples are not enough: cover operation order, preview/apply, validation/normalization/execution seams, failure atomicity, observability bounds, and OS/path/encoding axes. If adversarial review finds repeated cross-product defects, stop patching one symptom at a time and return to the model.
 - **Concurrency tests wait on the right clock.** Use `tests/clients/interleaving-kit.ts` for suspension and polling: every suspension belongs in `try/finally` with `release()` plus `restore()`, and waits on worker-thread or child-process progress must use the wall-time default. A custom tick yield is only valid for progress guaranteed to occur on the current event loop. Prefer a suspended call's `completed` promise over draining unrelated global work, and reset in-memory mirrors before asserting on durable disk state.
 - **Prove filesystem isolation before coding subagents touch Git.** A

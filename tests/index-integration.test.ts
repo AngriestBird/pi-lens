@@ -2462,10 +2462,13 @@ describe("#484 turn-summary emit at the agent_settled quiet window", () => {
 			const { default: registerExtension } = await import("../index.js");
 			const primary = createMockPi();
 			registerExtension(primary.pi as any);
-			await primary.trigger("message_end", { message: { role: "assistant" } }, makeCtx());
-			const { getDegradationSummary } = await import(
-				"../clients/degradation-ledger.js"
+			await primary.trigger(
+				"message_end",
+				{ message: { role: "assistant" } },
+				makeCtx(),
 			);
+			const { getDegradationSummary } =
+				await import("../clients/degradation-ledger.js");
 			expect(logCacheUsage).toHaveBeenCalledOnce();
 			expect(
 				getDegradationSummary().find(
@@ -2489,10 +2492,13 @@ describe("#484 turn-summary emit at the agent_settled quiet window", () => {
 			const { default: registerExtension } = await import("../index.js");
 			const primary = createMockPi();
 			registerExtension(primary.pi as any);
-			await primary.trigger("message_end", { message: { role: "assistant" } }, { cwd: "/x" });
-			const { getDegradationSummary } = await import(
-				"../clients/degradation-ledger.js"
+			await primary.trigger(
+				"message_end",
+				{ message: { role: "assistant" } },
+				{ cwd: "/x" },
 			);
+			const { getDegradationSummary } =
+				await import("../clients/degradation-ledger.js");
 			expect(logCacheUsage).toHaveBeenCalledOnce();
 			expect(
 				getDegradationSummary().find(
@@ -2504,7 +2510,7 @@ describe("#484 turn-summary emit at the agent_settled quiet window", () => {
 	);
 
 	it(
-		"message_end ledger metadata identifies the active session, with an unknown fallback",
+		"message_end stale attribution uses the last live ctx session, not the replacement",
 		async () => {
 			const logCacheUsage = vi.fn();
 			const incrementDegradationCount = vi.fn();
@@ -2521,22 +2527,27 @@ describe("#484 turn-summary emit at the agent_settled quiet window", () => {
 				incrementDegradationCount,
 			}));
 			const { default: registerExtension } = await import("../index.js");
-			const { registerPrimarySession } = await import(
-				"../clients/session-lifecycle.js"
-			);
+			const { registerPrimarySession } =
+				await import("../clients/session-lifecycle.js");
 			const primary = createMockPi();
 			registerExtension(primary.pi as any);
 			registerPrimarySession({}, "session-one");
-			await primary.trigger("message_end", { message: { role: "assistant" } }, makeStaleCtx());
+			const liveCtx = makeCtx({ sessionId: "session-one" });
+			await primary.trigger(
+				"message_end",
+				{ message: { role: "assistant" } },
+				liveCtx,
+			);
 			registerPrimarySession({}, "session-two");
-			await primary.trigger("message_end", { message: { role: "assistant" } }, makeStaleCtx());
-			registerPrimarySession({}, undefined);
-			await primary.trigger("message_end", { message: { role: "assistant" } }, makeStaleCtx());
-			expect(incrementDegradationCount.mock.calls.map(([record]) => record.metadata)).toEqual([
-				{ sessionId: "session-one" },
-				{ sessionId: "session-two" },
-				{ sessionId: "unknown" },
-			]);
+			await primary.trigger(
+				"message_end",
+				{ message: { role: "assistant" } },
+				makeStaleCtx(),
+			);
+			expect(incrementDegradationCount).toHaveBeenCalledWith(
+				expect.objectContaining({ metadata: { sessionId: "session-one" } }),
+			);
+			expect(incrementDegradationCount).toHaveBeenCalledTimes(1);
 		},
 		INTEGRATION_TIMEOUT_MS,
 	);
