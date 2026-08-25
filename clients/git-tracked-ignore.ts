@@ -48,8 +48,13 @@ function recordTruncatedLsFiles(
 	});
 }
 
-// A real listing in this repository is about 133 KiB. Cap pathological
-// repositories at 16 MiB so safeSpawnAsync cannot retain unbounded stdout.
+// The binding listing is the untracked-ignored one: a mid-size project's
+// node_modules alone yields a ~66k-line ignored list (roughly 4-6 MiB), and
+// a monorepo with several dependency trees can multiply that. 16 MiB leaves
+// that headroom while stopping safeSpawnAsync from retaining unbounded
+// stdout (an uncapped probe held 20 MiB in full). The tracked listing is
+// far smaller (~133 KiB in this repository). A capped read fails closed to
+// unavailable with one bounded ledger record per site.
 const MAX_LS_FILES_OUTPUT_BYTES = 16 * 1024 * 1024;
 
 /**
