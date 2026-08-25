@@ -867,7 +867,7 @@ export const EXEMPT_SESSION_STATE_FILES: Readonly<Record<string, string>> = {
 	"review-graph/shared-extraction-ir.ts":
 		"extraction IR keyed by cwd and file, invalidated by the graph build that produced it",
 	"lsp/client.ts":
-		"per-connection request bookkeeping, torn down with the connection",
+		"per-connection request bookkeeping, torn down with the connection. #2065 fix round 1 added `activeLspClients`, a projection registry (not an independent source of truth — see its doc comment) that lets memory-sampler.ts total retained-text bytes without importing LSPService. It deliberately spans sessions, matching the LSP clients it mirrors, which are themselves kept warm across session boundaries: a session_start reset would desync the projection from live connections rather than protect anything. Its only writers are spawnClient (add) and disposeClientConnection (delete), and disposeClientConnection is the single convergence point every permanent-death path already funnels through, so membership is torn down exactly when the connection it describes is.",
 	"project-changes.ts":
 		"change-log sequence fold counter, an observability tally",
 	"project-trust.ts":
@@ -939,7 +939,8 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	"lens-events.ts": 0,
 	"lsp-budget.ts": 0,
 	"lsp/cascade-tier.ts": 1,
-	"lsp/client.ts": 2,
+	// #2065 fix round 1: 2 -> 3 for activeLspClients (see EXEMPT_SESSION_STATE_FILES).
+	"lsp/client.ts": 3,
 	"lsp/config.ts": 1,
 	"lsp/index.ts": 2,
 	// #2000 phase 2: the pending-baseline store (one slot per cwd:generation)

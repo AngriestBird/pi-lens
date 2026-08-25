@@ -13,6 +13,7 @@ import {
 	clientRequestWorkspaceDiagnostics,
 	closeDocument,
 	createLSPClient,
+	getLspDocumentTextRetentionSnapshot,
 	handleNotifyChange,
 	handleNotifyOpen,
 	setupIncomingHandlers,
@@ -311,6 +312,81 @@ describe("outgoing didChange honors the negotiated sync kind (#1669)", () => {
 		for (const filePath of paths.slice(0, 3))
 			await closeDocument(full, filePath);
 		expect(full.documentContentHashes.size).toBe(0);
+	});
+
+	it("#2065 fix round 1 F2: the 64 MiB byte cap evicts on its own, independent of the 128-entry cap", async () => {
+		const state = createMockState({ syncKind: 2 });
+		// Two ~40 MiB (UTF-16) documents: entry count (2) stays far below the
+		// 128-entry cap the WHOLE test, so only the byte clause in the
+		// while-loop guard can be the one doing any evicting here. Pre-fix (or
+		// with the byte clause neutered), the entry-count check alone never
+		// fires at 2 entries and BOTH 40 MiB documents stay fully retained —
+		// ~80 MiB, well over the 64 MiB bound this test exists to prove.
+		const bigA = "a".repeat(20 * 1024 * 1024); // 20M chars = 40 MiB UTF-16
+		const bigB = "b".repeat(20 * 1024 * 1024);
+		const pathA = "/project/big-a.ts";
+		const pathB = "/project/big-b.ts";
+		state.openDocuments.add(normalizeMapKey(pathA));
+		state.openDocuments.add(normalizeMapKey(pathB));
+
+		await handleNotifyChange(state, pathA, bigA);
+		await handleNotifyChange(state, pathB, bigB);
+
+		const textEntries = [...state.documentContentHashes.entries()].filter(
+			([, binding]) => binding.text !== undefined,
+		);
+		expect(state.incrementalTextRetainedBytes).toBeLessThanOrEqual(
+			64 * 1024 * 1024,
+		);
+		// The byte cap must have evicted the OLDER of the two — proving the
+		// mechanism, not just the bound: a cap that dropped both, or the
+		// newer one, would also pass a bytes-only assertion.
+		expect(textEntries).toHaveLength(1);
+		expect(textEntries[0][0]).toBe(normalizeMapKey(pathB));
+	});
+
+	it("#2065 fix round 1 F3: a re-touched document survives eviction ahead of an untouched older one (LRU, not FIFO)", async () => {
+		const state = createMockState({ syncKind: 2 });
+		const paths = Array.from(
+			{ length: MAX_INCREMENTAL_TEXT_RETAINED_ENTRIES },
+			(_, index) => `/project/lru-${index}.ts`,
+		);
+		for (const filePath of paths) {
+			state.openDocuments.add(normalizeMapKey(filePath));
+			await handleNotifyChange(state, filePath, `text-${filePath}`);
+		}
+		// Filled exactly to the cap — no eviction has happened yet.
+		const hasText = (filePath: string) =>
+			state.documentContentHashes.get(normalizeMapKey(filePath))?.text !==
+			undefined;
+		expect(hasText(paths[0])).toBe(true);
+		expect(hasText(paths[1])).toBe(true);
+
+		// Re-touch the OLDEST path — under LRU this moves it to the newest end.
+		await handleNotifyChange(state, paths[0], `text-${paths[0]}-v2`);
+		// One brand-new path pushes entries one past the cap, forcing exactly
+		// one eviction.
+		const extraPath = "/project/lru-extra.ts";
+		state.openDocuments.add(normalizeMapKey(extraPath));
+		await handleNotifyChange(state, extraPath, `text-${extraPath}`);
+
+		// FIFO (the delete-before-set removed) would evict paths[0] — it was
+		// the first ever inserted and never gets a recency reinsert.  LRU
+		// (recency-correct) evicts paths[1] instead, the oldest path that was
+		// NOT re-touched, and keeps paths[0] alive.
+		expect(hasText(paths[0])).toBe(true);
+		expect(hasText(paths[1])).toBe(false);
+	});
+
+	it("#2065 fix round 1 F4: closeDocument clears the eighth per-path map, pullGenerations", async () => {
+		const state = createMockState({ syncKind: 2 });
+		state.openDocuments.add(TEST_KEY);
+		state.pullGenerations = state.pullGenerations ?? new Map();
+		state.pullGenerations.set(TEST_KEY, 3);
+
+		await closeDocument(state, TEST_FILE);
+
+		expect(state.pullGenerations.has(TEST_KEY)).toBe(false);
 	});
 
 	it("#2065 preserves an incremental edit round trip for retained text", async () => {
@@ -1138,6 +1214,52 @@ describe("negotiateSyncKind through the real createLSPClient init path (#1669 re
 			const [change] = received[0].contentChanges;
 			expect(change.range).toBeUndefined();
 			expect(change.text).toBe("const x = 1;\nconst y = 2;\n");
+		} finally {
+			await client.shutdown().catch(() => {});
+			await stopLSP(proc).catch(() => {});
+		}
+	}, 15_000);
+});
+
+describe("#2065 fix round 1 F1: a crashed client deregisters from activeLspClients", () => {
+	it("stops counting a client's retained text once its process is killed, without a graceful shutdown() call", async () => {
+		const before = getLspDocumentTextRetentionSnapshot();
+		const proc = await launchLSP(process.execPath, [FAKE_SERVER_PATH], {
+			cwd: process.cwd(),
+			env: { ...process.env, FAKE_LSP_SYNC_KIND: "2" }, // Incremental
+		});
+		const client = await createLSPClient({
+			serverId: "fake-crash-leak",
+			process: proc,
+			root: process.cwd(),
+		});
+		try {
+			const filePath = path.join(os.tmpdir(), "pi-lens-crash-leak.ts");
+			await client.notify.open(filePath, "const x = 1;\n", "typescript");
+			await client.notify.change(filePath, "const x = 1;\nconst y = 2;\n");
+
+			const withClient = getLspDocumentTextRetentionSnapshot();
+			expect(withClient.clients).toBe(before.clients + 1);
+			expect(withClient.entries).toBeGreaterThan(before.entries);
+
+			// A genuine crash — kill the process directly. `client.shutdown()` is
+			// deliberately never called: this must be learned from the
+			// connection's onClose/onError or the process's own 'exit' event
+			// (setupConnectionLifecycle), the same paths a real crash goes
+			// through, never the graceful clientShutdownOnce path.
+			proc.process.kill("SIGKILL");
+
+			await vi.waitFor(
+				() => {
+					expect(getLspDocumentTextRetentionSnapshot().clients).toBe(
+						before.clients,
+					);
+				},
+				{ timeout: 5000 },
+			);
+			const after = getLspDocumentTextRetentionSnapshot();
+			expect(after.entries).toBe(before.entries);
+			expect(after.bytes).toBe(before.bytes);
 		} finally {
 			await client.shutdown().catch(() => {});
 			await stopLSP(proc).catch(() => {});
