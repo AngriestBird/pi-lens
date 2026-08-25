@@ -53,6 +53,8 @@ on what it pins and why it exists (regression proof / contract seam /
 occupancy budget). If no tests changed, say so explicitly. Prove new
 regression tests RED on pre-fix code and quote the output.
 
+Where it is not obvious, name which of AGENTS.md's six test-authoring screens each new test satisfies (parallel path, invisible skip, wrong-layer pin, ambient-inspection double, env leakage, loose bound).
+
 ## Blast radius
 
 State affected dependents for each touched production module (from
