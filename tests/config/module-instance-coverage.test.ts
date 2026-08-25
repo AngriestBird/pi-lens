@@ -47,7 +47,9 @@ describe("test imports bind the compiled module instance (#1565)", () => {
 		const violations = scanned.filter(
 			(entry) => !reviewedExceptions.has(importKey(entry)),
 		);
-		assertNonEmptyScan("module-instance scan", scanned.length);
+		// Calibration: 1 dual-instance import on 2026-08-26; this guard stays
+		// at 1 because the population is intentionally a single known exception.
+		assertNonEmptyScan("module-instance scan", scanned.length, 1);
 
 		expect(
 			violations.map((entry) => `${entry.file}: ${entry.specifier}`).sort(),

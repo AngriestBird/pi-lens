@@ -81,10 +81,13 @@ describe("freshness kernel coverage (#1739)", () => {
 			}
 		};
 		walkDir(CLIENTS_DIR);
-		assertNonEmptyScan("freshness sweep: clients files scanned", scanned);
+		// Calibration: 393 production files walked on 2026-08-26; half rounds
+		// to 200. The matched population is 5, so its floor is 3.
+		assertNonEmptyScan("freshness sweep: clients files scanned", scanned, 200);
 		assertNonEmptyScan(
 			"freshness sweep: freshness-shaped comparisons",
 			matched,
+			3,
 		);
 		expect(
 			violations,

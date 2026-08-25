@@ -87,7 +87,8 @@ describe("timing-sensitive Vitest project coverage", () => {
 			.filter((file) =>
 				isTimingSensitive(fs.readFileSync(path.join(repoRoot, file), "utf8")),
 			);
-		assertNonEmptyScan("timing-sensitive detection", timingFiles.length);
+		// Calibration: 14 sampler/CPU-usage tests on 2026-08-26; half is 7.
+		assertNonEmptyScan("timing-sensitive detection", timingFiles.length, 7);
 
 		// Reverse check: a renamed or deleted test must not leave a dead glob
 		// behind — a stale entry silently stops phasing anything at all.

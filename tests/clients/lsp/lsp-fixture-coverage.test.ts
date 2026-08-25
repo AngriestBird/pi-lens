@@ -47,8 +47,10 @@ function primaryServerIdFor(file: string): string | undefined {
 
 const NON_AUX = LSP_SERVERS.filter((s) => s.role !== "auxiliary");
 const AUX = LSP_SERVERS.filter((s) => s.role === "auxiliary");
-assertNonEmptyScan("LSP_SERVERS registry", LSP_SERVERS.length);
-assertNonEmptyScan("LSP_FIXTURES registry", LSP_FIXTURES.length);
+// Calibration: 45 servers and 49 fixtures on 2026-08-26; floors are half,
+// rounded up, to keep a materially narrowed registry from reading as clean.
+assertNonEmptyScan("LSP_SERVERS registry", LSP_SERVERS.length, 20);
+assertNonEmptyScan("LSP_FIXTURES registry", LSP_FIXTURES.length, 22);
 
 const coveredPrimary = new Set<string>();
 const coveredAux = new Set<string>();

@@ -19,6 +19,8 @@ describe("host event-shape scan (#1681)", () => {
 		assertNonEmptyScan(
 			"host event-shape production walk",
 			hostEventShapeScanFileCount(),
+			// Calibration: 830 files walked on 2026-08-26; half rounds to 400.
+			400,
 		);
 		const violations = scanHostEventShapeViolations();
 		expect(violations, JSON.stringify(violations, null, 2)).toEqual([]);

@@ -17,7 +17,6 @@ import { describe, expect, it } from "vitest";
 import { RunnerRegistry } from "../../../clients/dispatch/dispatcher.js";
 import { TOOL_PLANS } from "../../../clients/dispatch/plan.js";
 import { registerDefaultRunners } from "../../../clients/dispatch/runners/index.js";
-import { assertNonEmptyScan } from "../../support/sweep-kit.js";
 
 // Runners reachable by a path the static plans don't capture.
 const DYNAMIC_OR_EXEMPT = new Set<string>([
@@ -66,10 +65,8 @@ describe("dispatch coverage", () => {
 	it("every dynamic/exempt runner is still registered", () => {
 		const registered = new Set(registeredRunnerIds());
 		const stale = [...DYNAMIC_OR_EXEMPT].filter((id) => !registered.has(id));
-		assertNonEmptyScan(
-			"dispatch dynamic/exempt registry",
-			DYNAMIC_OR_EXEMPT.size,
-		);
+		// DYNAMIC_OR_EXEMPT may legitimately become empty as dispatch becomes
+		// statically representable. Keep the stale-entry check below.
 		expect(stale, "dynamic/exempt entries must name live runners").toEqual([]);
 	});
 });
