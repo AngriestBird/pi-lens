@@ -79,6 +79,7 @@ import type { LSPServerInfo } from "./server.js";
 import {
 	LSP_SERVERS,
 	enforceLspRootCeiling,
+	getLspSessionCwd,
 	hasProjectBoundaryMarker,
 	isDirectLspCommandTemporarilyUnavailable,
 	resetClassicTsRepairGuard,
@@ -92,6 +93,17 @@ import {
 export type { LSPCapabilitySnapshot } from "./wait-policy/index.js";
 
 const WORKSPACE_ATTRIBUTION_CLIENT_CAP = 16;
+
+function isPathWithin(ancestor: string, candidate: string): boolean {
+	const relative = path.relative(
+		path.resolve(ancestor),
+		path.resolve(candidate),
+	);
+	return (
+		relative === "" ||
+		(!relative.startsWith("..") && !path.isAbsolute(relative))
+	);
+}
 
 /**
  * Request-local attribution for no-filePath workspace queries. The fixed site
@@ -1095,6 +1107,7 @@ export class LSPService {
 	private readonly workspaceProbeLogged = new Set<string>();
 	/** Per-service immutable root-boundary verdicts; root detectors cache hits too. */
 	private readonly projectBoundaryCache = new Map<string, Promise<boolean>>();
+	/** Foreign roots are recorded once per normalized root for this service/session. */
 	private readonly warmStartLogged = new Set<string>();
 	private readonly optionalFailureLogged = new Set<string>();
 	/** Server/root pairs that already emitted unavailable for the current occurrence. */
@@ -1326,8 +1339,10 @@ export class LSPService {
 	): Promise<string | undefined> {
 		const candidate = await server.root(filePath);
 		if (!candidate) return undefined;
-		const root = enforceLspRootCeiling(candidate, process.cwd(), filePath);
-		if (normalizeMapKey(root) === normalizeMapKey(process.cwd())) return root;
+		const sessionCwd = getLspSessionCwd();
+		if (!isPathWithin(sessionCwd, filePath)) return undefined;
+		const root = enforceLspRootCeiling(candidate, sessionCwd, filePath);
+		if (normalizeMapKey(root) === normalizeMapKey(sessionCwd)) return root;
 
 		const rootKey = normalizeMapKey(root);
 		const prefix = `${server.id}:`;
@@ -3562,6 +3577,11 @@ export class LSPService {
 		}
 		const startedAt = Date.now();
 		const normalizedPath = normalizeMapKey(filePath);
+		const outsideRoot = await this.findOutsideProjectRoot(filePath);
+		if (outsideRoot) {
+			this.recordOutsideRootDecline(filePath, outsideRoot);
+			return { diags: [], skipReason: "outside-project-root" };
+		}
 		// #1783: every path that asks a language server anything comes through
 		// here, so this is where the disk-drift backstop gets its heartbeat.
 		// Deliberately NOT awaited: the sweep is rate-limited to one pass per
@@ -5637,6 +5657,47 @@ export class LSPService {
 		}
 	}
 
+	private async findOutsideProjectRoot(
+		filePath: string,
+	): Promise<string | undefined> {
+		if (isPathWithin(getLspSessionCwd(), filePath)) return undefined;
+		const candidates = await Promise.all(
+			getServersForFileWithConfig(filePath).map((server) =>
+				server.root(filePath),
+			),
+		);
+		return candidates.find((candidate): candidate is string =>
+			Boolean(candidate),
+		);
+	}
+
+	private recordOutsideRootDecline(
+		filePath: string,
+		nearestRoot: string,
+	): void {
+		const root = normalizeMapKey(nearestRoot);
+		const ceiling = normalizeMapKey(getLspSessionCwd());
+		emitBounded(
+			"lsp_capability_skip",
+			root,
+			{
+				filePath: normalizeMapKey(filePath),
+				durationMs: 0,
+				metadata: {
+					operation: "touchFile",
+					nearestMarkerRoot: root,
+					sessionCwd: ceiling,
+					identity: root,
+				},
+			},
+			{
+				ledgerKind: "lsp-capability-skip",
+				risingEdgePer: "identity",
+				reason: `declined LSP root outside session cwd: ${root}`,
+			},
+		);
+	}
+
 	/**
 	 * Get diagnostics for a file
 	 */
@@ -5680,6 +5741,11 @@ export class LSPService {
 		diagnosticsMode: LSPDiagnosticsMode = "full",
 	): Promise<import("./client.js").LSPDiagnostic[]> {
 		const normalizedPath = normalizeMapKey(filePath);
+		const outsideRoot = await this.findOutsideProjectRoot(filePath);
+		if (outsideRoot) {
+			this.recordOutsideRootDecline(filePath, outsideRoot);
+			return [];
+		}
 		if (this.checkDestroyed()) {
 			this.lastDiagnosticsHealth.set(normalizedPath, {
 				health: "destroyed",

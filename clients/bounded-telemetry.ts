@@ -87,6 +87,8 @@ export const BOUNDED_TELEMETRY_PHASES = [
 	 * exact count.
 	 */
 	"lsp_warm_client_missing",
+	/** #2052: a file's nearest LSP root is outside the session ceiling. */
+	"lsp_capability_skip",
 	/**
 	 * #2044: failed-first test state was retired after a confirmed missing path,
 	 * retained because the filesystem verdict was indeterminate, or evicted at

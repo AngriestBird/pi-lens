@@ -54,6 +54,7 @@ import path from "node:path";
 import { BoundedLruCache } from "../bounded-cache.js";
 import { getGlobalPiLensDir } from "../file-utils.js";
 import { launchLSP } from "./launch.js";
+import { setLspSessionCwd } from "./server.js";
 import {
 	createRootDetector,
 	LSP_SERVERS,
@@ -268,6 +269,7 @@ function getConfigForFile(filePath: string): RegisteredLSPConfig {
  */
 export async function initLSPConfig(cwd: string): Promise<void> {
 	const normalizedCwd = normalizeWorkspacePath(cwd);
+	setLspSessionCwd(normalizedCwd);
 
 	const existing = configInFlight.get(normalizedCwd);
 	if (existing) return existing;

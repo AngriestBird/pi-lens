@@ -5,7 +5,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { LSPClientInfo } from "../../../clients/lsp/client.js";
 import { LSPService } from "../../../clients/lsp/index.js";
 import type { LSPServerInfo } from "../../../clients/lsp/server.js";
-import { enforceLspRootCeiling } from "../../../clients/lsp/server.js";
+import {
+	enforceLspRootCeiling,
+	setLspSessionCwd,
+} from "../../../clients/lsp/server.js";
 import { normalizeMapKey } from "../../../clients/path-utils.js";
 import { removeTempDirSync } from "../test-utils.js";
 
@@ -27,6 +30,7 @@ const dirs: string[] = [];
 afterEach(() => {
 	for (const dir of dirs.splice(0)) removeTempDirSync(dir);
 	vi.restoreAllMocks();
+	setLspSessionCwd();
 });
 
 function fakeClient(root: string): LSPClientInfo {
@@ -84,6 +88,22 @@ describe("LSP per-server nested-root coalescing (#1373)", () => {
 			service.resolveServerRoot(server, path.join(nested, "README.md")),
 		).resolves.toBe(nested);
 		cwdSpy.mockRestore();
+	});
+
+	it("declines a file whose nearest root is outside the session cwd", async () => {
+		const project = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-session-"));
+		const foreign = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-foreign-"));
+		dirs.push(project, foreign);
+		setLspSessionCwd(project);
+		const service = new LSPService() as unknown as RootPolicyHarness;
+		const server = {
+			...markerServer("typescript"),
+			root: async () => foreign,
+		};
+
+		await expect(
+			service.resolveServerRoot(server, path.join(foreign, "app.ts")),
+		).resolves.toBeUndefined();
 	});
 
 	it("coalesces a config-only TypeScript root with an already-hosted ancestor", async () => {

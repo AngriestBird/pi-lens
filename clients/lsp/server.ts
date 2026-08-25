@@ -110,6 +110,15 @@ const PROJECT_BOUNDARY_MARKERS = [
 // process (not once per session). Keep the root-boundary marker below aligned
 // with FALLBACK_PROJECT_MARKERS, the shared fallback root-policy marker set.
 const loggedRootCeilingClamps = new Set<string>();
+let lspSessionCwd: string | undefined;
+
+export function setLspSessionCwd(cwd?: string): void {
+	lspSessionCwd = cwd === undefined ? undefined : path.resolve(cwd);
+}
+
+export function getLspSessionCwd(): string {
+	return lspSessionCwd ?? process.cwd();
+}
 
 function isSameOrWithin(ancestor: string, candidate: string): boolean {
 	const windowsShaped = isWindowsPath(ancestor) || isWindowsPath(candidate);
@@ -1024,7 +1033,7 @@ export function WorkspacePriorityRoot(
 	excludePatterns?: string[],
 ): RootFunction {
 	return async (file: string) =>
-		PriorityRoot(markerGroups, excludePatterns, process.cwd())(file);
+		PriorityRoot(markerGroups, excludePatterns, getLspSessionCwd())(file);
 }
 
 function isPermissionFsError(err: unknown): boolean {
@@ -1158,7 +1167,7 @@ export function NearestRoot(
 						(await markerExists(currentDir, pattern)) &&
 						!(await isExcludedLspRoot(currentDir))
 					) {
-						return enforceLspRootCeiling(currentDir, process.cwd(), file);
+						return enforceLspRootCeiling(currentDir, getLspSessionCwd(), file);
 					}
 				}
 
@@ -1392,7 +1401,7 @@ async function findTsserverPath(
 	);
 	if (ancestorHit) return ancestorHit;
 	const cwdCandidate = path.join(
-		process.cwd(),
+		getLspSessionCwd(),
 		"node_modules",
 		"typescript",
 		"lib",
@@ -2247,7 +2256,7 @@ function RustWorkspaceRoot(): RootFunction {
 		const root = await crateRoot(file);
 		if (!root) return undefined;
 
-		const sessionCwd = process.cwd();
+		const sessionCwd = getLspSessionCwd();
 		// The walk-up for an ancestor Cargo.toml with a [workspace] table stays
 		// bounded by the same session ceiling the crate-root lookup above already
 		// enforces (enforceLspRootCeiling) — a monorepo hoist must never cross the
@@ -2351,7 +2360,7 @@ function JavaWorkspaceRoot(): RootFunction {
 		// is a different shape and out of scope for #1671.
 		if (!(await markerExists(root, "pom.xml"))) return root;
 
-		const sessionCwd = process.cwd();
+		const sessionCwd = getLspSessionCwd();
 		const stop = sessionHoistCeiling(sessionCwd, file);
 
 		// `current` is the walk CURSOR — it climbs over gap directories (ones
@@ -3335,7 +3344,7 @@ export const OpengrepServer: LSPServerInfo = {
 	// Stable per-repo root so ONE warm server serves the whole project (a
 	// per-directory root would spawn a fresh server — and re-pay rule load —
 	// for every folder).
-	root: RootWithFallback(NearestRoot([".git"]), async () => process.cwd()),
+	root: RootWithFallback(NearestRoot([".git"]), async () => getLspSessionCwd()),
 	availabilityKey: "opengrep",
 	// Rule compilation can take a few seconds on the first scan of a session.
 	initializeTimeoutMs: 15000,
@@ -3410,7 +3419,7 @@ export const AstGrepServer: LSPServerInfo = {
 	// (it falls back to napi when the ast-grep binary is absent — Gate B).
 	root: RootWithFallback(
 		createRootDetector(["sgconfig.yml", "sgconfig.yaml"]),
-		RootWithFallback(NearestRoot([".git"]), async () => process.cwd()),
+		RootWithFallback(NearestRoot([".git"]), async () => getLspSessionCwd()),
 	),
 	availabilityKey: "ast-grep",
 	// #1714: the one auxiliary with a measured wedge ceiling. A `lens_diagnostics
@@ -3475,7 +3484,7 @@ export const ZizmorServer: LSPServerInfo = {
 	pathFilter: isZizmorAuditTarget,
 	// Stable per-repo root so ONE warm server serves the whole project (like
 	// Opengrep) — config + workflow discovery is repo-relative.
-	root: RootWithFallback(NearestRoot([".git"]), async () => process.cwd()),
+	root: RootWithFallback(NearestRoot([".git"]), async () => getLspSessionCwd()),
 	availabilityKey: "zizmor",
 	async spawn(root, options) {
 		// Forward a token so the online audits run; absent one, zizmor self-selects
@@ -3562,7 +3571,7 @@ export const TyposServer: LSPServerInfo = {
 	extensions: TYPOS_EXTENSIONS,
 	// Stable per-repo root so ONE warm server serves the whole project (like the
 	// other auxiliaries) — typos.toml discovery is repo-relative.
-	root: RootWithFallback(NearestRoot([".git"]), async () => process.cwd()),
+	root: RootWithFallback(NearestRoot([".git"]), async () => getLspSessionCwd()),
 	availabilityKey: "typos-lsp",
 	async spawn(root, options) {
 		const launched = await resolveAndLaunch(
