@@ -7,6 +7,10 @@ import { getEffectiveLspIdleResetMs } from "../clients/runtime-turn.js";
 import { createPiMock, makeCtx, makeStaleCtx } from "./support/pi-mock.js";
 import { removeTempDirSync } from "./clients/test-utils.js";
 
+const r6Mocks = vi.hoisted(() => ({
+	incrementDegradationCount: vi.fn(),
+}));
+
 // This suite predates the consolidated harness and is written against the
 // legacy `{ pi, handlers, commands }` shape. Adapt the canonical createPiMock
 // to that shape so there is a single mock recorder (the old tests/support/
@@ -2548,6 +2552,67 @@ describe("#484 turn-summary emit at the agent_settled quiet window", () => {
 				expect.objectContaining({ metadata: { sessionId: "session-one" } }),
 			);
 			expect(incrementDegradationCount).toHaveBeenCalledTimes(1);
+		},
+		INTEGRATION_TIMEOUT_MS,
+	);
+
+	it(
+		"message_end stale attribution survives the real session_start rotation",
+		async () => {
+			const logCacheUsage = vi.fn();
+			r6Mocks.incrementDegradationCount.mockClear();
+			vi.doMock("../clients/cache-observability.js", async (importActual) => ({
+				...(await importActual<
+					typeof import("../clients/cache-observability.js")
+				>()),
+				logCacheUsage,
+			}));
+			vi.doMock("../clients/degradation-ledger.js", async (importActual) => ({
+				...(await importActual<
+					typeof import("../clients/degradation-ledger.js")
+				>()),
+				incrementDegradationCount: r6Mocks.incrementDegradationCount,
+			}));
+			vi.doMock("../clients/lsp/index.js", () => ({
+				getLSPService: () => ({
+					touchFile: vi.fn(),
+					getAliveClientCount: () => 0,
+					getAliveServerIds: () => [],
+				}),
+				resetLSPService: vi.fn(),
+			}));
+
+			const { default: registerExtension } = await import("../index.js");
+			const primary = createMockPi();
+			registerExtension(primary.pi as any);
+			const sessionA = makeCtx({ cwd: tmpDir, sessionId: "SESSION-A" });
+			await primary.trigger("session_start", {}, sessionA);
+			await primary.trigger(
+				"message_end",
+				{ message: { role: "assistant" } },
+				sessionA,
+			);
+
+			// The real session-start guard sees the replaced A context as stale, so
+			// B is a primary replacement and handleSessionStart performs its reset.
+			(sessionA.isIdle as () => unknown) = () => {
+				throw new Error("stale after session replacement");
+			};
+			const sessionB = makeCtx({ cwd: tmpDir, sessionId: "SESSION-B" });
+			await primary.trigger("session_start", {}, sessionB);
+			await primary.trigger(
+				"message_end",
+				{ message: { role: "assistant" } },
+				makeStaleCtx(),
+			);
+
+			expect(r6Mocks.incrementDegradationCount).toHaveBeenCalledWith(
+				expect.objectContaining({
+					metadata: { sessionId: "SESSION-A" },
+				}),
+			);
+			expect(r6Mocks.incrementDegradationCount).toHaveBeenCalledTimes(1);
+			expect(logCacheUsage).toHaveBeenCalledTimes(2);
 		},
 		INTEGRATION_TIMEOUT_MS,
 	);

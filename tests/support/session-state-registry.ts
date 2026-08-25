@@ -141,6 +141,8 @@ export interface SessionStateEntry {
 	 * one the static reachability walk can see.
 	 */
 	resetName: string;
+	/** Optional session-start transition when the full reset is not the boundary operation. */
+	sessionStartResetName?: string;
 	/** Why this policy is the right one. One sentence, in the author's words. */
 	reason: string;
 	/**
@@ -166,13 +168,14 @@ function scratchCwd(): string {
 
 export const SESSION_STATE_REGISTRY: SessionStateEntry[] = [
 	{
-		id: "message-end-attribution:lastStableSessionId",
+		id: "message-end-attribution:two-slot-anchor",
 		module: "message-end-attribution.ts",
-		state: "lastStableSessionId",
+		state: "lastStableSessionId, previousSessionId",
 		policy: "session_start",
 		resetName: "resetMessageEndAttribution",
+		sessionStartResetName: "rotateMessageEndAttribution",
 		reason:
-			"#1956 R2: a stale message_end drains after its ctx is replaced; the attribution anchor belongs to the last live ctx and cannot survive the next session boundary.",
+			"#1956 R3: session_start rotates the live anchor into one bounded previous slot because a stale message_end can drain after replacement; the full registry reset clears both slots.",
 		probe: {
 			arm: () => noteLiveMessageEndSessionId("session-state-probe"),
 			isArmed: () => getLastLiveMessageEndSessionId() === undefined,

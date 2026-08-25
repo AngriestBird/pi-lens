@@ -77,6 +77,13 @@ smell warnings count only the current session, or a 24-hour fallback window
 when no session boundary is available; explicit health remains separately
 labeled. (#1432)
 
+Message-end attribution uses a bounded two-slot session anchor. A primary
+`session_start` rotates `lastStableSessionId` into `previousSessionId` because
+queued stale events from the replaced session can drain after the boundary;
+stale attribution reads the live slot, then the previous slot, then `unknown`.
+The exported full reset clears both slots, while the session-start seam only
+rotates them. (#1956 R3)
+
 A new context-injection surface delivers append-only. It appends after the
 transcript, or splices immediately before a plain trailing user prompt, and it
 never rewrites `messages[0]`. It batches to one injection per settle or turn
