@@ -17,6 +17,7 @@ import { describe, expect, it } from "vitest";
 import { RunnerRegistry } from "../../../clients/dispatch/dispatcher.js";
 import { TOOL_PLANS } from "../../../clients/dispatch/plan.js";
 import { registerDefaultRunners } from "../../../clients/dispatch/runners/index.js";
+import { assertNonEmptyScan } from "../../support/sweep-kit.js";
 
 // Runners reachable by a path the static plans don't capture.
 const DYNAMIC_OR_EXEMPT = new Set<string>([
@@ -60,5 +61,15 @@ describe("dispatch coverage", () => {
 			phantom,
 			`plan references unregistered runner id(s): ${phantom.join(", ")}`,
 		).toEqual([]);
+	});
+
+	it("every dynamic/exempt runner is still registered", () => {
+		const registered = new Set(registeredRunnerIds());
+		const stale = [...DYNAMIC_OR_EXEMPT].filter((id) => !registered.has(id));
+		assertNonEmptyScan(
+			"dispatch dynamic/exempt registry",
+			DYNAMIC_OR_EXEMPT.size,
+		);
+		expect(stale, "dynamic/exempt entries must name live runners").toEqual([]);
 	});
 });

@@ -4,6 +4,7 @@ import { getServersForFileWithConfig } from "../../../clients/lsp/config.js";
 import { LSP_SERVERS } from "../../../clients/lsp/server.js";
 // Typed via scripts/smoke-tools.d.mts (the harness itself is plain ESM JS).
 import { LSP_FIXTURES } from "../../../scripts/smoke-tools.mjs";
+import { assertNonEmptyScan } from "../../support/sweep-kit.js";
 
 /**
  * Nightly LSP handshake coverage drift guard (#274/#278 follow-through).
@@ -46,6 +47,8 @@ function primaryServerIdFor(file: string): string | undefined {
 
 const NON_AUX = LSP_SERVERS.filter((s) => s.role !== "auxiliary");
 const AUX = LSP_SERVERS.filter((s) => s.role === "auxiliary");
+assertNonEmptyScan("LSP_SERVERS registry", LSP_SERVERS.length);
+assertNonEmptyScan("LSP_FIXTURES registry", LSP_FIXTURES.length);
 
 const coveredPrimary = new Set<string>();
 const coveredAux = new Set<string>();

@@ -9,6 +9,7 @@ import {
 	FORMATTER_POLICY_BY_EXTENSION,
 	FORMATTER_POLICY_BY_FILENAME,
 } from "../../clients/tool-policy.js";
+import { assertNonEmptyScan } from "../support/sweep-kit.js";
 
 // Bidirectional drift guard binding the two hand-maintained INVERSE mappings of
 // the formatter↔extension relation (#1135, the #883/#209 single-source-of-truth
@@ -48,8 +49,18 @@ function collectViolations<T>(items: Iterable<T>, check: Checker<T>): string[] {
 	return violations;
 }
 
-function expectClean<T>(items: Iterable<T>, check: Checker<T>): void {
-	const violations = collectViolations(items, check);
+function expectClean<T>(
+	items: Iterable<T>,
+	check: Checker<T>,
+	minimumItemCount = 1,
+): void {
+	const materialized = [...items];
+	assertNonEmptyScan(
+		"formatter policy consistency",
+		materialized.length,
+		minimumItemCount,
+	);
+	const violations = collectViolations(materialized, check);
 	expect(violations, violations.join("\n")).toEqual([]);
 }
 
