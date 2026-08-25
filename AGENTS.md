@@ -2206,6 +2206,13 @@ A new always-absent dependency stub (a `vi.mock`/fixture that makes a dependency
 
 Every commit that adds or changes logic **must** include relevant tests before pushing. No exceptions:
 
+Registered-or-fail sweep floors are calibrated from the live population at the
+time of change, normally at half-population with a documented count. The
+meta-sweep in `tests/config/sweep-floor-coverage.test.ts` detects the natural
+enumeration-plus-empty-assertion shape and requires proof of floor use in the
+same file; imports alone do not register a sweep. Static detection remains
+evadable by construction, so its exception map records intentional non-sweeps.
+
 - New functions → unit tests covering the happy path, edge cases, and error paths.
 - New tool parameters → tool-level routing tests verifying the parameter reaches the right handler.
 - Bug fixes → a regression test that would have caught the bug.
