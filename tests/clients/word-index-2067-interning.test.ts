@@ -31,4 +31,21 @@ describe("word-index posting file interning (#2067)", () => {
 		expect(normalizeCalls.value).toBeLessThan(100);
 		expect(searchWordIndex(index, "sharedToken")).toHaveLength(20);
 	});
+
+	it("keeps async removal normalization proportional to distinct files, not hits", async () => {
+		const { buildWordIndex, removeWordIndexDocumentAsync, searchWordIndex } =
+			await import("../../clients/word-index.js");
+		const files = Array.from({ length: 40 }, (_, i) => ({
+			path: `async-doc-${i}.ts`,
+			content: Array.from({ length: 40 }, () => "asyncShared").join("\n"),
+		}));
+		const index = buildWordIndex(files);
+
+		normalizeCalls.value = 0;
+		expect(await removeWordIndexDocumentAsync(index, "async-doc-0.ts")).toBe(
+			true,
+		);
+		expect(normalizeCalls.value).toBeLessThan(100);
+		expect(searchWordIndex(index, "asyncShared")).toHaveLength(20);
+	});
 });

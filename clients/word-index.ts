@@ -96,7 +96,7 @@ export interface WordIndex {
 	 * discipline forbids.
 	 */
 	fileSizes: PathKeyedMap<number>;
-	/** Bounded scalar aggregate for per-edit replacement observability. */
+	/** Bounded scalar aggregate for the current persist window. */
 	replacementStats?: { count: number; totalMs: number; maxMs: number };
 }
 
@@ -312,6 +312,23 @@ function internWordIndexFile(index: WordIndex, filePath: string): string {
 	return filePath;
 }
 
+function appendWordIndexPostings(
+	index: WordIndex,
+	filePath: string,
+	perTokenHits: Map<string, number[]>,
+): Map<string, number> {
+	const internedFile = internWordIndexFile(index, filePath);
+	const tokenLineCounts = new Map<string, number>();
+	for (const [token, lineNumbers] of perTokenHits) {
+		tokenLineCounts.set(token, lineNumbers.length);
+		const hits = lineNumbers.map((line) => ({ file: internedFile, line }));
+		const arr = index.postings.get(token);
+		if (arr) arr.push(...hits);
+		else index.postings.set(token, hits);
+	}
+	return tokenLineCounts;
+}
+
 function indexWordLine(
 	index: WordIndex,
 	filePath: string,
@@ -319,16 +336,20 @@ function indexWordLine(
 	lineNumber: number,
 	tokenLineCounts: Map<string, number>,
 ): number {
-	const internedFile = internWordIndexFile(index, filePath);
 	const lineTokens = tokenizeLine(line);
 	const seenOnLine = new Set<string>();
+	const perTokenHits = new Map<string, number[]>();
 	for (const token of lineTokens) {
 		if (seenOnLine.has(token)) continue;
 		seenOnLine.add(token);
-		const arr = index.postings.get(token);
-		if (arr) arr.push({ file: internedFile, line: lineNumber });
-		else index.postings.set(token, [{ file: internedFile, line: lineNumber }]);
-		tokenLineCounts.set(token, (tokenLineCounts.get(token) ?? 0) + 1);
+		perTokenHits.set(token, [lineNumber]);
+	}
+	for (const [token, count] of appendWordIndexPostings(
+		index,
+		filePath,
+		perTokenHits,
+	)) {
+		tokenLineCounts.set(token, (tokenLineCounts.get(token) ?? 0) + count);
 	}
 	return lineTokens.length;
 }
@@ -499,15 +520,11 @@ export function updateWordIndexDocument(
 		}
 	}
 
-	const internedFile = internWordIndexFile(index, doc.path);
-	const tokenLineCounts = new Map<string, number>();
-	for (const [token, lineNumbers] of perTokenHits) {
-		tokenLineCounts.set(token, lineNumbers.length);
-		const hits = lineNumbers.map((line) => ({ file: internedFile, line }));
-		const arr = index.postings.get(token);
-		if (arr) arr.push(...hits);
-		else index.postings.set(token, hits);
-	}
+	const tokenLineCounts = appendWordIndexPostings(
+		index,
+		doc.path,
+		perTokenHits,
+	);
 
 	index.docLengths.set(doc.path, docLength);
 	index.forward.set(doc.path, tokenLineCounts);
@@ -533,6 +550,26 @@ type StagedWordIndexRemoval = {
 	postings: Map<string, WordHit[] | undefined>;
 	docLength: number;
 };
+
+const asyncWordIndexOperations = new WeakMap<WordIndex, Promise<void>>();
+
+function enqueueAsyncWordIndexOperation<T>(
+	index: WordIndex,
+	operation: () => Promise<T>,
+): Promise<T> {
+	const previous = asyncWordIndexOperations.get(index) ?? Promise.resolve();
+	const run = previous.catch(() => undefined).then(operation);
+	const settled = run.then(
+		() => undefined,
+		() => undefined,
+	);
+	asyncWordIndexOperations.set(index, settled);
+	return run.finally(() => {
+		if (asyncWordIndexOperations.get(index) === settled) {
+			asyncWordIndexOperations.delete(index);
+		}
+	});
+}
 
 async function stageWordIndexDocumentRemoval(
 	index: WordIndex,
@@ -587,15 +624,17 @@ export async function removeWordIndexDocumentAsync(
 	filePath: string,
 	shouldContinue: () => boolean = () => true,
 ): Promise<boolean> {
-	const staged = await stageWordIndexDocumentRemoval(
-		index,
-		filePath,
-		shouldContinue,
-	);
-	if (!staged) return false;
-	if (!shouldContinue()) throw new Error("word index refresh superseded");
-	commitWordIndexDocumentRemoval(index, filePath, staged);
-	return true;
+	return enqueueAsyncWordIndexOperation(index, async () => {
+		const staged = await stageWordIndexDocumentRemoval(
+			index,
+			filePath,
+			shouldContinue,
+		);
+		if (!staged) return false;
+		if (!shouldContinue()) throw new Error("word index refresh superseded");
+		commitWordIndexDocumentRemoval(index, filePath, staged);
+		return true;
+	});
 }
 
 /** Cooperative replacement whose old/new state is committed without an await. */
@@ -603,6 +642,16 @@ export async function updateWordIndexDocumentAsync(
 	index: WordIndex,
 	doc: { path: string; content: string },
 	shouldContinue: () => boolean = () => true,
+): Promise<boolean> {
+	return enqueueAsyncWordIndexOperation(index, () =>
+		updateWordIndexDocumentAsyncUnsafe(index, doc, shouldContinue),
+	);
+}
+
+async function updateWordIndexDocumentAsyncUnsafe(
+	index: WordIndex,
+	doc: { path: string; content: string },
+	shouldContinue: () => boolean,
 ): Promise<boolean> {
 	if (!index.forward) return false;
 	const startedAt = Date.now();
@@ -635,15 +684,11 @@ export async function updateWordIndexDocumentAsync(
 	);
 	if (!shouldContinue()) throw new Error("word index refresh superseded");
 	if (removal) commitWordIndexDocumentRemoval(index, doc.path, removal);
-	const internedFile = internWordIndexFile(index, doc.path);
-	const tokenLineCounts = new Map<string, number>();
-	for (const [token, lineNumbers] of perTokenHits) {
-		tokenLineCounts.set(token, lineNumbers.length);
-		const hits = lineNumbers.map((line) => ({ file: internedFile, line }));
-		const arr = index.postings.get(token);
-		if (arr) arr.push(...hits);
-		else index.postings.set(token, hits);
-	}
+	const tokenLineCounts = appendWordIndexPostings(
+		index,
+		doc.path,
+		perTokenHits,
+	);
 	index.docLengths.set(doc.path, docLength);
 	index.forward.set(doc.path, tokenLineCounts);
 	index.fileMtimes.set(doc.path, -1);
@@ -1511,8 +1556,8 @@ export function serializeWordIndex(index: WordIndex): SerializedWordIndex {
 	const files = [...index.docLengths.keys()];
 	const fileIndex = new Map<string, number>();
 	files.forEach((file, i) => {
-		const interned = index.fileTable.get(wordIndexKey(file));
-		if (interned !== undefined) fileIndex.set(interned, i);
+		const interned = index.fileTable.get(wordIndexKey(file)) ?? file;
+		fileIndex.set(interned, i);
 	});
 
 	const postings: Array<[string, number[]]> = [];
@@ -1849,6 +1894,7 @@ async function writeWordIndexSnapshot(
 			totalReplacementMs: index.replacementStats?.totalMs ?? 0,
 			maxReplacementMs: index.replacementStats?.maxMs ?? 0,
 		});
+		index.replacementStats = { count: 0, totalMs: 0, maxMs: 0 };
 	} catch (err) {
 		dbg?.(`word-index persist: failed: ${err}`);
 		// M3, #958: a swallowed persist means every LATER symbol_search reads a

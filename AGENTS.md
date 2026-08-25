@@ -448,8 +448,9 @@ posting entry keeps the index-owned shared file string, while `fileTable` maps
 the canonical `wordIndexKey` to that string. Removal and async refresh compare
 posting identities; they must never call `wordIndexKey(hit.file)`. Snapshot wire
 format v2 remains `[fileIdx, line]`; load rebuilds the table and shared refs.
-The cascade per-edit seam deliberately uses the cooperative async replacement
-variant so its synchronous occupancy remains within the 8 ms budget.
+The cascade per-edit seam deliberately uses the synchronous replacement variant:
+unawaited concurrent cascades must not yield across a wholesale posting snapshot.
+Cooperative async variants are serialized per index and remain for bulk refresh.
 When touching this seam, keep posting-entry counts and replacement-cost scalars
 in word-index telemetry. #2069 intentionally builds on this prerequisite.
 

@@ -128,12 +128,17 @@ describe("word-index observability (#958)", () => {
 		try {
 			const {
 				buildWordIndex,
+				updateWordIndexDocument,
 				scheduleWordIndexPersist,
 				flushWordIndexPersistsForTests,
 			} = await import("../../clients/word-index.js");
 			const index = buildWordIndex([
 				{ path: "a.ts", content: "export const alpha = 1;" },
 			]);
+			updateWordIndexDocument(index, {
+				path: "a.ts",
+				content: "export const alpha = 2;",
+			});
 
 			scheduleWordIndexPersist(env.tmpDir, index);
 			flushWordIndexPersistsForTests();
@@ -150,9 +155,9 @@ describe("word-index observability (#958)", () => {
 					indexedFileCount: 1,
 					tokens: expect.any(Number),
 					postingEntries: expect.any(Number),
-					replacementCount: 0,
-					totalReplacementMs: 0,
-					maxReplacementMs: 0,
+					replacementCount: 1,
+					totalReplacementMs: expect.any(Number),
+					maxReplacementMs: expect.any(Number),
 				}),
 			);
 			// And no persist_failed on the success path.

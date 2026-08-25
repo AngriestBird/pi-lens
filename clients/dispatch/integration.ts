@@ -107,8 +107,8 @@ import {
 	hasJavaBuildDescriptor,
 } from "../tool-policy.js";
 import {
-	removeWordIndexDocumentAsync,
-	updateWordIndexDocumentAsync,
+	removeWordIndexDocument,
+	updateWordIndexDocument,
 	WORD_INDEX_MAX_BYTES,
 	type WordIndex,
 } from "../word-index.js";
@@ -834,7 +834,11 @@ function isIgnoredCascadeNeighbor(filePath: string, cwd: string): boolean {
  * `computeCascadeForFile`'s entry, before its own `await buildOrUpdateGraph`.
  * Node is single-threaded, so two overlapping cascades (#450's unawaited
  * concurrency) can never interleave mid-mutation here — each call runs to
- * completion in one turn. The only cross-build hazard is a full session-start
+ * completion in one turn. The async variants exist for cooperative bulk
+ * refreshes, but must not be used from unawaited concurrent callers: the
+ * reviewer's 300-document probe lost 1,719 postings during an 8 ms yield
+ * before the async path was serialized. The only cross-build hazard is a full
+ * session-start
  * rebuild REPLACING `runtime.wordIndex` with a new object between the caller
  * reading `runtime.wordIndex` (in runtime-tool-result.ts, also synchronous)
  * and this function receiving it — in that case this call simply mutates
@@ -855,10 +859,10 @@ async function updateWordIndexForCascade(args: {
 
 	const byteLength = Buffer.byteLength(content, "utf-8");
 	if (byteLength > WORD_INDEX_MAX_BYTES) {
-		await removeWordIndexDocumentAsync(wordIndex, filePath);
+		removeWordIndexDocument(wordIndex, filePath);
 		dbg?.(`word-index per-edit: dropped ${filePath} (over size cap)`);
 	} else {
-		await updateWordIndexDocumentAsync(wordIndex, { path: filePath, content });
+		updateWordIndexDocument(wordIndex, { path: filePath, content });
 		dbg?.(`word-index per-edit: updated ${filePath}`);
 	}
 	onUpdated?.(wordIndex);
