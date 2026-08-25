@@ -176,8 +176,9 @@ describe("collectMemorySampleSubsystems (O(1)/O(bounded-cache-size) live reads)"
 	});
 
 	it("reports word-index doc/posting/forward counts when a word index is supplied", () => {
-		const wordIndex: WordIndex = {
+		const wordIndex = {
 			postings: new Map([["foo", [{ file: "a.ts", line: 1 }]]]),
+			fileTable: new Map([[normalizeEphemeralMapKey("a.ts"), "a.ts"]]),
 			docLengths: (() => {
 				const m = new PathKeyedMap<number>(normalizeEphemeralMapKey);
 				m.set("a.ts", 5);
@@ -194,7 +195,7 @@ describe("collectMemorySampleSubsystems (O(1)/O(bounded-cache-size) live reads)"
 			docCount: 1,
 			fileMtimes: new PathKeyedMap<number>(normalizeEphemeralMapKey),
 			fileSizes: new PathKeyedMap<number>(normalizeEphemeralMapKey),
-		};
+		} as WordIndex;
 		const subsystems = collectMemorySampleSubsystems(wordIndex);
 		expect(subsystems.wordIndex).toEqual({
 			docs: 1,

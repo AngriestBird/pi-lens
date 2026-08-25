@@ -926,8 +926,11 @@ async function buildOrRefreshWordIndex(args: {
 	const snapshot = loadProjectSnapshot(snapshotRoot);
 	const snapshotLoadMs = Date.now() - snapshotLoadStartMs;
 	if (snapshot?.wordIndex) {
-		const { deserializeWordIndex, refreshWordIndexIncrementally } =
-			await import("./word-index.js");
+		const {
+			deserializeWordIndex,
+			refreshWordIndexIncrementally,
+			countWordIndexPostingEntries,
+		} = await import("./word-index.js");
 		const deserializeStartMs = Date.now();
 		const index = deserializeWordIndex(snapshot.wordIndex);
 		const deserializeMs = Date.now() - deserializeStartMs;
@@ -988,6 +991,7 @@ async function buildOrRefreshWordIndex(args: {
 						durationMs: Date.now() - startMs,
 						indexedFileCount: index.docCount,
 						tokens: index.postings.size,
+						postingEntries: countWordIndexPostingEntries(index),
 						truncated: index.truncated,
 						phaseDurationsMs: {
 							snapshotLoadMs,
@@ -1029,8 +1033,11 @@ async function buildOrRefreshWordIndex(args: {
 	// implementation backs this task, the quick-mode warmup call below, AND the
 	// stateless cold-query background trigger in word-index.ts — a bound/skip
 	// -rule change lands once, not in three copies.
-	const { buildWordIndexAsync, collectWordIndexDocs } =
-		await import("./word-index.js");
+	const {
+		buildWordIndexAsync,
+		collectWordIndexDocs,
+		countWordIndexPostingEntries,
+	} = await import("./word-index.js");
 	const docs = await collectWordIndexDocs(
 		analysisRoot,
 		() => runtime.isCurrentSession(sessionGeneration),
@@ -1072,6 +1079,7 @@ async function buildOrRefreshWordIndex(args: {
 		durationMs: Date.now() - startMs,
 		indexedFileCount: runtime.wordIndex.docCount,
 		tokens: runtime.wordIndex.postings.size,
+		postingEntries: countWordIndexPostingEntries(runtime.wordIndex),
 		truncated: runtime.wordIndex.truncated,
 		skipped: docs.skipped,
 	});

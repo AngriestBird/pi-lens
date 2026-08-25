@@ -149,6 +149,10 @@ describe("word-index observability (#958)", () => {
 					trigger: "per_edit",
 					indexedFileCount: 1,
 					tokens: expect.any(Number),
+					postingEntries: expect.any(Number),
+					replacementCount: 0,
+					totalReplacementMs: 0,
+					maxReplacementMs: 0,
 				}),
 			);
 			// And no persist_failed on the success path.

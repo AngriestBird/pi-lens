@@ -107,8 +107,8 @@ import {
 	hasJavaBuildDescriptor,
 } from "../tool-policy.js";
 import {
-	removeWordIndexDocument,
-	updateWordIndexDocument,
+	removeWordIndexDocumentAsync,
+	updateWordIndexDocumentAsync,
 	WORD_INDEX_MAX_BYTES,
 	type WordIndex,
 } from "../word-index.js";
@@ -842,23 +842,23 @@ function isIgnoredCascadeNeighbor(filePath: string, cwd: string): boolean {
  * abandoned/superseded, never corrupted. No queue, no lock: the simplest rule
  * that is still provably correct.
  */
-function updateWordIndexForCascade(args: {
+async function updateWordIndexForCascade(args: {
 	wordIndex?: WordIndex | null;
 	filePath: string;
 	content?: string;
 	onUpdated?: (index: WordIndex) => void;
 	dbg?: (msg: string) => void;
-}): void {
+}): Promise<void> {
 	const { wordIndex, filePath, content, onUpdated, dbg } = args;
 	if (!wordIndex || !wordIndex.forward) return;
 	if (content === undefined) return;
 
 	const byteLength = Buffer.byteLength(content, "utf-8");
 	if (byteLength > WORD_INDEX_MAX_BYTES) {
-		removeWordIndexDocument(wordIndex, filePath);
+		await removeWordIndexDocumentAsync(wordIndex, filePath);
 		dbg?.(`word-index per-edit: dropped ${filePath} (over size cap)`);
 	} else {
-		updateWordIndexDocument(wordIndex, { path: filePath, content });
+		await updateWordIndexDocumentAsync(wordIndex, { path: filePath, content });
 		dbg?.(`word-index per-edit: updated ${filePath}`);
 	}
 	onUpdated?.(wordIndex);
@@ -977,7 +977,7 @@ export async function computeCascadeForFile(
 		// The old hazard — this update silently orphaning a SECOND entry next to the
 		// walker's original-cased one — is now structurally impossible at the map
 		// layer, so this seam no longer has to hand-match the build path's key shape.
-		updateWordIndexForCascade({
+		await updateWordIndexForCascade({
 			wordIndex,
 			filePath: nodePath.resolve(filePath),
 			content: fileContent,
