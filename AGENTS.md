@@ -487,6 +487,24 @@ leave its prior workspace cache alive; it never walks above that ceiling.
   Verify the parent checkout after dispatch. If isolation is uncertain, stop
   every worker before recovering state. Never use branch switches or stashes
   to coordinate parallel workers inside one checkout.
+- **Verify sibling worktrees in situ; never trust coordinator-session
+  diagnostics for them.** All build, lint, test, and diagnostic verification
+  for a worktree runs from inside that worktree; its own `npm run build` and
+  `npm run lint` are authoritative. Diagnostics a coordinator session takes
+  on worktree files are advisory only: the parent's LSP/dispatch context
+  resolves those files under the wrong root and floods results with false
+  `Cannot find name 'process'` / missing-module blockers (one session logged
+  49 such false blocking errors that dominated its summary; refs #2050).
+  When a scratch or review worktree must run tests, link the parent's
+  dependency tree instead of copying it or reinstalling: Windows
+  `cmd /c mklink /J <worktree>\node_modules <parent>\node_modules` (a
+  junction needs no admin rights), POSIX `ln -s`. Run one `npm run build`
+  inside the worktree afterwards so the vitest stale-build guard passes.
+  Use a real isolated `npm install` inside the worktree ONLY when the branch
+  changes `package.json` or `package-lock.json`: a shared junction routes
+  every install mutation into the shared tree, so concurrent installs across
+  linked worktrees can corrupt it. Never copy `node_modules` into a worktree;
+  copies drift immediately and resurrect stale compiled twins.
 - **Real-clock budget assertions run in the wall-clock-budget phase (#1920).** A test that asserts elapsed time around awaited work (a `Date.now()` delta, or a self-reported span whose window contains deschedulable real work) measures scheduler contention under the default project's fork storm, not code speed — startup-overhead measured 659-2321ms against a 500ms budget under load while passing solo every time. Such tests belong in vitest.config.ts's fully-serialized `wallClockBudgetInclude` list (dead-last quiet phase), NOT in the `timing-sensitive` project, whose charter is sampler-only. Before adding a new budget assertion, ask whether it can assert recorded/logical spans instead; if it must measure real time, add the file to the list and note the budget's origin. The existence check in `tests/config/timing-sensitive-coverage.test.ts` keeps renamed members from silently dropping out of every project.
 - **Fault-injection probes come from the kit, not ad hoc (#1838).** Wedged child pipes (`spawnWedgedChild`), deterministic seam delays (`delayInside`), starved env budgets (`starveBudget`), externally-resolvable gates (`gatedPromise`), and lifecycle hooks fired inside a mocked seam (`fireResetAt`) come from `tests/support/fault-injection.ts`. Indefinite suspension stays on `suspendAt`. When a fix touches a latch, teardown path, in-flight cache, or session-straddling write (catalog shapes 1/3/9/24), the red-first pass should reach for the matching primitive instead of hand-rolling a probe — the bespoke-fixture era produced each probe exactly once and then lost it. Each kit primitive carries its own fidelity test in `fault-injection.test.ts`; extending the kit means adding one, and a primitive whose fidelity test cannot detect its own neutering does not ship.
 - **Preserve the model in handoffs.** Every issue or PR should name the defect/capability class, separate in-scope acceptance criteria from explicit non-goals, state invariants and failure semantics, and enumerate relevant test dimensions. A PR must say which existing seams it extends, how it preserves those invariants, and which matrix cells it tests. Keep cross-cutting capabilities in separate PRs unless their composition is explicitly designed and tested.
