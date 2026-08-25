@@ -15,7 +15,11 @@ import * as os from "node:os";
 import { pathToFileURL } from "node:url";
 import { emitBounded } from "../bounded-telemetry.js";
 import { withTimeout } from "../deadline-utils.js";
-import { incrementDegradationCount } from "../degradation-ledger.js";
+import { minimatch } from "../deps/minimatch.js";
+import {
+	incrementDegradationCount,
+	recordDegradationOnce,
+} from "../degradation-ledger.js";
 import type { MessageConnection } from "../deps/vscode-jsonrpc.js";
 // vscode-jsonrpc v9 ships an `exports` map exposing the Node entry as the
 // `./node` subpath (no `.js`); the old `/node.js` file path no longer resolves.
@@ -213,7 +217,13 @@ export interface LSPOperationSupport {
 	documentSymbol: boolean;
 	workspaceSymbol: boolean;
 	codeAction: boolean;
+	/** `codeActionProvider.resolveProvider === true` at initialize. */
+	codeActionResolve: boolean;
 	rename: boolean;
+	/** `workspace.fileOperations.willRename` registration options at initialize. */
+	willRenameFiles: boolean;
+	/** #1971: `workspace.fileOperations.didRename` registration options at initialize. */
+	didRenameFiles: boolean;
 	implementation: boolean;
 	callHierarchy: boolean;
 }
@@ -560,6 +570,11 @@ export const CLIENT_CAPABILITIES = {
 		workspaceFolders: true,
 		configuration: true,
 		didChangeWatchedFiles: { dynamicRegistration: true },
+		fileOperations: {
+			dynamicRegistration: false,
+			willRename: true,
+			didRename: true,
+		},
 	},
 	textDocument: {
 		synchronization: {
@@ -579,7 +594,27 @@ export const CLIENT_CAPABILITIES = {
 		implementation: { dynamicRegistration: false },
 		references: { dynamicRegistration: false },
 		documentSymbol: { dynamicRegistration: false },
-		codeAction: { dynamicRegistration: false },
+		codeAction: {
+			dynamicRegistration: false,
+			dataSupport: true,
+			resolveSupport: { properties: ["edit", "command"] },
+			// #1971 review: without literal support, LSP 3.17 constrains
+			// textDocument/codeAction responses to Command[] — resolve of an edit
+			// would then be protocol-invalid. We parse CodeAction objects.
+			codeActionLiteralSupport: {
+				codeActionKind: {
+					valueSet: [
+						"quickfix",
+						"refactor",
+						"refactor.extract",
+						"refactor.inline",
+						"refactor.rewrite",
+						"source",
+						"source.organizeImports",
+					],
+				},
+			},
+		},
 		rename: { dynamicRegistration: false },
 		publishDiagnostics: {
 			relatedInformation: true,
@@ -954,6 +989,13 @@ export interface LSPClientState {
 	workspaceDiagnosticsSupport: LSPWorkspaceDiagnosticsSupport;
 	/** Mutable: upgraded by applyDynamicCapabilities after registerCapability events */
 	operationSupport: LSPOperationSupport;
+	/** #1971: parsed `FileOperationRegistrationOptions` filters from initialize —
+	 *  the server registered WHICH paths it cares about for willRename/didRename.
+	 *  Sends outside these filters are suppressed at this boundary. */
+	fileOperationFilters?: {
+		willRename?: LSPFileOperationFilter[];
+		didRename?: LSPFileOperationFilter[];
+	};
 	/** Top-level keys of the raw ServerCapabilities from initialize (sorted) —
 	 *  captured once; the full advertised surface for diagnostics/documentation. */
 	rawCapabilityKeys?: string[];
@@ -4445,6 +4487,14 @@ async function resolveCodeActionBestEffort(
 			),
 		};
 	}
+	if (!state.operationSupport.codeActionResolve) {
+		recordDegradationOnce({
+			kind: "lsp-capability-skip",
+			subject: `${state.serverId}:codeAction/resolve`,
+			reason: "server did not advertise codeActionProvider.resolveProvider",
+		});
+		return action;
+	}
 	let resolved: LSPCodeAction | null | undefined;
 	try {
 		resolved = await withTimeout(
@@ -4809,6 +4859,20 @@ export async function createLSPClient(options: {
 	state.workspaceDiagnosticsSupport =
 		detectWorkspaceDiagnosticsSupport(initResult);
 	state.operationSupport = detectOperationSupport(initResult);
+	const capabilities = ((initResult as { capabilities?: unknown })
+		?.capabilities ?? {}) as Record<string, unknown>;
+	const workspace = isCapabilityRecord(capabilities.workspace)
+		? capabilities.workspace
+		: undefined;
+	const fileOperations = isCapabilityRecord(workspace)
+		? workspace.fileOperations
+		: undefined;
+	if (isCapabilityRecord(fileOperations)) {
+		state.fileOperationFilters = {
+			willRename: parseFileOperationFilters(fileOperations.willRename),
+			didRename: parseFileOperationFilters(fileOperations.didRename),
+		};
+	}
 	state.positionEncoding = negotiatePositionEncoding(
 		(initResult as { capabilities?: unknown })?.capabilities,
 	);
@@ -5165,6 +5229,33 @@ export async function createLSPClient(options: {
 		closeDocument: (filePath) => closeDocument(state, filePath),
 
 		async willRenameFiles(oldFilePath, newFilePath) {
+			if (!isClientAlive(state)) return null;
+			if (!state.operationSupport.willRenameFiles) {
+				recordDegradationOnce({
+					kind: "lsp-capability-skip",
+					subject: `${state.serverId}:workspace/willRenameFiles`,
+					reason:
+						"server did not advertise workspace.fileOperations.willRename",
+				});
+				return null;
+			}
+			// #1971 review: the server registered WHICH paths it cares about.
+			// Sending outside those filters asks a question the server never
+			// signed up to answer.
+			if (
+				!fileOperationFiltersMatch(
+					state.fileOperationFilters?.willRename,
+					oldFilePath,
+					newFilePath,
+				)
+			) {
+				recordDegradationOnce({
+					kind: "lsp-capability-skip",
+					subject: `${state.serverId}:workspace/willRenameFiles:filter`,
+					reason: "rename paths do not match the server's registered filters",
+				});
+				return null;
+			}
 			const result = await navRequest<LSPWorkspaceEdit>(
 				state,
 				"workspace/willRenameFiles",
@@ -5182,6 +5273,30 @@ export async function createLSPClient(options: {
 
 		async didRenameFiles(oldFilePath, newFilePath, oldUri, newUri) {
 			if (!isClientAlive(state)) return;
+			if (!state.operationSupport.didRenameFiles) {
+				recordDegradationOnce({
+					kind: "lsp-capability-skip",
+					subject: `${state.serverId}:workspace/didRenameFiles`,
+					reason: "server did not advertise workspace.fileOperations.didRename",
+				});
+				return;
+			}
+			// #1971 review: same registration-filter discipline as willRename —
+			// the server only signed up to hear about matching paths.
+			if (
+				!fileOperationFiltersMatch(
+					state.fileOperationFilters?.didRename,
+					oldFilePath,
+					newFilePath,
+				)
+			) {
+				recordDegradationOnce({
+					kind: "lsp-capability-skip",
+					subject: `${state.serverId}:workspace/didRenameFiles:filter`,
+					reason: "rename paths do not match the server's registered filters",
+				});
+				return;
+			}
 			await safeSendNotification(state.connection, "workspace/didRenameFiles", {
 				files: [
 					{
@@ -5467,8 +5582,13 @@ function detectOperationSupport(initResult: unknown): LSPOperationSupport {
 		const value = capabilities?.[key];
 		if (value === undefined || value === null) return false;
 		if (typeof value === "boolean") return value;
-		return true;
+		return isCapabilityRecord(value);
 	};
+	const codeActionProvider = capabilities?.codeActionProvider;
+	const workspace = capabilities?.workspace;
+	const fileOperations = isCapabilityRecord(workspace)
+		? workspace.fileOperations
+		: undefined;
 
 	return {
 		definition: hasProvider("definitionProvider"),
@@ -5480,8 +5600,107 @@ function detectOperationSupport(initResult: unknown): LSPOperationSupport {
 		documentSymbol: hasProvider("documentSymbolProvider"),
 		workspaceSymbol: hasProvider("workspaceSymbolProvider"),
 		codeAction: hasProvider("codeActionProvider"),
+		codeActionResolve:
+			isCapabilityRecord(codeActionProvider) &&
+			codeActionProvider.resolveProvider === true,
 		rename: hasProvider("renameProvider"),
+		willRenameFiles:
+			isCapabilityRecord(fileOperations) &&
+			isFileOperationRegistrationOptions(fileOperations.willRename),
+		didRenameFiles:
+			isCapabilityRecord(fileOperations) &&
+			isFileOperationRegistrationOptions(fileOperations.didRename),
 		implementation: hasProvider("implementationProvider"),
 		callHierarchy: hasProvider("callHierarchyProvider"),
 	};
+}
+
+function isCapabilityRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isFileOperationRegistrationOptions(value: unknown): boolean {
+	return isCapabilityRecord(value) && Array.isArray(value.filters);
+}
+
+/** One parsed `FileOperationFilter` from a registration-options object. */
+export interface LSPFileOperationFilter {
+	scheme: string | undefined;
+	glob: string;
+	matches: "file" | "folder" | undefined;
+	ignoreCase: boolean;
+}
+
+/**
+ * Parse the filters of a `FileOperationRegistrationOptions` object. Returns
+ * `undefined` when the options are absent or malformed — callers treat that as
+ * "no interest declared" and fail closed, never sending the operation.
+ */
+function parseFileOperationFilters(
+	value: unknown,
+): LSPFileOperationFilter[] | undefined {
+	if (!isCapabilityRecord(value) || !Array.isArray(value.filters)) {
+		return undefined;
+	}
+	const filters: LSPFileOperationFilter[] = [];
+	for (const entry of value.filters) {
+		if (!isCapabilityRecord(entry)) return undefined;
+		const pattern = entry.pattern;
+		if (
+			!isCapabilityRecord(pattern) ||
+			typeof pattern.glob !== "string" ||
+			pattern.glob.trim() === ""
+		) {
+			return undefined;
+		}
+		const matches = pattern.matches;
+		const options = isCapabilityRecord(pattern.options)
+			? pattern.options
+			: undefined;
+		filters.push({
+			scheme: typeof entry.scheme === "string" ? entry.scheme : undefined,
+			glob: pattern.glob,
+			matches: matches === "file" || matches === "folder" ? matches : undefined,
+			ignoreCase:
+				options?.ignoreCase === true ||
+				(options?.ignoreCase !== false && process.platform === "win32"),
+		});
+	}
+	return filters;
+}
+
+/**
+ * Whether ANY parsed filter expresses interest in either path of a rename.
+ * Conservative by design: a filter whose scheme differs from the path's, that
+ * declares `matches: "folder"` for our file-rename operations, or whose glob
+ * matches neither the posix path nor the basename, counts as no interest. A
+ * registration with ZERO parsable filters also matches nothing (fail closed).
+ */
+function fileOperationFiltersMatch(
+	filters: LSPFileOperationFilter[] | undefined,
+	oldFilePath: string,
+	newFilePath: string,
+): boolean {
+	if (!filters || filters.length === 0) return false;
+	const candidates = [oldFilePath, newFilePath].flatMap((p) => {
+		const posix = p.replace(/\\/g, "/");
+		return [posix, posix.split("/").at(-1) ?? posix];
+	});
+	for (const filter of filters) {
+		// pi-lens only ever renames local files (pathToFileURL); a registration
+		// scoped to another scheme expresses no interest in them.
+		if (filter.scheme !== undefined && filter.scheme !== "file") continue;
+		if (filter.matches === "folder") continue;
+		for (const candidate of candidates) {
+			if (
+				minimatch(candidate, filter.glob, {
+					nocase: filter.ignoreCase,
+					dot: true,
+				})
+			) {
+				return true;
+			}
+		}
+	}
+	return false;
 }
