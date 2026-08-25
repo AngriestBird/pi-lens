@@ -2249,3 +2249,8 @@ Process-table resource samples preserve query outcome. `clients/child-unref.ts`
 those failures, so consumers leave usage unknown rather than fabricating zero
 samples, and records one bounded `resource-sampler-query-failed` degradation
 per query subject. (#1863)
+
+Timer-owning cache entries clear their timer on the way OUT when a replacement
+is installed; clearing the incoming entry is vacuous and strands the outgoing
+payload behind its closure. Test replacement with a live-timer count, not
+elapsed time (#2073).
