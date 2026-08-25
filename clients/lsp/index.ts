@@ -531,12 +531,30 @@ export interface SpawnedServer {
  * `declined` never reaches `lsp_client_selected` — those paths already have
  * their own records (`lsp_client_unavailable`, `lsp_client_skipped_broken`,
  * `lsp_client_skipped_unavailable_command`).
+ *
+ * #2064: `cold-spawn` alone conflated two different facts. Every caller that
+ * awaited one spawn reported `cold-spawn`, so the value read as a spawn count
+ * and was not one. In a 21.8h field window 62 `cold-spawn` records clustered
+ * into 21 real spawn events, a 3.0x over-count, and one cluster held 39
+ * records inside 2ms against a measured 29.3s TypeScript spawn. The `-joined`
+ * values split the two readings apart without splitting the record:
+ *
+ * - process starts = count(`cold-spawn`) + count(`spawn-failure`);
+ * - selections that paid a spawn wait = those two plus their `-joined` twins;
+ * - reuse rate = `warm-reuse / (warm-reuse + every cold/failure value)`, the
+ *   same single denominator #1934 defined.
  */
 export type LSPClientAcquisitionOutcome =
 	| "warm-reuse"
 	| "cold-spawn"
+	| "cold-spawn-joined"
 	| "spawn-failure"
+	| "spawn-failure-joined"
 	| "declined";
+
+/** The outcomes whose caller STARTED a language-server process. */
+export const SPAWN_STARTING_OUTCOMES: ReadonlySet<LSPClientAcquisitionOutcome> =
+	new Set<LSPClientAcquisitionOutcome>(["cold-spawn", "spawn-failure"]);
 
 // #1621: a rename-propagation notify failure now records WHY it failed —
 // `timedOut` (the notify write never settled inside its budget) is distinct
@@ -2347,7 +2365,11 @@ export class LSPService {
 			// #1934: the first server whose acquisition ERRORED, as opposed to
 			// cleanly declining. Kept so a selection that served nobody still
 			// says which server the pool actually tried and failed to spawn.
+			// #2064 carries the errored outcome VALUE with it, so the record
+			// below reports whether this caller started the failed spawn or
+			// joined it, instead of pinning a starter label on every joiner.
 			let erroredServerId: string | undefined;
+			let erroredOutcome: LSPClientAcquisitionOutcome | undefined;
 
 			// Try each matching server
 			for (const server of servers) {
@@ -2383,8 +2405,14 @@ export class LSPService {
 					});
 					return spawned;
 				}
-				if (acquisition.outcome === "spawn-failure") {
-					erroredServerId ??= server.id;
+				if (
+					acquisition.outcome === "spawn-failure" ||
+					acquisition.outcome === "spawn-failure-joined"
+				) {
+					if (erroredServerId === undefined) {
+						erroredServerId = server.id;
+						erroredOutcome = acquisition.outcome;
+					}
 				}
 			}
 
@@ -2402,7 +2430,8 @@ export class LSPService {
 					metadata: {
 						serverId: erroredServerId,
 						candidateCount: servers.length,
-						outcome: "spawn-failure" satisfies LSPClientAcquisitionOutcome,
+						outcome: (erroredOutcome ??
+							"spawn-failure") satisfies LSPClientAcquisitionOutcome,
 					},
 				});
 			}
@@ -3220,11 +3249,20 @@ export class LSPService {
 			if (isOptionalServer) this.optionalDisabled.delete(key);
 		}
 
+		// #2064: did THIS caller start the language-server process, or did it
+		// join a spawn another caller already had in flight? The answer is only
+		// knowable here, before the await — downstream of `await spawnPromise`
+		// the two are indistinguishable, which is exactly how the 3.0x
+		// over-count happened. There are two join sites and both count as
+		// joins: the unguarded read below, and the `raced` re-read inside the
+		// spawn gate, which catches a caller that reached the gate before the
+		// starter published its promise.
+		let startedSpawn = false;
 		let spawnPromise = this.state.inFlight.get(key);
 		if (!spawnPromise) {
 			const started = await this.withClientSpawnGate(async () => {
 				const raced = this.state.inFlight.get(key);
-				if (raced) return { promise: raced };
+				if (raced) return { promise: raced, startedSpawn: false };
 				// `server.root()` and dead-client cleanup above are async. A reset during
 				// either gap must not let this retired generation start a late spawn.
 				if (this.checkDestroyed()) return undefined;
@@ -3237,10 +3275,11 @@ export class LSPService {
 					allowInstall,
 				);
 				this.state.inFlight.set(key, promise);
-				return { promise };
+				return { promise, startedSpawn: true };
 			});
 			if (!started) return undefined;
 			spawnPromise = started.promise;
+			startedSpawn = started.startedSpawn;
 		}
 		// Announce the in-flight spawn so the caller can skip a doomed touch
 		// wait. The announcement never returns a client and never
@@ -3261,20 +3300,31 @@ export class LSPService {
 			// #1934: a client here cost a process WAIT, whether this caller
 			// started the spawn or joined another caller's in-flight promise.
 			// Either way the selection was not served from the warm pool.
+			// #2064: which of the two it was is now named, so the record can
+			// answer "how many processes started" as well as "how many
+			// selections paid a wait". `startedSpawn` is captured before the
+			// await, because after it the two are indistinguishable.
 			//
 			// The verdict read is synchronous and sits in the same microtask as
 			// the await above, so it can only see the attempt just settled.
 			onOutcome?.(
 				spawned
-					? "cold-spawn"
+					? startedSpawn
+						? "cold-spawn"
+						: "cold-spawn-joined"
 					: this.lastSpawnVerdict.get(key) === "failed"
-						? "spawn-failure"
+						? startedSpawn
+							? "spawn-failure"
+							: "spawn-failure-joined"
 						: "declined",
 			);
 			return spawned;
 		} catch (err) {
 			// A throwing spawn promise is an errored acquisition by definition.
-			onOutcome?.("spawn-failure");
+			// #2064: the joiners of a failing spawn are counted apart from its
+			// starter for the same reason the success path splits them — one
+			// failed process start must not read as N.
+			onOutcome?.(startedSpawn ? "spawn-failure" : "spawn-failure-joined");
 			throw err;
 		} finally {
 			if (this.state.inFlight.get(key) === spawnPromise) {
@@ -3442,6 +3492,29 @@ export class LSPService {
 			const spawnDurationMs = Date.now() - startedAt;
 			recordLsp(server.id, root, "spawn_success", spawnDurationMs);
 			recordSuccessfulLspSpawn(server.id, spawnDurationMs);
+			// #2064: the only latency record that a language-server PROCESS
+			// started. `lsp_launch_candidate_success` covers the servers that
+			// launch through `resolveAndLaunch` and never fired for TypeScript,
+			// which served 913 of 941 selections in the field window — so
+			// nothing in `latency.log` counted the 29.3s TypeScript spawn at
+			// all. This sits at `spawnClient`'s single success path, so every
+			// server reports through one record instead of a per-server
+			// launcher, and `count(serverId=typescript)` is answerable from
+			// `latency.log` alone. Volume is bounded by process starts: one
+			// record per spawn, and a spawn is single-flighted per
+			// `serverId:root` by `state.inFlight`.
+			logLatency({
+				type: "phase",
+				phase: "lsp_server_spawned",
+				filePath: root,
+				durationMs: spawnDurationMs,
+				metadata: {
+					serverId: server.id,
+					source: spawned.source ?? "unknown",
+					launchVariant: spawned.launchVariant ?? "default",
+					triggerFilePath: filePath,
+				},
+			});
 			if (!this.workspaceProbeLogged.has(key)) {
 				logSessionStart(
 					`lsp workspace-diag probe ${server.id}: advertised=${wsDiag.advertised} mode=${wsDiag.mode} provider=${wsDiag.diagnosticProviderKind}`,
