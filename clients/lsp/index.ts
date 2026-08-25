@@ -6524,7 +6524,11 @@ export class LSPService {
 			recordDegradationOnce({
 				kind: "lsp-capability-skip",
 				subject: `${serverId}:workspace/willRenameFiles`,
-				reason: "server did not advertise workspace.fileOperations.willRename",
+				reason: client
+					.getMalformedFileOperationRegistrations()
+					.has("willRename")
+					? "malformed-registration"
+					: "no-registration",
 			});
 			return false;
 		});
@@ -6733,8 +6737,11 @@ export class LSPService {
 					recordDegradationOnce({
 						kind: "lsp-capability-skip",
 						subject: `${serverId}:workspace/didRenameFiles`,
-						reason:
-							"server did not advertise workspace.fileOperations.didRename",
+						reason: client
+							.getMalformedFileOperationRegistrations()
+							.has("didRename")
+							? "malformed-registration"
+							: "no-registration",
 					});
 					return;
 				}
