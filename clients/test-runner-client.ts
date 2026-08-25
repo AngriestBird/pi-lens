@@ -327,6 +327,8 @@ function canonicalProjectRoot(cwd: string): string {
 	}
 }
 
+const MAX_CANONICAL_ROOT_MEMO_ENTRIES = 512;
+
 interface RunnerAvailability {
 	available: boolean;
 	evidencePath?: string;
@@ -346,6 +348,12 @@ function filesystemErrorCode(error: unknown): string | undefined {
 
 export class TestRunnerClient {
 	private log: (msg: string) => void;
+	// This is an instance-lifetime memo: a symlink retargeted mid-session keeps
+	// its old resolution until a new client instance. That is acceptable because
+	// round 2's evidence re-validation already handles verdict-level staleness
+	// (positive verdicts re-stat their config file). Keep the memo bounded so
+	// pathological spelling churn cannot grow it without limit.
+	private canonicalRootMemo = new Map<string, string>();
 	private availableRunners = new PathKeyedMap<Map<string, RunnerAvailability>>(
 		normalizeEphemeralMapKey,
 	);
@@ -370,6 +378,19 @@ export class TestRunnerClient {
 		this.log = verbose ? createSubsystemLogger("test-runner") : () => {};
 		this.statFailedTarget =
 			options.statFailedTarget ?? ((filePath) => void fs.statSync(filePath));
+	}
+
+	private getCanonicalProjectRoot(cwd: string): string {
+		const cached = this.canonicalRootMemo.get(cwd);
+		if (cached !== undefined) return cached;
+
+		const canonical = canonicalProjectRoot(cwd);
+		if (this.canonicalRootMemo.size >= MAX_CANONICAL_ROOT_MEMO_ENTRIES) {
+			const oldest = this.canonicalRootMemo.keys().next().value;
+			if (oldest !== undefined) this.canonicalRootMemo.delete(oldest);
+		}
+		this.canonicalRootMemo.set(cwd, canonical);
+		return canonical;
 	}
 
 	private getRunnerAvailability(
@@ -409,7 +430,7 @@ export class TestRunnerClient {
 		cwd: string,
 		sourceFilePath?: string,
 	): { runner: string; config: RunnerConfig } | null {
-		const rootKey = canonicalProjectRoot(cwd);
+		const rootKey = this.getCanonicalProjectRoot(cwd);
 		let byRunner = this.availableRunners.get(rootKey);
 		if (!byRunner) {
 			byRunner = new Map();
@@ -684,7 +705,7 @@ export class TestRunnerClient {
 	parseVitestTestGlobs(
 		cwd: string,
 	): { include?: string[]; exclude?: string[] } | null {
-		const rootKey = canonicalProjectRoot(cwd);
+		const rootKey = this.getCanonicalProjectRoot(cwd);
 		const cached = this.vitestTestGlobsCache.get(rootKey);
 		if (cached !== undefined) {
 			return cached;
