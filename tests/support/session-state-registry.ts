@@ -914,7 +914,11 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	"lsp/index.ts": 2,
 	// #2000 phase 2: the pending-baseline store (one slot per cwd:generation)
 	// plus the process-global Symbol.for slot; cleared via resetOpaqueMutationState.
-	"opaque-mutation-scan.ts": 1,
+	// #2060: 1 -> 3 for UNMERGED_PORCELAIN_STATUSES and
+	// LEGAL_ORDINARY_PORCELAIN_STATUSES. Both are frozen-by-convention lookup
+	// tables of Git's documented porcelain matrix — import-time constants with
+	// no session identity, so they need no reset (SWEEP_HEURISTIC_LIMITS item 5).
+	"opaque-mutation-scan.ts": 3,
 	"lsp/pending-aux-coverage.ts": 1,
 	"lsp/jvm-runtime.ts": 0,
 	"lsp/spawn-history.ts": 1,
@@ -942,7 +946,9 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	"review-graph/shared-extraction-ir.ts": 1,
 	"review-graph/workspace-modules.ts": 2,
 	"runtime-config.ts": 0,
-	"runtime-tool-result.ts": 3,
+	// #2060: 3 -> 5 for GIT_INTEGRATION_SUBCOMMANDS and
+	// GIT_GLOBAL_OPTIONS_WITH_VALUE — command-shape vocabulary, not state.
+	"runtime-tool-result.ts": 5,
 	"safe-spawn.ts": 3,
 	"session-lifecycle.ts": 0,
 	"sgconfig.ts": 2,
