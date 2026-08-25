@@ -47,10 +47,12 @@ function sourceFiles(): string[] {
 		}),
 	);
 	files.push(path.join(repoRoot, "index.ts"));
-	return [...new Set(files)]
-		.map((file) => relativePosix(repoRoot, file))
-		.filter((file) => /\.(?:ts|js|mjs)$/.test(file))
-		.sort((a, b) => a.localeCompare(b));
+	return (
+		[...new Set(files)]
+			.map((file) => relativePosix(repoRoot, file))
+			// Authored-.ts-only scope; scripts/*.mjs are out because they have no runtime bus imports, and the sweep-kit enumerates authored sources.
+			.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
+	);
 }
 
 function read(file: string): string {
@@ -94,6 +96,18 @@ function busSubscriberFiles(
 			/\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*["']pilens:files:touched["']/g;
 		let match: RegExpExecArray | null;
 		while ((match = definition.exec(source))) bindings.add(match[1]);
+		const busImport =
+			/import\s*\{([^}]*)\}\s*from\s*["'][^"']*bus-publish(?:\.js)?["']/g;
+		while ((match = busImport.exec(source))) {
+			for (const specifier of match[1].split(",")) {
+				const eventImport =
+					/^\s*BUS_FILES_TOUCHED_EVENT\b(?:\s+as\s+([A-Za-z_$][\w$]*))?\s*$/.exec(
+						specifier,
+					);
+				if (eventImport)
+					bindings.add(eventImport[1] ?? "BUS_FILES_TOUCHED_EVENT");
+			}
+		}
 		const eventArgument = `(?:["']${EVENT}["']|${
 			[...bindings]
 				.map((binding) => binding.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
@@ -114,10 +128,12 @@ describe("pilens:files:touched bus surface (#1966)", () => {
 		expect(eventFiles).toContain("clients/agent-nudge.ts");
 
 		const actual = busPublisherFiles(files, sources).sort((a, b) =>
-			a.localeCompare(b),
+			a < b ? -1 : a > b ? 1 : 0,
 		);
 		expect(actual, "new publisher: update PUBLISHERS and AGENTS.md").toEqual(
-			PUBLISHERS.map((entry) => entry.file).sort((a, b) => a.localeCompare(b)),
+			PUBLISHERS.map((entry) => entry.file).sort((a, b) =>
+				a < b ? -1 : a > b ? 1 : 0,
+			),
 		);
 	});
 
@@ -125,15 +141,22 @@ describe("pilens:files:touched bus surface (#1966)", () => {
 		const files = sourceFiles();
 		const sources = new Map(files.map((file) => [file, read(file)]));
 		const actual = busSubscriberFiles(files, sources).sort((a, b) =>
-			a.localeCompare(b),
+			a < b ? -1 : a > b ? 1 : 0,
 		);
 		expect(actual, "new subscriber: update SUBSCRIBERS and AGENTS.md").toEqual(
-			SUBSCRIBERS.map((entry) => entry.file).sort((a, b) => a.localeCompare(b)),
+			SUBSCRIBERS.map((entry) => entry.file).sort((a, b) =>
+				a < b ? -1 : a > b ? 1 : 0,
+			),
 		);
 	});
 
 	it("handles the review probes without text-scan false positives", () => {
-		const files = ["comment.ts", "alias.ts", "literal-subscriber.ts"];
+		const files = [
+			"comment.ts",
+			"alias.ts",
+			"imported-constant-subscriber.ts",
+			"literal-subscriber.ts",
+		];
 		const sources = new Map([
 			[
 				"comment.ts",
@@ -143,10 +166,15 @@ describe("pilens:files:touched bus surface (#1966)", () => {
 				"alias.ts",
 				'import { publishFilesTouched as emitTouched } from "./bus-publish.js"; emitTouched({});',
 			],
+			[
+				"imported-constant-subscriber.ts",
+				'import { BUS_FILES_TOUCHED_EVENT as TOUCHED } from "./bus-publish.js"; bus.on(TOUCHED, handler);',
+			],
 			["literal-subscriber.ts", 'bus.on("pilens:files:touched", handler);'],
 		]);
 		expect(busPublisherFiles(files, sources)).toEqual(["alias.ts"]);
 		expect(busSubscriberFiles(files, sources)).toEqual([
+			"imported-constant-subscriber.ts",
 			"literal-subscriber.ts",
 		]);
 	});
