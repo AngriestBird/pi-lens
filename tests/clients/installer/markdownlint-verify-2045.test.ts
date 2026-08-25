@@ -1,7 +1,5 @@
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
-import { execFile } from "node:child_process";
 
 import { describe, expect, it, vi } from "vitest";
 
@@ -13,7 +11,6 @@ vi.mock("../../../clients/sessionstart-logger.js", () => ({
 }));
 
 import { TOOLS, verifyToolBinary } from "../../../clients/installer/index.js";
-import { removeTempDirSync } from "../test-utils.js";
 
 const fixture = fs.readFileSync(
 	path.join(
@@ -93,8 +90,8 @@ describe("managed markdownlint verification (#2045)", () => {
 			verifyToolBinary("success", onVersion, undefined, 10),
 		).resolves.toBe(true);
 		expect(onVersion).toHaveBeenCalledWith("real output\n");
-		expect(sessionLog).toHaveBeenLastCalledWith(
-			expect.stringContaining("command=--version"),
+		expect(sessionLog).not.toHaveBeenCalledWith(
+			expect.stringContaining("success for"),
 		);
 	});
 
@@ -111,47 +108,56 @@ describe("managed markdownlint verification (#2045)", () => {
 				? "markdownlint-cli2.cmd"
 				: "markdownlint-cli2",
 			["--no-globs", "-"],
-			expect.objectContaining({ timeout: 10 }),
+			expect.objectContaining({ timeout: 10, input: "" }),
 		);
 	});
 
-	it("proves the old real probe names --version while the corrected probe is bounded", async () => {
-		const binary = process.env.PI_LENS_2045_MARKDOWNLINT_BIN;
-		if (!binary) return;
-		const cwd = fs.mkdtempSync(
-			path.join(os.tmpdir(), "pi-lens-2045-markdownlint-"),
-		);
-		try {
-			fs.writeFileSync(path.join(cwd, "project.md"), "# title\n", "utf8");
-			const runProbe = async (args: string[]) => {
-				const command =
-					process.platform === "win32"
-						? (process.env.ComSpec ?? "cmd.exe")
-						: binary;
-				const commandArgs =
-					process.platform === "win32" ? ["/d", "/c", binary, ...args] : args;
-				return await new Promise<{ stdout: string; stderr: string }>(
-					(resolve) => {
-						const child = execFile(
-							command,
-							commandArgs,
-							{ cwd, timeout: 10000 },
-							(_error, stdout, stderr) => {
-								resolve({ stdout: String(stdout), stderr: String(stderr) });
-							},
-						);
-						child.stdin?.end();
-					},
-				);
-			};
-			const oldProbe = await runProbe(["--version"]);
-			expect(`${oldProbe.stdout}\n${oldProbe.stderr}`).toContain(
-				"Finding: --version",
-			);
-			const corrected = await runProbe(["--no-globs", "-"]);
-			expect(corrected.stdout).not.toContain("Finding: --version");
-		} finally {
-			removeTempDirSync(cwd);
+	it("pins effective argv for npm and non-npm verification samples", async () => {
+		safeSpawnAsync.mockClear();
+		safeSpawnAsync.mockResolvedValue(result({ status: 0, error: undefined }));
+		for (const id of ["markdownlint", "svelte-language-server", "mypy"]) {
+			const tool = TOOLS.find((entry) => entry.id === id);
+			expect(tool).toBeDefined();
+			await verifyToolBinary(id, undefined, undefined, 10, tool!.checkArgs);
 		}
-	}, 15_000);
+		const calls = safeSpawnAsync.mock.calls;
+		expect(calls.map((call) => call[1])).toEqual([
+			["--no-globs", "-"],
+			["--version"],
+			["--version"],
+		]);
+		expect(calls.every((call) => call[2].input === "")).toBe(true);
+	});
+
+	it.skipIf(!resolveMarkdownlintBinary())(
+		"proves the old real probe and corrected production verification",
+		async () => {
+			const actual = await vi.importActual<typeof import("../../../clients/safe-spawn.js")>(
+				"../../../clients/safe-spawn.js",
+			);
+			safeSpawnAsync.mockImplementation(actual.safeSpawnAsync);
+			const binary = resolveMarkdownlintBinary();
+			expect(binary).toBeTruthy();
+			const old = await actual.safeSpawnAsync(binary!, ["--version"], {
+				timeout: 1000,
+			});
+			expect(old.failure).toBe("timeout");
+			await expect(
+				verifyToolBinary(binary!, undefined, undefined, 10_000, [
+					"--no-globs",
+					"-",
+				]),
+			).resolves.toBe(true);
+		},
+		15_000,
+	);
 });
+
+function resolveMarkdownlintBinary(): string | undefined {
+	const candidates = [
+		path.join("C:\\Users\\apman\\.pi-lens\\tools", "node_modules", ".bin", "markdownlint-cli2"),
+		path.join(process.cwd(), "node_modules", ".bin", "markdownlint-cli2"),
+		process.env.PI_LENS_2045_MARKDOWNLINT_BIN,
+	];
+	return candidates.find((candidate) => candidate && fs.existsSync(candidate));
+}

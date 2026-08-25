@@ -628,7 +628,8 @@ export const TOOLS: ToolDefinition[] = [
 		id: "helm",
 		name: "Helm",
 		checkCommand: "helm",
-		checkArgs: ["version", "--short"],
+		// unverified against real binary (shape 16) — do not wire until probed
+		checkArgs: ["--version"],
 		installStrategy: "github",
 		binaryName: "helm",
 		github: {
@@ -939,7 +940,8 @@ export const TOOLS: ToolDefinition[] = [
 		id: "spotbugs",
 		name: "SpotBugs",
 		checkCommand: "spotbugs",
-		checkArgs: ["-version"],
+		// unverified against real binary (shape 16) — do not wire until probed
+		checkArgs: ["--version"],
 		installStrategy: "archive",
 		binaryName: "spotbugs",
 		archive: {
@@ -1183,7 +1185,8 @@ export const TOOLS: ToolDefinition[] = [
 		id: "gitleaks",
 		name: "gitleaks",
 		checkCommand: "gitleaks",
-		checkArgs: ["version"],
+		// unverified against real binary (shape 16) — do not wire until probed
+		checkArgs: ["--version"],
 		installStrategy: "github",
 		binaryName: "gitleaks",
 		github: {
@@ -1294,7 +1297,8 @@ export const TOOLS: ToolDefinition[] = [
 		id: "terraform-ls",
 		name: "terraform-ls",
 		checkCommand: "terraform-ls",
-		checkArgs: ["version"],
+		// unverified against real binary (shape 16) — do not wire until probed
+		checkArgs: ["--version"],
 		installStrategy: "github",
 		binaryName: "terraform-ls",
 		github: {
@@ -1365,6 +1369,7 @@ export const TOOLS: ToolDefinition[] = [
 		id: "cue",
 		name: "CUE",
 		checkCommand: "cue",
+		// Probed locally with CUE v0.17.1: `cue version` exits 0.
 		checkArgs: ["version"],
 		installStrategy: "github",
 		binaryName: "cue",
@@ -2158,14 +2163,12 @@ export async function verifyToolBinary(
 	try {
 		const result = await safeSpawnAsync(execPath, verificationArgs, {
 			timeout: timeoutMs,
+			input: "",
 		});
 		const output = `${result.stdout}\n${result.stderr}`;
 		if (result.status === 0 && !result.error) {
 			debugLog(
 				`Verified: ${binPath} (${verificationArgs.join(" ")}: ${result.stdout.trim()})`,
-			);
-			logSessionStart(
-				`auto-install verify: success for ${binPath} command=${verificationArgs.join(" ")}`,
 			);
 			onVersionOutput?.(result.stdout);
 			return true;

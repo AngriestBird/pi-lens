@@ -451,11 +451,16 @@ message text, and trigger install/reinstall only for `tool-not-found`.
 must remain non-repairable at that seam; the original errno-bearing Error is
 preserved as `cause`. (#1214)
 
-**Managed verification uses each tool's declared command.** `verifyToolBinary`
-defaults to `--version`, but all registry-driven callers pass `ToolDefinition.checkArgs`
-through local/global/user/install/refresh paths. This matters for tools such as
-markdownlint-cli2 whose `--version` is a file glob and can scan the project;
-verification logs prefer `spawnFailure.kind` over generic `error` text (#2045).
+**Managed verification uses each tool's declared command and closes stdin.**
+`verifyToolBinary` defaults to `--version`, but all registry-driven callers pass
+`ToolDefinition.checkArgs` through local/global/user/install/refresh paths and
+opt into `safeSpawnAsync`'s `input: ""` so every verification receives EOF.
+This matters for markdownlint-cli2: `--version` scanned 45 files and returned
+in about 370ms when stdin was closed, while `--no-globs -` linted one stdin
+file and returned in about 370ms; with production-shaped open stdin the latter
+waited for the full 10s budget. The bound is therefore supplied by the spawner,
+not by the CLI. Verification logs prefer `spawnFailure.kind` over generic
+`error` text (#2045).
 
 **One-shot process-table collection distinguishes exit failure from empty.**
 `spawnCollectStdoutResult` reports `exit-error` with code/signal and discards

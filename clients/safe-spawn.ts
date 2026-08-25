@@ -344,6 +344,8 @@ export interface SafeSpawnOptions {
 	resourceLabel?: string;
 	/** Maximum bytes retained across stdout and stderr for this child. */
 	maxOutputBytes?: number;
+	/** Optional stdin payload. Supplying it always writes and closes stdin. */
+	input?: string;
 	/**
 	 * Couple a long-lived, side-effecting child to this Node process. Registered
 	 * children are synchronously tree-killed during process exit/signals.
@@ -1369,6 +1371,11 @@ export async function safeSpawnAsync(
 					}),
 			);
 			return;
+		}
+		// Keep historical open stdin by default. An opted-in payload is written
+		// completely and followed by EOF; input: "" closes stdin immediately.
+		if (options?.input !== undefined) {
+			child.stdin?.end(options.input);
 		}
 		if (child.pid && (posixProcessGroup || options?.lifetimeCoupled)) {
 			// #2026: POSIX registers unconditionally - detached children no

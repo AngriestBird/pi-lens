@@ -53,10 +53,11 @@ const TEST_HOME = vi.hoisted(() => {
 	return dir;
 });
 
-const { spawnMock, sessionLogSpy, shimExitCodes } = vi.hoisted(() => ({
+const { spawnMock, sessionLogSpy, shimExitCodes, verifyOptions } = vi.hoisted(() => ({
 	spawnMock: vi.fn(),
 	sessionLogSpy: vi.fn(),
 	shimExitCodes: new Map<string, number>(),
+	verifyOptions: vi.fn(),
 }));
 
 vi.mock("../../../clients/safe-spawn.js", () => ({
@@ -64,7 +65,8 @@ vi.mock("../../../clients/safe-spawn.js", () => ({
 	// #2015: verifyToolBinary probes route through safe-spawn too. Answer
 	// --version probes centrally from the fixture exit-code map; everything
 	// else delegates to the scenario-controlled spawnMock.
-	safeSpawnAsync: async (command: string, args: string[]) => {
+	safeSpawnAsync: async (command: string, args: string[], options?: unknown) => {
+		verifyOptions(options);
 		if (args?.includes("--version")) {
 			const name = path
 				.basename(String(command))
@@ -258,6 +260,7 @@ beforeEach(() => {
 	fs.rmSync(TOOLS_DIR, { recursive: true, force: true });
 	fs.mkdirSync(NODE_MODULES, { recursive: true });
 	shimExitCodes.clear();
+	verifyOptions.mockReset();
 	spawnMock.mockReset();
 	sessionLogSpy.mockReset();
 	resetDegradationLedger();
@@ -951,6 +954,9 @@ describe("post-update verification (review F2)", () => {
 		const outcome = await runManagedToolRefresh(NOW);
 
 		expect(outcome.refreshed[0]).toMatchObject({ ok: true, verified: true });
+		expect(verifyOptions).toHaveBeenCalledWith(
+			expect.objectContaining({ input: "" }),
+		);
 		expect(logRows().some((row) => row.includes("verified"))).toBe(true);
 	});
 
