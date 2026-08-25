@@ -5,7 +5,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { minimatch } from "./deps/minimatch.js";
+import { Minimatch, type MinimatchOptions } from "./deps/minimatch.js";
 import {
 	isInSpawnTimeoutCooldown,
 	noteSpawnTimeout,
@@ -283,18 +283,18 @@ function matchesGitignorePattern(
 	pattern: GitignorePattern,
 	relativePath: string,
 	isDirectory: boolean,
+	matchExpanded: (value: string, expanded: string) => boolean,
 ): boolean {
 	const candidate = stripLeadingSlashes(normalizeIgnorePath(relativePath));
 	if (!candidate) return false;
 	const candidates = isDirectory ? [candidate, `${candidate}/`] : [candidate];
-	const options = { dot: true, nocase: process.platform === "win32" };
 	return expandGitignorePattern(pattern).some((expanded) => {
 		if (isDirectory && expanded.endsWith("/**")) {
 			const prefix = expanded.slice(0, -3);
 			if (candidate === prefix || candidate.startsWith(`${prefix}/`))
 				return true;
 		}
-		return candidates.some((value) => minimatch(value, expanded, options));
+		return candidates.some((value) => matchExpanded(value, expanded));
 	});
 }
 
@@ -405,6 +405,23 @@ function buildProjectIgnoreMatcher(
 	// function), and — critically — it's only ever paid for paths a pattern
 	// already flagged as ignored, so it doesn't reintroduce the per-file cost
 	// this memo exists to avoid for the common (not-ignored) case.
+	// Compile expanded gitignore globs once per matcher instance. Relative-path
+	// resolution remains outside this cache, so nested ignore scopes cannot leak
+	// verdicts between sibling trees. The instance lifetime bounds this map.
+	const gitignoreGlobOptions: MinimatchOptions = {
+		dot: true,
+		nocase: process.platform === "win32",
+	};
+	const compiledGlobs = new Map<string, Minimatch>();
+	const matchExpanded = (value: string, expanded: string): boolean => {
+		let compiled = compiledGlobs.get(expanded);
+		if (compiled === undefined) {
+			compiled = new Minimatch(expanded, gitignoreGlobOptions);
+			compiledGlobs.set(expanded, compiled);
+		}
+		return compiled.match(value);
+	};
+
 	const patternMemo = new Map<
 		string,
 		{ ignored: boolean; layer: GitignorePatternLayer | undefined }
@@ -466,7 +483,14 @@ function buildProjectIgnoreMatcher(
 						const relative = path.relative(dir, resolved);
 						const normalized = normalizeIgnorePath(relative);
 						for (const pattern of dirPatterns) {
-							if (!matchesGitignorePattern(pattern, normalized, isDirectory))
+							if (
+								!matchesGitignorePattern(
+									pattern,
+									normalized,
+									isDirectory,
+									matchExpanded,
+								)
+							)
 								continue;
 							ignored = !pattern.negated;
 							layer = pattern.layer;
