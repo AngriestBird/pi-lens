@@ -98,25 +98,26 @@ describe("with-memory-watch exit forwarding (#2042)", () => {
 });
 
 describe("with-memory-watch verdict durability (#2042)", () => {
-	it("routes every record through a blocking write to fd 1", () => {
+	it("routes every record through a blocking write", () => {
 		// The behavioural case below is the real proof, but it can only FAIL on
-		// Linux: Node documents `process.stdout` as synchronous for pipes on
-		// Windows and asynchronous for pipes on Linux, so a Windows dev box cannot
-		// reproduce the loss no matter how badly the reader is starved (confirmed
-		// on this host — the pre-fix write passed 5/5). CI is Linux, which is
-		// exactly where it bites and where nobody is watching.
+		// Linux. Windows discards pipe-buffered bytes at process teardown even
+		// after `fs.writeSync` reports a complete write (#2093 verify: `ok
+		// bytes=86 of 86`, nothing at the reader), so no write mechanism makes
+		// the loss reproducible-then-fixed there. CI is Linux, which is exactly
+		// where the fix holds and where nobody is watching.
 		//
 		// So pin the mechanism too, on every platform: no record may go out
-		// through `process.stdout.write`, whose queued bytes `process.exit`
-		// discards. Reverting any `emit(...)` call to `process.stdout.write` reds
-		// here regardless of OS.
+		// through `process.stdout.write` or `process.stderr.write`, whose queued
+		// bytes `process.exit` discards on Linux. Reverting any `emit(...)` call
+		// to a stream write reds here regardless of OS. On a dev box this text
+		// pin is the only thing holding the ratchet.
 		const source = fs.readFileSync(wrapper, "utf8");
 		const offending = source
 			.split("\n")
 			.map((line, index) => ({ line: line.trim(), number: index + 1 }))
 			.filter(
 				(entry) =>
-					entry.line.includes("process.stdout.write") &&
+					/process\.std(out|err)\.write/.test(entry.line) &&
 					!entry.line.startsWith("*") &&
 					!entry.line.startsWith("//"),
 			);
@@ -133,8 +134,11 @@ describe("with-memory-watch verdict durability (#2042)", () => {
 		// discards it. The #2093 review reproduced that 3/3 on Linux — correct
 		// exit code, no verdict line — losing the record in exactly the
 		// memory-pressured run this wrapper exists to explain. A blocking
-		// `fs.writeSync(1, ...)` survives. This case cannot fail on Windows; see
-		// the mechanism guard above for why, and for the cross-platform ratchet.
+		// `fs.writeSync(1, ...)` survives on Linux. This case cannot fail on
+		// Windows at these parameters, and a heavier probe (18 MB, 4 KB reads)
+		// fails there even WITH the fix (teardown discard, see the mechanism
+		// guard) — if a Windows unit-test leg is ever added, expect this case to
+		// flake for reasons unrelated to the code.
 		const run = await runWrapper(
 			["--", nodeCmd, "-e", "process.stdout.write('x'.repeat(4194304))"],
 			20,

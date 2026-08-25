@@ -32,31 +32,32 @@ import * as os from "node:os";
 import { formatVerdict, readMemory, shouldPrint } from "./lib/memory-watch.mjs";
 
 /**
- * Every line this wrapper emits goes through a BLOCKING write to fd 1, never
- * `process.stdout.write`.
+ * Every line this wrapper emits goes through a BLOCKING write, never
+ * `process.stdout.write` or `process.stderr.write`.
  *
  * When stdout is a pipe, Node buffers writes and flushes them asynchronously,
  * and `process.exit()` discards whatever is still queued. A reader that has
  * fallen behind — a log collector under memory pressure, which is precisely the
  * scenario this file exists for — fills the pipe, so the verdict line is queued
  * rather than written, and then thrown away microseconds later. The #2093
- * review reproduced that 3/3 on Linux with a slow reader: correct exit code, no
- * verdict line. `fs.writeSync` blocks until the bytes reach the OS, so the
+ * review reproduced that 3/3 with a slow reader: correct exit code, no verdict
+ * line. On Linux, `fs.writeSync` blocks until the bytes reach the OS, so the
  * record survives.
  *
- * Node writes to pipes synchronously on Windows and asynchronously on Linux, so
- * this only ever went wrong on the platform CI runs on.
+ * On Windows this is NOT sufficient: pipe-buffered bytes can be discarded at
+ * process teardown even after `fs.writeSync` reports a complete write (the
+ * #2093 verify reproduced the loss post-fix, `ok bytes=86 of 86` and no line at
+ * the reader). That is a separate OS teardown behavior no write mechanism here
+ * closes. The wrapper's durability guarantee is CI-grade (Linux) only.
  */
-function emit(line) {
-	fs.writeSync(1, line);
+function emit(line, fd = 1) {
+	fs.writeSync(fd, line);
 }
 
 const separator = process.argv.indexOf("--");
 const command = separator === -1 ? [] : process.argv.slice(separator + 1);
 if (command.length === 0) {
-	process.stderr.write(
-		"usage: node scripts/with-memory-watch.mjs -- <command> [args...]\n",
-	);
+	emit("usage: node scripts/with-memory-watch.mjs -- <command> [args...]\n", 2);
 	process.exit(2);
 }
 
@@ -107,7 +108,7 @@ const child = spawn(command[0], command.slice(1), {
 
 child.on("error", (error) => {
 	clearInterval(timer);
-	process.stderr.write(`[mem-watch] failed to spawn: ${error.message}\n`);
+	emit(`[mem-watch] failed to spawn: ${error.message}\n`, 2);
 	process.exit(1);
 });
 
