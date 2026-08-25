@@ -107,6 +107,19 @@ export type DegradationKind =
 	 */
 	| "extension-ctx-stale"
 	/**
+	 * A `message_end` event reached its handler on a ctx the SDK had already
+	 * invalidated, so the `cache_usage` row wrote with an UNATTRIBUTED stable
+	 * session id (#1956). Distinct from `extension-ctx-stale` on purpose: that
+	 * kind means the handler was SKIPPED, while here the row KEEPS WRITING —
+	 * the `message` payload is valid provider token/cost data, and dropping it
+	 * would lose real usage numbers. Only the attribution degraded. Subject is
+	 * the event name (`message_end`), so aggregation still answers WHICH
+	 * handler keeps losing its id after the record count stops. Written only on
+	 * a CONFIRMED stale probe; a live ctx that merely lacks a session id
+	 * (older host, unexpected shape) never reaches this kind.
+	 */
+	| "cache-usage-attribution-stale"
+	/**
 	 * A tool-event path did not resolve to an existing file, and pi's own
 	 * unicode/spacing variant ladder did not find it either (#1655 item 5).
 	 * The issue names this `path_variant_unresolved`; the ledger's kind

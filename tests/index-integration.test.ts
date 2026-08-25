@@ -4,7 +4,7 @@ import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CacheManager } from "../clients/cache-manager.js";
 import { getEffectiveLspIdleResetMs } from "../clients/runtime-turn.js";
-import { createPiMock, makeCtx } from "./support/pi-mock.js";
+import { createPiMock, makeCtx, makeStaleCtx } from "./support/pi-mock.js";
 import { removeTempDirSync } from "./clients/test-utils.js";
 
 // This suite predates the consolidated harness and is written against the
@@ -2382,6 +2382,69 @@ describe("#484 turn-summary emit at the agent_settled quiet window", () => {
 				"concurrent-secondary",
 			);
 			expect(resetLSPService).not.toHaveBeenCalled();
+		},
+		INTEGRATION_TIMEOUT_MS,
+	);
+
+	it(
+		"message_end on a stale ctx records the attribution degrade without skipping the cache_usage row (#1956)",
+		async () => {
+			const logCacheUsage = vi.fn();
+			vi.doMock("../clients/cache-observability.js", async (importActual) => ({
+				...(await importActual<
+					typeof import("../clients/cache-observability.js")
+				>()),
+				logCacheUsage,
+			}));
+			const resetLSPService = vi.fn();
+			vi.doMock("../clients/lsp/index.js", () => ({
+				getLSPService: () => ({
+					touchFile: vi.fn(),
+					getAliveClientCount: () => 0,
+					getAliveServerIds: () => [],
+				}),
+				resetLSPService,
+			}));
+
+			const { default: registerExtension } = await import("../index.js");
+			const primary = createMockPi();
+			registerExtension(primary.pi as any);
+
+			// A stale ctx (session replaced/reloaded): `getStableSessionId`
+			// returns undefined, `probeCtxActive` confirms staleness, and the
+			// handler must BOTH keep writing the cache_usage row AND record the
+			// attribution degrade in the ledger.
+			await primary.trigger(
+				"message_end",
+				{
+					message: {
+						role: "assistant",
+						provider: "provider",
+						model: "model",
+						usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+					},
+				},
+				makeStaleCtx(),
+			);
+
+			// The row keeps writing — this is a degrade, not a skip.
+			expect(logCacheUsage).toHaveBeenCalledWith(
+				expect.anything(),
+				expect.any(Function),
+				expect.objectContaining({ sessionId: undefined }),
+			);
+
+			// The attribution loss is recorded: the same degradation-ledger
+			// instance index.ts writes through must now carry the group, keyed
+			// by event name so aggregation answers WHICH handler lost its id.
+			const { getDegradationSummary } =
+				await import("../clients/degradation-ledger.js");
+			const group = getDegradationSummary().find(
+				(g) => g.kind === "cache-usage-attribution-stale",
+			);
+			expect(group).toBeDefined();
+			expect(group?.count).toBe(1);
+			expect(group?.latestReasons[0].subject).toBe("message_end");
 		},
 		INTEGRATION_TIMEOUT_MS,
 	);

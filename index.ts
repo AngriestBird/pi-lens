@@ -9,6 +9,7 @@ import {
 import { wireUserNotifier } from "./clients/user-notify.js";
 import {
 	getDegradationSummary,
+	incrementDegradationCount,
 	recordDegradation,
 } from "./clients/degradation-ledger.js";
 import {
@@ -156,6 +157,7 @@ import {
 	decideSessionStart,
 	decrementSecondarySessionCount,
 	noteSessionShutdown,
+	probeCtxActive,
 } from "./clients/session-lifecycle.js";
 import {
 	clearLastAnalyzedStateCache,
@@ -2987,6 +2989,25 @@ function activateExtension(hostPi: ExtensionAPI) {
 			if (!lensEnabled) return;
 			try {
 				const sessionId = getStableSessionId(ctx);
+				// #1956: a CONFIRMED-stale ctx has no stable session id, so the
+				// cache_usage row below writes unattributed. That is right — the
+				// `message` payload is valid provider token/cost data and must
+				// keep writing; skipping it would lose real usage numbers. The
+				// lost attribution is still a degrade, and one a session
+				// replacement can repeat for every queued message_end, so it is
+				// counted through the bounded ledger (`cache-usage-attribution-
+				// stale`, subject `message_end`; durable `degradation_ledger`
+				// rows at the first and power-of-two milestones). Never a skip,
+				// and never recorded for a LIVE ctx that merely lacks a session
+				// id — `probeCtxActive` returning `false` is the proof.
+				if (probeCtxActive(ctx) === false) {
+					incrementDegradationCount({
+						kind: "cache-usage-attribution-stale",
+						subject: "message_end",
+						reason:
+							"message_end met a stale extension ctx; cache_usage row wrote without a stable session id",
+					});
+				}
 				logCacheUsage((event as { message?: unknown })?.message, dbg, {
 					sessionId,
 					sessionRole: classifyOwnedSessionEmission(ctx, sessionId),

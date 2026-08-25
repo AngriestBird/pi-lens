@@ -374,6 +374,10 @@ record and admitted tally milestones also emit a `degradation_ledger` row throug
 the session remains auditable when no health render reaches the transcript.
 Scanner coverage gaps and stalled notify-inflight barriers use the ledger;
 successful notify drains remain latency-only because they are not degradations.
+The `message_end` handler uses `cache-usage-attribution-stale` (subject
+`message_end`) when a confirmed-stale ctx strips the stable id from a
+`cache_usage` row — the row still writes, so the degraded ATTRIBUTION is the
+degradation, never the row itself (#1956).
 Workspace-root path-attribution rollups are separate, memory-only session
 telemetry. They reset on the primary `session_start`, emit once on primary
 shutdown, and secondary shutdown returns before consuming the primary tally.
