@@ -422,7 +422,7 @@ describe("LSP Client Integration — nested capability gates (#1971)", () => {
 		}
 	});
 
-	it("honors complete file-operation filters on the protocol wire", async () => {
+	it("honors complete file-operation filters on the protocol wire", async (ctx) => {
 		const tempRoot = fs.mkdtempSync(
 			path.join(os.tmpdir(), "pi-lsp-rename-filter-"),
 		);
@@ -430,8 +430,13 @@ describe("LSP Client Integration — nested capability gates (#1971)", () => {
 		const newFile = path.join(tempRoot, "NEW.TS");
 		const oldFolder = path.join(tempRoot, "old-folder");
 		const newFolder = path.join(tempRoot, "new-folder");
+		const nestedDir = path.join(tempRoot, "a", "b");
+		const nestedOldFile = path.join(nestedDir, "old.ts");
+		const nestedNewFile = path.join(nestedDir, "new.ts");
 		fs.writeFileSync(oldFile, "export {};\n");
 		fs.mkdirSync(oldFolder);
+		fs.mkdirSync(nestedDir, { recursive: true });
+		fs.writeFileSync(nestedOldFile, "export {};\n");
 
 		const filter = (
 			glob: unknown,
@@ -464,6 +469,13 @@ describe("LSP Client Integration — nested capability gates (#1971)", () => {
 				sent: false,
 			},
 			{
+				name: "basename does not widen a nested path glob",
+				filters: [filter("*.ts")],
+				oldPath: nestedOldFile,
+				newPath: nestedNewFile,
+				sent: false,
+			},
+			{
 				name: "folder kind matches a probed folder",
 				filters: [filter("**/old-folder", { matches: "folder" })],
 				oldPath: oldFolder,
@@ -482,6 +494,13 @@ describe("LSP Client Integration — nested capability gates (#1971)", () => {
 				filters: [{ scheme: "untitled", pattern: { glob: "**/*.ts" } }],
 				oldUri: "untitled:///OLD.TS",
 				newUri: "untitled:///NEW.TS",
+				sent: false,
+			},
+			{
+				name: "unsupported wire URI scheme fails closed without filter scheme",
+				filters: [{ pattern: { glob: "**/*.ts" } }],
+				oldUri: "vscode-vfs://host/old.ts",
+				newUri: "vscode-vfs://host/new.ts",
 				sent: false,
 			},
 			{
@@ -508,6 +527,24 @@ describe("LSP Client Integration — nested capability gates (#1971)", () => {
 				registered: false,
 			},
 		];
+		let symlinkPaths: { oldPath: string; newPath: string } | undefined;
+		try {
+			const oldLink = path.join(tempRoot, "old-link");
+			const newLink = path.join(tempRoot, "new-link");
+			fs.symlinkSync(oldFolder, oldLink, "junction");
+			symlinkPaths = { oldPath: oldLink, newPath: newLink };
+		} catch {
+			ctx.skip();
+			return;
+		}
+		if (symlinkPaths) {
+			cases.push({
+				name: "matches file treats a directory symlink as the renamed entity",
+				filters: [filter("**/old-link", { matches: "file" })],
+				...symlinkPaths,
+				sent: true,
+			});
+		}
 
 		try {
 			for (const operation of ["will", "did"] as const) {
@@ -607,6 +644,22 @@ describe("LSP Client Integration — nested capability gates (#1971)", () => {
 			await stopLSP(unregistered);
 		}
 
+		const malformed = await launchLSP(process.execPath, [FAKE_SERVER_PATH], {
+			cwd: process.cwd(),
+			env: { ...process.env, FAKE_LSP_WILL_RENAME: "malformed" },
+		});
+		const malformedClient = await createLSPClient({
+			serverId: "fake-malformed-registration",
+			process: malformed,
+			root: process.cwd(),
+		});
+		try {
+			await malformedClient.willRenameFiles("old.ts", "new.ts");
+		} finally {
+			await malformedClient.shutdown();
+			await stopLSP(malformed);
+		}
+
 		const mismatched = await launchLSP(process.execPath, [FAKE_SERVER_PATH], {
 			cwd: process.cwd(),
 			env: {
@@ -631,7 +684,11 @@ describe("LSP Client Integration — nested capability gates (#1971)", () => {
 			.find((group) => group.kind === "lsp-capability-skip")
 			?.latestReasons.map((entry) => entry.reason);
 		expect(reasons).toEqual(
-			expect.arrayContaining(["no-registration", "filter-mismatch"]),
+			expect.arrayContaining([
+				"no-registration",
+				"malformed-registration",
+				"filter-mismatch",
+			]),
 		);
 	});
 

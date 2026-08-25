@@ -2256,3 +2256,10 @@ Process-table resource samples preserve query outcome. `clients/child-unref.ts`
 those failures, so consumers leave usage unknown rather than fabricating zero
 samples, and records one bounded `resource-sampler-query-failed` degradation
 per query subject. (#1863)
+
+File-operation rename filters match only the decoded URI path, never a basename
+fallback. Unsupported wire URI schemes fail closed; entity-kind probes are
+conditional on a filter declaring `matches` and use `lstat` so symlinks are
+classified as the renamed entity. Parsed filters and operation capability stay
+an invariant: filters undefined means the capability is absent; malformed
+initialize options are separately labeled in capability-skip telemetry.

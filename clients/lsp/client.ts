@@ -10,7 +10,7 @@
 
 import { spawn as nodeSpawn } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { access, readFile, stat } from "node:fs/promises";
+import { access, lstat, readFile } from "node:fs/promises";
 import * as os from "node:os";
 import { pathToFileURL } from "node:url";
 import { emitBounded } from "../bounded-telemetry.js";
@@ -996,6 +996,8 @@ export interface LSPClientState {
 		willRename?: LSPFileOperationFilter[];
 		didRename?: LSPFileOperationFilter[];
 	};
+	/** Static initialize-time distinction for capability-skip telemetry. */
+	fileOperationMalformedRegistrations?: Set<"willRename" | "didRename">;
 	/** Top-level keys of the raw ServerCapabilities from initialize (sorted) —
 	 *  captured once; the full advertised surface for diagnostics/documentation. */
 	rawCapabilityKeys?: string[];
@@ -4867,6 +4869,21 @@ export async function createLSPClient(options: {
 	const fileOperations = isCapabilityRecord(workspace)
 		? workspace.fileOperations
 		: undefined;
+	const malformedFileOperationRegistrations = new Set<
+		"willRename" | "didRename"
+	>();
+	if (isCapabilityRecord(fileOperations)) {
+		for (const operation of ["willRename", "didRename"] as const) {
+			if (
+				fileOperations[operation] !== undefined &&
+				parseFileOperationFilters(fileOperations[operation]) === undefined
+			) {
+				malformedFileOperationRegistrations.add(operation);
+			}
+		}
+	}
+	state.fileOperationMalformedRegistrations =
+		malformedFileOperationRegistrations;
 	if (isCapabilityRecord(fileOperations)) {
 		state.fileOperationFilters = {
 			willRename: parseFileOperationFilters(fileOperations.willRename),
@@ -5234,7 +5251,9 @@ export async function createLSPClient(options: {
 				recordDegradationOnce({
 					kind: "lsp-capability-skip",
 					subject: `${state.serverId}:workspace/willRenameFiles`,
-					reason: "no-registration",
+					reason: state.fileOperationMalformedRegistrations?.has("willRename")
+						? "malformed-registration"
+						: "no-registration",
 				});
 				return null;
 			}
@@ -5276,14 +5295,11 @@ export async function createLSPClient(options: {
 
 		async didRenameFiles(oldFilePath, newFilePath, oldUri, newUri) {
 			if (!isClientAlive(state)) return;
-			if (!state.operationSupport.didRenameFiles) {
-				recordDegradationOnce({
-					kind: "lsp-capability-skip",
-					subject: `${state.serverId}:workspace/didRenameFiles`,
-					reason: "no-registration",
-				});
-				return;
-			}
+			// `fileOperationFilters.didRename` is parsed by the same predicate that
+			// derives operationSupport.didRenameFiles (see
+			// isFileOperationRegistrationOptions). Thus filters undefined iff the
+			// capability is absent; the service-level gate remains the enforcement
+			// point for aggregated dispatch.
 			// #1971 review: same registration-filter discipline as willRename —
 			// the server only signed up to hear about matching paths.
 			const wireOldUri = oldUri ?? pathToFileURL(oldFilePath).href;
@@ -5708,8 +5724,9 @@ async function fileOperationFiltersMatch(
 ): Promise<boolean> {
 	if (!filters || filters.length === 0) return false;
 	const candidates = [oldUri, newUri].flatMap(fileOperationUriCandidates);
-	if (candidates.length === 0) return false;
-	const entityKind = await probeRenameEntityKind(oldFilePath, newFilePath);
+	const entityKind = filters.some((filter) => filter.matches !== undefined)
+		? await probeRenameEntityKind(oldFilePath, newFilePath)
+		: undefined;
 	for (const filter of filters) {
 		if (filter.scheme !== undefined && filter.scheme !== "file") continue;
 		if (filter.matches !== undefined && filter.matches !== entityKind) continue;
@@ -5747,7 +5764,7 @@ function fileOperationUriCandidates(uri: string): string[] {
 	} catch {
 		return [];
 	}
-	return [uriPath, uriPath.split("/").at(-1) ?? uriPath];
+	return [uriPath];
 }
 
 async function probeRenameEntityKind(
@@ -5756,7 +5773,7 @@ async function probeRenameEntityKind(
 ): Promise<"file" | "folder" | undefined> {
 	for (const filePath of [oldFilePath, newFilePath]) {
 		try {
-			const info = await stat(filePath);
+			const info = await lstat(filePath);
 			return info.isDirectory() ? "folder" : "file";
 		} catch {
 			// Before the rename the old path normally exists; after it, the new path
