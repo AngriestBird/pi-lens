@@ -6,9 +6,10 @@ import type { LSPClientInfo } from "../../../clients/lsp/client.js";
 import { LSPService } from "../../../clients/lsp/index.js";
 import type { LSPServerInfo } from "../../../clients/lsp/server.js";
 import {
-	enforceLspRootCeiling,
-	setLspSessionCwd,
-} from "../../../clients/lsp/server.js";
+	initLSPConfig,
+	resetLSPConfigStateForTests,
+} from "../../../clients/lsp/config.js";
+import { enforceLspRootCeiling } from "../../../clients/lsp/server.js";
 import { normalizeMapKey } from "../../../clients/path-utils.js";
 import { removeTempDirSync } from "../test-utils.js";
 
@@ -30,7 +31,7 @@ const dirs: string[] = [];
 afterEach(() => {
 	for (const dir of dirs.splice(0)) removeTempDirSync(dir);
 	vi.restoreAllMocks();
-	setLspSessionCwd();
+	resetLSPConfigStateForTests();
 });
 
 function fakeClient(root: string): LSPClientInfo {
@@ -90,11 +91,12 @@ describe("LSP per-server nested-root coalescing (#1373)", () => {
 		cwdSpy.mockRestore();
 	});
 
-	it("declines a file whose nearest root is outside the session cwd", async () => {
+	it("declines a file outside every registered session root", async () => {
 		const project = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-session-"));
 		const foreign = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-foreign-"));
 		dirs.push(project, foreign);
-		setLspSessionCwd(project);
+		resetLSPConfigStateForTests();
+		await initLSPConfig(project);
 		const service = new LSPService() as unknown as RootPolicyHarness;
 		const server = {
 			...markerServer("typescript"),
@@ -104,6 +106,49 @@ describe("LSP per-server nested-root coalescing (#1373)", () => {
 		await expect(
 			service.resolveServerRoot(server, path.join(foreign, "app.ts")),
 		).resolves.toBeUndefined();
+	});
+
+	// #2052 fix round 1 (F2). The decline gate used to read a single
+	// last-writer-wins session-cwd latch, so initializing a SECOND project
+	// silently made the FIRST project's files foreign. The registry keeps every
+	// initialized root live.
+	it("serves a file under an earlier session root after a second root initializes", async () => {
+		const projectA = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-multi-a-"));
+		const projectB = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-multi-b-"));
+		dirs.push(projectA, projectB);
+		resetLSPConfigStateForTests();
+		await initLSPConfig(projectA);
+		await initLSPConfig(projectB);
+
+		const service = new LSPService() as unknown as RootPolicyHarness;
+		const server = {
+			...markerServer("typescript"),
+			root: async () => projectA,
+		};
+
+		// projectA initialized FIRST and projectB LAST; projectA must still serve.
+		await expect(
+			service.resolveServerRoot(server, path.join(projectA, "a.ts")),
+		).resolves.toBe(projectA);
+	});
+
+	// #2052 fix round 1 (F1). An EMPTY registry means initLSPConfig never ran.
+	// Declining then would let process.cwd() gate a refusal for callers that
+	// never declared a session at all.
+	it("declines nothing when no session root is registered", async () => {
+		const foreign = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-noreg-"));
+		dirs.push(foreign);
+		resetLSPConfigStateForTests();
+
+		const service = new LSPService() as unknown as RootPolicyHarness;
+		const server = {
+			...markerServer("typescript"),
+			root: async () => foreign,
+		};
+
+		await expect(
+			service.resolveServerRoot(server, path.join(foreign, "app.ts")),
+		).resolves.toBe(foreign);
 	});
 
 	it("coalesces a config-only TypeScript root with an already-hosted ancestor", async () => {

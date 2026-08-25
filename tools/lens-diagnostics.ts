@@ -1278,6 +1278,10 @@ const UNCONFIRMED_REASON_SENTENCE: Record<
 	// completely different failure from a timeout. Must never collapse into
 	// "within budget", the exact string this PR exists to stop misrendering.
 	binding_mismatch: "the file changed on disk since this result was computed",
+	// #2052: no server was asked. Say WHY and say it is permanent for this
+	// path, so the reader does not read an empty result as "clean" or retry it.
+	outside_project_root:
+		"the file is outside every initialized session project root, so no language server was asked",
 };
 
 // Short per-reason label used only when MORE than one reason is present, so
@@ -1293,6 +1297,7 @@ const UNCONFIRMED_REASON_COUNT_LABEL: Record<
 	service_destroyed: "service reset mid-sweep",
 	error: "errored",
 	binding_mismatch: "stale binding",
+	outside_project_root: "outside project root",
 };
 
 /**
