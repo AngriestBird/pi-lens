@@ -27,8 +27,29 @@
  */
 
 import { spawn } from "node:child_process";
+import * as fs from "node:fs";
 import * as os from "node:os";
 import { formatVerdict, readMemory, shouldPrint } from "./lib/memory-watch.mjs";
+
+/**
+ * Every line this wrapper emits goes through a BLOCKING write to fd 1, never
+ * `process.stdout.write`.
+ *
+ * When stdout is a pipe, Node buffers writes and flushes them asynchronously,
+ * and `process.exit()` discards whatever is still queued. A reader that has
+ * fallen behind — a log collector under memory pressure, which is precisely the
+ * scenario this file exists for — fills the pipe, so the verdict line is queued
+ * rather than written, and then thrown away microseconds later. The #2093
+ * review reproduced that 3/3 on Linux with a slow reader: correct exit code, no
+ * verdict line. `fs.writeSync` blocks until the bytes reach the OS, so the
+ * record survives.
+ *
+ * Node writes to pipes synchronously on Windows and asynchronously on Linux, so
+ * this only ever went wrong on the platform CI runs on.
+ */
+function emit(line) {
+	fs.writeSync(1, line);
+}
 
 const separator = process.argv.indexOf("--");
 const command = separator === -1 ? [] : process.argv.slice(separator + 1);
@@ -44,7 +65,7 @@ const thresholdMb = Number(process.env.PI_LENS_MEM_WATCH_LOW_MB) || 1024;
 const stepMb = Number(process.env.PI_LENS_MEM_WATCH_STEP_MB) || 1024;
 
 const first = readMemory();
-process.stdout.write(
+emit(
 	`[mem-watch] host cpus=${os.availableParallelism?.() ?? os.cpus().length} ` +
 		`totalMb=${first.totalMb} availableMb=${first.availableMb} ` +
 		`source=${first.source} intervalMs=${intervalMs}\n`,
@@ -66,7 +87,7 @@ const timer = setInterval(() => {
 	}
 	if (shouldPrint(sample, state)) {
 		state.lastPrintedMb = sample.availableMb;
-		process.stdout.write(
+		emit(
 			`[mem-watch] ${at} availableMb=${sample.availableMb} of ${sample.totalMb}\n`,
 		);
 	}
@@ -74,6 +95,11 @@ const timer = setInterval(() => {
 // The watcher must never be the reason the process stays alive.
 timer.unref?.();
 
+// CI-only, and CI is Linux. The win32 branch is a courtesy for running the
+// wrapper by hand on a dev box: Windows cannot exec `npm` without a shell, and
+// `shell: true` concatenates rather than escapes the arguments, so a path with
+// a space or a shell metacharacter would be mis-parsed. Do not build a Windows
+// job on this.
 const child = spawn(command[0], command.slice(1), {
 	stdio: "inherit",
 	shell: process.platform === "win32",
@@ -87,7 +113,7 @@ child.on("error", (error) => {
 
 child.on("exit", (code, signal) => {
 	clearInterval(timer);
-	process.stdout.write(`${formatVerdict({ code, signal }, watch)}\n`);
+	emit(`${formatVerdict({ code, signal }, watch)}\n`);
 	// Re-raising the signal would make this wrapper's own death the story. Map
 	// it to the shell's 128+n instead, which is the code CI already reports.
 	if (signal) process.exit(128 + (os.constants.signals[signal] ?? 0));

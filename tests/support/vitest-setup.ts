@@ -76,8 +76,14 @@ if (toolTemplate) {
 // 2267 MB. The heavy tail is NATIVE memory — tree-sitter wasm grammar compiles
 // and @ast-grep/napi arenas — which no V8 flag bounds and no reporter shows.
 //
-// Without this line an OOM-killed CI run names nothing at all. With it, the
-// last lines before the kill name the files that were resident.
+// What this record can and cannot say. It is an `afterAll` hook, so it only
+// fires for a file that FINISHED. The file that was mid-run when the OS killed
+// the job never reports its own peak. What the last lines before a kill name is
+// the completed co-residents -- the memory profile of the phase the run died
+// in, not the culprit. That is still far better than the nothing there was
+// before, but it is circumstantial evidence, not attribution, and the
+// `[mem-watch]` low-water mark is the record that says how close the run
+// actually came.
 //
 // `maxRSS` is kilobytes on every platform: libuv normalizes the Win32 peak
 // working set for `uv_getrusage`, so no per-platform scaling is needed.

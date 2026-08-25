@@ -129,6 +129,38 @@ describe("test worker budget (#2042)", () => {
 		}
 	});
 
+	it("runs the heavy phase STRICTLY below the general cap when it can", () => {
+		// The ordering test above accepts equality, so it passes for a resolver
+		// that never halves anything. This one pins the halving itself: wherever
+		// the general cap is 2 or more, the heavy phase must be strictly smaller.
+		// Mutating `Math.floor(ciWorkers / 2)` to `ciWorkers` reds exactly here.
+		for (const [totalMemMb, cpus] of [
+			[16_384, 4],
+			[16_384, 3],
+			[32_768, 8],
+			[65_536, 32],
+		]) {
+			const budget = resolveTestWorkerBudget({ totalMemMb, cpus, ci: true });
+			const where = `${totalMemMb}MB/${cpus}cpu`;
+			expect(budget.maxWorkers, where).toBeGreaterThanOrEqual(2);
+			expect(budget.heavyMaxWorkers, where).toBeLessThan(
+				budget.maxWorkers as number,
+			);
+		}
+	});
+
+	it("keeps the local heavy phase at 2 on any core count", () => {
+		// Deriving this from core count silently moved a 1-3 core dev box to 1.
+		// The local posture is the pre-#2042 literal, and it does not vary.
+		for (const cpus of [1, 2, 3, 4, 8, 16]) {
+			expect(
+				resolveTestWorkerBudget({ totalMemMb: 65_536, cpus, ci: false })
+					.heavyMaxWorkers,
+				`${cpus}cpu`,
+			).toBe(2);
+		}
+	});
+
 	it("holds the per-fork heap ceiling between its correctness floor and cap", () => {
 		for (const [totalMemMb, cpus] of [
 			[2048, 1],

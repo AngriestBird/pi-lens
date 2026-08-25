@@ -22,6 +22,17 @@
 // `--max-old-space-size` cannot bound the growing axis, and `maxWorkers` bounds
 // the wrong one. Dividing the host's real memory by a measured per-worker peak
 // is the lever that fits.
+//
+// PROVENANCE OF THOSE NUMBERS, because it matters for how much to trust them:
+// they were measured on the DEV host (Windows, 16 cores, 15.6 GB), not on the
+// runner. The first `[mem-file]` lines from CI show Linux running roughly three
+// times leaner on the same files -- `tree-sitter-imports.test.ts` peaks at
+// 580 MB there against 1601 MB here, and 7 files clear 512 MB on CI against 42
+// clearing 1 GB on the dev host. So WORKER_PEAK_RSS_BUDGET_MB is conservative
+// against the profile it actually governs: it reserves more per worker than a
+// CI fork needs, which errs toward fewer workers. That is the safe direction,
+// but it is an unvalidated constant on Linux, and it should be re-derived from
+// accumulated `[mem-file]` data rather than treated as settled.
 
 /**
  * Per-worker peak-RSS budget, in MB: the measured p99 (1405 MB) rounded up to
@@ -73,11 +84,10 @@ export function resolveTestWorkerBudget(host) {
 	const maxWorkers = ci ? ciWorkers : workerOverride || LOCAL_MAX_WORKERS;
 
 	// The heavy phase's files each peaked at 1.4-3.9 GB, above the general
-	// budget, so it runs at half the general concurrency (floor 1). Locally that
-	// still lands on the pre-#2042 cap of 2 on any host with >= 6 cores.
-	const heavyMaxWorkers = ci
-		? Math.max(1, Math.floor(ciWorkers / 2))
-		: Math.max(1, Math.min(2, Math.floor(cpus / 2)));
+	// budget, so on CI it runs at half the general concurrency (floor 1). Locally
+	// it stays the plain pre-#2042 literal 2: deriving it from core count bought
+	// nothing and silently changed the local posture to 1 on a 1-3 core box.
+	const heavyMaxWorkers = ci ? Math.max(1, Math.floor(ciWorkers / 2)) : 2;
 
 	// Per-fork V8 heap ceiling: aim at half the host's memory shared between the
 	// concurrent forks, then clamp. The clamp usually wins, and that is the
