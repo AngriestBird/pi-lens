@@ -5,6 +5,10 @@ type GitOptions = {
 	stdio?: "ignore" | "pipe" | "inherit";
 };
 
+export function envFor(
+	cwd: string,
+	overrides?: Record<string, string | undefined>,
+): Record<string, string | undefined>;
 export function gitExecFileSync(
 	args: string[],
 	options?: GitOptions,

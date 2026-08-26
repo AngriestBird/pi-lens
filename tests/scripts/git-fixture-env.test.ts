@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import {
+	envFor,
 	gitExecFileSync,
 	gitExecSync,
 } from "../../scripts/lib/git-fixture-env.mjs";
@@ -32,6 +33,19 @@ describe("JavaScript Git fixture environment", () => {
 				}),
 			),
 		).toBe(".git\n");
+	});
+
+	it("scrubs indexed config keys even without a count (review F1)", () => {
+		// GIT_CONFIG_COUNT is scrubbed by name, so git would ignore orphaned
+		// KEY/VALUE entries anyway; this pins the pattern loop itself so a
+		// future COUNT passthrough cannot resurrect the injection.
+		const env = envFor("C:/tmp", {
+			GIT_CONFIG_KEY_0: "core.bare",
+			GIT_CONFIG_VALUE_0: "true",
+		});
+		expect(env.GIT_CONFIG_KEY_0).toBeUndefined();
+		expect(env.GIT_CONFIG_VALUE_0).toBeUndefined();
+		expect(env.GIT_CONFIG_NOSYSTEM).toBe("1");
 	});
 
 	it("keeps exec and shell wrappers inside a throwaway repository", () => {
