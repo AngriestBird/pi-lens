@@ -1826,6 +1826,29 @@ const serializedWordIndexCaches = new WeakMap<
 	SerializedWordIndexCache
 >();
 
+/**
+ * Deterministic work performed by the most recent {@link serializeWordIndex}
+ * call: how many distinct tokens the persist pass re-flattened, and whether
+ * it took the bounded incremental path or fell back to a full rebuild.
+ * Test-only observability (#2202) — the incremental path's whole point is to
+ * touch O(dirty-file tokens), not O(corpus tokens), and that property is a
+ * deterministic count, not a wall-clock duration, so it does not flake under
+ * runner load the way a same-run timing ratio does.
+ */
+export interface WordIndexSerializeWork {
+	affectedTokenCount: number;
+	tookFullPath: boolean;
+}
+
+let _lastSerializeWork: WordIndexSerializeWork | undefined;
+
+/** Test-only: work stats for the most recent {@link serializeWordIndex} call. */
+export function getLastWordIndexSerializeWork():
+	| WordIndexSerializeWork
+	| undefined {
+	return _lastSerializeWork;
+}
+
 function serializeWordIndexFull(index: WordIndex): SerializedWordIndexCache {
 	const files = [...index.docLengths.keys()];
 	// `files` carries whatever spelling `docLengths` last stored, which can
@@ -1878,6 +1901,7 @@ function serializeWordIndexFull(index: WordIndex): SerializedWordIndexCache {
 			);
 		}
 	}
+	_lastSerializeWork = { affectedTokenCount: postings.length, tookFullPath: true };
 	return { serialized, slotByFileId, tokensByFile };
 }
 
@@ -1913,7 +1937,10 @@ function serializeWordIndexIncrementally(
 		...priorFiles,
 		...files.filter((file) => !priorKeys.has(wordIndexKey(file))),
 	];
-	if (!dirty || dirty.size === 0) return cache;
+	if (!dirty || dirty.size === 0) {
+		_lastSerializeWork = { affectedTokenCount: 0, tookFullPath: false };
+		return cache;
+	}
 
 	const slotByFileId = new Map(cache.slotByFileId);
 	for (let i = priorFiles.length; i < filesInWireOrder.length; i += 1) {
@@ -1992,6 +2019,10 @@ function serializeWordIndexIncrementally(
 		totalTokens: index.totalTokens,
 		indexedFileCount: index.docCount,
 		truncated: index.truncated,
+	};
+	_lastSerializeWork = {
+		affectedTokenCount: affectedTokens.size,
+		tookFullPath: false,
 	};
 	return { serialized, slotByFileId, tokensByFile };
 }

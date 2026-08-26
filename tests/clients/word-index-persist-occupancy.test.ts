@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
 	buildWordIndex,
+	getLastWordIndexSerializeWork,
 	serializeWordIndex,
 	updateWordIndexDocument,
 } from "../../clients/word-index.js";
@@ -9,8 +10,21 @@ import { measureMaxSyncBlockMs } from "../support/perf-harness.js";
 describe("incremental word-index persist occupancy (#2068)", () => {
 	it(
 		"measures dirty-fraction scaling on the review fixture",
-		{ retry: 2, timeout: 120_000 },
+		{ timeout: 30_000 },
 		() => {
+			// #2202: this guard used to assert a same-run wall-clock ratio
+			// (dirty=750 ms < fullMs * 1.5). A reviewer replicated it 20x under
+			// 57-94% CPU load and measured a 0.436x-3.863x spread — noise wider
+			// than the 2x regression the guard exists to catch, and retry: 2
+			// only escapes a calibrated 2x-work injection about 2/3 of the
+			// time (it biases toward the fast tail, not away from the slow
+			// one). Wall clock cannot carry this assertion at any threshold.
+			// The property under test — the incremental path touches
+			// O(dirty-file tokens), not O(corpus tokens) — is a deterministic
+			// count, so this reads it straight from serializeWordIndex's own
+			// bookkeeping instead of timing it. A regression that made the
+			// incremental path scan the whole corpus shows up as a count,
+			// every run, independent of runner load.
 			const shared = Array.from({ length: 200 }, (_, i) => `shared_${i}`).join(
 				" ",
 			);
@@ -19,10 +33,13 @@ describe("incremental word-index persist occupancy (#2068)", () => {
 				content: `${shared} stable_${file}`,
 			}));
 			const fullIndex = buildWordIndex(docs);
-			const fullStarted = performance.now();
 			serializeWordIndex(fullIndex);
-			const fullMs = performance.now() - fullStarted;
-			const measurements: Array<{ dirty: number; ms: number }> = [];
+			const fullWork = getLastWordIndexSerializeWork();
+			const work: Array<{
+				dirty: number;
+				affectedTokenCount: number;
+				tookFullPath: boolean;
+			}> = [];
 			for (const dirty of [1, 75, 750]) {
 				const index = buildWordIndex(docs);
 				serializeWordIndex(index);
@@ -32,32 +49,39 @@ describe("incremental word-index persist occupancy (#2068)", () => {
 						content: `${shared} changed_${file}`,
 					});
 				}
-				const started = performance.now();
 				serializeWordIndex(index);
-				measurements.push({ dirty, ms: performance.now() - started });
+				const stats = getLastWordIndexSerializeWork();
+				work.push({
+					dirty,
+					affectedTokenCount: stats?.affectedTokenCount ?? -1,
+					tookFullPath: stats?.tookFullPath ?? true,
+				});
 			}
 			console.log(
 				JSON.stringify({
 					fixture: "750-doc/200-shared-token",
-					fullMs,
-					measurements,
+					fullWork,
+					work,
 				}),
 			);
-			expect(measurements).toHaveLength(3);
-			// Reviewed bounds unchanged; loaded-runner noise is absorbed by the
-			// retry option instead (a wider margin proved to mask the
-			// fallback-removed mutation on fast hosts, #2202).
-			// Observed noise (#2202): isolated local runs land at 0.6x-1.1x
-			// fullMs for the dirty=750 case. Under synthetic load (26 busy
-			// workers on a 16-core host) it breached the bound once at 1.86x
-			// fullMs (116.9ms vs. a 62.8ms same-run baseline; CI itself hit
-			// 197.98ms vs. a 152.13ms bound, a 1.3x breach). retry: 2
-			// re-measures a fresh baseline and passed at 0.56x on the next
-			// attempt, confirming the breach is runner noise, not a
-			// regression in the incremental path.
-			expect(measurements[0].ms).toBeLessThan(fullMs);
-			expect(measurements[1].ms).toBeLessThan(fullMs);
-			expect(measurements[2].ms).toBeLessThan(fullMs * 1.5);
+			expect(work).toHaveLength(3);
+			expect(fullWork).toBeDefined();
+			const fullTokenCount = fullWork!.affectedTokenCount;
+			// dirty=1 and dirty=75 stay under the >50%-dirty crossover (#2068),
+			// so they must take the bounded incremental path and touch a
+			// minority of the corpus's tokens, never the whole corpus.
+			expect(work[0].tookFullPath).toBe(false);
+			expect(work[1].tookFullPath).toBe(false);
+			expect(work[0].affectedTokenCount).toBeLessThan(fullTokenCount * 0.5);
+			expect(work[1].affectedTokenCount).toBeLessThan(fullTokenCount * 0.5);
+			// More dirty files touch at least as many tokens, never fewer.
+			expect(work[1].affectedTokenCount).toBeGreaterThanOrEqual(
+				work[0].affectedTokenCount,
+			);
+			// dirty=750 crosses the crossover threshold and deliberately falls
+			// back to a full rebuild (#2068's documented heuristic) —
+			// expected, not a regression signal.
+			expect(work[2].tookFullPath).toBe(true);
 		},
 	);
 
