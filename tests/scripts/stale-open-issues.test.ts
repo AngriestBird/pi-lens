@@ -174,6 +174,35 @@ describe("stale open-issue detector (#1323)", () => {
 		);
 	});
 
+	it("keeps the bounded commit window and reports truncation", async () => {
+		const pages = Array.from({ length: MAX_PAGES }, (_, pageIndex) =>
+			Array.from({ length: PAGE_SIZE }, (_, itemIndex) => ({
+				sha: `page${pageIndex}-sha${itemIndex}`,
+				commit: { message: "chore: routine" },
+			})),
+		);
+		const commits = pages.flat();
+		const fetcher = async (url: string) => {
+			const parsed = new URL(url);
+			if (parsed.pathname.endsWith("/issues"))
+				return { ok: true, status: 200, json: async () => [] };
+			if (parsed.pathname.endsWith("/commits"))
+				return {
+					ok: true,
+					status: 200,
+					json: async () => pages[Number(parsed.searchParams.get("page")) - 1],
+				};
+			return { ok: true, status: 200, json: async () => ({ files: [] }) };
+		};
+
+		const result = await detectStaleOpenIssues({
+			fetcher,
+			repository: "acme/repo",
+		});
+		expect(result.candidates).toEqual([]);
+		expect(result.truncatedCommits).toBe(commits.length - MAX_COMMIT_DETAILS);
+	});
+
 	it("keeps API work bounded and formats one detection-only summary", async () => {
 		const { fetcher, calls } = fakeGithub({
 			"/repos/acme/repo/issues": [],

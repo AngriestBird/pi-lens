@@ -71,7 +71,12 @@ async function getJson(fetcher, url) {
 	return response.json();
 }
 
-async function paged(fetcher, baseUrl, params = {}) {
+async function paged(
+	fetcher,
+	baseUrl,
+	params = {},
+	{ exhaustive = false } = {},
+) {
 	const values = [];
 	for (let page = 1; page <= MAX_PAGES; page++) {
 		const query = new URLSearchParams({
@@ -84,7 +89,9 @@ async function paged(fetcher, baseUrl, params = {}) {
 			throw new Error(`GitHub API returned a non-array for ${baseUrl}`);
 		values.push(...batch);
 		if (batch.length < PAGE_SIZE) break;
-		if (page === MAX_PAGES)
+		// A full final page does not prove another page exists, so exhaustive
+		// callers fail conservatively at the bound instead of using partial data.
+		if (exhaustive && page === MAX_PAGES)
 			throw new Error(
 				`GitHub API pagination bound reached for ${baseUrl}; refusing to use a partial response`,
 			);
@@ -101,6 +108,7 @@ export async function detectStaleOpenIssues({
 		fetcher,
 		`https://api.github.com/repos/${repository}/issues`,
 		{ state: "open" },
+		{ exhaustive: true },
 	);
 	const issueNumbers = new Set(
 		openIssues
