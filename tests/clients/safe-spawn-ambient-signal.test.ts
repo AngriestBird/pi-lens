@@ -9,7 +9,10 @@
  */
 
 import { afterEach, describe, expect, it } from "vitest";
-import { safeSpawnAsync, setAmbientAbortSignal } from "../../clients/safe-spawn.js";
+import {
+	safeSpawnAsync,
+	setAmbientAbortSignal,
+} from "../../clients/safe-spawn.js";
 import {
 	killedForOutputCap,
 	truncatedByOutputCap,
