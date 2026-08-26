@@ -334,24 +334,32 @@ describe("review graph service", () => {
 		}
 	});
 
-	it("case-variant workspace clears invalidate the source-path memo (#2072 F5)", async () => {
-		const env = setupTestEnvironment("pi-lens-review-graph-source-memo-clear-");
-		try {
-			createTempFile(env.tmpDir, "src/a.ts", "export const a = 1;\n");
-			_resetReviewGraphSourcePathMemoForTests();
-			const first = await getGraphSourceFiles(env.tmpDir);
-			if (process.platform !== "win32") return;
-			const variant = env.tmpDir.replace(/[A-Za-z](?=[^\\/]*$)/, (c) =>
-				c === c.toUpperCase() ? c.toLowerCase() : c.toUpperCase(),
+	// The case variant only aliases the same workspace on Windows, so the gate
+	// is declarative: an early return mid-body reported a PASS on every Linux
+	// CI run while asserting nothing (#2089). `it.skipIf` prints no reason, so
+	// the name carries it.
+	it.skipIf(process.platform !== "win32")(
+		"case-variant workspace clears invalidate the source-path memo, on win32 only (#2072 F5)",
+		async () => {
+			const env = setupTestEnvironment(
+				"pi-lens-review-graph-source-memo-clear-",
 			);
-			clearReviewGraphWorkspaceCache(variant);
-			const second = await getGraphSourceFiles(env.tmpDir);
-			expect(second.pathNormalizeCalls).toBe(first.files.length);
-		} finally {
-			_resetReviewGraphSourcePathMemoForTests();
-			env.cleanup();
-		}
-	});
+			try {
+				createTempFile(env.tmpDir, "src/a.ts", "export const a = 1;\n");
+				_resetReviewGraphSourcePathMemoForTests();
+				const first = await getGraphSourceFiles(env.tmpDir);
+				const variant = env.tmpDir.replace(/[A-Za-z](?=[^\\/]*$)/, (c) =>
+					c === c.toUpperCase() ? c.toLowerCase() : c.toUpperCase(),
+				);
+				clearReviewGraphWorkspaceCache(variant);
+				const second = await getGraphSourceFiles(env.tmpDir);
+				expect(second.pathNormalizeCalls).toBe(first.files.length);
+			} finally {
+				_resetReviewGraphSourcePathMemoForTests();
+				env.cleanup();
+			}
+		},
+	);
 
 	it("getCachedReviewGraph returns a shared, indexed object — no per-call clone (#260)", async () => {
 		const env = setupTestEnvironment("pi-lens-review-graph-shared-");
