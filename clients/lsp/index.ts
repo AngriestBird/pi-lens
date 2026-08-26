@@ -4858,18 +4858,9 @@ export class LSPService {
 						// Push already answered (settled, or published diagnostics that
 						// its wait is about to settle on) — nothing to confirm, no sync
 						// request goes out.
-						let publishedAt: number | undefined;
-						try {
-							publishedAt = primaryClient
-								.getAllDiagnostics()
-								.get(normalizedPath)?.ts;
-						} catch {
-							recordDegradationOnce({
-								kind: "lsp-diagnostics-timeout",
-								subject: `${primaryClient.serverId}:${normalizedPath}`,
-								reason: "primary sync publication probe unavailable",
-							});
-						}
+						const publishedAt = primaryClient
+							.getAllDiagnostics()
+							.get(normalizedPath)?.ts;
 						if (
 							pushWaitSettled ||
 							(publishedAt !== undefined && publishedAt > markedAtMs)
