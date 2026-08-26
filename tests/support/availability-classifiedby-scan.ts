@@ -66,6 +66,19 @@ export function scanSource(
 	const opener = new RegExp(`(?<![A-Za-z0-9_$.])${CALLEE}\\s*\\(`, "g");
 	let match = opener.exec(source);
 	while (match !== null) {
+		// The function's OWN declaration
+		// (`export function logAvailabilityDecision(decision: ...)`) reads no
+		// differently from a call under the bare-identifier regex above, so it
+		// is excluded by what precedes the name: only a declaration is preceded
+		// by the `function` keyword. Checking for a `tool:` key instead (an
+		// earlier version of this fix) also excluded real calls that carry
+		// `tool` through a `{...base, ...}` spread or pass the whole decision
+		// as a variable (`logAvailabilityDecision(decisionVar)`) — this is a
+		// general fix, not a `tool`-shaped one (#2226 review F3).
+		if (/\bfunction\s*$/.test(source.slice(0, match.index))) {
+			match = opener.exec(source);
+			continue;
+		}
 		const openIndex = source.indexOf("(", match.index);
 		const argsText = readBalancedArgs(source, openIndex);
 		const verdict = readTopLevelProperty(argsText, "verdict");
