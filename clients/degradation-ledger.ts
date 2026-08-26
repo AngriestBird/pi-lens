@@ -389,7 +389,21 @@ export type DegradationKind =
 	 * the recursion this design avoids — see `ndjson-logger.ts`'s
 	 * `writeFailures` doc comment.
 	 */
-	| "log-sink-write-failure";
+	| "log-sink-write-failure"
+	/**
+	 * A word-index posting named a file id the file table could not resolve to
+	 * a path, so the posting was dropped from a search result or a decoded hit
+	 * list (#2069). Since #2069 a posting carries an integer id rather than a
+	 * shared string, and an id is only released once the forward index has
+	 * enumerated and removed every posting naming it — so this is unreachable
+	 * by construction and means that invariant broke. Without this kind the
+	 * drop is invisible: the query returns a SHORTER result list and nothing
+	 * distinguishes it from a genuinely smaller match set (AGENTS.md shape 10,
+	 * an empty or reduced result that cannot tell clean from errored). Subject
+	 * is the orphaned id, so aggregation still answers WHICH id leaked after
+	 * the per-kind entry bound is reached.
+	 */
+	| "word-index-orphan-file-id";
 
 export interface DegradationRecord {
 	kind: unknown;

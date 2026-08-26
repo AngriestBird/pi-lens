@@ -933,6 +933,7 @@ async function buildOrRefreshWordIndex(args: {
 			deserializeWordIndex,
 			refreshWordIndexIncrementally,
 			countWordIndexPostingEntries,
+			estimateWordIndexResidentBytes,
 		} = await import("./word-index.js");
 		const deserializeStartMs = Date.now();
 		const index = deserializeWordIndex(snapshot.wordIndex);
@@ -995,6 +996,7 @@ async function buildOrRefreshWordIndex(args: {
 						indexedFileCount: index.docCount,
 						tokens: index.postings.size,
 						postingEntries: countWordIndexPostingEntries(index),
+						residentBytes: estimateWordIndexResidentBytes(index),
 						truncated: index.truncated,
 						phaseDurationsMs: {
 							snapshotLoadMs,
@@ -1040,6 +1042,7 @@ async function buildOrRefreshWordIndex(args: {
 		buildWordIndexAsync,
 		collectWordIndexDocs,
 		countWordIndexPostingEntries,
+		estimateWordIndexResidentBytes,
 	} = await import("./word-index.js");
 	const docs = await collectWordIndexDocs(
 		analysisRoot,
@@ -1083,6 +1086,7 @@ async function buildOrRefreshWordIndex(args: {
 		indexedFileCount: runtime.wordIndex.docCount,
 		tokens: runtime.wordIndex.postings.size,
 		postingEntries: countWordIndexPostingEntries(runtime.wordIndex),
+		residentBytes: estimateWordIndexResidentBytes(runtime.wordIndex),
 		truncated: runtime.wordIndex.truncated,
 		skipped: docs.skipped,
 	});
