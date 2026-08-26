@@ -343,12 +343,12 @@ export function wordIndexPostingHits(
 
 /**
  * Settle a freshly built index's posting store into its compact resident form
- * (#2069): release each list's growth slack, then re-home every list into one
- * shared arena so the long tail of rare tokens stops paying for an
- * `ArrayBuffer` header of its own.
+ * (#2069): re-home every list into one shared arena, sized from the live entry
+ * counts. That both releases the doubling growth slack a build leaves behind
+ * and stops the long tail of rare tokens paying for an `ArrayBuffer` header
+ * each.
  */
 function compactWordIndexPostings(index: WordIndex): void {
-	for (const list of index.postings.values()) list.compact();
 	compactPostingsIntoArena(index.postings);
 }
 

@@ -35,15 +35,19 @@ import {
 } from "../../clients/word-index-store.js";
 
 /**
- * Ceiling on measured bytes per posting entry. #2069 asks for under 16 on the
- * real 2,622-document corpus, where the per-document metadata amortizes over
- * ~850 postings each. This synthetic fixture is deliberately smaller, so its
- * fixed costs weigh more per entry; 40 keeps the guard comfortably clear of
- * that fixture effect while still failing hard on the 90-bytes-per-entry boxed
- * representation. The tight per-entry figure is asserted separately, against
- * the deterministic estimate.
+ * Ceiling on measured bytes per posting entry.
+ *
+ * The fixture below measures 17.8 on a packed index and 97.2 on the boxed one,
+ * so 28 leaves ~57% headroom for host variation while still failing hard on
+ * the boxed representation. It is also tight enough to catch dropping the
+ * token canonicalization the forward index depends on, which costs one string
+ * per (document, token) and measured 39 bytes per entry on this fixture.
+ *
+ * #2069's own "under 16" is a figure for the real 2,622-document corpus, where
+ * fixed per-token costs amortize over far more postings. That criterion is
+ * asserted separately against the deterministic estimate.
  */
-const MEASURED_BYTES_PER_ENTRY_CEILING = 40;
+const MEASURED_BYTES_PER_ENTRY_CEILING = 28;
 
 /**
  * A vocabulary sized so the fixture's postings-per-token ratio resembles a real
@@ -137,6 +141,14 @@ describe("word-index posting footprint (#2069)", () => {
 		// Drop the arena pass and this equals `postings.size`: one ArrayBuffer
 		// header per token, which measured 2.5 MB on this repository's corpus.
 		expect(countPostingBackingStores(index.postings)).toBe(1);
+		// A representation with no packed lanes at all reports one distinct
+		// backing store too, because every list would report `undefined`. Pin the
+		// store's identity and width so that cannot pass for an arena.
+		const [first] = [...index.postings.values()];
+		expect(first.backingStore).toBeInstanceOf(Int32Array);
+		expect(first.backingStore.length).toBe(
+			countWordIndexPostingEntries(index) * 2,
+		);
 	});
 
 	it("moves a token that outgrows its arena slice without disturbing its neighbours", () => {
@@ -145,19 +157,25 @@ describe("word-index posting footprint (#2069)", () => {
 			{ path: "b.ts", content: "betaToken\ngammaToken" },
 		]);
 		expect(countPostingBackingStores(index.postings)).toBe(1);
+		const alphaBefore = wordIndexPostingHits(index, "alphatoken");
 		const betaBefore = wordIndexPostingHits(index, "betatoken");
 		const gammaBefore = wordIndexPostingHits(index, "gammatoken");
 
-		// `alphatoken` gains a second posting, so its list must leave the arena
-		// rather than writing past its slice into `betatoken`'s lanes.
+		// `gammatoken` is the LAST list in the arena, so its slice starts at a
+		// non-zero offset — the case that catches a grow which forgets to reset
+		// the offset as well as one that writes past the slice. Growing the FIRST
+		// list would sit at offset zero and pass either way.
 		updateWordIndexDocument(index, {
 			path: "c.ts",
-			content: "alphaToken\nalphaToken again",
+			content: "gammaToken\ngammaToken more",
 		});
 
-		expect(wordIndexPostingHits(index, "alphatoken")).toHaveLength(3);
+		expect(wordIndexPostingHits(index, "gammatoken")).toHaveLength(3);
+		expect(wordIndexPostingHits(index, "alphatoken")).toEqual(alphaBefore);
 		expect(wordIndexPostingHits(index, "betatoken")).toEqual(betaBefore);
-		expect(wordIndexPostingHits(index, "gammatoken")).toEqual(gammaBefore);
+		expect(wordIndexPostingHits(index, "gammatoken").slice(0, 1)).toEqual(
+			gammaBefore,
+		);
 	});
 
 	it("recycles the file id a replaced document releases", () => {

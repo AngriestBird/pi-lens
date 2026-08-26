@@ -52,9 +52,10 @@ const DEFAULT_POSTING_CAPACITY_ENTRIES = 2;
  * A token's postings as packed `[fileId, line]` pairs.
  *
  * `length` counts ENTRIES, not lanes — the buffer holds `2 * length` `Int32`s
- * and may hold spare capacity beyond that. {@link compact} releases the spare;
- * bulk build paths call it once at the end so a cold index carries no growth
- * slack.
+ * and may hold spare capacity beyond that.
+ * {@link compactPostingsIntoArena} releases the spare and shares one backing
+ * store; bulk build paths run it once at the end, so a cold index carries no
+ * growth slack and one `ArrayBuffer` in total.
  */
 export class WordPostingList {
 	/**
@@ -98,11 +99,6 @@ export class WordPostingList {
 		return this.entryCount;
 	}
 
-	/** Entries this list can hold before the next reallocation. */
-	get capacity(): number {
-		return this.capacityEntries;
-	}
-
 	/** This list's share of backing store, its own spare capacity included. */
 	get byteLength(): number {
 		return this.capacityEntries * WORD_POSTING_ENTRY_BYTES;
@@ -142,17 +138,6 @@ export class WordPostingList {
 		this.lanes[at] = fileId;
 		this.lanes[at + 1] = line;
 		this.entryCount += 1;
-	}
-
-	/** Release growth slack. No-op when the list is already exactly sized. */
-	compact(): void {
-		if (this.entryCount === this.capacityEntries) return;
-		this.lanes = this.lanes.slice(
-			this.laneStart,
-			this.laneStart + this.entryCount * 2,
-		);
-		this.laneStart = 0;
-		this.capacityEntries = this.entryCount;
 	}
 
 	/**
@@ -337,10 +322,6 @@ export class WordForwardEntry {
 		return at === -1 ? undefined : this.lineCounts[at];
 	}
 
-	has(token: string): boolean {
-		return this.tokenNames.indexOf(token) !== -1;
-	}
-
 	keys(): IterableIterator<string> {
 		return this.tokenNames[Symbol.iterator]();
 	}
@@ -432,12 +413,6 @@ export class WordIndexFileTable {
 		return this.pathById[id];
 	}
 
-	/** Display path interned for `key`, or `undefined` when absent. */
-	pathForKey(key: string): string | undefined {
-		const id = this.idByKey.get(key);
-		return id === undefined ? undefined : this.pathById[id];
-	}
-
 	/** Drop `key` and recycle its id. Returns the freed id, or `undefined`. */
 	release(key: string): number | undefined {
 		const id = this.idByKey.get(key);
@@ -446,22 +421,5 @@ export class WordIndexFileTable {
 		this.pathById[id] = undefined;
 		this.freeIds.push(id);
 		return id;
-	}
-
-	clear(): void {
-		this.idByKey.clear();
-		this.pathById.length = 0;
-		this.freeIds.length = 0;
-	}
-
-	keys(): IterableIterator<string> {
-		return this.idByKey.keys();
-	}
-
-	*entries(): IterableIterator<[string, string]> {
-		for (const [key, id] of this.idByKey) {
-			const displayPath = this.pathById[id];
-			if (displayPath !== undefined) yield [key, displayPath];
-		}
 	}
 }

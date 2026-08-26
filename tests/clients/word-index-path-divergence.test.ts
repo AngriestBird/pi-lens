@@ -44,12 +44,14 @@ describe("word-index build/update key convergence (#1025 item #2)", () => {
 			{ path: "walk/alpha.ts", content: "foldedToken" },
 		]);
 		// Two walk spellings fold to one path key, so the file table interned ONE
-		// file id, under the FIRST spelling. Re-key `docLengths` to the opposite
-		// spelling: the serializer enumerates files from `docLengths`, so its slot
-		// lookup must run in the FOLDED key space. A raw-string lookup finds
-		// nothing here and silently drops every posting.
-		const divergent = "walk/alpha.ts";
-		expect(wordIndexKey(divergent)).toBe(wordIndexKey("walk\\alpha.ts"));
+		// file id, keyed on the FOLDED form. The serializer enumerates files from
+		// `docLengths`, which yields the raw display spelling, so its slot lookup
+		// must fold too. The backslash spelling below differs from its folded form
+		// on every platform, so a raw-string lookup finds nothing and silently
+		// drops every posting — on Linux CI as well as Windows.
+		const divergent = "walk\\alpha.ts";
+		expect(wordIndexKey(divergent)).not.toBe(divergent);
+		expect(wordIndexKey(divergent)).toBe(wordIndexKey("walk/alpha.ts"));
 		index.docLengths.clear();
 		index.docLengths.set(divergent, 1);
 		const serializedEntries = serializeWordIndex(index).postings.reduce(
