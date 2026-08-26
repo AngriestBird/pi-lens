@@ -66,9 +66,16 @@ function isInsideGitRepo(startDir: string): boolean {
 /**
  * Get current git commit hash (short)
  */
-function getCurrentCommit(): string {
-	if (!isInsideGitRepo(process.cwd())) {
+function getCurrentCommit(startDir: string): string {
+	const repoStartDir = path.resolve(startDir);
+	if (!isInsideGitRepo(repoStartDir)) {
 		return "unknown";
+	}
+	let spawnDir = repoStartDir;
+	while (!fs.existsSync(spawnDir)) {
+		const parent = path.dirname(spawnDir);
+		if (parent === spawnDir) return "unknown";
+		spawnDir = parent;
 	}
 
 	try {
@@ -83,6 +90,7 @@ function getCurrentCommit(): string {
 			encoding: "utf-8",
 			timeout: 5000,
 			stdio: ["ignore", "pipe", "ignore"],
+			cwd: spawnDir,
 		}).trim();
 	} catch {
 		return "unknown";
@@ -157,7 +165,7 @@ export function captureSnapshot(
 	}
 
 	const relativePath = path.relative(process.cwd(), filePath);
-	const commit = getCurrentCommit();
+	const commit = getCurrentCommit(path.dirname(filePath));
 
 	const snapshot: MetricSnapshot = {
 		commit,
@@ -226,7 +234,7 @@ export function captureSnapshots(
 
 	for (const file of files) {
 		const relativePath = path.relative(process.cwd(), file.filePath);
-		const commit = getCurrentCommit();
+		const commit = getCurrentCommit(path.dirname(file.filePath));
 
 		const snapshot: MetricSnapshot = {
 			commit,
