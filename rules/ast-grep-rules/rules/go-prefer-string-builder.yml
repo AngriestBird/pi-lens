@@ -1,6 +1,7 @@
 # Go Prefer strings.Builder Over Repeated Concatenation
-# Detects repeated string concatenation (x = x + y / x += y) that should use
-# strings.Builder instead.
+# Detects repeated string concatenation (x = x + y / x += "y") that should use
+# strings.Builder instead. The += arm requires a string literal because
+# ast-grep has no type information to distinguish string and numeric operands.
 # Ported from vinhnx/VTCode rules/go/prefer-string-builder.yml
 # (#2200, refs #2195).
 id: go-prefer-string-builder
@@ -19,13 +20,9 @@ note: |
 rule:
   any:
     - pattern: $VAR = $VAR + $OTHER
-    - pattern: $VAR += $OTHER
-constraints:
-  VAR:
-    kind: identifier
-files:
-  - "**/*.go"
-  - "!**/*_test.go"
+    - pattern: $VAR += "$OTHER"
+ignores:
+  - "**/*_test.go"
 tags:
   - go
   - idiom

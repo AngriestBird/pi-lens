@@ -17,10 +17,9 @@ note: |
   safe.
 rule:
   pattern: panic($MSG)
-files:
-  - "**/*.go"
-  - "!**/*_test.go"
-  - "!**/cmd/**"
+ignores:
+  - "**/*_test.go"
+  - "**/cmd/**"
 tags:
   - go
   - idiom

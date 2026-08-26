@@ -9,3 +9,7 @@ invalid:
     if err == os.ErrNotExist {
         return nil
     }
+  - |
+    if err != os.ErrNotExist {
+        return nil
+    }

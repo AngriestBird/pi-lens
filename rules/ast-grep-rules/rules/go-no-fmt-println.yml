@@ -23,10 +23,11 @@ constraints:
     regex: "^fmt\\.(Println|Printf|Fprintln|Fprint|Fprintf)$"
     has:
       kind: field_identifier
-files:
-  - "**/*.go"
-  - "!**/*_test.go"
-  - "!**/examples/**"
+ignores:
+  - "**/*_test.go"
+  - "**/examples/**"
+  - "tests/fixtures/**"
+  - "cases/**"
 tags:
   - go
   - idiom

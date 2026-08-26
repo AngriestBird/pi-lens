@@ -14,3 +14,8 @@ invalid:
         a = a + b
         return a
     }
+  - |
+    func appendSuffix(s string) string {
+        s += "suffix"
+        return s
+    }

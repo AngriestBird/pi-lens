@@ -23,9 +23,8 @@ rule:
 constraints:
   TARGET:
     regex: "^(Err|err|[A-Z].*[Ee]rror|os\\.Err)"
-files:
-  - "**/*.go"
-  - "!**/*_test.go"
+ignores:
+  - "**/*_test.go"
 tags:
   - go
   - idiom
