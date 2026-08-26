@@ -53,7 +53,15 @@ on what it pins and why it exists (regression proof / contract seam /
 occupancy budget). If no tests changed, say so explicitly. Prove new
 regression tests RED on pre-fix code and quote the output.
 
-Where it is not obvious, name which of AGENTS.md's six test-authoring screens each new test satisfies (parallel path, invisible skip, wrong-layer pin, ambient-inspection double, env leakage, loose bound).
+Where it is not obvious, name which of AGENTS.md's ten test-authoring screens each new test satisfies (parallel path, invisible skip, wrong-layer pin, ambient-inspection double, env leakage, loose bound, all-mocks, not-throw, implementation mirror, snapshot-as-behavior).
+
+### Test assessment
+
+For each test FILE this PR touches: one line on what behavior that file
+uniquely pins, and any test in it this PR makes redundant. Name removal
+candidates. A test may be REMOVED only when a named surviving test reds on
+the same mutations — demonstrate the redundancy, never assert it. Removal
+candidates you do not delete here go to the corpus value ledger issue.
 
 ## Blast radius
 

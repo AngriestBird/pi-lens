@@ -64,7 +64,8 @@ describe("#2052 sweep over a foreign root does not report or cache a clean", () 
 			id: "typescript",
 			name: "typescript",
 			extensions: [".ts"],
-			root: async () => foreignDir,
+			root: async (filePath: string) =>
+				filePath.startsWith(sessionDir) ? sessionDir : foreignDir,
 			spawn: vi.fn(async () => ({ process: {}, source: "test" })),
 		};
 		getServersForFileWithConfig.mockImplementation((fp: string) =>
@@ -136,5 +137,22 @@ describe("#2052 sweep over a foreign root does not report or cache a clean", () 
 		// Probe for ABSENCE. Pre-fix the record loop persisted `count: 0` here,
 		// so every later sweep replayed the false clean from disk.
 		expect(cached).toBeUndefined();
+	});
+
+	it("serves an inside file and declines a foreign file in one batch", async () => {
+		const insideFile = path.join(sessionDir, "inside.ts");
+		fs.writeFileSync(insideFile, "export const inside = 1;\n");
+		const service = await loadServiceWithSession();
+		const results = await service.runWorkspaceDiagnostics(sessionDir, {
+			files: [insideFile, foreignFile],
+		});
+
+		const inside = results.find((result) => result.filePath === insideFile);
+		const foreign = results.find((result) => result.filePath === foreignFile);
+		expect(inside).toBeDefined();
+		expect(inside?.timedOut).toBeUndefined();
+		expect(inside?.unconfirmedReason).toBeUndefined();
+		expect(foreign?.timedOut).toBe(true);
+		expect(foreign?.unconfirmedReason).toBe("outside_project_root");
 	});
 });
