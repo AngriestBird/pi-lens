@@ -121,18 +121,6 @@ export function _resetZizmorTokenCacheForTests(): void {
 	resetZizmorTokenAvailability();
 }
 
-/**
- * Classify a failed `gh auth token` probe.
- *
- * `classifyProbeFailure`'s default branch treats ANY unrecognized failure —
- * including a spawn that never actually ran (EACCES, a resolution error, the
- * generic `spawn-failed` bucket) — as a durable `non-installable` verdict.
- * That is correct for a probe that ran and rejected, but wrong here: an
- * unspawnable prober never asked `gh` anything, so it must not be read as a
- * durable "no" (the lesson from this week's sibling-fix reviews on the
- * #1467/#1494 latch family). Only two shapes may latch: a completed run (any
- * exit code — that IS gh's answer) and a proven-absent `gh` binary.
- */
 interface GhTokenFailureVerdict {
 	outcome: AvailabilityOutcome;
 	cause: AvailabilityCause;
@@ -147,6 +135,18 @@ interface GhTokenFailureVerdict {
 	classifiedBy: "probe" | "caller";
 }
 
+/**
+ * Classify a failed `gh auth token` probe.
+ *
+ * `classifyProbeFailure`'s default branch treats ANY unrecognized failure —
+ * including a spawn that never actually ran (EACCES, a resolution error, the
+ * generic `spawn-failed` bucket) — as a durable `non-installable` verdict.
+ * That is correct for a probe that ran and rejected, but wrong here: an
+ * unspawnable prober never asked `gh` anything, so it must not be read as a
+ * durable "no" (the lesson from this week's sibling-fix reviews on the
+ * #1467/#1494 latch family). Only two shapes may latch: a completed run (any
+ * exit code — that IS gh's answer) and a proven-absent `gh` binary.
+ */
 function classifyGhTokenFailure(
 	res: SpawnResult,
 	hostStallMs: number,
@@ -227,7 +227,11 @@ async function deriveGhCliToken(): Promise<string | undefined> {
 		// online audits ran while zizmor was actually about to launch offline
 		// — the #1535 silence moved into the telemetry instead of being fixed.
 		return recordGhTokenUnavailable(
-			{ outcome: "non-installable", cause: "empty-result", classifiedBy: "caller" },
+			{
+				outcome: "non-installable",
+				cause: "empty-result",
+				classifiedBy: "caller",
+			},
 			elapsedMs,
 			hostStallMs,
 		);
