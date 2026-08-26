@@ -15,6 +15,7 @@ import {
 	PROJECT_SNAPSHOT_VERSION,
 	getProjectSnapshotPath,
 	saveProjectSnapshot,
+	waitForProjectSnapshotPersistsForTests,
 } from "../../clients/project-snapshot.js";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
 import { handleSessionStart } from "../../clients/runtime-session.js";
@@ -35,6 +36,34 @@ vi.mock("../../clients/lsp/index.js", async (importOriginal) => ({
 		touchFile: mockTouchFile,
 	})),
 }));
+
+const deferredRuntimeSnapshotSave = vi.hoisted(() => ({
+	delayCall: undefined as number | undefined,
+	calls: 0,
+	delayMs: 1200,
+}));
+vi.mock("../../clients/project-snapshot.js", async (importOriginal) => {
+	const actual =
+		await importOriginal<typeof import("../../clients/project-snapshot.js")>();
+	return {
+		...actual,
+		saveRuntimeProjectSnapshot: vi.fn((args) => {
+			deferredRuntimeSnapshotSave.calls += 1;
+			if (
+				deferredRuntimeSnapshotSave.calls !==
+				deferredRuntimeSnapshotSave.delayCall
+			) {
+				actual.saveRuntimeProjectSnapshot(args);
+				return;
+			}
+			deferredRuntimeSnapshotSave.delayCall = undefined;
+			setTimeout(
+				() => actual.saveRuntimeProjectSnapshot(args),
+				deferredRuntimeSnapshotSave.delayMs,
+			).unref();
+		}),
+	};
+});
 
 function setStartupMode(mode: "full" | "quick"): () => void {
 	const prev = process.env.PI_LENS_STARTUP_MODE;
@@ -136,6 +165,8 @@ afterEach(() => {
 		__piLensFirstSessionDone?: boolean;
 		__piLensWarmupScheduled?: boolean;
 	};
+	deferredRuntimeSnapshotSave.delayCall = undefined;
+	deferredRuntimeSnapshotSave.calls = 0;
 	globals.__piLensFirstSessionDone = false;
 	globals.__piLensWarmupScheduled = false;
 });
@@ -322,6 +353,7 @@ describe("word-index lifecycle — full mode (#348)", () => {
 			const legacyRuntime = new RuntimeCoordinator();
 			legacyRuntime.resetForSession();
 			const legacyDbg = vi.fn();
+			deferredRuntimeSnapshotSave.delayCall = 2;
 			await handleSessionStart(makeDeps(env.tmpDir, legacyRuntime, legacyDbg));
 			await vi.waitFor(
 				() =>
@@ -332,6 +364,16 @@ describe("word-index lifecycle — full mode (#348)", () => {
 					).toBe(true),
 				{ timeout: 5000 },
 			);
+			await vi.waitFor(
+				() =>
+					expect(
+						legacyDbg.mock.calls.filter(([m]) =>
+							String(m).includes("project_snapshot: saved"),
+						).length,
+					).toBeGreaterThanOrEqual(2),
+				{ timeout: 5000 },
+			);
+			await waitForProjectSnapshotPersistsForTests();
 			expect(legacyRuntime.wordIndex?.docLengths.has("ghost-a.ts")).toBe(false);
 
 			// Seed a current-format index whose file set is mostly gone. The
