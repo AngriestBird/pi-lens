@@ -23,7 +23,7 @@ export interface AvailabilityDecisionSite {
 	/** Repo-relative path, forward slashes, so findings read the same on any OS. */
 	file: string;
 	line: number;
-	/** True when the call's `cause` argument is the literal `"ok"`. */
+	/** True when the call can emit an available-success `cause: "ok"` row. */
 	causeOk: boolean;
 	/** True when the call's own arguments set `classifiedBy`. */
 	hasClassifiedBy: boolean;
@@ -68,11 +68,20 @@ export function scanSource(
 	while (match !== null) {
 		const openIndex = source.indexOf("(", match.index);
 		const argsText = readBalancedArgs(source, openIndex);
+		const verdict = readTopLevelProperty(argsText, "verdict");
+		const outcome = readTopLevelProperty(argsText, "outcome");
+		const cause = readTopLevelProperty(argsText, "cause");
 		sites.push({
 			file,
 			line: source.slice(0, match.index).split("\n").length,
-			causeOk: /(?:^|[\s{,])cause\s*:\s*"ok"/.test(argsText),
-			hasClassifiedBy: /(?:^|[\s{,])classifiedBy\s*:/.test(argsText),
+			causeOk:
+				cause?.value === '"ok"' ||
+				(verdict?.value.includes('"available"') === true &&
+					outcome?.value.includes('"success"') === true &&
+					cause !== undefined &&
+					!/^['"`]/.test(cause.value)),
+			hasClassifiedBy:
+				readTopLevelProperty(argsText, "classifiedBy") !== undefined,
 		});
 		match = opener.exec(source);
 	}
@@ -82,8 +91,18 @@ export function scanSource(
 /** Argument text between `(` at `openIndex` and its matching `)`. */
 function readBalancedArgs(source: string, openIndex: number): string {
 	let depth = 0;
+	let quote: string | undefined;
 	for (let i = openIndex; i < source.length; i++) {
 		const ch = source[i];
+		if (quote !== undefined) {
+			if (ch === "\\") i++;
+			else if (ch === quote) quote = undefined;
+			continue;
+		}
+		if (ch === '"' || ch === "'" || ch === "`") {
+			quote = ch;
+			continue;
+		}
 		if (ch === "(") depth++;
 		else if (ch === ")") {
 			depth--;
@@ -91,6 +110,91 @@ function readBalancedArgs(source: string, openIndex: number): string {
 		}
 	}
 	return source.slice(openIndex + 1);
+}
+
+interface TopLevelProperty {
+	value: string;
+}
+
+/** Read one property from the call's outer object, not nested evidence. */
+function readTopLevelProperty(
+	argsText: string,
+	name: string,
+): TopLevelProperty | undefined {
+	let braceDepth = 0;
+	let bracketDepth = 0;
+	let parenDepth = 0;
+	let quote: string | undefined;
+	for (let i = 0; i < argsText.length; i++) {
+		const ch = argsText[i];
+		if (quote !== undefined) {
+			if (ch === "\\") i++;
+			else if (ch === quote) quote = undefined;
+			continue;
+		}
+		if (ch === '"' || ch === "'" || ch === "`") {
+			quote = ch;
+			continue;
+		}
+		if (ch === "{") {
+			braceDepth++;
+			continue;
+		}
+		if (ch === "}") {
+			braceDepth--;
+			continue;
+		}
+		if (ch === "[") {
+			bracketDepth++;
+			continue;
+		}
+		if (ch === "]") {
+			bracketDepth--;
+			continue;
+		}
+		if (ch === "(") {
+			parenDepth++;
+			continue;
+		}
+		if (ch === ")") {
+			parenDepth--;
+			continue;
+		}
+		if (braceDepth !== 1 || bracketDepth !== 0 || parenDepth !== 0) continue;
+		if (!argsText.startsWith(name, i)) continue;
+		let beforeIndex = i - 1;
+		while (/\s/.test(argsText[beforeIndex] ?? "")) beforeIndex--;
+		const before = argsText[beforeIndex];
+		if (before !== "{" && before !== ",") continue;
+		let cursor = i + name.length;
+		while (/\s/.test(argsText[cursor] ?? "")) cursor++;
+		if (argsText[cursor] !== ":") {
+			if (cursor === i + name.length) return { value: "<shorthand>" };
+			continue;
+		}
+		cursor++;
+		const valueStart = cursor;
+		let valueQuote: string | undefined;
+		let nested = 0;
+		for (; cursor < argsText.length; cursor++) {
+			const valueChar = argsText[cursor];
+			if (valueQuote !== undefined) {
+				if (valueChar === "\\") cursor++;
+				else if (valueChar === valueQuote) valueQuote = undefined;
+				continue;
+			}
+			if (valueChar === '"' || valueChar === "'" || valueChar === "`") {
+				valueQuote = valueChar;
+				continue;
+			}
+			if (valueChar === "{" || valueChar === "[" || valueChar === "(") nested++;
+			else if (valueChar === "}" || valueChar === "]" || valueChar === ")")
+				nested--;
+			else if ((valueChar === "," || valueChar === "}") && nested === 0) break;
+		}
+		return { value: argsText.slice(valueStart, cursor).trim() };
+	}
+	return undefined;
 }
 
 function listTypeScriptFiles(target: string): string[] {

@@ -41,7 +41,7 @@ describe("availability_decision classifiedBy sweep (#2131)", () => {
 		// A regex typo that matched nothing would make the assertion below
 		// trivially true. Pin a floor, not the exact count, which churns.
 		expect(SITES.length).toBeGreaterThan(20);
-		expect(OK_SITES.length).toBeGreaterThan(10);
+		expect(OK_SITES.length).toBe(18);
 	});
 
 	it('every cause:"ok" decision stamps classifiedBy', () => {
@@ -64,6 +64,9 @@ describe("availability-classifiedby scanner self-test", () => {
 		'logAvailabilityDecision({ tool: "x", verdict: "available", outcome: "success", cause: "ok", elapsedMs: 1, latched: true });',
 		'logAvailabilityDecision({ tool: "x", verdict: "available", outcome: "success", cause: "ok", elapsedMs: 1, latched: true, classifiedBy: "probe" });',
 		'logAvailabilityDecision({ tool: "x", verdict: "unavailable", outcome: "missing", cause: "not-found", elapsedMs: 1, latched: true, classifiedBy: "probe" });',
+		'logAvailabilityDecision({ tool: "x", verdict: "available", outcome: "success", cause: provisional ? "timeout" : "ok", classifiedBy: "probe" });',
+		'logAvailabilityDecision({ tool: "x", verdict: "available", outcome: "success", cause: "fast-path", evidence: { classifiedBy: "wrong" } });',
+		'logAvailabilityDecision({ tool: "x", verdict: "available", outcome: "success", cause: "ok", note: "unmatched ( quote" });',
 		'// logAvailabilityDecision({ cause: "ok" });',
 		'fakeLogAvailabilityDecision({ cause: "ok" });',
 	].join("\n");
@@ -76,14 +79,17 @@ describe("availability-classifiedby scanner self-test", () => {
 			[1, true, false],
 			[2, true, true],
 			[3, false, true],
+			[4, true, true],
+			[5, false, false],
+			[6, true, false],
 		]);
 	});
 
 	it("does not read a call that exists only in a comment", () => {
-		expect(found.some((site) => site.line === 4)).toBe(false);
+		expect(found.some((site) => site.line === 7)).toBe(false);
 	});
 
 	it("does not match an identifier that merely ends in the callee name", () => {
-		expect(found.some((site) => site.line === 5)).toBe(false);
+		expect(found.some((site) => site.line === 8)).toBe(false);
 	});
 });

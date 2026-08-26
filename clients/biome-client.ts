@@ -271,6 +271,11 @@ export class BiomeClient {
 					hostStallMs: this.lastProbeHostStallMs,
 					budgetMs: PROBE_TIMEOUT_MS,
 					classifiedBy: "caller",
+					evidence: {
+						install: "succeeded",
+						binary: "biome",
+						source: "managed-dir",
+					},
 				});
 			}
 			return true;
