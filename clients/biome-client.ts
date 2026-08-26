@@ -220,6 +220,7 @@ export class BiomeClient {
 				latched: true,
 				hostStallMs,
 				budgetMs: PROBE_TIMEOUT_MS,
+				classifiedBy: "probe",
 			});
 			return { outcome: "success", value: true };
 		}
@@ -269,6 +270,7 @@ export class BiomeClient {
 					latched: true,
 					hostStallMs: this.lastProbeHostStallMs,
 					budgetMs: PROBE_TIMEOUT_MS,
+					classifiedBy: "caller",
 				});
 			}
 			return true;
