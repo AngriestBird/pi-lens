@@ -54,6 +54,20 @@ export function registerSessionRoot(cwd: string): void {
 	}
 }
 
+/** Return whether this exact root is still served after cap eviction. */
+export function isSessionRootRegistered(cwd: string): boolean {
+	return sessionRoots.has(path.resolve(cwd));
+}
+
+/** True when a readiness memo must run initialization for this root. */
+export function shouldInitializeSessionRoot(
+	cwd: string,
+	readyRoots: ReadonlySet<string>,
+): boolean {
+	const normalized = path.resolve(cwd);
+	return !readyRoots.has(normalized) || !isSessionRootRegistered(normalized);
+}
+
 /**
  * Is `filePath` outside EVERY registered session root?
  *

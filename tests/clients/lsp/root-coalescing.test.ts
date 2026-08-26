@@ -9,8 +9,16 @@ import {
 	initLSPConfig,
 	resetLSPConfigStateForTests,
 } from "../../../clients/lsp/config.js";
-import { enforceLspRootCeiling } from "../../../clients/lsp/server.js";
+import {
+	enforceLspRootCeiling,
+	isSameOrWithin,
+} from "../../../clients/lsp/server.js";
 import { normalizeMapKey } from "../../../clients/path-utils.js";
+import {
+	isOutsideAllSessionRoots,
+	registerSessionRoot,
+	shouldInitializeSessionRoot,
+} from "../../../clients/lsp/session-roots.js";
 import { removeTempDirSync } from "../test-utils.js";
 
 process.env.PI_LENS_TEST_MODE = "1";
@@ -130,6 +138,56 @@ describe("LSP per-server nested-root coalescing (#1373)", () => {
 		await expect(
 			service.resolveServerRoot(server, path.join(projectA, "a.ts")),
 		).resolves.toBe(projectA);
+	});
+
+	// #2052 R1: the registry cap must not make an old root permanently foreign.
+	it("allows an evicted root to be registered again", () => {
+		resetLSPConfigStateForTests();
+		const roots = [
+			...Array.from({ length: 129 }, (_, index) =>
+				path.join(os.tmpdir(), `pi-lens-eviction-${index}`),
+			),
+		];
+		const readyRoots = new Set<string>();
+		for (const root of roots) {
+			registerSessionRoot(root);
+			readyRoots.add(path.resolve(root));
+		}
+		expect(isOutsideAllSessionRoots(roots[0]!)).toBe(true);
+		const firstRootStillServed =
+			shouldInitializeSessionRoot(roots[0]!, readyRoots) === true;
+		expect(
+			firstRootStillServed,
+			`firstRootStillServed=${firstRootStillServed}`,
+		).toBe(true);
+		registerSessionRoot(roots[0]!);
+		expect(isOutsideAllSessionRoots(path.join(roots[0]!, "app.ts"))).toBe(
+			false,
+		);
+		expect(isOutsideAllSessionRoots(path.join(roots[0]!, "app.ts"))).toBe(
+			false,
+		);
+	});
+
+	it("keeps the mac-shaped case boundary explicit on every host", () => {
+		const probe = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-case-probe-"));
+		try {
+			const actualCaseInsensitive = fs.existsSync(probe.toUpperCase());
+			expect(
+				isSameOrWithin(
+					"/Users/Example/Project",
+					"/Users/example/Project/src/app.ts",
+				),
+			).toBe(actualCaseInsensitive);
+			expect(
+				isSameOrWithin(
+					"/Users/Example/Project",
+					"/Users/Example/Project/src/app.ts",
+				),
+			).toBe(true);
+		} finally {
+			removeTempDirSync(probe);
+		}
 	});
 
 	// #2052 fix round 1 (F1). An EMPTY registry means initLSPConfig never ran.

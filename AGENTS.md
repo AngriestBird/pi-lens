@@ -316,6 +316,10 @@ TypeScript clients sample `projectInfo` once per normalized file after the first
 successful `didOpen`; this bounded best-effort telemetry never runs for native
 TS7 or blocks diagnostics. (#1328, #1373, #1412)
 
+The MCP `lspReadyCwds` set is only a readiness fast path. The authoritative
+session-root registry may evict old roots, so readiness must re-register a
+memoized root when `isSessionRootRegistered` no longer confirms it. (#2052)
+
 TypeScript diagnostic wait policy is launch-variant-aware: classic
 typescript-language-server may accept its complete first push, while native
 TS7's versionless publications are provisional until a bounded quiet window
