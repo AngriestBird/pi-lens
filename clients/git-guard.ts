@@ -368,6 +368,184 @@ function containsGuardedSubstitution(
 	return false;
 }
 
+/** Git global options that consume the following token as their value. */
+const GIT_GLOBAL_OPTIONS_WITH_VALUE = new Set([
+	"-C",
+	"-c",
+	"--config-env",
+	"--git-dir",
+	"--work-tree",
+	"--exec-path",
+	"--namespace",
+]);
+
+const GIT_GLOBAL_OPTIONS_WITH_INLINE_VALUE = [
+	"--config-env",
+	"--git-dir",
+	"--work-tree",
+	"--exec-path",
+	"--namespace",
+];
+
+/**
+ * Index of git's subcommand token in `gitTokens` (which starts at the `git`
+ * executable), after skipping global options and their values. Returns
+ * `undefined` when the invocation has no subcommand at all — `git --help`,
+ * `git --version`, or a trailing option with no verb behind it.
+ *
+ * Shared by the direct and indirect paths so both ask the same question about
+ * the same position (#2007).
+ */
+function gitVerbIndex(gitTokens: string[]): number | undefined {
+	let i = 1;
+	while (i < gitTokens.length && gitTokens[i].startsWith("-")) {
+		const option = gitTokens[i];
+		if (["--help", "-h", "--version", "-v", "-V"].includes(option)) {
+			return undefined;
+		}
+		if (option === "--") return i + 1 < gitTokens.length ? i + 1 : undefined;
+		if (
+			["-C", "-c"].some(
+				(prefix) => option.startsWith(prefix) && option.length > prefix.length,
+			)
+		) {
+			i += 1;
+			continue;
+		}
+		if (
+			GIT_GLOBAL_OPTIONS_WITH_INLINE_VALUE.some((prefix) =>
+				option.startsWith(`${prefix}=`),
+			)
+		) {
+			i += 1;
+			continue;
+		}
+		i += GIT_GLOBAL_OPTIONS_WITH_VALUE.has(option) ? 2 : 1;
+	}
+	return i < gitTokens.length ? i : undefined;
+}
+
+/**
+ * True when the subcommand in git's command position is one the matcher
+ * governs. `gitTokens[0]` is the `git` executable token.
+ */
+export function matchGitVerbAtCommandPosition(
+	gitTokens: string[],
+	matcher: GitVerbMatcher,
+): boolean {
+	const index = gitVerbIndex(gitTokens);
+	if (index === undefined) return false;
+	const argsAfterVerb = gitTokens.slice(index + 1);
+	// `git checkout --help` prints documentation and touches nothing. The
+	// global-option walk above cannot see it, because it sits AFTER the verb.
+	if (argsAfterVerb.some((arg) => arg === "--help" || arg === "-h")) {
+		return false;
+	}
+	const verbs = expandGuardVerbToken(gitTokens[index] ?? "");
+	return verbs.length === 1 && matcher.matchesVerb(verbs[0], argsAfterVerb);
+}
+
+/** Strip one layer of shell quoting the lexer preserved on a value token. */
+function unquoteGuardValue(value: string): string {
+	const trimmed = value.trim();
+	if (trimmed.length >= 2) {
+		const first = trimmed[0];
+		const last = trimmed[trimmed.length - 1];
+		if ((first === '"' || first === "'") && first === last) {
+			return trimmed.slice(1, -1);
+		}
+	}
+	return trimmed;
+}
+
+/**
+ * The directory a git invocation actually targets (#2007).
+ *
+ * `git -C <dir>` and `--work-tree` retarget the command at a DIFFERENT
+ * directory, so a guard that evaluates the caller's cwd would inspect the
+ * wrong working tree and allow a destructive command against a shared one.
+ * `-C` composes cumulatively, exactly as git applies it; `--work-tree` names
+ * the working tree directly and therefore wins.
+ *
+ * Returns the resolved absolute directory, or `cwd` when the invocation
+ * carries no retargeting option.
+ */
+export function resolveGitTargetDirectory(
+	gitTokens: string[],
+	cwd: string,
+): string {
+	let base = cwd;
+	let workTree: string | undefined;
+	let i = 1;
+	while (i < gitTokens.length && gitTokens[i].startsWith("-")) {
+		const option = gitTokens[i];
+		if (["--help", "-h", "--version", "-v", "-V"].includes(option)) break;
+		if (option === "--") break;
+		if (option === "-C" && i + 1 < gitTokens.length) {
+			base = path.resolve(base, unquoteGuardValue(gitTokens[i + 1]));
+			i += 2;
+			continue;
+		}
+		if (option.startsWith("-C") && option.length > 2) {
+			base = path.resolve(base, unquoteGuardValue(option.slice(2)));
+			i += 1;
+			continue;
+		}
+		if (option === "--work-tree" && i + 1 < gitTokens.length) {
+			workTree = unquoteGuardValue(gitTokens[i + 1]);
+			i += 2;
+			continue;
+		}
+		if (option.startsWith("--work-tree=")) {
+			workTree = unquoteGuardValue(option.slice("--work-tree=".length));
+			i += 1;
+			continue;
+		}
+		if (
+			option.startsWith("-c") &&
+			option.length > 2 &&
+			!option.startsWith("--")
+		) {
+			i += 1;
+			continue;
+		}
+		if (
+			GIT_GLOBAL_OPTIONS_WITH_INLINE_VALUE.some((prefix) =>
+				option.startsWith(`${prefix}=`),
+			)
+		) {
+			i += 1;
+			continue;
+		}
+		i += GIT_GLOBAL_OPTIONS_WITH_VALUE.has(option) ? 2 : 1;
+	}
+	return workTree === undefined ? base : path.resolve(base, workTree);
+}
+
+/**
+ * Every git invocation the command contains, as token arrays starting at the
+ * `git` executable. Used by callers that must know WHICH directory a matched
+ * command targets, not merely that it matched (#2007).
+ */
+export function collectGitInvocations(
+	toolName: string,
+	input: unknown,
+): string[][] {
+	if (toolName !== "bash") return [];
+	const command = getShellCommand(input);
+	if (!command) return [];
+	const invocations: string[][] = [];
+	for (const segment of tokenizeShellCommand(
+		canonicalizeGuardCommand(command),
+	)) {
+		const gitIndex = segment.tokens.findIndex((token) =>
+			isGitExecutable(token),
+		);
+		if (gitIndex >= 0) invocations.push(segment.tokens.slice(gitIndex));
+	}
+	return invocations;
+}
+
 function containsGuardedGitVerb(
 	tokens: string[],
 	depth: number,
@@ -406,67 +584,15 @@ function containsGuardedGitVerb(
 	if (gitIndex >= 0) {
 		// Any non-leading git invocation is indirect. Do not maintain a wrapper
 		// or flag allowlist: unknown launchers are the security boundary here.
-		if (gitIndex > 0) {
-			if (matcher.indirectAlwaysMatches) return true;
-			// #2007: a guard that protects the agent from its own accident must
-			// not decline `xargs git status`. Keep the indirect path armed only
-			// when the argv also carries a governed verb, so the evasion surface
-			// stays narrow without blocking every read-only indirect git.
-			const indirectTokens = commandTokens.slice(gitIndex + 1);
-			return indirectTokens.some((token, offset) =>
-				matcher.matchesVerb(
-					normalizeGuardVerbToken(token),
-					indirectTokens.slice(offset + 1),
-				),
-			);
-		}
-		const gitTokens = commandTokens.slice(gitIndex);
-		let i = 1;
-		const takesValue = new Set([
-			"-C",
-			"-c",
-			"--config-env",
-			"--git-dir",
-			"--work-tree",
-			"--exec-path",
-			"--namespace",
-		]);
-		while (i < gitTokens.length && gitTokens[i].startsWith("-")) {
-			const option = gitTokens[i];
-			if (["--help", "-h", "--version", "-v", "-V"].includes(option))
-				return false;
-			if (option === "--")
-				return matcher.matchesVerb(
-					gitTokens[i + 1] ?? "",
-					gitTokens.slice(i + 2),
-				);
-			if (
-				["-C", "-c"].some(
-					(prefix) =>
-						option.startsWith(prefix) && option.length > prefix.length,
-				)
-			) {
-				i += 1;
-				continue;
-			}
-			if (
-				[
-					"--config-env",
-					"--git-dir",
-					"--work-tree",
-					"--exec-path",
-					"--namespace",
-				].some((prefix) => option.startsWith(`${prefix}=`))
-			) {
-				i += 1;
-				continue;
-			}
-			i += takesValue.has(option) ? 2 : 1;
-		}
-		const verbs = expandGuardVerbToken(gitTokens[i] ?? "");
-		return (
-			verbs.length === 1 &&
-			matcher.matchesVerb(verbs[0], gitTokens.slice(i + 1))
+		if (gitIndex > 0 && matcher.indirectAlwaysMatches) return true;
+		// #2007: a guard that protects the agent from its own accident must not
+		// decline `xargs git status`, so the indirect path stays armed only when
+		// a governed verb sits in git's real COMMAND POSITION. Scanning every
+		// token instead would fire on `find . -name checkout | xargs git add`,
+		// where `checkout` is a positional value and not a subcommand at all.
+		return matchGitVerbAtCommandPosition(
+			commandTokens.slice(gitIndex),
+			matcher,
 		);
 	}
 	const leadingExecutable = commandTokens[0] ?? "";

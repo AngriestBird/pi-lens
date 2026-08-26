@@ -445,21 +445,44 @@ export function deregisterInstance(): void {
  * `registerInstance` writes, so drive-letter case and separators cannot make
  * a peer invisible (catalog shape 1).
  *
+ * `match` picks what "same directory" means, and the two callers genuinely
+ * differ. Warm attach needs `"exact"`: it shares one LSP service, which is
+ * bound to a specific project root. The shared-checkout guard needs
+ * `"containment"`: a peer registered at the repo root and a command run from
+ * `repo/clients` share one working tree, and an exact compare would report no
+ * peer and allow the destructive command. Containment compares on segment
+ * boundaries, so `/repo-backup` never matches `/repo`.
+ *
  * Best-effort by construction: the caller supplies the entries, so a failed
  * registry read is the caller's empty list, which reads as "no known peer".
  */
+export type PeerRootMatch = "exact" | "containment";
+
+/**
+ * True when `a` and `b` are the same directory, or one contains the other.
+ * Compared on SEGMENT boundaries, so `/repo-backup` never matches `/repo`.
+ */
+function rootsOverlap(a: string, b: string): boolean {
+	if (a === b) return true;
+	const [shorter, longer] = a.length < b.length ? [a, b] : [b, a];
+	return longer.startsWith(shorter.endsWith("/") ? shorter : `${shorter}/`);
+}
+
 export function selectLivePeerInstances(
 	entries: readonly InstanceEntry[],
 	root: string,
 	now: number = Date.now(),
 	isPidAlive: (pid: number) => boolean = realIsPidAlive,
+	match: PeerRootMatch = "exact",
 ): InstanceEntry[] {
 	const normalizedRoot = normalizeFilePath(root);
 	return entries
 		.filter(
 			(entry) =>
 				entry.pid !== process.pid &&
-				entry.projectRoot === normalizedRoot &&
+				(match === "exact"
+					? entry.projectRoot === normalizedRoot
+					: rootsOverlap(entry.projectRoot, normalizedRoot)) &&
 				isPidAlive(entry.pid) &&
 				Number.isFinite(Date.parse(entry.heartbeatAt)) &&
 				now - Date.parse(entry.heartbeatAt) <= STALE_HEARTBEAT_MS,

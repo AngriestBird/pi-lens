@@ -37,7 +37,11 @@ import {
 	getDegradationSummary,
 	resetDegradationLedger,
 } from "../../clients/degradation-ledger.js";
-import { isGitCommitOrPushAttempt } from "../../clients/git-guard.js";
+import {
+	collectGitInvocations,
+	isGitCommitOrPushAttempt,
+	resolveGitTargetDirectory,
+} from "../../clients/git-guard.js";
 import type { InstanceEntry } from "../../clients/instance-registry.js";
 import { selectLivePeerInstances } from "../../clients/instance-registry.js";
 import {
@@ -50,7 +54,7 @@ import {
 import { normalizeFilePath } from "../../clients/path-utils.js";
 import { safeSpawnAsync } from "../../clients/safe-spawn.js";
 
-const ROOT = "/shared/checkout";
+const ROOT = path.resolve("/shared/checkout");
 
 function bash(command: string): { command: string } {
 	return { command };
@@ -183,6 +187,52 @@ describe("worktree-mutating git classification (#2007)", () => {
 		).toBe(true);
 	});
 
+	it("reads the verb from git's COMMAND POSITION, not from any token", () => {
+		// F5: scanning every token after `git` fires on a positional value that
+		// happens to spell a subcommand. `checkout` here is a -name argument.
+		for (const command of [
+			"find . -name checkout | xargs git add",
+			"git log --format=checkout",
+			"git config alias.co checkout",
+			"git add restore.ts",
+			"xargs git add -- clean",
+		]) {
+			expect(isWorktreeMutatingGitAttempt("bash", bash(command)), command).toBe(
+				false,
+			);
+		}
+	});
+
+	it("treats a post-verb --help as documentation, not a mutation", () => {
+		// F4: the global-option walk cannot see `--help` after the verb, so
+		// `git checkout --help` classified as a branch switch.
+		for (const command of [
+			"git checkout --help",
+			"git stash -h",
+			"git clean --help",
+		]) {
+			expect(isWorktreeMutatingGitAttempt("bash", bash(command)), command).toBe(
+				false,
+			);
+		}
+	});
+
+	it("reads a clustered -n as `git clean` dry-run", () => {
+		// F4: short flags cluster. An exact-token set read `-nfd` as mutating.
+		for (const command of [
+			"git clean -nfd",
+			"git clean -ndx",
+			"git clean -n -f",
+		]) {
+			expect(isWorktreeMutatingGitAttempt("bash", bash(command)), command).toBe(
+				false,
+			);
+		}
+		expect(isWorktreeMutatingGitAttempt("bash", bash("git clean -fdx"))).toBe(
+			true,
+		);
+	});
+
 	it("only classifies bash tool input", () => {
 		expect(
 			isWorktreeMutatingGitAttempt("write", bash("git checkout main")),
@@ -206,6 +256,36 @@ describe("worktree-mutating git classification (#2007)", () => {
 	});
 });
 
+describe("git target-directory resolution (#2007)", () => {
+	function targetOf(command: string, cwd: string): string {
+		const [gitTokens] = collectGitInvocations("bash", bash(command));
+		return resolveGitTargetDirectory(gitTokens ?? [], cwd);
+	}
+
+	it("composes cumulative -C the way git does, and lets --work-tree win", () => {
+		const cwd = path.resolve("/cwd");
+		expect(targetOf("git checkout main", cwd)).toBe(cwd);
+		expect(targetOf("git -C sub checkout main", cwd)).toBe(
+			path.resolve(cwd, "sub"),
+		);
+		expect(targetOf("git -C /a -C b checkout main", cwd)).toBe(
+			path.resolve("/a/b"),
+		);
+		expect(targetOf("git -Csub checkout main", cwd)).toBe(
+			path.resolve(cwd, "sub"),
+		);
+		expect(targetOf("git -C /a --work-tree=/w checkout main", cwd)).toBe(
+			path.resolve("/w"),
+		);
+		expect(targetOf("git --work-tree /w checkout main", cwd)).toBe(
+			path.resolve("/w"),
+		);
+		// `-c key=value` is config, not a directory, and must not be consumed
+		// as one.
+		expect(targetOf("git -c core.autocrlf=false checkout main", cwd)).toBe(cwd);
+	});
+});
+
 describe("live-peer selection (#2007)", () => {
 	it("counts only another pid, alive, on this root, with a fresh heartbeat", () => {
 		const entries = [
@@ -216,6 +296,40 @@ describe("live-peer selection (#2007)", () => {
 		];
 		const live = selectLivePeerInstances(entries, ROOT, 3_000, () => true);
 		expect(live.map((entry) => entry.pid)).toEqual([process.pid + 1]);
+	});
+
+	it("matches a peer at the repo root from a subdirectory, in both directions", () => {
+		// F3: an exact compare reported no peer whenever the agent ran the
+		// command from a subdirectory of the shared checkout, which allowed the
+		// exact destructive command this guard exists to decline.
+		const sub = `${ROOT}/clients`;
+		expect(
+			selectLivePeerInstances([peer()], sub, 3_000, () => true, "containment"),
+		).toHaveLength(1);
+		expect(
+			selectLivePeerInstances(
+				[peer({ projectRoot: normalizeFilePath(sub) })],
+				ROOT,
+				3_000,
+				() => true,
+				"containment",
+			),
+		).toHaveLength(1);
+		// Segment boundaries: a sibling directory sharing a name PREFIX is not
+		// the same checkout.
+		expect(
+			selectLivePeerInstances(
+				[peer({ projectRoot: normalizeFilePath(`${ROOT}-backup`) })],
+				ROOT,
+				3_000,
+				() => true,
+				"containment",
+			),
+		).toHaveLength(0);
+		// Warm attach keeps the exact rule, because it shares one LSP service.
+		expect(
+			selectLivePeerInstances([peer()], sub, 3_000, () => true),
+		).toHaveLength(0);
 	});
 
 	it("drops a dead pid and a stale heartbeat", () => {
@@ -252,6 +366,28 @@ describe("evaluateSharedCheckoutGuard (#2007)", () => {
 		expect(decision.unknown).toBeUndefined();
 		expect(decision.reason).toContain(`pid ${process.pid + 1}`);
 		expect(decision.reason).toContain("uncommitted changes");
+	});
+
+	it("evaluates the directory `-C` retargets at, not the caller's cwd", async () => {
+		// F2: `git -C <shared> checkout main` run from a private worktree
+		// destroys the SHARED tree. Evaluating cwd found no peer and allowed it.
+		const probed: string[] = [];
+		const decision = await evaluateSharedCheckoutGuard(
+			"bash",
+			bash(`git -C ${ROOT} checkout main`),
+			"/private/worktree",
+			deps({
+				probeWorkingTree: async (root) => {
+					probed.push(root);
+					return "dirty";
+				},
+			}),
+		);
+		expect(decision.block).toBe(true);
+		// MUTATION PROOF: pass `cwd` to `evaluateOneTarget` instead of the
+		// resolved target and this reds — the probe would name /private/worktree
+		// and the peer on ROOT would never be found.
+		expect(probed).toEqual([path.resolve(ROOT)]);
 	});
 
 	it("allows the same command when no other session is here", async () => {

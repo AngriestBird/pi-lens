@@ -19,11 +19,16 @@
  * THREE FACTS MUST ALL HOLD BEFORE ANYTHING IS DECLINED, cheapest first:
  *
  *   1. The bash input really invokes a git verb that rewrites the working
- *      tree. Pure string work, no I/O — see `WORKTREE_MUTATING_GIT_MATCHER`.
- *   2. Another live pi-lens session is registered on this same root.
+ *      tree, read from git's own COMMAND POSITION. Pure string work, no I/O —
+ *      see `WORKTREE_MUTATING_GIT_MATCHER`. The directory judged is the one
+ *      the invocation TARGETS, which `-C` and `--work-tree` can move away
+ *      from the caller's cwd.
+ *   2. Another live pi-lens session shares that directory.
  *      `selectLivePeerInstances` (clients/instance-registry.ts) is the single
  *      source of truth for that question; warm-attach reads the same
- *      predicate. No peer means no shared checkout and nothing to protect.
+ *      predicate in `"exact"` mode. This guard asks in `"containment"` mode,
+ *      because a peer at the repo root and a command run from a subdirectory
+ *      share ONE working tree. No peer means nothing to protect.
  *   3. The working tree actually carries uncommitted work. A clean tree can
  *      be switched freely.
  *
@@ -42,7 +47,13 @@
  */
 
 import { emitBounded } from "./bounded-telemetry.js";
-import { detectGuardedGitVerb, type GitVerbMatcher } from "./git-guard.js";
+import {
+	collectGitInvocations,
+	detectGuardedGitVerb,
+	type GitVerbMatcher,
+	matchGitVerbAtCommandPosition,
+	resolveGitTargetDirectory,
+} from "./git-guard.js";
 import {
 	type InstanceEntry,
 	readInstanceRegistry,
@@ -79,7 +90,20 @@ const READ_ONLY_STASH_SUBCOMMANDS: ReadonlySet<string> = new Set([
 	"show",
 ]);
 
-const CLEAN_DRY_RUN_FLAGS: ReadonlySet<string> = new Set(["-n", "--dry-run"]);
+/**
+ * `git clean` in dry-run mode reports and deletes nothing.
+ *
+ * Short flags CLUSTER (`git clean -nfd` is `-n -f -d`), so an exact-token set
+ * would read `-nfd` as mutating and decline a command that touches nothing.
+ * Match the letter inside any short cluster, and `--dry-run` exactly.
+ */
+function isCleanDryRun(argsAfterVerb: readonly string[]): boolean {
+	return argsAfterVerb.some(
+		(arg) =>
+			arg === "--dry-run" ||
+			(arg.startsWith("-") && !arg.startsWith("--") && arg.includes("n")),
+	);
+}
 
 /**
  * The verb question for the shared-checkout guard. Every other part of the
@@ -112,12 +136,18 @@ export const WORKTREE_MUTATING_GIT_MATCHER: GitVerbMatcher = {
 				subcommand === undefined || !READ_ONLY_STASH_SUBCOMMANDS.has(subcommand)
 			);
 		}
-		if (verb === "clean") {
-			return !argsAfterVerb.some((arg) => CLEAN_DRY_RUN_FLAGS.has(arg));
-		}
+		if (verb === "clean") return !isCleanDryRun(argsAfterVerb);
 		return false;
 	},
 };
+
+/** True when this one git invocation's subcommand rewrites tracked files. */
+function matchesWorktreeMutatingVerb(gitTokens: string[]): boolean {
+	return matchGitVerbAtCommandPosition(
+		gitTokens,
+		WORKTREE_MUTATING_GIT_MATCHER,
+	);
+}
 
 /** True when this bash input runs a git verb that rewrites tracked files. */
 export function isWorktreeMutatingGitAttempt(
@@ -207,20 +237,58 @@ export async function evaluateSharedCheckoutGuard(
 	deps: SharedCheckoutGuardDeps = {},
 ): Promise<SharedCheckoutDecision> {
 	if (!isWorktreeMutatingGitAttempt(toolName, input)) return { block: false };
-	const root = normalizeFilePath(cwd);
-	let peers: InstanceEntry[];
+	// #2007: `git -C <dir>` and `--work-tree` retarget the command at a
+	// DIFFERENT directory. Evaluating the caller's cwd would inspect the wrong
+	// working tree and allow the destructive command against a shared one, so
+	// every targeted directory is evaluated and the first contended one wins.
+	const targets = resolveGuardTargets(toolName, input, cwd);
+	let entries: InstanceEntry[];
 	try {
-		const entries = await (deps.readRegistry ?? readInstanceRegistry)();
-		peers = selectLivePeerInstances(
-			entries,
-			cwd,
-			deps.now ?? Date.now(),
-			deps.isPidAlive ?? realIsPidAlive,
-		);
+		entries = await (deps.readRegistry ?? readInstanceRegistry)();
 	} catch {
-		logAllow(root, "registry_unreadable");
+		logAllow(normalizeFilePath(cwd), "registry_unreadable");
 		return { block: false };
 	}
+	for (const target of targets) {
+		const decision = await evaluateOneTarget(target, entries, deps);
+		if (decision.block) return decision;
+	}
+	return { block: false };
+}
+
+/** Distinct directories the command's git invocations actually target. */
+function resolveGuardTargets(
+	toolName: string,
+	input: unknown,
+	cwd: string,
+): string[] {
+	const targets = new Set<string>();
+	for (const gitTokens of collectGitInvocations(toolName, input)) {
+		if (!matchesWorktreeMutatingVerb(gitTokens)) continue;
+		targets.add(resolveGitTargetDirectory(gitTokens, cwd));
+	}
+	// A wrapper or substitution form the token scan cannot attribute to a
+	// directory still matched the classifier, so fall back to the cwd rather
+	// than evaluating nothing.
+	if (targets.size === 0) targets.add(cwd);
+	return [...targets];
+}
+
+async function evaluateOneTarget(
+	cwd: string,
+	entries: InstanceEntry[],
+	deps: SharedCheckoutGuardDeps,
+): Promise<SharedCheckoutDecision> {
+	const root = normalizeFilePath(cwd);
+	const peers = selectLivePeerInstances(
+		entries,
+		cwd,
+		deps.now ?? Date.now(),
+		deps.isPidAlive ?? realIsPidAlive,
+		// A peer registered at the repo root and a command run from a
+		// subdirectory share ONE working tree; an exact compare would miss it.
+		"containment",
+	);
 	if (peers.length === 0) {
 		logAllow(root, "no_peer_session");
 		return { block: false };

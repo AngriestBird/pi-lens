@@ -956,7 +956,10 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	"format-events-publish.ts": 0,
 	"formatters.ts": 5,
 	"generated-artifacts.ts": 2,
-	"git-guard.ts": 1,
+	// #2007 hoisted git's global-option table to a module-level `new Set`
+	// (1 → 2). It is an import-time frozen lookup with no session lifetime —
+	// SWEEP_HEURISTIC_LIMITS item 5, not state that must re-arm.
+	"git-guard.ts": 2,
 	"git-tracked-ignore.ts": 3,
 	"installer/index.ts": 12,
 	"instance-registry.ts": 0,
