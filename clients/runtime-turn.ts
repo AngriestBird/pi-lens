@@ -103,7 +103,10 @@ import {
 } from "./lsp/pending-aux-coverage.js";
 import type { LSPDiagnostic } from "./lsp/client.js";
 import { convertLspDiagnostics } from "./dispatch/utils/lsp-diagnostics.js";
-import { drainPendingRunnerFindings } from "./dispatch/pending-runner-findings.js";
+import {
+	drainPendingRunnerFindings,
+	rearmPendingRunnerFindings,
+} from "./dispatch/pending-runner-findings.js";
 // #1631 review V2: moved to its own leaf module so a low-level store
 // (widget-state.ts) can use the marker without importing this orchestrator —
 // see clients/stale-marker.ts's doc comment.
@@ -116,6 +119,7 @@ import { STALE_LINE_MARKER } from "./stale-marker.js";
 import {
 	getWidgetBlockingFilesForSweep,
 	markWidgetFileBlockersStale,
+	recordRunner,
 } from "./widget-state.js";
 import type { TestRunnerFindingsCache } from "./project-diagnostics/runner-adapters/runner-findings.js";
 
@@ -2246,11 +2250,37 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	// diagnostics use the same freshness gate as late auxiliary findings and
 	// enter the ordinary turn-end advisory delivery channel.
 	const runnerFindingsStart = Date.now();
-	const pendingRunnerFindings = await drainPendingRunnerFindings();
+	// Turn-end delivery is deliberately non-blocking. Collect already-settled
+	// results and requeue the rest; the edit path already paid the deferral
+	// decision, so another 2s wait would charge every turn while a runner is
+	// still in flight (#2122 F5).
+	const pendingRunnerFindings = await drainPendingRunnerFindings(0);
 	let runnerFindingsDelivered = 0;
 	let runnerFindingsStale = 0;
+	let runnerFindingsFailed = 0;
+	let runnerFindingsRearmed = 0;
 	for (const pending of pendingRunnerFindings) {
-		const findings = pending.result?.diagnostics ?? [];
+		const result = pending.result;
+		if (!result) continue;
+		recordRunner(
+			pending.filePath,
+			pending.runnerId,
+			result.status,
+			result.diagnostics.length,
+			Date.now() - pending.markedAtMs,
+			pending.writeIndex,
+		);
+		if (result.status === "failed") {
+			runnerFindingsFailed += 1;
+			const detail = result.failureMessage
+				? `: ${result.failureMessage}`
+				: "";
+			advisoryParts.push(
+				`❌ Deferred runner ${pending.runnerId} failed (${result.failureKind ?? "unknown"})${detail}`,
+			);
+			continue;
+		}
+		const findings = result.diagnostics;
 		if (findings.length === 0) continue;
 		const gate = gateFindingsByPathFreshness({
 			store: "late-runner-findings",
@@ -2260,6 +2290,13 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			citedPath: (finding) => finding.filePath,
 		});
 		runnerFindingsStale += gate.stale.length;
+		if (gate.stale.length > 0) {
+			// The runner answered for bytes older than the latest edit. Preserve
+			// coverage by probing the completed result against a refreshed baseline
+			// on the next turn, matching the #2001/#2002 auxiliary re-arm contract.
+			rearmPendingRunnerFindings(pending, Date.now());
+			runnerFindingsRearmed += 1;
+		}
 		if (gate.live.length === 0) continue;
 		const displayPath = toRunnerDisplayPath(cwd, pending.filePath);
 		const lines = gate.live.map(
@@ -2282,6 +2319,8 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			pending: pendingRunnerFindings.length,
 			delivered: runnerFindingsDelivered,
 			stale: runnerFindingsStale,
+			failed: runnerFindingsFailed,
+			rearmed: runnerFindingsRearmed,
 		},
 	});
 

@@ -77,6 +77,12 @@ import {
 	resetObservedRunnerLatency,
 } from "../../clients/dispatch/collect-later-tier.js";
 import {
+	deferRunnerFindings,
+	pendingRunnerFindingsSizeForTests,
+	resetPendingRunnerFindings,
+} from "../../clients/dispatch/pending-runner-findings.js";
+import type { RunnerResult } from "../../clients/dispatch/types.js";
+import {
 	createAvailabilityLatch,
 	resetInstallRetryLatches,
 } from "../../clients/dispatch/runners/utils/availability-policy.js";
@@ -731,6 +737,34 @@ export const SESSION_STATE_REGISTRY: SessionStateEntry[] = [
 					"session-state-probe",
 				) === "inline",
 			reset: () => resetObservedRunnerLatency(),
+		},
+	},
+	{
+		id: "pending-runner-findings:pending",
+		module: "dispatch/pending-runner-findings.ts",
+		state: "pending runner handoff array",
+		policy: "session_start",
+		resetName: "resetPendingRunnerFindings",
+		reason:
+			"#2122: deferred runner results are session-scoped and must not cross a session boundary or accumulate handlers across turn-end drains.",
+		probe: {
+			arm: () => {
+				const result: RunnerResult = {
+					status: "succeeded",
+					diagnostics: [],
+					semantic: "warning",
+				};
+				deferRunnerFindings({
+					filePath: "/probe/session-state-runner.ts",
+					cwd: "/probe",
+					projectRoot: "/probe",
+					runnerId: "session-state-probe",
+					markedAtMs: Date.now(),
+					promise: Promise.resolve(result),
+				});
+			},
+			isArmed: () => pendingRunnerFindingsSizeForTests() === 0,
+			reset: () => resetPendingRunnerFindings(),
 		},
 	},
 

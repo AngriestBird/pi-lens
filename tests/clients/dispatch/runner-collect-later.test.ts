@@ -10,8 +10,14 @@ import {
 } from "../../../clients/dispatch/collect-later-tier.js";
 import {
 	drainPendingRunnerFindings,
+	deferRunnerFindings,
+	rearmPendingRunnerFindings,
 	resetPendingRunnerFindings,
 } from "../../../clients/dispatch/pending-runner-findings.js";
+import {
+	getDegradationSummary,
+	resetDegradationLedger,
+} from "../../../clients/degradation-ledger.js";
 import {
 	createDispatchContext,
 	dispatchForFile,
@@ -27,6 +33,7 @@ describe("observed runner collect-later tier (#2116)", () => {
 	beforeEach(() => {
 		resetObservedRunnerLatency();
 		resetPendingRunnerFindings();
+		resetDegradationLedger();
 		writeFileSync(filePath, "const fixture = 1;\n");
 	});
 
@@ -109,5 +116,104 @@ describe("observed runner collect-later tier (#2116)", () => {
 				durationMs: 1,
 			}),
 		).toBe("inline");
+	});
+
+	it("keeps a deferred failure visible and delivers the affirmative failure", async () => {
+		observeRunnerLatency({
+			projectRoot,
+			runnerId: "failed-runner",
+			durationMs: COLLECT_LATER_THRESHOLD_MS + 1,
+		});
+		let resolve!: (result: RunnerResult) => void;
+		const registry = new RunnerRegistry();
+		registry.register({
+			id: "failed-runner",
+			appliesTo: ["jsts"],
+			priority: 1,
+			enabledByDefault: true,
+			run: async () => new Promise<RunnerResult>((r) => (resolve = r)),
+		});
+		const ctx = createDispatchContext(filePath, projectRoot, { getFlag: () => false }, new FactStore());
+		Object.defineProperty(ctx, "writeIndex", { value: 1 });
+		const edit = await dispatchForFile(ctx, [{ mode: "all", runnerIds: ["failed-runner"] }], registry);
+		expect(edit.output).toContain("failed-runner");
+		expect(edit.output).toContain("Pending runners");
+
+		resolve({
+			status: "failed",
+			diagnostics: [],
+			semantic: "warning",
+			failureKind: "timeout",
+			failureMessage: "runner timed out",
+		});
+		await new Promise<void>((resolve) => setImmediate(resolve));
+		const late = await drainPendingRunnerFindings(0);
+		expect(late[0]?.result).toMatchObject({ status: "failed", failureKind: "timeout" });
+	});
+
+	it("does not defer a slow observation outside a write dispatch", async () => {
+		observeRunnerLatency({
+			projectRoot,
+			runnerId: "direct-runner",
+			durationMs: COLLECT_LATER_THRESHOLD_MS + 1,
+		});
+		const registry = new RunnerRegistry();
+		registry.register({
+			id: "direct-runner",
+			appliesTo: ["jsts"],
+			priority: 1,
+			enabledByDefault: true,
+			run: async () => ({
+				status: "succeeded",
+				diagnostics: [{ id: "direct", message: "direct", filePath, tool: "direct", severity: "warning", semantic: "warning" }],
+				semantic: "warning",
+			}),
+		});
+		const ctx = createDispatchContext(filePath, projectRoot, { getFlag: () => false }, new FactStore());
+		const result = await dispatchForFile(ctx, [{ mode: "all", runnerIds: ["direct-runner"] }], registry);
+		expect(result.diagnostics).toHaveLength(1);
+		expect(result.output).not.toContain("Pending runners");
+		expect(await drainPendingRunnerFindings(0)).toEqual([]);
+	});
+
+	it("records the runner and file when the pending cap evicts an entry", () => {
+		for (let i = 0; i <= 50; i++) {
+			deferRunnerFindings({
+				filePath: `${projectRoot}/evicted-${i}.ts`,
+				cwd: projectRoot,
+				projectRoot,
+				runnerId: `runner-${i}`,
+				markedAtMs: Date.now(),
+				promise: new Promise<RunnerResult>(() => {}),
+			});
+		}
+		const group = getDegradationSummary().find((entry) => entry.kind === "runner-findings-evicted");
+		expect(group?.count).toBe(1);
+		expect(group?.latestReasons[0]?.subject).toContain("runner-0");
+	});
+
+	it("re-arms a stale completed result against a refreshed baseline", async () => {
+		const result: RunnerResult = {
+			status: "succeeded",
+			diagnostics: [
+				{ id: "stale", message: "stale", filePath, tool: "runner", severity: "warning", semantic: "warning" },
+			],
+			semantic: "warning",
+		};
+		deferRunnerFindings({
+			filePath,
+			cwd: projectRoot,
+			projectRoot,
+			runnerId: "stale-runner",
+			markedAtMs: 1,
+			promise: Promise.resolve(result),
+		});
+		await new Promise<void>((resolve) => setImmediate(resolve));
+		const stale = (await drainPendingRunnerFindings(0))[0];
+		rearmPendingRunnerFindings(stale!, Date.now());
+		await new Promise<void>((resolve) => setImmediate(resolve));
+		const rearmed = await drainPendingRunnerFindings(0);
+		expect(rearmed[0]?.markedAtMs).toBeGreaterThan(1);
+		expect(rearmed[0]?.result?.diagnostics[0]?.id).toBe("stale");
 	});
 });

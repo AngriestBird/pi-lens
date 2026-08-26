@@ -499,7 +499,7 @@ export interface RunnerLatency {
 	startTime: number;
 	endTime: number;
 	durationMs: number;
-	status: "succeeded" | "failed" | "skipped" | "when_skipped";
+	status: "succeeded" | "failed" | "skipped" | "when_skipped" | "pending";
 	diagnosticCount: number;
 	semantic: string;
 	skipReason?: RunnerSkipReason;
@@ -840,7 +840,31 @@ async function runGroup(
 				projectRoot,
 				runnerId: runner.id,
 				markedAtMs,
+				writeIndex: ctx.writeIndex,
 				promise: deferred,
+			});
+			// A deferred runner is still an observed runner. Keep it visible in
+			// both the edit latency report and the widget until its turn-end result
+			// replaces this pending state (#2122 F1).
+			latencies.push({
+				runnerId: runner.id,
+				startTime: runnerStart,
+				endTime: runnerStart,
+				durationMs: 0,
+				status: "pending",
+				diagnosticCount: 0,
+				semantic: semantic,
+			});
+			recordRunner(ctx.filePath, runner.id, "pending", 0, 0, ctx.writeIndex);
+			logLatency({
+				type: "runner",
+				filePath: ctx.filePath,
+				runnerId: runner.id,
+				durationMs: 0,
+				status: "pending",
+				diagnosticCount: 0,
+				semantic,
+				metadata: { tier: "collect-later", delivered: "turn_end" },
 			});
 			continue;
 		}
@@ -1146,6 +1170,12 @@ export async function dispatchForFile(
 	if (coverageNotice) {
 		output += formatDiagnostics([coverageNotice], "warning", 1);
 		warnings.push(coverageNotice);
+	}
+	const pendingRunners = runnerLatencies
+		.filter((runner) => runner.status === "pending")
+		.map((runner) => runner.runnerId);
+	if (pendingRunners.length > 0) {
+		output += `\n⏳ Pending runners (reported at turn end): ${pendingRunners.join(", ")}\n`;
 	}
 
 	// Generate and store latency report

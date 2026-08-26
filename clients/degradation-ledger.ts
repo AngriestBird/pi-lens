@@ -281,6 +281,8 @@ export type DegradationKind =
 	| "runner-parsed-nothing"
 	/** A runner exceeded the observed inline budget and moved to collect-later. */
 	| "runner-collect-later"
+	/** A pending runner entry was evicted at the bounded handoff cap (#2122). */
+	| "runner-findings-evicted"
 	/** A process-table resource sample failed or timed out; it is unknown. */
 	| "resource-sampler-query-failed"
 	/**

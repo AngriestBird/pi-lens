@@ -1,6 +1,7 @@
 /** Turn-end handoff for runners moved off the post-write critical path. */
 
 import type { Diagnostic, RunnerResult } from "./types.js";
+import { incrementDegradationCount } from "../degradation-ledger.js";
 
 export interface PendingRunnerFindings {
 	filePath: string;
@@ -8,11 +9,13 @@ export interface PendingRunnerFindings {
 	projectRoot: string;
 	runnerId: string;
 	markedAtMs: number;
+	writeIndex?: number;
 	result?: RunnerResult;
 }
 
 interface PendingRunnerPromise extends Omit<PendingRunnerFindings, "result"> {
 	promise: Promise<RunnerResult>;
+	settled: boolean;
 	result?: RunnerResult;
 }
 
@@ -24,8 +27,36 @@ export function deferRunnerFindings(
 		promise: Promise<RunnerResult>;
 	},
 ): void {
-	pending.push(entry);
-	if (pending.length > MAX_PENDING_RUNNER_FINDINGS) pending.shift();
+	const tracked: PendingRunnerPromise = { ...entry, settled: false };
+	// Attach exactly once at ownership time. Re-attaching at every turn end
+	// accumulates handlers on a promise that may never settle (#2122 F8).
+	void tracked.promise.then(
+		(result) => {
+			tracked.result = result;
+			tracked.settled = true;
+		},
+		(error: unknown) => {
+			tracked.result = {
+				status: "failed",
+				diagnostics: [],
+				semantic: "warning",
+				failureKind: "exception",
+				failureMessage: String(error).slice(0, 200),
+			};
+			tracked.settled = true;
+		},
+	);
+	pending.push(tracked);
+	if (pending.length > MAX_PENDING_RUNNER_FINDINGS) {
+		const evicted = pending.shift();
+		if (evicted) {
+			incrementDegradationCount({
+				kind: "runner-findings-evicted",
+				subject: `${evicted.runnerId}:${evicted.filePath}`,
+				reason: `pending runner cap ${MAX_PENDING_RUNNER_FINDINGS}`,
+			});
+		}
+	}
 }
 
 /**
@@ -37,31 +68,22 @@ export async function drainPendingRunnerFindings(
 ): Promise<PendingRunnerFindings[]> {
 	if (pending.length === 0) return [];
 	const current = pending.splice(0, pending.length);
-	const settled = new Set<PendingRunnerPromise>();
 	const results: PendingRunnerFindings[] = [];
-	let timer: ReturnType<typeof setTimeout> | undefined;
-	for (const entry of current) {
-		void entry.promise.then((result) => {
-			entry.result = result;
-			settled.add(entry);
+	if (maxWaitMs > 0 && current.some((entry) => !entry.settled)) {
+		await new Promise<void>((resolve) => {
+			const timer = setTimeout(resolve, maxWaitMs);
+			timer.unref?.();
 		});
 	}
-	await Promise.race([
-		Promise.allSettled(current.map((entry) => entry.promise)),
-		new Promise<void>((resolve) => {
-			timer = setTimeout(resolve, maxWaitMs);
-			timer.unref?.();
-		}),
-	]);
-	if (timer) clearTimeout(timer);
 	for (const entry of current) {
-		if (settled.has(entry) && entry.result) {
+		if (entry.settled && entry.result) {
 			results.push({
 				filePath: entry.filePath,
 				cwd: entry.cwd,
 				projectRoot: entry.projectRoot,
 				runnerId: entry.runnerId,
 				markedAtMs: entry.markedAtMs,
+				writeIndex: entry.writeIndex,
 				result: entry.result,
 			});
 		} else {
@@ -69,6 +91,23 @@ export async function drainPendingRunnerFindings(
 		}
 	}
 	return results;
+}
+
+/** Re-arm a completed result against a refreshed file baseline. */
+export function rearmPendingRunnerFindings(
+	entry: PendingRunnerFindings,
+	markedAtMs: number,
+): void {
+	if (!entry.result) return;
+	deferRunnerFindings({
+		filePath: entry.filePath,
+		cwd: entry.cwd,
+		projectRoot: entry.projectRoot,
+		runnerId: entry.runnerId,
+		markedAtMs,
+		writeIndex: entry.writeIndex,
+		promise: Promise.resolve(entry.result),
+	});
 }
 
 export function resetPendingRunnerFindings(): void {

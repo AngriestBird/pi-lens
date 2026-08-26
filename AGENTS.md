@@ -247,6 +247,13 @@ Each routine's output is a PR (or a tracked issue for discovery routines), revie
 
 ## Standing invariants
 
+Deferred collect-later runners are a three-state delivery contract: edit-time
+pending, turn-end clean, or turn-end failed. The pending state must reach the
+runner latency and widget surfaces, failures must carry their failure kind into
+turn-end delivery, and stale completed findings must re-arm a refreshed
+freshness baseline. Turn-end drains use a zero wait budget and requeue unsettled
+promises, so deferred work never adds a repeated per-turn stall (#2122).
+
 Live contracts, grouped by subsystem. Consult the group for the seam you
 touch; each paragraph carries its evidence issue. New entries join their
 group (see the placement rules in "Maintaining this file").
