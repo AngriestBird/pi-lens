@@ -30,19 +30,50 @@
  */
 
 import { normalizeFilePath } from "./path-utils.js";
+import { getProcessSingleton } from "./process-singletons.js";
 
-/** Module-scope state — deliberately shared by construction. This module is
- * loaded once per process by pi's process-global extension cache, so a
- * concurrent in-process subagent session sees the SAME instance as the
- * parent, which is exactly the signal this guard relies on. */
-let activeCtx: unknown | undefined;
-let activeSessionId: string | undefined;
-let activeRoot: string | undefined;
-let secondarySessionCount = 0;
+/**
+ * PROCESS-scope state, not module-scope (#2146).
+ *
+ * The premise this guard rests on is "the process has exactly one registration
+ * of the primary session". Module scope did NOT deliver that: pi evaluates the
+ * pi-lens module graph up to nine times in one process (source vs compiled
+ * graphs, in-process subagent binds), so every evaluation used to get its own
+ * empty registration. `hasPrior` then read `false` on evaluation 2, a subagent
+ * temp root classified `primary`, and the whole #473/#2129/#2133 guard was
+ * unreachable — correct code behind a violated precondition.
+ *
+ * Keying on `globalThis` restores the precondition. Every accessor below reads
+ * through {@link state}, so there is one registration per PROCESS regardless of
+ * how many times the module is evaluated.
+ */
+interface SessionLifecycleState {
+	activeCtx: unknown | undefined;
+	activeSessionId: string | undefined;
+	activeRoot: string | undefined;
+	secondarySessionCount: number;
+}
+
+const SESSION_LIFECYCLE_FAMILY = "session-lifecycle.primary-registration";
+/** Bump when {@link SessionLifecycleState}'s shape changes. */
+const SESSION_LIFECYCLE_VERSION = 1;
+
+function state(): SessionLifecycleState {
+	return getProcessSingleton(
+		SESSION_LIFECYCLE_FAMILY,
+		SESSION_LIFECYCLE_VERSION,
+		() => ({
+			activeCtx: undefined,
+			activeSessionId: undefined,
+			activeRoot: undefined,
+			secondarySessionCount: 0,
+		}),
+	);
+}
 
 /** The stable id of the currently registered primary session, if known. */
 export function getActiveSessionId(): string | undefined {
-	return activeSessionId;
+	return state().activeSessionId;
 }
 
 /**
@@ -54,7 +85,7 @@ export function getActiveSessionId(): string | undefined {
  * (#2130) so a record from a multi-root host is attributable.
  */
 export function getActivePrimaryRoot(): string | undefined {
-	return activeRoot;
+	return state().activeRoot;
 }
 
 export type SessionStartClassification =
@@ -219,14 +250,15 @@ export function registerPrimarySession(
 	sessionId: string | undefined,
 	root?: string | undefined,
 ): void {
-	activeCtx = ctx;
-	activeSessionId = sessionId;
+	const s = state();
+	s.activeCtx = ctx;
+	s.activeSessionId = sessionId;
 	// #2129: a re-registration that carries NO root must not erase a root the
 	// previous primary did record — losing it would make every later start's
 	// `sameRoot` read `undefined` (unknown) and silently restore the pre-fix
 	// "any root may steal primary" behavior.
-	if (root !== undefined) activeRoot = normalizeRootForCompare(root);
-	secondarySessionCount = 0;
+	if (root !== undefined) s.activeRoot = normalizeRootForCompare(root);
+	s.secondarySessionCount = 0;
 }
 
 /**
@@ -273,16 +305,17 @@ function normalizeRootForCompare(root: string | undefined): string | undefined {
  * here: with the primary gone there is no live sibling to protect.
  */
 export function releasePrimarySession(): void {
-	activeCtx = undefined;
-	activeSessionId = undefined;
-	activeRoot = undefined;
-	secondarySessionCount = 0;
+	const s = state();
+	s.activeCtx = undefined;
+	s.activeSessionId = undefined;
+	s.activeRoot = undefined;
+	s.secondarySessionCount = 0;
 }
 
 /** Register a concurrently-bound secondary (subagent) session. Does not
  * touch the primary's ctx/session id. */
 export function registerSecondarySession(): void {
-	secondarySessionCount += 1;
+	state().secondarySessionCount += 1;
 }
 
 export type SessionShutdownClassification = "primary" | "secondary";
@@ -319,21 +352,22 @@ export function noteSessionShutdown(
 	ctx: unknown,
 	sessionId: string | undefined,
 ): SessionShutdownClassification {
-	if (ctx !== undefined && ctx === activeCtx) {
+	const s = state();
+	if (ctx !== undefined && ctx === s.activeCtx) {
 		return "primary";
 	}
-	if (activeCtx === undefined && activeSessionId === undefined) {
+	if (s.activeCtx === undefined && s.activeSessionId === undefined) {
 		return "primary";
 	}
-	if (sessionId !== undefined && sessionId === activeSessionId) {
+	if (sessionId !== undefined && sessionId === s.activeSessionId) {
 		return "primary";
 	}
 	// Uncertainty guard: if EITHER side's session id is unknown we cannot
 	// positively establish "different session", so never classify secondary.
-	if (sessionId === undefined || activeSessionId === undefined) {
+	if (sessionId === undefined || s.activeSessionId === undefined) {
 		return "primary";
 	}
-	const primaryStillActive = probeCtxActive(activeCtx);
+	const primaryStillActive = probeCtxActive(s.activeCtx);
 	if (primaryStillActive === true) {
 		return "secondary";
 	}
@@ -364,26 +398,28 @@ export function classifyCurrentSessionEmission(
 	sessionId: string | undefined,
 ): "primary" | "concurrent-secondary" {
 	if (!guardEnabled()) return "primary";
-	if (activeCtx === undefined && activeSessionId === undefined)
+	const s = state();
+	if (s.activeCtx === undefined && s.activeSessionId === undefined)
 		return "primary";
-	if (ctx !== undefined && ctx === activeCtx) return "primary";
-	if (sessionId !== undefined && sessionId === activeSessionId)
+	if (ctx !== undefined && ctx === s.activeCtx) return "primary";
+	if (sessionId !== undefined && sessionId === s.activeSessionId)
 		return "primary";
 	// Uncertainty guard: if EITHER side's session id is unknown we cannot
 	// positively establish "different session", so never classify secondary.
-	if (sessionId === undefined || activeSessionId === undefined)
+	if (sessionId === undefined || s.activeSessionId === undefined)
 		return "primary";
-	const primaryStillActive = probeCtxActive(activeCtx);
+	const primaryStillActive = probeCtxActive(s.activeCtx);
 	if (primaryStillActive === true) return "concurrent-secondary";
 	return "primary";
 }
 
 export function getSecondarySessionCount(): number {
-	return secondarySessionCount;
+	return state().secondarySessionCount;
 }
 
 export function decrementSecondarySessionCount(): void {
-	if (secondarySessionCount > 0) secondarySessionCount -= 1;
+	const s = state();
+	if (s.secondarySessionCount > 0) s.secondarySessionCount -= 1;
 }
 
 /**
@@ -402,10 +438,14 @@ export function classifySessionStartGuarded(
 /** Test-only: clears all module-scope state (house style — see
  * `_resetSubagentModeForTests` / `slow-fs.ts`). */
 export function _resetSessionLifecycleForTests(): void {
-	activeCtx = undefined;
-	activeSessionId = undefined;
-	activeRoot = undefined;
-	secondarySessionCount = 0;
+	// Resets the PROCESS state, not a module-local copy: a reset that cleared
+	// only module scope would leave the real registration behind and make every
+	// suite that relies on isolation pass vacuously (#2146, catalog shape 7).
+	const s = state();
+	s.activeCtx = undefined;
+	s.activeSessionId = undefined;
+	s.activeRoot = undefined;
+	s.secondarySessionCount = 0;
 }
 
 export interface SessionStartGuardDecision {
@@ -443,31 +483,32 @@ export function decideSessionStart(
 	sessionId: string | undefined,
 	root?: string | undefined,
 ): SessionStartGuardDecision {
-	const hasPrior = activeCtx !== undefined || activeSessionId !== undefined;
-	const priorCtxActive = hasPrior ? probeCtxActive(activeCtx) : undefined;
+	const s = state();
+	const hasPrior = s.activeCtx !== undefined || s.activeSessionId !== undefined;
+	const priorCtxActive = hasPrior ? probeCtxActive(s.activeCtx) : undefined;
 	// ctx OBJECT IDENTITY: if the SDK ever hands the SAME ctx object to a
 	// repeated session_start, that is by definition the same session
 	// re-announcing itself — sequential, never concurrent. (Not expected with
 	// today's SDK — ExtensionRunner.emit() builds a fresh ctx per emit — but
 	// identity is the one signal that can't false-positive, so honor it.)
-	const sameCtx = hasPrior && ctx !== undefined && ctx === activeCtx;
+	const sameCtx = hasPrior && ctx !== undefined && ctx === s.activeCtx;
 	const sameSessionId =
 		sameCtx ||
-		(hasPrior && sessionId !== undefined && sessionId === activeSessionId);
+		(hasPrior && sessionId !== undefined && sessionId === s.activeSessionId);
 
 	// #2129: compare THIS start's cwd against the registered primary's root.
 	// `undefined` on either side means "unknown", never "different" — see
 	// `classifySessionStart`'s fail-safe note.
 	const incomingRoot = normalizeRootForCompare(root);
 	const sameRoot =
-		hasPrior && activeRoot !== undefined && incomingRoot !== undefined
-			? activeRoot === incomingRoot
+		hasPrior && s.activeRoot !== undefined && incomingRoot !== undefined
+			? s.activeRoot === incomingRoot
 			: undefined;
 
 	// #2129 review F5: capture the primary root BEFORE any registration mutates
 	// it, so the reported value is genuinely the decision-time input the
 	// classifier consulted rather than the value this call just wrote.
-	const primaryRootAtDecision = activeRoot;
+	const primaryRootAtDecision = s.activeRoot;
 
 	const classification = classifySessionStartGuarded({
 		hasPrior,
@@ -484,7 +525,7 @@ export function decideSessionStart(
 		return {
 			classification,
 			runFullSessionStart: false,
-			secondaryCount: secondarySessionCount,
+			secondaryCount: s.secondarySessionCount,
 			sameRoot,
 			primaryRoot: primaryRootAtDecision,
 		};
@@ -496,7 +537,7 @@ export function decideSessionStart(
 	return {
 		classification,
 		runFullSessionStart: true,
-		secondaryCount: secondarySessionCount,
+		secondaryCount: s.secondarySessionCount,
 		sameRoot,
 		primaryRoot: primaryRootAtDecision,
 	};
