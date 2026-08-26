@@ -55,7 +55,10 @@ import {
 import { selectLspStatus } from "./clients/lsp-status.js";
 import type { PersistedReadGuardState } from "./clients/read-guard.js";
 import { registerReadBridge } from "./clients/read-bridge.js";
-import { isExternalOrVendorFile } from "./clients/path-utils.js";
+import {
+	isExternalOrVendorFile,
+	normalizeFilePath,
+} from "./clients/path-utils.js";
 import { isPathIgnoredByProject } from "./clients/file-utils.js";
 import {
 	dropStaleFiles,
@@ -111,6 +114,7 @@ import {
 } from "./clients/instance-reaper.js";
 import {
 	deregisterInstance,
+	deregisterInstanceRoot,
 	readInstanceRegistry,
 	registerInstance,
 } from "./clients/instance-registry.js";
@@ -1783,8 +1787,21 @@ function activateExtension(hostPi: ExtensionAPI) {
 					// prior ctx classified `sequential-replacement`, stole the primary
 					// registration, and re-ran the whole session_start battery against
 					// unchanged content. Root identity is now a classification input.
-					const sessionStartCwd =
-						(ctx as { cwd?: string })?.cwd ?? process.cwd();
+					// Read defensively, and do NOT fall back to `process.cwd()`.
+					// `ctx.cwd` is an `assertActive()`-wrapped accessor, so a ctx the
+					// SDK already invalidated throws on the plain read. A
+					// `process.cwd()` fallback would also be worse than no value: it is
+					// identical for every root in the process, so a temp worktree would
+					// compare equal to the primary and the decline could never fire.
+					// An unreadable cwd yields `undefined` — "root unknown" — which
+					// changes no verdict.
+					const sessionStartCwd = (() => {
+						try {
+							return (ctx as { cwd?: string })?.cwd;
+						} catch {
+							return undefined;
+						}
+					})();
 					const sessionStartDecision = decideSessionStart(
 						ctx,
 						stableSessionId,
@@ -2957,6 +2974,28 @@ function activateExtension(hostPi: ExtensionAPI) {
 			);
 			clearCachePrefixSession(stableSessionId, "concurrent-secondary");
 			decrementSecondarySessionCount();
+			// #2130: scoped deregistration. A secondary's shutdown must never run
+			// `deregisterInstance()` — the process lives on and the primary still
+			// owns the entry. Drop only THIS session's own root, and only when it
+			// is positively a different root than the primary's, so a secondary
+			// that shares the primary's directory cannot deregister the root the
+			// host is still working in. A root this session never registered is a
+			// documented no-op inside `deregisterInstanceRoot`.
+			try {
+				const secondaryRoot = (ctx as { cwd?: string })?.cwd;
+				const primaryRoot = getActivePrimaryRoot();
+				if (
+					typeof secondaryRoot === "string" &&
+					secondaryRoot.length > 0 &&
+					primaryRoot !== undefined &&
+					normalizeFilePath(secondaryRoot) !== primaryRoot
+				) {
+					deregisterInstanceRoot(secondaryRoot);
+				}
+			} catch {
+				// Best-effort observability bookkeeping — a stale ctx or an
+				// unresolvable path must never break teardown.
+			}
 			dbg(
 				"session_shutdown: concurrent secondary — skipping shared-infra teardown",
 			);

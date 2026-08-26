@@ -158,15 +158,25 @@ describe("instance-registry multi-root (#2130)", () => {
 			expect(await readInstanceRegistry()).toEqual([]);
 		});
 
-		it("deregistering an unknown root writes nothing", async () => {
+		it("deregistering an unknown root does not rewrite the file", async () => {
+			// The early return is not just tidiness: this module's writes are
+			// read-modify-write over the WHOLE file, so a pointless rewrite can
+			// clobber a concurrent update (the #1724 shape). Proven by mtime, the
+			// only externally observable trace of "a write happened" — the
+			// serialized content is identical either way, so a content compare
+			// would pass with the guard deleted.
 			const { registerInstance, deregisterInstanceRoot } =
 				await import("../../clients/instance-registry.js");
 			await registerInstance(realRoot);
-			const before = fs.readFileSync(path.join(dir, "instances.json"), "utf-8");
+			const registryFile = path.join(dir, "instances.json");
+			const before = fs.statSync(registryFile, { bigint: true }).mtimeNs;
+			// Rename-based writes stamp a fresh mtime; wait past the filesystem's
+			// timestamp granularity so "unchanged" cannot be an artifact of speed.
+			await new Promise((resolve) => setTimeout(resolve, 25));
 			deregisterInstanceRoot(tempRoot);
-			expect(fs.readFileSync(path.join(dir, "instances.json"), "utf-8")).toBe(
-				before,
-			);
+			expect(fs.statSync(registryFile, { bigint: true }).mtimeNs).toBe(before);
+			// And the entry is untouched.
+			expect(readEntry().projectRoots).toHaveLength(1);
 		});
 	});
 
