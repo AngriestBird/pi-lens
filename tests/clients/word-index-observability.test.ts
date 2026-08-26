@@ -40,10 +40,6 @@ vi.mock("../../clients/project-snapshot.js", async (importOriginal) => {
 	};
 });
 
-async function flushMicrotasks(): Promise<void> {
-	for (let i = 0; i < 25; i++) await new Promise((r) => setTimeout(r, 5));
-}
-
 beforeEach(() => {
 	logSpy.mockClear();
 	failPersist.value = false;
@@ -104,7 +100,11 @@ describe("word-index observability (#958)", () => {
 			failPersist.value = true;
 			scheduleWordIndexPersist(env.tmpDir, index);
 			flushWordIndexPersistsForTests();
-			await flushMicrotasks();
+			await vi.waitFor(() =>
+				expect(
+					logSpy.mock.calls.some((c) => c[0]?.phase === "persist_failed"),
+				).toBe(true),
+			);
 
 			const persistFailed = logSpy.mock.calls.find(
 				(c) => c[0]?.phase === "persist_failed",
@@ -142,7 +142,14 @@ describe("word-index observability (#958)", () => {
 
 			scheduleWordIndexPersist(env.tmpDir, index);
 			flushWordIndexPersistsForTests();
-			await flushMicrotasks();
+			await vi.waitFor(() =>
+				expect(
+					logSpy.mock.calls.some(
+						(c) =>
+							c[0]?.phase === "persist_succeeded" && c[0]?.cwd === env.tmpDir,
+					),
+				).toBe(true),
+			);
 
 			const ok = logSpy.mock.calls.find(
 				(c) => c[0]?.phase === "persist_succeeded" && c[0]?.cwd === env.tmpDir,
@@ -182,10 +189,24 @@ describe("word-index observability (#958)", () => {
 			updateWordIndexDocument(index, { path: "a.ts", content: "beta" });
 			scheduleWordIndexPersist(env.tmpDir, index);
 			flushWordIndexPersistsForTests();
-			await flushMicrotasks();
+			await vi.waitFor(() =>
+				expect(
+					logSpy.mock.calls.filter(
+						(c) =>
+							c[0]?.phase === "persist_succeeded" && c[0]?.cwd === env.tmpDir,
+					).length,
+				).toBe(1),
+			);
 			scheduleWordIndexPersist(env.tmpDir, index);
 			flushWordIndexPersistsForTests();
-			await flushMicrotasks();
+			await vi.waitFor(() =>
+				expect(
+					logSpy.mock.calls.filter(
+						(c) =>
+							c[0]?.phase === "persist_succeeded" && c[0]?.cwd === env.tmpDir,
+					).length,
+				).toBe(2),
+			);
 			const records = logSpy.mock.calls
 				.map((call) => call[0])
 				.filter(
@@ -213,7 +234,11 @@ describe("word-index observability (#958)", () => {
 				await import("../../clients/word-index.js");
 
 			triggerBackgroundWordIndexBuild(env.tmpDir);
-			await flushMicrotasks();
+			await vi.waitFor(() =>
+				expect(
+					logSpy.mock.calls.some((c) => c[0]?.phase === "cold_build"),
+				).toBe(true),
+			);
 
 			const coldBuild = logSpy.mock.calls.find(
 				(c) => c[0]?.phase === "cold_build",
