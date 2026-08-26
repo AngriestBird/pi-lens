@@ -286,6 +286,13 @@ Pipeline-crash teardown is destructive only for the registered primary session;
 when no primary registration exists, the legacy reset remains the fail-safe.
 (#2157, #2174)
 
+Auxiliary diagnostic waits preserve a warm-turn fast path: on a cold
+acquisition, the budget is `max(declared wait, observed spawn + 500ms)` clamped
+to an 8s ceiling; on a warm acquisition, it remains `min(declared wait, 2000ms)`. An
+explicit `PI_LENS_AUX_GRACE_MS` value caps the budget on both paths;
+it never raises it. On a cold auxiliary it also caps the request's own
+wait, so a low value cancels the request earlier than the pre-#2152 behavior. (#2152)
+
 Pull-diagnostics request deadlines send `$/cancelRequest`, but cancellation is
 advisory. While a cancelled request remains unsettled, admission blocks another
 pull for the same path/source. The slot frees only on settlement. Apply this to
@@ -1058,6 +1065,19 @@ unrecognized leading launcher with `-c`/`--run`/`/c`/`-Command` is inspected
 recursively and fails closed only when its command string contains an actual
 guarded git verb (literal mentions such as `echo git push` remain allowed).
 
+Real-Git tests route child processes through `tests/support/git-fixture-env.ts`.
+That helper removes the Git directory environment family, isolates global config,
+and disables system config. It deletes inherited values even when the test harness
+itself starts with a contaminated environment; never trust the parent process
+environment for a spawned Git fixture. `git-fixture-governance.test.ts` sweeps test
+sources and requires the direct Git callee to be imported from that helper, while
+the script-side fixture probes use `scripts/lib/git-fixture-env.mjs`. The global-
+setup teardown guard rejects known fixture identity entries or `core.bare=true`
+in the repository config after the suite. The governance sweep anchors its
+implementation and justified-exemption lists to repo-relative paths, and its
+identity sweep keeps every literal `user.name`/`user.email` write in the guard's
+known sets.
+
 Git command classification has ONE implementation. `detectGuardedGitVerb`
 takes a `GitVerbMatcher` and owns the wrapper, `$IFS`, substitution, PATHEXT,
 and text-consumer analysis; a guard that needs "is this really a git
@@ -1096,8 +1116,10 @@ bounded commit-detail population opts out explicitly.
 
 The merge-train warden's GraphQL PR reader follows the same bounded-read contract:
 `fetchOpenPullRequests` preserves collected pages but records a fatal list error
-when `hasNextPage` remains true at `MAX_PAGES`. Its consumer prints that error and
-sets a nonzero exit code, while deliberately bounded sibling reads remain scoped.
+when `hasNextPage` remains true at `MAX_PAGES` or the cursor does not advance.
+It deduplicates PR numbers before `runWarden` decides or applies actions. Its
+consumer prints that error and sets a nonzero exit code, while deliberately
+bounded sibling reads remain scoped.
 
 CI validates GitHub close-keyword syntax through `scripts/check-close-keywords.mjs`:
 PR bodies may not use a comma-separated close list because GitHub applies only
