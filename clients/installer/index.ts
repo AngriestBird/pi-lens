@@ -1993,6 +1993,18 @@ export function resetProbeCacheStateForTesting(): void {
 	}
 }
 
+/**
+ * Exported for testing only. Read the `ensureTool` in-flight map directly
+ * (#1968's ABA regression: a second writer replacing an entry mid-flight,
+ * then a late-settling first run evicting it with a bare delete-by-key).
+ */
+export function _peekEnsureInFlightForTesting(): Map<
+	string,
+	Promise<string | undefined>
+> {
+	return ensureInFlight;
+}
+
 // --- Check Functions ---
 
 const pathWalkMemo = new Map<string, boolean>();
@@ -5374,7 +5386,13 @@ async function ensureToolResolved(
 	try {
 		return await ensurePromise;
 	} finally {
-		ensureInFlight.delete(inFlightKey);
+		// Identity-guarded release (#1968's pattern): delete only if THIS run is
+		// still the registered one. A bare delete-by-key lets a late-settling run
+		// evict a live successor a second writer registered under the same key
+		// mid-flight, after which the next caller starts a duplicate ensure/install.
+		if (ensureInFlight.get(inFlightKey) === ensurePromise) {
+			ensureInFlight.delete(inFlightKey);
+		}
 	}
 }
 

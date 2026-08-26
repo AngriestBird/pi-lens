@@ -475,6 +475,73 @@ describe("runner-helpers availability checker", () => {
 		expect(getSgCommand().cmd).toContain("ast-grep");
 	});
 
+	/**
+	 * In-flight ABA release (#1968, kit-driven white-box probe).
+	 *
+	 * Unlike dead-code-client's/knip-client's LATENT sibling (needs a future
+	 * second writer to reach), this one is LIVE today: `ensureCurrentSgGeneration`
+	 * IS the second writer. A session-boundary reset (`resetDispatchAvailabilityState`)
+	 * bumps the generation; the NEXT caller's `ensureCurrentSgGeneration` nulls
+	 * `sgAvailableInFlight` and starts a fresh flight B. Pre-fix, A's own bare
+	 * `sgAvailableInFlight = null` in its `.finally` clobbers that slot when A
+	 * later settles, even though B is still running — so a caller right after
+	 * shares nothing and starts a redundant THIRD probe.
+	 */
+	it("a late-settling probe does not evict its mid-flight successor across a reset (#1968)", async () => {
+		const safeSpawnMod = await import("../../../../clients/safe-spawn.js");
+		// This worktree's real node_modules/.bin carries local ast-grep/sg
+		// binaries, so each flight probes SEVERAL candidates in sequence, not
+		// just one. A's gated candidate REJECTS rather than resolves, so its
+		// sweep throws immediately instead of trying further candidates and
+		// recording a durable verdict — that write would otherwise race the
+		// shared `sgLatch` ahead of B's own (newer-generation) verdict, which is
+		// a separate concern from the in-flight MAP identity this test pins.
+		const gates: Array<{
+			resolve: (value: { stdout: string; stderr: string; status: number }) => void;
+			reject: (err: Error) => void;
+		}> = [];
+		let calls = 0;
+		vi.mocked(safeSpawnMod.safeSpawnAsync).mockImplementation((async () => {
+			calls += 1;
+			if (calls <= 2) {
+				return new Promise((resolve, reject) => {
+					gates.push({ resolve, reject });
+				});
+			}
+			return { stdout: "", stderr: "missing", status: 1 };
+		}) as never);
+
+		const buildA = isSgAvailableAsync(); // A in flight, call #1 pending
+		buildA.catch(() => {}); // rejection is asserted below; suppress Node's warning
+		expect(calls).toBe(1);
+
+		// The second writer: a session boundary lands mid-flight.
+		resetDispatchAvailabilityState();
+
+		const buildB = isSgAvailableAsync(); // generation mismatch supersedes A
+		expect(calls).toBe(2); // B started its OWN probe rather than sharing A's
+
+		// A settles late (rejects, never reaching a latch write).
+		gates[0]!.reject(new Error("probe blew up"));
+		await expect(buildA).rejects.toThrow("probe blew up");
+
+		// A THIRD caller in the same (B's) generation must share B's flight —
+		// not start a fresh probe, which is what the bare unconditional clear
+		// breaks (pre-fix: `sgAvailableInFlight` is null here, so this call
+		// starts a THIRD safeSpawnAsync invocation instead of joining B). Every
+		// `isSgAvailableAsync` call gets its OWN promise wrapper (it is an
+		// `async function`, so even `return sgAvailableInFlight` is re-wrapped),
+		// so "shared" is proven by the absence of a new probe call below, not by
+		// promise identity.
+		const buildC = isSgAvailableAsync();
+		expect(calls).toBe(2); // no new call: C joined B's flight
+
+		// Release B's own gated candidate as a match, so its sweep settles true.
+		gates[1]!.resolve({ stdout: "ast-grep 0.40.0", stderr: "", status: 0 });
+		expect(await buildB).toBe(true);
+		expect(await buildC).toBe(true);
+	});
+
 	it("does not re-serve a retained ast-grep winner this sweep just proved durably missing (#1593)", async () => {
 		const safeSpawnMod = await import("../../../../clients/safe-spawn.js");
 		try {
