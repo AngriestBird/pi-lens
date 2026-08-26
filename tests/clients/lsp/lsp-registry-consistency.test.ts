@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
+import { INITIALIZE_TIMEOUT_MS } from "../../../clients/lsp/client.js";
 import * as serverModule from "../../../clients/lsp/server.js";
 import { LSP_SERVERS } from "../../../clients/lsp/server.js";
+import {
+	LSP_DIAGNOSTICS_WAIT_MS,
+	LSP_RUNNER_TIMEOUT_MS,
+} from "../../../clients/dispatch/runners/lsp.js";
 
 /** A module export that is shaped like an LSPServerInfo (duck-typed). */
 function isServerInfoLike(v: unknown): v is { id: string } {
@@ -123,6 +128,64 @@ describe("LSP_SERVERS registry consistency", () => {
 			expect(server?.clientWaitTimeoutMs, `${id}.clientWaitTimeoutMs`).toBe(
 				timeoutMs,
 			);
+			// Fix-round F1 (#2233): `clientWaitTimeoutMs` alone is a no-op. The
+			// spawn's own `initialize` handshake is hard-killed at
+			// `initializeTimeoutMs` (default 15s, `clients/lsp/client.ts`),
+			// independently of how long the caller is willing to wait. A raised
+			// wait floor with no matching raise on this field dies at the
+			// unraised inner bound before the outer wait ever gets to matter.
+			expect(server?.initializeTimeoutMs, `${id}.initializeTimeoutMs`).toBe(
+				timeoutMs,
+			);
+		}
+	});
+
+	/**
+	 * Fix-round F1 (#2233), generalized: for every server that declares
+	 * `clientWaitTimeoutMs` (a promise to the caller "I'll wait this long for
+	 * a cold spawn"), `initializeTimeoutMs` must be at least as generous —
+	 * otherwise `createLSPClient`'s hard kill (`clients/lsp/client.ts`,
+	 * enforced around the `initialize` request) fires first and the raised
+	 * outer wait can never be used. This is exactly the shape that made the
+	 * original Prisma/Vue `clientWaitTimeoutMs` raise a no-op: both left
+	 * `initializeTimeoutMs` unset, falling back to the 15s default well
+	 * under their own 40s/30s waits.
+	 */
+	it("never lets the inner initialize kill fire before the outer client wait (#2233 F1)", () => {
+		for (const s of LSP_SERVERS) {
+			if (s.clientWaitTimeoutMs === undefined) continue;
+			const effectiveInit = s.initializeTimeoutMs ?? INITIALIZE_TIMEOUT_MS;
+			expect(
+				effectiveInit,
+				`${s.id}: initializeTimeoutMs (${effectiveInit}) must be >= ` +
+					`clientWaitTimeoutMs (${s.clientWaitTimeoutMs}) or the raised ` +
+					`wait can never be used — the spawn is killed first`,
+			).toBeGreaterThanOrEqual(s.clientWaitTimeoutMs);
+		}
+	});
+
+	/**
+	 * Fix-round F2 (#2233): the dispatch lsp-runner's OWN wall-clock budget
+	 * (`clients/dispatch/runners/lsp.ts`'s `LSP_RUNNER_TIMEOUT_MS`, passed as
+	 * this runner's `timeoutMs` to `dispatcher.ts`'s `runRunner`) must leave
+	 * headroom over any server's `clientWaitTimeoutMs` plus the diagnostics
+	 * wait that still runs after a cold spawn succeeds. Without this, the
+	 * dispatcher's own race (`runner.timeoutMs ?? RUNNER_TIMEOUT_MS`, 30s by
+	 * default) fires before a server's raised client-wait floor ever
+	 * elapses — exactly what made Prisma's original 40s wait and Vue's
+	 * original 30s wait both dead code against the shared 30s default.
+	 */
+	it("gives every server's client wait headroom under the dispatch runner budget (#2233 F2)", () => {
+		for (const s of LSP_SERVERS) {
+			if (s.clientWaitTimeoutMs === undefined) continue;
+			const required = s.clientWaitTimeoutMs + LSP_DIAGNOSTICS_WAIT_MS;
+			expect(
+				required,
+				`${s.id}: clientWaitTimeoutMs (${s.clientWaitTimeoutMs}) + ` +
+					`diagnostics wait (${LSP_DIAGNOSTICS_WAIT_MS}) = ${required} must ` +
+					`fit under LSP_RUNNER_TIMEOUT_MS (${LSP_RUNNER_TIMEOUT_MS}) or the ` +
+					`dispatcher kills the runner phase before the client wait can elapse`,
+			).toBeLessThan(LSP_RUNNER_TIMEOUT_MS);
 		}
 	});
 });
