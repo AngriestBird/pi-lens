@@ -226,6 +226,17 @@ describe("metrics-history repository guard (#2099)", () => {
 				),
 			);
 			fixtureEnv.PI_LENS_SKIP_HOOKS = "1";
+			for (const variable of [
+				"GIT_DIR",
+				"GIT_WORK_TREE",
+				"GIT_INDEX_FILE",
+				"GIT_OBJECT_DIRECTORY",
+				"GIT_ALTERNATE_OBJECT_DIRECTORIES",
+				"GIT_COMMON_DIR",
+				"GIT_PREFIX",
+			]) {
+				delete fixtureEnv[variable];
+			}
 			fixtureEnv.GIT_CONFIG_GLOBAL = path.join(tmp, "gitconfig");
 			fixtureEnv.GIT_CONFIG_NOSYSTEM = "1";
 			const repo = path.join(tmp, "nested-repo");
@@ -291,6 +302,17 @@ describe("metrics-history missing target directory (#2099)", () => {
 				),
 			);
 			fixtureEnv.PI_LENS_SKIP_HOOKS = "1";
+			for (const variable of [
+				"GIT_DIR",
+				"GIT_WORK_TREE",
+				"GIT_INDEX_FILE",
+				"GIT_OBJECT_DIRECTORY",
+				"GIT_ALTERNATE_OBJECT_DIRECTORIES",
+				"GIT_COMMON_DIR",
+				"GIT_PREFIX",
+			]) {
+				delete fixtureEnv[variable];
+			}
 			fixtureEnv.GIT_CONFIG_GLOBAL = path.join(tmp, "gitconfig");
 			fixtureEnv.GIT_CONFIG_NOSYSTEM = "1";
 			const runGit = (args: string[]) =>
