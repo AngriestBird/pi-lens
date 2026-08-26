@@ -975,6 +975,9 @@ unawaited concurrent cascades must not yield across a wholesale posting snapshot
 Cooperative async variants are serialized per index and remain for bulk refresh.
 When touching this seam, keep posting-entry counts and replacement-cost scalars
 in word-index telemetry. #2069 intentionally builds on this prerequisite.
+The reproducible synchronous replacement profile is
+`npm run build && npm run bench:word-index-replacement`; it reports latency
+percentiles and inspector samples attributed to `normalizeEphemeralMapKey`.
 
 Word-index persistence keeps the v2 wire contract and caches its flat serialized
 view per index. Every replacement or addition marks its document dirty; the next

@@ -1,5 +1,5 @@
 /**
- * #2069 acceptance criterion 3 — `searchWordIndex` output is unchanged by the
+ * #2067 criterion 5 / #2069 acceptance criterion 3 — `searchWordIndex` output is unchanged by the
  * packed posting store.
  *
  * This is a characterization test, not a red-first regression test: the
@@ -99,7 +99,7 @@ const baselinePath = path.join(
 	"word-index-rank-baseline.json",
 );
 
-describe("word-index ranking is unchanged by the packed store (#2069)", () => {
+describe("word-index ranking is unchanged by replacement and packing (#2067/#2069)", () => {
 	it("reproduces the boxed representation's output for a fixed 20-query set", () => {
 		const baseline = JSON.parse(
 			fs.readFileSync(baselinePath, "utf-8"),
