@@ -64,9 +64,7 @@ describe("review-graph-logger", () => {
 		});
 
 		expect(writerLog).toHaveBeenCalledTimes(2);
-		expect(writerLog.mock.calls[0][0].cwd).toBe(
-			writerLog.mock.calls[1][0].cwd,
-		);
+		expect(writerLog.mock.calls[0][0].cwd).toBe(writerLog.mock.calls[1][0].cwd);
 	});
 
 	it("is a no-op inside the test runner (isTestMode gate)", () => {
