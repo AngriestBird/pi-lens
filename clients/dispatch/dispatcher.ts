@@ -19,6 +19,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { FileKind } from "../file-kinds.js";
 import { recordRunner } from "../widget-state.js";
+import { incrementDegradationCount } from "../degradation-ledger.js";
 import { detectFileKind } from "../file-kinds.js";
 import { detectFileRole } from "../file-role.js";
 import { isTestFile } from "../file-utils.js";
@@ -42,6 +43,12 @@ import { applyDispositions } from "../diagnostic-dispositions.js";
 import { applyInlineSuppressions } from "./inline-suppressions.js";
 import { getToolPlan } from "./plan.js";
 import { resolveRunnerPath } from "./runner-context.js";
+import {
+	classifyObservedRunner,
+	COLLECT_LATER_THRESHOLD_MS,
+	observeRunnerLatency,
+} from "./collect-later-tier.js";
+import { deferRunnerFindings } from "./pending-runner-findings.js";
 import { applyRulePolicy, rulePolicyMapFromConfig } from "./rule-policy.js";
 import { getToolProfile } from "./tool-profile.js";
 import { isRunnerSkipReason } from "./types.js";
@@ -492,7 +499,7 @@ export interface RunnerLatency {
 	startTime: number;
 	endTime: number;
 	durationMs: number;
-	status: "succeeded" | "failed" | "skipped" | "when_skipped";
+	status: "succeeded" | "failed" | "skipped" | "when_skipped" | "pending";
 	diagnosticCount: number;
 	semantic: string;
 	skipReason?: RunnerSkipReason;
@@ -776,10 +783,126 @@ async function runGroup(
 			continue;
 		}
 
+		const projectRoot = ctx.projectRoot ?? ctx.cwd;
+		// Only post-write dispatches participate. Project scans and direct API
+		// callers must retain their existing synchronous semantics.
+		const observedTier =
+			ctx.writeIndex === undefined
+				? "inline"
+				: classifyObservedRunner(projectRoot, runner.id);
+		if (observedTier === "collect-later") {
+			const markedAtMs = Date.now();
+			const deferred = runRunner(ctx, runner, semantic).then((result) => {
+				const durationMs = Date.now() - markedAtMs;
+				const tier = observeRunnerLatency({
+					projectRoot,
+					runnerId: runner.id,
+					durationMs,
+					timedOut: result.failureKind === "timeout",
+				});
+				if (tier !== observedTier) {
+					logLatency({
+						type: "phase",
+						filePath: ctx.filePath,
+						phase: "runner_collect_later_tier_flip",
+						durationMs: 0,
+						metadata: {
+							runnerId: runner.id,
+							from: observedTier,
+							to: tier,
+							projectRoot: normalizeMapKey(projectRoot),
+						},
+					});
+				}
+				if (tier === "collect-later") {
+					incrementDegradationCount({
+						kind: "runner-collect-later",
+						subject: `${normalizeMapKey(projectRoot)}:${runner.id}`,
+						reason: `observed ${durationMs}ms, threshold ${COLLECT_LATER_THRESHOLD_MS}ms`,
+					});
+				}
+				logLatency({
+					type: "runner",
+					filePath: ctx.filePath,
+					runnerId: runner.id,
+					startedAt: new Date(markedAtMs).toISOString(),
+					durationMs,
+					status: result.status,
+					diagnosticCount: result.diagnostics.length,
+					semantic: result.semantic ?? semantic,
+					metadata: { tier: "collect-later", delivered: "turn_end" },
+				});
+				return result;
+			});
+			deferRunnerFindings({
+				filePath: ctx.filePath,
+				cwd: ctx.cwd,
+				projectRoot,
+				runnerId: runner.id,
+				markedAtMs,
+				writeIndex: ctx.writeIndex,
+				promise: deferred,
+			});
+			// A deferred runner is still an observed runner. Keep it visible in
+			// both the edit latency report and the widget until its turn-end result
+			// replaces this pending state (#2122 F1).
+			latencies.push({
+				runnerId: runner.id,
+				startTime: runnerStart,
+				endTime: runnerStart,
+				durationMs: 0,
+				status: "pending",
+				diagnosticCount: 0,
+				semantic: semantic,
+			});
+			recordRunner(ctx.filePath, runner.id, "pending", 0, 0, ctx.writeIndex);
+			logLatency({
+				type: "runner",
+				filePath: ctx.filePath,
+				runnerId: runner.id,
+				durationMs: 0,
+				status: "pending",
+				diagnosticCount: 0,
+				semantic,
+				metadata: { tier: "collect-later", delivered: "turn_end" },
+			});
+			continue;
+		}
+
 		const result = await runRunner(ctx, runner, semantic);
 		onRunnerResult?.(runnerId, result);
 		const runnerEnd = Date.now();
 		const duration = runnerEnd - runnerStart;
+		const tier =
+			ctx.writeIndex === undefined
+				? "inline"
+				: observeRunnerLatency({
+						projectRoot,
+						runnerId: runner.id,
+						durationMs: duration,
+						timedOut: result.failureKind === "timeout",
+					});
+		if (tier !== observedTier) {
+			logLatency({
+				type: "phase",
+				filePath: ctx.filePath,
+				phase: "runner_collect_later_tier_flip",
+				durationMs: 0,
+				metadata: {
+					runnerId: runner.id,
+					from: observedTier,
+					to: tier,
+					projectRoot: normalizeMapKey(projectRoot),
+				},
+			});
+		}
+		if (tier === "collect-later") {
+			incrementDegradationCount({
+				kind: "runner-collect-later",
+				subject: `${normalizeMapKey(projectRoot)}:${runner.id}`,
+				reason: `observed ${duration}ms, threshold ${COLLECT_LATER_THRESHOLD_MS}ms`,
+			});
+		}
 		// Runner definitions are a typed API, but embedders/plugins can still
 		// return untyped objects at runtime. Admit only the closed taxonomy and
 		// only on actual skips so free text cannot enter durable latency metadata.
@@ -1047,6 +1170,12 @@ export async function dispatchForFile(
 	if (coverageNotice) {
 		output += formatDiagnostics([coverageNotice], "warning", 1);
 		warnings.push(coverageNotice);
+	}
+	const pendingRunners = runnerLatencies
+		.filter((runner) => runner.status === "pending")
+		.map((runner) => runner.runnerId);
+	if (pendingRunners.length > 0) {
+		output += `\n⏳ Pending runners (reported at turn end): ${pendingRunners.join(", ")}\n`;
 	}
 
 	// Generate and store latency report
