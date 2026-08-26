@@ -1,3 +1,5 @@
+import { createDeadline, yieldIfOverBudget } from "./cooperative-budget.js";
+
 /**
  * Packed backing store for the word index's inverted postings (#2069).
  *
@@ -124,9 +126,13 @@ export class WordPostingList {
 	 * Grow so at least `entries` postings fit without another reallocation. The
 	 * grown store is always PRIVATE: a list that outgrows its arena slice must
 	 * not write past it into the next token's postings.
+	 *
+	 * Returns `true` when it allocated a fresh private store, so the index can
+	 * keep an O(1) running tally of distinct backing stores instead of rebuilding
+	 * a `Set` over the whole vocabulary on every edit (#2117).
 	 */
-	reserve(entries: number): void {
-		if (entries <= this.capacityEntries) return;
+	reserve(entries: number): boolean {
+		if (entries <= this.capacityEntries) return false;
 		const grown = new Int32Array(entries * 2);
 		grown.set(
 			this.lanes.subarray(this.laneStart, this.laneStart + this.entryCount * 2),
@@ -134,6 +140,7 @@ export class WordPostingList {
 		this.lanes = grown;
 		this.laneStart = 0;
 		this.capacityEntries = entries;
+		return true;
 	}
 
 	push(fileId: number, line: number): void {
@@ -222,9 +229,10 @@ export function estimatePostingListBytes(list: WordPostingList): number {
  *
  * A later per-edit `push` that outgrows a list allocates a fresh private array
  * for that token and stops referring to the arena. The vacated slice is not
- * reclaimed while any sibling still points into the arena, so churn
- * re-fragments what a build compacted, and only a full rebuild or a
- * `deserializeWordIndex` re-compacts it.
+ * reclaimed while any sibling still points into the arena, so incremental
+ * churn can re-fragment what a build compacted. `refreshWordIndexIncrementally`
+ * recompacts after a bounded store-count threshold, using the cooperative
+ * variant below so a refresh does not monopolize the event loop.
  *
  * Measured on this repository's own tree, 2,699 documents and 2,272,686
  * postings: a fresh build is 32.8 MB in ONE backing store; one full-corpus
@@ -243,6 +251,58 @@ export function compactPostingsIntoArena(
 	const arena = new Int32Array(lanes);
 	let offset = 0;
 	for (const list of postings.values()) offset = list.adoptArena(arena, offset);
+}
+
+/**
+ * Cooperative counterpart for incremental refresh. It yields every work budget
+ * while copying the lists, so a large corpus does not monopolize the event
+ * loop, and it is safe against a concurrent synchronous edit landing during one
+ * of those yields.
+ *
+ * The arena is sized from a snapshot taken up front. A synchronous
+ * `updateWordIndexDocument` that runs during a yield can grow a not-yet-adopted
+ * list or replace it wholesale. The publish loop therefore adopts a list ONLY
+ * when it is still the map's current entry AND still the size the snapshot
+ * charged AND still fits the space that entry reserved. A list that changed is
+ * left on its own private store; the next recompaction packs it. This makes an
+ * out-of-bounds `adoptArena` write structurally impossible — the earlier code
+ * sized the arena once, then wrote each list's CURRENT width, so a grown list
+ * overran the arena and V8 silently dropped the tail postings (#2117 review F2).
+ *
+ * Each `adoptArena` copies and re-homes one list within a single synchronous
+ * step, so readers never observe a partially written list.
+ */
+export async function compactPostingsIntoArenaCooperatively(
+	postings: Map<string, WordPostingList>,
+): Promise<void> {
+	// Snapshot (token, list, width) in one synchronous pass; the arena is sized
+	// from these widths and only unchanged lists are adopted, so the sum of the
+	// widths actually written can never exceed the arena length.
+	const planned: Array<{
+		token: string;
+		list: WordPostingList;
+		width: number;
+	}> = [];
+	let lanes = 0;
+	for (const [token, list] of postings) {
+		const width = list.length * 2;
+		planned.push({ token, list, width });
+		lanes += width;
+	}
+	if (lanes === 0) return;
+	const arena = new Int32Array(lanes);
+	let offset = 0;
+	const deadline = createDeadline(8);
+	for (const plan of planned) {
+		if (
+			postings.get(plan.token) === plan.list &&
+			plan.list.length * 2 === plan.width &&
+			offset + plan.width <= arena.length
+		) {
+			offset = plan.list.adoptArena(arena, offset);
+		}
+		if (deadline.expired()) await yieldIfOverBudget(deadline);
+	}
 }
 
 /**
@@ -285,14 +345,18 @@ export function countPostingEntries(store: WordIndexStore): number {
  *
  * It deliberately excludes the token strings, the path-keyed metadata maps, and
  * the `Map` spines, which together measured 2.5 MB against 63 MB of packed
- * store on this repository's own corpus. The figure is a floor on the index's
- * cost, reported so a heap census can be reconciled against the log.
+ * store on this repository's own corpus. Distinct backing stores are charged
+ * once, including abandoned arena slack. The figure remains a floor on the
+ * index's cost because object and map overhead stay unrepresented.
  */
 export function estimateWordIndexStoreBytes(store: WordIndexStore): number {
 	let bytes = 0;
+	const backingStores = new Set<Int32Array>();
 	for (const list of store.postings.values()) {
-		bytes += estimatePostingListBytes(list);
+		backingStores.add(list.backingStore);
+		bytes += WORD_POSTING_LIST_OVERHEAD_BYTES;
 	}
+	for (const backingStore of backingStores) bytes += backingStore.byteLength;
 	for (const entry of store.forward?.values() ?? []) {
 		bytes += entry.estimatedBytes;
 	}
