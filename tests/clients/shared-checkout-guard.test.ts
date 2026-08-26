@@ -51,6 +51,7 @@ import {
 	type SharedCheckoutGuardDeps,
 	type WorkingTreeState,
 } from "../../clients/shared-checkout-guard.js";
+import { resolveGitToplevel } from "../../clients/opaque-mutation-scan.js";
 import { normalizeFilePath } from "../../clients/path-utils.js";
 import { safeSpawnAsync } from "../../clients/safe-spawn.js";
 
@@ -90,7 +91,7 @@ function deps(
 		readRegistry: async () => [peer()],
 		isPidAlive: () => true,
 		now: 3_000,
-		isGitRepo: async () => true,
+		resolveToplevel: async () => ROOT,
 		probeWorkingTree: async (): Promise<WorkingTreeState> => {
 			if (probeSpy) probeSpy.calls += 1;
 			return "dirty";
@@ -390,6 +391,71 @@ describe("evaluateSharedCheckoutGuard (#2007)", () => {
 		expect(probed).toEqual([path.resolve(ROOT)]);
 	});
 
+	it("declines from a SUBDIRECTORY of the shared checkout, end to end", async () => {
+		// R2: round 2 proved containment only by calling
+		// `selectLivePeerInstances` directly, so swapping the call site back to
+		// "exact" left every test green. This drives the real evaluator.
+		const sub = path.join(ROOT, "clients");
+		const decision = await evaluateSharedCheckoutGuard(
+			"bash",
+			bash("git checkout main"),
+			sub,
+			deps({
+				// Both the subdirectory and the peer's root belong to one tree.
+				resolveToplevel: async () => ROOT,
+			}),
+		);
+		// MUTATION PROOF: change the call site's "containment" back to "exact"
+		// and this reds — a command run from any subdirectory would be allowed.
+		expect(decision.block).toBe(true);
+		expect(decision.reason).toContain(`pid ${process.pid + 1}`);
+	});
+
+	it("allows inside a NESTED worktree, which shares no files with its parent", async () => {
+		// R3: a linked worktree lives at a path under the main checkout but is
+		// a separate working tree. Lexical containment declined it, and the
+		// refusal told the operator to go use a dedicated worktree — which is
+		// exactly where they already were.
+		const nested = path.join(ROOT, ".claude", "worktrees", "agent-x");
+		const probed: string[] = [];
+		const decision = await evaluateSharedCheckoutGuard(
+			"bash",
+			bash("git checkout main"),
+			nested,
+			deps({
+				// The peer's root resolves to the MAIN tree, the cwd to its own.
+				resolveToplevel: async (root) =>
+					normalizeFilePath(root) === normalizeFilePath(nested) ? nested : ROOT,
+				probeWorkingTree: async (root) => {
+					probed.push(root);
+					return "dirty";
+				},
+			}),
+		);
+		// MUTATION PROOF: drop the toplevel comparison and keep containment
+		// alone, and this reds — every agent worktree under `.claude/` would be
+		// declined on the main checkout's peers.
+		expect(decision.block).toBe(false);
+		// It never even reaches the working-tree probe: there is no peer.
+		expect(probed).toEqual([]);
+		expect(
+			phaseCalls("shared_checkout_guard_allow")[0]?.metadata,
+		).toMatchObject({ reasonCategory: "no_peer_session" });
+	});
+
+	it("allows when the target is not inside any working tree", async () => {
+		const decision = await evaluateSharedCheckoutGuard(
+			"bash",
+			bash("git checkout main"),
+			ROOT,
+			deps({ resolveToplevel: async () => undefined }),
+		);
+		expect(decision.block).toBe(false);
+		expect(
+			phaseCalls("shared_checkout_guard_allow")[0]?.metadata,
+		).toMatchObject({ reasonCategory: "not_a_git_worktree" });
+	});
+
 	it("allows the same command when no other session is here", async () => {
 		const probeSpy = { calls: 0 };
 		const decision = await evaluateSharedCheckoutGuard(
@@ -459,18 +525,6 @@ describe("evaluateSharedCheckoutGuard (#2007)", () => {
 		expect(latencyCalls).toHaveLength(0);
 	});
 
-	it("allows when the shared directory is not a git worktree", async () => {
-		const probeSpy = { calls: 0 };
-		const decision = await evaluateSharedCheckoutGuard(
-			"bash",
-			bash("git checkout main"),
-			ROOT,
-			deps({ isGitRepo: async () => false }, probeSpy),
-		);
-		expect(decision.block).toBe(false);
-		expect(probeSpy.calls).toBe(0);
-	});
-
 	it("allows when the registry itself cannot be read", async () => {
 		const decision = await evaluateSharedCheckoutGuard(
 			"bash",
@@ -534,6 +588,55 @@ describe("probeWorkingTreeState against the real git binary (#2007)", () => {
 
 	afterAll(() => {
 		fs.rmSync(tmpRoot, { recursive: true, force: true });
+	});
+
+	it("gives a nested linked worktree its OWN toplevel (R3's premise)", async () => {
+		// The whole R3 fix rests on a claim about git: that a worktree created
+		// UNDER the main checkout reports itself, not the parent. Verified
+		// against the real binary rather than assumed (catalog shape 16) — this
+		// mirrors how this repo stores agent worktrees under `.claude/`.
+		const main = path.join(tmpRoot, "main-repo");
+		fs.mkdirSync(main, { recursive: true });
+		const run = async (args: string[], cwd: string) =>
+			safeSpawnAsync("git", args, { cwd, timeout: 20000 });
+		const init = await run(["init", "-q", "-b", "master"], main);
+		if (init.error || init.status !== 0) {
+			throw new Error(`git init unavailable: ${init.error ?? init.status}`);
+		}
+		await run(["config", "user.email", "t@t.t"], main);
+		await run(["config", "user.name", "t"], main);
+		fs.writeFileSync(path.join(main, "base.txt"), "base\n");
+		await run(["add", "-A"], main);
+		await run(["commit", "-qm", "init"], main);
+
+		const nested = path.join(main, ".claude", "worktrees", "agent-x");
+		const added = await run(
+			["worktree", "add", "-q", "-b", "agent-x", nested],
+			main,
+		);
+		if (added.error || added.status !== 0) {
+			throw new Error(
+				`git worktree add failed: ${added.error ?? added.status}`,
+			);
+		}
+
+		const mainTop = await resolveGitToplevel(main);
+		const nestedTop = await resolveGitToplevel(nested);
+		expect(mainTop).toBeDefined();
+		expect(nestedTop).toBeDefined();
+		// The nested tree is lexically INSIDE the main one and is still a
+		// different working tree. Containment alone cannot tell them apart.
+		expect(
+			normalizeFilePath(nestedTop!).startsWith(normalizeFilePath(mainTop!)),
+		).toBe(true);
+		expect(normalizeFilePath(nestedTop!)).not.toBe(normalizeFilePath(mainTop!));
+
+		// A plain subdirectory of the main tree DOES resolve back to it.
+		const plainSub = path.join(main, "sub");
+		fs.mkdirSync(plainSub, { recursive: true });
+		expect(normalizeFilePath((await resolveGitToplevel(plainSub))!)).toBe(
+			normalizeFilePath(mainTop!),
+		);
 	});
 
 	it("reports clean, then dirty, then unknown outside a repo", async () => {

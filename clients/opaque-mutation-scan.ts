@@ -228,6 +228,7 @@ const gitRepoMemo = new Map<string, boolean>();
 export function resetOpaqueMutationState(): void {
 	getOpaqueBaselineStore().takeAllForTest();
 	gitRepoMemo.clear();
+	gitToplevelMemo.clear();
 }
 
 /** Cached git-worktree probe (repos don't stop being git mid-session). */
@@ -248,6 +249,42 @@ export async function isGitWorktree(root: string): Promise<boolean> {
 
 export function _resetGitWorktreeMemoForTests(): void {
 	gitRepoMemo.clear();
+	gitToplevelMemo.clear();
+}
+
+const gitToplevelMemo = new Map<string, string | undefined>();
+
+/**
+ * The root of the working tree `root` belongs to, or `undefined` when it is
+ * not inside one (#2007).
+ *
+ * This is WORKTREE IDENTITY, which path containment cannot supply. A linked
+ * worktree lives at a path nested under the main checkout — this repo keeps
+ * agent worktrees under `.claude/worktrees/` — yet shares no working files
+ * with it. `--show-toplevel` answers which tree a directory really belongs
+ * to, so two directories are the same checkout when, and only when, their
+ * toplevels match.
+ *
+ * Memoized beside `isGitWorktree`, and cleared by the same
+ * `resetOpaqueMutationState` session boundary, so it cannot become a
+ * process-lifetime latch (catalog shape 17). `undefined` is a real cached
+ * answer, so the memo is probed with `has`, never by truthiness.
+ */
+export async function resolveGitToplevel(
+	root: string,
+): Promise<string | undefined> {
+	const key = normalizeMapKey(path.resolve(root));
+	if (gitToplevelMemo.has(key)) return gitToplevelMemo.get(key);
+	const result = await safeSpawnAsync("git", ["rev-parse", "--show-toplevel"], {
+		cwd: root,
+		timeout: 3000,
+	});
+	const toplevel =
+		!result.error && result.status === 0 && result.stdout?.trim()
+			? result.stdout.trim()
+			: undefined;
+	gitToplevelMemo.set(key, toplevel);
+	return toplevel;
 }
 
 export interface GitRecoveryOutcome {

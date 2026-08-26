@@ -23,12 +23,15 @@
  *      see `WORKTREE_MUTATING_GIT_MATCHER`. The directory judged is the one
  *      the invocation TARGETS, which `-C` and `--work-tree` can move away
  *      from the caller's cwd.
- *   2. Another live pi-lens session shares that directory.
- *      `selectLivePeerInstances` (clients/instance-registry.ts) is the single
- *      source of truth for that question; warm-attach reads the same
- *      predicate in `"exact"` mode. This guard asks in `"containment"` mode,
- *      because a peer at the repo root and a command run from a subdirectory
- *      share ONE working tree. No peer means nothing to protect.
+ *   2. Another live pi-lens session is in the SAME WORKING TREE.
+ *      `selectLivePeerInstances` (clients/instance-registry.ts) owns liveness
+ *      and is the single source of truth for it; warm-attach reads the same
+ *      predicate in `"exact"` mode. Path containment alone is not identity
+ *      here, in either direction: a peer at the repo root and a command run
+ *      from a subdirectory DO share one tree, while a linked worktree nested
+ *      under the main checkout shares nothing with it. Containment against
+ *      the toplevel is the pre-filter; `git rev-parse --show-toplevel` is the
+ *      decision. No peer means nothing to protect.
  *   3. The working tree actually carries uncommitted work. A clean tree can
  *      be switched freely.
  *
@@ -61,7 +64,7 @@ import {
 } from "./instance-registry.js";
 import { realIsPidAlive } from "./instance-reaper.js";
 import { logLatency } from "./latency-logger.js";
-import { isGitWorktree } from "./opaque-mutation-scan.js";
+import { resolveGitToplevel } from "./opaque-mutation-scan.js";
 import { normalizeFilePath } from "./path-utils.js";
 import { safeSpawnAsync } from "./safe-spawn.js";
 
@@ -125,6 +128,10 @@ function isCleanDryRun(argsAfterVerb: readonly string[]): boolean {
 export const WORKTREE_MUTATING_GIT_MATCHER: GitVerbMatcher = {
 	id: "worktree-mutating",
 	indirectAlwaysMatches: false,
+	// `git checkout --help` opens documentation and changes nothing. This
+	// guard can afford to read a leading help flag as documentation; the
+	// commit gate cannot — see `suppressPostVerbHelp`'s own docstring.
+	suppressPostVerbHelp: true,
 	matchesVerb(verb, argsAfterVerb) {
 		if (ALWAYS_MUTATING_VERBS.has(verb)) return true;
 		if (verb === "reset") {
@@ -199,7 +206,8 @@ export interface SharedCheckoutGuardDeps {
 	readRegistry?: () => Promise<InstanceEntry[]>;
 	isPidAlive?: (pid: number) => boolean;
 	now?: number;
-	isGitRepo?: (root: string) => Promise<boolean>;
+	/** Resolves a directory to its working-tree root, or undefined. */
+	resolveToplevel?: (root: string) => Promise<string | undefined>;
 	probeWorkingTree?: (root: string) => Promise<WorkingTreeState>;
 }
 
@@ -280,21 +288,43 @@ async function evaluateOneTarget(
 	deps: SharedCheckoutGuardDeps,
 ): Promise<SharedCheckoutDecision> {
 	const root = normalizeFilePath(cwd);
-	const peers = selectLivePeerInstances(
-		entries,
-		cwd,
-		deps.now ?? Date.now(),
-		deps.isPidAlive ?? realIsPidAlive,
-		// A peer registered at the repo root and a command run from a
-		// subdirectory share ONE working tree; an exact compare would miss it.
-		"containment",
-	);
-	if (peers.length === 0) {
-		logAllow(root, "no_peer_session");
+	const resolveToplevel = deps.resolveToplevel ?? resolveGitToplevel;
+	const toplevel = await resolveToplevel(cwd);
+	if (toplevel === undefined) {
+		logAllow(root, "not_a_git_worktree");
 		return { block: false };
 	}
-	if (!(await (deps.isGitRepo ?? isGitWorktree)(cwd))) {
-		logAllow(root, "not_a_git_worktree");
+	const normalizedToplevel = normalizeFilePath(toplevel);
+	// Containment against the TOPLEVEL, not against the caller's directory:
+	// two sessions in sibling subdirectories of one checkout share it, and
+	// comparing them to each other would miss that. Every directory in a
+	// working tree is under its own toplevel, so this pre-filter can only
+	// admit candidates, never drop a real peer.
+	const candidates = selectLivePeerInstances(
+		entries,
+		normalizedToplevel,
+		deps.now ?? Date.now(),
+		deps.isPidAlive ?? realIsPidAlive,
+		"containment",
+	);
+	// Path containment is NOT shared-checkout identity. A linked worktree sits
+	// at a path nested under the main checkout — this repo puts agent
+	// worktrees under `.claude/worktrees/` — and shares no working files with
+	// it. Confirm each candidate belongs to the SAME working tree before
+	// declining anything, or the guard tells an operator already inside a
+	// dedicated worktree to go get a dedicated worktree.
+	const peers: InstanceEntry[] = [];
+	for (const candidate of candidates) {
+		const peerToplevel = await resolveToplevel(candidate.projectRoot);
+		if (
+			peerToplevel !== undefined &&
+			normalizeFilePath(peerToplevel) === normalizedToplevel
+		) {
+			peers.push(candidate);
+		}
+	}
+	if (peers.length === 0) {
+		logAllow(root, "no_peer_session");
 		return { block: false };
 	}
 	const state = await (deps.probeWorkingTree ?? probeWorkingTreeState)(cwd);

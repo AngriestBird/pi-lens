@@ -302,12 +302,26 @@ export interface GitVerbMatcher {
 	 * `clients/shared-checkout-guard.ts`.
 	 */
 	readonly indirectAlwaysMatches: boolean;
+	/**
+	 * True when a LEADING post-verb `--help`/`-h` means "print documentation"
+	 * and the invocation should not match (#2007).
+	 *
+	 * FALSE for the commit gate, and that is a contract, not a tuning knob.
+	 * `-h` is a legal option VALUE: `git commit -m -h` creates a commit whose
+	 * message is `-h` (verified against git 2.55 — it exits 0 and the log
+	 * subject reads `-h`), and `git push --repo -h` really pushes. A gate that
+	 * fails closed must not be talked out of a match by a token that might be
+	 * a value. `git commit --help` therefore still classifies as an attempt,
+	 * exactly as it did before this seam existed.
+	 */
+	readonly suppressPostVerbHelp: boolean;
 }
 
 const COMMIT_PUSH_MATCHER: GitVerbMatcher = {
 	id: "commit-push",
 	matchesVerb: (verb) => verb === "commit" || verb === "push",
 	indirectAlwaysMatches: true,
+	suppressPostVerbHelp: false,
 };
 
 function containsGuardedSubstitution(
@@ -436,9 +450,22 @@ export function matchGitVerbAtCommandPosition(
 	const index = gitVerbIndex(gitTokens);
 	if (index === undefined) return false;
 	const argsAfterVerb = gitTokens.slice(index + 1);
-	// `git checkout --help` prints documentation and touches nothing. The
+	// `git checkout --help` prints documentation and touches nothing, and the
 	// global-option walk above cannot see it, because it sits AFTER the verb.
-	if (argsAfterVerb.some((arg) => arg === "--help" || arg === "-h")) {
+	//
+	// Only the FIRST argument counts, and only for matchers that opt in. `-h`
+	// deeper in the argv may be an option VALUE rather than a help request —
+	// `git commit -m -h` commits with the message `-h`, `git clean -e -h`
+	// excludes a pattern named `-h`. Reading any position would need a
+	// per-verb table of value-taking options for every governed verb, which is
+	// exactly the hand-maintained parallel list this repo forbids, and every
+	// gap in it would silently UNDER-block. Leading-position-only needs no
+	// table, covers how help is actually invoked, and every other spelling
+	// falls through to a match, which is the safe direction for a guard.
+	if (
+		matcher.suppressPostVerbHelp &&
+		(argsAfterVerb[0] === "--help" || argsAfterVerb[0] === "-h")
+	) {
 		return false;
 	}
 	const verbs = expandGuardVerbToken(gitTokens[index] ?? "");
