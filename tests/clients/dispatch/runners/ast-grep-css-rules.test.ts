@@ -1,15 +1,8 @@
 /**
  * CSS-language ast-grep rules through the napi in-process fallback (#2199).
  *
- * The primary path for `language: Css` rules is the ast-grep LSP binary
- * (`clients/lsp/server.ts` AstGrepServer), which already speaks CSS via its
- * own sgconfig-driven scan. This suite exercises the SECOND path: the
- * napi-native fallback (`clients/dispatch/runners/ast-grep-napi.ts`), which
- * the per-edit runner and the project-wide scanner both resume when the
- * ast-grep binary/LSP is unavailable (Gate B). Before this fix, that
- * fallback's language allowlist accepted only typescript/tsx/javascript and
- * silently dropped every non-JS/TS rule — including any `language: Css`
- * rule — regardless of the file being scanned.
+ * These tests use a real runner invocation. They verify both that CSS rules
+ * run on CSS roots and that they do not run on HTML roots.
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import astGrepNapiRunner from "../../../../clients/dispatch/runners/ast-grep-napi.js";
@@ -44,6 +37,20 @@ describe("ast-grep CSS rules (integration via napi fallback)", () => {
 		const { ctx } = env.addFile(
 			"plain.css",
 			[".button {", "  color: red;", "}", ""].join("\n"),
+		);
+		const result = await astGrepNapiRunner.run(ctx);
+		expect(firedRuleIds(result)).not.toContain("no-important");
+	});
+
+	it("does not run a CSS rule on an HTML root", async () => {
+		const { ctx } = env.addFile(
+			"sample.html",
+			[
+				"<!doctype html>",
+				"<style>.modal { z-index: 9999 !important; }</style>",
+				"<p>!important in HTML text</p>",
+				"",
+			].join("\n"),
 		);
 		const result = await astGrepNapiRunner.run(ctx);
 		expect(firedRuleIds(result)).not.toContain("no-important");

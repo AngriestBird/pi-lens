@@ -381,7 +381,7 @@ export function canHandle(filePath: string): boolean {
  */
 export function ruleLanguageForFile(
 	filePath: string,
-): "typescript" | "tsx" | "javascript" | undefined {
+): "typescript" | "tsx" | "javascript" | "css" | "html" | undefined {
 	const ext = path.extname(filePath).toLowerCase();
 	switch (ext) {
 		case ".ts":
@@ -391,6 +391,11 @@ export function ruleLanguageForFile(
 		case ".js":
 		case ".jsx":
 			return "javascript";
+		case ".css":
+			return "css";
+		case ".html":
+		case ".htm":
+			return "html";
 		default:
 			return undefined;
 	}
@@ -635,21 +640,20 @@ export function evaluateAstGrepRules(
 				continue;
 			}
 
-			// `css` joined the allowlist in #2199: `ruleLanguageForFile` returns
-			// undefined for .css (no ts/js twin-scoping needed), so a
-			// `language: Css` rule reaches every file here and is scoped down
-			// to .css files only by the fileLang mismatch check below. Before
-			// #2199, every `language: Css` rule silently never matched in this
-			// fallback engine — the ast-grep LSP was the only path that ran
-			// CSS rules — even though `getLang`/`canHandle` above already
-			// parsed .css files through it.
+			// CSS and HTML rules are scoped to their parsed roots.
+			// Without this scope, language-tagged rules scan unrelated roots.
+			// The file-language mismatch check below enforces this scope.
+			// CSS rules therefore run only on CSS roots.
+			// This preserves CSS rule findings while avoiding unrelated scans.
+			// The fallback and LSP paths share the same parsed-language scope.
 			const lang = rule.language?.toLowerCase();
 			if (
 				lang &&
 				lang !== "typescript" &&
 				lang !== "tsx" &&
 				lang !== "javascript" &&
-				lang !== "css"
+				lang !== "css" &&
+				lang !== "html"
 			) {
 				if (!unsupportedLanguageLog.has(lang)) {
 					const ids = newlyUnsupported.get(lang) ?? [];
