@@ -335,6 +335,8 @@ export interface ToolDefinition {
 	name: string;
 	checkCommand: string;
 	checkArgs: string[];
+	/** Verification timeout for this tool's managed-binary probe, in ms. */
+	verificationTimeoutMs?: number;
 	installStrategy: "npm" | "pip" | "gem" | "github" | "maven" | "archive";
 	packageName?: string;
 	binaryName?: string;
@@ -712,6 +714,10 @@ export const TOOLS: ToolDefinition[] = [
 		name: "Vue Language Server",
 		checkCommand: "vue-language-server",
 		checkArgs: ["--version"],
+		// Vue's launcher loads the full language-service bundle before answering
+		// --version. Its cold start exceeds the dispatch probe budget on some hosts
+		// even though warm starts complete quickly (#2176).
+		verificationTimeoutMs: 30_000,
 		installStrategy: "npm",
 		packageName: "@vue/language-server",
 		binaryName: "vue-language-server",
@@ -1474,6 +1480,11 @@ export const TOOLS: ToolDefinition[] = [
 		},
 	},
 ];
+
+/** Return the bounded managed-binary verification budget for a registered tool. */
+export function getToolVerificationTimeout(tool: ToolDefinition): number {
+	return tool.verificationTimeoutMs ?? 10_000;
+}
 
 const ensureInFlight = new Map<string, Promise<string | undefined>>();
 const installFailureReasons = new Map<string, string>();
@@ -2308,6 +2319,7 @@ export async function getAllToolStatuses(): Promise<ToolStatus[]> {
 				tool.binaryName || tool.id,
 				undefined,
 				tool.checkArgs,
+				getToolVerificationTimeout(tool),
 			);
 			if (npmPath) {
 				status.installed = true;
@@ -2324,6 +2336,7 @@ export async function getAllToolStatuses(): Promise<ToolStatus[]> {
 				tool.binaryName || tool.id,
 				undefined,
 				tool.checkArgs,
+				getToolVerificationTimeout(tool),
 			);
 			if (pipPath) {
 				status.installed = true;
@@ -2371,7 +2384,7 @@ export async function getAllToolStatuses(): Promise<ToolStatus[]> {
 					localPath,
 					undefined,
 					undefined,
-					10000,
+					getToolVerificationTimeout(tool),
 					tool.checkArgs,
 				)
 			) {
@@ -2569,7 +2582,7 @@ async function getToolPathResolved(
 					cmdPath,
 					recordVersion,
 					onTransient,
-					10000,
+					getToolVerificationTimeout(tool),
 					tool.checkArgs,
 				)
 			) {
@@ -2591,7 +2604,7 @@ async function getToolPathResolved(
 					exePath,
 					recordVersion,
 					onTransient,
-					10000,
+					getToolVerificationTimeout(tool),
 					tool.checkArgs,
 				)
 			) {
@@ -2612,7 +2625,7 @@ async function getToolPathResolved(
 					localBase,
 					recordVersion,
 					onTransient,
-					10000,
+					getToolVerificationTimeout(tool),
 					tool.checkArgs,
 				)
 			) {
@@ -2638,7 +2651,7 @@ async function getToolPathResolved(
 				platformBin,
 				undefined,
 				onTransient,
-				10000,
+				getToolVerificationTimeout(tool),
 				tool.checkArgs,
 			))
 		) {
@@ -2675,6 +2688,7 @@ async function getToolPathResolved(
 			tool.binaryName || tool.id,
 			onTransient,
 			tool.checkArgs,
+			getToolVerificationTimeout(tool),
 		);
 		if (npmPath) {
 			return npmPath;
@@ -2687,6 +2701,7 @@ async function getToolPathResolved(
 			tool.binaryName || tool.id,
 			onTransient,
 			tool.checkArgs,
+			getToolVerificationTimeout(tool),
 		);
 		if (pipPath) {
 			return pipPath;
@@ -2773,6 +2788,7 @@ async function findNpmGlobalToolPath(
 	binaryName: string,
 	onTransient?: () => void,
 	verificationArgs: string[] = ["--version"],
+	verificationTimeoutMs = 10_000,
 ): Promise<string | undefined> {
 	const isWindows = process.platform === "win32";
 	const binDirs = await getNpmGlobalBinCandidates(onTransient);
@@ -2793,7 +2809,7 @@ async function findNpmGlobalToolPath(
 						candidate,
 						undefined,
 						onTransient,
-						10000,
+						verificationTimeoutMs,
 						verificationArgs,
 					)
 				) {
@@ -2845,6 +2861,7 @@ async function findPipUserToolPath(
 	binaryName: string,
 	onTransient?: () => void,
 	verificationArgs: string[] = ["--version"],
+	verificationTimeoutMs = 10_000,
 ): Promise<string | undefined> {
 	const isWindows = process.platform === "win32";
 	const userBaseCandidates = await getPythonUserBaseCandidates();
@@ -2884,7 +2901,7 @@ async function findPipUserToolPath(
 							candidate,
 							undefined,
 							onTransient,
-							10000,
+							verificationTimeoutMs,
 							verificationArgs,
 						)
 					) {
@@ -3458,6 +3475,8 @@ export interface RefreshableManagedTool {
 	packageName?: string;
 	/** npm only — what `installNpmTool` verifies after an install or update. */
 	binaryName?: string;
+	/** Registry-scoped ceiling for managed verification probes. */
+	verificationTimeoutMs?: number;
 	/**
 	 * The identity of what the tool's coordinate resolves to TODAY, when that
 	 * identity is knowable without a network call. `archive` and `maven` entries
@@ -3512,6 +3531,7 @@ export function getRefreshableManagedTools(): RefreshableManagedTool[] {
 					checkArgs: tool.checkArgs,
 					packageName: tool.packageName,
 					binaryName: tool.binaryName,
+					verificationTimeoutMs: tool.verificationTimeoutMs,
 				});
 				break;
 			}
@@ -3637,7 +3657,7 @@ async function probeManagedToolVersion(
 	if (!cached?.path || !existsSync(cached.path)) return undefined;
 	try {
 		const result = await safeSpawnAsync(cached.path, tool.checkArgs, {
-			timeout: 10_000,
+			timeout: getToolVerificationTimeout(tool),
 			input: "",
 			ignoreAmbientSignal: true,
 			resourceLabel: `tool-refresh-version:${tool.id}`,
@@ -3946,7 +3966,7 @@ async function verifyRefreshedArtifact(
 			installedPath,
 			undefined,
 			undefined,
-			10000,
+			getToolVerificationTimeout(tool),
 			tool.checkArgs,
 		))
 	) {
@@ -4484,6 +4504,7 @@ async function installNpmTool(
 	packageName: string,
 	binaryName: string,
 	verificationArgs: string[] = ["--version"],
+	verificationTimeoutMs = 10_000,
 ): Promise<string | undefined> {
 	try {
 		// Ensure tools directory exists
@@ -4595,7 +4616,7 @@ async function installNpmTool(
 				() => {
 					lastAttemptTransient = true;
 				},
-				10000,
+				verificationTimeoutMs,
 				verificationArgs,
 			);
 			if (isValid) break;
@@ -4953,6 +4974,7 @@ export async function installTool(toolId: string): Promise<boolean> {
 					tool.packageName,
 					tool.binaryName,
 					tool.checkArgs,
+					getToolVerificationTimeout(tool),
 				);
 				if (npmPath !== undefined) {
 					// #1746 review F4: an install just resolved this package's range

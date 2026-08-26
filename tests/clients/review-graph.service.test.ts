@@ -264,6 +264,43 @@ describe("review graph service", () => {
 		}
 	}, 30_000);
 
+	it("keeps an 8,000-file one-file rebuild within the changed-file bound (#2072 AC2)", async () => {
+		const env = setupTestEnvironment("pi-lens-review-graph-source-memo-scale-");
+		const previousMaxFiles = process.env.PI_LENS_REVIEW_GRAPH_MAX_FILES;
+		try {
+			process.env.PI_LENS_REVIEW_GRAPH_MAX_FILES = "8000";
+			for (let i = 0; i < 8000; i++) {
+				createTempFile(
+					env.tmpDir,
+					`src/file-${String(i).padStart(4, "0")}.ts`,
+					`export const value${i} = ${i};\n`,
+				);
+			}
+			_resetReviewGraphSourcePathMemoForTests();
+
+			const cold = await getGraphSourceFiles(env.tmpDir);
+			createTempFile(
+				env.tmpDir,
+				"src/file-0000.ts",
+				"export const value0 = 1;\n",
+			);
+			const warm = await getGraphSourceFiles(env.tmpDir);
+
+			// Cold behavior is O(project-files); the one-file rebuild's warm path
+			// must stay within 2 x changedFiles, and this fixture changes one file.
+			expect(cold.files).toHaveLength(8000);
+			expect(cold.pathNormalizeCalls).toBe(8000);
+			expect(warm.pathNormalizeCalls).toBeLessThanOrEqual(2);
+			expect(warm.files).toEqual(cold.files);
+		} finally {
+			_resetReviewGraphSourcePathMemoForTests();
+			if (previousMaxFiles === undefined)
+				delete process.env.PI_LENS_REVIEW_GRAPH_MAX_FILES;
+			else process.env.PI_LENS_REVIEW_GRAPH_MAX_FILES = previousMaxFiles;
+			env.cleanup();
+		}
+	}, 120_000);
+
 	it("keeps a walk's normalize counter stable across workspace eviction (#2072 F4)", async () => {
 		const env = setupTestEnvironment(
 			"pi-lens-review-graph-source-memo-eviction-",
@@ -297,24 +334,32 @@ describe("review graph service", () => {
 		}
 	});
 
-	it("case-variant workspace clears invalidate the source-path memo (#2072 F5)", async () => {
-		const env = setupTestEnvironment("pi-lens-review-graph-source-memo-clear-");
-		try {
-			createTempFile(env.tmpDir, "src/a.ts", "export const a = 1;\n");
-			_resetReviewGraphSourcePathMemoForTests();
-			const first = await getGraphSourceFiles(env.tmpDir);
-			if (process.platform !== "win32") return;
-			const variant = env.tmpDir.replace(/[A-Za-z](?=[^\\/]*$)/, (c) =>
-				c === c.toUpperCase() ? c.toLowerCase() : c.toUpperCase(),
+	// The case variant only aliases the same workspace on Windows, so the gate
+	// is declarative: an early return mid-body reported a PASS on every Linux
+	// CI run while asserting nothing (#2089). `it.skipIf` prints no reason, so
+	// the name carries it.
+	it.skipIf(process.platform !== "win32")(
+		"case-variant workspace clears invalidate the source-path memo, on win32 only (#2072 F5)",
+		async () => {
+			const env = setupTestEnvironment(
+				"pi-lens-review-graph-source-memo-clear-",
 			);
-			clearReviewGraphWorkspaceCache(variant);
-			const second = await getGraphSourceFiles(env.tmpDir);
-			expect(second.pathNormalizeCalls).toBe(first.files.length);
-		} finally {
-			_resetReviewGraphSourcePathMemoForTests();
-			env.cleanup();
-		}
-	});
+			try {
+				createTempFile(env.tmpDir, "src/a.ts", "export const a = 1;\n");
+				_resetReviewGraphSourcePathMemoForTests();
+				const first = await getGraphSourceFiles(env.tmpDir);
+				const variant = env.tmpDir.replace(/[A-Za-z](?=[^\\/]*$)/, (c) =>
+					c === c.toUpperCase() ? c.toLowerCase() : c.toUpperCase(),
+				);
+				clearReviewGraphWorkspaceCache(variant);
+				const second = await getGraphSourceFiles(env.tmpDir);
+				expect(second.pathNormalizeCalls).toBe(first.files.length);
+			} finally {
+				_resetReviewGraphSourcePathMemoForTests();
+				env.cleanup();
+			}
+		},
+	);
 
 	it("getCachedReviewGraph returns a shared, indexed object — no per-call clone (#260)", async () => {
 		const env = setupTestEnvironment("pi-lens-review-graph-shared-");
