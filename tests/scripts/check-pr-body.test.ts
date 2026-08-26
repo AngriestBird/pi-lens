@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it, afterEach, vi } from "vitest";
 import {
+	lintLivePrBody,
 	lintPrBody,
 	resolveLivePrBody,
 	resolveTouchesTests,
@@ -306,6 +307,118 @@ describe("resolveTouchesTests", () => {
 		expect(warning).toHaveBeenCalledWith(
 			expect.stringContaining("::warning::"),
 		);
+		warning.mockRestore();
+	});
+});
+
+describe("nested headings are structure, not content (#2124 F1)", () => {
+	it("still flags an empty Tests section that carries only the nested heading", () => {
+		const result = lintPrBody(
+			body.replace(
+				"## Tests\nTargeted tests pass.",
+				"## Tests\n### Test assessment",
+			),
+		);
+		expect(result.valid).toBe(false);
+		expect(result.errors.join(" ")).toContain("## Tests");
+	});
+
+	it("rejects a required Test assessment satisfied only by a deeper heading", () => {
+		const result = lintPrBody(
+			`${body}
+
+### Test assessment
+#### sub`,
+			{
+				requireTestAssessment: true,
+			},
+		);
+		expect(result.valid).toBe(false);
+		expect(result.errors.join(" ")).toContain("Test assessment");
+	});
+});
+
+describe("renames out of tests/ still require the assessment (#2124 F3)", () => {
+	it("counts previous_filename", async () => {
+		vi.stubEnv("GITHUB_TOKEN", "t");
+		vi.stubEnv("GITHUB_API_URL", "https://api.example");
+		vi.stubEnv("GITHUB_REPOSITORY", "o/r");
+		const fetchImpl = vi.fn().mockResolvedValue(
+			new Response(
+				JSON.stringify([
+					{
+						filename: "attic/foo.test.ts",
+						previous_filename: "tests/clients/foo.test.ts",
+					},
+				]),
+				{ status: 200 },
+			),
+		);
+		expect(await resolveTouchesTests({ number: 7 }, fetchImpl)).toBe(true);
+		vi.unstubAllEnvs();
+	});
+});
+
+describe("the entrypoint consumes the tri-state (#2124 F2)", () => {
+	const assessedBody = `${body}
+
+### Test assessment
+foo.test.ts uniquely pins the retry ladder.`;
+
+	afterEach(() => vi.unstubAllEnvs());
+
+	function fetchFor(bodyText: string, files: unknown) {
+		return vi.fn().mockImplementation(async (url: string | URL | Request) => {
+			if (String(url).includes("/files"))
+				return files instanceof Error
+					? Promise.reject(files)
+					: new Response(JSON.stringify(files), { status: 200 });
+			return new Response(JSON.stringify({ body: bodyText }), { status: 200 });
+		});
+	}
+
+	function stubApi() {
+		vi.stubEnv("GITHUB_TOKEN", "t");
+		vi.stubEnv("GITHUB_API_URL", "https://api.example");
+		vi.stubEnv("GITHUB_REPOSITORY", "o/r");
+	}
+
+	it("requires the section when the live file list touches tests/", async () => {
+		stubApi();
+		const result = await lintLivePrBody(
+			{ number: 7, body },
+			fetchFor(body, [{ filename: "tests/clients/foo.test.ts" }]),
+		);
+		expect(result.valid).toBe(false);
+		expect(result.errors.join(" ")).toContain("Test assessment");
+	});
+
+	it("accepts the assessed body when required", async () => {
+		stubApi();
+		const result = await lintLivePrBody(
+			{ number: 7, body: assessedBody },
+			fetchFor(assessedBody, [{ filename: "tests/clients/foo.test.ts" }]),
+		);
+		expect(result).toMatchObject({ valid: true });
+	});
+
+	it("skips the section for production-only PRs", async () => {
+		stubApi();
+		const result = await lintLivePrBody(
+			{ number: 7, body },
+			fetchFor(body, [{ filename: "clients/foo.ts" }]),
+		);
+		expect(result).toMatchObject({ valid: true });
+	});
+
+	it("skips the section on file-list fetch trouble (null never enforces)", async () => {
+		stubApi();
+		const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+		const result = await lintLivePrBody(
+			{ number: 7, body },
+			fetchFor(body, new Error("boom")),
+		);
+		expect(result).toMatchObject({ valid: true });
 		warning.mockRestore();
 	});
 });

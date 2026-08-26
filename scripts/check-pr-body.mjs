@@ -86,7 +86,15 @@ function hasRealContent(lines, section, placeholders) {
 	const templateLines = placeholders.get(section) ?? new Set();
 	return lines.some((line) => {
 		const value = line.trim();
-		return value && !/^[-*+] \[ \]/.test(value) && !templateLines.has(value);
+		// A nested heading is structure, not content: counting it let an empty
+		// "## Tests" pass on the strength of its own "### Test assessment" line
+		// (#2124 review F1).
+		return (
+			value &&
+			!HEADING.test(value) &&
+			!/^[-*+] \[ \]/.test(value) &&
+			!templateLines.has(value)
+		);
 	});
 }
 
@@ -231,13 +239,33 @@ export async function resolveTouchesTests(
 		const files = await response.json();
 		if (!Array.isArray(files))
 			throw new Error("GitHub API returned no file list");
-		return files.some((file) => /^tests\//.test(file.filename ?? ""));
+		return files.some(
+			(file) =>
+				/^tests\//.test(file.filename ?? "") ||
+				// A rename OUT of tests/ reports only the new path in filename; a
+				// removal PR is exactly what the assessment exists to catch.
+				/^tests\//.test(file.previous_filename ?? ""),
+		);
 	} catch (error) {
 		console.warn(
 			`::warning::Could not resolve the PR file list; skipping the Test assessment check (${error instanceof Error ? error.message : error}).`,
 		);
 		return null;
 	}
+}
+
+/**
+ * The full live lint: resolve body and file list, then lint. The tri-state
+ * from resolveTouchesTests is consumed HERE: only an affirmative true
+ * requires the Test assessment section — null (fetch trouble) and false
+ * (no tests/ files) both skip it, so a flaky fetch can never misfire the
+ * check (#2124 review F2 pinned this consumption).
+ */
+export async function lintLivePrBody(payloadPr, fetchImpl = globalThis.fetch) {
+	return lintPrBody(await resolveLivePrBody(payloadPr, fetchImpl), {
+		requireTestAssessment:
+			(await resolveTouchesTests(payloadPr, fetchImpl)) === true,
+	});
 }
 
 function eventPayload() {
@@ -250,9 +278,7 @@ async function lintPullRequestEvent() {
 	const pullRequest = eventPayload().pull_request;
 	if (!pullRequest || !process.env.GITHUB_REPOSITORY)
 		throw new Error("Pull request event and GITHUB_REPOSITORY are required");
-	const result = lintPrBody(await resolveLivePrBody(pullRequest), {
-		requireTestAssessment: (await resolveTouchesTests(pullRequest)) === true,
-	});
+	const result = await lintLivePrBody(pullRequest);
 	if (!result.valid) {
 		for (const error of result.errors) console.error(error);
 		process.exitCode = 1;
