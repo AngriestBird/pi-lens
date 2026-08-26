@@ -21,6 +21,59 @@ import {
 // --- Basic primitive behavior --------------------------------------------------
 
 describe("updateWordIndexDocument / removeWordIndexDocument", () => {
+	it("refreshes the cached wire view for a dirty document", () => {
+		const index = buildWordIndex([
+			{ path: "a.ts", content: "oldalpha" },
+			{ path: "b.ts", content: "untouched" },
+		]);
+		serializeWordIndex(index);
+		updateWordIndexDocument(index, { path: "a.ts", content: "newalpha" });
+
+		const restored = deserializeWordIndex(serializeWordIndex(index));
+		expect(restored).not.toBeNull();
+		expect(wordIndexPostingHits(restored!, "oldalpha")).toEqual([]);
+		expect(wordIndexPostingHits(restored!, "newalpha")).toEqual([
+			{ file: "a.ts", line: 1 },
+		]);
+		expect(wordIndexPostingHits(restored!, "untouched")).toEqual([
+			{ file: "b.ts", line: 1 },
+		]);
+	});
+
+	it("persists a brand-new document after a cached snapshot is primed (#2158 F1)", () => {
+		const index = buildWordIndex([{ path: "a.ts", content: "alpha" }]);
+		serializeWordIndex(index);
+
+		updateWordIndexDocument(index, { path: "b.ts", content: "epsilon" });
+
+		const restored = deserializeWordIndex(serializeWordIndex(index));
+		expect(restored).not.toBeNull();
+		expect(wordIndexPostingHits(restored!, "epsilon")).toEqual([
+			{ file: "b.ts", line: 1 },
+		]);
+	});
+
+	it("keeps incremental and fresh mixed-batch wires equivalent (#2158 F3)", () => {
+		const index = buildWordIndex([
+			{ path: "a.ts", content: "shared alpha" },
+			{ path: "b.ts", content: "beta shared" },
+		]);
+		serializeWordIndex(index);
+
+		updateWordIndexDocument(index, { path: "a.ts", content: "shared gamma" });
+		updateWordIndexDocument(index, { path: "c.ts", content: "delta shared" });
+		removeWordIndexDocument(index, "b.ts");
+
+		const incremental = serializeWordIndex(index);
+		const fresh = serializeWordIndex(
+			buildWordIndex([
+				{ path: "a.ts", content: "shared gamma", mtimeMs: -1 },
+				{ path: "c.ts", content: "delta shared", mtimeMs: -1 },
+			]),
+		);
+		expect(incremental).toEqual(fresh);
+	});
+
 	it("adds a brand new document", () => {
 		const index = buildWordIndex([
 			{ path: "a.ts", content: "export function alpha() {}" },
