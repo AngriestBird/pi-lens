@@ -7,6 +7,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { resetDegradationLedger } from "../../clients/degradation-ledger.js";
 import { normalizeFilePath } from "../../clients/path-utils.js";
 import {
 	createReadGuard,
@@ -1565,7 +1566,12 @@ describe("ReadGuard eviction-path telemetry (#1918)", () => {
 			.mock.calls.filter(([entry]) => entry.event === event);
 	}
 
-	it("emits read_file_evicted with reason idle-timeout when a consumed read idles out", () => {
+	// #1918 review F2: idle-timeout is routine housekeeping, not a fault — a
+	// read-only session idling out N files is healthy behavior, and N is
+	// unbounded, so it takes an in-code justification (evictFile's doc
+	// comment) instead of an always-on record. The eviction itself still
+	// happens; only the telemetry is intentionally silent.
+	it("evicts on idle timeout without any read_file_evicted record", () => {
 		vi.useFakeTimers();
 		try {
 			const guard = createReadGuard("1918-idle-evict-session");
@@ -1576,14 +1582,8 @@ describe("ReadGuard eviction-path telemetry (#1918)", () => {
 
 			vi.advanceTimersByTime(31 * 60_000);
 
-			const evictions = evictionEvents("read_file_evicted");
-			expect(evictions).toHaveLength(1);
-			expect(evictions[0][0]).toMatchObject({
-				event: "read_file_evicted",
-				filePath: normalizeFilePath(filePath),
-				metadata: { reason: "idle-timeout" },
-			});
 			expect(guard.getReadHistory(filePath)).toHaveLength(0);
+			expect(evictionEvents("read_file_evicted")).toHaveLength(0);
 		} finally {
 			vi.useRealTimers();
 		}
@@ -1684,6 +1684,53 @@ describe("ReadGuard eviction-path telemetry (#1918)", () => {
 		}
 
 		expect(evictionEvents("edits_cap_trimmed")).toHaveLength(0);
+	});
+
+	// #1918 review F3: pin the (kind, subject) key the rising edge is keyed
+	// on — two DISTINCT files evicted via forgetPath must each get their own
+	// line, not share one rising edge because they hit the same `kind`.
+	it("emits one read_file_evicted line per distinct file, not one per session", () => {
+		const guard = createReadGuard("1918-distinct-files-session");
+		const firstPath = "/tmp/1918-distinct-first.ts";
+		const secondPath = "/tmp/1918-distinct-second.ts";
+		guard.recordRead(createReadRecord(firstPath));
+		guard.recordRead(createReadRecord(secondPath));
+		vi.mocked(logReadGuardEvent).mockClear();
+
+		guard.forgetPath(firstPath);
+		guard.forgetPath(secondPath);
+
+		const evictions = evictionEvents("read_file_evicted");
+		expect(evictions).toHaveLength(2);
+		expect(evictions.map(([entry]) => entry.filePath).sort()).toEqual(
+			[normalizeFilePath(firstPath), normalizeFilePath(secondPath)].sort(),
+		);
+	});
+
+	// #1918 review F3: pin session re-arm — the SAME file evicted twice within
+	// one session logs once (rising edge), but a fresh session (which is what
+	// resetDegradationLedger models: the ledger's own generation bump, wired
+	// into session start) re-arms the edge so the next eviction of that same
+	// path logs again.
+	it("re-emits for the same file after resetDegradationLedger (fresh session)", () => {
+		const guard = createReadGuard("1918-rearm-session");
+		const filePath = "/tmp/1918-rearm.ts";
+		guard.recordRead(createReadRecord(filePath));
+		vi.mocked(logReadGuardEvent).mockClear();
+
+		guard.forgetPath(filePath);
+		expect(evictionEvents("read_file_evicted")).toHaveLength(1);
+
+		// Second eviction of the SAME path in the SAME session: rising edge
+		// already tripped, so no second line.
+		guard.recordRead(createReadRecord(filePath));
+		guard.forgetPath(filePath);
+		expect(evictionEvents("read_file_evicted")).toHaveLength(1);
+
+		resetDegradationLedger();
+		guard.recordRead(createReadRecord(filePath));
+		guard.forgetPath(filePath);
+		expect(evictionEvents("read_file_evicted")).toHaveLength(2);
 	});
 });
 
