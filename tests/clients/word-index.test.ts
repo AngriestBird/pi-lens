@@ -888,10 +888,7 @@ describe("triggerBackgroundWordIndexBuild (#348 cold-query stampede guard)", () 
 		let corruptPostings = 0;
 		for (const list of postings.values()) {
 			for (let i = 0; i < list.length; i += 1) {
-				if (
-					list.fileIdAt(i) === undefined ||
-					list.lineAt(i) === undefined
-				) {
+				if (list.fileIdAt(i) === undefined || list.lineAt(i) === undefined) {
 					corruptPostings += 1;
 				}
 			}
