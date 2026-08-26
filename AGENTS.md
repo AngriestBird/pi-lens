@@ -1055,6 +1055,16 @@ unrecognized leading launcher with `-c`/`--run`/`/c`/`-Command` is inspected
 recursively and fails closed only when its command string contains an actual
 guarded git verb (literal mentions such as `echo git push` remain allowed).
 
+Real-Git tests route child processes through `tests/support/git-fixture-env.ts`.
+That helper removes the Git directory environment family, isolates global config,
+and disables system config. It deletes inherited values even when the test harness
+itself starts with a contaminated environment; never trust the parent process
+environment for a spawned Git fixture. `git-fixture-governance.test.ts` sweeps test
+sources and requires the direct Git callee to be imported from that helper, while
+the script-side fixture probes use `scripts/lib/git-fixture-env.mjs`. The global-
+setup teardown guard rejects local identity entries or `core.bare=true` in the
+repository config after the suite.
+
 Git command classification has ONE implementation. `detectGuardedGitVerb`
 takes a `GitVerbMatcher` and owns the wrapper, `$IFS`, substitution, PATHEXT,
 and text-consumer analysis; a guard that needs "is this really a git
