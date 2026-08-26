@@ -1,3 +1,4 @@
+// Follow-up reduction tracked in issue #2125; 29 entries, seven traverse a dynamic-import edge.
 [
   {
     "type": "cycle",

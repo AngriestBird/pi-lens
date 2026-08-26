@@ -1,4 +1,8 @@
-const eagerClients = require("./config/dependency-cruiser-eager-allowlist.json");
+const { parse: parseJson5 } = require("json5");
+const { readFileSync } = require("node:fs");
+const eagerClients = parseJson5(
+	readFileSync("./config/dependency-cruiser-eager-allowlist.json", "utf8"),
+);
 
 const eagerClientPattern = `^(?:\\./)?(?:${eagerClients
 	.map((modulePath) =>
@@ -43,8 +47,9 @@ module.exports = {
 	],
 	options: {
 		// dependency-cruiser 18 cannot parse TypeScript 7, but CI builds first and
-		// cruises the compiled clients/*.js graph. The TS transpiler warning is
-		// therefore immaterial; the built view is the enforced 836/4422 graph.
+		// cruises the compiled clients/*.js graph. index.ts is still parsed as TS
+		// without a transpiler, so type-only client imports remain ordinary edges
+		// there and are marked in the eager allowlist.
 		tsConfig: { fileName: "tsconfig.json" },
 		doNotFollow: { path: "(^|/)node_modules/" },
 		preserveSymlinks: false,

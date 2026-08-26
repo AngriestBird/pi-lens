@@ -2384,12 +2384,19 @@ Every issue should carry **one TYPE label + at least one `area:` label**.
 ## Conventions
 
 Dependency-boundary CI installs with `npm ci --ignore-scripts`, builds compiled
-clients, then cruises that JavaScript graph. Dependency-cruiser 18 warns about
-TypeScript 7, but the warning is immaterial because the enforced graph is the
-built 836-module, 4,422-dependency view. Static client cycles and index eager
-imports exclude dynamic-import edges. The reviewed static-cycle baseline has
-29 entries, and `tests/config/dependency-boundaries.test.ts` pins both that
-count and the derived eager-import set.
+clients, then cruises the built `clients/*.js` graph; see the Dependency
+boundaries CI job for current module and dependency counts. Dependency-cruiser
+18 warns about TypeScript 7. Static client cycles and index eager imports use a
+dynamic-import exclusion that filters the first hop, so the baseline has 29
+cycles, seven of which traverse a dynamic-import edge; all-dynamic cycles are
+excluded. The deliberate `clients/installer/index.ts:4870` cycle break remains
+baselined, not excluded. The 29-cycle reduction is tracked in issue #2125.
+`index.ts` is parsed as TypeScript without a transpiler, so its type-only
+`PersistedReadGuardState` import inflates the eager set; `./clients/read-guard.js`
+is annotated inline in `config/dependency-cruiser-eager-allowlist.json`. The
+compiled-JavaScript claim does not apply to that entry parsing. The governance
+test pins the exact three rule names, the 29-entry baseline count, and the
+derived eager-import set.
 
 - TypeScript ESM throughout (`"type": "module"`)
 - Edit the `.ts` sources only. Do **not** hand-edit sibling/generated `.js` files in this repo; pi loads TS via on-the-fly jiti transpilation and JS files are generated artifacts. If tests/runtime could see stale `.js`, run `npm run build` to regenerate from TS before testing.

@@ -48,6 +48,7 @@
   "./clients/project-trust.js",
   "./clients/quiet-window.js",
   "./clients/read-bridge.js",
+  // index.ts:56 is type-only, but dependency-cruiser parses it as an edge.
   "./clients/read-guard.js",
   "./clients/recent-touches.js",
   "./clients/runtime-agent-end.js",
