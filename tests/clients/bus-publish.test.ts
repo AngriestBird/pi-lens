@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { normalizeFilePath } from "../../clients/path-utils.js";
 
 const appendRecentTouches = vi.fn().mockResolvedValue(undefined);
 vi.mock("../../clients/recent-touches.js", () => ({
@@ -362,8 +363,8 @@ describe("bus-publish — pilens:files:touched (#482)", () => {
 				outcome: "emitted",
 				writer: "pi-lens",
 				paths: expect.arrayContaining([
-					"C:/repo/src/file-0.ts",
-					"C:/repo/src/file-63.ts",
+					normalizeFilePath(paths[0]),
+					normalizeFilePath(paths[63]),
 				]),
 			}),
 		);
