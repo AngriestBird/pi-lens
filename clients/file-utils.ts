@@ -186,17 +186,18 @@ export interface ProjectIgnoreMatcher {
 	 * degrade-to-pattern-only is intended, not a bug.
 	 */
 	ensureTrackedIndex(): Promise<void>;
-	/** Sources read by this matcher, with their build-time signatures. */
-	getConsumedIgnoreSources(): readonly IgnoreSource[];
-	/** Refresh the baseline after the existing write-result invalidation seam. */
-	refreshConsumedIgnoreSource(filePath: string): void;
 }
 
-export interface IgnoreSource {
+interface IgnoreSource {
 	path: string;
 	mtimeMs: number;
 	size: number;
 }
+
+type ProjectIgnoreMatcherWithFreshness = ProjectIgnoreMatcher & {
+	getConsumedIgnoreSources(): readonly IgnoreSource[];
+	refreshConsumedIgnoreSource(filePath: string): void;
+};
 
 function resolveGitIgnoreRoot(startDir: string): string {
 	const fallback = path.resolve(startDir);
@@ -345,7 +346,7 @@ function ancestorDirsBetween(rootDir: string, targetDir: string): string[] {
 function buildProjectIgnoreMatcher(
 	resolvedRoot: string,
 	patterns: GitignorePattern[],
-): ProjectIgnoreMatcher {
+): ProjectIgnoreMatcherWithFreshness {
 	const consumedIgnoreSources = new Map<string, IgnoreSource>();
 	const rememberIgnoreSource = (filePath: string): void => {
 		const signature = fileFreshnessSignature(filePath);
@@ -492,6 +493,7 @@ function buildProjectIgnoreMatcher(
 		patterns,
 		getConsumedIgnoreSources: () => [...consumedIgnoreSources.values()],
 		refreshConsumedIgnoreSource(filePath: string): void {
+			// The freshness sweep refreshes this baseline after invalidation.
 			if (consumedIgnoreSources.has(filePath)) rememberIgnoreSource(filePath);
 		},
 		invalidateSubtree,
@@ -600,7 +602,7 @@ const projectIgnoreMatcherCache = new Map<
 		globalConfigMtimeMs: number;
 		/** #1105 second axis for the global `~/.pi-lens/config.json`. */
 		globalConfigSize: number;
-		matcher: ProjectIgnoreMatcher;
+		matcher: ProjectIgnoreMatcherWithFreshness;
 	}
 >();
 
@@ -684,9 +686,14 @@ export function getProjectIgnoreMatcher(rootDir: string): ProjectIgnoreMatcher {
 			}
 		}
 	}
-	// A path can be discovered during the previous matcher lookup. Preserve
-	// that expanded source set in the cache before the next cadence check.
-	if (cached) cached.ignoreSources = [...cached.matcher.getConsumedIgnoreSources()];
+	// A path can be discovered during the previous matcher lookup. Publish only
+	// previously unseen sources so a walk cannot replace a pre-edit baseline.
+	if (cached) {
+		const known = new Set(cached.ignoreSources.map((source) => source.path));
+		for (const source of cached.matcher.getConsumedIgnoreSources()) {
+			if (!known.has(source.path)) cached.ignoreSources.push(source);
+		}
+	}
 	if (
 		cached?.gitignoreMtimeMs === gitignoreSig.mtimeMs &&
 		cached?.gitignoreSize === gitignoreSig.size &&
@@ -709,7 +716,7 @@ export function getProjectIgnoreMatcher(rootDir: string): ProjectIgnoreMatcher {
 		resolvedRoot,
 		projectConfig.ignore,
 		getGlobalIgnorePatterns(),
-	);
+	) as ProjectIgnoreMatcherWithFreshness;
 	projectIgnoreMatcherCache.set(resolvedRoot, {
 		ignoreSources: [...matcher.getConsumedIgnoreSources()],
 		lastIgnoreFreshnessCheckMs: Date.now(),
