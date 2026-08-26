@@ -14,6 +14,10 @@ import { normalizeMapKey } from "../../clients/path-utils.js";
 import * as safeSpawn from "../../clients/safe-spawn.js";
 import { createTempFile, setupTestEnvironment } from "./test-utils.js";
 import { gitExecFileSync } from "../support/git-fixture-env.js";
+import {
+	capThenAbortedSpawnResult,
+	capThenTimedOutSpawnResult,
+} from "../support/spawn-shapes.js";
 
 describe("parseUntrackedIgnoredOutput", () => {
 	it("parses repo-relative lines into normalized ids, skipping blanks", () => {
@@ -102,6 +106,39 @@ describe("collectUntrackedIgnoredIds (#694)", () => {
 					],
 				},
 			]);
+		},
+	);
+
+	it.each([
+		{
+			site: "untracked-ignored",
+			collect: collectUntrackedIgnoredIds,
+			resultFactory: capThenTimedOutSpawnResult,
+		},
+		{
+			site: "tracked",
+			collect: collectTrackedFiles,
+			resultFactory: capThenTimedOutSpawnResult,
+		},
+		{
+			site: "untracked-ignored",
+			collect: collectUntrackedIgnoredIds,
+			resultFactory: capThenAbortedSpawnResult,
+		},
+		{
+			site: "tracked",
+			collect: collectTrackedFiles,
+			resultFactory: capThenAbortedSpawnResult,
+		},
+	])(
+		"does not label a capped $site listing as truncated after timeout or abort",
+		async ({ collect, resultFactory }) => {
+			vi.spyOn(safeSpawn, "safeSpawnAsync").mockResolvedValue(
+				resultFactory({ stdout: "partial/path.ts\n" }),
+			);
+
+			expect(await collect(process.cwd())).toBeUndefined();
+			expect(getDegradationSummary()).toEqual([]);
 		},
 	);
 

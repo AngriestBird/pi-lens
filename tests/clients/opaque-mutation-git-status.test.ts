@@ -1,9 +1,18 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const safeSpawnAsync = vi.hoisted(() => vi.fn());
-vi.mock("../../clients/safe-spawn.js", () => ({ safeSpawnAsync }));
+// `importOriginal`, not a bare stub: the truncation tests below build the REAL
+// cap-kill result, and that needs safe-spawn's own `SpawnFailureError`.
+vi.mock("../../clients/safe-spawn.js", async (importOriginal) => ({
+	...(await importOriginal<typeof import("../../clients/safe-spawn.js")>()),
+	safeSpawnAsync,
+}));
 
 import { recoverOpaqueChangesViaGit } from "../../clients/opaque-mutation-scan.js";
+import {
+	capFastExitSpawnResult,
+	capKilledSpawnResult,
+} from "../support/spawn-shapes.js";
 
 // Mirrors Git's documented Porcelain v1 ordinary matrix. Keep this explicit:
 // a Cartesian product accepts impossible staged-deletion pairs such as DM/DT.
@@ -132,12 +141,15 @@ describe("opaque Git status parsing", () => {
 	// #2060 F4: safe-spawn caps stdout before the child finishes. A capped
 	// status listing is a PREFIX of the truth, so treating it as complete would
 	// report "clean" for every path the cap removed.
-	it("fails closed when safe-spawn truncated the status output", async () => {
-		safeSpawnAsync.mockResolvedValue({
-			status: 0,
-			stdout: " M kept.ts\0",
-			outputTruncated: true,
-		});
+	//
+	// #2100: both real cap shapes, not the status-0 pairing the first version of
+	// this test invented. The cap kill is a SIGTERM, so it also carries an error
+	// and a null status — the reason the guard has to precede the git-failed one.
+	it.each([
+		["the cap killed the child", capKilledSpawnResult],
+		["the child exited before the SIGTERM landed", capFastExitSpawnResult],
+	])("fails closed as a parse failure when %s", async (_label, shape) => {
+		safeSpawnAsync.mockResolvedValue(shape({ stdout: " M kept.ts\0" }));
 
 		await expect(
 			recoverOpaqueChangesViaGit("/repo", Date.now()),
@@ -147,6 +159,18 @@ describe("opaque Git status parsing", () => {
 			unknownReason: "git-status-parse-failed",
 			scannedCount: 0,
 		});
+	});
+
+	it("caps git status stdout so the truncation guard can fire at all", async () => {
+		safeSpawnAsync.mockResolvedValue({ status: 0, stdout: "" });
+
+		await recoverOpaqueChangesViaGit("/repo", Date.now());
+
+		expect(safeSpawnAsync).toHaveBeenCalledWith(
+			"git",
+			expect.any(Array),
+			expect.objectContaining({ maxOutputBytes: 16 * 1024 * 1024 }),
+		);
 	});
 
 	// #2060: an undocumented pair is never classified as incoming, so widening
