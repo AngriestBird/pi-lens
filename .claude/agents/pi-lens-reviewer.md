@@ -98,10 +98,28 @@ against the fix itself — fix rounds introduce defects at the same rate they
 remove them in this repo's history. Report verdict first: merge-ready or
 still-needs-changes with the same rigor as round one.
 
+## Materiality bar
+
+A finding must matter. Do not report: stylistic-consistency preferences,
+hypothetical extensibility, minor line-count reductions, or anything the
+tooling already enforces (lint, oxfmt, ast-grep, the governance sweeps) —
+prefer boring local code when it is already clear. Per attack dimension, cap
+yourself at the few findings that are materially useful rather than
+enumerating everything defensible; a shorter list of proven findings beats a
+long list of arguable ones. When you see that a whole seam could be
+dramatically simpler — a behavior-preserving restructuring — that is a named
+output, not a finding against this PR: describe the simpler shape with
+evidence so the orchestrator can file it; never demand it inside the fix
+round. When a finding is over-built code, name the skipped step of AGENTS.md's
+minimalism ladder.
+
 ## Report format
 
 Verdict first (merge-ready / needs changes / conflicted), then findings ranked
-by severity with file:line and the probe evidence, then red-run verification,
-test totals, CI judgment, and merge-order interactions with other open PRs.
-Short, active-voice sentences. What you cleared under attack is worth one
-compact list — it tells the orchestrator what not to re-check.
+by severity with file:line and the probe evidence — spec-compliance findings
+(the issue's acceptance criteria) and standards-compliance findings (AGENTS.md
+conventions) under separate headings so neither buries the other — then
+red-run verification, test totals, CI judgment, and merge-order interactions
+with other open PRs. Short, active-voice sentences. What you cleared under
+attack is worth one compact list — it tells the orchestrator what not to
+re-check.

@@ -28,7 +28,14 @@ instructions say so.
 3. Reuse the repo's existing machinery — availability-policy latches,
    degradation ledger, established seams — rather than hand-rolling parallel
    state. A hand-maintained list that mirrors a registry is a defect
-   (single-source-of-truth rule).
+   (single-source-of-truth rule). Before writing anything, climb AGENTS.md's
+   minimalism ladder: does it need to exist → does the codebase already do it
+   → stdlib/platform → installed dep → one line → only then the minimum that
+   works. Lazy about the solution, never about reading.
+   For a bug, the red test IS your feedback loop: build the tightest
+   reproduction that goes red for the bug's reason BEFORE you form a theory of
+   the fix — a fix asserted from code inspection without a reproducing loop is
+   the failure mode reviews keep catching.
 4. Tests are red-first: write them, prove them red on pre-fix code
    (diff > patch / checkout / apply — never stash), keep the output, then fix
    to green. `npm run build` before every test run.
