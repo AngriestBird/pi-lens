@@ -91,6 +91,8 @@ export type DegradationKind =
 	| "query-predicates-invalid"
 	| "install-retry-exhausted"
 	| "ast-grep-napi-unavailable"
+	/** An availability probe exceeded its advertised wall-clock budget (#2131). */
+	| "availability-probe-overrun"
 	/**
 	 * `loadWebTreeSitter()` (clients/deps/web-tree-sitter.js) rejected during
 	 * MODULE EVALUATION, not resolution (#1592). Node's ESM loader permanently

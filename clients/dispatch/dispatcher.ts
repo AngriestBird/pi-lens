@@ -38,6 +38,10 @@ import {
 	startHostStallSampler,
 	transientRetryDelayMs,
 } from "./runners/utils/availability-policy.js";
+import {
+	recordAvailabilityProbeOverrun,
+	runSharedAvailabilityProbe,
+} from "./runners/utils/runner-helpers.js";
 import type { FactStore } from "./fact-store.js";
 import { applyDispositions } from "../diagnostic-dispositions.js";
 import { applyInlineSuppressions } from "./inline-suppressions.js";
@@ -176,14 +180,25 @@ export async function checkToolAvailability(
 		const startedAt = Date.now();
 		let result: Awaited<ReturnType<typeof safeSpawnAsync>>;
 		let hostStallMs: number;
+		let probeJoined = false;
 		try {
-			result = await safeSpawnAsync(command, ["--version"], {
-				timeout: TOOL_PROBE_TIMEOUT_MS,
-			});
+			const shared = runSharedAvailabilityProbe(`dispatcher:${key}`, () =>
+				safeSpawnAsync(command, ["--version"], {
+					timeout: TOOL_PROBE_TIMEOUT_MS,
+				}),
+			);
+			probeJoined = shared.joined;
+			result = await shared.promise;
 		} finally {
 			hostStallMs = sampler.stop();
 		}
 		const elapsedMs = Date.now() - startedAt;
+		recordAvailabilityProbeOverrun(
+			command,
+			command,
+			elapsedMs,
+			TOOL_PROBE_TIMEOUT_MS,
+		);
 		if (result.status === 0) {
 			facts.setSessionFact(key, true);
 			// The tool answered: retire the cooldown facts rather than leaving a
@@ -197,6 +212,7 @@ export async function checkToolAvailability(
 				cause: "ok",
 				elapsedMs,
 				latched: true,
+				classifiedBy: probeJoined ? "joined" : "probe",
 				hostStallMs,
 				budgetMs: TOOL_PROBE_TIMEOUT_MS,
 			});
@@ -232,7 +248,7 @@ export async function checkToolAvailability(
 			hostStallMs,
 			...(retryAfterMs !== undefined && { retryAfterMs }),
 			budgetMs: TOOL_PROBE_TIMEOUT_MS,
-			classifiedBy: "probe",
+			classifiedBy: probeJoined ? "joined" : "probe",
 			evidence,
 		});
 		return false;

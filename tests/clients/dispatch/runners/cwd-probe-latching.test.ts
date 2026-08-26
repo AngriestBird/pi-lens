@@ -19,6 +19,7 @@ import {
 	createCwdCachedProbe,
 	resetDispatchAvailabilityState,
 } from "../../../../clients/dispatch/runners/utils/runner-helpers.js";
+import { getDegradationSummary } from "../../../../clients/degradation-ledger.js";
 
 const {
 	logLatencySpy,
@@ -108,6 +109,55 @@ beforeEach(() => {
 });
 
 describe("createCwdCachedProbe latch policy (#1494)", () => {
+	it("shares one in-flight probe across two consumers and records the join", async () => {
+		let release: ((value: ReturnType<typeof okResult>) => void) | undefined;
+		const probe = vi.fn(
+			() =>
+				new Promise<ReturnType<typeof okResult>>(
+					(resolve) => (release = resolve),
+				),
+		);
+		const first = createCwdCachedProbe(probe, { tool: "joined-widget" });
+		const second = createCwdCachedProbe(probe, { tool: "joined-widget" });
+
+		const a = first("/tmp/joined-project");
+		const b = second("/tmp/joined-project");
+		expect(probe).toHaveBeenCalledTimes(1);
+		release?.(okResult());
+		expect(await Promise.all([a, b])).toEqual([true, true]);
+		expect(decisions().map((entry) => entry.metadata.classifiedBy)).toEqual([
+			"probe",
+			"joined",
+		]);
+	});
+
+	it("records a bounded degradation when the probe exceeds budgetMs", async () => {
+		let release: ((value: ReturnType<typeof okResult>) => void) | undefined;
+		const probe = vi.fn(
+			() =>
+				new Promise<ReturnType<typeof okResult>>(
+					(resolve) => (release = resolve),
+				),
+		);
+		const cached = createCwdCachedProbe(probe, {
+			tool: "overrun-widget",
+			budgetMs: 5,
+		});
+		const pending = cached("/tmp/overrun-project");
+		vi.setSystemTime(new Date(Date.now() + 6));
+		release?.(okResult());
+		expect(await pending).toBe(true);
+		const group = getDegradationSummary().find(
+			(entry) => entry.kind === "availability-probe-overrun",
+		);
+		expect(group?.count).toBeGreaterThanOrEqual(1);
+		expect(
+			group?.latestReasons.some((entry) =>
+				entry.subject.includes("overrun-widget"),
+			),
+		).toBe(true);
+	});
+
 	it("re-probes after a timeout once the cooldown expires", async () => {
 		const probe = vi
 			.fn()
