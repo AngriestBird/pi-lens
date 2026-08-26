@@ -1,0 +1,7 @@
+id: python-optional-type
+valid:
+  - "value: str | None"
+  - "value: list[str]"
+invalid:
+  - "value: Optional[str]"
+  - "value: Optional[list[int]]"

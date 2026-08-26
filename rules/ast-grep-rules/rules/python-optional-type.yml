@@ -1,0 +1,20 @@
+id: python-optional-type
+language: Python
+severity: warning
+message: "Optional[T] requires Python 3.10+ to rewrite as T | None"
+note: |
+  `Optional[T]` can be written as `T | None` on Python 3.10 and later.
+  This rule is detection-only because the target project's Python version is
+  not available to a syntax-only matcher. Do not apply the rewrite to Python
+  3.8 or 3.9 code.
+rule:
+  kind: type
+  regex: '^Optional\['
+has_fix: false
+tags:
+  - python
+  - typing
+  - modernization
+examples:
+  bad: "value: Optional[str]"
+  good: "value: str | None"

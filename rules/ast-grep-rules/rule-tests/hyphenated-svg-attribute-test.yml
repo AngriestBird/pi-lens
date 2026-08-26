@@ -1,0 +1,8 @@
+id: hyphenated-svg-attribute
+valid:
+  - "const icon = <svg strokeWidth=\"2\" />;"
+  - "const custom = <my-element data-value=\"x\" />;"
+  - "const other = <div stroke-width=\"2\" />;"
+invalid:
+  - "const icon = <svg stroke-width=\"2\" />;"
+  - "const path = <path fill-rule=\"evenodd\" />;"

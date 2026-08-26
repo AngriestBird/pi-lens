@@ -1,0 +1,8 @@
+id: ruby-symbol-to-proc-candidate
+valid:
+  - "names.each { |name| puts name }"
+  - "names.map { |name| name.upcase(prefix) }"
+  - "names.map(&:upcase)"
+invalid:
+  - "names.map { |name| name.upcase }"
+  - "names.select { |name| name.empty? }"
