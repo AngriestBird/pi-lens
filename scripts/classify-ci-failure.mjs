@@ -62,7 +62,7 @@ async function main() {
 
 	console.log(
 		`PR #${result.prNumber} sha=${result.sha} job=${result.jobName} -> ` +
-			`${result.classification.kind}${result.rerunTriggered ? " (rerun triggered)" : ""}`,
+			`${result.classification.kind}${result.rerunTriggeredThisPass ? " (rerun triggered)" : ""}`,
 	);
 	console.log(result.commentBody);
 }

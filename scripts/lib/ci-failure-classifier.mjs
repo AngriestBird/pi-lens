@@ -1,8 +1,12 @@
 // Pure classification logic for `scripts/classify-ci-failure.mjs` (#2103).
 //
 // Kept separate from the CLI so the log-reading heuristics and the
-// once-per-SHA rerun guard are unit-testable without a GitHub event or a
-// network call (the check-pr-title.mjs / merge-train-warden.mjs pattern).
+// once-per-sequential-invocation rerun guard are unit-testable without a
+// GitHub event or a network call (the check-pr-title.mjs /
+// merge-train-warden.mjs pattern). The guard does not serialize CONCURRENT
+// invocations -- see the REAL SCOPE note on shouldTriggerRerun (review
+// round 2, V2/V3) for exactly what is and isn't guaranteed under
+// concurrency.
 //
 // The problem this solves is not the OOM itself, it is the JUDGMENT cost: the
 // 2026-08-25/26 merge train paid a manual log read and a judged rerun for
@@ -20,6 +24,23 @@ export function stripAnsi(text) {
 	return text.replace(ANSI_PATTERN, "");
 }
 
+/**
+ * Strips the GitHub Actions per-line ISO-8601 timestamp prefix (real log,
+ * every line): "2026-08-26T00:09:00.9329487Z  FAIL ...". Every job log
+ * fetched from the real API is prefixed this way on EVERY line -- discovered
+ * the hard way in review round 2 (V4): a `^\s*` line-start anchor added to
+ * fix a different false-positive (BARE_FAIL_LINE matching "FAIL" inside a
+ * passing test's own title) broke on the very real fixtures it was meant to
+ * keep working, because "FAIL" is never actually the first character on a
+ * real log line -- the timestamp is. Applied before any anchored pattern
+ * below, so "line start" means "start of content", not "start of the raw
+ * line".
+ */
+const LINE_TIMESTAMP_PREFIX = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+Z ?/gm;
+export function stripLineTimestamps(text) {
+	return text.replace(LINE_TIMESTAMP_PREFIX, "");
+}
+
 // #2096 shape (review round 1, F5): bound the read BEFORE interpretation. A
 // classifier that scans an unbounded log is itself a resource-exhaustion
 // risk, and the signal this classifier looks for -- a FAIL block, a
@@ -28,6 +49,12 @@ export function stripAnsi(text) {
 // fixtures make. This is a lossy read by design: content dropped by the cap
 // is invisible to every pattern below, matching how a human skimming "the
 // end of the log" would triage it too.
+//
+// Review round 2, V5 (measured, not assumed): a complete real Unit-tests
+// job log covering all 9,886 tests (run 32913518938, job 98012237782) is
+// 212,150 bytes. The 2MB cap is roughly a 10x margin over that real-world
+// size -- comfortably large enough to never truncate a normal run, while
+// still bounding the read against a pathological one.
 const MAX_LOG_BYTES = 2 * 1024 * 1024;
 
 // vitest's summary block for a failing test: (real log, run 32913518938,
@@ -40,7 +67,18 @@ const FAIL_LINE = /FAIL\s+\S+\s+(\S+\.test\.tsx?)\s*>\s*(.+)/;
 // reaches a single test, so vitest has no test name to print (review round
 // 1, F2/P2). Deliberately looser than FAIL_LINE: only used when FAIL_LINE
 // itself doesn't match.
-const BARE_FAIL_LINE = /FAIL\b.*?(\S+\.test\.tsx?)(?=\s|$)/m;
+//
+// Review round 2, V4: anchored to the vitest badge SHAPE -- "FAIL" is the
+// first non-whitespace token on its own line, exactly how vitest prints the
+// badge (real and synthetic fixtures alike start the line with optional
+// indentation then "FAIL"). An earlier, unanchored version matched "FAIL"
+// anywhere in the line, including inside a PASSING test's own title, e.g.
+// "✓ does not FAIL when tests/b.test.ts is absent" -- fabricating
+// "tests/b.test.ts" as the failing file and burying a genuine OOM kill
+// elsewhere in the same log under a fake real classification (safe
+// direction, but reimposes the manual-read tax this classifier exists to
+// remove). See the "V4 fabricated FAIL in a passing test title" fixture.
+const BARE_FAIL_LINE = /^\s*FAIL\b.*?(\S+\.test\.tsx?)(?=\s|$)/m;
 // (real log, same run) "AssertionError: expected false to be true //
 // Object.is equality"
 const ASSERTION_LINE = /AssertionError:\s*(.+)/;
@@ -51,8 +89,14 @@ const ASSERTION_LINE = /AssertionError:\s*(.+)/;
 // This is the review's F2/P1 fix: an OOM kill immediately AFTER this line
 // prints, but before the summary block, must still classify real -- the
 // summary block is not the only place a failure is visible.
+//
+// Review round 2, V4: anchored to line start (the "❯" badge is always the
+// first non-whitespace glyph vitest prints on this line) for the same
+// reason as BARE_FAIL_LINE above -- defense in depth, even though "❯"
+// followed by this exact "(N tests | M failed)" shape is already narrow
+// enough that no fixture has produced a false match mid-line.
 const INLINE_SUITE_FAIL =
-	/❯\s+\S+\s+(\S+\.test\.tsx?)\s*\(\d+\s*tests?\s*\|\s*(\d+)\s*failed\)/;
+	/^\s*❯\s+\S+\s+(\S+\.test\.tsx?)\s*\(\d+\s*tests?\s*\|\s*(\d+)\s*failed\)/m;
 // The per-test inline marker inside that same block (real log, same run,
 // line 539): "     × reuses a fresh persisted snapshot without rebuilding
 // 127ms" -- a fallback when the suite-level line above got lost to log
@@ -181,7 +225,7 @@ export function classifyFailureLog(rawLog) {
 	// result (see the truncation test).
 	const bounded =
 		original.length > MAX_LOG_BYTES ? original.slice(-MAX_LOG_BYTES) : original;
-	const log = stripAnsi(bounded);
+	const log = stripLineTimestamps(stripAnsi(bounded));
 
 	const realSignal = findRealFailureSignal(log);
 	if (realSignal) {
@@ -266,6 +310,39 @@ export function parseClassifierMarker(commentBody) {
  * call itself failed) is NOT "already triggered" -- it must remain eligible
  * so the next invocation can retry.
  *
+ * REAL SCOPE OF THE "ONCE PER SHA" GUARANTEE (review round 2, V2/V3 --
+ * measured, not assumed): this guard serializes SEQUENTIAL invocations
+ * against one PR's comment history. It does NOT serialize CONCURRENT
+ * invocations -- there is no lock around "read the marker, then rerun".
+ * Two known, accepted ways the guarantee can still under- or over-fire:
+ *
+ *   V2: N concurrent invocations for the same SHA can all read the SAME
+ *   "not yet triggered" marker state before any of them writes, so all N
+ *   attempt the rerun POST (measured: 3 concurrent invocations -> 3 rerun
+ *   calls). This is accepted, not serialized: GitHub's own
+ *   rerun-failed-jobs answers a duplicate rerun on an already-
+ *   queued/in-progress run with 403, which attemptRerun records as
+ *   `failed:403` -- a losing invocation's marker write (if it wins the
+ *   comment race) or the next sequential invocation's read both see an
+ *   honest failure record, not a false "never happened". The guarantee
+ *   this code actually provides is "once per SEQUENTIAL invocation", not
+ *   "once across any concurrency".
+ *
+ *   V3: the attempt-then-record order (F4) fixed "the marker lies", but it
+ *   opens a narrower window: if the rerun POST succeeds and the FOLLOWING
+ *   comment POST fails (a separate network call, after the rerun already
+ *   fired), this invocation throws having already triggered a real rerun
+ *   with no marker recorded. The next invocation finds no comment, so it
+ *   reruns again (measured: 2 total reruns across 2 sequential attempts
+ *   with an injected comment-POST failure). Judged the right trade against
+ *   the alternative (recording the marker BEFORE the attempt, which lies
+ *   whenever the attempt itself fails, per F4) -- an extra rerun is
+ *   wasteful, a permanently-blocked SHA is worse.
+ *
+ * Neither gap is silent: every attempt, successful or not, is recorded in
+ * SOME comment (this invocation's own, or a later reconciled one), and a
+ * duplicate rerun is GitHub's own no-op, not a runaway loop.
+ *
  * @param {{ classification: Classification, sha: string, existingMarker: { sha: string, rerunTriggered: boolean } | null }} args
  */
 export function shouldTriggerRerun({ classification, sha, existingMarker }) {
@@ -328,12 +405,17 @@ export function decideClassifierAction({ rawLog, sha, existingCommentBody }) {
 			? "true"
 			: "false";
 	const commentBody = buildCommentBody({ classification, sha, rerunState });
-	// `rerunTriggered` means "did THIS pass trigger a rerun", not "does the
-	// marker's cumulative state say true" -- eligibleForRerun already IS
-	// that this-pass answer (this pure function assumes an eligible attempt
-	// always succeeds; see runClassifier for the real, attempt-then-record
-	// version).
-	return { classification, rerunTriggered: eligibleForRerun, commentBody };
+	// Review round 2, V5: `rerunTriggeredThisPass` (not `rerunTriggered`,
+	// which parseClassifierMarker's return keeps for the CUMULATIVE
+	// marker-state meaning) -- this field means "did THIS pass trigger a
+	// rerun". eligibleForRerun already IS that this-pass answer (this pure
+	// function assumes an eligible attempt always succeeds; see
+	// runClassifier for the real, attempt-then-record version).
+	return {
+		classification,
+		rerunTriggeredThisPass: eligibleForRerun,
+		commentBody,
+	};
 }
 
 // ---------------------------------------------------------------------------
@@ -353,6 +435,22 @@ async function restJson(fetcher, method, url, body) {
 		body: body === undefined ? undefined : JSON.stringify(body),
 	});
 	if (!response.ok) {
+		// Review round 2, V1: reconcileDuplicateClassifierComments lets every
+		// LOSER among N concurrent invocations attempt to DELETE the same set
+		// of duplicate comment ids. The first DELETE to reach GitHub actually
+		// removes the comment; every later DELETE against that same id gets
+		// 404 (or 410 Gone, GitHub's other "already gone" shape) -- which IS
+		// the caller's desired end state ("this comment no longer exists"),
+		// not a failure. Without this, restJson threw on the 404 and the
+		// losing invocations exited 1 AFTER their own rerun/comment work had
+		// already landed successfully -- a crash that reported failure for
+		// work that, in fact, succeeded.
+		if (
+			method === "DELETE" &&
+			(response.status === 404 || response.status === 410)
+		) {
+			return null;
+		}
 		const text = await response.text().catch(() => "");
 		throw new Error(
 			`${method} ${url} -> HTTP ${response.status} ${text}`.trim(),
@@ -552,7 +650,10 @@ export async function attemptRerun({ fetcher, owner, repo, runId }) {
  * Orchestrate one run: classify, attempt the rerun (when eligible) BEFORE
  * writing any marker that claims it happened (review round 1, F4), upsert
  * the sticky comment with the ACTUAL outcome, and reconcile a concurrent
- * duplicate comment for the same SHA (review round 1, F3).
+ * duplicate comment for the same SHA (review round 1, F3; the 404/410
+ * -on-DELETE handling for a THIRD-or-later concurrent loser is review
+ * round 2, V1). See shouldTriggerRerun's REAL SCOPE note (V2/V3) for what
+ * "once per SHA" does and doesn't cover under concurrency.
  *
  * @param {{ fetcher: typeof fetch, owner: string, repo: string, runId: number | string, jobName?: string, prNumber?: number }} args
  */
@@ -630,7 +731,7 @@ export async function runClassifier({
 
 	let result = {
 		classification,
-		rerunTriggered: rerunTriggeredThisPass,
+		rerunTriggeredThisPass,
 		commentBody,
 		sha,
 		prNumber,
@@ -657,7 +758,7 @@ export async function runClassifier({
 			// already-queued/in-progress run is a no-op) covers that overlap.
 			result = {
 				...result,
-				rerunTriggered: false,
+				rerunTriggeredThisPass: false,
 				supersededByCommentId: reconciled.winningCommentId,
 			};
 		}

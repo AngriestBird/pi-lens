@@ -229,6 +229,23 @@ describe("classifyFailureLog (#2103)", () => {
 		const result = classifyFailureLog(log);
 		expect(result.kind).toBe("real");
 	});
+
+	// V4 (BLOCKING, red-proof with the reviewer's fabricated-title shape): a
+	// PASSING test titled "does not FAIL when tests/b.test.ts is absent"
+	// contains the literal word "FAIL" and a filename-shaped token in its own
+	// title -- an unanchored BARE_FAIL_LINE fabricated "tests/b.test.ts" as
+	// the failing file and misclassified a genuine OOM kill as real (safe
+	// direction, but reimposes the manual-read tax this classifier exists to
+	// remove). Fixture: real OOM-kill log (infra-oom-wrapper-killed.real.log)
+	// with that exact fabricated-title line spliced in among the passing
+	// tests -- every surrounding byte is the real capture; only the inserted
+	// line is synthetic.
+	it("V4: a fabricated FAIL inside a passing test's own title does not mask a genuine OOM kill", () => {
+		const result = classifyFailureLog(
+			fixture("fabricated-fail-in-passing-title.composite.log"),
+		);
+		expect(result.kind).toBe("infra-oom");
+	});
 });
 
 describe("marker round-trip (#2103)", () => {
@@ -351,7 +368,7 @@ describe("shouldTriggerRerun once-per-SHA guard (#2103)", () => {
 			sha,
 			existingCommentBody: null,
 		});
-		expect(first.rerunTriggered).toBe(true);
+		expect(first.rerunTriggeredThisPass).toBe(true);
 
 		// The second pass reads back the comment the first pass would have
 		// posted -- this is the realistic call shape the CLI's runClassifier
@@ -361,7 +378,7 @@ describe("shouldTriggerRerun once-per-SHA guard (#2103)", () => {
 			sha,
 			existingCommentBody: first.commentBody,
 		});
-		expect(second.rerunTriggered).toBe(false);
+		expect(second.rerunTriggeredThisPass).toBe(false);
 	});
 });
 
@@ -402,22 +419,23 @@ describe("runClassifier orchestration against a mocked, STATEFUL GitHub API (#21
 	function makeStatefulApi({
 		initialComments = [] as Array<{ id: number; body: string }>,
 		rerunHandler,
-		pairwiseCommentsBarrier = false,
+		concurrentInvocations = 0,
 	}: {
 		initialComments?: Array<{ id: number; body: string }>;
 		rerunHandler?: () => { ok: boolean; status: number };
 		/**
-		 * F3 only: force every PAIR of concurrent GET .../comments calls
-		 * (across two overlapping runClassifier invocations sharing this same
-		 * api) to arrive before either proceeds. This is what actually
-		 * reproduces "both reads happen before either write" deterministically
+		 * F3/V1 only: force every GROUP of N concurrent GET .../comments calls
+		 * (across N overlapping runClassifier invocations sharing this same
+		 * api) to arrive before any of them proceeds. This is what actually
+		 * reproduces "every read happens before any write" deterministically
 		 * -- a single-invocation test that also hits this endpoint twice
-		 * (initial read, then the F3 reconcile read) would otherwise deadlock
-		 * waiting for a partner that never comes, since those two calls are
-		 * sequential within one invocation. Only pass this for genuinely
-		 * concurrent invocations sharing one api instance.
+		 * (initial read, then the reconcile read) would otherwise deadlock
+		 * waiting for group-mates that never come, since those two calls are
+		 * sequential within one invocation. 0 (default) disables the barrier;
+		 * only pass N for exactly N genuinely concurrent invocations sharing
+		 * one api instance.
 		 */
-		pairwiseCommentsBarrier?: boolean;
+		concurrentInvocations?: number;
 	} = {}) {
 		const calls: Array<{ method: string; url: string; body?: unknown }> = [];
 		const rawLog = fixture("infra-oom-wrapper-killed.real.log");
@@ -426,15 +444,18 @@ describe("runClassifier orchestration against a mocked, STATEFUL GitHub API (#21
 		let rerunCallCount = 0;
 
 		let commentsGetCount = 0;
-		const pendingBarrierResolvers: Array<() => void> = [];
+		let pendingBarrierResolvers: Array<() => void> = [];
 		async function commentsGetBarrier() {
 			commentsGetCount++;
-			if (commentsGetCount % 2 === 1) {
+			const posInGroup = ((commentsGetCount - 1) % concurrentInvocations) + 1;
+			if (posInGroup < concurrentInvocations) {
 				await new Promise<void>((resolve) => {
 					pendingBarrierResolvers.push(resolve);
 				});
 			} else {
-				pendingBarrierResolvers.shift()?.();
+				const resolvers = pendingBarrierResolvers;
+				pendingBarrierResolvers = [];
+				for (const resolve of resolvers) resolve();
 			}
 		}
 
@@ -447,7 +468,7 @@ describe("runClassifier orchestration against a mocked, STATEFUL GitHub API (#21
 					typeof init?.body === "string" ? JSON.parse(init.body) : undefined,
 			});
 			if (
-				pairwiseCommentsBarrier &&
+				concurrentInvocations > 1 &&
 				method === "GET" &&
 				url.includes("/comments")
 			) {
@@ -494,7 +515,14 @@ describe("runClassifier orchestration against a mocked, STATEFUL GitHub API (#21
 			if (deleteMatch) {
 				const id = Number(deleteMatch[1]);
 				const index = comments.findIndex((c) => c.id === id);
-				if (index !== -1) comments.splice(index, 1);
+				if (index === -1) {
+					// V1, production-faithful: GitHub 404s a DELETE against a
+					// comment id that no longer exists -- exactly what happens
+					// when a second concurrent loser tries to delete the same
+					// duplicate a first loser already removed.
+					return jsonResponse({ message: "Not Found" }, 404);
+				}
+				comments.splice(index, 1);
 				return noContentResponse();
 			}
 			if (url.endsWith("/actions/runs/999/rerun-failed-jobs")) {
@@ -527,7 +555,7 @@ describe("runClassifier orchestration against a mocked, STATEFUL GitHub API (#21
 		});
 
 		expect(result.classification.kind).toBe("infra-oom");
-		expect(result.rerunTriggered).toBe(true);
+		expect(result.rerunTriggeredThisPass).toBe(true);
 
 		const posted = calls.find(
 			(c) => c.method === "POST" && c.url.includes("/comments"),
@@ -559,7 +587,7 @@ describe("runClassifier orchestration against a mocked, STATEFUL GitHub API (#21
 
 		// this-pass semantics: no NEW rerun was attempted this invocation, even
 		// though the marker/comment still reflect the earlier success.
-		expect(result.rerunTriggered).toBe(false);
+		expect(result.rerunTriggeredThisPass).toBe(false);
 		expect(result.commentBody).toContain("auto-rerun triggered");
 
 		const posted = calls.find(
@@ -591,7 +619,7 @@ describe("runClassifier orchestration against a mocked, STATEFUL GitHub API (#21
 			runId: 999,
 		});
 
-		expect(result.rerunTriggered).toBe(false);
+		expect(result.rerunTriggeredThisPass).toBe(false);
 		expect(result.commentBody).toContain("failed:403");
 		expect(result.commentBody).not.toContain("auto-rerun triggered");
 
@@ -628,7 +656,7 @@ describe("runClassifier orchestration against a mocked, STATEFUL GitHub API (#21
 			repo: "repo",
 			runId: 999,
 		});
-		expect(result.rerunTriggered).toBe(true);
+		expect(result.rerunTriggeredThisPass).toBe(true);
 		expect(second.rerunCallCount).toBe(1);
 	});
 
@@ -651,7 +679,7 @@ describe("runClassifier orchestration against a mocked, STATEFUL GitHub API (#21
 			runId: 999,
 		});
 
-		expect(result.rerunTriggered).toBe(false);
+		expect(result.rerunTriggeredThisPass).toBe(false);
 		expect(result.commentBody).toContain("failed:0");
 		void calls;
 	});
@@ -662,7 +690,7 @@ describe("runClassifier orchestration against a mocked, STATEFUL GitHub API (#21
 	// ONE comment and must not both believe they own the rerun.
 	it("F3: two concurrent invocations for the same SHA converge to one comment, not two", async () => {
 		const { fetcher, comments } = makeStatefulApi({
-			pairwiseCommentsBarrier: true,
+			concurrentInvocations: 2,
 		});
 
 		const [first, second] = await Promise.all([
@@ -678,6 +706,34 @@ describe("runClassifier orchestration against a mocked, STATEFUL GitHub API (#21
 				"supersededByCommentId" in r && r.supersededByCommentId !== undefined,
 		).length;
 		expect(supersededCount).toBe(1);
+	});
+
+	// V1 (BLOCKING, red-proof with production-faithful DELETE semantics: a
+	// repeat DELETE against an already-deleted comment 404s, per
+	// makeStatefulApi's DELETE handler above). With 3 concurrent invocations,
+	// TWO are losers -- both try to DELETE the same duplicate comment ids,
+	// so the second DELETE against each id must 404, not crash the caller.
+	// Pre-fix, restJson threw on that 404 and the losing invocations
+	// rejected AFTER their own successful rerun/comment work had already
+	// landed -- a spurious failure report for work that, in fact, succeeded.
+	it("V1: three concurrent invocations for the same SHA all settle, converging to one comment", async () => {
+		const { fetcher, comments } = makeStatefulApi({
+			concurrentInvocations: 3,
+		});
+
+		const settled = await Promise.allSettled([
+			runClassifier({ fetcher, owner: "acme", repo: "repo", runId: 999 }),
+			runClassifier({ fetcher, owner: "acme", repo: "repo", runId: 999 }),
+			runClassifier({ fetcher, owner: "acme", repo: "repo", runId: 999 }),
+		]);
+
+		// The headline assertion: every invocation FULFILLED. Pre-fix, at
+		// least one of the two losers rejected with an unhandled "HTTP 404"
+		// error from restJson's DELETE handling.
+		const rejected = settled.filter((r) => r.status === "rejected");
+		expect(rejected).toEqual([]);
+
+		expect(comments).toHaveLength(1);
 	});
 });
 

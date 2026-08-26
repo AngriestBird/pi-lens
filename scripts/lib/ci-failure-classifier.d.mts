@@ -23,7 +23,10 @@ export interface ClassifierMarker {
 }
 export interface ClassifierDecision {
 	classification: Classification;
-	rerunTriggered: boolean;
+	// "did THIS pass trigger a rerun" -- distinct from ClassifierMarker's
+	// `rerunTriggered`, which is the marker's CUMULATIVE state (review round
+	// 2, V5: kept as two differently-named fields on purpose).
+	rerunTriggeredThisPass: boolean;
 	commentBody: string;
 }
 
