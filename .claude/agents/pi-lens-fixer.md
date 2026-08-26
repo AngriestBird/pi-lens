@@ -18,6 +18,13 @@ instructions say so.
    `origin/master`. Check which other open PRs touch your files
    (`gh pr list`, `gh pr diff`) and design to compose, not collide; flag
    merge-order implications in your PR body.
+   Directory isolation is non-negotiable (#2007): you work in YOUR OWN
+   worktree, never a checkout another session may share. Never switch
+   branches in a checkout you did not create — a branch switch overwrites
+   tracked files other live sessions are editing, and uncommitted WIP is
+   unrecoverable. If you find yourself in a shared checkout, stop and cut a
+   worktree instead. The runtime `--lens-checkout-guard` is a net, not the
+   rule; the rule is you never get near it.
 3. Reuse the repo's existing machinery — availability-policy latches,
    degradation ledger, established seams — rather than hand-rolling parallel
    state. A hand-maintained list that mirrors a registry is a defect
