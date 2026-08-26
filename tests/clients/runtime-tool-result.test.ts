@@ -1711,6 +1711,55 @@ describe("runtime-tool-result inline behavior warnings", () => {
 		}
 	});
 
+	// R2-F2 (#2157 fix round 2): the primary-direction mirror of the secondary
+	// test above — a crash belonging to the registered primary must still
+	// reset its own fleet.
+	it("lets a primary session's own pipeline crash reset its fleet", async () => {
+		const { runPipeline } = await import("../../clients/pipeline.js");
+		vi.mocked(runPipeline).mockRejectedValue(new Error("primary boom"));
+
+		const env = setupTestEnvironment("pi-lens-runtime-tool-primary-crash-");
+		try {
+			const filePath = path.join(env.tmpDir, "src", "app.ts");
+			fs.mkdirSync(path.dirname(filePath), { recursive: true });
+			fs.writeFileSync(filePath, "export const x = 1;\n");
+			registerPrimarySession({}, "primary-session", env.tmpDir);
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			runtime.setSessionLifecycle({ sessionId: "primary-session" });
+			runtime.beginTurn();
+			const resetLSPService = vi.fn();
+
+			await handleToolResult({
+				event: {
+					toolName: "edit",
+					input: { path: filePath },
+					details: { diff: "+  1 export const x = 2;" },
+					content: [{ type: "text", text: "base" }],
+				},
+				getFlag: () => false,
+				dbg: () => {},
+				runtime,
+				cacheManager: new CacheManager(false),
+				biomeClient: {},
+				ruffClient: {},
+				testRunnerClient: {},
+				metricsClient: {},
+				resetLSPService,
+				agentBehaviorRecord: () => [],
+				formatBehaviorWarnings: () => "",
+			} as any);
+
+			expect(resetLSPService).toHaveBeenCalledWith({
+				fast: true,
+				reason: "pipeline_crash",
+			});
+		} finally {
+			releasePrimarySession();
+			env.cleanup();
+		}
+	});
+
 	it("resolves relative tool_result paths against the workspace root", async () => {
 		const { runPipeline } = await import("../../clients/pipeline.js");
 		vi.mocked(runPipeline).mockResolvedValue({
