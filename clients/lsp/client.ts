@@ -1123,14 +1123,31 @@ export function getLspDocumentTextRetentionSnapshot(): {
 	clients: number;
 	entries: number;
 	bytes: number;
+	/**
+	 * #2130: how many DISTINCT project roots the live clients are spread
+	 * across. `clients` alone cannot answer "are two tsservers up because one
+	 * root needs two servers, or because this host is serving two roots" —
+	 * which is the exact question the multi-root host raised, and the reason a
+	 * `clients` count with no root discriminator is not enough to reconcile
+	 * `memory_sample` against `instances.json`'s `lspChildCount`.
+	 *
+	 * A COUNT, not a path list: this rides on a per-turn record, so it must
+	 * stay bounded (one small integer) no matter how many roots a host serves.
+	 * The paths themselves live in `instances.json`'s `projectRoots`.
+	 */
+	roots: number;
 } {
 	let entries = 0;
 	let bytes = 0;
+	const roots = new Set<string>();
 	for (const state of activeLspClients) {
 		entries += state.incrementalTextRetainedEntries ?? 0;
 		bytes += state.incrementalTextRetainedBytes ?? 0;
+		if (typeof state.root === "string" && state.root.length > 0) {
+			roots.add(state.root);
+		}
 	}
-	return { clients: activeLspClients.size, entries, bytes };
+	return { clients: activeLspClients.size, entries, bytes, roots: roots.size };
 }
 
 function isClientAlive(state: LSPClientState): boolean {

@@ -156,6 +156,7 @@ import {
 	classifyCurrentSessionEmission,
 	decideSessionStart,
 	decrementSecondarySessionCount,
+	getActivePrimaryRoot,
 	noteSessionShutdown,
 	probeCtxActive,
 } from "./clients/session-lifecycle.js";
@@ -1777,18 +1778,38 @@ function activateExtension(hostPi: ExtensionAPI) {
 					// the shared LSP fleet + runtime generation out from under the still
 					// -live parent) or updateRuntimeIdentityFromCtx (which would
 					// overwrite the parent's telemetry identity).
-					const sessionStartDecision = decideSessionStart(ctx, stableSessionId);
+					// #2129: the third argument is this start's PROJECT ROOT. Without
+					// it, a subagent temp worktree arriving with an already-disposed
+					// prior ctx classified `sequential-replacement`, stole the primary
+					// registration, and re-ran the whole session_start battery against
+					// unchanged content. Root identity is now a classification input.
+					const sessionStartCwd =
+						(ctx as { cwd?: string })?.cwd ?? process.cwd();
+					const sessionStartDecision = decideSessionStart(
+						ctx,
+						stableSessionId,
+						sessionStartCwd,
+					);
 					ownedSessionRole = sessionStartDecision.runFullSessionStart
 						? "primary"
 						: "concurrent-secondary";
 					if (!sessionStartDecision.runFullSessionStart) {
 						dbg(
-							`session_start: concurrent secondary detected (count=${sessionStartDecision.secondaryCount}) — skipping handleSessionStart`,
+							`session_start: ${sessionStartDecision.classification} detected (count=${sessionStartDecision.secondaryCount}, sameRoot=${sessionStartDecision.sameRoot}) — skipping handleSessionStart`,
 						);
 						logConcurrentSessionBind({
 							secondaryCount: sessionStartDecision.secondaryCount,
 							sessionReason,
 							sameCwd: (ctx as { cwd?: string })?.cwd === process.cwd(),
+							// #2129: `sameCwd` above compares against `process.cwd()`,
+							// which answers a different question and read `true` for every
+							// pre-fix bind. These three fields record the input the
+							// classification actually consulted — the registered PRIMARY's
+							// root — so a log reader can tell a root-declined start from a
+							// live-sibling one.
+							classification: sessionStartDecision.classification,
+							sameRoot: sessionStartDecision.sameRoot,
+							primaryRoot: sessionStartDecision.primaryRoot,
 						});
 						return;
 					}
@@ -2582,6 +2603,9 @@ function activateExtension(hostPi: ExtensionAPI) {
 							sessionAgeMs: Math.max(0, Date.now() - runtime.sessionStartedAt),
 							sessionStartedAt: runtime.sessionStartedAt,
 							turnCount: runtime.turnIndex,
+							// #2130: root discriminator. Two roots in one host emitted
+							// the same turnIndex with nothing to separate them.
+							root: getActivePrimaryRoot(),
 						},
 					);
 					logLatency({

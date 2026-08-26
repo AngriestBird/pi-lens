@@ -60,7 +60,27 @@ export interface LspChildEntry {
 export interface InstanceEntry {
 	pid: number;
 	startedAt: string;
+	/**
+	 * The host's FIRST registered root — its primary. Pinned at first
+	 * registration and never overwritten since #2130; before that fix every
+	 * `registerInstance` clobbered it, so a host serving a subagent temp
+	 * worktree advertised the TEMP DIR as its project root and the
+	 * shared-checkout guard (#2107) and warm attach (#2007) both read a root
+	 * the host was not actually working in.
+	 *
+	 * Kept as a scalar for wire compatibility: every pre-#2130 entry on disk
+	 * has it, and it is what a human reading `instances.json` looks at first.
+	 * `projectRoots` is the authoritative set — read it through
+	 * {@link getInstanceRoots}, never this field alone.
+	 */
 	projectRoot: string;
+	/**
+	 * Every root this host serves, insertion-ordered, `projectRoot` first
+	 * (#2130). Registration is ADDITIVE: a second root joins the set instead of
+	 * replacing the first. Absent on pre-#2130 entries, which
+	 * {@link getInstanceRoots} folds back to `[projectRoot]`.
+	 */
+	projectRoots?: string[];
 	lspChildren: LspChildEntry[];
 	lspChildCount: number;
 	rssBytes: number;
@@ -206,7 +226,49 @@ function writeRegistrySync(file: RegistryFile): void {
 
 // --- Mutations (all read-modify-write whole file) ---
 
-/** Create/overwrite this process's entry. */
+/**
+ * Every root an entry serves, oldest first (#2130).
+ *
+ * The single reader for root identity in this module — no caller may compare
+ * `entry.projectRoot` directly, or a host's secondary roots become invisible
+ * again. Folds a pre-#2130 entry (no `projectRoots`) back to its scalar root,
+ * and drops non-string / empty members so a hand-edited or torn file cannot
+ * make a comparison throw.
+ */
+export function getInstanceRoots(entry: InstanceEntry): string[] {
+	const listed = Array.isArray(entry.projectRoots)
+		? entry.projectRoots.filter(
+				(root): root is string => typeof root === "string" && root.length > 0,
+			)
+		: [];
+	if (listed.length > 0) return listed;
+	return typeof entry.projectRoot === "string" && entry.projectRoot.length > 0
+		? [entry.projectRoot]
+		: [];
+}
+
+/**
+ * Bound on the per-host root set (#2130). A host that legitimately serves many
+ * worktrees must not grow an unbounded path list inside a file every other
+ * pi-lens process reads on every heartbeat. Eviction drops the OLDEST
+ * NON-PRIMARY root: `projectRoot` is the host's own working directory and the
+ * one the shared-checkout guard most needs, so it is never evicted.
+ * Deliberately smaller than `SESSION_ROOT_CAP` (128,
+ * `clients/lsp/session-roots.ts:45`) because that set lives in memory for one
+ * process while this one is serialized to disk for all of them.
+ */
+const INSTANCE_ROOT_CAP = 32;
+
+/**
+ * Register `projectRoot` for this process, ADDITIVELY (#2130).
+ *
+ * Creates the entry on first call and pins `projectRoot` as the primary. Every
+ * later call for a different root APPENDS to `projectRoots` instead of
+ * overwriting — that overwrite is the defect #2130 records, where a subagent
+ * temp worktree's session start made the host advertise a temp dir as its root.
+ * Re-registering a root already in the set is a no-op for the set (the
+ * heartbeat/rss fields still refresh).
+ */
 export async function registerInstance(projectRoot: string): Promise<void> {
 	if (!isInstanceRegistryEnabled()) return;
 	const pid = process.pid;
@@ -215,6 +277,12 @@ export async function registerInstance(projectRoot: string): Promise<void> {
 	const now = new Date().toISOString();
 	const others = file.instances.filter((entry) => entry.pid !== pid);
 	const existing = file.instances.find((entry) => entry.pid === pid);
+	const priorRoots = existing ? getInstanceRoots(existing) : [];
+	const roots = priorRoots.includes(normalizedRoot)
+		? [...priorRoots]
+		: [...priorRoots, normalizedRoot];
+	// Evict from index 1 upward so the primary at index 0 survives.
+	while (roots.length > INSTANCE_ROOT_CAP) roots.splice(1, 1);
 	const identity = isSubagentSession() ? getSubagentIdentity() : undefined;
 	const subagent = identity
 		? {
@@ -227,7 +295,9 @@ export async function registerInstance(projectRoot: string): Promise<void> {
 	others.push({
 		pid,
 		startedAt: existing?.startedAt ?? now,
-		projectRoot: normalizedRoot,
+		// Pinned: `roots[0]` is the first root this process ever registered.
+		projectRoot: roots[0] ?? normalizedRoot,
+		projectRoots: roots,
 		lspChildren: existing?.lspChildren ?? [],
 		lspChildCount: existing?.lspChildren?.length ?? 0,
 		rssBytes: process.memoryUsage().rss,
@@ -348,6 +418,7 @@ async function recordLspChildNow(entry: RecordLspChildInput): Promise<void> {
 			pid,
 			startedAt: now,
 			projectRoot: normalizeFilePath(process.cwd()),
+			projectRoots: [normalizeFilePath(process.cwd())],
 			lspChildren: [childEntry],
 			lspChildCount: 1,
 			rssBytes: process.memoryUsage().rss,
@@ -431,6 +502,43 @@ export function deregisterInstance(): void {
 }
 
 /**
+ * Drop ONE root from this process's entry (#2130) — the scoped counterpart to
+ * {@link deregisterInstance}, for a worktree this host stops serving while the
+ * host itself keeps running.
+ *
+ * SYNC fs only, matching `deregisterInstance`'s `session_shutdown` contract
+ * (#234: no child spawns at teardown; this function spawns none). Removing the
+ * LAST root removes the whole entry — a host serving no root is not a peer any
+ * caller should find. Removing the primary promotes the next root to
+ * `projectRoot` rather than leaving a stale scalar behind.
+ */
+export function deregisterInstanceRoot(projectRoot: string): void {
+	if (!isInstanceRegistryEnabled()) return;
+	const pid = process.pid;
+	const normalizedRoot = normalizeFilePath(projectRoot);
+	const file = readRegistrySync();
+	const idx = file.instances.findIndex((entry) => entry.pid === pid);
+	if (idx === -1) return;
+	const current = file.instances[idx];
+	const remainingRoots = getInstanceRoots(current).filter(
+		(root) => root !== normalizedRoot,
+	);
+	if (remainingRoots.length === getInstanceRoots(current).length) return;
+	if (remainingRoots.length === 0) {
+		writeRegistrySync({
+			instances: file.instances.filter((entry) => entry.pid !== pid),
+		});
+		return;
+	}
+	file.instances[idx] = {
+		...current,
+		projectRoot: remainingRoots[0],
+		projectRoots: remainingRoots,
+	};
+	writeRegistrySync(file);
+}
+
+/**
  * Every OTHER live pi-lens process registered against the same project root,
  * oldest first (#2007).
  *
@@ -480,9 +588,16 @@ export function selectLivePeerInstances(
 		.filter(
 			(entry) =>
 				entry.pid !== process.pid &&
-				(match === "exact"
-					? entry.projectRoot === normalizedRoot
-					: rootsOverlap(entry.projectRoot, normalizedRoot)) &&
+				// #2130: a host serves a SET of roots. Matching only
+				// `entry.projectRoot` made every secondary root invisible, so a peer
+				// working in the same checkout under its second root read as "no
+				// peer" — and the shared-checkout guard then allowed the destructive
+				// command it exists to block.
+				getInstanceRoots(entry).some((entryRoot) =>
+					match === "exact"
+						? entryRoot === normalizedRoot
+						: rootsOverlap(entryRoot, normalizedRoot),
+				) &&
 				isPidAlive(entry.pid) &&
 				Number.isFinite(Date.parse(entry.heartbeatAt)) &&
 				now - Date.parse(entry.heartbeatAt) <= STALE_HEARTBEAT_MS,
