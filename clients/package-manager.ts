@@ -161,6 +161,7 @@ async function probeAvailability(pm: NodePackageManager): Promise<boolean> {
 			latched: true,
 			hostStallMs,
 			budgetMs: PROBE_TIMEOUT_MS,
+			classifiedBy: "probe",
 		});
 		return true;
 	}

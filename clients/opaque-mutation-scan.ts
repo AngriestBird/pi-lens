@@ -43,6 +43,7 @@ import { createHash } from "node:crypto";
 import { normalizeMapKey } from "./path-utils.js";
 import { freshnessFromMtime } from "./freshness.js";
 import { safeSpawnAsync } from "./safe-spawn.js";
+import { truncatedByOutputCap } from "./spawn-output-cap.js";
 
 export interface FileStatEntry {
 	mtimeMs: number;
@@ -67,6 +68,15 @@ export const OPAQUE_SCAN_MAX_FILES = 2000;
 
 /** How far before recorded start an earlier write may still be attributed. */
 export const OPAQUE_MTIME_TOLERANCE_MS = 150;
+
+// `--untracked-files=all` lists untracked files individually instead of
+// collapsing them per directory (it does NOT add ignored paths — that needs
+// `--ignored`), so the worst realistic case is a working tree with a large
+// unignored generated or vendored directory, and a rename entry costs two
+// paths. 16 MiB is a blast-radius bound on that, well past any tree this can
+// answer usefully about, and it is what makes the truncation guard below
+// reachable at all (#2100).
+const MAX_GIT_STATUS_OUTPUT_BYTES = 16 * 1024 * 1024;
 
 export type OpaqueUnknownReason =
 	| "walk-failed"
@@ -415,24 +425,35 @@ export async function recoverOpaqueChangesViaGit(
 	const result = await safeSpawnAsync(
 		"git",
 		["status", "--porcelain", "-z", "--untracked-files=all"],
-		{ cwd: root, timeout: 5000 },
+		{
+			cwd: root,
+			timeout: 5000,
+			maxOutputBytes: MAX_GIT_STATUS_OUTPUT_BYTES,
+		},
 	);
+	// #2060: safe-spawn caps stdout before the child finishes. A capped listing
+	// is a PREFIX of the truth, so reading it as complete would report every
+	// path the cap removed as unchanged.
+	//
+	// #2100: FIRST, ahead of the git-failed check. Hitting the cap makes
+	// safe-spawn SIGTERM the child, so the result also carries an error and a
+	// null status — read in the other order every cap kill reported as
+	// "git-failed" and this guard could never speak. `truncatedByOutputCap`
+	// leaves a timed-out or aborted read to the git-failed branch below, which
+	// is the honest answer for those.
+	if (truncatedByOutputCap(result)) {
+		return {
+			verdict: "unknown",
+			paths: [],
+			unknownReason: "git-status-parse-failed",
+			scannedCount: 0,
+		};
+	}
 	if (result.error || (result.status !== 0 && result.status !== null)) {
 		return {
 			verdict: "unknown",
 			paths: [],
 			unknownReason: "git-failed",
-			scannedCount: 0,
-		};
-	}
-	// #2060: safe-spawn caps stdout before the child finishes. A capped listing
-	// is a PREFIX of the truth, so reading it as complete would report every
-	// path the cap removed as unchanged.
-	if (result.outputTruncated === true) {
-		return {
-			verdict: "unknown",
-			paths: [],
-			unknownReason: "git-status-parse-failed",
 			scannedCount: 0,
 		};
 	}

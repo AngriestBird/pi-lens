@@ -150,6 +150,8 @@ export interface SpawnResult {
 	};
 	/** True when stdout or stderr was capped before process completion. */
 	outputTruncated?: boolean;
+	/** True when the output cap started terminating the child. */
+	killedForOutputCap?: boolean;
 	/** True when the optional streaming matcher saw a matching chunk. */
 	streamingMatch?: boolean;
 	/** Peak/average CPU%+RSS sampled across this spawn's lifetime (#620).
@@ -1171,6 +1173,7 @@ export async function safeSpawnAsync(
 		let aborted = false;
 		let killed = false;
 		let outputTruncated = false;
+		let killedForOutputCap = false;
 		let streamingMatch = false;
 		// #1651 review: a single boolean the close/error handlers both check
 		// AND set, so whichever one decides the outcome first wins outright —
@@ -1614,6 +1617,7 @@ export async function safeSpawnAsync(
 				!killed &&
 				!child.killed
 			) {
+				killedForOutputCap = true;
 				killed = true;
 				killPromise = killTree();
 			}
@@ -1831,7 +1835,10 @@ export async function safeSpawnAsync(
 			await waitForPipeIdle();
 			const resourceUsage = finishResourceUsage();
 
-			const outputInfo = outputTruncated ? { outputTruncated: true } : {};
+			const outputInfo = {
+				...(outputTruncated ? { outputTruncated: true } : {}),
+				...(killedForOutputCap ? { killedForOutputCap: true } : {}),
+			};
 			const streamingMatchInfo = streamingMatch ? { streamingMatch: true } : {};
 			// #1816: surface the signal name as a field on every path where one
 			// exists, so callers can NAME it instead of scraping `error.message`.
@@ -1970,6 +1977,7 @@ export async function safeSpawnAsync(
 					failure,
 					spawnFailure,
 					...(outputTruncated ? { outputTruncated: true } : {}),
+					...(killedForOutputCap ? { killedForOutputCap: true } : {}),
 					...(streamingMatch ? { streamingMatch: true } : {}),
 					resourceUsage,
 				});

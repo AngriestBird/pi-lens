@@ -900,6 +900,8 @@ export interface LSPClientState {
 	 *  above; readers fold their input through `normalizeMapKey`. */
 	readonly diagnosticsVersionsByPath: Map<string, number>;
 	readonly documentVersions: Map<string, number>;
+	/** #2113: tails for same-path didChange sends; different paths stay parallel. */
+	readonly notifyChangeQueues: Map<string, Promise<void>>;
 	/** The LSP document version (`publishDiagnostics.version`) the cached
 	 *  diagnostics for a path were computed against. Only set when the server
 	 *  reports a version; absent entries mean "version unknown" and are treated
@@ -1873,6 +1875,14 @@ function recordSentContent(
 ): void {
 	const scan = scanSentContent(content);
 	const previous = state.documentContentHashes.get(normalizedPath);
+	if (previous && previous.version > version) {
+		incrementDegradationCount({
+			kind: "lsp-document-send-order",
+			subject: `${state.serverId}:${normalizedPath}`,
+			reason: `recorded version ${version} after newer version ${previous.version}`,
+		});
+		return;
+	}
 	if (previous?.text !== undefined) {
 		state.incrementalTextRetainedEntries = Math.max(
 			0,
@@ -3857,13 +3867,13 @@ export async function handleNotifyOpen(
 	});
 }
 
-export async function handleNotifyChange(
+async function handleNotifyChangeOnce(
 	state: LSPClientState,
 	filePath: string,
 	content: string,
+	normalizedPath: string,
 ): Promise<void> {
 	if (!isClientAlive(state)) return;
-	const normalizedPath = normalizeMapKey(filePath);
 	const uri =
 		state.openDocumentUris?.get(normalizedPath) ?? pathToFileURL(filePath).href;
 
@@ -3905,6 +3915,34 @@ export async function handleNotifyChange(
 		},
 	);
 	if (changeSent) recordSentContent(state, normalizedPath, version, content);
+}
+
+/**
+ * #2113: serialize the read/build/send/record transaction per document. The
+ * content-change payload must be built against the content recorded by the
+ * preceding send for this path; unrelated paths retain parallel sends.
+ */
+export function handleNotifyChange(
+	state: LSPClientState,
+	filePath: string,
+	content: string,
+): Promise<void> {
+	if (!isClientAlive(state)) return Promise.resolve();
+	const normalizedPath = normalizeMapKey(filePath);
+	const previous =
+		state.notifyChangeQueues.get(normalizedPath) ?? Promise.resolve();
+	const queued = previous
+		.catch(() => undefined)
+		.then(() =>
+			handleNotifyChangeOnce(state, filePath, content, normalizedPath),
+		);
+	const settled = queued.finally(() => {
+		if (state.notifyChangeQueues.get(normalizedPath) === settled) {
+			state.notifyChangeQueues.delete(normalizedPath);
+		}
+	});
+	state.notifyChangeQueues.set(normalizedPath, settled);
+	return settled;
 }
 
 /** Close a document through the same lifecycle path exposed by the client. */
@@ -5000,6 +5038,7 @@ export async function createLSPClient(options: {
 		diagnosticsVersion: 0,
 		diagnosticsVersionsByPath: new Map(),
 		documentVersions: new Map(),
+		notifyChangeQueues: new Map(),
 		diagnosticDocVersions: new Map(),
 		documentContentHashes: new Map(),
 		incrementalTextRetainedEntries: 0,

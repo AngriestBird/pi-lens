@@ -124,6 +124,7 @@ function notePsDecision(
 		cause: verdict.available ? "ok" : verdict.cause,
 		elapsedMs: verdict.elapsedMs,
 		latched: verdict.available || isLatchingOutcome(verdict.outcome),
+		classifiedBy: "probe",
 		hostStallMs: verdict.hostStallMs,
 		...(retryAfterMs !== undefined && { retryAfterMs }),
 		budgetMs: PS_TIMEOUT_MS,

@@ -27,7 +27,10 @@ import {
 	shouldEmitMemorySampleAdaptive,
 	toMemoryProcessUsage,
 } from "../../clients/memory-sampler.js";
-import { getReviewGraphWorkspaceCacheSnapshot } from "../../clients/review-graph/builder.js";
+import {
+	estimateReviewGraphStoreBytes,
+	getReviewGraphWorkspaceCacheSnapshot,
+} from "../../clients/review-graph/builder.js";
 import { getDispatchCascadeCacheStats } from "../../clients/dispatch/integration.js";
 import type { WordIndex } from "../../clients/word-index.js";
 import {
@@ -187,6 +190,12 @@ function fakeMem(
 }
 
 describe("collectMemorySampleSubsystems (O(1)/O(bounded-cache-size) live reads)", () => {
+	it("estimates graph store bytes from counts without walking graph contents", () => {
+		// Independent oracle from the reviewer’s isolated-store measurement:
+		// 450.5 bytes per node and 243 bytes per edge.
+		expect(estimateReviewGraphStoreBytes(2, 3)).toBe(1630);
+	});
+
 	it("wordIndex is null when none is supplied (no word index built yet this session)", () => {
 		const subsystems = collectMemorySampleSubsystems(null);
 		expect(subsystems.wordIndex).toBeNull();
@@ -236,7 +245,10 @@ describe("collectMemorySampleSubsystems (O(1)/O(bounded-cache-size) live reads)"
 		expect(subsystems.reviewGraph).toEqual(
 			getReviewGraphWorkspaceCacheSnapshot(),
 		);
-		expect(subsystems.dispatchCaches).toEqual(getDispatchCascadeCacheStats());
+		expect(subsystems.dispatchCaches).toEqual({
+			...getDispatchCascadeCacheStats(),
+			estimatedBytes: 0,
+		});
 	});
 
 	it("every numeric field is non-negative and finite (plausibility, not exact values)", () => {
@@ -247,9 +259,21 @@ describe("collectMemorySampleSubsystems (O(1)/O(bounded-cache-size) live reads)"
 		expect(subsystems.reviewGraph.cacheEntries).toBeGreaterThanOrEqual(0);
 		expect(subsystems.reviewGraph.totalNodes).toBeGreaterThanOrEqual(0);
 		expect(subsystems.reviewGraph.totalEdges).toBeGreaterThanOrEqual(0);
+		expect(subsystems.reviewGraph.residentBytes).toBeGreaterThanOrEqual(0);
 		expect(
 			subsystems.dispatchCaches.recentlyCleanNeighborCacheSize,
 		).toBeGreaterThanOrEqual(0);
+		expect(subsystems.dispatchCaches.estimatedBytes).toBeGreaterThanOrEqual(0);
+		// Registry sweep: every non-null subsystem must expose a byte field, so
+		// adding a count-only subsystem cannot silently recur (#2114, #2132
+		// criterion 3).
+		for (const [name, subsystem] of Object.entries(subsystems)) {
+			if (subsystem === null) continue;
+			expect(
+				Object.keys(subsystem).some((key) => /Bytes$/.test(key)),
+				`${name} must expose a byte-denominated field`,
+			).toBe(true);
+		}
 		if (subsystems.treeSitter) {
 			expect(subsystems.treeSitter.languagesLoaded).toBeGreaterThanOrEqual(0);
 			expect(subsystems.treeSitter.treeCacheTotalBytes).toBeGreaterThanOrEqual(
