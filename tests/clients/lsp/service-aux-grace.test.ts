@@ -157,22 +157,29 @@ function makeClient(
 			close: vi.fn(async () => {}),
 		},
 		waitForDiagnostics: vi.fn(
-			(filePath: string) =>
+			(filePath: string, timeoutMs: number) =>
 				new Promise<void>((resolve) =>
-					setTimeout(() => {
-						waitSettled = true;
-						// A genuine publish is what advances the version on a real
-						// client; a settle with NOTHING published must not, or the
-						// evidence-based outcome check below can't tell the two apart.
-						// #1493: an empty publish is still a publish — opt into it with
-						// `publishesWhenClean` to model a scanner that ran and found
-						// nothing.
-						if (diags.length > 0 || options.publishesWhenClean) {
-							version += 1;
-							stampsByPath.set(filePath, version);
-						}
-						resolve();
-					}, delayMs),
+					setTimeout(
+						() => {
+							const fitWithinBudget = delayMs <= timeoutMs;
+							if (fitWithinBudget) waitSettled = true;
+							// A genuine publish is what advances the version on a real
+							// client; a settle with NOTHING published must not, or the
+							// evidence-based outcome check below can't tell the two apart.
+							// #1493: an empty publish is still a publish — opt into it with
+							// `publishesWhenClean` to model a scanner that ran and found
+							// nothing.
+							if (
+								fitWithinBudget &&
+								(diags.length > 0 || options.publishesWhenClean)
+							) {
+								version += 1;
+								stampsByPath.set(filePath, version);
+							}
+							resolve();
+						},
+						Math.min(delayMs, timeoutMs),
+					),
 				),
 		),
 	};
@@ -478,17 +485,16 @@ describe("R8 — aux grace: touchFile with-auxiliary path", () => {
 				makePrimaryServer("ts-primary"),
 				auxServer,
 			]);
+			const auxClient = makeClient(2500, [makeDiagnostic("cold aux finding")], {
+				serverId: "typos",
+			});
 			createLSPClient
 				.mockResolvedValueOnce(
 					makeClient(100, [makeDiagnostic("primary-only sentinel")], {
 						serverId: "ts-primary",
 					}),
 				)
-				.mockResolvedValueOnce(
-					makeClient(2500, [makeDiagnostic("cold aux finding")], {
-						serverId: "typos",
-					}),
-				);
+				.mockResolvedValueOnce(auxClient);
 
 			const touch = service.touchFile(FILE, "cold-adaptive", {
 				clientScope: "with-auxiliary",
@@ -498,6 +504,11 @@ describe("R8 — aux grace: touchFile with-auxiliary path", () => {
 			});
 			await vi.advanceTimersByTimeAsync(observedMs + 2600);
 			const result = await touch;
+			expect(auxClient.waitForDiagnostics).toHaveBeenCalledWith(
+				FILE,
+				expectedFinding ? 3000 : 1500,
+				expect.objectContaining({ minVersion: 0 }),
+			);
 			expect(result?.diags.map((diagnostic) => diagnostic.message)).toContain(
 				expectedFinding ? "cold aux finding" : "primary-only sentinel",
 			);
