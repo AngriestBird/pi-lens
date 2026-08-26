@@ -1901,7 +1901,10 @@ function serializeWordIndexFull(index: WordIndex): SerializedWordIndexCache {
 			);
 		}
 	}
-	_lastSerializeWork = { affectedTokenCount: postings.length, tookFullPath: true };
+	_lastSerializeWork = {
+		affectedTokenCount: postings.length,
+		tookFullPath: true,
+	};
 	return { serialized, slotByFileId, tokensByFile };
 }
 

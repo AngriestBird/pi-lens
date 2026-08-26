@@ -66,22 +66,30 @@ describe("incremental word-index persist occupancy (#2068)", () => {
 			);
 			expect(work).toHaveLength(3);
 			expect(fullWork).toBeDefined();
-			const fullTokenCount = fullWork!.affectedTokenCount;
-			// dirty=1 and dirty=75 stay under the >50%-dirty crossover (#2068),
-			// so they must take the bounded incremental path and touch a
-			// minority of the corpus's tokens, never the whole corpus.
+			// This fixture is fixed (same 750 docs, same 200 shared tokens,
+			// same dirty sets every run), so the token counts below are a
+			// proven invariant, not a loose bound: identical across 40 local
+			// runs under synthetic load and on CI Linux. Pin the exact values
+			// instead of a `< 0.5x` tolerance — a tolerance still passes on a
+			// broken counter that under-reports (e.g. stuck at 0), only the
+			// exact count catches under-count, over-count, and staleness
+			// together.
+			expect(fullWork!.affectedTokenCount).toBe(1692);
+			// dirty=1 and dirty=75 fall under word-index.ts's crossover check
+			// (`dirty.size * 2 > files.length`, a FILE-count test, not a
+			// token-count one), so they take the bounded incremental path and
+			// touch a minority of the corpus's tokens.
 			expect(work[0].tookFullPath).toBe(false);
 			expect(work[1].tookFullPath).toBe(false);
-			expect(work[0].affectedTokenCount).toBeLessThan(fullTokenCount * 0.5);
-			expect(work[1].affectedTokenCount).toBeLessThan(fullTokenCount * 0.5);
-			// More dirty files touch at least as many tokens, never fewer.
-			expect(work[1].affectedTokenCount).toBeGreaterThanOrEqual(
-				work[0].affectedTokenCount,
-			);
-			// dirty=750 crosses the crossover threshold and deliberately falls
-			// back to a full rebuild (#2068's documented heuristic) —
-			// expected, not a regression signal.
+			expect(work[0].affectedTokenCount).toBe(395);
+			expect(work[1].affectedTokenCount).toBe(543);
+			// dirty=750 crosses that file-count threshold (750 dirty files is
+			// more than half of 750) and deliberately falls back to a full
+			// rebuild (#2068's documented heuristic) — expected, not a
+			// regression signal — so it touches every token, same as the
+			// initial full build above.
 			expect(work[2].tookFullPath).toBe(true);
+			expect(work[2].affectedTokenCount).toBe(1692);
 		},
 	);
 
