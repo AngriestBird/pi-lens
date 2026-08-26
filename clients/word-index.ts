@@ -32,6 +32,8 @@ import {
 import { getWordIndexMaxFilesDerived } from "./project-scale.js";
 import {
 	compactPostingsIntoArena,
+	compactPostingsIntoArenaCooperatively,
+	countPostingBackingStores,
 	countPostingEntries,
 	estimateWordIndexStoreBytes,
 	WordForwardEntry,
@@ -386,6 +388,63 @@ function compactWordIndexPostings(index: WordIndex): void {
 	compactPostingsIntoArena(index.postings);
 }
 
+const WORD_INDEX_RECOMPACT_STORE_THRESHOLD = 64;
+const pendingArenaRecompactions = new Map<WordIndex, Promise<void>>();
+
+async function recompactWordIndexPostingsIfNeeded(
+	index: WordIndex,
+	root: string,
+): Promise<void> {
+	const beforeStores = countPostingBackingStores(index.postings);
+	if (beforeStores <= WORD_INDEX_RECOMPACT_STORE_THRESHOLD) return;
+	const beforeBytes = estimateWordIndexResidentBytes(index);
+	await compactPostingsIntoArenaCooperatively(index.postings);
+	const afterStores = countPostingBackingStores(index.postings);
+	const afterBytes = estimateWordIndexResidentBytes(index);
+	const firstForRoot = incrementDegradationCount({
+		kind: "word-index-arena-recompact",
+		subject: path.resolve(root),
+		reason: `arena store threshold ${WORD_INDEX_RECOMPACT_STORE_THRESHOLD} exceeded`,
+		metadata: { beforeBytes, afterBytes, beforeStores, afterStores },
+	});
+	// Keep the detailed record bounded per root. The ledger still counts every
+	// repeated recompaction and emits its own power-of-two summaries.
+	if (firstForRoot) {
+		logWordIndex({
+			phase: "incremental_refresh",
+			cwd: path.resolve(root),
+			trigger: "incremental_refresh",
+			reason: `arena_recompact beforeBytes=${beforeBytes} afterBytes=${afterBytes} beforeStores=${beforeStores} afterStores=${afterStores}`,
+		});
+	}
+}
+
+function scheduleWordIndexRecompact(index: WordIndex, filePath: string): void {
+	if (
+		countPostingBackingStores(index.postings) <=
+			WORD_INDEX_RECOMPACT_STORE_THRESHOLD ||
+		pendingArenaRecompactions.has(index)
+	)
+		return;
+	const work = new Promise<void>((resolve) => setImmediate(resolve)).then(() =>
+		recompactWordIndexPostingsIfNeeded(index, path.dirname(filePath)),
+	);
+	pendingArenaRecompactions.set(index, work);
+	const clearPending = (): void => {
+		if (pendingArenaRecompactions.get(index) === work) {
+			pendingArenaRecompactions.delete(index);
+		}
+	};
+	void work.then(clearPending, clearPending);
+}
+
+/** Test hook: settle deferred incremental arena recompaction. */
+export async function flushWordIndexRecompactionsForTests(): Promise<void> {
+	await Promise.all(
+		[...pendingArenaRecompactions.values()].map((work) => work),
+	);
+}
+
 function recordWordIndexReplacement(index: WordIndex, startedAt: number): void {
 	const stats = index.replacementStats ?? { count: 0, totalMs: 0, maxMs: 0 };
 	const durationMs = Math.max(0, Date.now() - startedAt);
@@ -652,6 +711,7 @@ export function updateWordIndexDocument(
 		docLength,
 		startedAt,
 	);
+	scheduleWordIndexRecompact(index, doc.path);
 	return true;
 }
 
@@ -1257,6 +1317,7 @@ export async function refreshWordIndexIncrementally(
 		}
 	}
 	timings.refreshReadsMs = Date.now() - refreshReadsStartMs;
+	await recompactWordIndexPostingsIfNeeded(index, root);
 	index.truncated = walked.length === maxFiles;
 	return {
 		mode: "incremental",

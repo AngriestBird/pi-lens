@@ -2,21 +2,25 @@ import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	buildWordIndex,
+	collectWordIndexDocs,
 	buildWordIndexQueryFilter,
 	centralityFromReverseDeps,
 	deserializeWordIndex,
 	getWordIndexBuildStatus,
 	parseWordIndexQuery,
+	flushWordIndexRecompactionsForTests,
 	searchWordIndex,
 	serializeWordIndex,
 	splitIdentifier,
 	tokenizeLine,
+	updateWordIndexDocument,
 	WORD_INDEX_FORMAT_VERSION,
 	WordIndexQueryError,
 	wordIndexKey,
 	_resetWordIndexBuildGuardForTests,
 	triggerBackgroundWordIndexBuild,
 } from "../../clients/word-index.js";
+import { countPostingBackingStores } from "../../clients/word-index-store.js";
 import { KIND_EXTENSIONS } from "../../clients/file-kinds.js";
 import { loadProjectSnapshot } from "../../clients/project-snapshot.js";
 import { createTempFile, setupTestEnvironment } from "./test-utils.js";
@@ -801,4 +805,36 @@ describe("triggerBackgroundWordIndexBuild (#348 cold-query stampede guard)", () 
 			env.cleanup();
 		}
 	}, 10_000);
+
+	it("recompacts the arena after full-corpus incremental churn (#2117)", async () => {
+		const env = setupTestEnvironment("pi-lens-wordindex-recompact-");
+		try {
+			for (let file = 0; file < 100; file += 1) {
+				createTempFile(
+					env.tmpDir,
+					`src/f${file}.ts`,
+					`sharedToken stableToken${file}`,
+				);
+			}
+			const docs = await collectWordIndexDocs(env.tmpDir);
+			const index = buildWordIndex(docs);
+			for (let file = 0; file < 100; file += 1) {
+				createTempFile(
+					env.tmpDir,
+					`src/f${file}.ts`,
+					`sharedToken changedToken${file} revision`,
+				);
+			}
+			for (let file = 0; file < 100; file += 1) {
+				updateWordIndexDocument(index, {
+					path: path.join(env.tmpDir, "src", `f${file}.ts`),
+					content: `sharedToken changedToken${file} revision`,
+				});
+			}
+			await flushWordIndexRecompactionsForTests();
+			expect(countPostingBackingStores(index.postings)).toBe(1);
+		} finally {
+			env.cleanup();
+		}
+	});
 });

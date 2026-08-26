@@ -999,6 +999,14 @@ unawaited concurrent cascades must not yield across a wholesale posting snapshot
 Cooperative async variants are serialized per index and remain for bulk refresh.
 When touching this seam, keep posting-entry counts and replacement-cost scalars
 in word-index telemetry. #2069 intentionally builds on this prerequisite.
+Incremental replacement churn schedules arena recompaction after 64 distinct
+posting backing stores. The copy yields on the cooperative 8 ms budget, and
+the `word-index-arena-recompact` ledger entry gates one detailed
+`incremental_refresh` record per root with `reason: arena_recompact`,
+before/after bytes, and store counts.
+`estimateWordIndexStoreBytes` charges each distinct backing store once, so its
+resident-byte value includes abandoned arena slack and remains a floor for
+unrepresented object overhead. (#2117)
 The reproducible synchronous replacement profile is
 `npm run build && npm run bench:word-index-replacement`; it reports latency
 percentiles and inspector samples attributed to `normalizeEphemeralMapKey`.

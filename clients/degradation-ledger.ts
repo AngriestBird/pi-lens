@@ -420,7 +420,9 @@ export type DegradationKind =
 	 * is the orphaned id, so aggregation still answers WHICH id leaked after
 	 * the per-kind entry bound is reached.
 	 */
-	| "word-index-orphan-file-id";
+	| "word-index-orphan-file-id"
+	/** Incremental word-index churn required an arena re-compaction. */
+	| "word-index-arena-recompact";
 
 export interface DegradationRecord {
 	kind: unknown;

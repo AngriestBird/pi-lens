@@ -1,3 +1,5 @@
+import { createDeadline, yieldIfOverBudget } from "./cooperative-budget.js";
+
 /**
  * Packed backing store for the word index's inverted postings (#2069).
  *
@@ -222,9 +224,10 @@ export function estimatePostingListBytes(list: WordPostingList): number {
  *
  * A later per-edit `push` that outgrows a list allocates a fresh private array
  * for that token and stops referring to the arena. The vacated slice is not
- * reclaimed while any sibling still points into the arena, so churn
- * re-fragments what a build compacted, and only a full rebuild or a
- * `deserializeWordIndex` re-compacts it.
+ * reclaimed while any sibling still points into the arena, so incremental
+ * churn can re-fragment what a build compacted. `refreshWordIndexIncrementally`
+ * recompacts after a bounded store-count threshold, using the cooperative
+ * variant below so a refresh does not monopolize the event loop.
  *
  * Measured on this repository's own tree, 2,699 documents and 2,272,686
  * postings: a fresh build is 32.8 MB in ONE backing store; one full-corpus
@@ -243,6 +246,27 @@ export function compactPostingsIntoArena(
 	const arena = new Int32Array(lanes);
 	let offset = 0;
 	for (const list of postings.values()) offset = list.adoptArena(arena, offset);
+}
+
+/**
+ * Cooperative counterpart for incremental refresh. It always completes, but
+ * yields every work budget while copying the lists. Each adopted list remains
+ * valid during the transition, so readers never observe a partially written
+ * list even though the arena is adopted one list at a time.
+ */
+export async function compactPostingsIntoArenaCooperatively(
+	postings: Map<string, WordPostingList>,
+): Promise<void> {
+	let lanes = 0;
+	for (const list of postings.values()) lanes += list.length * 2;
+	if (lanes === 0) return;
+	const arena = new Int32Array(lanes);
+	let offset = 0;
+	const deadline = createDeadline(8);
+	for (const list of postings.values()) {
+		offset = list.adoptArena(arena, offset);
+		if (deadline.expired()) await yieldIfOverBudget(deadline);
+	}
 }
 
 /**
@@ -285,14 +309,18 @@ export function countPostingEntries(store: WordIndexStore): number {
  *
  * It deliberately excludes the token strings, the path-keyed metadata maps, and
  * the `Map` spines, which together measured 2.5 MB against 63 MB of packed
- * store on this repository's own corpus. The figure is a floor on the index's
- * cost, reported so a heap census can be reconciled against the log.
+ * store on this repository's own corpus. Distinct backing stores are charged
+ * once, including abandoned arena slack. The figure remains a floor on the
+ * index's cost because object and map overhead stay unrepresented.
  */
 export function estimateWordIndexStoreBytes(store: WordIndexStore): number {
 	let bytes = 0;
+	const backingStores = new Set<Int32Array>();
 	for (const list of store.postings.values()) {
-		bytes += estimatePostingListBytes(list);
+		backingStores.add(list.backingStore);
+		bytes += WORD_POSTING_LIST_OVERHEAD_BYTES;
 	}
+	for (const backingStore of backingStores) bytes += backingStore.byteLength;
 	for (const entry of store.forward?.values() ?? []) {
 		bytes += entry.estimatedBytes;
 	}
