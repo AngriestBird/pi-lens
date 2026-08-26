@@ -583,6 +583,30 @@ export interface ReviewGraphWorkspaceCacheSnapshot {
 	totalNodes: number;
 	/** Sum of `graph.edges.length` across every resident entry. */
 	totalEdges: number;
+	/** Estimated bytes retained by the graph stores, using bounded counters. */
+	residentBytes: number;
+}
+
+/**
+ * Conservative heap-floor coefficients for the graph's current object shape.
+ * These are deliberately estimates, not V8 internals: the graph stores four
+ * strings and optional metadata on edges, while each edge index retains one
+ * reference per edge. They keep the sampler O(cache entries).
+ */
+export const REVIEW_GRAPH_NODE_ESTIMATE_BYTES = 200;
+export const REVIEW_GRAPH_EDGE_ESTIMATE_BYTES = 150;
+export const REVIEW_GRAPH_EDGE_INDEX_REFERENCE_BYTES = 8;
+
+export function estimateReviewGraphStoreBytes(
+	totalNodes: number,
+	totalEdges: number,
+): number {
+	return (
+		totalNodes * REVIEW_GRAPH_NODE_ESTIMATE_BYTES +
+		totalEdges *
+			(REVIEW_GRAPH_EDGE_ESTIMATE_BYTES +
+				2 * REVIEW_GRAPH_EDGE_INDEX_REFERENCE_BYTES)
+	);
 }
 
 /**
@@ -603,6 +627,7 @@ export function getReviewGraphWorkspaceCacheSnapshot(): ReviewGraphWorkspaceCach
 		cacheEntries: _workspaceGraphCache.size,
 		totalNodes,
 		totalEdges,
+		residentBytes: estimateReviewGraphStoreBytes(totalNodes, totalEdges),
 	};
 }
 

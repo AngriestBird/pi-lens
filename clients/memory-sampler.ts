@@ -164,6 +164,7 @@ export interface MemorySampleSubsystems {
 		cacheEntries: number;
 		totalNodes: number;
 		totalEdges: number;
+		residentBytes: number;
 	};
 	/** `null` when no word index has been built yet this session. */
 	wordIndex: {
@@ -194,6 +195,7 @@ export interface MemorySampleSubsystems {
 	} | null;
 	dispatchCaches: {
 		recentlyCleanNeighborCacheSize: number;
+		estimatedBytes: number;
 	};
 }
 
@@ -275,7 +277,12 @@ export function collectMemorySampleSubsystems(
 				}
 			: null,
 		treeSitter,
-		dispatchCaches,
+		dispatchCaches: {
+			...dispatchCaches,
+			// Cache values are bounded and intentionally opaque; this fixed entry
+			// charge makes the count comparable without walking their contents.
+			estimatedBytes: dispatchCaches.recentlyCleanNeighborCacheSize * 128,
+		},
 	};
 }
 
