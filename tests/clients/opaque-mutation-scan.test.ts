@@ -23,6 +23,20 @@ vi.mock("../../clients/pipeline.js", () => ({
 	}),
 }));
 
+// #2081: wraps the real implementation by default (every other test in this
+// file exercises the genuine scan), but lets one test below override a single
+// call to pin the opaque_mutation_status_pair_unknown emission without
+// fabricating a real, undocumented git porcelain pair.
+vi.mock("../../clients/opaque-mutation-scan.js", async (importOriginal) => {
+	const actual = await importOriginal<
+		typeof import("../../clients/opaque-mutation-scan.js")
+	>();
+	return {
+		...actual,
+		recoverOpaqueChangesViaGit: vi.fn(actual.recoverOpaqueChangesViaGit),
+	};
+});
+
 import { handleToolCall } from "../../clients/runtime-tool-call.js";
 import {
 	handleToolResult,
@@ -281,6 +295,42 @@ describe("recoverOpaqueChangesViaGit (real git repo)", () => {
 			expect(outcome.paths).not.toContain(normalizeMapKey(imported));
 			expect(outcome.paths).not.toContain(normalizeMapKey(added));
 			expect(outcome.excludedIncomingCount).toBe(2);
+		},
+	);
+
+	// #2081: excludedIncomingCount must count only entries the mtime window
+	// would otherwise have dispatched. A clean-index entry that predates the
+	// window (a long-lived staged change untouched by this integration) was
+	// never going to be reported, so dropping it is not suppression and must
+	// not inflate the count.
+	it(
+		"does not count a clean incoming path outside the mtime window as excluded",
+		{ timeout: 20_000 },
+		async () => {
+			const imported = path.join(repoDir, "src", "imported.ts");
+			const conflict = path.join(repoDir, "src", "base.ts");
+			execSync("git checkout -qb incoming", { cwd: repoDir });
+			fs.writeFileSync(imported, "imported\n", "utf8");
+			fs.writeFileSync(conflict, "incoming\n", "utf8");
+			execSync("git add -A && git commit -qm incoming", { cwd: repoDir });
+			execSync("git checkout -q master", { cwd: repoDir });
+			fs.writeFileSync(conflict, "local\n", "utf8");
+			execSync("git add -A && git commit -qm local", { cwd: repoDir });
+
+			const startedAt = Date.now();
+			expect(() => execSync("git merge incoming", { cwd: repoDir })).toThrow();
+			// Checkout during the merge stamps a fresh mtime on imported.ts. Push
+			// it back before the window floor to model a long-lived staged change
+			// the merge did not itself write.
+			const old = new Date(startedAt - 10_000);
+			fs.utimesSync(imported, old, old);
+
+			const outcome = await recoverOpaqueChangesViaGit(repoDir, startedAt, {
+				excludeIndexOnlyWhenUnmerged: true,
+			});
+			expect(outcome.verdict).toBe("recovered");
+			expect(outcome.paths).not.toContain(normalizeMapKey(imported));
+			expect(outcome.excludedIncomingCount).toBeUndefined();
 		},
 	);
 
@@ -900,6 +950,57 @@ describe("failed Git integration recovery dispatch", () => {
 				);
 				expect(record, appended.join("\n")).toBeDefined();
 				expect(record).toContain("excluded:2");
+			} finally {
+				if (previousTestMode === undefined)
+					delete process.env.PI_LENS_TEST_MODE;
+				else process.env.PI_LENS_TEST_MODE = previousTestMode;
+			}
+		},
+	);
+
+	// #2081: the excluded-count record above proves one of the two new latency
+	// records fires; this pins the other. A real, undocumented-but-well-formed
+	// porcelain pair is not reproducible through real git, so this overrides
+	// one call of the scan seam directly - the assertion is still on the
+	// production callsite (clients/runtime-tool-result.ts) and its logLatency
+	// call, so renaming the phase string reds this exactly as it reds the
+	// excluded-count test above.
+	it(
+		"records how many status pairs were kept as unknown",
+		{ timeout: 30_000 },
+		async () => {
+			const previousTestMode = process.env.PI_LENS_TEST_MODE;
+			process.env.PI_LENS_TEST_MODE = "0";
+			try {
+				vi.mocked(recoverOpaqueChangesViaGit).mockResolvedValueOnce({
+					verdict: "recovered",
+					paths: [],
+					scannedCount: 0,
+					unknownStatusCount: 2,
+				});
+
+				const runtime = integrationRuntime("failed-integration-unknown-pair");
+				const command = "git merge incoming";
+				const latencyPath = path.join(getGlobalPiLensDir(), "latency.log");
+				const beforeLines = new Set(
+					fs.existsSync(latencyPath)
+						? fs.readFileSync(latencyPath, "utf8").split("\n")
+						: [],
+				);
+
+				await handleToolCall(callDepsFor(runtime, command));
+				await handleToolResult(resultDepsFor(runtime, command));
+				await flushLatencyLog();
+
+				const appended = fs
+					.readFileSync(latencyPath, "utf8")
+					.split("\n")
+					.filter((l) => l.trim() && !beforeLines.has(l));
+				const record = appended.find((l) =>
+					l.includes("opaque_mutation_status_pair_unknown"),
+				);
+				expect(record, appended.join("\n")).toBeDefined();
+				expect(record).toContain("kept:2");
 			} finally {
 				if (previousTestMode === undefined)
 					delete process.env.PI_LENS_TEST_MODE;

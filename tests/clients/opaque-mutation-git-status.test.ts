@@ -1,3 +1,7 @@
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const safeSpawnAsync = vi.hoisted(() => vi.fn());
@@ -175,24 +179,39 @@ describe("opaque Git status parsing", () => {
 
 	// #2060: an undocumented pair is never classified as incoming, so widening
 	// the table can only ever ADD exclusions, never remove capture by surprise.
+	//
+	// #2081: excludedIncomingCount only counts entries that pass the
+	// mtime-freshness window (would otherwise have been dispatched), so this
+	// case needs a real, freshly-written file at `path-2.ts` — a mocked path
+	// that never existed on disk would fail the window check for the wrong
+	// reason and silently pass regardless of the count's correctness.
 	it("never treats an undocumented pair as clean incoming content", async () => {
-		safeSpawnAsync.mockResolvedValue({
-			status: 0,
-			stdout: porcelainOutput(["UU", "U ", "A "]),
-		});
+		const root = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-opaque-status-"),
+		);
+		try {
+			const startedAt = Date.now();
+			fs.writeFileSync(path.join(root, "path-2.ts"), "staged\n", "utf8");
+			safeSpawnAsync.mockResolvedValue({
+				status: 0,
+				stdout: porcelainOutput(["UU", "U ", "A "]),
+			});
 
-		await expect(
-			recoverOpaqueChangesViaGit("/repo", Date.now(), {
-				excludeIndexOnlyWhenUnmerged: true,
-			}),
-		).resolves.toEqual({
-			verdict: "recovered",
-			paths: [],
-			scannedCount: 0,
-			// Only `A ` is dropped. `U ` is undocumented, so it keeps its path.
-			excludedIncomingCount: 1,
-			unknownStatusCount: 1,
-		});
+			await expect(
+				recoverOpaqueChangesViaGit(root, startedAt, {
+					excludeIndexOnlyWhenUnmerged: true,
+				}),
+			).resolves.toEqual({
+				verdict: "recovered",
+				paths: [],
+				scannedCount: 0,
+				// Only `A ` is dropped. `U ` is undocumented, so it keeps its path.
+				excludedIncomingCount: 1,
+				unknownStatusCount: 1,
+			});
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
 	});
 
 	it("returns an explicit unknown verdict for unterminated porcelain output", async () => {
