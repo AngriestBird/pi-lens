@@ -22,6 +22,17 @@ describe("Git contamination guard", () => {
 		expect(() => assertCleanGitConfig(config)).toThrow(/local user identity/);
 	});
 
+	it("fails on a subsection identity, not only the bare user section", () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-git-guard-"));
+		scratch.push(dir);
+		const config = path.join(dir, "config");
+		fs.writeFileSync(
+			config,
+			'[user "fixture"]\n\temail = fixture@example.com\n',
+		);
+		expect(() => assertCleanGitConfig(config)).toThrow(/local user identity/);
+	});
+
 	it("accepts a clean non-bare config", () => {
 		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-git-guard-"));
 		scratch.push(dir);

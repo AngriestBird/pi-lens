@@ -3,7 +3,9 @@ import * as path from "node:path";
 import { describe, expect, it } from "vitest";
 
 const directGitSpawn =
-	/\b(?:execSync|execFileSync|spawnSync|spawn|execFile|safeSpawnAsync)\s*\(\s*["'`]git\b/g;
+	/\b(execSync|execFileSync|spawnSync|spawn|execFile|safeSpawnAsync)\s*\(\s*["'`]git\b/g;
+const helperImport =
+	/import\s*{([^}]+)}\s*from\s*["'`][^"'`]*git-fixture-env/gs;
 
 const GIT_FIXTURE_VERDICTS = [
 	{
@@ -19,11 +21,16 @@ export function findGitSpawnOffenders(
 	return files
 		.filter(({ file, source }) => {
 			directGitSpawn.lastIndex = 0;
-			return (
-				!file.endsWith("git-fixture-governance.test.ts") &&
-				directGitSpawn.test(source) &&
-				!source.includes("git-fixture-env")
-			);
+			if (file.endsWith("git-fixture-governance.test.ts")) return false;
+			const imported = new Set<string>();
+			for (const match of source.matchAll(helperImport)) {
+				for (const item of match[1].split(","))
+					imported.add(item.trim().split(/\s+as\s+/)[0] ?? "");
+			}
+			for (const match of source.matchAll(directGitSpawn)) {
+				if (!imported.has(match[1])) return true;
+			}
+			return false;
 		})
 		.map(({ file }) => file);
 }
@@ -62,6 +69,34 @@ describe("real Git fixture governance", () => {
 				},
 			]),
 		).toEqual(["synthetic.test.ts"]);
+	});
+
+	it("rejects a helper mention that does not import or call the helper", () => {
+		expect(
+			findGitSpawnOffenders([
+				{
+					file: "synthetic.test.ts",
+					source: '// git-fixture-env\nexecFileSync("git", ["status"])',
+				},
+			]),
+		).toEqual(["synthetic.test.ts"]);
+	});
+
+	it("rejects a direct call when a different helper symbol is imported", () => {
+		expect(
+			findGitSpawnOffenders([
+				{
+					file: "synthetic.test.ts",
+					source:
+						'import { gitExecSync } from "./git-fixture-env.js";\nexecFileSync("git", [])',
+				},
+			]),
+		).toEqual(["synthetic.test.ts"]);
+	});
+
+	it("scans a non-empty source population", () => {
+		const files = testFiles(path.resolve(__dirname, ".."));
+		expect(files.length).toBeGreaterThanOrEqual(1);
 	});
 
 	it("records the confirmed per-file fixture verdicts", () => {

@@ -19,7 +19,7 @@ export function assertCleanGitConfig(configPath: string): void {
 	for (const line of text.split(/\r?\n/)) {
 		const header = /^\s*\[([^\]]+)\]/.exec(line);
 		if (header) {
-			section = header[1].trim().toLowerCase();
+			section = header[1].trim().toLowerCase().split(/\s+/)[0] ?? "";
 			continue;
 		}
 		if (section === "user" && /^\s*(?:name|email)\s*=/.test(line))

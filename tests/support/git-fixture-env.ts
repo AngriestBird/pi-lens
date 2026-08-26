@@ -125,7 +125,7 @@ export function gitFixtureSpawnAsync(
 		safeSpawnAsync("git", args, {
 			...options,
 			cwd: options.cwd ?? fixtureDir,
-			env: gitFixtureEnv(fixtureDir),
+			env: gitFixtureEnvWithOverrides(fixtureDir, options.env),
 		}),
 	);
 }
