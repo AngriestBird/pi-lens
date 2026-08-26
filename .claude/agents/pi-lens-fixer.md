@@ -39,7 +39,10 @@ instructions say so.
 4. Tests are red-first: write them, prove them red on pre-fix code
    (diff > patch / checkout / apply — never stash), keep the output, then fix
    to green. `npm run build` before every test run.
-   COMMIT LOCALLY BEFORE any checkout-based proof: `git checkout --` restores
+   COMMIT LOCALLY BEFORE any checkout-based proof — commit your TESTS AND FIX
+   first, then produce the red by reverting only the SOURCE under proof (via
+   the saved patch or `git checkout <pre-fix-sha> -- <files>`), never by
+   `git checkout --` against your own uncommitted work: that restores
    committed state, so uncommitted edits are silently destroyed — and when
    master moved under a comparison, the restore can also leave stray files in
    your index. Three agents lost work to this in one night. After any bulk
