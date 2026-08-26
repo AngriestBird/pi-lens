@@ -443,9 +443,9 @@ describe("managed npm executable paths", () => {
 			);
 			fakeAccess(localPath);
 
-			await expect(
-				ensureTool(toolId, { allowInstall: false }),
-			).resolves.toBe(localPath);
+			await expect(ensureTool(toolId, { allowInstall: false })).resolves.toBe(
+				localPath,
+			);
 			expect(
 				spawnCalls.some(
 					({ cmd, args, timeout }) =>

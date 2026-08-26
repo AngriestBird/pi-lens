@@ -1011,7 +1011,10 @@ describe("verification-budget delivery across non-npm strategies", () => {
 		const suffix = isWindows ? ".bat" : "";
 		spawnMock.mockImplementation(async (command: string, args: string[]) => {
 			const argv = args ?? [];
-			if (/tar(\.exe)?$/i.test(command) && argv.some((a) => a.startsWith("-x"))) {
+			if (
+				/tar(\.exe)?$/i.test(command) &&
+				argv.some((a) => a.startsWith("-x"))
+			) {
 				const destIndex = argv.indexOf("-C");
 				const destRel = destIndex >= 0 ? argv[destIndex + 1] : undefined;
 				if (destRel) {
@@ -1117,7 +1120,10 @@ describe("verification-budget delivery across non-npm strategies", () => {
 		await withVerificationTimeout("ktfmt", 45_000, async () => {
 			installManagedBin("ktfmt");
 			freshenAllExcept("ktfmt", {
-				ktfmt: { checkedAt: NOW - 8 * DAY_MS, resolutionId: `${KTFMT_PIN}-old` },
+				ktfmt: {
+					checkedAt: NOW - 8 * DAY_MS,
+					resolutionId: `${KTFMT_PIN}-old`,
+				},
 			});
 			httpsRoutes.push({
 				match: (url) => url.startsWith("https://repo1.maven.org/"),
