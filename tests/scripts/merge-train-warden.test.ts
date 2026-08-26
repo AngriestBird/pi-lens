@@ -16,8 +16,8 @@ import {
 } from "../../scripts/lib/merge-train-lane.mjs";
 import {
 	applyAction,
-	classifyActionFailure,
 	CONFLICT_LABEL,
+	classifyActionFailure,
 	decideActions,
 	fetchOpenPullRequests,
 	MAX_PAGES,
@@ -32,8 +32,12 @@ import {
 	countExecutedSteps,
 	decideRunHealthActions,
 	fetchHeadRunHealth,
+	isCancelledStalledRun,
+	isStalledRun,
 	isStarvedRun,
 	RUN_HEALTH,
+	STALLED_RUN_MINUTES,
+	stalledRunCommentMarker,
 } from "../../scripts/lib/warden-run-health.mjs";
 
 function pr(overrides: Record<string, unknown> = {}) {
@@ -1134,6 +1138,8 @@ describe("run-health recovery actions (#2184)", () => {
 	const starvedHealth = () => ({
 		classification: RUN_HEALTH.STARVED,
 		starvedRuns: [headRun()],
+		stalledRuns: [],
+		cancelledStalledRuns: [],
 		absentWorkflows: [],
 		unknownWorkflows: [],
 		pendingWorkflows: [],
@@ -1173,6 +1179,8 @@ describe("run-health recovery actions (#2184)", () => {
 			{
 				classification: RUN_HEALTH.ABSENT,
 				starvedRuns: [],
+				stalledRuns: [],
+				cancelledStalledRuns: [],
 				absentWorkflows: [".github/workflows/ci.yml"],
 				unknownWorkflows: [],
 				pendingWorkflows: [],
@@ -1196,6 +1204,8 @@ describe("run-health recovery actions (#2184)", () => {
 			{
 				classification: RUN_HEALTH.ABSENT,
 				starvedRuns: [],
+				stalledRuns: [],
+				cancelledStalledRuns: [],
 				absentWorkflows: [".github/workflows/ci.yml"],
 				unknownWorkflows: [],
 				pendingWorkflows: [],
@@ -1219,6 +1229,8 @@ describe("run-health recovery actions (#2184)", () => {
 				{
 					classification: RUN_HEALTH.NORMAL,
 					starvedRuns: [],
+					stalledRuns: [],
+					cancelledStalledRuns: [],
 					absentWorkflows: [],
 					unknownWorkflows: [],
 					pendingWorkflows: [],
@@ -1505,12 +1517,463 @@ describe("warden sweep with run health (#2184)", () => {
 });
 
 // ---------------------------------------------------------------------------
+// #2203: the third degradation signature -- a run stuck `queued`
+// ---------------------------------------------------------------------------
+
+/** A run GitHub queued and never scheduled: no jobs, no steps, no progress. */
+function queuedRun(overrides: Record<string, unknown> = {}) {
+	return headRun({
+		id: 32993037596,
+		status: "queued",
+		conclusion: null,
+		createdAt: "2026-08-26T15:00:00Z", // 90 minutes before NOW
+		jobs: [],
+		...overrides,
+	});
+}
+
+/** A head whose lint.yml is healthy, so only the ci.yml run is under test. */
+function healthyLintRun() {
+	return headRun({
+		id: 999,
+		path: ".github/workflows/lint.yml",
+		conclusion: "success",
+		jobs: executedJobs(),
+	});
+}
+
+type StalledFixture = ReturnType<typeof queuedRun> & {
+	stalledForMinutes?: number;
+};
+
+function stalledHealthOf(
+	runs: StalledFixture[],
+	cancelled: ReturnType<typeof queuedRun>[] = [],
+) {
+	return {
+		classification: RUN_HEALTH.STALLED,
+		starvedRuns: [],
+		stalledRuns: runs,
+		cancelledStalledRuns: cancelled,
+		absentWorkflows: [],
+		unknownWorkflows: [],
+		pendingWorkflows: [],
+		ageMinutes: 90,
+	};
+}
+
+describe("stalled-run detection (#2203)", () => {
+	// The red-first anchor. Before #2203 a queued run classified PENDING
+	// forever, however old, and the sweep printed "runs-in-progress" every
+	// cycle -- which reads as healthy waiting.
+	it("classifies a run queued past the threshold with zero steps as stalled", () => {
+		expect(isStalledRun(queuedRun(), NOW)).toBe(true);
+		const health = classifyHeadRun({
+			runs: [queuedRun(), healthyLintRun()],
+			headCommittedDate: "2026-08-26T15:00:00Z",
+			now: NOW,
+		});
+		expect(health.classification).toBe(RUN_HEALTH.STALLED);
+		expect(
+			health.stalledRuns.map((r: { id: number | string }) => r.id),
+		).toEqual([32993037596]);
+		expect(health.pendingWorkflows).toEqual([]);
+	});
+
+	// Mutation screen for the threshold: delete the age test and every run in
+	// the seconds between dispatch and pickup is "stalled", so the warden
+	// cancels healthy CI on every open PR.
+	it("classifies a freshly queued run as in progress, not stalled", () => {
+		const young = queuedRun({ createdAt: "2026-08-26T16:25:00Z" });
+		expect(isStalledRun(young, NOW)).toBe(false);
+		const health = classifyHeadRun({
+			runs: [young, healthyLintRun()],
+			headCommittedDate: "2026-08-26T16:25:00Z",
+			now: NOW,
+		});
+		expect(health.classification).toBe(RUN_HEALTH.PENDING);
+		expect(health.stalledRuns).toEqual([]);
+	});
+
+	// Mutation screen for the zero-executed-steps guard: a long matrix job is
+	// genuinely in progress no matter how old the run is. Widening the
+	// predicate to "old and not completed" would cancel live CI.
+	it("does NOT call a long-running run with executed steps stalled", () => {
+		const working = queuedRun({
+			status: "in_progress",
+			createdAt: "2026-08-26T10:00:00Z", // six and a half hours old
+			jobs: executedJobs(),
+		});
+		expect(isStalledRun(working, NOW)).toBe(false);
+		const health = classifyHeadRun({
+			runs: [working, healthyLintRun()],
+			headCommittedDate: "2026-08-26T10:00:00Z",
+			now: NOW,
+		});
+		expect(health.classification).toBe(RUN_HEALTH.PENDING);
+	});
+
+	it("treats the threshold as inclusive at exactly the boundary", () => {
+		const atBoundary = queuedRun({ createdAt: "2026-08-26T15:30:00Z" });
+		expect(STALLED_RUN_MINUTES).toBe(60);
+		expect(isStalledRun(atBoundary, NOW)).toBe(true);
+		expect(
+			isStalledRun(queuedRun({ createdAt: "2026-08-26T15:30:30Z" }), NOW),
+		).toBe(false);
+	});
+
+	// Shape 10: "we could not read the jobs" is not evidence of a zombie, and
+	// cancelling on a guess would kill a live run.
+	it("classifies an aged queued run whose jobs are unreadable as unknown", () => {
+		expect(isStalledRun(queuedRun({ jobs: null }), NOW)).toBe(false);
+		const health = classifyHeadRun({
+			runs: [queuedRun({ jobs: null }), healthyLintRun()],
+			headCommittedDate: "2026-08-26T15:00:00Z",
+			now: NOW,
+		});
+		expect(health.classification).toBe(RUN_HEALTH.UNKNOWN);
+		expect(health.unknownWorkflows).toEqual([".github/workflows/ci.yml"]);
+		expect(health.stalledRuns).toEqual([]);
+	});
+
+	// The second rung's input: the run the warden cancelled is completed, but a
+	// cancelled required check is not a passing one and it resolves on its own
+	// never. Before #2203 this classified NORMAL.
+	it("classifies a cancelled zero-step run as stalled, not normal", () => {
+		const cancelled = queuedRun({
+			status: "completed",
+			conclusion: "cancelled",
+			jobs: starvedJobs(),
+		});
+		expect(isCancelledStalledRun(cancelled)).toBe(true);
+		const health = classifyHeadRun({
+			runs: [cancelled, healthyLintRun()],
+			headCommittedDate: "2026-08-26T15:00:00Z",
+			now: NOW,
+		});
+		expect(health.classification).toBe(RUN_HEALTH.STALLED);
+		expect(
+			health.cancelledStalledRuns.map((r: { id: number | string }) => r.id),
+		).toEqual([32993037596]);
+	});
+
+	it("does NOT call a cancelled run that executed steps stalled", () => {
+		expect(
+			isCancelledStalledRun(
+				queuedRun({
+					status: "completed",
+					conclusion: "cancelled",
+					jobs: executedJobs(),
+				}),
+			),
+		).toBe(false);
+	});
+
+	it("reads jobs for an aged in-flight run, and never for a young one", async () => {
+		const routes = (createdAt: string) => ({
+			"GET /repos/acme/repo/actions/runs": runsRoute([
+				{
+					id: 1,
+					path: ".github/workflows/ci.yml",
+					status: "queued",
+					conclusion: null,
+					run_attempt: 1,
+					created_at: createdAt,
+				},
+			]),
+			"GET /repos/acme/repo/actions/runs/1/jobs": { jobs: [] },
+		});
+		const aged = fakeGithub(routes("2026-08-26T15:00:00Z"));
+		const agedHealth = await fetchHeadRunHealth(
+			aged.fetcher,
+			"acme",
+			"repo",
+			"8e32f127",
+			"2026-08-26T15:00:00Z",
+			NOW,
+		);
+		expect(agedHealth.health.classification).toBe(RUN_HEALTH.STALLED);
+		expect(aged.calls.filter((c) => c.url.includes("/jobs"))).toHaveLength(1);
+
+		const young = fakeGithub(routes("2026-08-26T16:25:00Z"));
+		await fetchHeadRunHealth(
+			young.fetcher,
+			"acme",
+			"repo",
+			"8e32f127",
+			"2026-08-26T16:25:00Z",
+			NOW,
+		);
+		expect(young.calls.filter((c) => c.url.includes("/jobs"))).toHaveLength(0);
+	});
+});
+
+describe("stalled-run recovery ladder (#2203)", () => {
+	it("announces the stuck run first, and cancels nothing in that cycle", () => {
+		const actions = decideRunHealthActions(
+			pr(),
+			stalledHealthOf([{ ...queuedRun(), stalledForMinutes: 90 }]),
+			{ stalledRunMarkers: new Set<string>() },
+		);
+		expect(actions).toEqual([
+			{
+				type: "comment",
+				body: expect.stringContaining(stalledRunCommentMarker(32993037596)),
+			},
+		]);
+		expect((actions[0] as { body: string }).body).toContain("32993037596");
+		expect((actions[0] as { body: string }).body).toContain("90 minutes");
+		expect(actions.some((a) => a.type === "cancel-run")).toBe(false);
+	});
+
+	// Mutation screen for the comment dedupe: without it the ladder reposts the
+	// notice every 10 minutes and never advances to the cancel.
+	it("cancels the stuck run once its marker exists, without repeating the comment", () => {
+		const actions = decideRunHealthActions(
+			pr(),
+			stalledHealthOf([{ ...queuedRun(), stalledForMinutes: 90 }]),
+			{
+				stalledRunMarkers: new Set([stalledRunCommentMarker(32993037596)]),
+			},
+		);
+		expect(actions).toEqual([
+			{
+				type: "cancel-run",
+				runId: 32993037596,
+				workflowPath: ".github/workflows/ci.yml",
+			},
+		]);
+	});
+
+	it("re-runs a run the warden itself cancelled", () => {
+		const cancelled = queuedRun({
+			status: "completed",
+			conclusion: "cancelled",
+			jobs: starvedJobs(),
+		});
+		const actions = decideRunHealthActions(
+			pr(),
+			stalledHealthOf([], [cancelled]),
+			{
+				stalledRunMarkers: new Set([stalledRunCommentMarker(32993037596)]),
+			},
+		);
+		expect(actions).toEqual([
+			{
+				type: "rerun-run",
+				runId: 32993037596,
+				workflowPath: ".github/workflows/ci.yml",
+			},
+		]);
+	});
+
+	// Mutation screen for the marker gate: drop it and the warden re-runs work
+	// a person deliberately cancelled.
+	it("does NOT re-run a cancelled run the warden did not cancel", () => {
+		const cancelled = queuedRun({
+			status: "completed",
+			conclusion: "cancelled",
+			jobs: starvedJobs(),
+		});
+		expect(
+			decideRunHealthActions(pr(), stalledHealthOf([], [cancelled]), {
+				stalledRunMarkers: new Set<string>(),
+			}),
+		).toEqual([]);
+	});
+
+	// Mutation screen for the run_attempt bound: delete it and the ladder
+	// cancels and re-runs the same run every cycle for the whole outage.
+	it("stops after one recovery, and marks the warden run red", () => {
+		const actions = decideRunHealthActions(
+			pr(),
+			stalledHealthOf([
+				{ ...queuedRun({ runAttempt: 2 }), stalledForMinutes: 90 },
+			]),
+			{
+				stalledRunMarkers: new Set([stalledRunCommentMarker(32993037596)]),
+			},
+		);
+		expect(actions).toEqual([
+			{
+				type: "note",
+				benign: false,
+				message: expect.stringContaining("STALLED again on attempt 2"),
+			},
+		]);
+		expect(actions.some((a) => a.type === "cancel-run")).toBe(false);
+	});
+
+	// Fail closed: without the markers the warden cannot tell its own
+	// cancellation from a person's.
+	it("takes no stalled action when the marker read failed", () => {
+		const actions = decideRunHealthActions(
+			pr(),
+			stalledHealthOf([{ ...queuedRun(), stalledForMinutes: 90 }]),
+			{ stalledRunMarkers: null },
+		);
+		expect(actions).toEqual([
+			{
+				type: "note",
+				benign: true,
+				message: expect.stringContaining("markers were unreadable"),
+			},
+		]);
+	});
+});
+
+describe("warden sweep over a stalled run (#2203)", () => {
+	const stalledPayload = {
+		id: 77,
+		path: ".github/workflows/ci.yml",
+		status: "queued",
+		conclusion: null,
+		run_attempt: 1,
+		created_at: "2026-08-26T15:00:00Z",
+	};
+	// The head's OTHER tracked workflow ran normally, so the sweep is testing
+	// the stalled ladder and not the absent-dispatch comment.
+	const healthyLintPayload = {
+		id: 78,
+		path: ".github/workflows/lint.yml",
+		status: "completed",
+		conclusion: "success",
+		run_attempt: 1,
+		created_at: "2026-08-26T15:00:00Z",
+	};
+
+	function sweepPage() {
+		return graphqlPage([
+			prNode({
+				number: 7,
+				mergeStateStatus: "CLEAN",
+				commits: {
+					nodes: [
+						{
+							commit: {
+								oid: "deadbeef",
+								committedDate: "2026-08-26T15:00:00Z",
+								statusCheckRollup: { contexts: { nodes: [] } },
+							},
+						},
+					],
+				},
+			}),
+		]);
+	}
+
+	it("comments, then cancels on the next cycle, and names the run in the sweep", async () => {
+		const first = fakeGithub({
+			"POST /graphql": sweepPage(),
+			"GET /repos/acme/repo/actions/runs": runsRoute([
+				stalledPayload,
+				healthyLintPayload,
+			]),
+			"GET /repos/acme/repo/actions/runs/77/jobs": { jobs: [] },
+		});
+		const firstResults = await runWarden({
+			fetcher: first.fetcher,
+			owner: "acme",
+			repo: "repo",
+			now: NOW,
+		});
+		const posted = first.calls.filter(
+			(c) => c.method === "POST" && c.url.endsWith("/issues/7/comments"),
+		);
+		expect(posted).toHaveLength(1);
+		expect(String((posted[0].body as { body: string }).body)).toContain(
+			stalledRunCommentMarker(77),
+		);
+		expect(first.calls.some((c) => c.url.includes("/cancel"))).toBe(false);
+		expect(firstResults[0].runHealth).toEqual({
+			classification: RUN_HEALTH.STALLED,
+			detail: expect.stringContaining(
+				"stalled .github/workflows/ci.yml run 77 queued 90m with zero executed steps",
+			),
+		});
+
+		const second = fakeGithub({
+			"POST /graphql": sweepPage(),
+			"GET /repos/acme/repo/actions/runs": runsRoute([
+				stalledPayload,
+				healthyLintPayload,
+			]),
+			"GET /repos/acme/repo/actions/runs/77/jobs": { jobs: [] },
+			"GET /repos/acme/repo/issues/7/comments": [
+				{ body: (posted[0].body as { body: string }).body },
+			],
+		});
+		const secondResults = await runWarden({
+			fetcher: second.fetcher,
+			owner: "acme",
+			repo: "repo",
+			now: NOW,
+		});
+		expect(
+			second.calls.filter(
+				(c) => c.method === "POST" && c.url.endsWith("/actions/runs/77/cancel"),
+			),
+		).toHaveLength(1);
+		expect(
+			second.calls.filter(
+				(c) => c.method === "POST" && c.url.endsWith("/issues/7/comments"),
+			),
+		).toHaveLength(0);
+		expect(secondResults[0].applied).toContain(
+			"cancel-run:.github/workflows/ci.yml#77",
+		);
+	});
+
+	it("re-runs the run it cancelled once the cancellation lands", async () => {
+		const marker = stalledRunCommentMarker(77);
+		const { fetcher, calls } = fakeGithub({
+			"POST /graphql": sweepPage(),
+			"GET /repos/acme/repo/actions/runs": runsRoute([
+				{ ...stalledPayload, status: "completed", conclusion: "cancelled" },
+				healthyLintPayload,
+			]),
+			"GET /repos/acme/repo/actions/runs/77/jobs": { jobs: starvedJobs() },
+			"GET /repos/acme/repo/issues/7/comments": [{ body: `x ${marker}` }],
+		});
+		const results = await runWarden({
+			fetcher,
+			owner: "acme",
+			repo: "repo",
+			now: NOW,
+		});
+		expect(
+			calls.filter(
+				(c) => c.method === "POST" && c.url.endsWith("/actions/runs/77/rerun"),
+			),
+		).toHaveLength(1);
+		expect(results[0].applied).toContain(
+			"rerun-run:.github/workflows/ci.yml#77",
+		);
+	});
+
+	it("issues the cancel against the runs cancel endpoint", async () => {
+		const { fetcher, calls } = fakeGithub({});
+		await applyAction(fetcher, "acme", "repo", pr({ number: 7 }), {
+			type: "cancel-run",
+			runId: 77,
+			workflowPath: ".github/workflows/ci.yml",
+		});
+		expect(calls[0].method).toBe("POST");
+		expect(calls[0].url).toBe(
+			"https://api.github.com/repos/acme/repo/actions/runs/77/cancel",
+		);
+	});
+});
+
+// ---------------------------------------------------------------------------
 // #2185: the label-gated merge lane
 // ---------------------------------------------------------------------------
 
 const HEALTHY = {
 	classification: RUN_HEALTH.NORMAL,
 	starvedRuns: [],
+	stalledRuns: [],
+	cancelledStalledRuns: [],
 	absentWorkflows: [],
 	unknownWorkflows: [],
 	pendingWorkflows: [],
@@ -1677,6 +2140,19 @@ describe("merge-lane gate (#2185)", () => {
 			merge: false,
 			reason: MERGE_GATE_REASON.RUN_HEALTH,
 		});
+	});
+
+	// #2203 AC4: the lane reads the new classification as not-green.
+	it("treats a stalled run health as not-green even with green required checks", () => {
+		const gate = gateOf(approved(), {
+			...HEALTHY,
+			classification: RUN_HEALTH.STALLED,
+		});
+		expect(gate).toMatchObject({
+			merge: false,
+			reason: MERGE_GATE_REASON.RUN_HEALTH,
+		});
+		expect(gate.detail).toContain("stalled-run");
 	});
 
 	it("blocks on a failing non-advisory check and allows a failing advisory one", () => {

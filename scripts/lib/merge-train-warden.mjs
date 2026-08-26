@@ -17,12 +17,16 @@
  * permissions (#2185).
  */
 
-import { commentMarkerExists } from "./github-paging.mjs";
+import {
+	commentMarkerExists,
+	presentCommentMarkers,
+} from "./github-paging.mjs";
 import {
 	absentRunCommentMarker,
 	decideRunHealthActions,
 	fetchHeadRunHealth,
 	RUN_HEALTH,
+	stalledRunCommentMarker,
 } from "./warden-run-health.mjs";
 
 export const CONFLICT_LABEL = "conflict";
@@ -407,6 +411,16 @@ export async function applyAction(fetcher, owner, repo, pr, action) {
 				"POST",
 				`${base}/actions/runs/${action.runId}/rerun`,
 			);
+		case "cancel-run":
+			// #2203. GitHub refuses `rerun` on a run that has not completed, so a
+			// zombie stuck in `queued` must be cancelled before it can be re-run.
+			// A second cancel of the same run returns 409, which is already
+			// classified benign.
+			return restJson(
+				fetcher,
+				"POST",
+				`${base}/actions/runs/${action.runId}/cancel`,
+			);
 		default:
 			throw new Error(`unknown warden action type: ${action.type}`);
 	}
@@ -442,9 +456,33 @@ export async function hasAbsentRunComment(fetcher, owner, repo, pr) {
 	);
 }
 
+/**
+ * Which stalled runs on this head already carry the warden's marker comment?
+ * One paged comment read per head, and ONLY for a head that already has a
+ * stalled run, so the healthy sweep pays nothing (#2203).
+ *
+ * Returns null when the read failed: the caller must not treat "we could not
+ * look" as "no marker", which would repost the notice and, worse, re-attribute
+ * a person's cancellation to the warden.
+ */
+export async function readStalledRunMarkers(fetcher, owner, repo, pr, health) {
+	const runs = [
+		...(health.stalledRuns ?? []),
+		...(health.cancelledStalledRuns ?? []),
+	];
+	if (runs.length === 0) return new Set();
+	return presentCommentMarkers(
+		fetcher,
+		owner,
+		repo,
+		pr.number,
+		runs.map((run) => stalledRunCommentMarker(run.id)),
+	);
+}
+
 function describeApplied(action) {
-	if (action.type === "rerun-run")
-		return `rerun-run:${action.workflowPath}#${action.runId}`;
+	if (action.type === "rerun-run" || action.type === "cancel-run")
+		return `${action.type}:${action.workflowPath}#${action.runId}`;
 	return action.type + (action.label ? `:${action.label}` : "");
 }
 
@@ -504,9 +542,31 @@ export async function runWarden({ fetcher, owner, repo, now = Date.now() }) {
 			}
 		}
 
+		let stalledRunMarkers = new Set();
+		try {
+			stalledRunMarkers = await readStalledRunMarkers(
+				fetcher,
+				owner,
+				repo,
+				pr,
+				health,
+			);
+		} catch (error) {
+			// null, not an empty Set: the ladder must stand still for a cycle
+			// rather than act on a guess (#2203).
+			stalledRunMarkers = null;
+			errors.push({
+				message: `PR #${pr.number}: ${error instanceof Error ? error.message : String(error)}; stalled-run markers unreadable this run`,
+				benign: true,
+			});
+		}
+
 		const actions = [
 			...decideActions(pr),
-			...decideRunHealthActions(pr, health, { absentCommentExists }),
+			...decideRunHealthActions(pr, health, {
+				absentCommentExists,
+				stalledRunMarkers,
+			}),
 		];
 		for (const action of actions) {
 			if (action.type === "note") {
@@ -558,6 +618,16 @@ export function summarizeRunHealth(health) {
 	for (const run of health.starvedRuns)
 		detail.push(
 			`starved ${run.path} run ${run.id} (attempt ${run.runAttempt})`,
+		);
+	// #2203 AC4: the sweep record must name the stuck run and how long it has
+	// been stuck, so a stalled train is one grep away in the warden run log.
+	for (const run of health.stalledRuns ?? [])
+		detail.push(
+			`stalled ${run.path} run ${run.id} ${run.status} ${Math.round(run.stalledForMinutes ?? 0)}m with zero executed steps (attempt ${run.runAttempt})`,
+		);
+	for (const run of health.cancelledStalledRuns ?? [])
+		detail.push(
+			`cancelled zero-step ${run.path} run ${run.id} (attempt ${run.runAttempt})`,
 		);
 	if (health.absentWorkflows.length > 0)
 		detail.push(`no run for ${health.absentWorkflows.join(", ")}`);
