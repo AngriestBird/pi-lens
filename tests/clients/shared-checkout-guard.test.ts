@@ -559,6 +559,35 @@ describe("evaluateSharedCheckoutGuard (#2007)", () => {
 			).toMatchObject({ reasonCategory: "no_peer_session" });
 		});
 
+		it("counts a peer once even when SEVERAL of its roots match", async () => {
+			// MUTATION PROOF: drop the `break` after the first matching root and
+			// this reds — the same session is pushed once per matching root, so
+			// the refusal claims "2 other live pi-lens sessions" when there is
+			// one, and `peerCount` in the telemetry inflates the same way.
+			const decision = await evaluateSharedCheckoutGuard(
+				"bash",
+				bash("git checkout main"),
+				ROOT,
+				deps({
+					readRegistry: async () => [
+						peer({
+							projectRoot: normalizeFilePath(ROOT),
+							projectRoots: [
+								normalizeFilePath(ROOT),
+								normalizeFilePath(path.join(ROOT, "clients")),
+							],
+						}),
+					],
+					resolveToplevel,
+				}),
+			);
+			expect(decision.block).toBe(true);
+			expect(decision.reason).toContain("1 other live pi-lens session");
+			expect(
+				phaseCalls("shared_checkout_switch_blocked")[0]?.metadata,
+			).toMatchObject({ peerCount: 1 });
+		});
+
 		it("resolves each distinct root at most once", async () => {
 			// The per-root loop must not turn one `git rev-parse` into N on a
 			// path that already spawns one for the target.

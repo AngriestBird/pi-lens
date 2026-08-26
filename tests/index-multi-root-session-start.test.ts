@@ -200,8 +200,10 @@ describe("session_start keys on the project root (#2129 wiring)", () => {
 	}, 30_000);
 
 	it("a declined SAME-root start adds nothing to the set (#2130)", async () => {
-		// Mutation guard on the `sameRoot === false` gate: registering
-		// unconditionally would be a redundant write on every concurrent bind.
+		// The root add runs for any readable cwd; `mergeInstanceRoots`'s dedupe
+		// is what makes a same-root bind a no-op, not a second gate at the call
+		// site. This pins the outcome; the dedupe itself is pinned in
+		// tests/clients/instance-registry-multi-root.test.ts.
 		const pi = createPiMock();
 		extension(pi.asExtensionAPI());
 
