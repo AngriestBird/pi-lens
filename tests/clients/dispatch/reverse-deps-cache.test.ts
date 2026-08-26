@@ -53,8 +53,6 @@ describe("reverse-dependency Tier-2 cache bounds (#1389)", () => {
 	});
 
 	it("does not leak PI_LENS_REVERSE_DEPS_IDLE_EVICT_MS to later tests (#2223)", () => {
-		expect(
-			process.env.PI_LENS_REVERSE_DEPS_IDLE_EVICT_MS,
-		).toBeUndefined();
+		expect(process.env.PI_LENS_REVERSE_DEPS_IDLE_EVICT_MS).toBeUndefined();
 	});
 });
