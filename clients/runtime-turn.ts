@@ -23,6 +23,7 @@ import {
 import { cascadeSettleWaitMs } from "./cascade-budget.js";
 import { logCascade } from "./cascade-logger.js";
 import { normalizeMapKey } from "./path-utils.js";
+import { compareOrdinal } from "./string-utils.js";
 import type {
 	DependencyChecker,
 	MadgeBatchStats,
@@ -2558,7 +2559,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		const content = capTurnEndMessage(findingParts.join("\n\n"));
 		const signature = `${files
 			.slice()
-			.sort((a, b) => a.localeCompare(b))
+			.sort((a, b) => compareOrdinal(a, b))
 			.join("|")}::${content}`;
 		const last = cacheManager.readCache<{
 			signature: string;
