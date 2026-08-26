@@ -1741,6 +1741,42 @@ describe("merge-lane gate (#2185)", () => {
 		});
 	});
 
+	// The mutation screen for startedAt ordering ITSELF. Both tests above stay
+	// green under fail-closed alone, so neither proves the ordering runs. Here
+	// the NEWER duplicate is the success: a re-run that fixed a red check. Only
+	// real time ordering merges this; fail-closed would pin the stale FAILURE
+	// and the PR could never merge again.
+	it("lets a re-run that fixed a red check win over its older failing duplicate", () => {
+		const gate = gateOf(
+			approved({
+				checkRuns: [
+					{
+						name: "Unit tests",
+						status: "COMPLETED",
+						conclusion: "FAILURE",
+						startedAt: "2026-08-26T17:21:00Z",
+					},
+					{
+						name: "Unit tests",
+						status: "COMPLETED",
+						conclusion: "SUCCESS",
+						startedAt: "2026-08-26T17:38:00Z",
+					},
+					{
+						name: "Lint & type-check",
+						status: "COMPLETED",
+						conclusion: "SUCCESS",
+						startedAt: "2026-08-26T17:38:00Z",
+					},
+				],
+			}),
+		);
+		expect(gate).toMatchObject({
+			merge: true,
+			reason: MERGE_GATE_REASON.GREEN,
+		});
+	});
+
 	it("fails closed when duplicates disagree and carry no usable startedAt", () => {
 		const resolved = resolveCheckRuns([
 			{ name: "Unit tests", status: "COMPLETED", conclusion: "SUCCESS" },
