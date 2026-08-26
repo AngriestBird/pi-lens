@@ -1146,6 +1146,47 @@ It deduplicates PR numbers before `runWarden` decides or applies actions. Its
 consumer prints that error and sets a nonzero exit code, while deliberately
 bounded sibling reads remain scoped.
 
+The warden also classifies what Actions did with each open PR head
+(`scripts/lib/warden-run-health.mjs`, #2184). A run that concluded
+`failure`/`startup_failure` with ZERO executed steps across every job is
+`starved-run`, not a red build — verified against the real incident run
+32986328966, where six jobs sat `queued` and one matrix job read
+`completed`/`skipped`, so "every job is queued" is the wrong predicate. A head
+with no `ci.yml`/`lint.yml` run past `ABSENT_RUN_GRACE_MINUTES` is `absent-run`.
+Recovery is bounded: one `POST /actions/runs/{id}/rerun` per starved run, keyed
+on GitHub's own `run_attempt` so the warden never re-runs the same run twice,
+and one per-head comment for an absent dispatch, keyed on an HTML marker
+carrying the head SHA. An unreadable runs or jobs list classifies
+`run-health-unknown`, never `absent-run`. Every swept PR gets a classification
+line in the run summary, including quiet ones.
+
+The label-gated merge lane (`scripts/lib/merge-train-lane.mjs`, #2185) is the
+only automation in this repository that merges, and it lives outside the warden
+on purpose. It merges a PR carrying `train:approved` only on POSITIVE evidence
+about the exact current head: both required checks present, `COMPLETED`, and
+`SUCCESS`, run health `runs-concluded-normally`, zero failing non-advisory
+checks, and a `CLEAN`/`UNSTABLE` merge state. Absent, unconcluded, starved, and
+DIRTY-skipped checks are all not-green. Gating on the current head is what
+re-gates a fix round, so the lane stores no "approved at SHA" state that could
+drift; the merge call passes `sha` so a head that moves mid-cycle 409s instead
+of merging on a stale verdict. Only the maintainer applies the label, so the
+adversarial-review-first policy is unchanged; removing the label aborts.
+
+Four facts about THIS repository the lane must keep matching, each probed live
+rather than assumed (review round 1 on PR #2191, all four were wrong first):
+master protection is `strict: true`, so a BEHIND head cannot be merged at all
+and instead gets `update-branch` with `expected_head_sha`; a check is advisory
+by its `(advisory)` NAME SUFFIX (`oxfmt format check (advisory)`,
+`PR body (advisory)`, `Vale prose lint (advisory)`, `OSV scan (advisory)`), not
+by a vendor allowlist; one head's rollup really does carry DUPLICATE check
+names, so `resolveCheckRuns` picks the newest by `startedAt` and fails closed on
+an unorderable disagreement, because `new Map(list.map(...))` is last-wins on
+array order and called an in-flight re-run green; and `direction=desc` is
+ignored by `issues/{n}/comments`, so every marker-dedupe read paginates to the
+last page through `scripts/lib/github-paging.mjs`. Label provenance comes from
+the last `labeled` timeline event and must name an approver, so "anyone who can
+label" is not "anyone who can merge".
+
 CI validates GitHub close-keyword syntax through `scripts/check-close-keywords.mjs`:
 PR bodies may not use a comma-separated close list because GitHub applies only
 the first issue per keyword; use one keyword per issue (`Closes #A. Closes #B.`).
