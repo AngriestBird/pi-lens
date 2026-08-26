@@ -131,6 +131,65 @@ describe("createCwdCachedProbe latch policy (#1494)", () => {
 		]);
 	});
 
+	it("does not join a flight from a consumer with another binary", async () => {
+		const releases: Array<(value: ReturnType<typeof okResult>) => void> = [];
+		const probe = vi.fn(
+			() =>
+				new Promise<ReturnType<typeof okResult>>((resolve) => {
+					releases.push(resolve);
+				}),
+		);
+		const first = createCwdCachedProbe(probe, {
+			tool: "binary-widget",
+			flightKeyComponent: "/tools/widget-v1",
+		});
+		const second = createCwdCachedProbe(probe, {
+			tool: "binary-widget",
+			flightKeyComponent: "/tools/widget-v2",
+		});
+
+		const a = first("/tmp/binary-project");
+		const b = second("/tmp/binary-project");
+		expect(probe).toHaveBeenCalledTimes(2);
+		expect(releases).toHaveLength(2);
+		releases[0]?.(okResult());
+		releases[1]?.(okResult());
+		expect(await Promise.all([a, b])).toEqual([true, true]);
+	});
+
+	it("does not let a refreshed probe join the stale flight", async () => {
+		let release: ((value: ReturnType<typeof okResult>) => void) | undefined;
+		const probe = vi
+			.fn()
+			.mockImplementationOnce(
+				() =>
+					new Promise<ReturnType<typeof okResult>>((resolve) => {
+						release = resolve;
+					}),
+			)
+			.mockResolvedValueOnce(okResult());
+		const preInstall = createCwdCachedProbe(probe, {
+			tool: "refresh-widget",
+			flightKeyComponent: "/tools/widget",
+		});
+		const postInstall = createCwdCachedProbe(probe, {
+			tool: "refresh-widget",
+			flightKeyComponent: "/tools/widget#refresh-1",
+		});
+
+		const stale = preInstall("/tmp/refresh-project");
+		const refreshed = postInstall("/tmp/refresh-project");
+		expect(probe).toHaveBeenCalledTimes(2);
+		release?.({
+			stdout: "",
+			stderr: "",
+			status: 1,
+		});
+		expect(await refreshed).toBe(true);
+		release = undefined;
+		expect(await stale).toBe(false);
+	});
+
 	it("records a bounded degradation when the probe exceeds budgetMs", async () => {
 		let release: ((value: ReturnType<typeof okResult>) => void) | undefined;
 		const probe = vi.fn(
@@ -151,11 +210,32 @@ describe("createCwdCachedProbe latch policy (#1494)", () => {
 			(entry) => entry.kind === "availability-probe-overrun",
 		);
 		expect(group?.count).toBeGreaterThanOrEqual(1);
+		expect(group?.latestReasons).toContainEqual(
+			expect.objectContaining({
+				subject: `overrun-widget:${path.resolve("/tmp/overrun-project")}`,
+			}),
+		);
+	});
+
+	it("does not book an overrun for a probe that returned a timeout verdict", async () => {
+		const probe = vi.fn().mockResolvedValue(timeoutResult());
+		const cached = createCwdCachedProbe(probe, {
+			tool: "timeout-widget",
+			budgetMs: 5,
+		});
+		const pending = cached("/tmp/timeout-project");
+		vi.setSystemTime(new Date(Date.now() + 6));
+		expect(await pending).toBe(false);
+		const group = getDegradationSummary().find(
+			(entry) => entry.kind === "availability-probe-overrun",
+		);
 		expect(
-			group?.latestReasons.some((entry) =>
-				entry.subject.includes("overrun-widget"),
+			group?.latestReasons.some(
+				(entry) =>
+					entry.subject ===
+					`timeout-widget:${path.resolve("/tmp/timeout-project")}`,
 			),
-		).toBe(true);
+		).toBe(false);
 	});
 
 	it("re-probes after a timeout once the cooldown expires", async () => {

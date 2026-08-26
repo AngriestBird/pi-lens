@@ -548,8 +548,10 @@ export function recordAvailabilityProbeOverrun(
 	key: string,
 	elapsedMs: number,
 	budgetMs: number | undefined,
+	failure?: ProbeFailureShape["failure"],
 ): void {
 	if (budgetMs === undefined || elapsedMs <= budgetMs) return;
+	if (failure === "timeout" && elapsedMs <= budgetMs * 2) return;
 	incrementDegradationCount({
 		kind: "availability-probe-overrun",
 		subject: `${tool}:${key}`,
@@ -868,6 +870,7 @@ export function createAvailabilityChecker(
 		normalizeEphemeralMapKey,
 	);
 	let checkerGeneration = availabilityGeneration.current();
+	let checkerFlightGeneration = 0;
 
 	const findCommand = createVenvFinder(command, windowsExt);
 
@@ -876,12 +879,14 @@ export function createAvailabilityChecker(
 		cacheByCwd.clear();
 		inFlightByCwd.clear();
 		checkerGeneration = availabilityGeneration.current();
+		checkerFlightGeneration++;
 	}
 
 	const reset = (): void => {
 		cacheByCwd.clear();
 		inFlightByCwd.clear();
 		checkerGeneration = availabilityGeneration.current();
+		checkerFlightGeneration++;
 	};
 
 	function getCache(cwd: string): AvailabilityCache {
@@ -1077,7 +1082,7 @@ export function createAvailabilityChecker(
 			let probeJoined = false;
 			try {
 				const shared = runSharedAvailabilityProbe(
-					`checker:${command}\0${versionArgs.join("\0")}\0${key}`,
+					`checker:${command}|${versionArgs.join("|")}|${key}|${checkerFlightGeneration}|${windowsExt}|${cmd}|${JSON.stringify(Object.entries(env ?? {}).sort(([a], [b]) => a.localeCompare(b)))}`,
 					() =>
 						safeSpawnAsync(cmd, versionArgs, {
 							timeout: options.probeTimeout ?? 5000,
@@ -1096,6 +1101,7 @@ export function createAvailabilityChecker(
 				resolvedCwd,
 				elapsedMs,
 				options.probeTimeout ?? 5000,
+				result.failure,
 			);
 
 			if (!result.error && result.status === 0) {
@@ -1181,6 +1187,8 @@ export interface CwdProbeResult extends ProbeFailureShape {
 export interface CwdCachedProbeOptions {
 	/** Tool name used in the `availability_decision` record. */
 	tool: string;
+	/** Identity of the resolved probe binary, or a caller-owned freshness token. */
+	flightKeyComponent?: string;
 	/** Probe budget the verdict was measured against, ms; overruns enter the bounded ledger. */
 	budgetMs?: number;
 	/** Outcome for a failure the taxonomy cannot classify. Default non-installable. */
@@ -1316,7 +1324,7 @@ export function createCwdCachedProbe(
 			let probeJoined = false;
 			try {
 				const shared = runSharedAvailabilityProbe(
-					`cwd:${options.tool}\0${key}`,
+					`cwd:${options.tool}|${options.flightKeyComponent ?? ""}|${key}`,
 					() => probe(key),
 				);
 				probeJoined = shared.joined;
@@ -1326,18 +1334,19 @@ export function createCwdCachedProbe(
 			}
 			const hostStallMs = stallSampler.stop();
 			const elapsedMs = Date.now() - startedAt;
+			const shape: CwdProbeResult = result ?? {
+				error: thrown instanceof Error ? thrown : new Error(String(thrown)),
+			};
 			recordAvailabilityProbeOverrun(
 				options.tool,
 				key,
 				elapsedMs,
 				options.budgetMs,
+				shape.failure,
 			);
 			// A probe that threw carries its errno in the Error, which is exactly
 			// what the taxonomy reads — so a thrown EAGAIN stays transient instead
 			// of collapsing into an untyped `false`.
-			const shape: CwdProbeResult = result ?? {
-				error: thrown instanceof Error ? thrown : new Error(String(thrown)),
-			};
 
 			if (result && !result.error && result.status === 0) {
 				note(latch, key, {

@@ -195,9 +195,10 @@ export async function checkToolAvailability(
 		const elapsedMs = Date.now() - startedAt;
 		recordAvailabilityProbeOverrun(
 			command,
-			command,
+			key,
 			elapsedMs,
 			TOOL_PROBE_TIMEOUT_MS,
+			result.failure,
 		);
 		if (result.status === 0) {
 			facts.setSessionFact(key, true);

@@ -39,7 +39,11 @@ function makeEslintProbe(cmd: string) {
 				timeout: ESLINT_PROBE_BUDGET_MS,
 				cwd,
 			}),
-		{ tool: "eslint", budgetMs: ESLINT_PROBE_BUDGET_MS },
+		{
+			tool: "eslint",
+			budgetMs: ESLINT_PROBE_BUDGET_MS,
+			flightKeyComponent: cmd,
+		},
 	);
 }
 const eslintAvailabilityByCmd = new Map<
