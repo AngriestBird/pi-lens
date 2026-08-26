@@ -4384,6 +4384,46 @@ function restoreValidIncomingEdges(
 	}
 }
 
+/**
+ * Remove duplicates created when deferred targets converge after restoration.
+ * The scan is limited to resolved edges and their target buckets, not the
+	 * complete graph, so same-batch repairs remain proportional to the resolved
+	 * edges and the fan-in of their target buckets.
+ */
+function dedupeResolvedEdges(
+	graph: ReviewGraph,
+	replacements: Array<[ReviewGraphEdge, ReviewGraphEdge]>,
+): void {
+	const resolvedEdges = new Set(replacements.map(([, after]) => after));
+	const seenByTarget = new Map<string, Set<string>>();
+	const removed = new Set<ReviewGraphEdge>();
+
+	for (const [, edge] of replacements) {
+		if (removed.has(edge)) continue;
+		let seen = seenByTarget.get(edge.to);
+		if (!seen) {
+			seen = new Set();
+			for (const candidate of graph.edgesByTo.get(edge.to) ?? []) {
+				if (!resolvedEdges.has(candidate)) {
+					seen.add(edgeIdentityKey(candidate));
+				}
+			}
+			seenByTarget.set(edge.to, seen);
+		}
+		const key = edgeIdentityKey(edge);
+		if (seen.has(key)) {
+			removed.add(edge);
+			unindexEdge(graph, edge);
+			continue;
+		}
+		seen.add(key);
+	}
+
+	if (removed.size > 0) {
+		graph.edges = graph.edges.filter((edge) => !removed.has(edge));
+	}
+}
+
 export interface GraphFileImportChange {
 	filePath: string;
 	existedBefore: boolean;
@@ -4564,6 +4604,7 @@ function resolveDeferredSymbolEdges(graph: ReviewGraph, rebuild = true): void {
 			graph.edgesByTo.delete(target);
 		}
 	}
+	dedupeResolvedEdges(graph, replacements);
 }
 
 interface CachedGraphEntry {
