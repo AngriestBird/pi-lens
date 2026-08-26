@@ -22,6 +22,22 @@
  * `node:https` and `safeSpawnAsync` are mocked so network calls and spawns can
  * be counted exactly. Everything else — the stamp file, the presence checks,
  * the cadence arithmetic — runs for real against a temp `PI_LENS_HOME`.
+ *
+ * #2182: this file flaked when run combined with the two
+ * `tests/clients/degradation-ledger*.test.ts` files under real machine
+ * contention. Root cause: "re-arms across sessions rather than latching for
+ * the process" awaits two refresh calls that resolve on queued microtasks
+ * (fast on a quiet host) but starved past the default 5000ms testTimeout
+ * under load; the timeout does not cancel the underlying promise, so the
+ * straggler resolved later and mutated the shared spawn/degradation mocks
+ * mid-test in an unrelated later case. Fix: budget correction — that one
+ * test now carries an explicit 15_000ms timeout (see the test body) sized
+ * off a local repro under synthetic CPU load, instead of a phased vitest
+ * project (the existing "timing-sensitive" lane is reserved for
+ * measureMaxSyncBlockMs sampler tests — see
+ * tests/config/timing-sensitive-coverage.test.ts — and this file uses
+ * neither the sampler nor a real process spawn, so it does not fit that or
+ * the "lsp-spawn-heavy" lane).
  */
 
 import { EventEmitter } from "node:events";
@@ -1237,6 +1253,19 @@ describe("one budget across all strategies", () => {
 		expect(apiCalls().length + installSpawns().length).toBeLessThanOrEqual(1);
 	});
 
+	// #2182: the two `runManagedToolRefresh` calls below resolve on queued
+	// microtasks (fast on a quiet host), but under the same real
+	// parallel-worker contention #2139 measured, this test's default 5000ms
+	// testTimeout starves and fires — reproduced locally by running this file
+	// combined with tests/clients/degradation-ledger*.test.ts under synthetic
+	// CPU load. The timeout does not stop the underlying refresh promise, so
+	// the straggler resolves later and mutates the shared spawn/degradation
+	// mocks mid-way through an UNRELATED later test (the "declines and
+	// touches nothing when PI_LENS_DISABLE_TOOL_INSTALL=1" case a few tests
+	// down failed the same combined run with degradationCount() 1 instead of
+	// 0 — a side effect of this straggler, not its own bug). Giving this
+	// test enough budget to finish normally removes the straggler at the
+	// source.
 	it("re-arms across sessions rather than latching for the process", async () => {
 		installProbeCached("ruff");
 		installProbeCached("rubocop");
@@ -1247,7 +1276,7 @@ describe("one budget across all strategies", () => {
 		await runManagedToolRefresh(NOW);
 
 		expect(installSpawns().length).toBe(first + 1);
-	});
+	}, 15_000);
 });
 
 // --- install kill-switch, trust gate, and install lock (#1759 review F2) --
