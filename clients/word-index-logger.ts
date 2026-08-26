@@ -74,8 +74,16 @@ export interface WordIndexLogEntry {
 	truncated?: boolean;
 	/** Distinct token count (postings.size) — index breadth at a glance. */
 	tokens?: number;
-	/** Total in-memory posting entries (sum of posting-array lengths). */
+	/** Total in-memory posting entries (sum of posting-list lengths). */
 	postingEntries?: number;
+	/**
+	 * Estimated resident bytes of the index’s packed stores (#2069). `tokens`
+	 * and `postingEntries` describe breadth; this is the number that actually
+	 * governs memory, so a heap census can be reconciled against this log
+	 * without taking a snapshot. Divide by `postingEntries` for the per-entry
+	 * cost the #2069 acceptance criterion is written against.
+	 */
+	residentBytes?: number;
 	/** Aggregate per-edit replacement cost for the pending turn/burst. */
 	replacementCount?: number;
 	totalReplacementMs?: number;
