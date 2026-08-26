@@ -7,6 +7,15 @@ import {
 	getSinkWriteFailures,
 	resetSinkWriteFailures,
 } from "./ndjson-logger.js";
+// #2146: pulled at READ time, never pushed. `process-singletons.ts` is a
+// dependency leaf on purpose — it cannot import this module without closing a
+// no-client-cycles cycle through instance-registry/instance-reaper — so the
+// ledger reaches IN for its reset log, the same inversion `getSinkWriteFailures`
+// above uses.
+import {
+	getProcessSingletonResets,
+	PROCESS_SINGLETON_RESET_KIND,
+} from "./process-singletons.js";
 
 // Re-exported so existing importers keep one name for the ledger's bound.
 export { LEDGER_FIELD_MAX, truncateForLedger };
@@ -619,6 +628,21 @@ export function getDegradationSummary(): DegradationGroup[] {
 				reason: truncateForLedger(
 					`${sink.droppedCount} dropped write(s) after reopen-retry failed`,
 				),
+			})),
+		});
+	}
+	// #2146, same read-time fold: process-singleton resets live in the leaf
+	// module's own bounded log. One entry per family, so this group's count is
+	// the number of families this build could not adopt, never an event tally.
+	const singletonResets = getProcessSingletonResets();
+	if (singletonResets.length > 0) {
+		summary.push({
+			kind: PROCESS_SINGLETON_RESET_KIND,
+			count: singletonResets.length,
+			droppedCount: 0,
+			latestReasons: singletonResets.map((reset) => ({
+				subject: truncateForLedger(reset.family),
+				reason: truncateForLedger(reset.reason),
 			})),
 		});
 	}

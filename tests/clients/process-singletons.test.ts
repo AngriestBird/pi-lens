@@ -298,14 +298,8 @@ describe("#2146 — the versioned adopt-or-reset protocol", () => {
 		// Bounded: nine evaluations must not write nine rows.
 		singletons.getProcessSingleton("fam", 2, () => ({ n: 0 }));
 
-		// The record is written through a dynamic import (the module is a leaf by
-		// design — see its header), so let the microtask land.
-		await vi.waitFor(() => {
-			const found = ledger
-				.getDegradationSummary()
-				.find((g) => g.kind === singletons.PROCESS_SINGLETON_RESET_KIND);
-			expect(found).toBeDefined();
-		});
+		// The ledger PULLS the reset log at read time; `process-singletons.ts` is
+		// a dependency leaf and never pushes into the ledger (see its header).
 		const group = ledger
 			.getDegradationSummary()
 			.find((g) => g.kind === singletons.PROCESS_SINGLETON_RESET_KIND);

@@ -48,10 +48,10 @@
  *    version) -> do NOT adopt. A shape this build cannot read is not safely
  *    readable in either direction, so guessing is worse than starting clean.
  *    The cell is replaced with a fresh value from `create()` and ONE bounded
- *    `process-singleton-reset` degradation record is written per family
- *    (`recordDegradationOnce`, so a nine-evaluation process still records at
- *    most one row per family). Behavior after a reset is exactly today's
- *    module-scope behavior for that family, which is the fail-safe direction.
+ *    `process-singleton-reset` entry is logged per family, so a nine-evaluation
+ *    process still reports at most one row per family. Behavior after a reset is
+ *    exactly today's module-scope behavior for that family, which is the
+ *    fail-safe direction.
  *
  * The container key itself is versioned (`SINGLETON_HOST_KEY`). A future change
  * to the CONTAINER shape bumps the key, so an old container is simply not
@@ -59,16 +59,22 @@
  */
 
 /**
- * STATIC IMPORTS: none, deliberately. This module must be a leaf.
+ * STATIC IMPORTS: none, deliberately. This module is a dependency leaf.
  *
- * `instance-registry.ts` imports it, and the degradation ledger reaches
- * `instance-reaper.ts` (via extension-log -> file-utils -> git-tracked-ignore ->
- * safe-spawn -> resource-sampler), which imports the registry back. A static
- * `degradation-ledger.js` import here therefore closes a `no-client-cycles`
- * cycle, which CI's dependency-boundaries lane rejects. The ledger is reached
- * through a dynamic import instead — the escape `.dependency-cruiser.cjs`
- * sanctions by excluding `dynamic-import` from that rule. It also keeps the
- * door open for the ledger itself to adopt this module later (#2157 item 5).
+ * It cannot import the degradation ledger. `instance-registry.ts` imports this
+ * module, and the ledger reaches `instance-reaper.ts` (through `extension-log`
+ * -> `file-utils` -> `git-tracked-ignore` -> `safe-spawn` -> `resource-sampler`),
+ * and `instance-reaper` imports the registry back. Any edge from here to the
+ * ledger closes a `no-client-cycles` cycle, which CI's dependency-boundaries
+ * lane rejects. A dynamic import does not help: the rule excludes
+ * `dynamic-import` only on the edge it evaluates, not on the intermediate edges
+ * of the cycle it walks.
+ *
+ * So the direction is inverted, exactly as `ndjson-logger.ts` already does for
+ * its own sink-write failures: this module keeps a bounded reset log, and
+ * `degradation-ledger.ts` PULLS it at read time through
+ * {@link getProcessSingletonResets} and folds it into `getDegradationSummary()`.
+ * The record still reaches `pilens_health`, with no import from here.
  */
 
 /** Bump only when the CONTAINER shape changes, never for a family's shape. */
@@ -114,30 +120,55 @@ function isAdoptable(cell: unknown, version: number): cell is SingletonCell {
 	);
 }
 
+/** One bounded reset log per process, capped so a pathological build pair
+ * cannot grow it without limit. */
+const RESET_LOG_FAMILY = "process-singleton-reset-log";
+const RESET_LOG_VERSION = 1;
+const RESET_LOG_CAP = 16;
+
+export interface ProcessSingletonReset {
+	family: string;
+	reason: string;
+}
+
+function resetLog(): { entries: ProcessSingletonReset[] } {
+	return getProcessSingleton(RESET_LOG_FAMILY, RESET_LOG_VERSION, () => ({
+		entries: [] as ProcessSingletonReset[],
+	}));
+}
+
 /**
- * Write the bounded reset record through a dynamic import (see the no-static-
- * imports note at the top). Fire-and-forget and never throws: telemetry must
- * not break the path it observes, and this fires only when two incompatible
- * builds meet in one process.
+ * Record that an incompatible cell was discarded. Bounded twice: once per
+ * family (a nine-evaluation process logs at most one entry per family) and once
+ * overall by {@link RESET_LOG_CAP}.
  */
 function recordIncompatibleCell(
 	family: string,
 	wantedVersion: number,
 	found: Partial<SingletonCell>,
 ): void {
-	const reason =
-		`incompatible process singleton discarded (found schema=${String(found.schema)} ` +
-		`version=${String(found.version)}, this build wants schema=${SINGLETON_SCHEMA} ` +
-		`version=${wantedVersion})`;
-	void import("./degradation-ledger.js")
-		.then((ledger) => {
-			ledger.recordDegradationOnce({
-				kind: PROCESS_SINGLETON_RESET_KIND,
-				subject: family,
-				reason,
-			});
-		})
-		.catch(() => {});
+	// The reset log is itself a family, so recording ITS reset would recurse.
+	// Dropping that one record is correct: the log it would be written to is the
+	// thing being discarded.
+	if (family === RESET_LOG_FAMILY) return;
+	const log = resetLog();
+	if (log.entries.some((entry) => entry.family === family)) return;
+	if (log.entries.length >= RESET_LOG_CAP) return;
+	log.entries.push({
+		family,
+		reason:
+			`incompatible process singleton discarded (found schema=${String(found.schema)} ` +
+			`version=${String(found.version)}, this build wants schema=${SINGLETON_SCHEMA} ` +
+			`version=${wantedVersion})`,
+	});
+}
+
+/**
+ * Read-time view for `degradation-ledger.ts` (see the header). Never performs
+ * I/O and never throws, so folding it into a health summary is free.
+ */
+export function getProcessSingletonResets(): readonly ProcessSingletonReset[] {
+	return resetLog().entries.map((entry) => ({ ...entry }));
 }
 
 /**
