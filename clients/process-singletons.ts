@@ -58,7 +58,18 @@
  * found rather than mis-read.
  */
 
-import { recordDegradationOnce } from "./degradation-ledger.js";
+/**
+ * STATIC IMPORTS: none, deliberately. This module must be a leaf.
+ *
+ * `instance-registry.ts` imports it, and the degradation ledger reaches
+ * `instance-reaper.ts` (via extension-log -> file-utils -> git-tracked-ignore ->
+ * safe-spawn -> resource-sampler), which imports the registry back. A static
+ * `degradation-ledger.js` import here therefore closes a `no-client-cycles`
+ * cycle, which CI's dependency-boundaries lane rejects. The ledger is reached
+ * through a dynamic import instead — the escape `.dependency-cruiser.cjs`
+ * sanctions by excluding `dynamic-import` from that rule. It also keeps the
+ * door open for the ledger itself to adopt this module later (#2157 item 5).
+ */
 
 /** Bump only when the CONTAINER shape changes, never for a family's shape. */
 const SINGLETON_HOST_KEY = Symbol.for("pi-lens.process-singletons.v1");
@@ -104,6 +115,32 @@ function isAdoptable(cell: unknown, version: number): cell is SingletonCell {
 }
 
 /**
+ * Write the bounded reset record through a dynamic import (see the no-static-
+ * imports note at the top). Fire-and-forget and never throws: telemetry must
+ * not break the path it observes, and this fires only when two incompatible
+ * builds meet in one process.
+ */
+function recordIncompatibleCell(
+	family: string,
+	wantedVersion: number,
+	found: Partial<SingletonCell>,
+): void {
+	const reason =
+		`incompatible process singleton discarded (found schema=${String(found.schema)} ` +
+		`version=${String(found.version)}, this build wants schema=${SINGLETON_SCHEMA} ` +
+		`version=${wantedVersion})`;
+	void import("./degradation-ledger.js")
+		.then((ledger) => {
+			ledger.recordDegradationOnce({
+				kind: PROCESS_SINGLETON_RESET_KIND,
+				subject: family,
+				reason,
+			});
+		})
+		.catch(() => {});
+}
+
+/**
  * Return the process-wide value for `family`, creating it on the first
  * evaluation that asks and adopting it on every later one.
  *
@@ -126,15 +163,7 @@ export function getProcessSingleton<T extends object>(
 		// An incompatible cell from another build. One bounded row per family:
 		// nine evaluations must not write nine records (AGENTS.md's bounded-record
 		// rule; `recordDegradationOnce` keys on kind + subject).
-		recordDegradationOnce({
-			kind: PROCESS_SINGLETON_RESET_KIND,
-			subject: family,
-			reason: `incompatible process singleton discarded (found schema=${String(
-				(existing as Partial<SingletonCell>).schema,
-			)} version=${String(
-				(existing as Partial<SingletonCell>).version,
-			)}, this build wants schema=${SINGLETON_SCHEMA} version=${version})`,
-		});
+		recordIncompatibleCell(family, version, existing as Partial<SingletonCell>);
 	}
 	const value = create();
 	cells.set(family, { schema: SINGLETON_SCHEMA, version, value });
