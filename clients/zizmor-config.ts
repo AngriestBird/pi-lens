@@ -193,6 +193,7 @@ async function deriveGhCliToken(): Promise<string | undefined> {
 				latched: true,
 				hostStallMs,
 				budgetMs: GH_TOKEN_PROBE_TIMEOUT_MS,
+				classifiedBy: "probe",
 			});
 			return token;
 		}

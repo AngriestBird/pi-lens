@@ -76,6 +76,7 @@ import { logLatency } from "./latency-logger.js";
 import { resolveGitToplevel } from "./opaque-mutation-scan.js";
 import { normalizeFilePath } from "./path-utils.js";
 import { safeSpawnAsync } from "./safe-spawn.js";
+import { truncatedByOutputCap } from "./spawn-output-cap.js";
 
 /** Verbs that rewrite tracked files unconditionally. */
 const ALWAYS_MUTATING_VERBS: ReadonlySet<string> = new Set([
@@ -179,6 +180,16 @@ export function isWorktreeMutatingGitAttempt(
  */
 export type WorkingTreeState = "dirty" | "clean" | "unknown";
 
+// A `git status --porcelain --untracked-files=all` listing over a huge
+// untracked tree (an unignored `node_modules`, a vendored dependency dump) can
+// run to many MiB. This is a blast-radius bound on a wedged or runaway git, not
+// a working limit; 16 MiB matches the sibling git-status probes
+// (`opaque-mutation-scan.ts`'s `MAX_GIT_STATUS_OUTPUT_BYTES` and
+// `git-tracked-ignore.ts`'s `MAX_LS_FILES_OUTPUT_BYTES`, both 16 MiB). Without
+// it `outputTruncated` can never fire, so the truncation guard below was
+// dormant (#2100 F3).
+const MAX_GIT_STATUS_OUTPUT_BYTES = 16 * 1024 * 1024;
+
 /**
  * Ask git whether the working tree carries uncommitted work.
  *
@@ -194,12 +205,19 @@ export async function probeWorkingTreeState(
 	const result = await safeSpawnAsync(
 		"git",
 		["status", "--porcelain", "--untracked-files=all"],
-		{ cwd: root, timeout: 5000 },
+		{ cwd: root, timeout: 5000, maxOutputBytes: MAX_GIT_STATUS_OUTPUT_BYTES },
 	);
+	// Read truncation FIRST (#2100 F3), through the shared seam that
+	// git-tracked-ignore uses. Reaching the cap makes safe-spawn kill the tree,
+	// which settles as `error` + null status on POSIX and status 1 on Windows —
+	// both of which the failure check below reads as `unknown`. So a definite
+	// dirty (we captured 16 MiB of porcelain) was being downgraded to `unknown`
+	// the moment the cap fired. Timeout and abort keep their own classification
+	// and fall through to `unknown`, since a hung git cannot prove dirtiness.
+	if (truncatedByOutputCap(result)) return "dirty";
 	if (result.error || (result.status !== 0 && result.status !== null)) {
 		return "unknown";
 	}
-	if (result.outputTruncated === true) return "dirty";
 	return (result.stdout ?? "").trim().length > 0 ? "dirty" : "clean";
 }
 

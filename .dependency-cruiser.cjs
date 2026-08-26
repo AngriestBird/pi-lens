@@ -28,7 +28,7 @@ module.exports = {
 			severity: "error",
 			comment: "Declared leaf modules must not import another clients/ module.",
 			from: {
-				path: "^(?:\\./)?clients/(ledger-bounds|lsp/workspace-diagnostics-session)\\.js$",
+				path: "^(?:\\./)?clients/(ledger-bounds|spawn-output-cap|lsp/workspace-diagnostics-session)\\.js$",
 			},
 			to: { path: "^(?:\\./)?clients/" },
 		},

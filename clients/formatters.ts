@@ -423,6 +423,7 @@ async function which(command: string): Promise<string | null> {
 			latched: true,
 			hostStallMs,
 			budgetMs: WHICH_BUDGET_MS,
+			classifiedBy: "probe",
 		});
 		return resolved;
 	}
