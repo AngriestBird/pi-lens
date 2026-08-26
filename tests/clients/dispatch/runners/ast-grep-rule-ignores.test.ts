@@ -6,7 +6,9 @@
 // shipped no-console-except-error rule YAML.
 
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import * as path from "node:path";
 import astGrepNapiRunner from "../../../../clients/dispatch/runners/ast-grep-napi.js";
+import { loadYamlRules } from "../../../../clients/dispatch/runners/yaml-rule-parser.js";
 import {
 	linesFor,
 	makeRealRunnerEnv,
@@ -25,6 +27,25 @@ beforeAll(() => {
 afterAll(() => env.cleanup());
 
 describe("no-console-except-error ignores CLI scripts and logger sinks (#965)", () => {
+	it("uses ignores for every VTCode Go rule and covers fixture paths (#2207)", () => {
+		const rules = loadYamlRules(
+			path.join(process.cwd(), "rules", "ast-grep-rules", "rules"),
+		);
+		const expected = new Map([
+			[
+				"go-no-fmt-println",
+				["**/*_test.go", "**/examples/**", "tests/fixtures/**", "cases/**"],
+			],
+			["go-no-panic-in-lib", ["**/*_test.go", "**/cmd/**"]],
+			["go-no-underscore-func-name", ["**/*_test.go"]],
+			["go-prefer-errors-is", ["**/*_test.go"]],
+			["go-prefer-string-builder", ["**/*_test.go"]],
+		]);
+		for (const [id, ignores] of expected) {
+			expect(rules.find((rule) => rule.id === id)).toMatchObject({ ignores });
+		}
+	});
+
 	it("still flags accidental console.log in ordinary application source", async () => {
 		const { ctx } = env.addFile(
 			"src/widget.ts",
