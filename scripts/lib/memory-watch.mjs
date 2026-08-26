@@ -66,13 +66,54 @@ export function shouldPrint(sample, state) {
 }
 
 /**
+ * How little memory must remain at the low-water mark before a SIGKILL can be
+ * blamed on memory. A fraction of the box, floored, so one rule holds on a
+ * 7 GB runner and on a 16 GB one.
+ */
+export const EXHAUSTION_AVAILABLE_FRACTION = 0.1;
+export const EXHAUSTION_AVAILABLE_FLOOR_MB = 512;
+
+/**
+ * Is the low-water mark consistent with memory exhaustion?
+ *
+ * #2042 round 2. The first version of this wrapper asserted "the OS reclaimed
+ * memory" for EVERY exit-137, which is a conclusion, not a reading. Three real
+ * kills that carried a verdict (runs 33010136296, 32975604997, 32943340609)
+ * landed with 13,260 / 13,057 / 13,073 MB of 15,990 MB still available, and
+ * the green run alongside them (33012307631) went LOWER, to 13,096 MB. The
+ * record was contradicting its own numbers, and every diagnosis downstream
+ * inherited the error.
+ *
+ * An unreadable total or mark defaults to the memory verdict: never quieter
+ * than the evidence supports.
+ *
+ * @param {{ totalMb: number, lowWaterMb: number }} watch
+ * @returns {boolean}
+ */
+export function looksMemoryExhausted(watch) {
+	if (!Number.isFinite(watch.totalMb) || watch.totalMb <= 0) return true;
+	if (!Number.isFinite(watch.lowWaterMb)) return true;
+	const limit = Math.max(
+		EXHAUSTION_AVAILABLE_FLOOR_MB,
+		Math.round(watch.totalMb * EXHAUSTION_AVAILABLE_FRACTION),
+	);
+	return watch.lowWaterMb <= limit;
+}
+
+/**
  * The verdict line. Exit 137 with no failing assertion is the whole problem
  * this wrapper exists for: on its own it reads as infrastructure noise and
  * costs a judged rerun. Naming the low-water mark turns it into a claim about
- * memory that the next reader can act on.
+ * memory that the next reader can act on — and, when the mark says the box was
+ * never short of memory, into a claim that memory was NOT the cause.
+ *
+ * Both kill heads start with "[mem-watch] KILLED" on purpose. The CI failure
+ * classifier (scripts/lib/ci-failure-classifier.mjs:114) matches that prefix
+ * and quotes the whole matched line as its posted detail, so an honest verdict
+ * makes the classifier's detail honest with no change to the classifier.
  *
  * @param {{ code: number | null, signal: string | null }} exit
- * @param {{ totalMb: number, lowWaterMb: number, lowWaterAt: string | null }} watch
+ * @param {{ totalMb: number, lowWaterMb: number, lowWaterAt: string | null, childPid?: number | null, intervalMs?: number | null }} watch
  * @returns {string}
  */
 export function formatVerdict(exit, watch) {
@@ -81,12 +122,36 @@ export function formatVerdict(exit, watch) {
 			? `signal=${exit.signal}`
 			: `exitCode=${exit.code ?? "null"}`;
 	const oomShaped = exit.signal === "SIGKILL" || exit.code === 137;
-	const head = oomShaped
-		? "[mem-watch] KILLED — no failing assertion means the OS reclaimed memory, not a test failure."
-		: "[mem-watch] done.";
+	let head;
+	if (!oomShaped) {
+		head = "[mem-watch] done.";
+	} else if (looksMemoryExhausted(watch)) {
+		head =
+			"[mem-watch] KILLED — no failing assertion means the OS reclaimed memory, not a test failure.";
+	} else {
+		// Round-2 review F4: claim only what a periodic sampler can see. A spike
+		// shorter than the interval is invisible to it, and so is a systemd-oomd
+		// kill, which fires on pressure while memory still reads available and IS
+		// memory-shaped. The kernel evidence step closes both gaps, so this line
+		// points at it instead of ruling memory out on its own authority.
+		const cadence = watch.intervalMs
+			? ` (${watch.intervalMs}ms sampling: a shorter spike, or a pressure-based kill by systemd-oomd, would not show up here)`
+			: "";
+		head =
+			"[mem-watch] KILLED WITH HEADROOM — no failing assertion, and no " +
+			`sample fell below ${watch.lowWaterMb} MB of ${watch.totalMb} MB, so ` +
+			"the box was not short of memory at any sample point" +
+			`${cadence}. Read the kernel kill evidence step for the signal's ` +
+			"sender.";
+	}
 	return (
 		`${head} ${status} totalMb=${watch.totalMb} ` +
 		`lowWaterAvailableMb=${watch.lowWaterMb}` +
-		(watch.lowWaterAt ? ` lowWaterAt=${watch.lowWaterAt}` : "")
+		(watch.lowWaterAt ? ` lowWaterAt=${watch.lowWaterAt}` : "") +
+		// Which process actually died. `dmesg`'s "Killed process <pid> (<comm>)"
+		// is only attributable next to the pid this wrapper was watching: in run
+		// 33010136296 the victim was `npm`, the SMALLEST node process in the
+		// tree, which is by itself evidence against the kernel OOM killer.
+		(watch.childPid ? ` childPid=${watch.childPid}` : "")
 	);
 }
