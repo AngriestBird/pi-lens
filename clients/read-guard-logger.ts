@@ -2,6 +2,7 @@ import * as path from "node:path";
 import { isTestMode } from "./env-utils.js";
 import { getGlobalPiLensDir } from "./file-utils.js";
 import { createNdjsonLogger } from "./ndjson-logger.js";
+import { normalizeFilePath } from "./path-utils.js";
 
 const READ_GUARD_LOG_DIR = getGlobalPiLensDir();
 const READ_GUARD_LOG_FILE = path.join(READ_GUARD_LOG_DIR, "read-guard.log");
@@ -333,7 +334,17 @@ export function logReadGuardEvent(entry: ReadGuardLogEntry): void {
 				? (bounded.value as Record<string, unknown>)
 				: undefined;
 	const { correlationId: _correlationId, ...logEntry } = entry;
-	writer.log({ ts: new Date().toISOString(), ...logEntry, metadata });
+	// #2219 (the #2141 class): `filePath` reaches here from
+	// `runtime-tool-result.ts`'s raw `path.resolve()`/`path.isAbsolute()`
+	// arithmetic (never `normalizeFilePath`-passed), always a genuine file —
+	// this field carries no non-path sentinel. Normalize once at this single
+	// emit seam, matching `review-graph-logger.ts`'s `logReviewGraph`.
+	writer.log({
+		ts: new Date().toISOString(),
+		...logEntry,
+		filePath: normalizeFilePath(logEntry.filePath),
+		metadata,
+	});
 }
 
 export function getReadGuardLogPath(): string {

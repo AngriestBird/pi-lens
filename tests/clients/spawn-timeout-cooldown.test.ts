@@ -259,3 +259,52 @@ describe("markdownlint runner consults the seam", () => {
 		}
 	});
 });
+
+/**
+ * #2229 review round 1, F3, reverted in round 3 (R2-F2): `noteSpawnTimeout`
+ * normalizes `filePath` (logLatency's emit-seam display field, no reader)
+ * but must leave `metadata.command` RAW — `safe-spawn-timeout-teardown.test.ts`
+ * reads `metadata.command` back to match a cooldown row against the exact
+ * command string, and `cooldownKey` above deliberately keys on basename
+ * because the same binary arrives in multiple spellings. Normalizing
+ * `metadata.command` would change a correlation key's contents, not just a
+ * display value.
+ */
+describe("noteSpawnTimeout filePath/metadata.command split (#2229 R2-F2)", () => {
+	it("normalizes filePath but leaves metadata.command raw for an absolute-path command", async () => {
+		vi.resetModules();
+		const writerLog = vi.fn();
+		vi.doMock("../../clients/env-utils.js", () => ({
+			isTestMode: () => false,
+		}));
+		vi.doMock("../../clients/ndjson-logger.js", () => ({
+			createNdjsonLogger: () => ({
+				log: writerLog,
+				append: vi.fn(),
+				truncate: vi.fn(),
+				flush: vi.fn().mockResolvedValue(undefined),
+				flushSync: vi.fn(),
+			}),
+		}));
+
+		const { noteSpawnTimeout } = await seam();
+		const { normalizeFilePath } = await import("../../clients/path-utils.js");
+		const raw = "C:\\Users\\dev\\pi-free\\tools\\markdownlint-cli2.cmd";
+
+		noteSpawnTimeout({
+			tool: "markdownlint",
+			command: raw,
+			phase: "lint",
+			durationMs: 15000,
+		});
+
+		expect(writerLog).toHaveBeenCalledTimes(1);
+		const payload = writerLog.mock.calls[0][0];
+		expect(payload.filePath).toBe(normalizeFilePath(raw));
+		expect(payload.metadata.command).toBe(raw);
+
+		vi.doUnmock("../../clients/env-utils.js");
+		vi.doUnmock("../../clients/ndjson-logger.js");
+		vi.resetModules();
+	});
+});
