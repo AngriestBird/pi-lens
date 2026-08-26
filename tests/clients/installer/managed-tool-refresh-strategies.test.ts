@@ -974,6 +974,189 @@ describe("archive and maven strategies compare the registry pin", () => {
 	});
 });
 
+// --- verification-budget delivery, all five non-npm strategies (#2194) ----
+
+/**
+ * The #2194 comment flagged that the per-strategy refresh candidate carries
+ * `verificationTimeoutMs` for npm only, and that `probeManagedToolVersion`
+ * (pip/gem) and `verifyRefreshedArtifact` (github/maven/archive) had no red
+ * test proving a registry-scoped budget actually reaches the post-refresh
+ * spawn instead of silently falling back to the shared 10s default. Each
+ * case here temporarily raises an already-fixtured tool's
+ * `verificationTimeoutMs` and asserts the exact value lands in the
+ * `--version` probe's spawn options.
+ */
+describe("verification-budget delivery across non-npm strategies", () => {
+	async function withVerificationTimeout<T>(
+		toolId: string,
+		timeoutMs: number,
+		fn: () => Promise<T>,
+	): Promise<T> {
+		const tool = TOOLS.find((t) => t.id === toolId);
+		if (!tool) throw new Error(`unknown tool ${toolId}`);
+		const original = tool.verificationTimeoutMs;
+		tool.verificationTimeoutMs = timeoutMs;
+		try {
+			// Awaited, not returned bare — a bare `return fn()` would run this
+			// `finally` synchronously right after the promise is created, restoring
+			// the original timeout before the awaited refresh ever reaches its
+			// spawn, and every assertion below would silently see the default.
+			return await fn();
+		} finally {
+			tool.verificationTimeoutMs = original;
+		}
+	}
+
+	/** Every `--version` spawn's `timeout` option, across all calls. */
+	function versionProbeTimeouts(): Array<number | undefined> {
+		return spawnMock.mock.calls
+			.filter(([, args]) => (args ?? []).includes("--version"))
+			.map(([, , options]) => (options as { timeout?: number })?.timeout);
+	}
+
+	/**
+	 * `installArchiveTool` verifies its launcher on real disk after a MOCKED
+	 * `tar` spawn, so the mock has to actually materialize the launcher file
+	 * (into the `-C` destination it was asked to extract to) or the install
+	 * fails before verification is ever reached. Every other spawn — the
+	 * `--version` post-refresh probe included — falls through to the default
+	 * success stub.
+	 */
+	function stubArchiveExtraction(launcherRelPath: string): void {
+		const isWindows = process.platform === "win32";
+		const suffix = isWindows ? ".bat" : "";
+		spawnMock.mockImplementation(async (command: string, args: string[]) => {
+			const argv = args ?? [];
+			if (
+				/tar(\.exe)?$/i.test(command) &&
+				argv.some((a) => a.startsWith("-x"))
+			) {
+				const destIndex = argv.indexOf("-C");
+				const destRel = destIndex >= 0 ? argv[destIndex + 1] : undefined;
+				if (destRel) {
+					const destAbs = path.join(
+						TOOLS_DIR,
+						destRel,
+						...`${launcherRelPath}${suffix}`.split("/"),
+					);
+					fs.mkdirSync(path.dirname(destAbs), { recursive: true });
+					fs.writeFileSync(destAbs, "#!/bin/sh\necho 1.2.3\nexit 0\n");
+				}
+				return { stdout: "", stderr: "", status: 0 };
+			}
+			return { stdout: "1.2.3", stderr: "", status: 0 };
+		});
+	}
+
+	it("delivers a github tool's custom budget to the post-refresh verify (#2194)", async () => {
+		await withVerificationTimeout("shfmt", 45_000, async () => {
+			installManagedBin("shfmt");
+			freshenAllExcept("shfmt", {
+				shfmt: { checkedAt: NOW - 8 * DAY_MS, resolutionId: "v3.7.0" },
+			});
+			routeGitHubRelease("v3.12.0", { etag: 'W/"abc"' });
+
+			const outcome = await runManagedToolRefresh(NOW);
+
+			expect(outcome.refreshed[0]).toMatchObject({
+				toolId: "shfmt",
+				ok: true,
+			});
+			expect(versionProbeTimeouts()).toContain(45_000);
+		});
+	});
+
+	it("delivers a pip tool's custom budget to both version probes (#2194)", async () => {
+		await withVerificationTimeout("ruff", 45_000, async () => {
+			installProbeCached("ruff");
+			freshenAllExcept("ruff", {
+				ruff: { checkedAt: NOW - 8 * DAY_MS, version: "0.5.0" },
+			});
+
+			const outcome = await runManagedToolRefresh(NOW);
+
+			expect(outcome.refreshed[0]).toMatchObject({
+				toolId: "ruff",
+				ok: true,
+			});
+			const timeouts = versionProbeTimeouts();
+			expect(timeouts.length).toBeGreaterThan(0);
+			expect(timeouts.every((t) => t === 45_000)).toBe(true);
+		});
+	});
+
+	it("delivers a gem tool's custom budget to both version probes (#2194)", async () => {
+		await withVerificationTimeout("rubocop", 45_000, async () => {
+			installProbeCached("rubocop");
+			freshenAllExcept("rubocop", {
+				rubocop: { checkedAt: NOW - 8 * DAY_MS, version: "1.60.0" },
+			});
+
+			const outcome = await runManagedToolRefresh(NOW);
+
+			expect(outcome.refreshed[0]).toMatchObject({
+				toolId: "rubocop",
+				ok: true,
+			});
+			const timeouts = versionProbeTimeouts();
+			expect(timeouts.length).toBeGreaterThan(0);
+			expect(timeouts.every((t) => t === 45_000)).toBe(true);
+		});
+	});
+
+	it("delivers an archive tool's custom budget to the post-refresh verify (#2194)", async () => {
+		await withVerificationTimeout("spotbugs", 45_000, async () => {
+			installManagedBin("spotbugs");
+			freshenAllExcept("spotbugs", {
+				spotbugs: {
+					checkedAt: NOW - 8 * DAY_MS,
+					resolutionId: `${SPOTBUGS_PIN}-old`,
+				},
+			});
+			httpsRoutes.push({
+				match: (url) => url.includes("spotbugs"),
+				respond: () => ({
+					statusCode: 200,
+					body: Buffer.from("archive-bytes"),
+				}),
+			});
+			stubArchiveExtraction("bin/spotbugs");
+
+			const outcome = await runManagedToolRefresh(NOW);
+
+			expect(outcome.refreshed[0]).toMatchObject({
+				toolId: "spotbugs",
+				ok: true,
+			});
+			expect(versionProbeTimeouts()).toContain(45_000);
+		});
+	});
+
+	it("delivers a maven tool's custom budget to the post-refresh verify (#2194)", async () => {
+		await withVerificationTimeout("ktfmt", 45_000, async () => {
+			installManagedBin("ktfmt");
+			freshenAllExcept("ktfmt", {
+				ktfmt: {
+					checkedAt: NOW - 8 * DAY_MS,
+					resolutionId: `${KTFMT_PIN}-old`,
+				},
+			});
+			httpsRoutes.push({
+				match: (url) => url.startsWith("https://repo1.maven.org/"),
+				respond: () => ({ statusCode: 200, body: Buffer.from("jar-bytes") }),
+			});
+
+			const outcome = await runManagedToolRefresh(NOW);
+
+			expect(outcome.refreshed[0]).toMatchObject({
+				toolId: "ktfmt",
+				ok: true,
+			});
+			expect(versionProbeTimeouts()).toContain(45_000);
+		});
+	});
+});
+
 // --- archive refresh never destroys a working install (#1759 review F1) --
 //
 // The reviewer's exact probe: a working extracted tree, a refresh whose

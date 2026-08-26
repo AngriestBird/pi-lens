@@ -709,7 +709,15 @@ preserved as `cause`. (#1214)
 opt into `safeSpawnAsync`'s `input: ""` so every verification receives EOF.
 The registry may declare a larger bounded timeout for a tool whose cold
 launcher startup exceeds the dispatch budget; Vue uses 30 seconds while the
-installer default remains 10 seconds (#2176).
+installer default remains 10 seconds (#2176). bash-language-server and
+vscode-json-language-server measured 9,667ms and 11,047ms cold with closed
+stdin — both close enough to the 10s default that host contention alone can
+trip a false verification degradation — and use a 20-second bound (#2194).
+Delivery is proven per strategy, not just for npm: `probeManagedToolVersion`
+(pip/gem) and `verifyRefreshedArtifact` (github/maven/archive) both resolve
+the timeout through `getToolVerificationTimeout` on every call, and each of
+the six strategies has a test that raises a tool's `verificationTimeoutMs`
+and asserts the exact value reaches the post-refresh `--version` spawn (#2194).
 This matters for markdownlint-cli2: `--version` scanned 45 files and returned
 in about 370ms when stdin was closed, while `--no-globs -` linted one stdin
 file and returned in about 370ms; with production-shaped open stdin the latter

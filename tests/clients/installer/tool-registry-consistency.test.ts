@@ -63,6 +63,17 @@ describe("TOOLS registry consistency", () => {
 		expect(vue?.verificationTimeoutMs).toBe(30_000);
 	});
 
+	it("uses the bash/JSON language-server cold-start budgets (#2194)", () => {
+		const bash = TOOLS.find((tool) => tool.id === "bash-language-server");
+		const json = TOOLS.find(
+			(tool) => tool.id === "vscode-json-language-server",
+		);
+		expect(bash).toBeDefined();
+		expect(json).toBeDefined();
+		expect(getToolVerificationTimeout(bash!)).toBe(20_000);
+		expect(getToolVerificationTimeout(json!)).toBe(20_000);
+	});
+
 	it("every tool has the required base wiring (id, name, checkCommand, checkArgs, strategy)", () => {
 		for (const t of TOOLS) {
 			expect(typeof t.id, `id on ${JSON.stringify(t.name)}`).toBe("string");
