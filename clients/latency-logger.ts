@@ -3,6 +3,7 @@ import { isTestMode } from "./env-utils.js";
 import { getGlobalPiLensDir } from "./file-utils.js";
 import { createNdjsonLogger } from "./ndjson-logger.js";
 import { getMaxLogSizeMB } from "./log-cleanup.js";
+import { normalizeLoggedPath } from "./path-utils.js";
 
 const LATENCY_LOG_DIR = getGlobalPiLensDir();
 const LATENCY_LOG_FILE = path.join(LATENCY_LOG_DIR, "latency.log");
@@ -636,7 +637,14 @@ export function logLatency(entry: LatencyEntry): void {
 	if (isTestMode()) {
 		return;
 	}
-	writer.log({ ...entry, ts, pid: process.pid });
+	// #2219 (the #2141 class): `filePath` mixes raw `path.resolve()`/`cwd`
+	// values (module-report.ts) with already-normalized ones
+	// (dispatcher.ts-derived `ctx.filePath`) AND non-path labels ("<pi-lens>",
+	// a tool name, a shell command) that several call sites deliberately use
+	// as a coarse identity — see bounded-telemetry.ts's comment on this field.
+	// `normalizeLoggedPath` normalizes only values that are already
+	// fully-qualified paths, leaving every label/command untouched.
+	writer.log({ ...entry, ts, pid: process.pid, filePath: normalizeLoggedPath(entry.filePath) });
 }
 
 export function getLatencyLogPath(): string {

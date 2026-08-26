@@ -120,6 +120,24 @@ export function normalizeFilePath(filePath: string): string {
 }
 
 /**
+ * Normalize a logged `filePath`/`cwd` value, but ONLY when it is already a
+ * fully-qualified path (#2219, the #2141 class's sibling loggers). Several
+ * NDJSON log-entry types reuse a `filePath`-typed field for non-path
+ * sentinels alongside genuine paths — `"<quiet-window>"` in
+ * `cascade-logger.ts`, `"<tree-sitter>"` in `tree-sitter-logger.ts`, a shell
+ * command or an empty placeholder in `latency-logger.ts`. `normalizeFilePath`
+ * resolves a relative-looking string against the CURRENT process cwd (see
+ * `resolveNonExisting` above), so running it over one of those sentinels
+ * would silently corrupt it into `"<repoRoot>/<quiet-window>"` instead of
+ * normalizing it. Only a value that is already fully qualified can be the
+ * #2141 mixed-raw/normalized-path defect; anything else is passed through
+ * unchanged.
+ */
+export function normalizeLoggedPath(value: string): string {
+	return isFullyQualified(value) ? normalizeFilePath(value) : value;
+}
+
+/**
  * Resolve a non-existing path by finding the nearest existing parent,
  * getting its canonical casing, then appending the non-existent parts lowercased.
  *

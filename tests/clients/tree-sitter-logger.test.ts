@@ -155,4 +155,61 @@ describe("tree-sitter-logger", () => {
 		// The swallowed rejection must not surface through flush().
 		await expect(mod.flushTreeSitterLog()).resolves.toBeUndefined();
 	});
+
+	// #2219 (the #2141 class): scanner.ts/builder.ts/tree-sitter-shared.ts feed
+	// a raw `cwd`/`process.cwd()` while dispatch/runners/tree-sitter.ts already
+	// passes a normalized `ctx.filePath` — the same real path in two forms.
+	it("normalizes a backslash-supplied absolute filePath to the canonical slash form", async () => {
+		const appendFile = vi.fn(async (_file: string, _data: string) => {});
+		vi.doMock("node:fs", () => ({
+			mkdirSync: vi.fn(),
+			statSync: () => {
+				throw new Error("ENOENT");
+			},
+			promises: { appendFile },
+		}));
+		vi.doMock("node:os", () => ({
+			homedir: () => "/mock-home",
+		}));
+
+		const mod = await import("../../clients/tree-sitter-logger.js");
+		const { normalizeFilePath } = await import("../../clients/path-utils.js");
+		mod.logTreeSitter({
+			phase: "runner_start",
+			filePath: "C:\\Users\\dev\\pi-free\\src\\a.ts",
+		});
+		await mod.flushTreeSitterLog();
+
+		const payload = JSON.parse(appendFile.mock.calls[0][1]);
+		expect(payload.filePath).toBe(
+			normalizeFilePath("C:\\Users\\dev\\pi-free\\src\\a.ts"),
+		);
+	});
+
+	// `logTreeSitterDiagnostic` falls back to the `"<tree-sitter>"` sentinel
+	// when no file is in hand (WASM abort, grammar fetch) — that sentinel
+	// must reach the log untouched, not get resolved against the process cwd.
+	it("passes the <tree-sitter> sentinel through unchanged", async () => {
+		const appendFile = vi.fn(async (_file: string, _data: string) => {});
+		vi.doMock("node:fs", () => ({
+			mkdirSync: vi.fn(),
+			statSync: () => {
+				throw new Error("ENOENT");
+			},
+			promises: { appendFile },
+		}));
+		vi.doMock("node:os", () => ({
+			homedir: () => "/mock-home",
+		}));
+
+		const mod = await import("../../clients/tree-sitter-logger.js");
+		mod.logTreeSitterDiagnostic({
+			subsystem: "tree-sitter-client",
+			message: "wasm aborted",
+		});
+		await mod.flushTreeSitterLog();
+
+		const payload = JSON.parse(appendFile.mock.calls[0][1]);
+		expect(payload.filePath).toBe("<tree-sitter>");
+	});
 });

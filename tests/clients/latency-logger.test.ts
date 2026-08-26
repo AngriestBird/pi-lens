@@ -29,11 +29,47 @@ import {
 	RECENT_PHASE_CAP,
 	resetCurrentPhaseForSession,
 } from "../../clients/latency-logger.js";
+import { normalizeFilePath } from "../../clients/path-utils.js";
 
 describe("latency-logger", () => {
 	beforeEach(() => {
 		writerLog.mockClear();
 	});
+
+	// #2219 (the #2141 class): module-report.ts feeds `logLatency` a raw
+	// `path.resolve()` result while dispatcher.ts-derived call sites already
+	// pass a normalized `ctx.filePath`.
+	it("normalizes a backslash-supplied absolute filePath to the canonical slash form (#2141 class)", () => {
+		logLatency({
+			type: "phase",
+			phase: "test",
+			filePath: "C:\\Users\\dev\\pi-free\\src\\a.ts",
+			durationMs: 5,
+		});
+
+		expect(writerLog.mock.calls[0][0].filePath).toBe(
+			normalizeFilePath("C:\\Users\\dev\\pi-free\\src\\a.ts"),
+		);
+	});
+
+	// Several call sites deliberately use `filePath` for a non-path label
+	// (bounded-telemetry.ts's own comment on the field), a shell command
+	// (spawn-timeout-cooldown.ts), or an empty placeholder
+	// (safe-spawn.ts/lens-diagnostics.ts). None of these may be resolved
+	// against the process cwd — only a genuine fully-qualified path is the
+	// #2141 defect.
+	it.each(["<pi-lens>", "", "git", "npm run build"])(
+		"leaves the non-path label %j untouched",
+		(label) => {
+			logLatency({
+				type: "phase",
+				phase: "test",
+				filePath: label,
+				durationMs: 5,
+			});
+			expect(writerLog.mock.calls[0][0].filePath).toBe(label);
+		},
+	);
 
 	it("owns process and timestamp attribution instead of trusting caller fields", () => {
 		logLatency({
