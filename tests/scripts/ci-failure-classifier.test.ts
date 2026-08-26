@@ -2,9 +2,9 @@
 // real, plus the once-per-SHA rerun guard and the sticky-comment upsert
 // shape.
 //
-// Log fixtures under tests/fixtures/ci-failure-logs/ are REAL captured
-// output (AGENTS.md shape 16 -- never hand-write a fixture for an external
-// system's behavior):
+// Log fixtures under tests/fixtures/ci-failure-logs/ named *.real.log or
+// *.composite.log are REAL captured output (AGENTS.md shape 16 -- never
+// hand-write a fixture for an external system's behavior):
 //   - real-assertion-failure.real.log: run 32913518938, job 98012237782
 //     (fetch: `gh api repos/apmantza/pi-lens/actions/jobs/98012237782/logs`)
 //   - infra-oom-wrapper-killed.real.log: run 32908647308 attempt 1, job
@@ -13,12 +13,25 @@
 //   - infra-oom-bare-killed-pre-wrapper.real.log: run 32888174877 (PR #2058,
 //     pre-#2042), job 97933472353 -- predates the wrapper entirely, so a
 //     bare "Killed" is the only signal
-// infra-net-getaddrinfo.unverified.log is NOT a captured fixture: no real
-// pi-lens Unit-tests run with a DNS/network failure was found in the
-// accessible run history for this issue (the "CodeQL tarball DNS error"
-// #2103 cites ran in a different job/workflow). It is documented as
-// unverified in scripts/lib/ci-failure-classifier.mjs and here, per the
-// shape-16 screen: label the claim, don't fake verification.
+//   - real-failure-then-oom-kill.composite.log (review round 1, F2/P1): a
+//     splice of two real excerpts -- job 98012237782's real inline
+//     "❯ ... (5 tests | 1 failed)"/"× ..." markers (lines 534-539 of that
+//     job's raw log) followed by job 97998085238's real "Killed"+exit-137
+//     tail -- reproducing "OOM kill AFTER a test failed, before the
+//     end-of-run summary prints" without fabricating either half's bytes.
+// Files named *.unverified.log or *.synthetic.log are NOT captured fixtures
+// (documented per shape 16, never claimed as verified):
+//   - infra-net-getaddrinfo.unverified.log: no real pi-lens Unit-tests run
+//     with a DNS/network failure was found in the accessible run history.
+//   - file-level-collection-failure.synthetic.log (F2/P2): a representative
+//     vitest file-level FAIL shape (import/collection error, no ">"
+//     test-name separator) -- not pulled from a real pi-lens run.
+//   - econnreset-in-test-output.synthetic.log (F2/P3): reuses the REAL
+//     literal string this repo's own corpus ships
+//     (tests/clients/smells-rollup.test.ts:124,
+//     `{"outcome":"emit_failed","error":"ECONNRESET"}`) inside a synthetic
+//     surrounding log, to prove that string alone must not flip an
+//     unrecognized real failure to infra-net.
 
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -118,14 +131,124 @@ describe("classifyFailureLog (#2103)", () => {
 		const result = classifyFailureLog(log);
 		expect(result.kind).toBe("real");
 	});
+
+	// --- Review round 1 findings ---------------------------------------
+
+	// F1 (BLOCKING, vacuous guard): the ONLY thing distinguishing "an OOM
+	// kill" from "the word Killed appeared in unrelated output" is the
+	// EXIT_137_SHAPED conjunct. This fixture has NO real fixture behind it
+	// on purpose -- it exists to pin the CODE's requirement, not to claim a
+	// real run produces this shape. Mutation-proof: deleting `&&
+	// EXIT_137_SHAPED.test(log)` from classifyFailureLog leaves this exact
+	// assertion red (the log falls through to the "otherwise real" default
+	// either way, but only because of that conjunct -- see the probe log in
+	// the PR body).
+	it("F1: a bare 'Killed' with NO exit-137/SIGKILL evidence anywhere is NOT infra-oom", () => {
+		const log =
+			"some-subprocess: Killed by user request, exiting cleanly\n" +
+			"##[error]Process completed with exit code 1.\n";
+		const result = classifyFailureLog(log);
+		expect(result.kind).not.toBe("infra-oom");
+	});
+
+	// F2/P1 (BLOCKING): an OOM kill immediately after a test's inline failure
+	// marker prints, but before vitest's end-of-run "Failed Tests" summary
+	// block ever gets a chance to print, must still classify real -- the kill
+	// destroyed the summary, not the fact that a test failed.
+	it("F2/P1: an OOM kill AFTER an inline test failure (no end-of-run summary ever printed) classifies real", () => {
+		const result = classifyFailureLog(
+			fixture("real-failure-then-oom-kill.composite.log"),
+		);
+		expect(result.kind).toBe("real");
+		expect(result.detail).toContain(
+			"tests/clients/word-index-lifecycle.test.ts",
+		);
+	});
+
+	// F2/P2 (BLOCKING): a file-level FAIL (import/collection error) has no
+	// test to name, so it has no "> testname" segment -- FAIL_LINE alone
+	// misses it entirely.
+	it("F2/P2: a file-level FAIL with no '> testname' segment classifies real", () => {
+		const result = classifyFailureLog(
+			fixture("file-level-collection-failure.synthetic.log"),
+		);
+		expect(result.kind).toBe("real");
+		expect(result.detail).toContain("tests/clients/broken-import.test.ts");
+	});
+
+	// F2/P3 (BLOCKING): NET_PATTERN's bare \bECONNRESET\b matched ANYWHERE in
+	// the log, including inside a test's own console output -- this repo's
+	// own corpus ships that literal string. An unrecognized real failure
+	// must not flip to infra-net just because that text appears somewhere
+	// unrelated.
+	it("F2/P3: ECONNRESET inside unrelated test output does not flip an unrecognized failure to infra-net", () => {
+		const result = classifyFailureLog(
+			fixture("econnreset-in-test-output.synthetic.log"),
+		);
+		expect(result.kind).toBe("real");
+	});
+
+	// F2/P3 companion: the genuine infra-net shape (network error text on a
+	// line that ALSO carries an explicit "npm error"/"##[error]" prefix)
+	// must still classify infra-net -- the fix scopes the pattern, it
+	// doesn't disable it.
+	it("F2/P3 companion: a genuine npm-error-prefixed network failure still classifies infra-net", () => {
+		const result = classifyFailureLog(
+			fixture("infra-net-getaddrinfo.unverified.log"),
+		);
+		expect(result.kind).toBe("infra-net");
+	});
+
+	// F5: empty log is distinguishable from "read something, didn't
+	// recognize it" -- the two are different failure modes (fetch itself
+	// failed / raced the upload, vs. a genuinely new failure shape).
+	it("F5: an empty log is classified real with a distinct 'empty log' detail", () => {
+		const result = classifyFailureLog("");
+		expect(result.kind).toBe("real");
+		expect(result.detail).toContain("empty log");
+		const whitespaceOnly = classifyFailureLog("   \n\t \n");
+		expect(whitespaceOnly.detail).toContain("empty log");
+	});
+
+	it("F5: an unrecognized NON-empty log gets a different detail than an empty one", () => {
+		const nonEmpty = classifyFailureLog("nothing recognizable happened here");
+		const empty = classifyFailureLog("");
+		expect(nonEmpty.detail).not.toBe(empty.detail);
+		expect(nonEmpty.detail).not.toContain("empty log");
+	});
+
+	// F5: bound the read BEFORE interpretation (#2096 shape). A signal that
+	// exists only in the discarded HEAD of an oversized log must have no
+	// effect -- this is deliberately lossy, and the test proves the cap is
+	// actually applied (not merely documented): removing the truncation
+	// step would let the head-of-log signal through and flip this from
+	// "real" to "infra-net".
+	it("F5: content beyond the log-size cap is not seen by the classifier", () => {
+		const oversizedHead = `npm error getaddrinfo ENOTFOUND registry.npmjs.org\n${"x".repeat(3 * 1024 * 1024)}`;
+		const log = `${oversizedHead}\n##[error]Process completed with exit code 1.\n`;
+		const result = classifyFailureLog(log);
+		expect(result.kind).toBe("real");
+	});
 });
 
 describe("marker round-trip (#2103)", () => {
 	it("parses back exactly what it built", () => {
-		const marker = buildMarker("abc1234", true);
+		const marker = buildMarker("abc1234", "true");
 		expect(parseClassifierMarker(`some text ${marker}`)).toEqual({
 			sha: "abc1234",
+			rerunState: "true",
 			rerunTriggered: true,
+		});
+	});
+
+	// F4: a "failed:<status>" marker round-trips as NOT triggered -- it is
+	// evidence of an ATTEMPT, not a success.
+	it("parses a failed:<status> marker as rerunTriggered=false", () => {
+		const marker = buildMarker("abc1234", "failed:403");
+		expect(parseClassifierMarker(marker)).toEqual({
+			sha: "abc1234",
+			rerunState: "failed:403",
+			rerunTriggered: false,
 		});
 	});
 
@@ -202,6 +325,23 @@ describe("shouldTriggerRerun once-per-SHA guard (#2103)", () => {
 		).toBe(true);
 	});
 
+	// F4: a prior "failed:<status>" marker (a rerun ATTEMPT that itself
+	// failed, e.g. a 403 because actions:write isn't granted) must still
+	// allow a retry -- only a confirmed SUCCESS blocks.
+	it("still allows a rerun when the prior marker for this SHA recorded a failed rerun attempt", () => {
+		expect(
+			shouldTriggerRerun({
+				classification: infra,
+				sha: "sha1",
+				existingMarker: {
+					sha: "sha1",
+					rerunTriggered: false,
+					rerunState: "failed:403",
+				},
+			}),
+		).toBe(true);
+	});
+
 	it("simulates two consecutive classifier passes on the same SHA end-to-end via decideClassifierAction", () => {
 		const rawLog = fixture("infra-oom-wrapper-killed.real.log");
 		const sha = "deadbeef";
@@ -225,7 +365,7 @@ describe("shouldTriggerRerun once-per-SHA guard (#2103)", () => {
 	});
 });
 
-describe("runClassifier orchestration against a mocked GitHub API (#2103)", () => {
+describe("runClassifier orchestration against a mocked, STATEFUL GitHub API (#2103)", () => {
 	function jsonResponse(body: unknown, status = 200) {
 		return {
 			ok: status >= 200 && status < 300,
@@ -242,12 +382,62 @@ describe("runClassifier orchestration against a mocked GitHub API (#2103)", () =
 			text: async () => body,
 		};
 	}
+	function noContentResponse(status = 204) {
+		return {
+			ok: status >= 200 && status < 300,
+			status,
+			json: async () => {
+				throw new Error("no body");
+			},
+			text: async () => "",
+		};
+	}
 
-	function mockApi({
-		existingComments = [] as Array<{ id: number; body: string }>,
+	/**
+	 * A stateful fake: comments actually persist across calls (POST appends,
+	 * PATCH updates, DELETE removes), which is what makes the F3 concurrent
+	 * -invocation and F4 retry-after-failure scenarios meaningfully testable
+	 * -- a static per-call fixture can't reproduce either race.
+	 */
+	function makeStatefulApi({
+		initialComments = [] as Array<{ id: number; body: string }>,
+		rerunHandler,
+		pairwiseCommentsBarrier = false,
+	}: {
+		initialComments?: Array<{ id: number; body: string }>;
+		rerunHandler?: () => { ok: boolean; status: number };
+		/**
+		 * F3 only: force every PAIR of concurrent GET .../comments calls
+		 * (across two overlapping runClassifier invocations sharing this same
+		 * api) to arrive before either proceeds. This is what actually
+		 * reproduces "both reads happen before either write" deterministically
+		 * -- a single-invocation test that also hits this endpoint twice
+		 * (initial read, then the F3 reconcile read) would otherwise deadlock
+		 * waiting for a partner that never comes, since those two calls are
+		 * sequential within one invocation. Only pass this for genuinely
+		 * concurrent invocations sharing one api instance.
+		 */
+		pairwiseCommentsBarrier?: boolean;
 	} = {}) {
 		const calls: Array<{ method: string; url: string; body?: unknown }> = [];
 		const rawLog = fixture("infra-oom-wrapper-killed.real.log");
+		const comments = [...initialComments];
+		let nextId = comments.reduce((max, c) => Math.max(max, c.id), 100) + 1;
+		let rerunCallCount = 0;
+
+		let commentsGetCount = 0;
+		const pendingBarrierResolvers: Array<() => void> = [];
+		async function commentsGetBarrier() {
+			commentsGetCount++;
+			if (commentsGetCount % 2 === 1) {
+				await new Promise<void>((resolve) => {
+					pendingBarrierResolvers.push(resolve);
+				});
+			} else {
+				pendingBarrierResolvers.shift()?.();
+			}
+		}
+
 		const fetcher = async (url: string, init?: RequestInit) => {
 			const method = init?.method ?? "GET";
 			calls.push({
@@ -256,6 +446,14 @@ describe("runClassifier orchestration against a mocked GitHub API (#2103)", () =
 				body:
 					typeof init?.body === "string" ? JSON.parse(init.body) : undefined,
 			});
+			if (
+				pairwiseCommentsBarrier &&
+				method === "GET" &&
+				url.includes("/comments")
+			) {
+				await commentsGetBarrier();
+			}
+
 			if (url.endsWith("/actions/runs/999")) {
 				return jsonResponse({
 					head_sha: "deadbeef",
@@ -273,22 +471,54 @@ describe("runClassifier orchestration against a mocked GitHub API (#2103)", () =
 			if (url.endsWith("/actions/jobs/111/logs")) {
 				return textResponse(rawLog);
 			}
-			if (url.includes("/issues/42/comments")) {
-				return jsonResponse(existingComments);
+			if (method === "GET" && url.includes("/issues/42/comments")) {
+				return jsonResponse([...comments]);
 			}
-			if (/\/issues\/comments\/\d+$/.test(url)) {
-				return jsonResponse({ ok: true });
+			if (method === "POST" && url.includes("/issues/42/comments")) {
+				const body = JSON.parse((init?.body as string) ?? "{}");
+				const created = { id: nextId++, body: body.body };
+				comments.push(created);
+				return jsonResponse(created, 201);
+			}
+			const patchMatch =
+				method === "PATCH" && /\/issues\/comments\/(\d+)$/.exec(url);
+			if (patchMatch) {
+				const id = Number(patchMatch[1]);
+				const body = JSON.parse((init?.body as string) ?? "{}");
+				const existing = comments.find((c) => c.id === id);
+				if (existing) existing.body = body.body;
+				return jsonResponse(existing ?? null);
+			}
+			const deleteMatch =
+				method === "DELETE" && /\/issues\/comments\/(\d+)$/.exec(url);
+			if (deleteMatch) {
+				const id = Number(deleteMatch[1]);
+				const index = comments.findIndex((c) => c.id === id);
+				if (index !== -1) comments.splice(index, 1);
+				return noContentResponse();
 			}
 			if (url.endsWith("/actions/runs/999/rerun-failed-jobs")) {
+				rerunCallCount++;
+				if (rerunHandler) {
+					const result = rerunHandler();
+					return jsonResponse({}, result.status);
+				}
 				return jsonResponse({}, 201);
 			}
 			throw new Error(`unmocked URL in test: ${method} ${url}`);
 		};
-		return { fetcher, calls };
+		return {
+			fetcher,
+			calls,
+			comments,
+			get rerunCallCount() {
+				return rerunCallCount;
+			},
+		};
 	}
 
 	it("posts a new comment and triggers a rerun on the first infra failure for a SHA", async () => {
-		const { fetcher, calls } = mockApi();
+		const { fetcher, calls } = makeStatefulApi();
 		const result = await runClassifier({
 			fetcher,
 			owner: "acme",
@@ -306,15 +536,18 @@ describe("runClassifier orchestration against a mocked GitHub API (#2103)", () =
 		expect((posted?.body as { body: string }).body).toContain(
 			"ci-classifier: infra-oom",
 		);
+		expect((posted?.body as { body: string }).body).toContain(
+			"auto-rerun triggered",
+		);
 
 		const reran = calls.find((c) => c.url.includes("rerun-failed-jobs"));
 		expect(reran).toBeDefined();
 	});
 
 	it("updates the existing sticky comment in place instead of posting a second one, and skips the rerun once already triggered for this SHA", async () => {
-		const priorBody = `ci-classifier: infra-oom (no failing assertion) ${buildMarker("deadbeef", true)}`;
-		const { fetcher, calls } = mockApi({
-			existingComments: [{ id: 555, body: priorBody }],
+		const priorBody = `ci-classifier: infra-oom (no failing assertion; auto-rerun triggered) ${buildMarker("deadbeef", "true")}`;
+		const { fetcher, calls } = makeStatefulApi({
+			initialComments: [{ id: 555, body: priorBody }],
 		});
 
 		const result = await runClassifier({
@@ -324,7 +557,10 @@ describe("runClassifier orchestration against a mocked GitHub API (#2103)", () =
 			runId: 999,
 		});
 
+		// this-pass semantics: no NEW rerun was attempted this invocation, even
+		// though the marker/comment still reflect the earlier success.
 		expect(result.rerunTriggered).toBe(false);
+		expect(result.commentBody).toContain("auto-rerun triggered");
 
 		const posted = calls.find(
 			(c) => c.method === "POST" && c.url.includes("/comments"),
@@ -338,6 +574,111 @@ describe("runClassifier orchestration against a mocked GitHub API (#2103)", () =
 		const reran = calls.find((c) => c.url.includes("rerun-failed-jobs"));
 		expect(reran).toBeUndefined();
 	});
+
+	// F4 (BLOCKING, red-proof with a throwing rerun stub): the marker must
+	// reflect the ACTUAL outcome of the rerun call, not an assumed one. A
+	// 403 (the realistic first outcome while actions:write is undecided,
+	// per the PR body) must NOT write rerun=true.
+	it("F4: a failing rerun attempt (403) is recorded honestly and does not lie in the marker", async () => {
+		const { fetcher, calls } = makeStatefulApi({
+			rerunHandler: () => ({ ok: false, status: 403 }),
+		});
+
+		const result = await runClassifier({
+			fetcher,
+			owner: "acme",
+			repo: "repo",
+			runId: 999,
+		});
+
+		expect(result.rerunTriggered).toBe(false);
+		expect(result.commentBody).toContain("failed:403");
+		expect(result.commentBody).not.toContain("auto-rerun triggered");
+
+		const posted = calls.find(
+			(c) => c.method === "POST" && c.url.includes("/comments"),
+		);
+		expect((posted?.body as { body: string }).body).toContain(
+			"rerun attempt failed",
+		);
+	});
+
+	// F4 continued: the SAME SHA must remain eligible for a retry after a
+	// recorded failure -- this is what "don't lie in the marker" is FOR.
+	it("F4: after a recorded rerun failure, the same SHA is still eligible for a retry", async () => {
+		const first = makeStatefulApi({
+			rerunHandler: () => ({ ok: false, status: 403 }),
+		});
+		await runClassifier({
+			fetcher: first.fetcher,
+			owner: "acme",
+			repo: "repo",
+			runId: 999,
+		});
+		expect(first.comments[0].body).toContain("failed:403");
+
+		// Second invocation reuses the same (now-populated) comment state, but
+		// this time the rerun endpoint succeeds.
+		const second = makeStatefulApi({
+			initialComments: [...first.comments],
+		});
+		const result = await runClassifier({
+			fetcher: second.fetcher,
+			owner: "acme",
+			repo: "repo",
+			runId: 999,
+		});
+		expect(result.rerunTriggered).toBe(true);
+		expect(second.rerunCallCount).toBe(1);
+	});
+
+	// F4: a thrown network error from the fetcher itself (not just a non-2xx
+	// response) must be caught and recorded the same honest way, never
+	// propagate as an unhandled rejection that skips the comment entirely.
+	it("F4: a throwing rerun stub (network-level failure) is recorded, not thrown", async () => {
+		const { fetcher, calls } = makeStatefulApi();
+		const throwingFetcher = async (url: string, init?: RequestInit) => {
+			if (url.endsWith("/rerun-failed-jobs")) {
+				throw new Error("ECONNRESET talking to api.github.com");
+			}
+			return fetcher(url, init);
+		};
+
+		const result = await runClassifier({
+			fetcher: throwingFetcher,
+			owner: "acme",
+			repo: "repo",
+			runId: 999,
+		});
+
+		expect(result.rerunTriggered).toBe(false);
+		expect(result.commentBody).toContain("failed:0");
+		void calls;
+	});
+
+	// F3 (medium, red-proof with the reviewer's concurrent-invocation shape):
+	// two overlapping runClassifier calls for the SAME sha, both reading
+	// "no existing comment" before either writes, must converge to exactly
+	// ONE comment and must not both believe they own the rerun.
+	it("F3: two concurrent invocations for the same SHA converge to one comment, not two", async () => {
+		const { fetcher, comments } = makeStatefulApi({
+			pairwiseCommentsBarrier: true,
+		});
+
+		const [first, second] = await Promise.all([
+			runClassifier({ fetcher, owner: "acme", repo: "repo", runId: 999 }),
+			runClassifier({ fetcher, owner: "acme", repo: "repo", runId: 999 }),
+		]);
+
+		expect(comments).toHaveLength(1);
+		// Exactly one of the two invocations reports itself as superseded --
+		// the reconciliation loser -- and the other does not.
+		const supersededCount = [first, second].filter(
+			(r) =>
+				"supersededByCommentId" in r && r.supersededByCommentId !== undefined,
+		).length;
+		expect(supersededCount).toBe(1);
+	});
 });
 
 describe("buildCommentBody (#2103)", () => {
@@ -345,23 +686,36 @@ describe("buildCommentBody (#2103)", () => {
 		const body = buildCommentBody({
 			classification: { kind: "infra-oom", detail: "no failing assertion" },
 			sha: "abc1234",
-			rerunTriggered: true,
+			rerunState: "true",
 		});
 		expect(body.split("\n")).toHaveLength(1);
 		expect(body).toContain("ci-classifier: infra-oom");
 		expect(body).toContain("auto-rerun triggered");
-		expect(body).toContain(buildMarker("abc1234", true));
+		expect(body).toContain(buildMarker("abc1234", "true"));
 	});
 
 	it("renders the real-failure line without any rerun language", () => {
 		const body = buildCommentBody({
 			classification: { kind: "real", detail: "tests/x.test.ts > some test" },
 			sha: "abc1234",
-			rerunTriggered: false,
+			rerunState: "false",
 		});
 		expect(body).toBe(
 			"ci-classifier: real — first failure: tests/x.test.ts > some test " +
-				buildMarker("abc1234", false),
+				buildMarker("abc1234", "false"),
 		);
+	});
+
+	// F4: the failed-attempt language is distinct from both success and
+	// never-attempted, so a reader (and shouldTriggerRerun) can tell them
+	// apart.
+	it("renders a distinct message for a failed rerun attempt", () => {
+		const body = buildCommentBody({
+			classification: { kind: "infra-net", detail: "network error: ENOTFOUND" },
+			sha: "abc1234",
+			rerunState: "failed:500",
+		});
+		expect(body).toContain("rerun attempt failed (HTTP 500");
+		expect(body).not.toContain("auto-rerun triggered");
 	});
 });

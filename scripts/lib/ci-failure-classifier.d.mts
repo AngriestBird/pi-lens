@@ -13,8 +13,12 @@ export interface Classification {
 	kind: ClassificationKind;
 	detail: string;
 }
+export type RerunState = "true" | "false" | `failed:${number}`;
 export interface ClassifierMarker {
 	sha: string;
+	// Optional on the TYPE (shouldTriggerRerun's guard only reads sha +
+	// rerunTriggered) even though parseClassifierMarker always sets it.
+	rerunState?: string;
 	rerunTriggered: boolean;
 }
 export interface ClassifierDecision {
@@ -25,10 +29,7 @@ export interface ClassifierDecision {
 
 export declare function stripAnsi(text: string): string;
 export declare function classifyFailureLog(rawLog: string): Classification;
-export declare function buildMarker(
-	sha: string,
-	rerunTriggered: boolean,
-): string;
+export declare function buildMarker(sha: string, rerunState: string): string;
 export declare function parseClassifierMarker(
 	commentBody: string | null | undefined,
 ): ClassifierMarker | null;
@@ -40,7 +41,7 @@ export declare function shouldTriggerRerun(args: {
 export declare function buildCommentBody(args: {
 	classification: Classification;
 	sha: string;
-	rerunTriggered: boolean;
+	rerunState: string;
 }): string;
 export declare function decideClassifierAction(args: {
 	rawLog: string;
@@ -80,13 +81,21 @@ export declare function upsertComment(args: {
 	prNumber: number;
 	existingComment: { id: number; body: string } | null;
 	body: string;
-}): Promise<unknown>;
-export declare function triggerRerunFailedJobs(args: {
+}): Promise<{ id: number; body: string } | null>;
+export declare function reconcileDuplicateClassifierComments(args: {
+	fetcher: FetchFn;
+	owner: string;
+	repo: string;
+	prNumber: number;
+	sha: string;
+	postedCommentId: number | undefined;
+}): Promise<{ isWinner: boolean; winningCommentId: number | undefined }>;
+export declare function attemptRerun(args: {
 	fetcher: FetchFn;
 	owner: string;
 	repo: string;
 	runId: number | string;
-}): Promise<void>;
+}): Promise<{ ok: boolean; status: number }>;
 export declare function runClassifier(args: {
 	fetcher: FetchFn;
 	owner: string;
@@ -100,5 +109,6 @@ export declare function runClassifier(args: {
 		prNumber: number;
 		jobId: number;
 		jobName: string;
+		supersededByCommentId?: number;
 	}
 >;
