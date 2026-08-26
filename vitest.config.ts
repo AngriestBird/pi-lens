@@ -163,6 +163,7 @@ const grammarHeavyInclude = [
 // smaller one) has already fully drained, so the sampler only ever
 // contends with (at most) one other file in this group.
 const timingSensitiveInclude = [
+	"tests/clients/review-graph-retention.test.ts",
 	"tests/clients/source-walk-occupancy.test.ts",
 	"tests/clients/source-filter-async.test.ts",
 	// Workspace-edit planning also uses the independent occupancy sampler; keep
