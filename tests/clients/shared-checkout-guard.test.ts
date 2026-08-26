@@ -831,4 +831,50 @@ describe("probeWorkingTreeState against the real git binary (#2007)", () => {
 		// git exits non-zero outside a repo. That is UNKNOWN, not clean.
 		expect(await probeWorkingTreeState(outside)).toBe("unknown");
 	});
+
+	// #2100 F3: the probe carried no `maxOutputBytes`, so `outputTruncated` could
+	// never fire, and the failure check ahead of it downgraded a DEFINITE dirty
+	// to `unknown` the moment a cap kill landed — `error` + null status on POSIX,
+	// status 1 on Windows. This shims a chatty `git` on PATH that floods stdout
+	// past the 16 MiB cap and then hangs, so the ONLY way it ends is the cap kill
+	// (post-fix) or the probe's own 5 s timeout (pre-fix). A real spawn, not a
+	// mock. Pre-fix: no cap, the flood is held whole and the hang trips the probe
+	// timeout, so the probe answers `unknown`. Post-fix: the cap kills the child,
+	// `truncatedByOutputCap` is read first, and 16 MiB of porcelain is dirt.
+	// Removing the cap OR restoring the old order reds this test.
+	it("calls a cap-flooded working tree dirty, not unknown", async () => {
+		const shimDir = path.join(tmpRoot, "chatty-git-shim");
+		fs.mkdirSync(shimDir, { recursive: true });
+		const chatty = path.join(shimDir, "chatty.js");
+		// One ~20 MiB write (past the 16 MiB cap) then a keep-alive, so the child
+		// never exits on its own — the cap kill or the timeout ends it.
+		fs.writeFileSync(
+			chatty,
+			[
+				'const line = "?? " + "a".repeat(200) + String.fromCharCode(10);',
+				"process.stdout.write(line.repeat(100000));",
+				"setTimeout(() => {}, 10000);",
+				"",
+			].join("\n"),
+		);
+		const node = process.execPath;
+		if (process.platform === "win32") {
+			fs.writeFileSync(
+				path.join(shimDir, "git.cmd"),
+				`@"${node}" "${chatty}" %*\r\n`,
+			);
+		} else {
+			const shim = path.join(shimDir, "git");
+			fs.writeFileSync(shim, `#!/bin/sh\nexec "${node}" "${chatty}"\n`);
+			fs.chmodSync(shim, 0o755);
+		}
+
+		const savedPath = process.env.PATH;
+		process.env.PATH = `${shimDir}${path.delimiter}${savedPath ?? ""}`;
+		try {
+			expect(await probeWorkingTreeState(shimDir)).toBe("dirty");
+		} finally {
+			process.env.PATH = savedPath;
+		}
+	}, 20000);
 });
