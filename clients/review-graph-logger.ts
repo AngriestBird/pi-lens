@@ -2,6 +2,7 @@ import * as path from "node:path";
 import { isTestMode } from "./env-utils.js";
 import { getGlobalPiLensDir } from "./file-utils.js";
 import { createNdjsonLogger } from "./ndjson-logger.js";
+import { normalizeFilePath } from "./path-utils.js";
 import type {
 	ReviewGraph,
 	ReviewGraphPersistCoverage,
@@ -173,11 +174,27 @@ export interface ReviewGraphLogEntry {
 	target?: number;
 }
 
+/**
+ * #2141: call sites feed this a mix of raw `cwd` params and already-normalized
+ * cache keys (`normalizeMapKey(path.resolve(cwd))`), so the same project root
+ * showed up in the log as both `C:\...\pi-free` and `C:/.../pi-free`. Rather
+ * than auditing every call site, normalize once here — the single emit
+ * seam — matching the form `normalizeFilePath` already produces for every
+ * other structured log's `cwd` field (bus-publish, disposition-publish,
+ * diagnostics-publish, format-events-publish all normalize at their publish
+ * call sites; this pulls the same conversion in-house so no future call site
+ * can regress it).
+ */
 export function logReviewGraph(entry: ReviewGraphLogEntry): void {
 	if (isTestMode()) {
 		return;
 	}
-	writer.log({ ts: new Date().toISOString(), ...entry, pid: process.pid });
+	writer.log({
+		ts: new Date().toISOString(),
+		...entry,
+		cwd: normalizeFilePath(entry.cwd),
+		pid: process.pid,
+	});
 }
 
 export function getReviewGraphLogPath(): string {
