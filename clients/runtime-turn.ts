@@ -2365,7 +2365,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	let lateAuxCeilingExhausted = 0;
 	let lateAuxAnswered = 0;
 	const lateAuxStuckPairs: Array<{ filePath: string; serverId: string }> = [];
-	if (drainedPairs.length > 0 || lateAuxCapEvicted > 0) {
+	if (drainedPairs.length > 0) {
 		const byFile = new Map<string, typeof drainedPairs>();
 		for (const pair of drainedPairs) {
 			const list = byFile.get(pair.filePath);
