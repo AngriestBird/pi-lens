@@ -85,13 +85,15 @@ describe("project ignore freshness probe (#2159)", () => {
 			getProjectIgnoreMatcher(env.tmpDir).isIgnored(walkerTarget);
 			getProjectIgnoreMatcher(env.tmpDir);
 			for (let window = 1; window <= 5; window++) {
-				vi.setSystemTime(start + window * PROJECT_IGNORE_FRESHNESS_CADENCE_MS + 1);
+				vi.setSystemTime(
+					start + window * PROJECT_IGNORE_FRESHNESS_CADENCE_MS + 1,
+				);
 				getProjectIgnoreMatcher(env.tmpDir).isIgnored(walkerTarget);
 			}
 
-			expect(getProjectIgnoreMatcher(env.tmpDir).isIgnored(memoizedTarget)).toBe(
-				false,
-			);
+			expect(
+				getProjectIgnoreMatcher(env.tmpDir).isIgnored(memoizedTarget),
+			).toBe(false);
 		} finally {
 			env.cleanup();
 		}
@@ -117,13 +119,15 @@ describe("project ignore freshness probe (#2159)", () => {
 			getProjectIgnoreMatcher(env.tmpDir).isIgnored(walkerTarget);
 			getProjectIgnoreMatcher(env.tmpDir);
 			for (let window = 1; window <= 5; window++) {
-				vi.setSystemTime(start + window * PROJECT_IGNORE_FRESHNESS_CADENCE_MS + 1);
+				vi.setSystemTime(
+					start + window * PROJECT_IGNORE_FRESHNESS_CADENCE_MS + 1,
+				);
 				getProjectIgnoreMatcher(env.tmpDir).isIgnored(walkerTarget);
 			}
 
-			expect(getProjectIgnoreMatcher(env.tmpDir).isIgnored(memoizedTarget)).toBe(
-				false,
-			);
+			expect(
+				getProjectIgnoreMatcher(env.tmpDir).isIgnored(memoizedTarget),
+			).toBe(false);
 		} finally {
 			env.cleanup();
 		}
@@ -172,9 +176,7 @@ describe("project ignore freshness probe (#2159)", () => {
 
 			const statSpy = vi.spyOn(fs, "statSync");
 			const sourceStats = () =>
-				statSpy.mock.calls.filter(
-					([filePath]) => filePath === ignorePath,
-				);
+				statSpy.mock.calls.filter(([filePath]) => filePath === ignorePath);
 			statSpy.mockClear();
 			fs.writeFileSync(ignorePath, "!generated.ts\n");
 			vi.useFakeTimers();
