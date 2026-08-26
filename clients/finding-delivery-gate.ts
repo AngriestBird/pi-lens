@@ -416,6 +416,7 @@ export const DELIVERY_SURFACES: Record<string, DeliverySurfaceEntry> = {
 		"Turn-end CLI runner findings collected after the post-write path.",
 		["gateFindingsByPathFreshness"],
 		['store: "late-runner-findings"'],
+		{ evidenceMin: 2 },
 	),
 	"runtime-turn:cascade-blocker": labeled(
 		RUNTIME_TURN_FILE,

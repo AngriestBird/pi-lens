@@ -22,6 +22,7 @@ vi.mock("../../clients/latency-logger.js", async (importOriginal) => {
 
 import { CacheManager } from "../../clients/cache-manager.js";
 import {
+	drainPendingRunnerFindings,
 	deferRunnerFindings,
 	pendingRunnerFindingsSizeForTests,
 	resetPendingRunnerFindings,
@@ -204,18 +205,20 @@ describe("turn-end blocker freshness (#1631)", () => {
 			const cacheManager = new CacheManager(false);
 			const filePath = path.join(env.tmpDir, "runner.ts");
 			fs.writeFileSync(filePath, "export const value = 1;\n");
+			const markedAtMs = Date.now();
 			deferRunnerFindings({
 				filePath,
 				cwd: env.tmpDir,
 				projectRoot: env.tmpDir,
 				runnerId: "slow-runner",
-				markedAtMs: Date.now(),
+				markedAtMs,
 				promise: Promise.resolve({
 					status: "succeeded",
 					diagnostics: [{ id: "old", message: "old bytes", filePath, tool: "slow-runner", severity: "warning", semantic: "warning" }],
 					semantic: "warning",
 				}),
 			});
+			await new Promise<void>((resolve) => setImmediate(resolve));
 			await new Promise<void>((resolve) => setImmediate(resolve));
 			driftIntoFuture(filePath);
 
@@ -224,10 +227,8 @@ describe("turn-end blocker freshness (#1631)", () => {
 			const findings = cacheManager.readCache<{ content: string }>("turn-end-findings", env.tmpDir);
 			expect(findings?.data?.content ?? "").not.toContain("old bytes");
 			expect(pendingRunnerFindingsSizeForTests()).toBe(1);
-			const runnerRecord = logLatency.mock.calls
-				.map((call) => call[0])
-				.find((entry: any) => entry?.phase === "late_runner_findings");
-			expect(runnerRecord?.metadata).toMatchObject({ stale: 1, rearmed: 1 });
+			const rearmed = await drainPendingRunnerFindings(0);
+			expect(rearmed[0]?.markedAtMs).toBeGreaterThan(markedAtMs);
 		} finally {
 			env.cleanup();
 		}
