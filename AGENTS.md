@@ -286,6 +286,12 @@ Pipeline-crash teardown is destructive only for the registered primary session;
 when no primary registration exists, the legacy reset remains the fail-safe.
 (#2157, #2174)
 
+Per-path `didChange` sends serialize their read/build/send/record transaction
+through `LSPClientState.notifyChangeQueues`; different paths remain parallel.
+`recordSentContent` rejects a lower-version mirror update and records an
+`lsp-document-send-order` degradation with the server and normalized path.
+(#2113)
+
 Auxiliary diagnostic waits preserve a warm-turn fast path: on a cold
 acquisition, the budget is `max(declared wait, observed spawn + 500ms)` clamped
 to an 8s ceiling; on a warm acquisition, it remains `min(declared wait, 2000ms)`. An
@@ -1139,6 +1145,47 @@ when `hasNextPage` remains true at `MAX_PAGES` or the cursor does not advance.
 It deduplicates PR numbers before `runWarden` decides or applies actions. Its
 consumer prints that error and sets a nonzero exit code, while deliberately
 bounded sibling reads remain scoped.
+
+The warden also classifies what Actions did with each open PR head
+(`scripts/lib/warden-run-health.mjs`, #2184). A run that concluded
+`failure`/`startup_failure` with ZERO executed steps across every job is
+`starved-run`, not a red build — verified against the real incident run
+32986328966, where six jobs sat `queued` and one matrix job read
+`completed`/`skipped`, so "every job is queued" is the wrong predicate. A head
+with no `ci.yml`/`lint.yml` run past `ABSENT_RUN_GRACE_MINUTES` is `absent-run`.
+Recovery is bounded: one `POST /actions/runs/{id}/rerun` per starved run, keyed
+on GitHub's own `run_attempt` so the warden never re-runs the same run twice,
+and one per-head comment for an absent dispatch, keyed on an HTML marker
+carrying the head SHA. An unreadable runs or jobs list classifies
+`run-health-unknown`, never `absent-run`. Every swept PR gets a classification
+line in the run summary, including quiet ones.
+
+The label-gated merge lane (`scripts/lib/merge-train-lane.mjs`, #2185) is the
+only automation in this repository that merges, and it lives outside the warden
+on purpose. It merges a PR carrying `train:approved` only on POSITIVE evidence
+about the exact current head: both required checks present, `COMPLETED`, and
+`SUCCESS`, run health `runs-concluded-normally`, zero failing non-advisory
+checks, and a `CLEAN`/`UNSTABLE` merge state. Absent, unconcluded, starved, and
+DIRTY-skipped checks are all not-green. Gating on the current head is what
+re-gates a fix round, so the lane stores no "approved at SHA" state that could
+drift; the merge call passes `sha` so a head that moves mid-cycle 409s instead
+of merging on a stale verdict. Only the maintainer applies the label, so the
+adversarial-review-first policy is unchanged; removing the label aborts.
+
+Four facts about THIS repository the lane must keep matching, each probed live
+rather than assumed (review round 1 on PR #2191, all four were wrong first):
+master protection is `strict: true`, so a BEHIND head cannot be merged at all
+and instead gets `update-branch` with `expected_head_sha`; a check is advisory
+by its `(advisory)` NAME SUFFIX (`oxfmt format check (advisory)`,
+`PR body (advisory)`, `Vale prose lint (advisory)`, `OSV scan (advisory)`), not
+by a vendor allowlist; one head's rollup really does carry DUPLICATE check
+names, so `resolveCheckRuns` picks the newest by `startedAt` and fails closed on
+an unorderable disagreement, because `new Map(list.map(...))` is last-wins on
+array order and called an in-flight re-run green; and `direction=desc` is
+ignored by `issues/{n}/comments`, so every marker-dedupe read paginates to the
+last page through `scripts/lib/github-paging.mjs`. Label provenance comes from
+the last `labeled` timeline event and must name an approver, so "anyone who can
+label" is not "anyone who can merge".
 
 CI validates GitHub close-keyword syntax through `scripts/check-close-keywords.mjs`:
 PR bodies may not use a comma-separated close list because GitHub applies only
@@ -2457,7 +2504,7 @@ Ten screens. The first six were distilled from nine adversarially reviewed PRs o
 **Meta-rule — the red-first proof must fail for the DEFECT'S reason.** This sharpens the red-first rule stated above; it does not replace it. A red run proves nothing until you read the failure message. A `TypeError` or an "is not a function" red proves the import wiring is wrong and nothing else; PR #2084 quoted exactly that red as its proof. Confirm the ASSERTION failed, not the module load, the fixture setup, or a missing export. Quote the assertion line in the PR body, not just "it failed".
 
 1. **A test that drives a parallel path instead of the production entry point.** *Screen:* enter at the same function production enters, through the same filters. Name the caller chain from the real trigger down to your assertion, then check your first call sits at the top of it. When a helper stands in for a production step, list what production runs at that step and make the helper run it too. *e.g.* PR #2059's round-2 test called `registerPrimarySession()` directly and skipped the real `handleSessionStart`, which wipes the anchor — green test, broken production path; PR #2061 drove a client method that `LSPService.renameFile` filters out before it can fire, so the test guarded an unreachable branch; PR #2062's real-binary helper called `child.stdin?.end()`, which production does not, so the double diverged from production at the exact seam that hung on EPIPE. *Detect:* review question: which production function does this test call first, and what runs BEFORE it in production? Related but distinct: catalog shape 14 is the same green-and-blind outcome caused by a duplicate module instance, and "Real-runner rule/dispatch tests" below states which seams may be doubled at all.
-2. **A skip that reports as a pass.** *Screen:* a test that cannot run skips visibly; it never returns early. Use `it.skipIf`/`describe.skipIf` with a stated reason, never a bare `if (!x) return;` in the body. Exercise the gate in both states — precondition present and absent — and name the machine where the present state holds. A resolver inside the gate is itself a fixture: assert the path it computes. *e.g.* PR #2062 twice — `if (!binary) return;` reported "passed" while asserting nothing, then the round-2 resolver missed the `.pi-lens` path segment, so the visible `skipIf` never ran anywhere; PR #2058's Windows alias case bare-returned on Linux. *Detect:* grep new test bodies for a `return` before the first `expect`; for every environment gate, name the lane that satisfies it. This is the general form of two existing rules: the OS-agnostic section's "skip correctly, never vacuously pass", and `assertGrammarAvailable()` in the real-runner section below.
+2. **A skip that reports as a pass.** *Screen:* a test that cannot run skips visibly; it never returns early. Use `it.skipIf`/`describe.skipIf` with a stated reason, never a bare `if (!x) return;` in the body. Exercise the gate in both states — precondition present and absent — and name the machine where the present state holds. A resolver inside the gate is itself a fixture: assert the path it computes. *e.g.* PR #2062 twice — `if (!binary) return;` reported "passed" while asserting nothing, then the round-2 resolver missed the `.pi-lens` path segment, so the visible `skipIf` never ran anywhere; PR #2058's Windows alias case bare-returned on Linux. *Detect:* `tests/config/vacuous-skip-coverage.test.ts` sweeps the whole `tests/` tree for this shape and fails on it — a bare `return` at a test callback's own statement level that precedes every assertion, with no `skip` call before it (detector and its declared blind spots: `tests/support/vacuous-skip-scan.ts`). It found thirteen offenders on 2026-08-25, where #2089's hand census named two. Beyond what a syntax walk can see: for every environment gate, name the lane that satisfies it. This is the general form of two existing rules: the OS-agnostic section's "skip correctly, never vacuously pass", and `assertGrammarAvailable()` in the real-runner section below.
 3. **A pin at the wrong layer.** *Screen:* pin the seam that broke, not the data that seam reads. If the plumbing was wrong, drive the plumbing and let it fetch its own inputs — handing the correct input in by hand pins the registry instead. Ask whether the test would still pass if every call site hard-coded the value; if yes, it sits one layer too low. Probe a detection mechanism in BOTH directions: a case it must catch, and a case that must not evade it. *e.g.* PR #2062's argv test called `verifyToolBinary` directly WITH `tool.checkArgs`, pinning the registry and not the plumbing, so hard-coding all 15 call sites stayed green; PR #2080's conformance regex counted comments as publishers and missed aliased imports, and only a two-direction probe shows both. *Detect:* name the mutation this test must red on, then apply the mutation and watch it. The mutation-proof rule in "Contributing" is the same instrument aimed at a guard; this screen aims it at the layer you chose.
 4. **A double that identifies its caller by ambient inspection.** *Screen:* a fake selects its behavior from the arguments it receives, never from a stack trace, a function name, or a file path. Ambient inspection breaks on the next rename, and it breaks silently: the double returns the wrong branch while the assertion stays green. When behavior must vary per caller, take the discriminator as a parameter or install one double per call site. *e.g.* PR #2078's `fs.statSync` double chose its return value by string-matching a private function name out of `new Error().stack`. *Detect:* grep new doubles for `.stack`, `caller`, or a name comparison; ask what the double returns after a rename.
 5. **Environment mutation that outlives its test.** *Screen:* a file that calls `vi.stubEnv` also calls `afterEach(() => vi.unstubAllEnvs())`; the same holds for direct `process.env` writes, fake timers, and cwd changes. Then prove independence — run the new test alone with `-t`, not only in file order. A test that passes in the file and fails alone is reading the previous test's leak, so its truth is order-dependent. *e.g.* three PRs in the corpus stubbed env with no `unstubAllEnvs`; PR #2084's inverse test passed only because the preceding test leaked `GITHUB_*` variables. *Detect:* grep the file for `stubEnv` and confirm a matching `unstubAllEnvs`; run the new test in isolation before you push.
