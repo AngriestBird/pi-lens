@@ -281,6 +281,14 @@ result carries that lane in `unconfirmedServerIds` and stays ineligible for the
 fully-covered workspace cache and footer replacement. Never reconstruct the gap
 from a touch-wide timeout: consume `touchFile`'s frozen coverage set. (#1549)
 
+MCP `ensureReady` treats its cwd memo as a fast path, not authoritative root
+state. It must consult `shouldInitializeSessionRoot` so the session-root cap can
+evict and later re-register a root used by a real MCP tool call. The shared
+`isSameOrWithin` comparator probes existing POSIX-shaped roots before applying
+case-insensitive containment, because macOS filesystems can ignore case. It treats a
+case-variant path as insensitive only when both spellings reach the same directory, and
+the root memo resets at session boundaries. (#2052)
+
 Bounded LSP warm touches preserve the spawn coordinator's lifecycle evidence:
 an empty ready-client set reports `spawn_in_flight_budget_elapsed` while a
 matching primary single-flight spawn remains pending, and
@@ -315,6 +323,10 @@ ancestor was hosted first (the accepted #1373 open-order sensitivity). Classic
 TypeScript clients sample `projectInfo` once per normalized file after the first
 successful `didOpen`; this bounded best-effort telemetry never runs for native
 TS7 or blocks diagnostics. (#1328, #1373, #1412)
+
+The MCP `lspReadyCwds` set is only a readiness fast path. The authoritative
+session-root registry may evict old roots, so readiness must re-register a
+memoized root when `isSessionRootRegistered` no longer confirms it. (#2052)
 
 TypeScript diagnostic wait policy is launch-variant-aware: classic
 typescript-language-server may accept its complete first push, while native

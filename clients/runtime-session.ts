@@ -46,7 +46,10 @@ import { resetCascadeTierSessionState } from "./lsp/cascade-tier.js";
 import type { LSPShutdownOptions } from "./lsp/client.js";
 import { initLSPConfig, loadLSPConfig } from "./lsp/config.js";
 import { resetWorkspaceDiagnosticsCacheSession } from "./lsp/workspace-diagnostics-session.js";
-import { resetDirectLspCommandAvailability } from "./lsp/server.js";
+import {
+	resetDirectLspCommandAvailability,
+	resetLSPCaseSensitivityState,
+} from "./lsp/server.js";
 import { loadLspService } from "./lsp-lazy.js";
 import type { MetricsClient } from "./metrics-client.js";
 import type { OpengrepClient, OpengrepResult } from "./opengrep-client.js";
@@ -2185,6 +2188,9 @@ export async function handleSessionStart(
 	// #1897: direct-LSP negative availability and bare installer paths are
 	// session facts. A command or PATH entry can appear between sessions.
 	resetDirectLspCommandAvailability();
+	// #2052: a root may not exist when the case-sensitivity probe first sees it.
+	// Re-probe it at the next session boundary after the workspace is created.
+	resetLSPCaseSensitivityState();
 	resetResolvedPathCache();
 	// #1653: pnpm/yarn/bun/npm's availability latches (package-manager.ts) are
 	// module-local, same #1490/#1535 shape as the two lines above — the
