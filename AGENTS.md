@@ -527,6 +527,24 @@ remain ordinary project directories. The positive `.gitignore` glob precheck is
 cached per resolved project root and `size:mtimeMs`, including the absent-file
 empty result, while the project ignore matcher remains authoritative.
 
+LSP acquisition records name the caller that STARTED a language-server process
+apart from the callers that joined its in-flight spawn. `lsp_client_selected`
+carries `cold-spawn`/`spawn-failure` for the starter and
+`cold-spawn-joined`/`spawn-failure-joined` for every joiner, and the
+starter/joiner bit is captured before `await spawnPromise` — after that await
+the two are indistinguishable, which is how one 29.3 s TypeScript spawn read as
+39 spawns in 2 ms. The AUTHORITATIVE spawn count is `lsp_server_spawned`, the
+process-start record emitted once at `spawnClient`'s success path for every
+server. It does not depend on a per-server launcher record such as
+`lsp_launch_candidate_success`, which the TypeScript path never reaches. The
+two records relate as `count(lsp_server_spawned) >=
+count(outcome="cold-spawn")`, never as equality: `getClientsForFile` and
+`getAuxiliaryClientsForFile` call `ensureClientForServer` without `onOutcome`,
+so a multi-client or auxiliary spawn writes a spawn record and no selection
+record. The starter-outcome count therefore under-counts real process starts,
+and only `lsp_server_spawned` answers "how many servers did we start".
+(#1934, #2064)
+
 ### Dispatch, runners, formatters, and installer
 
 Knip's dispatch memo is instance-owned and keyed by canonical project root plus
