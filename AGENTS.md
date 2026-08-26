@@ -607,6 +607,12 @@ and only `lsp_server_spawned` answers "how many servers did we start".
 
 ### Dispatch, runners, formatters, and installer
 
+Managed verification uses the registry's optional `verificationTimeoutMs` at
+every installer-owned probe seam, including local discovery, npm install, and
+periodic refresh. The refresh candidate projection carries that policy instead
+of reintroducing a shared literal; dispatch keeps its separate 5-second budget
+until its own issue defines the broader hot-path change. (#2176, #2194)
+
 The project ignore matcher keeps its per-path verdict memo hot between edits.
 The write-result seam calls `invalidateProjectIgnoreMatcherForPath` for a
 `.gitignore` mutation: it scans every cached root containing the edited path,
@@ -695,6 +701,9 @@ preserved as `cause`. (#1214)
 `verifyToolBinary` defaults to `--version`, but all registry-driven callers pass
 `ToolDefinition.checkArgs` through local/global/user/install/refresh paths and
 opt into `safeSpawnAsync`'s `input: ""` so every verification receives EOF.
+The registry may declare a larger bounded timeout for a tool whose cold
+launcher startup exceeds the dispatch budget; Vue uses 30 seconds while the
+installer default remains 10 seconds (#2176).
 This matters for markdownlint-cli2: `--version` scanned 45 files and returned
 in about 370ms when stdin was closed, while `--no-globs -` linted one stdin
 file and returned in about 370ms; with production-shaped open stdin the latter
