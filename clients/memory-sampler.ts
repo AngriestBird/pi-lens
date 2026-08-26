@@ -31,6 +31,10 @@
  */
 
 import type { WordIndex } from "./word-index.js";
+import {
+	countPostingEntries,
+	estimateWordIndexStoreBytes,
+} from "./word-index-store.js";
 import { getSharedTreeSitterClient } from "./tree-sitter-shared.js";
 import { getReviewGraphWorkspaceCacheSnapshot } from "./review-graph/builder.js";
 import { getDispatchCascadeCacheStats } from "./dispatch/integration.js";
@@ -161,7 +165,16 @@ export interface MemorySampleSubsystems {
 	wordIndex: {
 		docs: number;
 		fileTable: number;
+		/** Distinct token count. Breadth, NOT memory — see `postingBytes`. */
 		postings: number;
+		/**
+		 * Total posting entries across every token (#2069). #1999 read
+		 * `postings` as this number and under-counted the subsystem by a factor
+		 * of sixty; both are reported now so the two can never be confused.
+		 */
+		postingEntries: number;
+		/** Estimated resident bytes of the index’s packed stores (#2069). */
+		residentBytes: number;
 		forwardEntries: number;
 	} | null;
 	/** `null` when the shared tree-sitter client hasn't been created yet
@@ -236,6 +249,11 @@ export function collectMemorySampleSubsystems(
 					docs: wordIndex.docLengths.size,
 					fileTable: wordIndex.fileTable.size,
 					postings: wordIndex.postings.size,
+					// O(distinct tokens), reading only `.length`/`.byteLength` per
+					// list — no posting ELEMENT is touched, so this stays inside the
+					// module docstring’s bounded-read constraint.
+					postingEntries: countPostingEntries(wordIndex),
+					residentBytes: estimateWordIndexStoreBytes(wordIndex),
 					forwardEntries: wordIndex.forward?.size ?? 0,
 				}
 			: null,

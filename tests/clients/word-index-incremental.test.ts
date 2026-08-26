@@ -15,6 +15,7 @@ import {
 	serializeWordIndex,
 	updateWordIndexDocument,
 	type WordIndex,
+	wordIndexPostingHits,
 } from "../../clients/word-index.js";
 
 // --- Basic primitive behavior --------------------------------------------------
@@ -31,9 +32,9 @@ describe("updateWordIndexDocument / removeWordIndexDocument", () => {
 		expect(ok).toBe(true);
 		expect(index.docCount).toBe(2);
 		expect(index.forward?.has("b.ts")).toBe(true);
-		expect(index.postings.get("beta")?.some((h) => h.file === "b.ts")).toBe(
-			true,
-		);
+		expect(
+			wordIndexPostingHits(index, "beta").some((h) => h.file === "b.ts"),
+		).toBe(true);
 	});
 
 	it("replaces an existing document (term disappears entirely from the doc)", () => {
@@ -49,9 +50,9 @@ describe("updateWordIndexDocument / removeWordIndexDocument", () => {
 
 		// alpha is gone entirely (only doc that had it), omega is now present.
 		expect(index.postings.has("alpha")).toBe(false);
-		expect(index.postings.get("omega")?.some((h) => h.file === "a.ts")).toBe(
-			true,
-		);
+		expect(
+			wordIndexPostingHits(index, "omega").some((h) => h.file === "a.ts"),
+		).toBe(true);
 		expect(index.docCount).toBe(1);
 	});
 
@@ -89,7 +90,7 @@ describe("updateWordIndexDocument / removeWordIndexDocument", () => {
 			content: "export function alpha() {}\nexport function alphaHelper() {}",
 		});
 
-		expect(index.postings.get("alphahelper")?.[0]?.file).toBe("a.ts");
+		expect(wordIndexPostingHits(index, "alphahelper")[0]?.file).toBe("a.ts");
 		// z.ts's forward entry is a completely untouched reference — verified via
 		// identity, not just value equality, since an unrelated doc's edit must
 		// never even re-derive its own forward entry.
@@ -106,9 +107,9 @@ describe("updateWordIndexDocument / removeWordIndexDocument", () => {
 		expect(index.docCount).toBe(1);
 		expect(index.forward?.has("a.ts")).toBe(false);
 		expect(index.postings.has("alpha")).toBe(false);
-		expect(index.postings.get("beta")?.some((h) => h.file === "b.ts")).toBe(
-			true,
-		);
+		expect(
+			wordIndexPostingHits(index, "beta").some((h) => h.file === "b.ts"),
+		).toBe(true);
 	});
 
 	it("an unchanged doc is untouched by an unrelated update (reference identity)", () => {
@@ -233,10 +234,12 @@ function randomContent(rng: () => number, lineCount: number): string {
 
 /** Deep-normalize a WordIndex into a comparable plain structure (Maps sorted, Sets->arrays). */
 function normalize(index: WordIndex) {
-	const postings = [...index.postings.entries()]
-		.map(([token, hits]) => [
+	const postings = [...index.postings.keys()]
+		.map((token) => [
 			token,
-			[...hits].sort((a, b) => a.file.localeCompare(b.file) || a.line - b.line),
+			wordIndexPostingHits(index, token).sort(
+				(a, b) => a.file.localeCompare(b.file) || a.line - b.line,
+			),
 		])
 		.sort((a, b) => (a[0] as string).localeCompare(b[0] as string));
 	const docLengths = [...index.docLengths.entries()].sort((a, b) =>
