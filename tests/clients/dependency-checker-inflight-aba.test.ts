@@ -78,6 +78,35 @@ describe("DependencyChecker.checkFile in-flight ABA release (#1968)", () => {
 			cleanup();
 		}
 	});
+
+	// Mutation-proof companion: a guard that never releases (deleting or
+	// neutering the identity check by always clearing) is a leak in the OTHER
+	// direction. This pins that a normal, uncontested settlement still empties
+	// the slot, so a mutant that makes the guard permanently `false` reds here.
+	it("a normally-settling check still cleans up its own entry", async () => {
+		const { tmpDir, cleanup } = setupTestEnvironment(
+			"pi-lens-dep-check-clean-",
+		);
+		try {
+			const filePath = `${tmpDir}/probe.ts`;
+			fs.writeFileSync(filePath, "export const x = 1;\n");
+
+			const checker = new DependencyChecker();
+			const internals = checker as unknown as CheckInternals;
+			vi.spyOn(internals, "ensureAvailable").mockResolvedValue(true);
+			vi.spyOn(internals, "importsChanged").mockReturnValue(true);
+			vi.spyOn(internals, "runCheckFile").mockResolvedValue({
+				hasCircular: false,
+				circular: [],
+			});
+
+			await checker.checkFile(filePath, tmpDir);
+			await tick();
+			expect(internals.checkInFlight.size).toBe(0);
+		} finally {
+			cleanup();
+		}
+	});
 });
 
 describe("DependencyChecker.scanProject in-flight ABA release (#1968)", () => {
@@ -90,10 +119,7 @@ describe("DependencyChecker.scanProject in-flight ABA release (#1968)", () => {
 
 			const checker = new DependencyChecker();
 			const internals = checker as unknown as CheckInternals & {
-				runScanProject: (
-					projectRoot: string,
-					gen: number,
-				) => Promise<unknown>;
+				runScanProject: (projectRoot: string, gen: number) => Promise<unknown>;
 			};
 			vi.spyOn(internals, "ensureAvailable").mockResolvedValue(true);
 
@@ -125,6 +151,35 @@ describe("DependencyChecker.scanProject in-flight ABA release (#1968)", () => {
 			expect(calls).toBe(1);
 
 			successor.resolve({ circular: [], count: 0 });
+		} finally {
+			cleanup();
+		}
+	});
+
+	// Mutation-proof companion: pins that a normal, uncontested settlement
+	// still empties the slot, so a mutant that makes the identity guard
+	// permanently `false` (never releases) reds here.
+	it("a normally-settling scan still cleans up its own entry", async () => {
+		const { tmpDir, cleanup } = setupTestEnvironment("pi-lens-dep-scan-clean-");
+		try {
+			fs.writeFileSync(`${tmpDir}/probe.ts`, "export const x = 1;\n");
+
+			const checker = new DependencyChecker();
+			const internals = checker as unknown as CheckInternals;
+			vi.spyOn(internals, "ensureAvailable").mockResolvedValue(true);
+			vi.spyOn(
+				internals as unknown as {
+					runScanProject: (
+						projectRoot: string,
+						gen: number,
+					) => Promise<unknown>;
+				},
+				"runScanProject",
+			).mockResolvedValue({ circular: [], count: 0 });
+
+			await checker.scanProject(tmpDir);
+			await tick();
+			expect(internals.scanInFlight.size).toBe(0);
 		} finally {
 			cleanup();
 		}

@@ -358,7 +358,9 @@ describe("runTurnEndForIpc in-flight ABA release (#1968)", () => {
 		const third = runTurnEndForIpc(tmpDir);
 		expect(third).toBe(successor.promise);
 
-		successor.resolve({ outcome: { turnEnd: "", tests: "", filesRegistered: 0 } });
+		successor.resolve({
+			outcome: { turnEnd: "", tests: "", filesRegistered: 0 },
+		});
 		await third;
 	});
 });

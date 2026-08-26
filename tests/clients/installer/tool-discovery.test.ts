@@ -669,6 +669,26 @@ describe("ensureTool in-flight ABA release (#1968)", () => {
 			}
 		});
 	});
+
+	// Mutation-proof companion: pins that a normal, uncontested settlement
+	// still empties the slot, so a mutant that makes the identity guard
+	// permanently `false` (never releases) reds here. `allowInstall: false`
+	// still reaches the `ensureInFlight` registration (cache misses under
+	// `withEmptyPath`) but resolves without a network call, so this exercises
+	// the exact same map without needing the httpsBlocker gate.
+	it("a normally-settling ensure still cleans up its own entry", async () => {
+		await withEmptyPath(async () => {
+			const inFlight = _peekEnsureInFlightForTesting();
+			expect(inFlight.size).toBe(0);
+
+			const result = await ensureTool("rust-analyzer", {
+				allowInstall: false,
+			});
+
+			expect(result).toBeUndefined();
+			expect(inFlight.size).toBe(0);
+		});
+	});
 });
 
 describe("ensureTool force-reinstall", () => {

@@ -497,7 +497,11 @@ describe("runner-helpers availability checker", () => {
 		// shared `sgLatch` ahead of B's own (newer-generation) verdict, which is
 		// a separate concern from the in-flight MAP identity this test pins.
 		const gates: Array<{
-			resolve: (value: { stdout: string; stderr: string; status: number }) => void;
+			resolve: (value: {
+				stdout: string;
+				stderr: string;
+				status: number;
+			}) => void;
 			reject: (err: Error) => void;
 		}> = [];
 		let calls = 0;

@@ -171,9 +171,8 @@ describe("loadLSPConfig global configuration (#870)", () => {
 describe("initLSPConfig in-flight ABA release (#1968)", () => {
 	it("a late-settling init does not evict its mid-flight successor", async () => {
 		const projectDir = tmpDir("pi-lens-lsp-project-aba-");
-		const { initLSPConfig, _peekConfigInFlightForTests } = await import(
-			"../../../clients/lsp/config.js"
-		);
+		const { initLSPConfig, _peekConfigInFlightForTests } =
+			await import("../../../clients/lsp/config.js");
 
 		const buildA = initLSPConfig(projectDir);
 		// Synchronous: the map entry is already registered here, before A's
@@ -196,5 +195,29 @@ describe("initLSPConfig in-flight ABA release (#1968)", () => {
 
 		resolveSuccessor!();
 		await successor;
+	});
+
+	// Mutation-proof companion: pins that a normal, uncontested settlement
+	// still empties the slot, so a mutant that makes the identity guard
+	// permanently `false` (never releases) reds here. Checked by KEY, not
+	// overall map size — the sibling test above leaves a synthetic successor
+	// entry under its OWN key that nothing but a real `initLSPConfig` call for
+	// that same cwd would ever clear.
+	it("a normally-settling init still cleans up its own entry", async () => {
+		const projectDir = tmpDir("pi-lens-lsp-project-clean-");
+		const { initLSPConfig, _peekConfigInFlightForTests } = await import(
+			"../../../clients/lsp/config.js"
+		);
+
+		const inFlight = _peekConfigInFlightForTests();
+		const before = new Set(inFlight.keys());
+		const pass = initLSPConfig(projectDir);
+		// Synchronous: the map entry is already registered here, exactly as the
+		// ABA test above relies on.
+		const key = [...inFlight.keys()].find((k) => !before.has(k))!;
+		expect(key).toBeDefined();
+
+		await pass;
+		expect(inFlight.has(key)).toBe(false);
 	});
 });

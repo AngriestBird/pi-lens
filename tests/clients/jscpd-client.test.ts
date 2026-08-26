@@ -581,4 +581,25 @@ describe("jscpd-client in-flight ABA release (#1968)", () => {
 			cleanup();
 		}
 	});
+
+	// Mutation-proof companion: pins that a normal, uncontested settlement
+	// still empties the slot, so a mutant that makes the identity guard
+	// permanently `false` (never releases) reds here.
+	it("a normally-settling scan still cleans up its own entry", async () => {
+		const { JscpdClient } = await import("../../clients/jscpd-client.js");
+		const { tmpDir, cleanup } = setupTestEnvironment("pi-lens-jscpd-clean-");
+		try {
+			const client = new JscpdClient(false);
+			const internals = client as unknown as Internals;
+			vi.spyOn(internals, "ensureAvailable").mockResolvedValue(true);
+			vi.spyOn(internals, "hasSourceFilesRecursive").mockReturnValue(true);
+			vi.spyOn(internals, "runScan").mockResolvedValue({});
+
+			await client.scan(tmpDir, 5, 50, false);
+			await tick();
+			expect(internals.inFlight.size).toBe(0);
+		} finally {
+			cleanup();
+		}
+	});
 });
