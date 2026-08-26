@@ -205,7 +205,7 @@ describe("turn-end blocker freshness (#1631)", () => {
 			const cacheManager = new CacheManager(false);
 			const filePath = path.join(env.tmpDir, "runner.ts");
 			fs.writeFileSync(filePath, "export const value = 1;\n");
-			const markedAtMs = Date.now();
+			const markedAtMs = Date.now() - 1_000;
 			deferRunnerFindings({
 				filePath,
 				cwd: env.tmpDir,
