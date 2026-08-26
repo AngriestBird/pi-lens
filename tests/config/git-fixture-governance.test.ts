@@ -151,6 +151,10 @@ describe("real Git fixture governance", () => {
 		const files = scriptFiles(path.resolve(__dirname, "../../scripts"));
 		// Calibration: 60+ *.mjs files under scripts/ on 2026-08-26 (fix round
 		// 2); 30 is a floor well below that, well above zero.
-		assertNonEmptyScan("git fixture governance scripts sweep", files.length, 30);
+		assertNonEmptyScan(
+			"git fixture governance scripts sweep",
+			files.length,
+			30,
+		);
 	});
 });
