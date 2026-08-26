@@ -3041,6 +3041,11 @@ export const BashServer: LSPServerInfo = {
 	name: "Bash Language Server",
 	extensions: [".bash", ".sh", ".zsh"],
 	root: FileDirRoot,
+	// #2194 bounded the installer's own verification at 20s; the dispatch
+	// touch's client-wait floor stayed at the shared 5s default, so a cold
+	// spawn could still race that budget and read as unavailable even after
+	// installer verification cleared it. Match the installer bound (#2169).
+	clientWaitTimeoutMs: 20_000,
 	spawn(root, options) {
 		return resolveAndLaunch(
 			{
@@ -3153,6 +3158,10 @@ export const JsonServer: LSPServerInfo = {
 			[".git"],
 		]),
 	),
+	// See BashServer above: the installer's 20s verification bound (#2194)
+	// does not, on its own, raise the dispatch touch's cold-spawn wait floor.
+	// Mirror it here so a cold spawn cannot lose that race either (#2169).
+	clientWaitTimeoutMs: 20_000,
 	spawn(root, options) {
 		return resolveAndLaunch(
 			{
@@ -3215,6 +3224,10 @@ export const PrismaServer: LSPServerInfo = {
 	root: RootWithFallback(
 		createRootDetector(["prisma/schema.prisma", "schema.prisma"]),
 	),
+	// Matches the installer's 40s verification bound above (#2169): the
+	// dispatch touch's cold-spawn wait floor defaults to 5s and would
+	// otherwise time the client out well before the binary answers.
+	clientWaitTimeoutMs: 40_000,
 	spawn(root, options) {
 		return resolveAndLaunch(
 			{
@@ -3246,6 +3259,11 @@ export const VueServer: LSPServerInfo = {
 			]),
 		),
 	),
+	// Vue's launcher loads the full language-service bundle before answering,
+	// matching the installer's 30s verification bound (#2176). The dispatch
+	// touch's cold-spawn wait floor defaults to 5s and needs the same raise so
+	// a cold spawn cannot time out there instead.
+	clientWaitTimeoutMs: 30_000,
 	async spawn(root, options) {
 		const tsserverPath = await findTsserverPath(root, options?.allowInstall);
 
@@ -3296,6 +3314,10 @@ export const SvelteServer: LSPServerInfo = {
 			]),
 		),
 	),
+	// Matches the installer's 20s verification bound above (#2169): the
+	// dispatch touch's cold-spawn wait floor defaults to 5s and would
+	// otherwise time the client out well before the binary answers.
+	clientWaitTimeoutMs: 20_000,
 	async spawn(root, options) {
 		const tsserverPath = await findTsserverPath(root, options?.allowInstall);
 		const proc = await resolveAndLaunch(

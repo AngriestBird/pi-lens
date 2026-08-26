@@ -74,6 +74,29 @@ describe("TOOLS registry consistency", () => {
 		expect(getToolVerificationTimeout(json!)).toBe(20_000);
 	});
 
+	it("uses the Svelte/Prisma language-server cold-start budgets (#2169)", () => {
+		const svelte = TOOLS.find((tool) => tool.id === "svelte-language-server");
+		const prisma = TOOLS.find(
+			(tool) => tool.id === "@prisma/language-server",
+		);
+		expect(svelte).toBeDefined();
+		expect(prisma).toBeDefined();
+		expect(getToolVerificationTimeout(svelte!)).toBe(20_000);
+		expect(getToolVerificationTimeout(prisma!)).toBe(40_000);
+	});
+
+	it("carries the Svelte/Prisma timeouts into refresh candidates (#2169)", () => {
+		const refreshable = getRefreshableManagedTools();
+		const svelte = refreshable.find(
+			(tool) => tool.toolId === "svelte-language-server",
+		);
+		const prisma = refreshable.find(
+			(tool) => tool.toolId === "@prisma/language-server",
+		);
+		expect(svelte?.verificationTimeoutMs).toBe(20_000);
+		expect(prisma?.verificationTimeoutMs).toBe(40_000);
+	});
+
 	it("every tool has the required base wiring (id, name, checkCommand, checkArgs, strategy)", () => {
 		for (const t of TOOLS) {
 			expect(typeof t.id, `id on ${JSON.stringify(t.name)}`).toBe("string");

@@ -96,4 +96,33 @@ describe("LSP_SERVERS registry consistency", () => {
 			}
 		}
 	});
+
+	/**
+	 * #2169/#2176: the dispatch lsp-runner's `touchFile` call bounds cold-spawn
+	 * waiting at `RUNTIME_CONFIG.pipeline.lspSpawnBudgetMs` (5s) by default —
+	 * `getClientForFile` only raises that floor when the matching server
+	 * declares `clientWaitTimeoutMs` (the same seam RubyServer already uses for
+	 * its own slow cold-start bundle setup). Bash and JSON got a 20s installer
+	 * verification bound in #2194, and Vue a 30s bound in #2176's first PR, but
+	 * none of the three raised this SEPARATE dispatch-side floor — so a cold
+	 * spawn could still lose the 5s race and read as unavailable even after
+	 * installer verification would have accepted it. Svelte and Prisma need
+	 * the same floor for their own #2169 installer bounds.
+	 */
+	it("raises the dispatch client-wait floor for every known cold-start server (#2169, #2176)", () => {
+		const expected: Record<string, number> = {
+			bash: 20_000,
+			json: 20_000,
+			prisma: 40_000,
+			vue: 30_000,
+			svelte: 20_000,
+		};
+		for (const [id, timeoutMs] of Object.entries(expected)) {
+			const server = LSP_SERVERS.find((s) => s.id === id);
+			expect(server, `${id} registered`).toBeDefined();
+			expect(server?.clientWaitTimeoutMs, `${id}.clientWaitTimeoutMs`).toBe(
+				timeoutMs,
+			);
+		}
+	});
 });
