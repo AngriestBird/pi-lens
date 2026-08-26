@@ -201,7 +201,10 @@ export async function resolveLivePrBody(
  * caller SKIPS the conditional check rather than guessing — a lint that can
  * misfire on fetch trouble teaches people to ignore it.
  */
-export async function resolveTouchesTests(payloadPr, fetchImpl = globalThis.fetch) {
+export async function resolveTouchesTests(
+	payloadPr,
+	fetchImpl = globalThis.fetch,
+) {
 	try {
 		const token = process.env.GITHUB_TOKEN;
 		if (!token) throw new Error("GITHUB_TOKEN is not set");
@@ -222,9 +225,12 @@ export async function resolveTouchesTests(payloadPr, fetchImpl = globalThis.fetc
 		);
 		if (!response.ok) throw new Error(`GitHub API returned ${response.status}`);
 		if (/rel="next"/.test(response.headers.get("link") ?? ""))
-			throw new Error("PR exceeds one file page; skipping the conditional check");
+			throw new Error(
+				"PR exceeds one file page; skipping the conditional check",
+			);
 		const files = await response.json();
-		if (!Array.isArray(files)) throw new Error("GitHub API returned no file list");
+		if (!Array.isArray(files))
+			throw new Error("GitHub API returned no file list");
 		return files.some((file) => /^tests\//.test(file.filename ?? ""));
 	} catch (error) {
 		console.warn(
@@ -245,8 +251,7 @@ async function lintPullRequestEvent() {
 	if (!pullRequest || !process.env.GITHUB_REPOSITORY)
 		throw new Error("Pull request event and GITHUB_REPOSITORY are required");
 	const result = lintPrBody(await resolveLivePrBody(pullRequest), {
-		requireTestAssessment:
-			(await resolveTouchesTests(pullRequest)) === true,
+		requireTestAssessment: (await resolveTouchesTests(pullRequest)) === true,
 	});
 	if (!result.valid) {
 		for (const error of result.errors) console.error(error);

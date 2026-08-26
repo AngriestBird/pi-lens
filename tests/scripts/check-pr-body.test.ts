@@ -204,25 +204,29 @@ foo.test.ts uniquely pins the retry ladder; nothing made redundant.`;
 	});
 
 	it("accepts an answered section when required", () => {
-		expect(
-			lintPrBody(assessed, { requireTestAssessment: true }),
-		).toMatchObject({ valid: true });
+		expect(lintPrBody(assessed, { requireTestAssessment: true })).toMatchObject(
+			{ valid: true },
+		);
 	});
 
 	it("rejects an empty section when required", () => {
-		const result = lintPrBody(`${body}
+		const result = lintPrBody(
+			`${body}
 
 ### Test assessment
-`, {
-			requireTestAssessment: true,
-		});
+`,
+			{
+				requireTestAssessment: true,
+			},
+		);
 		expect(result.valid).toBe(false);
 		expect(result.errors.join(" ")).toContain("Test assessment");
 	});
 
 	it("rejects the template placeholder as content", () => {
 		const template = readFileSync(".github/PULL_REQUEST_TEMPLATE.md", "utf8");
-		const placeholder = /### Test assessment\r?\n\r?\n([^#]*)/.exec(template)?.[1] ?? "";
+		const placeholder =
+			/### Test assessment\r?\n\r?\n([^#]*)/.exec(template)?.[1] ?? "";
 		expect(placeholder.trim().length).toBeGreaterThan(0);
 		const result = lintPrBody(
 			`${body}
@@ -246,14 +250,17 @@ describe("resolveTouchesTests", () => {
 		vi.stubEnv("GITHUB_TOKEN", "t");
 		vi.stubEnv("GITHUB_API_URL", "https://api.example");
 		vi.stubEnv("GITHUB_REPOSITORY", "o/r");
-		const fetchImpl = vi.fn(async () => ({
-			ok: true,
-			headers: new Headers(),
-			json: async () => [
-				{ filename: "clients/foo.ts" },
-				{ filename: "tests/clients/foo.test.ts" },
-			],
-		}));
+		const fetchImpl = vi
+			.fn()
+			.mockResolvedValue(
+				new Response(
+					JSON.stringify([
+						{ filename: "clients/foo.ts" },
+						{ filename: "tests/clients/foo.test.ts" },
+					]),
+					{ status: 200 },
+				),
+			);
 		expect(await resolveTouchesTests(payloadPr, fetchImpl)).toBe(true);
 	});
 
@@ -261,11 +268,11 @@ describe("resolveTouchesTests", () => {
 		vi.stubEnv("GITHUB_TOKEN", "t");
 		vi.stubEnv("GITHUB_API_URL", "https://api.example");
 		vi.stubEnv("GITHUB_REPOSITORY", "o/r");
-		const fetchImpl = vi.fn(async () => ({
-			ok: true,
-			headers: new Headers(),
-			json: async () => [{ filename: "clients/foo.ts" }],
-		}));
+		const fetchImpl = vi.fn().mockResolvedValue(
+			new Response(JSON.stringify([{ filename: "clients/foo.ts" }]), {
+				status: 200,
+			}),
+		);
 		expect(await resolveTouchesTests(payloadPr, fetchImpl)).toBe(false);
 	});
 
@@ -274,11 +281,12 @@ describe("resolveTouchesTests", () => {
 		vi.stubEnv("GITHUB_API_URL", "https://api.example");
 		vi.stubEnv("GITHUB_REPOSITORY", "o/r");
 		const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
-		const fetchImpl = vi.fn(async () => ({
-			ok: true,
-			headers: new Headers({ link: '<next>; rel="next"' }),
-			json: async () => [],
-		}));
+		const fetchImpl = vi.fn().mockResolvedValue(
+			new Response("[]", {
+				status: 200,
+				headers: { link: '<next>; rel="next"' },
+			}),
+		);
 		expect(await resolveTouchesTests(payloadPr, fetchImpl)).toBe(null);
 		expect(warning).toHaveBeenCalledWith(
 			expect.stringContaining("::warning::"),
@@ -291,7 +299,9 @@ describe("resolveTouchesTests", () => {
 		vi.stubEnv("GITHUB_API_URL", "https://api.example");
 		vi.stubEnv("GITHUB_REPOSITORY", "o/r");
 		const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
-		const fetchImpl = vi.fn(async () => ({ ok: false, status: 500 }));
+		const fetchImpl = vi
+			.fn()
+			.mockResolvedValue(new Response("boom", { status: 500 }));
 		expect(await resolveTouchesTests(payloadPr, fetchImpl)).toBe(null);
 		expect(warning).toHaveBeenCalledWith(
 			expect.stringContaining("::warning::"),
