@@ -44,12 +44,12 @@ describe("availability_decision classifiedBy sweep (#2131)", () => {
 		expect(OK_SITES.length).toBeGreaterThan(10);
 	});
 
-	it("every cause:\"ok\" decision stamps classifiedBy", () => {
+	it('every cause:"ok" decision stamps classifiedBy', () => {
 		const unstamped = OK_SITES.filter((site) => !site.hasClassifiedBy);
 		expect(
 			evidence(unstamped),
 			[
-				"A cause:\"ok\" availability_decision emit is missing classifiedBy.",
+				'A cause:"ok" availability_decision emit is missing classifiedBy.',
 				"Every arm reaching this cause is either a direct probe success",
 				'(classifiedBy: "probe") or an install/join-repaired verdict the caller',
 				'asserted (classifiedBy: "caller"/"joined") — read the sibling failure',
@@ -64,13 +64,15 @@ describe("availability-classifiedby scanner self-test", () => {
 		'logAvailabilityDecision({ tool: "x", verdict: "available", outcome: "success", cause: "ok", elapsedMs: 1, latched: true });',
 		'logAvailabilityDecision({ tool: "x", verdict: "available", outcome: "success", cause: "ok", elapsedMs: 1, latched: true, classifiedBy: "probe" });',
 		'logAvailabilityDecision({ tool: "x", verdict: "unavailable", outcome: "missing", cause: "not-found", elapsedMs: 1, latched: true, classifiedBy: "probe" });',
-		"// logAvailabilityDecision({ cause: \"ok\" });",
-		"fakeLogAvailabilityDecision({ cause: \"ok\" });",
+		'// logAvailabilityDecision({ cause: "ok" });',
+		'fakeLogAvailabilityDecision({ cause: "ok" });',
 	].join("\n");
 	const found = scanSource(fixture, "fixture.ts");
 
 	it("reads cause and classifiedBy out of each call's own arguments", () => {
-		expect(found.map((site) => [site.line, site.causeOk, site.hasClassifiedBy])).toEqual([
+		expect(
+			found.map((site) => [site.line, site.causeOk, site.hasClassifiedBy]),
+		).toEqual([
 			[1, true, false],
 			[2, true, true],
 			[3, false, true],

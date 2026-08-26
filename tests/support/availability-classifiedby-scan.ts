@@ -49,7 +49,10 @@ export function scanAvailabilityDecisionSites(
 }
 
 /** Exported for the sweep's own self-test: scan one source string. */
-export function scanSource(raw: string, file: string): AvailabilityDecisionSite[] {
+export function scanSource(
+	raw: string,
+	file: string,
+): AvailabilityDecisionSite[] {
 	// `strings: "keep"` (as in bounded-telemetry-scan.ts): the `cause`/
 	// `classifiedBy` values this scanner reads ARE string literals, so blanking
 	// string contents would blind it to the very thing it exists to check.
