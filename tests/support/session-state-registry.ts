@@ -985,7 +985,7 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	"lsp/jvm-runtime.ts": 0,
 	"lsp/session-roots.ts": 1,
 	"lsp/spawn-history.ts": 1,
-	"lsp/server.ts": 5,
+	"lsp/server.ts": 6,
 	"lsp/workspace-diagnostics-cache.ts": 1,
 	"lsp/workspace-sweep-hold.ts": 1,
 	"mcp/analyze.ts": 1,

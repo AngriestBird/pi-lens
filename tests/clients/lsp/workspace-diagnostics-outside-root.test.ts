@@ -150,7 +150,8 @@ describe("#2052 sweep over a foreign root does not report or cache a clean", () 
 		const inside = results.find((result) => result.filePath === insideFile);
 		const foreign = results.find((result) => result.filePath === foreignFile);
 		expect(inside).toBeDefined();
-		expect(inside?.timedOut).not.toBe(true);
+		expect(inside?.timedOut).toBeUndefined();
+		expect(inside?.unconfirmedReason).toBeUndefined();
 		expect(foreign?.timedOut).toBe(true);
 		expect(foreign?.unconfirmedReason).toBe("outside_project_root");
 	});

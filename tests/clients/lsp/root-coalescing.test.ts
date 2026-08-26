@@ -169,21 +169,20 @@ describe("LSP per-server nested-root coalescing (#1373)", () => {
 		);
 	});
 
-	it("keeps the mac-shaped case boundary explicit on every host", () => {
+	it("matches the case behavior of the fixture filesystem", () => {
 		const probe = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-case-probe-"));
 		try {
-			const actualCaseInsensitive = fs.existsSync(probe.toUpperCase());
+			const actualCaseInsensitive = fs.existsSync(
+				path.join(path.dirname(probe), path.basename(probe).toUpperCase()),
+			);
+			const actualRoot = path.join(probe, "Project");
+			fs.mkdirSync(path.join(actualRoot, "src"), { recursive: true });
+			const aliasedRoot = path.join(probe, "project");
 			expect(
-				isSameOrWithin(
-					"/Users/Example/Project",
-					"/Users/example/Project/src/app.ts",
-				),
+				isSameOrWithin(actualRoot, path.join(aliasedRoot, "src", "app.ts")),
 			).toBe(actualCaseInsensitive);
 			expect(
-				isSameOrWithin(
-					"/Users/Example/Project",
-					"/Users/Example/Project/src/app.ts",
-				),
+				isSameOrWithin(actualRoot, path.join(actualRoot, "src", "app.ts")),
 			).toBe(true);
 		} finally {
 			removeTempDirSync(probe);

@@ -110,6 +110,25 @@ const PROJECT_BOUNDARY_MARKERS = [
 // process (not once per session). Keep the root-boundary marker below aligned
 // with FALLBACK_PROJECT_MARKERS, the shared fallback root-policy marker set.
 const loggedRootCeilingClamps = new Set<string>();
+const posixCaseInsensitiveByPath = new Map<string, boolean>();
+
+function posixFilesystemIsCaseInsensitive(root: string): boolean {
+	const resolved = path.resolve(root);
+	const cached = posixCaseInsensitiveByPath.get(resolved);
+	if (cached !== undefined) return cached;
+	if (!existsSync(resolved)) {
+		posixCaseInsensitiveByPath.set(resolved, false);
+		return false;
+	}
+	const name = path.basename(resolved);
+	const alternate =
+		name.toLowerCase() === name ? name.toUpperCase() : name.toLowerCase();
+	const insensitive =
+		alternate !== name &&
+		existsSync(path.join(path.dirname(resolved), alternate));
+	posixCaseInsensitiveByPath.set(resolved, insensitive);
+	return insensitive;
+}
 
 /**
  * Path-shape-aware containment test: is `candidate` the same path as
@@ -125,9 +144,13 @@ const loggedRootCeilingClamps = new Set<string>();
 export function isSameOrWithin(ancestor: string, candidate: string): boolean {
 	const windowsShaped = isWindowsPath(ancestor) || isWindowsPath(candidate);
 	const pathApi = windowsShaped ? path.win32 : path;
+	const resolvedAncestor = pathApi.resolve(ancestor);
+	const resolvedCandidate = pathApi.resolve(candidate);
+	const caseInsensitive =
+		!windowsShaped && posixFilesystemIsCaseInsensitive(resolvedAncestor);
 	const relative = pathApi.relative(
-		pathApi.resolve(ancestor),
-		pathApi.resolve(candidate),
+		caseInsensitive ? resolvedAncestor.toLowerCase() : resolvedAncestor,
+		caseInsensitive ? resolvedCandidate.toLowerCase() : resolvedCandidate,
 	);
 	return (
 		relative === "" ||
