@@ -146,8 +146,12 @@ describe("review-graph one-file rebuild cost (#2074)", () => {
 		"keeps rebuild work proportional to the changed file, not the graph",
 		{ timeout: 240_000 },
 		async () => {
-			const small = await warmThenRebuildOneFile(makeRing(40));
-			const large = await warmThenRebuildOneFile(makeRing(160));
+			// Ring sizes are kept as small as the 4x ratio allows: this file's peak
+			// RSS sits in the unit suite's heavy tail (tree-sitter and TS-compiler
+			// arenas, ~1.4 GB at 40/160 files), and the CI runner has been killed
+			// at exit 137 for less.
+			const small = await warmThenRebuildOneFile(makeRing(16));
+			const large = await warmThenRebuildOneFile(makeRing(64));
 
 			// Sanity: the fixture really did scale, so an O(graph) cost would show.
 			expect(large.nodes).toBeGreaterThan(small.nodes * 3);
@@ -173,11 +177,10 @@ describe("review-graph one-file rebuild cost (#2074)", () => {
 	);
 
 	it(
-		"reports existedBefore for a file already in the graph",
+		"reports existedBefore and leaves every derived index intact",
 		{ timeout: 120_000 },
 		async () => {
-			const root = makeRing(12);
-			const probe = await warmThenRebuildOneFile(root);
+			const probe = await warmThenRebuildOneFile(makeRing(10));
 			const delta = getGraphImportChanges(probe.graph);
 			expect(delta).toBeDefined();
 			const change = delta?.changes.find((entry) =>
@@ -191,14 +194,7 @@ describe("review-graph one-file rebuild cost (#2074)", () => {
 			// full reverse-deps rebuild on every incremental build.
 			expect(change?.existedBefore).toBe(true);
 			expect(change?.existsAfter).toBe(true);
-		},
-	);
 
-	it(
-		"leaves every derived index identical to a full reindex",
-		{ timeout: 120_000 },
-		async () => {
-			const probe = await warmThenRebuildOneFile(makeRing(24));
 			// Mutation guard for the incremental index maintenance that replaced the
 			// terminal rebuildIndexes: dropping unindexEdge, addNode's
 			// symbolNodesByFile upkeep, or resolveDeferredSymbolEdges' replacement
@@ -212,7 +208,7 @@ describe("review-graph one-file rebuild cost (#2074)", () => {
 		"does not duplicate preserved incoming edges across repeated rebuilds",
 		{ timeout: 120_000 },
 		async () => {
-			const root = makeRing(16);
+			const root = makeRing(10);
 			const changed = path.join(root, "src", "file0.ts");
 			let seq = 0;
 			const seqHint = {
