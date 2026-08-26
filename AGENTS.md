@@ -276,7 +276,9 @@ group (see the placement rules in "Maintaining this file").
 Auxiliary diagnostic waits preserve a warm-turn fast path: on a cold
 acquisition, the budget is `max(declared wait, observed spawn + 500ms)` clamped
 to an 8s ceiling; on a warm acquisition, it remains `min(declared wait, 2000ms)`. An
-explicit `PI_LENS_AUX_GRACE_MS` value overrides both formulas. (#2152)
+explicit `PI_LENS_AUX_GRACE_MS` value caps the budget on both paths;
+it never raises it. On a cold auxiliary it also caps the request's own
+wait, so a low value cancels the request earlier than master did. (#2152)
 
 Pull-diagnostics request deadlines send `$/cancelRequest`, but cancellation is
 advisory. While a cancelled request remains unsettled, admission blocks another

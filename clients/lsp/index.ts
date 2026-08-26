@@ -507,10 +507,7 @@ export function auxWaitBudgetMs(
 	}
 	return Math.min(
 		MAX_ADAPTIVE_AUX_GRACE_CEILING_MS,
-		Math.max(
-			declaredWaitMs,
-			(observedSpawnMs ?? 0) + ADAPTIVE_AUX_GRACE_MARGIN_MS,
-		),
+		Math.max(declaredWaitMs, observedSpawnMs + ADAPTIVE_AUX_GRACE_MARGIN_MS),
 	);
 }
 const DIAGNOSTICS_SEMANTIC_SETTLE_THRESHOLD_MS = Math.max(
