@@ -2282,6 +2282,27 @@ Six screens distilled from nine adversarially reviewed PRs on 2026-08-25. A revi
 5. **Environment mutation that outlives its test.** *Screen:* a file that calls `vi.stubEnv` also calls `afterEach(() => vi.unstubAllEnvs())`; the same holds for direct `process.env` writes, fake timers, and cwd changes. Then prove independence — run the new test alone with `-t`, not only in file order. A test that passes in the file and fails alone is reading the previous test's leak, so its truth is order-dependent. *e.g.* three PRs in the corpus stubbed env with no `unstubAllEnvs`; PR #2084's inverse test passed only because the preceding test leaked `GITHUB_*` variables. *Detect:* grep the file for `stubEnv` and confirm a matching `unstubAllEnvs`; run the new test in isolation before you push.
 6. **A bound loose enough to pass a partial regression.** *Screen:* measure two numbers — the regression's count and the fixed behavior's count — and set the bound within about 2-3x of the fixed one. Record both numbers in a comment beside the assertion. Never pick a round number by feel: a bound far from the regression value passes a halfway regression and reads as protection. *e.g.* a `lessThan(100)` assertion against a regression that measured 4807; a partial regression to O(n/2) passes it untouched. *Detect:* review question: what is the fixed behavior's actual count, what was the bug's, and where does this bound sit between them?
 
+### Test assessment and removal (value discipline)
+
+The screens above catch tests that are broken; this section addresses tests
+that are merely worthless — redundant sibling pins, characterization tests
+that outlived their purpose, load-heavy files pinning one behavior three
+ways. That weight is what the suite pays for in runtime, OOM pressure, and
+contention flakes.
+
+- **Every PR that touches a test file carries a Test assessment** (the PR
+  template's `### Test assessment` clause): per touched test FILE, one line
+  on what behavior it uniquely pins, plus any test the PR makes redundant.
+  Scope is the touched files only — never the whole suite.
+- **Removal requires proof, not judgment.** A test may be removed only when
+  a NAMED surviving test reds on the same mutations the removed test would
+  have redded on. Run the mutations and quote the surviving red. "Low value"
+  is a misjudgment this repo has made before: guards that looked redundant
+  (the #2044 alias test) or vacuous (win32 skip shapes) were load-bearing.
+- **Removal candidates you identify but do not delete go to the corpus
+  value ledger issue** (deferral hygiene: the candidate is recorded with the
+  mutation evidence it still owes, and the ledger stays open).
+
 ### Testing extension wiring (#171)
 
 For anything that goes through the `index.ts` entry — flag/command/tool/hook registration, the `context` injection toggle, `tool_call`/`tool_result` read-guard wiring, `session_start` registrations — use the shared harness in `tests/support/pi-mock.ts` instead of hand-rolling an `ExtensionAPI`/ctx mock:

@@ -32,6 +32,7 @@ const SECTION_SYNONYMS = new Map([
 	["blast radius", "blast radius"],
 	["class sweep", "class sweep"],
 	["observability", "observability"],
+	["test assessment", "test assessment"],
 ]);
 
 function sectionMessage(name, detail) {
@@ -90,7 +91,7 @@ function hasRealContent(lines, section, placeholders) {
 }
 
 /** Check the structural PR-body contract, including answered sections. */
-export function lintPrBody(body = "") {
+export function lintPrBody(body = "", options = {}) {
 	const rawLines = String(body ?? "").split(/\r?\n/);
 	const lines = sourceWithoutFencedBlocks(body).split(/\r?\n/);
 	const headings = [];
@@ -128,7 +129,15 @@ export function lintPrBody(body = "") {
 		errors.push(`PR body is missing a Summary section. See ${TEMPLATE_PATH}.`);
 	}
 
-	for (const name of REQUIRED_SECTIONS) {
+	// Value discipline (AGENTS.md "Test assessment and removal"): a PR that
+	// touches tests/ must say, per touched file, what it uniquely pins and
+	// what became redundant. Conditional because docs/production-only PRs owe
+	// nothing here.
+	const requiredSections = options.requireTestAssessment
+		? [...REQUIRED_SECTIONS, "Test assessment"]
+		: REQUIRED_SECTIONS;
+
+	for (const name of requiredSections) {
 		const heading = headings.find((candidate) =>
 			hasSection(candidate, name.toLowerCase()),
 		);
@@ -185,6 +194,46 @@ export async function resolveLivePrBody(
 	}
 }
 
+/**
+ * True when the PR touches any file under tests/. Advisory best-effort: one
+ * page of 100 files covers this repo's PR sizes; on any failure (including a
+ * PR larger than the page, detected via the Link header) return null so the
+ * caller SKIPS the conditional check rather than guessing — a lint that can
+ * misfire on fetch trouble teaches people to ignore it.
+ */
+export async function resolveTouchesTests(payloadPr, fetchImpl = globalThis.fetch) {
+	try {
+		const token = process.env.GITHUB_TOKEN;
+		if (!token) throw new Error("GITHUB_TOKEN is not set");
+		const apiUrl = process.env.GITHUB_API_URL;
+		const repository = process.env.GITHUB_REPOSITORY;
+		if (!apiUrl || !repository)
+			throw new Error("GITHUB_API_URL or GITHUB_REPOSITORY is missing");
+		const response = await fetchImpl(
+			`${apiUrl}/repos/${repository}/pulls/${payloadPr.number}/files?per_page=100`,
+			{
+				signal: AbortSignal.timeout(10_000),
+				headers: {
+					Accept: "application/vnd.github+json",
+					Authorization: `Bearer ${token}`,
+					"X-GitHub-Api-Version": "2022-11-28",
+				},
+			},
+		);
+		if (!response.ok) throw new Error(`GitHub API returned ${response.status}`);
+		if (/rel="next"/.test(response.headers.get("link") ?? ""))
+			throw new Error("PR exceeds one file page; skipping the conditional check");
+		const files = await response.json();
+		if (!Array.isArray(files)) throw new Error("GitHub API returned no file list");
+		return files.some((file) => /^tests\//.test(file.filename ?? ""));
+	} catch (error) {
+		console.warn(
+			`::warning::Could not resolve the PR file list; skipping the Test assessment check (${error instanceof Error ? error.message : error}).`,
+		);
+		return null;
+	}
+}
+
 function eventPayload() {
 	const eventPath = process.env.GITHUB_EVENT_PATH;
 	if (!eventPath) throw new Error("GITHUB_EVENT_PATH is required");
@@ -195,7 +244,10 @@ async function lintPullRequestEvent() {
 	const pullRequest = eventPayload().pull_request;
 	if (!pullRequest || !process.env.GITHUB_REPOSITORY)
 		throw new Error("Pull request event and GITHUB_REPOSITORY are required");
-	const result = lintPrBody(await resolveLivePrBody(pullRequest));
+	const result = lintPrBody(await resolveLivePrBody(pullRequest), {
+		requireTestAssessment:
+			(await resolveTouchesTests(pullRequest)) === true,
+	});
 	if (!result.valid) {
 		for (const error of result.errors) console.error(error);
 		process.exitCode = 1;

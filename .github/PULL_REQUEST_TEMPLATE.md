@@ -55,6 +55,14 @@ regression tests RED on pre-fix code and quote the output.
 
 Where it is not obvious, name which of AGENTS.md's six test-authoring screens each new test satisfies (parallel path, invisible skip, wrong-layer pin, ambient-inspection double, env leakage, loose bound).
 
+### Test assessment
+
+For each test FILE this PR touches: one line on what behavior that file
+uniquely pins, and any test in it this PR makes redundant. Name removal
+candidates. A test may be REMOVED only when a named surviving test reds on
+the same mutations — demonstrate the redundancy, never assert it. Removal
+candidates you do not delete here go to the corpus value ledger issue.
+
 ## Blast radius
 
 State affected dependents for each touched production module (from
