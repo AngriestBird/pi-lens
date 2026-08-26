@@ -2365,7 +2365,7 @@ Rules live in `rules/ast-grep-rules/rules/*.yml` (plus the multi-rule `rules/ast
 
 ### ast-grep catalog porting (detector-only, no rewrite)
 
-The NAPI fallback derives Java and Kotlin extension coverage from `KIND_EXTENSIONS`, and the dispatch plan includes both language lanes. The Java VTCode batch uses warning severity by default; `prefer-string-is-empty` alone carries a fix suggestion limited to exact empty forms. Keep the resolver coverage test aligned with this seam.
+Java and Kotlin ast-grep rules run through the ast-grep CLI/LSP lane because `@ast-grep/napi` bundles no Java or Kotlin grammar exports (#2215). The Java VTCode batch uses warning severity by default, and `prefer-string-is-empty` is detection-only because its suggested rewrite is not valid for every Java receiver. Keep Java rule coverage in the real CLI fixture harness; keep the NAPI resolver test limited to bundled grammars.
 
 The upstream [ast-grep catalog](https://ast-grep.github.io/catalog) is a list of ~50 rule examples. **Ship a rule when its `rule:` block is a clean detector** (we report, we don't rewrite — the LSP is what fires). Skip rules whose value is the `fix:`/`transform:`/`rewriters:` payload rather than the detection, and skip project-specific examples (Yoda-condition debate, Ant Design Vue migration, XState v4→v5, …). Detector-only ports that filled real gaps:
 

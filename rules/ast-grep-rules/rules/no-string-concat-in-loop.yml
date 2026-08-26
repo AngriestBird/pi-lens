@@ -7,6 +7,9 @@ rule:
   any:
     - all:
         - pattern: $VAR = $VAR + $EXPR
+        - has:
+            kind: string_literal
+            stopBy: end
         - any:
             - inside:
                 kind: for_statement
@@ -19,6 +22,9 @@ rule:
                 stopBy: end
     - all:
         - pattern: $VAR += $EXPR
+        - has:
+            kind: string_literal
+            stopBy: end
         - any:
             - inside:
                 kind: for_statement

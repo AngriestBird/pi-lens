@@ -78,14 +78,13 @@ describe("ruleLanguageForFile (#1608)", () => {
 		expect(ruleLanguageForFile("module.ts")).toBe("typescript");
 	});
 
-	it.each([
-		["App.java", "java"],
-		["App.kt", "kotlin"],
-		["build.gradle.kts", "kotlin"],
-	] as const)("resolves %s through the fallback grammar seam", (file, lang) => {
-		expect(canHandle(file)).toBe(true);
-		expect(ruleLanguageForFile(file)).toBe(lang);
-	});
+	it.each([["App.java"], ["App.kt"], ["build.gradle.kts"]] as const)(
+		"does not route polyglot files through the NAPI grammar seam",
+		(file) => {
+			expect(canHandle(file)).toBe(false);
+			expect(ruleLanguageForFile(file)).toBeUndefined();
+		},
+	);
 });
 
 describe("shipped TypeScript rules retain tsx coverage (#1608)", () => {

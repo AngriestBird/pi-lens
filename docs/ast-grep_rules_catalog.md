@@ -122,7 +122,7 @@ See [`docs/custom-rules.md`](custom-rules.md) to add your own. Rule sources: `ru
 | `no-string-concat-in-loop` | warning | no | pi-lens | Use StringBuilder instead of string concatenation in loops. |
 | `no-system-out-println` | warning | no | pi-lens | Avoid System.out.println; use a logging framework instead. |
 | `passwordauthentication-hardcoded-password-java` | warning | no | CodeRabbit | A secret is hard-coded in the application. Secrets stored in source code, such as credentials, identifiers, and other types of sensitive da… |
-| `prefer-string-is-empty` | warning | yes | pi-lens | Use .isEmpty() instead of .length() == 0 or .equals(""). |
+| `prefer-string-is-empty` | warning | no | pi-lens | Use .isEmpty() instead of .length() == 0 or .equals(""). |
 | `rsa-no-padding-java` | warning | no | CodeRabbit | Using RSA without OAEP mode weakens the encryption. |
 | `simple-command-injection-direct-input-java` | warning | no | CodeRabbit | "Untrusted input might be injected into a command executed by the application, which can lead to a command injection vulnerability. An atta… |
 | `system-setproperty-hardcoded-secret-java` | warning | no | CodeRabbit | A secret is hard-coded in the application. Secrets stored in source code, such as credentials, identifiers, and other types of sensitive da… |

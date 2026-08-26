@@ -7,6 +7,5 @@ rule:
   any:
     - pattern: $S.length() == 0
     - pattern: $S.equals("")
-fix: $S.isEmpty()
 files:
   - "**/*.java"

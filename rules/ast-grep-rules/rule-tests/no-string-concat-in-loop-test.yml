@@ -6,13 +6,23 @@ valid:
       result.append(item);
     }
   - 'String result = prefix + suffix;'
+  - |
+    int total = 0;
+    for (int value : values) {
+      total = total + value;
+    }
+  - |
+    double count = 0;
+    while (ready()) {
+      count += 1;
+    }
 invalid:
   - |
     String result = "";
     for (String item : items) {
-      result += item;
+      result += item + " ";
     }
   - |
     while (ready()) {
-      result = result + next();
+      result = result + " " ;
     }

@@ -2,4 +2,4 @@
 section: Added
 ---
 
-- **Enable Java structural linting (closes #2197)** — Add the Java ast-grep fallback lane with four VTCode-derived rules and shared Java/Kotlin grammar wiring.
+- **Enable Java structural linting (closes #2197)** — Add four VTCode-derived Java rules to the ast-grep CLI/LSP lane; keep the NAPI runner limited to its bundled grammars.
