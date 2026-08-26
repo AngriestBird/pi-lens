@@ -2,21 +2,32 @@ import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	buildWordIndex,
+	collectWordIndexDocs,
 	buildWordIndexQueryFilter,
 	centralityFromReverseDeps,
 	deserializeWordIndex,
 	getWordIndexBuildStatus,
 	parseWordIndexQuery,
+	flushWordIndexRecompactionsForTests,
 	searchWordIndex,
 	serializeWordIndex,
 	splitIdentifier,
 	tokenizeLine,
+	updateWordIndexDocument,
 	WORD_INDEX_FORMAT_VERSION,
 	WordIndexQueryError,
 	wordIndexKey,
 	_resetWordIndexBuildGuardForTests,
 	triggerBackgroundWordIndexBuild,
 } from "../../clients/word-index.js";
+import {
+	compactPostingsIntoArena,
+	compactPostingsIntoArenaCooperatively,
+	countPostingBackingStores,
+	estimateWordIndexStoreBytes,
+	WORD_POSTING_LIST_OVERHEAD_BYTES,
+	WordPostingList,
+} from "../../clients/word-index-store.js";
 import { KIND_EXTENSIONS } from "../../clients/file-kinds.js";
 import { loadProjectSnapshot } from "../../clients/project-snapshot.js";
 import { createTempFile, setupTestEnvironment } from "./test-utils.js";
@@ -801,4 +812,126 @@ describe("triggerBackgroundWordIndexBuild (#348 cold-query stampede guard)", () 
 			env.cleanup();
 		}
 	}, 10_000);
+
+	it("recompacts the arena after full-corpus incremental churn (#2117)", async () => {
+		const env = setupTestEnvironment("pi-lens-wordindex-recompact-");
+		try {
+			for (let file = 0; file < 100; file += 1) {
+				createTempFile(
+					env.tmpDir,
+					`src/f${file}.ts`,
+					`sharedToken stableToken${file}`,
+				);
+			}
+			const docs = await collectWordIndexDocs(env.tmpDir);
+			const index = buildWordIndex(docs);
+			for (let file = 0; file < 100; file += 1) {
+				createTempFile(
+					env.tmpDir,
+					`src/f${file}.ts`,
+					`sharedToken changedToken${file} revision`,
+				);
+			}
+			for (let file = 0; file < 100; file += 1) {
+				updateWordIndexDocument(index, {
+					path: path.join(env.tmpDir, "src", `f${file}.ts`),
+					content: `sharedToken changedToken${file} revision`,
+				});
+			}
+			await flushWordIndexRecompactionsForTests(index);
+			expect(countPostingBackingStores(index.postings)).toBe(1);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	// #2117 review F2: the cooperative compactor sizes the arena from a snapshot,
+	// then yields. A synchronous edit that grows a not-yet-adopted list during a
+	// yield made the pre-fix `adoptArena` write past the arena, and V8 silently
+	// dropped the overflow so the tail postings read `undefined`. The fix skips
+	// any list that changed since the snapshot, so no posting is ever corrupted.
+	it("never corrupts postings when an edit grows a list mid-recompaction (#2117)", async () => {
+		// Enough lane data that the copy crosses the 8 ms budget and yields at
+		// least once — the window the concurrent edit needs.
+		const postings = new Map<string, WordPostingList>();
+		const LISTS = 40_000;
+		const ENTRIES = 60;
+		for (let t = 0; t < LISTS; t += 1) {
+			const list = new WordPostingList(`token${t}`, ENTRIES);
+			for (let e = 0; e < ENTRIES; e += 1) list.push(t % 7, e);
+			postings.set(`token${t}`, list);
+		}
+		// The victim is inserted last, so the copy adopts it only at the very end;
+		// every yield gap lands before its adoption.
+		const victim = new WordPostingList("victimToken", 1);
+		victim.push(3, 0);
+		postings.set("victimToken", victim);
+
+		const recompact = compactPostingsIntoArenaCooperatively(postings);
+		let settled = false;
+		void recompact.then(() => {
+			settled = true;
+		});
+		// Grow the victim in each yield gap until the copy finishes. On the
+		// pre-fix code the grown victim overruns its 1-entry arena slot.
+		let grewDuringYield = false;
+		while (!settled) {
+			await new Promise<void>((resolve) => setImmediate(resolve));
+			if (!settled) {
+				victim.push(3, victim.length);
+				grewDuringYield = true;
+			}
+		}
+		await recompact;
+
+		expect(grewDuringYield).toBe(true);
+		let corruptPostings = 0;
+		for (const list of postings.values()) {
+			for (let i = 0; i < list.length; i += 1) {
+				if (list.fileIdAt(i) === undefined || list.lineAt(i) === undefined) {
+					corruptPostings += 1;
+				}
+			}
+		}
+		expect(corruptPostings).toBe(0);
+	}, 30_000);
+
+	// #2117 criterion 3: the estimator charges each distinct backing store once,
+	// including abandoned arena slack, so a churned index reads higher than
+	// master's per-list-slice sum, which cannot see the vacated lanes. A list
+	// that outgrows its arena slice detaches to a private store; its old slice
+	// stays resident inside the shared arena but no list's `byteLength` covers
+	// it. The estimate must account for that slack.
+	it("charges abandoned arena slack that a per-list sum misses (#2117)", () => {
+		const postings = new Map<string, WordPostingList>();
+		for (const token of ["alpha", "beta", "gamma"]) {
+			const list = new WordPostingList(token, 4);
+			for (let e = 0; e < 4; e += 1) list.push(0, e);
+			postings.set(token, list);
+		}
+		// Pack the three lists into ONE shared arena (3 * 4 entries * 8 bytes).
+		compactPostingsIntoArena(postings);
+		const store = { postings };
+		const arena = postings.get("alpha")!.backingStore;
+		expect(arena.byteLength).toBe(96);
+		expect(postings.get("gamma")!.backingStore).toBe(arena);
+
+		// Grow beta far past its 4-entry slice: it detaches to a private store and
+		// abandons its 4-entry (32-byte) slice inside the still-referenced arena.
+		const beta = postings.get("beta")!;
+		beta.reserve(64);
+		expect(beta.backingStore).not.toBe(arena);
+
+		const estimate = estimateWordIndexStoreBytes(store);
+		// alpha and gamma still pin the whole arena, so its full byteLength — the
+		// abandoned beta slice included — is resident and must be charged, plus
+		// beta's new private store and one fixed overhead per list. Master summed
+		// only each list's own live slice (alpha 32 + gamma 32 for the arena), so
+		// it missed the 32 abandoned bytes and reads below this floor.
+		expect(estimate).toBeGreaterThanOrEqual(
+			arena.byteLength +
+				beta.backingStore.byteLength +
+				3 * WORD_POSTING_LIST_OVERHEAD_BYTES,
+		);
+	});
 });
