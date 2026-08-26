@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync } from "../support/git-fixture-env.js";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -263,6 +263,43 @@ describe("review graph service", () => {
 			env.cleanup();
 		}
 	}, 30_000);
+
+	it("keeps an 8,000-file one-file rebuild within the changed-file bound (#2072 AC2)", async () => {
+		const env = setupTestEnvironment("pi-lens-review-graph-source-memo-scale-");
+		const previousMaxFiles = process.env.PI_LENS_REVIEW_GRAPH_MAX_FILES;
+		try {
+			process.env.PI_LENS_REVIEW_GRAPH_MAX_FILES = "8000";
+			for (let i = 0; i < 8000; i++) {
+				createTempFile(
+					env.tmpDir,
+					`src/file-${String(i).padStart(4, "0")}.ts`,
+					`export const value${i} = ${i};\n`,
+				);
+			}
+			_resetReviewGraphSourcePathMemoForTests();
+
+			const cold = await getGraphSourceFiles(env.tmpDir);
+			createTempFile(
+				env.tmpDir,
+				"src/file-0000.ts",
+				"export const value0 = 1;\n",
+			);
+			const warm = await getGraphSourceFiles(env.tmpDir);
+
+			// Cold behavior is O(project-files); the one-file rebuild's warm path
+			// must stay within 2 x changedFiles, and this fixture changes one file.
+			expect(cold.files).toHaveLength(8000);
+			expect(cold.pathNormalizeCalls).toBe(8000);
+			expect(warm.pathNormalizeCalls).toBeLessThanOrEqual(2);
+			expect(warm.files).toEqual(cold.files);
+		} finally {
+			_resetReviewGraphSourcePathMemoForTests();
+			if (previousMaxFiles === undefined)
+				delete process.env.PI_LENS_REVIEW_GRAPH_MAX_FILES;
+			else process.env.PI_LENS_REVIEW_GRAPH_MAX_FILES = previousMaxFiles;
+			env.cleanup();
+		}
+	}, 120_000);
 
 	it("keeps a walk's normalize counter stable across workspace eviction (#2072 F4)", async () => {
 		const env = setupTestEnvironment(

@@ -48,4 +48,28 @@ describe("word-index posting file interning (#2067)", () => {
 		expect(normalizeCalls.value).toBeLessThan(100);
 		expect(searchWordIndex(index, "asyncShared")).toHaveLength(20);
 	});
+
+	it("preserves BM25 results and scores across a document replacement", async () => {
+		const { buildWordIndex, searchWordIndex, updateWordIndexDocument } =
+			await import("../../clients/word-index.js");
+		const files = [
+			{ path: "src/a.ts", content: "export function sharedHandler() {}" },
+			{
+				path: "src/b.ts",
+				content: "export function sharedHandler() { return sharedHandler(); }",
+			},
+			{ path: "src/c.ts", content: "export function unrelated() {}" },
+		];
+		const index = buildWordIndex(files);
+		const before = searchWordIndex(index, "shared handler");
+
+		expect(
+			updateWordIndexDocument(index, {
+				path: "src/a.ts",
+				content: files[0].content,
+			}),
+		).toBe(true);
+
+		expect(searchWordIndex(index, "shared handler")).toEqual(before);
+	});
 });

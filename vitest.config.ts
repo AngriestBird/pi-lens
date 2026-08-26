@@ -49,6 +49,7 @@ const sharedGlobalSetup = [
 	"./tests/support/prewarm-grammars.ts",
 	// After check-build-freshness: the seed analyze runs the in-place build.
 	"./tests/support/prewarm-tool-home.ts",
+	"./tests/support/git-config-guard-setup.ts",
 ];
 
 const sharedSetupFiles = ["./tests/support/vitest-setup.ts"];
@@ -163,6 +164,10 @@ const grammarHeavyInclude = [
 // smaller one) has already fully drained, so the sampler only ever
 // contends with (at most) one other file in this group.
 const timingSensitiveInclude = [
+	// Real node child-process barrier race for #2173; process scheduling makes
+	// this unsuitable for the default fork storm.
+	"tests/clients/instance-registry-race.test.ts",
+	"tests/clients/instance-registry-lock.test.ts",
 	"tests/clients/review-graph-retention.test.ts",
 	"tests/clients/source-walk-occupancy.test.ts",
 	"tests/clients/source-filter-async.test.ts",

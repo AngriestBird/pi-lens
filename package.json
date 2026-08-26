@@ -39,6 +39,7 @@
 		"astgrep:self-scan:update-baseline": "node scripts/run-astgrep-pi-lens.mjs --update-baseline",
 		"audit:playground": "node scripts/playground-verify-rule.mjs",
 		"bench:cascade-budget": "node scripts/bench-cascade-budget.mjs",
+		"bench:word-index-replacement": "node scripts/bench-word-index-replacement.mjs",
 		"logs:smells": "node scripts/analyze-pi-lens-logs.mjs",
 		"changelog:check": "node scripts/rollup-changelog.mjs --check",
 		"changelog:release": "node scripts/changelog-release.mjs",

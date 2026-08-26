@@ -286,6 +286,13 @@ Pipeline-crash teardown is destructive only for the registered primary session;
 when no primary registration exists, the legacy reset remains the fail-safe.
 (#2157, #2174)
 
+Auxiliary diagnostic waits preserve a warm-turn fast path: on a cold
+acquisition, the budget is `max(declared wait, observed spawn + 500ms)` clamped
+to an 8s ceiling; on a warm acquisition, it remains `min(declared wait, 2000ms)`. An
+explicit `PI_LENS_AUX_GRACE_MS` value caps the budget on both paths;
+it never raises it. On a cold auxiliary it also caps the request's own
+wait, so a low value cancels the request earlier than the pre-#2152 behavior. (#2152)
+
 Pull-diagnostics request deadlines send `$/cancelRequest`, but cancellation is
 advisory. While a cancelled request remains unsettled, admission blocks another
 pull for the same path/source. The slot frees only on settlement. Apply this to
@@ -600,6 +607,12 @@ and only `lsp_server_spawned` answers "how many servers did we start".
 
 ### Dispatch, runners, formatters, and installer
 
+Managed verification uses the registry's optional `verificationTimeoutMs` at
+every installer-owned probe seam, including local discovery, npm install, and
+periodic refresh. The refresh candidate projection carries that policy instead
+of reintroducing a shared literal; dispatch keeps its separate 5-second budget
+until its own issue defines the broader hot-path change. (#2176, #2194)
+
 The project ignore matcher keeps its per-path verdict memo hot between edits.
 The write-result seam calls `invalidateProjectIgnoreMatcherForPath` for a
 `.gitignore` mutation: it scans every cached root containing the edited path,
@@ -688,6 +701,9 @@ preserved as `cause`. (#1214)
 `verifyToolBinary` defaults to `--version`, but all registry-driven callers pass
 `ToolDefinition.checkArgs` through local/global/user/install/refresh paths and
 opt into `safeSpawnAsync`'s `input: ""` so every verification receives EOF.
+The registry may declare a larger bounded timeout for a tool whose cold
+launcher startup exceeds the dispatch budget; Vue uses 30 seconds while the
+installer default remains 10 seconds (#2176).
 This matters for markdownlint-cli2: `--version` scanned 45 files and returned
 in about 370ms when stdin was closed, while `--no-globs -` linted one stdin
 file and returned in about 370ms; with production-shaped open stdin the latter
@@ -838,6 +854,14 @@ Tier-2 cache bounds (#1389) use the Tier-1 idle-timer/LRU shape where entries ar
 
 ### Session lifecycle, telemetry, and observability
 
+The machine-global instance registry serializes every whole-file writer with
+an adjacent O_EXCL lock. Contenders use jittered backoff for 500ms, and locks
+older than 5s or owned by dead pids are displaced and reclaimed; a crash can
+still leave a stale lock during that window. Child-first synthesis receives
+the session cwd and start time from the LSP client, preserves subagent
+identity, and records `instance-registry-registration-missing` once when the
+host registration is absent. (#2173)
+
 Tool metadata is normalized at the final `pi.registerTool` boundary in
 `clients/tool-definition.ts`. Keep this seam around the complete active/lazy/
 activation-tool registration list: child sessions and wrapped/lazy factories
@@ -975,6 +999,11 @@ unawaited concurrent cascades must not yield across a wholesale posting snapshot
 Cooperative async variants are serialized per index and remain for bulk refresh.
 When touching this seam, keep posting-entry counts and replacement-cost scalars
 in word-index telemetry. #2069 intentionally builds on this prerequisite.
+The reproducible synchronous replacement profile is
+`npm run build && npm run bench:word-index-replacement`; it reports latency
+percentiles and inspector samples attributed to `normalizeEphemeralMapKey`.
+The relative smoke check's restored run reports 0.226% attribution (3,092
+samples); the pre-interning comparison reports 32.303% (5,727 samples).
 
 Word-index persistence keeps the v2 wire contract and caches its flat serialized
 view per index. Every replacement or addition marks its document dirty; the next
@@ -1055,6 +1084,19 @@ unrecognized leading launcher with `-c`/`--run`/`/c`/`-Command` is inspected
 recursively and fails closed only when its command string contains an actual
 guarded git verb (literal mentions such as `echo git push` remain allowed).
 
+Real-Git tests route child processes through `tests/support/git-fixture-env.ts`.
+That helper removes the Git directory environment family, isolates global config,
+and disables system config. It deletes inherited values even when the test harness
+itself starts with a contaminated environment; never trust the parent process
+environment for a spawned Git fixture. `git-fixture-governance.test.ts` sweeps test
+sources and requires the direct Git callee to be imported from that helper, while
+the script-side fixture probes use `scripts/lib/git-fixture-env.mjs`. The global-
+setup teardown guard rejects known fixture identity entries or `core.bare=true`
+in the repository config after the suite. The governance sweep anchors its
+implementation and justified-exemption lists to repo-relative paths, and its
+identity sweep keeps every literal `user.name`/`user.email` write in the guard's
+known sets.
+
 Git command classification has ONE implementation. `detectGuardedGitVerb`
 takes a `GitVerbMatcher` and owns the wrapper, `$IFS`, substitution, PATHEXT,
 and text-consumer analysis; a guard that needs "is this really a git
@@ -1093,8 +1135,10 @@ bounded commit-detail population opts out explicitly.
 
 The merge-train warden's GraphQL PR reader follows the same bounded-read contract:
 `fetchOpenPullRequests` preserves collected pages but records a fatal list error
-when `hasNextPage` remains true at `MAX_PAGES`. Its consumer prints that error and
-sets a nonzero exit code, while deliberately bounded sibling reads remain scoped.
+when `hasNextPage` remains true at `MAX_PAGES` or the cursor does not advance.
+It deduplicates PR numbers before `runWarden` decides or applies actions. Its
+consumer prints that error and sets a nonzero exit code, while deliberately
+bounded sibling reads remain scoped.
 
 The warden also classifies what Actions did with each open PR head
 (`scripts/lib/warden-run-health.mjs`, #2184). A run that concluded
@@ -1725,6 +1769,8 @@ Do not hand-edit generated `.js`; regenerate it from the corresponding `.ts`. Th
 **BLOCKED grammars — refuse to load a runtime-crasher (#423/#432).** A prebuilt grammar wasm can **fatally crash the host runtime** rather than fail gracefully: `tree-sitter-swift.wasm` @ tree-sitter-wasms 0.1.13 triggers a fatal V8 Turboshaft-WASM crash on **Node 24, every OS** (`Fatal process out of memory: Zone`) the first time it's loaded + parsed. The crash is a process **abort** — uncatchable in-process — and **rebuilding the grammar from source does NOT dodge it** (the from-source wasm crashes on Node 24.18 identically; an earlier `VENDORED` from-source-commit approach, #426, was tried and reverted because it added machinery without fixing the crash). Since the only place graceful degradation can live is **before load**, the fix is a runtime **load-skip**: `BLOCKED_GRAMMARS` + `grammarBlockReason(filename, rt)` (`grammar-source.ts`) — `tree-sitter-client.ts` `loadLanguage` returns `null` (→ "grammar unavailable", no structural symbols) instead of loading the crasher. Swift's predicate is `isV8 && nodeMajor >= 24`, so **bun (JavaScriptCore) and Node ≤ 22 keep full Swift** via the normal CDN download (swift is a normal downloaded grammar again — no committed bytes, no vendoring). Membership is **guard-driven, not hand-maintained**: `scripts/check-grammar-load.mjs` (`npm run check:grammar-load`) loads + heat-parses each grammar in an **isolated child process** (a crash kills the worker, can't be a caught test failure), **skips** blocked grammars, and is a **hard gate** for any *new* crasher; the `.github/workflows/grammar-health.yml` nightly runs it across ubuntu/macOS/windows, plus a `swift-crash-watch` job that **force-loads** the blocked grammar (`PILENS_UNSAFE_FORCE_GRAMMAR_LOAD=1`, `continue-on-error`) to signal when a future Node/V8 makes it safe to **lift** the block. To block another grammar: add one row to `BLOCKED_GRAMMARS` with a runtime predicate — that's it.
 
 **Source overrides — pull a grammar from a better package than the aggregator (#255).** The frozen `tree-sitter-wasms@0.1.13` aggregator ships some **broken** grammars: its `tree-sitter-lua.wasm` parses to `ERROR` trees once a **second** grammar loads into web-tree-sitter's process-global WASM `Module` (lua-specific — bash/ruby/python/go/js are fine), silently emptying lua symbols/imports/`module_report` in every multi-language repo. This is a **different class from a BLOCKED crasher**: it's a bad grammar *build*, not a runtime crash, and it's fixable by swapping the source. `GRAMMAR_SOURCE_OVERRIDES` (`grammar-source.ts`, mirrored as `SOURCE_OVERRIDES` in `download-grammars.ts`/`.js`) maps a wasm filename → `{package, version, url}`; both the runtime lazy-fetch (`grammarSourceUrl`) and the build-time downloader pull the override URL instead of the aggregator, and provenance (`grammars.lock.json` `overrides` section + `expectedVersion`/`expectedPackage`) records the real package/version so `needsDownload` + the provenance guard don't false-trip. Two grammars are overridden: **lua → `@tree-sitter-grammars/tree-sitter-lua@0.4.1`** (#255, queries rewritten for its `function_declaration`/`function_call`/`dot_index_expression` node types) and **yaml → `@tree-sitter-grammars/tree-sitter-yaml@0.7.1`** (#427 — the aggregator's yaml is ABI-incompatible with web-tree-sitter 0.25 and fails `Language.load` outright; no queries, it just needs to load). The maintained `@tree-sitter-grammars/*` org ships prebuilt wasms for **lua, yaml, toml** (not swift — no such package, and `tree-sitter-swift` ships C source only, which crashes when built). Swap another grammar: add one `GRAMMAR_SOURCE_OVERRIDES` row + its lock hash + `overrides` entry, and (if it has SYMBOL/IMPORT queries) revalidate them against the new node types (AST-dump-then-validate).
+
+The instance-registry lock records timeout degradation through a function-scoped lazy ledger load so dependency-cycle checks remain acyclic; its synchronous path uses a memoized `createRequire` load. `pruneDeadInstances` returns `"pruned"`, `"no-match"`, or `"could-not-acquire"`, so lock-expired cleanup cannot be reported as clean.
 
 ## Data directory conventions
 
