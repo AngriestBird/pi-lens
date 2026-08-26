@@ -2196,6 +2196,75 @@ describe("merge-lane sweep (#2185)", () => {
 		});
 	});
 
+	// Review round 2, F1: update-branch's 403 means two different things
+	// depending on whose branch it is (#1959). The lane must read the response
+	// through the warden's existing classifier, not a weaker local rule.
+	function behindUpdateFails(isFork: boolean, status: number) {
+		return fakeGithub({
+			"POST /graphql": graphqlPage([
+				lanePrNode({
+					labels: [TRAIN_APPROVED_LABEL],
+					mergeStateStatus: "BEHIND",
+					isCrossRepository: isFork,
+				}),
+			]),
+			"GET /repos/acme/repo/actions/runs": runsRoute(HEALTHY_RUNS),
+			"PUT /repos/acme/repo/pulls/7/update-branch": () => ({
+				ok: false,
+				status,
+				json: async () => ({}),
+			}),
+		});
+	}
+
+	it("records an update-branch 403 on a fork-owned PR as benign with the fork outcome", async () => {
+		const { fetcher } = behindUpdateFails(true, 403);
+		const results = await runMergeLane({
+			fetcher,
+			owner: "acme",
+			repo: "repo",
+			now: NOW,
+		});
+		expect(results[0].updated).toBe(false);
+		expect(results[0].errors).toContainEqual({
+			message: expect.stringContaining("update-branch-forbidden-fork"),
+			benign: true,
+		});
+	});
+
+	it("records an update-branch 403 on an own-branch PR as a fatal failure", async () => {
+		const { fetcher } = behindUpdateFails(false, 403);
+		const results = await runMergeLane({
+			fetcher,
+			owner: "acme",
+			repo: "repo",
+			now: NOW,
+		});
+		expect(results[0].errors).toContainEqual({
+			message: expect.stringContaining("HTTP 403"),
+			benign: false,
+		});
+		expect(
+			results[0].errors.some((e) => e.message.includes("forbidden-fork")),
+		).toBe(false);
+	});
+
+	it("keeps update-branch 409 and 422 benign for an own-branch PR", async () => {
+		for (const status of [409, 422]) {
+			const { fetcher } = behindUpdateFails(false, status);
+			const results = await runMergeLane({
+				fetcher,
+				owner: "acme",
+				repo: "repo",
+				now: NOW,
+			});
+			expect(results[0].errors).toContainEqual({
+				message: expect.stringContaining(`HTTP ${status}`),
+				benign: true,
+			});
+		}
+	});
+
 	// Review round 1, F5, at the sweep level.
 	it("does not merge when the timeline names a labeler outside the approver list", async () => {
 		const { fetcher, calls } = fakeGithub({

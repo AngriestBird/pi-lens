@@ -24,6 +24,7 @@
 
 import { commentMarkerExists, paginate } from "./github-paging.mjs";
 import {
+	classifyActionFailure,
 	fetchOpenPullRequests,
 	REQUIRED_CHECKS,
 	resolveCheckRuns,
@@ -443,11 +444,28 @@ export async function runMergeLane({
 					pr,
 				);
 				updated = response.ok;
-				if (!response.ok)
+				if (!response.ok) {
+					// Review round 2, F1: an update-branch 403 means two different
+					// things depending on whose branch it is (#1959). On a FORK
+					// without maintainer edits the token correctly lacks write access
+					// to someone else's repository -- expected, benign. On an
+					// own-repo branch the same 403 means the token itself lacks
+					// contents: write, which must stay loud. The warden already
+					// encodes exactly this distinction, so read the response through
+					// it rather than hand-rolling a second, weaker rule here.
+					const classification = classifyActionFailure(
+						{ type: "update-branch" },
+						pr,
+						response.status,
+					);
+					const suffix = classification.outcome
+						? ` (${classification.outcome})`
+						: "";
 					errors.push({
-						message: `PR #${pr.number}: update-branch -> HTTP ${response.status}`,
-						benign: response.status === 409 || response.status === 422,
+						message: `PR #${pr.number}: update-branch -> HTTP ${response.status}${suffix}`,
+						benign: classification.benign,
 					});
+				}
 			} catch (error) {
 				errors.push({
 					message: `PR #${pr.number}: update-branch -> ${error instanceof Error ? error.message : String(error)}`,
