@@ -481,6 +481,9 @@ const psScriptAnalyzerRunner: RunnerDefinition = {
 					latched: false,
 					hostStallMs,
 					budgetMs: PS_TIMEOUT_MS,
+					// A read of the process's own stdout, not classifyProbeFailure, is
+					// what decided this (#2209).
+					classifiedBy: "caller",
 				});
 				incrementDegradationCount({
 					kind: "grammar-blocked",
