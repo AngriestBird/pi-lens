@@ -6,6 +6,7 @@ import {
 	serializeWordIndex,
 	updateWordIndexDocument,
 	updateWordIndexDocumentAsync,
+	wordIndexPostingHits,
 } from "../../clients/word-index.js";
 import { measureMaxSyncBlockMs } from "../support/perf-harness.js";
 import { createTempFile, setupTestEnvironment } from "./test-utils.js";
@@ -149,7 +150,7 @@ describe("cooperative word-index refresh occupancy (#1215/#1224/#1225)", () => {
 			for (const [file, tokenCounts] of index.forward!) {
 				for (const [token, count] of tokenCounts) {
 					expect(
-						(index.postings.get(token) ?? []).filter(
+						wordIndexPostingHits(index, token).filter(
 							(hit) => hit.file === file,
 						),
 					).toHaveLength(count);
