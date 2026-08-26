@@ -39,7 +39,7 @@ const MEM_WATCH_SAMPLE = /\[mem-watch\][^\r\n]*availableMb=\d+ of \d+/g;
 const EXIT_137_SHAPED = /exit code 137|exitCode=137|signal=SIGKILL/;
 // (real log, run 32908647308, job 97998085238) the OOM killer took the
 // wrapper process itself, mid test run, before it could print any verdict:
-// "/home/runner/work/_temp/....sh: line 1:  2464 Killed
+// "<runner tmp>/....sh: line 1:  2464 Killed
 // node scripts/with-memory-watch.mjs -- npm test". A bare "Killed" with no
 // [mem-watch] line anywhere in the log is the pre-#2042 shape (run
 // 32888174877, PR #2058): the wrapper didn't exist yet, so a plain "Killed"
