@@ -597,6 +597,13 @@ or merge restoration, and writes under already-ignored directories remain
 outside the tool-result producer and are tracked by the freshness-probe issue.
 (#2071)
 
+Consumed nested `.gitignore` sources carry their build-time `mtimeMs` and size
+in the project matcher cache. `getProjectIgnoreMatcher` sweeps those sources
+at most once per root per two-second cadence and routes drift, including
+deletion, through `invalidateProjectIgnoreMatcherForPath`; newly discovered
+sources append to the baseline without replacing existing signatures, and it
+never stats on `isIgnored` verdicts. (#2159)
+
 Knip's dispatch memo is instance-owned and keyed by canonical project root plus
 the runtime's monotonic project sequence. Only callers that supply that content
 generation may reuse a successful result; explicit fresh-analysis callers omit
