@@ -3330,9 +3330,10 @@ export class LSPService {
 			// split. `spawnClient` never rethrows; it catches its own spawn and
 			// initialize failures and resolves `undefined`. This catch is
 			// therefore reachable only when `spawnClient` throws BEFORE its own
-			// `try` (the trust probe, `logSessionStart`, `recordLsp`), and two
-			// facts follow. The published promise is already rejected when it
-			// enters `inFlight`, so no joiner can attach to it. And the rethrow
+			// `try` (the trust probe, `logSessionStart`, `recordLsp`). A joiner
+			// CAN read the already-rejected promise out of `inFlight` (the #2106
+			// verify measured 2 invocations for 3 callers), but it does not
+			// matter: the rethrow
 			// below unwinds past every `lsp_client_selected` emit site, so this
 			// value is written to no record: a probe drove a throwing trust
 			// check through two concurrent callers and got two rejections and

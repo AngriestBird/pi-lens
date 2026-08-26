@@ -19,9 +19,12 @@
 //     red, including the `getClientsForFile` one;
 //   - move the `startedSpawn` capture to AFTER `await spawnPromise` (which is
 //     the pre-fix shape) and the burst replay reports 39 spawns again;
-//   - make `spawnClient` rethrow from its own catch and the
-//     "emits no selection record when the acquisition throws" test reds,
-//     which is the signal that the un-split catch below it needs revisiting.
+//   - make `spawnClient` rethrow from its own catch and the "splits the
+//     starter from the joiners when the spawn fails" test reds (the error
+//     escapes the acquisition); the claim-pin test uses a throwing trust
+//     probe, which fires before `spawnClient`'s try, so that mutation does
+//     not touch it. A rethrow deletes records rather than re-opening the
+//     over-count.
 //
 // NOT claimed as mutation-proven: the catch around `await spawnPromise` keeps
 // a single `spawn-failure` value on purpose. See the comment at that catch and
