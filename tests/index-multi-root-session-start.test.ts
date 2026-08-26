@@ -23,6 +23,7 @@ import {
 	getSecondarySessionCount,
 } from "../clients/session-lifecycle.js";
 import {
+	_settleRegistryMutationsForTests,
 	deregisterInstance,
 	getInstanceRoots,
 	readInstanceRegistry,
@@ -44,6 +45,16 @@ function invalidate(ctx: unknown): void {
 	});
 }
 
+/**
+ * Let the fire-and-forget registry writes the session_start handler queues
+ * reach disk. They all share one serialization tail inside
+ * `clients/instance-registry.ts`, so queuing a no-op registration and awaiting
+ * it drains everything queued before it — no sleep, no polling.
+ */
+async function settleRegistryWrites(): Promise<void> {
+	await _settleRegistryMutationsForTests();
+}
+
 /** The roots this process's registry entry currently holds. */
 async function rootsForThisPid(): Promise<string[]> {
 	const entry = (await readInstanceRegistry()).find(
@@ -56,10 +67,13 @@ describe("session_start keys on the project root (#2129 wiring)", () => {
 	let hostRoot: string;
 	let tempWorktree: string;
 
-	beforeEach(() => {
+	beforeEach(async () => {
 		_resetSessionLifecycleForTests();
 		// The registry entry is keyed by pid, so it survives between tests in
-		// this file and roots would accumulate across them.
+		// this file and roots would accumulate across them. Drain first: a
+		// previous test's fire-and-forget writes would otherwise land AFTER this
+		// deregistration and resurrect its roots inside this test.
+		await settleRegistryWrites();
 		deregisterInstance();
 		hostRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-host-root-"));
 		tempWorktree = fs.mkdtempSync(path.join(os.tmpdir(), "pi-agent-worktree-"));
@@ -101,9 +115,9 @@ describe("session_start keys on the project root (#2129 wiring)", () => {
 	 * secondary needs its own `extension()` call; the module-scope lifecycle
 	 * state they share is exactly the seam the guard reads.
 	 *
-	 * The second root is registered by hand: a declined start never calls
-	 * `registerInstance`, so this stands in for the producer that does reach it
-	 * (a guard-disabled or root-unknown start).
+	 * Both roots are registered by hand so the entry's contents are exact and
+	 * independent of whichever writes the handler's fire-and-forget path
+	 * happens to queue.
 	 */
 	async function bindSecondaryIn(cwd: string) {
 		const host = createPiMock();
@@ -112,6 +126,7 @@ describe("session_start keys on the project root (#2129 wiring)", () => {
 		await host.emit("session_start", makeSessionStartEvent(), hostCtx);
 		await registerInstance(hostRoot);
 		await registerInstance(tempWorktree);
+		await settleRegistryWrites();
 
 		const secondary = createPiMock();
 		extension(secondary.asExtensionAPI());
@@ -152,6 +167,83 @@ describe("session_start keys on the project root (#2129 wiring)", () => {
 		);
 
 		expect(await rootsForThisPid()).toHaveLength(2);
+	}, 30_000);
+
+	it("a declined temp root still registers itself in instances.json (#2130)", async () => {
+		// Review F2. `registerInstance` lives in the FULL-start body, below the
+		// secondary gate, so a declined start never reaches it. Without a
+		// lightweight root add, the temp root would be absent from the registry
+		// entirely — the shared-checkout guard and warm attach would know less
+		// about it than before #2130, and deregisterInstanceRoot would have
+		// nothing to remove.
+		const pi = createPiMock();
+		extension(pi.asExtensionAPI());
+
+		const hostCtx = makeCtx({ cwd: hostRoot, sessionId: "host-session" });
+		await pi.emit("session_start", makeSessionStartEvent(), hostCtx);
+		await settleRegistryWrites();
+		expect(await rootsForThisPid()).toHaveLength(1);
+
+		invalidate(hostCtx);
+		await pi.emit(
+			"session_start",
+			makeSessionStartEvent(),
+			makeCtx({ cwd: tempWorktree, sessionId: "subagent-session" }),
+		);
+		await settleRegistryWrites();
+
+		const roots = await rootsForThisPid();
+		expect(roots).toHaveLength(2);
+		expect(roots[1]).toContain(path.basename(tempWorktree));
+		// Still pinned: a declined start must never become the advertised root.
+		expect(roots[0]).toContain(path.basename(hostRoot));
+	}, 30_000);
+
+	it("a declined SAME-root start adds nothing to the set (#2130)", async () => {
+		// Mutation guard on the `sameRoot === false` gate: registering
+		// unconditionally would be a redundant write on every concurrent bind.
+		const pi = createPiMock();
+		extension(pi.asExtensionAPI());
+
+		const hostCtx = makeCtx({ cwd: hostRoot, sessionId: "host-session" });
+		await pi.emit("session_start", makeSessionStartEvent(), hostCtx);
+
+		const secondary = createPiMock();
+		extension(secondary.asExtensionAPI());
+		await secondary.emit(
+			"session_start",
+			makeSessionStartEvent(),
+			makeCtx({ cwd: hostRoot, sessionId: "sibling-session" }),
+		);
+		await settleRegistryWrites();
+
+		expect(await rootsForThisPid()).toHaveLength(1);
+	}, 30_000);
+
+	it("the primary's shutdown re-arms the process for a new root (#2129 F3)", async () => {
+		// Review F3, the process-lifetime-latch shape. Root identity made a
+		// stale activeRoot decisive: without an explicit release at the primary's
+		// shutdown, every later start in a different root would classify
+		// secondary-root FOREVER — never primary, never a full start.
+		const pi = createPiMock();
+		extension(pi.asExtensionAPI());
+
+		const hostCtx = makeCtx({ cwd: hostRoot, sessionId: "host-session" });
+		await pi.emit("session_start", makeSessionStartEvent(), hostCtx);
+		await pi.emit("session_shutdown", {}, hostCtx);
+		expect(getActivePrimaryRoot()).toBeUndefined();
+
+		// A brand new session in a DIFFERENT root must take over as primary.
+		const next = createPiMock();
+		extension(next.asExtensionAPI());
+		await next.emit(
+			"session_start",
+			makeSessionStartEvent(),
+			makeCtx({ cwd: tempWorktree, sessionId: "next-session" }),
+		);
+
+		expect(getSecondarySessionCount()).toBe(0);
+		expect(getActivePrimaryRoot()).toContain(path.basename(tempWorktree));
 	}, 30_000);
 
 	it("still runs a same-root replacement as the primary", async () => {

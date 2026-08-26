@@ -117,6 +117,7 @@ import {
 	deregisterInstanceRoot,
 	readInstanceRegistry,
 	registerInstance,
+	registerInstanceRoot,
 } from "./clients/instance-registry.js";
 import { logVanishedInstances } from "./clients/vanished-instance-marker.js";
 import {
@@ -162,6 +163,7 @@ import {
 	decrementSecondarySessionCount,
 	getActivePrimaryRoot,
 	noteSessionShutdown,
+	releasePrimarySession,
 	probeCtxActive,
 } from "./clients/session-lifecycle.js";
 import {
@@ -1828,6 +1830,26 @@ function activateExtension(hostPi: ExtensionAPI) {
 							sameRoot: sessionStartDecision.sameRoot,
 							primaryRoot: sessionStartDecision.primaryRoot,
 						});
+						// #2130 review F2: a declined start returns BEFORE
+						// `registerInstance` (which lives in the full-start body below),
+						// so without this the secondary's root would be absent from
+						// `instances.json` entirely — the shared-checkout guard and warm
+						// attach would know LESS about it than they did before #2130, and
+						// `deregisterInstanceRoot` at its shutdown would have nothing to
+						// remove. Only the ROOT is added: none of `registerInstance`'s
+						// other side effects (RSS resample, startedAt reseed, subagent
+						// identity capture) belong to a session that is being declined.
+						// Gated on `sameRoot === false` — positive evidence of a
+						// different root — because a secondary in the primary's own
+						// directory adds nothing to the set.
+						if (
+							sessionStartDecision.sameRoot === false &&
+							typeof sessionStartCwd === "string"
+						) {
+							void registerInstanceRoot(sessionStartCwd).catch(() => {
+								// best-effort observability — never fail session_start
+							});
+						}
 						return;
 					}
 
@@ -3017,6 +3039,14 @@ function activateExtension(hostPi: ExtensionAPI) {
 		// #449 slice 1: SYNC-only deregistration (no child spawns — see the
 		// processExiting note below); safe to call unconditionally here.
 		deregisterInstance();
+		// #2129 review F3: release the primary registration at the same boundary
+		// the registry entry is released. Root identity made a stale `activeRoot`
+		// decisive: without this, once root A's primary ended, every later start
+		// in root B would classify `secondary-root` forever — never primary,
+		// never a full start, no re-arm. This is the process-lifetime-latch shape
+		// the catalog names. Only the PRIMARY path reaches here; a secondary
+		// returned above precisely because the primary is still live.
+		releasePrimarySession();
 		// processExiting: the loop is closing here — killing LSP servers must NOT
 		// spawn taskkill, or libuv aborts on uv_async_send to the closing loop
 		// (Assertion !(handle->flags & UV_HANDLE_CLOSING), src\win\async.c) — seen

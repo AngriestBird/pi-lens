@@ -128,6 +128,81 @@ describe("instance-registry multi-root (#2130)", () => {
 		expect(entry.projectRoot).toContain(path.basename(realRoot));
 	});
 
+	describe("registerInstanceRoot (the declined start's lightweight add)", () => {
+		it("adds a root without touching the pinned primary", async () => {
+			const { registerInstance, registerInstanceRoot } =
+				await import("../../clients/instance-registry.js");
+			await registerInstance(realRoot);
+			await registerInstanceRoot(tempRoot);
+
+			const entry = readEntry();
+			expect(entry.projectRoots).toHaveLength(2);
+			expect(entry.projectRoots?.[1]).toContain(path.basename(tempRoot));
+			expect(entry.projectRoot).toContain(path.basename(realRoot));
+		});
+
+		it("does NOT create an entry when this pid has none", async () => {
+			// Synthesizing one would write the TEMP root as `projectRoot` —
+			// reproducing the exact clobber #2130 is about.
+			const { registerInstanceRoot, readInstanceRegistry } =
+				await import("../../clients/instance-registry.js");
+			await registerInstanceRoot(tempRoot);
+			expect(await readInstanceRegistry()).toEqual([]);
+		});
+
+		it("leaves the other entry fields alone", async () => {
+			const { registerInstance, registerInstanceRoot } =
+				await import("../../clients/instance-registry.js");
+			await registerInstance(realRoot);
+			const before = readEntry() as unknown as Record<string, unknown>;
+			await registerInstanceRoot(tempRoot);
+			const after = readEntry() as unknown as Record<string, unknown>;
+			// No RSS resample, no startedAt reseed, no heartbeat bump.
+			expect(after.startedAt).toBe(before.startedAt);
+			expect(after.heartbeatAt).toBe(before.heartbeatAt);
+			expect(after.rssBytes).toBe(before.rssBytes);
+		});
+
+		it("re-adding a known root does not rewrite the file", async () => {
+			const { registerInstance, registerInstanceRoot } =
+				await import("../../clients/instance-registry.js");
+			await registerInstance(realRoot);
+			const registryFile = path.join(dir, "instances.json");
+			const before = fs.statSync(registryFile, { bigint: true }).mtimeNs;
+			await new Promise((resolve) => setTimeout(resolve, 25));
+			await registerInstanceRoot(realRoot);
+			expect(fs.statSync(registryFile, { bigint: true }).mtimeNs).toBe(before);
+		});
+	});
+
+	describe("mergeInstanceRoots (the single owner of set semantics)", () => {
+		it("appends a new root and dedupes a known one", async () => {
+			const { mergeInstanceRoots } =
+				await import("../../clients/instance-registry.js");
+			expect(mergeInstanceRoots(["/a"], "/b")).toEqual(["/a", "/b"]);
+			expect(mergeInstanceRoots(["/a", "/b"], "/a")).toEqual(["/a", "/b"]);
+		});
+
+		it("evicts the oldest NON-primary root at the cap", async () => {
+			const { mergeInstanceRoots } =
+				await import("../../clients/instance-registry.js");
+			const full = Array.from({ length: 32 }, (_, i) => `/root-${i}`);
+			const merged = mergeInstanceRoots(full, "/root-new");
+			expect(merged).toHaveLength(32);
+			expect(merged[0]).toBe("/root-0");
+			expect(merged).not.toContain("/root-1");
+			expect(merged.at(-1)).toBe("/root-new");
+		});
+
+		it("never mutates its input", async () => {
+			const { mergeInstanceRoots } =
+				await import("../../clients/instance-registry.js");
+			const prior = ["/a"];
+			mergeInstanceRoots(prior, "/b");
+			expect(prior).toEqual(["/a"]);
+		});
+	});
+
 	describe("scoped deregistration", () => {
 		it("removes one root and leaves the rest of the entry alive", async () => {
 			const { registerInstance, deregisterInstanceRoot } =

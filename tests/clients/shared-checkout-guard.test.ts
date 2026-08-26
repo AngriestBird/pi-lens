@@ -477,6 +477,114 @@ describe("evaluateSharedCheckoutGuard (#2007)", () => {
 		).toMatchObject({ reasonCategory: "no_peer_session" });
 	});
 
+	describe("multi-root peers (#2130)", () => {
+		// A host serving two roots: its PRIMARY is an unrelated repo, its SECOND
+		// root is inside the shared checkout. This is the plegma host shape from
+		// #2130 — the real root plus a subagent worktree.
+		const OTHER = path.resolve("/unrelated/repo");
+
+		function multiRootPeer(): InstanceEntry {
+			return peer({
+				projectRoot: normalizeFilePath(OTHER),
+				projectRoots: [normalizeFilePath(OTHER), normalizeFilePath(ROOT)],
+			});
+		}
+
+		/** Each directory resolves to the working tree that actually contains it. */
+		const resolveToplevel = async (dir: string) =>
+			normalizeFilePath(dir).startsWith(normalizeFilePath(OTHER))
+				? OTHER
+				: ROOT;
+
+		it("blocks on a peer admitted by its SECOND root", async () => {
+			// MUTATION PROOF: resolve only `candidate.projectRoot` (the index-0
+			// root) instead of every root, and this reds — the peer is dropped at
+			// stage 2, the guard reports no peer, and the destructive command is
+			// ALLOWED against a checkout somebody else has uncommitted work in.
+			const decision = await evaluateSharedCheckoutGuard(
+				"bash",
+				bash("git checkout main"),
+				ROOT,
+				deps({
+					readRegistry: async () => [multiRootPeer()],
+					resolveToplevel,
+				}),
+			);
+			expect(decision.block).toBe(true);
+			expect(decision.reason).toContain("shared with");
+		});
+
+		it("control: the same peer on its PRIMARY root blocks too", async () => {
+			// Pins that the test above is not passing for an unrelated reason —
+			// the only difference between the two is WHICH root matches.
+			const decision = await evaluateSharedCheckoutGuard(
+				"bash",
+				bash("git checkout main"),
+				ROOT,
+				deps({
+					readRegistry: async () => [
+						peer({
+							projectRoot: normalizeFilePath(ROOT),
+							projectRoots: [normalizeFilePath(ROOT), normalizeFilePath(OTHER)],
+						}),
+					],
+					resolveToplevel,
+				}),
+			);
+			expect(decision.block).toBe(true);
+		});
+
+		it("a peer whose roots are ALL elsewhere still allows", async () => {
+			// The widening must not become "any live peer blocks anything".
+			const decision = await evaluateSharedCheckoutGuard(
+				"bash",
+				bash("git checkout main"),
+				ROOT,
+				deps({
+					readRegistry: async () => [
+						peer({
+							projectRoot: normalizeFilePath(OTHER),
+							projectRoots: [
+								normalizeFilePath(OTHER),
+								normalizeFilePath(path.join(OTHER, "sub")),
+							],
+						}),
+					],
+					resolveToplevel,
+				}),
+			);
+			expect(decision.block).toBe(false);
+			expect(
+				phaseCalls("shared_checkout_guard_allow")[0]?.metadata,
+			).toMatchObject({ reasonCategory: "no_peer_session" });
+		});
+
+		it("resolves each distinct root at most once", async () => {
+			// The per-root loop must not turn one `git rev-parse` into N on a
+			// path that already spawns one for the target.
+			const resolved: string[] = [];
+			await evaluateSharedCheckoutGuard(
+				"bash",
+				bash("git checkout main"),
+				ROOT,
+				deps({
+					readRegistry: async () => [multiRootPeer(), multiRootPeer()],
+					resolveToplevel: async (dir) => {
+						resolved.push(normalizeFilePath(dir));
+						return resolveToplevel(dir);
+					},
+				}),
+			);
+			// One for the target, then OTHER and ROOT once each across BOTH peers.
+			// Without the memo this is five calls (1 + 2 + 2).
+			expect(resolved).toEqual([
+				normalizeFilePath(ROOT),
+				normalizeFilePath(OTHER),
+				normalizeFilePath(ROOT),
+			]);
+		});
+	});
+
 	it("allows when the target is not inside any working tree", async () => {
 		const decision = await evaluateSharedCheckoutGuard(
 			"bash",

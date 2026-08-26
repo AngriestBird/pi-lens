@@ -23,6 +23,7 @@ import {
 	getActivePrimaryRoot,
 	getSecondarySessionCount,
 	registerPrimarySession,
+	releasePrimarySession,
 } from "../../clients/session-lifecycle.js";
 
 const PRIMARY_ROOT = "/repo/plegma";
@@ -309,5 +310,54 @@ describe("decideSessionStart root identity (#2129)", () => {
 		const declined = decideSessionStart(staleCtx(), "session-temp", TEMP_ROOT);
 		expect(declined.sameRoot).toBe(false);
 		expect(declined.primaryRoot).toContain("plegma");
+	});
+
+	it("primaryRoot is the DECISION-time value, not what this call wrote", () => {
+		// Review F5. On a full start the registration overwrites `activeRoot`, so
+		// reporting it afterwards would echo this call's own input and the record
+		// could never show a root CHANGE.
+		const first = decideSessionStart(staleCtx(), "session-a", PRIMARY_ROOT);
+		expect(first.primaryRoot).toBeUndefined();
+		// A same-root replacement reports the root it compared against.
+		const second = decideSessionStart(staleCtx(), "session-b", PRIMARY_ROOT);
+		expect(second.primaryRoot).toContain("plegma");
+	});
+});
+
+describe("releasePrimarySession (#2129 review F3)", () => {
+	afterEach(() => {
+		_resetSessionLifecycleForTests();
+	});
+
+	it("re-arms the process: a new root becomes primary after a release", () => {
+		// Without the release, root identity turns a stale registration into a
+		// permanent decline — root B never becomes primary, never runs the
+		// battery.
+		decideSessionStart(staleCtx(), "session-a", PRIMARY_ROOT);
+		releasePrimarySession();
+		expect(getActivePrimaryRoot()).toBeUndefined();
+
+		const next = decideSessionStart(staleCtx(), "session-b", TEMP_ROOT);
+		expect(next.classification).toBe("primary");
+		expect(next.runFullSessionStart).toBe(true);
+		expect(getActivePrimaryRoot()).toContain("pi-agent-733f1108");
+	});
+
+	it("without a release the same sequence declines forever", () => {
+		// The complement, so the test above cannot pass for an unrelated reason.
+		decideSessionStart(staleCtx(), "session-a", PRIMARY_ROOT);
+		for (const id of ["session-b", "session-c", "session-d"]) {
+			expect(decideSessionStart(staleCtx(), id, TEMP_ROOT).classification).toBe(
+				"secondary-root",
+			);
+		}
+	});
+
+	it("clears the secondary count with the registration", () => {
+		decideSessionStart(staleCtx(), "session-a", PRIMARY_ROOT);
+		decideSessionStart(staleCtx(), "session-b", TEMP_ROOT);
+		expect(getSecondarySessionCount()).toBe(1);
+		releasePrimarySession();
+		expect(getSecondarySessionCount()).toBe(0);
 	});
 });

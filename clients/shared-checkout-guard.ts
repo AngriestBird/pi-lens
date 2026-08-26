@@ -66,6 +66,7 @@ import {
 	resolveGitTargetDirectory,
 } from "./git-guard.js";
 import {
+	getInstanceRoots,
 	type InstanceEntry,
 	readInstanceRegistry,
 	selectLivePeerInstances,
@@ -321,14 +322,40 @@ async function evaluateOneTarget(
 	// it. Confirm each candidate belongs to the SAME working tree before
 	// declining anything, or the guard tells an operator already inside a
 	// dedicated worktree to go get a dedicated worktree.
+	//
+	// #2130: confirm against EVERY root the candidate serves, not only
+	// `projectRoot`. `selectLivePeerInstances` admits a candidate when ANY of
+	// its roots overlaps the target, so resolving the index-0 root alone drops
+	// a peer admitted on a SECONDARY root — and dropping the only peer allows
+	// the destructive command. `getInstanceRoots` is the single reader for
+	// registry root identity precisely so no caller re-derives it from the
+	// scalar field.
+	//
+	// Cost: at most one `git rev-parse` per distinct root, capped by
+	// `INSTANCE_ROOT_CAP` (32) and memoized below, on a path that already
+	// spawns one `rev-parse` for the target. The loop short-circuits on the
+	// first matching root, so the common single-root peer costs exactly what it
+	// did before.
+	const toplevelMemo = new Map<string, string | undefined>();
+	const resolveToplevelOnce = async (
+		dir: string,
+	): Promise<string | undefined> => {
+		if (toplevelMemo.has(dir)) return toplevelMemo.get(dir);
+		const resolved = await resolveToplevel(dir);
+		toplevelMemo.set(dir, resolved);
+		return resolved;
+	};
 	const peers: InstanceEntry[] = [];
 	for (const candidate of candidates) {
-		const peerToplevel = await resolveToplevel(candidate.projectRoot);
-		if (
-			peerToplevel !== undefined &&
-			normalizeFilePath(peerToplevel) === normalizedToplevel
-		) {
-			peers.push(candidate);
+		for (const candidateRoot of getInstanceRoots(candidate)) {
+			const peerToplevel = await resolveToplevelOnce(candidateRoot);
+			if (
+				peerToplevel !== undefined &&
+				normalizeFilePath(peerToplevel) === normalizedToplevel
+			) {
+				peers.push(candidate);
+				break;
+			}
 		}
 	}
 	if (peers.length === 0) {

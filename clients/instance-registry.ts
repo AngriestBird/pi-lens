@@ -260,6 +260,27 @@ export function getInstanceRoots(entry: InstanceEntry): string[] {
 const INSTANCE_ROOT_CAP = 32;
 
 /**
+ * The SINGLE owner of root-set semantics: dedupe, append order, and
+ * primary-preserving cap eviction (#2130).
+ *
+ * Both writers — `registerInstance` (the full session-start registration) and
+ * `registerInstanceRoot` (the lightweight add a declined secondary-root start
+ * performs) — fold through this, so the two can never disagree about what the
+ * set means. Pure, so the rule is testable without touching the filesystem.
+ */
+export function mergeInstanceRoots(
+	priorRoots: readonly string[],
+	normalizedRoot: string,
+): string[] {
+	const roots = priorRoots.includes(normalizedRoot)
+		? [...priorRoots]
+		: [...priorRoots, normalizedRoot];
+	// Evict from index 1 upward so the primary at index 0 survives.
+	while (roots.length > INSTANCE_ROOT_CAP) roots.splice(1, 1);
+	return roots;
+}
+
+/**
  * Register `projectRoot` for this process, ADDITIVELY (#2130).
  *
  * Creates the entry on first call and pins `projectRoot` as the primary. Every
@@ -269,7 +290,11 @@ const INSTANCE_ROOT_CAP = 32;
  * Re-registering a root already in the set is a no-op for the set (the
  * heartbeat/rss fields still refresh).
  */
-export async function registerInstance(projectRoot: string): Promise<void> {
+export function registerInstance(projectRoot: string): Promise<void> {
+	return queueRegistryMutation(() => registerInstanceNow(projectRoot));
+}
+
+async function registerInstanceNow(projectRoot: string): Promise<void> {
 	if (!isInstanceRegistryEnabled()) return;
 	const pid = process.pid;
 	const normalizedRoot = normalizeFilePath(projectRoot);
@@ -277,12 +302,10 @@ export async function registerInstance(projectRoot: string): Promise<void> {
 	const now = new Date().toISOString();
 	const others = file.instances.filter((entry) => entry.pid !== pid);
 	const existing = file.instances.find((entry) => entry.pid === pid);
-	const priorRoots = existing ? getInstanceRoots(existing) : [];
-	const roots = priorRoots.includes(normalizedRoot)
-		? [...priorRoots]
-		: [...priorRoots, normalizedRoot];
-	// Evict from index 1 upward so the primary at index 0 survives.
-	while (roots.length > INSTANCE_ROOT_CAP) roots.splice(1, 1);
+	const roots = mergeInstanceRoots(
+		existing ? getInstanceRoots(existing) : [],
+		normalizedRoot,
+	);
 	const identity = isSubagentSession() ? getSubagentIdentity() : undefined;
 	const subagent = identity
 		? {
@@ -305,6 +328,62 @@ export async function registerInstance(projectRoot: string): Promise<void> {
 		...(subagent ? { subagent } : {}),
 	});
 	await writeRegistryAsync({ instances: others });
+}
+
+/**
+ * Add ONE root to this process's existing entry (#2130), without any of
+ * `registerInstance`'s other side effects — no RSS resample, no `startedAt`
+ * reseed, no subagent-identity capture.
+ *
+ * This is what a DECLINED session start performs. `registerInstance` lives in
+ * the full-start body, below the #473/#2129 secondary gate, so a
+ * `secondary-root` start never reaches it. Without this call the temp root
+ * would be absent from `instances.json` entirely: the shared-checkout guard
+ * and warm attach would have LESS information about it than before #2130, and
+ * `deregisterInstanceRoot` would have nothing to remove.
+ *
+ * NEVER creates an entry. A declined start has no host entry to append to only
+ * when this process never registered one (the registry was reaped, or the
+ * primary's start has not landed yet). Synthesizing one here would write the
+ * TEMP root as `projectRoot` — reproducing the exact clobber #2130 is about —
+ * so this returns quietly instead. The next `registerInstance` re-creates the
+ * entry with the real root pinned.
+ *
+ * Shares the serialization tail with every other same-process registry
+ * mutation, so it cannot interleave its read-modify-write with a concurrent
+ * `registerInstance` and silently revert it (#1724).
+ */
+export function registerInstanceRoot(projectRoot: string): Promise<void> {
+	return queueRegistryMutation(() => registerInstanceRootNow(projectRoot));
+}
+
+async function registerInstanceRootNow(projectRoot: string): Promise<void> {
+	if (!isInstanceRegistryEnabled()) return;
+	const pid = process.pid;
+	const normalizedRoot = normalizeFilePath(projectRoot);
+	const file = await readRegistryAsync();
+	const idx = file.instances.findIndex((entry) => entry.pid === pid);
+	if (idx === -1) return;
+	const current = file.instances[idx];
+	const priorRoots = getInstanceRoots(current);
+	const roots = mergeInstanceRoots(priorRoots, normalizedRoot);
+	// Nothing changed (already registered, or evicted straight back out) — skip
+	// the write rather than re-serializing the whole file over a concurrent
+	// update.
+	if (
+		roots.length === priorRoots.length &&
+		roots.every((root, index) => root === priorRoots[index])
+	) {
+		return;
+	}
+	file.instances[idx] = {
+		...current,
+		// `projectRoot` stays pinned: a declined start must never become the
+		// host's advertised root, which is the whole point of #2130.
+		projectRoot: roots[0] ?? current.projectRoot,
+		projectRoots: roots,
+	};
+	await writeRegistryAsync(file);
 }
 
 export interface HeartbeatPatch {
@@ -370,8 +449,9 @@ export interface RecordLspChildInput {
 	marker?: string;
 }
 
-// Every mutation below (`recordLspChild`, `removeLspChild`) reads the WHOLE
-// registry file, edits this process's own `lspChildren`, and writes the whole
+// Every mutation routed through this tail (`registerInstance`,
+// `registerInstanceRoot`, `recordLspChild`, `removeLspChild`) reads the WHOLE
+// registry file, edits this process's own entry, and writes the whole
 // file back. Two such mutations from the SAME process — e.g. a client-ceiling
 // eviction's `removeLspChild(victimPid)` racing the replacement spawn's
 // `recordLspChild(newChild)` that follows it — are ordinary concurrent async
@@ -385,17 +465,30 @@ export interface RecordLspChildInput {
 // and "remove" can never interleave their read-modify-write against each
 // other — the single seam both the forced-shutdown and self-crash
 // deregistration paths route through.
-let registryChildMutationTail: Promise<void> = Promise.resolve();
+let registryMutationTail: Promise<void> = Promise.resolve();
 
-function queueRegistryChildMutation(op: () => Promise<void>): Promise<void> {
-	const run = registryChildMutationTail.then(op);
-	registryChildMutationTail = run.catch(() => {});
+function queueRegistryMutation(op: () => Promise<void>): Promise<void> {
+	const run = registryMutationTail.then(op);
+	registryMutationTail = run.catch(() => {});
 	return run;
+}
+
+/**
+ * Test-only: resolve once every registry mutation queued so far has landed.
+ *
+ * Several production call sites fire registry writes and deliberately do not
+ * await them (`void registerInstance(...)` in the session_start handler), so a
+ * test that reads the file straight afterwards races them. Queuing an empty op
+ * on the same tail joins the queue rather than sleeping on it, which keeps the
+ * wait exact instead of timing-dependent.
+ */
+export function _settleRegistryMutationsForTests(): Promise<void> {
+	return queueRegistryMutation(async () => {});
 }
 
 /** Append/replace (by pid) an LSP child under this process's entry. */
 export function recordLspChild(entry: RecordLspChildInput): Promise<void> {
-	return queueRegistryChildMutation(() => recordLspChildNow(entry));
+	return queueRegistryMutation(() => recordLspChildNow(entry));
 }
 
 async function recordLspChildNow(entry: RecordLspChildInput): Promise<void> {
@@ -456,9 +549,7 @@ export function removeLspChild(
 	pid: number,
 	expectedMarker?: string,
 ): Promise<void> {
-	return queueRegistryChildMutation(() =>
-		removeLspChildNow(pid, expectedMarker),
-	);
+	return queueRegistryMutation(() => removeLspChildNow(pid, expectedMarker));
 }
 
 async function removeLspChildNow(

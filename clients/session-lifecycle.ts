@@ -248,6 +248,37 @@ function normalizeRootForCompare(root: string | undefined): string | undefined {
 	}
 }
 
+/**
+ * Release the primary registration when the primary session itself shuts down
+ * (#2129 review F3).
+ *
+ * WHY THIS EXISTS. Before root identity was an input, a stale `activeCtx` left
+ * behind by a departed primary was benign: the next start probed it, got
+ * `false` (dead ctx), and classified `sequential-replacement`, so it took over
+ * as the new primary. Root identity made that stale state DECISIVE — a start in
+ * a different root behind a dead-but-still-registered primary now classifies
+ * `secondary-root` and declines. Without an explicit release, root A's primary
+ * ending would mean every later start in root B declines FOREVER: never
+ * primary, never a full start, no re-arm.
+ *
+ * This is the catalog's process-lifetime-latch shape (state that must re-arm at
+ * a session boundary must not outlive it). `session_shutdown`'s primary path is
+ * that boundary. Deliberately NOT called on a secondary's shutdown — that path
+ * returns before the shared teardown precisely because the primary is still
+ * live.
+ *
+ * A concurrent secondary that outlives the primary now classifies `primary` on
+ * its later emissions rather than `concurrent-secondary`. That is the fail-safe
+ * direction this module has always taken (run the handler), and it is correct
+ * here: with the primary gone there is no live sibling to protect.
+ */
+export function releasePrimarySession(): void {
+	activeCtx = undefined;
+	activeSessionId = undefined;
+	activeRoot = undefined;
+	secondarySessionCount = 0;
+}
+
 /** Register a concurrently-bound secondary (subagent) session. Does not
  * touch the primary's ctx/session id. */
 export function registerSecondarySession(): void {
@@ -433,6 +464,11 @@ export function decideSessionStart(
 			? activeRoot === incomingRoot
 			: undefined;
 
+	// #2129 review F5: capture the primary root BEFORE any registration mutates
+	// it, so the reported value is genuinely the decision-time input the
+	// classifier consulted rather than the value this call just wrote.
+	const primaryRootAtDecision = activeRoot;
+
 	const classification = classifySessionStartGuarded({
 		hasPrior,
 		priorCtxActive,
@@ -450,7 +486,7 @@ export function decideSessionStart(
 			runFullSessionStart: false,
 			secondaryCount: secondarySessionCount,
 			sameRoot,
-			primaryRoot: activeRoot,
+			primaryRoot: primaryRootAtDecision,
 		};
 	}
 
@@ -462,6 +498,6 @@ export function decideSessionStart(
 		runFullSessionStart: true,
 		secondaryCount: secondarySessionCount,
 		sameRoot,
-		primaryRoot: activeRoot,
+		primaryRoot: primaryRootAtDecision,
 	};
 }
