@@ -253,6 +253,10 @@ import {
 	shouldLogWorstBlock,
 	startEventLoopMonitor,
 } from "./clients/event-loop-monitor.js";
+import {
+	formatBuildIdentity,
+	getBuildIdentity,
+} from "./clients/build-identity.js";
 import { logSessionStart } from "./clients/sessionstart-logger.js";
 import { logConcurrentSessionBind } from "./clients/session-start-observability.js";
 import { normalizeToolDefinition } from "./clients/tool-definition.js";
@@ -1733,6 +1737,15 @@ function activateExtension(hostPi: ExtensionAPI) {
 				const sessionStartFiredAt = Date.now();
 				try {
 					dbg("session_start fired");
+					// #1775: one bounded build-identity line per session start —
+					// commit/entryMtime/version — so dogfood forensics ("does this
+					// session include PR #N?") reads it off the log instead of
+					// re-deriving it by hand in the serving checkout each time.
+					// getBuildIdentity is a pure fs read (no spawn) and returns
+					// undefined inside the test runner, so nothing is computed when
+					// this line would be a no-op anyway.
+					const buildIdentity = getBuildIdentity(import.meta.url);
+					if (buildIdentity) dbg(formatBuildIdentity(buildIdentity));
 					const sessionReason = (event as { reason?: string }).reason;
 
 					// #1334 S5: adopt the HOST's project-trust decision before anything
