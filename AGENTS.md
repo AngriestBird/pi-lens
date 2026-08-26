@@ -220,6 +220,8 @@ This is the payoff of the two disciplines above: a bounded checklist of defect *
 23. **An ancestor-walk predicate testing the advanced cursor instead of the starting leaf.** The loop variable changes meaning on every step, so it cannot answer a question about the entity that began the walk. *Screen:* predicates about the starting entity receive the starting path, not the cursor; tests include a layout with a gap directory (#1686).
 
 24. **A second writer added to a shared field without a discriminator.** The #1631/#1641 fix PRs' `WidgetDiagnostic.stale` collision combined demote-and-exclude with demote-but-keep-tally semantics; each fix was green alone, but the incompatibility surfaced only when their branches composed (#1633/#1703). *Screen:* when your change adds a second writer to an existing field: name every existing writer (grep the field's assignments); add a reason/kind discriminator with per-writer semantics BEFORE either lands; prove composition by running the other in-flight PR's test files on a locally merged tree — never by reasoning about different structures.
+25. **A process-uniqueness assumption held in module scope.** pi evaluates the pi-lens module graph MORE THAN ONCE per process — source and compiled entries load through separate graphs, in-process subagent binds re-enter the extension loader, and dogfood pass 3 measured one pid emitting `host_boot` nine times. Every module-scope `let` therefore exists N times, so any state whose correctness depends on being the process's only copy silently breaks, and a guard built on it becomes unreachable rather than wrong. The #2133 session-start guard was correct and never fired: evaluation 2 read an empty registration, classified a subagent temp root as `primary`, and ran the full battery (three identical word-index rebuilds, 240.8s of CPU for one index). The instance registry's single mutation tail became N tails and tore `instances.json` (#2146). *Screen:* when you add module-scope state, ask whether a SECOND copy of it in the same process would be merely wasteful or actually wrong. Registrations, serialization points, and once-per-process latches are wrong: put them behind `getProcessSingleton` (`clients/process-singletons.ts`) with a family version, and make the test-reset clear the GLOBAL state. Memos that re-derive the same answer from a stable source (an env read, a host probe) stay at module scope. *Detect:* a test that evaluates the module twice (`vi.resetModules()` + dynamic import) and asserts the second instance sees the first's state; `host_boot.metadata.evaluationOrdinal` in `latency.log` proves multi-evaluation in production.
+
 
 ### AI-authorship smells
 
@@ -371,6 +373,14 @@ Late auxiliary LSP publications are captured before the next resync clears the
 client cache. Carry them into that read only when their stored SHA-256 content
 binding matches the touch content exactly. Unknown or changed-content bindings
 never replay. (#1458)
+
+Turn-end late-auxiliary cache probes return per-file diagnostics with the
+publication timestamp. A newer timestamp with zero diagnostics is a confirmed
+clean result; an absent or older entry is still unavailable. Keep re-arms
+bounded by both the TTL and a hard count carried across each drain, and expose
+bounded stuck-pair identity in the phase record. Pair-level retirements and
+finding-level counts use separate fields and reconcile each drained pair to
+one retirement or a pending-after count. (#2151)
 
 Every auxiliary touch emits one bounded `lsp_aux_wait_outcome` latency row, on
 both producers: the `with-auxiliary` grace wait (`waitShape: "aux_grace"`) and,
@@ -604,6 +614,18 @@ Coverage markers are deduped per session by normalized kind, file, and the
 normalized silent-scanner set. A changed set admits a new marker, and a marker
 is appended after primary diagnostics so both remain visible.
 
+Availability probes for package managers, dispatch, Go and Cargo toolchains,
+security scans, checkers, and cwd probes use owner-local keyed flights created
+by `createAvailabilityProbeFlight`. An owner with a reset seam clears only its
+own registry (dispatch clears checker and cwd flights; package-manager clears
+its own); the toolchain and security registries have no reset and rely on
+flight-settle semantics plus stable keys. Dispatch-owned flights also use the
+dispatch generation guard, and
+joined records retain `classifiedBy: "joined"`. Release-managed binaries under
+`~/.pi-lens/bin` resolve before PATH probing, and the resolved path reaches
+security scans. Overrun records use the cache key as their second subject
+component, not a root. (#2131, #2140)
+
 Formatter PATH availability is session-scoped and must be re-armed in the
 primary `handleSessionStart` reset block beside dispatch availability. Its
 module-local state is not covered by the dispatch generation, and secondary
@@ -650,8 +672,10 @@ This matters for markdownlint-cli2: `--version` scanned 45 files and returned
 in about 370ms when stdin was closed, while `--no-globs -` linted one stdin
 file and returned in about 370ms; with production-shaped open stdin the latter
 waited for the full 10s budget. The bound is therefore supplied by the spawner,
-not by the CLI. Verification logs prefer `spawnFailure.kind` over generic
-`error` text (#2045).
+not by the CLI. Verification failure logs include the effective check arguments
+and prefer `spawnFailure.kind` over generic `error` text. Markdownlint's
+availability checker and install fallback use the registry's bounded
+`["--no-globs", "-"]` command through the managed-shim path as well (#2045).
 
 **One-shot process-table collection distinguishes exit failure from empty.**
 `spawnCollectStdoutResult` reports `exit-error` with code/signal and discards
@@ -812,6 +836,18 @@ resolver's ctx source. Automatic
 smell warnings count only the current session, or a 24-hour fallback window
 when no session boundary is available; explicit health remains separately
 labeled. (#1432)
+
+The PR body advisory lint may auto-repair only clearly flattened bodies: two or
+more inline template headings, at most two physical newlines, and a minimum
+body length. Detection refuses bodies with escape-loss markers, while the
+post-split structural guard compares repaired heading count with distinct
+template-section count and refuses inconsistent structures. Repair only splits
+inline headings
+whose preceding text ends at body start or sentence-ending punctuation.
+`repairFlattenedBody` is idempotent via its detection short-circuit and must
+pass `lintPrBody` before `patchLivePrBody` writes through the GitHub API; failed,
+stale, or uncheckable repairs report the original errors and never write. The workflow grants
+`pull-requests: write` only to the PR body lint job. (#2145)
 
 Message-end attribution uses a bounded two-slot session anchor. A primary
 `session_start` rotates `lastStableSessionId` into `previousSessionId` because
@@ -1079,7 +1115,7 @@ diagnostic rather than a silent mount failure. (#1381)
   installer/index.ts      Auto-install + ensureTool; probe-cache.json for fast restarts. Strategies: npm/pip/gem/github + maven (fat JAR → java -jar launcher) + archive (tree). github API is token-authed (api.github.com only, Authorization dropped on cross-host redirect — unauth=60/hr silently fails CI installs); tar extract is recursive-find (handles FLAT tarballs like gleam, not --strip-components). GITHUB_TOOLS kept in sync with the registry by tool-registry-consistency.test.ts
   lsp/                    40+ LSP server IDs (incl. CMake via cmake-language-server and Fish via fish-lsp; opengrep + ast-grep + zizmor + typos are cross-cutting AUXILIARY diagnostic LSPs — role:"auxiliary", #111/#239/#272/#283), config, lifecycle. clojure-lsp + gleam now auto-install via github (native binary / flat tarball). zizmor (GitHub Actions security, `zizmor --lsp`) attaches to YAML; advisory unless the repo ships zizmor.yml; online audits need a token (env or `gh auth token`) via clients/zizmor-config.ts. typos (source-code spell checker, `typos-lsp`, native win-arm64 build) attaches to the code-aux set PLUS markdown (#283 option B); allow-list dictionary (only KNOWN misspellings) so low-FP; advisory (default WARNING) unless the repo ships typos.toml via clients/typos-config.ts
   dispatch/               Pipeline dispatcher + 46 registered runners (incl. spotbugs — flag-gated via withSpotbugsGroup, #133). Auxiliary LSPs (opengrep, ast-grep, zizmor, typos, …) are NOT runners — they attach via the lsp runner's with-auxiliary path; see clients/dispatch/auxiliary-lsp.ts
-  runner-helpers.ts       Shared availability seam supports optional probe timeouts and synchronous managed-command fast paths; clients using it retain install suppression, session reset, typed missing outcomes, and whole probe+install in-flight dedupe per (cwd, toolId). Independent consumers share one tool/root probe flight only when their resolved binary and probe options match; refreshed probes carry a caller-owned freshness component. Waiters classify as `joined`, and budget overruns enter the bounded degradation ledger only when they exceed the two-times timeout threshold or do not return a timeout verdict. Cached-positive bare commands revalidate through installer's `(name, PATH-hash)` session memo so dispatch pays one PATH walk per command/session; session reset clears all verdicts and typed spawn ENOENT feedback evicts the affected command immediately. Absolute paths still receive a single per-hit stat.
+  runner-helpers.ts       Shared availability seam supports optional probe timeouts and synchronous managed-command fast paths; clients using it retain install suppression, session reset, typed missing outcomes, and whole probe+install in-flight dedupe per (cwd, toolId). Dispatch-owned checker and cwd probe flights are generation-guarded and reset with dispatch state; other owners keep separate registries. Managed release binaries resolve before PATH, and overrun subjects use cache keys rather than roots. Cached-positive bare commands revalidate through installer's `(name, PATH-hash)` session memo so dispatch pays one PATH walk per command/session; session reset clears all verdicts and typed spawn ENOENT feedback evicts the affected command immediately. Absolute paths still receive a single per-hit stat.
   widget-state.ts         Footer widget rendering (@earendil-works/pi-tui)
 tools/                    ast-grep-search, lsp-navigation tool handlers
 tests/                    Vitest test suite (mirrors clients/ structure)

@@ -2190,7 +2190,7 @@ export async function verifyToolBinary(
 					? "spawn-error"
 					: "exit-nonzero");
 		logSessionStart(
-			`auto-install verify: failed for ${binPath} (kind=${kind}${result.status !== null ? `, exit=${result.status}` : ""})`,
+			`auto-install verify: failed for ${binPath} (check=${verificationArgs.join(" ")}, kind=${kind}${result.status !== null ? `, exit=${result.status}` : ""})`,
 		);
 		return false;
 	} catch (err) {
@@ -2703,6 +2703,22 @@ async function findGitHubToolPath(
 		}
 	}
 	return undefined;
+}
+
+/** Resolve a release-managed binary without probing PATH first. */
+export async function findManagedToolBinary(
+	toolId: string,
+): Promise<string | undefined> {
+	const tool = TOOLS.find((candidate) => candidate.id === toolId);
+	if (!tool) return undefined;
+	if (
+		tool.installStrategy !== "github" &&
+		tool.installStrategy !== "maven" &&
+		tool.installStrategy !== "archive"
+	) {
+		return undefined;
+	}
+	return findGitHubToolPath(tool.binaryName || tool.id);
 }
 
 function hasExecutableExtension(name: string): boolean {

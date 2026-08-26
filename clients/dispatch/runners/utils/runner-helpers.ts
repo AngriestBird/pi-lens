@@ -43,7 +43,7 @@ import {
 } from "../../../tool-policy.js";
 import type { DispatchContext } from "../../types.js";
 import { isInSpawnTimeoutCooldown } from "../../../spawn-timeout-cooldown.js";
-import { createSingleFlight } from "../../../single-flight.js";
+import { createAvailabilityProbeFlight } from "../../../availability-probe-flight.js";
 import {
 	type AvailabilityCause,
 	type AvailabilityLatch,
@@ -207,6 +207,7 @@ async function runManagedVerification(
 	stamp: string,
 	priorAttempts: number,
 	generation: GenerationHandle,
+	verificationArgs: string[] = ["--version"],
 ): Promise<ManagedVerdict> {
 	let transient = false;
 	let ok: boolean;
@@ -219,6 +220,7 @@ async function runManagedVerification(
 				transient = true;
 			},
 			MANAGED_VERIFY_TIMEOUT_MS,
+			verificationArgs,
 		);
 	} catch {
 		// The verifier itself could not run — installer-isolated unit tests mock
@@ -262,6 +264,7 @@ async function runManagedVerification(
 
 async function verifyManagedCandidate(
 	candidate: string,
+	verificationArgs: string[] = ["--version"],
 ): Promise<ManagedVerdict> {
 	let stamp: string;
 	try {
@@ -285,6 +288,7 @@ async function verifyManagedCandidate(
 		stamp,
 		priorAttempts,
 		generation,
+		verificationArgs,
 	).finally(() => {
 		// A settling old-session probe must not evict the live entry a new
 		// session already started for the same shim (#1674 review F5).
@@ -320,9 +324,10 @@ async function verifyManagedCandidate(
  */
 export async function findManagedNodeToolBinary(
 	tool: string,
+	verificationArgs: string[] = ["--version"],
 ): Promise<string | null> {
 	for (const candidate of managedNodeToolCandidates(tool)) {
-		const verdict = await verifyManagedCandidate(candidate);
+		const verdict = await verifyManagedCandidate(candidate, verificationArgs);
 		if (verdict === "ok" || verdict === "unverified") return candidate;
 	}
 	return null;
@@ -343,6 +348,7 @@ export async function findManagedNodeToolBinary(
 export function createVenvFinder(
 	command: string,
 	windowsExt = "",
+	verificationArgs: string[] = ["--version"],
 ): (cwd: string) => Promise<string> {
 	return async (cwd: string): Promise<string> => {
 		const venvPaths = [
@@ -369,7 +375,7 @@ export function createVenvFinder(
 		// check settles it without a spawn — after one verification per shim per
 		// session, so a shim that cannot run falls through to PATH instead of
 		// shadowing a working binary (#1657).
-		const managed = await findManagedNodeToolBinary(command);
+		const managed = await findManagedNodeToolBinary(command, verificationArgs);
 		if (managed) return managed;
 
 		// Fall back to global
@@ -526,22 +532,12 @@ const latchedUnavailableByCwd = new PathKeyedMap<Set<string>>(normalizeMapKey);
 // instead of five hand-rolled ones, and a dropped straddling write is visible
 // in the degradation ledger instead of silent.
 const availabilityGeneration = createGenerationSource("dispatch-availability");
+export const getDispatchAvailabilityGeneration = (): number =>
+	availabilityGeneration.current();
 
-const availabilityProbeFlights = createSingleFlight<ProbeFailureShape>({
-	generation: () => availabilityGeneration.current(),
-});
-
-/** Share one external availability probe across independently-created consumers. */
-export function runSharedAvailabilityProbe<T extends ProbeFailureShape>(
-	key: string,
-	probe: () => Promise<T>,
-): { promise: Promise<T>; joined: boolean } {
-	const joined = availabilityProbeFlights.has(key);
-	return {
-		promise: availabilityProbeFlights.run(key, probe) as Promise<T>,
-		joined,
-	};
-}
+const checkerProbeFlights = createAvailabilityProbeFlight<
+	Awaited<ReturnType<typeof safeSpawnAsync>>
+>({ generation: getDispatchAvailabilityGeneration });
 
 export function recordAvailabilityProbeOverrun(
 	tool: string,
@@ -820,7 +816,9 @@ export function resetDispatchAvailabilityState(): void {
 	managedVerifyInFlight.clear();
 	resetPathWalkMemo();
 	availabilityGeneration.bump();
-	availabilityProbeFlights.clear();
+	checkerProbeFlights.clear();
+	cwdProbeFlights.clear();
+	// The generation bump invalidates dispatcherProbeFlights in its owner module.
 }
 
 /** What the last probe for a cwd decided, for messaging and telemetry (#1467). */
@@ -872,7 +870,7 @@ export function createAvailabilityChecker(
 	let checkerGeneration = availabilityGeneration.current();
 	let checkerFlightGeneration = 0;
 
-	const findCommand = createVenvFinder(command, windowsExt);
+	const findCommand = createVenvFinder(command, windowsExt, versionArgs);
 
 	function ensureCurrentGeneration(): void {
 		if (checkerGeneration === availabilityGeneration.current()) return;
@@ -1081,13 +1079,14 @@ export function createAvailabilityChecker(
 			let hostStallMs: number;
 			let probeJoined = false;
 			try {
-				const shared = runSharedAvailabilityProbe(
+				const shared = checkerProbeFlights.run(
 					`checker:${command}|${versionArgs.join("|")}|${key}|${checkerFlightGeneration}|${windowsExt}|${cmd}|${JSON.stringify(Object.entries(env ?? {}).sort(([a], [b]) => a.localeCompare(b)))}`,
 					() =>
 						safeSpawnAsync(cmd, versionArgs, {
 							timeout: options.probeTimeout ?? 5000,
 							cwd: resolvedCwd,
 							env,
+							input: "",
 						}),
 				);
 				probeJoined = shared.joined;
@@ -1183,6 +1182,10 @@ export function createAvailabilityChecker(
 export interface CwdProbeResult extends ProbeFailureShape {
 	status?: number | null;
 }
+
+const cwdProbeFlights = createAvailabilityProbeFlight<CwdProbeResult>({
+	generation: getDispatchAvailabilityGeneration,
+});
 
 export interface CwdCachedProbeOptions {
 	/** Tool name used in the `availability_decision` record. */
@@ -1323,7 +1326,7 @@ export function createCwdCachedProbe(
 			let thrown: unknown;
 			let probeJoined = false;
 			try {
-				const shared = runSharedAvailabilityProbe(
+				const shared = cwdProbeFlights.run(
 					`cwd:${options.tool}|${options.flightKeyComponent ?? ""}|${key}`,
 					() => probe(key),
 				);
@@ -1490,6 +1493,7 @@ async function verifyOrInstallCommand(
 		const versionCheck = await safeSpawnAsync(command, versionArgs, {
 			timeout,
 			cwd,
+			input: "",
 		});
 		if (!versionCheck.error && versionCheck.status === 0) {
 			return command;
@@ -1538,7 +1542,7 @@ export async function resolveCommandArgsWithInstallFallback(
 	const versionCheck = await safeSpawnAsync(
 		command.cmd,
 		[...command.args, ...versionArgs],
-		{ timeout, cwd },
+		{ timeout, cwd, input: "" },
 	);
 	if (!versionCheck.error && versionCheck.status === 0) {
 		return command;

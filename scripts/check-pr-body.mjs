@@ -15,6 +15,29 @@ const REQUIRED_SECTIONS = [
 	"Observability",
 ];
 const HEADING = /^#{2,4}\s+(.+?)\s*$/;
+const FLATTENED_BODY_MAX_NEWLINES = 2;
+const REPAIR_HEADINGS = [
+	"Summary",
+	"Tests",
+	"Test assessment",
+	"Blast radius",
+	"Class sweep",
+	"Observability",
+	"Fix round \\d+",
+	"Review round \\d+",
+];
+const REPAIR_HEADING_PATTERN = REPAIR_HEADINGS.join("|");
+const CORRUPTED_HEADING_TAILS = [
+	"ummary",
+	"ests",
+	"est assessment",
+	"last radius",
+	"lass sweep",
+	"bservability",
+	"ix round \\d+",
+	"eview round \\d+",
+];
+const CORRUPTED_IDENTIFIER_TAILS = ["etchOpenPullRequests", "px"];
 
 // Fleet census from the review of 11 bodies: ## OBSERVABILITY x5,
 // ## what changed x6, ## verification x7, and ## Summary x1. “What changed”
@@ -98,6 +121,73 @@ function hasRealContent(lines, section, placeholders) {
 	});
 }
 
+/** Detect the high-confidence shape produced when a worker flattens a body. */
+export function detectFlattenedBody(body = "") {
+	const source = String(body ?? "");
+	const newlineCount = (source.match(/\r?\n/g) ?? []).length;
+	if (newlineCount > FLATTENED_BODY_MAX_NEWLINES || source.length < 200)
+		return false;
+	// A flattened body containing these markers has already lost data. It is
+	// safer to report the original lint errors than to write a guessed repair.
+	if (
+		/[\f\t]|\r(?!\n)|\\[ftr]/.test(source) ||
+		/\\n/.test(source) ||
+		new RegExp(
+			`(?:^|[\\s])(?:${CORRUPTED_HEADING_TAILS.join("|")})(?=\\s|$)`,
+			"i",
+		).test(source) ||
+		new RegExp(
+			`(?:^|[\\s` +
+				"\\\"'" +
+				`])(?:${CORRUPTED_IDENTIFIER_TAILS.join("|")})(?=$|[\\s` +
+				"\\\"',.)" +
+				`])`,
+		).test(source)
+	)
+		return false;
+	const inlineHeadings = source.match(
+		new RegExp(
+			`(?<!^)\\s#{2,4}\\s+(?:${REPAIR_HEADING_PATTERN})(?=\\s|$)`,
+			"g",
+		),
+	);
+	return (inlineHeadings?.length ?? 0) >= 2;
+}
+
+/** Repair only a body already proven to have the flattened shape. */
+export function repairFlattenedBody(body = "") {
+	const source = String(body ?? "");
+	if (!detectFlattenedBody(source)) return source;
+	let repaired = source.replace(/\r\n?/g, "\n");
+	repaired = repaired.replace(
+		new RegExp(
+			`(^|[.!?])[ \\t]*(#{2,4}\\s+(?:${REPAIR_HEADING_PATTERN}))(?=\\s|$)`,
+			"g",
+		),
+		(_match, sentenceEnd, heading) =>
+			sentenceEnd ? `${sentenceEnd}\n\n${heading}\n` : `${heading}\n`,
+	);
+	const residualInlineHeadings = repaired.match(
+		new RegExp(
+			`(?<!^)[ \\t]#{2,4}\\s+(?:${REPAIR_HEADING_PATTERN})(?=\\s|$)`,
+			"g",
+		),
+	);
+	if (residualInlineHeadings?.length) return source;
+	const repairedHeadings = repaired
+		.split("\n")
+		.map((line) => HEADING.exec(line)?.[1].trim().toLowerCase())
+		.filter(Boolean);
+	const templateHeadings = repairedHeadings.filter((heading) =>
+		new RegExp(`^(?:${REPAIR_HEADING_PATTERN})$`, "i").test(heading),
+	);
+	const distinctTemplateHeadings = new Set(
+		templateHeadings.map((heading) => heading.replace(/ \d+$/, "")),
+	);
+	if (repairedHeadings.length !== distinctTemplateHeadings.size) return source;
+	return repaired;
+}
+
 /** Check the structural PR-body contract, including answered sections. */
 export function lintPrBody(body = "", options = {}) {
 	const rawLines = String(body ?? "").split(/\r?\n/);
@@ -166,40 +256,71 @@ export function lintPrBody(body = "", options = {}) {
 	return { valid: errors.length === 0, errors };
 }
 
+async function fetchLivePrBody(payloadPr, fetchImpl) {
+	const token = process.env.GITHUB_TOKEN;
+	if (!token) throw new Error("GITHUB_TOKEN is not set");
+	const apiUrl = process.env.GITHUB_API_URL;
+	const repository = process.env.GITHUB_REPOSITORY;
+	if (!apiUrl || !repository)
+		throw new Error("GITHUB_API_URL or GITHUB_REPOSITORY is missing");
+	const response = await fetchImpl(
+		`${apiUrl}/repos/${repository}/pulls/${payloadPr.number}`,
+		{
+			signal: AbortSignal.timeout(10_000),
+			headers: {
+				Accept: "application/vnd.github+json",
+				Authorization: `Bearer ${token}`,
+				"X-GitHub-Api-Version": "2022-11-28",
+			},
+		},
+	);
+	if (!response.ok) throw new Error(`GitHub API returned ${response.status}`);
+	const data = await response.json();
+	if (typeof data.body !== "string")
+		throw new Error("GitHub API returned no body");
+	return data.body;
+}
+
 export async function resolveLivePrBody(
 	payloadPr,
 	fetchImpl = globalThis.fetch,
 ) {
-	const fallback = payloadPr.body ?? "";
 	try {
-		const token = process.env.GITHUB_TOKEN;
-		if (!token) throw new Error("GITHUB_TOKEN is not set");
-		const apiUrl = process.env.GITHUB_API_URL;
-		const repository = process.env.GITHUB_REPOSITORY;
-		if (!apiUrl || !repository)
-			throw new Error("GITHUB_API_URL or GITHUB_REPOSITORY is missing");
-		const response = await fetchImpl(
-			`${apiUrl}/repos/${repository}/pulls/${payloadPr.number}`,
-			{
-				signal: AbortSignal.timeout(10_000),
-				headers: {
-					Accept: "application/vnd.github+json",
-					Authorization: `Bearer ${token}`,
-					"X-GitHub-Api-Version": "2022-11-28",
-				},
-			},
-		);
-		if (!response.ok) throw new Error(`GitHub API returned ${response.status}`);
-		const data = await response.json();
-		if (typeof data.body !== "string")
-			throw new Error("GitHub API returned no body");
-		return data.body;
+		return await fetchLivePrBody(payloadPr, fetchImpl);
 	} catch (error) {
 		console.warn(
 			`::warning::Could not fetch the live PR body; using the event payload instead (${error instanceof Error ? error.message : error}).`,
 		);
-		return fallback;
+		return payloadPr.body ?? "";
 	}
+}
+
+export async function patchLivePrBody(
+	payloadPr,
+	body,
+	fetchImpl = globalThis.fetch,
+) {
+	const token = process.env.GITHUB_TOKEN;
+	if (!token) throw new Error("GITHUB_TOKEN is not set");
+	const apiUrl = process.env.GITHUB_API_URL;
+	const repository = process.env.GITHUB_REPOSITORY;
+	if (!apiUrl || !repository)
+		throw new Error("GITHUB_API_URL or GITHUB_REPOSITORY is missing");
+	const response = await fetchImpl(
+		`${apiUrl}/repos/${repository}/pulls/${payloadPr.number}`,
+		{
+			method: "PATCH",
+			signal: AbortSignal.timeout(10_000),
+			headers: {
+				Accept: "application/vnd.github+json",
+				Authorization: `Bearer ${token}`,
+				"X-GitHub-Api-Version": "2022-11-28",
+				"Content-Type": "application/json",
+			},
+			body: JSON.stringify({ body }),
+		},
+	);
+	if (!response.ok) throw new Error(`GitHub API returned ${response.status}`);
 }
 
 /**
@@ -254,6 +375,12 @@ export async function resolveTouchesTests(
 	}
 }
 
+function eventPayload() {
+	const eventPath = process.env.GITHUB_EVENT_PATH;
+	if (!eventPath) throw new Error("GITHUB_EVENT_PATH is required");
+	return JSON.parse(readFileSync(eventPath, "utf8"));
+}
+
 /**
  * The full live lint: resolve body and file list, then lint. The tri-state
  * from resolveTouchesTests is consumed HERE: only an affirmative true
@@ -261,35 +388,57 @@ export async function resolveTouchesTests(
  * (no tests/ files) both skip it, so a flaky fetch can never misfire the
  * check (#2124 review F2 pinned this consumption).
  */
-export async function lintLivePrBody(payloadPr, fetchImpl = globalThis.fetch) {
-	return lintPrBody(await resolveLivePrBody(payloadPr, fetchImpl), {
-		requireTestAssessment:
-			(await resolveTouchesTests(payloadPr, fetchImpl)) === true,
-	});
-}
-
-function eventPayload() {
-	const eventPath = process.env.GITHUB_EVENT_PATH;
-	if (!eventPath) throw new Error("GITHUB_EVENT_PATH is required");
-	return JSON.parse(readFileSync(eventPath, "utf8"));
-}
-
-async function lintPullRequestEvent() {
-	const pullRequest = eventPayload().pull_request;
+export async function lintPullRequestEvent(
+	fetchImpl = globalThis.fetch,
+	event = eventPayload(),
+) {
+	const pullRequest = event.pull_request;
 	if (!pullRequest || !process.env.GITHUB_REPOSITORY)
 		throw new Error("Pull request event and GITHUB_REPOSITORY are required");
-	const result = await lintLivePrBody(pullRequest);
-	if (!result.valid) {
-		for (const error of result.errors) console.error(error);
-		process.exitCode = 1;
-		return;
+	const body = await resolveLivePrBody(pullRequest, fetchImpl);
+	const requireTestAssessment =
+		(await resolveTouchesTests(pullRequest, fetchImpl)) === true;
+	const result = lintPrBody(body, { requireTestAssessment });
+	if (result.valid) {
+		console.log(`PR body OK: ${pullRequest.number}`);
+		return { valid: true, repaired: false };
 	}
-	console.log(`PR body OK: ${pullRequest.number}`);
+	if (detectFlattenedBody(body)) {
+		const repairedBody = repairFlattenedBody(body);
+		const repairedResult = lintPrBody(repairedBody, { requireTestAssessment });
+		if (repairedResult.valid) {
+			try {
+				const latestBody = await fetchLivePrBody(pullRequest, fetchImpl);
+				if (latestBody !== body) {
+					console.log(
+						`::notice::Skipped flattened PR body repair for #${pullRequest.number}; the body changed during linting.`,
+					);
+					for (const error of result.errors) console.error(error);
+					return { valid: false, repaired: false };
+				}
+				await patchLivePrBody(pullRequest, repairedBody, fetchImpl);
+				console.log(
+					`::notice::Repaired flattened PR body for #${pullRequest.number} before validation passed.`,
+				);
+				return { valid: true, repaired: true };
+			} catch (error) {
+				console.warn(
+					`::warning::Skipped flattened PR body repair for #${pullRequest.number}; freshness check failed, preserving original lint errors (${error instanceof Error ? error.message : error}).`,
+				);
+			}
+		}
+	}
+	for (const error of result.errors) console.error(error);
+	return { valid: false, repaired: false };
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
-	lintPullRequestEvent().catch((error) => {
-		console.error(error instanceof Error ? error.message : error);
-		process.exitCode = 1;
-	});
+	lintPullRequestEvent()
+		.then((result) => {
+			if (!result.valid) process.exitCode = 1;
+		})
+		.catch((error) => {
+			console.error(error instanceof Error ? error.message : error);
+			process.exitCode = 1;
+		});
 }
