@@ -286,6 +286,12 @@ Pipeline-crash teardown is destructive only for the registered primary session;
 when no primary registration exists, the legacy reset remains the fail-safe.
 (#2157, #2174)
 
+Per-path `didChange` sends serialize their read/build/send/record transaction
+through `LSPClientState.notifyChangeQueues`; different paths remain parallel.
+`recordSentContent` rejects a lower-version mirror update and records an
+`lsp-document-send-order` degradation with the server and normalized path.
+(#2113)
+
 Auxiliary diagnostic waits preserve a warm-turn fast path: on a cold
 acquisition, the budget is `max(declared wait, observed spawn + 500ms)` clamped
 to an 8s ceiling; on a warm acquisition, it remains `min(declared wait, 2000ms)`. An
@@ -703,7 +709,15 @@ preserved as `cause`. (#1214)
 opt into `safeSpawnAsync`'s `input: ""` so every verification receives EOF.
 The registry may declare a larger bounded timeout for a tool whose cold
 launcher startup exceeds the dispatch budget; Vue uses 30 seconds while the
-installer default remains 10 seconds (#2176).
+installer default remains 10 seconds (#2176). bash-language-server and
+vscode-json-language-server measured 9,667ms and 11,047ms cold with closed
+stdin — both close enough to the 10s default that host contention alone can
+trip a false verification degradation — and use a 20-second bound (#2194).
+Delivery is proven per strategy, not just for npm: `probeManagedToolVersion`
+(pip/gem) and `verifyRefreshedArtifact` (github/maven/archive) both resolve
+the timeout through `getToolVerificationTimeout` on every call, and each of
+the six strategies has a test that raises a tool's `verificationTimeoutMs`
+and asserts the exact value reaches the post-refresh `--version` spawn (#2194).
 This matters for markdownlint-cli2: `--version` scanned 45 files and returned
 in about 370ms when stdin was closed, while `--no-globs -` linted one stdin
 file and returned in about 370ms; with production-shaped open stdin the latter
@@ -1158,6 +1172,47 @@ when `hasNextPage` remains true at `MAX_PAGES` or the cursor does not advance.
 It deduplicates PR numbers before `runWarden` decides or applies actions. Its
 consumer prints that error and sets a nonzero exit code, while deliberately
 bounded sibling reads remain scoped.
+
+The warden also classifies what Actions did with each open PR head
+(`scripts/lib/warden-run-health.mjs`, #2184). A run that concluded
+`failure`/`startup_failure` with ZERO executed steps across every job is
+`starved-run`, not a red build — verified against the real incident run
+32986328966, where six jobs sat `queued` and one matrix job read
+`completed`/`skipped`, so "every job is queued" is the wrong predicate. A head
+with no `ci.yml`/`lint.yml` run past `ABSENT_RUN_GRACE_MINUTES` is `absent-run`.
+Recovery is bounded: one `POST /actions/runs/{id}/rerun` per starved run, keyed
+on GitHub's own `run_attempt` so the warden never re-runs the same run twice,
+and one per-head comment for an absent dispatch, keyed on an HTML marker
+carrying the head SHA. An unreadable runs or jobs list classifies
+`run-health-unknown`, never `absent-run`. Every swept PR gets a classification
+line in the run summary, including quiet ones.
+
+The label-gated merge lane (`scripts/lib/merge-train-lane.mjs`, #2185) is the
+only automation in this repository that merges, and it lives outside the warden
+on purpose. It merges a PR carrying `train:approved` only on POSITIVE evidence
+about the exact current head: both required checks present, `COMPLETED`, and
+`SUCCESS`, run health `runs-concluded-normally`, zero failing non-advisory
+checks, and a `CLEAN`/`UNSTABLE` merge state. Absent, unconcluded, starved, and
+DIRTY-skipped checks are all not-green. Gating on the current head is what
+re-gates a fix round, so the lane stores no "approved at SHA" state that could
+drift; the merge call passes `sha` so a head that moves mid-cycle 409s instead
+of merging on a stale verdict. Only the maintainer applies the label, so the
+adversarial-review-first policy is unchanged; removing the label aborts.
+
+Four facts about THIS repository the lane must keep matching, each probed live
+rather than assumed (review round 1 on PR #2191, all four were wrong first):
+master protection is `strict: true`, so a BEHIND head cannot be merged at all
+and instead gets `update-branch` with `expected_head_sha`; a check is advisory
+by its `(advisory)` NAME SUFFIX (`oxfmt format check (advisory)`,
+`PR body (advisory)`, `Vale prose lint (advisory)`, `OSV scan (advisory)`), not
+by a vendor allowlist; one head's rollup really does carry DUPLICATE check
+names, so `resolveCheckRuns` picks the newest by `startedAt` and fails closed on
+an unorderable disagreement, because `new Map(list.map(...))` is last-wins on
+array order and called an in-flight re-run green; and `direction=desc` is
+ignored by `issues/{n}/comments`, so every marker-dedupe read paginates to the
+last page through `scripts/lib/github-paging.mjs`. Label provenance comes from
+the last `labeled` timeline event and must name an approver, so "anyone who can
+label" is not "anyone who can merge".
 
 CI validates GitHub close-keyword syntax through `scripts/check-close-keywords.mjs`:
 PR bodies may not use a comma-separated close list because GitHub applies only

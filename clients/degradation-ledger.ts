@@ -98,6 +98,8 @@ export type DegradationKind =
 	| "lsp-diagnostics-timeout"
 	| "lsp-scanner-coverage-gap"
 	| "lsp-notify-inflight-stall"
+	/** A didChange content mirror was recorded behind a newer document version. */
+	| "lsp-document-send-order"
 	| "bus-stale"
 	| "query-predicates-invalid"
 	| "install-retry-exhausted"
