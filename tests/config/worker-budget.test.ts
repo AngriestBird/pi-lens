@@ -345,4 +345,19 @@ describe("CI memory attribution (#2042)", () => {
 		expect(ci).toContain("free -m");
 		expect(ci).toContain("nproc");
 	});
+
+	// #2042 round 2: the low-water mark proved the box was not short of memory
+	// on three real kills, but it cannot name what sent the SIGKILL. The kernel
+	// can, and only while the runner is still alive — so the record has to be
+	// taken inside the job, on failure.
+	it("asks the kernel who sent the kill when the job fails", () => {
+		expect(ci).toContain("Kernel kill evidence");
+		expect(ci).toContain("dmesg");
+		expect(ci).toContain("systemd-oomd");
+	});
+
+	it("gates the kernel evidence on failure, so a green run stays quiet", () => {
+		const step = ci.slice(ci.indexOf("Kernel kill evidence"));
+		expect(step.slice(0, 200)).toContain("if: failure()");
+	});
 });

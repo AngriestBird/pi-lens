@@ -69,13 +69,20 @@ const first = readMemory();
 emit(
 	`[mem-watch] host cpus=${os.availableParallelism?.() ?? os.cpus().length} ` +
 		`totalMb=${first.totalMb} availableMb=${first.availableMb} ` +
-		`source=${first.source} intervalMs=${intervalMs}\n`,
+		`source=${first.source} intervalMs=${intervalMs} ` +
+		// #2042 round 2: the kernel's own record names a pid and a comm
+		// ("Killed process 2477 (npm)"). Without these pids in the log there is
+		// nothing to match it against, and the two observed victims are exactly
+		// these two processes: the wrapper itself (run 32908647308) and its
+		// `npm` child (run 33010136296).
+		`watcherPid=${process.pid}\n`,
 );
 
 const watch = {
 	totalMb: first.totalMb,
 	lowWaterMb: first.availableMb,
 	lowWaterAt: null,
+	childPid: null,
 };
 const state = { lastPrintedMb: null, thresholdMb, stepMb };
 
@@ -105,6 +112,7 @@ const child = spawn(command[0], command.slice(1), {
 	stdio: "inherit",
 	shell: process.platform === "win32",
 });
+watch.childPid = child.pid ?? null;
 
 child.on("error", (error) => {
 	clearInterval(timer);

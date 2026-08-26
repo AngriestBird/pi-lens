@@ -176,6 +176,29 @@ jobs:
         # arrives with a number attached.
         run: node scripts/with-memory-watch.mjs -- npm test
 
+      # #2042 round 2: the low-water mark falsified the memory story (three
+      # kills at 13.0-13.3 GB available of 16 GB, a green run LOWER at 13.1 GB)
+      # but it cannot name what sent the SIGKILL. The kernel can. `dmesg` says
+      # in one line whether the OOM killer fired and on whom; systemd-oomd
+      # kills on PSI pressure while memory still reads available, so it is the
+      # other authority worth asking. Every command is best-effort: this step
+      # must add evidence to a failure, never change its cause.
+      - name: Kernel kill evidence
+        if: failure()
+        run: |
+          set +e
+          echo "--- kernel OOM/kill records ---"
+          sudo dmesg -T 2>/dev/null |
+            grep -iE 'out of memory|oom-kill|oom_reaper|killed process' |
+            tail -40
+          echo "--- systemd-oomd ---"
+          sudo journalctl -u systemd-oomd --no-pager -n 40 2>/dev/null
+          echo "--- cgroup memory.events ---"
+          cat /sys/fs/cgroup/memory.events 2>/dev/null
+          echo "--- memory now ---"
+          free -m
+          exit 0
+
   # Simulates pi's real install path: a `git:` install runs `npm install
   # --omit=dev`, which triggers `prepare` → `build:dist` FROM SOURCE with the
   # dev-only @types/node ABSENT. That's the path that broke with TS2688 (#193)

@@ -87,4 +87,95 @@ describe("memory watch verdict (#2042)", () => {
 		const line = formatVerdict({ code: 0, signal: null }, watch);
 		expect(line).toContain("lowWaterAvailableMb=143");
 	});
+
+	it("names the process it was watching, so the kernel's victim pid matches", () => {
+		// `dmesg` says "Killed process 2477 (npm)". That is only attributable
+		// next to the pid the wrapper was watching.
+		const line = formatVerdict(
+			{ code: null, signal: "SIGKILL" },
+			{ ...watch, childPid: 2477 },
+		);
+		expect(line).toContain("childPid=2477");
+	});
+});
+
+/**
+ * The verdict must be a reading of its own numbers, not a fixed conclusion.
+ *
+ * Every exit-137 in this repo's CI history carried the "the OS reclaimed
+ * memory" sentence, including three whose own low-water mark said 13 GB of
+ * 16 GB was still available (runs 33010136296, 32975604997, 32943340609) —
+ * while the green run beside them went LOWER, to 13,096 MB (run 33012307631).
+ * Four rounds of diagnosis inherited that false sentence.
+ */
+describe("memory watch verdict classifies from its own numbers (#2042)", () => {
+	// Verbatim from run 33010136296's own verdict line.
+	const realKill = {
+		totalMb: 15_990,
+		lowWaterMb: 13_260,
+		lowWaterAt: "20:24:08",
+		childPid: 2477,
+	};
+
+	it("refuses to blame memory when the box was never short of it", () => {
+		const line = formatVerdict({ code: null, signal: "SIGKILL" }, realKill);
+		expect(line).not.toContain("the OS reclaimed memory");
+		expect(line).toContain("HEADROOM");
+		expect(line).toContain("13260 MB of 15990 MB");
+		expect(line).toContain("lowWaterAvailableMb=13260");
+	});
+
+	it("still blames memory when the mark says the box ran out", () => {
+		const line = formatVerdict(
+			{ code: null, signal: "SIGKILL" },
+			{ totalMb: 15_990, lowWaterMb: 102, lowWaterAt: "12:00:00" },
+		);
+		expect(line).toContain("the OS reclaimed memory");
+		expect(line).not.toContain("HEADROOM");
+	});
+
+	it("keeps the [mem-watch] KILLED prefix on both verdicts", () => {
+		// scripts/lib/ci-failure-classifier.mjs matches `[mem-watch] KILLED` and
+		// quotes the whole line as its posted detail. Both heads must keep the
+		// prefix, or a headroom kill silently loses its classification.
+		for (const w of [realKill, { ...realKill, lowWaterMb: 102 }]) {
+			expect(formatVerdict({ code: null, signal: "SIGKILL" }, w)).toContain(
+				"[mem-watch] KILLED",
+			);
+		}
+	});
+
+	it("scales the exhaustion threshold with the box, not a fixed MB", () => {
+		// 700 MB left is comfortable on a 16 GB runner and terminal on a 4 GB one.
+		const onBigBox = formatVerdict(
+			{ code: null, signal: "SIGKILL" },
+			{ totalMb: 15_990, lowWaterMb: 700, lowWaterAt: null },
+		);
+		const onSmallBox = formatVerdict(
+			{ code: null, signal: "SIGKILL" },
+			{ totalMb: 4096, lowWaterMb: 700, lowWaterAt: null },
+		);
+		expect(onBigBox).toContain("the OS reclaimed memory");
+		expect(onSmallBox).toContain("HEADROOM");
+	});
+
+	it("defaults to the memory verdict when the numbers are unreadable", () => {
+		// Never quieter than the evidence supports: an unparsed meminfo must not
+		// turn into a confident "not memory" claim.
+		for (const total of [0, Number.NaN]) {
+			expect(
+				formatVerdict(
+					{ code: null, signal: "SIGKILL" },
+					{ totalMb: total, lowWaterMb: 13_260, lowWaterAt: null },
+				),
+			).toContain("the OS reclaimed memory");
+		}
+	});
+
+	it("leaves an ordinary failure alone whatever the headroom", () => {
+		const line = formatVerdict({ code: 1, signal: null }, realKill);
+		expect(line).not.toContain("HEADROOM");
+		expect(line).not.toContain("the OS reclaimed memory");
+		expect(line).toContain("exitCode=1");
+	});
 });
