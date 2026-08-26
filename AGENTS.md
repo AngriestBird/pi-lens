@@ -285,7 +285,9 @@ MCP `ensureReady` treats its cwd memo as a fast path, not authoritative root
 state. It must consult `shouldInitializeSessionRoot` so the session-root cap can
 evict and later re-register a root used by a real MCP tool call. The shared
 `isSameOrWithin` comparator probes existing POSIX-shaped roots before applying
-case-insensitive containment, because macOS filesystems can ignore case. (#2052)
+case-insensitive containment, because macOS filesystems can ignore case. It treats a
+case-variant path as insensitive only when both spellings reach the same directory, and
+the root memo resets at session boundaries. (#2052)
 
 Bounded LSP warm touches preserve the spawn coordinator's lifecycle evidence:
 an empty ready-client set reports `spawn_in_flight_budget_elapsed` while a

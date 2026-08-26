@@ -62,6 +62,11 @@ import {
 	resetCascadeTierSessionState,
 } from "../../clients/lsp/cascade-tier.js";
 import {
+	_getPosixCaseSensitivityCacheSizeForTests,
+	isSameOrWithin,
+	resetLSPCaseSensitivityState,
+} from "../../clients/lsp/server.js";
+import {
 	_resetDeferredForTests,
 	isDeferredThisSession,
 	markDisposition,
@@ -572,6 +577,26 @@ export const SESSION_STATE_REGISTRY: SessionStateEntry[] = [
 		resetName: "resetClassicTsRepairGuard",
 		reason:
 			"#1570: a repair that failed transiently in an earlier session must not stay latched for the rest of the extension-host process.",
+	},
+	{
+		id: "lsp-server:posixCaseSensitivityProbe",
+		module: "lsp/server.ts",
+		state: "posixCaseInsensitiveByPath",
+		policy: "session_start",
+		resetName: "resetLSPCaseSensitivityState",
+		reason:
+			"#2052: case-sensitivity answers are cached by root, but a root can be probed before it exists. A new session may create that root, so the process must clear this memo before containment decisions continue.",
+		probe: {
+			arm: () => {
+				resetLSPCaseSensitivityState();
+				const root = "/pi-lens-session-case-probe/Project";
+				isSameOrWithin(root, `${root}/src/app.ts`, {
+					caseInsensitiveProbe: () => false,
+				});
+			},
+			isArmed: () => _getPosixCaseSensitivityCacheSizeForTests() === 0,
+			reset: () => resetLSPCaseSensitivityState(),
+		},
 	},
 	{
 		id: "lsp-workspace-diagnostics-cache:sessionClock",
