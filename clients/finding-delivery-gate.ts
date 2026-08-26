@@ -411,6 +411,12 @@ export const DELIVERY_SURFACES: Record<string, DeliverySurfaceEntry> = {
 		["gateFindingsByPathFreshness"],
 		['store: "late-auxiliary-findings"'],
 	),
+	"runtime-turn:late-runner-findings": gated(
+		RUNTIME_TURN_FILE,
+		"Turn-end CLI runner findings collected after the post-write path.",
+		["gateFindingsByPathFreshness"],
+		['store: "late-runner-findings"'],
+	),
 	"runtime-turn:cascade-blocker": labeled(
 		RUNTIME_TURN_FILE,
 		"Turn-end 🧪 cascade neighbor blocker.",

@@ -72,6 +72,11 @@ import {
 	clearReverseDepsIndexCache,
 } from "../../clients/dispatch/integration.js";
 import {
+	classifyObservedRunner,
+	observeRunnerLatency,
+	resetObservedRunnerLatency,
+} from "../../clients/dispatch/collect-later-tier.js";
+import {
 	createAvailabilityLatch,
 	resetInstallRetryLatches,
 } from "../../clients/dispatch/runners/utils/availability-policy.js";
@@ -164,6 +169,7 @@ export interface SessionStateEntry {
 
 /** Throwaway cwds a probe created, removed by {@link _resetRegistryProbeState}. */
 const scratchDirs: string[] = [];
+let observedRunnerProbeRoot: string | undefined;
 
 /** Throwaway cwd for probes that need a project root on disk. */
 function scratchCwd(): string {
@@ -702,6 +708,31 @@ export const SESSION_STATE_REGISTRY: SessionStateEntry[] = [
 			reset: () => resetCascadeTierSessionState(),
 		},
 	},
+	{
+		id: "collect-later-tier:observedRunners",
+		module: "dispatch/collect-later-tier.ts",
+		state: "slowRunners",
+		policy: "session_start",
+		resetName: "resetObservedRunnerLatency",
+		reason:
+			"#2116: observed slow-runner decisions are scoped to the current session because a new session must re-probe its project environment rather than inherit a process-lifetime collect-later latch.",
+		probe: {
+			arm: () => {
+				observedRunnerProbeRoot = scratchCwd();
+				observeRunnerLatency({
+					projectRoot: observedRunnerProbeRoot,
+					runnerId: "session-state-probe",
+					durationMs: 5_001,
+				});
+			},
+			isArmed: () =>
+				classifyObservedRunner(
+					observedRunnerProbeRoot ?? "<missing>",
+					"session-state-probe",
+				) === "inline",
+			reset: () => resetObservedRunnerLatency(),
+		},
+	},
 
 	// ── Deliberately not session_start ───────────────────────────────────────
 	{
@@ -942,6 +973,7 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	"diagnostic-line-freshness.ts": 1,
 	"diagnostics-publish.ts": 1,
 	"dispatch/dispatcher.ts": 1,
+	"dispatch/collect-later-tier.ts": 1,
 	// #1899 removed the dead `neighborTouchCache` (10 → 9).
 	"dispatch/integration.ts": 9,
 	"dispatch/lazy.ts": 0,

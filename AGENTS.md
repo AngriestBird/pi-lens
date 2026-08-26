@@ -1823,6 +1823,15 @@ combination is never clean: nonzero runs retain shared parsed-nothing telemetry,
 while status 0 becomes an explicit `unconfirmed_output` failure. Reports with no
 no-files evidence continue through the ordinary parser.
 
+Observed-slow CLI runners use the shared `clients/dispatch/collect-later-tier.ts`
+classification seam. A timeout or latency above its threshold moves that
+runner and project off the post-write path on the next edit; the runner still
+executes and its findings drain through `clients/runtime-turn.ts` at turn end.
+Only a fast completed run re-arms the inline tier, and
+`resetObservedRunnerLatency` plus `resetPendingRunnerFindings` clear this
+session-scoped state at `session_start`. Keep tier flips and repeated slow
+observations bounded through the latency logger and degradation ledger.
+
 - **Use `safeSpawnAsync()` for all subprocess work** in hook/dispatch/install paths. The sync `safeSpawn()` is deprecated, blocks the Node event loop, and is now reachable only from the cached `TestRunnerClient.detectRunner` `which pytest` probe. Don't add new sync `safeSpawn` callers.
 - **The hot per-edit path is the dispatch runners** (`clients/dispatch/runners/*`), not the legacy per-tool client classes (`biome-client`, `ruff-client`, `rust-client`, `ast-grep-client`, …). Those classes historically carried a *parallel sync surface* (`checkFile`/`fixFile`/`isAvailable`/`findCargoPath`/…) that the async runners superseded; #197 found almost all of it **dead** and deleted ~1600 lines. **Lesson: when you find a sync client method, grep its real callers before "converting" it — the answer is usually "delete," and the live path already has an `*Async` twin** (`fixFileAsync`, `ensureAvailable`, `runTestFileAsync`, `tempScanAsync`, `findGoPathAsync`).
 - **Ambient turn abort signal (#197):** `safeSpawnAsync` defaults its `AbortSignal` to a module-level ambient signal (`setAmbientAbortSignal` in `clients/safe-spawn.ts`). The lifecycle handlers (`tool_result`, `agent_end`, `turn_end`) publish pi's `ctx.signal` at entry and clear it in `finally`, so an Esc/interrupt kills in-flight linter/format/type-check children (process-tree kill on Windows) without threading a signal through every call site. The signal is captured at spawn time, so clearing it only affects future spawns. Pass `ignoreAmbientSignal: true` for **installs** (gem/go/dotnet/rustup) so they run to completion even if the turn is interrupted — matching the old uncancellable sync behaviour; an explicit `options.signal` always wins.

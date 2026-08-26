@@ -103,6 +103,7 @@ import {
 } from "./lsp/pending-aux-coverage.js";
 import type { LSPDiagnostic } from "./lsp/client.js";
 import { convertLspDiagnostics } from "./dispatch/utils/lsp-diagnostics.js";
+import { drainPendingRunnerFindings } from "./dispatch/pending-runner-findings.js";
 // #1631 review V2: moved to its own leaf module so a low-level store
 // (widget-state.ts) can use the marker without importing this orchestrator —
 // see clients/stale-marker.ts's doc comment.
@@ -2240,6 +2241,49 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	}
 
 	cacheManager.incrementTurnCycle(cwd, currentOwner);
+
+	// Collect-later CLI runners continue off the write path. Their completed
+	// diagnostics use the same freshness gate as late auxiliary findings and
+	// enter the ordinary turn-end advisory delivery channel.
+	const runnerFindingsStart = Date.now();
+	const pendingRunnerFindings = await drainPendingRunnerFindings();
+	let runnerFindingsDelivered = 0;
+	let runnerFindingsStale = 0;
+	for (const pending of pendingRunnerFindings) {
+		const findings = pending.result?.diagnostics ?? [];
+		if (findings.length === 0) continue;
+		const gate = gateFindingsByPathFreshness({
+			store: "late-runner-findings",
+			findings,
+			cwd,
+			scannedAt: pending.markedAtMs,
+			citedPath: (finding) => finding.filePath,
+		});
+		runnerFindingsStale += gate.stale.length;
+		if (gate.live.length === 0) continue;
+		const displayPath = toRunnerDisplayPath(cwd, pending.filePath);
+		const lines = gate.live.map(
+			(finding) =>
+				`  ${displayPath}:${finding.line ?? 1}:${finding.column ?? 1} [${finding.rule ?? finding.id}] ${finding.message}`,
+		);
+		runnerFindingsDelivered += gate.live.length;
+		// @delivery-surface: runtime-turn:late-runner-findings
+		advisoryParts.push(
+			`⏱️ Late runner diagnostics (${pending.runnerId} completed after the edit):\n${lines.join("\n")}`,
+		);
+	}
+	logLatency({
+		type: "phase",
+		toolName: "turn_end",
+		filePath: cwd,
+		phase: "late_runner_findings",
+		durationMs: Date.now() - runnerFindingsStart,
+		metadata: {
+			pending: pendingRunnerFindings.length,
+			delivered: runnerFindingsDelivered,
+			stale: runnerFindingsStale,
+		},
+	});
 
 	// #2001/#2002: collect-later delivery for auxiliary LSP servers whose
 	// aux-grace window expired without a publication (opengrep on Windows:

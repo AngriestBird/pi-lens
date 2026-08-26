@@ -279,6 +279,8 @@ export type DegradationKind =
 	 * file clean, or did the parser fail to read it?".
 	 */
 	| "runner-parsed-nothing"
+	/** A runner exceeded the observed inline budget and moved to collect-later. */
+	| "runner-collect-later"
 	/** A process-table resource sample failed or timed out; it is unknown. */
 	| "resource-sampler-query-failed"
 	/**

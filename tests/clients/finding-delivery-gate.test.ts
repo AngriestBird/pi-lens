@@ -65,6 +65,7 @@ const EXPECTED_SURFACE_IDS = [
 	"runtime-turn:code-quality-warnings-advisory",
 	"runtime-turn:disposition-suppressed-notice",
 	"runtime-turn:late-auxiliary-findings",
+	"runtime-turn:late-runner-findings",
 	"runtime-turn:cascade-blocker",
 	"runtime-turn:cascade-coverage-advisory",
 	"runtime-turn:call-graph-advisory",
