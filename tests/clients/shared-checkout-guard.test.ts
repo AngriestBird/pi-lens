@@ -411,6 +411,28 @@ describe("evaluateSharedCheckoutGuard (#2007)", () => {
 		expect(decision.reason).toContain(`pid ${process.pid + 1}`);
 	});
 
+	it("finds a peer REGISTERED on a subdirectory of the shared checkout", async () => {
+		// R2, second direction. The first subdirectory test moves the CWD, which
+		// the toplevel lookup alone already handles — so it does not prove the
+		// call site's "containment" argument. This one moves the PEER: pi-lens
+		// registers a session at whatever project root it opened, which can be
+		// a package inside the repo. Only containment admits that candidate.
+		const decision = await evaluateSharedCheckoutGuard(
+			"bash",
+			bash("git checkout main"),
+			ROOT,
+			deps({
+				readRegistry: async () => [
+					peer({ projectRoot: normalizeFilePath(path.join(ROOT, "clients")) }),
+				],
+				resolveToplevel: async () => ROOT,
+			}),
+		);
+		// MUTATION PROOF: swap the call site's "containment" for "exact" and
+		// this reds — a peer registered one directory down is invisible.
+		expect(decision.block).toBe(true);
+	});
+
 	it("allows inside a NESTED worktree, which shares no files with its parent", async () => {
 		// R3: a linked worktree lives at a path under the main checkout but is
 		// a separate working tree. Lexical containment declined it, and the

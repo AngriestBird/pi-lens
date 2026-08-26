@@ -217,11 +217,11 @@ export const SESSION_STATE_REGISTRY: SessionStateEntry[] = [
 	{
 		id: "opaque-mutation-scan:baselineStore+gitMemo",
 		module: "opaque-mutation-scan.ts",
-		state: "OpaqueBaselineStore byCwd map, gitRepoMemo",
+		state: "OpaqueBaselineStore byCwd map, gitRepoMemo, gitToplevelMemo",
 		policy: "session_start",
 		resetName: "resetOpaqueMutationState",
 		reason:
-			"#2000 phase 2: pending pre-command baselines are keyed cwd:generation and become unreachable when the session generation advances; and the git-worktree memo must re-probe after a session that may have seen a directory become a worktree. Without the reset both leak per session and the memo mis-answers forever.",
+			"#2000 phase 2: pending pre-command baselines are keyed cwd:generation and become unreachable when the session generation advances; and the git-worktree and toplevel memos must re-probe after a session that may have seen a directory become a worktree, or become a LINKED worktree of another (#2007). Without the reset the baselines leak per session and the memos mis-answer forever.",
 	},
 	// ── #2026 pending auxiliary coverage baselines ──────────────────────
 	{
@@ -978,7 +978,9 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	// LEGAL_ORDINARY_PORCELAIN_STATUSES. Both are frozen-by-convention lookup
 	// tables of Git's documented porcelain matrix — import-time constants with
 	// no session identity, so they need no reset (SWEEP_HEURISTIC_LIMITS item 5).
-	"opaque-mutation-scan.ts": 3,
+	// #2007 added `gitToplevelMemo`, the worktree-identity cache (3 → 4). It
+	// is registered above and cleared by the same `resetOpaqueMutationState`.
+	"opaque-mutation-scan.ts": 4,
 	"lsp/pending-aux-coverage.ts": 1,
 	"lsp/jvm-runtime.ts": 0,
 	"lsp/session-roots.ts": 1,
