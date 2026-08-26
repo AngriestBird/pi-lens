@@ -13,6 +13,7 @@ vi.mock("../../clients/safe-spawn.js", async (importOriginal) => ({
 }));
 
 import { recoverOpaqueChangesViaGit } from "../../clients/opaque-mutation-scan.js";
+import { normalizeMapKey } from "../../clients/path-utils.js";
 import {
 	capFastExitSpawnResult,
 	capKilledSpawnResult,
@@ -182,15 +183,19 @@ describe("opaque Git status parsing", () => {
 	//
 	// #2081: excludedIncomingCount only counts entries that pass the
 	// mtime-freshness window (would otherwise have been dispatched), so this
-	// case needs a real, freshly-written file at `path-2.ts` — a mocked path
-	// that never existed on disk would fail the window check for the wrong
-	// reason and silently pass regardless of the count's correctness.
+	// case needs REAL, freshly-written files on disk for every entry the
+	// assertion depends on - not just the excluded one. A path that never
+	// exists fails the window check for the wrong reason (ENOENT, not the
+	// classification under test) and would pass this test even if `U ` were
+	// misclassified as clean incoming, since its absence keeps it out of
+	// `paths` either way.
 	it("never treats an undocumented pair as clean incoming content", async () => {
 		const root = fs.mkdtempSync(
 			path.join(os.tmpdir(), "pi-lens-opaque-status-"),
 		);
 		try {
 			const startedAt = Date.now();
+			fs.writeFileSync(path.join(root, "path-1.ts"), "unknown\n", "utf8");
 			fs.writeFileSync(path.join(root, "path-2.ts"), "staged\n", "utf8");
 			safeSpawnAsync.mockResolvedValue({
 				status: 0,
@@ -203,8 +208,9 @@ describe("opaque Git status parsing", () => {
 				}),
 			).resolves.toEqual({
 				verdict: "recovered",
-				paths: [],
-				scannedCount: 0,
+				// `U ` is undocumented, so it keeps its path and is dispatched.
+				paths: [normalizeMapKey(path.join(root, "path-1.ts"))],
+				scannedCount: 1,
 				// Only `A ` is dropped. `U ` is undocumented, so it keeps its path.
 				excludedIncomingCount: 1,
 				unknownStatusCount: 1,
