@@ -101,3 +101,101 @@ describe("metrics-history getCurrentCommit stderr suppression (#2095)", () => {
 		},
 	);
 });
+
+describe("metrics-history per-file commit resolution (#2099)", () => {
+	it.skipIf(!hasGit())(
+		"records each target file's repository commit when cwd has another HEAD",
+		() => {
+			const tmp = fs.mkdtempSync(
+				path.join(os.tmpdir(), "pi-lens-metrics-history-repos-"),
+			);
+			const fixtureEnv: Record<string, string> = Object.fromEntries(
+				Object.entries(process.env).filter(
+					(entry): entry is [string, string] => entry[1] !== undefined,
+				),
+			);
+			fixtureEnv.PI_LENS_SKIP_HOOKS = "1";
+			for (const variable of [
+				"GIT_DIR",
+				"GIT_WORK_TREE",
+				"GIT_INDEX_FILE",
+				"GIT_OBJECT_DIRECTORY",
+				"GIT_ALTERNATE_OBJECT_DIRECTORIES",
+				"GIT_COMMON_DIR",
+				"GIT_PREFIX",
+			]) {
+				delete fixtureEnv[variable];
+			}
+			const runGit = (cwd: string, args: string[]) =>
+				execFileSync("git", args, {
+					cwd,
+					stdio: "ignore",
+					env: fixtureEnv,
+				});
+			try {
+				const umbrella = tmp;
+				const repoA = path.join(umbrella, "service-a");
+				const repoB = path.join(umbrella, "service-b");
+				fs.mkdirSync(repoA);
+				fs.mkdirSync(repoB);
+
+				for (const repo of [umbrella, repoA, repoB]) {
+					runGit(repo, ["init", "-q"]);
+					runGit(repo, ["config", "user.email", "test@example.com"]);
+					runGit(repo, ["config", "user.name", "pi-lens test"]);
+				}
+				fs.writeFileSync(path.join(umbrella, "README.md"), "umbrella\n");
+				runGit(umbrella, ["add", "README.md"]);
+				runGit(umbrella, ["commit", "-qm", "umbrella"]);
+				fs.writeFileSync(path.join(repoA, "a.ts"), "const a = 1;\n");
+				runGit(repoA, ["add", "a.ts"]);
+				runGit(repoA, ["commit", "-qm", "service-a"]);
+				fs.writeFileSync(path.join(repoB, "b.ts"), "const b = 1;\n");
+				runGit(repoB, ["add", "b.ts"]);
+				runGit(repoB, ["commit", "-qm", "service-b"]);
+
+				const expectedA = execFileSync(
+					"git",
+					["rev-parse", "--short", "HEAD"],
+					{ cwd: repoA, encoding: "utf-8", env: fixtureEnv },
+				).trim();
+				const expectedB = execFileSync(
+					"git",
+					["rev-parse", "--short", "HEAD"],
+					{ cwd: repoB, encoding: "utf-8", env: fixtureEnv },
+				).trim();
+				const umbrellaHead = execFileSync(
+					"git",
+					["rev-parse", "--short", "HEAD"],
+					{ cwd: umbrella, encoding: "utf-8", env: fixtureEnv },
+				).trim();
+
+				const dataDir = path.join(umbrella, ".pilens-data");
+				const script = [
+					`process.chdir(${JSON.stringify(umbrella)});`,
+					`const { captureSnapshots } = require(${JSON.stringify(METRICS_HISTORY_JS)});`,
+					`const files = ${JSON.stringify([path.join(repoA, "a.ts"), path.join(repoB, "b.ts")])};`,
+					"const history = captureSnapshots(files.map((filePath) => ({ filePath, metrics: {",
+					"  maintainabilityIndex: 90, cognitiveComplexity: 1, maxNestingDepth: 1,",
+					"  linesOfCode: 10, maxCyclomatic: 1, entropy: 1,",
+					"} })));",
+					"process.stdout.write(JSON.stringify(files.map((filePath) => history.files[require('node:path').relative(process.cwd(), filePath)].latest.commit)));",
+				].join("\n");
+				const result = spawnSync(process.execPath, ["-e", script], {
+					cwd: umbrella,
+					encoding: "utf-8",
+					env: { ...fixtureEnv, PILENS_DATA_DIR: dataDir },
+				});
+
+				expect(result.error).toBeUndefined();
+				expect(result.status).toBe(0);
+				expect(JSON.parse(result.stdout)).toEqual([expectedA, expectedB]);
+				expect(expectedA).not.toBe(umbrellaHead);
+				expect(expectedB).not.toBe(umbrellaHead);
+			} finally {
+				fs.rmSync(tmp, { recursive: true, force: true });
+			}
+		},
+		30_000,
+	);
+});
