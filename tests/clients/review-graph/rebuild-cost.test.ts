@@ -333,7 +333,8 @@ describe("review-graph one-file rebuild cost (#2074)", () => {
 			// incoming edge already points at the real symbol, while the freshly
 			// extracted one points at a placeholder that resolveDeferredSymbolEdges
 			// rewrites onto that same symbol AFTER the restore has run. That
-			// duplicate is pre-existing behavior and reproduces on master.
+			// duplicate is pre-existing behavior, reproduces on master, and is
+			// tracked as #2127.
 			//
 			// The next single-file rebuild is where the dedupe branch earns its
 			// place: both copies come back as preserved incoming edges, and the
@@ -376,9 +377,9 @@ describe("review-graph one-file rebuild cost (#2074)", () => {
 				seqHint,
 			);
 			// Precondition, stated loudly on purpose: this guard's proof rests on
-			// the same-batch duplicate existing. If that pre-existing defect is
-			// fixed, this fails here rather than passing vacuously, and whoever
-			// fixes it must re-home the dedupe branch's proof.
+			// the same-batch duplicate existing. When #2127 fixes that defect, this
+			// fails here rather than passing vacuously, and whoever fixes it must
+			// re-home the dedupe branch's proof.
 			expect(duplicateEdgeCount(batched)).toBe(1);
 			expect(batched.edges.length).toBe(coldEdges + 1);
 
