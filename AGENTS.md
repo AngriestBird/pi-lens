@@ -286,6 +286,12 @@ Pipeline-crash teardown is destructive only for the registered primary session;
 when no primary registration exists, the legacy reset remains the fail-safe.
 (#2157, #2174)
 
+Per-path `didChange` sends serialize their read/build/send/record transaction
+through `LSPClientState.notifyChangeQueues`; different paths remain parallel.
+`recordSentContent` rejects a lower-version mirror update and records an
+`lsp-document-send-order` degradation with the server and normalized path.
+(#2113)
+
 Auxiliary diagnostic waits preserve a warm-turn fast path: on a cold
 acquisition, the budget is `max(declared wait, observed spawn + 500ms)` clamped
 to an 8s ceiling; on a warm acquisition, it remains `min(declared wait, 2000ms)`. An
@@ -703,7 +709,15 @@ preserved as `cause`. (#1214)
 opt into `safeSpawnAsync`'s `input: ""` so every verification receives EOF.
 The registry may declare a larger bounded timeout for a tool whose cold
 launcher startup exceeds the dispatch budget; Vue uses 30 seconds while the
-installer default remains 10 seconds (#2176).
+installer default remains 10 seconds (#2176). bash-language-server and
+vscode-json-language-server measured 9,667ms and 11,047ms cold with closed
+stdin — both close enough to the 10s default that host contention alone can
+trip a false verification degradation — and use a 20-second bound (#2194).
+Delivery is proven per strategy, not just for npm: `probeManagedToolVersion`
+(pip/gem) and `verifyRefreshedArtifact` (github/maven/archive) both resolve
+the timeout through `getToolVerificationTimeout` on every call, and each of
+the six strategies has a test that raises a tool's `verificationTimeoutMs`
+and asserts the exact value reaches the post-refresh `--version` spawn (#2194).
 This matters for markdownlint-cli2: `--version` scanned 45 files and returned
 in about 370ms when stdin was closed, while `--no-globs -` linted one stdin
 file and returned in about 370ms; with production-shaped open stdin the latter
