@@ -1042,8 +1042,11 @@ itself starts with a contaminated environment; never trust the parent process
 environment for a spawned Git fixture. `git-fixture-governance.test.ts` sweeps test
 sources and requires the direct Git callee to be imported from that helper, while
 the script-side fixture probes use `scripts/lib/git-fixture-env.mjs`. The global-
-setup teardown guard rejects local identity entries or `core.bare=true` in the
-repository config after the suite.
+setup teardown guard rejects known fixture identity entries or `core.bare=true`
+in the repository config after the suite. The governance sweep anchors its
+implementation and justified-exemption lists to repo-relative paths, and its
+identity sweep keeps every literal `user.name`/`user.email` write in the guard's
+known sets.
 
 Git command classification has ONE implementation. `detectGuardedGitVerb`
 takes a `GitVerbMatcher` and owns the wrapper, `$IFS`, substitution, PATHEXT,

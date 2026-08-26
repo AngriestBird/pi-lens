@@ -93,10 +93,14 @@ describe("git fixture environment", () => {
 		scratch.push(repo);
 		gitExecFileSync("git", ["init", "-q"], { cwd: repo });
 
-		const result = await gitFixtureSpawnAsync(repo, ["rev-parse", "--git-dir"], {
-			env: { GIT_DIR: path.join(os.tmpdir(), "should-not-be-used") },
-			timeout: 5_000,
-		});
+		const result = await gitFixtureSpawnAsync(
+			repo,
+			["rev-parse", "--git-dir"],
+			{
+				env: { GIT_DIR: path.join(os.tmpdir(), "should-not-be-used") },
+				timeout: 5_000,
+			},
+		);
 
 		expect(result.status).toBe(0);
 		expect(path.resolve(repo, result.stdout.trim())).toBe(
