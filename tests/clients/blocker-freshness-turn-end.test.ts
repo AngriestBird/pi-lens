@@ -25,7 +25,7 @@ import { gateFindingsByPathFreshness } from "../../clients/advisory-provenance.j
 import {
 	drainPendingRunnerFindings,
 	deferRunnerFindings,
-	pendingRunnerFindingsSizeForTests,
+	pendingRunnerFindingsSize,
 	resetPendingRunnerFindings,
 } from "../../clients/dispatch/pending-runner-findings.js";
 import {
@@ -80,12 +80,47 @@ function driftIntoFuture(filePath: string): void {
 
 afterEach(() => {
 	cancelLSPIdleReset();
+	vi.useRealTimers();
 	resetPendingRunnerFindings();
 	resetDegradationLedger();
 	logLatency.mockClear();
 });
 
 describe("turn-end blocker freshness (#1631)", () => {
+	it("arms idle reset before delivering a pending runner on a no-write turn", async () => {
+		vi.useFakeTimers();
+		const env = setupTestEnvironment("pi-lens-runner-idle-reset-");
+		try {
+			const runtime = new RuntimeCoordinator();
+			runtime.setTelemetryIdentity({ sessionId: "runner-idle-session" });
+			runtime.beginTurn();
+			const cacheManager = new CacheManager(false);
+			deferRunnerFindings({
+				filePath: path.join(env.tmpDir, "pending.ts"),
+				cwd: env.tmpDir,
+				projectRoot: env.tmpDir,
+				runnerId: "never-settling-runner",
+				markedAtMs: Date.now(),
+				promise: new Promise(() => {}),
+			});
+
+			await handleTurnEnd(
+				makeTurnEndDeps(runtime, cacheManager, { ctxCwd: env.tmpDir }),
+			);
+
+			// The deferred work remains owned for a later turn, but delivery still ran.
+			expect(pendingRunnerFindingsSize()).toBe(1);
+			expect(
+				logLatency.mock.calls.some(
+					([entry]) => entry?.phase === "late_runner_findings",
+				),
+			).toBe(true);
+			expect(vi.getTimerCount()).toBe(1);
+		} finally {
+			env.cleanup();
+		}
+	});
+
 	it("re-serves a drifted blocker as a [stale] advisory, not an authoritative blocker, and logs the sweep", async () => {
 		const env = setupTestEnvironment("pi-lens-fresh-turnend-");
 		try {
@@ -261,7 +296,7 @@ describe("turn-end blocker freshness (#1631)", () => {
 				env.tmpDir,
 			);
 			expect(findings?.data?.content ?? "").not.toContain("old bytes");
-			expect(pendingRunnerFindingsSizeForTests()).toBe(0);
+			expect(pendingRunnerFindingsSize()).toBe(0);
 			expect(getDegradationSummary()).toEqual(
 				expect.arrayContaining([
 					expect.objectContaining({

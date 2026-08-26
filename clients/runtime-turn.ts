@@ -106,7 +106,7 @@ import { convertLspDiagnostics } from "./dispatch/utils/lsp-diagnostics.js";
 import {
 	drainPendingRunnerFindings,
 	dropStaleRunnerFindings,
-	pendingRunnerFindingsSizeForTests,
+	pendingRunnerFindingsSize,
 } from "./dispatch/pending-runner-findings.js";
 // #1631 review V2: moved to its own leaf module so a low-level store
 // (widget-state.ts) can use the marker without importing this orchestrator —
@@ -447,11 +447,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	// the ordinary freshness gate and delivery cache can run. Max-cycle cleanup
 	// below intentionally remains a terminal reset; its pending work stays in
 	// the bounded handoff store for the next eligible turn.
-	if (
-		files.length === 0 &&
-		!runtime.hasCascadeRuns() &&
-		pendingRunnerFindingsSizeForTests() === 0
-	) {
+	if (files.length === 0 && !runtime.hasCascadeRuns()) {
 		// A genuinely clean session must invalidate the persisted guard record.
 		// Blocker records are retained only while the runtime still reports one.
 		if (getFlag("lens-guard") && !runtime.gitGuardHasBlockers) {
@@ -486,7 +482,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			});
 		}
 		resetFormatService();
-		return;
+		if (pendingRunnerFindingsSize() === 0) return;
 	}
 
 	// Cancel any pending idle reset since we're actively working. #1618: also
@@ -496,7 +492,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	// read "nothing pending" and skip the cancel while a rearm was still
 	// queued to fire the instant the sweep released its hold — resurrecting
 	// idle reset on a session that had since gone back to active editing.
-	if (lspIdleResetTimeout || pendingSweepRearm) {
+	if (files.length > 0 && (lspIdleResetTimeout || pendingSweepRearm)) {
 		cancelLSPIdleReset();
 		dbg("turn_end: cancelled pending LSP idle reset (active editing)");
 	}

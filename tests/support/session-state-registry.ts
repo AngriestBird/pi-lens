@@ -83,7 +83,7 @@ import {
 } from "../../clients/dispatch/collect-later-tier.js";
 import {
 	deferRunnerFindings,
-	pendingRunnerFindingsSizeForTests,
+	pendingRunnerFindingsSize,
 	resetPendingRunnerFindings,
 } from "../../clients/dispatch/pending-runner-findings.js";
 import type { RunnerResult } from "../../clients/dispatch/types.js";
@@ -788,7 +788,7 @@ export const SESSION_STATE_REGISTRY: SessionStateEntry[] = [
 					promise: Promise.resolve(result),
 				});
 			},
-			isArmed: () => pendingRunnerFindingsSizeForTests() === 0,
+			isArmed: () => pendingRunnerFindingsSize() === 0,
 			reset: () => resetPendingRunnerFindings(),
 		},
 	},

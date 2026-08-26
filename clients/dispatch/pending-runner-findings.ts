@@ -111,7 +111,7 @@ export function resetPendingRunnerFindings(): void {
 	pending.length = 0;
 }
 
-export function pendingRunnerFindingsSizeForTests(): number {
+export function pendingRunnerFindingsSize(): number {
 	return pending.length;
 }
 
