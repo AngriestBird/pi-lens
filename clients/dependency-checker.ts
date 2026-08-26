@@ -15,6 +15,7 @@ import * as path from "node:path";
 import { findNodeToolBinary } from "./package-manager.js";
 import { isFullyQualified } from "./path-utils.js";
 import { safeSpawnAsync } from "./safe-spawn.js";
+import { compareOrdinal } from "./string-utils.js";
 import {
 	createAvailabilityChecker,
 	discoverManagedTool,
@@ -1123,7 +1124,7 @@ export class DependencyChecker {
 		let output = `[Circular Deps] ${circular.length} cycle(s) found:\n`;
 
 		for (const dep of circular) {
-			const cycleKey = dep.path.sort((a, b) => a.localeCompare(b)).join("→");
+			const cycleKey = dep.path.sort(compareOrdinal).join("→");
 			if (seen.has(cycleKey)) continue;
 			seen.add(cycleKey);
 
