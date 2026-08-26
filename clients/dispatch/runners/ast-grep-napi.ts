@@ -418,6 +418,8 @@ const SUPPORTED_RULE_LANGUAGES: readonly string[] = [
 	"typescript",
 	"tsx",
 	"javascript",
+	"css",
+	"html",
 ];
 
 export function getLang(filePath: string, sgModule: AstGrepNapi) {
@@ -659,6 +661,12 @@ export function evaluateAstGrepRules(
 				continue;
 			}
 
+			// CSS and HTML rules are scoped to their parsed roots.
+			// Without this scope, language-tagged rules scan unrelated roots.
+			// The file-language mismatch check below enforces this scope.
+			// CSS rules therefore run only on CSS roots.
+			// This preserves CSS rule findings while avoiding unrelated scans.
+			// The fallback and LSP paths share the same parsed-language scope.
 			const lang = rule.language?.toLowerCase();
 			if (lang && !SUPPORTED_RULE_LANGUAGES.includes(lang)) {
 				if (!unsupportedLanguageLog.has(lang)) {

@@ -186,6 +186,7 @@ This is the payoff of the two disciplines above: a bounded checklist of defect *
 6. **A freshness stamp that doesn't cover what the data depends on.** mtime alone misses content changes that preserve mtime (git checkout, formatters, same-millisecond writes); an mtime keyed on file A misses a cross-file dependency on B. *Screen:* cache validity = `size` + `mtimeMs` as the cheap first tier, then a content-hash confirm; explicitly seed a same-mtime collision in tests. A diagnostic depending on B invalidates when B changes, not just A. The review-graph's `size:mtimeMs` + `confirmContentChanged` is the gold standard. *e.g.* #1105 (word-index refresh + `importsChanged` fast path bound to size, not mtime alone), #1088/#1092/#1633/#1664. *Detect:* grep `mtimeMs`/`.mtime` in an equality/cache-key lacking a sibling `.size`/hash; weak signal — #1158. **Second axis — existence, not content:** a stamp can be perfectly valid about content and still describe a file that no longer exists. A TTL-only scanner cache served a gitleaks 🔴 blocker for a directory deleted eleven minutes earlier, and the #1419 provenance guard certified it `current` seven times because it validates the files the agent EDITED, not the paths named INSIDE the findings. *Screen:* when a cached finding names a path, validate at delivery that the path still exists — not only that the cache is young. Drop the finding when the path is gone (there is no remediation for a deleted file); demote only for content drift on a surviving one. Use `dropFindingsForMissingPaths` (`clients/advisory-provenance.ts`): one stat per unique path, fails open on unreadable paths, and logs one bounded `finding_dead_path_drop` record. *Detect:* grep `readCache<` for stores whose findings carry a file path, and check the delivery seam for an existence probe (#1460/#1461).
 
 7. **A vacuous test fixture that never exercises the code under test.** A hardcoded version literal orphaned by a version bump; a mock missing the property the guarded code reads (so both guard branches pass for free); a drive-letter literal fed to a normalizer as an *expected key* on the assumption it's a no-op; or a suite-wide environment default disabling the mechanism whose side effects the test counts. *Screen:* every regression test must FAIL on pre-fix code, and the fixture must actually reach an armed code path. Side-effect-count tests opt back in with save/restore or assert a positive control. *e.g.* #1114 (kill-process-tree mock had no `.once`/`.killed`, so the SIGKILL-escalation guard passed vacuously — the escalation was dead code), #1089/#1106 (fixture version drift), #1139/#1150 (Windows-shaped literal as expected key — see the OS-agnostic paragraph), #1759 (17 tests asserted a suite-disabled no-op path). *Detect:* the "confirm the regression test fails against pre-fix code" step; a mock asserted on a method it never defines; an environment gate is off for the whole suite. Not ast-grep-able (#1759). *Prevention:* this entry is the review-time catch. The authoring-time form is the six **Test-authoring screens** in the "Test requirements" section below (#1829): parallel path, invisible skip, wrong-layer pin, ambient-inspection double, env leakage, and loose bound. Each is answerable while you write the test.
+	**Inverse variant — a fixture that pins a producer shape only one platform emits.** The mock is green and the guard runs, but it does not model the production input on every supported OS. A cap kill is `SIGTERM` with a null status on POSIX, but Windows reports status 1 with no signal or failure. `safeSpawnAsync.killedForOutputCap` carries the cross-platform ownership fact. *Screen:* derive fixtures from the producer through platform-specific builders and a live test that asserts only the portable invariants. Never infer our action from an exit code.
 
 8. **A name-heuristic that silently excludes real data.** A walk that skips by filename pattern drops real files that happen to match (`gen.ts` that is hand-written). *Screen:* any name-based skip needs observability (count what it dropped) + a content-probe escape hatch. *e.g.* #1107 (generated-artifact skip dropped real `gen.ts`; fix added a content probe + skip counters surfaced in project scans). *Detect:* grep filename-pattern skips in walkers; review question "what real file could this match, and would anyone notice it was dropped?".
 
@@ -285,6 +286,12 @@ and repair latch reset through their shared process state, not module copies.
 Pipeline-crash teardown is destructive only for the registered primary session;
 when no primary registration exists, the legacy reset remains the fail-safe.
 (#2157, #2174)
+
+Per-path `didChange` sends serialize their read/build/send/record transaction
+through `LSPClientState.notifyChangeQueues`; different paths remain parallel.
+`recordSentContent` rejects a lower-version mirror update and records an
+`lsp-document-send-order` degradation with the server and normalized path.
+(#2113)
 
 Auxiliary diagnostic waits preserve a warm-turn fast path: on a cold
 acquisition, the budget is `max(declared wait, observed spawn + 500ms)` clamped
@@ -703,7 +710,15 @@ preserved as `cause`. (#1214)
 opt into `safeSpawnAsync`'s `input: ""` so every verification receives EOF.
 The registry may declare a larger bounded timeout for a tool whose cold
 launcher startup exceeds the dispatch budget; Vue uses 30 seconds while the
-installer default remains 10 seconds (#2176).
+installer default remains 10 seconds (#2176). bash-language-server and
+vscode-json-language-server measured 9,667ms and 11,047ms cold with closed
+stdin — both close enough to the 10s default that host contention alone can
+trip a false verification degradation — and use a 20-second bound (#2194).
+Delivery is proven per strategy, not just for npm: `probeManagedToolVersion`
+(pip/gem) and `verifyRefreshedArtifact` (github/maven/archive) both resolve
+the timeout through `getToolVerificationTimeout` on every call, and each of
+the six strategies has a test that raises a tool's `verificationTimeoutMs`
+and asserts the exact value reaches the post-refresh `--version` spawn (#2194).
 This matters for markdownlint-cli2: `--version` scanned 45 files and returned
 in about 370ms when stdin was closed, while `--no-globs -` linted one stdin
 file and returned in about 370ms; with production-shaped open stdin the latter
@@ -748,6 +763,8 @@ eager because its synchronous shutdown/status contracts are host-visible; do
 not make those callbacks async without updating their ordering contract/tests.
 
 **Multi-formatter extension policies resolve to one formatter (#1306):** explicit project configuration wins, and every policy with multiple candidates must name one unique `defaultFormatter` as its deterministic overlap tie-break. Kotlin Spotless selection is parsed from `build.gradle{.kts}` and `settings.gradle{.kts}` `spotless { kotlin { ... } }` blocks through `getSpotlessKotlinFormatter`; never add independent ktlint/ktfmt detection at a caller. Its small lexical pre-pass blanks comments and quoted strings before brace scanning (disabled `if (false)` blocks remain an explicit non-goal), and Gradle reads are memoized by path plus `mtimeMs` so repeated per-file selection does not repeat config I/O while mid-session edits invalidate naturally.
+
+**Truncation guards read the output-cap predicate before status handling (#2100).** `safeSpawnAsync` only sets `outputTruncated` when a call site passes `maxOutputBytes`. `truncatedByOutputCap` (`clients/spawn-output-cap.ts`) is the only guard for those incomplete bytes. It runs before failure or status handling and excludes timeout and abort, which own their classifications even when the output was capped. `stopForOutputLimit` separately records `killedForOutputCap` when it starts ending the child. POSIX commonly returns null status plus `SIGTERM`; Windows returns status 1 with no signal or failure. Callers that need to know whether pi-lens ended the process use `killedForOutputCap`, never either platform exit shape. This distinction matters to helm render: a cap-killed render leaves an unchecked prefix, while a completed render with truncated progress output still validates its output tree. A `maxOutputBytes` needs a rationale comment and a spawn-options cap test. Test POSIX and Windows cap-kill builders plus timeout and abort variants (`tests/support/spawn-shapes.ts`), anchored to a live cross-platform invariant in `safe-spawn-ambient-signal.test.ts`. The predicate stays dependency-free because shared runner tests mock `safe-spawn.js` directly. `classifyRunOutcome` uses output-cap evidence only to improve ledger wording, never to change outcome kind.
 
 **Markdownlint default-config invariant (#833):** the Markdown dispatch runner invokes `markdownlint-cli2` with the package-owned `config/markdownlint/core.json` when no project markdownlint config is found; that config disables MD013 and sets MD024 to `siblings_only` so intentional repeated category headings in changelogs are allowed while duplicate sibling headings remain violations. A project config is left to markdownlint-cli2 unchanged (no runner-level rule overrides). `hasMarkdownlintConfig` must recognize every config filename supported by the installed markdownlint-cli2, including the `.markdownlint-cli2.*` and `.markdownlint.{jsonc,json,yaml,yml,cjs,mjs}` families.
 
@@ -1016,6 +1033,13 @@ persist test fail. Snapshot stringify and gzip remain in the existing
 project-snapshot worker; do not send a structured-clone object graph to a new
 worker.
 
+Memory-sample subsystem records report the axis that grows and at least one
+byte-denominated estimate. `reviewGraph.residentBytes` uses bounded node/edge
+counts plus the two edge-index reference charges; `dispatchCaches.estimatedBytes`
+uses its bounded entry count. Keep these estimates O(cache entries) and treat
+them as attribution floors, not V8 heap measurements. The corresponding
+real-tree census belongs in the issue or PR record, not in the hot sampler.
+
 MCP warm word indexes are bounded per root in `clients/mcp/analyze.ts`: callers
 must acquire/release a lease around every use, because idle and LRU eviction
 must never retire an index mid-query. Idle timers are generation-owned,
@@ -1047,6 +1071,12 @@ env-tunable with `PI_LENS_REVIEW_GRAPH_IDLE_EVICT_MS` and
 build-dedup promises so the next access is a true cold rebuild. Async graph
 writes carry a per-workspace epoch, preventing an in-flight build from
 resurrecting an evicted entry. (#1389)
+
+Incremental review-graph updates resolve deferred symbol edges after restoring
+preserved incoming edges. The live indexes must remain synchronized, and
+`dedupeResolvedEdges` removes only post-resolution duplicates from affected
+target buckets. Do not add a second whole-graph dedupe pass to the hot path;
+the next single-file rebuild must also remain duplicate-free. (#2127)
 
 ### Git guard
 

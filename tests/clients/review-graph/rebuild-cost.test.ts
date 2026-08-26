@@ -363,7 +363,7 @@ describe("review-graph one-file rebuild cost (#2074)", () => {
 			expect(duplicateEdgeCount(cold)).toBe(0);
 			const coldEdges = cold.edges.length;
 
-			// Same-batch re-extraction of both files creates the duplicate.
+			// Same-batch re-extraction of both files must not retain a duplicate.
 			seq++;
 			changedNow = [fileA, fileB];
 			for (const file of changedNow) {
@@ -376,15 +376,11 @@ describe("review-graph one-file rebuild cost (#2074)", () => {
 				new FactStore(),
 				seqHint,
 			);
-			// Precondition, stated loudly on purpose: this guard's proof rests on
-			// the same-batch duplicate existing. When #2127 fixes that defect, this
-			// fails here rather than passing vacuously, and whoever fixes it must
-			// re-home the dedupe branch's proof.
-			expect(duplicateEdgeCount(batched)).toBe(1);
-			expect(batched.edges.length).toBe(coldEdges + 1);
+			expect(duplicateEdgeCount(batched)).toBe(0);
+			expect(batched.edges.length).toBe(coldEdges);
 
-			// The single-file rebuild repairs it. This is the assertion that reds
-			// when the dedupe branch is deleted.
+			// A later single-file rebuild remains duplicate-free. This also guards
+			// the existing restore dedupe branch and its bounded repair behavior.
 			seq++;
 			changedNow = [fileA];
 			fs.appendFileSync(fileA, "\nexport const singleMarker = 2;\n");

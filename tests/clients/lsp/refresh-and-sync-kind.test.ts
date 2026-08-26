@@ -137,6 +137,79 @@ function lastDidChangeParams(state: LSPClientState): {
 }
 
 describe("outgoing didChange honors the negotiated sync kind (#1669)", () => {
+	it("serializes overlapping Incremental changes per path (#2113)", async () => {
+		const state = createMockState({ syncKind: 2 });
+		state.openDocuments.add(TEST_KEY);
+		state.documentVersions.set(TEST_KEY, 0);
+		state.documentContentHashes.set(TEST_KEY, {
+			version: 0,
+			hash: "irrelevant",
+			text: "before",
+		});
+
+		let releaseFirstSend!: () => void;
+		const firstSend = new Promise<void>((resolve) => {
+			releaseFirstSend = resolve;
+		});
+		let didChangeSends = 0;
+		vi.mocked(state.connection.sendNotification).mockImplementation(
+			async (method) => {
+				if (method === "textDocument/didChange" && didChangeSends++ === 0)
+					await firstSend;
+			},
+		);
+
+		const first = handleNotifyChange(state, TEST_FILE, "first");
+		const second = handleNotifyChange(state, TEST_FILE, "second");
+		releaseFirstSend();
+		await Promise.all([first, second]);
+
+		const changes = vi
+			.mocked(state.connection.sendNotification)
+			.mock.calls.filter((call) => call[0] === "textDocument/didChange")
+			.map(
+				(call) =>
+					(
+						call[1] as {
+							contentChanges: Array<{ range?: unknown; text: string }>;
+						}
+					).contentChanges[0],
+			);
+		expect(changes).toHaveLength(2);
+		expect(changes[0]).toEqual({
+			range: {
+				start: { line: 0, character: 0 },
+				end: { line: 0, character: "before".length },
+			},
+			text: "first",
+		});
+		expect(changes[1]).toEqual({
+			range: {
+				start: { line: 0, character: 0 },
+				end: { line: 0, character: "first".length },
+			},
+			text: "second",
+		});
+	});
+
+	it("does not overwrite a newer mirror when a lower version is recorded (#2113)", async () => {
+		const state = createMockState({ syncKind: 2 });
+		state.openDocuments.add(TEST_KEY);
+		state.documentVersions.set(TEST_KEY, 0);
+		state.documentContentHashes.set(TEST_KEY, {
+			version: 2,
+			hash: "newer",
+			text: "newer content",
+		});
+
+		await handleNotifyChange(state, TEST_FILE, "stale content");
+
+		expect(state.documentContentHashes.get(TEST_KEY)).toMatchObject({
+			version: 2,
+			text: "newer content",
+		});
+	});
+
 	it("Full sync kind: unchanged whole-document event", async () => {
 		const state = createMockState({ syncKind: 1 });
 		state.openDocuments.add(TEST_KEY);

@@ -1919,6 +1919,7 @@ function noteSgAvailable(
 		cause: provisional ? sgSweepTransientCause : "ok",
 		elapsedMs: Date.now() - startedAt,
 		latched: !provisional,
+		classifiedBy: "probe",
 		hostStallMs: sgSweepHostStallMs,
 		budgetMs: 5000,
 		...(provisional && {

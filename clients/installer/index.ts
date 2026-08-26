@@ -549,6 +549,12 @@ export const TOOLS: ToolDefinition[] = [
 		name: "Bash Language Server",
 		checkCommand: "bash-language-server",
 		checkArgs: ["--version"],
+		// The #2188 sweep measured a 9,667ms cold `--version` start with closed
+		// stdin — close enough to the 10s installer default that modest host
+		// contention pushes it over and emits a false verification degradation.
+		// 20s gives the same kind of headroom Vue's 30s bound gives its own
+		// slower cold start (#2176), without inventing a shared literal (#2194).
+		verificationTimeoutMs: 20_000,
 		installStrategy: "npm",
 		packageName: "bash-language-server",
 		binaryName: "bash-language-server",
@@ -585,6 +591,11 @@ export const TOOLS: ToolDefinition[] = [
 		name: "VSCode JSON Language Server",
 		checkCommand: "vscode-json-language-server",
 		checkArgs: ["--version"],
+		// The #2188 sweep measured an 11,047ms cold `--version` start with closed
+		// stdin — over the 10s installer default, so a cold or contended host can
+		// see a false verification degradation before the binary ever answers.
+		// 20s mirrors the bash-language-server bound above (#2194).
+		verificationTimeoutMs: 20_000,
 		installStrategy: "npm",
 		packageName: "vscode-langservers-extracted",
 		binaryName: "vscode-json-language-server",

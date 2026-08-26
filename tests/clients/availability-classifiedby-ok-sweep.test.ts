@@ -1,0 +1,95 @@
+/**
+ * classifiedBy sweep for the `cause: "ok"` availability-decision arm (#2131).
+ *
+ * Dogfood pass 5 measured the gap: over 8.76h of baseline, 33 of 75
+ * `cause: "ok"` decisions (44%) carried no `classifiedBy`, while `not-found`
+ * (51/51) and `fast-path` (23/23) carried it 100%. Seven call sites set
+ * `cause: "ok"` next to a sibling failure arm that stamps `classifiedBy` and
+ * simply omitted it on the success arm — a mechanical, structural gap, not a
+ * one-off typo, so a mechanical sweep is the fix that cannot regress silently.
+ *
+ * This scans every `logAvailabilityDecision` call under `clients/` and reds
+ * if ANY `cause: "ok"` call omits `classifiedBy` — the class this issue's
+ * verification note closes.
+ */
+
+import * as path from "node:path";
+import { fileURLToPath } from "node:url";
+import { describe, expect, it } from "vitest";
+
+import {
+	type AvailabilityDecisionSite,
+	scanAvailabilityDecisionSites,
+	scanSource,
+} from "../support/availability-classifiedby-scan.js";
+
+const REPO_ROOT = path.resolve(
+	path.dirname(fileURLToPath(import.meta.url)),
+	"../..",
+);
+
+const SITES = scanAvailabilityDecisionSites(REPO_ROOT);
+const OK_SITES = SITES.filter((site) => site.causeOk);
+
+/** `file:line` for every finding, so a failure message is actionable. */
+function evidence(sites: AvailabilityDecisionSite[]): string[] {
+	return sites.map((site) => `${site.file}:${site.line}`);
+}
+
+describe("availability_decision classifiedBy sweep (#2131)", () => {
+	it("scans a non-trivial population, so a broken scanner cannot pass vacuously", () => {
+		// A regex typo that matched nothing would make the assertion below
+		// trivially true. Pin a floor, not the exact count, which churns.
+		expect(SITES.length).toBeGreaterThan(20);
+		expect(OK_SITES.length).toBe(18);
+	});
+
+	it('every cause:"ok" decision stamps classifiedBy', () => {
+		const unstamped = OK_SITES.filter((site) => !site.hasClassifiedBy);
+		expect(
+			evidence(unstamped),
+			[
+				'A cause:"ok" availability_decision emit is missing classifiedBy.',
+				"Every arm reaching this cause is either a direct probe success",
+				'(classifiedBy: "probe") or an install/join-repaired verdict the caller',
+				'asserted (classifiedBy: "caller"/"joined") — read the sibling failure',
+				"arm in the same function for which one applies.",
+			].join(" "),
+		).toEqual([]);
+	});
+});
+
+describe("availability-classifiedby scanner self-test", () => {
+	const fixture = [
+		'logAvailabilityDecision({ tool: "x", verdict: "available", outcome: "success", cause: "ok", elapsedMs: 1, latched: true });',
+		'logAvailabilityDecision({ tool: "x", verdict: "available", outcome: "success", cause: "ok", elapsedMs: 1, latched: true, classifiedBy: "probe" });',
+		'logAvailabilityDecision({ tool: "x", verdict: "unavailable", outcome: "missing", cause: "not-found", elapsedMs: 1, latched: true, classifiedBy: "probe" });',
+		'logAvailabilityDecision({ tool: "x", verdict: "available", outcome: "success", cause: provisional ? "timeout" : "ok", classifiedBy: "probe" });',
+		'logAvailabilityDecision({ tool: "x", verdict: "available", outcome: "success", cause: "fast-path", evidence: { classifiedBy: "wrong" } });',
+		'logAvailabilityDecision({ tool: "x", verdict: "available", outcome: "success", cause: "ok", note: "unmatched ( quote" });',
+		'// logAvailabilityDecision({ cause: "ok" });',
+		'fakeLogAvailabilityDecision({ cause: "ok" });',
+	].join("\n");
+	const found = scanSource(fixture, "fixture.ts");
+
+	it("reads cause and classifiedBy out of each call's own arguments", () => {
+		expect(
+			found.map((site) => [site.line, site.causeOk, site.hasClassifiedBy]),
+		).toEqual([
+			[1, true, false],
+			[2, true, true],
+			[3, false, true],
+			[4, true, true],
+			[5, false, false],
+			[6, true, false],
+		]);
+	});
+
+	it("does not read a call that exists only in a comment", () => {
+		expect(found.some((site) => site.line === 7)).toBe(false);
+	});
+
+	it("does not match an identifier that merely ends in the callee name", () => {
+		expect(found.some((site) => site.line === 8)).toBe(false);
+	});
+});

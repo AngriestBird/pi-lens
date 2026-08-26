@@ -254,6 +254,7 @@ async function runJavaProbe(): Promise<boolean | undefined> {
 			latched: true,
 			hostStallMs,
 			budgetMs: JAVA_PROBE_TIMEOUT_MS,
+			classifiedBy: "probe",
 		});
 		return true;
 	}
