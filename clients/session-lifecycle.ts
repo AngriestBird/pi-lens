@@ -303,6 +303,24 @@ function normalizeRootForCompare(root: string | undefined): string | undefined {
  * its later emissions rather than `concurrent-secondary`. That is the fail-safe
  * direction this module has always taken (run the handler), and it is correct
  * here: with the primary gone there is no live sibling to protect.
+ *
+ * WHAT PROTECTS A SURVIVING SECONDARY (#2130 round 2, remainder N3/F3). Not the
+ * count zeroed below, and not this module-level classification at all: it is the
+ * per-activation `ownedSessionRole` closure in `index.ts`. Each activation
+ * records the role IT was classified as at its own session_start and consults
+ * that at its own shutdown, so a secondary whose primary has already released
+ * still takes the secondary teardown path.
+ *
+ * `secondarySessionCount` is therefore an OBSERVABILITY counter, not a guard.
+ * Zeroing it here under-reports for the window between the primary's release
+ * and the next primary's registration. That is real and accepted: the only
+ * reader is `concurrent_session_bind.metadata.secondaryCount` in `latency.log`,
+ * and during that window no primary is registered, so every arriving start
+ * classifies `primary` and re-registers — which zeroes the count anyway —
+ * instead of emitting a bind record. `decrementSecondarySessionCount` clamps at
+ * zero, so a late secondary's shutdown cannot underflow it. Documented rather
+ * than changed, because a count that outlived the registration it is scoped to
+ * would disagree with `getActivePrimaryRoot()` in the same record.
  */
 export function releasePrimarySession(): void {
 	const s = state();
