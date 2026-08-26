@@ -583,6 +583,28 @@ export interface ReviewGraphWorkspaceCacheSnapshot {
 	totalNodes: number;
 	/** Sum of `graph.edges.length` across every resident entry. */
 	totalEdges: number;
+	/** Estimated bytes retained by the graph stores, using bounded counters. */
+	residentBytes: number;
+}
+
+/**
+ * Measured heap coefficients for the graph's current object shape. An
+ * isolated store of the production node and edge objects was forced through
+ * GC and divided by its census: 450.5 bytes per node and 243.0 bytes per
+ * edge, including the two edge-index references. The measurement used 18,695
+ * nodes and 48,815 edges across three identical runs with --expose-gc.
+ */
+const REVIEW_GRAPH_NODE_RESIDENT_BYTES = 450.5;
+const REVIEW_GRAPH_EDGE_RESIDENT_BYTES = 243.0;
+
+export function estimateReviewGraphStoreBytes(
+	totalNodes: number,
+	totalEdges: number,
+): number {
+	return (
+		totalNodes * REVIEW_GRAPH_NODE_RESIDENT_BYTES +
+		totalEdges * REVIEW_GRAPH_EDGE_RESIDENT_BYTES
+	);
 }
 
 /**
@@ -603,6 +625,7 @@ export function getReviewGraphWorkspaceCacheSnapshot(): ReviewGraphWorkspaceCach
 		cacheEntries: _workspaceGraphCache.size,
 		totalNodes,
 		totalEdges,
+		residentBytes: estimateReviewGraphStoreBytes(totalNodes, totalEdges),
 	};
 }
 

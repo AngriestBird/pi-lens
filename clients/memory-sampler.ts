@@ -164,6 +164,7 @@ export interface MemorySampleSubsystems {
 		cacheEntries: number;
 		totalNodes: number;
 		totalEdges: number;
+		residentBytes: number;
 	};
 	/** `null` when no word index has been built yet this session. */
 	wordIndex: {
@@ -194,6 +195,8 @@ export interface MemorySampleSubsystems {
 	} | null;
 	dispatchCaches: {
 		recentlyCleanNeighborCacheSize: number;
+		/** Measured retained size of one `{ turnSeq, checkedAt }` cache entry. */
+		estimatedBytes: number;
 	};
 }
 
@@ -275,7 +278,12 @@ export function collectMemorySampleSubsystems(
 				}
 			: null,
 		treeSitter,
-		dispatchCaches,
+		dispatchCaches: {
+			...dispatchCaches,
+			// Three isolated-store runs measured 320 bytes per production entry.
+			// Keep this O(1); the cache key and Map bookkeeping are included.
+			estimatedBytes: dispatchCaches.recentlyCleanNeighborCacheSize * 320,
+		},
 	};
 }
 

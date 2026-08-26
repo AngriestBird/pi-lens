@@ -1030,6 +1030,13 @@ persist test fail. Snapshot stringify and gzip remain in the existing
 project-snapshot worker; do not send a structured-clone object graph to a new
 worker.
 
+Memory-sample subsystem records report the axis that grows and at least one
+byte-denominated estimate. `reviewGraph.residentBytes` uses bounded node/edge
+counts plus the two edge-index reference charges; `dispatchCaches.estimatedBytes`
+uses its bounded entry count. Keep these estimates O(cache entries) and treat
+them as attribution floors, not V8 heap measurements. The corresponding
+real-tree census belongs in the issue or PR record, not in the hot sampler.
+
 MCP warm word indexes are bounded per root in `clients/mcp/analyze.ts`: callers
 must acquire/release a lease around every use, because idle and LRU eviction
 must never retire an index mid-query. Idle timers are generation-owned,

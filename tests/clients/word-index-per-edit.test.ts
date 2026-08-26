@@ -120,6 +120,8 @@ describe("computeCascadeForFile — word-index per-edit seam (#348 phase 2)", ()
 				),
 			).toBe(true);
 			expect(onWordIndexUpdated).toHaveBeenCalledWith(wordIndex);
+			// The broader runtime.wordIndex -> memory_sample seam remains a remainder:
+			// this PR does not fix the dogfood wordIndex:null observation.
 		} finally {
 			env.cleanup();
 		}
