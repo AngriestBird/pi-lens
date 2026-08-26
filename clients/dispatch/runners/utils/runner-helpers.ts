@@ -11,6 +11,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { logSessionStart } from "../../../sessionstart-logger.js";
+import { incrementDegradationCount } from "../../../degradation-ledger.js";
 import { getGlobalPiLensDir } from "../../../file-utils.js";
 import {
 	createGenerationSource,
@@ -42,6 +43,7 @@ import {
 } from "../../../tool-policy.js";
 import type { DispatchContext } from "../../types.js";
 import { isInSpawnTimeoutCooldown } from "../../../spawn-timeout-cooldown.js";
+import { createSingleFlight } from "../../../single-flight.js";
 import {
 	type AvailabilityCause,
 	type AvailabilityLatch,
@@ -525,6 +527,38 @@ const latchedUnavailableByCwd = new PathKeyedMap<Set<string>>(normalizeMapKey);
 // in the degradation ledger instead of silent.
 const availabilityGeneration = createGenerationSource("dispatch-availability");
 
+const availabilityProbeFlights = createSingleFlight<ProbeFailureShape>({
+	generation: () => availabilityGeneration.current(),
+});
+
+/** Share one external availability probe across independently-created consumers. */
+export function runSharedAvailabilityProbe<T extends ProbeFailureShape>(
+	key: string,
+	probe: () => Promise<T>,
+): { promise: Promise<T>; joined: boolean } {
+	const joined = availabilityProbeFlights.has(key);
+	return {
+		promise: availabilityProbeFlights.run(key, probe) as Promise<T>,
+		joined,
+	};
+}
+
+export function recordAvailabilityProbeOverrun(
+	tool: string,
+	key: string,
+	elapsedMs: number,
+	budgetMs: number | undefined,
+	failure?: ProbeFailureShape["failure"],
+): void {
+	if (budgetMs === undefined || elapsedMs <= budgetMs) return;
+	if (failure === "timeout" && elapsedMs <= budgetMs * 2) return;
+	incrementDegradationCount({
+		kind: "availability-probe-overrun",
+		subject: `${tool}:${key}`,
+		reason: `probe took ${Math.round(elapsedMs)}ms; budget was ${Math.round(budgetMs)}ms`,
+	});
+}
+
 function installStateFor(cwd: string, toolId: string): InstallAttemptState {
 	let states = installAttemptsByCwd.get(cwd);
 	if (!states) {
@@ -786,6 +820,7 @@ export function resetDispatchAvailabilityState(): void {
 	managedVerifyInFlight.clear();
 	resetPathWalkMemo();
 	availabilityGeneration.bump();
+	availabilityProbeFlights.clear();
 }
 
 /** What the last probe for a cwd decided, for messaging and telemetry (#1467). */
@@ -835,6 +870,7 @@ export function createAvailabilityChecker(
 		normalizeEphemeralMapKey,
 	);
 	let checkerGeneration = availabilityGeneration.current();
+	let checkerFlightGeneration = 0;
 
 	const findCommand = createVenvFinder(command, windowsExt);
 
@@ -843,12 +879,14 @@ export function createAvailabilityChecker(
 		cacheByCwd.clear();
 		inFlightByCwd.clear();
 		checkerGeneration = availabilityGeneration.current();
+		checkerFlightGeneration++;
 	}
 
 	const reset = (): void => {
 		cacheByCwd.clear();
 		inFlightByCwd.clear();
 		checkerGeneration = availabilityGeneration.current();
+		checkerFlightGeneration++;
 	};
 
 	function getCache(cwd: string): AvailabilityCache {
@@ -880,7 +918,7 @@ export function createAvailabilityChecker(
 			elapsedMs: number;
 			hostStallMs?: number;
 			/** How the outcome was reached, and the facts behind it (#1500). */
-			classifiedBy?: "probe" | "caller";
+			classifiedBy?: "probe" | "caller" | "joined";
 			evidence?: ProbeEvidence;
 		},
 	): void {
@@ -1041,16 +1079,30 @@ export function createAvailabilityChecker(
 			const startedAt = Date.now();
 			let result: Awaited<ReturnType<typeof safeSpawnAsync>>;
 			let hostStallMs: number;
+			let probeJoined = false;
 			try {
-				result = await safeSpawnAsync(cmd, versionArgs, {
-					timeout: options.probeTimeout ?? 5000,
-					cwd: resolvedCwd,
-					env,
-				});
+				const shared = runSharedAvailabilityProbe(
+					`checker:${command}|${versionArgs.join("|")}|${key}|${checkerFlightGeneration}|${windowsExt}|${cmd}|${JSON.stringify(Object.entries(env ?? {}).sort(([a], [b]) => a.localeCompare(b)))}`,
+					() =>
+						safeSpawnAsync(cmd, versionArgs, {
+							timeout: options.probeTimeout ?? 5000,
+							cwd: resolvedCwd,
+							env,
+						}),
+				);
+				probeJoined = shared.joined;
+				result = await shared.promise;
 			} finally {
 				hostStallMs = stallSampler.stop();
 			}
 			const elapsedMs = Date.now() - startedAt;
+			recordAvailabilityProbeOverrun(
+				command,
+				resolvedCwd,
+				elapsedMs,
+				options.probeTimeout ?? 5000,
+				result.failure,
+			);
 
 			if (!result.error && result.status === 0) {
 				cache.command = cmd;
@@ -1060,7 +1112,7 @@ export function createAvailabilityChecker(
 					cause: "ok",
 					elapsedMs,
 					hostStallMs,
-					classifiedBy: "probe",
+					classifiedBy: probeJoined ? "joined" : "probe",
 					evidence: describeProbeEvidence(result),
 				});
 				return true;
@@ -1080,7 +1132,7 @@ export function createAvailabilityChecker(
 				cause,
 				elapsedMs,
 				hostStallMs,
-				classifiedBy: "probe",
+				classifiedBy: probeJoined ? "joined" : "probe",
 				evidence,
 			});
 			return false;
@@ -1135,7 +1187,9 @@ export interface CwdProbeResult extends ProbeFailureShape {
 export interface CwdCachedProbeOptions {
 	/** Tool name used in the `availability_decision` record. */
 	tool: string;
-	/** Probe budget the verdict was measured against, ms. Reported, not enforced. */
+	/** Identity of the resolved probe binary, or a caller-owned freshness token. */
+	flightKeyComponent?: string;
+	/** Probe budget the verdict was measured against, ms; overruns enter the bounded ledger. */
 	budgetMs?: number;
 	/** Outcome for a failure the taxonomy cannot classify. Default non-installable. */
 	unclassifiedFailureOutcome?: AvailabilityOutcome;
@@ -1211,6 +1265,7 @@ export function createCwdCachedProbe(
 			hostStallMs: number;
 			/** What the spawn returned, for the record's audit trail (#1500). */
 			evidence?: ProbeEvidence;
+			classifiedBy?: "probe" | "joined";
 		},
 	): void {
 		let retryAfterMs: number | undefined;
@@ -1239,7 +1294,7 @@ export function createCwdCachedProbe(
 				...(retryAfterMs !== undefined && { retryAfterMs }),
 				...(options.budgetMs !== undefined && { budgetMs: options.budgetMs }),
 				// Every verdict here is derived from the probe this seam just ran.
-				classifiedBy: "probe",
+				classifiedBy: verdict.classifiedBy ?? "probe",
 				...(verdict.evidence !== undefined && { evidence: verdict.evidence }),
 			},
 			key,
@@ -1266,19 +1321,32 @@ export function createCwdCachedProbe(
 			const startedAt = Date.now();
 			let result: CwdProbeResult | undefined;
 			let thrown: unknown;
+			let probeJoined = false;
 			try {
-				result = await probe(key);
+				const shared = runSharedAvailabilityProbe(
+					`cwd:${options.tool}|${options.flightKeyComponent ?? ""}|${key}`,
+					() => probe(key),
+				);
+				probeJoined = shared.joined;
+				result = await shared.promise;
 			} catch (error) {
 				thrown = error;
 			}
 			const hostStallMs = stallSampler.stop();
 			const elapsedMs = Date.now() - startedAt;
-			// A probe that threw carries its errno in the Error, which is exactly
-			// what the taxonomy reads — so a thrown EAGAIN stays transient instead
-			// of collapsing into an untyped `false`.
 			const shape: CwdProbeResult = result ?? {
 				error: thrown instanceof Error ? thrown : new Error(String(thrown)),
 			};
+			recordAvailabilityProbeOverrun(
+				options.tool,
+				key,
+				elapsedMs,
+				options.budgetMs,
+				shape.failure,
+			);
+			// A probe that threw carries its errno in the Error, which is exactly
+			// what the taxonomy reads — so a thrown EAGAIN stays transient instead
+			// of collapsing into an untyped `false`.
 
 			if (result && !result.error && result.status === 0) {
 				note(latch, key, {
@@ -1287,6 +1355,7 @@ export function createCwdCachedProbe(
 					cause: "ok",
 					elapsedMs,
 					hostStallMs,
+					classifiedBy: probeJoined ? "joined" : "probe",
 					evidence: describeProbeEvidence(result, options.tool),
 				});
 				return true;
@@ -1303,6 +1372,7 @@ export function createCwdCachedProbe(
 				cause,
 				elapsedMs,
 				hostStallMs,
+				classifiedBy: probeJoined ? "joined" : "probe",
 				evidence,
 			});
 			return false;

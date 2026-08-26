@@ -1123,6 +1123,31 @@ describe("compensating row: the memo burns only on a genuine correction (#1657)"
 		expect(available).toHaveLength(2);
 	});
 
+	it("reset starts a fresh flight instead of joining the stale one", async () => {
+		const safeSpawnMod = await import("../../../../clients/safe-spawn.js");
+		const releases: Array<(value: unknown) => void> = [];
+		vi.mocked(safeSpawnMod.safeSpawnAsync).mockImplementation(
+			() =>
+				new Promise((resolve) =>
+					releases.push(resolve as (value: unknown) => void),
+				),
+		);
+		const checker = createAvailabilityChecker("reset-flight-tool");
+		const first = checker.isAvailableAsync(process.cwd());
+		await vi.waitFor(() =>
+			expect(safeSpawnMod.safeSpawnAsync).toHaveBeenCalledTimes(1),
+		);
+		checker.reset();
+		const second = checker.isAvailableAsync(process.cwd());
+		await vi.waitFor(() =>
+			expect(safeSpawnMod.safeSpawnAsync).toHaveBeenCalledTimes(2),
+		);
+
+		releases[0]?.({ stdout: "", stderr: "", status: 0 });
+		releases[1]?.({ stdout: "", stderr: "", status: 0 });
+		expect(await Promise.all([first, second])).toEqual([true, true]);
+	});
+
 	/**
 	 * #1674 review F4 — both rows say `verdict: "available"`, and only the
 	 * evidence can tell a reader which one cleared a latched row.
