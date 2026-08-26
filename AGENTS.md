@@ -1021,8 +1021,9 @@ stores. The per-edit gate is O(1): the index carries a `postingStoreCount`
 over-estimate bumped on each private-store allocation and reset to the exact
 count at every compaction, so the hot path never rebuilds a `Set` over the
 vocabulary. The recompaction is serialized through the per-index async
-operation queue (`enqueueAsyncWordIndexOperation`) behind a `recompactInFlight`
-latch, and the cooperative copy is corruption-safe against a synchronous edit
+operation queue (`enqueueAsyncWordIndexOperation`) behind a per-index
+`createSingleFlight` registry (#1753, the repo's at-most-one-in-flight
+primitive), and the cooperative copy is corruption-safe against a synchronous edit
 that lands during one of its 8 ms yields: it sizes the arena from a snapshot and
 publishes a list only when that list is still the map's current entry, still the
 snapshot's size, and still fits. A list that grew or was replaced mid-copy stays

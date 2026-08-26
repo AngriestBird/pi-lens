@@ -25,6 +25,7 @@ import { incrementDegradationCount } from "./degradation-ledger.js";
 import { KIND_EXTENSIONS, type FileKind } from "./file-kinds.js";
 import { PathKeyedMap } from "./path-keyed-map.js";
 import { isAtOrAboveHomeDir, normalizeEphemeralMapKey } from "./path-utils.js";
+import { createSingleFlight, type SingleFlight } from "./single-flight.js";
 import {
 	createDebounceScheduler,
 	type DebounceScheduler,
@@ -132,12 +133,13 @@ export interface WordIndex {
 	 */
 	postingStoreCount?: number;
 	/**
-	 * True while a threshold-triggered arena recompaction is queued or running
-	 * for this index (#2117). Kept on the index rather than a module-level map so
-	 * the scheduler adds no session-state symbol and the flag is collected with
-	 * the index. Prevents a burst of edits from stacking duplicate recompactions.
+	 * At-most-one-in-flight registry for this index's threshold-triggered arena
+	 * recompaction (#2117). Uses the repo's canonical `createSingleFlight`
+	 * primitive (#1753) rather than a hand-rolled latch, so a burst of edits
+	 * joins the running recompaction instead of stacking duplicates. Held on the
+	 * index so its lifetime is the index's and it adds no module-level state.
 	 */
-	recompactInFlight?: boolean;
+	recompactFlight?: SingleFlight<void>;
 }
 
 export interface RankedFile {
@@ -327,7 +329,7 @@ function createEmptyWordIndex(truncated: boolean): WordIndex {
 		replacementStats: { count: 0, totalMs: 0, maxMs: 0 },
 		dirtyFiles: new Set<string>(),
 		postingStoreCount: 0,
-		recompactInFlight: false,
+		recompactFlight: createSingleFlight<void>(),
 	};
 }
 
@@ -460,25 +462,24 @@ async function recompactWordIndexPostingsIfNeeded(
  * async edit or refresh interleaves it (#2117). The queue plus the corruption-
  * proof cooperative compactor together close the review-F2 data race: the queue
  * excludes async operations, and the compactor's snapshot-and-skip publish
- * excludes the synchronous per-edit path the queue cannot see. The
- * `recompactInFlight` latch keeps a burst of edits from stacking duplicates.
+ * excludes the synchronous per-edit path the queue cannot see. The per-index
+ * `recompactFlight` single-flight (#1753) keeps a burst of edits from stacking
+ * duplicates: a caller that arrives while one recompaction runs joins it rather
+ * than starting a second. The single slot uses a constant key.
  */
 function enqueueWordIndexRecompact(
 	index: WordIndex,
 	root: string,
 ): Promise<void> {
-	if (
-		(index.postingStoreCount ?? 0) <= WORD_INDEX_RECOMPACT_STORE_THRESHOLD ||
-		index.recompactInFlight
-	) {
+	if ((index.postingStoreCount ?? 0) <= WORD_INDEX_RECOMPACT_STORE_THRESHOLD) {
 		return Promise.resolve();
 	}
-	index.recompactInFlight = true;
-	return enqueueAsyncWordIndexOperation(index, () =>
-		recompactWordIndexPostingsIfNeeded(index, root),
-	).finally(() => {
-		index.recompactInFlight = false;
-	});
+	const flight = (index.recompactFlight ??= createSingleFlight<void>());
+	return flight.run("recompact", () =>
+		enqueueAsyncWordIndexOperation(index, () =>
+			recompactWordIndexPostingsIfNeeded(index, root),
+		),
+	);
 }
 
 /**
@@ -2106,7 +2107,7 @@ export function deserializeWordIndex(
 		// Postings were just packed into one arena above, so the running gate
 		// starts from the exact post-compaction store count (#2117).
 		postingStoreCount: countPostingBackingStores(postings),
-		recompactInFlight: false,
+		recompactFlight: createSingleFlight<void>(),
 	};
 }
 
