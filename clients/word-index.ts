@@ -1840,7 +1840,10 @@ function serializeWordIndexIncrementally(
 		: undefined;
 	for (const fileKey of dirty) {
 		const file = fileByKey.get(fileKey);
-		const fileId = file === undefined ? undefined : index.fileTable.idFor(file);
+		const fileId =
+			file === undefined
+				? undefined
+				: index.fileTable.idFor(wordIndexKey(file));
 		const slot = fileId === undefined ? undefined : slotByFileId.get(fileId);
 		if (slot === undefined || !forward || file === undefined) continue;
 		forward[slot] = [slot, [...(index.forward?.get(file)?.entries() ?? [])]];

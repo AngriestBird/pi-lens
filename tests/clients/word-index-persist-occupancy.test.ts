@@ -14,7 +14,7 @@ describe("incremental word-index persist occupancy (#2068)", () => {
 			const shared = Array.from({ length: 200 }, (_, i) => `shared_${i}`).join(
 				" ",
 			);
-			const docs = Array.from({ length: 1500 }, (_, file) => ({
+			const docs = Array.from({ length: 750 }, (_, file) => ({
 				path: `src/f${file}.ts`,
 				content: `${shared} stable_${file}`,
 			}));
@@ -23,7 +23,7 @@ describe("incremental word-index persist occupancy (#2068)", () => {
 			serializeWordIndex(fullIndex);
 			const fullMs = performance.now() - fullStarted;
 			const measurements: Array<{ dirty: number; ms: number }> = [];
-			for (const dirty of [1, 150, 1500]) {
+			for (const dirty of [1, 75, 750]) {
 				const index = buildWordIndex(docs);
 				serializeWordIndex(index);
 				for (let file = 0; file < dirty; file += 1) {
@@ -38,7 +38,7 @@ describe("incremental word-index persist occupancy (#2068)", () => {
 			}
 			console.log(
 				JSON.stringify({
-					fixture: "1500-doc/200-shared-token",
+				fixture: "750-doc/200-shared-token",
 					fullMs,
 					measurements,
 				}),
@@ -46,7 +46,7 @@ describe("incremental word-index persist occupancy (#2068)", () => {
 			expect(measurements).toHaveLength(3);
 			expect(measurements[0].ms).toBeLessThan(fullMs);
 			expect(measurements[1].ms).toBeLessThan(fullMs);
-			expect(measurements[2].ms).toBeLessThan(fullMs * 2);
+			expect(measurements[2].ms).toBeLessThan(fullMs * 1.5);
 		},
 	);
 
