@@ -62,6 +62,48 @@ describe("git fixture environment", () => {
 		expect(output).toBe("missing");
 	});
 
+	it("scrubs GIT_CONFIG_COUNT and the indexed GIT_CONFIG_KEY_n/VALUE_n family", () => {
+		const output = gitExecFileSync(
+			process.execPath,
+			[
+				"-e",
+				"process.stdout.write(JSON.stringify([" +
+					"process.env.GIT_CONFIG_COUNT, " +
+					"process.env.GIT_CONFIG_KEY_0, " +
+					"process.env.GIT_CONFIG_VALUE_0" +
+					"]))",
+			],
+			{
+				cwd: process.cwd(),
+				env: {
+					GIT_CONFIG_COUNT: "1",
+					GIT_CONFIG_KEY_0: "core.bare",
+					GIT_CONFIG_VALUE_0: "true",
+				},
+				encoding: "utf8",
+			},
+		);
+		expect(JSON.parse(output)).toEqual([null, null, null]);
+	});
+
+	it("scrubs an injected GIT_DIR from gitFixtureSpawnAsync's override path", async () => {
+		const repo = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-git-async-escape-"),
+		);
+		scratch.push(repo);
+		gitExecFileSync("git", ["init", "-q"], { cwd: repo });
+
+		const result = await gitFixtureSpawnAsync(repo, ["rev-parse", "--git-dir"], {
+			env: { GIT_DIR: path.join(os.tmpdir(), "should-not-be-used") },
+			timeout: 5_000,
+		});
+
+		expect(result.status).toBe(0);
+		expect(path.resolve(repo, result.stdout.trim())).toBe(
+			path.join(repo, ".git"),
+		);
+	});
+
 	it("keeps all three wrappers inside a throwaway repository", async () => {
 		const repo = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-git-wrapper-"));
 		scratch.push(repo);
