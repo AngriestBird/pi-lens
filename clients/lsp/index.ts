@@ -507,6 +507,28 @@ function auxGraceCeilingMs(
 		),
 	);
 }
+
+export function auxWaitBudgetMs(
+	serverId: string,
+	isCold: boolean,
+	configuredCeilingMs: number | undefined,
+	declaredWaitMs: number,
+): number {
+	if (configuredCeilingMs !== undefined || !isCold) {
+		return Math.min(
+			declaredWaitMs,
+			auxGraceCeilingMs(serverId, isCold, configuredCeilingMs),
+		);
+	}
+	const observedSpawnMs = getSuccessfulLspSpawnDurationMs(serverId);
+	if (observedSpawnMs === undefined || observedSpawnMs <= 0) {
+		return Math.min(declaredWaitMs, DEFAULT_AUX_GRACE_CEILING_MS);
+	}
+	return Math.min(
+		MAX_ADAPTIVE_AUX_GRACE_CEILING_MS,
+		Math.max(declaredWaitMs, observedSpawnMs + ADAPTIVE_AUX_GRACE_MARGIN_MS),
+	);
+}
 const DIAGNOSTICS_SEMANTIC_SETTLE_THRESHOLD_MS = Math.max(
 	0,
 	Number.parseInt(
@@ -2342,10 +2364,6 @@ export class LSPService {
 		hardCapMs?: number,
 		resolvedRoots?: Map<string, string>,
 		waitSkipReasons?: Set<string>,
-		onOutcome?: (
-			serverId: string,
-			outcome: LSPClientAcquisitionOutcome,
-		) => void,
 	): Promise<SpawnedServer | undefined> {
 		if (this.checkDestroyed()) return undefined;
 		// Primary selection considers language servers only — auxiliary servers
@@ -2414,7 +2432,6 @@ export class LSPService {
 					noteSpawnInFlight,
 					(reported) => {
 						acquisition.outcome = reported;
-						onOutcome?.(server.id, reported);
 					},
 				);
 				if (spawned) {
@@ -4657,13 +4674,11 @@ export class LSPService {
 								const auxWaitStartedAt = Date.now();
 								const outcomes = await Promise.all(
 									auxWaits.map(async (aux) => {
-										const budgetMs = Math.min(
+										const budgetMs = auxWaitBudgetMs(
+											aux.serverId,
+											coldAuxiliaryServerIds.has(aux.serverId),
+											configuredAuxCeilingMs,
 											timeoutFor(aux.serverId),
-											auxGraceCeilingMs(
-												aux.serverId,
-												coldAuxiliaryServerIds.has(aux.serverId),
-												configuredAuxCeilingMs,
-											),
 										);
 										let timer: ReturnType<typeof setTimeout> | undefined;
 										const timeout = new Promise<false>((resolve) => {

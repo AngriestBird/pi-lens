@@ -230,9 +230,12 @@ async function touchAll(
 }
 
 describe("#1459 — sweep fan-out must not black out a scanner silently", () => {
-	beforeEach(() => {
+	beforeEach(async () => {
 		vi.useFakeTimers();
 		vi.resetModules();
+		(
+			await import("../../../clients/lsp/spawn-history.js")
+		)._clearSuccessfulLspSpawnHistoryForTests();
 		getServersForFileWithConfig.mockReset();
 		createLSPClient.mockReset();
 		logLatency.mockReset();
@@ -672,13 +675,19 @@ describe("#1459 — sweep fan-out must not black out a scanner silently", () => 
 		await vi.advanceTimersByTimeAsync(NOTIFY_BUDGET_MS * 200);
 		await Promise.all([first, second]);
 
-		const outcomes = rowsFor("lsp_aux_wait_outcome").flatMap(
-			(row) =>
-				(
-					row.metadata as {
-						outcomes?: Array<{ serverId: string; outcome: string }>;
-					}
-				)?.outcomes ?? [],
+		const outcomes = rowsFor("lsp_aux_wait_outcome").flatMap((row) =>
+			(
+				row.metadata as {
+					waitShape?: string;
+					outcomes?: Array<{ serverId: string; outcome: string }>;
+				}
+			)?.waitShape === "aux_grace"
+				? ((
+						row.metadata as {
+							outcomes?: Array<{ serverId: string; outcome: string }>;
+						}
+					)?.outcomes ?? [])
+				: [],
 		);
 		const opengrepOutcomes = outcomes
 			.filter((entry) => entry.serverId === "opengrep")

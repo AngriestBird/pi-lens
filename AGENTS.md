@@ -267,16 +267,16 @@ turn-end delivery, and stale completed findings must re-arm a refreshed
 freshness baseline. Turn-end drains use a zero wait budget and requeue unsettled
 promises, so deferred work never adds a repeated per-turn stall (#2122).
 
-Auxiliary diagnostics waits preserve a warm-turn fast path: the default 2s
-ceiling applies to reused clients, while a cold acquisition may use the
-server's last successful spawn duration plus a bounded margin, never exceeding
-8s. An explicit `PI_LENS_AUX_GRACE_MS` value overrides this adaptation. (#2152)
-
 Live contracts, grouped by subsystem. Consult the group for the seam you
 touch; each paragraph carries its evidence issue. New entries join their
 group (see the placement rules in "Maintaining this file").
 
 ### LSP: acquisition, touches, waits, and diagnostics
+
+Auxiliary diagnostic waits preserve a warm-turn fast path: on a cold
+acquisition, the budget is `max(declared wait, observed spawn + 500ms)` clamped
+to 8s; on a warm acquisition, it remains `min(declared wait, 2000ms)`. An
+explicit `PI_LENS_AUX_GRACE_MS` value overrides both formulas. (#2152)
 
 Pull-diagnostics request deadlines send `$/cancelRequest`, but cancellation is
 advisory. While a cancelled request remains unsettled, admission blocks another

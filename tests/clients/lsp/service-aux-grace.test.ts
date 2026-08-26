@@ -446,46 +446,73 @@ describe("R8 — aux grace: touchFile with-auxiliary path", () => {
 		);
 	});
 
-	it("extends a cold auxiliary grace from its observed spawn cost", async () => {
-		const { LSPService } = await import("../../../clients/lsp/index.js");
-		const service = new LSPService();
-		// A cold start measures 2.5s. The adaptive ceiling should give this
-		// first touch enough room for a 3s auxiliary wait, while the old static
-		// 2s ceiling cuts it off.
-		const auxServer = makeAuxServer("opengrep");
-		auxServer.spawn.mockImplementation(
-			async () =>
-				new Promise((resolve) =>
-					setTimeout(
-						() => resolve({ process: makeFakeProcess(), source: "test" }),
-						2500,
-					),
-				),
-		);
-		getServersForFileWithConfig.mockReturnValue([
-			makePrimaryServer("ts-primary"),
-			auxServer,
-		]);
-		createLSPClient
-			.mockResolvedValueOnce(makeClient(100, [], { serverId: "ts-primary" }))
-			.mockResolvedValueOnce(
-				makeClient(3000, [makeDiagnostic("cold aux finding")], {
-					serverId: "opengrep",
-				}),
+	it.each([
+		{ observedMs: 1000, expectedFinding: false },
+		{ observedMs: 2500, expectedFinding: true },
+	])(
+		"tracks a cold typos spawn of $observedMs ms instead of using a flat grace",
+		async ({ observedMs, expectedFinding }) => {
+			const { LSPService, auxWaitBudgetMs } =
+				await import("../../../clients/lsp/index.js");
+			const {
+				recordSuccessfulLspSpawn,
+				_clearSuccessfulLspSpawnHistoryForTests,
+			} = await import("../../../clients/lsp/spawn-history.js");
+			_clearSuccessfulLspSpawnHistoryForTests();
+			recordSuccessfulLspSpawn("typos", observedMs);
+			expect(auxWaitBudgetMs("typos", true, undefined, 1500)).toBe(
+				observedMs === 1000 ? 1500 : 3000,
 			);
+			const service = new LSPService();
+			const auxServer = makeAuxServer("typos");
+			auxServer.spawn.mockImplementation(
+				async () =>
+					new Promise((resolve) =>
+						setTimeout(
+							() => resolve({ process: makeFakeProcess(), source: "test" }),
+							observedMs,
+						),
+					),
+			);
+			getServersForFileWithConfig.mockReturnValue([
+				makePrimaryServer("ts-primary"),
+				auxServer,
+			]);
+			createLSPClient
+				.mockResolvedValueOnce(
+					makeClient(100, [makeDiagnostic("primary-only sentinel")], {
+						serverId: "ts-primary",
+					}),
+				)
+				.mockResolvedValueOnce(
+					makeClient(2500, [makeDiagnostic("cold aux finding")], {
+						serverId: "typos",
+					}),
+				);
 
-		const touch = service.touchFile(FILE, "cold-adaptive", {
-			clientScope: "with-auxiliary",
-			auxiliaryServerIds: ["opengrep"],
-			collectDiagnostics: true,
-			diagnostics: "document",
-		});
-		await vi.advanceTimersByTimeAsync(2500);
-		await vi.advanceTimersByTimeAsync(3010);
-		const result = await touch;
-		expect(result?.diags.map((diagnostic) => diagnostic.message)).toContain(
-			"cold aux finding",
-		);
+			const touch = service.touchFile(FILE, "cold-adaptive", {
+				clientScope: "with-auxiliary",
+				auxiliaryServerIds: ["typos"],
+				collectDiagnostics: true,
+				diagnostics: "document",
+			});
+			await vi.advanceTimersByTimeAsync(observedMs + 2600);
+			const result = await touch;
+			expect(result?.diags.map((diagnostic) => diagnostic.message)).toContain(
+				expectedFinding ? "cold aux finding" : "primary-only sentinel",
+			);
+		},
+	);
+
+	it("clamps a cold auxiliary budget at 8000 ms", async () => {
+		const { auxWaitBudgetMs } = await import("../../../clients/lsp/index.js");
+		const {
+			recordSuccessfulLspSpawn,
+			_clearSuccessfulLspSpawnHistoryForTests,
+		} = await import("../../../clients/lsp/spawn-history.js");
+		_clearSuccessfulLspSpawnHistoryForTests();
+		recordSuccessfulLspSpawn("typos", 9000);
+		expect(auxWaitBudgetMs("typos", true, undefined, 1500)).toBe(8000);
 	});
 
 	it("still waits for slow primary even if aux settles early", async () => {
