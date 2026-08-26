@@ -219,12 +219,17 @@ describe("normalizeEphemeralMapKey (refs #191)", () => {
 		);
 	});
 
-	it("is case-insensitive on win32 semantics (matches this suite's Windows CI target)", () => {
-		if (process.platform !== "win32") return;
-		expect(normalizeEphemeralMapKey("C:\\Foo\\BAR.TS")).toBe(
-			normalizeEphemeralMapKey("c:\\foo\\bar.ts"),
-		);
-	});
+	// Case folding is a no-op off Windows, so this declares itself skipped there
+	// rather than returning early from a body that would report as PASSED
+	// without asserting anything (#2089).
+	it.skipIf(process.platform !== "win32")(
+		"is case-insensitive on win32 semantics (matches this suite's Windows CI target)",
+		() => {
+			expect(normalizeEphemeralMapKey("C:\\Foo\\BAR.TS")).toBe(
+				normalizeEphemeralMapKey("c:\\foo\\bar.ts"),
+			);
+		},
+	);
 });
 
 describe("walkUpDirs / findNearestContaining (#122)", () => {
