@@ -1253,34 +1253,30 @@ describe("one budget across all strategies", () => {
 		expect(apiCalls().length + installSpawns().length).toBeLessThanOrEqual(1);
 	});
 
-	it(
-		"re-arms across sessions rather than latching for the process",
-		async () => {
-			installProbeCached("ruff");
-			installProbeCached("rubocop");
+	// #2182: the two `runManagedToolRefresh` calls below resolve on queued
+	// microtasks (fast on a quiet host), but under the same real
+	// parallel-worker contention #2139 measured, this test's default 5000ms
+	// testTimeout starves and fires — reproduced locally by running this file
+	// combined with tests/clients/degradation-ledger*.test.ts under synthetic
+	// CPU load. The timeout does not stop the underlying refresh promise, so
+	// the straggler resolves later and mutates the shared spawn/degradation
+	// mocks mid-way through an UNRELATED later test (the "declines and
+	// touches nothing when PI_LENS_DISABLE_TOOL_INSTALL=1" case a few tests
+	// down failed the same combined run with degradationCount() 1 instead of
+	// 0 — a side effect of this straggler, not its own bug). Giving this
+	// test enough budget to finish normally removes the straggler at the
+	// source.
+	it("re-arms across sessions rather than latching for the process", async () => {
+		installProbeCached("ruff");
+		installProbeCached("rubocop");
 
-			await runManagedToolRefresh(NOW);
-			const first = installSpawns().length;
-			resetManagedToolRefreshSession();
-			await runManagedToolRefresh(NOW);
+		await runManagedToolRefresh(NOW);
+		const first = installSpawns().length;
+		resetManagedToolRefreshSession();
+		await runManagedToolRefresh(NOW);
 
-			expect(installSpawns().length).toBe(first + 1);
-		},
-		// #2182: the two `runManagedToolRefresh` calls resolve on queued
-		// microtasks (fast on a quiet host), but under the same real
-		// parallel-worker contention #2139 measured, this test's default 5000ms
-		// testTimeout starves and fires — reproduced locally by running this
-		// file combined with tests/clients/degradation-ledger*.test.ts under
-		// synthetic CPU load. The timeout does not stop the underlying refresh
-		// promise, so the straggler resolves later and mutates the shared
-		// spawn/degradation mocks mid-way through an UNRELATED later test (the
-		// "declines and touches nothing when PI_LENS_DISABLE_TOOL_INSTALL=1"
-		// case a few tests down failed the same combined run with
-		// degradationCount() 1 instead of 0 — a side effect of this straggler,
-		// not its own bug). Giving this test enough budget to finish normally
-		// removes the straggler at the source.
-		15_000,
-	);
+		expect(installSpawns().length).toBe(first + 1);
+	}, 15_000);
 });
 
 // --- install kill-switch, trust gate, and install lock (#1759 review F2) --
