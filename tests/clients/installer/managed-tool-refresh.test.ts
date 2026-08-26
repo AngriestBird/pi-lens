@@ -943,6 +943,40 @@ describe("post-update verification (review F2)", () => {
 		}
 	});
 
+	it("delivers bash-language-server's 20s budget through npm refresh (#2194)", async () => {
+		installFixture("bash-language-server", "4.0.0");
+		stubSpawn("ok", { "bash-language-server": "5.0.0" });
+
+		const outcome = await runManagedToolRefresh(NOW);
+
+		expect(outcome.refreshed[0]).toMatchObject({
+			toolId: "bash-language-server",
+			ok: true,
+			verified: true,
+		});
+		expect(verifyOptions).toHaveBeenCalledWith(
+			expect.objectContaining({ timeout: 20_000 }),
+		);
+	});
+
+	it("delivers vscode-json-language-server's 20s budget through npm refresh (#2194)", async () => {
+		installFixture("vscode-langservers-extracted", "4.0.0", {
+			binaryName: "vscode-json-language-server",
+		});
+		stubSpawn("ok", { "vscode-langservers-extracted": "5.0.0" });
+
+		const outcome = await runManagedToolRefresh(NOW);
+
+		expect(outcome.refreshed[0]).toMatchObject({
+			toolId: "vscode-json-language-server",
+			ok: true,
+			verified: true,
+		});
+		expect(verifyOptions).toHaveBeenCalledWith(
+			expect.objectContaining({ timeout: 20_000 }),
+		);
+	});
+
 	it("fails the refresh when the updated binary cannot run", async () => {
 		installFixture("knip", "6.4.1");
 		spawnMock.mockImplementation(async (_c: string, args: string[]) => {

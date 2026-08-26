@@ -426,6 +426,71 @@ describe("managed npm executable paths", () => {
 		});
 	});
 
+	it.each([
+		["bash-language-server", "bash-language-server"],
+		["vscode-json-language-server", "vscode-json-language-server"],
+	])(
+		"passes the %s verification budget to the managed-local probe (#2194)",
+		async (toolId, binaryName) => {
+			process.env.PI_LENS_TEST_PLATFORM = "win32";
+			const localPath = path.join(
+				TEST_HOME,
+				".pi-lens",
+				"tools",
+				"node_modules",
+				".bin",
+				`${binaryName}.cmd`,
+			);
+			fakeAccess(localPath);
+
+			await expect(
+				ensureTool(toolId, { allowInstall: false }),
+			).resolves.toBe(localPath);
+			expect(
+				spawnCalls.some(
+					({ cmd, args, timeout }) =>
+						cmd === localPath &&
+						args.includes("--version") &&
+						timeout === 20_000,
+				),
+			).toBe(true);
+		},
+	);
+
+	it.each([
+		["bash-language-server", "bash-language-server"],
+		["vscode-json-language-server", "vscode-json-language-server"],
+	])(
+		"passes the %s verification budget through npm install (#2194)",
+		async (toolId, binaryName) => {
+			process.env.PI_LENS_TEST_PLATFORM = "win32";
+			process.env.PI_LENS_TEST_MODE = "1";
+			process.env.PI_LENS_TEST_NPM_SCRIPT = "install";
+			await withEmptyPath(async () => {
+				const expected = path.join(
+					TEST_HOME,
+					".pi-lens",
+					"tools",
+					"node_modules",
+					".bin",
+					`${binaryName}.cmd`,
+				);
+				fakeAccess(expected);
+				mockFsStat.mockResolvedValue({ mtimeMs: 1 });
+				await expect(
+					ensureTool(toolId, { forceReinstall: true }),
+				).resolves.toBe(expected);
+				const verificationCalls = spawnCalls.filter(
+					({ cmd, args }) => cmd === expected && args.includes("--version"),
+				);
+				expect(verificationCalls.length).toBeGreaterThan(0);
+				expect(
+					verificationCalls.every(({ timeout }) => timeout === 20_000),
+				).toBe(true);
+			});
+		},
+	);
+
 	it("clears the madge managed-path memo when a managed install succeeds (#1276)", async () => {
 		process.env.PI_LENS_TEST_PLATFORM = "win32";
 		process.env.PI_LENS_TEST_MODE = "1";
