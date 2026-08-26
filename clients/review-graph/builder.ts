@@ -4387,8 +4387,8 @@ function restoreValidIncomingEdges(
 /**
  * Remove duplicates created when deferred targets converge after restoration.
  * The scan is limited to resolved edges and their target buckets, not the
-	 * complete graph, so same-batch repairs remain proportional to the resolved
-	 * edges and the fan-in of their target buckets.
+ * complete graph, so same-batch repairs remain proportional to the resolved
+ * edges and the fan-in of their target buckets.
  */
 function dedupeResolvedEdges(
 	graph: ReviewGraph,
