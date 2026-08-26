@@ -461,6 +461,7 @@ export class SgRunner {
 			cause: provisional ? this.sweepTransientCause : "ok",
 			elapsedMs: Date.now() - startedAt,
 			latched: !provisional,
+			classifiedBy: "probe",
 			hostStallMs: this.sweepHostStallMs,
 			budgetMs: PROBE_TIMEOUT_MS,
 			...(provisional && {
