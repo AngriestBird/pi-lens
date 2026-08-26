@@ -938,7 +938,7 @@ export const EXEMPT_SESSION_STATE_FILES: Readonly<Record<string, string>> = {
 		"global config warn-once set, tied to the config file it warned about",
 	"instance-registry.ts": "instance-registry enablement flag",
 	"process-singletons.ts":
-		"the globalThis-keyed container for process-scope state (#2146). It owns storage, never lifecycle: each family's own module keeps its session_start reset (session-lifecycle.ts's releasePrimarySession, startup-timing.ts's host-ready anchor), so a reset here would wipe families whose boundary is the PROCESS, not the session — the registry mutation tail among them. Its only module-scope binding is the Symbol.for container key, a constant.",
+		"the globalThis-keyed container for process-scope state (#2146). It owns storage, never lifecycle: every family keeps whatever boundary it already had, and each one is a PROCESS boundary rather than a session boundary. session-lifecycle.ts releases its registration at the primary's own session_shutdown (releasePrimarySession), not at session_start. startup-timing.ts's host-ready anchor is registered here as policy process_lifetime with a ForTests-only reset, because resetting it at a session boundary would fabricate host stalls from the original process boot. The instance-registry mutation tail must outlive every session by construction. A reset in this module would therefore wipe state no session boundary owns. Its only module-scope binding is the Symbol.for container key, a constant.",
 	"session-lifecycle.ts":
 		"the session_start decision seam itself — it is the boundary, not state behind it",
 

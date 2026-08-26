@@ -341,6 +341,27 @@ export type SessionShutdownClassification = "primary" | "secondary";
  * now classifies `primary` (conservative miss — its teardown runs and hurts
  * the parent, same as pre-#473 behavior), because uncertainty must never
  * classify `secondary`.
+ *
+ * ROOT IDENTITY (#2146 review F1). The probe-based branch above is the only
+ * evidence this function had, and it is exactly the evidence that is missing in
+ * the state #2146 describes: the host's ctx is already invalidated, which is
+ * WHY `secondary-root` fires on the start side. A subagent's teardown therefore
+ * read "the primary's ctx is dead, so I must be the primary", and index.ts's
+ * primary path called `releasePrimarySession()` and wiped the SHARED process
+ * registration. The decline then survived exactly one subagent: the next one
+ * classified `primary` and ran the full battery.
+ *
+ * So this function takes the same root discriminator `decideSessionStart` has,
+ * with the same rule and the same fail-safe direction. A shutdown whose root is
+ * POSITIVELY different from the registered primary's root is a `secondary`,
+ * even when the primary's ctx probes `false` or `undefined` — deferring to the
+ * dead-ctx branch is what restored the defect. `undefined` on either side means
+ * "root unknown" and changes no verdict.
+ *
+ * Ordering: the root check sits BELOW the id-unknown guard, not above it. That
+ * guard is the #472 fix — a session with an unreadable session id must still
+ * tear itself down — and a root comparison cannot establish "different session"
+ * when the ids that identify sessions are unavailable.
  */
 export function noteSessionShutdown(
 	// Load-bearing: ctx OBJECT IDENTITY is the definitive discriminator when
@@ -351,6 +372,9 @@ export function noteSessionShutdown(
 	// defense-in-depth for SDK versions/paths that reuse a ctx.)
 	ctx: unknown,
 	sessionId: string | undefined,
+	/** This session's own project root (`ctx.cwd`), when readable. `undefined`
+	 *  means "root unknown" and never on its own changes a verdict. */
+	root?: string | undefined,
 ): SessionShutdownClassification {
 	const s = state();
 	if (ctx !== undefined && ctx === s.activeCtx) {
@@ -369,6 +393,19 @@ export function noteSessionShutdown(
 	}
 	const primaryStillActive = probeCtxActive(s.activeCtx);
 	if (primaryStillActive === true) {
+		return "secondary";
+	}
+	// #2146 F1: positive evidence of a DIFFERENT root, in a session positively
+	// identified as not the primary. Deliberately below the probe-true branch
+	// (a live sibling is already answered) and deliberately ABOVE the
+	// dead-ctx fail-safe, because a dead primary ctx is precisely the state a
+	// subagent teardown arrives in.
+	const shutdownRoot = normalizeRootForCompare(root);
+	if (
+		s.activeRoot !== undefined &&
+		shutdownRoot !== undefined &&
+		s.activeRoot !== shutdownRoot
+	) {
 		return "secondary";
 	}
 	// primaryStillActive is false or undefined: fail-safe to primary.

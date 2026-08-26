@@ -122,7 +122,8 @@ function isAdoptable(cell: unknown, version: number): cell is SingletonCell {
 
 /** One bounded reset log per process, capped so a pathological build pair
  * cannot grow it without limit. */
-const RESET_LOG_FAMILY = "process-singleton-reset-log";
+export const PROCESS_SINGLETON_RESET_LOG_FAMILY = "process-singleton-reset-log";
+const RESET_LOG_FAMILY = PROCESS_SINGLETON_RESET_LOG_FAMILY;
 const RESET_LOG_VERSION = 1;
 const RESET_LOG_CAP = 16;
 

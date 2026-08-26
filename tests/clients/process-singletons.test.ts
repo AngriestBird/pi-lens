@@ -329,3 +329,143 @@ describe("#2146 — the versioned adopt-or-reset protocol", () => {
 		expect(fresh).toEqual({ n: 5 });
 	});
 });
+
+// --- Fix round 1 ---
+
+describe("#2146 F1 — a subagent shutdown must not clear the shared registration", () => {
+	beforeEach(async () => {
+		const singletons = await import("../../clients/process-singletons.js");
+		singletons._resetProcessSingletonsForTests();
+	});
+
+	afterEach(async () => {
+		const singletons = await import("../../clients/process-singletons.js");
+		singletons._resetProcessSingletonsForTests();
+	});
+
+	/**
+	 * The #2146 dogfood state, exactly: the host's ctx is already invalidated,
+	 * which is WHY `secondary-root` fires on the start side. `decideSessionStart`
+	 * grew a root discriminator for that; `noteSessionShutdown` did not, so a
+	 * subagent's teardown read "the primary's ctx is dead, so I must be the
+	 * primary" and index.ts's primary path wiped the shared registration.
+	 */
+	it("a subagent shutdown in a different root classifies secondary", async () => {
+		const lifecycle = await import("../../clients/session-lifecycle.js");
+		const hostRoot = path.join(baseDir, "host");
+		lifecycle.registerPrimarySession(staleCtx(), "host-session", hostRoot);
+
+		const subRoot = path.join(baseDir, "subagent-1");
+		expect(lifecycle.noteSessionShutdown(staleCtx(), "sub-1", subRoot)).toBe(
+			"secondary",
+		);
+	});
+
+	it("the registration survives one subagent teardown, so the NEXT subagent still declines", async () => {
+		const lifecycle = await import("../../clients/session-lifecycle.js");
+		const hostRoot = path.join(baseDir, "host");
+		lifecycle.registerPrimarySession(staleCtx(), "host-session", hostRoot);
+
+		// Sub 1 tears down. index.ts only reaches `releasePrimarySession()` on the
+		// primary path, so classifying this shutdown correctly is what keeps the
+		// registration alive.
+		const classification = lifecycle.noteSessionShutdown(
+			staleCtx(),
+			"sub-1",
+			path.join(baseDir, "subagent-1"),
+		);
+		if (classification === "primary") lifecycle.releasePrimarySession();
+
+		expect(lifecycle.getActiveSessionId()).toBe("host-session");
+
+		// Sub 2 arrives after sub 1 left. Pre-fix this classified `primary` and
+		// ran the full session_start battery again.
+		const decision = lifecycle.decideSessionStart(
+			staleCtx(),
+			"sub-2",
+			path.join(baseDir, "subagent-2"),
+		);
+		expect(decision.classification).toBe("secondary-root");
+		expect(decision.runFullSessionStart).toBe(false);
+	});
+
+	// Positive control: the fix must not turn the primary's own teardown into a
+	// no-op. Without this the change could pass by classifying everything
+	// secondary, which leaks the LSP fleet on every clean exit (#472).
+	it("the primary's own shutdown in its own root still classifies primary and releases", async () => {
+		const lifecycle = await import("../../clients/session-lifecycle.js");
+		const hostRoot = path.join(baseDir, "host");
+		lifecycle.registerPrimarySession(staleCtx(), "host-session", hostRoot);
+
+		expect(
+			lifecycle.noteSessionShutdown(staleCtx(), "host-session", hostRoot),
+		).toBe("primary");
+		lifecycle.releasePrimarySession();
+		expect(lifecycle.getActiveSessionId()).toBeUndefined();
+	});
+
+	it("a shutdown with an unknown root leaves today's verdict untouched", async () => {
+		// Fail-safe direction: `undefined` means "root unknown", never
+		// "different root", so it must not manufacture a secondary verdict.
+		const lifecycle = await import("../../clients/session-lifecycle.js");
+		lifecycle.registerPrimarySession(
+			staleCtx(),
+			"host-session",
+			path.join(baseDir, "host"),
+		);
+		expect(lifecycle.noteSessionShutdown(staleCtx(), "other-session")).toBe(
+			"primary",
+		);
+	});
+
+	it("index.ts hands the shutdown classifier the session's own root", async () => {
+		const source = fs.readFileSync(
+			path.join(import.meta.dirname, "..", "..", "index.ts"),
+			"utf8",
+		);
+		expect(source).toMatch(
+			/classifyOwnedSessionShutdown\([\s\S]{0,160}shutdownCwd/,
+		);
+	});
+});
+
+describe("#2146 F2 — the reset log's own family cannot recurse", () => {
+	beforeEach(async () => {
+		const singletons = await import("../../clients/process-singletons.js");
+		singletons._resetProcessSingletonsForTests();
+	});
+
+	afterEach(async () => {
+		const singletons = await import("../../clients/process-singletons.js");
+		singletons._resetProcessSingletonsForTests();
+	});
+
+	it("an incompatible reset-log cell degrades bounded instead of blowing the stack", async () => {
+		const singletons = await import("../../clients/process-singletons.js");
+		// Two builds meet, and the RESET LOG itself is one of the families whose
+		// shape changed. Recording that family's own reset re-enters the log,
+		// which is incompatible again — unbounded recursion without the guard.
+		singletons._seedProcessSingletonCellForTests(
+			singletons.PROCESS_SINGLETON_RESET_LOG_FAMILY,
+			{ schema: "pi-lens.process-singletons", version: 99, value: {} },
+		);
+		singletons._seedProcessSingletonCellForTests("fam", {
+			schema: "pi-lens.process-singletons",
+			version: 99,
+			value: { legacy: true },
+		});
+
+		expect(() =>
+			singletons.getProcessSingleton("fam", 1, () => ({ n: 3 })),
+		).not.toThrow();
+		expect(singletons.getProcessSingleton("fam", 1, () => ({ n: 3 }))).toEqual({
+			n: 3,
+		});
+		// The ordinary family's reset is still recorded; the log's own is not,
+		// because the log it would be written to is the thing being discarded.
+		const families = singletons
+			.getProcessSingletonResets()
+			.map((entry) => entry.family);
+		expect(families).toEqual(["fam"]);
+	});
+});

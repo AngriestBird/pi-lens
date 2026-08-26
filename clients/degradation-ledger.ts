@@ -705,6 +705,18 @@ export function resetDegradationLedger(): void {
 	// process-lifetime latch too — it re-arms alongside the rest of the
 	// ledger rather than surviving past the session that observed it.
 	resetSinkWriteFailures();
+	// #2146 review F3: the OTHER pulled source, `getProcessSingletonResets()`,
+	// deliberately does NOT re-arm here, and the difference from its neighbour
+	// above is the point. A sink write failure recurs — new writes fail, so
+	// clearing the tally costs nothing and a later session re-observes the
+	// problem. A process-singleton reset happens once, at module-evaluation
+	// time, and cannot recur: after it, the container holds only compatible
+	// cells. Clearing it would show the fact in the first session's
+	// `pilens_health` and hide it from every session after, which is exactly
+	// when someone reads that line. The row is bounded independently of the
+	// session (one entry per family, capped at 16), so leaving it costs a fixed
+	// handful of lines and keeps a process-scope fact visible for the process's
+	// life. Deliberate exception to catalog shape 17, not an oversight.
 }
 
 export const DEGRADATION_ENTRIES_PER_KIND = ENTRIES_PER_KIND;
