@@ -38,7 +38,7 @@ describe("incremental word-index persist occupancy (#2068)", () => {
 			}
 			console.log(
 				JSON.stringify({
-				fixture: "750-doc/200-shared-token",
+					fixture: "750-doc/200-shared-token",
 					fullMs,
 					measurements,
 				}),
