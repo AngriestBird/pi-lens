@@ -644,7 +644,12 @@ export function logLatency(entry: LatencyEntry): void {
 	// as a coarse identity — see bounded-telemetry.ts's comment on this field.
 	// `normalizeLoggedPath` normalizes only values that are already
 	// fully-qualified paths, leaving every label/command untouched.
-	writer.log({ ...entry, ts, pid: process.pid, filePath: normalizeLoggedPath(entry.filePath) });
+	writer.log({
+		...entry,
+		ts,
+		pid: process.pid,
+		filePath: normalizeLoggedPath(entry.filePath),
+	});
 }
 
 export function getLatencyLogPath(): string {
