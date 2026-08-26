@@ -1,5 +1,5 @@
 /**
- * #2069 acceptance criterion 3 — `searchWordIndex` output is unchanged by the
+ * #2067 criterion 5 / #2069 acceptance criterion 3 — `searchWordIndex` output is unchanged by the
  * packed posting store.
  *
  * This is a characterization test, not a red-first regression test: the
@@ -19,7 +19,11 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { buildWordIndex, searchWordIndex } from "../../clients/word-index.js";
+import {
+	buildWordIndex,
+	searchWordIndex,
+	updateWordIndexDocument,
+} from "../../clients/word-index.js";
 
 const WORDS = [
 	"renderWidget",
@@ -99,7 +103,7 @@ const baselinePath = path.join(
 	"word-index-rank-baseline.json",
 );
 
-describe("word-index ranking is unchanged by the packed store (#2069)", () => {
+describe("word-index ranking is unchanged by replacement and packing (#2067/#2069)", () => {
 	it("reproduces the boxed representation's output for a fixed 20-query set", () => {
 		const baseline = JSON.parse(
 			fs.readFileSync(baselinePath, "utf-8"),
@@ -111,7 +115,8 @@ describe("word-index ranking is unchanged by the packed store (#2069)", () => {
 			QUERIES.length - 1,
 		);
 
-		const index = buildWordIndex(makeCorpus());
+		const corpus = makeCorpus();
+		const index = buildWordIndex(corpus);
 		const actual: RecordedQuery[] = QUERIES.map((query) => [
 			query,
 			searchWordIndex(index, query, { limit: 5 }).map(
@@ -125,5 +130,23 @@ describe("word-index ranking is unchanged by the packed store (#2069)", () => {
 		]);
 
 		expect(actual).toEqual(baseline);
+		expect(
+			updateWordIndexDocument(index, {
+				path: corpus[0].path,
+				content: corpus[0].content,
+			}),
+		).toBe(true);
+		const afterReplacement: RecordedQuery[] = QUERIES.map((query) => [
+			query,
+			searchWordIndex(index, query, { limit: 5 }).map(
+				(result): RecordedResult => [
+					result.file,
+					Number(result.score.toFixed(6)),
+					result.hits,
+					result.lines,
+				],
+			),
+		]);
+		expect(afterReplacement).toEqual(actual);
 	});
 });
