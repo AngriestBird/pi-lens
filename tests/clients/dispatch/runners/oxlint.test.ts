@@ -7,7 +7,11 @@ import {
 	type RunnerResult,
 } from "../../../../clients/dispatch/types.js";
 import { makeRunnerCtx } from "../../../support/runner-ctx.js";
-import { capKilledSpawnResult } from "../../../support/spawn-shapes.js";
+import {
+	capKilledSpawnResult,
+	capThenAbortedSpawnResult,
+	capThenTimedOutSpawnResult,
+} from "../../../support/spawn-shapes.js";
 import { setupTestEnvironment } from "../../test-utils.js";
 
 // All hoisted: importing `spawn-shapes.js` above reaches the mocked safe-spawn
@@ -53,6 +57,8 @@ const MATRIX_UNCONFIRMED_REASONS: Record<string, string> = {
 	"signal termination with exact envelope": "process-signal",
 	"truncated exact envelope": "process-truncated",
 	"cap-killed truncated envelope": "process-truncated",
+	"capped then timed-out envelope": "process-timeout",
+	"capped then aborted envelope": "process-killed",
 	"status zero with exact envelope": "status-zero",
 	"other nonzero status with exact envelope": "status-other",
 	"null status with exact envelope": "status-null",
@@ -214,12 +220,24 @@ describe("oxlint runner", () => {
 			expectedDegradation: "runner-parsed-nothing",
 		},
 		{
-			// #2100: the shape a real cap kill produces. safe-spawn SIGTERMs the
-			// child when the cap is reached, so truncation arrives WITH a signal
-			// failure — the process state must name the truncation that caused the
-			// kill, not the signal that carried it out.
 			name: "cap-killed truncated envelope",
 			result: capKilledSpawnResult({ stdout: CAPTURED_NO_FILES_STDOUT }),
+			expectedStatus: "skipped",
+			expectedDegradation: "runner-empty-result",
+		},
+		{
+			name: "capped then timed-out envelope",
+			result: capThenTimedOutSpawnResult({
+				stdout: CAPTURED_NO_FILES_STDOUT,
+			}),
+			expectedStatus: "skipped",
+			expectedDegradation: "runner-empty-result",
+		},
+		{
+			name: "capped then aborted envelope",
+			result: capThenAbortedSpawnResult({
+				stdout: CAPTURED_NO_FILES_STDOUT,
+			}),
 			expectedStatus: "skipped",
 			expectedDegradation: "runner-empty-result",
 		},

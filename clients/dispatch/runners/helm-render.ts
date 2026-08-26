@@ -82,7 +82,10 @@ import {
 	projectTrustDenialReason,
 } from "../../project-trust.js";
 import { safeSpawnAsync } from "../../safe-spawn.js";
-import { truncatedByOutputCap } from "../../spawn-output-cap.js";
+import {
+	killedForOutputCap,
+	truncatedByOutputCap,
+} from "../../spawn-output-cap.js";
 import { isTrivyEnabled, resolveSeverityFloor } from "../../trivy-client.js";
 import { findNearestDirWithMarker } from "../../workspace-topology.js";
 import { PRIORITY } from "../priorities.js";
@@ -938,14 +941,11 @@ async function renderAndValidate(
 		const renderOutput = [render.stdout, render.stderr]
 			.filter(Boolean)
 			.join("\n");
-		// #2100: the cap kill is OUR SIGTERM, so `spawnFailureKind` below reads it
-		// as "aborted" and returns before anything gets to ask about truncation.
-		// Only the shape where WE ended the render belongs here, though — helm
-		// exiting on its own means it finished writing `--output-dir`, and the
-		// two exit shapes are handled where they land (review F1). A timed-out or
-		// aborted render keeps its own classification via `spawnFailureKind`.
+		// `killedForOutputCap` is platform-neutral. POSIX usually reports SIGTERM,
+		// but Windows reports status 1 with no failure or signal. A timed-out or
+		// aborted render retains its own classification.
 		const renderCapped = truncatedByOutputCap(render);
-		if (renderCapped && render.status === null) {
+		if (killedForOutputCap(render)) {
 			// helm was cut off mid-render, so the scratch tree is a PREFIX —
 			// reading it back would report the manifests we never saw as clean
 			// (shape 10). Not parsed as a chart failure either: helm never reported

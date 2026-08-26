@@ -12,26 +12,38 @@
  * True when `outputTruncated` is the OUTPUT CAP's own verdict about this run,
  * and not a detail of some other ending.
  *
- * Reaching `maxOutputBytes` makes `stopForOutputLimit` kill the tree, so a
- * capped run normally resolves as a SIGTERM signal failure — or, when the tool
- * beats the signal out the door, as an ordinary exit that still carries the
- * flag. Either way the truncation is what happened to the run, and a caller
- * must read this BEFORE its `spawnFailure`/`failure`/`status` checks or those
- * answer the cap kill first and the truncation guard never speaks.
+ * A timeout or an abort can carry `outputTruncated` too. Those endings own
+ * their own classification, so they are excluded here rather than reported as
+ * truncation.
  *
- * A timeout or an abort can carry `outputTruncated` too — the flag is spread
- * into every resolve branch, and `timedOut`/`aborted` are set unconditionally,
- * so a noisy tool that also hangs hits both. Those endings own their own
- * classification (the tool never finished, for a reason that is not our cap),
- * so they are excluded here rather than reported as truncation.
- *
- * Typed structurally so `SpawnResult` and the runner-level result shapes that
- * re-spell `failure` as their own vocabulary can both use it.
+ * Typed structurally so `SpawnResult` and runner-level result shapes that
+ * re-spell `failure` can both use it.
  */
 export function truncatedByOutputCap(result: {
 	outputTruncated?: boolean;
 	failure?: string;
 }): boolean {
-	if (result.outputTruncated !== true) return false;
-	return result.failure !== "timeout" && result.failure !== "aborted";
+	return (
+		result.outputTruncated === true &&
+		result.failure !== "timeout" &&
+		result.failure !== "aborted"
+	);
+}
+
+/**
+ * True when `stopForOutputLimit` started terminating the child.
+ *
+ * Windows reports that termination as status 1 without a signal or failure,
+ * while POSIX commonly reports SIGTERM. This field avoids reconstructing our
+ * action from either platform's exit shape.
+ */
+export function killedForOutputCap(result: {
+	killedForOutputCap?: boolean;
+	failure?: string;
+}): boolean {
+	return (
+		result.killedForOutputCap === true &&
+		result.failure !== "timeout" &&
+		result.failure !== "aborted"
+	);
 }

@@ -1,13 +1,11 @@
 /**
  * The two spawn results a `maxOutputBytes` cap can actually produce (#2100).
  *
- * `safe-spawn.ts`'s `stopForOutputLimit` SIGTERMs the child the moment the
- * retained bytes reach the cap, so the dominant result is a SIGNAL failure that
- * happens to carry `outputTruncated` — not the clean-status pairing four
- * hand-written mocks in this tree assumed. The rarer second shape is a fast
- * tool that exited on its own before the SIGTERM landed. Both are pinned
- * against a live spawn in `tests/clients/safe-spawn-ambient-signal.test.ts`;
- * change them here only when that real-binary test says the runtime moved.
+ * `safe-spawn.ts` records `killedForOutputCap` when the cap starts ending the
+ * child. POSIX commonly reports that as SIGTERM. Windows reports status 1 with
+ * no failure or signal. A fast tool can still finish before the cap kill lands.
+ * The live cross-platform invariants are pinned in
+ * `tests/clients/safe-spawn-ambient-signal.test.ts`.
  */
 
 import {
@@ -15,7 +13,7 @@ import {
 	type SpawnResult,
 } from "../../clients/safe-spawn.js";
 
-/** The cap hit, safe-spawn killed the tree, the SIGTERM landed. */
+/** The cap hit, safe-spawn killed the tree, and POSIX reported SIGTERM. */
 export function capKilledSpawnResult(
 	overrides: Partial<SpawnResult> = {},
 ): SpawnResult {
@@ -29,6 +27,21 @@ export function capKilledSpawnResult(
 		failure: "signal",
 		spawnFailure: new SpawnFailureError("killed", cause.message, cause),
 		outputTruncated: true,
+		killedForOutputCap: true,
+		...overrides,
+	};
+}
+
+/** The cap hit, safe-spawn killed the tree, and Windows reported status 1. */
+export function capKilledOnWindowsSpawnResult(
+	overrides: Partial<SpawnResult> = {},
+): SpawnResult {
+	return {
+		stdout: "",
+		stderr: "",
+		status: 1,
+		outputTruncated: true,
+		killedForOutputCap: true,
 		...overrides,
 	};
 }
@@ -60,8 +73,10 @@ export function capThenTimedOutSpawnResult(
 		status: null,
 		error: cause,
 		failure: "timeout",
+		signal: "SIGTERM",
 		spawnFailure: new SpawnFailureError("timeout", cause.message, cause),
 		outputTruncated: true,
+		killedForOutputCap: true,
 		...overrides,
 	};
 }
@@ -77,8 +92,10 @@ export function capThenAbortedSpawnResult(
 		status: null,
 		error: cause,
 		failure: "aborted",
+		signal: "SIGTERM",
 		spawnFailure: new SpawnFailureError("killed", cause.message, cause),
 		outputTruncated: true,
+		killedForOutputCap: true,
 		...overrides,
 	};
 }

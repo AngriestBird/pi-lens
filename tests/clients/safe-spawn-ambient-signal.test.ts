@@ -9,12 +9,11 @@
  */
 
 import { afterEach, describe, expect, it } from "vitest";
+import { safeSpawnAsync, setAmbientAbortSignal } from "../../clients/safe-spawn.js";
 import {
-	SpawnFailureError,
-	safeSpawnAsync,
-	setAmbientAbortSignal,
-} from "../../clients/safe-spawn.js";
-import { truncatedByOutputCap } from "../../clients/spawn-output-cap.js";
+	killedForOutputCap,
+	truncatedByOutputCap,
+} from "../../clients/spawn-output-cap.js";
 import { capKilledSpawnResult } from "../support/spawn-shapes.js";
 
 // A trivial, immediately-exiting node invocation — guaranteed to exist on every
@@ -91,28 +90,17 @@ describe("safeSpawnAsync ambient abort signal (#197)", () => {
 		expect(
 			Buffer.byteLength(result.stdout) + Buffer.byteLength(result.stderr),
 		).toBeLessThanOrEqual(1024);
-		// #2100: the shape every truncation guard downstream must actually match.
-		// A cap kill is a SIGTERM, so it arrives as a signal failure carrying
-		// `outputTruncated` — never the status-0 pairing the mocks assumed.
-		// `capKilledSpawnResult` mirrors this; keep the two in step.
-		expect({
-			status: result.status,
-			failure: result.failure,
-			signal: result.signal,
-			spawnFailureKind: result.spawnFailure?.kind,
-		}).toEqual({
-			status: null,
-			failure: "signal",
-			signal: "SIGTERM",
-			spawnFailureKind: "killed",
-		});
-		expect(result.spawnFailure).toBeInstanceOf(SpawnFailureError);
+		// #2100: POSIX and Windows disagree on the exit shape. The cross-platform
+		// contract is that safe-spawn capped output, started ending the child, and
+		// the child did not self-report a successful exit.
+		expect(result.killedForOutputCap).toBe(true);
+		expect(result.status).not.toBe(0);
 		expect(capKilledSpawnResult({ stdout: result.stdout })).toMatchObject({
-			status: result.status,
-			failure: result.failure,
-			signal: result.signal,
+			outputTruncated: result.outputTruncated,
+			killedForOutputCap: result.killedForOutputCap,
 		});
 		expect(truncatedByOutputCap(result)).toBe(true);
+		expect(killedForOutputCap(result)).toBe(true);
 	});
 
 	// #2100 review F2: `outputTruncated` is spread into EVERY resolve branch, and
@@ -132,8 +120,10 @@ describe("safeSpawnAsync ambient abort signal (#197)", () => {
 		);
 
 		expect(result.outputTruncated).toBe(true);
+		expect(result.killedForOutputCap).toBe(true);
 		expect(result.failure).toBe("timeout");
 		expect(truncatedByOutputCap(result)).toBe(false);
+		expect(killedForOutputCap(result)).toBe(false);
 	});
 
 	it("reports a capped run that was then aborted as an abort, not a truncation", async () => {
@@ -150,8 +140,10 @@ describe("safeSpawnAsync ambient abort signal (#197)", () => {
 		);
 
 		expect(result.outputTruncated).toBe(true);
+		expect(result.killedForOutputCap).toBe(true);
 		expect(result.failure).toBe("aborted");
 		expect(truncatedByOutputCap(result)).toBe(false);
+		expect(killedForOutputCap(result)).toBe(false);
 	});
 
 	it("retains late output in the tail after an output-cap kill", async () => {

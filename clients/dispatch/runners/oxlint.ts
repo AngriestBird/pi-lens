@@ -11,6 +11,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { walkUpDirs } from "../../path-utils.js";
 import { safeSpawnAsync } from "../../safe-spawn.js";
+import { truncatedByOutputCap } from "../../spawn-output-cap.js";
 import {
 	getJstsLintPolicyForCwd,
 	hasVitePlusConfig,
@@ -289,15 +290,11 @@ interface OxlintProcessEvidence {
 
 function oxlintProcessState(result: OxlintProcessEvidence): OxlintProcessState {
 	const failureKind = result.spawnFailure?.kind;
-	// FIRST (#2100): a cap kill is OUR SIGTERM, so it arrives as a signal
-	// failure with `spawnFailure.kind === "killed"`. Read in the old order those
-	// two answered first and "truncated" could only ever describe a tool that
-	// beat the signal out the door.
-	if (result.outputTruncated) return "truncated";
-	if (result.signal || result.failure === "signal") return "signal";
+	if (truncatedByOutputCap(result)) return "truncated";
 	if (result.failure === "timeout" || failureKind === "timeout")
 		return "timeout";
 	if (result.failure === "aborted" || failureKind === "killed") return "killed";
+	if (result.signal || result.failure === "signal") return "signal";
 	if (result.failure === "spawn" || result.error) return "spawn";
 	return "normal";
 }

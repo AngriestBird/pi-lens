@@ -17,6 +17,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { makeRunnerCtx } from "../../../support/runner-ctx.js";
 import {
+	capKilledOnWindowsSpawnResult,
 	capKilledSpawnResult,
 	capThenAbortedSpawnResult,
 	capThenTimedOutSpawnResult,
@@ -87,6 +88,7 @@ function chartContentFingerprint(chartRoot: string): string[] {
 	});
 	const rows: string[] = [];
 	for (const entry of entries) {
+		// SAFETY: Node's recursive Dirent entries expose one of these parent fields.
 		const parent = entry as unknown as { parentPath?: string; path?: string };
 		const full = path.join(
 			parent.parentPath ?? parent.path ?? chartRoot,
@@ -127,6 +129,7 @@ interface SpawnStub {
 	spawnFailure?: { kind: string };
 	error?: Error;
 	outputTruncated?: boolean;
+	killedForOutputCap?: boolean;
 }
 
 /**
@@ -735,40 +738,46 @@ describe("helm-render rendered-manifest checks", () => {
 	});
 
 	// #2100: the render spawn had no output cap at all, so its "render-truncated"
-	// guard could never fire; and once capped, the cap kill arrives as a SIGTERM,
-	// which `spawnFailureKind` answers as "aborted" before the guard is reached.
+	// guard could never fire. A cap kill has different POSIX and Windows exit
+	// shapes, so this runner uses safe-spawn's ownership field instead.
 	// A chart whose render we cut short is UNCHECKED, not a runner abort.
-	it("says the render is truncated when the output cap killed helm", async () => {
-		const chart = installChart("valid-chart");
-		optIn({ helm: { renderValidation: { enabled: true } } });
-		stubSpawns({
-			render: (outputDir) => {
-				writeRendered(
-					outputDir,
-					path.join("pi-lens-render-valid", "templates", "deployment.yaml"),
-					RENDERED_DEPLOYMENT,
-				);
-				return capKilledSpawnResult({ stdout: "wrote a.yaml\nwrote b.yaml\n" });
-			},
-		});
+	it.each([
+		["POSIX", capKilledSpawnResult],
+		["Windows", capKilledOnWindowsSpawnResult],
+	] as const)(
+		"says the render is truncated when the output cap killed helm on %s",
+		async (_platform, resultFactory) => {
+			const chart = installChart("valid-chart");
+			optIn({ helm: { renderValidation: { enabled: true } } });
+			stubSpawns({
+				render: (outputDir) => {
+					writeRendered(
+						outputDir,
+						path.join("pi-lens-render-valid", "templates", "deployment.yaml"),
+						RENDERED_DEPLOYMENT,
+					);
+					return resultFactory({ stdout: "wrote a.yaml\nwrote b.yaml\n" });
+				},
+			});
 
-		const result = await helmRenderRunner.run(
-			makeRunnerCtx(
-				path.join(chart, "templates", "deployment.yaml"),
-				workspace,
-				{ kind: "yaml", projectRoot: workspace },
-			),
-		);
+			const result = await helmRenderRunner.run(
+				makeRunnerCtx(
+					path.join(chart, "templates", "deployment.yaml"),
+					workspace,
+					{ kind: "yaml", projectRoot: workspace },
+				),
+			);
 
-		expect(result.failureKind).toBeUndefined();
-		// Exactly one diagnostic, and it is the coverage gap. helm never reported
-		// an exit status here — WE stopped it — so a synthesized "helm template
-		// failed" blocking finding would blame the chart for our own cap (#1487).
-		expect(result.diagnostics).toHaveLength(1);
-		expect(result.diagnostics[0].rule).toBe("render-truncated");
-		expect(result.diagnostics[0].message).toContain("UNCHECKED");
-		expect(result.semantic).toBe("warning");
-	});
+			expect(result.failureKind).toBeUndefined();
+			// Exactly one diagnostic, and it is the coverage gap. We stopped helm, so
+			// a synthesized "helm template failed" finding would blame the chart for
+			// our own cap (#1487).
+			expect(result.diagnostics).toHaveLength(1);
+			expect(result.diagnostics[0].rule).toBe("render-truncated");
+			expect(result.diagnostics[0].message).toContain("UNCHECKED");
+			expect(result.semantic).toBe("warning");
+		},
+	);
 
 	// #2100 review F1: helm exiting 0 means it FINISHED writing --output-dir, so
 	// the tree on disk is complete and every manifest is still checkable. The
