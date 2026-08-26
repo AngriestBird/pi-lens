@@ -82,7 +82,7 @@ describe("real Git fixture governance", () => {
 			scriptFiles(path.resolve(__dirname, "../../scripts")),
 		);
 		const REMAINING_OFFENDERS = [
-			// #2163 F7 remainder: filed as a sibling issue, see PR body.
+			// #2163 F7 remainder: filed as #2177.
 			"characterize-lsp.mjs",
 			"server-capabilities.mjs",
 			"smoke-gitleaks-scratch-exclusion.mjs",
