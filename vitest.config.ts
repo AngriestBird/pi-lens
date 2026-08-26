@@ -49,6 +49,7 @@ const sharedGlobalSetup = [
 	"./tests/support/prewarm-grammars.ts",
 	// After check-build-freshness: the seed analyze runs the in-place build.
 	"./tests/support/prewarm-tool-home.ts",
+	"./tests/support/git-config-guard-setup.ts",
 ];
 
 const sharedSetupFiles = ["./tests/support/vitest-setup.ts"];
@@ -133,6 +134,12 @@ const grammarHeavyInclude = [
 	// the exact #255/#902 contention shape this project exists to bound.
 	"tests/clients/tree-sitter-call-graph.test.ts",
 	"tests/clients/module-report-call-graph.test.ts",
+	// #2074: builds several synthetic TypeScript projects end-to-end through the
+	// review-graph extractor. Measured peak RSS 1,417 MB — the same class as its
+	// review-graph siblings above (1,394-1,396 MB) — and the CI unit job was
+	// killed at exit 137 the first time this file ran as a default-project
+	// co-resident.
+	"tests/clients/review-graph/rebuild-cost.test.ts",
 ];
 
 // Tier 2 fix (#902): event-loop *occupancy* guards (measureMaxSyncBlockMs —
@@ -157,6 +164,11 @@ const grammarHeavyInclude = [
 // smaller one) has already fully drained, so the sampler only ever
 // contends with (at most) one other file in this group.
 const timingSensitiveInclude = [
+	// Real node child-process barrier race for #2173; process scheduling makes
+	// this unsuitable for the default fork storm.
+	"tests/clients/instance-registry-race.test.ts",
+	"tests/clients/instance-registry-lock.test.ts",
+	"tests/clients/review-graph-retention.test.ts",
 	"tests/clients/source-walk-occupancy.test.ts",
 	"tests/clients/source-filter-async.test.ts",
 	// Workspace-edit planning also uses the independent occupancy sampler; keep
@@ -202,6 +214,7 @@ const timingSensitiveInclude = [
 	"tests/clients/pipeline-snapshot-occupancy.test.ts",
 	"tests/clients/word-index-async-build.test.ts",
 	"tests/clients/word-index-cooperative-occupancy.test.ts",
+	"tests/clients/word-index-persist-occupancy.test.ts",
 	//   - cooperative-budget: #1215 acceptance screens — sampler-based
 	//     occupancy at 800-item scale plus the abort-latency bound.
 	"tests/clients/cooperative-budget.test.ts",

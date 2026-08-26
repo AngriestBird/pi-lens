@@ -7,6 +7,15 @@ import {
 	getSinkWriteFailures,
 	resetSinkWriteFailures,
 } from "./ndjson-logger.js";
+// #2146: pulled at READ time, never pushed. `process-singletons.ts` is a
+// dependency leaf on purpose — it cannot import this module without closing a
+// no-client-cycles cycle through instance-registry/instance-reaper — so the
+// ledger reaches IN for its reset log, the same inversion `getSinkWriteFailures`
+// above uses.
+import {
+	getProcessSingletonResets,
+	PROCESS_SINGLETON_RESET_KIND,
+} from "./process-singletons.js";
 
 // Re-exported so existing importers keep one name for the ledger's bound.
 export { LEDGER_FIELD_MAX, truncateForLedger };
@@ -16,6 +25,8 @@ export type DegradationKind =
 	| "mode-suppression"
 	| "ts-idle-eviction"
 	| "spawn-failure"
+	/** A managed-tool verification probe exceeded its retained output bound. */
+	| "installer-verification-output-truncated"
 	/** A git ls-files collection was truncated before parsing completed (#2075). */
 	| "git-tracked-ignore-truncated"
 	| "formatter-skip"
@@ -47,6 +58,14 @@ export type DegradationKind =
 	 */
 	| "lsp-warm-client-missing"
 	| "lsp-capability-skip"
+	/**
+	 * #2007: a worktree-mutating git command was declined because a live peer
+	 * session shares this dirty checkout. The subject is the checkout root, so
+	 * the ledger says WHICH shared directory is contended.
+	 */
+	| "shared-checkout-wip"
+	/** #2007: `git status` could not answer for that same decision. */
+	| "shared-checkout-probe"
 	/**
 	 * The blind review-graph read (`getCachedReviewGraph`) either DROPPED a
 	 * persisted snapshot because its git stamp names a different worktree, or
@@ -83,6 +102,8 @@ export type DegradationKind =
 	| "query-predicates-invalid"
 	| "install-retry-exhausted"
 	| "ast-grep-napi-unavailable"
+	/** An availability probe exceeded its advertised wall-clock budget (#2131). */
+	| "availability-probe-overrun"
 	/**
 	 * `loadWebTreeSitter()` (clients/deps/web-tree-sitter.js) rejected during
 	 * MODULE EVALUATION, not resolution (#1592). Node's ESM loader permanently
@@ -271,6 +292,12 @@ export type DegradationKind =
 	 * file clean, or did the parser fail to read it?".
 	 */
 	| "runner-parsed-nothing"
+	/** A runner exceeded the observed inline budget and moved to collect-later. */
+	| "runner-collect-later"
+	/** A pending runner entry was evicted at the bounded handoff cap (#2122). */
+	| "runner-findings-evicted"
+	/** A completed runner answer was stale and dropped instead of being replayed. */
+	| "runner-findings-stale"
 	/** A process-table resource sample failed or timed out; it is unknown. */
 	| "resource-sampler-query-failed"
 	/**
@@ -379,7 +406,21 @@ export type DegradationKind =
 	 * the recursion this design avoids — see `ndjson-logger.ts`'s
 	 * `writeFailures` doc comment.
 	 */
-	| "log-sink-write-failure";
+	| "log-sink-write-failure"
+	/**
+	 * A word-index posting named a file id the file table could not resolve to
+	 * a path, so the posting was dropped from a search result or a decoded hit
+	 * list (#2069). Since #2069 a posting carries an integer id rather than a
+	 * shared string, and an id is only released once the forward index has
+	 * enumerated and removed every posting naming it — so this is unreachable
+	 * by construction and means that invariant broke. Without this kind the
+	 * drop is invisible: the query returns a SHORTER result list and nothing
+	 * distinguishes it from a genuinely smaller match set (AGENTS.md shape 10,
+	 * an empty or reduced result that cannot tell clean from errored). Subject
+	 * is the orphaned id, so aggregation still answers WHICH id leaked after
+	 * the per-kind entry bound is reached.
+	 */
+	| "word-index-orphan-file-id";
 
 export interface DegradationRecord {
 	kind: unknown;
@@ -592,6 +633,21 @@ export function getDegradationSummary(): DegradationGroup[] {
 			})),
 		});
 	}
+	// #2146, same read-time fold: process-singleton resets live in the leaf
+	// module's own bounded log. One entry per family, so this group's count is
+	// the number of families this build could not adopt, never an event tally.
+	const singletonResets = getProcessSingletonResets();
+	if (singletonResets.length > 0) {
+		summary.push({
+			kind: PROCESS_SINGLETON_RESET_KIND,
+			count: singletonResets.length,
+			droppedCount: 0,
+			latestReasons: singletonResets.map((reset) => ({
+				subject: truncateForLedger(reset.family),
+				reason: truncateForLedger(reset.reason),
+			})),
+		});
+	}
 	return summary;
 }
 
@@ -651,6 +707,18 @@ export function resetDegradationLedger(): void {
 	// process-lifetime latch too — it re-arms alongside the rest of the
 	// ledger rather than surviving past the session that observed it.
 	resetSinkWriteFailures();
+	// #2146 review F3: the OTHER pulled source, `getProcessSingletonResets()`,
+	// deliberately does NOT re-arm here, and the difference from its neighbour
+	// above is the point. A sink write failure recurs — new writes fail, so
+	// clearing the tally costs nothing and a later session re-observes the
+	// problem. A process-singleton reset happens once, at module-evaluation
+	// time, and cannot recur: after it, the container holds only compatible
+	// cells. Clearing it would show the fact in the first session's
+	// `pilens_health` and hide it from every session after, which is exactly
+	// when someone reads that line. The row is bounded independently of the
+	// session (one entry per family, capped at 16), so leaving it costs a fixed
+	// handful of lines and keeps a process-scope fact visible for the process's
+	// life. Deliberate exception to catalog shape 17, not an oversight.
 }
 
 export const DEGRADATION_ENTRIES_PER_KIND = ENTRIES_PER_KIND;

@@ -50,6 +50,7 @@ export const MAX_PENDING_AUX_ENTRIES = 50;
  * forever. Overridable via `PI_LENS_LATE_AUX_REARM_TTL_MS`.
  */
 export const DEFAULT_LATE_AUX_REARM_TTL_MS = 5 * 60_000;
+export const MAX_LATE_AUX_REARMS = 8;
 
 /**
  * Read the `PI_LENS_LATE_AUX_REARM_TTL_MS` env override at call time (not
@@ -89,6 +90,7 @@ export interface PendingAuxCoverageEntry {
 	 * gate's freshness comparison.
 	 */
 	lastRearmedAtMs?: number;
+	rearmCount?: number;
 }
 
 /**
@@ -106,6 +108,15 @@ export function isPendingAuxiliaryPastRearmTtl(
 }
 
 const pending = new Map<string, PendingAuxCoverageEntry>();
+
+/**
+ * #2168: pairs evicted at the cap have no other retirement record — the
+ * drain-time reconciliation in `runtime-turn.ts` never sees them because
+ * they are gone before a drain can observe them. Counted here so the
+ * consumer can fold them into its per-turn `pairCreated`/retirement sum
+ * instead of the pair vanishing uncounted.
+ */
+let capEvictedCount = 0;
 
 function pairKey(filePath: string, serverId: string): string {
 	return `${normalizeEphemeralMapKey(filePath)}\u0000${serverId}`;
@@ -129,6 +140,7 @@ export function markPendingAuxiliaryCoverage(
 	serverIds: readonly string[],
 	markedAtMs: number = Date.now(),
 	rearmedAtMs?: number,
+	rearmCount?: number,
 ): void {
 	for (const serverId of serverIds) {
 		const key = pairKey(filePath, serverId);
@@ -149,6 +161,7 @@ export function markPendingAuxiliaryCoverage(
 							serverId,
 							markedAtMs: existing.markedAtMs,
 							lastRearmedAtMs: rearmedAtMs,
+							rearmCount: rearmCount ?? (existing.rearmCount ?? 0) + 1,
 						},
 			);
 			continue;
@@ -157,14 +170,37 @@ export function markPendingAuxiliaryCoverage(
 			key,
 			rearmedAtMs === undefined
 				? { filePath, serverId, markedAtMs }
-				: { filePath, serverId, markedAtMs, lastRearmedAtMs: rearmedAtMs },
+				: {
+						filePath,
+						serverId,
+						markedAtMs,
+						lastRearmedAtMs: rearmedAtMs,
+						rearmCount: rearmCount ?? 1,
+					},
 		);
 		while (pending.size > MAX_PENDING_AUX_ENTRIES) {
 			const oldest = pending.keys().next().value;
 			if (oldest === undefined) break;
 			pending.delete(oldest);
+			capEvictedCount += 1;
 		}
 	}
+}
+
+/** Re-arm a drained pair while carrying its ceiling count across the drain. */
+export function rearmPendingAuxiliaryCoverage(
+	pair: PendingAuxCoverageEntry,
+	rearmedAtMs: number = Date.now(),
+	refreshBaseline = false,
+): void {
+	const nextCount = (pair.rearmCount ?? 0) + 1;
+	markPendingAuxiliaryCoverage(
+		pair.filePath,
+		[pair.serverId],
+		refreshBaseline ? rearmedAtMs : pair.markedAtMs,
+		rearmedAtMs,
+		nextCount,
+	);
 }
 
 /**
@@ -190,9 +226,26 @@ export function drainPendingAuxiliaryCoverage(): PendingAuxCoverageEntry[] {
 	return drained;
 }
 
-/** Test-only: current pending pair count. */
-export function pendingAuxiliaryCoverageSizeForTests(): number {
+/** Current pending pair count for bounded reconciliation telemetry. */
+export function pendingAuxiliaryCoverageSize(): number {
 	return pending.size;
+}
+
+/** Test-only alias for the store-size assertion seam. */
+export const pendingAuxiliaryCoverageSizeForTests =
+	pendingAuxiliaryCoverageSize;
+
+/**
+ * Drain (read and reset) the cap-eviction count accumulated since the last
+ * drain. Mirrors {@link drainPendingAuxiliaryCoverage}'s consume-once shape
+ * so the turn-end consumer can fold evictions that happened between two
+ * turn ends into its reconciliation sum exactly once, never accumulating
+ * across turns.
+ */
+export function drainPendingAuxCapEvictedCount(): number {
+	const count = capEvictedCount;
+	capEvictedCount = 0;
+	return count;
 }
 
 /**
@@ -201,4 +254,5 @@ export function pendingAuxiliaryCoverageSizeForTests(): number {
  */
 export function resetPendingAuxiliaryCoverage(): void {
 	pending.clear();
+	capEvictedCount = 0;
 }

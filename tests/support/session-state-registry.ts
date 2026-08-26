@@ -62,6 +62,11 @@ import {
 	resetCascadeTierSessionState,
 } from "../../clients/lsp/cascade-tier.js";
 import {
+	_getPosixCaseSensitivityCacheSizeForTests,
+	isSameOrWithin,
+	resetLSPCaseSensitivityState,
+} from "../../clients/lsp/server.js";
+import {
 	_resetDeferredForTests,
 	isDeferredThisSession,
 	markDisposition,
@@ -71,6 +76,17 @@ import {
 	_seedReverseDepsIndexCacheForTests,
 	clearReverseDepsIndexCache,
 } from "../../clients/dispatch/integration.js";
+import {
+	classifyObservedRunner,
+	observeRunnerLatency,
+	resetObservedRunnerLatency,
+} from "../../clients/dispatch/collect-later-tier.js";
+import {
+	deferRunnerFindings,
+	pendingRunnerFindingsSize,
+	resetPendingRunnerFindings,
+} from "../../clients/dispatch/pending-runner-findings.js";
+import type { RunnerResult } from "../../clients/dispatch/types.js";
 import {
 	createAvailabilityLatch,
 	resetInstallRetryLatches,
@@ -164,6 +180,7 @@ export interface SessionStateEntry {
 
 /** Throwaway cwds a probe created, removed by {@link _resetRegistryProbeState}. */
 const scratchDirs: string[] = [];
+let observedRunnerProbeRoot: string | undefined;
 
 /** Throwaway cwd for probes that need a project root on disk. */
 function scratchCwd(): string {
@@ -217,11 +234,11 @@ export const SESSION_STATE_REGISTRY: SessionStateEntry[] = [
 	{
 		id: "opaque-mutation-scan:baselineStore+gitMemo",
 		module: "opaque-mutation-scan.ts",
-		state: "OpaqueBaselineStore byCwd map, gitRepoMemo",
+		state: "OpaqueBaselineStore byCwd map, gitRepoMemo, gitToplevelMemo",
 		policy: "session_start",
 		resetName: "resetOpaqueMutationState",
 		reason:
-			"#2000 phase 2: pending pre-command baselines are keyed cwd:generation and become unreachable when the session generation advances; and the git-worktree memo must re-probe after a session that may have seen a directory become a worktree. Without the reset both leak per session and the memo mis-answers forever.",
+			"#2000 phase 2: pending pre-command baselines are keyed cwd:generation and become unreachable when the session generation advances; and the git-worktree and toplevel memos must re-probe after a session that may have seen a directory become a worktree, or become a LINKED worktree of another (#2007). Without the reset the baselines leak per session and the memos mis-answer forever.",
 	},
 	// ── #2026 pending auxiliary coverage baselines ──────────────────────
 	{
@@ -258,7 +275,7 @@ export const SESSION_STATE_REGISTRY: SessionStateEntry[] = [
 	{
 		id: "workspace-sweep-hold:holds",
 		module: "lsp/workspace-sweep-hold.ts",
-		state: "holds, idleWaiters, nextHoldId",
+		state: "process-singleton holds, idleWaiters, nextHoldId",
 		policy: "session_start",
 		resetName: "clearWorkspaceSweepHoldForSessionStart",
 		reason:
@@ -434,7 +451,7 @@ export const SESSION_STATE_REGISTRY: SessionStateEntry[] = [
 	{
 		id: "package-manager:availabilityLatches",
 		module: "package-manager.ts",
-		state: "availabilityLatches, inFlightProbes",
+		state: "availabilityLatches and package-manager probe flights",
 		policy: "session_start",
 		resetName: "_resetPackageManagerCache",
 		reason:
@@ -574,6 +591,26 @@ export const SESSION_STATE_REGISTRY: SessionStateEntry[] = [
 			"#1570: a repair that failed transiently in an earlier session must not stay latched for the rest of the extension-host process.",
 	},
 	{
+		id: "lsp-server:posixCaseSensitivityProbe",
+		module: "lsp/server.ts",
+		state: "posixCaseInsensitiveByPath",
+		policy: "session_start",
+		resetName: "resetLSPCaseSensitivityState",
+		reason:
+			"#2052: case-sensitivity answers are cached by root, but a root can be probed before it exists. A new session may create that root, so the process must clear this memo before containment decisions continue.",
+		probe: {
+			arm: () => {
+				resetLSPCaseSensitivityState();
+				const root = "/pi-lens-session-case-probe/Project";
+				isSameOrWithin(root, `${root}/src/app.ts`, {
+					caseInsensitiveProbe: () => false,
+				});
+			},
+			isArmed: () => _getPosixCaseSensitivityCacheSizeForTests() === 0,
+			reset: () => resetLSPCaseSensitivityState(),
+		},
+	},
+	{
 		id: "lsp-workspace-diagnostics-cache:sessionClock",
 		module: "lsp/workspace-diagnostics-session.ts",
 		state: "_sessionStartedAt",
@@ -700,6 +737,59 @@ export const SESSION_STATE_REGISTRY: SessionStateEntry[] = [
 				);
 			},
 			reset: () => resetCascadeTierSessionState(),
+		},
+	},
+	{
+		id: "collect-later-tier:observedRunners",
+		module: "dispatch/collect-later-tier.ts",
+		state: "slowRunners",
+		policy: "session_start",
+		resetName: "resetObservedRunnerLatency",
+		reason:
+			"#2116: observed slow-runner decisions are scoped to the current session because a new session must re-probe its project environment rather than inherit a process-lifetime collect-later latch.",
+		probe: {
+			arm: () => {
+				observedRunnerProbeRoot = scratchCwd();
+				observeRunnerLatency({
+					projectRoot: observedRunnerProbeRoot,
+					runnerId: "session-state-probe",
+					durationMs: 5_001,
+				});
+			},
+			isArmed: () =>
+				classifyObservedRunner(
+					observedRunnerProbeRoot ?? "<missing>",
+					"session-state-probe",
+				) === "inline",
+			reset: () => resetObservedRunnerLatency(),
+		},
+	},
+	{
+		id: "pending-runner-findings:pending",
+		module: "dispatch/pending-runner-findings.ts",
+		state: "pending runner handoff array",
+		policy: "session_start",
+		resetName: "resetPendingRunnerFindings",
+		reason:
+			"#2122: deferred runner results are session-scoped and must not cross a session boundary or accumulate handlers across turn-end drains.",
+		probe: {
+			arm: () => {
+				const result: RunnerResult = {
+					status: "succeeded",
+					diagnostics: [],
+					semantic: "warning",
+				};
+				deferRunnerFindings({
+					filePath: "/probe/session-state-runner.ts",
+					cwd: "/probe",
+					projectRoot: "/probe",
+					runnerId: "session-state-probe",
+					markedAtMs: Date.now(),
+					promise: Promise.resolve(result),
+				});
+			},
+			isArmed: () => pendingRunnerFindingsSize() === 0,
+			reset: () => resetPendingRunnerFindings(),
 		},
 	},
 
@@ -847,6 +937,8 @@ export const EXEMPT_SESSION_STATE_FILES: Readonly<Record<string, string>> = {
 	"lens-config.ts":
 		"global config warn-once set, tied to the config file it warned about",
 	"instance-registry.ts": "instance-registry enablement flag",
+	"process-singletons.ts":
+		"the globalThis-keyed container for process-scope state (#2146). It owns storage, never lifecycle: every family keeps whatever boundary it already had, and each one is a PROCESS boundary rather than a session boundary. session-lifecycle.ts releases its registration at the primary's own session_shutdown (releasePrimarySession), not at session_start. startup-timing.ts's host-ready anchor is registered here as policy process_lifetime with a ForTests-only reset, because resetting it at a session boundary would fabricate host stalls from the original process boot. The instance-registry mutation tail must outlive every session by construction. A reset in this module would therefore wipe state no session boundary owns. Its only module-scope binding is the Symbol.for container key, a constant.",
 	"session-lifecycle.ts":
 		"the session_start decision seam itself — it is the boundary, not state behind it",
 
@@ -942,6 +1034,7 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	"diagnostic-line-freshness.ts": 1,
 	"diagnostics-publish.ts": 1,
 	"dispatch/dispatcher.ts": 1,
+	"dispatch/collect-later-tier.ts": 1,
 	// #1899 removed the dead `neighborTouchCache` (10 → 9).
 	"dispatch/integration.ts": 9,
 	"dispatch/lazy.ts": 0,
@@ -956,7 +1049,10 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	"format-events-publish.ts": 0,
 	"formatters.ts": 5,
 	"generated-artifacts.ts": 2,
-	"git-guard.ts": 1,
+	// #2007 hoisted git's global-option table to a module-level `new Set`
+	// (1 → 2). It is an import-time frozen lookup with no session lifetime —
+	// SWEEP_HEURISTIC_LIMITS item 5, not state that must re-arm.
+	"git-guard.ts": 2,
 	"git-tracked-ignore.ts": 3,
 	"installer/index.ts": 12,
 	"instance-registry.ts": 0,
@@ -975,20 +1071,25 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	// LEGAL_ORDINARY_PORCELAIN_STATUSES. Both are frozen-by-convention lookup
 	// tables of Git's documented porcelain matrix — import-time constants with
 	// no session identity, so they need no reset (SWEEP_HEURISTIC_LIMITS item 5).
-	"opaque-mutation-scan.ts": 3,
+	// #2007 added `gitToplevelMemo`, the worktree-identity cache (3 → 4). It
+	// is registered above and cleared by the same `resetOpaqueMutationState`.
+	"opaque-mutation-scan.ts": 4,
 	"lsp/pending-aux-coverage.ts": 1,
 	"lsp/jvm-runtime.ts": 0,
 	"lsp/session-roots.ts": 1,
 	"lsp/spawn-history.ts": 1,
-	"lsp/server.ts": 5,
+	"lsp/server.ts": 6,
 	"lsp/workspace-diagnostics-cache.ts": 1,
-	"lsp/workspace-sweep-hold.ts": 1,
+	"lsp/workspace-sweep-hold.ts": 0,
 	"mcp/analyze.ts": 1,
 	"mcp/session.ts": 2,
 	"module-report-lsp.ts": 1,
 	"ndjson-logger.ts": 0,
-	"package-manager.ts": 2,
+	"package-manager.ts": 1,
 	"project-changes.ts": 0,
+	// #2146: the container key is a Symbol.for constant, so the scan sees no
+	// mutable module-scope container here.
+	"process-singletons.ts": 0,
 	"project-lens-config.ts": 3,
 	"project-report.ts": 1,
 	"project-scale.ts": 0,
@@ -1008,6 +1109,8 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	// GIT_GLOBAL_OPTIONS_WITH_VALUE — command-shape vocabulary, not state.
 	"runtime-tool-result.ts": 5,
 	"safe-spawn.ts": 3,
+	// #2146 moved the four registration fields onto the process singleton, so the
+	// scan sees no module-scope container here either.
 	"session-lifecycle.ts": 0,
 	"sgconfig.ts": 2,
 	"slow-fs.ts": 0,
@@ -1018,7 +1121,9 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	"tui-fit.ts": 0,
 	"warm-attach.ts": 0,
 	"widget-state.ts": 2,
-	"word-index.ts": 3,
+	// #2068 added the per-index dirty-file set; it is process-local wire-cache
+	// state and is cleared by serialization, so it needs no session reset.
+	"word-index.ts": 4,
 	"workspace-topology.ts": 2,
 	"zizmor-config.ts": 0,
 };

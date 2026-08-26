@@ -177,6 +177,33 @@ describe("runner-helpers availability checker", () => {
 		);
 
 		expect(resolved).toEqual({ cmd: "bundle", args: ["exec", "rubocop"] });
+		expect(
+			vi.mocked(safeSpawnMod.safeSpawnAsync).mock.calls[0]?.[2],
+		).toMatchObject({
+			input: "",
+		});
+	});
+
+	it("closes stdin on the fallback verification probe", async () => {
+		const safeSpawnMod = await import("../../../../clients/safe-spawn.js");
+		const installerMod = await import("../../../../clients/installer/index.js");
+		vi.mocked(installerMod.isSpawnableCommand).mockResolvedValue(true);
+		vi.mocked(safeSpawnMod.safeSpawnAsync)
+			.mockResolvedValueOnce({ stdout: "", stderr: "rejected", status: 1 })
+			.mockResolvedValueOnce({ stdout: "tool 1.0.0", stderr: "", status: 0 });
+
+		await expect(
+			resolveCommandArgsWithInstallFallback(
+				{ cmd: "tool", args: [] },
+				"tool",
+				process.cwd(),
+			),
+		).resolves.toEqual({ cmd: "tool", args: [] });
+		expect(
+			vi.mocked(safeSpawnMod.safeSpawnAsync).mock.calls[1]?.[2],
+		).toMatchObject({
+			input: "",
+		});
 	});
 
 	it("does not auto-install config-first tools", async () => {
@@ -246,6 +273,110 @@ describe("runner-helpers availability checker", () => {
 		const checker = createAvailabilityChecker("zig", ".exe", ["version"]);
 		expect(await checker.isAvailableAsync(process.cwd())).toBe(true);
 		expect(probedArgs).toEqual(["version"]);
+		expect(
+			vi.mocked(safeSpawnMod.safeSpawnAsync).mock.calls.at(-1)?.[2],
+		).toMatchObject({
+			input: "",
+		});
+	});
+
+	it("forwards custom verification args to managed-shim verification", async () => {
+		const env = setupTestEnvironment("pi-lens-managed-check-args-");
+		try {
+			const managedHome = path.join(env.tmpDir, "managed-home");
+			vi.stubEnv("PI_LENS_HOME", managedHome);
+			fs.mkdirSync(path.join(managedHome, "tools", "node_modules", ".bin"), {
+				recursive: true,
+			});
+			const managedBinary = path.join(
+				managedHome,
+				"tools",
+				"node_modules",
+				".bin",
+				"markdownlint-cli2",
+			);
+			fs.writeFileSync(managedBinary, "#!/bin/sh\nexit 0\n");
+			const installerMod =
+				await import("../../../../clients/installer/index.js");
+			await createVenvFinder("markdownlint-cli2", ".cmd", ["--no-globs", "-"])(
+				env.tmpDir,
+			);
+			expect(installerMod.verifyToolBinary).toHaveBeenCalledWith(
+				managedBinary,
+				undefined,
+				expect.any(Function),
+				expect.any(Number),
+				["--no-globs", "-"],
+			);
+		} finally {
+			vi.unstubAllEnvs();
+			env.cleanup();
+		}
+	});
+
+	it("keys the checker flight by code-unit order, not locale (#2155, #2165)", async () => {
+		const safeSpawnMod = await import("../../../../clients/safe-spawn.js");
+		let releaseProbe!: (value: unknown) => void;
+		const pendingProbe = new Promise((resolve) => {
+			releaseProbe = resolve;
+		});
+		vi.mocked(safeSpawnMod.safeSpawnAsync).mockReturnValue(
+			pendingProbe as never,
+		);
+
+		// Two independent checker instances probing the SAME command in the
+		// SAME cwd with the SAME env content share one flight-registry key
+		// space (module-scoped `checkerProbeFlights`). Their env objects here
+		// carry identical entries, so a locale-independent key must join them
+		// into one physical probe regardless of what `localeCompare` says.
+		const env = { AAA: "1", BBB: "2" };
+		const checkerA = createAvailabilityChecker(
+			"dupe-locale-tool",
+			"",
+			["--version"],
+			{ environment: async () => ({ ...env }) },
+		);
+		const checkerB = createAvailabilityChecker(
+			"dupe-locale-tool",
+			"",
+			["--version"],
+			{ environment: async () => ({ ...env }) },
+		);
+
+		const realLocaleCompare = String.prototype.localeCompare;
+		try {
+			// Simulate "locale 1": AAA sorts before BBB.
+			String.prototype.localeCompare = function (this: string, that: string) {
+				if (this === "AAA" && that === "BBB") return -1;
+				if (this === "BBB" && that === "AAA") return 1;
+				return realLocaleCompare.call(this, that);
+			};
+			const first = checkerA.isAvailableAsync(process.cwd());
+			await vi.waitFor(() =>
+				expect(safeSpawnMod.safeSpawnAsync).toHaveBeenCalledTimes(1),
+			);
+
+			// Simulate "locale 2": the same two keys sort in the OPPOSITE order.
+			// A real second process under a different OS locale can see exactly
+			// this. `env` itself is untouched — only the comparator "moved".
+			String.prototype.localeCompare = function (this: string, that: string) {
+				if (this === "AAA" && that === "BBB") return 1;
+				if (this === "BBB" && that === "AAA") return -1;
+				return realLocaleCompare.call(this, that);
+			};
+			const second = checkerB.isAvailableAsync(process.cwd());
+			// Let the second call's async prefix (findCommand's fs walk) settle
+			// before asserting it did or didn't start a second physical probe.
+			await new Promise((resolve) => setTimeout(resolve, 100));
+
+			expect(safeSpawnMod.safeSpawnAsync).toHaveBeenCalledTimes(1);
+
+			releaseProbe({ stdout: "1.0.0", stderr: "", status: 0 });
+			expect(await first).toBe(true);
+			expect(await second).toBe(true);
+		} finally {
+			String.prototype.localeCompare = realLocaleCompare;
+		}
 	});
 
 	it("does not let an old in-flight probe delete a newer generation", async () => {
@@ -1121,6 +1252,31 @@ describe("compensating row: the memo burns only on a genuine correction (#1657)"
 			(record) => record.metadata.verdict === "available",
 		);
 		expect(available).toHaveLength(2);
+	});
+
+	it("reset starts a fresh flight instead of joining the stale one", async () => {
+		const safeSpawnMod = await import("../../../../clients/safe-spawn.js");
+		const releases: Array<(value: unknown) => void> = [];
+		vi.mocked(safeSpawnMod.safeSpawnAsync).mockImplementation(
+			() =>
+				new Promise((resolve) =>
+					releases.push(resolve as (value: unknown) => void),
+				),
+		);
+		const checker = createAvailabilityChecker("reset-flight-tool");
+		const first = checker.isAvailableAsync(process.cwd());
+		await vi.waitFor(() =>
+			expect(safeSpawnMod.safeSpawnAsync).toHaveBeenCalledTimes(1),
+		);
+		checker.reset();
+		const second = checker.isAvailableAsync(process.cwd());
+		await vi.waitFor(() =>
+			expect(safeSpawnMod.safeSpawnAsync).toHaveBeenCalledTimes(2),
+		);
+
+		releases[0]?.({ stdout: "", stderr: "", status: 0 });
+		releases[1]?.({ stdout: "", stderr: "", status: 0 });
+		expect(await Promise.all([first, second])).toEqual([true, true]);
 	});
 
 	/**

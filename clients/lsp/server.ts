@@ -7,7 +7,7 @@
  * - Platform-specific handling
  */
 
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, statSync } from "node:fs";
 import { access, readFile, readdir, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -55,6 +55,7 @@ import { createLombokJdtlsArgs } from "./lombok.js";
 import { resolveJavaRuntimeEnv } from "./jvm-runtime.js";
 import { normalizeMapKey } from "./path-utils.js";
 import { getRubyVersionDirNamesSync } from "./ruby-drive-dirs.js";
+import { getProcessSingleton } from "../process-singletons.js";
 
 // --- Types ---
 
@@ -110,6 +111,45 @@ const PROJECT_BOUNDARY_MARKERS = [
 // process (not once per session). Keep the root-boundary marker below aligned
 // with FALLBACK_PROJECT_MARKERS, the shared fallback root-policy marker set.
 const loggedRootCeilingClamps = new Set<string>();
+const posixCaseInsensitiveByPath = new Map<string, boolean>();
+
+export type IsSameOrWithinDeps = {
+	caseInsensitiveProbe?: (root: string) => boolean;
+};
+
+function posixFilesystemIsCaseInsensitive(root: string): boolean {
+	const resolved = path.resolve(root);
+	const cached = posixCaseInsensitiveByPath.get(resolved);
+	if (cached !== undefined) return cached;
+	if (!existsSync(resolved)) {
+		return false;
+	}
+	const name = path.basename(resolved);
+	const alternate =
+		name.toLowerCase() === name ? name.toUpperCase() : name.toLowerCase();
+	let insensitive = false;
+	const alternatePath = path.join(path.dirname(resolved), alternate);
+	if (alternate !== name && existsSync(alternatePath)) {
+		try {
+			const actual = statSync(resolved);
+			const alternateStat = statSync(alternatePath);
+			insensitive =
+				actual.dev === alternateStat.dev && actual.ino === alternateStat.ino;
+		} catch {
+			insensitive = false;
+		}
+	}
+	posixCaseInsensitiveByPath.set(resolved, insensitive);
+	return insensitive;
+}
+
+export function resetLSPCaseSensitivityState(): void {
+	posixCaseInsensitiveByPath.clear();
+}
+
+export function _getPosixCaseSensitivityCacheSizeForTests(): number {
+	return posixCaseInsensitiveByPath.size;
+}
 
 /**
  * Path-shape-aware containment test: is `candidate` the same path as
@@ -122,12 +162,30 @@ const loggedRootCeilingClamps = new Set<string>();
  * paths (shape 2 / #1150): `path.isAbsolute("C:\\repo")` is false on POSIX, so
  * a host-default comparator silently mis-answers a win32 path on Linux CI.
  */
-export function isSameOrWithin(ancestor: string, candidate: string): boolean {
+export function isSameOrWithin(
+	ancestor: string,
+	candidate: string,
+	deps: IsSameOrWithinDeps = {},
+): boolean {
 	const windowsShaped = isWindowsPath(ancestor) || isWindowsPath(candidate);
 	const pathApi = windowsShaped ? path.win32 : path;
+	const resolvedAncestor = pathApi.resolve(ancestor);
+	const resolvedCandidate = pathApi.resolve(candidate);
+	let caseInsensitive = false;
+	if (!windowsShaped) {
+		if (deps.caseInsensitiveProbe) {
+			const cached = posixCaseInsensitiveByPath.get(resolvedAncestor);
+			caseInsensitive = cached ?? deps.caseInsensitiveProbe(resolvedAncestor);
+			if (cached === undefined) {
+				posixCaseInsensitiveByPath.set(resolvedAncestor, caseInsensitive);
+			}
+		} else {
+			caseInsensitive = posixFilesystemIsCaseInsensitive(resolvedAncestor);
+		}
+	}
 	const relative = pathApi.relative(
-		pathApi.resolve(ancestor),
-		pathApi.resolve(candidate),
+		caseInsensitive ? resolvedAncestor.toLowerCase() : resolvedAncestor,
+		caseInsensitive ? resolvedCandidate.toLowerCase() : resolvedCandidate,
 	);
 	return (
 		relative === "" ||
@@ -1310,21 +1368,30 @@ async function findAncestorFileAmong(
  * Svelte). Without this guard an offline or partial install re-runs a 120 s
  * forced reinstall on every spawn.
  *
- * The guard is a plain module-level flag, so without an explicit re-arm it
+ * The guard is process-singleton state, so without an explicit re-arm it
  * would latch for the whole extension-host process — a repair that failed
  * once (transient registry hiccup) would stay unrepairable for every later
  * session in that process. `resetClassicTsRepairGuard` re-arms it; callers
  * wire that into `session_start` alongside the other per-session resets
  * (#1570).
  */
-let classicTsRepairAttempted = false;
+const CLASSIC_TS_REPAIR_FAMILY = "lsp.classic-ts-repair-guard";
+const CLASSIC_TS_REPAIR_VERSION = 1;
+
+function classicTsRepairState(): { attempted: boolean } {
+	return getProcessSingleton(
+		CLASSIC_TS_REPAIR_FAMILY,
+		CLASSIC_TS_REPAIR_VERSION,
+		() => ({ attempted: false }),
+	);
+}
 
 /** Re-arm the classic-repair guard so a new session gets its own attempt. */
 export function resetClassicTsRepairGuard(): void {
-	classicTsRepairAttempted = false;
+	classicTsRepairState().attempted = false;
 }
 
-/** Test hook — clears the per-process classic-repair guard. */
+/** Test hook — clears the process-singleton classic-repair guard. */
 export function _resetClassicTsRepairForTests(): void {
 	resetClassicTsRepairGuard();
 }
@@ -1442,7 +1509,7 @@ async function findTsserverPath(
 		discoveredTsserver ||
 		!discoveredTsc ||
 		!installAllowed ||
-		classicTsRepairAttempted
+		classicTsRepairState().attempted
 	) {
 		return discoveredTsserver;
 	}
@@ -1457,7 +1524,7 @@ async function findTsserverPath(
 	// An older managed tree took `latest` before the registry pinned the classic
 	// compiler. Reinstall the pinned version once so that tree self-heals,
 	// without deleting user or project-local TypeScript installations.
-	classicTsRepairAttempted = true;
+	classicTsRepairState().attempted = true;
 	logSessionStart(
 		`lsp typescript: managed compiler resolved to TypeScript ${discoveredVersion.version}, which ships no tsserver.js; reinstalling pinned classic fallback`,
 	);

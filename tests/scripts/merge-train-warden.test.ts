@@ -6,6 +6,7 @@ import {
 	decideActions,
 	fetchOpenPullRequests,
 	MAX_PAGES,
+	PAGE_SIZE,
 	RED_CI_LABEL,
 	runWarden,
 } from "../../scripts/lib/merge-train-warden.mjs";
@@ -521,15 +522,124 @@ describe("merge-train warden GraphQL fetch + REST apply (#1844)", () => {
 		expect(errors[0]).toContain("network down");
 	});
 
-	// Review round 1, F8: pin MAX_PAGES with a fixture that counts calls
-	// against an always-hasNextPage response, so lowering/raising the loop
-	// bound independently of the exported constant turns this red.
-	it("stops paginating at exactly MAX_PAGES calls when every page claims hasNextPage", async () => {
-		const { fetcher, calls } = fakeGithub({
-			"POST /graphql": graphqlPage([], true, "cursor"),
-		});
-		await fetchOpenPullRequests(fetcher, "acme", "repo");
+	// #2134: a full final page with hasNextPage is not an exhausted result.
+	// The page-aware fixture makes a cursor bug visible instead of returning
+	// the same page for every request.
+	it("records truncation when MAX_PAGES pages still claim another page", async () => {
+		const pages = Array.from({ length: MAX_PAGES }, (_, pageIndex) =>
+			graphqlPage(
+				Array.from({ length: PAGE_SIZE }, (_, itemIndex) =>
+					prNode({ number: pageIndex * PAGE_SIZE + itemIndex + 1 }),
+				),
+				true,
+				`cursor-${pageIndex}`,
+			),
+		);
+		const calls: unknown[] = [];
+		const fetcher = async (_url: string, init?: { body?: string }) => {
+			const body = JSON.parse(init?.body ?? "{}");
+			calls.push(body);
+			const after = body.variables?.after;
+			const pageIndex = after ? Number(after.replace("cursor-", "")) + 1 : 0;
+			return { ok: true, status: 200, json: async () => pages[pageIndex] };
+		};
+		const result = await fetchOpenPullRequests(fetcher, "acme", "repo");
 		expect(calls).toHaveLength(MAX_PAGES);
+		expect(result.prs).toHaveLength(MAX_PAGES * PAGE_SIZE);
+		expect(result.errors).toEqual([
+			`GraphQL pagination truncated after ${MAX_PAGES} pages while hasNextPage=true`,
+		]);
+	});
+
+	// The page limit is healthy when the final page exhausts the connection.
+	// Hoisting the truncation guard above the hasNextPage break must make this
+	// complete population report a false error.
+	it("accepts MAX_PAGES full pages when the last page is exhausted", async () => {
+		const pages = Array.from({ length: MAX_PAGES }, (_, pageIndex) =>
+			graphqlPage(
+				Array.from({ length: PAGE_SIZE }, (_, itemIndex) =>
+					prNode({ number: pageIndex * PAGE_SIZE + itemIndex + 1 }),
+				),
+				pageIndex < MAX_PAGES - 1,
+				`cursor-${pageIndex}`,
+			),
+		);
+		const calls: unknown[] = [];
+		const fetcher = async (_url: string, init?: { body?: string }) => {
+			const body = JSON.parse(init?.body ?? "{}");
+			calls.push(body);
+			const after = body.variables?.after;
+			const pageIndex = after ? Number(after.replace("cursor-", "")) + 1 : 0;
+			return { ok: true, status: 200, json: async () => pages[pageIndex] };
+		};
+		const result = await fetchOpenPullRequests(fetcher, "acme", "repo");
+		expect(calls).toHaveLength(MAX_PAGES);
+		expect(result.prs).toHaveLength(MAX_PAGES * PAGE_SIZE);
+		expect(result.errors).toEqual([]);
+	});
+
+	// #2150: a repeating/null endCursor must not make the collector replay a
+	// page. The error keeps the partial result visibly truncated.
+	it("stops on a non-advancing cursor and keeps one copy of the PR", async () => {
+		const { fetcher, calls } = fakeGithub({
+			"POST /graphql": graphqlPage([prNode()], true, null),
+		});
+		const result = await fetchOpenPullRequests(fetcher, "acme", "repo");
+		expect(calls).toHaveLength(1);
+		expect(result.prs).toHaveLength(1);
+		expect(result.errors).toEqual([
+			"GraphQL pagination truncated because cursor did not advance",
+		]);
+	});
+
+	it("does not return or process the same PR twice across distinct pages", async () => {
+		const pages = [
+			graphqlPage(
+				[prNode({ number: 7 }), prNode({ number: 8 })],
+				true,
+				"cursor-1",
+			),
+			graphqlPage(
+				[prNode({ number: 8 }), prNode({ number: 9 })],
+				false,
+				"cursor-2",
+			),
+		];
+		const calls: unknown[] = [];
+		const fetcher = async (_url: string, init?: { body?: string }) => {
+			const body = JSON.parse(init?.body ?? "{}");
+			calls.push(body);
+			return {
+				ok: true,
+				status: 200,
+				json: async () => pages[calls.length - 1],
+			};
+		};
+		const result = await fetchOpenPullRequests(fetcher, "acme", "repo");
+		expect(result.prs).toHaveLength(3);
+		expect(result.prs.map(({ number }) => number)).toEqual([7, 8, 9]);
+		expect(result.errors).toEqual([
+			"GraphQL pagination repeated PR #8 across pages; collection may be incomplete",
+		]);
+	});
+
+	it("decides actions once when pagination repeats a PR", async () => {
+		const { fetcher, calls } = fakeGithub({
+			"POST /graphql": graphqlPage([prNode()], true, null),
+		});
+		await runWarden({ fetcher, owner: "acme", repo: "repo" });
+		expect(
+			calls.filter(
+				({ method, url }) =>
+					method === "POST" && url.endsWith("/issues/7/labels"),
+			),
+		).toHaveLength(1);
+		expect(
+			calls.filter(
+				({ method, url }) =>
+					method === "POST" && url.endsWith("/issues/7/comments"),
+			),
+		).toHaveLength(1);
 	});
 
 	it("applyAction issues the exact REST call for each action type", async () => {

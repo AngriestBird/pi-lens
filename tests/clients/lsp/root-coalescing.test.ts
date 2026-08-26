@@ -9,8 +9,18 @@ import {
 	initLSPConfig,
 	resetLSPConfigStateForTests,
 } from "../../../clients/lsp/config.js";
-import { enforceLspRootCeiling } from "../../../clients/lsp/server.js";
+import {
+	enforceLspRootCeiling,
+	_getPosixCaseSensitivityCacheSizeForTests,
+	isSameOrWithin,
+	resetLSPCaseSensitivityState,
+} from "../../../clients/lsp/server.js";
 import { normalizeMapKey } from "../../../clients/path-utils.js";
+import {
+	isOutsideAllSessionRoots,
+	registerSessionRoot,
+	shouldInitializeSessionRoot,
+} from "../../../clients/lsp/session-roots.js";
 import { removeTempDirSync } from "../test-utils.js";
 
 process.env.PI_LENS_TEST_MODE = "1";
@@ -27,6 +37,25 @@ type RootPolicyHarness = {
 };
 
 const dirs: string[] = [];
+
+function hasCaseSensitiveFilesystem(): boolean {
+	const probe = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-case-fs-"));
+	try {
+		const upper = path.join(probe, "Project");
+		const lower = path.join(probe, "project");
+		fs.mkdirSync(upper);
+		try {
+			fs.mkdirSync(lower);
+		} catch {
+			return false;
+		}
+		return fs.realpathSync(upper) !== fs.realpathSync(lower);
+	} finally {
+		removeTempDirSync(probe);
+	}
+}
+
+const CASE_SENSITIVE_FILESYSTEM = hasCaseSensitiveFilesystem();
 
 afterEach(() => {
 	for (const dir of dirs.splice(0)) removeTempDirSync(dir);
@@ -130,6 +159,108 @@ describe("LSP per-server nested-root coalescing (#1373)", () => {
 		await expect(
 			service.resolveServerRoot(server, path.join(projectA, "a.ts")),
 		).resolves.toBe(projectA);
+	});
+
+	// #2052 R1: the registry cap must not make an old root permanently foreign.
+	it("allows an evicted root to be registered again", () => {
+		resetLSPConfigStateForTests();
+		const roots = [
+			...Array.from({ length: 129 }, (_, index) =>
+				path.join(os.tmpdir(), `pi-lens-eviction-${index}`),
+			),
+		];
+		const readyRoots = new Set<string>();
+		for (const root of roots) {
+			registerSessionRoot(root);
+			readyRoots.add(path.resolve(root));
+		}
+		expect(isOutsideAllSessionRoots(roots[0]!)).toBe(true);
+		const firstRootStillServed =
+			shouldInitializeSessionRoot(roots[0]!, readyRoots) === true;
+		expect(
+			firstRootStillServed,
+			`firstRootStillServed=${firstRootStillServed}`,
+		).toBe(true);
+		registerSessionRoot(roots[0]!);
+		expect(isOutsideAllSessionRoots(path.join(roots[0]!, "app.ts"))).toBe(
+			false,
+		);
+		expect(isOutsideAllSessionRoots(path.join(roots[0]!, "app.ts"))).toBe(
+			false,
+		);
+	});
+
+	it("matches the case behavior of the fixture filesystem", () => {
+		const probe = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-case-probe-"));
+		try {
+			const actualCaseInsensitive = fs.existsSync(
+				path.join(path.dirname(probe), path.basename(probe).toUpperCase()),
+			);
+			const actualRoot = path.join(probe, "Project");
+			fs.mkdirSync(path.join(actualRoot, "src"), { recursive: true });
+			const aliasedRoot = path.join(probe, "project");
+			expect(
+				isSameOrWithin(actualRoot, path.join(aliasedRoot, "src", "app.ts")),
+			).toBe(actualCaseInsensitive);
+			expect(
+				isSameOrWithin(actualRoot, path.join(actualRoot, "src", "app.ts")),
+			).toBe(true);
+		} finally {
+			removeTempDirSync(probe);
+		}
+	});
+
+	it.skipIf(!CASE_SENSITIVE_FILESYSTEM)(
+		"does not coalesce distinct case-variant directories",
+		() => {
+			const base = fs.mkdtempSync(
+				path.join(os.tmpdir(), "pi-lens-case-distinct-"),
+			);
+			dirs.push(base);
+			const actualRoot = path.join(base, "Project");
+			const distinctRoot = path.join(base, "project");
+			fs.mkdirSync(path.join(actualRoot, "src"), { recursive: true });
+			fs.mkdirSync(path.join(distinctRoot, "src"), { recursive: true });
+
+			// On a case-sensitive filesystem, the sibling's existence proves that
+			// it is a different directory, not that the filesystem folds case.
+			expect(
+				isSameOrWithin(actualRoot, path.join(distinctRoot, "src", "app.ts")),
+			).toBe(false);
+		},
+	);
+
+	it("honors an injected case-insensitive probe", () => {
+		const root = "/pi-lens-case-forced/Project";
+		const caseInsensitiveProbe = vi.fn(() => true);
+		expect(
+			isSameOrWithin(root, "/pi-lens-case-forced/project/src/app.ts", {
+				caseInsensitiveProbe,
+			}),
+		).toBe(true);
+		expect(caseInsensitiveProbe).toHaveBeenCalledWith(path.resolve(root));
+	});
+
+	it("honors an injected case-sensitive probe", () => {
+		const root = "/pi-lens-case-outcome/Project";
+		const caseInsensitiveProbe = vi.fn(() => false);
+		const result = isSameOrWithin(
+			root,
+			"/pi-lens-case-outcome/project/src/app.ts",
+			{ caseInsensitiveProbe },
+		);
+		expect(result).toBe(CASE_SENSITIVE_FILESYSTEM ? false : true);
+		expect(caseInsensitiveProbe).toHaveBeenCalledOnce();
+	});
+
+	it("clears the case-sensitivity probe cache at the session reset", () => {
+		const root = "/pi-lens-case-reset/Project";
+		isSameOrWithin(root, `${root}/src/app.ts`, {
+			caseInsensitiveProbe: () => false,
+		});
+		expect(_getPosixCaseSensitivityCacheSizeForTests()).toBeGreaterThan(0);
+		resetLSPCaseSensitivityState();
+		expect(_getPosixCaseSensitivityCacheSizeForTests()).toBe(0);
 	});
 
 	// #2052 fix round 1 (F1). An EMPTY registry means initLSPConfig never ran.

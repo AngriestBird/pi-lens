@@ -4,8 +4,13 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { CacheManager } from "../../clients/cache-manager.js";
 import { readChangesSince } from "../../clients/project-changes.js";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
+import {
+	registerPrimarySession,
+	releasePrimarySession,
+} from "../../clients/session-lifecycle.js";
 import { handleToolCall } from "../../clients/runtime-tool-call.js";
 import { handleToolResult } from "../../clients/runtime-tool-result.js";
+import { getProjectIgnoreMatcher } from "../../clients/file-utils.js";
 import {
 	getVerifiedPathAttributionGuessCount,
 	resetVerifiedPathAttributionGuessCount,
@@ -23,6 +28,51 @@ const notifyExternalFileChange = vi.hoisted(() => vi.fn(async () => undefined));
 vi.mock("../../clients/lsp/index.js", () => ({ notifyExternalFileChange }));
 
 describe("bash grep searchReads registration", () => {
+	it("invalidates the ignore matcher through handleToolResult", async () => {
+		const { runPipeline } = await import("../../clients/pipeline.js");
+		vi.mocked(runPipeline).mockResolvedValue({
+			output: "",
+			hasBlockers: false,
+			isError: false,
+			fileModified: false,
+		});
+		const env = setupTestEnvironment("pi-lens-2071-tool-result-");
+		try {
+			const nested = path.join(env.tmpDir, "packages", "app");
+			fs.mkdirSync(nested, { recursive: true });
+			const ignoredPath = path.join(nested, "generated.ts");
+			const ignorePath = path.join(nested, ".gitignore");
+			fs.writeFileSync(ignorePath, "generated.ts\n");
+			const matcher = getProjectIgnoreMatcher(env.tmpDir);
+			expect(matcher.isIgnored(ignoredPath)).toBe(true);
+
+			fs.writeFileSync(ignorePath, "!generated.ts\n");
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			await handleToolResult({
+				event: {
+					toolName: "write",
+					input: { path: ignorePath },
+					content: [{ type: "text", text: "written" }],
+				},
+				getFlag: () => false,
+				dbg: () => {},
+				runtime,
+				cacheManager: { addModifiedRange: () => {}, readTurnState: () => ({}) },
+				biomeClient: {},
+				ruffClient: {},
+				metricsClient: {},
+				resetLSPService: () => {},
+				agentBehaviorRecord: () => [],
+				formatBehaviorWarnings: () => "",
+			} as any);
+
+			expect(matcher.isIgnored(ignoredPath)).toBe(false);
+		} finally {
+			env.cleanup();
+		}
+	});
+
 	it("registers bash reads only from a successful tool result", async () => {
 		const env = setupTestEnvironment("pi-lens-bash-read-result-");
 		try {
@@ -1614,6 +1664,98 @@ describe("runtime-tool-result inline behavior warnings", () => {
 				reason: "pipeline_crash",
 			});
 		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("does not let a secondary pipeline crash reset the primary fleet", async () => {
+		const { runPipeline } = await import("../../clients/pipeline.js");
+		vi.mocked(runPipeline).mockRejectedValue(new Error("secondary boom"));
+
+		const env = setupTestEnvironment("pi-lens-runtime-tool-secondary-crash-");
+		try {
+			const filePath = path.join(env.tmpDir, "src", "app.ts");
+			fs.mkdirSync(path.dirname(filePath), { recursive: true });
+			fs.writeFileSync(filePath, "export const x = 1;\n");
+			registerPrimarySession({}, "primary-session", env.tmpDir);
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			runtime.setSessionLifecycle({ sessionId: "secondary-session" });
+			runtime.beginTurn();
+			const resetLSPService = vi.fn();
+
+			await handleToolResult({
+				event: {
+					toolName: "edit",
+					input: { path: filePath },
+					details: { diff: "+  1 export const x = 2;" },
+					content: [{ type: "text", text: "base" }],
+				},
+				getFlag: () => false,
+				dbg: () => {},
+				runtime,
+				cacheManager: new CacheManager(false),
+				biomeClient: {},
+				ruffClient: {},
+				testRunnerClient: {},
+				metricsClient: {},
+				resetLSPService,
+				agentBehaviorRecord: () => [],
+				formatBehaviorWarnings: () => "",
+			} as any);
+
+			expect(resetLSPService).not.toHaveBeenCalled();
+		} finally {
+			releasePrimarySession();
+			env.cleanup();
+		}
+	});
+
+	// R2-F2 (#2157 fix round 2): the primary-direction mirror of the secondary
+	// test above — a crash belonging to the registered primary must still
+	// reset its own fleet.
+	it("lets a primary session's own pipeline crash reset its fleet", async () => {
+		const { runPipeline } = await import("../../clients/pipeline.js");
+		vi.mocked(runPipeline).mockRejectedValue(new Error("primary boom"));
+
+		const env = setupTestEnvironment("pi-lens-runtime-tool-primary-crash-");
+		try {
+			const filePath = path.join(env.tmpDir, "src", "app.ts");
+			fs.mkdirSync(path.dirname(filePath), { recursive: true });
+			fs.writeFileSync(filePath, "export const x = 1;\n");
+			registerPrimarySession({}, "primary-session", env.tmpDir);
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			runtime.setSessionLifecycle({ sessionId: "primary-session" });
+			runtime.beginTurn();
+			const resetLSPService = vi.fn();
+
+			await handleToolResult({
+				event: {
+					toolName: "edit",
+					input: { path: filePath },
+					details: { diff: "+  1 export const x = 2;" },
+					content: [{ type: "text", text: "base" }],
+				},
+				getFlag: () => false,
+				dbg: () => {},
+				runtime,
+				cacheManager: new CacheManager(false),
+				biomeClient: {},
+				ruffClient: {},
+				testRunnerClient: {},
+				metricsClient: {},
+				resetLSPService,
+				agentBehaviorRecord: () => [],
+				formatBehaviorWarnings: () => "",
+			} as any);
+
+			expect(resetLSPService).toHaveBeenCalledWith({
+				fast: true,
+				reason: "pipeline_crash",
+			});
+		} finally {
+			releasePrimarySession();
 			env.cleanup();
 		}
 	});

@@ -16,7 +16,7 @@ const runUrl =
 	process.env.GITHUB_SERVER_URL && process.env.GITHUB_RUN_ID
 		? `${process.env.GITHUB_SERVER_URL}/${repository}/actions/runs/${process.env.GITHUB_RUN_ID}`
 		: undefined;
-const { candidates, truncatedCommits, priorityCoverage } =
+const { candidates, truncatedCommits, scannedOpenItems, priorityCoverage } =
 	await detectStaleOpenIssues({
 		fetcher: defaultFetcher(token),
 		repository,
@@ -24,6 +24,7 @@ const { candidates, truncatedCommits, priorityCoverage } =
 const summary = formatSummary(candidates, {
 	runUrl,
 	truncatedCommits,
+	scannedOpenItems,
 	priorityCoverage,
 });
 console.log(summary);

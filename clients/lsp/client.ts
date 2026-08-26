@@ -31,6 +31,7 @@ import {
 } from "../deps/vscode-jsonrpc.js";
 import { logExtension } from "../extension-log.js";
 import { recordLspChild, removeLspChild } from "../instance-registry.js";
+import { workspaceDiagnosticsCacheSessionStart } from "./workspace-diagnostics-session.js";
 import { logLatency } from "../latency-logger.js";
 import {
 	type LspMutationContext,
@@ -262,6 +263,8 @@ export interface LSPCallHierarchyOutgoingCall {
 export interface LSPClientInfo {
 	serverId: string;
 	root: string;
+	/** Session cwd, distinct from the language-server project root. */
+	sessionCwd?: string;
 	connection: MessageConnection;
 	/** Check if the connection is still alive */
 	isAlive: () => boolean;
@@ -912,10 +915,21 @@ export interface LSPClientState {
 	 *  ONLY when `syncKind` is Incremental — the one case that needs it, to
 	 *  compute the NEXT change's full-range replace against the document as the
 	 *  server last saw it (see `buildContentChanges`). Full/None servers never
-	 *  populate it, so the common case pays no extra retained memory. */
+	 *  populate it, so the common case pays no extra retained memory.
+	 *
+	 *  #2066: `lastLine` is where that same send's `scanSentContent` pass left
+	 *  the end of `text`, so the next change reads two numbers instead of
+	 *  re-walking (and re-splitting) the whole document for them. It travels
+	 *  with `text` and only with `text`: the eviction rewrite below drops both
+	 *  together, and a position describing text that is gone would be a lie. */
 	readonly documentContentHashes: Map<
 		string,
-		{ version: number; hash: string; text?: string }
+		{
+			version: number;
+			hash: string;
+			text?: string;
+			lastLine?: LastLinePosition;
+		}
 	>;
 	/** #2065: full Incremental-sync text is an LRU-like bounded subset of the
 	 * per-path content-binding map. The binding remains after text eviction. */
@@ -1112,14 +1126,31 @@ export function getLspDocumentTextRetentionSnapshot(): {
 	clients: number;
 	entries: number;
 	bytes: number;
+	/**
+	 * #2130: how many DISTINCT project roots the live clients are spread
+	 * across. `clients` alone cannot answer "are two tsservers up because one
+	 * root needs two servers, or because this host is serving two roots" —
+	 * which is the exact question the multi-root host raised, and the reason a
+	 * `clients` count with no root discriminator is not enough to reconcile
+	 * `memory_sample` against `instances.json`'s `lspChildCount`.
+	 *
+	 * A COUNT, not a path list: this rides on a per-turn record, so it must
+	 * stay bounded (one small integer) no matter how many roots a host serves.
+	 * The paths themselves live in `instances.json`'s `projectRoots`.
+	 */
+	roots: number;
 } {
 	let entries = 0;
 	let bytes = 0;
+	const roots = new Set<string>();
 	for (const state of activeLspClients) {
 		entries += state.incrementalTextRetainedEntries ?? 0;
 		bytes += state.incrementalTextRetainedBytes ?? 0;
+		if (typeof state.root === "string" && state.root.length > 0) {
+			roots.add(state.root);
+		}
 	}
-	return { clients: activeLspClients.size, entries, bytes };
+	return { clients: activeLspClients.size, entries, bytes, roots: roots.size };
 }
 
 function isClientAlive(state: LSPClientState): boolean {
@@ -1769,6 +1800,63 @@ function logTypeScriptPullSettle(
 	});
 }
 
+/** Where a document's last LSP-addressable line begins (#2066). */
+interface LastLinePosition {
+	/** Its 0-based line index. */
+	index: number;
+	/** Its first character's offset into the document. */
+	start: number;
+}
+
+interface SentContentScan {
+	/** `\n` count — `contentLineCount` is this + 1. */
+	lfNewlineCount: number;
+	lastLine: LastLinePosition;
+}
+
+/**
+ * #2066: the ONE full-document walk a send needs, replacing the two that used
+ * to run independently — a `charCodeAt` loop counting `\n` for the
+ * `lsp_document_send` line count, and a `.split(/\r\n|\r|\n/)` in
+ * `buildContentChanges` that materialized one substring per line to read the
+ * last one. The #1095 sha256 is a third walk and stays; it is native, and it
+ * is load-bearing.
+ *
+ * The two counts here are deliberately NOT the same number and must not be
+ * collapsed into one. `lfNewlineCount` counts `\n` only, because its consumer
+ * pairs against `diagnostic_past_eof`, whose gate counts LF BYTES
+ * (`clients/diagnostic-line-freshness.ts`); merging the conventions would put
+ * the two records one apart on exactly the mixed-ending documents the pairing
+ * exists to debug. `lastLine` uses the full LSP terminator set (`\r\n`, lone
+ * `\r`, `\n` — #1669 review F6), because a CRLF or classic-Mac document whose
+ * terminators went uncounted computes a range ending mid-document.
+ */
+function scanSentContent(content: string): SentContentScan {
+	let lfNewlineCount = 0;
+	let index = 0;
+	let start = 0;
+	// `charCodeAt`, not `codePointAt` (typescript:S7758, accepted): both are
+	// compared against 10/13, which no surrogate unit or astral code point can
+	// equal, so they are interchangeable here — but `codePointAt` measured 8%
+	// slower on a 400 KiB LF document (0.716 vs 0.663 ms/scan), because every
+	// ordinary character pays a surrogate-pair check this loop never uses.
+	for (let i = 0; i < content.length; i++) {
+		const code = content.charCodeAt(i);
+		if (code !== 10 && code !== 13) continue;
+		if (code === 10) {
+			lfNewlineCount++;
+		} else if (content.charCodeAt(i + 1) === 10) {
+			// `\r\n` is ONE line terminator, and still carries the `\n` the
+			// LF-only count wants.
+			lfNewlineCount++;
+			i++;
+		}
+		index++;
+		start = i + 1;
+	}
+	return { lfNewlineCount, lastLine: { index, start } };
+}
+
 /**
  * #1095: fingerprint the EXACT didOpen/didChange payload text at SEND time and
  * tag it with the document version it was sent as, so a later
@@ -1783,6 +1871,7 @@ function recordSentContent(
 	version: number,
 	content: string,
 ): void {
+	const scan = scanSentContent(content);
 	const previous = state.documentContentHashes.get(normalizedPath);
 	if (previous?.text !== undefined) {
 		state.incrementalTextRetainedEntries = Math.max(
@@ -1814,8 +1903,11 @@ function recordSentContent(
 		// #1669: retain the full text only for Incremental — the sole reader
 		// (`buildContentChanges`) needs it to compute the NEXT change against
 		// what the server last saw; Full/None never read this field.
+		// #2066: `lastLine` is that reader's answer, already computed by the
+		// scan above — it rides along with the text it describes.
 		...(state.syncKind === TEXT_DOCUMENT_SYNC_KIND_INCREMENTAL && {
 			text: content,
+			lastLine: scan.lastLine,
 		}),
 	});
 	if (state.syncKind === TEXT_DOCUMENT_SYNC_KIND_INCREMENTAL) {
@@ -1845,6 +1937,8 @@ function recordSentContent(
 			const binding = state.documentContentHashes.get(oldestPath);
 			state.incrementalTextBearingPaths.delete(oldestPath);
 			if (!binding || binding.text === undefined) continue;
+			// #2066: `lastLine` is dropped here with the text it describes. The
+			// #1095 version/hash binding is what must survive the strip.
 			state.documentContentHashes.set(oldestPath, {
 				version: binding.version,
 				hash: binding.hash,
@@ -1870,13 +1964,9 @@ function recordSentContent(
 	// convention as the gate itself (newline count + 1 — a trailing `\n` adds
 	// one more, empty, addressable line; an empty document is still 1 line),
 	// or the two records disagree by one at exactly the boundary this counter
-	// exists to help debug. Counted directly (no `.split("\n")`, which
-	// allocates one substring per line — measured at 13.3ms/200k allocations
-	// on a 7MB send) since only the COUNT is needed here, not the lines.
-	let newlineCount = 0;
-	for (let i = 0; i < content.length; i++) {
-		if (content.charCodeAt(i) === 10) newlineCount++;
-	}
+	// exists to help debug. #2066: the count comes from `scanSentContent`
+	// above, which folded this loop into the walk `buildContentChanges` was
+	// already paying for; the LF-only convention is unchanged.
 	logLatency({
 		type: "phase",
 		phase: "lsp_document_send",
@@ -1885,7 +1975,7 @@ function recordSentContent(
 		metadata: {
 			version,
 			contentLength: content.length,
-			contentLineCount: newlineCount + 1,
+			contentLineCount: scan.lfNewlineCount + 1,
 		},
 	});
 }
@@ -1926,23 +2016,24 @@ function buildContentChanges(
 	if (state.syncKind !== TEXT_DOCUMENT_SYNC_KIND_INCREMENTAL) {
 		return [{ text: content }];
 	}
-	const previousText = state.documentContentHashes.get(normalizedPath)?.text;
-	if (previousText === undefined) {
+	const previous = state.documentContentHashes.get(normalizedPath);
+	if (previous?.text === undefined) {
 		return [{ text: content }];
 	}
-	// #1669 review F6: split on every LSP line terminator (\r\n, lone \r, or
-	// \n), not just \n — a document using CRLF or lone-CR line endings would
-	// otherwise be undercounted, computing a range that ends mid-document
-	// instead of at the real last line.
-	const previousLines = previousText.split(/\r\n|\r|\n/);
-	const lastLine = previousLines.length - 1;
-	const lastLineText = previousLines[lastLine] ?? "";
+	const previousText = previous.text;
+	// #2066: `recordSentContent` scanned this exact text when it sent it, so
+	// read where it left the last line instead of walking (and splitting) the
+	// document a second time. An entry carrying text without that position was
+	// written by something else — resolve it through the SAME scanner, never a
+	// second convention that can drift from it.
+	const lastLine = previous.lastLine ?? scanSentContent(previousText).lastLine;
+	const lastLineText = previousText.slice(lastLine.start);
 	return [
 		{
 			range: {
 				start: { line: 0, character: 0 },
 				end: {
-					line: lastLine,
+					line: lastLine.index,
 					character: convertCharacterOffset(
 						state.positionEncoding,
 						lastLineText,
@@ -4721,6 +4812,8 @@ export async function createLSPClient(options: {
 	serverId: string;
 	process: LSPProcess;
 	root: string;
+	/** Session cwd, distinct from the language-server project root. */
+	sessionCwd?: string;
 	initialization?: Record<string, unknown>;
 	initializeTimeoutMs?: number;
 	/** See `LSPServerInfo.spawn`'s `launchVariant` (server.ts) — which concrete
@@ -4735,6 +4828,7 @@ export async function createLSPClient(options: {
 		serverId,
 		process: lspProcess,
 		root,
+		sessionCwd,
 		initialization,
 		initializeTimeoutMs = INITIALIZE_TIMEOUT_MS,
 		launchVariant,
@@ -4752,6 +4846,13 @@ export async function createLSPClient(options: {
 		serverId,
 		command: lspProcess.command,
 		marker: extractSpawnMarker(lspProcess.args),
+		sessionIdentity: {
+			projectRoot: sessionCwd ?? process.cwd(),
+			rootSource: sessionCwd ? "service-cwd" : "lsp-fallback",
+			startedAt: new Date(
+				workspaceDiagnosticsCacheSessionStart(),
+			).toISOString(),
+		},
 	}).catch((err) => {
 		// best-effort observability — never fail LSP startup over this
 		logLatency({

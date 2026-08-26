@@ -39,6 +39,7 @@ export function detectStaleOpenIssues(options: {
 }): Promise<{
 	candidates: StaleIssueCandidate[];
 	truncatedCommits: number;
+	scannedOpenItems: number;
 	priorityCoverage: PriorityCoverage;
 }>;
 export function formatSummary(
@@ -46,6 +47,7 @@ export function formatSummary(
 	options?: {
 		runUrl?: string;
 		truncatedCommits?: number;
+		scannedOpenItems?: number;
 		priorityCoverage?: PriorityCoverage;
 	},
 ): string;

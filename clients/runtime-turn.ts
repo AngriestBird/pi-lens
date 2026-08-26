@@ -23,6 +23,7 @@ import {
 import { cascadeSettleWaitMs } from "./cascade-budget.js";
 import { logCascade } from "./cascade-logger.js";
 import { normalizeMapKey } from "./path-utils.js";
+import { compareOrdinal } from "./string-utils.js";
 import type {
 	DependencyChecker,
 	MadgeBatchStats,
@@ -97,12 +98,20 @@ import { sweepInlineBlockerPastEof } from "./blocker-past-eof.js";
 // #2001/#2002: collect-later delivery for slow auxiliary LSP servers.
 import { getLSPService } from "./lsp/index.js";
 import {
+	drainPendingAuxCapEvictedCount,
 	drainPendingAuxiliaryCoverage,
 	isPendingAuxiliaryPastRearmTtl,
-	markPendingAuxiliaryCoverage,
+	rearmPendingAuxiliaryCoverage,
+	MAX_LATE_AUX_REARMS,
+	pendingAuxiliaryCoverageSize,
 } from "./lsp/pending-aux-coverage.js";
 import type { LSPDiagnostic } from "./lsp/client.js";
 import { convertLspDiagnostics } from "./dispatch/utils/lsp-diagnostics.js";
+import {
+	drainPendingRunnerFindings,
+	dropStaleRunnerFindings,
+	pendingRunnerFindingsSize,
+} from "./dispatch/pending-runner-findings.js";
 // #1631 review V2: moved to its own leaf module so a low-level store
 // (widget-state.ts) can use the marker without importing this orchestrator —
 // see clients/stale-marker.ts's doc comment.
@@ -112,9 +121,11 @@ import {
 	formatRetirementNote,
 } from "./demoted-finding-render.js";
 import { STALE_LINE_MARKER } from "./stale-marker.js";
+import { getActiveSessionId } from "./session-lifecycle.js";
 import {
 	getWidgetBlockingFilesForSweep,
 	markWidgetFileBlockersStale,
+	recordRunner,
 } from "./widget-state.js";
 import type { TestRunnerFindingsCache } from "./project-diagnostics/runner-adapters/runner-findings.js";
 
@@ -231,6 +242,20 @@ function scheduleLSPIdleReset(
 	delayMs: number,
 	options: {
 		isCurrentSession?: () => boolean;
+		/**
+		 * #2157 fix round 2: an idle-reset timer armed by a SECONDARY session
+		 * (e.g. a subagent evaluation, `isSubagentSession()`) must not tear down
+		 * a PRIMARY session's shared LSP fleet. `isCurrentSession` alone cannot
+		 * catch this — it only asks whether THIS evaluation's own session
+		 * generation moved on, which stays true for the secondary's own
+		 * generation for its whole (shortened) delay while it fires against the
+		 * fleet the primary is actively using. Mirrors the
+		 * `pipeline_crash`-reset gate in `runtime-tool-result.ts`
+		 * (`getActiveSessionId()` vs `runtime.telemetrySessionId`): undefined
+		 * primary (no registration yet) is fail-safe "belongs to primary", same
+		 * as today's un-gated behavior.
+		 */
+		isPrimarySession?: () => boolean;
 		onError?: (err: unknown) => void;
 	} = {},
 ): void {
@@ -268,6 +293,9 @@ function scheduleLSPIdleReset(
 		}
 		try {
 			if (options.isCurrentSession && !options.isCurrentSession()) {
+				return;
+			}
+			if (options.isPrimarySession && !options.isPrimarySession()) {
 				return;
 			}
 			resetFn();
@@ -436,6 +464,11 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	// instead of dying unrendered. `hasCascadeRuns()` is a cheap peek (no
 	// pending work almost every turn), so the common read-only turn still
 	// takes the early return below.
+	// A foreign live owner must not deliver another session's pending findings.
+	// A no-file turn falls through when this process has pending runner work so
+	// the ordinary freshness gate and delivery cache can run. Max-cycle cleanup
+	// below intentionally remains a terminal reset; its pending work stays in
+	// the bounded handoff store for the next eligible turn.
 	if (files.length === 0 && !runtime.hasCascadeRuns()) {
 		// A genuinely clean session must invalidate the persisted guard record.
 		// Blocker records are retained only while the runtime still reports one.
@@ -467,11 +500,21 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			const sessionGeneration = runtime.sessionGeneration;
 			scheduleLSPIdleReset(resetLSPService, idleResetMs, {
 				isCurrentSession: () => runtime.isCurrentSession(sessionGeneration),
+				// #2157 fix round 2: a secondary (subagent) evaluation's own timer
+				// must not release the primary's shared fleet — see the option's
+				// doc comment on `scheduleLSPIdleReset`.
+				isPrimarySession: () => {
+					const activePrimarySessionId = getActiveSessionId();
+					return (
+						activePrimarySessionId === undefined ||
+						activePrimarySessionId === runtime.telemetrySessionId
+					);
+				},
 				onError: (err) => dbg(`lsp idle reset failed: ${err}`),
 			});
 		}
 		resetFormatService();
-		return;
+		if (pendingRunnerFindingsSize() === 0) return;
 	}
 
 	// Cancel any pending idle reset since we're actively working. #1618: also
@@ -481,7 +524,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	// read "nothing pending" and skip the cancel while a rearm was still
 	// queued to fire the instant the sweep released its hold — resurrecting
 	// idle reset on a session that had since gone back to active editing.
-	if (lspIdleResetTimeout || pendingSweepRearm) {
+	if (files.length > 0 && (lspIdleResetTimeout || pendingSweepRearm)) {
 		cancelLSPIdleReset();
 		dbg("turn_end: cancelled pending LSP idle reset (active editing)");
 	}
@@ -2241,6 +2284,90 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 
 	cacheManager.incrementTurnCycle(cwd, currentOwner);
 
+	// Collect-later CLI runners continue off the write path. Their completed
+	// diagnostics use the same freshness gate as late auxiliary findings and
+	// enter the ordinary turn-end advisory delivery channel.
+	const runnerFindingsStart = Date.now();
+	// Turn-end delivery is deliberately non-blocking. Collect already-settled
+	// results and requeue the rest; the edit path already paid the deferral
+	// decision, so another 2s wait would charge every turn while a runner is
+	// still in flight (#2122 F5).
+	const pendingRunnerFindings = await drainPendingRunnerFindings(0);
+	let runnerFindingsDelivered = 0;
+	let runnerFindingsStale = 0;
+	let runnerFindingsFailed = 0;
+	let runnerFindingsDropped = 0;
+	const runnerFindingsDeliveredIds: string[] = [];
+	for (const pending of pendingRunnerFindings) {
+		const result = pending.result;
+		if (!result) continue;
+		recordRunner(
+			pending.filePath,
+			pending.runnerId,
+			result.status,
+			result.diagnostics.length,
+			Date.now() - pending.markedAtMs,
+			pending.writeIndex,
+		);
+		if (result.status === "failed") {
+			runnerFindingsFailed += 1;
+			const detail = result.failureMessage ? `: ${result.failureMessage}` : "";
+			// @delivery-surface: runtime-turn:late-runner-findings
+			advisoryParts.push(
+				`❌ Deferred runner ${pending.runnerId} failed (${result.failureKind ?? "unknown"})${detail}`,
+			);
+			continue;
+		}
+		const findings = result.diagnostics;
+		if (findings.length === 0) continue;
+		const gate = gateFindingsByPathFreshness({
+			store: "late-runner-findings",
+			findings,
+			cwd,
+			scannedAt: pending.markedAtMs,
+			citedPath: (finding) => finding.filePath,
+		});
+		runnerFindingsStale += gate.stale.length;
+		if (gate.stale.length > 0) {
+			// The runner answered for bytes older than the latest edit. Do not
+			// re-arm this completed answer: only a new runner query can restore
+			// coverage for the refreshed bytes.
+			dropStaleRunnerFindings(pending);
+			runnerFindingsDropped += 1;
+		}
+		if (gate.live.length === 0) continue;
+		const displayPath = toRunnerDisplayPath(cwd, pending.filePath);
+		const lines = gate.live.map(
+			(finding) =>
+				`  ${displayPath}:${finding.line ?? 1}:${finding.column ?? 1} [${finding.rule ?? finding.id}] ${finding.message}`,
+		);
+		runnerFindingsDelivered += gate.live.length;
+		for (const finding of gate.live) {
+			if (runnerFindingsDeliveredIds.length < 50) {
+				runnerFindingsDeliveredIds.push(finding.id);
+			}
+		}
+		// @delivery-surface: runtime-turn:late-runner-findings
+		advisoryParts.push(
+			`⏱️ Late runner diagnostics (${pending.runnerId} completed after the edit):\n${lines.join("\n")}`,
+		);
+	}
+	logLatency({
+		type: "phase",
+		toolName: "turn_end",
+		filePath: cwd,
+		phase: "late_runner_findings",
+		durationMs: Date.now() - runnerFindingsStart,
+		metadata: {
+			pending: pendingRunnerFindings.length,
+			delivered: runnerFindingsDelivered,
+			stale: runnerFindingsStale,
+			failed: runnerFindingsFailed,
+			dropped: runnerFindingsDropped,
+			deliveredIds: runnerFindingsDeliveredIds,
+		},
+	});
+
 	// #2001/#2002: collect-later delivery for auxiliary LSP servers whose
 	// aux-grace window expired without a publication (opengrep on Windows:
 	// ~8s per scan against a 2s grace — the scanner's eventual findings sat
@@ -2252,12 +2379,21 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	// client drops silently.
 	const lateAuxStart = Date.now();
 	const drainedPairs = drainPendingAuxiliaryCoverage();
+	// #2168: cap evictions retire a pair before any drain can observe it — read
+	// and reset that count here so it folds into this turn's reconciliation
+	// sum instead of the pair vanishing uncounted.
+	const lateAuxCapEvicted = drainPendingAuxCapEvictedCount();
 	let lateAuxDelivered = 0;
 	let lateAuxStale = 0;
 	let lateAuxMissing = 0;
 	let lateAuxRearmed = 0;
 	let lateAuxClientGone = 0;
 	let lateAuxProbeFailed = 0;
+	let lateAuxCleanConfirmed = 0;
+	let lateAuxExpired = 0;
+	let lateAuxCeilingExhausted = 0;
+	let lateAuxAnswered = 0;
+	const lateAuxStuckPairs: Array<{ filePath: string; serverId: string }> = [];
 	if (drainedPairs.length > 0) {
 		const byFile = new Map<string, typeof drainedPairs>();
 		for (const pair of drainedPairs) {
@@ -2268,34 +2404,54 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		try {
 			const service = getLSPService();
 			for (const [lateAuxPath, pairs] of byFile) {
-				let cached: Map<string, LSPDiagnostic[]>;
+				let cached: Map<
+					string,
+					{ diags: LSPDiagnostic[]; publishedAt?: number }
+				>;
 				try {
 					cached = await service.readCachedDiagnosticsForServers(
 						lateAuxPath,
 						new Set(pairs.map((p) => p.serverId)),
 					);
 				} catch {
-					// #2027 round-1 P3-2: count dropped pairs — never silent.
+					// #2027 round-1 P3-2 / #2167 R2-2: a transient probe rejection
+					// tells us nothing about the pair's content, so treat it like the
+					// "still scanning" branch below — re-arm under the SAME
+					// ceiling/TTL bound rather than dropping the coverage outright.
+					// `probeFailed` stays an honest per-turn failure count; it is
+					// informational (like `stale`/`missing`), not a terminal bucket,
+					// since the pair itself still resolves through rearmed/
+					// ceilingExhausted/expired below.
 					lateAuxProbeFailed += pairs.length;
 					for (const pair of pairs) {
-						markPendingAuxiliaryCoverage(
-							pair.filePath,
-							[pair.serverId],
-							Date.now(),
-						);
+						if (
+							!isPendingAuxiliaryPastRearmTtl(pair) &&
+							(pair.rearmCount ?? 0) < MAX_LATE_AUX_REARMS
+						) {
+							rearmPendingAuxiliaryCoverage(pair);
+							lateAuxRearmed += 1;
+						} else if (isPendingAuxiliaryPastRearmTtl(pair)) {
+							lateAuxExpired += 1;
+						} else {
+							lateAuxCeilingExhausted += 1;
+						}
 					}
 					continue;
 				}
 				const displayLateAuxPath = toRunnerDisplayPath(cwd, lateAuxPath);
 				for (const pair of pairs) {
-					const rawDiags = cached.get(pair.serverId);
-					if (rawDiags === undefined) {
+					const cachedEntry = cached.get(pair.serverId);
+					if (cachedEntry === undefined) {
 						// No live client for this server any more — best-effort probe,
 						// drop the pair silently.
 						lateAuxClientGone += 1;
 						continue;
 					}
-					if (rawDiags.length === 0) {
+					const rawDiags = cachedEntry.diags;
+					if (
+						cachedEntry.publishedAt === undefined ||
+						cachedEntry.publishedAt <= pair.markedAtMs
+					) {
 						// Still scanning (or published nothing yet) — keep waiting
 						// so a scan finishing before the NEXT turn end still
 						// delivers. Two clocks, deliberately decoupled: the
@@ -2303,21 +2459,35 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 						// the delivery gate stats against — while the re-arm TTL is
 						// anchored on `lastRearmedAtMs`, advanced by every successful
 						// empty probe: the scanner is demonstrably alive, just slow.
-						if (!isPendingAuxiliaryPastRearmTtl(pair)) {
-							markPendingAuxiliaryCoverage(
-								lateAuxPath,
-								[pair.serverId],
-								pair.markedAtMs,
-								Date.now(),
-							);
+						if (
+							!isPendingAuxiliaryPastRearmTtl(pair) &&
+							(pair.rearmCount ?? 0) < MAX_LATE_AUX_REARMS
+						) {
+							rearmPendingAuxiliaryCoverage(pair);
 							lateAuxRearmed += 1;
+							if (lateAuxStuckPairs.length < 20)
+								lateAuxStuckPairs.push({
+									filePath: pair.filePath,
+									serverId: pair.serverId,
+								});
+						} else {
+							if (isPendingAuxiliaryPastRearmTtl(pair)) lateAuxExpired += 1;
+							else lateAuxCeilingExhausted += 1;
 						}
+						continue;
+					}
+					if (rawDiags.length === 0) {
+						lateAuxCleanConfirmed += 1;
 						continue;
 					}
 					const converted = convertLspDiagnostics(rawDiags, lateAuxPath, {
 						tool: "lsp",
 					});
-					if (converted.length === 0) continue;
+					if (converted.length === 0) {
+						lateAuxMissing += rawDiags.length;
+						lateAuxAnswered += 1;
+						continue;
+					}
 					// Freshness kernel (#1634 gated surface): stat the cited file
 					// against the mark timestamp. Missing → drop (no remediation for
 					// a deleted file); mtime drifted past the mark → drop too, NOT
@@ -2337,22 +2507,32 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 					lateAuxStale += gate.stale.length;
 					lateAuxMissing +=
 						converted.length - gate.live.length - gate.stale.length;
-					if (gate.stale.length > 0) {
-						// Stale findings mean the scan predates the last edit.
-						// Re-arm with a REFRESHED baseline so the next turn probes
-						// the newer revision (#2027 round-1 P2-1).
-						markPendingAuxiliaryCoverage(
-							lateAuxPath,
-							[pair.serverId],
-							Date.now(),
-						);
+					if (gate.live.length === 0) {
+						if (gate.stale.length > 0) {
+							// Stale findings mean the scan predates the last edit. Re-arm
+							// with a refreshed baseline and carry the ceiling count.
+							if (
+								!isPendingAuxiliaryPastRearmTtl(pair) &&
+								(pair.rearmCount ?? 0) < MAX_LATE_AUX_REARMS
+							) {
+								rearmPendingAuxiliaryCoverage(pair, Date.now(), true);
+								lateAuxRearmed += 1;
+							} else if (isPendingAuxiliaryPastRearmTtl(pair)) {
+								lateAuxExpired += 1;
+							} else {
+								lateAuxCeilingExhausted += 1;
+							}
+						} else {
+							lateAuxAnswered += 1;
+						}
+						continue;
 					}
-					if (gate.live.length === 0) continue;
 					const lines = gate.live.map(
 						(f) =>
 							`  ${displayLateAuxPath}:${f.line}:${f.column} [${f.rule}] ${f.message}`,
 					);
 					lateAuxDelivered += gate.live.length;
+					lateAuxAnswered += 1;
 					// @delivery-surface: runtime-turn:late-auxiliary-findings
 					advisoryParts.push(
 						`🕐 Late auxiliary diagnostics (${pair.serverId} answered after its grace window):\n${lines.join("\n")}`,
@@ -2370,12 +2550,20 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			durationMs: Date.now() - lateAuxStart,
 			metadata: {
 				pending: drainedPairs.length,
+				pairCreated: drainedPairs.length + lateAuxCapEvicted,
+				pendingAfter: pendingAuxiliaryCoverageSize(),
 				delivered: lateAuxDelivered,
 				stale: lateAuxStale,
 				missing: lateAuxMissing,
 				rearmed: lateAuxRearmed,
 				clientGone: lateAuxClientGone,
 				probeFailed: lateAuxProbeFailed,
+				cleanConfirmed: lateAuxCleanConfirmed,
+				expired: lateAuxExpired,
+				ceilingExhausted: lateAuxCeilingExhausted,
+				answered: lateAuxAnswered,
+				capEvicted: lateAuxCapEvicted,
+				stuckPairs: lateAuxStuckPairs,
 			},
 		});
 	}
@@ -2397,7 +2585,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		const content = capTurnEndMessage(findingParts.join("\n\n"));
 		const signature = `${files
 			.slice()
-			.sort((a, b) => a.localeCompare(b))
+			.sort((a, b) => compareOrdinal(a, b))
 			.join("|")}::${content}`;
 		const last = cacheManager.readCache<{
 			signature: string;

@@ -411,6 +411,13 @@ export const DELIVERY_SURFACES: Record<string, DeliverySurfaceEntry> = {
 		["gateFindingsByPathFreshness"],
 		['store: "late-auxiliary-findings"'],
 	),
+	"runtime-turn:late-runner-findings": gated(
+		RUNTIME_TURN_FILE,
+		"Turn-end CLI runner findings collected after the post-write path.",
+		["gateFindingsByPathFreshness"],
+		['store: "late-runner-findings"'],
+		{ evidenceMin: 2 },
+	),
 	"runtime-turn:cascade-blocker": labeled(
 		RUNTIME_TURN_FILE,
 		"Turn-end 🧪 cascade neighbor blocker.",
@@ -558,6 +565,15 @@ export const DELIVERY_SURFACES: Record<string, DeliverySurfaceEntry> = {
 		"Synchronous preflight rejection returned inline with the failed git " +
 			"command — no stored state is delivered, so nothing can go stale between " +
 			"detection and delivery.",
+		"live",
+	),
+	"shared-checkout-guard:worktree-mutation-blocked": labeled(
+		"clients/shared-checkout-guard.ts",
+		"Shared-checkout 🔴 WORKING-TREE CHANGE BLOCKED verdict (--lens-checkout-guard).",
+		"Synchronous preflight rejection returned inline with the failed git " +
+			"command. Both inputs are read at decision time — the instance registry " +
+			"and `git status` — so no stored finding is replayed and nothing can go " +
+			"stale between detection and delivery.",
 		"live",
 	),
 	"read-guard-tool-lines:preflight-errors": labeled(

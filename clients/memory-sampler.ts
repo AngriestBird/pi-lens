@@ -31,6 +31,10 @@
  */
 
 import type { WordIndex } from "./word-index.js";
+import {
+	countPostingEntries,
+	estimateWordIndexStoreBytes,
+} from "./word-index-store.js";
 import { getSharedTreeSitterClient } from "./tree-sitter-shared.js";
 import { getReviewGraphWorkspaceCacheSnapshot } from "./review-graph/builder.js";
 import { getDispatchCascadeCacheStats } from "./dispatch/integration.js";
@@ -149,6 +153,10 @@ export function toMemoryProcessUsage(
 export interface MemorySampleSubsystems {
 	lsp: {
 		clients: number;
+		/** #2130: distinct project roots the live clients span. See
+		 *  `getLspDocumentTextRetentionSnapshot` for why a bare client count
+		 *  cannot be reconciled against `instances.json` without this. */
+		clientRoots: number;
 		incrementalTextEntries: number;
 		incrementalTextBytes: number;
 	};
@@ -161,7 +169,16 @@ export interface MemorySampleSubsystems {
 	wordIndex: {
 		docs: number;
 		fileTable: number;
+		/** Distinct token count. Breadth, NOT memory — see `residentBytes`. */
 		postings: number;
+		/**
+		 * Total posting entries across every token (#2069). #1999 read
+		 * `postings` as this number and under-counted the subsystem by a factor
+		 * of sixty; both are reported now so the two can never be confused.
+		 */
+		postingEntries: number;
+		/** Estimated resident bytes of the index’s packed stores (#2069). */
+		residentBytes: number;
 		forwardEntries: number;
 	} | null;
 	/** `null` when the shared tree-sitter client hasn't been created yet
@@ -186,6 +203,18 @@ export interface MemorySampleSessionContext {
 	sessionAgeMs: number;
 	sessionStartedAt: number;
 	turnCount: number;
+	/**
+	 * #2130: the project root this sample belongs to — the registered primary
+	 * session's root (`getActivePrimaryRoot`, `clients/session-lifecycle.ts`).
+	 *
+	 * `turnIndex` is per-runtime and restarts at 0 on every session reset, so a
+	 * multi-root host emitted `turnIndex: 10` twice with nothing to tell the two
+	 * apart. This field is that discriminator. `undefined` when no primary has
+	 * registered a root yet (an early sample, or a host that never ran
+	 * session_start) — never guessed from `process.cwd()`, which is what made
+	 * the pre-fix `sameCwd` field read `true` for every record.
+	 */
+	root?: string;
 }
 
 export interface MemorySample {
@@ -226,6 +255,7 @@ export function collectMemorySampleSubsystems(
 			const retention = getLspDocumentTextRetentionSnapshot();
 			return {
 				clients: retention.clients,
+				clientRoots: retention.roots,
 				incrementalTextEntries: retention.entries,
 				incrementalTextBytes: retention.bytes,
 			};
@@ -236,6 +266,11 @@ export function collectMemorySampleSubsystems(
 					docs: wordIndex.docLengths.size,
 					fileTable: wordIndex.fileTable.size,
 					postings: wordIndex.postings.size,
+					// O(distinct tokens), reading only `.length`/`.byteLength` per
+					// list — no posting ELEMENT is touched, so this stays inside the
+					// module docstring’s bounded-read constraint.
+					postingEntries: countPostingEntries(wordIndex),
+					residentBytes: estimateWordIndexStoreBytes(wordIndex),
 					forwardEntries: wordIndex.forward?.size ?? 0,
 				}
 			: null,

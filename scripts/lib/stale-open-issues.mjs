@@ -71,7 +71,12 @@ async function getJson(fetcher, url) {
 	return response.json();
 }
 
-async function paged(fetcher, baseUrl, params = {}) {
+async function paged(
+	fetcher,
+	baseUrl,
+	params = {},
+	{ exhaustive = true } = {},
+) {
 	const values = [];
 	for (let page = 1; page <= MAX_PAGES; page++) {
 		const query = new URLSearchParams({
@@ -84,6 +89,12 @@ async function paged(fetcher, baseUrl, params = {}) {
 			throw new Error(`GitHub API returned a non-array for ${baseUrl}`);
 		values.push(...batch);
 		if (batch.length < PAGE_SIZE) break;
+		// A full final page does not prove another page exists, so exhaustive
+		// callers fail conservatively at the bound instead of using partial data.
+		if (exhaustive && page === MAX_PAGES)
+			throw new Error(
+				`GitHub API pagination bound reached for ${baseUrl}; refusing to use a partial response`,
+			);
 	}
 	return values;
 }
@@ -97,6 +108,7 @@ export async function detectStaleOpenIssues({
 		fetcher,
 		`https://api.github.com/repos/${repository}/issues`,
 		{ state: "open" },
+		{ exhaustive: true },
 	);
 	const issueNumbers = new Set(
 		openIssues
@@ -108,6 +120,7 @@ export async function detectStaleOpenIssues({
 		fetcher,
 		`https://api.github.com/repos/${repository}/commits`,
 		{ sha: branch },
+		{ exhaustive: false },
 	);
 	for (const commit of commits.slice(0, MAX_COMMIT_DETAILS)) {
 		const commitText = commit.commit?.message ?? commit.message ?? "";
@@ -138,6 +151,7 @@ export async function detectStaleOpenIssues({
 	return {
 		candidates,
 		truncatedCommits: Math.max(0, commits.length - MAX_COMMIT_DETAILS),
+		scannedOpenItems: openIssues.length,
 		priorityCoverage: checkPriorityCoverage(openIssues),
 	};
 }
@@ -151,7 +165,7 @@ function formatIssueLine(issue) {
 
 export function formatSummary(
 	candidates,
-	{ runUrl, truncatedCommits = 0, priorityCoverage } = {},
+	{ runUrl, truncatedCommits = 0, scannedOpenItems, priorityCoverage } = {},
 ) {
 	const lines = [
 		"<!-- pi-lens-stale-open-issue-detector -->",
@@ -160,6 +174,8 @@ export function formatSummary(
 		"Detection only: a human must verify the evidence and close or update an issue. This job never closes issues.",
 		"",
 	];
+	if (scannedOpenItems !== undefined)
+		lines.push(`Scanned population: ${scannedOpenItems} open item(s).`);
 	if (candidates.length === 0) lines.push("No candidates found.");
 	else
 		for (const { issue, evidence } of candidates)
