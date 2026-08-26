@@ -379,6 +379,9 @@ function noteCooldownServedVerdict(
 		retryAfterMs: Math.max(1, retryAtMs - Date.now()),
 		budgetMs: WHICH_BUDGET_MS,
 		servedFromCooldown: true,
+		// No probe ran here: the latch's own remembered cause is replayed
+		// as-is, so the call site is the one asserting it (#2209).
+		classifiedBy: "caller",
 	});
 }
 
@@ -445,9 +448,15 @@ async function which(command: string): Promise<string | null> {
 		...(proberRan && { unclassifiedFailureOutcome: "missing" as const }),
 	});
 	let { outcome, cause } = classified;
+	// This call site OVERRIDES classifyProbeFailure's own answer below, so a
+	// row it forced is a caller assertion, not a probe classification — the
+	// scrutiny availability-policy.ts:253-258 reserves for "caller" rows must
+	// not be laundered away by mislabeling this one "probe" (#2226 review F1).
+	let outcomeForced = false;
 	if (!proberRan && outcome !== "transient") {
 		outcome = "transient";
 		cause = "probe-rejected";
+		outcomeForced = true;
 	}
 	const retryAfterMs = entry.latch.noteUnavailable(outcome, cause);
 	if (outcome === "transient") whichTransientCommands.add(command);
@@ -465,6 +474,7 @@ async function which(command: string): Promise<string | null> {
 		hostStallMs,
 		...(retryAfterMs > 0 && { retryAfterMs }),
 		budgetMs: WHICH_BUDGET_MS,
+		classifiedBy: outcomeForced ? "caller" : "probe",
 	});
 	return null;
 }

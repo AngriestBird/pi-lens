@@ -148,3 +148,34 @@ describe("with-memory-watch verdict durability (#2042)", () => {
 		expect(run.stdout).toContain("lowWaterAvailableMb=");
 	}, 60_000);
 });
+
+/**
+ * Round-2 review N1. Both fields the verdict reads are set by the WRAPPER, and
+ * both were pinned only at the formatter. Delete `intervalMs,` from the watch
+ * object and every formatter test stays green: the shipped verdict silently
+ * loses its cadence caveat and nothing notices. Same for the spawned pid, which
+ * is what makes the kernel's "Killed process <pid>" line attributable.
+ *
+ * These are source-text pins for the same reason the durability mechanism above
+ * is one: the behaviour they guard only appears in a real CI kill, which no
+ * unit test can stage.
+ */
+describe("with-memory-watch verdict wiring (#2042)", () => {
+	const source = (): string => fs.readFileSync(wrapper, "utf8");
+
+	it("hands the sampling cadence to the verdict", () => {
+		const literal = /const watch = \{([\s\S]*?)\n\};/.exec(source());
+		expect(literal, "the wrapper's `watch` object literal").not.toBeNull();
+		expect(
+			literal?.[1],
+			"watch.intervalMs feeds formatVerdict's cadence caveat",
+		).toMatch(/^\s*intervalMs\b/m);
+	});
+
+	it("records the pid it spawned, so the kernel's victim is nameable", () => {
+		expect(
+			source(),
+			"watch.childPid must be set from the spawned child",
+		).toMatch(/watch\.childPid\s*=\s*child\.pid/);
+	});
+});
