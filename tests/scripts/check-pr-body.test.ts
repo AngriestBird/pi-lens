@@ -665,6 +665,11 @@ describe("nested headings are structure, not content (#2124 F1)", () => {
 });
 
 describe("renames out of tests/ still require the assessment (#2124 F3)", () => {
+	// #2223: the unstub used to run only after the assertion below, so a
+	// failing assertion left GITHUB_TOKEN/GITHUB_API_URL/GITHUB_REPOSITORY
+	// stubbed for every later test in this file.
+	afterEach(() => vi.unstubAllEnvs());
+
 	it("counts previous_filename", async () => {
 		vi.stubEnv("GITHUB_TOKEN", "t");
 		vi.stubEnv("GITHUB_API_URL", "https://api.example");
@@ -681,7 +686,6 @@ describe("renames out of tests/ still require the assessment (#2124 F3)", () => 
 			),
 		);
 		expect(await resolveTouchesTests({ number: 7 }, fetchImpl)).toBe(true);
-		vi.unstubAllEnvs();
 	});
 });
 
