@@ -48,16 +48,23 @@ describe("metrics-history getCurrentCommit stderr suppression (#2095)", () => {
 				// A real repo with zero commits: `git rev-parse --short HEAD`
 				// genuinely fails with "fatal: ambiguous argument 'HEAD': unknown
 				// revision or path not in the working tree." on real stderr.
-				execFileSync("git", ["init", "-q"], { cwd: tmp });
+				// `stdio: "ignore"` here is the exact guard this PR is about —
+				// this setup call must not itself leak `git init`'s stderr.
+				execFileSync("git", ["init", "-q"], { cwd: tmp, stdio: "ignore" });
 
 				const dataDir = path.join(tmp, ".pilens-data");
 				const filePath = path.join(tmp, "file.ts");
+				// Use the synchronous, immediate-save `captureSnapshots` (not the
+				// debounced `captureSnapshot`) so the resolved commit is available
+				// to print without waiting on the 5s save timer.
 				const script = [
+					`const path = require("path");`,
 					`process.chdir(${JSON.stringify(tmp)});`,
-					`const { captureSnapshot } = require(${JSON.stringify(METRICS_HISTORY_JS)});`,
-					"captureSnapshot(",
-					`  ${JSON.stringify(filePath)},`,
-					"  {",
+					`const { captureSnapshots } = require(${JSON.stringify(METRICS_HISTORY_JS)});`,
+					`const filePath = ${JSON.stringify(filePath)};`,
+					"const history = captureSnapshots([{",
+					"  filePath,",
+					"  metrics: {",
 					"    maintainabilityIndex: 90,",
 					"    cognitiveComplexity: 1,",
 					"    maxNestingDepth: 1,",
@@ -65,7 +72,12 @@ describe("metrics-history getCurrentCommit stderr suppression (#2095)", () => {
 					"    maxCyclomatic: 1,",
 					"    entropy: 1,",
 					"  },",
-					");",
+					"}]);",
+					"const relativePath = path.relative(process.cwd(), filePath);",
+					// Print the resolved commit so the test can prove the failure
+					// path was actually taken — not that the require target was
+					// missing or the child silently crashed before reaching it.
+					'process.stdout.write("COMMIT:" + JSON.stringify(history.files[relativePath].latest.commit));',
 				].join("\n");
 
 				const result = spawnSync(process.execPath, ["-e", script], {
@@ -75,6 +87,11 @@ describe("metrics-history getCurrentCommit stderr suppression (#2095)", () => {
 				});
 
 				expect(result.error).toBeUndefined();
+				expect(result.status).toBe(0);
+				// Proves getCurrentCommit() actually took its catch/fallback
+				// branch, so the stderr assertion below is checking a genuinely
+				// exercised failure path, not a script that silently no-opped.
+				expect(result.stdout).toContain('COMMIT:"unknown"');
 				// The bug: git's raw "fatal: ..." line lands on the child's own
 				// stderr, unfiltered by any try/catch inside getCurrentCommit().
 				expect(result.stderr).not.toMatch(/fatal:/i);
