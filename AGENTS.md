@@ -1096,6 +1096,32 @@ The merge-train warden's GraphQL PR reader follows the same bounded-read contrac
 when `hasNextPage` remains true at `MAX_PAGES`. Its consumer prints that error and
 sets a nonzero exit code, while deliberately bounded sibling reads remain scoped.
 
+The warden also classifies what Actions did with each open PR head
+(`scripts/lib/warden-run-health.mjs`, #2184). A run that concluded
+`failure`/`startup_failure` with ZERO executed steps across every job is
+`starved-run`, not a red build — verified against the real incident run
+32986328966, where six jobs sat `queued` and one matrix job read
+`completed`/`skipped`, so "every job is queued" is the wrong predicate. A head
+with no `ci.yml`/`lint.yml` run past `ABSENT_RUN_GRACE_MINUTES` is `absent-run`.
+Recovery is bounded: one `POST /actions/runs/{id}/rerun` per starved run, keyed
+on GitHub's own `run_attempt` so the warden never re-runs the same run twice,
+and one per-head comment for an absent dispatch, keyed on an HTML marker
+carrying the head SHA. An unreadable runs or jobs list classifies
+`run-health-unknown`, never `absent-run`. Every swept PR gets a classification
+line in the run summary, including quiet ones.
+
+The label-gated merge lane (`scripts/lib/merge-train-lane.mjs`, #2185) is the
+only automation in this repository that merges, and it lives outside the warden
+on purpose. It merges a PR carrying `train:approved` only on POSITIVE evidence
+about the exact current head: both required checks present, `COMPLETED`, and
+`SUCCESS`, run health `runs-concluded-normally`, zero failing non-advisory
+checks, and a `CLEAN`/`BEHIND`/`UNSTABLE` merge state. Absent, unconcluded,
+starved, and DIRTY-skipped checks are all not-green. Gating on the current head
+is what re-gates a fix round, so the lane stores no "approved at SHA" state that
+could drift; the merge call passes `sha` so a head that moves mid-cycle 409s
+instead of merging on a stale verdict. Only the maintainer applies the label, so
+the adversarial-review-first policy is unchanged; removing the label aborts.
+
 CI validates GitHub close-keyword syntax through `scripts/check-close-keywords.mjs`:
 PR bodies may not use a comma-separated close list because GitHub applies only
 the first issue per keyword; use one keyword per issue (`Closes #A. Closes #B.`).

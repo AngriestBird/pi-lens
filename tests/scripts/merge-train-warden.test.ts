@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
+	evaluateMergeGate,
+	laneCommentMarker,
+	MERGE_GATE_REASON,
+	runMergeLane,
+	TRAIN_APPROVED_LABEL,
+	TRAIN_SQUASH_LABEL,
+} from "../../scripts/lib/merge-train-lane.mjs";
+import {
 	applyAction,
 	classifyActionFailure,
 	CONFLICT_LABEL,
@@ -10,17 +18,33 @@ import {
 	RED_CI_LABEL,
 	runWarden,
 } from "../../scripts/lib/merge-train-warden.mjs";
+import {
+	absentRunCommentMarker,
+	classifyHeadRun,
+	countExecutedSteps,
+	decideRunHealthActions,
+	fetchHeadRunHealth,
+	isStarvedRun,
+	RUN_HEALTH,
+} from "../../scripts/lib/warden-run-health.mjs";
 
 function pr(overrides: Record<string, unknown> = {}) {
 	return {
 		number: 1,
 		url: "https://github.com/acme/repo/pull/1",
 		headSha: "abc123",
+		headCommittedDate: null as string | null,
 		mergeStateStatus: "CLEAN",
 		autoMergeEnabled: false,
 		isFork: false,
 		labels: new Set<string>(),
 		checksUnknown: false,
+		checkRuns: [] as Array<{
+			name: string;
+			status: string | null;
+			conclusion: string | null;
+			url?: string;
+		}>,
 		failingRequiredChecks: [] as Array<{ name: string; url?: string }>,
 		unresolvedRequiredChecks: [] as string[],
 		...overrides,
@@ -277,8 +301,20 @@ function fakeGithub(routes: Record<string, unknown>) {
 		calls.push({ method, url, body });
 		const key = `${method} ${url.replace("https://api.github.com", "").split("?")[0]}`;
 		const entry = routes[key];
-		if (entry === undefined)
+		if (entry === undefined) {
+			// Default the #2184 run-health reads to well-formed empty payloads, so
+			// a test that only cares about labels/comments does not accidentally
+			// assert on an "unreadable runs list" error.
+			if (key.includes("/actions/runs"))
+				return {
+					ok: true,
+					status: 200,
+					json: async () => (key.endsWith("/jobs") ? { jobs: [] } : { workflow_runs: [] }),
+				};
+			if (key.endsWith("/comments") && method === "GET")
+				return { ok: true, status: 200, json: async () => [] };
 			return { ok: true, status: 200, json: async () => ({}) };
+		}
 		if (typeof entry === "function") return entry(body);
 		return { ok: true, status: 200, json: async () => entry };
 	};
@@ -744,7 +780,1041 @@ describe("merge-train warden GraphQL fetch + REST apply (#1844)", () => {
 						benign: false,
 					},
 				],
+				runHealth: null,
 			},
 		]);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// #2184: starved and absent workflow runs
+// ---------------------------------------------------------------------------
+
+/**
+ * The starved-run fixture is transcribed from the REAL incident run
+ * 32986328966 (`.github/workflows/ci.yml` on head 8e32f127, conclusion
+ * `failure`, `run_attempt` 1), read with `gh api` on 2026-08-26: six jobs at
+ * `status: "queued"` with no steps, plus one matrix job GitHub marked
+ * `completed`/`skipped` with no steps. That last job is why "every job is
+ * queued" is the WRONG predicate.
+ */
+function starvedJobs() {
+	return [
+		{ name: "Lint & type-check", status: "queued", conclusion: null, steps: [] },
+		{ name: "Unit tests", status: "queued", conclusion: null, steps: [] },
+		{ name: "Close-keyword syntax", status: "queued", conclusion: null, steps: [] },
+		{ name: "Dependency boundaries", status: "queued", conclusion: null, steps: [] },
+		{
+			name: "Changelog fragment (fast-fail)",
+			status: "queued",
+			conclusion: null,
+			steps: [],
+		},
+		{
+			name: "Production install build (--omit=dev, from source)",
+			status: "queued",
+			conclusion: null,
+			steps: [],
+		},
+		{
+			name: "Install test (${{ matrix.os }})",
+			status: "completed",
+			conclusion: "skipped",
+			steps: [],
+		},
+	];
+}
+
+function executedJobs() {
+	return [
+		{
+			name: "Unit tests",
+			status: "completed",
+			conclusion: "failure",
+			steps: [
+				{ name: "Set up job", status: "completed", conclusion: "success" },
+				{ name: "npm test", status: "completed", conclusion: "failure" },
+			],
+		},
+	];
+}
+
+function headRun(overrides: Record<string, unknown> = {}) {
+	return {
+		id: 32986328966,
+		path: ".github/workflows/ci.yml",
+		name: "CI",
+		status: "completed",
+		conclusion: "failure",
+		runAttempt: 1,
+		url: "https://github.com/acme/repo/actions/runs/32986328966",
+		createdAt: "2026-08-26T15:54:50Z",
+		jobs: starvedJobs(),
+		...overrides,
+	};
+}
+
+const NOW = Date.parse("2026-08-26T16:30:00Z");
+
+describe("starved-run detection (#2184)", () => {
+	it("counts only steps GitHub actually executed", () => {
+		expect(countExecutedSteps(starvedJobs())).toBe(0);
+		expect(countExecutedSteps(executedJobs())).toBe(2);
+		expect(countExecutedSteps(null)).toBe(0);
+	});
+
+	// The red-first anchor for the whole starved class: this is the real
+	// incident run's shape, and nothing in the pre-#2184 warden classified it.
+	it("classifies the real incident run (failure, zero executed steps) as starved", () => {
+		expect(isStarvedRun(headRun())).toBe(true);
+		const health = classifyHeadRun({
+			runs: [headRun(), headRun({ id: 2, path: ".github/workflows/lint.yml" })],
+			headCommittedDate: "2026-08-26T15:54:00Z",
+			now: NOW,
+		});
+		expect(health.classification).toBe(RUN_HEALTH.STARVED);
+		expect(health.starvedRuns.map((r) => r.path)).toEqual([
+			".github/workflows/ci.yml",
+			".github/workflows/lint.yml",
+		]);
+	});
+
+	// Mutation screen for the zero-executed-steps guard: widening the
+	// predicate to "concluded failure" alone makes every genuinely red PR look
+	// starved and re-runs it, which is exactly the failure this feature must
+	// not introduce.
+	it("does NOT call a genuinely failing run starved -- its jobs executed steps", () => {
+		expect(isStarvedRun(headRun({ jobs: executedJobs() }))).toBe(false);
+		const health = classifyHeadRun({
+			runs: [
+				headRun({ jobs: executedJobs() }),
+				headRun({
+					id: 2,
+					path: ".github/workflows/lint.yml",
+					conclusion: "success",
+					jobs: executedJobs(),
+				}),
+			],
+			headCommittedDate: "2026-08-26T15:54:00Z",
+			now: NOW,
+		});
+		expect(health.classification).toBe(RUN_HEALTH.NORMAL);
+		expect(health.starvedRuns).toEqual([]);
+	});
+
+	// A human cancelling a run also produces zero executed steps. Re-running it
+	// would fight the person who cancelled it.
+	it("does NOT call a cancelled zero-step run starved", () => {
+		expect(isStarvedRun(headRun({ conclusion: "cancelled" }))).toBe(false);
+	});
+
+	it("treats a startup_failure with no jobs at all as starved", () => {
+		expect(isStarvedRun(headRun({ conclusion: "startup_failure", jobs: [] }))).toBe(
+			true,
+		);
+	});
+
+	// Shape 10: an unreadable jobs list is missing information, not evidence.
+	it("classifies a failed run whose jobs could not be read as unknown, not starved", () => {
+		expect(isStarvedRun(headRun({ jobs: null }))).toBe(false);
+		const health = classifyHeadRun({
+			runs: [
+				headRun({ jobs: null }),
+				headRun({
+					id: 2,
+					path: ".github/workflows/lint.yml",
+					conclusion: "success",
+					jobs: executedJobs(),
+				}),
+			],
+			headCommittedDate: "2026-08-26T15:54:00Z",
+			now: NOW,
+		});
+		expect(health.classification).toBe(RUN_HEALTH.UNKNOWN);
+		expect(health.unknownWorkflows).toEqual([".github/workflows/ci.yml"]);
+	});
+
+	// The incident head carried an earlier lint.yml SUCCESS and a later
+	// lint.yml starved failure. Reading the older one wins the wrong answer.
+	it("judges the newest run per workflow, not the first one GitHub returns", () => {
+		const health = classifyHeadRun({
+			runs: [
+				headRun({
+					id: 1,
+					path: ".github/workflows/lint.yml",
+					conclusion: "success",
+					createdAt: "2026-08-26T15:40:00Z",
+					jobs: executedJobs(),
+				}),
+				headRun({
+					id: 2,
+					path: ".github/workflows/lint.yml",
+					createdAt: "2026-08-26T15:54:50Z",
+				}),
+				headRun({ id: 3, jobs: executedJobs(), conclusion: "success" }),
+			],
+			headCommittedDate: "2026-08-26T15:39:00Z",
+			now: NOW,
+		});
+		expect(health.classification).toBe(RUN_HEALTH.STARVED);
+		expect(health.starvedRuns.map((r) => r.id)).toEqual([2]);
+	});
+});
+
+describe("absent-run detection (#2184)", () => {
+	it("classifies a head with no tracked run past the grace window as absent", () => {
+		const health = classifyHeadRun({
+			runs: [],
+			headCommittedDate: "2026-08-26T16:00:00Z",
+			now: NOW,
+		});
+		expect(health.classification).toBe(RUN_HEALTH.ABSENT);
+		expect(health.absentWorkflows).toEqual([
+			".github/workflows/ci.yml",
+			".github/workflows/lint.yml",
+		]);
+		expect(health.ageMinutes).toBe(30);
+	});
+
+	// Mutation screen for the grace window: deleting it makes the warden shout
+	// "dropped dispatch" at every PR in the seconds between push and dispatch.
+	it("classifies a freshly pushed head with no run yet as pending, not absent", () => {
+		const health = classifyHeadRun({
+			runs: [],
+			headCommittedDate: "2026-08-26T16:28:00Z",
+			now: NOW,
+		});
+		expect(health.classification).toBe(RUN_HEALTH.PENDING);
+		expect(health.absentWorkflows).toEqual([]);
+		expect(health.pendingWorkflows).toHaveLength(2);
+	});
+
+	it("classifies a head with no readable commit date as unknown, not absent", () => {
+		const health = classifyHeadRun({
+			runs: [],
+			headCommittedDate: null,
+			now: NOW,
+		});
+		expect(health.classification).toBe(RUN_HEALTH.UNKNOWN);
+		expect(health.absentWorkflows).toEqual([]);
+	});
+
+	it("reports absence per workflow when only one of the two dispatched", () => {
+		const health = classifyHeadRun({
+			runs: [headRun({ conclusion: "success", jobs: executedJobs() })],
+			headCommittedDate: "2026-08-26T16:00:00Z",
+			now: NOW,
+		});
+		expect(health.classification).toBe(RUN_HEALTH.ABSENT);
+		expect(health.absentWorkflows).toEqual([".github/workflows/lint.yml"]);
+	});
+
+	it("classifies an in-flight run as pending, never as concluded normally", () => {
+		const health = classifyHeadRun({
+			runs: [
+				headRun({ status: "in_progress", conclusion: null, jobs: [] }),
+				headRun({
+					id: 2,
+					path: ".github/workflows/lint.yml",
+					conclusion: "success",
+					jobs: executedJobs(),
+				}),
+			],
+			headCommittedDate: "2026-08-26T16:00:00Z",
+			now: NOW,
+		});
+		expect(health.classification).toBe(RUN_HEALTH.PENDING);
+	});
+});
+
+describe("run-health recovery actions (#2184)", () => {
+	const starvedHealth = () => ({
+		classification: RUN_HEALTH.STARVED,
+		starvedRuns: [headRun()],
+		absentWorkflows: [],
+		unknownWorkflows: [],
+		pendingWorkflows: [],
+		ageMinutes: 36,
+	});
+
+	it("re-runs a starved run on its first attempt", () => {
+		expect(decideRunHealthActions(pr(), starvedHealth(), {})).toEqual([
+			{
+				type: "rerun-run",
+				runId: 32986328966,
+				workflowPath: ".github/workflows/ci.yml",
+			},
+		]);
+	});
+
+	// Mutation screen for rerun idempotence: GitHub's own run_attempt counter
+	// is the dedupe key. Deleting the check re-runs the same starved run every
+	// 10 minutes for as long as the outage lasts.
+	it("does NOT re-run a starved run the warden already re-ran (attempt 2)", () => {
+		const health = starvedHealth();
+		health.starvedRuns = [headRun({ runAttempt: 2 })];
+		const actions = decideRunHealthActions(pr(), health, {});
+		expect(actions).toEqual([
+			{
+				type: "note",
+				benign: false,
+				message: expect.stringContaining("STARVED again on attempt 2"),
+			},
+		]);
+		expect(actions.some((a) => a.type === "rerun-run")).toBe(false);
+	});
+
+	it("comments once per head when the dispatch is absent, carrying the head marker", () => {
+		const actions = decideRunHealthActions(
+			pr({ headSha: "cafe1234" }),
+			{
+				classification: RUN_HEALTH.ABSENT,
+				starvedRuns: [],
+				absentWorkflows: [".github/workflows/ci.yml"],
+				unknownWorkflows: [],
+				pendingWorkflows: [],
+				ageMinutes: 30,
+			},
+			{ absentCommentExists: false },
+		);
+		expect(actions).toEqual([
+			{
+				type: "comment",
+				body: expect.stringContaining(absentRunCommentMarker("cafe1234")),
+			},
+		]);
+		expect((actions[0] as { body: string }).body).toContain("never dispatched");
+	});
+
+	// Mutation screen for absent-comment dedupe.
+	it("does not repeat the absent-run comment while one already exists for this head", () => {
+		const actions = decideRunHealthActions(
+			pr({ headSha: "cafe1234" }),
+			{
+				classification: RUN_HEALTH.ABSENT,
+				starvedRuns: [],
+				absentWorkflows: [".github/workflows/ci.yml"],
+				unknownWorkflows: [],
+				pendingWorkflows: [],
+				ageMinutes: 30,
+			},
+			{ absentCommentExists: true },
+		);
+		expect(actions).toEqual([
+			{
+				type: "note",
+				benign: true,
+				message: expect.stringContaining("comment already posted"),
+			},
+		]);
+	});
+
+	it("proposes nothing for a healthy head", () => {
+		expect(
+			decideRunHealthActions(
+				pr(),
+				{
+					classification: RUN_HEALTH.NORMAL,
+					starvedRuns: [],
+					absentWorkflows: [],
+					unknownWorkflows: [],
+					pendingWorkflows: [],
+					ageMinutes: 5,
+				},
+				{},
+			),
+		).toEqual([]);
+	});
+});
+
+describe("run-health reads (#2184)", () => {
+	it("reads jobs only for FAILED tracked runs, never for healthy ones", async () => {
+		const { fetcher, calls } = fakeGithub({
+			"GET /repos/acme/repo/actions/runs": {
+				workflow_runs: [
+					{
+						id: 1,
+						path: ".github/workflows/ci.yml",
+						status: "completed",
+						conclusion: "failure",
+						run_attempt: 1,
+						created_at: "2026-08-26T15:54:50Z",
+					},
+					{
+						id: 2,
+						path: ".github/workflows/lint.yml",
+						status: "completed",
+						conclusion: "success",
+						run_attempt: 1,
+						created_at: "2026-08-26T15:54:50Z",
+					},
+					{
+						id: 3,
+						path: ".github/workflows/osv-scan.yml",
+						status: "completed",
+						conclusion: "failure",
+						run_attempt: 1,
+						created_at: "2026-08-26T15:54:50Z",
+					},
+				],
+			},
+			"GET /repos/acme/repo/actions/runs/1/jobs": { jobs: starvedJobs() },
+		});
+		const { health, errors } = await fetchHeadRunHealth(
+			fetcher,
+			"acme",
+			"repo",
+			"8e32f127",
+			"2026-08-26T15:54:00Z",
+			NOW,
+		);
+		expect(errors).toEqual([]);
+		expect(health.classification).toBe(RUN_HEALTH.STARVED);
+		const jobCalls = calls.filter((c) => c.url.includes("/jobs"));
+		expect(jobCalls).toHaveLength(1);
+		expect(jobCalls[0].url).toContain("/actions/runs/1/jobs");
+	});
+
+	// Shape 10 again, at the network seam: an API outage must not turn every
+	// open PR into a loud "GitHub dropped your dispatch" comment.
+	it("classifies an errored runs read as unknown, never as absent", async () => {
+		const { fetcher } = fakeGithub({
+			"GET /repos/acme/repo/actions/runs": () => ({
+				ok: false,
+				status: 500,
+				json: async () => ({}),
+			}),
+		});
+		const { health, errors } = await fetchHeadRunHealth(
+			fetcher,
+			"acme",
+			"repo",
+			"8e32f127",
+			"2026-08-26T15:00:00Z",
+			NOW,
+		);
+		expect(health.classification).toBe(RUN_HEALTH.UNKNOWN);
+		expect(health.absentWorkflows).toEqual([]);
+		expect(errors[0]).toContain("HTTP 500");
+	});
+});
+
+function runsRoute(runs: unknown[]) {
+	return { workflow_runs: runs };
+}
+
+describe("warden sweep with run health (#2184)", () => {
+	const starvedRunPayload = {
+		id: 77,
+		path: ".github/workflows/ci.yml",
+		status: "completed",
+		conclusion: "failure",
+		run_attempt: 1,
+		created_at: "2026-08-26T15:54:50Z",
+	};
+
+	it("re-runs a starved run once and records the classification in the sweep", async () => {
+		const page = graphqlPage([
+			prNode({
+				number: 7,
+				mergeStateStatus: "CLEAN",
+				commits: {
+					nodes: [
+						{
+							commit: {
+								oid: "deadbeef",
+								committedDate: "2026-08-26T15:54:00Z",
+								statusCheckRollup: { contexts: { nodes: [] } },
+							},
+						},
+					],
+				},
+			}),
+		]);
+		const { fetcher, calls } = fakeGithub({
+			"POST /graphql": page,
+			"GET /repos/acme/repo/actions/runs": runsRoute([
+				starvedRunPayload,
+				{
+					id: 78,
+					path: ".github/workflows/lint.yml",
+					status: "completed",
+					conclusion: "success",
+					run_attempt: 1,
+					created_at: "2026-08-26T15:54:50Z",
+				},
+			]),
+			"GET /repos/acme/repo/actions/runs/77/jobs": { jobs: starvedJobs() },
+		});
+		const results = await runWarden({
+			fetcher,
+			owner: "acme",
+			repo: "repo",
+			now: NOW,
+		});
+		const reruns = calls.filter(
+			(c) => c.method === "POST" && c.url.endsWith("/actions/runs/77/rerun"),
+		);
+		expect(reruns).toHaveLength(1);
+		expect(results[0].runHealth).toEqual({
+			classification: RUN_HEALTH.STARVED,
+			detail: expect.stringContaining("starved .github/workflows/ci.yml run 77"),
+		});
+		expect(results[0].applied).toContain(
+			"rerun-run:.github/workflows/ci.yml#77",
+		);
+	});
+
+	it("does not re-run a starved run already on attempt 2, and marks the run red", async () => {
+		const page = graphqlPage([
+			prNode({
+				number: 7,
+				mergeStateStatus: "CLEAN",
+				commits: {
+					nodes: [
+						{
+							commit: {
+								oid: "deadbeef",
+								committedDate: "2026-08-26T15:54:00Z",
+								statusCheckRollup: { contexts: { nodes: [] } },
+							},
+						},
+					],
+				},
+			}),
+		]);
+		const { fetcher, calls } = fakeGithub({
+			"POST /graphql": page,
+			"GET /repos/acme/repo/actions/runs": runsRoute([
+				{ ...starvedRunPayload, run_attempt: 2 },
+			]),
+			"GET /repos/acme/repo/actions/runs/77/jobs": { jobs: starvedJobs() },
+		});
+		const results = await runWarden({
+			fetcher,
+			owner: "acme",
+			repo: "repo",
+			now: NOW,
+		});
+		expect(calls.some((c) => c.url.includes("/rerun"))).toBe(false);
+		expect(results[0].errors).toContainEqual({
+			message: expect.stringContaining("STARVED again on attempt 2"),
+			benign: false,
+		});
+	});
+
+	it("comments once on an absent dispatch and never twice for the same head", async () => {
+		const page = graphqlPage([
+			prNode({
+				number: 7,
+				mergeStateStatus: "CLEAN",
+				commits: {
+					nodes: [
+						{
+							commit: {
+								oid: "deadbeef",
+								committedDate: "2026-08-26T15:00:00Z",
+								statusCheckRollup: { contexts: { nodes: [] } },
+							},
+						},
+					],
+				},
+			}),
+		]);
+		const first = fakeGithub({
+			"POST /graphql": page,
+			"GET /repos/acme/repo/actions/runs": runsRoute([]),
+		});
+		await runWarden({
+			fetcher: first.fetcher,
+			owner: "acme",
+			repo: "repo",
+			now: NOW,
+		});
+		const posted = first.calls.filter(
+			(c) => c.method === "POST" && c.url.endsWith("/issues/7/comments"),
+		);
+		expect(posted).toHaveLength(1);
+		expect(String((posted[0].body as { body: string }).body)).toContain(
+			absentRunCommentMarker("deadbeef"),
+		);
+
+		const second = fakeGithub({
+			"POST /graphql": page,
+			"GET /repos/acme/repo/actions/runs": runsRoute([]),
+			"GET /repos/acme/repo/issues/7/comments": [
+				{ body: (posted[0].body as { body: string }).body },
+			],
+		});
+		await runWarden({
+			fetcher: second.fetcher,
+			owner: "acme",
+			repo: "repo",
+			now: NOW,
+		});
+		expect(
+			second.calls.filter(
+				(c) => c.method === "POST" && c.url.endsWith("/issues/7/comments"),
+			),
+		).toHaveLength(0);
+	});
+
+	it("names a run-health classification for every swept PR, even a quiet one", async () => {
+		const page = graphqlPage([
+			prNode({
+				number: 7,
+				mergeStateStatus: "CLEAN",
+				commits: {
+					nodes: [
+						{
+							commit: {
+								oid: "deadbeef",
+								committedDate: "2026-08-26T16:29:00Z",
+								statusCheckRollup: {
+									contexts: {
+										nodes: [
+											checkRun("Unit tests", "SUCCESS"),
+											checkRun("Lint & type-check", "SUCCESS"),
+										],
+									},
+								},
+							},
+						},
+					],
+				},
+			}),
+		]);
+		const { fetcher } = fakeGithub({
+			"POST /graphql": page,
+			"GET /repos/acme/repo/actions/runs": runsRoute([]),
+		});
+		const results = await runWarden({
+			fetcher,
+			owner: "acme",
+			repo: "repo",
+			now: NOW,
+		});
+		expect(results[0].applied).toEqual([]);
+		expect(results[0].runHealth?.classification).toBe(RUN_HEALTH.PENDING);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// #2185: the label-gated merge lane
+// ---------------------------------------------------------------------------
+
+const HEALTHY = {
+	classification: RUN_HEALTH.NORMAL,
+	starvedRuns: [],
+	absentWorkflows: [],
+	unknownWorkflows: [],
+	pendingWorkflows: [],
+	ageMinutes: 20,
+};
+
+function greenChecks() {
+	return [
+		{ name: "Unit tests", status: "COMPLETED", conclusion: "SUCCESS" },
+		{ name: "Lint & type-check", status: "COMPLETED", conclusion: "SUCCESS" },
+	];
+}
+
+function approved(overrides: Record<string, unknown> = {}) {
+	return pr({
+		labels: new Set([TRAIN_APPROVED_LABEL]),
+		checkRuns: greenChecks(),
+		...overrides,
+	});
+}
+
+describe("merge-lane gate (#2185)", () => {
+	it("merges an approved PR whose current head concluded green", () => {
+		const gate = evaluateMergeGate(approved(), HEALTHY);
+		expect(gate).toMatchObject({
+			merge: true,
+			method: "merge",
+			reason: MERGE_GATE_REASON.GREEN,
+		});
+	});
+
+	it("uses the squash method when the PR also carries train:squash", () => {
+		const gate = evaluateMergeGate(
+			approved({
+				labels: new Set([TRAIN_APPROVED_LABEL, TRAIN_SQUASH_LABEL]),
+			}),
+			HEALTHY,
+		);
+		expect(gate).toMatchObject({ merge: true, method: "squash" });
+	});
+
+	// The label IS the review verdict. Without it the lane is invisible: no
+	// merge, and no comment either.
+	it("never touches or comments on an unlabeled PR", () => {
+		const gate = evaluateMergeGate(pr({ checkRuns: greenChecks() }), HEALTHY);
+		expect(gate).toMatchObject({
+			merge: false,
+			silent: true,
+			reason: MERGE_GATE_REASON.NOT_APPROVED,
+		});
+	});
+
+	// AC2 + AGENTS.md shape 11. This is also the head-change re-gate: a fix
+	// round's new head has no check runs yet, so the gate reads absent.
+	it("treats an absent required check as not-green (the head-change re-gate)", () => {
+		const gate = evaluateMergeGate(
+			approved({ headSha: "newhead", checkRuns: [] }),
+			HEALTHY,
+		);
+		expect(gate).toMatchObject({
+			merge: false,
+			silent: false,
+			reason: MERGE_GATE_REASON.REQUIRED_CHECK_ABSENT,
+		});
+		expect(gate.detail).toContain("absent required check is not a passing one");
+	});
+
+	it("treats a required check still in progress as not-green", () => {
+		const gate = evaluateMergeGate(
+			approved({
+				checkRuns: [
+					{ name: "Unit tests", status: "IN_PROGRESS", conclusion: null },
+					{
+						name: "Lint & type-check",
+						status: "COMPLETED",
+						conclusion: "SUCCESS",
+					},
+				],
+			}),
+			HEALTHY,
+		);
+		expect(gate).toMatchObject({
+			merge: false,
+			reason: MERGE_GATE_REASON.REQUIRED_CHECK_UNCONCLUDED,
+		});
+	});
+
+	// Mutation screen: a gate that reads STATUS instead of CONCLUSION merges a
+	// PR whose required check completed and FAILED.
+	it("treats a completed-but-failed required check as not-green", () => {
+		const gate = evaluateMergeGate(
+			approved({
+				checkRuns: [
+					{ name: "Unit tests", status: "COMPLETED", conclusion: "FAILURE" },
+					{
+						name: "Lint & type-check",
+						status: "COMPLETED",
+						conclusion: "SUCCESS",
+					},
+				],
+			}),
+			HEALTHY,
+		);
+		expect(gate).toMatchObject({
+			merge: false,
+			reason: MERGE_GATE_REASON.REQUIRED_CHECK_NOT_SUCCESS,
+		});
+	});
+
+	it("treats a missing check rollup as not-green", () => {
+		const gate = evaluateMergeGate(
+			approved({ checksUnknown: true }),
+			HEALTHY,
+		);
+		expect(gate).toMatchObject({
+			merge: false,
+			reason: MERGE_GATE_REASON.CHECKS_UNKNOWN,
+		});
+	});
+
+	// AC3: composes with #2184. Both required checks can read SUCCESS from an
+	// earlier attempt while the head's current run is starved or never fired.
+	it("treats a starved run health as not-green even with green required checks", () => {
+		const gate = evaluateMergeGate(approved(), {
+			...HEALTHY,
+			classification: RUN_HEALTH.STARVED,
+		});
+		expect(gate).toMatchObject({
+			merge: false,
+			reason: MERGE_GATE_REASON.RUN_HEALTH,
+		});
+	});
+
+	it("treats an absent run health as not-green even with green required checks", () => {
+		const gate = evaluateMergeGate(approved(), {
+			...HEALTHY,
+			classification: RUN_HEALTH.ABSENT,
+		});
+		expect(gate).toMatchObject({
+			merge: false,
+			reason: MERGE_GATE_REASON.RUN_HEALTH,
+		});
+	});
+
+	it("blocks on a failing non-advisory check and allows a failing advisory one", () => {
+		expect(
+			evaluateMergeGate(
+				approved({
+					checkRuns: [
+						...greenChecks(),
+						{ name: "Install test (ubuntu)", status: "COMPLETED", conclusion: "FAILURE" },
+					],
+				}),
+				HEALTHY,
+			),
+		).toMatchObject({ merge: false, reason: MERGE_GATE_REASON.FAILING_CHECK });
+		expect(
+			evaluateMergeGate(
+				approved({
+					mergeStateStatus: "UNSTABLE",
+					checkRuns: [
+						...greenChecks(),
+						{
+							name: "SonarCloud Code Analysis",
+							status: "COMPLETED",
+							conclusion: "FAILURE",
+						},
+					],
+				}),
+				HEALTHY,
+			),
+		).toMatchObject({ merge: true });
+	});
+
+	it("merges from CLEAN and BEHIND, and never from DIRTY, BLOCKED, or UNKNOWN", () => {
+		for (const state of ["CLEAN", "BEHIND"]) {
+			expect(
+				evaluateMergeGate(approved({ mergeStateStatus: state }), HEALTHY),
+			).toMatchObject({ merge: true });
+		}
+		for (const state of ["DIRTY", "BLOCKED", "DRAFT", "UNKNOWN"]) {
+			expect(
+				evaluateMergeGate(approved({ mergeStateStatus: state }), HEALTHY),
+			).toMatchObject({ merge: false, reason: MERGE_GATE_REASON.MERGE_STATE });
+		}
+	});
+});
+
+function lanePrNode(overrides: Record<string, unknown> = {}) {
+	const {
+		labels = [],
+		checks = greenChecks(),
+		committedDate = "2026-08-26T16:00:00Z",
+		...rest
+	} = overrides as {
+		labels?: string[];
+		checks?: Array<{ name: string; status: string; conclusion: string | null }>;
+		committedDate?: string;
+	} & Record<string, unknown>;
+	return prNode({
+		number: 7,
+		mergeStateStatus: "CLEAN",
+		labels: { nodes: labels.map((name) => ({ name })) },
+		commits: {
+			nodes: [
+				{
+					commit: {
+						oid: "deadbeef",
+						committedDate,
+						statusCheckRollup: {
+							contexts: {
+								nodes: checks.map((c) => ({
+									__typename: "CheckRun",
+									name: c.name,
+									status: c.status,
+									conclusion: c.conclusion,
+									detailsUrl: `https://example/${c.name}`,
+								})),
+							},
+						},
+					},
+				},
+			],
+		},
+		...rest,
+	});
+}
+
+const HEALTHY_RUNS = [
+	{
+		id: 1,
+		path: ".github/workflows/ci.yml",
+		status: "completed",
+		conclusion: "success",
+		run_attempt: 1,
+		created_at: "2026-08-26T16:05:00Z",
+	},
+	{
+		id: 2,
+		path: ".github/workflows/lint.yml",
+		status: "completed",
+		conclusion: "success",
+		run_attempt: 1,
+		created_at: "2026-08-26T16:05:00Z",
+	},
+];
+
+describe("merge-lane sweep (#2185)", () => {
+	it("merges an approved green PR with the exact head SHA and comments", async () => {
+		const { fetcher, calls } = fakeGithub({
+			"POST /graphql": graphqlPage([
+				lanePrNode({ labels: [TRAIN_APPROVED_LABEL] }),
+			]),
+			"GET /repos/acme/repo/actions/runs": runsRoute(HEALTHY_RUNS),
+		});
+		const results = await runMergeLane({
+			fetcher,
+			owner: "acme",
+			repo: "repo",
+			now: NOW,
+		});
+		expect(results[0]).toMatchObject({ number: 7, merged: true });
+		expect(calls).toContainEqual({
+			method: "PUT",
+			url: "https://api.github.com/repos/acme/repo/pulls/7/merge",
+			body: { merge_method: "merge", sha: "deadbeef" },
+		});
+		const comments = calls.filter(
+			(c) => c.method === "POST" && c.url.endsWith("/issues/7/comments"),
+		);
+		expect(comments).toHaveLength(1);
+		expect(String((comments[0].body as { body: string }).body)).toContain(
+			"merged",
+		);
+	});
+
+	// AC1's second half, and the mutation screen for the label gate: an
+	// unlabeled PR must cost ZERO calls beyond the shared list read.
+	it("issues no call at all for an unlabeled PR", async () => {
+		const { fetcher, calls } = fakeGithub({
+			"POST /graphql": graphqlPage([lanePrNode({ labels: [] })]),
+			"GET /repos/acme/repo/actions/runs": runsRoute(HEALTHY_RUNS),
+		});
+		const results = await runMergeLane({
+			fetcher,
+			owner: "acme",
+			repo: "repo",
+			now: NOW,
+		});
+		expect(results).toEqual([]);
+		expect(calls).toHaveLength(1);
+		expect(calls[0].url).toBe("https://api.github.com/graphql");
+	});
+
+	// AC2: the head moved after labeling, so the new head has no concluded
+	// checks. The label survives (the lane never removes it) and the PR gets a
+	// comment saying the lane is waiting.
+	it("holds a labeled PR whose head changed, keeps the label, and says it is waiting", async () => {
+		const { fetcher, calls } = fakeGithub({
+			"POST /graphql": graphqlPage([
+				lanePrNode({ labels: [TRAIN_APPROVED_LABEL], checks: [] }),
+			]),
+			"GET /repos/acme/repo/actions/runs": runsRoute(HEALTHY_RUNS),
+		});
+		const results = await runMergeLane({
+			fetcher,
+			owner: "acme",
+			repo: "repo",
+			now: NOW,
+		});
+		expect(results[0]).toMatchObject({
+			merged: false,
+			reason: MERGE_GATE_REASON.REQUIRED_CHECK_ABSENT,
+		});
+		expect(calls.some((c) => c.url.endsWith("/merge"))).toBe(false);
+		expect(
+			calls.some(
+				(c) =>
+					c.method === "DELETE" && c.url.includes(encodeURIComponent("train:")),
+			),
+		).toBe(false);
+		const comment = calls.find(
+			(c) => c.method === "POST" && c.url.endsWith("/issues/7/comments"),
+		);
+		expect(String((comment?.body as { body: string }).body)).toContain(
+			"label stays on",
+		);
+	});
+
+	it("does not repeat the same hold comment for the same head and reason", async () => {
+		const marker = laneCommentMarker(
+			"deadbeef",
+			MERGE_GATE_REASON.REQUIRED_CHECK_ABSENT,
+		);
+		const { fetcher, calls } = fakeGithub({
+			"POST /graphql": graphqlPage([
+				lanePrNode({ labels: [TRAIN_APPROVED_LABEL], checks: [] }),
+			]),
+			"GET /repos/acme/repo/actions/runs": runsRoute(HEALTHY_RUNS),
+			"GET /repos/acme/repo/issues/7/comments": [{ body: `held\n${marker}` }],
+		});
+		await runMergeLane({ fetcher, owner: "acme", repo: "repo", now: NOW });
+		expect(
+			calls.filter(
+				(c) => c.method === "POST" && c.url.endsWith("/issues/7/comments"),
+			),
+		).toHaveLength(0);
+	});
+
+	// AC3 at the sweep level: green checks plus a starved run must not merge.
+	it("refuses to merge a green-looking PR whose head run is starved", async () => {
+		const { fetcher, calls } = fakeGithub({
+			"POST /graphql": graphqlPage([
+				lanePrNode({ labels: [TRAIN_APPROVED_LABEL] }),
+			]),
+			"GET /repos/acme/repo/actions/runs": runsRoute([
+				{
+					id: 9,
+					path: ".github/workflows/ci.yml",
+					status: "completed",
+					conclusion: "failure",
+					run_attempt: 1,
+					created_at: "2026-08-26T16:05:00Z",
+				},
+				HEALTHY_RUNS[1],
+			]),
+			"GET /repos/acme/repo/actions/runs/9/jobs": { jobs: starvedJobs() },
+		});
+		const results = await runMergeLane({
+			fetcher,
+			owner: "acme",
+			repo: "repo",
+			now: NOW,
+		});
+		expect(results[0]).toMatchObject({
+			merged: false,
+			reason: MERGE_GATE_REASON.RUN_HEALTH,
+			runHealth: RUN_HEALTH.STARVED,
+		});
+		expect(calls.some((c) => c.url.endsWith("/merge"))).toBe(false);
+	});
+
+	it("records a 409 from a head that moved mid-cycle as benign, and comments", async () => {
+		const { fetcher, calls } = fakeGithub({
+			"POST /graphql": graphqlPage([
+				lanePrNode({ labels: [TRAIN_APPROVED_LABEL] }),
+			]),
+			"GET /repos/acme/repo/actions/runs": runsRoute(HEALTHY_RUNS),
+			"PUT /repos/acme/repo/pulls/7/merge": () => ({
+				ok: false,
+				status: 409,
+				json: async () => ({}),
+			}),
+		});
+		const results = await runMergeLane({
+			fetcher,
+			owner: "acme",
+			repo: "repo",
+			now: NOW,
+		});
+		expect(results[0].merged).toBe(false);
+		expect(results[0].errors).toContainEqual({
+			message: expect.stringContaining("HTTP 409"),
+			benign: true,
+		});
+		expect(
+			calls.some(
+				(c) => c.method === "POST" && c.url.endsWith("/issues/7/comments"),
+			),
+		).toBe(true);
 	});
 });

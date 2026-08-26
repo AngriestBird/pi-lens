@@ -4,11 +4,25 @@
  * open PRs for merge conflicts, stale auto-merge, and red required checks.
  *
  * The warden OBSERVES AND ANNOTATES ONLY. It never resolves conflicts,
- * never merges, and never pushes to a PR branch. The one exception is the
- * GitHub-sanctioned "update branch" kick for a PR that already has auto-merge
- * armed and has fallen BEHIND -- that is the same button a human clicks in
- * the PR UI, exposed here as the API GitHub documents for it.
+ * never merges, and never pushes to a PR branch. Two exceptions, both
+ * GitHub-sanctioned buttons a human clicks in the UI:
+ *
+ * - "update branch" for a PR that already has auto-merge armed and has
+ *   fallen BEHIND.
+ * - "re-run workflow" for a run this sweep classified as STARVED (#2184) --
+ *   at most once per run, keyed on GitHub's own `run_attempt` counter.
+ *
+ * Merging stays out of this file by construction; the label-gated merge lane
+ * lives in scripts/lib/merge-train-lane.mjs with its own workflow and its own
+ * permissions (#2185).
  */
+
+import {
+	decideRunHealthActions,
+	fetchHeadRunHealth,
+	absentRunCommentMarker,
+	RUN_HEALTH,
+} from "./warden-run-health.mjs";
 
 export const CONFLICT_LABEL = "conflict";
 export const RED_CI_LABEL = "red-ci";
@@ -39,12 +53,14 @@ query($owner: String!, $name: String!, $after: String) {
           nodes {
             commit {
               oid
+              committedDate
               statusCheckRollup {
                 contexts(first: 100) {
                   nodes {
                     __typename
                     ... on CheckRun {
                       name
+                      status
                       conclusion
                       detailsUrl
                     }
@@ -88,8 +104,19 @@ function normalizePr(node) {
 	const checksUnknown = rollup == null;
 	const contexts = rollup?.contexts?.nodes ?? [];
 	const checkRunsByName = new Map();
+	const checkRuns = [];
 	for (const c of contexts) {
-		if (c.__typename === "CheckRun") checkRunsByName.set(c.name, c);
+		if (c.__typename !== "CheckRun") continue;
+		checkRunsByName.set(c.name, c);
+		// The full list (name + status + conclusion) is what the merge lane's
+		// "zero non-advisory failing checks" gate reads (#2185). The warden
+		// itself still looks only at REQUIRED_CHECKS below.
+		checkRuns.push({
+			name: c.name,
+			status: c.status ?? null,
+			conclusion: c.conclusion ?? null,
+			url: c.detailsUrl,
+		});
 	}
 	const failingRequiredChecks = [];
 	// A required check that hasn't reported yet (absent from the rollup) or is
@@ -113,6 +140,11 @@ function normalizePr(node) {
 		number: node.number,
 		url: node.url,
 		headSha: headCommit?.oid,
+		// GraphQL's `pushedDate` is deprecated and reads null on every real PR
+		// in this repository (probed 2026-08-26 against #2180/#2181), so the
+		// committer date is the available age signal for "the dispatch should
+		// have landed by now" (#2184).
+		headCommittedDate: headCommit?.committedDate ?? null,
 		mergeStateStatus: node.mergeStateStatus,
 		autoMergeEnabled: Boolean(node.autoMergeRequest),
 		// isCrossRepository is GitHub's own fork signal: true when the PR's head
@@ -123,6 +155,7 @@ function normalizePr(node) {
 		isFork: Boolean(node.isCrossRepository),
 		labels,
 		checksUnknown,
+		checkRuns,
 		failingRequiredChecks,
 		unresolvedRequiredChecks,
 	};
@@ -302,6 +335,14 @@ export async function applyAction(fetcher, owner, repo, pr, action) {
 				`${base}/pulls/${pr.number}/update-branch`,
 				{ expected_head_sha: pr.headSha },
 			);
+		case "rerun-run":
+			// Full rerun, not rerun-failed-jobs: a starved run has no failed jobs
+			// to re-run, because nothing ever executed (#2184).
+			return restJson(
+				fetcher,
+				"POST",
+				`${base}/actions/runs/${action.runId}/rerun`,
+			);
 		default:
 			throw new Error(`unknown warden action type: ${action.type}`);
 	}
@@ -315,7 +356,37 @@ export async function applyAction(fetcher, owner, repo, pr, action) {
  * BENIGN_HTTP_STATUSES) or a "note" is expected noise, never cause for the
  * scheduled run itself to go red; anything else is a real failure.
  */
-export async function runWarden({ fetcher, owner, repo }) {
+/**
+ * Does the absent-run comment for THIS head already exist? Per-head dedupe
+ * needs a per-head key, and the warden's usual label-as-dedupe-key idiom
+ * cannot carry one: a label says "absent" but not "absent for which head", so
+ * a second consecutive dropped dispatch would go unreported. The comment
+ * itself carries the head SHA as an HTML marker, and this reads it back.
+ *
+ * Called ONLY for a head already classified absent, so the extra REST call
+ * lands on the anomalous minority of PRs, never on the healthy sweep.
+ */
+export async function hasAbsentRunComment(fetcher, owner, repo, pr) {
+	const marker = absentRunCommentMarker(pr.headSha);
+	const response = await fetcher(
+		`https://api.github.com/repos/${owner}/${repo}/issues/${pr.number}/comments?per_page=100`,
+		{ headers: { accept: "application/vnd.github+json" } },
+	);
+	if (!response.ok)
+		throw new Error(`comments read -> HTTP ${response.status}`);
+	const comments = await response.json();
+	if (!Array.isArray(comments))
+		throw new Error("comments read returned no array");
+	return comments.some((c) => String(c?.body ?? "").includes(marker));
+}
+
+function describeApplied(action) {
+	if (action.type === "rerun-run")
+		return `rerun-run:${action.workflowPath}#${action.runId}`;
+	return action.type + (action.label ? `:${action.label}` : "");
+}
+
+export async function runWarden({ fetcher, owner, repo, now = Date.now() }) {
 	const { prs, errors: listErrors } = await fetchOpenPullRequests(
 		fetcher,
 		owner,
@@ -329,12 +400,52 @@ export async function runWarden({ fetcher, owner, repo }) {
 			mergeStateStatus: null,
 			applied: [],
 			errors: listErrors.map((message) => ({ message, benign: false })),
+			runHealth: null,
 		});
 	}
 	for (const pr of prs) {
-		const actions = decideActions(pr);
 		const applied = [];
 		const errors = [];
+		// #2184: run health is read for EVERY open PR head, so the sweep record
+		// can name a classification per PR even when nothing needed doing. A
+		// stalled train is then visible in one warden cycle instead of at a
+		// session gate's timeout.
+		const { health, errors: healthErrors } = await fetchHeadRunHealth(
+			fetcher,
+			owner,
+			repo,
+			pr.headSha,
+			pr.headCommittedDate,
+			now,
+		);
+		for (const message of healthErrors)
+			errors.push({ message: `PR #${pr.number}: ${message}`, benign: true });
+
+		let absentCommentExists = false;
+		if (health.absentWorkflows.length > 0) {
+			try {
+				absentCommentExists = await hasAbsentRunComment(
+					fetcher,
+					owner,
+					repo,
+					pr,
+				);
+			} catch (error) {
+				// Fail CLOSED on an unreadable comment list: assume the comment is
+				// already there rather than risk re-posting the loud dropped-dispatch
+				// notice on every tick of an API outage.
+				absentCommentExists = true;
+				errors.push({
+					message: `PR #${pr.number}: ${error instanceof Error ? error.message : String(error)}; absent-run comment suppressed this run`,
+					benign: true,
+				});
+			}
+		}
+
+		const actions = [
+			...decideActions(pr),
+			...decideRunHealthActions(pr, health, { absentCommentExists }),
+		];
 		for (const action of actions) {
 			if (action.type === "note") {
 				errors.push({ message: action.message, benign: action.benign ?? true });
@@ -355,7 +466,7 @@ export async function runWarden({ fetcher, owner, repo }) {
 						`${action.type} ${action.label ?? ""} -> HTTP ${response.status}${suffix}`.trim();
 					errors.push({ message, benign: classification.benign });
 				} else {
-					applied.push(action.type + (action.label ? `:${action.label}` : ""));
+					applied.push(describeApplied(action));
 				}
 			} catch (error) {
 				errors.push({
@@ -370,7 +481,30 @@ export async function runWarden({ fetcher, owner, repo }) {
 			mergeStateStatus: pr.mergeStateStatus,
 			applied,
 			errors,
+			runHealth: summarizeRunHealth(health),
 		});
 	}
 	return results;
 }
+
+/**
+ * The sweep record for one head (#2184 AC3): a classification plus the exact
+ * workflows behind it, short enough for one line of the run summary.
+ */
+export function summarizeRunHealth(health) {
+	const detail = [];
+	for (const run of health.starvedRuns)
+		detail.push(`starved ${run.path} run ${run.id} (attempt ${run.runAttempt})`);
+	if (health.absentWorkflows.length > 0)
+		detail.push(`no run for ${health.absentWorkflows.join(", ")}`);
+	if (health.unknownWorkflows.length > 0)
+		detail.push(`unreadable ${health.unknownWorkflows.join(", ")}`);
+	if (health.pendingWorkflows.length > 0)
+		detail.push(`in flight ${health.pendingWorkflows.join(", ")}`);
+	return {
+		classification: health.classification,
+		detail: detail.join("; "),
+	};
+}
+
+export { RUN_HEALTH };
