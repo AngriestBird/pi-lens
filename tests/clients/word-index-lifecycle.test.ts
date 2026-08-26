@@ -8,10 +8,12 @@
  * (decision 2: fold into the existing warmup, not a new mechanism).
  */
 
+import * as fs from "node:fs";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	loadProjectSnapshot,
 	PROJECT_SNAPSHOT_VERSION,
+	getProjectSnapshotPath,
 	saveProjectSnapshot,
 } from "../../clients/project-snapshot.js";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
@@ -41,6 +43,13 @@ function setStartupMode(mode: "full" | "quick"): () => void {
 		if (prev === undefined) delete process.env.PI_LENS_STARTUP_MODE;
 		else process.env.PI_LENS_STARTUP_MODE = prev;
 	};
+}
+
+async function waitForPersistedSnapshot(cwd: string): Promise<void> {
+	await vi.waitFor(
+		() => expect(fs.existsSync(getProjectSnapshotPath(cwd))).toBe(true),
+		{ timeout: 5000 },
+	);
 }
 
 function makeDeps(tmpDir: string, runtime: RuntimeCoordinator, dbg = vi.fn()) {
@@ -241,6 +250,7 @@ describe("word-index lifecycle — full mode (#348)", () => {
 			await vi.waitFor(() => expect(runtime1.wordIndex).not.toBeNull(), {
 				timeout: 5000,
 			});
+			await waitForPersistedSnapshot(env.tmpDir);
 
 			// Second run against the same cwd/seq should reuse, not rebuild.
 			const runtime2 = new RuntimeCoordinator();
