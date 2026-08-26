@@ -21,7 +21,23 @@ export declare function shouldPrint(
 	},
 ): boolean;
 
+export interface MemoryWatchState {
+	totalMb: number;
+	lowWaterMb: number;
+	lowWaterAt: string | null;
+	/** The pid the wrapper was watching, to match against the kernel's victim. */
+	childPid?: number | null;
+}
+
+export declare const EXHAUSTION_AVAILABLE_FRACTION: number;
+export declare const EXHAUSTION_AVAILABLE_FLOOR_MB: number;
+
+export declare function looksMemoryExhausted(watch: {
+	totalMb: number;
+	lowWaterMb: number;
+}): boolean;
+
 export declare function formatVerdict(
 	exit: { code: number | null; signal: string | null },
-	watch: { totalMb: number; lowWaterMb: number; lowWaterAt: string | null },
+	watch: MemoryWatchState,
 ): string;
