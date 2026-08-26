@@ -568,7 +568,7 @@ export function createProjectIgnoreMatcher(
 	rootDir: string,
 	extraPatterns: string[] = [],
 	globalPatterns: string[] = [],
-): ProjectIgnoreMatcher {
+): ProjectIgnoreMatcherWithFreshness {
 	const resolvedRoot = resolveGitIgnoreRoot(rootDir);
 	// Precedence is gitignore order: LATER patterns override earlier ones. So
 	// global (lowest) → project .gitignore → project .pi-lens.json (highest),
@@ -680,8 +680,17 @@ export function getProjectIgnoreMatcher(rootDir: string): ProjectIgnoreMatcher {
 		if (hasIgnoreSourceDrift(cached.ignoreSources)) {
 			for (const source of cached.ignoreSources) {
 				if (hasIgnoreSourceDrift([source])) {
+					const sourceIndex = cached.ignoreSources.findIndex(
+						(cachedSource) => cachedSource.path === source.path,
+					);
 					invalidateProjectIgnoreMatcherForPath(source.path);
 					cached.matcher.refreshConsumedIgnoreSource(source.path);
+					const refreshedSource = cached.matcher
+						.getConsumedIgnoreSources()
+						.find((current) => current.path === source.path);
+					if (sourceIndex !== -1 && refreshedSource !== undefined) {
+						cached.ignoreSources.splice(sourceIndex, 1, refreshedSource);
+					}
 				}
 			}
 		}
@@ -716,7 +725,7 @@ export function getProjectIgnoreMatcher(rootDir: string): ProjectIgnoreMatcher {
 		resolvedRoot,
 		projectConfig.ignore,
 		getGlobalIgnorePatterns(),
-	) as ProjectIgnoreMatcherWithFreshness;
+	);
 	projectIgnoreMatcherCache.set(resolvedRoot, {
 		ignoreSources: [...matcher.getConsumedIgnoreSources()],
 		lastIgnoreFreshnessCheckMs: Date.now(),

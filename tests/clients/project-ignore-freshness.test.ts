@@ -157,4 +157,41 @@ describe("project ignore freshness probe (#2159)", () => {
 			env.cleanup();
 		}
 	});
+
+	it("settles to one source stat per cadence window after external edit", () => {
+		const env = setupTestEnvironment("pi-lens-2159-settled-");
+		try {
+			const nested = path.join(env.tmpDir, "package");
+			fs.mkdirSync(nested, { recursive: true });
+			const ignorePath = path.join(nested, ".gitignore");
+			const target = path.join(nested, "generated.ts");
+			fs.writeFileSync(ignorePath, "generated.ts\n");
+			const matcher = getProjectIgnoreMatcher(env.tmpDir);
+			matcher.isIgnored(target);
+			getProjectIgnoreMatcher(env.tmpDir);
+
+			const statSpy = vi.spyOn(fs, "statSync");
+			const sourceStats = () =>
+				statSpy.mock.calls.filter(
+					([filePath]) => filePath === ignorePath,
+				);
+			statSpy.mockClear();
+			fs.writeFileSync(ignorePath, "!generated.ts\n");
+			vi.useFakeTimers();
+			const start = Date.now();
+			const perWindow: number[] = [];
+			for (let window = 1; window <= 6; window++) {
+				vi.setSystemTime(
+					start + window * PROJECT_IGNORE_FRESHNESS_CADENCE_MS + 1,
+				);
+				const before = sourceStats().length;
+				getProjectIgnoreMatcher(env.tmpDir).isIgnored(target);
+				perWindow.push(sourceStats().length - before);
+			}
+
+			expect(perWindow.slice(1)).toEqual([1, 1, 1, 1, 1]);
+		} finally {
+			env.cleanup();
+		}
+	});
 });
