@@ -87,6 +87,9 @@ describe("availability-classifiedby scanner self-test", () => {
 		'logAvailabilityDecision({ tool: "x", verdict: "available", outcome: "success", cause: "ok", note: "unmatched ( quote" });',
 		'// logAvailabilityDecision({ cause: "ok" });',
 		'fakeLogAvailabilityDecision({ cause: "ok" });',
+		"function logAvailabilityDecision(decision) {",
+		'logAvailabilityDecision({ ...base, verdict: "available", outcome: "success", cause: "ok", classifiedBy: "probe" });',
+		"logAvailabilityDecision(decisionVar);",
 	].join("\n");
 	const found = scanSource(fixture, "fixture.ts");
 
@@ -100,6 +103,9 @@ describe("availability-classifiedby scanner self-test", () => {
 			[4, true, true],
 			[5, false, false],
 			[6, true, false],
+			// Line 9 (the declaration) is deliberately absent here.
+			[10, true, true],
+			[11, false, false],
 		]);
 	});
 
@@ -109,5 +115,19 @@ describe("availability-classifiedby scanner self-test", () => {
 
 	it("does not match an identifier that merely ends in the callee name", () => {
 		expect(found.some((site) => site.line === 8)).toBe(false);
+	});
+
+	it("excludes the function's own declaration (#2226 review F3)", () => {
+		expect(found.some((site) => site.line === 9)).toBe(false);
+	});
+
+	it("finds a call whose fields arrive via a spread (#2226 review F3)", () => {
+		const site = found.find((s) => s.line === 10);
+		expect(site).toMatchObject({ causeOk: true, hasClassifiedBy: true });
+	});
+
+	it("finds a call that passes the whole decision as a variable (#2226 review F3)", () => {
+		const site = found.find((s) => s.line === 11);
+		expect(site).toMatchObject({ causeOk: false, hasClassifiedBy: false });
 	});
 });
