@@ -132,9 +132,24 @@ export function normalizeFilePath(filePath: string): string {
  * normalizing it. Only a value that is already fully qualified can be the
  * #2141 mixed-raw/normalized-path defect; anything else is passed through
  * unchanged.
+ *
+ * #2229 review round 1, F1: this classifier checks BOTH host shapes
+ * (`isFullyQualifiedWin32(value) || isFullyQualifiedPosix(value)`), not
+ * `isFullyQualified(value)` (host-dispatched on `process.platform`). A
+ * Windows-shaped absolute path (`C:\Users\...`) is exactly the log payload
+ * this fix exists to normalize, but `isFullyQualified` on Linux CI routes to
+ * `isFullyQualifiedPosix`, which rejects it (no leading `/`) — so on Linux
+ * the guard silently no-ops for the very inputs the #2141 defect produces,
+ * passing the raw backslash form straight through. Checking both shapes
+ * makes the classifier's answer for a given STRING independent of which OS
+ * is asking; `normalizeFilePath` itself still branches on `process.platform`
+ * for how the file is resolved, but whether to normalize at all no longer
+ * does (AGENTS.md shape 2, the #1024/#1150 OS-divergence class).
  */
 export function normalizeLoggedPath(value: string): string {
-	return isFullyQualified(value) ? normalizeFilePath(value) : value;
+	return isFullyQualifiedWin32(value) || isFullyQualifiedPosix(value)
+		? normalizeFilePath(value)
+		: value;
 }
 
 /**

@@ -88,6 +88,7 @@ describe("tree-sitter-logger", () => {
 		}));
 
 		const mod = await import("../../clients/tree-sitter-logger.js");
+		const { normalizeLoggedPath } = await import("../../clients/path-utils.js");
 		mod.logTreeSitterCacheStats({
 			scope: "project_diagnostics_scan",
 			filePath: "/workspace",
@@ -115,7 +116,12 @@ describe("tree-sitter-logger", () => {
 		const payload = JSON.parse(appendFile.mock.calls[0][1]);
 		expect(payload).toMatchObject({
 			phase: "cache_stats",
-			filePath: "/workspace",
+			// #2229 review round 1: derived via the real normalizeLoggedPath
+			// (#2141 class fix) rather than hardcoded, so this holds on either
+			// CI OS — a POSIX-shaped literal is a fully-qualified path on BOTH
+			// platforms now (F1), and Windows's own realpath resolution differs
+			// from POSIX's early-return passthrough for the same input.
+			filePath: normalizeLoggedPath("/workspace"),
 			durationMs: 25,
 			metadata: {
 				scope: "project_diagnostics_scan",

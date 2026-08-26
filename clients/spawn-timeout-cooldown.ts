@@ -25,6 +25,7 @@
 
 import path from "node:path";
 import { logLatency } from "./latency-logger.js";
+import { normalizeLoggedPath } from "./path-utils.js";
 
 interface SpawnTimeoutRecord {
 	tool: string;
@@ -104,15 +105,22 @@ export function noteSpawnTimeout(input: NoteSpawnTimeoutInput): void {
 		phase: input.phase,
 		atMs: Date.now(),
 	});
+	// #2229 review round 1, F3: `filePath` and `metadata.command` both carry
+	// `input.command` — `logLatency`'s emit seam normalizes `filePath` but
+	// cannot see inside the opaque `metadata` bag, so passing the raw value
+	// to both fields would leave the SAME record with two spellings of the
+	// same command whenever it happens to be an absolute path. Normalize
+	// once here and reuse it for both.
+	const normalizedCommand = normalizeLoggedPath(input.command);
 	logLatency({
 		type: "phase",
 		toolName: input.tool,
 		phase: "spawn_timeout_cooldown",
-		filePath: input.command,
+		filePath: normalizedCommand,
 		durationMs: input.durationMs ?? 0,
 		status: "cooldown_armed",
 		metadata: {
-			command: input.command,
+			command: normalizedCommand,
 			wrapperKind: wrapperKindOf(input.command),
 			timeoutPhase: input.phase,
 			...(input.durationMs !== undefined && {
