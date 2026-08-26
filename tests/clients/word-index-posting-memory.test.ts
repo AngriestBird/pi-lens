@@ -17,6 +17,8 @@
  * `word-index-store.js` does not exist.
  */
 
+import * as v8 from "node:v8";
+import * as vm from "node:vm";
 import { describe, expect, it } from "vitest";
 import {
 	buildWordIndex,
@@ -82,14 +84,40 @@ function makeCorpus(documents: number, lines: number) {
 	}));
 }
 
+/**
+ * A forced-collection hook, without asking the whole suite for `--expose-gc`.
+ *
+ * The heap delta this file measures is meaningless un-forced: the tokenizer's
+ * garbage is larger than the signal. Adding `--expose-gc` to every worker's
+ * `execArgv` is the obvious route and is wrong here — `tests/config/worker-budget.test.ts`
+ * pins that array to exactly the derived heap ceiling (#2042), and one file's
+ * measurement need is no reason to widen a suite-wide contract. `setFlagsFromString`
+ * exposes `gc` for this process only; the flag is turned back off immediately,
+ * and the returned function keeps working because it is already bound.
+ *
+ * It throws rather than skipping. A silent skip would leave #2069's acceptance
+ * guard disarmed behind a green tick (AGENTS.md shape 7, the invisible-skip
+ * test-authoring screen).
+ */
+function resolveForcedCollector(): () => void {
+	const ambient = (globalThis as { gc?: () => void }).gc;
+	if (typeof ambient === "function") return ambient;
+	v8.setFlagsFromString("--expose-gc");
+	try {
+		const collect = vm.runInNewContext("gc") as unknown;
+		if (typeof collect !== "function") {
+			throw new Error("could not expose gc(); #2069's memory guard cannot run");
+		}
+		return collect as () => void;
+	} finally {
+		v8.setFlagsFromString("--no-expose-gc");
+	}
+}
+
+const forceCollect = resolveForcedCollector();
+
 function forceCollection(): void {
-	const collect = globalThis.gc;
-	// Assert rather than skip: without --expose-gc (vitest.config.ts's
-	// `execArgv`) this file cannot measure anything, and a silent skip would
-	// leave the acceptance guard disarmed with a green tick (AGENTS.md shape 7 /
-	// the invisible-skip test-authoring screen).
-	expect(typeof collect).toBe("function");
-	for (let i = 0; i < 5; i += 1) (collect as () => void)();
+	for (let i = 0; i < 5; i += 1) forceCollect();
 }
 
 /** Retained bytes, heap plus external backing stores, after a forced collection. */

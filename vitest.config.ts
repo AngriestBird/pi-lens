@@ -105,17 +105,7 @@ const sharedMaxWorkers = testBudget.maxWorkers;
 // flattened the config — `execArgv` is a direct `test` field (the v3
 // `poolOptions.forks.execArgv` nesting no longer exists and is silently
 // ignored).
-// `--expose-gc` rides along (#2069). A memory-footprint guard cannot measure a
-// retained structure without forcing collection first: an un-forced `heapUsed`
-// delta is dominated by the tokenizer's garbage, which is larger than the
-// signal. Exposing `globalThis.gc` has no behavioral effect on the code under
-// test — nothing in `clients/` reads it (grep) — and the guard asserts the
-// function is present rather than skipping, so losing the flag reds the test
-// instead of silently disarming it.
-const sharedExecArgv = [
-	`--max-old-space-size=${testBudget.heapMb}`,
-	"--expose-gc",
-];
+const sharedExecArgv = [`--max-old-space-size=${testBudget.heapMb}`];
 
 // Tier 1 fix (#902): these files all transitively drive real tree-sitter
 // grammar parses (via clients/review-graph/builder.js or the project-diagnostics
