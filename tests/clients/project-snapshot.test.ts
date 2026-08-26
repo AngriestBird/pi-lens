@@ -117,6 +117,11 @@ describe("project snapshot", () => {
 	});
 	afterEach(() => {
 		delete process.env.PI_LENS_SNAPSHOT_PERSIST_SYNC;
+		// #2090: three tests below stub PI_LENS_PROJECT_SNAPSHOT_IDLE_EVICT_MS
+		// via vi.stubEnv and never restored it, so the value leaked into every
+		// later test in this file (~50 tests, including the idle-eviction
+		// suite whose authors chose their own window).
+		vi.unstubAllEnvs();
 	});
 
 	it("fingerprints only the top-level generatedAt field as volatile", () => {

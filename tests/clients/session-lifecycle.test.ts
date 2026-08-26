@@ -479,38 +479,51 @@ describe("concurrent session_start guard — behavioral (index.ts wiring seam)",
 		}
 	});
 
-	it("with PI_LENS_CONCURRENT_SESSION_GUARD=0, the same sequence resets as today (behavior unchanged)", async () => {
-		const env = setupTestEnvironment("pi-lens-guard-disabled-");
-		try {
-			const runtime = new RuntimeCoordinator();
-			const resetLSPService = vi.fn();
+	it(
+		"with PI_LENS_CONCURRENT_SESSION_GUARD=0, the same sequence resets as today (behavior unchanged)",
+		async () => {
+			const env = setupTestEnvironment("pi-lens-guard-disabled-");
+			try {
+				const runtime = new RuntimeCoordinator();
+				const resetLSPService = vi.fn();
 
-			await runGuardedSessionStart(
-				runtime,
-				resetLSPService,
-				activeCtx(),
-				"parent-session",
-				env.tmpDir,
-			);
-			const generationAfterPrimary = runtime.sessionGeneration;
-			expect(resetLSPService).toHaveBeenCalledTimes(1);
+				await runGuardedSessionStart(
+					runtime,
+					resetLSPService,
+					activeCtx(),
+					"parent-session",
+					env.tmpDir,
+				);
+				const generationAfterPrimary = runtime.sessionGeneration;
+				expect(resetLSPService).toHaveBeenCalledTimes(1);
 
-			process.env.PI_LENS_CONCURRENT_SESSION_GUARD = "0";
-			const decision = await runGuardedSessionStart(
-				runtime,
-				resetLSPService,
-				activeCtx(),
-				"subagent-session",
-				env.tmpDir,
-			);
+				process.env.PI_LENS_CONCURRENT_SESSION_GUARD = "0";
+				const decision = await runGuardedSessionStart(
+					runtime,
+					resetLSPService,
+					activeCtx(),
+					"subagent-session",
+					env.tmpDir,
+				);
 
-			expect(decision.classification).toBe("sequential-replacement");
-			expect(decision.runFullSessionStart).toBe(true);
-			// Kill switch: today's behavior — reset runs again, generation bumps.
-			expect(resetLSPService).toHaveBeenCalledTimes(2);
-			expect(runtime.sessionGeneration).toBeGreaterThan(generationAfterPrimary);
-		} finally {
-			env.cleanup();
-		}
-	});
+				expect(decision.classification).toBe("sequential-replacement");
+				expect(decision.runFullSessionStart).toBe(true);
+				// Kill switch: today's behavior — reset runs again, generation bumps.
+				expect(resetLSPService).toHaveBeenCalledTimes(2);
+				expect(runtime.sessionGeneration).toBeGreaterThan(
+					generationAfterPrimary,
+				);
+			} finally {
+				env.cleanup();
+			}
+		},
+		// #2139: this test runs handleSessionStart TWICE for real (only
+		// resetLSPService is stubbed), and vitest's default 5000ms testTimeout
+		// is tighter than that honest cost — measured 7221ms/6.76s/5.96s locally
+		// on a cold module cache, and 6.24s / 5.4-5.9s under load in the #2133
+		// verify run that surfaced this. The work itself is fine (600-900ms
+		// once the module cache is warm); only the bound was too tight. 15s
+		// gives ~2x headroom over the worst measured run.
+		15_000,
+	);
 });
