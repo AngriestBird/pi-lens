@@ -28,9 +28,10 @@ vi.mock("../../clients/pipeline.js", () => ({
 // call to pin the opaque_mutation_status_pair_unknown emission without
 // fabricating a real, undocumented git porcelain pair.
 vi.mock("../../clients/opaque-mutation-scan.js", async (importOriginal) => {
-	const actual = await importOriginal<
-		typeof import("../../clients/opaque-mutation-scan.js")
-	>();
+	const actual =
+		await importOriginal<
+			typeof import("../../clients/opaque-mutation-scan.js")
+		>();
 	return {
 		...actual,
 		recoverOpaqueChangesViaGit: vi.fn(actual.recoverOpaqueChangesViaGit),
