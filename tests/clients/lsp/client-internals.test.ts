@@ -681,6 +681,52 @@ describe("handleNotifyOpen", () => {
 		expect(sendCall?.[0].metadata.contentLineCount).toBe(1);
 	});
 
+	it("#2066: a CRLF document counts its LF terminators, so two CRLFs are 3 lines", async () => {
+		logLatencyMock.mockClear();
+		const state = createMockState();
+		await handleNotifyOpen(state, TEST_FILE, "a\r\nb\r\n", "typescript");
+
+		const sendCall = logLatencyMock.mock.calls.find(
+			(c) => c[0]?.phase === "lsp_document_send",
+		);
+		expect(sendCall?.[0].metadata.contentLineCount).toBe(3);
+		expect(sendCall?.[0].metadata.contentLength).toBe(6);
+	});
+
+	it("#2066: a lone-CR document is 1 line to contentLineCount and 3 to the didChange range", async () => {
+		logLatencyMock.mockClear();
+		const state = createMockState({ syncKind: 2 });
+		await handleNotifyOpen(state, TEST_FILE, "a\rb\rc", "typescript");
+
+		const sendCall = logLatencyMock.mock.calls.find(
+			(c) => c[0]?.phase === "lsp_document_send",
+		);
+		// `contentLineCount` exists to pair with `diagnostic_past_eof`, whose gate
+		// counts `\n` BYTES (clients/diagnostic-line-freshness.ts). A lone-CR
+		// document has none, so it is one addressable line to BOTH records.
+		expect(sendCall?.[0].metadata.contentLineCount).toBe(1);
+
+		await handleNotifyChange(state, TEST_FILE, "a\rb\rd");
+
+		const didChange = [
+			...vi.mocked(state.connection.sendNotification).mock.calls,
+		]
+			.reverse()
+			.find((c) => c[0] === "textDocument/didChange");
+		const params = didChange?.[1] as {
+			contentChanges: Array<{
+				range?: { end: { line: number; character: number } };
+			}>;
+		};
+		// LSP line addressing treats a lone `\r` as a terminator, so the SAME
+		// document is 3 addressable lines here. The two numbers diverge on
+		// purpose; folding them into one would break one consumer or the other.
+		expect(params.contentChanges[0].range?.end).toEqual({
+			line: 2,
+			character: 1,
+		});
+	});
+
 	it("detaches the classic TypeScript projectInfo probe after didOpen", async () => {
 		const state = createMockState({
 			serverId: "typescript",
