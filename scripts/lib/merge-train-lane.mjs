@@ -167,8 +167,10 @@ export function evaluateMergeGate(pr, health, { approvedBy } = {}) {
 			);
 	}
 
-	// Starved and absent runs read as not-green even when a stale check run
-	// from an earlier attempt looks settled (#2184).
+	// Starved, stalled, and absent runs read as not-green even when a stale
+	// check run from an earlier attempt looks settled (#2184, #2203). The test
+	// is "not NORMAL", so a new classification is gated the day it is added,
+	// not the day someone remembers to list it here.
 	if (health.classification !== RUN_HEALTH.NORMAL)
 		return deny(
 			MERGE_GATE_REASON.RUN_HEALTH,

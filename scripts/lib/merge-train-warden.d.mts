@@ -42,6 +42,7 @@ export type WardenAction =
 	| { type: "comment"; body: string }
 	| { type: "update-branch" }
 	| { type: "rerun-run"; runId: number | string; workflowPath: string }
+	| { type: "cancel-run"; runId: number | string; workflowPath: string }
 	| { type: "note"; benign: boolean; message: string };
 
 export interface WardenError {
@@ -87,9 +88,31 @@ export function hasAbsentRunComment(
 	repo: string,
 	pr: WardenPr,
 ): Promise<boolean>;
+export function readStalledRunMarkers(
+	fetcher: FetchFn,
+	owner: string,
+	repo: string,
+	pr: WardenPr,
+	health: {
+		stalledRuns?: Array<{ id: number | string }>;
+		cancelledStalledRuns?: Array<{ id: number | string }>;
+	},
+): Promise<Set<string>>;
 export function summarizeRunHealth(health: {
 	classification: string;
 	starvedRuns: Array<{
+		id: number | string;
+		path: string;
+		runAttempt?: number;
+	}>;
+	stalledRuns?: Array<{
+		id: number | string;
+		path: string;
+		status?: string;
+		runAttempt?: number;
+		stalledForMinutes?: number | null;
+	}>;
+	cancelledStalledRuns?: Array<{
 		id: number | string;
 		path: string;
 		runAttempt?: number;
@@ -101,6 +124,7 @@ export function summarizeRunHealth(health: {
 export const RUN_HEALTH: {
 	NORMAL: string;
 	STARVED: string;
+	STALLED: string;
 	ABSENT: string;
 	PENDING: string;
 	UNKNOWN: string;
