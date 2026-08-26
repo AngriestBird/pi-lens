@@ -1,3 +1,7 @@
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const safeSpawnAsync = vi.hoisted(() => vi.fn());
@@ -9,6 +13,7 @@ vi.mock("../../clients/safe-spawn.js", async (importOriginal) => ({
 }));
 
 import { recoverOpaqueChangesViaGit } from "../../clients/opaque-mutation-scan.js";
+import { normalizeMapKey } from "../../clients/path-utils.js";
 import {
 	capFastExitSpawnResult,
 	capKilledSpawnResult,
@@ -175,24 +180,44 @@ describe("opaque Git status parsing", () => {
 
 	// #2060: an undocumented pair is never classified as incoming, so widening
 	// the table can only ever ADD exclusions, never remove capture by surprise.
+	//
+	// #2081: excludedIncomingCount only counts entries that pass the
+	// mtime-freshness window (would otherwise have been dispatched), so this
+	// case needs REAL, freshly-written files on disk for every entry the
+	// assertion depends on - not just the excluded one. A path that never
+	// exists fails the window check for the wrong reason (ENOENT, not the
+	// classification under test) and would pass this test even if `U ` were
+	// misclassified as clean incoming, since its absence keeps it out of
+	// `paths` either way.
 	it("never treats an undocumented pair as clean incoming content", async () => {
-		safeSpawnAsync.mockResolvedValue({
-			status: 0,
-			stdout: porcelainOutput(["UU", "U ", "A "]),
-		});
+		const root = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-opaque-status-"),
+		);
+		try {
+			const startedAt = Date.now();
+			fs.writeFileSync(path.join(root, "path-1.ts"), "unknown\n", "utf8");
+			fs.writeFileSync(path.join(root, "path-2.ts"), "staged\n", "utf8");
+			safeSpawnAsync.mockResolvedValue({
+				status: 0,
+				stdout: porcelainOutput(["UU", "U ", "A "]),
+			});
 
-		await expect(
-			recoverOpaqueChangesViaGit("/repo", Date.now(), {
-				excludeIndexOnlyWhenUnmerged: true,
-			}),
-		).resolves.toEqual({
-			verdict: "recovered",
-			paths: [],
-			scannedCount: 0,
-			// Only `A ` is dropped. `U ` is undocumented, so it keeps its path.
-			excludedIncomingCount: 1,
-			unknownStatusCount: 1,
-		});
+			await expect(
+				recoverOpaqueChangesViaGit(root, startedAt, {
+					excludeIndexOnlyWhenUnmerged: true,
+				}),
+			).resolves.toEqual({
+				verdict: "recovered",
+				// `U ` is undocumented, so it keeps its path and is dispatched.
+				paths: [normalizeMapKey(path.join(root, "path-1.ts"))],
+				scannedCount: 1,
+				// Only `A ` is dropped. `U ` is undocumented, so it keeps its path.
+				excludedIncomingCount: 1,
+				unknownStatusCount: 1,
+			});
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
 	});
 
 	it("returns an explicit unknown verdict for unterminated porcelain output", async () => {
