@@ -1124,7 +1124,11 @@ export class DependencyChecker {
 		let output = `[Circular Deps] ${circular.length} cycle(s) found:\n`;
 
 		for (const dep of circular) {
-			const cycleKey = dep.path.sort(compareOrdinal).join("→");
+			// Copy before sorting: `dep.path` is rendered verbatim below (and by
+			// other CircularDep consumers, e.g. madge.ts's diagnostic renderer),
+			// so the dedupe key must not reorder — let alone mutate in place —
+			// the path a user reads.
+			const cycleKey = [...dep.path].sort(compareOrdinal).join("→");
 			if (seen.has(cycleKey)) continue;
 			seen.add(cycleKey);
 
