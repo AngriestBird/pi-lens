@@ -287,7 +287,3 @@ describe("ast-grep-napi runner — metadata", () => {
 		expect(runner.enabledByDefault).toBe(true);
 	});
 });
-
-// #1371 review: the dedupe must be mutation-effective — two evaluations with
-// the same unsupported language emit the skip event exactly ONCE, and a reset
-// re-arms it. Drives evaluateAstGrepRules directly with the module-level Set.

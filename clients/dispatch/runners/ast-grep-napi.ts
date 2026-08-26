@@ -236,17 +236,7 @@ export function resetAstGrepNapiLoadState(): void {
 }
 
 // Supported extensions for NAPI
-// Derive extension coverage from the shared file-kind registry (#883).
-const NAPI_KINDS = ["jsts"] as const;
-const SUPPORTED_EXTS: readonly string[] = [
-	".ts",
-	".tsx",
-	".js",
-	".jsx",
-	".css",
-	".html",
-	".htm",
-];
+const SUPPORTED_EXTS = [".ts", ".tsx", ".js", ".jsx", ".css", ".html", ".htm"];
 
 /** Maximum matches per rule to prevent excessive false positives */
 const MAX_MATCHES_PER_RULE = 10;
@@ -402,9 +392,6 @@ export function ruleLanguageForFile(
 		case ".jsx":
 			return "javascript";
 		case ".css":
-		case ".less":
-		case ".sass":
-		case ".scss":
 			return "css";
 		case ".html":
 		case ".htm":
@@ -800,7 +787,7 @@ export function evaluateAstGrepRules(
 
 const astGrepNapiRunner: RunnerDefinition = {
 	id: "ast-grep-napi",
-	appliesTo: NAPI_KINDS,
+	appliesTo: ["jsts"],
 	priority: PRIORITY.SPECIALIZED_ANALYSIS,
 	enabledByDefault: true,
 	skipTestFiles: true,
