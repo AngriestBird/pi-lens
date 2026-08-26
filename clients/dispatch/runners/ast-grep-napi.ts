@@ -635,12 +635,21 @@ export function evaluateAstGrepRules(
 				continue;
 			}
 
+			// `css` joined the allowlist in #2199: `ruleLanguageForFile` returns
+			// undefined for .css (no ts/js twin-scoping needed), so a
+			// `language: Css` rule reaches every file here and is scoped down
+			// to .css files only by the fileLang mismatch check below. Before
+			// #2199, every `language: Css` rule silently never matched in this
+			// fallback engine — the ast-grep LSP was the only path that ran
+			// CSS rules — even though `getLang`/`canHandle` above already
+			// parsed .css files through it.
 			const lang = rule.language?.toLowerCase();
 			if (
 				lang &&
 				lang !== "typescript" &&
 				lang !== "tsx" &&
-				lang !== "javascript"
+				lang !== "javascript" &&
+				lang !== "css"
 			) {
 				if (!unsupportedLanguageLog.has(lang)) {
 					const ids = newlyUnsupported.get(lang) ?? [];

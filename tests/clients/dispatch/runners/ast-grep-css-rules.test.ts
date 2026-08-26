@@ -1,0 +1,51 @@
+/**
+ * CSS-language ast-grep rules through the napi in-process fallback (#2199).
+ *
+ * The primary path for `language: Css` rules is the ast-grep LSP binary
+ * (`clients/lsp/server.ts` AstGrepServer), which already speaks CSS via its
+ * own sgconfig-driven scan. This suite exercises the SECOND path: the
+ * napi-native fallback (`clients/dispatch/runners/ast-grep-napi.ts`), which
+ * the per-edit runner and the project-wide scanner both resume when the
+ * ast-grep binary/LSP is unavailable (Gate B). Before this fix, that
+ * fallback's language allowlist accepted only typescript/tsx/javascript and
+ * silently dropped every non-JS/TS rule — including any `language: Css`
+ * rule — regardless of the file being scanned.
+ */
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import astGrepNapiRunner from "../../../../clients/dispatch/runners/ast-grep-napi.js";
+import {
+	firedRuleIds,
+	makeRealRunnerEnv,
+	napiFallbackHasTool,
+	type RealRunnerEnv,
+} from "../../../support/real-runner-ctx.js";
+
+vi.mock("../../../../clients/lsp/wait-policy/index.js", () => ({
+	resolveAstGrepNativeExe: () => undefined,
+}));
+
+let env: RealRunnerEnv;
+beforeAll(() => {
+	env = makeRealRunnerEnv({ hasTool: napiFallbackHasTool });
+});
+afterAll(() => env.cleanup());
+
+describe("ast-grep CSS rules (integration via napi fallback)", () => {
+	it("fires no-important on a real !important declaration", async () => {
+		const { ctx } = env.addFile(
+			"sample.css",
+			[".modal {", "  z-index: 9999 !important;", "}", ""].join("\n"),
+		);
+		const result = await astGrepNapiRunner.run(ctx);
+		expect(firedRuleIds(result)).toContain("no-important");
+	});
+
+	it("does not fire on plain CSS without !important", async () => {
+		const { ctx } = env.addFile(
+			"plain.css",
+			[".button {", "  color: red;", "}", ""].join("\n"),
+		);
+		const result = await astGrepNapiRunner.run(ctx);
+		expect(firedRuleIds(result)).not.toContain("no-important");
+	});
+});
