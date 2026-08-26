@@ -244,7 +244,13 @@ export function shouldLogEvent(event: string): boolean {
 		// READ_GUARD_MAX_RECORDS_PER_FILE overflow triggers one), so this trim
 		// record bypasses the per-read verbosity gate — a live eviction
 		// regression must be visible without PI_LENS_READ_GUARD_VERBOSE=1.
-		event === "read_cap_trimmed"
+		event === "read_cap_trimmed" ||
+		// #1918: the record-cap trim's population siblings — whole-file
+		// eviction (file cap or idle timer) and the per-file edits-cap trim.
+		// Same rarity argument as #1913: each fires once per file per
+		// session (rising-edge gated), so always-on visibility costs nothing.
+		event === "read_file_evicted" ||
+		event === "edits_cap_trimmed"
 	);
 }
 

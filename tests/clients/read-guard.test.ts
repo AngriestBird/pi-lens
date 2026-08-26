@@ -1555,6 +1555,138 @@ describe("ReadGuard Tier-2 idle decay and bounds (#1389)", () => {
 	});
 });
 
+// #1918: the record-cap trim's population siblings. `evictFile` (whole-file
+// eviction, three internal call sites plus `forgetPath`) and the per-file
+// edits-cap splice evicted state with zero telemetry before this fix.
+describe("ReadGuard eviction-path telemetry (#1918)", () => {
+	function evictionEvents(event: string) {
+		return vi
+			.mocked(logReadGuardEvent)
+			.mock.calls.filter(([entry]) => entry.event === event);
+	}
+
+	it("emits read_file_evicted with reason idle-timeout when a consumed read idles out", () => {
+		vi.useFakeTimers();
+		try {
+			const guard = createReadGuard("1918-idle-evict-session");
+			const filePath = "/tmp/1918-idle-evict.ts";
+			guard.recordRead(createReadRecord(filePath));
+			guard.recordWritten(filePath); // marks consumed; arms the idle timer
+			vi.mocked(logReadGuardEvent).mockClear();
+
+			vi.advanceTimersByTime(31 * 60_000);
+
+			const evictions = evictionEvents("read_file_evicted");
+			expect(evictions).toHaveLength(1);
+			expect(evictions[0][0]).toMatchObject({
+				event: "read_file_evicted",
+				filePath: normalizeFilePath(filePath),
+				metadata: { reason: "idle-timeout" },
+			});
+			expect(guard.getReadHistory(filePath)).toHaveLength(0);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("emits read_file_evicted with reason file-cap-consumed at the consumed-file cap", () => {
+		const guard = createReadGuard("1918-file-cap-consumed-session");
+		const victimPath = "/tmp/1918-file-cap-consumed-victim.ts";
+		guard.recordRead(createReadRecord(victimPath));
+		guard.recordWritten(victimPath);
+		vi.mocked(logReadGuardEvent).mockClear();
+
+		for (let i = 0; i < 256; i += 1) {
+			const filePath = `/tmp/1918-file-cap-consumed-${i}.ts`;
+			guard.recordRead(createReadRecord(filePath));
+			guard.recordWritten(filePath);
+		}
+
+		const evictions = evictionEvents("read_file_evicted");
+		expect(evictions).toHaveLength(1);
+		expect(evictions[0][0]).toMatchObject({
+			event: "read_file_evicted",
+			filePath: normalizeFilePath(victimPath),
+			metadata: { reason: "file-cap-consumed" },
+		});
+		expect(guard.getReadHistory(victimPath)).toHaveLength(0);
+	});
+
+	it("emits read_file_evicted with reason file-cap-unconsumed at the unconsumed-file cap", () => {
+		const guard = createReadGuard("1918-file-cap-unconsumed-session");
+		const victimPath = "/tmp/1918-file-cap-unconsumed-victim.ts";
+		guard.recordRead(createReadRecord(victimPath));
+		vi.mocked(logReadGuardEvent).mockClear();
+
+		for (let i = 0; i < 4096; i += 1) {
+			guard.recordRead(
+				createReadRecord(`/tmp/1918-file-cap-unconsumed-${i}.ts`),
+			);
+		}
+
+		const evictions = evictionEvents("read_file_evicted");
+		expect(evictions).toHaveLength(1);
+		expect(evictions[0][0]).toMatchObject({
+			event: "read_file_evicted",
+			filePath: normalizeFilePath(victimPath),
+			metadata: { reason: "file-cap-unconsumed" },
+		});
+		expect(guard.getReadHistory(victimPath)).toHaveLength(0);
+	});
+
+	it("emits read_file_evicted with reason external-delete via forgetPath", () => {
+		const guard = createReadGuard("1918-forget-path-session");
+		const filePath = "/tmp/1918-forget-path.ts";
+		guard.recordRead(createReadRecord(filePath));
+		vi.mocked(logReadGuardEvent).mockClear();
+
+		guard.forgetPath(filePath);
+
+		const evictions = evictionEvents("read_file_evicted");
+		expect(evictions).toHaveLength(1);
+		expect(evictions[0][0]).toMatchObject({
+			event: "read_file_evicted",
+			filePath: normalizeFilePath(filePath),
+			metadata: { reason: "external-delete" },
+		});
+	});
+
+	it("emits exactly one edits_cap_trimmed record when the per-file edit history overflows", () => {
+		const guard = createReadGuard("1918-edits-cap-session");
+		const filePath = "/tmp/1918-edits-cap.ts";
+		guard.recordRead(
+			createReadRecord(filePath, { requestedLimit: 500, effectiveLimit: 500 }),
+		);
+		vi.mocked(logReadGuardEvent).mockClear();
+
+		for (let i = 0; i < 257; i += 1) {
+			guard.checkEdit(filePath, [1, 1]);
+		}
+
+		const trims = evictionEvents("edits_cap_trimmed");
+		expect(trims).toHaveLength(1);
+		expect(trims[0][0]).toMatchObject({
+			event: "edits_cap_trimmed",
+			filePath: normalizeFilePath(filePath),
+			metadata: { trimmedCount: 1, cappedLength: 256 },
+		});
+		expect(guard.getEditHistory(filePath)).toHaveLength(256);
+	});
+
+	it("emits no edits_cap_trimmed record while the edit history stays within the cap", () => {
+		const guard = createReadGuard("1918-edits-cap-no-trim-session");
+		const filePath = "/tmp/1918-edits-cap-no-trim.ts";
+		guard.recordRead(createReadRecord(filePath));
+		vi.mocked(logReadGuardEvent).mockClear();
+
+		for (let i = 0; i < 10; i += 1) {
+			guard.checkEdit(filePath, [1, 1]);
+		}
+
+		expect(evictionEvents("edits_cap_trimmed")).toHaveLength(0);
+	});
+});
+
 // #1041: export/import of the read-set across a session resume.
 describe("ReadGuard export/import across resume (#1041)", () => {
 	// Write, then backdate mtime to BEFORE any guard's session start so the file
