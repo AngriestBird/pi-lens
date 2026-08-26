@@ -105,7 +105,8 @@ import type { LSPDiagnostic } from "./lsp/client.js";
 import { convertLspDiagnostics } from "./dispatch/utils/lsp-diagnostics.js";
 import {
 	drainPendingRunnerFindings,
-	rearmPendingRunnerFindings,
+	dropStaleRunnerFindings,
+	pendingRunnerFindingsSizeForTests,
 } from "./dispatch/pending-runner-findings.js";
 // #1631 review V2: moved to its own leaf module so a low-level store
 // (widget-state.ts) can use the marker without importing this orchestrator —
@@ -441,7 +442,16 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	// instead of dying unrendered. `hasCascadeRuns()` is a cheap peek (no
 	// pending work almost every turn), so the common read-only turn still
 	// takes the early return below.
-	if (files.length === 0 && !runtime.hasCascadeRuns()) {
+	// A foreign live owner must not deliver another session's pending findings.
+	// A no-file turn falls through when this process has pending runner work so
+	// the ordinary freshness gate and delivery cache can run. Max-cycle cleanup
+	// below intentionally remains a terminal reset; its pending work stays in
+	// the bounded handoff store for the next eligible turn.
+	if (
+		files.length === 0 &&
+		!runtime.hasCascadeRuns() &&
+		pendingRunnerFindingsSizeForTests() === 0
+	) {
 		// A genuinely clean session must invalidate the persisted guard record.
 		// Blocker records are retained only while the runtime still reports one.
 		if (getFlag("lens-guard") && !runtime.gitGuardHasBlockers) {
@@ -2258,7 +2268,8 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	let runnerFindingsDelivered = 0;
 	let runnerFindingsStale = 0;
 	let runnerFindingsFailed = 0;
-	let runnerFindingsRearmed = 0;
+	let runnerFindingsDropped = 0;
+	const runnerFindingsDeliveredIds: string[] = [];
 	for (const pending of pendingRunnerFindings) {
 		const result = pending.result;
 		if (!result) continue;
@@ -2290,11 +2301,11 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		});
 		runnerFindingsStale += gate.stale.length;
 		if (gate.stale.length > 0) {
-			// The runner answered for bytes older than the latest edit. Preserve
-			// coverage by probing the completed result against a refreshed baseline
-			// on the next turn, matching the #2001/#2002 auxiliary re-arm contract.
-			rearmPendingRunnerFindings(pending, Date.now());
-			runnerFindingsRearmed += 1;
+			// The runner answered for bytes older than the latest edit. Do not
+			// re-arm this completed answer: only a new runner query can restore
+			// coverage for the refreshed bytes.
+			dropStaleRunnerFindings(pending);
+			runnerFindingsDropped += 1;
 		}
 		if (gate.live.length === 0) continue;
 		const displayPath = toRunnerDisplayPath(cwd, pending.filePath);
@@ -2303,6 +2314,11 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				`  ${displayPath}:${finding.line ?? 1}:${finding.column ?? 1} [${finding.rule ?? finding.id}] ${finding.message}`,
 		);
 		runnerFindingsDelivered += gate.live.length;
+		for (const finding of gate.live) {
+			if (runnerFindingsDeliveredIds.length < 50) {
+				runnerFindingsDeliveredIds.push(finding.id);
+			}
+		}
 		// @delivery-surface: runtime-turn:late-runner-findings
 		advisoryParts.push(
 			`⏱️ Late runner diagnostics (${pending.runnerId} completed after the edit):\n${lines.join("\n")}`,
@@ -2319,7 +2335,8 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			delivered: runnerFindingsDelivered,
 			stale: runnerFindingsStale,
 			failed: runnerFindingsFailed,
-			rearmed: runnerFindingsRearmed,
+			dropped: runnerFindingsDropped,
+			deliveredIds: runnerFindingsDeliveredIds,
 		},
 	});
 

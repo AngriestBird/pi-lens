@@ -11,7 +11,7 @@ import {
 import {
 	drainPendingRunnerFindings,
 	deferRunnerFindings,
-	rearmPendingRunnerFindings,
+	dropStaleRunnerFindings,
 	resetPendingRunnerFindings,
 } from "../../../clients/dispatch/pending-runner-findings.js";
 import {
@@ -224,7 +224,7 @@ describe("observed runner collect-later tier (#2116)", () => {
 		expect(group?.latestReasons[0]?.subject).toContain("runner-0");
 	});
 
-	it("re-arms a stale completed result against a refreshed baseline", async () => {
+	it("drops a stale completed result and records the coverage gap", async () => {
 		const result: RunnerResult = {
 			status: "succeeded",
 			diagnostics: [
@@ -249,10 +249,19 @@ describe("observed runner collect-later tier (#2116)", () => {
 		});
 		await new Promise<void>((resolve) => setImmediate(resolve));
 		const stale = (await drainPendingRunnerFindings(0))[0];
-		rearmPendingRunnerFindings(stale!, Date.now());
-		await new Promise<void>((resolve) => setImmediate(resolve));
-		const rearmed = await drainPendingRunnerFindings(0);
-		expect(rearmed[0]?.markedAtMs).toBeGreaterThan(1);
-		expect(rearmed[0]?.result?.diagnostics[0]?.id).toBe("stale");
+		dropStaleRunnerFindings(stale!);
+		expect(await drainPendingRunnerFindings(0)).toEqual([]);
+		expect(getDegradationSummary()).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					kind: "runner-findings-stale",
+					latestReasons: [
+						expect.objectContaining({
+							subject: `stale-runner:${filePath}`,
+						}),
+					],
+				}),
+			]),
+		);
 	});
 });

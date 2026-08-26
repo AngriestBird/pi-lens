@@ -283,6 +283,8 @@ export type DegradationKind =
 	| "runner-collect-later"
 	/** A pending runner entry was evicted at the bounded handoff cap (#2122). */
 	| "runner-findings-evicted"
+	/** A completed runner answer was stale and dropped instead of being replayed. */
+	| "runner-findings-stale"
 	/** A process-table resource sample failed or timed out; it is unknown. */
 	| "resource-sampler-query-failed"
 	/**

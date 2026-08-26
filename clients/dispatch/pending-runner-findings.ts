@@ -97,20 +97,13 @@ export async function drainPendingRunnerFindings(
 	return results;
 }
 
-/** Re-arm a completed result against a refreshed file baseline. */
-export function rearmPendingRunnerFindings(
-	entry: PendingRunnerFindings,
-	markedAtMs: number,
-): void {
+/** Drop a stale answer and record the lost re-run coverage. */
+export function dropStaleRunnerFindings(entry: PendingRunnerFindings): void {
 	if (!entry.result) return;
-	deferRunnerFindings({
-		filePath: entry.filePath,
-		cwd: entry.cwd,
-		projectRoot: entry.projectRoot,
-		runnerId: entry.runnerId,
-		markedAtMs,
-		writeIndex: entry.writeIndex,
-		promise: Promise.resolve(entry.result),
+	incrementDegradationCount({
+		kind: "runner-findings-stale",
+		subject: `${entry.runnerId}:${entry.filePath}`,
+		reason: "completed result was older than the latest file edit",
 	});
 }
 
