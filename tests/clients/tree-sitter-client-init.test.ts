@@ -51,50 +51,93 @@ describe("tree-sitter-client wasm resolution", () => {
 		expect(path.dirname(sibling)).toBe(wasmDir);
 	});
 
-	it("findGrammarsDir finds a real cwd tree-sitter-wasms fixture", () => {
-		const env = setupTestEnvironment("pi-lens-tree-sitter-2112-found-");
-		const originalCwd = process.cwd();
+	it("findGrammarsDir resolves the web-tree-sitter asset branch", () => {
+		const env = setupTestEnvironment("pi-lens-tree-sitter-2112-asset-");
 		try {
 			const wasmPath = createTempFile(
 				env.tmpDir,
-				"node_modules/tree-sitter-wasms/out/tree-sitter-typescript.wasm",
+				"grammars/tree-sitter-typescript.wasm",
 				"fixture wasm",
 			);
-			process.chdir(env.tmpDir);
-
-			const client = new TreeSitterClient() as unknown as {
-				grammarsDir: string;
-			};
-			expect(fs.existsSync(wasmPath)).toBe(true);
+			const client = new TreeSitterClient(false, undefined, {
+				resolveAsset: () => path.dirname(wasmPath),
+				resolvePackage: () => {
+					throw new Error("package resolver must not run");
+				},
+				cwd: () => {
+					throw new Error("cwd resolver must not run");
+				},
+			}) as unknown as { grammarsDir: string };
+			// isAvailable() overwrites this.grammarsDir; this post-construction
+			// read is the only faithful observable of findGrammarsDir().
 			expect(client.grammarsDir).toBe(path.dirname(wasmPath));
 		} finally {
-			process.chdir(originalCwd);
 			env.cleanup();
 		}
 	});
 
-	it("findGrammarsDir returns empty when no grammar fixture exists", () => {
-		const env = setupTestEnvironment("pi-lens-tree-sitter-2112-missing-");
-		const originalCwd = process.cwd();
+	it("findGrammarsDir resolves the tree-sitter-wasms package branch", () => {
+		const env = setupTestEnvironment("pi-lens-tree-sitter-2112-package-");
 		try {
-			process.chdir(env.tmpDir);
-
-			const client = new TreeSitterClient() as unknown as {
-				grammarsDir: string;
-			};
-			expect(
-				fs.existsSync(
-					path.join(
-						env.tmpDir,
-						"node_modules/tree-sitter-wasms/out/tree-sitter-typescript.wasm",
-					),
-				),
-			).toBe(false);
-			expect(client.grammarsDir).toBe("");
+			const packageJson = createTempFile(
+				env.tmpDir,
+				"tree-sitter-wasms/package.json",
+				"{}",
+			);
+			const expectedDir = path.join(env.tmpDir, "tree-sitter-wasms", "out");
+			fs.mkdirSync(expectedDir);
+			// An ambient cwd fixture must not win over the injected package branch.
+			createTempFile(
+				env.tmpDir,
+				"node_modules/tree-sitter-wasms/out/tree-sitter-typescript.wasm",
+				"ambient fixture wasm",
+			);
+			const client = new TreeSitterClient(false, undefined, {
+				resolveAsset: () => undefined,
+				resolvePackage: (specifier) => {
+					expect(specifier).toBe("tree-sitter-wasms/package.json");
+					return packageJson;
+				},
+				cwd: () => env.tmpDir,
+			}) as unknown as { grammarsDir: string };
+			expect(client.grammarsDir).toBe(expectedDir);
 		} finally {
-			process.chdir(originalCwd);
 			env.cleanup();
 		}
+	});
+
+	it("findGrammarsDir resolves the cwd fallback branch", () => {
+		const env = setupTestEnvironment("pi-lens-tree-sitter-2112-cwd-");
+		try {
+			const expectedDir = path.join(
+				env.tmpDir,
+				"node_modules",
+				"tree-sitter-wasms",
+				"out",
+			);
+			fs.mkdirSync(expectedDir, { recursive: true });
+			const client = new TreeSitterClient(false, undefined, {
+				resolveAsset: () => undefined,
+				resolvePackage: () => {
+					throw new Error("package resolver must not run");
+				},
+				cwd: () => env.tmpDir,
+			}) as unknown as { grammarsDir: string };
+			expect(client.grammarsDir).toBe(expectedDir);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("findGrammarsDir returns empty when no branch resolves", () => {
+		const client = new TreeSitterClient(false, undefined, {
+			resolveAsset: () => undefined,
+			resolvePackage: () => {
+				throw new Error("package unavailable");
+			},
+			cwd: () => "C:/absent-pi-lens-test-cwd",
+		}) as unknown as { grammarsDir: string };
+		expect(client.grammarsDir).toBe("");
 	});
 
 	it("TreeSitterClient.isAvailable returns true when grammars are installed", async () => {
