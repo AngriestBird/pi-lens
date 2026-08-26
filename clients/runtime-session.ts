@@ -19,6 +19,8 @@ import { resetPsScriptAnalyzerAvailability } from "./dispatch/runners/psscriptan
 import { resetInstallRetryLatches } from "./dispatch/runners/utils/availability-policy.js";
 import { resetLazyInstallAttempts } from "./dispatch/runners/utils/lazy-installer.js";
 import { resetDispatchAvailabilityState } from "./dispatch/runners/utils/runner-helpers.js";
+import { resetObservedRunnerLatency } from "./dispatch/collect-later-tier.js";
+import { resetPendingRunnerFindings } from "./dispatch/pending-runner-findings.js";
 import type { FileKind } from "./file-kinds.js";
 import { clearAllSessions as clearFileTimeSessions } from "./file-time.js";
 import {
@@ -2148,6 +2150,10 @@ export async function handleSessionStart(
 	// the tool for the rest of the process lifetime. Clear it here, same
 	// boundary as the other per-session caches on this line.
 	resetDispatchAvailabilityState();
+	// Runner collect-later observations and their late findings are session
+	// scoped. A new session must re-probe rather than inherit a process latch.
+	resetObservedRunnerLatency();
+	resetPendingRunnerFindings();
 	// #1995: a command that TIMED OUT (not merely failed a probe) cools down
 	// for the rest of the session so a hot loop of edits cannot hand the same
 	// wedged .cmd shim a second budget. A new session may retry: the executable

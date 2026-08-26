@@ -258,6 +258,13 @@ Each routine's output is a PR (or a tracked issue for discovery routines), revie
 
 ## Standing invariants
 
+Deferred collect-later runners are a three-state delivery contract: edit-time
+pending, turn-end clean, or turn-end failed. The pending state must reach the
+runner latency and widget surfaces, failures must carry their failure kind into
+turn-end delivery, and stale completed findings must re-arm a refreshed
+freshness baseline. Turn-end drains use a zero wait budget and requeue unsettled
+promises, so deferred work never adds a repeated per-turn stall (#2122).
+
 Live contracts, grouped by subsystem. Consult the group for the seam you
 touch; each paragraph carries its evidence issue. New entries join their
 group (see the placement rules in "Maintaining this file").
@@ -1845,6 +1852,15 @@ zero. A no-files lookalike on any other status/banner/stderr/JSON/schema/count
 combination is never clean: nonzero runs retain shared parsed-nothing telemetry,
 while status 0 becomes an explicit `unconfirmed_output` failure. Reports with no
 no-files evidence continue through the ordinary parser.
+
+Observed-slow CLI runners use the shared `clients/dispatch/collect-later-tier.ts`
+classification seam. A timeout or latency above its threshold moves that
+runner and project off the post-write path on the next edit; the runner still
+executes and its findings drain through `clients/runtime-turn.ts` at turn end.
+Only a fast completed run re-arms the inline tier, and
+`resetObservedRunnerLatency` plus `resetPendingRunnerFindings` clear this
+session-scoped state at `session_start`. Keep tier flips and repeated slow
+observations bounded through the latency logger and degradation ledger.
 
 - **Use `safeSpawnAsync()` for all subprocess work** in hook/dispatch/install paths. The sync `safeSpawn()` is deprecated, blocks the Node event loop, and is now reachable only from the cached `TestRunnerClient.detectRunner` `which pytest` probe. Don't add new sync `safeSpawn` callers.
 - **The hot per-edit path is the dispatch runners** (`clients/dispatch/runners/*`), not the legacy per-tool client classes (`biome-client`, `ruff-client`, `rust-client`, `ast-grep-client`, …). Those classes historically carried a *parallel sync surface* (`checkFile`/`fixFile`/`isAvailable`/`findCargoPath`/…) that the async runners superseded; #197 found almost all of it **dead** and deleted ~1600 lines. **Lesson: when you find a sync client method, grep its real callers before "converting" it — the answer is usually "delete," and the live path already has an `*Async` twin** (`fixFileAsync`, `ensureAvailable`, `runTestFileAsync`, `tempScanAsync`, `findGoPathAsync`).

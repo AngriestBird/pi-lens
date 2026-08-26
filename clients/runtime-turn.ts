@@ -103,6 +103,11 @@ import {
 } from "./lsp/pending-aux-coverage.js";
 import type { LSPDiagnostic } from "./lsp/client.js";
 import { convertLspDiagnostics } from "./dispatch/utils/lsp-diagnostics.js";
+import {
+	drainPendingRunnerFindings,
+	dropStaleRunnerFindings,
+	pendingRunnerFindingsSize,
+} from "./dispatch/pending-runner-findings.js";
 // #1631 review V2: moved to its own leaf module so a low-level store
 // (widget-state.ts) can use the marker without importing this orchestrator —
 // see clients/stale-marker.ts's doc comment.
@@ -115,6 +120,7 @@ import { STALE_LINE_MARKER } from "./stale-marker.js";
 import {
 	getWidgetBlockingFilesForSweep,
 	markWidgetFileBlockersStale,
+	recordRunner,
 } from "./widget-state.js";
 import type { TestRunnerFindingsCache } from "./project-diagnostics/runner-adapters/runner-findings.js";
 
@@ -436,6 +442,11 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	// instead of dying unrendered. `hasCascadeRuns()` is a cheap peek (no
 	// pending work almost every turn), so the common read-only turn still
 	// takes the early return below.
+	// A foreign live owner must not deliver another session's pending findings.
+	// A no-file turn falls through when this process has pending runner work so
+	// the ordinary freshness gate and delivery cache can run. Max-cycle cleanup
+	// below intentionally remains a terminal reset; its pending work stays in
+	// the bounded handoff store for the next eligible turn.
 	if (files.length === 0 && !runtime.hasCascadeRuns()) {
 		// A genuinely clean session must invalidate the persisted guard record.
 		// Blocker records are retained only while the runtime still reports one.
@@ -471,7 +482,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			});
 		}
 		resetFormatService();
-		return;
+		if (pendingRunnerFindingsSize() === 0) return;
 	}
 
 	// Cancel any pending idle reset since we're actively working. #1618: also
@@ -481,7 +492,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	// read "nothing pending" and skip the cancel while a rearm was still
 	// queued to fire the instant the sweep released its hold — resurrecting
 	// idle reset on a session that had since gone back to active editing.
-	if (lspIdleResetTimeout || pendingSweepRearm) {
+	if (files.length > 0 && (lspIdleResetTimeout || pendingSweepRearm)) {
 		cancelLSPIdleReset();
 		dbg("turn_end: cancelled pending LSP idle reset (active editing)");
 	}
@@ -2240,6 +2251,90 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	}
 
 	cacheManager.incrementTurnCycle(cwd, currentOwner);
+
+	// Collect-later CLI runners continue off the write path. Their completed
+	// diagnostics use the same freshness gate as late auxiliary findings and
+	// enter the ordinary turn-end advisory delivery channel.
+	const runnerFindingsStart = Date.now();
+	// Turn-end delivery is deliberately non-blocking. Collect already-settled
+	// results and requeue the rest; the edit path already paid the deferral
+	// decision, so another 2s wait would charge every turn while a runner is
+	// still in flight (#2122 F5).
+	const pendingRunnerFindings = await drainPendingRunnerFindings(0);
+	let runnerFindingsDelivered = 0;
+	let runnerFindingsStale = 0;
+	let runnerFindingsFailed = 0;
+	let runnerFindingsDropped = 0;
+	const runnerFindingsDeliveredIds: string[] = [];
+	for (const pending of pendingRunnerFindings) {
+		const result = pending.result;
+		if (!result) continue;
+		recordRunner(
+			pending.filePath,
+			pending.runnerId,
+			result.status,
+			result.diagnostics.length,
+			Date.now() - pending.markedAtMs,
+			pending.writeIndex,
+		);
+		if (result.status === "failed") {
+			runnerFindingsFailed += 1;
+			const detail = result.failureMessage ? `: ${result.failureMessage}` : "";
+			// @delivery-surface: runtime-turn:late-runner-findings
+			advisoryParts.push(
+				`❌ Deferred runner ${pending.runnerId} failed (${result.failureKind ?? "unknown"})${detail}`,
+			);
+			continue;
+		}
+		const findings = result.diagnostics;
+		if (findings.length === 0) continue;
+		const gate = gateFindingsByPathFreshness({
+			store: "late-runner-findings",
+			findings,
+			cwd,
+			scannedAt: pending.markedAtMs,
+			citedPath: (finding) => finding.filePath,
+		});
+		runnerFindingsStale += gate.stale.length;
+		if (gate.stale.length > 0) {
+			// The runner answered for bytes older than the latest edit. Do not
+			// re-arm this completed answer: only a new runner query can restore
+			// coverage for the refreshed bytes.
+			dropStaleRunnerFindings(pending);
+			runnerFindingsDropped += 1;
+		}
+		if (gate.live.length === 0) continue;
+		const displayPath = toRunnerDisplayPath(cwd, pending.filePath);
+		const lines = gate.live.map(
+			(finding) =>
+				`  ${displayPath}:${finding.line ?? 1}:${finding.column ?? 1} [${finding.rule ?? finding.id}] ${finding.message}`,
+		);
+		runnerFindingsDelivered += gate.live.length;
+		for (const finding of gate.live) {
+			if (runnerFindingsDeliveredIds.length < 50) {
+				runnerFindingsDeliveredIds.push(finding.id);
+			}
+		}
+		// @delivery-surface: runtime-turn:late-runner-findings
+		advisoryParts.push(
+			`⏱️ Late runner diagnostics (${pending.runnerId} completed after the edit):\n${lines.join("\n")}`,
+		);
+	}
+	logLatency({
+		type: "phase",
+		toolName: "turn_end",
+		filePath: cwd,
+		phase: "late_runner_findings",
+		durationMs: Date.now() - runnerFindingsStart,
+		metadata: {
+			pending: pendingRunnerFindings.length,
+			delivered: runnerFindingsDelivered,
+			stale: runnerFindingsStale,
+			failed: runnerFindingsFailed,
+			dropped: runnerFindingsDropped,
+			deliveredIds: runnerFindingsDeliveredIds,
+		},
+	});
 
 	// #2001/#2002: collect-later delivery for auxiliary LSP servers whose
 	// aux-grace window expired without a publication (opengrep on Windows:
