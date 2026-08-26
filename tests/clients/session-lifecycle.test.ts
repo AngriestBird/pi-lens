@@ -443,41 +443,50 @@ describe("concurrent session_start guard — behavioral (index.ts wiring seam)",
 		delete process.env.PI_LENS_CONCURRENT_SESSION_GUARD;
 	});
 
-	it("a concurrent secondary session_start leaves runtime.sessionGeneration unchanged and never calls resetLSPService", async () => {
-		const env = setupTestEnvironment("pi-lens-concurrent-secondary-");
-		try {
-			const runtime = new RuntimeCoordinator();
-			const resetLSPService = vi.fn();
+	it(
+		"a concurrent secondary session_start leaves runtime.sessionGeneration unchanged and never calls resetLSPService",
+		async () => {
+			const env = setupTestEnvironment("pi-lens-concurrent-secondary-");
+			try {
+				const runtime = new RuntimeCoordinator();
+				const resetLSPService = vi.fn();
 
-			// Primary session_start (the parent).
-			await runGuardedSessionStart(
-				runtime,
-				resetLSPService,
-				activeCtx(),
-				"parent-session",
-				env.tmpDir,
-			);
-			const generationAfterPrimary = runtime.sessionGeneration;
-			expect(resetLSPService).toHaveBeenCalledTimes(1);
+				// Primary session_start (the parent).
+				await runGuardedSessionStart(
+					runtime,
+					resetLSPService,
+					activeCtx(),
+					"parent-session",
+					env.tmpDir,
+				);
+				const generationAfterPrimary = runtime.sessionGeneration;
+				expect(resetLSPService).toHaveBeenCalledTimes(1);
 
-			// Concurrent in-process subagent bind — the parent's ctx is still
-			// active (activeCtx() never throws), and the session id differs.
-			const decision = await runGuardedSessionStart(
-				runtime,
-				resetLSPService,
-				activeCtx(),
-				"subagent-session",
-				env.tmpDir,
-			);
+				// Concurrent in-process subagent bind — the parent's ctx is still
+				// active (activeCtx() never throws), and the session id differs.
+				const decision = await runGuardedSessionStart(
+					runtime,
+					resetLSPService,
+					activeCtx(),
+					"subagent-session",
+					env.tmpDir,
+				);
 
-			expect(decision.classification).toBe("concurrent-secondary");
-			expect(runtime.sessionGeneration).toBe(generationAfterPrimary);
-			// Still only the one call from the primary's session_start.
-			expect(resetLSPService).toHaveBeenCalledTimes(1);
-		} finally {
-			env.cleanup();
-		}
-	});
+				expect(decision.classification).toBe("concurrent-secondary");
+				expect(runtime.sessionGeneration).toBe(generationAfterPrimary);
+				// Still only the one call from the primary's session_start.
+				expect(resetLSPService).toHaveBeenCalledTimes(1);
+			} finally {
+				env.cleanup();
+			}
+		},
+		// #2139 class sweep: this sibling shares the guard=0 test's shape (one
+		// real handleSessionStart call through the same seam) and was seen
+		// timing out at vitest's 5000ms default in a combined 4-file run
+		// locally, even though it measures ~320ms solo. Same budget-correction
+		// fix as the guard=0 test below.
+		15_000,
+	);
 
 	it(
 		"with PI_LENS_CONCURRENT_SESSION_GUARD=0, the same sequence resets as today (behavior unchanged)",

@@ -570,6 +570,14 @@ describe("project snapshot", () => {
 			}
 		}));
 
+	// #2090: the three idle-eviction tests above stub
+	// PI_LENS_PROJECT_SNAPSHOT_IDLE_EVICT_MS via vi.stubEnv. Without the
+	// afterEach unstub, the last stub value ("100000") survives into every
+	// later test in this file.
+	it("does not leak PI_LENS_PROJECT_SNAPSHOT_IDLE_EVICT_MS to later tests (#2090)", () => {
+		expect(process.env.PI_LENS_PROJECT_SNAPSHOT_IDLE_EVICT_MS).toBeUndefined();
+	});
+
 	it("embeds the derived sequence index in BOTH the body and the meta sidecar (#1019)", () =>
 		withProjectDataDir((cwd) => {
 			// A runtime with a real per-file sequence state at seq=3.
