@@ -187,13 +187,17 @@ export const LANGUAGE_CAPABILITY_MATRIX: Record<
 	java: {
 		name: "Java Linting",
 		capabilities: ["types", "lint"],
-		writeGroups: [primary("java")],
+		writeGroups: [
+			primary("java"),
+			{ mode: "all", runnerIds: ["ast-grep-napi"], filterKinds: ["java"] },
+		],
 	},
 	kotlin: {
 		name: "Kotlin Linting",
 		capabilities: ["types", "lint", "format", "smells"],
 		writeGroups: [
 			primary("kotlin"),
+			{ mode: "all", runnerIds: ["ast-grep-napi"], filterKinds: ["kotlin"] },
 			{ mode: "fallback", runnerIds: ["detekt"], filterKinds: ["kotlin"] },
 		],
 	},

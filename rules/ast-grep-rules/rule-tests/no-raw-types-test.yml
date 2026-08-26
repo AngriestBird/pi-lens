@@ -1,0 +1,7 @@
+id: no-raw-types
+valid:
+  - 'List<String> names = new ArrayList<String>();'
+  - 'Map<String, Integer> counts = new HashMap<>();'
+invalid:
+  - 'List names = new ArrayList();'
+  - 'Optional value = Optional.empty();'

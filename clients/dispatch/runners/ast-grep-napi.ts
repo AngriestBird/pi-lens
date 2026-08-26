@@ -27,6 +27,7 @@ import { recordDegradationOnce } from "../../degradation-ledger.js";
 import { isAuxiliaryLspAlive } from "../../lsp/index.js";
 import { resolveAstGrepNativeExe } from "../../lsp/wait-policy/index.js";
 import { PRIORITY } from "../priorities.js";
+import { KIND_EXTENSIONS, type FileKind } from "../../file-kinds.js";
 import type {
 	Diagnostic,
 	DispatchContext,
@@ -236,7 +237,17 @@ export function resetAstGrepNapiLoadState(): void {
 }
 
 // Supported extensions for NAPI
-const SUPPORTED_EXTS = [".ts", ".tsx", ".js", ".jsx", ".css", ".html", ".htm"];
+// Derive extension coverage from the shared file-kind registry (#883).
+const NAPI_KINDS: readonly FileKind[] = [
+	"jsts",
+	"css",
+	"html",
+	"java",
+	"kotlin",
+];
+const SUPPORTED_EXTS = new Set(
+	NAPI_KINDS.flatMap((kind) => KIND_EXTENSIONS[kind]),
+);
 
 /** Maximum matches per rule to prevent excessive false positives */
 const MAX_MATCHES_PER_RULE = 10;
@@ -350,7 +361,7 @@ function matchesRuleIgnores(
 }
 
 export function canHandle(filePath: string): boolean {
-	return SUPPORTED_EXTS.includes(path.extname(filePath).toLowerCase());
+	return SUPPORTED_EXTS.has(path.extname(filePath).toLowerCase());
 }
 
 /**
@@ -381,7 +392,15 @@ export function canHandle(filePath: string): boolean {
  */
 export function ruleLanguageForFile(
 	filePath: string,
-): "typescript" | "tsx" | "javascript" | undefined {
+):
+	| "typescript"
+	| "tsx"
+	| "javascript"
+	| "css"
+	| "html"
+	| "java"
+	| "kotlin"
+	| undefined {
 	const ext = path.extname(filePath).toLowerCase();
 	switch (ext) {
 		case ".ts":
@@ -391,12 +410,37 @@ export function ruleLanguageForFile(
 		case ".js":
 		case ".jsx":
 			return "javascript";
+		case ".css":
+		case ".less":
+		case ".sass":
+		case ".scss":
+			return "css";
+		case ".html":
+		case ".htm":
+			return "html";
+		case ".java":
+			return "java";
+		case ".kt":
+		case ".kts":
+			return "kotlin";
 		default:
 			return undefined;
 	}
 }
 
+const SUPPORTED_RULE_LANGUAGES: Set<string> = new Set(
+	NAPI_KINDS.flatMap((kind) => KIND_EXTENSIONS[kind])
+		.map((extension) => ruleLanguageForFile(`file${extension}`))
+		.filter((language): language is NonNullable<typeof language> =>
+			Boolean(language),
+		),
+);
+
 export function getLang(filePath: string, sgModule: AstGrepNapi) {
+	const polyglotModule = sgModule as AstGrepNapi & {
+		java?: AstGrepNapi["ts"];
+		kotlin?: AstGrepNapi["ts"];
+	};
 	const ext = path.extname(filePath).toLowerCase();
 	switch (ext) {
 		case ".ts":
@@ -411,6 +455,11 @@ export function getLang(filePath: string, sgModule: AstGrepNapi) {
 		case ".html":
 		case ".htm":
 			return sgModule.html;
+		case ".java":
+			return polyglotModule.java;
+		case ".kt":
+		case ".kts":
+			return polyglotModule.kotlin;
 		default:
 			return undefined;
 	}
@@ -636,12 +685,7 @@ export function evaluateAstGrepRules(
 			}
 
 			const lang = rule.language?.toLowerCase();
-			if (
-				lang &&
-				lang !== "typescript" &&
-				lang !== "tsx" &&
-				lang !== "javascript"
-			) {
+			if (lang && !SUPPORTED_RULE_LANGUAGES.has(lang)) {
 				if (!unsupportedLanguageLog.has(lang)) {
 					const ids = newlyUnsupported.get(lang) ?? [];
 					ids.push(rule.id);
@@ -773,7 +817,7 @@ export function evaluateAstGrepRules(
 
 const astGrepNapiRunner: RunnerDefinition = {
 	id: "ast-grep-napi",
-	appliesTo: ["jsts"],
+	appliesTo: Object.keys(KIND_EXTENSIONS) as FileKind[],
 	priority: PRIORITY.SPECIALIZED_ANALYSIS,
 	enabledByDefault: true,
 	skipTestFiles: true,

@@ -134,7 +134,12 @@ describe("dispatch plan exposure", () => {
 	});
 
 	it("routes java and csharp through fallback compiler coverage", () => {
-		expect(flattenRunnerIds(TOOL_PLANS.java)).toEqual(["lsp", "javac"]);
+		expect(flattenRunnerIds(TOOL_PLANS.java)).toEqual([
+			"lsp",
+			"javac",
+			"ast-grep-napi",
+		]);
+		expect(flattenRunnerIds(TOOL_PLANS.kotlin)).toContain("ast-grep-napi");
 		expect(flattenRunnerIds(TOOL_PLANS.csharp)).toEqual([
 			"lsp",
 			"dotnet-build",

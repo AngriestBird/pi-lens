@@ -1,0 +1,18 @@
+id: no-string-concat-in-loop
+valid:
+  - |
+    StringBuilder result = new StringBuilder();
+    for (String item : items) {
+      result.append(item);
+    }
+  - 'String result = prefix + suffix;'
+invalid:
+  - |
+    String result = "";
+    for (String item : items) {
+      result += item;
+    }
+  - |
+    while (ready()) {
+      result = result + next();
+    }

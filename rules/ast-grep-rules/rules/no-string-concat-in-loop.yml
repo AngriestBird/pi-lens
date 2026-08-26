@@ -1,0 +1,34 @@
+id: no-string-concat-in-loop
+language: java
+severity: warning
+message: Use StringBuilder instead of string concatenation in loops.
+note: Ported from VTCode (https://github.com/vinhnx/VTCode), refs #2195. Loop allocation and readability context make this detection-only.
+rule:
+  any:
+    - all:
+        - pattern: $VAR = $VAR + $EXPR
+        - any:
+            - inside:
+                kind: for_statement
+                stopBy: end
+            - inside:
+                kind: enhanced_for_statement
+                stopBy: end
+            - inside:
+                kind: while_statement
+                stopBy: end
+    - all:
+        - pattern: $VAR += $EXPR
+        - any:
+            - inside:
+                kind: for_statement
+                stopBy: end
+            - inside:
+                kind: enhanced_for_statement
+                stopBy: end
+            - inside:
+                kind: while_statement
+                stopBy: end
+files:
+  - "**/*.java"
+  - "!**/test/**"

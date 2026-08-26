@@ -1,0 +1,15 @@
+id: no-raw-types
+language: java
+severity: warning
+message: Use parameterized types instead of raw types.
+note: Ported from VTCode (https://github.com/vinhnx/VTCode), refs #2195. Raw collection types need a project/API-aware generic choice, so this rule is detection-only.
+rule:
+  kind: type_identifier
+  regex: "^(List|Map|Set|Collection|Iterator|Iterable|Queue|Deque|Optional)$"
+  not:
+    inside:
+      kind: generic_type
+      stopBy: end
+files:
+  - "**/*.java"
+  - "!**/test/**"
