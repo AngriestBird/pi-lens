@@ -8,6 +8,7 @@
 
 import { createRequire } from "node:module";
 import * as fs from "node:fs";
+import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
@@ -31,6 +32,26 @@ describe("tree-sitter-client wasm resolution", () => {
 		// regardless of whether it's nested or hoisted.
 		const wasmPath = _require.resolve("web-tree-sitter/tree-sitter.wasm");
 		expect(wasmPath).toMatch(/tree-sitter\.wasm$/);
+		const client = new TreeSitterClient();
+		const deps = (
+			client as unknown as {
+				grammarDirResolutionDeps: {
+					cwd: () => string;
+					resolvePackage: (specifier: string) => string;
+					resolveAsset: (asset: string) => string | undefined;
+				};
+			}
+		).grammarDirResolutionDeps;
+		expect(deps.cwd()).toBe(process.cwd());
+		expect(path.isAbsolute(deps.resolvePackage("vitest/package.json"))).toBe(
+			true,
+		);
+		expect(deps.resolveAsset("grammars")).toBe(
+			path.resolve(
+				path.dirname(fileURLToPath(import.meta.url)),
+				"../../node_modules/web-tree-sitter/grammars",
+			),
+		);
 		// Must NOT assume the wasm lives nested under pi-lens's own node_modules
 		// relative to import.meta.url — that breaks in hoisted layouts.
 		expect(path.isAbsolute(wasmPath)).toBe(true);
