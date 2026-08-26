@@ -49,19 +49,13 @@ describe("tree-sitter-client wasm resolution", () => {
 		expect(path.dirname(sibling)).toBe(wasmDir);
 	});
 
-	it("findGrammarsDir resolves external packages via require.resolve, not process.cwd()", () => {
-		// Verify tree-sitter-wasms is resolvable through Node's resolver.
-		// This would fail in a hoisted monorepo if we used process.cwd()/node_modules directly.
-		let resolved: string | undefined;
-		try {
-			resolved = _require.resolve("tree-sitter-wasms/package.json");
-		} catch {
-			// package not installed in this env — skip
-			return;
-		}
-		expect(resolved).toMatch(/package\.json$/);
-		expect(path.isAbsolute(resolved)).toBe(true);
-	});
+	// Deleted in #2089: a case named for `findGrammarsDir` that never called it
+	// — it resolved `tree-sitter-wasms` itself and asserted on the resolver
+	// (AGENTS.md test-authoring screen 1, a parallel path). It had also never
+	// run: `tree-sitter-wasms` is not a pi-lens dependency, so the resolution it
+	// caught-and-returned on is the normal state of a stock checkout. The real
+	// fallback at tree-sitter-client.ts:896 remains uncovered; that gap has its
+	// own follow-up.
 
 	it("TreeSitterClient.isAvailable returns true when grammars are installed", async () => {
 		const { getSharedTreeSitterClient } =
