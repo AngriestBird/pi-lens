@@ -71,6 +71,12 @@ function getCurrentCommit(startDir: string): string {
 	if (!isInsideGitRepo(repoStartDir)) {
 		return "unknown";
 	}
+	let spawnDir = repoStartDir;
+	while (!fs.existsSync(spawnDir)) {
+		const parent = path.dirname(spawnDir);
+		if (parent === spawnDir) return "unknown";
+		spawnDir = parent;
+	}
 
 	try {
 		// #2095: execSync inherits the child's stderr to THIS process by
@@ -84,7 +90,7 @@ function getCurrentCommit(startDir: string): string {
 			encoding: "utf-8",
 			timeout: 5000,
 			stdio: ["ignore", "pipe", "ignore"],
-			cwd: repoStartDir,
+			cwd: spawnDir,
 		}).trim();
 	} catch {
 		return "unknown";

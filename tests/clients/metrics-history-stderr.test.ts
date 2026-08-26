@@ -44,13 +44,24 @@ describe("metrics-history getCurrentCommit stderr suppression (#2095)", () => {
 			const tmp = fs.mkdtempSync(
 				path.join(os.tmpdir(), "pi-lens-metrics-history-"),
 			);
+			const fixtureEnv: Record<string, string> = Object.fromEntries(
+				Object.entries(process.env).filter(
+					(entry): entry is [string, string] => entry[1] !== undefined,
+				),
+			);
+			fixtureEnv.GIT_CONFIG_GLOBAL = path.join(tmp, "gitconfig");
+			fixtureEnv.GIT_CONFIG_NOSYSTEM = "1";
 			try {
 				// A real repo with zero commits: `git rev-parse --short HEAD`
 				// genuinely fails with "fatal: ambiguous argument 'HEAD': unknown
 				// revision or path not in the working tree." on real stderr.
 				// `stdio: "ignore"` here is the exact guard this PR is about —
 				// this setup call must not itself leak `git init`'s stderr.
-				execFileSync("git", ["init", "-q"], { cwd: tmp, stdio: "ignore" });
+				execFileSync("git", ["init", "-q"], {
+					cwd: tmp,
+					stdio: "ignore",
+					env: fixtureEnv,
+				});
 
 				const dataDir = path.join(tmp, ".pilens-data");
 				const filePath = path.join(tmp, "file.ts");
@@ -83,7 +94,7 @@ describe("metrics-history getCurrentCommit stderr suppression (#2095)", () => {
 				const result = spawnSync(process.execPath, ["-e", script], {
 					cwd: tmp,
 					encoding: "utf-8",
-					env: { ...process.env, PILENS_DATA_DIR: dataDir },
+					env: { ...fixtureEnv, PILENS_DATA_DIR: dataDir },
 				});
 
 				expect(result.error).toBeUndefined();
@@ -126,6 +137,8 @@ describe("metrics-history per-file commit resolution (#2099)", () => {
 			]) {
 				delete fixtureEnv[variable];
 			}
+			fixtureEnv.GIT_CONFIG_GLOBAL = path.join(tmp, "gitconfig");
+			fixtureEnv.GIT_CONFIG_NOSYSTEM = "1";
 			const runGit = (cwd: string, args: string[]) =>
 				execFileSync("git", args, {
 					cwd,
@@ -192,6 +205,134 @@ describe("metrics-history per-file commit resolution (#2099)", () => {
 				expect(JSON.parse(result.stdout)).toEqual([expectedA, expectedB]);
 				expect(expectedA).not.toBe(umbrellaHead);
 				expect(expectedB).not.toBe(umbrellaHead);
+			} finally {
+				fs.rmSync(tmp, { recursive: true, force: true });
+			}
+		},
+		30_000,
+	);
+});
+
+describe("metrics-history repository guard (#2099)", () => {
+	it.skipIf(!hasGit())(
+		"resolves a nested repository under a non-repository umbrella",
+		() => {
+			const tmp = fs.mkdtempSync(
+				path.join(os.tmpdir(), "pi-lens-metrics-history-nonrepo-"),
+			);
+			const fixtureEnv: Record<string, string> = Object.fromEntries(
+				Object.entries(process.env).filter(
+					(entry): entry is [string, string] => entry[1] !== undefined,
+				),
+			);
+			fixtureEnv.PI_LENS_SKIP_HOOKS = "1";
+			fixtureEnv.GIT_CONFIG_GLOBAL = path.join(tmp, "gitconfig");
+			fixtureEnv.GIT_CONFIG_NOSYSTEM = "1";
+			const repo = path.join(tmp, "nested-repo");
+			const filePath = path.join(repo, "nested.ts");
+			const runGit = (args: string[]) =>
+				execFileSync("git", args, {
+					cwd: repo,
+					stdio: "ignore",
+					env: fixtureEnv,
+				});
+			try {
+				fs.mkdirSync(repo);
+				runGit(["init", "-q"]);
+				runGit(["config", "user.email", "test@example.com"]);
+				runGit(["config", "user.name", "pi-lens test"]);
+				fs.writeFileSync(filePath, "const nested = 1;\n");
+				runGit(["add", "nested.ts"]);
+				runGit(["commit", "-qm", "nested-repo"]);
+				const expected = execFileSync("git", ["rev-parse", "--short", "HEAD"], {
+					cwd: repo,
+					encoding: "utf-8",
+					env: fixtureEnv,
+				}).trim();
+				const dataDir = path.join(tmp, ".pilens-data");
+				const script = [
+					`process.chdir(${JSON.stringify(tmp)});`,
+					`const { captureSnapshots } = require(${JSON.stringify(METRICS_HISTORY_JS)});`,
+					`const filePath = ${JSON.stringify(filePath)};`,
+					"const history = captureSnapshots([{ filePath, metrics: {",
+					"  maintainabilityIndex: 90, cognitiveComplexity: 1, maxNestingDepth: 1,",
+					"  linesOfCode: 10, maxCyclomatic: 1, entropy: 1,",
+					"} }]);",
+					"process.stdout.write(history.files[require('node:path').relative(process.cwd(), filePath)].latest.commit);",
+				].join("\n");
+				const result = spawnSync(process.execPath, ["-e", script], {
+					cwd: tmp,
+					encoding: "utf-8",
+					env: { ...fixtureEnv, PILENS_DATA_DIR: dataDir },
+				});
+
+				expect(result.error).toBeUndefined();
+				expect(result.status).toBe(0);
+				expect(result.stdout).toBe(expected);
+				expect(result.stdout).not.toBe("unknown");
+			} finally {
+				fs.rmSync(tmp, { recursive: true, force: true });
+			}
+		},
+		30_000,
+	);
+});
+
+describe("metrics-history missing target directory (#2099)", () => {
+	it.skipIf(!hasGit())(
+		"resolves a file whose directory does not exist yet",
+		() => {
+			const tmp = fs.mkdtempSync(
+				path.join(os.tmpdir(), "pi-lens-metrics-history-missing-"),
+			);
+			const fixtureEnv: Record<string, string> = Object.fromEntries(
+				Object.entries(process.env).filter(
+					(entry): entry is [string, string] => entry[1] !== undefined,
+				),
+			);
+			fixtureEnv.PI_LENS_SKIP_HOOKS = "1";
+			fixtureEnv.GIT_CONFIG_GLOBAL = path.join(tmp, "gitconfig");
+			fixtureEnv.GIT_CONFIG_NOSYSTEM = "1";
+			const runGit = (args: string[]) =>
+				execFileSync("git", args, {
+					cwd: tmp,
+					stdio: "ignore",
+					env: fixtureEnv,
+				});
+			try {
+				runGit(["init", "-q"]);
+				runGit(["config", "user.email", "test@example.com"]);
+				runGit(["config", "user.name", "pi-lens test"]);
+				fs.writeFileSync(path.join(tmp, "README.md"), "umbrella\n");
+				runGit(["add", "README.md"]);
+				runGit(["commit", "-qm", "fixture"]);
+				const expected = execFileSync("git", ["rev-parse", "--short", "HEAD"], {
+					cwd: tmp,
+					encoding: "utf-8",
+					env: fixtureEnv,
+				}).trim();
+				const filePath = path.join(tmp, "sub", "gone.ts");
+				const dataDir = path.join(tmp, ".pilens-data");
+				const script = [
+					`process.chdir(${JSON.stringify(tmp)});`,
+					`const { captureSnapshots } = require(${JSON.stringify(METRICS_HISTORY_JS)});`,
+					`const filePath = ${JSON.stringify(filePath)};`,
+					"const history = captureSnapshots([{ filePath, metrics: {",
+					"  maintainabilityIndex: 90, cognitiveComplexity: 1, maxNestingDepth: 1,",
+					"  linesOfCode: 10, maxCyclomatic: 1, entropy: 1,",
+					"} }]);",
+					"process.stdout.write(history.files[require('node:path').relative(process.cwd(), filePath)].latest.commit);",
+				].join("\n");
+				const result = spawnSync(process.execPath, ["-e", script], {
+					cwd: tmp,
+					encoding: "utf-8",
+					env: { ...fixtureEnv, PILENS_DATA_DIR: dataDir },
+				});
+
+				expect(result.error).toBeUndefined();
+				expect(result.status).toBe(0);
+				expect(result.stdout).toBe(expected);
+				expect(result.stdout).not.toBe("unknown");
 			} finally {
 				fs.rmSync(tmp, { recursive: true, force: true });
 			}
