@@ -208,15 +208,6 @@ function normalizeGraphSourcePath(memo: SourcePathMemo, raw: string): string {
 	return normalized;
 }
 
-export function _getReviewGraphSourcePathNormalizeCallsForTests(
-	cwd: string,
-): number {
-	return (
-		_sourcePathMemos.get(normalizeMapKey(path.resolve(cwd)))?.normalizeCalls
-			.value ?? 0
-	);
-}
-
 export function _resetReviewGraphSourcePathMemoForTests(): void {
 	_sourcePathMemos.clear();
 }
