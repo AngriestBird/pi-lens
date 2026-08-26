@@ -40,6 +40,7 @@ vi.mock("../../clients/lsp/index.js", async (importOriginal) => ({
 const deferredRuntimeSnapshotSave = vi.hoisted(() => ({
 	delayCall: undefined as number | undefined,
 	calls: 0,
+	wordIndexSaveCompleted: false,
 	delayMs: 1200,
 }));
 vi.mock("../../clients/project-snapshot.js", async (importOriginal) => {
@@ -48,19 +49,28 @@ vi.mock("../../clients/project-snapshot.js", async (importOriginal) => {
 	return {
 		...actual,
 		saveRuntimeProjectSnapshot: vi.fn((args) => {
+			// Replace the old ordinal assumption ("the second save is the
+			// promotion") with the free content discriminator: only a save carrying
+			// the runtime word index belongs to this forcing/barrier.
 			deferredRuntimeSnapshotSave.calls += 1;
+			const carriesWordIndex = args.runtime.wordIndex !== null;
+			if (!carriesWordIndex) {
+				actual.saveRuntimeProjectSnapshot(args);
+				return;
+			}
 			if (
 				deferredRuntimeSnapshotSave.calls !==
 				deferredRuntimeSnapshotSave.delayCall
 			) {
 				actual.saveRuntimeProjectSnapshot(args);
+				deferredRuntimeSnapshotSave.wordIndexSaveCompleted = true;
 				return;
 			}
 			deferredRuntimeSnapshotSave.delayCall = undefined;
-			setTimeout(
-				() => actual.saveRuntimeProjectSnapshot(args),
-				deferredRuntimeSnapshotSave.delayMs,
-			).unref();
+			setTimeout(() => {
+				actual.saveRuntimeProjectSnapshot(args);
+				deferredRuntimeSnapshotSave.wordIndexSaveCompleted = true;
+			}, deferredRuntimeSnapshotSave.delayMs).unref();
 		}),
 	};
 });
@@ -167,6 +177,7 @@ afterEach(() => {
 	};
 	deferredRuntimeSnapshotSave.delayCall = undefined;
 	deferredRuntimeSnapshotSave.calls = 0;
+	deferredRuntimeSnapshotSave.wordIndexSaveCompleted = false;
 	globals.__piLensFirstSessionDone = false;
 	globals.__piLensWarmupScheduled = false;
 });
@@ -365,12 +376,14 @@ describe("word-index lifecycle — full mode (#348)", () => {
 				{ timeout: 5000 },
 			);
 			await vi.waitFor(
-				() =>
+				() => {
 					expect(
 						legacyDbg.mock.calls.filter(([m]) =>
 							String(m).includes("project_snapshot: saved"),
 						).length,
-					).toBeGreaterThanOrEqual(2),
+					).toBeGreaterThanOrEqual(2);
+					expect(deferredRuntimeSnapshotSave.wordIndexSaveCompleted).toBe(true);
+				},
 				{ timeout: 5000 },
 			);
 			await waitForProjectSnapshotPersistsForTests();
