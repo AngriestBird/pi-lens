@@ -342,6 +342,35 @@ describe("bus-publish — pilens:files:touched (#482)", () => {
 		]);
 	});
 
+	it("records the pi-lens writer and bounded paths for drift correlation", () => {
+		const emit = vi.fn();
+		wireBusEmitter(emit);
+		const paths = Array.from(
+			{ length: 70 },
+			(_, index) => `/repo/src/file-${index}.ts`,
+		);
+
+		publishFilesTouched({
+			reason: "autofix",
+			paths,
+			cwd: "/repo",
+		});
+
+		expect(logBusEvent).toHaveBeenCalledWith(
+			expect.objectContaining({
+				event: BUS_FILES_TOUCHED_EVENT,
+				outcome: "emitted",
+				writer: "pi-lens",
+				paths: expect.arrayContaining([
+					"C:/repo/src/file-0.ts",
+					"C:/repo/src/file-63.ts",
+				]),
+			}),
+		);
+		const record = logBusEvent.mock.calls[0]?.[0] as { paths?: string[] };
+		expect(record.paths).toHaveLength(64);
+	});
+
 	describe("#502: fix-provenance additive fields", () => {
 		it("omits fixes when not provided (old-shape payload unaffected)", () => {
 			const emit = vi.fn();
