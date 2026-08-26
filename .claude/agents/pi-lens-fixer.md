@@ -27,7 +27,15 @@ instructions say so.
    to green. `npm run build` before every test run.
 5. Run targeted test files while iterating, plus every test file that
    references the symbols you changed (grep tests/ — sibling files encode the
-   same behavior). The full suite is CI's job.
+   same behavior), PLUS every directory-scanning governance suite: those walk
+   `clients/` and fire on any new or edited file, so a symbol grep structurally
+   cannot find them (PR #2107 lesson — two sweeps fired in CI that the symbol
+   grep missed). The set today: `delivery-surface-ratchet`,
+   `finding-delivery-gate`, `session-state-conformance`,
+   `bounded-telemetry-sweep`, `bus-producer-coverage`, `deps-centralization`,
+   `freshness-sweep`, `managed-tool-seam-coverage`, `profiling-coverage`,
+   `module-instance-coverage`, `sweep-floor-coverage`. The full suite is CI's
+   job.
 6. If the issue asks for a class sweep, run it and report coverage honestly:
    what you searched, what you found, what you deliberately left.
 7. Ship: changelog fragment in `.changelog/`; tpope-style commit (conventional
