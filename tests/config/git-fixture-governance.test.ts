@@ -5,6 +5,14 @@ import { describe, expect, it } from "vitest";
 const directGitSpawn =
 	/\b(?:execSync|execFileSync|spawnSync|spawn|execFile|safeSpawnAsync)\s*\(\s*["'`]git\b/g;
 
+const GIT_FIXTURE_VERDICTS = [
+	{
+		file: "tests/clients/shared-checkout-guard.test.ts",
+		scope: "#2007 real git binary block",
+		verdict: "fixed (confirmed live offender 2026-08-26, two escapes)",
+	},
+] as const;
+
 export function findGitSpawnOffenders(
 	files: ReadonlyArray<{ file: string; source: string }>,
 ): string[] {
@@ -54,5 +62,13 @@ describe("real Git fixture governance", () => {
 				},
 			]),
 		).toEqual(["synthetic.test.ts"]);
+	});
+
+	it("records the confirmed per-file fixture verdicts", () => {
+		expect(GIT_FIXTURE_VERDICTS).toContainEqual({
+			file: "tests/clients/shared-checkout-guard.test.ts",
+			scope: "#2007 real git binary block",
+			verdict: "fixed (confirmed live offender 2026-08-26, two escapes)",
+		});
 	});
 });

@@ -990,8 +990,10 @@ guarded git verb (literal mentions such as `echo git push` remain allowed).
 
 Real-Git tests route child processes through `tests/support/git-fixture-env.ts`.
 That helper removes the Git directory environment family, isolates global config,
-and disables system config. `git-fixture-governance.test.ts` sweeps test sources,
-while the global-setup teardown guard rejects local identity entries or
+and disables system config. It deletes inherited values even when the test harness
+itself starts with a contaminated environment; never trust the parent process
+environment for a spawned Git fixture. `git-fixture-governance.test.ts` sweeps test
+sources, while the global-setup teardown guard rejects local identity entries or
 `core.bare=true` in the repository config after the suite.
 
 Git command classification has ONE implementation. `detectGuardedGitVerb`

@@ -28,10 +28,34 @@ export function gitFixtureEnv(fixtureDir: string): Record<string, string> {
 			(entry): entry is [string, string] => entry[1] !== undefined,
 		),
 	);
+	return scrubGitFixtureEnv(fixtureDir, env);
+}
+
+function scrubGitFixtureEnv(
+	fixtureDir: string,
+	base: NodeJS.ProcessEnv,
+): Record<string, string> {
+	const env = Object.fromEntries(
+		Object.entries(base).filter(
+			(entry): entry is [string, string] => entry[1] !== undefined,
+		),
+	);
 	for (const variable of SCRUBBED_GIT_VARIABLES) delete env[variable];
+	// These are fixture policy, not caller overrides. The harness itself may
+	// already be contaminated, so delete inherited values before setting them.
 	env.GIT_CONFIG_GLOBAL = path.join(fixtureDir, "gitconfig");
 	env.GIT_CONFIG_NOSYSTEM = "1";
 	return env;
+}
+
+function gitFixtureEnvWithOverrides(
+	fixtureDir: string,
+	overrides: NodeJS.ProcessEnv | undefined,
+): Record<string, string> {
+	return scrubGitFixtureEnv(fixtureDir, {
+		...gitFixtureEnv(fixtureDir),
+		...overrides,
+	});
 }
 
 /** Install fixture isolation for production Git probes launched by a test. */
@@ -58,7 +82,7 @@ export function gitExecFileSync(
 ): Buffer | string {
 	return execFileSync(command, args, {
 		...options,
-		env: { ...gitFixtureEnv(options.cwd ?? process.cwd()), ...options.env },
+		env: gitFixtureEnvWithOverrides(options.cwd ?? process.cwd(), options.env),
 	});
 }
 
@@ -77,7 +101,7 @@ export function gitExecSync(
 ): Buffer | string {
 	return execSync(command, {
 		...options,
-		env: { ...gitFixtureEnv(options.cwd ?? process.cwd()), ...options.env },
+		env: gitFixtureEnvWithOverrides(options.cwd ?? process.cwd(), options.env),
 	});
 }
 
