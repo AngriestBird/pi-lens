@@ -240,9 +240,7 @@ describe("escaped-newline PR body repair", () => {
 	});
 
 	it("refuses a body whose only literal backslash-n sits inside a real path (F1)", () => {
-		expect(detectEscapedNewlineBody(escapedNewlineWithWindowsPath)).toBe(
-			false,
-		);
+		expect(detectEscapedNewlineBody(escapedNewlineWithWindowsPath)).toBe(false);
 		expect(repairEscapedNewlineBody(escapedNewlineWithWindowsPath)).toBe(
 			escapedNewlineWithWindowsPath,
 		);
@@ -260,9 +258,9 @@ describe("escaped-newline PR body repair", () => {
 
 	it("refuses a single literal join even when it lands between two headings (F3 count gate)", () => {
 		expect(singleLiteralNewlineTwoHeadings.length).toBeGreaterThanOrEqual(200);
-		expect(
-			detectEscapedNewlineBody(singleLiteralNewlineTwoHeadings),
-		).toBe(false);
+		expect(detectEscapedNewlineBody(singleLiteralNewlineTwoHeadings)).toBe(
+			false,
+		);
 	});
 
 	it("refuses two literal joins that never produce a template heading (F3 heading gate)", () => {
