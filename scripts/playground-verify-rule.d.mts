@@ -20,3 +20,10 @@ export function runChrome(
 	cmd: string,
 	options?: RunChromeOptions,
 ): Promise<void>;
+
+// #2208.
+export function buildPlaygroundUrl(
+	ruleYaml: string,
+	code: string,
+	lang: string,
+): string;

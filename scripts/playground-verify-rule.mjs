@@ -226,13 +226,23 @@ async function ensureChrome() {
 	process.stderr.write(`# [playground] chrome launch: ${Date.now() - t0}ms\n`);
 }
 
-function buildPlaygroundUrl(ruleYaml, code, lang) {
+// #2208: the playground's URL-hash state (ast-grep/ast-grep.github.io,
+// website/src/components/astGrep/state.ts) matches rules built from
+// `state.config` against `state.source` — `state.query` only feeds the
+// separate "Pattern" mode and is ignored in Config mode. This harness
+// previously wrote the caller's code into `query`, so the hash carried no
+// `source` field at all; the playground's `{...defaultState, ...parsed}`
+// merge silently fell back to its own hardcoded sample source instead of
+// erroring, so every run graded the rule against that fixed sample and
+// never against the code the caller passed in.
+export function buildPlaygroundUrl(ruleYaml, code, lang) {
 	const payload = {
 		mode: "Config",
 		lang,
-		query: code,
+		query: "",
 		rewrite: "",
 		config: ruleYaml,
+		source: code,
 	};
 	const b64 = Buffer.from(JSON.stringify(payload), "utf8").toString("base64");
 	return `${PLAYGROUND_URL}#${b64}`;
@@ -249,9 +259,8 @@ function buildPlaygroundUrl(ruleYaml, code, lang) {
 //
 // The playground shows one of:
 //   "Found N match(es)."        — the rule fired N times against the
-//                                  default source (the playground uses a
-//                                  hardcoded source; user code via the URL
-//                                  hash is ignored in Config mode)
+//                                  caller's source (state.source, set via
+//                                  the payload above)
 //   "No match found."           — the rule did not fire (0 matches)
 //   an error message             — the rule's YAML/pattern was rejected
 function buildScrapeExpr() {
