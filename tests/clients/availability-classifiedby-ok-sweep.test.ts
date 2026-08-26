@@ -1,16 +1,21 @@
 /**
- * classifiedBy sweep for the `cause: "ok"` availability-decision arm (#2131).
+ * classifiedBy sweep for `logAvailabilityDecision` call sites (#2131, #2209).
  *
- * Dogfood pass 5 measured the gap: over 8.76h of baseline, 33 of 75
+ * Dogfood pass 5 measured the #2131 gap: over 8.76h of baseline, 33 of 75
  * `cause: "ok"` decisions (44%) carried no `classifiedBy`, while `not-found`
  * (51/51) and `fast-path` (23/23) carried it 100%. Seven call sites set
  * `cause: "ok"` next to a sibling failure arm that stamps `classifiedBy` and
  * simply omitted it on the success arm — a mechanical, structural gap, not a
  * one-off typo, so a mechanical sweep is the fix that cannot regress silently.
  *
+ * #2209 found the same gap on the OTHER side: three named failure arms
+ * (and, once the class was swept for every call site rather than just the
+ * three, ten more besides) omitted `classifiedBy` too. The gap is symmetric,
+ * so the sweep below checks EVERY call, not just `cause: "ok"` ones.
+ *
  * This scans every `logAvailabilityDecision` call under `clients/` and reds
- * if ANY `cause: "ok"` call omits `classifiedBy` — the class this issue's
- * verification note closes.
+ * if ANY call omits `classifiedBy` — the class both issues' verification
+ * notes close.
  */
 
 import * as path from "node:path";
@@ -54,6 +59,19 @@ describe("availability_decision classifiedBy sweep (#2131)", () => {
 				'(classifiedBy: "probe") or an install/join-repaired verdict the caller',
 				'asserted (classifiedBy: "caller"/"joined") — read the sibling failure',
 				"arm in the same function for which one applies.",
+			].join(" "),
+		).toEqual([]);
+	});
+
+	it("every logAvailabilityDecision call stamps classifiedBy (#2209)", () => {
+		const unstamped = SITES.filter((site) => !site.hasClassifiedBy);
+		expect(
+			evidence(unstamped),
+			[
+				"An availability_decision emit is missing classifiedBy.",
+				'Stamp classifiedBy: "probe" when classifyProbeFailure derived the',
+				'outcome/cause, or "caller" when the call site asserts it directly —',
+				"see availability-policy.ts's AvailabilityDecision.classifiedBy doc.",
 			].join(" "),
 		).toEqual([]);
 	});

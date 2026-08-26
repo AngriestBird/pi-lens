@@ -379,6 +379,9 @@ function noteCooldownServedVerdict(
 		retryAfterMs: Math.max(1, retryAtMs - Date.now()),
 		budgetMs: WHICH_BUDGET_MS,
 		servedFromCooldown: true,
+		// No probe ran here: the latch's own remembered cause is replayed
+		// as-is, so the call site is the one asserting it (#2209).
+		classifiedBy: "caller",
 	});
 }
 
@@ -465,6 +468,7 @@ async function which(command: string): Promise<string | null> {
 		hostStallMs,
 		...(retryAfterMs > 0 && { retryAfterMs }),
 		budgetMs: WHICH_BUDGET_MS,
+		classifiedBy: "probe",
 	});
 	return null;
 }

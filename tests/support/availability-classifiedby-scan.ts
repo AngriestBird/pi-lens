@@ -68,21 +68,28 @@ export function scanSource(
 	while (match !== null) {
 		const openIndex = source.indexOf("(", match.index);
 		const argsText = readBalancedArgs(source, openIndex);
+		const tool = readTopLevelProperty(argsText, "tool");
 		const verdict = readTopLevelProperty(argsText, "verdict");
 		const outcome = readTopLevelProperty(argsText, "outcome");
 		const cause = readTopLevelProperty(argsText, "cause");
-		sites.push({
-			file,
-			line: source.slice(0, match.index).split("\n").length,
-			causeOk:
-				cause?.value === '"ok"' ||
-				(verdict?.value.includes('"available"') === true &&
-					outcome?.value.includes('"success"') === true &&
-					cause !== undefined &&
-					!/^['"`]/.test(cause.value)),
-			hasClassifiedBy:
-				readTopLevelProperty(argsText, "classifiedBy") !== undefined,
-		});
+		// `tool` is a required field on every real `AvailabilityDecision`, so its
+		// absence means this match is the function's OWN declaration
+		// (`export function logAvailabilityDecision(decision: ...)`), not a call
+		// — its argument list has no object-literal `tool:` key to find.
+		if (tool !== undefined) {
+			sites.push({
+				file,
+				line: source.slice(0, match.index).split("\n").length,
+				causeOk:
+					cause?.value === '"ok"' ||
+					(verdict?.value.includes('"available"') === true &&
+						outcome?.value.includes('"success"') === true &&
+						cause !== undefined &&
+						!/^['"`]/.test(cause.value)),
+				hasClassifiedBy:
+					readTopLevelProperty(argsText, "classifiedBy") !== undefined,
+			});
+		}
 		match = opener.exec(source);
 	}
 	return sites.sort((a, b) => a.line - b.line);

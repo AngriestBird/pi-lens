@@ -248,6 +248,11 @@ function recordGhTokenUnavailable(
 		hostStallMs,
 		...(retryAfterMs > 0 && { retryAfterMs }),
 		budgetMs: GH_TOKEN_PROBE_TIMEOUT_MS,
+		// Shared tail for both call paths (empty-answer literal and
+		// `classifyGhTokenFailure`, this module's own hand-rolled
+		// classifier — neither is the shared `classifyProbeFailure`), so
+		// this is the call site asserting the outcome, not a probe (#2209).
+		classifiedBy: "caller",
 	});
 	return undefined;
 }
@@ -343,6 +348,9 @@ export async function resolveZizmorGitHubToken(): Promise<string | undefined> {
 				hostStallMs: 0,
 				...(retryAfterMs > 0 && { retryAfterMs }),
 				budgetMs: GH_TOKEN_PROBE_TIMEOUT_MS,
+				// No probe ran here: the latch's own remembered cause is replayed
+				// as-is, so the call site is the one asserting it (#2209).
+				classifiedBy: "caller",
 			});
 		}
 		return memo ? cachedToken : undefined;
