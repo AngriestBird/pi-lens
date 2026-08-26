@@ -37,6 +37,7 @@ import { isExcludedDirName } from "./file-utils.js";
 import { recordDegradationOnce } from "./degradation-ledger.js";
 import { normalizeEphemeralMapKey, normalizeMapKey } from "./path-utils.js";
 import { safeSpawnAsync } from "./safe-spawn.js";
+import { truncatedByOutputCap } from "./spawn-output-cap.js";
 
 function recordTruncatedLsFiles(
 	parseSite: "untracked-ignored" | "tracked",
@@ -98,7 +99,7 @@ async function fetchUntrackedIgnoredIds(
 				resourceLabel: "git-tracked-ignore",
 			},
 		);
-		if (result.outputTruncated === true) {
+		if (truncatedByOutputCap(result)) {
 			recordTruncatedLsFiles("untracked-ignored");
 			return undefined;
 		}
@@ -195,7 +196,7 @@ async function fetchTrackedFiles(
 			maxOutputBytes: MAX_LS_FILES_OUTPUT_BYTES,
 			resourceLabel: "git-tracked-ignore",
 		});
-		if (result.outputTruncated === true) {
+		if (truncatedByOutputCap(result)) {
 			recordTruncatedLsFiles("tracked");
 			return undefined;
 		}

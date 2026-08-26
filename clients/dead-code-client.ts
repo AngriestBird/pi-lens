@@ -325,6 +325,7 @@ export class PythonDeadCodeClient implements DeadCodeClient {
 					latched: true,
 					hostStallMs,
 					budgetMs: 5000,
+					classifiedBy: "probe",
 				});
 				return true;
 			}

@@ -51,6 +51,30 @@ export async function paginate(fetcher, url) {
 }
 
 /**
+ * Which of these markers already appear in the issue's comments? One paged
+ * read answers for every marker, so a head carrying several stuck runs
+ * (#2203) costs the same single read as one carrying none.
+ */
+export async function presentCommentMarkers(
+	fetcher,
+	owner,
+	repo,
+	number,
+	markers,
+) {
+	const comments = await paginate(
+		fetcher,
+		`https://api.github.com/repos/${owner}/${repo}/issues/${number}/comments`,
+	);
+	const bodies = comments.map((c) => String(c?.body ?? ""));
+	return new Set(
+		(markers ?? []).filter((marker) =>
+			bodies.some((body) => body.includes(marker)),
+		),
+	);
+}
+
+/**
  * Does any comment on this issue carry the marker? Shared by both modules so
  * the per-head dedupe has one implementation, not two that can drift.
  */
@@ -61,9 +85,8 @@ export async function commentMarkerExists(
 	number,
 	marker,
 ) {
-	const comments = await paginate(
-		fetcher,
-		`https://api.github.com/repos/${owner}/${repo}/issues/${number}/comments`,
-	);
-	return comments.some((c) => String(c?.body ?? "").includes(marker));
+	const present = await presentCommentMarkers(fetcher, owner, repo, number, [
+		marker,
+	]);
+	return present.has(marker);
 }
