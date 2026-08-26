@@ -21,6 +21,7 @@ import {
 	forEachCooperatively,
 	yieldIfOverBudget,
 } from "./cooperative-budget.js";
+import { incrementDegradationCount } from "./degradation-ledger.js";
 import { KIND_EXTENSIONS, type FileKind } from "./file-kinds.js";
 import { PathKeyedMap } from "./path-keyed-map.js";
 import { isAtOrAboveHomeDir, normalizeEphemeralMapKey } from "./path-utils.js";
@@ -322,6 +323,32 @@ export function estimateWordIndexResidentBytes(index: WordIndex): number {
 }
 
 /**
+ * Record a posting whose file id the file table cannot resolve (#2069).
+ *
+ * Unreachable by construction: {@link WordIndexFileTable.release} only runs
+ * after the forward index has enumerated and removed every posting naming that
+ * id. If it fires, that invariant broke, and the visible symptom is a query
+ * returning FEWER results with nothing to distinguish it from a smaller match
+ * set — the clean-versus-errored ambiguity AGENTS.md catalogs as shape 10.
+ *
+ * `incrementDegradationCount` rather than `recordDegradationOnce` because
+ * ranking is a hot loop: the tally stays exact for every occurrence while only
+ * the first per (kind, orphaned id) writes a durable row. Subject is the id
+ * itself, so aggregation keeps the discriminating identity.
+ */
+function recordOrphanWordIndexFileId(
+	fileId: number,
+	token: string,
+	seam: "search" | "decode",
+): void {
+	incrementDegradationCount({
+		kind: "word-index-orphan-file-id",
+		subject: `fileId:${fileId}`,
+		reason: `${seam} dropped a posting for token "${token}": the file table has no path for this id`,
+	});
+}
+
+/**
  * Decode one token’s postings into `{ file, line }` objects. Allocates, so it
  * is for callers that genuinely need the display form (tests, diagnostics) —
  * never for the hot ranking loop, which reads the packed lanes directly.
@@ -334,8 +361,12 @@ export function wordIndexPostingHits(
 	if (!list) return [];
 	const hits: WordHit[] = [];
 	for (let i = 0; i < list.length; i += 1) {
-		const file = index.fileTable.pathFor(list.fileIdAt(i));
-		if (file === undefined) continue;
+		const fileId = list.fileIdAt(i);
+		const file = index.fileTable.pathFor(fileId);
+		if (file === undefined) {
+			recordOrphanWordIndexFileId(fileId, token, "decode");
+			continue;
+		}
 		hits.push({ file, line: list.lineAt(i) });
 	}
 	return hits;
@@ -1528,7 +1559,12 @@ export function searchWordIndex(
 
 		for (const [fileId, lines] of linesByFileId) {
 			const file = index.fileTable.pathFor(fileId);
-			if (file === undefined) continue;
+			if (file === undefined) {
+				// Dropping this silently would shorten the result list with nothing to
+				// tell it apart from a smaller match set. Record, then drop.
+				recordOrphanWordIndexFileId(fileId, token, "search");
+				continue;
+			}
 			if (combinedFilter && !combinedFilter(file)) continue;
 			const termFrequency = lines.length;
 			const docLength = index.docLengths.get(file) ?? avgDocLength;

@@ -40,8 +40,16 @@ export const WORD_POSTING_ENTRY_BYTES = 8;
  * `WordPostingList` wrapper object, its entry in the postings `Map`, and the
  * canonical token string it holds. V8 does not expose these, so this is a
  * deliberate over-estimate of the ~136 bytes they occupy on a 64-bit build with
- * pointer compression. Over-estimating is the safe direction: the reported
- * figure must never claim less memory than the index actually holds.
+ * pointer compression.
+ *
+ * Over-estimating this constant does NOT make the whole figure an upper bound,
+ * and {@link estimateWordIndexStoreBytes} is explicit that it is a floor. The
+ * blind spot is arena slack: a list that outgrows its slice after an edit stops
+ * referring to the arena, but the arena keeps the vacated lanes alive while any
+ * sibling still points into it, and nothing charges them to anyone. After a
+ * full-corpus rewrite pass the estimate reads 0.58 to 0.66 of the real cost
+ * (two independent measurements). Treat this constant as tightening a floor,
+ * never as buying headroom.
  */
 export const WORD_POSTING_LIST_OVERHEAD_BYTES = 160;
 
@@ -214,10 +222,17 @@ export function estimatePostingListBytes(list: WordPostingList): number {
  *
  * A later per-edit `push` that outgrows a list allocates a fresh private array
  * for that token and stops referring to the arena. The vacated slice is not
- * reclaimed while any sibling view still holds the arena, so the waste is
- * bounded by the tokens edited since the last bulk build, and a full rebuild
- * allocates a fresh arena. That is the deliberate trade: bounded, rebuild-reset
- * slack in exchange for a third of the store.
+ * reclaimed while any sibling still points into the arena, so churn
+ * re-fragments what a build compacted, and only a full rebuild or a
+ * `deserializeWordIndex` re-compacts it.
+ *
+ * Measured on this repository's own tree, 2,699 documents and 2,272,686
+ * postings: a fresh build is 32.8 MB in ONE backing store; one full-corpus
+ * rewrite pass takes it to 39.9 MB across 37,687 stores (+22%); a second pass
+ * reaches 41.7 MB and the store count does not move, so the cost levels off
+ * rather than compounding. Even fully churned it stays well under the 151.6 MB
+ * a boxed build cost. Recompaction on a churn threshold is tracked in the
+ * follow-up issue; this comment is the sizing that decision needs.
  */
 export function compactPostingsIntoArena(
 	postings: Map<string, WordPostingList>,

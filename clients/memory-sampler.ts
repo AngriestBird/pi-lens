@@ -165,7 +165,7 @@ export interface MemorySampleSubsystems {
 	wordIndex: {
 		docs: number;
 		fileTable: number;
-		/** Distinct token count. Breadth, NOT memory — see `postingBytes`. */
+		/** Distinct token count. Breadth, NOT memory — see `residentBytes`. */
 		postings: number;
 		/**
 		 * Total posting entries across every token (#2069). #1999 read

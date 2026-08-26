@@ -35,6 +35,10 @@ import {
 	countPostingBackingStores,
 	WORD_POSTING_ENTRY_BYTES,
 } from "../../clients/word-index-store.js";
+import {
+	getDegradationSummary,
+	resetDegradationLedger,
+} from "../../clients/degradation-ledger.js";
 
 /**
  * Ceiling on measured bytes per posting entry.
@@ -244,6 +248,58 @@ describe("word-index posting footprint (#2069)", () => {
 		);
 		expect(files.sort()).toEqual(["b.ts", "c.ts"]);
 		expect(index.postings.has("alphaonly")).toBe(false);
+	});
+
+	it("records a bounded degradation when a posting's file id has no path", () => {
+		resetDegradationLedger();
+		const index = buildWordIndex([
+			{ path: "a.ts", content: "alphaToken\nalphaToken again" },
+			{ path: "b.ts", content: "betaToken" },
+		]);
+		// Break the invariant the packed store rests on: release the id while its
+		// postings still name it. `release` is the real production method, so this
+		// forces the branch without stubbing anything the code under test owns.
+		expect(index.fileTable.release(wordIndexKey("a.ts"))).toBeDefined();
+
+		// Each seam is measured in its OWN ledger window. Sharing one window lets a
+		// seam that stopped recording hide behind its sibling's count.
+		const orphanGroup = () =>
+			getDegradationSummary().find(
+				(entry) => entry.kind === "word-index-orphan-file-id",
+			);
+
+		// Decode seam: a.ts held `alphatoken` on two lines, so both postings drop.
+		expect(wordIndexPostingHits(index, "alphatoken")).toEqual([]);
+		expect(orphanGroup()?.count).toBe(2);
+		expect(orphanGroup()?.latestReasons.map((entry) => entry.subject)).toEqual([
+			"fileId:0",
+		]);
+		expect(orphanGroup()?.latestReasons[0]?.reason).toMatch(
+			/^decode dropped a posting for token "alphatoken": the file table has no path for this id \(count: 2\)$/,
+		);
+
+		// Search seam, fresh window. `alphaToken` also splits into the shared
+		// sub-token `token`, which b.ts still carries, so the query returns a
+		// SHORTER list rather than an empty one — exactly the case a silent drop
+		// makes indistinguishable from a smaller match set (AGENTS.md shape 10).
+		resetDegradationLedger();
+		expect(orphanGroup()).toBeUndefined();
+		expect(
+			searchWordIndex(index, "alphaToken", {
+				demoteTestVendor: false,
+				demoteDocs: false,
+			}).map((result) => result.file),
+		).toEqual(["b.ts"]);
+		// One grouped entry per query token that still names the orphaned id:
+		// `alphatoken`, `alpha`, and the shared `token`.
+		expect(orphanGroup()?.count).toBe(3);
+		expect(orphanGroup()?.latestReasons.map((entry) => entry.subject)).toEqual([
+			"fileId:0",
+		]);
+		expect(orphanGroup()?.latestReasons[0]?.reason).toMatch(
+			/^search dropped a posting for token "[a-z]+": the file table has no path for this id \(count: 3\)$/,
+		);
+		resetDegradationLedger();
 	});
 
 	it("ranks identically to the boxed representation's documented output", () => {
