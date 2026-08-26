@@ -6,6 +6,7 @@ import { recordDegradationOnce } from "./degradation-ledger.js";
 import { detectFileKind } from "./file-kinds.js";
 import { isPathIgnoredByProject } from "./file-utils.js";
 import { evaluateGitGuard, isGitCommitOrPushAttempt } from "./git-guard.js";
+import { evaluateSharedCheckoutGuard } from "./shared-checkout-guard.js";
 import { logLatency } from "./latency-logger.js";
 import { normalizeMapKey } from "./path-utils.js";
 import {
@@ -560,6 +561,25 @@ async function handleToolCallImpl(deps: ToolCallDeps): Promise<ToolCallResult> {
 			return {
 				block: true,
 				reason: guard.reason,
+			};
+		}
+	}
+
+	// #2007: a sibling session's branch switch destroys uncommitted work in a
+	// shared checkout. Independent of `lens-guard`: that gate is about blocker
+	// hygiene before a commit, this one is about not deleting a peer's WIP.
+	// The evaluator short-circuits on a pure string classification, so a
+	// non-git bash command pays no I/O here.
+	if (getFlag("lens-checkout-guard")) {
+		const sharedCheckout = await evaluateSharedCheckoutGuard(
+			toolName,
+			event.input,
+			ctx.cwd ?? runtime.projectRoot ?? process.cwd(),
+		);
+		if (sharedCheckout.block) {
+			return {
+				block: true,
+				reason: sharedCheckout.reason,
 			};
 		}
 	}

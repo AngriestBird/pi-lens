@@ -560,6 +560,15 @@ export const DELIVERY_SURFACES: Record<string, DeliverySurfaceEntry> = {
 			"detection and delivery.",
 		"live",
 	),
+	"shared-checkout-guard:worktree-mutation-blocked": labeled(
+		"clients/shared-checkout-guard.ts",
+		"Shared-checkout 🔴 WORKING-TREE CHANGE BLOCKED verdict (--lens-checkout-guard).",
+		"Synchronous preflight rejection returned inline with the failed git " +
+			"command. Both inputs are read at decision time — the instance registry " +
+			"and `git status` — so no stored finding is replayed and nothing can go " +
+			"stale between detection and delivery.",
+		"live",
+	),
 	"read-guard-tool-lines:preflight-errors": labeled(
 		"clients/read-guard-tool-lines.ts",
 		"Read-guard hashline BLOCKED / RE-READ REQUIRED preflight errors.",

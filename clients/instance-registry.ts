@@ -35,7 +35,7 @@ import { getGlobalPiLensDir } from "./file-utils.js";
 // use on both sides happens inside function bodies, never at module-
 // evaluation time, so both modules are fully initialized before either
 // import is actually invoked.
-import { realIsPidAlive } from "./instance-reaper.js";
+import { realIsPidAlive, STALE_HEARTBEAT_MS } from "./instance-reaper.js";
 import { normalizeFilePath } from "./path-utils.js";
 import { getSubagentIdentity, isSubagentSession } from "./subagent-mode.js";
 
@@ -428,6 +428,66 @@ export function deregisterInstance(): void {
 	const remaining = file.instances.filter((entry) => entry.pid !== pid);
 	if (remaining.length === file.instances.length) return; // nothing to remove
 	writeRegistrySync({ instances: remaining });
+}
+
+/**
+ * Every OTHER live pi-lens process registered against the same project root,
+ * oldest first (#2007).
+ *
+ * "Live" is the registry's own three-part answer, not a guess: a different
+ * pid, an OS-confirmed alive pid, and a parseable heartbeat inside
+ * `STALE_HEARTBEAT_MS`. This is the single predicate for "am I sharing this
+ * directory with someone" — `selectWarmAttachIncumbent` picks the oldest
+ * entry it returns, and the shared-checkout guard asks whether it returns
+ * anything at all. Both must move together if the liveness rule changes.
+ *
+ * Roots are compared after `normalizeFilePath`, the same form
+ * `registerInstance` writes, so drive-letter case and separators cannot make
+ * a peer invisible (catalog shape 1).
+ *
+ * `match` picks what "same directory" means, and the two callers genuinely
+ * differ. Warm attach needs `"exact"`: it shares one LSP service, which is
+ * bound to a specific project root. The shared-checkout guard needs
+ * `"containment"`: a peer registered at the repo root and a command run from
+ * `repo/clients` share one working tree, and an exact compare would report no
+ * peer and allow the destructive command. Containment compares on segment
+ * boundaries, so `/repo-backup` never matches `/repo`.
+ *
+ * Best-effort by construction: the caller supplies the entries, so a failed
+ * registry read is the caller's empty list, which reads as "no known peer".
+ */
+export type PeerRootMatch = "exact" | "containment";
+
+/**
+ * True when `a` and `b` are the same directory, or one contains the other.
+ * Compared on SEGMENT boundaries, so `/repo-backup` never matches `/repo`.
+ */
+function rootsOverlap(a: string, b: string): boolean {
+	if (a === b) return true;
+	const [shorter, longer] = a.length < b.length ? [a, b] : [b, a];
+	return longer.startsWith(shorter.endsWith("/") ? shorter : `${shorter}/`);
+}
+
+export function selectLivePeerInstances(
+	entries: readonly InstanceEntry[],
+	root: string,
+	now: number = Date.now(),
+	isPidAlive: (pid: number) => boolean = realIsPidAlive,
+	match: PeerRootMatch = "exact",
+): InstanceEntry[] {
+	const normalizedRoot = normalizeFilePath(root);
+	return entries
+		.filter(
+			(entry) =>
+				entry.pid !== process.pid &&
+				(match === "exact"
+					? entry.projectRoot === normalizedRoot
+					: rootsOverlap(entry.projectRoot, normalizedRoot)) &&
+				isPidAlive(entry.pid) &&
+				Number.isFinite(Date.parse(entry.heartbeatAt)) &&
+				now - Date.parse(entry.heartbeatAt) <= STALE_HEARTBEAT_MS,
+		)
+		.sort((a, b) => Date.parse(a.startedAt) - Date.parse(b.startedAt));
 }
 
 // --- Resource footprint aggregation (#620) ----------------------------------

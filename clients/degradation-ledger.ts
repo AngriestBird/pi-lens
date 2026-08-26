@@ -48,6 +48,14 @@ export type DegradationKind =
 	| "lsp-warm-client-missing"
 	| "lsp-capability-skip"
 	/**
+	 * #2007: a worktree-mutating git command was declined because a live peer
+	 * session shares this dirty checkout. The subject is the checkout root, so
+	 * the ledger says WHICH shared directory is contended.
+	 */
+	| "shared-checkout-wip"
+	/** #2007: `git status` could not answer for that same decision. */
+	| "shared-checkout-probe"
+	/**
 	 * The blind review-graph read (`getCachedReviewGraph`) either DROPPED a
 	 * persisted snapshot because its git stamp names a different worktree, or
 	 * SERVED one whose stamp names a different HEAD (#1961). Subject is

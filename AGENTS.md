@@ -948,6 +948,30 @@ unrecognized leading launcher with `-c`/`--run`/`/c`/`-Command` is inspected
 recursively and fails closed only when its command string contains an actual
 guarded git verb (literal mentions such as `echo git push` remain allowed).
 
+Git command classification has ONE implementation. `detectGuardedGitVerb`
+takes a `GitVerbMatcher` and owns the wrapper, `$IFS`, substitution, PATHEXT,
+and text-consumer analysis; a guard that needs "is this really a git
+invocation of verb V" supplies only the verb question. Do not add a second
+lexer. The two matchers differ on exactly one axis, `indirectAlwaysMatches`:
+the commit gate is a policy an agent may want to evade, so any non-leading
+`git` fails closed there, while the shared-checkout guard protects an agent
+from its own accident and arms the indirect path only when the argv also
+carries a governed verb.
+
+The shared-checkout guard (`clients/shared-checkout-guard.ts`,
+`--lens-checkout-guard`) declines a worktree-mutating git command when three
+facts all hold, checked cheapest first: the command really mutates the
+working tree, `selectLivePeerInstances` reports another live session on this
+root, and `git status` reports uncommitted work. Refusal is the whole design
+— never auto-stash, because `git stash` is repo-global across worktrees and
+would reproduce the defect it is rescuing from. An unanswerable `git status`
+declines on its own UNKNOWN reason and records a counted degradation; it is
+never read as clean. A registry that cannot be read allows, so an
+observability outage cannot start refusing branch switches machine-wide.
+`selectLivePeerInstances` (`clients/instance-registry.ts`) is the single
+source of truth for "another session is here"; `selectWarmAttachIncumbent`
+picks the oldest entry it returns, so the two cannot drift.
+
 ### Host integration and repo automation
 
 The weekly stale-open-issue detector is detection-only: `.github/workflows/stale-open-issues.yml`
