@@ -1,16 +1,21 @@
 /**
- * classifiedBy sweep for the `cause: "ok"` availability-decision arm (#2131).
+ * classifiedBy sweep for `logAvailabilityDecision` call sites (#2131, #2209).
  *
- * Dogfood pass 5 measured the gap: over 8.76h of baseline, 33 of 75
+ * Dogfood pass 5 measured the #2131 gap: over 8.76h of baseline, 33 of 75
  * `cause: "ok"` decisions (44%) carried no `classifiedBy`, while `not-found`
  * (51/51) and `fast-path` (23/23) carried it 100%. Seven call sites set
  * `cause: "ok"` next to a sibling failure arm that stamps `classifiedBy` and
  * simply omitted it on the success arm — a mechanical, structural gap, not a
  * one-off typo, so a mechanical sweep is the fix that cannot regress silently.
  *
+ * #2209 found the same gap on the OTHER side: three named failure arms
+ * (and, once the class was swept for every call site rather than just the
+ * three, ten more besides) omitted `classifiedBy` too. The gap is symmetric,
+ * so the sweep below checks EVERY call, not just `cause: "ok"` ones.
+ *
  * This scans every `logAvailabilityDecision` call under `clients/` and reds
- * if ANY `cause: "ok"` call omits `classifiedBy` — the class this issue's
- * verification note closes.
+ * if ANY call omits `classifiedBy` — the class both issues' verification
+ * notes close.
  */
 
 import * as path from "node:path";
@@ -57,6 +62,19 @@ describe("availability_decision classifiedBy sweep (#2131)", () => {
 			].join(" "),
 		).toEqual([]);
 	});
+
+	it("every logAvailabilityDecision call stamps classifiedBy (#2209)", () => {
+		const unstamped = SITES.filter((site) => !site.hasClassifiedBy);
+		expect(
+			evidence(unstamped),
+			[
+				"An availability_decision emit is missing classifiedBy.",
+				'Stamp classifiedBy: "probe" when classifyProbeFailure derived the',
+				'outcome/cause, or "caller" when the call site asserts it directly —',
+				"see availability-policy.ts's AvailabilityDecision.classifiedBy doc.",
+			].join(" "),
+		).toEqual([]);
+	});
 });
 
 describe("availability-classifiedby scanner self-test", () => {
@@ -69,6 +87,9 @@ describe("availability-classifiedby scanner self-test", () => {
 		'logAvailabilityDecision({ tool: "x", verdict: "available", outcome: "success", cause: "ok", note: "unmatched ( quote" });',
 		'// logAvailabilityDecision({ cause: "ok" });',
 		'fakeLogAvailabilityDecision({ cause: "ok" });',
+		"function logAvailabilityDecision(decision) {",
+		'logAvailabilityDecision({ ...base, verdict: "available", outcome: "success", cause: "ok", classifiedBy: "probe" });',
+		"logAvailabilityDecision(decisionVar);",
 	].join("\n");
 	const found = scanSource(fixture, "fixture.ts");
 
@@ -82,6 +103,9 @@ describe("availability-classifiedby scanner self-test", () => {
 			[4, true, true],
 			[5, false, false],
 			[6, true, false],
+			// Line 9 (the declaration) is deliberately absent here.
+			[10, true, true],
+			[11, false, false],
 		]);
 	});
 
@@ -91,5 +115,19 @@ describe("availability-classifiedby scanner self-test", () => {
 
 	it("does not match an identifier that merely ends in the callee name", () => {
 		expect(found.some((site) => site.line === 8)).toBe(false);
+	});
+
+	it("excludes the function's own declaration (#2226 review F3)", () => {
+		expect(found.some((site) => site.line === 9)).toBe(false);
+	});
+
+	it("finds a call whose fields arrive via a spread (#2226 review F3)", () => {
+		const site = found.find((s) => s.line === 10);
+		expect(site).toMatchObject({ causeOk: true, hasClassifiedBy: true });
+	});
+
+	it("finds a call that passes the whole decision as a variable (#2226 review F3)", () => {
+		const site = found.find((s) => s.line === 11);
+		expect(site).toMatchObject({ causeOk: false, hasClassifiedBy: false });
 	});
 });

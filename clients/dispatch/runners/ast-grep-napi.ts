@@ -401,6 +401,14 @@ export function ruleLanguageForFile(
 	}
 }
 
+const SUPPORTED_RULE_LANGUAGES: readonly string[] = [
+	"typescript",
+	"tsx",
+	"javascript",
+	"css",
+	"html",
+];
+
 export function getLang(filePath: string, sgModule: AstGrepNapi) {
 	const ext = path.extname(filePath).toLowerCase();
 	switch (ext) {
@@ -647,14 +655,7 @@ export function evaluateAstGrepRules(
 			// This preserves CSS rule findings while avoiding unrelated scans.
 			// The fallback and LSP paths share the same parsed-language scope.
 			const lang = rule.language?.toLowerCase();
-			if (
-				lang &&
-				lang !== "typescript" &&
-				lang !== "tsx" &&
-				lang !== "javascript" &&
-				lang !== "css" &&
-				lang !== "html"
-			) {
+			if (lang && !SUPPORTED_RULE_LANGUAGES.includes(lang)) {
 				if (!unsupportedLanguageLog.has(lang)) {
 					const ids = newlyUnsupported.get(lang) ?? [];
 					ids.push(rule.id);

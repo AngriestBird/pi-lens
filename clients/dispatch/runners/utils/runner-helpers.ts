@@ -961,9 +961,9 @@ export function createAvailabilityChecker(
 				cause: verdict.cause,
 				elapsedMs: verdict.elapsedMs,
 				latched,
-				...(verdict.classifiedBy !== undefined && {
-					classifiedBy: verdict.classifiedBy,
-				}),
+				// Every caller passes this (#2209); a direct key, not a conditional
+				// spread, keeps it visible to the call-shaped classifiedBy sweep.
+				classifiedBy: verdict.classifiedBy,
 				...(verdict.evidence !== undefined && { evidence: verdict.evidence }),
 				...(verdict.hostStallMs !== undefined && {
 					hostStallMs: verdict.hostStallMs,
@@ -1948,6 +1948,9 @@ function noteSgUnavailable(
 		hostStallMs: sgSweepHostStallMs,
 		...(retryAfterMs > 0 && { retryAfterMs }),
 		budgetMs: 5000,
+		// Sibling of noteSgAvailable's "probe": both report the same
+		// candidate sweep this function ran (#2209).
+		classifiedBy: "probe",
 	});
 }
 

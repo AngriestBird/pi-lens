@@ -345,4 +345,38 @@ describe("CI memory attribution (#2042)", () => {
 		expect(ci).toContain("free -m");
 		expect(ci).toContain("nproc");
 	});
+
+	// #2042 round 2: the low-water mark proved the box was not short of memory
+	// on three real kills, but it cannot name what sent the SIGKILL. The kernel
+	// can, and only while the runner is still alive — so the record has to be
+	// taken inside the job, on failure.
+	it("asks the kernel who sent the kill when the job fails", () => {
+		expect(ci).toContain("Kernel kill evidence");
+		expect(ci).toContain("dmesg");
+		expect(ci).toContain("systemd-oomd");
+	});
+
+	it("gates the kernel evidence on failure, so a green run stays quiet", () => {
+		const step = ci.slice(ci.indexOf("Kernel kill evidence"));
+		expect(step.slice(0, 200)).toContain("if: failure()");
+	});
+
+	// Round-2 review F1: `cat /sys/fs/cgroup/memory.events` reads the ROOT
+	// cgroup, which cgroup v2 never populates. It printed nothing whether or not
+	// an event had occurred, so no reading of it could support a claim either
+	// way. The step has to resolve the job's own cgroup.
+	it("reads the job's own cgroup, not the unpopulated root", () => {
+		expect(ci).toContain("/proc/self/cgroup");
+		expect(ci).not.toContain("cat /sys/fs/cgroup/memory.events");
+	});
+
+	// Round-2 review F1/F2: every arm must distinguish "asked, nothing there"
+	// from "could not ask". Silence reads as the first and can be the second.
+	it("marks each evidence arm when it could not be read", () => {
+		const step = ci.slice(ci.indexOf("Kernel kill evidence"));
+		expect(step).toContain("dmesg unavailable or empty");
+		expect(step).toContain("zero OOM/kill records");
+		expect(step).toContain("journalctl unavailable");
+		expect(step).toContain("memory.events absent or unreadable");
+	});
 });
