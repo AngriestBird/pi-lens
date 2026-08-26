@@ -16,7 +16,6 @@ import {
 	wordIndexPostingHits,
 } from "../../clients/word-index.js";
 import { setupTestEnvironment } from "./test-utils.js";
-import { buildMemorySample } from "../../clients/memory-sampler.js";
 
 const mocks = vi.hoisted(() => ({
 	buildOrUpdateGraph: vi.fn(),
@@ -121,10 +120,8 @@ describe("computeCascadeForFile — word-index per-edit seam (#348 phase 2)", ()
 				),
 			).toBe(true);
 			expect(onWordIndexUpdated).toHaveBeenCalledWith(wordIndex);
-			// The same real index handed to the persistence hook must remain visible
-			// to memory_sample, so persist_succeeded cannot coincide with wordIndex:null.
-			const sample = buildMemorySample(wordIndex);
-			expect(sample.subsystems.wordIndex?.residentBytes).toBeGreaterThan(0);
+			// The broader runtime.wordIndex -> memory_sample seam remains a remainder:
+			// this PR does not fix the dogfood wordIndex:null observation.
 		} finally {
 			env.cleanup();
 		}

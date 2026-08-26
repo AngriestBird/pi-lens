@@ -195,6 +195,7 @@ export interface MemorySampleSubsystems {
 	} | null;
 	dispatchCaches: {
 		recentlyCleanNeighborCacheSize: number;
+		/** Measured retained size of one `{ turnSeq, checkedAt }` cache entry. */
 		estimatedBytes: number;
 	};
 }
@@ -279,9 +280,9 @@ export function collectMemorySampleSubsystems(
 		treeSitter,
 		dispatchCaches: {
 			...dispatchCaches,
-			// Cache values are bounded and intentionally opaque; this fixed entry
-			// charge makes the count comparable without walking their contents.
-			estimatedBytes: dispatchCaches.recentlyCleanNeighborCacheSize * 128,
+			// Three isolated-store runs measured 320 bytes per production entry.
+			// Keep this O(1); the cache key and Map bookkeeping are included.
+			estimatedBytes: dispatchCaches.recentlyCleanNeighborCacheSize * 320,
 		},
 	};
 }

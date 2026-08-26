@@ -191,9 +191,9 @@ function fakeMem(
 
 describe("collectMemorySampleSubsystems (O(1)/O(bounded-cache-size) live reads)", () => {
 	it("estimates graph store bytes from counts without walking graph contents", () => {
-		// Independent oracle: two nodes, three edges, and two eight-byte index
-		// references per edge use the published coefficient contract.
-		expect(estimateReviewGraphStoreBytes(2, 3)).toBe(2 * 200 + 3 * (150 + 16));
+		// Independent oracle from the reviewer’s isolated-store measurement:
+		// 450.5 bytes per node and 243 bytes per edge.
+		expect(estimateReviewGraphStoreBytes(2, 3)).toBe(1630);
 	});
 
 	it("wordIndex is null when none is supplied (no word index built yet this session)", () => {
@@ -264,13 +264,16 @@ describe("collectMemorySampleSubsystems (O(1)/O(bounded-cache-size) live reads)"
 			subsystems.dispatchCaches.recentlyCleanNeighborCacheSize,
 		).toBeGreaterThanOrEqual(0);
 		expect(subsystems.dispatchCaches.estimatedBytes).toBeGreaterThanOrEqual(0);
-		// Every registered subsystem must expose at least one byte-denominated
-		// value, so a future count-only addition cannot silently recur (#2114).
-		expect(subsystems.lsp.incrementalTextBytes).toBeDefined();
-		expect(subsystems.reviewGraph.residentBytes).toBeDefined();
-		expect(subsystems.wordIndex).toBeNull();
-		expect(subsystems.treeSitter?.treeCacheTotalBytes ?? 0).toBeDefined();
-		expect(subsystems.dispatchCaches.estimatedBytes).toBeDefined();
+		// Registry sweep: every non-null subsystem must expose a byte field, so
+		// adding a count-only subsystem cannot silently recur (#2114, #2132
+		// criterion 3).
+		for (const [name, subsystem] of Object.entries(subsystems)) {
+			if (subsystem === null) continue;
+			expect(
+				Object.keys(subsystem).some((key) => /Bytes$/.test(key)),
+				`${name} must expose a byte-denominated field`,
+			).toBe(true);
+		}
 		if (subsystems.treeSitter) {
 			expect(subsystems.treeSitter.languagesLoaded).toBeGreaterThanOrEqual(0);
 			expect(subsystems.treeSitter.treeCacheTotalBytes).toBeGreaterThanOrEqual(
