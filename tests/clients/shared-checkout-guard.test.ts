@@ -218,6 +218,18 @@ describe("worktree-mutating git classification (#2007)", () => {
 		}
 	});
 
+	it("suppresses help only in the LEADING post-verb position", () => {
+		// #2107 verify, L1: the suppression reads argsAfterVerb[0] only.
+		// Widening it to .some() would wrongly suppress both of these, which
+		// really mutate: `-h` here is the value of `-e` (an exclude pattern),
+		// and `-- --help` checks out a path literally named `--help`.
+		for (const command of ["git clean -e -h -fd", "git checkout -- --help"]) {
+			expect(isWorktreeMutatingGitAttempt("bash", bash(command)), command).toBe(
+				true,
+			);
+		}
+	});
+
 	it("reads a clustered -n as `git clean` dry-run", () => {
 		// F4: short flags cluster. An exact-token set read `-nfd` as mutating.
 		for (const command of [

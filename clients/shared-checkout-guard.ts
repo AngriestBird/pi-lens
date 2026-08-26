@@ -44,6 +44,14 @@
  * clean, and records a counted degradation so a repeatedly broken probe is
  * visible instead of silently permissive.
  *
+ * The TOPLEVEL probes fail open, deliberately and asymmetrically to the
+ * dirtiness probe: a candidate peer whose `git rev-parse --show-toplevel`
+ * fails is dropped, and the allow record folds into `no_peer_session`; a cwd
+ * whose probe fails folds into `not_a_git_worktree`. Both read as facts in
+ * latency.log when they may be a timeout or a lock. Chosen because failing
+ * closed here would let a broken probe block every branch switch; the cost is
+ * that those two reasons are not distinguishable from the genuine cases.
+ *
  * NO LATCHES HERE (catalog shape 17). Every decision is recomputed from the
  * registry and the tree. Repeat-suppression for telemetry lives in the
  * degradation ledger, which already re-arms at `session_start`.
