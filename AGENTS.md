@@ -1073,8 +1073,10 @@ bounded commit-detail population opts out explicitly.
 
 The merge-train warden's GraphQL PR reader follows the same bounded-read contract:
 `fetchOpenPullRequests` preserves collected pages but records a fatal list error
-when `hasNextPage` remains true at `MAX_PAGES`. Its consumer prints that error and
-sets a nonzero exit code, while deliberately bounded sibling reads remain scoped.
+when `hasNextPage` remains true at `MAX_PAGES` or the cursor does not advance.
+It deduplicates PR numbers before `runWarden` decides or applies actions. Its
+consumer prints that error and sets a nonzero exit code, while deliberately
+bounded sibling reads remain scoped.
 
 CI validates GitHub close-keyword syntax through `scripts/check-close-keywords.mjs`:
 PR bodies may not use a comma-separated close list because GitHub applies only
