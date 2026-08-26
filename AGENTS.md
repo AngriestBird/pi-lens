@@ -1007,8 +1007,10 @@ picks the oldest entry it returns, so the two cannot drift.
 The weekly stale-open-issue detector is detection-only: `.github/workflows/stale-open-issues.yml`
 calls `scripts/detect-stale-open-issues.mjs`, which uses the bounded GitHub REST
 fetcher seam in `scripts/lib/stale-open-issues.mjs` to inspect open issues and
-bounded `master` commit details. It comments one candidate summary on #1323 and
-writes the workflow summary; it must never close or edit detected issues.
+bounded `master` commit details. It paginates each response until an empty page
+proves exhaustion and fails loudly at the safety bound instead of interpreting a
+partial response. It comments one candidate summary on #1323 and writes the
+workflow summary; it must never close or edit detected issues.
 
 CI validates GitHub close-keyword syntax through `scripts/check-close-keywords.mjs`:
 PR bodies may not use a comma-separated close list because GitHub applies only

@@ -61,6 +61,48 @@ describe("stale open-issue detector (#1323)", () => {
 		expect(truncatedCommits).toBe(0);
 	});
 
+	it("fails loudly instead of returning a population beyond the page bound", async () => {
+		const { fetcher } = fakeGithub({
+			"/repos/acme/repo/issues": Array.from({ length: PAGE_SIZE }, (_, i) => ({
+				number: i + 1,
+				labels: [{ name: "priority:p3" }],
+			})),
+			"/repos/acme/repo/commits": [],
+		});
+		await expect(
+			detectStaleOpenIssues({ fetcher, repository: "acme/repo" }),
+		).rejects.toThrow("refusing to use a partial response");
+	});
+
+	it("paginates the open population until GitHub returns an empty page", async () => {
+		const pages = [
+			Array.from({ length: PAGE_SIZE }, (_, i) => ({
+				number: i + 1,
+				labels: [{ name: "priority:p3" }],
+			})),
+			[{ number: PAGE_SIZE + 1, labels: [{ name: "priority:p3" }] }],
+			[],
+		];
+		const fetcher = async (url: string) => {
+			const parsed = new URL(url);
+			const page = Number(parsed.searchParams.get("page"));
+			return {
+				ok: true,
+				status: 200,
+				json: async () =>
+					parsed.pathname.endsWith("/issues") ? pages[page - 1] : [],
+			};
+		};
+		const result = await detectStaleOpenIssues({
+			fetcher,
+			repository: "acme/repo",
+		});
+		expect(result.scannedOpenItems).toBe(PAGE_SIZE + 1);
+		expect(
+			formatSummary([], { scannedOpenItems: result.scannedOpenItems }),
+		).toContain("Scanned population: 101 open item(s).");
+	});
+
 	it("ignores issues absent from the open-issue response and non-test filenames", async () => {
 		const { fetcher } = fakeGithub({
 			"/repos/acme/repo/issues": [
@@ -292,5 +334,14 @@ describe("shouldPost (#1676 fix round)", () => {
 				priorityCoverage: { zero: [], multiple: [] },
 			}),
 		).toBe(false);
+	});
+
+	it("posts when multiple priority labels exist even without zero-label gaps", () => {
+		expect(
+			shouldPost({
+				candidates: [],
+				priorityCoverage: { zero: [], multiple: [{ number: 2, title: "x" }] },
+			}),
+		).toBe(true);
 	});
 });
