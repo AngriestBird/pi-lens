@@ -15,10 +15,17 @@
 //   - make `startedSpawn` unconditionally `true` in `ensureClientForServer` and
 //     the concurrency, burst-replay, and failure-join tests red;
 //   - make it unconditionally `false` and the same three red;
-//   - delete the `lsp_server_spawned` emit in `spawnClient` and the two
-//     spawn-record tests red;
+//   - delete the `lsp_server_spawned` emit in `spawnClient` and three tests
+//     red, including the `getClientsForFile` one;
 //   - move the `startedSpawn` capture to AFTER `await spawnPromise` (which is
-//     the pre-fix shape) and the burst replay reports 39 spawns again.
+//     the pre-fix shape) and the burst replay reports 39 spawns again;
+//   - make `spawnClient` rethrow from its own catch and the
+//     "emits no selection record when the acquisition throws" test reds,
+//     which is the signal that the un-split catch below it needs revisiting.
+//
+// NOT claimed as mutation-proven: the catch around `await spawnPromise` keeps
+// a single `spawn-failure` value on purpose. See the comment at that catch and
+// the last test in this file for the reachability analysis.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const logLatency = vi.hoisted(() => vi.fn());
@@ -33,6 +40,24 @@ vi.mock("../../../clients/lsp/config.js", () => ({
 }));
 
 vi.mock("../../../clients/lsp/client.js", () => ({ createLSPClient }));
+
+/**
+ * Drives the one route into `ensureClientForServer`'s catch: a throw from
+ * `spawnClient` BEFORE its own `try`. Defaults to off, so every other test in
+ * this file runs against the real trust module's behavior.
+ */
+const trustProbeThrows = { value: false };
+vi.mock("../../../clients/project-trust.js", async (importOriginal) => {
+	const actual =
+		await importOriginal<typeof import("../../../clients/project-trust.js")>();
+	return {
+		...actual,
+		isLspSpawnAllowedByTrust: () => {
+			if (trustProbeThrows.value) throw new Error("trust probe threw");
+			return actual.isLspSpawnAllowedByTrust();
+		},
+	};
+});
 
 function fakeClient(alive: { value: boolean }) {
 	return {
@@ -180,22 +205,17 @@ describe("LSP spawn records count truthfully (#2064)", () => {
 			expect(countOutcome("cold-spawn")).toBe(1);
 			expect(countOutcome("cold-spawn-joined")).toBe(38);
 
-			// The process-start record agrees with the starter count. That
-			// cross-check is the whole claim: one denominator, two readings.
+			// One process start, and on THIS path the spawn record and the
+			// starter outcome agree. They do not agree in general — see the
+			// `getClientsForFile` test below, which is why the recipe is an
+			// inequality.
 			expect(spawnRecords()).toHaveLength(1);
 
-			// The same count, derived the way a log reader derives it — through
-			// the exported classification rather than a literal in this test, so
-			// a future outcome value cannot be added without classifying it.
-			const { SPAWN_STARTING_OUTCOMES } =
-				await import("../../../clients/lsp/index.js");
-			const starters = selectionOutcomes().filter((outcome) =>
-				SPAWN_STARTING_OUTCOMES.has(
-					outcome as Parameters<typeof SPAWN_STARTING_OUTCOMES.has>[0],
-				),
+			// Nothing else reached the record, so the denominator is unchanged
+			// and no third value slipped in.
+			expect(new Set(selectionOutcomes())).toEqual(
+				new Set(["cold-spawn", "cold-spawn-joined"]),
 			);
-			expect(starters).toHaveLength(1);
-			// Every other record is a joiner, so the denominator is unchanged.
 			expect(selectionOutcomes()).toHaveLength(39);
 		} finally {
 			release?.();
@@ -253,6 +273,64 @@ describe("LSP spawn records count truthfully (#2064)", () => {
 			expect(spawnRecords()).toEqual([]);
 		} finally {
 			release?.();
+			await service.shutdown({ processExiting: true });
+		}
+	});
+
+	// #2064 review F1. `getClientsForFile` and `getAuxiliaryClientsForFile`
+	// call `ensureClientForServer` with no `onOutcome`, so a spawn on those
+	// paths writes a process-start record and NO selection record. This test
+	// exists because the first version of this PR documented the two counts as
+	// equal, which is false in production and would have sent a log reader
+	// hunting a phantom leak. The relation is
+	// `count(lsp_server_spawned) >= count(outcome="cold-spawn")`, and
+	// `lsp_server_spawned` is the authoritative spawn count.
+	it("counts a getClientsForFile spawn with no selection record", async () => {
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const service = new LSPService();
+		try {
+			const result = await service.getClientsForFile("/repo/a.ts");
+			expect(result.clients).toHaveLength(1);
+
+			// The process started, and only the spawn record says so.
+			expect(spawnRecords()).toHaveLength(1);
+			expect(selectionOutcomes()).toEqual([]);
+		} finally {
+			await service.shutdown({ processExiting: true });
+		}
+	});
+
+	// #2064 review F2. The catch around `await spawnPromise` deliberately keeps
+	// one `spawn-failure` value rather than splitting starter from joiner, and
+	// this test pins the reachability analysis that justifies it. `spawnClient`
+	// never rethrows, so the catch is reachable only when `spawnClient` throws
+	// before its own `try` — here, a throwing trust probe. Two facts follow,
+	// and both are asserted: the acquisition REJECTS rather than resolving, and
+	// the rethrow unwinds past every `lsp_client_selected` emit site, so the
+	// catch's outcome value reaches no record. A discriminator nothing can
+	// observe is a vacuous guard.
+	//
+	// Honest framing: this is a claim pin, not a red-first regression test. It
+	// passes before and after the fix. Its job is to fail if someone later
+	// makes `spawnClient` rethrow, because that would make the catch reachable
+	// with a live joiner and the single value would start over-counting again.
+	it("emits no selection record when the acquisition throws", async () => {
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const service = new LSPService();
+		try {
+			trustProbeThrows.value = true;
+			const settled = await Promise.allSettled([
+				service.getClientForFile("/repo/x1.ts"),
+				service.getClientForFile("/repo/x2.ts"),
+			]);
+			expect(settled.map((entry) => entry.status)).toEqual([
+				"rejected",
+				"rejected",
+			]);
+			expect(selectionOutcomes()).toEqual([]);
+			expect(spawnRecords()).toEqual([]);
+		} finally {
+			trustProbeThrows.value = false;
 			await service.shutdown({ processExiting: true });
 		}
 	});

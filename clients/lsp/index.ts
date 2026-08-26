@@ -539,10 +539,17 @@ export interface SpawnedServer {
  * records inside 2ms against a measured 29.3s TypeScript spawn. The `-joined`
  * values split the two readings apart without splitting the record:
  *
- * - process starts = count(`cold-spawn`) + count(`spawn-failure`);
- * - selections that paid a spawn wait = those two plus their `-joined` twins;
+ * - selections that paid a spawn wait = every cold/failure value;
+ * - selections served from the pool = `warm-reuse`;
  * - reuse rate = `warm-reuse / (warm-reuse + every cold/failure value)`, the
  *   same single denominator #1934 defined.
+ *
+ * These values are NOT the spawn count. `lsp_server_spawned` is, and it is
+ * authoritative: `getClientsForFile` and `getAuxiliaryClientsForFile` pass no
+ * `onOutcome`, so a multi-client or auxiliary spawn writes a spawn record and
+ * no selection record at all. Read the relation as
+ * `count(lsp_server_spawned) >= count(outcome="cold-spawn")`, never as
+ * equality (#2064 review F1).
  */
 export type LSPClientAcquisitionOutcome =
 	| "warm-reuse"
@@ -551,10 +558,6 @@ export type LSPClientAcquisitionOutcome =
 	| "spawn-failure"
 	| "spawn-failure-joined"
 	| "declined";
-
-/** The outcomes whose caller STARTED a language-server process. */
-export const SPAWN_STARTING_OUTCOMES: ReadonlySet<LSPClientAcquisitionOutcome> =
-	new Set<LSPClientAcquisitionOutcome>(["cold-spawn", "spawn-failure"]);
 
 // #1621: a rename-propagation notify failure now records WHY it failed —
 // `timedOut` (the notify write never settled inside its budget) is distinct
@@ -3321,10 +3324,21 @@ export class LSPService {
 			return spawned;
 		} catch (err) {
 			// A throwing spawn promise is an errored acquisition by definition.
-			// #2064: the joiners of a failing spawn are counted apart from its
-			// starter for the same reason the success path splits them — one
-			// failed process start must not read as N.
-			onOutcome?.(startedSpawn ? "spawn-failure" : "spawn-failure-joined");
+			//
+			// #2064 review F2: deliberately NOT split into a starter/joiner pair
+			// like the resolve path above, because nothing could observe the
+			// split. `spawnClient` never rethrows; it catches its own spawn and
+			// initialize failures and resolves `undefined`. This catch is
+			// therefore reachable only when `spawnClient` throws BEFORE its own
+			// `try` (the trust probe, `logSessionStart`, `recordLsp`), and two
+			// facts follow. The published promise is already rejected when it
+			// enters `inFlight`, so no joiner can attach to it. And the rethrow
+			// below unwinds past every `lsp_client_selected` emit site, so this
+			// value is written to no record: a probe drove a throwing trust
+			// check through two concurrent callers and got two rejections and
+			// zero selection records. An unobservable discriminator is a
+			// vacuous guard, so this path keeps the single #1934 value.
+			onOutcome?.("spawn-failure");
 			throw err;
 		} finally {
 			if (this.state.inFlight.get(key) === spawnPromise) {
@@ -3503,6 +3517,13 @@ export class LSPService {
 			// `latency.log` alone. Volume is bounded by process starts: one
 			// record per spawn, and a spawn is single-flighted per
 			// `serverId:root` by `state.inFlight`.
+			//
+			// The two path fields are deliberate and are not duplicates.
+			// `filePath` carries the ROOT, because the root plus `serverId` is
+			// the client's identity and the unit a spawn is single-flighted on.
+			// `triggerFilePath` carries the file whose touch paid for the
+			// spawn, which answers a different question and is the one that
+			// varies across records for the same client.
 			logLatency({
 				type: "phase",
 				phase: "lsp_server_spawned",
