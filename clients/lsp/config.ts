@@ -61,6 +61,7 @@ import {
 import {
 	createRootDetector,
 	LSP_SERVERS,
+	resetLSPCaseSensitivityState,
 	type LSPServerInfo,
 } from "./server.js";
 
@@ -405,6 +406,7 @@ export function getServerInitOverride(
 
 export function resetLSPConfigStateForTests(): void {
 	workspaceConfigs.clear();
+	resetLSPCaseSensitivityState();
 	// Reset both together: a cleared config store beside a live session-root
 	// registry would decline files for roots nothing can serve any more.
 	resetSessionRootsForTests();
