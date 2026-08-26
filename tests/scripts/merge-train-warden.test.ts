@@ -551,6 +551,33 @@ describe("merge-train warden GraphQL fetch + REST apply (#1844)", () => {
 		]);
 	});
 
+	// The page limit is healthy when the final page exhausts the connection.
+	// Hoisting the truncation guard above the hasNextPage break must make this
+	// complete population report a false error.
+	it("accepts MAX_PAGES full pages when the last page is exhausted", async () => {
+		const pages = Array.from({ length: MAX_PAGES }, (_, pageIndex) =>
+			graphqlPage(
+				Array.from({ length: PAGE_SIZE }, (_, itemIndex) =>
+					prNode({ number: pageIndex * PAGE_SIZE + itemIndex + 1 }),
+				),
+				pageIndex < MAX_PAGES - 1,
+				`cursor-${pageIndex}`,
+			),
+		);
+		const calls: unknown[] = [];
+		const fetcher = async (_url: string, init?: { body?: string }) => {
+			const body = JSON.parse(init?.body ?? "{}");
+			calls.push(body);
+			const after = body.variables?.after;
+			const pageIndex = after ? Number(after.replace("cursor-", "")) + 1 : 0;
+			return { ok: true, status: 200, json: async () => pages[pageIndex] };
+		};
+		const result = await fetchOpenPullRequests(fetcher, "acme", "repo");
+		expect(calls).toHaveLength(MAX_PAGES);
+		expect(result.prs).toHaveLength(MAX_PAGES * PAGE_SIZE);
+		expect(result.errors).toEqual([]);
+	});
+
 	it("applyAction issues the exact REST call for each action type", async () => {
 		const { fetcher, calls } = fakeGithub({});
 		const record = pr({ number: 5, headSha: "abc123" });
