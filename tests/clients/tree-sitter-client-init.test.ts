@@ -7,12 +7,14 @@
  */
 
 import { createRequire } from "node:module";
+import * as fs from "node:fs";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	TreeSitterClient,
 	type TreeSitterParseCacheStats,
 } from "../../clients/tree-sitter-client.js";
+import { createTempFile, setupTestEnvironment } from "../clients/test-utils.js";
 
 const _require = createRequire(import.meta.url);
 
@@ -49,18 +51,50 @@ describe("tree-sitter-client wasm resolution", () => {
 		expect(path.dirname(sibling)).toBe(wasmDir);
 	});
 
-	it("findGrammarsDir resolves external packages via require.resolve, not process.cwd()", () => {
-		// Verify tree-sitter-wasms is resolvable through Node's resolver.
-		// This would fail in a hoisted monorepo if we used process.cwd()/node_modules directly.
-		let resolved: string | undefined;
+	it("findGrammarsDir finds a real cwd tree-sitter-wasms fixture", () => {
+		const env = setupTestEnvironment("pi-lens-tree-sitter-2112-found-");
+		const originalCwd = process.cwd();
 		try {
-			resolved = _require.resolve("tree-sitter-wasms/package.json");
-		} catch {
-			// package not installed in this env — skip
-			return;
+			const wasmPath = createTempFile(
+				env.tmpDir,
+				"node_modules/tree-sitter-wasms/out/tree-sitter-typescript.wasm",
+				"fixture wasm",
+			);
+			process.chdir(env.tmpDir);
+
+			const client = new TreeSitterClient() as unknown as {
+				grammarsDir: string;
+			};
+			expect(fs.existsSync(wasmPath)).toBe(true);
+			expect(client.grammarsDir).toBe(path.dirname(wasmPath));
+		} finally {
+			process.chdir(originalCwd);
+			env.cleanup();
 		}
-		expect(resolved).toMatch(/package\.json$/);
-		expect(path.isAbsolute(resolved)).toBe(true);
+	});
+
+	it("findGrammarsDir returns empty when no grammar fixture exists", () => {
+		const env = setupTestEnvironment("pi-lens-tree-sitter-2112-missing-");
+		const originalCwd = process.cwd();
+		try {
+			process.chdir(env.tmpDir);
+
+			const client = new TreeSitterClient() as unknown as {
+				grammarsDir: string;
+			};
+			expect(
+				fs.existsSync(
+					path.join(
+						env.tmpDir,
+						"node_modules/tree-sitter-wasms/out/tree-sitter-typescript.wasm",
+					),
+				),
+			).toBe(false);
+			expect(client.grammarsDir).toBe("");
+		} finally {
+			process.chdir(originalCwd);
+			env.cleanup();
+		}
 	});
 
 	it("TreeSitterClient.isAvailable returns true when grammars are installed", async () => {
