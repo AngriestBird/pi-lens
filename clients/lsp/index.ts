@@ -4859,7 +4859,7 @@ export class LSPService {
 						// its wait is about to settle on) — nothing to confirm, no sync
 						// request goes out.
 						const publishedAt = primaryClient
-							.getAllDiagnostics()
+							.getAllDiagnostics?.()
 							.get(normalizedPath)?.ts;
 						if (
 							pushWaitSettled ||
