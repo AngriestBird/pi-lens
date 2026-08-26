@@ -196,7 +196,7 @@ describe("word-index observability (#958)", () => {
 					content: `sharedToken changedToken${file} revision`,
 				});
 			}
-			await flushWordIndexRecompactionsForTests();
+			await flushWordIndexRecompactionsForTests(index);
 			expect(logSpy.mock.calls).toContainEqual([
 				expect.objectContaining({
 					phase: "incremental_refresh",

@@ -126,9 +126,13 @@ export class WordPostingList {
 	 * Grow so at least `entries` postings fit without another reallocation. The
 	 * grown store is always PRIVATE: a list that outgrows its arena slice must
 	 * not write past it into the next token's postings.
+	 *
+	 * Returns `true` when it allocated a fresh private store, so the index can
+	 * keep an O(1) running tally of distinct backing stores instead of rebuilding
+	 * a `Set` over the whole vocabulary on every edit (#2117).
 	 */
-	reserve(entries: number): void {
-		if (entries <= this.capacityEntries) return;
+	reserve(entries: number): boolean {
+		if (entries <= this.capacityEntries) return false;
 		const grown = new Int32Array(entries * 2);
 		grown.set(
 			this.lanes.subarray(this.laneStart, this.laneStart + this.entryCount * 2),
@@ -136,6 +140,7 @@ export class WordPostingList {
 		this.lanes = grown;
 		this.laneStart = 0;
 		this.capacityEntries = entries;
+		return true;
 	}
 
 	push(fileId: number, line: number): void {
@@ -249,22 +254,53 @@ export function compactPostingsIntoArena(
 }
 
 /**
- * Cooperative counterpart for incremental refresh. It always completes, but
- * yields every work budget while copying the lists. Each adopted list remains
- * valid during the transition, so readers never observe a partially written
- * list even though the arena is adopted one list at a time.
+ * Cooperative counterpart for incremental refresh. It yields every work budget
+ * while copying the lists, so a large corpus does not monopolize the event
+ * loop, and it is safe against a concurrent synchronous edit landing during one
+ * of those yields.
+ *
+ * The arena is sized from a snapshot taken up front. A synchronous
+ * `updateWordIndexDocument` that runs during a yield can grow a not-yet-adopted
+ * list or replace it wholesale. The publish loop therefore adopts a list ONLY
+ * when it is still the map's current entry AND still the size the snapshot
+ * charged AND still fits the space that entry reserved. A list that changed is
+ * left on its own private store; the next recompaction packs it. This makes an
+ * out-of-bounds `adoptArena` write structurally impossible — the earlier code
+ * sized the arena once, then wrote each list's CURRENT width, so a grown list
+ * overran the arena and V8 silently dropped the tail postings (#2117 review F2).
+ *
+ * Each `adoptArena` copies and re-homes one list within a single synchronous
+ * step, so readers never observe a partially written list.
  */
 export async function compactPostingsIntoArenaCooperatively(
 	postings: Map<string, WordPostingList>,
 ): Promise<void> {
+	// Snapshot (token, list, width) in one synchronous pass; the arena is sized
+	// from these widths and only unchanged lists are adopted, so the sum of the
+	// widths actually written can never exceed the arena length.
+	const planned: Array<{
+		token: string;
+		list: WordPostingList;
+		width: number;
+	}> = [];
 	let lanes = 0;
-	for (const list of postings.values()) lanes += list.length * 2;
+	for (const [token, list] of postings) {
+		const width = list.length * 2;
+		planned.push({ token, list, width });
+		lanes += width;
+	}
 	if (lanes === 0) return;
 	const arena = new Int32Array(lanes);
 	let offset = 0;
 	const deadline = createDeadline(8);
-	for (const list of postings.values()) {
-		offset = list.adoptArena(arena, offset);
+	for (const plan of planned) {
+		if (
+			postings.get(plan.token) === plan.list &&
+			plan.list.length * 2 === plan.width &&
+			offset + plan.width <= arena.length
+		) {
+			offset = plan.list.adoptArena(arena, offset);
+		}
 		if (deadline.expired()) await yieldIfOverBudget(deadline);
 	}
 }

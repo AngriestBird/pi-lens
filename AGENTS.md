@@ -999,9 +999,20 @@ unawaited concurrent cascades must not yield across a wholesale posting snapshot
 Cooperative async variants are serialized per index and remain for bulk refresh.
 When touching this seam, keep posting-entry counts and replacement-cost scalars
 in word-index telemetry. #2069 intentionally builds on this prerequisite.
-Incremental replacement churn schedules arena recompaction after 64 distinct
-posting backing stores. The copy yields on the cooperative 8 ms budget, and
-the `word-index-arena-recompact` ledger entry gates one detailed
+Incremental replacement churn recompacts the arena once churn passes 64 backing
+stores. The per-edit gate is O(1): the index carries a `postingStoreCount`
+over-estimate bumped on each private-store allocation and reset to the exact
+count at every compaction, so the hot path never rebuilds a `Set` over the
+vocabulary. The recompaction is serialized through the per-index async
+operation queue (`enqueueAsyncWordIndexOperation`) behind a `recompactInFlight`
+latch, and the cooperative copy is corruption-safe against a synchronous edit
+that lands during one of its 8 ms yields: it sizes the arena from a snapshot and
+publishes a list only when that list is still the map's current entry, still the
+snapshot's size, and still fits. A list that grew or was replaced mid-copy stays
+on its own store, so `adoptArena` can never write past the arena and drop tail
+postings (#2117 review F2). Both the queued schedule and the refresh-path
+recompaction go through the same latch, so an edit and a refresh cannot both
+drive one. The `word-index-arena-recompact` ledger entry gates one detailed
 `incremental_refresh` record per root with `reason: arena_recompact`,
 before/after bytes, and store counts.
 `estimateWordIndexStoreBytes` charges each distinct backing store once, so its

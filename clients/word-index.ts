@@ -121,6 +121,23 @@ export interface WordIndex {
 	replacementStats?: { count: number; totalMs: number; maxMs: number };
 	/** Files whose wire contribution changed since the last serialized snapshot. */
 	dirtyFiles?: Set<string>;
+	/**
+	 * Running over-estimate of distinct posting backing stores since the last
+	 * compaction (#2117). Incremental edits bump it by one per fresh private
+	 * store they allocate; a compaction resets it to the exact store count. It
+	 * is an O(1) gate for the churn-recompaction threshold, so the per-edit hot
+	 * path never rebuilds a `Set` over the whole vocabulary. Over-counting only
+	 * recompacts marginally early, which is safe; it never under-counts, so it
+	 * never misses the threshold.
+	 */
+	postingStoreCount?: number;
+	/**
+	 * True while a threshold-triggered arena recompaction is queued or running
+	 * for this index (#2117). Kept on the index rather than a module-level map so
+	 * the scheduler adds no session-state symbol and the flag is collected with
+	 * the index. Prevents a burst of edits from stacking duplicate recompactions.
+	 */
+	recompactInFlight?: boolean;
 }
 
 export interface RankedFile {
@@ -309,6 +326,8 @@ function createEmptyWordIndex(truncated: boolean): WordIndex {
 		fileSizes: new PathKeyedMap<number>(wordIndexKey),
 		replacementStats: { count: 0, totalMs: 0, maxMs: 0 },
 		dirtyFiles: new Set<string>(),
+		postingStoreCount: 0,
+		recompactInFlight: false,
 	};
 }
 
@@ -386,20 +405,37 @@ export function wordIndexPostingHits(
  */
 function compactWordIndexPostings(index: WordIndex): void {
 	compactPostingsIntoArena(index.postings);
+	index.postingStoreCount = countPostingBackingStores(index.postings);
+}
+
+/** Bump the running distinct-backing-store tally by `count` (#2117). */
+function notePostingStoresAllocated(index: WordIndex, count: number): void {
+	index.postingStoreCount = (index.postingStoreCount ?? 0) + count;
 }
 
 const WORD_INDEX_RECOMPACT_STORE_THRESHOLD = 64;
-const pendingArenaRecompactions = new Map<WordIndex, Promise<void>>();
 
+/**
+ * Pack the arena if churn has spread the postings across more than the
+ * threshold of backing stores (#2117). Runs the exact O(vocab) store count as
+ * the authoritative gate — the per-edit hot path uses the O(1)
+ * `postingStoreCount` estimate, so this expensive walk only happens inside the
+ * bounded, off-hot-path recompaction it guards. Resets the estimate to the
+ * true post-compaction count.
+ */
 async function recompactWordIndexPostingsIfNeeded(
 	index: WordIndex,
 	root: string,
 ): Promise<void> {
 	const beforeStores = countPostingBackingStores(index.postings);
-	if (beforeStores <= WORD_INDEX_RECOMPACT_STORE_THRESHOLD) return;
+	if (beforeStores <= WORD_INDEX_RECOMPACT_STORE_THRESHOLD) {
+		index.postingStoreCount = beforeStores;
+		return;
+	}
 	const beforeBytes = estimateWordIndexResidentBytes(index);
 	await compactPostingsIntoArenaCooperatively(index.postings);
 	const afterStores = countPostingBackingStores(index.postings);
+	index.postingStoreCount = afterStores;
 	const afterBytes = estimateWordIndexResidentBytes(index);
 	const firstForRoot = incrementDegradationCount({
 		kind: "word-index-arena-recompact",
@@ -419,30 +455,50 @@ async function recompactWordIndexPostingsIfNeeded(
 	}
 }
 
-function scheduleWordIndexRecompact(index: WordIndex, filePath: string): void {
+/**
+ * Serialize a recompaction through the per-index async operation queue so no
+ * async edit or refresh interleaves it (#2117). The queue plus the corruption-
+ * proof cooperative compactor together close the review-F2 data race: the queue
+ * excludes async operations, and the compactor's snapshot-and-skip publish
+ * excludes the synchronous per-edit path the queue cannot see. The
+ * `recompactInFlight` latch keeps a burst of edits from stacking duplicates.
+ */
+function enqueueWordIndexRecompact(
+	index: WordIndex,
+	root: string,
+): Promise<void> {
 	if (
-		countPostingBackingStores(index.postings) <=
-			WORD_INDEX_RECOMPACT_STORE_THRESHOLD ||
-		pendingArenaRecompactions.has(index)
-	)
-		return;
-	const work = new Promise<void>((resolve) => setImmediate(resolve)).then(() =>
-		recompactWordIndexPostingsIfNeeded(index, path.dirname(filePath)),
-	);
-	pendingArenaRecompactions.set(index, work);
-	const clearPending = (): void => {
-		if (pendingArenaRecompactions.get(index) === work) {
-			pendingArenaRecompactions.delete(index);
-		}
-	};
-	void work.then(clearPending, clearPending);
+		(index.postingStoreCount ?? 0) <= WORD_INDEX_RECOMPACT_STORE_THRESHOLD ||
+		index.recompactInFlight
+	) {
+		return Promise.resolve();
+	}
+	index.recompactInFlight = true;
+	return enqueueAsyncWordIndexOperation(index, () =>
+		recompactWordIndexPostingsIfNeeded(index, root),
+	).finally(() => {
+		index.recompactInFlight = false;
+	});
 }
 
-/** Test hook: settle deferred incremental arena recompaction. */
-export async function flushWordIndexRecompactionsForTests(): Promise<void> {
-	await Promise.all(
-		[...pendingArenaRecompactions.values()].map((work) => work),
-	);
+/**
+ * O(1) hot-path gate for the synchronous per-edit seam. Reads the running
+ * store-count estimate, never a fresh `Set` over the vocabulary, then defers
+ * the actual work onto the async queue so it cannot stall the edit (#2117).
+ */
+function scheduleWordIndexRecompact(index: WordIndex, filePath: string): void {
+	void enqueueWordIndexRecompact(index, path.dirname(filePath));
+}
+
+/**
+ * Test hook: settle any queued arena recompaction for `index`. Draining the
+ * index's own async operation queue is enough because the recompaction runs
+ * through it; there is no module-level scheduler to flush.
+ */
+export async function flushWordIndexRecompactionsForTests(
+	index: WordIndex,
+): Promise<void> {
+	await (asyncWordIndexOperations.get(index) ?? Promise.resolve());
 }
 
 function recordWordIndexReplacement(index: WordIndex, startedAt: number): void {
@@ -468,10 +524,16 @@ function appendWordIndexPostings(
 	const tokenLineCounts = new Map<string, number>();
 	for (const [token, lineNumbers] of perTokenHits) {
 		let list = index.postings.get(token);
-		if (list) list.reserve(list.length + lineNumbers.length);
-		else {
+		if (list) {
+			// A grow allocates a fresh private store; count it so the O(1) gate
+			// tracks fragmentation without re-walking the vocabulary (#2117).
+			if (list.reserve(list.length + lineNumbers.length)) {
+				notePostingStoresAllocated(index, 1);
+			}
+		} else {
 			list = new WordPostingList(token, lineNumbers.length);
 			index.postings.set(token, list);
+			notePostingStoresAllocated(index, 1);
 		}
 		// `list.token` is the canonical instance, so the forward entry points at
 		// the same string the postings map is keyed by instead of retaining this
@@ -639,8 +701,11 @@ export function removeWordIndexDocument(
 		const list = index.postings.get(token);
 		if (!list) continue;
 		const next = list.withoutFile(removedId);
-		if (next.length > 0) index.postings.set(token, next);
-		else index.postings.delete(token);
+		// `withoutFile` always returns a freshly allocated private store (#2117).
+		if (next.length > 0) {
+			index.postings.set(token, next);
+			notePostingStoresAllocated(index, 1);
+		} else index.postings.delete(token);
 	}
 
 	const docLength = index.docLengths.get(filePath) ?? 0;
@@ -782,8 +847,12 @@ function commitWordIndexDocumentRemoval(
 	staged: StagedWordIndexRemoval,
 ): void {
 	for (const [token, list] of staged.postings) {
-		if (list) index.postings.set(token, list);
-		else index.postings.delete(token);
+		// Staged survivors come from `WordPostingList.fromLanes` — a fresh private
+		// store each, so the O(1) fragmentation gate must count them (#2117).
+		if (list) {
+			index.postings.set(token, list);
+			notePostingStoresAllocated(index, 1);
+		} else index.postings.delete(token);
 	}
 	index.docLengths.delete(filePath);
 	index.forward?.delete(filePath);
@@ -1317,7 +1386,9 @@ export async function refreshWordIndexIncrementally(
 		}
 	}
 	timings.refreshReadsMs = Date.now() - refreshReadsStartMs;
-	await recompactWordIndexPostingsIfNeeded(index, root);
+	// Route through the same guarded queue the per-edit seam uses, so a refresh
+	// and a concurrent cascade edit cannot both drive a recompaction (#2117).
+	await enqueueWordIndexRecompact(index, root);
 	index.truncated = walked.length === maxFiles;
 	return {
 		mode: "incremental",
@@ -2032,6 +2103,10 @@ export function deserializeWordIndex(
 		forward,
 		fileMtimes,
 		fileSizes,
+		// Postings were just packed into one arena above, so the running gate
+		// starts from the exact post-compaction store count (#2117).
+		postingStoreCount: countPostingBackingStores(postings),
+		recompactInFlight: false,
 	};
 }
 
