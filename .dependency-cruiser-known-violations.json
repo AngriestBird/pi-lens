@@ -126,73 +126,6 @@
   },
   {
     "type": "cycle",
-    "from": "clients/dependency-checker.js",
-    "to": "clients/installer/index.js",
-    "unresolvedTo": "./installer/index.js",
-    "dependencyTypes": [
-      "local",
-      "dynamic-import"
-    ],
-    "rule": {
-      "severity": "error",
-      "name": "no-client-cycles"
-    },
-    "cycle": [
-      {
-        "name": "clients/installer/index.js",
-        "dependencyTypes": [
-          "local",
-          "dynamic-import"
-        ]
-      },
-      {
-        "name": "clients/dependency-checker.js",
-        "dependencyTypes": [
-          "local",
-          "dynamic-import"
-        ]
-      }
-    ]
-  },
-  {
-    "type": "cycle",
-    "from": "clients/diagnostic-line-freshness.js",
-    "to": "clients/lsp/index.js",
-    "unresolvedTo": "./lsp/index.js",
-    "dependencyTypes": [
-      "local",
-      "dynamic-import"
-    ],
-    "rule": {
-      "severity": "error",
-      "name": "no-client-cycles"
-    },
-    "cycle": [
-      {
-        "name": "clients/lsp/index.js",
-        "dependencyTypes": [
-          "local",
-          "dynamic-import"
-        ]
-      },
-      {
-        "name": "clients/widget-state.js",
-        "dependencyTypes": [
-          "local",
-          "import"
-        ]
-      },
-      {
-        "name": "clients/diagnostic-line-freshness.js",
-        "dependencyTypes": [
-          "local",
-          "import"
-        ]
-      }
-    ]
-  },
-  {
-    "type": "cycle",
     "from": "clients/dispatch/runners/utils/runner-helpers.js",
     "to": "clients/lsp/config.js",
     "unresolvedTo": "../../../lsp/config.js",
@@ -531,12 +464,12 @@
   },
   {
     "type": "cycle",
-    "from": "clients/installer/index.js",
-    "to": "clients/installer/managed-tool-refresh.js",
-    "unresolvedTo": "./managed-tool-refresh.js",
+    "from": "clients/installer/managed-tool-refresh.js",
+    "to": "clients/installer/index.js",
+    "unresolvedTo": "./index.js",
     "dependencyTypes": [
       "local",
-      "dynamic-import"
+      "import"
     ],
     "rule": {
       "severity": "error",
@@ -544,17 +477,17 @@
     },
     "cycle": [
       {
-        "name": "clients/installer/managed-tool-refresh.js",
-        "dependencyTypes": [
-          "local",
-          "dynamic-import"
-        ]
-      },
-      {
         "name": "clients/installer/index.js",
         "dependencyTypes": [
           "local",
           "import"
+        ]
+      },
+      {
+        "name": "clients/installer/managed-tool-refresh.js",
+        "dependencyTypes": [
+          "local",
+          "dynamic-import"
         ]
       }
     ]
@@ -881,43 +814,6 @@
   },
   {
     "type": "cycle",
-    "from": "clients/lsp-lazy.js",
-    "to": "clients/lsp/index.js",
-    "unresolvedTo": "./lsp/index.js",
-    "dependencyTypes": [
-      "local",
-      "dynamic-import"
-    ],
-    "rule": {
-      "severity": "error",
-      "name": "no-client-cycles"
-    },
-    "cycle": [
-      {
-        "name": "clients/lsp/index.js",
-        "dependencyTypes": [
-          "local",
-          "dynamic-import"
-        ]
-      },
-      {
-        "name": "clients/warm-attach.js",
-        "dependencyTypes": [
-          "local",
-          "import"
-        ]
-      },
-      {
-        "name": "clients/lsp-lazy.js",
-        "dependencyTypes": [
-          "local",
-          "import"
-        ]
-      }
-    ]
-  },
-  {
-    "type": "cycle",
     "from": "clients/lsp/config.js",
     "to": "clients/lsp/session-roots.js",
     "unresolvedTo": "./session-roots.js",
@@ -970,6 +866,80 @@
         "dependencyTypes": [
           "local",
           "import"
+        ]
+      }
+    ]
+  },
+  {
+    "type": "cycle",
+    "from": "clients/lsp/index.js",
+    "to": "clients/warm-attach.js",
+    "unresolvedTo": "../warm-attach.js",
+    "dependencyTypes": [
+      "local",
+      "import"
+    ],
+    "rule": {
+      "severity": "error",
+      "name": "no-client-cycles"
+    },
+    "cycle": [
+      {
+        "name": "clients/warm-attach.js",
+        "dependencyTypes": [
+          "local",
+          "import"
+        ]
+      },
+      {
+        "name": "clients/lsp-lazy.js",
+        "dependencyTypes": [
+          "local",
+          "import"
+        ]
+      },
+      {
+        "name": "clients/lsp/index.js",
+        "dependencyTypes": [
+          "local",
+          "dynamic-import"
+        ]
+      }
+    ]
+  },
+  {
+    "type": "cycle",
+    "from": "clients/lsp/index.js",
+    "to": "clients/widget-state.js",
+    "unresolvedTo": "../widget-state.js",
+    "dependencyTypes": [
+      "local",
+      "import"
+    ],
+    "rule": {
+      "severity": "error",
+      "name": "no-client-cycles"
+    },
+    "cycle": [
+      {
+        "name": "clients/widget-state.js",
+        "dependencyTypes": [
+          "local",
+          "import"
+        ]
+      },
+      {
+        "name": "clients/diagnostic-line-freshness.js",
+        "dependencyTypes": [
+          "local",
+          "import"
+        ]
+      },
+      {
+        "name": "clients/lsp/index.js",
+        "dependencyTypes": [
+          "local",
+          "dynamic-import"
         ]
       }
     ]

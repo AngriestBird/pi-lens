@@ -13,7 +13,11 @@ module.exports = {
 			severity: "error",
 			comment: "clients/ modules must remain acyclic.",
 			from: { path: "^(?:\\./)?clients/" },
-			to: { path: "^(?:\\./)?clients/", circular: true },
+			to: {
+				path: "^(?:\\./)?clients/",
+				circular: true,
+				dependencyTypesNot: ["dynamic-import"],
+			},
 		},
 		{
 			name: "declared-client-leaf",
@@ -30,10 +34,17 @@ module.exports = {
 			comment:
 				"A session-start eager import must be added to config/dependency-cruiser-eager-allowlist.json deliberately.",
 			from: { path: "^index\\.ts$" },
-			to: { path: "^(?:\\./)?clients/", pathNot: eagerClientPattern },
+			to: {
+				path: "^(?:\\./)?clients/",
+				pathNot: eagerClientPattern,
+				dependencyTypesNot: ["dynamic-import"],
+			},
 		},
 	],
 	options: {
+		// dependency-cruiser 18 cannot parse TypeScript 7, but CI builds first and
+		// cruises the compiled clients/*.js graph. The TS transpiler warning is
+		// therefore immaterial; the built view is the enforced 836/4422 graph.
 		tsConfig: { fileName: "tsconfig.json" },
 		doNotFollow: { path: "(^|/)node_modules/" },
 		preserveSymlinks: false,

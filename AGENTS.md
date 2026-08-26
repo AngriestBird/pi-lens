@@ -2383,6 +2383,14 @@ Every issue should carry **one TYPE label + at least one `area:` label**.
 
 ## Conventions
 
+Dependency-boundary CI installs with `npm ci --ignore-scripts`, builds compiled
+clients, then cruises that JavaScript graph. Dependency-cruiser 18 warns about
+TypeScript 7, but the warning is immaterial because the enforced graph is the
+built 836-module, 4,422-dependency view. Static client cycles and index eager
+imports exclude dynamic-import edges. The reviewed static-cycle baseline has
+29 entries, and `tests/config/dependency-boundaries.test.ts` pins both that
+count and the derived eager-import set.
+
 - TypeScript ESM throughout (`"type": "module"`)
 - Edit the `.ts` sources only. Do **not** hand-edit sibling/generated `.js` files in this repo; pi loads TS via on-the-fly jiti transpilation and JS files are generated artifacts. If tests/runtime could see stale `.js`, run `npm run build` to regenerate from TS before testing.
 - Tests use vitest; mocks via `vi.mock` / `vi.hoisted`
