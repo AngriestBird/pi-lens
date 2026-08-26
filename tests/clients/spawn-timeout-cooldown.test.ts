@@ -261,14 +261,17 @@ describe("markdownlint runner consults the seam", () => {
 });
 
 /**
- * #2229 review round 1, F3: `noteSpawnTimeout` logs the same command twice
- * in one record — `filePath` (normalized by `logLatency`'s emit seam) and
- * `metadata.command` (opaque to that seam, so untouched unless the CALL
- * SITE normalizes it too). Before the fix, an absolute-path command
- * produced two different spellings in the same log line.
+ * #2229 review round 1, F3, reverted in round 3 (R2-F2): `noteSpawnTimeout`
+ * normalizes `filePath` (logLatency's emit-seam display field, no reader)
+ * but must leave `metadata.command` RAW — `safe-spawn-timeout-teardown.test.ts`
+ * reads `metadata.command` back to match a cooldown row against the exact
+ * command string, and `cooldownKey` above deliberately keys on basename
+ * because the same binary arrives in multiple spellings. Normalizing
+ * `metadata.command` would change a correlation key's contents, not just a
+ * display value.
  */
-describe("noteSpawnTimeout logs one spelling of command per record (#2229 F3)", () => {
-	it("normalizes filePath and metadata.command identically for an absolute-path command", async () => {
+describe("noteSpawnTimeout filePath/metadata.command split (#2229 R2-F2)", () => {
+	it("normalizes filePath but leaves metadata.command raw for an absolute-path command", async () => {
 		vi.resetModules();
 		const writerLog = vi.fn();
 		vi.doMock("../../clients/env-utils.js", () => ({
@@ -297,10 +300,8 @@ describe("noteSpawnTimeout logs one spelling of command per record (#2229 F3)", 
 
 		expect(writerLog).toHaveBeenCalledTimes(1);
 		const payload = writerLog.mock.calls[0][0];
-		const expected = normalizeFilePath(raw);
-		expect(payload.filePath).toBe(expected);
-		expect(payload.metadata.command).toBe(expected);
-		expect(payload.filePath).toBe(payload.metadata.command);
+		expect(payload.filePath).toBe(normalizeFilePath(raw));
+		expect(payload.metadata.command).toBe(raw);
 
 		vi.doUnmock("../../clients/env-utils.js");
 		vi.doUnmock("../../clients/ndjson-logger.js");

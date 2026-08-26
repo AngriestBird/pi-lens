@@ -676,9 +676,17 @@ describe("normalizeLoggedPath (#2219, #2229 review round 1)", () => {
 	// `filePath` call site); this pins the current, accepted behavior so a
 	// future caller doing so is a visible test change, not a silent
 	// surprise.
+	//
+	// #2229 review round 3, R2-F1: the expected value must be DERIVED via
+	// normalizeFilePath, not a hardcoded literal — normalizeFilePath's
+	// last-resort branch (path-utils.ts's win32 no-existing-ancestor case)
+	// lowercases the whole string when no `C:\` ancestor exists on the host
+	// filesystem, which is true on Linux CI but not on a Windows dev box with
+	// a real C: drive. A hardcoded "C:/tools/..." literal passes on Windows
+	// and fails on Linux with "c:/tools/..." (AGENTS.md shape 7, the
+	// #1139/#1150 drive-letter-case class).
 	it("pins current behavior for a drive-rooted command WITH arguments (no live caller does this)", () => {
 		const withArgs = String.raw`C:\tools\rg.exe --files`;
 		expect(normalizeLoggedPath(withArgs)).toBe(normalizeFilePath(withArgs));
-		expect(normalizeLoggedPath(withArgs)).toBe("C:/tools/rg.exe --files");
 	});
 });

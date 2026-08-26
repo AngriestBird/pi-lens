@@ -105,22 +105,28 @@ export function noteSpawnTimeout(input: NoteSpawnTimeoutInput): void {
 		phase: input.phase,
 		atMs: Date.now(),
 	});
-	// #2229 review round 1, F3: `filePath` and `metadata.command` both carry
-	// `input.command` — `logLatency`'s emit seam normalizes `filePath` but
-	// cannot see inside the opaque `metadata` bag, so passing the raw value
-	// to both fields would leave the SAME record with two spellings of the
-	// same command whenever it happens to be an absolute path. Normalize
-	// once here and reuse it for both.
-	const normalizedCommand = normalizeLoggedPath(input.command);
+	// #2229 review round 1, F3, reverted in round 3 (R2-F2): normalizing
+	// `filePath` here is fine (it is `logLatency`'s emit-seam field, a
+	// display value with no reader). `metadata.command` is NOT a display
+	// value — `safe-spawn-timeout-teardown.test.ts` reads it back to match
+	// the cooldown row against the RAW command, and `cooldownKey` above
+	// deliberately keys on basename because the same binary arrives in
+	// multiple spellings across call sites. Normalizing it changed a
+	// correlation key's contents, which is a behavior change other code
+	// reads, not just a display fix — narrower than what F3 asked for.
+	// `filePath` and `metadata.command` can legitimately show two spellings
+	// of the same command in one record; if that turns out to matter, the
+	// fix belongs in a follow-up that stops `filePath` from carrying
+	// commands at all, not in widening this field's normalization.
 	logLatency({
 		type: "phase",
 		toolName: input.tool,
 		phase: "spawn_timeout_cooldown",
-		filePath: normalizedCommand,
+		filePath: normalizeLoggedPath(input.command),
 		durationMs: input.durationMs ?? 0,
 		status: "cooldown_armed",
 		metadata: {
-			command: normalizedCommand,
+			command: input.command,
 			wrapperKind: wrapperKindOf(input.command),
 			timeoutPhase: input.phase,
 			...(input.durationMs !== undefined && {
