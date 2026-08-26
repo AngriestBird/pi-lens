@@ -81,6 +81,9 @@ const EXPECTED_SURFACE_IDS = [
 	"read-guard-tool-lines:preflight-errors",
 	"agent-behavior:thrashing-notice",
 	"tool-call:duplicate-export-blocker",
+	// #2007: the shared-checkout refusal, the same live-preflight shape as
+	// `git-guard:commit-blocked`.
+	"shared-checkout-guard:worktree-mutation-blocked",
 ].sort();
 
 // ── Real seam scan (#1634 review F2) ────────────────────────────────────────

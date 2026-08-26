@@ -107,6 +107,17 @@ export const BOUNDED_TELEMETRY_PHASES = [
 	 * queue of them, so it is rising-edge per event name.
 	 */
 	"session_event_stale_ctx_skip",
+	/**
+	 * #2007: a worktree-mutating git command declined because another live
+	 * session shares this dirty checkout. Rising edge per checkout root; the
+	 * ledger keeps the exact repeat count.
+	 */
+	"shared_checkout_switch_blocked",
+	/**
+	 * #2007: `git status` could not report the working-tree state, so the same
+	 * command was declined on an UNKNOWN rather than assumed clean.
+	 */
+	"shared_checkout_probe_failed",
 ] as const;
 
 export type BoundedPhase = (typeof BOUNDED_TELEMETRY_PHASES)[number];

@@ -527,6 +527,24 @@ remain ordinary project directories. The positive `.gitignore` glob precheck is
 cached per resolved project root and `size:mtimeMs`, including the absent-file
 empty result, while the project ignore matcher remains authoritative.
 
+LSP acquisition records name the caller that STARTED a language-server process
+apart from the callers that joined its in-flight spawn. `lsp_client_selected`
+carries `cold-spawn`/`spawn-failure` for the starter and
+`cold-spawn-joined`/`spawn-failure-joined` for every joiner, and the
+starter/joiner bit is captured before `await spawnPromise` — after that await
+the two are indistinguishable, which is how one 29.3 s TypeScript spawn read as
+39 spawns in 2 ms. The AUTHORITATIVE spawn count is `lsp_server_spawned`, the
+process-start record emitted once at `spawnClient`'s success path for every
+server. It does not depend on a per-server launcher record such as
+`lsp_launch_candidate_success`, which the TypeScript path never reaches. The
+two records relate as `count(lsp_server_spawned) >=
+count(outcome="cold-spawn")`, never as equality: `getClientsForFile` and
+`getAuxiliaryClientsForFile` call `ensureClientForServer` without `onOutcome`,
+so a multi-client or auxiliary spawn writes a spawn record and no selection
+record. The starter-outcome count therefore under-counts real process starts,
+and only `lsp_server_spawned` answers "how many servers did we start".
+(#1934, #2064)
+
 ### Dispatch, runners, formatters, and installer
 
 Knip's dispatch memo is instance-owned and keyed by canonical project root plus
@@ -929,6 +947,30 @@ launchers include shell families plus busybox, toybox, and nix-shell; an
 unrecognized leading launcher with `-c`/`--run`/`/c`/`-Command` is inspected
 recursively and fails closed only when its command string contains an actual
 guarded git verb (literal mentions such as `echo git push` remain allowed).
+
+Git command classification has ONE implementation. `detectGuardedGitVerb`
+takes a `GitVerbMatcher` and owns the wrapper, `$IFS`, substitution, PATHEXT,
+and text-consumer analysis; a guard that needs "is this really a git
+invocation of verb V" supplies only the verb question. Do not add a second
+lexer. The two matchers differ on exactly one axis, `indirectAlwaysMatches`:
+the commit gate is a policy an agent may want to evade, so any non-leading
+`git` fails closed there, while the shared-checkout guard protects an agent
+from its own accident and arms the indirect path only when the argv also
+carries a governed verb.
+
+The shared-checkout guard (`clients/shared-checkout-guard.ts`,
+`--lens-checkout-guard`) declines a worktree-mutating git command when three
+facts all hold, checked cheapest first: the command really mutates the
+working tree, `selectLivePeerInstances` reports another live session on this
+root, and `git status` reports uncommitted work. Refusal is the whole design
+— never auto-stash, because `git stash` is repo-global across worktrees and
+would reproduce the defect it is rescuing from. An unanswerable `git status`
+declines on its own UNKNOWN reason and records a counted degradation; it is
+never read as clean. A registry that cannot be read allows, so an
+observability outage cannot start refusing branch switches machine-wide.
+`selectLivePeerInstances` (`clients/instance-registry.ts`) is the single
+source of truth for "another session is here"; `selectWarmAttachIncumbent`
+picks the oldest entry it returns, so the two cannot drift.
 
 ### Host integration and repo automation
 
