@@ -330,20 +330,23 @@ describe("runner-helpers availability checker", () => {
 		// carry identical entries, so a locale-independent key must join them
 		// into one physical probe regardless of what `localeCompare` says.
 		const env = { AAA: "1", BBB: "2" };
-		const checkerA = createAvailabilityChecker("dupe-locale-tool", "", [
-			"--version",
-		], { environment: async () => ({ ...env }) });
-		const checkerB = createAvailabilityChecker("dupe-locale-tool", "", [
-			"--version",
-		], { environment: async () => ({ ...env }) });
+		const checkerA = createAvailabilityChecker(
+			"dupe-locale-tool",
+			"",
+			["--version"],
+			{ environment: async () => ({ ...env }) },
+		);
+		const checkerB = createAvailabilityChecker(
+			"dupe-locale-tool",
+			"",
+			["--version"],
+			{ environment: async () => ({ ...env }) },
+		);
 
 		const realLocaleCompare = String.prototype.localeCompare;
 		try {
 			// Simulate "locale 1": AAA sorts before BBB.
-			String.prototype.localeCompare = function (
-				this: string,
-				that: string,
-			) {
+			String.prototype.localeCompare = function (this: string, that: string) {
 				if (this === "AAA" && that === "BBB") return -1;
 				if (this === "BBB" && that === "AAA") return 1;
 				return realLocaleCompare.call(this, that);
@@ -356,10 +359,7 @@ describe("runner-helpers availability checker", () => {
 			// Simulate "locale 2": the same two keys sort in the OPPOSITE order.
 			// A real second process under a different OS locale can see exactly
 			// this. `env` itself is untouched — only the comparator "moved".
-			String.prototype.localeCompare = function (
-				this: string,
-				that: string,
-			) {
+			String.prototype.localeCompare = function (this: string, that: string) {
 				if (this === "AAA" && that === "BBB") return 1;
 				if (this === "BBB" && that === "AAA") return -1;
 				return realLocaleCompare.call(this, that);

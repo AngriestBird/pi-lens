@@ -24,10 +24,7 @@ describe("DependencyChecker.formatScanResult cycle-key comparator (#2155, #2165 
 			// exactly what two OS locales (or a locale change mid-session) can
 			// do to real `localeCompare`. A comparator this unstable must not
 			// affect the dedupe key at all.
-			String.prototype.localeCompare = function (
-				this: string,
-				that: string,
-			) {
+			String.prototype.localeCompare = function (this: string, that: string) {
 				call++;
 				if (this === "a.ts" && that === "b.ts") return call <= 1 ? -1 : 1;
 				if (this === "b.ts" && that === "a.ts") return call <= 1 ? 1 : -1;
