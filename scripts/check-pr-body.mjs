@@ -160,22 +160,31 @@ const ESCAPED_NEWLINE = /\\r\\n|\\n/g;
  * Detect the sibling flattening shape from the #2058-era class: a worker
  * emits the literal two-or-four character sequence "\n" or "\r\n" where a
  * real line break belongs, instead of collapsing real newlines into spaces
- * (the shape #2149 already repairs). Restoring this is unambiguous outside
- * a fenced code block — no character is lost. Inside a fence, a literal
- * backslash-n can be genuine content (an escape sequence being documented),
- * AND a flattened fence's own opening/closing delimiters can land on the
- * same logical line, which the unrelated line-based fence scanner in
- * lintPrBody cannot parse back apart. Rather than guess, any body carrying
- * a fence refuses this repair entirely (fence preservation, issue #2145;
+ * (the shape #2149 already repairs). Restoring this is unambiguous ONLY
+ * when every backslash in the body belongs to one of those joins — a
+ * Windows path like "C:\node_modules\pi" contains a genuine "\n" substring
+ * that a blind replace would split into "C:" + a real newline +
+ * "ode_modules\pi" while still validating (#2145 review F1). Any leftover
+ * backslash after the joins are stripped means real content is present, so
+ * this refuses, mirroring detectFlattenedBody's own data-loss guard.
+ *
+ * A fenced block (``` or ~~~, both valid CommonMark that GitHub renders)
+ * refuses this repair entirely too. Inside a fence a literal backslash-n
+ * can be genuine content, AND a flattened fence's own delimiters can land
+ * on the same logical line, which the unrelated line-based fence scanner
+ * in lintPrBody cannot parse back apart. Rather than guess, any body
+ * carrying a fence is left untouched (fence preservation, issue #2145;
  * true fence repair stays deferred, per the #2149 round-3 decision).
  */
 export function detectEscapedNewlineBody(body = "") {
 	const source = String(body ?? "");
-	if (source.length < 200 || source.includes("```")) return false;
+	if (source.length < 200 || source.includes("```") || source.includes("~~~"))
+		return false;
 	const realNewlines = (source.match(/\r\n|\n/g) ?? []).length;
 	if (realNewlines > FLATTENED_BODY_MAX_NEWLINES) return false;
 	const literalNewlines = source.match(ESCAPED_NEWLINE) ?? [];
 	if (literalNewlines.length < 2) return false;
+	if (source.replace(ESCAPED_NEWLINE, "").includes("\\")) return false;
 	const candidateHeadingLines = source
 		.replace(ESCAPED_NEWLINE, "\n")
 		.split("\n")
