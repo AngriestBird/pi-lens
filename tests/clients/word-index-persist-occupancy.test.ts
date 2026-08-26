@@ -9,7 +9,7 @@ import { measureMaxSyncBlockMs } from "../support/perf-harness.js";
 describe("incremental word-index persist occupancy (#2068)", () => {
 	it(
 		"measures dirty-fraction scaling on the review fixture",
-		{ timeout: 120_000 },
+		{ retry: 2, timeout: 120_000 },
 		() => {
 			const shared = Array.from({ length: 200 }, (_, i) => `shared_${i}`).join(
 				" ",
@@ -44,6 +44,9 @@ describe("incremental word-index persist occupancy (#2068)", () => {
 				}),
 			);
 			expect(measurements).toHaveLength(3);
+			// Reviewed bounds unchanged; loaded-runner noise is absorbed by the
+			// retry option instead (a wider margin proved to mask the
+			// fallback-removed mutation on fast hosts, #2202).
 			expect(measurements[0].ms).toBeLessThan(fullMs);
 			expect(measurements[1].ms).toBeLessThan(fullMs);
 			expect(measurements[2].ms).toBeLessThan(fullMs * 1.5);
