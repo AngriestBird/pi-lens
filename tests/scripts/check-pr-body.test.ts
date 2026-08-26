@@ -1,9 +1,11 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it, afterEach, vi } from "vitest";
 import {
+	detectEscapedNewlineBody,
 	detectFlattenedBody,
 	lintPullRequestEvent,
 	lintPrBody,
+	repairEscapedNewlineBody,
 	repairFlattenedBody,
 	resolveLivePrBody,
 	resolveTouchesTests,
@@ -165,6 +167,56 @@ describe("flattened PR body repair", () => {
 	});
 });
 
+const escapedNewlineFlattenedBody =
+	"## Summary\\nRestore real newlines for the escaped-newline flattening class (#2145).\\n\\n## Tests\\nAdds fixtures pinning literal backslash-n repair outside fences.\\n\\n## Blast radius\\nLimited to the body-lint script.\\n\\n## Class sweep\\nEscaped-newline flattening is the sibling of the space-flattening class already handled.\\n\\n## Observability\\nA notice logs the repaired PR number.";
+
+const escapedNewlineWithFence =
+	'## Summary\\nRestore real newlines outside fences only (#2145).\\n\\n## Tests\\n```json\\n{"note": "line1\\nline2"}\\n```\\nThe JSON example above documents a genuine escaped newline.\\n\\n## Blast radius\\nLimited to the body-lint script.\\n\\n## Class sweep\\nFence content must never be rewritten during escaped-newline repair.\\n\\n## Observability\\nA notice logs the repaired PR number.';
+
+describe("escaped-newline PR body repair", () => {
+	it("detects and repairs the literal backslash-n flattened shape", () => {
+		expect(escapedNewlineFlattenedBody).not.toMatch(/\r?\n/);
+		expect(detectEscapedNewlineBody(escapedNewlineFlattenedBody)).toBe(true);
+		const repaired = repairEscapedNewlineBody(escapedNewlineFlattenedBody);
+		expect(repaired).toContain("## Summary\nRestore real newlines");
+		expect(lintPrBody(repaired)).toEqual({ valid: true, errors: [] });
+	});
+
+	it("does not detect or touch a normal valid body", () => {
+		expect(detectEscapedNewlineBody(body)).toBe(false);
+		expect(repairEscapedNewlineBody(body)).toBe(body);
+	});
+
+	it("refuses a flattened body that carries a fence, leaving it untouched", () => {
+		// Mutation-proof case: a global replace without the fence guard would
+		// silently corrupt genuine content. The fence documents an escaped
+		// newline inside a JSON string value; converting it to a real newline
+		// makes the escape sequence disappear and breaks the JSON literal,
+		// even though nothing here signals data loss to the space-flattening
+		// detector (no letters vanish).
+		const naiveRepair = escapedNewlineWithFence.replace(/\\r\\n|\\n/g, "\n");
+		expect(naiveRepair).not.toContain('"line1\\nline2"');
+		expect(naiveRepair).toContain('"line1\nline2"');
+
+		expect(detectEscapedNewlineBody(escapedNewlineWithFence)).toBe(false);
+		expect(repairEscapedNewlineBody(escapedNewlineWithFence)).toBe(
+			escapedNewlineWithFence,
+		);
+	});
+
+	it("leaves a correct multi-line body with a fenced literal backslash-n untouched", () => {
+		const validWithFence = `${body}\n\n\`\`\`json\n{"note": "line1\\nline2"}\n\`\`\``;
+		expect(lintPrBody(validWithFence)).toMatchObject({ valid: true });
+		expect(detectEscapedNewlineBody(validWithFence)).toBe(false);
+		expect(repairEscapedNewlineBody(validWithFence)).toBe(validWithFence);
+	});
+
+	it("is idempotent", () => {
+		const repaired = repairEscapedNewlineBody(escapedNewlineFlattenedBody);
+		expect(repairEscapedNewlineBody(repaired)).toBe(repaired);
+	});
+});
+
 describe("flattened body CI entrypoint", () => {
 	afterEach(() => vi.unstubAllEnvs());
 
@@ -198,6 +250,39 @@ describe("flattened body CI entrypoint", () => {
 		).toEqual({ valid: true, repaired: true });
 		expect(fetchImpl).toHaveBeenCalledWith(
 			"https://api.example/repos/o/r/pulls/2144",
+			expect.objectContaining({
+				method: "PATCH",
+				body: expect.stringContaining("## Tests\\n"),
+			}),
+		);
+		expect(log).toHaveBeenCalledWith(
+			expect.stringContaining("::notice::Repaired flattened PR body"),
+		);
+		log.mockRestore();
+	});
+
+	it("patches an escaped-newline flattened body and reports a notice", async () => {
+		stubApi();
+		const log = vi.spyOn(console, "log").mockImplementation(() => {});
+		const fetchImpl = vi
+			.fn()
+			.mockImplementation(async (url: string, init?: RequestInit) => {
+				if (String(url).includes("/files"))
+					return new Response(JSON.stringify([]), { status: 200 });
+				if (init?.method === "PATCH")
+					return new Response("{}", { status: 200 });
+				return new Response(
+					JSON.stringify({ body: escapedNewlineFlattenedBody }),
+					{ status: 200 },
+				);
+			});
+		expect(
+			await lintPullRequestEvent(fetchImpl, {
+				pull_request: { number: 2145, body: escapedNewlineFlattenedBody },
+			}),
+		).toEqual({ valid: true, repaired: true });
+		expect(fetchImpl).toHaveBeenCalledWith(
+			"https://api.example/repos/o/r/pulls/2145",
 			expect.objectContaining({
 				method: "PATCH",
 				body: expect.stringContaining("## Tests\\n"),

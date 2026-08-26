@@ -154,6 +154,50 @@ export function detectFlattenedBody(body = "") {
 	return (inlineHeadings?.length ?? 0) >= 2;
 }
 
+const ESCAPED_NEWLINE = /\\r\\n|\\n/g;
+
+/**
+ * Detect the sibling flattening shape from the #2058-era class: a worker
+ * emits the literal two-or-four character sequence "\n" or "\r\n" where a
+ * real line break belongs, instead of collapsing real newlines into spaces
+ * (the shape #2149 already repairs). Restoring this is unambiguous outside
+ * a fenced code block — no character is lost. Inside a fence, a literal
+ * backslash-n can be genuine content (an escape sequence being documented),
+ * AND a flattened fence's own opening/closing delimiters can land on the
+ * same logical line, which the unrelated line-based fence scanner in
+ * lintPrBody cannot parse back apart. Rather than guess, any body carrying
+ * a fence refuses this repair entirely (fence preservation, issue #2145;
+ * true fence repair stays deferred, per the #2149 round-3 decision).
+ */
+export function detectEscapedNewlineBody(body = "") {
+	const source = String(body ?? "");
+	if (source.length < 200 || source.includes("```")) return false;
+	const realNewlines = (source.match(/\r\n|\n/g) ?? []).length;
+	if (realNewlines > FLATTENED_BODY_MAX_NEWLINES) return false;
+	const literalNewlines = source.match(ESCAPED_NEWLINE) ?? [];
+	if (literalNewlines.length < 2) return false;
+	const candidateHeadingLines = source
+		.replace(ESCAPED_NEWLINE, "\n")
+		.split("\n")
+		.filter((line) =>
+			new RegExp(`^\\s*#{2,4}\\s+(?:${REPAIR_HEADING_PATTERN})\\s*$`, "i").test(
+				line,
+			),
+		);
+	return candidateHeadingLines.length >= 2;
+}
+
+/**
+ * Repair only a body already proven to have the escaped-newline shape.
+ * detectEscapedNewlineBody already refuses any body carrying a fence, so
+ * this plain global replace never runs on fenced content.
+ */
+export function repairEscapedNewlineBody(body = "") {
+	const source = String(body ?? "");
+	if (!detectEscapedNewlineBody(source)) return source;
+	return source.replace(ESCAPED_NEWLINE, "\n");
+}
+
 /** Repair only a body already proven to have the flattened shape. */
 export function repairFlattenedBody(body = "") {
 	const source = String(body ?? "");
@@ -401,29 +445,36 @@ export async function lintPullRequestEvent(
 		console.log(`PR body OK: ${pullRequest.number}`);
 		return { valid: true, repaired: false };
 	}
-	if (detectFlattenedBody(body)) {
-		const repairedBody = repairFlattenedBody(body);
+	// Each strategy targets a distinct, unambiguous flattening shape (space
+	// joins vs. literal-\n joins). Try both; the first that both detects and
+	// produces a body which re-validates wins.
+	const repairStrategies = [
+		{ detect: detectFlattenedBody, repair: repairFlattenedBody },
+		{ detect: detectEscapedNewlineBody, repair: repairEscapedNewlineBody },
+	];
+	for (const { detect, repair } of repairStrategies) {
+		if (!detect(body)) continue;
+		const repairedBody = repair(body);
 		const repairedResult = lintPrBody(repairedBody, { requireTestAssessment });
-		if (repairedResult.valid) {
-			try {
-				const latestBody = await fetchLivePrBody(pullRequest, fetchImpl);
-				if (latestBody !== body) {
-					console.log(
-						`::notice::Skipped flattened PR body repair for #${pullRequest.number}; the body changed during linting.`,
-					);
-					for (const error of result.errors) console.error(error);
-					return { valid: false, repaired: false };
-				}
-				await patchLivePrBody(pullRequest, repairedBody, fetchImpl);
+		if (!repairedResult.valid) continue;
+		try {
+			const latestBody = await fetchLivePrBody(pullRequest, fetchImpl);
+			if (latestBody !== body) {
 				console.log(
-					`::notice::Repaired flattened PR body for #${pullRequest.number} before validation passed.`,
+					`::notice::Skipped flattened PR body repair for #${pullRequest.number}; the body changed during linting.`,
 				);
-				return { valid: true, repaired: true };
-			} catch (error) {
-				console.warn(
-					`::warning::Skipped flattened PR body repair for #${pullRequest.number}; freshness check failed, preserving original lint errors (${error instanceof Error ? error.message : error}).`,
-				);
+				for (const error of result.errors) console.error(error);
+				return { valid: false, repaired: false };
 			}
+			await patchLivePrBody(pullRequest, repairedBody, fetchImpl);
+			console.log(
+				`::notice::Repaired flattened PR body for #${pullRequest.number} before validation passed.`,
+			);
+			return { valid: true, repaired: true };
+		} catch (error) {
+			console.warn(
+				`::warning::Skipped flattened PR body repair for #${pullRequest.number}; freshness check failed, preserving original lint errors (${error instanceof Error ? error.message : error}).`,
+			);
 		}
 	}
 	for (const error of result.errors) console.error(error);
