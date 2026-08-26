@@ -73,7 +73,11 @@ When the symptom is reproducible behavior rather than a historical log window,
 the loop comes before the reading. Build the tightest feedback loop that can
 go red on the symptom — a failing test, a minimal driver script, a
 differential run — BEFORE forming theories; reading code without a loop is
-the failure mode, not the method. Then: (1) confirm the loop reproduces the
+the failure mode, not the method. This does not breach your read-only
+default: loops and instrumentation live in YOUR worktree and are fully
+reverted before you report; steps (4) and (5) below describe what your
+report RECOMMENDS to the fixer, not work you perform, unless your brief
+asks you to fix. Then: (1) confirm the loop reproduces the
 user's exact symptom, and minimize until every remaining element is
 load-bearing; a 30-second flaky loop is barely better than no loop — tighten
 for speed, signal, and determinism, and for non-deterministic symptoms raise

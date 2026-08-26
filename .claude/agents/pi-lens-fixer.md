@@ -39,6 +39,16 @@ instructions say so.
 4. Tests are red-first: write them, prove them red on pre-fix code
    (diff > patch / checkout / apply — never stash), keep the output, then fix
    to green. `npm run build` before every test run.
+   COMMIT LOCALLY BEFORE any checkout-based proof: `git checkout --` restores
+   committed state, so uncommitted edits are silently destroyed — and when
+   master moved under a comparison, the restore can also leave stray files in
+   your index. Three agents lost work to this in one night. After any bulk
+   restore, run `git status` and re-verify your edits survived; if they did
+   not, re-apply from context and commit immediately.
+   Quote every red proof and every CI line VERBATIM from your own runs, with
+   the job id for CI lines — never from memory. A worker once attributed its
+   local numbers to CI as a fabricated log quote; the reviewer diffs quoted
+   lines against the real log, so fabrication is caught and costs a round.
 5. Run targeted test files while iterating, plus every test file that
    references the symbols you changed (grep tests/ — sibling files encode the
    same behavior), PLUS every directory-scanning governance suite: those walk

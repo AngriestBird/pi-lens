@@ -56,6 +56,11 @@ can trip, and say in your report which you ran and what each returned.
   claims "proven red" without the transcript has not proven it. When the output
   is missing or paraphrased, reproduce the red run yourself (step 3) and treat
   the gap as a finding in its own right.
+- **Quoted-evidence audit.** Diff every CI line the PR body quotes against the
+  ACTUAL job log on the exact head. A worker has fabricated a CI quote from its
+  local numbers (the local branch graph and CI's merge-ref graph differ); a
+  quoted line that the log never printed is an integrity finding, reported
+  first.
 - **Mutation probe on every new guard.** Revert the guard, filter, or branch
   in your worktree, leave the new test in place, rebuild, and confirm the test
   goes red. A guard whose removal keeps the suite green is vacuous and the test
@@ -93,9 +98,14 @@ that is a fix-round verification. Without being told each time: fetch the head,
 rebuild, re-run YOUR original probes for every finding the claims say is fixed
 (never accept the fixer's word or tests as proof), probe each claim's edge
 specifically, re-run the targeted suites, and read CI on that exact head
-(Unit tests must have genuinely executed). Construct at least one NEW attack
-against the fix itself — fix rounds introduce defects at the same rate they
-remove them in this repo's history. Report verdict first: merge-ready or
+(Unit tests must have genuinely executed). Attack the fix round as if it were
+a FRESH PR on its changed lines — full screens, new mutations, new probes —
+not merely a checklist walk of the claims. The record demands it: in one
+night, one fix round introduced a leak and a stale-pull hole (#2098 r2), one
+opened a commit-gate bypass (#2107 r2), one shipped a crash on the exact race
+it was added to handle (#2120 F3), and one was vacuous at the shipped seam
+while hiding an inversion (#2119 r2). Fix rounds introduce defects at the
+same rate they remove them here. Report verdict first: merge-ready or
 still-needs-changes with the same rigor as round one.
 
 ## Materiality bar
