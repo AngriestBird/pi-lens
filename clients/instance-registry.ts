@@ -77,7 +77,21 @@ export interface InstanceEntry {
 	 * {@link getInstanceRoots}, never this field alone.
 	 */
 	projectRoot: string;
-	/** Provenance when a child had to synthesize the host identity. */
+	/**
+	 * Provenance when a child had to synthesize the host identity.
+	 *
+	 * Set only by `recordLspChild` when it has to synthesize the host entry
+	 * before `registerInstance` has run. `registerInstanceNow` rebuilds the
+	 * entry from scratch and has never carried this field over, for any value,
+	 * so the field's presence has always meant "no real registration has landed
+	 * for this pid yet". That is what makes it a usable signal.
+	 *
+	 * `"lsp-fallback"` is the one value that means the root is a GUESS
+	 * (`process.cwd()`) rather than evidence. #2130 round 2 reads it: the first
+	 * real registration takes the primary slot from a guessed root instead of
+	 * appending behind it. Roots appended to the entry in the meantime are
+	 * kept — only index 0 is the guess.
+	 */
 	rootSource?: "session-cwd" | "service-cwd" | "lsp-fallback";
 	/**
 	 * Every root this host serves, insertion-ordered, `projectRoot` first
@@ -336,10 +350,34 @@ async function registerInstanceNow(projectRoot: string): Promise<void> {
 		(file) => {
 			const others = file.instances.filter((entry) => entry.pid !== pid);
 			const existing = file.instances.find((entry) => entry.pid === pid);
-			const roots = mergeInstanceRoots(
-				existing ? getInstanceRoots(existing) : [],
-				normalizedRoot,
-			);
+			// #2130 round 2, class sweep. A `recordLspChild` that arrives before
+			// this call synthesizes the entry from `process.cwd()` and stamps
+			// `rootSource: "lsp-fallback"` to say so. Pinning made that GUESS
+			// permanent: the real session root joined the set behind it, and the
+			// host went on advertising a directory nobody asked it to serve —
+			// #2130's symptom reached through a different writer. So the first
+			// REAL registration takes the pin from a guessed primary. Any other
+			// `rootSource` ("session-cwd", "service-cwd") IS evidence of the root
+			// and keeps its pin, with this root appending behind it as usual.
+			//
+			// Review round 1, F1: ONLY index 0 is the guess. Everything behind it
+			// was appended by `registerInstanceRoot`, which is a declined
+			// secondary-root start recording a root it genuinely serves and which
+			// does not clear `rootSource`. Discarding the whole set would drop
+			// those, blinding the shared-checkout guard (#2107) to a live root —
+			// the same harm, inverted. Re-seed with the real root so it pins, then
+			// fold the rest back through `mergeInstanceRoots` so dedupe, order,
+			// and the cap stay single-owned.
+			const existingRoots = existing ? getInstanceRoots(existing) : [];
+			const roots =
+				existing?.rootSource === "lsp-fallback"
+					? existingRoots
+							.slice(1)
+							.reduce(
+								(acc, root) => mergeInstanceRoots(acc, root),
+								[normalizedRoot],
+							)
+					: mergeInstanceRoots(existingRoots, normalizedRoot);
 			others.push({
 				pid,
 				startedAt: existing?.startedAt ?? now,
@@ -692,13 +730,35 @@ export function deregisterInstance(): void {
  * {@link deregisterInstance}, for a worktree this host stops serving while the
  * host itself keeps running.
  *
- * SYNC fs only, matching `deregisterInstance`'s `session_shutdown` contract
+ * SYNC fs inside, matching `deregisterInstance`'s `session_shutdown` contract
  * (#234: no child spawns at teardown; this function spawns none). Removing the
  * LAST root removes the whole entry — a host serving no root is not a peer any
  * caller should find. Removing the primary promotes the next root to
  * `projectRoot` rather than leaving a stale scalar behind.
+ *
+ * QUEUED, unlike `deregisterInstance` (#2130 round 2). The two look alike but
+ * run at opposite ends of a process's life. `deregisterInstance` runs as the
+ * HOST exits, where a queued write may never get a turn, so it must bypass the
+ * tail and write immediately. This one runs at a SECONDARY's shutdown, where
+ * the process lives on and the ordering is what matters: a declined start fires
+ * `void registerInstanceRoot(cwd)` onto the tail (index.ts:1851) and never
+ * awaits it, so a short-lived subagent reaching shutdown first would remove a
+ * root that had not been added yet. The removal found nothing, the queued add
+ * landed behind it, and the temp root LEAKED until host exit or cap eviction.
+ * Sharing the tail makes remove-after-add hold by construction.
+ *
+ * The returned promise resolves when the removal has landed. Callers in
+ * teardown paths may fire and forget it — the tail still orders the write —
+ * but they can no longer read the file straight afterwards and expect the
+ * removal to be visible.
  */
-export function deregisterInstanceRoot(projectRoot: string): void {
+export function deregisterInstanceRoot(projectRoot: string): Promise<void> {
+	return queueRegistryMutation(async () =>
+		deregisterInstanceRootNow(projectRoot),
+	);
+}
+
+function deregisterInstanceRootNow(projectRoot: string): void {
 	if (!isInstanceRegistryEnabled()) return;
 	const pid = process.pid;
 	const normalizedRoot = normalizeFilePath(projectRoot);
