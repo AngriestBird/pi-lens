@@ -209,7 +209,7 @@ describe("instance-registry multi-root (#2130)", () => {
 				await import("../../clients/instance-registry.js");
 			await registerInstance(realRoot);
 			await registerInstance(tempRoot);
-			deregisterInstanceRoot(tempRoot);
+			await deregisterInstanceRoot(tempRoot);
 
 			const entry = readEntry();
 			expect(entry.projectRoots).toHaveLength(1);
@@ -221,7 +221,7 @@ describe("instance-registry multi-root (#2130)", () => {
 				await import("../../clients/instance-registry.js");
 			await registerInstance(realRoot);
 			await registerInstance(tempRoot);
-			deregisterInstanceRoot(realRoot);
+			await deregisterInstanceRoot(realRoot);
 			expect(readEntry().projectRoot).toContain(path.basename(tempRoot));
 		});
 
@@ -229,7 +229,7 @@ describe("instance-registry multi-root (#2130)", () => {
 			const { registerInstance, deregisterInstanceRoot, readInstanceRegistry } =
 				await import("../../clients/instance-registry.js");
 			await registerInstance(realRoot);
-			deregisterInstanceRoot(realRoot);
+			await deregisterInstanceRoot(realRoot);
 			expect(await readInstanceRegistry()).toEqual([]);
 		});
 
@@ -248,7 +248,7 @@ describe("instance-registry multi-root (#2130)", () => {
 			// Rename-based writes stamp a fresh mtime; wait past the filesystem's
 			// timestamp granularity so "unchanged" cannot be an artifact of speed.
 			await new Promise((resolve) => setTimeout(resolve, 25));
-			deregisterInstanceRoot(tempRoot);
+			await deregisterInstanceRoot(tempRoot);
 			expect(fs.statSync(registryFile, { bigint: true }).mtimeNs).toBe(before);
 			// And the entry is untouched.
 			expect(readEntry().projectRoots).toHaveLength(1);

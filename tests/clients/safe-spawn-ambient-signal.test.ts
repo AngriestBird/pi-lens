@@ -149,12 +149,20 @@ describe("safeSpawnAsync ambient abort signal (#197)", () => {
 		expect(killedForOutputCap(result)).toBe(false);
 	});
 
+	// The child ignores SIGTERM for the same reason the two tests above do: the
+	// cap's kill must not settle it before it emits its last line. On POSIX a
+	// child's writes to a pipe are asynchronous (they are synchronous only on
+	// Windows), so the 100 KB of filler is still queued in the child when the
+	// cap trips on the parent's first read. A child that takes the default
+	// SIGTERM disposition dies with that queue unflushed, and `late-rescue`
+	// never leaves it. Ignoring SIGTERM lets the child finish; safe-spawn's
+	// 1-second SIGKILL escalation still bounds the run.
 	it("retains late output in the tail after an output-cap kill", async () => {
 		const result = await safeSpawnAsync(
 			NODE,
 			[
 				"-e",
-				"process.stdout.write('h'.repeat(100000)); process.stdout.write('late-rescue');",
+				"process.on('SIGTERM', () => {}); process.stdout.write('h'.repeat(100000)); process.stdout.write('late-rescue');",
 			],
 			{ timeout: 5000, maxOutputBytes: 1024 },
 		);

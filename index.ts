@@ -3017,6 +3017,12 @@ function activateExtension(hostPi: ExtensionAPI) {
 			// that shares the primary's directory cannot deregister the root the
 			// host is still working in. A root this session never registered is a
 			// documented no-op inside `deregisterInstanceRoot`.
+			//
+			// #2130 round 2: the call is now QUEUED, so it lands behind this
+			// session's own `void registerInstanceRoot(cwd)` from the declined
+			// start above rather than racing ahead of it and leaving the temp
+			// root behind. Fire and forget is still correct — the tail owns the
+			// ordering, and teardown must not block on a registry write.
 			try {
 				const secondaryRoot = shutdownCwd;
 				const primaryRoot = getActivePrimaryRoot();
@@ -3026,7 +3032,9 @@ function activateExtension(hostPi: ExtensionAPI) {
 					primaryRoot !== undefined &&
 					normalizeFilePath(secondaryRoot) !== primaryRoot
 				) {
-					deregisterInstanceRoot(secondaryRoot);
+					void deregisterInstanceRoot(secondaryRoot).catch(() => {
+						// best-effort bookkeeping — never fail teardown
+					});
 				}
 			} catch {
 				// Best-effort observability bookkeeping — a stale ctx or an

@@ -22,6 +22,7 @@ import {
 	decideSessionStart,
 	getActivePrimaryRoot,
 	getSecondarySessionCount,
+	noteSessionShutdown,
 	registerPrimarySession,
 	releasePrimarySession,
 } from "../../clients/session-lifecycle.js";
@@ -359,5 +360,50 @@ describe("releasePrimarySession (#2129 review F3)", () => {
 		expect(getSecondarySessionCount()).toBe(1);
 		releasePrimarySession();
 		expect(getSecondarySessionCount()).toBe(0);
+	});
+});
+
+/**
+ * #2146 round-1 verification residual, closed here (#2130).
+ *
+ * `noteSessionShutdown` gained a root discriminator, and its docstring asserts
+ * the root check sits BELOW the id-unknown guard — the #472 fix, which says a
+ * session whose id is unreadable must still tear itself down. No test pinned
+ * that order: the reviewer hoisted the root check above the guard and 128 tests
+ * stayed green. The exposure is concrete. A primary whose
+ * `sessionManager.getSessionId()` read fails, running in a directory that is
+ * not the registered primary's, would classify `secondary`, return before
+ * shared teardown, and leak its LSP fleet on every clean exit.
+ */
+describe("noteSessionShutdown guard ORDER (#2146 residual)", () => {
+	afterEach(() => {
+		_resetSessionLifecycleForTests();
+	});
+
+	it("an unreadable session id tears down even from a different root", () => {
+		registerPrimarySession(staleCtx(), "session-a", PRIMARY_ROOT);
+		// Positively a different root, and the primary's ctx is dead — the two
+		// inputs the root branch acts on. The unknown id must still win.
+		expect(noteSessionShutdown(staleCtx(), undefined, TEMP_ROOT)).toBe(
+			"primary",
+		);
+	});
+
+	it("an unreadable PRIMARY id tears down even from a different root", () => {
+		// The mirror case: the registration itself carries no id, so "different
+		// session" is equally unestablishable from the other side.
+		registerPrimarySession(staleCtx(), undefined, PRIMARY_ROOT);
+		expect(noteSessionShutdown(staleCtx(), "session-b", TEMP_ROOT)).toBe(
+			"primary",
+		);
+	});
+
+	it("with BOTH ids known, a different root still classifies secondary", () => {
+		// The complement, so the two cases above cannot pass because the root
+		// branch stopped working altogether.
+		registerPrimarySession(staleCtx(), "session-a", PRIMARY_ROOT);
+		expect(noteSessionShutdown(staleCtx(), "session-b", TEMP_ROOT)).toBe(
+			"secondary",
+		);
 	});
 });
