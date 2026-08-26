@@ -9,15 +9,29 @@ export type FetchFn = (
 	init?: { method?: string; body?: string; headers?: Record<string, string> },
 ) => Promise<{ ok: boolean; status: number; json(): Promise<unknown> }>;
 
+export interface WardenCheckRun {
+	name: string;
+	status: string | null;
+	conclusion: string | null;
+	startedAt?: string | null;
+	url?: string;
+}
+
+export function resolveCheckRuns(
+	checkRuns: WardenCheckRun[] | null | undefined,
+): Map<string, WardenCheckRun>;
+
 export interface WardenPr {
 	number: number;
 	url: string;
 	headSha: string | undefined;
+	headCommittedDate: string | null;
 	mergeStateStatus: string;
 	autoMergeEnabled: boolean;
 	isFork: boolean;
 	labels: Set<string>;
 	checksUnknown: boolean;
+	checkRuns: WardenCheckRun[];
 	failingRequiredChecks: Array<{ name: string; url?: string }>;
 	unresolvedRequiredChecks: string[];
 }
@@ -27,11 +41,17 @@ export type WardenAction =
 	| { type: "remove-label"; label: string }
 	| { type: "comment"; body: string }
 	| { type: "update-branch" }
+	| { type: "rerun-run"; runId: number | string; workflowPath: string }
 	| { type: "note"; benign: boolean; message: string };
 
 export interface WardenError {
 	message: string;
 	benign: boolean;
+}
+
+export interface WardenRunHealthSummary {
+	classification: string;
+	detail: string;
 }
 
 export interface WardenResult {
@@ -40,6 +60,7 @@ export interface WardenResult {
 	mergeStateStatus: string | null;
 	applied: string[];
 	errors: WardenError[];
+	runHealth: WardenRunHealthSummary | null;
 }
 
 export function fetchOpenPullRequests(
@@ -60,8 +81,33 @@ export function applyAction(
 	pr: WardenPr,
 	action: WardenAction,
 ): Promise<{ ok: boolean; status: number; json(): Promise<unknown> }>;
+export function hasAbsentRunComment(
+	fetcher: FetchFn,
+	owner: string,
+	repo: string,
+	pr: WardenPr,
+): Promise<boolean>;
+export function summarizeRunHealth(health: {
+	classification: string;
+	starvedRuns: Array<{
+		id: number | string;
+		path: string;
+		runAttempt?: number;
+	}>;
+	absentWorkflows: string[];
+	unknownWorkflows: string[];
+	pendingWorkflows: string[];
+}): WardenRunHealthSummary;
+export const RUN_HEALTH: {
+	NORMAL: string;
+	STARVED: string;
+	ABSENT: string;
+	PENDING: string;
+	UNKNOWN: string;
+};
 export function runWarden(options: {
 	fetcher: FetchFn;
 	owner: string;
 	repo: string;
+	now?: number;
 }): Promise<WardenResult[]>;
