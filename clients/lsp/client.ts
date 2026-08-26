@@ -37,6 +37,7 @@ import {
 	type LspMutationContext,
 	newLspMutationCorrelationId,
 } from "../lsp-mutation.js";
+import { getProcessSingleton } from "../process-singletons.js";
 import { getAmbientAbortSignal } from "../safe-spawn.js";
 import { raceToCompletion } from "./aggregation.js";
 import {
@@ -1121,8 +1122,32 @@ export const MAX_INCREMENTAL_TEXT_RETAINED_BYTES = 64 * 1024 * 1024;
  * client's connection been torn down" — there is nowhere else in the file
  * that can flip a client from alive to permanently dead without going
  * through `disposeClientConnection`.
+ *
+ * PROCESS-SCOPED, not module-scoped (#2130 criterion 2). This Set is what
+ * `memory_sample.subsystems.lsp.clients` counts, and a module-scope Set counted
+ * only the clients this MODULE EVALUATION spawned. pi evaluates the pi-lens
+ * graph up to nine times per process (#2146, measured `host_boot` = 9) and each
+ * evaluation builds its own `LSPService` and fleet (#2157 item 1), so a
+ * secondary root's servers — spawned by a later evaluation — were invisible to
+ * the sampler running in the first. That is the reported symptom exactly:
+ * `clients: 1` in `memory_sample` beside `lspChildCount: 2` in `instances.json`,
+ * with two tsservers alive. Sharing the Set through `getProcessSingleton` makes
+ * both the count and `roots` span every root the process serves.
+ *
+ * Both seams share it, which is the whole requirement: sharing only the add
+ * site would build a Set that never shrinks, a worse leak than the undercount.
  */
-const activeLspClients = new Set<LSPClientState>();
+const ACTIVE_CLIENTS_FAMILY = "lsp-client.active-clients";
+/** Bump when the cell's shape changes. */
+const ACTIVE_CLIENTS_VERSION = 1;
+
+function activeLspClientSet(): Set<LSPClientState> {
+	return getProcessSingleton(
+		ACTIVE_CLIENTS_FAMILY,
+		ACTIVE_CLIENTS_VERSION,
+		() => new Set<LSPClientState>(),
+	);
+}
 
 export function getLspDocumentTextRetentionSnapshot(): {
 	clients: number;
@@ -1145,14 +1170,15 @@ export function getLspDocumentTextRetentionSnapshot(): {
 	let entries = 0;
 	let bytes = 0;
 	const roots = new Set<string>();
-	for (const state of activeLspClients) {
+	const active = activeLspClientSet();
+	for (const state of active) {
 		entries += state.incrementalTextRetainedEntries ?? 0;
 		bytes += state.incrementalTextRetainedBytes ?? 0;
 		if (typeof state.root === "string" && state.root.length > 0) {
 			roots.add(state.root);
 		}
 	}
-	return { clients: activeLspClients.size, entries, bytes, roots: roots.size };
+	return { clients: active.size, entries, bytes, roots: roots.size };
 }
 
 function isClientAlive(state: LSPClientState): boolean {
@@ -1170,7 +1196,7 @@ function disposeClientConnection(state: LSPClientState): void {
 	// clientShutdownOnce. Deregistering here, guarded by the idempotency flag
 	// above, means a crash that never re-attaches still frees its retained
 	// text instead of pinning it for the rest of the process lifetime.
-	activeLspClients.delete(state);
+	activeLspClientSet().delete(state);
 	try {
 		state.connection.dispose();
 	} catch {
@@ -5076,7 +5102,7 @@ export async function createLSPClient(options: {
 		// SAFETY: state construction completes before the flush closure can run.
 		watchQueue: undefined as unknown as WatchedFilesQueue,
 	};
-	activeLspClients.add(state);
+	activeLspClientSet().add(state);
 
 	// #271: batch per-file workspace/didChangeWatchedFiles into one notification
 	// per debounce window, so an N-file turn re-indexes the server once, not N×.

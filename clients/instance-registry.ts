@@ -77,7 +77,15 @@ export interface InstanceEntry {
 	 * {@link getInstanceRoots}, never this field alone.
 	 */
 	projectRoot: string;
-	/** Provenance when a child had to synthesize the host identity. */
+	/**
+	 * Provenance when a child had to synthesize the host identity.
+	 *
+	 * `"lsp-fallback"` means the root is a GUESS (`process.cwd()`), not
+	 * evidence. `registerInstance` replaces a guessed root outright rather than
+	 * appending behind it (#2130 round 2), and clears this field with it, so
+	 * the presence of `rootSource` on an entry always means "no real
+	 * registration has landed for this pid yet".
+	 */
 	rootSource?: "session-cwd" | "service-cwd" | "lsp-fallback";
 	/**
 	 * Every root this host serves, insertion-ordered, `projectRoot` first
@@ -336,10 +344,20 @@ async function registerInstanceNow(projectRoot: string): Promise<void> {
 		(file) => {
 			const others = file.instances.filter((entry) => entry.pid !== pid);
 			const existing = file.instances.find((entry) => entry.pid === pid);
-			const roots = mergeInstanceRoots(
-				existing ? getInstanceRoots(existing) : [],
-				normalizedRoot,
-			);
+			// #2130 round 2, class sweep. A `recordLspChild` that arrives before
+			// this call synthesizes the entry from `process.cwd()` and stamps
+			// `rootSource: "lsp-fallback"` to say so. Pinning made that GUESS
+			// permanent: the real session root joined the set behind it, and the
+			// host went on advertising a directory nobody asked it to serve —
+			// #2130's symptom reached through a different writer. A fallback root
+			// carries no evidence, so the first REAL registration replaces it
+			// outright instead of queueing behind it. Any other `rootSource`
+			// ("session-cwd", "service-cwd") IS evidence and keeps its pin.
+			const priorRoots =
+				existing && existing.rootSource !== "lsp-fallback"
+					? getInstanceRoots(existing)
+					: [];
+			const roots = mergeInstanceRoots(priorRoots, normalizedRoot);
 			others.push({
 				pid,
 				startedAt: existing?.startedAt ?? now,
@@ -692,13 +710,35 @@ export function deregisterInstance(): void {
  * {@link deregisterInstance}, for a worktree this host stops serving while the
  * host itself keeps running.
  *
- * SYNC fs only, matching `deregisterInstance`'s `session_shutdown` contract
+ * SYNC fs inside, matching `deregisterInstance`'s `session_shutdown` contract
  * (#234: no child spawns at teardown; this function spawns none). Removing the
  * LAST root removes the whole entry — a host serving no root is not a peer any
  * caller should find. Removing the primary promotes the next root to
  * `projectRoot` rather than leaving a stale scalar behind.
+ *
+ * QUEUED, unlike `deregisterInstance` (#2130 round 2). The two look alike but
+ * run at opposite ends of a process's life. `deregisterInstance` runs as the
+ * HOST exits, where a queued write may never get a turn, so it must bypass the
+ * tail and write immediately. This one runs at a SECONDARY's shutdown, where
+ * the process lives on and the ordering is what matters: a declined start fires
+ * `void registerInstanceRoot(cwd)` onto the tail (index.ts:1851) and never
+ * awaits it, so a short-lived subagent reaching shutdown first would remove a
+ * root that had not been added yet. The removal found nothing, the queued add
+ * landed behind it, and the temp root LEAKED until host exit or cap eviction.
+ * Sharing the tail makes remove-after-add hold by construction.
+ *
+ * The returned promise resolves when the removal has landed. Callers in
+ * teardown paths may fire and forget it — the tail still orders the write —
+ * but they can no longer read the file straight afterwards and expect the
+ * removal to be visible.
  */
-export function deregisterInstanceRoot(projectRoot: string): void {
+export function deregisterInstanceRoot(projectRoot: string): Promise<void> {
+	return queueRegistryMutation(async () =>
+		deregisterInstanceRootNow(projectRoot),
+	);
+}
+
+function deregisterInstanceRootNow(projectRoot: string): void {
 	if (!isInstanceRegistryEnabled()) return;
 	const pid = process.pid;
 	const normalizedRoot = normalizeFilePath(projectRoot);
