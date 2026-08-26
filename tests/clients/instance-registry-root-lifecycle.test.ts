@@ -128,6 +128,9 @@ describe("instance-registry root lifecycle (#2130 round 2)", () => {
 			expect(entry.projectRoots?.[0]).toContain(path.basename(realRoot));
 			// The guess is gone from the set entirely, and so is its provenance —
 			// keeping it would advertise a directory this host never served.
+			// Length 1 is right for THIS sequence only, because nothing appended a
+			// real root to the synthesized entry in between. The case that does is
+			// the next test, and it must keep what was appended.
 			expect(entry.projectRoots).toHaveLength(1);
 			expect(entry.rootSource).toBeUndefined();
 			// The child the synthesis existed to record survives the replacement.
@@ -135,6 +138,40 @@ describe("instance-registry root lifecycle (#2130 round 2)", () => {
 				fs.readFileSync(path.join(dir, "instances.json"), "utf-8"),
 			);
 			expect(raw.instances[0].lspChildren).toHaveLength(1);
+		});
+
+		it("keeps a real secondary root that was appended to the synthesized entry", async () => {
+			// Review round 1, F1. Only the GUESS at index 0 is evidence-free. A
+			// declined secondary-root start appends its real root to whatever entry
+			// exists (`registerInstanceRoot`, index.ts:1851) and does not clear
+			// `rootSource`, so a fallback-synthesized entry can legitimately carry
+			// real roots behind the guess. Discarding the whole set would drop them,
+			// which makes the shared-checkout guard (#2107) blind to a directory
+			// this host genuinely serves — the exact harm #2130 is about.
+			const { recordLspChild, registerInstance, registerInstanceRoot } =
+				await import("../../clients/instance-registry.js");
+			await recordLspChild({
+				pid: process.pid + 1,
+				serverId: "fake-ts",
+				command: "fake-tsserver",
+			});
+			await registerInstanceRoot(tempRoot);
+			// Precondition: the guess still holds the pin and still says it is a
+			// guess, so the real root really is sitting behind it.
+			const before = readEntry();
+			expect(before.rootSource).toBe("lsp-fallback");
+			expect(before.projectRoots).toHaveLength(2);
+
+			await registerInstance(realRoot);
+
+			const entry = readEntry();
+			// The real root takes the pin, the guess is gone, the appended root
+			// survives behind it.
+			expect(entry.projectRoot).toContain(path.basename(realRoot));
+			expect(entry.projectRoots).toHaveLength(2);
+			expect(entry.projectRoots?.[0]).toContain(path.basename(realRoot));
+			expect(entry.projectRoots?.[1]).toContain(path.basename(tempRoot));
+			expect(entry.rootSource).toBeUndefined();
 		});
 
 		it("a session-cwd root is NOT a guess, so it keeps the primary slot", async () => {

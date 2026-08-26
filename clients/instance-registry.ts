@@ -80,11 +80,17 @@ export interface InstanceEntry {
 	/**
 	 * Provenance when a child had to synthesize the host identity.
 	 *
-	 * `"lsp-fallback"` means the root is a GUESS (`process.cwd()`), not
-	 * evidence. `registerInstance` replaces a guessed root outright rather than
-	 * appending behind it (#2130 round 2), and clears this field with it, so
-	 * the presence of `rootSource` on an entry always means "no real
-	 * registration has landed for this pid yet".
+	 * Set only by `recordLspChild` when it has to synthesize the host entry
+	 * before `registerInstance` has run. `registerInstanceNow` rebuilds the
+	 * entry from scratch and has never carried this field over, for any value,
+	 * so the field's presence has always meant "no real registration has landed
+	 * for this pid yet". That is what makes it a usable signal.
+	 *
+	 * `"lsp-fallback"` is the one value that means the root is a GUESS
+	 * (`process.cwd()`) rather than evidence. #2130 round 2 reads it: the first
+	 * real registration takes the primary slot from a guessed root instead of
+	 * appending behind it. Roots appended to the entry in the meantime are
+	 * kept — only index 0 is the guess.
 	 */
 	rootSource?: "session-cwd" | "service-cwd" | "lsp-fallback";
 	/**
@@ -349,15 +355,29 @@ async function registerInstanceNow(projectRoot: string): Promise<void> {
 			// `rootSource: "lsp-fallback"` to say so. Pinning made that GUESS
 			// permanent: the real session root joined the set behind it, and the
 			// host went on advertising a directory nobody asked it to serve —
-			// #2130's symptom reached through a different writer. A fallback root
-			// carries no evidence, so the first REAL registration replaces it
-			// outright instead of queueing behind it. Any other `rootSource`
-			// ("session-cwd", "service-cwd") IS evidence and keeps its pin.
-			const priorRoots =
-				existing && existing.rootSource !== "lsp-fallback"
-					? getInstanceRoots(existing)
-					: [];
-			const roots = mergeInstanceRoots(priorRoots, normalizedRoot);
+			// #2130's symptom reached through a different writer. So the first
+			// REAL registration takes the pin from a guessed primary. Any other
+			// `rootSource` ("session-cwd", "service-cwd") IS evidence of the root
+			// and keeps its pin, with this root appending behind it as usual.
+			//
+			// Review round 1, F1: ONLY index 0 is the guess. Everything behind it
+			// was appended by `registerInstanceRoot`, which is a declined
+			// secondary-root start recording a root it genuinely serves and which
+			// does not clear `rootSource`. Discarding the whole set would drop
+			// those, blinding the shared-checkout guard (#2107) to a live root —
+			// the same harm, inverted. Re-seed with the real root so it pins, then
+			// fold the rest back through `mergeInstanceRoots` so dedupe, order,
+			// and the cap stay single-owned.
+			const existingRoots = existing ? getInstanceRoots(existing) : [];
+			const roots =
+				existing?.rootSource === "lsp-fallback"
+					? existingRoots
+							.slice(1)
+							.reduce(
+								(acc, root) => mergeInstanceRoots(acc, root),
+								[normalizedRoot],
+							)
+					: mergeInstanceRoots(existingRoots, normalizedRoot);
 			others.push({
 				pid,
 				startedAt: existing?.startedAt ?? now,
