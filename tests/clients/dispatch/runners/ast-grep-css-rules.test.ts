@@ -43,16 +43,23 @@ describe("ast-grep CSS rules (integration via napi fallback)", () => {
 	});
 
 	it("does not run a CSS rule on an HTML root", async () => {
-		const { ctx } = env.addFile(
-			"sample.html",
+		env.addFile(
+			"rules/ast-grep-rules/rules/html-element-local.yml",
 			[
-				"<!doctype html>",
-				"<style>.modal { z-index: 9999 !important; }</style>",
-				"<p>!important in HTML text</p>",
+				"id: html-element-local",
+				"language: Css",
+				"message: HTML elements must not match CSS rules",
+				"severity: warning",
+				"rule:",
+				"  kind: element",
 				"",
 			].join("\n"),
 		);
+		const { ctx } = env.addFile(
+			"sample.html",
+			["<!doctype html>", "<p>content</p>", ""].join("\n"),
+		);
 		const result = await astGrepNapiRunner.run(ctx);
-		expect(firedRuleIds(result)).not.toContain("no-important");
+		expect(firedRuleIds(result)).not.toContain("html-element-local");
 	});
 });
