@@ -985,6 +985,8 @@ in word-index telemetry. #2069 intentionally builds on this prerequisite.
 The reproducible synchronous replacement profile is
 `npm run build && npm run bench:word-index-replacement`; it reports latency
 percentiles and inspector samples attributed to `normalizeEphemeralMapKey`.
+The relative smoke check's restored run reports 0.226% attribution (3,092
+samples); the pre-interning comparison reports 32.303% (5,727 samples).
 
 Word-index persistence keeps the v2 wire contract and caches its flat serialized
 view per index. Every replacement or addition marks its document dirty; the next

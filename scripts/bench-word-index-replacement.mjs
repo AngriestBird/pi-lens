@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 /**
- * Profile the synchronous per-edit word-index replacement seam (#2067).
+ * Relative attribution smoke check for the synchronous per-edit word-index
+ * replacement seam (#2067).
  *
- * The workload deliberately keeps the corpus large and makes the edited
- * document appear in a shared posting list. This is the shape that used to
- * normalize every posting element. Run after `npm run build`:
+ * The workload deliberately makes the edited document appear in a shared
+ * posting list. It is not a reproduction of the issue's 2.2M-posting corpus
+ * and its latency is not a cross-machine performance claim. Run after build:
  *
  *   node scripts/bench-word-index-replacement.mjs
  *
@@ -49,7 +50,7 @@ function post(method, params = {}) {
 await post("Profiler.enable");
 await post("Profiler.start");
 const durations = [];
-for (let edit = 0; edit < 60; edit += 1) {
+for (let edit = 0; edit < 300; edit += 1) {
 	const content = `${corpus[0].content}\nexport const edit${edit} = sharedPostingHandler0;`;
 	const started = performance.now();
 	if (!updateWordIndexDocument(index, { path: targetPath, content })) {
@@ -62,13 +63,19 @@ session.disconnect();
 
 const samples = profile.samples ?? [];
 const nodes = new Map((profile.nodes ?? []).map((node) => [node.id, node]));
+const parents = new Map();
+for (const node of nodes.values()) {
+	for (const childId of node.children ?? []) parents.set(childId, node.id);
+}
 const selfSamples = samples.length;
 const normalizerSamples = samples.filter((sample) => {
-	let node = nodes.get(sample.nodeId);
-	while (node) {
+	let nodeId = sample;
+	while (nodeId !== undefined) {
+		const node = nodes.get(nodeId);
+		if (!node) break;
 		if (node.callFrame?.functionName === "normalizeEphemeralMapKey")
 			return true;
-		node = nodes.get(node.parent);
+		nodeId = parents.get(nodeId);
 	}
 	return false;
 }).length;
