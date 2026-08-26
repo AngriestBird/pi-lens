@@ -30,6 +30,12 @@ import {
 import { getReviewGraphWorkspaceCacheSnapshot } from "../../clients/review-graph/builder.js";
 import { getDispatchCascadeCacheStats } from "../../clients/dispatch/integration.js";
 import type { WordIndex } from "../../clients/word-index.js";
+import {
+	WORD_POSTING_LIST_OVERHEAD_BYTES,
+	WordForwardEntry,
+	WordIndexFileTable,
+	WordPostingList,
+} from "../../clients/word-index-store.js";
 import { PathKeyedMap } from "../../clients/path-keyed-map.js";
 import { normalizeEphemeralMapKey } from "../../clients/path-utils.js";
 import { createLSPClient } from "../../clients/lsp/client.js";
@@ -188,18 +194,20 @@ describe("collectMemorySampleSubsystems (O(1)/O(bounded-cache-size) live reads)"
 
 	it("reports word-index doc/posting/forward counts when a word index is supplied", () => {
 		const wordIndex: WordIndex = {
-			postings: new Map([["foo", [{ file: "a.ts", line: 1 }]]]),
-			fileTable: new Map([[normalizeEphemeralMapKey("a.ts"), "a.ts"]]),
+			postings: new Map([["foo", WordPostingList.fromLanes("foo", [0, 1])]]),
+			fileTable: (() => {
+				const table = new WordIndexFileTable();
+				table.intern(normalizeEphemeralMapKey("a.ts"), "a.ts");
+				return table;
+			})(),
 			docLengths: (() => {
 				const m = new PathKeyedMap<number>(normalizeEphemeralMapKey);
 				m.set("a.ts", 5);
 				return m;
 			})(),
 			forward: (() => {
-				const m = new PathKeyedMap<Map<string, number>>(
-					normalizeEphemeralMapKey,
-				);
-				m.set("a.ts", new Map([["foo", 1]]));
+				const m = new PathKeyedMap<WordForwardEntry>(normalizeEphemeralMapKey);
+				m.set("a.ts", WordForwardEntry.fromTally(new Map([["foo", 1]])));
 				return m;
 			})(),
 			totalTokens: 5,
@@ -211,7 +219,14 @@ describe("collectMemorySampleSubsystems (O(1)/O(bounded-cache-size) live reads)"
 		expect(subsystems.wordIndex).toEqual({
 			docs: 1,
 			fileTable: 1,
+			// `postings` is the DISTINCT TOKEN count and `postingEntries` is the
+			// posting count. #1999 read the first as the second and under-counted
+			// the subsystem sixtyfold, so both are asserted here (#2069).
 			postings: 1,
+			postingEntries: 1,
+			// One packed posting (8 bytes) plus one packed forward entry (8
+			// bytes), each carrying the fixed per-list header charge.
+			residentBytes: 2 * (8 + WORD_POSTING_LIST_OVERHEAD_BYTES),
 			forwardEntries: 1,
 		});
 	});
