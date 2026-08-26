@@ -53,6 +53,7 @@ AGENTS.md is the durable context handed to every agent that works on pi-lens. **
 - **Kill staleness.** If a commit changes behavior, structure, commands, conventions, or invariants documented here, fix the affected lines now. A stale claim is worse than none — agents act on it as fact.
 - **Capture decisions & patterns.** When a commit establishes a non-obvious decision, gotcha, convention, or architectural pattern the next agent would otherwise relearn the hard way, add it here with the *why* and *how-to-apply* (recent examples: the dist/packaging + `pi.skills` resolution gotcha, the event-loop/hot-path discipline, the build-vs-lint gate).
 - **Keep it high-signal.** Prune what's no longer true; prefer concise, load-bearing notes over exhaustive prose.
+- **Shed to HISTORY.md, don't delete.** When a section completes, dissolves, or a rule's supporting narrative stops changing any future decision, move that narrative to `HISTORY.md` and keep the live rule here. HISTORY.md updates ONLY on shedding — it is the destination for what this file removes, not a parallel changelog; a quiet HISTORY.md while this file only gains content is the expected state, not neglect.
 
 Placement rules (the add/add conflict record from 2026-08-25 - three PRs
 collided appending to this file's tail in one night):
@@ -116,6 +117,10 @@ Message-end stale attribution anchors the session id when a live ctx is handled,
   - Consistent terminology: never swap synonyms for the same thing.
   - Sentence-case headings. Plain words. No idioms or colloquialisms. No `please`. Oxford comma.
   - No em-dash chains or nested parentheticals.
+  - Second person for instructions; imperative for steps ("Run the sweep", not "The sweep should be run").
+  - Condition before instruction: "If the check is red, read the log" — the reader learns whether the sentence applies before parsing what it asks.
+  - Parallel structure in every list: items share grammatical shape (all imperatives, or all noun phrases), and the list is introduced by a complete sentence.
+  - Timeless wording in DURABLE docs (this file, HISTORY.md, README): no "new", "currently", "now", "recently" — they rot silently. Point-in-time records (PRs, issues, comments) instead use ABSOLUTE dates, never relative ones ("on 2026-08-26", not "yesterday").
   - Commits: tpope style on top of the conventional prefix. Imperative subject of 50 characters or fewer, blank line, 72-column body stating what and why.
   - Issue references live in the PR TITLE. Use `closes` only when every acceptance criterion is met. Otherwise use `refs` plus an issue comment naming the remainder.
 - **Mutation-proof every new guard, branch, and filter.** A red-first test for the feature is not enough: deleting or neutering the guard itself must turn at least one test red. Vacuous guards were the most repeated review finding of the 2026-08-19 arc. #1682's generation check survived `if (false)`. #1674's latch-clears survived neutering. #1686's membership check survived a cursor swap. #1692's coverage sweep survived gate deletion. When you add a conditional that exists to prevent a bad outcome, run the mutant yourself and cite the red in the PR body.
