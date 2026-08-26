@@ -76,9 +76,7 @@ describe("TOOLS registry consistency", () => {
 
 	it("uses the Svelte/Prisma language-server cold-start budgets (#2169)", () => {
 		const svelte = TOOLS.find((tool) => tool.id === "svelte-language-server");
-		const prisma = TOOLS.find(
-			(tool) => tool.id === "@prisma/language-server",
-		);
+		const prisma = TOOLS.find((tool) => tool.id === "@prisma/language-server");
 		expect(svelte).toBeDefined();
 		expect(prisma).toBeDefined();
 		expect(getToolVerificationTimeout(svelte!)).toBe(20_000);
