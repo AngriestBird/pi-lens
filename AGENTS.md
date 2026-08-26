@@ -1137,6 +1137,15 @@ Thread `getManagedToolEnvironment(tool, cwd)` into probes/spawns. Direct
 `ensureTool()` calls and bare managed-tool spawns outside the sanctioned wrapper
 surfaces are guarded by `tests/clients/managed-tool-seam-coverage.test.ts`.
 
+Managed language-server verification arguments are registry-owned and must
+finish within the installer budget against the real binary. Choose a faster
+argument such as `--help` only when a real-binary A/B reproduces a benefit;
+otherwise retain the tool's established probe and leave the cold-path question
+explicitly open.
+`verifyToolBinary` retains at most 64 KiB of child output; output-cap episodes
+use the `installer-verification-output-truncated` degradation kind and
+`recordDegradationOnce` so noisy probes remain bounded and identifiable.
+
 Installer package-manager and archive-extraction subprocesses must use
 `safeSpawnAsync` with `lifetimeCoupled: true` and `ignoreAmbientSignal: true`.
 This gives timeouts an awaited Windows tree-kill and prevents interrupted parent
@@ -1936,6 +1945,7 @@ session-scoped state at `session_start`. Keep tier flips and repeated slow
 observations bounded through the latency logger and degradation ledger.
 
 - **Use `safeSpawnAsync()` for all subprocess work** in hook/dispatch/install paths. The sync `safeSpawn()` is deprecated, blocks the Node event loop, and is now reachable only from the cached `TestRunnerClient.detectRunner` `which pytest` probe. Don't add new sync `safeSpawn` callers.
+- **Streaming output matches in `safeSpawnAsync()`** use `matchWhileStreaming` for bounded rescue detection before and after output-cap retention. While the matcher is armed and unmatched, the cap discards output beyond the retention budget but defers the cap kill; the caller's own timeout is the time bound. Once the matcher matches, or when no matcher is armed, the existing kill-on-cap behavior applies. This keeps memory bounded but makes the wait time-unbounded within the spawn seam, so every such caller must provide its own timeout. Carry the last `pattern.length - 1` bytes across chunks so a split match remains detectable, and preserve `streamingMatch` on error results.
 - **The hot per-edit path is the dispatch runners** (`clients/dispatch/runners/*`), not the legacy per-tool client classes (`biome-client`, `ruff-client`, `rust-client`, `ast-grep-client`, …). Those classes historically carried a *parallel sync surface* (`checkFile`/`fixFile`/`isAvailable`/`findCargoPath`/…) that the async runners superseded; #197 found almost all of it **dead** and deleted ~1600 lines. **Lesson: when you find a sync client method, grep its real callers before "converting" it — the answer is usually "delete," and the live path already has an `*Async` twin** (`fixFileAsync`, `ensureAvailable`, `runTestFileAsync`, `tempScanAsync`, `findGoPathAsync`).
 - **Ambient turn abort signal (#197):** `safeSpawnAsync` defaults its `AbortSignal` to a module-level ambient signal (`setAmbientAbortSignal` in `clients/safe-spawn.ts`). The lifecycle handlers (`tool_result`, `agent_end`, `turn_end`) publish pi's `ctx.signal` at entry and clear it in `finally`, so an Esc/interrupt kills in-flight linter/format/type-check children (process-tree kill on Windows) without threading a signal through every call site. The signal is captured at spawn time, so clearing it only affects future spawns. Pass `ignoreAmbientSignal: true` for **installs** (gem/go/dotnet/rustup) so they run to completion even if the turn is interrupted — matching the old uncancellable sync behaviour; an explicit `options.signal` always wins.
 - Expensive project scans have in-flight guards: Knip by project root, jscpd by project root + scan params, Madge by project root/file or project root scan.
