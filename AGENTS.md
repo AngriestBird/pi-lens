@@ -1115,12 +1115,27 @@ only automation in this repository that merges, and it lives outside the warden
 on purpose. It merges a PR carrying `train:approved` only on POSITIVE evidence
 about the exact current head: both required checks present, `COMPLETED`, and
 `SUCCESS`, run health `runs-concluded-normally`, zero failing non-advisory
-checks, and a `CLEAN`/`BEHIND`/`UNSTABLE` merge state. Absent, unconcluded,
-starved, and DIRTY-skipped checks are all not-green. Gating on the current head
-is what re-gates a fix round, so the lane stores no "approved at SHA" state that
-could drift; the merge call passes `sha` so a head that moves mid-cycle 409s
-instead of merging on a stale verdict. Only the maintainer applies the label, so
-the adversarial-review-first policy is unchanged; removing the label aborts.
+checks, and a `CLEAN`/`UNSTABLE` merge state. Absent, unconcluded, starved, and
+DIRTY-skipped checks are all not-green. Gating on the current head is what
+re-gates a fix round, so the lane stores no "approved at SHA" state that could
+drift; the merge call passes `sha` so a head that moves mid-cycle 409s instead
+of merging on a stale verdict. Only the maintainer applies the label, so the
+adversarial-review-first policy is unchanged; removing the label aborts.
+
+Four facts about THIS repository the lane must keep matching, each probed live
+rather than assumed (review round 1 on PR #2191, all four were wrong first):
+master protection is `strict: true`, so a BEHIND head cannot be merged at all
+and instead gets `update-branch` with `expected_head_sha`; a check is advisory
+by its `(advisory)` NAME SUFFIX (`oxfmt format check (advisory)`,
+`PR body (advisory)`, `Vale prose lint (advisory)`, `OSV scan (advisory)`), not
+by a vendor allowlist; one head's rollup really does carry DUPLICATE check
+names, so `resolveCheckRuns` picks the newest by `startedAt` and fails closed on
+an unorderable disagreement, because `new Map(list.map(...))` is last-wins on
+array order and called an in-flight re-run green; and `direction=desc` is
+ignored by `issues/{n}/comments`, so every marker-dedupe read paginates to the
+last page through `scripts/lib/github-paging.mjs`. Label provenance comes from
+the last `labeled` timeline event and must name an approver, so "anyone who can
+label" is not "anyone who can merge".
 
 CI validates GitHub close-keyword syntax through `scripts/check-close-keywords.mjs`:
 PR bodies may not use a comma-separated close list because GitHub applies only

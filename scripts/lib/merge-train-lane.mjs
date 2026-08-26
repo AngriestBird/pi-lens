@@ -22,20 +22,33 @@
  * state to drift.
  */
 
-import { fetchOpenPullRequests, REQUIRED_CHECKS } from "./merge-train-warden.mjs";
+import { commentMarkerExists, paginate } from "./github-paging.mjs";
+import {
+	fetchOpenPullRequests,
+	REQUIRED_CHECKS,
+	resolveCheckRuns,
+} from "./merge-train-warden.mjs";
 import { fetchHeadRunHealth, RUN_HEALTH } from "./warden-run-health.mjs";
 
 export const TRAIN_APPROVED_LABEL = "train:approved";
 export const TRAIN_SQUASH_LABEL = "train:squash";
 
-// Advisory checks may fail without blocking a merge. The list is explicit and
-// the gate is FAIL-CLOSED: anything not named here that fails blocks the
-// merge. An allowlist that guessed broadly would be the merge-lane spelling
-// of "silencing counted as fixing" (shape 10).
-export const ADVISORY_CHECKS = new Set([
-	"SonarCloud Code Analysis",
-	"CodeQL",
-]);
+// How this repository ACTUALLY marks a check advisory: the workflow job name
+// ends in "(advisory)". Probed 2026-08-26 against the live rollups of every
+// open PR -- `oxfmt format check (advisory)`, `PR body (advisory)`,
+// `Vale prose lint (advisory)`, `OSV scan (advisory)`. Review round 1, F3: a
+// hand-written allowlist of two vendor names read `oxfmt format check
+// (advisory): FAILURE` as blocking and refused to merge this PR's own head.
+// The suffix is the single source of truth the repository already maintains;
+// the two vendor names below carry no suffix and stay explicit.
+export const ADVISORY_SUFFIX = "(advisory)";
+export const ADVISORY_CHECKS = new Set(["SonarCloud Code Analysis", "CodeQL"]);
+
+export function isAdvisoryCheck(name) {
+	return (
+		ADVISORY_CHECKS.has(name) || String(name ?? "").endsWith(ADVISORY_SUFFIX)
+	);
+}
 
 // Only positive evidence of a settled pass. GitHub's CheckRun status is
 // QUEUED / IN_PROGRESS / COMPLETED and conclusion is null until COMPLETED
@@ -53,11 +66,20 @@ export const BLOCKING_CONCLUSIONS = new Set([
 	"STALE",
 ]);
 
-// CLEAN and BEHIND are the "clean or behind-with-no-conflict" states the
-// issue names. UNSTABLE is included because it means only NON-required checks
-// are unhappy, and the blocking-conclusion scan above already judges those on
-// their own merits. DIRTY, BLOCKED, DRAFT, and UNKNOWN are never merged.
-export const MERGEABLE_STATES = new Set(["CLEAN", "BEHIND", "UNSTABLE"]);
+// States the merge API will actually accept. Review round 1, F1: this
+// repository's master protection has `strict: true` (probed 2026-08-26 via
+// `GET /branches/master/protection`), so GitHub REFUSES to merge a BEHIND
+// head -- and every open PR was BEHIND at the time. BEHIND therefore is not a
+// merge state; it is an UPDATE state, handled below.
+export const MERGEABLE_STATES = new Set(["CLEAN", "UNSTABLE"]);
+
+// A green PR sitting BEHIND gets the branch update instead of a merge. The
+// update writes a new head, which re-gates the PR naturally on the next
+// cycle: the new head has no concluded checks yet, so nothing merges until
+// they conclude green again. The warden's own update-branch kick cannot cover
+// this, because it is gated on `autoMergeEnabled` and a train:approved PR has
+// no auto-merge armed.
+export const UPDATEABLE_STATES = new Set(["BEHIND"]);
 
 export const MERGE_GATE_REASON = {
 	NOT_APPROVED: "not-approved",
@@ -68,6 +90,8 @@ export const MERGE_GATE_REASON = {
 	RUN_HEALTH: "run-health",
 	FAILING_CHECK: "failing-check",
 	MERGE_STATE: "merge-state",
+	BEHIND_BASE: "behind-base",
+	NOT_APPROVED_BY_OWNER: "not-approved-by-owner",
 	GREEN: "green",
 };
 
@@ -76,12 +100,13 @@ export const MERGE_GATE_REASON = {
  * `classifyHeadRun` result for the same head. Returns the decision plus the
  * reason and a human-readable detail line for the PR comment.
  */
-export function evaluateMergeGate(pr, health) {
+export function evaluateMergeGate(pr, health, { approvedBy } = {}) {
 	// Unlabeled PRs are never touched, and never commented on: the lane must
 	// be invisible to every PR the maintainer has not approved.
 	if (!pr.labels.has(TRAIN_APPROVED_LABEL)) {
 		return {
 			merge: false,
+			update: false,
 			silent: true,
 			method: null,
 			reason: MERGE_GATE_REASON.NOT_APPROVED,
@@ -92,11 +117,25 @@ export function evaluateMergeGate(pr, health) {
 	const method = pr.labels.has(TRAIN_SQUASH_LABEL) ? "squash" : "merge";
 	const deny = (reason, detail) => ({
 		merge: false,
+		update: false,
 		silent: false,
 		method,
 		reason,
 		detail,
 	});
+
+	// Review round 1, F5: the label carries the review verdict, so WHO applied
+	// it is the whole authority story. Today only the repository owner is a
+	// collaborator, so nobody else can add a label at all -- but the day a
+	// second collaborator exists, "anyone who can label can merge" is a much
+	// larger grant than this lane is meant to hand out. The caller resolves
+	// the actor from the PR's timeline; an unresolved actor is a denial, not a
+	// pass, so an unreadable timeline can only hold a merge.
+	if (!approvedBy?.allowed)
+		return deny(
+			MERGE_GATE_REASON.NOT_APPROVED_BY_OWNER,
+			`\`${TRAIN_APPROVED_LABEL}\` was applied by \`${approvedBy?.actor ?? "an unresolved actor"}\`, who is not on the merge-train approver list`,
+		);
 
 	// A missing rollup is missing information, not a green head.
 	if (pr.checksUnknown)
@@ -105,7 +144,7 @@ export function evaluateMergeGate(pr, health) {
 			"GitHub reported no check rollup for the head commit",
 		);
 
-	const byName = new Map(pr.checkRuns.map((c) => [c.name, c]));
+	const byName = resolveCheckRuns(pr.checkRuns);
 	for (const name of REQUIRED_CHECKS) {
 		const run = byName.get(name);
 		// Absent is the DIRTY-skip and dropped-dispatch case. It is the single
@@ -135,9 +174,12 @@ export function evaluateMergeGate(pr, health) {
 			`workflow run health is \`${health.classification}\` on \`${pr.headSha}\``,
 		);
 
-	const failing = pr.checkRuns.filter(
+	// Judge the RESOLVED run per name, so a superseded duplicate cannot block
+	// a head whose current run passed, and a newer failing duplicate cannot be
+	// hidden by an older passing one.
+	const failing = [...byName.values()].filter(
 		(c) =>
-			!ADVISORY_CHECKS.has(c.name) &&
+			!isAdvisoryCheck(c.name) &&
 			c.conclusion != null &&
 			BLOCKING_CONCLUSIONS.has(c.conclusion),
 	);
@@ -147,6 +189,19 @@ export function evaluateMergeGate(pr, health) {
 			`non-advisory checks are failing: ${failing.map((c) => `\`${c.name}\` (${c.conclusion})`).join(", ")}`,
 		);
 
+	// BEHIND is not a refusal: it is the update lever. Everything above has
+	// already passed, so the only thing between this PR and master is the
+	// strict-protection requirement that the head be up to date.
+	if (UPDATEABLE_STATES.has(pr.mergeStateStatus))
+		return {
+			merge: false,
+			update: true,
+			silent: false,
+			method,
+			reason: MERGE_GATE_REASON.BEHIND_BASE,
+			detail: `every gate is green, but master protection is \`strict\`, so the head must be updated first. Updating the branch now; the new head re-gates on its own checks.`,
+		};
+
 	if (!MERGEABLE_STATES.has(pr.mergeStateStatus))
 		return deny(
 			MERGE_GATE_REASON.MERGE_STATE,
@@ -155,6 +210,7 @@ export function evaluateMergeGate(pr, health) {
 
 	return {
 		merge: true,
+		update: false,
 		silent: false,
 		method,
 		reason: MERGE_GATE_REASON.GREEN,
@@ -172,9 +228,9 @@ export function laneCommentMarker(headSha, reason) {
 }
 
 export function laneCommentBody(pr, gate) {
-	const header = gate.merge
-		? "**Merge train: merged.**"
-		: "**Merge train: holding.**";
+	let header = "**Merge train: holding.**";
+	if (gate.merge) header = "**Merge train: merged.**";
+	else if (gate.update) header = "**Merge train: updating the branch.**";
 	const lines = [header, "", gate.detail, ""];
 	if (!gate.merge) {
 		lines.push(
@@ -208,15 +264,50 @@ async function rest(fetcher, method, url, body) {
 }
 
 async function laneCommentExists(fetcher, owner, repo, pr, reason) {
-	const marker = laneCommentMarker(pr.headSha, reason);
-	const response = await fetcher(
-		`https://api.github.com/repos/${owner}/${repo}/issues/${pr.number}/comments?per_page=100`,
-		{ headers: { accept: "application/vnd.github+json" } },
+	return commentMarkerExists(
+		fetcher,
+		owner,
+		repo,
+		pr.number,
+		laneCommentMarker(pr.headSha, reason),
 	);
-	if (!response.ok) throw new Error(`comments read -> HTTP ${response.status}`);
-	const comments = await response.json();
-	if (!Array.isArray(comments)) throw new Error("comments read returned no array");
-	return comments.some((c) => String(c?.body ?? "").includes(marker));
+}
+
+/**
+ * Resolve WHO applied `train:approved`, from the PR's own timeline. The last
+ * `labeled` event for that label is the current provenance: if a maintainer
+ * removes and a bot re-adds it, the bot is the actor.
+ *
+ * Fails CLOSED. An unreadable timeline, a missing event, or an actor outside
+ * the approver list all return `allowed: false`.
+ */
+export async function resolveApprovalActor(
+	fetcher,
+	owner,
+	repo,
+	prNumber,
+	approvers,
+) {
+	const allowlist = new Set(approvers ?? []);
+	let actor = null;
+	try {
+		const events = await paginate(
+			fetcher,
+			`https://api.github.com/repos/${owner}/${repo}/issues/${prNumber}/timeline`,
+		);
+		for (const event of events) {
+			if (event?.event !== "labeled") continue;
+			if (event?.label?.name !== TRAIN_APPROVED_LABEL) continue;
+			actor = event?.actor?.login ?? null;
+		}
+	} catch (error) {
+		return {
+			allowed: false,
+			actor: null,
+			error: error instanceof Error ? error.message : String(error),
+		};
+	}
+	return { allowed: actor != null && allowlist.has(actor), actor, error: null };
 }
 
 /**
@@ -235,10 +326,30 @@ export async function mergePullRequest(fetcher, owner, repo, pr, method) {
 }
 
 /**
+ * The strict-protection update kick (review round 1, F1). `expected_head_sha`
+ * makes it as head-atomic as the merge call: if the branch moved since the
+ * gate read, GitHub refuses rather than updating a head nobody evaluated.
+ */
+export async function updatePullRequestBranch(fetcher, owner, repo, pr) {
+	return rest(
+		fetcher,
+		"PUT",
+		`https://api.github.com/repos/${owner}/${repo}/pulls/${pr.number}/update-branch`,
+		{ expected_head_sha: pr.headSha },
+	);
+}
+
+/**
  * Run the lane over every open PR. Returns a per-PR record for the run
  * summary. An unlabeled PR costs zero API calls beyond the shared list read.
  */
-export async function runMergeLane({ fetcher, owner, repo, now = Date.now() }) {
+export async function runMergeLane({
+	fetcher,
+	owner,
+	repo,
+	now = Date.now(),
+	approvers = [owner],
+}) {
 	const { prs, errors: listErrors } = await fetchOpenPullRequests(
 		fetcher,
 		owner,
@@ -268,8 +379,22 @@ export async function runMergeLane({ fetcher, owner, repo, now = Date.now() }) {
 		for (const message of healthErrors)
 			errors.push({ message: `PR #${pr.number}: ${message}`, benign: true });
 
-		const gate = evaluateMergeGate(pr, health);
+		const approvedBy = await resolveApprovalActor(
+			fetcher,
+			owner,
+			repo,
+			pr.number,
+			approvers,
+		);
+		if (approvedBy.error)
+			errors.push({
+				message: `PR #${pr.number}: timeline read -> ${approvedBy.error}`,
+				benign: true,
+			});
+
+		const gate = evaluateMergeGate(pr, health, { approvedBy });
 		let merged = false;
+		let updated = false;
 
 		if (gate.merge) {
 			try {
@@ -286,11 +411,16 @@ export async function runMergeLane({ fetcher, owner, repo, now = Date.now() }) {
 						message: `PR #${pr.number}: merge -> HTTP ${response.status}`,
 						benign: response.status === 409,
 					});
-					await postComment(
+					// Review round 1, F2: this comment wrote a marker and never read
+					// one, so a persistent merge refusal posted an identical comment
+					// every cycle -- 144 a day at the 10-minute cron. It now uses the
+					// same per-head, per-reason dedupe as every other comment path.
+					await postCommentOnce(
 						fetcher,
 						owner,
 						repo,
 						pr,
+						`merge-failed-${response.status}`,
 						mergeFailureCommentBody(pr, gate, response.status),
 						errors,
 					);
@@ -298,6 +428,29 @@ export async function runMergeLane({ fetcher, owner, repo, now = Date.now() }) {
 			} catch (error) {
 				errors.push({
 					message: `PR #${pr.number}: merge -> ${error instanceof Error ? error.message : String(error)}`,
+					benign: false,
+				});
+			}
+		} else if (gate.update) {
+			// Green but BEHIND under strict protection. Update the branch; the new
+			// head re-gates on its own checks next cycle. Never merge in the same
+			// pass -- the updated head has not been evaluated by anything.
+			try {
+				const response = await updatePullRequestBranch(
+					fetcher,
+					owner,
+					repo,
+					pr,
+				);
+				updated = response.ok;
+				if (!response.ok)
+					errors.push({
+						message: `PR #${pr.number}: update-branch -> HTTP ${response.status}`,
+						benign: response.status === 409 || response.status === 422,
+					});
+			} catch (error) {
+				errors.push({
+					message: `PR #${pr.number}: update-branch -> ${error instanceof Error ? error.message : String(error)}`,
 					benign: false,
 				});
 			}
@@ -335,7 +488,9 @@ export async function runMergeLane({ fetcher, owner, repo, now = Date.now() }) {
 			detail: gate.detail,
 			method: gate.method,
 			runHealth: health.classification,
+			approvedBy: approvedBy.actor,
 			merged,
+			updated,
 			errors,
 		});
 	}
@@ -354,4 +509,23 @@ async function postComment(fetcher, owner, repo, pr, body, errors) {
 			message: `PR #${pr.number}: comment -> HTTP ${response.status}`,
 			benign: true,
 		});
+}
+
+/**
+ * Post at most one comment per head and reason. Fails CLOSED: if the comment
+ * list cannot be read, assume the comment is already there rather than risk
+ * the repeat-comment defect the read exists to prevent.
+ */
+async function postCommentOnce(fetcher, owner, repo, pr, reason, body, errors) {
+	let exists = true;
+	try {
+		exists = await laneCommentExists(fetcher, owner, repo, pr, reason);
+	} catch (error) {
+		errors.push({
+			message: `PR #${pr.number}: comments read -> ${error instanceof Error ? error.message : String(error)}; comment suppressed this run`,
+			benign: true,
+		});
+		return;
+	}
+	if (!exists) await postComment(fetcher, owner, repo, pr, body, errors);
 }

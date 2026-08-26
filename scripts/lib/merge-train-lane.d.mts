@@ -3,15 +3,24 @@ import type { HeadRunHealth } from "./warden-run-health.d.mts";
 
 export const TRAIN_APPROVED_LABEL: string;
 export const TRAIN_SQUASH_LABEL: string;
+export const ADVISORY_SUFFIX: string;
 export const ADVISORY_CHECKS: Set<string>;
 export const CONCLUDED_STATUS: string;
 export const PASSING_CONCLUSION: string;
 export const BLOCKING_CONCLUSIONS: Set<string>;
 export const MERGEABLE_STATES: Set<string>;
+export const UPDATEABLE_STATES: Set<string>;
 export const MERGE_GATE_REASON: Record<string, string>;
+
+export interface ApprovalActor {
+	allowed: boolean;
+	actor: string | null;
+	error: string | null;
+}
 
 export interface MergeGateDecision {
 	merge: boolean;
+	update: boolean;
 	silent: boolean;
 	method: "squash" | "merge" | null;
 	reason: string;
@@ -25,13 +34,30 @@ export interface MergeLaneResult {
 	detail?: string;
 	method?: "squash" | "merge" | null;
 	runHealth?: string;
+	approvedBy?: string | null;
 	merged: boolean;
+	updated?: boolean;
 	errors: Array<{ message: string; benign: boolean }>;
 }
 
+export function isAdvisoryCheck(name: string): boolean;
+export function resolveApprovalActor(
+	fetcher: FetchFn,
+	owner: string,
+	repo: string,
+	prNumber: number,
+	approvers: string[],
+): Promise<ApprovalActor>;
+export function updatePullRequestBranch(
+	fetcher: FetchFn,
+	owner: string,
+	repo: string,
+	pr: WardenPr,
+): Promise<{ ok: boolean; status: number; json(): Promise<unknown> }>;
 export function evaluateMergeGate(
 	pr: WardenPr,
 	health: HeadRunHealth,
+	options?: { approvedBy?: ApprovalActor },
 ): MergeGateDecision;
 export function laneCommentMarker(
 	headSha: string | undefined,
@@ -55,4 +81,5 @@ export function runMergeLane(options: {
 	owner: string;
 	repo: string;
 	now?: number;
+	approvers?: string[];
 }): Promise<MergeLaneResult[]>;

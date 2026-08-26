@@ -1,4 +1,8 @@
-import type { FetchFn, WardenAction, WardenPr } from "./merge-train-warden.d.mts";
+import type {
+	FetchFn,
+	WardenAction,
+	WardenPr,
+} from "./merge-train-warden.d.mts";
 
 export const TRACKED_WORKFLOW_PATHS: string[];
 export const ABSENT_RUN_GRACE_MINUTES: number;

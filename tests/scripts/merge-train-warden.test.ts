@@ -1,8 +1,15 @@
 import { describe, expect, it } from "vitest";
 import {
+	commentMarkerExists,
+	MAX_REST_PAGES,
+	REST_PAGE_SIZE,
+} from "../../scripts/lib/github-paging.mjs";
+import {
 	evaluateMergeGate,
+	isAdvisoryCheck,
 	laneCommentMarker,
 	MERGE_GATE_REASON,
+	resolveApprovalActor,
 	runMergeLane,
 	TRAIN_APPROVED_LABEL,
 	TRAIN_SQUASH_LABEL,
@@ -16,6 +23,7 @@ import {
 	MAX_PAGES,
 	PAGE_SIZE,
 	RED_CI_LABEL,
+	resolveCheckRuns,
 	runWarden,
 } from "../../scripts/lib/merge-train-warden.mjs";
 import {
@@ -309,10 +317,26 @@ function fakeGithub(routes: Record<string, unknown>) {
 				return {
 					ok: true,
 					status: 200,
-					json: async () => (key.endsWith("/jobs") ? { jobs: [] } : { workflow_runs: [] }),
+					json: async () =>
+						key.endsWith("/jobs") ? { jobs: [] } : { workflow_runs: [] },
 				};
 			if (key.endsWith("/comments") && method === "GET")
 				return { ok: true, status: 200, json: async () => [] };
+			// Default the #2185 label-provenance read to "the repository owner
+			// applied it", so a test about the gate does not have to restate the
+			// approval story. Tests that care override this route.
+			if (key.endsWith("/timeline") && method === "GET")
+				return {
+					ok: true,
+					status: 200,
+					json: async () => [
+						{
+							event: "labeled",
+							label: { name: TRAIN_APPROVED_LABEL },
+							actor: { login: "acme" },
+						},
+					],
+				};
 			return { ok: true, status: 200, json: async () => ({}) };
 		}
 		if (typeof entry === "function") return entry(body);
@@ -800,10 +824,25 @@ describe("merge-train warden GraphQL fetch + REST apply (#1844)", () => {
  */
 function starvedJobs() {
 	return [
-		{ name: "Lint & type-check", status: "queued", conclusion: null, steps: [] },
+		{
+			name: "Lint & type-check",
+			status: "queued",
+			conclusion: null,
+			steps: [],
+		},
 		{ name: "Unit tests", status: "queued", conclusion: null, steps: [] },
-		{ name: "Close-keyword syntax", status: "queued", conclusion: null, steps: [] },
-		{ name: "Dependency boundaries", status: "queued", conclusion: null, steps: [] },
+		{
+			name: "Close-keyword syntax",
+			status: "queued",
+			conclusion: null,
+			steps: [],
+		},
+		{
+			name: "Dependency boundaries",
+			status: "queued",
+			conclusion: null,
+			steps: [],
+		},
 		{
 			name: "Changelog fragment (fast-fail)",
 			status: "queued",
@@ -909,9 +948,9 @@ describe("starved-run detection (#2184)", () => {
 	});
 
 	it("treats a startup_failure with no jobs at all as starved", () => {
-		expect(isStarvedRun(headRun({ conclusion: "startup_failure", jobs: [] }))).toBe(
-			true,
-		);
+		expect(
+			isStarvedRun(headRun({ conclusion: "startup_failure", jobs: [] })),
+		).toBe(true);
 	});
 
 	// Shape 10: an unreadable jobs list is missing information, not evidence.
@@ -1258,7 +1297,9 @@ describe("warden sweep with run health (#2184)", () => {
 		expect(reruns).toHaveLength(1);
 		expect(results[0].runHealth).toEqual({
 			classification: RUN_HEALTH.STARVED,
-			detail: expect.stringContaining("starved .github/workflows/ci.yml run 77"),
+			detail: expect.stringContaining(
+				"starved .github/workflows/ci.yml run 77",
+			),
 		});
 		expect(results[0].applied).toContain(
 			"rerun-run:.github/workflows/ci.yml#77",
@@ -1427,9 +1468,16 @@ function approved(overrides: Record<string, unknown> = {}) {
 	});
 }
 
+const OWNER_APPROVED = { allowed: true, actor: "apmantza", error: null };
+
+/** The gate, with label provenance already resolved to the repository owner. */
+function gateOf(prRecord: ReturnType<typeof pr>, health = HEALTHY) {
+	return evaluateMergeGate(prRecord, health, { approvedBy: OWNER_APPROVED });
+}
+
 describe("merge-lane gate (#2185)", () => {
 	it("merges an approved PR whose current head concluded green", () => {
-		const gate = evaluateMergeGate(approved(), HEALTHY);
+		const gate = gateOf(approved());
 		expect(gate).toMatchObject({
 			merge: true,
 			method: "merge",
@@ -1438,11 +1486,10 @@ describe("merge-lane gate (#2185)", () => {
 	});
 
 	it("uses the squash method when the PR also carries train:squash", () => {
-		const gate = evaluateMergeGate(
+		const gate = gateOf(
 			approved({
 				labels: new Set([TRAIN_APPROVED_LABEL, TRAIN_SQUASH_LABEL]),
 			}),
-			HEALTHY,
 		);
 		expect(gate).toMatchObject({ merge: true, method: "squash" });
 	});
@@ -1450,7 +1497,7 @@ describe("merge-lane gate (#2185)", () => {
 	// The label IS the review verdict. Without it the lane is invisible: no
 	// merge, and no comment either.
 	it("never touches or comments on an unlabeled PR", () => {
-		const gate = evaluateMergeGate(pr({ checkRuns: greenChecks() }), HEALTHY);
+		const gate = gateOf(pr({ checkRuns: greenChecks() }));
 		expect(gate).toMatchObject({
 			merge: false,
 			silent: true,
@@ -1458,13 +1505,36 @@ describe("merge-lane gate (#2185)", () => {
 		});
 	});
 
+	// Review round 1, F5: anyone who can label would otherwise be able to
+	// merge. Removing the provenance check must red this.
+	it("refuses to merge when train:approved was applied by someone off the approver list", () => {
+		const gate = evaluateMergeGate(approved(), HEALTHY, {
+			approvedBy: { allowed: false, actor: "drive-by", error: null },
+		});
+		expect(gate).toMatchObject({
+			merge: false,
+			silent: false,
+			reason: MERGE_GATE_REASON.NOT_APPROVED_BY_OWNER,
+		});
+		expect(gate.detail).toContain("drive-by");
+	});
+
+	it("refuses to merge when the label provenance could not be resolved at all", () => {
+		expect(evaluateMergeGate(approved(), HEALTHY, {})).toMatchObject({
+			merge: false,
+			reason: MERGE_GATE_REASON.NOT_APPROVED_BY_OWNER,
+		});
+		expect(
+			evaluateMergeGate(approved(), HEALTHY, {
+				approvedBy: { allowed: false, actor: null, error: "HTTP 500" },
+			}),
+		).toMatchObject({ reason: MERGE_GATE_REASON.NOT_APPROVED_BY_OWNER });
+	});
+
 	// AC2 + AGENTS.md shape 11. This is also the head-change re-gate: a fix
 	// round's new head has no check runs yet, so the gate reads absent.
 	it("treats an absent required check as not-green (the head-change re-gate)", () => {
-		const gate = evaluateMergeGate(
-			approved({ headSha: "newhead", checkRuns: [] }),
-			HEALTHY,
-		);
+		const gate = gateOf(approved({ headSha: "newhead", checkRuns: [] }));
 		expect(gate).toMatchObject({
 			merge: false,
 			silent: false,
@@ -1474,7 +1544,7 @@ describe("merge-lane gate (#2185)", () => {
 	});
 
 	it("treats a required check still in progress as not-green", () => {
-		const gate = evaluateMergeGate(
+		const gate = gateOf(
 			approved({
 				checkRuns: [
 					{ name: "Unit tests", status: "IN_PROGRESS", conclusion: null },
@@ -1485,7 +1555,6 @@ describe("merge-lane gate (#2185)", () => {
 					},
 				],
 			}),
-			HEALTHY,
 		);
 		expect(gate).toMatchObject({
 			merge: false,
@@ -1496,7 +1565,7 @@ describe("merge-lane gate (#2185)", () => {
 	// Mutation screen: a gate that reads STATUS instead of CONCLUSION merges a
 	// PR whose required check completed and FAILED.
 	it("treats a completed-but-failed required check as not-green", () => {
-		const gate = evaluateMergeGate(
+		const gate = gateOf(
 			approved({
 				checkRuns: [
 					{ name: "Unit tests", status: "COMPLETED", conclusion: "FAILURE" },
@@ -1507,7 +1576,6 @@ describe("merge-lane gate (#2185)", () => {
 					},
 				],
 			}),
-			HEALTHY,
 		);
 		expect(gate).toMatchObject({
 			merge: false,
@@ -1516,10 +1584,7 @@ describe("merge-lane gate (#2185)", () => {
 	});
 
 	it("treats a missing check rollup as not-green", () => {
-		const gate = evaluateMergeGate(
-			approved({ checksUnknown: true }),
-			HEALTHY,
-		);
+		const gate = gateOf(approved({ checksUnknown: true }));
 		expect(gate).toMatchObject({
 			merge: false,
 			reason: MERGE_GATE_REASON.CHECKS_UNKNOWN,
@@ -1529,7 +1594,7 @@ describe("merge-lane gate (#2185)", () => {
 	// AC3: composes with #2184. Both required checks can read SUCCESS from an
 	// earlier attempt while the head's current run is starved or never fired.
 	it("treats a starved run health as not-green even with green required checks", () => {
-		const gate = evaluateMergeGate(approved(), {
+		const gate = gateOf(approved(), {
 			...HEALTHY,
 			classification: RUN_HEALTH.STARVED,
 		});
@@ -1540,7 +1605,7 @@ describe("merge-lane gate (#2185)", () => {
 	});
 
 	it("treats an absent run health as not-green even with green required checks", () => {
-		const gate = evaluateMergeGate(approved(), {
+		const gate = gateOf(approved(), {
 			...HEALTHY,
 			classification: RUN_HEALTH.ABSENT,
 		});
@@ -1552,18 +1617,21 @@ describe("merge-lane gate (#2185)", () => {
 
 	it("blocks on a failing non-advisory check and allows a failing advisory one", () => {
 		expect(
-			evaluateMergeGate(
+			gateOf(
 				approved({
 					checkRuns: [
 						...greenChecks(),
-						{ name: "Install test (ubuntu)", status: "COMPLETED", conclusion: "FAILURE" },
+						{
+							name: "Install test (ubuntu)",
+							status: "COMPLETED",
+							conclusion: "FAILURE",
+						},
 					],
 				}),
-				HEALTHY,
 			),
 		).toMatchObject({ merge: false, reason: MERGE_GATE_REASON.FAILING_CHECK });
 		expect(
-			evaluateMergeGate(
+			gateOf(
 				approved({
 					mergeStateStatus: "UNSTABLE",
 					checkRuns: [
@@ -1575,21 +1643,151 @@ describe("merge-lane gate (#2185)", () => {
 						},
 					],
 				}),
-				HEALTHY,
 			),
 		).toMatchObject({ merge: true });
 	});
 
-	it("merges from CLEAN and BEHIND, and never from DIRTY, BLOCKED, or UNKNOWN", () => {
-		for (const state of ["CLEAN", "BEHIND"]) {
+	// Review round 1, F3: this repository marks a check advisory by NAME
+	// SUFFIX, not by a vendor allowlist. These four names are live job names,
+	// and the oxfmt one was genuinely FAILURE on this PR's own head, so the
+	// pre-fix gate refused to merge its own change.
+	it("reads the (advisory) name suffix, not just the two vendor names", () => {
+		for (const name of [
+			"oxfmt format check (advisory)",
+			"PR body (advisory)",
+			"Vale prose lint (advisory)",
+			"OSV scan (advisory)",
+		]) {
+			expect(isAdvisoryCheck(name)).toBe(true);
 			expect(
-				evaluateMergeGate(approved({ mergeStateStatus: state }), HEALTHY),
+				gateOf(
+					approved({
+						mergeStateStatus: "UNSTABLE",
+						checkRuns: [
+							...greenChecks(),
+							{ name, status: "COMPLETED", conclusion: "FAILURE" },
+						],
+					}),
+				),
 			).toMatchObject({ merge: true });
 		}
+		// A name that merely CONTAINS the word must still block.
+		expect(isAdvisoryCheck("advisory smoke test")).toBe(false);
+		expect(isAdvisoryCheck("Unit tests")).toBe(false);
+	});
+
+	// Review round 1, F4: the live rollup carries duplicate names, and PR
+	// #2190 carried `Unit tests` as both IN_PROGRESS and COMPLETED/SUCCESS.
+	// Last-wins on array order called that green.
+	it("resolves duplicate check names to the newest run, so an in-flight re-run is not green", () => {
+		const gate = gateOf(
+			approved({
+				checkRuns: [
+					{
+						name: "Unit tests",
+						status: "COMPLETED",
+						conclusion: "SUCCESS",
+						startedAt: "2026-08-26T17:21:00Z",
+					},
+					{
+						name: "Unit tests",
+						status: "IN_PROGRESS",
+						conclusion: null,
+						startedAt: "2026-08-26T17:38:00Z",
+					},
+					{
+						name: "Lint & type-check",
+						status: "COMPLETED",
+						conclusion: "SUCCESS",
+						startedAt: "2026-08-26T17:38:00Z",
+					},
+				],
+			}),
+		);
+		expect(gate).toMatchObject({
+			merge: false,
+			reason: MERGE_GATE_REASON.REQUIRED_CHECK_UNCONCLUDED,
+		});
+	});
+
+	it("keeps the newest duplicate even when it is listed FIRST (array order is not time order)", () => {
+		const gate = gateOf(
+			approved({
+				checkRuns: [
+					{
+						name: "Unit tests",
+						status: "IN_PROGRESS",
+						conclusion: null,
+						startedAt: "2026-08-26T17:38:00Z",
+					},
+					{
+						name: "Unit tests",
+						status: "COMPLETED",
+						conclusion: "SUCCESS",
+						startedAt: "2026-08-26T17:21:00Z",
+					},
+					{
+						name: "Lint & type-check",
+						status: "COMPLETED",
+						conclusion: "SUCCESS",
+						startedAt: "2026-08-26T17:38:00Z",
+					},
+				],
+			}),
+		);
+		expect(gate).toMatchObject({
+			merge: false,
+			reason: MERGE_GATE_REASON.REQUIRED_CHECK_UNCONCLUDED,
+		});
+	});
+
+	it("fails closed when duplicates disagree and carry no usable startedAt", () => {
+		const resolved = resolveCheckRuns([
+			{ name: "Unit tests", status: "COMPLETED", conclusion: "SUCCESS" },
+			{ name: "Unit tests", status: "IN_PROGRESS", conclusion: null },
+		]);
+		expect(resolved.get("Unit tests")).toMatchObject({ status: "IN_PROGRESS" });
+		const flipped = resolveCheckRuns([
+			{ name: "Unit tests", status: "IN_PROGRESS", conclusion: null },
+			{ name: "Unit tests", status: "COMPLETED", conclusion: "SUCCESS" },
+		]);
+		expect(flipped.get("Unit tests")).toMatchObject({ status: "IN_PROGRESS" });
+	});
+
+	// Review round 1, F1: master protection is `strict: true` (probed), so
+	// GitHub REFUSES to merge a BEHIND head. BEHIND is an update state.
+	it("updates the branch instead of merging when a green PR is BEHIND", () => {
+		const gate = gateOf(approved({ mergeStateStatus: "BEHIND" }));
+		expect(gate).toMatchObject({
+			merge: false,
+			update: true,
+			reason: MERGE_GATE_REASON.BEHIND_BASE,
+		});
+	});
+
+	it("does not update the branch of a BEHIND PR that is not otherwise green", () => {
+		const gate = gateOf(
+			approved({ mergeStateStatus: "BEHIND", checkRuns: [] }),
+		);
+		expect(gate).toMatchObject({
+			merge: false,
+			update: false,
+			reason: MERGE_GATE_REASON.REQUIRED_CHECK_ABSENT,
+		});
+	});
+
+	it("merges from CLEAN and UNSTABLE, and never from DIRTY, BLOCKED, or UNKNOWN", () => {
+		for (const state of ["CLEAN", "UNSTABLE"]) {
+			expect(gateOf(approved({ mergeStateStatus: state }))).toMatchObject({
+				merge: true,
+			});
+		}
 		for (const state of ["DIRTY", "BLOCKED", "DRAFT", "UNKNOWN"]) {
-			expect(
-				evaluateMergeGate(approved({ mergeStateStatus: state }), HEALTHY),
-			).toMatchObject({ merge: false, reason: MERGE_GATE_REASON.MERGE_STATE });
+			expect(gateOf(approved({ mergeStateStatus: state }))).toMatchObject({
+				merge: false,
+				update: false,
+				reason: MERGE_GATE_REASON.MERGE_STATE,
+			});
 		}
 	});
 });
@@ -1816,5 +2014,215 @@ describe("merge-lane sweep (#2185)", () => {
 				(c) => c.method === "POST" && c.url.endsWith("/issues/7/comments"),
 			),
 		).toBe(true);
+	});
+
+	// Review round 1, F2: the merge-failure comment wrote a marker and never
+	// read one, so a persistent refusal posted an identical comment every
+	// cycle. At the 10-minute cron that is 144 a day.
+	it("does not repeat the merge-failure comment while one already exists for this head", async () => {
+		const marker = laneCommentMarker("deadbeef", "merge-failed-405");
+		const { fetcher, calls } = fakeGithub({
+			"POST /graphql": graphqlPage([
+				lanePrNode({ labels: [TRAIN_APPROVED_LABEL] }),
+			]),
+			"GET /repos/acme/repo/actions/runs": runsRoute(HEALTHY_RUNS),
+			"GET /repos/acme/repo/issues/7/comments": [
+				{ body: `earlier failure\n${marker}` },
+			],
+			"PUT /repos/acme/repo/pulls/7/merge": () => ({
+				ok: false,
+				status: 405,
+				json: async () => ({}),
+			}),
+		});
+		await runMergeLane({ fetcher, owner: "acme", repo: "repo", now: NOW });
+		expect(
+			calls.filter(
+				(c) => c.method === "POST" && c.url.endsWith("/issues/7/comments"),
+			),
+		).toHaveLength(0);
+	});
+
+	it("posts the merge-failure comment exactly once when none exists yet", async () => {
+		const { fetcher, calls } = fakeGithub({
+			"POST /graphql": graphqlPage([
+				lanePrNode({ labels: [TRAIN_APPROVED_LABEL] }),
+			]),
+			"GET /repos/acme/repo/actions/runs": runsRoute(HEALTHY_RUNS),
+			"PUT /repos/acme/repo/pulls/7/merge": () => ({
+				ok: false,
+				status: 405,
+				json: async () => ({}),
+			}),
+		});
+		await runMergeLane({ fetcher, owner: "acme", repo: "repo", now: NOW });
+		const posted = calls.filter(
+			(c) => c.method === "POST" && c.url.endsWith("/issues/7/comments"),
+		);
+		expect(posted).toHaveLength(1);
+		expect(String((posted[0].body as { body: string }).body)).toContain(
+			laneCommentMarker("deadbeef", "merge-failed-405"),
+		);
+	});
+
+	// Review round 1, F1, at the sweep level: every open PR in this repository
+	// was BEHIND, and strict protection means the merge API refuses those.
+	it("calls update-branch with the expected head, and never merges, for a green BEHIND PR", async () => {
+		const { fetcher, calls } = fakeGithub({
+			"POST /graphql": graphqlPage([
+				lanePrNode({
+					labels: [TRAIN_APPROVED_LABEL],
+					mergeStateStatus: "BEHIND",
+				}),
+			]),
+			"GET /repos/acme/repo/actions/runs": runsRoute(HEALTHY_RUNS),
+		});
+		const results = await runMergeLane({
+			fetcher,
+			owner: "acme",
+			repo: "repo",
+			now: NOW,
+		});
+		expect(results[0]).toMatchObject({
+			merged: false,
+			updated: true,
+			reason: MERGE_GATE_REASON.BEHIND_BASE,
+		});
+		expect(calls.some((c) => c.url.endsWith("/pulls/7/merge"))).toBe(false);
+		expect(calls).toContainEqual({
+			method: "PUT",
+			url: "https://api.github.com/repos/acme/repo/pulls/7/update-branch",
+			body: { expected_head_sha: "deadbeef" },
+		});
+	});
+
+	// Review round 1, F5, at the sweep level.
+	it("does not merge when the timeline names a labeler outside the approver list", async () => {
+		const { fetcher, calls } = fakeGithub({
+			"POST /graphql": graphqlPage([
+				lanePrNode({ labels: [TRAIN_APPROVED_LABEL] }),
+			]),
+			"GET /repos/acme/repo/actions/runs": runsRoute(HEALTHY_RUNS),
+			"GET /repos/acme/repo/issues/7/timeline": [
+				{
+					event: "labeled",
+					label: { name: TRAIN_APPROVED_LABEL },
+					actor: { login: "drive-by" },
+				},
+			],
+		});
+		const results = await runMergeLane({
+			fetcher,
+			owner: "acme",
+			repo: "repo",
+			now: NOW,
+		});
+		expect(results[0]).toMatchObject({
+			merged: false,
+			reason: MERGE_GATE_REASON.NOT_APPROVED_BY_OWNER,
+			approvedBy: "drive-by",
+		});
+		expect(calls.some((c) => c.url.endsWith("/merge"))).toBe(false);
+	});
+
+	it("reads the LAST labeled event, so a re-add by a bot loses the owner's provenance", async () => {
+		const { fetcher } = fakeGithub({
+			"GET /repos/acme/repo/issues/7/timeline": [
+				{
+					event: "labeled",
+					label: { name: TRAIN_APPROVED_LABEL },
+					actor: { login: "acme" },
+				},
+				{ event: "unlabeled", label: { name: TRAIN_APPROVED_LABEL } },
+				{
+					event: "labeled",
+					label: { name: TRAIN_APPROVED_LABEL },
+					actor: { login: "some-bot" },
+				},
+			],
+		});
+		expect(
+			await resolveApprovalActor(fetcher, "acme", "repo", 7, ["acme"]),
+		).toEqual({ allowed: false, actor: "some-bot", error: null });
+	});
+
+	it("ignores labeled events for other labels", async () => {
+		const { fetcher } = fakeGithub({
+			"GET /repos/acme/repo/issues/7/timeline": [
+				{
+					event: "labeled",
+					label: { name: TRAIN_APPROVED_LABEL },
+					actor: { login: "acme" },
+				},
+				{
+					event: "labeled",
+					label: { name: "bug" },
+					actor: { login: "drive-by" },
+				},
+			],
+		});
+		expect(
+			await resolveApprovalActor(fetcher, "acme", "repo", 7, ["acme"]),
+		).toEqual({ allowed: true, actor: "acme", error: null });
+	});
+
+	it("fails closed when the timeline read errors", async () => {
+		const { fetcher } = fakeGithub({
+			"GET /repos/acme/repo/issues/7/timeline": () => ({
+				ok: false,
+				status: 500,
+				json: async () => ({}),
+			}),
+		});
+		const result = await resolveApprovalActor(fetcher, "acme", "repo", 7, [
+			"acme",
+		]);
+		expect(result.allowed).toBe(false);
+		expect(result.error).toContain("HTTP 500");
+	});
+});
+
+// Review round 1, F6: the comment-dedupe reads were first-page-only.
+describe("bounded REST paging (#2185)", () => {
+	function pagedComments(total: number, markerOnLast: string) {
+		return (_body: unknown, url: string) => {
+			const page = Number(new URL(url).searchParams.get("page") ?? "1");
+			const start = (page - 1) * REST_PAGE_SIZE;
+			const slice = Array.from(
+				{ length: Math.max(0, Math.min(REST_PAGE_SIZE, total - start)) },
+				(_, i) => ({
+					body:
+						start + i === total - 1
+							? `last\n${markerOnLast}`
+							: `filler ${start + i}`,
+				}),
+			);
+			return { ok: true, status: 200, json: async () => slice };
+		};
+	}
+
+	it("finds a marker that lives past the first page of comments", async () => {
+		const marker = "<!-- warden:absent-run:deadbeef -->";
+		const calls: string[] = [];
+		const fetcher = async (url: string) => {
+			calls.push(url);
+			return pagedComments(250, marker)(undefined, url);
+		};
+		expect(await commentMarkerExists(fetcher, "acme", "repo", 7, marker)).toBe(
+			true,
+		);
+		expect(calls).toHaveLength(3);
+		expect(calls[2]).toContain("page=3");
+	});
+
+	it("reports a truncated read instead of silently returning a partial list", async () => {
+		const fetcher = async (url: string) =>
+			pagedComments(REST_PAGE_SIZE * (MAX_REST_PAGES + 1), "never")(
+				undefined,
+				url,
+			);
+		await expect(
+			commentMarkerExists(fetcher, "acme", "repo", 7, "<!-- nope -->"),
+		).rejects.toThrow(/truncated/);
 	});
 });

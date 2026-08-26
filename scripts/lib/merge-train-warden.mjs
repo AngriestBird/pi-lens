@@ -17,10 +17,11 @@
  * permissions (#2185).
  */
 
+import { commentMarkerExists } from "./github-paging.mjs";
 import {
+	absentRunCommentMarker,
 	decideRunHealthActions,
 	fetchHeadRunHealth,
-	absentRunCommentMarker,
 	RUN_HEALTH,
 } from "./warden-run-health.mjs";
 
@@ -36,6 +37,45 @@ export const MAX_PAGES = 4; // 200 open PRs is far above this repo's steady stat
 // the scheduled run red, so the run doesn't email every 10 minutes for
 // benign races.
 const BENIGN_HTTP_STATUSES = new Set([404, 409, 422]);
+
+/**
+ * One check run per NAME, newest wins. Review round 1, F4: GitHub's rollup
+ * really does carry duplicate names on a single head -- PR #2191's own head
+ * listed six names twice, and PR #2190 listed `Unit tests` as both
+ * IN_PROGRESS and COMPLETED/SUCCESS. A naive `new Map(list.map(...))` is
+ * last-wins on ARRAY order, which is not time order, so a consumer can read
+ * the SUPERSEDED run and call an in-flight re-run settled.
+ *
+ * `startedAt` orders them. When it is missing or tied AND the duplicates
+ * disagree, the resolution is fail-closed: the run that is not a concluded
+ * success wins, so an unorderable tie can only ever withhold a pass, never
+ * grant one.
+ *
+ * Lives here, not in the merge lane, because BOTH consumers have the defect:
+ * the lane's gate and this file's own required-check scan.
+ */
+export function resolveCheckRuns(checkRuns) {
+	const byName = new Map();
+	for (const run of checkRuns ?? []) {
+		const incumbent = byName.get(run.name);
+		byName.set(run.name, incumbent ? preferCheckRun(incumbent, run) : run);
+	}
+	return byName;
+}
+
+function isConcludedSuccess(run) {
+	return run.status === "COMPLETED" && run.conclusion === "SUCCESS";
+}
+
+function preferCheckRun(a, b) {
+	const ta = Date.parse(a.startedAt ?? "");
+	const tb = Date.parse(b.startedAt ?? "");
+	if (!Number.isNaN(ta) && !Number.isNaN(tb) && ta !== tb)
+		return ta > tb ? a : b;
+	if (isConcludedSuccess(a) && !isConcludedSuccess(b)) return b;
+	if (isConcludedSuccess(b) && !isConcludedSuccess(a)) return a;
+	return a;
+}
 
 const PR_QUERY = `
 query($owner: String!, $name: String!, $after: String) {
@@ -62,6 +102,7 @@ query($owner: String!, $name: String!, $after: String) {
                       name
                       status
                       conclusion
+                      startedAt
                       detailsUrl
                     }
                   }
@@ -103,18 +144,19 @@ function normalizePr(node) {
 	// "confirmed no failures" from "we don't know".
 	const checksUnknown = rollup == null;
 	const contexts = rollup?.contexts?.nodes ?? [];
-	const checkRunsByName = new Map();
 	const checkRuns = [];
 	for (const c of contexts) {
 		if (c.__typename !== "CheckRun") continue;
-		checkRunsByName.set(c.name, c);
 		// The full list (name + status + conclusion) is what the merge lane's
 		// "zero non-advisory failing checks" gate reads (#2185). The warden
 		// itself still looks only at REQUIRED_CHECKS below.
+		// startedAt orders duplicate names on one head: GitHub's rollup really
+		// carries them (review round 1, F4), and array order is not time order.
 		checkRuns.push({
 			name: c.name,
 			status: c.status ?? null,
 			conclusion: c.conclusion ?? null,
+			startedAt: c.startedAt ?? null,
 			url: c.detailsUrl,
 		});
 	}
@@ -128,12 +170,17 @@ function normalizePr(node) {
 	// non-required check (e.g. SonarCloud) from tripping red-ci (review round
 	// 1, F5) -- it looks up exactly the required names, ignoring every other
 	// key checkRunsByName may hold.
+	// Resolved newest-per-name (review round 1, F4): a superseded duplicate
+	// must not decide whether a required check is failing or unresolved.
+	const checkRunsByName = resolveCheckRuns(checkRuns);
 	const unresolvedRequiredChecks = [];
 	for (const name of REQUIRED_CHECKS) {
 		const run = checkRunsByName.get(name);
 		if (!run) unresolvedRequiredChecks.push(name);
 		else if (run.conclusion === "FAILURE")
-			failingRequiredChecks.push({ name, url: run.detailsUrl });
+			// `url`, not `detailsUrl`: the resolver returns the NORMALIZED record
+			// built above, not the raw GraphQL node.
+			failingRequiredChecks.push({ name, url: run.url });
 		else if (!run.conclusion) unresolvedRequiredChecks.push(name);
 	}
 	return {
@@ -367,17 +414,15 @@ export async function applyAction(fetcher, owner, repo, pr, action) {
  * lands on the anomalous minority of PRs, never on the healthy sweep.
  */
 export async function hasAbsentRunComment(fetcher, owner, repo, pr) {
-	const marker = absentRunCommentMarker(pr.headSha);
-	const response = await fetcher(
-		`https://api.github.com/repos/${owner}/${repo}/issues/${pr.number}/comments?per_page=100`,
-		{ headers: { accept: "application/vnd.github+json" } },
+	// Paginated (review round 1, F6): a first-page-only read stops finding its
+	// own marker past 100 comments and starts repeating the notice.
+	return commentMarkerExists(
+		fetcher,
+		owner,
+		repo,
+		pr.number,
+		absentRunCommentMarker(pr.headSha),
 	);
-	if (!response.ok)
-		throw new Error(`comments read -> HTTP ${response.status}`);
-	const comments = await response.json();
-	if (!Array.isArray(comments))
-		throw new Error("comments read returned no array");
-	return comments.some((c) => String(c?.body ?? "").includes(marker));
 }
 
 function describeApplied(action) {
@@ -494,7 +539,9 @@ export async function runWarden({ fetcher, owner, repo, now = Date.now() }) {
 export function summarizeRunHealth(health) {
 	const detail = [];
 	for (const run of health.starvedRuns)
-		detail.push(`starved ${run.path} run ${run.id} (attempt ${run.runAttempt})`);
+		detail.push(
+			`starved ${run.path} run ${run.id} (attempt ${run.runAttempt})`,
+		);
 	if (health.absentWorkflows.length > 0)
 		detail.push(`no run for ${health.absentWorkflows.join(", ")}`);
 	if (health.unknownWorkflows.length > 0)

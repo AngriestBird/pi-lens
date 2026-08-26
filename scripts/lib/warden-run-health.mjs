@@ -95,7 +95,8 @@ export function latestRunPerWorkflowPath(runs) {
 function runIsNewer(candidate, incumbent) {
 	const a = Date.parse(candidate.createdAt ?? "");
 	const b = Date.parse(incumbent.createdAt ?? "");
-	if (Number.isNaN(a) || Number.isNaN(b)) return Number(candidate.id) > Number(incumbent.id);
+	if (Number.isNaN(a) || Number.isNaN(b))
+		return Number(candidate.id) > Number(incumbent.id);
 	if (a !== b) return a > b;
 	return Number(candidate.id) > Number(incumbent.id);
 }
@@ -146,7 +147,8 @@ export function classifyHeadRun({
 		if (!Array.isArray(run.jobs)) {
 			// A failed run whose jobs we could not read is exactly the case where
 			// starved and genuinely-red are indistinguishable. Say so.
-			if (STARVED_RUN_CONCLUSIONS.has(run.conclusion)) unknownWorkflows.push(path);
+			if (STARVED_RUN_CONCLUSIONS.has(run.conclusion))
+				unknownWorkflows.push(path);
 			continue;
 		}
 		if (isStarvedRun(run)) starvedRuns.push(run);
@@ -289,7 +291,9 @@ export function absentRunCommentMarker(headSha) {
 
 export function absentRunCommentBody(headSha, workflows, ageMinutes) {
 	const age =
-		ageMinutes === null ? "an unknown time" : `${Math.round(ageMinutes)} minutes`;
+		ageMinutes === null
+			? "an unknown time"
+			: `${Math.round(ageMinutes)} minutes`;
 	return [
 		"**Merge-train warden: GitHub never dispatched CI for this head.**",
 		"",
@@ -315,7 +319,11 @@ export function absentRunCommentBody(headSha, workflows, ageMinutes) {
  * is a real outage, recorded as a non-benign error so the warden's own run
  * goes red and the stall is visible within one cycle.
  */
-export function decideRunHealthActions(pr, health, { absentCommentExists } = {}) {
+export function decideRunHealthActions(
+	pr,
+	health,
+	{ absentCommentExists } = {},
+) {
 	const actions = [];
 	for (const run of health.starvedRuns ?? []) {
 		if ((run.runAttempt ?? 1) > 1) {

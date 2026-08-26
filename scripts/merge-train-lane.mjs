@@ -19,15 +19,34 @@ async function main() {
 			headers: { ...init?.headers, authorization: `Bearer ${token}` },
 		});
 
-	const results = await runMergeLane({ fetcher, owner, repo });
+	// Who may apply train:approved (review round 1, F5). Defaults to the
+	// repository owner, which is the only collaborator on this repo today;
+	// TRAIN_APPROVERS widens it without a code change when that stops being
+	// true. Derived, never a second hand-maintained list.
+	// An UNSET repository variable arrives as an empty string, not undefined,
+	// so `?? owner` alone would yield an empty approver list and silently
+	// freeze the whole lane. Fall back on emptiness, not on nullishness.
+	const configuredApprovers = (process.env.TRAIN_APPROVERS ?? "")
+		.split(",")
+		.map((name) => name.trim())
+		.filter(Boolean);
+	const approvers =
+		configuredApprovers.length > 0 ? configuredApprovers : [owner];
+
+	const results = await runMergeLane({ fetcher, owner, repo, approvers });
 
 	const lines = [
 		`Merge train: evaluated ${results.length} approved PR record(s).`,
 	];
 	for (const r of results) {
+		let verdict = `holding — ${r.reason}`;
+		if (r.merged) verdict = `MERGED (${r.method})`;
+		else if (r.updated)
+			verdict = "UPDATED BRANCH (behind base, re-gates next cycle)";
 		lines.push(
-			`- ${r.number === null ? "(list fetch)" : `#${r.number} ${r.url}`}: ${r.merged ? `MERGED (${r.method})` : `holding — ${r.reason}`}`,
+			`- ${r.number === null ? "(list fetch)" : `#${r.number} ${r.url}`}: ${verdict}`,
 		);
+		if (r.approvedBy) lines.push(`  approved by: ${r.approvedBy}`);
 		if (r.detail) lines.push(`  ${r.detail}`);
 		if (r.runHealth) lines.push(`  runs: ${r.runHealth}`);
 		if (r.errors.length > 0)
@@ -44,7 +63,8 @@ async function main() {
 
 	// Same benign/fatal split as the warden: a 409 from a head that moved
 	// mid-cycle is the guard working, not a lane failure.
-	if (results.some((r) => r.errors.some((e) => !e.benign))) process.exitCode = 1;
+	if (results.some((r) => r.errors.some((e) => !e.benign)))
+		process.exitCode = 1;
 }
 
 main().catch((error) => {

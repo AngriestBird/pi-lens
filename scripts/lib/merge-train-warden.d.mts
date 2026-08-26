@@ -13,8 +13,13 @@ export interface WardenCheckRun {
 	name: string;
 	status: string | null;
 	conclusion: string | null;
+	startedAt?: string | null;
 	url?: string;
 }
+
+export function resolveCheckRuns(
+	checkRuns: WardenCheckRun[] | null | undefined,
+): Map<string, WardenCheckRun>;
 
 export interface WardenPr {
 	number: number;
@@ -84,7 +89,11 @@ export function hasAbsentRunComment(
 ): Promise<boolean>;
 export function summarizeRunHealth(health: {
 	classification: string;
-	starvedRuns: Array<{ id: number | string; path: string; runAttempt?: number }>;
+	starvedRuns: Array<{
+		id: number | string;
+		path: string;
+		runAttempt?: number;
+	}>;
 	absentWorkflows: string[];
 	unknownWorkflows: string[];
 	pendingWorkflows: string[];
