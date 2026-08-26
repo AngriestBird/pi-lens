@@ -11,7 +11,10 @@ import {
 	clearReviewGraphWorkspaceCache,
 	getGraphImportChanges,
 } from "../../../clients/review-graph/builder.js";
-import type { ReviewGraph } from "../../../clients/review-graph/types.js";
+import type {
+	ReviewGraph,
+	ReviewGraphEdge,
+} from "../../../clients/review-graph/types.js";
 import { removeTempDirSync } from "../test-utils.js";
 
 const roots: string[] = [];
@@ -47,6 +50,34 @@ function makeRing(count: number): string {
 		);
 	}
 	return root;
+}
+
+/** A project with exactly the given files, ready for a seq-fast-path rebuild. */
+function makeProject(files: Record<string, string>): string {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-2074-"));
+	roots.push(root);
+	fs.writeFileSync(path.join(root, ".gitignore"), "node_modules/\n");
+	fs.writeFileSync(path.join(root, ".git"), "");
+	for (const [relative, body] of Object.entries(files)) {
+		const file = path.join(root, relative);
+		fs.mkdirSync(path.dirname(file), { recursive: true });
+		fs.writeFileSync(file, body);
+	}
+	return root;
+}
+
+/** Full edge identity, including target — the dedupe key plus `to`. */
+function fullEdgeKey(edge: ReviewGraphEdge): string {
+	return JSON.stringify([edge.from, edge.to, edge.kind, edge.metadata ?? {}]);
+}
+
+function duplicateEdgeCount(graph: ReviewGraph): number {
+	const counts = new Map<string, number>();
+	for (const edge of graph.edges) {
+		const key = fullEdgeKey(edge);
+		counts.set(key, (counts.get(key) ?? 0) + 1);
+	}
+	return [...counts.values()].filter((count) => count > 1).length;
 }
 
 interface RebuildProbe {
@@ -86,15 +117,43 @@ async function warmThenRebuildOneFile(root: string): Promise<RebuildProbe> {
 	};
 }
 
-/** The indexes `rebuildIndexes` would produce for `graph`, as plain data. */
-function referenceIndexes(graph: ReviewGraph): {
-	edgesByFrom: Array<[string, number]>;
-	edgesByTo: Array<[string, number]>;
+/**
+ * Snapshot of the four derived indexes, preserving BUCKET ORDER.
+ *
+ * Order matters, not just membership: `resolveUsedBy` in `clients/module-report.ts`
+ * walks `edgesByTo` and truncates at a cap, so bucket order decides which callers
+ * a reader is shown. `rebuildIndexes` orders every bucket by position in
+ * `graph.edges`; the incremental path must match that exactly. Comparing bucket
+ * LENGTHS only would pass on a graph whose buckets hold the right edges in the
+ * wrong order, which is the divergence this snapshot exists to catch.
+ *
+ * Edges are identified by content, not object identity, so a reference built
+ * from `graph.edges` and the live index compare equal when they agree.
+ */
+type IndexSnapshot = {
+	edgesByFrom: Array<[string, string[]]>;
+	edgesByTo: Array<[string, string[]]>;
 	fileNodes: Array<[string, string]>;
 	symbolNodesByFile: Array<[string, string[]]>;
-} {
-	const edgesByFrom = new Map<string, number>();
-	const edgesByTo = new Map<string, number>();
+};
+
+function edgeIdentity(edge: ReviewGraphEdge): string {
+	return JSON.stringify([
+		edge.from,
+		edge.to,
+		edge.kind,
+		edge.resolution ?? null,
+		edge.metadata ?? {},
+	]);
+}
+
+const byKey = <T>(entries: Array<[string, T]>): Array<[string, T]> =>
+	[...entries].sort(([a], [b]) => a.localeCompare(b));
+
+/** What `rebuildIndexes` would produce for `graph`, in `graph.edges` order. */
+function referenceIndexes(graph: ReviewGraph): IndexSnapshot {
+	const edgesByFrom = new Map<string, string[]>();
+	const edgesByTo = new Map<string, string[]>();
 	const fileNodes = new Map<string, string>();
 	const symbolNodesByFile = new Map<string, string[]>();
 	for (const node of graph.nodes.values()) {
@@ -108,36 +167,39 @@ function referenceIndexes(graph: ReviewGraph): {
 		}
 	}
 	for (const edge of graph.edges) {
-		edgesByFrom.set(edge.from, (edgesByFrom.get(edge.from) ?? 0) + 1);
-		edgesByTo.set(edge.to, (edgesByTo.get(edge.to) ?? 0) + 1);
+		const identity = edgeIdentity(edge);
+		const from = edgesByFrom.get(edge.from) ?? [];
+		from.push(identity);
+		edgesByFrom.set(edge.from, from);
+		const to = edgesByTo.get(edge.to) ?? [];
+		to.push(identity);
+		edgesByTo.set(edge.to, to);
 	}
-	const sortNum = (map: Map<string, number>): Array<[string, number]> =>
-		[...map].sort(([a], [b]) => a.localeCompare(b));
 	return {
-		edgesByFrom: sortNum(edgesByFrom),
-		edgesByTo: sortNum(edgesByTo),
-		fileNodes: [...fileNodes].sort(([a], [b]) => a.localeCompare(b)),
-		symbolNodesByFile: [...symbolNodesByFile]
-			.map(([key, ids]) => [key, [...ids].sort()] as [string, string[]])
-			.sort(([a], [b]) => a.localeCompare(b)),
+		edgesByFrom: byKey([...edgesByFrom]),
+		edgesByTo: byKey([...edgesByTo]),
+		fileNodes: byKey([...fileNodes]),
+		symbolNodesByFile: byKey([...symbolNodesByFile]),
 	};
 }
 
-/** The indexes actually carried by `graph`, in the same plain-data shape. */
-function liveIndexes(graph: ReviewGraph): ReturnType<typeof referenceIndexes> {
-	const counts = (map: Map<string, unknown[]>): Array<[string, number]> =>
-		[...map]
-			.filter(([, values]) => values.length > 0)
-			.map(([key, values]) => [key, values.length] as [string, number])
-			.sort(([a], [b]) => a.localeCompare(b));
+/** The indexes `graph` actually carries, in the same shape. */
+function liveIndexes(graph: ReviewGraph): IndexSnapshot {
+	const identities = (
+		map: Map<string, ReviewGraphEdge[]>,
+	): Array<[string, string[]]> =>
+		byKey(
+			[...map]
+				.filter(([, edges]) => edges.length > 0)
+				.map(([key, edges]) => [key, edges.map(edgeIdentity)]),
+		);
 	return {
-		edgesByFrom: counts(graph.edgesByFrom),
-		edgesByTo: counts(graph.edgesByTo),
-		fileNodes: [...graph.fileNodes].sort(([a], [b]) => a.localeCompare(b)),
-		symbolNodesByFile: [...graph.symbolNodesByFile]
-			.filter(([, ids]) => ids.length > 0)
-			.map(([key, ids]) => [key, [...ids].sort()] as [string, string[]])
-			.sort(([a], [b]) => a.localeCompare(b)),
+		edgesByFrom: identities(graph.edgesByFrom),
+		edgesByTo: identities(graph.edgesByTo),
+		fileNodes: byKey([...graph.fileNodes]),
+		symbolNodesByFile: byKey(
+			[...graph.symbolNodesByFile].filter(([, ids]) => ids.length > 0),
+		),
 	};
 }
 
@@ -201,6 +263,139 @@ describe("review-graph one-file rebuild cost (#2074)", () => {
 			// patching all leave the live indexes disagreeing with this reference.
 			expect(liveIndexes(probe.graph)).toEqual(referenceIndexes(probe.graph));
 			expect(probe.graph.edgesByFrom.size).toBeGreaterThan(0);
+		},
+	);
+
+	it(
+		"orders resolved-edge buckets the way a full reindex would",
+		{ timeout: 120_000 },
+		async () => {
+			// `aaa-caller` and `bbb-caller` call `shared()` by bare name. Two files
+			// define `shared`, so both calls stay on the unresolved placeholder and
+			// their edges sit EARLY in graph.edges. Renaming one definer makes the
+			// name unique, so resolveDeferredSymbolEdges moves those long-standing
+			// early edges into `zzz-def`'s symbol bucket, which already holds a
+			// LATER `contains` edge.
+			//
+			// Appending to the bucket puts them in the wrong order. That is
+			// observable: `resolveUsedBy` in clients/module-report.ts walks
+			// `edgesByTo` and truncates at a cap, so bucket order decides which
+			// callers a reader is shown. This assertion reds if the patch in
+			// resolveDeferredSymbolEdges goes back to unindex-then-append.
+			const root = makeProject({
+				"src/aaa-caller.ts":
+					"export function callsIt(): number {\n\treturn shared();\n}\n",
+				"src/bbb-caller.ts":
+					"export function callsItToo(): number {\n\treturn shared();\n}\n",
+				"src/mmm-dup.ts":
+					"export function shared(): number {\n\treturn 2;\n}\n",
+				"src/zzz-def.ts":
+					"export function shared(): number {\n\treturn 1;\n}\n",
+			});
+			const changed = path.join(root, "src", "mmm-dup.ts");
+			let seq = 0;
+			const seqHint = {
+				projectSeq: () => seq,
+				getFilesChangedSince: () => [changed],
+			};
+			await buildOrUpdateGraph(root, [changed], new FactStore(), seqHint);
+			seq++;
+			fs.writeFileSync(
+				changed,
+				"export function renamedAway(): number {\n\treturn 2;\n}\n",
+			);
+			clearGraphCache();
+			const graph = await buildOrUpdateGraph(
+				root,
+				[changed],
+				new FactStore(),
+				seqHint,
+			);
+
+			// Precondition: the rename really did resolve previously-ambiguous
+			// edges, so the ordering path under test actually ran.
+			const resolved = graph.edges.filter(
+				(edge) => edge.kind === "calls" && edge.resolution === "exact",
+			);
+			expect(resolved.length).toBeGreaterThan(0);
+
+			expect(liveIndexes(graph)).toEqual(referenceIndexes(graph));
+		},
+	);
+
+	it(
+		"collapses a duplicate incoming edge left by a same-batch rebuild",
+		{ timeout: 120_000 },
+		async () => {
+			// This is the fixture that actually reaches the dedupe branch in
+			// restoreValidIncomingEdges. Re-extracting two mutually-referencing
+			// files in ONE batch leaves a duplicate `calls` edge: the preserved
+			// incoming edge already points at the real symbol, while the freshly
+			// extracted one points at a placeholder that resolveDeferredSymbolEdges
+			// rewrites onto that same symbol AFTER the restore has run. That
+			// duplicate is pre-existing behavior and reproduces on master.
+			//
+			// The next single-file rebuild is where the dedupe branch earns its
+			// place: both copies come back as preserved incoming edges, and the
+			// branch collapses them. Delete `if (seen.has(key)) continue;` and this
+			// rebuild leaves the duplicate in place instead of repairing it.
+			const root = makeProject({
+				"src/a.ts":
+					'import { fnB } from "./b.js";\nexport function fnA(): number {\n\treturn fnB();\n}\n',
+				"src/b.ts":
+					'import { fnA } from "./a.js";\nexport function fnB(): number {\n\treturn fnA();\n}\n',
+			});
+			const fileA = path.join(root, "src", "a.ts");
+			const fileB = path.join(root, "src", "b.ts");
+			let seq = 0;
+			let changedNow: string[] = [fileA];
+			const seqHint = {
+				projectSeq: () => seq,
+				getFilesChangedSince: () => changedNow,
+			};
+			const cold = await buildOrUpdateGraph(
+				root,
+				changedNow,
+				new FactStore(),
+				seqHint,
+			);
+			expect(duplicateEdgeCount(cold)).toBe(0);
+			const coldEdges = cold.edges.length;
+
+			// Same-batch re-extraction of both files creates the duplicate.
+			seq++;
+			changedNow = [fileA, fileB];
+			for (const file of changedNow) {
+				fs.appendFileSync(file, "\nexport const batchMarker = 1;\n");
+			}
+			clearGraphCache();
+			const batched = await buildOrUpdateGraph(
+				root,
+				changedNow,
+				new FactStore(),
+				seqHint,
+			);
+			// Precondition, stated loudly on purpose: this guard's proof rests on
+			// the same-batch duplicate existing. If that pre-existing defect is
+			// fixed, this fails here rather than passing vacuously, and whoever
+			// fixes it must re-home the dedupe branch's proof.
+			expect(duplicateEdgeCount(batched)).toBe(1);
+			expect(batched.edges.length).toBe(coldEdges + 1);
+
+			// The single-file rebuild repairs it. This is the assertion that reds
+			// when the dedupe branch is deleted.
+			seq++;
+			changedNow = [fileA];
+			fs.appendFileSync(fileA, "\nexport const singleMarker = 2;\n");
+			clearGraphCache();
+			const repaired = await buildOrUpdateGraph(
+				root,
+				changedNow,
+				new FactStore(),
+				seqHint,
+			);
+			expect(duplicateEdgeCount(repaired)).toBe(0);
+			expect(repaired.edges.length).toBe(coldEdges);
 		},
 	);
 

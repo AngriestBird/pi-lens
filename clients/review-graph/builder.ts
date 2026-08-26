@@ -4540,9 +4540,37 @@ function resolveDeferredSymbolEdges(graph: ReviewGraph, rebuild = true): void {
 		rebuildIndexes(graph);
 		return;
 	}
+	if (replacements.length === 0) return;
+	// Bucket ORDER is part of the contract, not just bucket membership:
+	// `resolveUsedBy` in module-report walks `edgesByTo` and truncates at a cap,
+	// so the order decides which callers a reader sees. `rebuildIndexes` orders
+	// every bucket by position in `graph.edges`, and the incremental path must
+	// match it exactly.
+	//
+	// `from` is unchanged by a resolution, so the from-bucket only needs the new
+	// object swapped in at the OLD object's position — order is preserved for
+	// free. `to` moves from the placeholder's bucket to the resolved symbol's,
+	// and appending there would put an early edge behind later ones. Rebuild
+	// exactly the affected to-buckets from `graph.edges`, which restores
+	// canonical order without touching the rest of the index.
+	const affectedTargets = new Set<string>();
 	for (const [before, after] of replacements) {
-		unindexEdge(graph, before);
-		indexEdge(graph, after);
+		const fromBucket = graph.edgesByFrom.get(before.from);
+		if (fromBucket) {
+			const at = fromBucket.indexOf(before);
+			if (at >= 0) fromBucket[at] = after;
+		}
+		affectedTargets.add(before.to);
+		affectedTargets.add(after.to);
+	}
+	for (const target of affectedTargets) graph.edgesByTo.set(target, []);
+	for (const edge of graph.edges) {
+		if (affectedTargets.has(edge.to)) graph.edgesByTo.get(edge.to)?.push(edge);
+	}
+	for (const target of affectedTargets) {
+		if (graph.edgesByTo.get(target)?.length === 0) {
+			graph.edgesByTo.delete(target);
+		}
 	}
 }
 
