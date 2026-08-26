@@ -133,6 +133,12 @@ const grammarHeavyInclude = [
 	// the exact #255/#902 contention shape this project exists to bound.
 	"tests/clients/tree-sitter-call-graph.test.ts",
 	"tests/clients/module-report-call-graph.test.ts",
+	// #2074: builds several synthetic TypeScript projects end-to-end through the
+	// review-graph extractor. Measured peak RSS 1,417 MB — the same class as its
+	// review-graph siblings above (1,394-1,396 MB) — and the CI unit job was
+	// killed at exit 137 the first time this file ran as a default-project
+	// co-resident.
+	"tests/clients/review-graph/rebuild-cost.test.ts",
 ];
 
 // Tier 2 fix (#902): event-loop *occupancy* guards (measureMaxSyncBlockMs —

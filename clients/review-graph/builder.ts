@@ -1375,20 +1375,55 @@ export async function getGraphSourceFiles(
 }
 
 function addNode(graph: ReviewGraph, node: ReviewGraphNode): void {
+	// #2074: keep symbolNodesByFile live here, not only in rebuildIndexes, so the
+	// incremental path can drop its terminal O(graph) reindex. Re-adding an id
+	// already in the map must not push a duplicate — rebuildIndexes starts from
+	// empty maps, so the two producers stay consistent.
+	const isNew = !graph.nodes.has(node.id);
 	graph.nodes.set(node.id, node);
 	if (node.kind === "file" && node.filePath) {
 		graph.fileNodes.set(node.filePath, node.id);
+		return;
+	}
+	if (isNew && node.kind === "symbol" && node.filePath) {
+		const ids = graph.symbolNodesByFile.get(node.filePath) ?? [];
+		ids.push(node.id);
+		graph.symbolNodesByFile.set(node.filePath, ids);
 	}
 }
 
-function addEdge(graph: ReviewGraph, edge: ReviewGraphEdge): void {
-	graph.edges.push(edge);
+function indexEdge(graph: ReviewGraph, edge: ReviewGraphEdge): void {
 	const from = graph.edgesByFrom.get(edge.from) ?? [];
 	from.push(edge);
 	graph.edgesByFrom.set(edge.from, from);
 	const to = graph.edgesByTo.get(edge.to) ?? [];
 	to.push(edge);
 	graph.edgesByTo.set(edge.to, to);
+}
+
+/**
+ * Drop `edge` from both adjacency buckets (#2074). Costs one scan of the two
+ * buckets the edge belongs to, never a scan of `graph.edges`, so removing a
+ * changed file's edges stays proportional to that file's fan-in/fan-out.
+ */
+function unindexEdge(graph: ReviewGraph, edge: ReviewGraphEdge): void {
+	const from = graph.edgesByFrom.get(edge.from);
+	if (from) {
+		const at = from.indexOf(edge);
+		if (at >= 0) from.splice(at, 1);
+		if (from.length === 0) graph.edgesByFrom.delete(edge.from);
+	}
+	const to = graph.edgesByTo.get(edge.to);
+	if (to) {
+		const at = to.indexOf(edge);
+		if (at >= 0) to.splice(at, 1);
+		if (to.length === 0) graph.edgesByTo.delete(edge.to);
+	}
+}
+
+function addEdge(graph: ReviewGraph, edge: ReviewGraphEdge): void {
+	graph.edges.push(edge);
+	indexEdge(graph, edge);
 }
 
 function rebuildIndexes(graph: ReviewGraph): void {
@@ -4157,19 +4192,44 @@ function removeFileOwnedGraphData(
 	if (graph.nodes.has(fileNodeId)) removedIds.add(fileNodeId);
 
 	const preservedIncomingSymbolEdges: ReviewGraphEdge[] = [];
+	const droppedEdges: ReviewGraphEdge[] = [];
 	graph.edges = graph.edges.filter((edge) => {
 		const fromRemoved = removedIds.has(edge.from);
 		const toRemoved = removedIds.has(edge.to);
-		if (fromRemoved) return false;
+		if (fromRemoved) {
+			droppedEdges.push(edge);
+			return false;
+		}
 		if (removedSymbolIds.has(edge.to)) {
 			preservedIncomingSymbolEdges.push({ ...edge });
+			droppedEdges.push(edge);
 			return false;
 		}
 		// Preserve importer edges to the stable file node id; the node is re-added below.
 		if (toRemoved && edge.to === fileNodeId) return true;
+		if (toRemoved) droppedEdges.push(edge);
 		return !toRemoved;
 	});
-	for (const id of removedIds) graph.nodes.delete(id);
+	// #2074: keep the adjacency indexes live instead of rebuilding them over the
+	// whole graph afterwards. Only the dropped edges' own buckets are touched.
+	// Unconditional: on an unindexed graph every bucket lookup simply misses.
+	for (const edge of droppedEdges) unindexEdge(graph, edge);
+	for (const id of removedIds) {
+		const node = graph.nodes.get(id);
+		graph.nodes.delete(id);
+		if (!node?.filePath) continue;
+		if (node.kind === "file") {
+			if (graph.fileNodes.get(node.filePath) === id) {
+				graph.fileNodes.delete(node.filePath);
+			}
+		} else if (node.kind === "symbol") {
+			const ids = graph.symbolNodesByFile.get(node.filePath);
+			if (!ids) continue;
+			const at = ids.indexOf(id);
+			if (at >= 0) ids.splice(at, 1);
+			if (ids.length === 0) graph.symbolNodesByFile.delete(node.filePath);
+		}
+	}
 	return preservedIncomingSymbolEdges;
 }
 
@@ -4272,22 +4332,63 @@ async function addFileToGraph(
 	}
 }
 
+/**
+ * #2074 acceptance instrumentation. `restoreComparisons` counts edge-metadata
+ * stringifications inside `restoreValidIncomingEdges`; `importTargetEdgeScans`
+ * counts edges visited by `importTargetsForFile`. Before this change both grew
+ * with the whole graph on every one-file rebuild. They are the count-based
+ * signal the issue asks for, because wall time on this hardware is IO-noisy
+ * (#1920).
+ */
+const _rebuildCounters = { restoreComparisons: 0, importTargetEdgeScans: 0 };
+
+export function _getReviewGraphRebuildCountersForTests(): {
+	restoreComparisons: number;
+	importTargetEdgeScans: number;
+} {
+	return { ..._rebuildCounters };
+}
+
+export function _resetReviewGraphRebuildCountersForTests(): void {
+	_rebuildCounters.restoreComparisons = 0;
+	_rebuildCounters.importTargetEdgeScans = 0;
+}
+
+/**
+ * Identity of an edge for dedupe purposes, WITHIN one target bucket: the array
+ * form needs no separator sentinel and cannot collide across fields.
+ */
+function edgeIdentityKey(edge: ReviewGraphEdge): string {
+	_rebuildCounters.restoreComparisons++;
+	return JSON.stringify([edge.from, edge.kind, edge.metadata ?? {}]);
+}
+
 function restoreValidIncomingEdges(
 	graph: ReviewGraph,
 	edges: ReviewGraphEdge[],
 ): void {
-	const existing = new Set(
-		graph.edges.map(
-			(edge) =>
-				`${edge.from}\u0000${edge.to}\u0000${edge.kind}\u0000${JSON.stringify(edge.metadata ?? {})}`,
-		),
-	);
+	// #2074: dedupe per TARGET, using `edgesByTo`, instead of building a key set
+	// over every edge in the graph. Preserved incoming edges point at symbols of
+	// the files just re-extracted, and `removeFileOwnedGraphData` has already
+	// dropped those symbols' incoming edges, so each bucket read here is tiny.
+	// The per-target `Set` keeps the restore linear even when one changed file is
+	// a hub with thousands of preserved incoming edges — scanning the bucket per
+	// edge instead would be quadratic in that fan-in.
+	const seenByTarget = new Map<string, Set<string>>();
 	for (const edge of edges) {
 		if (!graph.nodes.has(edge.from) || !graph.nodes.has(edge.to)) continue;
-		const key = `${edge.from}\u0000${edge.to}\u0000${edge.kind}\u0000${JSON.stringify(edge.metadata ?? {})}`;
-		if (existing.has(key)) continue;
-		graph.edges.push(edge);
-		existing.add(key);
+		let seen = seenByTarget.get(edge.to);
+		if (!seen) {
+			seen = new Set<string>();
+			for (const candidate of graph.edgesByTo.get(edge.to) ?? []) {
+				seen.add(edgeIdentityKey(candidate));
+			}
+			seenByTarget.set(edge.to, seen);
+		}
+		const key = edgeIdentityKey(edge);
+		if (seen.has(key)) continue;
+		seen.add(key);
+		addEdge(graph, edge);
 	}
 }
 
@@ -4322,10 +4423,12 @@ function importTargetsForFile(graph: ReviewGraph, filePath: string): string[] {
 	const normalized = normalizeMapKey(filePath);
 	const fileNodeId = graph.fileNodes.get(normalized) ?? `file:${normalized}`;
 	const targets = new Set<string>();
-	// Cached graph snapshots intentionally omit derived indexes; read the
-	// canonical edge collection so the delta is correct before the first rebuild.
-	for (const edge of graph.edges) {
-		if (edge.from !== fileNodeId) continue;
+	// #2074: read this file's own out-edges from `edgesByFrom` rather than
+	// scanning every edge in the graph. The only caller, `updateGraphFiles`,
+	// indexes the graph before its first call and keeps the indexes live for the
+	// rest of the update, so the bucket is always authoritative here.
+	for (const edge of graph.edgesByFrom.get(fileNodeId) ?? []) {
+		_rebuildCounters.importTargetEdgeScans++;
 		if (edge.kind !== "imports") continue;
 		const target = graph.nodes.get(edge.to)?.filePath;
 		if (target) targets.add(normalizeMapKey(target));
@@ -4340,6 +4443,17 @@ async function updateGraphFiles(
 	facts: FactStore,
 	ignoredIds?: ReadonlySet<string>,
 ): Promise<GraphFileImportChange[]> {
+	// #2074: index ONCE, up front, then keep the indexes live through the update.
+	// This is the same single O(graph) pass the terminal `rebuildIndexes` used to
+	// cost, moved to the front, and it buys three things: the two
+	// `importTargetsForFile` calls per changed file become bucket lookups,
+	// `restoreValidIncomingEdges` dedupes against a fan-in bucket instead of the
+	// whole edge list, and `existedBefore` finally reads a POPULATED `fileNodes`.
+	// `cloneGraph` returns empty indexes, so before this the first file's
+	// `existedBefore` was always false on every update path — which forced
+	// `importsChanged` true in `clients/dispatch/integration.ts:1077` and blocked
+	// reverse-dependency index reuse on every incremental build.
+	rebuildIndexes(graph);
 	const prior = files.map((file) => ({
 		filePath: normalizeMapKey(file),
 		existedBefore: graph.fileNodes.has(normalizeMapKey(file)),
@@ -4352,7 +4466,6 @@ async function updateGraphFiles(
 	}
 	restoreValidIncomingEdges(graph, preservedIncoming);
 	resolveDeferredSymbolEdges(graph, false);
-	rebuildIndexes(graph);
 	graph.changedSymbolsByFile.clear();
 	for (const file of files) {
 		upsertChangedSymbols(graph, facts, file);
@@ -4376,6 +4489,12 @@ function resolveDeferredSymbolEdges(graph: ReviewGraph, rebuild = true): void {
 		symbolNameToIds.set(node.symbolName, ids);
 	}
 
+	// #2074: this pass REPLACES edge objects, so the adjacency buckets that hold
+	// the old objects go stale. Callers that keep the indexes live (the
+	// incremental path, which no longer reindexes afterwards) need each
+	// replacement patched into the buckets; collect them here rather than paying
+	// a whole-graph reindex for a handful of newly resolved edges.
+	const replacements: Array<[ReviewGraphEdge, ReviewGraphEdge]> = [];
 	graph.edges = graph.edges.map((edge) => {
 		const targetNode = graph.nodes.get(edge.to);
 		if (!targetNode?.metadata?.unresolvedName) return edge;
@@ -4391,13 +4510,25 @@ function resolveDeferredSymbolEdges(graph: ReviewGraph, rebuild = true): void {
 				(id) => graph.nodes.get(id)?.filePath === importHintFile,
 			);
 			if (scoped.length === 1) {
-				return { ...edge, to: scoped[0], resolution: "import" };
+				const resolved: ReviewGraphEdge = {
+					...edge,
+					to: scoped[0],
+					resolution: "import",
+				};
+				replacements.push([edge, resolved]);
+				return resolved;
 			}
 		}
 		if (candidates.length === 1) {
 			// Exactly one same-named real symbol exists graph-wide: the bare-name
 			// match is provably unambiguous (refs #655 — resolution confidence).
-			return { ...edge, to: candidates[0], resolution: "exact" };
+			const resolved: ReviewGraphEdge = {
+				...edge,
+				to: candidates[0],
+				resolution: "exact",
+			};
+			replacements.push([edge, resolved]);
+			return resolved;
 		}
 		// 0 or 2+ candidates (and no import hint narrowed it): stays on the
 		// unresolved placeholder, resolution stays "name-only" (set at edge
@@ -4405,7 +4536,42 @@ function resolveDeferredSymbolEdges(graph: ReviewGraph, rebuild = true): void {
 		// confirmed graph node.
 		return edge;
 	});
-	if (rebuild) rebuildIndexes(graph);
+	if (rebuild) {
+		rebuildIndexes(graph);
+		return;
+	}
+	if (replacements.length === 0) return;
+	// Bucket ORDER is part of the contract, not just bucket membership:
+	// `resolveUsedBy` in module-report walks `edgesByTo` and truncates at a cap,
+	// so the order decides which callers a reader sees. `rebuildIndexes` orders
+	// every bucket by position in `graph.edges`, and the incremental path must
+	// match it exactly.
+	//
+	// `from` is unchanged by a resolution, so the from-bucket only needs the new
+	// object swapped in at the OLD object's position — order is preserved for
+	// free. `to` moves from the placeholder's bucket to the resolved symbol's,
+	// and appending there would put an early edge behind later ones. Rebuild
+	// exactly the affected to-buckets from `graph.edges`, which restores
+	// canonical order without touching the rest of the index.
+	const affectedTargets = new Set<string>();
+	for (const [before, after] of replacements) {
+		const fromBucket = graph.edgesByFrom.get(before.from);
+		if (fromBucket) {
+			const at = fromBucket.indexOf(before);
+			if (at >= 0) fromBucket[at] = after;
+		}
+		affectedTargets.add(before.to);
+		affectedTargets.add(after.to);
+	}
+	for (const target of affectedTargets) graph.edgesByTo.set(target, []);
+	for (const edge of graph.edges) {
+		if (affectedTargets.has(edge.to)) graph.edgesByTo.get(edge.to)?.push(edge);
+	}
+	for (const target of affectedTargets) {
+		if (graph.edgesByTo.get(target)?.length === 0) {
+			graph.edgesByTo.delete(target);
+		}
+	}
 }
 
 interface CachedGraphEntry {
