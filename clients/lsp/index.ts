@@ -8732,7 +8732,7 @@ function lspProcessState(): LSPProcessState {
 			const previousHandoff = candidate.generationHandoff;
 			const teardown = candidate.service?.shutdown
 				? candidate.service
-						.shutdown({ reason: "process_singleton_reset" })
+						.shutdown({ fast: true, reason: "process_singleton_reset" })
 						.catch(() => undefined)
 				: undefined;
 			if (previousHandoff && teardown) {

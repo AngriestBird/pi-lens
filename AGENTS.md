@@ -277,6 +277,15 @@ group (see the placement rules in "Maintaining this file").
 
 ### LSP: acquisition, touches, waits, and diagnostics
 
+The live LSP service, generation handoff, workspace-sweep hold state, and
+classic TypeScript repair latch use separate versioned families in
+`getProcessSingleton`. The service's incompatible-cell teardown uses
+`shutdown({ fast: true, reason: "process_singleton_reset" })`; the sweep hold
+and repair latch reset through their shared process state, not module copies.
+Pipeline-crash teardown is destructive only for the registered primary session;
+when no primary registration exists, the legacy reset remains the fail-safe.
+(#2157, #2174)
+
 Pull-diagnostics request deadlines send `$/cancelRequest`, but cancellation is
 advisory. While a cancelled request remains unsettled, admission blocks another
 pull for the same path/source. The slot frees only on settlement. Apply this to

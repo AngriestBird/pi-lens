@@ -43,4 +43,22 @@ describe("LSP process singleton (#2157)", () => {
 		});
 		expect(second.getLSPService()).not.toBe(firstService);
 	});
+
+	it("fast-shuts down a live service in an incompatible cell", async () => {
+		const singletons = await import("../../../clients/process-singletons.js");
+		const shutdown = vi.fn().mockResolvedValue(undefined);
+		singletons._seedProcessSingletonCellForTests("lsp.service", {
+			schema: "pi-lens.process-singletons",
+			version: 99,
+			value: { service: { shutdown }, generationHandoff: undefined },
+		});
+
+		const lsp = await freshEvaluation();
+		lsp.getLSPService();
+
+		expect(shutdown).toHaveBeenCalledWith({
+			fast: true,
+			reason: "process_singleton_reset",
+		});
+	});
 });
