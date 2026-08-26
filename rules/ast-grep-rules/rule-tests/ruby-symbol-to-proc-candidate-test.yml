@@ -2,6 +2,7 @@ id: ruby-symbol-to-proc-candidate
 valid:
   - "names.each { |name| puts name }"
   - "names.map { |name| name.upcase(prefix) }"
+  - "names.map { |name| name.(1) }"
   - "names.map(&:upcase)"
   - "names.map { |name| name.() }"
 invalid:

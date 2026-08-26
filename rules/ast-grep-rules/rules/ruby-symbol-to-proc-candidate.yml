@@ -9,12 +9,12 @@ note: |
 rule:
   pattern: $LIST.$ITER { |$X| $X.$METHOD }
   not:
-    any:
-      - pattern: $LIST.$ITER { |$X| $X.$METHOD($$$ARGS) }
-      - pattern: $LIST.$ITER { |$X| $X.() }
+    pattern: $LIST.$ITER { |$X| $X.$METHOD($$$ARGS) }
 constraints:
   ITER:
     regex: '^(map|collect|filter|select|reject|find|detect|any\?|all\?|none\?|one\?|flat_map|sort_by|group_by)$'
+  METHOD:
+    regex: '^[A-Za-z_][A-Za-z0-9_]*[?!=]?$'
 fix: "$LIST.$ITER(&:$METHOD)"
 tags:
   - ruby
