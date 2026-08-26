@@ -133,9 +133,18 @@ describe("observed runner collect-later tier (#2116)", () => {
 			enabledByDefault: true,
 			run: async () => new Promise<RunnerResult>((r) => (resolve = r)),
 		});
-		const ctx = createDispatchContext(filePath, projectRoot, { getFlag: () => false }, new FactStore());
+		const ctx = createDispatchContext(
+			filePath,
+			projectRoot,
+			{ getFlag: () => false },
+			new FactStore(),
+		);
 		Object.defineProperty(ctx, "writeIndex", { value: 1 });
-		const edit = await dispatchForFile(ctx, [{ mode: "all", runnerIds: ["failed-runner"] }], registry);
+		const edit = await dispatchForFile(
+			ctx,
+			[{ mode: "all", runnerIds: ["failed-runner"] }],
+			registry,
+		);
 		expect(edit.output).toContain("failed-runner");
 		expect(edit.output).toContain("Pending runners");
 
@@ -148,7 +157,10 @@ describe("observed runner collect-later tier (#2116)", () => {
 		});
 		await new Promise<void>((resolve) => setImmediate(resolve));
 		const late = await drainPendingRunnerFindings(0);
-		expect(late[0]?.result).toMatchObject({ status: "failed", failureKind: "timeout" });
+		expect(late[0]?.result).toMatchObject({
+			status: "failed",
+			failureKind: "timeout",
+		});
 	});
 
 	it("does not defer a slow observation outside a write dispatch", async () => {
@@ -165,12 +177,30 @@ describe("observed runner collect-later tier (#2116)", () => {
 			enabledByDefault: true,
 			run: async () => ({
 				status: "succeeded",
-				diagnostics: [{ id: "direct", message: "direct", filePath, tool: "direct", severity: "warning", semantic: "warning" }],
+				diagnostics: [
+					{
+						id: "direct",
+						message: "direct",
+						filePath,
+						tool: "direct",
+						severity: "warning",
+						semantic: "warning",
+					},
+				],
 				semantic: "warning",
 			}),
 		});
-		const ctx = createDispatchContext(filePath, projectRoot, { getFlag: () => false }, new FactStore());
-		const result = await dispatchForFile(ctx, [{ mode: "all", runnerIds: ["direct-runner"] }], registry);
+		const ctx = createDispatchContext(
+			filePath,
+			projectRoot,
+			{ getFlag: () => false },
+			new FactStore(),
+		);
+		const result = await dispatchForFile(
+			ctx,
+			[{ mode: "all", runnerIds: ["direct-runner"] }],
+			registry,
+		);
 		expect(result.diagnostics).toHaveLength(1);
 		expect(result.output).not.toContain("Pending runners");
 		expect(await drainPendingRunnerFindings(0)).toEqual([]);
@@ -187,7 +217,9 @@ describe("observed runner collect-later tier (#2116)", () => {
 				promise: new Promise<RunnerResult>(() => {}),
 			});
 		}
-		const group = getDegradationSummary().find((entry) => entry.kind === "runner-findings-evicted");
+		const group = getDegradationSummary().find(
+			(entry) => entry.kind === "runner-findings-evicted",
+		);
 		expect(group?.count).toBe(1);
 		expect(group?.latestReasons[0]?.subject).toContain("runner-0");
 	});
@@ -196,7 +228,14 @@ describe("observed runner collect-later tier (#2116)", () => {
 		const result: RunnerResult = {
 			status: "succeeded",
 			diagnostics: [
-				{ id: "stale", message: "stale", filePath, tool: "runner", severity: "warning", semantic: "warning" },
+				{
+					id: "stale",
+					message: "stale",
+					filePath,
+					tool: "runner",
+					severity: "warning",
+					semantic: "warning",
+				},
 			],
 			semantic: "warning",
 		};

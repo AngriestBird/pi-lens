@@ -2272,9 +2272,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		);
 		if (result.status === "failed") {
 			runnerFindingsFailed += 1;
-			const detail = result.failureMessage
-				? `: ${result.failureMessage}`
-				: "";
+			const detail = result.failureMessage ? `: ${result.failureMessage}` : "";
 			// @delivery-surface: runtime-turn:late-runner-findings
 			advisoryParts.push(
 				`❌ Deferred runner ${pending.runnerId} failed (${result.failureKind ?? "unknown"})${detail}`,

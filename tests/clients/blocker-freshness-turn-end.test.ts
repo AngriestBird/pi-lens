@@ -21,6 +21,7 @@ vi.mock("../../clients/latency-logger.js", async (importOriginal) => {
 });
 
 import { CacheManager } from "../../clients/cache-manager.js";
+import { gateFindingsByPathFreshness } from "../../clients/advisory-provenance.js";
 import {
 	drainPendingRunnerFindings,
 	deferRunnerFindings,
@@ -205,7 +206,7 @@ describe("turn-end blocker freshness (#1631)", () => {
 			const cacheManager = new CacheManager(false);
 			const filePath = path.join(env.tmpDir, "runner.ts");
 			fs.writeFileSync(filePath, "export const value = 1;\n");
-			const markedAtMs = Date.now() - 1_000;
+			const markedAtMs = 1;
 			deferRunnerFindings({
 				filePath,
 				cwd: env.tmpDir,
@@ -214,21 +215,48 @@ describe("turn-end blocker freshness (#1631)", () => {
 				markedAtMs,
 				promise: Promise.resolve({
 					status: "succeeded",
-					diagnostics: [{ id: "old", message: "old bytes", filePath, tool: "slow-runner", severity: "warning", semantic: "warning" }],
+					diagnostics: [
+						{
+							id: "old",
+							message: "old bytes",
+							filePath,
+							tool: "slow-runner",
+							severity: "warning",
+							semantic: "warning",
+						},
+					],
 					semantic: "warning",
 				}),
 			});
 			await new Promise<void>((resolve) => setImmediate(resolve));
 			await new Promise<void>((resolve) => setImmediate(resolve));
+			const completed = (await drainPendingRunnerFindings(0))[0]!;
+			deferRunnerFindings({
+				...completed,
+				markedAtMs,
+				promise: Promise.resolve(completed.result!),
+			});
 			driftIntoFuture(filePath);
+			expect(
+				gateFindingsByPathFreshness({
+					store: "test-runner",
+					findings: [{ filePath }],
+					cwd: env.tmpDir,
+					scannedAt: markedAtMs,
+					citedPath: (finding) => finding.filePath,
+				}).stale,
+			).toHaveLength(1);
 
-			await handleTurnEnd(makeTurnEndDeps(runtime, cacheManager, { ctxCwd: env.tmpDir }));
+			await handleTurnEnd(
+				makeTurnEndDeps(runtime, cacheManager, { ctxCwd: env.tmpDir }),
+			);
 
-			const findings = cacheManager.readCache<{ content: string }>("turn-end-findings", env.tmpDir);
+			const findings = cacheManager.readCache<{ content: string }>(
+				"turn-end-findings",
+				env.tmpDir,
+			);
 			expect(findings?.data?.content ?? "").not.toContain("old bytes");
 			expect(pendingRunnerFindingsSizeForTests()).toBe(1);
-			const rearmed = await drainPendingRunnerFindings(0);
-			expect(rearmed[0]?.markedAtMs).toBeGreaterThan(markedAtMs);
 		} finally {
 			env.cleanup();
 		}

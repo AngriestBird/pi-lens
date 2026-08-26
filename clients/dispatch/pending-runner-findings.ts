@@ -69,6 +69,10 @@ export async function drainPendingRunnerFindings(
 	if (pending.length === 0) return [];
 	const current = pending.splice(0, pending.length);
 	const results: PendingRunnerFindings[] = [];
+	// Give already-resolved promises one microtask turn without introducing a
+	// wall-clock wait. This observes completed work while preserving the F5
+	// zero-budget contract for in-flight runners.
+	if (maxWaitMs === 0) await Promise.resolve();
 	if (maxWaitMs > 0 && current.some((entry) => !entry.settled)) {
 		await new Promise<void>((resolve) => {
 			const timer = setTimeout(resolve, maxWaitMs);
