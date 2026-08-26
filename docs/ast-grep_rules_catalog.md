@@ -308,7 +308,7 @@ See [`docs/custom-rules.md`](custom-rules.md) to add your own. Rule sources: `ru
 | `python-mysqlclient-hardcoded-secret-python` | warning | no | CodeRabbit | A secret is hard-coded in the application. Secrets stored in source code, such as credentials, identifiers, and other types of sensitive da… |
 | `python-neo4j-empty-password-python` | warning | no | CodeRabbit | The application creates a database connection with an empty password. This can lead to unauthorized access by either an internal or externa… |
 | `python-neo4j-hardcoded-secret-python` | warning | no | CodeRabbit | A secret is hard-coded in the application. Secrets stored in source code, such as credentials, identifiers, and other types of sensitive da… |
-| `python-optional-type` | warning | no | pi-lens | Optional[T] requires Python 3.10+ to rewrite as T \| None |
+| `python-optional-type` | hint | no | pi-lens | Optional[T] requires Python 3.10+ to rewrite as T \| None |
 | `python-peewee-mysql-empty-password-python` | warning | no | CodeRabbit | The application creates a database connection with an empty password. This can lead to unauthorized access by either an internal or externa… |
 | `python-peewee-mysql-hardcoded-secret-python` | warning | no | CodeRabbit | A secret is hard-coded in the application. Secrets stored in source code, such as credentials, identifiers, and other types of sensitive da… |
 | `python-peewee-pg-empty-password-python` | warning | no | CodeRabbit | The application creates a database connection with an empty password. This can lead to unauthorized access by either an internal or externa… |

@@ -10,7 +10,7 @@ rule:
   kind: jsx_attribute
   has:
     kind: property_identifier
-    regex: "^(stroke-width|stroke-linecap|stroke-linejoin|stroke-miterlimit|stroke-dasharray|stroke-dashoffset|fill-rule|clip-path|font-family|font-size|font-weight|text-anchor|dominant-baseline|stop-color|stop-opacity|fill-opacity|stroke-opacity|color-interpolation-filters|shape-rendering|vector-effect|flood-color|flood-opacity|lighting-color|marker-height|marker-width)$"
+    regex: "^(stroke-width|stroke-linecap|stroke-linejoin|stroke-miterlimit|stroke-dasharray|stroke-dashoffset|fill-rule|clip-rule|clip-path|font-family|font-size|font-weight|text-anchor|dominant-baseline|stop-color|stop-opacity|fill-opacity|stroke-opacity|color-interpolation-filters|shape-rendering|vector-effect|flood-color|flood-opacity|lighting-color|marker-height|marker-width|xlink-href|mask-type)$"
   inside:
     any:
       - kind: jsx_self_closing_element

@@ -6,3 +6,6 @@ valid:
 invalid:
   - "const icon = <svg stroke-width=\"2\" />;"
   - "const path = <path fill-rule=\"evenodd\" />;"
+  - "const path = <path clip-rule=\"evenodd\" />;"
+  - "const use = <use xlink-href=\"#icon\" />;"
+  - "const mask = <mask mask-type=\"luminance\" />;"
