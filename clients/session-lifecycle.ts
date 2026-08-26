@@ -29,12 +29,15 @@
  * `subagent-mode.ts` / `runtime-config.ts`).
  */
 
+import { normalizeFilePath } from "./path-utils.js";
+
 /** Module-scope state — deliberately shared by construction. This module is
  * loaded once per process by pi's process-global extension cache, so a
  * concurrent in-process subagent session sees the SAME instance as the
  * parent, which is exactly the signal this guard relies on. */
 let activeCtx: unknown | undefined;
 let activeSessionId: string | undefined;
+let activeRoot: string | undefined;
 let secondarySessionCount = 0;
 
 /** The stable id of the currently registered primary session, if known. */
@@ -42,10 +45,23 @@ export function getActiveSessionId(): string | undefined {
 	return activeSessionId;
 }
 
+/**
+ * The normalized project root of the currently registered primary session
+ * (#2129), or `undefined` when no primary has registered a root yet.
+ *
+ * This is the process's answer to "which directory does pi-lens actually
+ * serve", and it is what `memory_sample` carries as its root discriminator
+ * (#2130) so a record from a multi-root host is attributable.
+ */
+export function getActivePrimaryRoot(): string | undefined {
+	return activeRoot;
+}
+
 export type SessionStartClassification =
 	| "primary"
 	| "sequential-replacement"
-	| "concurrent-secondary";
+	| "concurrent-secondary"
+	| "secondary-root";
 
 export interface ClassifySessionStartInput {
 	/** Whether a primary session was already registered in this process. */
@@ -60,6 +76,16 @@ export interface ClassifySessionStartInput {
 	/** Whether this session_start carries the SAME stable session id as the
 	 * registered primary (e.g. resume/reload re-announcing itself). */
 	sameSessionId: boolean;
+	/**
+	 * #2129. Root identity relative to the registered primary's project root:
+	 * `true` = same root, `false` = POSITIVELY a different root, `undefined` =
+	 * unknown (no root recorded for the primary, or this start carries no cwd).
+	 *
+	 * `undefined` must never on its own change a verdict — the module's
+	 * fail-safe direction (see the header) means only positive evidence of a
+	 * DIFFERENT root may suppress a full session start.
+	 */
+	sameRoot?: boolean | undefined;
 }
 
 /**
@@ -76,18 +102,55 @@ export interface ClassifySessionStartInput {
  *     this IS the sequential case pi's own contract covers).
  *  4. Prior exists, `priorCtxActive === true`, different session id →
  *     `concurrent-secondary` (positive evidence of a live sibling).
- *  5. Prior exists, `priorCtxActive === undefined` (probe inconclusive) →
+ *  5. Prior exists, different session id, `sameRoot === false` (positive
+ *     evidence of a DIFFERENT project root) → `secondary-root` (#2129).
+ *  6. Prior exists, `priorCtxActive === undefined` (probe inconclusive) →
  *     `sequential-replacement` (fail toward today's behavior).
+ *
+ * WHY ROOT IDENTITY IS AN INPUT AT ALL (#2129). Branch 3 alone made a subagent
+ * temp worktree — a session_start in a DIFFERENT directory, arriving after the
+ * host's real session had already been disposed or had an unprobeable ctx —
+ * classify as a sequential replacement. It then re-registered itself as the
+ * process's primary and ran the full session_start body: `resetLSPService`
+ * killed the host's warm LSP fleet, and the whole async battery (opengrep,
+ * word-index rebuild, review-graph build) re-ran per temp root over content
+ * that had not changed. Two temp roots in one host cost ~50s of opengrep and
+ * ~53s of word-index rebuild EACH, and drove host RSS from 290MB to 1.1GB in
+ * four minutes.
+ *
+ * A start in a different root is therefore never allowed to steal primary. It
+ * is a `secondary-root`, which the caller treats exactly like a
+ * `concurrent-secondary`: skip the destructive resets and the expensive
+ * battery, leave the registered primary's ctx/session id/root untouched. The
+ * root still gets served — `initLSPConfig` registers session roots lazily,
+ * per file (`clients/lsp/session-roots.ts:48`), not from this handler.
+ *
+ * Ordering note: the root check sits BELOW the `priorCtxActive === true`
+ * branch so a live sibling still reports the more specific
+ * `concurrent-secondary`, and it deliberately fires even when
+ * `priorCtxActive === false`. "The prior ctx was invalidated" is exactly the
+ * state a temp-worktree start arrives in, so deferring to it would restore the
+ * defect.
+ *
+ * Accepted trade-off: an in-process SEQUENTIAL replacement that genuinely
+ * moves to a new directory (a host that switches sessions across cwds within
+ * one process) now takes the reduced path instead of a full start. It keeps
+ * working — the LSP still attaches per file — but skips the startup battery
+ * for the new root until a same-root start re-registers. `sameRoot` is only
+ * ever `false` on positive evidence, and
+ * `PI_LENS_CONCURRENT_SESSION_GUARD=0` disables this branch with the rest of
+ * the guard.
  */
 export function classifySessionStart(
 	input: ClassifySessionStartInput,
 ): SessionStartClassification {
-	const { hasPrior, priorCtxActive, sameSessionId } = input;
+	const { hasPrior, priorCtxActive, sameSessionId, sameRoot } = input;
 
 	if (!hasPrior) return "primary";
 	if (sameSessionId) return "sequential-replacement";
-	if (priorCtxActive === false) return "sequential-replacement";
 	if (priorCtxActive === true) return "concurrent-secondary";
+	if (sameRoot === false) return "secondary-root";
+	if (priorCtxActive === false) return "sequential-replacement";
 	// priorCtxActive === undefined: inconclusive probe — fail-safe.
 	return "sequential-replacement";
 }
@@ -154,9 +217,65 @@ export function probeCtxActive(ctx: unknown): boolean | undefined {
 export function registerPrimarySession(
 	ctx: unknown,
 	sessionId: string | undefined,
+	root?: string | undefined,
 ): void {
 	activeCtx = ctx;
 	activeSessionId = sessionId;
+	// #2129: a re-registration that carries NO root must not erase a root the
+	// previous primary did record — losing it would make every later start's
+	// `sameRoot` read `undefined` (unknown) and silently restore the pre-fix
+	// "any root may steal primary" behavior.
+	if (root !== undefined) activeRoot = normalizeRootForCompare(root);
+	secondarySessionCount = 0;
+}
+
+/**
+ * Normalize a project root for identity comparison (#2129).
+ *
+ * Uses `normalizeFilePath` — the SAME comparator `registerInstance`
+ * (`clients/instance-registry.ts:213`) writes roots with — so drive-letter
+ * case, separators, and symlinked temp dirs cannot make two spellings of one
+ * root look like two roots (catalog shape 1). Never throws: an unresolvable
+ * path degrades to `undefined`, which reads as "root unknown" and leaves the
+ * classification exactly where it was before this input existed.
+ */
+function normalizeRootForCompare(root: string | undefined): string | undefined {
+	if (typeof root !== "string" || root.length === 0) return undefined;
+	try {
+		return normalizeFilePath(root);
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * Release the primary registration when the primary session itself shuts down
+ * (#2129 review F3).
+ *
+ * WHY THIS EXISTS. Before root identity was an input, a stale `activeCtx` left
+ * behind by a departed primary was benign: the next start probed it, got
+ * `false` (dead ctx), and classified `sequential-replacement`, so it took over
+ * as the new primary. Root identity made that stale state DECISIVE — a start in
+ * a different root behind a dead-but-still-registered primary now classifies
+ * `secondary-root` and declines. Without an explicit release, root A's primary
+ * ending would mean every later start in root B declines FOREVER: never
+ * primary, never a full start, no re-arm.
+ *
+ * This is the catalog's process-lifetime-latch shape (state that must re-arm at
+ * a session boundary must not outlive it). `session_shutdown`'s primary path is
+ * that boundary. Deliberately NOT called on a secondary's shutdown — that path
+ * returns before the shared teardown precisely because the primary is still
+ * live.
+ *
+ * A concurrent secondary that outlives the primary now classifies `primary` on
+ * its later emissions rather than `concurrent-secondary`. That is the fail-safe
+ * direction this module has always taken (run the handler), and it is correct
+ * here: with the primary gone there is no live sibling to protect.
+ */
+export function releasePrimarySession(): void {
+	activeCtx = undefined;
+	activeSessionId = undefined;
+	activeRoot = undefined;
 	secondarySessionCount = 0;
 }
 
@@ -285,6 +404,7 @@ export function classifySessionStartGuarded(
 export function _resetSessionLifecycleForTests(): void {
 	activeCtx = undefined;
 	activeSessionId = undefined;
+	activeRoot = undefined;
 	secondarySessionCount = 0;
 }
 
@@ -296,6 +416,15 @@ export interface SessionStartGuardDecision {
 	 * `handleSessionStart` (and `updateRuntimeIdentityFromEvent`) entirely. */
 	runFullSessionStart: boolean;
 	secondaryCount: number;
+	/**
+	 * #2129 observability: the root-identity input the classification actually
+	 * consulted, so a log reader can tell "the root check ran and said same
+	 * root" from "the root check had nothing to compare". Mirrors
+	 * {@link ClassifySessionStartInput.sameRoot}.
+	 */
+	sameRoot: boolean | undefined;
+	/** The registered primary's normalized root at decision time, if any. */
+	primaryRoot: string | undefined;
 }
 
 /**
@@ -312,6 +441,7 @@ export interface SessionStartGuardDecision {
 export function decideSessionStart(
 	ctx: unknown,
 	sessionId: string | undefined,
+	root?: string | undefined,
 ): SessionStartGuardDecision {
 	const hasPrior = activeCtx !== undefined || activeSessionId !== undefined;
 	const priorCtxActive = hasPrior ? probeCtxActive(activeCtx) : undefined;
@@ -325,27 +455,49 @@ export function decideSessionStart(
 		sameCtx ||
 		(hasPrior && sessionId !== undefined && sessionId === activeSessionId);
 
+	// #2129: compare THIS start's cwd against the registered primary's root.
+	// `undefined` on either side means "unknown", never "different" — see
+	// `classifySessionStart`'s fail-safe note.
+	const incomingRoot = normalizeRootForCompare(root);
+	const sameRoot =
+		hasPrior && activeRoot !== undefined && incomingRoot !== undefined
+			? activeRoot === incomingRoot
+			: undefined;
+
+	// #2129 review F5: capture the primary root BEFORE any registration mutates
+	// it, so the reported value is genuinely the decision-time input the
+	// classifier consulted rather than the value this call just wrote.
+	const primaryRootAtDecision = activeRoot;
+
 	const classification = classifySessionStartGuarded({
 		hasPrior,
 		priorCtxActive,
 		sameSessionId,
+		sameRoot,
 	});
 
-	if (classification === "concurrent-secondary") {
+	if (
+		classification === "concurrent-secondary" ||
+		classification === "secondary-root"
+	) {
 		registerSecondarySession();
 		return {
 			classification,
 			runFullSessionStart: false,
 			secondaryCount: secondarySessionCount,
+			sameRoot,
+			primaryRoot: primaryRootAtDecision,
 		};
 	}
 
 	// "primary" or "sequential-replacement": register as the (new) primary
 	// and proceed exactly as today.
-	registerPrimarySession(ctx, sessionId);
+	registerPrimarySession(ctx, sessionId, root);
 	return {
 		classification,
 		runFullSessionStart: true,
 		secondaryCount: secondarySessionCount,
+		sameRoot,
+		primaryRoot: primaryRootAtDecision,
 	};
 }

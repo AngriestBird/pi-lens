@@ -55,7 +55,10 @@ import {
 import { selectLspStatus } from "./clients/lsp-status.js";
 import type { PersistedReadGuardState } from "./clients/read-guard.js";
 import { registerReadBridge } from "./clients/read-bridge.js";
-import { isExternalOrVendorFile } from "./clients/path-utils.js";
+import {
+	isExternalOrVendorFile,
+	normalizeFilePath,
+} from "./clients/path-utils.js";
 import { isPathIgnoredByProject } from "./clients/file-utils.js";
 import {
 	dropStaleFiles,
@@ -111,8 +114,10 @@ import {
 } from "./clients/instance-reaper.js";
 import {
 	deregisterInstance,
+	deregisterInstanceRoot,
 	readInstanceRegistry,
 	registerInstance,
+	registerInstanceRoot,
 } from "./clients/instance-registry.js";
 import { logVanishedInstances } from "./clients/vanished-instance-marker.js";
 import {
@@ -156,7 +161,9 @@ import {
 	classifyCurrentSessionEmission,
 	decideSessionStart,
 	decrementSecondarySessionCount,
+	getActivePrimaryRoot,
 	noteSessionShutdown,
+	releasePrimarySession,
 	probeCtxActive,
 } from "./clients/session-lifecycle.js";
 import {
@@ -1777,19 +1784,72 @@ function activateExtension(hostPi: ExtensionAPI) {
 					// the shared LSP fleet + runtime generation out from under the still
 					// -live parent) or updateRuntimeIdentityFromCtx (which would
 					// overwrite the parent's telemetry identity).
-					const sessionStartDecision = decideSessionStart(ctx, stableSessionId);
+					// #2129: the third argument is this start's PROJECT ROOT. Without
+					// it, a subagent temp worktree arriving with an already-disposed
+					// prior ctx classified `sequential-replacement`, stole the primary
+					// registration, and re-ran the whole session_start battery against
+					// unchanged content. Root identity is now a classification input.
+					// Read defensively, and do NOT fall back to `process.cwd()`.
+					// `ctx.cwd` is an `assertActive()`-wrapped accessor, so a ctx the
+					// SDK already invalidated throws on the plain read. A
+					// `process.cwd()` fallback would also be worse than no value: it is
+					// identical for every root in the process, so a temp worktree would
+					// compare equal to the primary and the decline could never fire.
+					// An unreadable cwd yields `undefined` — "root unknown" — which
+					// changes no verdict.
+					const sessionStartCwd = (() => {
+						try {
+							return (ctx as { cwd?: string })?.cwd;
+						} catch {
+							return undefined;
+						}
+					})();
+					const sessionStartDecision = decideSessionStart(
+						ctx,
+						stableSessionId,
+						sessionStartCwd,
+					);
 					ownedSessionRole = sessionStartDecision.runFullSessionStart
 						? "primary"
 						: "concurrent-secondary";
 					if (!sessionStartDecision.runFullSessionStart) {
 						dbg(
-							`session_start: concurrent secondary detected (count=${sessionStartDecision.secondaryCount}) — skipping handleSessionStart`,
+							`session_start: ${sessionStartDecision.classification} detected (count=${sessionStartDecision.secondaryCount}, sameRoot=${sessionStartDecision.sameRoot}) — skipping handleSessionStart`,
 						);
 						logConcurrentSessionBind({
 							secondaryCount: sessionStartDecision.secondaryCount,
 							sessionReason,
 							sameCwd: (ctx as { cwd?: string })?.cwd === process.cwd(),
+							// #2129: `sameCwd` above compares against `process.cwd()`,
+							// which answers a different question and read `true` for every
+							// pre-fix bind. These three fields record the input the
+							// classification actually consulted — the registered PRIMARY's
+							// root — so a log reader can tell a root-declined start from a
+							// live-sibling one.
+							classification: sessionStartDecision.classification,
+							sameRoot: sessionStartDecision.sameRoot,
+							primaryRoot: sessionStartDecision.primaryRoot,
 						});
+						// #2130 review F2: a declined start returns BEFORE
+						// `registerInstance` (which lives in the full-start body below),
+						// so without this the secondary's root would be absent from
+						// `instances.json` entirely — the shared-checkout guard and warm
+						// attach would know LESS about it than they did before #2130, and
+						// `deregisterInstanceRoot` at its shutdown would have nothing to
+						// remove. Only the ROOT is added: none of `registerInstance`'s
+						// other side effects (RSS resample, startedAt reseed, subagent
+						// identity capture) belong to a session that is being declined.
+						// Gated on `sameRoot === false` — positive evidence of a
+						// different root — because a secondary in the primary's own
+						// directory adds nothing to the set.
+						if (
+							sessionStartDecision.sameRoot === false &&
+							typeof sessionStartCwd === "string"
+						) {
+							void registerInstanceRoot(sessionStartCwd).catch(() => {
+								// best-effort observability — never fail session_start
+							});
+						}
 						return;
 					}
 
@@ -2582,6 +2642,9 @@ function activateExtension(hostPi: ExtensionAPI) {
 							sessionAgeMs: Math.max(0, Date.now() - runtime.sessionStartedAt),
 							sessionStartedAt: runtime.sessionStartedAt,
 							turnCount: runtime.turnIndex,
+							// #2130: root discriminator. Two roots in one host emitted
+							// the same turnIndex with nothing to separate them.
+							root: getActivePrimaryRoot(),
 						},
 					);
 					logLatency({
@@ -2933,6 +2996,28 @@ function activateExtension(hostPi: ExtensionAPI) {
 			);
 			clearCachePrefixSession(stableSessionId, "concurrent-secondary");
 			decrementSecondarySessionCount();
+			// #2130: scoped deregistration. A secondary's shutdown must never run
+			// `deregisterInstance()` — the process lives on and the primary still
+			// owns the entry. Drop only THIS session's own root, and only when it
+			// is positively a different root than the primary's, so a secondary
+			// that shares the primary's directory cannot deregister the root the
+			// host is still working in. A root this session never registered is a
+			// documented no-op inside `deregisterInstanceRoot`.
+			try {
+				const secondaryRoot = (ctx as { cwd?: string })?.cwd;
+				const primaryRoot = getActivePrimaryRoot();
+				if (
+					typeof secondaryRoot === "string" &&
+					secondaryRoot.length > 0 &&
+					primaryRoot !== undefined &&
+					normalizeFilePath(secondaryRoot) !== primaryRoot
+				) {
+					deregisterInstanceRoot(secondaryRoot);
+				}
+			} catch {
+				// Best-effort observability bookkeeping — a stale ctx or an
+				// unresolvable path must never break teardown.
+			}
 			dbg(
 				"session_shutdown: concurrent secondary — skipping shared-infra teardown",
 			);
@@ -2954,6 +3039,14 @@ function activateExtension(hostPi: ExtensionAPI) {
 		// #449 slice 1: SYNC-only deregistration (no child spawns — see the
 		// processExiting note below); safe to call unconditionally here.
 		deregisterInstance();
+		// #2129 review F3: release the primary registration at the same boundary
+		// the registry entry is released. Root identity made a stale `activeRoot`
+		// decisive: without this, once root A's primary ended, every later start
+		// in root B would classify `secondary-root` forever — never primary,
+		// never a full start, no re-arm. This is the process-lifetime-latch shape
+		// the catalog names. Only the PRIMARY path reaches here; a secondary
+		// returned above precisely because the primary is still live.
+		releasePrimarySession();
 		// processExiting: the loop is closing here — killing LSP servers must NOT
 		// spawn taskkill, or libuv aborts on uv_async_send to the closing loop
 		// (Assertion !(handle->flags & UV_HANDLE_CLOSING), src\win\async.c) — seen

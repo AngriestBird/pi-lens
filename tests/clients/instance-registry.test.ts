@@ -134,7 +134,7 @@ describe("instance-registry", () => {
 		expect(() => decideOrphanReaping(after, () => true)).not.toThrow();
 	});
 
-	it("registerInstance overwrites (not duplicates) this pid's prior entry", async () => {
+	it("registerInstance updates (not duplicates) this pid's prior entry", async () => {
 		const { registerInstance } =
 			await import("../../clients/instance-registry.js");
 		await registerInstance("/first/root");
@@ -142,7 +142,14 @@ describe("instance-registry", () => {
 
 		const parsed = JSON.parse(fs.readFileSync(registryFilePath(), "utf-8"));
 		expect(parsed.instances).toHaveLength(1);
-		expect(parsed.instances[0].projectRoot).toContain("second/root");
+		// #2130 changed this contract deliberately. The second root used to
+		// OVERWRITE `projectRoot`, which is how a host came to advertise a
+		// subagent's temp dir as its own root. Registration is additive now:
+		// the primary is pinned and the second root joins the set. See
+		// tests/clients/instance-registry-multi-root.test.ts.
+		expect(parsed.instances[0].projectRoot).toContain("first/root");
+		expect(parsed.instances[0].projectRoots).toHaveLength(2);
+		expect(parsed.instances[0].projectRoots[1]).toContain("second/root");
 	});
 
 	it("writes atomically via tmp-<pid> + rename (no tmp file left behind, no torn write)", async () => {

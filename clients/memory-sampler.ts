@@ -153,6 +153,10 @@ export function toMemoryProcessUsage(
 export interface MemorySampleSubsystems {
 	lsp: {
 		clients: number;
+		/** #2130: distinct project roots the live clients span. See
+		 *  `getLspDocumentTextRetentionSnapshot` for why a bare client count
+		 *  cannot be reconciled against `instances.json` without this. */
+		clientRoots: number;
 		incrementalTextEntries: number;
 		incrementalTextBytes: number;
 	};
@@ -199,6 +203,18 @@ export interface MemorySampleSessionContext {
 	sessionAgeMs: number;
 	sessionStartedAt: number;
 	turnCount: number;
+	/**
+	 * #2130: the project root this sample belongs to — the registered primary
+	 * session's root (`getActivePrimaryRoot`, `clients/session-lifecycle.ts`).
+	 *
+	 * `turnIndex` is per-runtime and restarts at 0 on every session reset, so a
+	 * multi-root host emitted `turnIndex: 10` twice with nothing to tell the two
+	 * apart. This field is that discriminator. `undefined` when no primary has
+	 * registered a root yet (an early sample, or a host that never ran
+	 * session_start) — never guessed from `process.cwd()`, which is what made
+	 * the pre-fix `sameCwd` field read `true` for every record.
+	 */
+	root?: string;
 }
 
 export interface MemorySample {
@@ -239,6 +255,7 @@ export function collectMemorySampleSubsystems(
 			const retention = getLspDocumentTextRetentionSnapshot();
 			return {
 				clients: retention.clients,
+				clientRoots: retention.roots,
 				incrementalTextEntries: retention.entries,
 				incrementalTextBytes: retention.bytes,
 			};
