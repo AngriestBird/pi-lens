@@ -82,8 +82,10 @@ describe("review-graph workspace replacement retention (#2073)", () => {
 			`graph-cache-retention baseline=${(baseline / MiB).toFixed(1)} MiB retained=${retainedMiB.toFixed(1)} MiB`,
 		);
 
-		// The final geometry measured about 2.7 MiB per leaked graph, so 6 MiB
-		// catches one retained graph while allowing normal forced-GC variance.
+		// Clean runs settle at ~3.2 MiB and each leaked graph adds ~2.7 MiB, so
+		// this bound reliably catches TWO or more leaked graphs; a single leak
+		// sits astride it (measured 5.86-6.14 MiB depending on position) and is
+		// not reliably detected. The pre-fix all-19 leak measures ~57 MiB.
 		expect(retainedMiB).toBeLessThan(6);
 		clearReviewGraphWorkspaceCache();
 	});
