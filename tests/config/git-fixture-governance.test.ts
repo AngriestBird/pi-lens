@@ -1,19 +1,12 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { describe, expect, it } from "vitest";
+import { assertNonEmptyScan } from "../support/sweep-kit.js";
 
 const directGitSpawn =
 	/\b(execSync|execFileSync|spawnSync|spawn|execFile|safeSpawnAsync)\s*\(\s*["'`]git\b/g;
 const helperImport =
 	/import\s*{([^}]+)}\s*from\s*["'`][^"'`]*git-fixture-env/gs;
-
-const GIT_FIXTURE_VERDICTS = [
-	{
-		file: "tests/clients/shared-checkout-guard.test.ts",
-		scope: "#2007 real git binary block",
-		verdict: "fixed (confirmed live offender 2026-08-26, two escapes)",
-	},
-] as const;
 
 export function findGitSpawnOffenders(
 	files: ReadonlyArray<{ file: string; source: string }>,
@@ -96,14 +89,9 @@ describe("real Git fixture governance", () => {
 
 	it("scans a non-empty source population", () => {
 		const files = testFiles(path.resolve(__dirname, ".."));
-		expect(files.length).toBeGreaterThanOrEqual(1);
-	});
-
-	it("records the confirmed per-file fixture verdicts", () => {
-		expect(GIT_FIXTURE_VERDICTS).toContainEqual({
-			file: "tests/clients/shared-checkout-guard.test.ts",
-			scope: "#2007 real git binary block",
-			verdict: "fixed (confirmed live offender 2026-08-26, two escapes)",
-		});
+		// Calibration: 807 *.test.ts files under tests/ on 2026-08-26 (fix round
+		// 2). Half is 403.5; 400 is the documented floor so the walk still fails
+		// loud if the tests/ tree collapses, without pinning to the exact count.
+		assertNonEmptyScan("git fixture governance sweep", files.length, 400);
 	});
 });
