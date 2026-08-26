@@ -172,6 +172,44 @@ describe("memory watch verdict classifies from its own numbers (#2042)", () => {
 		}
 	});
 
+	// Round-2 review F3. The fraction alone is not the rule: on a 2 GB box a
+	// tenth is 205 MB, so a genuinely starved run with 300 MB left would be
+	// called roomy. EXHAUSTION_AVAILABLE_FLOOR_MB is what stops that, and it was
+	// unpinned — setting it to 0 left all 17 tests green.
+	it("keeps a small box from being called roomy by the fraction alone", () => {
+		const line = formatVerdict(
+			{ code: null, signal: "SIGKILL" },
+			{ totalMb: 2048, lowWaterMb: 300, lowWaterAt: null },
+		);
+		expect(line).toContain("the OS reclaimed memory");
+		expect(line).not.toContain("HEADROOM");
+	});
+
+	// Round-2 review F5: `<=` vs `<` at the boundary was unpinned too.
+	it("counts a mark exactly at the limit as exhausted", () => {
+		// 15,990 * 0.1 = 1599, above the 512 MB floor, so the limit is 1599.
+		const line = formatVerdict(
+			{ code: null, signal: "SIGKILL" },
+			{ totalMb: 15_990, lowWaterMb: 1599, lowWaterAt: null },
+		);
+		expect(line).toContain("the OS reclaimed memory");
+		expect(line).not.toContain("HEADROOM");
+	});
+
+	// Round-2 review F4: a 2s sampler cannot rule out a faster spike, and a
+	// systemd-oomd pressure kill is memory-shaped and invisible to it. The
+	// verdict must state what it measured, not conclude past it.
+	it("names the sampling cadence it could not see past", () => {
+		const line = formatVerdict(
+			{ code: null, signal: "SIGKILL" },
+			{ ...realKill, intervalMs: 2000 },
+		);
+		expect(line).toContain("no sample fell below");
+		expect(line).toContain("2000ms sampling");
+		expect(line).toContain("systemd-oomd");
+		expect(line).not.toContain("a worker or heap knob will not fix it");
+	});
+
 	it("leaves an ordinary failure alone whatever the headroom", () => {
 		const line = formatVerdict({ code: 1, signal: null }, realKill);
 		expect(line).not.toContain("HEADROOM");

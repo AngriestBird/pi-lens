@@ -113,7 +113,7 @@ export function looksMemoryExhausted(watch) {
  * makes the classifier's detail honest with no change to the classifier.
  *
  * @param {{ code: number | null, signal: string | null }} exit
- * @param {{ totalMb: number, lowWaterMb: number, lowWaterAt: string | null, childPid?: number | null }} watch
+ * @param {{ totalMb: number, lowWaterMb: number, lowWaterAt: string | null, childPid?: number | null, intervalMs?: number | null }} watch
  * @returns {string}
  */
 export function formatVerdict(exit, watch) {
@@ -129,12 +129,20 @@ export function formatVerdict(exit, watch) {
 		head =
 			"[mem-watch] KILLED — no failing assertion means the OS reclaimed memory, not a test failure.";
 	} else {
+		// Round-2 review F4: claim only what a periodic sampler can see. A spike
+		// shorter than the interval is invisible to it, and so is a systemd-oomd
+		// kill, which fires on pressure while memory still reads available and IS
+		// memory-shaped. The kernel evidence step closes both gaps, so this line
+		// points at it instead of ruling memory out on its own authority.
+		const cadence = watch.intervalMs
+			? ` (${watch.intervalMs}ms sampling: a shorter spike, or a pressure-based kill by systemd-oomd, would not show up here)`
+			: "";
 		head =
-			"[mem-watch] KILLED WITH HEADROOM — no failing assertion, and " +
-			`${watch.lowWaterMb} MB of ${watch.totalMb} MB stayed available, so ` +
-			"memory exhaustion does not explain this kill. Read the kernel kill " +
-			"evidence step for the signal's sender; a worker or heap knob will " +
-			"not fix it.";
+			"[mem-watch] KILLED WITH HEADROOM — no failing assertion, and no " +
+			`sample fell below ${watch.lowWaterMb} MB of ${watch.totalMb} MB, so ` +
+			"the box was not short of memory at any sample point" +
+			`${cadence}. Read the kernel kill evidence step for the signal's ` +
+			"sender.";
 	}
 	return (
 		`${head} ${status} totalMb=${watch.totalMb} ` +

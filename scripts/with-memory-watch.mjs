@@ -83,6 +83,8 @@ const watch = {
 	lowWaterMb: first.availableMb,
 	lowWaterAt: null,
 	childPid: null,
+	// The verdict states what this cadence cannot see, so it has to carry it.
+	intervalMs,
 };
 const state = { lastPrintedMb: null, thresholdMb, stepMb };
 

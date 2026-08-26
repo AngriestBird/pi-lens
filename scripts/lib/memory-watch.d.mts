@@ -27,6 +27,8 @@ export interface MemoryWatchState {
 	lowWaterAt: string | null;
 	/** The pid the wrapper was watching, to match against the kernel's victim. */
 	childPid?: number | null;
+	/** Sampling period, so the verdict can state what its cadence cannot see. */
+	intervalMs?: number | null;
 }
 
 export declare const EXHAUSTION_AVAILABLE_FRACTION: number;
