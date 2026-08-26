@@ -485,6 +485,28 @@ function readEnvAuxGraceMs(): number | undefined {
 	if (!Number.isFinite(parsed) || parsed < 0) return undefined;
 	return parsed;
 }
+const DEFAULT_AUX_GRACE_CEILING_MS = 2000;
+const MAX_ADAPTIVE_AUX_GRACE_CEILING_MS = 8000;
+const ADAPTIVE_AUX_GRACE_MARGIN_MS = 500;
+
+function auxGraceCeilingMs(
+	serverId: string,
+	isCold: boolean,
+	configuredCeilingMs: number | undefined,
+): number {
+	if (configuredCeilingMs !== undefined || !isCold) {
+		return configuredCeilingMs ?? DEFAULT_AUX_GRACE_CEILING_MS;
+	}
+	const observedSpawnMs = getSuccessfulLspSpawnDurationMs(serverId);
+	if (observedSpawnMs === undefined) return DEFAULT_AUX_GRACE_CEILING_MS;
+	return Math.min(
+		MAX_ADAPTIVE_AUX_GRACE_CEILING_MS,
+		Math.max(
+			DEFAULT_AUX_GRACE_CEILING_MS,
+			observedSpawnMs + ADAPTIVE_AUX_GRACE_MARGIN_MS,
+		),
+	);
+}
 const DIAGNOSTICS_SEMANTIC_SETTLE_THRESHOLD_MS = Math.max(
 	0,
 	Number.parseInt(
@@ -2320,6 +2342,10 @@ export class LSPService {
 		hardCapMs?: number,
 		resolvedRoots?: Map<string, string>,
 		waitSkipReasons?: Set<string>,
+		onOutcome?: (
+			serverId: string,
+			outcome: LSPClientAcquisitionOutcome,
+		) => void,
 	): Promise<SpawnedServer | undefined> {
 		if (this.checkDestroyed()) return undefined;
 		// Primary selection considers language servers only — auxiliary servers
@@ -2388,6 +2414,7 @@ export class LSPService {
 					noteSpawnInFlight,
 					(reported) => {
 						acquisition.outcome = reported;
+						onOutcome?.(server.id, reported);
 					},
 				);
 				if (spawned) {
@@ -2605,6 +2632,10 @@ export class LSPService {
 	async getAuxiliaryClientsForFile(
 		filePath: string,
 		enabledIds: ReadonlySet<string>,
+		onOutcome?: (
+			serverId: string,
+			outcome: LSPClientAcquisitionOutcome,
+		) => void,
 	): Promise<SpawnedServer[]> {
 		if (this.checkDestroyed() || enabledIds.size === 0) return [];
 		const servers = getServersForFileWithConfig(filePath).filter(
@@ -2612,7 +2643,15 @@ export class LSPService {
 		);
 		if (servers.length === 0) return [];
 		const spawned = await Promise.all(
-			servers.map((server) => this.ensureClientForServer(filePath, server)),
+			servers.map((server) =>
+				this.ensureClientForServer(
+					filePath,
+					server,
+					undefined,
+					undefined,
+					(reported) => onOutcome?.(server.id, reported),
+				),
+			),
 		);
 		return spawned.filter((entry): entry is SpawnedServer => Boolean(entry));
 	}
@@ -3717,6 +3756,15 @@ export class LSPService {
 		const useAllClients = clientScope === "all";
 		const resolvedPrimaryRoots = new Map<string, string>();
 		const waitSkipReasons = new Set<string>();
+		const coldAuxiliaryServerIds = new Set<string>();
+		const noteColdAuxiliary = (
+			serverId: string,
+			outcome: LSPClientAcquisitionOutcome,
+		): void => {
+			if (outcome === "cold-spawn" || outcome === "cold-spawn-joined") {
+				coldAuxiliaryServerIds.add(serverId);
+			}
+		};
 		let spawned: SpawnedServer[];
 		let serverCountAttempted: number;
 		if (useAllClients) {
@@ -3741,6 +3789,7 @@ export class LSPService {
 				this.getAuxiliaryClientsForFile(
 					filePath,
 					new Set(options.auxiliaryServerIds ?? []),
+					noteColdAuxiliary,
 				),
 			]);
 			spawned = entry ? [entry, ...aux] : aux;
@@ -4591,7 +4640,7 @@ export class LSPService {
 										baseline: number | undefined;
 									} => x !== null,
 								);
-							const auxCeilingMs = readEnvAuxGraceMs() ?? 2000;
+							const configuredAuxCeilingMs = readEnvAuxGraceMs();
 							// After all primaries settle, give each auxiliary the smaller of
 							// its declared wait budget and the global auxiliary ceiling. The
 							// 2000ms default admits measured ~1.3s warm scanner runs without
@@ -4610,7 +4659,11 @@ export class LSPService {
 									auxWaits.map(async (aux) => {
 										const budgetMs = Math.min(
 											timeoutFor(aux.serverId),
-											auxCeilingMs,
+											auxGraceCeilingMs(
+												aux.serverId,
+												coldAuxiliaryServerIds.has(aux.serverId),
+												configuredAuxCeilingMs,
+											),
 										);
 										let timer: ReturnType<typeof setTimeout> | undefined;
 										const timeout = new Promise<false>((resolve) => {

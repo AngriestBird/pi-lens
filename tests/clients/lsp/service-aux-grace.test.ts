@@ -446,6 +446,48 @@ describe("R8 — aux grace: touchFile with-auxiliary path", () => {
 		);
 	});
 
+	it("extends a cold auxiliary grace from its observed spawn cost", async () => {
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const service = new LSPService();
+		// A cold start measures 2.5s. The adaptive ceiling should give this
+		// first touch enough room for a 3s auxiliary wait, while the old static
+		// 2s ceiling cuts it off.
+		const auxServer = makeAuxServer("opengrep");
+		auxServer.spawn.mockImplementation(
+			async () =>
+				new Promise((resolve) =>
+					setTimeout(
+						() => resolve({ process: makeFakeProcess(), source: "test" }),
+						2500,
+					),
+				),
+		);
+		getServersForFileWithConfig.mockReturnValue([
+			makePrimaryServer("ts-primary"),
+			auxServer,
+		]);
+		createLSPClient
+			.mockResolvedValueOnce(makeClient(100, [], { serverId: "ts-primary" }))
+			.mockResolvedValueOnce(
+				makeClient(3000, [makeDiagnostic("cold aux finding")], {
+					serverId: "opengrep",
+				}),
+			);
+
+		const touch = service.touchFile(FILE, "cold-adaptive", {
+			clientScope: "with-auxiliary",
+			auxiliaryServerIds: ["opengrep"],
+			collectDiagnostics: true,
+			diagnostics: "document",
+		});
+		await vi.advanceTimersByTimeAsync(2500);
+		await vi.advanceTimersByTimeAsync(3010);
+		const result = await touch;
+		expect(result?.diags.map((diagnostic) => diagnostic.message)).toContain(
+			"cold aux finding",
+		);
+	});
+
 	it("still waits for slow primary even if aux settles early", async () => {
 		process.env.PI_LENS_AUX_GRACE_MS = String(AUX_GRACE_MS);
 
