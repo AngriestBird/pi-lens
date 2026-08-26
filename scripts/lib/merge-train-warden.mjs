@@ -157,7 +157,12 @@ export async function fetchOpenPullRequests(fetcher, owner, name) {
 		const connection = payload?.data?.repository?.pullRequests;
 		if (!connection || !Array.isArray(connection.nodes)) break;
 		for (const node of connection.nodes) {
-			if (seenNumbers.has(node.number)) continue;
+			if (seenNumbers.has(node.number)) {
+				errors.push(
+					`GraphQL pagination repeated PR #${node.number} across pages; collection may be incomplete`,
+				);
+				continue;
+			}
 			seenNumbers.add(node.number);
 			prs.push(normalizePr(node));
 		}

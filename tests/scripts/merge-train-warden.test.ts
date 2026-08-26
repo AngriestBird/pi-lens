@@ -594,8 +594,16 @@ describe("merge-train warden GraphQL fetch + REST apply (#1844)", () => {
 
 	it("does not return or process the same PR twice across distinct pages", async () => {
 		const pages = [
-			graphqlPage([prNode({ number: 7 })], true, "cursor-1"),
-			graphqlPage([prNode({ number: 7 })], false, "cursor-2"),
+			graphqlPage(
+				[prNode({ number: 7 }), prNode({ number: 8 })],
+				true,
+				"cursor-1",
+			),
+			graphqlPage(
+				[prNode({ number: 8 }), prNode({ number: 9 })],
+				false,
+				"cursor-2",
+			),
 		];
 		const calls: unknown[] = [];
 		const fetcher = async (_url: string, init?: { body?: string }) => {
@@ -608,8 +616,11 @@ describe("merge-train warden GraphQL fetch + REST apply (#1844)", () => {
 			};
 		};
 		const result = await fetchOpenPullRequests(fetcher, "acme", "repo");
-		expect(result.prs).toHaveLength(1);
-		expect(result.prs[0].number).toBe(7);
+		expect(result.prs).toHaveLength(3);
+		expect(result.prs.map(({ number }) => number)).toEqual([7, 8, 9]);
+		expect(result.errors).toEqual([
+			"GraphQL pagination repeated PR #8 across pages; collection may be incomplete",
+		]);
 	});
 
 	it("decides actions once when pagination repeats a PR", async () => {
