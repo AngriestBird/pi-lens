@@ -286,6 +286,12 @@ Pipeline-crash teardown is destructive only for the registered primary session;
 when no primary registration exists, the legacy reset remains the fail-safe.
 (#2157, #2174)
 
+Per-path `didChange` sends serialize their read/build/send/record transaction
+through `LSPClientState.notifyChangeQueues`; different paths remain parallel.
+`recordSentContent` rejects a lower-version mirror update and records an
+`lsp-document-send-order` degradation with the server and normalized path.
+(#2113)
+
 Auxiliary diagnostic waits preserve a warm-turn fast path: on a cold
 acquisition, the budget is `max(declared wait, observed spawn + 500ms)` clamped
 to an 8s ceiling; on a warm acquisition, it remains `min(declared wait, 2000ms)`. An
