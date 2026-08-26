@@ -246,9 +246,14 @@ export function shouldLogEvent(event: string): boolean {
 		// regression must be visible without PI_LENS_READ_GUARD_VERBOSE=1.
 		event === "read_cap_trimmed" ||
 		// #1918: the record-cap trim's population siblings — whole-file
-		// eviction (file cap or idle timer) and the per-file edits-cap trim.
-		// Same rarity argument as #1913: each fires once per file per
-		// session (rising-edge gated), so always-on visibility costs nothing.
+		// eviction under real pressure (file cap or an external delete) and
+		// the per-file edits-cap trim. Idle-timeout eviction is deliberately
+		// EXCLUDED from this event (see read-guard.ts's evictFile doc
+		// comment) — it's routine housekeeping, not a fault, and its
+		// per-file cardinality is unbounded in a healthy session. Same
+		// rarity argument as #1913 for the reasons that DO fire: each is
+		// rising-edge gated once per file per session, so always-on
+		// visibility costs nothing.
 		event === "read_file_evicted" ||
 		event === "edits_cap_trimmed"
 	);
