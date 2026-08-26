@@ -13,6 +13,7 @@ import type { ReviewGraph } from "../../clients/review-graph/types.js";
 import {
 	buildWordIndex,
 	WORD_INDEX_MAX_BYTES,
+	wordIndexPostingHits,
 } from "../../clients/word-index.js";
 import { setupTestEnvironment } from "./test-utils.js";
 
@@ -114,9 +115,9 @@ describe("computeCascadeForFile — word-index per-edit seam (#348 phase 2)", ()
 
 			expect(wordIndex.postings.has("oldwidget")).toBe(false);
 			expect(
-				wordIndex.postings
-					.get("renderwidget")
-					?.some((h) => h.file === filePath),
+				wordIndexPostingHits(wordIndex, "renderwidget").some(
+					(h) => h.file === filePath,
+				),
 			).toBe(true);
 			expect(onWordIndexUpdated).toHaveBeenCalledWith(wordIndex);
 		} finally {
