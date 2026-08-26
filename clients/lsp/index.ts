@@ -3867,6 +3867,10 @@ export class LSPService {
 			const diagnosticBaselines = new Map(
 				spawned.map((entry) => [entry.client, readPathVersion(entry.client)]),
 			);
+			// #2161: anchor publication evidence before this touch's notify. A
+			// later per-file cache entry, including an empty one, proves that the
+			// primary answered; an empty diagnostics result alone cannot.
+			const markedAtMs = Date.now();
 			// #1458: read a late auxiliary publication BEFORE the ordinary resync
 			// clears its client cache. Carry it only when the publication's exact
 			// sent-content fingerprint matches this touch's content. A changed edit,
@@ -4777,9 +4781,21 @@ export class LSPService {
 						// Push already answered (settled, or published diagnostics that
 						// its wait is about to settle on) — nothing to confirm, no sync
 						// request goes out.
+						let publishedAt: number | undefined;
+						try {
+							publishedAt = primaryClient
+								.getAllDiagnostics()
+								.get(normalizedPath)?.ts;
+						} catch {
+							recordDegradationOnce({
+								kind: "lsp-diagnostics-timeout",
+								subject: `${primaryClient.serverId}:${normalizedPath}`,
+								reason: "primary sync publication probe unavailable",
+							});
+						}
 						if (
 							pushWaitSettled ||
-							primaryClient.getDiagnostics(filePath).length > 0
+							(publishedAt !== undefined && publishedAt > markedAtMs)
 						) {
 							return new Promise<never>(() => {});
 						}
