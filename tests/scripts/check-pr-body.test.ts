@@ -1,9 +1,11 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it, afterEach, vi } from "vitest";
 import {
+	detectEscapedNewlineBody,
 	detectFlattenedBody,
 	lintPullRequestEvent,
 	lintPrBody,
+	repairEscapedNewlineBody,
 	repairFlattenedBody,
 	resolveLivePrBody,
 	resolveTouchesTests,
@@ -165,6 +167,113 @@ describe("flattened PR body repair", () => {
 	});
 });
 
+const escapedNewlineFlattenedBody =
+	"## Summary\\nRestore real newlines for the escaped-newline flattening class (#2145).\\n\\n## Tests\\nAdds fixtures pinning literal backslash-n repair outside fences.\\n\\n## Blast radius\\nLimited to the body-lint script.\\n\\n## Class sweep\\nEscaped-newline flattening is the sibling of the space-flattening class already handled.\\n\\n## Observability\\nA notice logs the repaired PR number.";
+
+const escapedNewlineWithFence =
+	'## Summary\\nRestore real newlines outside fences only (#2145).\\n\\n## Tests\\n```json\\n{"note": "line1\\nline2"}\\n```\\nThe JSON example above documents a genuine escaped newline.\\n\\n## Blast radius\\nLimited to the body-lint script.\\n\\n## Class sweep\\nFence content must never be rewritten during escaped-newline repair.\\n\\n## Observability\\nA notice logs the repaired PR number.';
+
+const escapedNewlineWithTildeFence =
+	"## Summary\\nRestore real newlines outside fences only (#2145).\\n\\n## Tests\\n~~~text\\nexample fenced content\\n~~~\\nThe tilde fence above must not be repaired.\\n\\n## Blast radius\\nLimited to the body-lint script.\\n\\n## Class sweep\\nTilde fences are valid CommonMark and GitHub renders them.\\n\\n## Observability\\nA notice logs the repaired PR number.";
+
+// #2145 review F1: a Windows path carries a genuine "\n" substring (inside
+// "\node_modules") that is real content, not a flattening artifact. A blind
+// global replace would split it into "C:" + a real newline + "ode_modules\pi"
+// while the repaired body still validates, so this must refuse outright.
+const escapedNewlineWithWindowsPath =
+	"## Summary\\nRestore real newlines for the escaped-newline flattening class (#2145).\\n\\n## Tests\\nInstall under C:\\node_modules\\pi and confirm the smoke test passes.\\n\\n## Blast radius\\nLimited to the body-lint script.\\n\\n## Class sweep\\nEscaped-newline flattening is the sibling of the space-flattening class already handled.\\n\\n## Observability\\nA notice logs the repaired PR number.";
+
+// #2145 review F3: pins the realNewlines cap directly. This body is already
+// correctly formatted (real headings on their own real lines) and merely
+// documents the "\n" escape in prose. Without the cap, the later checks
+// (literal count >= 2, headings >= 2) all still pass on this body's existing
+// structure, so the cap is the only thing standing between this and a false
+// positive on an ordinary valid PR body.
+const healthyBodyWithProseEscapes = `${body}\n\nNote: this fixture documents the \\n escape three times: \\n and \\n appear here for illustration.`;
+
+// #2145 review F3: pins the literalNewlines < 2 gate directly. Exactly one
+// literal join converts into two heading-only lines ("## Summary" already
+// sits on its own real line; "## Tests" appears only after the one literal
+// join is converted), so the heading-count check alone cannot reject this —
+// only the minimum-occurrence gate can.
+const singleLiteralNewlineTwoHeadings = `## Summary\n${"Padding prose to reach the two-hundred character minimum length threshold so the detector's length gate does not short-circuit this fixture before reaching the guard actually under test here now, today.".padEnd(170, ".")}\\n## Tests`;
+
+// #2145 review F3: pins the candidateHeadingLines >= 2 gate directly. Two
+// literal joins pass the minimum-occurrence gate, but neither resulting line
+// is a template heading, so only the heading-count check can reject this.
+const twoLiteralNewlinesNoHeadings =
+	"Plain narrative text with no headings at all, just prose that keeps going for a while so the length threshold is comfortably satisfied here.\\nA second paragraph continues the narrative without introducing any heading syntax whatsoever, staying safely non-heading.\\nA third paragraph closes out the fixture with more filler text to be safe about the length floor.";
+
+describe("escaped-newline PR body repair", () => {
+	it("detects and repairs the literal backslash-n flattened shape", () => {
+		expect(escapedNewlineFlattenedBody).not.toMatch(/\r?\n/);
+		expect(detectEscapedNewlineBody(escapedNewlineFlattenedBody)).toBe(true);
+		const repaired = repairEscapedNewlineBody(escapedNewlineFlattenedBody);
+		expect(repaired).toContain("## Summary\nRestore real newlines");
+		expect(lintPrBody(repaired)).toEqual({ valid: true, errors: [] });
+	});
+
+	it("does not detect or touch a normal valid body", () => {
+		expect(detectEscapedNewlineBody(body)).toBe(false);
+		expect(repairEscapedNewlineBody(body)).toBe(body);
+	});
+
+	it("refuses a flattened body that carries a backtick fence, leaving it untouched", () => {
+		expect(detectEscapedNewlineBody(escapedNewlineWithFence)).toBe(false);
+		expect(repairEscapedNewlineBody(escapedNewlineWithFence)).toBe(
+			escapedNewlineWithFence,
+		);
+	});
+
+	it("refuses a flattened body that carries a tilde fence, leaving it untouched", () => {
+		expect(detectEscapedNewlineBody(escapedNewlineWithTildeFence)).toBe(false);
+		expect(repairEscapedNewlineBody(escapedNewlineWithTildeFence)).toBe(
+			escapedNewlineWithTildeFence,
+		);
+	});
+
+	it("leaves a correct multi-line body with a fenced literal backslash-n untouched", () => {
+		const validWithFence = `${body}\n\n\`\`\`json\n{"note": "line1\\nline2"}\n\`\`\``;
+		expect(lintPrBody(validWithFence)).toMatchObject({ valid: true });
+		expect(detectEscapedNewlineBody(validWithFence)).toBe(false);
+		expect(repairEscapedNewlineBody(validWithFence)).toBe(validWithFence);
+	});
+
+	it("refuses a body whose only literal backslash-n sits inside a real path (F1)", () => {
+		expect(detectEscapedNewlineBody(escapedNewlineWithWindowsPath)).toBe(false);
+		expect(repairEscapedNewlineBody(escapedNewlineWithWindowsPath)).toBe(
+			escapedNewlineWithWindowsPath,
+		);
+	});
+
+	it("does not misfire on a healthy body that merely documents the \\n escape (F3 cap)", () => {
+		expect(lintPrBody(healthyBodyWithProseEscapes)).toMatchObject({
+			valid: true,
+		});
+		expect(detectEscapedNewlineBody(healthyBodyWithProseEscapes)).toBe(false);
+		expect(repairEscapedNewlineBody(healthyBodyWithProseEscapes)).toBe(
+			healthyBodyWithProseEscapes,
+		);
+	});
+
+	it("refuses a single literal join even when it lands between two headings (F3 count gate)", () => {
+		expect(singleLiteralNewlineTwoHeadings.length).toBeGreaterThanOrEqual(200);
+		expect(detectEscapedNewlineBody(singleLiteralNewlineTwoHeadings)).toBe(
+			false,
+		);
+	});
+
+	it("refuses two literal joins that never produce a template heading (F3 heading gate)", () => {
+		expect(twoLiteralNewlinesNoHeadings.length).toBeGreaterThanOrEqual(200);
+		expect(detectEscapedNewlineBody(twoLiteralNewlinesNoHeadings)).toBe(false);
+	});
+
+	it("is idempotent", () => {
+		const repaired = repairEscapedNewlineBody(escapedNewlineFlattenedBody);
+		expect(repairEscapedNewlineBody(repaired)).toBe(repaired);
+	});
+});
+
 describe("flattened body CI entrypoint", () => {
 	afterEach(() => vi.unstubAllEnvs());
 
@@ -198,6 +307,39 @@ describe("flattened body CI entrypoint", () => {
 		).toEqual({ valid: true, repaired: true });
 		expect(fetchImpl).toHaveBeenCalledWith(
 			"https://api.example/repos/o/r/pulls/2144",
+			expect.objectContaining({
+				method: "PATCH",
+				body: expect.stringContaining("## Tests\\n"),
+			}),
+		);
+		expect(log).toHaveBeenCalledWith(
+			expect.stringContaining("::notice::Repaired flattened PR body"),
+		);
+		log.mockRestore();
+	});
+
+	it("patches an escaped-newline flattened body and reports a notice", async () => {
+		stubApi();
+		const log = vi.spyOn(console, "log").mockImplementation(() => {});
+		const fetchImpl = vi
+			.fn()
+			.mockImplementation(async (url: string, init?: RequestInit) => {
+				if (String(url).includes("/files"))
+					return new Response(JSON.stringify([]), { status: 200 });
+				if (init?.method === "PATCH")
+					return new Response("{}", { status: 200 });
+				return new Response(
+					JSON.stringify({ body: escapedNewlineFlattenedBody }),
+					{ status: 200 },
+				);
+			});
+		expect(
+			await lintPullRequestEvent(fetchImpl, {
+				pull_request: { number: 2145, body: escapedNewlineFlattenedBody },
+			}),
+		).toEqual({ valid: true, repaired: true });
+		expect(fetchImpl).toHaveBeenCalledWith(
+			"https://api.example/repos/o/r/pulls/2145",
 			expect.objectContaining({
 				method: "PATCH",
 				body: expect.stringContaining("## Tests\\n"),
