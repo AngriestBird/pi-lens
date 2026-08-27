@@ -177,10 +177,28 @@ export interface RunnerResult {
 
 // --- Dispatch Context ---
 
+/**
+ * #2016 invariant: `filePath`, `projectRoot`, and `cwd` are ALREADY
+ * `normalizeMapKey`-normalized. `createDispatchContext` is the only constructor
+ * and it normalizes all three before building the object.
+ *
+ * So `normalizeMapKey(ctx.filePath)` is a pure `realpathSync.native` syscall
+ * that returns its own input. On Windows that measures ~200 microseconds per
+ * call, and POSIX short-circuits it, which is why CI timing gates cannot see
+ * the waste. Use these three fields directly as map keys, fact keys, once-keys,
+ * and degradation subjects. `tests/clients/dispatch-context-normalized.test.ts`
+ * pins both halves: that the constructor normalizes, and that no call site
+ * re-normalizes.
+ */
 export interface DispatchContext {
+	/** Normalized. See the #2016 invariant above. */
 	readonly filePath: string;
-	/** Workspace/project root before language-specific root resolution. */
+	/**
+	 * Workspace/project root before language-specific root resolution.
+	 * Normalized. See the #2016 invariant above.
+	 */
 	readonly projectRoot?: string;
+	/** Normalized. See the #2016 invariant above. */
 	readonly cwd: string;
 	readonly kind: FileKind | undefined;
 	readonly fileRole: FileRole;
