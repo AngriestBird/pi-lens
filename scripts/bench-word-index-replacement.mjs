@@ -70,6 +70,15 @@ if (docs.length < 500) {
 // Acceptance criterion 1 names a 20 KB document, and the issue's per-size table
 // shows replacement cost rising with document size, so edit the documents
 // closest to that size rather than an arbitrary slice of the corpus.
+//
+// The default run reproduces the 20 KB row. For the large-document row, raise
+// the target past every document in the corpus so the largest ones are picked:
+//
+//   node scripts/bench-word-index-replacement.mjs --target-bytes 500000 --edits 30
+//
+// Absolute numbers vary by machine, OS, and event-loop load. The block-time
+// columns are the comparable ones; caller-return latency inflates for the
+// cooperative path on a loaded loop, because yielding lets competing work in.
 const targetBytes = Number(readArg("--target-bytes", "20480"));
 const sizeOf = (doc) => Buffer.byteLength(doc.content, "utf8");
 const targets = [...docs]
