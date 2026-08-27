@@ -6,17 +6,26 @@ import { TestRunnerClient } from "../../clients/test-runner-client.js";
 
 const tempRoots: string[] = [];
 
-function makeProject(): { root: string; alias: string } {
-	const parent = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-2048-"));
-	const root = path.join(parent, "project");
-	const alias = path.join(parent, "project-alias");
-	fs.mkdirSync(root);
+function linkAlias(root: string, alias: string): void {
 	try {
 		fs.symlinkSync(root, alias, "junction");
 	} catch {
 		fs.symlinkSync(root, alias, "dir");
 	}
+}
+
+function makeUnlinkedProject(prefix: string): { root: string; alias: string } {
+	const parent = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+	const root = path.join(parent, "project");
+	const alias = path.join(parent, "project-alias");
+	fs.mkdirSync(root);
 	tempRoots.push(parent);
+	return { root, alias };
+}
+
+function makeProject(): { root: string; alias: string } {
+	const { root, alias } = makeUnlinkedProject("pi-lens-2048-");
+	linkAlias(root, alias);
 	return { root, alias };
 }
 
@@ -58,6 +67,21 @@ describe("TestRunnerClient project-root caches (#2048)", () => {
 			"export default { test: { include: ['changed/**/*.test.ts'] } }\n",
 		);
 		expect(client.parseVitestTestGlobs(root)).toEqual(firstGlobs);
+	});
+
+	it("re-resolves an alias first probed before its symlink existed (#2077)", () => {
+		const { root, alias } = makeUnlinkedProject("pi-lens-2077-");
+		fs.writeFileSync(path.join(root, "vitest.config.ts"), "export default {}\n");
+		const client = new TestRunnerClient();
+
+		// The alias does not exist yet, so canonicalization falls back to the
+		// literal spelling and caches the miss under that fallback key.
+		expect(client.detectRunner(alias)).toBeNull();
+
+		linkAlias(root, alias);
+
+		expect(client.detectRunner(root)?.runner).toBe("vitest");
+		expect(client.detectRunner(alias)?.runner).toBe("vitest");
 	});
 
 	it("shares caches across a confirmed Windows separator and case alias", (ctx) => {
