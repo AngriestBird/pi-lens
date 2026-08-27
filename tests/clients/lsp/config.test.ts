@@ -205,9 +205,8 @@ describe("initLSPConfig in-flight ABA release (#1968)", () => {
 	// that same cwd would ever clear.
 	it("a normally-settling init still cleans up its own entry", async () => {
 		const projectDir = tmpDir("pi-lens-lsp-project-clean-");
-		const { initLSPConfig, _peekConfigInFlightForTests } = await import(
-			"../../../clients/lsp/config.js"
-		);
+		const { initLSPConfig, _peekConfigInFlightForTests } =
+			await import("../../../clients/lsp/config.js");
 
 		const inFlight = _peekConfigInFlightForTests();
 		const before = new Set(inFlight.keys());
