@@ -2098,8 +2098,8 @@ function capGraphForPersist(
 	// NODE — measured at 93.5us per node, about 14 seconds at 150k nodes — on the
 	// pre-existing persist cap that every over-cap build already pays. So fold
 	// LAZILY: index raw first, and pay one folding pass only when the raw index
-	// fails to cover every ranked file. Coverage, not emptiness, is the trigger: a
-	// PARTIAL raw match would otherwise silently under-select the rest.
+	// leaves nodes the ranking cannot reach. Reach, not emptiness, is the trigger:
+	// a PARTIAL raw match would otherwise silently under-select the rest.
 	const indexNodesByFile = (fold: boolean): Map<string, string[]> => {
 		const byFile = new Map<string, string[]>();
 		for (const [id, node] of graph.nodes) {
