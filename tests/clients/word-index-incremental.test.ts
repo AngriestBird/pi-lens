@@ -6,7 +6,7 @@
  * from-scratch `buildWordIndex` over the same final corpus.
  */
 
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import {
 	buildWordIndex,
 	deserializeWordIndex,
@@ -19,6 +19,7 @@ import {
 	type WordIndex,
 	wordIndexPostingHits,
 } from "../../clients/word-index.js";
+import { countClockReads } from "../support/perf-harness.js";
 
 // --- Basic primitive behavior --------------------------------------------------
 
@@ -482,18 +483,6 @@ describe("cooperative removal staging counts the clock per token (#2067)", () =>
 			total += index.postings.get(token)?.length ?? 0;
 		}
 		return total;
-	}
-
-	async function countClockReads(
-		work: () => Promise<unknown>,
-	): Promise<number> {
-		const spy = vi.spyOn(performance, "now");
-		try {
-			await work();
-			return spy.mock.calls.length;
-		} finally {
-			spy.mockRestore();
-		}
 	}
 
 	it("stages a removal with clock reads bounded by tokens, not postings", async () => {
