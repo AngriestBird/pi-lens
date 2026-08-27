@@ -1,0 +1,15 @@
+id: kotlin-prefer-data-class
+valid:
+  - |
+    data class Point(val x: Int, val y: Int)
+  - |
+    open class Base(val x: Int)
+  - |
+    class Mixed(val x: Int, y: Int)
+  - |
+    class WithBehavior(val x: Int) {
+        fun scale(factor: Int): Int = x * factor
+    }
+invalid:
+  - |
+    class Point(val x: Int, val y: Int)
