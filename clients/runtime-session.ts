@@ -82,7 +82,6 @@ import {
 	readProjectSnapshotMeta,
 	saveRuntimeProjectSnapshot,
 } from "./project-snapshot.js";
-import { clearTsconfigPathsCache } from "./review-graph/tsconfig-paths.js";
 import type { RuffClient } from "./ruff-client.js";
 import { scanProjectRules } from "./rules-scanner.js";
 import type { RuntimeCoordinator } from "./runtime-coordinator.js";
@@ -2123,14 +2122,10 @@ export async function handleSessionStart(
 	clearFileTimeSessions();
 	runtime.complexityBaselines.clear();
 	resetDispatchBaselines(ctxCwd);
-	// #806: drop the shared per-directory marker index (and any consumer
-	// cache layered on top, e.g. tsconfig-paths' matcher cache) so a
-	// `.pi-lens.json`/`tsconfig.json`/workspace-manifest edit made between
-	// sessions is picked up fresh instead of only on process restart — this
-	// also fixes #805's mid-session tsconfig staleness (the matcher cache was
-	// previously session-lived with no reset hook at all).
+	// #806: clear the shared per-directory marker index and registered
+	// topology-derived caches only at session start. Mid-session edits are NOT
+	// detected; #805's tsconfig matcher cache follows the same registry reset.
 	resetWorkspaceTopology();
-	clearTsconfigPathsCache();
 	// #2000: opaque-recovery baselines are keyed cwd:generation (unreachable
 	// after reset) and the git-worktree memo must re-probe after a session
 	// that may have seen a non-git dir become one.

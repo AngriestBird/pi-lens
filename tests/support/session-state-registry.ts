@@ -527,6 +527,33 @@ export const SESSION_STATE_REGISTRY: SessionStateEntry[] = [
 			"Workspace layout is re-derived per session; a new session can open a tree whose markers moved.",
 	},
 	{
+		id: "startup-scan:topology-derived-cache",
+		module: "startup-scan.ts",
+		state: "startupScanContextCache",
+		policy: "session_start",
+		resetName: "resetWorkspaceTopology",
+		reason:
+			"Startup scan context derives its project-root verdict from workspace marker topology, so the memo must re-arm with that index.",
+	},
+	{
+		id: "language-profile:topology-derived-cache",
+		module: "language-profile.ts",
+		state: "languageProfileCache",
+		policy: "session_start",
+		resetName: "resetWorkspaceTopology",
+		reason:
+			"Language profiles derive configured markers from workspace topology, so the memo must re-arm with that index.",
+	},
+	{
+		id: "tsconfig-paths:topology-derived-caches",
+		module: "review-graph/tsconfig-paths.ts",
+		state: "cache, referencesCache",
+		policy: "session_start",
+		resetName: "resetWorkspaceTopology",
+		reason:
+			"Tsconfig path and project-reference resolutions derive from workspace topology, so both memos must re-arm with that index.",
+	},
+	{
 		id: "workspace-modules:moduleSourceFilesMemo",
 		module: "review-graph/workspace-modules.ts",
 		state: "_moduleSourceFilesMemo",
