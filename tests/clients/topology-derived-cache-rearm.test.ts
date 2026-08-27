@@ -1,9 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { describe, expect, it } from "vitest";
-import {
-	detectProjectLanguageProfile,
-} from "../../clients/language-profile.js";
+import { detectProjectLanguageProfile } from "../../clients/language-profile.js";
 import { resolveStartupScanContext } from "../../clients/startup-scan.js";
 import { resetWorkspaceTopology } from "../../clients/workspace-topology.js";
 import { setupTestEnvironment } from "./test-utils.js";

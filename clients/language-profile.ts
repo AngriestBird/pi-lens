@@ -123,7 +123,8 @@ function hasProjectMarker(projectRoot: string, marker: string): boolean {
 	}
 }
 
-// Process-lifetime memo keyed on projectRoot. Only populated when the
+// Session-lifetime memo keyed on projectRoot. The topology-reset registry
+// clears it at session start. Only populated when the
 // caller did not pass an explicit `sourceFiles` array — the explicit-array
 // case is used by the warmup pipeline to inject pre-collected files and
 // must not pollute the no-arg cache. The synchronous getSourceFiles() call
