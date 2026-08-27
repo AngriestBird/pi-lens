@@ -27,7 +27,10 @@ import { getPrimaryDispatchGroup } from "../language-policy.js";
 import { resolveLanguageRootForFile } from "../language-profile.js";
 import { logLatency, phaseFinished, phaseStarted } from "../latency-logger.js";
 import { isSpawnableCommand } from "../installer/index.js";
-import { normalizeMapKey } from "../path-utils.js";
+import {
+	normalizeEphemeralMapKey,
+	normalizeMapKey,
+} from "../path-utils.js";
 import { loadPiLensProjectConfig } from "../project-lens-config.js";
 import { RUNTIME_CONFIG, getRunnerTimeoutFloorMs } from "../runtime-config.js";
 import { safeSpawnAsync } from "../safe-spawn.js";
@@ -566,13 +569,19 @@ function buildCoverageNotice(
 		// The marker describes this exact silent-scanner set. A scanner can
 		// recover while another goes dark on the same file, so the set belongs
 		// in the session dedupe identity rather than only kind and path.
+		// #2016: these are SCANNER IDS, not filesystem paths. `normalizeMapKey`
+		// would realpath each one; on Windows that fails, falls through to
+		// `resolveNonExisting`, and resolves the id against the CURRENT process
+		// cwd, so the dedupe key differed by platform and by cwd (the #2219
+		// non-path-sentinel class). The cheap syntactic fold is what this
+		// session-scoped dedupe key actually needs.
 		const silentScannerSet = [...new Set(unconfirmedServerIds)]
-			.map(normalizeMapKey)
+			.map(normalizeEphemeralMapKey)
 			// Code-unit comparator: the sorted set is a dedupe KEY, so ordering
 			// must be deterministic across locales — localeCompare is not.
 			.sort((a, b) => Number(a > b) - Number(a < b))
 			.join(",");
-		const onceKey = `${ctx.kind}:${normalizeMapKey(ctx.filePath)}:${silentScannerSet}`;
+		const onceKey = `${ctx.kind}:${ctx.filePath}:${silentScannerSet}`;
 		if (coverageNoticeSeen.has(onceKey)) return undefined;
 		coverageNoticeSeen.add(onceKey);
 		const shown = unconfirmedServerIds.slice(0, 4);
@@ -629,7 +638,7 @@ function buildCoverageNotice(
 	);
 	if (anyLinterHasCoverage) return undefined;
 
-	const onceKey = `${ctx.kind}:${normalizeMapKey(ctx.filePath)}`;
+	const onceKey = `${ctx.kind}:${ctx.filePath}`;
 	if (coverageNoticeSeen.has(onceKey)) return undefined;
 	coverageNoticeSeen.add(onceKey);
 
@@ -833,14 +842,14 @@ async function runGroup(
 							runnerId: runner.id,
 							from: observedTier,
 							to: tier,
-							projectRoot: normalizeMapKey(projectRoot),
+							projectRoot,
 						},
 					});
 				}
 				if (tier === "collect-later") {
 					incrementDegradationCount({
 						kind: "runner-collect-later",
-						subject: `${normalizeMapKey(projectRoot)}:${runner.id}`,
+						subject: `${projectRoot}:${runner.id}`,
 						reason: `observed ${durationMs}ms, threshold ${COLLECT_LATER_THRESHOLD_MS}ms`,
 					});
 				}
@@ -915,14 +924,14 @@ async function runGroup(
 					runnerId: runner.id,
 					from: observedTier,
 					to: tier,
-					projectRoot: normalizeMapKey(projectRoot),
+					projectRoot,
 				},
 			});
 		}
 		if (tier === "collect-later") {
 			incrementDegradationCount({
 				kind: "runner-collect-later",
-				subject: `${normalizeMapKey(projectRoot)}:${runner.id}`,
+				subject: `${projectRoot}:${runner.id}`,
 				reason: `observed ${duration}ms, threshold ${COLLECT_LATER_THRESHOLD_MS}ms`,
 			});
 		}
@@ -1055,8 +1064,13 @@ export async function dispatchForFile(
 
 	// Count baseline warnings before filtering (for delta count display)
 	const relativeKey = path.relative(ctx.cwd, ctx.filePath).replace(/\\/g, "/");
-	const baselineAbsKey = `session.baseline.${normalizeMapKey(ctx.filePath)}`;
-	const baselineRelKey = `session.baseline.${normalizeMapKey(relativeKey)}`;
+	const baselineAbsKey = `session.baseline.${ctx.filePath}`;
+	// #2016: `relativeKey` is relative to `ctx.cwd`. `normalizeMapKey` resolved
+	// it against the process cwd instead, so on Windows this "relative" key
+	// became an absolute path anchored on the wrong root while POSIX left it
+	// relative. Both the read here and the write below use this const, so the
+	// key stays self-consistent within a session.
+	const baselineRelKey = `session.baseline.${normalizeEphemeralMapKey(relativeKey)}`;
 	const previousBaseline = ctx.deltaMode
 		? (ctx.facts.getSessionFact<Diagnostic[]>(baselineAbsKey) ??
 			ctx.facts.getSessionFact<Diagnostic[]>(baselineRelKey))
