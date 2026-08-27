@@ -623,9 +623,11 @@ describe("live PR body resolution (#2085)", () => {
 		vi.stubEnv("GITHUB_REPOSITORY", "apmantza/pi-lens");
 		vi.stubEnv("GITHUB_TOKEN", "test-token");
 		const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
-		const fetchImpl = vi.fn().mockResolvedValue(
-			new Response(JSON.stringify({ body: null }), { status: 200 }),
-		);
+		const fetchImpl = vi
+			.fn()
+			.mockResolvedValue(
+				new Response(JSON.stringify({ body: null }), { status: 200 }),
+			);
 
 		try {
 			expect(await resolveLivePrBody(payloadPr, fetchImpl)).toBe("");
