@@ -171,7 +171,8 @@ const KERNEL_EVIDENCE_SECTION =
 	/--- kernel OOM\/kill records ---\r?\n([\s\S]*?)(?=\r?\n---|\r?\n?$)/;
 const KERNEL_NO_RECORDS =
 	/\(dmesg readable, zero OOM\/kill records - the kernel OOM killer did not fire\)/;
-const KERNEL_UNAVAILABLE = /\(dmesg unavailable or empty - no evidence either way\)/;
+const KERNEL_UNAVAILABLE =
+	/\(dmesg unavailable or empty - no evidence either way\)/;
 const CGROUP_EVENTS_SECTION =
 	/--- cgroup memory\.events ---\r?\n([\s\S]*?)(?=\r?\n---|\r?\n?$)/;
 const CGROUP_OOM_KILL_LINE = /^oom_kill\s+(\d+)/m;
@@ -182,7 +183,14 @@ const CGROUP_OOM_KILL_LINE = /^oom_kill\s+(\d+)/m;
  * resolves the process's own cgroup, so an absent/unreadable file is a
  * distinct outcome from "found it, counter is zero").
  *
- * @param {string} log
+ * Exported standalone for unit testing, but only ever CALLED internally
+ * (from classifyFailureLog / describeKernelKillEvidence) on the
+ * timestamp-stripped log, after stripLineTimestamps has run. Every real
+ * GitHub Actions log line carries a per-line ISO-8601 prefix, which shifts
+ * this function's section-header regex off the start of the line; called
+ * directly on a RAW log, it returns null even when the section is present.
+ *
+ * @param {string} log timestamp-stripped log text
  * @returns {number | null} the counter, or null when the section is absent
  *   or the file could not be read
  */
