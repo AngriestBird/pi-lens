@@ -433,12 +433,15 @@ const WORD_INDEX_RECOMPACT_STORE_FLOOR = 64;
  * accumulate proportionally to the index, so recompaction fires once per many
  * edits rather than once per edit.
  *
- * Memory ceiling: the store count can reach `fraction * vocabulary` private
+ * Memory ceiling: the store count can reach a tenth of the vocabulary in private
  * stores before a repack, each carrying a fixed header plus growth slack. #2117
  * measured the fully-churned ceiling (every token private, store count =
- * vocabulary) at +22% resident. At this fraction the peak is a quarter of that
- * store count, so the added resident memory stays near +5% — well inside the
- * +22% #2117 accepted. Measured on this repository's corpus in PR #2246.
+ * vocabulary) at +22% resident. The cost does not scale with the store count
+ * alone, because the tokens that churn most are also the ones carrying the
+ * longest posting lists. PR #2246's adversarial hot-token probe measured this
+ * gate at +13.7% resident at rest and +19.9% peak over base — inside the +22%
+ * #2117 accepted, but not by the wide margin a naive store-count ratio would
+ * predict. Raising the fraction further would cross that bound.
  */
 const WORD_INDEX_RECOMPACT_STORE_FRACTION = 0.1;
 

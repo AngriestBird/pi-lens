@@ -915,6 +915,43 @@ describe("triggerBackgroundWordIndexBuild (#348 cold-query stampede guard)", () 
 		expect(recompactions).toBeLessThan(40);
 	});
 
+	// #2246 review F2: the 64-store FLOOR needs its own red. The proportional
+	// half of the gate is pinned above, but on a small index the floor IS the
+	// gate, and dropping `Math.max(64, ...)` leaves a single-digit threshold that
+	// repacks a small corpus on nearly every edit. That mutation used to red only
+	// the wall-clock occupancy bound in word-index-per-edit.test.ts, which #2254
+	// replaces with a work count — so without this test the floor loses its guard.
+	// Deterministic by construction: it counts repacks, not milliseconds.
+	it("keeps the 64-store floor governing a small index (#2246)", async () => {
+		const DOCS = 40;
+		const REVISIONS = 2;
+		// A deliberately tiny vocabulary: two shared tokens plus one unique token
+		// per document, so `0.1 * postings.size` is single digits and the 64-store
+		// floor is what actually gates. This is the regime the floor exists for.
+		const doc = (revision: number, id: number) => ({
+			path: `src/small${id}.ts`,
+			content: `sharedalpha sharedbeta uniquetoken${revision}x${id}`,
+		});
+
+		const index = buildWordIndex(
+			Array.from({ length: DOCS }, (_unused, id) => doc(0, id)),
+		);
+		// Not vacuous: the proportional term really is below the floor here, so
+		// dropping the floor changes the threshold instead of being masked by it.
+		expect(Math.floor(index.postings.size * 0.1)).toBeLessThan(64);
+		resetDegradationLedger();
+		for (let revision = 1; revision <= REVISIONS; revision += 1) {
+			for (let id = 0; id < DOCS; id += 1) {
+				updateWordIndexDocument(index, doc(revision, id));
+				await new Promise((resolve) => setImmediate(resolve));
+			}
+		}
+		await flushWordIndexRecompactionsForTests(index);
+		// With the floor, 80 edits on this corpus repack a handful of times.
+		// Dropping `Math.max(64, ...)` repacks on nearly every edit.
+		expect(recompactionCount()).toBeLessThan(15);
+	});
+
 	// #2117 review F2: the cooperative compactor sizes the arena from a snapshot,
 	// then yields. A synchronous edit that grows a not-yet-adopted list during a
 	// yield made the pre-fix `adoptArena` write past the arena, and V8 silently
