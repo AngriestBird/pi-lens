@@ -255,6 +255,73 @@ describe("instance-registry multi-root (#2130)", () => {
 		});
 	});
 
+	describe("the resource footprint reports every root (#2130)", () => {
+		function entry(roots: { projectRoot?: string; projectRoots?: string[] }) {
+			return {
+				pid: 1,
+				startedAt: "2026-08-26T00:00:00.000Z",
+				heartbeatAt: "2026-08-26T00:00:00.000Z",
+				rssBytes: 0,
+				lspChildCount: 0,
+				lspChildren: [],
+				projectRoot: "",
+				...roots,
+			};
+		}
+
+		it("carries the whole set for a multi-root host", async () => {
+			// The under-report: `pilens_health` projected ONE root per instance, so
+			// a host serving a subagent's temp worktree looked single-rooted there
+			// while `instances.json` listed both.
+			const { computeResourceFootprint } =
+				await import("../../clients/instance-registry.js");
+			const footprint = computeResourceFootprint([
+				entry({
+					projectRoot: "/primary",
+					projectRoots: ["/primary", "/tmp/worktree-a"],
+				}),
+			]);
+			expect(footprint.perInstance[0].projectRoots).toEqual([
+				"/primary",
+				"/tmp/worktree-a",
+			]);
+			expect(footprint.perInstance[0].projectRoot).toBe("/primary");
+		});
+
+		it("folds a pre-#2130 entry to a one-element set, never undefined", async () => {
+			const { computeResourceFootprint } =
+				await import("../../clients/instance-registry.js");
+			const footprint = computeResourceFootprint([
+				entry({ projectRoot: "/legacy" }),
+			]);
+			expect(footprint.perInstance[0].projectRoots).toEqual(["/legacy"]);
+		});
+
+		it("resolves the scalar from the set when a torn entry lost it", async () => {
+			// `getInstanceRoots` is the single reader precisely so a projection
+			// cannot disagree with the set. Reading `entry.projectRoot` directly
+			// reported the empty scalar for a shape the set answers cleanly.
+			const { computeResourceFootprint } =
+				await import("../../clients/instance-registry.js");
+			const footprint = computeResourceFootprint([
+				entry({ projectRoots: ["/a", "/b"] }),
+			]);
+			expect(footprint.perInstance[0].projectRoot).toBe("/a");
+		});
+
+		it("getResourceFootprint reports both roots this pid registered", async () => {
+			const { registerInstance, registerInstanceRoot, getResourceFootprint } =
+				await import("../../clients/instance-registry.js");
+			await registerInstance(realRoot);
+			await registerInstanceRoot(tempRoot);
+
+			const footprint = await getResourceFootprint(() => true);
+			const mine = footprint.perInstance.find((i) => i.pid === process.pid);
+			expect(mine?.projectRoots).toHaveLength(2);
+			expect(mine?.projectRoots[1]).toContain(path.basename(tempRoot));
+		});
+	});
+
 	describe("selectLivePeerInstances sees SECONDARY roots (#2007 / #2107)", () => {
 		function peerEntry(roots: string[]) {
 			return {
