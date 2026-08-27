@@ -228,18 +228,16 @@ describe("runGitConfigGuardSetup one-time warn (#2251 fix round F2)", () => {
 		// The returned teardown closure resolves its config path via
 		// teardown()'s own process.cwd() (unchanged production behavior — only
 		// setup's baseline snapshot is cwd-injectable), so chdir into the
-		// fixture for the duration of this test to exercise it faithfully.
+		// fixture for the duration of this test to exercise it faithfully. A
+		// single try/finally spans BOTH the chdir-dependent calls so a throw
+		// from either one still restores cwd — leaving cwd inside `dir` would
+		// make the afterEach cleanup's rmSync fail (EPERM: can't remove a
+		// directory that is the current working directory on Windows).
 		const originalCwd = process.cwd();
 		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-		let teardown: () => void;
 		try {
 			process.chdir(dir);
-			teardown = runGitConfigGuardSetup(dir);
-		} finally {
-			warn.mockRestore();
-		}
-
-		try {
+			const teardown = runGitConfigGuardSetup(dir);
 			// A DIFFERENT fixture value appears mid-run: real contamination, not
 			// just the pre-existing baseline "t".
 			fs.writeFileSync(
@@ -249,6 +247,7 @@ describe("runGitConfigGuardSetup one-time warn (#2251 fix round F2)", () => {
 			expect(() => teardown()).toThrow(/known fixture identity/);
 		} finally {
 			process.chdir(originalCwd);
+			warn.mockRestore();
 		}
 	});
 });
