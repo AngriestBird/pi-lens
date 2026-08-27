@@ -30,7 +30,24 @@ import {
 } from "../../clients/word-index-store.js";
 import { KIND_EXTENSIONS } from "../../clients/file-kinds.js";
 import { loadProjectSnapshot } from "../../clients/project-snapshot.js";
+import {
+	getDegradationSummary,
+	resetDegradationLedger,
+} from "../../clients/degradation-ledger.js";
 import { createTempFile, setupTestEnvironment } from "./test-utils.js";
+
+/**
+ * Arena repacks recorded so far, read from the degradation ledger's own
+ * `word-index-arena-recompact` tally (#2117) rather than a parallel counter —
+ * `recompactWordIndexPostingsIfNeeded` bumps that ledger once per repack.
+ */
+function recompactionCount(): number {
+	return (
+		getDegradationSummary().find(
+			(group) => group.kind === "word-index-arena-recompact",
+		)?.count ?? 0
+	);
+}
 
 describe("splitIdentifier", () => {
 	it("splits camelCase and keeps the whole identifier", () => {
@@ -843,6 +860,59 @@ describe("triggerBackgroundWordIndexBuild (#348 cold-query stampede guard)", () 
 		} finally {
 			env.cleanup();
 		}
+	});
+
+	// #2246: the recompaction gate is a share of the vocabulary, not a flat 64
+	// stores. The flat gate was crossed by every edit — one replacement raises the
+	// store estimate by the edited document's distinct-token count (hundreds) — so
+	// the whole O(vocab) arena was rebuilt per edit. On a large-vocabulary index
+	// the proportional gate must fire a bounded number of times over many edits,
+	// while still firing at least once so churn cannot grow the arena without end.
+	//
+	// The loop turns the event loop between edits, the way a real session lands
+	// one edit per turn: the scheduled recompaction is a fire-and-forget async job
+	// coalesced by a single-flight, so without a turn a whole synchronous burst
+	// collapses into one repack and the gate's frequency is never exercised.
+	//
+	// Red-first proof: with the pre-#2246 flat 64-store gate (restore
+	// clients/word-index.ts from origin/master), the same fixture repacks once
+	// per edit — measured 297 of 300 — so the `toBeLessThan(40)` bound fails.
+	it("recompacts a share of the vocabulary, not once per edit (#2246)", async () => {
+		const DOCS = 100;
+		const REVISIONS = 3;
+		const TOKENS_PER_DOC = 40;
+		// Every document carries a disjoint token block, so the vocabulary is large
+		// (~4,000) and the proportional threshold (10% ≈ 400 stores) sits well above
+		// the 64-store floor. A flat 64 gate would repack far more often here.
+		const doc = (revision: number, id: number) => ({
+			path: `src/module${id}.ts`,
+			content: Array.from(
+				{ length: TOKENS_PER_DOC },
+				(_unused, t) =>
+					`const tokenR${revision}D${id}N${t} = valueR${revision}D${id}N${t};`,
+			).join("\n"),
+		});
+
+		const index = buildWordIndex(
+			Array.from({ length: DOCS }, (_unused, id) => doc(0, id)),
+		);
+		expect(index.postings.size).toBeGreaterThan(640); // 0.1 * size > 64 floor
+		resetDegradationLedger();
+		// Replace every document three times with fresh disjoint tokens, turning the
+		// loop between edits so each edit's scheduled repack can run before the next.
+		for (let revision = 1; revision <= REVISIONS; revision += 1) {
+			for (let id = 0; id < DOCS; id += 1) {
+				updateWordIndexDocument(index, doc(revision, id));
+				await new Promise((resolve) => setImmediate(resolve));
+			}
+		}
+		await flushWordIndexRecompactionsForTests(index);
+		const recompactions = recompactionCount();
+		// Bounded: the proportional gate repacks on the order of the churn-to-
+		// threshold ratio, not once per edit. 300 edits over a ~4,000-token
+		// vocabulary repacks under 40 times; the flat 64 gate does it ~300 times.
+		expect(recompactions).toBeGreaterThan(0);
+		expect(recompactions).toBeLessThan(40);
 	});
 
 	// #2117 review F2: the cooperative compactor sizes the arena from a snapshot,
