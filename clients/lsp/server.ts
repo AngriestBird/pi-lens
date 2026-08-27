@@ -3041,6 +3041,19 @@ export const BashServer: LSPServerInfo = {
 	name: "Bash Language Server",
 	extensions: [".bash", ".sh", ".zsh"],
 	root: FileDirRoot,
+	// #2194 bounded the installer's own verification at 20s; the dispatch
+	// touch's client-wait floor stayed at the shared 5s default, so a cold
+	// spawn could still race that budget and read as unavailable even after
+	// installer verification cleared it. Match the installer bound (#2169).
+	// `initializeTimeoutMs` matches it too: the measured cold start
+	// (9,667ms, #2194) has headroom under the unraised 15s default, but
+	// leaving the two fields mismatched is the same latent shape that made
+	// the Prisma/Vue raise a no-op (fix-round F1, #2233) — a slower host
+	// than the one measured would still hit the 15s inner kill despite the
+	// caller being willing to wait 20s. Equalizing costs nothing on the
+	// success path and removes the mismatch outright.
+	clientWaitTimeoutMs: 20_000,
+	initializeTimeoutMs: 20_000,
 	spawn(root, options) {
 		return resolveAndLaunch(
 			{
@@ -3153,6 +3166,13 @@ export const JsonServer: LSPServerInfo = {
 			[".git"],
 		]),
 	),
+	// See BashServer above: the installer's 20s verification bound (#2194)
+	// does not, on its own, raise the dispatch touch's cold-spawn wait floor.
+	// Mirror it here so a cold spawn cannot lose that race either (#2169).
+	// `initializeTimeoutMs` matches it for the same reason as BashServer
+	// above (fix-round F1, #2233).
+	clientWaitTimeoutMs: 20_000,
+	initializeTimeoutMs: 20_000,
 	spawn(root, options) {
 		return resolveAndLaunch(
 			{
@@ -3215,6 +3235,17 @@ export const PrismaServer: LSPServerInfo = {
 	root: RootWithFallback(
 		createRootDetector(["prisma/schema.prisma", "schema.prisma"]),
 	),
+	// Matches the installer's 40s verification bound above (#2169): the
+	// dispatch touch's cold-spawn wait floor defaults to 5s and would
+	// otherwise time the client out well before the binary answers.
+	// `initializeTimeoutMs` MUST be set alongside it (RubyServer's own
+	// precedent below): unset, it falls back to the 15s
+	// `INITIALIZE_TIMEOUT_MS` default in `clients/lsp/client.ts`, which
+	// hard-kills the child mid-handshake — a real cold Prisma run measured
+	// up to 27.3s, so the spawn would die there before this wait ever gets
+	// a chance to matter (fix-round F1, #2233).
+	clientWaitTimeoutMs: 40_000,
+	initializeTimeoutMs: 40_000,
 	spawn(root, options) {
 		return resolveAndLaunch(
 			{
@@ -3246,6 +3277,15 @@ export const VueServer: LSPServerInfo = {
 			]),
 		),
 	),
+	// Vue's launcher loads the full language-service bundle before answering,
+	// matching the installer's 30s verification bound (#2176). The dispatch
+	// touch's cold-spawn wait floor defaults to 5s and needs the same raise so
+	// a cold spawn cannot time out there instead. `initializeTimeoutMs` MUST
+	// match: unset, it falls back to the 15s default in `clients/lsp/client.ts`
+	// and hard-kills a cold spawn (measured up to 22.6s in #2188, 16.2s here)
+	// mid-handshake before this wait can matter (fix-round F1, #2233).
+	clientWaitTimeoutMs: 30_000,
+	initializeTimeoutMs: 30_000,
 	async spawn(root, options) {
 		const tsserverPath = await findTsserverPath(root, options?.allowInstall);
 
@@ -3296,6 +3336,13 @@ export const SvelteServer: LSPServerInfo = {
 			]),
 		),
 	),
+	// Matches the installer's 20s verification bound above (#2169): the
+	// dispatch touch's cold-spawn wait floor defaults to 5s and would
+	// otherwise time the client out well before the binary answers.
+	// `initializeTimeoutMs` matches it for the same reason as BashServer
+	// above (fix-round F1, #2233).
+	clientWaitTimeoutMs: 20_000,
+	initializeTimeoutMs: 20_000,
 	async spawn(root, options) {
 		const tsserverPath = await findTsserverPath(root, options?.allowInstall);
 		const proc = await resolveAndLaunch(
