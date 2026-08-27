@@ -1069,12 +1069,32 @@ export class RuntimeCoordinator {
 	}
 
 	/**
-	 * #1950: count one more turn end that re-served this record while `stale`.
-	 * The caller (`runtime-turn.ts`) only calls this for a `"dependency-drift"`
-	 * demotion — a `"past-eof"` demotion retires after its own single
-	 * delivery (#1944, `retireDemotedPastEofBlocker`) and never accumulates a
-	 * count. Returns the new count, or 0 when there is no entry to count
-	 * against (already retired, or never recorded).
+	 * #1950 fix-round F1: read the current delivery count WITHOUT committing
+	 * an increment. `runtime-turn.ts` needs the count a delivery would reach
+	 * BEFORE it knows whether that delivery will actually reach the agent —
+	 * the turn-end signature dedupe (`turn-end-findings-last`) can suppress a
+	 * turn whose rendered content is identical to the last one, and a
+	 * suppressed turn must not advance the counter (the agent never saw it).
+	 * The caller peeks, renders the tentative body, and only calls
+	 * {@link incrementInlineBlockerStaleDelivery} once it knows the turn's
+	 * content is NOT being suppressed.
+	 */
+	peekInlineBlockerStaleDeliveryCount(filePath: string): number {
+		const key = path.resolve(filePath);
+		return this._pendingInlineBlockers.get(key)?.staleDeliveryCount ?? 0;
+	}
+
+	/**
+	 * #1950: commit one more turn end that re-served this record while
+	 * `stale`. The caller (`runtime-turn.ts`) only calls this for a
+	 * `"dependency-drift"` demotion — a `"past-eof"` demotion retires after
+	 * its own single delivery (#1944, `retireDemotedPastEofBlocker`) and
+	 * never accumulates a count — and only AFTER confirming the turn's
+	 * content will not be suppressed by the signature dedupe (see
+	 * {@link peekInlineBlockerStaleDeliveryCount}), so this counts ACTUAL
+	 * deliveries the agent saw, not turn-end loop iterations. Returns the new
+	 * count, or 0 when there is no entry to count against (already retired,
+	 * or never recorded).
 	 */
 	incrementInlineBlockerStaleDelivery(filePath: string): number {
 		const key = path.resolve(filePath);

@@ -620,6 +620,17 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	const unresolvedBlockers = runtime.getInlineBlockersSnapshot();
 	/** #1944/#1950: demotions retired after their delivery limit. */
 	let demotedFindingsRetired = 0;
+	/**
+	 * #1950 fix-round F1: dependency-drift delivery-count commits, deferred
+	 * until this turn's content is confirmed NOT suppressed by the
+	 * `turn-end-findings-last` signature dedupe further down. That dedupe
+	 * silences a turn whose rendered content is byte-identical to the last
+	 * one actually delivered — the agent never sees a suppressed turn, so
+	 * committing the counter for it would count a delivery that didn't
+	 * happen. Each entry here is invoked only from the "not suppressed"
+	 * branch below.
+	 */
+	const pendingDependencyDriftDeliveries: Array<() => void> = [];
 	for (const {
 		filePath: bPath,
 		summary,
@@ -641,7 +652,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			// session.
 			const deadLines = blockerPastEof.deadLinesByPath.get(bPath) ?? [];
 			const degraded = degradeDemotedFindingBody(summary, { deadLines });
-			let retired = runtime.retireDemotedPastEofBlocker(bPath, deadLines);
+			const retired = runtime.retireDemotedPastEofBlocker(bPath, deadLines);
 			let retirementNote: string | undefined;
 			if (retired) {
 				demotedFindingsRetired += 1;
@@ -660,20 +671,33 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				// SAME demoted-but-unconfirmed record re-serves, and incident data
 				// showed repeat deliveries carrying near-zero information after the
 				// first. Cap it at DEPENDENCY_DRIFT_MAX_DELIVERIES instead.
-				const deliveryCount =
-					runtime.incrementInlineBlockerStaleDelivery(bPath);
-				if (deliveryCount >= DEPENDENCY_DRIFT_MAX_DELIVERIES) {
-					retired = runtime.retireDemotedDependencyDriftBlocker(bPath);
-					if (retired) {
-						demotedFindingsRetired += 1;
-						incrementDegradationCount({
-							kind: "demoted-finding-retired",
-							subject: `inline-blocker:${displayPath}`,
-							reason: `capped after ${deliveryCount} deliveries with no re-run; re-run can still confirm`,
-						});
-						retirementNote = formatDeliveryCapNote(deliveryCount);
-					}
+				//
+				// The count driving THIS render is a peek (fix-round F1): the actual
+				// increment is deferred to `pendingDependencyDriftDeliveries` below,
+				// committed only once this turn's content is known to reach the
+				// agent, so a suppressed turn's tentative render never advances the
+				// stored count.
+				const tentativeCount =
+					runtime.peekInlineBlockerStaleDeliveryCount(bPath) + 1;
+				if (tentativeCount >= DEPENDENCY_DRIFT_MAX_DELIVERIES) {
+					retirementNote = formatDeliveryCapNote(tentativeCount);
 				}
+				pendingDependencyDriftDeliveries.push(() => {
+					const deliveryCount =
+						runtime.incrementInlineBlockerStaleDelivery(bPath);
+					if (deliveryCount >= DEPENDENCY_DRIFT_MAX_DELIVERIES) {
+						const capRetired =
+							runtime.retireDemotedDependencyDriftBlocker(bPath);
+						if (capRetired) {
+							demotedFindingsRetired += 1;
+							incrementDegradationCount({
+								kind: "demoted-finding-retired",
+								subject: `inline-blocker:${displayPath}`,
+								reason: `capped after ${deliveryCount} deliveries with no re-run; re-run can still confirm`,
+							});
+						}
+					}
+				});
 			}
 			// @delivery-surface: runtime-turn:unresolved-inline-blocker
 			advisoryParts.push(
@@ -2666,6 +2690,10 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			resetFormatService();
 			return;
 		}
+		// #1950 fix-round F1: this turn's content is confirmed NOT suppressed —
+		// it is about to reach the agent — so NOW commit the delivery-count
+		// increments the per-blocker loop above only tentatively computed.
+		for (const commit of pendingDependencyDriftDeliveries) commit();
 		const fileSeqByPath: Record<string, number> = {};
 		for (const [filePath, seq] of runtime.getFileSeqEntries()) {
 			fileSeqByPath[normalizeMapKey(path.resolve(filePath))] = seq;
