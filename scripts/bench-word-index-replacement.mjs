@@ -1,18 +1,27 @@
 #!/usr/bin/env node
 /**
- * Relative attribution smoke check for the synchronous per-edit word-index
- * replacement seam (#2067).
+ * Per-edit word-index replacement bench (#2067).
  *
- * The workload deliberately makes the edited document appear in a shared
- * posting list. It is not a reproduction of the issue's 2.2M-posting corpus
- * and its latency is not a cross-machine performance claim. Run after build:
+ * Measures the cost the cascade seam pays for ONE document replacement, on a
+ * corpus read from a real source tree (this repository by default), so the
+ * posting-entry count is in the same range as the issue's field measurement
+ * rather than a synthetic fixture's. Run after `npm run build`:
  *
- *   node scripts/bench-word-index-replacement.mjs
+ *   node scripts/bench-word-index-replacement.mjs \
+ *     [--corpus <dir>] [--edits N] [--target-bytes N]
  *
- * The inspector profile is self-sample based. It reports the replacement
- * latency distribution and the share attributed to normalizeEphemeralMapKey,
- * so the acceptance numbers can be reproduced without a machine-specific
- * `--prof-process` installation.
+ * It reports, for both replacement primitives:
+ *   - latency distribution per edit (wall clock)
+ *   - the longest synchronous stretch the edit held the event loop
+ *
+ * The synchronous column is what the cascade seam used to call; the cooperative
+ * column is what it calls now. It also reports the share of CPU samples
+ * attributed to `normalizeEphemeralMapKey` (acceptance criterion 2) and checks
+ * that both primitives leave a byte-identical index and identical BM25 output
+ * for a fixed query set (acceptance criterion 5).
+ *
+ * The inspector profile is self-sample based, so the attribution reproduces
+ * without a machine-specific `--prof-process` installation.
  */
 import * as inspector from "node:inspector";
 import * as path from "node:path";
@@ -20,25 +29,138 @@ import { performance } from "node:perf_hooks";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const args = process.argv.slice(2);
+const readArg = (flag, fallback) => {
+	const at = args.indexOf(flag);
+	return at >= 0 && args[at + 1] !== undefined ? args[at + 1] : fallback;
+};
+const corpusRoot = path.resolve(readArg("--corpus", root));
+const editCount = Number(readArg("--edits", "60"));
+
 const wordIndexUrl = pathToFileURL(
 	path.join(root, "clients", "word-index.js"),
 ).href;
-const { buildWordIndex, updateWordIndexDocument } = await import(wordIndexUrl);
+const {
+	buildWordIndex,
+	collectWordIndexDocs,
+	countWordIndexPostingEntries,
+	searchWordIndex,
+	serializeWordIndex,
+	updateWordIndexDocument,
+	updateWordIndexDocumentForEdit,
+} = await import(wordIndexUrl);
 
-const corpusSize = 2600;
-const lineCount = 1600;
-const targetPath = "src/bench-target.ts";
-const corpus = Array.from({ length: corpusSize }, (_, file) => ({
-	path: file === 0 ? targetPath : `src/bench-${file}.ts`,
-	content: Array.from(
-		{ length: file === 0 ? lineCount : 8 },
-		(_, line) => `export function sharedPostingHandler${line}() {}`,
-	).join("\n"),
-}));
-const index = buildWordIndex(corpus);
+const QUERIES = [
+	"word index posting",
+	"cascade neighbour budget",
+	"availability policy latch",
+	"normalize map key",
+	"degradation ledger",
+	"tree sitter grammar",
+	"lsp diagnostics",
+	"persist debounce",
+];
+
+const docs = await collectWordIndexDocs(corpusRoot);
+if (docs.length < 500) {
+	throw new Error(
+		`corpus ${corpusRoot} yielded only ${docs.length} documents; pass --corpus <larger tree>`,
+	);
+}
+// Acceptance criterion 1 names a 20 KB document, and the issue's per-size table
+// shows replacement cost rising with document size, so edit the documents
+// closest to that size rather than an arbitrary slice of the corpus.
+const targetBytes = Number(readArg("--target-bytes", "20480"));
+const sizeOf = (doc) => Buffer.byteLength(doc.content, "utf8");
+const targets = [...docs]
+	.sort(
+		(a, b) =>
+			Math.abs(sizeOf(a) - targetBytes) - Math.abs(sizeOf(b) - targetBytes),
+	)
+	.slice(0, editCount);
+
+function ranked(index) {
+	return QUERIES.map((query) => [
+		query,
+		searchWordIndex(index, query, { limit: 5 }).map((result) => [
+			result.file,
+			Number(result.score.toFixed(6)),
+			result.hits,
+			result.lines,
+		]),
+	]);
+}
+
+/**
+ * Replace every target document, sampling the event loop from an independent
+ * self-rescheduling tick so the longest synchronous stretch is measured rather
+ * than inferred from wall-clock duration.
+ */
+async function run(label, replace) {
+	const index = buildWordIndex(docs);
+	const durations = [];
+	const blocks = [];
+	let maxBlockMs = 0;
+	let running = true;
+	let last = process.hrtime.bigint();
+	const tick = () => {
+		const now = process.hrtime.bigint();
+		const lagMs = Number(now - last) / 1e6;
+		if (lagMs > maxBlockMs) maxBlockMs = lagMs;
+		last = now;
+		if (running) setImmediate(tick);
+	};
+	setImmediate(tick);
+	for (const target of targets) {
+		const content = `${target.content}\nexport const benchMarker = 1;`;
+		// Turn the event loop between edits: a real session never lands two edits
+		// inside one loop turn, and without this the synchronous variant's queued
+		// recompactions never get to run, which flatters it.
+		await new Promise((resolve) => setImmediate(resolve));
+		maxBlockMs = 0;
+		const started = performance.now();
+		if (!(await replace(index, { path: target.path, content }))) {
+			throw new Error(`${label}: replacement was not available`);
+		}
+		durations.push(performance.now() - started);
+		await new Promise((resolve) => setImmediate(resolve));
+		blocks.push(maxBlockMs);
+	}
+	running = false;
+	await new Promise((resolve) => setImmediate(resolve));
+	const stats = (values) => {
+		const sorted = [...values].sort((a, b) => a - b);
+		return {
+			mean: values.reduce((sum, value) => sum + value, 0) / values.length,
+			p50: sorted[Math.floor((sorted.length - 1) * 0.5)],
+			p95: sorted[Math.floor((sorted.length - 1) * 0.95)],
+			max: sorted[sorted.length - 1],
+		};
+	};
+	return {
+		label,
+		index,
+		latency: stats(durations),
+		block: stats(blocks),
+	};
+}
+
+const probe = buildWordIndex(docs);
+console.log(`corpus root: ${corpusRoot}`);
+console.log(`corpus documents: ${docs.length}`);
+console.log(`posting entries: ${countWordIndexPostingEntries(probe)}`);
+console.log(`distinct tokens: ${probe.postings.size}`);
+console.log(`edits: ${targets.length}`);
+console.log(
+	`target bytes: mean ${Math.round(
+		targets.reduce((sum, doc) => sum + sizeOf(doc), 0) / targets.length,
+	)}, min ${Math.min(...targets.map(sizeOf))}, max ${Math.max(
+		...targets.map(sizeOf),
+	)}`,
+);
+
 const session = new inspector.Session();
 session.connect();
-
 function post(method, params = {}) {
 	return new Promise((resolve, reject) => {
 		session.post(method, params, (error, result) =>
@@ -47,19 +169,24 @@ function post(method, params = {}) {
 	});
 }
 
+const syncRun = await run("synchronous", (index, doc) =>
+	updateWordIndexDocument(index, doc),
+);
+
 await post("Profiler.enable");
 await post("Profiler.start");
-const durations = [];
-for (let edit = 0; edit < 300; edit += 1) {
-	const content = `${corpus[0].content}\nexport const edit${edit} = sharedPostingHandler0;`;
-	const started = performance.now();
-	if (!updateWordIndexDocument(index, { path: targetPath, content })) {
-		throw new Error("word-index replacement was not available");
-	}
-	durations.push(performance.now() - started);
-}
+const asyncRun = await run("cooperative", (index, doc) =>
+	updateWordIndexDocumentForEdit(index, doc),
+);
 const { profile } = await post("Profiler.stop");
 session.disconnect();
+
+const row = (name, s) =>
+	`${name}: mean ${s.mean.toFixed(1)} ms, p50 ${s.p50.toFixed(1)} ms, p95 ${s.p95.toFixed(1)} ms, max ${s.max.toFixed(1)} ms`;
+for (const result of [syncRun, asyncRun]) {
+	console.log(row(`${result.label} latency per edit`, result.latency));
+	console.log(row(`${result.label} sync block per edit`, result.block));
+}
 
 const samples = profile.samples ?? [];
 const nodes = new Map((profile.nodes ?? []).map((node) => [node.id, node]));
@@ -67,7 +194,6 @@ const parents = new Map();
 for (const node of nodes.values()) {
 	for (const childId of node.children ?? []) parents.set(childId, node.id);
 }
-const selfSamples = samples.length;
 const normalizerSamples = samples.filter((sample) => {
 	let nodeId = sample;
 	while (nodeId !== undefined) {
@@ -79,18 +205,40 @@ const normalizerSamples = samples.filter((sample) => {
 	}
 	return false;
 }).length;
-const sorted = [...durations].sort((a, b) => a - b);
-const percentile = (p) => sorted[Math.floor((sorted.length - 1) * p)];
-const mean =
-	durations.reduce((sum, value) => sum + value, 0) / durations.length;
-
-console.log(`corpus documents: ${corpusSize}`);
-console.log(`target bytes: ${Buffer.byteLength(corpus[0].content, "utf8")}`);
-console.log(`replacement mean: ${mean.toFixed(3)} ms`);
-console.log(`replacement p50: ${percentile(0.5).toFixed(3)} ms`);
-console.log(`replacement p95: ${percentile(0.95).toFixed(3)} ms`);
-console.log(`replacement max: ${Math.max(...durations).toFixed(3)} ms`);
 console.log(
-	`normalizeEphemeralMapKey: ${((100 * normalizerSamples) / Math.max(1, selfSamples)).toFixed(3)}% of samples`,
+	`normalizeEphemeralMapKey: ${(
+		(100 * normalizerSamples) /
+		Math.max(1, samples.length)
+	).toFixed(3)}% of ${samples.length} samples`,
 );
-console.log(`profile samples: ${selfSamples}`);
+
+const selfByFrame = new Map();
+for (const sample of samples) {
+	const node = nodes.get(sample);
+	if (!node) continue;
+	const frame = node.callFrame ?? {};
+	const where = `${frame.functionName || "(anonymous)"} ${path.basename(
+		frame.url || "",
+	)}:${(frame.lineNumber ?? -1) + 1}`;
+	selfByFrame.set(where, (selfByFrame.get(where) ?? 0) + 1);
+}
+console.log("top self-time frames (cooperative run):");
+for (const [where, count] of [...selfByFrame]
+	.sort((a, b) => b[1] - a[1])
+	.slice(0, 12)) {
+	console.log(
+		`  ${((100 * count) / Math.max(1, samples.length)).toFixed(1).padStart(5)}%  ${where}`,
+	);
+}
+
+const identicalIndex =
+	JSON.stringify(serializeWordIndex(syncRun.index)) ===
+	JSON.stringify(serializeWordIndex(asyncRun.index));
+const identicalRanking =
+	JSON.stringify(ranked(syncRun.index)) ===
+	JSON.stringify(ranked(asyncRun.index));
+console.log(`serialized index identical: ${identicalIndex}`);
+console.log(
+	`BM25 output identical over ${QUERIES.length} queries: ${identicalRanking}`,
+);
+if (!identicalIndex || !identicalRanking) process.exitCode = 1;

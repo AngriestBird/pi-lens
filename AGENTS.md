@@ -1011,9 +1011,14 @@ posting entry keeps the index-owned shared file string, while `fileTable` maps
 the canonical `wordIndexKey` to that string. Removal and async refresh compare
 posting identities; they must never call `wordIndexKey(hit.file)`. Snapshot wire
 format v2 remains `[fileIdx, line]`; load rebuilds the table and shared refs.
-The cascade per-edit seam deliberately uses the synchronous replacement variant:
-unawaited concurrent cascades must not yield across a wholesale posting snapshot.
-Cooperative async variants are serialized per index and remain for bulk refresh.
+The cascade per-edit seam uses the cooperative replacement variant
+(`updateWordIndexDocumentForEdit`), which is the async primitive plus the
+arena-recompaction gate the synchronous one carried. Unawaited concurrent
+cascades are ordered, not interleaved, because every async operation on one
+index chains through that index's operation queue in call order. Bulk refresh
+must not use the per-edit primitive: one refreshed document raises the store
+count by its distinct-token count, so a per-document recompaction schedule
+would fire between nearly every pair of documents.
 When touching this seam, keep posting-entry counts and replacement-cost scalars
 in word-index telemetry. #2069 intentionally builds on this prerequisite.
 Incremental replacement churn recompacts the arena once churn passes 64 backing
