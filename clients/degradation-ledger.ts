@@ -104,6 +104,21 @@ export type DegradationKind =
 	| "query-predicates-invalid"
 	| "install-retry-exhausted"
 	| "ast-grep-napi-unavailable"
+	/**
+	 * The napi fallback ADMITTED a file — its extension is in the in-process
+	 * language matrix (`clients/dispatch/runners/ast-grep-napi.ts`) — and the
+	 * addon that actually loaded then exposed no grammar for it, so every rule
+	 * for that language is skipped in-process for the rest of the session
+	 * (#2215). Before this kind that skip was the invisible half of the defect:
+	 * `getLang` returned undefined and each caller read it as an ordinary
+	 * "nothing to do", the AGENTS.md shape-10 clean-versus-unavailable
+	 * collapse. Unreachable while the matrix and the addon agree (the coverage
+	 * test pins that), so a record here means a napi upgrade dropped a grammar
+	 * or the matrix claims one the package never shipped. Subject is the rule
+	 * language rather than the file, because the gap is per-language: recorded
+	 * once, not once per file.
+	 */
+	| "ast-grep-napi-language-unavailable"
 	/** An availability probe exceeded its advertised wall-clock budget (#2131). */
 	| "availability-probe-overrun"
 	/**
