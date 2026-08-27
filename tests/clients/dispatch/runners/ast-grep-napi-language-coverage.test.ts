@@ -10,7 +10,8 @@
  * addon has no grammar for were skipped with nothing saying so. This file is
  * the net for both halves:
  *
- * - Every extension routed to this runner (`KIND_EXTENSIONS` jsts/css/html) is
+ * - Every extension routed to this runner (`KIND_EXTENSIONS` jsts/css/html,
+ *   all three reaching it through dispatch `appliesTo` since #2248) is
  *   either served or carries a recorded reason.
  * - Every extension `canHandle` admits resolves a real grammar on the addon
  *   that actually loaded — the "admitted then silently skipped" shape.
@@ -323,5 +324,22 @@ describe("admitted-but-unparseable language is recorded (#2215)", () => {
 	it("records nothing for an extension the matrix never admitted", () => {
 		expect(napi.getLang("main.go", sgModule)).toBeUndefined();
 		expect(languageGap()).toBeUndefined();
+	});
+
+	// #2248 acceptance criterion 2: the kinds `appliesTo` declares must equal the
+	// kinds the napi matrix actually serves, derived from `canHandle` over the
+	// registered extensions -- not a hand-written list. Dropping a served kind
+	// from `appliesTo` (the pre-#2248 defect) or declaring an unserved one reds
+	// this without any per-kind fixture.
+	it("appliesTo matches the kinds the napi matrix serves (#2248)", async () => {
+		const runner = (
+			await import("../../../../clients/dispatch/runners/ast-grep-napi.js")
+		).default;
+		const byCodeUnit = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
+		const servedKinds = Object.entries(KIND_EXTENSIONS)
+			.filter(([, exts]) => exts.some((ext) => napi.canHandle("probe" + ext)))
+			.map(([kind]) => kind)
+			.sort(byCodeUnit);
+		expect([...runner.appliesTo].sort(byCodeUnit)).toEqual(servedKinds);
 	});
 });
