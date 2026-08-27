@@ -1,4 +1,4 @@
-// Unit tests for the CI failure classifier (#2103): infra-oom / infra-net /
+// Unit tests for the CI failure classifier (#2103): infra-kill / infra-net /
 // real, plus the once-per-SHA rerun guard and the sticky-comment upsert
 // shape.
 //
@@ -7,10 +7,11 @@
 // hand-write a fixture for an external system's behavior):
 //   - real-assertion-failure.real.log: run 32913518938, job 98012237782
 //     (fetch: `gh api repos/apmantza/pi-lens/actions/jobs/98012237782/logs`)
-//   - infra-oom-wrapper-killed.real.log: run 32908647308 attempt 1, job
-//     97998085238 -- the OOM killer took the with-memory-watch.mjs wrapper
-//     itself, so there is no "[mem-watch] done"/"KILLED" verdict line at all
-//   - infra-oom-bare-killed-pre-wrapper.real.log: run 32888174877 (PR #2058,
+//   - infra-kill-wrapper-killed.real.log: run 32908647308 attempt 1, job
+//     97998085238 -- the with-memory-watch.mjs wrapper was killed after its
+//     last sample but before it could print a "[mem-watch] done"/"KILLED"
+//     verdict line
+//   - infra-kill-bare-killed-pre-wrapper.real.log: run 32888174877 (PR #2058,
 //     pre-#2042), job 97933472353 -- predates the wrapper entirely, so a
 //     bare "Killed" is the only signal
 //   - real-failure-then-oom-kill.composite.log (review round 1, F2/P1): a
@@ -42,7 +43,9 @@ import {
 	buildMarker,
 	classifyFailureLog,
 	decideClassifierAction,
+	describeKernelKillEvidence,
 	parseClassifierMarker,
+	readCgroupOomKillCount,
 	runClassifier,
 	shouldTriggerRerun,
 } from "../../scripts/lib/ci-failure-classifier.mjs";
@@ -69,9 +72,9 @@ describe("classifyFailureLog (#2103)", () => {
 
 	it("classifies the wrapper-as-victim OOM shape (no mem-watch verdict at all)", () => {
 		const result = classifyFailureLog(
-			fixture("infra-oom-wrapper-killed.real.log"),
+			fixture("infra-kill-wrapper-killed.real.log"),
 		);
-		expect(result.kind).toBe("infra-oom");
+		expect(result.kind).toBe("infra-kill");
 		// The real log's last sample before the kill (line 30 of the fixture) --
 		// proves the classifier reads the actual samples rather than emitting a
 		// generic "OOM happened" string with no evidence behind it.
@@ -80,11 +83,11 @@ describe("classifyFailureLog (#2103)", () => {
 
 	it("classifies the pre-#2042 bare-Killed OOM shape (no wrapper existed yet)", () => {
 		const result = classifyFailureLog(
-			fixture("infra-oom-bare-killed-pre-wrapper.real.log"),
+			fixture("infra-kill-bare-killed-pre-wrapper.real.log"),
 		);
-		expect(result.kind).toBe("infra-oom");
+		expect(result.kind).toBe("infra-kill");
 		expect(result.detail).toContain(
-			"no [mem-watch] verdict line -- the OOM killer took the wrapper itself",
+			"no [mem-watch] verdict line -- the run ended before any verdict was printed",
 		);
 	});
 
@@ -97,8 +100,88 @@ describe("classifyFailureLog (#2103)", () => {
 		const log =
 			"...\n[mem-watch] KILLED — no failing assertion means the OS reclaimed memory, not a test failure. signal=SIGKILL totalMb=15990 lowWaterAvailableMb=102 lowWaterAt=12:00:00\n##[error]Process completed with exit code 137.\n";
 		const result = classifyFailureLog(log);
-		expect(result.kind).toBe("infra-oom");
+		expect(result.kind).toBe("infra-kill");
 		expect(result.detail).toContain("[mem-watch] KILLED");
+	});
+
+	// #2230's re-home comment on #2103, point 1: ci.yml's "Kernel kill
+	// evidence" step (`if: failure()`) runs inside the SAME job as "Run
+	// tests", so its dmesg/cgroup output is already in the log this module
+	// reads. UNVERIFIED (AGENTS.md shape 16): no real captured log with this
+	// step's output exists yet (both real OOM fixtures predate the step), so
+	// these sections are built from the step's own echoed strings in ci.yml
+	// (lines 194-231), quoted verbatim, not guessed. Additive only: kind and
+	// the rerun decision are unchanged either way.
+	describe("kernel kill-evidence enrichment (#2103, additive, UNVERIFIED)", () => {
+		it("appends a dmesg OOM hit to the detail", () => {
+			const log =
+				`${fixture("infra-kill-wrapper-killed.real.log")}\n` +
+				"--- kernel OOM/kill records ---\n" +
+				"[12345.678901] Out of memory: Killed process 2464 (npm) total-vm:123456kB\n" +
+				"--- systemd-oomd ---\n";
+			const result = classifyFailureLog(log);
+			expect(result.kind).toBe("infra-kill");
+			expect(result.detail).toContain(
+				"kernel evidence: dmesg -- [12345.678901] Out of memory: Killed process 2464 (npm) total-vm:123456kB",
+			);
+		});
+
+		it("appends a cgroup oom_kill counter to the detail", () => {
+			const log =
+				`${fixture("infra-kill-wrapper-killed.real.log")}\n` +
+				"--- cgroup memory.events ---\n" +
+				"cgroup=/actions_job file=/sys/fs/cgroup/actions_job/memory.events\n" +
+				"low 0\nhigh 0\nmax 3\noom 1\noom_kill 1\n";
+			const result = classifyFailureLog(log);
+			expect(result.kind).toBe("infra-kill");
+			expect(result.detail).toContain("kernel evidence: cgroup oom_kill=1");
+		});
+
+		it("notes when dmesg and cgroup both show no records, without changing kind", () => {
+			const log =
+				`${fixture("infra-kill-wrapper-killed.real.log")}\n` +
+				"--- kernel OOM/kill records ---\n" +
+				"(dmesg readable, zero OOM/kill records - the kernel OOM killer did not fire)\n" +
+				"--- systemd-oomd ---\n" +
+				"(journalctl unavailable)\n" +
+				"--- cgroup memory.events ---\n" +
+				"cgroup=/actions_job file=/sys/fs/cgroup/actions_job/memory.events\n" +
+				"low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\n";
+			const result = classifyFailureLog(log);
+			expect(result.kind).toBe("infra-kill");
+			expect(result.detail).toContain(
+				"kernel evidence: dmesg and cgroup both show no OOM/kill records",
+			);
+		});
+
+		it("adds nothing when the kernel kill-evidence step never ran (today's real fixtures)", () => {
+			// Mutation-proof for "additive": this is the exact real fixture with
+			// NO kernel-evidence section, so the enrichment must be a no-op --
+			// the pre-#2230 detail text is unchanged.
+			const result = classifyFailureLog(
+				fixture("infra-kill-wrapper-killed.real.log"),
+			);
+			expect(result.detail).not.toContain("kernel evidence");
+		});
+	});
+
+	describe("describeKernelKillEvidence / readCgroupOomKillCount (unit, #2103)", () => {
+		it("returns null when the log has no kernel-evidence section", () => {
+			expect(describeKernelKillEvidence("plain log, no sections\n")).toBeNull();
+			expect(readCgroupOomKillCount("plain log, no sections\n")).toBeNull();
+		});
+
+		it("returns null when dmesg is unavailable and cgroup file is unreadable", () => {
+			const log =
+				"--- kernel OOM/kill records ---\n" +
+				"(dmesg unavailable or empty - no evidence either way)\n" +
+				"--- systemd-oomd ---\n" +
+				"(journalctl unavailable)\n" +
+				"--- cgroup memory.events ---\n" +
+				"(memory.events absent or unreadable from '/actions_job' up to root - no cgroup evidence either way)\n";
+			expect(describeKernelKillEvidence(log)).toBeNull();
+			expect(readCgroupOomKillCount(log)).toBeNull();
+		});
 	});
 
 	it("classifies a getaddrinfo/DNS network failure as infra-net (UNVERIFIED shape, see file header)", () => {
@@ -115,7 +198,7 @@ describe("classifyFailureLog (#2103)", () => {
 	// noise from a different tool) -- the real classification must win.
 	it("never labels a log infra when it also contains a FAIL block, even alongside Killed/137 noise", () => {
 		const log =
-			`${fixture("infra-oom-wrapper-killed.real.log")}\n` +
+			`${fixture("infra-kill-wrapper-killed.real.log")}\n` +
 			`${fixture("real-assertion-failure.real.log")}`;
 		const result = classifyFailureLog(log);
 		expect(result.kind).toBe("real");
@@ -143,12 +226,12 @@ describe("classifyFailureLog (#2103)", () => {
 	// assertion red (the log falls through to the "otherwise real" default
 	// either way, but only because of that conjunct -- see the probe log in
 	// the PR body).
-	it("F1: a bare 'Killed' with NO exit-137/SIGKILL evidence anywhere is NOT infra-oom", () => {
+	it("F1: a bare 'Killed' with NO exit-137/SIGKILL evidence anywhere is NOT infra-kill", () => {
 		const log =
 			"some-subprocess: Killed by user request, exiting cleanly\n" +
 			"##[error]Process completed with exit code 1.\n";
 		const result = classifyFailureLog(log);
-		expect(result.kind).not.toBe("infra-oom");
+		expect(result.kind).not.toBe("infra-kill");
 	});
 
 	// F2/P1 (BLOCKING): an OOM kill immediately after a test's inline failure
@@ -236,7 +319,7 @@ describe("classifyFailureLog (#2103)", () => {
 	// title -- an unanchored BARE_FAIL_LINE fabricated "tests/b.test.ts" as
 	// the failing file and misclassified a genuine OOM kill as real (safe
 	// direction, but reimposes the manual-read tax this classifier exists to
-	// remove). Fixture: real OOM-kill log (infra-oom-wrapper-killed.real.log)
+	// remove). Fixture: real OOM-kill log (infra-kill-wrapper-killed.real.log)
 	// with that exact fabricated-title line spliced in among the passing
 	// tests -- every surrounding byte is the real capture; only the inserted
 	// line is synthetic.
@@ -244,7 +327,7 @@ describe("classifyFailureLog (#2103)", () => {
 		const result = classifyFailureLog(
 			fixture("fabricated-fail-in-passing-title.composite.log"),
 		);
-		expect(result.kind).toBe("infra-oom");
+		expect(result.kind).toBe("infra-kill");
 	});
 });
 
@@ -277,7 +360,7 @@ describe("marker round-trip (#2103)", () => {
 });
 
 describe("shouldTriggerRerun once-per-SHA guard (#2103)", () => {
-	const infra = { kind: "infra-oom" as const, detail: "no failing assertion" };
+	const infra = { kind: "infra-kill" as const, detail: "no failing assertion" };
 	const real = {
 		kind: "real" as const,
 		detail: "some/file.test.ts > some test",
@@ -360,7 +443,7 @@ describe("shouldTriggerRerun once-per-SHA guard (#2103)", () => {
 	});
 
 	it("simulates two consecutive classifier passes on the same SHA end-to-end via decideClassifierAction", () => {
-		const rawLog = fixture("infra-oom-wrapper-killed.real.log");
+		const rawLog = fixture("infra-kill-wrapper-killed.real.log");
 		const sha = "deadbeef";
 
 		const first = decideClassifierAction({
@@ -438,7 +521,7 @@ describe("runClassifier orchestration against a mocked, STATEFUL GitHub API (#21
 		concurrentInvocations?: number;
 	} = {}) {
 		const calls: Array<{ method: string; url: string; body?: unknown }> = [];
-		const rawLog = fixture("infra-oom-wrapper-killed.real.log");
+		const rawLog = fixture("infra-kill-wrapper-killed.real.log");
 		const comments = [...initialComments];
 		let nextId = comments.reduce((max, c) => Math.max(max, c.id), 100) + 1;
 		let rerunCallCount = 0;
@@ -554,7 +637,7 @@ describe("runClassifier orchestration against a mocked, STATEFUL GitHub API (#21
 			runId: 999,
 		});
 
-		expect(result.classification.kind).toBe("infra-oom");
+		expect(result.classification.kind).toBe("infra-kill");
 		expect(result.rerunTriggeredThisPass).toBe(true);
 
 		const posted = calls.find(
@@ -562,7 +645,7 @@ describe("runClassifier orchestration against a mocked, STATEFUL GitHub API (#21
 		);
 		expect(posted).toBeDefined();
 		expect((posted?.body as { body: string }).body).toContain(
-			"ci-classifier: infra-oom",
+			"ci-classifier: infra-kill",
 		);
 		expect((posted?.body as { body: string }).body).toContain(
 			"auto-rerun triggered",
@@ -573,7 +656,7 @@ describe("runClassifier orchestration against a mocked, STATEFUL GitHub API (#21
 	});
 
 	it("updates the existing sticky comment in place instead of posting a second one, and skips the rerun once already triggered for this SHA", async () => {
-		const priorBody = `ci-classifier: infra-oom (no failing assertion; auto-rerun triggered) ${buildMarker("deadbeef", "true")}`;
+		const priorBody = `ci-classifier: infra-kill (no failing assertion; auto-rerun triggered) ${buildMarker("deadbeef", "true")}`;
 		const { fetcher, calls } = makeStatefulApi({
 			initialComments: [{ id: 555, body: priorBody }],
 		});
@@ -740,12 +823,12 @@ describe("runClassifier orchestration against a mocked, STATEFUL GitHub API (#21
 describe("buildCommentBody (#2103)", () => {
 	it("renders one visible line with the marker trailing on the same line", () => {
 		const body = buildCommentBody({
-			classification: { kind: "infra-oom", detail: "no failing assertion" },
+			classification: { kind: "infra-kill", detail: "no failing assertion" },
 			sha: "abc1234",
 			rerunState: "true",
 		});
 		expect(body.split("\n")).toHaveLength(1);
-		expect(body).toContain("ci-classifier: infra-oom");
+		expect(body).toContain("ci-classifier: infra-kill");
 		expect(body).toContain("auto-rerun triggered");
 		expect(body).toContain(buildMarker("abc1234", "true"));
 	});

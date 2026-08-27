@@ -64,11 +64,22 @@ export interface WardenResult {
 	runHealth: WardenRunHealthSummary | null;
 }
 
+/**
+ * #2192: `errors` are `WardenError` records, not strings. Both consumers used
+ * to map every list error to `benign: false`; classification now happens once,
+ * at the source, so a routine UPDATED_AT window slide cannot redden the run.
+ */
 export function fetchOpenPullRequests(
 	fetcher: FetchFn,
 	owner: string,
 	name: string,
-): Promise<{ prs: WardenPr[]; errors: string[] }>;
+): Promise<{ prs: WardenPr[]; errors: WardenError[] }>;
+
+/**
+ * How many repeated PR numbers one cross-page duplicate record names before it
+ * reports a remainder count instead (#2192).
+ */
+export const DUPLICATE_REPORT_CAP: number;
 export function decideActions(pr: WardenPr): WardenAction[];
 export function classifyActionFailure(
 	action: WardenAction,

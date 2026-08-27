@@ -307,7 +307,21 @@ export function lintPrBody(body = "", options = {}) {
 	return { valid: errors.length === 0, errors };
 }
 
-async function fetchLivePrBody(payloadPr, fetchImpl) {
+/**
+ * Strict live-body fetch: throws instead of swallowing, on a missing token,
+ * a non-2xx response, or a malformed body. `resolveLivePrBody` below wraps
+ * this for the advisory body LINTER, where degrading to the stale payload
+ * on any hiccup is the right posture. It is the wrong posture for a
+ * post-merge verification GATE (#2267 F2): a gate that silently passes on
+ * a fetch failure is indistinguishable from a gate that actually checked
+ * and found nothing wrong. check-close-keywords.mjs's --verify-merged path
+ * calls this directly and fails closed (exitCode=1, ::error::) instead.
+ *
+ * @param {{ number: number, body?: string | null }} payloadPr
+ * @param {typeof fetch} fetchImpl
+ * @returns {Promise<string>}
+ */
+export async function fetchLivePrBody(payloadPr, fetchImpl) {
 	const token = process.env.GITHUB_TOKEN;
 	if (!token) throw new Error("GITHUB_TOKEN is not set");
 	const apiUrl = process.env.GITHUB_API_URL;
@@ -327,9 +341,9 @@ async function fetchLivePrBody(payloadPr, fetchImpl) {
 	);
 	if (!response.ok) throw new Error(`GitHub API returned ${response.status}`);
 	const data = await response.json();
-	if (typeof data.body !== "string")
+	if (data.body !== null && typeof data.body !== "string")
 		throw new Error("GitHub API returned no body");
-	return data.body;
+	return data.body ?? "";
 }
 
 export async function resolveLivePrBody(

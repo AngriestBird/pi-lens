@@ -802,6 +802,17 @@ The shipped ast-grep catalog includes `no-bare-host-path-in-win32-branch`
 guarded by `isWindowsPath` or `isFullyQualifiedWin32`; host-default path calls
 elsewhere, including the valid fallback arm of a ternary, remain allowed.
 
+The YAML ast-grep rules cache snapshots every discovered rule file with
+`mtimeMs` and size, metadata only — no content hashing. `getCachedRules`
+serves the bundled tier, which is immutable per install, so it inherits
+`clients/cache/rule-cache.ts`'s documented content-confirm exemption; adding
+a content hash here cost a measured 8000x on a per-file hot path (#2292).
+A 2 s freshness cadence bounds re-stat work; rule-edit pickup lag is bounded
+by one cadence. It must detect edits to existing files and additions below
+nested rule directories; directory mtime alone is insufficient on supported
+filesystems. A same-size, same-mtime edit is invisible by design on this
+tier. (#2262)
+
 ### Caches, durable stores, and path keys
 
 Advisory caches must carry immutable capture provenance and validate it again
@@ -1205,6 +1216,18 @@ when `hasNextPage` remains true at `MAX_PAGES` or the cursor does not advance.
 It deduplicates PR numbers before `runWarden` decides or applies actions. Its
 consumer prints that error and sets a nonzero exit code, while deliberately
 bounded sibling reads remain scoped.
+
+A repeated PR number is recorded, but it is NOT automatically fatal (#2192).
+The query orders by `UPDATED_AT` descending, so a PR updated mid-pagination
+shifts the window and lands on the next page too. That is a routine boundary
+repeat, and the same rule that keeps benign HTTP races out of the fatal channel
+applies to it. The reader classifies by CURSOR: a duplicate on a page whose
+cursor advanced (or on the last page) is `benign: true`; a duplicate on a page
+whose cursor did not advance is real truncation and stays fatal. The record is
+one per page, naming the count and the first `DUPLICATE_REPORT_CAP` numbers,
+not one per repeated node. `fetchOpenPullRequests` returns
+`{ message, benign }` records, so both consumers read one classification rather
+than each deciding for itself.
 
 The warden also classifies what Actions did with each open PR head
 (`scripts/lib/warden-run-health.mjs`, #2184). A run that concluded
@@ -2357,7 +2380,7 @@ One feed of pi-lens's out-of-band activity (autofix/format writes, diagnostic di
 
 ### `pilens:diagnostics` — the second bus surface (#502)
 
-`clients/diagnostics-publish.ts` is a sibling module to `bus-publish.ts` (not folded into it — it owns its own module state: a `reportedDirtyPaths` set for clean-transition tracking and a `seq` counter), sharing only the `PI_LENS_BUS_PUBLISH` kill switch and the `pi.events.emit` binding wired at the same `index.ts` call site. It extends the #482 family from "which files changed" to "what pi-lens knows about them" — feeding terminal-native diff/review extensions (e.g. an interactive diff-review surface, split/unified diff rendering) rich enough data to render pi-lens's findings as inline annotations in THEIR views, rather than pi-lens owning a review UI.
+`clients/diagnostics-publish.ts` is a sibling module to `bus-publish.ts` (not folded into it — it owns its own module state: a `reportedDirtyPaths` set for clean-transition tracking and a `seq` counter), sharing only the `PI_LENS_BUS_PUBLISH` kill switch and the `pi.events.emit` binding wired at the same `index.ts` call site. It extends the #482 family from "which files changed" to "what pi-lens knows about them" — feeding terminal-native diff/review extensions (e.g. an interactive diff-review surface, split/unified diff rendering) rich enough data to render pi-lens's findings as inline annotations in THEIR views, rather than pi-lens owning a review UI. `tests/config/diagnostics-bus-conformance.test.ts` pins its publisher census and the intentional broadcast-only empty subscriber census.
 
 **Emission seam:** `publishDiagnostics` fires in `clients/pipeline.ts` immediately after `recordDiagnostics` (`clients/widget-state.ts`) commits a write batch's final per-file diagnostic set — i.e. after format, autofix, and dispatch have all run for that batch. This is deliberate: it guarantees the event reflects post-batch LATEST state, never an intermediate runner result, because `recordDiagnostics` is itself the single point where the batch's diagnostic outcome becomes final.
 

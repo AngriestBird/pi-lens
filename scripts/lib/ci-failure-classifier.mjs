@@ -150,8 +150,89 @@ const NET_PATTERN =
 const ERROR_PREFIXED_LINE = /^(?:.*\bnpm error\b.*|##\[error\].*)$/im;
 
 /**
- * @typedef {{ kind: "real" | "infra-oom" | "infra-net", detail: string }} Classification
+ * @typedef {{ kind: "real" | "infra-kill" | "infra-net", detail: string }} Classification
  */
+
+// #2230's re-home comment on #2103: a kill with confirmed available memory
+// headroom is not an OOM, so the classification `kind` must not say
+// "infra-oom" for either shape. `.github/workflows/ci.yml`'s "Kernel kill
+// evidence" step runs `if: failure()` inside the SAME job as "Run tests", so
+// its dmesg/cgroup output already lives in the log this module reads --
+// nothing new to fetch, just something in the log this module wasn't reading.
+//
+// UNVERIFIED (AGENTS.md shape 16): no real captured Unit-tests log with this
+// step's output on hand yet -- the two real OOM fixtures in
+// tests/fixtures/ci-failure-logs/ predate the step. The patterns below match
+// the step's OWN echoed strings verbatim (ci.yml lines 194-231), not a guess,
+// and are additive: they only enrich `detail`, never change `kind` or the
+// rerun decision, so a log without this section (every fixture on hand today)
+// classifies exactly as before.
+const KERNEL_EVIDENCE_SECTION =
+	/--- kernel OOM\/kill records ---\r?\n([\s\S]*?)(?=\r?\n---|\r?\n?$)/;
+const KERNEL_NO_RECORDS =
+	/\(dmesg readable, zero OOM\/kill records - the kernel OOM killer did not fire\)/;
+const KERNEL_UNAVAILABLE =
+	/\(dmesg unavailable or empty - no evidence either way\)/;
+const CGROUP_EVENTS_SECTION =
+	/--- cgroup memory\.events ---\r?\n([\s\S]*?)(?=\r?\n---|\r?\n?$)/;
+const CGROUP_OOM_KILL_LINE = /^oom_kill\s+(\d+)/m;
+
+/**
+ * Reads the "Kernel kill evidence" step's cgroup `oom_kill` counter out of
+ * the same log, when that step ran and found the file (ci.yml:216-231
+ * resolves the process's own cgroup, so an absent/unreadable file is a
+ * distinct outcome from "found it, counter is zero").
+ *
+ * Exported standalone for unit testing, but only ever CALLED internally
+ * (from classifyFailureLog / describeKernelKillEvidence) on the
+ * timestamp-stripped log, after stripLineTimestamps has run. Every real
+ * GitHub Actions log line carries a per-line ISO-8601 prefix, which shifts
+ * this function's section-header regex off the start of the line; called
+ * directly on a RAW log, it returns null even when the section is present.
+ *
+ * @param {string} log timestamp-stripped log text
+ * @returns {number | null} the counter, or null when the section is absent
+ *   or the file could not be read
+ */
+export function readCgroupOomKillCount(log) {
+	const section = CGROUP_EVENTS_SECTION.exec(log);
+	if (!section) return null;
+	const match = CGROUP_OOM_KILL_LINE.exec(section[1]);
+	return match ? Number(match[1]) : null;
+}
+
+/**
+ * Summarizes whatever the kernel kill-evidence step recorded, for appending
+ * to a kill classification's detail. Returns null when the step's output
+ * isn't in the log at all (older runs, or a job that never reached that
+ * `if: failure()` step) -- silence there means "nothing to add", not "no
+ * evidence".
+ *
+ * @param {string} log
+ * @returns {string | null}
+ */
+export function describeKernelKillEvidence(log) {
+	const cgroupCount = readCgroupOomKillCount(log);
+	if (cgroupCount !== null && cgroupCount > 0) {
+		return `kernel evidence: cgroup oom_kill=${cgroupCount}`;
+	}
+	const dmesgSection = KERNEL_EVIDENCE_SECTION.exec(log);
+	if (dmesgSection) {
+		const body = dmesgSection[1].trim();
+		if (KERNEL_NO_RECORDS.test(body)) {
+			return cgroupCount === 0
+				? "kernel evidence: dmesg and cgroup both show no OOM/kill records"
+				: "kernel evidence: dmesg shows no OOM/kill records";
+		}
+		if (!KERNEL_UNAVAILABLE.test(body) && body.length > 0) {
+			return `kernel evidence: dmesg -- ${body.split(/\r?\n/)[0]}`;
+		}
+	}
+	if (cgroupCount === 0) {
+		return "kernel evidence: cgroup shows zero OOM kills";
+	}
+	return null;
+}
 
 /**
  * Find the strongest "this is a real failure" signal in the (already
@@ -234,19 +315,25 @@ export function classifyFailureLog(rawLog) {
 
 	const killedVerdict = MEM_WATCH_KILLED.exec(log);
 	if (killedVerdict) {
-		return {
-			kind: "infra-oom",
-			detail: `no failing assertion; ${killedVerdict[0].trim()}`,
-		};
+		const evidence = describeKernelKillEvidence(log);
+		const detail = `no failing assertion; ${killedVerdict[0].trim()}${evidence ? `; ${evidence}` : ""}`;
+		return { kind: "infra-kill", detail };
 	}
 
 	if (KILLED_LINE.test(log) && EXIT_137_SHAPED.test(log)) {
 		const samples = log.match(MEM_WATCH_SAMPLE);
 		const lastSample = samples?.[samples.length - 1]?.trim();
-		const detail = lastSample
+		// #2230's re-home comment on #2103, point 2: when nothing survived to
+		// print a verdict, naming "the OOM killer" asserts a cause this branch
+		// never measured -- a pre-#2042 log (no wrapper ever ran) and a wrapper
+		// killed mid-sample both land here with identical evidence: none. State
+		// only what was observed.
+		const evidence = describeKernelKillEvidence(log);
+		const baseDetail = lastSample
 			? `no failing assertion; last sample before the kill: ${lastSample}`
-			: "no failing assertion; no [mem-watch] verdict line -- the OOM killer took the wrapper itself";
-		return { kind: "infra-oom", detail };
+			: "no failing assertion; no [mem-watch] verdict line -- the run ended before any verdict was printed";
+		const detail = `${baseDetail}${evidence ? `; ${evidence}` : ""}`;
+		return { kind: "infra-kill", detail };
 	}
 
 	const errorLine = ERROR_PREFIXED_LINE.exec(log);
@@ -358,8 +445,9 @@ export function shouldTriggerRerun({ classification, sha, existingMarker }) {
 }
 
 /**
- * Build the one-line sticky comment body (issue #2103's own examples:
- * "ci-classifier: infra-oom (0 assertions; auto-rerun triggered)" /
+ * Build the one-line sticky comment body (issue #2103's own examples, kind
+ * renamed to infra-kill per #2103's re-home comment on PR #2230:
+ * "ci-classifier: infra-kill (0 assertions; auto-rerun triggered)" /
  * "ci-classifier: real — first failure: <file> > <test>"), with the
  * machine-readable marker appended on the same line so the comment stays
  * one visible line and is still upsertable per SHA.

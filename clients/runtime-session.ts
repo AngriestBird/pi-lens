@@ -82,7 +82,6 @@ import {
 	readProjectSnapshotMeta,
 	saveRuntimeProjectSnapshot,
 } from "./project-snapshot.js";
-import { clearTsconfigPathsCache } from "./review-graph/tsconfig-paths.js";
 import type { RuffClient } from "./ruff-client.js";
 import { scanProjectRules } from "./rules-scanner.js";
 import type { RuntimeCoordinator } from "./runtime-coordinator.js";
@@ -1578,7 +1577,12 @@ function scheduleStartupScans(
 		// Build (or hydrate) the canonical review graph first. The call graph is a
 		// derived projection of that graph, so its freshness is the review graph's
 		// version/signature—not a second source walk and mtime policy.
-		const sessionFacts = new FactStore();
+		// Subject labels this store's capacity-eviction telemetry distinctly
+		// from the other five production FactStore instances (#2243 review
+		// round 3, F1) — this session-start walk runs BEFORE any dispatch and
+		// can visit every file in the project, so a shared subject would let
+		// it consume the dispatch store's once-per-session ledger slot first.
+		const sessionFacts = new FactStore("runtime-session-call-graph");
 		const graph = await buildOrUpdateGraph(analysisRoot, [], sessionFacts);
 		if (!runtime.isCurrentSession(sessionGeneration)) return;
 		const identity = getReviewGraphCacheIdentity(analysisRoot, graph);
@@ -2123,14 +2127,10 @@ export async function handleSessionStart(
 	clearFileTimeSessions();
 	runtime.complexityBaselines.clear();
 	resetDispatchBaselines(ctxCwd);
-	// #806: drop the shared per-directory marker index (and any consumer
-	// cache layered on top, e.g. tsconfig-paths' matcher cache) so a
-	// `.pi-lens.json`/`tsconfig.json`/workspace-manifest edit made between
-	// sessions is picked up fresh instead of only on process restart — this
-	// also fixes #805's mid-session tsconfig staleness (the matcher cache was
-	// previously session-lived with no reset hook at all).
+	// #806: clear the shared per-directory marker index and registered
+	// topology-derived caches only at session start. Mid-session edits are NOT
+	// detected; #805's tsconfig matcher cache follows the same registry reset.
 	resetWorkspaceTopology();
-	clearTsconfigPathsCache();
 	// #2000: opaque-recovery baselines are keyed cwd:generation (unreachable
 	// after reset) and the git-worktree memo must re-probe after a session
 	// that may have seen a non-git dir become one.

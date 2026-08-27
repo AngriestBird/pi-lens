@@ -527,6 +527,33 @@ export const SESSION_STATE_REGISTRY: SessionStateEntry[] = [
 			"Workspace layout is re-derived per session; a new session can open a tree whose markers moved.",
 	},
 	{
+		id: "startup-scan:topology-derived-cache",
+		module: "startup-scan.ts",
+		state: "startupScanContextCache",
+		policy: "session_start",
+		resetName: "resetWorkspaceTopology",
+		reason:
+			"Startup scan context derives its project-root verdict from workspace marker topology, so the memo must re-arm with that index.",
+	},
+	{
+		id: "language-profile:topology-derived-cache",
+		module: "language-profile.ts",
+		state: "languageProfileCache",
+		policy: "session_start",
+		resetName: "resetWorkspaceTopology",
+		reason:
+			"Language profiles derive configured markers from workspace topology, so the memo must re-arm with that index.",
+	},
+	{
+		id: "tsconfig-paths:topology-derived-caches",
+		module: "review-graph/tsconfig-paths.ts",
+		state: "cache, referencesCache",
+		policy: "session_start",
+		resetName: "resetWorkspaceTopology",
+		reason:
+			"Tsconfig path and project-reference resolutions derive from workspace topology, so both memos must re-arm with that index.",
+	},
+	{
 		id: "workspace-modules:moduleSourceFilesMemo",
 		module: "review-graph/workspace-modules.ts",
 		state: "_moduleSourceFilesMemo",
@@ -539,11 +566,11 @@ export const SESSION_STATE_REGISTRY: SessionStateEntry[] = [
 		id: "review-graph-builder:workspaceGraphCache",
 		module: "review-graph/builder.ts",
 		state:
-			"_workspaceGraphCache, _workspaceCacheEpochs, _sourcePathMemos, _sourcePathNormalizeCalls",
+			"_workspaceGraphCache, _workspaceCacheEpochs, _sourcePathMemos, _sourcePathNormalizeCalls, _retainedGraphSites",
 		policy: "session_start",
 		resetName: "clearReviewGraphWorkspaceCache",
 		reason:
-			"Same reason as the module graph: a cached workspace graph describes one revision of one tree.",
+			"Same reason as the module graph: a cached workspace graph describes one revision of one tree. #2255 adds one memory-attribution companion on the same seam: _retainedGraphSites (WeakRefs to graphs retained outside the cache, cleared with it so a new session never samples the previous one's graphs).",
 	},
 	{
 		id: "ast-grep-napi:loadState",
@@ -1110,7 +1137,7 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	"quiet-window-config.ts": 0,
 	"quiet-window.ts": 0,
 	"recent-touches.ts": 1,
-	"review-graph/builder.ts": 18,
+	"review-graph/builder.ts": 19,
 	"review-graph/git-identity.ts": 0,
 	"review-graph/shared-extraction-ir.ts": 1,
 	"review-graph/workspace-modules.ts": 2,

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // CI failure classifier CLI (#2103). Reads one failed workflow run's Unit
-// tests job log, decides infra-oom / infra-net / real, posts (or updates) one
+// tests job log, decides infra-kill / infra-net / real, posts (or updates) one
 // sticky PR comment, and reruns the failed jobs ONCE per head SHA when the
 // classification is infra. See scripts/lib/ci-failure-classifier.mjs for the
 // decision logic.

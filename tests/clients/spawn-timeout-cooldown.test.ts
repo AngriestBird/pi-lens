@@ -46,9 +46,15 @@ vi.mock("../../clients/tool-policy.js", async (importOriginal) => ({
 	getLinterPolicyForCwd: () => null,
 	markdownlintConfigArgs: () => [],
 }));
+
 import { detectFileChangedAfterCommand } from "../../clients/file-utils.js";
 import { makeRunnerCtx } from "../support/runner-ctx.js";
 import { setupTestEnvironment } from "./test-utils.js";
+
+// #2235: load the real pipeline during module setup. Its import graph is
+// substantial, so awaiting it inside a test makes Vitest's 5000ms test budget
+// measure scheduler contention instead of the cooldown behavior.
+const pipeline = await import("../../clients/pipeline.js");
 
 const TIMEOUT_RESULT = {
 	error: null,
@@ -169,7 +175,6 @@ describe("tryMarkdownlintFix consults the seam (review P2)", () => {
 				phase: "availability",
 			});
 
-			const pipeline = await import("../../clients/pipeline.js");
 			const fixed = await pipeline.tryMarkdownlintFix(filePath, env.tmpDir);
 
 			expect(fixed).toBe(0);

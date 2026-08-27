@@ -311,6 +311,14 @@ function findBinaryOnPath(
 			encoding: "utf-8",
 			stdio: ["ignore", "pipe", "ignore"],
 			env,
+			// #1980 population sweep: this was the one synchronous
+			// child-process site in the repo with no bound at all. It runs on
+			// the LSP server spawn path, so an unresponsive `where`/`which` — a
+			// stale network PATH entry is the classic cause — parked the event
+			// loop with no ceiling, and read as ordinary compute in
+			// `loop_block`. 5s matches `isCommandAvailable`/`findCommand` in
+			// clients/safe-spawn.ts, which run these same two binaries.
+			timeout: 5000,
 		})
 			.split(/\r?\n/)
 			.map((line) => line.trim())

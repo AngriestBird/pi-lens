@@ -58,6 +58,7 @@ describe("managed-tool client seam coverage (#1290)", () => {
 
 		const violations: string[] = [];
 		let ensureToolSignal = 0;
+		let safeSpawnAsyncSignal = 0;
 		for (const file of files) {
 			const relative = path.relative(CLIENTS, file).split(path.sep).join("/");
 			const source = fs
@@ -72,6 +73,11 @@ describe("managed-tool client seam coverage (#1290)", () => {
 			for (const match of source.matchAll(
 				/\bsafeSpawnAsync\s*\(\s*["']([^"']+)["']/g,
 			)) {
+				// #2088 fix round 3, R2: counted for EVERY match, not just the
+				// managed-command subset filtered below -- a positive control on
+				// the regex itself, not on the (already-controlled) violation
+				// path it feeds.
+				safeSpawnAsyncSignal++;
 				if (
 					MANAGED_COMMANDS.has(match[1]) &&
 					relative !== "dispatch/runners/utils/runner-helpers.ts"
@@ -88,6 +94,18 @@ describe("managed-tool client seam coverage (#1290)", () => {
 		assertNonEmptyScan(
 			"managed-tool-seam-coverage: ensureTool( detector signal",
 			ensureToolSignal,
+			13,
+		);
+		// #2088 fix round 3, R2: the review found this detector had NO positive
+		// control at all -- a `safeSpawnAsync(` call shape that stopped
+		// matching (a refactor to a wrapper function, a rename, a different
+		// call convention) would leave `violations` empty forever, which reads
+		// identical to "no bare managed spawns exist" with zero evidence
+		// behind it. 26 literal safeSpawnAsync(<string>) sites measured
+		// 2026-08-27; half rounded up is 13.
+		assertNonEmptyScan(
+			"managed-tool-seam-coverage: safeSpawnAsync( detector signal",
+			safeSpawnAsyncSignal,
 			13,
 		);
 		expect(violations).toEqual([]);
