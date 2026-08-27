@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { resolveLivePrBody } from "./check-pr-body.mjs";
 
 const CLOSE_KEYWORD = /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b/gi;
 const CLOSE_ISSUE = /\s*:?[ \t]*#(\d+)/y;
@@ -105,16 +106,35 @@ function issueState(repository, number) {
 	}
 }
 
-function verifyMergedPullRequest() {
-	const event = eventPayload();
+/**
+ * @param {typeof fetch} [fetchImpl]
+ * @param {object} [event] injectable event payload (tests only; defaults to
+ *   the real GITHUB_EVENT_PATH payload)
+ * @param {(repository: string, number: number) => string} [getIssueState]
+ *   injectable issue-state lookup (tests only; defaults to the real `gh api`
+ *   call)
+ */
+export async function verifyMergedPullRequest(
+	fetchImpl = globalThis.fetch,
+	event = eventPayload(),
+	getIssueState = issueState,
+) {
 	const pullRequest = event.pull_request;
 	const repository = process.env.GITHUB_REPOSITORY;
 	if (!pullRequest || !repository)
 		throw new Error("Pull request event and GITHUB_REPOSITORY are required");
 
-	const { issues } = parseCloseKeywords(pullRequest.body ?? "");
+	// #2086: the closed-event payload's body is a snapshot from when the PR
+	// closed. A rerun of this check after the body was edited post-merge must
+	// see the edit, not replay the stale snapshot. Reuses check-pr-body.mjs's
+	// resolveLivePrBody (PR #2085/#2086's own root-cause sibling) rather than
+	// hand-rolling a second live-body fetch -- same env vars, same
+	// fall-back-with-::warning:: behavior, already covered by that file's own
+	// tests for a missing token, a non-2xx response, and a malformed body.
+	const liveBody = await resolveLivePrBody(pullRequest, fetchImpl);
+	const { issues } = parseCloseKeywords(liveBody);
 	const unresolved = issues
-		.map((number) => ({ number, state: issueState(repository, number) }))
+		.map((number) => ({ number, state: getIssueState(repository, number) }))
 		.filter(({ state }) => state !== "closed");
 	if (unresolved.length === 0) {
 		console.log(
@@ -173,15 +193,16 @@ Post-merge close verification found issue(s) that were not closed: ${details}. G
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
-	try {
+	(async () => {
 		if (process.argv[2] === "--lint-pr") lintPullRequest();
-		else if (process.argv[2] === "--verify-merged") verifyMergedPullRequest();
+		else if (process.argv[2] === "--verify-merged")
+			await verifyMergedPullRequest();
 		else
 			throw new Error(
 				"Usage: node scripts/check-close-keywords.mjs --lint-pr|--verify-merged",
 			);
-	} catch (error) {
+	})().catch((error) => {
 		console.error(error instanceof Error ? error.message : error);
 		process.exitCode = 1;
-	}
+	});
 }
