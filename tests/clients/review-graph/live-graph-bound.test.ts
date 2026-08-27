@@ -1,3 +1,5 @@
+import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
@@ -12,6 +14,9 @@ import {
 	_resetRetainedGraphSitesForTests,
 	_setReviewGraphWorkspaceEntryForTests,
 	_setSessionReviewGraphFactForTests,
+	buildOrUpdateGraph,
+	clearGraphCache,
+	getLastGraphBuildInfo,
 	clearReviewGraphWorkspaceCache,
 	estimateReviewGraphStoreBytes,
 	getReviewGraphWorkspaceCacheSnapshot,
@@ -318,6 +323,35 @@ describe("live review-graph in-memory bound (#2255)", () => {
 		// ...and distinguishable from a walk-truncated graph for the base gates.
 		expect(coverage?.capTrimmed).toBe(true);
 		expect(coverage?.sourceFilesTruncated).toBeUndefined();
+	});
+
+	// F5, the behavior the marker split exists for. Refusing a cap-trimmed graph as
+	// a base put an over-budget repository on a full O(project) walk every turn,
+	// which is worse than the pre-bound behavior it replaced.
+	it("rebuilds incrementally from a cap-trimmed graph instead of walking again", async () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "memcap-base-"));
+		try {
+			const facts = new FactStore();
+			const a = path.join(dir, "a.ts");
+			fs.writeFileSync(a, "export function alphaSymbol() {\n\treturn 1;\n}\n");
+			// Budget of 1 byte: every build this test does is over budget, so the
+			// retained graph is always cap-trimmed.
+			process.env.PI_LENS_GRAPH_MAX_IN_MEMORY_BYTES = "1";
+			await buildOrUpdateGraph(dir, [a], facts);
+			expect(getLastGraphBuildInfo().reused).toBe(false); // full build
+
+			const b = path.join(dir, "b.ts");
+			fs.writeFileSync(b, "export function bravoSymbol() {\n\treturn 2;\n}\n");
+			clearGraphCache(); // drop promise-dedup; keep the warm workspace cache
+
+			await buildOrUpdateGraph(dir, [b], facts);
+
+			const info = getLastGraphBuildInfo();
+			expect(info.reused).toBe(true);
+			expect(info.mode).not.toBe("full");
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
 	});
 
 	it("never persists the process-local base-eligibility marker", () => {

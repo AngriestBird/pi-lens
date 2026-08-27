@@ -768,7 +768,11 @@ function setSessionReviewGraphFact(
 	graph: ReviewGraph,
 ): void {
 	const retained = retainedGraph(cwd, graph);
-	registerRetainedGraph(`fact:${normalizeMapKey(cwd)}`, retained);
+	// The raw `cwd` is the registry key on purpose. Folding it here would add a
+	// `realpath` probe to EVERY build, and the key only has to be stable: the
+	// snapshot deduplicates by graph object IDENTITY, so two spellings of one
+	// workspace cost one extra bounded registry slot and never a double count.
+	registerRetainedGraph(`fact:${cwd}`, retained);
 	facts.setSessionFact("session.reviewGraph", retained);
 }
 
