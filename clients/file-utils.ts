@@ -720,6 +720,23 @@ export function getProjectIgnoreMatcher(rootDir: string): ProjectIgnoreMatcher {
 	const lensConfig = lensConfigInfo(resolvedRoot);
 	const globalSig = globalConfigSignature();
 	const cached = projectIgnoreMatcherCache.get(resolvedRoot);
+	// A path can be discovered during the previous matcher lookup. Publish only
+	// previously unseen sources so a walk cannot replace a pre-edit baseline.
+	//
+	// This runs BEFORE the sweep below, and the order is load-bearing. A nested
+	// source can only be published on a call AFTER the one that consumed it.
+	// With the publish second, the sweep never saw a source during the window in
+	// which it was discovered, yet still reset `lastIgnoreFreshnessCheckMs`, so
+	// the first sweep that could see it ran a FULL cadence later. Pickup was up
+	// to 2x cadence, not 1x: measured stale at 2 s and 3 s, fresh at 4 s. The
+	// baseline is protected by the `known` set, not by the ordering, so moving
+	// the publish earlier cannot let a walk overwrite a pre-edit baseline.
+	if (cached) {
+		const known = new Set(cached.ignoreSources.map((source) => source.path));
+		for (const source of cached.matcher.getConsumedIgnoreSources()) {
+			if (!known.has(source.path)) cached.ignoreSources.push(source);
+		}
+	}
 	if (
 		cached &&
 		Date.now() - cached.lastIgnoreFreshnessCheckMs >=
@@ -742,14 +759,6 @@ export function getProjectIgnoreMatcher(rootDir: string): ProjectIgnoreMatcher {
 					}
 				}
 			}
-		}
-	}
-	// A path can be discovered during the previous matcher lookup. Publish only
-	// previously unseen sources so a walk cannot replace a pre-edit baseline.
-	if (cached) {
-		const known = new Set(cached.ignoreSources.map((source) => source.path));
-		for (const source of cached.matcher.getConsumedIgnoreSources()) {
-			if (!known.has(source.path)) cached.ignoreSources.push(source);
 		}
 	}
 	if (

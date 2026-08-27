@@ -9,6 +9,7 @@ vi.mock("node:fs", async (importOriginal) => {
 
 import {
 	getProjectIgnoreMatcher,
+	isPathIgnoredByProject,
 	PROJECT_IGNORE_FRESHNESS_CADENCE_MS,
 } from "../../clients/file-utils.js";
 import { setupTestEnvironment } from "./test-utils.js";
@@ -124,6 +125,107 @@ describe("nested ignore freshness clock (#2071)", () => {
 			);
 
 			expect(sourceStats()).toBe(1);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("re-arms the shared clock after an unchanged check crosses a window", () => {
+		const env = setupTestEnvironment("pi-lens-2071-rearm-");
+		try {
+			const nested = path.join(env.tmpDir, "package");
+			fs.mkdirSync(nested, { recursive: true });
+			const ignorePath = path.join(nested, ".gitignore");
+			fs.writeFileSync(ignorePath, "generated.ts\n");
+
+			vi.useFakeTimers();
+			const start = Date.now();
+			const matcher = getProjectIgnoreMatcher(env.tmpDir);
+			matcher.isIgnored(path.join(nested, "seed.ts"));
+
+			// Cross the boundary. This check finds no drift, so it must stamp the
+			// entry with the CURRENT time. Without the re-arm the entry keeps its
+			// build time, every later call still reads as expired, and the
+			// per-file stat storm this PR removed comes straight back. The
+			// existing bounded-cost case never crosses a window, so it cannot see
+			// the difference.
+			vi.setSystemTime(start + PROJECT_IGNORE_FRESHNESS_CADENCE_MS + 1);
+
+			const statSpy = vi.spyOn(fs, "statSync");
+			const sourceStats = () =>
+				statSpy.mock.calls.filter(([filePath]) => filePath === ignorePath)
+					.length;
+			statSpy.mockClear();
+
+			// The first of these pays the one boundary-crossing stat. The other
+			// forty-nine are inside the window the re-arm just opened.
+			for (let index = 0; index < 50; index++) {
+				matcher.isIgnored(path.join(nested, `f${index}.ts`));
+			}
+
+			expect(sourceStats()).toBe(1);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("catches a same-size nested edit through the mtime axis", () => {
+		const env = setupTestEnvironment("pi-lens-2071-mtime-axis-");
+		try {
+			const nested = path.join(env.tmpDir, "package");
+			fs.mkdirSync(nested, { recursive: true });
+			const ignorePath = path.join(nested, ".gitignore");
+			// "aaa.ts" and "bbb.ts" are the same length, so only mtime separates
+			// these two rule sets. The #1105 cases pin the size axis by holding
+			// mtime fixed; this is the mirror, and without it the mtime comparison
+			// is removable with every test still green.
+			fs.writeFileSync(ignorePath, "aaa.ts\n");
+			const target = path.join(nested, "bbb.ts");
+
+			vi.useFakeTimers();
+			const start = Date.now();
+			const matcher = getProjectIgnoreMatcher(env.tmpDir);
+			expect(matcher.isIgnored(target)).toBe(false);
+
+			fs.writeFileSync(ignorePath, "bbb.ts\n");
+			expect(fs.statSync(ignorePath).size).toBe(7);
+			vi.setSystemTime(start + PROJECT_IGNORE_FRESHNESS_CADENCE_MS + 1);
+			// A fresh path in the same directory rebuilds the drifted entry and
+			// drops the subtree's verdicts with it.
+			matcher.isIgnored(path.join(nested, "other.ts"));
+
+			expect(matcher.isIgnored(target)).toBe(true);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("publishes a newly discovered nested source before the sweep that must see it", () => {
+		const env = setupTestEnvironment("pi-lens-2071-publish-order-");
+		try {
+			const nested = path.join(env.tmpDir, "package");
+			fs.mkdirSync(nested, { recursive: true });
+			const ignorePath = path.join(nested, ".gitignore");
+			fs.writeFileSync(ignorePath, "placeholder-keep\n");
+			const target = path.join(nested, "x.ts");
+
+			vi.useFakeTimers();
+			const start = Date.now();
+			// Lookup one consumes the nested source for the first time. There is
+			// no cache entry yet, so the source cannot be published until a later
+			// call.
+			expect(isPathIgnoredByProject(target, env.tmpDir)).toBe(false);
+
+			fs.writeFileSync(ignorePath, "*.ts\n");
+
+			// Lookup two lands one cadence later. Its sweep must see the source
+			// discovered by lookup one. With the publish AFTER the sweep, this
+			// sweep ran against a source list that did not yet contain the nested
+			// file, found no drift, and still reset the clock — so pickup took a
+			// second full window (measured: stale at 2 s and 3 s, fresh at 4 s).
+			vi.setSystemTime(start + PROJECT_IGNORE_FRESHNESS_CADENCE_MS + 1);
+
+			expect(isPathIgnoredByProject(target, env.tmpDir)).toBe(true);
 		} finally {
 			env.cleanup();
 		}
