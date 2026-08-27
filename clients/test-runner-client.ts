@@ -424,12 +424,26 @@ export class TestRunnerClient {
 		return cached.available;
 	}
 
+	/**
+	 * #2252: only a POSITIVE verdict is memoized. A negative one has no
+	 * `evidencePath` to re-stat, so `getRunnerAvailability` had no way to tell
+	 * "still absent" from "a config file just appeared" and served the first
+	 * miss for the client's whole process lifetime — measured live: probe an
+	 * empty directory, add `vitest.config.ts`, and the SAME client kept
+	 * answering "no runner". Same precedent as #2242's alias-canonicalization
+	 * fix (`clients/test-runner-client.ts`'s `getCanonicalProjectRoot`): drop
+	 * the memo write on the failure branch rather than adding a TTL or a
+	 * re-arm signal. The cost is bounded and already paid today — a cache miss
+	 * re-runs the exact same `configFiles.some(fs.existsSync)` walk this
+	 * method's caller already does on every FIRST probe of a runner.
+	 */
 	private setRunnerAvailability(
 		byRunner: Map<string, RunnerAvailability>,
 		runner: string,
 		available: boolean,
 		evidencePath?: string,
 	): void {
+		if (!available) return;
 		byRunner.set(runner, { available, evidencePath });
 	}
 
@@ -751,7 +765,16 @@ export class TestRunnerClient {
 			}
 		}
 
-		this.vitestTestGlobsCache.set(rootKey, result);
+		// #2252: same treatment as `setRunnerAvailability` above — only a real
+		// parse is memoized. `null` means "no config yet, or nothing this
+		// heuristic could read", and caching THAT would latch a pre-config
+		// probe's answer for the client's whole life, the exact defect this
+		// issue is about. A cache miss re-runs the same bounded
+		// `fs.readFileSync` attempts over `candidates` a first probe already
+		// pays, so re-probing here is not a new cost.
+		if (result !== null) {
+			this.vitestTestGlobsCache.set(rootKey, result);
+		}
 		return result;
 	}
 

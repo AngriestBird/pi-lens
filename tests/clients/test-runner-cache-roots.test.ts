@@ -52,14 +52,17 @@ describe("TestRunnerClient project-root caches (#2048)", () => {
 		const { root, alias } = makeProject();
 		const client = new TestRunnerClient();
 
-		// Cache the negative verdict through one spelling, then change the
-		// project. A raw-root cache would probe the alias again and return true.
+		// No config yet through either spelling. #2252: a miss is never
+		// memoized, so this is a live check each time, not a cached latch.
 		expect(client.detectRunner(alias)).toBeNull();
 		fs.writeFileSync(
 			path.join(root, "vitest.config.ts"),
 			"export default { test: { include: ['tests/**/*.test.ts'] } }\n",
 		);
-		expect(client.detectRunner(root)).toBeNull();
+		// #2048: a POSITIVE verdict still shares its cache entry across the
+		// canonical root, resolving through EITHER spelling.
+		expect(client.detectRunner(root)?.runner).toBe("vitest");
+		expect(client.detectRunner(alias)?.runner).toBe("vitest");
 
 		const firstGlobs = client.parseVitestTestGlobs(alias);
 		fs.writeFileSync(
@@ -71,7 +74,10 @@ describe("TestRunnerClient project-root caches (#2048)", () => {
 
 	it("re-resolves an alias first probed before its symlink existed (#2077)", () => {
 		const { root, alias } = makeUnlinkedProject("pi-lens-2077-");
-		fs.writeFileSync(path.join(root, "vitest.config.ts"), "export default {}\n");
+		fs.writeFileSync(
+			path.join(root, "vitest.config.ts"),
+			"export default {}\n",
+		);
 		const client = new TestRunnerClient();
 
 		// The alias does not exist yet, so canonicalization falls back to the
@@ -94,8 +100,14 @@ describe("TestRunnerClient project-root caches (#2048)", () => {
 
 		const client = new TestRunnerClient();
 		expect(client.detectRunner(alias)).toBeNull();
-		fs.writeFileSync(path.join(root, "vitest.config.ts"), "export default {}\n");
-		expect(client.detectRunner(root)).toBeNull();
+		fs.writeFileSync(
+			path.join(root, "vitest.config.ts"),
+			"export default { test: { include: ['tests/**/*.test.ts'] } }\n",
+		);
+		// #2048: a POSITIVE verdict still shares its cache entry across the
+		// canonical root, resolving through EITHER spelling.
+		expect(client.detectRunner(root)?.runner).toBe("vitest");
+		expect(client.detectRunner(alias)?.runner).toBe("vitest");
 
 		const firstGlobs = client.parseVitestTestGlobs(alias);
 		fs.writeFileSync(
