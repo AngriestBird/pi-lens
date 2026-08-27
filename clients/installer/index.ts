@@ -716,6 +716,11 @@ export const TOOLS: ToolDefinition[] = [
 		name: "Prisma Language Server",
 		checkCommand: "prisma-language-server",
 		checkArgs: ["--version"],
+		// #2169: a real closed-stdin cold run measured 27,265ms, and a warm-cache
+		// rerun still took 9,860ms — well past the 10s installer default. 40s
+		// keeps the same margin-over-worst-observed ratio Vue's 30s bound uses
+		// (#2176) rather than trimming it for a slower binary.
+		verificationTimeoutMs: 40_000,
 		installStrategy: "npm",
 		packageName: "@prisma/language-server",
 		binaryName: "prisma-language-server",
@@ -738,6 +743,10 @@ export const TOOLS: ToolDefinition[] = [
 		name: "Svelte Language Server",
 		checkCommand: "svelteserver",
 		checkArgs: ["--version"],
+		// #2169: a real closed-stdin cold run measured 12,410ms — over the 10s
+		// installer default, matching the bash/JSON class of false verification
+		// degradation from a cold-cache host (#2194). 20s mirrors that bound.
+		verificationTimeoutMs: 20_000,
 		installStrategy: "npm",
 		packageName: "svelte-language-server",
 		binaryName: "svelteserver",
@@ -1991,6 +2000,18 @@ export function resetProbeCacheStateForTesting(): void {
 		clearTimeout(_probeCacheFlushTimer);
 		_probeCacheFlushTimer = null;
 	}
+}
+
+/**
+ * Exported for testing only. Read the `ensureTool` in-flight map directly
+ * (#1968's ABA regression: a second writer replacing an entry mid-flight,
+ * then a late-settling first run evicting it with a bare delete-by-key).
+ */
+export function _peekEnsureInFlightForTesting(): Map<
+	string,
+	Promise<string | undefined>
+> {
+	return ensureInFlight;
 }
 
 // --- Check Functions ---
@@ -5374,7 +5395,13 @@ async function ensureToolResolved(
 	try {
 		return await ensurePromise;
 	} finally {
-		ensureInFlight.delete(inFlightKey);
+		// Identity-guarded release (#1968's pattern): delete only if THIS run is
+		// still the registered one. A bare delete-by-key lets a late-settling run
+		// evict a live successor a second writer registered under the same key
+		// mid-flight, after which the next caller starts a duplicate ensure/install.
+		if (ensureInFlight.get(inFlightKey) === ensurePromise) {
+			ensureInFlight.delete(inFlightKey);
+		}
 	}
 }
 

@@ -15,6 +15,7 @@ import {
 	WORD_INDEX_MAX_BYTES,
 	wordIndexPostingHits,
 } from "../../clients/word-index.js";
+import { measureMaxSyncBlockMs } from "../support/perf-harness.js";
 import { setupTestEnvironment } from "./test-utils.js";
 
 const mocks = vi.hoisted(() => ({
@@ -212,6 +213,77 @@ describe("computeCascadeForFile — word-index per-edit seam (#348 phase 2)", ()
 			env.cleanup();
 		}
 	});
+
+	it(
+		"never holds the event loop for the whole replacement (#2067 AC4)",
+		{ retry: 2, timeout: 120_000 },
+		async () => {
+			const env = setupTestEnvironment("word-index-per-edit-occupancy-");
+			try {
+				// Few distinct tokens, many characters: the yieldable halves (posting
+				// scan, tokenization) dominate, and the atomic publish — which cannot
+				// yield and never could — stays small, so the measurement is about the
+				// occupancy this change owns.
+				const body = (tag: string, lines: number) =>
+					Array.from(
+						{ length: lines },
+						() =>
+							`export const ${tag}Handler = ${tag}ProjectSnapshotStore.${tag}ResolveDocumentEntry(${tag}RequestContext, ${tag}IndexShard, ${tag}WordPosting);`,
+					).join("\n");
+
+				const filePath = path.join(env.tmpDir, "src", "target.ts");
+				fs.mkdirSync(path.dirname(filePath), { recursive: true });
+				// Just under the shared size cap, so the seam replaces rather than drops.
+				const content = body("updated", 3_000);
+				expect(Buffer.byteLength(content, "utf-8")).toBeLessThan(
+					WORD_INDEX_MAX_BYTES,
+				);
+				fs.writeFileSync(filePath, content);
+
+				// High-document-frequency corpus: the removal half has to walk the
+				// posting list of every token the old document carried.
+				const wordIndex = buildWordIndex([
+					{ path: filePath, content: body("original", 3_000) },
+					...Array.from({ length: 400 }, (_, doc) => ({
+						path: path.join(env.tmpDir, "src", `peer${doc}.ts`),
+						content: body("original", 200),
+					})),
+				]);
+
+				const { computeCascadeForFile } =
+					await import("../../clients/dispatch/integration.js");
+				const maxBlockMs = await measureMaxSyncBlockMs(() =>
+					computeCascadeForFile(filePath, env.tmpDir, {
+						turnSeq: 1,
+						writeSeq: 1,
+						fileContent: content,
+						wordIndex,
+					}),
+				);
+
+				// The synchronous variant this seam used to call held the loop for the
+				// whole replacement: 40-42 ms on this fixture, against 9-16 ms for the
+				// cooperative one, which gives the loop back on its 8 ms budget. The
+				// bound sits between them with room for the non-yieldable atomic
+				// publish and a loaded CI box.
+				expect(maxBlockMs).toBeLessThan(30);
+				// Not vacuous: the replacement really happened.
+				expect(
+					wordIndexPostingHits(wordIndex, "updatedhandler").some(
+						(hit) => hit.file === filePath,
+					),
+				).toBe(true);
+				expect(wordIndex.postings.has("originalhandler")).toBe(true);
+				expect(
+					wordIndexPostingHits(wordIndex, "originalhandler").some(
+						(hit) => hit.file === filePath,
+					),
+				).toBe(false);
+			} finally {
+				env.cleanup();
+			}
+		},
+	);
 
 	it("removes (not partially indexes) a file over the shared size cap", async () => {
 		const env = setupTestEnvironment("word-index-per-edit-oversize-");

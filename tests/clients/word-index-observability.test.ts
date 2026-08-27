@@ -211,6 +211,43 @@ describe("word-index observability (#958)", () => {
 		}
 	});
 
+	it("records them for the per-edit seam's cooperative primitive too", async () => {
+		const env = setupTestEnvironment("pi-lens-word-recompact-async-");
+		try {
+			const {
+				buildWordIndex,
+				flushWordIndexRecompactionsForTests,
+				updateWordIndexDocumentForEdit,
+			} = await import("../../clients/word-index.js");
+			const index = buildWordIndex(
+				Array.from({ length: 70 }, (_, file) => ({
+					path: `${env.tmpDir}/f${file}.ts`,
+					content: `sharedToken stableToken${file}`,
+				})),
+			);
+			for (let file = 0; file < 70; file += 1) {
+				expect(
+					await updateWordIndexDocumentForEdit(index, {
+						path: `${env.tmpDir}/f${file}.ts`,
+						content: `sharedToken changedToken${file} revision`,
+					}),
+				).toBe(true);
+			}
+			await flushWordIndexRecompactionsForTests(index);
+			expect(logSpy.mock.calls).toContainEqual([
+				expect.objectContaining({
+					phase: "incremental_refresh",
+					trigger: "incremental_refresh",
+					reason: expect.stringMatching(
+						/^arena_recompact beforeBytes=\d+ afterBytes=\d+ beforeStores=\d+ afterStores=1$/,
+					),
+				}),
+			]);
+		} finally {
+			env.cleanup();
+		}
+	});
+
 	it("resets replacementCount between successful persist records", async () => {
 		const env = setupTestEnvironment("pi-lens-word-replacement-reset-");
 		try {

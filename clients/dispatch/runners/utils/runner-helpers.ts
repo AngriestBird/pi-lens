@@ -1808,7 +1808,7 @@ export async function isSgAvailableAsync(): Promise<boolean> {
 	if (memo !== null) return memo;
 	if (sgAvailableInFlight) return sgAvailableInFlight;
 
-	sgAvailableInFlight = (async () => {
+	const flight: Promise<boolean> = (async () => {
 		const startedAt = Date.now();
 		sgSweepSawTransient = false;
 		sgSweepTransientCause = "probe-timeout";
@@ -1881,10 +1881,19 @@ export async function isSgAvailableAsync(): Promise<boolean> {
 		);
 		return false;
 	})().finally(() => {
-		sgAvailableInFlight = null;
+		// Identity-guarded release (#1968's pattern): clear the slot only if THIS
+		// flight still owns it. `ensureCurrentSgGeneration()` above nulls the slot
+		// on a generation bump (a session reset arriving mid-flight) so the NEXT
+		// caller starts a fresh flight rather than sharing this one's stale-generation
+		// answer — that fresh flight is a live successor. Without the guard, this
+		// flight's own late settlement would stomp the slot back to null out from
+		// under that successor, and the caller after it would start a redundant
+		// THIRD probe instead of sharing the still-running second one.
+		if (sgAvailableInFlight === flight) sgAvailableInFlight = null;
 	});
+	sgAvailableInFlight = flight;
 
-	return sgAvailableInFlight;
+	return flight;
 }
 
 /**

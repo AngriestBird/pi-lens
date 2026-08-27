@@ -217,6 +217,7 @@ vi.mock("../../../clients/dependency-checker.js", () => ({
 
 import * as path from "node:path";
 import {
+	_peekEnsureInFlightForTesting,
 	checkProbeCache,
 	ensureTool,
 	getToolPath,
@@ -612,6 +613,80 @@ describe("ensureTool allowInstall policy", () => {
 				httpsBlocker.enabled = false;
 				httpsBlocker.errorHandler = undefined;
 			}
+		});
+	});
+});
+
+/**
+ * In-flight ABA release (#1968, kit-driven white-box probe — sibling of
+ * dead-code-client's/knip-client's bare-`.finally` release, same shape).
+ *
+ * `ensureTool`'s `ensureInFlight` map cleared with a bare delete-by-key. The
+ * race needs a SECOND WRITER replacing the map entry mid-flight — the public
+ * API alone cannot produce it today (single set site per key; microtask FIFO
+ * orders every observer after A's cleanup) — so this test simulates that
+ * writer directly, exactly the mechanism the #1838 reachability probe
+ * established for the original two sites. Red on the pre-fix bare `.finally`
+ * delete: A's cleanup evicted B and the next caller started a duplicate
+ * ensure/install.
+ */
+describe("ensureTool in-flight ABA release (#1968)", () => {
+	it("a late-settling ensure does not evict its mid-flight successor", async () => {
+		await withEmptyPath(async () => {
+			httpsBlocker.enabled = true;
+			try {
+				const buildA = ensureTool("rust-analyzer");
+				// Let A get past its early fs/probe-cache awaits and register its
+				// entry in ensureInFlight, then start (and block on) the network
+				// install — confirmed by an actual https.get call.
+				await new Promise((resolve) => setImmediate(resolve));
+				expect(httpsGetCalls.length).toBeGreaterThan(0);
+
+				const inFlight = _peekEnsureInFlightForTesting();
+				expect(inFlight.size).toBe(1);
+				const key = [...inFlight.keys()][0]!;
+
+				// B replaces the entry under the same key while A is still in flight.
+				let resolveSuccessor: (value: string | undefined) => void;
+				const successor = new Promise<string | undefined>((resolve) => {
+					resolveSuccessor = resolve;
+				});
+				inFlight.set(key, successor);
+
+				// A settles (network error, per the disabled blocker below).
+				httpsBlocker.enabled = false;
+				httpsBlocker.errorHandler?.(new Error("network disabled in test"));
+				expect(await buildA).toBeUndefined();
+
+				// B's entry survived A's cleanup.
+				expect(inFlight.get(key)).toBe(successor);
+
+				resolveSuccessor!("/managed/rust-analyzer");
+				await expect(successor).resolves.toBe("/managed/rust-analyzer");
+			} finally {
+				httpsBlocker.enabled = false;
+				httpsBlocker.errorHandler = undefined;
+			}
+		});
+	});
+
+	// Mutation-proof companion: pins that a normal, uncontested settlement
+	// still empties the slot, so a mutant that makes the identity guard
+	// permanently `false` (never releases) reds here. `allowInstall: false`
+	// still reaches the `ensureInFlight` registration (cache misses under
+	// `withEmptyPath`) but resolves without a network call, so this exercises
+	// the exact same map without needing the httpsBlocker gate.
+	it("a normally-settling ensure still cleans up its own entry", async () => {
+		await withEmptyPath(async () => {
+			const inFlight = _peekEnsureInFlightForTesting();
+			expect(inFlight.size).toBe(0);
+
+			const result = await ensureTool("rust-analyzer", {
+				allowInstall: false,
+			});
+
+			expect(result).toBeUndefined();
+			expect(inFlight.size).toBe(0);
 		});
 	});
 });

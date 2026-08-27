@@ -823,21 +823,19 @@ async function stageWordIndexDocumentRemoval(
 		if (!shouldContinue()) throw new Error("word index refresh superseded");
 		const list = index.postings.get(token);
 		if (!list) continue;
-		const survivors: number[] = [];
-		for (let i = 0; i < list.length; i += 1) {
-			if (list.fileIdAt(i) !== removedId) {
-				survivors.push(list.fileIdAt(i), list.lineAt(i));
-			}
-			if (deadline.expired() && (await yieldIfOverBudget(deadline))) {
-				if (!shouldContinue()) throw new Error("word index refresh superseded");
-			}
+		// One token's postings, filtered by the SAME packed primitive the
+		// synchronous path uses, so the staged result is identical rather than
+		// merely equivalent. The work unit is the token, not the posting element:
+		// a per-element deadline check cost one `performance.now()` per entry —
+		// on the order of a million per edit on a 2.2M-posting corpus — which is
+		// the tax that made this path unusable from the per-edit seam (#2067).
+		// One list's scan is a bounded, non-yieldable unit; the deadline is
+		// checked between lists.
+		const survivors = list.withoutFile(removedId);
+		postings.set(token, survivors.length > 0 ? survivors : undefined);
+		if (deadline.expired() && (await yieldIfOverBudget(deadline))) {
+			if (!shouldContinue()) throw new Error("word index refresh superseded");
 		}
-		postings.set(
-			token,
-			survivors.length > 0
-				? WordPostingList.fromLanes(list.token, survivors)
-				: undefined,
-		);
 	}
 	return { postings, docLength: index.docLengths.get(filePath) ?? 0 };
 }
@@ -848,8 +846,9 @@ function commitWordIndexDocumentRemoval(
 	staged: StagedWordIndexRemoval,
 ): void {
 	for (const [token, list] of staged.postings) {
-		// Staged survivors come from `WordPostingList.fromLanes` — a fresh private
-		// store each, so the O(1) fragmentation gate must count them (#2117).
+		// Staged survivors come from `WordPostingList.withoutFile` — a fresh
+		// private store each, so the O(1) fragmentation gate must count them
+		// (#2117).
 		if (list) {
 			index.postings.set(token, list);
 			notePostingStoresAllocated(index, 1);
@@ -882,6 +881,27 @@ export async function removeWordIndexDocumentAsync(
 		commitWordIndexDocumentRemoval(index, filePath, staged);
 		return true;
 	});
+}
+
+/**
+ * The per-edit replacement primitive the cascade seam calls (#2067).
+ *
+ * `updateWordIndexDocumentAsync` plus the arena-recompaction gate the
+ * synchronous variant carries, which is what makes this the per-edit entry
+ * point rather than a rename. Bulk refresh must NOT use it: one refreshed
+ * document raises `postingStoreCount` by roughly its distinct-token count, so a
+ * per-document schedule would drive an O(vocabulary) recompaction between
+ * nearly every pair of documents. `refreshWordIndexIncrementally` therefore
+ * drives `updateWordIndexDocumentAsync` directly and recompacts ONCE after its
+ * loop; the per-edit seam has no such "after the loop" and schedules here.
+ */
+export async function updateWordIndexDocumentForEdit(
+	index: WordIndex,
+	doc: { path: string; content: string },
+): Promise<boolean> {
+	const updated = await updateWordIndexDocumentAsync(index, doc);
+	if (updated) scheduleWordIndexRecompact(index, doc.path);
+	return updated;
 }
 
 /** Cooperative replacement whose old/new state is committed without an await. */
@@ -1826,6 +1846,29 @@ const serializedWordIndexCaches = new WeakMap<
 	SerializedWordIndexCache
 >();
 
+/**
+ * Deterministic work performed by the most recent {@link serializeWordIndex}
+ * call: how many distinct tokens the persist pass re-flattened, and whether
+ * it took the bounded incremental path or fell back to a full rebuild.
+ * Test-only observability (#2202) — the incremental path's whole point is to
+ * touch O(dirty-file tokens), not O(corpus tokens), and that property is a
+ * deterministic count, not a wall-clock duration, so it does not flake under
+ * runner load the way a same-run timing ratio does.
+ */
+export interface WordIndexSerializeWork {
+	affectedTokenCount: number;
+	tookFullPath: boolean;
+}
+
+let _lastSerializeWork: WordIndexSerializeWork | undefined;
+
+/** Test-only: work stats for the most recent {@link serializeWordIndex} call. */
+export function getLastWordIndexSerializeWork():
+	| WordIndexSerializeWork
+	| undefined {
+	return _lastSerializeWork;
+}
+
 function serializeWordIndexFull(index: WordIndex): SerializedWordIndexCache {
 	const files = [...index.docLengths.keys()];
 	// `files` carries whatever spelling `docLengths` last stored, which can
@@ -1878,6 +1921,10 @@ function serializeWordIndexFull(index: WordIndex): SerializedWordIndexCache {
 			);
 		}
 	}
+	_lastSerializeWork = {
+		affectedTokenCount: postings.length,
+		tookFullPath: true,
+	};
 	return { serialized, slotByFileId, tokensByFile };
 }
 
@@ -1913,7 +1960,10 @@ function serializeWordIndexIncrementally(
 		...priorFiles,
 		...files.filter((file) => !priorKeys.has(wordIndexKey(file))),
 	];
-	if (!dirty || dirty.size === 0) return cache;
+	if (!dirty || dirty.size === 0) {
+		_lastSerializeWork = { affectedTokenCount: 0, tookFullPath: false };
+		return cache;
+	}
 
 	const slotByFileId = new Map(cache.slotByFileId);
 	for (let i = priorFiles.length; i < filesInWireOrder.length; i += 1) {
@@ -1992,6 +2042,10 @@ function serializeWordIndexIncrementally(
 		totalTokens: index.totalTokens,
 		indexedFileCount: index.docCount,
 		truncated: index.truncated,
+	};
+	_lastSerializeWork = {
+		affectedTokenCount: affectedTokens.size,
+		tookFullPath: false,
 	};
 	return { serialized, slotByFileId, tokensByFile };
 }
