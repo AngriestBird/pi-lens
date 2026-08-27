@@ -381,6 +381,24 @@ export type DegradationKind =
 	 */
 	| "read-guard-record-cap-trim"
 	/**
+	 * `read-guard.ts`'s whole-file evictor (`evictFile`) dropped a file's
+	 * tracked read/edit state (#1918, the #1913 class sibling). Fires from
+	 * three call sites — the consumed-file cap, the unconsumed-file cap, and
+	 * the idle-eviction timer — the `reason` text in the matching
+	 * `read_file_evicted` read-guard.log line says which. Rising edge gates
+	 * that log line per file per session, same as `read-guard-record-cap-trim`.
+	 */
+	| "read-guard-file-evicted"
+	/**
+	 * `read-guard.ts`'s per-file edits-cap splice (`READ_GUARD_MAX_EDITS_PER_FILE`)
+	 * trimmed a file's edit history (#1918). The in-repo doc comment on that
+	 * cap argues the trim is inert in practice, but this kind gives it a
+	 * record instead of resting only on that argument. Rising edge gates the
+	 * matching `edits_cap_trimmed` read-guard.log line, same shape as
+	 * `read-guard-record-cap-trim`.
+	 */
+	| "read-guard-edits-cap-trim"
+	/**
 	 * A demoted finding was RETIRED from a delivery store instead of being
 	 * re-served (#1944). Raised when the cited file shrank past the
 	 * coordinates the finding is pinned to, so no re-run can ever confirm it.
