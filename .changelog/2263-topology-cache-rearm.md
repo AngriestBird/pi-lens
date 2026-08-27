@@ -1,4 +1,4 @@
 ---
 section: Fixed
 ---
-- **Topology-derived startup scan and language-profile memos now re-arm with the workspace marker index at session start (closes #2263)** — `resetWorkspaceTopology()` now walks one registered downstream-cache reset list, clearing `startupScanContextCache` and `languageProfileCache` with the source index. A new session therefore re-derives project-root and configured-language answers after marker changes; mid-session edits remain governed by each consumer's existing freshness policy.
+- **Topology-derived startup scan and language-profile memos re-arm with the workspace marker index at session start (closes #2263)** — `resetWorkspaceTopology()` walks one registered downstream-cache reset list, clearing `startupScanContextCache`, `languageProfileCache`, and tsconfig-path caches with the source index. Caches are cleared only at session start via the topology-reset registry; mid-session edits are not detected.

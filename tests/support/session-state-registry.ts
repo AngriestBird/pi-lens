@@ -545,6 +545,15 @@ export const SESSION_STATE_REGISTRY: SessionStateEntry[] = [
 			"Language profiles derive configured markers from workspace topology, so the memo must re-arm with that index.",
 	},
 	{
+		id: "tsconfig-paths:topology-derived-caches",
+		module: "review-graph/tsconfig-paths.ts",
+		state: "cache, referencesCache",
+		policy: "session_start",
+		resetName: "resetWorkspaceTopology",
+		reason:
+			"Tsconfig path and project-reference resolutions derive from workspace topology, so both memos must re-arm with that index.",
+	},
+	{
 		id: "workspace-modules:moduleSourceFilesMemo",
 		module: "review-graph/workspace-modules.ts",
 		state: "_moduleSourceFilesMemo",
