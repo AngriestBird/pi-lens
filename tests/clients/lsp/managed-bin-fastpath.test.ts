@@ -74,7 +74,18 @@ describe("resolveAndLaunch — managed-bin fast path (#2140)", () => {
 		findManagedToolBinary.mockImplementation(async (toolId: string) =>
 			toolId === "marksman" ? "marksman" : undefined,
 		);
-		launchLSP.mockResolvedValueOnce(fakeProc);
+		// #2140 fix-round F2: EVERY attempt rejects (tool-not-found), so
+		// resolveAndLaunch walks its whole candidate list rather than
+		// short-circuiting on the first success. Without the dedup guard, the
+		// prepended managed path ("marksman") and the original bare candidate
+		// ("marksman") would both be tried — two identical, both-failing
+		// attempts instead of one. A `mockResolvedValueOnce` on the first call
+		// would mask that: resolveAndLaunch returns after the first SUCCESS
+		// regardless of whether a duplicate entry was ever reached.
+		const toolNotFound = Object.assign(new Error("marksman not found"), {
+			kind: "tool-not-found" as const,
+		});
+		launchLSP.mockRejectedValue(toolNotFound);
 
 		await resolveAndLaunch(
 			{
