@@ -2,6 +2,7 @@ import { fileURLToPath } from "node:url";
 import * as path from "node:path";
 import { describe, expect, it } from "vitest";
 import { gitExecFileSync } from "../support/git-fixture-env.js";
+import { assertNonEmptyScan } from "../support/sweep-kit.js";
 
 const root = path.resolve(
 	path.dirname(fileURLToPath(import.meta.url)),
@@ -31,6 +32,13 @@ function findShadowedTrackedFiles(): string[] {
 		cwd: root,
 		encoding: "utf8",
 	});
+	const trackedCount = tracked.split("\0").filter(Boolean).length;
+	// Floor set well under the repo's real tracked-file count (~2,950) so it
+	// still catches a silent zero — e.g. the `input` forwarding this test
+	// relies on (git-fixture-env.ts's GitExecOptions) getting dropped in a
+	// future edit, which would make `shadowed` trivially equal `[]` for the
+	// wrong reason and pass forever (#2250 review V3).
+	assertNonEmptyScan("git ls-files (tracked files scanned)", trackedCount, 500);
 
 	let shadowed: string;
 	try {
