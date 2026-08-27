@@ -10,17 +10,16 @@ import {
 	mkdirSync,
 	mkdtempSync,
 	rmSync,
-	unlinkSync,
 	utimesSync,
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import checkBuildFreshness, {
+import {
 	findResidueCompiledTestSources,
 	findStaleCompiledSources,
+	runFreshnessChecks,
 } from "./support/check-build-freshness.js";
 
 let root: string;
@@ -126,27 +125,25 @@ describe("findResidueCompiledTestSources (#2232 stale test-support residue guard
 	});
 });
 
-describe("check-build-freshness setup() end-to-end (#2232)", () => {
-	// The real repo root, exactly as the globalSetup module computes it —
-	// proves the guard fires against the ACTUAL tests/ tree the whole suite
-	// runs from, not just an isolated fixture.
-	const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
-	const probeTs = join(repoRoot, "tests", "support", "__2232-residue-probe.ts");
-	const probeJs = join(repoRoot, "tests", "support", "__2232-residue-probe.js");
+describe("runFreshnessChecks() end-to-end (#2232)", () => {
+	// An isolated temp tree, NOT the live repo tests/ directory: planting a
+	// file under the real tests/support/ raced a concurrent
+	// module-instance-scan.ts walk of that same live tree under parallel
+	// test workers (ENOENT observed in review — CI green beforehand was
+	// scheduling luck, not correctness). runFreshnessChecks() takes an
+	// injectable root precisely so this proof never touches the live tree.
+	let e2eRoot: string;
 
-	afterAll(() => {
-		for (const p of [probeTs, probeJs]) {
-			try {
-				unlinkSync(p);
-			} catch {
-				// already absent
-			}
-		}
+	beforeAll(() => {
+		e2eRoot = mkdtempSync(join(tmpdir(), "pi-lens-freshness-e2e-"));
+		mkdirSync(join(e2eRoot, "tests", "support"), { recursive: true });
 	});
 
+	afterAll(() => rmSync(e2eRoot, { recursive: true, force: true }));
+
 	it("throws a loud error naming a planted stale-residue file", () => {
-		writeFileSync(probeTs, "");
-		writeFileSync(probeJs, "");
-		expect(() => checkBuildFreshness()).toThrow(/__2232-residue-probe\.js/);
+		writeFileSync(join(e2eRoot, "tests", "support", "probe.ts"), "");
+		writeFileSync(join(e2eRoot, "tests", "support", "probe.js"), "");
+		expect(() => runFreshnessChecks(e2eRoot)).toThrow(/probe\.js/);
 	});
 });
