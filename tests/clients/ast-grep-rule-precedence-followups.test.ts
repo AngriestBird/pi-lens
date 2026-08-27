@@ -9,7 +9,6 @@ import {
 	evaluateAstGrepRules,
 	type AstGrepEvaluateOptions,
 } from "../../clients/dispatch/runners/ast-grep-napi.js";
-import { clearRulesCache } from "../../clients/dispatch/runners/yaml-rule-parser.js";
 import { createLSPClient } from "../../clients/lsp/client.js";
 import { getServerById } from "../../clients/lsp/server.js";
 import {
@@ -194,7 +193,6 @@ function runCli(configPath: string, filePath: string) {
 
 afterEach(() => {
 	_resetBaselineSgconfigForTests();
-	clearRulesCache();
 	for (const root of tempRoots.splice(0)) {
 		// Windows: the raw ast-grep LSP child spawned by the cliIt case can still
 		// hold a handle on the temp dir when teardown runs, making rmSync throw

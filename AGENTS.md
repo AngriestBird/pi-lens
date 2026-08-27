@@ -802,6 +802,12 @@ The shipped ast-grep catalog includes `no-bare-host-path-in-win32-branch`
 guarded by `isWindowsPath` or `isFullyQualifiedWin32`; host-default path calls
 elsewhere, including the valid fallback arm of a ternary, remain allowed.
 
+The YAML ast-grep rules cache snapshots every discovered rule file with
+`mtimeMs` and size, then confirms file contents when those metadata values
+agree. It must detect edits to existing files and additions below nested rule
+directories; directory mtime alone is insufficient on supported filesystems.
+(#2262)
+
 ### Caches, durable stores, and path keys
 
 Advisory caches must carry immutable capture provenance and validate it again

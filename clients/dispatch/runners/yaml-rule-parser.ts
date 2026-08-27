@@ -77,7 +77,14 @@ export interface YamlRule {
 
 interface CachedRules {
 	rules: YamlRule[];
-	mtime: number;
+	files: RuleFileStamp[];
+	contentSignature: string;
+}
+
+interface RuleFileStamp {
+	path: string;
+	mtimeMs: number;
+	size: number;
 }
 
 interface ContentCachedRules {
@@ -119,13 +126,6 @@ const contentBlockingRulesCache = new BoundedLruCache<
 >(64);
 
 // --- Public API ---
-
-export function clearRulesCache(): void {
-	rulesCache.clear();
-	blockingRulesCache.clear();
-	contentRulesCache.clear();
-	contentBlockingRulesCache.clear();
-}
 
 export function loadYamlRules(
 	ruleDir: string,
@@ -220,22 +220,55 @@ export function getCachedRules(
 		return [];
 	}
 
-	let currentMtime = 0;
-	try {
-		currentMtime = fs.statSync(ruleDir).mtimeMs;
-	} catch {
-		return [];
-	}
-
 	const cache = severityFilter === "error" ? blockingRulesCache : rulesCache;
+	const files = findYamlRuleFiles(ruleDir);
+	const fileStamps = files.flatMap((file): RuleFileStamp[] => {
+		try {
+			const stat = fs.statSync(file);
+			return [{ path: file, mtimeMs: stat.mtimeMs, size: stat.size }];
+		} catch {
+			return [];
+		}
+	});
 	const cached = cache.get(ruleDir);
-	if (cached && cached.mtime === currentMtime) {
-		return cached.rules;
+	const metadataMatches =
+		cached?.files.length === fileStamps.length &&
+		cached.files.every(
+			(file, index) =>
+				file.path === fileStamps[index].path &&
+				file.mtimeMs === fileStamps[index].mtimeMs &&
+				file.size === fileStamps[index].size,
+		);
+	if (cached && metadataMatches) {
+		// Metadata is the cheap first tier. Confirm bytes when it agrees because
+		// same-mtime, same-size edits are valid on supported filesystems.
+		if (cached.contentSignature === ruleContentSignature(ruleDir, files)) {
+			return cached.rules;
+		}
 	}
 
-	const rules = loadYamlRulesUncached(ruleDir, severityFilter);
-	cache.set(ruleDir, { rules, mtime: currentMtime });
+	const rules = loadYamlRuleFiles(files, severityFilter);
+	cache.set(ruleDir, {
+		rules,
+		files: fileStamps,
+		contentSignature: ruleContentSignature(ruleDir, files),
+	});
 	return rules;
+}
+
+function ruleContentSignature(ruleDir: string, files: string[]): string {
+	const hash = createHash("sha256");
+	for (const file of files) {
+		hash.update(path.relative(ruleDir, file));
+		hash.update("\0");
+		try {
+			hash.update(fs.readFileSync(file));
+		} catch {
+			hash.update("missing");
+		}
+		hash.update("\0");
+	}
+	return hash.digest("hex");
 }
 
 export function isOverlyBroadPattern(

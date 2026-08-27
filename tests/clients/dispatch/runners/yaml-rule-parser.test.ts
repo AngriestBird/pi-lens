@@ -1,9 +1,73 @@
-import { describe, expect, it } from "vitest";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
 import {
+	loadYamlRules,
 	parseSimpleYaml,
 	isOverlyBroadPattern,
 	isStructuredRule,
 } from "../../../../clients/dispatch/runners/yaml-rule-parser.js";
+
+const ruleCacheTempDirs: string[] = [];
+
+function writeRule(filePath: string, id: string, message: string): void {
+	fs.mkdirSync(path.dirname(filePath), { recursive: true });
+	fs.writeFileSync(
+		filePath,
+		[
+			`id: ${id}`,
+			"severity: warning",
+			`message: ${message}`,
+			"rule:",
+			"  pattern: $X",
+			"",
+		].join("\n"),
+	);
+}
+
+function messages(rules: ReturnType<typeof loadYamlRules>): string[] {
+	return rules.map((rule) => rule.message ?? "").sort();
+}
+
+const FIXED_DIRECTORY_MTIME = new Date("2000-01-01T00:00:00.000Z");
+
+afterEach(() => {
+	for (const dir of ruleCacheTempDirs.splice(0))
+		fs.rmSync(dir, { recursive: true, force: true });
+});
+
+describe("yaml-rule-parser cache freshness (#2262)", () => {
+	it("reloads an edited existing rule when the directory mtime is unchanged", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pilens-rules-cache-"));
+		ruleCacheTempDirs.push(root);
+		const file = path.join(root, "existing.yml");
+		writeRule(file, "existing", "old");
+		fs.utimesSync(root, FIXED_DIRECTORY_MTIME, FIXED_DIRECTORY_MTIME);
+		const first = loadYamlRules(root);
+
+		writeRule(file, "existing", "new");
+		fs.utimesSync(root, FIXED_DIRECTORY_MTIME, FIXED_DIRECTORY_MTIME);
+
+		expect(messages(loadYamlRules(root))).toEqual(["new"]);
+		expect(messages(first)).toEqual(["old"]);
+	});
+
+	it("discovers a nested rule file when the root directory mtime is unchanged", () => {
+		const root = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pilens-rules-cache-nested-"),
+		);
+		ruleCacheTempDirs.push(root);
+		writeRule(path.join(root, "root.yml"), "root", "root");
+		fs.utimesSync(root, FIXED_DIRECTORY_MTIME, FIXED_DIRECTORY_MTIME);
+		loadYamlRules(root);
+
+		writeRule(path.join(root, "nested", "child.yml"), "child", "child");
+		fs.utimesSync(root, FIXED_DIRECTORY_MTIME, FIXED_DIRECTORY_MTIME);
+
+		expect(messages(loadYamlRules(root))).toEqual(["child", "root"]);
+	});
+});
 
 describe("yaml-rule-parser fix metadata", () => {
 	it("parses note and fix fields (including multiline) from ast-grep YAML", () => {
