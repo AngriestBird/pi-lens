@@ -9,6 +9,10 @@ export declare function lintPrBody(
 	valid: boolean;
 	errors: string[];
 };
+export declare function fetchLivePrBody(
+	payloadPr: { number: number; body?: string | null },
+	fetchImpl: typeof fetch,
+): Promise<string>;
 export declare function resolveLivePrBody(
 	payloadPr: { number: number; body?: string | null },
 	fetchImpl?: typeof fetch,

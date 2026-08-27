@@ -11,3 +11,8 @@ export declare function lintCloseKeywords(body?: string): {
 	offendingLines: string[];
 	valid: boolean;
 };
+export declare function verifyMergedPullRequest(
+	fetchImpl?: typeof fetch,
+	event?: { pull_request?: { number: number; body?: string | null } },
+	getIssueState?: (repository: string, number: number) => string,
+): Promise<void>;
