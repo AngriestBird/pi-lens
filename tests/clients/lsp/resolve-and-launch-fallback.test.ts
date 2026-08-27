@@ -12,6 +12,7 @@ const { ensureTool } = vi.hoisted(() => ({
 vi.mock("../../../clients/installer/index.js", () => ({
 	ensureTool,
 	getToolEnvironment: () => ({}),
+	findManagedToolBinary: vi.fn(async () => undefined),
 }));
 
 import { resolveAndLaunch } from "../../../clients/lsp/server.js";
