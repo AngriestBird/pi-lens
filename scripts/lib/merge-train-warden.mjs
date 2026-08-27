@@ -234,8 +234,9 @@ export const DUPLICATE_REPORT_CAP = 5;
  * desc, so any open PR touched mid-pagination shifts the window and pushes a
  * PR from page N onto page N+1. On a 10-minute cadence that is expected noise,
  * and this file's own design note (BENIGN_HTTP_STATUSES above) says such races
- * must not mark the scheduled run red. Classifying at the SOURCE also means
- * the two consumers stop carrying identical mapping code that can drift apart.
+ * must not mark the scheduled run red. An intra-page duplicate is malformed
+ * API data and stays fatal (#2289). Classifying at the SOURCE also means the
+ * two consumers stop carrying identical mapping code that can drift apart.
  */
 export async function fetchOpenPullRequests(fetcher, owner, name) {
 	const prs = [];
@@ -264,10 +265,17 @@ export async function fetchOpenPullRequests(fetcher, owner, name) {
 		// to MAX_PAGES x PAGE_SIZE = 200 identical lines into one summary. One
 		// record per page, naming the count, is the same information at 1/50th
 		// the volume.
-		const duplicates = [];
+		const seenOnPage = new Set();
+		const boundaryDuplicates = [];
+		const intraPageDuplicates = [];
 		for (const node of connection.nodes) {
+			if (seenOnPage.has(node.number)) {
+				intraPageDuplicates.push(node.number);
+				continue;
+			}
+			seenOnPage.add(node.number);
 			if (seenNumbers.has(node.number)) {
-				duplicates.push(node.number);
+				boundaryDuplicates.push(node.number);
 				continue;
 			}
 			seenNumbers.add(node.number);
@@ -276,24 +284,29 @@ export async function fetchOpenPullRequests(fetcher, owner, name) {
 
 		const hasNextPage = Boolean(connection.pageInfo?.hasNextPage);
 		const nextCursor = connection.pageInfo?.endCursor;
-		// Read BEFORE the breaks below, because it decides how the duplicate
-		// record is classified. A duplicate on a page whose cursor advanced (or
-		// on the last page, where there is no next cursor to advance) is the
-		// UPDATED_AT window sliding under us: routine. A duplicate on a page
-		// whose cursor did NOT advance means the collector was about to replay
-		// the same page, i.e. real truncation, and stays fatal.
+		// Read BEFORE the breaks below, because it decides how a cross-page
+		// duplicate is classified. An intra-page duplicate cannot be a boundary
+		// slide, regardless of cursor state, and is recorded separately above.
 		const cursorAdvanced =
 			!hasNextPage || (nextCursor != null && nextCursor !== after);
-		if (duplicates.length > 0) {
-			const shown = duplicates.slice(0, DUPLICATE_REPORT_CAP);
-			const remainder = duplicates.length - shown.length;
+		if (boundaryDuplicates.length > 0) {
+			const shown = boundaryDuplicates.slice(0, DUPLICATE_REPORT_CAP);
+			const remainder = boundaryDuplicates.length - shown.length;
 			record(
-				`GraphQL pagination repeated ${duplicates.length} PR number(s) on page ${page + 1} ` +
+				`GraphQL pagination repeated ${boundaryDuplicates.length} PR number(s) on page ${page + 1} ` +
 					`(${shown.map((n) => `#${n}`).join(", ")}${remainder > 0 ? `, +${remainder} more` : ""}); ` +
 					(cursorAdvanced
 						? "the open-PR window shifted during pagination, so this is a routine boundary repeat"
 						: "the cursor did not advance, so the collection is truncated"),
 				cursorAdvanced,
+			);
+		}
+		if (intraPageDuplicates.length > 0) {
+			const shown = intraPageDuplicates.slice(0, DUPLICATE_REPORT_CAP);
+			const remainder = intraPageDuplicates.length - shown.length;
+			record(
+				`GraphQL returned malformed page ${page + 1}: repeated ${intraPageDuplicates.length} PR number(s) within the page ` +
+					`(${shown.map((n) => `#${n}`).join(", ")}${remainder > 0 ? `, +${remainder} more` : ""})`,
 			);
 		}
 

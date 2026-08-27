@@ -748,6 +748,56 @@ describe("merge-train warden GraphQL fetch + REST apply (#1844)", () => {
 			expect(result.errors[0].message).toContain("window shifted");
 		});
 
+		it("keeps an intra-page duplicate fatal and names the malformed page", async () => {
+			const pages = [
+				graphqlPage(
+					[prNode({ number: 7 }), prNode({ number: 7 }), prNode({ number: 8 })],
+					false,
+					"c1",
+				),
+			];
+			const { fetcher } = servePages(pages);
+			const result = await fetchOpenPullRequests(fetcher, "acme", "repo");
+
+			expect(result.prs.map(({ number }) => number)).toEqual([7, 8]);
+			expect(result.errors).toEqual([
+				{
+					message: expect.stringContaining(
+						"malformed page 1: repeated 1 PR number(s) within the page (#7)",
+					),
+					benign: false,
+				},
+			]);
+			expect(result.errors[0].message).not.toContain("window shifted");
+		});
+
+		it("reports intra-page and cross-page duplicates separately", async () => {
+			const pages = [
+				graphqlPage([prNode({ number: 7 })], true, "c1"),
+				graphqlPage(
+					[prNode({ number: 7 }), prNode({ number: 8 }), prNode({ number: 8 })],
+					false,
+					"c2",
+				),
+			];
+			const { fetcher } = servePages(pages);
+			const result = await fetchOpenPullRequests(fetcher, "acme", "repo");
+
+			expect(result.errors).toHaveLength(2);
+			expect(result.errors).toEqual(
+				expect.arrayContaining([
+					{
+						message: expect.stringContaining("routine boundary repeat"),
+						benign: true,
+					},
+					{
+						message: expect.stringContaining("malformed page 2"),
+						benign: false,
+					},
+				]),
+			);
+		});
+
 		it("keeps a duplicate fatal when the cursor did not advance (real truncation)", async () => {
 			// Page 2 repeats page 1 AND hands back the same cursor: the
 			// collector was about to replay, which is genuine truncation.
