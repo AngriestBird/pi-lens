@@ -93,7 +93,10 @@ import {
 	gateFindingsByPathFreshness,
 	snapshotAdvisoryProvenance,
 } from "./advisory-provenance.js";
-import { sweepInlineBlockerFreshness } from "./blocker-freshness.js";
+import {
+	DEPENDENCY_DRIFT_MAX_DELIVERIES,
+	sweepInlineBlockerFreshness,
+} from "./blocker-freshness.js";
 import { sweepInlineBlockerPastEof } from "./blocker-past-eof.js";
 // #2001/#2002: collect-later delivery for slow auxiliary LSP servers.
 import { getLSPService } from "./lsp/index.js";
@@ -118,6 +121,7 @@ import {
 import { incrementDegradationCount } from "./degradation-ledger.js";
 import {
 	degradeDemotedFindingBody,
+	formatDeliveryCapNote,
 	formatRetirementNote,
 } from "./demoted-finding-render.js";
 import { STALE_LINE_MARKER } from "./stale-marker.js";
@@ -614,9 +618,25 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	// Re-surface inline blockers from this turn that the agent didn't fix.
 	// These were shown inline during write/edit but the agent moved on without resolving them.
 	const unresolvedBlockers = runtime.getInlineBlockersSnapshot();
-	/** #1944: past-EOF demotions retired after their single degraded delivery. */
+	/** #1944/#1950: demotions retired after their delivery limit. */
 	let demotedFindingsRetired = 0;
-	for (const { filePath: bPath, summary, stale } of unresolvedBlockers) {
+	/**
+	 * #1950 fix-round F1: dependency-drift delivery-count commits, deferred
+	 * until this turn's content is confirmed NOT suppressed by the
+	 * `turn-end-findings-last` signature dedupe further down. That dedupe
+	 * silences a turn whose rendered content is byte-identical to the last
+	 * one actually delivered — the agent never sees a suppressed turn, so
+	 * committing the counter for it would count a delivery that didn't
+	 * happen. Each entry here is invoked only from the "not suppressed"
+	 * branch below.
+	 */
+	const pendingDependencyDriftDeliveries: Array<() => void> = [];
+	for (const {
+		filePath: bPath,
+		summary,
+		stale,
+		staleReason,
+	} of unresolvedBlockers) {
 		const displayPath = toRunnerDisplayPath(cwd, bPath);
 		if (stale) {
 			// #1631: demoted — out of the authoritative blocker channel and into the
@@ -633,6 +653,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			const deadLines = blockerPastEof.deadLinesByPath.get(bPath) ?? [];
 			const degraded = degradeDemotedFindingBody(summary, { deadLines });
 			const retired = runtime.retireDemotedPastEofBlocker(bPath, deadLines);
+			let retirementNote: string | undefined;
 			if (retired) {
 				demotedFindingsRetired += 1;
 				// Bounded by the ledger's own per-kind/subject tally, and the subject
@@ -642,11 +663,46 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 					subject: `inline-blocker:${displayPath}`,
 					reason: `file shrank past cited line(s) ${deadLines.join(", ")}; retired after one degraded delivery`,
 				});
+				retirementNote = formatRetirementNote(deadLines);
+			} else if (staleReason === "dependency-drift") {
+				// #1950: a dependency-drift demotion is recoverable (its coordinates
+				// are still in bounds), so it does NOT retire after one delivery like
+				// the past-EOF case above — but nothing capped how many times the
+				// SAME demoted-but-unconfirmed record re-serves, and incident data
+				// showed repeat deliveries carrying near-zero information after the
+				// first. Cap it at DEPENDENCY_DRIFT_MAX_DELIVERIES instead.
+				//
+				// The count driving THIS render is a peek (fix-round F1): the actual
+				// increment is deferred to `pendingDependencyDriftDeliveries` below,
+				// committed only once this turn's content is known to reach the
+				// agent, so a suppressed turn's tentative render never advances the
+				// stored count.
+				const tentativeCount =
+					runtime.peekInlineBlockerStaleDeliveryCount(bPath) + 1;
+				if (tentativeCount >= DEPENDENCY_DRIFT_MAX_DELIVERIES) {
+					retirementNote = formatDeliveryCapNote(tentativeCount);
+				}
+				pendingDependencyDriftDeliveries.push(() => {
+					const deliveryCount =
+						runtime.incrementInlineBlockerStaleDelivery(bPath);
+					if (deliveryCount >= DEPENDENCY_DRIFT_MAX_DELIVERIES) {
+						const capRetired =
+							runtime.retireDemotedDependencyDriftBlocker(bPath);
+						if (capRetired) {
+							demotedFindingsRetired += 1;
+							incrementDegradationCount({
+								kind: "demoted-finding-retired",
+								subject: `inline-blocker:${displayPath}`,
+								reason: `capped after ${deliveryCount} deliveries with no re-run; re-run can still confirm`,
+							});
+						}
+					}
+				});
 			}
 			// @delivery-surface: runtime-turn:unresolved-inline-blocker
 			advisoryParts.push(
 				`${STALE_LINE_MARKER} ${displayPath}:\n${degraded.body}` +
-					(retired ? `\n${formatRetirementNote(deadLines)}` : ""),
+					(retirementNote ? `\n${retirementNote}` : ""),
 			);
 		} else {
 			// @delivery-surface: runtime-turn:unresolved-inline-blocker
@@ -2634,6 +2690,10 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			resetFormatService();
 			return;
 		}
+		// #1950 fix-round F1: this turn's content is confirmed NOT suppressed —
+		// it is about to reach the agent — so NOW commit the delivery-count
+		// increments the per-blocker loop above only tentatively computed.
+		for (const commit of pendingDependencyDriftDeliveries) commit();
 		const fileSeqByPath: Record<string, number> = {};
 		for (const [filePath, seq] of runtime.getFileSeqEntries()) {
 			fileSeqByPath[normalizeMapKey(path.resolve(filePath))] = seq;
