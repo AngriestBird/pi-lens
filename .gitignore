@@ -35,12 +35,19 @@ test-lsp-files/
 test-filetime/
 test-projects/
 # scripts/ intentionally tracked
-test-*.ts
-test-*.js
-test-*.py
-test-*.md
-test-*.sh
-test-*.mjs
+# Anchored to repo root (#2250): unanchored, these matched the basename of
+# any tracked test file anywhere in the tree (tests/clients/test-*.test.ts,
+# clients/test-runner-client.ts, .changelog/test-*.md), silently hiding
+# them from ignore-respecting search tools (rg, grep --exclude-from) even
+# though `git status`/`git check-ignore` show nothing wrong for a tracked
+# path. These rules only ever meant to catch ad hoc scratch files dropped
+# at the repo root.
+/test-*.ts
+/test-*.js
+/test-*.py
+/test-*.md
+/test-*.sh
+/test-*.mjs
 
 # Debug/dev scripts
 debug-*.js
