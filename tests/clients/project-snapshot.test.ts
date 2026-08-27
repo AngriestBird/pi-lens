@@ -1415,6 +1415,49 @@ describe("project snapshot", () => {
 			fs.unlinkSync(gzPath);
 			expect(loadProjectSnapshot(cwd)).toBeNull();
 		}));
+
+	it.each([
+		["full loader", (cwd: string) => loadProjectSnapshot(cwd)],
+		[
+			"exports-and-rules loader",
+			(cwd: string) => loadProjectSnapshotExportsAndRules(cwd),
+		],
+	])(
+		"%s detects a different-size external rewrite in the same mtime bucket (#2285)",
+		(_name, load) =>
+			withProjectDataDir((cwd) => {
+				const runtime = new RuntimeCoordinator();
+				runtime.seedProjectSequence(7);
+				const saved = buildProjectSnapshotFromRuntime({ cwd, runtime });
+				saveProjectSnapshot(cwd, saved);
+
+				const gzPath = getProjectSnapshotPath(cwd);
+				const savedStat = fs.statSync(gzPath);
+				const external = new RuntimeCoordinator();
+				external.seedProjectSequence(9);
+				for (let i = 0; i < 40; i++) {
+					external.cachedExports.set(
+						`external_${i}_${"x".repeat(i)}`,
+						path.join(cwd, "external", `${i}.ts`),
+					);
+				}
+				fs.writeFileSync(
+					gzPath,
+					gzipSync(
+						JSON.stringify(
+							buildProjectSnapshotFromRuntime({ cwd, runtime: external }),
+						),
+					),
+				);
+				const bucketMtime = Math.floor(savedStat.mtimeMs / 2000) * 2000;
+				fs.utimesSync(gzPath, new Date(bucketMtime), new Date(bucketMtime));
+				const externalStat = fs.statSync(gzPath);
+				expect(externalStat.size).not.toBe(savedStat.size);
+				expect(externalStat.mtimeMs).toBeLessThanOrEqual(savedStat.mtimeMs);
+
+				expect(load(cwd)?.seq).toBe(9);
+			}),
+	);
 });
 
 describe("project snapshot worker persist (#958)", () => {
