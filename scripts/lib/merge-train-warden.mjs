@@ -213,15 +213,34 @@ function normalizePr(node) {
 }
 
 /**
+ * How many repeated PR numbers one duplicate record names before it stops
+ * listing them and reports a remainder count (#2192). The record has to stay
+ * one line in a workflow summary; the COUNT is the signal, the first few
+ * numbers are the breadcrumb.
+ */
+export const DUPLICATE_REPORT_CAP = 5;
+
+/**
  * Single paginated list call (per PR, bounded by MAX_PAGES): rate-limit
  * conscious by construction. If GitHub returns a non-array/malformed page,
  * a request throws, or a page comes back with partial `errors`, bail
  * gracefully with whatever PRs were already collected plus a recorded error
  * -- never throw out of this function (review round 1, F6).
+ *
+ * Returns `errors` as `{ message, benign }` RECORDS, not strings (#2192).
+ * Both consumers -- `runWarden` below and the merge lane -- used to map every
+ * list error to `benign: false` on the way in, which is exactly the bug: a
+ * cross-page duplicate is routine, not fatal. The query orders by UPDATED_AT
+ * desc, so any open PR touched mid-pagination shifts the window and pushes a
+ * PR from page N onto page N+1. On a 10-minute cadence that is expected noise,
+ * and this file's own design note (BENIGN_HTTP_STATUSES above) says such races
+ * must not mark the scheduled run red. Classifying at the SOURCE also means
+ * the two consumers stop carrying identical mapping code that can drift apart.
  */
 export async function fetchOpenPullRequests(fetcher, owner, name) {
 	const prs = [];
 	const errors = [];
+	const record = (message, benign = false) => errors.push({ message, benign });
 	const seenNumbers = new Set();
 	let after;
 	for (let page = 0; page < MAX_PAGES; page++) {
@@ -229,37 +248,62 @@ export async function fetchOpenPullRequests(fetcher, owner, name) {
 		try {
 			payload = await graphql(fetcher, PR_QUERY, { owner, name, after });
 		} catch (error) {
-			errors.push(
+			record(
 				`GraphQL request failed: ${error instanceof Error ? error.message : String(error)}`,
 			);
 			break;
 		}
 		if (payload?.errors?.length)
-			errors.push(
+			record(
 				`GraphQL errors: ${payload.errors.map((e) => e.message).join("; ")}`,
 			);
 		const connection = payload?.data?.repository?.pullRequests;
 		if (!connection || !Array.isArray(connection.nodes)) break;
+		// Collected, not recorded per node (#2192): the old code pushed one
+		// FATAL error per repeated node, so a fully shifted window emitted up
+		// to MAX_PAGES x PAGE_SIZE = 200 identical lines into one summary. One
+		// record per page, naming the count, is the same information at 1/50th
+		// the volume.
+		const duplicates = [];
 		for (const node of connection.nodes) {
 			if (seenNumbers.has(node.number)) {
-				errors.push(
-					`GraphQL pagination repeated PR #${node.number} across pages; collection may be incomplete`,
-				);
+				duplicates.push(node.number);
 				continue;
 			}
 			seenNumbers.add(node.number);
 			prs.push(normalizePr(node));
 		}
-		if (!connection.pageInfo?.hasNextPage) break;
-		const nextCursor = connection.pageInfo.endCursor;
-		if (nextCursor == null || nextCursor === after) {
-			errors.push(
-				"GraphQL pagination truncated because cursor did not advance",
+
+		const hasNextPage = Boolean(connection.pageInfo?.hasNextPage);
+		const nextCursor = connection.pageInfo?.endCursor;
+		// Read BEFORE the breaks below, because it decides how the duplicate
+		// record is classified. A duplicate on a page whose cursor advanced (or
+		// on the last page, where there is no next cursor to advance) is the
+		// UPDATED_AT window sliding under us: routine. A duplicate on a page
+		// whose cursor did NOT advance means the collector was about to replay
+		// the same page, i.e. real truncation, and stays fatal.
+		const cursorAdvanced =
+			!hasNextPage || (nextCursor != null && nextCursor !== after);
+		if (duplicates.length > 0) {
+			const shown = duplicates.slice(0, DUPLICATE_REPORT_CAP);
+			const remainder = duplicates.length - shown.length;
+			record(
+				`GraphQL pagination repeated ${duplicates.length} PR number(s) on page ${page + 1} ` +
+					`(${shown.map((n) => `#${n}`).join(", ")}${remainder > 0 ? `, +${remainder} more` : ""}); ` +
+					(cursorAdvanced
+						? "the open-PR window shifted during pagination, so this is a routine boundary repeat"
+						: "the cursor did not advance, so the collection is truncated"),
+				cursorAdvanced,
 			);
+		}
+
+		if (!hasNextPage) break;
+		if (!cursorAdvanced) {
+			record("GraphQL pagination truncated because cursor did not advance");
 			break;
 		}
 		if (page === MAX_PAGES - 1) {
-			errors.push(
+			record(
 				`GraphQL pagination truncated after ${MAX_PAGES} pages while hasNextPage=true`,
 			);
 			break;
@@ -499,7 +543,11 @@ export async function runWarden({ fetcher, owner, repo, now = Date.now() }) {
 			url: null,
 			mergeStateStatus: null,
 			applied: [],
-			errors: listErrors.map((message) => ({ message, benign: false })),
+			// #2192: the classification is the READER's, not this caller's --
+			// `fetchOpenPullRequests` already returns `{ message, benign }`. The
+			// old blanket `benign: false` here is what made a routine
+			// window-slide duplicate mark the 10-minute run red.
+			errors: listErrors,
 			runHealth: null,
 		});
 	}
