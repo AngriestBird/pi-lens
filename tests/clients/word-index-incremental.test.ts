@@ -6,14 +6,16 @@
  * from-scratch `buildWordIndex` over the same final corpus.
  */
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
 	buildWordIndex,
 	deserializeWordIndex,
 	removeWordIndexDocument,
+	removeWordIndexDocumentAsync,
 	searchWordIndex,
 	serializeWordIndex,
 	updateWordIndexDocument,
+	updateWordIndexDocumentForEdit,
 	type WordIndex,
 	wordIndexPostingHits,
 } from "../../clients/word-index.js";
@@ -440,5 +442,96 @@ describe("equivalence property: k incremental edits == from-scratch rebuild (#34
 		]);
 
 		expect(normalize(initial)).toEqual(normalize(rebuilt));
+	});
+});
+
+// --- Cooperative removal staging: work unit is the token, not the posting ------
+
+describe("cooperative removal staging counts the clock per token (#2067)", () => {
+	/**
+	 * The cooperative staging path used to check its deadline per posting
+	 * ELEMENT, which cost one `performance.now()` per entry and made the
+	 * primitive unusable from the per-edit seam. Staging now filters each
+	 * token's postings with the packed `withoutFile` primitive and checks the
+	 * deadline BETWEEN tokens.
+	 *
+	 * This guard counts clock reads rather than measuring wall-clock time, so
+	 * it is invariant to machine speed and event-loop load. Restoring the
+	 * per-element form reds it: the fixture walks two orders of magnitude more
+	 * posting elements than it has tokens or lines.
+	 */
+	const TOKENS = Array.from({ length: 12 }, (_, i) => `stagingtoken${i}`);
+	const PEER_COUNT = 300;
+	const PEER_LINES = 60;
+
+	function highDocumentFrequencyIndex(target: string): WordIndex {
+		const line = TOKENS.join(" ");
+		return buildWordIndex([
+			{ path: target, content: Array(5).fill(line).join("\n") },
+			...Array.from({ length: PEER_COUNT }, (_, peer) => ({
+				path: `C:\Repo\Src\Peer${peer}.ts`,
+				content: Array(PEER_LINES).fill(line).join("\n"),
+			})),
+		]);
+	}
+
+	/** Posting entries the staging pass has to walk for `target`. */
+	function postingElementsToWalk(index: WordIndex, target: string): number {
+		let total = 0;
+		for (const token of index.forward?.get(target)?.keys() ?? []) {
+			total += index.postings.get(token)?.length ?? 0;
+		}
+		return total;
+	}
+
+	async function countClockReads(
+		work: () => Promise<unknown>,
+	): Promise<number> {
+		const spy = vi.spyOn(performance, "now");
+		try {
+			await work();
+			return spy.mock.calls.length;
+		} finally {
+			spy.mockRestore();
+		}
+	}
+
+	it("stages a removal with clock reads bounded by tokens, not postings", async () => {
+		const target = "C:\Repo\Src\Target.ts";
+		const index = highDocumentFrequencyIndex(target);
+		const elements = postingElementsToWalk(index, target);
+		// Not vacuous: the fixture really does walk a large posting population.
+		expect(elements).toBeGreaterThan(100_000);
+
+		const clockReads = await countClockReads(() =>
+			removeWordIndexDocumentAsync(index, target),
+		);
+
+		// One read per token plus a handful of yields, never one per element.
+		expect(clockReads).toBeLessThan(2_000);
+		expect(index.forward?.has(target)).toBe(false);
+		expect(
+			wordIndexPostingHits(index, TOKENS[0]).some((hit) => hit.file === target),
+		).toBe(false);
+	});
+
+	it("keeps the per-edit seam's replacement on the same bound", async () => {
+		const target = "C:\Repo\Src\Target.ts";
+		const index = highDocumentFrequencyIndex(target);
+		expect(postingElementsToWalk(index, target)).toBeGreaterThan(100_000);
+
+		const clockReads = await countClockReads(() =>
+			updateWordIndexDocumentForEdit(index, {
+				path: target,
+				content: "replacementtoken",
+			}),
+		);
+
+		expect(clockReads).toBeLessThan(2_000);
+		expect(
+			wordIndexPostingHits(index, "replacementtoken").some(
+				(hit) => hit.file === target,
+			),
+		).toBe(true);
 	});
 });

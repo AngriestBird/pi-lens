@@ -32,9 +32,9 @@ import { buildOrUpdateGraph } from "../review-graph/service.js";
 import { recordDiagnostics } from "../widget-state.js";
 import {
 	deserializeWordIndex,
-	removeWordIndexDocument,
+	removeWordIndexDocumentAsync,
 	scheduleWordIndexPersist,
-	updateWordIndexDocument,
+	updateWordIndexDocumentForEdit,
 	WORD_INDEX_MAX_BYTES,
 	type WordIndex,
 } from "../word-index.js";
@@ -484,8 +484,9 @@ export async function analyzeFile(
 		// index with no `forward` map (or none loaded) ⇒ no-op (no incremental
 		// primitive available — the eventual full rebuild covers it); an
 		// oversized file is REMOVED, never partially indexed; the update is
-		// synchronous (no interleaving hazard — MCP is single-process, same as
-		// pi); a successful update schedules the SAME debounced persist
+		// cooperative and serialized through the index's own operation queue
+		// (#2067 AC4), so this seam no longer holds the event loop for a whole
+		// replacement either; a successful update schedules the SAME debounced persist
 		// (`scheduleWordIndexPersist`, `PI_LENS_WORD_INDEX_PERSIST_DEBOUNCE_MS`)
 		// pi's path uses — no second persist mechanism.
 		//
@@ -502,9 +503,12 @@ export async function analyzeFile(
 					const content = fs.readFileSync(absPath, "utf8");
 					const byteLength = Buffer.byteLength(content, "utf-8");
 					if (byteLength > WORD_INDEX_MAX_BYTES) {
-						removeWordIndexDocument(warmIndex, absPath);
+						await removeWordIndexDocumentAsync(warmIndex, absPath);
 					} else {
-						updateWordIndexDocument(warmIndex, { path: absPath, content });
+						await updateWordIndexDocumentForEdit(warmIndex, {
+							path: absPath,
+							content,
+						});
 					}
 					scheduleWordIndexPersist(cwd, warmIndex);
 				} catch {
