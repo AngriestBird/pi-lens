@@ -107,8 +107,8 @@ import {
 	hasJavaBuildDescriptor,
 } from "../tool-policy.js";
 import {
-	removeWordIndexDocument,
-	updateWordIndexDocument,
+	removeWordIndexDocumentAsync,
+	updateWordIndexDocumentForEdit,
 	WORD_INDEX_MAX_BYTES,
 	type WordIndex,
 } from "../word-index.js";
@@ -864,22 +864,26 @@ function isIgnoredCascadeNeighbor(filePath: string, cwd: string): boolean {
  *    debounced persist (never a synchronous write per edit — same #260
  *    discipline as the graph).
  *
- * Race safety against a build-in-progress: this function body is entirely
- * synchronous (no `await` anywhere in it) and is called synchronously at
- * `computeCascadeForFile`'s entry, before its own `await buildOrUpdateGraph`;
- * the seam body is synchronous, although the caller awaits it.
- * Node is single-threaded, so two overlapping cascades (#450's unawaited
- * concurrency) can never interleave mid-mutation here — each call runs to
- * completion in one turn. The async variants exist for cooperative bulk
- * refreshes, but must not be used from unawaited concurrent callers: the
- * reviewer's 300-document probe lost 1,719 postings during an 8 ms yield
- * before the async path was serialized. The only cross-build hazard is a full
- * session-start rebuild REPLACING `runtime.wordIndex` with a new object between the caller
- * reading `runtime.wordIndex` (in runtime-tool-result.ts, also synchronous)
- * and this function receiving it — in that case this call simply mutates
- * whichever index object it was handed (old or new), and the other one is
- * abandoned/superseded, never corrupted. No queue, no lock: the simplest rule
- * that is still provably correct.
+ * Race safety against a build-in-progress: the update runs cooperatively, on
+ * an 8 ms budget, through the word index's own per-index operation queue
+ * (#2067 AC4). It used to run synchronously here, on the reasoning that two
+ * overlapping cascades (#450's unawaited concurrency) could not interleave
+ * mid-mutation if nothing ever yielded — the reviewer's 300-document probe had
+ * lost 1,719 postings during an 8 ms yield. That hazard is what the queue
+ * closed: every async operation on one index is chained behind the previous
+ * one in call order, so overlapping cascades are ordered rather than
+ * interleaved, and the cooperative arena compactor is separately proof against
+ * a synchronous edit landing mid-copy (#2117 review F2). What the synchronous
+ * variant could not fix is its own cost: one replacement on a 2,600-document
+ * corpus held the event loop for the whole replacement, which is the block
+ * #2067 measured at 1.1 s before interning and still tens of ms after it.
+ *
+ * The only cross-build hazard is a full session-start rebuild REPLACING
+ * `runtime.wordIndex` with a new object between the caller reading
+ * `runtime.wordIndex` (in runtime-tool-result.ts, synchronous) and this
+ * function receiving it — in that case this call simply mutates whichever
+ * index object it was handed (old or new), and the other one is
+ * abandoned/superseded, never corrupted.
  */
 async function updateWordIndexForCascade(args: {
 	wordIndex?: WordIndex | null;
@@ -894,10 +898,13 @@ async function updateWordIndexForCascade(args: {
 
 	const byteLength = Buffer.byteLength(content, "utf-8");
 	if (byteLength > WORD_INDEX_MAX_BYTES) {
-		removeWordIndexDocument(wordIndex, filePath);
+		await removeWordIndexDocumentAsync(wordIndex, filePath);
 		dbg?.(`word-index per-edit: dropped ${filePath} (over size cap)`);
 	} else {
-		updateWordIndexDocument(wordIndex, { path: filePath, content });
+		await updateWordIndexDocumentForEdit(wordIndex, {
+			path: filePath,
+			content,
+		});
 		dbg?.(`word-index per-edit: updated ${filePath}`);
 	}
 	onUpdated?.(wordIndex);

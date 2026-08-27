@@ -104,6 +104,21 @@ export type DegradationKind =
 	| "query-predicates-invalid"
 	| "install-retry-exhausted"
 	| "ast-grep-napi-unavailable"
+	/**
+	 * The napi fallback ADMITTED a file — its extension is in the in-process
+	 * language matrix (`clients/dispatch/runners/ast-grep-napi.ts`) — and the
+	 * addon that actually loaded then exposed no grammar for it, so every rule
+	 * for that language is skipped in-process for the rest of the session
+	 * (#2215). Before this kind that skip was the invisible half of the defect:
+	 * `getLang` returned undefined and each caller read it as an ordinary
+	 * "nothing to do", the AGENTS.md shape-10 clean-versus-unavailable
+	 * collapse. Unreachable while the matrix and the addon agree (the coverage
+	 * test pins that), so a record here means a napi upgrade dropped a grammar
+	 * or the matrix claims one the package never shipped. Subject is the rule
+	 * language rather than the file, because the gap is per-language: recorded
+	 * once, not once per file.
+	 */
+	| "ast-grep-napi-language-unavailable"
 	/** An availability probe exceeded its advertised wall-clock budget (#2131). */
 	| "availability-probe-overrun"
 	/**
@@ -380,6 +395,24 @@ export type DegradationKind =
 	 * hand-rolled per-file Set (#1913 review F1).
 	 */
 	| "read-guard-record-cap-trim"
+	/**
+	 * `read-guard.ts`'s whole-file evictor (`evictFile`) dropped a file's
+	 * tracked read/edit state (#1918, the #1913 class sibling). Fires from
+	 * three call sites — the consumed-file cap, the unconsumed-file cap, and
+	 * the idle-eviction timer — the `reason` text in the matching
+	 * `read_file_evicted` read-guard.log line says which. Rising edge gates
+	 * that log line per file per session, same as `read-guard-record-cap-trim`.
+	 */
+	| "read-guard-file-evicted"
+	/**
+	 * `read-guard.ts`'s per-file edits-cap splice (`READ_GUARD_MAX_EDITS_PER_FILE`)
+	 * trimmed a file's edit history (#1918). The in-repo doc comment on that
+	 * cap argues the trim is inert in practice, but this kind gives it a
+	 * record instead of resting only on that argument. Rising edge gates the
+	 * matching `edits_cap_trimmed` read-guard.log line, same shape as
+	 * `read-guard-record-cap-trim`.
+	 */
+	| "read-guard-edits-cap-trim"
 	/**
 	 * A demoted finding was RETIRED from a delivery store instead of being
 	 * re-served (#1944). Raised when the cited file shrank past the

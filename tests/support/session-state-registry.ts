@@ -1038,7 +1038,11 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	// #1899 removed the dead `neighborTouchCache` (10 → 9).
 	"dispatch/integration.ts": 9,
 	"dispatch/lazy.ts": 0,
-	"dispatch/runners/ast-grep-napi.ts": 5,
+	// #2215 added the language matrix's two derived lookups
+	// (`BINDING_BY_EXTENSION`, `LSP_ONLY_RULE_LANGUAGES`) (5 → 7). Both are
+	// import-time frozen lookups with no session lifetime —
+	// SWEEP_HEURISTIC_LIMITS item 5, not state that must re-arm.
+	"dispatch/runners/ast-grep-napi.ts": 7,
 	"dispatch/runners/biome-check.ts": 1,
 	"dispatch/runners/psscriptanalyzer.ts": 2,
 	"dispatch/runners/spotbugs.ts": 0,
