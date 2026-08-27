@@ -261,6 +261,33 @@ describe("live review-graph in-memory bound (#2255)", () => {
 		expect(findGroup("review-graph-memory-cap-floor")).toBeUndefined();
 	});
 
+	// R2: the lazy fold retries on COVERAGE, not emptiness. A partial raw match is
+	// the dangerous middle: some ranked files resolve, the rest are silently dropped
+	// from the ranking, and nothing reports the under-selection.
+	it("does not under-select when only some node paths are pre-folded", () => {
+		process.env.PI_LENS_GRAPH_MAX_IN_MEMORY_BYTES = String(OVER_BUDGET);
+		const mixedGraph = buildGraph(250, 1000);
+		// Unfold half the nodes; the rest keep production spelling.
+		let i = 0;
+		for (const node of mixedGraph.nodes.values()) {
+			if (node.filePath && i++ % 2 === 0) {
+				node.filePath = path.relative(process.cwd(), node.filePath);
+			}
+		}
+
+		_setReviewGraphWorkspaceEntryForTests(KEY, mixedGraph);
+		const mixed = getReviewGraphWorkspaceCacheSnapshot().totalNodes;
+		clearReviewGraphWorkspaceCache();
+		_resetRetainedGraphSitesForTests();
+		_setReviewGraphWorkspaceEntryForTests(KEY, buildGraph(250, 1000));
+		const allFolded = getReviewGraphWorkspaceCacheSnapshot().totalNodes;
+
+		// A half-unfolded graph must retain what a fully-folded one retains. The floor
+		// cannot rescue this case: the raw pass DOES select nodes, just too few.
+		expect(mixed).toBe(allFolded);
+		expect(findGroup("review-graph-memory-cap-floor")).toBeUndefined();
+	});
+
 	// F2: the workspace cache is not the only process-lifetime retention site.
 	// `session.reviewGraph` lands on FactStores that are module-scope, one of which
 	// is never cleared, so an unbounded value there defeats the cache bound.
@@ -308,6 +335,47 @@ describe("live review-graph in-memory bound (#2255)", () => {
 		expect(getReviewGraphWorkspaceCacheSnapshot().totalNodes).toBe(
 			graph.nodes.size,
 		);
+	});
+
+	// R1: on the real full-build path the cache and the session fact received two
+	// objects a `cloneGraph` apart, so each ran its own centrality pass and retained
+	// its own trimmed copy — two budgets resident, not one.
+	it("retains ONE budget when both sites are fed by one build", async () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "memcap-once-"));
+		try {
+			const facts = new FactStore();
+			const files: string[] = [];
+			for (let i = 0; i < 24; i += 1) {
+				const file = path.join(dir, `m${i}.ts`);
+				fs.writeFileSync(
+					file,
+					`import { s${(i + 1) % 24} } from "./m${(i + 1) % 24}.js";
+` +
+						`export function s${i}() {
+	return s${(i + 1) % 24};
+}
+`,
+				);
+				files.push(file);
+			}
+			const budget = 20_000;
+			process.env.PI_LENS_GRAPH_MAX_IN_MEMORY_BYTES = String(budget);
+
+			const graph = await buildOrUpdateGraph(dir, files, facts);
+			expect(
+				estimateReviewGraphStoreBytes(graph.nodes.size, graph.edges.length),
+			).toBeGreaterThan(budget);
+
+			// Both retention sites hold the SAME trimmed graph, so the sample — which
+			// deduplicates by object identity — reports one budget, not two.
+			const retained = facts.getSessionFact<ReviewGraph>("session.reviewGraph");
+			expect(retained).toBeDefined();
+			expect(getReviewGraphWorkspaceCacheSnapshot().residentBytes).toBeLessThan(
+				budget * 1.3,
+			);
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
 	});
 
 	// F5: cap-trimmed and walk-truncated are different facts. Conflating them put

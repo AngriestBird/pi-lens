@@ -636,12 +636,6 @@ function graphMaxInMemoryBytes(): number {
 		: GRAPH_MAX_IN_MEMORY_BYTES_DEFAULT;
 }
 
-// One bounded result per source graph instance. A WeakMap adds no retention: the
-// entry dies with the source graph. Without it, the cache and the session fact
-// would each run their own centrality pass and retain two distinct trimmed
-// copies, doubling both the cost and the footprint the bound exists to cut.
-const _boundedGraphs = new WeakMap<ReviewGraph, ReviewGraph>();
-
 /**
  * The graph any process-lifetime holder may RETAIN, bounded to the in-memory byte
  * budget (#2255). Callers keep the full graph for the current turn; only what
@@ -652,6 +646,12 @@ const _boundedGraphs = new WeakMap<ReviewGraph, ReviewGraph>();
  * element cap using the graph's own node/edge split, then `capGraphForPersist`
  * runs one centrality selection.
  *
+ * Deliberately NOT memoized. A memo keyed on the source graph short-circuits the
+ * budget check, so a graph mutated in place after its first trim keeps answering
+ * with the stale earlier result (#2255 review R4). Callers that retain the same
+ * graph at two sites dedupe at the CALL SITE by capping once and sharing the
+ * result, which is both simpler and staleness-free.
+ *
  * The result is marked `partial` AND `capTrimmed`. `partial` keeps every
  * coverage-reporting consumer honest; `capTrimmed` records the narrower fact that
  * the source WALK was complete and only size was cut, which is what lets the two
@@ -659,8 +659,6 @@ const _boundedGraphs = new WeakMap<ReviewGraph, ReviewGraph>();
  * turn. `capTrimmed` is process-local and stripped before persist.
  */
 function retainedGraph(cwd: string, graph: ReviewGraph): ReviewGraph {
-	const memoized = _boundedGraphs.get(graph);
-	if (memoized) return memoized;
 	const nodes = graph.nodes.size;
 	const edges = graph.edges.length;
 	const bytes = estimateReviewGraphStoreBytes(nodes, edges);
@@ -711,7 +709,6 @@ function retainedGraph(cwd: string, graph: ReviewGraph): ReviewGraph {
 			estimateReviewGraphStoreBytes(cappedNodes, cappedEdges) / (1024 * 1024),
 		)}MiB`,
 	});
-	_boundedGraphs.set(graph, capped);
 	return capped;
 }
 
@@ -757,10 +754,15 @@ function headSliceGraph(graph: ReviewGraph, cap: number): ReviewGraph {
  * FactStores this reaches are module-scope, so an unbounded value here outlives
  * every session and defeats the cache bound entirely.
  *
- * This bounds the VALUE, not the store. `sessionFacts` is keyed by a fixed fact-id
- * vocabulary, so its ENTRY COUNT is already bounded — it is not the unbounded-map
- * shape #2243 fixes on `fileFacts`, and deliberately does not add a second
- * bounding mechanism to `FactStore`.
+ * This bounds the VALUE, not the store, and deliberately adds no second bounding
+ * mechanism to `FactStore` (#2243 owns the store-level discipline).
+ *
+ * `sessionFacts` entry COUNT is not fully bounded — `session.baseline.${path}`
+ * (`dispatch/dispatcher.ts`) and `session.baseline.cascade.${path}`
+ * (`dispatch/integration.ts`) mint one key per file touched and clear only on
+ * `clearAll`. That is a separate #2240 sibling, tracked on its own issue; it is
+ * per-file `Diagnostic[]`, not a whole project graph. What this seam fixes is the
+ * one fact whose single VALUE is unbounded in project size.
  */
 function setSessionReviewGraphFact(
 	cwd: string,
@@ -2085,20 +2087,45 @@ function capGraphForPersist(
 	);
 	const reverseDeps = buildReverseDependencyIndexFromGraph({ cwd, graph });
 	const rankedFiles = rankFilesByReverseDependencyCentrality(reverseDeps);
-	// Both sides of this lookup must be folded the SAME way. `rankedFiles` comes
+	// Both sides of this lookup must agree on path spelling. `rankedFiles` comes
 	// from the reverse-dependency index, which keys by `normalizeMapKey`
-	// (reverse-deps.ts). Keying this map by the RAW `node.filePath` matched only
-	// because production paths already arrive folded (normalizeGraphSourcePath).
-	// Any caller handing over an unfolded path missed every lookup and produced an
-	// EMPTY selection — a separator/casing assumption, not a real ranking. Fold
-	// explicitly so the two sides agree by construction (#2255 review F1).
-	const nodeIdsByFile = new Map<string, string[]>();
-	for (const [id, node] of graph.nodes) {
-		if (!node.filePath) continue;
-		const fileKey = normalizeMapKey(node.filePath);
-		const ids = nodeIdsByFile.get(fileKey) ?? [];
-		ids.push(id);
-		nodeIdsByFile.set(fileKey, ids);
+	// (reverse-deps.ts), while this map keys by the RAW `node.filePath`. They agree
+	// because production paths already arrive folded (normalizeGraphSourcePath), so
+	// the raw pass is both correct and free. An unfolded path missed its lookup and
+	// was dropped from the ranking with no signal (#2255 review F1).
+	//
+	// Folding every node up front would fix that but costs a `realpath` probe PER
+	// NODE — measured at 93.5us per node, about 14 seconds at 150k nodes — on the
+	// pre-existing persist cap that every over-cap build already pays. So fold
+	// LAZILY: index raw first, and pay one folding pass only when the raw index
+	// fails to cover every ranked file. Coverage, not emptiness, is the trigger: a
+	// PARTIAL raw match would otherwise silently under-select the rest.
+	const indexNodesByFile = (fold: boolean): Map<string, string[]> => {
+		const byFile = new Map<string, string[]>();
+		for (const [id, node] of graph.nodes) {
+			if (!node.filePath) continue;
+			const fileKey = fold ? normalizeMapKey(node.filePath) : node.filePath;
+			const ids = byFile.get(fileKey) ?? [];
+			ids.push(id);
+			byFile.set(fileKey, ids);
+		}
+		return byFile;
+	};
+	const coveredRankedFiles = (byFile: Map<string, string[]>): number => {
+		let hits = 0;
+		for (const filePath of rankedFiles) {
+			if ((byFile.get(filePath)?.length ?? 0) > 0) hits++;
+		}
+		return hits;
+	};
+	let nodeIdsByFile = indexNodesByFile(false);
+	if (coveredRankedFiles(nodeIdsByFile) < rankedFiles.length) {
+		const folded = indexNodesByFile(true);
+		// Keep whichever index the ranking can actually reach. Folding is a repair
+		// for unfolded input, never a downgrade for input that was already correct.
+		if (coveredRankedFiles(folded) > coveredRankedFiles(nodeIdsByFile)) {
+			nodeIdsByFile = folded;
+		}
 	}
 
 	const keptIds = new Set<string>();
@@ -5747,8 +5774,16 @@ async function _doBuildGraph(
 	// so change detection does not reread every file after the graph is built.
 	// #459: full rebuild ⇒ new generation.
 	const generation = ++_graphGenerationCounter;
-	const graphSnapshot = cloneGraph(graph);
-	rebuildIndexes(graphSnapshot);
+	// #2255 review R1: cap ONCE and let both retention sites share the result. The
+	// cache took a clone while the session fact took the original, two objects a
+	// `cloneGraph` apart, so each ran its own centrality pass and retained its own
+	// trimmed copy — two budgets resident, not one. Over budget the cap already
+	// returns a fresh, fully-indexed graph, so it IS the snapshot and no clone is
+	// needed. In budget nothing is trimmed and the clone happens exactly as before.
+	const retained = retainedGraph(cwd, graph);
+	const wasCapped = retained !== graph;
+	const graphSnapshot = wasCapped ? retained : cloneGraph(graph);
+	if (!wasCapped) rebuildIndexes(graphSnapshot);
 	// Keep the content generation on the persisted snapshot instance too, so
 	// scheduled persistence logs join the same graph identity as build success.
 	graphSnapshot.buildGeneration = generation;
@@ -5790,7 +5825,9 @@ async function _doBuildGraph(
 		graphChanged: true,
 	});
 	graph.buildGeneration = generation;
-	setSessionReviewGraphFact(cwd, facts, graph);
+	// Share the cache's object, so an over-budget build retains ONE trimmed graph
+	// across both sites. In budget this stores the equivalent clone the cache holds.
+	setSessionReviewGraphFact(cwd, facts, graphSnapshot);
 	return graph;
 }
 

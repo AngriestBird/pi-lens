@@ -539,11 +539,11 @@ export const SESSION_STATE_REGISTRY: SessionStateEntry[] = [
 		id: "review-graph-builder:workspaceGraphCache",
 		module: "review-graph/builder.ts",
 		state:
-			"_workspaceGraphCache, _workspaceCacheEpochs, _sourcePathMemos, _sourcePathNormalizeCalls, _retainedGraphSites, _boundedGraphs",
+			"_workspaceGraphCache, _workspaceCacheEpochs, _sourcePathMemos, _sourcePathNormalizeCalls, _retainedGraphSites",
 		policy: "session_start",
 		resetName: "clearReviewGraphWorkspaceCache",
 		reason:
-			"Same reason as the module graph: a cached workspace graph describes one revision of one tree. #2255 adds two memory-attribution companions on the same seam: _retainedGraphSites (WeakRefs to graphs retained outside the cache, cleared with it so a new session never samples the previous one's graphs) and _boundedGraphs (a WeakMap memo whose entries die with the graph they key, so it needs no explicit reset).",
+			"Same reason as the module graph: a cached workspace graph describes one revision of one tree. #2255 adds one memory-attribution companion on the same seam: _retainedGraphSites (WeakRefs to graphs retained outside the cache, cleared with it so a new session never samples the previous one's graphs).",
 	},
 	{
 		id: "ast-grep-napi:loadState",
@@ -1110,7 +1110,7 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	"quiet-window-config.ts": 0,
 	"quiet-window.ts": 0,
 	"recent-touches.ts": 1,
-	"review-graph/builder.ts": 20,
+	"review-graph/builder.ts": 19,
 	"review-graph/git-identity.ts": 0,
 	"review-graph/shared-extraction-ir.ts": 1,
 	"review-graph/workspace-modules.ts": 2,
