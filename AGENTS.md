@@ -617,8 +617,17 @@ and only `lsp_server_spawned` answers "how many servers did we start".
 Managed verification uses the registry's optional `verificationTimeoutMs` at
 every installer-owned probe seam, including local discovery, npm install, and
 periodic refresh. The refresh candidate projection carries that policy instead
-of reintroducing a shared literal; dispatch keeps its separate 5-second budget
-until its own issue defines the broader hot-path change. (#2176, #2194)
+of reintroducing a shared literal. (#2176, #2194)
+
+The dispatch lsp-runner's `touchFile` call has its OWN 5-second cold-spawn
+wait floor (`RUNTIME_CONFIG.pipeline.lspSpawnBudgetMs`,
+`clients/dispatch/runners/lsp.ts`), separate from installer verification —
+`getClientForFile` only raises it when the matching `LSPServerInfo` declares
+`clientWaitTimeoutMs` (the seam RubyServer already used). Bounding a tool's
+installer verification alone does not stop a cold spawn from losing this
+separate 5-second race, so `clientWaitTimeoutMs` must mirror the tool's
+`verificationTimeoutMs` on the LSP registry side too: Bash and JSON at 20s,
+Vue at 30s, Svelte at 20s, and Prisma at 40s. (#2169, #2176)
 
 The project ignore matcher keeps its per-path verdict memo hot between edits.
 The write-result seam calls `invalidateProjectIgnoreMatcherForPath` for a
@@ -709,11 +718,13 @@ preserved as `cause`. (#1214)
 `ToolDefinition.checkArgs` through local/global/user/install/refresh paths and
 opt into `safeSpawnAsync`'s `input: ""` so every verification receives EOF.
 The registry may declare a larger bounded timeout for a tool whose cold
-launcher startup exceeds the dispatch budget; Vue uses 30 seconds while the
+launcher startup exceeds the installer default; Vue uses 30 seconds while the
 installer default remains 10 seconds (#2176). bash-language-server and
 vscode-json-language-server measured 9,667ms and 11,047ms cold with closed
 stdin — both close enough to the 10s default that host contention alone can
 trip a false verification degradation — and use a 20-second bound (#2194).
+svelte-language-server and @prisma/language-server measured 12,410ms and up
+to 27,265ms cold with closed stdin and use 20- and 40-second bounds (#2169).
 Delivery is proven per strategy, not just for npm: `probeManagedToolVersion`
 (pip/gem) and `verifyRefreshedArtifact` (github/maven/archive) both resolve
 the timeout through `getToolVerificationTimeout` on every call, and each of

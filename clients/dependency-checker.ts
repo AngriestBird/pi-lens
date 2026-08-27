@@ -668,9 +668,15 @@ export class DependencyChecker {
 		const existing = this.checkInFlight.get(key);
 		if (existing) return existing;
 
+		// Identity-guarded release (#1968's pattern): delete only if THIS run is
+		// still the registered one. A bare delete-by-key lets a late-settling run
+		// evict a live successor a second writer registered under the same key
+		// mid-flight, after which the next caller starts a duplicate check.
 		const promise = this.runCheckFile(normalized, projectRoot, gen).finally(
 			() => {
-				this.checkInFlight.delete(key);
+				if (this.checkInFlight.get(key) === promise) {
+					this.checkInFlight.delete(key);
+				}
 			},
 		);
 		this.checkInFlight.set(key, promise);
@@ -1059,8 +1065,14 @@ export class DependencyChecker {
 		// does, and the two overlap (runtime-session, fresh-fetch), so it takes a
 		// generation too — claimed before the spawn, as late as a scan can.
 		const gen = ++this.opGeneration;
+		// Identity-guarded release (#1968's pattern): delete only if THIS run is
+		// still the registered one. A bare delete-by-key lets a late-settling run
+		// evict a live successor a second writer registered under the same key
+		// mid-flight, after which the next caller starts a duplicate scan.
 		const promise = this.runScanProject(projectRoot, gen).finally(() => {
-			this.scanInFlight.delete(projectRoot);
+			if (this.scanInFlight.get(projectRoot) === promise) {
+				this.scanInFlight.delete(projectRoot);
+			}
 		});
 		this.scanInFlight.set(projectRoot, promise);
 		return promise;

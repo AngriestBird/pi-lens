@@ -545,7 +545,7 @@ export interface LSPClientInfo {
 
 // --- Constants ---
 
-const INITIALIZE_TIMEOUT_MS = positiveIntFromEnv(
+export const INITIALIZE_TIMEOUT_MS = positiveIntFromEnv(
 	"PI_LENS_LSP_INIT_TIMEOUT_MS",
 	15_000,
 ); // 15s — npx downloads are handled by ensureTool, not here
