@@ -189,6 +189,17 @@ describe("nested ignore freshness clock (#2071)", () => {
 
 			fs.writeFileSync(ignorePath, "bbb.ts\n");
 			expect(fs.statSync(ignorePath).size).toBe(7);
+			// PIN the mtime rather than trusting the clock to tick. Size is held
+			// constant here on purpose, so mtime is the ONLY axis that can carry
+			// the edit — and two same-size writes land in one coarse mtime bucket
+			// most of the time (measured 181/200 back to back on Windows). The
+			// real test does enough work between the writes to usually escape the
+			// bucket, which is worse than always failing: it failed 1 of 15
+			// unmutated runs here, and Linux CI would never show it. This is the
+			// mirror of the #1105 cases, which pin mtime with `utimesSync` to
+			// isolate the size axis; this pins it to isolate the mtime axis.
+			const bumped = new Date(fs.statSync(ignorePath).mtimeMs + 5_000);
+			fs.utimesSync(ignorePath, bumped, bumped);
 			vi.setSystemTime(start + PROJECT_IGNORE_FRESHNESS_CADENCE_MS + 1);
 			// A fresh path in the same directory rebuilds the drifted entry and
 			// drops the subtree's verdicts with it.
