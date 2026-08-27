@@ -18,8 +18,18 @@ rule:
   kind: call_expression
   has:
     field: function
-    kind: identifier
-    regex: "^printf$"
+    any:
+      # A bare call: printf(...).
+      - kind: identifier
+        regex: "^printf$"
+      # A namespace-qualified call: std::printf(...) or ::printf(...). C++
+      # inherits printf into std:: via <cstdio>. The qualifier isn't part of
+      # the identifier node's text, so only the trailing name is checked.
+      - kind: qualified_identifier
+        has:
+          field: name
+          kind: identifier
+          regex: "^printf$"
 tags:
   - cpp
   - idiom

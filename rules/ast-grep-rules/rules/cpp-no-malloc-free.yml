@@ -18,8 +18,21 @@ rule:
   kind: call_expression
   has:
     field: function
-    kind: identifier
-    regex: "^(malloc|calloc|realloc|free)$"
+    any:
+      # A bare call: malloc(...).
+      - kind: identifier
+        regex: "^(malloc|calloc|realloc|free)$"
+      # A namespace-qualified call: std::malloc(...) or ::malloc(...). C++
+      # inherits these into std:: via <cstdlib>, and the global-scope form
+      # is common in code that also has a project-local `malloc` overload.
+      # The qualifier itself (`std`/empty) isn't part of the identifier
+      # node's text, so it's unconstrained here; only the trailing name is
+      # checked, which is exactly the function being called either way.
+      - kind: qualified_identifier
+        has:
+          field: name
+          kind: identifier
+          regex: "^(malloc|calloc|realloc|free)$"
 tags:
   - cpp
   - idiom

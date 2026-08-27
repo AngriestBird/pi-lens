@@ -14,6 +14,11 @@ note: |
   correctly paired and error-checked, or a leak/double-free candidate
   requires tracing ownership across the function, which this syntactic rule
   cannot verify.
+  Expect volume in an unmanaged-memory C codebase: this fires once per
+  malloc/calloc/realloc/free call site, so a file with routine heap use can
+  report many findings that are individually fine. Treat a high count as a
+  prompt to skim for the unpaired or unchecked exceptions, not as a signal
+  every call site needs a change.
 rule:
   kind: call_expression
   has:

@@ -14,3 +14,12 @@ invalid:
     void release(int* buf) {
         free(buf);
     }
+  - |
+    int* make_buffer(int count) {
+        int* buf = static_cast<int*>(std::malloc(sizeof(int) * count));
+        return buf;
+    }
+  - |
+    void release(int* buf) {
+        ::free(buf);
+    }
