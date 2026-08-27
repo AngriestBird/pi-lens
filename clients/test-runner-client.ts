@@ -383,9 +383,18 @@ export class TestRunnerClient {
 	// treat that as "no additional signal" and fall back to naming-convention
 	// detection only.
 	private vitestTestGlobsCache = new PathKeyedMap<{
-		include?: string[];
-		exclude?: string[];
-	} | null>(normalizeEphemeralMapKey);
+		result: { include?: string[]; exclude?: string[] } | null;
+		/**
+		 * #2252 F2: the config file `result` was derived from, present whether
+		 * or not it parsed. `undefined` means no candidate config file existed
+		 * at cache time. Re-checked on every read — same shape as
+		 * `getRunnerAvailability`'s `evidencePath`: a `result: null` entry is
+		 * revalidated by `fs.existsSync`, not trusted forever, so a config file
+		 * that appears (or a broken one that gets fixed) converges instead of
+		 * latching the earlier miss.
+		 */
+		evidencePath?: string;
+	}>(normalizeEphemeralMapKey);
 
 	constructor(verbose = false, options: TestRunnerClientOptions = {}) {
 		this.log = verbose ? createSubsystemLogger("test-runner") : () => {};
@@ -424,12 +433,26 @@ export class TestRunnerClient {
 		return cached.available;
 	}
 
+	/**
+	 * #2252: only a POSITIVE verdict is memoized. A negative one has no
+	 * `evidencePath` to re-stat, so `getRunnerAvailability` had no way to tell
+	 * "still absent" from "a config file just appeared" and served the first
+	 * miss for the client's whole process lifetime — measured live: probe an
+	 * empty directory, add `vitest.config.ts`, and the SAME client kept
+	 * answering "no runner". Same precedent as #2242's alias-canonicalization
+	 * fix (`clients/test-runner-client.ts`'s `getCanonicalProjectRoot`): drop
+	 * the memo write on the failure branch rather than adding a TTL or a
+	 * re-arm signal. The cost is bounded and already paid today — a cache miss
+	 * re-runs the exact same `configFiles.some(fs.existsSync)` walk this
+	 * method's caller already does on every FIRST probe of a runner.
+	 */
 	private setRunnerAvailability(
 		byRunner: Map<string, RunnerAvailability>,
 		runner: string,
 		available: boolean,
 		evidencePath?: string,
 	): void {
+		if (!available) return;
 		byRunner.set(runner, { available, evidencePath });
 	}
 
@@ -713,27 +736,44 @@ export class TestRunnerClient {
 	 * template expression) — anything more dynamic than that is out of
 	 * scope for this heuristic.
 	 *
-	 * Cached per `cwd` so the file is only read/parsed once per project,
-	 * not on every edit.
+	 * Cached per `cwd`, including a `null` result — #2252 F2: a project with
+	 * no vitest config, or one this heuristic can't scrape, is a COMMON shape
+	 * (every non-vitest project pays this on every edit otherwise; measured
+	 * ~1500x — 0.4µs cached vs. 598.7µs re-reading the candidate list every
+	 * call). The cache entry is revalidated on every read, the same shape
+	 * `getRunnerAvailability` uses for a positive verdict: bounded
+	 * `fs.existsSync` checks against the config file the result was derived
+	 * from (or, when none existed, against the candidate list itself), never
+	 * a full re-read/re-parse on a cache hit. So a config file appearing (or
+	 * a broken one being fixed) still converges — only the FULL parse is
+	 * paid once, not the existence check.
 	 */
 	parseVitestTestGlobs(
 		cwd: string,
 	): { include?: string[]; exclude?: string[] } | null {
 		const rootKey = this.getCanonicalProjectRoot(cwd);
-		const cached = this.vitestTestGlobsCache.get(rootKey);
-		if (cached !== undefined) {
-			return cached;
-		}
-
 		// .mts isn't in RUNNERS.vitest.configFiles (that list drives runner
 		// *detection* priority) but is a legal vitest config extension, so it's
 		// included here for the scrape even though detectRunner doesn't check it.
 		const candidates = [...RUNNERS.vitest.configFiles, "vitest.config.mts"];
 
+		const cached = this.vitestTestGlobsCache.get(rootKey);
+		if (cached !== undefined) {
+			const stillValid =
+				cached.evidencePath !== undefined
+					? fs.existsSync(cached.evidencePath)
+					: !candidates.some((cf) => fs.existsSync(path.join(cwd, cf)));
+			if (stillValid) return cached.result;
+			this.vitestTestGlobsCache.delete(rootKey);
+		}
+
 		let content: string | null = null;
+		let foundPath: string | undefined;
 		for (const cf of candidates) {
+			const candidatePath = path.join(cwd, cf);
 			try {
-				content = fs.readFileSync(path.join(cwd, cf), "utf-8");
+				content = fs.readFileSync(candidatePath, "utf-8");
+				foundPath = candidatePath;
 				break;
 			} catch {
 				continue;
@@ -751,7 +791,7 @@ export class TestRunnerClient {
 			}
 		}
 
-		this.vitestTestGlobsCache.set(rootKey, result);
+		this.vitestTestGlobsCache.set(rootKey, { result, evidencePath: foundPath });
 		return result;
 	}
 

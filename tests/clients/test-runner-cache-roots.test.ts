@@ -52,14 +52,17 @@ describe("TestRunnerClient project-root caches (#2048)", () => {
 		const { root, alias } = makeProject();
 		const client = new TestRunnerClient();
 
-		// Cache the negative verdict through one spelling, then change the
-		// project. A raw-root cache would probe the alias again and return true.
+		// No config yet through either spelling. #2252: a miss is never
+		// memoized, so this is a live check each time, not a cached latch.
 		expect(client.detectRunner(alias)).toBeNull();
 		fs.writeFileSync(
 			path.join(root, "vitest.config.ts"),
 			"export default { test: { include: ['tests/**/*.test.ts'] } }\n",
 		);
-		expect(client.detectRunner(root)).toBeNull();
+		// #2048: a POSITIVE verdict still shares its cache entry across the
+		// canonical root, resolving through EITHER spelling.
+		expect(client.detectRunner(root)?.runner).toBe("vitest");
+		expect(client.detectRunner(alias)?.runner).toBe("vitest");
 
 		const firstGlobs = client.parseVitestTestGlobs(alias);
 		fs.writeFileSync(
@@ -73,18 +76,39 @@ describe("TestRunnerClient project-root caches (#2048)", () => {
 		const { root, alias } = makeUnlinkedProject("pi-lens-2077-");
 		fs.writeFileSync(
 			path.join(root, "vitest.config.ts"),
-			"export default {}\n",
+			"export default { test: { include: ['tests/**/*.test.ts'] } }\n",
 		);
 		const client = new TestRunnerClient();
 
-		// The alias does not exist yet, so canonicalization falls back to the
-		// literal spelling and caches the miss under that fallback key.
+		// The alias does not exist yet, so canonicalization must NOT memoize
+		// the fallback key it falls back to — #2077's fix is precisely that
+		// this call leaves no memo entry behind for `alias`.
 		expect(client.detectRunner(alias)).toBeNull();
 
 		linkAlias(root, alias);
 
 		expect(client.detectRunner(root)?.runner).toBe("vitest");
 		expect(client.detectRunner(alias)?.runner).toBe("vitest");
+
+		// #2252 fix-round F1: the two assertions above pass even if the alias
+		// got pinned to a WRONG (fallback) canonical key here, because a live
+		// `fs.existsSync` check through the now-real symlink still finds the
+		// config file regardless of which cache bucket the probe lands in —
+		// #2252 stopped caching negatives, so a wrong-bucket miss just
+		// re-derives the right answer instead of serving a stale wrong one.
+		// Pin the ACTUAL contract (alias and root share ONE cache entry) with
+		// a positive-verdict content-divergence probe: parseVitestTestGlobs
+		// never re-reads a cached HIT (only re-validates the evidence path's
+		// existence), so if `alias` were still keyed under the pre-symlink
+		// fallback — the #2077 defect this test exists to catch — this call
+		// would MISS that bucket, re-read the file fresh, and see the NEW
+		// content instead of the stale cached one.
+		const rootGlobs = client.parseVitestTestGlobs(root);
+		fs.writeFileSync(
+			path.join(root, "vitest.config.ts"),
+			"export default { test: { include: ['changed/**/*.test.ts'] } }\n",
+		);
+		expect(client.parseVitestTestGlobs(alias)).toEqual(rootGlobs);
 	});
 
 	it("shares caches across a confirmed Windows separator and case alias", (ctx) => {
@@ -99,9 +123,12 @@ describe("TestRunnerClient project-root caches (#2048)", () => {
 		expect(client.detectRunner(alias)).toBeNull();
 		fs.writeFileSync(
 			path.join(root, "vitest.config.ts"),
-			"export default {}\n",
+			"export default { test: { include: ['tests/**/*.test.ts'] } }\n",
 		);
-		expect(client.detectRunner(root)).toBeNull();
+		// #2048: a POSITIVE verdict still shares its cache entry across the
+		// canonical root, resolving through EITHER spelling.
+		expect(client.detectRunner(root)?.runner).toBe("vitest");
+		expect(client.detectRunner(alias)?.runner).toBe("vitest");
 
 		const firstGlobs = client.parseVitestTestGlobs(alias);
 		fs.writeFileSync(
