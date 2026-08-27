@@ -71,7 +71,10 @@ describe("TestRunnerClient project-root caches (#2048)", () => {
 
 	it("re-resolves an alias first probed before its symlink existed (#2077)", () => {
 		const { root, alias } = makeUnlinkedProject("pi-lens-2077-");
-		fs.writeFileSync(path.join(root, "vitest.config.ts"), "export default {}\n");
+		fs.writeFileSync(
+			path.join(root, "vitest.config.ts"),
+			"export default {}\n",
+		);
 		const client = new TestRunnerClient();
 
 		// The alias does not exist yet, so canonicalization falls back to the
@@ -94,7 +97,10 @@ describe("TestRunnerClient project-root caches (#2048)", () => {
 
 		const client = new TestRunnerClient();
 		expect(client.detectRunner(alias)).toBeNull();
-		fs.writeFileSync(path.join(root, "vitest.config.ts"), "export default {}\n");
+		fs.writeFileSync(
+			path.join(root, "vitest.config.ts"),
+			"export default {}\n",
+		);
 		expect(client.detectRunner(root)).toBeNull();
 
 		const firstGlobs = client.parseVitestTestGlobs(alias);
