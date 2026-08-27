@@ -46,9 +46,15 @@ vi.mock("../../clients/tool-policy.js", async (importOriginal) => ({
 	getLinterPolicyForCwd: () => null,
 	markdownlintConfigArgs: () => [],
 }));
+
 import { detectFileChangedAfterCommand } from "../../clients/file-utils.js";
 import { makeRunnerCtx } from "../support/runner-ctx.js";
 import { setupTestEnvironment } from "./test-utils.js";
+
+// #2235: load the real pipeline during module setup. Its import graph is
+// substantial, so awaiting it inside a test makes Vitest's 5000ms test budget
+// measure scheduler contention instead of the cooldown behavior.
+const pipeline = await import("../../clients/pipeline.js");
 
 const TIMEOUT_RESULT = {
 	error: null,
@@ -154,45 +160,29 @@ describe("tryMarkdownlintFix consults the seam (review P2)", () => {
 		safeSpawnAsync.mockReset();
 	});
 
-	it(
-		"returns 0 WITHOUT spawning when its resolved command is cooling down",
-		// #2235: this test pairs real filesystem I/O (setupTestEnvironment,
-		// writeFileSync) with a dynamic import of pipeline.js — a genuinely
-		// heavy module graph, measured at ~1.5s to resolve on an idle machine.
-		// The default 5000ms budget has only ~3x margin, which several
-		// concurrent vitest workers or sibling agent worktrees building/testing
-		// at once reliably exhaust: reproduced locally under synthetic 14-worker
-		// CPU load as a hard 5020ms timeout (vs. 1537ms idle), a ~3.3x slowdown
-		// this budget doesn't survive. 20s matches the margin already used
-		// elsewhere in this suite for real-spawn/real-import paths (e.g.
-		// safe-spawn-timeout-teardown.test.ts's 15-20s budgets) and comfortably
-		// covers the measured slowdown with headroom to spare.
-		{ timeout: 20_000 },
-		async () => {
-			const env = setupTestEnvironment("pi-lens-timeout-pipeline-guard-");
-			try {
-				const filePath = path.join(env.tmpDir, "notes.md");
-				fs.writeFileSync(filePath, "# hello\n");
-				const { noteSpawnTimeout } = await seam();
-				// The mocked resolver returns the bare tool id; in production both
-				// lanes resolve the same physical binary, and basename-level
-				// keying is what makes different spellings cross-cool.
-				noteSpawnTimeout({
-					tool: "markdownlint",
-					command: "markdownlint",
-					phase: "availability",
-				});
+	it("returns 0 WITHOUT spawning when its resolved command is cooling down", async () => {
+		const env = setupTestEnvironment("pi-lens-timeout-pipeline-guard-");
+		try {
+			const filePath = path.join(env.tmpDir, "notes.md");
+			fs.writeFileSync(filePath, "# hello\n");
+			const { noteSpawnTimeout } = await seam();
+			// The mocked resolver returns the bare tool id; in production both
+			// lanes resolve the same physical binary, and basename-level
+			// keying is what makes different spellings cross-cool.
+			noteSpawnTimeout({
+				tool: "markdownlint",
+				command: "markdownlint",
+				phase: "availability",
+			});
 
-				const pipeline = await import("../../clients/pipeline.js");
-				const fixed = await pipeline.tryMarkdownlintFix(filePath, env.tmpDir);
+			const fixed = await pipeline.tryMarkdownlintFix(filePath, env.tmpDir);
 
-				expect(fixed).toBe(0);
-				expect(safeSpawnAsync).not.toHaveBeenCalled();
-			} finally {
-				env.cleanup();
-			}
-		},
-	);
+			expect(fixed).toBe(0);
+			expect(safeSpawnAsync).not.toHaveBeenCalled();
+		} finally {
+			env.cleanup();
+		}
+	});
 });
 
 describe("cross-lane key sharing (review P2)", () => {
