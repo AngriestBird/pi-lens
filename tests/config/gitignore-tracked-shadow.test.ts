@@ -1,8 +1,6 @@
-import * as fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import * as path from "node:path";
 import { describe, expect, it } from "vitest";
-import { Minimatch } from "../../clients/deps/minimatch.js";
 import { gitExecFileSync } from "../support/git-fixture-env.js";
 
 const root = path.resolve(
@@ -15,52 +13,48 @@ const root = path.resolve(
  * A git-tracked file that also matches a `.gitignore` pattern is invisible
  * to any ignore-respecting tool that doesn't special-case tracked status —
  * `rg`, plain `grep --exclude-from`, GitHub code search. Git itself keeps
- * tracking the file (`git status`/`git check-ignore` both special-case
- * already-indexed paths, so neither flags the shadow), but tools that walk
- * the filesystem and apply `.gitignore` textually do not (#2250).
+ * tracking the file (`git status`/`git check-ignore` on an already-indexed
+ * path both special-case it), so nothing in git itself flags the shadow
+ * (#2250).
  *
- * A `.gitignore` line with no `/` (other than a trailing one) matches the
- * BASENAME of a path at any depth — that's the documented gitignore rule
- * responsible for the shadow, and the one `rg`/`git check-ignore --no-index`
- * apply. Reproduce it directly with the same semantics, rather than relying
- * on an external `rg` binary that may not be on PATH in CI.
- *
- * Scoped to the `test-*` scratch-file family named in #2250 ("Test
- * directories and files" section of `.gitignore`), not the whole file: the
- * blanket `*.md`/`*.js`/`*.d.ts` rules elsewhere have their own dedicated
- * negation allowlists (docs, README, etc.) that a naive basename matcher
- * can't evaluate correctly without fully reimplementing gitignore
- * precedence. Those are a separate, larger audit outside this issue's scope.
+ * `git check-ignore --no-index` is git's own textual pattern evaluator —
+ * the same primitive `rg`'s gitignore support and GitHub code search apply
+ * — so piping every tracked path through it is the ground truth for "would
+ * a real ignore-respecting tool skip this file", with zero reimplemented
+ * gitignore dialect (a hand-rolled matcher previously here missed
+ * negations entirely and produced false positives on `.changelog/*.md`
+ * fragments git does NOT actually ignore). `-z`/`--stdin -z` NUL-delimit
+ * both ends so no filename with a space or unusual character is misread.
  */
-function unanchoredTestScratchPatterns(): string[] {
-	const text = fs.readFileSync(path.join(root, ".gitignore"), "utf8");
-	return text
-		.split(/\r?\n/)
-		.map((line) => line.trim())
-		.filter((line) => line.startsWith("test-"))
-		.filter((line) => !line.slice(0, -1).includes("/")); // no "/" except maybe trailing
-}
-
 function findShadowedTrackedFiles(): string[] {
-	const tracked = gitExecFileSync("git", ["ls-files"], {
+	const tracked = gitExecFileSync("git", ["ls-files", "-z"], {
 		cwd: root,
 		encoding: "utf8",
-	})
-		.split("\n")
-		.filter(Boolean);
-
-	const matchers = unanchoredTestScratchPatterns().map(
-		(pattern) => new Minimatch(pattern, { matchBase: true, dot: true }),
-	);
-
-	return tracked.filter((file) => {
-		const base = path.basename(file);
-		return matchers.some((m) => m.match(base));
 	});
+
+	let shadowed: string;
+	try {
+		shadowed = gitExecFileSync(
+			"git",
+			["check-ignore", "--no-index", "--stdin", "-z"],
+			{ cwd: root, encoding: "utf8", input: tracked },
+		);
+	} catch (err) {
+		// git check-ignore exits 1 when NONE of the stdin paths are ignored —
+		// that's the passing case, not a failure. Any other exit still throws.
+		const e = err as { status?: number; stdout?: string | Buffer };
+		if (e.status !== 1) throw err;
+		shadowed =
+			typeof e.stdout === "string"
+				? e.stdout
+				: (e.stdout?.toString("utf8") ?? "");
+	}
+
+	return shadowed.split("\0").filter(Boolean);
 }
 
 describe("gitignore does not shadow tracked files (#2250)", () => {
-	it("no git-tracked file's basename matches an unanchored .gitignore pattern", () => {
+	it("no git-tracked file is reported ignored by git check-ignore --no-index", () => {
 		const shadowed = findShadowedTrackedFiles();
 		expect(shadowed).toEqual([]);
 	});

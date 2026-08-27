@@ -94,6 +94,9 @@ migrate-*.js
 !docs/dispositions.md
 !docs/word-index.md
 !docs/durable-store-audit-1202.md
+!docs/analysisall.md
+!docs/api-ports-inventory.md
+!docs/astplayground.md
 !skills/**/*.md
 !.github/PULL_REQUEST_TEMPLATE.md
 
@@ -126,10 +129,14 @@ BUG_*.md
 # Autofix-smoke fixtures (#209 --autofix layer) — files with a safely-autofixable
 # lint violation; the pipeline's safe-autofix phase must fix them.
 !tests/fixtures/autofix-smoke/**
+# call-graph / function-facts fixtures — small real-language snippets several
+# call-graph and function-fact test suites parse for structural facts; tracked
+# but shadowed by the global *.js ignore above (#2250 sweep).
+!tests/fixtures/call-graph/**
+!tests/fixtures/function-facts/**
 
 clients/dispatch/debug.log
 clients/lsp/.intelephense/
-AGENTS.md
 .npmignore
 .claude/
 !.claude/
