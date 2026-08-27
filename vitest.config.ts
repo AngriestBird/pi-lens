@@ -214,6 +214,9 @@ const timingSensitiveInclude = [
 	"tests/clients/pipeline-snapshot-occupancy.test.ts",
 	"tests/clients/word-index-async-build.test.ts",
 	"tests/clients/word-index-cooperative-occupancy.test.ts",
+	//   - word-index-per-edit: the per-edit seam's longest-sync-stretch bound
+	//     (#2067 AC4), sampler-based like its cooperative-occupancy sibling.
+	"tests/clients/word-index-per-edit.test.ts",
 	"tests/clients/word-index-persist-occupancy.test.ts",
 	//   - cooperative-budget: #1215 acceptance screens — sampler-based
 	//     occupancy at 800-item scale plus the abort-latency bound.
