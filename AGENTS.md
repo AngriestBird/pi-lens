@@ -2784,4 +2784,11 @@ Test-runner availability and Vitest-glob caches canonicalize each public cwd
 once, then use `normalizeEphemeralMapKey` because their keys are already
 canonical and process-local. `detectRunner` hoists the outer availability-map
 lookup before the runner loop and uses the nested plain `Map`; glob-cache
-lookups use one `get`, not `has` plus `get`. (#2048)
+lookups use one `get`, not `has` plus `get`. (#2048) The spelling-to-canonical
+memo stores RESOLVED spellings only: a `realpathSync` failure returns the
+fallback key without memoizing it, so an alias probed before its symlink
+existed re-resolves on the next probe instead of pinning that call's verdict
+for the client's life. Any bounded memo whose key derivation can fail owes the
+same freshness story on the failure branch, not just on the success branch —
+otherwise key derivation silently changes when the path comes into existence
+and the memo never re-runs it (defect shape 1's temporal edge). (#2077)
