@@ -86,4 +86,5 @@ rule:
                       pattern: $VAR
 files:
   - "**/*.java"
-  - "!**/test/**"
+ignores:
+  - "**/test/**"

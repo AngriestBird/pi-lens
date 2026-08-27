@@ -11,5 +11,6 @@ rule:
     - pattern: System.err.print($$$)
 files:
   - "**/*.java"
-  - "!**/test/**"
-  - "!**/*Test.java"
+ignores:
+  - "**/test/**"
+  - "**/*Test.java"
