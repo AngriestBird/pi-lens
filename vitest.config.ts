@@ -214,9 +214,6 @@ const timingSensitiveInclude = [
 	"tests/clients/pipeline-snapshot-occupancy.test.ts",
 	"tests/clients/word-index-async-build.test.ts",
 	"tests/clients/word-index-cooperative-occupancy.test.ts",
-	//   - word-index-per-edit: the per-edit seam's longest-sync-stretch bound
-	//     (#2067 AC4), sampler-based like its cooperative-occupancy sibling.
-	"tests/clients/word-index-per-edit.test.ts",
 	"tests/clients/word-index-persist-occupancy.test.ts",
 	//   - cooperative-budget: #1215 acceptance screens — sampler-based
 	//     occupancy at 800-item scale plus the abort-latency bound.
@@ -359,16 +356,17 @@ export default defineConfig({
 					globalSetup: sharedGlobalSetup,
 					setupFiles: sharedSetupFiles,
 					execArgv: sharedExecArgv,
-					// Fully serial so the event-loop-occupancy sampler in each
-					// (measureMaxSyncBlockMs, see perf-harness.ts) never competes
-					// with a sibling fork for CPU turns while it's mid-measurement.
-					// Dropped from 2 to 1 when word-index-per-edit joined the lane:
-					// that file rebuilds a 401-document index (~1.2s, retry: 2), and
-					// at cap 2 it starved performance-report-occupancy's sampler on a
-					// loaded runner (107ms against a 75ms budget, 3/3 retries). Return
-					// to 2 once #2254 converts the occupancy guards to load-invariant
-					// work counts, which lets them leave this lane.
-					maxWorkers: 1,
+					// At most two at a time so the event-loop-occupancy sampler in each
+					// (measureMaxSyncBlockMs, see perf-harness.ts) contends with at most
+					// one sibling fork for CPU turns while it's mid-measurement, not the
+					// full-suite fork storm. This lane briefly ran at 1 while
+					// word-index-per-edit lived here: that file rebuilt a 401-document
+					// index (~1.2s, retry: 2) and at cap 2 starved
+					// performance-report-occupancy's sampler on a loaded runner (107ms
+					// against a 75ms budget, 3/3 retries). #2254 converted that guard to
+					// a load-invariant clock-read count and moved it out of this lane, so
+					// the heavy neighbour is gone and the cap returns to 2.
+					maxWorkers: 2,
 					// Its own phase, after both "default" and "grammar-heavy" drain
 					// (required anyway once maxWorkers differs from "default" — see
 					// the grammar-heavy project above). By running last and alone,
