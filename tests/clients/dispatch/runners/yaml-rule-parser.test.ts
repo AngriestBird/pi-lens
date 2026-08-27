@@ -1,12 +1,24 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+// ESM can't redefine an unmocked module's exports (vi.spyOn on a bare `fs`
+// import throws "Module namespace is not configurable"). Wrapping `statSync`
+// through `vi.mock` — same shape as `nested-ignore-freshness-clock.test.ts`'s
+// mock for the sibling cadence — makes it spy-able.
+vi.mock("node:fs", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("node:fs")>();
+	return { ...actual, statSync: vi.fn(actual.statSync) };
+});
+
 import {
 	loadYamlRules,
+	loadYamlRulesUncached,
 	parseSimpleYaml,
 	isOverlyBroadPattern,
 	isStructuredRule,
+	RULES_CACHE_FRESHNESS_CADENCE_MS,
 } from "../../../../clients/dispatch/runners/yaml-rule-parser.js";
 
 const ruleCacheTempDirs: string[] = [];
@@ -33,10 +45,20 @@ function messages(rules: ReturnType<typeof loadYamlRules>): string[] {
 const FIXED_DIRECTORY_MTIME = new Date("2000-01-01T00:00:00.000Z");
 
 afterEach(() => {
+	vi.useRealTimers();
 	for (const dir of ruleCacheTempDirs.splice(0))
 		fs.rmSync(dir, { recursive: true, force: true });
 });
 
+/**
+ * `getCachedRules` now skips its stat sweep entirely inside
+ * `RULES_CACHE_FRESHNESS_CADENCE_MS` (round 2 of #2262 — see
+ * `yaml-rule-parser.ts`). An edit made and re-read within the same window is
+ * invisible until the window elapses, mirroring `file-utils.ts`'s
+ * `PROJECT_IGNORE_FRESHNESS_CADENCE_MS` contract. These two cases advance a
+ * fake clock past the window before the second read, exactly as
+ * `nested-ignore-freshness-clock.test.ts` does for the sibling cadence.
+ */
 describe("yaml-rule-parser cache freshness (#2262)", () => {
 	it("reloads an edited existing rule when the directory mtime is unchanged", () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pilens-rules-cache-"));
@@ -44,10 +66,13 @@ describe("yaml-rule-parser cache freshness (#2262)", () => {
 		const file = path.join(root, "existing.yml");
 		writeRule(file, "existing", "old");
 		fs.utimesSync(root, FIXED_DIRECTORY_MTIME, FIXED_DIRECTORY_MTIME);
+		vi.useFakeTimers();
+		const start = Date.now();
 		const first = loadYamlRules(root);
 
 		writeRule(file, "existing", "new");
 		fs.utimesSync(root, FIXED_DIRECTORY_MTIME, FIXED_DIRECTORY_MTIME);
+		vi.setSystemTime(start + RULES_CACHE_FRESHNESS_CADENCE_MS + 1);
 
 		expect(messages(loadYamlRules(root))).toEqual(["new"]);
 		expect(messages(first)).toEqual(["old"]);
@@ -60,12 +85,51 @@ describe("yaml-rule-parser cache freshness (#2262)", () => {
 		ruleCacheTempDirs.push(root);
 		writeRule(path.join(root, "root.yml"), "root", "root");
 		fs.utimesSync(root, FIXED_DIRECTORY_MTIME, FIXED_DIRECTORY_MTIME);
+		vi.useFakeTimers();
+		const start = Date.now();
 		loadYamlRules(root);
 
 		writeRule(path.join(root, "nested", "child.yml"), "child", "child");
 		fs.utimesSync(root, FIXED_DIRECTORY_MTIME, FIXED_DIRECTORY_MTIME);
+		vi.setSystemTime(start + RULES_CACHE_FRESHNESS_CADENCE_MS + 1);
 
 		expect(messages(loadYamlRules(root))).toEqual(["child", "root"]);
+	});
+
+	it("re-stats a rule directory at most once per cadence window, not once per call", () => {
+		const root = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pilens-rules-cache-bounded-"),
+		);
+		ruleCacheTempDirs.push(root);
+		writeRule(path.join(root, "a.yml"), "a", "a");
+		vi.useFakeTimers();
+		const start = Date.now();
+		loadYamlRules(root); // primes the cache: one sweep
+
+		const statSpy = vi.mocked(fs.statSync);
+		statSpy.mockClear();
+		for (let i = 0; i < 25; i++) loadYamlRules(root);
+		expect(statSpy).not.toHaveBeenCalled();
+
+		vi.setSystemTime(start + RULES_CACHE_FRESHNESS_CADENCE_MS + 1);
+		loadYamlRules(root);
+		expect(statSpy).toHaveBeenCalledTimes(1);
+	});
+
+	it("orders discovered rule files by code unit, not by locale collation", () => {
+		const root = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pilens-rules-cache-order-"),
+		);
+		ruleCacheTempDirs.push(root);
+		// Ordinal order puts 'B' (0x42) before 'a' (0x61); default locale
+		// collation orders case-insensitively and would put 'a' first. This
+		// pins the array order `loadYamlRulesFresh` hashes and `getCachedRules`
+		// compares index-by-index (#2262 F4).
+		writeRule(path.join(root, "B.yml"), "upper", "upper");
+		writeRule(path.join(root, "a.yml"), "lower", "lower");
+
+		const rules = loadYamlRulesUncached(root);
+		expect(rules.map((rule) => rule.message)).toEqual(["upper", "lower"]);
 	});
 });
 
