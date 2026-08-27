@@ -544,6 +544,11 @@ export function clearReviewGraphWorkspaceCache(cwd?: string): void {
 		_sourcePathMemos.clear();
 		_workspaceCacheEpoch++;
 		_sizeSkipVerdicts.clear();
+		// #2255 review V2: the non-cache retention registry is memory-attribution
+		// state for THIS session's graphs. Without this, a new session's
+		// `memory_sample` kept attributing the previous session's graph, which the
+		// registry still held a live `WeakRef` to.
+		_retainedGraphSites.clear();
 	} else {
 		const normalized = normalizeMapKey(cwd);
 		// Compare the key's WORKSPACE half only, both sides canonicalized the same
@@ -790,11 +795,6 @@ function registerRetainedGraph(site: string, graph: ReviewGraph): void {
 		if (ref.deref() === undefined) _retainedGraphSites.delete(key);
 	}
 	_retainedGraphSites.set(site, new WeakRef(graph));
-}
-
-/** Test-only: drop the non-cache retention registry. */
-export function _resetRetainedGraphSitesForTests(): void {
-	_retainedGraphSites.clear();
 }
 
 /**

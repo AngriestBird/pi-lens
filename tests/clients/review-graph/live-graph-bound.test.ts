@@ -1,7 +1,15 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import {
+	afterAll,
+	afterEach,
+	beforeAll,
+	beforeEach,
+	describe,
+	expect,
+	it,
+} from "vitest";
 import {
 	getDegradationSummary,
 	resetDegradationLedger,
@@ -11,7 +19,6 @@ import { normalizeMapKey } from "../../../clients/path-utils.js";
 import {
 	_getReviewGraphWorkspaceGraphForTests,
 	_persistedCoverageForTests,
-	_resetRetainedGraphSitesForTests,
 	_setReviewGraphWorkspaceEntryForTests,
 	_setSessionReviewGraphFactForTests,
 	buildOrUpdateGraph,
@@ -31,11 +38,30 @@ import type { ReviewGraph } from "../../../clients/review-graph/types.js";
 
 // Production node paths arrive folded through `normalizeGraphSourcePath`, which is
 // `normalizeMapKey`. The centrality selection keys off the same fold, so a fixture
-// that skips it is not production-shaped: on Linux every lookup missed and the cap
-// retained nothing (#2255 review F1). Fold the fixture the way production does.
-const KEY = normalizeMapKey(path.resolve("memcap-workspace"));
+// that skips it is not production-shaped: every lookup misses and the cap retains
+// nothing (#2255 review F1). Fold the fixture the way production does.
+//
+// The files are REAL, under a temp dir, because the fold's behavior on a
+// NON-EXISTENT path is platform-dependent: `resolveNonExisting` handles the tail
+// differently per OS. The first version of these tests built their "unfolded"
+// variant with `path.relative`, which round-trips through the fold on Windows but
+// not on Linux, so CI saw unmutated code behave like the mutant and the guard was
+// unprovable there (#2255 review V1). With real files, `realpathSync.native` is
+// deterministic on both.
+let fixtureDir = "";
+let KEY = "";
+
+/** The canonical spelling production would hand the builder. */
 const filePathFor = (i: number): string =>
-	normalizeMapKey(path.resolve("memcap-workspace", "src", `f${i}.ts`));
+	normalizeMapKey(path.join(fixtureDir, "src", `f${i}.ts`));
+
+/**
+ * The same file, spelled so it is NOT already folded, using a redundant `/./`
+ * segment. `path.resolve` collapses that purely syntactically, identically on every
+ * OS, so the fold provably reverses this transform everywhere — which is exactly
+ * what the platform-dependent `path.relative` version could not promise.
+ */
+const unfoldedPathFor = (i: number): string => `${fixtureDir}/src/./f${i}.ts`;
 
 /**
  * A graph with `fileCount` file nodes, one symbol node each, import edges between
@@ -138,19 +164,33 @@ function unrankableGraph(nodeCount: number): ReviewGraph {
 const findGroup = (kind: string) =>
 	getDegradationSummary().find((g) => g.kind === kind);
 
+const FIXTURE_FILES = 60;
 const OVER_BUDGET = 30 * 1024;
 const AMPLE_BUDGET = 512 * 1024 * 1024;
 
 describe("live review-graph in-memory bound (#2255)", () => {
+	beforeAll(() => {
+		fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "memcap-fixture-"));
+		fs.mkdirSync(path.join(fixtureDir, "src"), { recursive: true });
+		for (let i = 0; i < FIXTURE_FILES; i += 1) {
+			fs.writeFileSync(
+				path.join(fixtureDir, "src", `f${i}.ts`),
+				`export const s${i} = ${i};
+`,
+			);
+		}
+		KEY = normalizeMapKey(fixtureDir);
+	});
+	afterAll(() => {
+		fs.rmSync(fixtureDir, { recursive: true, force: true });
+	});
 	beforeEach(() => {
 		clearReviewGraphWorkspaceCache();
-		_resetRetainedGraphSitesForTests();
 		resetDegradationLedger();
 		delete process.env.PI_LENS_GRAPH_MAX_IN_MEMORY_BYTES;
 	});
 	afterEach(() => {
 		clearReviewGraphWorkspaceCache();
-		_resetRetainedGraphSitesForTests();
 		resetDegradationLedger();
 		delete process.env.PI_LENS_GRAPH_MAX_IN_MEMORY_BYTES;
 	});
@@ -247,9 +287,9 @@ describe("live review-graph in-memory bound (#2255)", () => {
 	it("selects real nodes when node paths are not pre-folded", () => {
 		process.env.PI_LENS_GRAPH_MAX_IN_MEMORY_BYTES = String(OVER_BUDGET);
 		const graph = buildGraph(60, 240);
+		let i = 0;
 		for (const node of graph.nodes.values()) {
-			if (node.filePath)
-				node.filePath = path.relative(process.cwd(), node.filePath);
+			if (node.filePath) node.filePath = unfoldedPathFor(Math.floor(i++ / 2));
 		}
 
 		_setReviewGraphWorkspaceEntryForTests(KEY, graph);
@@ -274,15 +314,15 @@ describe("live review-graph in-memory bound (#2255)", () => {
 		// Unfold half the nodes; the rest keep production spelling.
 		let i = 0;
 		for (const node of mixedGraph.nodes.values()) {
+			const fileIndex = Math.floor(i / 2);
 			if (node.filePath && i++ % 2 === 0) {
-				node.filePath = path.relative(process.cwd(), node.filePath);
+				node.filePath = unfoldedPathFor(fileIndex);
 			}
 		}
 
 		_setReviewGraphWorkspaceEntryForTests(KEY, mixedGraph);
 		const mixed = getReviewGraphWorkspaceCacheSnapshot().totalNodes;
 		clearReviewGraphWorkspaceCache();
-		_resetRetainedGraphSitesForTests();
 		_setReviewGraphWorkspaceEntryForTests(KEY, buildGraph(60, 240));
 		const allFolded = getReviewGraphWorkspaceCacheSnapshot().totalNodes;
 
@@ -381,6 +421,26 @@ describe("live review-graph in-memory bound (#2255)", () => {
 			fs.rmSync(dir, { recursive: true, force: true });
 		}
 	}, 20_000);
+
+	// V2: the session_start reset must drop the non-cache retention registry too.
+	// Without it the registry still held a live WeakRef, so a new session's sample
+	// kept attributing the PREVIOUS session's graph. Deliberately does NOT call the
+	// test-only reset — the production seam is what is under test.
+	it("session reset drops non-cache retention from the sample", () => {
+		process.env.PI_LENS_GRAPH_MAX_IN_MEMORY_BYTES = String(AMPLE_BUDGET);
+		const facts = new FactStore();
+		_setSessionReviewGraphFactForTests(KEY, facts, buildGraph(60, 240));
+		expect(getReviewGraphWorkspaceCacheSnapshot().totalNodes).toBeGreaterThan(
+			0,
+		);
+
+		clearReviewGraphWorkspaceCache();
+
+		// The FactStore still holds its graph — a session reset does not reach into a
+		// caller's store — but THIS session's attribution must start from zero.
+		expect(facts.getSessionFact("session.reviewGraph")).toBeDefined();
+		expect(getReviewGraphWorkspaceCacheSnapshot().totalNodes).toBe(0);
+	});
 
 	// F5: cap-trimmed and walk-truncated are different facts. Conflating them put
 	// an over-budget repository on a full walk every turn.
