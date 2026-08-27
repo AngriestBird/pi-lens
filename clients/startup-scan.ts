@@ -24,7 +24,10 @@ import {
 	walkTreeStackSync,
 	type WalkVisitor,
 } from "./source-walker.js";
-import { getDirectoryMarkers } from "./workspace-topology.js";
+import {
+	getDirectoryMarkers,
+	registerWorkspaceTopologyReset,
+} from "./workspace-topology.js";
 
 export const PROJECT_ROOT_MARKERS = [
 	".git",
@@ -329,6 +332,7 @@ export function countSourceFilesWithinLimit(
 const startupScanContextCache = new BoundedLruCache<string, StartupScanContext>(
 	32,
 );
+registerWorkspaceTopologyReset(() => startupScanContextCache.clear());
 
 function startupScanCacheKey(cwd: string, options: StartupScanOptions): string {
 	return [

@@ -2123,12 +2123,10 @@ export async function handleSessionStart(
 	clearFileTimeSessions();
 	runtime.complexityBaselines.clear();
 	resetDispatchBaselines(ctxCwd);
-	// #806: drop the shared per-directory marker index (and any consumer
-	// cache layered on top, e.g. tsconfig-paths' matcher cache) so a
-	// `.pi-lens.json`/`tsconfig.json`/workspace-manifest edit made between
-	// sessions is picked up fresh instead of only on process restart — this
-	// also fixes #805's mid-session tsconfig staleness (the matcher cache was
-	// previously session-lived with no reset hook at all).
+	// #806: drop the shared per-directory marker index and its registered
+	// topology-derived consumer caches so marker edits between sessions are
+	// picked up fresh instead of only on process restart. Mid-session edits
+	// remain governed by each consumer's own freshness policy.
 	resetWorkspaceTopology();
 	clearTsconfigPathsCache();
 	// #2000: opaque-recovery baselines are keyed cwd:generation (unreachable

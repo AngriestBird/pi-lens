@@ -17,7 +17,10 @@ import {
 } from "./language-policy.js";
 import { getSourceFiles } from "./scan-utils.js";
 import { readDirEntriesSafe, shouldRecurseIntoDir } from "./source-walker.js";
-import { findNearestDirWithAnyBasename } from "./workspace-topology.js";
+import {
+	findNearestDirWithAnyBasename,
+	registerWorkspaceTopologyReset,
+} from "./workspace-topology.js";
 import { BoundedLruCache } from "./bounded-cache.js";
 
 /** Every registered kind participates in project-language detection (#894). */
@@ -130,6 +133,7 @@ const languageProfileCache = new BoundedLruCache<
 	string,
 	ProjectLanguageProfile
 >(32);
+registerWorkspaceTopologyReset(() => languageProfileCache.clear());
 
 export function detectProjectLanguageProfile(
 	projectRoot: string,

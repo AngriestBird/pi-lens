@@ -93,6 +93,13 @@ interface DirCacheEntry {
 /** Per-directory marker cache — the shared seam every consumer reads through. */
 const dirMarkerCache = new Map<string, DirCacheEntry>();
 
+/** Downstream memo clears that must follow the topology index reset. */
+const topologyDerivedCacheResets: Array<() => void> = [];
+
+export function registerWorkspaceTopologyReset(reset: () => void): void {
+	topologyDerivedCacheResets.push(reset);
+}
+
 /** Cache for upward marker-walk results, keyed by `${startDir}\0${markerKey}`. */
 type WalkCacheEntry = {
 	dir: string | undefined;
@@ -152,6 +159,7 @@ function touchWalk(key: string, entry: WalkCacheEntry): void {
 export function resetWorkspaceTopology(): void {
 	for (const key of dirMarkerCache.keys()) deleteDirMarker(key);
 	for (const key of walkCache.keys()) deleteWalk(key);
+	for (const reset of topologyDerivedCacheResets) reset();
 }
 
 /**

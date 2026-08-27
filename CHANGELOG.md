@@ -14,6 +14,8 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Fixed
 
+- **Topology-derived startup scan and language-profile memos now re-arm with the workspace marker index at session start (closes #2263)** — `resetWorkspaceTopology()` now walks one registered downstream-cache reset list, clearing `startupScanContextCache` and `languageProfileCache` with the source index. A new session therefore re-derives project-root and configured-language answers after marker changes; mid-session edits remain governed by each consumer's existing freshness policy.
+
 ### Security
 
 ## [4.1.2] - 2026-08-24
