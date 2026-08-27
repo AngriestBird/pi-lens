@@ -415,12 +415,52 @@ function notePostingStoresAllocated(index: WordIndex, count: number): void {
 	index.postingStoreCount = (index.postingStoreCount ?? 0) + count;
 }
 
-const WORD_INDEX_RECOMPACT_STORE_THRESHOLD = 64;
+/**
+ * Floor for the recompaction gate: below this many backing stores the arena is
+ * never repacked, so a small index never pays an O(vocab) walk it cannot amortize
+ * (#2117). This is also the whole gate for indexes whose vocabulary is under
+ * `WORD_INDEX_RECOMPACT_STORE_FLOOR / WORD_INDEX_RECOMPACT_STORE_FRACTION`
+ * tokens, keeping the pre-#2246 behaviour for small corpora bit-identical.
+ */
+const WORD_INDEX_RECOMPACT_STORE_FLOOR = 64;
+
+/**
+ * Recompaction gate as a share of the live vocabulary (#2246). The flat 64-store
+ * threshold #2117 shipped was crossed by every single edit: one document
+ * replacement raises `postingStoreCount` by roughly the edited document's
+ * distinct-token count (hundreds), so the whole O(vocab) arena was rebuilt after
+ * every edit. Gating on a fraction of `postings.size` instead lets fragmentation
+ * accumulate proportionally to the index, so recompaction fires once per many
+ * edits rather than once per edit.
+ *
+ * Memory ceiling: the store count can reach a tenth of the vocabulary in private
+ * stores before a repack, each carrying a fixed header plus growth slack. #2117
+ * measured the fully-churned ceiling (every token private, store count =
+ * vocabulary) at +22% resident. The cost does not scale with the store count
+ * alone, because the tokens that churn most are also the ones carrying the
+ * longest posting lists. PR #2246's adversarial hot-token probe measured this
+ * gate at +13.7% resident at rest and +19.9% peak over base — inside the +22%
+ * #2117 accepted, but not by the wide margin a naive store-count ratio would
+ * predict. Raising the fraction further would cross that bound.
+ */
+const WORD_INDEX_RECOMPACT_STORE_FRACTION = 0.1;
+
+/**
+ * Backing-store count that triggers a repack for `index`: a fixed floor, or a
+ * share of the live vocabulary once the index is large enough for the share to
+ * exceed the floor. O(1) — reads `postings.size`, never walks the vocabulary.
+ */
+function wordIndexRecompactThreshold(index: WordIndex): number {
+	return Math.max(
+		WORD_INDEX_RECOMPACT_STORE_FLOOR,
+		Math.floor(index.postings.size * WORD_INDEX_RECOMPACT_STORE_FRACTION),
+	);
+}
 
 /**
  * Pack the arena if churn has spread the postings across more than the
- * threshold of backing stores (#2117). Runs the exact O(vocab) store count as
- * the authoritative gate — the per-edit hot path uses the O(1)
+ * threshold of backing stores (#2117, #2246). Runs the exact O(vocab) store
+ * count as the authoritative gate — the per-edit hot path uses the O(1)
  * `postingStoreCount` estimate, so this expensive walk only happens inside the
  * bounded, off-hot-path recompaction it guards. Resets the estimate to the
  * true post-compaction count.
@@ -429,8 +469,9 @@ async function recompactWordIndexPostingsIfNeeded(
 	index: WordIndex,
 	root: string,
 ): Promise<void> {
+	const threshold = wordIndexRecompactThreshold(index);
 	const beforeStores = countPostingBackingStores(index.postings);
-	if (beforeStores <= WORD_INDEX_RECOMPACT_STORE_THRESHOLD) {
+	if (beforeStores <= threshold) {
 		index.postingStoreCount = beforeStores;
 		return;
 	}
@@ -442,7 +483,7 @@ async function recompactWordIndexPostingsIfNeeded(
 	const firstForRoot = incrementDegradationCount({
 		kind: "word-index-arena-recompact",
 		subject: path.resolve(root),
-		reason: `arena store threshold ${WORD_INDEX_RECOMPACT_STORE_THRESHOLD} exceeded`,
+		reason: `arena store threshold ${threshold} exceeded`,
 		metadata: { beforeBytes, afterBytes, beforeStores, afterStores },
 	});
 	// Keep the detailed record bounded per root. The ledger still counts every
@@ -471,7 +512,7 @@ function enqueueWordIndexRecompact(
 	index: WordIndex,
 	root: string,
 ): Promise<void> {
-	if ((index.postingStoreCount ?? 0) <= WORD_INDEX_RECOMPACT_STORE_THRESHOLD) {
+	if ((index.postingStoreCount ?? 0) <= wordIndexRecompactThreshold(index)) {
 		return Promise.resolve();
 	}
 	const flight = (index.recompactFlight ??= createSingleFlight<void>());
