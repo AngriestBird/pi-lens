@@ -31,6 +31,7 @@ import {
 } from "../path-utils.js";
 import {
 	ensureTool,
+	findManagedToolBinary,
 	getToolEnvironment,
 	getToolPath,
 } from "../installer/index.js";
@@ -523,6 +524,26 @@ export async function resolveAndLaunch(
 		}
 	};
 
+	// #2140: consult the release-managed binary directory (~/.pi-lens/bin)
+	// BEFORE the bare-PATH candidates below. A bare `candidates: ["opengrep"]`
+	// entry only ever resolves through the OS's own PATH lookup — never that
+	// directory — so a github/maven/archive-strategy tool installed there with
+	// no PATH entry ENOENTs every direct candidate first, only to have the
+	// managed-install step further down find the very same binary a few
+	// hundred ms later. `findManagedToolBinary` does a bare `fs.access`, no
+	// spawn, so this costs at most a few stat calls per server launch attempt
+	// (not per file/dispatch — launches are session-scoped). Mirrors
+	// `findManagedNodeToolBinary`'s npm-managed fast path (runner-helpers.ts)
+	// and `SecurityScanClient.probeVersion`'s equivalent fix for the CLI-scan
+	// half of this same issue (#2140, landed in PR #2148/#2137).
+	const managedCandidate = spec.managedToolId
+		? await findManagedToolBinary(spec.managedToolId)
+		: undefined;
+	const candidates =
+		managedCandidate && !spec.candidates.includes(managedCandidate)
+			? [managedCandidate, ...spec.candidates]
+			: spec.candidates;
+
 	// A candidate that fails while a LATER candidate (or managed install)
 	// succeeds is just fallback, not a failure — logging each immediately floods
 	// the logs with scary "candidate failed / npm shim failed / Run npm install"
@@ -536,7 +557,7 @@ export async function resolveAndLaunch(
 	}> = [];
 
 	// Step 1 & 2 — try all explicit candidates (includes bare command = PATH lookup)
-	for (const [index, command] of spec.candidates.entries()) {
+	for (const [index, command] of candidates.entries()) {
 		logLatency({
 			type: "phase",
 			phase: "lsp_launch_candidate_attempt",
@@ -546,12 +567,12 @@ export async function resolveAndLaunch(
 				tool: toolLabel,
 				command,
 				index,
-				totalCandidates: spec.candidates.length,
+				totalCandidates: candidates.length,
 				allowInstall: canInstall(allowInstall),
 			},
 		});
 		logSessionStart(
-			`lsp launch candidate attempt tool=${toolLabel} idx=${index}/${spec.candidates.length - 1} command=${command} cwd=${spec.cwd}`,
+			`lsp launch candidate attempt tool=${toolLabel} idx=${index}/${candidates.length - 1} command=${command} cwd=${spec.cwd}`,
 		);
 		try {
 			const proc = await launchLSP(command, spec.args, {
