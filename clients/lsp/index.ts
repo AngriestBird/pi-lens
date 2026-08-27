@@ -8053,9 +8053,12 @@ export class LSPService {
 		// block by construction.
 		//
 		// Paired in `finally`, per `phaseFinished`'s contract: an abandoned
-		// bracket would misattribute every LATER loop_block to this sweep. An
-		// abort or a destroyed service returns out of the worker callback, which
-		// a trailing statement would miss and a `finally` does not.
+		// bracket would misattribute every LATER loop_block to this sweep. The
+		// leak guard is what the tests pin: emptying this `finally` reds three
+		// of them. `finally` rather than a trailing call covers a throw that
+		// escapes the fan-out; abort and service-destroyed both RETURN from the
+		// worker callback rather than throwing, so those two paths alone would
+		// not distinguish the two spellings.
 		const sweepPhase = phaseStarted("lsp_workspace_diagnostics_touch");
 		try {
 			await runPerServerGroups(
