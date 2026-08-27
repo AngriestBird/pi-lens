@@ -89,17 +89,70 @@ export function findStaleCompiledSources(opts: {
 	return stale;
 }
 
+/**
+ * `tests/` is excluded from `tsconfig.build.json` (#2232), so `npm run
+ * build` NEVER writes a `.js` sibling there. Any `.js` sibling of a
+ * `tests/**\/*.ts` therefore isn't "stale" in the mtime sense above — it's
+ * pure residue from an earlier local `tsc` invocation that DID include
+ * tests/ (a different tsconfig, an editor auto-compile-on-save, a manual
+ * `npx tsc`). Import specifiers in tests end in `.js`, so that residue
+ * silently wins module resolution over the real `.ts` source and every
+ * later test run in the worktree quietly exercises stale code — this is
+ * exactly what fooled a PR #2226 reviewer into a false "fix doesn't work"
+ * finding. Presence alone is the defect; there's no mtime check to make
+ * because a legitimately fresh compiled `.js` under tests/ can never exist.
+ */
+function* walkTestsTs(dir: string): Generator<string> {
+	let entries: Dirent[];
+	try {
+		entries = readdirSync(dir, { withFileTypes: true });
+	} catch {
+		return;
+	}
+	for (const entry of entries) {
+		const full = join(dir, entry.name);
+		if (entry.isDirectory()) {
+			if (entry.name === "node_modules") continue;
+			yield* walkTestsTs(full);
+		} else if (entry.isFile() && entry.name.endsWith(".ts") && !entry.name.endsWith(".d.ts")) {
+			yield full;
+		}
+	}
+}
+
+export function findResidueCompiledTestSources(opts: { root: string }): string[] {
+	const residue: string[] = [];
+	for (const ts of walkTestsTs(join(opts.root, "tests"))) {
+		const js = `${ts.slice(0, -3)}.js`;
+		if (existsSync(js)) residue.push(js);
+	}
+	return residue;
+}
+
 export default function setup(): void {
 	const stale = findStaleCompiledSources({ root: repoRoot });
-	if (stale.length === 0) return;
+	if (stale.length > 0) {
+		const rel = (p: string) => p.slice(repoRoot.length + 1).replace(/\\/g, "/");
+		const shown = stale.slice(0, 10).map(rel);
+		const more = stale.length > 10 ? `\n  …and ${stale.length - 10} more` : "";
+		throw new Error(
+			`\n⛔ Stale build: ${stale.length} source file(s) are newer than their compiled .js (or have none).\n` +
+				`Vitest loads the compiled .js next to each .ts (\`npm run build\` emits in place),\n` +
+				`so these edits are NOT under test. Run \`npm run build\` before testing.\n` +
+				`Stale:\n  ${shown.join("\n  ")}${more}\n`,
+		);
+	}
 
-	const rel = (p: string) => p.slice(repoRoot.length + 1).replace(/\\/g, "/");
-	const shown = stale.slice(0, 10).map(rel);
-	const more = stale.length > 10 ? `\n  …and ${stale.length - 10} more` : "";
-	throw new Error(
-		`\n⛔ Stale build: ${stale.length} source file(s) are newer than their compiled .js (or have none).\n` +
-			`Vitest loads the compiled .js next to each .ts (\`npm run build\` emits in place),\n` +
-			`so these edits are NOT under test. Run \`npm run build\` before testing.\n` +
-			`Stale:\n  ${shown.join("\n  ")}${more}\n`,
-	);
+	const residue = findResidueCompiledTestSources({ root: repoRoot });
+	if (residue.length > 0) {
+		const rel = (p: string) => p.slice(repoRoot.length + 1).replace(/\\/g, "/");
+		const shown = residue.slice(0, 10).map(rel);
+		const more = residue.length > 10 ? `\n  …and ${residue.length - 10} more` : "";
+		throw new Error(
+			`\n⛔ Stale test residue: ${residue.length} compiled .js file(s) sit beside tests/**/*.ts source.\n` +
+				`tests/ is excluded from \`npm run build\`, so these were never freshly built — an\n` +
+				`import ending in ".js" resolves to this STALE file instead of the real .ts source,\n` +
+				`silently running old code (#2232). Delete them:\n  ${shown.join("\n  ")}${more}\n`,
+		);
+	}
 }
