@@ -1613,6 +1613,16 @@ export function resetResolvedPathCache(): void {
 interface ProbeCacheEntry {
 	path: string;
 	mtimeMs: number;
+	/**
+	 * #2300: byte size at the same stat call as `mtimeMs`. A binary replaced
+	 * in-place (an upgrade landing in the same coarse-granularity mtime tick)
+	 * would otherwise pass the mtime-only freshness check unnoticed. Optional
+	 * so a pre-#2300 persisted entry doesn't need a version bump to stay
+	 * loadable — `checkProbeCache` fails OPEN (mtime-only) when absent; it
+	 * self-heals on the entry's next `updateProbeCache` write or 24h TTL
+	 * expiry, whichever comes first.
+	 */
+	sizeBytes?: number;
 	cachedAt: number;
 	/**
 	 * True when the `getToolPath` resolution that produced `path` saw a
@@ -1931,9 +1941,16 @@ export async function checkProbeCache(
 	try {
 		await fs.access(entry.path);
 		const stat = await fs.stat(entry.path);
-		if (stat.mtimeMs !== entry.mtimeMs) {
+		// #2300: size alongside mtime, from the same stat — a binary replaced
+		// in-place within the same coarse-granularity mtime tick would otherwise
+		// pass this check unnoticed. `entry.sizeBytes` absent (pre-#2300 entry)
+		// fails open to the mtime-only check (see the field's doc comment).
+		if (
+			stat.mtimeMs !== entry.mtimeMs ||
+			(entry.sizeBytes !== undefined && stat.size !== entry.sizeBytes)
+		) {
 			logSessionStart(
-				`auto-install probe-cache ${toolId}: miss (mtime changed)`,
+				`auto-install probe-cache ${toolId}: miss (mtime/size changed)`,
 			);
 			delete cache[toolId];
 			markProbeCacheChange(toolId, null);
@@ -1970,6 +1987,7 @@ export async function updateProbeCache(
 		const entry: ProbeCacheEntry = {
 			path: resolvedPath,
 			mtimeMs: stat.mtimeMs,
+			sizeBytes: stat.size,
 			cachedAt: Date.now(),
 			...(transient && { transient: true }),
 		};

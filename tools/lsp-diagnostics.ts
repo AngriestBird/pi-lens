@@ -1358,6 +1358,7 @@ async function collectFileDiagnosticResult(
 			collectedContent !== undefined
 				? hashDiagnosticContent(collectedContent)
 				: undefined,
+			stat.size,
 		);
 	}
 	return {
