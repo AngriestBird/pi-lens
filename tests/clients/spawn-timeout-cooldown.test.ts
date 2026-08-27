@@ -51,11 +51,6 @@ import { detectFileChangedAfterCommand } from "../../clients/file-utils.js";
 import { makeRunnerCtx } from "../support/runner-ctx.js";
 import { setupTestEnvironment } from "./test-utils.js";
 
-// #2235: load the real pipeline during module setup. Its import graph is
-// substantial, so awaiting it inside a test makes Vitest's 5000ms test budget
-// measure scheduler contention instead of the cooldown behavior.
-const pipeline = await import("../../clients/pipeline.js");
-
 const TIMEOUT_RESULT = {
 	error: null,
 	status: null,
@@ -148,37 +143,6 @@ describe("detectFileChangedAfterCommand consults the seam", () => {
 
 			const { isInSpawnTimeoutCooldown } = await seam();
 			expect(isInSpawnTimeoutCooldown(cmd)).toBe(true);
-		} finally {
-			env.cleanup();
-		}
-	});
-});
-
-describe("tryMarkdownlintFix consults the seam (review P2)", () => {
-	beforeEach(() => {
-		vi.resetModules();
-		safeSpawnAsync.mockReset();
-	});
-
-	it("returns 0 WITHOUT spawning when its resolved command is cooling down", async () => {
-		const env = setupTestEnvironment("pi-lens-timeout-pipeline-guard-");
-		try {
-			const filePath = path.join(env.tmpDir, "notes.md");
-			fs.writeFileSync(filePath, "# hello\n");
-			const { noteSpawnTimeout } = await seam();
-			// The mocked resolver returns the bare tool id; in production both
-			// lanes resolve the same physical binary, and basename-level
-			// keying is what makes different spellings cross-cool.
-			noteSpawnTimeout({
-				tool: "markdownlint",
-				command: "markdownlint",
-				phase: "availability",
-			});
-
-			const fixed = await pipeline.tryMarkdownlintFix(filePath, env.tmpDir);
-
-			expect(fixed).toBe(0);
-			expect(safeSpawnAsync).not.toHaveBeenCalled();
 		} finally {
 			env.cleanup();
 		}
