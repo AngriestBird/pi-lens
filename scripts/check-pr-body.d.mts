@@ -1,5 +1,7 @@
 export declare function detectFlattenedBody(body?: string): boolean;
 export declare function repairFlattenedBody(body?: string): string;
+export declare function detectEscapedNewlineBody(body?: string): boolean;
+export declare function repairEscapedNewlineBody(body?: string): string;
 export declare function lintPrBody(
 	body?: string,
 	options?: { requireTestAssessment?: boolean },
