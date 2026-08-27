@@ -37,6 +37,8 @@ import { describe, expect, it } from "vitest";
 import {
 	buildScrapeExpr,
 	firstNonEmptyLine,
+	initialPollStability,
+	trackStableUnmatched,
 } from "../../scripts/playground-verify-rule.mjs";
 
 // Evaluate a buildScrapeExpr() expression against a stubbed `document`,
@@ -200,6 +202,59 @@ describe("playground-verify-rule.mjs buildScrapeExpr sentinel (#2208 F2)", () =>
 	});
 });
 
+describe("playground-verify-rule.mjs buildScrapeExpr tab normalization (#2306)", () => {
+	// #2306: a first source line with an internal tab
+	// (`const\tok\t= arr.indexOf(x) !== -1;`) reported false schema drift —
+	// Monaco does not render the tab as a literal U+0009, so a sentinel
+	// built from the caller's raw source (with a real tab character) never
+	// matched the rendered page. This burned the full poll timeout before
+	// concluding "likely upstream schema drift" for what was really a
+	// normalization gap in this harness.
+	const tabbedCode = "const\tok\t= arr.indexOf(x) !== -1;";
+	const tabbedSentinel = firstNonEmptyLine(tabbedCode)!;
+	const tabbedB64 = Buffer.from(tabbedSentinel, "utf8").toString("base64");
+
+	it("reports sentinelFound:true when Monaco renders each tab as a run of nbsp", () => {
+		// Mirrors the existing nbsp-for-space test above: simulates Monaco
+		// expanding a tab into several nbsp glyphs instead of U+0009.
+		const nbspRun = "    ";
+		const renderedSource = `const${nbspRun}ok${nbspRun}=${nbspRun}arr.indexOf(x)${nbspRun}!==${nbspRun}-1;`;
+		const expr = buildScrapeExpr(tabbedB64);
+		const page = `${renderedSource}\nNo match found.`;
+		const result = runScrapeExpr(expr, page, [], renderedSource) as {
+			found: boolean;
+			sentinelFound: boolean;
+		};
+		expect(result.found).toBe(true);
+		expect(result.sentinelFound).toBe(true);
+	});
+
+	it("reports sentinelFound:true when Monaco renders each tab as a run of regular spaces", () => {
+		const spaceRun = "    ";
+		const renderedSource = `const${spaceRun}ok${spaceRun}=${spaceRun}arr.indexOf(x)${spaceRun}!==${spaceRun}-1;`;
+		const expr = buildScrapeExpr(tabbedB64);
+		const page = `${renderedSource}\nFound 1 match(es).\n1`;
+		const result = runScrapeExpr(expr, page, [], renderedSource) as {
+			found: boolean;
+			sentinelFound: boolean;
+		};
+		expect(result.found).toBe(true);
+		expect(result.sentinelFound).toBe(true);
+	});
+
+	it("still reports sentinelFound:false when the rendered source is genuinely different (schema drift survives normalization)", () => {
+		const expr = buildScrapeExpr(tabbedB64);
+		const defaultSampleText =
+			"function tryAstGrep() {\n  console.log('matched in metavar!')\n}\nFound 3 match(es).\n1\n2\n3";
+		const result = runScrapeExpr(expr, defaultSampleText) as {
+			found: boolean;
+			sentinelFound: boolean;
+		};
+		expect(result.found).toBe(true);
+		expect(result.sentinelFound).toBe(false);
+	});
+});
+
 describe("playground-verify-rule.mjs buildScrapeExpr line clamp (#2208 F6)", () => {
 	// #2208 fix-round F6: the gutter-number filter used to clamp scraped line
 	// numbers to `n <= count` (the MATCH count) instead of the source's own
@@ -245,5 +300,79 @@ describe("playground-verify-rule.mjs buildScrapeExpr line clamp (#2208 F6)", () 
 			lines: number[];
 		};
 		expect(result.lines).toEqual([1, 50]);
+	});
+});
+
+describe("playground-verify-rule.mjs trackStableUnmatched fail-fast (#2306)", () => {
+	// #2306 acceptance criterion 3: a sentinel mismatch should conclude
+	// faster than the full poll timeout when the first poll already renders
+	// a stable, unmatched pane. trackStableUnmatched is the pure poll-loop
+	// decision extracted from main() so this can be proven without a live
+	// Chrome/CDP harness.
+	it("does not conclude early while the source pane is still mounting (sourceLen changing)", () => {
+		let state = initialPollStability;
+		state = trackStableUnmatched(
+			{ found: true, sentinelFound: false, sourceLen: 0 },
+			state,
+		);
+		expect(state.concludedEarly).toBe(false);
+		state = trackStableUnmatched(
+			{ found: true, sentinelFound: false, sourceLen: 12 },
+			state,
+		);
+		expect(state.concludedEarly).toBe(false);
+		state = trackStableUnmatched(
+			{ found: true, sentinelFound: false, sourceLen: 34 },
+			state,
+		);
+		expect(state.concludedEarly).toBe(false);
+	});
+
+	it("concludes early once a non-empty sourceLen repeats for the required consecutive polls", () => {
+		let state = initialPollStability;
+		state = trackStableUnmatched(
+			{ found: true, sentinelFound: false, sourceLen: 34 },
+			state,
+		);
+		expect(state.concludedEarly).toBe(false);
+		state = trackStableUnmatched(
+			{ found: true, sentinelFound: false, sourceLen: 34 },
+			state,
+		);
+		expect(state.concludedEarly).toBe(false);
+		state = trackStableUnmatched(
+			{ found: true, sentinelFound: false, sourceLen: 34 },
+			state,
+		);
+		expect(state.concludedEarly).toBe(true);
+	});
+
+	it("resets the stability streak when sentinelFound becomes true", () => {
+		let state = initialPollStability;
+		state = trackStableUnmatched(
+			{ found: true, sentinelFound: false, sourceLen: 34 },
+			state,
+		);
+		state = trackStableUnmatched(
+			{ found: true, sentinelFound: false, sourceLen: 34 },
+			state,
+		);
+		state = trackStableUnmatched(
+			{ found: true, sentinelFound: true, sourceLen: 34 },
+			state,
+		);
+		expect(state.concludedEarly).toBe(false);
+		expect(state.stableUnmatchedPolls).toBe(0);
+	});
+
+	it("never counts a zero-length source pane toward the early exit", () => {
+		let state = initialPollStability;
+		for (let i = 0; i < 10; i++) {
+			state = trackStableUnmatched(
+				{ found: true, sentinelFound: false, sourceLen: 0 },
+				state,
+			);
+		}
+		expect(state.concludedEarly).toBe(false);
 	});
 });

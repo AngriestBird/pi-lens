@@ -35,3 +35,22 @@ export function buildScrapeExpr(
 	sentinelB64: string | null,
 	maxLine?: number,
 ): string;
+
+// #2306.
+export interface ScrapeResult {
+	found: boolean;
+	sentinelFound: boolean;
+	sourceLen?: number;
+}
+
+export interface PollStability {
+	stableUnmatchedPolls: number;
+	lastUnmatchedSourceLen: number | null;
+	concludedEarly: boolean;
+}
+
+export const initialPollStability: PollStability;
+export function trackStableUnmatched(
+	scrape: ScrapeResult | null,
+	prevState: PollStability,
+): PollStability;
