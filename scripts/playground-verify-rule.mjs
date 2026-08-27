@@ -257,15 +257,72 @@ export function buildPlaygroundUrl(ruleYaml, code, lang) {
 // entirely — character classes with the raw chars, or split string
 // matches, survive the round-trip.
 //
+// The first non-empty line of the caller's `--code`, used as a sentinel
+// (see buildScrapeExpr's `sentinelB64` param). Only the first line: #2208
+// fix-round finding F2 established (via a real 122-line fixture) that the
+// Monaco source editor virtualizes — the top of the document renders, but
+// a line far down the viewport does not. Checking the first non-empty line
+// is the one check that survives virtualization for a source of any length.
+export function firstNonEmptyLine(code) {
+	const line = code.split(/\r?\n/).find((l) => l.trim().length > 0);
+	return line ? line.trim() : null;
+}
+
 // The playground shows one of:
 //   "Found N match(es)."        — the rule fired N times against the
 //                                  caller's source (state.source, set via
 //                                  the payload above)
 //   "No match found."           — the rule did not fire (0 matches)
 //   an error message             — the rule's YAML/pattern was rejected
-function buildScrapeExpr() {
+//
+// #2208 fix-round finding F2: the 0-match bug this file fixes could recur
+// through upstream schema drift alone — e.g. the playground renaming
+// `state.source` to something else would make our `source: code` write
+// land nowhere, and the playground would again silently grade its own
+// hardcoded sample. That failure mode looks identical to a legitimate
+// {ok:true, matches:0}: nothing here would throw or time out. `sentinelB64`
+// is the caller's first source line (see firstNonEmptyLine), base64-encoded
+// with the same routine ast-grep's own playground uses for its URL hash
+// (utoa: btoa(unescape(encodeURIComponent(text)))) so it survives Windows
+// argv's backslash-stripping (no `\`-containing regex/string literals to
+// mangle) and round-trips non-ASCII. The playground always echoes the
+// source into the DOM (it's the editor's own content), so if that line is
+// genuinely absent from the rendered text, the source never reached the
+// engine — regardless of what "Found N match(es)" says.
+// #2208 fix-round finding F6: the gutter-number filter used to clamp to
+// `n <= count` (the MATCH count), not the source's own line count. A match
+// on line 3 of a 3-line file reported `lines: [1]` — the filter discarded
+// any gutter number above the match count, even though the match count and
+// the line number it occurred on are unrelated quantities (one match can
+// sit on line 200 of a 5-line... no, on line 200 of a 200-line file with
+// only 1 match). `maxLine` is the caller's own source line count — a gutter
+// number can never legitimately exceed it, whereas the match count can be
+// smaller than the line a match falls on.
+export function buildScrapeExpr(sentinelB64, maxLine) {
+	const sentinelExpr = sentinelB64
+		? `decodeURIComponent(escape(atob("${sentinelB64}")))`
+		: "null";
+	const maxLineExpr =
+		Number.isFinite(maxLine) && maxLine > 0
+			? String(Math.floor(maxLine))
+			: "Infinity";
+	// #2208 fix-round F2, verified against the live upstream site: Monaco
+	// renders the space between tokens as U+00A0 (non-breaking space), not
+	// U+0020 — confirmed by dumping charCodes around a rendered "const a = 1"
+	// (codes 99,111,110,115,116,160,97,160,61,160,49 — 160 is nbsp). A
+	// sentinel built from the caller's raw source (regular spaces) would
+	// never match the rendered page for any line containing a space, which
+	// looked exactly like the schema-drift condition this check exists to
+	// catch. Normalize nbsp to a regular space on the page side before
+	// comparing. (`" "` here is resolved to the real character by this
+	// file's own parser, not sent over argv as a `\`-escape, so it survives
+	// Windows argv's backslash-stripping same as the rest of this
+	// function's argv-safety already does.)
 	return `(() => {
-		const text = document.body.innerText || "";
+		const text = (document.body.innerText || "").split(" ").join(" ");
+		const sentinel = ${sentinelExpr};
+		const sentinelFound = sentinel === null || text.indexOf(sentinel) !== -1;
+		const maxLine = ${maxLineExpr};
 		const m = text.match(/Found[ \\t]+(\\d+)[ \\t]+match/i);
 		if (m) {
 			const count = parseInt(m[1], 10);
@@ -273,15 +330,15 @@ function buildScrapeExpr() {
 				.map((el) => (el.textContent || "").trim())
 				.filter((t) => /^[0-9]+$/.test(t))
 				.map((t) => parseInt(t, 10))
-				.filter((n) => n >= 1 && n <= count)
+				.filter((n) => n >= 1 && n <= maxLine)
 				.filter((n, i, a) => a.indexOf(n) === i)
 				.sort((a, b) => a - b);
-			return { found: true, count, lines };
+			return { found: true, count, lines, sentinelFound };
 		}
 		if (/no[ \\t]+match[ \\t]+found/i.test(text)) {
-			return { found: true, count: 0, lines: [] };
+			return { found: true, count: 0, lines: [], sentinelFound };
 		}
-		return { found: false, text: text.slice(0, 800) };
+		return { found: false, text: text.slice(0, 800), sentinelFound };
 	})()`;
 }
 
@@ -364,18 +421,31 @@ async function main() {
 		log(`targetId: ${tid}`);
 		await runCdp(["nav", targetId, url]);
 		// 5) Poll for the "Found N match(es)" line (or "No match found").
+		const sentinelLine = firstNonEmptyLine(code);
+		const sentinelB64 = sentinelLine
+			? Buffer.from(sentinelLine, "utf8").toString("base64")
+			: null;
+		const maxLine = code.split(/\r?\n/).length;
+		const scrapeExpr = buildScrapeExpr(sentinelB64, maxLine);
 		const deadline = Date.now() + opts.timeoutMs;
 		let scrape = null;
 		let polls = 0;
 		while (Date.now() < deadline) {
 			polls++;
-			const out = await runCdp(["eval", targetId, buildScrapeExpr()]);
+			const out = await runCdp(["eval", targetId, scrapeExpr]);
 			try {
 				scrape = JSON.parse(out);
 			} catch {
 				scrape = null;
 			}
-			if (scrape?.found) break;
+			// On a warm/reused Chrome the match count can render a poll or
+			// two before the source editor paints its own content — `Found
+			// N match(es)` and the source pane are two independently-mounted
+			// Vue components, not one atomic update. Keep polling until the
+			// sentinel also lands, exactly as we already do for the match
+			// text itself; a genuine drift (source never arrives) still
+			// exhausts the deadline and reports below, just slower.
+			if (scrape?.found && scrape?.sentinelFound) break;
 			if (polls % 10 === 0) log(`poll #${polls}: still waiting…`);
 			await new Promise((r) => setTimeout(r, 250));
 		}
@@ -386,6 +456,24 @@ async function main() {
 				rule_id: rule.id,
 				error: "playground did not render 'Found N match(es)' within timeout",
 				debug_text: scrape?.text || null,
+				engine_ms: Date.now() - startMs,
+			};
+			console.error(JSON.stringify(result));
+			process.exit(3);
+		}
+		// #2208 fix-round F2: a {found:true} scrape only means the page
+		// rendered SOME match-count text — it says nothing about whose
+		// source produced it. If the caller's own first source line never
+		// made it into the rendered page, the playground graded a source
+		// we didn't send (its own default sample, or a stale one from an
+		// upstream field-name change) — never trust the count in that case.
+		if (!scrape.sentinelFound) {
+			const result = {
+				ok: false,
+				rule_id: rule.id,
+				error:
+					"caller's source did not appear in the playground page — likely upstream schema drift (state.source field renamed/moved), not a real 0-match result",
+				matches_reported_by_page: scrape.count,
 				engine_ms: Date.now() - startMs,
 			};
 			console.error(JSON.stringify(result));

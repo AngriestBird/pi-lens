@@ -131,12 +131,17 @@ const skip = !chromeAvailable()
 		}, 60_000);
 
 		it("reports a genuine match for a JSX snippet the rule is written to catch", async () => {
-			// #2208: this is the exact evidence from the issue — a JSX && snippet
-			// the rule demonstrably catches locally (verified against the local
-			// `ast-grep scan` CLI) reported 0 matches from the playground before
-			// the fix, because the snippet was written into `query` (Pattern
-			// mode only) instead of `source` (what Config mode actually matches
-			// against).
+			// #2208: adapted from the issue's evidence. The issue's own snippet
+			// used a self-closing `<b/>`, which is a `jsx_self_closing_element`
+			// node — the rule requires `kind: jsx_element` on the `&&`'s right
+			// side, so that exact snippet was already a correct 0-match result
+			// (mis-specified repro, confirmed with `ast-grep scan --rule ... `
+			// plus `--debug-query ast`, and noted on the issue). Swapping to a
+			// non-self-closing `<b>hi</b>` keeps the issue's shape (`.length &&
+			// <jsx>`) while producing a snippet the rule genuinely catches. It
+			// reported 0 matches from the playground before the fix, because
+			// the snippet was written into `query` (Pattern mode only) instead
+			// of `source` (what Config mode actually matches against).
 			const result = await runVerify(
 				join(RULES_DIR, "jsx-boolean-short-circuit.yml"),
 				[
@@ -164,10 +169,10 @@ describe("playground-verify-rule.mjs setup errors", () => {
 		// pins the "empty result must distinguish clean from errored"
 		// contract the #2208 bug violated implicitly (the harness never
 		// errored even though it wasn't evaluating the caller's code).
-		const result = await runVerify(
-			join(RULES_DIR, "does-not-exist-2208.yml"),
-			["--code", "console.log('x');"],
-		);
+		const result = await runVerify(join(RULES_DIR, "does-not-exist-2208.yml"), [
+			"--code",
+			"console.log('x');",
+		]);
 		expect(result.ok).toBe(false);
 		expect(result.matches).toBeUndefined();
 		expect(result.error).toMatch(/rule not found/);

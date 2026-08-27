@@ -27,3 +27,11 @@ export function buildPlaygroundUrl(
 	code: string,
 	lang: string,
 ): string;
+
+// #2208 fix-round F2.
+export function firstNonEmptyLine(code: string): string | null;
+// #2208 fix-round F6: maxLine clamps the scraped gutter numbers.
+export function buildScrapeExpr(
+	sentinelB64: string | null,
+	maxLine?: number,
+): string;
