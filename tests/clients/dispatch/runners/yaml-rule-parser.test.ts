@@ -70,11 +70,15 @@ describe("yaml-rule-parser cache freshness (#2262)", () => {
 		const start = Date.now();
 		const first = loadYamlRules(root);
 
-		writeRule(file, "existing", "new");
+		// The replacement message must differ in LENGTH from "old": the metadata
+		// tier is mtimeMs+size only, and NTFS mtime granularity makes a same-size
+		// rewrite collide with the original stamp ~90% of the time (flaked 3/24
+		// on Windows). A size change is what the mechanism actually detects.
+		writeRule(file, "existing", "renewed");
 		fs.utimesSync(root, FIXED_DIRECTORY_MTIME, FIXED_DIRECTORY_MTIME);
 		vi.setSystemTime(start + RULES_CACHE_FRESHNESS_CADENCE_MS + 1);
 
-		expect(messages(loadYamlRules(root))).toEqual(["new"]);
+		expect(messages(loadYamlRules(root))).toEqual(["renewed"]);
 		expect(messages(first)).toEqual(["old"]);
 	});
 

@@ -803,10 +803,15 @@ guarded by `isWindowsPath` or `isFullyQualifiedWin32`; host-default path calls
 elsewhere, including the valid fallback arm of a ternary, remain allowed.
 
 The YAML ast-grep rules cache snapshots every discovered rule file with
-`mtimeMs` and size, then confirms file contents when those metadata values
-agree. It must detect edits to existing files and additions below nested rule
-directories; directory mtime alone is insufficient on supported filesystems.
-(#2262)
+`mtimeMs` and size, metadata only — no content hashing. `getCachedRules`
+serves the bundled tier, which is immutable per install, so it inherits
+`clients/cache/rule-cache.ts`'s documented content-confirm exemption; adding
+a content hash here cost a measured 8000x on a per-file hot path (#2292).
+A 2 s freshness cadence bounds re-stat work; rule-edit pickup lag is bounded
+by one cadence. It must detect edits to existing files and additions below
+nested rule directories; directory mtime alone is insufficient on supported
+filesystems. A same-size, same-mtime edit is invisible by design on this
+tier. (#2262)
 
 ### Caches, durable stores, and path keys
 
