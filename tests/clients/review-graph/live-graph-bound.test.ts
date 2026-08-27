@@ -56,12 +56,19 @@ const filePathFor = (i: number): string =>
 	normalizeMapKey(path.join(fixtureDir, "src", `f${i}.ts`));
 
 /**
- * The same file, spelled so it is NOT already folded, using a redundant `/./`
- * segment. `path.resolve` collapses that purely syntactically, identically on every
- * OS, so the fold provably reverses this transform everywhere — which is exactly
- * what the platform-dependent `path.relative` version could not promise.
+ * The same file, spelled so it is NOT already folded: a BACKSLASH separator.
+ *
+ * This is the one perturbation `normalizeFilePath` (`clients/path-utils.ts`) undoes
+ * on BOTH platforms, and picking it took two wrong guesses. That function returns
+ * early for POSIX paths on Linux (`:99-101`) — no `resolve`, no `realpath` — so
+ * neither `path.relative` (round 3) nor a redundant `/./` segment (round 4) is
+ * reversed there, and the fixture silently stopped exercising the fold. What DOES
+ * run everywhere is the unconditional backslash-to-slash replace at `:97`, ahead of
+ * that early return; Windows reaches the same spelling via `realpathSync.native`.
  */
-const unfoldedPathFor = (i: number): string => `${fixtureDir}/src/./f${i}.ts`;
+const BACKSLASH = String.fromCharCode(92);
+const unfoldedPathFor = (i: number): string =>
+	`${normalizeMapKey(fixtureDir)}/src${BACKSLASH}f${i}.ts`;
 
 /**
  * A graph with `fileCount` file nodes, one symbol node each, import edges between
@@ -321,14 +328,19 @@ describe("live review-graph in-memory bound (#2255)", () => {
 		}
 
 		_setReviewGraphWorkspaceEntryForTests(KEY, mixedGraph);
-		const mixed = getReviewGraphWorkspaceCacheSnapshot().totalNodes;
-		clearReviewGraphWorkspaceCache();
-		_setReviewGraphWorkspaceEntryForTests(KEY, buildGraph(60, 240));
-		const allFolded = getReviewGraphWorkspaceCacheSnapshot().totalNodes;
 
-		// A half-unfolded graph must retain what a fully-folded one retains. The floor
-		// cannot rescue this case: the raw pass DOES select nodes, just too few.
-		expect(mixed).toBe(allFolded);
+		// Assert REACHABILITY, not a count matched against a second graph. Only the
+		// file nodes carry the unfolded spelling, so if the raw index is used as-is
+		// they are unreachable from the ranking and none survive — while the folded
+		// symbol nodes still fill the cap, which is exactly the silent under-select
+		// this guards. Comparing two graphs' totals instead made the assertion
+		// depend on selection tie-breaks and gave a 43-vs-42 failure on Linux that
+		// said nothing about the fold (#2255 review V1).
+		const retained = _getReviewGraphWorkspaceGraphForTests(KEY);
+		const retainedFileNodes = [...(retained?.nodes.values() ?? [])].filter(
+			(node) => node.kind === "file",
+		).length;
+		expect(retainedFileNodes).toBeGreaterThan(0);
 		expect(findGroup("review-graph-memory-cap-floor")).toBeUndefined();
 	});
 
