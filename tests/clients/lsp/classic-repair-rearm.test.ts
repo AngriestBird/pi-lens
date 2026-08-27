@@ -25,6 +25,7 @@ const logSessionStart = vi.fn();
 vi.mock("../../../clients/installer/index.js", () => ({
 	ensureTool,
 	getToolEnvironment,
+	findManagedToolBinary: vi.fn(async () => undefined),
 }));
 
 vi.mock("../../../clients/lsp/launch.js", () => ({

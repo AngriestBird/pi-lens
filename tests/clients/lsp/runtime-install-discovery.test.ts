@@ -16,6 +16,7 @@ vi.mock("../../../clients/latency-logger.js", () => ({ logLatency }));
 vi.mock("../../../clients/installer/index.js", () => ({
 	ensureTool: vi.fn(async () => null),
 	getToolEnvironment: () => ({}),
+	findManagedToolBinary: vi.fn(async () => undefined),
 }));
 
 import {

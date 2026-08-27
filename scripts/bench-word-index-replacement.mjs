@@ -48,7 +48,16 @@ const {
 	serializeWordIndex,
 	updateWordIndexDocument,
 	updateWordIndexDocumentForEdit,
+	estimateWordIndexResidentBytes,
 } = await import(wordIndexUrl);
+
+const { getDegradationSummary, resetDegradationLedger } = await import(
+	pathToFileURL(path.join(root, "clients", "degradation-ledger.js")).href
+);
+const recompactionCount = () =>
+	getDegradationSummary().find(
+		(group) => group.kind === "word-index-arena-recompact",
+	)?.count ?? 0;
 
 const QUERIES = [
 	"word index posting",
@@ -107,6 +116,8 @@ function ranked(index) {
  */
 async function run(label, replace) {
 	const index = buildWordIndex(docs);
+	resetDegradationLedger();
+	let peakResidentBytes = estimateWordIndexResidentBytes?.(index) ?? 0;
 	const durations = [];
 	const blocks = [];
 	let maxBlockMs = 0;
@@ -134,6 +145,8 @@ async function run(label, replace) {
 		durations.push(performance.now() - started);
 		await new Promise((resolve) => setImmediate(resolve));
 		blocks.push(maxBlockMs);
+		const resident = estimateWordIndexResidentBytes?.(index) ?? 0;
+		if (resident > peakResidentBytes) peakResidentBytes = resident;
 	}
 	running = false;
 	await new Promise((resolve) => setImmediate(resolve));
@@ -151,6 +164,8 @@ async function run(label, replace) {
 		index,
 		latency: stats(durations),
 		block: stats(blocks),
+		recompactions: recompactionCount(),
+		peakResidentBytes,
 	};
 }
 
@@ -159,6 +174,12 @@ console.log(`corpus root: ${corpusRoot}`);
 console.log(`corpus documents: ${docs.length}`);
 console.log(`posting entries: ${countWordIndexPostingEntries(probe)}`);
 console.log(`distinct tokens: ${probe.postings.size}`);
+console.log(
+	`fresh-build resident: ${(
+		(estimateWordIndexResidentBytes?.(probe) ?? 0) /
+		(1024 * 1024)
+	).toFixed(1)} MB`,
+);
 console.log(`edits: ${targets.length}`);
 console.log(
 	`target bytes: mean ${Math.round(
@@ -195,6 +216,12 @@ const row = (name, s) =>
 for (const result of [syncRun, asyncRun]) {
 	console.log(row(`${result.label} latency per edit`, result.latency));
 	console.log(row(`${result.label} sync block per edit`, result.block));
+	console.log(
+		`${result.label} arena recompactions: ${result.recompactions} over ${targets.length} edits, peak resident ${(
+			result.peakResidentBytes /
+			(1024 * 1024)
+		).toFixed(1)} MB`,
+	);
 }
 
 const samples = profile.samples ?? [];
