@@ -21,28 +21,35 @@ const SELF = "tests/config/sweep-floor-coverage.test.ts";
  * production-symbol list remains an intent exception for registries whose
  * walk is not syntactically obvious. Static detection is evadable by
  * construction; this catches natural shapes, while the exception list catches
- * intent.
+ * intent. Exported as a pure function (source in, boolean out) so the
+ * emptiness alternation can be unit-tested against literal snippets, not
+ * only inferred from a whole-tree census.
  */
+export function looksSweepShaped(source: string): boolean {
+	const enumerates =
+		/(?:fs\.readdirSync|(?<![A-Za-z0-9_$])readdirSync|fs\.promises\.readdir|(?<![A-Za-z0-9_$.])readdir(?!Sync)|globSync|listSourceFiles|clientSourceFiles)/.test(
+			source,
+		) ||
+		/(?:assertNonEmptyScan|auditRegistry|scanDualInstanceImports|LSP_SERVERS|LSP_FIXTURES|ALL_FORMATTERS|DYNAMIC_OR_EXEMPT|isTimingSensitive|scanHostEventShapeViolations)/.test(
+			source,
+		);
+	// #2088 fix round 3, R1: the mainstream `expect(x.length).toBe(0)`
+	// spelling (14 existing test files use it) was missing from this
+	// alternation, so a sweep written that way never registered as
+	// sweep-shaped at all -- invisible to the meta-sweep, not merely
+	// unfloored.
+	const empties =
+		/\.toEqual\(\s*\[\s*\]\s*\)|\.toHaveLength\(\s*0\s*\)|\.toStrictEqual\(\s*\[\s*\]\s*\)|\.length\s*\)\s*\.toBe\(\s*0\s*\)/.test(
+			source,
+		);
+	return enumerates && empties;
+}
+
 function sweepShapeFiles(): string[] {
 	return listSourceFiles(TESTS_ROOT, { extensions: [".ts"] })
 		.filter((file) => file.endsWith(".test.ts"))
 		.filter((file) => relativePosix(REPO_ROOT, file) !== SELF)
-		.filter((file) => {
-			const raw = fs.readFileSync(file, "utf8");
-			const source = stripSource(raw);
-			const enumerates =
-				/(?:fs\.readdirSync|(?<![A-Za-z0-9_$])readdirSync|fs\.promises\.readdir|(?<![A-Za-z0-9_$.])readdir(?!Sync)|globSync|listSourceFiles|clientSourceFiles)/.test(
-					source,
-				) ||
-				/(?:assertNonEmptyScan|auditRegistry|scanDualInstanceImports|LSP_SERVERS|LSP_FIXTURES|ALL_FORMATTERS|DYNAMIC_OR_EXEMPT|isTimingSensitive|scanHostEventShapeViolations)/.test(
-					source,
-				);
-			const empties =
-				/\.toEqual\(\s*\[\s*\]\s*\)|\.toHaveLength\(\s*0\s*\)|\.toStrictEqual\(\s*\[\s*\]\s*\)/.test(
-					source,
-				);
-			return enumerates && empties;
-		});
+		.filter((file) => looksSweepShaped(stripSource(fs.readFileSync(file, "utf8"))));
 }
 
 const DECLARED_EXCEPTIONS: Readonly<Record<string, string>> = {
@@ -160,20 +167,59 @@ describe("registered-or-fail sweep floors", () => {
 			flagged: files,
 			registered,
 			exemptions: DECLARED_EXCEPTIONS,
-			// Calibration: 781 test files walked on 2026-08-26 (fix round 2, post
-			// master-merge); half is 391, rounded up to the documented 400 floor.
+			// Calibration: 831 test files walked on 2026-08-27 (fix round 3, #2088
+			// R1: the `.length).toBe(0)` alternation added above pulled 3 more
+			// already-registered sweep files into the census); half is 416,
+			// rounded up to the documented 420 floor.
 			scannedCount,
-			minScanned: 400,
-			// Calibration: this census flags 55 sweep-shaped files on 2026-08-26
-			// (fix round 2) -- 10 registered via assertNonEmptyScan/minScanned, 45
-			// declared exceptions. Half of 55 rounded up is 28. Earlier figures
-			// (13 in this comment, 40 in the PR body table) were both stale by the
-			// time the exception list finished growing to 46 entries in round 1.
+			minScanned: 420,
+			// Calibration: this census flags 58 sweep-shaped files on 2026-08-27
+			// (fix round 3) -- 13 registered via assertNonEmptyScan/minScanned, 45
+			// declared exceptions. Half of 58 rounded up is 29. Earlier figures (28
+			// for a census of 55) were accurate as of round 2 but went stale the
+			// moment the R1 regex fix changed what counts as sweep-shaped.
 			// Recalibrate by reading this test's OWN measured numbers, not by
 			// copying a figure from a comment or a PR body.
-			minFlagged: 28,
+			minFlagged: 29,
 			minReasonLength: 20,
 		});
 		expect(audit.problems, audit.problems.join("\n")).toEqual([]);
+	});
+});
+
+describe("looksSweepShaped emptiness detection (#2088 fix round 3, R1)", () => {
+	const enumerateLine = "for (const f of fs.readdirSync(dir)) { use(f); }";
+
+	// Mutation-proof: the R1 fix from a census of 55 to 58 pulled in files
+	// spelled exactly this way (grep confirms 14 existing test files use
+	// `expect(x.length).toBe(0)`). Deleting the new alternative from the
+	// `empties` regex above must red this exact case.
+	it("recognizes the expect(x.length).toBe(0) spelling", () => {
+		const source = `${enumerateLine}\nexpect(violations.length).toBe(0);`;
+		expect(looksSweepShaped(source)).toBe(true);
+	});
+
+	it("still recognizes the three previously-supported spellings", () => {
+		expect(
+			looksSweepShaped(`${enumerateLine}\nexpect(violations).toEqual([]);`),
+		).toBe(true);
+		expect(
+			looksSweepShaped(`${enumerateLine}\nexpect(violations).toHaveLength(0);`),
+		).toBe(true);
+		expect(
+			looksSweepShaped(
+				`${enumerateLine}\nexpect(violations).toStrictEqual([]);`,
+			),
+		).toBe(true);
+	});
+
+	it("does not flag an enumeration with no emptiness assertion at all", () => {
+		expect(
+			looksSweepShaped(`${enumerateLine}\nexpect(violations.length).toBe(3);`),
+		).toBe(false);
+	});
+
+	it("does not flag an emptiness assertion with no enumeration", () => {
+		expect(looksSweepShaped("expect(x.length).toBe(0);")).toBe(false);
 	});
 });
