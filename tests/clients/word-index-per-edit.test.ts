@@ -15,7 +15,7 @@ import {
 	WORD_INDEX_MAX_BYTES,
 	wordIndexPostingHits,
 } from "../../clients/word-index.js";
-import { measureMaxSyncBlockMs } from "../support/perf-harness.js";
+import { countClockReads } from "../support/perf-harness.js";
 import { setupTestEnvironment } from "./test-utils.js";
 
 const mocks = vi.hoisted(() => ({
@@ -214,76 +214,80 @@ describe("computeCascadeForFile — word-index per-edit seam (#348 phase 2)", ()
 		}
 	});
 
-	it(
-		"never holds the event loop for the whole replacement (#2067 AC4)",
-		{ retry: 2, timeout: 120_000 },
-		async () => {
-			const env = setupTestEnvironment("word-index-per-edit-occupancy-");
-			try {
-				// Few distinct tokens, many characters: the yieldable halves (posting
-				// scan, tokenization) dominate, and the atomic publish — which cannot
-				// yield and never could — stays small, so the measurement is about the
-				// occupancy this change owns.
-				const body = (tag: string, lines: number) =>
-					Array.from(
-						{ length: lines },
-						() =>
-							`export const ${tag}Handler = ${tag}ProjectSnapshotStore.${tag}ResolveDocumentEntry(${tag}RequestContext, ${tag}IndexShard, ${tag}WordPosting);`,
-					).join("\n");
+	// #2254: the seam's cooperative replacement must read the clock O(distinct
+	// tokens the old document carried), not O(posting elements it walks). That is
+	// what keeps the per-edit block bounded — a deadline check per posting element
+	// cost one `performance.now()` per entry (the #2067 tax). A clock-read count
+	// is a deterministic WORK COUNT, invariant to machine speed and runner load,
+	// so it replaces the earlier wall-clock max-block bound (#2202 class): that
+	// bound needed a 401-document fixture and `retry: 2`, and was both flaky and a
+	// noisy neighbour in the timing-sensitive lane.
+	//
+	// Red-first: restoring the per-element deadline check reds this — the fixture
+	// walks two orders of magnitude more posting elements than it has tokens.
+	it("replaces through the seam with clock reads bounded by tokens, not postings (#2254)", async () => {
+		const env = setupTestEnvironment("word-index-per-edit-occupancy-");
+		try {
+			// A few distinct tokens repeated across a high-document-frequency corpus:
+			// each token's posting list is long, so a per-element deadline check would
+			// read the clock tens of thousands of times while a per-token check reads
+			// it a handful. No large single document and no retry are needed — the
+			// clock-read count does not depend on wall-clock timing.
+			const shared = Array.from({ length: 6 }, (_, i) => `sharedtoken${i}`).join(
+				" ",
+			);
+			const filePath = path.join(env.tmpDir, "src", "target.ts");
+			fs.mkdirSync(path.dirname(filePath), { recursive: true });
+			const content = Array(20).fill("replacementtoken here").join("\n");
+			fs.writeFileSync(filePath, content);
 
-				const filePath = path.join(env.tmpDir, "src", "target.ts");
-				fs.mkdirSync(path.dirname(filePath), { recursive: true });
-				// Just under the shared size cap, so the seam replaces rather than drops.
-				const content = body("updated", 3_000);
-				expect(Buffer.byteLength(content, "utf-8")).toBeLessThan(
-					WORD_INDEX_MAX_BYTES,
-				);
-				fs.writeFileSync(filePath, content);
+			const wordIndex = buildWordIndex([
+				{ path: filePath, content: Array(20).fill(shared).join("\n") },
+				...Array.from({ length: 60 }, (_, doc) => ({
+					path: path.join(env.tmpDir, "src", `peer${doc}.ts`),
+					content: Array(200).fill(shared).join("\n"),
+				})),
+			]);
 
-				// High-document-frequency corpus: the removal half has to walk the
-				// posting list of every token the old document carried.
-				const wordIndex = buildWordIndex([
-					{ path: filePath, content: body("original", 3_000) },
-					...Array.from({ length: 400 }, (_, doc) => ({
-						path: path.join(env.tmpDir, "src", `peer${doc}.ts`),
-						content: body("original", 200),
-					})),
-				]);
-
-				const { computeCascadeForFile } =
-					await import("../../clients/dispatch/integration.js");
-				const maxBlockMs = await measureMaxSyncBlockMs(() =>
-					computeCascadeForFile(filePath, env.tmpDir, {
-						turnSeq: 1,
-						writeSeq: 1,
-						fileContent: content,
-						wordIndex,
-					}),
-				);
-
-				// The synchronous variant this seam used to call held the loop for the
-				// whole replacement: 40-42 ms on this fixture, against 9-16 ms for the
-				// cooperative one, which gives the loop back on its 8 ms budget. The
-				// bound sits between them with room for the non-yieldable atomic
-				// publish and a loaded CI box.
-				expect(maxBlockMs).toBeLessThan(30);
-				// Not vacuous: the replacement really happened.
-				expect(
-					wordIndexPostingHits(wordIndex, "updatedhandler").some(
-						(hit) => hit.file === filePath,
-					),
-				).toBe(true);
-				expect(wordIndex.postings.has("originalhandler")).toBe(true);
-				expect(
-					wordIndexPostingHits(wordIndex, "originalhandler").some(
-						(hit) => hit.file === filePath,
-					),
-				).toBe(false);
-			} finally {
-				env.cleanup();
+			// Not vacuous: the old document's tokens really do span a large posting
+			// population the staging pass has to walk.
+			let postingElements = 0;
+			for (const token of wordIndex.forward?.get(filePath)?.keys() ?? []) {
+				postingElements += wordIndex.postings.get(token)?.length ?? 0;
 			}
-		},
-	);
+			expect(postingElements).toBeGreaterThan(20_000);
+
+			const { computeCascadeForFile } = await import(
+				"../../clients/dispatch/integration.js"
+			);
+			const clockReads = await countClockReads(() =>
+				computeCascadeForFile(filePath, env.tmpDir, {
+					turnSeq: 1,
+					writeSeq: 1,
+					fileContent: content,
+					wordIndex,
+				}),
+			);
+
+			// One read per token the old document carried, plus tokenization of the
+			// new content and a handful of yields — never one per posting element.
+			// The per-element form reds this by two orders of magnitude.
+			expect(clockReads).toBeLessThan(2_000);
+			// Not vacuous: the replacement really happened.
+			expect(
+				wordIndexPostingHits(wordIndex, "replacementtoken").some(
+					(hit) => hit.file === filePath,
+				),
+			).toBe(true);
+			expect(
+				wordIndexPostingHits(wordIndex, "sharedtoken0").some(
+					(hit) => hit.file === filePath,
+				),
+			).toBe(false);
+		} finally {
+			env.cleanup();
+		}
+	});
 
 	it("removes (not partially indexes) a file over the shared size cap", async () => {
 		const env = setupTestEnvironment("word-index-per-edit-oversize-");
