@@ -17,9 +17,9 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const { launchLSP } = vi.hoisted(() => ({ launchLSP: vi.fn() }));
 const { logLatency } = vi.hoisted(() => ({ logLatency: vi.fn() }));
 const { findManagedToolBinary, ensureTool } = vi.hoisted(() => ({
-	findManagedToolBinary: vi.fn(async (_toolId: string) => undefined as
-		| string
-		| undefined),
+	findManagedToolBinary: vi.fn(
+		async (_toolId: string) => undefined as string | undefined,
+	),
 	ensureTool: vi.fn(async () => null),
 }));
 vi.mock("../../../clients/lsp/launch.js", () => ({ launchLSP }));
@@ -103,10 +103,6 @@ describe("resolveAndLaunch — managed-bin fast path (#2140)", () => {
 		);
 
 		expect(result?.source).toBe("direct");
-		expect(launchLSP).toHaveBeenCalledWith(
-			"typos-lsp",
-			[],
-			expect.anything(),
-		);
+		expect(launchLSP).toHaveBeenCalledWith("typos-lsp", [], expect.anything());
 	});
 });
