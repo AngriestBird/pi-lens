@@ -29,4 +29,5 @@ rule:
           kind: class_literal
 files:
   - "**/*.java"
-  - "!**/test/**"
+ignores:
+  - "**/test/**"

@@ -33,6 +33,18 @@ describe("no-console-except-error ignores CLI scripts and logger sinks (#965)", 
 		);
 		const expected = new Map([
 			[
+				"no-raw-types",
+				["**/test/**"],
+			],
+			[
+				"no-string-concat-in-loop",
+				["**/test/**"],
+			],
+			[
+				"no-system-out-println",
+				["**/test/**", "**/*Test.java"],
+			],
+			[
 				"go-no-fmt-println",
 				["**/*_test.go", "**/examples/**", "tests/fixtures/**", "cases/**"],
 			],
@@ -73,5 +85,32 @@ describe("no-console-except-error ignores CLI scripts and logger sinks (#965)", 
 		);
 		const result = await astGrepNapiRunner.run(ctx);
 		expect(linesFor(result.diagnostics, "no-console-except-error")).toEqual([]);
+	});
+
+	it("does not flag Java test files excluded by rule intent (#2280)", async () => {
+		const { ctx } = env.addFile(
+			"src/ExampleTest.java",
+			[
+				"import java.util.List;",
+				"class ExampleTest {",
+				"  void run() {",
+				"    List values = null;",
+				"    String text = \"\";",
+				"    for (;;) { text += values; }",
+				"    System.out.println(text);",
+				"  }",
+				"}",
+			].join("\\n"),
+		);
+		const result = await astGrepNapiRunner.run(ctx);
+		expect(
+			result.diagnostics.filter((diagnostic) =>
+				[
+					"no-raw-types",
+					"no-string-concat-in-loop",
+					"no-system-out-println",
+				].includes(diagnostic.ruleId),
+			),
+		).toEqual([]);
 	});
 });
