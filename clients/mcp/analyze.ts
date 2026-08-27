@@ -47,7 +47,9 @@ import { createMcpHost } from "./host-shim.js";
 // tiers key off a stable FactStore instance across calls, so a fresh FactStore
 // per call would defeat that reuse. Scoped separately from integration.ts's
 // singleton since this file has no dependency on that module's internal state.
-const warmGraphFacts = new FactStore();
+// Subject labels this store's capacity-eviction telemetry distinctly from
+// the other five production FactStore instances (#2243 review round 3, F1).
+const warmGraphFacts = new FactStore("mcp-analyze");
 
 // #536 rider (issue body: "when #348 phase 2 lands, the word-index per-edit
 // update should ride the SAME seam so both indexes stay warm together"):

@@ -1,0 +1,5 @@
+---
+section: Fixed
+---
+
+- **Harden the dispatch fact-store pin against eviction (refs #2240)** — the debounced ast-grep warning scan is a dispatch entry point, but it never pinned its file or re-derived content, so a project walk in its 2-second window could evict `file.content` and make inline `pi-lens-ignore` suppressions silently stop applying. The scan now pins and re-derives like every other dispatch caller, via a new `beginDispatchFor` that pins WITHOUT clearing the file's already-fresh facts (the earlier clear-and-re-derive cost ~51ms of redundant re-parsing for a file already re-derived by the inline dispatch 2 seconds earlier). The pin is also released at dispatch completion, so the pin set tracks dispatches actually in flight rather than the last 16 files touched. Capacity-eviction telemetry is now labeled per store instead of one shared subject across all six production `FactStore` instances, so a session-start review-graph walk can no longer consume the dispatch store's once-per-session degradation record before a real dispatch runs.
