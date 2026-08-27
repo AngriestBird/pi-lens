@@ -827,39 +827,33 @@ describe("pip strategy", () => {
 		expect(installSpawns()).toEqual([]);
 	});
 
-	it(
-		"degrades when the upgrade leaves a binary that cannot report a version",
-		async () => {
-			installProbeCached("ruff");
-			freshenAllExcept("ruff", {
-				ruff: { checkedAt: NOW - 8 * DAY_MS, version: "0.5.0" },
-			});
-			// The version probe answers before the upgrade and fails after it: the
-			// upgrade replaced a working copy with one that cannot run.
-			let probes = 0;
-			spawnMock.mockImplementation(
-				async (_command: string, args: string[]) => {
-					if ((args ?? []).includes("install")) {
-						return { stdout: "", stderr: "", status: 0 };
-					}
-					probes += 1;
-					return probes === 1
-						? { stdout: "0.5.0", stderr: "", status: 0 }
-						: { stdout: "", stderr: "cannot execute", status: 126 };
-				},
-			);
+	it("degrades when the upgrade leaves a binary that cannot report a version", async () => {
+		installProbeCached("ruff");
+		freshenAllExcept("ruff", {
+			ruff: { checkedAt: NOW - 8 * DAY_MS, version: "0.5.0" },
+		});
+		// The version probe answers before the upgrade and fails after it: the
+		// upgrade replaced a working copy with one that cannot run.
+		let probes = 0;
+		spawnMock.mockImplementation(async (_command: string, args: string[]) => {
+			if ((args ?? []).includes("install")) {
+				return { stdout: "", stderr: "", status: 0 };
+			}
+			probes += 1;
+			return probes === 1
+				? { stdout: "0.5.0", stderr: "", status: 0 }
+				: { stdout: "", stderr: "cannot execute", status: 126 };
+		});
 
-			const outcome = await runManagedToolRefresh(NOW);
+		const outcome = await runManagedToolRefresh(NOW);
 
-			expect(outcome.refreshed[0]).toMatchObject({ ok: false });
-			expect(degradationCount()).toBe(1);
-			expect(readState().ruff).toMatchObject({
-				failed: true,
-				version: "0.5.0",
-			});
-		},
-		25_000,
-	);
+		expect(outcome.refreshed[0]).toMatchObject({ ok: false });
+		expect(degradationCount()).toBe(1);
+		expect(readState().ruff).toMatchObject({
+			failed: true,
+			version: "0.5.0",
+		});
+	}, 25_000);
 
 	it("degrades once and keeps the recorded version when pip fails", async () => {
 		installProbeCached("ruff");
