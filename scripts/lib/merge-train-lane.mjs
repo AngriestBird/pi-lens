@@ -364,7 +364,12 @@ export async function runMergeLane({
 			number: null,
 			reason: "list-error",
 			merged: false,
-			errors: listErrors.map((message) => ({ message, benign: false })),
+			// #2192: `fetchOpenPullRequests` classifies its own errors now, so
+			// this consumer passes them through instead of re-deciding. The two
+			// consumers used to carry the same blanket `benign: false` mapping,
+			// which is the shape that let a routine boundary duplicate read as
+			// fatal in both of them.
+			errors: listErrors,
 		});
 	}
 

@@ -1206,6 +1206,18 @@ It deduplicates PR numbers before `runWarden` decides or applies actions. Its
 consumer prints that error and sets a nonzero exit code, while deliberately
 bounded sibling reads remain scoped.
 
+A repeated PR number is recorded, but it is NOT automatically fatal (#2192).
+The query orders by `UPDATED_AT` descending, so a PR updated mid-pagination
+shifts the window and lands on the next page too. That is a routine boundary
+repeat, and the same rule that keeps benign HTTP races out of the fatal channel
+applies to it. The reader classifies by CURSOR: a duplicate on a page whose
+cursor advanced (or on the last page) is `benign: true`; a duplicate on a page
+whose cursor did not advance is real truncation and stays fatal. The record is
+one per page, naming the count and the first `DUPLICATE_REPORT_CAP` numbers,
+not one per repeated node. `fetchOpenPullRequests` returns
+`{ message, benign }` records, so both consumers read one classification rather
+than each deciding for itself.
+
 The warden also classifies what Actions did with each open PR head
 (`scripts/lib/warden-run-health.mjs`, #2184). A run that concluded
 `failure`/`startup_failure` with ZERO executed steps across every job is

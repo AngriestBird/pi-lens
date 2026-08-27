@@ -19,6 +19,7 @@ import {
 	CONFLICT_LABEL,
 	classifyActionFailure,
 	decideActions,
+	DUPLICATE_REPORT_CAP,
 	fetchOpenPullRequests,
 	MAX_PAGES,
 	PAGE_SIZE,
@@ -570,7 +571,10 @@ describe("merge-train warden GraphQL fetch + REST apply (#1844)", () => {
 			"repo",
 		);
 		expect(prs).toHaveLength(1);
-		expect(errors[0]).toContain("some field errored");
+		// #2192: list errors are { message, benign } records now, so the
+		// classification lives at the source instead of at each consumer.
+		expect(errors[0].message).toContain("some field errored");
+		expect(errors[0].benign).toBe(false);
 	});
 
 	it("records a thrown GraphQL request failure instead of propagating", async () => {
@@ -583,7 +587,8 @@ describe("merge-train warden GraphQL fetch + REST apply (#1844)", () => {
 			"repo",
 		);
 		expect(prs).toEqual([]);
-		expect(errors[0]).toContain("network down");
+		expect(errors[0].message).toContain("network down");
+		expect(errors[0].benign).toBe(false);
 	});
 
 	// #2134: a full final page with hasNextPage is not an exhausted result.
@@ -611,7 +616,10 @@ describe("merge-train warden GraphQL fetch + REST apply (#1844)", () => {
 		expect(calls).toHaveLength(MAX_PAGES);
 		expect(result.prs).toHaveLength(MAX_PAGES * PAGE_SIZE);
 		expect(result.errors).toEqual([
-			`GraphQL pagination truncated after ${MAX_PAGES} pages while hasNextPage=true`,
+			{
+				message: `GraphQL pagination truncated after ${MAX_PAGES} pages while hasNextPage=true`,
+				benign: false,
+			},
 		]);
 	});
 
@@ -652,7 +660,10 @@ describe("merge-train warden GraphQL fetch + REST apply (#1844)", () => {
 		expect(calls).toHaveLength(1);
 		expect(result.prs).toHaveLength(1);
 		expect(result.errors).toEqual([
-			"GraphQL pagination truncated because cursor did not advance",
+			{
+				message: "GraphQL pagination truncated because cursor did not advance",
+				benign: false,
+			},
 		]);
 	});
 
@@ -682,9 +693,135 @@ describe("merge-train warden GraphQL fetch + REST apply (#1844)", () => {
 		const result = await fetchOpenPullRequests(fetcher, "acme", "repo");
 		expect(result.prs).toHaveLength(3);
 		expect(result.prs.map(({ number }) => number)).toEqual([7, 8, 9]);
+		// #2192: ONE record for the page, and benign -- the second page
+		// exhausted the connection, so a repeat there is the UPDATED_AT window
+		// sliding, not truncation.
 		expect(result.errors).toEqual([
-			"GraphQL pagination repeated PR #8 across pages; collection may be incomplete",
+			{
+				message: expect.stringContaining(
+					"repeated 1 PR number(s) on page 2 (#8)",
+				),
+				benign: true,
+			},
 		]);
+	});
+
+	/**
+	 * #2192: the duplicate record was FATAL-channel and PER-NODE. Both halves
+	 * are wrong once pagination actually arms (today's 8 open PRs never reach
+	 * page 2 at PAGE_SIZE 50, so this is latent, not live).
+	 *
+	 * The query orders by UPDATED_AT desc. Any open PR updated while the
+	 * warden pages shifts the window and pushes PRs from page N onto page
+	 * N+1 -- routine on a 10-minute cadence, and this file's own design note
+	 * says such races must not mark the run red.
+	 */
+	describe("#2192 cross-page duplicates", () => {
+		/** Serve a fixed list of pages in request order. */
+		function servePages(pages: unknown[]) {
+			const calls: unknown[] = [];
+			const fetcher = async (_url: string, init?: { body?: string }) => {
+				calls.push(JSON.parse(init?.body ?? "{}"));
+				return {
+					ok: true,
+					status: 200,
+					json: async () => pages[calls.length - 1],
+				};
+			};
+			return { fetcher, calls };
+		}
+
+		it("classifies a boundary duplicate as benign when the cursor advanced", async () => {
+			const pages = [
+				graphqlPage([prNode({ number: 7 }), prNode({ number: 8 })], true, "c1"),
+				graphqlPage([prNode({ number: 8 }), prNode({ number: 9 })], true, "c2"),
+				graphqlPage([prNode({ number: 10 })], false, "c3"),
+			];
+			const { fetcher } = servePages(pages);
+			const result = await fetchOpenPullRequests(fetcher, "acme", "repo");
+
+			expect(result.prs.map(({ number }) => number)).toEqual([7, 8, 9, 10]);
+			expect(result.errors).toHaveLength(1);
+			// Pre-fix: benign is false, so a routine window slide reddens the
+			// scheduled run every ten minutes.
+			expect(result.errors[0].benign).toBe(true);
+			expect(result.errors[0].message).toContain("window shifted");
+		});
+
+		it("keeps a duplicate fatal when the cursor did not advance (real truncation)", async () => {
+			// Page 2 repeats page 1 AND hands back the same cursor: the
+			// collector was about to replay, which is genuine truncation.
+			const pages = [
+				graphqlPage([prNode({ number: 7 })], true, "c1"),
+				graphqlPage([prNode({ number: 7 })], true, "c1"),
+			];
+			const { fetcher } = servePages(pages);
+			const result = await fetchOpenPullRequests(fetcher, "acme", "repo");
+
+			const duplicate = result.errors.find((e) =>
+				e.message.includes("repeated"),
+			);
+			expect(duplicate?.benign).toBe(false);
+			expect(duplicate?.message).toContain("cursor did not advance");
+		});
+
+		it("emits ONE record per page naming the count, not one per repeated node", async () => {
+			// A fully shifted window: every node on page 2 was already seen.
+			const first = Array.from({ length: PAGE_SIZE }, (_, i) =>
+				prNode({ number: i + 1 }),
+			);
+			const pages = [
+				graphqlPage(first, true, "c1"),
+				graphqlPage(first, false, "c2"),
+			];
+			const { fetcher } = servePages(pages);
+			const result = await fetchOpenPullRequests(fetcher, "acme", "repo");
+
+			// Pre-fix: PAGE_SIZE (50) identical fatal lines in one summary, and
+			// up to MAX_PAGES x PAGE_SIZE = 200 across a whole run.
+			expect(result.errors).toHaveLength(1);
+			expect(result.errors[0].message).toContain(
+				`repeated ${PAGE_SIZE} PR number(s) on page 2`,
+			);
+			expect(result.errors[0].benign).toBe(true);
+			// Still one copy of each PR: the dedupe itself is untouched.
+			expect(result.prs).toHaveLength(PAGE_SIZE);
+		});
+
+		it("caps how many numbers the record lists and says how many it dropped", async () => {
+			const first = Array.from({ length: PAGE_SIZE }, (_, i) =>
+				prNode({ number: i + 1 }),
+			);
+			const pages = [
+				graphqlPage(first, true, "c1"),
+				graphqlPage(first, false, "c2"),
+			];
+			const { fetcher } = servePages(pages);
+			const result = await fetchOpenPullRequests(fetcher, "acme", "repo");
+
+			const message = result.errors[0].message;
+			// Mutation guard on the cap itself: remove the slice and every one
+			// of the 50 numbers lands in the line.
+			const listed = message.match(/#\d+/g) ?? [];
+			expect(listed).toHaveLength(DUPLICATE_REPORT_CAP);
+			expect(message).toContain(`+${PAGE_SIZE - DUPLICATE_REPORT_CAP} more`);
+		});
+
+		it("does not redden a warden run over a routine boundary duplicate", async () => {
+			// The end-to-end claim: benign must survive the trip through
+			// runWarden into the summary the workflow reads for its exit code.
+			const pages = [
+				graphqlPage([prNode({ number: 7 })], true, "c1"),
+				graphqlPage([prNode({ number: 7 })], false, "c2"),
+			];
+			const { fetcher } = servePages(pages);
+			const results = await runWarden({ fetcher, owner: "acme", repo: "repo" });
+
+			const listErrors = results.find(({ number }) => number === null)?.errors;
+			expect(listErrors).toHaveLength(1);
+			expect(listErrors?.[0].benign).toBe(true);
+			expect(results.some((r) => r.errors.some((e) => !e.benign))).toBe(false);
+		});
 	});
 
 	it("decides actions once when pagination repeats a PR", async () => {
