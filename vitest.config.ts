@@ -231,6 +231,15 @@ const timingSensitiveInclude = [
 	// a stall — contention, not a regression, so the cure is a quiet host, not
 	// a looser assertion. timing-sensitive-coverage.test.ts derives this
 	// membership from the process.cpuUsage marker and fails if it is absent.
+	//
+	// Read the `maxWorkers: 2` note below together with this entry. That note
+	// says the lane's heavy neighbour is gone; this file is a NEW one — three
+	// cases that busy-spin a core for ~4.8s in total, which is exactly the
+	// shape that starved a sibling's sampler at cap 2 before. Measured rather
+	// than assumed when this landed: the full lane ran clean 4/4 at cap 2 with
+	// this file in it (19 files, 118 tests, ~49s). If a sampler-based sibling
+	// starts flaking here, this file is the first suspect and the cap is the
+	// first lever.
 	"tests/clients/loop-block-stall-discrimination.test.ts",
 ];
 
