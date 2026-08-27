@@ -8,7 +8,7 @@ export type FetchFn = (
 	text(): Promise<string>;
 }>;
 
-export type ClassificationKind = "real" | "infra-oom" | "infra-net";
+export type ClassificationKind = "real" | "infra-kill" | "infra-net";
 export interface Classification {
 	kind: ClassificationKind;
 	detail: string;
@@ -32,6 +32,8 @@ export interface ClassifierDecision {
 
 export declare function stripAnsi(text: string): string;
 export declare function classifyFailureLog(rawLog: string): Classification;
+export declare function readCgroupOomKillCount(log: string): number | null;
+export declare function describeKernelKillEvidence(log: string): string | null;
 export declare function buildMarker(sha: string, rerunState: string): string;
 export declare function parseClassifierMarker(
 	commentBody: string | null | undefined,
