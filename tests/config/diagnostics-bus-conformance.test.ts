@@ -51,11 +51,20 @@ function busPublisherFiles(
 	files: string[],
 	sources: Map<string, string>,
 ): string[] {
-	return files.filter((file) => {
-		if (file === "clients/diagnostics-publish.ts") return false;
-		const source = stripSource(sources.get(file) ?? "");
-		return /(?<!function )publishDiagnostics\s*\(/.test(source);
-	});
+	return files
+		.filter((file) => file !== "clients/diagnostics-publish.ts")
+		.filter((file) => {
+			const source = stripSource(sources.get(file) ?? "");
+			const importSource = stripSource(sources.get(file) ?? "", {
+				strings: "keep",
+			});
+			const directCall = /(?<![\w$.])publishDiagnostics\s*\(/.test(source);
+			const seamImport =
+				/import\s*\{[^}]*\bpublishDiagnostics\b[^}]*\}\s*from\s*["'][^"']*diagnostics-publish(?:\.js)?["']/.test(
+					importSource,
+				);
+			return directCall || seamImport;
+		});
 }
 
 function busSubscriberFiles(
@@ -99,18 +108,26 @@ describe("pilens:diagnostics bus surface (#2079)", () => {
 		const eventFiles = files.filter((file) => read(file).includes(EVENT));
 		expect(eventFiles).toContain("clients/diagnostics-publish.ts");
 
-		const actual = busPublisherFiles(files, sources).sort();
+		const actual = busPublisherFiles(files, sources).sort(
+			(a, b) => (a < b ? -1 : a > b ? 1 : 0),
+		);
 		expect(actual, "new publisher: update PUBLISHERS and AGENTS.md").toEqual(
-			PUBLISHERS.map((entry) => entry.file).sort(),
+			PUBLISHERS.map((entry) => entry.file).sort(
+				(a, b) => (a < b ? -1 : a > b ? 1 : 0),
+			),
 		);
 	});
 
 	it("keeps the event subscriber list in conformance", () => {
 		const files = sourceFiles();
 		const sources = new Map(files.map((file) => [file, read(file)]));
-		const actual = busSubscriberFiles(files, sources).sort();
+		const actual = busSubscriberFiles(files, sources).sort(
+			(a, b) => (a < b ? -1 : a > b ? 1 : 0),
+		);
 		expect(actual, "new subscriber: update SUBSCRIBERS and AGENTS.md").toEqual(
-			SUBSCRIBERS.map((entry) => entry.file).sort(),
+			SUBSCRIBERS.map((entry) => entry.file).sort(
+				(a, b) => (a < b ? -1 : a > b ? 1 : 0),
+			),
 		);
 	});
 
@@ -118,7 +135,10 @@ describe("pilens:diagnostics bus surface (#2079)", () => {
 		const files = ["comment.ts", "alias.ts", "imported.ts", "literal.ts"];
 		const sources = new Map([
 			["comment.ts", "// publishDiagnostics({}); bus.on(EVENT, handler);"],
-			["alias.ts", "publishDiagnostics({});"],
+			[
+				"alias.ts",
+				'import { publishDiagnostics as emitDiagnostics } from "./diagnostics-publish.js"; emitDiagnostics({});',
+			],
 			[
 				"imported.ts",
 				'import { BUS_DIAGNOSTICS_EVENT as DIAGS } from "./diagnostics-publish.js"; bus.on(DIAGS, handler);',
