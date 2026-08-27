@@ -233,9 +233,10 @@ describe("computeCascadeForFile — word-index per-edit seam (#348 phase 2)", ()
 			// read the clock tens of thousands of times while a per-token check reads
 			// it a handful. No large single document and no retry are needed — the
 			// clock-read count does not depend on wall-clock timing.
-			const shared = Array.from({ length: 6 }, (_, i) => `sharedtoken${i}`).join(
-				" ",
-			);
+			const shared = Array.from(
+				{ length: 6 },
+				(_, i) => `sharedtoken${i}`,
+			).join(" ");
 			const filePath = path.join(env.tmpDir, "src", "target.ts");
 			fs.mkdirSync(path.dirname(filePath), { recursive: true });
 			const content = Array(20).fill("replacementtoken here").join("\n");
@@ -252,14 +253,16 @@ describe("computeCascadeForFile — word-index per-edit seam (#348 phase 2)", ()
 			// Not vacuous: the old document's tokens really do span a large posting
 			// population the staging pass has to walk.
 			let postingElements = 0;
+			let oldDistinctTokens = 0;
 			for (const token of wordIndex.forward?.get(filePath)?.keys() ?? []) {
 				postingElements += wordIndex.postings.get(token)?.length ?? 0;
+				oldDistinctTokens += 1;
 			}
 			expect(postingElements).toBeGreaterThan(20_000);
+			expect(oldDistinctTokens).toBeGreaterThan(0);
 
-			const { computeCascadeForFile } = await import(
-				"../../clients/dispatch/integration.js"
-			);
+			const { computeCascadeForFile } =
+				await import("../../clients/dispatch/integration.js");
 			const clockReads = await countClockReads(() =>
 				computeCascadeForFile(filePath, env.tmpDir, {
 					turnSeq: 1,
@@ -269,9 +272,16 @@ describe("computeCascadeForFile — word-index per-edit seam (#348 phase 2)", ()
 				}),
 			);
 
-			// One read per token the old document carried, plus tokenization of the
-			// new content and a handful of yields — never one per posting element.
-			// The per-element form reds this by two orders of magnitude.
+			// TWO-SIDED. The upper bound catches the per-element regression: one read
+			// per posting element instead of per token reds it by two orders of
+			// magnitude. The lower bound catches the opposite regression, and it is
+			// the one the deleted wall-clock assertion used to own — if the seam stops
+			// calling the cooperative primitive and goes back to the synchronous
+			// `updateWordIndexDocument`, there is no deadline at all, so the count
+			// COLLAPSES to zero and an upper bound alone stays green. The floor is the
+			// old document's distinct-token count, because cooperative staging checks
+			// its deadline once per token it retires.
+			expect(clockReads).toBeGreaterThanOrEqual(oldDistinctTokens);
 			expect(clockReads).toBeLessThan(2_000);
 			// Not vacuous: the replacement really happened.
 			expect(
