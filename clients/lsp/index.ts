@@ -18,11 +18,7 @@ import { recordLsp } from "../widget-state.js";
 import { applyAuxiliarySuppressions } from "../dispatch/auxiliary-lsp.js";
 import { detectFileRole } from "../file-role.js";
 import { emitBounded } from "../bounded-telemetry.js";
-import {
-	logLatency,
-	phaseFinished,
-	phaseStarted,
-} from "../latency-logger.js";
+import { logLatency, phaseFinished, phaseStarted } from "../latency-logger.js";
 import { logSessionStart } from "../sessionstart-logger.js";
 import {
 	incrementDegradationCount,

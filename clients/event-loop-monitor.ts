@@ -234,7 +234,9 @@ export function classifyLoopBlock(
 	const cpuCoverageRatio =
 		maxMs > 0 ? Math.round((windowCpuMs / maxMs) * 100) / 100 : undefined;
 	if (maxMs < floorMs) return { stallClass: "below-floor", cpuCoverageRatio };
-	if (isSuspendSuspectedBlock(maxMs, windowCpuMs, suspendFloorMs, suspendSlopMs))
+	if (
+		isSuspendSuspectedBlock(maxMs, windowCpuMs, suspendFloorMs, suspendSlopMs)
+	)
 		return { stallClass: "system-stall", cpuCoverageRatio };
 	if (windowCpuMs + slopMs < maxMs)
 		return { stallClass: "non-cpu-stall", cpuCoverageRatio };

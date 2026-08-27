@@ -196,9 +196,9 @@ describe("classifyLoopBlock: CPU-vs-wall stall discrimination (#1980)", () => {
 			[19780, 7907],
 			[5000, 5500],
 		] as const) {
-			expect(classifyLoopBlock(maxMs, cpuMs).stallClass === "system-stall").toBe(
-				isSuspendSuspectedBlock(maxMs, cpuMs),
-			);
+			expect(
+				classifyLoopBlock(maxMs, cpuMs).stallClass === "system-stall",
+			).toBe(isSuspendSuspectedBlock(maxMs, cpuMs));
 		}
 	});
 

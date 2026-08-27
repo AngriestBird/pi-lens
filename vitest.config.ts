@@ -226,6 +226,15 @@ const timingSensitiveInclude = [
 	// sampler, and its fail-then-pass pair injects a busy-wait stall, so it
 	// must not compete with a fork storm for CPU turns.
 	"tests/clients/source-walker-io-occupancy.test.ts",
+	// #1980: blocks the real event loop twice (a parked-thread futex wait, then
+	// a busy spin of the same length) and asserts the two classify differently
+	// on the CPU axis, reading process.cpuUsage through getEventLoopStats.
+	// Under the default fork storm a busy spin gets descheduled and burns less
+	// CPU than the wall time it held, which would make the compute case read as
+	// a stall — contention, not a regression, so the cure is a quiet host, not
+	// a looser assertion. timing-sensitive-coverage.test.ts derives this
+	// membership from the process.cpuUsage marker and fails if it is absent.
+	"tests/clients/loop-block-stall-discrimination.test.ts",
 ];
 
 // #1022 fix: the "workspace LSP winner" case in this file spawns a REAL
@@ -266,13 +275,6 @@ const lspSpawnHeavyInclude = [
 // host. Sweep coverage for other members lives in this list; new entries must
 // carry a wall-clock budget assertion, not just slowness.
 const wallClockBudgetInclude = [
-	// #1980: blocks the real event loop twice (a parked-thread futex wait, then
-	// a busy spin of the same length) and asserts the two classify differently
-	// on the CPU axis. Under the default fork storm a busy spin gets
-	// descheduled and burns less CPU than the wall time it held, which would
-	// make the compute case read as a stall — contention, not a regression, so
-	// the cure is a quiet host, not a looser assertion.
-	"tests/clients/loop-block-stall-discrimination.test.ts",
 	"tests/clients/startup-overhead.test.ts",
 	"tests/clients/runtime-session-scan-cache.test.ts",
 	"tests/clients/cascade-turn-merge.test.ts",

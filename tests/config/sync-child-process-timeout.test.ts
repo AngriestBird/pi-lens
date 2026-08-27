@@ -2,91 +2,68 @@
  * #1980 AC3, as a recurrence guard rather than a one-off census.
  *
  * A synchronous child-process call parks the event loop for exactly as long
- * as the child takes. With no `timeout`, that is unbounded — and #1980's
+ * as the child takes. With no `timeout`, that park is unbounded — and #1980's
  * whole finding is that such a park used to read as ordinary compute in
- * `loop_block`, because `windowCpuMs` was recorded and never read.
+ * `loop_block`, because `windowCpuMs` was recorded beside every block and
+ * never read.
  *
- * The one-off sweep found two unbounded sites (`findBinaryOnPath` in
- * clients/lsp/launch.ts, on the LSP spawn path, and
- * `ensureUtf8ConsoleCodePageOnce` in clients/safe-spawn.ts, on the first
- * spawn of the process). Both are fixed. This walks the family so the next
- * one cannot land silently: a hand-written list of "the sync spawn sites"
- * would go stale the first time someone adds one, which is the
- * single-source-of-truth rule this repo already applies to language and
- * runner registries.
+ * The one-off sweep found three real call sites with no bound. Two are fixed
+ * (`findBinaryOnPath` in clients/lsp/launch.ts, on the LSP spawn path;
+ * `ensureUtf8ConsoleCodePageOnce` in clients/safe-spawn.ts, on the first spawn
+ * of the process); the third is exempted below with its reason. This walks the
+ * family so the next one cannot land silently: a hand-written list of "the
+ * sync spawn sites" goes stale the first time someone adds one, which is the
+ * single-source-of-truth rule this repo already applies to language and runner
+ * registries.
  *
- * Scope: `spawnSync` / `execSync` / `execFileSync` CALL sites in the shipped
- * source tree (clients/, index.ts, tools/, mcp/). Tests and scripts are out —
- * neither runs on pi's event loop.
+ * Built on tests/support/sweep-kit.ts — `listSourceFiles` for the walk,
+ * `stripSource` for comment/string masking, `auditRegistry` for
+ * exempted-with-a-reason plus stale-exemption and dead-scan floors. Those
+ * floors are the point: this repo's catalog shape 10 is a sweep that matches
+ * nothing and reads as clean.
+ *
+ * Scope: the shipped source tree (clients/, index.ts, tools/, mcp/). Tests and
+ * scripts are out — neither runs on pi's event loop.
  */
 
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import {
+	auditRegistry,
+	listSourceFiles,
+	relativePosix,
+	stripSource,
+} from "../support/sweep-kit.js";
 
-const repoRoot = path.resolve(
+const REPO_ROOT = path.resolve(
 	path.dirname(fileURLToPath(import.meta.url)),
-	"..",
-	"..",
+	"../..",
 );
 
-/** The family. Each is a synchronous child-process launcher. */
+/** The family: every synchronous child-process launcher Node offers. */
 const SYNC_SPAWN_CALLS = ["spawnSync", "execSync", "execFileSync"];
 
 /**
  * Sites that legitimately carry no literal `timeout:` in their own options,
- * with the reason. Keyed by `file::enclosingSnippet` so a move is visible but
- * a rename of the surrounding function is not a false failure.
+ * each with the reason `auditRegistry` requires. Keyed `file:snippet`, where
+ * the snippet appears in the call's arguments or just above it, so a moved
+ * call is still recognised but a genuinely new one is not.
  *
- * Keep this SHORT and reasoned. "It is probably fast" is not a reason — the
- * two bugs this test exists for were both probably fast.
+ * Keep this SHORT and reasoned. "It is probably fast" is not a reason — both
+ * bugs this guard exists for were probably fast.
  */
-const ALLOWED_WITHOUT_TIMEOUT: ReadonlyArray<{
-	file: string;
-	contains: string;
-	reason: string;
-}> = [
-	{
-		file: "clients/safe-spawn.ts",
-		contains: "taskkill.exe",
-		reason:
-			"killPidTreeSync runs from process exit/signal handlers. The process is already tearing down, so there is no event loop left to protect and a timeout would only orphan the kill.",
-	},
-	{
-		file: "clients/safe-spawn.ts",
-		contains: "...(options as SpawnOptions)",
-		reason:
-			"safeSpawn's own two spawnSync calls spread the CALLER's options, which is where the timeout comes from; its only in-repo callers (isCommandAvailable, findCommand) both pass timeout: 5000.",
-	},
-];
-
-function sourceFiles(): string[] {
-	const roots = ["clients", "tools", "mcp"];
-	const found: string[] = [];
-	const walk = (dir: string): void => {
-		for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-			const full = path.join(dir, entry.name);
-			if (entry.isDirectory()) {
-				if (entry.name === "node_modules" || entry.name === "dist") continue;
-				walk(full);
-			} else if (entry.name.endsWith(".ts") && !entry.name.endsWith(".d.ts")) {
-				found.push(full);
-			}
-		}
-	};
-	for (const root of roots) {
-		const abs = path.join(repoRoot, root);
-		if (fs.existsSync(abs)) walk(abs);
-	}
-	const indexTs = path.join(repoRoot, "index.ts");
-	if (fs.existsSync(indexTs)) found.push(indexTs);
-	return found;
-}
+const EXEMPT_SITES: Readonly<Record<string, string>> = {
+	"clients/safe-spawn.ts:taskkill.exe":
+		"killPidTreeSync runs from process exit and signal handlers. The process is already tearing down, so there is no event loop left to protect, and a timeout would only orphan the kill it was asked to perform.",
+	"clients/safe-spawn.ts:...(options as SpawnOptions)":
+		"safeSpawn's own spawnSync calls spread the CALLER's options, which is where the timeout comes from; its only in-repo callers, isCommandAvailable and findCommand, both pass timeout: 5000.",
+};
 
 /**
- * Slice from `(` to its matching `)`, so the options object is read whole
- * rather than by a line-bounded regex that a multi-line call defeats.
+ * Slice from `(` to its matching `)`, so a multi-line options object is read
+ * whole rather than by a line-bounded regex that a formatted call defeats.
  */
 function callArguments(source: string, openParenIndex: number): string {
 	let depth = 0;
@@ -101,126 +78,111 @@ function callArguments(source: string, openParenIndex: number): string {
 	return source.slice(openParenIndex + 1);
 }
 
-/**
- * Which byte offsets are real code, as opposed to comment or string body.
- *
- * Necessary, not fussy: this repo documents its own migrations in prose, so
- * `clients/lsp/server.ts` and `clients/safe-spawn.ts` both contain the text
- * `spawnSync(` inside doc comments explaining that the call USED to be
- * synchronous. A plain regex reports those as unbounded call sites, which is
- * a false failure that would push a maintainer to weaken this test. Stripping
- * comments with a regex has the opposite risk — it can swallow real code and
- * hide a genuine site — so this walks the file once and tracks state instead.
- */
-function codeMask(source: string): Uint8Array {
-	const mask = new Uint8Array(source.length).fill(1);
-	let i = 0;
-	const blank = (from: number, to: number): void => {
-		for (let k = from; k < to && k < source.length; k++) mask[k] = 0;
-	};
-	while (i < source.length) {
-		const two = source.slice(i, i + 2);
-		if (two === "//") {
-			const end = source.indexOf("\n", i);
-			const stop = end === -1 ? source.length : end;
-			blank(i, stop);
-			i = stop;
-		} else if (two === "/*") {
-			const end = source.indexOf("*/", i + 2);
-			const stop = end === -1 ? source.length : end + 2;
-			blank(i, stop);
-			i = stop;
-		} else if (source[i] === '"' || source[i] === "'" || source[i] === "`") {
-			const quote = source[i];
-			let j = i + 1;
-			while (j < source.length) {
-				if (source[j] === "\\") j += 2;
-				else if (source[j] === quote) break;
-				else j++;
-			}
-			blank(i, Math.min(j + 1, source.length));
-			i = j + 1;
-		} else {
-			i++;
-		}
-	}
-	return mask;
-}
-
 interface CallSite {
+	/** `file:line fn` — the id the audit reports. */
+	id: string;
 	file: string;
-	line: number;
-	fn: string;
-	args: string;
-	/** Source just before the call, so an allowlist entry can key on the
-	 * enclosing function rather than on the argument list alone. */
-	context: string;
+	/** Argument list plus a little preceding source, for exemption matching. */
+	haystack: string;
+	bounded: boolean;
 }
 
-function findCallSites(): CallSite[] {
+function shippedSourceFiles(): string[] {
+	const files = ["clients", "tools", "mcp"].flatMap((dir) => {
+		const abs = path.join(REPO_ROOT, dir);
+		return fs.existsSync(abs)
+			? listSourceFiles(abs, { extensions: [".ts"], skipTests: true })
+			: [];
+	});
+	const indexTs = path.join(REPO_ROOT, "index.ts");
+	if (fs.existsSync(indexTs)) files.push(indexTs);
+	return files;
+}
+
+function findCallSites(): { sites: CallSite[]; scanned: number } {
+	const files = shippedSourceFiles();
 	const sites: CallSite[] = [];
-	for (const abs of sourceFiles()) {
-		const source = fs.readFileSync(abs, "utf-8");
-		const mask = codeMask(source);
-		const rel = path.relative(repoRoot, abs).split(path.sep).join("/");
+	for (const abs of files) {
+		const raw = fs.readFileSync(abs, "utf8");
+		// Comment/string masking is necessary, not fussy: this repo documents
+		// its own sync-to-async migrations in prose, so clients/lsp/server.ts
+		// and clients/safe-spawn.ts both contain `spawnSync(` inside doc
+		// comments explaining that the call USED to be synchronous. A raw regex
+		// reports those as unbounded sites, which is a false failure that would
+		// push a maintainer to weaken this guard. `stripSource` blanks comments
+		// and string bodies while preserving every offset.
+		const masked = stripSource(raw);
+		const rel = relativePosix(REPO_ROOT, abs);
 		for (const fn of SYNC_SPAWN_CALLS) {
-			// A CALL, not an import/type/prose mention: the name must be
-			// followed by `(`, and must not be preceded by an identifier char
-			// (so `safeSpawnSync(` never matches `spawnSync`).
+			// A CALL, not an import, type, or prose mention: the name must be
+			// followed by `(` and must not be preceded by an identifier
+			// character, so `safeSpawnSync(` never matches `spawnSync`.
 			const pattern = new RegExp(`(?<![\\w$.])${fn}\\s*\\(`, "g");
-			for (const match of source.matchAll(pattern)) {
-				if (mask[match.index] !== 1) continue; // comment or string body
-				const openParen = source.indexOf("(", match.index);
+			for (const match of masked.matchAll(pattern)) {
+				const openParen = masked.indexOf("(", match.index);
+				const args = callArguments(raw, openParen);
 				sites.push({
+					id: `${rel}:${raw.slice(0, match.index).split("\n").length} ${fn}`,
 					file: rel,
-					line: source.slice(0, match.index).split("\n").length,
-					fn,
-					args: callArguments(source, openParen),
-					context: source.slice(Math.max(0, match.index - 600), match.index),
+					haystack:
+						raw.slice(Math.max(0, match.index - 600), match.index) + args,
+					bounded: /\btimeout\s*:/.test(args),
 				});
 			}
 		}
 	}
-	return sites;
+	return { sites, scanned: files.length };
 }
 
-const matchesEntry = (
-	site: CallSite,
-	entry: (typeof ALLOWED_WITHOUT_TIMEOUT)[number],
-): boolean =>
-	entry.file === site.file &&
-	(site.args.includes(entry.contains) || site.context.includes(entry.contains));
-
-const isAllowed = (site: CallSite): boolean =>
-	ALLOWED_WITHOUT_TIMEOUT.some((entry) => matchesEntry(site, entry));
+/** The exemption key a site matches, if any. */
+function exemptionKey(site: CallSite): string | undefined {
+	return Object.keys(EXEMPT_SITES).find((key) => {
+		const [file, ...rest] = key.split(":");
+		return file === site.file && site.haystack.includes(rest.join(":"));
+	});
+}
 
 describe("#1980 every synchronous child-process call bounds the event-loop park", () => {
-	const sites = findCallSites();
+	const { sites, scanned } = findCallSites();
+	const unbounded = sites.filter((site) => !site.bounded);
 
-	it("finds the family at all (guards against a regex that matches nothing)", () => {
-		// Vacuity guard: if the detection breaks, every assertion below passes
-		// for free. The repo had 7 such sites when this landed.
+	const audit = auditRegistry({
+		sweepName: "sync child-process timeout sweep",
+		// Flagged = the unbounded sites, reported under their exemption key when
+		// they have one, so a stale exemption is detectable by the kit itself.
+		flagged: unbounded.map((site) => exemptionKey(site) ?? site.id),
+		registered: [],
+		exemptions: EXEMPT_SITES,
+		scannedCount: scanned,
+		// Floors, not decoration (catalog shape 10): a walk that finds no
+		// source files, or a detector that flags nothing, must fail rather than
+		// read as clean. 200 is well under the ~450 shipped .ts files; 1 is the
+		// single exempt site that will always be flagged.
+		minScanned: 200,
+		minFlagged: 1,
+		remediation:
+			"Pass an explicit `timeout` (5000 matches every other sync child-process site), or add an entry to EXEMPT_SITES with a real reason.",
+	});
+
+	it("actually finds the family (a dead scan must not read as clean)", () => {
+		// Vacuity guard on the DETECTOR, separate from the audit's floors: if
+		// the call-site regex breaks, every assertion below passes for free.
+		// There were 7 sites across 3 files when this landed.
 		expect(sites.length).toBeGreaterThanOrEqual(5);
 		expect(new Set(sites.map((s) => s.file)).size).toBeGreaterThanOrEqual(3);
 	});
 
-	it("passes an explicit timeout, or is allowlisted with a reason", () => {
-		const unbounded = sites
-			.filter((site) => !/\btimeout\s*:/.test(site.args))
-			.filter((site) => !isAllowed(site))
-			.map((site) => `${site.file}:${site.line} ${site.fn}`);
-		// Pre-fix this reads:
+	it("bounds every site, or exempts it with a reason", () => {
+		// Pre-fix, `audit.unaccounted` reads:
 		//   clients/lsp/launch.ts:310 execFileSync
 		//   clients/safe-spawn.ts:1062 spawnSync
-		expect(unbounded).toEqual([]);
+		expect(audit.problems).toEqual([]);
 	});
 
-	it("keeps the allowlist live, so a stale exemption cannot hide a new site", () => {
-		// An allowlist entry whose site no longer exists must be deleted, not
-		// left to silently cover some future call it was never reasoned about.
-		const stale = ALLOWED_WITHOUT_TIMEOUT.filter(
-			(entry) => !sites.some((site) => matchesEntry(site, entry)),
-		).map((entry) => `${entry.file} :: ${entry.contains}`);
-		expect(stale).toEqual([]);
+	it("keeps the exemption list live and reasoned", () => {
+		// An exemption whose site no longer exists must be deleted, not left to
+		// silently cover some future call it was never reasoned about.
+		expect(audit.staleExemptions).toEqual([]);
+		expect(audit.reasonlessExemptions).toEqual([]);
 	});
 });
