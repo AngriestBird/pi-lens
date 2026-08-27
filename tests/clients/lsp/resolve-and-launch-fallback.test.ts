@@ -5,7 +5,12 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const { launchLSP } = vi.hoisted(() => ({ launchLSP: vi.fn() }));
 const { logLatency } = vi.hoisted(() => ({ logLatency: vi.fn() }));
 vi.mock("../../../clients/lsp/launch.js", () => ({ launchLSP }));
-vi.mock("../../../clients/latency-logger.js", () => ({ logLatency }));
+vi.mock("../../../clients/latency-logger.js", async (importActual) => ({
+	...(await importActual<
+		typeof import("../../../clients/latency-logger.js")
+	>()),
+	logLatency,
+}));
 const { ensureTool } = vi.hoisted(() => ({
 	ensureTool: vi.fn(async () => null),
 }));

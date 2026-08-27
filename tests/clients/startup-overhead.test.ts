@@ -26,7 +26,9 @@ import type { LatencyEntry } from "../../clients/latency-logger.js";
 import { createTempFile, setupTestEnvironment } from "./test-utils.js";
 
 const latencyEntries = vi.hoisted(() => [] as LatencyEntry[]);
-vi.mock("../../clients/latency-logger.js", () => ({
+
+vi.mock("../../clients/latency-logger.js", async (importActual) => ({
+	...(await importActual<typeof import("../../clients/latency-logger.js")>()),
 	logLatency: (entry: LatencyEntry) => latencyEntries.push(entry),
 }));
 
