@@ -348,14 +348,25 @@ function buildProjectIgnoreMatcher(
 	patterns: GitignorePattern[],
 ): ProjectIgnoreMatcherWithFreshness {
 	const consumedIgnoreSources = new Map<string, IgnoreSource>();
-	const rememberIgnoreSource = (filePath: string): void => {
-		const signature = fileFreshnessSignature(filePath);
+	// `signature` lets a caller that already statted the file reuse that one
+	// stat (#2016's class on this seam: never re-derive a value you just
+	// computed). Callers with no signature in hand still pay their own stat.
+	const rememberIgnoreSource = (
+		filePath: string,
+		signature: FreshnessSignature = fileFreshnessSignature(filePath),
+	): void => {
 		consumedIgnoreSources.set(filePath, { path: filePath, ...signature });
 	};
 	rememberIgnoreSource(path.join(resolvedRoot, ".gitignore"));
 	const nestedCache = new Map<
 		string,
 		{
+			/**
+			 * #2071: the ONE clock this directory's ignore rules and every path
+			 * verdict derived from them share. Inside the window neither is
+			 * re-checked, so two paths under the same rule cannot disagree.
+			 */
+			checkedAtMs: number;
 			gitignoreMtimeMs: number;
 			gitignoreSize: number;
 			pilensMtimeMs: number;
@@ -375,8 +386,28 @@ function buildProjectIgnoreMatcher(
 	// caller (or the root-config lookup above) already loaded.
 	const patternsForDir = (dir: string): GitignorePattern[] => {
 		if (dir === resolvedRoot) return patterns;
+		const cached = nestedCache.get(dir);
+		const now = Date.now();
+		// #2071: inside the cadence window this directory's rules are frozen, so
+		// no stat runs and every verdict already memoized under `dir` stays
+		// derivable from exactly these patterns. Before this gate the freshness
+		// check ran per call while `patternMemo` did not, which is what let a
+		// fresh path and a memoized path in the same directory return opposite
+		// verdicts for the same rule. Externally edited nested sources are
+		// therefore picked up within PROJECT_IGNORE_FRESHNESS_CADENCE_MS, the
+		// same bound #2159 already accepted for the root sources.
+		// pi-authored `.gitignore` writes keep their instant path through
+		// `invalidateProjectIgnoreMatcherForPath`.
+		if (
+			cached !== undefined &&
+			now - cached.checkedAtMs < PROJECT_IGNORE_FRESHNESS_CADENCE_MS
+		) {
+			return cached.patterns;
+		}
 		const gitignoreSig = gitignoreSignature(dir);
-		rememberIgnoreSource(path.join(dir, ".gitignore"));
+		// One stat, two consumers. `rememberIgnoreSource` used to stat the same
+		// file a second time on the line below this one.
+		rememberIgnoreSource(path.join(dir, ".gitignore"), gitignoreSig);
 		// #1105: gate on size too. `findPiLensConfigInDir` returns `size` alongside
 		// `mtimeMs` (both from one stat), and `gitignoreSignature` reads both for
 		// the nested `.gitignore`, so an mtime-preserving, length-changing edit to
@@ -384,13 +415,15 @@ function buildProjectIgnoreMatcher(
 		const pilensInfo = findPiLensConfigInDir(dir);
 		const pilensMtime = pilensInfo?.mtimeMs ?? -1;
 		const pilensSize = pilensInfo?.size ?? -1;
-		const cached = nestedCache.get(dir);
 		if (
 			cached?.gitignoreMtimeMs === gitignoreSig.mtimeMs &&
 			cached?.gitignoreSize === gitignoreSig.size &&
 			cached?.pilensMtimeMs === pilensMtime &&
 			cached?.pilensSize === pilensSize
 		) {
+			// Unchanged: re-arm the shared clock so the next window is measured
+			// from this check, not from the build that first populated the entry.
+			cached.checkedAtMs = now;
 			return cached.patterns;
 		}
 		const nestedConfig = loadPiLensConfigInDir(dir);
@@ -399,12 +432,18 @@ function buildProjectIgnoreMatcher(
 			...parseGitignoreContent(nestedConfig.ignore.join("\n"), "pilens"),
 		];
 		nestedCache.set(dir, {
+			checkedAtMs: now,
 			gitignoreMtimeMs: gitignoreSig.mtimeMs,
 			gitignoreSize: gitignoreSig.size,
 			pilensMtimeMs: pilensMtime,
 			pilensSize: pilensSize,
 			patterns: nextPatterns,
 		});
+		// #2071: drift is the SINGLE trigger. The rules under `dir` just changed,
+		// so every verdict computed under the superseded rules dies in the same
+		// step that supersedes them. `cached === undefined` is a first build, not
+		// a change, and has no verdicts to drop.
+		if (cached !== undefined) dropVerdictsUnder(dir);
 		return nextPatterns;
 	};
 
@@ -433,7 +472,14 @@ function buildProjectIgnoreMatcher(
 		string,
 		{ ignored: boolean; layer: GitignorePatternLayer | undefined }
 	>();
-	const invalidateSubtree = (subtree: string): void => {
+	/**
+	 * Drop every memoized verdict at or below `subtree`, leaving `nestedCache`
+	 * alone. `patternsForDir` calls this the moment it rebuilds a directory's
+	 * patterns, which is why it must NOT evict the entry that rebuild just
+	 * wrote. `invalidateSubtree` layers the eviction on top for the write-hook
+	 * path, where the caller knows the source changed but has not re-read it.
+	 */
+	function dropVerdictsUnder(subtree: string): void {
 		const resolvedSubtree = path.resolve(subtree);
 		for (const key of patternMemo.keys()) {
 			const memoPath = key.slice(2);
@@ -445,7 +491,10 @@ function buildProjectIgnoreMatcher(
 				patternMemo.delete(key);
 			}
 		}
-		nestedCache.delete(resolvedSubtree);
+	}
+	const invalidateSubtree = (subtree: string): void => {
+		dropVerdictsUnder(subtree);
+		nestedCache.delete(path.resolve(subtree));
 	};
 
 	// Compile expanded gitignore globs once per matcher instance. Relative-path
@@ -671,6 +720,23 @@ export function getProjectIgnoreMatcher(rootDir: string): ProjectIgnoreMatcher {
 	const lensConfig = lensConfigInfo(resolvedRoot);
 	const globalSig = globalConfigSignature();
 	const cached = projectIgnoreMatcherCache.get(resolvedRoot);
+	// A path can be discovered during the previous matcher lookup. Publish only
+	// previously unseen sources so a walk cannot replace a pre-edit baseline.
+	//
+	// This runs BEFORE the sweep below, and the order is load-bearing. A nested
+	// source can only be published on a call AFTER the one that consumed it.
+	// With the publish second, the sweep never saw a source during the window in
+	// which it was discovered, yet still reset `lastIgnoreFreshnessCheckMs`, so
+	// the first sweep that could see it ran a FULL cadence later. Pickup was up
+	// to 2x cadence, not 1x: measured stale at 2 s and 3 s, fresh at 4 s. The
+	// baseline is protected by the `known` set, not by the ordering, so moving
+	// the publish earlier cannot let a walk overwrite a pre-edit baseline.
+	if (cached) {
+		const known = new Set(cached.ignoreSources.map((source) => source.path));
+		for (const source of cached.matcher.getConsumedIgnoreSources()) {
+			if (!known.has(source.path)) cached.ignoreSources.push(source);
+		}
+	}
 	if (
 		cached &&
 		Date.now() - cached.lastIgnoreFreshnessCheckMs >=
@@ -693,14 +759,6 @@ export function getProjectIgnoreMatcher(rootDir: string): ProjectIgnoreMatcher {
 					}
 				}
 			}
-		}
-	}
-	// A path can be discovered during the previous matcher lookup. Publish only
-	// previously unseen sources so a walk cannot replace a pre-edit baseline.
-	if (cached) {
-		const known = new Set(cached.ignoreSources.map((source) => source.path));
-		for (const source of cached.matcher.getConsumedIgnoreSources()) {
-			if (!known.has(source.path)) cached.ignoreSources.push(source);
 		}
 	}
 	if (
