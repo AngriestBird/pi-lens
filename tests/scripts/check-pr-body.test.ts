@@ -618,6 +618,23 @@ describe("live PR body resolution (#2085)", () => {
 		);
 	});
 
+	it("treats a null live body as an empty body", async () => {
+		vi.stubEnv("GITHUB_API_URL", "https://api.github.test");
+		vi.stubEnv("GITHUB_REPOSITORY", "apmantza/pi-lens");
+		vi.stubEnv("GITHUB_TOKEN", "test-token");
+		const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+		const fetchImpl = vi.fn().mockResolvedValue(
+			new Response(JSON.stringify({ body: null }), { status: 200 }),
+		);
+
+		try {
+			expect(await resolveLivePrBody(payloadPr, fetchImpl)).toBe("");
+			expect(warning).not.toHaveBeenCalled();
+		} finally {
+			warning.mockRestore();
+		}
+	});
+
 	it.each([
 		[
 			"non-2xx",

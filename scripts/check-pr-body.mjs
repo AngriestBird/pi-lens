@@ -327,9 +327,9 @@ async function fetchLivePrBody(payloadPr, fetchImpl) {
 	);
 	if (!response.ok) throw new Error(`GitHub API returned ${response.status}`);
 	const data = await response.json();
-	if (typeof data.body !== "string")
+	if (data.body !== null && typeof data.body !== "string")
 		throw new Error("GitHub API returned no body");
-	return data.body;
+	return data.body ?? "";
 }
 
 export async function resolveLivePrBody(
