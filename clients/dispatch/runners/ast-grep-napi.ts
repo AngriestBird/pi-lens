@@ -905,7 +905,7 @@ export function evaluateAstGrepRules(
 
 const astGrepNapiRunner: RunnerDefinition = {
 	id: "ast-grep-napi",
-	appliesTo: ["jsts"],
+	appliesTo: ["jsts", "css", "html"],
 	priority: PRIORITY.SPECIALIZED_ANALYSIS,
 	enabledByDefault: true,
 	skipTestFiles: true,
