@@ -92,6 +92,34 @@ describe("findPhaseEntries / phaseWasLogged", () => {
 			false,
 		);
 	});
+
+	// #2249: `concurrent_session_bind_rollup` (the session-end summary,
+	// index.ts's session_shutdown handler) shares a prefix with
+	// `concurrent_session_bind` (the per-bind record, #473). Exact-match only —
+	// a naive substring/prefix check would conflate the two.
+	it("distinguishes concurrent_session_bind from its concurrent_session_bind_rollup sibling", () => {
+		const mixed = [
+			{
+				type: "phase",
+				phase: "concurrent_session_bind",
+				ts: "2026-07-10T10:00:00.000Z",
+			},
+			{
+				type: "phase",
+				phase: "concurrent_session_bind_rollup",
+				ts: "2026-07-10T10:00:01.000Z",
+			},
+		];
+		expect(findPhaseEntries(mixed, "concurrent_session_bind")).toHaveLength(
+			1,
+		);
+		expect(
+			findPhaseEntries(mixed, "concurrent_session_bind_rollup"),
+		).toHaveLength(1);
+		expect(phaseWasLogged(mixed, "concurrent_session_bind_rollup")).toBe(
+			true,
+		);
+	});
 });
 
 describe("noPhasesLogged", () => {
