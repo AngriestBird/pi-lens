@@ -11,7 +11,11 @@ import {
 	flushLatencyLog,
 	getLatencyLogPath,
 } from "../../clients/latency-logger.js";
-import { RUNNERS, TestRunnerClient } from "../../clients/test-runner-client.js";
+import {
+	RUNNERS,
+	TestRunnerClient,
+	type TestResult,
+} from "../../clients/test-runner-client.js";
 import { createTempFile, setupTestEnvironment } from "./test-utils.js";
 
 // Only the resolveExec matrix below (#1098) needs this mocked; every other
@@ -1298,6 +1302,36 @@ describe("test-runner-client", () => {
 				path.join(second.tmpDir, `failure-${index}_test.go`),
 			);
 			const client = new TestRunnerClient(false);
+			// The cap is the behavior under test. Feed the real client failed results
+			// at its recording seam instead of paying for 33 process startups.
+			const recordFailedTarget = (root: string, testFile: string): void => {
+				fs.writeFileSync(testFile, "package widget\n");
+				(
+					client as unknown as {
+						recordResult(record: {
+							cwd: string;
+							runner: string;
+							testFile: string;
+							result: TestResult;
+							turnIndex: number;
+						}): void;
+					}
+				).recordResult({
+					cwd: root,
+					runner: "go",
+					testFile,
+					result: {
+						file: testFile,
+						sourceFile: "",
+						runner: "go",
+						passed: 0,
+						failed: 1,
+						skipped: 0,
+						failures: [],
+					},
+					turnIndex: 2045,
+				});
+			};
 			const previousTestMode = process.env.PI_LENS_TEST_MODE;
 			process.env.PI_LENS_TEST_MODE = "0";
 			try {
@@ -1309,13 +1343,7 @@ describe("test-runner-client", () => {
 					...middle.map((testFile) => [second.tmpDir, testFile]),
 					[first.tmpDir, newest],
 				]) {
-					fs.writeFileSync(testFile, "package widget\n");
-					const seeded = await client.runTestFileAsync(testFile, root, {
-						runner: "go",
-						config: failingNodeConfig,
-						turnIndex: 2045,
-					});
-					expect(seeded.failed).toBe(1);
+					recordFailedTarget(root, testFile);
 				}
 
 				expect(

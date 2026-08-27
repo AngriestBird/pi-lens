@@ -153,7 +153,9 @@ Three scripts, one job each:
   resolution, accessibility tree, and network tracing stripped out.
 - `playground-verify-rule.mjs` — the CLI the user invokes. Reads the rule,
   builds the playground URL, runs the page through CDP, scrapes the
-  result, prints JSON, kills Chrome.
+  result, prints JSON, and kills Chrome. Its source-drift sentinel reads only
+  the first `.monaco-editor` in the source pane, not the config editor, so a
+  rule note cannot satisfy the check by repeating the fixture text.
 
 ## Skipping the test
 

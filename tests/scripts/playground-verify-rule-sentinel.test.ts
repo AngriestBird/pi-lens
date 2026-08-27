@@ -49,9 +49,14 @@ function runScrapeExpr(
 	exprSrc: string,
 	innerText: string,
 	gutterTexts: string[] = [],
+	sourceEditorText?: string,
 ): unknown {
 	const fakeDocument = {
 		body: { innerText },
+		querySelector: (selector: string) =>
+			selector === ".playground > .half:first-child .monaco-editor"
+				? { textContent: sourceEditorText ?? innerText }
+				: null,
 		querySelectorAll: () => gutterTexts.map((t) => ({ textContent: t })),
 	};
 	// eslint-disable-next-line no-new-func -- test-only sandboxed eval of our own generated expression
@@ -139,6 +144,29 @@ describe("playground-verify-rule.mjs buildScrapeExpr sentinel (#2208 F2)", () =>
 		};
 		expect(result.found).toBe(true);
 		expect(result.count).toBe(3);
+		expect(result.sentinelFound).toBe(false);
+	});
+
+	it("ignores a colliding sentinel in the config pane during schema drift", () => {
+		// The rule note documents the canonical example, so the config editor
+		// can contain the caller's first line while the source editor still
+		// shows the playground's default sample. The body-wide lookup was
+		// mutation-survivable for this collision and incorrectly returned true.
+		const collidingSource = "arr.length && <JSX>";
+		const collidingSentinel = Buffer.from(collidingSource, "utf8").toString(
+			"base64",
+		);
+		const expr = buildScrapeExpr(collidingSentinel);
+		const configPane = `id: example\nnote: ${collidingSource}`;
+		const defaultSource = "function tryAstGrep() {\n  return 0;\n}";
+		const result = runScrapeExpr(
+			expr,
+			`${configPane}\nFound 0 match(es).\n${defaultSource}`,
+			[],
+			defaultSource,
+		) as { found: boolean; count: number; sentinelFound: boolean };
+		expect(result.found).toBe(true);
+		expect(result.count).toBe(0);
 		expect(result.sentinelFound).toBe(false);
 	});
 
