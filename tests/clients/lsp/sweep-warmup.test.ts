@@ -32,7 +32,12 @@ vi.mock("../../../clients/lsp/config.js", () => ({
 	getServerInitOverride: vi.fn().mockReturnValue(undefined),
 }));
 vi.mock("../../../clients/lsp/client.js", () => ({ createLSPClient }));
-vi.mock("../../../clients/latency-logger.js", () => ({ logLatency }));
+vi.mock("../../../clients/latency-logger.js", async (importActual) => ({
+	...(await importActual<
+		typeof import("../../../clients/latency-logger.js")
+	>()),
+	logLatency,
+}));
 
 function makeTsServer(root: string) {
 	return {

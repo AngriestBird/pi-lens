@@ -14,6 +14,8 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Fixed
 
+- **LSP-facing latency-logger test doubles now preserve newly added exports (refs #2281)** — the 22 whole-module factories now spread the real module and override only the logging behavior each test controls. A conformance test keeps this mock class from regressing silently.
+
 ### Security
 
 ## [4.1.2] - 2026-08-24

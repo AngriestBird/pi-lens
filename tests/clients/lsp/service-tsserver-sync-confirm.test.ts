@@ -48,7 +48,10 @@ vi.mock("../../../clients/quiet-window.js", () => ({
 	registerQuietWindowTask: vi.fn(),
 }));
 
-vi.mock("../../../clients/latency-logger.js", () => ({
+vi.mock("../../../clients/latency-logger.js", async (importActual) => ({
+	...(await importActual<
+		typeof import("../../../clients/latency-logger.js")
+	>()),
 	logLatency: vi.fn(),
 }));
 

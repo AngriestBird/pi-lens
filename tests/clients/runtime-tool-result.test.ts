@@ -18,7 +18,10 @@ import {
 import { createTempFile, setupTestEnvironment } from "./test-utils.js";
 
 const logLatency = vi.hoisted(() => vi.fn());
-vi.mock("../../clients/latency-logger.js", () => ({ logLatency }));
+vi.mock("../../clients/latency-logger.js", async (importActual) => ({
+	...(await importActual<typeof import("../../clients/latency-logger.js")>()),
+	logLatency,
+}));
 
 vi.mock("../../clients/pipeline.js", () => ({
 	runPipeline: vi.fn(),
