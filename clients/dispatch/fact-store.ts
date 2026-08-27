@@ -46,21 +46,17 @@ export function getFactStoreEvictionReporter():
 // until the heap ran out. Bound the record count the way widget-state.ts bounds
 // its file records.
 const MAX_FILE_FACT_RECORDS = 1024;
-// Pinned records are exempt from capacity eviction. A dispatch reads its file's
-// facts back after the runner groups settle (`file.content` misses read as empty
-// content, not as "re-derive"), and the fire-and-forget blast-radius build runs
-// a whole-project walk against the SAME store meanwhile — plain LRU recency
-// would let that walk evict the file being dispatched. Every other holder
+// Pinned records are exempt from capacity eviction. A dispatch reads its
+// file's facts back after the runner groups settle (`file.content` misses read as
+// empty content, not as "re-derive"), and the fire-and-forget blast-radius
+// build runs a whole-project walk against the SAME store meanwhile — plain LRU
+// recency would let that walk evict the file being dispatched. Every other holder
 // re-derives an evicted fact from disk.
 //
 // #2243 item 2: a dispatch pins its file at start (`clearFileFactsFor`) and
 // releases it at completion (`endDispatchFor`, in the dispatch's finally). The
 // pin set therefore tracks dispatches actually IN FLIGHT, not the last N files
-// touched. This cap is now a BACKSTOP against a leaked pin — a dispatch that
-// pinned but never reached its `endDispatchFor` — not the primary release, so
-// it holds only concurrent in-flight dispatches, a small set. On overflow the
-// OLDEST pin is dropped.
-const MAX_PINNED_FILE_RECORDS = 16;
+// touched.
 
 export interface ReadonlyFactStore {
 	getFileFact<T>(filePath: string, factId: string): T | undefined;
@@ -157,6 +153,7 @@ export class FactStore implements ReadonlyFactStore {
 	 *  actually in flight rather than the last N files touched (#2243 item 2). */
 	endDispatchFor(filePath: string): void {
 		this.unpinFile(normalizeMapKey(filePath));
+		this.evictColdFileFacts();
 	}
 
 	/** Clear one file's facts WITHOUT pinning. For sequential single-store scans
@@ -179,15 +176,6 @@ export class FactStore implements ReadonlyFactStore {
 
 	private pinFile(key: string): void {
 		this.pinnedFiles.set(key, (this.pinnedFiles.get(key) ?? 0) + 1);
-		// Backstop against a leaked pin (a dispatch that never reached its
-		// endDispatchFor): drop the oldest pin so the set cannot grow without
-		// bound. Symmetric endDispatchFor is the primary release, so in normal
-		// operation the set holds only concurrent in-flight dispatches.
-		while (this.pinnedFiles.size > MAX_PINNED_FILE_RECORDS) {
-			const oldest = this.pinnedFiles.keys().next().value;
-			if (oldest === undefined) break;
-			this.pinnedFiles.delete(oldest);
-		}
 	}
 
 	private unpinFile(key: string): void {
@@ -198,8 +186,7 @@ export class FactStore implements ReadonlyFactStore {
 	}
 
 	/** Drop least-recently-used records past the cap, skipping the files whose
-	 *  dispatch pinned them. The pin set is bounded well below the cap, so a
-	 *  fully pinned store cannot stall eviction. */
+	 *  dispatch pinned them. Pins survive until endDispatchFor or clearAll. */
 	private evictColdFileFacts(): void {
 		if (this.fileFacts.size <= MAX_FILE_FACT_RECORDS) return;
 		for (const key of this.fileFacts.keys()) {

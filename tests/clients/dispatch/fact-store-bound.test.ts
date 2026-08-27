@@ -24,10 +24,8 @@ const productionEvictionReporter = getFactStoreEvictionReporter();
 afterEach(() => setFactStoreEvictionReporter(undefined));
 
 // The store caps file records at 1024 and exempts in-flight dispatches from
-// eviction. A dispatch pins its file at start and releases it at completion;
-// the pin set is bounded at 16 as a backstop against a leaked pin.
+// eviction. A dispatch pins its file at start and releases it at completion.
 const MAX_RECORDS = 1024;
-const MAX_PINNED = 16;
 const BATCH = 2000;
 
 function batchPaths(prefix: string, count = BATCH): string[] {
@@ -46,9 +44,7 @@ describe("FactStore file-fact bound (#2240)", () => {
 
 		for (const p of paths) store.setFileFact(p, "file.content", "x");
 
-		expect(retained(store, paths)).toBeLessThanOrEqual(
-			MAX_RECORDS + MAX_PINNED,
-		);
+		expect(retained(store, paths)).toBeLessThanOrEqual(MAX_RECORDS);
 		expect(store.hasFileFact(paths[0], "file.content")).toBe(false);
 		expect(store.hasFileFact(paths[BATCH - 1], "file.content")).toBe(true);
 		// Eviction is capacity-only — session baselines and tool caches stay.
@@ -87,21 +83,26 @@ describe("FactStore file-fact bound (#2240)", () => {
 		expect(store.getFileFact(active, "file.content")).toBe("const x = 1;");
 	});
 
-	it("bounds the pin set — an old dispatch cannot pin a record forever", () => {
+	it("retains every in-flight dispatch record until it settles", () => {
 		const store = new FactStore();
-		const dispatched = batchPaths("dispatched", MAX_PINNED * 2);
-		for (const p of dispatched) {
+		const dispatched = batchPaths("dispatched", MAX_RECORDS + 1);
+		for (const [index, p] of dispatched.entries()) {
 			store.clearFileFactsFor(p);
-			store.setFileFact(p, "file.content", "x");
+			store.setFileFact(p, "file.content", `value-${index}`);
 		}
 
+		// While these files are in-flight, they must survive a large store flood.
 		for (const p of batchPaths("walk"))
 			store.setFileFact(p, "file.content", "");
 
-		expect(store.hasFileFact(dispatched[0], "file.content")).toBe(false);
-		expect(
-			store.hasFileFact(dispatched[dispatched.length - 1], "file.content"),
-		).toBe(true);
+		for (const [index, p] of dispatched.entries()) {
+			expect(store.getFileFact(p, "file.content")).toBe(`value-${index}`);
+		}
+
+		store.endDispatchFor(dispatched[0]);
+		expect(store.getFileFact(dispatched[0], "file.content")).toBeUndefined();
+
+		for (const p of dispatched.slice(1)) store.endDispatchFor(p);
 	});
 
 	it("clearAll releases the pins with the records", () => {
@@ -120,17 +121,16 @@ describe("FactStore file-fact bound (#2240)", () => {
 	});
 
 	// #2243 item 2: the pin is released at dispatch END, so the pin set tracks
-	// dispatches actually in flight — not the last 16 files touched. A file whose
-	// dispatch is still running survives even after 16 LATER dispatches complete.
-	it("a completed dispatch releases its pin, so 16 later completed dispatches keep an in-flight file", () => {
+	// dispatches actually in flight.
+	it("a completed dispatch releases its pin, so later completed dispatches keep an in-flight file", () => {
 		const store = new FactStore();
 		const active = "/repo/src/active.ts";
 		// The in-flight dispatch: begins, but has not settled.
 		store.clearFileFactsFor(active);
 		store.setFileFact(active, "file.content", "const x = 1;");
 
-		// 16 later dispatches that each BEGIN and SETTLE.
-		for (const p of batchPaths("later", MAX_PINNED)) {
+		// 17 later dispatches that each BEGIN and SETTLE.
+		for (const p of batchPaths("later", 17)) {
 			store.clearFileFactsFor(p);
 			store.setFileFact(p, "file.content", "y");
 			store.endDispatchFor(p);
