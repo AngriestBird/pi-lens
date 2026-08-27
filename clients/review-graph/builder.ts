@@ -2111,19 +2111,23 @@ function capGraphForPersist(
 		}
 		return byFile;
 	};
-	const coveredRankedFiles = (byFile: Map<string, string[]>): number => {
-		let hits = 0;
-		for (const filePath of rankedFiles) {
-			if ((byFile.get(filePath)?.length ?? 0) > 0) hits++;
-		}
-		return hits;
+	// Measure reach in NODES, not files. Counting files is too weak: when only some
+	// of a file's nodes are unfolded, the file still appears covered while its group
+	// is short, and the missing nodes drop out of the ranking with no signal.
+	const reachableNodes = (byFile: Map<string, string[]>): number => {
+		let reached = 0;
+		for (const filePath of rankedFiles)
+			reached += byFile.get(filePath)?.length ?? 0;
+		return reached;
 	};
+	let placeableNodes = 0;
+	for (const node of graph.nodes.values()) if (node.filePath) placeableNodes++;
 	let nodeIdsByFile = indexNodesByFile(false);
-	if (coveredRankedFiles(nodeIdsByFile) < rankedFiles.length) {
+	if (reachableNodes(nodeIdsByFile) < placeableNodes) {
 		const folded = indexNodesByFile(true);
-		// Keep whichever index the ranking can actually reach. Folding is a repair
-		// for unfolded input, never a downgrade for input that was already correct.
-		if (coveredRankedFiles(folded) > coveredRankedFiles(nodeIdsByFile)) {
+		// Keep whichever index the ranking can actually reach. Folding repairs
+		// unfolded input; it is never a downgrade for input that was already correct.
+		if (reachableNodes(folded) > reachableNodes(nodeIdsByFile)) {
 			nodeIdsByFile = folded;
 		}
 	}

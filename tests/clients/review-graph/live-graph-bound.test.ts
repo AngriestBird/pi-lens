@@ -265,7 +265,12 @@ describe("live review-graph in-memory bound (#2255)", () => {
 	// the dangerous middle: some ranked files resolve, the rest are silently dropped
 	// from the ranking, and nothing reports the under-selection.
 	it("does not under-select when only some node paths are pre-folded", () => {
-		process.env.PI_LENS_GRAPH_MAX_IN_MEMORY_BYTES = String(OVER_BUDGET);
+		// A budget that keeps MANY file groups. At the tight budget the first-group
+		// rule alone fills the cap, so both variants retain the same count and the
+		// assertion cannot see an under-selection (measured: 130 vs 130). At this
+		// budget the gap is visible — 250 retained against 346 — so the test is
+		// discriminating rather than incidentally equal.
+		process.env.PI_LENS_GRAPH_MAX_IN_MEMORY_BYTES = String(400 * 1024);
 		const mixedGraph = buildGraph(250, 1000);
 		// Unfold half the nodes; the rest keep production spelling.
 		let i = 0;
