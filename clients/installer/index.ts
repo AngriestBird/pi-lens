@@ -716,6 +716,11 @@ export const TOOLS: ToolDefinition[] = [
 		name: "Prisma Language Server",
 		checkCommand: "prisma-language-server",
 		checkArgs: ["--version"],
+		// #2169: a real closed-stdin cold run measured 27,265ms, and a warm-cache
+		// rerun still took 9,860ms — well past the 10s installer default. 40s
+		// keeps the same margin-over-worst-observed ratio Vue's 30s bound uses
+		// (#2176) rather than trimming it for a slower binary.
+		verificationTimeoutMs: 40_000,
 		installStrategy: "npm",
 		packageName: "@prisma/language-server",
 		binaryName: "prisma-language-server",
@@ -738,6 +743,10 @@ export const TOOLS: ToolDefinition[] = [
 		name: "Svelte Language Server",
 		checkCommand: "svelteserver",
 		checkArgs: ["--version"],
+		// #2169: a real closed-stdin cold run measured 12,410ms — over the 10s
+		// installer default, matching the bash/JSON class of false verification
+		// degradation from a cold-cache host (#2194). 20s mirrors that bound.
+		verificationTimeoutMs: 20_000,
 		installStrategy: "npm",
 		packageName: "svelte-language-server",
 		binaryName: "svelteserver",

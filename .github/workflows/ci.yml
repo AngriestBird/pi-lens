@@ -176,6 +176,64 @@ jobs:
         # arrives with a number attached.
         run: node scripts/with-memory-watch.mjs -- npm test
 
+      # #2042 round 2: the low-water mark falsified the memory story (three
+      # kills at 13.0-13.3 GB available of 16 GB, a green run LOWER at 13.1 GB)
+      # but it cannot name what sent the SIGKILL. The kernel can. `dmesg` says
+      # in one line whether the OOM killer fired and on whom; systemd-oomd
+      # kills on PSI pressure while memory still reads available, so it is the
+      # other authority worth asking. Every command is best-effort: this step
+      # must add evidence to a failure, never change its cause.
+      - name: Kernel kill evidence
+        if: failure()
+        run: |
+          set +e
+          # Round-2 review F2: an empty arm must distinguish "asked, nothing
+          # there" from "could not ask". Silence alone reads as the first and
+          # can be the second.
+          echo "--- kernel OOM/kill records ---"
+          dm=$(sudo dmesg -T 2>/dev/null)
+          if [ -z "$dm" ]; then
+            echo "(dmesg unavailable or empty - no evidence either way)"
+          else
+            hits=$(printf '%s\n' "$dm" |
+              grep -iE 'out of memory|oom-kill|oom_reaper|killed process' |
+              tail -40)
+            if [ -z "$hits" ]; then
+              echo "(dmesg readable, zero OOM/kill records - the kernel OOM killer did not fire)"
+            else
+              printf '%s\n' "$hits"
+            fi
+          fi
+          echo "--- systemd-oomd ---"
+          sudo journalctl -u systemd-oomd --no-pager -n 40 2>/dev/null ||
+            echo "(journalctl unavailable)"
+          # Round-2 review F1: reading /sys/fs/cgroup/memory.events reads the
+          # ROOT cgroup, which cgroup v2 does not populate. It printed nothing
+          # whether or not an event had occurred, so it could never support a
+          # claim either way. Resolve this process's OWN cgroup and walk up to
+          # the first ancestor that actually has the file.
+          echo "--- cgroup memory.events ---"
+          cg=$(awk -F: '$1=="0"{print $3}' /proc/self/cgroup 2>/dev/null)
+          p="$cg"
+          found=""
+          while [ -n "$p" ]; do
+            f="/sys/fs/cgroup${p%/}/memory.events"
+            if [ -r "$f" ]; then
+              echo "cgroup=${p} file=${f}"
+              cat "$f"
+              found=1
+              break
+            fi
+            if [ "$p" = "/" ]; then break; fi
+            p=$(dirname "$p")
+          done
+          if [ -z "$found" ]; then
+            echo "(memory.events absent or unreadable from '${cg:-unknown}' up to root - no cgroup evidence either way)"
+          fi
+          echo "--- memory now ---"
+          free -m
+          exit 0
+
   # Simulates pi's real install path: a `git:` install runs `npm install
   # --omit=dev`, which triggers `prepare` → `build:dist` FROM SOURCE with the
   # dev-only @types/node ABSENT. That's the path that broke with TS2688 (#193)
