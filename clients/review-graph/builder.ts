@@ -367,7 +367,7 @@ function setWorkspaceGraph(
 	// #2255: bound what the cache RETAINS. The caller keeps its full-graph
 	// reference for the current turn; only the retained copy is trimmed, so an
 	// over-budget repo never accumulates an unbounded graph across the process.
-	const boundedGraph = capGraphForMemory(key, entry.graph);
+	const boundedGraph = retainedGraph(key, entry.graph);
 	const resident: WorkspaceGraphCacheEntry = {
 		...entry,
 		graph: boundedGraph,
@@ -615,14 +615,18 @@ export function estimateReviewGraphStoreBytes(
 // --- In-memory live-graph byte bound (#2255) ---
 // The persist element cap (`GRAPH_PERSIST_MAX_ELEMENTS_DEFAULT`) guards the
 // synchronous serialize+gzip spike; it trims only the on-disk snapshot. The live
-// `ReviewGraph` retained in `_workspaceGraphCache` had no bound and grew with
-// project size — the second unbounded dispatch store behind the #2240 OOM
-// (FactStore was the first, bounded in #2243). This bound caps the RETAINED live
-// graph by estimated resident bytes, evicting with the same centrality-ranked
-// induced-subgraph selection the snapshot uses (`capGraphForPersist`). The capped
-// graph carries `persistCoverage.partial`, which the build path already refuses as
-// an incremental base (`:4844`, `:5203`), so the next build re-derives the full
-// graph rather than extending a truncated one — the FactStore #2243 posture.
+// `ReviewGraph` had no bound and grew with project size — the second unbounded
+// dispatch store behind the #2240 OOM (FactStore's fileFacts was the first,
+// bounded in #2243). This bound caps the RETAINED live graph by estimated
+// resident bytes, using the same centrality-ranked induced-subgraph selection the
+// snapshot uses (`capGraphForPersist`).
+//
+// A graph has TWO process-lifetime retention sites, not one: the workspace cache,
+// and `session.reviewGraph` on a caller's FactStore — and two of those stores are
+// module-scope (`dispatch/integration.ts`, `mcp/analyze.ts`, the latter never
+// cleared). Bounding only the cache left the full graph resident on the fact, so
+// both sites go through `retainedGraph` below, memoized per graph instance so the
+// two sites share ONE bounded object instead of trimming twice (#2255 review F2).
 export const GRAPH_MAX_IN_MEMORY_BYTES_DEFAULT = 512 * 1024 * 1024;
 
 function graphMaxInMemoryBytes(): number {
@@ -632,59 +636,191 @@ function graphMaxInMemoryBytes(): number {
 		: GRAPH_MAX_IN_MEMORY_BYTES_DEFAULT;
 }
 
+// One bounded result per source graph instance. A WeakMap adds no retention: the
+// entry dies with the source graph. Without it, the cache and the session fact
+// would each run their own centrality pass and retain two distinct trimmed
+// copies, doubling both the cost and the footprint the bound exists to cut.
+const _boundedGraphs = new WeakMap<ReviewGraph, ReviewGraph>();
+
 /**
- * Cap the RETAINED live graph at the in-memory byte budget (#2255). Returns the
- * graph unchanged when it fits or is already a partial (capped) graph — the O(1)
- * size read is the only cost on the common in-budget path. Over budget, it
- * converts the byte budget to an element cap using the graph's own node/edge byte
- * split, then reuses `capGraphForPersist` so the on-disk and in-memory bounds share
- * one centrality selection and one honest coverage marker. One bounded degradation
- * record per cwd names the trim's before/after so a live cap is provable from the
- * ledger (the cwd is the discriminating identity across a multi-root host).
+ * The graph any process-lifetime holder may RETAIN, bounded to the in-memory byte
+ * budget (#2255). Callers keep the full graph for the current turn; only what
+ * outlives the turn goes through here.
+ *
+ * In budget, this is an O(1) size read returning the same object, so a normal
+ * repository sees no behavior change. Over budget, the byte budget converts to an
+ * element cap using the graph's own node/edge split, then `capGraphForPersist`
+ * runs one centrality selection.
+ *
+ * The result is marked `partial` AND `capTrimmed`. `partial` keeps every
+ * coverage-reporting consumer honest; `capTrimmed` records the narrower fact that
+ * the source WALK was complete and only size was cut, which is what lets the two
+ * incremental-base gates rebuild from it instead of forcing a full walk every
+ * turn. `capTrimmed` is process-local and stripped before persist.
  */
-function capGraphForMemory(cwd: string, graph: ReviewGraph): ReviewGraph {
-	if (graph.persistCoverage?.partial === true) return graph;
+function retainedGraph(cwd: string, graph: ReviewGraph): ReviewGraph {
+	const memoized = _boundedGraphs.get(graph);
+	if (memoized) return memoized;
 	const nodes = graph.nodes.size;
 	const edges = graph.edges.length;
 	const bytes = estimateReviewGraphStoreBytes(nodes, edges);
 	const budget = graphMaxInMemoryBytes();
+	// Deliberately NOT skipped for an already-partial graph. A full build over the
+	// source-walk entry budget sets `partial: true` on a graph that is still the
+	// full walked set, so skipping partials exempted the exact population this
+	// bound targets (#2255 review F3). The byte check below is the only
+	// idempotence this needs: a graph already under budget is returned as-is.
 	if (bytes <= budget) return graph;
 	// Scale both axes by the same budget/bytes ratio so the element cap preserves
 	// the graph's node/edge split; `capGraphForPersist` re-splits the cap by that
-	// same ratio, landing the capped graph at ~budget bytes.
+	// same ratio, landing the capped graph at or under the budget.
 	const elementCap = Math.max(
 		1,
 		Math.floor(((nodes + edges) * budget) / bytes),
 	);
-	const capped = capGraphForPersist(cwd, graph, elementCap);
+	let capped = capGraphForPersist(cwd, graph, elementCap);
+	// Floor: a selection that retains NOTHING is never an acceptable answer for a
+	// non-empty input — it silently converts "too big" into "no graph at all", and
+	// every query against it reads as a clean empty result (#2255 review F4).
+	// Fall back to a deterministic head slice, which is still bounded by the same
+	// element cap but cannot be empty, and say so under its own ledger kind so the
+	// two outcomes are never blended into one record.
+	if (capped.nodes.size === 0 && nodes > 0) {
+		capped = headSliceGraph(graph, elementCap);
+		incrementDegradationCount({
+			kind: "review-graph-memory-cap-floor",
+			subject: cwd,
+			reason: `centrality selection retained 0 of ${nodes} nodes at cap ${elementCap}; fell back to a ${capped.nodes.size}-node head slice`,
+		});
+	}
+	const cappedNodes = capped.nodes.size;
+	const cappedEdges = capped.edges.length;
+	capped.persistCoverage = {
+		...(capped.persistCoverage ?? graphCoverage(capped, elementCap)),
+		partial: true,
+		capTrimmed: true,
+	};
 	incrementDegradationCount({
 		kind: "review-graph-memory-cap",
 		subject: cwd,
 		reason: `live graph ${nodes}n/${edges}e ~${Math.round(
 			bytes / (1024 * 1024),
-		)}MiB over ${Math.round(budget / (1024 * 1024))}MiB budget; trimmed to ${
-			capped.nodes.size
-		}n/${capped.edges.length}e ~${Math.round(
-			estimateReviewGraphStoreBytes(capped.nodes.size, capped.edges.length) /
-				(1024 * 1024),
+		)}MiB over ${Math.round(
+			budget / (1024 * 1024),
+		)}MiB budget; trimmed to ${cappedNodes}n/${cappedEdges}e ~${Math.round(
+			estimateReviewGraphStoreBytes(cappedNodes, cappedEdges) / (1024 * 1024),
 		)}MiB`,
 	});
+	_boundedGraphs.set(graph, capped);
 	return capped;
 }
 
 /**
- * O(cache-entries) snapshot of the resident workspace graph cache — NOT
- * O(nodes)/O(edges): only `.size`/`.length` are read per entry, never the
- * graph contents themselves (#1123 item 2 memory-attribution sample). Cache
- * entries are per-cwd and normally number 1 (a session_start clears the
- * cache), so this is cheap enough for a per-N-turn sample.
+ * Deterministic non-empty fallback selection: take whole per-file node groups in
+ * stable path order until the element cap is reached, then the induced edges.
+ * Used only when centrality selection returns nothing (#2255 review F4).
+ */
+function headSliceGraph(graph: ReviewGraph, cap: number): ReviewGraph {
+	const nodeBudget = Math.max(
+		1,
+		Math.floor(
+			(cap * graph.nodes.size) / (graph.nodes.size + graph.edges.length),
+		),
+	);
+	const keptIds = new Set<string>();
+	for (const [id] of graph.nodes) {
+		if (keptIds.size >= nodeBudget) break;
+		keptIds.add(id);
+	}
+	const nodes = new Map([...graph.nodes].filter(([id]) => keptIds.has(id)));
+	const edgeBudget = Math.max(0, cap - nodes.size);
+	const edges = graph.edges
+		.filter((edge) => keptIds.has(edge.from) && keptIds.has(edge.to))
+		.slice(0, edgeBudget);
+	const sliced: ReviewGraph = {
+		...graph,
+		nodes,
+		edges,
+		edgesByFrom: new Map(),
+		edgesByTo: new Map(),
+		fileNodes: new Map(),
+		symbolNodesByFile: new Map(),
+		changedSymbolsByFile: new Map(),
+		persistCoverage: undefined,
+	};
+	rebuildIndexes(sliced);
+	return sliced;
+}
+
+/**
+ * Store the graph on `session.reviewGraph` bounded (#2255 review F2). Two of the
+ * FactStores this reaches are module-scope, so an unbounded value here outlives
+ * every session and defeats the cache bound entirely.
+ *
+ * This bounds the VALUE, not the store. `sessionFacts` is keyed by a fixed fact-id
+ * vocabulary, so its ENTRY COUNT is already bounded — it is not the unbounded-map
+ * shape #2243 fixes on `fileFacts`, and deliberately does not add a second
+ * bounding mechanism to `FactStore`.
+ */
+function setSessionReviewGraphFact(
+	cwd: string,
+	facts: FactStore,
+	graph: ReviewGraph,
+): void {
+	const retained = retainedGraph(cwd, graph);
+	registerRetainedGraph(`fact:${normalizeMapKey(cwd)}`, retained);
+	facts.setSessionFact("session.reviewGraph", retained);
+}
+
+// Retention sites OUTSIDE the workspace cache — today `session.reviewGraph` on a
+// caller's FactStore. Held through `WeakRef` so registering adds no retention of
+// its own: a graph whose only remaining referent is this registry is collectable,
+// and its slot is pruned on the next write or read. Keyed by site, so the map is
+// bounded by the number of distinct workspaces, not by builds (#2255 review F2).
+const _retainedGraphSites = new Map<string, WeakRef<ReviewGraph>>();
+
+function registerRetainedGraph(site: string, graph: ReviewGraph): void {
+	for (const [key, ref] of _retainedGraphSites) {
+		if (ref.deref() === undefined) _retainedGraphSites.delete(key);
+	}
+	_retainedGraphSites.set(site, new WeakRef(graph));
+}
+
+/** Test-only: drop the non-cache retention registry. */
+export function _resetRetainedGraphSitesForTests(): void {
+	_retainedGraphSites.clear();
+}
+
+/**
+ * O(retention-sites) snapshot of every resident review graph — NOT
+ * O(nodes)/O(edges): only `.size`/`.length` are read per graph, never the graph
+ * contents themselves (#1123 item 2 memory-attribution sample).
+ *
+ * Counts the workspace cache AND the non-cache retention sites, deduplicated by
+ * object IDENTITY. Reading the cache alone reported zero bytes while a full graph
+ * was still resident on `session.reviewGraph` — the sample read clean during the
+ * exact heap exhaustion it is cited to prove against (#2255 review F2). The
+ * dedupe matters because the bound hands both sites the same bounded object;
+ * summing them would double-count the common case.
  */
 export function getReviewGraphWorkspaceCacheSnapshot(): ReviewGraphWorkspaceCacheSnapshot {
 	let totalNodes = 0;
 	let totalEdges = 0;
-	for (const entry of _workspaceGraphCache.values()) {
-		totalNodes += entry.graph.nodes.size;
-		totalEdges += entry.graph.edges.length;
+	const counted = new Set<ReviewGraph>();
+	const count = (graph: ReviewGraph): void => {
+		if (counted.has(graph)) return;
+		counted.add(graph);
+		totalNodes += graph.nodes.size;
+		totalEdges += graph.edges.length;
+	};
+	for (const entry of _workspaceGraphCache.values()) count(entry.graph);
+	for (const [key, ref] of _retainedGraphSites) {
+		const graph = ref.deref();
+		if (graph === undefined) {
+			_retainedGraphSites.delete(key);
+			continue;
+		}
+		count(graph);
 	}
 	return {
 		cacheEntries: _workspaceGraphCache.size,
@@ -711,6 +847,22 @@ export function _setReviewGraphWorkspaceEntryForTests(
 		fileSignatures: new Map(),
 		graph,
 	});
+}
+
+/** Test-only drive of the session-fact retention seam the build paths use. */
+export function _setSessionReviewGraphFactForTests(
+	cwd: string,
+	facts: FactStore,
+	graph: ReviewGraph,
+): void {
+	setSessionReviewGraphFact(cwd, facts, graph);
+}
+
+/** Test-only view of what a graph's coverage looks like once persisted. */
+export function _persistedCoverageForTests(
+	coverage: ReviewGraphPersistCoverage | undefined,
+): ReviewGraphPersistCoverage | undefined {
+	return stripProcessLocalCoverage(coverage);
 }
 
 /** Test-only read of the exact retained graph for a raw cache key (#2255). */
@@ -1847,9 +1999,28 @@ function persistedData(pending: PendingPersist): PersistedGraphData {
 			: undefined,
 		nodes: Array.from(pending.graph.nodes.entries()),
 		edges: pending.graph.edges,
-		coverage: pending.graph.persistCoverage,
+		coverage: stripProcessLocalCoverage(pending.graph.persistCoverage),
 		gitStamp: pending.gitStamp,
 	};
+}
+
+/**
+ * Drop coverage fields that are true only of THIS process's graph before the
+ * snapshot is written (#2255 review F5).
+ *
+ * `capTrimmed` means "this process walked every file, then cut for size", which
+ * is what makes a graph a safe incremental base. A snapshot read back in a later
+ * process carries no such guarantee — the tree may have changed underneath it —
+ * so persisting the marker would let a hydrated graph claim base-eligibility
+ * nobody established, the #936 laundering shape. `partial` itself is preserved,
+ * so the snapshot still reports honestly that it is incomplete.
+ */
+function stripProcessLocalCoverage(
+	coverage: ReviewGraphPersistCoverage | undefined,
+): ReviewGraphPersistCoverage | undefined {
+	if (!coverage?.capTrimmed) return coverage;
+	const { capTrimmed: _capTrimmed, ...persisted } = coverage;
+	return persisted;
 }
 
 function countRetainedSourceFiles(
@@ -1910,12 +2081,20 @@ function capGraphForPersist(
 	);
 	const reverseDeps = buildReverseDependencyIndexFromGraph({ cwd, graph });
 	const rankedFiles = rankFilesByReverseDependencyCentrality(reverseDeps);
+	// Both sides of this lookup must be folded the SAME way. `rankedFiles` comes
+	// from the reverse-dependency index, which keys by `normalizeMapKey`
+	// (reverse-deps.ts). Keying this map by the RAW `node.filePath` matched only
+	// because production paths already arrive folded (normalizeGraphSourcePath).
+	// Any caller handing over an unfolded path missed every lookup and produced an
+	// EMPTY selection — a separator/casing assumption, not a real ranking. Fold
+	// explicitly so the two sides agree by construction (#2255 review F1).
 	const nodeIdsByFile = new Map<string, string[]>();
 	for (const [id, node] of graph.nodes) {
 		if (!node.filePath) continue;
-		const ids = nodeIdsByFile.get(node.filePath) ?? [];
+		const fileKey = normalizeMapKey(node.filePath);
+		const ids = nodeIdsByFile.get(fileKey) ?? [];
 		ids.push(id);
-		nodeIdsByFile.set(node.filePath, ids);
+		nodeIdsByFile.set(fileKey, ids);
 	}
 
 	const keptIds = new Set<string>();
@@ -4818,7 +4997,7 @@ async function tryIncrementalFromCache(
 			graphChanged: false,
 		});
 		graph.buildGeneration = generation;
-		ctx.facts.setSessionFact("session.reviewGraph", graph);
+		setSessionReviewGraphFact(ctx.cwd, ctx.facts, graph);
 		return graph;
 	}
 
@@ -4877,7 +5056,7 @@ async function tryIncrementalFromCache(
 		fromGeneration: priorGeneration,
 		changes: importChanges,
 	});
-	ctx.facts.setSessionFact("session.reviewGraph", graph);
+	setSessionReviewGraphFact(ctx.cwd, ctx.facts, graph);
 	return graph;
 }
 
@@ -4910,10 +5089,16 @@ async function trySeqFastpath(
 	cacheEpoch?: number,
 ): Promise<SeqFastpathResult> {
 	const cached = _workspaceGraphCache.get(normalizedCwd);
-	// Condition 2: need an in-process complete entry that recorded a build seq.
-	// A capped or entry-budget-truncated graph is read-only orientation data, not
-	// a safe incremental base; force the next build through a complete walk.
-	if (cached?.graph.persistCoverage?.partial) {
+	// Condition 2: need an in-process entry that recorded a build seq and whose
+	// SOURCE WALK was complete. An entry-budget-truncated or checkpoint graph has
+	// UNSEEN files, so it is read-only orientation data and must force a complete
+	// walk. A `capTrimmed` graph is a different case: this process walked every
+	// file and then cut the graph for size, so rebuilding from it is safe, and
+	// refusing it puts an over-budget repository on a full walk every single turn
+	// (#2255 review F5). The marker is process-local and never hydrated from disk,
+	// so a snapshot-derived partial still takes the refusal above.
+	const cachedCoverage = cached?.graph.persistCoverage;
+	if (cachedCoverage?.partial && cachedCoverage.capTrimmed !== true) {
 		return { fallback: "partial-base" };
 	}
 	if (!cached || cached.builtAtProjectSeq === undefined) {
@@ -5013,7 +5198,7 @@ async function trySeqFastpath(
 			graphChanged: false,
 		});
 		graph.buildGeneration = generation;
-		facts.setSessionFact("session.reviewGraph", graph);
+		setSessionReviewGraphFact(cwd, facts, graph);
 		return { graph };
 	}
 
@@ -5090,7 +5275,7 @@ async function trySeqFastpath(
 		fromGeneration: priorGeneration,
 		changes: importChanges,
 	});
-	facts.setSessionFact("session.reviewGraph", graph);
+	setSessionReviewGraphFact(cwd, facts, graph);
 	return { graph };
 }
 
@@ -5144,7 +5329,7 @@ async function _doBuildGraph(
 			// treat as changed so dependents never trust stale derived state.
 			graphChanged: true,
 		});
-		facts.setSessionFact("session.reviewGraph", graph);
+		setSessionReviewGraphFact(cwd, facts, graph);
 		return graph;
 	}
 
@@ -5251,7 +5436,7 @@ async function _doBuildGraph(
 			// with a buildGeneration: absent ⇒ derived caches rebuild every time.
 			graphChanged: true,
 		});
-		facts.setSessionFact("session.reviewGraph", graph);
+		setSessionReviewGraphFact(cwd, facts, graph);
 		return graph;
 	}
 	// #782: the repo is within the cap on this build attempt — drop any
@@ -5272,7 +5457,17 @@ async function _doBuildGraph(
 	// re-persisting it would launder partial coverage onto disk as a complete
 	// snapshot (#936 review). Ignore it here — the disk tier rejects a partial
 	// base too, so the build falls through to a full rebuild.
-	if (memCached?.graph.persistCoverage?.partial) memCached = undefined;
+	//
+	// `capTrimmed` is the one partial cause this does NOT refuse: this process
+	// walked every file and then cut the graph to the memory budget, so no file is
+	// unaccounted for. Refusing it forced a full walk on every turn for exactly
+	// the repositories the memory bound targets (#2255 review F5). The marker is
+	// process-local and stripped at persist, so a snapshot-hydrated partial —
+	// whose completeness this process cannot vouch for — is still refused.
+	const memCoverage = memCached?.graph.persistCoverage;
+	if (memCoverage?.partial && memCoverage.capTrimmed !== true) {
+		memCached = undefined;
+	}
 	if (memCached?.signature === signature) {
 		touchWorkspaceGraph(normalizedCwd);
 		const graph = cloneGraph(memCached.graph);
@@ -5295,7 +5490,7 @@ async function _doBuildGraph(
 			graphChanged: false,
 		});
 		graph.buildGeneration = generation;
-		facts.setSessionFact("session.reviewGraph", graph);
+		setSessionReviewGraphFact(cwd, facts, graph);
 		return graph;
 	}
 	if (memCached) {
@@ -5355,7 +5550,7 @@ async function _doBuildGraph(
 			graphChanged: false,
 		});
 		graph.buildGeneration = generation;
-		facts.setSessionFact("session.reviewGraph", graph);
+		setSessionReviewGraphFact(cwd, facts, graph);
 		return graph;
 	}
 	if (diskCached) {
@@ -5591,7 +5786,7 @@ async function _doBuildGraph(
 		graphChanged: true,
 	});
 	graph.buildGeneration = generation;
-	facts.setSessionFact("session.reviewGraph", graph);
+	setSessionReviewGraphFact(cwd, facts, graph);
 	return graph;
 }
 
