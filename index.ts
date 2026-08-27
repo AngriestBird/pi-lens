@@ -2562,10 +2562,12 @@ function activateExtension(hostPi: ExtensionAPI) {
 				// scheduled as a macrotask, and microtasks always drain first, so a
 				// genuinely synchronous phase has typically ALREADY closed by the
 				// time this line runs. Checking live brackets alone would read
-				// empty for exactly the case this exists to catch. NOT wired into
-				// the LSP workspace-diagnostics sweep's own touch loop
-				// (clients/lsp/index.ts) — that remains a named, deferred gap (see
-				// the PR body / issue comment), not a silent one.
+				// empty for exactly the case this exists to catch. Both bracket
+				// sites are wired now: the runner chokepoint (`runRunner` in
+				// dispatcher.ts, #1805) and the LSP workspace-diagnostics sweep
+				// (clients/lsp/index.ts), the latter as ONE bracket around the
+				// whole per-file loop so it survives the closed-bracket ring to
+				// reach this read point.
 				//
 				// #1723 review round 3: this window — [now - loopMaxMs, now] —
 				// assumes the block ENDED right at this sample, which is a
@@ -2600,6 +2602,16 @@ function activateExtension(hostPi: ExtensionAPI) {
 						worstSoFar: isNewSessionWorst,
 						turnIndex: runtime.turnIndex,
 						suspectSystemStall,
+						// #1980: the CPU-vs-wall split, read from the record alone.
+						// `windowCpuMs` has sat beside every block since #1122 and
+						// was never read together with `durationMs`; nine of sixteen
+						// genuine 5s+ blocks in a 23h window burned less CPU than the
+						// block lasted, which makes them parked, not computing. The
+						// monitor owns the verdict (clients/event-loop-monitor.ts's
+						// `classifyLoopBlock`) so `suspectSystemStall` and
+						// `stallClass` cannot disagree about one sample.
+						stallClass: elStats?.stallClass,
+						cpuCoverageRatio: elStats?.cpuCoverageRatio,
 						windowCpuMs: elStats?.windowCpuMs,
 						windowWallMs: elStats?.windowWallMs,
 						lastPhase: lastPhase?.phase,

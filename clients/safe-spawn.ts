@@ -1062,6 +1062,13 @@ function ensureUtf8ConsoleCodePageOnce(): void {
 		spawnSync(cmdExe, ["/d", "/s", "/c", "chcp 65001 >nul 2>&1"], {
 			shell: false,
 			windowsHide: true,
+			// #1980 population sweep: a synchronous spawn with no timeout parks
+			// the event loop for as long as the child takes, and nothing here
+			// bounds that. `chcp` is normally instant, but this runs before the
+			// FIRST real spawn of the process, which is exactly when a cold or
+			// antivirus-throttled cmd.exe is slowest. Matches the 5s bound every
+			// other synchronous child-process site in this repo already carries.
+			timeout: 5000,
 		});
 	} catch {
 		// Best-effort: worst case is non-ASCII tool output decoded incorrectly, not a
