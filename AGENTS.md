@@ -617,8 +617,17 @@ and only `lsp_server_spawned` answers "how many servers did we start".
 Managed verification uses the registry's optional `verificationTimeoutMs` at
 every installer-owned probe seam, including local discovery, npm install, and
 periodic refresh. The refresh candidate projection carries that policy instead
-of reintroducing a shared literal; dispatch keeps its separate 5-second budget
-until its own issue defines the broader hot-path change. (#2176, #2194)
+of reintroducing a shared literal. (#2176, #2194)
+
+The dispatch lsp-runner's `touchFile` call has its OWN 5-second cold-spawn
+wait floor (`RUNTIME_CONFIG.pipeline.lspSpawnBudgetMs`,
+`clients/dispatch/runners/lsp.ts`), separate from installer verification —
+`getClientForFile` only raises it when the matching `LSPServerInfo` declares
+`clientWaitTimeoutMs` (the seam RubyServer already used). Bounding a tool's
+installer verification alone does not stop a cold spawn from losing this
+separate 5-second race, so `clientWaitTimeoutMs` must mirror the tool's
+`verificationTimeoutMs` on the LSP registry side too: Bash and JSON at 20s,
+Vue at 30s, Svelte at 20s, and Prisma at 40s. (#2169, #2176)
 
 The project ignore matcher keeps its per-path verdict memo hot between edits.
 The write-result seam calls `invalidateProjectIgnoreMatcherForPath` for a
@@ -709,11 +718,13 @@ preserved as `cause`. (#1214)
 `ToolDefinition.checkArgs` through local/global/user/install/refresh paths and
 opt into `safeSpawnAsync`'s `input: ""` so every verification receives EOF.
 The registry may declare a larger bounded timeout for a tool whose cold
-launcher startup exceeds the dispatch budget; Vue uses 30 seconds while the
+launcher startup exceeds the installer default; Vue uses 30 seconds while the
 installer default remains 10 seconds (#2176). bash-language-server and
 vscode-json-language-server measured 9,667ms and 11,047ms cold with closed
 stdin — both close enough to the 10s default that host contention alone can
 trip a false verification degradation — and use a 20-second bound (#2194).
+svelte-language-server and @prisma/language-server measured 12,410ms and up
+to 27,265ms cold with closed stdin and use 20- and 40-second bounds (#2169).
 Delivery is proven per strategy, not just for npm: `probeManagedToolVersion`
 (pip/gem) and `verifyRefreshedArtifact` (github/maven/archive) both resolve
 the timeout through `getToolVerificationTimeout` on every call, and each of
@@ -2410,7 +2421,7 @@ Rules live in `rules/ast-grep-rules/rules/*.yml` (plus the multi-rule `rules/ast
 
 **TS/JS rule twins have two execution surfaces.** The ast-grep CLI/LSP language-gates by `language:`, so a `language: TypeScript` rule does **not** cover standalone `.js` files in the shipped ast-grep LSP baseline; user-facing TS/JS rules that should fire in JS usually need a `-js` twin with `language: JavaScript` and its own fixture. The in-process `ast-grep-napi.ts` fallback is different: it skips only rules whose `language:` is *neither* TypeScript nor JavaScript, parses each target file with its OWN grammar (`.ts`→ts, `.js`→js), and runs every remaining TS/JS rule. A grammar-agnostic twin can therefore duplicate in fallback mode, while a grammar-divergent twin is still required (canonical example: `no-flag-argument`, where a default parameter is `required_parameter` in TS and `assignment_pattern` in JS). When changing this policy, fix fallback dedup/normalization explicitly rather than relying on CLI behavior. Full authoring guidance: the `pi-lens-write-ast-grep-rule` skill.
 
-**Cross-validation against the upstream playground:** `scripts/playground-verify-rule.mjs` is a headless-CDP tool that loads a rule into the official [ast-grep playground](https://ast-grep.github.io/playground.html) and reports the match count the playground's own engine produces. This is a *second opinion* against the local CLI test — useful for catching pattern-level drift between the version of `ast-grep` pinned in `package.json` and the version the upstream binary ships. The playground uses a fixed source, so this is a pattern-level smoke test, not a source-level one. See `docs/astplayground.md` for the architecture, limitations, and CLI surface.
+**Cross-validation against the upstream playground:** `scripts/playground-verify-rule.mjs` is a headless-CDP tool that loads a rule and a `--code` fixture into the official [ast-grep playground](https://ast-grep.github.io/playground.html) and reports the match count the playground's own engine produces against that fixture. This is a *second opinion* against the local CLI test — useful for catching both pattern-level drift between the version of `ast-grep` pinned in `package.json` and the version the upstream binary ships, and rule-vs-source disagreements. (#2208: earlier versions wrote `--code` into the playground's Pattern-mode-only `query` field instead of `source`, so every run silently graded the playground's own hardcoded sample instead of the fixture — every "ok:true" was a smoke test that the rule loaded, not evidence the fixture matched. Fixed; see `docs/astplayground.md` for the field split and the scrape sentinel that now catches a recurrence.) See `docs/astplayground.md` for the architecture, limitations, and CLI surface.
 
 - **Native napi engine (#206).** The runner matches every rule through napi's own engine — `root.findAll({rule, constraints})` — fed by a faithful `js-yaml` parse (`parseSimpleYaml` is a thin `js-yaml` wrapper). The old hand-rolled YAML parser + ~240-line interpreter and the `ast-grep-native-rules` flag are **gone**. The full grammar works: nested `any`/`all`/`has`, `inside`/`follows`/`precedes`, `field`, `nthChild`, and metavariable `constraints`. A rule napi rejects is skipped (never partially evaluated).
 - **`has`/`inside` default to the immediate child/parent** (`stopBy: neighbor`). Add `stopBy: end` for a recursive descendant/ancestor search — required when the target isn't a direct child (e.g. `switch-without-default` needs it: `switch_default` lives under `switch_body`). Conversely, leave direct-child `has` at the default or it over-reports (`throw has string` + `end` flags `throw new Error("x")`).
