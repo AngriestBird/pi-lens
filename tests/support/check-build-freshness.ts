@@ -114,13 +114,19 @@ function* walkTestsTs(dir: string): Generator<string> {
 		if (entry.isDirectory()) {
 			if (entry.name === "node_modules") continue;
 			yield* walkTestsTs(full);
-		} else if (entry.isFile() && entry.name.endsWith(".ts") && !entry.name.endsWith(".d.ts")) {
+		} else if (
+			entry.isFile() &&
+			entry.name.endsWith(".ts") &&
+			!entry.name.endsWith(".d.ts")
+		) {
 			yield full;
 		}
 	}
 }
 
-export function findResidueCompiledTestSources(opts: { root: string }): string[] {
+export function findResidueCompiledTestSources(opts: {
+	root: string;
+}): string[] {
 	const residue: string[] = [];
 	for (const ts of walkTestsTs(join(opts.root, "tests"))) {
 		const js = `${ts.slice(0, -3)}.js`;
@@ -147,7 +153,8 @@ export default function setup(): void {
 	if (residue.length > 0) {
 		const rel = (p: string) => p.slice(repoRoot.length + 1).replace(/\\/g, "/");
 		const shown = residue.slice(0, 10).map(rel);
-		const more = residue.length > 10 ? `\n  …and ${residue.length - 10} more` : "";
+		const more =
+			residue.length > 10 ? `\n  …and ${residue.length - 10} more` : "";
 		throw new Error(
 			`\n⛔ Stale test residue: ${residue.length} compiled .js file(s) sit beside tests/**/*.ts source.\n` +
 				`tests/ is excluded from \`npm run build\`, so these were never freshly built — an\n` +

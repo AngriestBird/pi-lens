@@ -130,10 +130,7 @@ describe("check-build-freshness setup() end-to-end (#2232)", () => {
 	// The real repo root, exactly as the globalSetup module computes it —
 	// proves the guard fires against the ACTUAL tests/ tree the whole suite
 	// runs from, not just an isolated fixture.
-	const repoRoot = join(
-		dirname(fileURLToPath(import.meta.url)),
-		"..",
-	);
+	const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 	const probeTs = join(repoRoot, "tests", "support", "__2232-residue-probe.ts");
 	const probeJs = join(repoRoot, "tests", "support", "__2232-residue-probe.js");
 
