@@ -49,7 +49,9 @@ function sweepShapeFiles(): string[] {
 	return listSourceFiles(TESTS_ROOT, { extensions: [".ts"] })
 		.filter((file) => file.endsWith(".test.ts"))
 		.filter((file) => relativePosix(REPO_ROOT, file) !== SELF)
-		.filter((file) => looksSweepShaped(stripSource(fs.readFileSync(file, "utf8"))));
+		.filter((file) =>
+			looksSweepShaped(stripSource(fs.readFileSync(file, "utf8"))),
+		);
 }
 
 const DECLARED_EXCEPTIONS: Readonly<Record<string, string>> = {
