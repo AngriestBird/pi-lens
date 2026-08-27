@@ -47,7 +47,10 @@ describe("dispatch context normalization invariant (#2016)", () => {
 		} finally {
 			env.cleanup();
 		}
-	});
+		// Generous budget: this drives the real constructor, which loads project
+		// config and reads a file prefix. Under a loaded parallel run the default
+		// 5s budget is a flake, not a signal.
+	}, 30_000);
 
 	it("has no call site that re-normalizes an already-normalized context field", () => {
 		const repoRoot = path.resolve(import.meta.dirname, "..", "..");
@@ -67,7 +70,8 @@ describe("dispatch context normalization invariant (#2016)", () => {
 					walk(full);
 					continue;
 				}
-				if (!entry.name.endsWith(".ts") || entry.name.endsWith(".d.ts")) continue;
+				if (!entry.name.endsWith(".ts") || entry.name.endsWith(".d.ts"))
+					continue;
 				const lines = fs.readFileSync(full, "utf-8").split(/\r?\n/);
 				lines.forEach((line, index) => {
 					// Comments name the forbidden form in order to forbid it.
@@ -93,7 +97,8 @@ describe("dispatch context normalization invariant (#2016)", () => {
 			const full = path.join(repoRoot, root);
 			if (!fs.existsSync(full)) continue;
 			if (fs.statSync(full).isDirectory()) walk(full);
-			else if (pattern.test(fs.readFileSync(full, "utf-8"))) offenders.push(root);
+			else if (pattern.test(fs.readFileSync(full, "utf-8")))
+				offenders.push(root);
 		}
 
 		expect(offenders).toEqual([]);

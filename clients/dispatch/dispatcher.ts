@@ -27,10 +27,7 @@ import { getPrimaryDispatchGroup } from "../language-policy.js";
 import { resolveLanguageRootForFile } from "../language-profile.js";
 import { logLatency, phaseFinished, phaseStarted } from "../latency-logger.js";
 import { isSpawnableCommand } from "../installer/index.js";
-import {
-	normalizeEphemeralMapKey,
-	normalizeMapKey,
-} from "../path-utils.js";
+import { normalizeEphemeralMapKey, normalizeMapKey } from "../path-utils.js";
 import { loadPiLensProjectConfig } from "../project-lens-config.js";
 import { RUNTIME_CONFIG, getRunnerTimeoutFloorMs } from "../runtime-config.js";
 import { safeSpawnAsync } from "../safe-spawn.js";
