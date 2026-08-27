@@ -1392,6 +1392,18 @@ describe("project snapshot", () => {
 			expect(first).toBe(saved);
 			expect(loadProjectSnapshot(cwd)).toBe(saved);
 
+			// A newer mtime with IDENTICAL bytes must supersede on its own —
+			// this pins the mtime clause specifically, because the size axis
+			// added for #2285 satisfies the different-size case below by
+			// itself and silently absorbed this guard's old coverage.
+			const gzPathEarly = getProjectSnapshotPath(cwd);
+			const sameBytes = fs.readFileSync(gzPathEarly);
+			fs.writeFileSync(gzPathEarly, sameBytes);
+			const bumpedSame = new Date(Date.now() + 6000);
+			fs.utimesSync(gzPathEarly, bumpedSame, bumpedSame);
+			expect(fs.statSync(gzPathEarly).size).toBe(sameBytes.length);
+			expect(loadProjectSnapshot(cwd)).not.toBe(saved);
+
 			// An external writer moves the gz body past our own write (newer
 			// mtime) → the authoritative entry is abandoned and disk wins.
 			const other = new RuntimeCoordinator();
@@ -1466,7 +1478,7 @@ describe("project snapshot", () => {
 			(cwd: string) => loadProjectSnapshotExportsAndRules(cwd),
 		],
 	])(
-		"%s carries forward the authoritative in-process write when the body disappears from disk (#2296)",
+		"%s carries forward the authoritative in-process write when the body disappears from disk (#2285)",
 		(_name, load) =>
 			withProjectDataDir((cwd) => {
 				const runtime = new RuntimeCoordinator();
