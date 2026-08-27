@@ -29,7 +29,8 @@ import {
 	RunnerRegistry,
 	type RunnerResultSink,
 } from "./dispatcher.js";
-import { FactStore } from "./fact-store.js";
+import { recordDegradationOnce } from "../degradation-ledger.js";
+import { FactStore, setFactStoreEvictionReporter } from "./fact-store.js";
 import { TOOL_PLANS } from "./plan.js";
 import type {
 	DispatchResult,
@@ -181,6 +182,19 @@ export function applyProjectLensConfig(cwd: string): PiLensProjectConfig {
 }
 
 const sessionFacts = new FactStore();
+// #2243 item 4: wire the fact-store's capacity-eviction telemetry to the
+// ledger from HERE, not from fact-store.ts. fact-store stays an import leaf so
+// it cannot re-enter the safe-spawn ↔ degradation-ledger cycle (see
+// `setFactStoreEvictionReporter`). A constant subject makes the ledger's own
+// per-session dedupe emit exactly ONE record per session, re-arming when the
+// ledger resets at session_start.
+setFactStoreEvictionReporter((reason) => {
+	recordDegradationOnce({
+		kind: "fact-store-capacity-eviction",
+		subject: "session-fact-store",
+		reason,
+	});
+});
 const cascadeDiagnosticBaselines = new Map<
 	string,
 	import("./types.js").Diagnostic[]

@@ -1,10 +1,29 @@
-import { describe, it, expect } from "vitest";
+import { afterEach, describe, it, expect } from "vitest";
 import {
 	getDegradationSummary,
+	recordDegradationOnce,
 	resetDegradationLedger,
 } from "../../../clients/degradation-ledger.js";
-import { FactStore } from "../../../clients/dispatch/fact-store.js";
+import {
+	FactStore,
+	setFactStoreEvictionReporter,
+} from "../../../clients/dispatch/fact-store.js";
 import { normalizeMapKey } from "../../../clients/path-utils.js";
+
+// fact-store emits capacity-eviction telemetry through an injected reporter
+// (it stays an import leaf; integration.ts wires the real one). Install the
+// SAME reporter production uses so these tests exercise the real ledger path.
+function installProductionEvictionReporter(): void {
+	setFactStoreEvictionReporter((reason) => {
+		recordDegradationOnce({
+			kind: "fact-store-capacity-eviction",
+			subject: "session-fact-store",
+			reason,
+		});
+	});
+}
+
+afterEach(() => setFactStoreEvictionReporter(undefined));
 
 // The store caps file records at 1024 and exempts in-flight dispatches from
 // eviction. A dispatch pins its file at start and releases it at completion;
@@ -149,8 +168,9 @@ describe("FactStore file-fact bound (#2240)", () => {
 	// #2243 item 4: the cap evicts silently, and the victim can be a fact a live
 	// dispatch still needs. Record ONE bounded degradation on the first capacity
 	// eviction per session, stamped with the evicted path, re-arming per session.
-	it("records one capacity-eviction degradation per session, stamped with the evicted path", () => {
+	it("records one capacity-eviction degradation per session, naming the evicted path", () => {
 		resetDegradationLedger();
+		installProductionEvictionReporter();
 		const store = new FactStore();
 		const paths = batchPaths("evict");
 		for (const p of paths) store.setFileFact(p, "file.content", "x");
@@ -162,8 +182,10 @@ describe("FactStore file-fact bound (#2240)", () => {
 		const group = find();
 		expect(group).toBeDefined();
 		expect(group?.count).toBe(1);
-		// The FIRST record names the FIRST evicted path (oldest inserted).
-		expect(group?.latestReasons.at(-1)?.subject).toBe(
+		// One record per session (constant subject); the reason names the FIRST
+		// evicted path (oldest inserted).
+		expect(group?.latestReasons.at(-1)?.subject).toBe("session-fact-store");
+		expect(group?.latestReasons.at(-1)?.reason).toContain(
 			normalizeMapKey(paths[0]),
 		);
 
@@ -178,5 +200,18 @@ describe("FactStore file-fact bound (#2240)", () => {
 		for (const p of batchPaths("evict3"))
 			store2.setFileFact(p, "file.content", "x");
 		expect(find()?.count).toBe(1);
+	});
+
+	// fact-store must stay an import leaf: it emits eviction telemetry only
+	// through the injected reporter, never by importing the ledger directly
+	// (that re-enters the safe-spawn ↔ degradation-ledger cycle).
+	it("emits capacity eviction through the injected reporter", () => {
+		const reasons: string[] = [];
+		setFactStoreEvictionReporter((reason) => reasons.push(reason));
+		const store = new FactStore();
+		for (const p of batchPaths("emit"))
+			store.setFileFact(p, "file.content", "x");
+		expect(reasons.length).toBeGreaterThan(0);
+		expect(reasons[0]).toContain("exceeded");
 	});
 });

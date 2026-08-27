@@ -1,8 +1,28 @@
-import {
-	getDegradationLedgerGeneration,
-	recordDegradationOnce,
-} from "../degradation-ledger.js";
 import { normalizeMapKey } from "../path-utils.js";
+
+// #2243 item 4 telemetry sink, INJECTED rather than imported. fact-store must
+// stay an import leaf: `degradation-ledger` pulls
+// `process-singletons → git-tracked-ignore → safe-spawn`, and `safe-spawn`
+// imports `degradation-ledger` back, so a direct import here re-enters that
+// cycle and, under vitest's mock hoisting, deadlocks module init with a
+// "Cannot access 'safeSpawnAsync' before initialization" TDZ. integration.ts
+// owns the store and already sits above that cycle, so it wires this to
+// `recordDegradationOnce`. Unset (a plain LRU with no telemetry) is a safe
+// no-op for the scanner's local store and for tests that never load dispatch.
+export type CapacityEvictionReporter = (reason: string) => void;
+let capacityEvictionReporter: CapacityEvictionReporter | undefined;
+
+export function setFactStoreEvictionReporter(
+	reporter: CapacityEvictionReporter | undefined,
+): void {
+	capacityEvictionReporter = reporter;
+}
+
+export function getFactStoreEvictionReporter():
+	| CapacityEvictionReporter
+	| undefined {
+	return capacityEvictionReporter;
+}
 
 // #2240: the dispatch store is module-scope in integration.ts, so it lives for
 // the whole process, and a review-graph project walk seeds facts for EVERY file
@@ -42,11 +62,6 @@ export class FactStore implements ReadonlyFactStore {
 	// count is > 0. Refcounted, not a Set, so two overlapping dispatches of the
 	// same file both hold the pin until BOTH settle (#2243 item 2).
 	private readonly pinnedFiles = new Map<string, number>();
-	// #2243 item 4: the ledger generation under which this session already
-	// recorded its one capacity-eviction degradation. Compared against the
-	// ledger's live generation so the record re-arms at session_start (when
-	// resetDegradationLedger bumps the generation) without a hand-rolled latch.
-	private capacityEvictionReportedGeneration = -1;
 
 	// All file-keyed methods normalize the path internally via normalizeMapKey().
 	// Callers always pass raw/resolved paths — normalization is not their concern.
@@ -149,28 +164,23 @@ export class FactStore implements ReadonlyFactStore {
 		for (const key of this.fileFacts.keys()) {
 			if (this.pinnedFiles.has(key)) continue;
 			this.fileFacts.delete(key);
-			this.reportCapacityEvictionOnce(key);
+			this.reportCapacityEviction(key);
 			if (this.fileFacts.size <= MAX_FILE_FACT_RECORDS) return;
 		}
 	}
 
 	// #2243 item 4: the cap silently drops a fact a live dispatch may read back
-	// as "" (dispatcher.ts reads `file.content` with `?? ""`). Record ONE
-	// bounded degradation on the first capacity eviction per session, stamped
-	// with the evicted path, so the drop is visible in the ledger instead of
-	// being inferred from a downstream symptom. Re-arms per session through the
-	// ledger's own generation (resetDegradationLedger bumps it at
-	// session_start) — the sanctioned alternative to a hand-rolled latch that
-	// would forget to re-arm.
-	private reportCapacityEvictionOnce(evictedKey: string): void {
-		const generation = getDegradationLedgerGeneration();
-		if (this.capacityEvictionReportedGeneration === generation) return;
-		this.capacityEvictionReportedGeneration = generation;
-		recordDegradationOnce({
-			kind: "fact-store-capacity-eviction",
-			subject: evictedKey,
-			reason: `file-fact store exceeded ${MAX_FILE_FACT_RECORDS} records; evicted least-recently-used fact for ${evictedKey}`,
-		});
+	// as "" (dispatcher.ts reads `file.content` with `?? ""`). Emit through the
+	// injected reporter so the drop is visible in the ledger instead of being
+	// inferred from a downstream symptom. integration.ts routes this to
+	// `recordDegradationOnce` with a constant subject, so the ledger's own
+	// per-session dedupe yields exactly ONE record per session (re-arming at
+	// session_start when the ledger resets) — no latch or generation compare
+	// here, so fact-store keeps no session-scoped state to forget to re-arm.
+	private reportCapacityEviction(evictedKey: string): void {
+		capacityEvictionReporter?.(
+			`file-fact store exceeded ${MAX_FILE_FACT_RECORDS} records; evicted least-recently-used fact for ${evictedKey}`,
+		);
 	}
 
 	getSessionFact<T>(factId: string): T | undefined {
