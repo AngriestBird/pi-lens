@@ -424,7 +424,18 @@ export type DegradationKind =
 	 */
 	| "word-index-orphan-file-id"
 	/** Incremental word-index churn required an arena re-compaction. */
-	| "word-index-arena-recompact";
+	| "word-index-arena-recompact"
+	/**
+	 * The dispatch `FactStore` (`clients/dispatch/fact-store.ts`) evicted a
+	 * least-recently-used file fact because the record count passed its cap
+	 * (#2243 item 4). The eviction is otherwise silent, yet a fact a live
+	 * dispatch still needs can be the victim — `dispatcher.ts` reads
+	 * `file.content` back with `?? ""`, so an evicted content fact turns into
+	 * empty content and inline suppressions stop applying. Recorded once per
+	 * session, stamped with the first evicted path, so the drop is visible in
+	 * the ledger rather than inferred from a downstream symptom.
+	 */
+	| "fact-store-capacity-eviction";
 
 export interface DegradationRecord {
 	kind: unknown;

@@ -1,8 +1,14 @@
 import { describe, it, expect } from "vitest";
+import {
+	getDegradationSummary,
+	resetDegradationLedger,
+} from "../../../clients/degradation-ledger.js";
 import { FactStore } from "../../../clients/dispatch/fact-store.js";
+import { normalizeMapKey } from "../../../clients/path-utils.js";
 
-// The store caps file records at 1024 and exempts the 16 most recently
-// dispatched paths from eviction.
+// The store caps file records at 1024 and exempts in-flight dispatches from
+// eviction. A dispatch pins its file at start and releases it at completion;
+// the pin set is bounded at 16 as a backstop against a leaked pin.
 const MAX_RECORDS = 1024;
 const MAX_PINNED = 16;
 const BATCH = 2000;
@@ -94,5 +100,83 @@ describe("FactStore file-fact bound (#2240)", () => {
 			store.setFileFact(p, "file.content", "");
 
 		expect(store.hasFileFact(active, "file.content")).toBe(false);
+	});
+
+	// #2243 item 2: the pin is released at dispatch END, so the pin set tracks
+	// dispatches actually in flight — not the last 16 files touched. A file whose
+	// dispatch is still running survives even after 16 LATER dispatches complete.
+	it("a completed dispatch releases its pin, so 16 later completed dispatches keep an in-flight file", () => {
+		const store = new FactStore();
+		const active = "/repo/src/active.ts";
+		// The in-flight dispatch: begins, but has not settled.
+		store.clearFileFactsFor(active);
+		store.setFileFact(active, "file.content", "const x = 1;");
+
+		// 16 later dispatches that each BEGIN and SETTLE.
+		for (const p of batchPaths("later", MAX_PINNED)) {
+			store.clearFileFactsFor(p);
+			store.setFileFact(p, "file.content", "y");
+			store.endDispatchFor(p);
+		}
+
+		// The fire-and-forget project walk floods the store.
+		for (const p of batchPaths("walk"))
+			store.setFileFact(p, "file.content", "");
+
+		expect(store.getFileFact(active, "file.content")).toBe("const x = 1;");
+	});
+
+	// #2243: dropFileFacts clears without pinning, so a scan's own store keeps
+	// the capacity cap effective. clearFileFactsFor pins; dropFileFacts must not.
+	it("dropFileFacts does not pin — a dropped file stays evictable", () => {
+		const store = new FactStore();
+		const viaDrop = "/repo/src/via-drop.ts";
+		const viaClear = "/repo/src/via-clear.ts";
+		store.dropFileFacts(viaDrop);
+		store.setFileFact(viaDrop, "file.content", "d");
+		store.clearFileFactsFor(viaClear);
+		store.setFileFact(viaClear, "file.content", "c");
+
+		for (const p of batchPaths("walk"))
+			store.setFileFact(p, "file.content", "");
+
+		// clearFileFactsFor pinned viaClear (in flight) → survives.
+		expect(store.getFileFact(viaClear, "file.content")).toBe("c");
+		// dropFileFacts did not pin viaDrop → the walk evicts it.
+		expect(store.hasFileFact(viaDrop, "file.content")).toBe(false);
+	});
+
+	// #2243 item 4: the cap evicts silently, and the victim can be a fact a live
+	// dispatch still needs. Record ONE bounded degradation on the first capacity
+	// eviction per session, stamped with the evicted path, re-arming per session.
+	it("records one capacity-eviction degradation per session, stamped with the evicted path", () => {
+		resetDegradationLedger();
+		const store = new FactStore();
+		const paths = batchPaths("evict");
+		for (const p of paths) store.setFileFact(p, "file.content", "x");
+
+		const find = () =>
+			getDegradationSummary().find(
+				(g) => g.kind === "fact-store-capacity-eviction",
+			);
+		const group = find();
+		expect(group).toBeDefined();
+		expect(group?.count).toBe(1);
+		// The FIRST record names the FIRST evicted path (oldest inserted).
+		expect(group?.latestReasons.at(-1)?.subject).toBe(
+			normalizeMapKey(paths[0]),
+		);
+
+		// Further evictions in the same session do not add a second record.
+		for (const p of batchPaths("evict2"))
+			store.setFileFact(p, "file.content", "x");
+		expect(find()?.count).toBe(1);
+
+		// A new session (ledger re-arm) records again.
+		resetDegradationLedger();
+		const store2 = new FactStore();
+		for (const p of batchPaths("evict3"))
+			store2.setFileFact(p, "file.content", "x");
+		expect(find()?.count).toBe(1);
 	});
 });

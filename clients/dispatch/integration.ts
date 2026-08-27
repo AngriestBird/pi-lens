@@ -232,31 +232,61 @@ function scheduleAstGrepWarningScan(
 	const existing = astGrepWarnDebounceTimers.get(filePath);
 	if (existing) clearTimeout(existing);
 
-	const timer = setTimeout(async () => {
+	const timer = setTimeout(() => {
 		astGrepWarnDebounceTimers.delete(filePath);
-		try {
-			const ctx = createDispatchContext(filePath, cwd, pi, sessionFacts, false);
-			if (ctx.kind !== "jsts") return;
-
-			// Single-runner group: ast-grep only, warning mode (blockingOnly=false)
-			const group: RunnerGroup = {
-				mode: "all",
-				runnerIds: ["ast-grep"],
-				filterKinds: ["jsts"],
-			};
-			const result = await dispatchForFile(ctx, [group], sessionRunnerRegistry);
-			if (result.diagnostics.length === 0) return;
-
-			const logger = getDiagnosticLogger();
-			for (const d of result.diagnostics) {
-				logger.logCaught(d, logContext, false);
-			}
-		} catch {
+		void runAstGrepWarningScan(filePath, cwd, pi, logContext).catch(() => {
 			// Non-critical background scan — swallow errors silently
-		}
+		});
 	}, AST_GREP_WARN_DEBOUNCE_MS);
 
 	astGrepWarnDebounceTimers.set(filePath, timer);
+}
+
+/**
+ * Run the debounced ast-grep warning scan for one jsts file.
+ *
+ * #2243 item 1: this is a dispatch entry point like dispatchLint*, so it must
+ * follow the same discipline. It fires ~2 s after the last write, and in that
+ * window the review-graph project walk (`buildOrUpdateGraph`) seeds facts for
+ * every file into the SAME `sessionFacts`, which can evict this file's
+ * `file.content`. `dispatcher.ts` reads that fact back with `?? ""` for inline
+ * suppressions, so a stale or evicted read silently stops applying
+ * `pi-lens-ignore`. Two guards, matching the other dispatch callers:
+ *   1. `clearFileFactsFor` pins the file for the dispatch (released in the
+ *      finally), so a concurrent walk cannot evict it mid-dispatch.
+ *   2. `runProviders` re-derives `file.content` from disk, so the read never
+ *      depends on content a prior dispatch happened to leave behind.
+ * `facts` is injected only for tests; production always uses `sessionFacts`.
+ */
+export async function runAstGrepWarningScan(
+	filePath: string,
+	cwd: string,
+	pi: PiAgentAPI,
+	logContext: LogContext,
+	facts: FactStore = sessionFacts,
+): Promise<void> {
+	const ctx = createDispatchContext(filePath, cwd, pi, facts, false);
+	if (ctx.kind !== "jsts") return;
+
+	facts.clearFileFactsFor(ctx.filePath);
+	try {
+		// Single-runner group: ast-grep only, warning mode (blockingOnly=false)
+		const group: RunnerGroup = {
+			mode: "all",
+			runnerIds: ["ast-grep"],
+			filterKinds: ["jsts"],
+		};
+		await runProviders(ctx);
+		const result = await dispatchForFile(ctx, [group], sessionRunnerRegistry);
+		if (result.diagnostics.length === 0) return;
+
+		const logger = getDiagnosticLogger();
+		for (const d of result.diagnostics) {
+			logger.logCaught(d, logContext, false);
+		}
+	} finally {
+		facts.endDispatchFor(ctx.filePath);
+	}
 }
 
 function resetSessionSlopScore(): void {
@@ -2488,21 +2518,26 @@ export async function dispatchLint(
 		projectRoot,
 	);
 	sessionFacts.clearFileFactsFor(ctx.filePath);
+	// #2243 item 2: release the pin when the dispatch settles, so the pin set
+	// tracks in-flight dispatches rather than the last N files touched.
+	try {
+		const kind = ctx.kind;
+		if (!kind) return "";
 
-	const kind = ctx.kind;
-	if (!kind) return "";
+		const groups = withSpotbugsGroup(
+			kind,
+			getDispatchGroupsForKind(kind, pi),
+			ctx,
+		);
+		if (groups.length === 0) return "";
 
-	const groups = withSpotbugsGroup(
-		kind,
-		getDispatchGroupsForKind(kind, pi),
-		ctx,
-	);
-	if (groups.length === 0) return "";
-
-	await runProviders(ctx);
-	const result = await dispatchForFile(ctx, groups, sessionRunnerRegistry);
-	trackSessionSlopStats(ctx, result.diagnostics);
-	return result.output;
+		await runProviders(ctx);
+		const result = await dispatchForFile(ctx, groups, sessionRunnerRegistry);
+		trackSessionSlopStats(ctx, result.diagnostics);
+		return result.output;
+	} finally {
+		sessionFacts.endDispatchFor(ctx.filePath);
+	}
 }
 
 /**
@@ -2541,53 +2576,57 @@ export async function dispatchLintWithResult(
 		options?.telemetryProvider,
 	);
 	sessionFacts.clearFileFactsFor(ctx.filePath);
+	// #2243 item 2: release the pin when the dispatch settles.
+	try {
+		const kind = ctx.kind;
+		if (!kind) {
+			return {
+				diagnostics: [],
+				blockers: [],
+				warnings: [],
+				baselineWarningCount: 0,
+				fixed: [],
+				resolvedCount: 0,
+				output: "",
+				blockerOutput: "",
+				hasBlockers: false,
+			};
+		}
 
-	const kind = ctx.kind;
-	if (!kind) {
-		return {
-			diagnostics: [],
-			blockers: [],
-			warnings: [],
-			baselineWarningCount: 0,
-			fixed: [],
-			resolvedCount: 0,
-			output: "",
-			blockerOutput: "",
-			hasBlockers: false,
-		};
+		const groups = withSpotbugsGroup(
+			kind,
+			getDispatchGroupsForKind(kind, pi),
+			ctx,
+		);
+		if (groups.length === 0) {
+			return {
+				diagnostics: [],
+				blockers: [],
+				warnings: [],
+				baselineWarningCount: 0,
+				fixed: [],
+				resolvedCount: 0,
+				output: "",
+				blockerOutput: "",
+				hasBlockers: false,
+			};
+		}
+
+		await runProviders(ctx);
+		const result = await dispatchForFile(ctx, groups, sessionRunnerRegistry);
+		trackSessionSlopStats(ctx, result.diagnostics);
+
+		// Schedule debounced ast-grep warning scan for jsts files.
+		// Runs 2s after the last write — collapses rapid sequential edits into one scan.
+		// Results are logged only, never surfaced to the agent.
+		if (kind === "jsts" && logContext) {
+			scheduleAstGrepWarningScan(filePath, cwd, pi, logContext);
+		}
+
+		return result;
+	} finally {
+		sessionFacts.endDispatchFor(ctx.filePath);
 	}
-
-	const groups = withSpotbugsGroup(
-		kind,
-		getDispatchGroupsForKind(kind, pi),
-		ctx,
-	);
-	if (groups.length === 0) {
-		return {
-			diagnostics: [],
-			blockers: [],
-			warnings: [],
-			baselineWarningCount: 0,
-			fixed: [],
-			resolvedCount: 0,
-			output: "",
-			blockerOutput: "",
-			hasBlockers: false,
-		};
-	}
-
-	await runProviders(ctx);
-	const result = await dispatchForFile(ctx, groups, sessionRunnerRegistry);
-	trackSessionSlopStats(ctx, result.diagnostics);
-
-	// Schedule debounced ast-grep warning scan for jsts files.
-	// Runs 2s after the last write — collapses rapid sequential edits into one scan.
-	// Results are logged only, never surfaced to the agent.
-	if (kind === "jsts" && logContext) {
-		scheduleAstGrepWarningScan(filePath, cwd, pi, logContext);
-	}
-
-	return result;
 }
 
 /** Per-runner outcome captured while driving the real dispatch path. */
@@ -2637,32 +2676,36 @@ export async function dispatchLintDetailed(
 		options?.projectRoot,
 	);
 	sessionFacts.clearFileFactsFor(ctx.filePath);
+	// #2243 item 2: release the pin when the dispatch settles.
+	try {
+		const kind = ctx.kind;
+		if (!kind) return { result: empty, runners: [] };
 
-	const kind = ctx.kind;
-	if (!kind) return { result: empty, runners: [] };
+		const groups = withSpotbugsGroup(
+			kind,
+			getDispatchGroupsForKind(kind, pi),
+			ctx,
+		);
+		if (groups.length === 0) return { result: empty, runners: [] };
 
-	const groups = withSpotbugsGroup(
-		kind,
-		getDispatchGroupsForKind(kind, pi),
-		ctx,
-	);
-	if (groups.length === 0) return { result: empty, runners: [] };
+		const runners: RunnerOutcome[] = [];
+		const sink: RunnerResultSink = (runnerId, result) => {
+			runners.push({ runnerId, result });
+		};
 
-	const runners: RunnerOutcome[] = [];
-	const sink: RunnerResultSink = (runnerId, result) => {
-		runners.push({ runnerId, result });
-	};
+		await runProviders(ctx);
+		const result = await dispatchForFile(
+			ctx,
+			groups,
+			sessionRunnerRegistry,
+			sink,
+		);
+		trackSessionSlopStats(ctx, result.diagnostics);
 
-	await runProviders(ctx);
-	const result = await dispatchForFile(
-		ctx,
-		groups,
-		sessionRunnerRegistry,
-		sink,
-	);
-	trackSessionSlopStats(ctx, result.diagnostics);
-
-	return { result, runners };
+		return { result, runners };
+	} finally {
+		sessionFacts.endDispatchFor(ctx.filePath);
+	}
 }
 
 /**

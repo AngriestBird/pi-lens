@@ -1,3 +1,7 @@
+import {
+	getDegradationLedgerGeneration,
+	recordDegradationOnce,
+} from "../degradation-ledger.js";
 import { normalizeMapKey } from "../path-utils.js";
 
 // #2240: the dispatch store is module-scope in integration.ts, so it lives for
@@ -12,8 +16,15 @@ const MAX_FILE_FACT_RECORDS = 1024;
 // content, not as "re-derive"), and the fire-and-forget blast-radius build runs
 // a whole-project walk against the SAME store meanwhile — plain LRU recency
 // would let that walk evict the file being dispatched. Every other holder
-// re-derives an evicted fact from disk. Bounded so the pin set cannot itself
-// grow: 16 covers a turn's concurrently dispatched writes.
+// re-derives an evicted fact from disk.
+//
+// #2243 item 2: a dispatch pins its file at start (`clearFileFactsFor`) and
+// releases it at completion (`endDispatchFor`, in the dispatch's finally). The
+// pin set therefore tracks dispatches actually IN FLIGHT, not the last N files
+// touched. This cap is now a BACKSTOP against a leaked pin — a dispatch that
+// pinned but never reached its `endDispatchFor` — not the primary release, so
+// it holds only concurrent in-flight dispatches, a small set. On overflow the
+// OLDEST pin is dropped.
 const MAX_PINNED_FILE_RECORDS = 16;
 
 export interface ReadonlyFactStore {
@@ -27,7 +38,15 @@ export class FactStore implements ReadonlyFactStore {
 	// Insertion order is eviction order: the oldest-used record is evicted first.
 	private readonly fileFacts = new Map<string, Map<string, unknown>>();
 	private readonly sessionFacts = new Map<string, unknown>();
-	private readonly pinnedFiles = new Set<string>();
+	// Pin refcount per file. A file is exempt from capacity eviction while its
+	// count is > 0. Refcounted, not a Set, so two overlapping dispatches of the
+	// same file both hold the pin until BOTH settle (#2243 item 2).
+	private readonly pinnedFiles = new Map<string, number>();
+	// #2243 item 4: the ledger generation under which this session already
+	// recorded its one capacity-eviction degradation. Compared against the
+	// ledger's live generation so the record re-arms at session_start (when
+	// resetDegradationLedger bumps the generation) without a hand-rolled latch.
+	private capacityEvictionReportedGeneration = -1;
 
 	// All file-keyed methods normalize the path internally via normalizeMapKey().
 	// Callers always pass raw/resolved paths — normalization is not their concern.
@@ -63,22 +82,33 @@ export class FactStore implements ReadonlyFactStore {
 		if (facts.size === 0) this.fileFacts.delete(key);
 	}
 
-	/** Clear facts for one specific file only. Use at the start of each per-file dispatch call.
+	/** Clear facts for one specific file only, and mark the file's dispatch as
+	 *  begun. Use at the start of each per-file dispatch call.
 	 *  Preserves facts for other files computed in the same turn.
 	 *  Normalizes filePath internally — callers pass raw paths.
-	 *  This call is also what marks the file as being dispatched, so its facts
-	 *  are pinned against capacity eviction until 16 later files claim the pin. */
+	 *  Pins the file against capacity eviction until the matching
+	 *  {@link endDispatchFor} runs in the dispatch's settle path (#2243 item 2).
+	 *  Every `clearFileFactsFor` MUST be paired with an `endDispatchFor`. */
 	clearFileFactsFor(filePath: string): void {
 		const key = normalizeMapKey(filePath);
 		this.fileFacts.delete(key);
 		this.pinFile(key);
 	}
 
-	/** Clear all file facts across all paths. Reserve for explicit full resets only —
-	 *  do NOT use in the normal per-file dispatch path. */
-	clearFileFacts(): void {
-		this.fileFacts.clear();
-		this.pinnedFiles.clear();
+	/** Release the pin a {@link clearFileFactsFor} took for one file's dispatch.
+	 *  Call once per `clearFileFactsFor`, from the dispatch's finally/settle
+	 *  path, so the pin set tracks dispatches actually in flight rather than the
+	 *  last N files touched (#2243 item 2). */
+	endDispatchFor(filePath: string): void {
+		this.unpinFile(normalizeMapKey(filePath));
+	}
+
+	/** Clear one file's facts WITHOUT pinning. For sequential single-store scans
+	 *  (project-diagnostics) that own their store and race no concurrent walk:
+	 *  pinning there would exempt every scanned file from the capacity cap and
+	 *  defeat it. Normalizes filePath internally. */
+	dropFileFacts(filePath: string): void {
+		this.fileFacts.delete(normalizeMapKey(filePath));
 	}
 
 	/** LRU touch: re-inserting an existing record moves it to the end of the
@@ -92,13 +122,23 @@ export class FactStore implements ReadonlyFactStore {
 	}
 
 	private pinFile(key: string): void {
-		this.pinnedFiles.delete(key);
-		this.pinnedFiles.add(key);
+		this.pinnedFiles.set(key, (this.pinnedFiles.get(key) ?? 0) + 1);
+		// Backstop against a leaked pin (a dispatch that never reached its
+		// endDispatchFor): drop the oldest pin so the set cannot grow without
+		// bound. Symmetric endDispatchFor is the primary release, so in normal
+		// operation the set holds only concurrent in-flight dispatches.
 		while (this.pinnedFiles.size > MAX_PINNED_FILE_RECORDS) {
-			const oldest = this.pinnedFiles.values().next().value;
+			const oldest = this.pinnedFiles.keys().next().value;
 			if (oldest === undefined) break;
 			this.pinnedFiles.delete(oldest);
 		}
+	}
+
+	private unpinFile(key: string): void {
+		const count = this.pinnedFiles.get(key);
+		if (count === undefined) return;
+		if (count <= 1) this.pinnedFiles.delete(key);
+		else this.pinnedFiles.set(key, count - 1);
 	}
 
 	/** Drop least-recently-used records past the cap, skipping the files whose
@@ -109,8 +149,28 @@ export class FactStore implements ReadonlyFactStore {
 		for (const key of this.fileFacts.keys()) {
 			if (this.pinnedFiles.has(key)) continue;
 			this.fileFacts.delete(key);
+			this.reportCapacityEvictionOnce(key);
 			if (this.fileFacts.size <= MAX_FILE_FACT_RECORDS) return;
 		}
+	}
+
+	// #2243 item 4: the cap silently drops a fact a live dispatch may read back
+	// as "" (dispatcher.ts reads `file.content` with `?? ""`). Record ONE
+	// bounded degradation on the first capacity eviction per session, stamped
+	// with the evicted path, so the drop is visible in the ledger instead of
+	// being inferred from a downstream symptom. Re-arms per session through the
+	// ledger's own generation (resetDegradationLedger bumps it at
+	// session_start) — the sanctioned alternative to a hand-rolled latch that
+	// would forget to re-arm.
+	private reportCapacityEvictionOnce(evictedKey: string): void {
+		const generation = getDegradationLedgerGeneration();
+		if (this.capacityEvictionReportedGeneration === generation) return;
+		this.capacityEvictionReportedGeneration = generation;
+		recordDegradationOnce({
+			kind: "fact-store-capacity-eviction",
+			subject: evictedKey,
+			reason: `file-fact store exceeded ${MAX_FILE_FACT_RECORDS} records; evicted least-recently-used fact for ${evictedKey}`,
+		});
 	}
 
 	getSessionFact<T>(factId: string): T | undefined {
