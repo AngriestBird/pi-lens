@@ -364,8 +364,13 @@ function setWorkspaceGraph(
 	if (epoch !== undefined && workspaceCacheEpoch(key) !== epoch) return false;
 	const previous = _workspaceGraphCache.get(key);
 	if (previous) clearWorkspaceGraphTimer(previous);
+	// #2255: bound what the cache RETAINS. The caller keeps its full-graph
+	// reference for the current turn; only the retained copy is trimmed, so an
+	// over-budget repo never accumulates an unbounded graph across the process.
+	const boundedGraph = capGraphForMemory(key, entry.graph);
 	const resident: WorkspaceGraphCacheEntry = {
 		...entry,
+		graph: boundedGraph,
 		lastUsedAt: Date.now(),
 	};
 	_workspaceGraphCache.set(key, resident);
@@ -607,6 +612,66 @@ export function estimateReviewGraphStoreBytes(
 	);
 }
 
+// --- In-memory live-graph byte bound (#2255) ---
+// The persist element cap (`GRAPH_PERSIST_MAX_ELEMENTS_DEFAULT`) guards the
+// synchronous serialize+gzip spike; it trims only the on-disk snapshot. The live
+// `ReviewGraph` retained in `_workspaceGraphCache` had no bound and grew with
+// project size — the second unbounded dispatch store behind the #2240 OOM
+// (FactStore was the first, bounded in #2243). This bound caps the RETAINED live
+// graph by estimated resident bytes, evicting with the same centrality-ranked
+// induced-subgraph selection the snapshot uses (`capGraphForPersist`). The capped
+// graph carries `persistCoverage.partial`, which the build path already refuses as
+// an incremental base (`:4844`, `:5203`), so the next build re-derives the full
+// graph rather than extending a truncated one — the FactStore #2243 posture.
+export const GRAPH_MAX_IN_MEMORY_BYTES_DEFAULT = 512 * 1024 * 1024;
+
+function graphMaxInMemoryBytes(): number {
+	const raw = Number(process.env.PI_LENS_GRAPH_MAX_IN_MEMORY_BYTES);
+	return Number.isFinite(raw) && raw > 0
+		? raw
+		: GRAPH_MAX_IN_MEMORY_BYTES_DEFAULT;
+}
+
+/**
+ * Cap the RETAINED live graph at the in-memory byte budget (#2255). Returns the
+ * graph unchanged when it fits or is already a partial (capped) graph — the O(1)
+ * size read is the only cost on the common in-budget path. Over budget, it
+ * converts the byte budget to an element cap using the graph's own node/edge byte
+ * split, then reuses `capGraphForPersist` so the on-disk and in-memory bounds share
+ * one centrality selection and one honest coverage marker. One bounded degradation
+ * record per cwd names the trim's before/after so a live cap is provable from the
+ * ledger (the cwd is the discriminating identity across a multi-root host).
+ */
+function capGraphForMemory(cwd: string, graph: ReviewGraph): ReviewGraph {
+	if (graph.persistCoverage?.partial === true) return graph;
+	const nodes = graph.nodes.size;
+	const edges = graph.edges.length;
+	const bytes = estimateReviewGraphStoreBytes(nodes, edges);
+	const budget = graphMaxInMemoryBytes();
+	if (bytes <= budget) return graph;
+	// Scale both axes by the same budget/bytes ratio so the element cap preserves
+	// the graph's node/edge split; `capGraphForPersist` re-splits the cap by that
+	// same ratio, landing the capped graph at ~budget bytes.
+	const elementCap = Math.max(
+		1,
+		Math.floor(((nodes + edges) * budget) / bytes),
+	);
+	const capped = capGraphForPersist(cwd, graph, elementCap);
+	incrementDegradationCount({
+		kind: "review-graph-memory-cap",
+		subject: cwd,
+		reason: `live graph ${nodes}n/${edges}e ~${Math.round(
+			bytes / (1024 * 1024),
+		)}MiB over ${Math.round(budget / (1024 * 1024))}MiB budget; trimmed to ${
+			capped.nodes.size
+		}n/${capped.edges.length}e ~${Math.round(
+			estimateReviewGraphStoreBytes(capped.nodes.size, capped.edges.length) /
+				(1024 * 1024),
+		)}MiB`,
+	});
+	return capped;
+}
+
 /**
  * O(cache-entries) snapshot of the resident workspace graph cache — NOT
  * O(nodes)/O(edges): only `.size`/`.length` are read per entry, never the
@@ -646,6 +711,13 @@ export function _setReviewGraphWorkspaceEntryForTests(
 		fileSignatures: new Map(),
 		graph,
 	});
+}
+
+/** Test-only read of the exact retained graph for a raw cache key (#2255). */
+export function _getReviewGraphWorkspaceGraphForTests(
+	key: string,
+): ReviewGraph | undefined {
+	return _workspaceGraphCache.get(key)?.graph;
 }
 
 export function _getReviewGraphCacheStateForTests(cwd: string):
