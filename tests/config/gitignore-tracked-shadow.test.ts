@@ -1,9 +1,9 @@
-import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import * as path from "node:path";
 import { describe, expect, it } from "vitest";
 import { Minimatch } from "../../clients/deps/minimatch.js";
+import { gitExecFileSync } from "../support/git-fixture-env.js";
 
 const root = path.resolve(
 	path.dirname(fileURLToPath(import.meta.url)),
@@ -42,7 +42,7 @@ function unanchoredTestScratchPatterns(): string[] {
 }
 
 function findShadowedTrackedFiles(): string[] {
-	const tracked = execFileSync("git", ["ls-files"], {
+	const tracked = gitExecFileSync("git", ["ls-files"], {
 		cwd: root,
 		encoding: "utf8",
 	})
