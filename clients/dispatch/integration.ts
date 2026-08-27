@@ -181,17 +181,23 @@ export function applyProjectLensConfig(cwd: string): PiLensProjectConfig {
 	return loadPiLensProjectConfig(cwd);
 }
 
-const sessionFacts = new FactStore();
+// "dispatch" labels this store's eviction telemetry (#2243 review round 3,
+// F1) — five other production FactStore instances exist (mcp/analyze.ts,
+// lens-map.ts, project-diagnostics/scanner.ts, runtime-session.ts's
+// session-start call-graph task, mcp/cli.ts); a shared constant subject let
+// runtime-session's session-start review-graph walk consume the once-per-
+// session ledger slot before any dispatch ran, misattributing the record.
+const sessionFacts = new FactStore("dispatch");
 // #2243 item 4: wire the fact-store's capacity-eviction telemetry to the
 // ledger from HERE, not from fact-store.ts. fact-store stays an import leaf so
 // it cannot re-enter the safe-spawn ↔ degradation-ledger cycle (see
-// `setFactStoreEvictionReporter`). A constant subject makes the ledger's own
-// per-session dedupe emit exactly ONE record per session, re-arming when the
-// ledger resets at session_start.
-setFactStoreEvictionReporter((reason) => {
+// `setFactStoreEvictionReporter`). The reporter forwards each store's own
+// subject, so the ledger's per-kind+subject dedupe emits exactly ONE record
+// per session PER STORE, re-arming when the ledger resets at session_start.
+setFactStoreEvictionReporter((subject, reason) => {
 	recordDegradationOnce({
 		kind: "fact-store-capacity-eviction",
-		subject: "session-fact-store",
+		subject,
 		reason,
 	});
 });
@@ -266,10 +272,17 @@ function scheduleAstGrepWarningScan(
  * `file.content`. `dispatcher.ts` reads that fact back with `?? ""` for inline
  * suppressions, so a stale or evicted read silently stops applying
  * `pi-lens-ignore`. Two guards, matching the other dispatch callers:
- *   1. `clearFileFactsFor` pins the file for the dispatch (released in the
- *      finally), so a concurrent walk cannot evict it mid-dispatch.
- *   2. `runProviders` re-derives `file.content` from disk, so the read never
- *      depends on content a prior dispatch happened to leave behind.
+ *   1. `beginDispatchFor` pins the file for the dispatch (released in the
+ *      finally), so a concurrent walk cannot evict it mid-dispatch. This
+ *      does NOT clear the file's existing facts the way `clearFileFactsFor`
+ *      does for the other dispatch callers (#2243 review round 3, F5): this
+ *      scan fires ~2s after the SAME edit's inline dispatch already
+ *      re-derived every fact for this file, so a second clear+re-derive
+ *      here bought nothing but ~51ms of redundant re-parsing across all
+ *      five providers (measured; a warm-cache read is ~1ms).
+ *   2. `runProviders` still re-derives `file.content` when it's actually
+ *      missing (a genuine miss — evicted, or never computed), so the read
+ *      never depends on staleness.
  * `facts` is injected only for tests; production always uses `sessionFacts`.
  */
 export async function runAstGrepWarningScan(
@@ -282,7 +295,7 @@ export async function runAstGrepWarningScan(
 	const ctx = createDispatchContext(filePath, cwd, pi, facts, false);
 	if (ctx.kind !== "jsts") return;
 
-	facts.clearFileFactsFor(ctx.filePath);
+	facts.beginDispatchFor(ctx.filePath);
 	try {
 		// Single-runner group: ast-grep only, warning mode (blockingOnly=false)
 		const group: RunnerGroup = {

@@ -1,27 +1,25 @@
 import { afterEach, describe, it, expect } from "vitest";
 import {
 	getDegradationSummary,
-	recordDegradationOnce,
 	resetDegradationLedger,
 } from "../../../clients/degradation-ledger.js";
 import {
 	FactStore,
+	getFactStoreEvictionReporter,
 	setFactStoreEvictionReporter,
 } from "../../../clients/dispatch/fact-store.js";
 import { normalizeMapKey } from "../../../clients/path-utils.js";
-
-// fact-store emits capacity-eviction telemetry through an injected reporter
-// (it stays an import leaf; integration.ts wires the real one). Install the
-// SAME reporter production uses so these tests exercise the real ledger path.
-function installProductionEvictionReporter(): void {
-	setFactStoreEvictionReporter((reason) => {
-		recordDegradationOnce({
-			kind: "fact-store-capacity-eviction",
-			subject: "session-fact-store",
-			reason,
-		});
-	});
-}
+// Side-effect import: loading integration.ts runs its module-scope
+// `setFactStoreEvictionReporter(...)` call, wiring the REAL production
+// reporter into fact-store's module-scope slot. #2243 review round 3 (F4):
+// a prior version of this file hand-copied that wiring
+// (`recordDegradationOnce({kind, subject, reason})`) into a local test
+// helper — a shared-seam double that never actually exercised the reporter
+// body integration.ts installs, so a mutation to its `kind` or `subject`
+// there went unnoticed here. Capture the REAL reporter reference now, at
+// module load, before any test's `afterEach` below can clear the slot.
+import "../../../clients/dispatch/integration.js";
+const productionEvictionReporter = getFactStoreEvictionReporter();
 
 afterEach(() => setFactStoreEvictionReporter(undefined));
 
@@ -168,10 +166,18 @@ describe("FactStore file-fact bound (#2240)", () => {
 	// #2243 item 4: the cap evicts silently, and the victim can be a fact a live
 	// dispatch still needs. Record ONE bounded degradation on the first capacity
 	// eviction per session, stamped with the evicted path, re-arming per session.
+	//
+	// #2243 review round 3 (F1/F4): this drives the REAL, actually-installed
+	// production reporter (imported from integration.ts, not hand-copied), and
+	// a store labeled "dispatch" — the same subject integration.ts's own
+	// `sessionFacts` carries — so a mutation to either the reporter's `kind` /
+	// `subject` wiring in integration.ts, or the per-store subject label, reds
+	// this test.
 	it("records one capacity-eviction degradation per session, naming the evicted path", () => {
+		expect(productionEvictionReporter).toBeDefined();
 		resetDegradationLedger();
-		installProductionEvictionReporter();
-		const store = new FactStore();
+		setFactStoreEvictionReporter(productionEvictionReporter);
+		const store = new FactStore("dispatch");
 		const paths = batchPaths("evict");
 		for (const p of paths) store.setFileFact(p, "file.content", "x");
 
@@ -182,9 +188,9 @@ describe("FactStore file-fact bound (#2240)", () => {
 		const group = find();
 		expect(group).toBeDefined();
 		expect(group?.count).toBe(1);
-		// One record per session (constant subject); the reason names the FIRST
-		// evicted path (oldest inserted).
-		expect(group?.latestReasons.at(-1)?.subject).toBe("session-fact-store");
+		// One record per session per store; the reason names the FIRST evicted
+		// path (oldest inserted).
+		expect(group?.latestReasons.at(-1)?.subject).toBe("dispatch");
 		expect(group?.latestReasons.at(-1)?.reason).toContain(
 			normalizeMapKey(paths[0]),
 		);
@@ -196,10 +202,35 @@ describe("FactStore file-fact bound (#2240)", () => {
 
 		// A new session (ledger re-arm) records again.
 		resetDegradationLedger();
-		const store2 = new FactStore();
+		const store2 = new FactStore("dispatch");
 		for (const p of batchPaths("evict3"))
 			store2.setFileFact(p, "file.content", "x");
 		expect(find()?.count).toBe(1);
+	});
+
+	// #2243 review round 3 (F1): a DIFFERENT store — a different subject —
+	// still gets its OWN once-per-session record, even after "dispatch" (or
+	// any other subject) already fired one in this session. Before F1, the
+	// constant subject meant only the FIRST store to evict in a session ever
+	// recorded anything.
+	it("gives a differently-labeled store its own record after another store already fired", () => {
+		resetDegradationLedger();
+		setFactStoreEvictionReporter(productionEvictionReporter);
+		const graphWalkStore = new FactStore("runtime-session-call-graph");
+		for (const p of batchPaths("graph-walk"))
+			graphWalkStore.setFileFact(p, "file.content", "x");
+
+		const dispatchStore = new FactStore("dispatch");
+		for (const p of batchPaths("dispatch-evict"))
+			dispatchStore.setFileFact(p, "file.content", "x");
+
+		const groups = getDegradationSummary().filter(
+			(g) => g.kind === "fact-store-capacity-eviction",
+		);
+		expect(groups).toHaveLength(1); // one GROUP (kind), two entries within it
+		const subjects = groups[0]?.latestReasons.map((r) => r.subject) ?? [];
+		expect(subjects).toContain("runtime-session-call-graph");
+		expect(subjects).toContain("dispatch");
 	});
 
 	// fact-store must stay an import leaf: it emits eviction telemetry only
@@ -207,11 +238,16 @@ describe("FactStore file-fact bound (#2240)", () => {
 	// (that re-enters the safe-spawn ↔ degradation-ledger cycle).
 	it("emits capacity eviction through the injected reporter", () => {
 		const reasons: string[] = [];
-		setFactStoreEvictionReporter((reason) => reasons.push(reason));
-		const store = new FactStore();
+		const subjects: string[] = [];
+		setFactStoreEvictionReporter((subject, reason) => {
+			subjects.push(subject);
+			reasons.push(reason);
+		});
+		const store = new FactStore("emit-subject");
 		for (const p of batchPaths("emit"))
 			store.setFileFact(p, "file.content", "x");
 		expect(reasons.length).toBeGreaterThan(0);
 		expect(reasons[0]).toContain("exceeded");
+		expect(subjects[0]).toBe("emit-subject");
 	});
 });

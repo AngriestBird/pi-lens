@@ -154,7 +154,9 @@ async function scanFileMajorRules(
 		? await queryLoader.loadQueries(cwd)
 		: undefined;
 
-	const facts = new FactStore();
+	// Subject labels this store's capacity-eviction telemetry distinctly from
+	// the other five production FactStore instances (#2243 review round 3, F1).
+	const facts = new FactStore("project-diagnostics-scanner");
 	const pi = { getFlag: () => undefined };
 	const treeSitter: ProjectDiagnostic[] = [];
 	const factRules: ProjectDiagnostic[] = [];

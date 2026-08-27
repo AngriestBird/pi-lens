@@ -1578,7 +1578,12 @@ function scheduleStartupScans(
 		// Build (or hydrate) the canonical review graph first. The call graph is a
 		// derived projection of that graph, so its freshness is the review graph's
 		// version/signature—not a second source walk and mtime policy.
-		const sessionFacts = new FactStore();
+		// Subject labels this store's capacity-eviction telemetry distinctly
+		// from the other five production FactStore instances (#2243 review
+		// round 3, F1) — this session-start walk runs BEFORE any dispatch and
+		// can visit every file in the project, so a shared subject would let
+		// it consume the dispatch store's once-per-session ledger slot first.
+		const sessionFacts = new FactStore("runtime-session-call-graph");
 		const graph = await buildOrUpdateGraph(analysisRoot, [], sessionFacts);
 		if (!runtime.isCurrentSession(sessionGeneration)) return;
 		const identity = getReviewGraphCacheIdentity(analysisRoot, graph);

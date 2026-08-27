@@ -9,7 +9,22 @@ import { normalizeMapKey } from "../path-utils.js";
 // owns the store and already sits above that cycle, so it wires this to
 // `recordDegradationOnce`. Unset (a plain LRU with no telemetry) is a safe
 // no-op for the scanner's local store and for tests that never load dispatch.
-export type CapacityEvictionReporter = (reason: string) => void;
+// #2243 review round 3 (F1): SIX production FactStore instances share this one
+// module-scope reporter slot (dispatch/integration.ts, mcp/analyze.ts,
+// lens-map.ts, project-diagnostics/scanner.ts, runtime-session.ts's
+// session-start call-graph task, mcp/cli.ts). A constant subject collapsed
+// their eviction records into one: runtime-session's session-start
+// review-graph walk — which runs before any dispatch and floods a store with
+// every file in the project — consumed the once-per-session ledger slot, and
+// the dispatch store's OWN eviction (the one that actually risks a live
+// read-back mid-dispatch) never got its own record. The reporter now carries
+// the evicting store's `subject`, so `recordDegradationOnce`'s own
+// kind+subject dedupe key discriminates by store — each store gets its own
+// once-per-session record.
+export type CapacityEvictionReporter = (
+	subject: string,
+	reason: string,
+) => void;
 let capacityEvictionReporter: CapacityEvictionReporter | undefined;
 
 export function setFactStoreEvictionReporter(
@@ -63,6 +78,15 @@ export class FactStore implements ReadonlyFactStore {
 	// same file both hold the pin until BOTH settle (#2243 item 2).
 	private readonly pinnedFiles = new Map<string, number>();
 
+	/**
+	 * @param subject Discriminates this store's capacity-eviction telemetry
+	 *   from every other production FactStore's (#2243 review round 3, F1).
+	 *   Production callers pass a label naming the store (e.g. `"dispatch"`,
+	 *   `"runtime-session-call-graph"`); the default is only for call sites
+	 *   that never wired a reporter and tests that don't care.
+	 */
+	constructor(private readonly subject: string = "session-fact-store") {}
+
 	// All file-keyed methods normalize the path internally via normalizeMapKey().
 	// Callers always pass raw/resolved paths — normalization is not their concern.
 
@@ -110,10 +134,27 @@ export class FactStore implements ReadonlyFactStore {
 		this.pinFile(key);
 	}
 
-	/** Release the pin a {@link clearFileFactsFor} took for one file's dispatch.
-	 *  Call once per `clearFileFactsFor`, from the dispatch's finally/settle
-	 *  path, so the pin set tracks dispatches actually in flight rather than the
-	 *  last N files touched (#2243 item 2). */
+	/** Pin a file against capacity eviction for the duration of a dispatch,
+	 *  WITHOUT clearing its existing facts. Pairs with {@link endDispatchFor}
+	 *  exactly like {@link clearFileFactsFor} does.
+	 *
+	 *  #2243 review round 3 (F5): `clearFileFactsFor`'s clear+re-derive is
+	 *  right for a dispatch driven by a fresh edit, but the debounced
+	 *  ast-grep warning scan runs ~2s AFTER the inline dispatch for that same
+	 *  edit already re-derived every fact for this exact file — a second
+	 *  clear there bought nothing but ~51ms of redundant re-parsing across
+	 *  all five providers (measured; a warm-cache read is ~1ms). Use this
+	 *  where the facts are very likely already fresh: `runProviders` still
+	 *  re-derives any fact this file is missing (a genuine miss, e.g. the
+	 *  fact was evicted meanwhile), so a read never depends on staleness. */
+	beginDispatchFor(filePath: string): void {
+		this.pinFile(normalizeMapKey(filePath));
+	}
+
+	/** Release the pin a {@link clearFileFactsFor} or {@link beginDispatchFor}
+	 *  took for one file's dispatch. Call once per matching call, from the
+	 *  dispatch's finally/settle path, so the pin set tracks dispatches
+	 *  actually in flight rather than the last N files touched (#2243 item 2). */
 	endDispatchFor(filePath: string): void {
 		this.unpinFile(normalizeMapKey(filePath));
 	}
@@ -173,12 +214,14 @@ export class FactStore implements ReadonlyFactStore {
 	// as "" (dispatcher.ts reads `file.content` with `?? ""`). Emit through the
 	// injected reporter so the drop is visible in the ledger instead of being
 	// inferred from a downstream symptom. integration.ts routes this to
-	// `recordDegradationOnce` with a constant subject, so the ledger's own
-	// per-session dedupe yields exactly ONE record per session (re-arming at
-	// session_start when the ledger resets) — no latch or generation compare
-	// here, so fact-store keeps no session-scoped state to forget to re-arm.
+	// `recordDegradationOnce` keyed on THIS store's `subject` (#2243 review
+	// round 3, F1), so the ledger's own per-kind+subject dedupe yields exactly
+	// ONE record per session PER STORE (re-arming at session_start when the
+	// ledger resets) — no latch or generation compare here, so fact-store
+	// keeps no session-scoped state to forget to re-arm.
 	private reportCapacityEviction(evictedKey: string): void {
 		capacityEvictionReporter?.(
+			this.subject,
 			`file-fact store exceeded ${MAX_FILE_FACT_RECORDS} records; evicted least-recently-used fact for ${evictedKey}`,
 		);
 	}
