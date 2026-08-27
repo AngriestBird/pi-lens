@@ -3,7 +3,11 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { gitExecFileSync } from "./git-fixture-env.js";
-import { assertCleanGitConfig, localConfigPath } from "./git-config-guard.js";
+import {
+	assertCleanGitConfig,
+	localConfigPath,
+	snapshotGitConfigState,
+} from "./git-config-guard.js";
 
 const scratch: string[] = [];
 afterEach(() => {
@@ -76,6 +80,45 @@ describe("Git contamination guard", () => {
 			"[user]\n\tname = Apostolos Mantzaris\n\temail = ap.mantza@gmail.com\n",
 		);
 		expect(() => assertCleanGitConfig(config)).not.toThrow();
+	});
+
+	it("does not flag a fixture-shaped identity that was already present at suite start (#2251)", () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-git-guard-"));
+		scratch.push(dir);
+		const config = path.join(dir, "config");
+		// A maintainer whose real identity happens to equal a fixture value
+		// (e.g. `user.name=t`, `user.email=t@t.local`) must never trip the
+		// guard just because the value matches — only a CHANGE during the
+		// run is contamination.
+		fs.writeFileSync(config, "[user]\n\tname = t\n\temail = t@t.local\n");
+		const baseline = snapshotGitConfigState(config);
+		expect(() => assertCleanGitConfig(config, baseline)).not.toThrow();
+	});
+
+	it("still flags a fixture identity that appears during the run even when a different fixture value already existed (#2251)", () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-git-guard-"));
+		scratch.push(dir);
+		const config = path.join(dir, "config");
+		fs.writeFileSync(config, "[user]\n\tname = t\n");
+		const baseline = snapshotGitConfigState(config);
+		// A DIFFERENT fixture identity shows up mid-run: real contamination,
+		// not just the maintainer's pre-existing "t".
+		fs.writeFileSync(config, "[user]\n\tname = t\n\temail = test@example.com\n");
+		expect(() => assertCleanGitConfig(config, baseline)).toThrow(
+			/known fixture identity/,
+		);
+	});
+
+	it("still flags core.bare=true that appears during the run, baseline or not (#2251)", () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-git-guard-"));
+		scratch.push(dir);
+		const config = path.join(dir, "config");
+		fs.writeFileSync(config, "[core]\n\tbare = false\n");
+		const baseline = snapshotGitConfigState(config);
+		fs.writeFileSync(config, "[core]\n\tbare = true\n");
+		expect(() => assertCleanGitConfig(config, baseline)).toThrow(
+			/core\.bare=true/,
+		);
 	});
 
 	it("resolves a linked worktree's config to the COMMON dir, not the per-worktree gitdir (F4)", () => {
