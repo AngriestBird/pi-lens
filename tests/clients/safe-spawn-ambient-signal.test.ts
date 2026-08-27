@@ -111,45 +111,14 @@ describe("safeSpawnAsync ambient abort signal (#197)", () => {
 	// then timed out (or was interrupted) carries the flag under a timeout/abort
 	// failure. Those endings own their own classification; only the cap's own
 	// SIGTERM (or a tool that beat it out the door) is a truncation verdict.
-	// Both children ignore SIGTERM so the cap's kill cannot settle them first.
-	it("reports a capped run that then timed out as a timeout, not a truncation", async () => {
-		const result = await safeSpawnAsync(
-			NODE,
-			[
-				"-e",
-				"process.on('SIGTERM', () => {}); setInterval(() => process.stdout.write('x'.repeat(4096)), 1);",
-			],
-			{ timeout: 300, maxOutputBytes: 1024 },
-		);
+	//
+	// #2225: the two "capped-then-timeout"/"capped-then-aborted" cases that used
+	// to live here raced a real child's stdout against a real 300ms timer —
+	// flaky under CPU load (5/8 concurrent runs failing). They now live in
+	// safe-spawn-cap-race.test.ts, mocked so the cap trips before the
+	// timeout/abort by construction instead of by timing.
 
-		expect(result.outputTruncated).toBe(true);
-		expect(result.killedForOutputCap).toBe(true);
-		expect(result.failure).toBe("timeout");
-		expect(truncatedByOutputCap(result)).toBe(false);
-		expect(killedForOutputCap(result)).toBe(false);
-	});
-
-	it("reports a capped run that was then aborted as an abort, not a truncation", async () => {
-		const controller = new AbortController();
-		setTimeout(() => controller.abort(), 300).unref();
-
-		const result = await safeSpawnAsync(
-			NODE,
-			[
-				"-e",
-				"process.on('SIGTERM', () => {}); setInterval(() => process.stdout.write('x'.repeat(4096)), 1);",
-			],
-			{ timeout: 10_000, maxOutputBytes: 1024, signal: controller.signal },
-		);
-
-		expect(result.outputTruncated).toBe(true);
-		expect(result.killedForOutputCap).toBe(true);
-		expect(result.failure).toBe("aborted");
-		expect(truncatedByOutputCap(result)).toBe(false);
-		expect(killedForOutputCap(result)).toBe(false);
-	});
-
-	// The child ignores SIGTERM for the same reason the two tests above do: the
+	// The child ignores SIGTERM for the same reason the two moved tests above did: the
 	// cap's kill must not settle it before it emits its last line. On POSIX a
 	// child's writes to a pipe are asynchronous (they are synchronous only on
 	// Windows), so the 100 KB of filler is still queued in the child when the
