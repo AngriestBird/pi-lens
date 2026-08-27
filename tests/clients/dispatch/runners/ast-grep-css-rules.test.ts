@@ -5,6 +5,10 @@
  * run on CSS roots and that they do not run on HTML roots.
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import {
+	dispatchForFile,
+	RunnerRegistry,
+} from "../../../../clients/dispatch/dispatcher.js";
 import astGrepNapiRunner from "../../../../clients/dispatch/runners/ast-grep-napi.js";
 import {
 	firedRuleIds,
@@ -24,6 +28,26 @@ beforeAll(() => {
 afterAll(() => env.cleanup());
 
 describe("ast-grep CSS rules (integration via napi fallback)", () => {
+	it("dispatches CSS files to napi and reports a real rule finding", async () => {
+		const { ctx } = env.addFile(
+			"dispatch.css",
+			[".modal {", "  z-index: 9999 !important;", "}", ""].join("\n"),
+		);
+		const registry = new RunnerRegistry();
+		registry.register(astGrepNapiRunner);
+		expect(ctx.kind).toBe("css");
+		const selected = registry.getForKind("css", ctx.filePath);
+		const result = await dispatchForFile(
+			ctx,
+			[{ mode: "all", runnerIds: selected.map((runner) => runner.id) }],
+			registry,
+		);
+
+		expect(result.diagnostics.map((diagnostic) => diagnostic.rule)).toContain(
+			"no-important",
+		);
+	});
+
 	it("fires no-important on a real !important declaration", async () => {
 		const { ctx } = env.addFile(
 			"sample.css",
