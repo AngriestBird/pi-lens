@@ -6,6 +6,8 @@ type GitExecOptions = {
 	encoding?: BufferEncoding;
 	stdio?: "ignore" | "pipe" | "inherit";
 	env?: NodeJS.ProcessEnv;
+	/** Piped to the child's stdin, e.g. feeding `git check-ignore --stdin`. */
+	input?: string | Buffer;
 };
 type GitSpawnOptions = Parameters<
 	typeof import("../../clients/safe-spawn.js").safeSpawnAsync
