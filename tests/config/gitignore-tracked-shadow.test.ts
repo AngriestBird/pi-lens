@@ -5,7 +5,11 @@ import * as path from "node:path";
 import { describe, expect, it } from "vitest";
 import { Minimatch } from "../../clients/deps/minimatch.js";
 
-const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
+const root = path.resolve(
+	path.dirname(fileURLToPath(import.meta.url)),
+	"..",
+	"..",
+);
 
 /**
  * A git-tracked file that also matches a `.gitignore` pattern is invisible
