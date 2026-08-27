@@ -116,11 +116,20 @@ describe("safeSpawnAsync ambient abort signal (#197)", () => {
 	// to live here raced a real child's stdout against a real 300ms timer —
 	// flaky under CPU load (5/8 concurrent runs failing). They now live in
 	// safe-spawn-cap-race.test.ts, mocked so the cap trips before the
-	// timeout/abort by construction instead of by timing.
+	// timeout/abort by construction instead of by timing. That move drops
+	// real-process coverage for THOSE two interleavings specifically (cap
+	// racing a timeout, cap racing an abort) — the mock never spawns an OS
+	// process at all. The rest of this file's real-child coverage is
+	// unaffected: "kills a noisy child..." above (line 82) and "retains late
+	// output..." below (line 129) still spawn real children and assert
+	// against their real completion, with no competing timer to race — that's
+	// the #2100/#2197-class flush/late-output behavior this file still pins
+	// end to end against a real process.
 
-	// The child ignores SIGTERM for the same reason the two moved tests above did: the
-	// cap's kill must not settle it before it emits its last line. On POSIX a
-	// child's writes to a pipe are asynchronous (they are synchronous only on
+	// The child ignores SIGTERM for the same reason the noisy-child test above
+	// does (line 82): the cap's kill must not settle it before it emits its
+	// last line. On POSIX a child's writes to a pipe are asynchronous (they
+	// are synchronous only on
 	// Windows), so the 100 KB of filler is still queued in the child when the
 	// cap trips on the parent's first read. A child that takes the default
 	// SIGTERM disposition dies with that queue unflushed, and `late-rescue`

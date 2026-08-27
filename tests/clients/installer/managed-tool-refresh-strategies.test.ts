@@ -43,16 +43,24 @@
  * both version probes" (timed out at 5000ms, then corrupted the very next
  * gem-budget test's result the same way #2216 first diagnosed).
  *
+ * The 8932ms/15086ms figures above are LOAD-INDUCED, not this file's normal
+ * cost: on a quiet host the same two tests measure 552ms and 348ms (this
+ * file's full 43-test run completes in 3.3-4.0s of test time). They're the
+ * genuine work observed under sustained 14-16 concurrent CPU-load workers,
+ * which is the scenario this fix has to survive.
+ *
  * Rather than keep annotating individual tests as each one gets caught by a
  * heavier load sample, `vi.setConfig` below raises the DEFAULT test timeout
  * for the WHOLE file once — the single mechanism the next flake report
  * should point at (#2182 acceptance criterion 2), sized with real margin
- * over the slowest genuine-work measurement observed (15086ms). This isn't a
- * phased vitest project: the existing "timing-sensitive" lane is reserved
- * for `measureMaxSyncBlockMs` sampler tests (see
- * tests/config/timing-sensitive-coverage.test.ts), and this file uses
- * neither the sampler nor a real process spawn, so it fits neither that lane
- * nor "lsp-spawn-heavy".
+ * over the slowest genuine-work measurement observed (15086ms). No test in
+ * this file carries its own `it(..., N)` override alongside it — a test
+ * that needs more than the file default gets a bigger default, not a second
+ * mechanism. This isn't a phased vitest project: the existing
+ * "timing-sensitive" lane is reserved for `measureMaxSyncBlockMs` sampler
+ * tests (see tests/config/timing-sensitive-coverage.test.ts), and this file
+ * uses neither the sampler nor a real process spawn, so it fits neither that
+ * lane nor "lsp-spawn-heavy".
  *
  * One residual symptom did NOT fit this budget-correction shape: "gem
  * strategy > re-runs the install command" lost a recorded spawn under the
@@ -79,10 +87,14 @@ import {
 import { withEnv } from "../../support/with-env.js";
 
 // #2182: raises this FILE's default test timeout from vitest's 5000ms to
-// 20_000ms — see the file header for the measurements this margin is sized
-// against. `resetConfig` in `afterAll` scopes the change back to this file
-// alone so it can't leak into a later file reusing the same worker.
-vi.setConfig({ testTimeout: 20_000 });
+// 25_000ms — see the file header for the measurements this margin is sized
+// against (25000/15086 = 1.66x over the slowest genuine-work run observed).
+// This is the ONLY timeout override in the file — no per-test `it(..., N)`
+// coexists with it; a test that needs a bigger number than this raises the
+// default, it doesn't add a second mechanism next to it (#2182 AC2).
+// `resetConfig` in `afterAll` scopes the change back to this file alone so
+// it can't leak into a later file reusing the same worker.
+vi.setConfig({ testTimeout: 25_000 });
 afterAll(() => {
 	vi.resetConfig();
 });
@@ -853,7 +865,7 @@ describe("pip strategy", () => {
 			failed: true,
 			version: "0.5.0",
 		});
-	}, 25_000);
+	});
 
 	it("degrades once and keeps the recorded version when pip fails", async () => {
 		installProbeCached("ruff");
