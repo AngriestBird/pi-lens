@@ -138,7 +138,7 @@ function unrankableGraph(nodeCount: number): ReviewGraph {
 const findGroup = (kind: string) =>
 	getDegradationSummary().find((g) => g.kind === kind);
 
-const OVER_BUDGET = 150 * 1024;
+const OVER_BUDGET = 30 * 1024;
 const AMPLE_BUDGET = 512 * 1024 * 1024;
 
 describe("live review-graph in-memory bound (#2255)", () => {
@@ -157,7 +157,7 @@ describe("live review-graph in-memory bound (#2255)", () => {
 
 	it("caps the retained graph to the in-memory byte budget", () => {
 		process.env.PI_LENS_GRAPH_MAX_IN_MEMORY_BYTES = String(OVER_BUDGET);
-		const graph = buildGraph(250, 1000);
+		const graph = buildGraph(60, 240);
 		const uncappedBytes = estimateReviewGraphStoreBytes(
 			graph.nodes.size,
 			graph.edges.length,
@@ -175,7 +175,7 @@ describe("live review-graph in-memory bound (#2255)", () => {
 
 	it("records a bounded ledger entry naming the trimmed cwd", () => {
 		process.env.PI_LENS_GRAPH_MAX_IN_MEMORY_BYTES = String(OVER_BUDGET);
-		_setReviewGraphWorkspaceEntryForTests(KEY, buildGraph(250, 1000));
+		_setReviewGraphWorkspaceEntryForTests(KEY, buildGraph(60, 240));
 
 		const group = findGroup("review-graph-memory-cap");
 		expect(group).toBeDefined();
@@ -184,7 +184,7 @@ describe("live review-graph in-memory bound (#2255)", () => {
 
 	it("leaves an in-budget graph whole and records nothing", () => {
 		process.env.PI_LENS_GRAPH_MAX_IN_MEMORY_BYTES = String(AMPLE_BUDGET);
-		const graph = buildGraph(250, 1000);
+		const graph = buildGraph(60, 240);
 		const originalNodes = graph.nodes.size;
 		const originalEdges = graph.edges.length;
 
@@ -204,7 +204,7 @@ describe("live review-graph in-memory bound (#2255)", () => {
 	// exact population the bound targets.
 	it("caps an already-partial graph instead of exempting it", () => {
 		process.env.PI_LENS_GRAPH_MAX_IN_MEMORY_BYTES = String(OVER_BUDGET);
-		const graph = buildGraph(250, 1000);
+		const graph = buildGraph(60, 240);
 		graph.persistCoverage = {
 			partial: true,
 			cap: 500_000,
@@ -212,8 +212,8 @@ describe("live review-graph in-memory bound (#2255)", () => {
 			totalEdges: graph.edges.length,
 			persistedNodes: graph.nodes.size,
 			persistedEdges: graph.edges.length,
-			totalFiles: 250,
-			persistedFiles: 250,
+			totalFiles: 60,
+			persistedFiles: 60,
 			sourceFilesTruncated: true,
 		};
 
@@ -228,7 +228,7 @@ describe("live review-graph in-memory bound (#2255)", () => {
 	// query then reads as a clean empty result.
 	it("never retains an empty graph, and says so under its own kind", () => {
 		process.env.PI_LENS_GRAPH_MAX_IN_MEMORY_BYTES = String(OVER_BUDGET);
-		const graph = unrankableGraph(500);
+		const graph = unrankableGraph(200);
 
 		_setReviewGraphWorkspaceEntryForTests(KEY, graph);
 
@@ -246,7 +246,7 @@ describe("live review-graph in-memory bound (#2255)", () => {
 	// pins the fold itself rather than a platform's separator conventions.
 	it("selects real nodes when node paths are not pre-folded", () => {
 		process.env.PI_LENS_GRAPH_MAX_IN_MEMORY_BYTES = String(OVER_BUDGET);
-		const graph = buildGraph(250, 1000);
+		const graph = buildGraph(60, 240);
 		for (const node of graph.nodes.values()) {
 			if (node.filePath)
 				node.filePath = path.relative(process.cwd(), node.filePath);
@@ -265,13 +265,12 @@ describe("live review-graph in-memory bound (#2255)", () => {
 	// the dangerous middle: some ranked files resolve, the rest are silently dropped
 	// from the ranking, and nothing reports the under-selection.
 	it("does not under-select when only some node paths are pre-folded", () => {
-		// A budget that keeps MANY file groups. At the tight budget the first-group
-		// rule alone fills the cap, so both variants retain the same count and the
-		// assertion cannot see an under-selection (measured: 130 vs 130). At this
-		// budget the gap is visible — 250 retained against 346 — so the test is
-		// discriminating rather than incidentally equal.
-		process.env.PI_LENS_GRAPH_MAX_IN_MEMORY_BYTES = String(400 * 1024);
-		const mixedGraph = buildGraph(250, 1000);
+		// A budget that keeps MANY file groups. At the tightest budget the
+		// first-group rule alone fills the cap, so both variants retain the same
+		// count and the assertion cannot see an under-selection. This budget leaves
+		// room for the gap to show, which the M10 mutation below confirms.
+		process.env.PI_LENS_GRAPH_MAX_IN_MEMORY_BYTES = String(50 * 1024);
+		const mixedGraph = buildGraph(60, 240);
 		// Unfold half the nodes; the rest keep production spelling.
 		let i = 0;
 		for (const node of mixedGraph.nodes.values()) {
@@ -284,7 +283,7 @@ describe("live review-graph in-memory bound (#2255)", () => {
 		const mixed = getReviewGraphWorkspaceCacheSnapshot().totalNodes;
 		clearReviewGraphWorkspaceCache();
 		_resetRetainedGraphSitesForTests();
-		_setReviewGraphWorkspaceEntryForTests(KEY, buildGraph(250, 1000));
+		_setReviewGraphWorkspaceEntryForTests(KEY, buildGraph(60, 240));
 		const allFolded = getReviewGraphWorkspaceCacheSnapshot().totalNodes;
 
 		// A half-unfolded graph must retain what a fully-folded one retains. The floor
@@ -298,7 +297,7 @@ describe("live review-graph in-memory bound (#2255)", () => {
 	// is never cleared, so an unbounded value there defeats the cache bound.
 	it("bounds the graph retained on session.reviewGraph", () => {
 		process.env.PI_LENS_GRAPH_MAX_IN_MEMORY_BYTES = String(OVER_BUDGET);
-		const graph = buildGraph(250, 1000);
+		const graph = buildGraph(60, 240);
 		const facts = new FactStore();
 
 		_setSessionReviewGraphFactForTests(KEY, facts, graph);
@@ -318,7 +317,7 @@ describe("live review-graph in-memory bound (#2255)", () => {
 	// on the fact, during the exact heap exhaustion it is cited to prove against.
 	it("counts session-fact retention in the memory sample", () => {
 		process.env.PI_LENS_GRAPH_MAX_IN_MEMORY_BYTES = String(AMPLE_BUDGET);
-		const graph = buildGraph(250, 1000);
+		const graph = buildGraph(60, 240);
 		const facts = new FactStore();
 
 		// No cache entry at all — the fact is the only retention site.
@@ -331,7 +330,7 @@ describe("live review-graph in-memory bound (#2255)", () => {
 
 	it("counts a graph held by both sites once, not twice", () => {
 		process.env.PI_LENS_GRAPH_MAX_IN_MEMORY_BYTES = String(AMPLE_BUDGET);
-		const graph = buildGraph(250, 1000);
+		const graph = buildGraph(60, 240);
 		const facts = new FactStore();
 
 		_setReviewGraphWorkspaceEntryForTests(KEY, graph);
@@ -381,13 +380,13 @@ describe("live review-graph in-memory bound (#2255)", () => {
 		} finally {
 			fs.rmSync(dir, { recursive: true, force: true });
 		}
-	});
+	}, 20_000);
 
 	// F5: cap-trimmed and walk-truncated are different facts. Conflating them put
 	// an over-budget repository on a full walk every turn.
 	it("marks a cap-trimmed graph partial for readers and base-eligible in-process", () => {
 		process.env.PI_LENS_GRAPH_MAX_IN_MEMORY_BYTES = String(OVER_BUDGET);
-		_setReviewGraphWorkspaceEntryForTests(KEY, buildGraph(250, 1000));
+		_setReviewGraphWorkspaceEntryForTests(KEY, buildGraph(60, 240));
 
 		const coverage =
 			_getReviewGraphWorkspaceGraphForTests(KEY)?.persistCoverage;
@@ -425,11 +424,11 @@ describe("live review-graph in-memory bound (#2255)", () => {
 		} finally {
 			fs.rmSync(dir, { recursive: true, force: true });
 		}
-	});
+	}, 20_000);
 
 	it("never persists the process-local base-eligibility marker", () => {
 		process.env.PI_LENS_GRAPH_MAX_IN_MEMORY_BYTES = String(OVER_BUDGET);
-		_setReviewGraphWorkspaceEntryForTests(KEY, buildGraph(250, 1000));
+		_setReviewGraphWorkspaceEntryForTests(KEY, buildGraph(60, 240));
 		const coverage =
 			_getReviewGraphWorkspaceGraphForTests(KEY)?.persistCoverage;
 

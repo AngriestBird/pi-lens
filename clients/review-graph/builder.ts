@@ -760,7 +760,7 @@ function headSliceGraph(graph: ReviewGraph, cap: number): ReviewGraph {
  * `sessionFacts` entry COUNT is not fully bounded — `session.baseline.${path}`
  * (`dispatch/dispatcher.ts`) and `session.baseline.cascade.${path}`
  * (`dispatch/integration.ts`) mint one key per file touched and clear only on
- * `clearAll`. That is a separate #2240 sibling, tracked on its own issue; it is
+ * `clearAll`. That is #2282, a separate #2240 sibling; it is
  * per-file `Diagnostic[]`, not a whole project graph. What this seam fixes is the
  * one fact whose single VALUE is unbounded in project size.
  */
