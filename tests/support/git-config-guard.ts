@@ -63,6 +63,13 @@ export const KNOWN_FIXTURE_EMAILS: ReadonlySet<string> = new Set([
  * name/email string alone, is what makes a coincidental real identity safe
  * (#2251): a maintainer named "t" starts and ends the suite with "t" in
  * baseline and current alike, so nothing is "new".
+ *
+ * Consequence: baseline subtraction also makes contamination left over from
+ * a PRIOR run that crashed before its own teardown ran permanently invisible
+ * in this worktree — every later suite's baseline includes it, so it is
+ * never "new" again. `git-config-guard-setup.ts` emits a one-time warning
+ * naming any fixture-shaped value present at baseline for exactly this
+ * reason (#2251's acceptance criteria call this "pass or one-time warn").
  */
 export interface GitConfigSnapshot {
 	readonly fixtureNames: ReadonlySet<string>;
@@ -125,7 +132,9 @@ export function assertCleanGitConfig(
 		const reason = newBare
 			? "core.bare=true"
 			: `known fixture identity (${[...newNames, ...newEmails].join(", ")})`;
-		throw new Error(`Git contamination guard failed for ${configPath}: ${reason}`);
+		throw new Error(
+			`Git contamination guard failed for ${configPath}: ${reason}`,
+		);
 	}
 }
 

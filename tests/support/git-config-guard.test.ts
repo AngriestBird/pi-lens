@@ -1,13 +1,14 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { gitExecFileSync } from "./git-fixture-env.js";
 import {
 	assertCleanGitConfig,
 	localConfigPath,
 	snapshotGitConfigState,
 } from "./git-config-guard.js";
+import { runGitConfigGuardSetup } from "./git-config-guard-setup.js";
 
 const scratch: string[] = [];
 afterEach(() => {
@@ -103,7 +104,10 @@ describe("Git contamination guard", () => {
 		const baseline = snapshotGitConfigState(config);
 		// A DIFFERENT fixture identity shows up mid-run: real contamination,
 		// not just the maintainer's pre-existing "t".
-		fs.writeFileSync(config, "[user]\n\tname = t\n\temail = test@example.com\n");
+		fs.writeFileSync(
+			config,
+			"[user]\n\tname = t\n\temail = test@example.com\n",
+		);
 		expect(() => assertCleanGitConfig(config, baseline)).toThrow(
 			/known fixture identity/,
 		);
@@ -165,5 +169,86 @@ describe("Git contamination guard", () => {
 		const resolved = localConfigPath(worktree);
 		expect(resolved).toBe(path.join(main, ".git", "config"));
 		expect(() => assertCleanGitConfig(resolved)).toThrow(/core\.bare=true/);
+	});
+});
+
+describe("runGitConfigGuardSetup one-time warn (#2251 fix round F2)", () => {
+	it("warns once, naming the value, when a fixture-shaped identity is already present at suite start", () => {
+		const dir = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-git-guard-warn-"),
+		);
+		scratch.push(dir);
+		fs.mkdirSync(path.join(dir, ".git"));
+		fs.writeFileSync(
+			path.join(dir, ".git", "config"),
+			"[user]\n\tname = t\n\temail = t@t.local\n",
+		);
+
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+		try {
+			runGitConfigGuardSetup(dir);
+			expect(warn).toHaveBeenCalledTimes(1);
+			const message = warn.mock.calls[0]?.[0] as string;
+			expect(message).toContain("t");
+			expect(message).toContain("t@t.local");
+		} finally {
+			warn.mockRestore();
+		}
+	});
+
+	it("does not warn when the config starts clean", () => {
+		const dir = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-git-guard-warn-"),
+		);
+		scratch.push(dir);
+		fs.mkdirSync(path.join(dir, ".git"));
+		fs.writeFileSync(
+			path.join(dir, ".git", "config"),
+			"[user]\n\tname = Real Maintainer\n",
+		);
+
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+		try {
+			runGitConfigGuardSetup(dir);
+			expect(warn).not.toHaveBeenCalled();
+		} finally {
+			warn.mockRestore();
+		}
+	});
+
+	it("still returns a teardown that flags NEW contamination even after warning on baseline", () => {
+		const dir = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-git-guard-warn-"),
+		);
+		scratch.push(dir);
+		fs.mkdirSync(path.join(dir, ".git"));
+		const configPath = path.join(dir, ".git", "config");
+		fs.writeFileSync(configPath, "[user]\n\tname = t\n");
+
+		// The returned teardown closure resolves its config path via
+		// teardown()'s own process.cwd() (unchanged production behavior — only
+		// setup's baseline snapshot is cwd-injectable), so chdir into the
+		// fixture for the duration of this test to exercise it faithfully.
+		const originalCwd = process.cwd();
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+		let teardown: () => void;
+		try {
+			process.chdir(dir);
+			teardown = runGitConfigGuardSetup(dir);
+		} finally {
+			warn.mockRestore();
+		}
+
+		try {
+			// A DIFFERENT fixture value appears mid-run: real contamination, not
+			// just the pre-existing baseline "t".
+			fs.writeFileSync(
+				configPath,
+				"[user]\n\tname = t\n\temail = test@example.com\n",
+			);
+			expect(() => teardown()).toThrow(/known fixture identity/);
+		} finally {
+			process.chdir(originalCwd);
+		}
 	});
 });
