@@ -108,12 +108,12 @@ describe("pilens:diagnostics bus surface (#2079)", () => {
 		const eventFiles = files.filter((file) => read(file).includes(EVENT));
 		expect(eventFiles).toContain("clients/diagnostics-publish.ts");
 
-		const actual = busPublisherFiles(files, sources).sort(
-			(a, b) => (a < b ? -1 : a > b ? 1 : 0),
+		const actual = busPublisherFiles(files, sources).sort((a, b) =>
+			a < b ? -1 : a > b ? 1 : 0,
 		);
 		expect(actual, "new publisher: update PUBLISHERS and AGENTS.md").toEqual(
-			PUBLISHERS.map((entry) => entry.file).sort(
-				(a, b) => (a < b ? -1 : a > b ? 1 : 0),
+			PUBLISHERS.map((entry) => entry.file).sort((a, b) =>
+				a < b ? -1 : a > b ? 1 : 0,
 			),
 		);
 	});
@@ -121,12 +121,12 @@ describe("pilens:diagnostics bus surface (#2079)", () => {
 	it("keeps the event subscriber list in conformance", () => {
 		const files = sourceFiles();
 		const sources = new Map(files.map((file) => [file, read(file)]));
-		const actual = busSubscriberFiles(files, sources).sort(
-			(a, b) => (a < b ? -1 : a > b ? 1 : 0),
+		const actual = busSubscriberFiles(files, sources).sort((a, b) =>
+			a < b ? -1 : a > b ? 1 : 0,
 		);
 		expect(actual, "new subscriber: update SUBSCRIBERS and AGENTS.md").toEqual(
-			SUBSCRIBERS.map((entry) => entry.file).sort(
-				(a, b) => (a < b ? -1 : a > b ? 1 : 0),
+			SUBSCRIBERS.map((entry) => entry.file).sort((a, b) =>
+				a < b ? -1 : a > b ? 1 : 0,
 			),
 		);
 	});
