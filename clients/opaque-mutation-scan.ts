@@ -306,7 +306,11 @@ export interface GitRecoveryOutcome {
 	 * #2060: clean index-only paths the failed-integration filter dropped.
 	 * Over-exclusion is silent by construction - the dropped files simply never
 	 * appear - so this count is the only production evidence the filter ran.
-	 * Present only when it is nonzero.
+	 * Counts only entries that also pass the mtime-freshness window, i.e. would
+	 * otherwise have been dispatched (#2081) - a long-staged clean-index entry
+	 * outside the window was never going to be reported, so excluding it is
+	 * not suppression and must not inflate this count. Present only when
+	 * nonzero.
 	 */
 	excludedIncomingCount?: number;
 	/**
@@ -508,6 +512,23 @@ export async function recoverOpaqueChangesViaGit(
 	}
 
 	const hasUnmerged = entries.some((entry) => isUnmergedStatus(entry.status));
+	const floorMs = startedAt - OPAQUE_MTIME_TOLERANCE_MS;
+	// Kernel "stale" = modified AFTER the window floor - exactly the writes
+	// this command may have authored, so exactly the entries that would be
+	// dispatched absent any other filtering.
+	async function isInWindow(absPath: string): Promise<boolean> {
+		try {
+			const stat = await fs.promises.stat(absPath);
+			return (
+				stat.isFile() &&
+				freshnessFromMtime({ mtimeMs: stat.mtimeMs, referenceMs: floorMs })
+					.verdict === "stale"
+			);
+		} catch {
+			// Deleted or vanished: deletions are deliberately unreported.
+			return false;
+		}
+	}
 	let excludedIncomingCount = 0;
 	let candidates = entries;
 	if (options.excludeIndexOnlyWhenUnmerged === true && hasUnmerged) {
@@ -523,30 +544,24 @@ export async function recoverOpaqueChangesViaGit(
 		// excluded count below is the visibility for that edge.
 		// A blank Y already excludes every unmerged pair (all seven are two
 		// letters), so this needs no separate unmerged term.
-		candidates = entries.filter((entry) => {
+		const kept: GitStatusEntry[] = [];
+		for (const entry of entries) {
 			const cleanIndexOnly =
 				entry.status[1] === " " && isKnownPorcelainStatus(entry.status);
-			if (cleanIndexOnly) excludedIncomingCount += 1;
-			return !cleanIndexOnly;
-		});
+			if (!cleanIndexOnly) {
+				kept.push(entry);
+				continue;
+			}
+			// #2081: only count entries the mtime window would otherwise have
+			// dispatched. A long-staged clean-index path outside the window was
+			// never going to be reported, so dropping it here is not suppression.
+			if (await isInWindow(entry.absPath)) excludedIncomingCount += 1;
+		}
+		candidates = kept;
 	}
-	const floorMs = startedAt - OPAQUE_MTIME_TOLERANCE_MS;
 	const paths: string[] = [];
 	for (const { absPath } of candidates) {
-		try {
-			const stat = await fs.promises.stat(absPath);
-			if (
-				stat.isFile() &&
-				freshnessFromMtime({ mtimeMs: stat.mtimeMs, referenceMs: floorMs })
-					.verdict === "stale"
-			) {
-				// Kernel "stale" = modified AFTER the window floor - exactly the
-				// writes this command may have authored.
-				paths.push(normalizeMapKey(absPath));
-			}
-		} catch {
-			// Deleted or vanished: deletions are deliberately unreported.
-		}
+		if (await isInWindow(absPath)) paths.push(normalizeMapKey(absPath));
 	}
 	return {
 		verdict: "recovered",
