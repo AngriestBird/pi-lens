@@ -243,10 +243,7 @@ export function getCachedRules(
 	const cache = severityFilter === "error" ? blockingRulesCache : rulesCache;
 	const cached = cache.get(ruleDir);
 	const now = Date.now();
-	if (
-		cached &&
-		now - cached.checkedAtMs < RULES_CACHE_FRESHNESS_CADENCE_MS
-	) {
+	if (cached && now - cached.checkedAtMs < RULES_CACHE_FRESHNESS_CADENCE_MS) {
 		// Inside the cadence window: no stat sweep at all. `getCachedRules` is
 		// the bundled-catalog path only (project rules route through
 		// `loadYamlRulesFresh` — see `ast-grep-napi.ts`'s route split), and
