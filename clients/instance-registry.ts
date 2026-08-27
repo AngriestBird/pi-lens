@@ -857,7 +857,20 @@ export function selectLivePeerInstances(
 
 export interface InstanceFootprint {
 	pid: number;
+	/** The host's pinned primary root. Kept for wire compatibility — every
+	 *  pre-#2130 consumer of `pilens_health`'s `resourceFootprint` reads it. */
 	projectRoot: string;
+	/**
+	 * Every root this host serves (#2130), through {@link getInstanceRoots} —
+	 * the same single reader the shared-checkout guard uses.
+	 *
+	 * Without it a multi-root host reported as if it worked in one directory:
+	 * the scalar above is only the FIRST root, so `pilens_health` showed a
+	 * subagent's temp worktree nowhere at all while `instances.json` listed it.
+	 * Always present and always non-empty for a well-formed entry, so a
+	 * consumer never has to branch on the pre-#2130 shape.
+	 */
+	projectRoots: string[];
 	rssBytes: number;
 	cpuPercent: number;
 	lspChildCount: number;
@@ -928,9 +941,11 @@ export function computeResourceFootprint(
 			(sum, child) => sum + (child.cpuPercent ?? 0),
 			0,
 		);
+		const roots = getInstanceRoots(instance);
 		return {
 			pid: instance.pid,
-			projectRoot: instance.projectRoot,
+			projectRoot: roots[0] ?? instance.projectRoot,
+			projectRoots: roots,
 			rssBytes: instance.rssBytes ?? 0,
 			cpuPercent: instance.cpuPercent ?? 0,
 			lspChildCount: instance.lspChildren.length,
