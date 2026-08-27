@@ -2,7 +2,9 @@
  * ast-grep NAPI runner for dispatch system
  *
  * Uses @ast-grep/napi for programmatic parsing instead of CLI.
- * Handles TypeScript/JavaScript/CSS/HTML files with YAML rule support.
+ * The languages it can serve are exactly the grammars that addon bundles —
+ * see `NAPI_LANGUAGE_BINDINGS` for the matrix and for what the other twelve
+ * catalog languages deliver through instead.
  *
  * Replaces CLI-based runners for faster performance (100x speedup).
  */
@@ -235,8 +237,135 @@ export function resetAstGrepNapiLoadState(): void {
 	sgHoldReason = undefined;
 }
 
-// Supported extensions for NAPI
-const SUPPORTED_EXTS = [".ts", ".tsx", ".js", ".jsx", ".css", ".html", ".htm"];
+/**
+ * The in-process language matrix — ONE table describing every extension this
+ * fallback admits, the `@ast-grep/napi` export that parses it, and the rule
+ * `language:` token it scopes rules to. `canHandle`, `ruleLanguageForFile`,
+ * `SUPPORTED_RULE_LANGUAGES`, and `getLang` all derive from it, so the four
+ * hand-maintained lists that used to drift cannot disagree (#2215; the #883
+ * derive-don't-hand-maintain pattern).
+ *
+ * `napiExport` is a CLAIM about the addon, not a fact. `getLang` resolves it
+ * against the module that actually loaded, so the EFFECTIVE in-process set is
+ * always this matrix intersected with the addon's real capabilities. The
+ * addon's `Lang` export cannot be probed instead: at runtime it is an empty
+ * object — the enum in `@ast-grep/napi/types/lang.d.ts` is type-only — so the
+ * module's own language accessors ARE the capability surface. Probed against
+ * 0.45.1 on 2026-08-26: `css html js jsx ts tsx` and nothing else, and
+ * `registerDynamicLanguage` is called nowhere in this tree, so no grammar is
+ * added at runtime.
+ *
+ * The routed extensions deliberately left OUT — `.vue`/`.svelte` (no grammar)
+ * and `.less`/`.sass`/`.scss` (the css grammar is not validated against them)
+ * — carry their reasons in `ast-grep-napi-language-coverage.test.ts`, which
+ * reds when a newly registered `KIND_EXTENSIONS` entry is in neither list.
+ */
+interface NapiLanguageBinding {
+	/** Lowercased rule `language:` token this grammar serves. */
+	ruleLanguage: "typescript" | "tsx" | "javascript" | "css" | "html";
+	/** Accessor on the loaded addon that parses it. */
+	napiExport: "ts" | "tsx" | "js" | "css" | "html";
+	/** `KIND_EXTENSIONS` members (clients/file-kinds.ts) this grammar parses. */
+	extensions: readonly string[];
+}
+
+const NAPI_LANGUAGE_BINDINGS: readonly NapiLanguageBinding[] = [
+	// `.mts`/`.cts` and `.mjs`/`.cjs` are the same two grammars under a
+	// module-system-flavored extension; leaving them off the old hand list meant
+	// the whole catalog went dark on every ES/CommonJS module file (#2215).
+	{
+		ruleLanguage: "typescript",
+		napiExport: "ts",
+		extensions: [".ts", ".mts", ".cts"],
+	},
+	{ ruleLanguage: "tsx", napiExport: "tsx", extensions: [".tsx"] },
+	{
+		ruleLanguage: "javascript",
+		napiExport: "js",
+		// `.jsx` stays on the `js` grammar it has always used here. The addon
+		// also exports a separate `jsx`, but switching to it is a matching
+		// change, not a coverage one, and belongs with its own fixtures.
+		extensions: [".js", ".jsx", ".mjs", ".cjs"],
+	},
+	{ ruleLanguage: "css", napiExport: "css", extensions: [".css"] },
+	{ ruleLanguage: "html", napiExport: "html", extensions: [".html", ".htm"] },
+];
+
+const BINDING_BY_EXTENSION = new Map<string, NapiLanguageBinding>(
+	NAPI_LANGUAGE_BINDINGS.flatMap((binding) =>
+		binding.extensions.map((ext) => [ext, binding] as const),
+	),
+);
+
+const SUPPORTED_RULE_LANGUAGES: readonly string[] = NAPI_LANGUAGE_BINDINGS.map(
+	(binding) => binding.ruleLanguage,
+);
+
+/**
+ * Rule `language:` tokens the shipped catalog carries that NO bundled napi
+ * grammar can parse. Their rules deliver through the ast-grep LSP/CLI, which
+ * ships its own grammar set — never in-process. One shared reason, so this is
+ * a list of decisions rather than twelve copies of a sentence: the addon
+ * bundles six grammars (see `NAPI_LANGUAGE_BINDINGS`) and nothing registers
+ * more at runtime.
+ *
+ * The LSP/CLI half of that claim is measured, not assumed: every entry below
+ * was run through the real `ast-grep run -l <lang>` on 2026-08-26 and parsed,
+ * with `cobol` as the negative control (`cobol is not supported!`, exit 2). So
+ * no catalog language is unreachable by BOTH engines — the issue's
+ * "genuinely missing" bucket is empty, and this list is a routing fact rather
+ * than a coverage hole.
+ *
+ * This is the deliberate-exclusion half of the #2215 contract; the served half
+ * is derived from the addon itself. `ast-grep-napi-language-coverage.test.ts`
+ * reds when a catalog language with enabled rules is in neither half.
+ */
+export const AST_GREP_LSP_ONLY_RULE_LANGUAGES: readonly string[] = [
+	"c",
+	"cpp",
+	"csharp",
+	"go",
+	"java",
+	"kotlin",
+	"php",
+	"python",
+	"ruby",
+	"rust",
+	"scala",
+	"swift",
+];
+
+const LSP_ONLY_RULE_LANGUAGES = new Set(AST_GREP_LSP_ONLY_RULE_LANGUAGES);
+
+export type RuleLanguageDeliveryRoute =
+	| "napi"
+	| "ast-grep-lsp-cli"
+	| "unclassified";
+
+/**
+ * How a rule's declared language reaches the user. `unclassified` is the
+ * runtime signal that the #2215 class regrew: rules ship for a language nobody
+ * decided a delivery route for, so they may run nowhere at all.
+ */
+export function deliveryRouteForRuleLanguage(
+	ruleLanguage: string,
+): RuleLanguageDeliveryRoute {
+	if (SUPPORTED_RULE_LANGUAGES.includes(ruleLanguage)) return "napi";
+	return LSP_ONLY_RULE_LANGUAGES.has(ruleLanguage)
+		? "ast-grep-lsp-cli"
+		: "unclassified";
+}
+
+/**
+ * Delivery route for one aggregated skip key. A `mismatch:<rule>-><file>` key
+ * is a rule whose language this engine DOES serve and that simply isn't this
+ * file's grammar, so it still routes through napi on its own files.
+ */
+function skipRouteFor(key: string): RuleLanguageDeliveryRoute {
+	return key.startsWith("mismatch:")
+		? "napi"
+		: deliveryRouteForRuleLanguage(key);
+}
 
 /** Maximum matches per rule to prevent excessive false positives */
 const MAX_MATCHES_PER_RULE = 10;
@@ -350,7 +479,7 @@ function matchesRuleIgnores(
 }
 
 export function canHandle(filePath: string): boolean {
-	return SUPPORTED_EXTS.includes(path.extname(filePath).toLowerCase());
+	return BINDING_BY_EXTENSION.has(path.extname(filePath).toLowerCase());
 }
 
 /**
@@ -376,57 +505,39 @@ export function canHandle(filePath: string): boolean {
  * parsed as tsx (ast-grep-tsx-coverage.test.ts) rather than assumed.
  * Without this exception the entire TS ruleset silently never runs on
  * `.tsx` files. `TSX`-tagged rules stay `.tsx`-exclusive; the exception
- * is TS→TSX only. Returns undefined for extensions this scoping doesn't
- * apply to (css/html), where no filtering is added.
+ * is TS→TSX only. Returns undefined for an extension outside the matrix.
  */
 export function ruleLanguageForFile(
 	filePath: string,
-): "typescript" | "tsx" | "javascript" | "css" | "html" | undefined {
-	const ext = path.extname(filePath).toLowerCase();
-	switch (ext) {
-		case ".ts":
-			return "typescript";
-		case ".tsx":
-			return "tsx";
-		case ".js":
-		case ".jsx":
-			return "javascript";
-		case ".css":
-			return "css";
-		case ".html":
-		case ".htm":
-			return "html";
-		default:
-			return undefined;
-	}
+): NapiLanguageBinding["ruleLanguage"] | undefined {
+	return BINDING_BY_EXTENSION.get(path.extname(filePath).toLowerCase())
+		?.ruleLanguage;
 }
 
-const SUPPORTED_RULE_LANGUAGES: readonly string[] = [
-	"typescript",
-	"tsx",
-	"javascript",
-	"css",
-	"html",
-];
-
+/**
+ * The grammar for `filePath` on the addon that actually loaded, or undefined
+ * when there is none.
+ *
+ * Both callers (this file's runner and clients/project-diagnostics/scanner.ts)
+ * gate on `canHandle` first, so an undefined return HERE means the matrix
+ * admitted the file and the addon then dropped it — the silent skip #2215 is
+ * about, which is why it records instead of just returning. An extension
+ * outside the matrix was never admitted, so it records nothing.
+ */
 export function getLang(filePath: string, sgModule: AstGrepNapi) {
-	const ext = path.extname(filePath).toLowerCase();
-	switch (ext) {
-		case ".ts":
-			return sgModule.ts;
-		case ".tsx":
-			return sgModule.tsx;
-		case ".js":
-		case ".jsx":
-			return sgModule.js;
-		case ".css":
-			return sgModule.css;
-		case ".html":
-		case ".htm":
-			return sgModule.html;
-		default:
-			return undefined;
+	const binding = BINDING_BY_EXTENSION.get(
+		path.extname(filePath).toLowerCase(),
+	);
+	if (!binding) return undefined;
+	const lang = sgModule[binding.napiExport];
+	if (!lang) {
+		recordDegradationOnce({
+			kind: "ast-grep-napi-language-unavailable",
+			subject: binding.ruleLanguage,
+			reason: `@ast-grep/napi exposes no "${binding.napiExport}" grammar; every ${binding.ruleLanguage} rule is skipped in-process this session`,
+		});
 	}
+	return lang;
 }
 
 /** Per-edit defaults — tuned to keep inline output bounded on a broken file. */
@@ -578,6 +689,13 @@ export function evaluateAstGrepRules(
 						{
 							count: ruleIds.length,
 							ruleIds: ruleIds.slice(0, UNSUPPORTED_RULE_ID_SAMPLE_SIZE),
+							// #2215: a skip count alone says a rule did not run and
+							// nothing about whether it runs anywhere else. `route` names
+							// the delivery path (`ast-grep-lsp-cli` for the twelve
+							// grammar-less catalog languages); `unclassified` means rules
+							// ship for a language nobody decided a route for, which is the
+							// class this issue closed regrowing.
+							route: skipRouteFor(language),
 						},
 					]),
 				),
