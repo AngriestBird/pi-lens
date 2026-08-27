@@ -58,7 +58,8 @@ describe("FactStore file-fact bound (#2240)", () => {
 
 		// The fire-and-forget blast-radius build walks the whole project against
 		// this same store while the dispatch is still running.
-		for (const p of batchPaths("walk")) store.setFileFact(p, "file.content", "");
+		for (const p of batchPaths("walk"))
+			store.setFileFact(p, "file.content", "");
 
 		expect(store.getFileFact(active, "file.content")).toBe("const x = 1;");
 	});
@@ -71,7 +72,8 @@ describe("FactStore file-fact bound (#2240)", () => {
 			store.setFileFact(p, "file.content", "x");
 		}
 
-		for (const p of batchPaths("walk")) store.setFileFact(p, "file.content", "");
+		for (const p of batchPaths("walk"))
+			store.setFileFact(p, "file.content", "");
 
 		expect(store.hasFileFact(dispatched[0], "file.content")).toBe(false);
 		expect(
@@ -88,7 +90,8 @@ describe("FactStore file-fact bound (#2240)", () => {
 		store.clearAll();
 
 		store.setFileFact(active, "file.content", "const x = 1;");
-		for (const p of batchPaths("walk")) store.setFileFact(p, "file.content", "");
+		for (const p of batchPaths("walk"))
+			store.setFileFact(p, "file.content", "");
 
 		expect(store.hasFileFact(active, "file.content")).toBe(false);
 	});
