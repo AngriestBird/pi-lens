@@ -2600,6 +2600,16 @@ function activateExtension(hostPi: ExtensionAPI) {
 						worstSoFar: isNewSessionWorst,
 						turnIndex: runtime.turnIndex,
 						suspectSystemStall,
+						// #1980: the CPU-vs-wall split, read from the record alone.
+						// `windowCpuMs` has sat beside every block since #1122 and
+						// was never read together with `durationMs`; nine of sixteen
+						// genuine 5s+ blocks in a 23h window burned less CPU than the
+						// block lasted, which makes them parked, not computing. The
+						// monitor owns the verdict (clients/event-loop-monitor.ts's
+						// `classifyLoopBlock`) so `suspectSystemStall` and
+						// `stallClass` cannot disagree about one sample.
+						stallClass: elStats?.stallClass,
+						cpuCoverageRatio: elStats?.cpuCoverageRatio,
 						windowCpuMs: elStats?.windowCpuMs,
 						windowWallMs: elStats?.windowWallMs,
 						lastPhase: lastPhase?.phase,

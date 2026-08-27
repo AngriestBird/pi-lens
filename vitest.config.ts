@@ -266,6 +266,13 @@ const lspSpawnHeavyInclude = [
 // host. Sweep coverage for other members lives in this list; new entries must
 // carry a wall-clock budget assertion, not just slowness.
 const wallClockBudgetInclude = [
+	// #1980: blocks the real event loop twice (a parked-thread futex wait, then
+	// a busy spin of the same length) and asserts the two classify differently
+	// on the CPU axis. Under the default fork storm a busy spin gets
+	// descheduled and burns less CPU than the wall time it held, which would
+	// make the compute case read as a stall — contention, not a regression, so
+	// the cure is a quiet host, not a looser assertion.
+	"tests/clients/loop-block-stall-discrimination.test.ts",
 	"tests/clients/startup-overhead.test.ts",
 	"tests/clients/runtime-session-scan-cache.test.ts",
 	"tests/clients/cascade-turn-merge.test.ts",

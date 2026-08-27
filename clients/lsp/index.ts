@@ -18,7 +18,11 @@ import { recordLsp } from "../widget-state.js";
 import { applyAuxiliarySuppressions } from "../dispatch/auxiliary-lsp.js";
 import { detectFileRole } from "../file-role.js";
 import { emitBounded } from "../bounded-telemetry.js";
-import { logLatency } from "../latency-logger.js";
+import {
+	logLatency,
+	phaseFinished,
+	phaseStarted,
+} from "../latency-logger.js";
 import { logSessionStart } from "../sessionstart-logger.js";
 import {
 	incrementDegradationCount,
@@ -7819,6 +7823,23 @@ export class LSPService {
 		};
 
 		const processFile = async (filePath: string): Promise<void> => {
+			// #1723 residual (named as a deferred gap on PR #1805, closed here).
+			// This closure is the SCAN-side twin of the runner chokepoint #1805
+			// wired in `dispatcher.ts`'s `runRunner`. It is the site whose
+			// COMPLETION (`lsp_workspace_diagnostics`) is the `lastPhase` on this
+			// issue's own 18 270 ms reproduction — so until this bracket existed,
+			// the motivating record could only ever name the phase that finished
+			// BEFORE the block, never the one burning the time during it.
+			//
+			// Cost: one object allocation, one `Date.now()`/`toISOString()`, one
+			// `Map.set` per file — see `phaseStarted`'s own doc. That matters here
+			// because this loop must keep its opens inside `WatchedFilesQueue`'s
+			// 100ms debounce window (see the `statSync` note below), so the PR
+			// body carries a measured per-call number rather than an assurance.
+			//
+			// Paired in `finally`, per `phaseFinished`'s contract: an abandoned
+			// bracket would misattribute every LATER loop_block to this sweep.
+			const sweepPhase = phaseStarted("lsp_workspace_diagnostics_touch");
 			try {
 				const content =
 					contentCache.get(filePath) ??
@@ -7998,6 +8019,11 @@ export class LSPService {
 					unconfirmedReason: "error",
 					writeIndex: writeIndexByPath.get(normalizeMapKey(filePath)),
 				});
+			} finally {
+				// Closes on EVERY exit — success, error, or an abort that unwinds
+				// through here — so a torn-down sweep cannot leave a phantom bracket
+				// attributing later blocks to work that already stopped.
+				phaseFinished(sweepPhase);
 			}
 			completed += 1;
 			// User-facing progress (streamed to the tool's onUpdate). Per-file so the
