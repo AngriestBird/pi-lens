@@ -25,19 +25,50 @@
  *
  * #2182: this file flaked when run combined with the two
  * `tests/clients/degradation-ledger*.test.ts` files under real machine
- * contention. Root cause: "re-arms across sessions rather than latching for
- * the process" awaits two refresh calls that resolve on queued microtasks
- * (fast on a quiet host) but starved past the default 5000ms testTimeout
- * under load; the timeout does not cancel the underlying promise, so the
- * straggler resolved later and mutated the shared spawn/degradation mocks
- * mid-test in an unrelated later case. Fix: budget correction — that one
- * test now carries an explicit 15_000ms timeout (see the test body) sized
- * off a local repro under synthetic CPU load, instead of a phased vitest
- * project (the existing "timing-sensitive" lane is reserved for
- * measureMaxSyncBlockMs sampler tests — see
- * tests/config/timing-sensitive-coverage.test.ts — and this file uses
- * neither the sampler nor a real process spawn, so it does not fit that or
- * the "lsp-spawn-heavy" lane).
+ * contention. Root cause: several tests here await real-shaped async work
+ * (multiple sequential mocked spawns, real filesystem I/O against a temp
+ * `PI_LENS_HOME`) that stays well under vitest's default 5000ms testTimeout
+ * on a quiet host but starves past it under load — and a timed-out test's
+ * promise chain keeps running (vitest doesn't cancel it), so the straggler
+ * resolves later and mutates the shared spawn/degradation mocks mid a LATER,
+ * unrelated test. First diagnosed and fixed for one test ("re-arms across
+ * sessions...") in #2216 with a per-test timeout override; verifying that
+ * fix under heavier synthetic load (14-16 concurrent CPU-load workers,
+ * several rounds) turned up more instances of the same shape — "pip
+ * strategy > upgrades a stale package with -U" (genuine work measured at
+ * 8932ms with the budget temporarily raised to 30s), "pip strategy >
+ * degrades when the upgrade leaves a binary that cannot report a version"
+ * (15086ms — two sequential mocked spawns instead of one), and
+ * "verification-budget delivery ... delivers a pip tool's custom budget to
+ * both version probes" (timed out at 5000ms, then corrupted the very next
+ * gem-budget test's result the same way #2216 first diagnosed).
+ *
+ * The 8932ms/15086ms figures above are LOAD-INDUCED, not this file's normal
+ * cost: on a quiet host the same two tests measure 552ms and 348ms (this
+ * file's full 43-test run completes in 3.3-4.0s of test time). They're the
+ * genuine work observed under sustained 14-16 concurrent CPU-load workers,
+ * which is the scenario this fix has to survive.
+ *
+ * Rather than keep annotating individual tests as each one gets caught by a
+ * heavier load sample, `vi.setConfig` below raises the DEFAULT test timeout
+ * for the WHOLE file once — the single mechanism the next flake report
+ * should point at (#2182 acceptance criterion 2), sized with real margin
+ * over the slowest genuine-work measurement observed (15086ms). No test in
+ * this file carries its own `it(..., N)` override alongside it — a test
+ * that needs more than the file default gets a bigger default, not a second
+ * mechanism. This isn't a phased vitest project: the existing
+ * "timing-sensitive" lane is reserved for `measureMaxSyncBlockMs` sampler
+ * tests (see tests/config/timing-sensitive-coverage.test.ts), and this file
+ * uses neither the sampler nor a real process spawn, so it fits neither that
+ * lane nor "lsp-spawn-heavy".
+ *
+ * One residual symptom did NOT fit this budget-correction shape: "gem
+ * strategy > re-runs the install command" lost a recorded spawn under the
+ * 16-worker run while finishing in ~3s itself — never near any timeout. That
+ * points at a genuinely shared `installSpawns()`/`TEST_HOME` mutable-state
+ * race between concurrent-in-time promise settlement, not a starved budget.
+ * Left uninvestigated and named on the #2182 issue thread as a remaining
+ * item; it needs its own root-cause pass, not a bigger number here.
  */
 
 import { EventEmitter } from "node:events";
@@ -54,6 +85,19 @@ import {
 	vi,
 } from "vitest";
 import { withEnv } from "../../support/with-env.js";
+
+// #2182: raises this FILE's default test timeout from vitest's 5000ms to
+// 25_000ms — see the file header for the measurements this margin is sized
+// against (25000/15086 = 1.66x over the slowest genuine-work run observed).
+// This is the ONLY timeout override in the file — no per-test `it(..., N)`
+// coexists with it; a test that needs a bigger number than this raises the
+// default, it doesn't add a second mechanism next to it (#2182 AC2).
+// `resetConfig` in `afterAll` scopes the change back to this file alone so
+// it can't leak into a later file reusing the same worker.
+vi.setConfig({ testTimeout: 25_000 });
+afterAll(() => {
+	vi.resetConfig();
+});
 
 vi.unmock("../../../clients/installer/index.js");
 
@@ -817,7 +861,10 @@ describe("pip strategy", () => {
 
 		expect(outcome.refreshed[0]).toMatchObject({ ok: false });
 		expect(degradationCount()).toBe(1);
-		expect(readState().ruff).toMatchObject({ failed: true, version: "0.5.0" });
+		expect(readState().ruff).toMatchObject({
+			failed: true,
+			version: "0.5.0",
+		});
 	});
 
 	it("degrades once and keeps the recorded version when pip fails", async () => {
@@ -1459,7 +1506,7 @@ describe("one budget across all strategies", () => {
 		await runManagedToolRefresh(NOW);
 
 		expect(installSpawns().length).toBe(first + 1);
-	}, 15_000);
+	});
 });
 
 // --- install kill-switch, trust gate, and install lock (#1759 review F2) --
