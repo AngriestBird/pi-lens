@@ -320,8 +320,15 @@ export function buildScrapeExpr(sentinelB64, maxLine) {
 	// function's argv-safety already does.)
 	return `(() => {
 		const text = (document.body.innerText || "").split(" ").join(" ");
+		const sourceEditor = document.querySelector(
+			".playground > .half:first-child .monaco-editor",
+		);
+		const sourceTextNormalized = (sourceEditor?.textContent || "")
+			.split(String.fromCharCode(160))
+			.join(" ");
 		const sentinel = ${sentinelExpr};
-		const sentinelFound = sentinel === null || text.indexOf(sentinel) !== -1;
+		const sentinelFound =
+			sentinel === null || sourceTextNormalized.indexOf(sentinel) !== -1;
 		const maxLine = ${maxLineExpr};
 		const m = text.match(/Found[ \\t]+(\\d+)[ \\t]+match/i);
 		if (m) {
