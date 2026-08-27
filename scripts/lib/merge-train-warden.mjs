@@ -265,7 +265,6 @@ export async function fetchOpenPullRequests(fetcher, owner, name) {
 		// to MAX_PAGES x PAGE_SIZE = 200 identical lines into one summary. One
 		// record per page, naming the count, is the same information at 1/50th
 		// the volume.
-		const seenBeforePage = new Set(seenNumbers);
 		const seenOnPage = new Set();
 		const boundaryDuplicates = [];
 		const intraPageDuplicates = [];
@@ -275,7 +274,7 @@ export async function fetchOpenPullRequests(fetcher, owner, name) {
 				continue;
 			}
 			seenOnPage.add(node.number);
-			if (seenBeforePage.has(node.number)) {
+			if (seenNumbers.has(node.number)) {
 				boundaryDuplicates.push(node.number);
 				continue;
 			}
