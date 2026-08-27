@@ -318,12 +318,18 @@ function canonicalFailedPath(filePath: string): string {
 	}
 }
 
-function canonicalProjectRoot(cwd: string): string {
+function canonicalProjectRoot(cwd: string): {
+	key: string;
+	resolved: boolean;
+} {
 	const absolute = path.resolve(cwd);
 	try {
-		return normalizeEphemeralMapKey(fs.realpathSync.native(absolute));
+		return {
+			key: normalizeEphemeralMapKey(fs.realpathSync.native(absolute)),
+			resolved: true,
+		};
 	} catch {
-		return normalizeEphemeralMapKey(absolute);
+		return { key: normalizeEphemeralMapKey(absolute), resolved: false };
 	}
 }
 
@@ -348,11 +354,18 @@ function filesystemErrorCode(error: unknown): string | undefined {
 
 export class TestRunnerClient {
 	private log: (msg: string) => void;
-	// This is an instance-lifetime memo: a symlink retargeted mid-session keeps
-	// its old resolution until a new client instance. That is acceptable because
-	// round 2's evidence re-validation already handles verdict-level staleness
-	// (positive verdicts re-stat their config file). Keep the memo bounded so
-	// pathological spelling churn cannot grow it without limit.
+	// This is an instance-lifetime memo of RESOLVED spellings only, which leaves
+	// two temporal edges. A symlink retargeted mid-session keeps its old
+	// resolution until a new client instance — acceptable because round 2's
+	// evidence re-validation already handles verdict-level staleness (positive
+	// verdicts re-stat their config file). A spelling that did NOT resolve is
+	// never memoized (#2077): the fallback key is a guess about a path that does
+	// not exist yet, so memoizing it would pin an alias probed before its
+	// symlink was created to a stale verdict for the instance's life. Re-probing
+	// costs one failing realpath per call, and only for a cwd that does not
+	// resolve — a state where `detectRunner` already walks node_modules on every
+	// call. Keep the memo bounded so pathological spelling churn cannot grow it
+	// without limit.
 	private canonicalRootMemo = new Map<string, string>();
 	private availableRunners = new PathKeyedMap<Map<string, RunnerAvailability>>(
 		normalizeEphemeralMapKey,
@@ -384,13 +397,14 @@ export class TestRunnerClient {
 		const cached = this.canonicalRootMemo.get(cwd);
 		if (cached !== undefined) return cached;
 
-		const canonical = canonicalProjectRoot(cwd);
+		const { key, resolved } = canonicalProjectRoot(cwd);
+		if (!resolved) return key;
 		if (this.canonicalRootMemo.size >= MAX_CANONICAL_ROOT_MEMO_ENTRIES) {
 			const oldest = this.canonicalRootMemo.keys().next().value;
 			if (oldest !== undefined) this.canonicalRootMemo.delete(oldest);
 		}
-		this.canonicalRootMemo.set(cwd, canonical);
-		return canonical;
+		this.canonicalRootMemo.set(cwd, key);
+		return key;
 	}
 
 	private getRunnerAvailability(
