@@ -7819,23 +7819,6 @@ export class LSPService {
 		};
 
 		const processFile = async (filePath: string): Promise<void> => {
-			// #1723 residual (named as a deferred gap on PR #1805, closed here).
-			// This closure is the SCAN-side twin of the runner chokepoint #1805
-			// wired in `dispatcher.ts`'s `runRunner`. It is the site whose
-			// COMPLETION (`lsp_workspace_diagnostics`) is the `lastPhase` on this
-			// issue's own 18 270 ms reproduction — so until this bracket existed,
-			// the motivating record could only ever name the phase that finished
-			// BEFORE the block, never the one burning the time during it.
-			//
-			// Cost: one object allocation, one `Date.now()`/`toISOString()`, one
-			// `Map.set` per file — see `phaseStarted`'s own doc. That matters here
-			// because this loop must keep its opens inside `WatchedFilesQueue`'s
-			// 100ms debounce window (see the `statSync` note below), so the PR
-			// body carries a measured per-call number rather than an assurance.
-			//
-			// Paired in `finally`, per `phaseFinished`'s contract: an abandoned
-			// bracket would misattribute every LATER loop_block to this sweep.
-			const sweepPhase = phaseStarted("lsp_workspace_diagnostics_touch");
 			try {
 				const content =
 					contentCache.get(filePath) ??
@@ -8015,11 +7998,6 @@ export class LSPService {
 					unconfirmedReason: "error",
 					writeIndex: writeIndexByPath.get(normalizeMapKey(filePath)),
 				});
-			} finally {
-				// Closes on EVERY exit — success, error, or an abort that unwinds
-				// through here — so a torn-down sweep cannot leave a phantom bracket
-				// attributing later blocks to work that already stopped.
-				phaseFinished(sweepPhase);
 			}
 			completed += 1;
 			// User-facing progress (streamed to the tool's onUpdate). Per-file so the
@@ -8052,157 +8030,188 @@ export class LSPService {
 			WORKSPACE_DIAGNOSTICS_CONCURRENCY,
 			groups.length,
 		);
-		await runPerServerGroups(
-			groups,
-			groupWorkers,
-			async (group) => {
-				if (signal?.aborted) return;
-				// #1618: checked before any per-group work (pull attempt, warm-up,
-				// per-file loop) so a service already destroyed when this group
-				// starts never pays for a language-server round trip it cannot get.
-				if (this.checkDestroyed()) {
-					markServiceDestroyed(group.files);
-					return;
-				}
-				// Fast path: one project-wide pull for the whole group (opt-in).
-				if (!isWarmAttached() && workspacePullEnabled && !group.multiServer) {
-					const pulled = await this.tryWorkspacePull(
-						group.files,
-						perFileMs,
-						cacheServedKeys,
-					);
-					if (pulled) {
-						// #1782: an explicit zero-diagnostic answer for a file this
-						// sweep served from cache SUPERSEDES that cached replay. Route
-						// it through the same result list every other answer uses, so
-						// the cache write below overwrites the stale entry and the
-						// footer reconcile in `tools/lens-diagnostics.ts` clears the
-						// widget rows — no second eviction path to keep in step.
-						for (const clean of pulled.extraClean) {
-							supersededCacheKeys.add(normalizeMapKey(clean.filePath));
-						}
-						for (const result of [...pulled.results, ...pulled.extraClean]) {
-							results.push({
-								...result,
-								writeIndex: writeIndexByPath.get(
-									normalizeMapKey(result.filePath),
-								),
-							});
-							// #671: a pull result is always confirmed (see
-							// `tryWorkspacePull`'s doc comment), so it's cache-eligible
-							// too — best-effort stat since the pull already resolved the
-							// diagnostics for this file some time ago.
-							try {
-								scannedMtimeByFile.set(
-									result.filePath,
-									nodeFs.statSync(result.filePath).mtimeMs,
-								);
-							} catch {
-								// Not cache-eligible without a confirmed mtime.
-							}
-						}
-						completed += group.files.length;
-						options.onProgress?.(completed, files.length);
-						return;
-					}
-				}
-				// #667: warm-check before this group's own per-file loop starts —
-				// cheap/no-op when the group's primary server already demonstrated
-				// readiness (from an earlier sweep, or an earlier group sharing the
-				// same server root, this session); pays one deliberate warm-up round
-				// trip against the group's first file only when genuinely cold. Not
-				// needed above the pull fast path: a `workspace/diagnostic` pull
-				// already covers the WHOLE group with its own generous per-server
-				// budget in one shot — the per-file "first N files eat individual
-				// timeouts" failure mode this fixes doesn't apply there.
-				const first = group.files[0];
-				if (first && !isWarmAttached()) {
-					const warmup = await this.ensureWarmForSweep(first, { signal });
+		// #1723 residual, named as a deferred gap on PR #1805 and closed here:
+		// the SCAN-side twin of the runner chokepoint #1805 wired in
+		// `dispatcher.ts`'s `runRunner`. This sweep is the site whose COMPLETION
+		// (`lsp_workspace_diagnostics`) is the `lastPhase` on #1723's own
+		// 18 270 ms reproduction, so until this bracket existed the record could
+		// only ever name the phase that finished BEFORE the block, never the one
+		// burning the time during it.
+		//
+		// ONE bracket for the whole fan-out, not one per file (#2272 review F1).
+		// Per-file bracketing was the first shape and it was inert for exactly
+		// the case above: `phaseFinished` pushes onto a ring capped at
+		// `CLOSED_BRACKET_CAP` (5, clients/latency-logger.ts), while `turn_end`
+		// reads `getPhaseForWindow` AFTER the sweep returns. A 225-file sweep
+		// therefore evicted the blocking file's own bracket unless the block
+		// landed in the last five files, and the survivors were then rejected by
+		// `MIN_PLAUSIBLE_ELAPSED_FRACTION` for being far shorter than the block
+		// window. The phase string is a constant carrying no per-file identity,
+		// so 225 brackets never held more information than one — they only cost
+		// 225 map inserts and destroyed the ring. One bracket keeps the same
+		// discriminating identity, survives to the read point, and spans the
+		// block by construction.
+		//
+		// Paired in `finally`, per `phaseFinished`'s contract: an abandoned
+		// bracket would misattribute every LATER loop_block to this sweep. An
+		// abort or a destroyed service returns out of the worker callback, which
+		// a trailing statement would miss and a `finally` does not.
+		const sweepPhase = phaseStarted("lsp_workspace_diagnostics_touch");
+		try {
+			await runPerServerGroups(
+				groups,
+				groupWorkers,
+				async (group) => {
 					if (signal?.aborted) return;
-					// #744: the group's primary server failed warm-up (initial round
-					// trip + one retry both left it cold). Every per-file touch to it
-					// would re-pay its full timeout and time out again, dragging the
-					// whole sweep — the exact wedged-marksman failure mode this closes.
-					// So skip this group's files and record each as UNCONFIRMED
-					// (timedOut + skippedWarmupFailure), never as confirmed-clean `[]`:
-					// the group is keyed by its primary server, so a non-empty
-					// `failedServerIds` means that primary is the one that couldn't warm.
-					if (warmup.failedServerIds.length > 0) {
-						logLatency({
-							type: "phase",
-							phase: "lsp_sweep_group_skipped_warmup",
-							filePath: first,
-							durationMs: 0,
-							metadata: {
-								failedServerIds: warmup.failedServerIds,
-								// #799: distinguishes a fresh warm-up failure from a
-								// negative-cache hit (this sweep never re-attempted warm-up
-								// at all — it was already known cold from earlier this
-								// session).
-								skippedFromCache: warmup.skippedFromCache ?? false,
-								skippedFiles: group.files.length,
-							},
-						});
-						for (const filePath of group.files) {
-							results.push({
-								filePath,
-								diagnostics: [],
-								count: 0,
-								timedOut: true,
-								unconfirmedReason: "inconclusive",
-								skippedWarmupFailure: true,
-							});
-							timedOutFiles += 1;
-							completed += 1;
-						}
-						options.onProgress?.(completed, files.length);
-						return;
-					}
-					if (warmup.performedWarmup) options.onServerReady?.();
-				}
-				// #608/#621: batch-open a CHUNK of this group's files before
-				// waiting on diagnostics for any of them individually — see
-				// `preOpenGroupFiles` above. Chunking (rather than the whole
-				// group at once) bounds how much a single burst can dump on
-				// the server's request queue at real project scale, while each
-				// chunk's opens still land inside the debounce window and
-				// coalesce into one flush — see `WORKSPACE_SWEEP_PREOPEN_CHUNK_SIZE`.
-				for (
-					let chunkStart = 0;
-					chunkStart < group.files.length;
-					chunkStart += WORKSPACE_SWEEP_PREOPEN_CHUNK_SIZE
-				) {
-					if (signal?.aborted) return;
-					// #1618: a service destroyed WHILE this group's chunk loop was
-					// already running (the group-start check above can't see a
-					// destruction that lands mid-loop) — stop here and mark every
-					// file from this chunk onward, rather than letting the remaining
-					// chunks pay for pre-opens/touches against a torn-down service.
+					// #1618: checked before any per-group work (pull attempt, warm-up,
+					// per-file loop) so a service already destroyed when this group
+					// starts never pays for a language-server round trip it cannot get.
 					if (this.checkDestroyed()) {
-						markServiceDestroyed(group.files.slice(chunkStart));
+						markServiceDestroyed(group.files);
 						return;
 					}
-					const chunk = group.files.slice(
-						chunkStart,
-						chunkStart + WORKSPACE_SWEEP_PREOPEN_CHUNK_SIZE,
-					);
-					await preOpenGroupFiles(chunk);
-					for (const filePath of chunk) {
-						// Honor cancellation between files (#341); already-collected
-						// results are returned as a partial.
-						if (signal?.aborted) return;
-						if (this.checkDestroyed()) {
-							markServiceDestroyed(
-								group.files.slice(group.files.indexOf(filePath)),
-							);
+					// Fast path: one project-wide pull for the whole group (opt-in).
+					if (!isWarmAttached() && workspacePullEnabled && !group.multiServer) {
+						const pulled = await this.tryWorkspacePull(
+							group.files,
+							perFileMs,
+							cacheServedKeys,
+						);
+						if (pulled) {
+							// #1782: an explicit zero-diagnostic answer for a file this
+							// sweep served from cache SUPERSEDES that cached replay. Route
+							// it through the same result list every other answer uses, so
+							// the cache write below overwrites the stale entry and the
+							// footer reconcile in `tools/lens-diagnostics.ts` clears the
+							// widget rows — no second eviction path to keep in step.
+							for (const clean of pulled.extraClean) {
+								supersededCacheKeys.add(normalizeMapKey(clean.filePath));
+							}
+							for (const result of [...pulled.results, ...pulled.extraClean]) {
+								results.push({
+									...result,
+									writeIndex: writeIndexByPath.get(
+										normalizeMapKey(result.filePath),
+									),
+								});
+								// #671: a pull result is always confirmed (see
+								// `tryWorkspacePull`'s doc comment), so it's cache-eligible
+								// too — best-effort stat since the pull already resolved the
+								// diagnostics for this file some time ago.
+								try {
+									scannedMtimeByFile.set(
+										result.filePath,
+										nodeFs.statSync(result.filePath).mtimeMs,
+									);
+								} catch {
+									// Not cache-eligible without a confirmed mtime.
+								}
+							}
+							completed += group.files.length;
+							options.onProgress?.(completed, files.length);
 							return;
 						}
-						await processFile(filePath);
 					}
-				}
-			},
-			signal,
-		);
+					// #667: warm-check before this group's own per-file loop starts —
+					// cheap/no-op when the group's primary server already demonstrated
+					// readiness (from an earlier sweep, or an earlier group sharing the
+					// same server root, this session); pays one deliberate warm-up round
+					// trip against the group's first file only when genuinely cold. Not
+					// needed above the pull fast path: a `workspace/diagnostic` pull
+					// already covers the WHOLE group with its own generous per-server
+					// budget in one shot — the per-file "first N files eat individual
+					// timeouts" failure mode this fixes doesn't apply there.
+					const first = group.files[0];
+					if (first && !isWarmAttached()) {
+						const warmup = await this.ensureWarmForSweep(first, { signal });
+						if (signal?.aborted) return;
+						// #744: the group's primary server failed warm-up (initial round
+						// trip + one retry both left it cold). Every per-file touch to it
+						// would re-pay its full timeout and time out again, dragging the
+						// whole sweep — the exact wedged-marksman failure mode this closes.
+						// So skip this group's files and record each as UNCONFIRMED
+						// (timedOut + skippedWarmupFailure), never as confirmed-clean `[]`:
+						// the group is keyed by its primary server, so a non-empty
+						// `failedServerIds` means that primary is the one that couldn't warm.
+						if (warmup.failedServerIds.length > 0) {
+							logLatency({
+								type: "phase",
+								phase: "lsp_sweep_group_skipped_warmup",
+								filePath: first,
+								durationMs: 0,
+								metadata: {
+									failedServerIds: warmup.failedServerIds,
+									// #799: distinguishes a fresh warm-up failure from a
+									// negative-cache hit (this sweep never re-attempted warm-up
+									// at all — it was already known cold from earlier this
+									// session).
+									skippedFromCache: warmup.skippedFromCache ?? false,
+									skippedFiles: group.files.length,
+								},
+							});
+							for (const filePath of group.files) {
+								results.push({
+									filePath,
+									diagnostics: [],
+									count: 0,
+									timedOut: true,
+									unconfirmedReason: "inconclusive",
+									skippedWarmupFailure: true,
+								});
+								timedOutFiles += 1;
+								completed += 1;
+							}
+							options.onProgress?.(completed, files.length);
+							return;
+						}
+						if (warmup.performedWarmup) options.onServerReady?.();
+					}
+					// #608/#621: batch-open a CHUNK of this group's files before
+					// waiting on diagnostics for any of them individually — see
+					// `preOpenGroupFiles` above. Chunking (rather than the whole
+					// group at once) bounds how much a single burst can dump on
+					// the server's request queue at real project scale, while each
+					// chunk's opens still land inside the debounce window and
+					// coalesce into one flush — see `WORKSPACE_SWEEP_PREOPEN_CHUNK_SIZE`.
+					for (
+						let chunkStart = 0;
+						chunkStart < group.files.length;
+						chunkStart += WORKSPACE_SWEEP_PREOPEN_CHUNK_SIZE
+					) {
+						if (signal?.aborted) return;
+						// #1618: a service destroyed WHILE this group's chunk loop was
+						// already running (the group-start check above can't see a
+						// destruction that lands mid-loop) — stop here and mark every
+						// file from this chunk onward, rather than letting the remaining
+						// chunks pay for pre-opens/touches against a torn-down service.
+						if (this.checkDestroyed()) {
+							markServiceDestroyed(group.files.slice(chunkStart));
+							return;
+						}
+						const chunk = group.files.slice(
+							chunkStart,
+							chunkStart + WORKSPACE_SWEEP_PREOPEN_CHUNK_SIZE,
+						);
+						await preOpenGroupFiles(chunk);
+						for (const filePath of chunk) {
+							// Honor cancellation between files (#341); already-collected
+							// results are returned as a partial.
+							if (signal?.aborted) return;
+							if (this.checkDestroyed()) {
+								markServiceDestroyed(
+									group.files.slice(group.files.indexOf(filePath)),
+								);
+								return;
+							}
+							await processFile(filePath);
+						}
+					}
+				},
+				signal,
+			);
+		} finally {
+			phaseFinished(sweepPhase);
+		}
 
 		// #1618: per-reason tally alongside the flat `timedOutFiles` count (kept
 		// for the existing `scripts/analyze-pi-lens-logs.mjs` consumer) — a
