@@ -249,8 +249,11 @@ export function buildPlaygroundUrl(ruleYaml, code, lang) {
 }
 
 // JS expression evaluated in the page to scrape the playground result.
-// We don't depend on a specific DOM selector (the playground's React
-// internals change between builds); we scan the rendered text.
+// The match-count scan stays selector-free (rendered text), but the
+// SENTINEL check deliberately anchors to the first `.half`'s Monaco
+// editor under `main.playground` — body-wide text let a rule note in
+// the config pane satisfy it (#2253). If the playground's pane layout
+// changes, that selector is the thing to revisit.
 //
 // IMPORTANT: the expression is passed through spawn argv, which on
 // Windows strips backslashes. We avoid regex backslash escapes
