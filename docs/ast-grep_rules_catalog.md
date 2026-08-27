@@ -246,7 +246,7 @@ See [`docs/custom-rules.md`](custom-rules.md) to add your own. Rule sources: `ru
 | `kotlin-no-unsafe-cast` | warning | no | pi-lens | Unsafe cast (as) throws ClassCastException on a mismatch; consider as? |
 | `kotlin-no-var` | warning | no | pi-lens | Prefer val over var; mutability should be explicit and scoped |
 | `kotlin-prefer-data-class` | warning | no | pi-lens | This class looks like a plain value holder; consider a data class |
-| `kotlin-prefer-is-empty` | warning | yes | pi-lens | Use isEmpty() instead of comparing size/length to zero |
+| `kotlin-prefer-is-empty` | warning | no | pi-lens | Use isEmpty() instead of comparing size/length to zero |
 | `rsa-no-padding-kotlin` | warning | no | CodeRabbit | Using RSA without OAEP mode weakens the encryption. |
 | `system-setproperty-hardcoded-secret-kotlin` | warning | no | CodeRabbit | A secret is hard-coded in the application. Secrets stored in source code, such as credentials, identifiers, and other types of sensitive da… |
 

@@ -12,6 +12,10 @@ note: |
   Detection-only: some `var`s are load-bearing (loop counters, accumulators,
   lifecycle-managed fields), and rewriting to `val` requires knowing every
   call site's mutation intent, which this rule cannot verify.
+  A `lateinit var` also matches `kotlin-no-lateinit`, so it reports twice.
+  That's intentional, not a bug to dedupe: the two findings name different
+  problems (mutability here, deferred-initialization risk there) and either
+  one could be fixed independently of the other.
 rule:
   kind: property_declaration
   has:

@@ -12,14 +12,20 @@ note: |
   Detection-only: which logger to use, and whether a given call site is a
   CLI entry point or a test where println is acceptable, is a project
   policy call this rule cannot make.
+  Scoped to the unqualified call. A fully-qualified spelling
+  (`kotlin.io.println(...)`) is missed on purpose: syntactically it is the
+  same navigation-call shape as `anyReceiver.println(...)`, a member call on
+  an arbitrary type (a Writer, a PrintStream) that this rule must not flag,
+  and there is no type information here to tell the two apart.
 rule:
   any:
     - pattern: println($$$ARGS)
     - pattern: print($$$ARGS)
 files:
   - "**/*.kt"
-  - "!**/*Test.kt"
-  - "!**/test/**"
+ignores:
+  - "**/*Test.kt"
+  - "**/test/**"
 tags:
   - kotlin
   - idiom
