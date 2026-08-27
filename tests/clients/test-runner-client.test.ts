@@ -1376,37 +1376,97 @@ describe("test-runner-client", () => {
 			);
 			const newest = path.join(second.tmpDir, "newest_test.go");
 			const client = new TestRunnerClient(false);
-			const recordFailure = async (root: string, testFile: string) => {
+			const recordFailure = (
+				client: TestRunnerClient,
+				root: string,
+				testFile: string,
+			): void => {
 				fs.writeFileSync(testFile, "package widget\n");
-				const result = await client.runTestFileAsync(
+				(
+					client as unknown as {
+						recordResult(record: {
+							cwd: string;
+							runner: string;
+							testFile: string;
+							result: TestResult;
+							turnIndex: number;
+						}): void;
+					}
+				).recordResult({
+					cwd: root,
+					runner: "go",
 					testFile,
-					root,
-					"go",
-					failingNodeConfig,
-				);
-				expect(result.failed).toBe(1);
+					result: {
+						file: testFile,
+						sourceFile: "",
+						runner: "go",
+						passed: 0,
+						failed: 1,
+						skipped: 0,
+						failures: [],
+					},
+					turnIndex: 2045,
+				});
 			};
 
-			await recordFailure(first.tmpDir, hot);
-			for (const testFile of cold) {
-				await recordFailure(second.tmpDir, testFile);
-			}
-			// Refresh A after every original B entry, then force one eviction in B.
-			await recordFailure(first.tmpDir, hot);
-			await recordFailure(second.tmpDir, newest);
+			const previousTestMode = process.env.PI_LENS_TEST_MODE;
+			process.env.PI_LENS_TEST_MODE = "0";
+			try {
+				resetBoundedTelemetry();
+				clearLatencyLog();
+				await flushLatencyLog();
+				recordFailure(client, first.tmpDir, hot);
+				for (const testFile of cold) {
+					recordFailure(client, second.tmpDir, testFile);
+				}
+				// Refresh A after every original B entry, then force one eviction in B.
+				recordFailure(client, first.tmpDir, hot);
+				recordFailure(client, second.tmpDir, newest);
 
-			expect(
-				client.getTestRunTarget(
-					path.join(first.tmpDir, "widget.go"),
+				expect(
+					client.getTestRunTarget(
+						path.join(first.tmpDir, "widget.go"),
+						first.tmpDir,
+					)?.testFile,
+				).toBe(path.resolve(hot));
+				expect(
+					client.getTestRunTarget(
+						path.join(second.tmpDir, "widget.go"),
+						second.tmpDir,
+					)?.testFile,
+				).toBe(path.resolve(cold[1]));
+
+				// Refresh another root, then evict the sole target in this root. The
+				// new target must be inserted into a reacquired root map.
+				const reacquisitionClient = new TestRunnerClient(false);
+				const reacquisitionNewest = path.join(
 					first.tmpDir,
-				)?.testFile,
-			).toBe(path.resolve(hot));
-			expect(
-				client.getTestRunTarget(
-					path.join(second.tmpDir, "widget.go"),
-					second.tmpDir,
-				)?.testFile,
-			).toBe(path.resolve(cold[1]));
+					"reacquired_test.go",
+				);
+				recordFailure(reacquisitionClient, first.tmpDir, hot);
+				for (const testFile of cold) {
+					recordFailure(reacquisitionClient, second.tmpDir, testFile);
+				}
+				recordFailure(reacquisitionClient, second.tmpDir, cold[0]);
+				recordFailure(reacquisitionClient, first.tmpDir, reacquisitionNewest);
+				expect(
+					reacquisitionClient.getTestRunTarget(
+						path.join(first.tmpDir, "widget.go"),
+						first.tmpDir,
+					)?.testFile,
+				).toBe(path.resolve(reacquisitionNewest));
+
+				await flushLatencyLog();
+				const log = fs.readFileSync(getLatencyLogPath(), "utf8");
+				expect(log).toContain('"outcome":"capacity-evicted"');
+				expect(log).toContain('"phase":"test_runner_failed_target_state"');
+			} finally {
+				if (previousTestMode === undefined) {
+					delete process.env.PI_LENS_TEST_MODE;
+				} else {
+					process.env.PI_LENS_TEST_MODE = previousTestMode;
+				}
+			}
 		});
 	});
 
