@@ -794,16 +794,24 @@ export function loadProjectSnapshotExportsAndRules(
 	const body = resolveSnapshotBodyPath(cwd);
 	const authoritative = authoritativeSnapshots.get(key);
 	if (authoritative) {
-		const diskMtime = body ? body.mtimeMs : Number.NEGATIVE_INFINITY;
-		const diskSize = body ? body.size : Number.NEGATIVE_INFINITY;
-		if (
-			diskMtime <= authoritative.knownMtime &&
-			diskSize === authoritative.knownSize
-		) {
+		// `body === null` means nothing is on disk — that is never "the body
+		// changed size", so it must not be read as superseding our own write.
+		// See the matching comment in loadProjectSnapshotInternal.
+		const notSuperseded =
+			body === null ||
+			(body.mtimeMs <= authoritative.knownMtime &&
+				body.size === authoritative.knownSize);
+		if (notSuperseded) {
 			const { version, seq, cachedExports, projectRulesScan } =
 				authoritative.snapshot;
 			return { version, seq, cachedExports, projectRulesScan };
 		}
+		// On mismatch, unlike the full loader, this narrow loader neither
+		// deletes the entry nor touches its idle timer (it never calls
+		// touchAuthoritativeSnapshot even on a hit). The stale entry is safe to
+		// leave in place: nothing here re-arms its eviction, so it is still
+		// bounded by whatever idle window the full loader (or the original
+		// write) last set, not left to live indefinitely.
 	}
 	if (!body) return null;
 	return readSnapshotExportsAndRulesBody(body.path, body.gz);
@@ -818,16 +826,16 @@ function loadProjectSnapshotInternal(
 	// Authoritative in-process write wins while our own (possibly still
 	// in-flight) write has not been superseded on disk by a newer external mtime
 	// or a different-size body in the same/coarser bucket. `body === null` means
-	// nothing is on disk yet — our just-scheduled write is the only truth, so
-	// serve it. Keep `<=`: the pre-promotion body can be older than our baseline.
+	// nothing is on disk — either our just-scheduled write hasn't landed yet, or
+	// something removed the body after we wrote it (e.g. a cleared cache dir).
+	// Neither case is "the body changed size", so serve the in-process object.
 	const authoritative = authoritativeSnapshots.get(key);
 	if (authoritative) {
-		const diskMtime = body ? body.mtimeMs : Number.NEGATIVE_INFINITY;
-		const diskSize = body ? body.size : Number.NEGATIVE_INFINITY;
-		if (
-			diskMtime <= authoritative.knownMtime &&
-			diskSize === authoritative.knownSize
-		) {
+		const notSuperseded =
+			body === null ||
+			(body.mtimeMs <= authoritative.knownMtime &&
+				body.size === authoritative.knownSize);
+		if (notSuperseded) {
 			touchAuthoritativeSnapshot(key, authoritative);
 			return authoritative.snapshot;
 		}

@@ -1458,6 +1458,37 @@ describe("project snapshot", () => {
 				expect(load(cwd)?.seq).toBe(9);
 			}),
 	);
+
+	it.each([
+		["full loader", (cwd: string) => loadProjectSnapshot(cwd)],
+		[
+			"exports-and-rules loader",
+			(cwd: string) => loadProjectSnapshotExportsAndRules(cwd),
+		],
+	])(
+		"%s carries forward the authoritative in-process write when the body disappears from disk (#2296)",
+		(_name, load) =>
+			withProjectDataDir((cwd) => {
+				const runtime = new RuntimeCoordinator();
+				runtime.seedProjectSequence(7);
+				const saved = buildProjectSnapshotFromRuntime({ cwd, runtime });
+				saveProjectSnapshot(cwd, saved);
+
+				// Our own write is authoritative and has been reconciled against the
+				// body it just wrote (knownMtime/knownSize are real numbers now).
+				const gzPath = getProjectSnapshotPath(cwd);
+				expect(fs.existsSync(gzPath)).toBe(true);
+
+				// External deletion — e.g. a user clearing the cache dir mid-session.
+				// `body === null` means nothing is on disk, which per the documented
+				// contract at loadProjectSnapshotInternal must NOT be read as "the
+				// body changed size"; our own in-process write is still the only
+				// truth and must keep being served.
+				fs.unlinkSync(gzPath);
+
+				expect(load(cwd)?.seq).toBe(7);
+			}),
+	);
 });
 
 describe("project snapshot worker persist (#958)", () => {

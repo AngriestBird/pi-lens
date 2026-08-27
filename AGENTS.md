@@ -821,7 +821,10 @@ at save and after promotion. Both `loadProjectSnapshot` and
 disk mtime is `<=` the stamp and size still matches. Keep `<=` for the
 in-flight-write case; size detects different-length writes in a coarse mtime
 bucket. Same-size, same-mtime external rewrites remain invisible by design,
-and this hot read path does not content-hash. (#2285)
+and this hot read path does not content-hash. Only `loadProjectSnapshot`
+re-arms the idle-eviction timer on a cache hit (`touchAuthoritativeSnapshot`),
+so a bucket the narrow loader alone keeps hitting rides an indefinite mask,
+not one bounded by the 20-minute idle window. (#2285)
 
 Advisory caches must carry immutable capture provenance and validate it again
 at every delivery surface. A finding is current only when session/turn state
