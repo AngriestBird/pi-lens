@@ -9,7 +9,12 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 // mock for the sibling cadence — makes it spy-able.
 vi.mock("node:fs", async (importOriginal) => {
 	const actual = await importOriginal<typeof import("node:fs")>();
-	return { ...actual, statSync: vi.fn(actual.statSync) };
+	return {
+		...actual,
+		readFileSync: vi.fn(actual.readFileSync),
+		readdirSync: vi.fn(actual.readdirSync),
+		statSync: vi.fn(actual.statSync),
+	};
 });
 
 import {
@@ -100,7 +105,7 @@ describe("yaml-rule-parser cache freshness (#2262)", () => {
 		expect(messages(loadYamlRules(root))).toEqual(["child", "root"]);
 	});
 
-	it("re-stats a rule directory at most once per cadence window, not once per call", () => {
+	it("performs one metadata sweep and no content reads per cadence window", () => {
 		const root = fs.mkdtempSync(
 			path.join(os.tmpdir(), "pilens-rules-cache-bounded-"),
 		);
@@ -110,13 +115,24 @@ describe("yaml-rule-parser cache freshness (#2262)", () => {
 		const start = Date.now();
 		loadYamlRules(root); // primes the cache: one sweep
 
+		const readFileSpy = vi.mocked(fs.readFileSync);
+		const readdirSpy = vi.mocked(fs.readdirSync);
 		const statSpy = vi.mocked(fs.statSync);
-		statSpy.mockClear();
+		for (const spy of [readFileSpy, readdirSpy, statSpy]) spy.mockClear();
 		for (let i = 0; i < 25; i++) loadYamlRules(root);
+		expect(readFileSpy).not.toHaveBeenCalled();
+		expect(readdirSpy).not.toHaveBeenCalled();
 		expect(statSpy).not.toHaveBeenCalled();
 
 		vi.setSystemTime(start + RULES_CACHE_FRESHNESS_CADENCE_MS + 1);
 		loadYamlRules(root);
+		expect(readFileSpy).not.toHaveBeenCalled();
+		expect(readdirSpy).toHaveBeenCalledTimes(1);
+		expect(statSpy).toHaveBeenCalledTimes(1);
+
+		for (let i = 0; i < 25; i++) loadYamlRules(root);
+		expect(readFileSpy).not.toHaveBeenCalled();
+		expect(readdirSpy).toHaveBeenCalledTimes(1);
 		expect(statSpy).toHaveBeenCalledTimes(1);
 	});
 
