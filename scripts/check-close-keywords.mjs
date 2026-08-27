@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { resolveLivePrBody } from "./check-pr-body.mjs";
+import { fetchLivePrBody } from "./check-pr-body.mjs";
 
 const CLOSE_KEYWORD = /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b/gi;
 const CLOSE_ISSUE = /\s*:?[ \t]*#(\d+)/y;
@@ -127,11 +127,30 @@ export async function verifyMergedPullRequest(
 	// #2086: the closed-event payload's body is a snapshot from when the PR
 	// closed. A rerun of this check after the body was edited post-merge must
 	// see the edit, not replay the stale snapshot. Reuses check-pr-body.mjs's
-	// resolveLivePrBody (PR #2085/#2086's own root-cause sibling) rather than
-	// hand-rolling a second live-body fetch -- same env vars, same
-	// fall-back-with-::warning:: behavior, already covered by that file's own
-	// tests for a missing token, a non-2xx response, and a malformed body.
-	const liveBody = await resolveLivePrBody(pullRequest, fetchImpl);
+	// fetchLivePrBody (PR #2085/#2086's own root-cause sibling) rather than
+	// hand-rolling a second live-body fetch -- same env vars, same request
+	// shape.
+	//
+	// #2267 F2: uses the STRICT fetchLivePrBody here, not resolveLivePrBody's
+	// warn-and-fall-back-to-stale-payload wrapper. That wrapper is right for
+	// the advisory body LINTER (check-pr-body.mjs), where degrading to the
+	// stale body on a fetch hiccup is an acceptable trade. It is wrong for
+	// this post-merge verification GATE: a gate that silently falls back and
+	// reports "OK" on a fetch failure is indistinguishable from a gate that
+	// actually checked and found nothing wrong -- the exact "fails open"
+	// shape #2086 was filed to close, just moved one level up. A fetch
+	// failure here fails the check LOUD instead.
+	let liveBody;
+	try {
+		liveBody = await fetchLivePrBody(pullRequest, fetchImpl);
+	} catch (error) {
+		const reason = error instanceof Error ? error.message : String(error);
+		console.error(
+			`::error::Post-merge close verification could not fetch the live PR body, so it did not run: ${reason}`,
+		);
+		process.exitCode = 1;
+		return;
+	}
 	const { issues } = parseCloseKeywords(liveBody);
 	const unresolved = issues
 		.map((number) => ({ number, state: getIssueState(repository, number) }))

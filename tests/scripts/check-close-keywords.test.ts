@@ -1,3 +1,7 @@
+import * as fs from "node:fs";
+import * as path from "node:path";
+import { fileURLToPath } from "node:url";
+import * as yaml from "js-yaml";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	INVALID_CLOSE_KEYWORD_MESSAGE,
@@ -6,11 +10,21 @@ import {
 	verifyMergedPullRequest,
 } from "../../scripts/check-close-keywords.mjs";
 // Reused, not reimplemented (#2086): check-close-keywords.mjs imports this
-// straight from check-pr-body.mjs. Its own edge cases (missing token,
-// non-2xx, malformed body) are already covered by
-// tests/scripts/check-pr-body.test.ts's "live PR body resolution (#2085)"
-// suite -- no need to duplicate them here.
-import { resolveLivePrBody } from "../../scripts/check-pr-body.mjs";
+// straight from check-pr-body.mjs. Deliberately the STRICT fetchLivePrBody,
+// not the advisory resolveLivePrBody wrapper (#2267 F2) -- see the comment
+// at its call site in check-close-keywords.mjs for why a post-merge GATE
+// must fail closed on a fetch problem instead of falling back to stale
+// data. resolveLivePrBody's own fallback paths (missing token, non-2xx,
+// malformed body) are covered by check-pr-body.test.ts's "live PR body
+// resolution (#2085)" suite; this file exercises fetchLivePrBody's THROWING
+// behavior directly, since that's the behavior check-close-keywords.mjs
+// actually depends on.
+import { fetchLivePrBody } from "../../scripts/check-pr-body.mjs";
+
+const REPO_ROOT = path.resolve(
+	path.dirname(fileURLToPath(import.meta.url)),
+	"../..",
+);
 
 afterEach(() => {
 	vi.unstubAllEnvs();
@@ -122,7 +136,7 @@ describe("live PR body resolution (#2086)", () => {
 			}),
 		);
 
-		const body = await resolveLivePrBody(payloadPr, fetchImpl);
+		const body = await fetchLivePrBody(payloadPr, fetchImpl);
 		expect(body).toBe("Closes #123. Closes #456.");
 		expect(lintCloseKeywords(body).valid).toBe(true);
 		expect(fetchImpl).toHaveBeenCalledWith(
@@ -144,7 +158,7 @@ describe("live PR body resolution (#2086)", () => {
 			}),
 		);
 
-		const body = await resolveLivePrBody(payloadPr, fetchImpl);
+		const body = await fetchLivePrBody(payloadPr, fetchImpl);
 		expect(lintCloseKeywords(payloadPr.body).valid).toBe(false);
 		expect(lintCloseKeywords(body).valid).toBe(true);
 	});
@@ -162,14 +176,14 @@ describe("live PR body resolution (#2086)", () => {
 			}),
 		);
 
-		const body = await resolveLivePrBody(cleanPayloadPr, fetchImpl);
+		const body = await fetchLivePrBody(cleanPayloadPr, fetchImpl);
 		expect(lintCloseKeywords(cleanPayloadPr.body).valid).toBe(true);
 		expect(lintCloseKeywords(body).valid).toBe(false);
 	});
 });
 
 // The actual regression this issue is about, exercised end to end through
-// verifyMergedPullRequest itself (not just resolveLivePrBody in isolation):
+// verifyMergedPullRequest itself (not just fetchLivePrBody in isolation):
 // a rerun of --verify-merged must lint the LIVE body's issue references, not
 // the ones frozen into the closed-event payload. Both fixture bodies name
 // issues getIssueState reports as already closed, so the run always takes
@@ -204,5 +218,100 @@ describe("verifyMergedPullRequest reads the live body, not the stale payload (#2
 		expect(getIssueState).toHaveBeenCalledWith("apmantza/pi-lens", 1);
 		expect(getIssueState).toHaveBeenCalledWith("apmantza/pi-lens", 2);
 		log.mockRestore();
+	});
+});
+
+// #2267 F2 (fix round): a post-merge verification GATE must fail LOUD on a
+// fetch problem, not warn-and-fall-back like the advisory body linter does.
+// Reproduces the reviewer's exact production scenario: GITHUB_TOKEN unset
+// (F1's shape) or the API returning non-2xx -- either way, the check used
+// to log a ::warning:: and report "OK" on the stale payload. It must now
+// set exitCode=1 with an ::error:: annotation and never reach the
+// success-path console.log or the gh-CLI comment path.
+describe("verifyMergedPullRequest fails closed on a live-fetch problem (#2267 F2)", () => {
+	afterEach(() => {
+		process.exitCode = undefined;
+	});
+
+	it("fails closed when GITHUB_TOKEN is unset (the F1 production shape)", async () => {
+		vi.stubEnv("GITHUB_REPOSITORY", "apmantza/pi-lens");
+		vi.stubEnv("GITHUB_TOKEN", "");
+		const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+		const log = vi.spyOn(console, "log").mockImplementation(() => {});
+		const fetchImpl = vi.fn();
+		const event = { pull_request: { number: 2267, body: "Closes #1, #2" } };
+		const getIssueState = vi.fn().mockReturnValue("open");
+
+		await verifyMergedPullRequest(fetchImpl, event, getIssueState);
+
+		expect(process.exitCode).toBe(1);
+		expect(fetchImpl).not.toHaveBeenCalled();
+		// Mutation-proof: reverting to resolveLivePrBody's swallow-and-warn
+		// behavior would call console.warn (not console.error) and go on to
+		// log a success/failure message from the STALE payload instead of
+		// short-circuiting here -- this asserts neither happened.
+		expect(log).not.toHaveBeenCalled();
+		expect(errorLog).toHaveBeenCalledWith(expect.stringContaining("::error::"));
+		expect(errorLog).toHaveBeenCalledWith(
+			expect.stringContaining("GITHUB_TOKEN is not set"),
+		);
+		expect(getIssueState).not.toHaveBeenCalled();
+		errorLog.mockRestore();
+		log.mockRestore();
+	});
+
+	it("fails closed when the GitHub API returns a non-2xx response", async () => {
+		vi.stubEnv("GITHUB_API_URL", "https://api.github.test");
+		vi.stubEnv("GITHUB_REPOSITORY", "apmantza/pi-lens");
+		vi.stubEnv("GITHUB_TOKEN", "test-token");
+		const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+		const fetchImpl = vi
+			.fn()
+			.mockResolvedValue(new Response("service unavailable", { status: 503 }));
+		const event = { pull_request: { number: 2267, body: "Closes #1" } };
+		const getIssueState = vi.fn();
+
+		await verifyMergedPullRequest(fetchImpl, event, getIssueState);
+
+		expect(process.exitCode).toBe(1);
+		expect(getIssueState).not.toHaveBeenCalled();
+		expect(errorLog).toHaveBeenCalledWith(expect.stringContaining("503"));
+		errorLog.mockRestore();
+	});
+});
+
+// #2267 F1 (fix round, BLOCKING): the fix never fired in production because
+// the workflow step set GH_TOKEN (for the gh CLI calls) but not
+// GITHUB_TOKEN (which fetchLivePrBody/resolveLivePrBody read specifically)
+// -- every real run threw "GITHUB_TOKEN is not set" before any fetch and
+// silently used the stale payload, the exact bug #2086 exists to fix, under
+// a different name. A source-level unit test can prove the function reads
+// process.env.GITHUB_TOKEN, but nothing short of reading the workflow YAML
+// itself proves the WIRING is correct in the one place it actually runs.
+describe("close-keyword-verification.yml carries GITHUB_TOKEN (#2267 F1)", () => {
+	it("sets both GH_TOKEN and GITHUB_TOKEN on the verify step", () => {
+		const workflowPath = path.join(
+			REPO_ROOT,
+			".github/workflows/close-keyword-verification.yml",
+		);
+		type WorkflowStep = { run?: string; env?: Record<string, string> };
+		type Workflow = { jobs: { verify: { steps: WorkflowStep[] } } };
+		const workflow = yaml.load(
+			fs.readFileSync(workflowPath, "utf8"),
+		) as Workflow;
+		const step = workflow.jobs.verify.steps.find((s) =>
+			(s.run ?? "").includes("check-close-keywords.mjs"),
+		);
+		if (!step)
+			throw new Error(
+				"verify step not found in close-keyword-verification.yml",
+			);
+		// Mutation-proof: removing either line reds this. GH_TOKEN feeds the
+		// `gh` CLI calls (issue-state lookups, the PR comment); GITHUB_TOKEN
+		// feeds fetchLivePrBody -- check-pr-body.mjs reads that exact name,
+		// not GH_TOKEN, so the two are NOT interchangeable here even though
+		// they carry the same secret value.
+		expect(step.env?.GH_TOKEN).toBeTruthy();
+		expect(step.env?.GITHUB_TOKEN).toBeTruthy();
 	});
 });
