@@ -60,7 +60,7 @@ describe("topology-derived cache re-arm (#2263)", () => {
 				expect.objectContaining({ pattern: "@old/*" }),
 			]);
 			expect(aliasedImportTargets("@old/value", sourceDir)).toEqual([
-				path.join(env.tmpDir, "old/*").replace("*", "value"),
+				path.join(env.tmpDir, "old", "value"),
 			]);
 
 			const originalStat = fs.statSync(configPath);
