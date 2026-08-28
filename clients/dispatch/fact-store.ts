@@ -82,6 +82,14 @@ export class FactStore implements ReadonlyFactStore {
 	// mutation keeps getFileFact/setFileFact O(1) amortized; never scan the map
 	// to decide whether the byte budget is exceeded.
 	private retainedContentBytes = 0;
+	// Subset of retainedContentBytes held by currently pinned files (#2247
+	// review F2). Maintained incrementally the same way — a scan over
+	// `pinnedFiles` looks small in isolation, but `evictColdFileFacts` calls it
+	// on EVERY unpinned insert for as long as pinned bytes stay over budget, so
+	// a scan there would re-walk a large pinned file's full string on every
+	// single write admitted during that window. Keeping a running total avoids
+	// reintroducing exactly the scan `retainedContentBytes` exists to avoid.
+	private pinnedContentBytesTotal = 0;
 
 	/**
 	 * @param subject Discriminates this store's capacity-eviction telemetry
@@ -109,8 +117,10 @@ export class FactStore implements ReadonlyFactStore {
 			this.fileFacts.set(key, facts);
 		}
 		if (factId === "file.content") {
-			this.retainedContentBytes -= this.contentBytes(facts.get(factId));
-			this.retainedContentBytes += this.contentBytes(value);
+			const delta =
+				this.contentBytes(value) - this.contentBytes(facts.get(factId));
+			this.retainedContentBytes += delta;
+			if (this.pinnedFiles.has(key)) this.pinnedContentBytesTotal += delta;
 		}
 		facts.set(factId, value);
 		this.evictColdFileFacts();
@@ -127,7 +137,9 @@ export class FactStore implements ReadonlyFactStore {
 		const facts = this.fileFacts.get(key);
 		if (!facts) return;
 		if (factId === "file.content") {
-			this.retainedContentBytes -= this.contentBytes(facts.get(factId));
+			const dropped = this.contentBytes(facts.get(factId));
+			this.retainedContentBytes -= dropped;
+			if (this.pinnedFiles.has(key)) this.pinnedContentBytesTotal -= dropped;
 		}
 		facts.delete(factId);
 		if (facts.size === 0) this.fileFacts.delete(key);
@@ -191,14 +203,31 @@ export class FactStore implements ReadonlyFactStore {
 	}
 
 	private pinFile(key: string): void {
-		this.pinnedFiles.set(key, (this.pinnedFiles.get(key) ?? 0) + 1);
+		const count = this.pinnedFiles.get(key) ?? 0;
+		// Transition from unpinned to pinned: this file's content joins the
+		// pinned subset. A refcount bump past 1 (an already-pinned file, two
+		// overlapping dispatches) does not — it is already counted.
+		if (count === 0) {
+			this.pinnedContentBytesTotal += this.contentBytes(
+				this.fileFacts.get(key)?.get("file.content"),
+			);
+		}
+		this.pinnedFiles.set(key, count + 1);
 	}
 
 	private unpinFile(key: string): void {
 		const count = this.pinnedFiles.get(key);
 		if (count === undefined) return;
-		if (count <= 1) this.pinnedFiles.delete(key);
-		else this.pinnedFiles.set(key, count - 1);
+		if (count <= 1) {
+			this.pinnedFiles.delete(key);
+			// Transition from pinned to unpinned: this file's content leaves the
+			// pinned subset.
+			this.pinnedContentBytesTotal -= this.contentBytes(
+				this.fileFacts.get(key)?.get("file.content"),
+			);
+		} else {
+			this.pinnedFiles.set(key, count - 1);
+		}
 	}
 
 	/** Drop least-recently-used records past either cap, skipping the files whose
@@ -220,7 +249,10 @@ export class FactStore implements ReadonlyFactStore {
 		for (const key of this.fileFacts.keys()) {
 			if (this.pinnedFiles.has(key)) continue;
 			const axis = this.capacityAxis();
-			if (axis === "bytes" && this.pinnedContentBytes() > MAX_FILE_FACT_CONTENT_BYTES) {
+			if (
+				axis === "bytes" &&
+				this.pinnedContentBytesTotal > MAX_FILE_FACT_CONTENT_BYTES
+			) {
 				this.reportPinnedOverBudget();
 				return;
 			}
@@ -245,24 +277,12 @@ export class FactStore implements ReadonlyFactStore {
 		return typeof value === "string" ? Buffer.byteLength(value, "utf8") : 0;
 	}
 
-	/** Sum of `file.content` bytes across currently pinned files only. Scans
-	 *  `pinnedFiles`, not the whole map — that set tracks dispatches actually
-	 *  in flight, so it stays small even when `fileFacts` holds up to 1024
-	 *  records (#2247 review F2). Called only while over the byte budget, not
-	 *  on every insert, so it does not reintroduce the whole-map scan the
-	 *  running `retainedContentBytes` total exists to avoid. */
-	private pinnedContentBytes(): number {
-		let total = 0;
-		for (const key of this.pinnedFiles.keys()) {
-			total += this.contentBytes(this.fileFacts.get(key)?.get("file.content"));
-		}
-		return total;
-	}
-
 	private deleteFileFactsRecord(key: string): void {
 		const facts = this.fileFacts.get(key);
 		if (!facts) return;
-		this.retainedContentBytes -= this.contentBytes(facts.get("file.content"));
+		const dropped = this.contentBytes(facts.get("file.content"));
+		this.retainedContentBytes -= dropped;
+		if (this.pinnedFiles.has(key)) this.pinnedContentBytesTotal -= dropped;
 		this.fileFacts.delete(key);
 	}
 
@@ -293,7 +313,7 @@ export class FactStore implements ReadonlyFactStore {
 	// than reusing `reportCapacityEviction`'s "evicted least-recently-used
 	// fact for X" language, which would misdescribe what happened.
 	private reportPinnedOverBudget(): void {
-		const pinnedBytes = this.pinnedContentBytes();
+		const pinnedBytes = this.pinnedContentBytesTotal;
 		capacityEvictionReporter?.(
 			this.subject,
 			"pinned-over-budget",
@@ -330,5 +350,6 @@ export class FactStore implements ReadonlyFactStore {
 		this.sessionFacts.clear();
 		this.pinnedFiles.clear();
 		this.retainedContentBytes = 0;
+		this.pinnedContentBytesTotal = 0;
 	}
 }

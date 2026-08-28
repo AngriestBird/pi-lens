@@ -369,7 +369,9 @@ describe("FactStore file-fact bound (#2240)", () => {
 		expect(group).toBeDefined();
 		expect(group?.count).toBe(1);
 		expect(group?.latestReasons.at(-1)?.subject).toBe("dispatch");
-		expect(group?.latestReasons.at(-1)?.reason).toContain("pinned content bytes");
+		expect(group?.latestReasons.at(-1)?.reason).toContain(
+			"pinned content bytes",
+		);
 
 		// A regular byte-axis eviction still applies once pins release and
 		// pressure is unpinned-driven again.
