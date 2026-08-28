@@ -1876,6 +1876,12 @@ function activateExtension(hostPi: ExtensionAPI) {
 					// new primary. A crash or forced kill can skip session_shutdown's
 					// own emit+reset below, so the rollup also re-arms here rather than
 					// trusting shutdown alone (AGENTS.md catalog shape 17).
+					// #2312 review F1: on the sequential-replacement path (prior primary
+					// never reached session_shutdown), the reset below would otherwise
+					// silently discard an unemitted tally. Emit first — a no-op when
+					// nothing was declined — so the crash/kill case still produces its
+					// one summary row instead of losing it.
+					emitConcurrentSessionBindRollupAtSessionEnd(runtime.projectRoot);
 					resetConcurrentSessionBindRollupCounts();
 
 					// Dynamic tooling (#pi 0.80.x+): put the active tool set back to the

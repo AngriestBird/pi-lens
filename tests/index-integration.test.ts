@@ -449,6 +449,13 @@ describe("index.ts integration", () => {
 	it(
 		"a NEW primary's session_start clears a stale rollup left by a crashed prior primary",
 		async () => {
+			const logLatency = vi.fn();
+			vi.doMock("../clients/latency-logger.js", async (importActual) => ({
+				...(await importActual<
+					typeof import("../clients/latency-logger.js")
+				>()),
+				logLatency,
+			}));
 			const observability =
 				await import("../clients/session-start-observability.js");
 			// Simulates a prior primary session that logged a decline and then
@@ -471,6 +478,27 @@ describe("index.ts integration", () => {
 				"secondary-root": 0,
 				unclassified: 0,
 			});
+			// #2312 review F1: the crashed prior primary never reached
+			// session_shutdown, so its tally would otherwise be silently
+			// discarded by the reset above instead of summarized. The fresh
+			// primary's session_start must emit the stale tally before
+			// clearing it — exactly one row, not zero and not more.
+			const rollups = logLatency.mock.calls.filter(
+				([row]) =>
+					(row as { phase?: string }).phase ===
+					"concurrent_session_bind_rollup",
+			);
+			expect(rollups).toHaveLength(1);
+			expect(rollups[0][0]).toEqual(
+				expect.objectContaining({
+					phase: "concurrent_session_bind_rollup",
+					metadata: {
+						"concurrent-secondary": 1,
+						"secondary-root": 0,
+						unclassified: 0,
+					},
+				}),
+			);
 		},
 		INTEGRATION_TIMEOUT_MS,
 	);

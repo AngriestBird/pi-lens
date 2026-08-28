@@ -97,24 +97,68 @@ describe("findPhaseEntries / phaseWasLogged", () => {
 	// index.ts's session_shutdown handler) shares a prefix with
 	// `concurrent_session_bind` (the per-bind record, #473). Exact-match only —
 	// a naive substring/prefix check would conflate the two.
-	it("distinguishes concurrent_session_bind from its concurrent_session_bind_rollup sibling", () => {
-		const mixed = [
-			{
-				type: "phase",
-				phase: "concurrent_session_bind",
-				ts: "2026-07-10T10:00:00.000Z",
-			},
-			{
-				type: "phase",
-				phase: "concurrent_session_bind_rollup",
-				ts: "2026-07-10T10:00:01.000Z",
-			},
-		];
-		expect(findPhaseEntries(mixed, "concurrent_session_bind")).toHaveLength(1);
-		expect(
-			findPhaseEntries(mixed, "concurrent_session_bind_rollup"),
-		).toHaveLength(1);
-		expect(phaseWasLogged(mixed, "concurrent_session_bind_rollup")).toBe(true);
+	//
+	// #2312 review F2: hand-built literal objects never touch the feature — the
+	// prior version of this test passed with the whole PR reverted. Drive the
+	// REAL seam instead: the actual `logConcurrentSessionBind`/
+	// `emitConcurrentSessionBindRollupAtSessionEnd` production functions write
+	// through the real `logLatency` sink into a real NDJSON file
+	// (`PI_LENS_HOME` is a per-worker temp dir, set globally by
+	// tests/support/vitest-setup.ts), then `findPhaseEntries` parses that file
+	// back. Deleting `session-start-observability.ts`'s exports, or its call to
+	// `logLatency`, breaks this test structurally (import/behavioral failure),
+	// not just a hand-maintained fixture.
+	it("distinguishes concurrent_session_bind from its concurrent_session_bind_rollup sibling, driven through the real logging seam", async () => {
+		const previousTestMode = process.env.PI_LENS_TEST_MODE;
+		process.env.PI_LENS_TEST_MODE = "0";
+		try {
+			const {
+				clearLatencyLog,
+				flushLatencyLog,
+				getLatencyLogPath,
+			} = await import("../../clients/latency-logger.js");
+			const {
+				logConcurrentSessionBind,
+				emitConcurrentSessionBindRollupAtSessionEnd,
+				resetConcurrentSessionBindRollupCounts,
+			} = await import("../../clients/session-start-observability.js");
+			const fs = await import("node:fs");
+
+			resetConcurrentSessionBindRollupCounts();
+			clearLatencyLog();
+			await flushLatencyLog();
+
+			// One per-bind record (#473's `concurrent_session_bind`)...
+			logConcurrentSessionBind({
+				secondaryCount: 1,
+				sameCwd: true,
+				classification: "concurrent-secondary",
+			});
+			// ...then the real session-end summary
+			// (`concurrent_session_bind_rollup`), sharing the `concurrent_session_bind`
+			// prefix.
+			emitConcurrentSessionBindRollupAtSessionEnd("/tmp/f2-real-seam");
+			await flushLatencyLog();
+
+			const text = fs.readFileSync(getLatencyLogPath(), "utf8");
+			const entries = parseNdjsonEntries(text);
+
+			expect(findPhaseEntries(entries, "concurrent_session_bind")).toHaveLength(
+				1,
+			);
+			expect(
+				findPhaseEntries(entries, "concurrent_session_bind_rollup"),
+			).toHaveLength(1);
+			expect(phaseWasLogged(entries, "concurrent_session_bind_rollup")).toBe(
+				true,
+			);
+		} finally {
+			if (previousTestMode === undefined) {
+				delete process.env.PI_LENS_TEST_MODE;
+			} else {
+				process.env.PI_LENS_TEST_MODE = previousTestMode;
+			}
+		}
 	});
 });
 

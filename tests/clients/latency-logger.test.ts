@@ -226,6 +226,28 @@ describe("getLastLoggedPhase (loop_block attribution, #1122/#1123)", () => {
 		});
 		expect(getLastLoggedPhase()?.phase).toBe("turn_end_tests");
 	});
+
+	// #2249/#2312 review F3: `concurrent_session_bind_rollup` is a zero-duration
+	// session-end summary, the same shape as `session_end_bus_rollup` and
+	// `path_attribution_verified_rollup` above — it must not win lastPhase
+	// attribution for a loop_block that happens to land right after it. Pins
+	// the `LAST_PHASE_EXCLUDED` entry so deleting it reds here instead of
+	// surviving unnoticed.
+	it("does not let the concurrent-session-bind rollup own stall attribution (#2249)", () => {
+		logLatency({
+			type: "phase",
+			phase: "provider_request",
+			filePath: "<pi-lens>",
+			durationMs: 5,
+		});
+		logLatency({
+			type: "phase",
+			phase: "concurrent_session_bind_rollup",
+			filePath: "<pi-lens>",
+			durationMs: 0,
+		});
+		expect(getLastLoggedPhase()?.phase).toBe("provider_request");
+	});
 });
 
 describe("getRecentLoggedPhases (#1723: bounded attribution ring)", () => {
