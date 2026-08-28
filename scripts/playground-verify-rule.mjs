@@ -558,18 +558,19 @@ async function main() {
 		// we didn't send (its own default sample, or a stale one from an
 		// upstream field-name change) — never trust the count in that case.
 		if (!scrape.sentinelFound) {
-			// #2306: the source pane rendering a stable, non-empty
-			// `sourceLen` that still doesn't contain the (whitespace-
-			// normalized) sentinel points at a sentinel-normalization
-			// mismatch in THIS harness — a Monaco whitespace substitution
-			// buildScrapeExpr's collapseWhitespace doesn't yet cover — ahead
-			// of genuine upstream schema drift (state.source renamed/moved),
-			// which is a real but less likely cause of the same signal.
+			// #2306: a stable, non-empty `sourceLen` rules out "the pane is
+			// still mounting" — it does NOT pick between the two remaining
+			// causes. A Monaco whitespace substitution collapseWhitespace
+			// doesn't yet cover and upstream schema drift (state.source
+			// renamed/moved, so the page renders its own default sample)
+			// both render a stable pane the sentinel can't be found in, so
+			// the early-exit message narrows the search without claiming
+			// which one it is.
 			const result = {
 				ok: false,
 				rule_id: rule.id,
 				error: pollStability.concludedEarly
-					? "caller's source did not appear in the playground page after whitespace normalization, and the source pane is stable (not still rendering) — likely a sentinel-normalization mismatch in this harness (an un-normalized Monaco whitespace substitution), not upstream schema drift"
+					? "caller's source did not appear in the playground page after whitespace normalization, and the source pane is stable (done rendering) — either a sentinel-normalization mismatch in this harness (an un-normalized Monaco whitespace substitution) or upstream schema drift (state.source field renamed/moved, leaving the page's own default sample rendered), not a real 0-match result"
 					: "caller's source did not appear in the playground page after whitespace normalization — likely a sentinel-normalization mismatch in this harness (an un-normalized Monaco whitespace substitution) or upstream schema drift (state.source field renamed/moved), not a real 0-match result",
 				matches_reported_by_page: scrape.count,
 				polls,
