@@ -27,6 +27,11 @@ afterEach(() => setFactStoreEvictionReporter(undefined));
 // eviction. A dispatch pins its file at start and releases it at completion.
 const MAX_RECORDS = 1024;
 const BATCH = 2000;
+const MIB = 1024 * 1024;
+
+function contentOfBytes(bytes: number): string {
+	return "x".repeat(bytes);
+}
 
 function batchPaths(prefix: string, count = BATCH): string[] {
 	return Array.from({ length: count }, (_, i) => `/repo/src/${prefix}-${i}.ts`);
@@ -66,6 +71,55 @@ describe("FactStore file-fact bound (#2240)", () => {
 
 		expect(store.hasFileFact(paths[0], "file.content")).toBe(true);
 		expect(store.hasFileFact(paths[1], "file.content")).toBe(false);
+	});
+
+	it("evicts on retained content bytes before the record cap is reached", () => {
+		const store = new FactStore();
+		const paths = batchPaths("byte-pressure", 3);
+		for (const p of paths) {
+			store.setFileFact(p, "file.content", contentOfBytes(24 * MIB));
+		}
+
+		expect(store.hasFileFact(paths[0], "file.content")).toBe(false);
+		expect(retained(store, paths)).toBe(2);
+	});
+
+	it("weighs retained content as UTF-8 bytes rather than string length", () => {
+		const store = new FactStore();
+		const paths = batchPaths("utf8-byte-pressure", 2);
+		// Two strings total 36 MiB in JavaScript length but 72 MiB in UTF-8.
+		for (const p of paths) {
+			store.setFileFact(p, "file.content", "😀".repeat(9 * MIB));
+		}
+
+		expect(store.hasFileFact(paths[0], "file.content")).toBe(false);
+		expect(store.hasFileFact(paths[1], "file.content")).toBe(true);
+	});
+
+	it("keeps pinned content under byte pressure and evicts it after unpin", () => {
+		const store = new FactStore();
+		const active = "/repo/src/byte-pinned.ts";
+		store.clearFileFactsFor(active);
+		store.setFileFact(active, "file.content", contentOfBytes(40 * MIB));
+		store.setFileFact(
+			"/repo/src/pressure-1.ts",
+			"file.content",
+			contentOfBytes(20 * MIB),
+		);
+		store.setFileFact(
+			"/repo/src/pressure-2.ts",
+			"file.content",
+			contentOfBytes(20 * MIB),
+		);
+
+		expect(store.hasFileFact(active, "file.content")).toBe(true);
+		store.endDispatchFor(active);
+		store.setFileFact(
+			"/repo/src/pressure-3.ts",
+			"file.content",
+			contentOfBytes(20 * MIB),
+		);
+		expect(store.hasFileFact(active, "file.content")).toBe(false);
 	});
 
 	it("never evicts the file whose dispatch is in flight", () => {
@@ -194,6 +248,7 @@ describe("FactStore file-fact bound (#2240)", () => {
 		expect(group?.latestReasons.at(-1)?.reason).toContain(
 			normalizeMapKey(paths[0]),
 		);
+		expect(group?.latestReasons.at(-1)?.reason).toContain("axis=count");
 
 		// Further evictions in the same session do not add a second record.
 		for (const p of batchPaths("evict2"))
@@ -206,6 +261,21 @@ describe("FactStore file-fact bound (#2240)", () => {
 		for (const p of batchPaths("evict3"))
 			store2.setFileFact(p, "file.content", "x");
 		expect(find()?.count).toBe(1);
+	});
+
+	it("records the byte axis when retained content triggers eviction", () => {
+		resetDegradationLedger();
+		setFactStoreEvictionReporter(productionEvictionReporter);
+		const store = new FactStore("dispatch-byte-axis");
+		for (const p of batchPaths("byte-axis", 3)) {
+			store.setFileFact(p, "file.content", contentOfBytes(24 * MIB));
+		}
+
+		const group = getDegradationSummary().find(
+			(g) => g.kind === "fact-store-capacity-eviction",
+		);
+		expect(group?.latestReasons.at(-1)?.subject).toBe("dispatch-byte-axis");
+		expect(group?.latestReasons.at(-1)?.reason).toContain("axis=bytes");
 	});
 
 	// #2243 review round 3 (F1): a DIFFERENT store — a different subject —
@@ -239,7 +309,7 @@ describe("FactStore file-fact bound (#2240)", () => {
 	it("emits capacity eviction through the injected reporter", () => {
 		const reasons: string[] = [];
 		const subjects: string[] = [];
-		setFactStoreEvictionReporter((subject, reason) => {
+		setFactStoreEvictionReporter((subject, _axis, reason) => {
 			subjects.push(subject);
 			reasons.push(reason);
 		});

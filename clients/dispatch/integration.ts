@@ -194,7 +194,7 @@ const sessionFacts = new FactStore("dispatch");
 // `setFactStoreEvictionReporter`). The reporter forwards each store's own
 // subject, so the ledger's per-kind+subject dedupe emits exactly ONE record
 // per session PER STORE, re-arming when the ledger resets at session_start.
-setFactStoreEvictionReporter((subject, reason) => {
+setFactStoreEvictionReporter((subject, _axis, reason) => {
 	recordDegradationOnce({
 		kind: "fact-store-capacity-eviction",
 		subject,

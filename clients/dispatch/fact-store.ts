@@ -23,6 +23,7 @@ import { normalizeMapKey } from "../path-utils.js";
 // once-per-session record.
 export type CapacityEvictionReporter = (
 	subject: string,
+	axis: "count" | "bytes",
 	reason: string,
 ) => void;
 let capacityEvictionReporter: CapacityEvictionReporter | undefined;
@@ -46,6 +47,10 @@ export function getFactStoreEvictionReporter():
 // until the heap ran out. Bound the record count the way widget-state.ts bounds
 // its file records.
 const MAX_FILE_FACT_RECORDS = 1024;
+// Keep enough content for 1024 typical source files averaging 64 KiB, while
+// preventing a small number of generated or vendored files from retaining
+// hundreds of MiB for the process lifetime (#2247).
+const MAX_FILE_FACT_CONTENT_BYTES = 64 * 1024 * 1024;
 // Pinned records are exempt from capacity eviction. A dispatch reads its
 // file's facts back after the runner groups settle (`file.content` misses read as
 // empty content, not as "re-derive"), and the fire-and-forget blast-radius
@@ -73,6 +78,10 @@ export class FactStore implements ReadonlyFactStore {
 	// count is > 0. Refcounted, not a Set, so two overlapping dispatches of the
 	// same file both hold the pin until BOTH settle (#2243 item 2).
 	private readonly pinnedFiles = new Map<string, number>();
+	// Running UTF-8 byte total for file.content only. Maintaining it at every
+	// mutation keeps getFileFact/setFileFact O(1) amortized; never scan the map
+	// to decide whether the byte budget is exceeded.
+	private retainedContentBytes = 0;
 
 	/**
 	 * @param subject Discriminates this store's capacity-eviction telemetry
@@ -99,6 +108,10 @@ export class FactStore implements ReadonlyFactStore {
 			facts = new Map();
 			this.fileFacts.set(key, facts);
 		}
+		if (factId === "file.content") {
+			this.retainedContentBytes -= this.contentBytes(facts.get(factId));
+			this.retainedContentBytes += this.contentBytes(value);
+		}
 		facts.set(factId, value);
 		this.evictColdFileFacts();
 	}
@@ -113,6 +126,9 @@ export class FactStore implements ReadonlyFactStore {
 		const key = normalizeMapKey(filePath);
 		const facts = this.fileFacts.get(key);
 		if (!facts) return;
+		if (factId === "file.content") {
+			this.retainedContentBytes -= this.contentBytes(facts.get(factId));
+		}
 		facts.delete(factId);
 		if (facts.size === 0) this.fileFacts.delete(key);
 	}
@@ -126,7 +142,7 @@ export class FactStore implements ReadonlyFactStore {
 	 *  Every `clearFileFactsFor` MUST be paired with an `endDispatchFor`. */
 	clearFileFactsFor(filePath: string): void {
 		const key = normalizeMapKey(filePath);
-		this.fileFacts.delete(key);
+		this.deleteFileFactsRecord(key);
 		this.pinFile(key);
 	}
 
@@ -161,7 +177,7 @@ export class FactStore implements ReadonlyFactStore {
 	 *  pinning there would exempt every scanned file from the capacity cap and
 	 *  defeat it. Normalizes filePath internally. */
 	dropFileFacts(filePath: string): void {
-		this.fileFacts.delete(normalizeMapKey(filePath));
+		this.deleteFileFactsRecord(normalizeMapKey(filePath));
 	}
 
 	/** LRU touch: re-inserting an existing record moves it to the end of the
@@ -185,16 +201,40 @@ export class FactStore implements ReadonlyFactStore {
 		else this.pinnedFiles.set(key, count - 1);
 	}
 
-	/** Drop least-recently-used records past the cap, skipping the files whose
-	 *  dispatch pinned them. Pins survive until endDispatchFor or clearAll. */
+	/** Drop least-recently-used records past either cap, skipping the files whose
+	 *  dispatch pinned them. Pinned content counts toward the byte total, but is
+	 *  never evicted before endDispatchFor. Pins survive until clearAll. */
 	private evictColdFileFacts(): void {
-		if (this.fileFacts.size <= MAX_FILE_FACT_RECORDS) return;
+		if (!this.overCapacity()) return;
 		for (const key of this.fileFacts.keys()) {
 			if (this.pinnedFiles.has(key)) continue;
-			this.fileFacts.delete(key);
-			this.reportCapacityEviction(key);
-			if (this.fileFacts.size <= MAX_FILE_FACT_RECORDS) return;
+			const axis = this.capacityAxis();
+			this.deleteFileFactsRecord(key);
+			this.reportCapacityEviction(key, axis);
+			if (!this.overCapacity()) return;
 		}
+	}
+
+	private overCapacity(): boolean {
+		return (
+			this.fileFacts.size > MAX_FILE_FACT_RECORDS ||
+			this.retainedContentBytes > MAX_FILE_FACT_CONTENT_BYTES
+		);
+	}
+
+	private capacityAxis(): "count" | "bytes" {
+		return this.fileFacts.size > MAX_FILE_FACT_RECORDS ? "count" : "bytes";
+	}
+
+	private contentBytes(value: unknown): number {
+		return typeof value === "string" ? Buffer.byteLength(value, "utf8") : 0;
+	}
+
+	private deleteFileFactsRecord(key: string): void {
+		const facts = this.fileFacts.get(key);
+		if (!facts) return;
+		this.retainedContentBytes -= this.contentBytes(facts.get("file.content"));
+		this.fileFacts.delete(key);
 	}
 
 	// #2243 item 4: the cap silently drops a fact a live dispatch may read back
@@ -206,10 +246,16 @@ export class FactStore implements ReadonlyFactStore {
 	// ONE record per session PER STORE (re-arming at session_start when the
 	// ledger resets) — no latch or generation compare here, so fact-store
 	// keeps no session-scoped state to forget to re-arm.
-	private reportCapacityEviction(evictedKey: string): void {
+	private reportCapacityEviction(
+		evictedKey: string,
+		axis: "count" | "bytes",
+	): void {
 		capacityEvictionReporter?.(
 			this.subject,
-			`file-fact store exceeded ${MAX_FILE_FACT_RECORDS} records; evicted least-recently-used fact for ${evictedKey}`,
+			axis,
+			axis === "count"
+				? `file-fact store axis=count exceeded ${MAX_FILE_FACT_RECORDS} records; evicted least-recently-used fact for ${evictedKey}`
+				: `file-fact store axis=bytes exceeded ${MAX_FILE_FACT_CONTENT_BYTES} retained content bytes; evicted least-recently-used fact for ${evictedKey}`,
 		);
 	}
 
@@ -230,5 +276,6 @@ export class FactStore implements ReadonlyFactStore {
 		this.fileFacts.clear();
 		this.sessionFacts.clear();
 		this.pinnedFiles.clear();
+		this.retainedContentBytes = 0;
 	}
 }
