@@ -1069,8 +1069,8 @@ export async function dispatchForFile(
 	// key stays self-consistent within a session.
 	const baselineRelKey = `session.baseline.${normalizeEphemeralMapKey(relativeKey)}`;
 	const previousBaseline = ctx.deltaMode
-		? (ctx.facts.getSessionFact<Diagnostic[]>(baselineAbsKey) ??
-			ctx.facts.getSessionFact<Diagnostic[]>(baselineRelKey))
+		? (ctx.facts.getBoundedSessionFact<Diagnostic[]>(baselineAbsKey) ??
+			ctx.facts.getBoundedSessionFact<Diagnostic[]>(baselineRelKey))
 		: undefined;
 	const baselineWarnings = previousBaseline?.filter(
 		(d) => d.semantic === "warning" || d.semantic === "none",
@@ -1159,8 +1159,8 @@ export async function dispatchForFile(
 
 	// Persist full current snapshot for next run (not delta-filtered subset).
 	if (ctx.deltaMode) {
-		ctx.facts.setSessionFact(baselineAbsKey, [...dedupedDiagnostics]);
-		ctx.facts.setSessionFact(baselineRelKey, [...dedupedDiagnostics]);
+		ctx.facts.setBoundedSessionFact(baselineAbsKey, [...dedupedDiagnostics]);
+		ctx.facts.setBoundedSessionFact(baselineRelKey, [...dedupedDiagnostics]);
 	}
 
 	// Categorize results

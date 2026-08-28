@@ -23,7 +23,7 @@ import { normalizeMapKey } from "../path-utils.js";
 // once-per-session record.
 export type CapacityEvictionReporter = (
 	subject: string,
-	axis: "count" | "bytes" | "pinned-over-budget",
+	axis: "count" | "bytes" | "pinned-over-budget" | "session-count",
 	reason: string,
 ) => void;
 let capacityEvictionReporter: CapacityEvictionReporter | undefined;
@@ -63,6 +63,23 @@ const MAX_FILE_FACT_CONTENT_BYTES = 64 * 1024 * 1024;
 // pin set therefore tracks dispatches actually IN FLIGHT, not the last N files
 // touched.
 
+// #2282: `sessionFacts` below is a flat `Map<factId, value>` shared by two
+// unrelated fact shapes — a small FIXED vocabulary (tool availability keyed by
+// command, the singleton "session.reviewGraph") and PER-FILE families that
+// mint one key per file touched (session baseline, cascade baseline, review-
+// graph entity snapshots) and never shrink. Only the second shape grows with
+// batch size, so only it gets a bound; the fixed vocabulary stays on the plain
+// map, unbounded, because its cardinality is small and stable. Per-file
+// session facts opt into `boundedSessionFacts` instead, reusing fileFacts'
+// LRU-count-cap-and-report discipline rather than adding a third mechanism.
+// No pin exemption here (unlike fileFacts): every current per-file session
+// fact is read once near dispatch start and written once at dispatch end, so
+// nothing re-reads its OWN key later in the same dispatch the way a runner
+// re-reads `file.content` — an eviction mid-batch only means the next dispatch
+// of that path sees no previous baseline, the same safe state as its first
+// ever dispatch this session.
+const MAX_SESSION_FACT_RECORDS = 4096;
+
 export interface ReadonlyFactStore {
 	getFileFact<T>(filePath: string, factId: string): T | undefined;
 	hasFileFact(filePath: string, factId: string): boolean;
@@ -74,6 +91,9 @@ export class FactStore implements ReadonlyFactStore {
 	// Insertion order is eviction order: the oldest-used record is evicted first.
 	private readonly fileFacts = new Map<string, Map<string, unknown>>();
 	private readonly sessionFacts = new Map<string, unknown>();
+	// Bounded sibling of `sessionFacts` for per-file-keyed session facts (#2282).
+	// Same insertion-order-is-eviction-order convention as `fileFacts`.
+	private readonly boundedSessionFacts = new Map<string, unknown>();
 	// Pin refcount per file. A file is exempt from capacity eviction while its
 	// count is > 0. Refcounted, not a Set, so two overlapping dispatches of the
 	// same file both hold the pin until BOTH settle (#2243 item 2).
@@ -355,10 +375,57 @@ export class FactStore implements ReadonlyFactStore {
 		return this.sessionFacts.has(factId);
 	}
 
+	/** Bounded counterpart to {@link getSessionFact} for per-file-keyed session
+	 *  facts (#2282) — session baselines, cascade baselines, review-graph entity
+	 *  snapshots. LRU touch: a read moves the record off the eviction end. */
+	getBoundedSessionFact<T>(factId: string): T | undefined {
+		const facts = this.boundedSessionFacts;
+		if (!facts.has(factId)) return undefined;
+		const value = facts.get(factId);
+		facts.delete(factId);
+		facts.set(factId, value);
+		return value as T;
+	}
+
+	/** Bounded counterpart to {@link setSessionFact}. Callers use this instead
+	 *  of `setSessionFact` for any family that mints one key per file/entity
+	 *  touched, so the store's count stays bounded across a large batch instead
+	 *  of retaining one entry per distinct path for the process lifetime. */
+	setBoundedSessionFact(factId: string, value: unknown): void {
+		this.boundedSessionFacts.delete(factId);
+		this.boundedSessionFacts.set(factId, value);
+		this.evictColdBoundedSessionFacts();
+	}
+
+	hasBoundedSessionFact(factId: string): boolean {
+		return this.boundedSessionFacts.has(factId);
+	}
+
+	/** O(1) entry count for memory-attribution sampling (#2282 Observability):
+	 *  the fixed-vocabulary map plus the bounded per-file map, so a caller gets
+	 *  this store's whole `sessionFacts` footprint in one number. */
+	getSessionFactEntryCount(): number {
+		return this.sessionFacts.size + this.boundedSessionFacts.size;
+	}
+
+	private evictColdBoundedSessionFacts(): void {
+		while (this.boundedSessionFacts.size > MAX_SESSION_FACT_RECORDS) {
+			const oldestKey = this.boundedSessionFacts.keys().next().value;
+			if (oldestKey === undefined) break;
+			this.boundedSessionFacts.delete(oldestKey);
+			capacityEvictionReporter?.(
+				this.subject,
+				"session-count",
+				`session-fact store axis=count exceeded ${MAX_SESSION_FACT_RECORDS} records; evicted least-recently-used fact for ${oldestKey}`,
+			);
+		}
+	}
+
 	/** Call on session reset only. Clears everything including tool cache and baselines. */
 	clearAll(): void {
 		this.fileFacts.clear();
 		this.sessionFacts.clear();
+		this.boundedSessionFacts.clear();
 		this.pinnedFiles.clear();
 		this.retainedContentBytes = 0;
 		this.pinnedContentBytesTotal = 0;

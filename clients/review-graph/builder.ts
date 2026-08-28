@@ -762,12 +762,15 @@ function headSliceGraph(graph: ReviewGraph, cap: number): ReviewGraph {
  * This bounds the VALUE, not the store, and deliberately adds no second bounding
  * mechanism to `FactStore` (#2243 owns the store-level discipline).
  *
- * `sessionFacts` entry COUNT is not fully bounded — `session.baseline.${path}`
- * (`dispatch/dispatcher.ts`) and `session.baseline.cascade.${path}`
- * (`dispatch/integration.ts`) mint one key per file touched and clear only on
- * `clearAll`. That is #2282, a separate #2240 sibling; it is
- * per-file `Diagnostic[]`, not a whole project graph. What this seam fixes is the
- * one fact whose single VALUE is unbounded in project size.
+ * `sessionFacts` entry COUNT (a separate #2240 sibling, #2282) is now bounded
+ * too: `session.baseline.${path}` (`dispatch/dispatcher.ts`),
+ * `session.baseline.cascade.${path}` (`dispatch/integration.ts`), and this
+ * module's own `changedSymbols`/`entitySnapshot` per-file keys all go through
+ * `FactStore.setBoundedSessionFact`/`getBoundedSessionFact`, an LRU-count-cap
+ * sibling of the per-file `fileFacts` bound reusing the SAME discipline
+ * (#2243), not a second mechanism. `session.reviewGraph` itself stays on the
+ * plain, unbounded `sessionFacts` map — its key is a fixed singleton, so the
+ * VALUE bound below is what keeps IT small, not an entry-count cap.
  */
 function setSessionReviewGraphFact(
 	cwd: string,
@@ -3618,7 +3621,7 @@ function upsertChangedSymbols(
 	// #260: tests aren't in the graph, so don't track their changed symbols.
 	if (detectFileRole(filePath) === "test") return;
 	const normalized = normalizeMapKey(filePath);
-	const changed = facts.getSessionFact<string[]>(
+	const changed = facts.getBoundedSessionFact<string[]>(
 		`${CHANGED_SYMBOLS_PREFIX}${normalized}`,
 	);
 	if (changed && changed.length > 0) {

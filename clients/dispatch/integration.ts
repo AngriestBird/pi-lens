@@ -570,12 +570,19 @@ const recentlyCleanNeighborCache = new Map<
 >();
 
 /** O(1) entry count of this module's turn-bounded cache (#1123 item 2
- *  memory attribution) — a `Map.size` read, never iterated. */
+ *  memory attribution) — a `Map.size` read, never iterated.
+ *  `sessionFactEntries` (#2282) is the dispatch `FactStore`'s own
+ *  `sessionFacts` footprint: the fixed-vocabulary map (small, unbounded by
+ *  design) plus the bounded per-file map (capped at `MAX_SESSION_FACT_RECORDS`
+ *  — see `fact-store.ts`), so this number is now itself bounded rather than
+ *  invisible growth. */
 export function getDispatchCascadeCacheStats(): {
 	recentlyCleanNeighborCacheSize: number;
+	sessionFactEntries: number;
 } {
 	return {
 		recentlyCleanNeighborCacheSize: recentlyCleanNeighborCache.size,
+		sessionFactEntries: sessionFacts.getSessionFactEntryCount(),
 	};
 }
 const RECENTLY_CLEAN_TTL_TURNS = 5;
@@ -2406,11 +2413,11 @@ function applyCascadeDeltaBaselines(
 		const baselineKey = `session.baseline.cascade.${normalizeMapKey(neighbor.filePath)}`;
 		const previous =
 			cascadeDiagnosticBaselines.get(baselineKey) ??
-			sessionFacts.getSessionFact<import("./types.js").Diagnostic[]>(
+			sessionFacts.getBoundedSessionFact<import("./types.js").Diagnostic[]>(
 				baselineKey,
 			);
 		cascadeDiagnosticBaselines.set(baselineKey, [...neighbor.diagnostics]);
-		sessionFacts.setSessionFact(baselineKey, [...neighbor.diagnostics]);
+		sessionFacts.setBoundedSessionFact(baselineKey, [...neighbor.diagnostics]);
 		if (!previous) return neighbor;
 		const before = new Set(previous.map(diagnosticDeltaKey));
 		return {

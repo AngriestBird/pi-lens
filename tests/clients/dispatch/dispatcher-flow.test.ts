@@ -844,6 +844,6 @@ function setBaselineFacts(
 ): void {
 	const absKey = `session.baseline.${normalizeMapKey(normalizedFilePath)}`;
 	const relKey = `session.baseline.${normalizeMapKey("test.ts")}`;
-	facts.setSessionFact(absKey, diagnostics);
-	facts.setSessionFact(relKey, diagnostics);
+	facts.setBoundedSessionFact(absKey, diagnostics);
+	facts.setBoundedSessionFact(relKey, diagnostics);
 }

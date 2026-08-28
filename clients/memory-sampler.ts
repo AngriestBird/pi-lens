@@ -195,6 +195,9 @@ export interface MemorySampleSubsystems {
 	} | null;
 	dispatchCaches: {
 		recentlyCleanNeighborCacheSize: number;
+		/** Dispatch `FactStore`'s `sessionFacts` entry count — fixed vocabulary
+		 *  plus the bounded per-file map (#2282). */
+		sessionFactEntries: number;
 		/** Measured retained size of one `{ turnSeq, checkedAt }` cache entry. */
 		estimatedBytes: number;
 	};

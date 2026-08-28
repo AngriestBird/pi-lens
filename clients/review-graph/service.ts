@@ -55,7 +55,7 @@ export function recordEntitySnapshotDiff(
 	nextSnapshot: Map<string, string>,
 ): { added: string[]; removed: string[]; modified: string[] } {
 	const prev =
-		facts.getSessionFact<Map<string, string>>(
+		facts.getBoundedSessionFact<Map<string, string>>(
 			`${ENTITY_SNAPSHOT_PREFIX}${filePath}`,
 		) ?? new Map<string, string>();
 	const added: string[] = [];
@@ -77,10 +77,13 @@ export function recordEntitySnapshotDiff(
 				.filter(Boolean),
 		),
 	];
-	facts.setSessionFact(
+	facts.setBoundedSessionFact(
 		`${ENTITY_SNAPSHOT_PREFIX}${filePath}`,
 		new Map(nextSnapshot),
 	);
-	facts.setSessionFact(`${CHANGED_SYMBOLS_PREFIX}${filePath}`, changedSymbols);
+	facts.setBoundedSessionFact(
+		`${CHANGED_SYMBOLS_PREFIX}${filePath}`,
+		changedSymbols,
+	);
 	return { added, removed, modified };
 }
