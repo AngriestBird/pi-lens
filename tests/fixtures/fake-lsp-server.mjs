@@ -247,7 +247,8 @@ function handle(raw) {
 					},
 					diagnosticProvider: {
 						interFileDependencies: false,
-						workspaceDiagnostics: false,
+						workspaceDiagnostics:
+							process.env.FAKE_LSP_WORKSPACE_DIAGNOSTICS === "1",
 					},
 				},
 			},
@@ -521,6 +522,35 @@ function handle(raw) {
 					],
 			},
 		});
+		return;
+	}
+
+	// Programmable project-wide pull for real-wire workspace sweep tests.
+	if (data.method === "workspace/diagnostic") {
+		const reply = () => {
+			if (process.env.FAKE_LSP_WORKSPACE_DIAGNOSTIC_ERROR === "1") {
+				send({
+					jsonrpc: "2.0",
+					id: data.id,
+					error: { code: -32603, message: "fake workspace pull failed" },
+				});
+				return;
+			}
+			const uri = process.env.FAKE_LSP_WORKSPACE_DIAGNOSTIC_URI;
+			send({
+				jsonrpc: "2.0",
+				id: data.id,
+				result: {
+					items: uri ? [{ uri, kind: "full", items: [] }] : [],
+				},
+			});
+		};
+		const delay = Number.parseInt(
+			process.env.FAKE_LSP_WORKSPACE_DIAGNOSTIC_DELAY_MS ?? "0",
+			10,
+		);
+		if (delay > 0) setTimeout(reply, delay);
+		else reply();
 		return;
 	}
 
