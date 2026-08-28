@@ -432,8 +432,13 @@ export function parseClassifierMarker(commentBody) {
  *
  * @param {{ classification: Classification, sha: string, existingMarker: { sha: string, rerunTriggered: boolean } | null }} args
  */
-export function shouldTriggerRerun({ classification, sha, existingMarker }) {
-	if (classification.kind === "real") return false;
+export function shouldTriggerRerun({
+	classification,
+	sha,
+	existingMarker,
+	rerunKinds = ["infra-kill", "infra-net"],
+}) {
+	if (!rerunKinds.includes(classification.kind)) return false;
 	if (
 		existingMarker &&
 		existingMarker.sha === sha &&
@@ -589,11 +594,9 @@ export async function fetchRunAndFailedJob({
 		`${base}/actions/runs/${runId}/jobs`,
 	);
 	const jobs = jobsResponse.jobs ?? [];
-	const failedJob =
-		jobs.find(
-			(job) =>
-				job.conclusion === "failure" && (!jobName || job.name === jobName),
-		) ?? jobs.find((job) => job.conclusion === "failure");
+	const failedJob = jobName
+		? jobs.find((job) => job.conclusion === "failure" && job.name === jobName)
+		: jobs.find((job) => job.conclusion === "failure");
 	if (!failedJob) {
 		throw new Error(
 			`run ${runId} has no failed job${jobName ? ` named "${jobName}"` : ""}`,
@@ -752,13 +755,43 @@ export async function runClassifier({
 	runId,
 	jobName,
 	prNumber: prNumberOverride,
+	sha: shaOverride,
+	rerunKinds,
+	skipMissingJob = false,
 }) {
+	let runAndJob;
+	try {
+		runAndJob = await fetchRunAndFailedJob({
+			fetcher,
+			owner,
+			repo,
+			runId,
+			jobName,
+		});
+	} catch (error) {
+		if (
+			skipMissingJob &&
+			error instanceof Error &&
+			error.message.includes("has no failed job")
+		) {
+			return { skipped: true, reason: error.message };
+		}
+		await commentClassificationFailure({
+			fetcher,
+			owner,
+			repo,
+			prNumber: prNumberOverride,
+			sha: shaOverride,
+			error,
+		});
+		throw error;
+	}
 	const {
 		sha,
 		prNumber: resolvedPrNumber,
 		jobId,
 		jobName: resolvedJobName,
-	} = await fetchRunAndFailedJob({ fetcher, owner, repo, runId, jobName });
+	} = runAndJob;
 	const prNumber = prNumberOverride ?? resolvedPrNumber;
 	if (!prNumber) {
 		throw new Error(
@@ -766,19 +799,46 @@ export async function runClassifier({
 		);
 	}
 
-	const rawLog = await fetchJobLog({ fetcher, owner, repo, jobId });
+	let rawLog;
+	try {
+		rawLog = await fetchJobLog({ fetcher, owner, repo, jobId });
+	} catch (error) {
+		await commentClassificationFailure({
+			fetcher,
+			owner,
+			repo,
+			prNumber,
+			sha,
+			error,
+		});
+		throw error;
+	}
 	const existingComment = await findExistingClassifierComment({
 		fetcher,
 		owner,
 		repo,
 		prNumber,
 	});
-	const classification = classifyFailureLog(rawLog);
+	let classification;
+	try {
+		classification = classifyFailureLog(rawLog);
+	} catch (error) {
+		await commentClassificationFailure({
+			fetcher,
+			owner,
+			repo,
+			prNumber,
+			sha,
+			error,
+		});
+		throw error;
+	}
 	const existingMarker = parseClassifierMarker(existingComment?.body);
 	const eligibleForRerun = shouldTriggerRerun({
 		classification,
 		sha,
 		existingMarker,
+		rerunKinds,
 	});
 
 	// F4: the rerun attempt happens BEFORE the marker is built, so the
@@ -853,4 +913,41 @@ export async function runClassifier({
 	}
 
 	return result;
+}
+
+/**
+ * Records an absent classification as an explicit PR comment. The workflow
+ * supplies the event's PR and SHA so a failed run/job/log API read cannot turn
+ * into a silent no-op. When those identifiers are unavailable, the original
+ * error remains authoritative and no broader permission is assumed.
+ */
+export async function commentClassificationFailure({
+	fetcher,
+	owner,
+	repo,
+	prNumber,
+	sha,
+	error,
+}) {
+	if (!prNumber || !sha) return false;
+	const rawDetail = error instanceof Error ? error.message : String(error);
+	const detail = rawDetail.replace(/\s+/g, " ").slice(0, 500);
+	const body =
+		`ci-classifier: classification failed; no rerun was triggered: ${detail} ` +
+		buildMarker(sha, "false");
+	const existingComment = await findExistingClassifierComment({
+		fetcher,
+		owner,
+		repo,
+		prNumber,
+	});
+	await upsertComment({
+		fetcher,
+		owner,
+		repo,
+		prNumber,
+		existingComment,
+		body,
+	});
+	return true;
 }

@@ -31,6 +31,7 @@ export interface ClassifierDecision {
 }
 
 export declare function stripAnsi(text: string): string;
+export declare function stripLineTimestamps(text: string): string;
 export declare function classifyFailureLog(rawLog: string): Classification;
 export declare function readCgroupOomKillCount(log: string): number | null;
 export declare function describeKernelKillEvidence(log: string): string | null;
@@ -42,6 +43,7 @@ export declare function shouldTriggerRerun(args: {
 	classification: Classification;
 	sha: string;
 	existingMarker: ClassifierMarker | null;
+	rerunKinds?: ClassificationKind[];
 }): boolean;
 export declare function buildCommentBody(args: {
 	classification: Classification;
@@ -101,19 +103,39 @@ export declare function attemptRerun(args: {
 	repo: string;
 	runId: number | string;
 }): Promise<{ ok: boolean; status: number }>;
-export declare function runClassifier(args: {
+export interface RunClassifierArgs {
 	fetcher: FetchFn;
 	owner: string;
 	repo: string;
 	runId: number | string;
 	jobName?: string;
 	prNumber?: number;
-}): Promise<
-	ClassifierDecision & {
-		sha: string;
-		prNumber: number;
-		jobId: number;
-		jobName: string;
-		supersededByCommentId?: number;
-	}
->;
+	sha?: string;
+	rerunKinds?: ClassificationKind[];
+	skipMissingJob?: boolean;
+}
+export type SuccessfulClassifierRun = ClassifierDecision & {
+	sha: string;
+	prNumber: number;
+	jobId: number;
+	jobName: string;
+	supersededByCommentId?: number;
+};
+export type SkippedClassifierRun = { skipped: true; reason: string };
+export declare function runClassifier(
+	args: RunClassifierArgs & { skipMissingJob?: false },
+): Promise<SuccessfulClassifierRun>;
+export declare function runClassifier(
+	args: RunClassifierArgs & { skipMissingJob: true },
+): Promise<SuccessfulClassifierRun | SkippedClassifierRun>;
+export declare function runClassifier(
+	args: RunClassifierArgs,
+): Promise<SuccessfulClassifierRun | SkippedClassifierRun>;
+export declare function commentClassificationFailure(args: {
+	fetcher: FetchFn;
+	owner: string;
+	repo: string;
+	prNumber?: number;
+	sha?: string;
+	error: unknown;
+}): Promise<boolean>;

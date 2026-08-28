@@ -547,7 +547,7 @@ export function decideRunHealthActions(
 			actions.push({
 				type: "note",
 				benign: false,
-				message: `PR #${pr.number}: ${run.path} run ${run.id} is STARVED again on attempt ${run.runAttempt}; the warden already re-ran it once for this head`,
+				message: `PR #${pr.number}: ${run.path} run ${run.id} is STARVED again on attempt ${run.runAttempt}; a rerun (warden or infra-kill classifier) already fired once for this head`,
 			});
 			continue;
 		}
