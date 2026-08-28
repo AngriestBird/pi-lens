@@ -65,9 +65,8 @@ vi.mock(
 	}),
 );
 
-const { dispatchLintDetailed } = await import(
-	"../../../../clients/dispatch/integration.js"
-);
+const { dispatchLintDetailed } =
+	await import("../../../../clients/dispatch/integration.js");
 
 /**
  * Violates `no-any-type` (rules/ast-grep-rules/rules/no-any-type.yml,
