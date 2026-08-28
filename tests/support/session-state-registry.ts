@@ -407,7 +407,7 @@ export const SESSION_STATE_REGISTRY: SessionStateEntry[] = [
 		id: "dispatch-integration:sessionCaches",
 		module: "dispatch/integration.ts",
 		state:
-			"cascadeDiagnosticBaselines, recentlyCleanNeighborCache, primaryFilesThisTurn, sessionSlopRuleCounts, sessionFacts",
+			"recentlyCleanNeighborCache, primaryFilesThisTurn, sessionSlopRuleCounts, sessionFacts",
 		policy: "session_start",
 		resetName: "resetDispatchBaselines",
 		reason:
@@ -1063,8 +1063,9 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	"diagnostics-publish.ts": 1,
 	"dispatch/dispatcher.ts": 1,
 	"dispatch/collect-later-tier.ts": 1,
-	// #1899 removed the dead `neighborTouchCache` (10 → 9).
-	"dispatch/integration.ts": 9,
+	// #1899 removed the dead `neighborTouchCache` (10 → 9); #2282 removed the
+	// redundant `cascadeDiagnosticBaselines` shadow map (9 → 8).
+	"dispatch/integration.ts": 8,
 	"dispatch/lazy.ts": 0,
 	// #2215 added the language matrix's two derived lookups
 	// (`BINDING_BY_EXTENSION`, `LSP_ONLY_RULE_LANGUAGES`) (5 → 7). Both are
