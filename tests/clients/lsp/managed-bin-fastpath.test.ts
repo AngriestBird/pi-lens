@@ -20,7 +20,7 @@ const { findManagedToolBinary, ensureTool } = vi.hoisted(() => ({
 	findManagedToolBinary: vi.fn(
 		async (_toolId: string) => undefined as string | undefined,
 	),
-	ensureTool: vi.fn(async () => null),
+	ensureTool: vi.fn(async () => null as string | null),
 }));
 vi.mock("../../../clients/lsp/launch.js", () => ({ launchLSP }));
 vi.mock("../../../clients/latency-logger.js", async (importActual) => ({
@@ -120,5 +120,122 @@ describe("resolveAndLaunch — managed-bin fast path (#2140)", () => {
 
 		expect(result?.source).toBe("direct");
 		expect(launchLSP).toHaveBeenCalledWith("typos-lsp", [], expect.anything());
+	});
+});
+
+/** availability_decision records emitted for `tool`, oldest first (#2140). */
+function decisionsFor(tool: string): Array<Record<string, unknown>> {
+	return logLatency.mock.calls
+		.map((call) => call[0] as Record<string, unknown>)
+		.filter(
+			(entry) =>
+				entry?.phase === "availability_decision" &&
+				(entry.metadata as Record<string, unknown> | undefined)?.tool === tool,
+		);
+}
+
+function metadataOf(record: Record<string, unknown>): Record<string, unknown> {
+	return record.metadata as Record<string, unknown>;
+}
+
+describe("resolveAndLaunch — managed-bin availability telemetry (#2140)", () => {
+	beforeEach(() => {
+		launchLSP.mockReset();
+		findManagedToolBinary.mockReset();
+		findManagedToolBinary.mockResolvedValue(undefined);
+		ensureTool.mockReset();
+		logLatency.mockClear();
+	});
+
+	it("emits exactly ONE availability_decision (verdict=available) when the managed binary is present", async () => {
+		const managedPath = "/home/user/.pi-lens/bin/opengrep";
+		findManagedToolBinary.mockImplementation(async (toolId: string) =>
+			toolId === "opengrep" ? managedPath : undefined,
+		);
+		launchLSP.mockResolvedValueOnce(fakeProc);
+
+		const result = await resolveAndLaunch(
+			{
+				candidates: ["opengrep"],
+				args: ["lsp"],
+				cwd: "/tmp/proj",
+				managedToolId: "opengrep",
+			},
+			false,
+		);
+
+		expect(result?.source).toBe("direct");
+		const decisions = decisionsFor("opengrep");
+		expect(decisions).toHaveLength(1);
+		expect(metadataOf(decisions[0])).toMatchObject({
+			verdict: "available",
+			outcome: "success",
+			cause: "ok",
+			classifiedBy: "probe",
+			evidence: { source: "managed-dir", binary: "opengrep" },
+		});
+	});
+
+	it("does not swallow the negative case: unavailable then the install-path override both emit when the binary is absent", async () => {
+		const installedPath = "/home/user/.pi-lens/bin/typos-lsp";
+		// Absent at first resolution; present once the install below "lands" it.
+		findManagedToolBinary.mockImplementation(async (toolId: string) =>
+			toolId === "typos-lsp" && ensureTool.mock.calls.length > 0
+				? installedPath
+				: undefined,
+		);
+		const toolNotFound = Object.assign(new Error("typos-lsp not found"), {
+			kind: "tool-not-found" as const,
+		});
+		launchLSP.mockRejectedValueOnce(toolNotFound);
+		launchLSP.mockResolvedValueOnce(fakeProc);
+		ensureTool.mockResolvedValueOnce(installedPath);
+
+		const result = await resolveAndLaunch(
+			{
+				candidates: ["typos-lsp"],
+				args: [],
+				cwd: "/tmp/proj",
+				managedToolId: "typos-lsp",
+			},
+			true,
+		);
+
+		expect(result?.source).toBe("managed");
+		const decisions = decisionsFor("typos-lsp");
+		expect(decisions).toHaveLength(2);
+		expect(metadataOf(decisions[0])).toMatchObject({
+			verdict: "unavailable",
+			outcome: "missing",
+			cause: "not-found",
+			classifiedBy: "probe",
+		});
+		expect(metadataOf(decisions[1])).toMatchObject({
+			verdict: "available",
+			outcome: "success",
+			cause: "ok",
+			classifiedBy: "caller",
+			evidence: {
+				install: "succeeded",
+				binary: "typos-lsp",
+				source: "managed-dir",
+			},
+		});
+	});
+
+	it("emits no availability_decision when a bare-PATH copy resolves and no managed binary exists", async () => {
+		launchLSP.mockResolvedValueOnce(fakeProc);
+
+		await resolveAndLaunch(
+			{
+				candidates: ["typos-lsp"],
+				args: [],
+				cwd: "/tmp/proj",
+				managedToolId: "typos-lsp",
+			},
+			false,
+		);
+
+		expect(decisionsFor("typos-lsp")).toHaveLength(0);
 	});
 });

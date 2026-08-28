@@ -35,6 +35,7 @@ import {
 	getToolEnvironment,
 	getToolPath,
 } from "../installer/index.js";
+import { logAvailabilityDecision } from "../dispatch/runners/utils/availability-policy.js";
 import { resolveOpengrepConfig } from "../opengrep-config.js";
 import {
 	isZizmorAuditTarget,
@@ -536,6 +537,7 @@ export async function resolveAndLaunch(
 	// `findManagedNodeToolBinary`'s npm-managed fast path (runner-helpers.ts)
 	// and `SecurityScanClient.probeVersion`'s equivalent fix for the CLI-scan
 	// half of this same issue (#2140, landed in PR #2148/#2137).
+	const managedProbeStartedAt = Date.now();
 	const managedCandidate = spec.managedToolId
 		? await findManagedToolBinary(spec.managedToolId)
 		: undefined;
@@ -594,6 +596,28 @@ export async function resolveAndLaunch(
 			logSessionStart(
 				`lsp launch candidate success tool=${toolLabel} idx=${index} command=${command} source=direct`,
 			);
+			// The managed-dir fast path (#2140) IS the availability probe for a
+			// release-managed tool: a real spawn just confirmed the binary
+			// findManagedToolBinary resolved actually launches. Gated on the exact
+			// managed candidate (never a later bare-PATH fallback), so a session
+			// start with the binary present emits exactly one decision and a
+			// developer-PATH-resolved copy (no managed binary at all) emits none —
+			// unchanged from before this fix.
+			if (managedCandidate !== undefined && command === managedCandidate) {
+				logAvailabilityDecision({
+					tool: toolLabel,
+					verdict: "available",
+					outcome: "success",
+					cause: "ok",
+					elapsedMs: Date.now() - managedProbeStartedAt,
+					latched: true,
+					classifiedBy: "probe",
+					evidence: {
+						binary: path.basename(managedCandidate),
+						source: "managed-dir",
+					},
+				});
+			}
 			return { process: proc, source: "direct" };
 		} catch (err) {
 			const message = err instanceof Error ? err.message : String(err);
@@ -651,9 +675,28 @@ export async function resolveAndLaunch(
 
 	// Step 3 — managed install via installer registry
 	if (spec.managedToolId) {
+		// Neither the managed-dir stat (#2140) nor any bare-PATH candidate
+		// resolved this tool — the negative counterpart to the fast-path
+		// "available" decision above, mirroring `SecurityScanClient.probeVersion`'s
+		// failure record so the negative case is visible in latency.log rather
+		// than swallowed by going straight to the install attempt.
+		logAvailabilityDecision({
+			tool: spec.managedToolId,
+			verdict: "unavailable",
+			outcome: "missing",
+			cause: "not-found",
+			elapsedMs: Date.now() - managedProbeStartedAt,
+			latched: true,
+			classifiedBy: "probe",
+			evidence: {
+				command: candidateFailures[candidateFailures.length - 1]?.command,
+				failure: "tool-not-found",
+			},
+		});
 		logSessionStart(
 			`lsp launch ensure-tool start tool=${spec.managedToolId} cwd=${spec.cwd}`,
 		);
+		const installStartedAt = Date.now();
 		const installed = await ensureTool(spec.managedToolId);
 		logSessionStart(
 			`lsp launch ensure-tool result tool=${spec.managedToolId} installed=${installed ? "yes" : "no"} path=${installed ?? ""}`,
@@ -686,6 +729,32 @@ export async function resolveAndLaunch(
 					metadata: {
 						tool: spec.managedToolId,
 						command: installed,
+					},
+				});
+				// Compensating row for the "unavailable" decision logged above (#1606
+				// shape): the install fixed exactly what the fast path found missing,
+				// so the durable record must not be left saying the tool is off.
+				// `source` is only asserted when a fresh managed-dir lookup confirms
+				// the install actually landed in ~/.pi-lens/bin (github/maven/archive
+				// strategies) rather than an npm/pip/gem install elsewhere, so the
+				// evidence never claims a resolution this call didn't derive.
+				const confirmedManagedPath = await findManagedToolBinary(
+					spec.managedToolId,
+				);
+				logAvailabilityDecision({
+					tool: spec.managedToolId,
+					verdict: "available",
+					outcome: "success",
+					cause: "ok",
+					elapsedMs: Date.now() - installStartedAt,
+					latched: true,
+					classifiedBy: "caller",
+					evidence: {
+						install: "succeeded",
+						binary: path.basename(installed),
+						...(confirmedManagedPath !== undefined && {
+							source: "managed-dir",
+						}),
 					},
 				});
 				return { process: proc, source: "managed" };
