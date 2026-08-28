@@ -1219,6 +1219,8 @@ picks the oldest entry it returns, so the two cannot drift.
 
 ### Host integration and repo automation
 
+The CI classifier's automatic PR comment path (`scripts/lib/ci-failure-classifier.mjs`, #2316/#2318) treats failed-job detail as untrusted log text: `buildCommentBody` escapes HTML comment delimiters and neutralizes mentions before interpolation. `parseClassifierMarker` accepts only the final anchored marker, so comment payload cannot forge rerun suppression while the legitimate trailing marker remains round-trippable.
+
 The weekly stale-open-issue detector is detection-only: `.github/workflows/stale-open-issues.yml`
 calls `scripts/detect-stale-open-issues.mjs`, which uses the bounded GitHub REST
 fetcher seam in `scripts/lib/stale-open-issues.mjs` to inspect open issues and
