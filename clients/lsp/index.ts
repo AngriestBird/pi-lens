@@ -7632,6 +7632,10 @@ export class LSPService {
 		// mtime it was ACTUALLY scanned at (not re-stat'd after the fact, which
 		// could race a concurrent edit).
 		const scannedMtimeByFile = new Map<string, number>();
+		// #2300: size from the SAME stat call as the mtime above — zero extra
+		// syscalls — so the cache write below can give `isEntryFresh` a size
+		// axis alongside the mtime.
+		const scannedSizeByFile = new Map<string, number>();
 
 		// Group files by their primary language server (#387, extracted as
 		// `groupFilesByPrimaryServer` for #631). tsserver — and most servers — is
@@ -7834,7 +7838,9 @@ export class LSPService {
 				// microseconds with no extra event-loop tick, where an awaited
 				// promise would insert one.
 				try {
-					scannedMtimeByFile.set(filePath, nodeFs.statSync(filePath).mtimeMs);
+					const scanStat = nodeFs.statSync(filePath);
+					scannedMtimeByFile.set(filePath, scanStat.mtimeMs);
+					scannedSizeByFile.set(filePath, scanStat.size);
 				} catch {
 					// Best-effort: a failed stat here just means this file won't be
 					// eligible for caching below (no entry gets written for it).
@@ -8102,10 +8108,9 @@ export class LSPService {
 								// too — best-effort stat since the pull already resolved the
 								// diagnostics for this file some time ago.
 								try {
-									scannedMtimeByFile.set(
-										result.filePath,
-										nodeFs.statSync(result.filePath).mtimeMs,
-									);
+									const pullStat = nodeFs.statSync(result.filePath);
+									scannedMtimeByFile.set(result.filePath, pullStat.mtimeMs);
+									scannedSizeByFile.set(result.filePath, pullStat.size);
 								} catch {
 									// Not cache-eligible without a confirmed mtime.
 								}
@@ -8298,6 +8303,7 @@ export class LSPService {
 				result.diagnostics,
 				scannedAt,
 				result.contentHash,
+				scannedSizeByFile.get(result.filePath),
 			);
 		}
 		workspaceDiagnosticsCacheCtx.persist();
