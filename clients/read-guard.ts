@@ -946,7 +946,7 @@ export class ReadGuard {
 			}
 			const verdict = this.blockOrWarn(
 				"zero-read",
-				`[retry] Edit without read — Read \`${filePath}\` first, then retry: \`read path="${filePath}"\`.`,
+				`🔄 RETRYABLE — Edit without read: you have not read \`${filePath}\` in this conversation. Read it first, then retry: \`read path="${filePath}"\`.`,
 				undefined,
 				effectiveMode,
 			);

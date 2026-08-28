@@ -57,8 +57,12 @@ describe("ReadGuard", () => {
 			const verdict = guard.checkEdit("/src/api.ts");
 
 			expect(verdict.action).toBe("block");
+			// Full-message pin, built through the same canonicalizer the guard
+			// uses so the assertion holds on every platform (Windows resolves
+			// /src/api.ts to a drive-qualified path -- AGENTS.md shape 2/7).
+			const canonical = normalizeFilePath("/src/api.ts");
 			expect(verdict.reason).toBe(
-				'[retry] Edit without read — Read `/src/api.ts` first, then retry: `read path="/src/api.ts"`.',
+				`🔄 RETRYABLE — Edit without read: you have not read \`${canonical}\` in this conversation. Read it first, then retry: \`read path="${canonical}"\`.`,
 			);
 		});
 
