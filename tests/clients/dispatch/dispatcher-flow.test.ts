@@ -329,6 +329,85 @@ describe("Dispatch Flow", () => {
 			expect(result.hasBlockers).toBe(true);
 		});
 
+		it("skips runners that do not apply to the file kind in a group", async () => {
+			const calls: string[] = [];
+			registerRunner(
+				createMockRunner({
+					id: "python-only",
+					appliesTo: ["python"],
+					runResult: {
+						status: "succeeded",
+						diagnostics: [
+							{
+								id: "wrong-kind",
+								message: "must not run",
+								filePath: "test.ts",
+								severity: "error",
+								semantic: "blocking",
+								tool: "python-only",
+							},
+						],
+						semantic: "blocking",
+					},
+				}),
+			);
+			registerRunner(
+				createMockRunner({
+					id: "all-kinds",
+					appliesTo: [],
+					runResult: {
+						status: "succeeded",
+						diagnostics: [],
+						semantic: "none",
+					},
+					when: () => {
+						calls.push("all-kinds");
+						return true;
+					},
+				}),
+			);
+			registerRunner(
+				createMockRunner({
+					id: "jsts-only",
+					appliesTo: ["jsts"],
+					runResult: {
+						status: "succeeded",
+						diagnostics: [],
+						semantic: "none",
+					},
+					when: () => {
+						calls.push("jsts-only");
+						return true;
+					},
+				}),
+			);
+
+			const ctx = createMockContext("test.ts");
+			const result = await dispatchForFile(ctx, [
+				{
+					mode: "all",
+					runnerIds: ["python-only", "all-kinds", "jsts-only"],
+					filterKinds: ["jsts"],
+				},
+			]);
+
+			expect(calls).toEqual(["all-kinds", "jsts-only"]);
+			expect(result.diagnostics).toEqual([]);
+			const report = getLatencyReports().at(-1);
+			expect(report?.runners).toContainEqual(
+				expect.objectContaining({
+					runnerId: "python-only",
+					status: "skipped",
+				}),
+			);
+			expect(report?.runners).not.toContainEqual(
+				expect.objectContaining({
+					runnerId: "python-only",
+					status: "failed",
+				}),
+			);
+		});
+
 		it("suppresses overlapping non-blocking lint warnings when LSP reports same span/class", async () => {
 			registerRunner({
 				id: "lsp",
