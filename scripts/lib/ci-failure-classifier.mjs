@@ -946,7 +946,9 @@ export async function commentClassificationFailure({
 	// Same untrusted-text rule as buildCommentBody: the error message can
 	// carry GitHub API response text, which is attacker-influenced on the
 	// same axis as job logs (mentions, HTML comments).
-	const detail = sanitizeCommentDetail(rawDetail.replace(/\s+/g, " ").slice(0, 500));
+	const detail = sanitizeCommentDetail(
+		rawDetail.replace(/\s+/g, " ").slice(0, 500),
+	);
 	const body =
 		`ci-classifier: classification failed; no rerun was triggered: ${detail} ` +
 		buildMarker(sha, "false");
