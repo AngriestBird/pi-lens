@@ -1,5 +1,0 @@
----
-section: Fixed
----
-
-- **Normalize tabs in playground-verify's sentinel comparison, and fail fast on a stable mismatch (closes #2306)** — a first source line with an internal tab (`const\tok\t= arr.indexOf(x) !== -1;`) burned the full 40s poll timeout and reported "likely upstream schema drift": Monaco doesn't render a tab as U+0009, so the raw-tab sentinel never matched, the same failure mode the existing nbsp normalization was added for. `buildScrapeExpr` now collapses every run of tab/nbsp/space to one space on BOTH sides of the comparison instead of hand-listing substitutions. The poll loop also tracks a stable, non-empty rendered-source length across polls and concludes as soon as it repeats unmatched for three consecutive polls, rather than always waiting out the full `--timeout`; the failure message now names both remaining causes (a sentinel-normalization mismatch in this harness, or upstream schema drift leaving the page's default sample rendered) instead of a bare schema-drift verdict.

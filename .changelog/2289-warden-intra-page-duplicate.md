@@ -1,5 +1,0 @@
----
-section: Fixed
----
-
-- **Merge-train duplicate classification (#2289)** — The warden now treats a PR number repeated within one GraphQL page as malformed data and a fatal error. Genuine cross-page window slides remain benign notes.
