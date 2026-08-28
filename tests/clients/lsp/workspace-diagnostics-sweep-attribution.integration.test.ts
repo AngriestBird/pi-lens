@@ -106,7 +106,7 @@ describe("runWorkspaceDiagnostics sweep bracket on the real wire (#2332)", () =>
 		);
 	}, 30_000);
 
-	it("closes the phase when the real workspace pull rejects", async () => {
+	it("continues on the real document pull when the workspace pull rejects", async () => {
 		process.env.FAKE_LSP_WORKSPACE_DIAGNOSTIC_ERROR = "1";
 		const { LSPService } = await import("../../../clients/lsp/index.js");
 		const latency = await import("../../../clients/latency-logger.js");
@@ -120,6 +120,24 @@ describe("runWorkspaceDiagnostics sweep bracket on the real wire (#2332)", () =>
 		// The rejected project pull falls back to the real document pull.
 		expect(trace).toContain("recv textDocument/diagnostic");
 		expect(results).toHaveLength(1);
+		expect(latency.getCurrentPhase()).toBeUndefined();
+		expect(latency._closedBracketsStorageLengthForTest()).toBe(1);
+	}, 30_000);
+
+	it("closes the phase when warm-up throws out of the server-group runner", async () => {
+		process.env.FAKE_LSP_WORKSPACE_DIAGNOSTIC_ERROR = "1";
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const latency = await import("../../../clients/latency-logger.js");
+		service = new LSPService();
+		const escapedError = new Error("fake escaping warm-up failure");
+		vi.spyOn(service, "ensureWarmForSweep").mockRejectedValueOnce(escapedError);
+
+		await expect(
+			service.runWorkspaceDiagnostics(root, { files: [file] }),
+		).rejects.toBe(escapedError);
+		const trace = fs.readFileSync(traceFile, "utf8");
+		// The real-wire pull error is absorbed before the warm-up rejection escapes.
+		expect(trace).toContain("recv workspace/diagnostic");
 		expect(latency.getCurrentPhase()).toBeUndefined();
 		expect(latency._closedBracketsStorageLengthForTest()).toBe(1);
 	}, 30_000);
