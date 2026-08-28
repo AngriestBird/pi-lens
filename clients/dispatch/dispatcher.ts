@@ -510,10 +510,10 @@ function promoteDeltaUnusedToBlockers(diagnostics: Diagnostic[]): Diagnostic[] {
  * Optional per-runner result sink. Fires once for each runner that actually
  * executes (immediately after its `run()` returns), with the exact
  * `RunnerResult` — including `failureKind`/`failureMessage` that the merged
- * `DispatchResult` discards. Runners that are filtered out, `when`-skipped, or
- * not registered do not fire it. Lets the live tool-smoke harness (#209) assert
- * each tool spawned and exited cleanly without duplicating dispatch's
- * selection/gating logic.
+ * `DispatchResult` discards. Runners that are filtered out, `when`-skipped,
+ * skipped for being a test file, or not registered do not fire it. Lets the
+ * live tool-smoke harness (#209) assert each tool spawned and exited cleanly
+ * without duplicating dispatch's selection/gating logic.
  */
 export type RunnerResultSink = (runnerId: string, result: RunnerResult) => void;
 
@@ -522,7 +522,13 @@ export interface RunnerLatency {
 	startTime: number;
 	endTime: number;
 	durationMs: number;
-	status: "succeeded" | "failed" | "skipped" | "when_skipped" | "pending";
+	status:
+		| "succeeded"
+		| "failed"
+		| "skipped"
+		| "when_skipped"
+		| "test_file_skipped"
+		| "pending";
 	diagnosticCount: number;
 	semantic: string;
 	skipReason?: RunnerSkipReason;
@@ -776,6 +782,32 @@ async function runGroup(
 				status: "not_registered",
 				diagnosticCount: 0,
 				semantic: "unknown",
+			});
+			continue;
+		}
+
+		// Same skipTestFiles gate RunnerRegistry.getForKind applies for the
+		// per-edit path (#2337): the plan/group path resolves runners by id via
+		// registry.get() instead, which bypasses getForKind entirely, so a
+		// runner declaring skipTestFiles never had it enforced here.
+		if (runner.skipTestFiles && isTestFile(ctx.filePath)) {
+			latencies.push({
+				runnerId,
+				startTime: runnerStart,
+				endTime: Date.now(),
+				durationMs: Date.now() - runnerStart,
+				status: "test_file_skipped",
+				diagnosticCount: 0,
+				semantic: "none",
+			});
+			logLatency({
+				type: "runner",
+				filePath: ctx.filePath,
+				runnerId,
+				durationMs: 0,
+				status: "test_file_skipped",
+				diagnosticCount: 0,
+				semantic: "none",
 			});
 			continue;
 		}
