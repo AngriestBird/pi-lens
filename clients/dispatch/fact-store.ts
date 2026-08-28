@@ -332,6 +332,17 @@ export class FactStore implements ReadonlyFactStore {
 		return this.retainedContentBytes;
 	}
 
+	/** Running UTF-8 byte total for the pinned SUBSET of retained
+	 *  `file.content` values. Exposed so tests can crosscheck it against a
+	 *  fresh sum over `pinnedFiles ∩ fileFacts` (#2247 review F4) — like
+	 *  `retainedContentBytes`, it is maintained incrementally on the pin
+	 *  0→1 transition, the unpin 1→0 transition, content overwrite/delete,
+	 *  and `clearAll`, so a drop from any one of those paths would
+	 *  otherwise drift silently instead of failing loudly. */
+	getPinnedContentBytes(): number {
+		return this.pinnedContentBytesTotal;
+	}
+
 	getSessionFact<T>(factId: string): T | undefined {
 		return this.sessionFacts.get(factId) as T | undefined;
 	}

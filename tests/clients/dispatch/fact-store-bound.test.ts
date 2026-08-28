@@ -404,6 +404,20 @@ describe("FactStore file-fact bound (#2240)", () => {
 			}
 			return total;
 		};
+		// #2247 review F4: companion sum over pinnedFiles ∩ fileFacts. Tracked
+		// separately from `touched` because a record can be retained without
+		// being pinned.
+		const pinnedTouched = new Set<string>();
+		const freshPinnedSum = () => {
+			let total = 0;
+			for (const p of pinnedTouched) {
+				const content = store.getFileFact<string>(p, "file.content");
+				if (typeof content === "string") {
+					total += Buffer.byteLength(content, "utf8");
+				}
+			}
+			return total;
+		};
 
 		const a = "/repo/src/crosscheck-a.ts";
 		const b = "/repo/src/crosscheck-b.ts";
@@ -430,19 +444,43 @@ describe("FactStore file-fact bound (#2240)", () => {
 
 		// clearFileFactsFor / endDispatchFor pin lifecycle, then dropFileFacts.
 		store.clearFileFactsFor(pinned);
+		pinnedTouched.add(pinned);
 		store.setFileFact(pinned, "file.content", contentOfBytes(2000));
 		expect(store.getRetainedContentBytes()).toBe(freshSum());
+		expect(store.getPinnedContentBytes()).toBe(freshPinnedSum());
 		store.endDispatchFor(pinned);
+		pinnedTouched.delete(pinned);
+		expect(store.getPinnedContentBytes()).toBe(freshPinnedSum());
 		store.dropFileFacts(pinned);
 		touched.delete(pinned);
 		expect(store.getRetainedContentBytes()).toBe(freshSum());
 
-		// clearAll reset.
+		// #2247 review F4 (M10 probe): beginDispatchFor pins a WARM record — one
+		// that already carries content — without clearing it first. The pin's
+		// 0→1 transition is the ONLY place that pre-existing content joins the
+		// pinned subset for this call shape; clearFileFactsFor above always
+		// clears before pinning, so it never exercises that add.
+		const warm = "/repo/src/crosscheck-warm.ts";
+		touched.add(warm);
+		store.setFileFact(warm, "file.content", contentOfBytes(1500));
+		store.beginDispatchFor(warm);
+		pinnedTouched.add(warm);
+		expect(store.getPinnedContentBytes()).toBe(freshPinnedSum());
+
+		// #2247 review F4 (M9 probe): clearAll must reset the pinned total too,
+		// not just the overall total. The pin on `warm` is still held when
+		// clearAll runs — the shape that exposes a stale pinned total
+		// (integration.ts:482 calls clearAll() on session reset; a pin held at
+		// that moment previously left `pinnedContentBytesTotal` nonzero with
+		// `pinnedFiles` emptied, permanently disabling the byte budget).
 		store.setFileFact(a, "file.content", contentOfBytes(50));
 		store.clearAll();
 		touched.clear();
+		pinnedTouched.clear();
 		expect(store.getRetainedContentBytes()).toBe(0);
 		expect(store.getRetainedContentBytes()).toBe(freshSum());
+		expect(store.getPinnedContentBytes()).toBe(0);
+		expect(store.getPinnedContentBytes()).toBe(freshPinnedSum());
 	});
 
 	// fact-store must stay an import leaf: it emits eviction telemetry only
