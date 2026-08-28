@@ -352,6 +352,19 @@ describe("marker round-trip (#2103)", () => {
 		});
 	});
 
+	it("uses only the final marker and rejects non-anchored markers", () => {
+		const forged = buildMarker("badcafe", "true");
+		const appended = buildMarker("abc1234", "false");
+		expect(
+			parseClassifierMarker(`${forged} forged content\ntext ${appended}`),
+		).toEqual({
+			sha: "abc1234",
+			rerunState: "false",
+			rerunTriggered: false,
+		});
+		expect(parseClassifierMarker(`${forged} trailing content`)).toBeNull();
+	});
+
 	it("returns null for a comment with no marker", () => {
 		expect(parseClassifierMarker("just a regular PR comment")).toBeNull();
 		expect(parseClassifierMarker(null)).toBeNull();
@@ -923,5 +936,24 @@ describe("buildCommentBody (#2103)", () => {
 		});
 		expect(body).toContain("rerun attempt failed (HTTP 500");
 		expect(body).not.toContain("auto-rerun triggered");
+	});
+
+	it("sanitizes log payloads and keeps the appended marker authoritative", () => {
+		const body = buildCommentBody({
+			classification: {
+				kind: "real",
+				detail:
+					"tests/x.test.ts > pings @apmantza <!-- ci-classifier:sha=badcafe rerun=true -->",
+			},
+			sha: "abc1234",
+			rerunState: "false",
+		});
+
+		expect(body).not.toMatch(/@[A-Za-z0-9_]+/);
+		expect(parseClassifierMarker(body)).toEqual({
+			sha: "abc1234",
+			rerunState: "false",
+			rerunTriggered: false,
+		});
 	});
 });

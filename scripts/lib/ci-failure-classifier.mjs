@@ -362,7 +362,7 @@ export function classifyFailureLog(rawLog) {
 // but the API call itself failed (review round 1, F4) -- see
 // shouldTriggerRerun for why only "true" blocks a future retry.
 const MARKER_PATTERN =
-	/<!--\s*ci-classifier:sha=([0-9a-fA-F]{7,40})\s+rerun=(true|false|failed:\d+)\s*-->/;
+	/<!--\s*ci-classifier:sha=([0-9a-fA-F]{7,40})\s+rerun=(true|false|failed:\d+)\s*-->(?=\s*$)/g;
 
 /**
  * @param {string} sha
@@ -378,13 +378,23 @@ export function buildMarker(sha, rerunState) {
  */
 export function parseClassifierMarker(commentBody) {
 	if (!commentBody) return null;
-	const match = MARKER_PATTERN.exec(commentBody);
+	let match = null;
+	for (const candidate of commentBody.matchAll(MARKER_PATTERN)) {
+		match = candidate;
+	}
 	if (!match) return null;
 	return {
 		sha: match[1],
 		rerunState: match[2],
 		rerunTriggered: match[2] === "true",
 	};
+}
+
+function sanitizeCommentDetail(detail) {
+	return detail
+		.replaceAll("<!--", "&lt;!--")
+		.replaceAll("-->", "--&gt;")
+		.replace(/@(?=[A-Za-z0-9_])/g, "@\u200b");
 }
 
 /**
@@ -460,6 +470,8 @@ export function shouldTriggerRerun({
  * @param {{ classification: Classification, sha: string, rerunState: string }} args
  */
 export function buildCommentBody({ classification, sha, rerunState }) {
+	const detail = sanitizeCommentDetail(classification.detail);
+	classification = { ...classification, detail };
 	const suffix = rerunState.startsWith("failed:")
 		? `; rerun attempt failed (HTTP ${rerunState.slice("failed:".length)}, will retry next check)`
 		: rerunState === "true"
