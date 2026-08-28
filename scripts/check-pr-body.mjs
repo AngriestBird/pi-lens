@@ -156,6 +156,31 @@ export function detectFlattenedBody(body = "") {
 
 const ESCAPED_NEWLINE = /\\r\\n|\\n/g;
 
+function escapedNewlineRangesOutsideCodeSpans(source) {
+	const protectedRanges = [];
+	for (const match of source.matchAll(/(`+)([\s\S]*?)\1/g)) {
+		protectedRanges.push([match.index, match.index + match[0].length]);
+	}
+	return [...source.matchAll(ESCAPED_NEWLINE)]
+		.filter(
+			({ index }) =>
+				!protectedRanges.some(([start, end]) => index >= start && index < end),
+		)
+		.map(({ index, 0: value }) => ({ index, value }));
+}
+
+function replaceEscapedNewlinesOutsideCodeSpans(source) {
+	const replacements = escapedNewlineRangesOutsideCodeSpans(source);
+	if (!replacements.length) return source;
+	let result = "";
+	let cursor = 0;
+	for (const { index, value } of replacements) {
+		result += source.slice(cursor, index) + "\n";
+		cursor = index + value.length;
+	}
+	return result + source.slice(cursor);
+}
+
 /**
  * Detect the sibling flattening shape from the #2058-era class: a worker
  * emits the literal two-or-four character sequence "\n" or "\r\n" where a
@@ -182,11 +207,14 @@ export function detectEscapedNewlineBody(body = "") {
 		return false;
 	const realNewlines = (source.match(/\r\n|\n/g) ?? []).length;
 	if (realNewlines > FLATTENED_BODY_MAX_NEWLINES) return false;
-	const literalNewlines = source.match(ESCAPED_NEWLINE) ?? [];
+	const literalNewlines = escapedNewlineRangesOutsideCodeSpans(source);
 	if (literalNewlines.length < 2) return false;
-	if (source.replace(ESCAPED_NEWLINE, "").includes("\\")) return false;
-	const candidateHeadingLines = source
-		.replace(ESCAPED_NEWLINE, "\n")
+	const normalized = replaceEscapedNewlinesOutsideCodeSpans(source);
+	const unprotected = source
+		.replace(/(`+)([\s\S]*?)\1/g, (span) => " ".repeat(span.length))
+		.replace(ESCAPED_NEWLINE, "");
+	if (unprotected.includes("\\")) return false;
+	const candidateHeadingLines = normalized
 		.split("\n")
 		.filter((line) =>
 			new RegExp(`^\\s*#{2,4}\\s+(?:${REPAIR_HEADING_PATTERN})\\s*$`, "i").test(
@@ -204,7 +232,29 @@ export function detectEscapedNewlineBody(body = "") {
 export function repairEscapedNewlineBody(body = "") {
 	const source = String(body ?? "");
 	if (!detectEscapedNewlineBody(source)) return source;
-	return source.replace(ESCAPED_NEWLINE, "\n");
+	return replaceEscapedNewlinesOutsideCodeSpans(source);
+}
+
+/**
+ * Normalize only for linting. The body remains unchanged on GitHub: workers
+ * should fix their own PR text, while this read-only path makes a clear
+ * warning when a high-confidence flattened-body repair lets checks proceed.
+ */
+export function normalizePrBodyForChecking(body = "", pullRequestNumber) {
+	const source = String(body ?? "");
+	for (const { detect, repair } of [
+		{ detect: detectFlattenedBody, repair: repairFlattenedBody },
+		{ detect: detectEscapedNewlineBody, repair: repairEscapedNewlineBody },
+	]) {
+		if (!detect(source)) continue;
+		const normalized = repair(source);
+		if (normalized === source) continue;
+		console.warn(
+			`::warning::Normalized flattened PR body for #${pullRequestNumber ?? "?"} for checking only; the original body was not edited.`,
+		);
+		return { body: normalized, normalized: true };
+	}
+	return { body: source, normalized: false };
 }
 
 /** Repair only a body already proven to have the flattened shape. */
@@ -319,7 +369,7 @@ export function lintPrBody(body = "", options = {}) {
  *
  * @param {{ number: number, body?: string | null }} payloadPr
  * @param {typeof fetch} fetchImpl
- * @returns {Promise<string>}
+ * @returns {Promise<{body: string, normalized: boolean}>}
  */
 export async function fetchLivePrBody(payloadPr, fetchImpl) {
 	const token = process.env.GITHUB_TOKEN;
@@ -343,7 +393,7 @@ export async function fetchLivePrBody(payloadPr, fetchImpl) {
 	const data = await response.json();
 	if (data.body !== null && typeof data.body !== "string")
 		throw new Error("GitHub API returned no body");
-	return data.body ?? "";
+	return normalizePrBodyForChecking(data.body ?? "", payloadPr.number);
 }
 
 export async function resolveLivePrBody(
@@ -356,36 +406,8 @@ export async function resolveLivePrBody(
 		console.warn(
 			`::warning::Could not fetch the live PR body; using the event payload instead (${error instanceof Error ? error.message : error}).`,
 		);
-		return payloadPr.body ?? "";
+		return normalizePrBodyForChecking(payloadPr.body ?? "", payloadPr.number);
 	}
-}
-
-export async function patchLivePrBody(
-	payloadPr,
-	body,
-	fetchImpl = globalThis.fetch,
-) {
-	const token = process.env.GITHUB_TOKEN;
-	if (!token) throw new Error("GITHUB_TOKEN is not set");
-	const apiUrl = process.env.GITHUB_API_URL;
-	const repository = process.env.GITHUB_REPOSITORY;
-	if (!apiUrl || !repository)
-		throw new Error("GITHUB_API_URL or GITHUB_REPOSITORY is missing");
-	const response = await fetchImpl(
-		`${apiUrl}/repos/${repository}/pulls/${payloadPr.number}`,
-		{
-			method: "PATCH",
-			signal: AbortSignal.timeout(10_000),
-			headers: {
-				Accept: "application/vnd.github+json",
-				Authorization: `Bearer ${token}`,
-				"X-GitHub-Api-Version": "2022-11-28",
-				"Content-Type": "application/json",
-			},
-			body: JSON.stringify({ body }),
-		},
-	);
-	if (!response.ok) throw new Error(`GitHub API returned ${response.status}`);
 }
 
 /**
@@ -460,45 +482,13 @@ export async function lintPullRequestEvent(
 	const pullRequest = event.pull_request;
 	if (!pullRequest || !process.env.GITHUB_REPOSITORY)
 		throw new Error("Pull request event and GITHUB_REPOSITORY are required");
-	const body = await resolveLivePrBody(pullRequest, fetchImpl);
+	const { body, normalized } = await resolveLivePrBody(pullRequest, fetchImpl);
 	const requireTestAssessment =
 		(await resolveTouchesTests(pullRequest, fetchImpl)) === true;
 	const result = lintPrBody(body, { requireTestAssessment });
 	if (result.valid) {
 		console.log(`PR body OK: ${pullRequest.number}`);
-		return { valid: true, repaired: false };
-	}
-	// Each strategy targets a distinct, unambiguous flattening shape (space
-	// joins vs. literal-\n joins). Try both; the first that both detects and
-	// produces a body which re-validates wins.
-	const repairStrategies = [
-		{ detect: detectFlattenedBody, repair: repairFlattenedBody },
-		{ detect: detectEscapedNewlineBody, repair: repairEscapedNewlineBody },
-	];
-	for (const { detect, repair } of repairStrategies) {
-		if (!detect(body)) continue;
-		const repairedBody = repair(body);
-		const repairedResult = lintPrBody(repairedBody, { requireTestAssessment });
-		if (!repairedResult.valid) continue;
-		try {
-			const latestBody = await fetchLivePrBody(pullRequest, fetchImpl);
-			if (latestBody !== body) {
-				console.log(
-					`::notice::Skipped flattened PR body repair for #${pullRequest.number}; the body changed during linting.`,
-				);
-				for (const error of result.errors) console.error(error);
-				return { valid: false, repaired: false };
-			}
-			await patchLivePrBody(pullRequest, repairedBody, fetchImpl);
-			console.log(
-				`::notice::Repaired flattened PR body for #${pullRequest.number} before validation passed.`,
-			);
-			return { valid: true, repaired: true };
-		} catch (error) {
-			console.warn(
-				`::warning::Skipped flattened PR body repair for #${pullRequest.number}; freshness check failed, preserving original lint errors (${error instanceof Error ? error.message : error}).`,
-			);
-		}
+		return { valid: true, repaired: normalized };
 	}
 	for (const error of result.errors) console.error(error);
 	return { valid: false, repaired: false };

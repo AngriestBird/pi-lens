@@ -940,17 +940,16 @@ smell warnings count only the current session, or a 24-hour fallback window
 when no session boundary is available; explicit health remains separately
 labeled. (#1432)
 
-The PR body advisory lint may auto-repair only clearly flattened bodies: two or
+The PR body checks normalize only clearly flattened bodies in memory: two or
 more inline template headings, at most two physical newlines, and a minimum
 body length. Detection refuses bodies with escape-loss markers, while the
-post-split structural guard compares repaired heading count with distinct
-template-section count and refuses inconsistent structures. Repair only splits
-inline headings
-whose preceding text ends at body start or sentence-ending punctuation.
-`repairFlattenedBody` is idempotent via its detection short-circuit and must
-pass `lintPrBody` before `patchLivePrBody` writes through the GitHub API; failed,
-stale, or uncheckable repairs report the original errors and never write. The workflow grants
-`pull-requests: write` only to the PR body lint job. (#2145)
+post-split structural guard compares normalized heading count with distinct
+template-section count and refuses inconsistent structures. Normalization only
+splits inline headings whose preceding text ends at body start or
+sentence-ending punctuation. `normalizePrBodyForChecking` returns the body and
+the normalization verdict together, so callers never reclassify a stale event
+payload after checking the live body. The workflow grants the advisory lint
+read-only pull-request access and never edits contributor text. (#2145)
 
 Message-end attribution uses a bounded two-slot session anchor. A primary
 `session_start` rotates `lastStableSessionId` into `previousSessionId` because

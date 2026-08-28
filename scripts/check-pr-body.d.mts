@@ -2,6 +2,10 @@ export declare function detectFlattenedBody(body?: string): boolean;
 export declare function repairFlattenedBody(body?: string): string;
 export declare function detectEscapedNewlineBody(body?: string): boolean;
 export declare function repairEscapedNewlineBody(body?: string): string;
+export declare function normalizePrBodyForChecking(
+	body?: string,
+	pullRequestNumber?: number,
+): { body: string; normalized: boolean };
 export declare function lintPrBody(
 	body?: string,
 	options?: { requireTestAssessment?: boolean },
@@ -12,16 +16,11 @@ export declare function lintPrBody(
 export declare function fetchLivePrBody(
 	payloadPr: { number: number; body?: string | null },
 	fetchImpl: typeof fetch,
-): Promise<string>;
+): Promise<{ body: string; normalized: boolean }>;
 export declare function resolveLivePrBody(
 	payloadPr: { number: number; body?: string | null },
 	fetchImpl?: typeof fetch,
-): Promise<string>;
-export declare function patchLivePrBody(
-	payloadPr: { number: number },
-	body: string,
-	fetchImpl?: typeof fetch,
-): Promise<void>;
+): Promise<{ body: string; normalized: boolean }>;
 export declare function resolveTouchesTests(
 	payloadPr: { number: number },
 	fetchImpl?: typeof fetch,
