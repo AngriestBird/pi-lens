@@ -22,6 +22,10 @@ import { recordRunner } from "../widget-state.js";
 import { incrementDegradationCount } from "../degradation-ledger.js";
 import { detectFileKind } from "../file-kinds.js";
 import { detectFileRole } from "../file-role.js";
+import {
+	classifyGeneratedOrArtifactDetailed,
+	type GeneratedArtifactEvidence,
+} from "../generated-artifacts.js";
 import { isTestFile } from "../file-utils.js";
 import { getPrimaryDispatchGroup } from "../language-policy.js";
 import { resolveLanguageRootForFile } from "../language-profile.js";
@@ -312,10 +316,20 @@ export function createDispatchContext(
 	);
 	const normalizedFilePath = normalizeMapKey(absoluteFilePath);
 	const kind = detectFileKind(normalizedFilePath);
-	const fileRole = detectFileRole(
-		normalizedFilePath,
-		readFilePrefix(normalizedFilePath),
-	);
+	const contentPrefix = readFilePrefix(normalizedFilePath);
+	const fileRole = detectFileRole(normalizedFilePath, contentPrefix);
+	// Captured once here so the generated short-circuit below can emit a
+	// `dispatch_skipped_generated` record carrying the deciding evidence tier
+	// and the measured line-shape statistic — without re-reading the file
+	// (refs #2346). The content passed is the same 4096-byte prefix already
+	// read for role detection, so this classification costs no extra I/O.
+	const generatedDetail =
+		fileRole === "generated"
+			? classifyGeneratedOrArtifactDetailed(normalizedFilePath, {
+					content: contentPrefix,
+					includeDeclarations: false,
+				})
+			: undefined;
 	const projectConfig = loadPiLensProjectConfig(normalizedCwd);
 
 	return {
@@ -324,6 +338,8 @@ export function createDispatchContext(
 		cwd: normalizedCwd,
 		kind,
 		fileRole,
+		generatedEvidence: generatedDetail?.evidence,
+		generatedLineShapeMean: generatedDetail?.lineShapeMean,
 		pi,
 		autofix: false,
 		deltaMode: !pi.getFlag("no-delta"),
@@ -651,6 +667,11 @@ function buildCoverageNotice(
 
 const latencyReports: DispatchLatencyReport[] = [];
 const coverageNoticeSeen = new Set<string>();
+// One `dispatch_skipped_generated` phase record per file per process (refs
+// #2346): a generated file dispatched repeatedly must not spam latency.log,
+// so only the first skip of each file emits the row; the degradation ledger
+// below still tallies every repetition with a bounded per-subject count.
+const generatedSkipRecorded = new Set<string>();
 
 export function getLatencyReports(): DispatchLatencyReport[] {
 	return [...latencyReports];
@@ -662,6 +683,7 @@ export function clearLatencyReports(): void {
 
 export function clearCoverageNoticeState(): void {
 	coverageNoticeSeen.clear();
+	generatedSkipRecorded.clear();
 }
 
 export function formatLatencyReport(report: DispatchLatencyReport): string {
@@ -1021,6 +1043,34 @@ export async function dispatchForFile(
 ): Promise<DispatchResult> {
 	const _overallStart = Date.now();
 	if (ctx.fileRole === "generated") {
+		// The generated short-circuit (refs #2346): never ran before this fix
+		// for name-less machine-emitted files (a scraped/minified page has no
+		// `.min.js` pattern to catch it), so the classification now also has a
+		// content-shape tier. The skip is observable — one `dispatch_skipped_generated`
+		// phase record per file per process carrying the deciding evidence tier
+		// and the measured line-shape statistic, plus a bounded degradation
+		// count that aggregates repeat dispatches of the same file.
+		const evidence: GeneratedArtifactEvidence | undefined =
+			ctx.generatedEvidence;
+		const lineShapeMean = ctx.generatedLineShapeMean;
+		if (!generatedSkipRecorded.has(ctx.filePath)) {
+			generatedSkipRecorded.add(ctx.filePath);
+			logLatency({
+				type: "phase",
+				filePath: ctx.filePath,
+				phase: "dispatch_skipped_generated",
+				durationMs: 0,
+				metadata: {
+					evidence: evidence ?? "unknown",
+					...(lineShapeMean !== undefined && { lineShapeMean }),
+				},
+			});
+		}
+		incrementDegradationCount({
+			kind: "dispatch-skipped-generated",
+			subject: ctx.filePath,
+			reason: `evidence=${evidence ?? "unknown"}`,
+		});
 		return {
 			diagnostics: [],
 			blockers: [],
