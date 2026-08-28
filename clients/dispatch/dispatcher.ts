@@ -1048,8 +1048,11 @@ export async function dispatchForFile(
 		// `.min.js` pattern to catch it), so the classification now also has a
 		// content-shape tier. The skip is observable — one `dispatch_skipped_generated`
 		// phase record per file per process carrying the deciding evidence tier
-		// and the measured line-shape statistic, plus a bounded degradation
-		// count that aggregates repeat dispatches of the same file.
+		// and the measured line-shape statistic. Deliberately NOT a degradation
+		// ledger entry: skipping a generated file is healthy behavior working
+		// as designed, and the ledger's bounded kind slots are reserved for
+		// genuine degradations (#2348 review F3 — the ledger precedent at the
+		// collect-later tier flip below records an actual capability loss).
 		const evidence: GeneratedArtifactEvidence | undefined =
 			ctx.generatedEvidence;
 		const lineShapeMean = ctx.generatedLineShapeMean;
@@ -1066,11 +1069,6 @@ export async function dispatchForFile(
 				},
 			});
 		}
-		incrementDegradationCount({
-			kind: "dispatch-skipped-generated",
-			subject: ctx.filePath,
-			reason: `evidence=${evidence ?? "unknown"}`,
-		});
 		return {
 			diagnostics: [],
 			blockers: [],

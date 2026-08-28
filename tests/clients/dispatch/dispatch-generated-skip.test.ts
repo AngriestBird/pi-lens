@@ -153,8 +153,7 @@ describe("dispatch skips machine-emitted text via content shape (refs #2346)", (
 		);
 
 		// Repeat dispatches of the same file: the phase record is deduped to
-		// one per file, while the degradation ledger aggregates the repeats
-		// into one bounded per-subject counter (#2346 no-spam requirement).
+		// one per file (#2346 no-spam requirement).
 		await runDispatchForFile(ctx, groups, registry);
 		await runDispatchForFile(ctx, groups, registry);
 		const afterRepeats = latencyEntries.filter(
@@ -162,10 +161,13 @@ describe("dispatch skips machine-emitted text via content shape (refs #2346)", (
 		);
 		expect(afterRepeats).toHaveLength(1);
 
+		// #2348 review F3: a generated skip is healthy behavior, NOT a
+		// degradation — it must never appear in the ledger, where it would
+		// consume a bounded kind slot and surface under /lens-perf
+		// "Degradations". The phase record above is the observability record.
 		const skippedGroup = getDegradationSummary().find(
 			(group) => group.kind === "dispatch-skipped-generated",
 		);
-		expect(skippedGroup).toBeDefined();
-		expect(skippedGroup?.count).toBeGreaterThanOrEqual(2);
+		expect(skippedGroup).toBeUndefined();
 	});
 });

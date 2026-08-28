@@ -1,4 +1,7 @@
 import { describe, expect, it } from "vitest";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import {
 	classifyGeneratedOrArtifactDetailed,
 	classifyMachineEmittedLineShape,
@@ -61,8 +64,10 @@ describe("generated-artifacts basename shape-coherence (refs #1161, sibling of #
 // #2346: a language-agnostic content-shape test for machine-emitted text — a
 // scraped/minified page whose NAME carries no generated marker (`.html`) but
 // whose line shape is unambiguously machine-emitted. Threshold derived by
-// measurement of this repo's own sources on 2026-08-28 (max measured mean
-// non-empty line length 65.1 across 422 files; threshold 500, ~7.7x margin).
+// measurement ON THE SHIPPED PREFIX STATISTIC across all 3,331 repo text
+// files on 2026-08-28: worst hand-authored prefix mean 453.2
+// (docs/analysisall.md); threshold 2500, ~5.5x margin (see the constant's
+// doc comment for the full derivation and the false-KEEP direction rule).
 describe("machine-emitted line-shape classification (refs #2346)", () => {
 	function minifiedPage(bytes: number, lines: number): string {
 		const perLine = Math.floor(bytes / lines);
@@ -89,10 +94,10 @@ describe("machine-emitted line-shape classification (refs #2346)", () => {
 	});
 
 	it("exposes the measured line-shape statistic the record carries", () => {
-		const content = `${"x".repeat(2000)}\n${"y".repeat(2000)}\n`;
+		const content = `${"x".repeat(3000)}\n${"y".repeat(3000)}\n`;
 		expect(classifyMachineEmittedLineShape(content)).toEqual({
 			generated: true,
-			meanLineLength: 2000,
+			meanLineLength: 3000,
 		});
 	});
 
@@ -139,12 +144,7 @@ describe("machine-emitted line-shape classification (refs #2346)", () => {
 		expect(classifyMachineEmittedLineShape(above).generated).toBe(true);
 	});
 
-	it("reports line-shape verdict for a minified file discovered through the header probe", () => {
-		// The project-scan path reads only a 4 KB header; a minified page's
-		// header is a single giant line, so readContentHeader alone suffices.
-		// This case cannot hit disk in a hermetic vitest worker, so it pins
-		// the content branch used by `createDispatchContext` instead (the
-		// dispatch path passes a 4096-byte prefix as `content`).
+	it("pins the content branch used by createDispatchContext (4096-byte prefix)", () => {
 		const prefix = "x".repeat(4096);
 		const classification = classifyGeneratedOrArtifactDetailed(
 			"/proj/tmp-page.html",
@@ -152,5 +152,50 @@ describe("machine-emitted line-shape classification (refs #2346)", () => {
 		);
 		expect(classification.verdict).toBe("generated");
 		expect(classification.evidence).toBe("line-shape");
+	});
+
+	// #2348 review F1: the header-probe branch (analyzeFileHeader → shape) is
+	// the one project scans and source walks rest on, and it was previously
+	// untested — neutering the shape feed left every suite green. This case
+	// hits the REAL disk path: a temp file read through readContentHeader.
+	it("classifies a minified file as generated through the on-disk header probe", () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-genart-"));
+		try {
+			const p = path.join(dir, "tmp-minified-page.html");
+			fs.writeFileSync(p, `${"z".repeat(30_000)}\n${"w".repeat(30_000)}\n`);
+			const classification = classifyGeneratedOrArtifactDetailed(p, {
+				readContentHeader: true,
+			});
+			expect(classification.verdict).toBe("generated");
+			expect(classification.evidence).toBe("line-shape");
+			expect(classification.lineShapeMean).toBeGreaterThan(
+				MACHINE_EMITTED_LINE_SHAPE_MEAN_THRESHOLD,
+			);
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	// #2348 review F2: negative pins on the shipped prefix statistic. The
+	// repo's own worst hand-authored file (docs/analysisall.md, prefix mean
+	// 453.2 — unwrapped prose paragraphs) and a wide one-line barrel
+	// re-export must both stay source.
+	it("keeps unwrapped prose paragraphs (analysisall.md shape) as source", () => {
+		const paragraph = "word ".repeat(91).trim(); // ~454 chars per line
+		const content = Array.from({ length: 9 }, () => paragraph).join("\n\n");
+		expect(classifyMachineEmittedLineShape(content).generated).toBe(false);
+		expect(isGeneratedOrArtifact("/proj/docs/analysis.md", { content })).toBe(
+			false,
+		);
+	});
+
+	it("keeps a wide single-line barrel re-export as source", () => {
+		const names = Array.from({ length: 200 }, (_, i) => `symbol${i}`).join(
+			", ",
+		);
+		const content = `export { ${names} } from "./resources/index.js";\n`;
+		expect(content.length).toBeGreaterThan(2048); // passes the min-content gate
+		expect(classifyMachineEmittedLineShape(content).generated).toBe(false);
+		expect(isGeneratedOrArtifact("/proj/index.d.ts", { content })).toBe(false);
 	});
 });

@@ -68,7 +68,7 @@ describe("detectFileRole", () => {
 	// non-empty line length in `clients/` is 65.1 (`dispatch/runners/index.ts`,
 	// which the role classifier reports as `init` for its basename), and of
 	// the files that classify as `source`, the maximum is `clients/tool-event.ts`
-	// at 52.1 — both far below the 500 threshold. This test feeds the file's
+	// at 52.1 — both far below the 2500 threshold. This test feeds the file's
 	// REAL content so a threshold regression that starts capturing ordinary
 	// source reds here.
 	it("keeps the longest-line source-role file in clients/ as source (refs #2346)", () => {

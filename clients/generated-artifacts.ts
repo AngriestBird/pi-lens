@@ -206,13 +206,20 @@ function hasGeneratedArtifactContent(content: string): boolean {
  * which is the exact gap #2346 hit: a 269 KB scraped page on 38 lines (mean
  * ~7084/line) drew the full auxiliary scanner stack.
  *
- * The threshold is derived from measurement, not a guess. On 2026-08-28,
- * 422 source files under `clients/`/`tools/`/`scripts/` (content >= the
- * minimum below) measured a MAXIMUM non-empty mean line length of 65.1
- * (`clients/dispatch/runners/index.ts`). A threshold of 500 sits ~7.7x above
- * that maximum — a wide margin for hand-authored source while still far
- * below minified/blob line shapes. Both constants are exported so the tuning
- * claim is checkable and the regression tests pin the margin probe.
+ * The threshold is derived from measurement ON THE SHIPPED STATISTIC (the
+ * 4096-byte header/prefix mean, not full-content means — the two differ by
+ * 3-7x on long-paragraph prose). Measured 2026-08-28 across all 3,331 text
+ * files in this repo: the maximum hand-authored prefix mean is 453.2
+ * (`docs/analysisall.md`, unwrapped prose paragraphs); the widest
+ * hand-authored one-line shape observed anywhere probed is a ~2048-char
+ * barrel re-export. The threshold of 2500 sits ~5.5x above the repo's worst
+ * prose file and above every observed hand-authored shape, while the #2346
+ * evidence file (269 KB / 38 lines) remains far above it. Direction of
+ * error is deliberate per #1107: a borderline machine-emitted file that
+ * slips through (false KEEP) costs noise once; a hand-authored file
+ * silently classified generated (false DROP) vanishes from scans with no
+ * signal. Both constants are exported so the tuning claim is checkable and
+ * the regression tests pin the margin probes on both sides.
  *
  * Degenerate cases are guarded: content below the minimum byte length never
  * classifies generated on line shape alone (a 500-byte single-line config
@@ -220,7 +227,7 @@ function hasGeneratedArtifactContent(content: string): boolean {
  * file yields a zero mean and stays source.
  */
 export const MACHINE_EMITTED_LINE_SHAPE_MIN_CONTENT = 2048;
-export const MACHINE_EMITTED_LINE_SHAPE_MEAN_THRESHOLD = 500;
+export const MACHINE_EMITTED_LINE_SHAPE_MEAN_THRESHOLD = 2500;
 
 export interface MachineEmittedLineShape {
 	/** True when the content shape classifies as generated. */
