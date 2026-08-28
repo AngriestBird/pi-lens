@@ -34,6 +34,8 @@ references rot and are evidence-only):
 - Review graph, snapshots, or word index: Standing invariants
   project-intelligence group; "Project intelligence and snapshots".
 - Git-guard work: Standing invariants git-guard group.
+- Delegated work: "Role contracts for delegated work" and
+  `docs/pi-lens-subagent.md`, plus the selected role contract.
 - ast-grep or tree-sitter rules: Standing invariants rules group; "ast-grep
   rules"; "Tree-sitter rules".
 - Opening a PR: the PR template headings; the prose contract, blast-radius,
@@ -137,6 +139,32 @@ Message-end stale attribution anchors the session id when a live ctx is handled,
 ## Contributing
 
 For human contributors and issue/PR authors, see `CONTRIBUTING.md` at the repo root. It covers the development workflow, how to add runners, LSP servers, formatters, and rules, and the issue/PR templates. This `AGENTS.md` is the durable agent context; `CONTRIBUTING.md` is the public contributor guide.
+
+### Role contracts for delegated work
+
+Every delegated worker receives `docs/pi-lens-subagent.md` and exactly one role
+contract before it starts:
+
+- Use `docs/pi-lens-fixer.md` to implement an issue or requested change.
+- Use `docs/pi-lens-reviewer.md` to adversarially verify a finished change.
+- Use `docs/pi-lens-investigator.md` to root-cause behavior without editing.
+
+This routing applies to native subagents, Plegma workers, and any other agent
+runner. Include the contract text or an explicit repository-relative reference
+in the task. For Plegma, also pass the matching daemon contract names in this
+order: `pi-lens-subagent`, then the selected role. Repository instructions win
+if a daemon copy has drifted.
+
+Name the role, absolute worktree, branch, base, acceptance criteria, non-goals,
+and Git authority in every delegation. A role never grants Git authority by
+itself. Follow "Prove filesystem isolation before coding subagents touch Git":
+if the worker cannot verify a distinct registered worktree, it runs no Git
+commands, and the orchestrator owns commits, pushes, and PR operations.
+
+Do not mix implementation and review in one delegation. If an investigation
+produces a fix, return the diagnosis and start a fixer delegation. If a reviewer
+finds a defect, return the finding and start a fixer round. Run the final review
+against the actual PR head in a separate reviewer delegation.
 
 **The minimalism ladder — climb it before writing any code.** Be lazy about the solution, never about reading: understand the problem and trace the real code flow first, then ask, in order: (1) does this need to exist at all — would nothing break without it? (2) does this codebase already do it — reuse the existing seam (single-source-of-truth rule); (3) does the stdlib or platform do it? (4) does an installed dependency do it? (5) is it one line? Only then write the minimum that works. Lazy, not negligent: validation, error handling, security, bounded observability, and the degradation records this repo requires are never skipped for minimalism. The record: #2091 was built and then killed by measurement — step 1 asked before building would have saved the PR; #2106's catch-path outcome split was an unobservable discriminator that step 1 would have stopped ("a discriminator nothing can observe is a vacuous guard"). When a reviewer finds over-built code, the finding names the ladder step that was skipped.
 
