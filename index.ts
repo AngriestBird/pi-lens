@@ -258,7 +258,11 @@ import {
 	getBuildIdentity,
 } from "./clients/build-identity.js";
 import { logSessionStart } from "./clients/sessionstart-logger.js";
-import { logConcurrentSessionBind } from "./clients/session-start-observability.js";
+import {
+	emitConcurrentSessionBindRollupAtSessionEnd,
+	logConcurrentSessionBind,
+	resetConcurrentSessionBindRollupCounts,
+} from "./clients/session-start-observability.js";
 import { normalizeToolDefinition } from "./clients/tool-definition.js";
 import { warmFormatters } from "./clients/formatters-lazy.js";
 
@@ -1867,6 +1871,18 @@ function activateExtension(hostPi: ExtensionAPI) {
 					// accepted cost on the other side (a torn-down secondary's own
 					// bracket goes stale until the next full session start).
 					resetCurrentPhaseForSession();
+					// #2249: same gate — a declined bind's own session_start must never
+					// reach here (it returned above), so this only fires for a genuine
+					// new primary. A crash or forced kill can skip session_shutdown's
+					// own emit+reset below, so the rollup also re-arms here rather than
+					// trusting shutdown alone (AGENTS.md catalog shape 17).
+					// #2312 review F1: on the sequential-replacement path (prior primary
+					// never reached session_shutdown), the reset below would otherwise
+					// silently discard an unemitted tally. Emit first — a no-op when
+					// nothing was declined — so the crash/kill case still produces its
+					// one summary row instead of losing it.
+					emitConcurrentSessionBindRollupAtSessionEnd(runtime.projectRoot);
+					resetConcurrentSessionBindRollupCounts();
 
 					// Dynamic tooling (#pi 0.80.x+): put the active tool set back to the
 					// posture this logical conversation had — the always-active baseline
@@ -3101,6 +3117,10 @@ function activateExtension(hostPi: ExtensionAPI) {
 		// process-wide module state a live secondary would still need.
 		emitBusEventRollupAtSessionEnd(runtime.projectRoot);
 		emitVerifiedPathAttributionRollup(runtime.projectRoot);
+		// #2249: same primary-only placement — one concurrent_session_bind_rollup
+		// row summarizing this session's declined binds by classification, a
+		// no-op when none occurred.
+		emitConcurrentSessionBindRollupAtSessionEnd(runtime.projectRoot);
 		// #1123 item 4: dump active handles AFTER teardown — whatever is still
 		// alive at this point is exactly what would keep a --print/--no-session
 		// process from exiting (the #1097 lesson: what survives IS the leak).

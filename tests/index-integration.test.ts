@@ -440,6 +440,193 @@ describe("index.ts integration", () => {
 		INTEGRATION_TIMEOUT_MS,
 	);
 
+	// #2249: the declined-bind rollup. Same primary-only reset/emit placement
+	// as the verified-attribution tally above, but process-singleton backed
+	// (AGENTS.md catalog shape 25) rather than a module-scope `let`, and the
+	// counter is driven by the REAL decideSessionStart decline path rather
+	// than a manual record call, so these also exercise the production wiring
+	// end to end.
+	it(
+		"a NEW primary's session_start clears a stale rollup left by a crashed prior primary",
+		async () => {
+			const logLatency = vi.fn();
+			vi.doMock("../clients/latency-logger.js", async (importActual) => ({
+				...(await importActual<
+					typeof import("../clients/latency-logger.js")
+				>()),
+				logLatency,
+			}));
+			const observability =
+				await import("../clients/session-start-observability.js");
+			// Simulates a prior primary session that logged a decline and then
+			// never reached session_shutdown (crash/forced kill) — the counters
+			// are process-wide (globalThis-backed) state that outlives it.
+			observability.logConcurrentSessionBind({
+				secondaryCount: 1,
+				sameCwd: true,
+				classification: "concurrent-secondary",
+			});
+			const { default: registerExtension } = await import("../index.js");
+			const { pi, handlers } = createMockPi();
+			registerExtension(pi as any);
+			await handlers.session_start?.[0]?.(
+				{},
+				makeCtx({ cwd: tmpDir, sessionId: "primary" }),
+			);
+			expect(observability.getConcurrentSessionBindRollupCounts()).toEqual({
+				"concurrent-secondary": 0,
+				"secondary-root": 0,
+				unclassified: 0,
+			});
+			// #2312 review F1: the crashed prior primary never reached
+			// session_shutdown, so its tally would otherwise be silently
+			// discarded by the reset above instead of summarized. The fresh
+			// primary's session_start must emit the stale tally before
+			// clearing it — exactly one row, not zero and not more.
+			const rollups = logLatency.mock.calls.filter(
+				([row]) =>
+					(row as { phase?: string }).phase ===
+					"concurrent_session_bind_rollup",
+			);
+			expect(rollups).toHaveLength(1);
+			expect(rollups[0][0]).toEqual(
+				expect.objectContaining({
+					phase: "concurrent_session_bind_rollup",
+					metadata: {
+						"concurrent-secondary": 1,
+						"secondary-root": 0,
+						unclassified: 0,
+					},
+				}),
+			);
+		},
+		INTEGRATION_TIMEOUT_MS,
+	);
+
+	it(
+		"primary session_shutdown emits one concurrent-session-bind rollup and clears it, while zero stays silent",
+		async () => {
+			const logLatency = vi.fn();
+			vi.doMock("../clients/latency-logger.js", async (importActual) => ({
+				...(await importActual<
+					typeof import("../clients/latency-logger.js")
+				>()),
+				logLatency,
+			}));
+			const observability =
+				await import("../clients/session-start-observability.js");
+			const { default: registerExtension } = await import("../index.js");
+			const { pi, handlers } = createMockPi();
+			registerExtension(pi as any);
+			const shutdown = handlers.session_shutdown?.[0];
+			observability.logConcurrentSessionBind({
+				secondaryCount: 1,
+				sameCwd: true,
+				classification: "concurrent-secondary",
+			});
+			shutdown?.({}, makeCtx({ cwd: tmpDir, sessionId: "primary" }));
+			const rollups = () =>
+				logLatency.mock.calls.filter(
+					([row]) =>
+						(row as { phase?: string }).phase ===
+						"concurrent_session_bind_rollup",
+				);
+			expect(rollups()).toHaveLength(1);
+			expect(rollups()[0][0]).toEqual(
+				expect.objectContaining({
+					phase: "concurrent_session_bind_rollup",
+					metadata: {
+						"concurrent-secondary": 1,
+						"secondary-root": 0,
+						unclassified: 0,
+					},
+				}),
+			);
+			expect(observability.getConcurrentSessionBindRollupCounts()).toEqual({
+				"concurrent-secondary": 0,
+				"secondary-root": 0,
+				unclassified: 0,
+			});
+			logLatency.mockClear();
+			shutdown?.({}, makeCtx({ cwd: tmpDir, sessionId: "primary" }));
+			expect(rollups()).toHaveLength(0);
+		},
+		INTEGRATION_TIMEOUT_MS,
+	);
+
+	it(
+		"secondary session_shutdown does not consume the primary rollup tally",
+		async () => {
+			const logLatency = vi.fn();
+			vi.doMock("../clients/latency-logger.js", async (importActual) => ({
+				...(await importActual<
+					typeof import("../clients/latency-logger.js")
+				>()),
+				logLatency,
+			}));
+			const observability =
+				await import("../clients/session-start-observability.js");
+			const { default: registerExtension } = await import("../index.js");
+			const primary = createMockPi();
+			registerExtension(primary.pi as any);
+			await primary.trigger(
+				"session_start",
+				{},
+				makeCtx({ cwd: tmpDir, sessionId: "primary" }),
+			);
+
+			const secondary = createMockPi();
+			registerExtension(secondary.pi as any);
+			// Same cwd, still-live primary ctx, different session id —
+			// decideSessionStart classifies this concurrent-secondary and
+			// index.ts's session_start handler declines the full start, which is
+			// what actually calls logConcurrentSessionBind (real production path,
+			// not a manual record call).
+			await secondary.trigger(
+				"session_start",
+				{},
+				makeCtx({ cwd: tmpDir, sessionId: "secondary" }),
+			);
+			expect(observability.getConcurrentSessionBindRollupCounts()).toEqual({
+				"concurrent-secondary": 1,
+				"secondary-root": 0,
+				unclassified: 0,
+			});
+
+			const rollups = () =>
+				logLatency.mock.calls.filter(
+					([row]) =>
+						(row as { phase?: string }).phase ===
+						"concurrent_session_bind_rollup",
+				);
+
+			await secondary.trigger(
+				"session_shutdown",
+				{},
+				makeCtx({ cwd: tmpDir, sessionId: "secondary" }),
+			);
+			expect(rollups()).toHaveLength(0);
+			expect(observability.getConcurrentSessionBindRollupCounts()).toEqual({
+				"concurrent-secondary": 1,
+				"secondary-root": 0,
+				unclassified: 0,
+			});
+
+			await primary.trigger(
+				"session_shutdown",
+				{},
+				makeCtx({ cwd: tmpDir, sessionId: "primary" }),
+			);
+			expect(rollups()).toHaveLength(1);
+			expect(observability.getConcurrentSessionBindRollupCounts()).toEqual({
+				"concurrent-secondary": 0,
+				"secondary-root": 0,
+				unclassified: 0,
+			});
+		},
+		INTEGRATION_TIMEOUT_MS,
+	);
+
 	// #1910: the tier-3 cascade outstanding-touch registry (clients/lsp/
 	// cascade-tier.ts) is process-shared runtime state, same #473 shape as the
 	// active-tool set and the direct-LSP latch above. A concurrently-live
