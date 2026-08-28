@@ -815,6 +815,46 @@ describe("Dispatch Flow", () => {
 			expect(result.diagnostics.map((d) => d.id)).toEqual(["napi-finding"]);
 		});
 
+		it("still runs a runner that does not declare skipTestFiles on a test file", async () => {
+			registerRunner(
+				createMockRunner({
+					id: "plain-runner",
+					appliesTo: ["jsts"],
+					runResult: {
+						status: "succeeded",
+						diagnostics: [
+							{
+								id: "plain-finding",
+								message: "runs on test files too",
+								filePath: "auth.test.ts",
+								severity: "warning",
+								semantic: "warning",
+								tool: "plain-runner",
+							},
+						],
+						semantic: "warning",
+					},
+				}),
+			);
+
+			const ctx = createMockContext("auth.test.ts");
+			const groups: RunnerGroup[] = [
+				{
+					mode: "all",
+					runnerIds: ["plain-runner"],
+					filterKinds: ["jsts"],
+				},
+			];
+
+			const result = await dispatchForFile(ctx, groups);
+
+			expect(result.diagnostics.map((d) => d.id)).toEqual(["plain-finding"]);
+			const report = getLatencyReports().at(-1);
+			expect(
+				report?.runners.find((r) => r.runnerId === "plain-runner")?.status,
+			).toBe("succeeded");
+		});
+
 		it("does not fire onRunnerResult for a skipTestFiles runner on a test file", async () => {
 			registerRunner(
 				createMockRunner({

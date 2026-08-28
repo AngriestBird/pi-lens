@@ -607,7 +607,10 @@ function buildCoverageNotice(
 	if (primaryHasCoverage) return undefined;
 
 	const allPrimarySkipped = relevant.every(
-		(r) => r.status === "skipped" || r.status === "when_skipped",
+		(r) =>
+			r.status === "skipped" ||
+			r.status === "when_skipped" ||
+			r.status === "test_file_skipped",
 	);
 	if (!allPrimarySkipped) return undefined;
 
