@@ -787,8 +787,7 @@ describe("Dispatch Flow", () => {
 			expect(result.diagnostics).toHaveLength(0);
 			const report = getLatencyReports().at(-1);
 			expect(
-				report?.runners.find((r) => r.runnerId === "skip-test-runner")
-					?.status,
+				report?.runners.find((r) => r.runnerId === "skip-test-runner")?.status,
 			).toBe("test_file_skipped");
 		});
 
