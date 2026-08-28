@@ -41,7 +41,7 @@ async function main() {
 		parseArgs(process.argv.slice(2));
 	if (!runId) {
 		console.error(
-			"usage: node scripts/classify-ci-failure.mjs --run <runId> [--job-name <name>] [--pr <number>]",
+			"usage: node scripts/classify-ci-failure.mjs --run <runId> [--job-name <name>] [--pr <number>] [--sha <headSha>] [--infra-kill-only] [--skip-missing-job]",
 		);
 		process.exitCode = 2;
 		return;
