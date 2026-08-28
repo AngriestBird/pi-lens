@@ -41,7 +41,6 @@ function mockRunner(id: string, diagnostics: Diagnostic[]): RunnerDefinition {
 		id,
 		appliesTo: ["jsts"],
 		priority: 10,
-		enabledByDefault: true,
 		async run() {
 			return {
 				status: "succeeded",

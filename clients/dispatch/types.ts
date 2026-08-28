@@ -131,7 +131,6 @@ export interface RunnerDefinition {
 	id: string;
 	appliesTo: readonly FileKind[];
 	priority: number;
-	enabledByDefault: boolean;
 	/** Skip this runner for test files (false positive reduction) */
 	skipTestFiles?: boolean;
 	/** Per-runner wall-clock timeout in ms; overrides dispatch.runnerTimeoutMs when set */

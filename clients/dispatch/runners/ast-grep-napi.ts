@@ -914,7 +914,6 @@ const astGrepNapiRunner: RunnerDefinition = {
 	id: "ast-grep-napi",
 	appliesTo: ["jsts", "css", "html"],
 	priority: PRIORITY.SPECIALIZED_ANALYSIS,
-	enabledByDefault: true,
 	skipTestFiles: true,
 
 	async run(ctx: DispatchContext): Promise<RunnerResult> {

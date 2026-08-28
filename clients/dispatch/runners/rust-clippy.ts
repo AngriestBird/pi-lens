@@ -81,7 +81,6 @@ const rustClippyRunner: RunnerDefinition = {
 	id: "rust-clippy",
 	appliesTo: ["rust"],
 	priority: PRIORITY.SPECIALIZED_ANALYSIS,
-	enabledByDefault: true,
 	timeoutMs: 90_000,
 
 	async run(ctx: DispatchContext): Promise<RunnerResult> {

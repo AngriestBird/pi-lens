@@ -735,7 +735,6 @@ describe("oxlint runner", () => {
 				id: "eslint",
 				appliesTo: ["jsts"],
 				priority: 1,
-				enabledByDefault: true,
 				async run() {
 					return { status: "skipped", diagnostics: [], semantic: "none" };
 				},
@@ -745,7 +744,6 @@ describe("oxlint runner", () => {
 				id: "biome-check-json",
 				appliesTo: ["jsts"],
 				priority: 3,
-				enabledByDefault: true,
 				async run() {
 					biomeCalls.push(Date.now());
 					return { status: "succeeded", diagnostics: [], semantic: "none" };
@@ -1246,7 +1244,6 @@ describe("oxlint runner", () => {
 				id: "malformed-skip",
 				appliesTo: ["jsts"],
 				priority: 1,
-				enabledByDefault: true,
 				async run() {
 					return {
 						status: "skipped",

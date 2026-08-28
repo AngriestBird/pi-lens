@@ -104,7 +104,6 @@ const oxlintRunner: RunnerDefinition = {
 	id: "oxlint",
 	appliesTo: ["jsts"],
 	priority: PRIORITY.LINT_SECONDARY,
-	enabledByDefault: true,
 	skipTestFiles: false,
 
 	async run(ctx: DispatchContext): Promise<RunnerResult> {

@@ -29,7 +29,6 @@ const pyrightRunner: RunnerDefinition = {
 	id: "pyright",
 	appliesTo: ["python"],
 	priority: PRIORITY.LSP_FALLBACK,
-	enabledByDefault: true,
 	timeoutMs: 75_000,
 
 	async run(ctx: DispatchContext): Promise<RunnerResult> {
