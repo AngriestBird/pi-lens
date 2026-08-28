@@ -312,7 +312,7 @@ describe("html edits run the enabled html catalog (#2325)", () => {
 	});
 	afterAll(() => env.cleanup());
 
-	it("reports a plaintext HTTP link through the dispatch runner", async () => {
+	it("reports a plaintext HTTP link through the napi runner", async () => {
 		const { ctx } = env.addFile(
 			"index.html",
 			'<a href="http://example.com">Example</a>\n',

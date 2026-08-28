@@ -2556,8 +2556,12 @@ NAPI routing and enabled-rule coverage are bidirectional: every enabled catalog
 language has a delivery route, and every NAPI-routed language has at least one
 enabled rule. `ast-grep-napi-language-coverage.test.ts` enforces both directions
 against the shared `getAstGrepRuleSources` census. Normalize catalog `language:`
-values to lowercase before comparing them with the lowercase NAPI bindings;
-the shipped HTML rule declares `language: html`, not `Html`. (#2325)
+values to lowercase before ANY comparison — the corpus mixes case across
+nearly every language (111 `TypeScript` vs 31 `typescript`, 47 `Python` vs
+52 `python`, ...), so a raw-case comparison is wrong somewhere on every
+language, not just HTML. Runtime lowercases (sgconfig.ts, ast-grep-napi.ts);
+tooling that compares raw is the recurring gap — #2331 tracks the two known
+sites. (#2325)
 
 A target repository that supplies its own `sgconfig.yml` / `sgconfig.yaml` at the workspace root takes precedence — pi-lens respects the project config instead of injecting its baseline.
 
