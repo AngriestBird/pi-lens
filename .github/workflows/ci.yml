@@ -43,6 +43,8 @@ jobs:
           persist-credentials: false
 
       - name: Validate per-issue close keywords
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: node scripts/check-close-keywords.mjs --lint-pr
 
   # #1844: the changelog-fragment format error hit four PRs in one day, each

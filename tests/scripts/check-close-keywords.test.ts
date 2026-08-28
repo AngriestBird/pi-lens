@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	INVALID_CLOSE_KEYWORD_MESSAGE,
 	lintCloseKeywords,
+	lintPullRequest,
 	parseCloseKeywords,
 	verifyMergedPullRequest,
 } from "../../scripts/check-close-keywords.mjs";
@@ -111,6 +112,34 @@ describe("close-keyword parser (#1320)", () => {
 		const result = lintCloseKeywords("Intro.\nCloses #12, #13\nOutro.");
 		expect(result.valid).toBe(false);
 		expect(result.offendingLines).toEqual(["Closes #12, #13"]);
+	});
+});
+
+describe("close-keyword syntax lint reads the live body (#2086)", () => {
+	it("uses the live body when a rerun receives a stale event payload", async () => {
+		vi.stubEnv("GITHUB_API_URL", "https://api.github.test");
+		vi.stubEnv("GITHUB_REPOSITORY", "apmantza/pi-lens");
+		vi.stubEnv("GITHUB_TOKEN", "test-token");
+		const log = vi.spyOn(console, "log").mockImplementation(() => {});
+		const fetchImpl = vi.fn().mockResolvedValue(
+			new Response(JSON.stringify({ body: "Closes #123. Closes #456." }), {
+				status: 200,
+			}),
+		);
+		const event = {
+			pull_request: { number: 2086, body: "Closes #123, #456" },
+		};
+
+		await lintPullRequest(fetchImpl, event);
+
+		expect(fetchImpl).toHaveBeenCalledWith(
+			"https://api.github.test/repos/apmantza/pi-lens/pulls/2086",
+			expect.objectContaining({ signal: expect.any(AbortSignal) }),
+		);
+		expect(log).toHaveBeenCalledWith(
+			"Close-keyword syntax OK (2 issues referenced).",
+		);
+		log.mockRestore();
 	});
 });
 
@@ -312,6 +341,24 @@ describe("close-keyword-verification.yml carries GITHUB_TOKEN (#2267 F1)", () =>
 		// not GH_TOKEN, so the two are NOT interchangeable here even though
 		// they carry the same secret value.
 		expect(step.env?.GH_TOKEN).toBeTruthy();
+		expect(step.env?.GITHUB_TOKEN).toBeTruthy();
+	});
+
+	it("sets GITHUB_TOKEN on the syntax-lint step", () => {
+		const workflowPath = path.join(REPO_ROOT, ".github/workflows/ci.yml");
+		type WorkflowStep = { run?: string; env?: Record<string, string> };
+		type Workflow = {
+			jobs: { "close-keyword-lint": { steps: WorkflowStep[] } };
+		};
+		const workflow = yaml.load(
+			fs.readFileSync(workflowPath, "utf8"),
+		) as Workflow;
+		const step = workflow.jobs["close-keyword-lint"].steps.find((s) =>
+			(s.run ?? "").includes("check-close-keywords.mjs"),
+		);
+		if (!step) throw new Error("syntax-lint step not found in ci.yml");
+		// Mutation-proof: without this workflow wiring the strict live fetch
+		// fails before it can inspect the current PR body.
 		expect(step.env?.GITHUB_TOKEN).toBeTruthy();
 	});
 });
