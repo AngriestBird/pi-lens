@@ -59,6 +59,10 @@ function mockWorkingSgLoad(): void {
 				}),
 			}),
 		},
+		// #2324 R2-B: declared but undefined, matching an addon build that
+		// dropped a grammar (#2215) — `getLang` must read this as "no parser
+		// for html", not throw on an undeclared mock export.
+		html: undefined,
 	}));
 }
 
@@ -127,13 +131,22 @@ describe("ast-grep-napi runner — LSP supersede gate (#239 Phase 2)", () => {
 	// @ast-grep/napi mock and collides with the doMock in the skip-path suite.
 });
 
-describe("ast-grep-napi runner — late-auxiliary dedupe (#2324 F3)", () => {
+describe("ast-grep-napi runner — late-auxiliary dedupe (#2324 F3/R2)", () => {
 	beforeEach(() => {
 		vi.resetModules();
 		mockAuxiliaryLspPublished.mockResolvedValue(false);
 	});
 
-	it("consumes the pending late-auxiliary pair when it runs as the fallback, so only one delivery surface arms", async () => {
+	// #2324 R2-A: production can NEVER see a pending pair for THIS touch by
+	// the time napi's clear runs — the wait that marks a pair for this touch
+	// takes up to its own grace budget (~1800ms), strictly LONGER than napi's
+	// Gate-B check plus rule evaluation. Any pair visible here is therefore a
+	// LEFTOVER from an EARLIER touch, describing a PREVIOUS revision this
+	// fresh evaluation supersedes — clearing it is correct. The mark-vs-clear
+	// RACE for THIS touch's own pair is closed on the OTHER side, in
+	// service-aux-grace.test.ts, where the aux-grace wait consults
+	// `napiFallbackCoveredSince` before it ever marks.
+	it("clears a leftover pending pair from an earlier touch once it actually evaluates rules", async () => {
 		const env = setupTestEnvironment("pi-lens-ast-grep-dedupe-");
 		try {
 			const filePath = path.join(env.tmpDir, "file.ts");
@@ -141,8 +154,7 @@ describe("ast-grep-napi runner — late-auxiliary dedupe (#2324 F3)", () => {
 			const pendingAux =
 				await import("../../../../clients/lsp/pending-aux-coverage.js");
 			pendingAux.resetPendingAuxiliaryCoverage();
-			// Lane 1 arms: the aux-grace wait already found ast-grep silent for
-			// this touch and marked it for turn-end late delivery.
+			// A leftover pair from an EARLIER touch, still undelivered.
 			pendingAux.markPendingAuxiliaryCoverage(filePath, ["ast-grep"]);
 			expect(pendingAux.hasPendingAuxiliaryCoverage(filePath, "ast-grep")).toBe(
 				true,
@@ -151,19 +163,57 @@ describe("ast-grep-napi runner — late-auxiliary dedupe (#2324 F3)", () => {
 			mockWorkingSgLoad();
 			const mod =
 				await import("../../../../clients/dispatch/runners/ast-grep-napi.js");
-			// Lane 2 arms: Gate B finds no publication yet, so napi runs and
-			// delivers this turn's findings itself.
 			const result = await mod.default.run(
 				createCtx(filePath, { hasTool: async () => false }) as any,
 			);
 			expect(result.status).toBe("succeeded");
 
-			// Exactly one delivery surface should remain armed: napi already
-			// delivered, so the late-auxiliary lane must be consumed — a
-			// pending pair left behind here would redeliver the identical
-			// rule/line at the next turn_end as a duplicate.
+			// This fresh evaluation supersedes the leftover pair.
 			expect(pendingAux.hasPendingAuxiliaryCoverage(filePath, "ast-grep")).toBe(
 				false,
+			);
+			pendingAux.resetPendingAuxiliaryCoverage();
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	// #2324 R2-B: the clear/record must sit AFTER every early-return skip —
+	// loadSg failure, missing file, unresolved language, stat/size/read/parse
+	// failure — not at Gate B's decision point. A run that never reaches rule
+	// evaluation did not actually cover the file, so it must not consume a
+	// pending pair a genuine late LSP delivery still needs. Reproduces the
+	// reviewer's probe: an .html file the mocked sg module has no parser for
+	// (`mockWorkingSgLoad` only registers `ts`), so `getLang` returns
+	// undefined and napi skips before ever touching rules.
+	it("preserves a pending late-auxiliary pair when napi never reaches rule evaluation", async () => {
+		const env = setupTestEnvironment("pi-lens-ast-grep-dedupe-");
+		try {
+			const filePath = path.join(env.tmpDir, "file.html");
+			fs.writeFileSync(
+				filePath,
+				"<div>unparsed by the mocked sg module</div>\n",
+			);
+			const pendingAux =
+				await import("../../../../clients/lsp/pending-aux-coverage.js");
+			pendingAux.resetPendingAuxiliaryCoverage();
+			pendingAux.markPendingAuxiliaryCoverage(filePath, ["ast-grep"]);
+			expect(pendingAux.hasPendingAuxiliaryCoverage(filePath, "ast-grep")).toBe(
+				true,
+			);
+
+			mockWorkingSgLoad();
+			const mod =
+				await import("../../../../clients/dispatch/runners/ast-grep-napi.js");
+			const result = await mod.default.run(
+				createCtx(filePath, { hasTool: async () => false }) as any,
+			);
+			expect(result.status).toBe("skipped");
+
+			// Napi never evaluated a rule for this file — the pending pair, and
+			// the LSP's legitimate late delivery it represents, must survive.
+			expect(pendingAux.hasPendingAuxiliaryCoverage(filePath, "ast-grep")).toBe(
+				true,
 			);
 			pendingAux.resetPendingAuxiliaryCoverage();
 		} finally {
@@ -320,5 +370,94 @@ describe("ast-grep-napi runner — metadata", () => {
 		expect(runner.id).toBe("ast-grep-napi");
 		expect(runner.appliesTo).toContain("jsts");
 		expect(runner.enabledByDefault).toBe(true);
+	});
+});
+
+// #2324 F2/R2-C: the residual "published once, silent now" loss is a bounded
+// `aux-runner-findings-lost` degradation, not a re-run. Neutering the branch
+// that records it must turn this test red — the finding the review round
+// caught was that no test referenced the record at all, so the branch could
+// be deleted with the suite staying green.
+describe("ast-grep-napi runner — aux-runner-findings-lost degradation (#2324 R2-C)", () => {
+	beforeEach(() => {
+		vi.resetModules();
+		mockAuxiliaryLspPublished.mockResolvedValue(false);
+	});
+
+	it("records the loss when Gate B skips on a leftover pending pair", async () => {
+		const env = setupTestEnvironment("pi-lens-ast-grep-loss-");
+		try {
+			const filePath = path.join(env.tmpDir, "file.ts");
+			fs.writeFileSync(filePath, "const x = 1;\n");
+			// #2324 R2-C: dynamically imported AFTER vi.resetModules() so this is
+			// the SAME module instance (and the same ledger state) the runner
+			// module below resolves — a static top-of-file import would bind to
+			// a stale pre-reset instance and this test would fail for the wrong
+			// reason.
+			const ledger = await import("../../../../clients/degradation-ledger.js");
+			ledger.resetDegradationLedger();
+			const pendingAux =
+				await import("../../../../clients/lsp/pending-aux-coverage.js");
+			pendingAux.resetPendingAuxiliaryCoverage();
+			// A leftover pair from an earlier touch — by R2-A's ordering, the
+			// only shape a pair can take by the time this synchronous check
+			// runs (this touch's own mark, if any, is decided strictly later).
+			pendingAux.markPendingAuxiliaryCoverage(filePath, ["ast-grep"]);
+
+			// Gate B: the per-file publication gate reads "published" (a prior
+			// touch's publication), so napi is about to skip.
+			mockAuxiliaryLspPublished.mockResolvedValue(true);
+			mockWorkingSgLoad();
+			const mod =
+				await import("../../../../clients/dispatch/runners/ast-grep-napi.js");
+			const result = await mod.default.run(
+				createCtx(filePath, { hasTool: async () => false }) as any,
+			);
+			expect(result.status).toBe("skipped");
+
+			const group = ledger
+				.getDegradationSummary()
+				.find((g) => g.kind === "aux-runner-findings-lost");
+			expect(group).toBeDefined();
+			expect(group?.count).toBe(1);
+			expect(group?.latestReasons[0]?.subject).toBe("ast-grep");
+			// The reason must describe an EARLIER-touch leftover, not this
+			// touch's own aux-grace outcome — R2-C's corrected claim.
+			expect(group?.latestReasons[0]?.reason).toContain("EARLIER touch");
+			pendingAux.resetPendingAuxiliaryCoverage();
+			ledger.resetDegradationLedger();
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("does not record the loss when no pending pair exists (a clean skip)", async () => {
+		const env = setupTestEnvironment("pi-lens-ast-grep-loss-");
+		try {
+			const filePath = path.join(env.tmpDir, "file.ts");
+			fs.writeFileSync(filePath, "const x = 1;\n");
+			const ledger = await import("../../../../clients/degradation-ledger.js");
+			ledger.resetDegradationLedger();
+			const pendingAux =
+				await import("../../../../clients/lsp/pending-aux-coverage.js");
+			pendingAux.resetPendingAuxiliaryCoverage();
+
+			mockAuxiliaryLspPublished.mockResolvedValue(true);
+			mockWorkingSgLoad();
+			const mod =
+				await import("../../../../clients/dispatch/runners/ast-grep-napi.js");
+			const result = await mod.default.run(
+				createCtx(filePath, { hasTool: async () => false }) as any,
+			);
+			expect(result.status).toBe("skipped");
+			expect(
+				ledger
+					.getDegradationSummary()
+					.find((g) => g.kind === "aux-runner-findings-lost"),
+			).toBeUndefined();
+			ledger.resetDegradationLedger();
+		} finally {
+			env.cleanup();
+		}
 	});
 });

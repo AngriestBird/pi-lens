@@ -2080,3 +2080,105 @@ describe('#1533 — silent auxiliary honesty on clientScope "all"', () => {
 		);
 	});
 });
+
+/**
+ * #2324 R2-A — the actual production ordering: the ast-grep napi fallback's
+ * Gate-B check is a synchronous map lookup, while the aux-grace wait that
+ * decides whether to mark a pending late-auxiliary pair runs for up to its
+ * own grace budget (here, up to the aux's own wait). By the time this wait
+ * is ready to decide, THIS touch's napi run (if any) has already recorded
+ * its coverage — the wait consults that record before marking. A clear
+ * issued from napi's side (the F3 fix's first attempt) cannot rely on this
+ * ordering: the mark it would race has not been written yet.
+ */
+describe("R8 — aux grace: ast-grep napi/aux-grace mark ordering (#2324 R2-A)", () => {
+	beforeEach(() => {
+		vi.useFakeTimers();
+		vi.resetModules();
+		getServersForFileWithConfig.mockReset();
+		createLSPClient.mockReset();
+		logLatency.mockReset();
+		delete process.env.PI_LENS_AUX_GRACE_MS;
+	});
+
+	afterEach(() => {
+		vi.useRealTimers();
+		vi.restoreAllMocks();
+		delete process.env.PI_LENS_AUX_GRACE_MS;
+	});
+
+	it("does not mark a pending pair when napi already covered this touch before the wait decides", async () => {
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		// Dynamically imported AFTER vi.resetModules() so this is the SAME
+		// module instance LSPService resolves internally — a static top-level
+		// import would bind to a stale pre-reset instance.
+		const pendingAux =
+			await import("../../../clients/lsp/pending-aux-coverage.js");
+		pendingAux.resetPendingAuxiliaryCoverage();
+		const service = new LSPService();
+		getServersForFileWithConfig.mockReturnValue([
+			makePrimaryServer("ts-primary"),
+			makeAuxServer("ast-grep"),
+		]);
+		// ast-grep's own wait settles SILENTLY (no publish) well inside its
+		// budget — the shape that, absent this fix, marks a pending pair.
+		createLSPClient
+			.mockResolvedValueOnce(makeClient(800, [], { serverId: "ts-primary" }))
+			.mockResolvedValueOnce(makeClient(900, [], { serverId: "ast-grep" }));
+		await service.getClientsForFile(FILE);
+
+		const touchPromise = service.touchFile(FILE, "content", {
+			clientScope: "with-auxiliary",
+			auxiliaryServerIds: ["ast-grep"],
+			collectDiagnostics: true,
+			diagnostics: "document",
+		});
+		// Gate B's napi runner is dispatched CONCURRENTLY with this wait
+		// (dispatcher.ts's Promise.all groups) and settles almost immediately
+		// — a synchronous map lookup plus a fast rule evaluation. Reproduced
+		// here by recording napi's coverage right after the touch starts,
+		// well before the aux's own ~900ms wait or the grace ceiling resolve.
+		pendingAux.recordNapiFallbackCoverage(FILE);
+		await vi.advanceTimersByTimeAsync(3000);
+		await touchPromise;
+
+		expect(pendingAux.hasPendingAuxiliaryCoverage(FILE, "ast-grep")).toBe(
+			false,
+		);
+		pendingAux.resetPendingAuxiliaryCoverage();
+	});
+
+	it("still marks the pair when napi's coverage predates this touch (stale record)", async () => {
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const pendingAux =
+			await import("../../../clients/lsp/pending-aux-coverage.js");
+		pendingAux.resetPendingAuxiliaryCoverage();
+		const service = new LSPService();
+		getServersForFileWithConfig.mockReturnValue([
+			makePrimaryServer("ts-primary"),
+			makeAuxServer("ast-grep"),
+		]);
+		createLSPClient
+			.mockResolvedValueOnce(makeClient(800, [], { serverId: "ts-primary" }))
+			.mockResolvedValueOnce(makeClient(900, [], { serverId: "ast-grep" }));
+		await service.getClientsForFile(FILE);
+
+		// napi covered this file for an EARLIER revision, well before this
+		// touch even starts — a stale record must not suppress a mark this
+		// touch's silent server genuinely needs delivered later.
+		pendingAux.recordNapiFallbackCoverage(FILE);
+		await vi.advanceTimersByTimeAsync(5000);
+
+		const touchPromise = service.touchFile(FILE, "content-2", {
+			clientScope: "with-auxiliary",
+			auxiliaryServerIds: ["ast-grep"],
+			collectDiagnostics: true,
+			diagnostics: "document",
+		});
+		await vi.advanceTimersByTimeAsync(3000);
+		await touchPromise;
+
+		expect(pendingAux.hasPendingAuxiliaryCoverage(FILE, "ast-grep")).toBe(true);
+		pendingAux.resetPendingAuxiliaryCoverage();
+	});
+});

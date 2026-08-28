@@ -33,6 +33,7 @@ import { hasAuxiliaryLspPublishedForRoot } from "../../lsp/index.js";
 import {
 	clearPendingAuxiliaryCoverage,
 	hasPendingAuxiliaryCoverage,
+	recordNapiFallbackCoverage,
 } from "../../lsp/pending-aux-coverage.js";
 import { PRIORITY } from "../priorities.js";
 import type {
@@ -937,34 +938,24 @@ const astGrepNapiRunner: RunnerDefinition = {
 			? await hasAuxiliaryLspPublishedForRoot("ast-grep", ctx.filePath)
 			: false;
 		if (astGrepLspEnabled && astGrepLspPublished) {
-			// #2324 F2: "has this server EVER published for this file" can go
+			// #2324 F2/R2-C: "has this server EVER published for this file" can go
 			// stale — a LATER touch's aux-grace wait can find the server silent
 			// for the CURRENT content while an OLDER revision's publication still
-			// satisfies this per-file gate. A pending late-aux entry for this
-			// exact pair is that signal: the aux-grace wait already decided this
-			// touch got no fresh evidence, yet Gate B is about to skip anyway.
-			// Re-running napi here would risk the F3 duplicate this fix just
-			// closed, so the residual loss is made observable instead.
+			// satisfies this per-file gate. Any pending late-aux entry visible
+			// HERE is necessarily a LEFTOVER from an earlier touch, never this
+			// one: the wait that marks a pair for THIS touch runs to completion
+			// (up to its own grace budget, ~1800ms) strictly AFTER this
+			// synchronous Gate-B check returns, so it cannot have marked
+			// anything yet. Re-running napi here would risk the F3 duplicate
+			// this fix closes, so the loss is made observable instead.
 			if (hasPendingAuxiliaryCoverage(ctx.filePath, "ast-grep")) {
 				incrementDegradationCount({
 					kind: "aux-runner-findings-lost",
 					subject: "ast-grep",
-					reason: `Gate B skipped napi for ${ctx.filePath}: prior publication exists but this touch's aux-grace wait found no fresh evidence`,
+					reason: `Gate B skipped napi for ${ctx.filePath}: a pending late-auxiliary pair from an EARLIER touch is still undelivered while a prior publication satisfies the per-file gate`,
 				});
 			}
 			return { status: "skipped", diagnostics: [], semantic: "none" };
-		}
-		if (astGrepLspEnabled && !astGrepLspPublished) {
-			// #2324 F3: napi is about to run BECAUSE the per-file gate found no
-			// publication evidence — the same condition the aux-grace wait just
-			// used (or is about to use) to mark this file pending for late-
-			// auxiliary delivery. Napi's run covers this turn's findings, so
-			// consume that pending pair now. Left unconsumed, the LSP's actual
-			// (delayed) publication would redeliver the identical rule/line at
-			// the next turn_end as `late-auxiliary-findings` — a duplicate
-			// surface, not new coverage. Unknown pairs are a no-op, so this is
-			// safe even when no aux-grace wait ran for this touch.
-			clearPendingAuxiliaryCoverage(ctx.filePath, "ast-grep");
 		}
 
 		const sgModule = await loadSg();
@@ -1018,6 +1009,32 @@ const astGrepNapiRunner: RunnerDefinition = {
 			rootNode = root.root();
 		} catch {
 			return { status: "skipped", diagnostics: [], semantic: "none" };
+		}
+
+		if (astGrepLspEnabled && !astGrepLspPublished) {
+			// #2324 F3/R2-A/R2-B: napi is about to ACTUALLY EVALUATE RULES —
+			// every early-return skip above (load failure, missing file,
+			// unresolved language, stat/size/read/parse failure) is now behind
+			// us, so this run genuinely covers the file rather than reporting a
+			// zero-finding no-op. Placing this here (not at Gate-B's decision
+			// point) matters twice over:
+			//   - R2-B: a napi run that never reached rule evaluation must NOT
+			//     consume anything — an unparseable .html file, say, would
+			//     otherwise silence the LSP's legitimate late delivery for a
+			//     file napi never actually covered.
+			//   - R2-A: recording coverage HERE, keyed by timestamp, lets the
+			//     aux-grace wait (clients/lsp/index.ts) — which decides whether
+			//     to mark a pending pair for THIS touch strictly AFTER this
+			//     synchronous call returns — see that napi already delivered
+			//     and skip marking, instead of racing a clear against a mark
+			//     that has not been written yet.
+			// The clear below only ever removes a LEFTOVER pair from an
+			// EARLIER touch (this touch's own pair, if the wait decides to
+			// mark one, is marked strictly later) — that pair describes a
+			// PREVIOUS revision this fresh evaluation supersedes, so dropping
+			// it is safe. Unknown pairs are a no-op.
+			recordNapiFallbackCoverage(ctx.filePath);
+			clearPendingAuxiliaryCoverage(ctx.filePath, "ast-grep");
 		}
 
 		const diagnostics = evaluateAstGrepRules(

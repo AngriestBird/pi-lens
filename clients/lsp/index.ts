@@ -41,7 +41,10 @@ import {
 	fingerprintDocumentContent,
 	type DriftSweepResult,
 } from "./document-drift.js";
-import { markPendingAuxiliaryCoverage } from "./pending-aux-coverage.js";
+import {
+	markPendingAuxiliaryCoverage,
+	napiFallbackCoveredSince,
+} from "./pending-aux-coverage.js";
 import {
 	isAtOrAboveHomeDir,
 	isWindowsPath,
@@ -4807,7 +4810,20 @@ export class LSPService {
 									.filter(
 										(o) =>
 											!o.publishedThisContent &&
-											(o.outcome === "cut_off" || o.outcome === "silent"),
+											(o.outcome === "cut_off" || o.outcome === "silent") &&
+											// #2324 R2-A: ast-grep's napi fallback is a SECOND
+											// producer of coverage for this exact pair. Its
+											// Gate-B check settles synchronously, well before
+											// this wait's own grace budget expires, so by the
+											// time this filter runs, this touch's napi run (if
+											// any) has already recorded its coverage — checked
+											// against THIS wait's own start so a stale record
+											// from an earlier touch can never suppress a mark
+											// this touch's silent server genuinely needs.
+											!(
+												o.serverId === "ast-grep" &&
+												napiFallbackCoveredSince(filePath, waitStartedAt)
+											),
 									)
 									.map((o) => o.serverId);
 								if (collectLaterServerIds.length > 0) {

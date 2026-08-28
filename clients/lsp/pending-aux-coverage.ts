@@ -36,6 +36,21 @@
  * index whose keys are produced by this same process's touch path, so the
  * cheap ephemeral normalizer is the lifetime-appropriate choice per the
  * PathKeyedMap guidance — no realpath walk on the per-edit path.
+ *
+ * #2324 F3/R2-A: this module ALSO hands off in the other direction, for
+ * ast-grep specifically. Gate B's napi runner is a second producer of
+ * coverage for the same (file, "ast-grep") pair — when it runs as the
+ * fallback and actually evaluates rules, it calls
+ * {@link recordNapiFallbackCoverage}. The PRODUCER above reads that record
+ * (via {@link napiFallbackCoveredSince}) before deciding whether to mark a
+ * pair, because napi's Gate-B check settles synchronously while the aux-grace
+ * wait's own decision takes up to its full grace budget — by the time the
+ * wait is ready to mark, THIS touch's napi run (if any) has already finished,
+ * so the wait can reliably see it; a clear issued from napi's side cannot,
+ * because the mark it would be racing has not been written yet.
+ * {@link clearPendingAuxiliaryCoverage} is still used, but only to drop a
+ * LEFTOVER pair from an EARLIER touch once napi has fresh evaluated findings
+ * to supersede it.
  */
 
 import { normalizeEphemeralMapKey } from "../path-utils.js";
@@ -265,10 +280,67 @@ export function drainPendingAuxCapEvictedCount(): number {
 }
 
 /**
+ * #2324 R2-A: (file) -> the timestamp of the LAST time the ast-grep napi
+ * fallback actually evaluated rules for it, as Gate B's runner
+ * (`clients/dispatch/runners/ast-grep-napi.ts`). This is the cross-module
+ * hand-off the aux-grace wait (`clients/lsp/index.ts`) needs to avoid
+ * marking a pending late-auxiliary pair for a file napi ALREADY delivered
+ * for on THIS touch.
+ *
+ * Ordering is why a synchronous clear-on-napi-run cannot do this job: the
+ * wait that decides whether to mark a pair runs for up to ~1800ms (its own
+ * grace budget) AFTER napi's Gate-B check, which is a single map lookup.
+ * Clearing at napi's run start (or end) races the mark and reliably loses —
+ * the mark, if any, has not been written yet. The wait itself is the only
+ * place that knows the outcome, so it is the one that must consult this
+ * store and skip marking, not the runner that must guess at the wait's
+ * future decision.
+ *
+ * Bounded like the pending-pair store itself; oldest evicted first.
+ */
+const napiFallbackCoverage = new Map<string, number>();
+export const MAX_NAPI_COVERAGE_ENTRIES = 50;
+
+/** Record that napi actually evaluated rules for `filePath` at `atMs`. */
+export function recordNapiFallbackCoverage(
+	filePath: string,
+	atMs: number = Date.now(),
+): void {
+	const key = normalizeEphemeralMapKey(filePath);
+	napiFallbackCoverage.delete(key);
+	napiFallbackCoverage.set(key, atMs);
+	while (napiFallbackCoverage.size > MAX_NAPI_COVERAGE_ENTRIES) {
+		const oldest = napiFallbackCoverage.keys().next().value;
+		if (oldest === undefined) break;
+		napiFallbackCoverage.delete(oldest);
+	}
+}
+
+/**
+ * Did napi cover `filePath` at or after `sinceMs`? The aux-grace wait passes
+ * its own `waitStartedAt` baseline so a STALE coverage record from an
+ * earlier touch (napi ran for a PREVIOUS revision) cannot suppress marking a
+ * pair this touch's silent server genuinely needs delivered later.
+ */
+export function napiFallbackCoveredSince(
+	filePath: string,
+	sinceMs: number,
+): boolean {
+	const ts = napiFallbackCoverage.get(normalizeEphemeralMapKey(filePath));
+	return ts !== undefined && ts >= sinceMs;
+}
+
+/** Test-only reset for the napi-coverage hand-off. */
+export function resetNapiFallbackCoverageForTests(): void {
+	napiFallbackCoverage.clear();
+}
+
+/**
  * Session-boundary clear (#1635): pending baselines are unreachable after
  * reset (the generation-stamped keys no longer match any active session).
  */
 export function resetPendingAuxiliaryCoverage(): void {
 	pending.clear();
 	capEvictedCount = 0;
+	napiFallbackCoverage.clear();
 }
