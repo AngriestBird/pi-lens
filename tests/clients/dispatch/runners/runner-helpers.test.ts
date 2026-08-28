@@ -117,6 +117,36 @@ describe("runner-helpers availability checker", () => {
 		}
 	});
 
+	it("pins the availability-lane cooldown consult and its transient decision (#2309)", async () => {
+		const safeSpawnMod = await import("../../../../clients/safe-spawn.js");
+		const cooldownMod =
+			await import("../../../../clients/spawn-timeout-cooldown.js");
+		const command = "cooldown-probe-tool";
+
+		cooldownMod.resetSpawnTimeoutCooldowns();
+		cooldownMod.noteSpawnTimeout({
+			tool: command,
+			command,
+			phase: "availability",
+		});
+
+		const checker = createAvailabilityChecker(command);
+		expect(await checker.isAvailableAsync(process.cwd())).toBe(false);
+		expect(safeSpawnMod.safeSpawnAsync).not.toHaveBeenCalled();
+		expect(availabilityDecisions()).toHaveLength(1);
+		expect(availabilityDecisions()[0]?.metadata).toMatchObject({
+			tool: command,
+			verdict: "unavailable",
+			outcome: "transient",
+			cause: "probe-timeout",
+			classifiedBy: "caller",
+			evidence: {
+				command,
+				status: null,
+			},
+		});
+	});
+
 	it("falls back to global command when no local node_modules binary exists", () => {
 		const env = setupTestEnvironment("pi-lens-node-bin-global-");
 		try {
