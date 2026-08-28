@@ -11,6 +11,7 @@ import {
 	loadSg,
 } from "../dispatch/runners/ast-grep-napi.js";
 import type { Diagnostic } from "../dispatch/types.js";
+import { detectFileKind } from "../file-kinds.js";
 import { isTestFile } from "../file-utils.js";
 import { isAtOrAboveHomeDir } from "../path-utils.js";
 import { getProjectDiagnosticsScannerMaxFiles } from "../project-scale.js";
@@ -238,7 +239,7 @@ async function scanFileMajorRules(
 				filePath,
 				rootNode,
 				cwd,
-				"jsts",
+				detectFileKind(filePath),
 				{
 					maxMatchesPerRule: AST_GREP_SCAN_MAX_MATCHES_PER_RULE,
 					maxTotalDiagnostics: AST_GREP_SCAN_MAX_DIAGNOSTICS_PER_FILE,
