@@ -223,6 +223,40 @@ describe("resolveAndLaunch — managed-bin availability telemetry (#2140)", () =
 		});
 	});
 
+	it("does not assert evidence.source when the install lands outside ~/.pi-lens/bin (npm/pip-strategy servers)", async () => {
+		// findManagedToolBinary short-circuits to undefined for every non-github/
+		// maven/archive strategy (installer/index.ts), before AND after install —
+		// there is nothing to re-confirm, so the compensating row must not claim
+		// managed-dir source it never derived (recurring-defect shape 13).
+		findManagedToolBinary.mockResolvedValue(undefined);
+		const toolNotFound = Object.assign(
+			new Error("bash-language-server not found"),
+			{
+				kind: "tool-not-found" as const,
+			},
+		);
+		launchLSP.mockRejectedValueOnce(toolNotFound);
+		launchLSP.mockResolvedValueOnce(fakeProc);
+		ensureTool.mockResolvedValueOnce(
+			"/home/user/.pi-lens/tools/bash-language-server/bin/bash-language-server",
+		);
+
+		const result = await resolveAndLaunch(
+			{
+				candidates: ["bash-language-server"],
+				args: [],
+				cwd: "/tmp/proj",
+				managedToolId: "bash-language-server",
+			},
+			true,
+		);
+
+		expect(result?.source).toBe("managed");
+		const decisions = decisionsFor("bash-language-server");
+		expect(decisions).toHaveLength(2);
+		expect(metadataOf(decisions[1]).evidence).not.toHaveProperty("source");
+	});
+
 	it("emits no availability_decision when a bare-PATH copy resolves and no managed binary exists", async () => {
 		launchLSP.mockResolvedValueOnce(fakeProc);
 
