@@ -266,6 +266,7 @@ const timingSensitiveInclude = [
 // not a substitute for phasing).
 const lspSpawnHeavyInclude = [
 	"tests/clients/ast-grep-rule-precedence-followups.test.ts",
+	"tests/clients/lsp/workspace-diagnostics-sweep-attribution.integration.test.ts",
 ];
 
 // #1920: files that assert REAL wall-clock elapsed-time budgets (Date.now()
