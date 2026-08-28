@@ -110,15 +110,11 @@ describe("findPhaseEntries / phaseWasLogged", () => {
 				ts: "2026-07-10T10:00:01.000Z",
 			},
 		];
-		expect(findPhaseEntries(mixed, "concurrent_session_bind")).toHaveLength(
-			1,
-		);
+		expect(findPhaseEntries(mixed, "concurrent_session_bind")).toHaveLength(1);
 		expect(
 			findPhaseEntries(mixed, "concurrent_session_bind_rollup"),
 		).toHaveLength(1);
-		expect(phaseWasLogged(mixed, "concurrent_session_bind_rollup")).toBe(
-			true,
-		);
+		expect(phaseWasLogged(mixed, "concurrent_session_bind_rollup")).toBe(true);
 	});
 });
 

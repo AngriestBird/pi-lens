@@ -449,9 +449,8 @@ describe("index.ts integration", () => {
 	it(
 		"a NEW primary's session_start clears a stale rollup left by a crashed prior primary",
 		async () => {
-			const observability = await import(
-				"../clients/session-start-observability.js"
-			);
+			const observability =
+				await import("../clients/session-start-observability.js");
 			// Simulates a prior primary session that logged a decline and then
 			// never reached session_shutdown (crash/forced kill) — the counters
 			// are process-wide (globalThis-backed) state that outlives it.
@@ -486,9 +485,8 @@ describe("index.ts integration", () => {
 				>()),
 				logLatency,
 			}));
-			const observability = await import(
-				"../clients/session-start-observability.js"
-			);
+			const observability =
+				await import("../clients/session-start-observability.js");
 			const { default: registerExtension } = await import("../index.js");
 			const { pi, handlers } = createMockPi();
 			registerExtension(pi as any);
@@ -538,9 +536,8 @@ describe("index.ts integration", () => {
 				>()),
 				logLatency,
 			}));
-			const observability = await import(
-				"../clients/session-start-observability.js"
-			);
+			const observability =
+				await import("../clients/session-start-observability.js");
 			const { default: registerExtension } = await import("../index.js");
 			const primary = createMockPi();
 			registerExtension(primary.pi as any);

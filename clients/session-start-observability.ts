@@ -91,9 +91,7 @@ export function getConcurrentSessionBindRollupCounts(): Record<
  * A no-op when nothing was ever declined this session, matching those same
  * rollups' "no noise on an ordinary session" shape.
  */
-export function emitConcurrentSessionBindRollupAtSessionEnd(
-	cwd: string,
-): void {
+export function emitConcurrentSessionBindRollupAtSessionEnd(cwd: string): void {
 	const counts = bindRollupCounts();
 	const total =
 		counts["concurrent-secondary"] +

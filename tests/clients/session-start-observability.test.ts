@@ -175,9 +175,7 @@ describe("session-start observability — #2249 rollup survives module re-evalua
 
 	async function freshEvaluation() {
 		vi.resetModules();
-		return (await import(
-			"../../clients/session-start-observability.js"
-		)) as typeof import("../../clients/session-start-observability.js");
+		return (await import("../../clients/session-start-observability.js")) as typeof import("../../clients/session-start-observability.js");
 	}
 
 	it("a second evaluation's bind is counted in the rollup the first evaluation emits", async () => {
