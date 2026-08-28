@@ -221,6 +221,14 @@ function hasGeneratedArtifactContent(content: string): boolean {
  * signal. Both constants are exported so the tuning claim is checkable and
  * the regression tests pin the margin probes on both sides.
  *
+ * Prefix-path quantization: on the 4096-byte header/prefix paths the
+ * achievable means are quantized (~4096 for a one-line prefix, ~2048 for
+ * two lines), so any threshold in (2048, 4096] behaves as "is the first
+ * line longer than 4096 bytes". A machine-emitted file with 2500-4000-char
+ * lines is missed on the prefix path even though its full content would
+ * classify — the deliberate false-KEEP direction, not a continuous 5.5x
+ * margin there. The full-content path (dispatch) has no such quantization.
+ *
  * Degenerate cases are guarded: content below the minimum byte length never
  * classifies generated on line shape alone (a 500-byte single-line config
  * file is not machine-emitted evidence), and an empty or whitespace-only
