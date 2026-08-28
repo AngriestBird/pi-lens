@@ -100,7 +100,7 @@ export class RunnerRegistry implements RunnerRegistryContract {
 
 		for (const runner of this.runners.values()) {
 			if (isTest && runner.skipTestFiles) continue;
-			if (runner.appliesTo.includes(kind) || runner.appliesTo.length === 0) {
+			if (runnerAppliesToKind(runner, kind)) {
 				matching.push(runner);
 			}
 		}
@@ -115,6 +115,16 @@ export class RunnerRegistry implements RunnerRegistryContract {
 	clear(): void {
 		this.runners.clear();
 	}
+}
+
+function runnerAppliesToKind(
+	runner: RunnerDefinition,
+	kind: FileKind | undefined,
+): boolean {
+	return (
+		runner.appliesTo.length === 0 ||
+		(kind !== undefined && runner.appliesTo.includes(kind))
+	);
 }
 
 // --- Tool Availability Cache ---
@@ -833,6 +843,35 @@ async function runGroup(
 				status: "test_file_skipped",
 				diagnosticCount: 0,
 				semantic: "none",
+			});
+			continue;
+		}
+
+		// Keep explicit groups aligned with RunnerRegistry.getForKind(): an empty
+		// appliesTo list means every kind, while a populated list must contain the
+		// current kind. A filtered runner remains visible as skipped telemetry so
+		// language mismatches cannot be mistaken for runner failures.
+		const appliesToCurrentKind = runnerAppliesToKind(runner, ctx.kind);
+		if (!appliesToCurrentKind) {
+			const runnerEnd = Date.now();
+			latencies.push({
+				runnerId,
+				startTime: runnerStart,
+				endTime: runnerEnd,
+				durationMs: 0,
+				status: "skipped",
+				diagnosticCount: 0,
+				semantic: "unknown",
+			});
+			logLatency({
+				type: "runner",
+				filePath: ctx.filePath,
+				runnerId,
+				durationMs: 0,
+				status: "skipped",
+				diagnosticCount: 0,
+				semantic: "unknown",
+				metadata: { reason: "applies_to", kind: ctx.kind },
 			});
 			continue;
 		}
