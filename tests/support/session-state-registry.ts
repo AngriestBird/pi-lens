@@ -416,11 +416,11 @@ export const SESSION_STATE_REGISTRY: SessionStateEntry[] = [
 	{
 		id: "dispatcher:coverageNoticeSeen",
 		module: "dispatch/dispatcher.ts",
-		state: "coverageNoticeSeen",
+		state: "coverageNoticeSeen, generatedSkipRecorded",
 		policy: "session_start",
 		resetName: "clearCoverageNoticeState",
 		reason:
-			"A once-per-session coverage notice must be sayable again to the next session's agent.",
+			"A once-per-session coverage notice must be sayable again to the next session's agent; `generatedSkipRecorded` (refs #2346) rides the same reset so a generated file's `dispatch_skipped_generated` record is emitted for the new session's dispatches of that file, not silently withheld because an older session already logged it.",
 	},
 	{
 		id: "tree-sitter-shared:webTreeSitterLoadFailed",
@@ -1061,7 +1061,9 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	"diagnostic-dispositions.ts": 1,
 	"diagnostic-line-freshness.ts": 1,
 	"diagnostics-publish.ts": 1,
-	"dispatch/dispatcher.ts": 1,
+	// #2346 added `generatedSkipRecorded` beside `coverageNoticeSeen` (1 → 2);
+	// both are cleared by the same session-start reset seam.
+	"dispatch/dispatcher.ts": 2,
 	"dispatch/collect-later-tier.ts": 1,
 	// #1899 removed the dead `neighborTouchCache` (10 → 9).
 	"dispatch/integration.ts": 9,
