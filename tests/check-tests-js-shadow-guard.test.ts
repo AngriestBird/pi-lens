@@ -45,7 +45,9 @@ describe("findShadowedTestSources (#2232 tests/ shadow guard)", () => {
 
 	it("names the .ts source shadowed by a stray compiled .js sibling", () => {
 		expect(
-			run().some((p) => p.endsWith("support/availability-classifiedby-scan.ts")),
+			run().some((p) =>
+				p.endsWith("support/availability-classifiedby-scan.ts"),
+			),
 		).toBe(true);
 	});
 

@@ -78,7 +78,9 @@ export default function setup(): void {
 	const rel = (p: string) => p.slice(repoRoot.length + 1).replace(/\\/g, "/");
 	const shown = shadowed
 		.slice(0, 10)
-		.map((ts) => `${rel(ts)} (shadowed by stale ${rel(`${ts.slice(0, -3)}.js`)})`);
+		.map(
+			(ts) => `${rel(ts)} (shadowed by stale ${rel(`${ts.slice(0, -3)}.js`)})`,
+		);
 	const more =
 		shadowed.length > 10 ? `\n  …and ${shadowed.length - 10} more` : "";
 	throw new Error(
