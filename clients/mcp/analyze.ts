@@ -537,7 +537,9 @@ export async function analyzeFile(
 	const lsp = lspRunner
 		? {
 				ran:
-					lspRunner.status !== "skipped" && lspRunner.status !== "when_skipped",
+					lspRunner.status !== "skipped" &&
+					lspRunner.status !== "when_skipped" &&
+					lspRunner.status !== "test_file_skipped",
 				status: lspRunner.status,
 				diagnosticCount: lspRunner.diagnosticCount,
 				durationMs: lspRunner.durationMs,

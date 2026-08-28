@@ -12,7 +12,9 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import {
 	clearCoverageNoticeState,
+	clearLatencyReports,
 	createDispatchContext,
+	getLatencyReports,
 	RunnerRegistry,
 	dispatchForFile as runDispatchForFile,
 } from "../../../clients/dispatch/dispatcher.js";
@@ -46,6 +48,7 @@ describe("Dispatch Flow", () => {
 	beforeEach(() => {
 		registry = new RunnerRegistry();
 		clearCoverageNoticeState();
+		clearLatencyReports();
 	});
 
 	describe("Runner Registration", () => {
@@ -736,6 +739,142 @@ describe("Dispatch Flow", () => {
 			const result = await dispatchForFile(ctx, groups);
 
 			expect(result.diagnostics.map((d) => d.id)).toEqual(["healthy-warning"]);
+		});
+	});
+
+	// #2337: ast-grep-napi declares skipTestFiles: true, but that flag was only
+	// enforced in RunnerRegistry.getForKind. The jsts write-group path
+	// (clients/dispatch/plan.ts) resolves runners by id via registry.get() and
+	// runs them through runGroup, which never consulted skipTestFiles — so a
+	// runner declaring the flag still ran, and reported findings, on test files.
+	describe("skipTestFiles (dispatcher-level gate, #2337)", () => {
+		const skipRunnerResult = () => ({
+			status: "succeeded" as const,
+			diagnostics: [
+				{
+					id: "napi-finding",
+					message: "should not fire on test files",
+					filePath: "auth.test.ts",
+					severity: "warning" as const,
+					semantic: "warning" as const,
+					tool: "skip-test-runner",
+				},
+			],
+			semantic: "warning" as const,
+		});
+
+		it("skips a skipTestFiles runner via the group/plan path on a test file", async () => {
+			registerRunner(
+				createMockRunner({
+					id: "skip-test-runner",
+					appliesTo: ["jsts"],
+					skipTestFiles: true,
+					runResult: skipRunnerResult(),
+				}),
+			);
+
+			const ctx = createMockContext("auth.test.ts");
+			const groups: RunnerGroup[] = [
+				{
+					mode: "all",
+					runnerIds: ["skip-test-runner"],
+					filterKinds: ["jsts"],
+				},
+			];
+
+			const result = await dispatchForFile(ctx, groups);
+
+			expect(result.diagnostics).toHaveLength(0);
+			const report = getLatencyReports().at(-1);
+			expect(
+				report?.runners.find((r) => r.runnerId === "skip-test-runner")?.status,
+			).toBe("test_file_skipped");
+		});
+
+		it("still runs a skipTestFiles runner on a non-test file", async () => {
+			registerRunner(
+				createMockRunner({
+					id: "skip-test-runner",
+					appliesTo: ["jsts"],
+					skipTestFiles: true,
+					runResult: skipRunnerResult(),
+				}),
+			);
+
+			const ctx = createMockContext("auth.ts");
+			const groups: RunnerGroup[] = [
+				{
+					mode: "all",
+					runnerIds: ["skip-test-runner"],
+					filterKinds: ["jsts"],
+				},
+			];
+
+			const result = await dispatchForFile(ctx, groups);
+
+			expect(result.diagnostics.map((d) => d.id)).toEqual(["napi-finding"]);
+		});
+
+		it("still runs a runner that does not declare skipTestFiles on a test file", async () => {
+			registerRunner(
+				createMockRunner({
+					id: "plain-runner",
+					appliesTo: ["jsts"],
+					runResult: {
+						status: "succeeded",
+						diagnostics: [
+							{
+								id: "plain-finding",
+								message: "runs on test files too",
+								filePath: "auth.test.ts",
+								severity: "warning",
+								semantic: "warning",
+								tool: "plain-runner",
+							},
+						],
+						semantic: "warning",
+					},
+				}),
+			);
+
+			const ctx = createMockContext("auth.test.ts");
+			const groups: RunnerGroup[] = [
+				{
+					mode: "all",
+					runnerIds: ["plain-runner"],
+					filterKinds: ["jsts"],
+				},
+			];
+
+			const result = await dispatchForFile(ctx, groups);
+
+			expect(result.diagnostics.map((d) => d.id)).toEqual(["plain-finding"]);
+			const report = getLatencyReports().at(-1);
+			expect(
+				report?.runners.find((r) => r.runnerId === "plain-runner")?.status,
+			).toBe("succeeded");
+		});
+
+		it("does not fire onRunnerResult for a skipTestFiles runner on a test file", async () => {
+			registerRunner(
+				createMockRunner({
+					id: "skip-test-runner",
+					appliesTo: ["jsts"],
+					skipTestFiles: true,
+					runResult: skipRunnerResult(),
+				}),
+			);
+
+			const ctx = createMockContext("auth.test.ts");
+			const ids: string[] = [];
+			await runDispatchForFile(
+				ctx,
+				[{ mode: "all", runnerIds: ["skip-test-runner"] }],
+				registry,
+				(id) => ids.push(id),
+			);
+
+			expect(ids).toEqual([]);
 		});
 	});
 
