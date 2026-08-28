@@ -466,9 +466,25 @@ export type DegradationKind =
 	 * `file.content` back with `?? ""`, so an evicted content fact turns into
 	 * empty content and inline suppressions stop applying. Recorded once per
 	 * session, stamped with the first evicted path, so the drop is visible in
-	 * the ledger rather than inferred from a downstream symptom.
+	 * the ledger rather than inferred from a downstream symptom. Subject
+	 * carries `<store>:<axis>` (#2247 review F1) so a count-axis and a
+	 * byte-axis eviction on the SAME store each get their own once-per-session
+	 * record instead of one collapsing into the other.
 	 */
-	| "fact-store-capacity-eviction";
+	| "fact-store-capacity-eviction"
+	/**
+	 * The dispatch `FactStore`'s pinned content bytes alone exceed the
+	 * 64 MiB retained-content budget (#2247 review F2). A pin exempts an
+	 * in-flight dispatch's file from eviction, so a leaked pin on a large
+	 * file — or several overlapping ones — can put pinned bytes over budget
+	 * on their own; evicting the remaining unpinned records can never bring
+	 * total bytes back under budget in that state, so `FactStore` stops
+	 * evicting and admits unpinned inserts without eviction until a pin
+	 * releases. Without this kind that admission-without-enforcement state
+	 * is invisible: the store just silently stops honoring its budget.
+	 * Recorded once per session, subject is the store label.
+	 */
+	| "fact-store-pinned-over-budget";
 
 export interface DegradationRecord {
 	kind: unknown;

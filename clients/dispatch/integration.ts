@@ -194,10 +194,30 @@ const sessionFacts = new FactStore("dispatch");
 // `setFactStoreEvictionReporter`). The reporter forwards each store's own
 // subject, so the ledger's per-kind+subject dedupe emits exactly ONE record
 // per session PER STORE, re-arming when the ledger resets at session_start.
-setFactStoreEvictionReporter((subject, _axis, reason) => {
+//
+// #2247 review F1: the axis was previously dropped here, so
+// `recordDegradationOnce`'s `${kind}\0${subject}` dedupe collapsed a store's
+// count-axis and byte-axis evictions onto the SAME key — whichever axis
+// tripped first (always count, since 1024 typical files land far under 64
+// MiB) silently consumed the once-per-session slot and a later byte-axis
+// eviction on that same store recorded nothing. Fold the axis into the
+// subject (`<store>:<axis>`), matching this ledger's own `<store>:<file>`
+// convention (see `demoted-finding-retired`'s doc comment) rather than
+// growing the `kind` union per axis. `pinned-over-budget` (#2247 review F2)
+// is a distinct condition, not an eviction, so it gets its own kind instead
+// of sharing the eviction kind's subject convention.
+setFactStoreEvictionReporter((subject, axis, reason) => {
+	if (axis === "pinned-over-budget") {
+		recordDegradationOnce({
+			kind: "fact-store-pinned-over-budget",
+			subject,
+			reason,
+		});
+		return;
+	}
 	recordDegradationOnce({
 		kind: "fact-store-capacity-eviction",
-		subject,
+		subject: `${subject}:${axis}`,
 		reason,
 	});
 });

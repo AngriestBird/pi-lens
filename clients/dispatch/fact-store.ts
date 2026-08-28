@@ -23,7 +23,7 @@ import { normalizeMapKey } from "../path-utils.js";
 // once-per-session record.
 export type CapacityEvictionReporter = (
 	subject: string,
-	axis: "count" | "bytes",
+	axis: "count" | "bytes" | "pinned-over-budget",
 	reason: string,
 ) => void;
 let capacityEvictionReporter: CapacityEvictionReporter | undefined;
@@ -203,12 +203,27 @@ export class FactStore implements ReadonlyFactStore {
 
 	/** Drop least-recently-used records past either cap, skipping the files whose
 	 *  dispatch pinned them. Pinned content counts toward the byte total, but is
-	 *  never evicted before endDispatchFor. Pins survive until clearAll. */
+	 *  never evicted before endDispatchFor. Pins survive until clearAll.
+	 *
+	 *  #2247 review F2: a leaked (or several overlapping) pin(s) can put pinned
+	 *  bytes over budget ON THEIR OWN. Evicting every unpinned record can never
+	 *  bring the total back under budget in that state — before this guard, the
+	 *  loop below evicted each newly inserted unpinned record on the very next
+	 *  call (it was always the sole remaining unpinned key), so unpinned writes
+	 *  never retained anything: a silent, permanent collapse for the rest of
+	 *  the process. Once byte pressure is unpinned-bytes-driven-only, stop
+	 *  evicting and admit unpinned inserts as-is — best-effort under pin
+	 *  pressure — and record the state distinctly so it is visible instead of
+	 *  inferred from "the store stopped retaining anything". */
 	private evictColdFileFacts(): void {
 		if (!this.overCapacity()) return;
 		for (const key of this.fileFacts.keys()) {
 			if (this.pinnedFiles.has(key)) continue;
 			const axis = this.capacityAxis();
+			if (axis === "bytes" && this.pinnedContentBytes() > MAX_FILE_FACT_CONTENT_BYTES) {
+				this.reportPinnedOverBudget();
+				return;
+			}
 			this.deleteFileFactsRecord(key);
 			this.reportCapacityEviction(key, axis);
 			if (!this.overCapacity()) return;
@@ -228,6 +243,20 @@ export class FactStore implements ReadonlyFactStore {
 
 	private contentBytes(value: unknown): number {
 		return typeof value === "string" ? Buffer.byteLength(value, "utf8") : 0;
+	}
+
+	/** Sum of `file.content` bytes across currently pinned files only. Scans
+	 *  `pinnedFiles`, not the whole map — that set tracks dispatches actually
+	 *  in flight, so it stays small even when `fileFacts` holds up to 1024
+	 *  records (#2247 review F2). Called only while over the byte budget, not
+	 *  on every insert, so it does not reintroduce the whole-map scan the
+	 *  running `retainedContentBytes` total exists to avoid. */
+	private pinnedContentBytes(): number {
+		let total = 0;
+		for (const key of this.pinnedFiles.keys()) {
+			total += this.contentBytes(this.fileFacts.get(key)?.get("file.content"));
+		}
+		return total;
 	}
 
 	private deleteFileFactsRecord(key: string): void {
@@ -257,6 +286,30 @@ export class FactStore implements ReadonlyFactStore {
 				? `file-fact store axis=count exceeded ${MAX_FILE_FACT_RECORDS} records; evicted least-recently-used fact for ${evictedKey}`
 				: `file-fact store axis=bytes exceeded ${MAX_FILE_FACT_CONTENT_BYTES} retained content bytes; evicted least-recently-used fact for ${evictedKey}`,
 		);
+	}
+
+	// #2247 review F2: pinned bytes alone exceeding budget is not an eviction —
+	// nothing is dropped — so it is reported through a distinct axis rather
+	// than reusing `reportCapacityEviction`'s "evicted least-recently-used
+	// fact for X" language, which would misdescribe what happened.
+	private reportPinnedOverBudget(): void {
+		const pinnedBytes = this.pinnedContentBytes();
+		capacityEvictionReporter?.(
+			this.subject,
+			"pinned-over-budget",
+			`file-fact store pinned content bytes (${pinnedBytes}) exceed the ` +
+				`${MAX_FILE_FACT_CONTENT_BYTES}-byte budget; unpinned inserts are ` +
+				`admitted without eviction until a pin releases`,
+		);
+	}
+
+	/** Running UTF-8 byte total for retained `file.content` values. Exposed so
+	 *  tests can crosscheck it against a fresh sum over retained records
+	 *  (#2247 review F3) — the running total is maintained incrementally on
+	 *  every insert/delete path rather than recomputed, so a subtraction
+	 *  dropped from one of those paths would otherwise drift silently. */
+	getRetainedContentBytes(): number {
+		return this.retainedContentBytes;
 	}
 
 	getSessionFact<T>(factId: string): T | undefined {
