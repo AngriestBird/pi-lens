@@ -46,6 +46,11 @@ const unitOnlyExclude =
 
 const sharedGlobalSetup = [
 	"./tests/support/check-build-freshness.ts",
+	// Complementary guard (#2232): check-build-freshness compares mtimes for
+	// dirs the build DOES compile in place; this one catches the opposite-shaped
+	// residue in tests/, which the build never touches, so a stray compiled .js
+	// left there by some earlier local run silently shadows its .ts source.
+	"./tests/support/check-tests-js-shadow.ts",
 	"./tests/support/prewarm-grammars.ts",
 	// After check-build-freshness: the seed analyze runs the in-place build.
 	"./tests/support/prewarm-tool-home.ts",

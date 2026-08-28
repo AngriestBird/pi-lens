@@ -25,7 +25,10 @@ import { testSourceFiles } from "./module-instance-scan.js";
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
 // Directories compiled in place by `npm run build` that tests import as `.js`.
-// (tests/ is excluded from the build and loaded as `.ts`, so it's not at risk.)
+// (tests/ is excluded from the build, so it's not at risk of THIS staleness
+// shape — a stray compiled .js left there by some other means is a different
+// hazard, a same-named sibling always being residue rather than staleness;
+// see the complementary check-tests-js-shadow.ts guard for that one.)
 const COMPILED_DIRS = ["clients", "commands", "tools"];
 const COMPILED_ROOT_FILES = ["index.ts", "i18n.ts"];
 
