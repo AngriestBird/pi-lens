@@ -7,19 +7,12 @@ import {
 } from "../../../support/runner-ctx.js";
 import { setupTestEnvironment } from "../../test-utils.js";
 
-const { mockAuxiliaryLspAlive, mockResolveAstGrepNativeExe } = vi.hoisted(
-	() => ({
-		mockAuxiliaryLspAlive: vi.fn().mockResolvedValue(false),
-		mockResolveAstGrepNativeExe: vi.fn().mockReturnValue(undefined),
-	}),
-);
-
-vi.mock("../../../../clients/lsp/index.js", () => ({
-	isAuxiliaryLspAlive: mockAuxiliaryLspAlive,
+const { mockAuxiliaryLspPublished } = vi.hoisted(() => ({
+	mockAuxiliaryLspPublished: vi.fn().mockResolvedValue(false),
 }));
 
-vi.mock("../../../../clients/lsp/wait-policy/index.js", () => ({
-	resolveAstGrepNativeExe: mockResolveAstGrepNativeExe,
+vi.mock("../../../../clients/lsp/index.js", () => ({
+	hasAuxiliaryLspPublishedForRoot: mockAuxiliaryLspPublished,
 }));
 
 // Mock heavy dependencies before importing the runner
@@ -72,23 +65,21 @@ function mockWorkingSgLoad(): void {
 describe("ast-grep-napi runner — LSP supersede gate (#239 Phase 2)", () => {
 	beforeEach(() => {
 		vi.resetModules();
-		mockAuxiliaryLspAlive.mockResolvedValue(false);
-		mockResolveAstGrepNativeExe.mockReturnValue(undefined);
+		mockAuxiliaryLspPublished.mockResolvedValue(false);
 	});
 
-	it("skips when PATH fails but the bundled launcher binary resolves", async () => {
+	it("runs until the bundled LSP completes its first root publication", async () => {
 		const env = setupTestEnvironment("pi-lens-ast-grep-gate-");
 		try {
 			const filePath = path.join(env.tmpDir, "file.ts");
 			fs.writeFileSync(filePath, "const r = arr.sort();\n"); // would match no-sort-without-comparator
-			mockResolveAstGrepNativeExe.mockReturnValue("/bundled/ast-grep.exe");
 			mockWorkingSgLoad();
 			const mod =
 				await import("../../../../clients/dispatch/runners/ast-grep-napi.js");
 			const result = await mod.default.run(
 				createCtx(filePath, { hasTool: async () => false }) as any,
 			);
-			expect(result.status).toBe("skipped");
+			expect(result.status).toBe("succeeded");
 			expect(result.diagnostics).toHaveLength(0);
 		} finally {
 			env.cleanup();
@@ -112,12 +103,12 @@ describe("ast-grep-napi runner — LSP supersede gate (#239 Phase 2)", () => {
 		}
 	});
 
-	it("skips when a live ast-grep LSP client is handling the file regardless of PATH", async () => {
+	it("skips after the ast-grep LSP completes its first root publication", async () => {
 		const env = setupTestEnvironment("pi-lens-ast-grep-gate-");
 		try {
 			const filePath = path.join(env.tmpDir, "file.ts");
 			fs.writeFileSync(filePath, "const x = 1;\n");
-			mockAuxiliaryLspAlive.mockResolvedValue(true);
+			mockAuxiliaryLspPublished.mockResolvedValue(true);
 			mockWorkingSgLoad();
 			const mod =
 				await import("../../../../clients/dispatch/runners/ast-grep-napi.js");
@@ -244,8 +235,7 @@ describe("ast-grep-napi runner — skip paths", () => {
 describe("ast-grep-napi runner — real shipped rule", () => {
 	it("loads and matches no-sort-without-comparator through the real YAML parser", async () => {
 		vi.resetModules();
-		mockAuxiliaryLspAlive.mockResolvedValue(false);
-		mockResolveAstGrepNativeExe.mockReturnValue(undefined);
+		mockAuxiliaryLspPublished.mockResolvedValue(false);
 		vi.doUnmock("../../../../clients/dispatch/runners/yaml-rule-parser.js");
 		vi.doUnmock("../../../../clients/package-root.js");
 		// Earlier skip-path cases install per-test NAPI mocks. Replace any

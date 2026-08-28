@@ -2709,11 +2709,11 @@ export class LSPService {
 	}
 
 	/**
-	 * Read-only liveness check for one server/file pair. Unlike
-	 * `getClientForFile`, this never creates or warms a client; it only resolves
-	 * the server's root and checks the already-connected client map.
+	 * Read-only Gate-B readiness check for one auxiliary server/root. A connected
+	 * process is not yet a diagnostic producer: only its first publication proves
+	 * that this root's client can supersede an in-process fallback runner.
 	 */
-	async isServerAliveForFile(
+	async hasServerPublishedForFileRoot(
 		serverId: string,
 		filePath: string,
 	): Promise<boolean> {
@@ -2723,7 +2723,8 @@ export class LSPService {
 			const root = await this.resolveServerRoot(server, filePath);
 			if (!root) continue;
 			const key = `${server.id}:${normalizeMapKey(root)}`;
-			if (this.state.clients.get(key)?.isAlive()) return true;
+			const client = this.state.clients.get(key);
+			if (client?.isAlive() && client.diagnosticsVersion > 0) return true;
 		}
 		return false;
 	}
@@ -2731,7 +2732,7 @@ export class LSPService {
 	/**
 	 * #2001/#2002 collect-later: read-only cached-diagnostics probe for the
 	 * turn-end late-auxiliary delivery (`clients/runtime-turn.ts`). Like
-	 * `isServerAliveForFile`, this NEVER creates or warms a client — it only
+	 * the Gate-B readiness check, this NEVER creates or warms a client — it only
 	 * resolves each requested server's root and reads the already-connected
 	 * client's cached diagnostics for `filePath`. Servers with no live client
 	 * are simply absent from the returned map. A live client is present only
@@ -6542,7 +6543,7 @@ export class LSPService {
 	 * `executeCommand` above cannot give a render-path probe:
 	 *
 	 * - **Never spawns.** It resolves the already-connected client map the way
-	 *   `isServerAliveForFile` does, instead of routing through
+	 *   other read-only client-map lookups do, instead of routing through
 	 *   `getClientForFile` → `ensureClientForServer`. A probe that spawns a
 	 *   language-server fleet to answer a question about how to RENDER a
 	 *   diagnostic is a cost the caller never asked for — and under warm attach
@@ -8889,15 +8890,14 @@ export function getLSPService(): LSPService {
 }
 
 /**
- * Cross-layer liveness seam for dispatch-side auxiliary gates. This is a
- * liveness read only: it does not spawn, wait for initialization, or probe a
- * binary.
+ * Gate-B readiness seam. It reads only the live client map and never spawns,
+ * waits for initialization, or probes a binary.
  */
-export async function isAuxiliaryLspAlive(
+export async function hasAuxiliaryLspPublishedForRoot(
 	serverId: string,
 	filePath: string,
 ): Promise<boolean> {
-	return getLSPService().isServerAliveForFile(serverId, filePath);
+	return getLSPService().hasServerPublishedForFileRoot(serverId, filePath);
 }
 
 /**

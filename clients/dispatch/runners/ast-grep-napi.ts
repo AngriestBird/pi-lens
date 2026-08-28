@@ -26,8 +26,7 @@ import { hasEslintConfig } from "../../tool-policy.js";
 import { enabledAuxiliaryLspServerIds } from "../auxiliary-lsp.js";
 import { classifyDefect } from "../diagnostic-taxonomy.js";
 import { recordDegradationOnce } from "../../degradation-ledger.js";
-import { isAuxiliaryLspAlive } from "../../lsp/index.js";
-import { resolveAstGrepNativeExe } from "../../lsp/wait-policy/index.js";
+import { hasAuxiliaryLspPublishedForRoot } from "../../lsp/index.js";
 import { PRIORITY } from "../priorities.js";
 import type {
 	Diagnostic,
@@ -923,20 +922,14 @@ const astGrepNapiRunner: RunnerDefinition = {
 		const astGrepLspEnabled = enabledAuxiliaryLspServerIds((f) =>
 			ctx.pi?.getFlag?.(f),
 		).includes("ast-grep");
-		// Gate B asks whether the LSP will handle this file, not whether a bare
-		// `ast-grep` command happens to be on PATH. The launcher first tries the
-		// platform-native package binary, then PATH; mirror that resolution here.
-		// A live client covers the already-warm case, while a resolvable binary
-		// covers the cold case before the LSP has spawned for this root.
-		const astGrepLspAlive = astGrepLspEnabled
-			? await isAuxiliaryLspAlive("ast-grep", ctx.filePath)
+		// Gate B asks whether the LSP has proved it can handle this root, not
+		// whether an ast-grep process or binary merely exists.
+		// A first publication covers the warm case. Process liveness and binary
+		// resolution do not: both precede proof that this root can publish findings.
+		const astGrepLspPublished = astGrepLspEnabled
+			? await hasAuxiliaryLspPublishedForRoot("ast-grep", ctx.filePath)
 			: false;
-		let astGrepBinaryResolvable = false;
-		if (astGrepLspEnabled && !astGrepLspAlive) {
-			astGrepBinaryResolvable =
-				Boolean(resolveAstGrepNativeExe()) || (await ctx.hasTool("ast-grep"));
-		}
-		if (astGrepLspEnabled && (astGrepLspAlive || astGrepBinaryResolvable)) {
+		if (astGrepLspEnabled && astGrepLspPublished) {
 			return { status: "skipped", diagnostics: [], semantic: "none" };
 		}
 
