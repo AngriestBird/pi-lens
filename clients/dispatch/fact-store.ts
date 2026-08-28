@@ -23,7 +23,7 @@ import { normalizeMapKey } from "../path-utils.js";
 // once-per-session record.
 export type CapacityEvictionReporter = (
 	subject: string,
-	axis: "count" | "bytes" | "pinned-over-budget",
+	axis: "count" | "bytes" | "pinned-over-budget" | "session-count",
 	reason: string,
 ) => void;
 let capacityEvictionReporter: CapacityEvictionReporter | undefined;
@@ -63,6 +63,37 @@ const MAX_FILE_FACT_CONTENT_BYTES = 64 * 1024 * 1024;
 // pin set therefore tracks dispatches actually IN FLIGHT, not the last N files
 // touched.
 
+// #2282: `sessionFacts` below is a flat `Map<factId, value>` shared by two
+// unrelated fact shapes — a small FIXED vocabulary (tool availability keyed by
+// command, the singleton "session.reviewGraph") and PER-FILE families that
+// mint one key per file touched (session baseline, cascade baseline, review-
+// graph entity snapshots) and never shrink. Only the second shape grows with
+// batch size, so only it gets a bound; the fixed vocabulary stays on the plain
+// map, unbounded, because its cardinality is small and stable. Per-file
+// session facts opt into `boundedSessionFacts` instead, reusing fileFacts'
+// LRU-count-cap-and-report discipline rather than adding a third mechanism.
+// No pin exemption here (unlike fileFacts): every current per-file session
+// fact is read once near dispatch start and written once at dispatch end, so
+// nothing re-reads its OWN key later in the same dispatch the way a runner
+// re-reads `file.content` — an eviction mid-batch only means the next dispatch
+// of that path sees no previous baseline, the same safe state as its first
+// ever dispatch this session.
+//
+// That equivalence holds only where an absent baseline means "report
+// everything", which is true for the diagnostic baselines and false for the
+// review-graph entity snapshot: there, an absent snapshot read as an empty one
+// puts every symbol in `added` and drives a blast-radius run for a file that
+// did not change. So an eviction leaves a tombstone, and a reader that needs
+// the distinction asks `wasBoundedSessionFactEvicted`. Tombstones are keys
+// only, and carry the same cap, so the coldest of them fall off in turn and
+// that key reverts to first-dispatch semantics.
+//
+// Five per-file keys are minted per dispatched file today (absolute and
+// relative diagnostic baseline, cascade baseline, entity snapshot, changed
+// symbols), so 4096 records covers roughly 800 distinct files before the
+// coldest file's baseline starts degrading.
+const MAX_SESSION_FACT_RECORDS = 4096;
+
 export interface ReadonlyFactStore {
 	getFileFact<T>(filePath: string, factId: string): T | undefined;
 	hasFileFact(filePath: string, factId: string): boolean;
@@ -74,6 +105,12 @@ export class FactStore implements ReadonlyFactStore {
 	// Insertion order is eviction order: the oldest-used record is evicted first.
 	private readonly fileFacts = new Map<string, Map<string, unknown>>();
 	private readonly sessionFacts = new Map<string, unknown>();
+	// Bounded sibling of `sessionFacts` for per-file-keyed session facts (#2282).
+	// Same insertion-order-is-eviction-order convention as `fileFacts`.
+	private readonly boundedSessionFacts = new Map<string, unknown>();
+	// Keys evicted from `boundedSessionFacts` and not written since, so a reader
+	// can tell "evicted" from "never seen" (#2282). Same cap, same FIFO order.
+	private readonly evictedSessionFactKeys = new Set<string>();
 	// Pin refcount per file. A file is exempt from capacity eviction while its
 	// count is > 0. Refcounted, not a Set, so two overlapping dispatches of the
 	// same file both hold the pin until BOTH settle (#2243 item 2).
@@ -355,10 +392,76 @@ export class FactStore implements ReadonlyFactStore {
 		return this.sessionFacts.has(factId);
 	}
 
+	/** Bounded counterpart to {@link getSessionFact} for per-file-keyed session
+	 *  facts (#2282) — session baselines, cascade baselines, review-graph entity
+	 *  snapshots. LRU touch: a read moves the record off the eviction end. */
+	getBoundedSessionFact<T>(factId: string): T | undefined {
+		const facts = this.boundedSessionFacts;
+		if (!facts.has(factId)) return undefined;
+		const value = facts.get(factId);
+		facts.delete(factId);
+		facts.set(factId, value);
+		return value as T;
+	}
+
+	/** Bounded counterpart to {@link setSessionFact}. Callers use this instead
+	 *  of `setSessionFact` for any family that mints one key per file/entity
+	 *  touched, so the store's count stays bounded across a large batch instead
+	 *  of retaining one entry per distinct path for the process lifetime. */
+	setBoundedSessionFact(factId: string, value: unknown): void {
+		this.boundedSessionFacts.delete(factId);
+		this.boundedSessionFacts.set(factId, value);
+		this.evictedSessionFactKeys.delete(factId);
+		this.evictColdBoundedSessionFacts();
+	}
+
+	hasBoundedSessionFact(factId: string): boolean {
+		return this.boundedSessionFacts.has(factId);
+	}
+
+	/** True when this key held a bounded session fact that capacity eviction
+	 *  dropped and nothing has rewritten since (#2282). Readers whose "absent"
+	 *  branch is not a safe default — the review-graph entity snapshot, where
+	 *  absent would read as "every symbol is new" — use this to tell an evicted
+	 *  key from one this session has never seen. */
+	wasBoundedSessionFactEvicted(factId: string): boolean {
+		return this.evictedSessionFactKeys.has(factId);
+	}
+
+	/** O(1) entry count for memory-attribution sampling (#2282 Observability):
+	 *  the fixed-vocabulary map plus the bounded per-file map, so a caller gets
+	 *  this store's whole `sessionFacts` footprint in one number. */
+	getSessionFactEntryCount(): number {
+		return this.sessionFacts.size + this.boundedSessionFacts.size;
+	}
+
+	private evictColdBoundedSessionFacts(): void {
+		while (this.boundedSessionFacts.size > MAX_SESSION_FACT_RECORDS) {
+			const oldestKey = this.boundedSessionFacts.keys().next().value;
+			if (oldestKey === undefined) break;
+			this.boundedSessionFacts.delete(oldestKey);
+			this.evictedSessionFactKeys.add(oldestKey);
+			while (this.evictedSessionFactKeys.size > MAX_SESSION_FACT_RECORDS) {
+				const oldestTombstone = this.evictedSessionFactKeys
+					.values()
+					.next().value;
+				if (oldestTombstone === undefined) break;
+				this.evictedSessionFactKeys.delete(oldestTombstone);
+			}
+			capacityEvictionReporter?.(
+				this.subject,
+				"session-count",
+				`session-fact store axis=count exceeded ${MAX_SESSION_FACT_RECORDS} records; evicted least-recently-used fact for ${oldestKey}`,
+			);
+		}
+	}
+
 	/** Call on session reset only. Clears everything including tool cache and baselines. */
 	clearAll(): void {
 		this.fileFacts.clear();
 		this.sessionFacts.clear();
+		this.boundedSessionFacts.clear();
+		this.evictedSessionFactKeys.clear();
 		this.pinnedFiles.clear();
 		this.retainedContentBytes = 0;
 		this.pinnedContentBytesTotal = 0;

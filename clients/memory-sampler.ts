@@ -195,6 +195,9 @@ export interface MemorySampleSubsystems {
 	} | null;
 	dispatchCaches: {
 		recentlyCleanNeighborCacheSize: number;
+		/** Dispatch `FactStore`'s `sessionFacts` entry count — fixed vocabulary
+		 *  plus the bounded per-file map (#2282). */
+		sessionFactEntries: number;
 		/** Measured retained size of one `{ turnSeq, checkedAt }` cache entry. */
 		estimatedBytes: number;
 	};
@@ -232,6 +235,19 @@ export interface MemorySample {
  * process-global singletons) but every individual read is a `.size`/`.length`
  * access — see the module docstring's hard constraint.
  */
+/** Byte attribution for `dispatchCaches`, from measured per-entry costs: three
+ *  isolated-store runs put a recently-clean neighbor entry at 320 bytes, and
+ *  #2282 measured a 500-file batch's 1,000 session-fact entries at 439,560
+ *  bytes (~440 each). O(1) — the cache key and Map bookkeeping are included. */
+export function estimateDispatchCacheBytes(stats: {
+	recentlyCleanNeighborCacheSize: number;
+	sessionFactEntries: number;
+}): number {
+	return (
+		stats.recentlyCleanNeighborCacheSize * 320 + stats.sessionFactEntries * 440
+	);
+}
+
 export function collectMemorySampleSubsystems(
 	wordIndex: WordIndex | null,
 ): MemorySampleSubsystems {
@@ -280,9 +296,7 @@ export function collectMemorySampleSubsystems(
 		treeSitter,
 		dispatchCaches: {
 			...dispatchCaches,
-			// Three isolated-store runs measured 320 bytes per production entry.
-			// Keep this O(1); the cache key and Map bookkeeping are included.
-			estimatedBytes: dispatchCaches.recentlyCleanNeighborCacheSize * 320,
+			estimatedBytes: estimateDispatchCacheBytes(dispatchCaches),
 		},
 	};
 }

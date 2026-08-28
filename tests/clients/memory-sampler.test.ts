@@ -17,6 +17,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import {
 	buildMemorySample,
 	collectMemorySampleSubsystems,
+	estimateDispatchCacheBytes,
 	formatMemoryHealthLine,
 	HEAP_GROWTH_TIGHTEN_RATIO,
 	isRapidHeapGrowth,
@@ -194,6 +195,24 @@ describe("collectMemorySampleSubsystems (O(1)/O(bounded-cache-size) live reads)"
 		// Independent oracle from the reviewer’s isolated-store measurement:
 		// 450.5 bytes per node and 243 bytes per edge.
 		expect(estimateReviewGraphStoreBytes(2, 3)).toBe(1630);
+	});
+
+	// #2282 review round F4: the session-fact entry count arrived as a
+	// count-only field, so `dispatchCaches.estimatedBytes` still omitted the
+	// whole sessionFacts footprint. Both counts now carry measured bytes.
+	it("attributes bytes to session-fact entries, not just the neighbor cache", () => {
+		expect(
+			estimateDispatchCacheBytes({
+				recentlyCleanNeighborCacheSize: 2,
+				sessionFactEntries: 1000,
+			}),
+		).toBe(440_640);
+		expect(
+			estimateDispatchCacheBytes({
+				recentlyCleanNeighborCacheSize: 0,
+				sessionFactEntries: 1000,
+			}),
+		).toBe(440_000);
 	});
 
 	it("wordIndex is null when none is supplied (no word index built yet this session)", () => {

@@ -64,7 +64,7 @@ describe("review graph service", () => {
 			);
 
 			const facts = new FactStore();
-			facts.setSessionFact(
+			facts.setBoundedSessionFact(
 				`session.reviewGraph.changedSymbols:${normalizeMapKey(aPath)}`,
 				["alpha"],
 			);
@@ -665,7 +665,7 @@ describe("review graph service", () => {
 			);
 
 			const facts = new FactStore();
-			facts.setSessionFact(
+			facts.setBoundedSessionFact(
 				`session.reviewGraph.changedSymbols:${normalizeMapKey(modelsPath)}`,
 				["User"],
 			);
@@ -699,7 +699,7 @@ describe("review graph service", () => {
 			const lonePath = createTempFile(env.tmpDir, "src/lone.py", "value = 1\n");
 
 			const facts = new FactStore();
-			facts.setSessionFact(
+			facts.setBoundedSessionFact(
 				`session.reviewGraph.changedSymbols:${normalizeMapKey(aPath)}`,
 				["alpha"],
 			);
@@ -769,7 +769,7 @@ describe("review graph service", () => {
 			}
 
 			const facts = new FactStore();
-			facts.setSessionFact(
+			facts.setBoundedSessionFact(
 				`session.reviewGraph.changedSymbols:${normalizeMapKey(changedPath)}`,
 				["changed"],
 			);
