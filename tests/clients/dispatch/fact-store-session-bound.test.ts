@@ -13,7 +13,10 @@ import {
 	getFactStoreEvictionReporter,
 	setFactStoreEvictionReporter,
 } from "../../../clients/dispatch/fact-store.js";
-import type { Diagnostic, RunnerGroup } from "../../../clients/dispatch/types.js";
+import type {
+	Diagnostic,
+	RunnerGroup,
+} from "../../../clients/dispatch/types.js";
 import { createMockRunner } from "../../mocks/runner-factory.js";
 // Side-effect import: loading integration.ts runs its module-scope
 // `setFactStoreEvictionReporter(...)` call, wiring the REAL production
@@ -27,10 +30,7 @@ const MAX_SESSION_RECORDS = 4096;
 const BATCH = 3000;
 
 function batchPaths(prefix: string, count = BATCH): string[] {
-	return Array.from(
-		{ length: count },
-		(_, i) => `/repo/src/${prefix}-${i}.ts`,
-	);
+	return Array.from({ length: count }, (_, i) => `/repo/src/${prefix}-${i}.ts`);
 }
 
 // A realistic per-file delta-baseline payload: two `Diagnostic`s, the shape
@@ -169,9 +169,7 @@ describe("FactStore session-fact bound (#2282)", () => {
 
 		for (const p of paths) store.setBoundedSessionFact(p, "x");
 
-		const retained = paths.filter((p) =>
-			store.hasBoundedSessionFact(p),
-		).length;
+		const retained = paths.filter((p) => store.hasBoundedSessionFact(p)).length;
 		expect(retained).toBeLessThanOrEqual(MAX_SESSION_RECORDS);
 		expect(store.hasBoundedSessionFact(paths[0])).toBe(false);
 		expect(store.hasBoundedSessionFact(paths[count - 1])).toBe(true);
@@ -242,9 +240,8 @@ describe("FactStore session-fact bound (#2282)", () => {
 			group?.latestReasons.some((r) => r.subject === "dispatch:session-count"),
 		).toBe(true);
 		expect(
-			group?.latestReasons.find(
-				(r) => r.subject === "dispatch:session-count",
-			)?.reason,
+			group?.latestReasons.find((r) => r.subject === "dispatch:session-count")
+				?.reason,
 		).toContain(paths[0]);
 
 		// The file-fact count axis and the session-fact count axis are
