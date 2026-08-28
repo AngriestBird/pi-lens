@@ -25,6 +25,11 @@ afterEach(() => {
 });
 
 describe("rule tooling language comparisons", () => {
+	// PINS EXISTING BEHAVIOR, not this PR's change: the audit script has
+	// normalized language at parse since af7605f8 (#657, line 85), so this
+	// case is green on master. It stays as a regression net against anyone
+	// removing that parse-site lowercase. #2331's audit half was a review
+	// false positive, corrected in the #2339 review.
 	it("reports an identical-body duplicate across Python and python", () => {
 		const root = makeTempRepo();
 		const rules = path.join(root, "rules", "ast-grep-rules", "rules");
@@ -85,5 +90,39 @@ describe("rule tooling language comparisons", () => {
 		const output = `${result.stdout}${result.stderr}`;
 		expect(output).toContain("possible overlap for python::file::same");
 		expect(output).toContain("'one' and 'two'");
+	});
+
+	// The review's F2: the overlap key's toLowerCase crashed on an entry
+	// missing its language field, so the validator died before printing the
+	// missing-field error it had already detected. The guard must keep the
+	// script alive to report.
+	it("reports a missing language field instead of crashing", () => {
+		const root = makeTempRepo();
+		fs.mkdirSync(path.join(root, "rules"), { recursive: true });
+		fs.writeFileSync(
+			path.join(root, "rules", "rule-catalog.json"),
+			JSON.stringify({
+				entries: [
+					{
+						rule_id: "no-lang",
+						engine: "architect",
+						family: "security",
+						scope: "file",
+						canonical_concept: "same",
+						severity_default: "warning",
+						confidence: "high",
+						status: "active",
+					},
+				],
+			}),
+		);
+
+		const result = spawnSync(process.execPath, [CATALOG], {
+			cwd: root,
+			encoding: "utf8",
+		});
+		const output = `${result.stdout}${result.stderr}`;
+		expect(output).not.toContain("TypeError");
+		expect(output).toContain("missing required field 'language'");
 	});
 });
