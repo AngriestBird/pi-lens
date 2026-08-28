@@ -5,31 +5,40 @@
 // classification is infra. See scripts/lib/ci-failure-classifier.mjs for the
 // decision logic.
 //
-// A human or an orchestrator runs this by hand today, on a run id it already
-// knows is red:
+// A human can run this on a known red run id:
 //
 //   GITHUB_TOKEN=... node scripts/classify-ci-failure.mjs --run 32908647308
 //
-// It is deliberately NOT wired to a workflow_run trigger yet (refs #2103,
-// see the PR body): that needs a decision about `actions: write` scope and a
-// real workflow_run payload to test the PR-resolution path against, which
-// this PR does not have on hand.
+// `.github/workflows/ci-infra-kill-rerun.yml` also invokes this CLI after a
+// completed first-attempt CI failure. That path limits eligibility to
+// infra-kill and skips runs whose Unit-tests job did not fail.
 
 import { runClassifier } from "./lib/ci-failure-classifier.mjs";
 
 function parseArgs(argv) {
-	const args = { runId: null, jobName: "Unit tests", prNumber: null };
+	const args = {
+		runId: null,
+		jobName: "Unit tests",
+		prNumber: null,
+		sha: null,
+		infraKillOnly: false,
+		skipMissingJob: false,
+	};
 	for (let i = 0; i < argv.length; i++) {
 		const arg = argv[i];
 		if (arg === "--run") args.runId = argv[++i];
 		else if (arg === "--job-name") args.jobName = argv[++i];
 		else if (arg === "--pr") args.prNumber = Number(argv[++i]);
+		else if (arg === "--sha") args.sha = argv[++i];
+		else if (arg === "--infra-kill-only") args.infraKillOnly = true;
+		else if (arg === "--skip-missing-job") args.skipMissingJob = true;
 	}
 	return args;
 }
 
 async function main() {
-	const { runId, jobName, prNumber } = parseArgs(process.argv.slice(2));
+	const { runId, jobName, prNumber, sha, infraKillOnly, skipMissingJob } =
+		parseArgs(process.argv.slice(2));
 	if (!runId) {
 		console.error(
 			"usage: node scripts/classify-ci-failure.mjs --run <runId> [--job-name <name>] [--pr <number>]",
@@ -58,7 +67,14 @@ async function main() {
 		runId,
 		jobName,
 		prNumber: prNumber || undefined,
+		sha: sha || undefined,
+		rerunKinds: infraKillOnly ? ["infra-kill"] : undefined,
+		skipMissingJob,
 	});
+	if ("skipped" in result) {
+		console.log(`CI failure classifier skipped: ${result.reason}`);
+		return;
+	}
 
 	console.log(
 		`PR #${result.prNumber} sha=${result.sha} job=${result.jobName} -> ` +

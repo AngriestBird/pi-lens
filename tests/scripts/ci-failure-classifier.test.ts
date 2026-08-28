@@ -376,6 +376,17 @@ describe("shouldTriggerRerun once-per-SHA guard (#2103)", () => {
 		).toBe(false);
 	});
 
+	it("allows workflow policy to exclude an infra-net verdict", () => {
+		expect(
+			shouldTriggerRerun({
+				classification: { kind: "infra-net", detail: "ENOTFOUND" },
+				sha: "sha1",
+				existingMarker: null,
+				rerunKinds: ["infra-kill"],
+			}),
+		).toBe(false);
+	});
+
 	it("triggers on the first infra classification for a SHA (no prior comment)", () => {
 		expect(
 			shouldTriggerRerun({
@@ -653,6 +664,62 @@ describe("runClassifier orchestration against a mocked, STATEFUL GitHub API (#21
 
 		const reran = calls.find((c) => c.url.includes("rerun-failed-jobs"));
 		expect(reran).toBeDefined();
+	});
+
+	it("comments classification failure when the Unit-tests log download fails", async () => {
+		const api = makeStatefulApi();
+		const failingLogFetcher = async (url: string, init?: RequestInit) => {
+			if (url.endsWith("/actions/jobs/111/logs")) {
+				return jsonResponse({ message: "log unavailable" }, 502);
+			}
+			return api.fetcher(url, init);
+		};
+
+		await expect(
+			runClassifier({
+				fetcher: failingLogFetcher,
+				owner: "acme",
+				repo: "repo",
+				runId: 999,
+				prNumber: 42,
+				sha: "deadbeef",
+				rerunKinds: ["infra-kill"],
+			}),
+		).rejects.toThrow("HTTP 502");
+		expect(api.comments).toHaveLength(1);
+		expect(api.comments[0].body).toContain("classification failed");
+		expect(api.comments[0].body).toContain(buildMarker("deadbeef", "false"));
+		expect(api.rerunCallCount).toBe(0);
+	});
+
+	it("skips a failed run when Unit tests itself did not fail", async () => {
+		const api = makeStatefulApi();
+		const lintOnlyFailureFetcher = async (url: string, init?: RequestInit) => {
+			if (url.endsWith("/actions/runs/999/jobs")) {
+				return jsonResponse({
+					jobs: [
+						{ id: 111, name: "Unit tests", conclusion: "success" },
+						{ id: 222, name: "Lint & type-check", conclusion: "failure" },
+					],
+				});
+			}
+			return api.fetcher(url, init);
+		};
+
+		const result = await runClassifier({
+			fetcher: lintOnlyFailureFetcher,
+			owner: "acme",
+			repo: "repo",
+			runId: 999,
+			jobName: "Unit tests",
+			skipMissingJob: true,
+		});
+		expect(result).toEqual({
+			skipped: true,
+			reason: 'run 999 has no failed job named "Unit tests"',
+		});
+		expect(api.comments).toHaveLength(0);
+		expect(api.rerunCallCount).toBe(0);
 	});
 
 	it("updates the existing sticky comment in place instead of posting a second one, and skips the rerun once already triggered for this SHA", async () => {
