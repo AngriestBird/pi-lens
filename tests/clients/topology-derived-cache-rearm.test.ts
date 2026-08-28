@@ -9,7 +9,10 @@ import {
 } from "../../clients/review-graph/tsconfig-paths.js";
 import * as startupScan from "../../clients/startup-scan.js";
 import { resolveStartupScanContext } from "../../clients/startup-scan.js";
-import { decideSessionStart } from "../../clients/session-lifecycle.js";
+import {
+	decideSessionStart,
+	_resetSessionLifecycleForTests,
+} from "../../clients/session-lifecycle.js";
 import { handleSessionStart } from "../../clients/runtime-session.js";
 import { resetWorkspaceTopology } from "../../clients/workspace-topology.js";
 import { setupTestEnvironment } from "./test-utils.js";
@@ -93,6 +96,11 @@ describe("topology-derived cache re-arm (#2263)", () => {
 		delete process.env.PI_LENS_STARTUP_MODE;
 		delete process.env.PI_LENS_COLD_START_QUICK;
 		delete process.env.PI_LENS_WARMUP_DELAY_MS;
+		// decideSessionStart registers on PROCESS state (session-lifecycle.ts
+		// :495's own warning, catalog shape 7): without this reset a later
+		// caller in this file or worker classifies concurrent-secondary and
+		// silently never exercises the session-start reset.
+		_resetSessionLifecycleForTests();
 	});
 
 	it("re-arms all registered topology caches through a live primary→/new start", async () => {
@@ -179,7 +187,13 @@ describe("topology-derived cache re-arm (#2263)", () => {
 				env.tmpDir,
 			);
 			expect(secondDecision.classification).toBe("sequential-replacement");
-			await handleSessionStart(sessionDeps(env.tmpDir, runtime));
+			// #2333's observability criterion: the full path must EMIT its
+			// per-phase records, not just do the work.
+			const secondDbg = vi.fn();
+			await handleSessionStart(sessionDeps(env.tmpDir, runtime, secondDbg));
+			expect(secondDbg).toHaveBeenCalledWith(
+				expect.stringContaining("session_start phase"),
+			);
 			expect(languageDerive).toHaveBeenCalledTimes(2);
 			expect(startupDerive).toHaveBeenCalledTimes(2);
 
