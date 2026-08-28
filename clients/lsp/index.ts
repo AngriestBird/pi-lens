@@ -2724,7 +2724,17 @@ export class LSPService {
 			if (!root) continue;
 			const key = `${server.id}:${normalizeMapKey(root)}`;
 			const client = this.state.clients.get(key);
-			if (client?.isAlive() && client.diagnosticsVersion > 0) return true;
+			// #2324 F1: per-file grain. `diagnosticsVersion` is client-global —
+			// any sibling path's publication bumps it, so it cannot answer "did
+			// THIS server publish for THIS file?" (client.ts:339-341). A file
+			// this server never touched would otherwise read as gated-open the
+			// moment any other file on the same client got a publication.
+			if (
+				client?.isAlive() &&
+				client.getDiagnosticsVersionForPath(filePath) > 0
+			) {
+				return true;
+			}
 		}
 		return false;
 	}

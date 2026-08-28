@@ -25,8 +25,15 @@ import { logLatency } from "../../latency-logger.js";
 import { hasEslintConfig } from "../../tool-policy.js";
 import { enabledAuxiliaryLspServerIds } from "../auxiliary-lsp.js";
 import { classifyDefect } from "../diagnostic-taxonomy.js";
-import { recordDegradationOnce } from "../../degradation-ledger.js";
+import {
+	incrementDegradationCount,
+	recordDegradationOnce,
+} from "../../degradation-ledger.js";
 import { hasAuxiliaryLspPublishedForRoot } from "../../lsp/index.js";
+import {
+	clearPendingAuxiliaryCoverage,
+	hasPendingAuxiliaryCoverage,
+} from "../../lsp/pending-aux-coverage.js";
 import { PRIORITY } from "../priorities.js";
 import type {
 	Diagnostic,
@@ -930,7 +937,34 @@ const astGrepNapiRunner: RunnerDefinition = {
 			? await hasAuxiliaryLspPublishedForRoot("ast-grep", ctx.filePath)
 			: false;
 		if (astGrepLspEnabled && astGrepLspPublished) {
+			// #2324 F2: "has this server EVER published for this file" can go
+			// stale — a LATER touch's aux-grace wait can find the server silent
+			// for the CURRENT content while an OLDER revision's publication still
+			// satisfies this per-file gate. A pending late-aux entry for this
+			// exact pair is that signal: the aux-grace wait already decided this
+			// touch got no fresh evidence, yet Gate B is about to skip anyway.
+			// Re-running napi here would risk the F3 duplicate this fix just
+			// closed, so the residual loss is made observable instead.
+			if (hasPendingAuxiliaryCoverage(ctx.filePath, "ast-grep")) {
+				incrementDegradationCount({
+					kind: "aux-runner-findings-lost",
+					subject: "ast-grep",
+					reason: `Gate B skipped napi for ${ctx.filePath}: prior publication exists but this touch's aux-grace wait found no fresh evidence`,
+				});
+			}
 			return { status: "skipped", diagnostics: [], semantic: "none" };
+		}
+		if (astGrepLspEnabled && !astGrepLspPublished) {
+			// #2324 F3: napi is about to run BECAUSE the per-file gate found no
+			// publication evidence — the same condition the aux-grace wait just
+			// used (or is about to use) to mark this file pending for late-
+			// auxiliary delivery. Napi's run covers this turn's findings, so
+			// consume that pending pair now. Left unconsumed, the LSP's actual
+			// (delayed) publication would redeliver the identical rule/line at
+			// the next turn_end as `late-auxiliary-findings` — a duplicate
+			// surface, not new coverage. Unknown pairs are a no-op, so this is
+			// safe even when no aux-grace wait ran for this touch.
+			clearPendingAuxiliaryCoverage(ctx.filePath, "ast-grep");
 		}
 
 		const sgModule = await loadSg();

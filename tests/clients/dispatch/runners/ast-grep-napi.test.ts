@@ -127,6 +127,52 @@ describe("ast-grep-napi runner — LSP supersede gate (#239 Phase 2)", () => {
 	// @ast-grep/napi mock and collides with the doMock in the skip-path suite.
 });
 
+describe("ast-grep-napi runner — late-auxiliary dedupe (#2324 F3)", () => {
+	beforeEach(() => {
+		vi.resetModules();
+		mockAuxiliaryLspPublished.mockResolvedValue(false);
+	});
+
+	it("consumes the pending late-auxiliary pair when it runs as the fallback, so only one delivery surface arms", async () => {
+		const env = setupTestEnvironment("pi-lens-ast-grep-dedupe-");
+		try {
+			const filePath = path.join(env.tmpDir, "file.ts");
+			fs.writeFileSync(filePath, "const x = 1;\n");
+			const pendingAux = await import(
+				"../../../../clients/lsp/pending-aux-coverage.js"
+			);
+			pendingAux.resetPendingAuxiliaryCoverage();
+			// Lane 1 arms: the aux-grace wait already found ast-grep silent for
+			// this touch and marked it for turn-end late delivery.
+			pendingAux.markPendingAuxiliaryCoverage(filePath, ["ast-grep"]);
+			expect(
+				pendingAux.hasPendingAuxiliaryCoverage(filePath, "ast-grep"),
+			).toBe(true);
+
+			mockWorkingSgLoad();
+			const mod =
+				await import("../../../../clients/dispatch/runners/ast-grep-napi.js");
+			// Lane 2 arms: Gate B finds no publication yet, so napi runs and
+			// delivers this turn's findings itself.
+			const result = await mod.default.run(
+				createCtx(filePath, { hasTool: async () => false }) as any,
+			);
+			expect(result.status).toBe("succeeded");
+
+			// Exactly one delivery surface should remain armed: napi already
+			// delivered, so the late-auxiliary lane must be consumed — a
+			// pending pair left behind here would redeliver the identical
+			// rule/line at the next turn_end as a duplicate.
+			expect(
+				pendingAux.hasPendingAuxiliaryCoverage(filePath, "ast-grep"),
+			).toBe(false);
+			pendingAux.resetPendingAuxiliaryCoverage();
+		} finally {
+			env.cleanup();
+		}
+	});
+});
+
 describe("ast-grep-napi runner — skip paths", () => {
 	beforeEach(() => {
 		vi.resetModules();

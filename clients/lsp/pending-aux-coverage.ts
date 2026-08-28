@@ -204,6 +204,22 @@ export function rearmPendingAuxiliaryCoverage(
 }
 
 /**
+ * Read-only check: is this (file, server) pair currently pending late
+ * delivery? #2324 F2: Gate B's "has this server EVER published for this
+ * file" answer goes stale the moment a later touch's aux-grace wait finds
+ * the server silent for the CURRENT content — a pending pair is exactly
+ * that signal, so a caller deciding whether to skip a fallback runner can
+ * tell "published, still current" from "published once, silent now" without
+ * draining or mutating the store.
+ */
+export function hasPendingAuxiliaryCoverage(
+	filePath: string,
+	serverId: string,
+): boolean {
+	return pending.has(pairKey(filePath, serverId));
+}
+
+/**
  * Remove one pair after its findings were delivered, or whenever the caller
  * knows it is resolved. Unknown pairs are a no-op.
  */

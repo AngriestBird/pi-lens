@@ -1648,12 +1648,17 @@ a *second host adapter* alongside `index.ts`. Design rationale + progress: `mcp.
   which makes an array-only edge clone safe. Debounced persistence retains the
   finished graph/maps and materializes serialization arrays only at flush time,
   so callers must likewise replace rather than mutate those snapshots.
-- **Auxiliary LSP publication readiness is a read-only dispatch seam (#868/#2324).**
-  `clients/lsp/index.ts` exposes
+- **Auxiliary LSP publication readiness is a read-only dispatch seam, per file
+  (#868/#2324).** `clients/lsp/index.ts` exposes
   `hasAuxiliaryLspPublishedForRoot(serverId, filePath)` for Gate-B fallback
-  decisions. It resolves the matching root and requires a live client's first
-  diagnostic publication; process liveness or a resolvable binary is not proof
-  that the server can supersede a fallback runner. It inspects only the existing
+  decisions. It resolves the matching root and requires that live client's
+  FIRST diagnostic publication FOR THAT FILE — `getDiagnosticsVersionForPath`,
+  never the client-global `diagnosticsVersion`. The global counter advances on
+  any path's publication, so it answered "did the server publish?" for a
+  sibling file too, satisfying the gate for a file the server never touched
+  and leaving fallback findings undelivered (the #2324 headline warm-silence
+  case). Process liveness or a resolvable binary is not proof that the server
+  can supersede a fallback runner either. It inspects only the existing
   client map and must never spawn or warm a client. Dispatch-side
   code imports this seam from `lsp/index.ts`, while `dispatch/auxiliary-lsp.ts`
   remains free of the reverse import to avoid the LSP/auxiliary cycle.
