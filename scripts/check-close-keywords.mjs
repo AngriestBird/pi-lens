@@ -76,8 +76,29 @@ function eventPayload() {
 	return JSON.parse(readFileSync(eventPath, "utf8"));
 }
 
-function lintPullRequest() {
-	const result = lintCloseKeywords(eventPayload().pull_request?.body ?? "");
+export async function lintPullRequest(
+	fetchImpl = globalThis.fetch,
+	event = eventPayload(),
+) {
+	const pullRequest = event.pull_request;
+	if (!pullRequest || !process.env.GITHUB_REPOSITORY)
+		throw new Error("Pull request event and GITHUB_REPOSITORY are required");
+	// Same fail-closed reporting contract as verifyMergedPullRequest: a fetch
+	// failure states plainly that the check did not run, instead of surfacing
+	// as a bare thrown message that reads like a broken script (worst for
+	// fork PRs hitting a transient 5xx).
+	let body;
+	try {
+		body = await fetchLivePrBody(pullRequest, fetchImpl);
+	} catch (error) {
+		const reason = error instanceof Error ? error.message : String(error);
+		console.error(
+			`::error::Close-keyword syntax check could not fetch the live PR body, so it did not run: ${reason}`,
+		);
+		process.exitCode = 1;
+		return;
+	}
+	const result = lintCloseKeywords(body);
 	if (!result.valid) {
 		console.error(INVALID_CLOSE_KEYWORD_MESSAGE);
 		for (const line of result.offendingLines) {
@@ -213,7 +234,7 @@ Post-merge close verification found issue(s) that were not closed: ${details}. G
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
 	(async () => {
-		if (process.argv[2] === "--lint-pr") lintPullRequest();
+		if (process.argv[2] === "--lint-pr") await lintPullRequest();
 		else if (process.argv[2] === "--verify-merged")
 			await verifyMergedPullRequest();
 		else

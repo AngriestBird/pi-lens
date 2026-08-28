@@ -28,7 +28,7 @@ export const MISSING_ISSUE_REF_MESSAGE =
  * can prove a ref sitting only in the body no longer rescues the title.
  * Pure function so it is unit-testable without a GitHub event payload.
  */
-export function lintPrTitle(title = "", _body = "") {
+export function lintPrTitle(title = "") {
 	const errors = [];
 	if (!CONVENTIONAL_PREFIX.test(title.trim())) {
 		errors.push(MISSING_PREFIX_MESSAGE);
@@ -94,7 +94,7 @@ async function lintPullRequestEvent() {
 	const pullRequest = eventPayload().pull_request;
 	if (!pullRequest) throw new Error("Event payload has no pull_request");
 	const title = await resolveLivePrTitle(pullRequest);
-	const result = lintPrTitle(title, pullRequest.body ?? "");
+	const result = lintPrTitle(title);
 	if (!result.valid) {
 		for (const error of result.errors) console.error(error);
 		process.exitCode = 1;

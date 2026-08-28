@@ -1284,9 +1284,12 @@ label" is not "anyone who can merge".
 CI validates GitHub close-keyword syntax through `scripts/check-close-keywords.mjs`:
 PR bodies may not use a comma-separated close list because GitHub applies only
 the first issue per keyword; use one keyword per issue (`Closes #A. Closes #B.`).
+The syntax check fetches the live PR body with `GITHUB_TOKEN`, so reruns do not
+replay an edited event snapshot. The merged-PR workflow uses the same live-body
+contract and fails closed when the fetch fails.
 The merged-PR workflow rechecks each same-repository close target and comments on
 the PR when a referenced issue is missing or remains open. Keep the parser pure
-and unit-tested; workflow YAML should only pass the event to the script.
+and unit-tested; workflow YAML supplies the token required by the live fetch.
 
 ## Key source layout
 
