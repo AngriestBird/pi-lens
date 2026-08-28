@@ -614,6 +614,14 @@ and only `lsp_server_spawned` answers "how many servers did we start".
 
 ### Dispatch, runners, formatters, and installer
 
+`FactStore` bounds file facts on two axes: 1,024 LRU records and 64 MiB of
+retained UTF-8 `file.content` bytes. It maintains the byte total at each
+mutation; never replace that total with a hot-path map scan. Pinned dispatch
+records count toward the byte budget but remain exempt from eviction until
+`endDispatchFor`, because dispatch reads content after its runners settle.
+Capacity telemetry keeps the per-store subject and names the triggering
+`count` or `bytes` axis in the existing bounded degradation record. (#2247)
+
 Managed verification uses the registry's optional `verificationTimeoutMs` at
 every installer-owned probe seam, including local discovery, npm install, and
 periodic refresh. The refresh candidate projection carries that policy instead

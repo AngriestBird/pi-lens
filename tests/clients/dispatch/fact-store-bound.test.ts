@@ -27,6 +27,11 @@ afterEach(() => setFactStoreEvictionReporter(undefined));
 // eviction. A dispatch pins its file at start and releases it at completion.
 const MAX_RECORDS = 1024;
 const BATCH = 2000;
+const MIB = 1024 * 1024;
+
+function contentOfBytes(bytes: number): string {
+	return "x".repeat(bytes);
+}
 
 function batchPaths(prefix: string, count = BATCH): string[] {
 	return Array.from({ length: count }, (_, i) => `/repo/src/${prefix}-${i}.ts`);
@@ -66,6 +71,55 @@ describe("FactStore file-fact bound (#2240)", () => {
 
 		expect(store.hasFileFact(paths[0], "file.content")).toBe(true);
 		expect(store.hasFileFact(paths[1], "file.content")).toBe(false);
+	});
+
+	it("evicts on retained content bytes before the record cap is reached", () => {
+		const store = new FactStore();
+		const paths = batchPaths("byte-pressure", 3);
+		for (const p of paths) {
+			store.setFileFact(p, "file.content", contentOfBytes(24 * MIB));
+		}
+
+		expect(store.hasFileFact(paths[0], "file.content")).toBe(false);
+		expect(retained(store, paths)).toBe(2);
+	});
+
+	it("weighs retained content as UTF-8 bytes rather than string length", () => {
+		const store = new FactStore();
+		const paths = batchPaths("utf8-byte-pressure", 2);
+		// Two strings total 36 MiB in JavaScript length but 72 MiB in UTF-8.
+		for (const p of paths) {
+			store.setFileFact(p, "file.content", "😀".repeat(9 * MIB));
+		}
+
+		expect(store.hasFileFact(paths[0], "file.content")).toBe(false);
+		expect(store.hasFileFact(paths[1], "file.content")).toBe(true);
+	});
+
+	it("keeps pinned content under byte pressure and evicts it after unpin", () => {
+		const store = new FactStore();
+		const active = "/repo/src/byte-pinned.ts";
+		store.clearFileFactsFor(active);
+		store.setFileFact(active, "file.content", contentOfBytes(40 * MIB));
+		store.setFileFact(
+			"/repo/src/pressure-1.ts",
+			"file.content",
+			contentOfBytes(20 * MIB),
+		);
+		store.setFileFact(
+			"/repo/src/pressure-2.ts",
+			"file.content",
+			contentOfBytes(20 * MIB),
+		);
+
+		expect(store.hasFileFact(active, "file.content")).toBe(true);
+		store.endDispatchFor(active);
+		store.setFileFact(
+			"/repo/src/pressure-3.ts",
+			"file.content",
+			contentOfBytes(20 * MIB),
+		);
+		expect(store.hasFileFact(active, "file.content")).toBe(false);
 	});
 
 	it("never evicts the file whose dispatch is in flight", () => {
@@ -173,6 +227,10 @@ describe("FactStore file-fact bound (#2240)", () => {
 	// `sessionFacts` carries — so a mutation to either the reporter's `kind` /
 	// `subject` wiring in integration.ts, or the per-store subject label, reds
 	// this test.
+	//
+	// #2247 review F1: the ledger subject now carries `<store>:<axis>`, so a
+	// count-axis and a byte-axis eviction on the SAME store no longer share
+	// one dedupe key.
 	it("records one capacity-eviction degradation per session, naming the evicted path", () => {
 		expect(productionEvictionReporter).toBeDefined();
 		resetDegradationLedger();
@@ -188,12 +246,13 @@ describe("FactStore file-fact bound (#2240)", () => {
 		const group = find();
 		expect(group).toBeDefined();
 		expect(group?.count).toBe(1);
-		// One record per session per store; the reason names the FIRST evicted
-		// path (oldest inserted).
-		expect(group?.latestReasons.at(-1)?.subject).toBe("dispatch");
+		// One record per session per store per axis; the reason names the FIRST
+		// evicted path (oldest inserted).
+		expect(group?.latestReasons.at(-1)?.subject).toBe("dispatch:count");
 		expect(group?.latestReasons.at(-1)?.reason).toContain(
 			normalizeMapKey(paths[0]),
 		);
+		expect(group?.latestReasons.at(-1)?.reason).toContain("axis=count");
 
 		// Further evictions in the same session do not add a second record.
 		for (const p of batchPaths("evict2"))
@@ -206,6 +265,53 @@ describe("FactStore file-fact bound (#2240)", () => {
 		for (const p of batchPaths("evict3"))
 			store2.setFileFact(p, "file.content", "x");
 		expect(find()?.count).toBe(1);
+	});
+
+	it("records the byte axis when retained content triggers eviction", () => {
+		resetDegradationLedger();
+		setFactStoreEvictionReporter(productionEvictionReporter);
+		const store = new FactStore("dispatch-byte-axis");
+		for (const p of batchPaths("byte-axis", 3)) {
+			store.setFileFact(p, "file.content", contentOfBytes(24 * MIB));
+		}
+
+		const group = getDegradationSummary().find(
+			(g) => g.kind === "fact-store-capacity-eviction",
+		);
+		expect(group?.latestReasons.at(-1)?.subject).toBe(
+			"dispatch-byte-axis:bytes",
+		);
+		expect(group?.latestReasons.at(-1)?.reason).toContain("axis=bytes");
+	});
+
+	// #2247 review F1: the reviewer's missing case — the SAME store trips the
+	// count axis first (its guaranteed order: 1024 typical files land far
+	// under 64 MiB), then a later byte-axis eviction happens on that store
+	// too. Both must produce distinct records; before the fix the count-axis
+	// record consumed the `${kind}\0${subject}` dedupe key and the byte-axis
+	// eviction recorded nothing.
+	it("records both axes for the same store when count then bytes eviction fire in sequence", () => {
+		resetDegradationLedger();
+		setFactStoreEvictionReporter(productionEvictionReporter);
+		const store = new FactStore("dispatch");
+
+		// Count axis fires first: exceed the 1024-record cap with tiny content.
+		for (const p of batchPaths("count-then-bytes", MAX_RECORDS + 1)) {
+			store.setFileFact(p, "file.content", "x");
+		}
+		// Byte axis fires next, on the SAME store: push large content past the
+		// 64 MiB retained-bytes budget.
+		for (const p of batchPaths("count-then-bytes-big", 3)) {
+			store.setFileFact(p, "file.content", contentOfBytes(24 * MIB));
+		}
+
+		const group = getDegradationSummary().find(
+			(g) => g.kind === "fact-store-capacity-eviction",
+		);
+		expect(group?.count).toBe(2);
+		const subjects = group?.latestReasons.map((r) => r.subject) ?? [];
+		expect(subjects).toContain("dispatch:count");
+		expect(subjects).toContain("dispatch:bytes");
 	});
 
 	// #2243 review round 3 (F1): a DIFFERENT store — a different subject —
@@ -229,8 +335,152 @@ describe("FactStore file-fact bound (#2240)", () => {
 		);
 		expect(groups).toHaveLength(1); // one GROUP (kind), two entries within it
 		const subjects = groups[0]?.latestReasons.map((r) => r.subject) ?? [];
-		expect(subjects).toContain("runtime-session-call-graph");
-		expect(subjects).toContain("dispatch");
+		expect(subjects).toContain("runtime-session-call-graph:count");
+		expect(subjects).toContain("dispatch:count");
+	});
+
+	// #2247 review F2: a leaked (or several overlapping) pin(s) whose bytes
+	// alone exceed the 64 MiB budget must not silently wedge the store —
+	// before the fix, every subsequent unpinned insert was evicted on the
+	// same call it was admitted, forever, because it was always the sole
+	// remaining unpinned key.
+	it("does not silently collapse unpinned writes when pinned content alone exceeds the byte budget", () => {
+		resetDegradationLedger();
+		setFactStoreEvictionReporter(productionEvictionReporter);
+		const store = new FactStore("dispatch");
+		const pinnedA = "/repo/src/pinned-a.ts";
+		const pinnedB = "/repo/src/pinned-b.ts";
+		store.clearFileFactsFor(pinnedA);
+		store.setFileFact(pinnedA, "file.content", contentOfBytes(40 * MIB));
+		store.clearFileFactsFor(pinnedB);
+		store.setFileFact(pinnedB, "file.content", contentOfBytes(40 * MIB));
+		// 80 MiB pinned against a 64 MiB budget.
+
+		const normalPaths = batchPaths("normal-under-pin-pressure", 50);
+		for (const p of normalPaths) store.setFileFact(p, "file.content", "small");
+
+		expect(retained(store, normalPaths)).toBe(50);
+		expect(store.hasFileFact(pinnedA, "file.content")).toBe(true);
+		expect(store.hasFileFact(pinnedB, "file.content")).toBe(true);
+
+		const group = getDegradationSummary().find(
+			(g) => g.kind === "fact-store-pinned-over-budget",
+		);
+		expect(group).toBeDefined();
+		expect(group?.count).toBe(1);
+		expect(group?.latestReasons.at(-1)?.subject).toBe("dispatch");
+		expect(group?.latestReasons.at(-1)?.reason).toContain(
+			"pinned content bytes",
+		);
+
+		// A regular byte-axis eviction still applies once pins release and
+		// pressure is unpinned-driven again.
+		store.endDispatchFor(pinnedA);
+		store.endDispatchFor(pinnedB);
+		store.setFileFact(
+			"/repo/src/after-unpin.ts",
+			"file.content",
+			contentOfBytes(20 * MIB),
+		);
+		expect(store.hasFileFact(pinnedA, "file.content")).toBe(false);
+	});
+
+	// #2247 review F3: three accounting paths (overwrite's subtract-old,
+	// delete's subtraction, clearAll's reset) were mutation-vacuous — nothing
+	// in the suite caught their removal. Recompute a fresh sum over every
+	// path this test ever touched after a mixed operation sequence and
+	// assert it matches the running total exactly, rather than only
+	// asserting individual hasFileFact booleans.
+	it("keeps the running retained-bytes total equal to a fresh sum after a mixed op sequence", () => {
+		const store = new FactStore();
+		const touched = new Set<string>();
+		const freshSum = () => {
+			let total = 0;
+			for (const p of touched) {
+				const content = store.getFileFact<string>(p, "file.content");
+				if (typeof content === "string") {
+					total += Buffer.byteLength(content, "utf8");
+				}
+			}
+			return total;
+		};
+		// #2247 review F4: companion sum over pinnedFiles ∩ fileFacts. Tracked
+		// separately from `touched` because a record can be retained without
+		// being pinned.
+		const pinnedTouched = new Set<string>();
+		const freshPinnedSum = () => {
+			let total = 0;
+			for (const p of pinnedTouched) {
+				const content = store.getFileFact<string>(p, "file.content");
+				if (typeof content === "string") {
+					total += Buffer.byteLength(content, "utf8");
+				}
+			}
+			return total;
+		};
+
+		const a = "/repo/src/crosscheck-a.ts";
+		const b = "/repo/src/crosscheck-b.ts";
+		const c = "/repo/src/crosscheck-c.ts";
+		const pinned = "/repo/src/crosscheck-pinned.ts";
+		touched.add(a).add(b).add(c).add(pinned);
+
+		store.setFileFact(a, "file.content", contentOfBytes(1000));
+		expect(store.getRetainedContentBytes()).toBe(freshSum());
+
+		// Overwrite with a DIFFERENT size — exercises subtract-old-on-overwrite.
+		store.setFileFact(a, "file.content", contentOfBytes(300));
+		expect(store.getRetainedContentBytes()).toBe(freshSum());
+
+		// Multibyte content: UTF-8 byte length differs from string length.
+		store.setFileFact(b, "file.content", "😀".repeat(500));
+		expect(store.getRetainedContentBytes()).toBe(freshSum());
+
+		// deleteFileFact subtraction.
+		store.setFileFact(c, "file.content", contentOfBytes(700));
+		store.deleteFileFact(c, "file.content");
+		touched.delete(c);
+		expect(store.getRetainedContentBytes()).toBe(freshSum());
+
+		// clearFileFactsFor / endDispatchFor pin lifecycle, then dropFileFacts.
+		store.clearFileFactsFor(pinned);
+		pinnedTouched.add(pinned);
+		store.setFileFact(pinned, "file.content", contentOfBytes(2000));
+		expect(store.getRetainedContentBytes()).toBe(freshSum());
+		expect(store.getPinnedContentBytes()).toBe(freshPinnedSum());
+		store.endDispatchFor(pinned);
+		pinnedTouched.delete(pinned);
+		expect(store.getPinnedContentBytes()).toBe(freshPinnedSum());
+		store.dropFileFacts(pinned);
+		touched.delete(pinned);
+		expect(store.getRetainedContentBytes()).toBe(freshSum());
+
+		// #2247 review F4 (M10 probe): beginDispatchFor pins a WARM record — one
+		// that already carries content — without clearing it first. The pin's
+		// 0→1 transition is the ONLY place that pre-existing content joins the
+		// pinned subset for this call shape; clearFileFactsFor above always
+		// clears before pinning, so it never exercises that add.
+		const warm = "/repo/src/crosscheck-warm.ts";
+		touched.add(warm);
+		store.setFileFact(warm, "file.content", contentOfBytes(1500));
+		store.beginDispatchFor(warm);
+		pinnedTouched.add(warm);
+		expect(store.getPinnedContentBytes()).toBe(freshPinnedSum());
+
+		// #2247 review F4 (M9 probe): clearAll must reset the pinned total too,
+		// not just the overall total. The pin on `warm` is still held when
+		// clearAll runs — the shape that exposes a stale pinned total
+		// (integration.ts:482 calls clearAll() on session reset; a pin held at
+		// that moment previously left `pinnedContentBytesTotal` nonzero with
+		// `pinnedFiles` emptied, permanently disabling the byte budget).
+		store.setFileFact(a, "file.content", contentOfBytes(50));
+		store.clearAll();
+		touched.clear();
+		pinnedTouched.clear();
+		expect(store.getRetainedContentBytes()).toBe(0);
+		expect(store.getRetainedContentBytes()).toBe(freshSum());
+		expect(store.getPinnedContentBytes()).toBe(0);
+		expect(store.getPinnedContentBytes()).toBe(freshPinnedSum());
 	});
 
 	// fact-store must stay an import leaf: it emits eviction telemetry only
@@ -239,7 +489,7 @@ describe("FactStore file-fact bound (#2240)", () => {
 	it("emits capacity eviction through the injected reporter", () => {
 		const reasons: string[] = [];
 		const subjects: string[] = [];
-		setFactStoreEvictionReporter((subject, reason) => {
+		setFactStoreEvictionReporter((subject, _axis, reason) => {
 			subjects.push(subject);
 			reasons.push(reason);
 		});

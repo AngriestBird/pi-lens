@@ -23,6 +23,7 @@ import { normalizeMapKey } from "../path-utils.js";
 // once-per-session record.
 export type CapacityEvictionReporter = (
 	subject: string,
+	axis: "count" | "bytes" | "pinned-over-budget",
 	reason: string,
 ) => void;
 let capacityEvictionReporter: CapacityEvictionReporter | undefined;
@@ -46,6 +47,10 @@ export function getFactStoreEvictionReporter():
 // until the heap ran out. Bound the record count the way widget-state.ts bounds
 // its file records.
 const MAX_FILE_FACT_RECORDS = 1024;
+// Keep enough content for 1024 typical source files averaging 64 KiB, while
+// preventing a small number of generated or vendored files from retaining
+// hundreds of MiB for the process lifetime (#2247).
+const MAX_FILE_FACT_CONTENT_BYTES = 64 * 1024 * 1024;
 // Pinned records are exempt from capacity eviction. A dispatch reads its
 // file's facts back after the runner groups settle (`file.content` misses read as
 // empty content, not as "re-derive"), and the fire-and-forget blast-radius
@@ -73,6 +78,18 @@ export class FactStore implements ReadonlyFactStore {
 	// count is > 0. Refcounted, not a Set, so two overlapping dispatches of the
 	// same file both hold the pin until BOTH settle (#2243 item 2).
 	private readonly pinnedFiles = new Map<string, number>();
+	// Running UTF-8 byte total for file.content only. Maintaining it at every
+	// mutation keeps getFileFact/setFileFact O(1) amortized; never scan the map
+	// to decide whether the byte budget is exceeded.
+	private retainedContentBytes = 0;
+	// Subset of retainedContentBytes held by currently pinned files (#2247
+	// review F2). Maintained incrementally the same way — a scan over
+	// `pinnedFiles` looks small in isolation, but `evictColdFileFacts` calls it
+	// on EVERY unpinned insert for as long as pinned bytes stay over budget, so
+	// a scan there would re-walk a large pinned file's full string on every
+	// single write admitted during that window. Keeping a running total avoids
+	// reintroducing exactly the scan `retainedContentBytes` exists to avoid.
+	private pinnedContentBytesTotal = 0;
 
 	/**
 	 * @param subject Discriminates this store's capacity-eviction telemetry
@@ -99,6 +116,12 @@ export class FactStore implements ReadonlyFactStore {
 			facts = new Map();
 			this.fileFacts.set(key, facts);
 		}
+		if (factId === "file.content") {
+			const delta =
+				this.contentBytes(value) - this.contentBytes(facts.get(factId));
+			this.retainedContentBytes += delta;
+			if (this.pinnedFiles.has(key)) this.pinnedContentBytesTotal += delta;
+		}
 		facts.set(factId, value);
 		this.evictColdFileFacts();
 	}
@@ -113,6 +136,11 @@ export class FactStore implements ReadonlyFactStore {
 		const key = normalizeMapKey(filePath);
 		const facts = this.fileFacts.get(key);
 		if (!facts) return;
+		if (factId === "file.content") {
+			const dropped = this.contentBytes(facts.get(factId));
+			this.retainedContentBytes -= dropped;
+			if (this.pinnedFiles.has(key)) this.pinnedContentBytesTotal -= dropped;
+		}
 		facts.delete(factId);
 		if (facts.size === 0) this.fileFacts.delete(key);
 	}
@@ -126,7 +154,7 @@ export class FactStore implements ReadonlyFactStore {
 	 *  Every `clearFileFactsFor` MUST be paired with an `endDispatchFor`. */
 	clearFileFactsFor(filePath: string): void {
 		const key = normalizeMapKey(filePath);
-		this.fileFacts.delete(key);
+		this.deleteFileFactsRecord(key);
 		this.pinFile(key);
 	}
 
@@ -161,7 +189,7 @@ export class FactStore implements ReadonlyFactStore {
 	 *  pinning there would exempt every scanned file from the capacity cap and
 	 *  defeat it. Normalizes filePath internally. */
 	dropFileFacts(filePath: string): void {
-		this.fileFacts.delete(normalizeMapKey(filePath));
+		this.deleteFileFactsRecord(normalizeMapKey(filePath));
 	}
 
 	/** LRU touch: re-inserting an existing record moves it to the end of the
@@ -175,26 +203,87 @@ export class FactStore implements ReadonlyFactStore {
 	}
 
 	private pinFile(key: string): void {
-		this.pinnedFiles.set(key, (this.pinnedFiles.get(key) ?? 0) + 1);
+		const count = this.pinnedFiles.get(key) ?? 0;
+		// Transition from unpinned to pinned: this file's content joins the
+		// pinned subset. A refcount bump past 1 (an already-pinned file, two
+		// overlapping dispatches) does not — it is already counted.
+		if (count === 0) {
+			this.pinnedContentBytesTotal += this.contentBytes(
+				this.fileFacts.get(key)?.get("file.content"),
+			);
+		}
+		this.pinnedFiles.set(key, count + 1);
 	}
 
 	private unpinFile(key: string): void {
 		const count = this.pinnedFiles.get(key);
 		if (count === undefined) return;
-		if (count <= 1) this.pinnedFiles.delete(key);
-		else this.pinnedFiles.set(key, count - 1);
+		if (count <= 1) {
+			this.pinnedFiles.delete(key);
+			// Transition from pinned to unpinned: this file's content leaves the
+			// pinned subset.
+			this.pinnedContentBytesTotal -= this.contentBytes(
+				this.fileFacts.get(key)?.get("file.content"),
+			);
+		} else {
+			this.pinnedFiles.set(key, count - 1);
+		}
 	}
 
-	/** Drop least-recently-used records past the cap, skipping the files whose
-	 *  dispatch pinned them. Pins survive until endDispatchFor or clearAll. */
+	/** Drop least-recently-used records past either cap, skipping the files whose
+	 *  dispatch pinned them. Pinned content counts toward the byte total, but is
+	 *  never evicted before endDispatchFor. Pins survive until clearAll.
+	 *
+	 *  #2247 review F2: a leaked (or several overlapping) pin(s) can put pinned
+	 *  bytes over budget ON THEIR OWN. Evicting every unpinned record can never
+	 *  bring the total back under budget in that state — before this guard, the
+	 *  loop below evicted each newly inserted unpinned record on the very next
+	 *  call (it was always the sole remaining unpinned key), so unpinned writes
+	 *  never retained anything: a silent, permanent collapse for the rest of
+	 *  the process. Once byte pressure is unpinned-bytes-driven-only, stop
+	 *  evicting and admit unpinned inserts as-is — best-effort under pin
+	 *  pressure — and record the state distinctly so it is visible instead of
+	 *  inferred from "the store stopped retaining anything". */
 	private evictColdFileFacts(): void {
-		if (this.fileFacts.size <= MAX_FILE_FACT_RECORDS) return;
+		if (!this.overCapacity()) return;
 		for (const key of this.fileFacts.keys()) {
 			if (this.pinnedFiles.has(key)) continue;
-			this.fileFacts.delete(key);
-			this.reportCapacityEviction(key);
-			if (this.fileFacts.size <= MAX_FILE_FACT_RECORDS) return;
+			const axis = this.capacityAxis();
+			if (
+				axis === "bytes" &&
+				this.pinnedContentBytesTotal > MAX_FILE_FACT_CONTENT_BYTES
+			) {
+				this.reportPinnedOverBudget();
+				return;
+			}
+			this.deleteFileFactsRecord(key);
+			this.reportCapacityEviction(key, axis);
+			if (!this.overCapacity()) return;
 		}
+	}
+
+	private overCapacity(): boolean {
+		return (
+			this.fileFacts.size > MAX_FILE_FACT_RECORDS ||
+			this.retainedContentBytes > MAX_FILE_FACT_CONTENT_BYTES
+		);
+	}
+
+	private capacityAxis(): "count" | "bytes" {
+		return this.fileFacts.size > MAX_FILE_FACT_RECORDS ? "count" : "bytes";
+	}
+
+	private contentBytes(value: unknown): number {
+		return typeof value === "string" ? Buffer.byteLength(value, "utf8") : 0;
+	}
+
+	private deleteFileFactsRecord(key: string): void {
+		const facts = this.fileFacts.get(key);
+		if (!facts) return;
+		const dropped = this.contentBytes(facts.get("file.content"));
+		this.retainedContentBytes -= dropped;
+		if (this.pinnedFiles.has(key)) this.pinnedContentBytesTotal -= dropped;
+		this.fileFacts.delete(key);
 	}
 
 	// #2243 item 4: the cap silently drops a fact a live dispatch may read back
@@ -206,11 +295,52 @@ export class FactStore implements ReadonlyFactStore {
 	// ONE record per session PER STORE (re-arming at session_start when the
 	// ledger resets) — no latch or generation compare here, so fact-store
 	// keeps no session-scoped state to forget to re-arm.
-	private reportCapacityEviction(evictedKey: string): void {
+	private reportCapacityEviction(
+		evictedKey: string,
+		axis: "count" | "bytes",
+	): void {
 		capacityEvictionReporter?.(
 			this.subject,
-			`file-fact store exceeded ${MAX_FILE_FACT_RECORDS} records; evicted least-recently-used fact for ${evictedKey}`,
+			axis,
+			axis === "count"
+				? `file-fact store axis=count exceeded ${MAX_FILE_FACT_RECORDS} records; evicted least-recently-used fact for ${evictedKey}`
+				: `file-fact store axis=bytes exceeded ${MAX_FILE_FACT_CONTENT_BYTES} retained content bytes; evicted least-recently-used fact for ${evictedKey}`,
 		);
+	}
+
+	// #2247 review F2: pinned bytes alone exceeding budget is not an eviction —
+	// nothing is dropped — so it is reported through a distinct axis rather
+	// than reusing `reportCapacityEviction`'s "evicted least-recently-used
+	// fact for X" language, which would misdescribe what happened.
+	private reportPinnedOverBudget(): void {
+		const pinnedBytes = this.pinnedContentBytesTotal;
+		capacityEvictionReporter?.(
+			this.subject,
+			"pinned-over-budget",
+			`file-fact store pinned content bytes (${pinnedBytes}) exceed the ` +
+				`${MAX_FILE_FACT_CONTENT_BYTES}-byte budget; unpinned inserts are ` +
+				`admitted without eviction until a pin releases`,
+		);
+	}
+
+	/** Running UTF-8 byte total for retained `file.content` values. Exposed so
+	 *  tests can crosscheck it against a fresh sum over retained records
+	 *  (#2247 review F3) — the running total is maintained incrementally on
+	 *  every insert/delete path rather than recomputed, so a subtraction
+	 *  dropped from one of those paths would otherwise drift silently. */
+	getRetainedContentBytes(): number {
+		return this.retainedContentBytes;
+	}
+
+	/** Running UTF-8 byte total for the pinned SUBSET of retained
+	 *  `file.content` values. Exposed so tests can crosscheck it against a
+	 *  fresh sum over `pinnedFiles ∩ fileFacts` (#2247 review F4) — like
+	 *  `retainedContentBytes`, it is maintained incrementally on the pin
+	 *  0→1 transition, the unpin 1→0 transition, content overwrite/delete,
+	 *  and `clearAll`, so a drop from any one of those paths would
+	 *  otherwise drift silently instead of failing loudly. */
+	getPinnedContentBytes(): number {
+		return this.pinnedContentBytesTotal;
 	}
 
 	getSessionFact<T>(factId: string): T | undefined {
@@ -230,5 +360,7 @@ export class FactStore implements ReadonlyFactStore {
 		this.fileFacts.clear();
 		this.sessionFacts.clear();
 		this.pinnedFiles.clear();
+		this.retainedContentBytes = 0;
+		this.pinnedContentBytesTotal = 0;
 	}
 }
