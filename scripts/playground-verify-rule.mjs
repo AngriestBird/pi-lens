@@ -86,6 +86,42 @@ const DEFAULT_TIMEOUT_MS = 30_000;
 // for a wedged/daemonized child that never emits 'close' at all — the
 // #1679 hang this constant exists to bound.
 const CHILD_SPAWN_TIMEOUT_MS = 45_000;
+// #2306: once the source pane has rendered a stable, non-empty
+// `sourceLen` this many CONSECUTIVE polls (250ms apart) while the sentinel
+// still hasn't matched, the mismatch is real — further polling only wastes
+// time up to the full --timeout. Requiring >1 consecutive identical reading
+// tolerates the ordinary one-or-two-poll lag between the match-count and
+// source-editor components mounting (see the poll loop's own comment).
+const STABLE_UNMATCHED_POLLS_REQUIRED = 3;
+
+// #2306: pure poll-to-poll state machine for the fail-fast decision,
+// exported so the "is this a real, stable mismatch?" logic can be unit
+// tested without a live Chrome/CDP harness. `prevState` is the previous
+// call's return value (or the initial state below); returns the next
+// state, including `concludedEarly` once a non-empty `scrape.sourceLen`
+// has repeated for STABLE_UNMATCHED_POLLS_REQUIRED consecutive calls with
+// the sentinel still unmatched.
+export const initialPollStability = {
+	stableUnmatchedPolls: 0,
+	lastUnmatchedSourceLen: null,
+	concludedEarly: false,
+};
+
+export function trackStableUnmatched(scrape, prevState) {
+	if (scrape?.found && !scrape?.sentinelFound && scrape.sourceLen > 0) {
+		const stableUnmatchedPolls =
+			scrape.sourceLen === prevState.lastUnmatchedSourceLen
+				? prevState.stableUnmatchedPolls + 1
+				: 1;
+		return {
+			stableUnmatchedPolls,
+			lastUnmatchedSourceLen: scrape.sourceLen,
+			concludedEarly: stableUnmatchedPolls >= STABLE_UNMATCHED_POLLS_REQUIRED,
+		};
+	}
+	return initialPollStability;
+}
+
 const PORT = Number(process.env.PILENS_PLAYGROUND_PORT) || 9224;
 const CHROME_SCRIPT = join(__dirname, "playground-chrome.mjs");
 const CDP_SCRIPT = join(__dirname, "playground-cdp.mjs");
@@ -321,17 +357,40 @@ export function buildScrapeExpr(sentinelB64, maxLine) {
 	// file's own parser, not sent over argv as a `\`-escape, so it survives
 	// Windows argv's backslash-stripping same as the rest of this
 	// function's argv-safety already does.)
+	//
+	// #2306: a tab in the source has the same problem — Monaco does not
+	// render it as U+0009 either, so a sentinel built from the caller's raw
+	// source (a literal tab) never matched the rendered page for any line
+	// containing one, misreporting a genuine run as schema drift exactly
+	// like the nbsp case above. Rather than hand-list every substitution
+	// Monaco happens to use, collapse EVERY run of whitespace-like
+	// characters (tab, nbsp, regular space) to one space on BOTH sides of
+	// the comparison — the decoded sentinel string itself, not just the
+	// page's rendered text — so a difference in run length (one tab vs. a
+	// run of spaces/nbsp) can no longer defeat the match.
 	return `(() => {
 		const text = (document.body.innerText || "").split(" ").join(" ");
 		const sourceEditor = document.querySelector(
 			".playground > .half:first-child .monaco-editor",
 		);
-		const sourceTextNormalized = (sourceEditor?.textContent || "")
-			.split(String.fromCharCode(160))
-			.join(" ");
+		const collapseWhitespace = (s) =>
+			s
+				.split(String.fromCharCode(9))
+				.join(" ")
+				.split(String.fromCharCode(160))
+				.join(" ")
+				.split(" ")
+				.filter(Boolean)
+				.join(" ");
+		const sourceTextNormalized = collapseWhitespace(
+			sourceEditor?.textContent || "",
+		);
 		const sentinel = ${sentinelExpr};
+		const normalizedSentinel =
+			sentinel === null ? null : collapseWhitespace(sentinel);
 		const sentinelFound =
-			sentinel === null || sourceTextNormalized.indexOf(sentinel) !== -1;
+			normalizedSentinel === null ||
+			sourceTextNormalized.indexOf(normalizedSentinel) !== -1;
 		const maxLine = ${maxLineExpr};
 		const m = text.match(/Found[ \\t]+(\\d+)[ \\t]+match/i);
 		if (m) {
@@ -343,10 +402,22 @@ export function buildScrapeExpr(sentinelB64, maxLine) {
 				.filter((n) => n >= 1 && n <= maxLine)
 				.filter((n, i, a) => a.indexOf(n) === i)
 				.sort((a, b) => a - b);
-			return { found: true, count, lines, sentinelFound };
+			return {
+				found: true,
+				count,
+				lines,
+				sentinelFound,
+				sourceLen: sourceTextNormalized.length,
+			};
 		}
 		if (/no[ \\t]+match[ \\t]+found/i.test(text)) {
-			return { found: true, count: 0, lines: [], sentinelFound };
+			return {
+				found: true,
+				count: 0,
+				lines: [],
+				sentinelFound,
+				sourceLen: sourceTextNormalized.length,
+			};
 		}
 		return { found: false, text: text.slice(0, 800), sentinelFound };
 	})()`;
@@ -440,6 +511,13 @@ async function main() {
 		const deadline = Date.now() + opts.timeoutMs;
 		let scrape = null;
 		let polls = 0;
+		// #2306: distinguishes "the source pane is still mounting" (sourceLen
+		// changing between polls — keep waiting) from "the pane is done
+		// rendering and the sentinel genuinely doesn't match" (sourceLen
+		// stable and non-zero — stop early instead of burning the full
+		// --timeout). trackStableUnmatched resets on any change so a
+		// still-painting pane never counts toward the early exit.
+		let pollStability = initialPollStability;
 		while (Date.now() < deadline) {
 			polls++;
 			const out = await runCdp(["eval", targetId, scrapeExpr]);
@@ -456,6 +534,8 @@ async function main() {
 			// text itself; a genuine drift (source never arrives) still
 			// exhausts the deadline and reports below, just slower.
 			if (scrape?.found && scrape?.sentinelFound) break;
+			pollStability = trackStableUnmatched(scrape, pollStability);
+			if (pollStability.concludedEarly) break;
 			if (polls % 10 === 0) log(`poll #${polls}: still waiting…`);
 			await new Promise((r) => setTimeout(r, 250));
 		}
@@ -478,12 +558,23 @@ async function main() {
 		// we didn't send (its own default sample, or a stale one from an
 		// upstream field-name change) — never trust the count in that case.
 		if (!scrape.sentinelFound) {
+			// #2306: a stable, non-empty `sourceLen` rules out "the pane is
+			// still mounting" — it does NOT pick between the two remaining
+			// causes. A Monaco whitespace substitution collapseWhitespace
+			// doesn't yet cover and upstream schema drift (state.source
+			// renamed/moved, so the page renders its own default sample)
+			// both render a stable pane the sentinel can't be found in, so
+			// the early-exit message narrows the search without claiming
+			// which one it is.
 			const result = {
 				ok: false,
 				rule_id: rule.id,
-				error:
-					"caller's source did not appear in the playground page — likely upstream schema drift (state.source field renamed/moved), not a real 0-match result",
+				error: pollStability.concludedEarly
+					? "caller's source did not appear in the playground page after whitespace normalization, and the source pane is stable (done rendering) — either a sentinel-normalization mismatch in this harness (an un-normalized Monaco whitespace substitution) or upstream schema drift (state.source field renamed/moved, leaving the page's own default sample rendered), not a real 0-match result"
+					: "caller's source did not appear in the playground page after whitespace normalization — likely a sentinel-normalization mismatch in this harness (an un-normalized Monaco whitespace substitution) or upstream schema drift (state.source field renamed/moved), not a real 0-match result",
 				matches_reported_by_page: scrape.count,
+				polls,
+				concluded_early: pollStability.concludedEarly,
 				engine_ms: Date.now() - startMs,
 			};
 			console.error(JSON.stringify(result));
