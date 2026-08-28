@@ -2148,6 +2148,68 @@ describe("R8 — aux grace: ast-grep napi/aux-grace mark ordering (#2324 R2-A)",
 		pendingAux.resetPendingAuxiliaryCoverage();
 	});
 
+	// #2324 R3-A: the issue's own 68ms race, reproduced against the SPECIFIC
+	// baseline the guard uses. Nothing is pre-warmed — `createLSPClient`
+	// itself takes real (fake-timer) time to resolve, modeling the
+	// spawn+handshake `getClientForFile`/`getAuxiliaryClientsForFile` do on a
+	// COLD touch. `waitStartedAt` (clients/lsp/index.ts) is captured only
+	// AFTER that spawn work resolves — well after this touch's own entry —
+	// so a napi record landing in that spawn window predates `waitStartedAt`
+	// even though it postdates `touchFile`'s own start. Baselining on
+	// `startedAt` (stamped at entry, before any spawn) is what lets a
+	// same-touch napi record survive that window.
+	it("does not mark a pending pair when napi's coverage lands during a COLD spawn's handshake window", async () => {
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const pendingAux =
+			await import("../../../clients/lsp/pending-aux-coverage.js");
+		pendingAux.resetPendingAuxiliaryCoverage();
+		const service = new LSPService();
+		getServersForFileWithConfig.mockReturnValue([
+			makePrimaryServer("ts-primary"),
+			makeAuxServer("ast-grep"),
+		]);
+		const COLD_SPAWN_HANDSHAKE_MS = 400;
+		// No pre-warm call here — this IS the cold spawn. `createLSPClient`
+		// itself is delayed, so `waitStartedAt` (captured only after both
+		// spawns resolve) lands ~400ms after touchFile's own entry.
+		createLSPClient.mockImplementation(
+			(options: { serverId?: string }) =>
+				new Promise((resolve) =>
+					setTimeout(
+						() =>
+							resolve(
+								options?.serverId === "ast-grep"
+									? makeClient(900, [], { serverId: "ast-grep" })
+									: makeClient(100, [], { serverId: "ts-primary" }),
+							),
+						COLD_SPAWN_HANDSHAKE_MS,
+					),
+				),
+		);
+
+		const touchPromise = service.touchFile(FILE, "cold-content", {
+			clientScope: "with-auxiliary",
+			auxiliaryServerIds: ["ast-grep"],
+			collectDiagnostics: true,
+			diagnostics: "document",
+		});
+		// Gate B's napi runner is dispatched CONCURRENTLY with the WHOLE
+		// touch (dispatcher.ts's Promise.all groups), not just with the LSP
+		// wait — it settles almost immediately regardless of how long THIS
+		// touch's own client spawn takes. Recording at 10ms lands well
+		// inside the 400ms cold-spawn handshake window, before
+		// `waitStartedAt` is ever captured, but after `touchFile`'s entry.
+		await vi.advanceTimersByTimeAsync(10);
+		pendingAux.recordNapiFallbackCoverage(FILE);
+		await vi.advanceTimersByTimeAsync(5000);
+		await touchPromise;
+
+		expect(pendingAux.hasPendingAuxiliaryCoverage(FILE, "ast-grep")).toBe(
+			false,
+		);
+		pendingAux.resetPendingAuxiliaryCoverage();
+	});
+
 	it("still marks the pair when napi's coverage predates this touch (stale record)", async () => {
 		const { LSPService } = await import("../../../clients/lsp/index.js");
 		const pendingAux =

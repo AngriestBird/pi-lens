@@ -4811,18 +4811,24 @@ export class LSPService {
 										(o) =>
 											!o.publishedThisContent &&
 											(o.outcome === "cut_off" || o.outcome === "silent") &&
-											// #2324 R2-A: ast-grep's napi fallback is a SECOND
-											// producer of coverage for this exact pair. Its
-											// Gate-B check settles synchronously, well before
-											// this wait's own grace budget expires, so by the
-											// time this filter runs, this touch's napi run (if
-											// any) has already recorded its coverage — checked
-											// against THIS wait's own start so a stale record
-											// from an earlier touch can never suppress a mark
-											// this touch's silent server genuinely needs.
+											// #2324 R2-A/R3-A: ast-grep's napi fallback is a
+											// SECOND producer of coverage for this exact pair,
+											// dispatched CONCURRENTLY with this whole touch
+											// (dispatcher.ts's Promise.all groups) — not just
+											// concurrently with this wait. On a COLD touch,
+											// getClientsForFile's spawn+handshake (above, before
+											// waitStartedAt is ever captured) can itself take
+											// long enough that napi's near-instant Gate-B check
+											// records coverage BEFORE waitStartedAt — the
+											// issue's own 68ms race shape. Baseline on startedAt
+											// instead: stamped at touchFile's own entry, before
+											// ANY spawn work, so it is the earliest instant this
+											// touch's own napi run could possibly predate. Still
+											// excludes a stale record from an EARLIER touch,
+											// which is all the staleness guard needs.
 											!(
 												o.serverId === "ast-grep" &&
-												napiFallbackCoveredSince(filePath, waitStartedAt)
+												napiFallbackCoveredSince(filePath, startedAt)
 											),
 									)
 									.map((o) => o.serverId);
