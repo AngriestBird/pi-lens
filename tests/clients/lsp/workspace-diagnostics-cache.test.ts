@@ -300,10 +300,10 @@ describe("WorkspaceDiagnosticsCacheContext (#671)", () => {
 	it("a same-mtime-bucket external rewrite with a different size invalidates the recorded entry", () => {
 		const filePath = path.join(tmp, "a.ts");
 		fs.writeFileSync(filePath, "const a = 1;\n");
-		// Pin to a clean whole-millisecond mtime — `utimesSync` (Date-based)
-		// can't round-trip a filesystem's sub-millisecond mtime exactly, which
-		// would make the forced-same-mtime rewrite below land on a slightly
-		// different mtime instead of proving the same-bucket collision.
+		// Pin the mtime up front so the rewrite below can be forced back to it.
+		// `stat.mtimeMs` below is the round-tripped value, not the nominal one:
+		// `mtimeMs` is derived from a nanosecond timestamp, so a whole-ms Date
+		// can come back as e.g. 1787865854006.999 on ext4.
 		const pinnedMtimeMs = Date.now();
 		fs.utimesSync(filePath, new Date(pinnedMtimeMs), new Date(pinnedMtimeMs));
 		const ctx = createWorkspaceDiagnosticsCacheContext(tmp);
@@ -315,7 +315,7 @@ describe("WorkspaceDiagnosticsCacheContext (#671)", () => {
 		// the entry was recorded against.
 		fs.writeFileSync(filePath, "const a = 22222222222;\n");
 		fs.utimesSync(filePath, new Date(pinnedMtimeMs), new Date(pinnedMtimeMs));
-		expect(fs.statSync(filePath).mtimeMs).toBe(pinnedMtimeMs);
+		expect(fs.statSync(filePath).mtimeMs).toBe(stat.mtimeMs);
 		expect(fs.statSync(filePath).size).not.toBe(stat.size);
 
 		expect(ctx.lookup(filePath, "all|")).toBeUndefined();

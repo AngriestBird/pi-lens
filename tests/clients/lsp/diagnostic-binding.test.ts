@@ -116,13 +116,15 @@ describe("#1095 diagnostic-binding — createDiskBindingCache (I5, I6, I8)", () 
 	it("same-mtime-bucket rewrite with a different size is not masked by the mtime-only memo (#2300)", () => {
 		const original = "const x = 1;\n";
 		const file = mkTmpFile("a.ts", original);
-		// Pin the mtime to a clean whole-millisecond value up front — the real
-		// filesystem can report sub-millisecond mtimes that `utimesSync` (Date-
-		// based, whole-ms resolution) can't round-trip exactly, which would
-		// make the forced-same-mtime rewrite below land on a slightly different
-		// mtime instead of proving the same-bucket collision.
+		// Pin the mtime up front so the rewrite below can be forced back to it.
+		// Read the pinned value BACK rather than asserting against the nominal
+		// one: `mtimeMs` is derived from a nanosecond timestamp, so a whole-ms
+		// Date can come back as e.g. 1787865954578.999 on ext4. Only the
+		// round-tripped value is stable across two identical `utimesSync` calls,
+		// and it is what the memo actually caches.
 		const pinnedMtimeMs = Date.now();
 		fs.utimesSync(file, new Date(pinnedMtimeMs), new Date(pinnedMtimeMs));
+		const observedMtimeMs = fs.statSync(file).mtimeMs;
 		const cache = createDiskBindingCache();
 		const stored = { contentHash: hashDiagnosticContent(original) };
 		// Warm the memo: caches {mtimeMs, size} of the original content.
@@ -133,7 +135,7 @@ describe("#1095 diagnostic-binding — createDiskBindingCache (I5, I6, I8)", () 
 		const rewritten = "const x = 22222222222;\n"; // different length than original
 		fs.writeFileSync(file, rewritten);
 		fs.utimesSync(file, new Date(pinnedMtimeMs), new Date(pinnedMtimeMs));
-		expect(fs.statSync(file).mtimeMs).toBe(pinnedMtimeMs);
+		expect(fs.statSync(file).mtimeMs).toBe(observedMtimeMs);
 		// A mtime-only memo would reuse the cached hash of the OLD content and
 		// wrongly report `true`. The size axis forces a re-hash, which correctly
 		// reports `false` against the still-stale `stored` binding.

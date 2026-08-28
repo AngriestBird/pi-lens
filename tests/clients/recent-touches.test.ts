@@ -331,11 +331,12 @@ describe("recent-touches (#492 cross-process touched-files record)", () => {
 			fs.writeFileSync(firstFile, "// first", "utf-8");
 			fs.writeFileSync(secondFile, "// second", "utf-8");
 
-			// Pin to a clean whole-millisecond mtime up front — `utimesSync`
-			// (Date-based) can't round-trip a filesystem's sub-millisecond mtime
-			// exactly, which would make the forced-same-mtime rewrite below land
-			// on a slightly different mtime instead of proving the same-bucket
-			// collision.
+			// Pin the mtime up front so the rewrite below can be forced back to
+			// it. The pinned value is read BACK before it is asserted on:
+			// `mtimeMs` is derived from a nanosecond timestamp, so a whole-ms
+			// Date can come back as e.g. 1787865854006.999 on ext4. Only the
+			// round-tripped value is stable across two identical `utimesSync`
+			// calls, and it is what the memo actually caches.
 			const pinnedMtimeMs = Date.now();
 			fs.writeFileSync(
 				recordFilePath(),
@@ -351,6 +352,7 @@ describe("recent-touches (#492 cross-process touched-files record)", () => {
 				new Date(pinnedMtimeMs),
 				new Date(pinnedMtimeMs),
 			);
+			const observedMtimeMs = fs.statSync(recordFilePath()).mtimeMs;
 			const first = await readCrossProcessTouchesForTurnStart({
 				cwd: FAKE_CWD,
 				selfPid: process.pid,
@@ -379,7 +381,7 @@ describe("recent-touches (#492 cross-process touched-files record)", () => {
 				new Date(pinnedMtimeMs),
 				new Date(pinnedMtimeMs),
 			);
-			expect(fs.statSync(recordFilePath()).mtimeMs).toBe(pinnedMtimeMs);
+			expect(fs.statSync(recordFilePath()).mtimeMs).toBe(observedMtimeMs);
 
 			const second = await readCrossProcessTouchesForTurnStart({
 				cwd: FAKE_CWD,
