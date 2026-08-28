@@ -25,9 +25,16 @@ import { logLatency } from "../../latency-logger.js";
 import { hasEslintConfig } from "../../tool-policy.js";
 import { enabledAuxiliaryLspServerIds } from "../auxiliary-lsp.js";
 import { classifyDefect } from "../diagnostic-taxonomy.js";
-import { recordDegradationOnce } from "../../degradation-ledger.js";
-import { isAuxiliaryLspAlive } from "../../lsp/index.js";
-import { resolveAstGrepNativeExe } from "../../lsp/wait-policy/index.js";
+import {
+	incrementDegradationCount,
+	recordDegradationOnce,
+} from "../../degradation-ledger.js";
+import { hasAuxiliaryLspPublishedForRoot } from "../../lsp/index.js";
+import {
+	clearPendingAuxiliaryCoverage,
+	hasPendingAuxiliaryCoverage,
+	recordNapiFallbackCoverage,
+} from "../../lsp/pending-aux-coverage.js";
 import { PRIORITY } from "../priorities.js";
 import type {
 	Diagnostic,
@@ -923,20 +930,31 @@ const astGrepNapiRunner: RunnerDefinition = {
 		const astGrepLspEnabled = enabledAuxiliaryLspServerIds((f) =>
 			ctx.pi?.getFlag?.(f),
 		).includes("ast-grep");
-		// Gate B asks whether the LSP will handle this file, not whether a bare
-		// `ast-grep` command happens to be on PATH. The launcher first tries the
-		// platform-native package binary, then PATH; mirror that resolution here.
-		// A live client covers the already-warm case, while a resolvable binary
-		// covers the cold case before the LSP has spawned for this root.
-		const astGrepLspAlive = astGrepLspEnabled
-			? await isAuxiliaryLspAlive("ast-grep", ctx.filePath)
+		// Gate B asks whether the LSP has proved it can handle this root, not
+		// whether an ast-grep process or binary merely exists.
+		// A first publication covers the warm case. Process liveness and binary
+		// resolution do not: both precede proof that this root can publish findings.
+		const astGrepLspPublished = astGrepLspEnabled
+			? await hasAuxiliaryLspPublishedForRoot("ast-grep", ctx.filePath)
 			: false;
-		let astGrepBinaryResolvable = false;
-		if (astGrepLspEnabled && !astGrepLspAlive) {
-			astGrepBinaryResolvable =
-				Boolean(resolveAstGrepNativeExe()) || (await ctx.hasTool("ast-grep"));
-		}
-		if (astGrepLspEnabled && (astGrepLspAlive || astGrepBinaryResolvable)) {
+		if (astGrepLspEnabled && astGrepLspPublished) {
+			// #2324 F2/R2-C: "has this server EVER published for this file" can go
+			// stale — a LATER touch's aux-grace wait can find the server silent
+			// for the CURRENT content while an OLDER revision's publication still
+			// satisfies this per-file gate. Any pending late-aux entry visible
+			// HERE is necessarily a LEFTOVER from an earlier touch, never this
+			// one: the wait that marks a pair for THIS touch runs to completion
+			// (up to its own grace budget, ~1800ms) strictly AFTER this
+			// synchronous Gate-B check returns, so it cannot have marked
+			// anything yet. Re-running napi here would risk the F3 duplicate
+			// this fix closes, so the loss is made observable instead.
+			if (hasPendingAuxiliaryCoverage(ctx.filePath, "ast-grep")) {
+				incrementDegradationCount({
+					kind: "aux-runner-findings-lost",
+					subject: "ast-grep",
+					reason: `Gate B skipped napi for ${ctx.filePath}: a pending late-auxiliary pair from an EARLIER touch is still undelivered while a prior publication satisfies the per-file gate`,
+				});
+			}
 			return { status: "skipped", diagnostics: [], semantic: "none" };
 		}
 
@@ -991,6 +1009,32 @@ const astGrepNapiRunner: RunnerDefinition = {
 			rootNode = root.root();
 		} catch {
 			return { status: "skipped", diagnostics: [], semantic: "none" };
+		}
+
+		if (astGrepLspEnabled && !astGrepLspPublished) {
+			// #2324 F3/R2-A/R2-B: napi is about to ACTUALLY EVALUATE RULES —
+			// every early-return skip above (load failure, missing file,
+			// unresolved language, stat/size/read/parse failure) is now behind
+			// us, so this run genuinely covers the file rather than reporting a
+			// zero-finding no-op. Placing this here (not at Gate-B's decision
+			// point) matters twice over:
+			//   - R2-B: a napi run that never reached rule evaluation must NOT
+			//     consume anything — an unparseable .html file, say, would
+			//     otherwise silence the LSP's legitimate late delivery for a
+			//     file napi never actually covered.
+			//   - R2-A: recording coverage HERE, keyed by timestamp, lets the
+			//     aux-grace wait (clients/lsp/index.ts) — which decides whether
+			//     to mark a pending pair for THIS touch strictly AFTER this
+			//     synchronous call returns — see that napi already delivered
+			//     and skip marking, instead of racing a clear against a mark
+			//     that has not been written yet.
+			// The clear below only ever removes a LEFTOVER pair from an
+			// EARLIER touch (this touch's own pair, if the wait decides to
+			// mark one, is marked strictly later) — that pair describes a
+			// PREVIOUS revision this fresh evaluation supersedes, so dropping
+			// it is safe. Unknown pairs are a no-op.
+			recordNapiFallbackCoverage(ctx.filePath);
+			clearPendingAuxiliaryCoverage(ctx.filePath, "ast-grep");
 		}
 
 		const diagnostics = evaluateAstGrepRules(

@@ -41,7 +41,10 @@ import {
 	fingerprintDocumentContent,
 	type DriftSweepResult,
 } from "./document-drift.js";
-import { markPendingAuxiliaryCoverage } from "./pending-aux-coverage.js";
+import {
+	markPendingAuxiliaryCoverage,
+	napiFallbackCoveredSince,
+} from "./pending-aux-coverage.js";
 import {
 	isAtOrAboveHomeDir,
 	isWindowsPath,
@@ -2709,11 +2712,11 @@ export class LSPService {
 	}
 
 	/**
-	 * Read-only liveness check for one server/file pair. Unlike
-	 * `getClientForFile`, this never creates or warms a client; it only resolves
-	 * the server's root and checks the already-connected client map.
+	 * Read-only Gate-B readiness check for one auxiliary server/root. A connected
+	 * process is not yet a diagnostic producer: only its first publication proves
+	 * that this root's client can supersede an in-process fallback runner.
 	 */
-	async isServerAliveForFile(
+	async hasServerPublishedForFileRoot(
 		serverId: string,
 		filePath: string,
 	): Promise<boolean> {
@@ -2723,7 +2726,18 @@ export class LSPService {
 			const root = await this.resolveServerRoot(server, filePath);
 			if (!root) continue;
 			const key = `${server.id}:${normalizeMapKey(root)}`;
-			if (this.state.clients.get(key)?.isAlive()) return true;
+			const client = this.state.clients.get(key);
+			// #2324 F1: per-file grain. `diagnosticsVersion` is client-global —
+			// any sibling path's publication bumps it, so it cannot answer "did
+			// THIS server publish for THIS file?" (client.ts:339-341). A file
+			// this server never touched would otherwise read as gated-open the
+			// moment any other file on the same client got a publication.
+			if (
+				client?.isAlive() &&
+				client.getDiagnosticsVersionForPath(filePath) > 0
+			) {
+				return true;
+			}
 		}
 		return false;
 	}
@@ -2731,7 +2745,7 @@ export class LSPService {
 	/**
 	 * #2001/#2002 collect-later: read-only cached-diagnostics probe for the
 	 * turn-end late-auxiliary delivery (`clients/runtime-turn.ts`). Like
-	 * `isServerAliveForFile`, this NEVER creates or warms a client — it only
+	 * the Gate-B readiness check, this NEVER creates or warms a client — it only
 	 * resolves each requested server's root and reads the already-connected
 	 * client's cached diagnostics for `filePath`. Servers with no live client
 	 * are simply absent from the returned map. A live client is present only
@@ -4796,7 +4810,26 @@ export class LSPService {
 									.filter(
 										(o) =>
 											!o.publishedThisContent &&
-											(o.outcome === "cut_off" || o.outcome === "silent"),
+											(o.outcome === "cut_off" || o.outcome === "silent") &&
+											// #2324 R2-A/R3-A: ast-grep's napi fallback is a
+											// SECOND producer of coverage for this exact pair,
+											// dispatched CONCURRENTLY with this whole touch
+											// (dispatcher.ts's Promise.all groups) — not just
+											// concurrently with this wait. On a COLD touch,
+											// getClientsForFile's spawn+handshake (above, before
+											// waitStartedAt is ever captured) can itself take
+											// long enough that napi's near-instant Gate-B check
+											// records coverage BEFORE waitStartedAt — the
+											// issue's own 68ms race shape. Baseline on startedAt
+											// instead: stamped at touchFile's own entry, before
+											// ANY spawn work, so it is the earliest instant this
+											// touch's own napi run could possibly predate. Still
+											// excludes a stale record from an EARLIER touch,
+											// which is all the staleness guard needs.
+											!(
+												o.serverId === "ast-grep" &&
+												napiFallbackCoveredSince(filePath, startedAt)
+											),
 									)
 									.map((o) => o.serverId);
 								if (collectLaterServerIds.length > 0) {
@@ -6542,7 +6575,7 @@ export class LSPService {
 	 * `executeCommand` above cannot give a render-path probe:
 	 *
 	 * - **Never spawns.** It resolves the already-connected client map the way
-	 *   `isServerAliveForFile` does, instead of routing through
+	 *   other read-only client-map lookups do, instead of routing through
 	 *   `getClientForFile` → `ensureClientForServer`. A probe that spawns a
 	 *   language-server fleet to answer a question about how to RENDER a
 	 *   diagnostic is a cost the caller never asked for — and under warm attach
@@ -8889,15 +8922,14 @@ export function getLSPService(): LSPService {
 }
 
 /**
- * Cross-layer liveness seam for dispatch-side auxiliary gates. This is a
- * liveness read only: it does not spawn, wait for initialization, or probe a
- * binary.
+ * Gate-B readiness seam. It reads only the live client map and never spawns,
+ * waits for initialization, or probes a binary.
  */
-export async function isAuxiliaryLspAlive(
+export async function hasAuxiliaryLspPublishedForRoot(
 	serverId: string,
 	filePath: string,
 ): Promise<boolean> {
-	return getLSPService().isServerAliveForFile(serverId, filePath);
+	return getLSPService().hasServerPublishedForFileRoot(serverId, filePath);
 }
 
 /**

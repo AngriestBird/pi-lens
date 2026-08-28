@@ -484,7 +484,22 @@ export type DegradationKind =
 	 * is invisible: the store just silently stops honoring its budget.
 	 * Recorded once per session, subject is the store label.
 	 */
-	| "fact-store-pinned-over-budget";
+	| "fact-store-pinned-over-budget"
+	/**
+	 * Gate B (`clients/dispatch/runners/ast-grep-napi.ts`) skipped the napi
+	 * fallback because the ast-grep LSP client has published for this file
+	 * BEFORE, and a pending late-auxiliary pair for the same (file, "ast-grep")
+	 * still sits in `clients/lsp/pending-aux-coverage.ts` (#2324 F2). Ordering
+	 * makes this pair provably a LEFTOVER from an earlier touch, never this
+	 * one: the aux-grace wait that marks a pair for THIS touch only runs to
+	 * completion, and only decides to mark, after napi's Gate B check has
+	 * already returned (napi's check is a synchronous map lookup; the wait's
+	 * own budget is up to ~1800 ms) — so a pair visible here was marked by a
+	 * PRIOR touch's wait and never got delivered. Subject is the server id, so
+	 * the ledger still answers which server's earlier finding never resurfaced
+	 * after the count-bound stops naming files.
+	 */
+	| "aux-runner-findings-lost";
 
 export interface DegradationRecord {
 	kind: unknown;

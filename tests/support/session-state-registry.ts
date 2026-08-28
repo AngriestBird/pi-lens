@@ -244,11 +244,12 @@ export const SESSION_STATE_REGISTRY: SessionStateEntry[] = [
 	{
 		id: "lsp:pending-aux-coverage",
 		module: "lsp/pending-aux-coverage.ts",
-		state: "pending Map (filePath,serverId) pairs",
+		state:
+			"pending Map (filePath,serverId) pairs; napiFallbackCoverage Map (filePath) (#2324 R2-A)",
 		policy: "session_start",
 		resetName: "resetPendingAuxiliaryCoverage",
 		reason:
-			"#2026: pending auxiliary baselines are keyed by cwd and become unreachable when the session generation advances.",
+			"#2026: pending auxiliary baselines are keyed by cwd and become unreachable when the session generation advances. #2324 R2-A: napiFallbackCoverage records WHEN the ast-grep napi fallback last covered a file, so the aux-grace wait can skip marking a duplicate pending pair — a cross-session leftover would wrongly suppress a legitimate mark in the new session.",
 	},
 	// ── The named population from #1635 ──────────────────────────────────────
 	{
@@ -1111,7 +1112,10 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	// #2007 added `gitToplevelMemo`, the worktree-identity cache (3 → 4). It
 	// is registered above and cleared by the same `resetOpaqueMutationState`.
 	"opaque-mutation-scan.ts": 4,
-	"lsp/pending-aux-coverage.ts": 1,
+	// #2324 R2-A added `napiFallbackCoverage`, the napi-run hand-off map
+	// (1 → 2). Registered above and cleared by the same
+	// `resetPendingAuxiliaryCoverage`.
+	"lsp/pending-aux-coverage.ts": 2,
 	"lsp/jvm-runtime.ts": 0,
 	"lsp/session-roots.ts": 1,
 	"lsp/spawn-history.ts": 1,
