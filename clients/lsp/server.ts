@@ -689,7 +689,7 @@ export async function resolveAndLaunch(
 			latched: true,
 			classifiedBy: "probe",
 			evidence: {
-				command: candidateFailures[candidateFailures.length - 1]?.command,
+				command: candidateFailures.at(-1)?.command,
 				failure: "tool-not-found",
 			},
 		});
