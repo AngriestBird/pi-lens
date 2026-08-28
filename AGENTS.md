@@ -2571,7 +2571,9 @@ nearly every language (111 `TypeScript` vs 31 `typescript`, 47 `Python` vs
 52 `python`, ...), so a raw-case comparison is wrong somewhere on every
 language, not just HTML. Runtime lowercases (sgconfig.ts, ast-grep-napi.ts);
 tooling that compares raw is the recurring gap — #2331 tracks the two known
-sites. (#2325)
+sites. Keep the corpus's mixed-case tags intact and normalize at each tooling
+comparison site rather than rewriting source data; regression coverage must
+pin that boundary. (#2325, #2331)
 
 A target repository that supplies its own `sgconfig.yml` / `sgconfig.yaml` at the workspace root takes precedence — pi-lens respects the project config instead of injecting its baseline.
 

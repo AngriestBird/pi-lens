@@ -82,7 +82,7 @@ const parsed = files.map((file) => {
 	return {
 		file,
 		id: readField(text, "id"),
-		language: (readField(text, "language") || "").toLowerCase(),
+		language: readField(text, "language") || "",
 		message: readField(text, "message"),
 		severity: readField(text, "severity"),
 		ruleBody: extractRuleBlock(text),
@@ -96,7 +96,7 @@ const notes = [];
 const byLangBody = new Map();
 for (const rule of parsed) {
 	if (!rule.ruleBody) continue;
-	const key = `${rule.language}::${rule.ruleBody}`;
+	const key = `${rule.language.toLowerCase()}::${rule.ruleBody}`;
 	const prev = byLangBody.get(key);
 	if (prev) {
 		errors.push(
@@ -123,7 +123,9 @@ for (const rule of parsed) {
 		continue;
 	}
 
-	const languages = [base.language, rule.language].sort();
+	const languages = [base.language, rule.language]
+		.map((language) => language.toLowerCase())
+		.sort();
 	const isCanonicalTwin =
 		languages.length === 2 &&
 		languages[0] === "javascript" &&
