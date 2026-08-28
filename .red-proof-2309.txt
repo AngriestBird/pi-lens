@@ -1,4 +1,0 @@
-Mutation: clients/dispatch/runners/utils/runner-helpers.ts
-  if (false && isInSpawnTimeoutCooldown(cmd))
-
-Result: the pinning test failed at the early-return assertion because safeSpawnAsync was called once.

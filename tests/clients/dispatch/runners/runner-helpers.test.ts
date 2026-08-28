@@ -123,6 +123,10 @@ describe("runner-helpers availability checker", () => {
 			await import("../../../../clients/spawn-timeout-cooldown.js");
 		const command = "cooldown-probe-tool";
 
+		// The shared beforeEach does not reset logLatencySpy, so the
+		// toHaveLength(1) below is only valid against a locally cleared
+		// history — the same idiom the two later mockReset sites use.
+		logLatencySpy.mockReset();
 		cooldownMod.resetSpawnTimeoutCooldowns();
 		cooldownMod.noteSpawnTimeout({
 			tool: command,
