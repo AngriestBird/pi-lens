@@ -155,6 +155,11 @@ describe("Java rule ignores deliver through the real ast-grep CLI (#2280)", () =
 		"",
 	].join("\n");
 
+	// Each case spawns the real ast-grep binary over a temp tree. The spawn
+	// itself budgets 60s, but vitest's default 5s test timeout did not, so under
+	// a loaded worker pool these cases timed out while the scan was still
+	// running (#2336). Match the spawn budget, as the other real-binary
+	// ast-grep suites already do (ast-grep-rule-tests.test.ts:268).
 	(skip ? describe.skip : describe)("with the real binary", () => {
 		let env: { tmpDir: string; cleanup: () => void };
 
@@ -190,7 +195,7 @@ describe("Java rule ignores deliver through the real ast-grep CLI (#2280)", () =
 					"no-system-out-println",
 				]),
 			);
-		});
+		}, 60_000);
 
 		it("excludes every rule under **/test/**", async () => {
 			const findings = await scan(env.tmpDir);
@@ -198,7 +203,7 @@ describe("Java rule ignores deliver through the real ast-grep CLI (#2280)", () =
 				f.file.endsWith("src/test/Example.java"),
 			);
 			expect(hits).toEqual([]);
-		});
+		}, 60_000);
 
 		it("excludes only no-system-out-println on an *Test.java file", async () => {
 			const findings = await scan(env.tmpDir);
@@ -210,6 +215,6 @@ describe("Java rule ignores deliver through the real ast-grep CLI (#2280)", () =
 			expect(ids).toEqual(
 				new Set(["no-raw-types", "no-string-concat-in-loop"]),
 			);
-		});
+		}, 60_000);
 	});
 });

@@ -12,29 +12,29 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import {
+	incrementDegradationCount,
+	recordDegradationOnce,
+} from "../../degradation-ledger.js";
+import {
 	type AstGrepNapi,
 	loadAstGrepNapi,
 	type SgRoot,
 } from "../../deps/ast-grep-napi.js";
 import { minimatch } from "../../deps/minimatch.js";
-import {
-	type AstGrepRuleSource,
-	getAstGrepRuleSources,
-} from "../../sgconfig.js";
 import { logLatency } from "../../latency-logger.js";
-import { hasEslintConfig } from "../../tool-policy.js";
-import { enabledAuxiliaryLspServerIds } from "../auxiliary-lsp.js";
-import { classifyDefect } from "../diagnostic-taxonomy.js";
-import {
-	incrementDegradationCount,
-	recordDegradationOnce,
-} from "../../degradation-ledger.js";
 import { hasAuxiliaryLspPublishedForRoot } from "../../lsp/index.js";
 import {
 	clearPendingAuxiliaryCoverage,
 	hasPendingAuxiliaryCoverage,
 	recordNapiFallbackCoverage,
 } from "../../lsp/pending-aux-coverage.js";
+import {
+	type AstGrepRuleSource,
+	getAstGrepRuleSources,
+} from "../../sgconfig.js";
+import { hasEslintConfig } from "../../tool-policy.js";
+import { enabledAuxiliaryLspServerIds } from "../auxiliary-lsp.js";
+import { classifyDefect } from "../diagnostic-taxonomy.js";
 import { PRIORITY } from "../priorities.js";
 import type {
 	Diagnostic,
@@ -1011,7 +1011,13 @@ const astGrepNapiRunner: RunnerDefinition = {
 			return { status: "skipped", diagnostics: [], semantic: "none" };
 		}
 
-		if (astGrepLspEnabled && !astGrepLspPublished) {
+		// #2336: napi is standing in for the ast-grep auxiliary LSP exactly when
+		// that server is expected but has not published for this root. Gate B
+		// above already returned for the published case, so reaching here with
+		// the auxiliary enabled IS the substitute role.
+		const runningAsLspSubstitute = astGrepLspEnabled && !astGrepLspPublished;
+
+		if (runningAsLspSubstitute) {
 			// #2324 F3/R2-A/R2-B: napi is about to ACTUALLY EVALUATE RULES —
 			// every early-return skip above (load failure, missing file,
 			// unresolved language, stat/size/read/parse failure) is now behind
@@ -1037,17 +1043,62 @@ const astGrepNapiRunner: RunnerDefinition = {
 			clearPendingAuxiliaryCoverage(ctx.filePath, "ast-grep");
 		}
 
+		// #2336: the substitute runs at the severity floor the server it replaces
+		// would have used. The ast-grep auxiliary profile states that floor in
+		// words — "the rule severity is deliberate, so preserve ast-grep's
+		// severity semantics: ERROR can block, WARNING/INFO stay advisory"
+		// (clients/dispatch/auxiliary-lsp.ts:179-183). `blockingOnly` drops every
+		// rule whose declared severity is not `error`, which is 380 of the 481
+		// bundled rules, so the substitute delivered a fifth of the coverage the
+		// LSP delivers and the runner reported zero diagnostics in all 255
+		// retained dispatch records. Nothing downstream needs the filter for
+		// noise control: `dispatcher.ts` already shows only `semantic:
+		// "blocking"` diagnostics inline and routes warning-tier ones to
+		// lens_diagnostics, and `tree-sitter.ts:525` already runs its full query
+		// set under `blockingOnly` for the same reason.
+		//
+		// Scoped to the substitute role deliberately. Evaluating the full catalog
+		// costs ~6x more per file (measured on this repo: 2.4 ms -> 23 ms at 68
+		// lines, 19 ms -> 188 ms at 1275 lines), and outside the substitute role
+		// either the LSP is publishing (Gate B skipped napi already) or the user
+		// retired ast-grep with `no-ast-grep`. Paying the cost only when napi is
+		// the sole ast-grep surface buys coverage that nothing else provides.
 		const diagnostics = evaluateAstGrepRules(
 			ctx.filePath,
 			rootNode,
 			ctx.cwd,
 			ctx.kind,
 			{
-				blockingOnly: ctx.blockingOnly,
+				blockingOnly: runningAsLspSubstitute ? false : ctx.blockingOnly,
 				projectRoot: ctx.projectRoot,
 				log: (message: string) => ctx.log(message),
 			},
 		);
+
+		if (runningAsLspSubstitute) {
+			// #2336 observability: the dispatcher's own runner record carries
+			// `diagnosticCount`, which is what showed 0 of 255. It cannot say WHICH
+			// severity floor produced that count. One line per substitute run —
+			// the same cadence as the runner record it annotates — names the floor
+			// and the tier mix, so a future "napi found nothing" reading can tell
+			// an empty catalog pass from a filtered one.
+			const bySeverity: Record<string, number> = {};
+			for (const d of diagnostics) {
+				bySeverity[d.severity] = (bySeverity[d.severity] ?? 0) + 1;
+			}
+			logLatency({
+				type: "phase",
+				phase: "astgrep_napi_substitute_floor",
+				filePath: ctx.filePath,
+				durationMs: 0,
+				metadata: {
+					floor: "lsp-equivalent",
+					ctxBlockingOnly: ctx.blockingOnly === true,
+					diagnosticCount: diagnostics.length,
+					bySeverity,
+				},
+			});
+		}
 
 		const hasBlocking = diagnostics.some((d) => d.semantic === "blocking");
 		let semantic: "blocking" | "warning" | "none" = "none";

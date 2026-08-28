@@ -51,5 +51,7 @@ describe("ast-grep write-plan dispatch", () => {
 			(entry) => entry.phase === "dispatch_start",
 		);
 		expect(dispatchStart?.metadata?.runners).toContain("ast-grep-napi");
-	});
+		// A real full-catalog dispatch; vitest's default 5s budget is not enough
+		// for it on a loaded worker pool (#2336).
+	}, 30_000);
 });
