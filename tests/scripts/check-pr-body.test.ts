@@ -283,7 +283,7 @@ describe("flattened body CI entrypoint", () => {
 		vi.stubEnv("GITHUB_REPOSITORY", "o/r");
 	}
 
-	it("patches only the repaired body and reports a notice", async () => {
+	it("checks the repaired body and reports a warning without writing", async () => {
 		stubApi();
 		const log = vi.spyOn(console, "log").mockImplementation(() => {});
 		const fetchImpl = vi
@@ -294,8 +294,6 @@ describe("flattened body CI entrypoint", () => {
 						JSON.stringify([{ filename: "tests/foo.test.ts" }]),
 						{ status: 200 },
 					);
-				if (init?.method === "PATCH")
-					return new Response("{}", { status: 200 });
 				return new Response(JSON.stringify({ body: flattenedBody }), {
 					status: 200,
 				});
@@ -305,20 +303,15 @@ describe("flattened body CI entrypoint", () => {
 				pull_request: { number: 2144, body: flattenedBody },
 			}),
 		).toEqual({ valid: true, repaired: true });
-		expect(fetchImpl).toHaveBeenCalledWith(
-			"https://api.example/repos/o/r/pulls/2144",
-			expect.objectContaining({
-				method: "PATCH",
-				body: expect.stringContaining("## Tests\\n"),
-			}),
+		expect(fetchImpl).not.toHaveBeenCalledWith(
+			expect.anything(),
+			expect.objectContaining({ method: "PATCH" }),
 		);
-		expect(log).toHaveBeenCalledWith(
-			expect.stringContaining("::notice::Repaired flattened PR body"),
-		);
+		expect(log).toHaveBeenCalledWith("PR body OK: 2144");
 		log.mockRestore();
 	});
 
-	it("patches an escaped-newline flattened body and reports a notice", async () => {
+	it("checks an escaped-newline flattened body and reports a warning", async () => {
 		stubApi();
 		const log = vi.spyOn(console, "log").mockImplementation(() => {});
 		const fetchImpl = vi
@@ -326,8 +319,6 @@ describe("flattened body CI entrypoint", () => {
 			.mockImplementation(async (url: string, init?: RequestInit) => {
 				if (String(url).includes("/files"))
 					return new Response(JSON.stringify([]), { status: 200 });
-				if (init?.method === "PATCH")
-					return new Response("{}", { status: 200 });
 				return new Response(
 					JSON.stringify({ body: escapedNewlineFlattenedBody }),
 					{ status: 200 },
@@ -338,16 +329,11 @@ describe("flattened body CI entrypoint", () => {
 				pull_request: { number: 2145, body: escapedNewlineFlattenedBody },
 			}),
 		).toEqual({ valid: true, repaired: true });
-		expect(fetchImpl).toHaveBeenCalledWith(
-			"https://api.example/repos/o/r/pulls/2145",
-			expect.objectContaining({
-				method: "PATCH",
-				body: expect.stringContaining("## Tests\\n"),
-			}),
+		expect(fetchImpl).not.toHaveBeenCalledWith(
+			expect.anything(),
+			expect.objectContaining({ method: "PATCH" }),
 		);
-		expect(log).toHaveBeenCalledWith(
-			expect.stringContaining("::notice::Repaired flattened PR body"),
-		);
+		expect(log).toHaveBeenCalledWith("PR body OK: 2145");
 		log.mockRestore();
 	});
 
@@ -374,78 +360,6 @@ describe("flattened body CI entrypoint", () => {
 		);
 		expect(errors).toHaveBeenCalled();
 		errors.mockRestore();
-	});
-
-	it("skips the patch when freshness GET fails", async () => {
-		stubApi();
-		const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
-		const errors = vi.spyOn(console, "error").mockImplementation(() => {});
-		let bodyGets = 0;
-		const fetchImpl = vi
-			.fn()
-			.mockImplementation(async (url: string, init?: RequestInit) => {
-				if (String(url).includes("/files"))
-					return new Response(JSON.stringify([]), { status: 200 });
-				if (init?.method === "PATCH")
-					return new Response("{}", { status: 200 });
-				bodyGets += 1;
-				if (bodyGets === 2) throw new Error("transient GET failure");
-				return new Response(JSON.stringify({ body: flattenedBody }), {
-					status: 200,
-				});
-			});
-		expect(
-			await lintPullRequestEvent(fetchImpl, {
-				pull_request: { number: 2144, body: flattenedBody },
-			}),
-		).toEqual({ valid: false, repaired: false });
-		expect(fetchImpl).not.toHaveBeenCalledWith(
-			expect.anything(),
-			expect.objectContaining({ method: "PATCH" }),
-		);
-		expect(warning).toHaveBeenCalledWith(
-			expect.stringContaining("freshness check failed"),
-		);
-		expect(errors).toHaveBeenCalled();
-		warning.mockRestore();
-		errors.mockRestore();
-	});
-
-	it("skips the patch when the live body changes after linting", async () => {
-		stubApi();
-		const log = vi.spyOn(console, "log").mockImplementation(() => {});
-		let bodyGets = 0;
-		const changedBody = `${flattenedBody} changed`;
-		const fetchImpl = vi
-			.fn()
-			.mockImplementation(async (url: string, init?: RequestInit) => {
-				if (String(url).includes("/files"))
-					return new Response(JSON.stringify([]), { status: 200 });
-				if (init?.method === "PATCH")
-					return new Response("{}", { status: 200 });
-				bodyGets += 1;
-				return new Response(
-					JSON.stringify({
-						body: bodyGets === 1 ? flattenedBody : changedBody,
-					}),
-					{
-						status: 200,
-					},
-				);
-			});
-		expect(
-			await lintPullRequestEvent(fetchImpl, {
-				pull_request: { number: 2144, body: flattenedBody },
-			}),
-		).toEqual({ valid: false, repaired: false });
-		expect(fetchImpl).not.toHaveBeenCalledWith(
-			expect.anything(),
-			expect.objectContaining({ method: "PATCH" }),
-		);
-		expect(log).toHaveBeenCalledWith(
-			expect.stringContaining("body changed during linting"),
-		);
-		log.mockRestore();
 	});
 
 	it("reports original errors and does not write when repair remains invalid", async () => {
@@ -599,6 +513,8 @@ describe("PR body lint (#1844)", () => {
 
 describe("live PR body resolution (#2085)", () => {
 	const payloadPr = { number: 2085, body: "fallback" };
+	const flattenedCloseKeywordBody =
+		"## Summary\\nThis worker body references Closes #2145 while preserving the complete report.\\n\\n## Tests\\nThe real flattened fixture reaches the body lint as literal newline soup.\\n\\n## Blast radius\\nOnly checking behavior changes.\\n\\n## Class sweep\\nThe shared live-body seam covers sibling readers.\\n\\n## Observability\\nA warning records that checking used normalized text.";
 
 	afterEach(() => vi.unstubAllEnvs());
 
@@ -616,6 +532,53 @@ describe("live PR body resolution (#2085)", () => {
 			"https://api.github.test/repos/apmantza/pi-lens/pulls/2085",
 			expect.objectContaining({ signal: expect.any(AbortSignal) }),
 		);
+	});
+
+	it("normalizes flattened live bodies for checking and warns without writing", async () => {
+		vi.stubEnv("GITHUB_API_URL", "https://api.github.test");
+		vi.stubEnv("GITHUB_REPOSITORY", "apmantza/pi-lens");
+		vi.stubEnv("GITHUB_TOKEN", "test-token");
+		const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+		const fetchImpl = vi.fn().mockResolvedValue(
+			new Response(JSON.stringify({ body: flattenedCloseKeywordBody }), {
+				status: 200,
+			}),
+		);
+
+		const normalized = await resolveLivePrBody(
+			{ number: 2145, body: flattenedCloseKeywordBody },
+			fetchImpl,
+		);
+
+		expect(normalized).toContain("## Tests\n");
+		expect(normalized).toContain("Closes #2145");
+		expect(warning).toHaveBeenCalledWith(
+			expect.stringContaining("Normalized flattened PR body"),
+		);
+		expect(fetchImpl).toHaveBeenCalledTimes(1);
+		warning.mockRestore();
+	});
+
+	it("does not mangle a genuine backslash-n inside a code span", async () => {
+		vi.stubEnv("GITHUB_API_URL", "https://api.github.test");
+		vi.stubEnv("GITHUB_REPOSITORY", "apmantza/pi-lens");
+		vi.stubEnv("GITHUB_TOKEN", "test-token");
+		const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+		const codeSpanBody = `${escapedNewlineFlattenedBody.replace(
+			"literal backslash-n repair outside fences.",
+			"literal `line1\\nline2` repair outside fences.",
+		)}`;
+		const fetchImpl = vi
+			.fn()
+			.mockResolvedValue(
+				new Response(JSON.stringify({ body: codeSpanBody }), { status: 200 }),
+			);
+
+		const normalized = await resolveLivePrBody(payloadPr, fetchImpl);
+		expect(normalized).toContain("## Summary\n");
+		expect(codeSpanBody).toContain("`line1\\nline2`");
+		expect(normalized).toContain("`line1\\nline2`");
+		warning.mockRestore();
 	});
 
 	it("treats a null live body as an empty body", async () => {

@@ -146,6 +146,34 @@ describe("close-keyword syntax lint reads the live body (#2086)", () => {
 		log.mockRestore();
 	});
 
+	it("sees close keywords in a normalized literal-newline body", async () => {
+		vi.stubEnv("GITHUB_API_URL", "https://api.github.test");
+		vi.stubEnv("GITHUB_REPOSITORY", "apmantza/pi-lens");
+		vi.stubEnv("GITHUB_TOKEN", "test-token");
+		const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+		const log = vi.spyOn(console, "log").mockImplementation(() => {});
+		const flattened =
+			"## Summary\\nThis is a complete worker-authored body that says Closes #2145.\\n\\n## Tests\\nThe section heading and issue reference are buried in literal newline soup.\\n\\n## Blast radius\\nChecking only.\\n\\n## Class sweep\\nShared seam.\\n\\n## Observability\\nWarn on normalization.";
+		const fetchImpl = vi
+			.fn()
+			.mockResolvedValue(
+				new Response(JSON.stringify({ body: flattened }), { status: 200 }),
+			);
+
+		await lintPullRequest(fetchImpl, {
+			pull_request: { number: 2145, body: flattened },
+		});
+
+		expect(log).toHaveBeenCalledWith(
+			"Close-keyword syntax OK (1 issue referenced).",
+		);
+		expect(warning).toHaveBeenCalledWith(
+			expect.stringContaining("checking only"),
+		);
+		warning.mockRestore();
+		log.mockRestore();
+	});
+
 	// #2086 criterion 3: the lint path carries the same fail-closed guard set
 	// the verify path got in #2267 -- missing token, non-2xx, malformed
 	// response. Each states that the check did not run instead of surfacing
