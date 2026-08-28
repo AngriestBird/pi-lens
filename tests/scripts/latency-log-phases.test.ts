@@ -112,11 +112,8 @@ describe("findPhaseEntries / phaseWasLogged", () => {
 		const previousTestMode = process.env.PI_LENS_TEST_MODE;
 		process.env.PI_LENS_TEST_MODE = "0";
 		try {
-			const {
-				clearLatencyLog,
-				flushLatencyLog,
-				getLatencyLogPath,
-			} = await import("../../clients/latency-logger.js");
+			const { clearLatencyLog, flushLatencyLog, getLatencyLogPath } =
+				await import("../../clients/latency-logger.js");
 			const {
 				logConcurrentSessionBind,
 				emitConcurrentSessionBindRollupAtSessionEnd,
