@@ -57,7 +57,9 @@ describe("ReadGuard", () => {
 			const verdict = guard.checkEdit("/src/api.ts");
 
 			expect(verdict.action).toBe("block");
-			expect(verdict.reason).toContain("Edit without read");
+			expect(verdict.reason).toBe(
+				'[retry] Edit without read — Read `/src/api.ts` first, then retry: `read path="/src/api.ts"`.',
+			);
 		});
 
 		it("allows edit on previously read file", () => {
