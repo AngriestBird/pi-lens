@@ -116,6 +116,10 @@ describe("close-keyword parser (#1320)", () => {
 });
 
 describe("close-keyword syntax lint reads the live body (#2086)", () => {
+	afterEach(() => {
+		process.exitCode = undefined;
+	});
+
 	it("uses the live body when a rerun receives a stale event payload", async () => {
 		vi.stubEnv("GITHUB_API_URL", "https://api.github.test");
 		vi.stubEnv("GITHUB_REPOSITORY", "apmantza/pi-lens");
@@ -139,6 +143,76 @@ describe("close-keyword syntax lint reads the live body (#2086)", () => {
 		expect(log).toHaveBeenCalledWith(
 			"Close-keyword syntax OK (2 issues referenced).",
 		);
+		log.mockRestore();
+	});
+
+	// #2086 criterion 3: the lint path carries the same fail-closed guard set
+	// the verify path got in #2267 -- missing token, non-2xx, malformed
+	// response. Each states that the check did not run instead of surfacing
+	// a bare throw that reads like a broken script.
+	it("fails closed with an ::error record when GITHUB_TOKEN is unset", async () => {
+		vi.stubEnv("GITHUB_REPOSITORY", "apmantza/pi-lens");
+		vi.stubEnv("GITHUB_TOKEN", "");
+		const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+		const log = vi.spyOn(console, "log").mockImplementation(() => {});
+		const fetchImpl = vi.fn();
+		const event = { pull_request: { number: 2086, body: "Closes #1, #2" } };
+
+		await lintPullRequest(fetchImpl, event);
+
+		expect(process.exitCode).toBe(1);
+		expect(fetchImpl).not.toHaveBeenCalled();
+		// Mutation-proof: letting the fetch error escape to the CLI .catch
+		// prints the bare reason with no ::error:: and no did-not-run
+		// statement; linting the stale payload instead would call log.
+		expect(log).not.toHaveBeenCalled();
+		expect(errorLog).toHaveBeenCalledWith(
+			expect.stringContaining(
+				"::error::Close-keyword syntax check could not fetch the live PR body, so it did not run:",
+			),
+		);
+		errorLog.mockRestore();
+		log.mockRestore();
+	});
+
+	it("fails closed with an ::error record on a non-2xx response", async () => {
+		vi.stubEnv("GITHUB_API_URL", "https://api.github.test");
+		vi.stubEnv("GITHUB_REPOSITORY", "apmantza/pi-lens");
+		vi.stubEnv("GITHUB_TOKEN", "test-token");
+		const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+		const log = vi.spyOn(console, "log").mockImplementation(() => {});
+		const fetchImpl = vi
+			.fn()
+			.mockResolvedValue(new Response("service unavailable", { status: 503 }));
+		const event = { pull_request: { number: 2086, body: "Closes #1" } };
+
+		await lintPullRequest(fetchImpl, event);
+
+		expect(process.exitCode).toBe(1);
+		expect(log).not.toHaveBeenCalled();
+		expect(errorLog).toHaveBeenCalledWith(expect.stringContaining("::error::"));
+		expect(errorLog).toHaveBeenCalledWith(expect.stringContaining("503"));
+		errorLog.mockRestore();
+		log.mockRestore();
+	});
+
+	it("fails closed with an ::error record on a malformed response", async () => {
+		vi.stubEnv("GITHUB_API_URL", "https://api.github.test");
+		vi.stubEnv("GITHUB_REPOSITORY", "apmantza/pi-lens");
+		vi.stubEnv("GITHUB_TOKEN", "test-token");
+		const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+		const log = vi.spyOn(console, "log").mockImplementation(() => {});
+		const fetchImpl = vi
+			.fn()
+			.mockResolvedValue(new Response(JSON.stringify({}), { status: 200 }));
+		const event = { pull_request: { number: 2086, body: "Closes #1" } };
+
+		await lintPullRequest(fetchImpl, event);
+
+		expect(process.exitCode).toBe(1);
+		expect(log).not.toHaveBeenCalled();
+		expect(errorLog).toHaveBeenCalledWith(expect.stringContaining("::error::"));
+		errorLog.mockRestore();
 		log.mockRestore();
 	});
 });

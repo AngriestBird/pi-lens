@@ -83,7 +83,21 @@ export async function lintPullRequest(
 	const pullRequest = event.pull_request;
 	if (!pullRequest || !process.env.GITHUB_REPOSITORY)
 		throw new Error("Pull request event and GITHUB_REPOSITORY are required");
-	const body = await fetchLivePrBody(pullRequest, fetchImpl);
+	// Same fail-closed reporting contract as verifyMergedPullRequest: a fetch
+	// failure states plainly that the check did not run, instead of surfacing
+	// as a bare thrown message that reads like a broken script (worst for
+	// fork PRs hitting a transient 5xx).
+	let body;
+	try {
+		body = await fetchLivePrBody(pullRequest, fetchImpl);
+	} catch (error) {
+		const reason = error instanceof Error ? error.message : String(error);
+		console.error(
+			`::error::Close-keyword syntax check could not fetch the live PR body, so it did not run: ${reason}`,
+		);
+		process.exitCode = 1;
+		return;
+	}
 	const result = lintCloseKeywords(body);
 	if (!result.valid) {
 		console.error(INVALID_CLOSE_KEYWORD_MESSAGE);
