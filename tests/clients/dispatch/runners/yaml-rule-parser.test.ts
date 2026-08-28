@@ -14,6 +14,8 @@ vi.mock("node:fs", async (importOriginal) => {
 		readFileSync: vi.fn(actual.readFileSync),
 		readdirSync: vi.fn(actual.readdirSync),
 		statSync: vi.fn(actual.statSync),
+		existsSync: vi.fn(actual.existsSync),
+		openSync: vi.fn(actual.openSync),
 	};
 });
 
@@ -111,6 +113,11 @@ describe("yaml-rule-parser cache freshness (#2262)", () => {
 		);
 		ruleCacheTempDirs.push(root);
 		writeRule(path.join(root, "a.yml"), "a", "a");
+		writeRule(path.join(root, "nested", "b.yml"), "b", "b");
+		writeRule(path.join(root, "nested", "c.yml"), "c", "c");
+		writeRule(path.join(root, "nested", "deeper", "d.yml"), "d", "d");
+		writeRule(path.join(root, "nested", "deeper", "e.yml"), "e", "e");
+		const ruleFileCount = 5;
 		vi.useFakeTimers();
 		const start = Date.now();
 		loadYamlRules(root); // primes the cache: one sweep
@@ -118,22 +125,31 @@ describe("yaml-rule-parser cache freshness (#2262)", () => {
 		const readFileSpy = vi.mocked(fs.readFileSync);
 		const readdirSpy = vi.mocked(fs.readdirSync);
 		const statSpy = vi.mocked(fs.statSync);
-		for (const spy of [readFileSpy, readdirSpy, statSpy]) spy.mockClear();
+		const existsSpy = vi.mocked(fs.existsSync);
+		const openSpy = vi.mocked(fs.openSync);
+		for (const spy of [readFileSpy, readdirSpy, statSpy, existsSpy, openSpy])
+			spy.mockClear();
 		for (let i = 0; i < 25; i++) loadYamlRules(root);
 		expect(readFileSpy).not.toHaveBeenCalled();
-		expect(readdirSpy).not.toHaveBeenCalled();
 		expect(statSpy).not.toHaveBeenCalled();
+		expect(readdirSpy).not.toHaveBeenCalled();
+		expect(existsSpy).toHaveBeenCalledTimes(25);
+		expect(openSpy).not.toHaveBeenCalled();
 
 		vi.setSystemTime(start + RULES_CACHE_FRESHNESS_CADENCE_MS + 1);
 		loadYamlRules(root);
 		expect(readFileSpy).not.toHaveBeenCalled();
-		expect(readdirSpy).toHaveBeenCalledTimes(1);
-		expect(statSpy).toHaveBeenCalledTimes(1);
+		expect(readdirSpy).toHaveBeenCalledTimes(3);
+		expect(statSpy).toHaveBeenCalledTimes(ruleFileCount);
+		expect(existsSpy).toHaveBeenCalledTimes(26);
+		expect(openSpy).not.toHaveBeenCalled();
 
 		for (let i = 0; i < 25; i++) loadYamlRules(root);
 		expect(readFileSpy).not.toHaveBeenCalled();
-		expect(readdirSpy).toHaveBeenCalledTimes(1);
-		expect(statSpy).toHaveBeenCalledTimes(1);
+		expect(readdirSpy).toHaveBeenCalledTimes(3);
+		expect(statSpy).toHaveBeenCalledTimes(ruleFileCount);
+		expect(existsSpy).toHaveBeenCalledTimes(51);
+		expect(openSpy).not.toHaveBeenCalled();
 	});
 
 	it("orders discovered rule files by code unit, not by locale collation", () => {
