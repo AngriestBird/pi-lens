@@ -80,6 +80,10 @@ describe("dispatch plan exposure", () => {
 		expect(sqlIds).toContain("sqlfluff");
 	});
 
+	it("routes JSON CloudFormation templates through opt-in Trivy config", () => {
+		expect(flattenRunnerIds(TOOL_PLANS.json)).toEqual(["lsp", "trivy-config"]);
+	});
+
 	it("routes tpl helpers through the explicit Helm template plan", () => {
 		expect(flattenRunnerIds(TOOL_PLANS["helm-template"])).toEqual([
 			"helm-lint",
@@ -88,7 +92,11 @@ describe("dispatch plan exposure", () => {
 	});
 
 	it("routes html/docker/powershell/php/prisma through aligned primary plans", () => {
-		expect(flattenRunnerIds(TOOL_PLANS.html)).toEqual(["lsp", "htmlhint"]);
+		expect(flattenRunnerIds(TOOL_PLANS.html)).toEqual([
+			"lsp",
+			"htmlhint",
+			"ast-grep-napi",
+		]);
 		expect(flattenRunnerIds(TOOL_PLANS.docker)).toEqual([
 			"lsp",
 			"hadolint",
@@ -102,6 +110,7 @@ describe("dispatch plan exposure", () => {
 			"lsp",
 			"php-lint",
 			"phpstan",
+			"tree-sitter",
 		]);
 		expect(flattenRunnerIds(TOOL_PLANS.prisma)).toEqual([
 			"lsp",
@@ -139,6 +148,7 @@ describe("dispatch plan exposure", () => {
 		expect(flattenRunnerIds(TOOL_PLANS.csharp)).toEqual([
 			"lsp",
 			"dotnet-build",
+			"tree-sitter",
 		]);
 	});
 
