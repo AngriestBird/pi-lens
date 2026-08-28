@@ -18,6 +18,8 @@ import type {
 	RunnerGroup,
 } from "../../../clients/dispatch/types.js";
 import { createMockRunner } from "../../mocks/runner-factory.js";
+import { normalizeMapKey } from "../../../clients/path-utils.js";
+import { recordEntitySnapshotDiff } from "../../../clients/review-graph/service.js";
 // Side-effect import: loading integration.ts runs its module-scope
 // `setFactStoreEvictionReporter(...)` call, wiring the REAL production
 // reporter into fact-store's module-scope slot (mirrors fact-store-bound.test.ts).
@@ -254,5 +256,72 @@ describe("FactStore session-fact bound (#2282)", () => {
 		).map((r) => r.subject);
 		expect(subjectsAfterFileEviction).toContain("dispatch:session-count");
 		expect(subjectsAfterFileEviction).toContain("dispatch:count");
+	});
+
+	// Review round F1: the entity snapshot is the one migrated family whose
+	// "absent" branch is not a safe default — an empty previous snapshot puts
+	// every entity in `added`, which reads downstream as "the whole file
+	// changed" and schedules a blast-radius run for a file nothing touched.
+	describe("evicted entity snapshots do not invert to a whole-file change", () => {
+		const TARGET = "/repo/src/Target.ts";
+		const snapshot = () =>
+			new Map([
+				["function:alpha", "h1"],
+				["function:beta", "h2"],
+				["class:Gamma", "h3"],
+			]);
+
+		it("reports no diff for a snapshot the cap evicted, not every symbol", () => {
+			const store = new FactStore("dispatch");
+
+			expect(recordEntitySnapshotDiff(store, TARGET, snapshot()).added).toEqual(
+				["function:alpha", "function:beta", "class:Gamma"],
+			);
+			expect(recordEntitySnapshotDiff(store, TARGET, snapshot()).added).toEqual(
+				[],
+			);
+
+			for (const p of batchPaths("snapshot-evict", MAX_SESSION_RECORDS + 500))
+				store.setBoundedSessionFact(p, []);
+
+			const afterEviction = recordEntitySnapshotDiff(store, TARGET, snapshot());
+			expect(afterEviction).toEqual({ added: [], removed: [], modified: [] });
+		});
+
+		it("re-seeds the evicted snapshot so the next real edit still diffs", () => {
+			const store = new FactStore("dispatch");
+			recordEntitySnapshotDiff(store, TARGET, snapshot());
+			for (const p of batchPaths("snapshot-reseed", MAX_SESSION_RECORDS + 500))
+				store.setBoundedSessionFact(p, []);
+			recordEntitySnapshotDiff(store, TARGET, snapshot());
+
+			const edited = snapshot();
+			edited.set("function:beta", "h2-edited");
+
+			expect(recordEntitySnapshotDiff(store, TARGET, edited)).toEqual({
+				added: [],
+				removed: [],
+				modified: ["function:beta"],
+			});
+		});
+
+		// Review round F3: builder.ts reads this key through normalizeMapKey, so
+		// an unnormalized write is a key the reader can never hit. normalizeMapKey
+		// leaves a plain POSIX path alone, so the asymmetry only shows on a path
+		// it actually rewrites — a backslash-separated one (the #1150 shape).
+		it("writes changedSymbols under the key builder.ts reads", () => {
+			const store = new FactStore("dispatch");
+			const backslashPath = "/repo/src\\nested\\Target.ts";
+			expect(normalizeMapKey(backslashPath)).not.toBe(backslashPath);
+
+			recordEntitySnapshotDiff(store, backslashPath, snapshot());
+
+			const readKey = `session.reviewGraph.changedSymbols:${normalizeMapKey(backslashPath)}`;
+			expect(store.getBoundedSessionFact<string[]>(readKey)).toEqual([
+				"alpha",
+				"beta",
+				"Gamma",
+			]);
+		});
 	});
 });

@@ -1,4 +1,5 @@
 import type { FactStore } from "../dispatch/fact-store.js";
+import { normalizeMapKey } from "../path-utils.js";
 import {
 	computeImpactCascade as computeImpactCascadeImpl,
 	computeTransitiveImpact as computeTransitiveImpactImpl,
@@ -54,10 +55,21 @@ export function recordEntitySnapshotDiff(
 	filePath: string,
 	nextSnapshot: Map<string, string>,
 ): { added: string[]; removed: string[]; modified: string[] } {
-	const prev =
-		facts.getBoundedSessionFact<Map<string, string>>(
-			`${ENTITY_SNAPSHOT_PREFIX}${filePath}`,
-		) ?? new Map<string, string>();
+	const snapshotKey = `${ENTITY_SNAPSHOT_PREFIX}${filePath}`;
+	// builder.ts reads this one through normalizeMapKey; write it the same way
+	// or the read never hits (#2282 review F3).
+	const changedSymbolsKey = `${CHANGED_SYMBOLS_PREFIX}${normalizeMapKey(filePath)}`;
+	const stored = facts.getBoundedSessionFact<Map<string, string>>(snapshotKey);
+	// An evicted snapshot is unknown, not empty. Diffing against an empty Map
+	// puts every entity in `added`, which reads downstream as "the whole file
+	// changed" and schedules a blast-radius run for a file that did not change.
+	// Re-seed the snapshot and report no diff instead (#2282 review F1).
+	if (stored === undefined && facts.wasBoundedSessionFactEvicted(snapshotKey)) {
+		facts.setBoundedSessionFact(snapshotKey, new Map(nextSnapshot));
+		facts.setBoundedSessionFact(changedSymbolsKey, []);
+		return { added: [], removed: [], modified: [] };
+	}
+	const prev = stored ?? new Map<string, string>();
 	const added: string[] = [];
 	const removed: string[] = [];
 	const modified: string[] = [];
@@ -77,13 +89,7 @@ export function recordEntitySnapshotDiff(
 				.filter(Boolean),
 		),
 	];
-	facts.setBoundedSessionFact(
-		`${ENTITY_SNAPSHOT_PREFIX}${filePath}`,
-		new Map(nextSnapshot),
-	);
-	facts.setBoundedSessionFact(
-		`${CHANGED_SYMBOLS_PREFIX}${filePath}`,
-		changedSymbols,
-	);
+	facts.setBoundedSessionFact(snapshotKey, new Map(nextSnapshot));
+	facts.setBoundedSessionFact(changedSymbolsKey, changedSymbols);
 	return { added, removed, modified };
 }

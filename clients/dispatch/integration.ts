@@ -221,10 +221,6 @@ setFactStoreEvictionReporter((subject, axis, reason) => {
 		reason,
 	});
 });
-const cascadeDiagnosticBaselines = new Map<
-	string,
-	import("./types.js").Diagnostic[]
->();
 const sessionRunnerRegistry = new RunnerRegistry();
 registerDefaultRunners(sessionRunnerRegistry);
 const LSP_CAPABLE_KINDS = new Set<FileKind>(getLspCapableKinds());
@@ -520,7 +516,6 @@ export function resetDispatchBaselines(cwd?: string): void {
 	clearModuleGraphCache();
 	recentlyCleanNeighborCache.clear();
 	primaryFilesThisTurn.clear();
-	cascadeDiagnosticBaselines.clear();
 	cascadeSessionStats = {
 		runs: 0,
 		diagnosticsSurfaced: 0,
@@ -2412,11 +2407,9 @@ function applyCascadeDeltaBaselines(
 	return neighbors.map((neighbor) => {
 		const baselineKey = `session.baseline.cascade.${normalizeMapKey(neighbor.filePath)}`;
 		const previous =
-			cascadeDiagnosticBaselines.get(baselineKey) ??
 			sessionFacts.getBoundedSessionFact<import("./types.js").Diagnostic[]>(
 				baselineKey,
 			);
-		cascadeDiagnosticBaselines.set(baselineKey, [...neighbor.diagnostics]);
 		sessionFacts.setBoundedSessionFact(baselineKey, [...neighbor.diagnostics]);
 		if (!previous) return neighbor;
 		const before = new Set(previous.map(diagnosticDeltaKey));
