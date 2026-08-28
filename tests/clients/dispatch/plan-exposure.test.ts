@@ -97,6 +97,12 @@ describe("dispatch plan exposure", () => {
 			"htmlhint",
 			"ast-grep-napi",
 		]);
+		expect(flattenRunnerIds(TOOL_PLANS.css)).toEqual([
+			"lsp",
+			"stylelint",
+			"tree-sitter",
+			"ast-grep-napi",
+		]);
 		expect(flattenRunnerIds(TOOL_PLANS.docker)).toEqual([
 			"lsp",
 			"hadolint",
