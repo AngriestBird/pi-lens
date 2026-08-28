@@ -125,6 +125,14 @@ function servedRuleLanguages(): Set<string> {
 	return served;
 }
 
+function routedLanguagesWithoutRules(
+	ruleCatalog: ReadonlyMap<string, readonly string[]>,
+): string[] {
+	return [...servedRuleLanguages()]
+		.filter((language) => !ruleCatalog.has(language))
+		.sort();
+}
+
 beforeAll(async () => {
 	// Fail loudly rather than let every assertion below pass on an addon that
 	// never loaded — the whole point of this file is that a missing grammar is
@@ -232,6 +240,16 @@ describe("catalog language delivery coverage (#2215)", () => {
 		expect(stale).toEqual([]);
 	});
 
+	it("ships enabled rules for every napi-routed language (#2325)", () => {
+		expect(routedLanguagesWithoutRules(catalog)).toEqual([]);
+
+		// Mutation probe: removing HTML from the enabled catalog must expose the
+		// routed lane instead of letting an empty language report as covered.
+		const withoutHtml = new Map(catalog);
+		withoutHtml.delete("html");
+		expect(routedLanguagesWithoutRules(withoutHtml)).toEqual(["html"]);
+	});
+
 	it("never claims a napi-served language delivers by LSP/CLI only", () => {
 		const served = servedRuleLanguages();
 		const contradictory = (napi.AST_GREP_LSP_ONLY_RULE_LANGUAGES ?? [])
@@ -284,6 +302,23 @@ describe("module-flavored jsts extensions run the catalog (#2215)", () => {
 		expect(napi.canHandle("App.vue")).toBe(false);
 		expect(napi.canHandle("App.svelte")).toBe(false);
 		expect(napi.ruleLanguageForFile("App.vue")).toBeUndefined();
+	});
+});
+
+describe("html edits run the enabled html catalog (#2325)", () => {
+	let env: RealRunnerEnv;
+	beforeAll(() => {
+		env = makeRealRunnerEnv({ hasTool: napiFallbackHasTool });
+	});
+	afterAll(() => env.cleanup());
+
+	it("reports a plaintext HTTP link through the napi runner", async () => {
+		const { ctx } = env.addFile(
+			"index.html",
+			'<a href="http://example.com">Example</a>\n',
+		);
+		const result = await napi.default.run(ctx);
+		expect(firedRuleIds(result)).toContain("plaintext-http-link-html");
 	});
 });
 

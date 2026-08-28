@@ -2552,6 +2552,17 @@ The shipped ast-grep baseline that runs on every file dispatch is composed from 
 
 **Rule-ID precedence is shared by raw LSP and NAPI (#497):** `clients/sgconfig.ts` is the discovery seam for both paths, ordered project primary → project secondary/CodeRabbit → bundled native → bundled CodeRabbit. Discovery is recursive and deterministic. The synthesized raw config contains one per-process, per-workspace merged rule directory; lower-layer same-ID definitions are filtered so a project rule overrides its bundled twin without making `sg` reject the config. Same-layer duplicates are deliberately retained for raw ast-grep validation, and NAPI emits an equivalent blocking configuration diagnostic instead of silently choosing. Project-rule caches fingerprint relative paths plus contents, so equal-size/preserved-mtime edits, renames, additions, and removals invalidate correctly. Avoid reintroducing independent rule-dir lists in either path. Even though cross-tier collisions now have defined precedence, a native/CodeRabbit duplicate remains a maintenance hazard; the catalog port still checks CodeRabbit first and skips anything already vendored.
 
+NAPI routing and enabled-rule coverage are bidirectional: every enabled catalog
+language has a delivery route, and every NAPI-routed language has at least one
+enabled rule. `ast-grep-napi-language-coverage.test.ts` enforces both directions
+against the shared `getAstGrepRuleSources` census. Normalize catalog `language:`
+values to lowercase before ANY comparison — the corpus mixes case across
+nearly every language (111 `TypeScript` vs 31 `typescript`, 47 `Python` vs
+52 `python`, ...), so a raw-case comparison is wrong somewhere on every
+language, not just HTML. Runtime lowercases (sgconfig.ts, ast-grep-napi.ts);
+tooling that compares raw is the recurring gap — #2331 tracks the two known
+sites. (#2325)
+
 A target repository that supplies its own `sgconfig.yml` / `sgconfig.yaml` at the workspace root takes precedence — pi-lens respects the project config instead of injecting its baseline.
 
 ## Tree-sitter rules
