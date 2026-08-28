@@ -267,7 +267,7 @@ describe("live PR body resolution (#2086)", () => {
 			}),
 		);
 
-		const body = await fetchLivePrBody(payloadPr, fetchImpl);
+		const { body } = await fetchLivePrBody(payloadPr, fetchImpl);
 		expect(body).toBe("Closes #123. Closes #456.");
 		expect(lintCloseKeywords(body).valid).toBe(true);
 		expect(fetchImpl).toHaveBeenCalledWith(
@@ -289,7 +289,7 @@ describe("live PR body resolution (#2086)", () => {
 			}),
 		);
 
-		const body = await fetchLivePrBody(payloadPr, fetchImpl);
+		const { body } = await fetchLivePrBody(payloadPr, fetchImpl);
 		expect(lintCloseKeywords(payloadPr.body).valid).toBe(false);
 		expect(lintCloseKeywords(body).valid).toBe(true);
 	});
@@ -307,7 +307,7 @@ describe("live PR body resolution (#2086)", () => {
 			}),
 		);
 
-		const body = await fetchLivePrBody(cleanPayloadPr, fetchImpl);
+		const { body } = await fetchLivePrBody(cleanPayloadPr, fetchImpl);
 		expect(lintCloseKeywords(cleanPayloadPr.body).valid).toBe(true);
 		expect(lintCloseKeywords(body).valid).toBe(false);
 	});

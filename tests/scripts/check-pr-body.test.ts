@@ -286,18 +286,16 @@ describe("flattened body CI entrypoint", () => {
 	it("checks the repaired body and reports a warning without writing", async () => {
 		stubApi();
 		const log = vi.spyOn(console, "log").mockImplementation(() => {});
-		const fetchImpl = vi
-			.fn()
-			.mockImplementation(async (url: string, init?: RequestInit) => {
-				if (String(url).includes("/files"))
-					return new Response(
-						JSON.stringify([{ filename: "tests/foo.test.ts" }]),
-						{ status: 200 },
-					);
-				return new Response(JSON.stringify({ body: flattenedBody }), {
-					status: 200,
-				});
+		const fetchImpl = vi.fn().mockImplementation(async (url: string) => {
+			if (String(url).includes("/files"))
+				return new Response(
+					JSON.stringify([{ filename: "tests/foo.test.ts" }]),
+					{ status: 200 },
+				);
+			return new Response(JSON.stringify({ body: flattenedBody }), {
+				status: 200,
 			});
+		});
 		expect(
 			await lintPullRequestEvent(fetchImpl, {
 				pull_request: { number: 2144, body: flattenedBody },
@@ -314,16 +312,14 @@ describe("flattened body CI entrypoint", () => {
 	it("checks an escaped-newline flattened body and reports a warning", async () => {
 		stubApi();
 		const log = vi.spyOn(console, "log").mockImplementation(() => {});
-		const fetchImpl = vi
-			.fn()
-			.mockImplementation(async (url: string, init?: RequestInit) => {
-				if (String(url).includes("/files"))
-					return new Response(JSON.stringify([]), { status: 200 });
-				return new Response(
-					JSON.stringify({ body: escapedNewlineFlattenedBody }),
-					{ status: 200 },
-				);
-			});
+		const fetchImpl = vi.fn().mockImplementation(async (url: string) => {
+			if (String(url).includes("/files"))
+				return new Response(JSON.stringify([]), { status: 200 });
+			return new Response(
+				JSON.stringify({ body: escapedNewlineFlattenedBody }),
+				{ status: 200 },
+			);
+		});
 		expect(
 			await lintPullRequestEvent(fetchImpl, {
 				pull_request: { number: 2145, body: escapedNewlineFlattenedBody },
@@ -335,6 +331,23 @@ describe("flattened body CI entrypoint", () => {
 		);
 		expect(log).toHaveBeenCalledWith("PR body OK: 2145");
 		log.mockRestore();
+	});
+
+	it("reports no repair when the payload is flattened but the live body is clean", async () => {
+		stubApi();
+		const fetchImpl = vi
+			.fn()
+			.mockImplementation(async (url: string) =>
+				String(url).includes("/files")
+					? new Response(JSON.stringify([]), { status: 200 })
+					: new Response(JSON.stringify({ body }), { status: 200 }),
+			);
+
+		expect(
+			await lintPullRequestEvent(fetchImpl, {
+				pull_request: { number: 2145, body: flattenedBody },
+			}),
+		).toEqual({ valid: true, repaired: false });
 	});
 
 	it("refuses a flattened fenced template and preserves lint errors", async () => {
@@ -527,7 +540,10 @@ describe("live PR body resolution (#2085)", () => {
 			.mockResolvedValue(
 				new Response(JSON.stringify({ body: "live" }), { status: 200 }),
 			);
-		expect(await resolveLivePrBody(payloadPr, fetchImpl)).toBe("live");
+		expect(await resolveLivePrBody(payloadPr, fetchImpl)).toEqual({
+			body: "live",
+			normalized: false,
+		});
 		expect(fetchImpl).toHaveBeenCalledWith(
 			"https://api.github.test/repos/apmantza/pi-lens/pulls/2085",
 			expect.objectContaining({ signal: expect.any(AbortSignal) }),
@@ -550,8 +566,9 @@ describe("live PR body resolution (#2085)", () => {
 			fetchImpl,
 		);
 
-		expect(normalized).toContain("## Tests\n");
-		expect(normalized).toContain("Closes #2145");
+		expect(normalized).toMatchObject({ normalized: true });
+		expect(normalized.body).toContain("## Tests\n");
+		expect(normalized.body).toContain("Closes #2145");
 		expect(warning).toHaveBeenCalledWith(
 			expect.stringContaining("Normalized flattened PR body"),
 		);
@@ -575,9 +592,10 @@ describe("live PR body resolution (#2085)", () => {
 			);
 
 		const normalized = await resolveLivePrBody(payloadPr, fetchImpl);
-		expect(normalized).toContain("## Summary\n");
+		expect(normalized).toMatchObject({ normalized: true });
+		expect(normalized.body).toContain("## Summary\n");
 		expect(codeSpanBody).toContain("`line1\\nline2`");
-		expect(normalized).toContain("`line1\\nline2`");
+		expect(normalized.body).toContain("`line1\\nline2`");
 		warning.mockRestore();
 	});
 
@@ -593,7 +611,10 @@ describe("live PR body resolution (#2085)", () => {
 			);
 
 		try {
-			expect(await resolveLivePrBody(payloadPr, fetchImpl)).toBe("");
+			expect(await resolveLivePrBody(payloadPr, fetchImpl)).toEqual({
+				body: "",
+				normalized: false,
+			});
 			expect(warning).not.toHaveBeenCalled();
 		} finally {
 			warning.mockRestore();
@@ -617,7 +638,10 @@ describe("live PR body resolution (#2085)", () => {
 		vi.stubEnv("GITHUB_TOKEN", "test-token");
 		const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
 		const fetchImpl = vi.fn().mockResolvedValue(response);
-		expect(await resolveLivePrBody(payloadPr, fetchImpl)).toBe("fallback");
+		expect(await resolveLivePrBody(payloadPr, fetchImpl)).toEqual({
+			body: "fallback",
+			normalized: false,
+		});
 		expect(warning).toHaveBeenCalledWith(
 			expect.stringContaining("::warning::"),
 		);
@@ -629,7 +653,10 @@ describe("live PR body resolution (#2085)", () => {
 		vi.stubEnv("GITHUB_TOKEN", "");
 		const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
 		const fetchImpl = vi.fn();
-		expect(await resolveLivePrBody(payloadPr, fetchImpl)).toBe("fallback");
+		expect(await resolveLivePrBody(payloadPr, fetchImpl)).toEqual({
+			body: "fallback",
+			normalized: false,
+		});
 		expect(fetchImpl).not.toHaveBeenCalled();
 		expect(warning).toHaveBeenCalledWith(
 			expect.stringContaining("GITHUB_TOKEN is not set"),

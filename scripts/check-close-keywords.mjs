@@ -89,7 +89,7 @@ export async function lintPullRequest(
 	// fork PRs hitting a transient 5xx).
 	let body;
 	try {
-		body = await fetchLivePrBody(pullRequest, fetchImpl);
+		({ body } = await fetchLivePrBody(pullRequest, fetchImpl));
 	} catch (error) {
 		const reason = error instanceof Error ? error.message : String(error);
 		console.error(
@@ -163,7 +163,7 @@ export async function verifyMergedPullRequest(
 	// failure here fails the check LOUD instead.
 	let liveBody;
 	try {
-		liveBody = await fetchLivePrBody(pullRequest, fetchImpl);
+		({ body: liveBody } = await fetchLivePrBody(pullRequest, fetchImpl));
 	} catch (error) {
 		const reason = error instanceof Error ? error.message : String(error);
 		console.error(

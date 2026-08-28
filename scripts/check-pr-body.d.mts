@@ -16,11 +16,11 @@ export declare function lintPrBody(
 export declare function fetchLivePrBody(
 	payloadPr: { number: number; body?: string | null },
 	fetchImpl: typeof fetch,
-): Promise<string>;
+): Promise<{ body: string; normalized: boolean }>;
 export declare function resolveLivePrBody(
 	payloadPr: { number: number; body?: string | null },
 	fetchImpl?: typeof fetch,
-): Promise<string>;
+): Promise<{ body: string; normalized: boolean }>;
 export declare function resolveTouchesTests(
 	payloadPr: { number: number },
 	fetchImpl?: typeof fetch,

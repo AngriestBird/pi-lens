@@ -369,7 +369,7 @@ export function lintPrBody(body = "", options = {}) {
  *
  * @param {{ number: number, body?: string | null }} payloadPr
  * @param {typeof fetch} fetchImpl
- * @returns {Promise<string>}
+ * @returns {Promise<{body: string, normalized: boolean}>}
  */
 export async function fetchLivePrBody(payloadPr, fetchImpl) {
 	const token = process.env.GITHUB_TOKEN;
@@ -393,7 +393,7 @@ export async function fetchLivePrBody(payloadPr, fetchImpl) {
 	const data = await response.json();
 	if (data.body !== null && typeof data.body !== "string")
 		throw new Error("GitHub API returned no body");
-	return normalizePrBodyForChecking(data.body ?? "", payloadPr.number).body;
+	return normalizePrBodyForChecking(data.body ?? "", payloadPr.number);
 }
 
 export async function resolveLivePrBody(
@@ -406,8 +406,7 @@ export async function resolveLivePrBody(
 		console.warn(
 			`::warning::Could not fetch the live PR body; using the event payload instead (${error instanceof Error ? error.message : error}).`,
 		);
-		return normalizePrBodyForChecking(payloadPr.body ?? "", payloadPr.number)
-			.body;
+		return normalizePrBodyForChecking(payloadPr.body ?? "", payloadPr.number);
 	}
 }
 
@@ -483,10 +482,7 @@ export async function lintPullRequestEvent(
 	const pullRequest = event.pull_request;
 	if (!pullRequest || !process.env.GITHUB_REPOSITORY)
 		throw new Error("Pull request event and GITHUB_REPOSITORY are required");
-	const sourceBody = pullRequest.body ?? "";
-	const body = await resolveLivePrBody(pullRequest, fetchImpl);
-	const normalized =
-		detectFlattenedBody(sourceBody) || detectEscapedNewlineBody(sourceBody);
+	const { body, normalized } = await resolveLivePrBody(pullRequest, fetchImpl);
 	const requireTestAssessment =
 		(await resolveTouchesTests(pullRequest, fetchImpl)) === true;
 	const result = lintPrBody(body, { requireTestAssessment });
