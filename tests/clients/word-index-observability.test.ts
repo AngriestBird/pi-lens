@@ -67,11 +67,19 @@ describe("word-index observability (#958)", () => {
 			const { collectWordIndexDocs, WORD_INDEX_MAX_BYTES } =
 				await import("../../clients/word-index.js");
 			createTempFile(env.tmpDir, "src/small.ts", "export const kept = 1;");
-			createTempFile(
-				env.tmpDir,
-				"src/huge.ts",
-				`// x\nexport const big = "${"z".repeat(WORD_INDEX_MAX_BYTES + 16)}";\n`,
-			);
+			// The oversized fixture must stay HUMAN-shaped: many ordinary lines,
+			// not one giant line. Since #2346 a giant single-line file classifies
+			// as machine-emitted generated and is pruned at the source walk, so
+			// the oversized-skip accounting below would otherwise see nothing to
+			// count. A many-line >cap file still exercises the L1 contract.
+			const bodyLine = `export const data = "${"x".repeat(48)}";`;
+			const hugeBody = Array.from(
+				{
+					length: Math.ceil((WORD_INDEX_MAX_BYTES + 16) / bodyLine.length),
+				},
+				(_, i) => `// section ${i}\n${bodyLine}`,
+			).join("\n");
+			createTempFile(env.tmpDir, "src/huge.ts", `// x\n${hugeBody}\n`);
 
 			const docs = await collectWordIndexDocs(env.tmpDir);
 
