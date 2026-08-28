@@ -197,7 +197,6 @@ const helmLintRunner: RunnerDefinition = {
 	id: "helm-lint",
 	appliesTo: ["yaml", "helm-template"],
 	priority: PRIORITY.GENERAL_ANALYSIS,
-	enabledByDefault: true,
 	skipTestFiles: false,
 	timeoutMs: 35_000,
 

@@ -115,7 +115,6 @@ const markdownlintRunner: RunnerDefinition = {
 	id: "markdownlint",
 	appliesTo: ["markdown"],
 	priority: PRIORITY.DOC_QUALITY,
-	enabledByDefault: true,
 	skipTestFiles: false,
 
 	async run(ctx: DispatchContext): Promise<RunnerResult> {

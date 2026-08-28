@@ -124,7 +124,6 @@ const lspRunner: RunnerDefinition = {
 	// is now the only step this seam needs (#1545).
 	appliesTo: getLspCapableKinds(),
 	priority: PRIORITY.LSP_PRIMARY,
-	enabledByDefault: true,
 	timeoutMs: LSP_RUNNER_TIMEOUT_MS,
 
 	async run(ctx: DispatchContext): Promise<RunnerResult> {

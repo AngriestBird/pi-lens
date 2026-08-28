@@ -395,7 +395,6 @@ describe("ast-grep-napi runner — metadata", () => {
 		const runner = mod.default;
 		expect(runner.id).toBe("ast-grep-napi");
 		expect(runner.appliesTo).toContain("jsts");
-		expect(runner.enabledByDefault).toBe(true);
 	});
 });
 

@@ -1107,7 +1107,6 @@ const helmRenderRunner: RunnerDefinition = {
 	id: "helm-render",
 	appliesTo: ["yaml", "helm-template"],
 	priority: PRIORITY.GENERAL_ANALYSIS,
-	enabledByDefault: true,
 	skipTestFiles: false,
 	timeoutMs: RENDER_TIMEOUT_MS + TRIVY_TIMEOUT_MS + 10_000,
 

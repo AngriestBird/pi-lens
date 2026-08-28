@@ -118,7 +118,6 @@ const eslintRunner: RunnerDefinition = {
 	id: "eslint",
 	appliesTo: ["jsts"],
 	priority: PRIORITY.LINT_SECONDARY,
-	enabledByDefault: true,
 
 	async run(ctx: DispatchContext): Promise<RunnerResult> {
 		const cwd = ctx.cwd || process.cwd();

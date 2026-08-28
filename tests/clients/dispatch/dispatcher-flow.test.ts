@@ -217,7 +217,6 @@ describe("Dispatch Flow", () => {
 				id: "lsp",
 				appliesTo: ["go"],
 				priority: 4,
-				enabledByDefault: true,
 				async run() {
 					return { status: "skipped", diagnostics: [], semantic: "none" };
 				},
@@ -226,7 +225,6 @@ describe("Dispatch Flow", () => {
 				id: "go-vet",
 				appliesTo: ["go"],
 				priority: 12,
-				enabledByDefault: true,
 				async run() {
 					return { status: "skipped", diagnostics: [], semantic: "none" };
 				},
@@ -235,7 +233,6 @@ describe("Dispatch Flow", () => {
 				id: "golangci-lint",
 				appliesTo: ["go"],
 				priority: 14,
-				enabledByDefault: true,
 				async run() {
 					return { status: "skipped", diagnostics: [], semantic: "none" };
 				},
@@ -244,7 +241,6 @@ describe("Dispatch Flow", () => {
 				id: "tree-sitter",
 				appliesTo: ["go"],
 				priority: 20,
-				enabledByDefault: true,
 				async run() {
 					return { status: "succeeded", diagnostics: [], semantic: "none" };
 				},
@@ -274,7 +270,6 @@ describe("Dispatch Flow", () => {
 				id: "lsp",
 				appliesTo: ["go"],
 				priority: 4,
-				enabledByDefault: true,
 				async run() {
 					return { status: "skipped", diagnostics: [], semantic: "none" };
 				},
@@ -283,7 +278,6 @@ describe("Dispatch Flow", () => {
 				id: "go-vet",
 				appliesTo: ["go"],
 				priority: 12,
-				enabledByDefault: true,
 				async run() {
 					return { status: "skipped", diagnostics: [], semantic: "none" };
 				},
@@ -292,7 +286,6 @@ describe("Dispatch Flow", () => {
 				id: "eslint",
 				appliesTo: ["jsts"],
 				priority: 15,
-				enabledByDefault: true,
 				async run() {
 					return { status: "succeeded", diagnostics: [], semantic: "none" };
 				},
@@ -334,7 +327,6 @@ describe("Dispatch Flow", () => {
 				id: "lsp",
 				appliesTo: ["jsts"],
 				priority: 4,
-				enabledByDefault: true,
 				async run() {
 					return {
 						status: "succeeded",
@@ -359,7 +351,6 @@ describe("Dispatch Flow", () => {
 				id: "eslint",
 				appliesTo: ["jsts"],
 				priority: 12,
-				enabledByDefault: true,
 				async run() {
 					return {
 						status: "succeeded",
@@ -410,7 +401,6 @@ describe("Dispatch Flow", () => {
 				id: "code-path",
 				appliesTo: ["jsts"],
 				priority: 10,
-				enabledByDefault: true,
 				async run() {
 					return {
 						status: "succeeded",
@@ -443,7 +433,6 @@ describe("Dispatch Flow", () => {
 				id: "first-fail",
 				appliesTo: ["jsts"],
 				priority: 10,
-				enabledByDefault: true,
 				async run() {
 					calls.push("first-fail");
 					return {
@@ -467,7 +456,6 @@ describe("Dispatch Flow", () => {
 				id: "second-success",
 				appliesTo: ["jsts"],
 				priority: 11,
-				enabledByDefault: true,
 				async run() {
 					calls.push("second-success");
 					return {
@@ -491,7 +479,6 @@ describe("Dispatch Flow", () => {
 				id: "third-skipped",
 				appliesTo: ["jsts"],
 				priority: 12,
-				enabledByDefault: true,
 				async run() {
 					calls.push("third-skipped");
 					return { status: "succeeded", diagnostics: [], semantic: "none" };
@@ -884,7 +871,6 @@ describe("Dispatch Flow", () => {
 				id: "ok",
 				appliesTo: ["jsts"],
 				priority: 10,
-				enabledByDefault: true,
 				async run() {
 					return {
 						status: "succeeded",
@@ -906,7 +892,6 @@ describe("Dispatch Flow", () => {
 				id: "boom",
 				appliesTo: ["jsts"],
 				priority: 11,
-				enabledByDefault: true,
 				async run() {
 					throw new Error("kaboom");
 				},
@@ -943,7 +928,6 @@ describe("Dispatch Flow", () => {
 				id: "skipme",
 				appliesTo: ["jsts"],
 				priority: 10,
-				enabledByDefault: true,
 				when: async () => false,
 				async run() {
 					return { status: "succeeded", diagnostics: [], semantic: "none" };

@@ -50,7 +50,6 @@ describe("observed runner collect-later tier (#2116)", () => {
 			id: "fixture-runner",
 			appliesTo: ["jsts"],
 			priority: 1,
-			enabledByDefault: true,
 			run: async () => completed,
 		});
 		const ctx = createDispatchContext(
@@ -130,7 +129,6 @@ describe("observed runner collect-later tier (#2116)", () => {
 			id: "failed-runner",
 			appliesTo: ["jsts"],
 			priority: 1,
-			enabledByDefault: true,
 			run: async () => new Promise<RunnerResult>((r) => (resolve = r)),
 		});
 		const ctx = createDispatchContext(
@@ -174,7 +172,6 @@ describe("observed runner collect-later tier (#2116)", () => {
 			id: "direct-runner",
 			appliesTo: ["jsts"],
 			priority: 1,
-			enabledByDefault: true,
 			run: async () => ({
 				status: "succeeded",
 				diagnostics: [
