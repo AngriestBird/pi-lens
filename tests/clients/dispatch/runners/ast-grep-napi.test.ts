@@ -138,16 +138,15 @@ describe("ast-grep-napi runner — late-auxiliary dedupe (#2324 F3)", () => {
 		try {
 			const filePath = path.join(env.tmpDir, "file.ts");
 			fs.writeFileSync(filePath, "const x = 1;\n");
-			const pendingAux = await import(
-				"../../../../clients/lsp/pending-aux-coverage.js"
-			);
+			const pendingAux =
+				await import("../../../../clients/lsp/pending-aux-coverage.js");
 			pendingAux.resetPendingAuxiliaryCoverage();
 			// Lane 1 arms: the aux-grace wait already found ast-grep silent for
 			// this touch and marked it for turn-end late delivery.
 			pendingAux.markPendingAuxiliaryCoverage(filePath, ["ast-grep"]);
-			expect(
-				pendingAux.hasPendingAuxiliaryCoverage(filePath, "ast-grep"),
-			).toBe(true);
+			expect(pendingAux.hasPendingAuxiliaryCoverage(filePath, "ast-grep")).toBe(
+				true,
+			);
 
 			mockWorkingSgLoad();
 			const mod =
@@ -163,9 +162,9 @@ describe("ast-grep-napi runner — late-auxiliary dedupe (#2324 F3)", () => {
 			// delivered, so the late-auxiliary lane must be consumed — a
 			// pending pair left behind here would redeliver the identical
 			// rule/line at the next turn_end as a duplicate.
-			expect(
-				pendingAux.hasPendingAuxiliaryCoverage(filePath, "ast-grep"),
-			).toBe(false);
+			expect(pendingAux.hasPendingAuxiliaryCoverage(filePath, "ast-grep")).toBe(
+				false,
+			);
 			pendingAux.resetPendingAuxiliaryCoverage();
 		} finally {
 			env.cleanup();
