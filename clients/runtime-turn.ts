@@ -76,7 +76,6 @@ import { knipIssuesToProjectDiagnostics } from "./project-diagnostics/runner-ada
 import type { ProjectDiagnostic } from "./project-diagnostics/types.js";
 import { applyDispositionsMultiFile } from "./diagnostic-dispositions.js";
 import { logLatency } from "./latency-logger.js";
-import { emitBounded } from "./bounded-telemetry.js";
 import {
 	getLspBudgetIdleTimeoutMs,
 	shouldShortenLspIdleTimeout,
@@ -120,6 +119,7 @@ import {
 // (widget-state.ts) can use the marker without importing this orchestrator —
 // see clients/stale-marker.ts's doc comment.
 import { incrementDegradationCount } from "./degradation-ledger.js";
+import { emitBounded } from "./bounded-telemetry.js";
 import {
 	degradeDemotedFindingBody,
 	formatDeliveryCapNote,
