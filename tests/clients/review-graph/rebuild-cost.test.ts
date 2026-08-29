@@ -82,7 +82,11 @@ function duplicateEdgeCount(graph: ReviewGraph): number {
 
 interface RebuildProbe {
 	graph: ReviewGraph;
-	counters: { restoreComparisons: number; importTargetEdgeScans: number };
+	counters: {
+		restoreComparisons: number;
+		importTargetEdgeScans: number;
+		removeOwnedEdgeVisits: number;
+	};
 	nodes: number;
 	edges: number;
 }
@@ -106,6 +110,43 @@ async function warmThenRebuildOneFile(root: string): Promise<RebuildProbe> {
 	const graph = await buildOrUpdateGraph(
 		root,
 		[changed],
+		new FactStore(),
+		seqHint,
+	);
+	return {
+		graph,
+		counters: _getReviewGraphRebuildCountersForTests(),
+		nodes: graph.nodes.size,
+		edges: graph.edges.length,
+	};
+}
+
+/**
+ * Warm the graph, then edit EVERY file in `changedRelative` in one batch and
+ * rebuild through the #451 seq fast path, counting only the rebuild's work.
+ */
+async function warmThenRebuildFiles(
+	root: string,
+	changedRelative: string[],
+): Promise<RebuildProbe> {
+	const changed = changedRelative.map((relative) =>
+		path.join(root, "src", relative),
+	);
+	let seq = 0;
+	const seqHint = {
+		projectSeq: () => seq,
+		getFilesChangedSince: () => changed,
+	};
+	await buildOrUpdateGraph(root, changed, new FactStore(), seqHint);
+	seq++;
+	for (const file of changed) {
+		fs.appendFileSync(file, "\nexport const marker = 1;\n");
+	}
+	clearGraphCache();
+	_resetReviewGraphRebuildCountersForTests();
+	const graph = await buildOrUpdateGraph(
+		root,
+		changed,
 		new FactStore(),
 		seqHint,
 	);
@@ -234,6 +275,34 @@ describe("review-graph one-file rebuild cost (#2074)", () => {
 			);
 			expect(large.counters.importTargetEdgeScans).toBeLessThan(
 				small.edges / 2,
+			);
+		},
+	);
+
+	it(
+		"keeps owned-edge removal proportional to the changed files, not batch size times the graph",
+		{ timeout: 240_000 },
+		async () => {
+			// A 2-file batch: before #2074, removeFileOwnedGraphData scanned the
+			// WHOLE graph.edges array once per changed file in the batch, so a
+			// multi-file rebuild cost changedFiles x graph, not changedFiles x
+			// fan-in/out. Two files changed per fixture isolates that multiplier
+			// from the graph-size axis this suite already covers with one file.
+			const small = await warmThenRebuildFiles(makeRing(16), [
+				"file0.ts",
+				"file1.ts",
+			]);
+			const large = await warmThenRebuildFiles(makeRing(64), [
+				"file0.ts",
+				"file1.ts",
+			]);
+
+			// Sanity: the fixture really did scale, so an O(graph) cost would show.
+			expect(large.nodes).toBeGreaterThan(small.nodes * 3);
+			expect(large.edges).toBeGreaterThan(small.edges * 3);
+
+			expect(large.counters.removeOwnedEdgeVisits).toBe(
+				small.counters.removeOwnedEdgeVisits,
 			);
 		},
 	);
