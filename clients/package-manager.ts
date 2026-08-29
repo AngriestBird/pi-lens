@@ -434,7 +434,8 @@ async function probeGlobalBinDirs(pm: NodePackageManager): Promise<string[]> {
 
 	// npm reports a prefix; binaries live in `<prefix>/bin` on Unix, `<prefix>`
 	// on Windows. pnpm/yarn already print the bin dir directly.
-	const dirs = pm === "npm" ? [onWindows() ? out : path.join(out, "bin")] : [out];
+	const dirs =
+		pm === "npm" ? [onWindows() ? out : path.join(out, "bin")] : [out];
 	globalBinDirCache.set(pm, dirs);
 	return dirs;
 }

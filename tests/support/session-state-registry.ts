@@ -461,7 +461,8 @@ export const SESSION_STATE_REGISTRY: SessionStateEntry[] = [
 	{
 		id: "package-manager:availabilityLatches",
 		module: "package-manager.ts",
-		state: "availabilityLatches and package-manager probe flights",
+		state:
+			"availabilityLatches, globalBinDirCache, and package-manager probe flights",
 		policy: "session_start",
 		resetName: "_resetPackageManagerCache",
 		reason:
@@ -1147,7 +1148,9 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	"mcp/session.ts": 2,
 	"module-report-lsp.ts": 1,
 	"ndjson-logger.ts": 0,
-	"package-manager.ts": 1,
+	// #1602 added `globalBinDirCache` (1 → 2), cleared by the same
+	// `_resetPackageManagerCache` the registry entry above names.
+	"package-manager.ts": 2,
 	"project-changes.ts": 0,
 	// #2146: the container key is a Symbol.for constant, so the scan sees no
 	// mutable module-scope container here.
