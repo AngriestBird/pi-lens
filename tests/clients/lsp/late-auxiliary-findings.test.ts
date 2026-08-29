@@ -736,4 +736,183 @@ describe("turn-end late-auxiliary findings (#2001/#2002)", () => {
 			env.cleanup();
 		}
 	});
+
+	it("re-arms a pair while notify-stall teardown awaits a replacement (#2356)", async () => {
+		const env = setupTestEnvironment("pi-lens-late-aux-demoted-");
+		try {
+			const runtime = new RuntimeCoordinator();
+			runtime.setTelemetryIdentity({ sessionId: "late-aux-demoted" });
+			runtime.beginTurn();
+			const cacheManager = new CacheManager(false);
+			const file = path.join(env.tmpDir, "src", "demoted.ts");
+			registerEdit(env, "late-aux-demoted", cacheManager, file);
+			markPendingAuxiliaryCoverage(file, ["opengrep"], Date.now() - 1000);
+
+			// This is the LSP service's explicit notify-stall teardown status. It is
+			// distinct from an absent client: the old generation was removed, but the
+			// breaker still permits a replacement attempt after cooldown.
+			readCachedDiagnosticsForServers.mockResolvedValue(
+				new Map([
+					[
+						"opengrep",
+						{ diags: [], notifyStallDemoted: true, demotedAt: Date.now() },
+					],
+				]),
+			);
+
+			await handleTurnEnd(makeDeps(runtime, cacheManager, env.tmpDir));
+
+			const pending = drainPendingAuxiliaryCoverage();
+			expect(pending).toHaveLength(1);
+			expect(lateAuxRecord()?.metadata).toMatchObject({
+				notifyStallDemoted: 1,
+				rearmed: 1,
+				clientGone: 0,
+			});
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("re-raises a coverage gap when a demoted scanner has no replacement (#2356)", async () => {
+		const env = setupTestEnvironment("pi-lens-late-aux-demoted-gap-");
+		try {
+			process.env.PI_LENS_LATE_AUX_REARM_TTL_MS = "5000";
+			const runtime = new RuntimeCoordinator();
+			runtime.setTelemetryIdentity({ sessionId: "late-aux-demoted-gap" });
+			runtime.beginTurn();
+			const cacheManager = new CacheManager(false);
+			const file = path.join(env.tmpDir, "src", "demoted-gap.ts");
+			registerEdit(env, "late-aux-demoted-gap", cacheManager, file);
+			markPendingAuxiliaryCoverage(
+				file,
+				["opengrep"],
+				Date.now() - 1000,
+				Date.now() - 1000,
+				MAX_LATE_AUX_REARMS,
+			);
+			readCachedDiagnosticsForServers.mockResolvedValue(
+				new Map([
+					[
+						"opengrep",
+						{ diags: [], notifyStallDemoted: true, demotedAt: Date.now() },
+					],
+				]),
+			);
+
+			await handleTurnEnd(makeDeps(runtime, cacheManager, env.tmpDir));
+
+			expect(drainPendingAuxiliaryCoverage()).toHaveLength(0);
+			expect(lateAuxRecord()?.metadata).toMatchObject({
+				notifyStallDemoted: 1,
+				coverageGapReRaised: 1,
+				clientGone: 0,
+			});
+			const gapRows = logLatency.mock.calls
+				.map(([entry]) => entry)
+				.filter((entry: unknown) => {
+					if (typeof entry !== "object" || entry === null) return false;
+					const record = entry as {
+						phase?: unknown;
+						metadata?: { reRaised?: unknown };
+					};
+					return (
+						record.phase === "lsp_scanner_coverage_gap" &&
+						record.metadata?.reRaised === true
+					);
+				});
+			expect(gapRows).toHaveLength(1);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("correlates notify-stall demotions to each pair generation (#2356)", async () => {
+		const env = setupTestEnvironment("pi-lens-late-aux-demoted-generation-");
+		try {
+			process.env.PI_LENS_LATE_AUX_REARM_TTL_MS = "5000";
+			const runtime = new RuntimeCoordinator();
+			runtime.setTelemetryIdentity({
+				sessionId: "late-aux-demoted-generation",
+			});
+			runtime.beginTurn();
+			const cacheManager = new CacheManager(false);
+			const terminalFile = path.join(env.tmpDir, "src", "terminal.ts");
+			const eligibleFile = path.join(env.tmpDir, "src", "eligible.ts");
+			const postDemotionFile = path.join(env.tmpDir, "src", "post-demotion.ts");
+			registerEdit(
+				env,
+				"late-aux-demoted-generation",
+				cacheManager,
+				terminalFile,
+			);
+			registerEdit(
+				env,
+				"late-aux-demoted-generation",
+				cacheManager,
+				eligibleFile,
+			);
+			registerEdit(
+				env,
+				"late-aux-demoted-generation",
+				cacheManager,
+				postDemotionFile,
+			);
+
+			const demotedAt = Date.now();
+			markPendingAuxiliaryCoverage(
+				terminalFile,
+				["opengrep"],
+				demotedAt - 2,
+				demotedAt - 2,
+				MAX_LATE_AUX_REARMS,
+			);
+			markPendingAuxiliaryCoverage(eligibleFile, ["opengrep"], demotedAt - 1);
+			markPendingAuxiliaryCoverage(
+				postDemotionFile,
+				["opengrep"],
+				demotedAt + 1,
+			);
+			readCachedDiagnosticsForServers.mockImplementation(async () => {
+				return new Map([
+					["opengrep", { diags: [], notifyStallDemoted: true, demotedAt }],
+				]);
+			});
+
+			await handleTurnEnd(makeDeps(runtime, cacheManager, env.tmpDir));
+			const firstDrain = drainPendingAuxiliaryCoverage();
+			expect(firstDrain.map((pair) => pair.filePath)).toEqual([eligibleFile]);
+			expect(lateAuxRecord()?.metadata).toMatchObject({
+				pending: 3,
+				notifyStallDemoted: 2,
+				rearmed: 1,
+				clientGone: 1,
+				coverageGapReRaised: 1,
+			});
+
+			// The terminal pair must not clear the shared marker. The pre-demotion
+			// eligible pair remains attributable and re-arms on the next turn.
+			logLatency.mockClear();
+			runtime.beginTurn();
+			markPendingAuxiliaryCoverage(eligibleFile, ["opengrep"], demotedAt - 1);
+			registerEdit(
+				env,
+				"late-aux-demoted-generation",
+				cacheManager,
+				eligibleFile,
+			);
+			await handleTurnEnd(makeDeps(runtime, cacheManager, env.tmpDir));
+			const secondDrain = drainPendingAuxiliaryCoverage();
+			expect(secondDrain.map((pair) => pair.filePath)).toEqual([eligibleFile]);
+			expect(lateAuxRecord()?.metadata).toMatchObject({
+				pending: 1,
+				notifyStallDemoted: 1,
+				rearmed: 1,
+				clientGone: 0,
+				coverageGapReRaised: 0,
+			});
+		} finally {
+			env.cleanup();
+		}
+	});
 });

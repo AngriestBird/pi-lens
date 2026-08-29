@@ -147,6 +147,7 @@ function makeClient(
 			(filePath: string) => stampsByPath.get(filePath) ?? 0,
 		),
 		getDiagnostics: vi.fn(() => diags),
+		getAllDiagnostics: vi.fn(() => new Map()),
 		notify: {
 			open: vi.fn(() => {
 				inFlight += 1;
@@ -551,6 +552,62 @@ describe("#1459 — sweep fan-out must not black out a scanner silently", () => 
 			true,
 		);
 		expect(aux.shutdown).toHaveBeenCalled();
+	});
+
+	it("keeps a pending late pair attributable across notify-stall teardown (#2356)", async () => {
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const {
+			drainPendingAuxiliaryCoverage,
+			markPendingAuxiliaryCoverage,
+			resetPendingAuxiliaryCoverage,
+		} = await import("../../../clients/lsp/pending-aux-coverage.js");
+		const service = new LSPService();
+		const aux = makeClient("opengrep", undefined, [], "never");
+		const file = `${ROOT}/late.ts`;
+		getServersForFileWithConfig.mockReturnValue([
+			makeServer("opengrep", "auxiliary"),
+		]);
+		(
+			service as unknown as { state: { clients: Map<string, unknown> } }
+		).state.clients.set(AUX_KEY_PREFIX, aux);
+		markPendingAuxiliaryCoverage(file, ["opengrep"], Date.now() - 1000);
+
+		// Call the production teardown seam. It deletes the client, but the
+		// late-pair probe must retain the reason for that temporary absence.
+		(
+			service as unknown as {
+				demoteForNotifyStall: (...args: unknown[]) => void;
+			}
+		).demoteForNotifyStall(
+			AUX_KEY_PREFIX,
+			{ client: aux, info: makeServer("opengrep", "auxiliary") },
+			file,
+			{ outstandingMs: NOTIFY_BUDGET_MS * 5 },
+		);
+
+		const duringCooldown = await service.readCachedDiagnosticsForServers(
+			file,
+			new Set(["opengrep"]),
+		);
+		expect(duringCooldown.get("opengrep")).toMatchObject({
+			notifyStallDemoted: true,
+			demotedAt: expect.any(Number),
+		});
+		expect(aux.shutdown).toHaveBeenCalled();
+		expect(drainPendingAuxiliaryCoverage()).toHaveLength(1);
+
+		// A replacement generation clears the retired-generation marker and is
+		// treated as a normal live cache probe again.
+		const replacement = makeClient("opengrep", 0, [], "never");
+		(
+			service as unknown as { state: { clients: Map<string, unknown> } }
+		).state.clients.set(AUX_KEY_PREFIX, replacement);
+		const afterReplacement = await service.readCachedDiagnosticsForServers(
+			file,
+			new Set(["opengrep"]),
+		);
+		expect(afterReplacement.get("opengrep")).toEqual({ diags: [] });
+		resetPendingAuxiliaryCoverage();
 	});
 
 	it("a queued resync never waits longer than the caller's own budget", async () => {

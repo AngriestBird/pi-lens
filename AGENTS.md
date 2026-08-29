@@ -444,6 +444,16 @@ bounded stuck-pair identity in the phase record. Pair-level retirements and
 finding-level counts use separate fields and reconcile each drained pair to
 one retirement or a pending-after count. (#2151)
 
+Notify-stall teardown is a temporary client-generation absence, not proof that
+an auxiliary scanner is gone. `LSPService` carries that reason through the
+read-only late-coverage probe with the demotion timestamp until a replacement
+generation is published; turn-end correlates each pair's mark to that timestamp
+before re-arming under the same TTL and count ceiling. Pairs marked after
+teardown follow ordinary `clientGone` handling. If no replacement appears
+before that bounded window closes, the pre-demotion pair is retired and
+re-raises `lsp_scanner_coverage_gap` with its server/file identity instead of
+being counted as an ordinary `clientGone` absence. (#2356)
+
 Every auxiliary touch emits one bounded `lsp_aux_wait_outcome` latency row, on
 both producers: the `with-auxiliary` grace wait (`waitShape: "aux_grace"`) and,
 since #1533, the `clientScope: "all"` aggregate wait (`waitShape: "aggregate"`),
