@@ -141,6 +141,17 @@ const BUILTIN_CLEARS = new Set([
 	"clearImmediate",
 ]);
 
+/**
+ * Reset-shaped (or rotate-shaped) bare call names worth following. Shared by
+ * the `handleSessionStart` walk and the session_start-closure walk (#2319).
+ */
+function isResetName(name: string): boolean {
+	return (
+		(RESET_NAME.test(name) || /^rotate[A-Z]/.test(name)) &&
+		!BUILTIN_CLEARS.has(name)
+	);
+}
+
 let cachedResetNames: Set<string> | undefined;
 
 /**
@@ -187,11 +198,8 @@ export function sessionStartResetNames(): Set<string> {
 		);
 	}
 
-	const isReset = (name: string) =>
-		(RESET_NAME.test(name) || /^rotate[A-Z]/.test(name)) &&
-		!BUILTIN_CLEARS.has(name);
 	const reached = new Set<string>();
-	const queue = bareCalls(entry).filter(isReset);
+	const queue = bareCalls(entry).filter(isResetName);
 	while (queue.length > 0) {
 		const name = queue.pop() as string;
 		if (reached.has(name)) continue;
@@ -199,7 +207,7 @@ export function sessionStartResetNames(): Set<string> {
 		const body = bodyOf(name);
 		if (!body) continue;
 		for (const called of bareCalls(body)) {
-			if (isReset(called) && !reached.has(called)) queue.push(called);
+			if (isResetName(called) && !reached.has(called)) queue.push(called);
 		}
 	}
 	cachedResetNames = reached;
@@ -221,6 +229,70 @@ export function resetNameDefinitions(): Map<string, string[]> {
 	return byName;
 }
 
+// ── 1b. What index.ts's session_start closure resets directly (#2319) ────────
+
+/** The repository's root `index.ts`, which owns the session_start closure. */
+function indexEntrySource(): string {
+	return fs.readFileSync(path.join(repoRoot, "index.ts"), "utf8");
+}
+
+/**
+ * The bare calls made DIRECTLY inside index.ts's `pi.on("session_start", ...)`
+ * closure, with comments and string literals removed first. Exported so the
+ * suite can pin this walker against synthetic source, exactly like
+ * {@link callsWithinFunction}.
+ *
+ * The closure is anchored on its raw wrapper registration
+ * (`wrapSessionEventHandler("session_start", async (event, ctx) => {`) and
+ * brace-matched on the STRIPPED source, so a brace inside a string or comment
+ * cannot truncate the body and a call named only in prose is not a call (the
+ * same R1/S1 discipline the `handleSessionStart` walker obeys).
+ */
+export function callsWithinSessionStartClosure(source: string): string[] {
+	const anchor =
+		/wrapSessionEventHandler\(\s*"session_start"\s*,\s*async\s*\([^)]*\)\s*=>\s*\{/.exec(
+			source,
+		);
+	if (!anchor) return [];
+	const openBrace = anchor.index + anchor[0].length - 1;
+	const stripped = stripCommentsAndStrings(source);
+	let depth = 0;
+	for (let i = openBrace; i < stripped.length; i++) {
+		if (stripped[i] === "{") depth++;
+		else if (stripped[i] === "}") {
+			depth--;
+			if (depth === 0) return bareCalls(stripped.slice(openBrace, i + 1));
+		}
+	}
+	return [];
+}
+
+let cachedClosureResetNames: Set<string> | undefined;
+
+/**
+ * The reset-shaped bare calls directly inside index.ts's session_start closure
+ * — #2319.
+ *
+ * {@link sessionStartResetNames} walks `handleSessionStart`'s reachable call
+ * graph. A few resets are deliberately placed in the session_start CLOSURE
+ * itself rather than inside `handleSessionStart`'s body: `resetCurrentPhaseForSession`
+ * (must sit inside the #473 concurrent-secondary gate but before
+ * `handleSessionStart` runs — #1723 review F4), the concurrent-session bind
+ * rollup reset (must run only on the primary continuation path — #2249), and
+ * the verified-attribution tally reset. The registry marks such entries with
+ * `sessionStartClosureReset`, and this walk is the derived evidence the
+ * conformance suite checks them against — a reset that is registered as
+ * closure-wired but never called here reds exactly like an unwired
+ * `handleSessionStart` reset does.
+ */
+export function sessionStartClosureResetNames(): Set<string> {
+	if (cachedClosureResetNames) return cachedClosureResetNames;
+	const names =
+		callsWithinSessionStartClosure(indexEntrySource()).filter(isResetName);
+	cachedClosureResetNames = new Set(names);
+	return cachedClosureResetNames!;
+}
+
 // ── 2. Which files look like they own session-scoped state ───────────────────
 
 /** A source file matching the session-scoped-state code pattern. */
@@ -233,6 +305,11 @@ export interface SessionStateCandidate {
 	resets: string[];
 	/** True when at least one reset is an explicitly test-only seam. */
 	hasTestOnlyReset: boolean;
+	/** True when the file calls `getProcessSingleton(...)` — state on the
+	 *  process-wide container (#2146/#2319). The container's VALUE lives off
+	 *  module scope, so this is the only signal the file owns process-lifetime
+	 *  (possibly session-scoped) state. */
+	hasProcessSingleton: boolean;
 }
 
 /**
@@ -251,13 +328,30 @@ const EXPORTED_RESET = /^export function (_?(?:reset|clear)[A-Za-z0-9_]*)/gm;
 const TEST_ONLY_RESET = /ForTests?$|ForTesting$/;
 
 /**
+ * A call to `getProcessSingleton(` — the file acquires state on the
+ * process-wide container ({@link clients/process-singletons.ts}): a cell whose
+ * correctness depends on being the process's only copy. The VALUE lives off
+ * module scope on `globalThis`, so the module-scope container regex cannot see
+ * it; this is the file-level signal that state is held at process lifetime and
+ * must be classified (session_start / turn_end / process_lifetime) like any
+ * other candidate.
+ *
+ * NO `g` flag, deliberately: `.test()` keeps `lastIndex` between calls on a
+ * global regex, so scanning the second file would resume mid-string and a
+ * legitimate call ahead of the cursor would be missed (this exact bug turned
+ * `session-start-observability.ts` invisible in the first draft of #2319).
+ */
+const PROCESS_SINGLETON_CALL = /getProcessSingleton\s*\(/;
+
+/**
  * What this heuristic catches, and what it structurally cannot.
  *
  * CATCHES — a module-level `Map`/`Set`/`PathKeyedMap` in a file that also
- * exports a reset-shaped function, and any file exporting a
- * `_reset…ForTests`-style seam. That pairing is the observed shape of every
- * process-lifetime-latch bug in the #1266–#1625 arc: state that outlives a
- * session plus a reset nobody calls at the session boundary.
+ * exports a reset-shaped function; a `getProcessSingleton(...)` call in a file
+ * that also exports one; and any file exporting a `_reset…ForTests`-style seam.
+ * Those pairings are the observed shape of every process-lifetime-latch bug in
+ * the #1266–#1625 arc (and #2319's process-singleton twin): state that outlives
+ * a session plus a reset nobody calls at the session boundary.
  *
  * MISSES — and each of these is a real, currently-unguarded class:
  * 1. **Scalar state.** `let installRetryGeneration = 0`, a boolean latch, a
@@ -301,6 +395,7 @@ export const SWEEP_HEURISTIC_LIMITS = [
 	"instance fields on bootstrap-lived singletons",
 	"session-scoped vs import-time-constant semantics",
 	"substitution: add one container, remove another, and the #1817 symbol-count pin sees no change",
+	"getProcessSingleton cells are a SIGNAL, but the cell VALUE lives off module scope on globalThis — a session-scoped cell is still only caught when its file also exports a reset (the pair-with-reset rule), and the cell itself is registered/exempted by hand judgment",
 ] as const;
 
 let cachedCandidates: SessionStateCandidate[] | undefined;
@@ -329,14 +424,18 @@ export function scanSessionStateCandidates(
 		const resets = [...source.matchAll(EXPORTED_RESET)].map((m) => m[1]);
 		if (resets.length === 0) continue;
 		const hasTestOnlyReset = resets.some((r) => TEST_ONLY_RESET.test(r));
-		// Signal A (container + reset) or signal B (an explicit test-only reset
-		// seam, which by itself says "this module holds state tests must undo").
-		if (containers.length === 0 && !hasTestOnlyReset) continue;
+		const hasProcessSingleton = PROCESS_SINGLETON_CALL.test(source);
+		// Signal A (container + reset), signal B (an explicit test-only reset
+		// seam, which by itself says "this module holds state tests must undo"),
+		// or signal C (a getProcessSingleton cell + reset — #2319).
+		if (containers.length === 0 && !hasTestOnlyReset && !hasProcessSingleton)
+			continue;
 		found.push({
 			file: relativePosix(dir, absolute),
 			containers,
 			resets,
 			hasTestOnlyReset,
+			hasProcessSingleton,
 		});
 	}
 	if (useCache) cachedCandidates = found;
