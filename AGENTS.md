@@ -498,8 +498,9 @@ must reach the AGENT-facing surface too
 (`CascadeNeighborResult.unconfirmedServerIds` and the cascade formatter), not
 only the result wrapper. One aggregate `lsp_scanner_coverage_gap` count per
 touch records every pair; detailed re-raised rows use the bounded telemetry
-cap for the current turn, while the degradation ledger retains each
-server/file identity and the aggregate row reports dropped detail.
+cap for the current turn, while the degradation ledger retains a bounded
+latest server/file identity window and its dropped count. The aggregate row
+reports dropped detail, so identities beyond those bounds are not implied.
 #1493's content-hash exemption outranks a deferral: a scanner whose STORED
 publication is bound to exactly these bytes has reported on this file, so the
 skipped resync withholds nothing — it stays covered, and its stored findings

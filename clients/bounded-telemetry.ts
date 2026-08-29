@@ -11,7 +11,8 @@
  * a speculative framework. Three of its four options come straight from those
  * sites. The fourth, `capPerTurn`, expresses #1733's per-turn bound
  * structurally and now caps re-raised auxiliary coverage-gap detail rows
- * (#2356), while the aggregate count and ledger retain every pair.
+ * (#2356), while the aggregate count and ledger retain bounded latest
+ * identities plus the dropped count.
  *
  * Three rules the helper makes structural instead of prose:
  *

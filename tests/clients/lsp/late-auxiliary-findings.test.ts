@@ -30,7 +30,13 @@ const logLatency = vi.hoisted(() => vi.fn());
 vi.mock("../../../clients/latency-logger.js", async (importOriginal) => {
 	const actual =
 		await importOriginal<typeof import("../../../clients/latency-logger.js")>();
-	return { ...actual, logLatency };
+	return {
+		...actual,
+		logLatency: (entry: Parameters<typeof actual.logLatency>[0]) => {
+			logLatency(entry);
+			actual.logLatency(entry);
+		},
+	};
 });
 
 import { CacheManager } from "../../../clients/cache-manager.js";
@@ -55,6 +61,9 @@ import { setupTestEnvironment } from "../test-utils.js";
 // The fixed behavior admits 20 detailed gap rows per turn. The regression uses
 // 24 pairs, so a half-fixed cap still exceeds this bound and turns the test red.
 const EXPECTED_GAP_DETAIL_CAP_PER_TURN = 20;
+// The degradation ledger keeps 20 latest identity/reason entries per kind;
+// excess identities are represented by droppedCount, not retained implicitly.
+const EXPECTED_LEDGER_IDENTITY_CAP = 20;
 
 function diag(line: number, message: string): LSPDiagnostic {
 	return {
@@ -842,7 +851,14 @@ describe("turn-end late-auxiliary findings (#2001/#2002)", () => {
 
 	it("caps re-raised coverage-gap detail while preserving aggregate visibility (#2356)", async () => {
 		const env = setupTestEnvironment("pi-lens-late-aux-demoted-gap-cap-");
+		const previousTestMode = process.env.PI_LENS_TEST_MODE;
+		process.env.PI_LENS_TEST_MODE = "0";
+		const realLatencyLogger = await vi.importActual<
+			typeof import("../../../clients/latency-logger.js")
+		>("../../../clients/latency-logger.js");
 		try {
+			realLatencyLogger.clearLatencyLog();
+			await realLatencyLogger.flushLatencyLog();
 			process.env.PI_LENS_LATE_AUX_REARM_TTL_MS = "5000";
 			const runtime = new RuntimeCoordinator();
 			runtime.setTelemetryIdentity({ sessionId: "late-aux-demoted-gap-cap" });
@@ -871,20 +887,29 @@ describe("turn-end late-auxiliary findings (#2001/#2002)", () => {
 
 			await handleTurnEnd(makeDeps(runtime, cacheManager, env.tmpDir));
 
-			const record = lateAuxRecord();
+			// Read the serialized bytes written by the real logger. The mocked
+			// wrapper above records calls for the surrounding suite, but this proof
+			// verifies the production sink's actual NDJSON surface.
+			await realLatencyLogger.flushLatencyLog();
+			const serializedRows = fs
+				.readFileSync(realLatencyLogger.getLatencyLogPath(), "utf8")
+				.split(/\r?\n/)
+				.filter(Boolean)
+				.map((line) => JSON.parse(line) as any);
+			const record = serializedRows.find(
+				(entry) => entry?.phase === "late_auxiliary_findings",
+			);
 			expect(record?.metadata).toMatchObject({
 				coverageGapReRaised: pairCount,
 				coverageGapReRaisedDetailed: EXPECTED_GAP_DETAIL_CAP_PER_TURN,
 				coverageGapReRaisedDropped:
 					pairCount - EXPECTED_GAP_DETAIL_CAP_PER_TURN,
 			});
-			const gapRows = logLatency.mock.calls
-				.map(([entry]) => entry)
-				.filter(
-					(entry: any) =>
-						entry?.phase === "lsp_scanner_coverage_gap" &&
-						entry?.metadata?.reRaised === true,
-				);
+			const gapRows = serializedRows.filter(
+				(entry) =>
+					entry?.phase === "lsp_scanner_coverage_gap" &&
+					entry?.metadata?.reRaised === true,
+			);
 			expect(gapRows).toHaveLength(EXPECTED_GAP_DETAIL_CAP_PER_TURN);
 			expect(
 				gapRows.every((row: any) =>
@@ -901,7 +926,14 @@ describe("turn-end late-auxiliary findings (#2001/#2002)", () => {
 			const gapLedger = getDegradationSummary().find(
 				(group) => group.kind === "lsp-scanner-coverage-gap",
 			);
-			expect(gapLedger).toMatchObject({ count: pairCount });
+			expect(gapLedger).toMatchObject({
+				count: pairCount,
+				latestReasons: expect.any(Array),
+				droppedCount: pairCount - EXPECTED_LEDGER_IDENTITY_CAP,
+			});
+			expect(gapLedger?.latestReasons).toHaveLength(
+				EXPECTED_LEDGER_IDENTITY_CAP,
+			);
 			expect(
 				gapLedger?.latestReasons.every(
 					(entry) =>
@@ -910,6 +942,8 @@ describe("turn-end late-auxiliary findings (#2001/#2002)", () => {
 				),
 			).toBe(true);
 		} finally {
+			if (previousTestMode === undefined) delete process.env.PI_LENS_TEST_MODE;
+			else process.env.PI_LENS_TEST_MODE = previousTestMode;
 			env.cleanup();
 		}
 	});
