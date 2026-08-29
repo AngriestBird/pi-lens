@@ -35,6 +35,7 @@ import {
 	getToolEnvironment,
 	getToolPath,
 } from "../installer/index.js";
+import * as installer from "../installer/index.js";
 import {
 	classifyProbeFailure,
 	describeInstallAttempt,
@@ -443,18 +444,8 @@ function staleLaunch(
 async function installEvidenceForLaunch(
 	toolId: string,
 	installed: string,
+	attempt: Parameters<typeof describeInstallAttempt>[0],
 ): Promise<Record<string, unknown>> {
-	// Production always exports getInstallAttempt. If an isolated test double
-	// omits it, preserve the honest unknown state rather than treating a truthy
-	// ensureTool path as proof that this call installed anything.
-	const installer = await import("../installer/index.js");
-	let getInstallAttempt: typeof installer.getInstallAttempt | undefined;
-	try {
-		getInstallAttempt = installer.getInstallAttempt;
-	} catch {
-		// Older test doubles do not expose this production export.
-	}
-	const attempt = getInstallAttempt?.(toolId);
 	const evidence = describeInstallAttempt(attempt);
 	const confirmedManagedPath = await findManagedToolBinary(toolId);
 	return {
@@ -465,6 +456,19 @@ async function installEvidenceForLaunch(
 				source: "managed-dir",
 			}),
 	};
+}
+
+function captureInstallAttempt(
+	toolId: string,
+): Parameters<typeof describeInstallAttempt>[0] {
+	try {
+		// Capture synchronously after ensureTool resolves. Reading this later, after
+		// launch/evidence awaits, can observe another concurrent ensure's outcome.
+		return installer.getInstallAttempt?.(toolId);
+	} catch {
+		// Older test doubles do not expose this production export.
+	}
+	return undefined;
 }
 
 /** Re-arm direct-command availability for the next session. */
@@ -785,6 +789,7 @@ export async function resolveAndLaunch(
 		);
 		const installStartedAt = Date.now();
 		const installed = await ensureTool(spec.managedToolId);
+		const installAttempt = captureInstallAttempt(spec.managedToolId);
 		if (staleLaunch(generation, `${toolLabel}:ensureTool`)) {
 			return undefined;
 		}
@@ -834,6 +839,7 @@ export async function resolveAndLaunch(
 				const evidence = await installEvidenceForLaunch(
 					spec.managedToolId,
 					installed,
+					installAttempt,
 				);
 				if (staleLaunch(generation, `${toolLabel}:managed-evidence`, proc)) {
 					return undefined;
@@ -854,6 +860,11 @@ export async function resolveAndLaunch(
 				});
 				return { process: proc, source: "managed" };
 			} catch (err) {
+				if (
+					staleLaunch(generation, `${toolLabel}:launchLSP:managed-rejection`)
+				) {
+					return undefined;
+				}
 				const message = err instanceof Error ? err.message : String(err);
 				logSessionStart(
 					`lsp launch managed failed tool=${spec.managedToolId} command=${installed} error=${message}`,
@@ -883,6 +894,7 @@ export async function resolveAndLaunch(
 					const reinstalled = await ensureTool(spec.managedToolId, {
 						forceReinstall: true,
 					});
+					const reinstallAttempt = captureInstallAttempt(spec.managedToolId);
 					if (staleLaunch(generation, `${toolLabel}:forceReinstall`)) {
 						return undefined;
 					}
@@ -917,6 +929,7 @@ export async function resolveAndLaunch(
 							const evidence = await installEvidenceForLaunch(
 								spec.managedToolId,
 								reinstalled,
+								reinstallAttempt,
 							);
 							if (
 								staleLaunch(

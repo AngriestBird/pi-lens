@@ -469,6 +469,64 @@ describe("resolveAndLaunch — managed-bin availability telemetry (#2140)", () =
 		});
 	});
 
+	it("keeps the ensure invocation's evidence across a concurrent overwrite", async () => {
+		const installedPath = "/home/user/.pi-lens/bin/opengrep";
+		const toolNotFound = Object.assign(new Error("opengrep not found"), {
+			kind: "tool-not-found" as const,
+		});
+		findManagedToolBinary
+			.mockResolvedValueOnce(undefined)
+			.mockResolvedValue(installedPath);
+		let ensureCalls = 0;
+		ensureTool.mockImplementation(async () => {
+			ensureCalls++;
+			if (ensureCalls === 1) {
+				getInstallAttempt.mockReturnValue({
+					outcome: "succeeded",
+					at: Date.now(),
+				});
+				return installedPath;
+			}
+			getInstallAttempt.mockReturnValue({
+				outcome: "failed",
+				reason: "concurrent attempt",
+				at: Date.now(),
+			});
+			return null;
+		});
+		launchLSP.mockRejectedValueOnce(toolNotFound);
+		const launch = suspendAt(launchLSP, async () => fakeProc, { calls: 1 });
+		try {
+			const launching = resolveAndLaunch(
+				{
+					candidates: ["opengrep"],
+					args: [],
+					cwd: "/tmp/proj",
+					managedToolId: "opengrep",
+				},
+				true,
+			);
+			await launch.admitted;
+			// A second ensure overwrites the installer's process-global last-attempt
+			// state while the first LSP launch is still airborne.
+			const concurrentEnsure = ensureTool as unknown as (
+				toolId: string,
+			) => Promise<string | null>;
+			expect(await concurrentEnsure("opengrep")).toBeNull();
+			launch.release();
+			expect(await launching).toMatchObject({ source: "managed" });
+			const rows = await decisionsFor("opengrep");
+			expect(metadataOf(rows[1]).evidence).toMatchObject({
+				install: "succeeded",
+			});
+			expect(metadataOf(rows[1]).evidence).not.toMatchObject({
+				install: "failed",
+			});
+		} finally {
+			launch.restore();
+		}
+	});
+
 	it("does not publish managed availability when managed launch fails but PATH fallback succeeds", async () => {
 		const managedPath = "/home/user/.pi-lens/bin/opengrep";
 		const toolNotFound = Object.assign(new Error("managed binary failed"), {
@@ -519,6 +577,42 @@ describe("resolveAndLaunch — managed-bin availability telemetry (#2140)", () =
 		expect(await launching).toBeUndefined();
 		expect(launchLSP).not.toHaveBeenCalled();
 		expect(await decisionsFor("opengrep")).toHaveLength(0);
+	});
+
+	it("drops a rejected launch after reset before force reinstall can start", async () => {
+		const toolNotFound = Object.assign(new Error("opengrep not found"), {
+			kind: "tool-not-found" as const,
+		});
+		findManagedToolBinary.mockResolvedValue(undefined);
+		launchLSP.mockRejectedValueOnce(toolNotFound);
+		ensureTool.mockResolvedValueOnce("opengrep");
+		const launch = suspendAt(launchLSP, async () => {
+			throw toolNotFound;
+		});
+		try {
+			const launching = resolveAndLaunch(
+				{
+					candidates: ["opengrep"],
+					args: [],
+					cwd: "/tmp/proj",
+					managedToolId: "opengrep",
+				},
+				true,
+			);
+			await launch.admitted;
+			resetLspLaunchAvailabilityGeneration();
+			launch.release();
+			expect(await launching).toBeUndefined();
+			expect(ensureTool).toHaveBeenCalledTimes(1);
+			const rows = await decisionsFor("opengrep");
+			expect(rows).toHaveLength(1);
+			expect(rows[0]?.metadata).toMatchObject({
+				verdict: "unavailable",
+				producer: "lsp-launch",
+			});
+		} finally {
+			launch.restore();
+		}
 	});
 
 	it("drops an ensureTool completion after the LSP generation resets", async () => {
