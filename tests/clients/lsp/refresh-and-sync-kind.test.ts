@@ -34,6 +34,7 @@ import type { PositionEncoding } from "../../../clients/lsp/position-encoding.js
 // fix (openDocumentUris/projectIdentityProbedFiles) and a `syncKind` default,
 // both folded into the shared file directly by this round's rebase.
 import { createMockState } from "./mock-client-state.js";
+import { suspendAt } from "../interleaving-kit.js";
 
 const TEST_FILE = "/project/app.ts";
 const TEST_KEY = normalizeMapKey(TEST_FILE);
@@ -147,49 +148,48 @@ describe("outgoing didChange honors the negotiated sync kind (#1669)", () => {
 			text: "before",
 		});
 
-		let releaseFirstSend!: () => void;
-		const firstSend = new Promise<void>((resolve) => {
-			releaseFirstSend = resolve;
-		});
-		let didChangeSends = 0;
-		vi.mocked(state.connection.sendNotification).mockImplementation(
-			async (method) => {
-				if (method === "textDocument/didChange" && didChangeSends++ === 0)
-					await firstSend;
-			},
+		const suspension = suspendAt(
+			vi.mocked(state.connection.sendNotification),
+			async () => undefined,
+			{ calls: 1 },
 		);
+		try {
+			const first = handleNotifyChange(state, TEST_FILE, "first");
+			await suspension.admitted;
+			const second = handleNotifyChange(state, TEST_FILE, "second");
+			suspension.release();
+			await Promise.all([first, second]);
 
-		const first = handleNotifyChange(state, TEST_FILE, "first");
-		const second = handleNotifyChange(state, TEST_FILE, "second");
-		releaseFirstSend();
-		await Promise.all([first, second]);
-
-		const changes = vi
-			.mocked(state.connection.sendNotification)
-			.mock.calls.filter((call) => call[0] === "textDocument/didChange")
-			.map(
-				(call) =>
-					(
-						call[1] as {
-							contentChanges: Array<{ range?: unknown; text: string }>;
-						}
-					).contentChanges[0],
-			);
-		expect(changes).toHaveLength(2);
-		expect(changes[0]).toEqual({
-			range: {
-				start: { line: 0, character: 0 },
-				end: { line: 0, character: "before".length },
-			},
-			text: "first",
-		});
-		expect(changes[1]).toEqual({
-			range: {
-				start: { line: 0, character: 0 },
-				end: { line: 0, character: "first".length },
-			},
-			text: "second",
-		});
+			const changes = vi
+				.mocked(state.connection.sendNotification)
+				.mock.calls.filter((call) => call[0] === "textDocument/didChange")
+				.map(
+					(call) =>
+						(
+							call[1] as {
+								contentChanges: Array<{ range?: unknown; text: string }>;
+							}
+						).contentChanges[0],
+				);
+			expect(changes).toHaveLength(2);
+			expect(changes[0]).toEqual({
+				range: {
+					start: { line: 0, character: 0 },
+					end: { line: 0, character: "before".length },
+				},
+				text: "first",
+			});
+			expect(changes[1]).toEqual({
+				range: {
+					start: { line: 0, character: 0 },
+					end: { line: 0, character: "first".length },
+				},
+				text: "second",
+			});
+		} finally {
+			suspension.release();
+			suspension.restore();
+		}
 	});
 
 	it("does not overwrite a newer mirror when a lower version is recorded (#2113)", async () => {
