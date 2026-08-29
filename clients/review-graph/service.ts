@@ -55,9 +55,13 @@ export function recordEntitySnapshotDiff(
 	filePath: string,
 	nextSnapshot: Map<string, string>,
 ): { added: string[]; removed: string[]; modified: string[] } {
-	const snapshotKey = `${ENTITY_SNAPSHOT_PREFIX}${filePath}`;
-	// builder.ts reads this one through normalizeMapKey; write it the same way
-	// or the read never hits (#2282 review F3).
+	// Both keys are read through normalizeMapKey elsewhere (builder.ts reads
+	// changedSymbols; the snapshot is only ever re-read by this same function).
+	// Write both under normalizeMapKey or the pair diverges on a case-variant
+	// spelling (#2355): an unnormalized write is a key the reader can never hit,
+	// and an unnormalized snapshot forks a second empty diff. (#2282 review F3,
+	// #210/#1020 class rule.)
+	const snapshotKey = `${ENTITY_SNAPSHOT_PREFIX}${normalizeMapKey(filePath)}`;
 	const changedSymbolsKey = `${CHANGED_SYMBOLS_PREFIX}${normalizeMapKey(filePath)}`;
 	const stored = facts.getBoundedSessionFact<Map<string, string>>(snapshotKey);
 	// An evicted snapshot is unknown, not empty. Diffing against an empty Map

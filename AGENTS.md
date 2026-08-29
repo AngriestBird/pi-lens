@@ -934,6 +934,17 @@ formatter config metadata, and tsconfig-path signatures include recursive
 
 `isFullyQualified` follows host path semantics. Use `isFullyQualifiedWin32` or `isFullyQualifiedPosix` when the consuming path grammar is fixed independently of the host (for example, safe-spawn's Windows resolver).
 
+Every per-file session-fact key in `FactStore`'s bounded map
+(`setBoundedSessionFact`/`getBoundedSessionFact`) writes and reads under one
+normalization per member, applied to both members of the pair. Delta baselines
+(`session.baseline.*`, `dispatcher.ts`) share one per-dispatch constant; the
+cascade baseline (`integration.ts`) and the review-graph
+`changedSymbols`/`entitySnapshot` keys (`clients/review-graph/service.ts` +
+`builder.ts`) fold through `normalizeMapKey` at write and read. A raw-path key
+in this family forks a second empty entity snapshot when one file arrives under
+two case/separator spellings and inverts every symbol to `added` — the #2282 F1
+whole-file-change false positive, re-entered through a re-spelled write (#2355).
+
 Small process-lifetime memo tables use `clients/bounded-cache.ts` when an
 insertion-ordered LRU cap is sufficient; path-root caches still normalize keys
 at the seam. Widget-state's file map remains a plain map because active
