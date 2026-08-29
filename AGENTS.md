@@ -36,6 +36,8 @@ references rot and are evidence-only):
 - Git-guard work: Standing invariants git-guard group.
 - Delegated work: "Role contracts for delegated work" and
   `docs/pi-lens-subagent.md`, plus the selected role contract.
+- Multi-PR orchestration: "Role contracts for delegated work" and
+  `docs/pi-lens-warden.md`.
 - ast-grep or tree-sitter rules: Standing invariants rules group; "ast-grep
   rules"; "Tree-sitter rules".
 - Opening a PR: the PR template headings; the prose contract, blast-radius,
@@ -148,6 +150,7 @@ contract before it starts:
 - Use `docs/pi-lens-fixer.md` to implement an issue or requested change.
 - Use `docs/pi-lens-reviewer.md` to adversarially verify a finished change.
 - Use `docs/pi-lens-investigator.md` to root-cause behavior without editing.
+- Use `docs/pi-lens-warden.md` to audit PR state and route the next handoff.
 
 This routing applies to native subagents, Plegma workers, and any other agent
 runner. Include the contract text or an explicit repository-relative reference
@@ -165,6 +168,21 @@ Do not mix implementation and review in one delegation. If an investigation
 produces a fix, return the diagnosis and start a fixer delegation. If a reviewer
 finds a defect, return the finding and start a fixer round. Run the final review
 against the actual PR head in a separate reviewer delegation.
+
+For concurrent PR work, run the warden after every worker completion, push,
+review verdict, CI verdict, merge, and status request. The warden assigns each
+PR one workflow state, one next action, and one next owner from GitHub and
+registered-worktree evidence. Trigger that owner in the same orchestration
+pass. A completed handoff without a triggered next owner is an orchestration
+defect. Reuse the same fixer and reviewer across correction rounds. Enable
+automerge only after the final head passes required CI and same-reviewer
+verification. The warden remains read-only; Git and GitHub authority stays with
+the orchestrator.
+
+Record every worker handoff on the pull request or another shared ledger. Name
+the role, exact head or working-tree identity, verdict, finding dispositions,
+and next owner. A chat-only result is not durable workflow evidence and cannot
+support a later warden audit.
 
 All delegated roles follow `docs/pi-lens-subagent.md`'s "Tautological tests
 considered harmful" rule. A red-first test is valid only when it reaches the

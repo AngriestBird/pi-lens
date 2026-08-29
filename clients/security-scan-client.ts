@@ -95,6 +95,7 @@ export abstract class SecurityScanClient<TResult> {
 	private logDurableAbsence(evidence?: ProbeEvidence, elapsedMs = 0): void {
 		logAvailabilityDecision({
 			tool: this.toolName,
+			producer: "security-scan",
 			verdict: "unavailable",
 			outcome: "missing",
 			cause: "not-found",
@@ -192,6 +193,7 @@ export abstract class SecurityScanClient<TResult> {
 			this.log(`${this.toolName} found: ${probe.stdout.trim().split("\n")[0]}`);
 			logAvailabilityDecision({
 				tool: this.toolName,
+				producer: "security-scan",
 				verdict: "available",
 				outcome: "success",
 				cause: "ok",
@@ -224,6 +226,7 @@ export abstract class SecurityScanClient<TResult> {
 				: 0;
 		logAvailabilityDecision({
 			tool: this.toolName,
+			producer: "security-scan",
 			verdict: "unavailable",
 			outcome,
 			cause,

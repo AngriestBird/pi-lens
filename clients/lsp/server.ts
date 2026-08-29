@@ -35,6 +35,12 @@ import {
 	getToolEnvironment,
 	getToolPath,
 } from "../installer/index.js";
+import * as installer from "../installer/index.js";
+import {
+	classifyProbeFailure,
+	describeInstallAttempt,
+	logAvailabilityDecision,
+} from "../dispatch/runners/utils/availability-policy.js";
 import { resolveOpengrepConfig } from "../opengrep-config.js";
 import {
 	isZizmorAuditTarget,
@@ -57,6 +63,10 @@ import { resolveJavaRuntimeEnv } from "./jvm-runtime.js";
 import { normalizeMapKey } from "./path-utils.js";
 import { getRubyVersionDirNamesSync } from "./ruby-drive-dirs.js";
 import { getProcessSingleton } from "../process-singletons.js";
+import {
+	createGenerationSource,
+	type GenerationHandle,
+} from "../generation-guard.js";
 
 // --- Types ---
 
@@ -404,6 +414,63 @@ const DIRECT_LSP_NEGATIVE_TTL_MS = Math.max(
 const directLspCommandUnavailableUntil = new Map<string, number>();
 const directLspCommandSkipLoggedUntil = new Map<string, number>();
 
+// Availability rows are emitted from the same async launch path that owns the
+// live LSP generation. A session reset can retire that generation while a
+// managed lookup, install, or launch is still awaiting; stale work must not
+// publish into the replacement session (#2351, shape 22).
+const lspLaunchAvailabilityGeneration = createGenerationSource(
+	"lsp-launch-availability",
+);
+
+export function resetLspLaunchAvailabilityGeneration(): void {
+	lspLaunchAvailabilityGeneration.bump();
+}
+
+function staleLaunch(
+	generation: GenerationHandle,
+	subject: string,
+	proc?: LSPProcess,
+): boolean {
+	if (generation.isCurrent()) return false;
+	try {
+		proc?.process?.kill();
+	} catch {
+		// Best-effort cleanup for a process returned after service retirement.
+	}
+	generation.guardedWrite(subject, () => undefined);
+	return true;
+}
+
+async function installEvidenceForLaunch(
+	toolId: string,
+	installed: string,
+	attempt: Parameters<typeof describeInstallAttempt>[0],
+): Promise<Record<string, unknown>> {
+	const evidence = describeInstallAttempt(attempt);
+	const confirmedManagedPath = await findManagedToolBinary(toolId);
+	return {
+		...evidence,
+		binary: path.basename(installed),
+		...(confirmedManagedPath !== undefined &&
+			pathsEqual(confirmedManagedPath, installed) && {
+				source: "managed-dir",
+			}),
+	};
+}
+
+function captureInstallAttempt(
+	toolId: string,
+): Parameters<typeof describeInstallAttempt>[0] {
+	try {
+		// Capture synchronously after ensureTool resolves. Reading this later, after
+		// launch/evidence awaits, can observe another concurrent ensure's outcome.
+		return installer.getInstallAttempt?.(toolId);
+	} catch {
+		// Older test doubles do not expose this production export.
+	}
+	return undefined;
+}
+
 /** Re-arm direct-command availability for the next session. */
 export function resetDirectLspCommandAvailability(): void {
 	directLspCommandUnavailableUntil.clear();
@@ -512,6 +579,7 @@ export async function resolveAndLaunch(
 	| { process: LSPProcess; source: "direct" | "managed" | "package-manager" }
 	| undefined
 > {
+	const generation = lspLaunchAvailabilityGeneration.capture();
 	const toolLabel =
 		spec.managedToolId ??
 		spec.candidates[spec.candidates.length - 1] ??
@@ -536,9 +604,13 @@ export async function resolveAndLaunch(
 	// `findManagedNodeToolBinary`'s npm-managed fast path (runner-helpers.ts)
 	// and `SecurityScanClient.probeVersion`'s equivalent fix for the CLI-scan
 	// half of this same issue (#2140, landed in PR #2148/#2137).
+	const managedProbeStartedAt = Date.now();
 	const managedCandidate = spec.managedToolId
 		? await findManagedToolBinary(spec.managedToolId)
 		: undefined;
+	if (staleLaunch(generation, `${toolLabel}:findManagedToolBinary`)) {
+		return undefined;
+	}
 	const candidates =
 		managedCandidate && !spec.candidates.includes(managedCandidate)
 			? [managedCandidate, ...spec.candidates]
@@ -579,6 +651,9 @@ export async function resolveAndLaunch(
 				cwd: spec.cwd,
 				env: spec.env,
 			});
+			if (staleLaunch(generation, `${toolLabel}:launchLSP:${command}`, proc)) {
+				return undefined;
+			}
 			logLatency({
 				type: "phase",
 				phase: "lsp_launch_candidate_success",
@@ -594,8 +669,35 @@ export async function resolveAndLaunch(
 			logSessionStart(
 				`lsp launch candidate success tool=${toolLabel} idx=${index} command=${command} source=direct`,
 			);
+			// The managed-dir fast path (#2140) IS the availability probe for a
+			// release-managed tool: a real spawn just confirmed the binary
+			// findManagedToolBinary resolved actually launches. Gated on the exact
+			// managed candidate (never a later bare-PATH fallback), so a session
+			// start with the binary present emits exactly one decision and a
+			// developer-PATH-resolved copy (no managed binary at all) emits none —
+			// unchanged from before this fix.
+			if (managedCandidate !== undefined && command === managedCandidate) {
+				logAvailabilityDecision({
+					tool: toolLabel,
+					verdict: "available",
+					outcome: "success",
+					cause: "ok",
+					elapsedMs: Date.now() - managedProbeStartedAt,
+					latched: false,
+					producer: "lsp-launch",
+					classifiedBy: "probe",
+					evidence: {
+						binary: path.basename(managedCandidate),
+						source: "managed-dir",
+						correctsLatchedRow: false,
+					},
+				});
+			}
 			return { process: proc, source: "direct" };
 		} catch (err) {
+			if (staleLaunch(generation, `${toolLabel}:launchLSP:${command}`)) {
+				return undefined;
+			}
 			const message = err instanceof Error ? err.message : String(err);
 			// Defer logging: only a failure if no later candidate/install succeeds.
 			candidateFailures.push({ index, command, message, err });
@@ -651,10 +753,46 @@ export async function resolveAndLaunch(
 
 	// Step 3 — managed install via installer registry
 	if (spec.managedToolId) {
+		// Neither the managed-dir stat (#2140) nor any bare-PATH candidate
+		// resolved this tool — the negative counterpart to the fast-path
+		// "available" decision above, mirroring `SecurityScanClient.probeVersion`'s
+		// failure record so the negative case is visible in latency.log rather
+		// than swallowed by going straight to the install attempt.
+		const failedCandidate = candidateFailures.at(-1);
+		const classifiedFailure = classifyProbeFailure(
+			{
+				error:
+					failedCandidate?.err instanceof Error
+						? failedCandidate.err
+						: undefined,
+				spawnFailure: {
+					kind: hasSpawnFailureKind(failedCandidate?.err, "tool-not-found")
+						? "tool-not-found"
+						: undefined,
+				},
+			},
+			{ command: failedCandidate?.command },
+		);
+		logAvailabilityDecision({
+			tool: spec.managedToolId,
+			verdict: "unavailable",
+			outcome: classifiedFailure.outcome,
+			cause: classifiedFailure.cause,
+			elapsedMs: Date.now() - managedProbeStartedAt,
+			latched: false,
+			classifiedBy: "probe",
+			producer: "lsp-launch",
+			evidence: classifiedFailure.evidence,
+		});
 		logSessionStart(
 			`lsp launch ensure-tool start tool=${spec.managedToolId} cwd=${spec.cwd}`,
 		);
+		const installStartedAt = Date.now();
 		const installed = await ensureTool(spec.managedToolId);
+		const installAttempt = captureInstallAttempt(spec.managedToolId);
+		if (staleLaunch(generation, `${toolLabel}:ensureTool`)) {
+			return undefined;
+		}
 		logSessionStart(
 			`lsp launch ensure-tool result tool=${spec.managedToolId} installed=${installed ? "yes" : "no"} path=${installed ?? ""}`,
 		);
@@ -675,6 +813,9 @@ export async function resolveAndLaunch(
 					cwd: spec.cwd,
 					env: spec.env,
 				});
+				if (staleLaunch(generation, `${toolLabel}:launchLSP:managed`, proc)) {
+					return undefined;
+				}
 				logSessionStart(
 					`lsp launch managed success tool=${spec.managedToolId} command=${installed} source=managed`,
 				);
@@ -688,8 +829,42 @@ export async function resolveAndLaunch(
 						command: installed,
 					},
 				});
+				// Compensating row for the "unavailable" decision logged above (#1606
+				// shape): the install fixed exactly what the fast path found missing,
+				// so the durable record must not be left saying the tool is off.
+				// `source` is only asserted when a fresh managed-dir lookup confirms
+				// the install actually landed in ~/.pi-lens/bin (github/maven/archive
+				// strategies) rather than an npm/pip/gem install elsewhere, so the
+				// evidence never claims a resolution this call didn't derive.
+				const evidence = await installEvidenceForLaunch(
+					spec.managedToolId,
+					installed,
+					installAttempt,
+				);
+				if (staleLaunch(generation, `${toolLabel}:managed-evidence`, proc)) {
+					return undefined;
+				}
+				logAvailabilityDecision({
+					tool: spec.managedToolId,
+					verdict: "available",
+					outcome: "success",
+					cause: "ok",
+					elapsedMs: Date.now() - installStartedAt,
+					latched: false,
+					classifiedBy: "caller",
+					producer: "lsp-launch",
+					evidence: {
+						...evidence,
+						correctsLatchedRow: false,
+					},
+				});
 				return { process: proc, source: "managed" };
 			} catch (err) {
+				if (
+					staleLaunch(generation, `${toolLabel}:launchLSP:managed-rejection`)
+				) {
+					return undefined;
+				}
 				const message = err instanceof Error ? err.message : String(err);
 				logSessionStart(
 					`lsp launch managed failed tool=${spec.managedToolId} command=${installed} error=${message}`,
@@ -719,12 +894,25 @@ export async function resolveAndLaunch(
 					const reinstalled = await ensureTool(spec.managedToolId, {
 						forceReinstall: true,
 					});
+					const reinstallAttempt = captureInstallAttempt(spec.managedToolId);
+					if (staleLaunch(generation, `${toolLabel}:forceReinstall`)) {
+						return undefined;
+					}
 					if (reinstalled) {
 						try {
 							const proc = await launchLSP(reinstalled, spec.args, {
 								cwd: spec.cwd,
 								env: spec.env,
 							});
+							if (
+								staleLaunch(
+									generation,
+									`${toolLabel}:launchLSP:forceReinstall`,
+									proc,
+								)
+							) {
+								return undefined;
+							}
 							logSessionStart(
 								`lsp launch managed force-reinstall success tool=${spec.managedToolId} command=${reinstalled}`,
 							);
@@ -736,6 +924,34 @@ export async function resolveAndLaunch(
 								metadata: {
 									tool: spec.managedToolId,
 									command: reinstalled,
+								},
+							});
+							const evidence = await installEvidenceForLaunch(
+								spec.managedToolId,
+								reinstalled,
+								reinstallAttempt,
+							);
+							if (
+								staleLaunch(
+									generation,
+									`${toolLabel}:forceReinstall-evidence`,
+									proc,
+								)
+							) {
+								return undefined;
+							}
+							logAvailabilityDecision({
+								tool: spec.managedToolId,
+								verdict: "available",
+								outcome: "success",
+								cause: "ok",
+								elapsedMs: Date.now() - installStartedAt,
+								latched: false,
+								classifiedBy: "caller",
+								producer: "lsp-launch",
+								evidence: {
+									...evidence,
+									correctsLatchedRow: false,
 								},
 							});
 							return { process: proc, source: "managed" };
@@ -752,21 +968,34 @@ export async function resolveAndLaunch(
 	}
 
 	// Step 4 — language-native runtime install (go install, gem install, …)
-	if (
-		spec.runtimeInstall &&
-		(await isOnPath(spec.runtimeInstall.runtimeCommand))
-	) {
-		const ok = await spec.runtimeInstall.install();
+	const runtimeInstall = spec.runtimeInstall;
+	const runtimeAvailable = runtimeInstall
+		? await isOnPath(runtimeInstall.runtimeCommand)
+		: false;
+	if (staleLaunch(generation, `${toolLabel}:runtimeAvailability`)) {
+		return undefined;
+	}
+	if (runtimeInstall && runtimeAvailable) {
+		const ok = await runtimeInstall.install();
+		if (staleLaunch(generation, `${toolLabel}:runtimeInstall`)) {
+			return undefined;
+		}
 		if (ok) {
-			const retry = spec.runtimeInstall.retryCandidates ?? spec.candidates;
+			const retry = runtimeInstall.retryCandidates ?? spec.candidates;
 			for (const command of retry) {
 				try {
 					const proc = await launchLSP(command, spec.args, {
 						cwd: spec.cwd,
 						env: spec.env,
 					});
+					if (staleLaunch(generation, `${toolLabel}:launchLSP:runtime`, proc)) {
+						return undefined;
+					}
 					return { process: proc, source: "managed" };
 				} catch (err) {
+					if (staleLaunch(generation, `${toolLabel}:launchLSP:runtime`)) {
+						return undefined;
+					}
 					trackRuntimeFailure(err);
 					// try next
 				}

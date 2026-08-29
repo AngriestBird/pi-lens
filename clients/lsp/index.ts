@@ -93,6 +93,7 @@ import {
 	hasProjectBoundaryMarker,
 	isDirectLspCommandTemporarilyUnavailable,
 	resetClassicTsRepairGuard,
+	resetLspLaunchAvailabilityGeneration,
 } from "./server.js";
 import {
 	classifyCascadeWaitTier,
@@ -8946,6 +8947,10 @@ export async function notifyExternalFileChange(
 }
 
 export function resetLSPService(options: LSPShutdownOptions = {}): void {
+	// Invalidate availability publication started by the retiring service before
+	// any asynchronous teardown. The launch seam checks this generation after
+	// every managed lookup, install, and process launch (#2351).
+	resetLspLaunchAvailabilityGeneration();
 	// A new session must get its own classic-tsserver-repair attempt: the
 	// guard is a process-lifetime flag (see resetClassicTsRepairGuard), so a
 	// repair that failed transiently in an earlier session must not stay
