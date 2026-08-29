@@ -121,6 +121,7 @@ import { resetWorkspaceTopology } from "./workspace-topology.js";
 import { resetZizmorTokenAvailability } from "./zizmor-config.js";
 import { resetSpawnTimeoutCooldowns } from "./spawn-timeout-cooldown.js";
 import { resetTestRunnerDelivery } from "./test-runner-delivery.js";
+import type { SessionStartClassification } from "./session-lifecycle.js";
 
 interface SessionStartDeps {
 	ctxCwd?: string;
@@ -152,6 +153,18 @@ interface SessionStartDeps {
 	 * run. Pass `"full"` from `clients/mcp/session.ts`.
 	 */
 	startupModeOverride?: StartupMode;
+	/**
+	 * #2129 observability: the classification `decideSessionStart` already made
+	 * for this start, before this handler ever runs (a declined start never
+	 * reaches here). Logged alongside `session_start_total`'s `mode` field so a
+	 * log reader can tell "sequential-replacement" from "primary" without
+	 * cross-referencing `concurrent_session_bind`, which only fires for the
+	 * declined side.
+	 */
+	sessionStartClassification?: SessionStartClassification;
+	/** The root-identity input that classification consulted (mirrors
+	 *  `ClassifySessionStartInput.sameRoot`). */
+	sessionStartSameRoot?: boolean;
 	runtime: RuntimeCoordinator;
 	metricsClient: MetricsClient;
 	cacheManager: CacheManager;
@@ -2462,7 +2475,16 @@ export async function handleSessionStart(
 			filePath: cwd,
 			startedAt: new Date(sessionStartMs).toISOString(),
 			durationMs: totalDurationMs,
-			metadata: { mode: startupMode, reason: deps.sessionReason },
+			metadata: {
+				mode: startupMode,
+				reason: deps.sessionReason,
+				// #2129: the root-identity input decideSessionStart consulted,
+				// alongside `mode` — every start reaching this line already
+				// classified `primary`/`sequential-replacement` (a `secondary-root`
+				// start returns before `handleSessionStart` is ever called).
+				classification: deps.sessionStartClassification,
+				sameRoot: deps.sessionStartSameRoot,
+			},
 		});
 		logHostReadyDelay(deps, cwd);
 		emitSmellsSessionStartLine(dbg, sessionStartMs);
@@ -2889,7 +2911,13 @@ export async function handleSessionStart(
 		filePath: cwd,
 		startedAt: new Date(sessionStartMs).toISOString(),
 		durationMs: totalDurationMs,
-		metadata: { mode: startupMode, reason: deps.sessionReason },
+		metadata: {
+			mode: startupMode,
+			reason: deps.sessionReason,
+			// #2129: see the quick-mode session_start_total record above.
+			classification: deps.sessionStartClassification,
+			sameRoot: deps.sessionStartSameRoot,
+		},
 	});
 	logHostReadyDelay(deps, cwd);
 	emitSmellsSessionStartLine(dbg, sessionStartMs);
