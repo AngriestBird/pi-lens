@@ -23,6 +23,12 @@ next action. Use one state from this closed set:
 - `READY_AUTOMERGE`
 - `MERGED`
 
+A worker result becomes durable workflow evidence only when the orchestrator
+records its role, exact head or working-tree identity, verdict, dispositions,
+and next owner on the pull request or another shared ledger. Chat-only results
+cannot drive a later audit. Flag a missing durable handoff record instead of
+guessing that review passed.
+
 Assign an owner and next action whenever the state changes. Reuse the same
 fixer for correction rounds and the same reviewer for verification rounds. A
 completed handoff without a triggered next owner is an orchestration defect;

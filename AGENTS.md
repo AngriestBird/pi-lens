@@ -179,6 +179,11 @@ automerge only after the final head passes required CI and same-reviewer
 verification. The warden remains read-only; Git and GitHub authority stays with
 the orchestrator.
 
+Record every worker handoff on the pull request or another shared ledger. Name
+the role, exact head or working-tree identity, verdict, finding dispositions,
+and next owner. A chat-only result is not durable workflow evidence and cannot
+support a later warden audit.
+
 All delegated roles follow `docs/pi-lens-subagent.md`'s "Tautological tests
 considered harmful" rule. A red-first test is valid only when it reaches the
 real seam, observes an independent result, and turns red when its guard or
