@@ -143,6 +143,7 @@ const BASELINE_KEYS = [
 	"hostStallMs",
 	"latched",
 	"outcome",
+	"producer",
 	"tool",
 	"verdict",
 ];
@@ -297,6 +298,7 @@ describe.each(CONSUMERS)("probeVersion telemetry: %s (#1501)", (tool) => {
 			"evidence",
 			"latched",
 			"outcome",
+			"producer",
 			"tool",
 			"verdict",
 		]);

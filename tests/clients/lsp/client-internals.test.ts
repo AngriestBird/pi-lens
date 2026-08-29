@@ -63,6 +63,8 @@ import { applyWorkspaceEdit } from "../../../clients/lsp/edits.js";
 // #1667: the LSPClientState fixture moved to a shared module so the
 // multi-identifier pull tests reuse it instead of maintaining a copy.
 import { createMockLspProcess, createMockState } from "./mock-client-state.js";
+import { gatedPromise } from "../../support/fault-injection.js";
+import { waitFor } from "../interleaving-kit.js";
 
 const TEST_FILE = "/project/app.ts";
 const TEST_KEY = normalizeMapKey(TEST_FILE);
@@ -584,6 +586,53 @@ describe("stripDiagnosticNoiseLines", () => {
 });
 
 describe("clientShutdown", () => {
+	it("settles superseded callers and cancels unwritten work without running it (#2357)", async () => {
+		const state = createMockState();
+		state.openDocuments.add(TEST_KEY);
+		state.documentVersions.set(TEST_KEY, 0);
+		const writeGate = gatedPromise<void>();
+		let didChangeCalls = 0;
+		vi.mocked(state.connection.sendNotification).mockImplementation(
+			async (method) => {
+				if (method === "textDocument/didChange") {
+					didChangeCalls++;
+					await writeGate.promise;
+				}
+			},
+		);
+
+		try {
+			const first = handleNotifyChange(state, TEST_FILE, "v1");
+			await waitFor(
+				() => didChangeCalls,
+				(calls) => calls === 1,
+			);
+			let pendingSettled = 0;
+			const second = handleNotifyChange(state, TEST_FILE, "v2").finally(
+				() => pendingSettled++,
+			);
+			const newest = handleNotifyChange(state, TEST_FILE, "v3").finally(
+				() => pendingSettled++,
+			);
+
+			await clientShutdown(state, { fast: true });
+			expect(state.notifyChangeQueues.size).toBe(0);
+			expect(didChangeCalls).toBe(1);
+			await waitFor(
+				() => pendingSettled,
+				(count) => count === 2,
+				{ timeoutMs: 1_000 },
+			);
+			await expect(second).resolves.toBeUndefined();
+			await expect(newest).resolves.toBeUndefined();
+
+			writeGate.resolve();
+			await expect(first).resolves.toBeUndefined();
+		} finally {
+			writeGate.resolve();
+		}
+	});
+
 	it("skips LSP protocol handshake in fast mode", async () => {
 		const process = {
 			killed: false,
@@ -655,6 +704,22 @@ describe("handleNotifyOpen", () => {
 		const didOpenCall = calls.find((c) => c[0] === "textDocument/didOpen");
 		expect(didOpenCall).toBeDefined();
 		expect(state.openDocuments.has(TEST_KEY)).toBe(true);
+	});
+
+	it("coalesces same-file didOpen bursts to the newest content (#2357)", async () => {
+		const state = createMockState();
+		const first = handleNotifyOpen(state, TEST_FILE, "v1", "typescript");
+		const second = handleNotifyOpen(state, TEST_FILE, "v2", "typescript");
+		const newest = handleNotifyOpen(state, TEST_FILE, "v3", "typescript");
+		await Promise.all([first, second, newest]);
+
+		const opens = vi
+			.mocked(state.connection.sendNotification)
+			.mock.calls.filter(([method]) => method === "textDocument/didOpen");
+		expect(opens).toHaveLength(1);
+		expect(
+			(opens[0][1] as { textDocument: { text: string } }).textDocument.text,
+		).toBe("v3");
 	});
 
 	it("#1641 F4: lsp_document_send's contentLineCount matches the gate's LSP-addressable convention (newlines + 1), not wc -l", async () => {
@@ -1124,6 +1189,122 @@ describe("handleNotifyChange", () => {
 		await handleNotifyChange(state, TEST_FILE, "const y = 2;");
 
 		expect(state.connection.sendNotification).not.toHaveBeenCalled();
+	});
+
+	it("coalesces a same-file burst before a non-draining write starts (#2357)", async () => {
+		const state = createMockState();
+		state.openDocuments.add(TEST_KEY);
+		state.documentVersions.set(TEST_KEY, 0);
+		const writeGate = gatedPromise<void>();
+		vi.mocked(state.connection.sendNotification).mockImplementation(
+			async () => writeGate.promise,
+		);
+		logLatencyMock.mockClear();
+
+		try {
+			let settled = 0;
+			const first = handleNotifyChange(state, TEST_FILE, "v1").finally(
+				() => settled++,
+			);
+			const second = handleNotifyChange(state, TEST_FILE, "v2").finally(
+				() => settled++,
+			);
+			const newest = handleNotifyChange(state, TEST_FILE, "v3").finally(
+				() => settled++,
+			);
+			await Promise.resolve();
+
+			const writes = vi
+				.mocked(state.connection.sendNotification)
+				.mock.calls.filter(([method]) => method === "textDocument/didChange");
+			expect(writes).toHaveLength(1);
+			expect(
+				(writes[0][1] as { contentChanges: Array<{ text: string }> })
+					.contentChanges[0].text,
+			).toBe("v3");
+			writeGate.resolve();
+			await waitFor(
+				() => settled,
+				(count) => count === 3,
+				{
+					timeoutMs: 1_000,
+				},
+			);
+			await Promise.all([first, second, newest]);
+
+			const sendRecord = logLatencyMock.mock.calls.find(
+				([entry]) => entry?.phase === "lsp_document_send",
+			);
+			expect(sendRecord?.[0].metadata.coalescedCount).toBe(2);
+		} finally {
+			writeGate.resolve();
+		}
+	});
+
+	it("rejects a started write while continuing with the newer pending entry (#2357)", async () => {
+		const state = createMockState();
+		state.openDocuments.add(TEST_KEY);
+		state.documentVersions.set(TEST_KEY, 0);
+		const firstWrite = gatedPromise<void>();
+		let didChangeCalls = 0;
+		vi.mocked(state.connection.sendNotification).mockImplementation(
+			async (method) => {
+				if (method !== "textDocument/didChange") return;
+				didChangeCalls++;
+				if (didChangeCalls === 1) {
+					await firstWrite.promise;
+					throw new Error("first didChange failed");
+				}
+			},
+		);
+
+		try {
+			const first = handleNotifyChange(state, TEST_FILE, "v1");
+			await waitFor(
+				() => didChangeCalls,
+				(calls) => calls === 1,
+			);
+			const newer = handleNotifyChange(state, TEST_FILE, "v2");
+			firstWrite.resolve();
+
+			await expect(first).rejects.toThrow("first didChange failed");
+			await waitFor(
+				() => didChangeCalls,
+				(calls) => calls === 2,
+				{ timeoutMs: 1_000 },
+			);
+			await expect(newer).resolves.toBeUndefined();
+			expect(state.notifyChangeQueues.size).toBe(0);
+		} finally {
+			firstWrite.resolve();
+		}
+	});
+
+	it("keeps different files independent while coalescing each file (#2357)", async () => {
+		const state = createMockState();
+		const otherFile = "/project/other.ts";
+		state.openDocuments.add(TEST_KEY);
+		state.openDocuments.add(normalizeMapKey(otherFile));
+		state.documentVersions.set(TEST_KEY, 0);
+		state.documentVersions.set(normalizeMapKey(otherFile), 0);
+
+		const a1 = handleNotifyChange(state, TEST_FILE, "a1");
+		const a2 = handleNotifyChange(state, TEST_FILE, "a2");
+		const b1 = handleNotifyChange(state, otherFile, "b1");
+		const b2 = handleNotifyChange(state, otherFile, "b2");
+		await Promise.all([a1, a2, b1, b2]);
+
+		const writes = vi
+			.mocked(state.connection.sendNotification)
+			.mock.calls.filter(([method]) => method === "textDocument/didChange");
+		expect(writes).toHaveLength(2);
+		expect(
+			writes.map(
+				([, params]) =>
+					(params as { contentChanges: Array<{ text: string }> })
+						.contentChanges[0].text,
+			),
+		).toEqual(["a2", "b2"]);
 	});
 });
 
