@@ -17,7 +17,6 @@ import type { CacheManager } from "./cache-manager.js";
 import { emitBounded } from "./bounded-telemetry.js";
 import type { RuntimeCoordinator } from "./runtime-coordinator.js";
 import { peekTestFindings } from "./runtime-context.js";
-import { normalizeMapKey } from "./path-utils.js";
 import { fitLines } from "./tui-fit.js";
 import type { Component } from "./deps/pi-tui.js";
 
@@ -44,7 +43,10 @@ interface PendingDelivery {
 const pending = new Map<string, PendingDelivery>();
 
 function key(cwd: string, sessionId: string): string {
-	return `${normalizeMapKey(cwd)}\u0000${sessionId}`;
+	// `cwd` comes from the same host session field at turn_end and settle. Keep
+	// that canonical value unchanged so cache reads use the identical workspace
+	// identity; dispatch contexts already normalize their own path fields.
+	return `${cwd}\u0000${sessionId}`;
 }
 
 function boundedContent(content: string): {
