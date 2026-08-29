@@ -944,6 +944,9 @@ cascade baseline (`integration.ts`) and the review-graph
 in this family forks a second empty entity snapshot when one file arrives under
 two case/separator spellings and inverts every symbol to `added` — the #2282 F1
 whole-file-change false positive, re-entered through a re-spelled write (#2355).
+`recordEntitySnapshotDiff` computes that folded path once per call and reuses it
+for both fact keys; do not reintroduce a second realpath probe on this runner
+hot path.
 
 Small process-lifetime memo tables use `clients/bounded-cache.ts` when an
 insertion-ordered LRU cap is sufficient; path-root caches still normalize keys
