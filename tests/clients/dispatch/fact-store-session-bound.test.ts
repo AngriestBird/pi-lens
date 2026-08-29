@@ -323,5 +323,54 @@ describe("FactStore session-fact bound (#2282)", () => {
 				"Gamma",
 			]);
 		});
+
+		// #2355's own probe shape: `recordEntitySnapshotDiff` is called with the
+		// agent-supplied spelling, while builder.ts reads the key under
+		// normalizeMapKey. A case-variant PAIR (`src/Target.ts` written, the read
+		// arriving as `src/target.ts`) must land on the same normalized key — the
+		// same written stone, one lowercase slot. Red on the pre-#2282 raw-path
+		// writer: the raw `C:/.../Target.ts` key is unreadable from the lowercase
+		// read spelling. Both spellings are win32-shaped and nonexistent, so
+		// normalizeMapKey folds them deterministically on every OS (#1150 shape).
+		it("serves a changedSymbols write to a case-variant read spelling (closes #2355)", () => {
+			const store = new FactStore("dispatch");
+			const writeSpelling = "C:/repo/2355/src/Target.ts";
+			const readSpelling = "c:/repo/2355/src/target.ts";
+			expect(writeSpelling).not.toBe(readSpelling);
+			expect(normalizeMapKey(writeSpelling)).toBe(
+				normalizeMapKey(readSpelling),
+			);
+
+			recordEntitySnapshotDiff(store, writeSpelling, snapshot());
+
+			const readKey = `session.reviewGraph.changedSymbols:${normalizeMapKey(readSpelling)}`;
+			expect(store.getBoundedSessionFact<string[]>(readKey)).toEqual([
+				"alpha",
+				"beta",
+				"Gamma",
+			]);
+		});
+
+		// The entity-snapshot key is the sibling of changedSymbols in the same
+		// function, and it was stored raw on both sides. Within one call the pair
+		// is self-consistent, so the raw key only bites ACROSS spellings: editing
+		// the same file under a second spelling read an empty prior snapshot and
+		// inverted every symbol to `added` — the #2282 F1 whole-file-change
+		// false positive, re-entered through a different door. The snapshot key
+		// must normalize exactly like the changedSymbols key it pairs with.
+		it("diffs a re-spelled file against its own snapshot, not an empty one (refs #2355)", () => {
+			const store = new FactStore("dispatch");
+			const firstSpelling = "C:/repo/2355/src/Target.ts";
+			const reSpelling = "c:/repo/2355/src/target.ts";
+			expect(normalizeMapKey(firstSpelling)).toBe(normalizeMapKey(reSpelling));
+
+			recordEntitySnapshotDiff(store, firstSpelling, snapshot());
+
+			expect(recordEntitySnapshotDiff(store, reSpelling, snapshot())).toEqual({
+				added: [],
+				removed: [],
+				modified: [],
+			});
+		});
 	});
 });

@@ -1339,6 +1339,15 @@ export class LSPService {
 			wedgeTimer: ReturnType<typeof setTimeout>;
 		}
 	>();
+	/**
+	 * #2356: auxiliary clients removed by the notify-stall breaker are a
+	 * temporary absence, not a missing scanner. Keep the demotion identity after
+	 * deleting the client so the turn-end late-coverage probe can re-arm the
+	 * pending pair until a replacement is published (or its existing bounded
+	 * re-arm ceiling is reached). A successful replacement removes the marker.
+	 */
+	private readonly notifyStallDemotions = new Map<string, number>();
+	private static readonly MAX_NOTIFY_STALL_DEMOTIONS = 50;
 	/** LRU clock for capacity eviction, keyed by the canonical server/root key. */
 	private readonly clientLastUsedAt = new Map<string, number>();
 	/**
@@ -1821,6 +1830,14 @@ export class LSPService {
 		// at the ceiling and pay a barrier on its first file.
 		this.auxNotifyInflight.delete(key);
 		this.state.broken.set(key, Date.now() + BROKEN_BASE_COOLDOWN_MS);
+		this.notifyStallDemotions.set(key, Date.now());
+		while (
+			this.notifyStallDemotions.size > LSPService.MAX_NOTIFY_STALL_DEMOTIONS
+		) {
+			const oldest = this.notifyStallDemotions.keys().next().value;
+			if (oldest === undefined) break;
+			this.notifyStallDemotions.delete(oldest);
+		}
 		void entry.client.shutdown().catch(() => {});
 		this.state.clients.delete(key);
 		this.state.clientSpawnedAt.delete(key);
@@ -2749,9 +2766,11 @@ export class LSPService {
 	 * the Gate-B readiness check, this NEVER creates or warms a client — it only
 	 * resolves each requested server's root and reads the already-connected
 	 * client's cached diagnostics for `filePath`. Servers with no live client
-	 * are simply absent from the returned map. A live client is present only
-	 * when its per-file cache entry exists; its timestamp distinguishes a
-	 * published clean result from no publication.
+	 * are absent unless notify-stall teardown marked that generation as
+	 * replaceable; that status carries the demotion timestamp so turn-end late
+	 * coverage can correlate each pair to the removed generation. A live
+	 * client is present even when its per-file cache entry is empty; its
+	 * timestamp distinguishes a published clean result from no publication.
 	 */
 	async readCachedDiagnosticsForServers(
 		filePath: string,
@@ -2759,12 +2778,24 @@ export class LSPService {
 	): Promise<
 		Map<
 			string,
-			{ diags: import("./client.js").LSPDiagnostic[]; publishedAt?: number }
+			{
+				diags: import("./client.js").LSPDiagnostic[];
+				publishedAt?: number;
+				/** The client was removed by notify-stall teardown and may be replaced. */
+				notifyStallDemoted?: boolean;
+				/** When the demoted client generation was removed. */
+				demotedAt?: number;
+			}
 		>
 	> {
 		const out = new Map<
 			string,
-			{ diags: import("./client.js").LSPDiagnostic[]; publishedAt?: number }
+			{
+				diags: import("./client.js").LSPDiagnostic[];
+				publishedAt?: number;
+				notifyStallDemoted?: boolean;
+				demotedAt?: number;
+			}
 		>();
 		if (this.checkDestroyed() || serverIds.size === 0) return out;
 		for (const server of getServersForFileWithConfig(filePath)) {
@@ -2773,7 +2804,20 @@ export class LSPService {
 			if (!root) continue;
 			const key = `${server.id}:${normalizeMapKey(root)}`;
 			const client = this.state.clients.get(key);
-			if (!client?.isAlive()) continue;
+			if (!client?.isAlive()) {
+				const demotedAt = this.notifyStallDemotions.get(key);
+				if (demotedAt !== undefined) {
+					out.set(server.id, {
+						diags: [],
+						notifyStallDemoted: true,
+						demotedAt,
+					});
+				}
+				continue;
+			}
+			// A replacement is live again. The old generation's marker no longer
+			// describes this client and must not make a later absence look transient.
+			this.notifyStallDemotions.delete(key);
 			const entry = client.getAllDiagnostics().get(normalizeMapKey(filePath));
 			out.set(server.id, {
 				diags: entry?.diags ?? [],
@@ -3557,6 +3601,9 @@ export class LSPService {
 						};
 
 			this.state.clients.set(key, client);
+			// #2356: this generation is the replacement the late-coverage probe was
+			// waiting for. Clear the retired-generation marker before any later probe.
+			this.notifyStallDemotions.delete(key);
 			this.unavailableLogged.delete(key);
 			// #1934 review F1: a success retires the previous verdict, so the map
 			// never outlives the attempts it describes.
@@ -5624,9 +5671,7 @@ export class LSPService {
 						reason: reasons.join(", ") || "scanner coverage gap",
 					});
 				}
-				logLatency({
-					type: "phase",
-					phase: "lsp_scanner_coverage_gap",
+				emitBounded("lsp_scanner_coverage_gap", `${source}:${normalizedPath}`, {
 					filePath: normalizedPath,
 					durationMs: Date.now() - startedAt,
 					metadata: {
@@ -5635,10 +5680,10 @@ export class LSPService {
 						...(brokenSkippedServerIds.length > 0 && {
 							brokenSkippedServerIds,
 						}),
-						// #1586: the deferrals this touch is actually uncovered for. The raw
+						// #1586: the deferrals this touch is actually uncovered for. The
 						// gate action keeps its own record in `lsp_notify_resync_deferred`;
-						// this row exists to prove a blackout, and a scanner already bound to
-						// these bytes is not one.
+						// this row exists to prove a blackout, and a scanner already bound
+						// to these bytes is not one.
 						...(uncoveredDeferredServerIds.length > 0 && {
 							deferredResyncServerIds: uncoveredDeferredServerIds,
 						}),
@@ -8694,6 +8739,7 @@ export class LSPService {
 		// describe a live one. The gate's identity check already neutralises a stale
 		// entry; clearing keeps the map honest rather than relying on that.
 		this.outstandingAuxNotifyWrites.clear();
+		this.notifyStallDemotions.clear();
 		// #1714: same reasoning — a backlog count belongs to a client generation,
 		// and every client is gone. `session_start` reaches this through the service
 		// reset, so the pacing state re-arms with the session rather than living for

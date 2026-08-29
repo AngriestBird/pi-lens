@@ -10,9 +10,9 @@
  * get the bounding right. This module is the intersection of those four, not
  * a speculative framework. Three of its four options come straight from those
  * sites. The fourth, `capPerTurn`, expresses #1733's per-turn bound
- * structurally but has no caller yet: that site's bound is its call cadence,
- * and pinning a cap there would red its own wiring tests. It ships tested and
- * mutation-proofed, awaiting its first site.
+ * structurally and now caps re-raised auxiliary coverage-gap detail rows
+ * (#2356), while the aggregate count and ledger retain bounded latest
+ * identities plus the dropped count.
  *
  * Three rules the helper makes structural instead of prose:
  *
@@ -38,7 +38,7 @@
  * stated reason for staying raw.
  *
  * Nothing here ever throws. Telemetry must not perturb the path it observes —
- * every one of the four migrated sites had already decided its outcome before
+ * each caller has already decided its outcome before
  * calling in.
  */
 
@@ -118,6 +118,10 @@ export const BOUNDED_TELEMETRY_PHASES = [
 	 * command was declined on an UNKNOWN rather than assumed clean.
 	 */
 	"shared_checkout_probe_failed",
+	/** #2356: a notify-stall auxiliary remained uncovered after its bounded
+	 * replacement window. Detailed rows are capped per turn; the ledger and
+	 * aggregate turn-end row retain the complete count and identity. */
+	"lsp_scanner_coverage_gap",
 ] as const;
 
 export type BoundedPhase = (typeof BOUNDED_TELEMETRY_PHASES)[number];

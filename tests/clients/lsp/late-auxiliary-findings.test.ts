@@ -30,10 +30,21 @@ const logLatency = vi.hoisted(() => vi.fn());
 vi.mock("../../../clients/latency-logger.js", async (importOriginal) => {
 	const actual =
 		await importOriginal<typeof import("../../../clients/latency-logger.js")>();
-	return { ...actual, logLatency };
+	return {
+		...actual,
+		logLatency: (entry: Parameters<typeof actual.logLatency>[0]) => {
+			logLatency(entry);
+			actual.logLatency(entry);
+		},
+	};
 });
 
 import { CacheManager } from "../../../clients/cache-manager.js";
+import { resetBoundedTelemetry } from "../../../clients/bounded-telemetry.js";
+import {
+	getDegradationSummary,
+	resetDegradationLedger,
+} from "../../../clients/degradation-ledger.js";
 import { RuntimeCoordinator } from "../../../clients/runtime-coordinator.js";
 import { handleTurnEnd } from "../../../clients/runtime-turn.js";
 import {
@@ -46,6 +57,13 @@ import {
 } from "../../../clients/lsp/pending-aux-coverage.js";
 import type { LSPDiagnostic } from "../../../clients/lsp/client.js";
 import { setupTestEnvironment } from "../test-utils.js";
+
+// The fixed behavior admits 20 detailed gap rows per turn. The regression uses
+// 24 pairs, so a half-fixed cap still exceeds this bound and turns the test red.
+const EXPECTED_GAP_DETAIL_CAP_PER_TURN = 20;
+// The degradation ledger keeps 20 latest identity/reason entries per kind;
+// excess identities are represented by droppedCount, not retained implicitly.
+const EXPECTED_LEDGER_IDENTITY_CAP = 20;
 
 function diag(line: number, message: string): LSPDiagnostic {
 	return {
@@ -133,10 +151,14 @@ beforeEach(() => {
 	readCachedDiagnosticsForServers.mockReset();
 	logLatency.mockClear();
 	resetPendingAuxiliaryCoverage();
+	resetBoundedTelemetry();
+	resetDegradationLedger();
 });
 
 afterEach(() => {
 	resetPendingAuxiliaryCoverage();
+	resetBoundedTelemetry();
+	resetDegradationLedger();
 	delete process.env.PI_LENS_LATE_AUX_REARM_TTL_MS;
 });
 
@@ -732,6 +754,284 @@ describe("turn-end late-auxiliary findings (#2001/#2002)", () => {
 			expect(record).toBeDefined();
 			expect(record.metadata.clientGone).toBe(1);
 			expect(record.metadata.rearmed).toBe(0);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("re-arms a pair while notify-stall teardown awaits a replacement (#2356)", async () => {
+		const env = setupTestEnvironment("pi-lens-late-aux-demoted-");
+		try {
+			const runtime = new RuntimeCoordinator();
+			runtime.setTelemetryIdentity({ sessionId: "late-aux-demoted" });
+			runtime.beginTurn();
+			const cacheManager = new CacheManager(false);
+			const file = path.join(env.tmpDir, "src", "demoted.ts");
+			registerEdit(env, "late-aux-demoted", cacheManager, file);
+			markPendingAuxiliaryCoverage(file, ["opengrep"], Date.now() - 1000);
+
+			// This is the LSP service's explicit notify-stall teardown status. It is
+			// distinct from an absent client: the old generation was removed, but the
+			// breaker still permits a replacement attempt after cooldown.
+			readCachedDiagnosticsForServers.mockResolvedValue(
+				new Map([
+					[
+						"opengrep",
+						{ diags: [], notifyStallDemoted: true, demotedAt: Date.now() },
+					],
+				]),
+			);
+
+			await handleTurnEnd(makeDeps(runtime, cacheManager, env.tmpDir));
+
+			const pending = drainPendingAuxiliaryCoverage();
+			expect(pending).toHaveLength(1);
+			expect(lateAuxRecord()?.metadata).toMatchObject({
+				notifyStallDemoted: 1,
+				rearmed: 1,
+				clientGone: 0,
+			});
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("re-raises a coverage gap when a demoted scanner has no replacement (#2356)", async () => {
+		const env = setupTestEnvironment("pi-lens-late-aux-demoted-gap-");
+		try {
+			process.env.PI_LENS_LATE_AUX_REARM_TTL_MS = "5000";
+			const runtime = new RuntimeCoordinator();
+			runtime.setTelemetryIdentity({ sessionId: "late-aux-demoted-gap" });
+			runtime.beginTurn();
+			const cacheManager = new CacheManager(false);
+			const file = path.join(env.tmpDir, "src", "demoted-gap.ts");
+			registerEdit(env, "late-aux-demoted-gap", cacheManager, file);
+			markPendingAuxiliaryCoverage(
+				file,
+				["opengrep"],
+				Date.now() - 1000,
+				Date.now() - 1000,
+				MAX_LATE_AUX_REARMS,
+			);
+			readCachedDiagnosticsForServers.mockResolvedValue(
+				new Map([
+					[
+						"opengrep",
+						{ diags: [], notifyStallDemoted: true, demotedAt: Date.now() },
+					],
+				]),
+			);
+
+			await handleTurnEnd(makeDeps(runtime, cacheManager, env.tmpDir));
+
+			expect(drainPendingAuxiliaryCoverage()).toHaveLength(0);
+			expect(lateAuxRecord()?.metadata).toMatchObject({
+				notifyStallDemoted: 1,
+				coverageGapReRaised: 1,
+				clientGone: 0,
+			});
+			const gapRows = logLatency.mock.calls
+				.map(([entry]) => entry)
+				.filter((entry: unknown) => {
+					if (typeof entry !== "object" || entry === null) return false;
+					const record = entry as {
+						phase?: unknown;
+						metadata?: { reRaised?: unknown };
+					};
+					return (
+						record.phase === "lsp_scanner_coverage_gap" &&
+						record.metadata?.reRaised === true
+					);
+				});
+			expect(gapRows).toHaveLength(1);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("caps re-raised coverage-gap detail while preserving aggregate visibility (#2356)", async () => {
+		const env = setupTestEnvironment("pi-lens-late-aux-demoted-gap-cap-");
+		const previousTestMode = process.env.PI_LENS_TEST_MODE;
+		process.env.PI_LENS_TEST_MODE = "0";
+		const realLatencyLogger = await vi.importActual<
+			typeof import("../../../clients/latency-logger.js")
+		>("../../../clients/latency-logger.js");
+		try {
+			realLatencyLogger.clearLatencyLog();
+			await realLatencyLogger.flushLatencyLog();
+			process.env.PI_LENS_LATE_AUX_REARM_TTL_MS = "5000";
+			const runtime = new RuntimeCoordinator();
+			runtime.setTelemetryIdentity({ sessionId: "late-aux-demoted-gap-cap" });
+			runtime.beginTurn();
+			const cacheManager = new CacheManager(false);
+			const pairCount = EXPECTED_GAP_DETAIL_CAP_PER_TURN + 4;
+			const demotedAt = Date.now();
+			const files = Array.from({ length: pairCount }, (_, index) =>
+				path.join(env.tmpDir, "src", `demoted-gap-${index}.ts`),
+			);
+			for (const file of files) {
+				registerEdit(env, "late-aux-demoted-gap-cap", cacheManager, file);
+				markPendingAuxiliaryCoverage(
+					file,
+					["opengrep"],
+					demotedAt - 1000,
+					demotedAt - 1000,
+					MAX_LATE_AUX_REARMS,
+				);
+			}
+			readCachedDiagnosticsForServers.mockResolvedValue(
+				new Map([
+					["opengrep", { diags: [], notifyStallDemoted: true, demotedAt }],
+				]),
+			);
+
+			await handleTurnEnd(makeDeps(runtime, cacheManager, env.tmpDir));
+
+			// Read the serialized bytes written by the real logger. The mocked
+			// wrapper above records calls for the surrounding suite, but this proof
+			// verifies the production sink's actual NDJSON surface.
+			await realLatencyLogger.flushLatencyLog();
+			const serializedRows = fs
+				.readFileSync(realLatencyLogger.getLatencyLogPath(), "utf8")
+				.split(/\r?\n/)
+				.filter(Boolean)
+				.map((line) => JSON.parse(line) as any);
+			const record = serializedRows.find(
+				(entry) => entry?.phase === "late_auxiliary_findings",
+			);
+			expect(record?.metadata).toMatchObject({
+				coverageGapReRaised: pairCount,
+				coverageGapReRaisedDetailed: EXPECTED_GAP_DETAIL_CAP_PER_TURN,
+				coverageGapReRaisedDropped:
+					pairCount - EXPECTED_GAP_DETAIL_CAP_PER_TURN,
+			});
+			const gapRows = serializedRows.filter(
+				(entry) =>
+					entry?.phase === "lsp_scanner_coverage_gap" &&
+					entry?.metadata?.reRaised === true,
+			);
+			expect(gapRows).toHaveLength(EXPECTED_GAP_DETAIL_CAP_PER_TURN);
+			expect(
+				gapRows.every((row: any) =>
+					row.metadata.identity.endsWith(row.filePath),
+				),
+			).toBe(true);
+			expect(gapRows[0]).toMatchObject({
+				filePath: expect.stringContaining("demoted-gap-0.ts"),
+				metadata: {
+					identity: expect.stringContaining("opengrep:"),
+					serverIds: ["opengrep"],
+				},
+			});
+			const gapLedger = getDegradationSummary().find(
+				(group) => group.kind === "lsp-scanner-coverage-gap",
+			);
+			expect(gapLedger).toMatchObject({
+				count: pairCount,
+				latestReasons: expect.any(Array),
+				droppedCount: pairCount - EXPECTED_LEDGER_IDENTITY_CAP,
+			});
+			expect(gapLedger?.latestReasons).toHaveLength(
+				EXPECTED_LEDGER_IDENTITY_CAP,
+			);
+			expect(
+				gapLedger?.latestReasons.every(
+					(entry) =>
+						entry.subject.startsWith("opengrep:") &&
+						entry.subject.includes("demoted-gap-"),
+				),
+			).toBe(true);
+		} finally {
+			if (previousTestMode === undefined) delete process.env.PI_LENS_TEST_MODE;
+			else process.env.PI_LENS_TEST_MODE = previousTestMode;
+			env.cleanup();
+		}
+	});
+
+	it("correlates notify-stall demotions to each pair generation (#2356)", async () => {
+		const env = setupTestEnvironment("pi-lens-late-aux-demoted-generation-");
+		try {
+			process.env.PI_LENS_LATE_AUX_REARM_TTL_MS = "5000";
+			const runtime = new RuntimeCoordinator();
+			runtime.setTelemetryIdentity({
+				sessionId: "late-aux-demoted-generation",
+			});
+			runtime.beginTurn();
+			const cacheManager = new CacheManager(false);
+			const terminalFile = path.join(env.tmpDir, "src", "terminal.ts");
+			const eligibleFile = path.join(env.tmpDir, "src", "eligible.ts");
+			const postDemotionFile = path.join(env.tmpDir, "src", "post-demotion.ts");
+			registerEdit(
+				env,
+				"late-aux-demoted-generation",
+				cacheManager,
+				terminalFile,
+			);
+			registerEdit(
+				env,
+				"late-aux-demoted-generation",
+				cacheManager,
+				eligibleFile,
+			);
+			registerEdit(
+				env,
+				"late-aux-demoted-generation",
+				cacheManager,
+				postDemotionFile,
+			);
+
+			const demotedAt = Date.now();
+			markPendingAuxiliaryCoverage(
+				terminalFile,
+				["opengrep"],
+				demotedAt - 2,
+				demotedAt - 2,
+				MAX_LATE_AUX_REARMS,
+			);
+			markPendingAuxiliaryCoverage(eligibleFile, ["opengrep"], demotedAt - 1);
+			markPendingAuxiliaryCoverage(
+				postDemotionFile,
+				["opengrep"],
+				demotedAt + 1,
+			);
+			readCachedDiagnosticsForServers.mockImplementation(async () => {
+				return new Map([
+					["opengrep", { diags: [], notifyStallDemoted: true, demotedAt }],
+				]);
+			});
+
+			await handleTurnEnd(makeDeps(runtime, cacheManager, env.tmpDir));
+			const firstDrain = drainPendingAuxiliaryCoverage();
+			expect(firstDrain.map((pair) => pair.filePath)).toEqual([eligibleFile]);
+			expect(lateAuxRecord()?.metadata).toMatchObject({
+				pending: 3,
+				notifyStallDemoted: 2,
+				rearmed: 1,
+				clientGone: 1,
+				coverageGapReRaised: 1,
+			});
+
+			// The terminal pair must not clear the shared marker. The pre-demotion
+			// eligible pair remains attributable and re-arms on the next turn.
+			logLatency.mockClear();
+			runtime.beginTurn();
+			markPendingAuxiliaryCoverage(eligibleFile, ["opengrep"], demotedAt - 1);
+			registerEdit(
+				env,
+				"late-aux-demoted-generation",
+				cacheManager,
+				eligibleFile,
+			);
+			await handleTurnEnd(makeDeps(runtime, cacheManager, env.tmpDir));
+			const secondDrain = drainPendingAuxiliaryCoverage();
+			expect(secondDrain.map((pair) => pair.filePath)).toEqual([eligibleFile]);
+			expect(lateAuxRecord()?.metadata).toMatchObject({
+				pending: 1,
+				notifyStallDemoted: 1,
+				rearmed: 1,
+				clientGone: 0,
+				coverageGapReRaised: 0,
+			});
 		} finally {
 			env.cleanup();
 		}
