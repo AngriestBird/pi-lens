@@ -183,10 +183,28 @@ async function findUp(
 	let currentDir = startDir;
 
 	while (currentDir !== stopDir) {
-		for (const target of targets) {
-			const checkPath = path.join(currentDir, target);
-			if (await fileExists(checkPath)) {
-				found.push(checkPath);
+		// One `readdir` per directory instead of one `access` per target: the
+		// per-target probe made this loop's cost O(targets), so a long target
+		// list (e.g. `FORMATTER_CONFIG_FILES`) paid for every entry at every
+		// ancestor directory even when almost none of them exist (#1603).
+		let entries: string[];
+		try {
+			entries = await fs.readdir(currentDir);
+		} catch {
+			entries = [];
+		}
+		if (entries.length > 0) {
+			// On default-case-insensitive platforms the old `fs.access` probe
+			// matched a config file regardless of on-disk casing; fold so the
+			// readdir membership check keeps that behavior.
+			const foldCase = process.platform === "win32" || process.platform === "darwin";
+			const entrySet = new Set(
+				foldCase ? entries.map((e) => e.toLowerCase()) : entries,
+			);
+			for (const target of targets) {
+				if (entrySet.has(foldCase ? target.toLowerCase() : target)) {
+					found.push(path.join(currentDir, target));
+				}
 			}
 		}
 		const parent = path.dirname(currentDir);
