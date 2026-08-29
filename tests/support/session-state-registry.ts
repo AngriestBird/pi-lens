@@ -191,6 +191,15 @@ function scratchCwd(): string {
 
 export const SESSION_STATE_REGISTRY: SessionStateEntry[] = [
 	{
+		id: "test-runner-delivery:pending",
+		module: "test-runner-delivery.ts",
+		state: "pending",
+		policy: "session_start",
+		resetName: "resetTestRunnerDelivery",
+		reason:
+			"#2366: staged test results belong to their owning session and must not cross a primary session replacement; the durable findings cache remains available to pull diagnostics.",
+	},
+	{
 		id: "message-end-attribution:two-slot-anchor",
 		module: "message-end-attribution.ts",
 		state: "lastStableSessionId, previousSessionId",
@@ -1162,6 +1171,8 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	"startup-timing.ts": 0,
 	"subagent-mode.ts": 0,
 	"tree-sitter-shared.ts": 0,
+	// #2366: one bounded pending-delivery map, cleared at primary session_start.
+	"test-runner-delivery.ts": 1,
 	"tui-fit.ts": 0,
 	"warm-attach.ts": 0,
 	"widget-state.ts": 2,

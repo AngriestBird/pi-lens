@@ -76,6 +76,7 @@ import { knipIssuesToProjectDiagnostics } from "./project-diagnostics/runner-ada
 import type { ProjectDiagnostic } from "./project-diagnostics/types.js";
 import { applyDispositionsMultiFile } from "./diagnostic-dispositions.js";
 import { logLatency } from "./latency-logger.js";
+import { emitBounded } from "./bounded-telemetry.js";
 import {
 	getLspBudgetIdleTimeoutMs,
 	shouldShortenLspIdleTimeout,
@@ -147,6 +148,14 @@ interface TurnEndDeps {
 	owner?: TurnStateOwner;
 	resetLSPService: () => void;
 	resetFormatService: () => void;
+	/** Stage completed test results for the post-agent non-context surface. */
+	onTestRunnerComplete?: (args: {
+		cwd: string;
+		sessionId: string;
+		generation: number;
+		targetCount: number;
+		hasFindings: boolean;
+	}) => void;
 }
 
 /**
@@ -1811,8 +1820,8 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	});
 
 	// --- Test runner: fire once per turn after all edits are done ---
-	// Runs for each unique test target across modified files; results appear
-	// in the next turn's context injection alongside jscpd/madge findings.
+	// Runs for each unique test target across modified files; results remain in
+	// the pull-diagnostics cache and are delivered after the agent settles.
 	if (!getFlag("no-tests") && files.length > 0) {
 		const seen = new Set<string>();
 		const targets: NonNullable<
@@ -1937,8 +1946,31 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 					const stale = runtime.turnIndex !== firedAtTurn;
 					const failures: string[] = [];
 					const resultValues: TestResult[] = [];
+					let rejectedCount = 0;
 					for (const r of results) {
 						if (r.status === "rejected") {
+							rejectedCount++;
+							emitBounded(
+								"test_runner_delivery",
+								`${cwd}:generation:${testRunGeneration}:rejected`,
+								{
+									filePath: cwd,
+									durationMs: 0,
+									metadata: {
+										outcome: "runner-promise-rejected",
+										sessionId: firedSessionId,
+										generation: testRunGeneration,
+										targetCount: targets.length,
+										droppedDetailCount: 0,
+										reason: String(r.reason).slice(0, 500),
+									},
+								},
+								{
+									ledgerKind: "test-runner-delivery",
+									reason: "test runner promise rejected",
+									capPerTurn: { limit: 8, turnIndex: firedAtTurn },
+								},
+							);
 							dbg(`turn_end: test run rejected — ${r.reason}`);
 							continue;
 						}
@@ -1995,6 +2027,11 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 							if (formatted) failures.push(formatted);
 						}
 					}
+					if (rejectedCount > 0) {
+						failures.push(
+							`Test runner rejected ${rejectedCount} promise(s) before producing a structured result.`,
+						);
+					}
 					if (failures.length > 0) {
 						const currentGeneration =
 							cacheManager.readCache<TestRunnerFindingsCache>(
@@ -2027,6 +2064,17 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 							},
 							cwd,
 						);
+						try {
+							deps.onTestRunnerComplete?.({
+								cwd,
+								sessionId: firedSessionId,
+								generation: testRunGeneration,
+								targetCount: targets.length,
+								hasFindings: true,
+							});
+						} catch (deliveryErr) {
+							dbg(`turn_end: test delivery staging failed — ${deliveryErr}`);
+						}
 						if (
 							getFlag("lens-guard") &&
 							firedSessionId === runtime.telemetrySessionId
@@ -2066,9 +2114,49 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 							);
 						}
 						dbg(
-							`turn_end: ${failures.length} test failure(s) cached for next context injection${stale ? " (stale — turn advanced while tests ran)" : ""}`,
+							`turn_end: ${failures.length} test failure(s) cached for pull diagnostics and post-agent delivery${stale ? " (stale — turn advanced while tests ran)" : ""}`,
 						);
 					} else if (results.length > 0) {
+						const currentGeneration =
+							cacheManager.readCache<TestRunnerFindingsCache>(
+								"test-runner-findings",
+								cwd,
+							)?.data?.testRunGeneration;
+						if (
+							currentGeneration !== undefined &&
+							currentGeneration > testRunGeneration
+						) {
+							dbg(
+								`turn_end: clean test generation ${testRunGeneration} superseded by ${currentGeneration}`,
+							);
+							return;
+						}
+						cacheManager.writeCache(
+							"test-runner-findings",
+							{
+								...(priorTestCache ?? { content: "" }),
+								content: "",
+								stale: false,
+								results: resultValues,
+								testRunGeneration,
+								launchedFrom,
+								publishedAgainst,
+								provenance: publishedAgainst,
+								superseded,
+							},
+							cwd,
+						);
+						try {
+							deps.onTestRunnerComplete?.({
+								cwd,
+								sessionId: firedSessionId,
+								generation: testRunGeneration,
+								targetCount: targets.length,
+								hasFindings: false,
+							});
+						} catch (deliveryErr) {
+							dbg(`turn_end: test delivery staging failed — ${deliveryErr}`);
+						}
 						if (
 							getFlag("lens-guard") &&
 							firedSessionId === runtime.telemetrySessionId

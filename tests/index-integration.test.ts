@@ -40,6 +40,7 @@ function createMockPi(overrides: Record<string, boolean> = {}) {
 		...overrides,
 	});
 	return {
+		mock,
 		pi: mock.asExtensionAPI(),
 		// #484: raw mock recordings not on the ExtensionAPI type surface
 		// (sentMessages, messageRenderers) — exposed directly for tests that
@@ -2009,6 +2010,12 @@ describe("#484 turn-summary emit at the agent_settled quiet window", () => {
 	// here we only need "index.ts registered the task" + "running the task
 	// chain at settle produces the emission".
 	let quietTasks: Array<{ name: string; fn: () => Promise<void> | void }>;
+	let handleTurnEndHook:
+		| ((deps: {
+				onTestRunnerComplete?: (args: any) => void;
+				runtime: any;
+		  }) => void)
+		| undefined;
 
 	beforeEach(() => {
 		vi.resetModules();
@@ -2024,6 +2031,7 @@ describe("#484 turn-summary emit at the agent_settled quiet window", () => {
 		vi.doUnmock("../clients/runtime-session.js");
 		vi.doUnmock("../clients/lsp/index.js");
 		quietTasks = [];
+		handleTurnEndHook = undefined;
 		_resetProcessSingletonsForTests();
 		tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-turn-summary-"));
 		originalStartupMode = process.env.PI_LENS_STARTUP_MODE;
@@ -2067,7 +2075,9 @@ describe("#484 turn-summary emit at the agent_settled quiet window", () => {
 		// exercises only the #484 seam (collector → quiet-window emit) without
 		// depending on that machinery or its real-filesystem/timer effects.
 		vi.doMock("../clients/runtime-turn.js", () => ({
-			handleTurnEnd: vi.fn(async () => undefined),
+			handleTurnEnd: vi.fn(async (deps: any) => {
+				handleTurnEndHook?.(deps);
+			}),
 			cancelLSPIdleReset: vi.fn(),
 		}));
 		// Light quiet-window stub: record registrations, run them in order on
@@ -2164,7 +2174,7 @@ describe("#484 turn-summary emit at the agent_settled quiet window", () => {
 	) {
 		const settled = handlers.agent_settled?.[0];
 		expect(settled).toBeTypeOf("function");
-		await settled?.({}, { cwd: tmpDir });
+		await settled?.({}, { cwd: tmpDir, isIdle: () => true });
 		// index.ts kicks runQuietWindow off unawaited (fire-and-forget by
 		// design — the SDK awaits the handler); drain the microtask queue so
 		// the stub's task chain completes before assertions.
@@ -2180,6 +2190,71 @@ describe("#484 turn-summary emit at the agent_settled quiet window", () => {
 			registerExtension(pi as any);
 
 			expect(quietTasks.map((t) => t.name)).toContain("turn_summary_emit");
+		},
+		INTEGRATION_TIMEOUT_MS,
+	);
+
+	it(
+		"does not add test-runner failures to a later model context",
+		async () => {
+			mockSuiteDeps();
+			const cache = new CacheManager(false);
+			cache.writeCache(
+				"test-runner-findings",
+				{ content: "FAIL test/app.test.ts:1" },
+				tmpDir,
+			);
+
+			const { default: registerExtension } = await import("../index.js");
+			const { pi, mock } = createMockPi();
+			registerExtension(pi as any);
+
+			const result = await mock.emit(
+				"context",
+				{ messages: [{ role: "user", content: "continue" }] },
+				{ cwd: tmpDir },
+			);
+			expect(result).toBeUndefined();
+		},
+		INTEGRATION_TIMEOUT_MS,
+	);
+
+	it(
+		"delivers staged test failures once through a non-context custom entry",
+		async () => {
+			mockSuiteDeps();
+			const cache = new CacheManager(false);
+			cache.writeCache(
+				"test-runner-findings",
+				{ content: "FAIL test/app.test.ts:1", testRunGeneration: 1 },
+				tmpDir,
+			);
+			const filePath = path.join(tmpDir, "src", "app.ts");
+			fs.mkdirSync(path.dirname(filePath), { recursive: true });
+			fs.writeFileSync(filePath, "export const x = 1;\n");
+			handleTurnEndHook = (deps) =>
+				deps.onTestRunnerComplete?.({
+					cwd: tmpDir,
+					sessionId: deps.runtime.telemetrySessionId,
+					generation: 1,
+					targetCount: 1,
+					hasFindings: true,
+				});
+
+			const { default: registerExtension } = await import("../index.js");
+			const { pi, mock, handlers, sentMessages } = createMockPi();
+			registerExtension(pi as any);
+			await driveEditThenTurnEnd(handlers, filePath);
+
+			await fireAgentSettled(handlers);
+
+			expect(mock.appendedEntries).toHaveLength(1);
+			expect(mock.appendedEntries[0]).toMatchObject({
+				customType: "pilens:test-runner-findings",
+				data: { content: expect.stringContaining("FAIL") },
+			});
+			expect(sentMessages).toHaveLength(0);
+			expect(mock.entryRenderers.has("pilens:test-runner-findings")).toBe(true);
 		},
 		INTEGRATION_TIMEOUT_MS,
 	);

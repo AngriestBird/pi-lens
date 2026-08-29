@@ -143,9 +143,13 @@ import { checkCrossProcessLspBudget } from "./clients/lsp-budget.js";
 import { handleAgentEnd } from "./clients/runtime-agent-end.js";
 import {
 	consumeSessionStartGuidance,
-	consumeTestFindings,
 	consumeTurnEndFindings,
 } from "./clients/runtime-context.js";
+import {
+	deliverTestRunnerFindings,
+	registerTestRunnerEntryRenderer,
+	stageTestRunnerDelivery,
+} from "./clients/test-runner-delivery.js";
 import {
 	readHostModelIdentity,
 	RuntimeCoordinator,
@@ -499,6 +503,14 @@ let _turnSummaryEmitCtx:
 			pi: ExtensionAPI;
 			getLensFlag: (name: string) => boolean | string | undefined;
 			isLensEnabled: () => boolean;
+	  }
+	| undefined;
+let _testRunnerDeliveryRegistered = false;
+let _testRunnerDeliveryCtx:
+	| {
+			pi: ExtensionAPI;
+			cacheManager: CacheManager;
+			runtime: RuntimeCoordinator;
 	  }
 	| undefined;
 const _lspConfigInitializedCwds = new Set<string>();
@@ -955,6 +967,10 @@ function activateExtension(hostPi: ExtensionAPI) {
 			dbg(`turn-summary renderer registration failed: ${registerRendererErr}`);
 		}
 	}
+	// #2366: test failures are a persistent, non-context custom entry. The
+	// delivery task still checks appendEntry at fire time; this registration is
+	// capability detection only and never authorizes a sendMessage fallback.
+	registerTestRunnerEntryRenderer(pi);
 
 	// --- Commands ---
 
@@ -2729,6 +2745,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 				deadCodeClients,
 				depChecker,
 				testRunnerClient,
+				onTestRunnerComplete: stageTestRunnerDelivery,
 				// The LSP idle reset (240s of no turns) releases the warm servers
 				// from a detached timer, with no pi event in flight — so nothing
 				// would repaint the footer and it would keep showing a stale
@@ -2799,6 +2816,24 @@ function activateExtension(hostPi: ExtensionAPI) {
 	// would hold up the host returning control (e.g. blocking the user from
 	// starting a new turn). Kick it off unawaited and return immediately.
 	registerBuiltinQuietWindowTasks(() => runtime);
+	_testRunnerDeliveryCtx = { pi, cacheManager, runtime };
+	if (!_testRunnerDeliveryRegistered) {
+		_testRunnerDeliveryRegistered = true;
+		registerQuietWindowTask("test_runner_delivery", () => {
+			const deliveryCtx = _testRunnerDeliveryCtx;
+			if (!deliveryCtx) return;
+			const ctx = ownEventCtx as
+				| { cwd?: string; isIdle?: () => boolean }
+				| undefined;
+			deliverTestRunnerFindings({
+				pi: deliveryCtx.pi,
+				ctx: ctx ?? {},
+				cacheManager: deliveryCtx.cacheManager,
+				runtime: deliveryCtx.runtime,
+				sessionId: deliveryCtx.runtime.telemetrySessionId,
+			});
+		});
+	}
 	// #458: reconcile any cascade-lane Tier-3 touches that skipped their
 	// in-lane wait (clients/lsp/cascade-tier.ts) in the same quiet window.
 	// #1023: re-inject a cold-snapshot neighbor whose error resolved after the
@@ -2932,6 +2967,9 @@ function activateExtension(hostPi: ExtensionAPI) {
 	}
 	const onAgentSettled = async (_event: unknown, ctx: DeferredDrainCtx) => {
 		if (!lensEnabled) return;
+		// Keep the activation-owned live ctx current for the detached delivery
+		// task. It must probe idleness and append through this run's host seam.
+		rememberOwnEventCtx(ctx);
 		// #1654: the #1387 deferred-format/autofix drain runs HERE, not at
 		// agent_end — see `runDeferredMutationDrain`'s doc comment above.
 		// Awaited (unlike the quiet-window tasks below): this mirrors the
@@ -3301,7 +3339,6 @@ function activateExtension(hostPi: ExtensionAPI) {
 						cacheManager,
 						cwd,
 					);
-					const testFindings = consumeTestFindings(cacheManager, cwd, runtime);
 					const agentNudge = consumeAgentNudge(dbg);
 					const sourceMessages = [
 						{
@@ -3311,10 +3348,6 @@ function activateExtension(hostPi: ExtensionAPI) {
 						{
 							source: "turn-findings" as const,
 							messages: turnEndFindings?.messages ?? [],
-						},
-						{
-							source: "test-findings" as const,
-							messages: testFindings?.messages ?? [],
 						},
 						{
 							source: "agent-nudge" as const,

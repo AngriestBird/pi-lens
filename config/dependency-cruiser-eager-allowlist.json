@@ -59,6 +59,7 @@
   "./clients/runtime-tool-call.js",
   "./clients/runtime-tool-result.js",
   "./clients/runtime-turn.js",
+  "./clients/test-runner-delivery.js",
   "./clients/safe-spawn.js",
   "./clients/session-event-guard.js",
   "./clients/session-lifecycle.js",
