@@ -543,6 +543,31 @@ export interface LSPClientInfo {
 	shutdown(options?: LSPShutdownOptions): Promise<void>;
 }
 
+/**
+ * One document-notification queue entry. A queued entry has not started its
+ * transport write yet, so replacing it cannot leave the server with a partial
+ * protocol message. Once `run` starts, the entry is never replaced; a newer
+ * document state waits behind it and supersedes only the still-pending entry.
+ */
+interface PendingDocumentNotify {
+	run: (coalescedCount: number) => Promise<void>;
+	waiters: Array<{
+		resolve: () => void;
+		reject: (error: unknown) => void;
+	}>;
+	coalescedCount: number;
+}
+
+/**
+ * Per-file queue state. The map itself is per LSP client, so the key pair is
+ * effectively (client, normalized path). Different files retain independent
+ * queues and therefore retain the existing parallel-send behavior.
+ */
+interface DocumentNotifyQueue {
+	pending?: PendingDocumentNotify;
+	running: boolean;
+}
+
 // --- Constants ---
 
 export const INITIALIZE_TIMEOUT_MS = positiveIntFromEnv(
@@ -901,8 +926,8 @@ export interface LSPClientState {
 	 *  above; readers fold their input through `normalizeMapKey`. */
 	readonly diagnosticsVersionsByPath: Map<string, number>;
 	readonly documentVersions: Map<string, number>;
-	/** #2113: tails for same-path didChange sends; different paths stay parallel. */
-	readonly notifyChangeQueues: Map<string, Promise<void>>;
+	/** #2113/#2357: latest-pending same-path document sends; different paths stay parallel. */
+	readonly notifyChangeQueues: Map<string, DocumentNotifyQueue>;
 	/** The LSP document version (`publishDiagnostics.version`) the cached
 	 *  diagnostics for a path were computed against. Only set when the server
 	 *  reports a version; absent entries mean "version unknown" and are treated
@@ -1898,6 +1923,7 @@ function recordSentContent(
 	normalizedPath: string,
 	version: number,
 	content: string,
+	coalescedCount = 0,
 ): void {
 	const scan = scanSentContent(content);
 	const previous = state.documentContentHashes.get(normalizedPath);
@@ -2012,6 +2038,7 @@ function recordSentContent(
 			version,
 			contentLength: content.length,
 			contentLineCount: scan.lfNewlineCount + 1,
+			...(coalescedCount > 0 && { coalescedCount }),
 		},
 	});
 }
@@ -3752,13 +3779,14 @@ export function handleNotifyExternalChange(
 	state.watchQueue.enqueue(uri, type);
 }
 
-export async function handleNotifyOpen(
+async function handleNotifyOpenOnce(
 	state: LSPClientState,
 	filePath: string,
 	content: string,
 	languageId: string,
 	preserveDiagnostics = false,
 	silent = false,
+	coalescedCount = 0,
 ): Promise<void> {
 	if (!isClientAlive(state)) return;
 	const normalizedPath = normalizeMapKey(filePath);
@@ -3813,7 +3841,13 @@ export async function handleNotifyOpen(
 			// #1669 review F7: only mirror the send locally once it actually left
 			// the process — see safeSendNotification's doc comment.
 			if (reopenSent)
-				recordSentContent(state, normalizedPath, version, content);
+				recordSentContent(
+					state,
+					normalizedPath,
+					version,
+					content,
+					coalescedCount,
+				);
 			state.openDocuments.add(normalizedPath);
 			state.openDocumentUris?.set(normalizedPath, uri);
 			return;
@@ -3826,7 +3860,14 @@ export async function handleNotifyOpen(
 				contentChanges: buildContentChanges(state, normalizedPath, content),
 			},
 		);
-		if (changeSent) recordSentContent(state, normalizedPath, version, content);
+		if (changeSent)
+			recordSentContent(
+				state,
+				normalizedPath,
+				version,
+				content,
+				coalescedCount,
+			);
 		return;
 	}
 
@@ -3866,7 +3907,8 @@ export async function handleNotifyOpen(
 		"textDocument/didOpen",
 		{ textDocument: { uri, languageId, version: 0, text: content } },
 	);
-	if (openSent) recordSentContent(state, normalizedPath, 0, content);
+	if (openSent)
+		recordSentContent(state, normalizedPath, 0, content, coalescedCount);
 	state.pendingOpens.delete(normalizedPath);
 	state.openDocuments.add(normalizedPath);
 	state.closedDocuments?.delete(normalizedPath);
@@ -3893,11 +3935,104 @@ export async function handleNotifyOpen(
 	});
 }
 
+/**
+ * Replace only notifications that have not started a transport write. A
+ * microtask starts the first entry so a synchronous burst of callers installs
+ * one latest entry before any bytes are handed to vscode-jsonrpc. Once an
+ * entry starts, it runs to completion; LSP has no cancellation/acknowledgement
+ * for notifications, so dropping a started write could violate didOpen before
+ * didChange ordering or leave a partial message in the pipe.
+ */
+function enqueueDocumentNotify(
+	state: LSPClientState,
+	normalizedPath: string,
+	run: (coalescedCount: number) => Promise<void>,
+): Promise<void> {
+	let queue = state.notifyChangeQueues.get(normalizedPath);
+	if (!queue) {
+		queue = { running: false };
+		state.notifyChangeQueues.set(normalizedPath, queue);
+	}
+	return new Promise<void>((resolve, reject) => {
+		const previous = queue?.pending;
+		// Keep superseded callers attached to the replacement's completion. The
+		// notification is dropped, but callers such as the auxiliary backlog
+		// ledger must not observe completion before the newest content is sent.
+		const waiters = previous?.waiters ?? [];
+		waiters.push({ resolve, reject });
+		queue!.pending = {
+			run,
+			waiters,
+			coalescedCount: (previous?.coalescedCount ?? 0) + (previous ? 1 : 0),
+		};
+		if (queue!.running) return;
+		queue!.running = true;
+		// Let same-turn callers replace the unwritten entry before the runner
+		// invokes the transport. Different path queues still start independently.
+		void Promise.resolve().then(async () => {
+			try {
+				for (;;) {
+					const next = queue!.pending;
+					if (!next) break;
+					queue!.pending = undefined;
+					try {
+						await next.run(next.coalescedCount);
+						for (const waiter of next.waiters) waiter.resolve();
+					} catch (error) {
+						for (const waiter of next.waiters) waiter.reject(error);
+					}
+				}
+			} finally {
+				queue!.running = false;
+				if (
+					!queue!.pending &&
+					state.notifyChangeQueues.get(normalizedPath) === queue
+				) {
+					state.notifyChangeQueues.delete(normalizedPath);
+				}
+			}
+		});
+	});
+}
+
+/** Drop unwritten document notifications when a client is torn down. */
+function cancelDocumentNotifyQueues(state: LSPClientState): void {
+	for (const queue of state.notifyChangeQueues.values()) {
+		for (const waiter of queue.pending?.waiters ?? []) waiter.resolve();
+		queue.pending = undefined;
+	}
+	state.notifyChangeQueues.clear();
+}
+
+export function handleNotifyOpen(
+	state: LSPClientState,
+	filePath: string,
+	content: string,
+	languageId: string,
+	preserveDiagnostics = false,
+	silent = false,
+): Promise<void> {
+	if (!isClientAlive(state)) return Promise.resolve();
+	const normalizedPath = normalizeMapKey(filePath);
+	return enqueueDocumentNotify(state, normalizedPath, (coalescedCount) =>
+		handleNotifyOpenOnce(
+			state,
+			filePath,
+			content,
+			languageId,
+			preserveDiagnostics,
+			silent,
+			coalescedCount,
+		),
+	);
+}
+
 async function handleNotifyChangeOnce(
 	state: LSPClientState,
 	filePath: string,
 	content: string,
 	normalizedPath: string,
+	coalescedCount = 0,
 ): Promise<void> {
 	if (!isClientAlive(state)) return;
 	const uri =
@@ -3921,7 +4056,8 @@ async function handleNotifyChangeOnce(
 		state.documentVersions.set(normalizedPath, 0);
 		state.documentOpenedAt.set(normalizedPath, Date.now());
 		state.diagnosticPublicationCounts.set(normalizedPath, 0);
-		if (fallbackOpenSent) recordSentContent(state, normalizedPath, 0, content);
+		if (fallbackOpenSent)
+			recordSentContent(state, normalizedPath, 0, content, coalescedCount);
 		state.openDocuments.add(normalizedPath);
 		state.openDocumentUris?.set(normalizedPath, uri);
 		return;
@@ -3940,7 +4076,8 @@ async function handleNotifyChangeOnce(
 			contentChanges: buildContentChanges(state, normalizedPath, content),
 		},
 	);
-	if (changeSent) recordSentContent(state, normalizedPath, version, content);
+	if (changeSent)
+		recordSentContent(state, normalizedPath, version, content, coalescedCount);
 }
 
 /**
@@ -3955,20 +4092,15 @@ export function handleNotifyChange(
 ): Promise<void> {
 	if (!isClientAlive(state)) return Promise.resolve();
 	const normalizedPath = normalizeMapKey(filePath);
-	const previous =
-		state.notifyChangeQueues.get(normalizedPath) ?? Promise.resolve();
-	const queued = previous
-		.catch(() => undefined)
-		.then(() =>
-			handleNotifyChangeOnce(state, filePath, content, normalizedPath),
-		);
-	const settled = queued.finally(() => {
-		if (state.notifyChangeQueues.get(normalizedPath) === settled) {
-			state.notifyChangeQueues.delete(normalizedPath);
-		}
-	});
-	state.notifyChangeQueues.set(normalizedPath, settled);
-	return settled;
+	return enqueueDocumentNotify(state, normalizedPath, (coalescedCount) =>
+		handleNotifyChangeOnce(
+			state,
+			filePath,
+			content,
+			normalizedPath,
+			coalescedCount,
+		),
+	);
 }
 
 /** Close a document through the same lifecycle path exposed by the client. */
@@ -4130,6 +4262,9 @@ async function clientShutdownOnce(
 	state.pendingOpens.clear();
 	state.openDocuments.clear();
 	state.openDocumentUris?.clear();
+	// #2357: superseded notifications that have not started writing are moot
+	// once this client is dead; resolve their callers and release the queue.
+	cancelDocumentNotifyQueues(state);
 	// #1412 L1: mirror openDocuments' clear — a shut-down/evicted client's
 	// probe memo is moot along with everything else document-scoped.
 	state.projectIdentityProbedFiles?.clear();

@@ -247,6 +247,8 @@ export function describeInstallAttempt(
 
 export interface AvailabilityDecision {
 	tool: string;
+	/** Producer scope for independent availability evidence (#2351). */
+	producer?: "security-scan" | "lsp-launch";
 	verdict: "available" | "unavailable";
 	outcome: AvailabilityOutcome;
 	cause: AvailabilityCause;
@@ -844,6 +846,9 @@ export function logAvailabilityDecision(
 		durationMs: Math.round(decision.elapsedMs),
 		metadata: {
 			tool: decision.tool,
+			...(decision.producer !== undefined && {
+				producer: decision.producer,
+			}),
 			verdict: decision.verdict,
 			outcome: decision.outcome,
 			cause: decision.cause,
