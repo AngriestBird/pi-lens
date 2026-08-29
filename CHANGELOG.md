@@ -14,6 +14,8 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Fixed
 
+- **Bound re-raised auxiliary coverage-gap detail (#2356)** — notify-stall pairs still count every uncovered server/file in the degradation ledger and turn-end aggregate, while detailed latency rows are capped at 20 per turn and report dropped detail.
+
 ### Security
 
 ## [4.1.3] - 2026-08-28

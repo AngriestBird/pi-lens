@@ -34,6 +34,11 @@ vi.mock("../../../clients/latency-logger.js", async (importOriginal) => {
 });
 
 import { CacheManager } from "../../../clients/cache-manager.js";
+import { resetBoundedTelemetry } from "../../../clients/bounded-telemetry.js";
+import {
+	getDegradationSummary,
+	resetDegradationLedger,
+} from "../../../clients/degradation-ledger.js";
 import { RuntimeCoordinator } from "../../../clients/runtime-coordinator.js";
 import { handleTurnEnd } from "../../../clients/runtime-turn.js";
 import {
@@ -46,6 +51,10 @@ import {
 } from "../../../clients/lsp/pending-aux-coverage.js";
 import type { LSPDiagnostic } from "../../../clients/lsp/client.js";
 import { setupTestEnvironment } from "../test-utils.js";
+
+// The fixed behavior admits 20 detailed gap rows per turn. The regression uses
+// 24 pairs, so a half-fixed cap still exceeds this bound and turns the test red.
+const EXPECTED_GAP_DETAIL_CAP_PER_TURN = 20;
 
 function diag(line: number, message: string): LSPDiagnostic {
 	return {
@@ -133,10 +142,14 @@ beforeEach(() => {
 	readCachedDiagnosticsForServers.mockReset();
 	logLatency.mockClear();
 	resetPendingAuxiliaryCoverage();
+	resetBoundedTelemetry();
+	resetDegradationLedger();
 });
 
 afterEach(() => {
 	resetPendingAuxiliaryCoverage();
+	resetBoundedTelemetry();
+	resetDegradationLedger();
 	delete process.env.PI_LENS_LATE_AUX_REARM_TTL_MS;
 });
 
@@ -822,6 +835,80 @@ describe("turn-end late-auxiliary findings (#2001/#2002)", () => {
 					);
 				});
 			expect(gapRows).toHaveLength(1);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("caps re-raised coverage-gap detail while preserving aggregate visibility (#2356)", async () => {
+		const env = setupTestEnvironment("pi-lens-late-aux-demoted-gap-cap-");
+		try {
+			process.env.PI_LENS_LATE_AUX_REARM_TTL_MS = "5000";
+			const runtime = new RuntimeCoordinator();
+			runtime.setTelemetryIdentity({ sessionId: "late-aux-demoted-gap-cap" });
+			runtime.beginTurn();
+			const cacheManager = new CacheManager(false);
+			const pairCount = EXPECTED_GAP_DETAIL_CAP_PER_TURN + 4;
+			const demotedAt = Date.now();
+			const files = Array.from({ length: pairCount }, (_, index) =>
+				path.join(env.tmpDir, "src", `demoted-gap-${index}.ts`),
+			);
+			for (const file of files) {
+				registerEdit(env, "late-aux-demoted-gap-cap", cacheManager, file);
+				markPendingAuxiliaryCoverage(
+					file,
+					["opengrep"],
+					demotedAt - 1000,
+					demotedAt - 1000,
+					MAX_LATE_AUX_REARMS,
+				);
+			}
+			readCachedDiagnosticsForServers.mockResolvedValue(
+				new Map([
+					["opengrep", { diags: [], notifyStallDemoted: true, demotedAt }],
+				]),
+			);
+
+			await handleTurnEnd(makeDeps(runtime, cacheManager, env.tmpDir));
+
+			const record = lateAuxRecord();
+			expect(record?.metadata).toMatchObject({
+				coverageGapReRaised: pairCount,
+				coverageGapReRaisedDetailed: EXPECTED_GAP_DETAIL_CAP_PER_TURN,
+				coverageGapReRaisedDropped:
+					pairCount - EXPECTED_GAP_DETAIL_CAP_PER_TURN,
+			});
+			const gapRows = logLatency.mock.calls
+				.map(([entry]) => entry)
+				.filter(
+					(entry: any) =>
+						entry?.phase === "lsp_scanner_coverage_gap" &&
+						entry?.metadata?.reRaised === true,
+				);
+			expect(gapRows).toHaveLength(EXPECTED_GAP_DETAIL_CAP_PER_TURN);
+			expect(
+				gapRows.every((row: any) =>
+					row.metadata.identity.endsWith(row.filePath),
+				),
+			).toBe(true);
+			expect(gapRows[0]).toMatchObject({
+				filePath: expect.stringContaining("demoted-gap-0.ts"),
+				metadata: {
+					identity: expect.stringContaining("opengrep:"),
+					serverIds: ["opengrep"],
+				},
+			});
+			const gapLedger = getDegradationSummary().find(
+				(group) => group.kind === "lsp-scanner-coverage-gap",
+			);
+			expect(gapLedger).toMatchObject({ count: pairCount });
+			expect(
+				gapLedger?.latestReasons.every(
+					(entry) =>
+						entry.subject.startsWith("opengrep:") &&
+						entry.subject.includes("demoted-gap-"),
+				),
+			).toBe(true);
 		} finally {
 			env.cleanup();
 		}

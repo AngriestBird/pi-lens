@@ -5670,9 +5670,7 @@ export class LSPService {
 						reason: reasons.join(", ") || "scanner coverage gap",
 					});
 				}
-				logLatency({
-					type: "phase",
-					phase: "lsp_scanner_coverage_gap",
+				emitBounded("lsp_scanner_coverage_gap", `${source}:${normalizedPath}`, {
 					filePath: normalizedPath,
 					durationMs: Date.now() - startedAt,
 					metadata: {
@@ -5681,10 +5679,10 @@ export class LSPService {
 						...(brokenSkippedServerIds.length > 0 && {
 							brokenSkippedServerIds,
 						}),
-						// #1586: the deferrals this touch is actually uncovered for. The raw
+						// #1586: the deferrals this touch is actually uncovered for. The
 						// gate action keeps its own record in `lsp_notify_resync_deferred`;
-						// this row exists to prove a blackout, and a scanner already bound to
-						// these bytes is not one.
+						// this row exists to prove a blackout, and a scanner already bound
+						// to these bytes is not one.
 						...(uncoveredDeferredServerIds.length > 0 && {
 							deferredResyncServerIds: uncoveredDeferredServerIds,
 						}),

@@ -496,7 +496,10 @@ silence reads as CLEAN unless the touch names it. A scanner that never attached
 `unconfirmedServerIds`, exactly like a cut-off or silent auxiliary, and the gap
 must reach the AGENT-facing surface too
 (`CascadeNeighborResult.unconfirmedServerIds` and the cascade formatter), not
-only the result wrapper. One `lsp_scanner_coverage_gap` row per touch records it.
+only the result wrapper. One aggregate `lsp_scanner_coverage_gap` count per
+touch records every pair; detailed re-raised rows use the bounded telemetry
+cap for the current turn, while the degradation ledger retains each
+server/file identity and the aggregate row reports dropped detail.
 #1493's content-hash exemption outranks a deferral: a scanner whose STORED
 publication is bound to exactly these bytes has reported on this file, so the
 skipped resync withholds nothing — it stays covered, and its stored findings

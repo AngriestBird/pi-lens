@@ -119,6 +119,7 @@ import {
 // (widget-state.ts) can use the marker without importing this orchestrator —
 // see clients/stale-marker.ts's doc comment.
 import { incrementDegradationCount } from "./degradation-ledger.js";
+import { emitBounded } from "./bounded-telemetry.js";
 import {
 	degradeDemotedFindingBody,
 	formatDeliveryCapNote,
@@ -126,12 +127,16 @@ import {
 } from "./demoted-finding-render.js";
 import { STALE_LINE_MARKER } from "./stale-marker.js";
 import { getActiveSessionId } from "./session-lifecycle.js";
+
 import {
 	getWidgetBlockingFilesForSweep,
 	markWidgetFileBlockersStale,
 	recordRunner,
 } from "./widget-state.js";
 import type { TestRunnerFindingsCache } from "./project-diagnostics/runner-adapters/runner-findings.js";
+
+/** Maximum detailed notify-stall coverage-gap rows emitted in one turn. */
+const LATE_AUX_COVERAGE_GAP_DETAIL_CAP_PER_TURN = 20;
 
 interface TurnEndDeps {
 	ctxCwd?: string;
@@ -2454,6 +2459,8 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		filePath: string;
 		serverId: string;
 	}> = [];
+	let lateAuxCoverageGapDetailCount = 0;
+	let lateAuxCoverageGapDropCount = 0;
 	const lateAuxStuckPairs: Array<{ filePath: string; serverId: string }> = [];
 	if (drainedPairs.length > 0) {
 		const byFile = new Map<string, typeof drainedPairs>();
@@ -2646,24 +2653,31 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		// preserving the server/file identity in both the ledger and latency row.
 		for (const pair of lateAuxCoverageGapPairs) {
 			const normalizedPairPath = normalizeMapKey(pair.filePath);
-			incrementDegradationCount({
-				kind: "lsp-scanner-coverage-gap",
-				subject: `${pair.serverId}:${normalizedPairPath}`,
-				reason:
-					"notify-stall replacement was not available before late-coverage ceiling",
-			});
-			logLatency({
-				type: "phase",
-				phase: "lsp_scanner_coverage_gap",
-				filePath: normalizedPairPath,
-				durationMs: 0,
-				metadata: {
-					source: "late-auxiliary",
-					serverIds: [pair.serverId],
-					reason: "notify-stall-replacement-unavailable",
-					reRaised: true,
+			const emitted = emitBounded(
+				"lsp_scanner_coverage_gap",
+				`${pair.serverId}:${normalizedPairPath}`,
+				{
+					filePath: normalizedPairPath,
+					durationMs: 0,
+					metadata: {
+						source: "late-auxiliary",
+						serverIds: [pair.serverId],
+						reason: "notify-stall-replacement-unavailable",
+						reRaised: true,
+					},
 				},
-			});
+				{
+					ledgerKind: "lsp-scanner-coverage-gap",
+					reason:
+						"notify-stall replacement was not available before late-coverage ceiling",
+					capPerTurn: {
+						limit: LATE_AUX_COVERAGE_GAP_DETAIL_CAP_PER_TURN,
+						turnIndex: runtime.turnIndex,
+					},
+				},
+			);
+			if (emitted) lateAuxCoverageGapDetailCount += 1;
+			else lateAuxCoverageGapDropCount += 1;
 		}
 		logLatency({
 			type: "phase",
@@ -2687,6 +2701,8 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				answered: lateAuxAnswered,
 				notifyStallDemoted: lateAuxNotifyStallDemoted,
 				coverageGapReRaised: lateAuxCoverageGapPairs.length,
+				coverageGapReRaisedDetailed: lateAuxCoverageGapDetailCount,
+				coverageGapReRaisedDropped: lateAuxCoverageGapDropCount,
 				capEvicted: lateAuxCapEvicted,
 				stuckPairs: lateAuxStuckPairs,
 			},
