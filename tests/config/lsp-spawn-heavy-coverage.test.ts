@@ -71,6 +71,23 @@ const launchCall = "launchLSP" + "(";
 const registryLookup = "getServer" + "ById(";
 const fixtureName = "fake-lsp-" + "server";
 
+// Each case contains exactly one marker. These are direct detector probes,
+// not census fixtures: deleting any one marker arm must turn its own case red.
+const syntheticMarkerCases = [
+	{
+		name: "launch seam",
+		source: `await ${launchCall}(process.execPath, []);`,
+	},
+	{
+		name: "server registry",
+		source: `const server = ${registryLookup}"ast-grep";`,
+	},
+	{
+		name: "fake server fixture",
+		source: `const fixture = "tests/fixtures/${fixtureName}.mjs";`,
+	},
+] as const;
+
 /** The `include` list of the "lsp-spawn-heavy" project, read from the live config. */
 function lspSpawnHeavyInclude(): string[] {
 	const projects: unknown = vitestConfig.test?.projects;
@@ -152,6 +169,13 @@ const SPAWN_EXEMPTIONS: Readonly<Record<string, string>> = {
 };
 
 describe("lsp-spawn-heavy Vitest project coverage", () => {
+	it.each(syntheticMarkerCases)(
+		"detects the $name marker independently",
+		({ source }) => {
+			expect(isLspSpawnHeavy(source)).toBe(true);
+		},
+	);
+
 	it("phases or documents every test that spawns a real LSP child", () => {
 		const included = lspSpawnHeavyInclude();
 		const files = listSourceFiles(path.join(repoRoot, "tests"), {

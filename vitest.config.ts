@@ -272,6 +272,10 @@ const timingSensitiveInclude = [
 // silently goes stale.
 const lspSpawnHeavyInclude = [
 	"tests/clients/ast-grep-rule-precedence-followups.test.ts",
+	// #2344: npm test leaves this real-child integration suite in the default
+	// project unless it is explicitly phased here. `test:integration` still
+	// selects the same file positionally, while `test:unit` excludes it below.
+	"tests/clients/lsp/integration.test.ts",
 	"tests/clients/lsp/workspace-diagnostics-sweep-attribution.integration.test.ts",
 	// #873/#448: the dispatch LSP runner against a real stdio JSON-RPC server
 	// — a real child spawn through the production LSPService plus a
@@ -403,7 +407,7 @@ export default defineConfig({
 				test: {
 					name: "lsp-spawn-heavy",
 					include: lspSpawnHeavyInclude,
-					exclude: sharedExclude,
+					exclude: [...sharedExclude, ...unitOnlyExclude],
 					globalSetup: sharedGlobalSetup,
 					setupFiles: sharedSetupFiles,
 					execArgv: sharedExecArgv,
