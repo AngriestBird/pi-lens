@@ -19,6 +19,14 @@ tool surfaces. Add bounded observability for every new failure path. Include the
 required changelog fragment for a code change. Report verification honestly.
 Write active, direct prose with short sentences and consistent terms.
 
+## Tautological tests considered harmful
+
+A test must observe behavior through the real seam, not repeat the implementation
+or feed the expected answer in through setup. Keep the red-first failure tied to
+the defect, and mutate the guard or filter to prove the test can detect its loss.
+Mocks belong only at true process or host boundaries. When a test can use the
+real store, sink, coordinator, or registry, use it and assert the durable result.
+
 Git authority is separate from the role. Commit, push, or open a PR only when
 the delegation explicitly grants that authority after worktree verification.
 Otherwise, edit and test with the assigned worktree as the command working

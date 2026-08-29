@@ -18,3 +18,10 @@ file and line, a concrete failure, evidence, and a suggested fix. Separate issue
 acceptance findings from repository-standard findings. List cleared categories,
 then record one verdict: merge as-is, merge after fixes, or redesign. Never
 merge or silently repair the author's branch. Use short, active, plain prose.
+
+## Tautological tests considered harmful
+
+Check that each regression test reaches the real seam and observes an independent
+effect. Remove or mutate the claimed guard and require the test to fail for the
+intended reason. Flag tests that restate the implementation, assert setup data,
+or swap a real in-process store, sink, coordinator, or registry for a fake.

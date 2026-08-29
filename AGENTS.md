@@ -166,6 +166,12 @@ produces a fix, return the diagnosis and start a fixer delegation. If a reviewer
 finds a defect, return the finding and start a fixer round. Run the final review
 against the actual PR head in a separate reviewer delegation.
 
+All delegated roles follow `docs/pi-lens-subagent.md`'s "Tautological tests
+considered harmful" rule. A red-first test is valid only when it reaches the
+real seam, observes an independent result, and turns red when its guard or
+filter is removed. Treat setup-echoing assertions, duplicated predicates, and
+unnecessary in-process mocks as test defects.
+
 **The minimalism ladder — climb it before writing any code.** Be lazy about the solution, never about reading: understand the problem and trace the real code flow first, then ask, in order: (1) does this need to exist at all — would nothing break without it? (2) does this codebase already do it — reuse the existing seam (single-source-of-truth rule); (3) does the stdlib or platform do it? (4) does an installed dependency do it? (5) is it one line? Only then write the minimum that works. Lazy, not negligent: validation, error handling, security, bounded observability, and the degradation records this repo requires are never skipped for minimalism. The record: #2091 was built and then killed by measurement — step 1 asked before building would have saved the PR; #2106's catch-path outcome split was an unobservable discriminator that step 1 would have stopped ("a discriminator nothing can observe is a vacuous guard"). When a reviewer finds over-built code, the finding names the ladder step that was skipped.
 
 **External-PR handling.** Maintainer agents may commit directly to a contributor's PR branch when "allow edits from maintainers" is enabled. Prefer this over asking the contributor to apply small review asks. Keep the contributor's authorship: commit only the review deltas, write clear commit messages, and reference the review. When you post a review on an external PR, thank the contributor first. Then state plainly that the review is AI-generated and that a maintainer supervises the process.
