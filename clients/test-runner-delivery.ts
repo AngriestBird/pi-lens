@@ -35,18 +35,31 @@ export interface TestRunnerDeliveryEntry {
 interface PendingDelivery {
 	cwd: string;
 	sessionId: string;
+	ownerId?: string;
 	generation: number;
 	targetCount: number;
 	createdAt: number;
+	owner?: TestRunnerDeliveryOwner;
 }
 
 const pending = new Map<string, PendingDelivery>();
 
-function key(cwd: string, sessionId: string): string {
+export interface TestRunnerDeliveryOwner {
+	ownerId: string;
+	pi: ExtensionAPI;
+	cacheManager: CacheManager;
+	runtime: RuntimeCoordinator;
+	getCtx: () => {
+		cwd?: string;
+		isIdle?: () => boolean;
+	};
+}
+
+function key(cwd: string, sessionId: string, ownerId?: string): string {
 	// `cwd` comes from the same host session field at turn_end and settle. Keep
 	// that canonical value unchanged so cache reads use the identical workspace
 	// identity; dispatch contexts already normalize their own path fields.
-	return `${cwd}\u0000${sessionId}`;
+	return `${ownerId ?? "direct"}\u0000${cwd}\u0000${sessionId}`;
 }
 
 function boundedContent(content: string): {
@@ -113,19 +126,22 @@ function prunePending(): void {
 export function stageTestRunnerDelivery(args: {
 	cwd: string;
 	sessionId: string;
+	owner?: TestRunnerDeliveryOwner;
 	generation: number;
 	targetCount: number;
 	hasFindings: boolean;
 }): void {
-	const deliveryKey = key(args.cwd, args.sessionId);
+	const deliveryKey = key(args.cwd, args.sessionId, args.owner?.ownerId);
 	const prior = pending.get(deliveryKey);
 	if (prior && prior.generation > args.generation) {
 		const superseded: PendingDelivery = {
 			cwd: args.cwd,
 			sessionId: args.sessionId,
+			ownerId: args.owner?.ownerId,
 			generation: args.generation,
 			targetCount: args.targetCount,
 			createdAt: Date.now(),
+			owner: args.owner,
 		};
 		record(deliveryKey, "superseded", superseded, {
 			currentGeneration: prior.generation,
@@ -146,9 +162,11 @@ export function stageTestRunnerDelivery(args: {
 	const delivery: PendingDelivery = {
 		cwd: args.cwd,
 		sessionId: args.sessionId,
+		ownerId: args.owner?.ownerId,
 		generation: args.generation,
 		targetCount: args.targetCount,
 		createdAt: Date.now(),
+		owner: args.owner,
 	};
 	pending.set(deliveryKey, delivery);
 	prunePending();
@@ -165,9 +183,10 @@ export function deliverTestRunnerFindings(args: {
 	cacheManager: CacheManager;
 	runtime: RuntimeCoordinator;
 	sessionId: string;
+	ownerId?: string;
 }): void {
 	const cwd = args.ctx.cwd ?? process.cwd();
-	const deliveryKey = key(cwd, args.sessionId);
+	const deliveryKey = key(cwd, args.sessionId, args.ownerId);
 	const delivery = pending.get(deliveryKey);
 	if (!delivery) return;
 	const currentGeneration = args.cacheManager.readCache<{
@@ -249,6 +268,32 @@ export function deliverTestRunnerFindings(args: {
 			error: String(error).slice(0, 500),
 		});
 	}
+}
+
+/** Deliver only the result staged by this activation and settled session. */
+export function deliverStagedTestRunnerFindings(args?: {
+	cwd?: string;
+	sessionId?: string;
+	ownerId?: string;
+}): void {
+	if (!args?.cwd || !args.ownerId) return;
+	const delivery = args.sessionId
+		? pending.get(key(args.cwd, args.sessionId, args.ownerId))
+		: [...pending.values()]
+				.reverse()
+				.find(
+					(candidate) =>
+						candidate.cwd === args.cwd && candidate.ownerId === args.ownerId,
+				);
+	if (!delivery?.owner) return;
+	deliverTestRunnerFindings({
+		pi: delivery.owner.pi,
+		ctx: delivery.owner.getCtx(),
+		cacheManager: delivery.owner.cacheManager,
+		runtime: delivery.owner.runtime,
+		sessionId: delivery.sessionId,
+		ownerId: delivery.ownerId,
+	});
 }
 
 export function registerTestRunnerEntryRenderer(pi: ExtensionAPI): boolean {

@@ -146,7 +146,7 @@ import {
 	consumeTurnEndFindings,
 } from "./clients/runtime-context.js";
 import {
-	deliverTestRunnerFindings,
+	deliverStagedTestRunnerFindings,
 	registerTestRunnerEntryRenderer,
 	stageTestRunnerDelivery,
 } from "./clients/test-runner-delivery.js";
@@ -506,13 +506,7 @@ let _turnSummaryEmitCtx:
 	  }
 	| undefined;
 let _testRunnerDeliveryRegistered = false;
-let _testRunnerDeliveryCtx:
-	| {
-			pi: ExtensionAPI;
-			cacheManager: CacheManager;
-			runtime: RuntimeCoordinator;
-	  }
-	| undefined;
+let _nextTestRunnerDeliveryOwnerId = 0;
 const _lspConfigInitializedCwds = new Set<string>();
 const LSP_CONFIG_CWD_CAP = 128;
 
@@ -611,6 +605,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 	// the log instead of pi's frame. Host-initiated output stays on the real
 	// console, because it runs outside every window.
 	const pi = withConsoleCaptureWindows(hostPi);
+	const testRunnerDeliveryOwnerId = `activation-${++_nextTestRunnerDeliveryOwnerId}`;
 	// Event contexts belong to the activation that owns this factory closure.
 	// The process-global latest ctx remains only a boot-window fallback.
 	// biome-ignore lint/suspicious/noExplicitAny: heterogeneous pi event ctx shapes
@@ -2745,7 +2740,18 @@ function activateExtension(hostPi: ExtensionAPI) {
 				deadCodeClients,
 				depChecker,
 				testRunnerClient,
-				onTestRunnerComplete: stageTestRunnerDelivery,
+				sessionId: getStableSessionId(ctx),
+				onTestRunnerComplete: (delivery) =>
+					stageTestRunnerDelivery({
+						...delivery,
+						owner: {
+							ownerId: testRunnerDeliveryOwnerId,
+							pi,
+							cacheManager,
+							runtime,
+							getCtx: () => ownEventCtx ?? {},
+						},
+					}),
 				// The LSP idle reset (240s of no turns) releases the warm servers
 				// from a detached timer, with no pi event in flight — so nothing
 				// would repaint the footer and it would keep showing a stale
@@ -2816,22 +2822,10 @@ function activateExtension(hostPi: ExtensionAPI) {
 	// would hold up the host returning control (e.g. blocking the user from
 	// starting a new turn). Kick it off unawaited and return immediately.
 	registerBuiltinQuietWindowTasks(() => runtime);
-	_testRunnerDeliveryCtx = { pi, cacheManager, runtime };
 	if (!_testRunnerDeliveryRegistered) {
 		_testRunnerDeliveryRegistered = true;
-		registerQuietWindowTask("test_runner_delivery", () => {
-			const deliveryCtx = _testRunnerDeliveryCtx;
-			if (!deliveryCtx) return;
-			const ctx = ownEventCtx as
-				| { cwd?: string; isIdle?: () => boolean }
-				| undefined;
-			deliverTestRunnerFindings({
-				pi: deliveryCtx.pi,
-				ctx: ctx ?? {},
-				cacheManager: deliveryCtx.cacheManager,
-				runtime: deliveryCtx.runtime,
-				sessionId: deliveryCtx.runtime.telemetrySessionId,
-			});
+		registerQuietWindowTask("test_runner_delivery", (quietContext) => {
+			deliverStagedTestRunnerFindings(quietContext);
 		});
 	}
 	// #458: reconcile any cascade-lane Tier-3 touches that skipped their
@@ -3007,6 +3001,8 @@ function activateExtension(hostPi: ExtensionAPI) {
 				runtime,
 				dbg,
 				cwd,
+				sessionId: getStableSessionId(ctx),
+				ownerId: testRunnerDeliveryOwnerId,
 			}).catch((err) => {
 				dbg(`quiet_window crashed: ${err}`);
 			});

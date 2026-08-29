@@ -156,6 +156,8 @@ interface TurnEndDeps {
 		targetCount: number;
 		hasFindings: boolean;
 	}) => void;
+	/** Stable session identity from the event ctx that fired this turn_end. */
+	sessionId?: string;
 }
 
 /**
@@ -411,6 +413,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		deadCodeClients,
 		depChecker,
 		testRunnerClient,
+		sessionId,
 		owner,
 		resetLSPService,
 		resetFormatService,
@@ -1883,7 +1886,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				`turn_end: firing ${targets.length} test target(s) async (non-blocking)`,
 			);
 			const firedAtTurn = runtime.turnIndex;
-			const firedSessionId = runtime.telemetrySessionId;
+			const firedSessionId = sessionId ?? runtime.telemetrySessionId;
 			const priorTestCache = cacheManager.readCache<TestRunnerFindingsCache>(
 				"test-runner-findings",
 				cwd,

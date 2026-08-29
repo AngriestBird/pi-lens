@@ -2009,11 +2009,21 @@ describe("#484 turn-summary emit at the agent_settled quiet window", () => {
 	// real scheduler (clients/quiet-window.ts) is exercised by its own suite;
 	// here we only need "index.ts registered the task" + "running the task
 	// chain at settle produces the emission".
-	let quietTasks: Array<{ name: string; fn: () => Promise<void> | void }>;
+	let quietTasks: Array<{
+		name: string;
+		fn: (context?: {
+			runtime: unknown;
+			cwd?: string;
+			sessionId?: string;
+			ownerId?: string;
+		}) => Promise<void> | void;
+	}>;
 	let handleTurnEndHook:
 		| ((deps: {
 				onTestRunnerComplete?: (args: any) => void;
 				runtime: any;
+				ctxCwd?: string;
+				sessionId?: string;
 		  }) => void)
 		| undefined;
 
@@ -2087,15 +2097,25 @@ describe("#484 turn-summary emit at the agent_settled quiet window", () => {
 		vi.doMock("../clients/quiet-window.js", () => ({
 			registerQuietWindowTask: (
 				name: string,
-				fn: () => Promise<void> | void,
+				fn: (context?: {
+					runtime: unknown;
+					cwd?: string;
+					sessionId?: string;
+					ownerId?: string;
+				}) => Promise<void> | void,
 			) => {
 				quietTasks.push({ name, fn });
 			},
 			registerBuiltinQuietWindowTasks: () => {},
-			runQuietWindow: async () => {
+			runQuietWindow: async (deps: {
+				runtime: unknown;
+				cwd?: string;
+				sessionId?: string;
+				ownerId?: string;
+			}) => {
 				for (const task of quietTasks) {
 					try {
-						await task.fn();
+						await task.fn(deps);
 					} catch {
 						// mirror the real scheduler: task failures are isolated
 					}
@@ -2255,6 +2275,78 @@ describe("#484 turn-summary emit at the agent_settled quiet window", () => {
 			});
 			expect(sentMessages).toHaveLength(0);
 			expect(mock.entryRenderers.has("pilens:test-runner-findings")).toBe(true);
+		},
+		INTEGRATION_TIMEOUT_MS,
+	);
+
+	it(
+		"keeps primary and concurrent secondary test delivery on their owning activation",
+		async () => {
+			mockSuiteDeps();
+			vi.doMock("../clients/runtime-session.js", () => ({
+				handleSessionStart: vi.fn(async () => {}),
+			}));
+			handleTurnEndHook = (deps) =>
+				deps.onTestRunnerComplete?.({
+					cwd: deps.ctxCwd ?? tmpDir,
+					sessionId: deps.sessionId ?? "unknown",
+					generation: 1,
+					targetCount: deps.sessionId === "secondary-delivery" ? 22 : 11,
+					hasFindings: true,
+				});
+			new CacheManager(false).writeCache(
+				"test-runner-findings",
+				{ content: "FAIL cross-session.test.ts:1", testRunGeneration: 1 },
+				tmpDir,
+			);
+
+			const { default: registerExtension } = await import("../index.js");
+			const primary = createMockPi();
+			registerExtension(primary.pi as any);
+			await primary.trigger(
+				"session_start",
+				{},
+				makeCtx({ cwd: tmpDir, sessionId: "primary-delivery" }),
+			);
+			const secondary = createMockPi();
+			registerExtension(secondary.pi as any);
+			await secondary.trigger(
+				"session_start",
+				{},
+				makeCtx({ cwd: tmpDir, sessionId: "secondary-delivery" }),
+			);
+
+			await primary.trigger(
+				"turn_end",
+				{},
+				makeCtx({ cwd: tmpDir, sessionId: "primary-delivery" }),
+			);
+			await secondary.trigger(
+				"turn_end",
+				{},
+				makeCtx({ cwd: tmpDir, sessionId: "secondary-delivery" }),
+			);
+			await primary.trigger(
+				"agent_settled",
+				{},
+				makeCtx({ cwd: tmpDir, sessionId: "primary-delivery" }),
+			);
+			await secondary.trigger(
+				"agent_settled",
+				{},
+				makeCtx({ cwd: tmpDir, sessionId: "secondary-delivery" }),
+			);
+
+			expect(primary.mock.appendedEntries).toHaveLength(1);
+			expect(secondary.mock.appendedEntries).toHaveLength(1);
+			expect(primary.mock.appendedEntries[0]?.data).toMatchObject({
+				sessionId: "primary-delivery",
+				targetCount: 11,
+			});
+			expect(secondary.mock.appendedEntries[0]?.data).toMatchObject({
+				sessionId: "secondary-delivery",
+				targetCount: 22,
+			});
 		},
 		INTEGRATION_TIMEOUT_MS,
 	);

@@ -6,6 +6,7 @@ import { CacheManager } from "../../clients/cache-manager.js";
 import {
 	_resetTestRunnerDeliveryForTests,
 	deliverTestRunnerFindings,
+	deliverStagedTestRunnerFindings,
 	registerTestRunnerEntryRenderer,
 	stageTestRunnerDelivery,
 } from "../../clients/test-runner-delivery.js";
@@ -183,6 +184,105 @@ describe("automatic test-runner delivery (#2366)", () => {
 				sessionId: "session-a",
 			});
 			expect(pi.appendedEntries).toHaveLength(0);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("drops a pending older generation while newer findings remain cached", () => {
+		const { env, cache, runtime } = setup();
+		try {
+			const pi = createPiMock();
+			stageTestRunnerDelivery({
+				cwd: env.tmpDir,
+				sessionId: "session-a",
+				generation: 1,
+				targetCount: 1,
+				hasFindings: true,
+			});
+			// Keep generation 1 pending. Only the persisted cache high-water mark
+			// advances, so this assertion is red if the delivery guard is removed.
+			cache.writeCache(
+				"test-runner-findings",
+				{ content: "FAIL newer-generation.test.ts:1", testRunGeneration: 2 },
+				env.tmpDir,
+			);
+			deliverTestRunnerFindings({
+				pi: pi.asExtensionAPI(),
+				ctx: { cwd: env.tmpDir, isIdle: () => true },
+				cacheManager: cache,
+				runtime,
+				sessionId: "session-a",
+			});
+			expect(pi.appendedEntries).toHaveLength(0);
+			expect(
+				cache.readCache<{ content: string }>("test-runner-findings", env.tmpDir)
+					?.data.content,
+			).toContain("newer-generation");
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("delivers each activation's staged result through its own owner", () => {
+		const { env, cache, runtime } = setup();
+		try {
+			const primaryPi = createPiMock();
+			const secondaryPi = createPiMock();
+			const secondaryRuntime = new RuntimeCoordinator();
+			secondaryRuntime.setTelemetryIdentity({ sessionId: "session-b" });
+			const primaryOwner = {
+				ownerId: "activation-primary",
+				pi: primaryPi.asExtensionAPI(),
+				cacheManager: cache,
+				runtime,
+				getCtx: () => ({ cwd: env.tmpDir, isIdle: () => true }),
+			};
+			const secondaryOwner = {
+				ownerId: "activation-secondary",
+				pi: secondaryPi.asExtensionAPI(),
+				cacheManager: cache,
+				runtime: secondaryRuntime,
+				getCtx: () => ({ cwd: env.tmpDir, isIdle: () => true }),
+			};
+			stageTestRunnerDelivery({
+				cwd: env.tmpDir,
+				sessionId: "session-a",
+				generation: 1,
+				targetCount: 11,
+				hasFindings: true,
+				owner: primaryOwner,
+			});
+			stageTestRunnerDelivery({
+				cwd: env.tmpDir,
+				sessionId: "session-b",
+				generation: 1,
+				targetCount: 22,
+				hasFindings: true,
+				owner: secondaryOwner,
+			});
+
+			deliverStagedTestRunnerFindings({
+				cwd: env.tmpDir,
+				sessionId: "session-a",
+				ownerId: "activation-primary",
+			});
+			deliverStagedTestRunnerFindings({
+				cwd: env.tmpDir,
+				sessionId: "session-b",
+				ownerId: "activation-secondary",
+			});
+
+			expect(primaryPi.appendedEntries).toHaveLength(1);
+			expect(secondaryPi.appendedEntries).toHaveLength(1);
+			expect(primaryPi.appendedEntries[0]?.data).toMatchObject({
+				sessionId: "session-a",
+				targetCount: 11,
+			});
+			expect(secondaryPi.appendedEntries[0]?.data).toMatchObject({
+				sessionId: "session-b",
+				targetCount: 22,
+			});
 		} finally {
 			env.cleanup();
 		}

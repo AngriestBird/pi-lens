@@ -325,6 +325,13 @@ turn-end delivery, and stale completed findings must re-arm a refreshed
 freshness baseline. Turn-end drains use a zero wait budget and requeue unsettled
 promises, so deferred work never adds a repeated per-turn stall (#2122).
 
+Post-agent test-runner delivery is activation/session-owned: the staged record
+retains its owning host, cache, runtime, and event context, while the quiet
+window receives the settled event's stable session identity and activation
+owner. A process-global latest activation must never select the pi/cache/runtime
+for another session's result. Persisted test-runner generations still gate
+delivery before append (#2366).
+
 Live contracts, grouped by subsystem. Consult the group for the seam you
 touch; each paragraph carries its evidence issue. New entries join their
 group (see the placement rules in "Maintaining this file").
