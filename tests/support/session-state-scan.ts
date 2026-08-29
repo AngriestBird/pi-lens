@@ -115,6 +115,87 @@ function bareCalls(body: string): string[] {
 }
 
 /**
+ * Extract calls from the closure's own control flow, excluding callback
+ * bodies. Control-flow blocks remain visible, so a reset behind an `if` still
+ * counts as directly wired, while a reset deferred to `setImmediate`, `then`,
+ * or `catch` does not. The source is stripped, so brace matching is safe.
+ */
+function directClosureCalls(body: string): string[] {
+	const visible = body.split("");
+	const maskRange = (start: number, end: number) => {
+		for (let i = start; i < end; i++) visible[i] = " ";
+	};
+	const matchingBrace = (open: number): number => {
+		let depth = 0;
+		for (let i = open; i < body.length; i++) {
+			if (body[i] === "{") depth++;
+			else if (body[i] === "}" && --depth === 0) return i;
+		}
+		return body.length;
+	};
+	const functionBodyOpen = (start: number): number => {
+		let parens = 0;
+		for (let i = start + "function".length; i < body.length; i++) {
+			if (body[i] === "(") parens++;
+			else if (body[i] === ")") parens--;
+			else if (body[i] === "{" && parens === 0) return i;
+		}
+		return body.length;
+	};
+	const arrowExpressionEnd = (start: number): number => {
+		let parens = 0;
+		let brackets = 0;
+		for (let i = start; i < body.length; i++) {
+			switch (body[i]) {
+				case "(":
+					parens++;
+					break;
+				case ")":
+					if (parens === 0 && brackets === 0) return i;
+					parens--;
+					break;
+				case "[":
+					brackets++;
+					break;
+				case "]":
+					brackets--;
+					break;
+				case ",":
+				case ";":
+					if (parens === 0 && brackets === 0) return i;
+			}
+		}
+		return body.length;
+	};
+
+	for (let i = 0; i < body.length - 1; i++) {
+		if (
+			body.startsWith("function", i) &&
+			!/[\w$]/.test(body[i - 1] ?? "") &&
+			!/[\w$]/.test(body[i + "function".length] ?? "")
+		) {
+			const open = functionBodyOpen(i);
+			if (open < body.length) {
+				maskRange(open, matchingBrace(open) + 1);
+				i = open;
+			}
+		}
+		if (body[i] === "=" && body[i + 1] === ">") {
+			let next = i + 2;
+			while (/\s/.test(body[next] ?? "")) next++;
+			if (body[next] === "{") {
+				maskRange(next, matchingBrace(next) + 1);
+				i = next;
+			} else {
+				maskRange(next, arrowExpressionEnd(next));
+				i = next;
+			}
+		}
+	}
+	return bareCalls(visible.join(""));
+}
+
+/**
  * The bare-identifier calls made inside `name`'s body in `source`, with
  * comments and string literals removed first. Exported so the suite can pin
  * this behavior against synthetic source rather than only against whatever
@@ -261,7 +342,8 @@ export function callsWithinSessionStartClosure(source: string): string[] {
 		if (stripped[i] === "{") depth++;
 		else if (stripped[i] === "}") {
 			depth--;
-			if (depth === 0) return bareCalls(stripped.slice(openBrace, i + 1));
+			if (depth === 0)
+				return directClosureCalls(stripped.slice(openBrace, i + 1));
 		}
 	}
 	return [];

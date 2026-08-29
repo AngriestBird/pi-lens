@@ -263,6 +263,32 @@ describe("session-state scan — closure walker smuggle probes (#2319)", () => {
 		expect(calls).not.toContain("resetVerifiedPathAttributionGuessCount");
 	});
 
+	it("a reset deferred to a callback does not count as a direct call", () => {
+		const source = closureSource([
+			"\t\tsetImmediate(() => resetVerifiedPathAttributionGuessCount());",
+			"\t\tPromise.resolve().then(() => {",
+			"\t\t\tresetConcurrentSessionBindRollupCounts();",
+			"\t\t});",
+		]);
+		expect(callsWithinSessionStartClosure(source)).not.toContain(
+			"resetVerifiedPathAttributionGuessCount",
+		);
+		expect(callsWithinSessionStartClosure(source)).not.toContain(
+			"resetConcurrentSessionBindRollupCounts",
+		);
+	});
+
+	it("a reset deferred to a function callback does not count as direct", () => {
+		const source = closureSource([
+			"\t\tsetImmediate(function () {",
+			"\t\t\tresetVerifiedPathAttributionGuessCount();",
+			"\t\t});",
+		]);
+		expect(callsWithinSessionStartClosure(source)).not.toContain(
+			"resetVerifiedPathAttributionGuessCount",
+		);
+	});
+
 	it("returns empty when the registration shape changes — the failure is loud, not silent", () => {
 		// #2319: if the wrapper/event registration is renamed or reformatted,
 		// the derivation yields nothing and every closure-site registry entry

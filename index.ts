@@ -1720,7 +1720,6 @@ function activateExtension(hostPi: ExtensionAPI) {
 			"session_start",
 			async (event, ctx) => {
 				const sessionStartMonotonicAt = performance.now();
-				resetVerifiedPathAttributionGuessCount();
 				warmDispatchAtSessionStart();
 				void warmLspService().catch((err) =>
 					logExtension({
@@ -1858,6 +1857,11 @@ function activateExtension(hostPi: ExtensionAPI) {
 						}
 						return;
 					}
+
+					// #2319: this process-singleton tally belongs to the primary
+					// session that owns the session-end rollup. A concurrent secondary
+					// must not erase a live primary's count before this decision.
+					resetVerifiedPathAttributionGuessCount();
 
 					// #1723 review F4: the in-flight-phase live-bracket map/closed-ring
 					// (clients/latency-logger.ts) is process-shared state, exactly like

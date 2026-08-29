@@ -276,7 +276,7 @@ export const SESSION_STATE_REGISTRY: SessionStateEntry[] = [
 		resetName: "resetVerifiedPathAttributionGuessCount",
 		sessionStartClosureReset: true,
 		reason:
-			"#2319: the verified path-attribution guess tally is a per-session counter that emits one path_attribution_verified_rollup row at session end; PR #2312's class sweep flagged the module-scope `let` as the same latent shape as the bind rollup, so it now rides getProcessSingleton (shape 25). Its reset runs in index.ts's session_start closure - placed before the #473 decision so every start re-arms the tally; the count is memory-only best-effort observability, so a lost tally is noise, not data.",
+			"#2319: the verified path-attribution guess tally is a per-session counter that emits one path_attribution_verified_rollup row at session end; PR #2312's class sweep flagged the module-scope `let` as the same latent shape as the bind rollup, so it now rides getProcessSingleton (shape 25). Its reset runs in index.ts's session_start closure after the #473 decision and only on the primary path, so a secondary cannot erase the primary's tally; the count is memory-only best-effort observability, so a lost tally is noise, not data.",
 	},
 	// The exemption this entry replaces (#2319): liveBrackets is NOT exempt
 	// any longer - it is real session-scoped process-shared state whose reset

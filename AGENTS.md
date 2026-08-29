@@ -2843,6 +2843,14 @@ Keep the records bounded, use the existing log conventions, and exclude zero-dur
 
 Verified workspace-root guesses for a missing tool-call attribution are benign host behavior: count them in `clients/path-attribution-telemetry.ts` and emit one `path_attribution_verified_rollup` row at session shutdown. Keep non-existent or otherwise unverified guesses as full `path_attribution_missing` records with `rawFilePath` and `guessedPath`; this uses the session-rollup shape from `clients/bus-events-logger.ts`, not the degradation ledger.
 
+The session-state registry uses `sessionStartClosureReset` when a reset must
+run in `index.ts`'s `session_start` closure instead of the
+`handleSessionStart` call graph. `sessionStartClosureResetNames()` derives
+direct reset calls at that site and excludes nested or deferred callback bodies;
+the registry checks this derived set rather than a copied list. Keep resets for
+process-singleton session state behind the concurrent-secondary decision. The
+primary activation owns the tally, and a secondary must never clear it.
+
 ## Issue triage & labels
 
 Every issue should carry **one TYPE label + at least one `area:` label**.

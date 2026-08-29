@@ -9,7 +9,10 @@ const latencyEntries = vi.hoisted(() => [] as LatencyEntry[]);
 vi.mock("../../clients/latency-logger.js", async (importActual) => {
 	const actual =
 		await importActual<typeof import("../../clients/latency-logger.js")>();
-	return { ...actual, logLatency: (entry: LatencyEntry) => latencyEntries.push(entry) };
+	return {
+		...actual,
+		logLatency: (entry: LatencyEntry) => latencyEntries.push(entry),
+	};
 });
 
 import {
