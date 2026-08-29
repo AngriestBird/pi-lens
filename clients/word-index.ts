@@ -2189,7 +2189,7 @@ export function deserializeWordIndex(
 		}
 	}
 
-	return {
+	const index: WordIndex = {
 		postings,
 		fileTable,
 		docLengths,
@@ -2203,7 +2203,37 @@ export function deserializeWordIndex(
 		// starts from the exact post-compaction store count (#2117).
 		postingStoreCount: countPostingBackingStores(postings),
 		recompactFlight: createSingleFlight<void>(),
+		// A deserialized index is a fresh object distinct from whichever index
+		// produced `data`. Without this, every per-edit dirty mark on a
+		// session-start reload (#2068) is a no-op against `undefined`, and
+		// serializeWordIndexIncrementally's `!dirty` branch then returns the
+		// stale cached wire view forever, silently dropping every later edit
+		// from the persisted snapshot.
+		dirtyFiles: new Set<string>(),
 	};
+
+	// Seed the wire cache from the snapshot just loaded so the FIRST persist
+	// of a reloaded session (session-start's `snapshotSaveSyncMs`, #2068) also
+	// takes the bounded incremental path instead of paying a full rebuild —
+	// mirrors exactly what one priming `serializeWordIndex` call would cache.
+	const slotByFileId = new Map<number, number>();
+	fileIdBySlot.forEach((fileId, slot) => slotByFileId.set(fileId, slot));
+	const tokensByFile = new Map<string, Set<string>>();
+	if (forward) {
+		for (const file of data.files) {
+			tokensByFile.set(
+				wordIndexKey(file),
+				new Set(forward.get(file)?.keys() ?? []),
+			);
+		}
+	}
+	serializedWordIndexCaches.set(index, {
+		serialized: data,
+		slotByFileId,
+		tokensByFile,
+	});
+
+	return index;
 }
 
 // --- Cold-query background build trigger (#348) -------------------------------

@@ -67,6 +67,29 @@ describe("updateWordIndexDocument / removeWordIndexDocument", () => {
 		]);
 	});
 
+	it("keeps persisting edits after a session-start reload from a snapshot (#2068)", () => {
+		const built = buildWordIndex([
+			{ path: "a.ts", content: "oldalpha" },
+			{ path: "b.ts", content: "untouched" },
+		]);
+		const restored = deserializeWordIndex(serializeWordIndex(built));
+		expect(restored).not.toBeNull();
+
+		// Mirrors session start's own first save right after deserialize
+		// (`saveRuntimeProjectSnapshot`), which primes the wire cache before
+		// any further edit happens in this process.
+		serializeWordIndex(restored!);
+
+		updateWordIndexDocument(restored!, { path: "a.ts", content: "newalpha" });
+
+		const roundTripped = deserializeWordIndex(serializeWordIndex(restored!));
+		expect(roundTripped).not.toBeNull();
+		expect(wordIndexPostingHits(roundTripped!, "oldalpha")).toEqual([]);
+		expect(wordIndexPostingHits(roundTripped!, "newalpha")).toEqual([
+			{ file: "a.ts", line: 1 },
+		]);
+	});
+
 	it("persists a brand-new document after a cached snapshot is primed (#2158 F1)", () => {
 		const index = buildWordIndex([{ path: "a.ts", content: "alpha" }]);
 		serializeWordIndex(index);
