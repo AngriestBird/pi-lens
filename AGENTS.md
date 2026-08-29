@@ -328,6 +328,12 @@ through `LSPClientState.notifyChangeQueues`; different paths remain parallel.
 `lsp-document-send-order` degradation with the server and normalized path.
 (#2113)
 
+Document `didOpen` and `didChange` notifications share those per-client,
+per-path queues. A same-turn newer entry replaces only an unwritten pending
+entry; a transport write that has started always settles before the newer entry
+runs. Replacements retain the latest content and report their bounded count in
+the succeeding `lsp_document_send` metadata. (#2357)
+
 Auxiliary diagnostic waits preserve a warm-turn fast path: on a cold
 acquisition, the budget is `max(declared wait, observed spawn + 500ms)` clamped
 to an 8s ceiling; on a warm acquisition, it remains `min(declared wait, 2000ms)`. An
