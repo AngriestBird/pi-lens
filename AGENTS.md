@@ -468,6 +468,16 @@ bounded stuck-pair identity in the phase record. Pair-level retirements and
 finding-level counts use separate fields and reconcile each drained pair to
 one retirement or a pending-after count. (#2151)
 
+Notify-stall teardown is a temporary client-generation absence, not proof that
+an auxiliary scanner is gone. `LSPService` carries that reason through the
+read-only late-coverage probe with the demotion timestamp until a replacement
+generation is published; turn-end correlates each pair's mark to that timestamp
+before re-arming under the same TTL and count ceiling. Pairs marked after
+teardown follow ordinary `clientGone` handling. If no replacement appears
+before that bounded window closes, the pre-demotion pair is retired and
+re-raises `lsp_scanner_coverage_gap` with its server/file identity instead of
+being counted as an ordinary `clientGone` absence. (#2356)
+
 Every auxiliary touch emits one bounded `lsp_aux_wait_outcome` latency row, on
 both producers: the `with-auxiliary` grace wait (`waitShape: "aux_grace"`) and,
 since #1533, the `clientScope: "all"` aggregate wait (`waitShape: "aggregate"`),
@@ -510,7 +520,11 @@ silence reads as CLEAN unless the touch names it. A scanner that never attached
 `unconfirmedServerIds`, exactly like a cut-off or silent auxiliary, and the gap
 must reach the AGENT-facing surface too
 (`CascadeNeighborResult.unconfirmedServerIds` and the cascade formatter), not
-only the result wrapper. One `lsp_scanner_coverage_gap` row per touch records it.
+only the result wrapper. One aggregate `lsp_scanner_coverage_gap` count per
+touch records every pair; detailed re-raised rows use the bounded telemetry
+cap for the current turn, while the degradation ledger retains a bounded
+latest server/file identity window and its dropped count. The aggregate row
+reports dropped detail, so identities beyond those bounds are not implied.
 #1493's content-hash exemption outranks a deferral: a scanner whose STORED
 publication is bound to exactly these bytes has reported on this file, so the
 skipped resync withholds nothing — it stays covered, and its stored findings
