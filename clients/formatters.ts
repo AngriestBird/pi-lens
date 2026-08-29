@@ -197,7 +197,8 @@ async function findUp(
 			// On default-case-insensitive platforms the old `fs.access` probe
 			// matched a config file regardless of on-disk casing; fold so the
 			// readdir membership check keeps that behavior.
-			const foldCase = process.platform === "win32" || process.platform === "darwin";
+			const foldCase =
+				process.platform === "win32" || process.platform === "darwin";
 			const entrySet = new Set(
 				foldCase ? entries.map((e) => e.toLowerCase()) : entries,
 			);
