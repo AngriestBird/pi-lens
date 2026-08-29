@@ -662,6 +662,15 @@ export const SESSION_STATE_REGISTRY: SessionStateEntry[] = [
 			"The service is torn down and rebuilt per session; this reset is also the seam that carries the sweep hold and TS-repair guard resets.",
 	},
 	{
+		id: "lsp-server:launchAvailabilityGeneration",
+		module: "lsp/server.ts",
+		state: "lspLaunchAvailabilityGeneration",
+		policy: "session_start",
+		resetName: "resetLSPService",
+		reason:
+			"Availability publication shares the LSP service generation. A managed lookup, install, or launch that crosses reset must not publish into the replacement session. #2351.",
+	},
+	{
 		id: "spawn-timeout-cooldown:latches",
 		module: "spawn-timeout-cooldown.ts",
 		state: "timedOutByCommand",

@@ -46,10 +46,9 @@ describe("availability_decision classifiedBy sweep (#2131)", () => {
 		// A regex typo that matched nothing would make the assertion below
 		// trivially true. Pin a floor, not the exact count, which churns.
 		expect(SITES.length).toBeGreaterThan(20);
-		// #2140: resolveAndLaunch's managed-bin fast path added two new
-		// cause:"ok" sites (the direct-launch success and the ensureTool
-		// compensating override), both correctly stamped classifiedBy below.
-		expect(OK_SITES.length).toBe(20);
+		// #2140/#2351: resolveAndLaunch's managed-bin fast path and force-reinstall
+		// recovery add three cause:"ok" sites, all stamped classifiedBy below.
+		expect(OK_SITES.length).toBe(21);
 	});
 
 	it('every cause:"ok" decision stamps classifiedBy', () => {
