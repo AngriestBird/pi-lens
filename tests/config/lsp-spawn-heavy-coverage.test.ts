@@ -144,8 +144,6 @@ const SPAWN_EXEMPTIONS: Readonly<Record<string, string>> = {
 		"real clients across two module instances to prove process-scope retention; handshake only against the instant fixture, no contention budget",
 	"tests/clients/lsp/initialize-timeout-backstop.test.ts":
 		"POSIX-only real-child initialize-timeout backstop; waits on a 50ms timeout firing then sleeps past kill escalation — deterministic and short",
-	"tests/clients/lsp/integration.test.ts":
-		"already routed outside the default fork storm: it is in vitest.config.ts integrationInclude and runs only under npm run test:integration",
 	"tests/clients/lsp/launch.test.ts":
 		"unit-tests the launchLSP seam itself over real binaries; asserts spawn/exit/failure shapes, never an LSP handshake under a timing budget",
 	"tests/clients/lsp/lifecycle.test.ts":
@@ -202,8 +200,8 @@ describe("lsp-spawn-heavy Vitest project coverage", () => {
 			// excluded); half rounded up is 429, documented floor 430.
 			scannedCount: files.length,
 			minScanned: 430,
-			// Calibration: 19 spawning-test candidates on 2026-08-29 (3 phased,
-			// 16 exempted); half rounded up is 10.
+			// Calibration: 19 spawning-test candidates on 2026-08-30 (4 phased,
+			// 15 exempted); half rounded up is 10.
 			minFlagged: 10,
 			remediation:
 				"A test that spawns a real LSP child must run in the lsp-spawn-heavy " +

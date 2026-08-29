@@ -411,7 +411,7 @@ export default defineConfig({
 					globalSetup: sharedGlobalSetup,
 					setupFiles: sharedSetupFiles,
 					execArgv: sharedExecArgv,
-					// Full serialization, not just a cap: three files, but the point
+					// Full serialization, not just a cap: four files, but the point
 					// is to guarantee zero overlap with the "default" project's
 					// fork storm (the actual contention source, see #1022/#2332
 					// above), not to bound intra-project concurrency.
