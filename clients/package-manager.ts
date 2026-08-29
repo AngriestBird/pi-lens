@@ -239,11 +239,15 @@ function isAvailable(
  * day, start a fresh session, pi-lens still reports it missing until a
  * process restart (#1653). Called from `handleSessionStart`'s per-session
  * reset block beside `resetZizmorTokenAvailability()` /
- * `resetPsScriptAnalyzerAvailability()`; also used directly by tests.
+ * `resetPsScriptAnalyzerAvailability()`; also used directly by tests. Also
+ * clears `globalBinDirCache`, whose memo lifetime rides the same reset — it
+ * must not outlive the availability verdicts it was derived from (#1602).
  */
 export function _resetPackageManagerCache(): void {
 	availabilityLatches.clear();
 	packageManagerProbeFlights.clear();
+	globalBinDirCache.clear();
+	globalBinDirProbeFlights.clear();
 }
 
 // ============================================================================
@@ -387,12 +391,34 @@ export function execArgs(
 // GLOBAL BIN DISCOVERY
 // ============================================================================
 
+/**
+ * Per-manager global bin dir, memoized for the process (cleared alongside
+ * `availabilityLatches` in `_resetPackageManagerCache`). Only a SUCCESSFUL
+ * lookup is cached: a spawn failure here is evidence about this call, not
+ * about the manager (the manager already passed `isAvailable`'s own probe),
+ * so it must not latch an empty result the way a genuine absence would.
+ */
+const globalBinDirCache = new Map<NodePackageManager, string[]>();
+const globalBinDirProbeFlights = createAvailabilityProbeFlight<string[]>();
+
 /** Directories where a given manager installs global binaries. */
 async function globalBinDirsFor(pm: NodePackageManager): Promise<string[]> {
+	const cached = globalBinDirCache.get(pm);
+	if (cached) return cached;
+
+	// Concurrent callers (dispatch runs several tools per edit) must share ONE
+	// probe rather than each spawning their own `npm config get prefix` (#1602).
+	const shared = globalBinDirProbeFlights.run(pm, () => probeGlobalBinDirs(pm));
+	return shared.promise;
+}
+
+async function probeGlobalBinDirs(pm: NodePackageManager): Promise<string[]> {
 	if (pm === "bun") {
 		// bun has no per-call query cost — the global bin dir is deterministic.
 		const base = process.env.BUN_INSTALL || path.join(os.homedir(), ".bun");
-		return [path.join(base, "bin")];
+		const dirs = [path.join(base, "bin")];
+		globalBinDirCache.set(pm, dirs);
+		return dirs;
 	}
 
 	const query =
@@ -408,10 +434,9 @@ async function globalBinDirsFor(pm: NodePackageManager): Promise<string[]> {
 
 	// npm reports a prefix; binaries live in `<prefix>/bin` on Unix, `<prefix>`
 	// on Windows. pnpm/yarn already print the bin dir directly.
-	if (pm === "npm") {
-		return [onWindows() ? out : path.join(out, "bin")];
-	}
-	return [out];
+	const dirs = pm === "npm" ? [onWindows() ? out : path.join(out, "bin")] : [out];
+	globalBinDirCache.set(pm, dirs);
+	return dirs;
 }
 
 /**

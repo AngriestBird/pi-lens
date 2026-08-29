@@ -508,6 +508,52 @@ describe("findGlobalBinary", () => {
 		onlyAvailable();
 		expect(await findGlobalBinary("prisma")).toBeUndefined();
 	});
+
+	/**
+	 * #1602 — `globalBinDirsFor` re-spawned `npm config get prefix` (and its
+	 * pnpm/yarn equivalents) on every `findGlobalBinary` miss, even though
+	 * `isAvailable` above it is latched. Two misses must spawn the prefix
+	 * lookup once. Must FAIL on pre-fix code (two query spawns).
+	 */
+	it("memoizes the per-manager global bin dir across findGlobalBinary misses", async () => {
+		setPlatform("linux");
+		npmGlobalPrefix(); // available, but no binary ever written — both calls miss
+		expect(await findGlobalBinary("does-not-exist")).toBeUndefined();
+		expect(await findGlobalBinary("still-not-there")).toBeUndefined();
+		const npmQueries = queryCalls.filter((c) => c.cmd === "npm");
+		expect(npmQueries.length).toBe(1);
+	});
+
+	/**
+	 * #1602 review — the memo must not latch a transient bin-dir lookup
+	 * failure the way a genuine absence would: npm already passed
+	 * `isAvailable`'s own probe, so a failed `config get prefix` here is
+	 * evidence about this one call, not about npm. A memo that cached every
+	 * result — including an empty one — would keep serving no bin dirs for
+	 * npm forever.
+	 */
+	it("does not latch a failed bin-dir lookup forever", async () => {
+		setPlatform("linux");
+		const prefix = tmpDir();
+		const binDir = path.join(prefix, "bin");
+		fs.mkdirSync(binDir, { recursive: true });
+		fs.writeFileSync(path.join(binDir, "prisma"), "#!/bin/sh\n");
+		onlyAvailable("npm");
+		let attempt = 0;
+		setQueryResponder(async () => {
+			attempt += 1;
+			if (attempt === 1) return { stdout: "", stderr: "", status: 1 };
+			return { stdout: `${prefix}\n`, stderr: "", status: 0 };
+		});
+
+		// First call: the prefix query fails — npm's bin dir can't be resolved.
+		expect(await findGlobalBinary("prisma")).toBeUndefined();
+
+		// Second call: the prefix query now succeeds.
+		expect(await findGlobalBinary("prisma")).toBe(
+			path.resolve(path.join(binDir, "prisma")),
+		);
+	});
 });
 
 describe("findNodeToolBinary", () => {
