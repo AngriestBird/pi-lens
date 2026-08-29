@@ -1026,7 +1026,10 @@ function notifyWriteBudgetMs(): number {
 // cold primary spawn is allowed to run this long, so anything downstream that
 // charges itself against `maxWaitMs` alone — rather than this floor — sees an
 // already-elapsed time it never budgeted for and clamps to zero.
-function primaryServerWaitFloorMs(filePath: string, maxWaitMs?: number): number {
+function primaryServerWaitFloorMs(
+	filePath: string,
+	maxWaitMs?: number,
+): number {
 	const serverWaitOverrideMs = getServersForFileWithConfig(filePath)
 		.filter((s) => s.role !== "auxiliary")
 		.reduce((max, server) => Math.max(max, server.clientWaitTimeoutMs ?? 0), 0);
