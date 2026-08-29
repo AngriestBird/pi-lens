@@ -110,7 +110,7 @@ describe("workspace-topology scan — synthetic fixtures", () => {
 		withFixtureTree(
 			{
 				"consumer.ts":
-					'import { getDirectoryMarkers } from "../workspace-topology.js";\nconst c = getDirectoryMarkers("/probe");',
+					'import { getDirectoryMarkers } from "./workspace-topology.js";\nconst c = getDirectoryMarkers("/probe");',
 			},
 			(dir) => {
 				const consumers = scanTopologyConsumers(dir);
@@ -128,7 +128,7 @@ describe("workspace-topology scan — synthetic fixtures", () => {
 		withFixtureTree(
 			{
 				"aliased.ts": [
-					'import { getDirectoryMarkers as markers } from "../workspace-topology.js";',
+					'import { getDirectoryMarkers as markers } from "./workspace-topology.js";',
 					'const c = markers("/probe");',
 				].join("\n"),
 			},
@@ -145,7 +145,7 @@ describe("workspace-topology scan — synthetic fixtures", () => {
 				"multiline.ts": [
 					"import {",
 					"\tfindNearestDirWithAnyBasename,",
-					'} from "../workspace-topology.js";',
+					'} from "./workspace-topology.js";',
 					'const r = findNearestDirWithAnyBasename("/probe", ["x"]);',
 				].join("\n"),
 			},
@@ -161,7 +161,7 @@ describe("workspace-topology scan — synthetic fixtures", () => {
 		withFixtureTree(
 			{
 				"ns.ts": [
-					'import * as topo from "../workspace-topology.js";',
+					'import * as topo from "./workspace-topology.js";',
 					'const d = topo.getDirectoryMarkers("/probe");',
 				].join("\n"),
 			},
@@ -177,7 +177,7 @@ describe("workspace-topology scan — synthetic fixtures", () => {
 		withFixtureTree(
 			{
 				"bare.ts":
-					'import { findNearestProjectRoot } from "../startup-scan.js";',
+					'import { findNearestProjectRoot } from "./startup-scan.js";',
 			},
 			(dir) => {
 				expect(scanTopologyConsumers(dir).map((c) => c.file)).toEqual([
@@ -209,7 +209,7 @@ describe("workspace-topology scan — synthetic fixtures", () => {
 		withFixtureTree(
 			{
 				"mixed.ts": [
-					'import { getDirectoryMarkers } from "../workspace-topology.js";',
+					'import { getDirectoryMarkers } from "./workspace-topology.js";',
 					"function getDirectoryMarkers(dir: string) { return dir; }",
 					'const c = getDirectoryMarkers("/probe");',
 				].join("\n"),
@@ -237,15 +237,58 @@ describe("workspace-topology scan — synthetic fixtures", () => {
 		);
 	});
 
+	it("a template-literal import-shaped decoy is NOT an import", () => {
+		withFixtureTree(
+			{
+				"template-decoy.ts": [
+					"const fixture = `",
+					'import { getDirectoryMarkers } from "./workspace-topology.js";',
+					"`;",
+				].join("\n"),
+			},
+			(dir) => {
+				expect(scanTopologyConsumers(dir)).toEqual([]);
+			},
+		);
+	});
+
+	it("a type-only or alias-mismatched import is NOT a runtime consumer", () => {
+		withFixtureTree(
+			{
+				"type-only.ts":
+					'import type { getDirectoryMarkers as markers } from "./workspace-topology.js";',
+				"alias-mismatch.ts":
+					'import { unrelated as getDirectoryMarkers } from "./workspace-topology.js";',
+			},
+			(dir) => {
+				expect(scanTopologyConsumers(dir)).toEqual([]);
+			},
+		);
+	});
+
+	it("a same-basename non-canonical import is NOT a governed import", () => {
+		withFixtureTree(
+			{
+				"vendor/workspace-topology.ts":
+					"export const getDirectoryMarkers = () => [];",
+				"vendor-consumer.ts":
+					'import { getDirectoryMarkers } from "./vendor/workspace-topology.js";',
+			},
+			(dir) => {
+				expect(scanTopologyConsumers(dir)).toEqual([]);
+			},
+		);
+	});
+
 	it("registered is DERIVED from a call, never from an import or comment", () => {
 		withFixtureTree(
 			{
 				"registered.ts": [
-					'import { registerWorkspaceTopologyReset } from "../workspace-topology.js";',
+					'import { registerWorkspaceTopologyReset } from "./workspace-topology.js";',
 					"registerWorkspaceTopologyReset(() => cache.clear());",
 				].join("\n"),
 				"imports-register-only.ts":
-					'import { registerWorkspaceTopologyReset } from "../workspace-topology.js";',
+					'import { registerWorkspaceTopologyReset } from "./workspace-topology.js";',
 				"comment-names-register.ts": `// registerWorkspaceTopologyReset(() => cache.clear())\nconst y = 2;`,
 			},
 			(dir) => {
@@ -262,8 +305,8 @@ describe("workspace-topology scan — synthetic fixtures", () => {
 			{
 				// The defect shape: memoizes from a seam, never registers.
 				"rogue.ts": [
-					'import { getDirectoryMarkers } from "../workspace-topology.js";',
-					'import { registerWorkspaceTopologyReset } from "../workspace-topology.js";',
+					'import { getDirectoryMarkers } from "./workspace-topology.js";',
+					'import { registerWorkspaceTopologyReset } from "./workspace-topology.js";',
 					`const cache = new Map<string, unknown>();`,
 					`const key = getDirectoryMarkers("/probe").dir;`,
 					"// rogues: cached result, no downstream reset registered",

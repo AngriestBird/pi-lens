@@ -10,7 +10,8 @@
  * complete.
  *
  * This scan is the compensating, pull-side guard. It ENUMERATES the modules
- * under `clients/` that IMPORT a topology probe seam, then the conformance
+ * under `clients/` that structurally IMPORT a topology probe seam from its
+ * canonical source path, then the conformance
  * test asserts each is either registered (the file calls
  * `registerWorkspaceTopologyReset(`) or carries a documented freshness-key
  * exemption. A future consumer that memoizes from a seam without registering
@@ -34,7 +35,7 @@
  *   `import * as topo from "workspace-topology.js"` — the namespace makes
  *   every governed probe of that module reachable as `topo.<probe>`.
  *
- * A BARE import of a governed probe enters the population even when the local
+ * A named import of a governed probe enters the population even when the local
  * binding is never called — importing the seam is the act that can feed a
  * memo. Stateless imports that hold no derived cache are documented
  * exemptions, exactly like the call-shaped population's per-run consumers.
@@ -45,8 +46,8 @@
  * would flag it. Import-scoped binding detection is what keeps that out.
  *
  * Multiline named imports and namespace imports are supported; both a default
- * and a named binding in one statement are handled. Side-effect-only imports
- * of a canonical module (`import "workspace-topology.js"`) carry no probe
+ * and a named binding in one statement are handled. Type-only and
+ * side-effect-only imports of a canonical module carry no runtime probe
  * binding and do not enter the population.
  *
  * ## The probe-seam list (the canonical set)
@@ -60,6 +61,7 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { ts as sgTs } from "@ast-grep/napi";
 import { listSourceFiles, relativePosix, stripSource } from "./sweep-kit.js";
 import { repoRoot } from "./session-state-scan.js";
 
@@ -113,15 +115,44 @@ function moduleRelative(dir: string, absolute: string): string {
 }
 
 /**
- * Which canonical module a specifier resolves to, by last path segment.
- * `"../workspace-topology.js"`, `"./workspace-topology.js"` and
- * `"../../workspace-topology.js"` all resolve to `workspace-topology.js`.
+ * Resolve a local import to one of the canonical source modules.
+ *
+ * Matching the basename is not enough: `some-package/workspace-topology.js`
+ * and `../workspace-topology.js` can share a basename while referring to
+ * unrelated modules. Compare the import's resolved path with the governed
+ * source path instead. The source twin candidates support the repository's
+ * ESM convention (`.js` specifiers for `.ts` sources) without accepting a
+ * sibling or package path that only happens to end in the same name.
  */
-function canonicalModuleForSpec(spec: string): string | undefined {
-	const basename = spec.split(/[\\/]/).pop();
-	return basename && Object.hasOwn(GOVERNED_PROBES_BY_MODULE, basename)
-		? basename
-		: undefined;
+function canonicalModuleForSpec(
+	spec: string,
+	sourceFilePath: string,
+	rootDir: string,
+): string | undefined {
+	if (!spec.startsWith(".")) return undefined;
+	const resolved = path.resolve(path.dirname(sourceFilePath), spec);
+	const ext = path.extname(resolved).toLowerCase();
+	const sourceBase = /\.(?:js|jsx|mjs|cjs|ts|tsx|mts|cts)$/.test(ext)
+		? resolved.slice(0, -ext.length)
+		: resolved;
+	const candidates = new Set([
+		resolved,
+		`${sourceBase}.ts`,
+		`${sourceBase}.tsx`,
+		`${sourceBase}.mts`,
+		`${sourceBase}.cts`,
+	]);
+	for (const module of Object.keys(GOVERNED_PROBES_BY_MODULE)) {
+		const canonical = path.resolve(rootDir, module.replace(/\.js$/, ".ts"));
+		for (const candidate of candidates) {
+			const equal =
+				process.platform === "win32"
+					? candidate.toLowerCase() === canonical.toLowerCase()
+					: candidate === canonical;
+			if (equal) return module;
+		}
+	}
+	return undefined;
 }
 
 export interface TopologyImport {
@@ -133,76 +164,76 @@ export interface TopologyImport {
 	namespace: boolean;
 }
 
-/**
- * The governed-probe imports in `source`, found by binding shape.
- *
- * Run on comment-stripped source with STRING CONTENTS KEPT (so the module
- * specifier `"workspace-topology.js"` is readable) but comments and literals
- * blanked (so a comment or assertion string that merely names the seam is not
- * an import). Named imports split the import clause against the governed
- * export set; aliases contribute their IMPORTED name (the alias is a local
- * spelling, not the governed identity); namespace imports of a canonical
- * module contribute that module's full probe set; a default+binding mix and
- * multiline `{ ... }` clauses are both handled.
- */
-export function scanGovernedImports(strippedSource: string): TopologyImport[] {
-	const out: TopologyImport[] = [];
-	// Named import (optionally preceded by a default binding), multiline-safe
-	// because the `{ ... }` clause is non-greedy over `[\s\S]`.
-	const NAMED =
-		/^\s*import\s+(?:type\s+)?(?:(?:[\w$]+)\s*,\s*)?\s*\{([\s\S]*?)\}\s+from\s+["']([^"']+)["']/gm;
-	// (namespace handled separately below so the named regex never consumes it)
+export interface ScanGovernedImportsOptions {
+	/** Absolute path of the source file containing the import declarations. */
+	sourceFilePath: string;
+	/** Directory containing the canonical governed source modules. */
+	rootDir: string;
+}
 
-	let m: RegExpExecArray | null;
-	NAMED.lastIndex = 0;
-	while ((m = NAMED.exec(strippedSource)) !== null) {
-		const module = canonicalModuleForSpec(m[2]);
-		if (!module) continue;
-		// The clause's imported names, honoring aliases (`x as y` → x).
-		const importedNames = m[1]
-			.split(",")
-			.map((part) => part.trim())
-			.filter((part) => part.length > 0)
-			.map((part) => {
-				const asIndex = part.search(/\s+as\s+/);
-				return asIndex === -1 ? part : part.slice(0, asIndex).trim();
-			});
-		const governed = importedNames.filter((name) =>
-			(GOVERNED_PROBES_BY_MODULE[module] as readonly string[]).includes(name),
+/**
+ * The governed-probe imports in `source`, found from TypeScript's parsed import
+ * declarations and binding nodes. Parsing is structural: comments, strings,
+ * template literals, malformed textual decoys, and dead code cannot become an
+ * import. The resolved module path must also be the canonical source twin.
+ * Named imports use the imported name (not an alias), namespace imports of a
+ * canonical module contribute that module's full probe set, and type-only
+ * imports contribute nothing because they cannot feed runtime state.
+ */
+export function scanGovernedImports(
+	source: string,
+	options: ScanGovernedImportsOptions,
+): TopologyImport[] {
+	const out: TopologyImport[] = [];
+	const root = sgTs.parse(source).root();
+	for (const statement of root.children()) {
+		if (statement.kind() !== "import_statement") continue;
+		const clause = statement
+			.children()
+			.find((child) => child.kind() === "import_clause");
+		if (
+			!clause ||
+			statement.children().some((child) => child.kind() === "type")
+		)
+			continue;
+		const module = canonicalModuleForSpec(
+			(statement.field("source")?.text() ?? "").replace(/^['"]|['"]$/g, ""),
+			options.sourceFilePath,
+			options.rootDir,
 		);
+		if (!module) continue;
+		const namespace = clause
+			.children()
+			.find((child) => child.kind() === "namespace_import");
+		if (namespace) {
+			out.push({
+				probes: [...GOVERNED_PROBES_BY_MODULE[module]],
+				line: statement.range().start.line + 1,
+				namespace: true,
+			});
+			continue;
+		}
+		const named = clause
+			.children()
+			.find((child) => child.kind() === "named_imports");
+		if (!named) continue;
+		const governed = named
+			.children()
+			.filter((element) => element.kind() === "import_specifier")
+			.filter((element) => !/^type\s+/.test(element.text().trim()))
+			.map((element) => element.field("name")?.text() ?? "")
+			.filter((name) =>
+				(GOVERNED_PROBES_BY_MODULE[module] as readonly string[]).includes(name),
+			);
 		if (governed.length === 0) continue;
 		out.push({
 			probes: governed,
-			line: lineOf(strippedSource, m.index),
+			line: statement.range().start.line + 1,
 			namespace: false,
 		});
-		NAMED.lastIndex = m.index + m[0].length;
-	}
-
-	const NS_RE =
-		/^\s*import\s+\*\s*as\s+[\w$]+(?:\s*,\s*\{[\s\S]*?\})?\s+from\s+["']([^"']+)["']/gm;
-	NS_RE.lastIndex = 0;
-	while ((m = NS_RE.exec(strippedSource)) !== null) {
-		const module = canonicalModuleForSpec(m[1]);
-		if (!module) continue;
-		out.push({
-			probes: [...GOVERNED_PROBES_BY_MODULE[module]],
-			line: lineOf(strippedSource, m.index),
-			namespace: true,
-		});
-		NS_RE.lastIndex = m.index + m[0].length;
 	}
 
 	return out;
-}
-
-/** 1-based line number of a 0-based character offset. */
-function lineOf(source: string, index: number): number {
-	let line = 1;
-	for (let i = 0; i < index && i < source.length; i++) {
-		if (source[i] === "\n") line++;
-	}
-	return line;
 }
 
 export interface TopologyConsumer {
@@ -221,13 +252,10 @@ export function scanTopologyConsumers(dir = CLIENTS_ROOT): TopologyConsumer[] {
 	for (const absolute of topologyScanSourceFiles(dir)) {
 		const rel = moduleRelative(dir, absolute);
 		if (rel === TOPOLOGY_OWNER) continue;
-		// Comment-stripped with STRINGS KEPT — the module specifier is itself a
-		// string literal we must read, while a comment that names the seam must
-		// not count as an import. (sweep-kit `stripSource`, `strings:"keep"`.)
-		const keptSource = stripSource(fs.readFileSync(absolute, "utf8"), {
-			strings: "keep",
+		const imports = scanGovernedImports(fs.readFileSync(absolute, "utf8"), {
+			sourceFilePath: absolute,
+			rootDir: dir,
 		});
-		const imports = scanGovernedImports(keptSource);
 		if (imports.length === 0) continue;
 		out.push({
 			file: rel,
