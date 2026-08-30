@@ -52,6 +52,37 @@ function makeRing(count: number): string {
 	return root;
 }
 
+/** A real source graph where every caller points at one changed symbol. */
+function makeFanIn(count: number): string {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-2074-fanin-"));
+	roots.push(root);
+	fs.writeFileSync(path.join(root, ".gitignore"), "node_modules/\n");
+	fs.writeFileSync(path.join(root, ".git"), "");
+	const src = path.join(root, "src");
+	fs.mkdirSync(src, { recursive: true });
+	fs.writeFileSync(
+		path.join(src, "target.ts"),
+		"export function shared(): number {\n\treturn 1;\n}\n",
+	);
+	for (let i = 0; i < count; i++) {
+		fs.writeFileSync(
+			path.join(src, `caller${i}.ts`),
+			`import { shared } from "./target.js";\n` +
+				`export function caller${i}(): number {\n\treturn shared();\n}\n`,
+		);
+	}
+	return root;
+}
+
+function maxCallFanIn(graph: ReviewGraph): number {
+	const byTarget = new Map<string, number>();
+	for (const edge of graph.edges) {
+		if (edge.kind !== "calls") continue;
+		byTarget.set(edge.to, (byTarget.get(edge.to) ?? 0) + 1);
+	}
+	return Math.max(0, ...byTarget.values());
+}
+
 /** A project with exactly the given files, ready for a seq-fast-path rebuild. */
 function makeProject(files: Record<string, string>): string {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-2074-"));
@@ -86,6 +117,7 @@ interface RebuildProbe {
 		restoreComparisons: number;
 		importTargetEdgeScans: number;
 		removeOwnedEdgeVisits: number;
+		removeOwnedEdgePositions: number;
 	};
 	nodes: number;
 	edges: number;
@@ -95,8 +127,11 @@ interface RebuildProbe {
  * Warm the graph, then edit ONE file and rebuild through the #451 seq fast
  * path, counting only the rebuild's work.
  */
-async function warmThenRebuildOneFile(root: string): Promise<RebuildProbe> {
-	const changed = path.join(root, "src", "file0.ts");
+async function warmThenRebuildOneFile(
+	root: string,
+	changedRelative = "file0.ts",
+): Promise<RebuildProbe> {
+	const changed = path.join(root, "src", changedRelative);
 	let seq = 0;
 	const seqHint = {
 		projectSeq: () => seq,
@@ -303,6 +338,25 @@ describe("review-graph one-file rebuild cost (#2074)", () => {
 
 			expect(large.counters.removeOwnedEdgeVisits).toBe(
 				small.counters.removeOwnedEdgeVisits,
+			);
+		},
+	);
+
+	it(
+		"removes a high-fan-in target with one adjacency-bucket pass",
+		{ timeout: 240_000 },
+		async () => {
+			const small = await warmThenRebuildOneFile(makeFanIn(200), "target.ts");
+			const large = await warmThenRebuildOneFile(makeFanIn(400), "target.ts");
+
+			// These are real graph builds. The changed target owns the shared symbol,
+			// so its incoming bucket contains every caller edge. Pin that precondition
+			// independently before comparing the bucket-removal work counter.
+			expect(maxCallFanIn(small.graph)).toBeGreaterThanOrEqual(200);
+			expect(maxCallFanIn(large.graph)).toBeGreaterThanOrEqual(400);
+			expect(large.counters.removeOwnedEdgePositions).toBeGreaterThan(0);
+			expect(large.counters.removeOwnedEdgePositions).toBeLessThan(
+				small.counters.removeOwnedEdgePositions * 3,
 			);
 		},
 	);

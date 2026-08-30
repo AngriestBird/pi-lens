@@ -1650,22 +1650,64 @@ function indexEdge(graph: ReviewGraph, edge: ReviewGraphEdge): void {
 }
 
 /**
- * Drop `edge` from both adjacency buckets (#2074). Costs one scan of the two
- * buckets the edge belongs to, never a scan of `graph.edges`, so removing a
- * changed file's edges stays proportional to that file's fan-in/fan-out.
+ * Drop `edge` from both adjacency buckets. This is kept for the single-edge
+ * dedupe path; multi-file removal uses `unindexEdges` below so a shared hub
+ * bucket is scanned once rather than once per removed edge (#2074).
  */
 function unindexEdge(graph: ReviewGraph, edge: ReviewGraphEdge): void {
 	const from = graph.edgesByFrom.get(edge.from);
 	if (from) {
+		// Count the full bucket as the linear `indexOf` scan's bounded work.
+		_rebuildCounters.removeOwnedEdgePositions += from.length;
 		const at = from.indexOf(edge);
 		if (at >= 0) from.splice(at, 1);
 		if (from.length === 0) graph.edgesByFrom.delete(edge.from);
 	}
 	const to = graph.edgesByTo.get(edge.to);
 	if (to) {
+		_rebuildCounters.removeOwnedEdgePositions += to.length;
 		const at = to.indexOf(edge);
 		if (at >= 0) to.splice(at, 1);
 		if (to.length === 0) graph.edgesByTo.delete(edge.to);
+	}
+}
+
+/**
+ * Remove a batch of edges from both live adjacency indexes. Each touched
+ * bucket is filtered once, so the work is proportional to the bucket lengths,
+ * not to the product of a hub's fan-in and its removed-edge count (#2074).
+ */
+function unindexEdges(
+	graph: ReviewGraph,
+	removedEdges: ReadonlySet<ReviewGraphEdge>,
+): void {
+	const fromIds = new Set<string>();
+	const toIds = new Set<string>();
+	for (const edge of removedEdges) {
+		fromIds.add(edge.from);
+		toIds.add(edge.to);
+	}
+	for (const fromId of fromIds) {
+		const bucket = graph.edgesByFrom.get(fromId);
+		if (!bucket) continue;
+		const kept: ReviewGraphEdge[] = [];
+		for (const edge of bucket) {
+			_rebuildCounters.removeOwnedEdgePositions++;
+			if (!removedEdges.has(edge)) kept.push(edge);
+		}
+		if (kept.length === 0) graph.edgesByFrom.delete(fromId);
+		else graph.edgesByFrom.set(fromId, kept);
+	}
+	for (const toId of toIds) {
+		const bucket = graph.edgesByTo.get(toId);
+		if (!bucket) continue;
+		const kept: ReviewGraphEdge[] = [];
+		for (const edge of bucket) {
+			_rebuildCounters.removeOwnedEdgePositions++;
+			if (!removedEdges.has(edge)) kept.push(edge);
+		}
+		if (kept.length === 0) graph.edgesByTo.delete(toId);
+		else graph.edgesByTo.set(toId, kept);
 	}
 }
 
@@ -3318,6 +3360,7 @@ async function tryResumeFromCheckpoint(
 	const removedEdges = new Set<ReviewGraphEdge>();
 	for (const file of stale) removeFileOwnedGraphData(graph, file, removedEdges);
 	if (removedEdges.size > 0) {
+		unindexEdges(graph, removedEdges);
 		graph.edges = graph.edges.filter((edge) => !removedEdges.has(edge));
 	}
 	pruneOrphanNonFileNodes(graph);
@@ -4525,6 +4568,10 @@ function removeFileOwnedGraphData(
 
 	const preservedIncomingSymbolEdges: ReviewGraphEdge[] = [];
 	for (const edge of candidates) {
+		// A cross-edge can be discovered from both changed files' adjacency
+		// buckets. Preserve and remove it only once, matching eager unindexing
+		// while the batch indexes remain live until the end.
+		if (removedEdges.has(edge)) continue;
 		const fromRemoved = removedIds.has(edge.from);
 		// Preserve importer edges to the stable file node id; the node is
 		// re-added below.
@@ -4533,7 +4580,6 @@ function removeFileOwnedGraphData(
 			preservedIncomingSymbolEdges.push({ ...edge });
 		}
 		removedEdges.add(edge);
-		unindexEdge(graph, edge);
 	}
 	for (const id of removedIds) {
 		const node = graph.nodes.get(id);
@@ -4661,19 +4707,23 @@ async function addFileToGraph(
  * `removeFileOwnedGraphData`. Before this change all three grew with the whole
  * graph on every one-file rebuild, and `removeOwnedEdgeVisits` grew with
  * changedFiles x graph on a multi-file batch (one full `graph.edges` scan per
- * file). They are the count-based signal the issue asks for, because wall time
- * on this hardware is IO-noisy (#1920).
+ * file). `removeOwnedEdgePositions` counts adjacency positions examined while
+ * removing edges; batching keeps a high-fan-in bucket linear instead of
+ * rescanning its prefix for every edge. They are the count-based signal the
+ * issue asks for, because wall time on this hardware is IO-noisy (#1920).
  */
 const _rebuildCounters = {
 	restoreComparisons: 0,
 	importTargetEdgeScans: 0,
 	removeOwnedEdgeVisits: 0,
+	removeOwnedEdgePositions: 0,
 };
 
 export function _getReviewGraphRebuildCountersForTests(): {
 	restoreComparisons: number;
 	importTargetEdgeScans: number;
 	removeOwnedEdgeVisits: number;
+	removeOwnedEdgePositions: number;
 } {
 	return { ..._rebuildCounters };
 }
@@ -4682,6 +4732,7 @@ export function _resetReviewGraphRebuildCountersForTests(): void {
 	_rebuildCounters.restoreComparisons = 0;
 	_rebuildCounters.importTargetEdgeScans = 0;
 	_rebuildCounters.removeOwnedEdgeVisits = 0;
+	_rebuildCounters.removeOwnedEdgePositions = 0;
 }
 
 /**
@@ -4841,6 +4892,7 @@ async function updateGraphFiles(
 		await addFileToGraph(graph, cwd, file, facts, ignoredIds);
 	}
 	if (removedEdges.size > 0) {
+		unindexEdges(graph, removedEdges);
 		graph.edges = graph.edges.filter((edge) => !removedEdges.has(edge));
 	}
 	restoreValidIncomingEdges(graph, preservedIncoming);
