@@ -387,31 +387,40 @@ describe("index.ts integration", () => {
 			const telemetry =
 				await import("../clients/path-attribution-telemetry.js");
 			const { default: registerExtension } = await import("../index.js");
-			const primary = createMockPi();
-			registerExtension(primary.pi as any);
-			await primary.trigger(
+			const primary = createPiMock({
+				"lens-lsp": true,
+				"no-lsp": false,
+				"lens-guard": false,
+			});
+			registerExtension(primary.asExtensionAPI());
+			await primary.emit(
 				"session_start",
 				{},
 				makeCtx({ cwd: tmpDir, sessionId: "primary" }),
 			);
+			telemetry.recordVerifiedPathAttributionGuess();
 			const lspServer = await import("../clients/lsp/server.js");
 			lspServer._markDirectLspCommandUnavailableForTests(
 				"secondary-must-not-reset",
 			);
-			const secondary = createMockPi();
-			registerExtension(secondary.pi as any);
-			await secondary.trigger(
+			const secondary = createPiMock({
+				"lens-lsp": true,
+				"no-lsp": false,
+				"lens-guard": false,
+			});
+			registerExtension(secondary.asExtensionAPI());
+			await secondary.emit(
 				"session_start",
 				{},
 				makeCtx({ cwd: tmpDir, sessionId: "secondary" }),
 			);
+			expect(telemetry.getVerifiedPathAttributionGuessCount()).toBe(1);
 			expect(
 				lspServer.isDirectLspCommandTemporarilyUnavailable(
 					"secondary-must-not-reset",
 				),
 			).toBe(true);
-			telemetry.recordVerifiedPathAttributionGuess();
-			await secondary.trigger(
+			await secondary.emit(
 				"session_shutdown",
 				{},
 				makeCtx({ cwd: tmpDir, sessionId: "secondary" }),
@@ -424,7 +433,7 @@ describe("index.ts integration", () => {
 				),
 			).toHaveLength(0);
 			expect(telemetry.getVerifiedPathAttributionGuessCount()).toBe(1);
-			await primary.trigger(
+			await primary.emit(
 				"session_shutdown",
 				{},
 				makeCtx({ cwd: tmpDir, sessionId: "primary" }),
