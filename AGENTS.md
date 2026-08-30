@@ -1247,7 +1247,9 @@ Incremental review-graph updates resolve deferred symbol edges after restoring
 preserved incoming edges. The live indexes must remain synchronized, and
 `dedupeResolvedEdges` removes only post-resolution duplicates from affected
 target buckets. Do not add a second whole-graph dedupe pass to the hot path;
-the next single-file rebuild must also remain duplicate-free. (#2127)
+the next single-file rebuild must also remain duplicate-free. Multi-file removal
+collects removed edges first, then filters each touched adjacency bucket once;
+per-edge `indexOf`/`splice` in a high-fan-in bucket is quadratic. (#2127, #2074)
 
 ### Git guard
 
