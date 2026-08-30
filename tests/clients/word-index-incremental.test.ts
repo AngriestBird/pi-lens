@@ -147,6 +147,24 @@ describe("updateWordIndexDocument / removeWordIndexDocument", () => {
 		});
 	});
 
+	it("keeps the fast path for valid historical posting order", () => {
+		const index = buildWordIndex([
+			{ path: "a.ts", content: "shared alpha" },
+			{ path: "b.ts", content: "shared beta" },
+		]);
+		serializeWordIndex(index);
+		updateWordIndexDocument(index, { path: "a.ts", content: "shared gamma" });
+		const wire = serializeWordIndex(index);
+		expect(wire.postings.find(([token]) => token === "shared")?.[1]).toEqual([
+			1, 1, 0, 1,
+		]);
+
+		const restored = deserializeWordIndex(wire);
+		expect(restored).not.toBeNull();
+		serializeWordIndex(restored!);
+		expect(getLastWordIndexSerializeWork()?.tookFullPath).toBe(false);
+	});
+
 	it("takes the full path for aliases and partial legacy snapshots", () => {
 		const valid = serializeWordIndex(
 			buildWordIndex([{ path: "a.ts", content: "good" }]),

@@ -2220,9 +2220,6 @@ export function deserializeWordIndex(
 		postingTokens.add(token);
 		const acceptedPairs: Array<[number, number]> = [];
 		const seenPairs = new Set<string>();
-		let previousSlot = -1;
-		let previousLine = -1;
-		let ordered = true;
 		for (let i = 0; i < flat.length; i += 2) {
 			const slot = flat[i];
 			const line = flat[i + 1];
@@ -2243,19 +2240,7 @@ export function deserializeWordIndex(
 				continue;
 			}
 			seenPairs.add(pairKey);
-			if (
-				slot < previousSlot ||
-				(slot === previousSlot && line < previousLine)
-			) {
-				ordered = false;
-			}
-			previousSlot = slot;
-			previousLine = line;
 			acceptedPairs.push([slot, line]);
-		}
-		if (!ordered) {
-			canonical = false;
-			acceptedPairs.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
 		}
 		if (acceptedPairs.length === 0) continue;
 		const lanes: number[] = [];
