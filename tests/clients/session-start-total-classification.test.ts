@@ -13,7 +13,13 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+	clearLatencyLog,
+	flushLatencyLog,
+	getLatencyLogPath,
+} from "../../clients/latency-logger.js";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
+import type { SessionStartRootTelemetry } from "../../clients/runtime-session.js";
 import { createTempFile, setupTestEnvironment } from "./test-utils.js";
 
 vi.mock("../../clients/lsp/config.js", () => ({
@@ -28,13 +34,6 @@ vi.mock("../../clients/lsp/index.js", () => ({
 		supportsLSP: () => false,
 	})),
 }));
-
-const logLatencySpy = vi.hoisted(() => vi.fn());
-vi.mock("../../clients/latency-logger.js", async (importOriginal) => {
-	const actual =
-		await importOriginal<typeof import("../../clients/latency-logger.js")>();
-	return { ...actual, logLatency: logLatencySpy };
-});
 
 import { handleSessionStart } from "../../clients/runtime-session.js";
 
@@ -97,22 +96,64 @@ function makeDeps(ctxCwd: string, overrides: Record<string, unknown> = {}) {
 	} as any;
 }
 
-function sessionStartTotalCall() {
-	return logLatencySpy.mock.calls
-		.map(([entry]) => entry)
-		.find((entry: { phase: string }) => entry.phase === "session_start_total");
+type SessionStartTotalMetadata = {
+	mode: "full" | "minimal" | "quick";
+	classification?: string;
+	sameRoot: SessionStartRootTelemetry;
+};
+
+function sessionStartTotals(): Array<{
+	phase: "session_start_total";
+	metadata: SessionStartTotalMetadata;
+}> {
+	const text = fs.existsSync(getLatencyLogPath())
+		? fs.readFileSync(getLatencyLogPath(), "utf8")
+		: "";
+	return text
+		.split(/\r?\n/)
+		.filter(Boolean)
+		.map((line) => JSON.parse(line) as { phase?: string; metadata?: unknown })
+		.filter((entry) => entry.phase === "session_start_total")
+		.map((entry) => {
+			const metadata = entry.metadata;
+			if (!metadata || typeof metadata !== "object") {
+				throw new Error("session_start_total metadata is missing");
+			}
+			const typed = metadata as Partial<SessionStartTotalMetadata>;
+			if (
+				typed.sameRoot !== true &&
+				typed.sameRoot !== false &&
+				typed.sameRoot !== "unknown"
+			) {
+				throw new Error(
+					"session_start_total sameRoot is not an explicit bounded value",
+				);
+			}
+			return {
+				phase: "session_start_total" as const,
+				metadata: metadata as SessionStartTotalMetadata,
+			};
+		});
 }
 
 describe("session_start_total carries the classification decision (#2129)", () => {
 	let restoreStartupMode: (() => void) | undefined;
+	let previousTestMode: string | undefined;
 
-	beforeEach(() => {
-		logLatencySpy.mockClear();
+	beforeEach(async () => {
+		previousTestMode = process.env.PI_LENS_TEST_MODE;
+		process.env.PI_LENS_TEST_MODE = "0";
+		clearLatencyLog();
+		await flushLatencyLog();
 	});
 
-	afterEach(() => {
+	afterEach(async () => {
+		await flushLatencyLog();
+		if (previousTestMode === undefined) delete process.env.PI_LENS_TEST_MODE;
+		else process.env.PI_LENS_TEST_MODE = previousTestMode;
 		restoreStartupMode?.();
 		restoreStartupMode = undefined;
+		previousTestMode = undefined;
 	});
 
 	it("quick mode: logs classification and sameRoot alongside mode", async () => {
@@ -130,7 +171,8 @@ describe("session_start_total carries the classification decision (#2129)", () =
 					sessionStartSameRoot: true,
 				}),
 			);
-			expect(sessionStartTotalCall()?.metadata).toEqual({
+			await flushLatencyLog();
+			expect(sessionStartTotals()[0]?.metadata).toEqual({
 				mode: "quick",
 				classification: "sequential-replacement",
 				sameRoot: true,
@@ -157,9 +199,11 @@ describe("session_start_total carries the classification decision (#2129)", () =
 					sessionStartSameRoot: undefined,
 				}),
 			);
-			expect(sessionStartTotalCall()?.metadata).toEqual({
+			await flushLatencyLog();
+			expect(sessionStartTotals()[0]?.metadata).toEqual({
 				mode: "full",
 				classification: "primary",
+				sameRoot: "unknown",
 			});
 		} finally {
 			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
@@ -178,7 +222,11 @@ describe("session_start_total carries the classification decision (#2129)", () =
 		globals.__piLensWarmupScheduled = true;
 		try {
 			await handleSessionStart(makeDeps(env.tmpDir));
-			expect(sessionStartTotalCall()?.metadata).toEqual({ mode: "quick" });
+			await flushLatencyLog();
+			expect(sessionStartTotals()[0]?.metadata).toEqual({
+				mode: "quick",
+				sameRoot: "unknown",
+			});
 		} finally {
 			globals.__piLensWarmupScheduled = previousWarmup;
 			env.cleanup();

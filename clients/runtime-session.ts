@@ -123,6 +123,9 @@ import { resetSpawnTimeoutCooldowns } from "./spawn-timeout-cooldown.js";
 import { resetTestRunnerDelivery } from "./test-runner-delivery.js";
 import type { SessionStartClassification } from "./session-lifecycle.js";
 
+/** Durable root-identity value on `session_start_total` records. */
+export type SessionStartRootTelemetry = boolean | "unknown";
+
 interface SessionStartDeps {
 	ctxCwd?: string;
 	/** Host hook timestamp, so total includes work before this handler is entered. */
@@ -2483,7 +2486,9 @@ export async function handleSessionStart(
 				// classified `primary`/`sequential-replacement` (a `secondary-root`
 				// start returns before `handleSessionStart` is ever called).
 				classification: deps.sessionStartClassification,
-				sameRoot: deps.sessionStartSameRoot,
+				// `undefined` is omitted by JSON.stringify. Keep unknown explicit so
+				// strict log readers can distinguish it from legacy omission.
+				sameRoot: deps.sessionStartSameRoot ?? "unknown",
 			},
 		});
 		logHostReadyDelay(deps, cwd);
@@ -2916,7 +2921,8 @@ export async function handleSessionStart(
 			reason: deps.sessionReason,
 			// #2129: see the quick-mode session_start_total record above.
 			classification: deps.sessionStartClassification,
-			sameRoot: deps.sessionStartSameRoot,
+			// Keep the full path's durable shape identical to quick mode.
+			sameRoot: deps.sessionStartSameRoot ?? "unknown",
 		},
 	});
 	logHostReadyDelay(deps, cwd);

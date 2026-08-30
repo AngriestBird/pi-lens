@@ -1735,6 +1735,12 @@ a *second host adapter* alongside `index.ts`. Design rationale + progress: `mcp.
   delayed warmup child phases in `latency.log`; concurrent secondaries emit only
   `concurrent_session_bind`. Keep logging fire-and-forget and preserve contiguous
   top-level timing so quick-start child durations remain within ~10 ms of total.
+  `session_start_total.metadata.classification` carries the accepted start's
+  `primary` or `sequential-replacement` decision, and `sameRoot` carries
+  `true`, `false`, or the explicit bounded value `"unknown"`; never omit the
+  field when root identity was unavailable because NDJSON serialization drops
+  `undefined`. The quick and full writers share this durable shape, and strict
+  readers must accept only those three root values. (#2129)
   #1019: `session_start_log_cleanup` is now emitted from a deferred `setImmediate`
   (its `metadata.deferred:true`), NOT synchronously in the awaited chain, so it is
   no longer a top-level critical-path phase — do not re-add it to the contiguous
