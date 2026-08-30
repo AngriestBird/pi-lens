@@ -516,7 +516,11 @@ and only a scanner that cannot accept a write inside the budget makes a waiter
 give up. A write that lands after its deadline but inside the wedge window
 retracts the timeout it was charged for (slow is not broken); one nothing
 accepts for the whole wedge window keeps its strike and demotes the server, so
-the gate cannot defer a dead input path forever. A DEFERRED server is neither
+the gate cannot defer a dead input path forever. Its queue wait uses the
+effective `primaryServerWaitFloorMs`, which includes the caller's
+`maxClientWaitMs` and any primary server `clientWaitTimeoutMs` override, so a
+cold primary's configured wait does not make the remaining queue budget appear
+to be already exhausted. A DEFERRED server is neither
 waited on nor read from — its version cannot advance, so waiting only burns its
 budget and would flip the touch to `inconclusive`, and its diagnostics cache
 still holds the previous content's findings because the resync that would have

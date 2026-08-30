@@ -4107,9 +4107,10 @@ export class LSPService {
 			if (!notifySkipped) {
 				const budget = notifyWriteBudgetMs();
 				// #1459: how long a queued auxiliary may wait for its resync slot. Bounded
-				// by the write budget AND by whatever the caller already declared it is
-				// willing to spend on this touch (`maxClientWaitMs` — cascade's cold
-				// snapshot passes 1000ms), minus what the client wait above already spent.
+				// by the write budget and by the effective primary wait floor, minus what
+				// which includes the caller's `maxClientWaitMs` and any primary
+				// server `clientWaitTimeoutMs` override. The elapsed client wait is
+				// subtracted below.
 				// A flat write-budget wait would tax a caller that asked for less than one
 				// budget in total. Non-positive means "no time left to queue": the server
 				// is reported as uncovered immediately.
