@@ -1200,9 +1200,12 @@ one slot map and flattening each affected token lane once. File removal falls
 back to a full serialization because it changes slot identity; replacements
 retain their previous wire order. `serializeWordIndex` clears dirty markers only
 after it has produced the view, so deleting the dirty mark makes the stale-
-persist test fail. Snapshot stringify and gzip remain in the existing
-project-snapshot worker; do not send a structured-clone object graph to a new
-worker.
+persist test fail. A reload seeds the flat wire cache only when files, numeric
+metadata, postings, and the optional forward lanes are canonical and mutually
+consistent; sanitized or partial snapshots leave it unseeded so the first
+persist publishes `serializeWordIndexFull` output. Snapshot stringify and gzip
+remain in the existing project-snapshot worker; do not send a structured-clone
+object graph to a new worker.
 
 Memory-sample subsystem records report the axis that grows and at least one
 byte-denominated estimate. `reviewGraph.residentBytes` uses bounded node/edge
