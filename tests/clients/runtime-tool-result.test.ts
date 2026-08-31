@@ -80,6 +80,96 @@ describe("bash grep searchReads registration", () => {
 		}
 	});
 
+	it("invalidates formatter selection for config removal and changedFiles side effects", async () => {
+		const { runPipeline } = await import("../../clients/pipeline.js");
+		vi.mocked(runPipeline).mockResolvedValue({
+			output: "",
+			hasBlockers: false,
+			isError: false,
+			fileModified: false,
+		});
+		const env = setupTestEnvironment("pi-lens-1603-removal-");
+		try {
+			const filePath = path.join(env.tmpDir, "init.lua");
+			const sourcePath = path.join(env.tmpDir, "source.ts");
+			const configPath = path.join(env.tmpDir, "stylua.toml");
+			fs.writeFileSync(sourcePath, "const value = 1;\n");
+			fs.writeFileSync(configPath, "column_width = 100\n");
+
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			const deps = {
+				getFlag: () => false,
+				dbg: () => {},
+				runtime,
+				cacheManager: { addModifiedRange: () => {}, readTurnState: () => ({}) },
+				biomeClient: {},
+				ruffClient: {},
+				metricsClient: {},
+				resetLSPService: () => {},
+				agentBehaviorRecord: () => [],
+				formatBehaviorWarnings: () => "",
+			} as any;
+
+			await handleToolResult({
+				...deps,
+				event: {
+					toolName: "write",
+					input: { path: configPath },
+					content: [{ type: "text", text: "written" }],
+				},
+			});
+			expect(
+				(await getFormattersForFile(filePath, env.tmpDir)).map((f) => f.name),
+			).toEqual(["stylua"]);
+
+			fs.rmSync(configPath);
+			await handleToolResult({
+				...deps,
+				event: {
+					toolName: "write",
+					input: { path: configPath },
+					content: [{ type: "text", text: "removed" }],
+				},
+			});
+			expect(await getFormattersForFile(filePath, env.tmpDir)).toEqual([]);
+
+			fs.writeFileSync(configPath, "column_width = 120\n");
+			await handleToolResult({
+				...deps,
+				event: {
+					toolName: "write",
+					input: { path: configPath },
+					content: [{ type: "text", text: "written" }],
+				},
+			});
+			expect(
+				(await getFormattersForFile(filePath, env.tmpDir)).map((f) => f.name),
+			).toEqual(["stylua"]);
+
+			fs.rmSync(configPath);
+			vi.mocked(runPipeline).mockResolvedValue({
+				output: "",
+				hasBlockers: false,
+				isError: false,
+				fileModified: false,
+				changedFiles: [configPath],
+			});
+			await handleToolResult({
+				...deps,
+				event: {
+					toolName: "write",
+					input: { path: sourcePath },
+					content: [{ type: "text", text: "source changed" }],
+				},
+			});
+			expect(await getFormattersForFile(filePath, env.tmpDir)).toEqual([]);
+		} finally {
+			clearFormatterRuntimeState();
+			env.cleanup();
+		}
+	});
+
 	it("invalidates the ignore matcher through handleToolResult", async () => {
 		const { runPipeline } = await import("../../clients/pipeline.js");
 		vi.mocked(runPipeline).mockResolvedValue({

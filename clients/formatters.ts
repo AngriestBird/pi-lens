@@ -14,6 +14,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { BoundedLruCache } from "./bounded-cache.js";
+import { createGenerationSource } from "./generation-guard.js";
 import { normalizeMapKey } from "./path-utils.js";
 import { TERRAGRUNT_FILENAMES } from "./file-kinds.js";
 import {
@@ -1595,9 +1596,9 @@ const detectionCache = new BoundedLruCache<
 // warm lookup must not repeat the ancestor walk or stat matched configs.
 const formatterSignatureFlights = new Map<
 	string,
-	{ generation: number; promise: Promise<string> }
+	{ promise: Promise<string> }
 >();
-let formatterCacheGeneration = 0;
+const formatterCacheGeneration = createGenerationSource("formatter-cache");
 
 // These are the formatter configuration files consulted by the policy helpers
 // above. Their metadata is captured by the cold detection signature. The
@@ -1710,15 +1711,14 @@ async function getFormatterConfigSignature(
 	cwd: string,
 	normalizedCwd: string,
 ): Promise<string> {
-	const generation = formatterCacheGeneration;
 	const existing = formatterSignatureFlights.get(normalizedCwd);
-	if (existing?.generation === generation) return existing.promise;
+	if (existing) return existing.promise;
 	const promise = formatterConfigSignature(cwd).finally(() => {
 		const current = formatterSignatureFlights.get(normalizedCwd);
 		if (current?.promise === promise)
 			formatterSignatureFlights.delete(normalizedCwd);
 	});
-	formatterSignatureFlights.set(normalizedCwd, { generation, promise });
+	formatterSignatureFlights.set(normalizedCwd, { promise });
 	return promise;
 }
 
@@ -1767,18 +1767,25 @@ export async function getFormattersForFile(
 		return ALL_FORMATTERS.filter((f) => enabledNames.includes(f.name));
 	}
 	if (!cached) {
-		const generation = formatterCacheGeneration;
+		const generation = formatterCacheGeneration.capture();
 		const configSignature = await getFormatterConfigSignature(
 			cwd,
 			normalizedCwd,
 		);
 		// An invalidation can happen while the first signature walk is in flight.
 		// Do not publish a pre-invalidation signature into the new generation.
-		if (generation !== formatterCacheGeneration) {
+		if (!generation.isCurrent()) {
 			return getFormattersForFile(filePath, cwd);
 		}
-		cached = { signature: configSignature, entries: new Map() };
-		detectionCache.set(normalizedCwd, cached);
+		// Another cold caller for this cwd can finish the shared signature flight
+		// first. Re-read the LRU before installing an object so the later caller
+		// merges its extension entry into the existing object instead of replacing
+		// the earlier entry.
+		cached = detectionCache.get(normalizedCwd);
+		if (!cached) {
+			cached = { signature: configSignature, entries: new Map() };
+			detectionCache.set(normalizedCwd, cached);
+		}
 	}
 
 	// Detect formatters for this extension (or exact filename, e.g. terragrunt.hcl)
@@ -1971,7 +1978,7 @@ export async function getFormattersForFile(
  * therefore re-arms every directory EXCEPT the one the user is working in.
  */
 export function clearFormatterCache(): void {
-	formatterCacheGeneration += 1;
+	formatterCacheGeneration.bump();
 	formatterSignatureFlights.clear();
 	detectionCache.clear();
 	resetWhichLatches();
