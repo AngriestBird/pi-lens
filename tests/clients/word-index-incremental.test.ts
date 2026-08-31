@@ -189,6 +189,7 @@ describe("updateWordIndexDocument / removeWordIndexDocument", () => {
 		]);
 		const aliasOutput = serializeWordIndex(restoredAlias!);
 		expect(getLastWordIndexSerializeWork()?.tookFullPath).toBe(true);
+		expect(aliasOutput.indexedFileCount).toBe(aliasOutput.files.length);
 		expect(JSON.stringify(aliasOutput)).not.toBe(JSON.stringify(aliased));
 
 		const legacy = { ...valid } as Record<string, unknown>;
@@ -200,6 +201,49 @@ describe("updateWordIndexDocument / removeWordIndexDocument", () => {
 		expect(getLastWordIndexSerializeWork()?.tookFullPath).toBe(true);
 		expect(legacyOutput.fileSizes).toEqual([0]);
 		expect(legacyOutput.forward).toBeUndefined();
+	});
+
+	it("does not cache duplicate or per-file-inconsistent postings", () => {
+		const valid = serializeWordIndex(
+			buildWordIndex([
+				{ path: "a.ts", content: "shared" },
+				{ path: "b.ts", content: "shared" },
+			]),
+		);
+		const duplicate = {
+			...valid,
+			postings: [["shared", [0, 1, 0, 1]]] as Array<[string, number[]]>,
+			forward: [
+				[0, [["shared", 2]]],
+				[1, []],
+			] as Array<[number, Array<[string, number]>]>,
+		};
+
+		const restored = deserializeWordIndex(duplicate);
+		expect(restored).not.toBeNull();
+		expect(wordIndexPostingHits(restored!, "shared")).toEqual([
+			{ file: "a.ts", line: 1 },
+		]);
+		const output = serializeWordIndex(restored!);
+		expect(getLastWordIndexSerializeWork()?.tookFullPath).toBe(true);
+		expect(output.postings).toEqual([["shared", [0, 1]]]);
+		expect(output.forward).toEqual([
+			[0, [["shared", 1]]],
+			[1, []],
+		]);
+
+		const inconsistent = {
+			...valid,
+			postings: [["shared", [0, 1, 0, 2]]] as Array<[string, number[]]>,
+		};
+		const restoredInconsistent = deserializeWordIndex(inconsistent);
+		expect(restoredInconsistent).not.toBeNull();
+		const inconsistentOutput = serializeWordIndex(restoredInconsistent!);
+		expect(getLastWordIndexSerializeWork()?.tookFullPath).toBe(true);
+		expect(inconsistentOutput.forward).toEqual([
+			[0, [["shared", 2]]],
+			[1, []],
+		]);
 	});
 
 	it("persists a brand-new document after a cached snapshot is primed (#2158 F1)", () => {
