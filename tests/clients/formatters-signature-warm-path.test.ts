@@ -1,22 +1,8 @@
 /**
- * #1603 — `formatterConfigSignature` ran BEFORE the cache check in
- * `getFormattersForFile`, and its `findUp` walk probed every one of
- * `FORMATTER_CONFIG_FILES`' ~60 names with its own `fs.access` call at every
- * ancestor directory. That cost scaled with the candidate list's length (a
- * measured 41% growth as #1596 grew it 44→60 entries) and ran unconditionally
- * on every call, including a fully warm cache hit that never needed it.
+ * #1603 — warm formatter selection must not poll configuration files.
  *
- * Fixed by having `findUp` read each ancestor directory once (`fs.readdir`)
- * and check membership in-memory, instead of probing each candidate name with
- * its own `fs.access`. The walk still runs on every call — so a config file
- * created after the first call keeps invalidating the cache exactly as
- * before (#1572/#1596) — but its cost no longer depends on how many names
- * the candidate list holds.
- *
- * This FAILS against pre-fix code: `fs.access` is called once per
- * (ancestor directory × candidate filename) on every call, so a warm repeat
- * call for an already-cached extension still fires a large, nonzero number
- * of `access` probes.
+ * Config changes are invalidated by the write-result seam. The cold signature
+ * walk still uses real filesystem state to discover the initial config set.
  */
 
 vi.mock("node:fs/promises", async (importOriginal) => {
@@ -32,8 +18,10 @@ import * as fsp from "node:fs/promises";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+	_findUpForTests,
 	clearFormatterRuntimeState,
 	getFormattersForFile,
+	invalidateFormatterCacheForPath,
 } from "../../clients/formatters.js";
 import { setupTestEnvironment } from "./test-utils.js";
 
@@ -55,23 +43,117 @@ afterEach(() => {
 });
 
 describe("formatterConfigSignature warm-cache cost (#1603)", () => {
-	it("a repeat call for an already-cached extension makes no per-config-name access probes", async () => {
-		// An extension no formatter claims: `matching` is empty, so the only
-		// filesystem work `getFormattersForFile` does at all is the unconditional
-		// `formatterConfigSignature` walk — isolating exactly the cost this issue
-		// is about.
+	it("does no filesystem work on a warm selection hit", async () => {
 		const filePath = path.join(tmpDir, "index.zzznotarealext");
 
 		await getFormattersForFile(filePath, tmpDir);
+		const coldReaddirCount = readdirMock.mock.calls.length;
+		expect(coldReaddirCount).toBeGreaterThan(0);
 		accessMock.mockClear();
 		readdirMock.mockClear();
 
 		await getFormattersForFile(filePath, tmpDir);
 
 		expect(accessMock).not.toHaveBeenCalled();
-		// One readdir per ancestor directory — bounded by directory depth, not
-		// by however many names FORMATTER_CONFIG_FILES holds.
+		expect(readdirMock).not.toHaveBeenCalled();
+	});
+
+	it("shares the cold signature walk across concurrent cwd lookups", async () => {
+		const firstFile = path.join(tmpDir, "first.zzznotarealext");
+		await getFormattersForFile(firstFile, tmpDir);
+		const coldReaddirCount = readdirMock.mock.calls.length;
+		expect(coldReaddirCount).toBeGreaterThan(0);
+
+		clearFormatterRuntimeState();
+		readdirMock.mockClear();
+		await Promise.all([
+			getFormattersForFile(firstFile, tmpDir),
+			getFormattersForFile(path.join(tmpDir, "second.zzzotherext"), tmpDir),
+		]);
+
+		expect(readdirMock.mock.calls.length).toBe(coldReaddirCount);
+	});
+
+	it("scales with matched candidates, not the candidate-list size", async () => {
+		const ancestor = path.join(tmpDir, "project");
+		const sourceDir = path.join(ancestor, "src");
+		const nested = path.join(sourceDir, "deep");
+		await fsp.mkdir(nested, { recursive: true });
+		await fsp.writeFile(path.join(sourceDir, "real.config"), "ok\n");
+
+		const small = await _findUpForTests(["real.config"], nested, ancestor);
+		const smallAccesses = accessMock.mock.calls.length;
+		const smallReads = readdirMock.mock.calls.length;
+		expect(small).toEqual([path.join(sourceDir, "real.config")]);
+
+		accessMock.mockClear();
+		readdirMock.mockClear();
+		const large = await _findUpForTests(
+			[
+				"real.config",
+				"missing-a.config",
+				"missing-b.config",
+				"missing-c.config",
+			],
+			nested,
+			ancestor,
+		);
+
+		// The independent setup work is complete before counters are read. A
+		// restored per-candidate probe would increase access calls fourfold;
+		// removing entrySet.has would also admit the three missing names.
+		expect(large).toEqual(small);
+		expect(accessMock.mock.calls.length).toBe(smallAccesses);
+		expect(readdirMock.mock.calls.length).toBe(smallReads);
+	});
+
+	it.skipIf(process.platform === "win32")(
+		"rejects dangling symlinks but keeps accessible matched files",
+		async () => {
+			// Windows ACL denial is not deterministic on the developer and CI
+			// accounts, so the inaccessible-entry axis remains a stated non-goal;
+			// the production access check still preserves the old failure semantics.
+			const ancestor = path.join(tmpDir, "project");
+			const sourceDir = path.join(ancestor, "src");
+			const nested = path.join(sourceDir, "deep");
+			await fsp.mkdir(nested, { recursive: true });
+			await fsp.writeFile(path.join(sourceDir, "real.config"), "ok\n");
+			await fsp.symlink(
+				path.join(sourceDir, "missing-target"),
+				path.join(sourceDir, "dangling.config"),
+			);
+
+			await expect(
+				_findUpForTests(["dangling.config", "real.config"], nested, ancestor),
+			).resolves.toEqual([path.join(sourceDir, "real.config")]);
+		},
+	);
+
+	it("invalidates cold and warm results for config create and remove", async () => {
+		const filePath = path.join(tmpDir, "init.lua");
+		const configPath = path.join(tmpDir, "stylua.toml");
+
+		expect(await getFormattersForFile(filePath, tmpDir)).toEqual([]);
+		await fsp.writeFile(configPath, "column_width = 100\n");
+		// No polling: an external mutation remains invisible until its owner
+		// reports the path through invalidateFormatterCacheForPath.
+		expect(await getFormattersForFile(filePath, tmpDir)).toEqual([]);
+
+		invalidateFormatterCacheForPath(configPath);
+		expect(
+			(await getFormattersForFile(filePath, tmpDir)).map((f) => f.name),
+		).toEqual(["stylua"]);
+
+		await fsp.writeFile(configPath, "column_width = 120\n");
+		invalidateFormatterCacheForPath(configPath);
+		readdirMock.mockClear();
+		expect(
+			(await getFormattersForFile(filePath, tmpDir)).map((f) => f.name),
+		).toEqual(["stylua"]);
 		expect(readdirMock.mock.calls.length).toBeGreaterThan(0);
-		expect(readdirMock.mock.calls.length).toBeLessThan(20);
+
+		await fsp.rm(configPath);
+		invalidateFormatterCacheForPath(configPath);
+		expect(await getFormattersForFile(filePath, tmpDir)).toEqual([]);
 	});
 });

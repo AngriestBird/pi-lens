@@ -2,4 +2,4 @@
 section: Fixed
 ---
 
-- **Formatter config-signature walk no longer scales with the candidate list (closes #1603)** — `findUp` (used by `formatterConfigSignature` and every `has*Config` check) now reads each ancestor directory once and checks membership in-memory, instead of issuing one `fs.access` per candidate filename per directory. The walk still runs on every `getFormattersForFile` call, so a formatter config created or edited after the first call for a cwd still invalidates the cache exactly as before (#1572/#1596); its cost just no longer grows with how many names `FORMATTER_CONFIG_FILES` holds.
+- **Formatter config-signature lookup is warm-path cached (closes #1603)** — `findUp` reads each ancestor directory once, validates only matched entries, and rejects dangling links. The first lookup for a cwd computes one session-generation signature; warm selections do no configuration polling. The write-result seam invalidates selection for config create, change, and remove events, so formatter detection still re-runs without a per-call filesystem tax.

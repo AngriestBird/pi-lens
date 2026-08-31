@@ -10,6 +10,10 @@ import {
 } from "../../clients/session-lifecycle.js";
 import { handleToolCall } from "../../clients/runtime-tool-call.js";
 import { handleToolResult } from "../../clients/runtime-tool-result.js";
+import {
+	clearFormatterRuntimeState,
+	getFormattersForFile,
+} from "../../clients/formatters.js";
 import { getProjectIgnoreMatcher } from "../../clients/file-utils.js";
 import {
 	getVerifiedPathAttributionGuessCount,
@@ -31,6 +35,51 @@ const notifyExternalFileChange = vi.hoisted(() => vi.fn(async () => undefined));
 vi.mock("../../clients/lsp/index.js", () => ({ notifyExternalFileChange }));
 
 describe("bash grep searchReads registration", () => {
+	it("invalidates formatter selection through handleToolResult", async () => {
+		const { runPipeline } = await import("../../clients/pipeline.js");
+		vi.mocked(runPipeline).mockResolvedValue({
+			output: "",
+			hasBlockers: false,
+			isError: false,
+			fileModified: false,
+		});
+		const env = setupTestEnvironment("pi-lens-1603-tool-result-");
+		try {
+			const filePath = path.join(env.tmpDir, "init.lua");
+			const configPath = path.join(env.tmpDir, "stylua.toml");
+			expect(await getFormattersForFile(filePath, env.tmpDir)).toEqual([]);
+			fs.writeFileSync(configPath, "column_width = 100\n");
+			expect(await getFormattersForFile(filePath, env.tmpDir)).toEqual([]);
+
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			await handleToolResult({
+				event: {
+					toolName: "write",
+					input: { path: configPath },
+					content: [{ type: "text", text: "written" }],
+				},
+				getFlag: () => false,
+				dbg: () => {},
+				runtime,
+				cacheManager: { addModifiedRange: () => {}, readTurnState: () => ({}) },
+				biomeClient: {},
+				ruffClient: {},
+				metricsClient: {},
+				resetLSPService: () => {},
+				agentBehaviorRecord: () => [],
+				formatBehaviorWarnings: () => "",
+			} as any);
+
+			expect(
+				(await getFormattersForFile(filePath, env.tmpDir)).map((f) => f.name),
+			).toEqual(["stylua"]);
+		} finally {
+			clearFormatterRuntimeState();
+			env.cleanup();
+		}
+	});
+
 	it("invalidates the ignore matcher through handleToolResult", async () => {
 		const { runPipeline } = await import("../../clients/pipeline.js");
 		vi.mocked(runPipeline).mockResolvedValue({
