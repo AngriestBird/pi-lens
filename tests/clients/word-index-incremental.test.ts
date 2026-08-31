@@ -201,6 +201,34 @@ describe("updateWordIndexDocument / removeWordIndexDocument", () => {
 		expect(getLastWordIndexSerializeWork()?.tookFullPath).toBe(true);
 		expect(legacyOutput.fileSizes).toEqual([0]);
 		expect(legacyOutput.forward).toBeUndefined();
+
+		const missingSizes = { ...valid } as Record<string, unknown>;
+		delete missingSizes.fileSizes;
+		const restoredMissingSizes = deserializeWordIndex(missingSizes as never);
+		expect(restoredMissingSizes).not.toBeNull();
+		const missingSizesOutput = serializeWordIndex(restoredMissingSizes!);
+		expect(getLastWordIndexSerializeWork()?.tookFullPath).toBe(true);
+		expect(missingSizesOutput.fileSizes).toEqual([0]);
+		expect(missingSizesOutput.forward).toEqual(valid.forward);
+
+		const missingForward = { ...valid } as Record<string, unknown>;
+		delete missingForward.forward;
+		const restoredMissingForward = deserializeWordIndex(
+			missingForward as never,
+		);
+		expect(restoredMissingForward).not.toBeNull();
+		const missingForwardOutput = serializeWordIndex(restoredMissingForward!);
+		expect(getLastWordIndexSerializeWork()?.tookFullPath).toBe(true);
+		expect(missingForwardOutput.fileSizes).toEqual(valid.fileSizes);
+		expect(missingForwardOutput.forward).toBeUndefined();
+		expect(
+			updateWordIndexDocument(restoredMissingForward!, {
+				path: "a.ts",
+				content: "changed",
+			}),
+		).toBe(false);
+		const afterUnsupportedEdit = serializeWordIndex(restoredMissingForward!);
+		expect(afterUnsupportedEdit).toEqual(missingForwardOutput);
 	});
 
 	it("does not cache duplicate or per-file-inconsistent postings", () => {

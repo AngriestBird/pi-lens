@@ -2141,6 +2141,7 @@ export function deserializeWordIndex(
 		data.docLengths.length === data.files.length &&
 		data.fileMtimes.length === data.files.length;
 	let needsDeepSanitize = !Array.isArray(data.forward);
+	if (needsDeepSanitize) canonical = false;
 	const fileKeys = new Set<string>();
 	for (const file of data.files) {
 		if (typeof file !== "string") return null;
