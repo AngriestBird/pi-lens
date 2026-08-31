@@ -2319,10 +2319,11 @@ export function deserializeWordIndex(
 				forwardMatchesPostings = false;
 				continue;
 			}
-			for (let i = 0; i < candidate.length; i += 1) {
-				const expected = candidate[i].get(token) ?? 0;
-				const got = observed.get(fileIdBySlot[i]) ?? 0;
-				if (expected !== got) forwardMatchesPostings = false;
+			for (const [fileId, count] of observed) {
+				const slot = slotByFileId.get(fileId);
+				if (slot === undefined || candidate[slot].get(token) !== count) {
+					forwardMatchesPostings = false;
+				}
 			}
 		}
 		for (const token of forwardTotals.keys()) {
