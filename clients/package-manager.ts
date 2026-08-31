@@ -244,6 +244,7 @@ function isAvailable(
  * must not outlive the availability verdicts it was derived from (#1602).
  */
 export function _resetPackageManagerCache(): void {
+	packageManagerCacheGeneration += 1;
 	availabilityLatches.clear();
 	packageManagerProbeFlights.clear();
 	globalBinDirCache.clear();
@@ -396,28 +397,40 @@ export function execArgs(
  * `availabilityLatches` in `_resetPackageManagerCache`). Only a SUCCESSFUL
  * lookup is cached: a spawn failure here is evidence about this call, not
  * about the manager (the manager already passed `isAvailable`'s own probe),
- * so it must not latch an empty result the way a genuine absence would.
+ * so it must not latch an empty result the way a genuine absence would. The
+ * generation owns both flight reuse and post-await cache publication, so a
+ * probe crossing a session reset cannot repopulate the fresh memo.
  */
 const globalBinDirCache = new Map<NodePackageManager, string[]>();
-const globalBinDirProbeFlights = createAvailabilityProbeFlight<string[]>();
+let packageManagerCacheGeneration = 0;
+const globalBinDirProbeFlights = createAvailabilityProbeFlight<string[]>({
+	generation: () => packageManagerCacheGeneration,
+});
 
 /** Directories where a given manager installs global binaries. */
 async function globalBinDirsFor(pm: NodePackageManager): Promise<string[]> {
+	const generation = packageManagerCacheGeneration;
 	const cached = globalBinDirCache.get(pm);
 	if (cached) return cached;
 
 	// Concurrent callers (dispatch runs several tools per edit) must share ONE
 	// probe rather than each spawning their own `npm config get prefix` (#1602).
-	const shared = globalBinDirProbeFlights.run(pm, () => probeGlobalBinDirs(pm));
+	const shared = globalBinDirProbeFlights.run(pm, () =>
+		probeGlobalBinDirs(pm, generation),
+	);
 	return shared.promise;
 }
 
-async function probeGlobalBinDirs(pm: NodePackageManager): Promise<string[]> {
+async function probeGlobalBinDirs(
+	pm: NodePackageManager,
+	generation: number,
+): Promise<string[]> {
 	if (pm === "bun") {
 		// bun has no per-call query cost — the global bin dir is deterministic.
 		const base = process.env.BUN_INSTALL || path.join(os.homedir(), ".bun");
 		const dirs = [path.join(base, "bin")];
-		globalBinDirCache.set(pm, dirs);
+		if (generation === packageManagerCacheGeneration)
+			globalBinDirCache.set(pm, dirs);
 		return dirs;
 	}
 
@@ -436,7 +449,8 @@ async function probeGlobalBinDirs(pm: NodePackageManager): Promise<string[]> {
 	// on Windows. pnpm/yarn already print the bin dir directly.
 	const dirs =
 		pm === "npm" ? [onWindows() ? out : path.join(out, "bin")] : [out];
-	globalBinDirCache.set(pm, dirs);
+	if (generation === packageManagerCacheGeneration)
+		globalBinDirCache.set(pm, dirs);
 	return dirs;
 }
 

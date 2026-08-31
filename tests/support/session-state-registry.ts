@@ -545,7 +545,7 @@ export const SESSION_STATE_REGISTRY: SessionStateEntry[] = [
 		id: "package-manager:availabilityLatches",
 		module: "package-manager.ts",
 		state:
-			"availabilityLatches, globalBinDirCache, and package-manager probe flights",
+			"availabilityLatches, globalBinDirCache, cache generation, and package-manager probe flights",
 		policy: "session_start",
 		resetName: "_resetPackageManagerCache",
 		reason:
