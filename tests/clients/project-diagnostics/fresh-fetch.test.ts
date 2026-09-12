@@ -1199,8 +1199,8 @@ describe("fetchFreshProjectDiagnostics (#585)", () => {
 	});
 
 	// Recurrence: a successful partial report used to enter `analyzed` without
-	// paths, so the retirement fallback treated it as a clean empty scan.
-	it("keeps a partial opengrep scan with no paths cold", async () => {
+	// paths, then render as cold/not-run despite carrying findings.
+	it("keeps a partial opengrep scan distinct from cold", async () => {
 		const client = new OpengrepClient();
 		client.ensureAvailable = vi.fn().mockResolvedValue(true);
 		vi.spyOn(safeSpawn, "safeSpawnAsync").mockImplementationOnce(
@@ -1223,7 +1223,9 @@ describe("fetchFreshProjectDiagnostics (#585)", () => {
 			clients,
 		);
 		expect(result.analyzed).not.toContain("opengrep");
-		expect(result.cold).toContain("opengrep");
+		expect(result.partial).toContain("opengrep");
+		expect(result.cold).not.toContain("opengrep");
+		expect(result.partialReasons?.opengrep).toBe("invalid UTF-8");
 		expect(result.authoritativeCoverage).toEqual([]);
 	});
 

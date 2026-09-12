@@ -255,6 +255,7 @@ export class OpengrepClient extends SecurityScanClient<OpengrepResult> {
 						}
 					: {}),
 				...(report.partial ? { partial: true } : {}),
+				...(report.partial ? { summary: report.partial.reason } : {}),
 				...(report.partial && report.scanned.length === 0
 					? { reason: "partial-no-paths" as const }
 					: {}),
