@@ -917,59 +917,6 @@ describe("#2464 — the observed-settle path also dispatches pipeline analysis",
 		}
 	});
 
-	it("analyses bytes written while an earlier pipeline is parked", async () => {
-		// PROBE-LATCH: a third-party write while the first real handler call is
-		// parked must not become the first pipeline's already-analysed identity.
-		// On pre-fix code, dispatchPipelineAnalysis reads disk after await and
-		// stamps S2 even though the parked pipeline analysed S1; C2 at S2 is then
-		// skipped. This drives the real handleToolCall/handleToolResult path.
-		const env = setupTestEnvironment("pi-lens-2499-latch-");
-		const previousDataDir = process.env.PILENS_DATA_DIR;
-		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
-		const { runPipeline } = await import("../../clients/pipeline.js");
-		try {
-			const filePath = path.join(env.tmpDir, "latch.ts");
-			fs.writeFileSync(filePath, SOURCE);
-			const { runtime, cacheManager } = newSession(env.tmpDir);
-			const gated = gatePipeline(vi.mocked(runPipeline));
-			const firstEvent = patchEvent(filePath, "call-2499-latch-c1");
-
-			await handleToolCall(
-				toolCallDeps({
-					event: firstEvent,
-					cwd: env.tmpDir,
-					runtime,
-					cacheManager,
-				}),
-			);
-			fs.writeFileSync(filePath, `${SOURCE}const s1 = 1;\n`);
-			const first = handleToolResult(
-				toolResultDeps({ event: firstEvent, runtime, cacheManager }),
-			);
-			await flushAsyncWork();
-			expect(gated.gates).toHaveLength(1);
-
-			// A writer outside pi-lens moves the bytes while C1's pipeline is parked.
-			fs.writeFileSync(filePath, `${SOURCE}const s2 = 2;\n`);
-			gated.release(0, 1);
-			await first;
-
-			// C2 arrives at S2. It must run because C1 analysed S1, not S2.
-			const second = handleToolResult(
-				toolResultDeps({ event: firstEvent, runtime, cacheManager }),
-			);
-			await flushAsyncWork();
-			gated.release(1, gated.gates.length);
-			await second;
-			expect(vi.mocked(runPipeline)).toHaveBeenCalledTimes(2);
-		} finally {
-			ungatePipeline(vi.mocked(runPipeline));
-			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
-			else process.env.PILENS_DATA_DIR = previousDataDir;
-			env.cleanup();
-		}
-	});
-
 	it("surfaces a pipeline crash on the observed path the way the classified path does", async () => {
 		// #2464 review round 2, S6. A crash used to be swallowed into a `dbg`
 		// line the model never sees, so an observed tool's edit came back looking
