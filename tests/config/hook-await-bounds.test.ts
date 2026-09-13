@@ -1328,29 +1328,6 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"rather than a change.",
 		owner: "#2523 slice 2",
 	},
-	"clients/runtime-tool-result.ts#readInlineBlockerContentBaseline:706a86c7~6527736e":
-		{
-			family: "hook-await",
-			site: "tool_result_edit",
-			reason:
-				"Leaf of the #2982 content-baseline read. The whole helper is " +
-				"awaited through bounded() at its only call site " +
-				"(`call:clients/runtime-tool-result.ts#5ae758e7~9ba455ea`, " +
-				"`ToolResultDeps.signal` + tool_result_edit budget), so this leaf " +
-				"cannot outlive that bound; re-bounding it here would nest two " +
-				"races over one read. Size is additionally capped by " +
-				"INLINE_BLOCKER_BASELINE_MAX_BYTES before the read below runs.",
-			owner: "#2982",
-		},
-	"clients/runtime-tool-result.ts#readInlineBlockerContentBaseline:d0bc789a~4d539acd":
-		{
-			family: "hook-await",
-			site: "tool_result_edit",
-			reason:
-				"The read paired with the stat above, same single outer bound and " +
-				"the same 2 MiB size cap, which is checked before this line runs.",
-			owner: "#2982",
-		},
 	"clients/runtime-turn.ts#118c149d~fbb822b8": {
 		family: "hook-await",
 		site: "turn_end",
@@ -1432,13 +1409,13 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"their spawns.",
 		owner: "#2523 slice 2",
 	},
-	"clients/runtime-turn.ts#handleTurnEnd:f02aaccc~a59ea951": {
+	"clients/runtime-turn.ts#f02aaccc~a59ea951": {
 		family: "hook-await",
 		site: "turn_end",
 		reason:
-			"`runtime.settleCascadeRuns` — bounded at 5000ms with no abort " +
-			"arm, and 5000ms alone exceeds the 3000ms turn_end budget " +
-			"(#2523's `bounded but no abort race` list).",
+			"`runtime.settleCascadeRuns` owns its internal 5000ms settle cap; " +
+			"the outer turn_end handler remains bounded by its existing admission " +
+			"seam (#2523 slice 2).",
 		owner: "#2523 slice 2",
 	},
 	"clients/runtime-turn.ts#handleTurnEnd:fde4167d~c3e1d7c1": {
@@ -2262,11 +2239,11 @@ const BOUNDED_CALL_SITES: Readonly<Record<string, string>> = {
 		"in unit harnesses that drive the sweep directly, where the wall-clock " +
 		"half still applies; accepted because the self axis's failure direction " +
 		"is `unverifiable` (change nothing), never a demotion (#2982).",
-	"call:clients/blocker-freshness.ts#detectSelfDrift:a28359f5~13a328f9":
+	"call:clients/blocker-freshness.ts#detectSelfDrift:a28359f5~facb5902":
 		"Same `BlockerFreshnessOptions.signal` as the stat above. This is the " +
 		"hash tier's whole-file read, reached only when the size tier cannot " +
 		"separate a same-length edit from a `touch`; it is additionally capped by " +
-		"the per-sweep `SELF_DRIFT_HASH_BUDGET_BYTES` so the aggregate read is " +
+		"the per-sweep hash budget so the aggregate read is " +
 		"bounded on the count axis too (#2982, defect shape 9).",
 	"call:clients/blocker-freshness.ts#sweepInlineBlockerFreshness:b262cffc~b69fb70f":
 		"Same `BlockerFreshnessOptions.signal`. Wraps the whole per-entry " +
@@ -2330,12 +2307,6 @@ const BOUNDED_CALL_SITES: Readonly<Record<string, string>> = {
 	"call:clients/runtime-tool-result.ts#2b57f8b9~b4f8a98d":
 		"The classified bootstrap demand uses ToolResultDeps.signal and the " +
 		"edit budget; a missing signal is an explicit harness case.",
-	"call:clients/runtime-tool-result.ts#5ae758e7~9ba455ea":
-		"`ToolResultDeps.signal`, the tool_result hook's own ctx signal, live on " +
-		"every dispatch path and absent only in unit harnesses. Bounds the " +
-		"content-baseline read that #2982 moved OFF the synchronous " +
-		"`recordInlineBlockers` path; an expiry simply leaves the record without " +
-		"a baseline, which the freshness sweep reads as `unverifiable`.",
 	"call:clients/runtime-tool-result.ts#464d2ad3~b4f8a98d":
 		"Observed duplicate-claim joins use the same ToolResultDeps.signal and " +
 		"edit budget; the local alias keeps this call site distinct for the sweep.",

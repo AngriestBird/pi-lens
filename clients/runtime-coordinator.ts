@@ -224,8 +224,8 @@ export interface InlineBlockerRecord {
 	 * edit (a renamed identifier of equal length, a flipped comparison, a changed
 	 * digit) is the common shape, not an exotic one, so a size-only tier leaves a
 	 * genuinely changed record authoritative. Captured off the synchronous
-	 * dispatch path by `setInlineBlockerContentBaseline`; absent when that
-	 * capture did not land, which the sweep reads as `unverifiable`.
+	 * dispatch path by the pipeline result; absent when that result could not
+	 * provide a bounded baseline, which the sweep reads as `unverifiable`.
 	 */
 	recordedHash?: string;
 	/**
@@ -1035,11 +1035,8 @@ export class RuntimeCoordinator {
 		writeIndex?: number,
 		sources?: readonly string[],
 		lines?: readonly number[],
+		contentBaseline?: { size: number; sha256: string },
 	): number {
-		// #2982: returned so the async caller can pin its off-path content-baseline
-		// capture to THIS verdict. A re-record between the two replaces the
-		// stamp, and `setInlineBlockerContentBaseline` then drops the late
-		// baseline rather than attaching it to a verdict it did not measure.
 		const recordedAtMs = Date.now();
 		this._pendingInlineBlockers.set(path.resolve(filePath), {
 			filePath,
@@ -1049,42 +1046,14 @@ export class RuntimeCoordinator {
 			lines,
 			recordedAtMs,
 			stale: false,
+			...(contentBaseline
+				? {
+						recordedSize: contentBaseline.size,
+						recordedHash: contentBaseline.sha256,
+					}
+				: {}),
 		});
 		return recordedAtMs;
-	}
-
-	/**
-	 * #2982 review round 2: attach the content baseline the self-drift axis
-	 * confirms against, captured OFF this synchronous path.
-	 *
-	 * `recordInlineBlockers` runs inside the dispatch handler and must not read
-	 * the file: a blocking read there spends a hook budget on I/O, and a network
-	 * filesystem makes that concrete. The async caller
-	 * (`runtime-tool-result.ts`, already inside `handleToolResult`) does the read
-	 * under `bounded()` and hands the result here. A record whose baseline never
-	 * arrives (read timed out, aborted, or failed) simply has none, and the sweep
-	 * reads that as `unverifiable` and changes no state.
-	 *
-	 * Ignores a baseline for a record that is no longer the one it was captured
-	 * for: a re-record between the capture and this call replaces the verdict,
-	 * and `recordedAtMs` is what tells them apart.
-	 */
-	setInlineBlockerContentBaseline(
-		filePath: string,
-		recordedAtMs: number,
-		size: number,
-		hash: string,
-	): boolean {
-		const key = path.resolve(filePath);
-		const existing = this._pendingInlineBlockers.get(key);
-		if (!existing) return false;
-		if (existing.recordedAtMs !== recordedAtMs) return false;
-		this._pendingInlineBlockers.set(key, {
-			...existing,
-			recordedSize: size,
-			recordedHash: hash,
-		});
-		return true;
 	}
 
 	clearInlineBlockers(filePath: string): void {

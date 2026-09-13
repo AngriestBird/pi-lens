@@ -352,19 +352,17 @@ describe("self-drift is outside the delivery cap (#2982)", () => {
 				env.tmpDir,
 				sessionId,
 			);
-			const recordedAtMs = runtime.recordInlineBlockers(
+			const baselineBytes = fs.readFileSync(target);
+			runtime.recordInlineBlockers(
 				target,
 				"🔴 hardcoded secret",
 				1,
 				["ast-grep"],
-			);
-			// The baseline production attaches from the async caller (#2982 round 2).
-			const baselineBytes = fs.readFileSync(target);
-			runtime.setInlineBlockerContentBaseline(
-				target,
-				recordedAtMs,
-				baselineBytes.byteLength,
-				createHash("sha256").update(baselineBytes).digest("hex"),
+				undefined,
+				{
+					size: baselineBytes.byteLength,
+					sha256: createHash("sha256").update(baselineBytes).digest("hex"),
+				},
 			);
 			runtime.updateGitGuardStatus(true, "🔴 hardcoded secret");
 
@@ -413,19 +411,17 @@ describe("self-drift is outside the delivery cap (#2982)", () => {
 				env.tmpDir,
 				sessionId,
 			);
-			const recordedAtMs = runtime.recordInlineBlockers(
+			const baselineBytes = fs.readFileSync(target);
+			runtime.recordInlineBlockers(
 				target,
 				"🔴 hardcoded secret",
 				1,
 				["ast-grep"],
-			);
-			// The baseline production attaches from the async caller (#2982 round 2).
-			const baselineBytes = fs.readFileSync(target);
-			runtime.setInlineBlockerContentBaseline(
-				target,
-				recordedAtMs,
-				baselineBytes.byteLength,
-				createHash("sha256").update(baselineBytes).digest("hex"),
+				undefined,
+				{
+					size: baselineBytes.byteLength,
+					sha256: createHash("sha256").update(baselineBytes).digest("hex"),
+				},
 			);
 			runtime.updateGitGuardStatus(true, "🔴 hardcoded secret");
 

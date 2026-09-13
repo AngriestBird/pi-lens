@@ -361,19 +361,17 @@ describe("blocker freshness sweep — widget-store population (#1790)", () => {
 		);
 
 		const runtime = new RuntimeCoordinator();
-		const recordedAtMs = runtime.recordInlineBlockers(
+		const baselineBytes = fs.readFileSync(consumer);
+		runtime.recordInlineBlockers(
 			consumer,
 			"🔴 incomplete assertion",
 			1,
 			["tree-sitter"],
-		);
-		// The content baseline production attaches from the async caller (#2982).
-		const baselineBytes = fs.readFileSync(consumer);
-		runtime.setInlineBlockerContentBaseline(
-			consumer,
-			recordedAtMs,
-			baselineBytes.byteLength,
-			createHash("sha256").update(baselineBytes).digest("hex"),
+			undefined,
+			{
+				size: baselineBytes.byteLength,
+				sha256: createHash("sha256").update(baselineBytes).digest("hex"),
+			},
 		);
 		recordCacheServedBlocking(consumer, "cached blocking finding", Date.now());
 		// Both axes drift: the blocker's own bytes (a real change, since the self

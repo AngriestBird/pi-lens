@@ -67,10 +67,8 @@
  * not an exotic one (a renamed identifier of equal length, a flipped comparison,
  * a changed digit), so a size-only tier would leave a genuinely changed record
  * authoritative, which is #2982 arriving from the other side. The baseline is
- * captured OFF the synchronous dispatch path by
- * `RuntimeCoordinator.setInlineBlockerContentBaseline`, called from
- * `runtime-tool-result.ts` under `bounded()`; `recordInlineBlockers` itself
- * reads nothing. Every bound that expires, and every missing baseline, yields
+ * carried by `PipelineResult` beside the inline-blocker evidence and stamped
+ * synchronously by `recordInlineBlockers`. Every bound that expires, and every missing baseline, yields
  * `unverifiable`, which changes no state in either direction and is counted so
  * it is visible rather than silent.
  *
@@ -136,8 +134,10 @@
 import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import { bounded } from "./deadline-utils.js";
+import { recordDegradationOnce } from "./degradation-ledger.js";
 import { HOOK_WALL_BUDGET_MS } from "./hook-budgets.js";
 import { normalizeEphemeralMapKey } from "./path-utils.js";
+import { toRunnerDisplayPath } from "./dispatch/runner-context.js";
 import { resolveImportToFiles } from "./review-graph/import-resolvers.js";
 import type { RuntimeCoordinator } from "./runtime-coordinator.js";
 import {
@@ -206,6 +206,8 @@ export interface BlockerFreshnessCounts {
 	 * a rise in "we could not tell" is visible instead of folded into `kept`.
 	 */
 	selfUnverifiable: number;
+	/** Same sweep-level signal when the aggregate hash budget is exhausted. */
+	hashBudgetExhausted: number;
 }
 
 /**
@@ -455,7 +457,7 @@ type SelfDriftVerdict = "drift" | "unchanged" | "unverifiable";
  * Two tiers, in cost order. `size` decides most cases from the stat already
  * taken. When the size matches, only a hash can separate a one-character edit
  * from a `touch`, so the bytes are read and compared against the baseline
- * `setInlineBlockerContentBaseline` attached off the dispatch path.
+ * carried by the pipeline.
  *
  * Both tiers fail toward `"unverifiable"`, never toward `"drift"`: a bound that
  * expires, a baseline that never landed, or a file past the per-sweep hash
@@ -471,7 +473,7 @@ async function detectSelfDrift(args: {
 	recordedHash: string | undefined;
 	signal: AbortSignal | undefined;
 	/** Mutable per-sweep hash budget. See {@link SELF_DRIFT_HASH_BUDGET_BYTES}. */
-	budget: { bytesLeft: number };
+	budget: { bytesLeft: number; exhausted: boolean };
 }): Promise<SelfDriftVerdict> {
 	const boundOptions = (label: string) =>
 		({
@@ -506,7 +508,10 @@ async function detectSelfDrift(args: {
 	// turn is an unbounded AGGREGATE read on a hook path. The per-sweep byte
 	// budget bounds the other axis; past it the record is unverifiable, not
 	// drifted.
-	if (stat.size > args.budget.bytesLeft) return "unverifiable";
+	if (stat.size > args.budget.bytesLeft) {
+		args.budget.exhausted = true;
+		return "unverifiable";
+	}
 	const content = await bounded(
 		fs.promises.readFile(args.filePath),
 		boundOptions("selfDriftHash"),
@@ -764,6 +769,7 @@ export async function sweepInlineBlockerFreshness(
 		truncatedImports: 0,
 		selfHealed: 0,
 		selfUnverifiable: 0,
+		hashBudgetExhausted: 0,
 	};
 	const resolveForwardImports =
 		options?.resolveForwardImports ?? extractForwardImportPaths;
@@ -876,7 +882,10 @@ export async function sweepInlineBlockerFreshness(
 
 	// One budget for the whole sweep (defect shape 9), consumed by the self
 	// axis's hash tier as it goes.
-	const hashBudget = { bytesLeft: SELF_DRIFT_HASH_BUDGET_BYTES };
+	const hashBudget = {
+		bytesLeft: SELF_DRIFT_HASH_BUDGET_BYTES,
+		exhausted: false,
+	};
 
 	for (const entry of population) {
 		try {
@@ -930,6 +939,7 @@ export async function sweepInlineBlockerFreshness(
 				}
 				// The outer bound too: an expired one yields `undefined`, and that
 				// means "could not decide", never "changed".
+				const hashBudgetWasExhausted = hashBudget.exhausted;
 				const verdict =
 					(await bounded(
 						detectSelfDrift({
@@ -950,6 +960,22 @@ export async function sweepInlineBlockerFreshness(
 				if (verdict === "unverifiable") {
 					// Decide nothing. Leave the record in whatever state it holds.
 					counts.selfUnverifiable += 1;
+					if (
+						entry.recordedSize === undefined ||
+						entry.recordedHash === undefined
+					) {
+						recordDegradationOnce({
+							kind: "self-drift-unverifiable",
+							subject: `inline-blocker:${toRunnerDisplayPath(cwd, entry.filePath)}#missing-baseline`,
+							reason: "the pipeline did not provide a bounded content baseline",
+						});
+					} else if (!hashBudgetWasExhausted && !hashBudget.exhausted) {
+						recordDegradationOnce({
+							kind: "self-drift-unverifiable",
+							subject: `inline-blocker:${toRunnerDisplayPath(cwd, entry.filePath)}#bound-expired`,
+							reason: "the bounded self-drift check did not complete",
+						});
+					}
 					if (selfDriftDemoted) counts.alreadyStale += 1;
 					else counts.kept += 1;
 					continue;
@@ -985,5 +1011,6 @@ export async function sweepInlineBlockerFreshness(
 			counts.kept += 1;
 		}
 	}
+	counts.hashBudgetExhausted = hashBudget.exhausted ? 1 : 0;
 	return counts;
 }

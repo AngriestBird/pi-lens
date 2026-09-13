@@ -12,6 +12,7 @@
  *   7. Cascade diagnostics (other files with errors, LSP only)
  */
 
+import { createHash } from "node:crypto";
 import * as nodeFs from "node:fs";
 import * as path from "node:path";
 import type { PiLensFlagSource } from "./lens-config.js";
@@ -358,6 +359,8 @@ export interface PipelineResult {
 	 * e.g. a whole-file secret finding).
 	 */
 	inlineBlockerLines?: number[];
+	/** Content baseline captured from the pipeline read used to render blockers. */
+	inlineBlockerFileContent?: { size: number; sha256: string };
 	/** Fixable warning diagnostics introduced by this pipeline run. */
 	actionableWarnings?: ActionableWarningRecord[];
 	/** Non-fixable code-quality warnings introduced/touched by this pipeline run. */
@@ -1868,6 +1871,18 @@ export async function runPipeline(
 						content: fileContent,
 						source: "autofix",
 					}
+				: undefined,
+		inlineBlockerFileContent:
+			dispatchResult.hasBlockers && fileContent !== undefined
+				? (() => {
+						const content = Buffer.from(fileContent, "utf8");
+						return content.byteLength <= 2 * 1024 * 1024
+							? {
+									size: content.byteLength,
+									sha256: createHash("sha256").update(content).digest("hex"),
+								}
+							: undefined;
+					})()
 				: undefined,
 	};
 }

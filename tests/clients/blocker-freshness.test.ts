@@ -22,6 +22,10 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+	getDegradationSummary,
+	resetDegradationLedger,
+} from "../../clients/degradation-ledger.js";
+import {
 	extractForwardImportPaths,
 	sweepInlineBlockerFreshness,
 } from "../../clients/blocker-freshness.js";
@@ -36,6 +40,7 @@ function makeDir(prefix: string): string {
 }
 
 afterEach(() => {
+	resetDegradationLedger();
 	while (tempDirs.length > 0) {
 		const dir = tempDirs.pop();
 		if (dir) fs.rmSync(dir, { recursive: true, force: true });
@@ -397,9 +402,8 @@ describe("blocker freshness sweep — self-drift on non-LSP provenance", () => {
 	/**
 	 * Record a verdict AND attach its content baseline, which is what production
 	 * does across two steps: `recordInlineBlockers` synchronously in the dispatch
-	 * handler, then `setInlineBlockerContentBaseline` from the async caller once
-	 * the bounded read lands (#2982 review round 2). A test that skips the second
-	 * step is testing the no-baseline path, not the demotion path.
+	 * handler with the pipeline's already-read content baseline. A test that skips
+	 * that evidence is testing the no-baseline path, not the demotion path.
 	 */
 	function recordWithBaseline(
 		runtime: RuntimeCoordinator,
@@ -407,19 +411,12 @@ describe("blocker freshness sweep — self-drift on non-LSP provenance", () => {
 		summary: string,
 		sources: string[],
 	): void {
-		const recordedAtMs = runtime.recordInlineBlockers(
-			filePath,
-			summary,
-			1,
-			sources,
-		);
-		const content = fs.readFileSync(filePath);
-		runtime.setInlineBlockerContentBaseline(
-			filePath,
-			recordedAtMs,
-			content.byteLength,
-			createHash("sha256").update(content).digest("hex"),
-		);
+		runtime.recordInlineBlockers(filePath, summary, 1, sources, undefined, {
+			size: fs.statSync(filePath).size,
+			sha256: createHash("sha256")
+				.update(fs.readFileSync(filePath))
+				.digest("hex"),
+		});
 	}
 
 	/** Record the verdict against `before`, then land a real byte change. */
@@ -577,8 +574,7 @@ describe("blocker freshness sweep — self-drift on non-LSP provenance", () => {
 		fs.writeFileSync(target, "export const y = 1;\n");
 
 		const runtime = new RuntimeCoordinator();
-		// No `setInlineBlockerContentBaseline`: the bounded read never landed, so
-		// the record has no tier to compare against.
+		// No pipeline content baseline: the record has no tier to compare against.
 		runtime.recordInlineBlockers(target, "🔴 blocker", 1, ["ast-grep"]);
 		fs.writeFileSync(target, "export const y = 987654321;\n");
 		driftIntoFuture(target);
@@ -587,6 +583,54 @@ describe("blocker freshness sweep — self-drift on non-LSP provenance", () => {
 		expect(counts.selfUnverifiable).toBe(1);
 		expect(counts.revalidated).toBe(0);
 		expect(runtime.getInlineBlockersSnapshot()[0]?.stale).toBe(false);
+		expect(getDegradationSummary()).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					kind: "self-drift-unverifiable",
+					latestReasons: [
+						expect.objectContaining({
+							subject: `inline-blocker:${path.relative(dir, target)}#missing-baseline`,
+						}),
+					],
+				}),
+			]),
+		);
+	});
+
+	it("records a distinct bounded record when the self-drift bound expires", async () => {
+		const dir = makeDir("pi-lens-fresh-bound-");
+		const target = path.join(dir, "consumer.ts");
+		fs.writeFileSync(target, "export const y = 1;\n");
+		const runtime = new RuntimeCoordinator();
+		const content = fs.readFileSync(target);
+		runtime.recordInlineBlockers(
+			target,
+			"🔴 blocker",
+			1,
+			["ast-grep"],
+			undefined,
+			{
+				size: content.byteLength,
+				sha256: createHash("sha256").update(content).digest("hex"),
+			},
+		);
+		const signal = AbortSignal.abort();
+
+		const counts = await sweepInlineBlockerFreshness(runtime, dir, { signal });
+		expect(counts.selfUnverifiable).toBe(1);
+		expect(counts.revalidated).toBe(0);
+		expect(getDegradationSummary()).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					kind: "self-drift-unverifiable",
+					latestReasons: [
+						expect.objectContaining({
+							subject: `inline-blocker:${path.relative(dir, target)}#bound-expired`,
+						}),
+					],
+				}),
+			]),
+		);
 	});
 
 	// The import axis stays excluded for non-LSP provenance, which is #1631
