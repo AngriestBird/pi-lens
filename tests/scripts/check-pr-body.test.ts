@@ -324,23 +324,51 @@ describe("test-reference shape and placement", () => {
 		expect(result.errors.join(" ")).toContain(value);
 	};
 
-	it("checks short ids in prose, bullets, and every table column", () => {
-		for (const extra of [
-			"The witness is `Z99`.",
-			"- The witness is `Z99`.",
-			"| Notes | Test |\n| --- | --- |\n| `Z99` | real |",
-			"| Notes | Test |\n| --- | --- |\n| real | `Z99` |",
-		])
-			missing(clean(extra), "Z99");
+	it("checks short ids only in the test column", () => {
+		missing(clean("| Notes | Test |\n| --- | --- |\n| real | `Z99` |"), "Z99");
+		expect(clean("The witness is `Z99`.").valid).toBe(true);
+		expect(clean("- The witness is `Z99`.").valid).toBe(true);
+		expect(
+			clean("| Notes | Test |\n| --- | --- |\n| `Z99` | real |").valid,
+		).toBe(true);
 	});
 
-	it("accepts short ids in the same placements when they are real", () => {
-		for (const extra of [
-			"The witness is `A01`.",
-			"- The witness is `A01`.",
-			"| Notes | Test |\n| --- | --- |\n| `A01` | real |",
-		])
-			expect(clean(extra).errors.join(" ")).not.toContain("A01");
+	it("accepts short ids in a test column when they resolve to test titles", () => {
+		const fixtureCwd = mkdtempSync(
+			join(repositoryRoot, ".tmp-pr-body-short-id-"),
+		);
+		try {
+			mkdirSync(join(fixtureCwd, "tests"), { recursive: true });
+			writeFileSync(
+				join(fixtureCwd, "tests", "short-ids.test.ts"),
+				[
+					'it("F1", () => {});',
+					'it("V3", () => {});',
+					'it("F12", () => {});',
+				].join("\n"),
+			);
+			gitExecFileSync(["init", "-q"], { cwd: fixtureCwd });
+			gitExecFileSync(["add", "tests/short-ids.test.ts"], { cwd: fixtureCwd });
+			gitExecFileSync(
+				[
+					"-c",
+					"user.email=pi-lens-test@example.com",
+					"-c",
+					"user.name=pi-lens-test",
+					"commit",
+					"-qm",
+					"fixture",
+				],
+				{ cwd: fixtureCwd },
+			);
+			const result = lintPrBody(
+				`${body}\n| Case | Test |\n| --- | --- |\n| A | \`F1\` |\n| B | \`V3\` |\n| C | \`F12\` |`,
+				{ cwd: fixtureCwd },
+			);
+			expect(result).toEqual({ valid: true, errors: [] });
+		} finally {
+			rmSync(fixtureCwd, { recursive: true, force: true });
+		}
 	});
 
 	it("checks paths and path-line citations everywhere, including directories", () => {
@@ -406,7 +434,7 @@ describe("test-reference shape and placement", () => {
 		).toEqual({ valid: true, errors: [] });
 	});
 
-	it("rejects all eleven historical fabricated ids through both readers", () => {
+	it("keeps historical short ids scoped to named test columns", () => {
 		const fixture = readFileSync(
 			join(
 				repositoryRoot,
@@ -437,10 +465,23 @@ describe("test-reference shape and placement", () => {
 			);
 			const direct = lintPrBody(fixture).errors.join(" ");
 			const local = lintLocalPrBody(fixture, fixtureRepo).errors.join(" ");
-			for (let index = 1; index <= 11; index += 1) {
-				const id = `Z${String(index).padStart(2, "0")}`;
+			for (const id of ["Z10", "P01", "P30"]) {
 				expect(direct).toContain(id);
 				expect(local).toContain(id);
+			}
+			for (const id of [
+				"Z01",
+				"Z02",
+				"Z03",
+				"Z04",
+				"Z05",
+				"Z06",
+				"Z07",
+				"Z08",
+				"Z09",
+			]) {
+				expect(direct).not.toContain(id);
+				expect(local).not.toContain(id);
 			}
 		} finally {
 			rmSync(fixtureRepo, { recursive: true, force: true });
@@ -2001,6 +2042,16 @@ describe("head-tree citations and test references", () => {
 			options,
 		);
 		expect(result.errors.join(" ")).toContain("B01");
+	});
+
+	it("rejects missing one-digit short ids in a test column", () => {
+		for (const id of ["F1", "V3"]) {
+			const result = lintPrBody(
+				`${body}\n| Case | Test |\n| --- | --- |\n| A | \`${id}\` |`,
+				options,
+			);
+			expect(result.errors.join(" ")).toContain(id);
+		}
 	});
 
 	it("harvests titles after regex literals without confusing division", () => {

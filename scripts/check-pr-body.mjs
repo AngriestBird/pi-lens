@@ -757,13 +757,15 @@ function lintTestReferences(body, options = {}, corpus = testCorpus(options)) {
 			references.push(pathToken);
 		}
 	};
-	const addToken = (raw, strict = false) => {
+	const addToken = (raw, strict = false, testColumn = false) => {
 		const token = raw.trim();
 		const wrapped = /^it\(\s*(["'])(.*?)\1\s*\)(?:\s*\([^)]*\))?$/.exec(token);
 		const value = wrapped
 			? wrapped[2].replace(/\s*\([^)]*\)\s*$/, "").trim()
 			: token;
-		if (/^[A-Z]\d{2}$/.test(value) || wrapped) {
+		// Short IDs are references only in an explicitly named test column.
+		// A bare ID in prose is not evidence of a test and must remain inert.
+		if ((/^[A-Z]\d+$/.test(value) && testColumn) || wrapped) {
 			references.push(value);
 			return;
 		}
@@ -825,7 +827,7 @@ function lintTestReferences(body, options = {}, corpus = testCorpus(options)) {
 					tableHeaders[cellIndex] ?? "",
 				),
 			);
-			addToken(match[1], inTestColumn || (table && !inTable));
+			addToken(match[1], inTestColumn || (table && !inTable), inTestColumn);
 		}
 		for (const match of line.matchAll(/\bit\(\s*(["'])(.*?)\1\s*\)/g))
 			if (isBullet || !inTable) addToken(match[0]);
