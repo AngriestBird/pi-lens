@@ -388,8 +388,11 @@ async function analyzeLatency(files, state) {
 						total: 0,
 						stale: 0,
 					};
-					summary.total += 1;
-					if (entry.metadata?.stale === true) summary.stale += 1;
+					const verdictCount = entry.metadata?.verdictCount;
+					const staleCount = entry.metadata?.staleCount;
+					summary.total += typeof verdictCount === "number" ? verdictCount : 1;
+					if (typeof staleCount === "number") summary.stale += staleCount;
+					else if (entry.metadata?.stale === true) summary.stale += 1;
 					state.latency.testRunnerVerdicts.set(sessionId, summary);
 				}
 				if (phase === "config_resolved") {

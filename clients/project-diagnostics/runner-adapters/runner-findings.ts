@@ -125,8 +125,15 @@ export interface TestRunnerFindingsCache {
 export interface TestRunnerVerdict {
 	file: string;
 	sourceFile: string;
-	fileSeq: number;
+	fileSeq?: TestRunnerFileSequence;
 }
+
+export type TestRunnerFileSequence =
+	| { state: "known"; value: number }
+	| {
+			state: "unknown";
+			reason: "legacy-cache-record" | "sequence-unavailable";
+	  };
 
 function failureMessage(failure: TestFailure): string {
 	const firstLine = failure.message.split("\n")[0]?.slice(0, 300) ?? "";

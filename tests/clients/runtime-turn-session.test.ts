@@ -2043,7 +2043,10 @@ describe("turn_end test runner — stale results are cached, not discarded", () 
 			expect(cached?.data?.content).toContain("prior turn");
 			// #2542: preserve the sequence captured before the later edit.
 			expect(cached?.data?.verdicts).toEqual([
-				expect.objectContaining({ sourceFile: srcFile, fileSeq: 1 }),
+				expect.objectContaining({
+					sourceFile: srcFile,
+					fileSeq: { state: "known", value: 1 },
+				}),
 			]);
 		} finally {
 			env.cleanup();

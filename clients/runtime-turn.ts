@@ -2684,7 +2684,16 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 									{
 										file: result.value.file,
 										sourceFile: target.sourceFile,
-										fileSeq: target.fileSeqAtRun ?? 0,
+										fileSeq:
+											target.fileSeqAtRun === undefined
+												? ({
+														state: "unknown",
+														reason: "sequence-unavailable",
+													} as const)
+												: ({
+														state: "known",
+														value: target.fileSeqAtRun,
+													} as const),
 									},
 								]
 							: [];
