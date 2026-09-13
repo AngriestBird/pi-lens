@@ -270,6 +270,13 @@ is the procedure and defers here on conflict; 2026-09-09).**
   every long probe, and any wait on an external state runs that way, so a red
   CI is a notification, not a discovery. Record: 2026-09-09, a red on #2807
   sat unread for over an hour behind detached chains.
+- *Plegma inventory output is filtered before it reaches agent context.* Never
+  run an unbounded `plegma list` or `plegma list --mine` into a tool response.
+  Use `watch --next --mine` for settlements and `result <delegation>` for one
+  handoff. If an inventory is necessary, redirect it to a scratch file and
+  filter by the active handles or delegation IDs before reading it. Record:
+  2026-09-13, one historical inventory consumed 50 KiB of tool output and
+  displaced most of the orchestrator's working context.
 - *The orchestrator's commit step checks the index, not only the diff.*
   Before every commit from a worker tree: `git ls-files` contains none of
   `PR_BODY.md`, `COMMIT_MSG.txt`, `REVIEW.md`, `INVESTIGATION.md`,
