@@ -10,6 +10,7 @@ import {
 import { logLatency } from "./latency-logger.js";
 import {
 	getSinkRotations,
+	getSinkOptionConflicts,
 	getSinkWriteFailures,
 	resetSinkRotations,
 	resetSinkWriteFailures,
@@ -113,6 +114,7 @@ export type DegradationKind =
 	 * degradation gets. Subject is `<hook>:<label>`, same as above, so the two
 	 * causes stay separable in `pilens_health`.
 	 */
+	| "bash-view-clipped"
 	| "biome-explain-unavailable"
 	| "bus-stale"
 	| "cache-usage-attribution-stale"
@@ -269,6 +271,9 @@ export type DegradationKind =
 	/** A busy notify-stall discriminator was deferred; detail is rising-edge bounded. */
 	| "instance-registry-corrupt"
 	/** A didChange content mirror was recorded behind a newer document version. */
+	| "lens-diagnostics-analysis-root-rejected"
+	/** Cross-graph rotation options disagreed; the first writer retained ownership. */
+	| "log-sink-option-conflict"
 	| "log-sink-rotate-failed"
 	| "log-sink-rotated"
 	| "log-sink-write-failure"
@@ -475,6 +480,7 @@ export type DegradationKind =
 	 * from the ledger alone.
 	 */
 	| "mode-suppression"
+	| "native-read-clipped"
 	/**
 	 * A shell-out runner's tool DID produce output, exited nonzero, and the
 	 * runner's parser extracted ZERO diagnostics from it (#1948). The adjacent
@@ -489,6 +495,8 @@ export type DegradationKind =
 	| "observed-mutation-budget"
 	/** A runner exceeded the observed inline budget and moved to collect-later. */
 	| "observed-mutation-dir-cap"
+	/** An observed directory mutation exceeded the same-turn analysis fan-out. */
+	| "observed-mutation-dispatch-cap"
 	/** Opengrep completed with partial parsing warnings (#2943). */
 	| "opengrep-partial-scan"
 	/** Opengrep refused the requested root or reported a scan error (#2943). */
@@ -590,6 +598,18 @@ export type DegradationKind =
 	 * pi's `agent_settled` window and dogfood logs show gaps up to 52 minutes;
 	 * this kind means a session out-touched that cadence.
 	 */
+	/**
+	 * #2968: a `startSpawnUsageSampler` poll stopped at its LIFETIME cap — the
+	 * caller-supplied bound, which `safeSpawnAsync` derives as the spawn's
+	 * effective timeout plus `SPAWN_SAMPLER_TEARDOWN_GRACE_MS` — while the
+	 * child it brackets was still running; the
+	 * child outlived every teardown `safeSpawnAsync` owns. The summary
+	 * gathered before the cap is still returned; this is the row that says the
+	 * reading is truncated, and that something spawned is not dying. One
+	 * subject for all samplers, counted, so a session that hangs four children
+	 * for six hours writes a tally rather than a row per spawn.
+	 */
+	| "resource-sampler-lifetime-capped"
 	| "resource-sampler-query-failed"
 	/**
 	 * `read-guard.ts`'s per-file record cap (`READ_GUARD_MAX_RECORDS_PER_FILE`)
@@ -600,6 +620,18 @@ export type DegradationKind =
 	 * hand-rolled per-file Set (#1913 review F1).
 	 */
 	| "resource-sampler-scanner-escalated"
+	/**
+	 * #2968: a `startSpawnUsageSampler` poll tick was SKIPPED because the
+	 * previous tick's process-table queries had not settled yet. Before the
+	 * in-flight guard the tick fired anyway, so on Windows — where one tick is
+	 * two `powershell.exe` CIM queries plus, past the query timeout, a
+	 * `taskkill.exe` — every slow query stacked another set of children on the
+	 * host (the external report measured 234 of them). A skip means sampling
+	 * resolution was lost, which #1863's "a failed query must not read as an
+	 * empty table" rule says has to be visible; it is counted, not once-only,
+	 * because the count is the backpressure signal.
+	 */
+	| "resource-sampler-tick-overlapped"
 	/**
 	 * `read-guard.ts`'s whole-file evictor (`evictFile`) dropped a file's
 	 * tracked read/edit state (#1918, the #1913 class sibling). Fires from
@@ -906,6 +938,7 @@ export type DegradationKind =
 	 * `skills/` path; see `clients/skills-resolver.ts`.
 	 */
 	| "web-tree-sitter-load-failed"
+	| "widget-disposition-reconcile-fallback"
 	/**
 	 * #2636 (the #2626 class sweep's ast-grep leg): `AstGrepClient`'s
 	 * `ruleDir` fell back to `resolvePackagePath(import.meta.url, "rules")`
@@ -1185,6 +1218,20 @@ export function getDegradationSummary(): DegradationGroup[] {
 				subject: truncateForLedger(sink.file),
 				reason: truncateForLedger(
 					`${sink.failureCount} failed rotation attempt(s); this sink is growing past its byte bound`,
+				),
+			})),
+		});
+	}
+	const optionConflicts = getSinkOptionConflicts();
+	if (optionConflicts.length > 0) {
+		summary.push({
+			kind: "log-sink-option-conflict",
+			count: optionConflicts.length,
+			droppedCount: 0,
+			latestReasons: optionConflicts.map((sink) => ({
+				subject: truncateForLedger(sink.file),
+				reason: truncateForLedger(
+					"shared writer rotation options differed across module graphs; first writer retained ownership",
 				),
 			})),
 		});

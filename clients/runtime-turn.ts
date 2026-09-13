@@ -2233,6 +2233,8 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		const targets: Array<
 			Omit<TurnEndTestTarget, "strategy"> & {
 				strategy: TurnEndTestTarget["strategy"] | "deferred";
+				sourceFile: string;
+				fileSeqAtRun?: number;
 				/** Cut-batch count carried in from the cache, for the cap below. */
 				deferralAttempts?: number;
 			}
@@ -2457,6 +2459,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				heldDeferred.push({
 					testFile,
 					runner: carried.runner,
+					sourceFile: carried.sourceFile ?? testFile,
 					attempts,
 					sessionId: turnSessionId,
 				});
@@ -2467,6 +2470,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			redispatchedDeferred++;
 			targets.push({
 				testFile,
+				sourceFile: carried.sourceFile ?? testFile,
 				runner: carried.runner,
 				config,
 				strategy: "deferred",
@@ -2579,7 +2583,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 					overCapTargets++;
 					continue;
 				}
-				targets.push(target);
+				targets.push({ ...target, sourceFile: abs });
 				dbg(
 					`turn_end: ${display} → test ${target.runner} ${path.relative(cwd, target.testFile)} (${target.strategy}${isNeighbor ? ", cascade-neighbor" : ""})`,
 				);
@@ -2618,6 +2622,9 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			);
 		}
 		if (targets.length > 0) {
+			for (const target of targets) {
+				target.fileSeqAtRun = runtime.getFileSeq(target.sourceFile);
+			}
 			dbg(
 				`turn_end: firing ${targets.length} test target(s) async (non-blocking, max ${TEST_RUNNER_BATCH_CONCURRENCY} concurrent)`,
 			);
@@ -2669,8 +2676,36 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 					}),
 			})
 				.then(({ results, deferred, stopReason }) => {
+					const settledResults = results as Array<
+						PromiseSettledResult<TestResult>
+					>;
+					const verdicts = settledResults.flatMap((result) => {
+						if (result.status === "rejected") return [];
+						const target = targets.find(
+							(candidate) => candidate.testFile === result.value.file,
+						);
+						return target
+							? [
+									{
+										file: result.value.file,
+										sourceFile: target.sourceFile,
+										fileSeq:
+											target.fileSeqAtRun === undefined
+												? ({
+														state: "unknown",
+														reason: "sequence-unavailable",
+													} as const)
+												: ({
+														state: "known",
+														value: target.fileSeqAtRun,
+													} as const),
+									},
+								]
+							: [];
+					});
 					const deferredTargets: DeferredTestTarget[] = deferred.map((t) => ({
 						testFile: t.testFile,
+						sourceFile: t.sourceFile,
 						runner: t.runner,
 						// One more cut batch for this target. Read back by the
 						// selection loop above, which retires it at
@@ -2902,6 +2937,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 								content,
 								stale,
 								results: resultValues,
+								verdicts,
 								testRunGeneration,
 								launchedFrom,
 								publishedAgainst,
@@ -3019,6 +3055,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 								content: deferralNote,
 								stale,
 								results: resultValues,
+								verdicts,
 								testRunGeneration,
 								launchedFrom,
 								publishedAgainst,
