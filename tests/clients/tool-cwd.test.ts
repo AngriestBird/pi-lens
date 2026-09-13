@@ -146,6 +146,40 @@ describe("resolveToolCwd (#2777)", () => {
 		).toBe(nested);
 	});
 
+	it.each([
+		["ruff tool-owned markers", "ruff", ["ruff.toml", ".ruff.toml"], ".py"],
+		[
+			"oxlint tool-owned markers",
+			"oxlint",
+			[".oxlintrc.json", "oxlint.config.js"],
+			".ts",
+		],
+		[
+			"Typos tool-owned markers",
+			"spellcheck/typos",
+			["_typos.toml", "typos.toml"],
+			".md",
+		],
+		["Prettier tool-owned marker", "prettier", [".prettierignore"], ".js"],
+	] as const)(
+		"walks from the %s through the real resolver",
+		(_label, tool, markers, extension) => {
+			// Recurrence: #2971 deleted runner-owned markers without representing
+			// them in the shared vocabulary, sending children to the workspace root.
+			const workspace = path.join(home, "repo");
+			const nested = path.join(workspace, "packages", tool.replace("/", "-"));
+			const file = path.join(nested, "src", `index${extension}`);
+			fs.mkdirSync(path.dirname(file), { recursive: true });
+			for (const marker of markers)
+				fs.writeFileSync(path.join(nested, marker), "\n");
+			fs.writeFileSync(file, "\n");
+
+			expect(
+				toolCwd.resolveToolCwd("runner", tool, file, { cwd: workspace }).cwd,
+			).toBe(nested);
+		},
+	);
+
 	it("returns the marker that anchored the cwd (#2966)", () => {
 		const workspace = path.join(home, "repo");
 		const file = path.join(workspace, "src", "main.rs");

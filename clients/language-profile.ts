@@ -122,10 +122,28 @@ const ROOT_MARKERS_BY_KIND: Partial<Record<FileKind, readonly string[]>> = {
 	fsharp: DOTNET_FSHARP_ROOT_MARKERS,
 };
 
+// Tool-owned configuration belongs beside the shared language vocabulary, but
+// not in ROOT_MARKERS_BY_KIND: these files are discovered by the tool, not by
+// the language root detector. Keeping them here lets runner cwd resolution
+// consume one canonical vocabulary without restoring a second seam-local map.
+const TOOL_MARKERS_BY_RUNNER: Readonly<Record<string, readonly string[]>> = {
+	ruff: ["ruff.toml", ".ruff.toml"],
+	oxlint: [".oxlintrc.json", "oxlint.config.js"],
+	"spellcheck/typos": ["_typos.toml", "typos.toml"],
+	prettier: [".prettierignore"],
+};
+
 /** Return the one shared marker vocabulary used to anchor this file kind. */
-export function rootMarkersForFile(filePath: string): readonly string[] {
+export function rootMarkersForFile(
+	filePath: string,
+	runner?: string,
+): readonly string[] {
 	const kind = detectFileKind(path.resolve(filePath));
-	return kind ? (ROOT_MARKERS_BY_KIND[kind] ?? []) : [];
+	const languageMarkers = kind ? (ROOT_MARKERS_BY_KIND[kind] ?? []) : [];
+	const toolMarkers = runner ? (TOOL_MARKERS_BY_RUNNER[runner] ?? []) : [];
+	return toolMarkers.length
+		? [...new Set([...languageMarkers, ...toolMarkers])]
+		: languageMarkers;
 }
 
 function hasProjectMarker(projectRoot: string, marker: string): boolean {

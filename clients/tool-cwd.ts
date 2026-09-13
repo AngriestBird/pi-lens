@@ -191,7 +191,8 @@ function markersFor(
 	if (kind === "lsp") return ctx.rootMarkers ?? [];
 	// #2965: runner fallback uses the language table that also anchors the
 	// dispatch context. A caller-owned table remains an explicit override.
-	if (kind === "runner") return ctx.rootMarkers ?? rootMarkersForFile(file);
+	if (kind === "runner")
+		return ctx.rootMarkers ?? rootMarkersForFile(file, tool);
 	return FORMATTER_MARKERS[tool] ?? [".gitignore"];
 }
 
