@@ -1198,6 +1198,15 @@ and only `lsp_server_spawned` answers "how many servers did we start".
 
 ### Dispatch, runners, formatters, and installer
 
+Project-runner authority has two independent facts: a parsed scan may retire
+findings only when its producer establishes coverage, and a warning-level
+partial scan with no scanned paths is cold even when it returns successfully.
+Opengrep is the only producer with a complete `paths.scanned` report field in
+the current runner set. `clients/opengrep-client.ts` therefore sets
+`analyzed: false` for that partial shape, while a complete empty report keeps
+`analyzed: true`; `clients/project-diagnostics/fresh-fetch.ts` preserves any
+partial findings without granting retirement authority. Do not infer coverage
+from finding paths, duplicate endpoints, dependency targets, or issue paths.
 **Kotlin autofix declines when project ownership is not independently provable (#3000/#3004).** `hasGradleKtlintPlugin` performs a lexical scan over the owning Gradle files, `buildSrc/`, `build-logic/`, and paths named by executable `includeBuild(...)` calls. It blanks comments and strings before accepting a plugin-id match, so prose and string literals do not establish ownership. The build-logic walk is bounded at `GRADLE_BUILD_LOGIC_SCAN_MAX_ENTRIES`; exceeding that bound records `gradle-ktlint-scan-budget-exceeded` once per session and declines because the scan cannot establish ownership. Spotless-owned ktlint also declines because its resolved CLI version cannot be established without executing Gradle. The guard covers the synchronous autofix path only; formatter execution remains a separate seam until #3005's shared tool-agreement change.
 
 **Pip-backed managed tools follow a private-install ladder (#2916).**
