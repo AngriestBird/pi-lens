@@ -130,6 +130,7 @@ const TOOL_MARKERS_BY_RUNNER: Readonly<Record<string, readonly string[]>> = {
 	ruff: ["ruff.toml", ".ruff.toml"],
 	oxlint: [".oxlintrc.json", "oxlint.config.js"],
 	"spellcheck/typos": ["_typos.toml", "typos.toml"],
+	yamllint: ["yamllint.yaml", "yamllint.yml"],
 	prettier: [".prettierignore"],
 };
 

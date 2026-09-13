@@ -160,6 +160,12 @@ describe("resolveToolCwd (#2777)", () => {
 			["_typos.toml", "typos.toml"],
 			".md",
 		],
+		[
+			"yamllint tool-owned markers",
+			"yamllint",
+			["yamllint.yaml", "yamllint.yml"],
+			".yaml",
+		],
 		["Prettier tool-owned marker", "prettier", [".prettierignore"], ".js"],
 	] as const)(
 		"walks from the %s through the real resolver",
