@@ -619,6 +619,12 @@ non-TypeScript row in the test matrix. Record: #2823 r1 (2026-09-09) shipped the
 #2817 dependency re-sync keyed on TypeScript while every server's module graph
 goes stale the same way.
 
+The C++ registry intentionally includes `.cuh` in both its language and
+grammar extension projections and in `KIND_EXTENSIONS.cxx`, although clang's
+driver table omits it. CUDA and HIP projects use `.cuh` for headers; preserve
+the #2986 divergence comment and production-resolution guard when updating the
+clang-derived lists.
+
 Harness scratch directories use `scripts/lib/scratch-dir.mjs`: `claimScratchDir`
 records `owner.pid`, and `sweepScratchDirs` removes only dead owners or
 pid-less directories beyond the age fallback. A cleanup catch is not a
@@ -3498,6 +3504,12 @@ and could never be re-learned. An observation the net could not COMPLETE is
 de-attribution run. One `unclassified-mutating-tool` degradation per tool keeps
 the registry gap visible; a truncated directory watch adds an
 `observed-mutation-dir-cap` tally naming the tool.
+
+When an observed directory mutation settles, `runtime-tool-result.ts` dispatches
+the recorded file paths, never the directory target. Same-turn analysis is
+capped at 32 paths, and each dispatched path carries the tool-result wall budget
+and abort signal. A cap records `observed-mutation-dispatch-cap` with the number
+of paths not dispatched; it must never degrade silently.
 
 A tool that names no file is caught by the `agent_settled` sweep, which runs
 BEFORE the deferred drain and re-baselines after it so pi-lens's own formatter
