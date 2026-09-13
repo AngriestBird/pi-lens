@@ -17,7 +17,6 @@ import { PAST_EOF_STALE_MARKER } from "./diagnostic-line-freshness.js";
 import { STALE_LINE_MARKER } from "./stale-marker.js";
 import type { FormatterOutcomeKind } from "./formatters.js";
 import {
-	applyDispositions,
 	anchorsForDiagnostic,
 	getDisposition,
 	registerWidgetDispositionReconciler,
@@ -296,9 +295,6 @@ export function reconcileWidgetDisposition(
 			source = "";
 		}
 	}
-	const active = new Set(
-		applyDispositions(current, cwd, target.filePath, source),
-	);
 	const normalized: WidgetDiagnostic[] = current.map((diagnostic) => {
 		const { strict, weak } = anchorsForDiagnostic(
 			cwd,
@@ -308,9 +304,8 @@ export function reconcileWidgetDisposition(
 		);
 		const entry = getDisposition(cwd, strict) ?? getDisposition(cwd, weak);
 		if (
-			!active.has(diagnostic) &&
-			(entry?.disposition === "false-positive" ||
-				entry?.disposition === "suppress")
+			entry?.disposition === "false-positive" ||
+			entry?.disposition === "suppress"
 		) {
 			return { ...diagnostic, disposition: entry.disposition, flagged: false };
 		}
@@ -324,7 +319,24 @@ export function reconcileWidgetDisposition(
 			: baseDiagnostic;
 	});
 	const rec = getOrCreate(target.filePath);
+	const writeIndex = admitWidgetDiagnosticsWrite(target.filePath);
+	if (
+		!diagnosticsWriteGuard.shouldWrite(fileMapKey(target.filePath), writeIndex)
+	)
+		return;
 	commitDiagnostics(rec, target.filePath, normalized, Date.now());
+}
+
+/** Reserve a widget write for a producer that has no runtime write index. */
+export function admitWidgetDiagnosticsWrite(
+	filePath: string,
+	writeIndex?: number,
+): number {
+	const key = fileMapKey(filePath);
+	const token = writeIndex ?? diagnosticsWriteGuard.nextToken(key);
+	diagnosticsWriteGuard.shouldWrite(key, token);
+	runnerWriteGuard.shouldWrite(key, token);
+	return token;
 }
 
 registerWidgetDispositionReconciler((cwd, target, disposition) =>

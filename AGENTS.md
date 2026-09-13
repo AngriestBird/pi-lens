@@ -556,6 +556,8 @@ This is the payoff of the two disciplines above: a bounded checklist of defect *
 
 51. **A bookkeeping write wired into a fork-capped gating workflow.** *Screen:* every `GITHUB_TOKEN` write on a `pull_request` trigger is fork-guarded or advisory-listed; metadata upkeep never gates change correctness, and write-required checks use an uncapped trigger. (#2993)
 
+57. **A second writer bypasses a shared durable record’s admission guard.** A widget, cache, mirror, or ledger can be overwritten by an older asynchronous result when one writer commits directly beside the guarded writer. *Screen:* before adding or changing a writer, enumerate every writer by identity, admission time, commit time, and ordering token; route every tokened writer through one admission-ordered seam, and test each admitted-first/committed-first cell, including an older result that commits last. The `diagnosticsWriteGuard`/`runnerWriteGuard` pair in `clients/widget-state.ts` is the guard for widget-record writers; future writers must reserve at admission and validate at commit. A count of zero must not be used as an untyped stand-in for “not computed” (#1616).
+
 The PR-body test corpus may cache only HEAD-tree builds keyed by `cwd` plus the immutable `git rev-parse HEAD` result, with a fixed process-lifetime bound. Working-tree builds remain uncached because their files have no immutable identity.
 
 For process singletons that own live child processes, an incompatible cell must

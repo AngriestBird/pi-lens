@@ -1,9 +1,9 @@
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
 	__testing,
+	admitWidgetDiagnosticsWrite,
 	clearWidgetState,
 	getFileDiagnostics,
 	reconcileWidgetDisposition,
@@ -24,6 +24,7 @@ import {
 	wireDispositionBusEmitter,
 	type PilensDispositionPayload,
 } from "../../clients/disposition-publish.js";
+import { setupTestEnvironment } from "./test-utils.js";
 
 const content = "const bad = true;\n";
 const targetBase = {
@@ -36,11 +37,13 @@ const theme = { fg: (_color: string, value: string) => value };
 
 let tempHome: string;
 let filePath: string;
+let testEnvironment: ReturnType<typeof setupTestEnvironment>;
 
 beforeEach(() => {
-	tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-1616-"));
+	testEnvironment = setupTestEnvironment("pi-lens-1616-");
+	tempHome = testEnvironment.tmpDir;
 	process.env.PI_LENS_HOME = tempHome;
-	filePath = path.join(os.tmpdir(), `pi-lens-1616-${process.pid}.ts`);
+	filePath = path.join(tempHome, "fixture.ts");
 	fs.writeFileSync(filePath, content);
 	process.env.PI_LENS_BUS_PUBLISH = "1";
 	clearWidgetState();
@@ -59,6 +62,7 @@ afterEach(() => {
 	try {
 		fs.unlinkSync(filePath);
 	} catch {}
+	testEnvironment.cleanup();
 });
 
 function recordFinding(): void {
@@ -169,6 +173,98 @@ describe("widget disposition reconciliation (#1616)", () => {
 					}),
 				],
 			}),
+		]);
+	});
+
+	it("marks during an in-flight dispatch and rejects the stale completion", async () => {
+		// Prevents #1616's older dispatch completion from restoring stale counts.
+		recordFinding();
+		admitWidgetDiagnosticsWrite(filePath, 1);
+
+		const staleCompletion = Promise.resolve().then(() =>
+			recordDiagnostics(filePath, [{ ...targetBase, severity: "error" }], 1),
+		);
+		markDisposition(
+			process.cwd(),
+			{ ...targetBase, cwd: process.cwd(), filePath, content },
+			"false-positive",
+		);
+		await staleCompletion;
+
+		expect(__testing.getWidgetStateSnapshot().files[0]).toMatchObject({
+			blocking: 0,
+			errors: 0,
+		});
+		expect(getFileDiagnostics(filePath)).toEqual([
+			expect.objectContaining({ disposition: "false-positive" }),
+		]);
+	});
+
+	it("coalesces two marks in one tick without regressing the latest mark", () => {
+		recordFinding();
+		markDisposition(
+			process.cwd(),
+			{ ...targetBase, cwd: process.cwd(), filePath, content },
+			"false-positive",
+		);
+		markDisposition(
+			process.cwd(),
+			{ ...targetBase, cwd: process.cwd(), filePath, content },
+			"false-positive",
+		);
+
+		expect(__testing.getWidgetStateSnapshot().files[0]).toMatchObject({
+			blocking: 0,
+			errors: 0,
+		});
+		expect(getFileDiagnostics(filePath)).toEqual([
+			expect.objectContaining({ disposition: "false-positive" }),
+		]);
+	});
+
+	it("allows an unrelated later producer to publish its own snapshot", () => {
+		recordFinding();
+		markDisposition(
+			process.cwd(),
+			{ ...targetBase, cwd: process.cwd(), filePath, content },
+			"false-positive",
+		);
+		recordDiagnostics(filePath, [], 2);
+
+		expect(__testing.getWidgetStateSnapshot().files[0]).toMatchObject({
+			blocking: 0,
+			errors: 0,
+		});
+		expect(getFileDiagnostics(filePath)).toEqual([]);
+	});
+
+	it("rejects a host disposition event with a non-string message", () => {
+		// Prevents host payload drift from turning an invalid message into a mark.
+		recordFinding();
+		markDisposition(
+			process.cwd(),
+			{ ...targetBase, cwd: process.cwd(), filePath, content },
+			"false-positive",
+		);
+		clearWidgetState();
+		recordFinding();
+		let subscribe!: (data: unknown) => void;
+		wireWidgetDispositionSubscriber({
+			events: { on: (_channel, handler) => ((subscribe = handler), () => {}) },
+		});
+		subscribe({
+			source: "pi-lens",
+			cwd: process.cwd(),
+			filePath,
+			disposition: "false-positive",
+			message: 42,
+			tool: targetBase.tool,
+			rule: targetBase.rule,
+			line: targetBase.line,
+		});
+
+		expect(getFileDiagnostics(filePath)).toEqual([
+			expect.not.objectContaining({ disposition: "false-positive" }),
 		]);
 	});
 });
