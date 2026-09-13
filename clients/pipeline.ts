@@ -81,6 +81,7 @@ import { HOOK_WALL_BUDGET_MS } from "./hook-budgets.js";
 import type { LedgerHookKey } from "./hook-budgets.js";
 import { enabledAuxiliaryLspServerIds } from "./dispatch/auxiliary-lsp.js";
 import { recordDegradationOnce } from "./degradation-ledger.js";
+import { establishToolAgreement } from "./tool-agreement.js";
 import { dropFindingsForMissingPaths } from "./advisory-provenance.js";
 import {
 	getAutofixPolicyForFile,
@@ -88,7 +89,6 @@ import {
 	getRubocopCommand,
 	hasBiomeConfig,
 	hasDetektConfig,
-	hasGradleKtlintPlugin,
 	hasEslintConfig,
 	hasGolangciConfig,
 	hasKtfmtConfig,
@@ -580,25 +580,7 @@ async function tryRubocopFix(filePath: string, cwd: string): Promise<number> {
 	);
 }
 
-async function tryKtlintFix(
-	filePath: string,
-	cwd: string,
-	dbg: PipelineContext["dbg"],
-): Promise<number> {
-	const gradleOwnership = hasGradleKtlintPlugin(cwd);
-	if (gradleOwnership.kind === "indeterminate") return 0;
-	if (gradleOwnership.kind === "owned" || hasKtlintConfig(cwd)) {
-		const reason =
-			"this project resolves ktlint through Gradle or Spotless, so the version this run used " +
-			"cannot be established from the project — declining to autofix";
-		dbg(`autofix: ktlint declined for ${filePath} (${reason})`);
-		recordDegradationOnce({
-			kind: "autofix-agreement-unavailable",
-			subject: "ktlint:gradle",
-			reason,
-		});
-		return 0;
-	}
+async function tryKtlintFix(filePath: string, cwd: string): Promise<number> {
 	const cmd = await resolveToolCommandWithInstallFallback(cwd, "ktlint");
 	if (!cmd) return 0;
 
@@ -844,6 +826,18 @@ export async function runAutofix(
 
 	for (const toolName of preferredAutofixTools) {
 		attemptedTools.push(toolName);
+		const agreement = establishToolAgreement(toolName, cwd);
+		if (agreement.decision === "decline") {
+			const reason = agreement.reason;
+			dbg(`autofix: ${toolName} declined (${reason})`);
+			recordDegradationOnce({
+				kind: "autofix-agreement-unavailable",
+				subject: agreement.subject,
+				reason,
+			});
+			continue;
+		}
+
 		if (toolName === "ruff") {
 			const ruffReady = ruffClient.isPythonFile(filePath)
 				? await ruffClient.ensureAvailable()
@@ -939,7 +933,7 @@ export async function runAutofix(
 		}
 
 		if (toolName === "ktlint") {
-			const ktlintFixed = await tryKtlintFix(filePath, cwd, dbg);
+			const ktlintFixed = await tryKtlintFix(filePath, cwd);
 			if (ktlintFixed > 0) {
 				fixedCount += ktlintFixed;
 				autofixTools.push(`ktlint:${ktlintFixed}`);
@@ -1290,6 +1284,8 @@ export async function runFormatPhase(
 		// out of `formatFailures` (which requeues). Record it once, distinctly.
 		for (const f of result.formatters) {
 			if (f.outcome !== "unavailable") continue;
+			if (f.error?.includes("project tool agreement could not be established"))
+				continue;
 			const reason = f.error ?? "formatter executable not found";
 			formatUnavailable.push({ formatter: f.name, reason });
 			recordDegradationOnce({
