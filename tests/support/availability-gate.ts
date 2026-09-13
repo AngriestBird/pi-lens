@@ -64,7 +64,8 @@
  *     ToolHandle = ReturnType<typeof makeToolProbe>; Map<string,
  *     ToolHandle>`) is not resolved, so it reads as unrouted. This is another
  *     false negative and the safe direction; type resolution is outside this
- *     test-support analyser;
+ *     test-support analyser. It remains a recorded #1582 residual rather than
+ *     a verdict contract because this result has no explicit decline kind;
  *   * a `POLICY_FACTORY` imported under a renamed binding
  *     (`import { createCwdCachedProbe as ccp }`) does not match the factory's
  *     canonical name and reads as a hand-rolled latch, not a handle. Also a
