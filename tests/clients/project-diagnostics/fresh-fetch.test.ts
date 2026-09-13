@@ -1380,6 +1380,51 @@ describe("fetchFreshProjectDiagnostics (#585)", () => {
 		expect(result.authoritativeCoverage).toEqual([]);
 	});
 
+	// Recurrence: a warning-level report with findings and scanned paths used to
+	// be cached as complete when the fresh-fetch partial branch was bypassed.
+	it("keeps findings visible and skips cache for a partial scanned report", async () => {
+		const client = new OpengrepClient();
+		client.ensureAvailable = vi.fn().mockResolvedValue(true);
+		vi.spyOn(safeSpawn, "safeSpawnAsync").mockImplementationOnce(
+			async (_command, args: string[]) => {
+				const report = args[args.indexOf("--json-output") + 1];
+				// Captured from opengrep 1.25.0 --json with one finding and one
+				// warning-level skipped-file error.
+				fs.writeFileSync(
+					report,
+					'{"results":[{"check_id":"python.lang.security.audit.subprocess-shell-true","path":"a.py","start":{"line":7,"col":3},"end":{"line":7,"col":20},"extra":{"message":"shell=True is dangerous","severity":"ERROR","metadata":{"cwe":["CWE-78: OS Command Injection"]}}}],"errors":[{"level":"warn","message":"skipped 1 file"}],"paths":{"scanned":["a.py"]}}',
+				);
+				return { status: 0, stdout: "", stderr: "" };
+			},
+		);
+		const cacheManager = makeCacheManager();
+		const clients = makeClients();
+		(clients as unknown as { opengrepClient: OpengrepClient }).opengrepClient =
+			client;
+
+		const result = await fetchFreshProjectDiagnostics(
+			cacheManager,
+			tmp,
+			clients,
+		);
+
+		expect(result.partial).toContain("opengrep");
+		expect(result.partialReasons?.opengrep).toBe("skipped 1 file");
+		expect(result.diagnostics).toContainEqual(
+			expect.objectContaining({
+				runner: "opengrep",
+				filePath: path.resolve(tmp, "a.py"),
+				message: "shell=True is dangerous (CWE-78: OS Command Injection)",
+			}),
+		);
+		expect(cacheManager.writeCache).not.toHaveBeenCalledWith(
+			"opengrep",
+			expect.anything(),
+			path.resolve(tmp),
+			expect.anything(),
+		);
+	});
+
 	it("does not cache a dead-code result that did not analyse the root (#2887)", async () => {
 		const cacheManager = makeCacheManager();
 		const clients = makeClients();
