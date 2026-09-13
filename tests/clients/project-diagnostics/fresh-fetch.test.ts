@@ -304,6 +304,38 @@ describe("fetchFreshProjectDiagnostics (#585)", () => {
 		);
 	});
 
+	it("shares one validated explicit root with every heavyweight consumer (#2977)", async () => {
+		const cacheManager = makeCacheManager();
+		const clients = makeClients({ jscpdAvailable: true, madgeAvailable: true });
+		const fakeHome = path.join(tmp, "home", "user");
+		const project = path.join(fakeHome, "repo");
+		fs.mkdirSync(project, { recursive: true });
+
+		const result = await fetchFreshProjectDiagnostics(
+			cacheManager,
+			fakeHome,
+			clients,
+			undefined,
+			{ homeDir: fakeHome, analysisRoot: "repo" },
+		);
+
+		const validated = result.analysisRootValidation;
+		expect(validated).toEqual({
+			state: "safe",
+			root: fs.realpathSync(project),
+		});
+		for (const consumer of [
+			clients.knipClient.analyze,
+			clients.jscpdClient.scan,
+			clients.depChecker.scanProject,
+		]) {
+			expect(consumer).toHaveBeenCalled();
+			const calls = (consumer as unknown as { mock: { calls: unknown[][] } })
+				.mock.calls;
+			expect(calls[0]?.[0]).toBe(fs.realpathSync(project));
+		}
+	});
+
 	it("refuses an explicit analysis root AT or ABOVE home (#2053, #749)", async () => {
 		const cacheManager = makeCacheManager();
 		const clients = makeClients();

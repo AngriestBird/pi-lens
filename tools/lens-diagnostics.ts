@@ -2177,6 +2177,7 @@ async function formatFullMode(
 			details: {
 				mode: "full",
 				analysisRootError: extracted.analysisRootError,
+				analysisRootValidation: extracted.analysisRootValidation,
 			},
 		};
 	}
@@ -2818,7 +2819,12 @@ async function formatFullMode(
 			// #747: true when the fresh fetch refused an at-or-above-$HOME root —
 			// lets a caller distinguish "skipped for safety" from per-analyzer
 			// cold reasons without parsing the text note.
-			analyzersUnsafeRoot: extracted.unsafeRoot ?? false,
+			// This is the fetch seam's explicit-root policy. The cwd walk below is
+			// intentionally separate: it answers a different root question.
+			analyzersUnsafeRoot:
+				extracted.analysisRootValidation?.state === "unsafe" ||
+				extracted.unsafeRoot === true,
+			analysisRootValidation: extracted.analysisRootValidation,
 			// #747: true when the cwd resolved at/above $HOME so the cheap project
 			// scan and the LSP workspace sweep both refused to walk — lets a caller
 			// distinguish "walked nothing for safety" from a genuinely clean sweep.

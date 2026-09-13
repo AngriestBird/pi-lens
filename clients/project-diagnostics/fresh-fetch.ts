@@ -114,6 +114,8 @@ import type { ProjectDiagnostic } from "./types.js";
 import type { FailedProjectAnalyzer } from "./extractors.js";
 
 export interface FreshProjectDiagnosticsResult {
+	/** The single validation result shared by all explicit-root consumers. */
+	analysisRootValidation?: AnalysisRootValidation;
 	diagnostics: ProjectDiagnostic[];
 	/** Extractor ids that actually contributed findings this run. */
 	runners: string[];
@@ -198,6 +200,11 @@ export interface FreshProjectDiagnosticsResult {
 	dispositionSuppressedByLane?: Record<string, number>;
 }
 
+export type AnalysisRootValidation =
+	| { state: "safe"; root: string }
+	| { state: "unsafe"; root: string; reason: string }
+	| { state: "undecided"; root?: string; reason: string };
+
 export interface ProjectRunnerCoverage {
 	runnerId: string;
 	root: string;
@@ -255,6 +262,7 @@ export async function fetchFreshProjectDiagnostics(
 			? cwd
 			: path.resolve(cwd, options.analysisRoot);
 	let analysisRoot: string;
+	let analysisRootValidation: AnalysisRootValidation;
 	if (options.analysisRoot !== undefined) {
 		try {
 			if (!fs.statSync(requestedRoot).isDirectory()) {
@@ -264,12 +272,18 @@ export async function fetchFreshProjectDiagnostics(
 		} catch (error) {
 			const detail = error instanceof Error ? error.message : String(error);
 			const reason = `the explicit analysis root ${requestedRoot} is unavailable or ${detail}`;
+			analysisRootValidation = {
+				state: "undecided",
+				root: requestedRoot,
+				reason,
+			};
 			incrementDegradationCount({
 				kind: "lens-diagnostics-analysis-root-rejected",
 				subject: requestedRoot,
 				reason,
 			});
 			return {
+				analysisRootValidation,
 				diagnostics: [],
 				runners: [],
 				analyzed: [],
@@ -296,24 +310,35 @@ export async function fetchFreshProjectDiagnostics(
 	const unsafeRootReason =
 		"the analysis root resolves at or above the home directory; heavyweight analyzers refuse to walk from there (#747)";
 	const homeRoot = realpathOrResolve(options.homeDir ?? os.homedir());
-	const unsafeExplicitRoot =
-		options.analysisRoot !== undefined &&
-		(!isSameOrWithin(homeRoot, analysisRoot) ||
-			isSameOrWithin(analysisRoot, homeRoot));
-	if (
-		(options.analysisRoot === undefined &&
-			isAtOrAboveHomeDir(analysisRoot, options.homeDir)) ||
-		unsafeExplicitRoot
-	) {
+	if (options.analysisRoot !== undefined) {
+		const unsafeExplicitRoot =
+			!isSameOrWithin(homeRoot, analysisRoot) ||
+			isSameOrWithin(analysisRoot, homeRoot);
+		analysisRootValidation = unsafeExplicitRoot
+			? {
+					state: "unsafe",
+					root: analysisRoot,
+					reason:
+						"explicit analysis root must be strictly contained by the canonical home directory",
+				}
+			: { state: "safe", root: analysisRoot };
+	} else if (isAtOrAboveHomeDir(analysisRoot, options.homeDir)) {
+		analysisRootValidation = {
+			state: "unsafe",
+			root: analysisRoot,
+			reason: unsafeRootReason,
+		};
+	} else {
+		analysisRootValidation = { state: "safe", root: analysisRoot };
+	}
+	if (analysisRootValidation.state !== "safe") {
 		incrementDegradationCount({
 			kind: "lens-diagnostics-analysis-root-rejected",
 			subject: analysisRoot,
-			reason:
-				options.analysisRoot === undefined
-					? unsafeRootReason
-					: "explicit analysis root must be strictly contained by the canonical home directory",
+			reason: analysisRootValidation.reason,
 		});
 		return {
+			analysisRootValidation,
 			diagnostics: [],
 			runners: [],
 			analyzed: [],
@@ -324,7 +349,7 @@ export async function fetchFreshProjectDiagnostics(
 			),
 			failed: [],
 			timings: {},
-			unsafeRoot: true,
+			unsafeRoot: analysisRootValidation.state === "unsafe",
 		};
 	}
 	const diagnostics: ProjectDiagnostic[] = [];
@@ -842,6 +867,7 @@ export async function fetchFreshProjectDiagnostics(
 		const abortedIds = ANALYZER_IDS.filter((id) => !settledIds.has(id));
 		for (const id of abortedIds) pushUnique(cold, id);
 		return {
+			analysisRootValidation,
 			diagnostics,
 			runners,
 			analyzed,
@@ -859,6 +885,7 @@ export async function fetchFreshProjectDiagnostics(
 	}
 
 	return {
+		analysisRootValidation,
 		diagnostics,
 		runners,
 		analyzed,
