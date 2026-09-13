@@ -339,31 +339,21 @@ describe("test-reference shape and placement", () => {
 		);
 		try {
 			mkdirSync(join(fixtureCwd, "tests"), { recursive: true });
-			writeFileSync(
-				join(fixtureCwd, "tests", "short-ids.test.ts"),
-				[
-					'it("F1", () => {});',
-					'it("V3", () => {});',
-					'it("F12", () => {});',
-				].join("\n"),
-			);
-			gitExecFileSync(["init", "-q"], { cwd: fixtureCwd });
-			gitExecFileSync(["add", "tests/short-ids.test.ts"], { cwd: fixtureCwd });
-			gitExecFileSync(
-				[
-					"-c",
-					"user.email=pi-lens-test@example.com",
-					"-c",
-					"user.name=pi-lens-test",
-					"commit",
-					"-qm",
-					"fixture",
-				],
-				{ cwd: fixtureCwd },
-			);
+			const source = [
+				'it("F1", () => {});',
+				'it("V3", () => {});',
+				'it("F12", () => {});',
+			].join("\n");
+			writeFileSync(join(fixtureCwd, "tests", "short-ids.test.ts"), source);
+			const git = (args: string[]) => {
+				if (args[0] === "rev-parse") return "fixture-head\n";
+				if (args[0] === "ls-files") return "tests/short-ids.test.ts\n";
+				if (args[0] === "show") return source;
+				throw new Error(`unexpected git command: ${args.join(" ")}`);
+			};
 			const result = lintPrBody(
 				`${body}\n| Case | Test |\n| --- | --- |\n| A | \`F1\` |\n| B | \`V3\` |\n| C | \`F12\` |`,
-				{ cwd: fixtureCwd },
+				{ cwd: fixtureCwd, git },
 			);
 			expect(result).toEqual({ valid: true, errors: [] });
 		} finally {
