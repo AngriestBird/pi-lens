@@ -13,6 +13,7 @@
  */
 
 import * as nodeFs from "node:fs";
+import * as nodeCrypto from "node:crypto";
 import * as path from "node:path";
 import type { PiLensFlagSource } from "./lens-config.js";
 import {
@@ -332,6 +333,8 @@ export interface PipelineResult {
 	isError: boolean;
 	/** True if file was modified by format/autofix */
 	fileModified: boolean;
+	/** Hash captured after this pipeline's own writes, before analysis awaits. */
+	postWriteStateHash?: string;
 	/** Files modified by pi-lens format/autofix, including side-effect files. */
 	changedFiles?: string[];
 	/** Blocking-only formatted output for turn_end re-surfacing if agent didn't fix */
@@ -1769,6 +1772,25 @@ export async function runPipeline(
 	phase.end("total", { hasOutput: !!output });
 
 	const fileModified = formatChanged || fixedCount > 0;
+	// Capture pipeline-owned bytes before the awaitable LSP/dispatch work. A
+	// third-party write during that work must not become this pipeline's identity.
+	const postWriteStateHash = fileModified
+		? (() => {
+				try {
+					return nodeCrypto
+						.createHash("sha256")
+						.update(nodeFs.readFileSync(filePath))
+						.digest("hex");
+				} catch (error) {
+					recordDegradationOnce({
+						kind: "pipeline-post-write-hash-unavailable",
+						subject: filePath,
+						reason: error instanceof Error ? error.message : String(error),
+					});
+					return undefined;
+				}
+			})()
+		: undefined;
 	const changedFiles = [...piChangedFiles];
 	emitLensAnalysisComplete({
 		cwd,
@@ -1795,6 +1817,7 @@ export async function runPipeline(
 		cascadePromise,
 		isError: false,
 		fileModified,
+		postWriteStateHash,
 		changedFiles,
 		inlineBlockerSummary: dispatchResult.hasBlockers
 			? dispatchResult.blockerOutput.trim() || undefined

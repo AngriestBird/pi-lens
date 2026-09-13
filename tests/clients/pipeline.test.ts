@@ -317,6 +317,12 @@ describe("Pipeline", () => {
 			// "modified".
 			expect(result.output).not.toContain("clean");
 			expect(result.output).toBe("");
+			expect(result.postWriteStateHash).toBe(
+				(await import("node:crypto"))
+					.createHash("sha256")
+					.update(fs.readFileSync(filePath))
+					.digest("hex"),
+			);
 		});
 
 		it("surfaces formatter failures instead of plain clean output", async () => {

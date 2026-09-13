@@ -1040,10 +1040,10 @@ async function dispatchPipelineAnalysis(args: {
 	// already-analysed latch was never set).
 	// The latch identifies the bytes this pipeline actually analysed. A pipeline
 	// that reports no write analysed its input state, even if another writer
-	// changed disk while the await was parked. Only a pipeline-reported write
-	// makes the post-pipeline disk state the analysed identity (#2499).
+	// changed disk while the await was parked. A pipeline-reported write selects
+	// only the identity captured by runPipeline before analysis awaits (#2499).
 	const finalStateHash = result.fileModified
-		? getFileStateHash(filePath)
+		? (result.postWriteStateHash ?? getFileStateHash(filePath))
 		: initialStateHash;
 	lastAnalyzedStateByFile.set(filePath, {
 		turnIndex: runtime.turnIndex,
