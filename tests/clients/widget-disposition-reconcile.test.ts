@@ -74,7 +74,35 @@ function recordFinding(): void {
 	]);
 }
 
+function recordBlockingFinding(): void {
+	recordDiagnostics(filePath, [
+		{
+			...targetBase,
+			severity: "error",
+			semantic: "blocking",
+		},
+	]);
+}
+
 describe("widget disposition reconciliation (#1616)", () => {
+	it("keeps a blocking error counted when only a weak suppress mark exists", () => {
+		// Prevents #1616's weak suppress anchor from hiding a blocking finding.
+		recordBlockingFinding();
+		markDisposition(
+			process.cwd(),
+			{ ...targetBase, cwd: process.cwd(), filePath, content },
+			"suppress",
+		);
+
+		expect(__testing.getWidgetStateSnapshot().files[0]).toMatchObject({
+			blocking: 1,
+			errors: 1,
+		});
+		expect(getFileDiagnostics(filePath)).toEqual([
+			expect.not.objectContaining({ disposition: "suppress" }),
+		]);
+	});
+
 	it("marks false-positive findings suppressed immediately, with a visible bucket", () => {
 		recordFinding();
 		markDisposition(

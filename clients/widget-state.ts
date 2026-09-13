@@ -18,6 +18,7 @@ import { STALE_LINE_MARKER } from "./stale-marker.js";
 import type { FormatterOutcomeKind } from "./formatters.js";
 import {
 	anchorsForDiagnostic,
+	applyDispositions,
 	getDisposition,
 	registerWidgetDispositionReconciler,
 	type Disposition,
@@ -295,6 +296,9 @@ export function reconcileWidgetDisposition(
 			source = "";
 		}
 	}
+	const active = new Set(
+		applyDispositions(current, cwd, target.filePath, source),
+	);
 	const normalized: WidgetDiagnostic[] = current.map((diagnostic) => {
 		const { strict, weak } = anchorsForDiagnostic(
 			cwd,
@@ -304,8 +308,9 @@ export function reconcileWidgetDisposition(
 		);
 		const entry = getDisposition(cwd, strict) ?? getDisposition(cwd, weak);
 		if (
-			entry?.disposition === "false-positive" ||
-			entry?.disposition === "suppress"
+			!active.has(diagnostic) &&
+			(entry?.disposition === "false-positive" ||
+				entry?.disposition === "suppress")
 		) {
 			return { ...diagnostic, disposition: entry.disposition, flagged: false };
 		}
