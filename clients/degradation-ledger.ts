@@ -719,6 +719,7 @@ export type DegradationKind =
 	| "runner-parsed-nothing"
 	/** A duplicate RPC session start was suppressed after its first full pass. */
 	/** A self-drift baseline could not be verified within its available evidence. */
+	| "self-drift-hash-budget-exhausted"
 	| "self-drift-unverifiable"
 	| "session-start-duplicate"
 	/** Incremental word-index churn required an arena re-compaction. */

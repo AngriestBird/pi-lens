@@ -442,6 +442,12 @@ async function statMtimeMs(filePath: string): Promise<number | undefined> {
  * and the record's state is left exactly as it is.
  */
 type SelfDriftVerdict = "drift" | "unchanged" | "unverifiable";
+type SelfDriftUnverifiableReason =
+	| "bound-expired"
+	| "stat-unavailable"
+	| "missing-baseline"
+	| "hash-budget-exhausted"
+	| "hash-unavailable";
 
 /**
  * Confirm a self-axis record against content, not mtime alone.
@@ -474,7 +480,10 @@ async function detectSelfDrift(args: {
 	signal: AbortSignal | undefined;
 	/** Mutable per-sweep hash budget. See {@link SELF_DRIFT_HASH_BUDGET_BYTES}. */
 	budget: { bytesLeft: number; exhausted: boolean };
-}): Promise<SelfDriftVerdict> {
+}): Promise<{
+	verdict: SelfDriftVerdict;
+	unverifiableReason?: SelfDriftUnverifiableReason;
+}> {
 	const boundOptions = (label: string) =>
 		({
 			ms: HOOK_WALL_BUDGET_MS.turn_end,
@@ -491,35 +500,42 @@ async function detectSelfDrift(args: {
 		fs.promises.stat(args.filePath),
 		boundOptions("selfDriftStat"),
 	);
-	if (stat === undefined) return "unverifiable";
+	if (stat === undefined)
+		return { verdict: "unverifiable", unverifiableReason: "stat-unavailable" };
 	const freshness = freshnessFromMtime({
 		mtimeMs: stat.mtimeMs,
 		referenceMs: args.recordedAtMs,
 	});
-	if (freshness.verdict !== "stale") return "unchanged";
+	if (freshness.verdict !== "stale") return { verdict: "unchanged" };
 	// mtime moved past the verdict. Confirm against content before calling it
 	// drift.
-	if (args.recordedSize === undefined) return "unverifiable";
-	if (stat.size !== args.recordedSize) return "drift";
+	if (args.recordedSize === undefined)
+		return { verdict: "unverifiable", unverifiableReason: "missing-baseline" };
+	if (stat.size !== args.recordedSize) return { verdict: "drift" };
 	// Same length. Only the hash can separate a one-character edit from a
 	// `touch`, and a same-length edit is the common shape, not an exotic one.
-	if (args.recordedHash === undefined) return "unverifiable";
+	if (args.recordedHash === undefined)
+		return { verdict: "unverifiable", unverifiableReason: "missing-baseline" };
 	// Defect shape 9: each read is individually bounded, but N blockers in one
 	// turn is an unbounded AGGREGATE read on a hook path. The per-sweep byte
 	// budget bounds the other axis; past it the record is unverifiable, not
 	// drifted.
 	if (stat.size > args.budget.bytesLeft) {
 		args.budget.exhausted = true;
-		return "unverifiable";
+		return {
+			verdict: "unverifiable",
+			unverifiableReason: "hash-budget-exhausted",
+		};
 	}
 	const content = await bounded(
 		fs.promises.readFile(args.filePath),
 		boundOptions("selfDriftHash"),
 	);
-	if (content === undefined) return "unverifiable";
+	if (content === undefined)
+		return { verdict: "unverifiable", unverifiableReason: "hash-unavailable" };
 	args.budget.bytesLeft -= content.byteLength;
 	const hash = createHash("sha256").update(content).digest("hex");
-	return hash === args.recordedHash ? "unchanged" : "drift";
+	return { verdict: hash === args.recordedHash ? "unchanged" : "drift" };
 }
 
 /** Result of {@link collectForwardImportMtimes}. */
@@ -940,40 +956,44 @@ export async function sweepInlineBlockerFreshness(
 				// The outer bound too: an expired one yields `undefined`, and that
 				// means "could not decide", never "changed".
 				const hashBudgetWasExhausted = hashBudget.exhausted;
-				const verdict =
-					(await bounded(
-						detectSelfDrift({
-							filePath: entry.filePath,
-							recordedAtMs: entry.recordedAtMs,
-							recordedSize: entry.recordedSize,
-							recordedHash: entry.recordedHash,
-							signal: options?.signal,
-							budget: hashBudget,
-						}),
-						{
-							ms: HOOK_WALL_BUDGET_MS.turn_end,
-							signal: options?.signal,
-							hook: "turn_end",
-							label: "detectSelfDrift",
-						},
-					)) ?? "unverifiable";
+				const selfDrift = (await bounded(
+					detectSelfDrift({
+						filePath: entry.filePath,
+						recordedAtMs: entry.recordedAtMs,
+						recordedSize: entry.recordedSize,
+						recordedHash: entry.recordedHash,
+						signal: options?.signal,
+						budget: hashBudget,
+					}),
+					{
+						ms: HOOK_WALL_BUDGET_MS.turn_end,
+						signal: options?.signal,
+						hook: "turn_end",
+						label: "detectSelfDrift",
+					},
+				)) ?? {
+					verdict: "unverifiable" as const,
+					unverifiableReason: "bound-expired" as const,
+				};
+				const verdict = selfDrift.verdict;
 				if (verdict === "unverifiable") {
 					// Decide nothing. Leave the record in whatever state it holds.
 					counts.selfUnverifiable += 1;
-					if (
-						entry.recordedSize === undefined ||
-						entry.recordedHash === undefined
-					) {
+					const reason =
+						selfDrift.unverifiableReason ??
+						(hashBudgetWasExhausted || hashBudget.exhausted
+							? "hash-budget-exhausted"
+							: "hash-unavailable");
+					recordDegradationOnce({
+						kind: "self-drift-unverifiable",
+						subject: `inline-blocker:${toRunnerDisplayPath(cwd, entry.filePath)}#${reason}`,
+						reason: `the self-drift check was unverifiable: ${reason}`,
+					});
+					if (reason === "hash-budget-exhausted") {
 						recordDegradationOnce({
-							kind: "self-drift-unverifiable",
-							subject: `inline-blocker:${toRunnerDisplayPath(cwd, entry.filePath)}#missing-baseline`,
-							reason: "the pipeline did not provide a bounded content baseline",
-						});
-					} else if (!hashBudgetWasExhausted && !hashBudget.exhausted) {
-						recordDegradationOnce({
-							kind: "self-drift-unverifiable",
-							subject: `inline-blocker:${toRunnerDisplayPath(cwd, entry.filePath)}#bound-expired`,
-							reason: "the bounded self-drift check did not complete",
+							kind: "self-drift-hash-budget-exhausted",
+							subject: `inline-blocker:${toRunnerDisplayPath(cwd, entry.filePath)}`,
+							reason: "the aggregate self-drift hash budget was exhausted",
 						});
 					}
 					if (selfDriftDemoted) counts.alreadyStale += 1;

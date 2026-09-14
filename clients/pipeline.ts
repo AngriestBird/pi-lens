@@ -1552,6 +1552,21 @@ export async function runPipeline(
 	};
 	const { dispatchLintWithResult, computeCascadeForFile } =
 		await loadDispatchIntegration();
+	// Capture the bytes the pipeline presents to analysis before the dispatch
+	// promise can yield to another writer. The blocker evidence below belongs to
+	// this analysis input, not to whatever happens to be on disk when the whole
+	// pipeline returns.
+	const inlineBlockerFileContent = fileContent
+		? (() => {
+				const content = Buffer.from(fileContent, "utf8");
+				return content.byteLength <= 2 * 1024 * 1024
+					? {
+							size: content.byteLength,
+							sha256: createHash("sha256").update(content).digest("hex"),
+						}
+					: undefined;
+			})()
+		: undefined;
 	const dispatchResult = await dispatchLintWithResult(
 		filePath,
 		cwd,
@@ -1872,17 +1887,8 @@ export async function runPipeline(
 						source: "autofix",
 					}
 				: undefined,
-		inlineBlockerFileContent:
-			dispatchResult.hasBlockers && fileContent !== undefined
-				? (() => {
-						const content = Buffer.from(fileContent, "utf8");
-						return content.byteLength <= 2 * 1024 * 1024
-							? {
-									size: content.byteLength,
-									sha256: createHash("sha256").update(content).digest("hex"),
-								}
-							: undefined;
-					})()
-				: undefined,
+		inlineBlockerFileContent: dispatchResult.hasBlockers
+			? inlineBlockerFileContent
+			: undefined,
 	};
 }
