@@ -827,11 +827,16 @@ describe("#2464 — the observed-settle path also dispatches pipeline analysis",
 			// after-write stamp is gated on the bytes actually having moved.
 			const formattingPipeline = (async () => {
 				fs.appendFileSync(filePath, "\n// formatted\n");
+				const postWriteStateHash = (await import("node:crypto"))
+					.createHash("sha256")
+					.update(fs.readFileSync(filePath))
+					.digest("hex");
 				return {
 					output: "",
 					hasBlockers: false,
 					isError: false,
 					fileModified: true,
+					postWriteStateHash,
 					changedFiles: [filePath],
 				};
 			}) as never;

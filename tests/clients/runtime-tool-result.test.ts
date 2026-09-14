@@ -1562,6 +1562,50 @@ describe("runtime-tool-result inline behavior warnings", () => {
 		}
 	});
 
+	it("does not stamp an ambiguous side-effect write as the target identity (#2499 HIGH)", async () => {
+		const { runPipeline } = await import("../../clients/pipeline.js");
+		const env = setupTestEnvironment("pi-lens-2499-ambiguous-write-");
+		try {
+			const filePath = createTempFile(env.tmpDir, "target.ts", "const x = 1;\n");
+			vi.mocked(runPipeline).mockResolvedValue({
+				output: "",
+				hasBlockers: false,
+				isError: false,
+				fileModified: true,
+				// A side-effect file changed, but the target write has no owned hash.
+				changedFiles: [path.join(env.tmpDir, "helper.rs")],
+			});
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			const noteAfterWriteHash = vi.spyOn(
+				runtime.partialApplyRecords,
+				"noteAfterWriteHash",
+			);
+
+			await handleToolResult({
+				event: {
+					toolName: "edit",
+					input: {
+						path: filePath,
+						edits: [{ oldText: "const x = 1;", newText: "const x = 2;" }],
+					},
+					content: [],
+				},
+				getFlag: () => false,
+				dbg: () => {},
+				runtime,
+				cacheManager: new CacheManager(false),
+				resetLSPService: () => {},
+				agentBehaviorRecord: () => [],
+				formatBehaviorWarnings: () => "",
+			} as any);
+
+			expect(noteAfterWriteHash).not.toHaveBeenCalled();
+		} finally {
+			env.cleanup();
+		}
+	});
+
 	it("runs bash synthetic writes immediately and returns authoritative content", async () => {
 		const { runPipeline } = await import("../../clients/pipeline.js");
 		const env = setupTestEnvironment("pi-lens-runtime-tool-bash-write-");

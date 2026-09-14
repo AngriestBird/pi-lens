@@ -1042,13 +1042,16 @@ async function dispatchPipelineAnalysis(args: {
 	// that reports no write analysed its input state, even if another writer
 	// changed disk while the await was parked. A pipeline-reported write selects
 	// only the identity captured by runPipeline before analysis awaits (#2499).
-	const finalStateHash = result.fileModified
-		? (result.postWriteStateHash ?? getFileStateHash(filePath))
-		: initialStateHash;
-	lastAnalyzedStateByFile.set(filePath, {
-		turnIndex: runtime.turnIndex,
-		stateHash: finalStateHash,
-	});
+	const pipelineOwnedWriteHash = result.fileModified
+		? result.postWriteStateHash
+		: undefined;
+	const finalStateHash = pipelineOwnedWriteHash ?? initialStateHash;
+	if (!result.fileModified || pipelineOwnedWriteHash !== undefined) {
+		lastAnalyzedStateByFile.set(filePath, {
+			turnIndex: runtime.turnIndex,
+			stateHash: finalStateHash,
+		});
+	}
 
 	// #2402: pi-lens' own immediate format/autofix may have rewritten the file
 	// after the native edit was recorded by the caller. Stamp the post-pipeline
@@ -1058,7 +1061,7 @@ async function dispatchPipelineAnalysis(args: {
 	// `initialStateHash` IS the post-write hash at both call sites — the
 	// classified chain passes `postWriteStateHash` verbatim, the observed path
 	// passes the same pre-settle digest.
-	if (result.fileModified) {
+	if (pipelineOwnedWriteHash !== undefined) {
 		for (const pair of nativeAppliedPairs) {
 			runtime.partialApplyRecords.noteAfterWriteHash(
 				filePath,

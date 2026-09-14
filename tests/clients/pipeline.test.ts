@@ -288,6 +288,26 @@ describe("Pipeline", () => {
 				}
 				return result;
 			};
+			vi.mocked(dispatchLintWithResult).mockImplementationOnce(async () => {
+				// A third-party writer can change the file while dispatch awaits. The
+				// pipeline identity must remain the formatter's earlier bytes.
+				fs.writeFileSync(filePath, "third-party write\n");
+				return {
+					diagnostics: [],
+					blockers: [],
+					warnings: [],
+					baselineWarningCount: 0,
+					fixed: [],
+					resolvedCount: 0,
+					output: "",
+					blockerOutput: "",
+					hasBlockers: false,
+				};
+			});
+			const formatterStateHash = (await import("node:crypto"))
+				.createHash("sha256")
+				.update("const x = 1;\n")
+				.digest("hex");
 
 			const result = await runPipeline(
 				createMockContext(filePath, {
@@ -317,12 +337,7 @@ describe("Pipeline", () => {
 			// "modified".
 			expect(result.output).not.toContain("clean");
 			expect(result.output).toBe("");
-			expect(result.postWriteStateHash).toBe(
-				(await import("node:crypto"))
-					.createHash("sha256")
-					.update(fs.readFileSync(filePath))
-					.digest("hex"),
-			);
+			expect(result.postWriteStateHash).toBe(formatterStateHash);
 		});
 
 		it("surfaces formatter failures instead of plain clean output", async () => {

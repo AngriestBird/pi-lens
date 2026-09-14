@@ -29,7 +29,10 @@ import {
 	type CodeQualityWarningRecord,
 } from "./code-quality-warnings.js";
 import type { BiomeClient } from "./biome-client.js";
-import { recordDiagnostics } from "./widget-state.js";
+import {
+	admitWidgetDiagnosticsWrite,
+	recordDiagnostics,
+} from "./widget-state.js";
 import { getDiagnosticLogger } from "./diagnostic-logger.js";
 import { getDiagnosticTracker } from "./diagnostic-tracker.js";
 import { loadDispatchIntegration } from "./dispatch/lazy.js";
@@ -79,6 +82,7 @@ import { HOOK_WALL_BUDGET_MS } from "./hook-budgets.js";
 import type { LedgerHookKey } from "./hook-budgets.js";
 import { enabledAuxiliaryLspServerIds } from "./dispatch/auxiliary-lsp.js";
 import { recordDegradationOnce } from "./degradation-ledger.js";
+import { establishToolAgreement } from "./tool-agreement.js";
 import { dropFindingsForMissingPaths } from "./advisory-provenance.js";
 import {
 	getAutofixPolicyForFile,
@@ -86,7 +90,6 @@ import {
 	getRubocopCommand,
 	hasBiomeConfig,
 	hasDetektConfig,
-	hasGradleKtlintPlugin,
 	hasEslintConfig,
 	hasGolangciConfig,
 	hasKtfmtConfig,
@@ -580,25 +583,7 @@ async function tryRubocopFix(filePath: string, cwd: string): Promise<number> {
 	);
 }
 
-async function tryKtlintFix(
-	filePath: string,
-	cwd: string,
-	dbg: PipelineContext["dbg"],
-): Promise<number> {
-	const gradleOwnership = hasGradleKtlintPlugin(cwd);
-	if (gradleOwnership.kind === "indeterminate") return 0;
-	if (gradleOwnership.kind === "owned" || hasKtlintConfig(cwd)) {
-		const reason =
-			"this project resolves ktlint through Gradle or Spotless, so the version this run used " +
-			"cannot be established from the project — declining to autofix";
-		dbg(`autofix: ktlint declined for ${filePath} (${reason})`);
-		recordDegradationOnce({
-			kind: "autofix-agreement-unavailable",
-			subject: "ktlint:gradle",
-			reason,
-		});
-		return 0;
-	}
+async function tryKtlintFix(filePath: string, cwd: string): Promise<number> {
 	const cmd = await resolveToolCommandWithInstallFallback(cwd, "ktlint");
 	if (!cmd) return 0;
 
@@ -844,6 +829,18 @@ export async function runAutofix(
 
 	for (const toolName of preferredAutofixTools) {
 		attemptedTools.push(toolName);
+		const agreement = establishToolAgreement(toolName, cwd);
+		if (agreement.decision === "decline") {
+			const reason = agreement.reason;
+			dbg(`autofix: ${toolName} declined (${reason})`);
+			recordDegradationOnce({
+				kind: "autofix-agreement-unavailable",
+				subject: agreement.subject,
+				reason,
+			});
+			continue;
+		}
+
 		if (toolName === "ruff") {
 			const ruffReady = ruffClient.isPythonFile(filePath)
 				? await ruffClient.ensureAvailable()
@@ -939,7 +936,7 @@ export async function runAutofix(
 		}
 
 		if (toolName === "ktlint") {
-			const ktlintFixed = await tryKtlintFix(filePath, cwd, dbg);
+			const ktlintFixed = await tryKtlintFix(filePath, cwd);
 			if (ktlintFixed > 0) {
 				fixedCount += ktlintFixed;
 				autofixTools.push(`ktlint:${ktlintFixed}`);
@@ -1290,6 +1287,8 @@ export async function runFormatPhase(
 		// out of `formatFailures` (which requeues). Record it once, distinctly.
 		for (const f of result.formatters) {
 			if (f.outcome !== "unavailable") continue;
+			if (f.error?.includes("project tool agreement could not be established"))
+				continue;
 			const reason = f.error ?? "formatter executable not found";
 			formatUnavailable.push({ formatter: f.name, reason });
 			recordDegradationOnce({
@@ -1406,6 +1405,7 @@ export async function runPipeline(
 ): Promise<PipelineResult> {
 	const { filePath, cwd, toolName, getFlag, getFlagSource, dbg } = ctx;
 	const { getFormatService } = deps;
+	admitWidgetDiagnosticsWrite(filePath, ctx.telemetry?.writeIndex);
 
 	const phase = createPhaseTracker(toolName, filePath);
 	const pipelineStart = Date.now();
@@ -1527,6 +1527,30 @@ export async function runPipeline(
 		attemptedTools,
 		skipReason: autofixSkipReason,
 	});
+
+	// Capture the target's bytes immediately after pi-lens writes and before any
+	// awaitable LSP or dispatch work. `fileModified` also covers side-effect
+	// files, so target membership is the discriminator for pipeline ownership
+	// (#2499).
+	const fileModified = formatChanged || fixedCount > 0;
+	const targetFileModified = piChangedFiles.has(path.resolve(filePath));
+	const postWriteStateHash = fileModified && targetFileModified
+		? (() => {
+				try {
+					return nodeCrypto
+						.createHash("sha256")
+						.update(nodeFs.readFileSync(filePath))
+						.digest("hex");
+				} catch (error) {
+					recordDegradationOnce({
+						kind: "pipeline-post-write-hash-unavailable",
+						subject: filePath,
+						reason: error instanceof Error ? error.message : String(error),
+					});
+					return undefined;
+				}
+			})()
+		: undefined;
 
 	// --- 4. LSP file sync ---
 	// Sync once with final post-format/post-fix content so dispatch and cascade
@@ -1771,26 +1795,6 @@ export async function runPipeline(
 
 	phase.end("total", { hasOutput: !!output });
 
-	const fileModified = formatChanged || fixedCount > 0;
-	// Capture pipeline-owned bytes before the awaitable LSP/dispatch work. A
-	// third-party write during that work must not become this pipeline's identity.
-	const postWriteStateHash = fileModified
-		? (() => {
-				try {
-					return nodeCrypto
-						.createHash("sha256")
-						.update(nodeFs.readFileSync(filePath))
-						.digest("hex");
-				} catch (error) {
-					recordDegradationOnce({
-						kind: "pipeline-post-write-hash-unavailable",
-						subject: filePath,
-						reason: error instanceof Error ? error.message : String(error),
-					});
-					return undefined;
-				}
-			})()
-		: undefined;
 	const changedFiles = [...piChangedFiles];
 	emitLensAnalysisComplete({
 		cwd,
