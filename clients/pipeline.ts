@@ -13,6 +13,7 @@
  */
 
 import * as nodeFs from "node:fs";
+import * as nodeCrypto from "node:crypto";
 import * as path from "node:path";
 import type { PiLensFlagSource } from "./lens-config.js";
 import {
@@ -335,6 +336,8 @@ export interface PipelineResult {
 	isError: boolean;
 	/** True if file was modified by format/autofix */
 	fileModified: boolean;
+	/** Hash captured after this pipeline's own writes, before analysis awaits. */
+	postWriteStateHash?: string;
 	/** Files modified by pi-lens format/autofix, including side-effect files. */
 	changedFiles?: string[];
 	/** Blocking-only formatted output for turn_end re-surfacing if agent didn't fix */
@@ -1525,6 +1528,31 @@ export async function runPipeline(
 		skipReason: autofixSkipReason,
 	});
 
+	// Capture the target's bytes immediately after pi-lens writes and before any
+	// awaitable LSP or dispatch work. `fileModified` also covers side-effect
+	// files, so target membership is the discriminator for pipeline ownership
+	// (#2499).
+	const fileModified = formatChanged || fixedCount > 0;
+	const targetFileModified = piChangedFiles.has(path.resolve(filePath));
+	const postWriteStateHash =
+		fileModified && targetFileModified
+			? (() => {
+					try {
+						return nodeCrypto
+							.createHash("sha256")
+							.update(nodeFs.readFileSync(filePath))
+							.digest("hex");
+					} catch (error) {
+						recordDegradationOnce({
+							kind: "pipeline-post-write-hash-unavailable",
+							subject: filePath,
+							reason: error instanceof Error ? error.message : String(error),
+						});
+						return undefined;
+					}
+				})()
+			: undefined;
+
 	// --- 4. LSP file sync ---
 	// Sync once with final post-format/post-fix content so dispatch and cascade
 	// diagnostics do not observe stale pre-format text.
@@ -1768,7 +1796,6 @@ export async function runPipeline(
 
 	phase.end("total", { hasOutput: !!output });
 
-	const fileModified = formatChanged || fixedCount > 0;
 	const changedFiles = [...piChangedFiles];
 	emitLensAnalysisComplete({
 		cwd,
@@ -1795,6 +1822,7 @@ export async function runPipeline(
 		cascadePromise,
 		isError: false,
 		fileModified,
+		postWriteStateHash,
 		changedFiles,
 		inlineBlockerSummary: dispatchResult.hasBlockers
 			? dispatchResult.blockerOutput.trim() || undefined

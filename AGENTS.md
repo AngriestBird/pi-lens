@@ -281,6 +281,10 @@ and PR language; detailed historical examples are in `HISTORY.md`.
 
 ### Dispatch, runners, formatters, and installers
 
+- The analysed-state latch records a pipeline-owned target hash captured after
+  pi-lens writes and before LSP or dispatch awaits. `fileModified` also covers
+  side-effect files, so `postWriteStateHash` is the ownership discriminator;
+  an absent hash must not stamp the target with later disk bytes (#2499).
 - `RUNNERS` declarations include file kinds. Runner selection is gated by file
   kind and anchored at the file's language root, not by dispatch-root config or
   declaration order. Runner children use `resolveToolCwd` with launcher markers.
