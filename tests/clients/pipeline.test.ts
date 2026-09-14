@@ -8,6 +8,7 @@
  * - dispatchLintWithResult
  */
 
+import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -282,6 +283,50 @@ describe("Pipeline", () => {
 			}),
 			{ projectRoot: tmpDir },
 		);
+	});
+
+	it("binds blocker content to the pre-dispatch analysis bytes", async () => {
+		const filePath = createTempFile(
+			tmpDir,
+			"blocker-baseline.ts",
+			"const x = 1;\n",
+		);
+		const diagnostic = {
+			id: "blocker",
+			message: "bad code",
+			filePath,
+			severity: "error" as const,
+			source: "test",
+			tool: "ast-grep",
+			semantic: "blocking" as const,
+			line: 1,
+			column: 1,
+		};
+		vi.mocked(dispatchLintWithResult).mockImplementationOnce(async () => {
+			// Model a writer that runs while the analysis promise is suspended.
+			fs.writeFileSync(filePath, "const x = 2;\n");
+			return {
+				diagnostics: [diagnostic],
+				blockers: [diagnostic],
+				warnings: [],
+				baselineWarningCount: 0,
+				fixed: [],
+				resolvedCount: 0,
+				output: "blocked",
+				blockerOutput: "blocked",
+				hasBlockers: true,
+			};
+		});
+
+		const result = await runPipeline(
+			createMockContext(filePath),
+			createMockDeps(),
+		);
+
+		expect(result.inlineBlockerFileContent).toEqual({
+			size: Buffer.byteLength("const x = 1;\n"),
+			sha256: createHash("sha256").update("const x = 1;\n").digest("hex"),
+		});
 	});
 
 	describe("Format phase", () => {
