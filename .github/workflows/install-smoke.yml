@@ -75,6 +75,7 @@ on:
   # every pre-existing job) -- the full os x pm x pi-install matrices stay
   # push/nightly/dispatch-only, unchanged from before this lane existed.
   pull_request:
+    branches: [master]
     paths: *install-smoke-paths
 
 # A merge made with GITHUB_TOKEN suppresses its push event. Replayed
