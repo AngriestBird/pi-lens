@@ -143,7 +143,10 @@ export interface RunnerDefinition {
 }
 
 /** Closed telemetry taxonomy for expected runner skips. */
-export const RUNNER_SKIP_REASONS = ["no-files-matched"] as const;
+export const RUNNER_SKIP_REASONS = [
+	"no-files-matched",
+	"configured-non-biome-linter",
+] as const;
 export type RunnerSkipReason = (typeof RUNNER_SKIP_REASONS)[number];
 
 /** Runtime guard for untyped/plugin-provided runner results. */
