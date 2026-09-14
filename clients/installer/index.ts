@@ -4716,8 +4716,9 @@ async function stripExtractedArchiveRoot(
 ): Promise<boolean> {
 	for (let i = 0; i < components; i++) {
 		const entries = await fs.readdir(dir, { withFileTypes: true });
-		if (entries.length !== 1 || !entries[0].isDirectory()) return false;
-		const root = path.join(dir, entries[0].name);
+		const [entry] = entries;
+		if (entries.length !== 1 || !entry?.isDirectory()) return false;
+		const root = path.join(dir, entry.name);
 		for (const child of await fs.readdir(root))
 			await fs.rename(path.join(root, child), path.join(dir, child));
 		await fs.rm(root, { recursive: true, force: true });
