@@ -1566,7 +1566,11 @@ describe("runtime-tool-result inline behavior warnings", () => {
 		const { runPipeline } = await import("../../clients/pipeline.js");
 		const env = setupTestEnvironment("pi-lens-2499-ambiguous-write-");
 		try {
-			const filePath = createTempFile(env.tmpDir, "target.ts", "const x = 1;\n");
+			const filePath = createTempFile(
+				env.tmpDir,
+				"target.ts",
+				"const x = 1;\n",
+			);
 			vi.mocked(runPipeline).mockResolvedValue({
 				output: "",
 				hasBlockers: false,

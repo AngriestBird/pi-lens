@@ -1534,23 +1534,24 @@ export async function runPipeline(
 	// (#2499).
 	const fileModified = formatChanged || fixedCount > 0;
 	const targetFileModified = piChangedFiles.has(path.resolve(filePath));
-	const postWriteStateHash = fileModified && targetFileModified
-		? (() => {
-				try {
-					return nodeCrypto
-						.createHash("sha256")
-						.update(nodeFs.readFileSync(filePath))
-						.digest("hex");
-				} catch (error) {
-					recordDegradationOnce({
-						kind: "pipeline-post-write-hash-unavailable",
-						subject: filePath,
-						reason: error instanceof Error ? error.message : String(error),
-					});
-					return undefined;
-				}
-			})()
-		: undefined;
+	const postWriteStateHash =
+		fileModified && targetFileModified
+			? (() => {
+					try {
+						return nodeCrypto
+							.createHash("sha256")
+							.update(nodeFs.readFileSync(filePath))
+							.digest("hex");
+					} catch (error) {
+						recordDegradationOnce({
+							kind: "pipeline-post-write-hash-unavailable",
+							subject: filePath,
+							reason: error instanceof Error ? error.message : String(error),
+						});
+						return undefined;
+					}
+				})()
+			: undefined;
 
 	// --- 4. LSP file sync ---
 	// Sync once with final post-format/post-fix content so dispatch and cascade
