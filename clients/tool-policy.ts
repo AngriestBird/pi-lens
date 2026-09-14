@@ -1897,17 +1897,26 @@ export function getPreferredAutofixTools(
 	return getAutofixPolicyForFile(filePath, context)?.preferredTools ?? [];
 }
 
-const ESLINT_CONFIGS = [
+// Flat-config filenames resolve like ESLint itself: upward from cwd without
+// stopping at an intermediate package.json (#3017, shape 39). Legacy
+// `.eslintrc.*` names and the `package.json#eslintConfig` field keep the
+// historic per-package boundary below.
+const ESLINT_FLAT_CONFIGS = [
+	"eslint.config.js",
+	"eslint.config.mjs",
+	"eslint.config.cjs",
+	"eslint.config.ts",
+	"eslint.config.mts",
+	"eslint.config.cts",
+];
+
+const ESLINT_LEGACY_CONFIGS = [
 	".eslintrc",
 	".eslintrc.js",
 	".eslintrc.cjs",
 	".eslintrc.json",
 	".eslintrc.yaml",
 	".eslintrc.yml",
-	"eslint.config.js",
-	"eslint.config.mjs",
-	"eslint.config.cjs",
-	"eslint.config.ts",
 ];
 
 function* walkUpDirsUntilPackageJson(cwd: string): Generator<string> {
@@ -1967,8 +1976,18 @@ export function hasNearestPackageJsonField(
 }
 
 export function hasEslintConfig(cwd: string): boolean {
+	// Flat configs mirror ESLint's own discovery: every ancestor dir up to
+	// the filesystem root, ignoring intermediate package.json boundaries, so
+	// a monorepo root config stays visible from inside a nested package.
+	for (const dir of walkUpDirs(cwd)) {
+		for (const cfg of ESLINT_FLAT_CONFIGS) {
+			if (fs.existsSync(path.join(dir, cfg))) return true;
+		}
+	}
+	// Legacy `.eslintrc.*` and `package.json#eslintConfig` keep per-package
+	// semantics: the walk stops at the nearest package.json.
 	for (const dir of walkUpDirsUntilPackageJson(cwd)) {
-		for (const cfg of ESLINT_CONFIGS) {
+		for (const cfg of ESLINT_LEGACY_CONFIGS) {
 			if (fs.existsSync(path.join(dir, cfg))) return true;
 		}
 		const pkgPath = path.join(dir, "package.json");
@@ -3048,7 +3067,10 @@ const OXLINT_CONFIGS = [
 ];
 
 export function hasOxlintConfig(cwd: string): boolean {
-	for (const dir of walkUpDirsUntilPackageJson(cwd)) {
+	// Oxlint auto-discovers the nearest config by file location, so the walk
+	// ignores intermediate package.json boundaries just like the flat
+	// ESLint branch above (#3017).
+	for (const dir of walkUpDirs(cwd)) {
 		for (const cfg of OXLINT_CONFIGS) {
 			if (fs.existsSync(path.join(dir, cfg))) return true;
 		}
