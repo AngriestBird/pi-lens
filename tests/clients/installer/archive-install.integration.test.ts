@@ -2,6 +2,7 @@ import { EventEmitter } from "node:events";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { removeTempDirSync } from "../test-utils.js";
 
 const HOME = vi.hoisted(() => {
 	const nodeFs = require("node:fs") as typeof import("node:fs");
@@ -70,6 +71,10 @@ vi.mock("../../../clients/sessionstart-logger.js", () => ({
 import { ensureTool } from "../../../clients/installer/index.js";
 
 afterAll(() => {
+	// #2912: this module-scoped HOME is a real /tmp fixture, including the
+	// installer's data and log trees. Remove the whole root so archive coverage
+	// cannot leave a top-level pi-lens-3020-* entry for hygiene to report.
+	removeTempDirSync(HOME);
 	delete process.env.PI_LENS_TEST_PLATFORM;
 });
 
