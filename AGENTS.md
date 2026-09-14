@@ -223,6 +223,12 @@ and PR language; detailed historical examples are in `HISTORY.md`.
 - `clients/language-registry.ts` is the identity source for language ids,
   extensions, filenames, file kinds, LSP ids, and grammars. Consumers project
   from it; they do not maintain parallel language tables.
+- Agent-facing advisory text resolves names through `resolveLensToolName` with
+  the delivery host: pi uses `piName`, and MCP uses `mcpName` from
+  `TOOL_REGISTRY`. Known tools without a host mapping resolve to `undefined`,
+  so callers omit or rephrase them; pi-only rows require
+  `PI_ONLY_TOOL_REASONS`. Do not add a second name map or hard-code a pi tool
+  name in advisory output (#2535).
 - `clients/config-core/` owns schema validation, normalization, merging,
   provenance, deny precedence, merge strategies, trust-gated process specs,
   and bounded migration records. Existing LSP, global, and project loaders
