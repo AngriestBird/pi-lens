@@ -571,7 +571,9 @@ const RESIDUALS: ReadonlyArray<{
 const MEMBER_SPOOF_SOURCE = `
 	import { createCwdCachedProbe } from "./dispatch/runners/utils/runner-helpers.js";
 	import { safeSpawnAsync } from "./safe-spawn.js";
-	const shims = { createCwdCachedProbe: (x: string) => x };
+	const shims = {
+		createCwdCachedProbe: (_x: string) => new Map<string, Promise<boolean>>(),
+	};
 	function makeToolProbe(cmd: string) {
 		return createCwdCachedProbe(
 			(cwd) => safeSpawnAsync(cmd, ["--version"], { timeout: 5000, cwd }),
