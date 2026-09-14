@@ -39,6 +39,33 @@ import {
 	wireDiagnosticsBusEmitter,
 } from "../../clients/diagnostics-publish.js";
 
+vi.mock("../../clients/safe-spawn.js", async (importOriginal) => {
+	const actual =
+		await importOriginal<typeof import("../../clients/safe-spawn.js")>();
+	return {
+		...actual,
+		safeSpawnAsync: vi.fn(
+			async (
+				command: string,
+				args: readonly string[],
+				options?: Parameters<typeof actual.safeSpawnAsync>[2],
+			) => {
+				if (command === "cargo" && args[0] === "--version") {
+					return { stdout: "cargo 1.82.0", stderr: "", status: 0 };
+				}
+				if (command === "cargo" && args[0] === "clippy") {
+					fs.writeFileSync(
+						path.join(options?.cwd ?? "", "src", "helper.rs"),
+						"pub fn helper() { 1 + 1; }\n",
+					);
+					return { stdout: "", stderr: "", status: 0 };
+				}
+				return actual.safeSpawnAsync(command, [...args], options);
+			},
+		),
+	};
+});
+
 // Mock the dispatch integration to avoid side effects
 vi.mock("../../clients/dispatch/integration.js", () => ({
 	dispatchLintWithResult: vi.fn(),
@@ -120,6 +147,45 @@ describe("Pipeline", () => {
 			...overrides,
 		};
 	}
+
+	it("leaves the post-write identity absent when autofix changes only a side-effect file", async () => {
+		// Regression #2499 F1: `fileModified` aggregates side-effect writes, but
+		// `postWriteStateHash` must identify only bytes owned by this pipeline for
+		// the target file. The real runPipeline and Rust autofix path are used; the
+		// subprocess boundary supplies the deterministic side-effect write.
+		const crateDir = path.join(tmpDir, "crate");
+		const srcDir = path.join(crateDir, "src");
+		fs.mkdirSync(srcDir, { recursive: true });
+		fs.writeFileSync(
+			path.join(crateDir, "Cargo.toml"),
+			'[package]\nname = "fixture"\nversion = "0.1.0"\nedition = "2021"\n',
+		);
+		const filePath = path.join(srcDir, "main.rs");
+		fs.writeFileSync(filePath, "mod helper;\nfn main() {}\n");
+		fs.writeFileSync(path.join(srcDir, "helper.rs"), "pub fn helper() {}\n");
+		vi.mocked(dispatchLintWithResult).mockResolvedValue({
+			diagnostics: [],
+			blockers: [],
+			warnings: [],
+			baselineWarningCount: 0,
+			fixed: [],
+			resolvedCount: 0,
+			output: "",
+			blockerOutput: "",
+			hasBlockers: false,
+		});
+
+		const targetBefore = fs.readFileSync(filePath, "utf-8");
+		const result = await runPipeline(
+			createMockContext(filePath),
+			createMockDeps({ getFormatService: () => ({}) as any }),
+		);
+
+		expect(result.fileModified).toBe(true);
+		expect(result.changedFiles).toEqual([path.join(srcDir, "helper.rs")]);
+		expect(fs.readFileSync(filePath, "utf-8")).toBe(targetBefore);
+		expect(result.postWriteStateHash).toBeUndefined();
+	});
 
 	it("project config disables format and autofix while preserving diagnostics", async () => {
 		fs.writeFileSync(
