@@ -450,9 +450,23 @@ describe("#2944 every runner's spawn-marker set names the build its command runs
 				.children()
 				.find((node) => node.field("key")?.text() === "command")!
 				.field("value")!;
-			const launchers = new Set(
-				commands(command).map((command) => path.win32.basename(command)),
+			// The launcher escape only applies to a command with a
+			// path-relative alternative (`./gradlew`, ENOENT without cwd in its
+			// own directory) -- the wrapper IS the build definition there. A
+			// bare PATH binary (`mvn`, `cargo`, `mix`, ...) has no such
+			// alternative, so its basename is not evidence of anything: it is
+			// the same string wherever the command runs and anchors no
+			// directory. Gating on "any alternative", not "every alternative",
+			// is what keeps gradle's non-separator win32 alternative
+			// (`gradlew.bat`) inside the escape once the Linux alternative
+			// (`./gradlew`) has opened it.
+			const commandAlternatives = commands(command);
+			const hasPathRelativeLauncher = commandAlternatives.some((alt) =>
+				/[/\\]/.test(alt),
 			);
+			const launchers = hasPathRelativeLauncher
+				? new Set(commandAlternatives.map((alt) => path.win32.basename(alt)))
+				: new Set<string>();
 			const markers = config.spawnCwdMarkers ?? config.configFiles;
 			if (
 				markers.length === 0 ||
