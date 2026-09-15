@@ -39,6 +39,20 @@ const stubPath = join(here, "fixtures", "classify-ci-failure-fetch-stub.mjs");
 
 // The exact argv .github/workflows/ci-infra-kill-rerun.yml builds when a
 // push or repository_dispatch run resolves no PR number (#2668).
+// The PR-run argv the same workflow builds when a PR number IS resolved:
+// `--pr <n>` in place of `--allow-missing-pr` (ci-infra-kill-rerun.yml's
+// classify step, the `if [[ -n "$PR_NUMBER" ]]` arm).
+const PRODUCTION_PR_ARGV = [
+	"--run",
+	"999",
+	"--sha",
+	"deadbeef",
+	"--infra-kill-only",
+	"--skip-missing-job",
+	"--pr",
+	"42",
+];
+
 const PRODUCTION_PUSH_ARGV = [
 	"--run",
 	"999",
@@ -75,7 +89,12 @@ describe("classify-ci-failure.mjs CLI (#2668 review F2 -- real child process, re
 		{
 			rerunStatus = "201",
 			runAttempt = "1",
-		}: { rerunStatus?: string; runAttempt?: string } = {},
+			priorComment,
+		}: {
+			rerunStatus?: string;
+			runAttempt?: string;
+			priorComment?: string;
+		} = {},
 	) {
 		try {
 			const stdout = execFileSync(
@@ -90,6 +109,9 @@ describe("classify-ci-failure.mjs CLI (#2668 review F2 -- real child process, re
 						CLASSIFY_CLI_TEST_CALL_LOG: callLogPath,
 						CLASSIFY_CLI_TEST_RERUN_STATUS: rerunStatus,
 						CLASSIFY_CLI_TEST_RUN_ATTEMPT: runAttempt,
+						...(priorComment === undefined
+							? {}
+							: { CLASSIFY_CLI_TEST_PR_COMMENT: priorComment }),
 						PI_LENS_HOME: piLensHome,
 						PILENS_DATA_DIR: piLensHome,
 					},
@@ -134,20 +156,50 @@ describe("classify-ci-failure.mjs CLI (#2668 review F2 -- real child process, re
 		expect(commentCalls).toEqual([]);
 	});
 
-	// #2042 through the SHIPPED CLI as a child process. The library-level
-	// suite drives `runClassifier` with a JS object; only this lane proves
-	// the real process reads `run_attempt` off the run it was pointed at.
-	// Master lane (`--allow-missing-pr`): no PR, so no marker exists and the
-	// attempt is the only thing standing between the kill and a rerun.
-	it("#2042: a second infra kill on one head (run_attempt 2) still reruns end to end", () => {
-		const result = runCli(PRODUCTION_PUSH_ARGV, { runAttempt: "2" });
+	// #2042 through the SHIPPED CLI as a child process, on the PR lane --
+	// the lane that was actually broken. A push run carries no sticky
+	// comment, so there is no marker for the rerun guard to read and a
+	// second-kill case there reruns with or without the fix (measured: it
+	// stays green against the pre-fix library, which is exactly why it is
+	// NOT written that way here). On a PR the attempt-1 marker exists, and
+	// the shipped process must read the run's own `run_attempt` to see past
+	// it. The library suite drives `runClassifier` with a JS object; only
+	// this lane proves the real child process does the same.
+	it("#2042: a second infra kill on one head reruns on the PR lane, past the attempt-1 marker", () => {
+		const result = runCli(PRODUCTION_PR_ARGV, {
+			runAttempt: "2",
+			// The LEGACY marker shape, deliberately: this is byte-for-byte what
+			// the pre-#2042 classifier wrote, so it is what a PR's sticky
+			// comment actually holds at the moment a second kill arrives. It
+			// doubles as the old-record compatibility proof through the
+			// shipped process -- the field is absent and must read as
+			// attempt 1.
+			priorComment: `ci-classifier: infra-kill (no failing assertion; auto-rerun triggered) <!-- ci-classifier:sha=deadbeef rerun=true -->`,
+		});
 
 		expect(result.status).toBe(0);
-		expect(result.stdout).toContain("infra-kill");
-		expect(result.stdout).toContain("rerun triggered");
+		expect(result.stdout).toContain("PR #42");
+		// The CLI echoes the comment BODY on its second line, and that body
+		// reads "auto-rerun triggered" even when this pass triggered nothing
+		// (a carried-forward marker). Only the classification line spells
+		// "-> <kind> (rerun triggered)", so that is what this asserts on --
+		// a bare "rerun triggered" substring is satisfied by the echo and
+		// would have let the pre-fix refusal read green.
+		expect(result.stdout).toContain("-> infra-kill (rerun triggered)");
 
-		const rerun = readCalls().find((c) => c.url.includes("rerun-failed-jobs"));
+		const calls = readCalls();
+		const rerun = calls.find((c) => c.url.includes("rerun-failed-jobs"));
 		expect(rerun?.method).toBe("POST");
+		// Upsert, not append: the one existing comment is PATCHed, and its
+		// new body names THIS attempt so a repeat invocation on attempt 2 is
+		// refused while attempt 3 was never eligible.
+		const patched = calls.find((c) => c.method === "PATCHED_BODY");
+		expect(patched?.url).toContain(
+			"<!-- ci-classifier:sha=deadbeef rerun=true attempt=2 -->",
+		);
+		expect(
+			calls.filter((c) => c.method === "POST" && c.url.includes("/comments")),
+		).toEqual([]);
 	});
 
 	// The bound, through the same shipped process: attempt 3 is terminal, so
@@ -159,7 +211,7 @@ describe("classify-ci-failure.mjs CLI (#2668 review F2 -- real child process, re
 
 		expect(result.status).toBe(0);
 		expect(result.stdout).toContain("infra-kill");
-		expect(result.stdout).not.toContain("rerun triggered");
+		expect(result.stdout).not.toContain("(rerun triggered)");
 
 		const calls = readCalls();
 		expect(calls.filter((c) => c.url.includes("rerun-failed-jobs"))).toEqual(
