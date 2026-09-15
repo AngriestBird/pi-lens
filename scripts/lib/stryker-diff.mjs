@@ -5,6 +5,8 @@ const IMPORT_SPECIFIER_RE =
 	/(?:from\s+|import\s*(?:\(\s*)?|require\(\s*)["']([^"']+)["']/g;
 
 export const DEFAULT_MAX_FILES = 6;
+export const MUTATION_VITEST_TEST_TIMEOUT_MS = 30_000;
+export const MUTATION_OUTPUT_MAX_BUFFER = 10 * 1024 * 1024;
 
 export const isScriptMutationFile = (file) =>
 	/^scripts\/.*\.mjs$/.test(file) && !file.endsWith(".test.mjs");
@@ -50,6 +52,53 @@ export function capMutationFiles(files, maxFiles = DEFAULT_MAX_FILES) {
 
 export function formatCapNotice(selectedCount, totalCount, skipped) {
 	return `capped: ${selectedCount} of ${totalCount} changed scripts mutated; skipped: ${skipped.join(", ")}`;
+}
+
+function shellQuote(value) {
+	return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
+export function formatVitestCommand(testFiles) {
+	return [
+		"node_modules/.bin/vitest",
+		"run",
+		"--configLoader",
+		"runner",
+		"--testTimeout",
+		String(MUTATION_VITEST_TEST_TIMEOUT_MS),
+		...testFiles.map(shellQuote),
+	].join(" ");
+}
+
+export function classifyStrykerFailure(output = "") {
+	return /DryRunExecutor[^\n]*One or more tests failed in the initial test run/i.test(
+		String(output),
+	)
+		? "dry-run-no-mutants-evaluated"
+		: "stryker-failure";
+}
+
+export function formatStrykerFailure({
+	status,
+	error,
+	stdout = "",
+	stderr = "",
+}) {
+	const exitMsg = error ? `: ${error.message}` : "";
+	if (
+		classifyStrykerFailure(`${stdout}\n${stderr}`) ===
+		"dry-run-no-mutants-evaluated"
+	)
+		return `mutation diff: dry run failed; no mutants evaluated (Stryker status ${status ?? "unknown"}${exitMsg})`;
+	return `mutation diff: Stryker status ${status ?? "unknown"}${exitMsg}`;
+}
+
+export function strykerSpawnOptions() {
+	return {
+		stdio: ["inherit", "pipe", "pipe"],
+		encoding: "utf8",
+		maxBuffer: MUTATION_OUTPUT_MAX_BUFFER,
+	};
 }
 
 /**

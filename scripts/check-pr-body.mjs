@@ -1174,7 +1174,8 @@ export function lintPrBody(body = "", options = {}) {
 			),
 		);
 	errors.push(...lintCodeCitations(body, options));
-	errors.push(...lintTestReferences(body, options, testCorpus(options)));
+	const corpus = options.testCorpus ?? testCorpus(options);
+	errors.push(...lintTestReferences(body, options, corpus));
 	errors.push(...lintMasterClaims(body));
 	return { valid: errors.length === 0, errors };
 }

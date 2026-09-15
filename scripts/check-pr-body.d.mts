@@ -28,6 +28,10 @@ export declare function lintPrBody(
 		git?: (args: string[], options?: Record<string, unknown>) => string;
 		workingTree?: boolean;
 		headFiles?: Map<string, string>;
+		testCorpus?: {
+			paths: ReadonlySet<string>;
+			titles: ReadonlySet<string>;
+		};
 	},
 ): {
 	valid: boolean;

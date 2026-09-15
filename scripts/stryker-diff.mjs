@@ -4,8 +4,11 @@ import {
 	capMutationFiles,
 	DEFAULT_MAX_FILES,
 	formatCapNotice,
+	formatStrykerFailure,
+	formatVitestCommand,
 	isScriptMutationFile,
 	mapRelatedTests,
+	strykerSpawnOptions,
 } from "./lib/stryker-diff.mjs";
 
 function argumentValue(name, fallback) {
@@ -38,19 +41,9 @@ function changedScriptFiles() {
 	}
 }
 
-function shellQuote(value) {
-	return `'${value.replaceAll("'", "'\\''")}'`;
-}
-
 function writeRunConfig(testFiles) {
 	mkdirSync(".stryker", { recursive: true });
-	const command = [
-		"node_modules/.bin/vitest",
-		"run",
-		"--configLoader",
-		"runner",
-		...testFiles.map(shellQuote),
-	].join(" ");
+	const command = formatVitestCommand(testFiles);
 	const config = `import base from "../stryker.config.mjs";\nexport default { ...base, commandRunner: { ...base.commandRunner, command: ${JSON.stringify(command)} } };\n`;
 	const file = ".stryker/diff.config.mjs";
 	writeFileSync(file, config);
@@ -82,14 +75,13 @@ console.log(`mutation diff: running related tests ${tests.join(", ")}`);
 const result = spawnSync(
 	"node_modules/.bin/stryker",
 	["run", "--mutate", covered.join(","), configFile],
-	{ stdio: "inherit", encoding: "utf8" },
+	strykerSpawnOptions(),
 );
 
+process.stdout.write(result.stdout ?? "");
+process.stderr.write(result.stderr ?? "");
 if (result.error || result.status !== 0) {
-	const exitMsg = result.error ? `: ${result.error.message}` : "";
-	console.error(
-		`mutation diff: Stryker status ${result.status ?? "unknown"}${exitMsg}`,
-	);
+	console.error(formatStrykerFailure(result));
 	process.exit(1);
 }
 

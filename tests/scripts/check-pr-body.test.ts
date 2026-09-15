@@ -166,7 +166,7 @@ describe("flattened PR body repair", () => {
 	it.each([
 		[
 			"plain quoted headings",
-			`${flattenedBody} \"## Summary one ## Tests two\"`,
+			`${flattenedBody} "## Summary one ## Tests two"`,
 		],
 		[
 			"fenced quoted headings",
@@ -1663,7 +1663,16 @@ describe("head-tree citations and test references", () => {
 			'it("contains every label this repo\'s rules require to exist", () => {});\n',
 		],
 	]);
-	const options = { headFiles };
+	const options = {
+		headFiles,
+		testCorpus: {
+			paths: new Set(["tests/scripts/check-pr-body.test.ts"]),
+			titles: new Set([
+				"contains every label this repo's rules require to exist",
+				"ignores non-test table cells",
+			]),
+		},
+	};
 
 	it("emits decoded string spans with quote kinds", () => {
 		const result = blankCommentsAndStrings(
@@ -1699,6 +1708,26 @@ describe("head-tree citations and test references", () => {
 		expect(
 			lintPrBody(`${body}\nEvidence: \`clients/citation.ts:1\``, options),
 		).toEqual({ valid: true, errors: [] });
+	});
+
+	it("uses an injected test corpus without rebuilding the real corpus", () => {
+		// Recurrence: mutation runs should not pay the full repository test census
+		// for every test process, while the default path remains covered below.
+		const git = vi.fn(() => {
+			throw new Error("the injected corpus must bypass git discovery");
+		});
+		const result = lintPrBody(
+			`${body}\nThe test is it("injected corpus title only").\n\n| Test |\n| --- |\n| \`tests/injected-corpus.test.ts\` |`,
+			{
+				testCorpus: {
+					paths: new Set(["tests/injected-corpus.test.ts"]),
+					titles: new Set(["injected corpus title only"]),
+				},
+				git,
+			},
+		);
+		expect(result).toEqual({ valid: true, errors: [] });
+		expect(git).not.toHaveBeenCalled();
 	});
 
 	it("accepts a citation in a table cell without a quote", () => {
@@ -2059,7 +2088,7 @@ describe("head-tree citations and test references", () => {
 					'it("title after typeof regex", () => {});',
 					"const quotient = numerator / denominator;",
 					'it("title after division", () => {});',
-					'it.each([{ value: fn(1) }])(\"array each title\", () => {});',
+					'it.each([{ value: fn(1) }])("array each title", () => {});',
 				].join("\n"),
 			);
 			const git = (args: string[]) =>
@@ -2209,7 +2238,7 @@ describe("head-tree citations and test references", () => {
 			mkdirSync(join(fixtureCwd, "tests"), { recursive: true });
 			writeFileSync(
 				join(fixtureCwd, "tests", "lexer.test.ts"),
-				`it(\"${title.replaceAll("\\", "\\\\")}\", () => {});\n`,
+				`it("${title.replaceAll("\\", "\\\\")}", () => {});\n`,
 			);
 			const git = (args: string[]) =>
 				args[0] === "ls-files" ? "tests/lexer.test.ts\n" : "";
