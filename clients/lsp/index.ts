@@ -9308,9 +9308,16 @@ export class LSPService {
 				// duplicating what the per-edit path already suppresses. `content`
 				// was already read above for this file, so `detectFileRole` gets the
 				// higher-accuracy content-aware classification at no extra cost.
+				// #3041: `filePath`/`scanRoot` additionally apply each rule's own
+				// `ignores` carve-out (#965). ast-grep's LSP does NOT apply it to the
+				// per-document diagnostics it publishes (only its own `scan` walk
+				// does), so without this the sweep re-surfaces exactly what the NAPI
+				// runner skips on the same file.
 				const filteredDiagnostics = diagnostics
 					? applyAuxiliarySuppressions(diagnostics, content, {
 							fileRole: detectFileRole(filePath, content),
+							filePath,
+							scanRoot: root,
 						})
 					: diagnostics;
 				results.push({

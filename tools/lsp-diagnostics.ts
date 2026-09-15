@@ -538,6 +538,13 @@ async function collectDiagnosticsForFile(
 	lspService: NonNullable<ReturnType<typeof getLSPService>>,
 	waitMs?: number,
 	serverScope: "primary" | "all" = "all",
+	/**
+	 * #3041: project root the per-rule `ignores` globs (#965) are resolved
+	 * against. ast-grep's LSP publishes per-document diagnostics without
+	 * applying them, so this standalone `source=lsp` query has to — the same
+	 * carve-out the NAPI runner applies on the same file.
+	 */
+	scanRoot?: string,
 ): Promise<DiagnosticsCollectionResult> {
 	let timedOut = false;
 	let content: string | undefined;
@@ -578,7 +585,11 @@ async function collectDiagnosticsForFile(
 				const filtered = applyAuxiliarySuppressions(
 					scopedDiagnostics,
 					content,
-					{ fileRole: detectFileRole(absPath, content) },
+					{
+						fileRole: detectFileRole(absPath, content),
+						filePath: absPath,
+						scanRoot,
+					},
 				);
 				return {
 					diagnostics: filtered,
@@ -645,6 +656,8 @@ async function collectDiagnosticsForFile(
 		content !== undefined
 			? applyAuxiliarySuppressions(diagnostics, content, {
 					fileRole: detectFileRole(absPath, content),
+					filePath: absPath,
+					scanRoot,
 				})
 			: diagnostics;
 	// #1095: surface the touch's content binding (only a touch that resolved
@@ -1053,7 +1066,13 @@ async function collectFileDiagnosticResult(
 		content: collectedContent,
 		binding,
 		skipReason,
-	} = await collectDiagnosticsForFile(file, lspService, waitMs, serverScope);
+	} = await collectDiagnosticsForFile(
+		file,
+		lspService,
+		waitMs,
+		serverScope,
+		cwd,
+	);
 	const health = lspService.getDiagnosticsHealth?.(file) as
 		| LspHealthLike
 		| undefined;
@@ -1196,7 +1215,13 @@ async function runFileDiagnostics(
 		content: collectedContent,
 		binding,
 		skipReason,
-	} = await collectDiagnosticsForFile(absPath, lspService, waitMs, serverScope);
+	} = await collectDiagnosticsForFile(
+		absPath,
+		lspService,
+		waitMs,
+		serverScope,
+		cwd,
+	);
 	const lspHealth = lspService.getDiagnosticsHealth?.(absPath) as
 		| LspHealthLike
 		| undefined;

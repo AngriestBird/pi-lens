@@ -1,3 +1,4 @@
+import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { LSPDiagnostic } from "../../../clients/lsp/client.js";
 import {
@@ -506,5 +507,54 @@ describe("retagAuxiliaryDiagnostics (#692)", () => {
 		});
 		expect(retagged).toHaveLength(1);
 		expect(retagged[0].tool).toBe("lsp");
+	});
+});
+
+// #3041 recurrence: ast-grep's LSP publishes per-document diagnostics WITHOUT
+// applying a rule's own `ignores` globs (its `scan` walk does — verified against
+// ast-grep 0.45.3), so every pi-lens route that delivers those diagnostics
+// re-surfaced findings the NAPI runner correctly skips. Guarding it here, at the
+// one shared drop-decision seam both routes call, is what keeps `source=lsp` and
+// `mode=full` from drifting apart again the way #586 and #692 did.
+describe("applyAuxiliarySuppressions per-rule ignores gate (#3041)", () => {
+	const astGrepDiag = (code: string): LSPDiagnostic =>
+		diag({ source: "ast-grep", code });
+	// The shipped catalog rule whose own YAML carves out `scripts/**`, `bin/**`
+	// and `**/logger.ts` (#965).
+	const RULE = "no-console-except-error";
+	const root = path.resolve("/repo");
+	const content = "console.log('x');\n";
+
+	it("drops a catalog rule's finding on a path the rule's own `ignores` carves out", () => {
+		expect(
+			applyAuxiliarySuppressions([astGrepDiag(RULE)], content, {
+				filePath: path.join(root, "scripts", "cli.ts"),
+				scanRoot: root,
+			}),
+		).toEqual([]);
+	});
+
+	it("keeps the same rule's finding on a path it does not carve out", () => {
+		const kept = applyAuxiliarySuppressions([astGrepDiag(RULE)], content, {
+			filePath: path.join(root, "src", "app.ts"),
+			scanRoot: root,
+		});
+		expect(kept).toHaveLength(1);
+	});
+
+	it("keeps a rule that declares no `ignores` at all on the same carved-out path", () => {
+		const kept = applyAuxiliarySuppressions(
+			[astGrepDiag("no-alert")],
+			content,
+			{ filePath: path.join(root, "scripts", "cli.ts"), scanRoot: root },
+		);
+		expect(kept).toHaveLength(1);
+	});
+
+	it("leaves every diagnostic in place when the caller supplies no scan root", () => {
+		const kept = applyAuxiliarySuppressions([astGrepDiag(RULE)], content, {
+			filePath: path.join(root, "scripts", "cli.ts"),
+		});
+		expect(kept).toHaveLength(1);
 	});
 });
