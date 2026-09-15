@@ -143,6 +143,39 @@ describe("project diagnostics cache", () => {
 		expect(loadProjectDiagnosticsSnapshot(tmp)).toBeUndefined();
 	});
 
+	// #2154 (#3060 review F1): what happens to a record written before the
+	// content axis existed. A v2 snapshot carries no `fileFingerprints`, so its
+	// rows can only be judged by `mtime <= scannedAt` — the test that just
+	// proved unable to separate "unchanged" from "changed mid-scan". Every row
+	// in this store is a POSITIVE claim, so the version guard REJECTS such a
+	// record and the project is re-scanned, rather than serving it under the
+	// failed axis. The cost is one cold cheap scan after upgrade, reported
+	// through the tool's existing "no cached scan" channel.
+	it("rejects a pre-fingerprint v2 snapshot instead of serving its mtime-only rows", () => {
+		expect(PROJECT_DIAGNOSTICS_CACHE_VERSION).toBeGreaterThan(2);
+		saveProjectDiagnosticsSnapshot(
+			tmp,
+			snapshot({
+				version: 2,
+				diagnostics: [
+					{
+						filePath: path.join(tmp, "src/a.ts"),
+						line: 1,
+						severity: "warning",
+						semantic: "warning",
+						tool: "fact-rules",
+						runner: "fact-rules",
+						rule: "pass-through-wrappers",
+						message: "wrapper",
+						source: "project-scan",
+					},
+				],
+			}),
+		);
+
+		expect(loadProjectDiagnosticsSnapshot(tmp)).toBeUndefined();
+	});
+
 	it("persists delta reports", () => {
 		const report = {
 			version: PROJECT_DIAGNOSTICS_CACHE_VERSION,
@@ -217,6 +250,48 @@ describe("reconcileProjectDiagnosticsSnapshot (#298 staleness)", () => {
 			reconcileProjectDiagnosticsSnapshot(snap);
 		expect(reconciled.diagnostics).toHaveLength(0);
 		expect(staleDropped).toBe(1);
+	});
+
+	// #2154: a row whose file carries NO fingerprint keeps the mtime rule. A
+	// rule may cite a path the scan never opened, so there is no content claim
+	// to check — the same fail-open posture `WorkspaceDiagnosticsCacheEntry`
+	// takes for a pre-#2300 entry with no `sizeBytes`. Pinned so the fallback
+	// branch cannot go dead unnoticed.
+	it("falls back to the mtime rule for a row with no recorded fingerprint", () => {
+		const file = path.join(tmp, "unfingerprinted.ts");
+		fs.writeFileSync(file, "export const a = 1;\n");
+		const past = new Date(Date.now() - 60_000);
+		fs.utimesSync(file, past, past);
+		const withoutFingerprints = snapshot({
+			scannedAt: new Date().toISOString(),
+			diagnostics: [
+				{
+					filePath: file,
+					line: 1,
+					severity: "warning",
+					semantic: "warning",
+					tool: "fact-rules",
+					runner: "fact-rules",
+					rule: "pass-through-wrappers",
+					message: "wrapper",
+					source: "project-scan",
+				},
+			],
+		});
+
+		// Unchanged since the scan by the only axis it has: kept.
+		expect(
+			reconcileProjectDiagnosticsSnapshot(withoutFingerprints).snapshot
+				.diagnostics.length,
+		).toBe(1);
+
+		// Touched after the scan: dropped, as before this change.
+		const future = new Date(Date.now() + 60_000);
+		fs.utimesSync(file, future, future);
+		expect(
+			reconcileProjectDiagnosticsSnapshot(withoutFingerprints).snapshot
+				.diagnostics,
+		).toEqual([]);
 	});
 
 	it("drops a diagnostic for a deleted file", () => {
@@ -827,6 +902,83 @@ describe("scanProjectDiagnostics", () => {
 		expect(loadProjectDiagnosticsSnapshot(tmp)?.diagnostics.length).toBe(
 			result.diagnostics.length,
 		);
+	});
+
+	// #2154 (#3060 review F1). `scannedAt` is stamped AFTER the whole file loop,
+	// so an edit that lands while the scan is still running leaves the file with
+	// new bytes and an mtime at or before that timestamp — which the mtime-only
+	// rule reads as fresh forever, in this session and every later one, because
+	// this snapshot is the cross-session cache. The real scanner records what it
+	// read; the real reconcile must judge the row by that, not by the clock.
+	// `utimesSync` reproduces the race's observable state deterministically.
+	it("drops a row whose file changed without an mtime bump after the scan", async () => {
+		const srcDir = path.join(tmp, "src");
+		fs.mkdirSync(srcDir, { recursive: true });
+		const file = path.join(srcDir, "wrap.ts");
+		fs.writeFileSync(
+			file,
+			[
+				"function inner(value: number) { return value; }",
+				"function wrap(value: number) {",
+				"  return inner(value);",
+				"}",
+			].join("\n"),
+		);
+
+		const scanned = await scanProjectDiagnostics({
+			cwd: tmp,
+			tier: "cheap",
+			maxFiles: 10,
+		});
+		expect(scanned.diagnostics.length).toBeGreaterThan(0);
+
+		const before = fs.statSync(file);
+		fs.writeFileSync(file, "export const clean = 1;\n");
+		fs.utimesSync(file, before.atime, before.mtime);
+
+		const persisted = loadProjectDiagnosticsSnapshot(tmp);
+		expect(persisted?.diagnostics.length).toBe(scanned.diagnostics.length);
+		const reconciled = reconcileProjectDiagnosticsSnapshot(
+			persisted as ProjectDiagnosticsSnapshot,
+		);
+		expect(reconciled.snapshot.diagnostics).toEqual([]);
+		expect(reconciled.staleDropped).toBe(1);
+	});
+
+	// The same seam in the other direction: bytes that still match what the scan
+	// read keep their row, so the content axis is a real discriminator and not a
+	// blanket drop. Restoring the ORIGINAL content after an intervening write
+	// also makes the point that content, not the timestamp, is what decides —
+	// this file's mtime is now well past `scannedAt`.
+	it("keeps a row whose file still holds the bytes the scan read", async () => {
+		const srcDir = path.join(tmp, "src");
+		fs.mkdirSync(srcDir, { recursive: true });
+		const file = path.join(srcDir, "wrap.ts");
+		const source = [
+			"function inner(value: number) { return value; }",
+			"function wrap(value: number) {",
+			"  return inner(value);",
+			"}",
+		].join("\n");
+		fs.writeFileSync(file, source);
+
+		const scanned = await scanProjectDiagnostics({
+			cwd: tmp,
+			tier: "cheap",
+			maxFiles: 10,
+		});
+		expect(scanned.diagnostics.length).toBeGreaterThan(0);
+
+		fs.writeFileSync(file, "export const clean = 1;\n");
+		fs.writeFileSync(file, source);
+
+		const reconciled = reconcileProjectDiagnosticsSnapshot(
+			loadProjectDiagnosticsSnapshot(tmp) as ProjectDiagnosticsSnapshot,
+		);
+		expect(reconciled.snapshot.diagnostics.length).toBe(
+			scanned.diagnostics.length,
+		);
+		expect(reconciled.staleDropped).toBe(0);
 	});
 
 	it("runs ast-grep-napi project-wide without the ast-grep binary (#308)", async () => {
