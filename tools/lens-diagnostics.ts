@@ -2061,9 +2061,30 @@ async function getProjectDiagnosticsSnapshotForFullMode(
 		// edited/deleted since the scan so a stale entry isn't replayed (#298). A
 		// fresh scan (above) is current by construction and needs no reconcile.
 		const cached = loadProjectDiagnosticsSnapshot(cwd);
-		return cached
-			? reconcileProjectDiagnosticsSnapshot(cached).snapshot
-			: undefined;
+		if (!cached) return undefined;
+		const reconciled = reconcileProjectDiagnosticsSnapshot(cached);
+		// #2154: what this gate DROPS was invisible — the count was computed and
+		// thrown away, so a session that silently retired another session's rows
+		// (the whole point of the content axis added this round) left no record
+		// of having done so. Bounded by construction: at most one row per
+		// mode=full call, and only when rows were actually retired — the shape
+		// `lsp_authoritative_widget_retire` uses for the sibling arm.
+		if (reconciled.staleDropped > 0) {
+			logLatency({
+				type: "phase",
+				toolName: "lens_diagnostics",
+				filePath: cwd,
+				phase: "project_snapshot_rows_retired",
+				durationMs: 0,
+				metadata: {
+					files: reconciled.staleDropped,
+					rows:
+						cached.diagnostics.length - reconciled.snapshot.diagnostics.length,
+					scannedAt: cached.scannedAt,
+				},
+			});
+		}
+		return reconciled.snapshot;
 	}
 	return undefined;
 }

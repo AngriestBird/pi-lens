@@ -256,6 +256,16 @@ describe("real pi harness: diagnostic provenance", () => {
 						},
 						async (sessionB) => {
 							await expectSessionBClean(sessionB);
+							// The retirement is observable, not silent: one bounded
+							// latency row per mode=full call that actually dropped
+							// rows, in the shared home both sessions write to.
+							const retired = sessionB.lens
+								.latencyRows()
+								.filter((row) => row.phase === "project_snapshot_rows_retired");
+							expect(retired.length).toBeGreaterThan(0);
+							expect(
+								(retired[0]?.metadata as { files?: number } | undefined)?.files,
+							).toBeGreaterThan(0);
 						},
 					);
 				},
