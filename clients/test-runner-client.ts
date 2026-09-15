@@ -165,8 +165,8 @@ export interface RunnerConfig {
 	parseJson: boolean;
 }
 
-// Source file → test file patterns (reverse lookup)
-const SOURCE_TO_TEST_PATTERNS: Array<{
+// Discovery table; exported so the #2928 parity test enumerates its conventions.
+export const SOURCE_TO_TEST_PATTERNS: Array<{
 	ext: string;
 	testExts: string[];
 	dirs: string[];

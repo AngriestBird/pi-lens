@@ -7,6 +7,7 @@ import { createHash } from "node:crypto";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Minimatch, type MinimatchOptions } from "./deps/minimatch.js";
+import { detectFileRole } from "./file-role.js";
 import { FRESHNESS_CADENCE_MS } from "./freshness-cadence.js";
 import {
 	isInSpawnTimeoutCooldown,
@@ -1270,15 +1271,14 @@ export async function detectFileChangedAfterCommand(
  * Check if file path is a test/fixture/mock file.
  * Used by secrets scanner, rate command, and dispatch runners
  * to skip these files (false positives on fake credentials, etc).
+ *
+ * Delegate naming/directory classification to file-role (#2928). Fixtures,
+ * mocks and test helpers remain this skip gate's separate policy.
  */
 export function isTestFile(filePath: string): boolean {
+	if (detectFileRole(filePath) === "test") return true;
 	const normalized = filePath.replace(/\\/g, "/");
 	return (
-		normalized.includes(".test.") ||
-		normalized.includes(".spec.") ||
-		normalized.includes("/test/") ||
-		normalized.includes("/tests/") ||
-		normalized.includes("__tests__/") ||
 		normalized.includes("test-utils") ||
 		normalized.startsWith("test-") ||
 		normalized.includes(".fixture.") ||
