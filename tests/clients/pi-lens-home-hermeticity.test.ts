@@ -25,6 +25,7 @@ import {
 	relativePosix,
 	stripSource,
 } from "../support/sweep-kit.js";
+import { execFileSync as gitExecFileSync } from "../support/git-fixture-env.js";
 import { removeTempDirSync } from "./test-utils.js";
 
 const realGlobalDir = path.join(os.homedir(), ".pi-lens");
@@ -524,24 +525,33 @@ function isIsolated(
 	return false;
 }
 
-/** Exempted file (repo-relative to `tests/`) → reason. A reason is required
- *  and a stale one (the scan no longer flags it) fails loud — `auditRegistry`
- *  enforces both. */
-const REGISTRY_ISOLATION_EXEMPTIONS: Readonly<Record<string, string>> = {
-	"index-vanished-instance-wiring.test.ts":
-		"#3042's own recurrence, the one this sweep exists to catch: no per-case " +
-		"PI_LENS_HOME pin, so registerInstance/sweepOrphans race every sibling " +
-		"Vitest fork over the run-shared registry — the exact CI reds on " +
-		"#3023/#3026. Already fixed on PR #3048 " +
-		"(apmantza/fix/3042-vanished-instance-dead-pid), open at the time this " +
-		"sweep landed. Remove this entry the moment #3048 merges — an entry the " +
-		"scan no longer flags is stale weight, not a screen (AGENTS.md).",
-};
+/** Currently no exemption: #3042's own recurrence
+ *  (`tests/index-vanished-instance-wiring.test.ts`) was fixed by PR #3048
+ *  (merged 2026-09-15, before this sweep landed) — its per-case
+ *  `process.env.PI_LENS_HOME = caseHome;` clears `isIsolated` below like any
+ *  other properly-isolated file. Zero is therefore the live, healthy state;
+ *  `REGISTRY_ISOLATION_EXEMPTIONS` stays declared (rather than removed) so a
+ *  FUTURE in-flight fix has the same documented, reasoned escape hatch this
+ *  one used while #3048 was still open. */
+const REGISTRY_ISOLATION_EXEMPTIONS: Readonly<Record<string, string>> = {};
+
+/** The exact pre-#3048 content of `tests/index-vanished-instance-wiring.
+ *  test.ts` — #3042's own recurrence, the shape this whole sweep exists to
+ *  catch. `20896a56b` is the last commit before PR #3048's fix landed (cited
+ *  in that PR's own body). Fetched once via the repo's git-fixture wrapper
+ *  (`tests/config/git-fixture-governance.test.ts` requires every direct Git
+ *  spawn under tests/ to route through it) rather than hand-copied, so this
+ *  proof is against the REAL historical file, not a paraphrase of it. */
+const PRE_3048_VANISHED_WIRING_CONTENT = gitExecFileSync(
+	"git",
+	["show", "20896a56b:tests/index-vanished-instance-wiring.test.ts"],
+	{ cwd: REPO_ROOT, encoding: "utf8" },
+);
 
 describe("no tests/**/*.test.ts file drives a producer's registry against the run-shared PI_LENS_HOME (#3042 recurrence)", () => {
-	function scanFlagged(): string[] {
+	function scanFlagged(files: readonly string[] = testFiles): string[] {
 		const flagged: string[] = [];
-		for (const file of testFiles) {
+		for (const file of files) {
 			const source = fs.readFileSync(file, "utf8");
 			const commentsBlankedStringsKept = stripSource(source, {
 				strings: "keep",
@@ -567,9 +577,9 @@ describe("no tests/**/*.test.ts file drives a producer's registry against the ru
 			flagged,
 			registered: [],
 			exemptions: REGISTRY_ISOLATION_EXEMPTIONS,
-			// Zero is the HEALTHY steady state here (once #3048 merges, nothing
-			// is flagged) — unlike a tagged-seam sweep, this floor would fail the
-			// day the codebase is actually clean. `minScanned` below is what
+			// Zero is the HEALTHY steady state here (#3048 has merged, so nothing
+			// is flagged) — unlike a tagged-seam sweep, this floor would fail on
+			// exactly the day the codebase is clean. `minScanned` below is what
 			// still catches a broken walk (#1718's shape).
 			minFlagged: 0,
 			scannedCount: testFiles.length,
@@ -583,55 +593,46 @@ describe("no tests/**/*.test.ts file drives a producer's registry against the ru
 		expect(audit.problems).toEqual([]);
 	});
 
-	it("red-first proof: tests/index-vanished-instance-wiring.test.ts is caught by the walk (pre-#3048), not waved through by its exemption alone", () => {
-		// The exemption above is what keeps the audit clean TODAY. This proves
-		// the scan's OWN classification is what the exemption reasons about — not
-		// that the exemption is silently doing all the work while the detector
-		// itself is inert. Reads the file exactly as the main sweep does.
-		const file = testFiles.find((candidate) =>
-			candidate.endsWith("/index-vanished-instance-wiring.test.ts"),
+	it("red-first proof: the FULL scan catches the pre-#3048 shape (temporary scratch copy under tests/, removed after)", () => {
+		// #3042's own recurrence is fixed on master now, so this proves the
+		// detector against its real, historical, pre-fix content instead of a
+		// hand-shaped stand-in — placed under tests/ so `listSourceFiles` walks
+		// it exactly like any other file, then removed so it never lingers.
+		const scratchPath = path.join(
+			TESTS_ROOT,
+			"scratch-3050-pre-3048-vanished-wiring.test.ts",
 		);
-		expect(file, "fixture moved or renamed").toBeDefined();
-		const source = fs.readFileSync(file as string, "utf8");
-		const commentsBlankedStringsKept = stripSource(source, { strings: "keep" });
-		const stringsBlankedCode = stripSource(source, { strings: "blank" });
+		fs.writeFileSync(scratchPath, PRE_3048_VANISHED_WIRING_CONTENT);
+		try {
+			const freshTestFiles = listSourceFiles(TESTS_ROOT, {
+				skipDeclarations: true,
+			}).filter((file) => file.endsWith(".test.ts"));
+			expect(freshTestFiles).toContain(scratchPath);
 
-		const touch = touchesGlobalDirRegistry(
-			commentsBlankedStringsKept,
-			stringsBlankedCode,
-		);
-		expect(touch).toBeDefined();
-		expect(touch?.matchedSymbols).toEqual(["sweepOrphans"]);
-		expect(
-			isIsolated(commentsBlankedStringsKept, touch?.matchedSymbols ?? []),
-		).toBe(false);
-
-		// And with the exemption removed, the full audit reds and names exactly
-		// this file — the actual "re-point at the run-shared home, paste the
-		// red" proof (#3042's PR #3048 has not landed yet, so this IS that
-		// file's real, unmodified, pre-fix content).
-		const withoutExemption = auditRegistry({
-			sweepName: "tests/ registry isolation (exemption removed)",
-			flagged: scanFlagged(),
-			registered: [],
-			exemptions: {},
-			minFlagged: 0,
-		});
-		expect(withoutExemption.problems.length).toBeGreaterThan(0);
-		expect(withoutExemption.unaccounted).toContain(
-			"index-vanished-instance-wiring.test.ts",
-		);
+			const audit = auditRegistry({
+				sweepName: "tests/ registry isolation (pre-#3048 scratch copy)",
+				flagged: scanFlagged(freshTestFiles),
+				registered: [],
+				exemptions: REGISTRY_ISOLATION_EXEMPTIONS,
+				minFlagged: 1,
+			});
+			expect(audit.problems.length).toBeGreaterThan(0);
+			expect(audit.unaccounted).toContain(
+				"scratch-3050-pre-3048-vanished-wiring.test.ts",
+			);
+		} finally {
+			fs.rmSync(scratchPath, { force: true });
+		}
 	});
 
-	it("mutation-proof: loosening the PI_LENS_HOME check to a bare reference falsely clears the known-bad file", () => {
-		// tests/index-vanished-instance-wiring.test.ts's own
+	it("mutation-proof: loosening the PI_LENS_HOME check to a bare reference falsely clears the pre-#3048 shape", () => {
+		// The pre-#3048 file's own
 		// `path.join(process.env.PI_LENS_HOME as string, "instances.json")` is a
 		// READ, not a pin — the exact false-clear this predicate must refuse.
-		const file = testFiles.find((candidate) =>
-			candidate.endsWith("/index-vanished-instance-wiring.test.ts"),
+		const commentsBlankedStringsKept = stripSource(
+			PRE_3048_VANISHED_WIRING_CONTENT,
+			{ strings: "keep" },
 		);
-		const source = fs.readFileSync(file as string, "utf8");
-		const commentsBlankedStringsKept = stripSource(source, { strings: "keep" });
 
 		expect(isIsolated(commentsBlankedStringsKept, ["sweepOrphans"])).toBe(
 			false,
@@ -651,15 +652,15 @@ describe("no tests/**/*.test.ts file drives a producer's registry against the ru
 	});
 
 	it("mutation-proof: a mock naming a producer symbol but still falling through to `actual.<symbol>(` does not isolate", () => {
-		// tests/index-vanished-instance-wiring.test.ts mocks instance-reaper.js
-		// and NAMES sweepOrphans as a key — a naive check ("is this producer
-		// mocked at all, with this key present") would clear it. Only the
-		// pass-through check below refuses that.
-		const file = testFiles.find((candidate) =>
-			candidate.endsWith("/index-vanished-instance-wiring.test.ts"),
+		// The pre-#3048 file mocks instance-reaper.js and NAMES sweepOrphans as a
+		// key — a naive check ("is this producer mocked at all, with this key
+		// present") would clear it. Only the pass-through check below refuses
+		// that, which is exactly why the SAME file is still caught post-#3048
+		// via its own env pin below, rather than by this mock at all.
+		const commentsBlankedStringsKept = stripSource(
+			PRE_3048_VANISHED_WIRING_CONTENT,
+			{ strings: "keep" },
 		);
-		const source = fs.readFileSync(file as string, "utf8");
-		const commentsBlankedStringsKept = stripSource(source, { strings: "keep" });
 
 		const callText = findMockCallText(
 			commentsBlankedStringsKept,
@@ -686,6 +687,35 @@ describe("no tests/**/*.test.ts file drives a producer's registry against the ru
 				"sweepOrphans",
 			),
 		);
+	});
+
+	it("the post-#3048 file is caught by neither the reaper mock (still falls through) nor the read-mock fallback, only by its own PI_LENS_HOME pin", () => {
+		// Confirms the LIVE file, today, is isolated for the reason the module
+		// docstring above claims — not by accident of some OTHER idiom.
+		const file = testFiles.find((candidate) =>
+			candidate.endsWith("/index-vanished-instance-wiring.test.ts"),
+		);
+		expect(file, "fixture moved or renamed").toBeDefined();
+		const source = fs.readFileSync(file as string, "utf8");
+		const commentsBlankedStringsKept = stripSource(source, { strings: "keep" });
+		const stringsBlankedCode = stripSource(source, { strings: "blank" });
+
+		const touch = touchesGlobalDirRegistry(
+			commentsBlankedStringsKept,
+			stringsBlankedCode,
+		);
+		expect(touch?.matchedSymbols).toEqual(["sweepOrphans"]);
+		expect(
+			mockOverridesSymbol(
+				commentsBlankedStringsKept,
+				"instance-reaper.js",
+				"sweepOrphans",
+			),
+		).toBe(false);
+		expect(PI_LENS_HOME_ASSIGNMENT.test(commentsBlankedStringsKept)).toBe(true);
+		expect(
+			isIsolated(commentsBlankedStringsKept, touch?.matchedSymbols ?? []),
+		).toBe(true);
 	});
 
 	it("mutation-proof: a comment merely naming the isolation idioms and target files does not satisfy the walk (detectors match code, not prose)", () => {
