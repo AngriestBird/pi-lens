@@ -38,6 +38,18 @@ describe("event-loop-monitor", () => {
 		expect(s?.maxMs).toBeGreaterThanOrEqual(0);
 	});
 
+	it("keeps the production monitor path queryable with current Node types (#3026)", async () => {
+		// Regression for @types/node 26.5.1 removing the named IntervalHistogram
+		// export: infer the monitor value from the runtime API and preserve the
+		// start/reset/stats lifecycle rather than weakening the monitor contract.
+		startEventLoopMonitor(10);
+		await settle(40);
+		const beforeReset = getEventLoopStats();
+		expect(beforeReset).toBeDefined();
+		resetEventLoopMonitor();
+		expect(getEventLoopStats()).toBeDefined();
+	});
+
 	it("exposes per-window CPU/wall accounting and a stall flag (#1122)", async () => {
 		startEventLoopMonitor(10);
 		await settle(40);
