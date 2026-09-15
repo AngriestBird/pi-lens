@@ -139,6 +139,13 @@ function recordStaleSkip(
 	);
 }
 
+export interface HandlerCrashOptions {
+	/** pi-lens's debug sink, so a crash is also visible in a dogfood trace. */
+	dbg?: (message: string) => void;
+	/** Keep a floating fire-and-forget rejection from terminating the host. */
+	rethrow?: boolean;
+}
+
 export interface SessionEventGuardOptions {
 	/** pi-lens's debug sink, so a skip is also visible in a dogfood trace. */
 	dbg?: (message: string) => void;
@@ -146,9 +153,6 @@ export interface SessionEventGuardOptions {
 	budgetKey?:
 		| HookBudgetKey
 		| ((event: unknown, ctx: unknown) => HookBudgetKey | undefined);
-	/** Keep a floating fire-and-forget rejection from terminating the host. */
-	// Only surfaceHandlerCrash honors this option; event wrappers ignore it.
-	rethrow?: boolean;
 }
 
 /**
@@ -191,7 +195,7 @@ export interface SessionEventGuardOptions {
 export function surfaceHandlerCrash(
 	handler: string,
 	err: unknown,
-	options: SessionEventGuardOptions = {},
+	options: HandlerCrashOptions = {},
 ): void {
 	try {
 		options.dbg?.(`${handler} crashed: ${err}`);
@@ -281,7 +285,7 @@ function guardSessionEvent<E, C, R>(
 				// handler crash instead (#2939 F5). `rethrow` is intentionally not
 				// forwarded: wrappers do not pass it, and only `surfaceHandlerCrash`
 				// honors that option (#2939 F4).
-				const crashOptions: SessionEventGuardOptions = {};
+				const crashOptions: HandlerCrashOptions = {};
 				if (options.dbg !== undefined) crashOptions.dbg = options.dbg;
 				surfaceHandlerCrash(eventName, err, crashOptions);
 				return Promise.resolve(onStaleResult(event)) as R;

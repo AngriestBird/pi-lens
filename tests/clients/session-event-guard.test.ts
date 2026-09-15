@@ -18,6 +18,7 @@ import {
 	surfaceHandlerCrash,
 	wrapSessionEventHandler,
 	wrapSessionEventHandlerWithResult,
+	type HandlerCrashOptions,
 } from "../../clients/session-event-guard.js";
 import { makeStaleCtx, STALE_CTX_MESSAGE } from "../support/pi-mock.js";
 
@@ -37,6 +38,20 @@ function identityFallbackGroup() {
 		(group) => group.kind === "turn-context-identity-fallback",
 	);
 }
+
+/** Compile-time contract: only the crash helper accepts the rethrow option. */
+function _wrapperOptionsDoNotTypeCheck(): void {
+	const crashOptions: HandlerCrashOptions = { rethrow: false };
+	surfaceHandlerCrash("quiet_window", new Error("compile-only"), crashOptions);
+	// @ts-expect-error #2969: wrapper options must not expose crash rethrow.
+	wrapSessionEventHandler("turn_end", vi.fn(), { rethrow: false });
+	wrapSessionEventHandlerWithResult("context", vi.fn(), {
+		// @ts-expect-error #2969: result wrapper options must not expose crash rethrow.
+		rethrow: false,
+		onStaleResult: () => undefined,
+	});
+}
+void _wrapperOptionsDoNotTypeCheck;
 
 describe("wrapSessionEventHandler (#1925)", () => {
 	beforeEach(() => {
