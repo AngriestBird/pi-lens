@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -24,12 +25,22 @@ interface Run {
  * is still producing output. That is the state the wrapper is in when a CI log
  * collector falls behind, and it is where an asynchronously queued write is
  * lost to `process.exit`.
+ *
+ * `extraEnv` (round-2 review F4) merges over the inherited environment --
+ * folded in here rather than kept as a second, near-duplicate spawn helper
+ * (the net-count rule: `runWrapperWithEnv` repeated 18 of this function's 24
+ * lines for one added `env` key).
  */
-function runWrapper(args: string[], throttleMs = 0): Promise<Run> {
+function runWrapper(
+	args: string[],
+	throttleMs = 0,
+	extraEnv: Record<string, string> = {},
+): Promise<Run> {
 	return new Promise((resolve, reject) => {
 		const child = spawn(process.execPath, [wrapper, ...args], {
 			cwd: repoRoot,
 			stdio: ["ignore", "pipe", "pipe"],
+			env: { ...process.env, ...extraEnv },
 		});
 		let stdout = "";
 		let stderr = "";
@@ -178,4 +189,112 @@ describe("with-memory-watch verdict wiring (#2042)", () => {
 			"watch.childPid must be set from the spawned child",
 		).toMatch(/watch\.childPid\s*=\s*child\.pid/);
 	});
+});
+
+// flake-shape: raw-timer-wait — the poll loop below waits for the wrapper's
+// OWN real setInterval sampling tick to reach disk, which cannot be faked
+// from the test process (a separate real child process); a fixed sleep here
+// flaked under concurrent vitest workers, so this waits for the actual
+// condition (file exists) instead.
+/**
+ * #2042 2026-09-15 diagnosis, section A: the cheapest probe. End-to-end
+ * through the real wrapper, not the library functions directly, so the wiring
+ * between the interval tick and the on-disk file is what is under test.
+ */
+describe("with-memory-watch sample tail (#2042 2026-09-15)", () => {
+	function makeSampleFile(): string {
+		return path.join(
+			os.tmpdir(),
+			`pi-lens-mem-watch-test-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.log`,
+		);
+	}
+
+	// Round-2 review F2: replaces the old ring-buffer "never grows past the
+	// cap" case. The sampler no longer caps anything it writes -- an
+	// append-only file can never lose an earlier line to a rewrite, which is
+	// exactly what a fixed ring did on the real 2026-09-15 CI run (the tail
+	// covered only the run's last 60s, 21:10:04-21:11:04, while the actual
+	// low-water event -- what a kill would land near -- was at 21:02:18,
+	// already scrolled out). What has to hold instead: one line per tick, in
+	// order, never truncated, growing linearly with elapsed ticks.
+	it("appends exactly one line per tick, in order, never truncating earlier lines", async () => {
+		const sampleFile = makeSampleFile();
+		try {
+			await runWrapper(["--", nodeCmd, "-e", "setTimeout(() => {}, 250)"], 0, {
+				PI_LENS_MEM_WATCH_INTERVAL_MS: "30",
+				PI_LENS_MEM_WATCH_SAMPLE_FILE: sampleFile,
+			});
+			const lines = fs
+				.readFileSync(sampleFile, "utf8")
+				.split("\n")
+				.filter(Boolean);
+			// ~250ms / 30ms: at least 5 ticks fired, and NONE were trimmed --
+			// the old ring, fed the same parameters, would have capped this at 2.
+			expect(lines.length).toBeGreaterThanOrEqual(5);
+			for (const line of lines) {
+				expect(line).toMatch(
+					/^\[mem-sample\] \d\d:\d\d:\d\d\.\d\d\d availableMb=\d+ totalMb=\d+ /,
+				);
+				expect(line).toMatch(/memCurrentMb=(\?|\d+) memPeakMb=(\?|\d+)/);
+				expect(line).toMatch(/pids=(\?|\d+)/);
+			}
+			// Strictly increasing millisecond stamps: every tick's line survives,
+			// none overwritten, none reordered.
+			const stamps = lines.map(
+				(line) => /\[mem-sample\] (\d\d:\d\d:\d\d\.\d\d\d)/.exec(line)?.[1],
+			);
+			const sorted = [...stamps].sort();
+			expect(stamps).toEqual(sorted);
+		} finally {
+			fs.rmSync(sampleFile, { force: true });
+		}
+	}, 15_000);
+
+	it("still leaves the sample file behind when the wrapper's own process is the one killed", async () => {
+		// The master 1701d01 red: no verdict line, because the wrapper itself
+		// died, not its child. That is exactly the case the file has to survive
+		// -- proven here by killing the WRAPPER (not the child) mid-run and
+		// checking the file anyway. Waits for the FIRST tick's write rather than
+		// a fixed sleep, so this stays reliable under a loaded, contended box
+		// (a fixed short sleep flaked here under concurrent vitest workers: the
+		// wrapper's own process start can take longer than the sleep on a busy
+		// host, which would make the kill land before the first tick and turn a
+		// real fix into a flaky test).
+		const sampleFile = makeSampleFile();
+		try {
+			const child = spawn(
+				process.execPath,
+				[wrapper, "--", nodeCmd, "-e", "setTimeout(() => {}, 30000)"],
+				{
+					cwd: repoRoot,
+					stdio: "ignore",
+					env: {
+						...process.env,
+						PI_LENS_MEM_WATCH_INTERVAL_MS: "30",
+						PI_LENS_MEM_WATCH_SAMPLE_FILE: sampleFile,
+					},
+				},
+			);
+			const deadline = Date.now() + 10_000;
+			while (!fs.existsSync(sampleFile)) {
+				if (Date.now() > deadline) {
+					child.kill("SIGKILL");
+					throw new Error("sample file never appeared before the deadline");
+				}
+				await new Promise((resolve) => setTimeout(resolve, 10));
+			}
+			child.kill("SIGKILL");
+			// One more tick's worth of grace for the write that was already
+			// in-flight when the kill landed to finish reaching disk.
+			await new Promise((resolve) => setTimeout(resolve, 100));
+			expect(fs.existsSync(sampleFile)).toBe(true);
+			const lines = fs
+				.readFileSync(sampleFile, "utf8")
+				.split("\n")
+				.filter(Boolean);
+			expect(lines.length).toBeGreaterThan(0);
+		} finally {
+			fs.rmSync(sampleFile, { force: true });
+		}
+	}, 15_000);
 });
