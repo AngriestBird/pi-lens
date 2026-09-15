@@ -474,6 +474,28 @@ function managedGitHubFormatterTool(
 
 const MANAGED_GITHUB_FORMATTERS = [
 	{
+		id: "typstyle",
+		name: "typstyle",
+		owner: "typstyle-rs",
+		repo: "typstyle",
+		assetPattern: archAssetMatch({
+			linux: {
+				x64: "typstyle-x86_64-unknown-linux-gnu",
+				arm64: "typstyle-aarch64-unknown-linux-gnu",
+			},
+			darwin: {
+				x64: "typstyle-x86_64-apple-darwin",
+				arm64: "typstyle-aarch64-apple-darwin",
+			},
+			win32: {
+				x64: "typstyle-x86_64-pc-windows-msvc.exe",
+				arm64: "typstyle-aarch64-pc-windows-msvc.exe",
+			},
+		}),
+		kind: "binary",
+		binaryInArchive: "typstyle",
+	},
+	{
 		id: "stylua",
 		name: "StyLua",
 		owner: "JohnnyMorganz",
@@ -1623,6 +1645,34 @@ export const TOOLS: ToolDefinition[] = [
 				return undefined;
 			},
 			binaryInArchive: "gleam",
+		},
+	},
+	{
+		// Tinymist publishes cargo-dist archives containing the `tinymist` binary
+		// for the supported desktop targets. The LSP server uses `tinymist lsp`.
+		id: "tinymist",
+		name: "Tinymist",
+		checkCommand: "tinymist",
+		checkArgs: ["--version"],
+		installStrategy: "github",
+		binaryName: "tinymist",
+		github: {
+			repo: "Myriad-Dreamin/tinymist",
+			assetMatch: archAssetMatch({
+				linux: {
+					x64: "tinymist-x86_64-unknown-linux-gnu.tar.gz",
+					arm64: "tinymist-aarch64-unknown-linux-gnu.tar.gz",
+				},
+				darwin: {
+					x64: "tinymist-x86_64-apple-darwin.tar.gz",
+					arm64: "tinymist-aarch64-apple-darwin.tar.gz",
+				},
+				win32: {
+					x64: "tinymist-x86_64-pc-windows-msvc.zip",
+					arm64: "tinymist-aarch64-pc-windows-msvc.zip",
+				},
+			}),
+			binaryInArchive: "tinymist",
 		},
 	},
 	{
@@ -6250,6 +6300,8 @@ export const GITHUB_TOOLS = [
 	"clojure-lsp",
 	"cue",
 	"gleam",
+	"typstyle",
+	"tinymist",
 	"marksman",
 	"expert",
 ] as const;

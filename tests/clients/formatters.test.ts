@@ -40,6 +40,7 @@ import {
 	ALL_FORMATTERS,
 	styluaFormatter,
 	ktlintFormatter,
+	typstyleFormatter,
 } from "../../clients/formatters.js";
 import { resetDegradationLedger } from "../../clients/degradation-ledger.js";
 import { FORMATTER_MARKERS } from "../../clients/tool-cwd.js";
@@ -869,6 +870,18 @@ describe("getFormattersForFile — policy selection", () => {
 			const formatters = await getFormattersForFile(filePath, tmpDir);
 			expect(formatters.map((f) => f.name)).toEqual(["gleam"]);
 		});
+	});
+
+	it("uses typstyle as the smart default for Typst files when available", async () => {
+		const filePath = path.join(tmpDir, "main.typ");
+		createTempFile(tmpDir, "main.typ", "#let x=1+2\n");
+		await withPathShim("typstyle", async () => {
+			const formatters = await getFormattersForFile(filePath, tmpDir);
+			expect(formatters.map((f) => f.name)).toEqual(["typstyle"]);
+		});
+		expect(await typstyleFormatter.resolveCommand!(filePath, tmpDir)).toEqual(
+			expect.arrayContaining(["typstyle", "-i", filePath]),
+		);
 	});
 
 	it("does not force csharpier on unconfigured C# files", async () => {

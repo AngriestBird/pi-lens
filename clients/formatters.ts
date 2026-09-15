@@ -1422,6 +1422,20 @@ export const gleamFormatter: FormatterInfo = {
 	},
 };
 
+export const typstyleFormatter: FormatterInfo = {
+	name: "typstyle",
+	command: ["typstyle", "-i", "$FILE"],
+	extensions: [".typ"],
+	async resolveCommand(filePath) {
+		const inPath = await which("typstyle");
+		if (inPath) return [inPath, "-i", filePath];
+		return resolveManagedSmartDefaultCommand("typstyle", filePath, ["-i"]);
+	},
+	detect: managedToolDetect("typstyle", undefined, async () =>
+		(await which("typstyle")) !== null,
+	),
+};
+
 export const terraformFormatter: FormatterInfo = {
 	name: "terraform",
 	command: ["terraform", "fmt", "$FILE"],
@@ -1751,6 +1765,7 @@ export const ALL_FORMATTERS: FormatterInfo[] = [
 	rubocopFormatter,
 	standardrbFormatter,
 	gleamFormatter,
+	typstyleFormatter,
 	taploFormatter,
 	googleJavaFormatFormatter,
 	cljfmtFormatter,

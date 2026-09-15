@@ -19,6 +19,20 @@ describe("GitHub release asset selection", () => {
 		["cljfmt", "darwin", "arm64", "standalone.jar", "java"],
 		["cljfmt", "linux", "arm64", "standalone.jar", "java"],
 		["cljfmt", "linux", "x64", "linux-amd64-static.tar.gz", undefined],
+		[
+			"typstyle",
+			"linux",
+			"x64",
+			"typstyle-x86_64-unknown-linux-gnu",
+			undefined,
+		],
+		[
+			"tinymist",
+			"win32",
+			"arm64",
+			"tinymist-aarch64-pc-windows-msvc.zip",
+			undefined,
+		],
 	] as const)(
 		"maps %s %s/%s asset %s to launcher %s",
 		(toolId, platform, _arch, asset, launcher) => {

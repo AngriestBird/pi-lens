@@ -132,6 +132,7 @@ describe("tool-policy", () => {
 		expect(getAutoInstallToolIdForFormatter("prettier")).toBe("prettier");
 		expect(getAutoInstallToolIdForFormatter("shfmt")).toBe("shfmt");
 		expect(getAutoInstallToolIdForFormatter("taplo")).toBe("taplo");
+		expect(getAutoInstallToolIdForFormatter("typstyle")).toBe("typstyle");
 		expect(getAutoInstallToolIdForFormatter("gofmt")).toBeUndefined();
 		expect(getAutoInstallToolIdForFormatter("rustfmt")).toBeUndefined();
 		expect(getAutoInstallToolIdForFormatter("terraform")).toBeUndefined();
