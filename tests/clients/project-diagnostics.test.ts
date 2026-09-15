@@ -1004,12 +1004,33 @@ describe("scanProjectDiagnostics", () => {
 		].join("\n");
 		fs.writeFileSync(file, source);
 
+		// #3060 round 2 F1: a file whose bytes are not valid UTF-8 — one
+		// latin-1 0xE9 in a comment. The scan decodes it lossily (one byte
+		// becomes a 3-byte U+FFFD), so a fingerprint measured on the DECODED
+		// string can never equal the on-disk size and the row is retired on
+		// every cached read, for a file nobody touched. The size recorded must
+		// be the bytes the file actually holds.
+		const latin1File = path.join(srcDir, "wrap-latin1.ts");
+		const latin1Source = Buffer.concat([
+			Buffer.from("// caf", "utf-8"),
+			Buffer.from([0xe9]),
+			Buffer.from(
+				"\nfunction innerL(value: number) { return value; }\nfunction wrapL(value: number) {\n  return innerL(value);\n}\n",
+				"utf-8",
+			),
+		]);
+		fs.writeFileSync(latin1File, latin1Source);
+
 		const scanned = await scanProjectDiagnostics({
 			cwd: tmp,
 			tier: "cheap",
 			maxFiles: 10,
 		});
-		expect(scanned.diagnostics.length).toBeGreaterThan(0);
+		const latin1Rows = scanned.diagnostics.filter(
+			(d) => d.filePath === latin1File,
+		);
+		expect(latin1Rows.length).toBeGreaterThan(0);
+		expect(fs.statSync(latin1File).size).toBe(latin1Source.length);
 
 		fs.writeFileSync(file, "export const clean = 1;\n");
 		fs.writeFileSync(file, source);

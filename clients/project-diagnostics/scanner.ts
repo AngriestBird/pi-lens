@@ -324,11 +324,26 @@ async function scanFileMajorRules(
 			if (!langId && !factEligible && !astGrepLang) continue;
 			if (langId || factEligible) phaseOneFilesScanned++;
 
+			// #2154 (#3060 round 2 F1): read the BYTES once, then decode. The
+			// fingerprint below must record the file's ON-DISK length, because
+			// that is what the reader compares against `statSync().size`. A
+			// length taken from the decoded STRING disagrees for every file
+			// holding a byte that is not valid UTF-8 — one such byte decodes to
+			// a 3-byte U+FFFD — so the size check could never match and every
+			// row from that file was retired on every cached read, for a file
+			// nobody touched. That is the DROP direction this store's own
+			// reconcile doc calls the worse one. `buf.length` equals
+			// `stat.size` for every file; both sides then hash the same lossy
+			// decode, so an unchanged file still matches exactly.
 			let content: string | null;
+			let contentBytes: number | undefined;
 			try {
-				content = fs.readFileSync(filePath, "utf-8");
+				const buf = fs.readFileSync(filePath);
+				contentBytes = buf.length;
+				content = buf.toString("utf-8");
 			} catch {
 				content = null;
+				contentBytes = undefined;
 			}
 
 			// #2154: how many rows existed BEFORE this file was scanned, so the
@@ -401,10 +416,11 @@ async function scanFileMajorRules(
 				// disk holds by the time the scan ends.
 				if (
 					content !== null &&
+					contentBytes !== undefined &&
 					treeSitter.length + factRules.length + astGrep.length > rowsBeforeFile
 				) {
 					fingerprints[filePath] = {
-						sizeBytes: Buffer.byteLength(content),
+						sizeBytes: contentBytes,
 						contentHash: hashDiagnosticContent(content),
 					};
 				}

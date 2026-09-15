@@ -308,22 +308,41 @@ describe("real pi harness: diagnostic provenance", () => {
 					await withRealPi(
 						{
 							fixture: "diagnostic-provenance",
-							script: "two-sessions-a.json",
+							script: "two-sessions-b.json",
 							project: worktree,
 							home,
 						},
 						async (worktreeSession) => {
 							expect(worktreeSession.projectPath()).toBe(worktree);
-							await worktreeSession.prompt("worktree session scans");
-							const served = JSON.stringify(
+							// The load-bearing turn (#3060 round 2 F2): this session's
+							// FIRST call is `refreshRunners=cached`, and this worktree
+							// has never been scanned, so its own snapshot store is
+							// empty. Anything the cached read serves can only have come
+							// from the sibling root's store. A rescanning turn could
+							// not make that claim — it would find its own copy of the
+							// same fixture and pass either way.
+							await worktreeSession.prompt("worktree session cached read");
+							const cached = JSON.stringify(
 								await worktreeSession.awaitToolResult("lens_diagnostics"),
 							);
-							// The parent's rows are not served, and — the stronger
-							// claim — the parent's ROOT is never named at all, so this
-							// cannot pass merely because both trees hold a same-named
-							// file with the same finding.
-							expect(served).not.toContain(parent);
-							expect(served).toContain(worktree);
+							// The parent's ROOT is never named — the stronger claim than
+							// "no matching row", since both trees hold a same-named file
+							// with the same finding.
+							expect(cached).not.toContain(parent);
+							expect(cached).toContain(worktree);
+
+							// Then let this worktree populate its OWN store, so the
+							// two-stores assertion below is about two real records.
+							await worktreeSession.awaitAssistantTurn();
+							await worktreeSession.prompt("worktree session delta");
+							await worktreeSession.awaitToolResult("lens_diagnostics");
+							await worktreeSession.awaitAssistantTurn();
+							await worktreeSession.prompt("worktree session scans");
+							const scanned = JSON.stringify(
+								await worktreeSession.awaitToolResult("lens_diagnostics"),
+							);
+							expect(scanned).not.toContain(parent);
+							expect(scanned).toContain("debugger-statement");
 						},
 					);
 					// Two roots, two stores: the parent's own snapshot is still there

@@ -24,7 +24,13 @@ export interface ProjectDiagnostic {
  * cheap reject (no read); `contentHash` settles a same-size rewrite.
  */
 export interface ProjectScanFileFingerprint {
-	/** Byte length of the exact content the rules ran over. */
+	/**
+	 * The file's ON-DISK byte length at the moment the scan read it — the
+	 * buffer's own length, never `Buffer.byteLength` of the decoded string
+	 * (#3060 round 2 F1: those differ by 2 for every byte that is not valid
+	 * UTF-8, so a decoded-string length could never match `statSync().size`
+	 * and retired every row from such a file on every cached read).
+	 */
 	sizeBytes: number;
 	/** sha256 of that same content, via `hashDiagnosticContent`. */
 	contentHash: string;
