@@ -363,6 +363,12 @@ export const wallClockBudgetInclude = [
 	// block growth), so the file runs here, fully serialized (flake-shape
 	// admission).
 	"tests/clients/performance-report-occupancy.test.ts",
+	// #3050: the pre-#3048 recurrence proof shells out to the real `git show
+	// <sha>:<path>` for its historical fixture content (flake-shape
+	// admission) — no wall-clock budget assertion, membership solely to
+	// satisfy flake-shape-ratchet.test.ts's real-process-spawn gate, same as
+	// tests/scripts/knip-sibling-purge.test.ts's admission below.
+	"tests/clients/pi-lens-home-hermeticity.test.ts",
 	"tests/clients/pipeline-lsp-sync.test.ts",
 	"tests/clients/project-data-dir-slug.test.ts",
 	"tests/clients/read-expansion-enrichment.test.ts",

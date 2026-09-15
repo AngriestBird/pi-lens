@@ -213,6 +213,16 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		reason:
 			"real git children emit stderr bytes whose metrics classification cannot be observed in-process",
 	},
+	// 2026-09-16 (#3050): the pre-#3048 recurrence proof shells out to the
+	// real `git show <sha>:<path>` for its historical fixture content — a
+	// paraphrase would risk drifting from the actual defect the detector
+	// exists to catch (the external-contract rule this repo already applies
+	// to third-party adapters, here applied to the repo's own history).
+	"real-process-spawn:clients/pi-lens-home-hermeticity.test.ts": {
+		detector: "real-process-spawn",
+		reason:
+			"the pre-#3048 recurrence proof reads the real historical file via git show, not a hand-copied stand-in",
+	},
 	"real-process-spawn:clients/project-data-dir-slug.test.ts": {
 		detector: "real-process-spawn",
 		reason:

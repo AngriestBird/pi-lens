@@ -542,6 +542,8 @@ const REGISTRY_ISOLATION_EXEMPTIONS: Readonly<Record<string, string>> = {};
  *  (`tests/config/git-fixture-governance.test.ts` requires every direct Git
  *  spawn under tests/ to route through it) rather than hand-copied, so this
  *  proof is against the REAL historical file, not a paraphrase of it. */
+// flake-shape: real-process-spawn — the pre-#3048 recurrence proof reads the
+// real historical file via git show, not a hand-copied stand-in
 const PRE_3048_VANISHED_WIRING_CONTENT = gitExecFileSync(
 	"git",
 	["show", "20896a56b:tests/index-vanished-instance-wiring.test.ts"],
