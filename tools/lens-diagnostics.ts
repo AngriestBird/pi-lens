@@ -111,7 +111,10 @@ import {
 import { logExtension } from "../clients/extension-log.js";
 import { recordDegradationOnce } from "../clients/degradation-ledger.js";
 import { convertLspDiagnostics } from "../clients/dispatch/utils/lsp-diagnostics.js";
-import { retagAuxiliaryDiagnostics } from "../clients/dispatch/auxiliary-lsp.js";
+import {
+	findAuxiliaryProfileForSource,
+	retagAuxiliaryDiagnostics,
+} from "../clients/dispatch/auxiliary-lsp.js";
 import { detectFileRole } from "../clients/file-role.js";
 import { STALE_LINE_MARKER } from "../clients/stale-marker.js";
 import { makeProgressReporter, scanningSummaryLine } from "./scan-progress.js";
@@ -1499,7 +1502,13 @@ function lspDiagnosticToWidget(diagnostic: LSPDiagnostic): WidgetDiagnostic {
 		line: diagnostic.range.start.line + 1,
 		col: diagnostic.range.start.character + 1,
 		rule,
-		tool: "lsp",
+		// #3041: keep auxiliary provenance. The footer-reconcile loop above already
+		// gives a swept aux finding its real tool id via `retagAuxiliaryDiagnostics`
+		// (#692); this second conversion of the SAME raw diagnostics did not, and
+		// dispositions are anchored by `tool` — so a `false-positive`/`suppress`
+		// mark recorded against the per-edit `ast-grep` finding never matched the
+		// `lsp`-labelled copy mode=full renders.
+		tool: findAuxiliaryProfileForSource(diagnostic.source)?.tool ?? "lsp",
 	};
 }
 
