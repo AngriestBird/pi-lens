@@ -98,17 +98,23 @@ type PnpmGlobalBinFacts = {
 	pathEntry?: string;
 	configuredBinDir?: string;
 	githubPathEntry?: string;
+	pathExportLine: number;
+	globalConfigLine: number;
 };
 
+const PATH_EXPORT = /export PATH="([^":]+):\$PATH"/;
+const GLOBAL_CONFIG_WRITE = /pnpm config set --global global-bin-dir "([^"]+)"/;
+
 function pnpmGlobalBinFacts(script: string): PnpmGlobalBinFacts {
-	const text = executableLines(script).join("\n");
+	const lines = executableLines(script);
+	const text = lines.join("\n");
 	return {
 		pnpmHome: text.match(/export PNPM_HOME="([^"]+)"/)?.[1],
-		pathEntry: text.match(/export PATH="([^":]+):\$PATH"/)?.[1],
-		configuredBinDir: text.match(
-			/pnpm config set --global global-bin-dir "([^"]+)"/,
-		)?.[1],
+		pathEntry: text.match(PATH_EXPORT)?.[1],
+		configuredBinDir: text.match(GLOBAL_CONFIG_WRITE)?.[1],
 		githubPathEntry: text.match(/echo "([^"]+)" >> "\$GITHUB_PATH"/)?.[1],
+		pathExportLine: lines.findIndex((line) => PATH_EXPORT.test(line)),
+		globalConfigLine: lines.findIndex((line) => GLOBAL_CONFIG_WRITE.test(line)),
 	};
 }
 
@@ -135,6 +141,31 @@ function assertGlobalBinDirAgreesWithPnpm(script: string, label: string): void {
 		pathEntry: resolvedByPnpm,
 		configuredBinDir: resolvedByPnpm,
 		githubPathEntry: resolvedByPnpm,
+	});
+	// ORDER is part of the same invariant, not decoration: pnpm reads PATH at
+	// the moment the --global command runs, so writing the config first reds
+	// with the very #3043 error even when all three directories are correct.
+	// Measured on pnpm 11.15.1 and 11.21.0 with the two lines swapped:
+	//   + pnpm config set --global global-bin-dir …/.pnpm-global/bin
+	//   [ERROR] The configured global bin directory "…/.pnpm-global/bin" is
+	//           not in PATH
+	//   ##[step exit] 1
+	// mise-repro has no pull_request cell, so nothing but this line would
+	// catch that swap before it reached master (review F1 on #3049).
+	expect(
+		facts.pathExportLine,
+		`${label}: no PATH export`,
+	).toBeGreaterThanOrEqual(0);
+	expect(
+		facts.globalConfigLine,
+		`${label}: no --global write`,
+	).toBeGreaterThanOrEqual(0);
+	expect({
+		label,
+		pathBeforeConfig: facts.pathExportLine < facts.globalConfigLine,
+	}).toEqual({
+		label,
+		pathBeforeConfig: true,
 	});
 }
 
