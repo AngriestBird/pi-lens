@@ -945,6 +945,45 @@ describe("scanProjectDiagnostics", () => {
 		expect(reconciled.staleDropped).toBe(1);
 	});
 
+	// #2154: the same-SIZE rewrite — the case `sizeBytes` alone cannot see and
+	// `contentHash` exists for (the LSP store's own #2300 note names the
+	// NTFS-granularity version of it). Without the hash, a replacement of
+	// identical length with the mtime preserved reads as the very bytes the
+	// scan analysed. Padded to the original length on purpose; the assertion
+	// below proves the two really are the same size.
+	it("drops a row whose file was rewritten to the same length", async () => {
+		const srcDir = path.join(tmp, "src");
+		fs.mkdirSync(srcDir, { recursive: true });
+		const file = path.join(srcDir, "wrap.ts");
+		const source = [
+			"function inner(value: number) { return value; }",
+			"function wrap(value: number) {",
+			"  return inner(value);",
+			"}",
+		].join("\n");
+		fs.writeFileSync(file, source);
+
+		const scanned = await scanProjectDiagnostics({
+			cwd: tmp,
+			tier: "cheap",
+			maxFiles: 10,
+		});
+		expect(scanned.diagnostics.length).toBeGreaterThan(0);
+
+		const before = fs.statSync(file);
+		const clean = "export const clean = 1;".padEnd(source.length, " ");
+		expect(Buffer.byteLength(clean)).toBe(Buffer.byteLength(source));
+		fs.writeFileSync(file, clean);
+		fs.utimesSync(file, before.atime, before.mtime);
+		expect(fs.statSync(file).size).toBe(before.size);
+
+		const reconciled = reconcileProjectDiagnosticsSnapshot(
+			loadProjectDiagnosticsSnapshot(tmp) as ProjectDiagnosticsSnapshot,
+		);
+		expect(reconciled.snapshot.diagnostics).toEqual([]);
+		expect(reconciled.staleDropped).toBe(1);
+	});
+
 	// The same seam in the other direction: bytes that still match what the scan
 	// read keep their row, so the content axis is a real discriminator and not a
 	// blanket drop. The file is rewritten, restored, and then stamped a minute
