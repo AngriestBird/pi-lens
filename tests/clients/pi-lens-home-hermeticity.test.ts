@@ -304,7 +304,8 @@ function topLevelFunctionBodies(strippedCode: string): Map<string, string> {
 	let arrowMatch: RegExpExecArray | null;
 	while ((arrowMatch = arrowOrFunctionExprPattern.exec(strippedCode))) {
 		const afterMatch = arrowMatch.index + arrowMatch[0].length;
-		const gapLength = /^\s*/.exec(strippedCode.slice(afterMatch))?.[0].length ?? 0;
+		const gapLength =
+			/^\s*/.exec(strippedCode.slice(afterMatch))?.[0].length ?? 0;
 		record(arrowMatch[1], afterMatch + gapLength);
 	}
 
@@ -617,9 +618,9 @@ function mockOverridesSymbol(
 	}
 	const aliases = realModuleAliases(callText);
 	return !aliases.some((alias) =>
-		new RegExp(`\\b${escapeRegExp(alias)}\\.${escapeRegExp(symbolName)}\\b`).test(
-			callText,
-		),
+		new RegExp(
+			`\\b${escapeRegExp(alias)}\\.${escapeRegExp(symbolName)}\\b`,
+		).test(callText),
 	);
 }
 
@@ -706,7 +707,11 @@ describe("no tests/**/*.test.ts file drives a producer's registry against the ru
 			);
 			if (!touch) continue;
 			if (
-				isIsolated(commentsBlankedStringsKept, stringsBlankedCode, touch.matchedSymbols)
+				isIsolated(
+					commentsBlankedStringsKept,
+					stringsBlankedCode,
+					touch.matchedSymbols,
+				)
 			)
 				continue;
 			flagged.push(relativePosix(TESTS_ROOT, file));
@@ -907,7 +912,9 @@ describe("no tests/**/*.test.ts file drives a producer's registry against the ru
 		].join("\n");
 
 		for (const source of [withoutDoc, withDoc]) {
-			const commentsBlankedStringsKept = stripSource(source, { strings: "keep" });
+			const commentsBlankedStringsKept = stripSource(source, {
+				strings: "keep",
+			});
 			const stringsBlankedCode = stripSource(source, { strings: "blank" });
 			const touch = touchesGlobalDirRegistry(
 				commentsBlankedStringsKept,
@@ -982,7 +989,9 @@ describe("no tests/**/*.test.ts file drives a producer's registry against the ru
 		// finds no fall-through and wrongly reports an override.
 		const callText =
 			findMockCallText(commentsBlankedStringsKept, "file-utils.js") ?? "";
-		const naiveFallsThrough = /\bactual\.getGlobalPiLensDir\s*\(/.test(callText);
+		const naiveFallsThrough = /\bactual\.getGlobalPiLensDir\s*\(/.test(
+			callText,
+		);
 		expect(naiveFallsThrough).toBe(false);
 	});
 
