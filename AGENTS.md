@@ -232,9 +232,15 @@ and PR language; detailed historical examples are in `HISTORY.md`.
     or default, name the concrete failure that reaches the user and choose the
     direction from that harm; test unreadable, absent, and thrown lookup states
     where the seam supports both directions.
-49. **Indentation unit from alignment:** a shallowest leading run can be a
-    continuation alignment rather than one nesting unit. Infer from structural
-    evidence or decline style pinning when only nested runs are visible.
+49. **Whitespace counted as structure when it is alignment:** a leading run can
+    be alignment rather than one nesting unit, and the shape has at least two
+    members — an aligned continuation inside a call (#3038) and the interior of
+    a block comment, whose ` * ` lines sit one column past their opener, which
+    made every doc-commented 2- or 4-space file read as width 1 (#3039 F1) and
+    every tab file with a top-level JSDoc read as spaces (#3039 F2). Before
+    counting leading whitespace as evidence, name which lines carry structure
+    and exclude the rest; decline rather than pin a style when only ambiguous
+    runs remain.
 
 ## Standing invariants
 

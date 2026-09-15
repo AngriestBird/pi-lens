@@ -2,4 +2,4 @@
 section: Fixed
 ---
 
-- **Make formatter indentation fallback idempotent (refs #3038)** — infer a structurally supported indentation unit, decline ambiguous nested-only evidence, and honor ancestor `.editorconfig` files so repeated formatting cannot amplify indentation.
+- **Make the formatter's no-config indentation fallback stable (refs #3038)** — infer the unit from structural lines only (block-comment interiors are alignment, not nesting), decline ambiguous nested-only evidence, and honor ancestor `.editorconfig` files, so repeated formatting neither amplifies nor shrinks a file's indentation.

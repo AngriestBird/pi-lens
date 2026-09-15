@@ -68,6 +68,75 @@ const fixture = [
 	"",
 ].join("\n");
 
+/** A 2-space module carrying the doc comment that #3039 F1 mis-read. */
+const docCommented = [
+	"/**",
+	" * Adds two numbers.",
+	" * @param a the first addend",
+	" * @param b the second addend",
+	" */",
+	"export function add(a: number, b: number): number {",
+	"  const sum = a + b;",
+	"  if (sum > 0) {",
+	"    return sum;",
+	"  }",
+	"  return 0;",
+	"}",
+	"",
+].join("\n");
+
+/** A tab-indented module carrying the doc comment that #3039 F2 mis-read. */
+const tabDocCommented = [
+	"/**",
+	" * Adds two numbers.",
+	" * @param a the first addend",
+	" * @param b the second addend",
+	" * @returns the sum, or zero",
+	" */",
+	"export function add(a: number, b: number): number {",
+	"\tconst sum = a + b;",
+	"\tif (sum > 0) {",
+	"\t\treturn sum;",
+	"\t}",
+	"\treturn 0;",
+	"}",
+	"",
+].join("\n");
+
+/**
+ * Re-indent the way `biome format --indent-style space --indent-width N` does:
+ * a line's structural depth is its leading run divided by the unit the file is
+ * currently written in, and block-comment continuations sit one column past
+ * their opener's indent. The double must honor `--indent-width`, or a detector
+ * that pins the wrong width would look inert.
+ */
+function reindentAsBiome(
+	content: string,
+	width: number,
+	unit: number,
+): string {
+	const out: string[] = [];
+	let inBlock = false;
+	for (const line of content.split("\n")) {
+		const leading = /^ */.exec(line)?.[0].length ?? 0;
+		const rest = line.slice(leading);
+		if (rest === "") {
+			out.push("");
+			continue;
+		}
+		if (inBlock) {
+			out.push(
+				" ".repeat(Math.floor((leading - 1) / unit) * width + 1) + rest,
+			);
+			if (rest.includes("*/")) inBlock = false;
+			continue;
+		}
+		out.push(" ".repeat(Math.floor(leading / unit) * width) + rest);
+		if (rest.startsWith("/*") && !rest.includes("*/")) inBlock = true;
+	}
+	return out.join("\n");
+}
+
 describe("formatter indentation inference through FormatService (#3038)", () => {
 	beforeEach(() => {
 		safeSpawnAsync.mockReset();
@@ -185,6 +254,76 @@ describe("formatter indentation inference through FormatService (#3038)", () => 
 				expect.anything(),
 			);
 			expect(safeSpawnAsync.mock.calls[0]?.[1]).not.toContain("--indent-width");
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("keeps a doc-commented 2-space file byte-identical across three passes", async () => {
+		// Recurrence this pins (#3039 F1): the block comment's ` * ` continuation
+		// lines are indented one column, and `/**` sits at column 0, so the
+		// structural-boundary check certified width 1 and the first pass rewrote
+		// every doc-commented 2- and 4-space file in the repository.
+		const env = setupTestEnvironment("pi-lens-format-indent-doc-");
+		try {
+			writeBiomeEvidence(env.tmpDir);
+			const filePath = path.join(env.tmpDir, "add.ts");
+			fs.writeFileSync(filePath, docCommented);
+			const argv: string[][] = [];
+			let unit = 2;
+			safeSpawnAsync.mockImplementation(
+				async (_command: string, args: string[]) => {
+					argv.push(args);
+					const width = Number(args[args.indexOf("--indent-width") + 1]);
+					const current = fs.readFileSync(filePath, "utf8");
+					fs.writeFileSync(filePath, reindentAsBiome(current, width, unit));
+					unit = width;
+					return { status: 0, stdout: "", stderr: "" };
+				},
+			);
+
+			const service = new FormatService("format-indent-doc", true);
+			for (let pass = 0; pass < 3; pass++) {
+				service.recordRead(filePath);
+				await service.formatFile(filePath);
+				expect(fs.readFileSync(filePath, "utf8")).toBe(docCommented);
+			}
+
+			expect(argv).toHaveLength(3);
+			for (const args of argv) {
+				expect(args).toEqual(
+					expect.arrayContaining([
+						"--indent-style",
+						"space",
+						"--indent-width",
+						"2",
+					]),
+				);
+			}
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("keeps tab style for a tab file carrying a top-level doc comment", async () => {
+		// Recurrence this pins (#3039 F2): the six 1-space comment continuation
+		// lines outnumbered the tab-indented lines, so the space-majority branch
+		// won and a tab-indented file was pinned to two spaces.
+		const env = setupTestEnvironment("pi-lens-format-indent-tabdoc-");
+		try {
+			writeBiomeEvidence(env.tmpDir);
+			const filePath = path.join(env.tmpDir, "tabbed.ts");
+			fs.writeFileSync(filePath, tabDocCommented);
+			safeSpawnAsync.mockResolvedValue({ status: 0, stdout: "", stderr: "" });
+
+			const service = new FormatService("format-indent-tabdoc", true);
+			service.recordRead(filePath);
+			await service.formatFile(filePath);
+
+			expect(safeSpawnAsync.mock.calls[0]?.[1]).toEqual(
+				expect.arrayContaining(["--indent-style", "tab"]),
+			);
+			expect(fs.readFileSync(filePath, "utf8")).toBe(tabDocCommented);
 		} finally {
 			env.cleanup();
 		}
