@@ -238,10 +238,11 @@ and PR language; detailed historical examples are in `HISTORY.md`.
     where the seam supports both directions.
 49. **Whitespace counted as structure when it is alignment:** a leading run can
     be alignment, not one nesting unit. Known members: an aligned continuation
-    inside a call (#3038) and the interior of a block comment, whose ` * ` lines
-    sit one column past their opener (#3039). Name which lines carry structure
-    and exclude the rest before counting; decline rather than pin a style when
-    only ambiguous runs remain.
+    inside a call (#3038), the interior of a block comment, whose ` * ` lines
+    sit one column past their opener (#3039), and the same block-comment
+    interior picked as `indent-retarget.ts`'s extrapolation base unit (#3052).
+    Name which lines carry structure and exclude the rest before counting;
+    decline rather than pin a style when only ambiguous runs remain.
 
 ## Standing invariants
 
@@ -478,6 +479,13 @@ npm run docs:rule-catalogs            regenerate rule catalogs
 npm run hygiene -- --dry-run          inspect worktree/process hygiene
 node scripts/ci-verdict.mjs <pr|sha>  exact-head CI verdict
 ```
+
+A workflow edit whose only executing lane is master-only (a job gated
+`if: github.event_name != 'pull_request'`) has no CI evidence at merge time:
+run it on the branch with `gh workflow run <file> --ref <branch>` and quote
+the run id and per-job conclusions, or give the edited lane one PR-eligible
+cell (#3043, where six install-smoke cells failed on every master push for a
+day because #3033's PR could not run the arm it changed).
 
 Build after TypeScript changes before tests. The stale-build guard rejects a
 missing or older compiled twin. Run targeted tests while iterating and one

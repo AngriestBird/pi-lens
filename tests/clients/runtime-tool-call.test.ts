@@ -786,3 +786,46 @@ describe("#2423 review round 4 (F5) — the hashline anchor memo drops at the to
 		}
 	});
 });
+
+// #3052: the indent-autopatch bridge (handleToolCall -> tryCorrectIndentation-
+// MismatchFromContent -> retargetReplacementIndentation) must not pick a
+// block comment's alignment as the base nesting unit when it patches
+// newText for a real "edit" tool call. Drives the actual production
+// sequence end to end (no hand-rolled reimplementation of either function).
+describe("#3052 indent autopatch does not retarget from a comment's alignment", () => {
+	it("patches newText's deeper nesting from the code's own indent unit, not the JSDoc's", async () => {
+		mockPipelineSucceeds();
+		const env = setupTestEnvironment("pi-lens-3052-premise-");
+		try {
+			// The real file already has the corrected indentation: a 1-space
+			// JSDoc continuation (comment ratio 1->2) and a 4-space code line
+			// whose OWN ratio (4->3) differs from the comment's.
+			const corrected = "/**\n  * doc\n  */\nfunction f() {\n   go();\n}\n";
+			const filePath = createTempFile(env.tmpDir, "src/f.ts", corrected);
+			// The model's oldText guess (mismatched vs. the real file) and a
+			// newText whose second line nests one level deeper than anything
+			// oldText showed the corrector.
+			const oldText = "/**\n * doc\n */\nfunction f() {\n    go();\n}";
+			const newText = "function g() {\n    a();\n        b();\n}";
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			const event = {
+				toolName: "edit",
+				input: { path: filePath, oldText, newText },
+			};
+
+			await handleToolCall(
+				baseDeps({ runtime, ctx: { cwd: env.tmpDir }, event }),
+			);
+
+			// applyNewText patches event.input.newText in place (the host then
+			// applies this replacement text) — assert the PATCHED value, the
+			// same field production hands back to the caller.
+			expect((event.input as { newText: string }).newText).toBe(
+				"function g() {\n   a();\n      b();\n}",
+			);
+		} finally {
+			env.cleanup();
+		}
+	});
+});

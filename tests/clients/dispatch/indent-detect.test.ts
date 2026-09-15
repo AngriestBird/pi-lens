@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+	blockCommentInteriorMask,
 	detectIndentation,
 	hasDetectableIndentation,
 } from "../../../clients/dispatch/indent-detect.js";
@@ -241,4 +242,45 @@ describe("indentation detection state space (#3038, #3039)", () => {
 			expect(hasDetectableIndentation(content)).toBe(expected);
 		},
 	);
+});
+
+// Round 2, F2: blockCommentInteriorMask is a public per-index contract now
+// (indent-retarget.ts, #3052, depends on the opener itself being `false`),
+// so it gets its own direct assertions instead of only being observed
+// indirectly through detectIndentation's aggregated width.
+describe("blockCommentInteriorMask", () => {
+	it("masks only the interior of a terminated JSDoc, keeping the opener false", () => {
+		const lines = ["/**", " * doc", " */", "code();"];
+		expect(blockCommentInteriorMask(lines)).toEqual([false, true, true, false]);
+	});
+
+	it("keeps every line structural when the opener never closes (R21 shape)", () => {
+		const lines = ['const s = "/*";', "function f() {", "  go();", "}"];
+		expect(blockCommentInteriorMask(lines)).toEqual([
+			false,
+			false,
+			false,
+			false,
+		]);
+	});
+
+	it("does not open a region for a /* that follows // on the same line (R21b shape)", () => {
+		const lines = ["// matches /* here", "function f() {", "  go();", "}"];
+		expect(blockCommentInteriorMask(lines)).toEqual([
+			false,
+			false,
+			false,
+			false,
+		]);
+	});
+
+	it("opens a region for a banner whose opener line carries a URL // after /* (R21d shape)", () => {
+		const lines = [
+			"/* see https://example.com/spec",
+			" * details",
+			" */",
+			"function f() {",
+		];
+		expect(blockCommentInteriorMask(lines)).toEqual([false, true, true, false]);
+	});
 });

@@ -30,6 +30,7 @@ import {
 	DOTNET_FSHARP_ROOT_MARKERS,
 	KIND_EXTENSIONS,
 } from "../file-kinds.js";
+import { extensionsForLanguage } from "../language-registry.js";
 import {
 	CARGO_WORKSPACE_MEMBER_DIALECT,
 	direntsHaveMarkerGlobMatch,
@@ -3231,6 +3232,25 @@ export const GleamServer: LSPServerInfo = {
 	},
 };
 
+export const TinymistServer: LSPServerInfo = {
+	id: "tinymist",
+	name: "Tinymist",
+	extensions: extensionsForLanguage("typst"),
+	root: RootWithFallback(createRootDetector(["typst.toml", ".git"])),
+	availabilityKey: "tinymist",
+	async spawn(root, options) {
+		return resolveAndLaunch(
+			{
+				candidates: ["tinymist"],
+				args: ["lsp"],
+				cwd: root,
+				managedToolId: "tinymist",
+			},
+			options?.allowInstall,
+		);
+	},
+};
+
 export const MarksmanServer: LSPServerInfo = {
 	id: "marksman",
 	name: "Marksman",
@@ -4029,6 +4049,7 @@ export const LSP_SERVERS: LSPServerInfo[] = [
 	ElixirServer,
 	ElixirExpertServer,
 	GleamServer,
+	TinymistServer,
 	MarksmanServer,
 	OCamlServer,
 	ClojureServer,

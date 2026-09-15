@@ -15,11 +15,7 @@
 
 import * as path from "node:path";
 import { minimatch } from "../deps/minimatch.js";
-import { getAstGrepRuleSources } from "../sgconfig.js";
-import {
-	loadYamlRules,
-	loadYamlRulesFresh,
-} from "./runners/yaml-rule-parser.js";
+import { buildEffectiveAstGrepCatalog } from "./ast-grep-catalog.js";
 
 /**
  * True when `filePath` is carved out of a rule by one of its glob `patterns`.
@@ -47,12 +43,16 @@ export function isRuleIgnoredForPath(
 /**
  * Rule id → its `ignores` globs, for the effective ast-grep catalog at `root`.
  *
- * Same sources, same precedence, and the same two loaders the NAPI runner uses
- * (project rule trees are mutable within a session, bundled catalogs are not),
- * so the LSP seam carves out exactly the paths the runner carves out. Both
- * loaders are cached, so this is ~0.09 ms per call on pi-lens's own catalog
- * (17 rules with `ignores`, measured) — cheap enough to call per file rather
- * than thread a preloaded map through every sweep.
+ * #3053: the catalog walk and its first-source-wins precedence used to be
+ * reimplemented here; both this function and the NAPI runner now read
+ * `buildEffectiveAstGrepCatalog` (clients/dispatch/ast-grep-catalog.ts), so
+ * the LSP seam carves out exactly the paths the runner carves out by
+ * construction rather than by two hand-aligned copies — see that module's
+ * docstring for the precedence rule and the within-source-duplicate decision
+ * this function inherits from it. The catalog's own loaders are cached, so
+ * this is ~0.09 ms per call on pi-lens's own catalog (17 rules with
+ * `ignores`, measured) — cheap enough to call per file rather than thread a
+ * preloaded map through every sweep.
  *
  * Keyed by the EXACT rule id, matching the runner: a `-js` twin (e.g.
  * `no-console-except-error-js`) carries its own `ignores` in its own document,
@@ -63,40 +63,9 @@ export function loadRuleIgnorePatterns(
 	root: string,
 ): ReadonlyMap<string, readonly string[]> {
 	const patterns = new Map<string, readonly string[]>();
-	const seenRuleIds = new Set<string>();
-	for (const source of getAstGrepRuleSources(root)) {
-		// No try/catch around the loaders: every I/O path inside them already
-		// swallows its own failure (missing dir, unreadable readdir, unreadable
-		// file all yield an empty list), so a catch here would be a guard no
-		// mutation can red.
-		const rules =
-			source.origin === "project"
-				? loadYamlRulesFresh(source.dir)
-				: loadYamlRules(source.dir);
-		for (const rule of rules) {
-			// Claim the id on FIRST sighting and only then look at `ignores` —
-			// the same order as `ast-grep-napi.ts`'s `seenRuleIds.add(rule.id)`,
-			// which claims unconditionally BEFORE its own ignore check. Recording
-			// the claim inside `patterns` instead would skip a doc that declares no
-			// `ignores` without claiming its id, and a LOWER-precedence copy of the
-			// same id would then register ITS globs: a project rule that redefines
-			// a bundled id to fire everywhere kept the bundled `scripts/**`
-			// carve-out over LSP while the runner fired on it per-edit (#3041 r2).
-			// Deliberately NOT mirroring the runner's `duplicateSet` skip for ids
-			// duplicated within ONE source. The two surfaces genuinely differ there
-			// and neither choice matches the runner: the runner emits only its
-			// Duplicate-rule-id diagnostic and drops the rule outright, so it
-			// suppresses everything for that id, while `materializeMergedRuleDir`
-			// (sgconfig.ts) drops only documents claimed by an EARLIER source —
-			// both copies survive into the merged dir and ast-grep's LSP publishes
-			// them. So the choice is between honoring the first copy's carve-out
-			// and registering no patterns at all; the latter would leave those
-			// published findings unfiltered and re-open #3041 for that id.
-			if (seenRuleIds.has(rule.id)) continue;
-			seenRuleIds.add(rule.id);
-			if (!rule.ignores?.length) continue;
-			patterns.set(rule.id, rule.ignores);
-		}
+	for (const [id, { rule }] of buildEffectiveAstGrepCatalog(root)
+		.effectiveRules) {
+		if (rule.ignores?.length) patterns.set(id, rule.ignores);
 	}
 	return patterns;
 }

@@ -2111,7 +2111,20 @@ const HELPER_UNBOUNDED: Readonly<Record<string, number>> = {
 	// its single-directory `await fs.access` onto the synchronous
 	// `findNearestContaining` seam (`clients/path-utils.ts`), which walks
 	// ancestors, so one unbounded await left this module.
-	"clients/formatters.ts": 113,
+	// then 113 → 115 (#3037): `typstyleFormatter` adds the same two PATH probes every
+	// managed-smart-default formatter beside it already holds — `await
+	// which("typstyle")` in `resolveCommand` and the same call inside its
+	// `managedToolDetect` availability closure. Neither can take `bounded()`
+	// today: `FormatterInfo.resolveCommand(filePath)` and `detect(cwd)` carry no
+	// `AbortSignal`, so there is no hook signal at the seam — #2523 AC4's
+	// deps-type threading is what lowers this whole family, not a per-caller
+	// wrap. Both spend the module's own `which()`, a latched
+	// `safeSpawnAsync("which"|"where", …, { timeout: WHICH_BUDGET_MS })` whose
+	// leaf spawn budget and availability latch already cap it — the same leaf
+	// the other 43 `await which(...)` sites in this module spend, which is
+	// exactly the "bound at the leaf, unreachable from the hook" shape this
+	// pin exists to keep visible rather than to bless.
+	"clients/formatters.ts": 115,
 	"clients/gitleaks-client.ts": 4,
 	"clients/govulncheck-client.ts": 6,
 	// 192 → 194 (#2722), in two steps, both registered rather than absorbed:

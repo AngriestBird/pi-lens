@@ -42,7 +42,6 @@
 	"tests/clients/dispatch/runners/ast-grep-css-rules.test.ts:../../../../clients/lsp/wait-policy/index.js:[\"resolveAstGrepNativeExe\"]": 3,
 	"tests/clients/dispatch/runners/ast-grep-napi-html-embed.test.ts:../../../../clients/lsp/wait-policy/index.js:[\"resolveAstGrepNativeExe\"]": 3,
 	"tests/clients/dispatch/runners/ast-grep-napi-language-coverage.test.ts:../../../../clients/lsp/wait-policy/index.js:[\"resolveAstGrepNativeExe\"]": 3,
-	"tests/clients/dispatch/runners/ast-grep-napi.test.ts:../../../../clients/dispatch/runners/yaml-rule-parser.js:[\"MAX_BLOCKING_RULE_COMPLEXITY\",\"calculateRuleComplexity\",\"isOverlyBroadPattern\",\"isStructuredRule\",\"loadYamlRules\"]": 1,
 	"tests/clients/dispatch/runners/ast-grep-napi.test.ts:../../../../clients/lsp/index.js:[\"hasAuxiliaryLspPublishedForRoot\"]": 14,
 	"tests/clients/dispatch/runners/ast-grep-napi.test.ts:../../../../clients/package-root.js:[\"resolvePackagePath\"]": 1,
 	"tests/clients/dispatch/runners/ast-grep-napi.test.ts:../../../../clients/tool-policy.js:[\"hasEslintConfig\"]": 2,

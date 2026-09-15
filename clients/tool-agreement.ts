@@ -120,6 +120,10 @@ export const TOOL_AGREEMENT_POLICIES: Readonly<
 		check: hasStandardrbConfig,
 	},
 	ktlint: { bucket: "standalone-cli", withoutEvidence: "decline" },
+	// typstyle is a standalone formatter binary. Its smart-default policy is
+	// autonomous, so PATH or managed-install availability is sufficient
+	// agreement; it is not owned by a project manifest (#3037).
+	typstyle: { bucket: "standalone-cli", withoutEvidence: "decline" },
 	ktfmt: {
 		bucket: "project-config",
 		withoutEvidence: "decline",
