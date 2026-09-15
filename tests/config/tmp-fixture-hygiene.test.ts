@@ -22,11 +22,10 @@ const REPO_ROOT = path.resolve(
 );
 
 // Tmp-fixture hygiene governance (#2912). The setup hook in
-// tests/support/vitest-setup.ts contains every temp dir a test creates by
-// pointing TMPDIR/TMP/TEMP at a per-file private root, then removes that root
-// in afterAll and reds the file on leftovers. That containment holds only
-// when every mkdtemp site derives its parent from os.tmpdir()/tmpdir() at
-// call time. This sweep pins the sites that would escape it.
+// tests/support/vitest-setup.ts preserves the real temp namespace, snapshots
+// pi-lens-* entries, admits known prefixes, and the serialized governance
+// owner fails on leftovers, then cleans them. Raw mkdtemp roots depend on
+// owning-file teardown; deferred writes can recreate them afterward.
 
 const MKTEMP_CALLEE = /\bmkdtempSync\s*\(|\bmkdtemp\s*\(/g;
 const TMPDIR_SOURCE = /\bos\.tmpdir\s*\(\s*\)|[^a-zA-Z]tmpdir\s*\(\s*\)/;
