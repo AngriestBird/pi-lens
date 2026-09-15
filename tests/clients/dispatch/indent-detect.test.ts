@@ -10,6 +10,10 @@ describe("indentation detection", () => {
 		["  one\n    two\n", { style: "space", width: 2 }],
 		["    one\n        two\n", { style: "space", width: 4 }],
 		["   one\n", { style: "space", width: 3 }],
+		[
+			"  shallow\n" + "      deep\n".repeat(10),
+			{ style: "space", width: 2 },
+		],
 	])("detects %s", (content, expected) => {
 		expect(detectIndentation(content)).toEqual(expected);
 		expect(hasDetectableIndentation(content)).toBe(true);

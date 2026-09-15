@@ -16,7 +16,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { BoundedLruCache } from "./bounded-cache.js";
 import { createGenerationSource } from "./generation-guard.js";
-import { normalizeMapKey } from "./path-utils.js";
+import { findNearestContaining, normalizeMapKey } from "./path-utils.js";
 import { resolveToolCwd } from "./tool-cwd.js";
 import { resolveCargoPackageEdition } from "./cargo-manifest.js";
 import { resolveKtfmtGradleStyle } from "./gradle-ktfmt-style.js";
@@ -842,12 +842,7 @@ export const FORMATTERS_WITH_EXPLICIT_CONFIG_CHECK = new Set<string>(
 // --- Formatter Definitions ---
 
 async function hasEditorConfig(cwd: string): Promise<boolean> {
-	try {
-		await fs.access(path.join(cwd, ".editorconfig"));
-		return true;
-	} catch {
-		return false;
-	}
+	return findNearestContaining(cwd, [".editorconfig"]) !== undefined;
 }
 
 async function indentationArgs(

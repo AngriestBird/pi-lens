@@ -22,19 +22,12 @@ export function detectIndentation(content: string): Indentation {
 	if (tabs === 0 && spaceCounts.length === 0) return DEFAULT_INDENTATION;
 	if (tabs > spaceCounts.length) return { style: "tab", width: 1 };
 	if (spaceCounts.length > tabs) {
-		const counts = new Map<number, number>();
-		for (const count of spaceCounts) {
-			for (const other of spaceCounts) {
-				if (other > count) {
-					const delta = other - count;
-					counts.set(delta, (counts.get(delta) ?? 0) + 1);
-				}
-			}
-		}
-		const inferredWidth =
-			[...counts.entries()].sort(
-				(a, b) => b[1] - a[1] || a[0] - b[0],
-			)[0]?.[0] ?? Math.min(...spaceCounts);
+		// Pairwise deltas depend on how many lines happen to occur at each
+		// nesting depth. A formatter can change that distribution while
+		// preserving the file's indentation unit, causing repeated formatting to
+		// escalate (2 -> 4 -> 8, #3038). The shallowest observed indentation is
+		// the stable unit and remains unchanged when deeper levels are added.
+		const inferredWidth = Math.min(...spaceCounts);
 		return { style: "space", width: inferredWidth <= 8 ? inferredWidth : 2 };
 	}
 
