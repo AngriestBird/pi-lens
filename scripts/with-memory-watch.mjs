@@ -24,12 +24,31 @@
  *   PI_LENS_MEM_WATCH_STEP_MB       Print when available memory has fallen this
  *                                   far since the last printed line
  *                                   (default 1024).
+ *   PI_LENS_MEM_WATCH_SAMPLE_FILE   Path for the bounded per-sample tail (the
+ *                                   #2042 2026-09-15 diagnosis's "cheapest
+ *                                   probe"). Default:
+ *                                   <tmpdir>/pi-lens-mem-watch-samples.log.
+ *   PI_LENS_MEM_WATCH_SAMPLE_TAIL_MS
+ *                                   How much history the sample file keeps
+ *                                   (default 60000 = last 60s). The file is a
+ *                                   fixed-size ring, never a per-sample log
+ *                                   line in the job's console output, and
+ *                                   never unbounded — including across a run
+ *                                   long enough to outlast its own tail.
  */
 
 import { spawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
-import { formatVerdict, readMemory, shouldPrint } from "./lib/memory-watch.mjs";
+import {
+	formatSampleLine,
+	formatVerdict,
+	pushSample,
+	readCgroupSample,
+	readMemory,
+	resolveCgroupDir,
+	shouldPrint,
+} from "./lib/memory-watch.mjs";
 
 /**
  * Every line this wrapper emits goes through a BLOCKING write, never
@@ -64,6 +83,17 @@ if (command.length === 0) {
 const intervalMs = Number(process.env.PI_LENS_MEM_WATCH_INTERVAL_MS) || 2000;
 const thresholdMb = Number(process.env.PI_LENS_MEM_WATCH_LOW_MB) || 1024;
 const stepMb = Number(process.env.PI_LENS_MEM_WATCH_STEP_MB) || 1024;
+const sampleFile =
+	process.env.PI_LENS_MEM_WATCH_SAMPLE_FILE ||
+	`${os.tmpdir()}/pi-lens-mem-watch-samples.log`;
+const sampleTailMs =
+	Number(process.env.PI_LENS_MEM_WATCH_SAMPLE_TAIL_MS) || 60_000;
+const sampleTailLines = Math.max(1, Math.ceil(sampleTailMs / intervalMs));
+// Resolved once: the cgroup a process belongs to does not change mid-run, and
+// re-walking /proc/self/cgroup every 200ms would be pure overhead.
+const cgroupDir = resolveCgroupDir();
+/** @type {string[]} */
+const sampleTail = [];
 
 const first = readMemory();
 emit(
@@ -100,6 +130,23 @@ const timer = setInterval(() => {
 		emit(
 			`[mem-watch] ${at} availableMb=${sample.availableMb} of ${sample.totalMb}\n`,
 		);
+	}
+	// The #2042 2026-09-15 cheapest probe: everything a 200ms MemAvailable poll
+	// cannot see. Never printed to the job's console — that would bury the test
+	// output — only appended to the bounded on-disk tail below, which an
+	// `if: always()` CI step reads even when this very wrapper is the kill's
+	// victim (the master 1701d01 red: no verdict line, because the wrapper
+	// itself died — this file is the record that survives that case).
+	pushSample(
+		sampleTail,
+		formatSampleLine(at, sample, readCgroupSample(cgroupDir)),
+		sampleTailLines,
+	);
+	try {
+		fs.writeFileSync(sampleFile, `${sampleTail.join("\n")}\n`);
+	} catch {
+		// Best-effort: a disk-full or permissions failure here must never take
+		// down the sampler or the wrapped command.
 	}
 }, intervalMs);
 // The watcher must never be the reason the process stays alive.

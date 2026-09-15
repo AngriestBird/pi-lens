@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -179,3 +180,131 @@ describe("with-memory-watch verdict wiring (#2042)", () => {
 		).toMatch(/watch\.childPid\s*=\s*child\.pid/);
 	});
 });
+
+// flake-shape: raw-timer-wait — the poll loop below waits for the wrapper's
+// OWN real setInterval sampling tick to reach disk, which cannot be faked
+// from the test process (a separate real child process); a fixed sleep here
+// flaked under concurrent vitest workers, so this waits for the actual
+// condition (file exists) instead.
+/**
+ * #2042 2026-09-15 diagnosis, section A: the cheapest probe. End-to-end
+ * through the real wrapper, not the library functions directly, so the wiring
+ * between the interval tick and the on-disk file is what is under test.
+ */
+describe("with-memory-watch sample tail (#2042 2026-09-15)", () => {
+	function makeSampleFile(): string {
+		return path.join(
+			os.tmpdir(),
+			`pi-lens-mem-watch-test-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.log`,
+		);
+	}
+
+	it("writes a bounded sample file across a multi-tick run", async () => {
+		const sampleFile = makeSampleFile();
+		try {
+			// 5 ticks at 30ms against a 2-tick tail: proves both that the file is
+			// written before the child exits (the wrapper is not the killed
+			// process in this run, but the file must not depend on the verdict
+			// handler to exist) and that it never grows past the cap.
+			await runWrapperWithEnv(
+				["--", nodeCmd, "-e", "setTimeout(() => {}, 170)"],
+				{
+					PI_LENS_MEM_WATCH_INTERVAL_MS: "30",
+					PI_LENS_MEM_WATCH_SAMPLE_FILE: sampleFile,
+					PI_LENS_MEM_WATCH_SAMPLE_TAIL_MS: "60",
+				},
+			);
+			const lines = fs
+				.readFileSync(sampleFile, "utf8")
+				.split("\n")
+				.filter(Boolean);
+			// ceil(60/30) = 2. Never more, even though ~5 ticks fired.
+			expect(lines.length).toBeGreaterThan(0);
+			expect(lines.length).toBeLessThanOrEqual(2);
+			for (const line of lines) {
+				expect(line).toMatch(/^\d\d:\d\d:\d\d availableMb=\d+ totalMb=\d+ /);
+				expect(line).toMatch(/memCurrentMb=(\?|\d+) memPeakMb=(\?|\d+)/);
+				expect(line).toMatch(/pids=(\?|\d+)/);
+			}
+		} finally {
+			fs.rmSync(sampleFile, { force: true });
+		}
+	}, 15_000);
+
+	it("still leaves the sample file behind when the wrapper's own process is the one killed", async () => {
+		// The master 1701d01 red: no verdict line, because the wrapper itself
+		// died, not its child. That is exactly the case the file has to survive
+		// -- proven here by killing the WRAPPER (not the child) mid-run and
+		// checking the file anyway. Waits for the FIRST tick's write rather than
+		// a fixed sleep, so this stays reliable under a loaded, contended box
+		// (a fixed short sleep flaked here under concurrent vitest workers: the
+		// wrapper's own process start can take longer than the sleep on a busy
+		// host, which would make the kill land before the first tick and turn a
+		// real fix into a flaky test).
+		const sampleFile = makeSampleFile();
+		try {
+			const child = spawn(
+				process.execPath,
+				[wrapper, "--", nodeCmd, "-e", "setTimeout(() => {}, 30000)"],
+				{
+					cwd: repoRoot,
+					stdio: "ignore",
+					env: {
+						...process.env,
+						PI_LENS_MEM_WATCH_INTERVAL_MS: "30",
+						PI_LENS_MEM_WATCH_SAMPLE_FILE: sampleFile,
+						PI_LENS_MEM_WATCH_SAMPLE_TAIL_MS: "60",
+					},
+				},
+			);
+			const deadline = Date.now() + 10_000;
+			while (!fs.existsSync(sampleFile)) {
+				if (Date.now() > deadline) {
+					child.kill("SIGKILL");
+					throw new Error("sample file never appeared before the deadline");
+				}
+				await new Promise((resolve) => setTimeout(resolve, 10));
+			}
+			child.kill("SIGKILL");
+			// One more tick's worth of grace for the write that was already
+			// in-flight when the kill landed to finish reaching disk.
+			await new Promise((resolve) => setTimeout(resolve, 100));
+			expect(fs.existsSync(sampleFile)).toBe(true);
+			const lines = fs
+				.readFileSync(sampleFile, "utf8")
+				.split("\n")
+				.filter(Boolean);
+			expect(lines.length).toBeGreaterThan(0);
+		} finally {
+			fs.rmSync(sampleFile, { force: true });
+		}
+	}, 15_000);
+});
+
+/**
+ * Extends `runWrapper` with extra env vars, for the sample-file tests above.
+ */
+function runWrapperWithEnv(
+	args: string[],
+	extraEnv: Record<string, string>,
+): Promise<Run> {
+	return new Promise((resolve, reject) => {
+		const child = spawn(process.execPath, [wrapper, ...args], {
+			cwd: repoRoot,
+			stdio: ["ignore", "pipe", "pipe"],
+			env: { ...process.env, ...extraEnv },
+		});
+		let stdout = "";
+		let stderr = "";
+		child.stdout.setEncoding("utf8");
+		child.stderr.setEncoding("utf8");
+		child.stdout.on("data", (chunk: string) => {
+			stdout += chunk;
+		});
+		child.stderr.on("data", (chunk: string) => {
+			stderr += chunk;
+		});
+		child.on("error", reject);
+		child.on("close", (code) => resolve({ code, stdout, stderr }));
+	});
+}

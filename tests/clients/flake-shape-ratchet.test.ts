@@ -133,6 +133,16 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		reason:
 			"the hook remainder is the defect; fake timers isolate the delayed pre-snapshot work from scheduler contention",
 	},
+	// 2026-09-15 (#2042 cheapest probe): the sample-tail file is written by the
+	// wrapper's own real setInterval loop in a separate process; a poll waits
+	// for that file's first write rather than a fixed sleep, and one case kills
+	// the wrapper's real process to prove the tail survives that exact victim
+	// shape (master 1701d01).
+	"raw-timer-wait:scripts/with-memory-watch.test.ts": {
+		detector: "raw-timer-wait",
+		reason:
+			"the sample file is written by the wrapper's own real interval loop in a separate process; a real poll and a real kill are the subject",
+	},
 	"raw-timer-wait:support/fault-injection.ts": {
 		detector: "raw-timer-wait",
 		reason:

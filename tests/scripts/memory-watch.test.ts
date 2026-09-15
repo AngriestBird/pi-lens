@@ -1,7 +1,14 @@
-import { describe, expect, it } from "vitest";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
 import {
+	formatSampleLine,
 	formatVerdict,
 	parseMeminfo,
+	pushSample,
+	readCgroupSample,
+	resolveCgroupDir,
 	shouldPrint,
 } from "../../scripts/lib/memory-watch.mjs";
 
@@ -215,5 +222,183 @@ describe("memory watch verdict classifies from its own numbers (#2042)", () => {
 		expect(line).not.toContain("HEADROOM");
 		expect(line).not.toContain("the OS reclaimed memory");
 		expect(line).toContain("exitCode=1");
+	});
+});
+
+/**
+ * #2042 2026-09-15 diagnosis, section A / (4): a 2s (now 200ms) MemAvailable
+ * poll cannot see per-process RSS, PID-count churn, or PSI stall; cgroup v2
+ * can. These tests build a fake `/sys/fs/cgroup` + `/proc/self/cgroup` tree so
+ * the walk and the parsing are pinned without touching the real filesystem.
+ */
+describe("cgroup resolution (#2042 2026-09-15)", () => {
+	const roots: string[] = [];
+	afterEach(() => {
+		for (const root of roots.splice(0)) {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+	function makeRoot(): string {
+		const root = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-cgroup-fixture-"),
+		);
+		roots.push(root);
+		return root;
+	}
+
+	it("walks up from /proc/self/cgroup to the first ancestor with a readable memory.events", () => {
+		const root = makeRoot();
+		const procCgroup = path.join(root, "proc-self-cgroup");
+		fs.writeFileSync(
+			procCgroup,
+			"0::/system.slice/hosted-compute-agent.service/deep/leaf\n",
+		);
+		const cgroupRoot = path.join(root, "sys-fs-cgroup");
+		const ancestorDir = path.join(
+			cgroupRoot,
+			"system.slice/hosted-compute-agent.service",
+		);
+		fs.mkdirSync(ancestorDir, { recursive: true });
+		fs.writeFileSync(path.join(ancestorDir, "memory.events"), "oom 0\n");
+		// The leaf itself has no memory.events (the shape cgroup v2 actually
+		// produces for a delegated slice) -- only the walk finds the ancestor.
+		expect(resolveCgroupDir(cgroupRoot, procCgroup)).toBe(ancestorDir);
+	});
+
+	it("returns null rather than the root when no ancestor has memory.events", () => {
+		// This is the exact defect the "Runner capacity" step had: reading the
+		// literal root prints nothing, because cgroup v2 never populates it. A
+		// mutant that returned the root here instead of null would silently
+		// resurrect that defect.
+		const root = makeRoot();
+		const procCgroup = path.join(root, "proc-self-cgroup");
+		fs.writeFileSync(procCgroup, "0::/system.slice/some.service\n");
+		const cgroupRoot = path.join(root, "sys-fs-cgroup");
+		fs.mkdirSync(cgroupRoot, { recursive: true });
+		expect(resolveCgroupDir(cgroupRoot, procCgroup)).toBeNull();
+	});
+
+	it("returns null when /proc/self/cgroup itself is unreadable", () => {
+		const root = makeRoot();
+		expect(
+			resolveCgroupDir(
+				path.join(root, "sys-fs-cgroup"),
+				path.join(root, "does-not-exist"),
+			),
+		).toBeNull();
+	});
+});
+
+describe("cgroup sample reading (#2042 2026-09-15)", () => {
+	const roots: string[] = [];
+	afterEach(() => {
+		for (const root of roots.splice(0)) {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+	function makeCgroupDir(files: Record<string, string>): string {
+		const dir = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-cgroup-sample-"),
+		);
+		roots.push(dir);
+		for (const [name, content] of Object.entries(files)) {
+			fs.writeFileSync(path.join(dir, name), content);
+		}
+		return dir;
+	}
+
+	it("reads memory.current and memory.peak as MB, not bytes", () => {
+		const dir = makeCgroupDir({
+			"memory.current": `${3_251_634_176}\n`, // ~3102 MB
+			"memory.peak": `${9_678_290_944}\n`, // ~9229 MB
+		});
+		const sample = readCgroupSample(dir);
+		expect(sample.memCurrentMb).toBe(Math.round(3_251_634_176 / (1024 * 1024)));
+		expect(sample.memPeakMb).toBe(Math.round(9_678_290_944 / (1024 * 1024)));
+	});
+
+	it("reads pids.current as a plain integer", () => {
+		const dir = makeCgroupDir({ "pids.current": "42\n" });
+		expect(readCgroupSample(dir).pidsCurrent).toBe(42);
+	});
+
+	it("reads PSI's cumulative 'some' total, not the instantaneous avg", () => {
+		// A stall between two 200ms samples still shows up in the next sample
+		// because `total` only ever grows -- that is the whole point of using it
+		// instead of avg10, which a short spike can fall in and out of unseen.
+		const dir = makeCgroupDir({
+			"memory.pressure":
+				"some avg10=0.00 avg60=1.50 avg300=0.80 total=123456\n" +
+				"full avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+			"cpu.pressure": "some avg10=12.50 avg60=8.00 avg300=2.00 total=987654\n",
+		});
+		const sample = readCgroupSample(dir);
+		expect(sample.memPressureSomeTotal).toBe(123456);
+		expect(sample.cpuPressureSomeTotal).toBe(987654);
+	});
+
+	it("reports every field as null, never throws, for a missing cgroup dir", () => {
+		const sample = readCgroupSample(null);
+		expect(sample).toEqual({
+			memCurrentMb: null,
+			memPeakMb: null,
+			pidsCurrent: null,
+			memPressureSomeTotal: null,
+			cpuPressureSomeTotal: null,
+		});
+	});
+
+	it("reports one missing file as null without failing the other fields", () => {
+		const dir = makeCgroupDir({ "memory.current": "1048576\n" }); // 1 MB
+		const sample = readCgroupSample(dir);
+		expect(sample.memCurrentMb).toBe(1);
+		expect(sample.memPeakMb).toBeNull();
+		expect(sample.pidsCurrent).toBeNull();
+	});
+});
+
+describe("sample line formatting and the bounded tail (#2042 2026-09-15)", () => {
+	it("formats every field, substituting ? for anything unreadable", () => {
+		const line = formatSampleLine(
+			"19:02:48",
+			{ availableMb: 4077, totalMb: 15990 },
+			{
+				memCurrentMb: 3102,
+				memPeakMb: 9226,
+				pidsCurrent: 41,
+				memPressureSomeTotal: 123,
+				cpuPressureSomeTotal: null,
+			},
+		);
+		expect(line).toBe(
+			"19:02:48 availableMb=4077 totalMb=15990 memCurrentMb=3102 memPeakMb=9226 " +
+				"pids=41 memPressureSomeTotal=123 cpuPressureSomeTotal=?",
+		);
+	});
+
+	// #2042 2026-09-15 shape 9, applied to the sampler itself: a resource
+	// bounded on one axis (job duration is unbounded) and unbounded on the axis
+	// that actually grows (the file's own line count) is a leak. The tail must
+	// stay a FIXED size regardless of how many samples are pushed.
+	it("keeps the tail at a fixed size no matter how many samples are pushed", () => {
+		const buffer: string[] = [];
+		for (let i = 0; i < 1000; i++) {
+			pushSample(buffer, `line-${i}`, 5);
+		}
+		expect(buffer.length).toBe(5);
+		expect(buffer).toEqual([
+			"line-995",
+			"line-996",
+			"line-997",
+			"line-998",
+			"line-999",
+		]);
+	});
+
+	it("never trims below maxLines while filling up", () => {
+		const buffer: string[] = [];
+		pushSample(buffer, "a", 3);
+		pushSample(buffer, "b", 3);
+		expect(buffer).toEqual(["a", "b"]);
 	});
 });
