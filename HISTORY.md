@@ -13,6 +13,26 @@ guidance those sections carried stayed in `AGENTS.md`.
 - **Async-spawn migration (#197)** completed; the deliberate sync residue and
   its mocking guidance remain live in AGENTS.md under the same heading.
 
+## 2026-09-15 — retrospective contract (`docs/pi-lens-retro.md`)
+
+Why it exists: one session produced four mistakes that a prose rule had
+already covered and no check enforced. (1) A fixer pinned `TMPDIR` to the
+harness `.probe-home` and reported 16 unrelated suites red on `origin/master`;
+the tree was green, the environment was wrong (`tests/support/vitest-setup.ts`
+keeps the real `TMPDIR` on purpose). (2) `install-smoke`'s `pi-load` and
+`mise-repro` jobs skip on `pull_request`, so #3033 changed those very steps
+and shipped untested; master was red for a day (#3043). (3) The infra-kill
+auto-rerun fires only on `run_attempt == 1`, so a second kill needed a hand
+rerun (#2042). (4) A runtime vitest case was added as "regression evidence"
+for a type-only compile defect (#3026); it could never red and was deleted.
+Each is mechanical: a preflight row, a governance test over workflow gates, a
+one-line workflow condition, and a reviewer duty. The contract makes the
+mechanical-versus-judgement classification the first step so the deliverable
+is the check, not the sentence. The inspiration was an external retro skill
+(mattpocock/skills, `retro`); what it lacked, and this contract adds, is the
+red-transcript requirement on the check itself and a single home for rules.
+
+
 ## Archived pre-trim agent context (2026-09-14)
 
 The detailed incident narratives, closed decisions, and subsystem evidence below
