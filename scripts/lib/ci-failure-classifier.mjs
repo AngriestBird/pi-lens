@@ -970,10 +970,12 @@ async function attemptRerun({ fetcher, owner, repo, runId }) {
  * lookup failed) and throws. With it, classification and the rerun attempt
  * still run in full, but every PR-comment step (find/upsert/reconcile) is
  * skipped -- there is no issue thread to post to. That also means the
- * cross-invocation "already reran this SHA" marker guard (shouldTriggerRerun
- * reading `existingMarker`) has no comment to read for a push run; the
- * workflow's own `run_attempt == 1` gate is what bounds a push rerun to
- * once per completed run, the same way it bounds the PR path.
+ * cross-invocation "already reran this attempt" marker guard
+ * (shouldTriggerRerun reading `existingMarker`) has no comment to read for a
+ * push run -- so on that lane the ONLY bounds are the workflow's own
+ * `run_attempt <= 2` gate and this module's MAX_AUTO_RERUN_ATTEMPT, both of
+ * which cap a head at two automatic reruns without needing any stored state
+ * (#2042).
  *
  * @param {{ fetcher: typeof fetch, owner: string, repo: string, runId: number | string, jobName?: string, prNumber?: number, allowMissingPr?: boolean }} args
  */
