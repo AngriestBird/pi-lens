@@ -73,7 +73,6 @@ function testFileNameMatches(rawBase: string, base: string): boolean {
 		base.includes("_test.") ||
 		base.includes("_spec.") ||
 		base.startsWith("test_") ||
-		base.startsWith("spec_") ||
 		/(Test|Tests|TestCase)\.(java|kt|kts|cs|fs|php)$/.test(rawBase)
 	);
 }

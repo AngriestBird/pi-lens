@@ -218,4 +218,28 @@ describe("test-file classifier parity (refs #2928, #2925)", () => {
 		expect(detectFileRole("/proj/x__tests__/foo.ts")).toBe("source");
 		expect(detectFileRole("/proj/__tests__x/foo.ts")).toBe("source");
 	});
+
+	it("isTestFile now inherits file-role's broader directory policy (refs #3078 review F1)", () => {
+		// file-utils' deleted arms only matched `/test/`, `/tests/` and
+		// `__tests__/`. Delegating to `detectFileRole` (#2928) also pulls in
+		// its `/spec/`, `/specs/` and bare `[/_-]tests?|specs?$` directory
+		// arms on a neutral basename — a direction file-utils never had.
+		// Every `isTestFile` consumer now skips these directories too:
+		// project-diagnostics/scanner's secrets scan, dispatch/dispatcher's
+		// two gates, dispatch/runners/tree-sitter's per-rule skip, and the
+		// pass-through-wrappers/async-noise/placeholder-comments rule gates.
+		for (const filePath of [
+			"/repo/spec/Widget.ts",
+			"/repo/specs/Widget.ts",
+			"/repo/my-test/Widget.ts",
+			"/repo/integration-test/Widget.ts",
+			"/repo/e2e_tests/Widget.ts",
+		]) {
+			expect(detectFileRole(filePath), filePath).toBe("test");
+			expect(isTestFile(filePath), filePath).toBe(true);
+		}
+		// Control: a neutral directory is unaffected by the inherited policy.
+		expect(detectFileRole("/repo/src/Widget.ts")).toBe("source");
+		expect(isTestFile("/repo/src/Widget.ts")).toBe(false);
+	});
 });
