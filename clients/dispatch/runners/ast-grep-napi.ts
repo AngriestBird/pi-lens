@@ -1061,7 +1061,14 @@ export function evaluateAstGrepRules(
 			if (duplicateSet.has(rule.id)) continue;
 			// Cross-layer collisions keep the first (higher-precedence) source —
 			// resolved once by `buildEffectiveAstGrepCatalog`, not per-rule here.
-			if (catalog.effectiveRules.get(rule.id)?.source !== source) continue;
+			// Compares the winning DOCUMENT (object identity), not merely its
+			// source: comparing `.source` alone can't tell a within-source
+			// duplicate's two copies apart (they share one source), so it gave
+			// no defense if `duplicateSet.has` above were ever the only guard
+			// standing (#3053 round 2 F1). Every `rule` iterated here is the
+			// same object instance the catalog recorded, since both read the
+			// identical `rules` arrays off `catalog.sources`.
+			if (catalog.effectiveRules.get(rule.id)?.rule !== rule) continue;
 			if (blockingOnly && rule.severity !== "error") continue;
 			// Per-rule path carve-out (#965): a rule that's noise on CLI scripts or
 			// a project's own logging sink (e.g. no-console-except-error firing

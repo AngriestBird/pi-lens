@@ -98,15 +98,21 @@ describe("buildEffectiveAstGrepCatalog (#3053)", () => {
 	});
 
 	it("walks sources in project-then-bundled precedence order", () => {
+		// #3053 round 2 F2: with only one project source present, `indexOf` and
+		// `lastIndexOf` degenerate the same way `getAstGrepRuleSources`'s own
+		// reversed order would — `indexOf("bundled")` was 0 either way, so
+		// `slice(0, 0).every(...)` was vacuously true and stayed green under
+		// `candidates.reverse()`. `lastIndexOf("project") < indexOf("bundled")`
+		// plus pinning the array's own first element both require the REAL
+		// (non-reversed) order to hold.
 		const root = makeProject();
 		roots.push(root);
 		writeRule(root, PRIMARY_RULES, "own.yml", { id: "project-only-rule" });
 		const catalog = buildEffectiveAstGrepCatalog(root);
 		const origins = catalog.sources.map((s) => s.source.origin);
-		const firstBundled = origins.indexOf("bundled");
-		expect(firstBundled).toBeGreaterThan(-1);
-		expect(origins.slice(0, firstBundled).every((o) => o === "project")).toBe(
-			true,
+		expect(origins[0]).toBe("project");
+		expect(origins.lastIndexOf("project")).toBeLessThan(
+			origins.indexOf("bundled"),
 		);
 	});
 });
