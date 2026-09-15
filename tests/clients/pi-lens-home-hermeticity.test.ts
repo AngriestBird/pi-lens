@@ -186,7 +186,7 @@ describe("clients/ best-effort getGlobalPiLensDir() writers stay a named, regist
 		expect(audit.problems).toEqual([]);
 	});
 
-	it("mutation-proof: dropping the best-effort-lock half of the predicate lets read-only getGlobalPiLensDir() consumers into the registry, reding the audit above", () => {
+	it("mutation-proof: dropping the best-effort-lock half of the predicate lets read-only getGlobalPiLensDir() consumers into the registry, failing the audit above", () => {
 		// #3042's shape is "resolves the path AND locks it best-effort" — NOT
 		// merely "calls getGlobalPiLensDir somewhere". clients/biome-client.ts,
 		// clients/effective-config.ts and clients/runtime-session.ts all call
@@ -254,6 +254,72 @@ describe("clients/ best-effort getGlobalPiLensDir() writers stay a named, regist
  *  arrow (`=> foo()`) has no braces to balance, and reusing the first brace
  *  found LATER in the file would silently attribute an unrelated function's
  *  body to this declaration — named limit, not attempted here. */
+/** Index of a `function NAME(` declaration's BODY brace, given the index of
+ *  its parameter list's opening paren — or -1 when the declaration has no
+ *  body (an overload signature, which ends at `;`).
+ *
+ *  Balances the parameter list first, so a default parameter VALUE's braces
+ *  (`options: Opts = {}`) can never be mistaken for the body (#3050). Between
+ *  the closing paren and the body only a return-type annotation can sit, and
+ *  that annotation can carry braces of its own: nested in `<...>`
+ *  (`Promise<{ ok: boolean }>`, skipped by angle depth — `=>`'s `>` is not a
+ *  closing bracket) or BARE (`instance-registry.ts`'s
+ *  `registryTailState(): { tail: Promise<void> }`, skipped by balancing the
+ *  group and looking at what follows it: another type brace / `|` / `&` means
+ *  the annotation continues, anything else means the group WAS the body). */
+function bodyBraceAfterParams(code: string, openParen: number): number {
+	if (code[openParen] !== "(") return -1;
+	let parens = 0;
+	let close = -1;
+	for (let i = openParen; i < code.length; i++) {
+		if (code[i] === "(") parens++;
+		else if (code[i] === ")") {
+			parens--;
+			if (parens === 0) {
+				close = i;
+				break;
+			}
+		}
+	}
+	if (close < 0) return -1;
+	const nextNonSpace = (from: number): number => {
+		let i = from;
+		while (i < code.length && /\s/.test(code[i] ?? "")) i++;
+		return i;
+	};
+	const hasReturnType = code[nextNonSpace(close + 1)] === ":";
+	let angle = 0;
+	for (let i = close + 1; i < code.length; i++) {
+		const ch = code[i];
+		if (ch === "<") angle++;
+		else if (ch === ">") {
+			if (code[i - 1] !== "=") angle = Math.max(0, angle - 1);
+		} else if (ch === ";") return -1;
+		else if (ch === "{" && angle === 0) {
+			if (!hasReturnType) return i;
+			const end = balancedBraceEnd(code, i);
+			if (end < 0) return -1;
+			const after = code[nextNonSpace(end + 1)];
+			if (after !== "{" && after !== "|" && after !== "&") return i;
+			i = end;
+		}
+	}
+	return -1;
+}
+
+/** Index of the `}` closing the `{` at `braceStart`, or -1 when unbalanced. */
+function balancedBraceEnd(code: string, braceStart: number): number {
+	let depth = 0;
+	for (let i = braceStart; i < code.length; i++) {
+		if (code[i] === "{") depth++;
+		else if (code[i] === "}") {
+			depth--;
+			if (depth === 0) return i;
+		}
+	}
+	return -1;
+}
+
 function topLevelFunctionBodies(strippedCode: string): Map<string, string> {
 	const bodies = new Map<string, string>();
 
@@ -261,33 +327,31 @@ function topLevelFunctionBodies(strippedCode: string): Map<string, string> {
 	 *  name — shared tail for both declaration shapes below. */
 	const record = (name: string, braceStart: number): void => {
 		if (strippedCode[braceStart] !== "{") return;
-		let depth = 0;
-		let end = -1;
-		for (let i = braceStart; i < strippedCode.length; i++) {
-			if (strippedCode[i] === "{") depth++;
-			else if (strippedCode[i] === "}") {
-				depth--;
-				if (depth === 0) {
-					end = i;
-					break;
-				}
-			}
-		}
+		const end = balancedBraceEnd(strippedCode, braceStart);
 		if (end < 0) return;
 		bodies.set(name, strippedCode.slice(braceStart, end + 1));
 	};
 
 	// `function NAME(...) { ... }`: the match ends at the parameter list's
-	// OPENING paren only (params and a return-type annotation still sit
-	// between it and the body), so — as before F5 — the body's `{` is
-	// whichever one comes NEXT, found by a plain forward search.
+	// OPENING paren only, so the body's `{` is found by walking PAST the
+	// parameter list — never by a plain forward `indexOf("{")` from there.
+	// #3050 recurrence (master 038e28b's Unit red): a default parameter VALUE
+	// carries its own braces, so the plain search stopped on the `{}` of
+	// `sweepUntrackedOrphans(options: BackstopSweepOptions = {})` and recorded
+	// a 2-character body. `callsPrimitiveDirectly` then saw nothing, the whole
+	// backstop half of `instance-reaper.ts` (`sweepUntrackedOrphans`,
+	// `scheduleUntrackedOrphanSweep`, `sweepAtomicWriteStages`, and
+	// `instance-registry.ts`'s `updateHeartbeat`) stayed out of
+	// `hazardousSymbols`, and `tests/clients/instance-reaper-unref.test.ts`
+	// — which drives the real cooldown stamp and sweep lock in the run-shared
+	// home — was waved through as isolated.
 	const functionPattern =
 		/^(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s*\*?\s+([A-Za-z_$][\w$]*)\s*\(/gm;
 	let functionMatch: RegExpExecArray | null;
 	while ((functionMatch = functionPattern.exec(strippedCode))) {
-		const braceStart = strippedCode.indexOf(
-			"{",
-			functionMatch.index + functionMatch[0].length,
+		const braceStart = bodyBraceAfterParams(
+			strippedCode,
+			functionMatch.index + functionMatch[0].length - 1,
 		);
 		if (braceStart >= 0) record(functionMatch[1], braceStart);
 	}
@@ -447,6 +511,56 @@ describe("clients/ hazardous exported registry symbols stay derived, not guessed
 		const declarationOnlyPattern =
 			/^(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s*\*?\s+([A-Za-z_$][\w$]*)\s*\(/gm;
 		expect(declarationOnlyPattern.test(stripped)).toBe(false);
+	});
+
+	it("#3050 recurrence: a default parameter VALUE's braces are not read as the function body", () => {
+		// The recurrence: master 038e28b's Unit lane redded on
+		// `tests/clients/instance-reaper-unref.test.ts` because THIS derivation
+		// never saw `sweepUntrackedOrphans`. Its declaration carries
+		// `options: BackstopSweepOptions = {}`, and the body brace used to be
+		// located with a plain `indexOf("{")` from the opening paren — which
+		// lands on the DEFAULT VALUE's `{}`. The recorded body was 2 characters,
+		// so the whole backstop half of the module stayed non-hazardous and the
+		// unref file's real cooldown-stamp/sweep-lock reach into the run-shared
+		// home was waved through as isolated.
+		const reaperStripped = stripSource(
+			fs.readFileSync(path.join(CLIENTS_ROOT, "instance-reaper.ts"), "utf8"),
+			{ strings: "blank" },
+		);
+		const body = topLevelFunctionBodies(reaperStripped).get(
+			"sweepUntrackedOrphans",
+		);
+		expect(body).toBeDefined();
+		expect(body).toContain("acquireBackstopLock(");
+		expect(hazardousExportedNames(reaperStripped)).toContain(
+			"sweepUntrackedOrphans",
+		);
+
+		// MUTATION: the pre-fix locator, inline — the first `{` after the
+		// opening paren is the default value's, and it balances to `{}`.
+		const declaration =
+			/^export async function sweepUntrackedOrphans\s*\(/m.exec(reaperStripped);
+		expect(declaration).not.toBeNull();
+		const preFixBrace = reaperStripped.indexOf(
+			"{",
+			(declaration?.index ?? 0) + (declaration?.[0].length ?? 0),
+		);
+		expect(reaperStripped.slice(preFixBrace, preFixBrace + 2)).toBe("{}");
+
+		// The sibling shape found by this fix, live in the OTHER registered
+		// producer: a BARE inline object return type
+		// (`registryTailState(): { tail: Promise<void> }`) whose annotation
+		// brace would bind as the body just as readily as a default value's.
+		const registryStripped = stripSource(
+			fs.readFileSync(path.join(CLIENTS_ROOT, "instance-registry.ts"), "utf8"),
+			{ strings: "blank" },
+		);
+		expect(registryStripped).toMatch(
+			/^function registryTailState\(\): \{ tail: Promise<void> \} \{/m,
+		);
+		expect(
+			topLevelFunctionBodies(registryStripped).get("registryTailState"),
+		).toContain("getProcessSingleton(");
 	});
 });
 
