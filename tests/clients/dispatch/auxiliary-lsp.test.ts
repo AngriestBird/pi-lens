@@ -1,3 +1,5 @@
+import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { LSPDiagnostic } from "../../../clients/lsp/client.js";
@@ -10,6 +12,7 @@ import {
 	retagAuxiliaryDiagnostics,
 } from "../../../clients/dispatch/auxiliary-lsp.js";
 import { convertLspDiagnostics } from "../../../clients/dispatch/utils/lsp-diagnostics.js";
+import { removeTempDirSync } from "../test-utils.js";
 import { _resetSubagentModeForTests } from "../../../clients/subagent-mode.js";
 
 const diag = (over: Partial<LSPDiagnostic>): LSPDiagnostic =>
@@ -556,5 +559,40 @@ describe("applyAuxiliarySuppressions per-rule ignores gate (#3041)", () => {
 			filePath: path.join(root, "scripts", "cli.ts"),
 		});
 		expect(kept).toHaveLength(1);
+	});
+});
+
+// #3041: the seam must read the SAME effective catalog the NAPI runner reads —
+// project rule trees first, bundled second, first source wins per rule id. A
+// project that redefines a bundled rule id with its own `ignores` would
+// otherwise be carved out by the bundled globs over LSP and by its own globs
+// per-edit, which is the drift this change exists to remove.
+describe("rule-ignore catalog precedence (#3041)", () => {
+	let tmp: string;
+	const RULE = "no-console-except-error";
+	const content = "console.log('x');\n";
+
+	beforeEach(() => {
+		tmp = fs.mkdtempSync(path.join(os.tmpdir(), "rule-ignores-precedence-"));
+		const dir = path.join(tmp, "rules", "ast-grep-rules", "rules");
+		fs.mkdirSync(dir, { recursive: true });
+		// Same id as the bundled rule, different carve-out.
+		fs.writeFileSync(
+			path.join(dir, `${RULE}.yml`),
+			`id: ${RULE}\nlanguage: TypeScript\nseverity: warning\nmessage: "project override"\nignores:\n  - "vendor/**"\nrule:\n  pattern: console.log($$$)\n`,
+		);
+	});
+	afterEach(() => removeTempDirSync(tmp));
+
+	const keptCount = (relative: string) =>
+		applyAuxiliarySuppressions(
+			[diag({ source: "ast-grep", code: RULE })],
+			content,
+			{ filePath: path.join(tmp, relative), scanRoot: tmp },
+		).length;
+
+	it("uses the project rule's ignores, not the bundled rule's, for the same id", () => {
+		expect(keptCount(path.join("vendor", "dep.ts"))).toBe(0);
+		expect(keptCount(path.join("scripts", "cli.ts"))).toBe(1);
 	});
 });

@@ -208,6 +208,11 @@ function stripInlineComment(value: string): string {
 	return value.replace(/\s+#.*$/, "").trim();
 }
 
+/** Strip one layer of matching YAML quotes from a scalar list item. */
+function unquoteScalar(value: string): string {
+	return value.trim().replace(/^["']|["']$/g, "");
+}
+
 export function isDisabledQueryFilePath(filePath: string): boolean {
 	const normalized = filePath.replaceAll("\\", "/");
 	const parts = normalized.split("/").filter(Boolean);
@@ -462,10 +467,7 @@ export class TreeSitterQueryLoader {
 
 				// Handle arrays inline: metavars: [A, B, C]
 				if (value.startsWith("[") && value.endsWith("]")) {
-					value = value
-						.slice(1, -1)
-						.split(",")
-						.map((s) => s.trim().replace(/^["']|["']$/g, ""));
+					value = value.slice(1, -1).split(",").map(unquoteScalar);
 				}
 				// Handle multi-line arrays: metavars:\n  - A\n  - B
 				// and nested objects: post_filter_params:\n  KEY: "value"
@@ -490,7 +492,15 @@ export class TreeSitterQueryLoader {
 						// Check if it's an array item
 						const itemMatch = nextLine.match(/^\s+-\s*(.+)$/);
 						if (itemMatch) {
-							const item = itemMatch[1].trim().replace(/\s*#.*$/, "");
+							// #3041: unquote, exactly as the inline `[a, b]` branch above
+							// does. Without it a quoted item kept its own quote marks as
+							// part of the value — `- "scripts/**"` parsed as the literal
+							// `"scripts/**"`, so console-statement's `ignore_paths`
+							// carve-out (#965) never matched any path. These are the two
+							// spellings of one list; they have to parse identically.
+							const item = unquoteScalar(
+								itemMatch[1].trim().replace(/\s*#.*$/, ""),
+							);
 							if (item) arrayItems.push(item);
 							continue;
 						}

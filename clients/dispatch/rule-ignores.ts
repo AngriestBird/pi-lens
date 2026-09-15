@@ -64,15 +64,14 @@ export function loadRuleIgnorePatterns(
 ): ReadonlyMap<string, readonly string[]> {
 	const patterns = new Map<string, readonly string[]>();
 	for (const source of getAstGrepRuleSources(root)) {
-		let rules;
-		try {
-			rules =
-				source.origin === "project"
-					? loadYamlRulesFresh(source.dir)
-					: loadYamlRules(source.dir);
-		} catch {
-			continue;
-		}
+		// No try/catch around the loaders: every I/O path inside them already
+		// swallows its own failure (missing dir, unreadable readdir, unreadable
+		// file all yield an empty list), so a catch here would be a guard no
+		// mutation can red.
+		const rules =
+			source.origin === "project"
+				? loadYamlRulesFresh(source.dir)
+				: loadYamlRules(source.dir);
 		for (const rule of rules) {
 			// First source wins, matching the runner's cross-layer precedence.
 			if (patterns.has(rule.id) || !rule.ignores?.length) continue;
