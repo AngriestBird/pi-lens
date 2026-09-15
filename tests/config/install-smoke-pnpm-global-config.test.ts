@@ -170,14 +170,15 @@ function assertGlobalBinDirAgreesWithPnpm(script: string, label: string): void {
 }
 
 function assertPnpmInstallPath(workflow: Workflow, jobName: string): void {
-	const job = workflow.jobs?.[jobName];
-	const matrix = job?.strategy?.matrix;
+	// Neither job's matrix is restated here. #3043 made pi-load's
+	// `pi_install` an event-dependent expression, and the 2026-09-15 retro's
+	// F2 sweep did the same to mise-repro's `pi_via` and `os` exclusions (one
+	// PR cell each, the full matrix otherwise). Both per-event populations are
+	// asserted ONCE, by evaluating the real expressions, in
+	// tests/config/install-smoke-gates.test.ts -- restating them here would be
+	// a second copy of the same table. What this file owns is the STEP
+	// ordering and content of the pnpm path, which no matrix value changes.
 	if (jobName === "pi-load") {
-		// #3043: `pi_install` is now an event-dependent expression (one
-		// pnpm-global cell on pull_request, the full list otherwise). Its
-		// per-event populations are asserted ONCE, by evaluating the real
-		// expression, in tests/config/install-smoke-gates.test.ts -- restating
-		// them here would be a second copy of the same table.
 		const setup = stepIndex(workflow, jobName, "Setup pnpm");
 		const install = stepIndex(workflow, jobName, "Install pi");
 		expect(stepIndex(workflow, jobName, "Setup Node")).toBeLessThan(setup);
@@ -194,8 +195,6 @@ function assertPnpmInstallPath(workflow: Workflow, jobName: string): void {
 		expect(pnpmInstallLines).toContain('pnpm add -g --ignore-scripts "$PKG"');
 		expect(pnpmInstallLines).toContain('echo "NPMCMD=pnpm" >> "$GITHUB_ENV"');
 	} else {
-		expect(matrix?.os).toEqual(["ubuntu-latest", "macos-latest"]);
-		expect(matrix?.pi_via).toEqual(["mise-node", "mise-npm-backend"]);
 		const installPnpm = stepIndex(workflow, jobName, "Install pnpm");
 		const configure = stepIndex(workflow, jobName, "Configure pnpm global");
 		expect(installPnpm).toBeLessThan(configure);
