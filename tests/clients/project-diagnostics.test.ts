@@ -93,6 +93,47 @@ describe("project diagnostics cache", () => {
 		expect(loadProjectDiagnosticsSnapshot(tmp)).toEqual(saved);
 	});
 
+	// #2154 AC2 (project-root axis). Two worktrees of one repo — the reported
+	// incident's shape — run under one user, so they share `PILENS_DATA_DIR`
+	// (or the default `~/.pi-lens/projects`) and therefore one store BASE.
+	// What keeps their diagnostics apart is that the store's PATH is derived
+	// per root by `getProjectDataDir`, so this is the root half of the
+	// cache-key provenance AC2 asks for: a finding written under one root must
+	// be invisible to a reader in the other, and each root's own record must
+	// survive the sibling's scan. Both directions are asserted, because a fold
+	// that collapsed the two roots onto one slug would otherwise show up only
+	// as a missing finding in whichever session wrote second.
+	it("never serves one project root's snapshot to a sibling root sharing the data dir", () => {
+		const rootA = path.join(tmp, "worktree-a");
+		const rootB = path.join(tmp, "worktree-b");
+		fs.mkdirSync(path.join(rootA, "src"), { recursive: true });
+		fs.mkdirSync(path.join(rootB, "src"), { recursive: true });
+		const saved = snapshot({
+			cwd: rootA,
+			diagnostics: [
+				{
+					filePath: path.join(rootA, "src/a.ts"),
+					line: 1,
+					severity: "warning",
+					semantic: "warning",
+					tool: "fact-rules",
+					runner: "fact-rules",
+					rule: "pass-through-wrappers",
+					message: "wrapper",
+					source: "project-scan",
+				},
+			],
+		});
+
+		saveProjectDiagnosticsSnapshot(rootA, saved);
+
+		expect(loadProjectDiagnosticsSnapshot(rootB)).toBeUndefined();
+		expect(loadProjectDiagnosticsSnapshot(rootA)?.cwd).toBe(rootA);
+		// The other direction: B's own scan must not overwrite A's record.
+		saveProjectDiagnosticsSnapshot(rootB, snapshot({ cwd: rootB }));
+		expect(loadProjectDiagnosticsSnapshot(rootA)).toEqual(saved);
+	});
+
 	it("ignores stale cache versions", () => {
 		// Deliberately pinned to the literal 0, below PROJECT_DIAGNOSTICS_CACHE_VERSION,
 		// to exercise the stale-version rejection path itself (the #1082/#1106
