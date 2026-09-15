@@ -306,7 +306,10 @@ const lspSpawnHeavyInclude = [
 
 // Real pi RPC sessions execute the built extension and a real host tool. Keep
 // this admission outside the default fork storm: each scenario has a 60 s
-// wall budget and one child process owns the fixture project.
+// wall budget, and a child owns its fixture project unless the test supplied
+// one (`withRealPi({ project })`, #2154) — the two-live-sessions case, where
+// two children deliberately share one project root and one PI_LENS_HOME and
+// the TEST owns the tree's lifetime.
 export const realHarnessInclude = [
 	"tests/real-harness/fixture-shape.test.ts",
 	"tests/real-harness/scenario-1.test.ts",
@@ -453,6 +456,13 @@ export const wallClockBudgetInclude = [
 	// where the record lands and is unobservable in-process (flake-shape
 	// admission).
 	"tests/scripts/warm-loader-cache.test.ts",
+	// #2042 2026-09-15: the sample-tail wiring is proven by spawning the real
+	// wrapper (its own real setInterval sampling loop cannot be faked from the
+	// test process) and, in one case, killing the wrapper's real process mid-run
+	// -- the exact "wrapper is the kill's victim" shape the diagnosis found on
+	// master 1701d01. A poll loop (real setTimeout) waits for the file's first
+	// write rather than a fixed sleep (flake-shape admission).
+	"tests/scripts/with-memory-watch.test.ts",
 	"tests/support/fault-injection.test.ts",
 	"tests/support/git-config-guard.test.ts",
 	"tests/support/git-fixture-env.test.ts",

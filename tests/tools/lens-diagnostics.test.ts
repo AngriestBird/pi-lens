@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createLensDiagnosticsTool } from "../../tools/lens-diagnostics.js";
 import { createLensDiagnosticMarkTool } from "../../tools/lens-diagnostic-mark.js";
 import { hashDiagnosticContent } from "../../clients/lsp/diagnostic-binding.js";
+import { PROJECT_DIAGNOSTICS_CACHE_VERSION } from "../../clients/project-diagnostics/cache.js";
 import {
 	_resetDeferredForTests,
 	_resetStateCacheForTests,
@@ -68,18 +69,28 @@ vi.mock("../../clients/project-diagnostics/scanner.js", () => ({
 	scanProjectDiagnostics: projectDiagnosticsMocks.scanProjectDiagnostics,
 }));
 
-vi.mock("../../clients/project-diagnostics/cache.js", () => ({
-	PROJECT_DIAGNOSTICS_CACHE_VERSION: 2,
-	loadProjectDiagnosticsSnapshot:
-		projectDiagnosticsMocks.loadProjectDiagnosticsSnapshot,
-	loadProjectDiagnosticsDeltaReport:
-		projectDiagnosticsMocks.loadProjectDiagnosticsDeltaReport,
-	// Identity passthrough — these tests exercise ignore-filtering, not on-disk
-	// staleness (covered in project-diagnostics.test.ts).
-	reconcileProjectDiagnosticsSnapshot: (
-		snapshot: import("../../clients/project-diagnostics/types.js").ProjectDiagnosticsSnapshot,
-	) => ({ snapshot, staleDropped: 0 }),
-}));
+// #2154: the version comes from the REAL module. A hand-copied `2` here
+// silently drifted the moment the constant moved to 3, leaving these tests
+// asserting against a version production no longer writes.
+vi.mock(
+	"../../clients/project-diagnostics/cache.js",
+	async (importOriginal) => ({
+		PROJECT_DIAGNOSTICS_CACHE_VERSION: (
+			await importOriginal<
+				typeof import("../../clients/project-diagnostics/cache.js")
+			>()
+		).PROJECT_DIAGNOSTICS_CACHE_VERSION,
+		loadProjectDiagnosticsSnapshot:
+			projectDiagnosticsMocks.loadProjectDiagnosticsSnapshot,
+		loadProjectDiagnosticsDeltaReport:
+			projectDiagnosticsMocks.loadProjectDiagnosticsDeltaReport,
+		// Identity passthrough — these tests exercise ignore-filtering, not on-disk
+		// staleness (covered in project-diagnostics.test.ts).
+		reconcileProjectDiagnosticsSnapshot: (
+			snapshot: import("../../clients/project-diagnostics/types.js").ProjectDiagnosticsSnapshot,
+		) => ({ snapshot, staleDropped: 0 }),
+	}),
+);
 
 // ── Mock widget state ─────────────────────────────────────────────────────────
 
@@ -2386,7 +2397,7 @@ describe("lens_diagnostics mode=full", () => {
 			]),
 		};
 		projectDiagnosticsMocks.scanProjectDiagnostics.mockResolvedValue({
-			version: 2,
+			version: PROJECT_DIAGNOSTICS_CACHE_VERSION,
 			cwd: "/proj",
 			tier: "cheap",
 			scannedAt: "2026-08-20T14:30:14.000Z",
@@ -3310,7 +3321,7 @@ describe("lens_diagnostics mode=full", () => {
 		projectDiagnosticsMocks.loadProjectDiagnosticsSnapshot.mockReturnValue({
 			// cache.js is mocked in this file, so the version constant isn't in scope;
 			// the tool path doesn't validate it (loader is mocked, reconcile is identity).
-			version: 2,
+			version: PROJECT_DIAGNOSTICS_CACHE_VERSION,
 			cwd: "/proj",
 			tier: "cheap",
 			scannedAt: "2026-01-01T00:00:00.000Z",

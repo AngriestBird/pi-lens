@@ -281,7 +281,29 @@ jobs:
         run: |
           echo "nproc=$(nproc)"
           free -m
-          cat /sys/fs/cgroup/memory.max 2>/dev/null || true
+          # 2026-09-15: this read the ROOT cgroup's memory.max, which cgroup v2
+          # never populates, so it printed nothing on every run in the dataset
+          # the 2026-09-15 diagnosis assembled — the same defect the sibling
+          # kernel-kill-evidence step further down was fixed for (#2230 round 2
+          # F1), four lines away, and never swept onto this one. Walk to this
+          # process's own cgroup the same way that step does.
+          cg=$(awk -F: '$1=="0"{print $3}' /proc/self/cgroup 2>/dev/null || true)
+          p="$cg"
+          found=""
+          while [ -n "$p" ]; do
+            f="/sys/fs/cgroup${p%/}/memory.max"
+            if [ -r "$f" ]; then
+              echo "cgroup=${p} file=${f}"
+              cat "$f"
+              found=1
+              break
+            fi
+            if [ "$p" = "/" ]; then break; fi
+            p=$(dirname "$p")
+          done
+          if [ -z "$found" ]; then
+            echo "(memory.max absent or unreadable from '${cg:-unknown}' up to root)"
+          fi
 
       - name: Run tests
         env:
@@ -294,12 +316,45 @@ jobs:
           # never contention to serialize — skip it explicitly rather than
           # relying on it being harmless.
           PI_LENS_TEST_NO_LOCK: '1'
+          # #2042 2026-09-15 cheapest probe: a 2s MemAvailable poll cannot see a
+          # sub-2-second spike, so sample five times faster. The env var already
+          # existed for exactly this; only the value is new.
+          PI_LENS_MEM_WATCH_INTERVAL_MS: '200'
+          # Shared with the "Memory sample tail" step below so both read/write
+          # the same file. runner.temp, not the checkout, so it never shows up
+          # in `git status` and is cleaned up with the rest of the job's scratch
+          # space regardless of how the job ends.
+          PI_LENS_MEM_WATCH_SAMPLE_FILE: ${{ runner.temp }}/pi-lens-mem-watch-samples.log
         # #2042: the wrapper changes nothing about what runs and forwards the
         # child's exit code unchanged. It prints the host's memory low-water
         # mark and a verdict line, so the next `Killed npm test` / exit 137 —
         # which carries no failing assertion and reads as infrastructure noise —
         # arrives with a number attached.
         run: node scripts/with-memory-watch.mjs -- npm test
+
+      # #2042 2026-09-15: the wrapper's console line is a step-crossing summary
+      # of host memory only — it cannot show per-cgroup RSS, PID-count churn, or
+      # PSI stall, and the 1701d01 red proved the console line can be lost
+      # entirely when the wrapper itself is the kill's victim. The wrapper
+      # appends every sample (per-cgroup memory.current/memory.peak/pids.current
+      # plus PSI) to the file below regardless; `if: always()` reads it even
+      # when the job never reaches a later step, so a killed run still yields
+      # its samples. Round-2 review F2: the file itself is unbounded (append-
+      # only, so an earlier low-water sample can never be scrolled out by a
+      # rewrite); `tail` bounds only what THIS step prints.
+      - name: Memory sample tail
+        if: always()
+        env:
+          PI_LENS_MEM_WATCH_SAMPLE_FILE: ${{ runner.temp }}/pi-lens-mem-watch-samples.log
+        run: |
+          f="$PI_LENS_MEM_WATCH_SAMPLE_FILE"
+          if [ -r "$f" ]; then
+            total=$(wc -l < "$f")
+            echo "--- mem-sample tail (last 300 of ${total} lines) ---"
+            tail -n 300 "$f"
+          else
+            echo "(no sample file at $f - the wrapper wrote nothing before the job ended)"
+          fi
 
       # #2042 round 2: the low-water mark falsified the memory story (three
       # kills at 13.0-13.3 GB available of 16 GB, a green run LOWER at 13.1 GB)

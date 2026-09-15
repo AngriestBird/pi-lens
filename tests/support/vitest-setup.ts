@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterAll, expect } from "vitest";
 import { installGitFixtureEnv } from "./git-fixture-env.js";
+import { reportPeakRss } from "./worker-peak-rss.js";
 import { removeTempDirSync } from "../clients/test-utils.js";
 
 // The review-graph persist is debounced in production (#260 circuit-breaker) so
@@ -362,14 +363,23 @@ if (memReportThresholdMb > 0) {
 			.replace(/\\/g, "/")
 			.split("/tests/")
 			.pop();
+		// #3058: the record, and the budget it is measured against, both live
+		// in tests/support/worker-peak-rss.ts so the ceiling has a seam a test
+		// can drive. A file over it fails its own suite here, naming itself,
+		// instead of surfacing five days later as a rising SIGKILL rate.
+		//
 		// Straight to the fork's stderr, not `console.log`: vitest intercepts
 		// worker console output and routes it through the reporter, which
 		// attributes it to a task and can drop it entirely for a hook that runs
 		// after the last test (verified 2026-08-25 — the console form printed
 		// nothing). A raw write lands in the job log unconditionally, which is the
 		// whole point of a line whose only reader is a post-mortem.
-		process.stderr.write(
-			`[mem-file] peakRssMb=${peakMb} heapUsedMb=${Math.round(usage.heapUsed / 1048576)} externalMb=${Math.round(usage.external / 1048576)} tests/${file}\n`,
-		);
+		reportPeakRss({
+			file: `tests/${file}`,
+			peakRssMb: peakMb,
+			heapUsedMb: Math.round(usage.heapUsed / 1048576),
+			externalMb: Math.round(usage.external / 1048576),
+			write: (line) => process.stderr.write(line),
+		});
 	});
 }
