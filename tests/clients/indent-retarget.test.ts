@@ -175,14 +175,17 @@ describe("retargetReplacementIndentation — block-comment interior excluded fro
 	});
 
 	it("does not treat a generator method's leading `*` as a comment opener", () => {
-		// Guards against an over-broad exclusion (any line starting with `*`)
-		// swallowing ordinary code — `*items()` has no `/*` anywhere in it.
-		const oldText = "class C {\n  *items() {\n    yield 1;\n  }\n}";
-		const corrected = "class C {\n\t*items() {\n\t\tyield 1;\n\t}\n}";
-		const newText =
-			"class D {\n  *values() {\n    yield 2;\n    if (x) {\n      yield 3;\n    }\n  }\n}";
+		// Guards against an over-broad exclusion (any line starting with `*`,
+		// or containing one at all) swallowing ordinary code — `*items()` has
+		// no `/*` anywhere in it. The single-line body is deliberate: with no
+		// sibling line at the same depth, excluding `*items()` would empty the
+		// map entirely (abort to undefined) instead of merely picking a
+		// different base — the sharpest observable signal for this guard.
+		const oldText = "class C {\n  *items() { yield 1; }\n}";
+		const corrected = "class C {\n\t*items() { yield 1; }\n}";
+		const newText = "class D {\n  *values() {\n    yield 2;\n  }\n}";
 		expect(retargetReplacementIndentation(newText, oldText, corrected)).toBe(
-			"class D {\n\t*values() {\n\t\tyield 2;\n\t\tif (x) {\n\t\t\tyield 3;\n\t\t}\n\t}\n}",
+			"class D {\n\t*values() {\n\t\tyield 2;\n\t}\n}",
 		);
 	});
 
