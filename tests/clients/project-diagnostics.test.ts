@@ -947,9 +947,12 @@ describe("scanProjectDiagnostics", () => {
 
 	// The same seam in the other direction: bytes that still match what the scan
 	// read keep their row, so the content axis is a real discriminator and not a
-	// blanket drop. Restoring the ORIGINAL content after an intervening write
-	// also makes the point that content, not the timestamp, is what decides —
-	// this file's mtime is now well past `scannedAt`.
+	// blanket drop. The file is rewritten, restored, and then stamped a minute
+	// INTO THE FUTURE, well past `scannedAt` and its drift tolerance — so this
+	// also pins the behaviour change the fix makes in the other direction: a
+	// touched-but-identical file used to lose its row and no longer does,
+	// because for per-file syntax rules identical bytes mean identical
+	// findings whatever the clock says.
 	it("keeps a row whose file still holds the bytes the scan read", async () => {
 		const srcDir = path.join(tmp, "src");
 		fs.mkdirSync(srcDir, { recursive: true });
@@ -971,6 +974,8 @@ describe("scanProjectDiagnostics", () => {
 
 		fs.writeFileSync(file, "export const clean = 1;\n");
 		fs.writeFileSync(file, source);
+		const future = new Date(Date.now() + 60_000);
+		fs.utimesSync(file, future, future);
 
 		const reconciled = reconcileProjectDiagnosticsSnapshot(
 			loadProjectDiagnosticsSnapshot(tmp) as ProjectDiagnosticsSnapshot,
