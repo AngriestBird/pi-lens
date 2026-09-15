@@ -109,6 +109,10 @@ permission grants, release/version changes, dependency majors or lockfile
 regeneration, deletion of user data or durable records, external-contributor
 PRs, and changes to these rules require user decision.
 
+Every regroup, merged bug fix, second round on one shape, and incident runs
+the retrospective in `docs/pi-lens-retro.md` (mechanical mistakes become
+checks with a red transcript; judgement calls become one contract line).
+
 For CI, verify required checks actually ran and passed on the exact head. A
 conflicted PR can silently skip required jobs. Use:
 
