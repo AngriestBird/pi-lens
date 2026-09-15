@@ -20,7 +20,7 @@ import {
 	loadAstGrepNapi,
 	type SgRoot,
 } from "../../deps/ast-grep-napi.js";
-import { minimatch } from "../../deps/minimatch.js";
+import { isRuleIgnoredForPath } from "../rule-ignores.js";
 import { logLatency } from "../../latency-logger.js";
 import { hasAuxiliaryLspPublishedForRoot } from "../../lsp/index.js";
 import {
@@ -464,27 +464,6 @@ function explicitRuleFixSuggestion(rule: YamlRule): string | undefined {
 
 function normalizeRuleId(ruleId: string): string {
 	return ruleId.replace(/-js$/, "");
-}
-
-/**
- * `filePath` relative to `root`, forward-slashed, for matching a rule's
- * `ignores` globs (#965). Falls back to the absolute (slash-normalized) path
- * when `filePath` isn't under `root` (e.g. an out-of-tree temp file), so a
- * glob like `scripts/**` simply never matches rather than throwing.
- */
-function relativeForIgnoreGlob(filePath: string, root: string): string {
-	const rel = path.relative(root, filePath);
-	return (rel.startsWith("..") ? filePath : rel).split(path.sep).join("/");
-}
-
-function matchesRuleIgnores(
-	filePath: string,
-	root: string,
-	patterns: string[] | undefined,
-): boolean {
-	if (!patterns || patterns.length === 0) return false;
-	const rel = relativeForIgnoreGlob(filePath, root);
-	return patterns.some((pattern) => minimatch(rel, pattern, { dot: true }));
 }
 
 export function canHandle(filePath: string): boolean {
@@ -1105,7 +1084,7 @@ export function evaluateAstGrepRules(
 			// Per-rule path carve-out (#965): a rule that's noise on CLI scripts or
 			// a project's own logging sink (e.g. no-console-except-error firing
 			// inside scripts/** or lib/logger.ts) opts out via `ignores`.
-			if (matchesRuleIgnores(filePath, ignoreRoot, rule.ignores)) continue;
+			if (isRuleIgnoredForPath(filePath, ignoreRoot, rule.ignores)) continue;
 
 			if (
 				suppressLinterOverlap &&
