@@ -220,4 +220,17 @@ describe("retargetReplacementIndentation — block-comment interior excluded fro
 			"function g() {\r\n   a();\r\n      b();\r\n}",
 		);
 	});
+
+	// Round 2, F1: a comment-interior indent must still resolve by DIRECT
+	// lookup — only its eligibility as the extrapolation BASE unit is
+	// revoked. A replacement that reintroduces the same comment indent (here,
+	// adding another JSDoc) must still retarget instead of aborting.
+	it("still resolves a comment-interior indent by direct lookup when newText reintroduces it (P3)", () => {
+		const oldText = "/**\n * doc\n */\nfunction f() {\n    go();\n}";
+		const corrected = "/**\n  * doc\n  */\nfunction f() {\n   go();\n}";
+		const newText = "/**\n * added doc\n */\nfunction g() {\n    a();\n}";
+		expect(retargetReplacementIndentation(newText, oldText, corrected)).toBe(
+			"/**\n  * added doc\n  */\nfunction g() {\n   a();\n}",
+		);
+	});
 });
