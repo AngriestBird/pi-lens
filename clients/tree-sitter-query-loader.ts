@@ -14,6 +14,7 @@ import {
 	reportBundledResourceDirHealth,
 } from "./bundled-resource-health.js";
 import { getDegradationLedgerGeneration } from "./degradation-ledger.js";
+import yaml from "./deps/js-yaml.js";
 import { resolvePackagePath } from "./package-root.js";
 
 /**
@@ -198,21 +199,6 @@ export function queriesForLanguage(
 	return ruleSourceLanguages(languageId).flatMap((langId) => enabled(langId));
 }
 
-/**
- * Drop a trailing ` # comment` from an unquoted YAML scalar. Quoted values keep
- * their `#` (a message may legitimately contain one), matching YAML's rule that
- * a comment only starts after whitespace outside quotes.
- */
-function stripInlineComment(value: string): string {
-	if (value.startsWith('"') || value.startsWith("'")) return value;
-	return value.replace(/\s+#.*$/, "").trim();
-}
-
-/** Strip one layer of matching YAML quotes from a scalar list item. */
-function unquoteScalar(value: string): string {
-	return value.trim().replace(/^["']|["']$/g, "");
-}
-
 export function isDisabledQueryFilePath(filePath: string): boolean {
 	const normalized = filePath.replaceAll("\\", "/");
 	const parts = normalized.split("/").filter(Boolean);
@@ -378,7 +364,6 @@ export class TreeSitterQueryLoader {
 		try {
 			const content = fs.readFileSync(filePath, "utf-8");
 
-			// Simple YAML parsing (extract key: value pairs)
 			const parsed = this.parseYaml(content);
 
 			if (!parsed.id || !parsed.query) {
@@ -396,8 +381,7 @@ export class TreeSitterQueryLoader {
 				description: parsed.description
 					? String(parsed.description)
 					: undefined,
-				query:
-					this.extractMultilineValue(content, "query") || String(parsed.query),
+				query: String(parsed.query),
 				metavars: Array.isArray(parsed.metavars)
 					? parsed.metavars.map(String)
 					: this.extractMetavars(String(parsed.query)),
@@ -443,196 +427,21 @@ export class TreeSitterQueryLoader {
 	}
 
 	/**
-	 * Simple YAML parser for our query files
+	 * Parse a query file's YAML with `js-yaml` — the same real parser
+	 * `clients/dispatch/runners/yaml-rule-parser.ts` uses for ast-grep rules
+	 * (#206: a hand-rolled line scanner flattened nested structures there; the
+	 * hand-rolled scanner this loader carried made the identical mistake,
+	 * twice over — its inline `[a, b]` array branch unquoted list items but
+	 * its multi-line `- item` branch did not, so `console-statement.yml`'s
+	 * quoted `ignore_paths` glob parsed with the quote marks attached and the
+	 * #965 carve-out never matched a path, #3041/#3046). A malformed document
+	 * returns `{}` rather than throwing, so the caller's `!parsed.id` check
+	 * skips just that query.
 	 */
-	private parseYaml(
-		content: string,
-	): Record<string, string | string[] | boolean> {
-		const result: Record<string, string | string[] | boolean> = {};
-		const lines = content.split("\n");
-
-		for (let i = 0; i < lines.length; i++) {
-			const line = lines[i];
-			const match = line.match(/^([a-z_]+):\s*(.*)$/);
-			if (match) {
-				const key = match[1];
-				// Strip a trailing YAML comment (` # …`) on unquoted scalars, as the
-				// array-item branch below already does. Without this, a rule written
-				// `post_filter: not_in_test_block  # skip test blocks` carried the
-				// whole comment as the filter NAME, so the filter never resolved and
-				// the rule reported unfiltered matches.
-				let value: string | string[] | boolean = stripInlineComment(
-					match[2].trim(),
-				);
-
-				// Handle arrays inline: metavars: [A, B, C]
-				if (value.startsWith("[") && value.endsWith("]")) {
-					value = value.slice(1, -1).split(",").map(unquoteScalar);
-				}
-				// Handle multi-line arrays: metavars:\n  - A\n  - B
-				// and nested objects: post_filter_params:\n  KEY: "value"
-				else if (value === "") {
-					const arrayItems: string[] = [];
-					const nestedObj: Record<string, string> = {};
-					const baseIndent = line.match(/^(\s*)/)?.[0].length || 0;
-
-					for (let j = i + 1; j < lines.length; j++) {
-						const nextLine = lines[j];
-						const nextIndent = nextLine.match(/^(\s*)/)?.[0].length || 0;
-
-						// Stop if we hit a line with same or less indent (new key)
-						if (
-							nextIndent <= baseIndent &&
-							nextLine.trim() !== "" &&
-							nextLine.match(/^\S/)
-						) {
-							break;
-						}
-
-						// Check if it's an array item
-						const itemMatch = nextLine.match(/^\s+-\s*(.+)$/);
-						if (itemMatch) {
-							// #3041: unquote, exactly as the inline `[a, b]` branch above
-							// does. Without it a quoted item kept its own quote marks as
-							// part of the value — `- "scripts/**"` parsed as the literal
-							// `"scripts/**"`, so console-statement's `ignore_paths`
-							// carve-out (#965) never matched any path. These are the two
-							// spellings of one list; they have to parse identically.
-							const item = unquoteScalar(
-								itemMatch[1].trim().replace(/\s*#.*$/, ""),
-							);
-							if (item) arrayItems.push(item);
-							continue;
-						}
-
-						// Check if it's a nested key: value pair
-						const nestedMatch = nextLine.match(/^\s+(\w+):\s*(.+)$/);
-						if (nestedMatch) {
-							let nv = nestedMatch[2].trim();
-							if (
-								(nv.startsWith('"') && nv.endsWith('"')) ||
-								(nv.startsWith("'") && nv.endsWith("'"))
-							) {
-								nv = nv.slice(1, -1);
-							}
-							nestedObj[nestedMatch[1]] = nv;
-						}
-					}
-
-					if (arrayItems.length > 0) {
-						value = arrayItems;
-					} else if (Object.keys(nestedObj).length > 0) {
-						// biome-ignore lint/suspicious/noExplicitAny: nested object from YAML
-						(result as any)[key] = nestedObj;
-						continue;
-					}
-				}
-				// Handle booleans
-				else if (value === "true") value = true;
-				else if (value === "false") value = false;
-				// Strip quotes from strings
-				else if (value.startsWith('"') && value.endsWith('"')) {
-					value = value.slice(1, -1);
-				}
-
-				result[key] = value;
-			}
-		}
-
-		return result;
-	}
-
-	/**
-	 * Extract a multiline value (like query) from YAML
-	 */
-	private extractMultilineValue(content: string, key: string): string | null {
-		const lines = content.split("\n");
-		let startLine = -1;
-		let startIndent = 0;
-
-		const keyPrefix = `${key}:`;
-
-		// Find the key line
-		for (let i = 0; i < lines.length; i++) {
-			const trimmed = lines[i].trimStart();
-			if (trimmed.startsWith(keyPrefix)) {
-				startLine = i;
-				startIndent = lines[i].length - trimmed.length;
-				const afterKey = trimmed.slice(keyPrefix.length).trim();
-				// If there's content on the same line (not just |), return it
-				if (afterKey && afterKey !== "|") return afterKey;
-				break;
-			}
-		}
-
-		if (startLine === -1) return null;
-
-		// Collect all lines until we hit a new key with same or less indent
-		const valueLines: string[] = [];
-		for (let i = startLine + 1; i < lines.length; i++) {
-			const line = lines[i];
-
-			// Track empty lines
-			if (!line.trim()) {
-				valueLines.push("");
-				continue;
-			}
-
-			// Check indent
-			const indentMatch = line.match(/^(\s*)/);
-			const indent = indentMatch ? indentMatch[1].length : 0;
-			const trimmed = line.trim();
-
-			// Stop at a new top-level key (same or less indent than the key).
-			if (indent <= startIndent && trimmed.match(/^[a-z_]+:/)) {
-				break;
-			}
-
-			// A comment at or below the key's indent is a document-level comment
-			// that follows the block, not part of it — stop. Block-scalar content
-			// (including native tree-sitter predicate lines `#eq?`/`#match?`) is
-			// always MORE indented than the key, so those are preserved. Without
-			// this, a stray `# …` line between a `query: |` block and the next key
-			// was appended to the query and made it fail to compile (mixed-async).
-			if (trimmed.startsWith("#") && indent <= startIndent) {
-				break;
-			}
-
-			// Skip YAML comment lines for most keys, but preserve native
-			// tree-sitter predicate lines in query blocks (#eq?, #match?, ...).
-			if (trimmed.startsWith("#") && key !== "query") continue;
-
-			// This is part of the multiline value
-			valueLines.push(line);
-		}
-
-		// Strip the common minimum indent (relative to startIndent).
-		// YAML's `|` block scalar preserves content with consistent
-		// indentation; we want to remove the leading whitespace that
-		// was used for YAML formatting.
-		// biome-ignore lint/suspicious/noExplicitAny: line iteration
-		const nonEmpty = valueLines.filter((l: string) => l.trim().length > 0);
-		if (nonEmpty.length > 0) {
-			const minExtraIndent = Math.min(
-				...nonEmpty.map((l: string) => {
-					const m = l.match(/^(\s*)/);
-					return (m?.[1].length ?? 0) - startIndent;
-				}),
-			);
-			for (let i = 0; i < valueLines.length; i++) {
-				if (valueLines[i].trim().length === 0) continue; // leave blank lines alone
-				valueLines[i] = valueLines[i].slice(
-					startIndent + Math.max(0, minExtraIndent),
-				);
-			}
-		}
-
-		// Clean up - remove trailing empty lines
-		while (valueLines.length > 0 && !valueLines[valueLines.length - 1].trim()) {
-			valueLines.pop();
-		}
-
-		return valueLines.length > 0 ? valueLines.join("\n") : null;
+	private parseYaml(content: string): Record<string, unknown> {
+		const parsed: unknown = yaml.load(content);
+		if (!parsed || typeof parsed !== "object") return {};
+		return parsed as Record<string, unknown>;
 	}
 
 	/**

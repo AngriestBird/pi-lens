@@ -258,6 +258,59 @@ metavars: [X]
 	});
 });
 
+// #3054: the hand-rolled line-regex scanner (its own inline-comment stripper,
+// its own inline `[a, b]` array branch, its own multi-line `- item` branch,
+// its own nested-object branch) is gone; `yaml.load` — the same real parser
+// `clients/dispatch/runners/yaml-rule-parser.ts` already used for ast-grep
+// rules (#206) — parses the whole document now. One fixture exercises every
+// construct the deleted scanner special-cased, in the shape #3046 showed
+// disagreeing: an inline array, a multi-line list, BOTH multi-line quote
+// spellings (the exact defect: the inline-array branch unquoted, the
+// multi-line branch didn't, so `console-statement.yml`'s quoted
+// `ignore_paths` glob carried its quote marks and the #965 carve-out never
+// matched a path), a nested object, and both an inline comment on an
+// unquoted scalar and a literal `#` preserved inside a quoted one.
+describe("fold onto js-yaml (#3054)", () => {
+	it("parses inline arrays, multi-line lists in both quote spellings, nested objects, and inline/quoted comments in one document", async () => {
+		const root = makeTempRulesRoot();
+		writeRule(
+			root,
+			"rules/tree-sitter-queries/typescript/all-constructs.yml",
+			`id: all-constructs
+name: All Constructs
+severity: warning
+category: correctness
+language: typescript
+message: "keeps a # inside a quoted string"
+post_filter: not_in_test_block  # trailing comment stripped
+query: |
+  (identifier) @X
+metavars: [X, Y]
+tags:
+  - alpha
+  - beta
+ignore_paths:
+  - "scripts/**"
+  - 'bin/**'
+post_filter_params:
+  KEY: "value"
+has_fix: false
+`,
+		);
+
+		const loader = new TreeSitterQueryLoader();
+		await loader.loadQueries(root);
+		const query = loader.getQueryById("all-constructs");
+		expect(query).toBeTruthy();
+		expect(query?.message).toBe("keeps a # inside a quoted string");
+		expect(query?.post_filter).toBe("not_in_test_block");
+		expect(query?.metavars).toEqual(["X", "Y"]);
+		expect(query?.tags).toEqual(["alpha", "beta"]);
+		expect(query?.ignore_paths).toEqual(["scripts/**", "bin/**"]);
+		expect(query?.post_filter_params).toEqual({ KEY: "value" });
+	});
+});
+
 describe("queriesForLanguage", () => {
 	const rule = (id: string, filePath: string): TreeSitterQuery =>
 		({ id, filePath }) as TreeSitterQuery;
