@@ -232,6 +232,9 @@ and PR language; detailed historical examples are in `HISTORY.md`.
     or default, name the concrete failure that reaches the user and choose the
     direction from that harm; test unreadable, absent, and thrown lookup states
     where the seam supports both directions.
+49. **Indentation unit from alignment:** a shallowest leading run can be a
+    continuation alignment rather than one nesting unit. Infer from structural
+    evidence or decline style pinning when only nested runs are visible.
 
 ## Standing invariants
 

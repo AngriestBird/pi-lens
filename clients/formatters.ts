@@ -865,6 +865,7 @@ async function indentationArgs(
 	}
 	if (!hasDetectableIndentation(content)) return null;
 	const indentation = detectIndentation(content);
+	if (!indentation) return null;
 	if (tool === "shfmt")
 		return indentation.style === "tab"
 			? ["-i", "0"]

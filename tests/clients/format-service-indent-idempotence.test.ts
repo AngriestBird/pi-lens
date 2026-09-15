@@ -99,6 +99,49 @@ describe("formatter indentation inference through FormatService (#3038)", () => 
 		}
 	});
 
+	it("pins the structural unit for aligned continuation indentation", async () => {
+		const env = setupTestEnvironment("pi-lens-format-indent-continuation-");
+		try {
+			writeBiomeEvidence(env.tmpDir);
+			const filePath = path.join(env.tmpDir, "continuation.ts");
+			fs.writeFileSync(
+				filePath,
+				"const value = call(\n      first,\n      second,\n    );\n",
+			);
+			safeSpawnAsync.mockResolvedValue({ status: 0, stdout: "", stderr: "" });
+
+			const service = new FormatService("format-indent-continuation", true);
+			service.recordRead(filePath);
+			await service.formatFile(filePath);
+
+			expect(safeSpawnAsync.mock.calls[0]?.[1]).toEqual(
+				expect.arrayContaining(["--indent-width", "2"]),
+			);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("declines formatter style for ambiguous nested-only indentation", async () => {
+		const env = setupTestEnvironment("pi-lens-format-indent-ambiguous-");
+		try {
+			writeBiomeEvidence(env.tmpDir);
+			const filePath = path.join(env.tmpDir, "nested-only.ts");
+			fs.writeFileSync(filePath, "      nested\n            deeper\n");
+
+			const service = new FormatService("format-indent-ambiguous", true);
+			service.recordRead(filePath);
+			const summary = await service.formatFile(filePath);
+
+			expect(summary.formatters).toEqual([
+				expect.objectContaining({ name: "biome", outcome: "skipped" }),
+			]);
+			expect(safeSpawnAsync).not.toHaveBeenCalled();
+		} finally {
+			env.cleanup();
+		}
+	});
+
 	it("honors an ancestor editorconfig through the selected formatter", async () => {
 		const env = setupTestEnvironment("pi-lens-format-indent-config-");
 		try {
