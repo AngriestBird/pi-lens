@@ -116,10 +116,7 @@ function pnpmGlobalBinFacts(script: string): PnpmGlobalBinFacts {
 // PATH entry, the configured value and the GITHUB_PATH entry must all BE
 // `$PNPM_HOME/bin`. Any one of them reverting to bare `$PNPM_HOME` is the
 // exact shape that failed all six pnpm cells of run 35013232780.
-function assertGlobalBinDirAgreesWithPnpm(
-	script: string,
-	label: string,
-): void {
+function assertGlobalBinDirAgreesWithPnpm(script: string, label: string): void {
 	const facts = pnpmGlobalBinFacts(script);
 	const pnpmHome = facts.pnpmHome;
 	expect(pnpmHome, `${label}: no PNPM_HOME export`).toBeDefined();

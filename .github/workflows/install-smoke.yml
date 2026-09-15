@@ -70,10 +70,13 @@ on:
       # not just transitively through the `prepare` lifecycle script.
       - "scripts/download-grammars.js"
       - ".github/workflows/install-smoke.yml"
-  # PR-gating (#2613): only the host-range-smoke job below runs on
-  # pull_request (guarded by `if: github.event_name != 'pull_request'` on
-  # every pre-existing job) -- the full os x pm x pi-install matrices stay
-  # push/nightly/dispatch-only, unchanged from before this lane existed.
+  # PR-gating (#2613): host-range-smoke runs on pull_request, and (#3043)
+  # ONE pi-load cell (ubuntu-latest x pnpm-global, narrowed by that job's
+  # matrix expressions) -- because the lane a change edits must be a lane
+  # some pre-merge run can execute. `smoke` and `mise-repro` remain
+  # push/nightly/dispatch-only via `if: github.event_name != 'pull_request'`,
+  # so an edit to THOSE still needs a `gh workflow run install-smoke.yml
+  # --ref <branch>` before merge (AGENTS.md, "Commands and gates").
   pull_request:
     branches: [master]
     paths: *install-smoke-paths
@@ -307,8 +310,8 @@ jobs:
         os: [ubuntu-latest, macos-latest]
         pi_install: ${{ github.event_name == 'pull_request' && fromJSON('["pnpm-global"]') || fromJSON('["npm-global", "pnpm-global", "bun-global", "curl"]') }}
         # NOTE: no space after the JSON colon -- a plain YAML scalar may not
-        # contain ": ", and `{"os": "macos-latest"}` makes this whole file
-        # unparseable (caught by the governance test below, which yaml.loads it).
+        # contain ": ", so `{"os": "macos-latest"}` makes this whole file
+        # unparseable (every tests/config workflow test yaml.loads it).
         exclude: ${{ github.event_name == 'pull_request' && fromJSON('[{"os":"macos-latest"}]') || fromJSON('[]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7 # for the RPC driver
