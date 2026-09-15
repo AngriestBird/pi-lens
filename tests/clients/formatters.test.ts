@@ -42,7 +42,10 @@ import {
 	ktlintFormatter,
 	typstyleFormatter,
 } from "../../clients/formatters.js";
-import { resetDegradationLedger } from "../../clients/degradation-ledger.js";
+import {
+	getDegradationSummary,
+	resetDegradationLedger,
+} from "../../clients/degradation-ledger.js";
 import { FORMATTER_MARKERS } from "../../clients/tool-cwd.js";
 import { createTempFile, setupTestEnvironment } from "./test-utils.js";
 import { _getSpotlessGradleReadCountForTests } from "../../clients/tool-policy.js";
@@ -255,6 +258,7 @@ describe("managed formatter absence is typed (#2767)", () => {
 		["php-cs-fixer", phpCsFixerFormatter, "main.php"],
 		["google-java-format", googleJavaFormatFormatter, "Main.java"],
 		["oxfmt", oxfmtFormatter, "main.ts"],
+		["typstyle", typstyleFormatter, "main.typ"],
 	] as const)(
 		"returns formatter-unavailable for %s when every candidate is absent",
 		async (_toolId, formatter, fileName) => {
@@ -266,6 +270,11 @@ describe("managed formatter absence is typed (#2767)", () => {
 					tmpDir,
 				);
 				expect(command).toBe("formatter-unavailable");
+				if (_toolId === "typstyle") {
+					expect(getDegradationSummary()).toContainEqual(
+						expect.objectContaining({ kind: "formatter-unavailable" }),
+					);
+				}
 			});
 		},
 	);
@@ -304,6 +313,7 @@ describe("formatter child cwd", () => {
 			"shfmt",
 			"ktlint",
 			"ktfmt",
+			"typstyle",
 		];
 		const missing = expected.filter((name) => !(name in FORMATTER_MARKERS));
 		const unknown = Object.keys(FORMATTER_MARKERS).filter(
@@ -878,10 +888,11 @@ describe("getFormattersForFile — policy selection", () => {
 		await withPathShim("typstyle", async () => {
 			const formatters = await getFormattersForFile(filePath, tmpDir);
 			expect(formatters.map((f) => f.name)).toEqual(["typstyle"]);
+			const command = await typstyleFormatter.resolveCommand!(filePath, tmpDir);
+			expect(command).not.toBeNull();
+			expect(command?.[0]).toMatch(/(?:^|[\\/])typstyle(?:\.exe)?$/);
+			expect(command?.slice(1)).toEqual(["-i", filePath]);
 		});
-		expect(await typstyleFormatter.resolveCommand!(filePath, tmpDir)).toEqual(
-			expect.arrayContaining(["typstyle", "-i", filePath]),
-		);
 	});
 
 	it("uses typstyle for Typst code files when available", async () => {
@@ -890,10 +901,11 @@ describe("getFormattersForFile — policy selection", () => {
 		await withPathShim("typstyle", async () => {
 			const formatters = await getFormattersForFile(filePath, tmpDir);
 			expect(formatters.map((f) => f.name)).toEqual(["typstyle"]);
+			const command = await typstyleFormatter.resolveCommand!(filePath, tmpDir);
+			expect(command).not.toBeNull();
+			expect(command?.[0]).toMatch(/(?:^|[\\/])typstyle(?:\.exe)?$/);
+			expect(command?.slice(1)).toEqual(["-i", filePath]);
 		});
-		expect(await typstyleFormatter.resolveCommand!(filePath, tmpDir)).toEqual(
-			expect.arrayContaining(["typstyle", "-i", filePath]),
-		);
 	});
 
 	it("does not force csharpier on unconfigured C# files", async () => {

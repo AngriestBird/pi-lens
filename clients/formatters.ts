@@ -693,12 +693,20 @@ async function resolveManagedSmartDefaultCommand(
 	formatterName: string,
 	filePath: string,
 	args: string[],
-): Promise<string[] | null> {
+): Promise<string[] | typeof FORMATTER_UNAVAILABLE> {
 	const toolId = getAutoInstallToolIdForFormatter(formatterName);
-	if (!toolId) return null;
+	if (!toolId) return FORMATTER_UNAVAILABLE;
 	const { ensureTool } = await import("./installer/index.js");
 	const installed = await ensureTool(toolId);
-	if (!installed) return null;
+	if (!installed) {
+		recordDegradationOnce({
+			kind: "formatter-unavailable",
+			subject: formatterName,
+			reason:
+				"managed formatter lookup and installation returned no executable",
+		});
+		return FORMATTER_UNAVAILABLE;
+	}
 	return [installed, ...args, filePath];
 }
 
@@ -1431,8 +1439,10 @@ export const typstyleFormatter: FormatterInfo = {
 		if (inPath) return [inPath, "-i", filePath];
 		return resolveManagedSmartDefaultCommand("typstyle", filePath, ["-i"]);
 	},
-	detect: managedToolDetect("typstyle", undefined, async () =>
-		(await which("typstyle")) !== null,
+	detect: managedToolDetect(
+		"typstyle",
+		undefined,
+		async () => (await which("typstyle")) !== null,
 	),
 };
 
