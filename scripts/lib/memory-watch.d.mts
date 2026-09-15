@@ -54,13 +54,7 @@ export declare function readCgroupSample(
 ): CgroupSample;
 
 export declare function formatSampleLine(
-	at: string,
+	atMs: string,
 	hostSample: { availableMb: number; totalMb: number },
 	cgroupSample: CgroupSample,
 ): string;
-
-export declare function pushSample<T>(
-	buffer: T[],
-	line: T,
-	maxLines: number,
-): T[];

@@ -24,17 +24,22 @@
  *   PI_LENS_MEM_WATCH_STEP_MB       Print when available memory has fallen this
  *                                   far since the last printed line
  *                                   (default 1024).
- *   PI_LENS_MEM_WATCH_SAMPLE_FILE   Path for the bounded per-sample tail (the
- *                                   #2042 2026-09-15 diagnosis's "cheapest
- *                                   probe"). Default:
- *                                   <tmpdir>/pi-lens-mem-watch-samples.log.
- *   PI_LENS_MEM_WATCH_SAMPLE_TAIL_MS
- *                                   How much history the sample file keeps
- *                                   (default 60000 = last 60s). The file is a
- *                                   fixed-size ring, never a per-sample log
- *                                   line in the job's console output, and
- *                                   never unbounded — including across a run
- *                                   long enough to outlast its own tail.
+ *   PI_LENS_MEM_WATCH_SAMPLE_FILE   Path for the per-sample record (the #2042
+ *                                   2026-09-15 diagnosis's "cheapest probe").
+ *                                   Default: <tmpdir>/pi-lens-mem-watch-
+ *                                   samples.log. Appended to, one line per
+ *                                   tick, never rewritten — round-2 review F2:
+ *                                   an in-memory ring plus a full-file
+ *                                   rewrite each tick measured 122.7 MB of
+ *                                   writes over one 12-minute run and, worse,
+ *                                   held only its OWN fixed window: on a run
+ *                                   whose low-water mark preceded the job's
+ *                                   end by more than that window, the window
+ *                                   had already scrolled past it by the time
+ *                                   anything read the file. `appendFileSync`
+ *                                   can never lose an earlier line, and the
+ *                                   CI reader step bounds what it PRINTS with
+ *                                   `tail`, not what the sampler writes.
  */
 
 import { spawn } from "node:child_process";
@@ -43,7 +48,6 @@ import * as os from "node:os";
 import {
 	formatSampleLine,
 	formatVerdict,
-	pushSample,
 	readCgroupSample,
 	readMemory,
 	resolveCgroupDir,
@@ -86,14 +90,9 @@ const stepMb = Number(process.env.PI_LENS_MEM_WATCH_STEP_MB) || 1024;
 const sampleFile =
 	process.env.PI_LENS_MEM_WATCH_SAMPLE_FILE ||
 	`${os.tmpdir()}/pi-lens-mem-watch-samples.log`;
-const sampleTailMs =
-	Number(process.env.PI_LENS_MEM_WATCH_SAMPLE_TAIL_MS) || 60_000;
-const sampleTailLines = Math.max(1, Math.ceil(sampleTailMs / intervalMs));
 // Resolved once: the cgroup a process belongs to does not change mid-run, and
 // re-walking /proc/self/cgroup every 200ms would be pure overhead.
 const cgroupDir = resolveCgroupDir();
-/** @type {string[]} */
-const sampleTail = [];
 
 const first = readMemory();
 emit(
@@ -120,7 +119,8 @@ const state = { lastPrintedMb: null, thresholdMb, stepMb };
 
 const timer = setInterval(() => {
 	const sample = readMemory();
-	const at = new Date().toISOString().slice(11, 19);
+	const now = new Date();
+	const at = now.toISOString().slice(11, 19);
 	if (sample.availableMb < watch.lowWaterMb) {
 		watch.lowWaterMb = sample.availableMb;
 		watch.lowWaterAt = at;
@@ -131,19 +131,23 @@ const timer = setInterval(() => {
 			`[mem-watch] ${at} availableMb=${sample.availableMb} of ${sample.totalMb}\n`,
 		);
 	}
+	// Round-2 review F1: `at` above is second-resolution and shared with the
+	// verdict's `lowWaterAt=`, which tests pin verbatim
+	// (tests/scripts/memory-watch.test.ts, ci-failure-classifier.test.ts) — it
+	// is never widened. The 200ms cadence needs its own, higher-resolution
+	// stamp, used ONLY here.
+	const atMs = now.toISOString().slice(11, 23);
 	// The #2042 2026-09-15 cheapest probe: everything a 200ms MemAvailable poll
 	// cannot see. Never printed to the job's console — that would bury the test
-	// output — only appended to the bounded on-disk tail below, which an
+	// output — only appended to the on-disk record below, which an
 	// `if: always()` CI step reads even when this very wrapper is the kill's
 	// victim (the master 1701d01 red: no verdict line, because the wrapper
 	// itself died — this file is the record that survives that case).
-	pushSample(
-		sampleTail,
-		formatSampleLine(at, sample, readCgroupSample(cgroupDir)),
-		sampleTailLines,
-	);
 	try {
-		fs.writeFileSync(sampleFile, `${sampleTail.join("\n")}\n`);
+		fs.appendFileSync(
+			sampleFile,
+			`${formatSampleLine(atMs, sample, readCgroupSample(cgroupDir))}\n`,
+		);
 	} catch {
 		// Best-effort: a disk-full or permissions failure here must never take
 		// down the sampler or the wrapped command.

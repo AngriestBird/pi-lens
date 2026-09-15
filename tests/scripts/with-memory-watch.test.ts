@@ -25,12 +25,22 @@ interface Run {
  * is still producing output. That is the state the wrapper is in when a CI log
  * collector falls behind, and it is where an asynchronously queued write is
  * lost to `process.exit`.
+ *
+ * `extraEnv` (round-2 review F4) merges over the inherited environment --
+ * folded in here rather than kept as a second, near-duplicate spawn helper
+ * (the net-count rule: `runWrapperWithEnv` repeated 18 of this function's 24
+ * lines for one added `env` key).
  */
-function runWrapper(args: string[], throttleMs = 0): Promise<Run> {
+function runWrapper(
+	args: string[],
+	throttleMs = 0,
+	extraEnv: Record<string, string> = {},
+): Promise<Run> {
 	return new Promise((resolve, reject) => {
 		const child = spawn(process.execPath, [wrapper, ...args], {
 			cwd: repoRoot,
 			stdio: ["ignore", "pipe", "pipe"],
+			env: { ...process.env, ...extraEnv },
 		});
 		let stdout = "";
 		let stderr = "";
@@ -199,33 +209,42 @@ describe("with-memory-watch sample tail (#2042 2026-09-15)", () => {
 		);
 	}
 
-	it("writes a bounded sample file across a multi-tick run", async () => {
+	// Round-2 review F2: replaces the old ring-buffer "never grows past the
+	// cap" case. The sampler no longer caps anything it writes -- an
+	// append-only file can never lose an earlier line to a rewrite, which is
+	// exactly what a fixed ring did on the real 2026-09-15 CI run (the tail
+	// covered only the run's last 60s, 21:10:04-21:11:04, while the actual
+	// low-water event -- what a kill would land near -- was at 21:02:18,
+	// already scrolled out). What has to hold instead: one line per tick, in
+	// order, never truncated, growing linearly with elapsed ticks.
+	it("appends exactly one line per tick, in order, never truncating earlier lines", async () => {
 		const sampleFile = makeSampleFile();
 		try {
-			// 5 ticks at 30ms against a 2-tick tail: proves both that the file is
-			// written before the child exits (the wrapper is not the killed
-			// process in this run, but the file must not depend on the verdict
-			// handler to exist) and that it never grows past the cap.
-			await runWrapperWithEnv(
-				["--", nodeCmd, "-e", "setTimeout(() => {}, 170)"],
-				{
-					PI_LENS_MEM_WATCH_INTERVAL_MS: "30",
-					PI_LENS_MEM_WATCH_SAMPLE_FILE: sampleFile,
-					PI_LENS_MEM_WATCH_SAMPLE_TAIL_MS: "60",
-				},
-			);
+			await runWrapper(["--", nodeCmd, "-e", "setTimeout(() => {}, 250)"], 0, {
+				PI_LENS_MEM_WATCH_INTERVAL_MS: "30",
+				PI_LENS_MEM_WATCH_SAMPLE_FILE: sampleFile,
+			});
 			const lines = fs
 				.readFileSync(sampleFile, "utf8")
 				.split("\n")
 				.filter(Boolean);
-			// ceil(60/30) = 2. Never more, even though ~5 ticks fired.
-			expect(lines.length).toBeGreaterThan(0);
-			expect(lines.length).toBeLessThanOrEqual(2);
+			// ~250ms / 30ms: at least 5 ticks fired, and NONE were trimmed --
+			// the old ring, fed the same parameters, would have capped this at 2.
+			expect(lines.length).toBeGreaterThanOrEqual(5);
 			for (const line of lines) {
-				expect(line).toMatch(/^\d\d:\d\d:\d\d availableMb=\d+ totalMb=\d+ /);
+				expect(line).toMatch(
+					/^\[mem-sample\] \d\d:\d\d:\d\d\.\d\d\d availableMb=\d+ totalMb=\d+ /,
+				);
 				expect(line).toMatch(/memCurrentMb=(\?|\d+) memPeakMb=(\?|\d+)/);
 				expect(line).toMatch(/pids=(\?|\d+)/);
 			}
+			// Strictly increasing millisecond stamps: every tick's line survives,
+			// none overwritten, none reordered.
+			const stamps = lines.map(
+				(line) => /\[mem-sample\] (\d\d:\d\d:\d\d\.\d\d\d)/.exec(line)?.[1],
+			);
+			const sorted = [...stamps].sort();
+			expect(stamps).toEqual(sorted);
 		} finally {
 			fs.rmSync(sampleFile, { force: true });
 		}
@@ -253,7 +272,6 @@ describe("with-memory-watch sample tail (#2042 2026-09-15)", () => {
 						...process.env,
 						PI_LENS_MEM_WATCH_INTERVAL_MS: "30",
 						PI_LENS_MEM_WATCH_SAMPLE_FILE: sampleFile,
-						PI_LENS_MEM_WATCH_SAMPLE_TAIL_MS: "60",
 					},
 				},
 			);
@@ -280,31 +298,3 @@ describe("with-memory-watch sample tail (#2042 2026-09-15)", () => {
 		}
 	}, 15_000);
 });
-
-/**
- * Extends `runWrapper` with extra env vars, for the sample-file tests above.
- */
-function runWrapperWithEnv(
-	args: string[],
-	extraEnv: Record<string, string>,
-): Promise<Run> {
-	return new Promise((resolve, reject) => {
-		const child = spawn(process.execPath, [wrapper, ...args], {
-			cwd: repoRoot,
-			stdio: ["ignore", "pipe", "pipe"],
-			env: { ...process.env, ...extraEnv },
-		});
-		let stdout = "";
-		let stderr = "";
-		child.stdout.setEncoding("utf8");
-		child.stderr.setEncoding("utf8");
-		child.stdout.on("data", (chunk: string) => {
-			stdout += chunk;
-		});
-		child.stderr.on("data", (chunk: string) => {
-			stderr += chunk;
-		});
-		child.on("error", reject);
-		child.on("close", (code) => resolve({ code, stdout, stderr }));
-	});
-}

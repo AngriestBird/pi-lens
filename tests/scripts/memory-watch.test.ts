@@ -6,7 +6,6 @@ import {
 	formatSampleLine,
 	formatVerdict,
 	parseMeminfo,
-	pushSample,
 	readCgroupSample,
 	resolveCgroupDir,
 	shouldPrint,
@@ -357,10 +356,15 @@ describe("cgroup sample reading (#2042 2026-09-15)", () => {
 	});
 });
 
-describe("sample line formatting and the bounded tail (#2042 2026-09-15)", () => {
-	it("formats every field, substituting ? for anything unreadable", () => {
+describe("sample line formatting (#2042 2026-09-15, round 2)", () => {
+	it("formats every field with the millisecond stamp and a distinct [mem-sample] prefix", () => {
+		// Round-2 review F1: the real 2026-09-15 CI run's tail carried 58
+		// wall-clock seconds each shared by 4-5 samples at the 200ms cadence --
+		// indistinguishable without milliseconds. Round-2 review F3: the prefix
+		// is distinct from `[mem-watch]` on purpose (see the function's own
+		// comment) -- `ci-failure-classifier.mjs` does not match it.
 		const line = formatSampleLine(
-			"19:02:48",
+			"19:02:48.203",
 			{ availableMb: 4077, totalMb: 15990 },
 			{
 				memCurrentMb: 3102,
@@ -371,34 +375,8 @@ describe("sample line formatting and the bounded tail (#2042 2026-09-15)", () =>
 			},
 		);
 		expect(line).toBe(
-			"19:02:48 availableMb=4077 totalMb=15990 memCurrentMb=3102 memPeakMb=9226 " +
+			"[mem-sample] 19:02:48.203 availableMb=4077 totalMb=15990 memCurrentMb=3102 memPeakMb=9226 " +
 				"pids=41 memPressureSomeTotal=123 cpuPressureSomeTotal=?",
 		);
-	});
-
-	// #2042 2026-09-15 shape 9, applied to the sampler itself: a resource
-	// bounded on one axis (job duration is unbounded) and unbounded on the axis
-	// that actually grows (the file's own line count) is a leak. The tail must
-	// stay a FIXED size regardless of how many samples are pushed.
-	it("keeps the tail at a fixed size no matter how many samples are pushed", () => {
-		const buffer: string[] = [];
-		for (let i = 0; i < 1000; i++) {
-			pushSample(buffer, `line-${i}`, 5);
-		}
-		expect(buffer.length).toBe(5);
-		expect(buffer).toEqual([
-			"line-995",
-			"line-996",
-			"line-997",
-			"line-998",
-			"line-999",
-		]);
-	});
-
-	it("never trims below maxLines while filling up", () => {
-		const buffer: string[] = [];
-		pushSample(buffer, "a", 3);
-		pushSample(buffer, "b", 3);
-		expect(buffer).toEqual(["a", "b"]);
 	});
 });

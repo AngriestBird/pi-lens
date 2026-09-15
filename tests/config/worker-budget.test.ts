@@ -392,6 +392,14 @@ describe("CI cheapest-probe wiring (#2042 2026-09-15)", () => {
 		ci.indexOf("- name: Run tests"),
 		ci.indexOf(tailStepMarker),
 	);
+	// Bounded to this ONE step's own body, not left open to end-of-file --
+	// round-2 review self-catch: an earlier version of this slice ran to EOF
+	// and a `not.toContain('cat "$f"')` assertion tripped on an unrelated
+	// `cat "$f"` in a wholly different job later in ci.yml.
+	const tailStep = ci.slice(
+		ci.indexOf(tailStepMarker),
+		ci.indexOf("- name: Kernel kill evidence"),
+	);
 
 	it("samples five times faster than the 2s default that could miss a spike", () => {
 		// The env var already existed (PI_LENS_MEM_WATCH_INTERVAL_MS); only the
@@ -401,7 +409,6 @@ describe("CI cheapest-probe wiring (#2042 2026-09-15)", () => {
 	});
 
 	it("shares one sample-file path between the writer and the reader step", () => {
-		const tailStep = ci.slice(ci.indexOf(tailStepMarker));
 		const pathPattern = /PI_LENS_MEM_WATCH_SAMPLE_FILE:\s*(.+)/;
 		const writerPath = pathPattern.exec(runTestsStep)?.[1]?.trim();
 		const readerPath = pathPattern.exec(tailStep)?.[1]?.trim();
@@ -415,7 +422,6 @@ describe("CI cheapest-probe wiring (#2042 2026-09-15)", () => {
 	// but `if: always()` is what makes it survive that AND a cancelled job.
 	it("tails the sample file from an if: always() step, so a killed run still yields it", () => {
 		expect(ci).toContain(tailStepMarker);
-		const tailStep = ci.slice(ci.indexOf(tailStepMarker));
 		expect(tailStep.slice(0, 120)).toContain("if: always()");
 	});
 
@@ -431,5 +437,15 @@ describe("CI cheapest-probe wiring (#2042 2026-09-15)", () => {
 		expect(step).not.toContain(
 			"cat /sys/fs/cgroup/memory.max 2>/dev/null || true",
 		);
+	});
+
+	// Round-2 review F2: the sample file is append-only and therefore
+	// unbounded on disk (deliberately -- see scripts/with-memory-watch.mjs's
+	// own comment), so the ONLY place output volume is bounded is this read
+	// step. `cat` on an hours-long run would flood the job log; `tail` is the
+	// bound.
+	it("bounds what the tail step PRINTS with tail -n, not what the sampler writes", () => {
+		expect(tailStep).toContain('tail -n 300 "$f"');
+		expect(tailStep).not.toContain('cat "$f"');
 	});
 });

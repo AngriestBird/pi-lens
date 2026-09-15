@@ -262,42 +262,38 @@ export function readCgroupSample(cgroupDir) {
 }
 
 /**
- * One line of the on-disk sample tail (see `pushSample`). Kept separate from
- * the host-memory step-print policy above: this line is never printed to the
- * job's console, only appended to the bounded file, so it can afford to carry
- * every field every tick.
+ * One line of the on-disk sample tail, appended (never rewritten — see
+ * `scripts/with-memory-watch.mjs`) once per tick. Kept separate from the
+ * host-memory step-print policy above: this line is never printed to the
+ * job's console directly, only appended to the file, so it can afford to
+ * carry every field every tick.
  *
- * @param {string} at HH:MM:SS
+ * The `[mem-sample] ` prefix (round-2 review F3) is deliberately distinct
+ * from `[mem-watch]`: `scripts/lib/ci-failure-classifier.mjs` matches only
+ * `[mem-watch] … availableMb=N of M` today, so these lines are NOT yet
+ * consumed by the failure classifier — the prefix exists so a future
+ * classifier change has a grep-able handle, not because one reads it yet.
+ *
+ * `at` carries milliseconds (round-2 review F1): the shared `[mem-watch]`
+ * `at` (HH:MM:SS, asserted verbatim in `formatVerdict`'s `lowWaterAt=` and by
+ * `ci-failure-classifier.test.ts`) is second-resolution, but the cadence here
+ * is 200ms — on the 2026-09-15 head's own CI run, 58 of the tail's 300 lines
+ * shared a wall-clock second with four to five siblings, indistinguishable
+ * without the milliseconds. The caller passes a SEPARATE, higher-resolution
+ * timestamp here; the shared `at` local is never widened.
+ *
+ * @param {string} atMs HH:MM:SS.mmm
  * @param {{ availableMb: number, totalMb: number }} hostSample
  * @param {ReturnType<typeof readCgroupSample>} cgroupSample
  * @returns {string}
  */
-export function formatSampleLine(at, hostSample, cgroupSample) {
+export function formatSampleLine(atMs, hostSample, cgroupSample) {
 	const n = (v) => (v === null || v === undefined ? "?" : v);
 	return (
-		`${at} availableMb=${hostSample.availableMb} totalMb=${hostSample.totalMb} ` +
+		`[mem-sample] ${atMs} availableMb=${hostSample.availableMb} totalMb=${hostSample.totalMb} ` +
 		`memCurrentMb=${n(cgroupSample.memCurrentMb)} memPeakMb=${n(cgroupSample.memPeakMb)} ` +
 		`pids=${n(cgroupSample.pidsCurrent)} ` +
 		`memPressureSomeTotal=${n(cgroupSample.memPressureSomeTotal)} ` +
 		`cpuPressureSomeTotal=${n(cgroupSample.cpuPressureSomeTotal)}`
 	);
-}
-
-/**
- * Append `line` to `buffer`, trimmed to at most `maxLines` — a FIXED tail, not
- * a log that grows with the run's duration. #2042 2026-09-15's own diagnosis
- * names this exact shape (shape 9: bounded on one axis, unbounded on another)
- * as the defect in the test file this sampler exists to help attribute; the
- * sampler must not repeat it against itself over a long CI run.
- *
- * @template T
- * @param {T[]} buffer mutated in place
- * @param {T} line
- * @param {number} maxLines
- * @returns {T[]} the same buffer, for chaining
- */
-export function pushSample(buffer, line, maxLines) {
-	buffer.push(line);
-	while (buffer.length > maxLines) buffer.shift();
-	return buffer;
 }
