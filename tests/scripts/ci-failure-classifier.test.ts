@@ -61,6 +61,7 @@ import {
 	classifyFailureLog,
 	decideClassifierAction,
 	describeKernelKillEvidence,
+	MAX_AUTO_RERUN_ATTEMPT,
 	parseClassifierMarker,
 	readCgroupOomKillCount,
 	runClassifier,
@@ -718,6 +719,7 @@ describe("marker round-trip (#2103)", () => {
 			sha: "abc1234",
 			rerunState: "true",
 			rerunTriggered: true,
+			runAttempt: 1,
 		});
 	});
 
@@ -729,6 +731,7 @@ describe("marker round-trip (#2103)", () => {
 			sha: "abc1234",
 			rerunState: "failed:403",
 			rerunTriggered: false,
+			runAttempt: 1,
 		});
 	});
 
@@ -741,6 +744,7 @@ describe("marker round-trip (#2103)", () => {
 			sha: "abc1234",
 			rerunState: "false",
 			rerunTriggered: false,
+			runAttempt: 1,
 		});
 		expect(parseClassifierMarker(`${forged} trailing content`)).toBeNull();
 	});
@@ -869,6 +873,116 @@ describe("shouldTriggerRerun once-per-SHA guard (#2103)", () => {
 	});
 });
 
+// The recurrence these guard: on 2026-09-15 the runner 137-killed #3048's CI
+// on attempts 1 AND 2, and #3040's the same way on 1e9844d. The workflow gate
+// (`run_attempt == 1`, pinned in tests/config/ci-infra-kill-rerun-gate.test.ts)
+// meant the second kill was never classified at all -- and behind that gate,
+// this guard was keyed on the SHA alone, so even once the job fired the PR
+// lane would still have refused the second rerun. Both had to move; these
+// rows pin the half that lives in the classifier.
+describe("shouldTriggerRerun per-attempt keying and the two-rerun bound (#2042)", () => {
+	const infra = { kind: "infra-kill" as const, detail: "no failing assertion" };
+
+	it("triggers again on attempt 2 when the marker recorded a rerun for attempt 1 (the second infra kill on one head)", () => {
+		expect(
+			shouldTriggerRerun({
+				classification: infra,
+				sha: "sha1",
+				runAttempt: 2,
+				existingMarker: { sha: "sha1", rerunTriggered: true, runAttempt: 1 },
+			}),
+		).toBe(true);
+	});
+
+	it("does NOT re-trigger within one attempt: a marker already recording this attempt blocks a repeat invocation", () => {
+		expect(
+			shouldTriggerRerun({
+				classification: infra,
+				sha: "sha1",
+				runAttempt: 2,
+				existingMarker: { sha: "sha1", rerunTriggered: true, runAttempt: 2 },
+			}),
+		).toBe(false);
+	});
+
+	// The bound. Attempts 1 and 2 can each issue one rerun, so a head gets at
+	// most two and attempt 3 is terminal; without it a persistently starved
+	// runner would loop this lane forever.
+	it("never triggers from attempt 3, even with no prior marker at all", () => {
+		expect(
+			shouldTriggerRerun({
+				classification: infra,
+				sha: "sha1",
+				runAttempt: 3,
+				existingMarker: null,
+			}),
+		).toBe(false);
+		expect(MAX_AUTO_RERUN_ATTEMPT).toBe(2);
+	});
+
+	// Negative population: a real failure is still never rerun, at any
+	// attempt -- loosening the attempt key must not loosen the kind gate.
+	it("still never triggers for a real classification on attempt 2", () => {
+		expect(
+			shouldTriggerRerun({
+				classification: {
+					kind: "real" as const,
+					detail: "some/file.test.ts > some test",
+				},
+				sha: "sha1",
+				runAttempt: 2,
+				existingMarker: null,
+			}),
+		).toBe(false);
+	});
+
+	// Durable-record back-compat: a marker written before `attempt=` existed
+	// must still parse, and must read as attempt 1 -- which is what it was,
+	// because the workflow only invoked the classifier on run_attempt == 1.
+	it("reads a pre-#2042 marker with no attempt field as attempt 1, and still lets attempt 2 rerun", () => {
+		const legacy = "<!-- ci-classifier:sha=deadbeef rerun=true -->";
+		expect(parseClassifierMarker(legacy)).toEqual({
+			sha: "deadbeef",
+			rerunState: "true",
+			rerunTriggered: true,
+			runAttempt: 1,
+		});
+		expect(
+			shouldTriggerRerun({
+				classification: infra,
+				sha: "deadbeef",
+				runAttempt: 2,
+				existingMarker: parseClassifierMarker(legacy),
+			}),
+		).toBe(true);
+	});
+
+	it("carries a prior attempt's rerun forward without restamping it onto this attempt", () => {
+		const rawLog = fixture("infra-kill-wrapper-killed.real.log");
+		const sha = "deadbeef";
+		const first = decideClassifierAction({
+			rawLog,
+			sha,
+			runAttempt: 2,
+			existingCommentBody: null,
+		});
+		expect(first.rerunTriggeredThisPass).toBe(true);
+		expect(first.commentBody).toContain(buildMarker(sha, "true", 2));
+
+		// A repeat invocation for the SAME attempt must not rerun again, and
+		// must keep naming attempt 2 -- restamping a later attempt number here
+		// would silently hand that attempt a fresh try it never earned.
+		const repeat = decideClassifierAction({
+			rawLog,
+			sha,
+			runAttempt: 2,
+			existingCommentBody: first.commentBody,
+		});
+		expect(repeat.rerunTriggeredThisPass).toBe(false);
+		expect(repeat.commentBody).toContain(buildMarker(sha, "true", 2));
+	});
+});
+
 describe("runClassifier orchestration against a mocked, STATEFUL GitHub API (#2103)", () => {
 	function jsonResponse(body: unknown, status = 200) {
 		return {
@@ -907,9 +1021,17 @@ describe("runClassifier orchestration against a mocked, STATEFUL GitHub API (#21
 		initialComments = [] as Array<{ id: number; body: string }>,
 		rerunHandler,
 		concurrentInvocations = 0,
+		runAttempt = 1,
 	}: {
 		initialComments?: Array<{ id: number; body: string }>;
 		rerunHandler?: () => { ok: boolean; status: number };
+		/**
+		 * The run's `run_attempt`, exactly as GitHub's
+		 * GET /actions/runs/:id reports it (#2042). Production-faithful on the
+		 * axis under test: the rerun guard reads this field off the run, so a
+		 * double that omitted it would let an inert fix read green.
+		 */
+		runAttempt?: number;
 		/**
 		 * F3/V1 only: force every GROUP of N concurrent GET .../comments calls
 		 * (across N overlapping runClassifier invocations sharing this same
@@ -965,6 +1087,7 @@ describe("runClassifier orchestration against a mocked, STATEFUL GitHub API (#21
 			if (url.endsWith("/actions/runs/999")) {
 				return jsonResponse({
 					head_sha: "deadbeef",
+					run_attempt: runAttempt,
 					pull_requests: [{ number: 42 }],
 				});
 			}
@@ -1144,6 +1267,52 @@ describe("runClassifier orchestration against a mocked, STATEFUL GitHub API (#21
 
 		const reran = calls.find((c) => c.url.includes("rerun-failed-jobs"));
 		expect(reran).toBeUndefined();
+	});
+
+	// #2042, through the real orchestration rather than the pure guard: the
+	// PR lane's SECOND infra kill on one head. #3048 and #3040 each sat here
+	// on 2026-09-15 until a human pressed rerun. The run now reports
+	// run_attempt=2 (as GitHub's REST does) and the sticky comment already
+	// carries the attempt-1 rerun marker, which is the exact state the second
+	// kill arrives in.
+	it("#2042: a SECOND infra kill on the same head (attempt 2, marker from attempt 1) triggers one more rerun", async () => {
+		const priorBody = `ci-classifier: infra-kill (no failing assertion; auto-rerun triggered) ${buildMarker("deadbeef", "true", 1)}`;
+		const api = makeStatefulApi({
+			initialComments: [{ id: 555, body: priorBody }],
+			runAttempt: 2,
+		});
+
+		const result = await runClassifier({
+			fetcher: api.fetcher,
+			owner: "acme",
+			repo: "repo",
+			runId: 999,
+		});
+
+		expect(result.classification.kind).toBe("infra-kill");
+		expect(result.rerunTriggeredThisPass).toBe(true);
+		expect(api.rerunCallCount).toBe(1);
+		// The marker now names attempt 2, so a repeat invocation for THIS
+		// attempt is blocked while attempt 3 was never eligible in the first
+		// place (the bound).
+		expect(api.comments[0].body).toContain(buildMarker("deadbeef", "true", 2));
+	});
+
+	// The bound, through the same orchestration: attempt 3 is terminal. No
+	// marker at all, an unambiguous infra-kill log -- and still no rerun.
+	it("#2042: attempt 3 is terminal — no automatic rerun is issued even with no prior marker", async () => {
+		const api = makeStatefulApi({ runAttempt: 3 });
+
+		const result = await runClassifier({
+			fetcher: api.fetcher,
+			owner: "acme",
+			repo: "repo",
+			runId: 999,
+		});
+
+		expect(result.classification.kind).toBe("infra-kill");
+		expect(result.rerunTriggeredThisPass).toBe(false);
+		expect(api.rerunCallCount).toBe(0);
 	});
 
 	// F4 (BLOCKING, red-proof with a throwing rerun stub): the marker must
@@ -1431,6 +1600,7 @@ describe("buildCommentBody (#2103)", () => {
 			sha: "abc1234",
 			rerunState: "false",
 			rerunTriggered: false,
+			runAttempt: 1,
 		});
 	});
 });
