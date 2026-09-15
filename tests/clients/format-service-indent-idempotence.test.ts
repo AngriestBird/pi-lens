@@ -110,11 +110,7 @@ const tabDocCommented = [
  * their opener's indent. The double must honor `--indent-width`, or a detector
  * that pins the wrong width would look inert.
  */
-function reindentAsBiome(
-	content: string,
-	width: number,
-	unit: number,
-): string {
+function reindentAsBiome(content: string, width: number, unit: number): string {
 	const out: string[] = [];
 	let inBlock = false;
 	for (const line of content.split("\n")) {
@@ -125,9 +121,7 @@ function reindentAsBiome(
 			continue;
 		}
 		if (inBlock) {
-			out.push(
-				" ".repeat(Math.floor((leading - 1) / unit) * width + 1) + rest,
-			);
+			out.push(" ".repeat(Math.floor((leading - 1) / unit) * width + 1) + rest);
 			if (rest.includes("*/")) inBlock = false;
 			continue;
 		}

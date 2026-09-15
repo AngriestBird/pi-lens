@@ -139,7 +139,8 @@ const ROWS: Array<{
 		// has no indented line at all, so it falls to the safe default instead of
 		// certifying width 1 from its ` * ` lines.
 		id: "R15 block-comment continuations are the only indented lines",
-		content: "/**\n * A module with no indented code.\n */\nexport const x = 1;\n",
+		content:
+			"/**\n * A module with no indented code.\n */\nexport const x = 1;\n",
 		expected: { style: "space", width: 2 },
 	},
 	{
