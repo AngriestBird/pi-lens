@@ -791,6 +791,13 @@ const LSP_FIXTURES = [
 		tools: ["gleam"],
 	},
 	{
+		lang: "typst",
+		dir: "tests/fixtures/tool-smoke/typst",
+		file: "main.typ",
+		serverHint: "tinymist",
+		tools: ["tinymist"],
+	},
+	{
 		lang: "ocaml",
 		dir: "tests/fixtures/tool-smoke/ocaml",
 		file: "main.ml",
@@ -1114,6 +1121,13 @@ const FORMAT_FIXTURES = [
 		file: "messy.gleam",
 		formatter: "gleam",
 		tools: [],
+	},
+	{
+		lang: "typst",
+		dir: "tests/fixtures/format-smoke/typst",
+		file: "messy.typ",
+		formatter: "typstyle",
+		tools: ["typstyle"],
 	},
 	{
 		lang: "ruby",
