@@ -459,6 +459,13 @@ export const wallClockBudgetInclude = [
 	// where the record lands and is unobservable in-process (flake-shape
 	// admission).
 	"tests/scripts/warm-loader-cache.test.ts",
+	// #2042 2026-09-15: the sample-tail wiring is proven by spawning the real
+	// wrapper (its own real setInterval sampling loop cannot be faked from the
+	// test process) and, in one case, killing the wrapper's real process mid-run
+	// -- the exact "wrapper is the kill's victim" shape the diagnosis found on
+	// master 1701d01. A poll loop (real setTimeout) waits for the file's first
+	// write rather than a fixed sleep (flake-shape admission).
+	"tests/scripts/with-memory-watch.test.ts",
 	"tests/support/fault-injection.test.ts",
 	"tests/support/git-config-guard.test.ts",
 	"tests/support/git-fixture-env.test.ts",

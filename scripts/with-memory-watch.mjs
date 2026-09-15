@@ -24,12 +24,35 @@
  *   PI_LENS_MEM_WATCH_STEP_MB       Print when available memory has fallen this
  *                                   far since the last printed line
  *                                   (default 1024).
+ *   PI_LENS_MEM_WATCH_SAMPLE_FILE   Path for the per-sample record (the #2042
+ *                                   2026-09-15 diagnosis's "cheapest probe").
+ *                                   Default: <tmpdir>/pi-lens-mem-watch-
+ *                                   samples.log. Appended to, one line per
+ *                                   tick, never rewritten — round-2 review F2:
+ *                                   an in-memory ring plus a full-file
+ *                                   rewrite each tick measured 122.7 MB of
+ *                                   writes over one 12-minute run and, worse,
+ *                                   held only its OWN fixed window: on a run
+ *                                   whose low-water mark preceded the job's
+ *                                   end by more than that window, the window
+ *                                   had already scrolled past it by the time
+ *                                   anything read the file. `appendFileSync`
+ *                                   can never lose an earlier line, and the
+ *                                   CI reader step bounds what it PRINTS with
+ *                                   `tail`, not what the sampler writes.
  */
 
 import { spawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
-import { formatVerdict, readMemory, shouldPrint } from "./lib/memory-watch.mjs";
+import {
+	formatSampleLine,
+	formatVerdict,
+	readCgroupSample,
+	readMemory,
+	resolveCgroupDir,
+	shouldPrint,
+} from "./lib/memory-watch.mjs";
 
 /**
  * Every line this wrapper emits goes through a BLOCKING write, never
@@ -64,6 +87,12 @@ if (command.length === 0) {
 const intervalMs = Number(process.env.PI_LENS_MEM_WATCH_INTERVAL_MS) || 2000;
 const thresholdMb = Number(process.env.PI_LENS_MEM_WATCH_LOW_MB) || 1024;
 const stepMb = Number(process.env.PI_LENS_MEM_WATCH_STEP_MB) || 1024;
+const sampleFile =
+	process.env.PI_LENS_MEM_WATCH_SAMPLE_FILE ||
+	`${os.tmpdir()}/pi-lens-mem-watch-samples.log`;
+// Resolved once: the cgroup a process belongs to does not change mid-run, and
+// re-walking /proc/self/cgroup every 200ms would be pure overhead.
+const cgroupDir = resolveCgroupDir();
 
 const first = readMemory();
 emit(
@@ -90,7 +119,8 @@ const state = { lastPrintedMb: null, thresholdMb, stepMb };
 
 const timer = setInterval(() => {
 	const sample = readMemory();
-	const at = new Date().toISOString().slice(11, 19);
+	const now = new Date();
+	const at = now.toISOString().slice(11, 19);
 	if (sample.availableMb < watch.lowWaterMb) {
 		watch.lowWaterMb = sample.availableMb;
 		watch.lowWaterAt = at;
@@ -100,6 +130,27 @@ const timer = setInterval(() => {
 		emit(
 			`[mem-watch] ${at} availableMb=${sample.availableMb} of ${sample.totalMb}\n`,
 		);
+	}
+	// Round-2 review F1: `at` above is second-resolution and shared with the
+	// verdict's `lowWaterAt=`, which tests pin verbatim
+	// (tests/scripts/memory-watch.test.ts, ci-failure-classifier.test.ts) — it
+	// is never widened. The 200ms cadence needs its own, higher-resolution
+	// stamp, used ONLY here.
+	const atMs = now.toISOString().slice(11, 23);
+	// The #2042 2026-09-15 cheapest probe: everything a 200ms MemAvailable poll
+	// cannot see. Never printed to the job's console — that would bury the test
+	// output — only appended to the on-disk record below, which an
+	// `if: always()` CI step reads even when this very wrapper is the kill's
+	// victim (the master 1701d01 red: no verdict line, because the wrapper
+	// itself died — this file is the record that survives that case).
+	try {
+		fs.appendFileSync(
+			sampleFile,
+			`${formatSampleLine(atMs, sample, readCgroupSample(cgroupDir))}\n`,
+		);
+	} catch {
+		// Best-effort: a disk-full or permissions failure here must never take
+		// down the sampler or the wrapped command.
 	}
 }, intervalMs);
 // The watcher must never be the reason the process stays alive.
