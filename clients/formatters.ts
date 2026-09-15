@@ -16,7 +16,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { BoundedLruCache } from "./bounded-cache.js";
 import { createGenerationSource } from "./generation-guard.js";
-import { normalizeMapKey } from "./path-utils.js";
+import { findNearestContaining, normalizeMapKey } from "./path-utils.js";
 import { resolveToolCwd } from "./tool-cwd.js";
 import { resolveCargoPackageEdition } from "./cargo-manifest.js";
 import { resolveKtfmtGradleStyle } from "./gradle-ktfmt-style.js";
@@ -850,12 +850,7 @@ export const FORMATTERS_WITH_EXPLICIT_CONFIG_CHECK = new Set<string>(
 // --- Formatter Definitions ---
 
 async function hasEditorConfig(cwd: string): Promise<boolean> {
-	try {
-		await fs.access(path.join(cwd, ".editorconfig"));
-		return true;
-	} catch {
-		return false;
-	}
+	return findNearestContaining(cwd, [".editorconfig"]) !== undefined;
 }
 
 async function indentationArgs(
@@ -878,6 +873,20 @@ async function indentationArgs(
 	}
 	if (!hasDetectableIndentation(content)) return null;
 	const indentation = detectIndentation(content);
+	if (!indentation) {
+		// #3038: the file HAS indentation, but only nested runs, so no unit can be
+		// proven. The caller turns this into SKIP_FORMATTING — a file the user
+		// expected to be formatted silently is not — so the refusal gets one
+		// bounded row. Subject is the tool (four possible values, recorded once
+		// per session each) rather than the path: a session that edits many such
+		// files must not write one ledger key per file.
+		recordDegradationOnce({
+			kind: "formatter-skip",
+			subject: tool,
+			reason: "indentation evidence is ambiguous; formatter style not pinned",
+		});
+		return null;
+	}
 	if (tool === "shfmt")
 		return indentation.style === "tab"
 			? ["-i", "0"]

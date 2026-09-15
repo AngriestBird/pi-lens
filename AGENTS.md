@@ -109,6 +109,10 @@ permission grants, release/version changes, dependency majors or lockfile
 regeneration, deletion of user data or durable records, external-contributor
 PRs, and changes to these rules require user decision.
 
+Every regroup, merged bug fix, second round on one shape, and incident runs
+the retrospective in `docs/pi-lens-retro.md` (mechanical mistakes become
+checks with a red transcript; judgement calls become one contract line).
+
 For CI, verify required checks actually ran and passed on the exact head. A
 conflicted PR can silently skip required jobs. Use:
 
@@ -232,6 +236,12 @@ and PR language; detailed historical examples are in `HISTORY.md`.
     or default, name the concrete failure that reaches the user and choose the
     direction from that harm; test unreadable, absent, and thrown lookup states
     where the seam supports both directions.
+49. **Whitespace counted as structure when it is alignment:** a leading run can
+    be alignment, not one nesting unit. Known members: an aligned continuation
+    inside a call (#3038) and the interior of a block comment, whose ` * ` lines
+    sit one column past their opener (#3039). Name which lines carry structure
+    and exclude the rest before counting; decline rather than pin a style when
+    only ambiguous runs remain.
 
 ## Standing invariants
 

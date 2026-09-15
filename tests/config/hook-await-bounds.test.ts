@@ -2107,7 +2107,11 @@ const HELPER_UNBOUNDED: Readonly<Record<string, number>> = {
 	"clients/format-service.ts": 4,
 	// #2767: managed formatter resolution uses the installer's bounded probes;
 	// keep the measured count pinned until the formatter seam carries signals.
-	// 114 → 116 (#3037): `typstyleFormatter` adds the same two PATH probes every
+	// 114 → 113 (#3038), recorded rather than absorbed: `hasEditorConfig` folded
+	// its single-directory `await fs.access` onto the synchronous
+	// `findNearestContaining` seam (`clients/path-utils.ts`), which walks
+	// ancestors, so one unbounded await left this module.
+	// then 113 → 115 (#3037): `typstyleFormatter` adds the same two PATH probes every
 	// managed-smart-default formatter beside it already holds — `await
 	// which("typstyle")` in `resolveCommand` and the same call inside its
 	// `managedToolDetect` availability closure. Neither can take `bounded()`
@@ -2120,7 +2124,7 @@ const HELPER_UNBOUNDED: Readonly<Record<string, number>> = {
 	// the other 43 `await which(...)` sites in this module spend, which is
 	// exactly the "bound at the leaf, unreachable from the hook" shape this
 	// pin exists to keep visible rather than to bless.
-	"clients/formatters.ts": 116,
+	"clients/formatters.ts": 115,
 	"clients/gitleaks-client.ts": 4,
 	"clients/govulncheck-client.ts": 6,
 	// 192 → 194 (#2722), in two steps, both registered rather than absorbed:

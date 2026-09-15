@@ -169,6 +169,27 @@ describe("resolveCommand — node_modules/.bin", () => {
 		expect(cmd).toContain("2");
 	});
 
+	it("biome: ancestor editorconfig disables inferred style flags", async () => {
+		const binPath = nodeModulesBin(tmpDir, "biome");
+		makeFakeExe(binPath);
+		const nestedDir = path.join(tmpDir, "packages", "app");
+		fs.mkdirSync(nestedDir, { recursive: true });
+		fs.writeFileSync(path.join(tmpDir, ".editorconfig"), "root = true\n");
+		const filePath = fileIn(nestedDir, "index.ts");
+		fs.writeFileSync(filePath, "function f() {\n      return 1;\n}\n");
+
+		const cmd = await biomeFormatter.resolveCommand!(filePath, nestedDir);
+
+		expect(cmd).toEqual([
+			binPath,
+			"format",
+			"--write",
+			"--no-errors-on-unmatched",
+			"--use-editorconfig=true",
+			filePath,
+		]);
+	});
+
 	it("biome: prefers local node_modules/.bin/biome over npx", async () => {
 		const binPath = nodeModulesBin(tmpDir, "biome");
 		makeFakeExe(binPath);
