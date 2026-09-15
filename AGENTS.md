@@ -215,6 +215,23 @@ and PR language; detailed historical examples are in `HISTORY.md`.
     `pathToFileURL(process.argv[1]).href`.
 45. **Root wrapper drops metadata:** wrappers preserve the complete marker table
     and are checked against direct root resolution.
+46. **Long-lived container without a bound:** module-level or bootstrap-lived
+    `Map`/`Set` state can grow per file, project, or request despite a reset.
+    Classify each live occurrence as bounded, evicted, or content-keyed and
+    keep the inventory shrink-only; a read-only TTL check or session reset is
+    not a bound without a finite key-space argument. The bounded-container
+    sweep scans `clients/`, `tools/`, `mcp/`, and `index.ts` with AST evidence
+    and retains non-zero population and flagged floors.
+47. **Retry or drain loop consumes its own work list:** a bounded retry or
+    drain loop must not remove its tracked item from the collection it iterates
+    on the first successful pass. Later attempts must observe the resource's
+    actual absence before untracking it; tests cover a resource recreated
+    between attempts.
+48. **Fallback direction chosen without naming the user-facing obstruction:**
+    "fail closed" is not a universal justification. For each fallback, catch,
+    or default, name the concrete failure that reaches the user and choose the
+    direction from that harm; test unreadable, absent, and thrown lookup states
+    where the seam supports both directions.
 
 ## Standing invariants
 
@@ -223,6 +240,12 @@ and PR language; detailed historical examples are in `HISTORY.md`.
 - `clients/language-registry.ts` is the identity source for language ids,
   extensions, filenames, file kinds, LSP ids, and grammars. Consumers project
   from it; they do not maintain parallel language tables.
+- Agent-facing advisory text resolves names through `resolveLensToolName` with
+  the delivery host: pi uses `piName`, and MCP uses `mcpName` from
+  `TOOL_REGISTRY`. Known tools without a host mapping resolve to `undefined`,
+  so callers omit or rephrase them; pi-only rows require
+  `PI_ONLY_TOOL_REASONS`. Do not add a second name map or hard-code a pi tool
+  name in advisory output (#2535).
 - `clients/config-core/` owns schema validation, normalization, merging,
   provenance, deny precedence, merge strategies, trust-gated process specs,
   and bounded migration records. Existing LSP, global, and project loaders
@@ -300,6 +323,12 @@ and PR language; detailed historical examples are in `HISTORY.md`.
 - Analyzer and runner fallback filters must match the substituted surface's
   contract. Empty output distinguishes clean, skipped, unavailable, errored,
   inconclusive, and partial states.
+- Every autonomous writer (pipeline autofix, immediate/deferred formatter, and
+  actionable-warning quickfix) resolves through `clients/tool-agreement.ts`.
+  Its declarative population assigns one evidence bucket and declines absent,
+  unreadable, unparseable, unsupported, or unregistered evidence; callers emit
+  bounded degradation records. Ktlint's standalone-CLI exception still
+  declines Gradle-owned projects without guessing a CLI version.
 - `clients/dispatch/runners/runner-spawn-cwd-sweep.test.ts` is the population
   guard for child cwd derivation. Add a reasoned migration row instead of a
   pin-only update.
