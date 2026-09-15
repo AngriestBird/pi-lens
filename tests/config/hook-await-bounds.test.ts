@@ -2107,7 +2107,11 @@ const HELPER_UNBOUNDED: Readonly<Record<string, number>> = {
 	"clients/format-service.ts": 4,
 	// #2767: managed formatter resolution uses the installer's bounded probes;
 	// keep the measured count pinned until the formatter seam carries signals.
-	"clients/formatters.ts": 114,
+	// 114 → 113 (#3038), recorded rather than absorbed: `hasEditorConfig` folded
+	// its single-directory `await fs.access` onto the synchronous
+	// `findNearestContaining` seam (`clients/path-utils.ts`), which walks
+	// ancestors, so one unbounded await left this module.
+	"clients/formatters.ts": 113,
 	"clients/gitleaks-client.ts": 4,
 	"clients/govulncheck-client.ts": 6,
 	// 192 → 194 (#2722), in two steps, both registered rather than absorbed:

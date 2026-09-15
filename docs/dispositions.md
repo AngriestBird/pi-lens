@@ -52,6 +52,15 @@ per-disposition binding strength:
   edits to the line and drift elsewhere in the file. (`suppress` is enforced
   by the inline comment anyway; the store entry is an audit mirror.)
 
+Both anchors also hash the producing `tool`, so a finding that changes hands
+between tools gets a fresh anchor. One such change shipped in #3041: `mode:
+"full"` used to render auxiliary-scanner findings (ast-grep, opengrep, zizmor,
+typos) under the generic `tool: "lsp"` while every other surface already showed
+them under their real tool id. It now shows the real id everywhere, so a mark
+recorded against the old `lsp`-labelled copy no longer matches and the finding
+gets one fresh chance to be re-marked — under the same `tool` the per-edit path
+has always used.
+
 ## Suppression comments
 
 `suppress` writes a pi-lens-owned ignore comment on the line immediately

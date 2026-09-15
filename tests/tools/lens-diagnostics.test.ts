@@ -4598,6 +4598,67 @@ describe("lens_diagnostics disposition read-filter (#755)", () => {
 		return markTool().execute("m", params, undefined, () => {}, { cwd: ddTmp });
 	}
 
+	it("mode=full applies a stored disposition to an auxiliary LSP finding (#3041)", async () => {
+		// #3041 recurrence: the full-mode merge converted a SECOND copy of the same
+		// raw LSP diagnostics with a hardcoded `tool: "lsp"`, while the footer
+		// reconcile loop beside it already re-tagged them through
+		// `retagAuxiliaryDiagnostics` (#692). Dispositions anchor on `tool`, so a
+		// `false-positive` mark recorded against the per-edit `ast-grep` finding
+		// never matched the copy mode=full rendered.
+		const filePath = path.join(ddTmp, "app.ts");
+		fs.writeFileSync(filePath, "console.log('debug');\n");
+		const lspService = {
+			runWorkspaceDiagnostics: vi.fn().mockResolvedValue([
+				{
+					filePath,
+					diagnostics: [
+						{
+							severity: 2,
+							message: "debug output",
+							range: {
+								start: { line: 0, character: 0 },
+								end: { line: 0, character: 11 },
+							},
+							source: "ast-grep",
+							code: "some-project-rule",
+						},
+					],
+					count: 1,
+				},
+			]),
+		};
+		const tool = createLensDiagnosticsTool(
+			makeCacheManager({}) as any,
+			() => ddTmp,
+			() => lspService as any,
+		);
+
+		const before = await tool.execute(
+			"1",
+			{ mode: "full", paths: [filePath] },
+			new AbortController().signal,
+			null,
+			{ cwd: ddTmp },
+		);
+		expect(String(before.content[0].text)).toContain("debug output");
+		await runMark({
+			filePath,
+			line: 1,
+			message: "debug output",
+			rule: "ast-grep:some-project-rule",
+			tool: "ast-grep",
+			disposition: "false-positive",
+		});
+		const after = await tool.execute(
+			"1",
+			{ mode: "full", paths: [filePath] },
+			new AbortController().signal,
+			null,
+			{ cwd: ddTmp },
+		);
+		expect(String(after.content[0].text)).not.toContain("debug output");
+	});
+
 	it("mode=delta hides a finding suppressed via the mark tool without a re-dispatch", async () => {
 		const filePath = path.join(ddTmp, "a.ts");
 		fs.writeFileSync(filePath, "const a = 1;\nconst target = bad();\n");

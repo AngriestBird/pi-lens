@@ -536,6 +536,16 @@ type DiagnosticsCollectionResult = {
 async function collectDiagnosticsForFile(
 	absPath: string,
 	lspService: NonNullable<ReturnType<typeof getLSPService>>,
+	/**
+	 * #3041: project root the per-rule `ignores` globs (#965) are resolved
+	 * against. ast-grep's LSP publishes per-document diagnostics without
+	 * applying them, so this standalone `source=lsp` query has to — the same
+	 * carve-out the NAPI runner applies on the same file. Positioned before the
+	 * optional parameters so it is structurally REQUIRED: an optional
+	 * `string | undefined` would silently disable the carve-out for whichever
+	 * caller forgot to pass it.
+	 */
+	scanRoot: string,
 	waitMs?: number,
 	serverScope: "primary" | "all" = "all",
 ): Promise<DiagnosticsCollectionResult> {
@@ -578,7 +588,11 @@ async function collectDiagnosticsForFile(
 				const filtered = applyAuxiliarySuppressions(
 					scopedDiagnostics,
 					content,
-					{ fileRole: detectFileRole(absPath, content) },
+					{
+						fileRole: detectFileRole(absPath, content),
+						filePath: absPath,
+						scanRoot,
+					},
 				);
 				return {
 					diagnostics: filtered,
@@ -645,6 +659,8 @@ async function collectDiagnosticsForFile(
 		content !== undefined
 			? applyAuxiliarySuppressions(diagnostics, content, {
 					fileRole: detectFileRole(absPath, content),
+					filePath: absPath,
+					scanRoot,
 				})
 			: diagnostics;
 	// #1095: surface the touch's content binding (only a touch that resolved
@@ -1053,7 +1069,13 @@ async function collectFileDiagnosticResult(
 		content: collectedContent,
 		binding,
 		skipReason,
-	} = await collectDiagnosticsForFile(file, lspService, waitMs, serverScope);
+	} = await collectDiagnosticsForFile(
+		file,
+		lspService,
+		cwd,
+		waitMs,
+		serverScope,
+	);
 	const health = lspService.getDiagnosticsHealth?.(file) as
 		| LspHealthLike
 		| undefined;
@@ -1196,7 +1218,13 @@ async function runFileDiagnostics(
 		content: collectedContent,
 		binding,
 		skipReason,
-	} = await collectDiagnosticsForFile(absPath, lspService, waitMs, serverScope);
+	} = await collectDiagnosticsForFile(
+		absPath,
+		lspService,
+		cwd,
+		waitMs,
+		serverScope,
+	);
 	const lspHealth = lspService.getDiagnosticsHealth?.(absPath) as
 		| LspHealthLike
 		| undefined;
