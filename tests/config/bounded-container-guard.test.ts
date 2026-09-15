@@ -116,7 +116,8 @@ export function isGrowthShapedContainer(nodes: any[], name: string): boolean {
 			const value = node.field("value");
 			if (value?.kind() !== "new_expression") continue;
 			const ctor = identifier(value.field("constructor"));
-			if (!BUILTINS.has(ctor ?? "") && !BOUNDED_HELPERS.has(ctor ?? "")) continue;
+			if (!BUILTINS.has(ctor ?? "") && !BOUNDED_HELPERS.has(ctor ?? ""))
+				continue;
 			declared = true;
 			builtin = BUILTINS.has(ctor ?? "");
 		}
@@ -770,7 +771,9 @@ describe("#2981 long-lived containers are bounded or admitted", () => {
 		).toBe(true);
 		expect(
 			isGrowthShapedContainer(
-				parseNodes('const names = new Set(); const add = () => names.add("ts");'),
+				parseNodes(
+					'const names = new Set(); const add = () => names.add("ts");',
+				),
 				"names",
 			),
 		).toBe(false);

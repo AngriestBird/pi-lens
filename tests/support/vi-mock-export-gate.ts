@@ -579,9 +579,7 @@ function requiredValues(
 
 	const maxDepth = options.importerDepth ?? Number.POSITIVE_INFINITY;
 	const queue = testImports
-		.filter(
-			(imported) => imported.resolved && !mocked.has(imported.specifier),
-		)
+		.filter((imported) => imported.resolved && !mocked.has(imported.specifier))
 		.map((imported) => ({ file: imported.resolved as string, depth: 1 }));
 	const visited = new Set<string>();
 	while (queue.length > 0) {
