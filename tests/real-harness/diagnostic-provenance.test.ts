@@ -1,4 +1,10 @@
-import { existsSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import {
+	existsSync,
+	readFileSync,
+	readdirSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
 import * as path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
@@ -21,12 +27,7 @@ function inheritedProjectSnapshots(home: string): string[] {
 	if (!existsSync(projects)) return [];
 	const found: string[] = [];
 	for (const slug of readdirSync(projects)) {
-		const file = path.join(
-			projects,
-			slug,
-			"cache",
-			"project-diagnostics.json",
-		);
+		const file = path.join(projects, slug, "cache", "project-diagnostics.json");
 		if (existsSync(file)) found.push(readFileSync(file, "utf8"));
 	}
 	return found;
