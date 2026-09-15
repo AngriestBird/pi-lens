@@ -168,11 +168,20 @@ function loadWorkflow(text: string): Workflow {
 
 export function triggersOnPullRequest(workflow: Workflow): boolean {
 	const triggers = workflow.on;
-	const names =
-		triggers && typeof triggers === "object"
-			? Object.keys(triggers as Record<string, unknown>)
-			: typeof triggers === "string"
-				? [triggers]
+	// GitHub accepts three spellings of `on:` and this must read all three.
+	// The ARRAY case is checked first and explicitly (round 2, F1): an array
+	// is `typeof "object"`, so the mapping branch below would key it with
+	// Object.keys and get ["0","1"] -- no match, and every job in that file
+	// silently skipped with jobsExamined 0, the sweep reading clean over a
+	// file it never looked inside. Every workflow in the tree happens to use
+	// the mapping form today, which is exactly why this read clean; the
+	// sweep exists for the next member, which may use any spelling.
+	const names = Array.isArray(triggers)
+		? triggers.map(String)
+		: typeof triggers === "string"
+			? [triggers]
+			: triggers && typeof triggers === "object"
+				? Object.keys(triggers as Record<string, unknown>)
 				: [];
 	return names.some(
 		(name) => name === "pull_request" || name === "pull_request_target",
@@ -250,9 +259,11 @@ describe("every PR-triggerable workflow job is reachable on a pull request (#304
 			registered: [],
 			exemptions: EXEMPTIONS,
 			// Calibration, measured on 2026-09-16 by raising both floors until
-			// the audit printed its own counts: 20 workflow files walked, 8 of
-			// them PR-triggerable, 13 job-level `if:` expressions examined in
-			// those 8, 7 of them unreachable from a pull request. Floors are
+			// the audit printed its own counts, and re-measured in round 2 with
+			// the `on:`-reader fixed: 20 workflow files walked, 9 of them
+			// PR-triggerable (greetings.yml and mutation.yml carry no
+			// job-level `if:` at all), 13 job-level `if:` expressions examined
+			// in those 9, 7 of them unreachable from a pull request. Floors are
 			// half, rounded down, so an accidental narrowing of the walk (a
 			// moved directory, a glob that stops matching .yml) fails loudly
 			// instead of reading clean -- AGENTS.md defect shape 10.
@@ -335,6 +346,76 @@ describe("the #3043 shape is what this sweep flags", () => {
 			{ path: ".github/workflows/install-smoke.yml", text: fixed },
 		]);
 		expect(flagged).not.toContain(".github/workflows/install-smoke.yml::smoke");
+	});
+
+	// Round 2, F1: GitHub Actions accepts THREE spellings of `on:` -- a
+	// mapping (`on:\n  pull_request:`), a bare string (`on: pull_request`)
+	// and a LIST (`on: [push, pull_request]`). js-yaml parses the list as a
+	// JS array, and an array is `typeof "object"`, so keying it with
+	// Object.keys yielded ["0","1"] and every job in such a workflow was
+	// silently skipped with jobsExamined 0 -- the sweep reading clean over a
+	// file it never looked inside. All 20 workflows in the tree use the
+	// mapping form today, which is exactly why this was invisible: the
+	// sweep's whole purpose is the NEXT member, and the next member is free
+	// to use any spelling GitHub accepts.
+	it("flags the #3043 shape under the list form of `on:` (round 2, F1)", () => {
+		const listForm = [
+			"name: install smoke",
+			"on: [push, pull_request]",
+			"jobs:",
+			"  smoke:",
+			"    if: github.event_name != 'pull_request'",
+			"    runs-on: ubuntu-latest",
+			"    steps:",
+			"      - run: echo smoke",
+			"",
+		].join("\n");
+		const { flagged, jobsExamined } = findPullRequestUnreachableJobs([
+			{ path: ".github/workflows/install-smoke.yml", text: listForm },
+		]);
+		expect(jobsExamined).toBe(1);
+		expect(flagged).toEqual([".github/workflows/install-smoke.yml::smoke"]);
+	});
+
+	it("flags the #3043 shape under the bare-string form of `on:` (round 2, F1)", () => {
+		const stringForm = [
+			"name: install smoke",
+			"on: pull_request",
+			"jobs:",
+			"  smoke:",
+			"    if: github.event_name != 'pull_request'",
+			"    runs-on: ubuntu-latest",
+			"    steps:",
+			"      - run: echo smoke",
+			"",
+		].join("\n");
+		const { flagged, jobsExamined } = findPullRequestUnreachableJobs([
+			{ path: ".github/workflows/install-smoke.yml", text: stringForm },
+		]);
+		expect(jobsExamined).toBe(1);
+		expect(flagged).toEqual([".github/workflows/install-smoke.yml::smoke"]);
+	});
+
+	// A LIST form that does not name pull_request stays out of scope, the
+	// same as the mapping form below -- the fix must widen the reader, not
+	// the scope.
+	it("does not flag a list-form workflow that never names pull_request (round 2, F1)", () => {
+		const nightlyList = [
+			"name: nightly",
+			"on: [schedule, workflow_dispatch]",
+			"jobs:",
+			"  nightly-only:",
+			"    if: github.event_name == 'schedule'",
+			"    runs-on: ubuntu-latest",
+			"    steps:",
+			"      - run: echo nightly",
+			"",
+		].join("\n");
+		const { flagged, jobsExamined } = findPullRequestUnreachableJobs([
+			{ path: ".github/workflows/nightly.yml", text: nightlyList },
+		]);
+		expect(flagged).toEqual([]);
+		expect(jobsExamined).toBe(0);
 	});
 
 	// A workflow a pull request cannot trigger at all is deliberately out of
