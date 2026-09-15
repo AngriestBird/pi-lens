@@ -455,14 +455,17 @@ describe("real Git fixture governance", () => {
 		).toEqual([]);
 	});
 
-	it("scans a non-empty tests/**/*.ts population for historical commit-ish arguments", () => {
+	it("scans a non-empty tests/**/*.ts population, helpers included", () => {
+		const files = testTypeScriptFiles(path.resolve(__dirname, "..")).map(
+			({ file }) => repoRelative(file),
+		);
 		// Calibration: 400 is the same documented floor the *.test.ts walk
 		// below uses; this population is a superset of it (#3050).
-		assertNonEmptyScan(
-			"historical commit-ish sweep",
-			testTypeScriptFiles(path.resolve(__dirname, "..")).length,
-			400,
-		);
+		assertNonEmptyScan("historical commit-ish sweep", files.length, 400);
+		// The superset is the point, not an accident: a module-scope spawn in
+		// a tests/support helper takes every file that imports it down with
+		// it, so the walk must reach past the collected *.test.ts files.
+		expect(files).toContain("tests/support/git-fixture-env.ts");
 	});
 
 	it("scans a non-empty source population", () => {
