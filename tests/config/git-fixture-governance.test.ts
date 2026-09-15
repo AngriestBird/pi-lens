@@ -114,17 +114,20 @@ export function findHistoricalCommitIshOffenders(
 			)
 		)
 			continue;
-		// Cheap admission: parsing every file under tests/ with ast-grep to
-		// find call sites would cost hundreds of parses (and the peak RSS the
-		// #3062 budget gate measures) for a needle almost no file carries.
+		// One scanning point, and it is also the admission gate: parsing every
+		// file under tests/ with ast-grep to find call sites would cost
+		// hundreds of parses (and the peak RSS the #3062 budget gate measures)
+		// for a needle almost no file carries. Comments are blanked HERE, so a
+		// file whose only sha is prose is never admitted and can never flag;
+		// stripping the argument text again inside the loop was mutation-inert
+		// for exactly that reason and is gone.
 		LITERAL_COMMIT_ISH.lastIndex = 0;
 		if (!LITERAL_COMMIT_ISH.test(stripSource(source, { strings: "keep" })))
 			continue;
 		for (const site of callSites(source, GIT_SPAWN_CALLEE)) {
 			if (!isGitSpawnSite(site.callee, site.argsText)) continue;
-			const args = stripSource(site.argsText, { strings: "keep" });
 			LITERAL_COMMIT_ISH.lastIndex = 0;
-			for (const match of args.matchAll(LITERAL_COMMIT_ISH)) {
+			for (const match of site.argsText.matchAll(LITERAL_COMMIT_ISH)) {
 				offenders.push(`${relativeFile}:${site.line} ${match[0]}`);
 			}
 		}
@@ -417,7 +420,8 @@ describe("real Git fixture governance", () => {
 	it("does not let a comment INSIDE the argument list trip the guard", () => {
 		// The shape the #3066 round 2 remedy leaves behind: the spawn is gone,
 		// but a comment in the surviving call still quotes the sha the fixture
-		// was taken at. A comment is prose, never an argument.
+		// was taken at. A comment is prose, never an argument — the admission
+		// scan blanks comments, so such a file is never even parsed.
 		expect(
 			findHistoricalCommitIshOffenders([
 				{
