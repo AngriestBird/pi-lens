@@ -55,7 +55,6 @@ export declare function shouldTriggerRerun(args: {
 	runAttempt?: number;
 	existingMarker: ClassifierMarker | null;
 	rerunKinds?: ClassificationKind[];
-	maxRunAttempt?: number;
 }): boolean;
 export declare function buildCommentBody(args: {
 	classification: Classification;

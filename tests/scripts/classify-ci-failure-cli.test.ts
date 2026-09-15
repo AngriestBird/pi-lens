@@ -72,7 +72,10 @@ describe("classify-ci-failure.mjs CLI (#2668 review F2 -- real child process, re
 
 	function runCli(
 		argv: string[],
-		{ rerunStatus = "201" }: { rerunStatus?: string } = {},
+		{
+			rerunStatus = "201",
+			runAttempt = "1",
+		}: { rerunStatus?: string; runAttempt?: string } = {},
 	) {
 		try {
 			const stdout = execFileSync(
@@ -86,6 +89,7 @@ describe("classify-ci-failure.mjs CLI (#2668 review F2 -- real child process, re
 						GITHUB_TOKEN: "fake-token-for-test",
 						CLASSIFY_CLI_TEST_CALL_LOG: callLogPath,
 						CLASSIFY_CLI_TEST_RERUN_STATUS: rerunStatus,
+						CLASSIFY_CLI_TEST_RUN_ATTEMPT: runAttempt,
 						PI_LENS_HOME: piLensHome,
 						PILENS_DATA_DIR: piLensHome,
 					},
@@ -128,6 +132,43 @@ describe("classify-ci-failure.mjs CLI (#2668 review F2 -- real child process, re
 		// PR thread, so the real CLI process must never hit the comments API.
 		const commentCalls = calls.filter((c) => c.url.includes("/comments"));
 		expect(commentCalls).toEqual([]);
+	});
+
+	// #2042 through the SHIPPED CLI as a child process. The library-level
+	// suite drives `runClassifier` with a JS object; only this lane proves
+	// the real process reads `run_attempt` off the run it was pointed at.
+	// Master lane (`--allow-missing-pr`): no PR, so no marker exists and the
+	// attempt is the only thing standing between the kill and a rerun.
+	it("#2042: a second infra kill on one head (run_attempt 2) still reruns end to end", () => {
+		const result = runCli(PRODUCTION_PUSH_ARGV, { runAttempt: "2" });
+
+		expect(result.status).toBe(0);
+		expect(result.stdout).toContain("infra-kill");
+		expect(result.stdout).toContain("rerun triggered");
+
+		const rerun = readCalls().find((c) => c.url.includes("rerun-failed-jobs"));
+		expect(rerun?.method).toBe("POST");
+	});
+
+	// The bound, through the same shipped process: attempt 3 is terminal, so
+	// the CLI must classify and report WITHOUT posting a rerun. A human can
+	// run this CLI on any run id with no workflow gate in front of it, which
+	// is why the cap lives in the library and not only in the YAML.
+	it("#2042: attempt 3 is terminal — the CLI classifies but posts no rerun", () => {
+		const result = runCli(PRODUCTION_PUSH_ARGV, { runAttempt: "3" });
+
+		expect(result.status).toBe(0);
+		expect(result.stdout).toContain("infra-kill");
+		expect(result.stdout).not.toContain("rerun triggered");
+
+		const calls = readCalls();
+		expect(calls.filter((c) => c.url.includes("rerun-failed-jobs"))).toEqual(
+			[],
+		);
+		// Still a full classification pass: the log WAS read and judged.
+		expect(calls.some((c) => c.url.includes("/actions/jobs/111/logs"))).toBe(
+			true,
+		);
 	});
 
 	it("rejects an unknown flag with exit code 4 instead of silently ignoring it", () => {

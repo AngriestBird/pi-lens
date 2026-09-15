@@ -18,6 +18,14 @@
 //                                 can't share the parent's in-memory array).
 //   CLASSIFY_CLI_TEST_RERUN_STATUS  optional (default "201"): HTTP status
 //                                 the rerun-failed-jobs endpoint returns.
+//   CLASSIFY_CLI_TEST_RUN_ATTEMPT   optional (default "1"): the run's own
+//                                 `run_attempt`, exactly as GitHub's
+//                                 GET /actions/runs/:id reports it (#2042).
+//                                 Without it this stub could only ever
+//                                 exercise attempt 1, so the shipped CLI's
+//                                 attempt handling -- the second infra kill
+//                                 on one head, and the two-rerun bound --
+//                                 had no end-to-end coverage at all.
 //
 // Fixed to run id 999 / job id 111 / job name "Unit tests", matching the
 // exact production argv this test exercises
@@ -44,6 +52,7 @@ const rawLog = readFileSync(
 
 const callLogPath = process.env.CLASSIFY_CLI_TEST_CALL_LOG;
 const rerunStatus = Number(process.env.CLASSIFY_CLI_TEST_RERUN_STATUS ?? "201");
+const runAttempt = Number(process.env.CLASSIFY_CLI_TEST_RUN_ATTEMPT ?? "1");
 
 function record(method, url) {
 	if (!callLogPath) return;
@@ -59,7 +68,11 @@ globalThis.fetch = async (url, init = {}) => {
 		// Production-faithful: a push/repository_dispatch run's
 		// `pull_requests` array is always empty (#2668).
 		return new Response(
-			JSON.stringify({ head_sha: "deadbeef", pull_requests: [] }),
+			JSON.stringify({
+				head_sha: "deadbeef",
+				run_attempt: runAttempt,
+				pull_requests: [],
+			}),
 			{ status: 200 },
 		);
 	}

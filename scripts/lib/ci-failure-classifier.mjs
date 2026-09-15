@@ -630,10 +630,9 @@ export function shouldTriggerRerun({
 	runAttempt = 1,
 	existingMarker,
 	rerunKinds = ["infra-kill", "infra-net"],
-	maxRunAttempt = MAX_AUTO_RERUN_ATTEMPT,
 }) {
 	if (!rerunKinds.includes(classification.kind)) return false;
-	if (runAttempt > maxRunAttempt) return false;
+	if (runAttempt > MAX_AUTO_RERUN_ATTEMPT) return false;
 	if (
 		existingMarker &&
 		existingMarker.sha === sha &&
