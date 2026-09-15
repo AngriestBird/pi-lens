@@ -3,6 +3,8 @@ import {
 	readFileSync,
 	readdirSync,
 	rmSync,
+	statSync,
+	utimesSync,
 	writeFileSync,
 } from "node:fs";
 import * as path from "node:path";
@@ -71,6 +73,64 @@ describe("real pi harness: diagnostic provenance", () => {
 	}, 60_000);
 
 	/**
+	 * The clean change every two-session case below makes, out of band, while
+	 * session A is still live: the export knip reported and the statement the
+	 * cheap tier reported are both removed, and three lines are prepended so a
+	 * replayed row cannot coincidentally still match its old coordinates (the
+	 * #2868 line-movement axis, now across a session boundary).
+	 *
+	 * `preserveMtime` restores the file's timestamps afterwards. That is not a
+	 * contrivance: `scanProjectDiagnostics` stamps one `scannedAt` AFTER its
+	 * file loop has read every file, so an ordinary edit that lands while the
+	 * scan is in flight produces exactly this state — new bytes, an mtime at or
+	 * before `scannedAt` — and mtime is the only content axis the cheap-tier
+	 * snapshot carries. `utimesSync` reproduces it deterministically instead of
+	 * racing a real scan.
+	 */
+	function makeCleanChange(
+		file: string,
+		{ preserveMtime = false }: { preserveMtime?: boolean } = {},
+	): void {
+		const before = statSync(file);
+		const source = readFileSync(file, "utf8");
+		writeFileSync(
+			file,
+			`// out-of-band 01\n// out-of-band 02\n// out-of-band 03\n${source
+				.replace("export const staleExport = 2;\n", "")
+				.replace("\tdebugger;\n", "")}`,
+		);
+		if (preserveMtime) utimesSync(file, before.atime, before.mtime);
+	}
+
+	/**
+	 * Drive the four `lens_diagnostics` modes of `two-sessions-b.json` in a
+	 * second live session and assert what the session may and may not serve.
+	 *
+	 * Anti-vacuity is the `trip` half: a session that reported nothing at all
+	 * would satisfy the two `not.toContain` assertions. `trip` survived the
+	 * edit, so every scanning mode must still name it — at its POST-edit line,
+	 * never the line session A recorded. `delta` is exempt because a fresh
+	 * session's turn delta is legitimately empty.
+	 */
+	async function expectSessionBClean(
+		sessionB: Awaited<Parameters<Parameters<typeof withRealPi>[1]>[0]>,
+	): Promise<void> {
+		for (const mode of ["cached full", "delta", "fresh full", "session view"]) {
+			await sessionB.prompt(`session B ${mode}`);
+			const served = JSON.stringify(
+				await sessionB.awaitToolResult("lens_diagnostics"),
+			);
+			expect(served, mode).not.toContain("staleExport");
+			expect(served, mode).not.toContain("debugger-statement");
+			if (mode !== "delta") {
+				expect(served, mode).toContain("trip");
+				expect(served, mode).toContain("L45");
+			}
+			await sessionB.awaitAssistantTurn();
+		}
+	}
+
+	/**
 	 * #2154 AC1, second half — the reported incident's own shape, which the
 	 * single-session case above cannot reach: TWO LIVE `pi` sessions in one
 	 * repository, the finding recorded by one and the condition removed while
@@ -82,17 +142,12 @@ describe("real pi harness: diagnostic provenance", () => {
 	 * `clients/project-diagnostics/scanner.ts` calls "the authoritative
 	 * cross-session cache". That store is the delivery channel AC2 is about:
 	 * its key carries the project root (the data-dir slug) and nothing about
-	 * the session or the content generation, so if nothing gated it at READ
-	 * time, session B would render session A's pre-edit rows as current.
+	 * the session or the content generation.
 	 *
 	 * Session A records both producer arms in one call — the cheap tier's
 	 * blocking `debugger-statement`, which is what lands in that shared
 	 * snapshot, and knip's `staleExport`, the reporter's own "Unused export"
-	 * shape. The clean change then removes both while A is still alive, and
-	 * session B — started after the edit and running concurrently — must serve
-	 * neither, in any of the four modes, while still reporting the finding that
-	 * genuinely survived the edit (`trip`, at its POST-edit line) so a silent
-	 * session cannot pass for a clean one.
+	 * shape.
 	 */
 	it("does not serve a second live session the findings the first recorded before a clean edit", async () => {
 		const project = createRealPiProject("diagnostic-provenance");
@@ -113,24 +168,12 @@ describe("real pi harness: diagnostic provenance", () => {
 					expect(recorded).toContain("staleExport");
 					expect(recorded).toContain("debugger-statement");
 
-					// The clean change, out of band, while session A is still live.
-					// The three prepended lines move every surviving line, so a
-					// replayed row cannot coincidentally still match its old
-					// coordinates (the #2868 line-movement axis, now across a
-					// session boundary).
-					const file = path.join(project, "src", "moved.ts");
-					const source = readFileSync(file, "utf8");
-					writeFileSync(
-						file,
-						`// out-of-band 01\n// out-of-band 02\n// out-of-band 03\n${source
-							.replace("export const staleExport = 2;\n", "")
-							.replace("\tdebugger;\n", "")}`,
-					);
+					makeCleanChange(path.join(project, "src", "moved.ts"));
 
-					// Anti-vacuity, half one: the stale row session B could serve is
-					// really on disk in the shared store when B starts. Without this
-					// the "B is clean" assertions below would also pass if nothing
-					// had ever been persisted for B to inherit.
+					// Anti-vacuity: the stale row session B could serve is really on
+					// disk in the shared store when B starts. Without this the "B is
+					// clean" assertions would also pass if nothing had ever been
+					// persisted for B to inherit.
 					const snapshots = inheritedProjectSnapshots(home);
 					expect(snapshots.length).toBe(1);
 					expect(snapshots[0]).toContain("debugger-statement");
@@ -144,34 +187,143 @@ describe("real pi harness: diagnostic provenance", () => {
 						},
 						async (sessionB) => {
 							expect(sessionB.projectPath()).toBe(sessionA.projectPath());
-							for (const mode of [
-								"cached full",
-								"delta",
-								"fresh full",
-								"session view",
-							]) {
-								await sessionB.prompt(`session B ${mode}`);
-								const served = JSON.stringify(
-									await sessionB.awaitToolResult("lens_diagnostics"),
-								);
-								expect(served, mode).not.toContain("staleExport");
-								expect(served, mode).not.toContain("debugger-statement");
-								// Anti-vacuity, half two: a session that reports nothing at
-								// all would satisfy every assertion above. `trip` survived
-								// the edit, so every scanning mode must still name it — at
-								// its POST-edit line, never the line A recorded.
-								if (mode !== "delta") {
-									expect(served, mode).toContain("trip");
-									expect(served, mode).toContain("L45");
-								}
-								await sessionB.awaitAssistantTurn();
-							}
+							await expectSessionBClean(sessionB);
 						},
 					);
 				},
 			);
 		} finally {
 			rmSync(project, { recursive: true, force: true });
+			rmSync(home, { recursive: true, force: true });
+		}
+	}, 60_000);
+
+	/**
+	 * #3060 review F1 — the same two sessions, with the clean change's mtime
+	 * left at its pre-edit value.
+	 *
+	 * This is the state an edit that lands DURING a cheap-tier scan produces on
+	 * its own (see `makeCleanChange`), and before this round it made session B
+	 * render session A's removed `debugger` statement as a current blocking
+	 * error, with no stale marker, for that session and every later one: the
+	 * snapshot's only content axis is `mtime <= scannedAt`, which such a file
+	 * satisfies forever. The fix gives the snapshot's rows the second content
+	 * axis the LSP store has carried since #2300/#1095, so the row is judged by
+	 * the bytes it was computed from, not by a timestamp comparison the
+	 * producer cannot make safe.
+	 */
+	it("does not serve a second live session a finding whose file changed without an mtime bump", async () => {
+		const project = createRealPiProject("diagnostic-provenance");
+		const home = claimScratchDir(SCRATCH_DIR_ROOT, "real-pi-home");
+		try {
+			await withRealPi(
+				{
+					fixture: "diagnostic-provenance",
+					script: "two-sessions-a.json",
+					project,
+					home,
+				},
+				async (sessionA) => {
+					await sessionA.prompt("session A records the findings");
+					const recorded = JSON.stringify(
+						await sessionA.awaitToolResult("lens_diagnostics"),
+					);
+					expect(recorded).toContain("debugger-statement");
+
+					const file = path.join(project, "src", "moved.ts");
+					const scannedMtimeMs = statSync(file).mtimeMs;
+					makeCleanChange(file, { preserveMtime: true });
+					// `utimesSync` restores at millisecond granularity, so the value
+					// can land a fraction either side of the original. What matters
+					// is that it did not advance to NOW the way an ordinary write
+					// does — the snapshot's only content axis is `mtime <= scannedAt`
+					// (with a 50 ms drift tolerance), and this file still satisfies
+					// it while its bytes no longer match.
+					expect(
+						Math.abs(statSync(file).mtimeMs - scannedMtimeMs),
+					).toBeLessThan(1);
+
+					const snapshots = inheritedProjectSnapshots(home);
+					expect(snapshots.length).toBe(1);
+					expect(snapshots[0]).toContain("debugger-statement");
+
+					await withRealPi(
+						{
+							fixture: "diagnostic-provenance",
+							script: "two-sessions-b.json",
+							project,
+							home,
+						},
+						async (sessionB) => {
+							await expectSessionBClean(sessionB);
+						},
+					);
+				},
+			);
+		} finally {
+			rmSync(project, { recursive: true, force: true });
+			rmSync(home, { recursive: true, force: true });
+		}
+	}, 60_000);
+
+	/**
+	 * #3060 review F2 — the reporter's own configuration: two sessions in two
+	 * WORKTREES of one repository, not two sessions in one tree. Two project
+	 * roots under one `PI_LENS_HOME` resolve to two `getProjectDataDir` slugs,
+	 * so the worktree session must never name the parent tree's root or serve
+	 * its rows. `tests/clients/project-diagnostics.test.ts` pins that key
+	 * derivation at the store seam; this pins the whole delivery path with two
+	 * live children, which is the configuration the report describes.
+	 */
+	it("does not serve a session in a sibling worktree the other worktree's findings", async () => {
+		const parent = createRealPiProject("diagnostic-provenance");
+		const worktree = createRealPiProject("diagnostic-provenance");
+		const home = claimScratchDir(SCRATCH_DIR_ROOT, "real-pi-home");
+		try {
+			await withRealPi(
+				{
+					fixture: "diagnostic-provenance",
+					script: "two-sessions-a.json",
+					project: parent,
+					home,
+				},
+				async (parentSession) => {
+					await parentSession.prompt("parent worktree records the findings");
+					const recorded = JSON.stringify(
+						await parentSession.awaitToolResult("lens_diagnostics"),
+					);
+					expect(recorded).toContain("debugger-statement");
+					expect(recorded).toContain(parent);
+
+					await withRealPi(
+						{
+							fixture: "diagnostic-provenance",
+							script: "two-sessions-a.json",
+							project: worktree,
+							home,
+						},
+						async (worktreeSession) => {
+							expect(worktreeSession.projectPath()).toBe(worktree);
+							await worktreeSession.prompt("worktree session scans");
+							const served = JSON.stringify(
+								await worktreeSession.awaitToolResult("lens_diagnostics"),
+							);
+							// The parent's rows are not served, and — the stronger
+							// claim — the parent's ROOT is never named at all, so this
+							// cannot pass merely because both trees hold a same-named
+							// file with the same finding.
+							expect(served).not.toContain(parent);
+							expect(served).toContain(worktree);
+						},
+					);
+					// Two roots, two stores: the parent's own snapshot is still there
+					// beside the worktree's, which is what "keyed by root" means.
+					expect(inheritedProjectSnapshots(home).length).toBe(2);
+				},
+			);
+		} finally {
+			rmSync(parent, { recursive: true, force: true });
+			rmSync(worktree, { recursive: true, force: true });
 			rmSync(home, { recursive: true, force: true });
 		}
 	}, 60_000);
