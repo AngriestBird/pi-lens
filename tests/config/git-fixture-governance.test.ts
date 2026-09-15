@@ -135,7 +135,6 @@ export function findHistoricalCommitIshOffenders(
 	return offenders;
 }
 
-
 function repoRelative(file: string): string {
 	if (!path.isAbsolute(file)) return file.replaceAll("\\", "/");
 	return path.relative(REPO_ROOT, file).replaceAll("\\", "/");
@@ -429,8 +428,8 @@ describe("real Git fixture governance", () => {
 					source:
 						'gitExecFileSync("git", [\n' +
 						'  "show",\n' +
-						"  // was \"20896a56b:tests/index-vanished-instance-wiring.test.ts\"\n" +
-						'  `${fixtureSha}:src/a.ts`,\n' +
+						'  // was "20896a56b:tests/index-vanished-instance-wiring.test.ts"\n' +
+						"  `${fixtureSha}:src/a.ts`,\n" +
 						"]);",
 				},
 			]),
