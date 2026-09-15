@@ -237,14 +237,11 @@ and PR language; detailed historical examples are in `HISTORY.md`.
     direction from that harm; test unreadable, absent, and thrown lookup states
     where the seam supports both directions.
 49. **Whitespace counted as structure when it is alignment:** a leading run can
-    be alignment rather than one nesting unit, and the shape has at least two
-    members — an aligned continuation inside a call (#3038) and the interior of
-    a block comment, whose ` * ` lines sit one column past their opener, which
-    made every doc-commented 2- or 4-space file read as width 1 (#3039 F1) and
-    every tab file with a top-level JSDoc read as spaces (#3039 F2). Before
-    counting leading whitespace as evidence, name which lines carry structure
-    and exclude the rest; decline rather than pin a style when only ambiguous
-    runs remain.
+    be alignment, not one nesting unit. Known members: an aligned continuation
+    inside a call (#3038) and the interior of a block comment, whose ` * ` lines
+    sit one column past their opener (#3039). Name which lines carry structure
+    and exclude the rest before counting; decline rather than pin a style when
+    only ambiguous runs remain.
 
 ## Standing invariants
 
