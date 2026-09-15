@@ -285,6 +285,19 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		reason:
 			"real pi child death is the process-boundary failure that must reject a governed waiter promptly",
 	},
+	// 2026-09-15 (#2154 AC1): 1 -> 3, then 3 -> 7 in #3060 round 2 (review F1 +
+	// F2). The reported defect needs TWO LIVE pi sessions over one project root
+	// and one PI_LENS_HOME — the durable stores they share are keyed by exactly
+	// that pair, so one child (or a pair of in-process doubles) cannot reach
+	// the crossing at all. Round 2 adds two more pairs: the same two sessions
+	// with the clean edit's mtime preserved (the edit-during-scan state), and
+	// the reporter's own two-WORKTREE configuration, which needs two roots
+	// under one home and therefore two more children.
+	"real-process-spawn:real-harness/diagnostic-provenance.test.ts": {
+		detector: "real-process-spawn",
+		reason:
+			"two concurrent real pi children must share one project root and one PI_LENS_HOME; the cross-session stores are keyed by that pair",
+	},
 	"real-process-spawn:real-harness/negative.test.ts": {
 		detector: "real-process-spawn",
 		reason:
