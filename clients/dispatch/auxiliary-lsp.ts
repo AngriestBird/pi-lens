@@ -349,11 +349,16 @@ export function applyAuxiliarySuppressions(
 			if (profile?.skipTestFiles) return false;
 		}
 		// Keyed by the diagnostic's own rule id — ast-grep's LSP reports the bare
-		// catalog id as `code`. A non-ast-grep auxiliary's code simply misses the
-		// map: the ids are pi-lens's own catalog namespace, so no extra source
-		// gate is needed to keep opengrep/zizmor/typos findings out of it.
+		// catalog id as `code`. Gated on the producing tool as well: the map is
+		// built from the AST-GREP catalog, so without the gate any auxiliary whose
+		// own rule id happened to collide with a catalog id (several are generic —
+		// `no-raw-types`, `no-string-concat-in-loop`) would be silently dropped on
+		// a path an unrelated rule carved out. Losing a finding silently is the
+		// harm this whole change exists to stop, so the collision is gated, not
+		// accepted (#3041 r2 F4).
 		if (
 			ruleIgnores !== undefined &&
+			findAuxiliaryProfileForSource(d.source)?.tool === "ast-grep" &&
 			isRuleIgnoredForPath(
 				filePath as string,
 				scanRoot as string,

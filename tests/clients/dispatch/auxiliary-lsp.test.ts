@@ -574,15 +574,29 @@ describe("rule-ignore catalog precedence (#3041)", () => {
 
 	beforeEach(() => {
 		tmp = fs.mkdtempSync(path.join(os.tmpdir(), "rule-ignores-precedence-"));
-		const dir = path.join(tmp, "rules", "ast-grep-rules", "rules");
-		fs.mkdirSync(dir, { recursive: true });
-		// Same id as the bundled rule, different carve-out.
-		fs.writeFileSync(
-			path.join(dir, `${RULE}.yml`),
-			`id: ${RULE}\nlanguage: TypeScript\nseverity: warning\nmessage: "project override"\nignores:\n  - "vendor/**"\nrule:\n  pattern: console.log($$$)\n`,
-		);
 	});
 	afterEach(() => removeTempDirSync(tmp));
+
+	/** Redefine the bundled rule id in the project tree, with or without ignores. */
+	const writeProjectRule = (ignores?: readonly string[]) => {
+		const dir = path.join(tmp, "rules", "ast-grep-rules", "rules");
+		fs.mkdirSync(dir, { recursive: true });
+		fs.writeFileSync(
+			path.join(dir, `${RULE}.yml`),
+			[
+				`id: ${RULE}`,
+				"language: TypeScript",
+				"severity: warning",
+				'message: "project override"',
+				...(ignores
+					? ["ignores:", ...ignores.map((glob) => `  - "${glob}"`)]
+					: []),
+				"rule:",
+				"  pattern: console.log($$$)",
+				"",
+			].join("\n"),
+		);
+	};
 
 	const keptCount = (relative: string) =>
 		applyAuxiliarySuppressions(
@@ -592,7 +606,62 @@ describe("rule-ignore catalog precedence (#3041)", () => {
 		).length;
 
 	it("uses the project rule's ignores, not the bundled rule's, for the same id", () => {
+		writeProjectRule(["vendor/**"]);
 		expect(keptCount(path.join("vendor", "dep.ts"))).toBe(0);
 		expect(keptCount(path.join("scripts", "cli.ts"))).toBe(1);
+	});
+
+	// #3041 r2 F1: the winning document declaring NO `ignores` is the inverted
+	// case. `ast-grep-napi.ts` claims the id (`seenRuleIds.add`) BEFORE its own
+	// ignore check, so a project rule that redefines a bundled id to fire
+	// everywhere fires on scripts/** per-edit. Skipping a no-ignores document
+	// without claiming its id let the LOWER-precedence bundled copy register its
+	// `scripts/**` globs, so mode=full and source=lsp dropped what the runner
+	// delivered — the same two surfaces disagreeing that this PR exists to fix,
+	// only inverted.
+	it("lets a project rule that declares no ignores override the bundled carve-out", () => {
+		writeProjectRule();
+		expect(keptCount(path.join("scripts", "cli.ts"))).toBe(1);
+		expect(keptCount(path.join("src", "app.ts"))).toBe(1);
+	});
+
+	// #3041 r2 F2: a file outside `scanRoot` is matched by its ABSOLUTE path, not
+	// by the `../..`-prefixed relative one — measured: with real catalog globs the
+	// two forms disagree on 12 of 24 (root, file, pattern) combinations, e.g.
+	// `**/logger.ts` matches `/elsewhere/lib/logger.ts` and never matches
+	// `../../elsewhere/lib/logger.ts`. Without the fallback an out-of-tree logger
+	// sink loses its carve-out entirely.
+	it("matches an out-of-tree file by its absolute path", () => {
+		const outside = fs.mkdtempSync(path.join(os.tmpdir(), "rule-ignores-out-"));
+		try {
+			const loggerKept = applyAuxiliarySuppressions(
+				[diag({ source: "ast-grep", code: RULE })],
+				content,
+				{ filePath: path.join(outside, "lib", "logger.ts"), scanRoot: tmp },
+			).length;
+			const scriptKept = applyAuxiliarySuppressions(
+				[diag({ source: "ast-grep", code: RULE })],
+				content,
+				{ filePath: path.join(outside, "scripts", "cli.ts"), scanRoot: tmp },
+			).length;
+			// `**/logger.ts` reaches an absolute path; the root-anchored
+			// `scripts/**` deliberately does not.
+			expect(loggerKept).toBe(0);
+			expect(scriptKept).toBe(1);
+		} finally {
+			removeTempDirSync(outside);
+		}
+	});
+
+	// #3041 r2 F4: the map is built from the AST-GREP catalog, so a colliding rule
+	// id from any other producer must NOT inherit its carve-out — a silently
+	// dropped finding is the harm this change exists to stop.
+	it("never drops a non-ast-grep finding whose code collides with a catalog id", () => {
+		const kept = applyAuxiliarySuppressions(
+			[diag({ source: "eslint", code: RULE })],
+			content,
+			{ filePath: path.join(tmp, "scripts", "cli.ts"), scanRoot: tmp },
+		);
+		expect(kept).toHaveLength(1);
 	});
 });

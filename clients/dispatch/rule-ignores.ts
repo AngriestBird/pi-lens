@@ -63,6 +63,7 @@ export function loadRuleIgnorePatterns(
 	root: string,
 ): ReadonlyMap<string, readonly string[]> {
 	const patterns = new Map<string, readonly string[]>();
+	const seenRuleIds = new Set<string>();
 	for (const source of getAstGrepRuleSources(root)) {
 		// No try/catch around the loaders: every I/O path inside them already
 		// swallows its own failure (missing dir, unreadable readdir, unreadable
@@ -73,8 +74,21 @@ export function loadRuleIgnorePatterns(
 				? loadYamlRulesFresh(source.dir)
 				: loadYamlRules(source.dir);
 		for (const rule of rules) {
-			// First source wins, matching the runner's cross-layer precedence.
-			if (patterns.has(rule.id) || !rule.ignores?.length) continue;
+			// Claim the id on FIRST sighting and only then look at `ignores` —
+			// the same order as `ast-grep-napi.ts`'s `seenRuleIds.add(rule.id)`,
+			// which claims unconditionally BEFORE its own ignore check. Recording
+			// the claim inside `patterns` instead would skip a doc that declares no
+			// `ignores` without claiming its id, and a LOWER-precedence copy of the
+			// same id would then register ITS globs: a project rule that redefines
+			// a bundled id to fire everywhere kept the bundled `scripts/**`
+			// carve-out over LSP while the runner fired on it per-edit (#3041 r2).
+			// Deliberately NOT mirroring the runner's `duplicateSet` skip for ids
+			// duplicated within ONE source: the runner drops such a rule entirely,
+			// but ast-grep's LSP still publishes it, so honoring the first copy's
+			// carve-out suppresses more than the runner, never less.
+			if (seenRuleIds.has(rule.id)) continue;
+			seenRuleIds.add(rule.id);
+			if (!rule.ignores?.length) continue;
 			patterns.set(rule.id, rule.ignores);
 		}
 	}
