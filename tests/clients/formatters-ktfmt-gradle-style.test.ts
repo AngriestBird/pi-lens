@@ -1,18 +1,16 @@
 /**
- * #2468: `clients/formatters.ts` invoked bare `ktfmt <file>` with no style
- * flag, so ktfmt formatted under its own default style instead of the
- * project's actual Gradle `ktfmt { googleStyle() | kotlinLangStyle() }`
- * selection — the same manifest-detected-but-not-carried defect shape #2466
- * fixed for rustfmt `--edition`.
+ * #2468/#2481: `clients/formatters.ts` invoked bare `ktfmt <file>` with no
+ * style flag, so ktfmt formatted under its own default style instead of the
+ * project's actual Gradle or Spotless ktfmt style selection — the same
+ * manifest-detected-but-not-carried defect shape #2466 fixed for rustfmt
+ * `--edition`.
  *
- * The two argv cases (the carried `--google-style`, and the fallback that
- * must carry nothing) call `ktfmtFormatter.resolveCommand` (the same pattern
- * as `formatters-rustfmt-edition.test.ts`) with a project-local PATH shim so
- * the real `which`/`where` spawn resolves `ktfmt` for real — that pair is the
- * load-bearing regression proof that the style flag reaches, and stays out
- * of, ktfmt's actual argv. The remaining cases call `resolveKtfmtGradleStyle`
- * (`clients/gradle-ktfmt-style.ts`) directly, the same way
- * `formatters-rustfmt-edition.test.ts`'s F5 case calls
+ * All argv cases call `ktfmtFormatter.resolveCommand` with a project-local
+ * PATH shim so the real `which`/`where` spawn resolves `ktfmt` for real. This
+ * is the load-bearing regression proof that style flags reach, and stay out
+ * of, ktfmt's actual argv. The remaining scope cases call
+ * `resolveKtfmtGradleStyle` (`clients/gradle-ktfmt-style.ts`) directly, the
+ * same way `formatters-rustfmt-edition.test.ts`'s F5 case calls
  * `resolveCargoPackageEdition` directly for the `homeDir`-override case that
  * `resolveCommand` doesn't expose.
  */
@@ -20,6 +18,14 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { ktfmtFormatter } from "../../clients/formatters.js";
+import {
+	getDegradationSummary,
+	resetDegradationLedger,
+} from "../../clients/degradation-ledger.js";
+import {
+	flushExtensionLog,
+	getExtensionLogPath,
+} from "../../clients/extension-log.js";
 import { resolveKtfmtGradleStyle } from "../../clients/gradle-ktfmt-style.js";
 import { removeTempDirSync, setupTestEnvironment } from "./test-utils.js";
 
@@ -37,6 +43,60 @@ function newTmpDir(prefix: string): string {
 	const env = setupTestEnvironment(prefix);
 	tmpDirs.push(env.tmpDir);
 	return env.tmpDir;
+}
+
+function writeKtFile(dir: string, ...segments: string[]): string {
+	const filePath = path.join(dir, ...segments);
+	fs.mkdirSync(path.dirname(filePath), { recursive: true });
+	fs.writeFileSync(filePath, "fun main() {}\n");
+	return filePath;
+}
+
+function readExtensionLogRows(): Array<Record<string, unknown>> {
+	const logPath = getExtensionLogPath();
+	if (!fs.existsSync(logPath)) return [];
+	return fs
+		.readFileSync(logPath, "utf8")
+		.split("\n")
+		.filter(Boolean)
+		.map((line: string) => JSON.parse(line) as Record<string, unknown>);
+}
+
+interface TwoProjectFixture {
+	root: string;
+	moduleDir: string;
+	rootFile: string;
+	moduleFile: string;
+}
+
+function makeTwoProjectFixture(
+	prefix: string,
+	gradleFile: string,
+	rootBuild: string,
+): TwoProjectFixture {
+	const root = newTmpDir(prefix);
+	fs.writeFileSync(path.join(root, gradleFile), rootBuild);
+	const moduleDir = path.join(root, "app");
+	fs.mkdirSync(moduleDir, { recursive: true });
+	fs.writeFileSync(path.join(moduleDir, gradleFile), "plugins {}\n");
+	return {
+		root,
+		moduleDir,
+		rootFile: writeKtFile(root, "src", "Root.kt"),
+		moduleFile: writeKtFile(moduleDir, "src", "Main.kt"),
+	};
+}
+
+async function resolveKtfmtArgs(
+	filePath: string,
+	cwd: string,
+): Promise<string[]> {
+	const resolved = await ktfmtFormatter.resolveCommand?.(filePath, cwd);
+	expect(resolved).not.toBeNull();
+	expect(resolved).not.toBeUndefined();
+	const [binary, ...args] = resolved as string[];
+	expect(binary.toLowerCase()).toContain("ktfmt");
+	return args;
 }
 
 function makeFakeKtfmtExe(shimDir: string): void {
@@ -64,7 +124,7 @@ async function withKtfmtOnPath(
 	}
 }
 
-describe("ktfmtFormatter — Gradle ktfmt{} style carriage (#2468)", () => {
+describe("ktfmtFormatter — Gradle and Spotless style carriage (#2468/#2481)", () => {
 	it("passes --google-style from the nearest ktfmt {} block's googleStyle()", async () => {
 		const tmpDir = newTmpDir("pi-lens-ktfmt-google-");
 		fs.writeFileSync(
@@ -87,6 +147,257 @@ describe("ktfmtFormatter — Gradle ktfmt{} style carriage (#2468)", () => {
 			expect(binary.toLowerCase()).toContain("ktfmt");
 			expect(rest).toEqual(["--google-style", filePath]);
 		});
+	});
+
+	it("carries Spotless ktfmt(...).googleStyle() through resolveCommand", async () => {
+		const tmpDir = newTmpDir("pi-lens-spotless-ktfmt-google-");
+		fs.writeFileSync(
+			path.join(tmpDir, "build.gradle.kts"),
+			'spotless {\n  kotlin {\n    ktfmt("0.51").googleStyle()\n  }\n}\n',
+		);
+		const filePath = path.join(tmpDir, "src", "Main.kt");
+		fs.mkdirSync(path.dirname(filePath), { recursive: true });
+		fs.writeFileSync(filePath, "fun main() {}\n");
+
+		await withKtfmtOnPath(path.join(tmpDir, "shims"), async () => {
+			const resolved = await ktfmtFormatter.resolveCommand?.(filePath, tmpDir);
+			expect(resolved).not.toBeNull();
+			expect(resolved).not.toBeUndefined();
+			const [binary, ...rest] = resolved as string[];
+			expect(binary.toLowerCase()).toContain("ktfmt");
+			expect(rest).toEqual(["--google-style", filePath]);
+		});
+	});
+
+	it("carries Spotless ktfmt(...).kotlinlangStyle() through resolveCommand", async () => {
+		const tmpDir = newTmpDir("pi-lens-spotless-ktfmt-kotlinlang-");
+		fs.writeFileSync(
+			path.join(tmpDir, "build.gradle"),
+			"spotless {\n  kotlin {\n    ktfmt('0.51').kotlinlangStyle()\n  }\n}\n",
+		);
+		const filePath = path.join(tmpDir, "src", "Main.kt");
+		fs.mkdirSync(path.dirname(filePath), { recursive: true });
+		fs.writeFileSync(filePath, "fun main() {}\n");
+
+		await withKtfmtOnPath(path.join(tmpDir, "shims"), async () => {
+			const resolved = await ktfmtFormatter.resolveCommand?.(filePath, tmpDir);
+			expect(resolved).not.toBeNull();
+			expect(resolved).not.toBeUndefined();
+			const [binary, ...rest] = resolved as string[];
+			expect(binary.toLowerCase()).toContain("ktfmt");
+			expect(rest).toEqual(["--kotlinlang-style", filePath]);
+		});
+	});
+
+	it("carries a Spotless style from subprojects into a module only", async () => {
+		const fixture = makeTwoProjectFixture(
+			"pi-lens-spotless-ktfmt-subprojects-",
+			"build.gradle.kts",
+			`subprojects {
+  spotless {
+    kotlin {
+      ktfmt(libs.versions.ktfmt.get()).googleStyle()
+    }
+  }
+}
+`,
+		);
+
+		await withKtfmtOnPath(path.join(fixture.root, "shims"), async () => {
+			expect(
+				await resolveKtfmtArgs(fixture.moduleFile, fixture.moduleDir),
+			).toEqual(["--google-style", fixture.moduleFile]);
+			expect(await resolveKtfmtArgs(fixture.rootFile, fixture.root)).toEqual([
+				fixture.rootFile,
+			]);
+		});
+	});
+
+	it("carries a Spotless style from allprojects into the root and modules", async () => {
+		const fixture = makeTwoProjectFixture(
+			"pi-lens-spotless-ktfmt-allprojects-",
+			"build.gradle",
+			`allprojects {
+  spotless {
+    kotlin {
+      ktfmt('0.51').kotlinlangStyle()
+    }
+  }
+}
+`,
+		);
+
+		await withKtfmtOnPath(path.join(fixture.root, "shims"), async () => {
+			expect(
+				await resolveKtfmtArgs(fixture.moduleFile, fixture.moduleDir),
+			).toEqual(["--kotlinlang-style", fixture.moduleFile]);
+			expect(await resolveKtfmtArgs(fixture.rootFile, fixture.root)).toEqual([
+				"--kotlinlang-style",
+				fixture.rootFile,
+			]);
+		});
+	});
+
+	it("fails closed for a Spotless style under an unknown wrapper", async () => {
+		const fixture = makeTwoProjectFixture(
+			"pi-lens-spotless-ktfmt-unknown-wrapper-",
+			"build.gradle.kts",
+			`configureConvention {
+  spotless {
+    kotlin {
+      ktfmt('0.51').googleStyle()
+    }
+  }
+}
+`,
+		);
+
+		await withKtfmtOnPath(path.join(fixture.root, "shims"), async () => {
+			expect(await resolveKtfmtArgs(fixture.moduleFile, fixture.moduleDir)).toEqual([
+				fixture.moduleFile,
+			]);
+			expect(await resolveKtfmtArgs(fixture.rootFile, fixture.root)).toEqual([
+				fixture.rootFile,
+			]);
+		});
+	});
+
+	it("fails closed for multiple enclosing Spotless wrappers", async () => {
+		const fixture = makeTwoProjectFixture(
+			"pi-lens-spotless-ktfmt-multiple-wrappers-",
+			"build.gradle.kts",
+			`allprojects {
+  subprojects {
+    spotless {
+      kotlin {
+        ktfmt('0.51').googleStyle()
+      }
+    }
+  }
+}
+`,
+		);
+
+		await withKtfmtOnPath(path.join(fixture.root, "shims"), async () => {
+			expect(await resolveKtfmtArgs(fixture.moduleFile, fixture.moduleDir)).toEqual([
+				fixture.moduleFile,
+			]);
+			expect(await resolveKtfmtArgs(fixture.rootFile, fixture.root)).toEqual([
+				fixture.rootFile,
+			]);
+		});
+	});
+
+	it("parses nested expressions in a Spotless ktfmt argument", async () => {
+		const fixture = makeTwoProjectFixture(
+			"pi-lens-spotless-ktfmt-nested-argument-",
+			"build.gradle.kts",
+			`spotless {
+  kotlin {
+    ktfmt(libs.versions.ktfmt.get()).googleStyle()
+  }
+}
+`,
+		);
+
+		await withKtfmtOnPath(path.join(fixture.root, "shims"), async () => {
+			expect(await resolveKtfmtArgs(fixture.rootFile, fixture.root)).toEqual([
+				"--google-style",
+				fixture.rootFile,
+			]);
+		});
+	});
+
+	it("uses the last style declaration in a Spotless kotlin block", async () => {
+		const fixture = makeTwoProjectFixture(
+			"pi-lens-spotless-ktfmt-last-style-",
+			"build.gradle",
+			// This is a valid replacement sequence: clearSteps() removes the first
+			// ktfmt step, and one standalone invocation uses the last declaration.
+			`spotless {
+  kotlin {
+    ktfmt('0.51').googleStyle()
+    clearSteps()
+    ktfmt('0.51').kotlinlangStyle()
+  }
+}
+`,
+		);
+
+		await withKtfmtOnPath(path.join(fixture.root, "shims"), async () => {
+			expect(await resolveKtfmtArgs(fixture.rootFile, fixture.root)).toEqual([
+				"--kotlinlang-style",
+				fixture.rootFile,
+			]);
+		});
+	});
+
+	it("logs Spotless dropboxStyle() once across files and falls back", async () => {
+		const tmpDir = newTmpDir("pi-lens-spotless-ktfmt-dropbox-");
+		fs.writeFileSync(
+			path.join(tmpDir, "build.gradle.kts"),
+			'spotless {\n  kotlin {\n    ktfmt("0.51").dropboxStyle()\n  }\n}\n',
+		);
+		const filePath = writeKtFile(tmpDir, "src", "Main.kt");
+		const secondFilePath = writeKtFile(tmpDir, "src", "Other.kt");
+		resetDegradationLedger();
+		const originalTestMode = process.env.PI_LENS_TEST_MODE;
+		process.env.PI_LENS_TEST_MODE = "0";
+		try {
+			await withKtfmtOnPath(path.join(tmpDir, "shims"), async () => {
+				const resolved = await ktfmtFormatter.resolveCommand?.(filePath, tmpDir);
+				expect(resolved).not.toBeNull();
+				expect(resolved).not.toBeUndefined();
+				const [binary, ...rest] = resolved as string[];
+				expect(binary.toLowerCase()).toContain("ktfmt");
+				expect(rest).toEqual([filePath]);
+
+				const second = await ktfmtFormatter.resolveCommand?.(
+					secondFilePath,
+					tmpDir,
+				);
+				expect(second).not.toBeNull();
+				expect(second).not.toBeUndefined();
+				expect((second as string[]).slice(1)).toEqual([secondFilePath]);
+			});
+
+			await flushExtensionLog();
+			const emitted = readExtensionLogRows().filter((row) => {
+				const metadata = row.metadata as
+					| { filePath?: unknown; gradleDir?: unknown }
+					| undefined;
+				return (
+					row.subsystem === "format" &&
+					row.message ===
+						"Spotless ktfmt dropboxStyle(): pi-lens standalone CLI cannot " +
+							"express the style; falling back to bare ktfmt" &&
+					metadata?.gradleDir === tmpDir
+				);
+			});
+			expect(emitted).toHaveLength(1);
+			expect(emitted[0]).toMatchObject({
+				subsystem: "format",
+				level: "debug",
+				message:
+					"Spotless ktfmt dropboxStyle(): pi-lens standalone CLI cannot " +
+					"express the style; falling back to bare ktfmt",
+				metadata: { filePath: filePath, gradleDir: tmpDir },
+			});
+
+			const skips = getDegradationSummary().find(
+				(group) => group.kind === "formatter-skip",
+			);
+			expect(skips).toMatchObject({ count: 2 });
+			expect(skips?.latestReasons).toHaveLength(1);
+			expect(skips?.latestReasons[0]?.reason).toContain(
+				"pi-lens standalone CLI cannot express the style; falling back to bare " +
+					"ktfmt (count: 2)",
+			);
+		} finally {
+			if (originalTestMode === undefined) delete process.env.PI_LENS_TEST_MODE;
+			else process.env.PI_LENS_TEST_MODE = originalTestMode;
+		}
+		expect(process.env.PI_LENS_TEST_MODE).toBe(originalTestMode);
 	});
 
 	it("resolves --kotlinlang-style for a kotlinLangStyle() declaration", async () => {
@@ -592,7 +903,7 @@ describe("resolveKtfmtGradleStyle — enclosing-block scope (#2468 review round 
 	it("S2: allprojects { subprojects { ktfmt { } } } — two RECOGNIZED enclosing blocks still reach neither project", async () => {
 		// S1 proved an unrecognized wrapper fails closed; this is the negative
 		// twin for two blocks the resolver DOES recognize individually.
-		// `scopeOfKtfmtBlock` rejects any `ktfmt { }` with more than one
+		// `scopeOfGradleStyleBlock` rejects any `ktfmt { }` with more than one
 		// enclosing block outright (`enclosing.length > 1 → undefined`) before
 		// ever consulting SCOPE_BY_ENCLOSING_BLOCK — composing `allprojects { }`
 		// and `subprojects { }` is exactly the kind of build-script evaluation

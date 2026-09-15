@@ -9,17 +9,21 @@
  * `blockIndent`/`continuationIndent`/`trailingCommaManagementStrategy`, so a
  * body calling both is LAST-CALL-WINS, not first).
  *
- * None of this is read by ktfmt's own CLI from `build.gradle` — verified
- * against `ParsedArgs.kt` in `facebook/ktfmt` (now mirrored at
+ * Spotless uses a second DSL shape, `spotless { kotlin { ktfmt(...).googleStyle()
+ * } }`, with `kotlinlangStyle()` and `dropboxStyle()` as fluent methods.
+ *
+ * None of these selections are read by ktfmt's own CLI from `build.gradle` —
+ * verified against `ParsedArgs.kt` in `facebook/ktfmt` (now mirrored at
  * `Kotlin/ktfmt`) at tag v0.63, the exact version `clients/installer/
  * index.ts` pins for pi-lens's managed ktfmt install. That CLI accepts
  * `--google-style` / `--kotlinlang-style` (plus the default `--meta-style`)
  * — so the Gradle-declared choice has to be translated to the matching CLI
  * flag by something on our side; ktfmt itself never bridges `build.gradle`
- * to argv.
+ * to argv. Spotless's Dropbox style has no equivalent flag, so that case logs
+ * and falls back to bare ktfmt.
  *
  * Reuses the exact lexical pre-pass (`stripGradleCommentsAndStrings` /
- * `namedGradleBlockRanges`) that `clients/tool-policy.ts`'s
+ * `gradleBlockRanges`) that `clients/tool-policy.ts`'s
  * `getSpotlessKotlinFormatter` already applies to Gradle files, instead of a
  * second hand-rolled Gradle-block parser (#2468 AC) — same
  * single-source-of-truth reuse `clients/cargo-manifest.ts` did for TOML
@@ -57,6 +61,8 @@
  * - `subprojects { ktfmt { … } }` → DESCENDANT directories only, never the
  *   declaring one. `subprojects` configures the children and nothing else.
  * - `allprojects { ktfmt { … } }` → the declaring directory AND descendants.
+ * - Spotless `spotless { kotlin { … } }` uses the same enclosing-block rules,
+ *   with its own `spotless` block excluded from the wrapper count.
  * - anything else enclosing it — `configure(subprojects.filter { … }) { }`,
  *   `project(":app") { }`, `tasks.register(…) { }`, a convention-plugin
  *   wrapper, or more than one nested block — reaches NEITHER scope. pi-lens
@@ -82,6 +88,8 @@
 import * as os from "node:os";
 import * as path from "node:path";
 import { readTextFileOrUndefined } from "./cargo-manifest.js";
+import { incrementDegradationCount } from "./degradation-ledger.js";
+import { logExtension } from "./extension-log.js";
 import { findNearestMarkerRoot } from "./path-utils.js";
 import {
 	gradleBlockRanges,
@@ -106,8 +114,11 @@ const KTFMT_GRADLE_ROOT_FILES = [
  * long before this.
  */
 const MAX_GRADLE_ANCESTOR_HOPS = 16;
+/** Bound malformed Spotless calls without rejecting ordinary nested arguments. */
+const MAX_SPOTLESS_KTFMT_CALL_CHARS = 4096;
 
 type KtfmtGradleStyle = "google" | "kotlinlang";
+type ParsedKtfmtStyle = KtfmtGradleStyle | "spotless-dropbox-unsupported";
 
 /** The CLI flags ktfmt v0.63 actually defines (`ParsedArgs.kt`, verified above). */
 const KTFMT_STYLE_CLI_FLAG: Record<KtfmtGradleStyle, string> = {
@@ -121,8 +132,8 @@ const KTFMT_STYLE_CLI_FLAG: Record<KtfmtGradleStyle, string> = {
  * project below it.
  */
 interface GradleKtfmtStyles {
-	own?: KtfmtGradleStyle;
-	descendants?: KtfmtGradleStyle;
+	own?: ParsedKtfmtStyle;
+	descendants?: ParsedKtfmtStyle;
 }
 
 /**
@@ -153,10 +164,52 @@ function styleFromKtfmtBlockBody(body: string): KtfmtGradleStyle | undefined {
 	return style;
 }
 
+/** Find a bounded matching close parenthesis for a Spotless ktfmt call. */
+function findBalancedCallEnd(
+	source: string,
+	openParen: number,
+): number | undefined {
+	let depth = 0;
+	const limit = Math.min(
+		source.length,
+		openParen + MAX_SPOTLESS_KTFMT_CALL_CHARS,
+	);
+	for (let index = openParen; index < limit; index += 1) {
+		if (source[index] === "(") depth += 1;
+		if (source[index] !== ")") continue;
+		depth -= 1;
+		if (depth === 0) return index + 1;
+	}
+	return undefined;
+}
+
+/** Read a Spotless `ktfmt(...).style()` fluent chain from one kotlin body. */
+function styleFromSpotlessKotlinBody(
+	body: string,
+): ParsedKtfmtStyle | undefined {
+	let style: ParsedKtfmtStyle | undefined;
+	for (const call of body.matchAll(/\bktfmt\s*(?=\()/g)) {
+		const callOpenParen = call.index + call[0].length;
+		const closeParen = findBalancedCallEnd(body, callOpenParen);
+		if (closeParen === undefined) continue;
+		const chain = /^\s*((?:\.\s*(?:googleStyle|kotlinlangStyle|dropboxStyle)\s*\(\s*\)\s*)+)/.exec(
+			body.slice(closeParen),
+		);
+		if (!chain) continue;
+		for (const method of chain[1].matchAll(
+			/\.\s*(googleStyle|kotlinlangStyle|dropboxStyle)\s*\(\s*\)/g,
+		)) {
+			if (method[1] === "googleStyle") style = "google";
+			if (method[1] === "kotlinlangStyle") style = "kotlinlang";
+			if (method[1] === "dropboxStyle") style = "spotless-dropbox-unsupported";
+		}
+	}
+	return style;
+}
+
 /**
- * Which projects a `ktfmt { }` block reaches. `undefined` from
- * `scopeOfKtfmtBlock` means NEITHER — a scope this resolver cannot compute,
- * which falls back to the bare invocation.
+ * Which projects a Gradle style block reaches. `undefined` means NEITHER, a
+ * scope this resolver cannot compute, which falls back to the bare invocation.
  */
 type KtfmtBlockScope = "own" | "descendants" | "both";
 
@@ -171,9 +224,9 @@ const SCOPE_BY_ENCLOSING_BLOCK: Readonly<Record<string, KtfmtBlockScope>> = {
 };
 
 /**
- * Classify one `ktfmt { }` block by the block that encloses it.
+ * Classify one Gradle style block by the block that encloses it.
  *
- * `blocks` is every brace pair in the stripped source, so "enclosing" is
+ * `ranges` is every brace pair in the stripped source, so "enclosing" is
  * literal containment, not a guess from a name test: `range` strictly inside
  * `outer` means `outer.start < range.start` (an enclosing body always opens
  * before the body it contains) and `outer.end >= range.end`.
@@ -183,11 +236,11 @@ const SCOPE_BY_ENCLOSING_BLOCK: Readonly<Record<string, KtfmtBlockScope>> = {
  * exactly the kind of build-script evaluation this lexical pass cannot do,
  * and the cost of the conservative answer is the pre-#2468 bare invocation.
  */
-function scopeOfKtfmtBlock(
+function scopeOfGradleStyleBlock(
 	range: NamedGradleBlockRange,
-	blocks: readonly NamedGradleBlockRange[],
+	ranges: readonly NamedGradleBlockRange[],
 ): KtfmtBlockScope | undefined {
-	const enclosing = blocks.filter(
+	const enclosing = ranges.filter(
 		(outer) => outer.start < range.start && outer.end >= range.end,
 	);
 	if (enclosing.length === 0) return "own";
@@ -195,9 +248,46 @@ function scopeOfKtfmtBlock(
 	return SCOPE_BY_ENCLOSING_BLOCK[enclosing[0].name];
 }
 
+interface GradleStyleSelection {
+	scope: KtfmtBlockScope;
+	style: ParsedKtfmtStyle;
+}
+
+function styleSelectionForGradleBlock(
+	block: NamedGradleBlockRange,
+	source: string,
+	allBlockRanges: readonly NamedGradleBlockRange[],
+	nonSpotlessRanges: readonly NamedGradleBlockRange[],
+): GradleStyleSelection | undefined {
+	if (block.name === "ktfmt") {
+		const scope = scopeOfGradleStyleBlock(block, allBlockRanges);
+		if (!scope) return undefined;
+		const style = styleFromKtfmtBlockBody(
+			source.slice(block.start, block.end),
+		);
+		return style ? { scope, style } : undefined;
+	}
+	if (block.name !== "kotlin") return undefined;
+	const enclosingSpotless = allBlockRanges.filter(
+		(outer) =>
+			outer.name === "spotless" &&
+			outer.start < block.start &&
+			outer.end >= block.end,
+	);
+	if (enclosingSpotless.length !== 1) return undefined;
+	const scope = scopeOfGradleStyleBlock(block, nonSpotlessRanges);
+	if (!scope) return undefined;
+	const style = styleFromSpotlessKotlinBody(
+		source.slice(block.start, block.end),
+	);
+	return style ? { scope, style } : undefined;
+}
+
 function stylesFromGradleContent(content: string): GradleKtfmtStyles {
 	const stripped = stripGradleCommentsAndStrings(content);
 	const blocks = gradleBlockRanges(stripped);
+	// The Spotless block is the target DSL, not a project-scope wrapper.
+	const scopeRanges = blocks.filter((range) => range.name !== "spotless");
 	const styles: GradleKtfmtStyles = {};
 	// Source order, so a later block overwrites an earlier one for the scope
 	// it reaches — the same last-call-wins rule that applies inside one body.
@@ -206,15 +296,15 @@ function stylesFromGradleContent(content: string): GradleKtfmtStyles {
 	// over a single slot, or the source order of unrelated scopes decides
 	// which project gets the wrong flag.
 	for (const range of blocks) {
-		if (range.name !== "ktfmt") continue;
-		const scope = scopeOfKtfmtBlock(range, blocks);
-		if (!scope) continue;
-		const style = styleFromKtfmtBlockBody(
-			stripped.slice(range.start, range.end),
+		const selection = styleSelectionForGradleBlock(
+			range,
+			stripped,
+			blocks,
+			scopeRanges,
 		);
-		if (!style) continue;
-		if (scope !== "descendants") styles.own = style;
-		if (scope !== "own") styles.descendants = style;
+		if (!selection) continue;
+		if (selection.scope !== "descendants") styles.own = selection.style;
+		if (selection.scope !== "own") styles.descendants = selection.style;
 	}
 	return styles;
 }
@@ -255,11 +345,11 @@ async function stylesForGradleDir(
  *   the climb only continues past a gradle directory that declares NO style
  *   applying to this file, so nearest-wins is unchanged where a nearer
  *   declaration exists.
- * - Returns `undefined` on any miss (no gradle file found, no `ktfmt { }`
- *   block, or no recognized style call in one): callers fall back to their
- *   pre-existing default argv rather than guessing. `dropboxStyle()` — the
- *   call ktfmt-gradle removed in 0.19.0, never a ktfmt CLI flag — is just
- *   such a miss and never becomes a guessed flag.
+ * - Returns `undefined` on any miss (no gradle file found, no style block, or
+ *   no recognized style call): callers fall back to their pre-existing default
+ *   argv rather than guessing. Spotless `dropboxStyle()` is recognized as a
+ *   standalone-CLI limitation, records a bounded notice, and still falls back
+ *   without becoming a guessed flag.
  *
  * `homeDir` defaults to `os.homedir()` and exists as a parameter so tests can
  * inject a nearer ceiling and prove the guard actually stops a climb (mirrors
@@ -284,6 +374,27 @@ export async function resolveKtfmtGradleStyle(
 
 		const styles = await stylesForGradleDir(gradleDir);
 		const style = hop === 0 ? styles.own : styles.descendants;
+		if (style === "spotless-dropbox-unsupported") {
+			const absolutePath = path.resolve(filePath);
+			const reason =
+				"Spotless ktfmt dropboxStyle(): pi-lens standalone CLI cannot express " +
+				"the style; falling back to bare ktfmt";
+			const firstOccurrence = incrementDegradationCount({
+				kind: "formatter-skip",
+				subject: "ktfmt:spotless-dropbox",
+				reason,
+				metadata: { filePath: absolutePath, gradleDir },
+			});
+			if (firstOccurrence) {
+				logExtension({
+					subsystem: "format",
+					level: "debug",
+					message: reason,
+					metadata: { filePath: absolutePath, gradleDir },
+				});
+			}
+			return undefined;
+		}
 		if (style) return KTFMT_STYLE_CLI_FLAG[style];
 
 		const parent = path.dirname(gradleDir);

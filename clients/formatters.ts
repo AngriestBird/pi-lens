@@ -1339,12 +1339,12 @@ export const ktfmtFormatter: FormatterInfo = {
 	// ktfmt formats in place when given a file path (no flag needed).
 	command: ["ktfmt", "$FILE"],
 	extensions: [".kt", ".kts"],
-	// #2468: ktfmt's CLI never reads a project's Gradle `ktfmt { googleStyle()
-	// | kotlinLangStyle() }` selection — style is CLI-flag-only
+	// #2468/#2481: ktfmt's CLI never reads a project's Gradle `ktfmt { }` or
+	// Spotless `ktfmt(...).style()` selection — style is CLI-flag-only
 	// (`--google-style`/`--kotlinlang-style`, verified against ktfmt v0.63's
 	// own arg parser). Carry the nearest module's declared style through;
 	// `undefined` (no declaration, unreadable/unparseable manifest, or an
-	// unsupported style like the removed `dropboxStyle()`) falls back to the
+	// unsupported style like Spotless's `dropboxStyle()`) falls back to the
 	// bare invocation, unchanged from pre-#2468 behavior.
 	async resolveCommand(filePath, _cwd) {
 		const styleFlag = await resolveKtfmtGradleStyle(filePath);

@@ -328,7 +328,10 @@ and PR language; detailed historical examples are in `HISTORY.md`.
   Its declarative population assigns one evidence bucket and declines absent,
   unreadable, unparseable, unsupported, or unregistered evidence; callers emit
   bounded degradation records. Ktlint's standalone-CLI exception still
-  declines Gradle-owned projects without guessing a CLI version.
+  declines Gradle-owned projects without guessing a CLI version. The ktfmt
+  carriage maps supported Gradle-plugin and Spotless fluent styles to the
+  standalone CLI flags, applies only known Gradle scopes, and records
+  unsupported Spotless Dropbox fallback.
 - `clients/dispatch/runners/runner-spawn-cwd-sweep.test.ts` is the population
   guard for child cwd derivation. Add a reasoned migration row instead of a
   pin-only update.
