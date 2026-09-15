@@ -238,10 +238,11 @@ and PR language; detailed historical examples are in `HISTORY.md`.
     where the seam supports both directions.
 49. **Whitespace counted as structure when it is alignment:** a leading run can
     be alignment, not one nesting unit. Known members: an aligned continuation
-    inside a call (#3038) and the interior of a block comment, whose ` * ` lines
-    sit one column past their opener (#3039). Name which lines carry structure
-    and exclude the rest before counting; decline rather than pin a style when
-    only ambiguous runs remain.
+    inside a call (#3038), the interior of a block comment, whose ` * ` lines
+    sit one column past their opener (#3039), and the same block-comment
+    interior picked as `indent-retarget.ts`'s extrapolation base unit (#3052).
+    Name which lines carry structure and exclude the rest before counting;
+    decline rather than pin a style when only ambiguous runs remain.
 
 ## Standing invariants
 

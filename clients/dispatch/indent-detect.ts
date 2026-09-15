@@ -70,29 +70,40 @@ function opensBlockComment(line: string): boolean {
 }
 
 /**
- * Drop the lines *inside* a block comment from the evidence. Their leading
- * space is alignment on the opener's `*` column, not a nesting unit: a
- * top-level JSDoc contributes a run of 1-space lines, so a 2- or 4-space file
- * with doc comments otherwise reads as width 1 and a tab file with a top-level
- * JSDoc reads as spaces (#3039 F1/F2). The opener line keeps its own
- * indentation, which *is* structural. An opener that never closes was a `/*`
- * inside a string or a regex, so its lines stay in the evidence rather than
- * silently swallowing the rest of the file.
+ * One boolean per line: true when the line sits *inside* a terminated block
+ * comment, so its leading space is alignment on the opener's `*` column, not
+ * a nesting unit. The opener line itself is false (its own indentation *is*
+ * structural). An opener that never closes was a `/*` inside a string or a
+ * regex, so its lines are left false rather than silently swallowed.
+ *
+ * Shared by {@link structuralLines} (drops the lines from indentation
+ * detection's own evidence — a top-level JSDoc otherwise contributes a run
+ * of 1-space lines, so a 2- or 4-space file with doc comments reads as width
+ * 1 and a tab file with a top-level JSDoc reads as spaces, #3039 F1/F2) and
+ * by `clients/indent-retarget.ts`'s `retargetReplacementIndentation`, which
+ * must not pick its base nesting unit from a comment's alignment column
+ * either (#3052) — one lexer for "which lines carry structure", not two.
  */
-function structuralLines(lines: string[]): string[] {
-	const kept: string[] = [];
-	let pending: string[] | undefined;
-	for (const line of lines) {
-		if (pending) {
-			pending.push(line);
-			if (line.includes("*/")) pending = undefined;
+export function blockCommentInteriorMask(lines: string[]): boolean[] {
+	const mask: boolean[] = Array.from({ length: lines.length }, () => false);
+	let pendingStart = -1;
+	for (const [i, line] of lines.entries()) {
+		if (pendingStart >= 0) {
+			mask[i] = true;
+			if (line.includes("*/")) pendingStart = -1;
 			continue;
 		}
-		kept.push(line);
-		if (opensBlockComment(line)) pending = [];
+		if (opensBlockComment(line)) pendingStart = i;
 	}
-	if (pending) for (const line of pending) kept.push(line);
-	return kept;
+	if (pendingStart >= 0) {
+		for (let i = pendingStart + 1; i < lines.length; i += 1) mask[i] = false;
+	}
+	return mask;
+}
+
+function structuralLines(lines: string[]): string[] {
+	const mask = blockCommentInteriorMask(lines);
+	return lines.filter((_, index) => !mask[index]);
 }
 
 function greatestCommonDivisor(left: number, right: number): number {

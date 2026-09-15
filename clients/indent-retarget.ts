@@ -1,3 +1,5 @@
+import { blockCommentInteriorMask } from "./dispatch/indent-detect.js";
+
 /**
  * Retargets the leading-whitespace style of newText to match the indentation
  * correction that was applied to oldText.
@@ -7,6 +9,15 @@
  * Returns undefined — leaving newText unchanged — when any non-blank line in
  * newText has indentation that cannot be resolved, to avoid producing
  * mixed-indentation output.
+ *
+ * A line inside a terminated `/* … *\/` block comment is excluded from the
+ * mapping entirely: its leading space is alignment on the opener's `*`
+ * column, not a nesting unit, so it must never be picked as the shortest
+ * ("base") indent and extrapolated from — a doc comment's own alignment
+ * ratio can differ from the code's own indentation ratio, silently
+ * mis-scaling every deeper line `newText` adds (#3052). Uses the same
+ * lexer as `clients/dispatch/indent-detect.ts`'s `detectIndentation`
+ * (#3039) rather than a second one.
  */
 export function retargetReplacementIndentation(
 	newText: string,
@@ -17,12 +28,17 @@ export function retargetReplacementIndentation(
 	const oldLines = oldText.replace(/\r\n/g, "\n").split("\n");
 	const correctedLines = correctedOldText.replace(/\r\n/g, "\n").split("\n");
 	if (oldLines.length !== correctedLines.length) return undefined;
+	const commentInterior = blockCommentInteriorMask(oldLines);
 
 	const indentMap = new Map<string, string>();
 	const ambiguousIndents = new Set<string>();
-	for (let i = 0; i < oldLines.length; i += 1) {
-		const oldIndent = oldLines[i].match(/^[\t ]*/)?.[0] ?? "";
-		const correctedIndent = correctedLines[i].match(/^[\t ]*/)?.[0] ?? "";
+	for (const [i, oldLine] of oldLines.entries()) {
+		if (commentInterior[i]) continue;
+		// oldLines.length === correctedLines.length is checked above; the "" is
+		// unreachable, only satisfying noUncheckedIndexedAccess.
+		const correctedLine = correctedLines[i] ?? "";
+		const oldIndent = oldLine.match(/^[\t ]*/)?.[0] ?? "";
+		const correctedIndent = correctedLine.match(/^[\t ]*/)?.[0] ?? "";
 		if (oldIndent === correctedIndent) continue;
 		const previous = indentMap.get(oldIndent);
 		if (previous !== undefined && previous !== correctedIndent) {
