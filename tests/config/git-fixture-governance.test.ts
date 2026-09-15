@@ -414,15 +414,20 @@ describe("real Git fixture governance", () => {
 		).toEqual(["tests/clients/synthetic.test.ts:1 ca2639524"]);
 	});
 
-	it("does not let a comment quoting the offence satisfy or trip the guard", () => {
+	it("does not let a comment INSIDE the argument list trip the guard", () => {
+		// The shape the #3066 round 2 remedy leaves behind: the spawn is gone,
+		// but a comment in the surviving call still quotes the sha the fixture
+		// was taken at. A comment is prose, never an argument.
 		expect(
 			findHistoricalCommitIshOffenders([
 				{
 					file: "tests/clients/synthetic.test.ts",
 					source:
-						"// The pre-fix content used to be read with\n" +
-						"// gitExecFileSync(\"git\", [\"show\", \"20896a56b:tests/x.test.ts\"]).\n" +
-						'const PRE = readFileSync("tests/fixtures/pre-3048.txt", "utf8");',
+						'gitExecFileSync("git", [\n' +
+						'  "show",\n' +
+						"  // was \"20896a56b:tests/index-vanished-instance-wiring.test.ts\"\n" +
+						'  `${fixtureSha}:src/a.ts`,\n' +
+						"]);",
 				},
 			]),
 		).toEqual([]);
