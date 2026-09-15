@@ -5,7 +5,16 @@
 // clients/dispatch/runners/yaml-rule-parser.ts) end to end through the
 // shipped no-console-except-error rule YAML.
 
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import {
+	afterAll,
+	afterEach,
+	beforeAll,
+	beforeEach,
+	describe,
+	expect,
+	it,
+	vi,
+} from "vitest";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import astGrepNapiRunner from "../../../../clients/dispatch/runners/ast-grep-napi.js";
@@ -74,37 +83,6 @@ describe("no-console-except-error ignores CLI scripts and logger sinks (#965)", 
 		expect(linesFor(result.diagnostics, "no-console-except-error")).toEqual([]);
 	});
 
-	// #3041 r2 F1: the OTHER side of the divergence the LSP seam had to match.
-	// The runner claims a rule id on first sighting (`seenRuleIds.add`) BEFORE it
-	// looks at `ignores`, so a project rule that redefines a bundled id with no
-	// `ignores` fires on `scripts/**` per-edit. The LSP seam has to reach the same
-	// verdict from the same catalog — see the sibling case in
-	// tests/clients/dispatch/auxiliary-lsp.test.ts.
-	it("flags scripts/** when a project rule redefines the bundled id with no ignores", async () => {
-		const rulesDir = path.join(env.cwd, "rules", "ast-grep-rules", "rules");
-		fs.mkdirSync(rulesDir, { recursive: true });
-		fs.writeFileSync(
-			path.join(rulesDir, "no-console-except-error.yml"),
-			[
-				"id: no-console-except-error",
-				"language: TypeScript",
-				"severity: warning",
-				'message: "project wants console flagged everywhere"',
-				"rule:",
-				"  pattern: console.log($$$)",
-				"",
-			].join("\n"),
-		);
-		const { ctx } = env.addFile(
-			"scripts/override-cli.ts",
-			'console.log("cli output");\n',
-		);
-		const result = await astGrepNapiRunner.run(ctx);
-		expect(linesFor(result.diagnostics, "no-console-except-error")).toEqual([
-			1,
-		]);
-	});
-
 	it("does not flag console output inside a logger.ts implementation", async () => {
 		const { ctx } = env.addFile(
 			"lib/logger.ts",
@@ -113,6 +91,77 @@ describe("no-console-except-error ignores CLI scripts and logger sinks (#965)", 
 		const result = await astGrepNapiRunner.run(ctx);
 		expect(linesFor(result.diagnostics, "no-console-except-error")).toEqual([]);
 	});
+});
+
+/**
+ * #3041: the runner's HALF of the catalog-precedence contract the LSP seam
+ * (`clients/dispatch/rule-ignores.ts`) has to reproduce. The runner claims a
+ * rule id on first sighting — `seenRuleIds.add(rule.id)` at
+ * ast-grep-napi.ts:1081, BEFORE its own `ignores` check — so the first
+ * document for an id wins whether or not it declares `ignores`, and a
+ * lower-precedence copy's globs never apply. The seam's sibling cases live in
+ * tests/clients/dispatch/auxiliary-lsp.test.ts; both must agree or #3041's two
+ * surfaces disagree again.
+ *
+ * Each case gets its OWN env: writing a project rule tree into the shared
+ * describe-wide env leaks into every later case in that describe, which is
+ * exactly what happened in this PR's round 2 (the logger.ts case silently
+ * started evaluating the override and stopped redding under the M6 mutation).
+ */
+describe("project rules override the bundled catalog for the same id (#3041)", () => {
+	let overrideEnv: RealRunnerEnv;
+	beforeEach(() => {
+		overrideEnv = makeRealRunnerEnv({ hasTool: napiFallbackHasTool });
+	});
+	afterEach(() => overrideEnv?.cleanup());
+
+	/** Redefine the bundled `no-console-except-error` id in the project tree. */
+	const writeProjectOverride = (ignores?: readonly string[]) => {
+		const rulesDir = path.join(
+			overrideEnv.cwd,
+			"rules",
+			"ast-grep-rules",
+			"rules",
+		);
+		fs.mkdirSync(rulesDir, { recursive: true });
+		fs.writeFileSync(
+			path.join(rulesDir, "no-console-except-error.yml"),
+			[
+				"id: no-console-except-error",
+				"language: TypeScript",
+				"severity: warning",
+				'message: "project override"',
+				...(ignores
+					? ["ignores:", ...ignores.map((glob) => `  - "${glob}"`)]
+					: []),
+				"rule:",
+				"  pattern: console.log($$$)",
+				"",
+			].join("\n"),
+		);
+	};
+
+	const consoleLinesFor = async (relPath: string) => {
+		const { ctx } = overrideEnv.addFile(relPath, 'console.log("output");\n');
+		const result = await astGrepNapiRunner.run(ctx);
+		return linesFor(result.diagnostics, "no-console-except-error");
+	};
+
+	it("flags scripts/** when the project rule declares no ignores", async () => {
+		writeProjectOverride();
+		expect(await consoleLinesFor("scripts/override-cli.ts")).toEqual([1]);
+	}, 30_000);
+
+	it("applies only the project rule's ignores, never the bundled copy's", async () => {
+		writeProjectOverride(["vendor/**"]);
+		// The project rule carves out vendor/**; the bundled copy (which carves
+		// out scripts/** instead) must not get a second chance to fire here. It
+		// does exactly that if `seenRuleIds.add` stops claiming the id.
+		expect(await consoleLinesFor("vendor/dep.ts")).toEqual([]);
+		// Control: the override itself is live, so the [] above is a carve-out
+		// and not a rule that failed to load.
+		expect(await consoleLinesFor("src/app.ts")).toEqual([1]);
+	}, 30_000);
 });
 
 /**

@@ -83,9 +83,15 @@ export function loadRuleIgnorePatterns(
 			// a bundled id to fire everywhere kept the bundled `scripts/**`
 			// carve-out over LSP while the runner fired on it per-edit (#3041 r2).
 			// Deliberately NOT mirroring the runner's `duplicateSet` skip for ids
-			// duplicated within ONE source: the runner drops such a rule entirely,
-			// but ast-grep's LSP still publishes it, so honoring the first copy's
-			// carve-out suppresses more than the runner, never less.
+			// duplicated within ONE source. The two surfaces genuinely differ there
+			// and neither choice matches the runner: the runner emits only its
+			// Duplicate-rule-id diagnostic and drops the rule outright, so it
+			// suppresses everything for that id, while `materializeMergedRuleDir`
+			// (sgconfig.ts) drops only documents claimed by an EARLIER source —
+			// both copies survive into the merged dir and ast-grep's LSP publishes
+			// them. So the choice is between honoring the first copy's carve-out
+			// and registering no patterns at all; the latter would leave those
+			// published findings unfiltered and re-open #3041 for that id.
 			if (seenRuleIds.has(rule.id)) continue;
 			seenRuleIds.add(rule.id);
 			if (!rule.ignores?.length) continue;
