@@ -22,18 +22,28 @@ const REPO_ROOT = path.resolve(
 );
 
 // Tmp-fixture hygiene governance (#2912). The setup hook in
-// tests/support/vitest-setup.ts contains every temp dir a test creates by
-// pointing TMPDIR/TMP/TEMP at a per-file private root, then removes that root
-// in afterAll and reds the file on leftovers. That containment holds only
-// when every mkdtemp site derives its parent from os.tmpdir()/tmpdir() at
-// call time. This sweep pins the sites that would escape it.
+// tests/support/vitest-setup.ts keeps the REAL TMPDIR: it never repoints
+// TMPDIR/TMP/TEMP, so the gate watches the same /tmp namespace production
+// uses. At each test-file load it snapshots the existing `pi-lens-`-prefixed
+// entries there; each file's afterAll reports additions, and this file, the
+// serialized governance owner that runs after every other project, reds on
+// new unadmitted entries in its afterAll and removes them after the
+// assertion. Per-file teardown is the ONLY containment: a raw mkdtempSync
+// root is contained solely by its owning file's teardown, and a deferred
+// producer that writes after teardown recreates it. The admission baseline in
+// tests/config/tmp-fixture-hygiene-baseline.json is a shrink-only ratchet
+// over the entries that outlive their owning file. This sweep keeps the
+// mkdtemp population observable: each site's parent must derive from the real
+// tmpdir (os.tmpdir()/the ambient TMPDIR at call time), stay repo-rooted, or
+// use the sanctioned scratch seam, so every fixture it creates is either
+// watched by the prefix diff, never tmpfs, or self-swept.
 
 const MKTEMP_CALLEE = /\bmkdtempSync\s*\(|\bmkdtemp\s*\(/g;
 const TMPDIR_SOURCE = /\bos\.tmpdir\s*\(\s*\)|[^a-zA-Z]tmpdir\s*\(\s*\)/;
 const TMPDIR_ENV_SOURCE = /process\.env\.TMPDIR/;
-// Repo-rooted parents never enter /tmp, so the private-TMPDIR containment
-// question does not apply to them. They are repo pollution of a different
-// class (tracked-but-ignored `.probe-*` dirs), not tmpfs inodes.
+// Repo-rooted parents never enter /tmp, so the prefix snapshot cannot observe
+// them. They are repo pollution of a different class (tracked-but-ignored
+// `.probe-*` dirs), not tmpfs inodes.
 const REPO_ROOTED_SOURCE =
 	/\bREPO_ROOT\b|process\.cwd\s*\(\s*\)|\brepositoryRoot\b|\brepoRoot\b/;
 // The sanctioned scratch seam (scripts/lib/scratch-dir.mjs) owns its
