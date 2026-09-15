@@ -528,7 +528,7 @@ describe("applyAuxiliarySuppressions per-rule ignores gate (#3041)", () => {
 	const root = path.resolve("/repo");
 	const content = "console.log('x');\n";
 
-	it("drops a catalog rule's finding on a path the rule's own `ignores` carves out", () => {
+	it("drops a catalog rule finding on a path the rule ignores globs carve out", () => {
 		expect(
 			applyAuxiliarySuppressions([astGrepDiag(RULE)], content, {
 				filePath: path.join(root, "scripts", "cli.ts"),
@@ -537,7 +537,7 @@ describe("applyAuxiliarySuppressions per-rule ignores gate (#3041)", () => {
 		).toEqual([]);
 	});
 
-	it("keeps the same rule's finding on a path it does not carve out", () => {
+	it("keeps the same rule finding on a path it does not carve out", () => {
 		const kept = applyAuxiliarySuppressions([astGrepDiag(RULE)], content, {
 			filePath: path.join(root, "src", "app.ts"),
 			scanRoot: root,
@@ -545,7 +545,7 @@ describe("applyAuxiliarySuppressions per-rule ignores gate (#3041)", () => {
 		expect(kept).toHaveLength(1);
 	});
 
-	it("keeps a rule that declares no `ignores` at all on the same carved-out path", () => {
+	it("keeps a rule that declares no ignores at all on the same carved-out path", () => {
 		const kept = applyAuxiliarySuppressions(
 			[astGrepDiag("no-alert")],
 			content,
