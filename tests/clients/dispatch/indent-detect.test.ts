@@ -21,7 +21,8 @@ describe("indentation detection", () => {
 	it("infers the unit from aligned continuation runs", () => {
 		// Regression: the shallowest run is continuation alignment, not the
 		// formatter's unit (#3038, F-3039-1).
-		const content = "const value = call(\n      first,\n      second,\n    );\n";
+		const content =
+			"const value = call(\n      first,\n      second,\n    );\n";
 		expect(detectIndentation(content)).toEqual({ style: "space", width: 2 });
 	});
 

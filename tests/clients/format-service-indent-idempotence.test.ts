@@ -6,12 +6,21 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import {
+	getDegradationSummary,
+	resetDegradationLedger,
+} from "../../clients/degradation-ledger.js";
 import { FormatService } from "../../clients/format-service.js";
 import { clearFormatterRuntimeState } from "../../clients/formatters.js";
 import { setupTestEnvironment } from "./test-utils.js";
 
 const safeSpawnAsync = vi.hoisted(() => vi.fn());
-vi.mock("../../clients/safe-spawn.js", () => ({
+// #2281 vi-mock export ratchet: spread the real module so a new safe-spawn
+// export cannot silently vanish from this double. The two overrides below stay
+// explicit — the test must never reach a real PATH probe or a real ambient
+// signal.
+vi.mock("../../clients/safe-spawn.js", async (importOriginal) => ({
+	...(await importOriginal<typeof import("../../clients/safe-spawn.js")>()),
 	safeSpawnAsync,
 	safeSpawn: vi.fn(),
 	getAmbientAbortSignal: () => undefined,
@@ -63,6 +72,7 @@ describe("formatter indentation inference through FormatService (#3038)", () => 
 	beforeEach(() => {
 		safeSpawnAsync.mockReset();
 		clearFormatterRuntimeState();
+		resetDegradationLedger();
 	});
 
 	it("keeps a no-config TypeScript fixture byte-identical on the second run", async () => {
@@ -72,18 +82,20 @@ describe("formatter indentation inference through FormatService (#3038)", () => 
 			const filePath = path.join(env.tmpDir, "values.ts");
 			fs.writeFileSync(filePath, fixture);
 			const argv: string[][] = [];
-			safeSpawnAsync.mockImplementation(async (_command: string, args: string[]) => {
-				argv.push(args);
-				const width = Number(args[args.indexOf("--indent-width") + 1]);
-				const current = fs.readFileSync(filePath, "utf8");
-				fs.writeFileSync(
-					filePath,
-					current.replace(/^( +)(?=\S)/gm, (spaces) =>
-						" ".repeat((spaces.length / 2) * width),
-					),
-				);
-				return { status: 0, stdout: "", stderr: "" };
-			});
+			safeSpawnAsync.mockImplementation(
+				async (_command: string, args: string[]) => {
+					argv.push(args);
+					const width = Number(args[args.indexOf("--indent-width") + 1]);
+					const current = fs.readFileSync(filePath, "utf8");
+					fs.writeFileSync(
+						filePath,
+						current.replace(/^( +)(?=\S)/gm, (spaces) =>
+							" ".repeat((spaces.length / 2) * width),
+						),
+					);
+					return { status: 0, stdout: "", stderr: "" };
+				},
+			);
 
 			const service = new FormatService("format-indent", true);
 			service.recordRead(filePath);
@@ -137,6 +149,16 @@ describe("formatter indentation inference through FormatService (#3038)", () => 
 				expect.objectContaining({ name: "biome", outcome: "skipped" }),
 			]);
 			expect(safeSpawnAsync).not.toHaveBeenCalled();
+			// Recurrence this pins (#3038): the ambiguity refusal was invisible —
+			// the file simply came back unformatted with no session record saying
+			// why. One bounded row per tool, keyed by the tool and not the path.
+			expect(getDegradationSummary()).toEqual([
+				expect.objectContaining({
+					kind: "formatter-skip",
+					count: 1,
+					latestReasons: [expect.objectContaining({ subject: "biome" })],
+				}),
+			]);
 		} finally {
 			env.cleanup();
 		}

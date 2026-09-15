@@ -865,7 +865,20 @@ async function indentationArgs(
 	}
 	if (!hasDetectableIndentation(content)) return null;
 	const indentation = detectIndentation(content);
-	if (!indentation) return null;
+	if (!indentation) {
+		// #3038: the file HAS indentation, but only nested runs, so no unit can be
+		// proven. The caller turns this into SKIP_FORMATTING — a file the user
+		// expected to be formatted silently is not — so the refusal gets one
+		// bounded row. Subject is the tool (four possible values, recorded once
+		// per session each) rather than the path: a session that edits many such
+		// files must not write one ledger key per file.
+		recordDegradationOnce({
+			kind: "formatter-skip",
+			subject: tool,
+			reason: "indentation evidence is ambiguous; formatter style not pinned",
+		});
+		return null;
+	}
 	if (tool === "shfmt")
 		return indentation.style === "tab"
 			? ["-i", "0"]

@@ -23,15 +23,19 @@ export function detectIndentation(content: string): Indentation | undefined {
 	if (tabs > spaceCounts.length) return { style: "tab", width: 1 };
 	if (spaceCounts.length > tabs) {
 		const minimum = Math.min(...spaceCounts);
-		const gcd = spaceCounts.reduce(greatestCommonDivisor);
-		const nonBlank = lines
-			.map((line) => line.match(/^( *)\S/)?.[1].length)
-			.filter((count): count is number => count !== undefined);
-		const hasStructuralBoundary = nonBlank.some(
-			(count, index) =>
-				count === minimum &&
-				index > 0 && nonBlank[index - 1] < minimum,
+		// 0 is GCD's identity, so seeding the fold both satisfies "reduce needs an
+		// initial value" and leaves every result unchanged.
+		const gcd = spaceCounts.reduce(
+			(unit, count) => greatestCommonDivisor(unit, count),
+			0,
 		);
+		const nonBlank = lines
+			.map((line) => line.match(/^( *)\S/)?.[1]?.length)
+			.filter((count): count is number => count !== undefined);
+		const hasStructuralBoundary = nonBlank.some((count, index) => {
+			const previous = nonBlank[index - 1];
+			return count === minimum && previous !== undefined && previous < minimum;
+		});
 		if (hasStructuralBoundary && minimum <= 8) {
 			return { style: "space", width: minimum };
 		}
