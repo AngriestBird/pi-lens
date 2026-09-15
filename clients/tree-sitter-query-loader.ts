@@ -13,7 +13,10 @@ import {
 	classifyBundledResourceDir,
 	reportBundledResourceDirHealth,
 } from "./bundled-resource-health.js";
-import { getDegradationLedgerGeneration } from "./degradation-ledger.js";
+import {
+	getDegradationLedgerGeneration,
+	recordDegradationOnce,
+} from "./degradation-ledger.js";
 import yaml from "./deps/js-yaml.js";
 import { resolvePackagePath } from "./package-root.js";
 
@@ -199,6 +202,23 @@ export function queriesForLanguage(
 	return ruleSourceLanguages(languageId).flatMap((langId) => enabled(langId));
 }
 
+/**
+ * Coerce a parsed YAML scalar to a string, refusing a mapping or array.
+ * `String({})`/`String([])` silently produce the literal text
+ * `"[object Object]"`/`"a,b"` — SonarCloud typescript:S6551 flagged this at
+ * every scalar field in `parseQueryFile` once `parseYaml` widened to
+ * `Record<string, unknown>` (#3054 review F2). Returns `undefined` for
+ * `null`/`undefined`/a non-scalar so call sites keep using `||`/`??` for
+ * defaults exactly as the old `String(x || fallback)` calls did.
+ */
+function str(value: unknown): string | undefined {
+	return typeof value === "string" ||
+		typeof value === "number" ||
+		typeof value === "boolean"
+		? String(value)
+		: undefined;
+}
+
 export function isDisabledQueryFilePath(filePath: string): boolean {
 	const normalized = filePath.replaceAll("\\", "/");
 	const parts = normalized.split("/").filter(Boolean);
@@ -285,6 +305,28 @@ export class TreeSitterQueryLoader {
 	}
 
 	/**
+	 * One degradation-ledger record per malformed rule file per session
+	 * (#3054 review F1). The old hand-rolled scanner tolerated almost any
+	 * line-level mistake and still produced SOME parsed shape; `yaml.load`
+	 * correctly throws on realistic authoring mistakes the scanner shrugged
+	 * off (a colon in an unquoted scalar, a tab in list indentation, a
+	 * duplicate key, an unclosed quote, a bare `@` value — fuzzed over 800
+	 * corruptions of one shipped query: 139 that loaded before now skip, 0
+	 * the other way). Before this, the only sink on that skip path was
+	 * `dbg()`, gated behind `verbose` — both production instantiations
+	 * (this file's `queryLoader` singleton and `tree-sitter-client.ts`'s
+	 * `new TreeSitterQueryLoader()`) construct with the `verbose = false`
+	 * default — so a silently-dropped custom rule had no surviving signal.
+	 */
+	private recordQueryParseFailure(filePath: string, reason: string): void {
+		recordDegradationOnce({
+			kind: "tree-sitter-query-parse-failed",
+			subject: filePath,
+			reason,
+		});
+	}
+
+	/**
 	 * Load all queries from the rules/tree-sitter-queries directory.
 	 *
 	 * Returns the in-memory memo when the same root was already loaded.
@@ -366,36 +408,49 @@ export class TreeSitterQueryLoader {
 
 			const parsed = this.parseYaml(content);
 
-			if (!parsed.id || !parsed.query) {
+			// #3054 review F2: type-checked, not just truthy. `yaml.load` widened
+			// `parsed` to `Record<string, unknown>`, so a mapping- or
+			// array-valued `id`/`query` (a plausible authoring slip: forgetting
+			// the `|` on `query:` turns the block into a nested mapping) is
+			// truthy and used to sail through the old `!parsed.id || !parsed.query`
+			// check, then `String(...)` turned it into the literal text
+			// `"[object Object]"` — which for `query` reached the Query
+			// constructor (SonarCloud typescript:S6551 flagged every such
+			// stringification in this function; fixed below via `str()`).
+			const id = str(parsed.id);
+			const query = typeof parsed.query === "string" ? parsed.query : undefined;
+			if (!id || !query) {
 				this.dbg(`Invalid query file: ${filePath}`);
+				this.recordQueryParseFailure(
+					filePath,
+					!id
+						? `'id' is missing or not a scalar (got ${typeof parsed.id})`
+						: `'query' is missing or not a string (got ${typeof parsed.query})`,
+				);
 				return null;
 			}
 
 			return {
-				id: String(parsed.id),
-				name: String(parsed.name || parsed.id),
+				id,
+				name: str(parsed.name) || id,
 				severity: this.parseSeverity(parsed.severity),
-				category: String(parsed.category || "general"),
-				language: String(parsed.language || language),
-				message: String(parsed.message || `Pattern: ${parsed.id}`),
-				description: parsed.description
-					? String(parsed.description)
-					: undefined,
-				query: String(parsed.query),
+				category: str(parsed.category) || "general",
+				language: str(parsed.language) || language,
+				message: str(parsed.message) || `Pattern: ${id}`,
+				description: str(parsed.description) || undefined,
+				query,
 				metavars: Array.isArray(parsed.metavars)
 					? parsed.metavars.map(String)
-					: this.extractMetavars(String(parsed.query)),
-				post_filter: parsed.post_filter
-					? String(parsed.post_filter)
-					: undefined,
+					: this.extractMetavars(query),
+				post_filter: str(parsed.post_filter) || undefined,
 				// biome-ignore lint/suspicious/noExplicitAny: Post filter params
 				post_filter_params: parsed.post_filter_params as any,
-				defect_class: parsed.defect_class
-					? String(parsed.defect_class)
-					: undefined,
-				inline_tier: parsed.inline_tier
-					? (String(parsed.inline_tier) as "blocking" | "warning" | "review")
-					: undefined,
+				defect_class: str(parsed.defect_class) || undefined,
+				inline_tier: (str(parsed.inline_tier) || undefined) as
+					| "blocking"
+					| "warning"
+					| "review"
+					| undefined,
 				skip_test_files: parsed.skip_test_files === true,
 				ignore_paths: Array.isArray(parsed.ignore_paths)
 					? parsed.ignore_paths.map(String)
@@ -413,15 +468,21 @@ export class TreeSitterQueryLoader {
 				owasp: Array.isArray(parsed.owasp)
 					? parsed.owasp.map(String)
 					: undefined,
-				confidence: parsed.confidence
-					? (String(parsed.confidence) as "low" | "medium" | "high")
-					: undefined,
+				confidence: (str(parsed.confidence) || undefined) as
+					| "low"
+					| "medium"
+					| "high"
+					| undefined,
 				has_fix: parsed.has_fix === true || parsed.has_fix === "true",
-				fix_action: parsed.fix_action ? String(parsed.fix_action) : undefined,
+				fix_action: str(parsed.fix_action) || undefined,
 				filePath,
 			};
 		} catch (err) {
 			this.dbg(`Failed to parse ${filePath}: ${err}`);
+			this.recordQueryParseFailure(
+				filePath,
+				err instanceof Error ? err.message : String(err),
+			);
 			return null;
 		}
 	}
@@ -434,14 +495,17 @@ export class TreeSitterQueryLoader {
 	 * twice over — its inline `[a, b]` array branch unquoted list items but
 	 * its multi-line `- item` branch did not, so `console-statement.yml`'s
 	 * quoted `ignore_paths` glob parsed with the quote marks attached and the
-	 * #965 carve-out never matched a path, #3041/#3046). A malformed document
-	 * returns `{}` rather than throwing, so the caller's `!parsed.id` check
-	 * skips just that query.
+	 * #965 carve-out never matched a path, #3041/#3046). A genuine syntax
+	 * error throws, caught by `parseQueryFile`'s `try`/`catch`; a
+	 * syntactically valid but wrong-shaped document (a bare scalar, a list,
+	 * `null`) is cast here and skipped by `parseQueryFile`'s `id`/`query`
+	 * type check below — property access on a non-object primitive never
+	 * throws in JS, so no separate `typeof parsed !== "object"` guard is
+	 * needed here (#3054 review F3: that guard was vacuous — deleting it
+	 * reds nothing, every case it caught was already caught one frame up).
 	 */
 	private parseYaml(content: string): Record<string, unknown> {
-		const parsed: unknown = yaml.load(content);
-		if (!parsed || typeof parsed !== "object") return {};
-		return parsed as Record<string, unknown>;
+		return yaml.load(content) as Record<string, unknown>;
 	}
 
 	/**
