@@ -379,8 +379,8 @@ describe("lsp server policy", () => {
 		);
 	});
 
-	it("falls back to file directory for standalone cpp/zig/elixir/gleam files", async () => {
-		const { CppServer, ZigServer, ElixirServer, GleamServer } =
+	it("falls back to file directory for standalone cpp/zig/elixir/gleam/typst files", async () => {
+		const { CppServer, ZigServer, ElixirServer, GleamServer, TinymistServer } =
 			await import("../../../clients/lsp/server.js");
 		const tmp = fs.mkdtempSync(
 			path.join(os.tmpdir(), "pi-lens-secondary-roots-"),
@@ -391,12 +391,15 @@ describe("lsp server policy", () => {
 		const zigFile = path.join(tmp, "src", "main.zig");
 		const elixirFile = path.join(tmp, "lib", "app.ex");
 		const gleamFile = path.join(tmp, "src", "app.gleam");
+		const typstFile = path.join(tmp, "docs", "main.typ");
 		fs.mkdirSync(path.dirname(cppFile), { recursive: true });
 		fs.mkdirSync(path.dirname(elixirFile), { recursive: true });
+		fs.mkdirSync(path.dirname(typstFile), { recursive: true });
 		fs.writeFileSync(cppFile, "int main() { return 0; }\n");
 		fs.writeFileSync(zigFile, "pub fn main() void {}\n");
 		fs.writeFileSync(elixirFile, "defmodule App do end\n");
 		fs.writeFileSync(gleamFile, "pub fn main() { Nil }\n");
+		fs.writeFileSync(typstFile, "#let x = 1\n");
 
 		await expect(CppServer.root(cppFile)).resolves.toBe(path.dirname(cppFile));
 		await expect(ZigServer.root(zigFile)).resolves.toBe(path.dirname(zigFile));
@@ -405,6 +408,9 @@ describe("lsp server policy", () => {
 		);
 		await expect(GleamServer.root(gleamFile)).resolves.toBe(
 			path.dirname(gleamFile),
+		);
+		await expect(TinymistServer.root(typstFile)).resolves.toBe(
+			path.dirname(typstFile),
 		);
 	});
 

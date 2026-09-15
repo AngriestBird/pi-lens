@@ -70,10 +70,13 @@ on:
       # not just transitively through the `prepare` lifecycle script.
       - "scripts/download-grammars.js"
       - ".github/workflows/install-smoke.yml"
-  # PR-gating (#2613): only the host-range-smoke job below runs on
-  # pull_request (guarded by `if: github.event_name != 'pull_request'` on
-  # every pre-existing job) -- the full os x pm x pi-install matrices stay
-  # push/nightly/dispatch-only, unchanged from before this lane existed.
+  # PR-gating (#2613): host-range-smoke runs on pull_request, and (#3043)
+  # ONE pi-load cell (ubuntu-latest x pnpm-global, narrowed by that job's
+  # matrix expressions) -- because the lane a change edits must be a lane
+  # some pre-merge run can execute. `smoke` and `mise-repro` remain
+  # push/nightly/dispatch-only via `if: github.event_name != 'pull_request'`,
+  # so an edit to THOSE still needs a `gh workflow run install-smoke.yml
+  # --ref <branch>` before merge (AGENTS.md, "Commands and gates").
   pull_request:
     branches: [master]
     paths: *install-smoke-paths
@@ -288,7 +291,15 @@ jobs:
   # users get) — guards the shipped artifact; the `smoke` job guards current code.
   pi-load:
     name: pi-load · ${{ matrix.os }} · ${{ matrix.pi_install }}
-    if: github.event_name != 'pull_request'
+    # #3043: this job carried `if: github.event_name != 'pull_request'`, so
+    # #3033 -- which edited the pnpm-global arm below and nothing else that
+    # runs on a PR -- shipped to master with NO lane able to execute it, and
+    # broke six matrix cells on every master push for a day. PR-time this job
+    # now runs EXACTLY ONE cell (ubuntu-latest x pnpm-global, via the matrix
+    # expressions below); push/nightly/dispatch keep the full 2x4 matrix. The
+    # `os` list stays a literal array so the macOS-reachability sweep in
+    # tests/support/workflow-shell-portability.ts still sees this job as
+    # macOS-capable; the PR-time narrowing is done with `exclude`.
     needs: validate-merge-train-dispatch
     runs-on: ${{ matrix.os }}
     permissions:
@@ -297,7 +308,11 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
-        pi_install: [npm-global, pnpm-global, bun-global, curl]
+        pi_install: ${{ github.event_name == 'pull_request' && fromJSON('["pnpm-global"]') || fromJSON('["npm-global", "pnpm-global", "bun-global", "curl"]') }}
+        # NOTE: no space after the JSON colon -- a plain YAML scalar may not
+        # contain ": ", so `{"os": "macos-latest"}` makes this whole file
+        # unparseable (every tests/config workflow test yaml.loads it).
+        exclude: ${{ github.event_name == 'pull_request' && fromJSON('[{"os":"macos-latest"}]') || fromJSON('[]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7 # for the RPC driver
         with:
@@ -361,15 +376,24 @@ jobs:
               echo "$(npm prefix -g)/bin" >> "$GITHUB_PATH"
               echo "NPMCMD=npm" >> "$GITHUB_ENV" ;;
             pnpm-global)
-              # pnpm refuses `add -g` unless the global bin dir is ON PATH *now*
-              # (GITHUB_PATH only affects later steps), so export it here too.
-              export PNPM_HOME="$HOME/.pnpm-global"; mkdir -p "$PNPM_HOME"
-              export PATH="$PNPM_HOME:$PATH"
-              pnpm config set --global global-bin-dir "$PNPM_HOME"
+              # pnpm refuses ANY --global command unless the global bin dir is
+              # ON PATH *now* (GITHUB_PATH only affects later steps), so export
+              # it here too. That directory is "$PNPM_HOME/bin", NOT $PNPM_HOME:
+              # pnpm 11 resolves it as `globalBinDir ?? join(pnpmHomeDir,'bin')`
+              # with pnpmHomeDir = $PNPM_HOME (pnpm/config/reader,
+              # checkGlobalBinDir). #3043: putting bare $PNPM_HOME on PATH
+              # failed every pnpm-global cell with GLOBAL_BIN_DIR_NOT_IN_PATH
+              # ("The configured global bin directory .../bin is not in PATH").
+              # The --global write is what keeps LATER steps (which have no
+              # PNPM_HOME of ours -- pnpm/action-setup owns that variable)
+              # resolving the same, GITHUB_PATH-exported directory.
+              export PNPM_HOME="$HOME/.pnpm-global"; mkdir -p "$PNPM_HOME/bin"
+              export PATH="$PNPM_HOME/bin:$PATH"
+              pnpm config set --global global-bin-dir "$PNPM_HOME/bin"
               # --ignore-scripts: pi's own lifecycle scripts aren't needed for
               # this smoke test (same as the npm-global case above).
               pnpm add -g --ignore-scripts "$PKG" || echo "::notice::pnpm add -g exit $? (blocked scripts?)"
-              echo "$PNPM_HOME" >> "$GITHUB_PATH"
+              echo "$PNPM_HOME/bin" >> "$GITHUB_PATH"
               echo "NPMCMD=pnpm" >> "$GITHUB_ENV" ;;
             bun-global)
               bun add -g "$PKG" || echo "::notice::bun blocked scripts (expected)"
@@ -535,12 +559,16 @@ jobs:
         run: |
           set -uxo pipefail
           # Keep pnpm's global setup outside the checkout's npm project config.
+          # The global bin dir pnpm 11 resolves is "$PNPM_HOME/bin", and pnpm
+          # refuses any --global command unless THAT directory is already on
+          # PATH (#3043 -- bare $PNPM_HOME failed with
+          # GLOBAL_BIN_DIR_NOT_IN_PATH before the config could be written).
           export PNPM_HOME="$HOME/.pnpm-global"
-          mkdir -p "$PNPM_HOME"
-          export PATH="$PNPM_HOME:$PATH"
-          pnpm config set --global global-bin-dir "$PNPM_HOME"
+          mkdir -p "$PNPM_HOME/bin"
+          export PATH="$PNPM_HOME/bin:$PATH"
+          pnpm config set --global global-bin-dir "$PNPM_HOME/bin"
           echo "PNPM_HOME=$PNPM_HOME" >> "$GITHUB_ENV"
-          echo "$PNPM_HOME" >> "$GITHUB_PATH"
+          echo "$PNPM_HOME/bin" >> "$GITHUB_PATH"
 
       - name: Install pi (${{ matrix.pi_via }})
         shell: bash
