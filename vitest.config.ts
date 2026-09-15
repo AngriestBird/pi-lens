@@ -306,7 +306,10 @@ const lspSpawnHeavyInclude = [
 
 // Real pi RPC sessions execute the built extension and a real host tool. Keep
 // this admission outside the default fork storm: each scenario has a 60 s
-// wall budget and one child process owns the fixture project.
+// wall budget, and a child owns its fixture project unless the test supplied
+// one (`withRealPi({ project })`, #2154) — the two-live-sessions case, where
+// two children deliberately share one project root and one PI_LENS_HOME and
+// the TEST owns the tree's lifetime.
 export const realHarnessInclude = [
 	"tests/real-harness/fixture-shape.test.ts",
 	"tests/real-harness/scenario-1.test.ts",
