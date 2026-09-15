@@ -64,6 +64,7 @@ describe("tool-policy", () => {
 		expect(getSmartDefaultFormatterName("/tmp/file.css")).toBe("biome");
 		expect(getSmartDefaultFormatterName("/tmp/file.less")).toBe("prettier");
 		expect(getSmartDefaultFormatterName("/tmp/file.gleam")).toBe("gleam");
+		expect(getSmartDefaultFormatterName("/tmp/file.typc")).toBe("typstyle");
 		expect(getSmartDefaultFormatterName("/tmp/file.go")).toBe("gofmt");
 		expect(getSmartDefaultFormatterName("/tmp/file.rs")).toBe("rustfmt");
 		expect(getSmartDefaultFormatterName("/tmp/file.sh")).toBe("shfmt");
@@ -184,6 +185,12 @@ describe("tool-policy", () => {
 		expect(getFormatterPolicyForFile("/tmp/file.gleam")).toMatchObject({
 			defaultFormatter: "gleam",
 			defaultWhenUnconfigured: true,
+		});
+		expect(getFormatterPolicyForFile("/tmp/file.typc")).toMatchObject({
+			formatterNames: ["typstyle"],
+			defaultFormatter: "typstyle",
+			defaultWhenUnconfigured: true,
+			gate: "smart-default",
 		});
 		expect(getFormatterPolicyForFile("/tmp/file.cs")).toMatchObject({
 			defaultFormatter: "csharpier",

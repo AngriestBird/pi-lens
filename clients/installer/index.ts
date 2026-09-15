@@ -493,7 +493,6 @@ const MANAGED_GITHUB_FORMATTERS = [
 			},
 		}),
 		kind: "binary",
-		binaryInArchive: "typstyle",
 	},
 	{
 		id: "stylua",

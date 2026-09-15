@@ -397,6 +397,15 @@ const FORMATTER_POLICY_BY_EXTENSION = new Map<string, FormatterPolicy>([
 		},
 	],
 	[
+		".typc",
+		{
+			formatterNames: ["typstyle"],
+			defaultFormatter: "typstyle",
+			defaultWhenUnconfigured: true,
+			gate: "smart-default",
+		},
+	],
+	[
 		".c",
 		{
 			formatterNames: ["clang-format"],

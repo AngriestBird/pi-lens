@@ -1425,7 +1425,7 @@ export const gleamFormatter: FormatterInfo = {
 export const typstyleFormatter: FormatterInfo = {
 	name: "typstyle",
 	command: ["typstyle", "-i", "$FILE"],
-	extensions: [".typ"],
+	extensions: [".typ", ".typc"],
 	async resolveCommand(filePath) {
 		const inPath = await which("typstyle");
 		if (inPath) return [inPath, "-i", filePath];

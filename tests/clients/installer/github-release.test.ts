@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
 	GITHUB_TOOLS,
 	GitHubToolId,
+	TOOLS,
 	resolveGitHubAssetLauncher,
 } from "../../../clients/installer/index.js";
 
@@ -215,6 +216,22 @@ describe("GitHub release asset selection", () => {
 				await import("../../../clients/installer/index.js");
 			expect(resolveGitHubAsset("terragrunt", platform, arch)).toBe(expected);
 		});
+	});
+
+	it("treats typstyle release assets as bare binaries", async () => {
+		const { resolveGitHubArchiveBinaryCandidates } =
+			await import("../../../clients/installer/index.js");
+		// Prevent recurrence of #3037: typstyle release assets are bare binaries,
+		// so the registry must not reintroduce a misleading archive member name.
+		const typstyle = TOOLS.find((tool) => tool.id === "typstyle");
+		expect(typstyle?.github?.binaryInArchive).toBeUndefined();
+		expect(
+			resolveGitHubArchiveBinaryCandidates(
+				"typstyle",
+				"linux",
+				"typstyle-x86_64-unknown-linux-gnu",
+			),
+		).toEqual(["typstyle"]);
 	});
 
 	describe("windows archive binary names", () => {
