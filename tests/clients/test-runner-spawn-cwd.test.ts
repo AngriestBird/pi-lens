@@ -357,3 +357,86 @@ describe("#2871 the test-runner child's cwd comes from resolveToolCwd", () => {
 		expect(result.failures).toEqual([]);
 	});
 });
+
+describe("#2944 every runner's spawn-marker set names the build its command runs", () => {
+	// Recurrence this file prevents (#2944): `RUNNERS.maven.spawnCwdMarkers`
+	// was `["mvnw", "mvnw.cmd"]` while `RUNNERS.maven.command` is `mvn` — the
+	// cwd anchor was a proxy for the wrapper, not the module. A Maven project
+	// without the wrapper found NO marker at all, so the seam fell through to
+	// the dispatch root instead of the module's `pom.xml`. Measured on the
+	// recurrence state with the real seam and a root `pom.xml` + nested module
+	// `pom.xml`:
+	//
+	//   effective rootMarkers = ["mvnw","mvnw.cmd"]
+	//   resolved spawn cwd    = <dispatch root>
+	//   anchoring marker      = undefined
+	//
+	// The derived contract over the whole table: the child runs at the
+	// nearest directory carrying an effective marker, so that marker set must
+	// name a file that DEFINES the build the command runs — either one of the
+	// entry's own `configFiles` (the manifests detection itself accepts) or
+	// the launcher script the command literally invokes (`./gradlew` ENOENTs
+	// without it in cwd, so the wrapper IS the build definition for that
+	// child). Any other override re-introduces #2944: a marker the command
+	// never uses, anchoring wrapper-less projects on the dispatch root.
+	it("anchors every runner on one of its own manifests or the launcher its command invokes", () => {
+		const violations: string[] = [];
+		for (const [name, config] of Object.entries(RUNNERS)) {
+			const markers = config.spawnCwdMarkers ?? config.configFiles;
+			const manifestAnchored = markers.some((marker) =>
+				config.configFiles.includes(marker),
+			);
+			const launcherAnchored = markers.some((marker) =>
+				config.command.includes(marker),
+			);
+			if (!manifestAnchored && !launcherAnchored) {
+				violations.push(`${name}: ${markers.join(", ")}`);
+			}
+		}
+		expect(violations).toEqual([]);
+	});
+
+	it("keeps the gradle child launcher-anchored, not manifest-anchored", () => {
+		// The escape the derived test allows, pinned in its only legitimate
+		// current form: gradle's command is the literal `./gradlew`, so a
+		// manifest-only anchor would spawn `./gradlew ENOENT` in a module
+		// carrying `build.gradle.kts` but no wrapper. If gradle ever drops
+		// its wrapper markers this fails, and so does the existing
+		// "keeps a wrapper-launched Gradle build at the directory that owns
+		// the wrapper" case above — the escape must stay load-bearing.
+		const markers =
+			RUNNERS.gradle.spawnCwdMarkers ?? RUNNERS.gradle.configFiles;
+		expect(
+			markers.some((marker) => RUNNERS.gradle.command.includes(marker)),
+		).toBe(true);
+	});
+
+	it("anchors the maven child on the module's pom.xml, not the dispatch root, when no wrapper exists", async () => {
+		// The defect's own shape, end to end through the real `runTestFileAsync`
+		// (mocked only at the process boundary): a wrapper-less multi-module
+		// Maven tree must anchor the child on the module the test file belongs
+		// to, not on the dispatch root.
+		const root = makeRoot("pi-lens-2944-maven-");
+		write(root, "pom.xml", "<project/>\n");
+		const module = path.join(root, "mod");
+		write(root, "mod/pom.xml", "<project/>\n");
+		const testFile = write(
+			root,
+			"mod/src/test/java/com/x/FooTest.java",
+			"class FooTest {}\n",
+		);
+
+		await new TestRunnerClient(false).runTestFileAsync(
+			testFile,
+			root,
+			"maven",
+			RUNNERS.maven,
+		);
+
+		expect(spawned).toHaveLength(1);
+		expect(spawned[0].cwd).toBe(module);
+		// The invariant, not just the path: the child runs where its own
+		// build file is.
+		expect(fs.existsSync(path.join(spawned[0].cwd!, "pom.xml"))).toBe(true);
+	});
+});
