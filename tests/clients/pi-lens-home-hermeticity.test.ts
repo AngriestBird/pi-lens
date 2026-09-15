@@ -25,7 +25,6 @@ import {
 	relativePosix,
 	stripSource,
 } from "../support/sweep-kit.js";
-import { execFileSync as gitExecFileSync } from "../support/git-fixture-env.js";
 import { removeTempDirSync } from "./test-utils.js";
 
 const realGlobalDir = path.join(os.homedir(), ".pi-lens");
@@ -237,20 +236,31 @@ describe("clients/ best-effort getGlobalPiLensDir() writers stay a named, regist
 // for an unrelated, non-racy log file). The population must be the functions
 // that actually perform the best-effort-locked I/O.
 
-/** Every top-level `function NAME(...) { ... }` in `strippedCode` (comments
- *  and strings already blanked, so brace-counting only ever sees REAL code
- *  braces — a template-literal `${...}` interpolation's own braces are left
- *  unblanked by `stripSource` for exactly this reason), keyed by name to its
- *  body text including the braces. Assumes column-0 top-level declarations,
- *  same as sweep-kit's `findEnclosingSymbol` already does for this repo. */
+/** Every top-level `function NAME(...) { ... }` DECLARATION, or `const/let
+ *  NAME = (async )?(...) => { ... }` / `const/let NAME = (async )?function
+ *  (...) { ... }` ASSIGNMENT, in `strippedCode` (comments and strings
+ *  already blanked, so brace-counting only ever sees REAL code braces — a
+ *  template-literal `${...}` interpolation's own braces are left unblanked
+ *  by `stripSource` for exactly this reason), keyed by name to its body text
+ *  including the braces. Assumes column-0 top-level declarations, same as
+ *  sweep-kit's `findEnclosingSymbol` already does for this repo.
+ *
+ *  Review round 2, F5: the arrow/function-expression form was previously
+ *  unmatched, so a hazardous helper written as `export const sweepX = async
+ *  (...) => { ...withInstanceRegistryLock... }` in a registered producer
+ *  would never enter `hazardousExportedNames` at all — latent today (zero
+ *  such exports in the two current producers) but silent the moment one is
+ *  added. Guarded to only bound BLOCK bodies (`=> {`): an expression-bodied
+ *  arrow (`=> foo()`) has no braces to balance, and reusing the first brace
+ *  found LATER in the file would silently attribute an unrelated function's
+ *  body to this declaration — named limit, not attempted here. */
 function topLevelFunctionBodies(strippedCode: string): Map<string, string> {
 	const bodies = new Map<string, string>();
-	const pattern =
-		/^(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s*\*?\s+([A-Za-z_$][\w$]*)\s*\(/gm;
-	let match: RegExpExecArray | null;
-	while ((match = pattern.exec(strippedCode))) {
-		const braceStart = strippedCode.indexOf("{", match.index + match[0].length);
-		if (braceStart < 0) continue;
+
+	/** Find the body's own `{` at `braceStart`, balance it, and record the
+	 *  name — shared tail for both declaration shapes below. */
+	const record = (name: string, braceStart: number): void => {
+		if (strippedCode[braceStart] !== "{") return;
 		let depth = 0;
 		let end = -1;
 		for (let i = braceStart; i < strippedCode.length; i++) {
@@ -263,9 +273,41 @@ function topLevelFunctionBodies(strippedCode: string): Map<string, string> {
 				}
 			}
 		}
-		if (end < 0) continue;
-		bodies.set(match[1], strippedCode.slice(braceStart, end + 1));
+		if (end < 0) return;
+		bodies.set(name, strippedCode.slice(braceStart, end + 1));
+	};
+
+	// `function NAME(...) { ... }`: the match ends at the parameter list's
+	// OPENING paren only (params and a return-type annotation still sit
+	// between it and the body), so — as before F5 — the body's `{` is
+	// whichever one comes NEXT, found by a plain forward search.
+	const functionPattern =
+		/^(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s*\*?\s+([A-Za-z_$][\w$]*)\s*\(/gm;
+	let functionMatch: RegExpExecArray | null;
+	while ((functionMatch = functionPattern.exec(strippedCode))) {
+		const braceStart = strippedCode.indexOf(
+			"{",
+			functionMatch.index + functionMatch[0].length,
+		);
+		if (braceStart >= 0) record(functionMatch[1], braceStart);
 	}
+
+	// `const/let NAME = (async )?(...) => { ... }` or `= (async )?function
+	// (...) { ... }` (F5): the match ends right at `=>`/the parameter list's
+	// CLOSING paren, so — unlike the declaration form above — the very next
+	// non-whitespace character MUST be the body's own `{`, or this is an
+	// expression-bodied arrow (`=> foo()`) with no braces to balance; reusing
+	// a LATER, unrelated brace would silently corrupt this entry (see the
+	// doc above `topLevelFunctionBodies`).
+	const arrowOrFunctionExprPattern =
+		/^(?:export\s+)?(?:const|let)\s+([A-Za-z_$][\w$]*)\s*(?::[^=\n]+)?=\s*(?:async\s+)?(?:\([^()]*\)\s*=>|[A-Za-z_$][\w$]*\s*=>|function\s*\*?\s*(?:[A-Za-z_$][\w$]*\s*)?\([^()]*\))/gm;
+	let arrowMatch: RegExpExecArray | null;
+	while ((arrowMatch = arrowOrFunctionExprPattern.exec(strippedCode))) {
+		const afterMatch = arrowMatch.index + arrowMatch[0].length;
+		const gapLength = /^\s*/.exec(strippedCode.slice(afterMatch))?.[0].length ?? 0;
+		record(arrowMatch[1], afterMatch + gapLength);
+	}
+
 	return bodies;
 }
 
@@ -301,11 +343,15 @@ function hazardousExportedNames(strippedCode: string): string[] {
 		}
 	}
 	const exported = new Set<string>();
+	// F5: an exported `const`/`let` arrow or function-expression name is an
+	// export too — matched the same way `topLevelFunctionBodies` finds the
+	// declaration itself, so a name that entered `bodies` above can also
+	// enter `exported` here.
 	const exportPattern =
-		/^export\s+(?:default\s+)?(?:async\s+)?function\s*\*?\s+([A-Za-z_$][\w$]*)/gm;
+		/^export\s+(?:default\s+)?(?:async\s+)?function\s*\*?\s+([A-Za-z_$][\w$]*)|^export\s+(?:const|let)\s+([A-Za-z_$][\w$]*)/gm;
 	let exportMatch: RegExpExecArray | null;
 	while ((exportMatch = exportPattern.exec(strippedCode))) {
-		exported.add(exportMatch[1]);
+		exported.add(exportMatch[1] ?? exportMatch[2]);
 	}
 	return [...hazardous].filter((name) => exported.has(name)).sort();
 }
@@ -416,8 +462,14 @@ function touchesGlobalDirRegistry(
 		.sort();
 	if (matchedSymbols.length > 0) return { reason: "symbol", matchedSymbols };
 
+	// Review round 2, F3: matches the filename ANYWHERE in code/string text,
+	// not only as a complete `"filename"` literal — a template-literal path
+	// (`` `${home}/instances.json` ``) never produces that exact quoted
+	// substring (the filename sits after an interpolation, inside backticks,
+	// with no quotes of its own around just the filename), so the stricter
+	// form silently missed it.
 	const namesTargetFile = TARGET_FILENAMES.some((filename) =>
-		commentsBlankedStringsKept.includes(`"${filename}"`),
+		commentsBlankedStringsKept.includes(filename),
 	);
 	if (!namesTargetFile) return undefined;
 	const referencesHome =
@@ -434,7 +486,19 @@ function touchesGlobalDirRegistry(
  *  `tests/index-vanished-instance-wiring.test.ts` itself. Matches
  *  `process.env.PI_LENS_HOME = x` (own-process pin) and an object literal's
  *  `PI_LENS_HOME: x` key (a spawned child's env, e.g.
- *  `tests/clients/instance-registry-race.test.ts`) without matching `===`. */
+ *  `tests/clients/instance-registry-race.test.ts`) without matching `===`.
+ *
+ *  MUST be evaluated over STRINGS-BLANKED text (review round 2, F2): a real
+ *  pin is CODE — `process.env.PI_LENS_HOME =` and an object literal's
+ *  `PI_LENS_HOME:` key both survive comment-and-string blanking exactly like
+ *  any other statement — so testing it against strings-KEPT text let a
+ *  documentation STRING merely narrating the pin (`"process.env.PI_LENS_HOME
+ *  = testRegistryHome"`, `tests/scripts/check-pr-body.test.ts`'s own fixture
+ *  data for a DIFFERENT check) falsely satisfy this predicate for a
+ *  genuinely-unpinned file that happens to carry that string. Kept as a
+ *  separate constant from `TARGET_FILENAMES` below on purpose — that
+ *  evidence genuinely IS a string literal (a filename), so it alone still
+ *  needs the strings-KEPT pass. */
 const PI_LENS_HOME_ASSIGNMENT = /\bPI_LENS_HOME\s*(?:=(?!=)|:)/;
 
 /** The full, paren-matched text of a `vi.mock("...basename", factory)` /
@@ -466,17 +530,56 @@ function findMockCallText(
 	return commentsBlankedStringsKept.slice(openParenIndex, end + 1);
 }
 
+/** The factory's own "give me the real module" hook parameter name
+ *  (conventionally `importOriginal`/`importActual`, but vitest never
+ *  requires either spelling), plus every local name bound to its awaited
+ *  result (`const actual = await importOriginal();`, `const orig = await
+ *  importActual();`, ...). Review round 2, F4: a passthrough is not always
+ *  spelled `actual` — generalizing to WHATEVER name the factory itself
+ *  chose is what makes the guard below survive a rename. */
+function realModuleAliases(callText: string): string[] {
+	// The factory is `vi.mock`'s SECOND argument — always comma-led here,
+	// never immediately after the call's own opening paren (that position is
+	// the specifier string). `,\s*` anchors to that comma rather than any
+	// open paren, which the specifier's own parenthesis-free text cannot
+	// satisfy.
+	const paramMatch = /,\s*(?:async\s*)?\(\s*([A-Za-z_$][\w$]*)\s*\)\s*=>/.exec(
+		callText,
+	);
+	const param = paramMatch?.[1];
+	if (!param) return [];
+	const aliases = new Set<string>([param]);
+	// `(?:<[^>]*>)?` tolerates an explicit generic type argument between the
+	// call and its parens (`await importActual<typeof import("...")>()`,
+	// this repo's own convention) without requiring nested-`>` handling —
+	// good enough for the shapes this repo actually writes.
+	const aliasPattern = new RegExp(
+		`\\b([A-Za-z_$][\\w$]*)\\s*=\\s*await\\s+${escapeRegExp(param)}\\s*(?:<[^>]*>)?\\s*\\(`,
+		"g",
+	);
+	let match: RegExpExecArray | null;
+	while ((match = aliasPattern.exec(callText))) aliases.add(match[1]);
+	return [...aliases];
+}
+
 /** True when the file mocks `basename` with a factory that OVERRIDES
- *  `symbolName` — names it as an object-literal key AND does not fall
- *  through to `actual.<symbolName>(` anywhere inside that mock call.
+ *  `symbolName` — names it as an object-literal key AND does not reference
+ *  the real module (the factory's import-original parameter, or any local
+ *  bound to its awaited result — see `realModuleAliases`) for that same
+ *  symbol name anywhere inside the mock call.
  *  `tests/clients/instance-reaper-registry-scan-escalation.test.ts`'s
- *  `readInstanceRegistry: async () => h.state.registry` qualifies (no
- *  `actual` at all); `tests/index-vanished-instance-wiring.test.ts`'s
+ *  `readInstanceRegistry: async () => h.state.registry` qualifies (no real
+ *  module reference at all); `tests/index-vanished-instance-wiring.test.ts`'s
  *  `sweepOrphans: async () => { await actual.sweepOrphans(); ... }` does
  *  NOT — it names the key but still calls straight through to the real,
  *  unpinned implementation, which is exactly why this repo's ONE real
  *  member of this sweep's population is caught rather than waved through by
- *  its incidental `vi.mock("../clients/instance-reaper.js", ...)`. */
+ *  its incidental `vi.mock("../clients/instance-reaper.js", ...)`. Review
+ *  round 2, F4: also refuses a bare REFERENCE passthrough with no trailing
+ *  call (`getGlobalPiLensDir: actual.getGlobalPiLensDir`) and a renamed
+ *  binding (`const orig = await importOriginal(); ... orig.symbolName()`) —
+ *  neither is a real override, both used to slip through the old
+ *  `actual\.symbolName\(` — literal-only check. */
 function mockOverridesSymbol(
 	commentsBlankedStringsKept: string,
 	basename: string,
@@ -487,8 +590,11 @@ function mockOverridesSymbol(
 	if (!new RegExp(`\\b${escapeRegExp(symbolName)}\\s*:`).test(callText)) {
 		return false;
 	}
-	return !new RegExp(`\\bactual\\.${escapeRegExp(symbolName)}\\s*\\(`).test(
-		callText,
+	const aliases = realModuleAliases(callText);
+	return !aliases.some((alias) =>
+		new RegExp(`\\b${escapeRegExp(alias)}\\.${escapeRegExp(symbolName)}\\b`).test(
+			callText,
+		),
 	);
 }
 
@@ -496,12 +602,19 @@ function mockOverridesSymbol(
  *  `file-utils.js`'s `getGlobalPiLensDir` (the universal isolator — every
  *  hazardous symbol's target path resolves through it), or — only when
  *  EVERY matched symbol is read-only — overrides `instance-registry.js`'s
- *  `readInstanceRegistry`. */
+ *  `readInstanceRegistry`.
+ *
+ *  Takes BOTH text variants (review round 2, F2): the `PI_LENS_HOME` pin
+ *  check runs over `stringsBlankedCode` (a real pin is code, not a string —
+ *  see `PI_LENS_HOME_ASSIGNMENT`'s own doc), while the mock-override checks
+ *  still need `commentsBlankedStringsKept` (a `vi.mock` specifier and a
+ *  passthrough alias name are read as-is, not blanked). */
 function isIsolated(
 	commentsBlankedStringsKept: string,
+	stringsBlankedCode: string,
 	matchedSymbols: readonly string[],
 ): boolean {
-	if (PI_LENS_HOME_ASSIGNMENT.test(commentsBlankedStringsKept)) return true;
+	if (PI_LENS_HOME_ASSIGNMENT.test(stringsBlankedCode)) return true;
 	if (
 		mockOverridesSymbol(
 			commentsBlankedStringsKept,
@@ -537,17 +650,20 @@ const REGISTRY_ISOLATION_EXEMPTIONS: Readonly<Record<string, string>> = {};
 
 /** The exact pre-#3048 content of `tests/index-vanished-instance-wiring.
  *  test.ts` — #3042's own recurrence, the shape this whole sweep exists to
- *  catch. `20896a56b` is the last commit before PR #3048's fix landed (cited
- *  in that PR's own body). Fetched once via the repo's git-fixture wrapper
- *  (`tests/config/git-fixture-governance.test.ts` requires every direct Git
- *  spawn under tests/ to route through it) rather than hand-copied, so this
- *  proof is against the REAL historical file, not a paraphrase of it. */
-// flake-shape: real-process-spawn — the pre-#3048 recurrence proof reads the
-// real historical file via git show, not a hand-copied stand-in
-const PRE_3048_VANISHED_WIRING_CONTENT = gitExecFileSync(
-	"git",
-	["show", "20896a56b:tests/index-vanished-instance-wiring.test.ts"],
-	{ cwd: REPO_ROOT, encoding: "utf8" },
+ *  catch. Committed verbatim as a static fixture
+ *  (`tests/fixtures/pre-3048-vanished-instance-wiring.txt`, copied from full
+ *  commit `20896a56bd4c64d01026ba9e919b40ce1fa7dfa3`, the last commit before
+ *  PR #3048's fix landed) rather than fetched at test time via `git show`:
+ *  review round 2, F1 — `ci.yml`'s Unit tests job checks out at the
+ *  default shallow depth (no `fetch-depth` override, confirmed at
+ *  `.github/workflows/ci.yml`'s `test:` job), so that historical commit is
+ *  not reachable there and `git show` would fail every CI run, collecting
+ *  zero tests from this whole file. A committed fixture is also the
+ *  minimalism answer: no real spawn, no flake-shape admission, no
+ *  wall-clock-budget membership to maintain for a file that never changes. */
+const PRE_3048_VANISHED_WIRING_CONTENT = fs.readFileSync(
+	path.join(TESTS_ROOT, "fixtures", "pre-3048-vanished-instance-wiring.txt"),
+	"utf8",
 );
 
 describe("no tests/**/*.test.ts file drives a producer's registry against the run-shared PI_LENS_HOME (#3042 recurrence)", () => {
@@ -564,7 +680,9 @@ describe("no tests/**/*.test.ts file drives a producer's registry against the ru
 				stringsBlankedCode,
 			);
 			if (!touch) continue;
-			if (isIsolated(commentsBlankedStringsKept, touch.matchedSymbols))
+			if (
+				isIsolated(commentsBlankedStringsKept, stringsBlankedCode, touch.matchedSymbols)
+			)
 				continue;
 			flagged.push(relativePosix(TESTS_ROOT, file));
 		}
@@ -635,21 +753,24 @@ describe("no tests/**/*.test.ts file drives a producer's registry against the ru
 			PRE_3048_VANISHED_WIRING_CONTENT,
 			{ strings: "keep" },
 		);
+		const stringsBlankedCode = stripSource(PRE_3048_VANISHED_WIRING_CONTENT, {
+			strings: "blank",
+		});
 
-		expect(isIsolated(commentsBlankedStringsKept, ["sweepOrphans"])).toBe(
-			false,
-		);
+		expect(
+			isIsolated(commentsBlankedStringsKept, stringsBlankedCode, [
+				"sweepOrphans",
+			]),
+		).toBe(false);
 
 		// MUTATION: drop the assignment/key requirement, match the bare
 		// identifier instead — the naive version a first draft would reach for.
-		const bareReferenceMatches = /\bPI_LENS_HOME\b/.test(
-			commentsBlankedStringsKept,
-		);
+		const bareReferenceMatches = /\bPI_LENS_HOME\b/.test(stringsBlankedCode);
 		expect(bareReferenceMatches).toBe(true); // the identifier IS present...
 		// ...so a bare-reference check would WRONGLY call this file isolated,
 		// reintroducing exactly the recurrence #3042 shipped.
 		expect(bareReferenceMatches).not.toBe(
-			PI_LENS_HOME_ASSIGNMENT.test(commentsBlankedStringsKept),
+			PI_LENS_HOME_ASSIGNMENT.test(stringsBlankedCode),
 		);
 	});
 
@@ -714,9 +835,13 @@ describe("no tests/**/*.test.ts file drives a producer's registry against the ru
 				"sweepOrphans",
 			),
 		).toBe(false);
-		expect(PI_LENS_HOME_ASSIGNMENT.test(commentsBlankedStringsKept)).toBe(true);
+		expect(PI_LENS_HOME_ASSIGNMENT.test(stringsBlankedCode)).toBe(true);
 		expect(
-			isIsolated(commentsBlankedStringsKept, touch?.matchedSymbols ?? []),
+			isIsolated(
+				commentsBlankedStringsKept,
+				stringsBlankedCode,
+				touch?.matchedSymbols ?? [],
+			),
 		).toBe(true);
 	});
 
@@ -735,7 +860,9 @@ describe("no tests/**/*.test.ts file drives a producer's registry against the ru
 		});
 		const stringsBlankedCode = stripSource(commentOnly, { strings: "blank" });
 
-		expect(isIsolated(commentsBlankedStringsKept, [])).toBe(false);
+		expect(isIsolated(commentsBlankedStringsKept, stringsBlankedCode, [])).toBe(
+			false,
+		);
 		expect(
 			touchesGlobalDirRegistry(commentsBlankedStringsKept, stringsBlankedCode),
 		).toBeUndefined();
