@@ -190,18 +190,30 @@ const ROWS: Array<{
 	},
 	{
 		// Recurrence this pins (#3039): a `/*` that follows `//` on the same line
-		// is inside a line comment, not an opener.
-		id: "R21b /* inside a line comment",
+		// is inside a line comment, not an opener. A later block comment closes,
+		// so a false region opened here swallows the file's whole 4-space body
+		// instead of being restored as an unterminated opener (R21's path).
+		id: "R21b /* inside a line comment, with a later block comment",
 		content:
-			"// matches /* here\nfunction f() {\n    go();\n    if (a) {\n        b();\n    }\n}\n",
+			"// matches /* here\nfunction f() {\n    go();\n    if (a) {\n        b();\n    }\n}\n/**\n * trailing doc\n */\nexport const x = 1;\n",
 		expected: { style: "space", width: 4 },
 	},
 	{
-		// The converse of R21b: a `//` inside a banner (a URL) must not stop the
-		// line from closing its own block comment.
-		id: "R21c one-line block comment containing a URL",
+		// Recurrence this pins (#3039): a block comment that opens and closes on
+		// one line opens no region. The later block comment supplies the `*/`
+		// that a false region would close on.
+		id: "R21c one-line block comment, with a later block comment",
 		content:
-			"/* see https://example.com/spec */\nfunction f() {\n    go();\n    if (a) {\n        b();\n    }\n}\n",
+			"/* banner */\nfunction f() {\n    go();\n    if (a) {\n        b();\n    }\n}\n/**\n * trailing doc\n */\nexport const x = 1;\n",
+		expected: { style: "space", width: 4 },
+	},
+	{
+		// The converse of R21b: a `//` that follows the `/*` on the same line is
+		// a URL inside the banner, not a line comment, so the banner still opens
+		// its region and its ` * ` lines stay out of the evidence.
+		id: "R21d multi-line banner whose opener carries a URL",
+		content:
+			"/* see https://example.com/spec\n * details\n */\nfunction f() {\n    go();\n    if (a) {\n        b();\n    }\n}\n",
 		expected: { style: "space", width: 4 },
 	},
 	{
