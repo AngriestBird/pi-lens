@@ -127,3 +127,110 @@ describe("retargetReplacementIndentation", () => {
 		).toBeUndefined();
 	});
 });
+
+// ── #3052: a block-comment continuation's alignment must not become the ────
+// base nesting unit (AGENTS.md defect 49, third member — a shallowest leading
+// run can be alignment, not one nesting unit). Each row's oldText/corrected
+// pair gives the comment continuation and the code line DIFFERENT correction
+// ratios so a base-unit mix-up produces a visibly wrong (not coincidentally
+// right) deeper-nesting value.
+describe("retargetReplacementIndentation — block-comment interior excluded from the base unit (#3052)", () => {
+	it("bases a 4-space file's deeper nesting on the code line, not the JSDoc's 1-space alignment", () => {
+		const oldText = "/**\n * doc\n */\nfunction f() {\n    go();\n}";
+		// Comment ratio 1->2; code ratio 4->3 (deliberately different so a
+		// comment-derived base would silently mis-scale, not coincide).
+		const corrected = "/**\n  * doc\n  */\nfunction f() {\n   go();\n}";
+		// "b();" nests one level deeper than anything in oldText — its indent
+		// must extend from the code's own 4-space unit (4->3), not the
+		// comment's 1-space one (1->2).
+		const newText = "function g() {\n    a();\n        b();\n}";
+		expect(retargetReplacementIndentation(newText, oldText, corrected)).toBe(
+			"function g() {\n   a();\n      b();\n}",
+		);
+	});
+
+	it("bases a 2-space file's deeper nesting on the code line, not the JSDoc's 1-space alignment", () => {
+		const oldText = "/**\n * doc\n */\nfunction f() {\n  go();\n}";
+		// Comment ratio 1->3; code ratio 2->4.
+		const corrected = "/**\n   * doc\n   */\nfunction f() {\n    go();\n}";
+		const newText = "function g() {\n  a();\n      b();\n}";
+		expect(retargetReplacementIndentation(newText, oldText, corrected)).toBe(
+			"function g() {\n    a();\n            b();\n}",
+		);
+	});
+
+	it("keeps a tab file's deeper nesting in tabs instead of mixing in the comment's space alignment", () => {
+		// The model guessed 2-space alignment for the comment continuation and
+		// 4-space indentation for the code; the real file uses 1-space comment
+		// alignment (typical even in tab files) and tabs for code.
+		const oldText = "/**\n  * doc\n  */\nfunction f() {\n    go();\n}";
+		const corrected = "/**\n * doc\n */\nfunction f() {\n\tgo();\n}";
+		const newText = "function g() {\n    a();\n        b();\n}";
+		// Bug shape: baseFrom picked from the comment ("  " -> " ") would put
+		// literal SPACES into a tab file. Fixed: baseFrom is the code's own
+		// "    " -> "\t" unit, so the deeper line doubles in tabs.
+		expect(retargetReplacementIndentation(newText, oldText, corrected)).toBe(
+			"function g() {\n\ta();\n\t\tb();\n}",
+		);
+	});
+
+	it("does not treat a generator method's leading `*` as a comment opener", () => {
+		// Guards against an over-broad exclusion (any line starting with `*`,
+		// or containing one at all) swallowing ordinary code — `*items()` has
+		// no `/*` anywhere in it. The single-line body is deliberate: with no
+		// sibling line at the same depth, excluding `*items()` would empty the
+		// map entirely (abort to undefined) instead of merely picking a
+		// different base — the sharpest observable signal for this guard.
+		const oldText = "class C {\n  *items() { yield 1; }\n}";
+		const corrected = "class C {\n\t*items() { yield 1; }\n}";
+		const newText = "class D {\n  *values() {\n    yield 2;\n  }\n}";
+		expect(retargetReplacementIndentation(newText, oldText, corrected)).toBe(
+			"class D {\n\t*values() {\n\t\tyield 2;\n\t}\n}",
+		);
+	});
+
+	it("does not treat a C-style pointer dereference's leading `*` as a comment opener", () => {
+		const oldText = "void f() {\n  int *p = &x;\n}";
+		const corrected = "void f() {\n\tint *p = &x;\n}";
+		const newText = "void g() {\n  int *q = &y;\n    int *r = &z;\n}";
+		expect(retargetReplacementIndentation(newText, oldText, corrected)).toBe(
+			"void g() {\n\tint *q = &y;\n\t\tint *r = &z;\n}",
+		);
+	});
+
+	it("keeps lines after an unterminated /* (a comment token inside a string) as structural evidence", () => {
+		// The `/*` here is inside a string literal and never closes anywhere in
+		// oldText — indent-detect's own rule treats those lines as structural
+		// rather than silently swallowing the rest of the file; retarget must
+		// match that rule via the same shared lexer.
+		const oldText = 'const s = "/*";\nfunction f() {\n  go();\n}';
+		const corrected = 'const s = "/*";\nfunction f() {\n\tgo();\n}';
+		const newText = "function g() {\n  a();\n    b();\n}";
+		expect(retargetReplacementIndentation(newText, oldText, corrected)).toBe(
+			"function g() {\n\ta();\n\t\tb();\n}",
+		);
+	});
+
+	it("excludes the comment interior under CRLF line endings too", () => {
+		const oldText = "/**\r\n * doc\r\n */\r\nfunction f() {\r\n    go();\r\n}";
+		const corrected =
+			"/**\r\n  * doc\r\n  */\r\nfunction f() {\r\n   go();\r\n}";
+		const newText = "function g() {\r\n    a();\r\n        b();\r\n}";
+		expect(retargetReplacementIndentation(newText, oldText, corrected)).toBe(
+			"function g() {\r\n   a();\r\n      b();\r\n}",
+		);
+	});
+
+	// Round 2, F1: a comment-interior indent must still resolve by DIRECT
+	// lookup — only its eligibility as the extrapolation BASE unit is
+	// revoked. A replacement that reintroduces the same comment indent (here,
+	// adding another JSDoc) must still retarget instead of aborting.
+	it("still resolves a comment-interior indent by direct lookup when newText reintroduces it (P3)", () => {
+		const oldText = "/**\n * doc\n */\nfunction f() {\n    go();\n}";
+		const corrected = "/**\n  * doc\n  */\nfunction f() {\n   go();\n}";
+		const newText = "/**\n * added doc\n */\nfunction g() {\n    a();\n}";
+		expect(retargetReplacementIndentation(newText, oldText, corrected)).toBe(
+			"/**\n  * added doc\n  */\nfunction g() {\n   a();\n}",
+		);
+	});
+});
