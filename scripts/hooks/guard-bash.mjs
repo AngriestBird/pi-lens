@@ -2,11 +2,12 @@
 /**
  * scripts/hooks/guard-bash.mjs (#2699, refs umbrella #2697)
  *
- * PreToolUse hook for the Bash tool. Mechanically enforces four
+ * PreToolUse hook for the Bash tool. Mechanically enforces five
  * non-negotiables that previously lived only as prose in CLAUDE.md and the
  * fixer/reviewer playbooks -- a fixer ran `git stash` on 2026-09-07 (the
- * #2686 lane) and two review probes wrote into the real `~/.pi-lens` on
- * 2026-09-02 (#2506), both rules a hook can catch that prose could not:
+ * #2686 lane), two review probes wrote into the real `~/.pi-lens` on
+ * 2026-09-02 (#2506), and a fixer pointed TMPDIR at the vitest harness home
+ * on 2026-09-15 (#3026), all rules a hook can catch that prose could not:
  *
  *   - `git stash` in any form (CLAUDE.md non-negotiable)
  *   - `git reset --soft origin/<branch>` / `git reset --hard <anything>`
@@ -17,6 +18,8 @@
  *     or dist/ (not merely a payload that mentions "clients/" in passing --
  *     review round 2 F5) with no PI_LENS_HOME pin (AGENTS.md "Probe
  *     hygiene")
+ *   - `TMPDIR`/`TMP`/`TEMP` aimed at the vitest harness's own home
+ *     (AGENTS.md "Probe hygiene", #3026) -- see {@link classifyTempDirVars}
  *
  * ## Contract source
  *
@@ -126,7 +129,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
-/** @typedef {"stash"|"reset"|"worktreeForce"|"probe"} DenyRule */
+/** @typedef {"stash"|"reset"|"worktreeForce"|"probe"|"tmpdirCollision"} DenyRule */
 
 /** @type {Record<DenyRule, string>} */
 export const RULE_MESSAGES = {
@@ -138,6 +141,8 @@ export const RULE_MESSAGES = {
 		"a HAND-typed `git worktree remove` with two force flags is forbidden (fixer playbook rule) -- use `node scripts/prune-agent-worktrees.mjs` (liveness-checked; it applies the same double force internally once a tree is confirmed dead) for a stuck worktree, or `git worktree unlock` then a single-force remove.",
 	probe:
 		"an unpinned node probe that LOADS runtime code from clients/ or dist/ is forbidden (AGENTS.md Probe hygiene) -- prefix `PI_LENS_HOME=<worktree>/.probe-home`.",
+	tmpdirCollision:
+		"TMPDIR/TMP/TEMP must not point at the vitest harness home (AGENTS.md Probe hygiene) -- tests/support/vitest-setup.ts keeps the real TMPDIR on purpose and mkdtemps PI_LENS_HOME under os.tmpdir(), so a TMPDIR inside `.probe-home` moves the harness home into a git-ignored directory in the worktree and reds unrelated suites (#3026). Pin PI_LENS_HOME/PILENS_DATA_DIR there; give TMPDIR its own directory.",
 };
 
 /**
@@ -821,6 +826,58 @@ function classifyNode(args, env, rawSegment) {
 }
 
 /**
+ * The environment variables Node's `os.tmpdir()` consults. MEASURED, not
+ * assumed -- one child process per variable on node v22.22.1 (this repo's
+ * runtime), Linux: `TMPDIR=/a` -> `/a`, `TMP=/b` -> `/b`, `TEMP=/c` ->
+ * `/c`, all three set -> `/a`, none -> `/tmp`. All three reach the harness,
+ * so the guard covers all three rather than only the one the incident used.
+ */
+const TEMP_DIR_VARS = ["TMPDIR", "TMP", "TEMP"];
+
+/**
+ * The directory name AGENTS.md "Probe hygiene" prescribes for a pinned
+ * `PI_LENS_HOME` (and the {@link RULE_MESSAGES}.probe message hands out).
+ */
+const HARNESS_HOME_SEGMENT = ".probe-home";
+
+/** `$PI_LENS_HOME` / `${PI_LENS_HOME}` -- the same directory under its
+ *  variable spelling, which is what an agent reaches for right after
+ *  reading the `probe` rule's message. */
+const HARNESS_HOME_VARIABLE = /\$\{?PI_LENS_HOME\}?/;
+
+/**
+ * Deny a `TMPDIR`/`TMP`/`TEMP` assignment that aims Node's temp directory
+ * at the vitest harness's own `PI_LENS_HOME` (#3026, 2026-09-15).
+ *
+ * `tests/support/vitest-setup.ts` deliberately keeps the REAL `TMPDIR` and
+ * mkdtemps the per-worker `PI_LENS_HOME` under `os.tmpdir()`. Point
+ * `TMPDIR` at `<worktree>/.probe-home` and that home lands inside the
+ * checkout, in a directory `.gitignore` ignores -- so every suite whose
+ * fixtures live under `os.tmpdir()` is suddenly reading ignored paths. The
+ * #3026 fixer did exactly that and reported "16 suites red on
+ * origin/master"; the tree was green. Measured again on this branch:
+ * `tests/clients/ext-gate-before-ignore.test.ts` is 8/8 green with TMPDIR
+ * elsewhere and 7 failed / 1 passed with `TMPDIR=$PWD/.probe-home`, same
+ * build, same tree.
+ *
+ * Matching is by path SEGMENT ({@link fileArgUnderDir}), never substring,
+ * so `$PWD/.probe-home`, `/abs/.probe-home` and `.probe-home/sub` all
+ * match while `.probe-home-2` does not.
+ *
+ * @param {Record<string, string>} env
+ * @returns {DenyRule | null}
+ */
+function classifyTempDirVars(env) {
+	for (const name of TEMP_DIR_VARS) {
+		const value = env[name];
+		if (value === undefined) continue;
+		if (fileArgUnderDir(value, HARNESS_HOME_SEGMENT)) return "tmpdirCollision";
+		if (HARNESS_HOME_VARIABLE.test(value)) return "tmpdirCollision";
+	}
+	return null;
+}
+
+/**
  * Words that just mean "run the following command", stripped before the
  * command word is identified. `command`/`exec`/`env` came from review
  * round 2 F7; `sudo`/`time` from round 3's V5 (both confirmed against real
@@ -885,9 +942,15 @@ export function classifySegment(rawSegment, sharedEnv = {}) {
 	if (words[0] === "export") {
 		const { env: exported } = stripEnvAssignments(words.slice(1));
 		Object.assign(sharedEnv, exported);
-		return null;
+		return classifyTempDirVars(exported);
 	}
 	const { env: segmentEnv, rest } = stripEnvAssignments(words);
+	// Before the command dispatch: the #3026 incident's own command was
+	// `TMPDIR=$PWD/.probe-home npx vitest run …`, and `npx` is a command this
+	// guard classifies as nothing at all. The assignment is the offence, so
+	// it is judged where it is written, whatever follows it.
+	const tempDirCollision = classifyTempDirVars(segmentEnv);
+	if (tempDirCollision) return tempDirCollision;
 	if (rest.length === 0) {
 		// A standalone (non-exported) `VAR=val` with no command -- lenient:
 		// persist it too (real bash would keep it a local shell variable, not

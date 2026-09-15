@@ -3,6 +3,7 @@ import * as path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
 	assertNonEmptyScan,
+	callSites,
 	codeMatches,
 	stripSource,
 } from "../support/sweep-kit.js";
@@ -40,6 +41,97 @@ const NOT_A_FIXTURE = [
 ] as const;
 
 const REPO_ROOT = path.resolve(__dirname, "../..");
+
+/**
+ * Every callee that can put a `git` process on the end of an argument list:
+ * the raw child_process entry points {@link directGitSpawn} already knows,
+ * plus the three git-fixture-env wrappers a compliant test uses. Anchored so
+ * `spawn` cannot claim `spawnSync`'s call sites (sweep-kit requires the whole
+ * simple name to match).
+ */
+const GIT_SPAWN_CALLEE =
+	/^(?:gitExecFileSync|gitExecSync|gitFixtureSpawnAsync|execFileSync|execSync|spawnSync|safeSpawnAsync|execFile|spawn)$/;
+
+/**
+ * A LITERAL Git object name in argument position: 7-40 lowercase hex
+ * characters that are not part of a longer word -- standing alone
+ * (`["checkout", "ca26395", "--"]`) or carrying a `:path`/`^`/`~` suffix
+ * (`["show", "20896a56b:tests/x.test.ts"]`).
+ *
+ * LITERAL is the whole discriminator. A fixture repo's own commit is read
+ * back at RUNTIME (`rev-parse HEAD` into a variable) and reaches the spawn
+ * as `${sha}`, which this needle deliberately does not match; only a sha
+ * typed into the source can name an object in THIS repository's history.
+ */
+const LITERAL_COMMIT_ISH = /(?<![\w.$-])[0-9a-f]{7,40}(?![\w.$-])/g;
+
+/**
+ * Does this call site actually run `git`? Either the callee is one of the
+ * git-fixture-env wrappers (which spawn nothing else), or the first argument
+ * is a `git` command word -- `execFileSync("git", [...])`,
+ * `execSync("git show ...")`, `execFileSync("/usr/bin/git", [...])`.
+ */
+function isGitSpawnSite(callee: string, argsText: string): boolean {
+	if (callee.startsWith("git")) return true;
+	return /^\s*["'`](?:[^"'`\s]*[\\/])?git(?:["'`]|\s)/.test(argsText);
+}
+
+/**
+ * #3050 / #3066 round 1 (`ca26395`): a `git show <sha>:<path>` at MODULE
+ * SCOPE in `tests/clients/pi-lens-home-hermeticity.test.ts`. `.github/
+ * workflows/ci.yml`'s `test` job checks out with no `fetch-depth` override,
+ * which is depth 1, so the object is unreachable on CI: the call throws
+ * during collection and the whole file yields ZERO tests -- silently taking
+ * three pre-existing #525 cases with it. The remedy round 2 shipped is to
+ * commit the content as a fixture under `tests/fixtures/` and read it.
+ *
+ * Detector policy, per needle (AGENTS.md "Detectors match code, not prose"):
+ * comments BLANKED, string contents KEPT. The evidence is itself a string
+ * literal -- a commit-ish reaches a spawn only as a quoted argument -- so
+ * the `"blank"` policy would erase the only thing there is to see, the same
+ * reason the sibling `directGitSpawn` row in this file scans with
+ * `strings: "keep"`. A sha QUOTED IN PROSE (`// like git show ca26395:x`)
+ * is blanked and cannot flag: a comment never satisfies this guard, which is
+ * the dangerous direction. The residual false positive -- a delimited 7-40
+ * hex run inside some other string in a git spawn's own argument list --
+ * reds loudly and is the safe direction.
+ *
+ * Named limits: a commit-ish assembled through a variable or a template
+ * expression is invisible to a text needle (that spelling is also how a
+ * legitimate FIXTURE sha arrives, so the needle cannot tell them apart from
+ * text alone), and an UPPERCASE hex object name is not matched -- enumerating
+ * spellings is its own defect shape, and git writes lowercase.
+ */
+export function findHistoricalCommitIshOffenders(
+	files: ReadonlyArray<{ file: string; source: string }>,
+): string[] {
+	const offenders: string[] = [];
+	for (const { file, source } of files) {
+		const relativeFile = repoRelative(file);
+		if (
+			OWN_IMPLEMENTATION_FILES.includes(
+				relativeFile as (typeof OWN_IMPLEMENTATION_FILES)[number],
+			)
+		)
+			continue;
+		// Cheap admission: parsing every file under tests/ with ast-grep to
+		// find call sites would cost hundreds of parses (and the peak RSS the
+		// #3062 budget gate measures) for a needle almost no file carries.
+		LITERAL_COMMIT_ISH.lastIndex = 0;
+		if (!LITERAL_COMMIT_ISH.test(stripSource(source, { strings: "keep" })))
+			continue;
+		for (const site of callSites(source, GIT_SPAWN_CALLEE)) {
+			if (!isGitSpawnSite(site.callee, site.argsText)) continue;
+			const args = stripSource(site.argsText, { strings: "keep" });
+			LITERAL_COMMIT_ISH.lastIndex = 0;
+			for (const match of args.matchAll(LITERAL_COMMIT_ISH)) {
+				offenders.push(`${relativeFile}:${site.line} ${match[0]}`);
+			}
+		}
+	}
+	return offenders;
+}
+
 
 function repoRelative(file: string): string {
 	if (!path.isAbsolute(file)) return file.replaceAll("\\", "/");
@@ -123,6 +215,18 @@ function walkFiles(
 
 function testFiles(root: string): Array<{ file: string; source: string }> {
 	return walkFiles(root, (name) => name.endsWith(".test.ts"));
+}
+
+/**
+ * Every TypeScript file under tests/, not only the collected `*.test.ts`
+ * ones: a module-scope spawn in a `tests/support/` helper collapses every
+ * file that imports it, which is the same zero-collected-tests outcome
+ * {@link findHistoricalCommitIshOffenders} exists to prevent.
+ */
+function testTypeScriptFiles(
+	root: string,
+): Array<{ file: string; source: string }> {
+	return walkFiles(root, (name) => name.endsWith(".ts"));
 }
 
 /**
@@ -265,6 +369,100 @@ describe("real Git fixture governance", () => {
 				},
 			]),
 		).toEqual(["synthetic.test.ts"]);
+	});
+
+	it("pins no historical commit-ish in any tests/ Git spawn", () => {
+		const offenders = findHistoricalCommitIshOffenders(
+			testTypeScriptFiles(path.resolve(__dirname, "..")),
+		);
+		expect(
+			offenders,
+			"A tests/ Git spawn names a commit from this repository's history.\n" +
+				"CI checks out at depth 1 (.github/workflows/ci.yml's test job sets no\n" +
+				"fetch-depth), so the object is unreachable there: at module scope the\n" +
+				"call throws during collection and the file yields ZERO tests (#3066\n" +
+				"round 1, ca26395). Commit the content as a fixture under tests/fixtures/\n" +
+				"and read it back instead:\n" +
+				offenders.join("\n"),
+		).toEqual([]);
+	});
+
+	it("detects the #3066 round 1 shape: git show <sha>:<path> through the fixture wrapper", () => {
+		expect(
+			findHistoricalCommitIshOffenders([
+				{
+					file: "tests/clients/synthetic.test.ts",
+					source:
+						'const PRE = gitExecFileSync("git", [\n' +
+						'  "show",\n' +
+						'  "20896a56b:tests/index-vanished-instance-wiring.test.ts",\n' +
+						'], { cwd: REPO_ROOT, encoding: "utf8" });',
+				},
+			]),
+		).toEqual(["tests/clients/synthetic.test.ts:1 20896a56b"]);
+	});
+
+	it("detects a bare commit-ish argument, not only the <sha>:<path> form", () => {
+		expect(
+			findHistoricalCommitIshOffenders([
+				{
+					file: "tests/clients/synthetic.test.ts",
+					source:
+						'execFileSync("git", ["checkout", "ca2639524", "--", "clients/x.ts"]);',
+				},
+			]),
+		).toEqual(["tests/clients/synthetic.test.ts:1 ca2639524"]);
+	});
+
+	it("does not let a comment quoting the offence satisfy or trip the guard", () => {
+		expect(
+			findHistoricalCommitIshOffenders([
+				{
+					file: "tests/clients/synthetic.test.ts",
+					source:
+						"// The pre-fix content used to be read with\n" +
+						"// gitExecFileSync(\"git\", [\"show\", \"20896a56b:tests/x.test.ts\"]).\n" +
+						'const PRE = readFileSync("tests/fixtures/pre-3048.txt", "utf8");',
+				},
+			]),
+		).toEqual([]);
+	});
+
+	it("leaves a fixture repo's own runtime sha alone", () => {
+		// The legitimate population this guard must not touch: a sha the test
+		// itself created and read back at runtime is reachable everywhere,
+		// depth-1 CI checkout included.
+		expect(
+			findHistoricalCommitIshOffenders([
+				{
+					file: "tests/clients/synthetic.test.ts",
+					source:
+						'const sha = gitExecSync("git rev-parse HEAD", { cwd: fixture }).trim();\n' +
+						'gitExecFileSync("git", ["show", `${sha}:src/a.ts`], { cwd: fixture });',
+				},
+			]),
+		).toEqual([]);
+	});
+
+	it("does not flag a hex argument to a spawn that is not git", () => {
+		expect(
+			findHistoricalCommitIshOffenders([
+				{
+					file: "tests/clients/synthetic.test.ts",
+					source: 'execFileSync("node", ["-e", "console.log(\'deadbeef1\')"]);',
+				},
+			]),
+		).toEqual([]);
+	});
+
+	it("scans a non-empty tests/**/*.ts population for historical commit-ish arguments", () => {
+		// Calibration: 400 is the same documented floor the *.test.ts walk
+		// below uses; this population is a superset of it (#3050).
+		assertNonEmptyScan(
+			"historical commit-ish sweep",
+			testTypeScriptFiles(path.resolve(__dirname, "..")).length,
+			400,
+		);
 	});
 
 	it("scans a non-empty source population", () => {
