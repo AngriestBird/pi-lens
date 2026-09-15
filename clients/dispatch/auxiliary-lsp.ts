@@ -354,7 +354,6 @@ export function applyAuxiliarySuppressions(
 		// gate is needed to keep opengrep/zizmor/typos findings out of it.
 		if (
 			ruleIgnores !== undefined &&
-			d.code !== undefined &&
 			isRuleIgnoredForPath(
 				filePath as string,
 				scanRoot as string,

@@ -536,15 +536,18 @@ type DiagnosticsCollectionResult = {
 async function collectDiagnosticsForFile(
 	absPath: string,
 	lspService: NonNullable<ReturnType<typeof getLSPService>>,
-	waitMs?: number,
-	serverScope: "primary" | "all" = "all",
 	/**
 	 * #3041: project root the per-rule `ignores` globs (#965) are resolved
 	 * against. ast-grep's LSP publishes per-document diagnostics without
 	 * applying them, so this standalone `source=lsp` query has to — the same
-	 * carve-out the NAPI runner applies on the same file.
+	 * carve-out the NAPI runner applies on the same file. Positioned before the
+	 * optional parameters so it is structurally REQUIRED: an optional
+	 * `string | undefined` would silently disable the carve-out for whichever
+	 * caller forgot to pass it.
 	 */
-	scanRoot?: string,
+	scanRoot: string,
+	waitMs?: number,
+	serverScope: "primary" | "all" = "all",
 ): Promise<DiagnosticsCollectionResult> {
 	let timedOut = false;
 	let content: string | undefined;
@@ -1069,9 +1072,9 @@ async function collectFileDiagnosticResult(
 	} = await collectDiagnosticsForFile(
 		file,
 		lspService,
+		cwd,
 		waitMs,
 		serverScope,
-		cwd,
 	);
 	const health = lspService.getDiagnosticsHealth?.(file) as
 		| LspHealthLike
@@ -1218,9 +1221,9 @@ async function runFileDiagnostics(
 	} = await collectDiagnosticsForFile(
 		absPath,
 		lspService,
+		cwd,
 		waitMs,
 		serverScope,
-		cwd,
 	);
 	const lspHealth = lspService.getDiagnosticsHealth?.(absPath) as
 		| LspHealthLike
