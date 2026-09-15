@@ -300,7 +300,7 @@ function topLevelFunctionBodies(strippedCode: string): Map<string, string> {
 	// a LATER, unrelated brace would silently corrupt this entry (see the
 	// doc above `topLevelFunctionBodies`).
 	const arrowOrFunctionExprPattern =
-		/^(?:export\s+)?(?:const|let)\s+([A-Za-z_$][\w$]*)\s*(?::[^=\n]+)?=\s*(?:async\s+)?(?:\([^()]*\)\s*=>|[A-Za-z_$][\w$]*\s*=>|function\s*\*?\s*(?:[A-Za-z_$][\w$]*\s*)?\([^()]*\))/gm;
+		/^(?:export\s+)?(?:const|let)\s+([A-Za-z_$][\w$]*)\s*(?::[^=\n]+)?=\s*(?:async\s+)?(?:\([^()]*\)\s*(?::[^=\n]+)?=>|[A-Za-z_$][\w$]*\s*=>|function\s*\*?\s*(?:[A-Za-z_$][\w$]*\s*)?\([^()]*\))/gm;
 	let arrowMatch: RegExpExecArray | null;
 	while ((arrowMatch = arrowOrFunctionExprPattern.exec(strippedCode))) {
 		const afterMatch = arrowMatch.index + arrowMatch[0].length;
@@ -421,6 +421,31 @@ describe("clients/ hazardous exported registry symbols stay derived, not guessed
 		// ...which would have let a test file calling ONLY registerInstance
 		// (tests/clients/instance-registry.test.ts, among others) pass the
 		// "touches a producer" check unflagged even with no isolation at all.
+	});
+
+	it("reviewer probe (round 2, F5): an arrow-function export calling the lock primitive enters the hazardous set", () => {
+		// A FAKE producer module — never a real clients/ file, so this never
+		// depends on the two real producers happening to be written as
+		// `function` declarations. Named `export function NAME(...) { ... }`
+		// was the ONLY shape `topLevelFunctionBodies` recognized before F5; a
+		// hazardous helper written as an arrow export (legal, idiomatic
+		// TypeScript) entered neither `bodies` nor `hazardousSymbols` at all.
+		const fakeProducerSource = [
+			'import { getGlobalPiLensDir } from "./file-utils.js";',
+			'import { withInstanceRegistryLock } from "./instance-registry-lock.js";',
+			"export const sweepFakeThing = async (): Promise<void> => {",
+			"	await withInstanceRegistryLock(getGlobalPiLensDir(), async () => {});",
+			"};",
+		].join("\n");
+		const stripped = stripSource(fakeProducerSource, { strings: "blank" });
+		expect(hazardousExportedNames(stripped)).toContain("sweepFakeThing");
+
+		// MUTATION: the pre-F5 declaration-only pattern — `sweepFakeThing` is
+		// an arrow export, so it never matches at all, and the fixed-point
+		// closure never even gets a candidate to start from.
+		const declarationOnlyPattern =
+			/^(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s*\*?\s+([A-Za-z_$][\w$]*)\s*\(/gm;
+		expect(declarationOnlyPattern.test(stripped)).toBe(false);
 	});
 });
 
@@ -866,5 +891,123 @@ describe("no tests/**/*.test.ts file drives a producer's registry against the ru
 		expect(
 			touchesGlobalDirRegistry(commentsBlankedStringsKept, stringsBlankedCode),
 		).toBeUndefined();
+	});
+
+	it("reviewer probe (round 2, F2): a documentation STRING narrating a PI_LENS_HOME pin does not isolate an otherwise-identical hazardous file", () => {
+		// Two files, identical except for one doc string. Both call a real
+		// hazardous symbol and pin NOTHING — both must be flagged the same way.
+		const withoutDoc = [
+			'import { registerInstance } from "../../clients/instance-registry.js";',
+			'registerInstance("/x");',
+		].join("\n");
+		const withDoc = [
+			'import { registerInstance } from "../../clients/instance-registry.js";',
+			'const DOC = "run with process.env.PI_LENS_HOME = /tmp/foo for isolation";',
+			'registerInstance("/x");',
+		].join("\n");
+
+		for (const source of [withoutDoc, withDoc]) {
+			const commentsBlankedStringsKept = stripSource(source, { strings: "keep" });
+			const stringsBlankedCode = stripSource(source, { strings: "blank" });
+			const touch = touchesGlobalDirRegistry(
+				commentsBlankedStringsKept,
+				stringsBlankedCode,
+			);
+			expect(touch?.matchedSymbols).toEqual(["registerInstance"]);
+			expect(
+				isIsolated(
+					commentsBlankedStringsKept,
+					stringsBlankedCode,
+					touch?.matchedSymbols ?? [],
+				),
+			).toBe(false);
+		}
+
+		// MUTATION: run the assignment check over strings-KEPT text instead
+		// (the pre-fix bug) — the two snippets now DISAGREE: the doc-string
+		// one wrongly reads as pinned while the plain one correctly does not,
+		// exactly the "only one of two identical files flagged" signature the
+		// reviewer's probe named.
+		const withDocKept = stripSource(withDoc, { strings: "keep" });
+		const withoutDocKept = stripSource(withoutDoc, { strings: "keep" });
+		expect(PI_LENS_HOME_ASSIGNMENT.test(withDocKept)).toBe(true);
+		expect(PI_LENS_HOME_ASSIGNMENT.test(withoutDocKept)).toBe(false);
+	});
+
+	it("reviewer probe (round 2, F3): a template-literal path escapes the exact-quote target-file match", () => {
+		// `` `${process.env.PI_LENS_HOME}/instances.json` `` never produces the
+		// substring `"instances.json"` (no quotes sit around just the
+		// filename), so the stricter pre-fix form missed it entirely even
+		// though the snippet plainly reaches the shared registry file by hand.
+		const templateLiteralSnippet =
+			'fs.writeFileSync(`${process.env.PI_LENS_HOME}/instances.json`, "{}");';
+		const commentsBlankedStringsKept = stripSource(templateLiteralSnippet, {
+			strings: "keep",
+		});
+		const stringsBlankedCode = stripSource(templateLiteralSnippet, {
+			strings: "blank",
+		});
+		const touch = touchesGlobalDirRegistry(
+			commentsBlankedStringsKept,
+			stringsBlankedCode,
+		);
+		expect(touch?.reason).toBe("target-file");
+
+		// MUTATION: require the filename as a COMPLETE `"quoted"` literal (the
+		// pre-fix form) — the template-literal snippet no longer matches at all.
+		const quotedOnly = TARGET_FILENAMES.some((filename) =>
+			commentsBlankedStringsKept.includes(`"${filename}"`),
+		);
+		expect(quotedOnly).toBe(false);
+	});
+
+	it("reviewer probe (round 2, F4a): a bare reference passthrough with no trailing call does not isolate", () => {
+		const source = [
+			'vi.mock("../../clients/file-utils.js", async (importOriginal) => {',
+			"	const actual = await importOriginal();",
+			"	return { ...actual, getGlobalPiLensDir: actual.getGlobalPiLensDir };",
+			"});",
+		].join("\n");
+		const commentsBlankedStringsKept = stripSource(source, { strings: "keep" });
+		expect(
+			mockOverridesSymbol(
+				commentsBlankedStringsKept,
+				"file-utils.js",
+				"getGlobalPiLensDir",
+			),
+		).toBe(false);
+
+		// MUTATION: require a trailing call (the pre-fix `actual\.symbol\(`
+		// literal) — a bare reference passthrough has none, so the naive check
+		// finds no fall-through and wrongly reports an override.
+		const callText =
+			findMockCallText(commentsBlankedStringsKept, "file-utils.js") ?? "";
+		const naiveFallsThrough = /\bactual\.getGlobalPiLensDir\s*\(/.test(callText);
+		expect(naiveFallsThrough).toBe(false);
+	});
+
+	it("reviewer probe (round 2, F4b): a renamed real-module binding still counts as a passthrough", () => {
+		const source = [
+			'vi.mock("../../clients/file-utils.js", async (importOriginal) => {',
+			"	const orig = await importOriginal();",
+			"	return { ...orig, getGlobalPiLensDir: () => orig.getGlobalPiLensDir() };",
+			"});",
+		].join("\n");
+		const commentsBlankedStringsKept = stripSource(source, { strings: "keep" });
+		expect(
+			mockOverridesSymbol(
+				commentsBlankedStringsKept,
+				"file-utils.js",
+				"getGlobalPiLensDir",
+			),
+		).toBe(false);
+
+		// MUTATION: hardcode the alias name to "actual" (the pre-fix spelling)
+		// — "orig" never matches it, so the renamed passthrough is wrongly
+		// cleared.
+		const callText =
+			findMockCallText(commentsBlankedStringsKept, "file-utils.js") ?? "";
+		const naiveFallsThrough = /\bactual\.getGlobalPiLensDir\b/.test(callText);
+		expect(naiveFallsThrough).toBe(false);
 	});
 });
