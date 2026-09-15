@@ -5,6 +5,7 @@ import {
 	assertNonEmptyScan,
 	callSites,
 	codeMatches,
+	escapeRegExp,
 	stripSource,
 } from "../support/sweep-kit.js";
 import {
@@ -53,17 +54,183 @@ const GIT_SPAWN_CALLEE =
 	/^(?:gitExecFileSync|gitExecSync|gitFixtureSpawnAsync|execFileSync|execSync|spawnSync|safeSpawnAsync|execFile|spawn)$/;
 
 /**
- * A LITERAL Git object name in argument position: 7-40 lowercase hex
- * characters that are not part of a longer word -- standing alone
- * (`["checkout", "ca26395", "--"]`) or carrying a `:path`/`^`/`~` suffix
- * (`["show", "20896a56b:tests/x.test.ts"]`).
- *
- * LITERAL is the whole discriminator. A fixture repo's own commit is read
- * back at RUNTIME (`rev-parse HEAD` into a variable) and reaches the spawn
- * as `${sha}`, which this needle deliberately does not match; only a sha
- * typed into the source can name an object in THIS repository's history.
+ * A LITERAL Git object name: 7-40 lowercase hex characters that are not part
+ * of a longer word -- standing alone (`["checkout", "ca26395", "--"]`) or
+ * carrying a `:path`/`^`/`~` suffix (`["show", "20896a56b:tests/x.test.ts"]`).
+ * The word boundaries keep `"myabcdef1var"` and `"v1-abcdef1"` out; both have
+ * a row below, because round 2 T2 found the lookarounds mutation-inert.
  */
 const LITERAL_COMMIT_ISH = /(?<![\w.$-])[0-9a-f]{7,40}(?![\w.$-])/g;
+
+/**
+ * A module-scope `const NAME = "<sha>"` binding. Round 2 S1: hoisting the sha
+ * out of the argument list and spawning `["show", `${PRE_FIX_SHA}:path`]`
+ * left the guard green on the REAL `ca26395` file (19/19) while the
+ * module-scope spawn still collapses the file on a depth-1 checkout. The
+ * binding is code, so it is read from the comment-blanked source.
+ */
+const SHA_BINDING =
+	/\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::\s*string\s*)?=\s*["'`]([0-9a-f]{7,40})["'`]/g;
+
+/**
+ * Git subcommands that resolve an argument against the repository's HISTORY.
+ * They are the only ones a depth-1 checkout can fail, so they are the only
+ * ones whose arguments are scanned. Round 2 S3: scanning every git spawn's
+ * whole argument text flagged `GIT_AUTHOR_DATE: "1700000000 +0000"`,
+ * `-m "fix deadbeef regression"`, `-m "defaced effaced"` and
+ * `["add", "tests/fixtures/abcdef1/x.ts"]` -- five false positives, none of
+ * which can name a commit.
+ */
+const HISTORY_SUBCOMMANDS = new Set([
+	"show",
+	"cat-file",
+	"diff",
+	"log",
+	"checkout",
+	"rev-parse",
+	"archive",
+]);
+
+/**
+ * Global git options that consume a SEPARATE following token, so the
+ * subcommand search steps over their value -- the same two
+ * `scripts/hooks/guard-bash.mjs`'s `classifyGit` walks past.
+ */
+const GIT_TWO_TOKEN_FLAGS = new Set(["-C", "-c"]);
+
+const QUOTED_ITEM = /^(["'`])((?:\\.|(?!\1)[\s\S])*)\1$/;
+
+/**
+ * A stand-in for an array element that is not a string or template literal
+ * (`dir`, `path.join(a, b)`). It keeps the token list POSITIONAL, which is
+ * what lets the global-option walk below stay aligned with what git sees:
+ * dropping unquoted elements made `["-C", dir, "show", rev]` resolve its
+ * subcommand to the rev. It can match neither a subcommand name nor
+ * {@link LITERAL_COMMIT_ISH}.
+ */
+const OPAQUE_ELEMENT = "\u0000";
+
+function quotedItems(region: string): string[] {
+	return splitTopLevel(region).map((element) => {
+		const match = QUOTED_ITEM.exec(element.trim());
+		return match ? (match[2] ?? "") : OPAQUE_ELEMENT;
+	});
+}
+
+/**
+ * Split an array-literal body on its own top-level commas. Quote-, bracket-
+ * and brace-aware, so a comma inside a string, a nested array or an object
+ * does not start a new element.
+ */
+function splitTopLevel(region: string): string[] {
+	const elements: string[] = [];
+	let quote: string | undefined;
+	let depth = 0;
+	let start = 0;
+	for (let index = 0; index < region.length; index += 1) {
+		const character = region[index];
+		if (quote !== undefined) {
+			if (character === "\\") index += 1;
+			else if (character === quote) quote = undefined;
+			continue;
+		}
+		if (character === '"' || character === "'" || character === "`") {
+			quote = character;
+			continue;
+		}
+		if (character === "[" || character === "{" || character === "(") depth += 1;
+		else if (character === "]" || character === "}" || character === ")")
+			depth -= 1;
+		else if (character === "," && depth === 0) {
+			elements.push(region.slice(start, index));
+			start = index + 1;
+		}
+	}
+	elements.push(region.slice(start));
+	return elements.filter((element) => element.trim() !== "");
+}
+
+/**
+ * The body of the first top-level array literal in `code`, or undefined when
+ * there is none. Quote-aware, so a `[` inside a string or a template is not a
+ * bracket. Named limit: a template literal whose EXPRESSION contains a quote
+ * character (`` `${a["k"]}` ``) desynchronises the quote state; that spelling
+ * does not occur in a git argument vector and is not handled.
+ */
+function firstArrayLiteral(code: string): string | undefined {
+	let quote: string | undefined;
+	let depth = 0;
+	let start = -1;
+	for (let index = 0; index < code.length; index += 1) {
+		const character = code[index];
+		if (quote !== undefined) {
+			if (character === "\\") index += 1;
+			else if (character === quote) quote = undefined;
+			continue;
+		}
+		if (character === '"' || character === "'" || character === "`") {
+			quote = character;
+			continue;
+		}
+		if (character === "[") {
+			if (depth === 0) start = index;
+			depth += 1;
+			continue;
+		}
+		if (character === "]") {
+			depth -= 1;
+			if (depth === 0 && start !== -1) return code.slice(start + 1, index);
+		}
+	}
+	return undefined;
+}
+
+/**
+ * The tokens git itself would receive, from either spawn spelling: the
+ * argument ARRAY (`execFileSync("git", ["show", rev])`) or the single command
+ * string (`execSync("git show rev")`). Everything after the vector -- the
+ * options object with its `cwd` and `env` -- is outside the array and is
+ * never scanned, which is half of the round 2 S3 fix.
+ */
+function gitArgumentTokens(argsText: string): string[] {
+	// Comments are blanked HERE as well as at the admission gate. Round 2 S2:
+	// a sha in a comment INSIDE the argument list is reported as an argument
+	// as soon as any OTHER hex literal in the file passes admission, so the
+	// two stripping points have separate signatures and neither is redundant.
+	const code = stripSource(argsText, { strings: "keep" });
+	const array = firstArrayLiteral(code);
+	if (array !== undefined) return quotedItems(array);
+	const commandString = QUOTED_ITEM.exec(splitTopLevel(code)[0]?.trim() ?? "");
+	if (!commandString) return [];
+	const words = (commandString[2] ?? "").trim().split(/\s+/);
+	const command = words[0]?.split(/[\\/]/).pop();
+	return command === "git" ? words.slice(1) : [];
+}
+
+/**
+ * The argument tokens of a HISTORY subcommand, or an empty list when this
+ * spawn is not one. Global options are stepped over the way git steps over
+ * them, so `["-C", dir, "show", rev]` resolves to `show` and not to `-C`.
+ */
+function historyArgumentTokens(tokens: readonly string[]): string[] {
+	let index = 0;
+	while (index < tokens.length) {
+		const token = tokens[index] ?? "";
+		if (GIT_TWO_TOKEN_FLAGS.has(token)) {
+			index += 2;
+			continue;
+		}
+		if (token.startsWith("-")) {
+			index += 1;
+			continue;
+		}
+		break;
+	}
+	const subcommand = tokens[index];
+	if (subcommand === undefined || !HISTORY_SUBCOMMANDS.has(subcommand))
+		return [];
+	return [...tokens.slice(index + 1)];
+}
 
 /**
  * Does this call site actually run `git`? Either the callee is one of the
@@ -78,29 +245,37 @@ function isGitSpawnSite(callee: string, argsText: string): boolean {
 
 /**
  * #3050 / #3066 round 1 (`ca26395`): a `git show <sha>:<path>` at MODULE
- * SCOPE in `tests/clients/pi-lens-home-hermeticity.test.ts`. `.github/
- * workflows/ci.yml`'s `test` job checks out with no `fetch-depth` override,
- * which is depth 1, so the object is unreachable on CI: the call throws
- * during collection and the whole file yields ZERO tests -- silently taking
- * three pre-existing #525 cases with it. The remedy round 2 shipped is to
- * commit the content as a fixture under `tests/fixtures/` and read it.
+ * SCOPE in `tests/clients/pi-lens-home-hermeticity.test.ts`.
+ * `.github/workflows/ci.yml`'s `test` job checks out with no `fetch-depth`
+ * override, which is depth 1, so the object is unreachable on CI: the call
+ * throws during collection and the whole file yields ZERO tests -- silently
+ * taking three #525 cases that already lived there with it. The remedy round
+ * 2 shipped is to commit the content as a fixture under `tests/fixtures/`
+ * and read it.
+ *
+ * What counts as naming history: a literal hex object name in a history
+ * subcommand's arguments, or `${NAME}` where NAME is a module-scope binding
+ * to such a literal. A fixture repo's own commit is read back at RUNTIME
+ * (`rev-parse HEAD` into a variable) and reaches the spawn as `${sha}` with
+ * no hex literal anywhere, so it is untouched -- that is the discriminator.
  *
  * Detector policy, per needle (AGENTS.md "Detectors match code, not prose"):
- * comments BLANKED, string contents KEPT. The evidence is itself a string
- * literal -- a commit-ish reaches a spawn only as a quoted argument -- so
- * the `"blank"` policy would erase the only thing there is to see, the same
+ * comments BLANKED, string contents KEPT, at BOTH scanning points (the file
+ * admission gate and the argument vector). The evidence is itself a string
+ * literal -- a commit-ish reaches a spawn only as a quoted argument -- so the
+ * `"blank"` policy would erase the only thing there is to see, the same
  * reason the sibling `directGitSpawn` row in this file scans with
- * `strings: "keep"`. A sha QUOTED IN PROSE (`// like git show ca26395:x`)
- * is blanked and cannot flag: a comment never satisfies this guard, which is
- * the dangerous direction. The residual false positive -- a delimited 7-40
- * hex run inside some other string in a git spawn's own argument list --
- * reds loudly and is the safe direction.
+ * `strings: "keep"`. A sha quoted in a comment is blanked at both points and
+ * cannot flag; a comment never satisfies this guard, which is the dangerous
+ * direction. The residual false positive -- a delimited 7-40 hex run in a
+ * history subcommand's own argument -- reds loudly and is the safe direction.
  *
- * Named limits: a commit-ish assembled through a variable or a template
- * expression is invisible to a text needle (that spelling is also how a
- * legitimate FIXTURE sha arrives, so the needle cannot tell them apart from
- * text alone), and an UPPERCASE hex object name is not matched -- enumerating
- * spellings is its own defect shape, and git writes lowercase.
+ * Named blind spots, all of them one indirection further than the binding
+ * above: a sha IMPORTED from another module, one held in an object property
+ * or array element, one assigned to a `let` after declaration, and one built
+ * by concatenation. Each is invisible to a text needle; none has occurred.
+ * An UPPERCASE hex object name is also not matched -- enumerating spellings
+ * is its own defect shape, and git writes lowercase.
  */
 export function findHistoricalCommitIshOffenders(
 	files: ReadonlyArray<{ file: string; source: string }>,
@@ -108,27 +283,32 @@ export function findHistoricalCommitIshOffenders(
 	const offenders: string[] = [];
 	for (const { file, source } of files) {
 		const relativeFile = repoRelative(file);
-		if (
-			OWN_IMPLEMENTATION_FILES.includes(
-				relativeFile as (typeof OWN_IMPLEMENTATION_FILES)[number],
-			)
-		)
-			continue;
-		// One scanning point, and it is also the admission gate: parsing every
-		// file under tests/ with ast-grep to find call sites would cost
-		// hundreds of parses (and the peak RSS the #3062 budget gate measures)
-		// for a needle almost no file carries. Comments are blanked HERE, so a
-		// file whose only sha is prose is never admitted and can never flag;
-		// stripping the argument text again inside the loop was mutation-inert
-		// for exactly that reason and is gone.
+		// Cheap admission: parsing every file under tests/ with ast-grep would
+		// cost hundreds of parses (and the peak RSS the #3062 budget gate
+		// measures) for a needle almost no file carries. No file is exempt
+		// from THIS row -- `tests/support/git-fixture-env.ts` is the wrapper
+		// the sibling spawn row has to exempt, and it is the helper whose
+		// collapse would take the most files down with it (round 2 T2).
+		const code = stripSource(source, { strings: "keep" });
 		LITERAL_COMMIT_ISH.lastIndex = 0;
-		if (!LITERAL_COMMIT_ISH.test(stripSource(source, { strings: "keep" })))
-			continue;
+		if (!LITERAL_COMMIT_ISH.test(code)) continue;
+		SHA_BINDING.lastIndex = 0;
+		const boundShaNames = [...code.matchAll(SHA_BINDING)].map(
+			(match) => match[1] ?? "",
+		);
 		for (const site of callSites(source, GIT_SPAWN_CALLEE)) {
 			if (!isGitSpawnSite(site.callee, site.argsText)) continue;
-			LITERAL_COMMIT_ISH.lastIndex = 0;
-			for (const match of site.argsText.matchAll(LITERAL_COMMIT_ISH)) {
-				offenders.push(`${relativeFile}:${site.line} ${match[0]}`);
+			for (const token of historyArgumentTokens(
+				gitArgumentTokens(site.argsText),
+			)) {
+				LITERAL_COMMIT_ISH.lastIndex = 0;
+				for (const match of token.matchAll(LITERAL_COMMIT_ISH))
+					offenders.push(`${relativeFile}:${site.line} ${match[0]}`);
+				for (const name of boundShaNames)
+					if (
+						new RegExp(`\\$\\{\\s*${escapeRegExp(name)}\\s*\\}`).test(token)
+					)
+						offenders.push(`${relativeFile}:${site.line} \${${name}}`);
 			}
 		}
 	}
@@ -416,24 +596,113 @@ describe("real Git fixture governance", () => {
 		).toEqual(["tests/clients/synthetic.test.ts:1 ca2639524"]);
 	});
 
-	it("does not let a comment INSIDE the argument list trip the guard", () => {
-		// The shape the #3066 round 2 remedy leaves behind: the spawn is gone,
-		// but a comment in the surviving call still quotes the sha the fixture
-		// was taken at. A comment is prose, never an argument — the admission
-		// scan blanks comments, so such a file is never even parsed.
+	it("detects a sha hoisted out of the argument list into a const", () => {
+		// Round 2 S1: the same real ca26395 file with the sha hoisted to
+		// `const PRE_FIX_SHA` and interpolated was GREEN (19/19) while the
+		// module-scope spawn still collapses the file on a depth-1 checkout.
 		expect(
 			findHistoricalCommitIshOffenders([
 				{
 					file: "tests/clients/synthetic.test.ts",
 					source:
+						'const PRE_FIX_SHA = "20896a56b";\n' +
+						'const PRE = gitExecFileSync("git", [\n' +
+						'  "show",\n' +
+						"  `${PRE_FIX_SHA}:tests/index-vanished-instance-wiring.test.ts`,\n" +
+						'], { cwd: REPO_ROOT, encoding: "utf8" });',
+				},
+			]),
+		).toEqual(["tests/clients/synthetic.test.ts:2 ${PRE_FIX_SHA}"]);
+	});
+
+	it("does not let a comment INSIDE the argument list trip the guard", () => {
+		// The shape the #3066 round 2 remedy leaves behind: the spawn is gone,
+		// but a comment in the surviving call still quotes the sha the fixture
+		// was taken at. A comment is prose, never an argument.
+		//
+		// Round 2 S2: the fixture carries a SECOND hex literal (`COLOR`) on
+		// purpose. Without it the file never passes the admission gate, the
+		// argument vector is never read, and the row passes for the wrong
+		// reason — which is exactly how round 1 mis-measured the argument-side
+		// comment blanking as inert and deleted it.
+		expect(
+			findHistoricalCommitIshOffenders([
+				{
+					file: "tests/clients/synthetic.test.ts",
+					source:
+						'const COLOR = "abcdef1";\n' +
 						'gitExecFileSync("git", [\n' +
 						'  "show",\n' +
 						'  // was "20896a56b:tests/index-vanished-instance-wiring.test.ts"\n' +
 						"  `${fixtureSha}:src/a.ts`,\n" +
-						"]);",
+						"], { cwd: COLOR });",
 				},
 			]),
 		).toEqual([]);
+	});
+
+	it("does not scan the arguments of a subcommand that cannot name a commit", () => {
+		// Round 2 S3, all four verbatim: a commit message, an author date in
+		// the options object, and a fixture path that happens to be hex.
+		expect(
+			findHistoricalCommitIshOffenders([
+				{
+					file: "tests/clients/synthetic.test.ts",
+					source:
+						'gitExecFileSync("git", ["commit", "-m", "x"], { cwd: "/f", env: { GIT_AUTHOR_DATE: "1700000000 +0000" } });\n' +
+						'gitExecFileSync("git", ["commit", "-m", "fix deadbeef regression"], { cwd: "/f" });\n' +
+						'gitExecFileSync("git", ["commit", "-m", "defaced effaced"], { cwd: "/f" });\n' +
+						'gitExecFileSync("git", ["add", "tests/fixtures/abcdef1/x.ts"], { cwd: "/f" });',
+				},
+			]),
+		).toEqual([]);
+	});
+
+	it("leaves every cleared revision spelling green", () => {
+		// Round 2 S3's keep-green list: symbolic revisions, a tag, a
+		// too-short abbreviation, an uppercase name, and the two word-boundary
+		// cases round 2 T2 found unpinned.
+		expect(
+			findHistoricalCommitIshOffenders([
+				{
+					file: "tests/clients/synthetic.test.ts",
+					source: [
+						'gitExecFileSync("git", ["show", "HEAD:src/a.ts"], { cwd: "/f" });',
+						'gitExecFileSync("git", ["show", "origin/master:src/a.ts"], { cwd: "/f" });',
+						'gitExecFileSync("git", ["show", "HEAD~1"], { cwd: "/f" });',
+						'gitExecFileSync("git", ["show", "v4.1.6:package.json"], { cwd: "/f" });',
+						'gitExecFileSync("git", ["show", "abcde1:x"], { cwd: "/f" });',
+						'gitExecFileSync("git", ["show", "ABCDEF1:x"], { cwd: "/f" });',
+						'gitExecFileSync("git", ["show", "myabcdef1var"], { cwd: "/f" });',
+						'gitExecFileSync("git", ["show", "v1-abcdef1"], { cwd: "/f" });',
+					].join("\n"),
+				},
+			]),
+		).toEqual([]);
+	});
+
+	it("reads the single-command-string spawn spelling too", () => {
+		expect(
+			findHistoricalCommitIshOffenders([
+				{
+					file: "tests/clients/synthetic.test.ts",
+					source:
+						'gitExecSync("git show ca2639524:clients/x.ts", { cwd: REPO_ROOT });',
+				},
+			]),
+		).toEqual(["tests/clients/synthetic.test.ts:1 ca2639524"]);
+	});
+
+	it("steps over git global options to find the subcommand", () => {
+		expect(
+			findHistoricalCommitIshOffenders([
+				{
+					file: "tests/clients/synthetic.test.ts",
+					source:
+						'execFileSync("git", ["-C", dir, "show", "ca2639524:clients/x.ts"]);',
+				},
+			]),
+		).toEqual(["tests/clients/synthetic.test.ts:1 ca2639524"]);
 	});
 
 	it("leaves a fixture repo's own runtime sha alone", () => {
