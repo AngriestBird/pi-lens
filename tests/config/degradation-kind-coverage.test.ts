@@ -304,9 +304,7 @@ function classifyKindOccurrences(
 	const sameFile = resolveSameFileConstKind(fileSource, identifier);
 	if (sameFile !== undefined) return { kinds: [sameFile], unresolved: [] };
 
-	const audited = AUDITED_IDENTIFIER_KIND_SITES.get(
-		`${relPath}#${identifier}`,
-	);
+	const audited = AUDITED_IDENTIFIER_KIND_SITES.get(`${relPath}#${identifier}`);
 	if (audited !== undefined) return { kinds: [audited], unresolved: [] };
 
 	return { kinds: [], unresolved: [identifier] };
@@ -448,9 +446,9 @@ describe("DegradationKind bare-identifier resolution (#3140)", () => {
 	// silently skipping a site that could have been read one line away.
 
 	it("extracts a bare identifier and nothing else", () => {
-		expect(
-			bareIdentifierKind("{ kind: TRUST_REFUSAL_KIND, subject: x }"),
-		).toBe("TRUST_REFUSAL_KIND");
+		expect(bareIdentifierKind("{ kind: TRUST_REFUSAL_KIND, subject: x }")).toBe(
+			"TRUST_REFUSAL_KIND",
+		);
 	});
 
 	it("does not treat a property access or function call as a bare identifier", () => {
@@ -474,9 +472,9 @@ describe("DegradationKind bare-identifier resolution (#3140)", () => {
 		const fixtureSource =
 			'const TRUST_REFUSAL_KIND = "trust-refusal";\n' +
 			"function refuse() { incrementDegradationCount({ kind: TRUST_REFUSAL_KIND }); }\n";
-		expect(
-			resolveSameFileConstKind(fixtureSource, "TRUST_REFUSAL_KIND"),
-		).toBe("trust-refusal");
+		expect(resolveSameFileConstKind(fixtureSource, "TRUST_REFUSAL_KIND")).toBe(
+			"trust-refusal",
+		);
 	});
 
 	it("does not resolve an identifier reached only through an import", () => {
