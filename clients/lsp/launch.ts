@@ -24,6 +24,7 @@ import { findGlobalBinary } from "../package-manager.js";
 import { redactSecrets } from "../redact/secrets.js";
 import {
 	classifySpawnFailure,
+	holdOwnChildPid,
 	isOwnLiveChild,
 	SpawnFailureError,
 } from "../safe-spawn.js";
@@ -398,6 +399,15 @@ function trySpawn(
 				`The binary may be missing or corrupted.`,
 		);
 	}
+
+	// #3091 F1-r2: take ownership HERE, while the child is provably alive. LSP
+	// servers are the one long-lived child pi-lens spawns outside
+	// `safeSpawnAsync`, so without this their first offer of verification is
+	// `stopLSP`'s group kill — by which time, on the `processExiting` path, the
+	// leader can already be dead, `/proc` is gone, and the group signal that
+	// reaps surviving grandchildren (#2026) is refused. The verdict is released
+	// by `killProcessTree` when the shutdown ladder is done with the pid.
+	holdOwnChildPid(proc.pid, "lsp-spawn");
 
 	return proc;
 }

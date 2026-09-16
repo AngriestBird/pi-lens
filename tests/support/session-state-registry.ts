@@ -1692,7 +1692,15 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	// since died. It cannot grow (BoundedFifoMap, 512 entries, FIFO eviction)
 	// and a stale entry cannot mislead: a pid alive under a different parent is
 	// refused by the /proc read before the memo is ever consulted.
-	"safe-spawn.ts": 4,
+	//
+	// #3091 F1-r2b: rose to 5 with `heldOwnPids`, the companion store for
+	// RESOURCE-scoped verdicts — the LSP children `lsp/launch.ts` spawns with
+	// `nodeSpawn`. Same no-reset reasoning, and the same axis argument one step
+	// further: this set is retired by resource STATE (`releaseOwnChildPid` when
+	// the shutdown ladder is done, plus a sweep that drops every pid whose
+	// process GROUP no longer exists), never by age, because age is exactly
+	// what evicted a long-lived server's verdict from the FIFO above.
+	"safe-spawn.ts": 5,
 	// #2146 moved the four registration fields onto the process singleton, so the
 	// scan sees no module-scope container here either.
 	"session-lifecycle.ts": 0,

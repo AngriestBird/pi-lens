@@ -39,7 +39,11 @@ import {
 	newLspMutationCorrelationId,
 } from "../lsp-mutation.js";
 import { getProcessSingleton } from "../process-singletons.js";
-import { getAmbientAbortSignal, isOwnLiveChild } from "../safe-spawn.js";
+import {
+	getAmbientAbortSignal,
+	isOwnLiveChild,
+	releaseOwnChildPid,
+} from "../safe-spawn.js";
 import { raceToCompletion } from "./aggregation.js";
 import {
 	hashDiagnosticContent,
@@ -1270,6 +1274,9 @@ export async function killProcessTree(
 		(proc.exitCode != null || proc.signalCode != null) &&
 		!options.processExiting
 	) {
+		// #3091 F1-r2b: this pid will never be signalled again, so retire the
+		// ownership hold taken at spawn rather than leaving it to age out.
+		releaseOwnChildPid(pid);
 		proc.unref?.();
 		return;
 	}
@@ -1413,6 +1420,11 @@ export async function killProcessTree(
 						killDirectChild("SIGKILL");
 					}
 				}
+				// AFTER the escalation, never before it: this tick issues the
+				// last signal this pid can receive, and retiring the ownership
+				// hold first would make that very SIGKILL the thing that gets
+				// refused (#3091 F1-r2b).
+				releaseOwnChildPid(pid);
 			}, 1500);
 			timer.unref?.();
 			proc.unref?.();
@@ -1450,6 +1462,7 @@ export async function killProcessTree(
 				killDirectChild("SIGKILL");
 			}
 		}
+		releaseOwnChildPid(pid);
 	} catch {
 		// ignore
 	}

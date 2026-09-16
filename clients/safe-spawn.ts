@@ -447,8 +447,93 @@ const PROC_PPID_READABLE = ((): boolean => {
  * more than the cap drops its OLDEST verdicts, where a wholesale clear would
  * drop the one it is about to need.
  */
-const VERIFIED_OWN_PID_CAP = 512;
+export const VERIFIED_OWN_PID_CAP = 512;
 const verifiedOwnPids = new BoundedFifoMap<number, true>(VERIFIED_OWN_PID_CAP);
+
+/**
+ * Pids whose OWNERSHIP IS HELD for the lifetime of a long-lived resource —
+ * today, the LSP children `clients/lsp/launch.ts` spawns with `nodeSpawn`
+ * (#3091 F1-r2b).
+ *
+ * These deliberately do NOT live in `verifiedOwnPids`. Age is the wrong
+ * retirement axis for a resource-scoped verdict: an LSP leader is verified once
+ * at spawn and then sits untouched for the whole session, so in a FIFO that
+ * every `safeSpawnAsync` writes to it is the OLDEST entry and therefore the
+ * FIRST evicted — measured, 520 later verdicts were enough — and its group kill
+ * at host exit is refused precisely because the server was long-lived enough to
+ * matter. Retirement here is by RESOURCE STATE instead: `releaseOwnChildPid`
+ * when the shutdown ladder is done with the pid, plus the confirmed-dead sweep
+ * below for the paths that never reach a ladder (a server that crashes, or a
+ * host killed mid-session).
+ *
+ * The bound that remains, stated rather than implied: one entry per LIVE LSP
+ * child, plus at most `HELD_OWN_PID_SWEEP_AT` entries whose group has not yet
+ * been confirmed dead. A crash-looping server cannot grow it without bound
+ * because each sweep drops every pid whose process GROUP no longer exists,
+ * which is exactly the condition under which the entry can never be needed
+ * again.
+ */
+const HELD_OWN_PID_SWEEP_AT = 256;
+const heldOwnPids = new Set<number>();
+
+/** A process group that no longer exists can never need another signal. */
+function groupIsGone(pid: number): boolean {
+	try {
+		process.kill(-pid, 0);
+		return false;
+	} catch (error) {
+		return errorCode(error as Error) === "ESRCH";
+	}
+}
+
+function sweepHeldOwnPids(): void {
+	if (heldOwnPids.size < HELD_OWN_PID_SWEEP_AT) return;
+	// Deleting the current entry mid-iteration is well-defined for a Set, so
+	// no snapshot copy is needed.
+	for (const pid of heldOwnPids) {
+		if (groupIsGone(pid)) heldOwnPids.delete(pid);
+	}
+	// Last resort if every held group is still alive: drop the oldest, which is
+	// the only entry whose owner has had the longest chance to release it.
+	if (heldOwnPids.size >= HELD_OWN_PID_SWEEP_AT) {
+		const oldest = heldOwnPids.values().next().value;
+		if (oldest !== undefined) heldOwnPids.delete(oldest);
+	}
+}
+
+/**
+ * Verify a pid at ADMISSION and hold the verdict for the resource's lifetime.
+ *
+ * This is AGENTS.md shape 50's own rule, which #3091 round 1 broke at the site
+ * it was fixing: `isOwnLiveChild`'s three call sites were the `safeSpawnAsync`
+ * registration, the Windows tree kill, and the SHUTDOWN group kill — so for an
+ * LSP child, spawned with `nodeSpawn`, the first offer of verification was also
+ * the last, and on the `processExiting` path the leader could already be dead
+ * by then (`/proc` gone, nothing on record, signal refused, grandchildren
+ * orphaned).
+ */
+export function holdOwnChildPid(
+	pid: number | undefined,
+	site: string,
+): boolean {
+	const owned = isOwnLiveChild(pid, site);
+	if (!owned || !PROC_PPID_READABLE || typeof pid !== "number") return owned;
+	// Exactly one home: the verification above filed the verdict in the
+	// age-bounded FIFO, and leaving a copy there would make BOTH the held set
+	// and its release mutation-inert — the FIFO copy would answer for them.
+	verifiedOwnPids.delete(pid);
+	sweepHeldOwnPids();
+	heldOwnPids.add(pid);
+	return true;
+}
+
+/**
+ * Retire a held pid once nothing will signal it again — the end of the
+ * shutdown ladder. Idempotent.
+ */
+export function releaseOwnChildPid(pid: number | undefined): void {
+	if (typeof pid === "number") heldOwnPids.delete(pid);
+}
 
 /** Once per session: a Linux host whose `/proc` cannot answer the question. */
 function recordProcUnavailable(site: string): void {
@@ -490,7 +575,7 @@ export function isOwnLiveChild(
 		// grandchild after the direct child has died. Ownership verified while
 		// the leader was alive is what answers that; a pid this process never
 		// owned is still refused.
-		return verifiedOwnPids.has(pid);
+		return heldOwnPids.has(pid) || verifiedOwnPids.has(pid);
 	}
 	const parent = /^PPid:\s*(\d+)$/m.exec(status);
 	if (!parent) return true;
