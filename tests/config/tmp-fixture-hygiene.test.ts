@@ -12,6 +12,8 @@ import {
 } from "../support/sweep-kit.js";
 import {
 	cleanupTmpHygiene,
+	removeRunBackstopDirs,
+	unadmittedRootBackstopEntries,
 	tmpHygieneAdmissionFor,
 	tmpHygieneLeakReport,
 	tmpHygieneObservedEntries,
@@ -131,6 +133,146 @@ describe("tmp-fixture-hygiene", () => {
 		expect(
 			escapees.map((site) => `${site.file}:${site.line}: ${site.text}`),
 		).toEqual([]);
+	});
+
+	// PR #3100 review F2: #3083's per-file backstop directories live under the
+	// run-shared home, which no owner removes, and round 1's
+	// `process.once("exit")` never fired under vitest's SIGTERM fork teardown —
+	// two green runs left one, then two, directories holding real stamps. This
+	// file is the owner that sweeps them, dead last, when no worker is alive to
+	// recreate one from a delayed callback; the sibling row is the recurrence in
+	// the other direction, a second vitest invocation sharing this checkout's
+	// `.probe-home` losing its live directory to our sweep.
+	// The planted directories hold a nested `stamp.json` standing in for the real
+	// cooldown stamp, so the sweep is proven to remove a NON-EMPTY tree. The
+	// production filename is deliberately not spelled here: the #3042
+	// registry-isolation sweep in tests/clients/pi-lens-home-hermeticity.test.ts
+	// flags any file naming a producer's target filename beside PI_LENS_HOME
+	// without its own pin, and this owner cannot pin a home — the run-shared one
+	// is its subject. Comments are blanked before that scan, so this note neither
+	// trips nor excuses it.
+	//
+	// Over a FIXTURE directory, not the live home: the sweep is destructive and
+	// this file is the last worker, so pointing the guard at the live home would
+	// perform the run's cleanup from inside the assertion and hide whether
+	// `cleanupTmpHygiene` still calls the sweep at all. That the default target
+	// is the live home is what the out-of-process leftover count proves.
+	//
+	// All four cells of the cleanup axis in one case (round 3 F1). Before the
+	// stale arm, `oldForeign` had no remover at all: a run-id-only sweep cleans
+	// only itself, so every targeted invocation that excludes this file left one
+	// more stamped directory under the persistent home for ever.
+	it("sweeps this run's private backstop directories and spares a sibling invocation's", () => {
+		const fixture = path.join(
+			process.env.PI_LENS_HOME as string,
+			`hygiene-backstop-guard-${process.env.PI_LENS_TMP_HYGIENE_RUN_ID}`,
+		);
+		const mine = path.join(
+			fixture,
+			`backstop-${process.env.PI_LENS_TMP_HYGIENE_RUN_ID}-owner-guard`,
+		);
+		const liveForeign = path.join(fixture, "backstop-0000000000-0-owner-guard");
+		const oldForeign = path.join(fixture, "backstop-0000000001-0-owner-guard");
+		for (const dir of [mine, liveForeign, oldForeign]) {
+			fs.mkdirSync(path.join(dir, "nested"), { recursive: true });
+			fs.writeFileSync(
+				path.join(dir, "nested", "stamp.json"),
+				JSON.stringify({ lastSweepAt: 1 }),
+			);
+		}
+		// Round 4 F4, second half: root-level residue is reclaimed on the same
+		// window. It is a FILE, which is why the seam's directory-only sweep
+		// cannot be the whole rule.
+		const oldRoot = path.join(fixture, "orphan-backstop-owner-guard-old");
+		const liveRoot = path.join(fixture, "orphan-backstop-owner-guard-live");
+		for (const file of [oldRoot, liveRoot])
+			fs.writeFileSync(file, JSON.stringify({ lastSweepAt: 1 }));
+		// A day old: past any six-hour window, and far past the 16-minute
+		// worst-case vitest invocation the window is sized against.
+		const dayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
+		fs.utimesSync(oldForeign, dayAgo, dayAgo);
+		fs.utimesSync(oldRoot, dayAgo, dayAgo);
+		// Round 5: `mine`'s mtime is put two seconds INTO THE FUTURE, the
+		// boundary that redded CI (run 35072411511). A directory created
+		// microseconds before the sweep can carry a filesystem timestamp later
+		// than the process clock, and the run-id arm's `maxAgeMs: 0` read as
+		// "age >= 0" and skipped it. The rule for my own run's directories is
+		// the prefix alone, so no clock comparison may enter it.
+		const soon = new Date(Date.now() + 2_000);
+		fs.utimesSync(mine, soon, soon);
+		try {
+			removeRunBackstopDirs(fixture);
+			expect(fs.existsSync(mine)).toBe(false);
+			expect(fs.existsSync(liveForeign)).toBe(true);
+			expect(fs.existsSync(oldForeign)).toBe(false);
+			expect(fs.existsSync(oldRoot)).toBe(false);
+			expect(fs.existsSync(liveRoot)).toBe(true);
+		} finally {
+			fs.rmSync(fixture, { recursive: true, force: true });
+		}
+	});
+
+	// PR #3100 round 4 F4. The per-file detector used to assert the shared root
+	// holds NO backstop residue at all, while the tmp gate in the same file has
+	// always diffed against a setup snapshot. A checkout that had run master
+	// first — the expected first state for this change — therefore redded every
+	// test file for ever, naming an innocent file as the writer: with
+	// `.probe-home/orphan-backstop.json` planted, all 8 tests of
+	// bootstrap-lazy-liveness passed and the FILE failed. CI never sees it,
+	// because CI checks out fresh.
+	//
+	// `before` is injected because the real baseline is captured at setup, so no
+	// test can plant an entry into it; the directory read and the filter are the
+	// shipped ones. Both directions matter — the second is the guarantee round 3
+	// had and must not lose: a producer writing DURING the run is still named.
+	it("names only root backstop residue this run is answerable for", () => {
+		const home = process.env.PI_LENS_HOME as string;
+		const planted = `orphan-backstop-round4-guard-${process.env.PI_LENS_TMP_HYGIENE_RUN_ID}`;
+		const file = path.join(home, planted);
+		fs.writeFileSync(file, "{}");
+		const mtimeMs = fs.statSync(file).mtimeMs;
+		try {
+			// Present at setup, untouched since: not this run's doing.
+			expect(
+				unadmittedRootBackstopEntries({ [planted]: mtimeMs }),
+			).not.toContain(planted);
+			// Absent at setup: a producer created it during the run.
+			expect(unadmittedRootBackstopEntries({})).toContain(planted);
+			// Present at setup and OVERWRITTEN during the run — the case a
+			// name-only baseline masks. Measured on the real writer with the pin
+			// mutated away: same path, new mtime, and name-only named only the
+			// quarantine directory beside it, never the rewritten stamp.
+			expect(
+				unadmittedRootBackstopEntries({ [planted]: mtimeMs - 1000 }),
+			).toContain(planted);
+		} finally {
+			fs.rmSync(file, { force: true });
+		}
+	});
+
+	// PR #3100 round 3 F3. The wiring — that `cleanupTmpHygiene` still calls the
+	// sweep — has no behavioural guard available: this file is the LAST worker,
+	// so a guard driving the live home would perform the run's cleanup from
+	// inside its own assertion and stay green with the call deleted (measured:
+	// the whole hermeticity file and all 61 tests/config files passed while one
+	// directory leaked). The same source-scan idiom this file already uses for
+	// the setup-hook registration above, over comment-and-string-blanked text so
+	// a comment naming the call can never satisfy it.
+	it("keeps the backstop sweep wired into cleanupTmpHygiene", () => {
+		const setup = stripSource(
+			fs.readFileSync(
+				path.join(REPO_ROOT, "tests/support/vitest-setup.ts"),
+				"utf8",
+			),
+		);
+		const body = setup.match(
+			/export function cleanupTmpHygiene\(\): void \{[\s\S]*?\n\}/,
+		)?.[0];
+		expect(
+			body,
+			"cleanupTmpHygiene is no longer declared as expected",
+		).toBeTypeOf("string");
+		expect(body).toMatch(/\bremoveRunBackstopDirs\s*\(/);
 	});
 
 	it("registers the tmp-hygiene setup hook in every vitest project", () => {

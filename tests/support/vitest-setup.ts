@@ -2,11 +2,15 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { afterAll, expect } from "vitest";
+import { afterAll, expect, vi } from "vitest";
 import { installGitFixtureEnv } from "./git-fixture-env.js";
 import { installKillGuard, killGuardReport } from "./kill-guard.js";
 import { reportPeakRss } from "./worker-peak-rss.js";
 import { removeTempDirSync } from "../clients/test-utils.js";
+import {
+	SWEEP_ANY_AGE,
+	sweepScratchDirs,
+} from "../../scripts/lib/scratch-dir.mjs";
 
 // #2042: before anything else in the worker, so the guard is already in place
 // when a test's own `process.once("exit")` handler fires at fork teardown.
@@ -57,33 +61,89 @@ process.env.PI_LENS_CONFIG_PATH = "/nonexistent-pi-lens-tests/config.json";
 // owner observes the same namespace as production. Workers report additions;
 // the serialized owner removes entries after its assertion.
 const tmpHygieneRealTmp = os.tmpdir();
+const tmpHygieneHome = process.env.PI_LENS_HOME
+	? path.resolve(process.env.PI_LENS_HOME)
+	: path.join(process.cwd(), ".probe-home");
+fs.mkdirSync(tmpHygieneHome, { recursive: true });
 const tmpHygieneBaselinePath = path.join(
 	process.cwd(),
 	".probe-home",
 	`tmp-hygiene-baseline-${process.env.PI_LENS_TMP_HYGIENE_RUN_ID}.json`,
 );
 fs.mkdirSync(path.dirname(tmpHygieneBaselinePath), { recursive: true });
+
+/** Root-level `orphan-backstop*` entries of a home, each with its mtime: the
+ *  stamp, the transient lock, and the `orphan-backstop.lock.quarantine-…/`
+ *  directory a contended lock leaves behind. One definition, used by the
+ *  snapshot, the per-file detector and the stale sweep, so they can never
+ *  disagree (#3083).
+ *
+ *  Name AND mtime, because the name alone does not identify an ENTRY, and the
+ *  stamp's path is FIXED. Measured (round 4): with a stale
+ *  `orphan-backstop.json` in the baseline and the pin mutated away, the real
+ *  session_start writer overwrote that exact path during the run (mtime 08:04 →
+ *  11:05); a name-only baseline then reported only the uniquely-named
+ *  quarantine directory beside it and never named the rewritten stamp. A writer
+ *  that takes an UNCONTENDED lock leaves no quarantine directory, so name-only
+ *  would have reported nothing at all. Not a second clause — one rule with a
+ *  faithful notion of identity: the entry I saw at setup is the entry with that
+ *  name AND that mtime. */
+function rootBackstopSnapshot(
+	dir: string = tmpHygieneHome,
+): Record<string, number> {
+	const snapshot: Record<string, number> = {};
+	for (const entry of readTmpDirEntries(dir))
+		if (entry.startsWith("orphan-backstop"))
+			snapshot[entry] =
+				fs.statSync(path.join(dir, entry), { throwIfNoEntry: false })
+					?.mtimeMs ?? 0;
+	return snapshot;
+}
+
+/** PR #3100 round 3 F4: the backstop detector below used to assert the shared
+ *  root is ABSOLUTELY empty, while the tmp gate twelve lines down has always
+ *  compared against what was there at setup. Residue this run did not write —
+ *  most realistically master's own writer from a run before this branch was
+ *  checked out, the expected FIRST state for this change — then redded every
+ *  test file, for ever, naming an innocent file as the writer. CI never sees it
+ *  (fresh checkout), the same blind spot as the leak F1 fixed. One baseline
+ *  record, one write, one settle loop, now carrying both populations. */
+interface TmpHygieneBaseline {
+	tmp: string[];
+	backstopRoot: Record<string, number>;
+}
+
 let tmpHygieneBefore: Set<string>;
+let backstopRootBefore: Record<string, number>;
+
+function adoptBaseline(baseline: TmpHygieneBaseline): void {
+	tmpHygieneBefore = new Set(baseline.tmp);
+	backstopRootBefore = baseline.backstopRoot;
+}
+
 try {
-	tmpHygieneBefore = new Set(
-		JSON.parse(fs.readFileSync(tmpHygieneBaselinePath, "utf8")) as string[],
+	adoptBaseline(
+		JSON.parse(
+			fs.readFileSync(tmpHygieneBaselinePath, "utf8"),
+		) as TmpHygieneBaseline,
 	);
 } catch {
-	const baseline = snapshotTmpPiLensEntries(
-		readTmpDirEntries(tmpHygieneRealTmp),
-	);
+	const baseline: TmpHygieneBaseline = {
+		tmp: snapshotTmpPiLensEntries(readTmpDirEntries(tmpHygieneRealTmp)),
+		backstopRoot: rootBackstopSnapshot(),
+	};
 	try {
 		const fd = fs.openSync(tmpHygieneBaselinePath, "wx");
 		fs.writeFileSync(fd, `${JSON.stringify(baseline)}\n`);
 		fs.closeSync(fd);
-		tmpHygieneBefore = new Set(baseline);
+		adoptBaseline(baseline);
 	} catch {
 		for (let attempt = 0; attempt < 1000; attempt++) {
 			try {
-				tmpHygieneBefore = new Set(
+				adoptBaseline(
 					JSON.parse(
 						fs.readFileSync(tmpHygieneBaselinePath, "utf8"),
-					) as string[],
+					) as TmpHygieneBaseline,
 				);
 				break;
 			} catch {
@@ -93,12 +153,151 @@ try {
 		}
 	}
 }
-const tmpHygieneHome = process.env.PI_LENS_HOME
-	? path.resolve(process.env.PI_LENS_HOME)
-	: path.join(process.cwd(), ".probe-home");
-fs.mkdirSync(tmpHygieneHome, { recursive: true });
 process.env.PI_LENS_HOME = tmpHygieneHome;
 installGitFixtureEnv(tmpHygieneHome);
+
+// #3083: session_start reaches the backstop transitively through index.js.
+// Pin the filesystem location once for every file, without a caller registry
+// or changing #2912's shared home. Explicit per-case homes remain authoritative.
+// A module mock survives resetModules; no scheduler, store or lock is mocked.
+//
+// PR #3100 review F1: the question this asks is "is this the run-shared home?",
+// and that is a question about a DIRECTORY, not about a string. `PI_LENS_HOME`
+// pointed at a symlink of the run-shared home produced a different string, so a
+// string compare called it a separate explicit home and the real stamp and lock
+// landed at the shared root anyway. One rule — same st_dev + st_ino — answers
+// every spelling: the same path, a trailing slash or `..` (already normalised by
+// getGlobalPiLensDir's path.resolve), a symlink alias, and a second mount of the
+// same directory, which realpath alone would NOT catch. A path that does not
+// exist cannot be the run-shared home (mkdir'd above), so an absent stat is a
+// pass-through and no separate clause is needed for it.
+const backstopRunPrefix = `backstop-${process.env.PI_LENS_TMP_HYGIENE_RUN_ID}-`;
+let backstopPrivateDir: string | undefined;
+
+function isRunSharedHome(candidate: string): boolean {
+	const self = fs.statSync(candidate, { throwIfNoEntry: false });
+	const shared = fs.statSync(tmpHygieneHome, { throwIfNoEntry: false });
+	return (
+		self !== undefined &&
+		shared !== undefined &&
+		self.dev === shared.dev &&
+		self.ino === shared.ino
+	);
+}
+
+vi.mock("../../clients/instance-reaper-state.js", () => ({
+	resolveBackstopStateDir: (machineHome: string): string => {
+		if (!isRunSharedHome(machineHome)) return machineHome;
+		// On first use, not at import: most files that pull in the reaper never
+		// reach the backstop. Measured over the eight-file reaper batch (PR #3100
+		// round 2): mkdtemp in the factory left 8 directories, 7 of them empty;
+		// on first use it leaves the 1 that holds a stamp.
+		backstopPrivateDir ??= fs.mkdtempSync(
+			path.join(tmpHygieneHome, backstopRunPrefix),
+		);
+		return backstopPrivateDir;
+	},
+}));
+
+/**
+ * PR #3100 review F2. The run-shared home is NOT removed at run end: nothing in
+ * the repo removes `<cwd>/.probe-home`, and `cleanupTmpHygiene` below sweeps
+ * `os.tmpdir()` only. Round 1's `process.once("exit")` never fired either —
+ * vitest terminates a fork with SIGTERM — so two green runs left one, then two,
+ * private directories holding real stamps. Cleanup therefore belongs to the
+ * #2912 serialized hygiene owner (`tests/config/tmp-fixture-hygiene.test.ts`,
+ * groupOrder 6, maxWorkers 1), which runs after every other project has drained:
+ * no live worker's delayed callback can recreate a directory it removes, which a
+ * per-file `afterAll` could not promise. Scoped to this run's id because a
+ * concurrent sibling vitest invocation in the same checkout shares `.probe-home`
+ * and owns its own directories — the same reasoning as the `pi-lens-test-home-`
+ * admission below.
+ *
+ * Round 3 F1: a run-id-only sweep means a run only ever cleans ITSELF, so every
+ * invocation that excludes the hygiene owner — the targeted-run loop this repo
+ * runs all day — left one more directory with a real stamp under the persistent
+ * home, for ever. Master overwrote ONE stamp per run; that must not become
+ * unbounded growth, and the #2912 owner's own rule below says it: "so admissions
+ * cannot become a permanent inode leak". The cleanup axis has four cells and one
+ * rule covers them, expressed through the repo's existing stale-scratch seam
+ * (`scripts/lib/scratch-dir.mjs`, already imported by
+ * `tests/support/real-pi-harness.ts`) rather than a second hand-rolled loop:
+ *
+ * - this run's directories — `backstopRunPrefix`, `SWEEP_ANY_AGE`: the run is
+ *   finishing and no worker of it is alive, so the prefix alone is the rule and
+ *   no clock comparison enters it (round 5: `maxAgeMs: 0` means "age >= 0" and
+ *   skipped a directory whose mtime landed ahead of the process clock, which
+ *   redded CI run 35072411511);
+ * - a LIVE sibling invocation's — matches neither arm (different run id, and its
+ *   directories were written minutes ago at most), so it keeps its cooldown
+ *   stamp and its own owner removes them at the end of ITS run;
+ * - an ABANDONED foreign run's (a targeted run without the owner file) and
+ *   a KILLED run's (OOM/SIGKILL — seen on this host) — the same age arm
+ *   reclaims both, since in neither case will an owner ever run for them.
+ *
+ * `BACKSTOP_STALE_MS` is deliberately generous. Sweeping a live sibling's
+ * directory is the F2 flake class (its next sweep loses its cooldown stamp);
+ * reclaiming late only delays recovery. The longest observed whole-`ci.yml`
+ * workflow on master is 16 minutes (runs 35057763476, 35050766324), so six hours
+ * is ~22x the longest invocation this repo produces.
+ *
+ * `home` exists so the owner's own guard can drive this rule over a fixture
+ * directory. The sweep is destructive and the guard runs inside the LAST
+ * worker, so a guard aimed at the live home would perform the cleanup itself
+ * and hide whether `cleanupTmpHygiene` still calls this at all — measured:
+ * with the call deleted, a guard on the live home held the leftover count at 0.
+ * That wiring is pinned by a source scan in the owner's file instead (round 3
+ * F3).
+ */
+const BACKSTOP_STALE_MS = 6 * 60 * 60 * 1000;
+
+export function removeRunBackstopDirs(home: string = tmpHygieneHome): void {
+	sweepScratchDirs(home, backstopRunPrefix, { maxAgeMs: SWEEP_ANY_AGE });
+	sweepScratchDirs(home, "backstop-", { maxAgeMs: BACKSTOP_STALE_MS });
+	// Round 4 F4, second half: the baseline stops root-level residue accusing an
+	// innocent file, but only this reclaims it — otherwise it sits under the
+	// persistent home for ever, exactly the leak F1 closed one directory over.
+	// Not `sweepScratchDirs`: the stamp is a FILE and that seam only considers
+	// directories, so it would reclaim the quarantine directory and leave the
+	// stamp. Young residue is left alone — the detector has already redded the
+	// file that wrote it, and this runs while that evidence still matters.
+	for (const [name, mtimeMs] of Object.entries(rootBackstopSnapshot(home))) {
+		if (Date.now() - mtimeMs < BACKSTOP_STALE_MS) continue;
+		removeTempDirSync(path.join(home, name));
+	}
+}
+
+/** The root-level backstop residue this RUN is answerable for: what is there
+ *  now, minus what was already there when the run started. `before` is a
+ *  parameter so the owner's guard can drive the real directory against a
+ *  synthetic baseline — the F4 case cannot be reached otherwise, since the real
+ *  baseline is captured at setup, before any test can plant anything. */
+export function unadmittedRootBackstopEntries(
+	before: Readonly<Record<string, number>> = backstopRootBefore,
+	home: string = tmpHygieneHome,
+): string[] {
+	return Object.entries(rootBackstopSnapshot(home))
+		.filter(([name, mtimeMs]) => before[name] !== mtimeMs)
+		.map(([name]) => name);
+}
+
+// #3083, master red 038e28b: catch a new transitive writer in whichever
+// file introduced it. The runtime hermeticity test also observes released locks.
+// By PREFIX, not by the two exact names (PR #3100 round 2): reverting the
+// identity rule left `orphan-backstop.lock.quarantine-<pid>-release-…/` at the
+// shared root beside the stamp — durable residue of a contended lock that
+// neither exact name covers, and the only residue left by a writer that
+// quarantines a lock without reaching the stamp.
+//
+// Against the setup snapshot, not against emptiness (round 4 F4): residue this
+// run did not write is not this file's doing, and accusing it made the whole
+// suite unrunnable on any checkout that had run master first.
+afterAll(() => {
+	expect(
+		unadmittedRootBackstopEntries(),
+		"#3083: test wrote run-shared orphan-backstop state",
+	).toEqual([]);
+});
 
 interface TmpLeakAdmission {
 	/** Test file (repo-relative) or "*" for every file. */
@@ -303,6 +502,7 @@ export function cleanupTmpHygiene(): void {
 			continue;
 		removeTempDirSync(path.join(tmpHygieneRealTmp, name));
 	}
+	removeRunBackstopDirs();
 	try {
 		fs.rmSync(tmpHygieneBaselinePath, { force: true });
 	} catch {

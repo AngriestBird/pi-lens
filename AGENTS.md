@@ -307,6 +307,9 @@ and PR language; detailed historical examples are in `HISTORY.md`.
   `PI_LENS_HOME` under `os.tmpdir()`, so a `TMPDIR` aimed at `.probe-home` moves
   the harness home into a git-ignored directory inside the checkout and reds
   unrelated suites (#3026). `scripts/hooks/guard-bash.mjs` denies it.
+- Vitest keeps the #2912 run-shared home; `vitest-setup.ts` pins only the
+  orphan-backstop directory through `resolveBackstopStateDir` (#3083). Explicit
+  per-case homes remain authoritative. Never bypass this seam for its lock or stamp.
 - New filesystem walkers use shared exclusions and ignore matching, cap
   walk-down work, and use the correct home-ceiling policy for walk-up discovery.
 
