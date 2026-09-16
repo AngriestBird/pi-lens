@@ -39,7 +39,11 @@ import {
 	newLspMutationCorrelationId,
 } from "../lsp-mutation.js";
 import { getProcessSingleton } from "../process-singletons.js";
-import { getAmbientAbortSignal } from "../safe-spawn.js";
+import {
+	getAmbientAbortSignal,
+	isOwnLiveChild,
+	releaseOwnChildPid,
+} from "../safe-spawn.js";
 import { raceToCompletion } from "./aggregation.js";
 import {
 	hashDiagnosticContent,
@@ -1270,6 +1274,9 @@ export async function killProcessTree(
 		(proc.exitCode != null || proc.signalCode != null) &&
 		!options.processExiting
 	) {
+		// #3091 F1-r2b: this pid will never be signalled again, so retire the
+		// ownership hold taken at spawn rather than leaving it to age out.
+		releaseOwnChildPid(pid);
 		proc.unref?.();
 		return;
 	}
@@ -1344,7 +1351,20 @@ export async function killProcessTree(
 	}
 
 	const killPosixProcessGroup = (signal: NodeJS.Signals): boolean => {
-		if (pid <= 0) return false;
+		// #2042: one ownership predicate for every kill-by-raw-pid, replacing
+		// the `pid <= 0` sign check that let a test double's invented pid
+		// through. A pid we do not own falls back to `killDirectChild` below,
+		// which signals through the retained handle and can only ever reach
+		// our own child.
+		//
+		// #3091 F1: `proc` is deliberately NOT passed. The handle arm means
+		// "already exited ⇒ refuse", and this group kill must still fire when
+		// the direct child is dead — the early return at :1269 is skipped under
+		// `options.processExiting`, and a POSIX group outlives its leader, so
+		// the group signal is the only thing that reaps surviving grandchildren
+		// at host exit (#2026). Ownership here comes from the kernel and, once
+		// the leader is gone, from the verdict recorded while it was alive.
+		if (!isOwnLiveChild(pid, "lsp-stop-posix-group")) return false;
 		try {
 			process.kill(-pid, signal);
 			return true;
@@ -1400,6 +1420,11 @@ export async function killProcessTree(
 						killDirectChild("SIGKILL");
 					}
 				}
+				// AFTER the escalation, never before it: this tick issues the
+				// last signal this pid can receive, and retiring the ownership
+				// hold first would make that very SIGKILL the thing that gets
+				// refused (#3091 F1-r2b).
+				releaseOwnChildPid(pid);
 			}, 1500);
 			timer.unref?.();
 			proc.unref?.();
@@ -1437,6 +1462,7 @@ export async function killProcessTree(
 				killDirectChild("SIGKILL");
 			}
 		}
+		releaseOwnChildPid(pid);
 	} catch {
 		// ignore
 	}

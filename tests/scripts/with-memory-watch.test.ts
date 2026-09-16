@@ -154,7 +154,7 @@ describe("with-memory-watch verdict durability (#2042)", () => {
 			["--", nodeCmd, "-e", "process.stdout.write('x'.repeat(4194304))"],
 			20,
 		);
-		expect(run.code).toBe(0);
+		expect(run.code, run.stderr).toBe(0);
 		expect(run.stdout).toContain("[mem-watch] done.");
 		expect(run.stdout).toContain("lowWaterAvailableMb=");
 	}, 60_000);
