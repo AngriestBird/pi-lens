@@ -15,7 +15,10 @@ import {
 	retireWidgetDependencyDriftBlockers,
 } from "../../clients/widget-state.js";
 import { createLensDiagnosticMarkTool } from "../../tools/lens-diagnostic-mark.js";
-import { removeTempDirSync } from "../clients/test-utils.js";
+import {
+	createCaseAliasFixture,
+	removeTempDirSync,
+} from "../clients/test-utils.js";
 
 let tmpDir: string;
 let previousDataDir: string | undefined;
@@ -160,6 +163,49 @@ describe("lens_diagnostic_mark tool — line verification/reanchoring (#802)", (
 		const anchor = (result.details as { anchor: string }).anchor;
 		const entry = getDisposition(tmpDir, anchor);
 		expect(entry?.disposition).toBe("false-positive");
+	});
+
+	// #3160: `widgetCrossCheck` looked up the RAW (possibly mis-cased) absPath
+	// against `getFileDiagnostics`, which keys with `normalizeEphemeralMapKey`
+	// — case-preserving on POSIX by design (no filesystem I/O on that hot
+	// path). Production writers key from `ctx.filePath`, which
+	// `createDispatchContext` already normalizes to the on-disk casing
+	// (#2016/#3098), so a mis-cased `lens_diagnostic_mark` call derived a
+	// DIFFERENT key than the one the widget stored under, missed the live
+	// diagnostic, and silently fell through to the fuzzy fallback — exactly
+	// the input the #802 cross-check exists for. `createCaseAliasFixture`
+	// manufactures the identical kernel contract (two spellings, one file,
+	// `realpath` reporting the on-disk one) with a case-variant symlink, so
+	// this reproduces on the case-sensitive ubuntu Unit tests lane too — refs
+	// #3098/#3159.
+	it("mis-cased filePath still finds the live widget diagnostic to reanchor (#3160)", async (ctx) => {
+		const fixture = createCaseAliasFixture(tmpDir, {
+			content: "const a = 1;\nconst b = 2;\nconst target = bad();\n",
+		});
+		ctx.skip(fixture.skipReason !== undefined, fixture.skipReason ?? "");
+
+		// The widget-state write side records under the on-disk casing (what
+		// `ctx.filePath` always is in production) — never the caller's raw
+		// mis-cased spelling.
+		recordDiagnostics(fixture.onDisk, [
+			{ tool: "eslint", rule: "no-bad", message: "bad call", line: 3 },
+		]);
+
+		const misCasedRelative = path.relative(tmpDir, fixture.rawMisCased);
+		const result = await run({
+			filePath: misCasedRelative,
+			line: 2, // stale
+			message: "bad call",
+			rule: "no-bad",
+			tool: "eslint",
+			disposition: "false-positive",
+		});
+
+		expect(result.isError).toBeFalsy();
+		expect(String(result.content[0]?.text)).toMatch(
+			/reanchored from line 2 to 3/,
+		);
+		expect((result.details as { line: number }).line).toBe(3);
 	});
 
 	// #2275 review F2: the widget footer's dependency-drift delivery cap stops

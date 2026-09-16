@@ -1,0 +1,11 @@
+---
+section: Fixed
+---
+
+- **`lens_diagnostic_mark` widget cross-check missed mis-cased paths on case-insensitive filesystems (refs #3160)** — the #802 line-reanchor
+  cross-check looked up the raw, possibly mis-cased, mark target against
+  widget state, which is keyed case-preservingly on POSIX; on a
+  case-insensitive filesystem (macOS APFS, `nocase` vfat/ntfs3/cifs) this
+  silently missed the live diagnostic and fell back to the fuzzy line guess.
+  The lookup now normalizes the path to on-disk casing before checking
+  widget state, matching how the widget's own writers key their records.
