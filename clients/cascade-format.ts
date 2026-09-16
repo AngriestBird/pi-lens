@@ -119,7 +119,10 @@ export function buildResolvedFoundCascadeRun(
 		policyMap: loadProjectRulePolicyMap(cwd),
 		identities: renderedRuleIdentities,
 	});
-	const suppressed = converted.length - diagnostics.length;
+	// Policy drops only, DISJOINT from `auxSuppressed` below — the same split
+	// the `late_auxiliary_findings` record uses, so one operator reading both
+	// records does not have to know that one nests and the other does not.
+	const suppressed = retained.length - diagnostics.length;
 	if (suppressed > 0) {
 		// One bounded record per RUN, never one per finding (AGENTS.md "bounded
 		// observability"). This is a PUSH surface: silence after a mark is the
