@@ -4,6 +4,61 @@ import {
 } from "./dispatch/indent-detect.js";
 
 /**
+ * Anchors the interior-mask lexer to the real file instead of the agent's
+ * oldText fragment. `content` is the file's full text (LF-normalized,
+ * covering lines before and after the fragment); `startLine` is the
+ * 1-indexed line, within `content`, where `correctedOldText`'s first line
+ * begins — i.e. the same line-range a caller resolves via
+ * `findUniqueMatchLineRange` before it knows the correction is safe to
+ * apply. Without this, a fragment that starts or ends INSIDE a multi-line
+ * template literal is lexically ambiguous on its own — a template's CLOSER
+ * appearing without its opener reads as an opener, and vice versa, so the
+ * mask can invert (real code masked as template interior, or the reverse)
+ * wherever the fragment crosses a template boundary the surrounding file
+ * would have resolved correctly (#3116 review round 2, F1/F4).
+ */
+export interface IndentRetargetFileContext {
+	content: string;
+	startLine: number;
+}
+
+/**
+ * Computes both interior masks for `oldLines`, anchored to the real file
+ * when `fileContext` resolves cleanly, falling back to the fragment alone
+ * otherwise. `blockCommentInteriorMask` has no fragment-ambiguity to correct
+ * (a lone `*\/` cannot be mistaken for an opener the way a lone backtick
+ * can), so it always runs file-anchored when a file is available — this is
+ * about `templateLiteralInteriorMask` specifically, but both take the same
+ * path for one lexing pass over consistent line numbers.
+ */
+function computeInteriorMasks(
+	oldLines: string[],
+	fileContext: IndentRetargetFileContext | undefined,
+): { commentInterior: boolean[]; templateInterior: boolean[] } {
+	if (fileContext) {
+		const fileLines = fileContext.content.replace(/\r\n/g, "\n").split("\n");
+		const start = fileContext.startLine - 1;
+		const end = start + oldLines.length;
+		if (start >= 0 && end <= fileLines.length) {
+			return {
+				commentInterior: blockCommentInteriorMask(fileLines).slice(start, end),
+				templateInterior: templateLiteralInteriorMask(fileLines).slice(
+					start,
+					end,
+				),
+			};
+		}
+		// startLine/length don't fit inside content — the caller resolved a
+		// stale or mismatched range; fall through to the fragment-only path
+		// rather than slicing out of bounds.
+	}
+	return {
+		commentInterior: blockCommentInteriorMask(oldLines),
+		templateInterior: templateLiteralInteriorMask(oldLines),
+	};
+}
+
+/**
  * Retargets the leading-whitespace style of newText to match the indentation
  * correction that was applied to oldText.
  *
@@ -25,18 +80,30 @@ import {
  * indentation ratio, silently mis-scaling every such deeper line (#3052,
  * #3116). Uses the same lexer as `clients/dispatch/indent-detect.ts`'s
  * `detectIndentation` (#3039, #3059) rather than a second one.
+ *
+ * `fileContext`, when the caller has it, anchors that lexer to the real file
+ * (see {@link IndentRetargetFileContext}) so a template boundary the
+ * oldText fragment crosses is read correctly instead of ambiguously. Without
+ * it (match position unknown — the caller never found a unique file span,
+ * or is calling with a synthetic fragment that has no backing file), the
+ * masks fall back to running over the fragment alone, which is exact for a
+ * block comment (`*\/` cannot be mistaken for an opener) but can misread a
+ * template literal whose opener or closer lies outside the fragment.
  */
 export function retargetReplacementIndentation(
 	newText: string,
 	oldText: string,
 	correctedOldText: string,
+	fileContext?: IndentRetargetFileContext,
 ): string | undefined {
 	const newline = newText.includes("\r\n") ? "\r\n" : "\n";
 	const oldLines = oldText.replace(/\r\n/g, "\n").split("\n");
 	const correctedLines = correctedOldText.replace(/\r\n/g, "\n").split("\n");
 	if (oldLines.length !== correctedLines.length) return undefined;
-	const commentInterior = blockCommentInteriorMask(oldLines);
-	const templateInterior = templateLiteralInteriorMask(oldLines);
+	const { commentInterior, templateInterior } = computeInteriorMasks(
+		oldLines,
+		fileContext,
+	);
 
 	const indentMap = new Map<string, string>();
 	// oldIndent keys backed by at least one line OUTSIDE a comment or

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { retargetReplacementIndentation } from "../../clients/indent-retarget.js";
+import type { IndentRetargetFileContext } from "../../clients/indent-retarget.js";
 
 describe("retargetReplacementIndentation", () => {
 	// ── basic remapping ────────────────────────────────────────────────────────
@@ -236,7 +237,7 @@ describe("retargetReplacementIndentation — block-comment interior excluded fro
 });
 
 // ── #3116: a template-literal interior's alignment must not become the ────
-// base nesting unit either (AGENTS.md defect 49, fourth member — same shape
+// base nesting unit either (AGENTS.md defect 49, fifth member — same shape
 // #3052 fixed for block comments, now via templateLiteralInteriorMask,
 // #3059). Each row gives the template's interior and the code line DIFFERENT
 // correction ratios so a base-unit mix-up produces a visibly wrong (not
@@ -287,8 +288,21 @@ describe("retargetReplacementIndentation — template-literal interior excluded 
 		// anywhere) swallowing ordinary code — the decoy backtick here is
 		// inside a quoted string, so templateLiteralInteriorMask (and thus
 		// retarget) must never open a template region for it.
-		const oldText = 'const s = "a ` decoy";\nfunction f() {\n  go();\n}';
-		const corrected = 'const s = "a ` decoy";\nfunction f() {\n\tgo();\n}';
+		//
+		// A SECOND decoy on its own line (review round 2, F2) is required for
+		// this to actually exercise skipQuoted's own logic: with only one
+		// decoy, neutering skipQuoted (exposing the backtick to top-level
+		// scanning) opens a phantom template that never finds a closing
+		// backtick anywhere in oldText — the opener-never-closes fail-safe
+		// then unmasks everything again, so the mutant's WRONG path (skip
+		// disabled, fail-safe absorbs it) coincides with the correct path's
+		// output and the test stays green either way. The second decoy gives
+		// the phantom something to wrongly close against, so the mutant masks
+		// "function f() {" / "  go();" as template interior and diverges.
+		const oldText =
+			'const s = "a ` decoy";\nfunction f() {\n  go();\n}\nconst t = "b ` decoy";';
+		const corrected =
+			'const s = "a ` decoy";\nfunction f() {\n\tgo();\n}\nconst t = "b ` decoy";';
 		const newText = "function g() {\n  a();\n    b();\n}";
 		expect(retargetReplacementIndentation(newText, oldText, corrected)).toBe(
 			"function g() {\n\ta();\n\t\tb();\n}",
@@ -332,5 +346,103 @@ describe("retargetReplacementIndentation — template-literal interior excluded 
 		expect(retargetReplacementIndentation(newText, oldText, corrected)).toBe(
 			"const OTHER = `\n  text more\n`;\nfunction g() {\n   a();\n}",
 		);
+	});
+});
+
+// ── #3116 review round 2, F1/F4: a fragment-only lexer is ambiguous ────────
+// wherever the oldText fragment crosses a template-literal BOUNDARY the
+// surrounding file would have resolved unambiguously. A lone backtick reads
+// as an OPENER when the fragment lacks the real opener that precedes it, and
+// as a CLOSER when the fragment lacks the real closer that follows it — so a
+// fragment crossing from one template's close into another's open (or
+// starting/ending mid-template) can invert which lines are template interior
+// versus real code. `fileContext` anchors the lexer to the real file (the
+// same line range a caller resolves via `findUniqueMatchLineRange`) so the
+// surrounding template boundaries are read correctly. Every row's fixture is
+// reproduced directly against retargetReplacementIndentation (not asserted
+// from code inspection) before being written here.
+describe("retargetReplacementIndentation — fileContext anchors the mask across a template boundary (#3116 review round 2)", () => {
+	// F1 probe (a): oldText is a fragment starting at template A's closer and
+	// ending at template B's opener — real code ("function f() {" / "go();" /
+	// "}") sits entirely between the two. A fragment-only lexer reads A's
+	// closer backtick as an OPENER (no matching opener in the fragment) and
+	// B's opener backtick as its CLOSER, so it marks the intervening real code
+	// as template interior — excluding "go();"'s indent from the base pick
+	// entirely (indentMap has only that one entry) and aborting to undefined,
+	// where a correct (file-anchored) read resolves the deeper `b();` line
+	// from the code's own ratio.
+	it("resolves a fragment that crosses from one template's closer into another's opener (F1 probe a)", () => {
+		const fileContent =
+			"const A = `\n  first\n`;\nfunction f() {\n   go();\n}\nconst B = `\n  second\n`;\n";
+		const oldText = "`;\nfunction f() {\n  go();\n}\nconst B = `";
+		const corrected = "`;\nfunction f() {\n   go();\n}\nconst B = `";
+		const newText = "function g() {\n  a();\n      b();\n}";
+		const fileContext: IndentRetargetFileContext = {
+			content: fileContent,
+			startLine: 3, // fileContent's line 3 ("`;") is oldText's line 1
+		};
+
+		// Without fileContext: the fragment-only lexer's inversion excludes
+		// the only real base candidate, so the function safely DECLINES
+		// (returns undefined) rather than silently mis-scaling — this is the
+		// documented fallback, not the defect itself.
+		expect(
+			retargetReplacementIndentation(newText, oldText, corrected),
+		).toBeUndefined();
+
+		// With fileContext: correctly resolves from the code's own 2->3 ratio.
+		expect(
+			retargetReplacementIndentation(newText, oldText, corrected, fileContext),
+		).toBe("function g() {\n   a();\n         b();\n}");
+	});
+
+	// F1 probe (b): same boundary-crossing shape, but this time the fragment
+	// also carries a SECOND template's interior line (with its own, shorter,
+	// differing-ratio indent). Without file-anchoring, the inversion excludes
+	// the real code line ("go();") from eligibility while wrongly leaving the
+	// template interior line eligible — so baseFrom becomes the template's
+	// OWN ratio (2->3, mis-scaling a deeper newText line to 12 spaces)
+	// instead of the code's real ratio (4->2, correctly giving 4 spaces). A
+	// WRONG VALUE, not merely a decline — the sharper of the two review-round
+	// manifestations.
+	it("does not mis-scale from a template's own ratio when a boundary-crossing fragment wrongly excludes the real code line (F1 probe b)", () => {
+		const fileContent =
+			"const A = `\n   p\n`;\nfunction f() {\n  go();\n}\nconst B = `\n   q\n`;\n";
+		const oldText = "`;\nfunction f() {\n    go();\n}\nconst B = `\n  q";
+		const corrected = "`;\nfunction f() {\n  go();\n}\nconst B = `\n   q";
+		const newText = "function g() {\n    a();\n        b();\n}";
+		const fileContext: IndentRetargetFileContext = {
+			content: fileContent,
+			startLine: 3,
+		};
+
+		expect(
+			retargetReplacementIndentation(newText, oldText, corrected, fileContext),
+		).toBe("function g() {\n  a();\n    b();\n}");
+	});
+
+	// F4: the fragment sits entirely INSIDE a template's interior — neither
+	// the opener nor the closer is in the fragment at all. A fragment-only
+	// lexer never sees a backtick, so it reads these lines as plain code
+	// (mask all false) — the ORIGINAL #3116 defect reappearing specifically
+	// when the fragment doesn't carry the opener. File-anchoring the lexer
+	// over the real file resolves it: the single differing indent is
+	// correctly recognized as template alignment and excluded from the base
+	// pick, so a deeper `newText` line correctly DECLINES (undefined) rather
+	// than being silently mis-scaled by the template's own alignment ratio.
+	it("declines rather than mis-scale when the fragment sits entirely inside a template's interior, opener outside the slice (F4)", () => {
+		const fileContent =
+			"const HELP = `\n  first\n  second\n`;\nfunction f() {\n  go();\n}\n";
+		const oldText = "  first\n  second";
+		const corrected = "    first\n    second";
+		const newText = "    third\n        fourth";
+		const fileContext: IndentRetargetFileContext = {
+			content: fileContent,
+			startLine: 2, // fileContent's line 2 ("  first") is oldText's line 1
+		};
+
+		expect(
+			retargetReplacementIndentation(newText, oldText, corrected, fileContext),
+		).toBeUndefined();
 	});
 });
