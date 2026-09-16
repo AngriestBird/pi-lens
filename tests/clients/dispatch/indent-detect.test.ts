@@ -3,6 +3,7 @@ import {
 	blockCommentInteriorMask,
 	detectIndentation,
 	hasDetectableIndentation,
+	templateLiteralInteriorMask,
 } from "../../../clients/dispatch/indent-detect.js";
 
 const T = "\t";
@@ -223,9 +224,32 @@ const ROWS: Array<{
 		content: `#!/bin/sh\n# a script\nf() {\n${T}echo hi\n${T}if true; then\n${T}${T}echo deep\n${T}fi\n}\n`,
 		expected: { style: "tab", width: 1 },
 	},
+	{
+		// Recurrence this pins (#3059, AGENTS.md defect 49's fourth member): a
+		// multi-line template literal's interior is alignment on the string's own
+		// content, not a nesting unit — the same shape as a block-comment's ` * `
+		// column. Proven through the real FormatService with the pinned biome
+		// binary (PR body): a 4-space file carrying this exact template gets
+		// rewritten to 2-space on the first pass. Without the exclusion the two
+		// 2-space text lines outvote the 4-space code, matching #3039's ` * `
+		// mechanism.
+		id: "T1 4-space file with a 2-space-indented template literal (help text)",
+		content:
+			"const HELP = `\n  Usage: tool [options]\n\n  Options:\n    -h, --help     Show this help\n    -v, --version  Show version\n`;\n\nfunction main() {\n    doStuff();\n    if (ok) {\n        run();\n    }\n}\n",
+		expected: { style: "space", width: 4 },
+	},
+	{
+		// T1's control: the identical file with the template literal's text
+		// flush left, so it donates no indented lines and the file is
+		// byte-identical evidence with or without the fix.
+		id: "T1-control identical file, template literal flush left",
+		content:
+			"const HELP = `\nUsage: tool [options]\n\nOptions:\n-h, --help     Show this help\n-v, --version  Show version\n`;\n\nfunction main() {\n    doStuff();\n    if (ok) {\n        run();\n    }\n}\n",
+		expected: { style: "space", width: 4 },
+	},
 ];
 
-describe("indentation detection state space (#3038, #3039)", () => {
+describe("indentation detection state space (#3038, #3039, #3059)", () => {
 	it.each(ROWS.map((row) => [row.id, row] as const))("%s", (_id, row) => {
 		expect(detectIndentation(row.content)).toEqual(row.expected);
 	});
@@ -282,5 +306,116 @@ describe("blockCommentInteriorMask", () => {
 			"function f() {",
 		];
 		expect(blockCommentInteriorMask(lines)).toEqual([false, true, true, false]);
+	});
+});
+
+/**
+ * templateLiteralInteriorMask state space (#3059, AGENTS.md defect 49's
+ * fourth member). Four axes, mirroring blockCommentInteriorMask's own direct
+ * assertions:
+ *
+ *   position     — opener line / interior line / closer line / outside
+ *   ${ } nesting — none / one level (object literal) / a nested template
+ *   escaping     — plain backtick / escaped backtick (`\``)
+ *   false opener — a backtick inside a `//` comment or a quoted string
+ *
+ * | test                                   | position        | nesting  | escape | false opener |
+ * |-----------------------------------------|-----------------|----------|--------|--------------|
+ * | masks interior, keeps opener/closer     | all four        | none     | no     | no           |
+ * | ${ } with an object literal survives    | all four        | one level| no     | no           |
+ * | an escaped backtick does not close early| interior         | none     | yes    | no           |
+ * | // comment backtick does not open       | n/a (no template)| n/a      | no     | // comment   |
+ * | string backtick does not open           | n/a (no template)| n/a      | no     | quoted string|
+ * | unterminated template swallows nothing  | interior (never closes) | none | no | no      |
+ */
+describe("templateLiteralInteriorMask", () => {
+	it("masks only the interior of a multi-line template, keeping the opener and closer's own line true and real code false", () => {
+		const lines = ["const s = `", "  text", "`;", "code();"];
+		expect(templateLiteralInteriorMask(lines)).toEqual([
+			false,
+			true,
+			true,
+			false,
+		]);
+	});
+
+	it("tracks ${ } nesting depth so an object literal inside a substitution does not close it early (#3059 acceptance: nesting stated and tested)", () => {
+		// A mutation that stops counting nested `{` inside the substitution (so
+		// any `}` pops it) sends this exact input's mask to
+		// [false, true, false, false, true, false] instead — see the PR body's
+		// mutation transcript.
+		const lines = [
+			"const s = `",
+			"${ {} `",
+			"  more",
+			"` }",
+			"`;",
+			"code();",
+		];
+		expect(templateLiteralInteriorMask(lines)).toEqual([
+			false,
+			true,
+			true,
+			true,
+			true,
+			false,
+		]);
+	});
+
+	it("does not close the template on an escaped backtick (#3059 acceptance: escaping stated and tested)", () => {
+		const lines = [
+			"const s = `",
+			"  esc \\` still inside",
+			"  more text",
+			"`;",
+			"code();",
+		];
+		expect(templateLiteralInteriorMask(lines)).toEqual([
+			false,
+			true,
+			true,
+			true,
+			false,
+		]);
+	});
+
+	it("does not open a template for a backtick inside a // comment (#3059 acceptance)", () => {
+		const lines = [
+			"// a stray ` backtick",
+			"function f() {",
+			"  go();",
+			"}",
+		];
+		expect(templateLiteralInteriorMask(lines)).toEqual([
+			false,
+			false,
+			false,
+			false,
+		]);
+	});
+
+	it("does not open a template for a backtick inside a string literal (#3059 acceptance)", () => {
+		const lines = [
+			'const s = "a ` stray backtick";',
+			"function f() {",
+			"  go();",
+			"}",
+		];
+		expect(templateLiteralInteriorMask(lines)).toEqual([
+			false,
+			false,
+			false,
+			false,
+		]);
+	});
+
+	it("keeps every line structural when the opener never closes, mirroring blockCommentInteriorMask's R21 shape", () => {
+		const lines = ["const open = `", "function f() {", "    go();", "}"];
+		expect(templateLiteralInteriorMask(lines)).toEqual([
+			false,
+			false,
+			false,
+			false,
+		]);
 	});
 });
