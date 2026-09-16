@@ -27,6 +27,7 @@ Each runtime toggle is settable from the CLI *and* from `config.json`. The two a
 | `--lens-actionable-warning-all` | `actionableWarnings.deltaOnly` (`false`) | `true` |
 | `--lens-compact-tool-line` | `ui.compactToolLine` | `false` |
 | `--lens-compact-lsp-status` | `ui.compactLspStatus` | `false` |
+| `--lens-hide-lsp-status` | `ui.hideLspStatus` | `false` |
 | `--no-lazy-tools` | `tools.lazy` | `true` |
 | `--lens-turn-end-madge` | `turnEnd.madge.enabled` | `false` |
 | `--no-knip` | `knip.enabled` | `true` |

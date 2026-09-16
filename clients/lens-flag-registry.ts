@@ -234,6 +234,15 @@ export const LENS_FLAGS: readonly LensFlagSpec[] = [
 		scope: "global",
 	},
 	{
+		name: "lens-hide-lsp-status",
+		description:
+			"Opt-in (#3099): publish no pi-lens-lsp footer status at all, so a host that renders extension statuses stops showing the key. Outranks lens-compact-lsp-status when both are set. Default off. Also via ui.hideLspStatus=true in ~/.pi-lens/config.json.",
+		configKey: "ui.hideLspStatus",
+		negated: false,
+		default: false,
+		scope: "global",
+	},
+	{
 		name: "no-lazy-tools",
 		description:
 			"Keep all pi-lens tools active to avoid tool-list cache changes. Also via tools.lazy=false in ~/.pi-lens/config.json.",

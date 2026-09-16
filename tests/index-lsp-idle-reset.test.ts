@@ -227,6 +227,62 @@ describe("index.ts LSP idle reset", () => {
 		INTEGRATION_TIMEOUT_MS,
 	);
 
+	// #3099: off mode publishes no status at all — `undefined`, not a dim
+	// "LSP Inactive" — so a host that renders extension statuses stops showing
+	// the `pi-lens-lsp` key entirely. Drives the real turn_end →
+	// updateLspStatus path and asserts the published value across BOTH the
+	// active turn and the idle-released repaint: neutering the guard (making
+	// it a no-op) would make the first assertion see `"LSP Active: typescript"`
+	// instead of `undefined`, and the second would still see a live server
+	// name/dim text rather than staying `undefined` after the idle timer.
+	it(
+		"publishes no status at all when lens-hide-lsp-status is on, and stays unpublished across the idle repaint (#3099)",
+		async () => {
+			const { turnEnd, ui, lspStatuses, resetLSPService } =
+				await setupLspStatusRepaint({
+					flags: { "lens-hide-lsp-status": true },
+				});
+			const ctx = { cwd: tmpDir, ui };
+
+			vi.useFakeTimers();
+			try {
+				await turnEnd?.({}, ctx);
+				expect(lspStatuses().at(-1)).toBeUndefined();
+
+				await vi.advanceTimersByTimeAsync(getEffectiveLspIdleResetMs());
+
+				expect(resetLSPService).toHaveBeenCalledTimes(1);
+				// Still unpublished after the repaint that would otherwise flip to
+				// "LSP Inactive" (or its compact dim glyph) — the flag never changed.
+				expect(lspStatuses().at(-1)).toBeUndefined();
+			} finally {
+				vi.useRealTimers();
+			}
+		},
+		INTEGRATION_TIMEOUT_MS,
+	);
+
+	// #3099: precedence — off wins when both flags are set, since there is
+	// nothing left to render compactly once the key itself is gone. Mutating
+	// the off-check's placement (checking compact first, or dropping the
+	// early `return`) would let the compact glyph ("LSP ✓") leak out.
+	it(
+		"off outranks compact when both lens-hide-lsp-status and lens-compact-lsp-status are on (#3099)",
+		async () => {
+			const { turnEnd, ui, lspStatuses } = await setupLspStatusRepaint({
+				flags: {
+					"lens-hide-lsp-status": true,
+					"lens-compact-lsp-status": true,
+				},
+			});
+			const ctx = { cwd: tmpDir, ui };
+
+			await turnEnd?.({}, ctx);
+			expect(lspStatuses().at(-1)).toBeUndefined();
+		},
+		INTEGRATION_TIMEOUT_MS,
+	);
+
 	// #713: subagent light mode uses a shorter idle reset than a normal
 	// session. #1618 (R4): that shortened delay is now ALSO derived against
 	// the sweep's own wall-clock ceiling (`getEffectiveLspIdleResetMs` floors

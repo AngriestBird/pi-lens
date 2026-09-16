@@ -842,6 +842,17 @@ function activateExtension(hostPi: ExtensionAPI) {
 		theme: LspStatusTheme,
 	) {
 		try {
+			// #3099: opt-in off mode. Publishing undefined removes the key entirely
+			// so a host that renders extension statuses stops showing it at all —
+			// stronger than compact, which still publishes a glyph. Checked first
+			// and before any of the selection work below: off outranks compact
+			// when both are set, since there is nothing left to render compactly
+			// once the key itself is gone. Nothing leaves the surface — the ids
+			// stay reachable through /lens-tools and lens_health.
+			if (getLensFlag("lens-hide-lsp-status") === true) {
+				setStatus("pi-lens-lsp", undefined);
+				return;
+			}
 			// Active and Failed coexist (#170): show the working servers in green
 			// AND any language whose servers all failed in red, side by side. A
 			// failed server is suppressed when a live sibling covers its language
