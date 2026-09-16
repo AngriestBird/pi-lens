@@ -380,6 +380,86 @@ query:
 		expect(group?.count).toBe(1);
 		expect(group?.latestReasons[0]?.reason).toContain("'query'");
 	});
+
+	// #3070 N1: `loadQueries` short-circuits on `this.loaded && this.loadedRoot
+	// === resolvedRoot` before `parseQueryFile` runs, so a memoized (no
+	// `force`) return in a LATER session never re-parses and never replays the
+	// `tree-sitter-query-parse-failed` record for this session's generation.
+	// `handleSessionStart` -> `resetDegradationLedger()` clears the once-keys
+	// every session, but the loader's shared client (`clients/tree-sitter-shared.ts:39`)
+	// and its `loaded`/`loadedRoot` memo are deliberately kept across
+	// sessions, so the SECOND session's health summary silently loses the row
+	// the first session recorded — the exact "silently drops to zero" shape
+	// `getBundledQueriesRootHealth` (this file, generation-keyed) already
+	// solves correctly.
+	it("replays the parse-failure record on a memoized (no-force) reload after a session boundary (#3070 N1)", async () => {
+		const root = makeTempRulesRoot();
+		writeRule(
+			root,
+			"rules/tree-sitter-queries/typescript/broken-colon.yml",
+			`id: broken-colon
+name: Broken Colon
+severity: warning
+category: quality
+language: typescript
+message: some: unquoted colon breaks YAML
+query: |
+  (identifier) @X
+`,
+		);
+
+		const loader = new TreeSitterQueryLoader();
+		await loader.loadQueries(root);
+		expect(parseFailureGroup()?.count).toBe(1);
+
+		// Session boundary: handleSessionStart's resetDegradationLedger() call,
+		// simulated directly. The loader instance itself is NOT recreated —
+		// tree-sitter-shared.ts deliberately keeps the client across sessions.
+		resetDegradationLedger();
+		expect(parseFailureGroup()).toBeUndefined();
+
+		// No `force`: this is the memoized return path every non-RuleCache-miss
+		// call takes. It must still carry the row in the NEW session's ledger.
+		await loader.loadQueries(root);
+		const group = parseFailureGroup();
+		expect(group?.count).toBe(1);
+		expect(
+			group?.latestReasons.some((r) => r.subject.endsWith("broken-colon.yml")),
+		).toBe(true);
+	});
+
+	// #3070 N2: `str()` (clients/tree-sitter-query-loader.ts) refuses a
+	// mapping-valued scalar field so `message` falls back to the id-derived
+	// default rather than stringifying to the literal text "[object Object]"
+	// a user would otherwise read in the diagnostic. Unlike the `id`/`query`
+	// mapping cases above (both load-blocking), a mapping-valued `message` is
+	// non-fatal — the rule still loads — so this pins the FALLBACK behavior on
+	// a field no other test in this file exercises with a non-scalar value.
+	it("falls back to the id-derived message for a mapping-valued `message` field (#3070 N2)", async () => {
+		const root = makeTempRulesRoot();
+		writeRule(
+			root,
+			"rules/tree-sitter-queries/typescript/mapping-message.yml",
+			`id: mapping-message
+name: Mapping Message
+severity: warning
+category: quality
+language: typescript
+message:
+  not: a string
+query: |
+  (identifier) @X
+`,
+		);
+
+		const loader = new TreeSitterQueryLoader();
+		await loader.loadQueries(root);
+
+		const query = loader.getQueryById("mapping-message");
+		expect(query).toBeTruthy();
+		// A loosened guard would stringify the mapping to "[object Object]".
+		expect(query?.message).toBe("Pattern: mapping-message");
+	});
 });
 
 // #3054 review F2: pins the corpus-wide equivalence claim in CI, not only in
