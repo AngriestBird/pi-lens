@@ -41,7 +41,9 @@ function runWrapper(
 	args: string[],
 	throttleMs = 0,
 	extraEnv: Record<string, string> = {},
-	onFirstStdoutChunk?: (child: ChildProcessByStdio<null, Readable, Readable>) => void,
+	onFirstStdoutChunk?: (
+		child: ChildProcessByStdio<null, Readable, Readable>,
+	) => void,
 ): Promise<Run> {
 	return new Promise((resolve, reject) => {
 		const child = spawn(process.execPath, [wrapper, ...args], {
@@ -199,9 +201,10 @@ describe("with-memory-watch verdict durability (#2042)", () => {
 			},
 		);
 		expect(run.code, run.stderr).toBe(0);
-		expect(run.stderr, "an EAGAIN must never reach the top level").not.toContain(
-			"EAGAIN",
-		);
+		expect(
+			run.stderr,
+			"an EAGAIN must never reach the top level",
+		).not.toContain("EAGAIN");
 		expect(run.stdout).toContain("[mem-watch] done.");
 	}, 60_000);
 
