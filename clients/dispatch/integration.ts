@@ -2345,6 +2345,7 @@ export async function computeCascadeForFile(
 			visibleNeighbors,
 			impact.neighborFiles.length,
 			policyCounts.suppressed,
+			policyCounts.inputTruncated,
 		);
 
 		// #1104 HONESTY: filtering a bound-false display candidate must not turn a
@@ -2655,20 +2656,37 @@ function formatCascadeResult(
 	totalNeighbors: number,
 	/** This run's aggregate policy-stack drops (#3157). */
 	policySuppressed: number,
+	/**
+	 * This run's aggregate `MAX_POLICY_INPUT_PER_FILE` truncation (#3157 round
+	 * 3, N1) — ERRORs the policy never LOOKED at.
+	 */
+	policyInputTruncated: number,
 ): string {
 	const diagnosticsBlock = formatCascadeNeighborDiagnostics(cwd, neighbors, {
 		noun: "neighbor",
 		includeReason: true,
 	});
-	if (!diagnosticsBlock) return "";
+	// #3157 round 3, N1: an empty block is silence, and silence is a CLEAN
+	// verdict to the agent. That is honest only when everything was looked at.
+	// `policyInputTruncated > 0` means this run's own cost bound declined to
+	// evaluate findings that exist — the #1459 coverage-gap case, not a verdict —
+	// so it must speak even with nothing to render. `policySuppressed` does NOT
+	// get the same treatment on purpose: those findings WERE evaluated and every
+	// drop is the agent's own mark or its project's own rule policy, and the
+	// quiet-window lane deliberately says nothing at all for that case
+	// (`buildResolvedFoundCascadeRun` returns `undefined`). Speaking here and not
+	// there would re-open the two-lane divergence #3157 exists to close.
+	if (!diagnosticsBlock && policyInputTruncated === 0) return "";
 
 	const impactHeader = formatImpactCascade(
 		impact,
 		RUNTIME_CONFIG.pipeline.cascadeMaxFiles,
 	);
-	let out = impactHeader
-		? `${impactHeader}\n${diagnosticsBlock}`
-		: diagnosticsBlock;
+	let out = !diagnosticsBlock
+		? ""
+		: impactHeader
+			? `${impactHeader}\n${diagnosticsBlock}`
+			: diagnosticsBlock;
 
 	// A10: include truncated filenames so agent knows which files were cut
 	const truncated = totalNeighbors - neighbors.length;
@@ -2692,6 +2710,21 @@ function formatCascadeResult(
 	// in the `cascade_finding_policy` record. A run with NOTHING left returned ""
 	// above and says nothing at all — silence is not a claim that a neighbour is
 	// clean.
+	// #3157 round 3, N1: the same shape and the same closing clause as the
+	// "did not cover" line this file's renderer already uses for a neighbour no
+	// scanner looked at (`clients/cascade-format.ts`) — the agent must not read
+	// an empty or short block as a clean verdict when the bound cut findings
+	// nobody evaluated.
+	if (policyInputTruncated > 0) {
+		if (out) out += "\n";
+		out +=
+			`⚠️ Cascade did not evaluate ${policyInputTruncated} finding(s) — the per-neighbor ` +
+			`policy input is bounded at ${MAX_POLICY_INPUT_PER_FILE}; no findings does NOT mean clean here.`;
+	}
+
+	// Rides along whenever anything is rendered at all: when the block is empty
+	// and the coverage line above is speaking, this is what explains WHY it is
+	// empty. The empty-and-nothing-truncated case returned above.
 	if (policySuppressed > 0) {
 		out += `\nsuppressed by disposition: ${policySuppressed} finding(s) (marked false-positive or won't-fix).`;
 	}

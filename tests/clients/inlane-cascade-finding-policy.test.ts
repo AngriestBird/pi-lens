@@ -658,6 +658,112 @@ describe("in-lane cascade neighbour diagnostics take the finding policy (#3157)"
 		});
 	});
 
+	it("tells the AGENT when the input bound left findings unevaluated (all 80 marked)", async () => {
+		// Round 3 N1: the round-2 input bound reproduced F1 one threshold up. With
+		// 100 ERRORs and the first 80 marked, the bound cuts at 80, the policy drops
+		// all 80, `kept` is empty, and `formatCascadeResult`'s `if
+		// (!diagnosticsBlock) return ""` fires BEFORE any sentence — so 20 genuine
+		// unevaluated ERRORs reached the agent as silence. `inputTruncated` on the
+		// latency row is an OPERATOR surface; the misled actor is the agent.
+		fs.writeFileSync(
+			neighbor,
+			Array.from({ length: 100 }, (_, i) => `const v${i} = ${i};`).join("\n") +
+				"\n",
+		);
+		for (let i = 0; i < 80; i++) {
+			await mark({
+				filePath: neighbor,
+				line: i + 1,
+				message: `err-${i}`,
+				tool: "lsp",
+				rule: `typescript:${2300 + i}`,
+				disposition: "false-positive",
+			});
+		}
+		const formatted = await cascadeFor(
+			snapshotService(
+				Array.from({ length: 100 }, (_, i) =>
+					errorDiag(i, `err-${i}`, 2300 + i),
+				),
+			),
+		);
+		expect(formatted).toContain("did not evaluate 20 finding(s)");
+		expect(formatted).toContain("no findings does NOT mean clean here");
+		// The sentence rides along: it is what explains the empty block.
+		expect(formatted).toContain("suppressed by disposition: 80 finding(s)");
+	});
+
+	it("tells the AGENT when a single .pi-lens.json rule disable exhausts the input bound", async () => {
+		// Reachability without hand marks (round 3 N1, the reviewer's second
+		// probe): one rule disable over a neighbour whose first 80 ERRORs share
+		// that rule hides 20 genuine errors of a DIFFERENT rule behind an empty
+		// block.
+		fs.writeFileSync(
+			path.join(env.tmpDir, ".pi-lens.json"),
+			JSON.stringify({ rules: { ts: { disable: ["typescript:2304"] } } }),
+		);
+		fs.writeFileSync(
+			neighbor,
+			Array.from({ length: 100 }, (_, i) => `const v${i} = ${i};`).join("\n") +
+				"\n",
+		);
+		const formatted = await cascadeFor(
+			snapshotService([
+				...Array.from({ length: 80 }, (_, i) =>
+					errorDiag(i, `disabled-${i}`, 2304),
+				),
+				...Array.from({ length: 20 }, (_, i) =>
+					errorDiag(80 + i, `GENUINE-${i}`, 2345),
+				),
+			]),
+		);
+		expect(formatted).toContain("did not evaluate 20 finding(s)");
+		expect(formatted).not.toContain("disabled-0");
+	});
+
+	it("interpolates the run's OWN truncation count into the coverage line", async () => {
+		// Both reviewer probes truncate exactly 20, so a hardcoded `20` in the
+		// line reads identically under either — this case demands a different
+		// number (150 ERRORs, bound 80, so 70 were never evaluated) and is the
+		// only case that reds when the count is hardcoded.
+		fs.writeFileSync(
+			neighbor,
+			Array.from({ length: 150 }, (_, i) => `const v${i} = ${i};`).join("\n") +
+				"\n",
+		);
+		const formatted = await cascadeFor(
+			snapshotService(
+				Array.from({ length: 150 }, (_, i) =>
+					errorDiag(i, `err-${i}`, 2300 + (i % 50)),
+				),
+			),
+		);
+		expect(formatted).toContain("did not evaluate 70 finding(s)");
+		expect(cascadePolicyRows()[0]?.metadata).toMatchObject({
+			total: 80,
+			inputTruncated: 70,
+		});
+	});
+
+	it("stays silent when every error was policy-dropped and NOTHING was truncated", async () => {
+		// Round 3, the other half of the decision: row 3 of the terminal-state
+		// table keeps `""`. Every finding WAS evaluated and every drop is the
+		// agent's own mark, so re-announcing them on a push surface that fires on
+		// every edit is nagging — and the quiet-window lane already decided this
+		// (`builds no cascade run at all when every neighbour error was
+		// suppressed`). Making this lane speak here would re-open the two-lane
+		// divergence #3157 exists to close.
+		await mark({
+			filePath: neighbor,
+			line: 1,
+			message: MARKED,
+			...CANONICAL_MARK,
+			disposition: "false-positive",
+		});
+		const formatted = await cascadeFor(snapshotService([errorDiag(0, MARKED)]));
+		expect(formatted).toBe("");
+	});
+
 	it("times the policy stack only, not the neighbour touch fan-out", async () => {
 		// Round 2 F2: `policyStart` was taken before the whole `touchFile` fan-out,
 		// so the in-lane `cascade_finding_policy` row reported the WALK (hundreds
