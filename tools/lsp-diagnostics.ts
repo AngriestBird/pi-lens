@@ -54,6 +54,7 @@ import { classifyCascadeWaitTier } from "../clients/lsp/wait-policy/index.js";
 import { attemptTsserverSyncDiagnostics } from "../clients/lsp/tsserver-sync.js";
 import { convertLspDiagnostics } from "../clients/dispatch/utils/lsp-diagnostics.js";
 import { demoteInferredProjectDiagnostics } from "../clients/lsp/inferred-project.js";
+import { normalizeMapKey } from "../clients/path-utils.js";
 import {
 	isBlocking,
 	reconcileScanDiagnostics,
@@ -425,8 +426,15 @@ export function createLspDiagnosticsTool(
 				// Preserve input order (including duplicate entries); normalize each
 				// path before grouping so Windows separators and dot segments cannot
 				// change cache/group identity. Explicit lists never enter the walker.
+				// #3160/#3182: normalizeMapKey (filesystem-aware, adopts on-disk
+				// casing where the path exists) subsumes path.normalize's separator/
+				// dot-segment folding — an agent-typed, possibly mis-cased `paths`
+				// entry must key `reconcileScanDiagnostics`'s widget-state write the
+				// same way a canonical writer (clients/pipeline.ts's ctx.filePath) or
+				// the #3160-fixed lens_diagnostic_mark reader would, or a mis-cased
+				// batch call silently orphans its own widget-state record.
 				const absPaths = rawPaths.map((entry) =>
-					path.normalize(
+					normalizeMapKey(
 						path.isAbsolute(entry) ? entry : path.resolve(cwd, entry),
 					),
 				);

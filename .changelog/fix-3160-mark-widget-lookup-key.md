@@ -10,4 +10,7 @@ section: Fixed
   The lookup now normalizes the path to on-disk casing before checking
   widget state. `pilens_analyze` also recorded diagnostics under the raw,
   un-normalized spelling of its agent-supplied `file` argument, so it now
-  normalizes on write too — both sides key on-disk casing consistently.
+  normalizes on write too — both sides key on-disk casing consistently. The
+  `lsp_diagnostics`/`lens_diagnostics(source: "lsp", scope: "paths")`
+  explicit-`paths` batch had the same raw-key write for a mis-cased entry
+  (refs #3182); it now normalizes on write as well.

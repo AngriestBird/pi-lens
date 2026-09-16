@@ -37,7 +37,10 @@ import {
 import { createLensDiagnosticMarkTool } from "../../tools/lens-diagnostic-mark.js";
 import { createLensDiagnosticsTool } from "../../tools/lens-diagnostics.js";
 import { createLspDiagnosticsTool } from "../../tools/lsp-diagnostics.js";
-import { removeTempDirSync } from "../clients/test-utils.js";
+import {
+	createCaseAliasFixture,
+	removeTempDirSync,
+} from "../clients/test-utils.js";
 
 const MESSAGE = "Type 'string' is not assignable to type 'number'.";
 const FILE_BODY = "const value: number = 'bad';\nexport const other = 1;\n";
@@ -767,5 +770,104 @@ describe("the source=lsp footer reconcile respects mark-time demotion (#3088)", 
 
 		const recorded = getFileDiagnostics(filePath) ?? [];
 		expect(recorded.map((d) => d.message)).toEqual([OTHER_MESSAGE]);
+	});
+});
+
+// #3160/#3182: the `paths`-mode batch (tools/lsp-diagnostics.ts:428-433,
+// reached identically from the legacy `lsp_diagnostics` tool's own `paths`
+// param and from `lens_diagnostics {source:"lsp", scope:"paths"}`, which
+// forwards `paths` VERBATIM to the same `lspProbe` — tools/lens-diagnostics.ts
+// :581, lspParams = {...params} minus source/scope) derived its per-file
+// lookup key with `path.normalize` only, which folds separators/dot-segments
+// but never adopts on-disk casing. `reconcileScanDiagnostics`
+// (clients/widget-state.ts) records under that RAW key. A canonical writer
+// (clients/pipeline.ts's ctx.filePath, or `lens_diagnostic_mark`'s own
+// #3160-fixed reader) never derives that same raw key on a case-insensitive
+// filesystem, so a mis-cased `paths` entry silently orphaned its own
+// widget-state record — the `directory`-mode batch (tools/lsp-diagnostics.ts
+// `collectFiles`, a real filesystem walk) never had this problem, since a
+// directory listing already returns on-disk-accurate casing.
+describe("lens_diagnostics source=lsp scope=paths / legacy lsp_diagnostics paths-mode batch widget-state key parity (#3160/#3182)", () => {
+	function makeBadCallService() {
+		return {
+			touchFile: vi.fn(async () => ({
+				diags: [
+					{
+						severity: 1,
+						message: "bad call",
+						source: "typescript",
+						code: 9999,
+						serverId: "typescript",
+						range: {
+							start: { line: 2, character: 0 },
+							end: { line: 2, character: 5 },
+						},
+					},
+				],
+			})),
+			getDiagnostics: vi.fn(async () => []),
+			getCapabilitySnapshots: vi.fn(async () => []),
+		};
+	}
+
+	it("a mis-cased paths-mode entry (lens_diagnostics source=lsp scope=paths) lets lens_diagnostic_mark reanchor under EITHER spelling", async (ctx) => {
+		const fixture = createCaseAliasFixture(cwd, {
+			content: "const a = 1;\nconst b = 2;\nconst target = bad();\n",
+		});
+		ctx.skip(fixture.skipReason !== undefined, fixture.skipReason ?? "");
+
+		const misCasedRelative = path.relative(cwd, fixture.rawMisCased);
+		const onDiskRelative = path.relative(cwd, fixture.onDisk);
+
+		const service = makeBadCallService();
+		const tool = createLensDiagnosticsTool(
+			makeCacheManager(),
+			() => cwd,
+			() => service as never,
+		);
+		const result = (await tool.execute(
+			"diag-3182",
+			{
+				source: "lsp",
+				scope: "paths",
+				paths: [misCasedRelative],
+				severity: "all",
+			},
+			new AbortController().signal,
+			null,
+			{ cwd },
+		)) as {
+			content: Array<{ text: string }>;
+			details?: Record<string, unknown>;
+		};
+		expect(result.content[0]?.text).toContain("bad call");
+
+		const runMark = (targetFilePath: string) =>
+			createLensDiagnosticMarkTool(() => cwd).execute(
+				"mark-3182",
+				{
+					filePath: targetFilePath,
+					line: 2, // stale
+					message: "bad call",
+					rule: "typescript:9999",
+					tool: "lsp",
+					disposition: "false-positive",
+				},
+				undefined,
+				() => {},
+				{ cwd },
+			);
+
+		const viaCanonical = await runMark(onDiskRelative);
+		expect(viaCanonical.isError).toBeFalsy();
+		expect(String(viaCanonical.content[0]?.text)).toMatch(
+			/reanchored from line 2 to 3/,
+		);
+
+		const viaMisCased = await runMark(misCasedRelative);
+		expect(viaMisCased.isError).toBeFalsy();
+		expect(String(viaMisCased.content[0]?.text)).toMatch(
+			/reanchored from line 2 to 3/,
+		);
 	});
 });
