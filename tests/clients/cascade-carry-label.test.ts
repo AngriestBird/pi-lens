@@ -23,12 +23,22 @@ import { createLensDiagnosticsTool } from "../../tools/lens-diagnostics.js";
 import { resetProjectLensConfigCache } from "../../clients/project-lens-config.js";
 
 describe("cascade carry label (#3167)", () => {
-	it("labels a run carried across one turn", () => {
-		expect(cascadeCarrySuffix(1)).toBe("(carried 1 turn)");
+	it("labels a run carried across one turn with its observation age (#3168 F3)", () => {
+		const observedAt = Date.now() - 95 * 60_000;
+		expect(cascadeCarrySuffix(1, observedAt)).toBe(
+			"(carried 1 turn · scanned 1h 35m ago)",
+		);
 	});
 
-	it("labels multi-turn carries with the plural form", () => {
-		expect(cascadeCarrySuffix(3)).toBe("(carried 3 turns)");
+	it("falls to the neutral wording when the run has no stamp (the re-park arm, #3168 F3)", () => {
+		expect(cascadeCarrySuffix(1)).toBe("(carried 1 turn · scan age unknown)");
+	});
+
+	it("labels multi-turn carries with the plural form (unreachable under the one-turn cap — pins the form should the cap lift, #3168 F8)", () => {
+		const observedAt = Date.now() - 10_000;
+		expect(cascadeCarrySuffix(3, observedAt)).toBe(
+			"(carried 3 turns · scanned <1m ago)",
+		);
 	});
 
 	it("emits no label for non-carried runs — no label noise", () => {
@@ -38,6 +48,17 @@ describe("cascade carry label (#3167)", () => {
 });
 
 describe("delivery-gate registry (#3167)", () => {
+	it("F2: both cascade entries claim their seam calls as evidence", () => {
+		const blocker = DELIVERY_SURFACES["runtime-turn:cascade-blocker"] as {
+			evidence?: string[];
+		};
+		const coverage = DELIVERY_SURFACES[
+			"runtime-turn:cascade-coverage-advisory"
+		] as { evidence?: string[] };
+		expect(blocker.evidence).toContain("cascadeCarrySuffix(");
+		expect(coverage.evidence).toContain("withCarryLabel(");
+	});
+
 	it("the two carried-cascade entries are no longer partial", () => {
 		for (const id of [
 			"runtime-turn:cascade-blocker",
@@ -116,7 +137,44 @@ describe("demoted delta rows (#3167)", () => {
 		const text = result.content.map((part) => part.text).join("\n");
 		expect(text).toContain(STALE_LINE_MARKER);
 		expect(text).toContain("x is unused");
+		// F1 (#3168): the label carries the CONTROLLED stamp's age — the seeded
+		// generatedAt is exactly 60s old, so the neutral arm would be a false
+		// pass. Mutation: removing the staleAsOf tag reds this assertion.
+		expect(text).toContain("(scanned 1m ago)");
 		const ageLabels = text.match(/scanned .* ago|scan age unknown/g) ?? [];
+		expect(ageLabels.length, text).toBe(1);
+	});
+
+	it("F5: a file demoted in both reports renders exactly one age label", async () => {
+		fs.writeFileSync(filePath, "const x = 1;\n");
+		const generatedAt = new Date(Date.now() - 60_000).toISOString();
+		const warning = {
+			line: 1,
+			rule: "no-unused-vars",
+			tool: "eslint",
+			message: "x is unused",
+		};
+		const tool = makeTool({
+			"actionable-warnings": {
+				files: [{ filePath, warnings: [warning] }],
+				generatedAt,
+				summary: { warnings: 1 },
+			},
+			"code-quality-warnings": {
+				files: [{ filePath, warnings: [warning] }],
+				generatedAt,
+				summary: { warnings: 1 },
+			},
+		});
+		const result = (await tool.execute(
+			"1",
+			{ mode: "delta" },
+			undefined,
+			null,
+			{ cwd },
+		)) as { content: Array<{ type: "text"; text: string }> };
+		const text = result.content.map((part) => part.text).join("\n");
+		const ageLabels = text.match(/\(scanned 1m ago\)/g) ?? [];
 		expect(ageLabels.length, text).toBe(1);
 	});
 

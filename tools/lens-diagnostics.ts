@@ -46,6 +46,7 @@ import {
 	isAtOrAboveHomeDir,
 	normalizeEphemeralMapKey,
 	normalizeFilePath,
+	normalizeMapKey,
 	realpathOrResolve,
 } from "../clients/path-utils.js";
 import { getLSPService } from "../clients/lsp/index.js";
@@ -1167,6 +1168,15 @@ function formatDeltaMode(
 
 	// Fixable warnings from actionable-warnings and quality cache entries retain
 	// their own severity tier. Apply the same threshold semantics as the LSP path.
+	// F5 (#3168): at most ONE age label per file — a file demoted in BOTH
+	// reports is labeled once, by the quality loop that renders last; the
+	// actionable loop skips files the quality loop will label. (The quality
+	// loop's pre-existing header suppression — a file's quality rows rendering
+	// under an earlier header — predates #3168 and is not worsened: the label
+	// follows the same rows it always did.)
+	const qualityLabeledFiles = new Set(
+		filteredQualityFiles.map((file) => normalizeMapKey(file.filePath)),
+	);
 	if (filteredActionableFiles.length > 0) {
 		for (const file of filteredActionableFiles) {
 			const rel = path.relative(cwd, file.filePath);
@@ -1175,7 +1185,9 @@ function formatDeltaMode(
 				const where = w.stale ? STALE_LINE_MARKER : `L${w.line ?? "?"}`;
 				lines.push(`  ⚠ ${where}  ${w.rule ?? w.code ?? w.tool}  ${w.message}`);
 			}
-			appendGroupAgeLabel(lines, file.warnings);
+			if (!qualityLabeledFiles.has(normalizeMapKey(file.filePath))) {
+				appendGroupAgeLabel(lines, file.warnings);
+			}
 		}
 	}
 

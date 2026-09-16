@@ -241,6 +241,10 @@ interface LabeledDeliverySurface extends DeliverySurfaceBase {
 	reason: string;
 	/** What supplies the age shown to the agent (a scannedAt field, "live", or "n/a"). */
 	ageSource: string;
+	/** #3168 F2: labeled surfaces that DO call a shared helper claim it here —
+	 * same evidence contract as the gated entries (a bare status flip without
+	 * the call-shape evidence is the #1634 F1 recurrence). */
+	evidenceMin?: number;
 }
 
 export type DeliverySurfaceEntry =
@@ -298,7 +302,9 @@ function labeled(
 	reason: string,
 	ageSource: string,
 	evidence: string[] = [],
-	extra: Partial<Pick<LabeledDeliverySurface, "status" | "partialReason">> = {},
+	extra: Partial<
+		Pick<LabeledDeliverySurface, "status" | "partialReason" | "evidenceMin">
+	> = {},
 ): LabeledDeliverySurface {
 	return {
 		mode: "labeled",
@@ -465,9 +471,11 @@ export const DELIVERY_SURFACES: Record<string, DeliverySurfaceEntry> = {
 		"Cascade results settle synchronously this turn where possible " +
 			"(`settleCascadeRuns`), but an unsettled compute can carry over to a " +
 			"later turn (bounded by a carry cap) — a carried-over result renders " +
-			"with an explicit `(carried N turns)` label (#3167), so the agent can " +
-			"tell it from a fresh observation.",
+			"with an explicit `(carried N turns · scanned Xm ago)` label (#3167, " +
+			"#3168 F3), so the agent can tell it from a fresh observation.",
 		"live",
+		["cascadeCarrySuffix("],
+		{ evidenceMin: 1 },
 	),
 	"runtime-turn:cascade-coverage-advisory": labeled(
 		RUNTIME_TURN_FILE,
@@ -475,8 +483,11 @@ export const DELIVERY_SURFACES: Record<string, DeliverySurfaceEntry> = {
 		"Explains what the cascade check could NOT confirm this turn — not a " +
 			"finding with a cited path, an absence-of-coverage disclosure computed " +
 			"from this turn's own indeterminate-run list. An advisory computed from " +
-			"a carried indeterminate run is labeled `(carried N turns)` (#3167).",
+			"a carried indeterminate run is labeled `(carried N turns · scanned Xm ago)` " +
+			"(#3167, #3168 F4 — dropped on mixed carried/fresh buckets).",
 		"live",
+		["withCarryLabel("],
+		{ evidenceMin: 3 },
 	),
 	// #3102: the cold-neighbour cascade run is BUILT here, in the quiet-window
 	// reconcile (`onResolvedFound` in index.ts), a turn earlier than the

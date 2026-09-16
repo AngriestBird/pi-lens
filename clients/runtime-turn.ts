@@ -1197,13 +1197,22 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	// Fix B (#3167): which results belong to a CARRIED run — the label is
 	// per-result at render time, so the run→result pairing must survive the
 	// flatMap above (which discards the wrapper).
-	const carriedTurnsByResult = new Map<
+	// Fix B (#3168 F6): the success-path record — latency.log could not show
+	// the feature ever rendered without it (the only phases were the drop/
+	// settle records). One bounded record per turn, emitted after both render
+	// sections below.
+	let carriedRunsRendered = 0;
+	let labeledAdvisories = 0;
+	const carriedMetaByResult = new Map<
 		NonNullable<(typeof cascadeRuns)[number]["result"]>,
-		number
+		{ carriedTurns: number; observedAt?: number }
 	>();
 	for (const r of cascadeRuns) {
 		if (r.result && (r.carriedTurns ?? 0) > 0 && r.carriedTurns !== undefined) {
-			carriedTurnsByResult.set(r.result, r.carriedTurns);
+			carriedMetaByResult.set(r.result, {
+				carriedTurns: r.carriedTurns,
+				observedAt: r.observedAt,
+			});
 		}
 	}
 	// #1550 class sweep: every cascade record below summarises `cascadeResults`
@@ -1244,17 +1253,20 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				(n) => neighborOwner.get(normalizeMapKey(n.filePath)) === pk,
 			);
 			if (ownsAny && result.formatted) {
-				// Fix B (#3167): a carried run's re-rendered blocker is labeled so
-				// the agent can tell it from a fresh observation. The carry is
-				// bounded to one turn, so the label reads `(carried 1 turn)`.
+				// Fix B (#3167/#3168): a carried run's re-rendered blocker is labeled
+				// so the agent can tell it from a fresh observation — with the
+				// run's own observation age (#3168 F3).
+				const carryMeta = carriedMetaByResult.get(result);
 				const carrySuffix = cascadeCarrySuffix(
-					carriedTurnsByResult.get(result),
+					carryMeta?.carriedTurns,
+					carryMeta?.observedAt,
 				);
 				parts.push(
 					carrySuffix
 						? `${result.formatted}\n${carrySuffix}`
 						: result.formatted,
 				);
+				if (carrySuffix) carriedRunsRendered += 1;
 				injectedNeighborCount += result.neighbors.length;
 				injectedDiagnosticCount += result.neighbors.reduce(
 					(s, n) => s + n.diagnostics.length,
@@ -1433,20 +1445,31 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		// "ℹ️ Advisory — no action required this turn:" label, so an imperative
 		// ("review dependents manually") would contradict it. The #533 substance
 		// stays: a clean cascade result does NOT cover these files' dependents.
-		// Fix B (#3167): a coverage advisory computed from a CARRIED
+		// Fix B (#3167/#3168 F4): a coverage advisory computed from a CARRIED
 		// indeterminate run describes the previous turn's evidence — label it so
-		// the absence-of-coverage statement is not read as current.
+		// the absence-of-coverage statement is not read as current. A MIXED
+		// bucket (some carried, some fresh) is left UNLABELED: a Math.max
+		// suffix on the finished multi-line advisory would attach the carry to
+		// a file that was not carried.
 		const withCarryLabel = (
 			advisory: string | undefined,
-			runs: ReadonlyArray<{ carriedTurns?: number }>,
+			runs: ReadonlyArray<{ carriedTurns?: number; observedAt?: number }>,
 		): string | undefined => {
 			if (advisory === undefined) return undefined;
-			const maxCarry = runs.reduce(
-				(max, r) => Math.max(max, r.carriedTurns ?? 0),
-				0,
+			const carried = runs.filter((r) => (r.carriedTurns ?? 0) > 0);
+			if (carried.length === 0 || carried.length !== runs.length) {
+				return advisory;
+			}
+			const oldestObservedAt = carried.reduce(
+				(min, r) => Math.min(min, r.observedAt ?? Number.MAX_SAFE_INTEGER),
+				Number.MAX_SAFE_INTEGER,
 			);
-			const suffix = cascadeCarrySuffix(maxCarry > 0 ? maxCarry : undefined);
-			return suffix ? `${advisory} ${suffix}` : advisory;
+			let observedAt: number | undefined = oldestObservedAt;
+			if (observedAt === Number.MAX_SAFE_INTEGER) observedAt = undefined;
+			const suffix = cascadeCarrySuffix(carried[0]?.carriedTurns, observedAt);
+			if (!suffix) return advisory;
+			labeledAdvisories += 1;
+			return `${advisory} ${suffix}`;
 		};
 		const graphAdvisory = withCarryLabel(
 			buildAdvisory(graphRuns, {
@@ -1531,6 +1554,15 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				byFile: byFile.slice(0, 20),
 				...(byFile.length > 20 && { byFileTruncated: byFile.length - 20 }),
 			},
+		});
+	}
+
+	// Fix B (#3168 F6): the success-path record — see the counters above.
+	if (carriedRunsRendered > 0 || labeledAdvisories > 0) {
+		logCascade({
+			phase: "cascade_carry_rendered",
+			filePath: cascadeLogFilePath,
+			metadata: { carriedRunsRendered, labeledAdvisories },
 		});
 	}
 

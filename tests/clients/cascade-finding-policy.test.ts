@@ -17,6 +17,11 @@ import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const logLatency = vi.hoisted(() => vi.fn());
+const logCascadeMock = vi.hoisted(() => vi.fn());
+vi.mock("../../clients/cascade-logger.js", async (importOriginal) => ({
+	...(await importOriginal<object>()),
+	logCascade: (...args: unknown[]) => logCascadeMock(...args),
+}));
 vi.mock("../../clients/latency-logger.js", async (importOriginal) => ({
 	...(await importOriginal<typeof import("../../clients/latency-logger.js")>()),
 	logLatency,
@@ -24,6 +29,7 @@ vi.mock("../../clients/latency-logger.js", async (importOriginal) => ({
 
 import { CacheManager } from "../../clients/cache-manager.js";
 import { buildResolvedFoundCascadeRun } from "../../clients/cascade-format.js";
+import type { CascadeRun } from "../../clients/cascade-types.js";
 import {
 	_resetDeferredForTests,
 	_resetStateCacheForTests,
@@ -123,6 +129,9 @@ async function reconcileAndDeliver(diags: LSPDiagnostic[]): Promise<string> {
 	const run = buildResolvedFoundCascadeRun(env.tmpDir, {
 		filePath: neighbor,
 		diagnostics: outcomes[0]?.diagnostics ?? [],
+		// #3168 F3: the reconcile outcome carries #1444's publish stamp —
+		// threaded here so the carried-run label renders the real age.
+		publishedAt: Date.now(),
 	});
 	if (run) runtime.appendCascadeRun(run);
 
@@ -199,6 +208,112 @@ describe("cold-neighbour cascade run applies the finding policy (#3102)", () => 
 		// delivery that dropped nothing could still announce
 		// "suppressed by disposition: 0 finding(s)" and no case would notice.
 		expect(content).not.toContain("suppressed by disposition:");
+	});
+
+	it("#3168 F2: a carried run's re-rendered blocker is labeled with its observation age", async () => {
+		// The harness's beginTurn stamps the appended run carriedTurns: 1 — the
+		// re-rendered blocker must carry the carry label with the run's own
+		// observation age (#1444's publishedAt, threaded through the plumb).
+		// Red on master's shape: neutering either cascadeCarrySuffix call site
+		// removes the label and this assertion fails.
+		const content = await reconcileAndDeliver([
+			errorDiag(0, MARKED_MESSAGE),
+			errorDiag(1, OTHER_MESSAGE, 2304),
+		]);
+		expect(content).toContain("(carried 1 turn ·");
+		const labelCount = content.match(/\(carried 1 turn ·/g) ?? [];
+		expect(labelCount.length).toBe(1);
+		expect(content).toContain("scanned <1m ago");
+	});
+
+	it("#3168 F4: a MIXED carried/fresh coverage bucket is left unlabeled", async () => {
+		// One carried run (stamped by beginTurn) + one fresh run in the same
+		// graph bucket: the Math.max suffix would attach the carry to a file
+		// that was not carried (#3168 F4) — the bucket is left unlabeled.
+		const carriedRun: CascadeRun = {
+			filePath: neighbor,
+			result: undefined,
+			neighborCount: 0,
+			diagnosticCount: 0,
+			indeterminate: { reason: "missing_node", detail: "graph degraded" },
+		};
+		const freshRun: CascadeRun = {
+			filePath: primary,
+			result: undefined,
+			neighborCount: 0,
+			diagnosticCount: 0,
+			indeterminate: { reason: "missing_node", detail: "graph degraded" },
+		};
+		const runtime = new RuntimeCoordinator();
+		const cacheManager = new CacheManager(false);
+		runtime.appendCascadeRun(carriedRun);
+		runtime.beginTurn(); // stamps carriedTurns: 1 on carriedRun
+		runtime.appendCascadeRun(freshRun); // appended after beginTurn: no stamp
+		await handleTurnEnd({
+			ctxCwd: env.tmpDir,
+			getFlag: () => false,
+			dbg: () => {},
+			runtime,
+			cacheManager,
+			knipClient: {
+				ensureAvailable: async () => false,
+				analyze: async () => EMPTY_KNIP_RESULT,
+			},
+			deadCodeClients: [],
+			depChecker: { ensureAvailable: async () => false },
+			testRunnerClient: { getTestRunTarget: () => null },
+			resetLSPService: () => {},
+			resetFormatService: () => {},
+		} as never);
+		const content =
+			consumeTurnEndFindings(cacheManager, env.tmpDir)?.messages[0]?.content ??
+			"";
+		expect(content).toContain("Cascade could not compute downstream impact");
+		expect(content).not.toContain("(carried");
+	});
+
+	it("#3168 F6: an all-carried bucket renders the label and emits the success record", async () => {
+		const carriedRun: CascadeRun = {
+			filePath: neighbor,
+			result: undefined,
+			neighborCount: 0,
+			diagnosticCount: 0,
+			indeterminate: { reason: "missing_node", detail: "graph degraded" },
+			observedAt: Date.now(),
+		};
+		const runtime = new RuntimeCoordinator();
+		const cacheManager = new CacheManager(false);
+		runtime.appendCascadeRun(carriedRun);
+		runtime.beginTurn(); // stamps carriedTurns: 1
+		await handleTurnEnd({
+			ctxCwd: env.tmpDir,
+			getFlag: () => false,
+			dbg: () => {},
+			runtime,
+			cacheManager,
+			knipClient: {
+				ensureAvailable: async () => false,
+				analyze: async () => EMPTY_KNIP_RESULT,
+			},
+			deadCodeClients: [],
+			depChecker: { ensureAvailable: async () => false },
+			testRunnerClient: { getTestRunTarget: () => null },
+			resetLSPService: () => {},
+			resetFormatService: () => {},
+		} as never);
+		const content =
+			consumeTurnEndFindings(cacheManager, env.tmpDir)?.messages[0]?.content ??
+			"";
+		expect(content).toContain("(carried 1 turn · scanned <1m ago)");
+		expect(logCascadeMock).toHaveBeenCalledWith(
+			expect.objectContaining({
+				phase: "cascade_carry_rendered",
+				metadata: expect.objectContaining({
+					carriedRunsRendered: 0,
+					labeledAdvisories: 1,
+				}),
+			}),
+		);
 	});
 
 	it("drops a neighbour error marked false-positive", async () => {
