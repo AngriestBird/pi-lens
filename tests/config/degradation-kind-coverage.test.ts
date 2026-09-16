@@ -100,46 +100,35 @@ function kindLiteralsInOptions(optionsLiteral: string): string[] {
 	// value) — the literal content itself is read from the ORIGINAL text below,
 	// by the same offsets, since `stripSource` preserves length and layout.
 	const structure = stripSource(optionsLiteral, { strings: "blank" });
+	// The FIRST "kind:" in the object wins. Every one of the 169 measured
+	// call sites (#3071) writes `kind` as its object literal's FIRST
+	// property, so this is never ambiguous against a later nested `kind`
+	// (e.g. inside `metadata: { kind: ... }`) in practice — stated as a known
+	// limit rather than defended with an untestable depth check: a
+	// `metadata`-nested `kind` written BEFORE the record's own would be
+	// misread, but no shipped call site does that, and a guard against it
+	// could not be shown to catch anything real (AGENTS.md: a guard that
+	// cannot be made to red does not need to exist).
 	const keyMatch = /(?<![\w$])kind(?![\w$])\s*:/.exec(structure);
 	if (!keyMatch) return [];
 
-	// Depth just BEFORE the match must be exactly 1 — inside the object
-	// literal's own `{` and nothing else — so a `kind` spelled inside a
-	// NESTED object (e.g. a hypothetical `metadata: { kind: ... }`) is never
-	// mistaken for the record's own top-level property.
-	let depth = 0;
-	for (let i = 0; i < keyMatch.index; i++) {
-		const ch = structure[i];
-		if (ch === "{" || ch === "[" || ch === "(") depth++;
-		else if (ch === "}" || ch === "]" || ch === ")") depth--;
-	}
-	if (depth !== 1) return [];
-
-	// The value's own text runs from just after the colon to the next
-	// SAME-DEPTH `,` (the property separator) or the object's own closing `}`
-	// (when `kind` is the last property) — bracket/paren-depth aware, so a
-	// value like `fired === "deadline" ? "a" : "b"` is not cut short by
-	// anything inside it.
-	let valueDepth = 0;
-	let end = structure.length;
-	for (
-		let i = keyMatch.index + keyMatch[0].length;
-		i < structure.length;
-		i++
-	) {
-		const ch = structure[i];
-		if (ch === "{" || ch === "[" || ch === "(") valueDepth++;
-		else if (ch === "}" || ch === "]" || ch === ")") {
-			if (valueDepth === 0) {
-				end = i;
-				break;
-			}
-			valueDepth--;
-		} else if (ch === "," && valueDepth === 0) {
-			end = i;
-			break;
-		}
-	}
+	// The value's own text runs from just after the colon to the next `,`
+	// (the property separator) or the object's own closing `}` (when `kind`
+	// is the last property), whichever comes first. No bracket-depth tracking
+	// is needed: none of the 169 measured call sites' `kind` values contain a
+	// nested `,` at all (not the ternary — `fired === "deadline" ? "a" : "b"`
+	// has none — and not a pass-through function call's arguments, since
+	// those never resolve to a literal either way, truncated or not) — stated
+	// as a known limit rather than defended with untestable depth tracking
+	// (AGENTS.md: a guard that cannot be made to red does not need to exist).
+	// A future `kind` value that legitimately needs one (a nested call whose
+	// OWN comma must be skipped to reach a trailing literal) would need this
+	// widened, and would fail LOUD here (`bare`/`ternary` below matching
+	// nothing) rather than silently misreading — the safe direction.
+	const start = keyMatch.index + keyMatch[0].length;
+	const candidates = [structure.indexOf(",", start), structure.indexOf("}", start)]
+		.filter((index) => index !== -1);
+	const end = candidates.length > 0 ? Math.min(...candidates) : structure.length;
 
 	const valueText = optionsLiteral.slice(
 		keyMatch.index + keyMatch[0].length,
@@ -241,9 +230,10 @@ describe("DegradationKind call-site literal extraction (#3071)", () => {
 		).toEqual([]);
 	});
 
-	it("ignores a kind spelled inside a nested object, not the record's own", () => {
-		// Depth guard: a literal named "kind" inside `metadata` (or any nested
-		// object) must never be read as the record's OWN kind.
+	it("finds the record's own kind ahead of a nested one written later", () => {
+		// The realistic shape (every measured call site): `kind` is the FIRST
+		// property, so a `kind` nested inside a LATER field (`metadata`) never
+		// competes with it — the first "kind:" in source order is the real one.
 		expect(
 			kindLiteralsInOptions(
 				'{ kind: "real-kind", subject: x, metadata: { kind: "decoy" } }',
