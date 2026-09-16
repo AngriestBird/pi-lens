@@ -70,13 +70,13 @@ on:
       # not just transitively through the `prepare` lifecycle script.
       - "scripts/download-grammars.js"
       - ".github/workflows/install-smoke.yml"
-  # PR-gating (#2613): host-range-smoke runs on pull_request, and (#3043)
-  # ONE pi-load cell (ubuntu-latest x pnpm-global, narrowed by that job's
-  # matrix expressions) -- because the lane a change edits must be a lane
-  # some pre-merge run can execute. `smoke` and `mise-repro` remain
-  # push/nightly/dispatch-only via `if: github.event_name != 'pull_request'`,
-  # so an edit to THOSE still needs a `gh workflow run install-smoke.yml
-  # --ref <branch>` before merge (AGENTS.md, "Commands and gates").
+  # PR-gating (#2613): host-range-smoke runs on pull_request, and (#3043,
+  # then the 2026-09-15 retro F2 sweep) ONE cell each of pi-load, smoke and
+  # mise-repro -- because the lane a change edits must be a lane some
+  # pre-merge run can execute. No job in this file is gated off pull_request
+  # any more; `host-latest-smoke` is the one remaining event-gated job and is
+  # the nightly/dispatch drift lane by construction, registered as such in
+  # tests/config/workflow-pull-request-reachability.test.ts.
   pull_request:
     branches: [master]
     paths: *install-smoke-paths
@@ -171,9 +171,24 @@ jobs:
 
   smoke:
     name: ${{ matrix.os }} · ${{ matrix.pm }}
-    # Unchanged from before #2613: this os x pm x pm-flavor matrix stays off
-    # pull_request entirely -- host-range-smoke is the new PR-gating lane.
-    if: github.event_name != 'pull_request'
+    # #3043's shape, swept (2026-09-15 retro F2): this job carried
+    # `if: github.event_name != 'pull_request'`, so an edit to any of its four
+    # package-manager arms reached master with NO pre-merge lane able to
+    # execute it -- the same state that broke six pi-load cells for a day when
+    # #3033 edited its pnpm arm. host-range-smoke covers the build/pack/
+    # selftest SEQUENCE on a PR, but not the pm axis, which is what these arms
+    # exist for.
+    #
+    # PR-time this job now runs EXACTLY ONE cell (ubuntu-latest x pnpm, via
+    # the matrix expressions below); push/nightly/dispatch keep the full 2x4.
+    # pnpm is the chosen arm because its symlink store and blocked build
+    # scripts are the #285 axis the other three do not exercise. Measured cost
+    # of that cell on master run 35024302385: 36 s wall (21:13:32Z ->
+    # 21:14:08Z), in parallel with the PR cells already present.
+    #
+    # The `os` list stays a literal array so the macOS-reachability sweep in
+    # tests/support/workflow-shell-portability.ts still sees this job as
+    # macOS-capable; the PR-time narrowing is done with `exclude`.
     needs: validate-merge-train-dispatch
     runs-on: ${{ matrix.os }}
     permissions:
@@ -182,7 +197,11 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
-        pm: [npm, pnpm, bun, yarn]
+        pm: ${{ github.event_name == 'pull_request' && fromJSON('["pnpm"]') || fromJSON('["npm", "pnpm", "bun", "yarn"]') }}
+        # NOTE: no space after the JSON colon -- a plain YAML scalar may not
+        # contain ": ", so `{"os": "macos-latest"}` makes this whole file
+        # unparseable (every tests/config workflow test yaml.loads it).
+        exclude: ${{ github.event_name == 'pull_request' && fromJSON('[{"os":"macos-latest"}]') || fromJSON('[]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -458,7 +477,25 @@ jobs:
   # of #285 coverage.
   mise-repro:
     name: mise repro (#285) · ${{ matrix.os }} · ${{ matrix.pi_via }}
-    if: github.event_name != 'pull_request'
+    # #3049 review F1, swept (2026-09-15 retro F2): with
+    # `if: github.event_name != 'pull_request'` here, moving the
+    # `export PATH="$PNPM_HOME/bin:$PATH"` line of "Configure pnpm global bin
+    # dir" back BELOW the `pnpm config set --global` it exists to unblock
+    # (#3043's own bug) would have reached master unseen -- no pre-merge lane
+    # could run the step at all.
+    #
+    # PR-time this job now runs EXACTLY ONE cell (ubuntu-latest x mise-node);
+    # push/nightly/dispatch keep the full 2x2. That cell is enough for the
+    # pnpm steps because "Install pnpm (the npmCommand) under mise node" and
+    # "Configure pnpm global bin dir" are unconditional -- they run
+    # identically under both `pi_via` arms. Measured cost on master run
+    # 35024302385: 31 s wall (21:13:57Z -> 21:14:28Z).
+    #
+    # The job stays NON-BLOCKING on every event (continue-on-error below, for
+    # the reason in the block comment above this job): the PR cell's job is to
+    # EXECUTE the edited lines and put them in a log a reviewer can read, not
+    # to gate the merge. `os` stays a literal array for the macOS
+    # portability sweep; the narrowing is done with `exclude`.
     needs: validate-merge-train-dispatch
     runs-on: ${{ matrix.os }}
     permissions:
@@ -468,7 +505,11 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
-        pi_via: [mise-node, mise-npm-backend]
+        pi_via: ${{ github.event_name == 'pull_request' && fromJSON('["mise-node"]') || fromJSON('["mise-node", "mise-npm-backend"]') }}
+        # NOTE: no space after the JSON colon -- a plain YAML scalar may not
+        # contain ": ", so `{"os": "macos-latest"}` makes this whole file
+        # unparseable (every tests/config workflow test yaml.loads it).
+        exclude: ${{ github.event_name == 'pull_request' && fromJSON('[{"os":"macos-latest"}]') || fromJSON('[]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7 # RPC driver
         with:
