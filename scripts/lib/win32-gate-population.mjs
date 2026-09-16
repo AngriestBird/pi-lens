@@ -81,8 +81,13 @@ function sourceFiles(root) {
  * same shape) is exactly the drift a shared bounded-collection primitive
  * exists to prevent.
  */
-const VANISHED_PATH_RECORD_CAP = 256;
+export const VANISHED_PATH_RECORD_CAP = 256;
 const vanishedBetweenWalkAndRead = new BoundedSet(VANISHED_PATH_RECORD_CAP);
+
+/** Test seam: the cap is only observable through many recorded paths. */
+export function recordedVanishedPathCount() {
+	return vanishedBetweenWalkAndRead.size;
+}
 
 /**
  * Read a file this module's own walk just produced, tolerating the file
