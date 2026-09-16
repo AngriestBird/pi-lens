@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import {
+	type ActionableWarningsReport,
 	buildActionableWarningsReport,
 	formatActionableWarningsAdvisory,
 	publishActionableWarningsReport,
@@ -122,6 +123,7 @@ import {
 import type { LSPDiagnostic } from "./lsp/client.js";
 import { convertLspDiagnostics } from "./dispatch/utils/lsp-diagnostics.js";
 import { retagAuxiliaryDiagnostics } from "./dispatch/auxiliary-lsp.js";
+import { runPersistentReverify } from "./persistent-reverify.js";
 import { cascadeCarrySuffix } from "./cascade-format.js";
 import {
 	applyFindingPolicy,
@@ -3376,6 +3378,55 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		}
 	}
 	if (getFlag("lens-actionable-warnings")) {
+		// #3170: re-verify carried deferred findings before the advisory
+		// assembles — a finding whose file is unchanged re-serves from the
+		// persisted report without ever being re-observed; root-cause-fixed-
+		// elsewhere findings converge here instead of repeating. Bounded in the
+		// module (≤4 files, wall budget, abort signal); the replacement publishes
+		// in-band so the carried entry is superseded, not unioned with.
+		const persistedReport = cacheManager.readCache<ActionableWarningsReport>(
+			"actionable-warnings",
+			cwd,
+			Number.MAX_SAFE_INTEGER,
+		)?.data;
+		if (persistedReport?.files?.some((entry) => entry.origin === "deferred")) {
+			const reverifyLspService = getLSPService();
+			if (reverifyLspService) {
+				const reverify = await runPersistentReverify({
+					report: persistedReport,
+					cwd,
+					lspService: reverifyLspService,
+					signal: deps.signal,
+				});
+				if (reverify.replacementFiles.length > 0) {
+					const replacementByPath = new Map(
+						reverify.replacementFiles.map((file) => [
+							normalizeMapKey(file.filePath),
+							file,
+						]),
+					);
+					publishActionableWarningsReport(
+						cacheManager,
+						cwd,
+						{
+							...persistedReport,
+							files: (persistedReport.files ?? []).map(
+								(file) =>
+									replacementByPath.get(normalizeMapKey(file.filePath)) ?? file,
+							),
+							generatedAt: new Date().toISOString(),
+						},
+						{
+							origin: "in-band",
+							getFileSeq: getFileSeq
+								? (filePath: string) => getFileSeq.call(runtime, filePath)
+								: undefined,
+							dbg,
+						},
+					);
+				}
+			}
+		}
 		try {
 			const report = await buildActionableWarningsReport({
 				cwd,

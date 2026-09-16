@@ -1097,6 +1097,17 @@ function formatDeltaMode(
 		"code-quality-warnings",
 		cwd,
 	);
+	// #3170: files whose re-verify pass could not complete inside its budget —
+	// their rows render as carried, plus this explicit gap label (never a
+	// false clean). Computed from the RAW actionable-warnings cache entries
+	// because the freshness pipeline below rebuilds the file shape. The
+	// re-verify only ever writes the actionable-warnings cache — the quality
+	// report's file shape carries no such marker.
+	const reverifyIncompletePaths = new Set(
+		(actionableEntry?.data?.files ?? [])
+			.filter((file) => file.reVerifyIncomplete)
+			.map((file) => normalizeMapKey(file.filePath)),
+	);
 	const actionable = actionableEntry?.data;
 	const quality = qualityEntry?.data;
 	// Project rule policy (`.pi-lens.json` `rules.<id>.disable` /
@@ -1188,6 +1199,9 @@ function formatDeltaMode(
 			if (!qualityLabeledFiles.has(normalizeMapKey(file.filePath))) {
 				appendGroupAgeLabel(lines, file.warnings);
 			}
+			if (reverifyIncompletePaths.has(normalizeMapKey(file.filePath))) {
+				lines.push("  (re-verify incomplete)");
+			}
 		}
 	}
 
@@ -1201,6 +1215,9 @@ function formatDeltaMode(
 				lines.push(`  ℹ ${where}  ${w.rule ?? w.code ?? w.tool}  ${w.message}`);
 			}
 			appendGroupAgeLabel(lines, file.warnings);
+			if (reverifyIncompletePaths.has(normalizeMapKey(file.filePath))) {
+				lines.push("  (re-verify incomplete)");
+			}
 		}
 	}
 
