@@ -48,12 +48,22 @@ const integrationInclude = [
 const unitOnlyExclude =
 	process.env.npm_lifecycle_event === "test:unit" ? integrationInclude : [];
 
-const sharedGlobalSetup = [
+/**
+ * The run-level setup arms. EXPORTED (#3104 review F2) so
+ * tests/support/tests-tree-write-guard.test.ts can assert membership: every
+ * arm here is a guard whose absence is silent — delete a row and the guard's
+ * own unit tests stay green while the guard stops running for the whole suite.
+ */
+export const sharedGlobalSetup = [
 	"./tests/support/check-build-freshness.ts",
 	"./tests/support/prewarm-grammars.ts",
 	// After check-build-freshness: the seed analyze runs the in-place build.
 	"./tests/support/prewarm-tool-home.ts",
 	"./tests/support/git-config-guard-setup.ts",
+	// Last: every earlier step (the in-place build, the grammar prewarm, the
+	// tool-home seed) has finished, so the baseline this guard snapshots is the
+	// tree the test files will actually walk (#3082).
+	"./tests/support/tests-tree-write-guard-setup.ts",
 ];
 
 const sharedSetupFiles = ["./tests/support/vitest-setup.ts"];
@@ -470,6 +480,11 @@ export const wallClockBudgetInclude = [
 	"tests/support/fault-injection.test.ts",
 	"tests/support/git-config-guard.test.ts",
 	"tests/support/git-fixture-env.test.ts",
+	// #3082: the tests-tree write guard's one real-watcher case. A recursive
+	// `fs.watch` delivers on the kernel's schedule, so the case retries the
+	// create/remove and polls the guard's own report (real setTimeout, bounded)
+	// rather than sleeping a guessed settle time (flake-shape admission).
+	"tests/support/tests-tree-write-guard.test.ts",
 ];
 
 // #2912: the tmp-fixture governance sweep compares the real process-wide

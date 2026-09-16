@@ -38,11 +38,11 @@
  * `.emit(...)` with one of these five event-type strings.
  */
 
-import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { toPosix } from "../../clients/path-utils.js";
 import { stripCommentsAndStrings } from "./session-state-scan.ts";
+import { listSourceFiles, readWalkedFiles } from "./sweep-kit.js";
 
 const repoRoot = path.resolve(
 	path.dirname(fileURLToPath(import.meta.url)),
@@ -51,13 +51,14 @@ const repoRoot = path.resolve(
 
 const TESTS_ROOT = path.join(repoRoot, "tests");
 
-/** Every `.ts`/`.mjs` file under `tests/`. */
+/** Every `.ts`/`.mjs` file under `tests/`, through the shared walker (#3082):
+ *  this module used to hand-roll the identical recursive `readdirSync` walk.
+ *  `skipDeclarations: false` keeps the population byte-identical to that walk
+ *  — `.d.ts` files were part of it and the 400-file floor is calibrated on it. */
 function testFiles(dir = TESTS_ROOT): string[] {
-	return fs.readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
-		const entryPath = path.join(dir, entry.name);
-		if (entry.isDirectory()) return testFiles(entryPath);
-		if (!/\.(ts|mjs)$/.test(entry.name)) return [];
-		return [entryPath];
+	return listSourceFiles(dir, {
+		extensions: [".ts", ".mjs"],
+		skipDeclarations: false,
 	});
 }
 
@@ -158,10 +159,11 @@ export function scanSourceForHostEventShapeViolations(
 /** Every fixture literal, across the five {@link EVENT_TYPES}, carrying a forbidden field. */
 export function scanHostEventShapeViolations(): HostEventShapeViolation[] {
 	const violations: HostEventShapeViolation[] = [];
-	for (const absolute of testFiles()) {
-		const raw = fs.readFileSync(absolute, "utf8");
+	// readWalkedFiles: a path that vanished between the walk and the read is out
+	// of the population, not a finding (#3082).
+	for (const { file, source } of readWalkedFiles(testFiles())) {
 		violations.push(
-			...scanSourceForHostEventShapeViolations(testsRelative(absolute), raw),
+			...scanSourceForHostEventShapeViolations(testsRelative(file), source),
 		);
 	}
 	return violations;

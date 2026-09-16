@@ -64,6 +64,46 @@ function sourceFiles(root) {
 	return files.sort();
 }
 
+/**
+ * Paths this process already warned about, so one vanished file is one
+ * warning however many times the population is rebuilt (`findWin32Gates` is
+ * called twice by `getWin32LaneFiles` alone). Matches the TypeScript seam's
+ * once-per-distinct-path rule; bounded for the same reason it is there.
+ */
+const VANISHED_PATH_RECORD_CAP = 256;
+const vanishedBetweenWalkAndRead = new Set();
+
+/**
+ * Read a file this module's own walk just produced, tolerating the file
+ * vanishing between the walk and the read (#3082): a concurrently running
+ * test that creates a source file under `tests/` and removes it again makes
+ * this read throw ENOENT in whichever walker was mid-enumeration. `undefined`
+ * means "no longer part of the population" — a gone file has no gates.
+ *
+ * The TypeScript-side seam for the same rule is `readWalkedFile` in
+ * tests/support/sweep-kit.ts, which every other walker in the repo now uses;
+ * scripts/ cannot import from tests/, so this one repeats it rather than
+ * inverting the layering. Behaviour is deliberately IDENTICAL, including the
+ * once-per-distinct-path record (#3104 review F6, which found this copy
+ * warning once per occurrence instead) and its bound.
+ */
+export function readWalkedFile(absolute) {
+	try {
+		return readFileSync(absolute, "utf8");
+	} catch (error) {
+		if (error?.code !== "ENOENT") throw error;
+		if (!vanishedBetweenWalkAndRead.has(absolute)) {
+			if (vanishedBetweenWalkAndRead.size >= VANISHED_PATH_RECORD_CAP)
+				vanishedBetweenWalkAndRead.clear();
+			vanishedBetweenWalkAndRead.add(absolute);
+			console.warn(
+				`[win32-gate-population] ${absolute} vanished between the walk and the read; skipped (#3082)`,
+			);
+		}
+		return undefined;
+	}
+}
+
 function isWindowsOnlyGate(match, rawSpan) {
 	if (!/["']win32["']/.test(rawSpan)) return false;
 	return (
@@ -77,7 +117,8 @@ export function findWin32Gates(cwd = process.cwd()) {
 	const gates = [];
 	for (const absolute of sourceFiles(root)) {
 		if (absolute.startsWith(join(root, TESTS_ROOT, "fixtures") + sep)) continue;
-		const raw = readFileSync(absolute, "utf8");
+		const raw = readWalkedFile(absolute);
+		if (raw === undefined) continue;
 		for (const match of blankSource(raw).matchAll(GATE_PATTERN)) {
 			const offset = match.index ?? 0;
 			if (
