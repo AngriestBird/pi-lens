@@ -1,0 +1,5 @@
+---
+section: Fixed
+---
+
+- **A mis-cased path and a normalized read now share one anchor on POSIX (closes #3098, closes #3090)** — `normalizeFilePath` canonicalized casing only on Windows, so on a case-insensitive POSIX filesystem (macOS APFS, `nocase` vfat/ntfs3/cifs) a raw mis-cased `lens_diagnostic_mark` write and the dispatcher's `normalizeMapKey` read derived two anchors for one file and the agent's own false-positive/flagged mark silently never applied — the #1024 defect, live on every macOS install. The POSIX arm now adopts the on-disk casing `realpath(3)` reports for the trailing segments of an existing path, stopping at the first segment that differs by more than case, so casing is fixed while a symlinked prefix (macOS's `/var/folders` tmpdir, a symlinked monorepo package) is still never resolved; a path that does not exist stays case-preserving, because on a case-sensitive filesystem `SUB/a.ts` and `sub/a.ts` are two different files. The #1024 regression test now runs unskipped on the Linux CI lane instead of skipping there and failing on macOS.

@@ -44,7 +44,7 @@ import {
 	uriToPath,
 	walkUpDirs,
 } from "../../clients/path-utils.js";
-import { setupTestEnvironment } from "./test-utils.js";
+import { createCaseAliasFixture, setupTestEnvironment } from "./test-utils.js";
 
 describe("isWindowsPath (#1213 review pins)", () => {
 	it("matches drive-prefixed and UNC shapes only", async () => {
@@ -181,6 +181,125 @@ describe("normalizeFilePath: Windows-shaped path is OS-coherent (refs #1150, cla
 	it("normalizeMapKey (the map-key entry point) yields the same stable key", () => {
 		expect(normalizeMapKey(nonExistent)).toBe(normalizeFilePath(nonExistent));
 		expect(normalizeMapKey(nonExistentBack)).toBe(normalizeMapKey(nonExistent));
+	});
+});
+
+describe("normalizeFilePath: POSIX adopts on-disk casing (#3098, the live half of #1024)", () => {
+	// RECURRENCE GUARDED: the POSIX arm used to return the caller's spelling
+	// unchanged, so on a case-insensitive filesystem (macOS APFS, `nocase`
+	// vfat/ntfs3/cifs) a raw mis-cased write (`lens_diagnostic_mark` anchors
+	// under `path.resolve(cwd, arg)`) and a `normalizeMapKey` read derived TWO
+	// anchors for ONE file — #1024's dropped-mark defect, live on every macOS
+	// install (#3090 reported it as a test failure; #3098 is the production
+	// half). The fixture supplies the kernel contract the fix rests on
+	// (aliasing + on-disk casing from `realpath(3)`) natively where the
+	// filesystem is case-insensitive and via a case-variant symlink on the
+	// case-sensitive ubuntu Unit tests lane, so these run on EVERY lane.
+	it("a mis-cased spelling and the on-disk spelling derive ONE map key", (ctx) => {
+		const { tmpDir, cleanup } = setupTestEnvironment("pi-lens-case-");
+		try {
+			const alias = createCaseAliasFixture(tmpDir);
+			ctx.skip(alias.skipReason !== undefined, alias.skipReason ?? "");
+			expect(normalizeMapKey(alias.rawMisCased)).toBe(
+				normalizeMapKey(alias.onDisk),
+			);
+		} finally {
+			cleanup();
+		}
+	});
+
+	it("adopts the on-disk casing itself — never a lowercased or uppercased form", (ctx) => {
+		const { tmpDir, cleanup } = setupTestEnvironment("pi-lens-case-");
+		try {
+			const alias = createCaseAliasFixture(tmpDir, { dirName: "subDir" });
+			ctx.skip(alias.skipReason !== undefined, alias.skipReason ?? "");
+			// The on-disk spelling is mixed-case `subDir`; the caller held
+			// `SUBDIR`. Lowercasing the POSIX key (an explicit #3098 non-goal)
+			// would produce `subdir` and pass the one-key test above while
+			// silently renaming every key the product renders.
+			expect(normalizeMapKey(alias.rawMisCased).endsWith("/subDir/a.ts")).toBe(
+				true,
+			);
+		} finally {
+			cleanup();
+		}
+	});
+
+	it("keeps a symlinked PREFIX — POSIX normalization still resolves no symlink", (ctx) => {
+		ctx.skip(
+			process.platform === "win32",
+			"win32 arm resolves symlinks by design (unchanged by #3098); lane: ubuntu Unit tests",
+		);
+		const { tmpDir, cleanup } = setupTestEnvironment("pi-lens-case-");
+		try {
+			fs.mkdirSync(path.join(tmpDir, "real", "sub"), { recursive: true });
+			fs.writeFileSync(path.join(tmpDir, "real", "sub", "a.ts"), "x\n");
+			fs.symlinkSync("real", path.join(tmpDir, "link"), "dir");
+			const viaLink = path.join(tmpDir, "link", "sub", "a.ts");
+			// A symlinked package root is how monorepos are laid out; folding it
+			// to its target would re-key every file in them (refs #2490).
+			expect(normalizeMapKey(viaLink)).toBe(viaLink);
+		} finally {
+			cleanup();
+		}
+	});
+
+	it("a symlinked prefix with a mis-cased tail fixes the casing only (the macOS /var/folders shape)", (ctx) => {
+		ctx.skip(
+			process.platform === "win32",
+			"win32 arm resolves symlinks by design (unchanged by #3098); lane: ubuntu Unit tests",
+		);
+		const { tmpDir, cleanup } = setupTestEnvironment("pi-lens-case-");
+		try {
+			const real = path.join(tmpDir, "real");
+			fs.mkdirSync(real, { recursive: true });
+			const alias = createCaseAliasFixture(real);
+			ctx.skip(alias.skipReason !== undefined, alias.skipReason ?? "");
+			fs.symlinkSync("real", path.join(tmpDir, "link"), "dir");
+			// macOS `os.tmpdir()` IS this shape: `/var/folders/...` is a symlink
+			// into `/private/var`, so a whole-string "is this a case variant"
+			// test would decline to canonicalize exactly the paths #1024's
+			// regression test runs on.
+			const held = path.join(tmpDir, "link", "SUB", "a.ts");
+			expect(normalizeMapKey(held)).toBe(
+				path.join(tmpDir, "link", "sub", "a.ts"),
+			);
+		} finally {
+			cleanup();
+		}
+	});
+
+	it("a path that does not exist stays case-preserving", () => {
+		const { tmpDir, cleanup } = setupTestEnvironment("pi-lens-case-");
+		try {
+			const absent = path.join(tmpDir, "NOPE", "b.ts");
+			// Nothing on disk can say which spelling is real, and on a
+			// case-sensitive filesystem `NOPE` and `nope` are two different
+			// directories — folding one into the other is the #3098 non-goal.
+			expect(normalizeMapKey(absent)).toBe(absent.replace(/\\/g, "/"));
+		} finally {
+			cleanup();
+		}
+	});
+
+	it("two genuinely distinct files on a case-sensitive filesystem keep two keys", (ctx) => {
+		const { tmpDir, cleanup } = setupTestEnvironment("pi-lens-case-");
+		try {
+			fs.mkdirSync(path.join(tmpDir, "sub"), { recursive: true });
+			fs.writeFileSync(path.join(tmpDir, "sub", "a.ts"), "lower\n");
+			const upper = path.join(tmpDir, "SUB");
+			ctx.skip(
+				fs.existsSync(upper),
+				"case-insensitive filesystem: SUB and sub cannot be two directories here",
+			);
+			fs.mkdirSync(upper, { recursive: true });
+			fs.writeFileSync(path.join(upper, "a.ts"), "upper\n");
+			expect(normalizeMapKey(path.join(upper, "a.ts"))).not.toBe(
+				normalizeMapKey(path.join(tmpDir, "sub", "a.ts")),
+			);
+		} finally {
+			cleanup();
+		}
 	});
 });
 
