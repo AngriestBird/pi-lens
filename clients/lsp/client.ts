@@ -39,7 +39,7 @@ import {
 	newLspMutationCorrelationId,
 } from "../lsp-mutation.js";
 import { getProcessSingleton } from "../process-singletons.js";
-import { getAmbientAbortSignal } from "../safe-spawn.js";
+import { getAmbientAbortSignal, isOwnLiveChild } from "../safe-spawn.js";
 import { raceToCompletion } from "./aggregation.js";
 import {
 	hashDiagnosticContent,
@@ -1344,7 +1344,12 @@ export async function killProcessTree(
 	}
 
 	const killPosixProcessGroup = (signal: NodeJS.Signals): boolean => {
-		if (pid <= 0) return false;
+		// #2042: one ownership predicate for every kill-by-raw-pid, replacing
+		// the `pid <= 0` sign check that let a test double's invented pid
+		// through. A pid we do not own falls back to `killDirectChild` below,
+		// which signals through the retained handle and can only ever reach
+		// our own child.
+		if (!isOwnLiveChild(pid, "lsp-stop-posix-group", proc)) return false;
 		try {
 			process.kill(-pid, signal);
 			return true;

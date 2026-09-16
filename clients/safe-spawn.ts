@@ -24,7 +24,10 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { BoundedFifoMap } from "./bounded-cache.js";
 import { logLatency } from "./latency-logger.js";
-import { recordDegradation } from "./degradation-ledger.js";
+import {
+	incrementDegradationCount,
+	recordDegradation,
+} from "./degradation-ledger.js";
 import { logExtension } from "./extension-log.js";
 import { isFullyQualifiedWin32 } from "./path-utils.js";
 import { startSpawnUsageSampler } from "./resource-sampler.js";
@@ -381,6 +384,84 @@ const lifetimeState =
 		installed: false,
 	});
 
+/**
+ * THE ownership predicate for every kill-by-raw-pid in this repo (#2042).
+ *
+ * A pid is signalable only when it is a LIVE DIRECT CHILD of this process.
+ * `tests/clients/lsp/launch.test.ts` mocked `node:child_process` with a fake
+ * child carrying the literal pid `2468`; `safeSpawnAsync` registered it in
+ * `lifetimeState.pids`, the fake never emitted `close` so nothing removed it,
+ * and at fork teardown `installLifetimeCleanup()` fired
+ * `process.kill(-2468, "SIGKILL")`. On ~10 % of GitHub runners pid 2468 was
+ * one of the job's own long-lived processes — that is the whole of #2042:
+ * exit 137, no failing assertion, no kernel record, five weeks of "infra
+ * kill" reruns. A `pid <= 0` guard would not have stopped it; 2468 is a
+ * perfectly plausible pid. The defect is OWNERSHIP, not sign.
+ *
+ * Three guards fold into this one (net-count rule): `lsp/client.ts`'s
+ * `pid <= 0`, `lsp/launch.ts`'s `handle.pid <= 0` plus its already-exited
+ * recycled-pid check, and `killTree`'s `child.pid > 0` below. It closes
+ * fabricated, stale and recycled pids together.
+ *
+ * NOT folded: `instance-reaper.ts#killPidTree`. Its pids come from OTHER
+ * pi-lens instances' registries and from an OS scan of managed binaries with
+ * confirmed-dead parents — deliberately NOT our children. Its `!isFinite ||
+ * pid <= 0` guard is well-formedness on a different axis, and applying this
+ * predicate there would turn the orphan reaper into a no-op.
+ *
+ * Platform behaviour, stated rather than implied:
+ *  - Linux (the authoritative lane, and the one that lost five weeks):
+ *    `/proc/<pid>/status` is the kernel's own answer. Missing entry = the pid
+ *    does not exist, so there is nothing of ours to kill; `PPid` other than
+ *    ours = someone else's process, which is recorded and never signalled.
+ *  - Windows and macOS have no `/proc`, so ownership is unverifiable from a
+ *    raw pid and the predicate keeps today's best-effort behaviour. The
+ *    `handle` arm still applies there: it is the only ownership evidence
+ *    Windows has, and it is what `killWindowsTree` already used.
+ */
+export function isOwnLiveChild(
+	pid: number | undefined,
+	site: string,
+	handle?: { exitCode?: number | null; signalCode?: NodeJS.Signals | null },
+): boolean {
+	if (typeof pid !== "number" || !Number.isInteger(pid) || pid <= 0)
+		return false;
+	// A handle that has already reported exit is proof the pid is dead — and
+	// therefore possibly recycled to an unrelated process.
+	if (handle && (handle.exitCode != null || handle.signalCode != null))
+		return false;
+	if (process.platform !== "linux") return true;
+	let status: string;
+	try {
+		status = fs.readFileSync(`/proc/${pid}/status`, "utf8");
+	} catch {
+		// No such process. Not a degradation: a child that exited before the
+		// teardown signal is the ordinary case, and nothing is at risk.
+		return false;
+	}
+	const parent = /^PPid:\s*(\d+)$/m.exec(status);
+	if (!parent) return true;
+	if (Number(parent[1]) === process.pid) return true;
+	// Alive AND someone else's: the dangerous case, and the only one worth a
+	// record. Subject is the SITE (a fixed, tiny set), never the pid, so the
+	// ledger stays bounded however often it fires.
+	incrementDegradationCount({
+		kind: "kill-foreign-pid-refused",
+		subject: site,
+		reason: `pid ${pid} has parent ${parent[1]}, not this process — signal refused`,
+	});
+	return false;
+}
+
+/**
+ * Kill one registered pid's tree at host exit. Deliberately NOT re-checked
+ * against `isOwnLiveChild` here: `lifetimeState.pids` has exactly one writer
+ * (the registration below), that writer is now gated, and a second gate on
+ * the same feeder would make BOTH mutation-inert — remove either one and the
+ * other still blocks the kill, so neither would have a test that reds. The
+ * gate lives where the pid enters, which is also where ownership is a fact
+ * rather than a stale reading (#2042).
+ */
 function killPidTreeSync(pid: number): void {
 	if (process.platform === "win32") {
 		try {
@@ -1540,12 +1621,19 @@ export async function safeSpawnAsync(
 			child.stdin?.on("error", () => {});
 			child.stdin?.end(options.input);
 		}
-		if (child.pid && (posixProcessGroup || options?.lifetimeCoupled)) {
+		// #2042: ownership is a SPAWN-TIME fact — a real child is alive with
+		// `PPid == ours` the instant `spawn` returns, while a test double's
+		// invented pid never is. Resolve it once, here, and reuse the verdict:
+		// the group escalation below must still fire after the direct child
+		// dies (#2027: a SIGTERM-hardy grandchild keeps the group alive), so it
+		// cannot re-read `/proc` at kill time.
+		const ownsChildPid = isOwnLiveChild(child.pid, "safe-spawn-register");
+		if (ownsChildPid && (posixProcessGroup || options?.lifetimeCoupled)) {
 			// #2026: POSIX registers unconditionally - detached children no
 			// longer receive terminal signals directly, so the lifetime
 			// cleanup's signal forwarding IS their die-with-host path.
 			installLifetimeCleanup();
-			lifetimeState.pids.add(child.pid);
+			lifetimeState.pids.add(child.pid as number);
 		}
 
 		// #620: bracket this spawn's lifetime with a short-interval CPU/RSS poll
@@ -1606,11 +1694,11 @@ export async function safeSpawnAsync(
 				} catch {
 					child.kill("SIGKILL");
 				}
-			} else if (posixProcessGroup && child.pid && child.pid > 0) {
+			} else if (posixProcessGroup && ownsChildPid) {
 				// #2026: signal the whole process group. Grandchildren spawned
 				// by the tool share its group, so one signal reaches the whole
 				// tree; a negative-pid ESRCH means it already exited.
-				const pgid = -child.pid;
+				const pgid = -(child.pid as number);
 				try {
 					process.kill(pgid, "SIGTERM");
 				} catch {

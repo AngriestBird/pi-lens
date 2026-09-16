@@ -273,6 +273,17 @@ export type DegradationKind =
 	| "installer-verification-output-truncated"
 	/** A busy notify-stall discriminator was deferred; detail is rising-edge bounded. */
 	| "instance-registry-corrupt"
+	/**
+	 * #2042: a kill-by-raw-pid was REFUSED because `/proc/<pid>/status` showed
+	 * the pid alive under a different parent — someone else's process. Subject
+	 * is the call site (`safe-spawn-register`, `lsp-stop-posix-group`,
+	 * `lsp-stop-windows-tree`), a fixed tiny set, so
+	 * the ledger stays bounded however often the refusal fires; the pid and
+	 * its real parent are in the reason. A pid that simply no longer exists is
+	 * NOT recorded — that is the ordinary "child already exited" case and
+	 * nothing is at risk.
+	 */
+	| "kill-foreign-pid-refused"
 	/** A didChange content mirror was recorded behind a newer document version. */
 	| "lens-diagnostics-analysis-root-rejected"
 	/** Cross-graph rotation options disagreed; the first writer retained ownership. */
