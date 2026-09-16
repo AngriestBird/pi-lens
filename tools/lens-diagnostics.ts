@@ -948,7 +948,6 @@ function filterDeltaReportDispositions(
 	return { ...report, diagnostics: policyKept };
 }
 
-
 /**
  * #1634 review round: `formatDeltaMode` re-serves the `actionable-warnings`/
  * `code-quality-warnings` caches verbatim — each cited `file:line`, no

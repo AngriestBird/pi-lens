@@ -29,6 +29,7 @@ import {
 	_resetDeferredForTests,
 	_resetStateCacheForTests,
 } from "../../clients/diagnostic-dispositions.js";
+import { getProjectDataDir } from "../../clients/file-utils.js";
 import {
 	clearWidgetState,
 	getFileDiagnostics,
@@ -259,6 +260,98 @@ describe("lens_diagnostics source=lsp honors dispositions (#3088)", () => {
 		expect((await probe(service)).content[0].text).toContain(MESSAGE);
 	});
 
+	it("applies the same filter, with its count, on a directory scan", async () => {
+		const service = makeService();
+		const tool = createLspDiagnosticsTool(
+			undefined,
+			undefined,
+			() => service as never,
+		);
+		const scanDir = () =>
+			tool.execute(
+				"lsp-3088-dir",
+				{ path: cwd },
+				new AbortController().signal,
+				null,
+				{ cwd },
+			) as Promise<{
+				content: Array<{ text: string }>;
+				details?: Record<string, unknown>;
+			}>;
+
+		expect((await scanDir()).content[0].text).toContain(MESSAGE);
+		await mark({
+			filePath,
+			line: 1,
+			message: MESSAGE,
+			...CANONICAL_MARK,
+			disposition: "false-positive",
+		});
+
+		const after = await scanDir();
+		expect(after.content[0].text).not.toContain(MESSAGE);
+		expect(after.content[0].text).toContain("suppressed by disposition: 1");
+		expect(after.details?.dispositionSuppressed).toBe(1);
+	});
+
+	it("keeps the surviving finding and its count when a directory scan drops only one", async () => {
+		const OTHER = "Cannot find name 'other'.";
+		const service = makeService();
+		service.touchFile = vi.fn(async () => ({
+			diags: [
+				{
+					severity: 2,
+					message: MESSAGE,
+					source: "typescript",
+					code: 2322,
+					serverId: "typescript",
+					range: {
+						start: { line: 0, character: 6 },
+						end: { line: 0, character: 11 },
+					},
+				},
+				{
+					severity: 2,
+					message: OTHER,
+					source: "typescript",
+					code: 2304,
+					serverId: "typescript",
+					range: {
+						start: { line: 1, character: 13 },
+						end: { line: 1, character: 18 },
+					},
+				},
+			],
+		}));
+		const tool = createLspDiagnosticsTool(
+			undefined,
+			undefined,
+			() => service as never,
+		);
+		const scanDir = () =>
+			tool.execute(
+				"lsp-3088-dir2",
+				{ path: cwd },
+				new AbortController().signal,
+				null,
+				{ cwd },
+			) as Promise<{ content: Array<{ text: string }> }>;
+
+		await scanDir();
+		await mark({
+			filePath,
+			line: 1,
+			message: MESSAGE,
+			...CANONICAL_MARK,
+			disposition: "false-positive",
+		});
+
+		const after = (await scanDir()).content[0].text;
+		expect(after).not.toContain(MESSAGE);
+		expect(after).toContain(OTHER);
+		expect(after).toContain("suppressed by disposition: 1");
+	});
+
 	it("applies the same filter on the legacy lsp_diagnostics tool", async () => {
 		const service = makeService();
 		await legacyProbe(service);
@@ -271,6 +364,52 @@ describe("lens_diagnostics source=lsp honors dispositions (#3088)", () => {
 		});
 		const after = await legacyProbe(service);
 		expect(after.content[0].text).not.toContain(MESSAGE);
+		// The all-dropped arm of the single-file render still states the count.
+		expect(after.content[0].text).toContain("suppressed by disposition: 1");
+	});
+
+	it("keeps the surviving finding and its count on a single-file probe", async () => {
+		const OTHER = "Cannot find name 'other'.";
+		const service = makeService();
+		service.touchFile = vi.fn(async () => ({
+			diags: [
+				{
+					severity: 2,
+					message: MESSAGE,
+					source: "typescript",
+					code: 2322,
+					serverId: "typescript",
+					range: {
+						start: { line: 0, character: 6 },
+						end: { line: 0, character: 11 },
+					},
+				},
+				{
+					severity: 2,
+					message: OTHER,
+					source: "typescript",
+					code: 2304,
+					serverId: "typescript",
+					range: {
+						start: { line: 1, character: 13 },
+						end: { line: 1, character: 18 },
+					},
+				},
+			],
+		}));
+		await legacyProbe(service);
+		await mark({
+			filePath,
+			line: 1,
+			message: MESSAGE,
+			...CANONICAL_MARK,
+			disposition: "false-positive",
+		});
+
+		const after = (await legacyProbe(service)).content[0].text;
+		expect(after).not.toContain(MESSAGE);
+		expect(after).toContain(OTHER);
+		expect(after).toContain("suppressed by disposition: 1");
 	});
 });
 
@@ -390,7 +529,9 @@ describe("cache-replay probes honor marks like fresh ones (#3088)", () => {
 	// `policy.inlineKept` and this case reds.
 	it("resurfaces a finding on a replay once its mark is gone from the store", async () => {
 		const service = makeService();
-		await probe(service);
+		// The mark exists BEFORE the only fresh observation, so the cache entry
+		// this probe records is the one written while the finding was filtered
+		// out of the output — the case that tells `inlineKept` and `kept` apart.
 		await mark({
 			filePath,
 			line: 1,
@@ -398,14 +539,20 @@ describe("cache-replay probes honor marks like fresh ones (#3088)", () => {
 			...CANONICAL_MARK,
 			disposition: "false-positive",
 		});
-		expect((await probe(service)).content[0].text).not.toContain(MESSAGE);
+		const fresh = (await probe(service)).content[0].text;
+		expect(fresh).not.toContain(MESSAGE);
+		// The FRESH observation is the one that filtered here — marks outlive a
+		// session, so the first probe of a new session is exactly this shape — and
+		// it carries its own count up to the batch render.
+		expect(fresh).toContain("suppressed by disposition: 1");
+		expect(service.touchFile).toHaveBeenCalledTimes(1);
 
+		// Deleting the store is how a user revokes every persistent mark
+		// (docs/dispositions.md "Storage").
 		fs.rmSync(
 			path.join(
-				process.env.PILENS_DATA_DIR as string,
-				...fs
-					.readdirSync(process.env.PILENS_DATA_DIR as string)
-					.map((slug) => path.join(slug, "cache")),
+				getProjectDataDir(cwd),
+				"cache",
 				"diagnostic-dispositions.json",
 			),
 		);

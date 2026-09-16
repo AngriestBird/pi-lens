@@ -33,7 +33,8 @@ import { applyRulePolicy, rulePolicyMapFromConfig } from "./rule-policy.js";
 import type { Diagnostic } from "./types.js";
 import { convertLspDiagnostics } from "./utils/lsp-diagnostics.js";
 
-/** The `(tool, rule)` pair a disposition anchor is derived from. */
+/** The `(tool, rule)` pair a disposition anchor is derived from. Either half
+ * may be absent — `lens_diagnostic_mark` takes both as optional. */
 export interface FindingIdentity {
 	tool?: string;
 	rule?: string;
@@ -79,7 +80,11 @@ export interface FindingPolicyResult<T> {
  * diagnostics that already carry dispatch identity (`tool`/`rule`/`line`).
  */
 export function applyFindingPolicy<
-	T extends DispositionCandidate & { rule?: string; code?: string; id?: string },
+	T extends DispositionCandidate & {
+		rule?: string;
+		code?: string;
+		id?: string;
+	},
 >(diagnostics: T[], options: FindingPolicyOptions<T>): FindingPolicyResult<T> {
 	const inlineKept = applyInlineSuppressions(diagnostics, options.content);
 	const disposed = filterDisposed(inlineKept, options);
@@ -124,35 +129,34 @@ function filterDisposed<T extends DispositionCandidate>(
 	if (!diagnostics.length || !hasAnyDispositionMarks(options.cwd)) {
 		return diagnostics;
 	}
-	const owners: number[] = [];
-	const candidates: DispositionCandidate[] = [];
-	for (const [index, diagnostic] of diagnostics.entries()) {
-		for (const identity of identities(diagnostic)) {
-			owners.push(index);
-			candidates.push({
-				tool: identity.tool,
-				rule: identity.rule,
+	const expanded = diagnostics.flatMap((diagnostic) =>
+		identities(diagnostic).map((identity) => ({
+			diagnostic,
+			candidate: {
+				...identity,
 				message: diagnostic.message,
-				line: diagnostic.line,
-				semantic: diagnostic.semantic,
-			});
-		}
-	}
+				...(diagnostic.line !== undefined && { line: diagnostic.line }),
+				...(diagnostic.semantic !== undefined && {
+					semantic: diagnostic.semantic,
+				}),
+			} satisfies DispositionCandidate,
+		})),
+	);
 	const survivors = new Set(
 		applyDispositions(
-			candidates,
+			expanded.map((entry) => entry.candidate),
 			options.cwd,
 			options.filePath,
 			options.content,
 		),
 	);
-	const disposedOwners = new Set<number>();
-	for (const [position, candidate] of candidates.entries()) {
-		if (!survivors.has(candidate)) disposedOwners.add(owners[position]);
+	const disposed = new Set<T>();
+	for (const entry of expanded) {
+		if (!survivors.has(entry.candidate)) disposed.add(entry.diagnostic);
 	}
-	return disposedOwners.size === 0
+	return disposed.size === 0
 		? diagnostics
-		: diagnostics.filter((_, index) => !disposedOwners.has(index));
+		: diagnostics.filter((diagnostic) => !disposed.has(diagnostic));
 }
 
 /**
@@ -179,23 +183,30 @@ function probeIdentities(
 	canonical: DispositionCandidate,
 	raw: LSPDiagnostic | undefined,
 ): FindingIdentity[] {
-	const rendered: FindingIdentity[] = [
-		{ tool: canonical.tool, rule: canonical.rule },
+	const rendered: Array<[string | undefined, string | undefined]> = [
+		[canonical.tool, canonical.rule],
 	];
-	if (raw !== undefined && (raw.source !== undefined || raw.code !== undefined)) {
-		rendered.push({
-			tool: raw.source,
-			rule: raw.code === undefined ? undefined : String(raw.code),
-		});
+	if (
+		raw !== undefined &&
+		(raw.source !== undefined || raw.code !== undefined)
+	) {
+		rendered.push([
+			raw.source,
+			raw.code === undefined ? undefined : String(raw.code),
+		]);
 	}
 	const out: FindingIdentity[] = [];
 	const seen = new Set<string>();
-	for (const identity of rendered) {
-		for (const candidate of [identity, { rule: identity.rule }]) {
-			const key = `${candidate.tool ?? ""} ${candidate.rule ?? ""}`;
+	for (const [tool, rule] of rendered) {
+		// Both spellings also in the `tool`-omitted form the mark tool admits.
+		for (const candidateTool of [tool, undefined]) {
+			const key = `${candidateTool ?? ""}\u0000${rule ?? ""}`;
 			if (seen.has(key)) continue;
 			seen.add(key);
-			out.push(candidate);
+			out.push({
+				...(candidateTool !== undefined && { tool: candidateTool }),
+				...(rule !== undefined && { rule }),
+			});
 		}
 	}
 	return out;
@@ -259,9 +270,14 @@ export function applyLspFindingPolicy(
 		cwd: options.cwd,
 		fileRole: options.fileRole,
 	});
+	// `convertLspDiagnostics` maps its (pre-filtered) input 1:1, so `converted[i]`
+	// belongs to `anchored[i]`. Pair them up front and work from the pairing: a
+	// converted entry with no counterpart is simply never paired, so it can never
+	// be dropped — fail open, never hide a finding this filter could not identify.
 	const rawByConverted = new Map<Diagnostic, LSPDiagnostic>();
 	for (const [index, diagnostic] of converted.entries()) {
-		rawByConverted.set(diagnostic, anchored[index]);
+		const raw = anchored[index];
+		if (raw !== undefined) rawByConverted.set(diagnostic, raw);
 	}
 	const { kept, inlineKept } = applyFindingPolicy(converted, {
 		cwd: options.cwd,
@@ -275,10 +291,8 @@ export function applyLspFindingPolicy(
 		if (survivors.length === converted.length) return diagnostics;
 		const keptConverted = new Set(survivors);
 		const dropped = new Set<LSPDiagnostic>();
-		for (const diagnostic of converted) {
-			if (keptConverted.has(diagnostic)) continue;
-			const raw = rawByConverted.get(diagnostic);
-			if (raw !== undefined) dropped.add(raw);
+		for (const [diagnostic, raw] of rawByConverted) {
+			if (!keptConverted.has(diagnostic)) dropped.add(raw);
 		}
 		return diagnostics.filter((d) => !dropped.has(d));
 	};

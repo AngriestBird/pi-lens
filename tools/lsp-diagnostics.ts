@@ -965,7 +965,6 @@ function applyProbeFindingPolicy(
 				metadata: {
 					suppressed: result.suppressed,
 					total: diagnostics.length,
-					strictMarks: hasStrictDispositionMarks(cwd),
 				},
 			});
 		}
