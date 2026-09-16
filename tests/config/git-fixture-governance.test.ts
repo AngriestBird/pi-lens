@@ -305,9 +305,7 @@ export function findHistoricalCommitIshOffenders(
 				for (const match of token.matchAll(LITERAL_COMMIT_ISH))
 					offenders.push(`${relativeFile}:${site.line} ${match[0]}`);
 				for (const name of boundShaNames)
-					if (
-						new RegExp(`\\$\\{\\s*${escapeRegExp(name)}\\s*\\}`).test(token)
-					)
+					if (new RegExp(`\\$\\{\\s*${escapeRegExp(name)}\\s*\\}`).test(token))
 						offenders.push(`${relativeFile}:${site.line} \${${name}}`);
 			}
 		}

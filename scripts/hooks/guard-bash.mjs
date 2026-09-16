@@ -845,7 +845,8 @@ const HARNESS_HOME_SEGMENT = ".probe-home";
  *  reading the `probe` rule's message. The name boundary matters: without
  *  it `$PI_LENS_HOME_TMP` and `$PI_LENS_HOMEDIR/x` -- different variables,
  *  naming different directories -- were both denied (review round 2 T3). */
-const HARNESS_HOME_VARIABLE = /\$\{PI_LENS_HOME\}|\$PI_LENS_HOME(?![A-Za-z0-9_])/;
+const HARNESS_HOME_VARIABLE =
+	/\$\{PI_LENS_HOME\}|\$PI_LENS_HOME(?![A-Za-z0-9_])/;
 
 /**
  * Deny a `TMPDIR`/`TMP`/`TEMP` assignment that aims Node's temp directory
