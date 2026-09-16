@@ -6,26 +6,39 @@ import {
 } from "./tests-tree-write-guard.js";
 
 /**
- * Repo-root files a test is known to write and remove within one run,
- * excused from the root arm below (#3105).
- *
  * `tests/index-2992-integration.test.ts` writes `index-2992-probe.ts` and
- * `index-2992-recovered.ts` at the repo root, not under `tests/` and not
- * under a gitignored scratch dir: the read/mutation bridges it drives are
- * real, and `isRecordableProjectPath` (`clients/file-utils.ts`) treats any
- * path either outside the project root or matched by `.gitignore` as
- * external/vendor and silently drops it — so a mkdtemp root, the pinned
- * TMPDIR (outside the worktree), or the test's own `.probe-home` (gitignored,
- * used for `PI_LENS_HOME` two lines above each write) would all make the
- * bridges under test silently stop recording, which is the behavior the test
- * exists to exercise. The repo root is the one place that is simultaneously
- * "under the project root" and "not gitignored". Both files are removed
- * before the `it` that created them returns (`afterEach`/`finally`).
+ * `index-2992-recovered.ts` into this scratch dir at runtime and removes
+ * them before the `it` that created them returns (`afterEach`/`finally`) —
+ * the exact producer shape this guard exists for
+ * (`tests/clients/pi-lens-home-hermeticity.test.ts` is the guard's own
+ * worked example of the same pattern, cleaned up).
+ *
+ * NOT gitignored, and it must not become so: `isRecordableProjectPath`
+ * (`clients/file-utils.ts`) drops any path `.gitignore` matches, and that
+ * test drives the real read/mutation bridges through it. Measured directly
+ * against the built runtime — `isRecordableProjectPath` for a path under
+ * this dir is `true`; for a path under this same test's own gitignored
+ * `.probe-home` (used for `PI_LENS_HOME`) it is `false`. A path under the
+ * bare repo root is ALSO `true` (`isExternalOrVendorFile`,
+ * `clients/path-utils.ts`, only checks containment under the project root
+ * and a `node_modules`-style vendor segment — not "is this the root
+ * specifically"), so the repo root was never the only option; this
+ * directory, inside the tree the #3082 guard already watches, is simply the
+ * one that needs no separate arm.
  */
-const ROOT_WRITE_ALLOWLIST: ReadonlySet<string> = new Set([
-	"index-2992-probe.ts",
-	"index-2992-recovered.ts",
-]);
+const INDEX_2992_SCRATCH_PREFIX = ["support", ".index-2992-scratch"];
+
+/**
+ * Excuses `INDEX_2992_SCRATCH_PREFIX` by directory, not by the two filenames
+ * inside it: a producer adding a third scratch file to its own directory
+ * needs no update here.
+ */
+export function isUnderIndex2992Scratch(relative: string): boolean {
+	const segments = relative.split(/[\\/]/);
+	return INDEX_2992_SCRATCH_PREFIX.every(
+		(segment, index) => segments[index] === segment,
+	);
+}
 
 /**
  * globalSetup arm of the #3082 guard — one watcher per activated PROJECT, not
@@ -68,49 +81,10 @@ export function runTestsTreeWriteGuardSetup(
 	};
 }
 
-/**
- * Repo-root arm (#3105): the same producer shape as the `tests/` arm above —
- * a test creating a source file inside a tree it does not own, mid-run — but
- * one directory up, where no directory-walking sweep enumerates today. A
- * non-recursive watch (see {@link installTestsTreeWriteGuard}'s `recursive`
- * option): only a file appearing directly in the repo root is this shape; a
- * nested one is the `tests/` arm's to catch, or already the tracked tree's
- * business.
- */
-function installRootWriteGuard(): TestsTreeWriteGuard {
-	return installTestsTreeWriteGuard(process.cwd(), {
-		recursive: false,
-		allow: ROOT_WRITE_ALLOWLIST,
-	});
-}
-
-/**
- * Combine any number of guards into one teardown: every report gets thrown
- * together (so a `tests/` violation and a root violation in the same run are
- * both visible, not just whichever guard's `report()` ran first), and every
- * guard is closed regardless of whether the combined teardown throws — the
- * same close-on-throw contract {@link runTestsTreeWriteGuardSetup} keeps for
- * one guard (AGENTS.md shape 4: a throw must never leak the watch handle).
- */
-export function combineGuardTeardowns(
-	guards: readonly TestsTreeWriteGuard[],
-): () => void {
-	return () => {
-		try {
-			const reports = guards
-				.map((guard) => guard.report())
-				.filter((report): report is string => report !== undefined);
-			if (reports.length > 0) throw new Error(reports.join("\n\n"));
-		} finally {
-			for (const guard of guards) guard.close();
-		}
-	};
-}
-
 export default function setup(): () => void {
-	const testsGuard = installTestsTreeWriteGuard(
-		path.join(process.cwd(), "tests"),
+	const root = path.join(process.cwd(), "tests");
+	return runTestsTreeWriteGuardSetup(
+		root,
+		installTestsTreeWriteGuard(root, { allow: isUnderIndex2992Scratch }),
 	);
-	const rootGuard = installRootWriteGuard();
-	return combineGuardTeardowns([testsGuard, rootGuard]);
 }
