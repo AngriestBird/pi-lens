@@ -23,11 +23,13 @@ import { describe, expect, it } from "vitest";
 import {
 	classifyPayload,
 	findDeny,
+	RULE_MESSAGES,
 	scannableRegions,
 	splitSegments,
 	splitWords,
 	stripEnvAssignments,
 } from "../../scripts/hooks/guard-bash.mjs";
+import type { DenyRule } from "../../scripts/hooks/guard-bash.d.mts";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = join(here, "..", "..");
@@ -164,6 +166,7 @@ const DENY_CASES: Array<[command: string, ruleNeedle: string]> = [
 	// for straight after reading the `probe` rule's own message.
 	["TMPDIR=$PI_LENS_HOME npx vitest run tests/config", "tmpdir"],
 	["TMPDIR=${PI_LENS_HOME}/x npx vitest run tests/config", "tmpdir"],
+	["TMPDIR=$PI_LENS_HOME/sub npx vitest run tests/config", "tmpdir"],
 ];
 
 // Every allow string the issue lists, which must stay green.
@@ -252,6 +255,15 @@ const ALLOW_CASES: string[] = [
 	// must never be caught by the TMPDIR rule.
 	"PI_LENS_HOME=$PWD/.probe-home npm test",
 	"export PI_LENS_HOME=$PWD/.probe-home && npm test",
+	// Review round 2 T3: a DIFFERENT variable whose name merely starts with
+	// PI_LENS_HOME names a different directory. Both were denied before the
+	// name boundary landed.
+	"TMPDIR=$PI_LENS_HOME_TMP npm test",
+	"TMPDIR=$PI_LENS_HOMEDIR/x npm test",
+	// Review round 2, named limit: a third variable hides the path from a
+	// static scan, so this ALLOWS. The row exists so the limit is a pinned,
+	// visible behaviour rather than an untested claim in a docblock.
+	"export PROBE_HOME=$PWD/.probe-home; export TMPDIR=$PROBE_HOME; npm test",
 ];
 
 // Round-2 survey harness retained as a regression fixture for #2705. The
@@ -303,6 +315,17 @@ describe("scripts/hooks/guard-bash.mjs -- allow list (#2699)", () => {
 		const result = runHook(command);
 		expect(result.status).toBe(0);
 		expect(result.stderr).toBe("");
+	});
+});
+
+describe("scripts/hooks/guard-bash.mjs -- rule declarations (review round 2 T1)", () => {
+	it("declares tmpdirCollision in the DenyRule union the .d.mts exports", () => {
+		// The union in scripts/hooks/guard-bash.d.mts is what every .ts caller
+		// sees. It shipped without the fifth rule in round 1, so this typed
+		// binding is the guard: remove "tmpdirCollision" from the union and
+		// `npm run lint` fails with TS2322 before the suite even runs.
+		const rule: DenyRule = "tmpdirCollision";
+		expect(RULE_MESSAGES[rule]).toContain("TMPDIR");
 	});
 });
 

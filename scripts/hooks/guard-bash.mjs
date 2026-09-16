@@ -842,8 +842,10 @@ const HARNESS_HOME_SEGMENT = ".probe-home";
 
 /** `$PI_LENS_HOME` / `${PI_LENS_HOME}` -- the same directory under its
  *  variable spelling, which is what an agent reaches for right after
- *  reading the `probe` rule's message. */
-const HARNESS_HOME_VARIABLE = /\$\{?PI_LENS_HOME\}?/;
+ *  reading the `probe` rule's message. The name boundary matters: without
+ *  it `$PI_LENS_HOME_TMP` and `$PI_LENS_HOMEDIR/x` -- different variables,
+ *  naming different directories -- were both denied (review round 2 T3). */
+const HARNESS_HOME_VARIABLE = /\$\{PI_LENS_HOME\}|\$PI_LENS_HOME(?![A-Za-z0-9_])/;
 
 /**
  * Deny a `TMPDIR`/`TMP`/`TEMP` assignment that aims Node's temp directory
@@ -863,6 +865,13 @@ const HARNESS_HOME_VARIABLE = /\$\{?PI_LENS_HOME\}?/;
  * Matching is by path SEGMENT ({@link fileArgUnderDir}), never substring,
  * so `$PWD/.probe-home`, `/abs/.probe-home` and `.probe-home/sub` all
  * match while `.probe-home-2` does not.
+ *
+ * Known limit (review round 2): the offending path has to appear in the
+ * assignment's own text. A third variable hides it --
+ * `export PROBE_HOME=$PWD/.probe-home; export TMPDIR=$PROBE_HOME` allows,
+ * because resolving it would mean evaluating the shell's variable
+ * environment, which this static scan does not do (the same class as the
+ * header's "command word assembled by expansion" blind spot).
  *
  * @param {Record<string, string>} env
  * @returns {DenyRule | null}
