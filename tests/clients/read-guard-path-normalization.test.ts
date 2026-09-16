@@ -262,7 +262,7 @@ describe("ReadGuard pendingCreations key (#3163 existence-straddle)", () => {
 
 		// The user-visible consequence, end to end. An injected creation read is
 		// OUTSTANDING enforcement state, so `touchFile` deliberately arms no idle
-		// timer for it (read-guard.ts:683) and the file's write record survives an
+		// timer for it (read-guard.ts:685-687) and the file's write record survives
 		// idle session. With the entry orphaned there is no read, the idle timer
 		// runs, `evictFile` drops `writtenThisSession`, and the mtime backstop in
 		// `wasWrittenThisSession` is the only thing left — which is exactly what
