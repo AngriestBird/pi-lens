@@ -811,7 +811,8 @@ describe("real Git fixture governance", () => {
 			findHistoricalCommitIshOffenders([
 				{
 					file: "tests/clients/synthetic.test.ts",
-					source: 'execFileSync("git", [globalArgs, "show", "ca2639524:x.ts"]);',
+					source:
+						'execFileSync("git", [globalArgs, "show", "ca2639524:x.ts"]);',
 				},
 			]),
 		).toEqual(["tests/clients/synthetic.test.ts:1 ca2639524"]);
@@ -824,8 +825,7 @@ describe("real Git fixture governance", () => {
 			findHistoricalCommitIshOffenders([
 				{
 					file: "tests/clients/synthetic.test.ts",
-					source:
-						'execFileSync("git", ["show", ...extra, "ca2639524:a.ts"]);',
+					source: 'execFileSync("git", ["show", ...extra, "ca2639524:a.ts"]);',
 				},
 			]),
 		).toEqual(["tests/clients/synthetic.test.ts:1 ca2639524"]);
