@@ -192,6 +192,14 @@ describe("tmp-fixture-hygiene", () => {
 		const dayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
 		fs.utimesSync(oldForeign, dayAgo, dayAgo);
 		fs.utimesSync(oldRoot, dayAgo, dayAgo);
+		// Round 5: `mine`'s mtime is put two seconds INTO THE FUTURE, the
+		// boundary that redded CI (run 35072411511). A directory created
+		// microseconds before the sweep can carry a filesystem timestamp later
+		// than the process clock, and the run-id arm's `maxAgeMs: 0` read as
+		// "age >= 0" and skipped it. The rule for my own run's directories is
+		// the prefix alone, so no clock comparison may enter it.
+		const soon = new Date(Date.now() + 2_000);
+		fs.utimesSync(mine, soon, soon);
 		try {
 			removeRunBackstopDirs(fixture);
 			expect(fs.existsSync(mine)).toBe(false);

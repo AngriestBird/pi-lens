@@ -7,7 +7,10 @@ import { installGitFixtureEnv } from "./git-fixture-env.js";
 import { installKillGuard, killGuardReport } from "./kill-guard.js";
 import { reportPeakRss } from "./worker-peak-rss.js";
 import { removeTempDirSync } from "../clients/test-utils.js";
-import { sweepScratchDirs } from "../../scripts/lib/scratch-dir.mjs";
+import {
+	SWEEP_ANY_AGE,
+	sweepScratchDirs,
+} from "../../scripts/lib/scratch-dir.mjs";
 
 // #2042: before anything else in the worker, so the guard is already in place
 // when a test's own `process.once("exit")` handler fires at fork teardown.
@@ -220,8 +223,11 @@ vi.mock("../../clients/instance-reaper-state.js", () => ({
  * (`scripts/lib/scratch-dir.mjs`, already imported by
  * `tests/support/real-pi-harness.ts`) rather than a second hand-rolled loop:
  *
- * - this run's directories — `backstopRunPrefix`, `maxAgeMs: 0`: the run is
- *   finishing and no worker of it is alive, so age is irrelevant;
+ * - this run's directories — `backstopRunPrefix`, `SWEEP_ANY_AGE`: the run is
+ *   finishing and no worker of it is alive, so the prefix alone is the rule and
+ *   no clock comparison enters it (round 5: `maxAgeMs: 0` means "age >= 0" and
+ *   skipped a directory whose mtime landed ahead of the process clock, which
+ *   redded CI run 35072411511);
  * - a LIVE sibling invocation's — matches neither arm (different run id, and its
  *   directories were written minutes ago at most), so it keeps its cooldown
  *   stamp and its own owner removes them at the end of ITS run;
@@ -246,7 +252,7 @@ vi.mock("../../clients/instance-reaper-state.js", () => ({
 const BACKSTOP_STALE_MS = 6 * 60 * 60 * 1000;
 
 export function removeRunBackstopDirs(home: string = tmpHygieneHome): void {
-	sweepScratchDirs(home, backstopRunPrefix, { maxAgeMs: 0 });
+	sweepScratchDirs(home, backstopRunPrefix, { maxAgeMs: SWEEP_ANY_AGE });
 	sweepScratchDirs(home, "backstop-", { maxAgeMs: BACKSTOP_STALE_MS });
 	// Round 4 F4, second half: the baseline stops root-level residue accusing an
 	// innocent file, but only this reclaims it — otherwise it sits under the
