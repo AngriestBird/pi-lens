@@ -287,6 +287,20 @@ export class TreeSitterQueryLoader {
 	private loaded = false;
 	private loadedRoot: string | null = null;
 	private verbose: boolean;
+	/**
+	 * This root's per-file parse failures, remembered across the memoized
+	 * (no-`force`) `loadQueries` path so a later session's ledger can carry
+	 * the same row without re-parsing every file (#3070 N1).
+	 */
+	private readonly parseFailures = new Map<string, string>();
+	/**
+	 * Generation (`getDegradationLedgerGeneration()`) at which `parseFailures`
+	 * was last replayed into the ledger — the same generation-keyed memo
+	 * idiom `getBundledQueriesRootHealth` above uses, applied here so a
+	 * memoized `loadQueries` return still re-arms `recordDegradationOnce` once
+	 * per session rather than only in the session that actually parsed.
+	 */
+	private parseFailuresReplayedGeneration: number | undefined;
 
 	constructor(verbose = false) {
 		this.verbose = verbose;
@@ -319,11 +333,36 @@ export class TreeSitterQueryLoader {
 	 * default — so a silently-dropped custom rule had no surviving signal.
 	 */
 	private recordQueryParseFailure(filePath: string, reason: string): void {
+		this.parseFailures.set(filePath, reason);
 		recordDegradationOnce({
 			kind: "tree-sitter-query-parse-failed",
 			subject: filePath,
 			reason,
 		});
+	}
+
+	/**
+	 * Replay every remembered per-file parse failure into the CURRENT
+	 * session's ledger, at most once per ledger generation (#3070 N1). A
+	 * memoized `loadQueries` return skips `parseQueryFile` entirely, so
+	 * without this replay the `tree-sitter-query-parse-failed` record only
+	 * ever reached the FIRST session that actually parsed — `resetDegradationLedger`
+	 * (wired into `handleSessionStart`) clears the once-keys every session,
+	 * but the loader instance and its `parseFailures` memo are kept across
+	 * sessions (`clients/tree-sitter-shared.ts:39`), the same shape
+	 * `getBundledQueriesRootHealth` above already re-probes per generation.
+	 */
+	private replayQueryParseFailures(): void {
+		const generation = getDegradationLedgerGeneration();
+		if (this.parseFailuresReplayedGeneration === generation) return;
+		this.parseFailuresReplayedGeneration = generation;
+		for (const [filePath, reason] of this.parseFailures) {
+			recordDegradationOnce({
+				kind: "tree-sitter-query-parse-failed",
+				subject: filePath,
+				reason,
+			});
+		}
 	}
 
 	/**
@@ -342,10 +381,12 @@ export class TreeSitterQueryLoader {
 	): Promise<Map<string, TreeSitterQuery[]>> {
 		const resolvedRoot = path.resolve(rootDir);
 		if (!options.force && this.loaded && this.loadedRoot === resolvedRoot) {
+			this.replayQueryParseFailures();
 			return this.queries;
 		}
 
 		this.queries.clear();
+		this.parseFailures.clear();
 		this.loaded = false;
 
 		// Load from user's project rules AND package built-in rules (coexist)
@@ -393,6 +434,11 @@ export class TreeSitterQueryLoader {
 
 		this.loaded = true;
 		this.loadedRoot = resolvedRoot;
+		// Every failure hit above was recorded into THIS generation's ledger
+		// directly (via recordQueryParseFailure); mark it replayed so a
+		// same-generation memoized call right after this one doesn't redo the
+		// (harmless but pointless) replay loop.
+		this.parseFailuresReplayedGeneration = getDegradationLedgerGeneration();
 		return this.queries;
 	}
 
