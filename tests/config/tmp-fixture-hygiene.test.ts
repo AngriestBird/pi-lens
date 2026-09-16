@@ -214,14 +214,25 @@ describe("tmp-fixture-hygiene", () => {
 	it("names only root backstop residue this run is answerable for", () => {
 		const home = process.env.PI_LENS_HOME as string;
 		const planted = `orphan-backstop-round4-guard-${process.env.PI_LENS_TMP_HYGIENE_RUN_ID}`;
-		fs.writeFileSync(path.join(home, planted), "{}");
+		const file = path.join(home, planted);
+		fs.writeFileSync(file, "{}");
+		const mtimeMs = fs.statSync(file).mtimeMs;
 		try {
-			expect(unadmittedRootBackstopEntries(new Set([planted]))).not.toContain(
-				planted,
-			);
-			expect(unadmittedRootBackstopEntries(new Set())).toContain(planted);
+			// Present at setup, untouched since: not this run's doing.
+			expect(
+				unadmittedRootBackstopEntries({ [planted]: mtimeMs }),
+			).not.toContain(planted);
+			// Absent at setup: a producer created it during the run.
+			expect(unadmittedRootBackstopEntries({})).toContain(planted);
+			// Present at setup and OVERWRITTEN during the run — the case a
+			// name-only baseline masks. Measured on the real writer with the pin
+			// mutated away: same path, new mtime, and name-only named only the
+			// quarantine directory beside it, never the rewritten stamp.
+			expect(
+				unadmittedRootBackstopEntries({ [planted]: mtimeMs - 1000 }),
+			).toContain(planted);
 		} finally {
-			fs.rmSync(path.join(home, planted), { force: true });
+			fs.rmSync(file, { force: true });
 		}
 	});
 

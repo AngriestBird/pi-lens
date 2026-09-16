@@ -69,14 +69,32 @@ const tmpHygieneBaselinePath = path.join(
 );
 fs.mkdirSync(path.dirname(tmpHygieneBaselinePath), { recursive: true });
 
-/** Root-level `orphan-backstop*` entries of a home: the stamp, the transient
- *  lock, and the `orphan-backstop.lock.quarantine-…/` directory a contended
- *  lock leaves behind. One definition, used by the snapshot, the per-file
- *  detector and the stale sweep, so they can never disagree (#3083). */
-function rootBackstopEntries(dir: string = tmpHygieneHome): string[] {
-	return readTmpDirEntries(dir).filter((entry) =>
-		entry.startsWith("orphan-backstop"),
-	);
+/** Root-level `orphan-backstop*` entries of a home, each with its mtime: the
+ *  stamp, the transient lock, and the `orphan-backstop.lock.quarantine-…/`
+ *  directory a contended lock leaves behind. One definition, used by the
+ *  snapshot, the per-file detector and the stale sweep, so they can never
+ *  disagree (#3083).
+ *
+ *  Name AND mtime, because the name alone does not identify an ENTRY, and the
+ *  stamp's path is FIXED. Measured (round 4): with a stale
+ *  `orphan-backstop.json` in the baseline and the pin mutated away, the real
+ *  session_start writer overwrote that exact path during the run (mtime 08:04 →
+ *  11:05); a name-only baseline then reported only the uniquely-named
+ *  quarantine directory beside it and never named the rewritten stamp. A writer
+ *  that takes an UNCONTENDED lock leaves no quarantine directory, so name-only
+ *  would have reported nothing at all. Not a second clause — one rule with a
+ *  faithful notion of identity: the entry I saw at setup is the entry with that
+ *  name AND that mtime. */
+function rootBackstopSnapshot(
+	dir: string = tmpHygieneHome,
+): Record<string, number> {
+	const snapshot: Record<string, number> = {};
+	for (const entry of readTmpDirEntries(dir))
+		if (entry.startsWith("orphan-backstop"))
+			snapshot[entry] =
+				fs.statSync(path.join(dir, entry), { throwIfNoEntry: false })
+					?.mtimeMs ?? 0;
+	return snapshot;
 }
 
 /** PR #3100 round 3 F4: the backstop detector below used to assert the shared
@@ -89,15 +107,15 @@ function rootBackstopEntries(dir: string = tmpHygieneHome): string[] {
  *  record, one write, one settle loop, now carrying both populations. */
 interface TmpHygieneBaseline {
 	tmp: string[];
-	backstopRoot: string[];
+	backstopRoot: Record<string, number>;
 }
 
 let tmpHygieneBefore: Set<string>;
-let backstopRootBefore: Set<string>;
+let backstopRootBefore: Record<string, number>;
 
 function adoptBaseline(baseline: TmpHygieneBaseline): void {
 	tmpHygieneBefore = new Set(baseline.tmp);
-	backstopRootBefore = new Set(baseline.backstopRoot);
+	backstopRootBefore = baseline.backstopRoot;
 }
 
 try {
@@ -109,7 +127,7 @@ try {
 } catch {
 	const baseline: TmpHygieneBaseline = {
 		tmp: snapshotTmpPiLensEntries(readTmpDirEntries(tmpHygieneRealTmp)),
-		backstopRoot: rootBackstopEntries(),
+		backstopRoot: rootBackstopSnapshot(),
 	};
 	try {
 		const fd = fs.openSync(tmpHygieneBaselinePath, "wx");
@@ -237,12 +255,9 @@ export function removeRunBackstopDirs(home: string = tmpHygieneHome): void {
 	// directories, so it would reclaim the quarantine directory and leave the
 	// stamp. Young residue is left alone — the detector has already redded the
 	// file that wrote it, and this runs while that evidence still matters.
-	for (const name of rootBackstopEntries(home)) {
-		const entry = path.join(home, name);
-		const mtimeMs = fs.statSync(entry, { throwIfNoEntry: false })?.mtimeMs;
-		if (mtimeMs === undefined || Date.now() - mtimeMs < BACKSTOP_STALE_MS)
-			continue;
-		removeTempDirSync(entry);
+	for (const [name, mtimeMs] of Object.entries(rootBackstopSnapshot(home))) {
+		if (Date.now() - mtimeMs < BACKSTOP_STALE_MS) continue;
+		removeTempDirSync(path.join(home, name));
 	}
 }
 
@@ -252,10 +267,12 @@ export function removeRunBackstopDirs(home: string = tmpHygieneHome): void {
  *  synthetic baseline — the F4 case cannot be reached otherwise, since the real
  *  baseline is captured at setup, before any test can plant anything. */
 export function unadmittedRootBackstopEntries(
-	before: ReadonlySet<string> = backstopRootBefore,
+	before: Readonly<Record<string, number>> = backstopRootBefore,
 	home: string = tmpHygieneHome,
 ): string[] {
-	return rootBackstopEntries(home).filter((entry) => !before.has(entry));
+	return Object.entries(rootBackstopSnapshot(home))
+		.filter(([name, mtimeMs]) => before[name] !== mtimeMs)
+		.map(([name]) => name);
 }
 
 // #3083, master red 038e28b: catch a new transitive writer in whichever
