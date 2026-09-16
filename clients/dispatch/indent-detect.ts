@@ -136,20 +136,43 @@ function hasLiveFrame(stack: TemplateFrame[]): boolean {
  * them out of consideration the same way; a block comment skips everything,
  * backticks included, up to its own `*\/`, possibly spanning lines).
  *
- * Known gap: a regex literal has no state here, so a backtick inside one
- * (`` /`foo/ ``) is indistinguishable from a real opener — the same caveat
- * `opensBlockComment` already concedes for `/*`. An even count across a
- * file can mask code between two such regexes without tripping the
- * opener-never-closes fail-safe; tracked as #3120 rather than fixed here (a
- * first-pass regex-opener heuristic over-declined the corpus 54 files vs 5
- * for a real fix elsewhere in this lexer). The same regex blindness has a
- * second, block-frame face: a `/*` inside a regex literal (`` /[/*]/ ``) is
- * read the same way — it pushes a `"block"` frame that then waits for a
- * closing `*\/` the regex never produced, so it stays open for the rest of
- * the file and silently disables the template mask past that point. Both
- * faces are monotonically safe (under-masking only, degrading to pre-#3059
- * behaviour) and are covered by the same #3120 known-limit decision rather
- * than a lexer change here.
+ * A regex literal (`` /pattern/flags ``) has its own resolution: the same
+ * class of problem as a `/* … *\/` comment or a quoted string, since a
+ * backtick or `/*` inside one must not be read as a real opener either
+ * (#3120). Disambiguating `/` from division in general needs a real
+ * tokenizer with full grammar context — a first-pass heuristic tried here
+ * over-declined the corpus 54 files vs 5 for a real fix, so {@link
+ * isRegexOpenerPosition} only recognises `/` as an opener in positions
+ * where JS grammar makes a value expression, never a divisor: immediately
+ * after `(`, `,`, `=`, `:`, `[`, `!`, `&`, `|`, `?`, a `return`/`typeof`/
+ * `case` keyword, or at line start. (`{`, `}`, and `;` were tried too —
+ * dropped, not just unused: `}` is grammatically unsound on its own
+ * (`x = {a:1} / 2` is division, not a regex opener, and both sibling
+ * lexers in this tree — `tests/support/sweep-kit.ts`,
+ * `scripts/check-pr-body.mjs`'s `blankCommentsAndStrings` — exclude it for
+ * that reason), and measurement showed `{`/`}`/`;` firing 10/0/6 times
+ * across a 25,553-file corpus (own tree plus `node_modules`, every
+ * extension biome/prettier/ruff/shfmt format) with zero verdict
+ * differences either way — see #3120 PR round 2.) Anywhere else (after an
+ * identifier, a digit, `)`, `]`, a string, or a template) is left alone
+ * exactly as before this state existed — division stays division, so the
+ * gate can only ever add masking correctness, never remove it, MODULO the
+ * closing-scan's own correctness (see {@link skipRegexLiteral}'s doc
+ * comment: the position gate alone is not sufficient — a misfired skip
+ * that swallows an odd number of backticks can still invert parity for
+ * the rest of the file; measured against the same corpus, this changed
+ * 0 files' verdicts, but 158 of 181 gate firings on the corpus's 882
+ * Markdown files alone accepted a false close before the closing-scan's
+ * own tightening below cut that to 19). A recognised opener is skipped to its own
+ * closing `/` (honouring `[...]` character classes and `\` escapes) by
+ * {@link skipRegexLiteral} the same way `skipQuoted` skips a string;
+ * everything inside — backticks, `/*`, quotes — is consumed without
+ * touching `stack`. A regex literal cannot itself contain a literal
+ * newline, so this resolves entirely within one line; the position gate
+ * fires on every `/` that starts a line (for instance a Markdown path
+ * like `/src`), not only on shapes that can actually close as a regex —
+ * it is the closing scan's own `-1` fallback, not the gate, that makes an
+ * unclosed or wrongly-shaped match safe.
  */
 function advanceTemplateState(line: string, stack: TemplateFrame[]): void {
 	let j = 0;
@@ -186,6 +209,17 @@ function advanceTemplateState(line: string, stack: TemplateFrame[]): void {
 			stack.push({ kind: "block" });
 			j += 2;
 			continue;
+		}
+		if (line[j] === "/" && isRegexOpenerPosition(line, j)) {
+			const after = skipRegexLiteral(line, j);
+			if (after >= 0) {
+				j = after;
+				continue;
+			}
+			// No closing `/` before EOL: not actually a regex literal at this
+			// position (the heuristic misfired, or the line just ends mid-token).
+			// Fall through and scan `/` as an ordinary character, unchanged from
+			// before this state existed.
 		}
 		const ch = line[j];
 		if (ch === '"' || ch === "'") {
@@ -227,6 +261,117 @@ function skipQuoted(line: string, start: number, quote: string): number {
 		j += 1;
 	}
 	return line.length; // unterminated on this line; nothing more to find
+}
+
+/** The set of characters that make a following `/` unambiguous — JS grammar
+ * only accepts a value expression there, never a divisor. */
+const REGEX_OPENER_PUNCTUATION = new Set([
+	"(",
+	",",
+	"=",
+	":",
+	"[",
+	"!",
+	"&",
+	"|",
+	"?",
+]);
+
+/** A `return`, `typeof`, or `case` keyword, word-bounded, immediately before
+ * (modulo trailing whitespace) the position under test. */
+const REGEX_OPENER_KEYWORD = /(?:^|[^A-Za-z0-9_$])(?:return|typeof|case)$/;
+
+/**
+ * Whether `line[at]` (a `/`) sits in a position where JS grammar makes it a
+ * regex-literal opener rather than division: immediately after one of
+ * {@link REGEX_OPENER_PUNCTUATION}, a `return`/`typeof`/`case` keyword, or
+ * at the start of the line (#3120). Deliberately narrower than every legal
+ * regex position (an arrow function's `=>`, for instance, is not
+ * recognised) — a missed opener leaves `/` division-shaped exactly like
+ * before this state existed, so under-recognition is inert while
+ * over-recognition would corrupt real code.
+ */
+function isRegexOpenerPosition(line: string, at: number): boolean {
+	const before = line.slice(0, at).replace(/[ \t]+$/, "");
+	if (before === "") return true; // line start (modulo leading whitespace)
+	if (REGEX_OPENER_KEYWORD.test(before)) return true;
+	return REGEX_OPENER_PUNCTUATION.has(before.at(-1) ?? "");
+}
+
+/** Regex flag letters JS accepts after a literal's closing `/`. */
+const REGEX_FLAG_CHARS = "dgimsuvy";
+
+/**
+ * Skip a regex literal starting at its opening `/` (`start`), honoring
+ * `[...]` character classes (a `/` or unescaped `]` inside one closes
+ * nothing) and `\` escapes, mirroring {@link skipQuoted}. Returns the index
+ * just past the closing `/`, or -1 if none is found before EOL — a regex
+ * literal cannot contain a literal newline, so an unclosed scan means this
+ * was not actually one.
+ *
+ * The position gate ({@link isRegexOpenerPosition}) alone is not enough:
+ * it fires on every `/` that starts a value-expression position, including
+ * prose that merely looks like one — a Markdown line like `` Layout: /src
+ * `bin/cli` and friends. `` gates on the `:` before `/src`, and the first
+ * `/` found afterward (inside the backticked `` `bin/cli` ``) would
+ * otherwise read as a valid close, swallowing the backtick and inverting
+ * template-tracking parity for the rest of the file. A closing `/` is
+ * accepted only when it is followed by zero or more regex flag letters
+ * ({@link REGEX_FLAG_CHARS}) and then a NON-IDENTIFIER character (or
+ * EOL) — `/src/cli` and friends` has an identifier character (`c`) right
+ * after the candidate close, which a real regex literal's own syntax
+ * forbids (flags must be immediately followed by a statement terminator,
+ * not more identifier text), so it is rejected and the scan returns -1
+ * instead.
+ *
+ * This narrows the false-close family, it does not close it: when what
+ * follows the false close is instead a NON-identifier character (a
+ * backtick, a space, `)`, `.` — anything outside `[A-Za-z0-9_$]`), this
+ * check does not fire either, and the same corruption is still possible
+ * in principle. Round 3 F2 measured the residual directly rather than
+ * asserting it away: of the 19 regex-shaped matches that still survive
+ * in the corpus's Markdown files after this check (round 2's own count),
+ * NONE has a backtick inside its matched span — every survivor is either
+ * a genuine regex literal in a fenced code sample or ASCII-art/prose that
+ * happens to satisfy the grammar without ever touching a `` ` `` — so the
+ * residual is 0 of 25,553 corpus files and 0 of those 19 matches, not
+ * merely untested. The only check that closes the family completely is
+ * counting backticks in the consumed span and rejecting an odd count —
+ * which is exactly the shape a real `` /`foo`/ `` regex literal (a
+ * pattern that legitimately contains backticks) also has, so rejecting
+ * it would re-introduce the over-decline this PR's own first-pass
+ * heuristic was rejected for (#3120's own history). Left as a measured,
+ * documented limit rather than tightened further.
+ */
+function skipRegexLiteral(line: string, start: number): number {
+	let j = start + 1;
+	let inClass = false;
+	while (j < line.length) {
+		const c = line[j];
+		if (c === "\\") {
+			j += 2;
+			continue;
+		}
+		if (inClass) {
+			if (c === "]") inClass = false;
+			j += 1;
+			continue;
+		}
+		if (c === "[") {
+			inClass = true;
+			j += 1;
+			continue;
+		}
+		if (c === "/") {
+			let k = j + 1;
+			while (k < line.length && REGEX_FLAG_CHARS.includes(line[k] ?? ""))
+				k += 1;
+			if (k < line.length && /[A-Za-z0-9_$]/.test(line[k] ?? "")) return -1;
+			return j + 1;
+		}
+		j += 1;
+	}
+	return -1; // unterminated on this line; not a regex literal after all
 }
 
 /**

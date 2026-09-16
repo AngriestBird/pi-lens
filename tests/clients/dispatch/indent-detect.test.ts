@@ -591,4 +591,287 @@ describe("templateLiteralInteriorMask", () => {
 			false,
 		]);
 	});
+
+	it("does not open a phantom template for a backtick inside an unambiguous regex literal (#3120 R3, two regexes with backticks)", () => {
+		// Before the regex-literal state: `/`/g`'s backtick (after `=`, an
+		// unambiguous opener position) reads as a real template opener, so the
+		// real function body between the two regex literals is wrongly
+		// swallowed as "template interior" (excluded from indentation
+		// evidence) -- an even count of stray backticks closes the phantom
+		// pair cleanly, so the opener-never-closes fail-safe never trips and
+		// the corruption is silent. With the regex state, both `/`/g`
+		// literals are recognised and skipped whole, so their backticks never
+		// reach the template branch at all. The trailing `g` flag on both
+		// (round 3, F1) pins the flag-skip loop in `skipRegexLiteral`: a
+		// mutation that disables it (`while (false)` instead of consuming
+		// flag letters) checks the character right after the closing `/` --
+		// `g`, an identifier character -- and wrongly rejects this as not a
+		// regex literal at all, letting both backticks fall through to the
+		// same phantom-template corruption this test exists to catch.
+		const lines = [
+			"const a = /`/g;",
+			"function f() {",
+			"  go();",
+			"}",
+			"const b = /`/g;",
+			"const s = `",
+			"  text",
+			"`;",
+			"code();",
+		];
+		expect(templateLiteralInteriorMask(lines)).toEqual([
+			false,
+			false,
+			false,
+			false,
+			false,
+			false,
+			true,
+			true,
+			false,
+		]);
+	});
+
+	it("does not open a phantom block frame for a /* inside a regex character class (#3120, #3118 round-2 verify addendum 1, /[/*]/ case)", () => {
+		// Before the regex-literal state: the `/*` inside `/[/*]/` (a regex
+		// matching a literal `/` or `*`) reads as a block-comment opener that
+		// never finds a `*/` to close against, so it pushes a "block" frame
+		// that stays on the stack for the rest of the file. hasLiveFrame
+		// treats a lone "block" frame as not template evidence, so the real
+		// template two lines later is never masked at all -- under-masking,
+		// degrading to pre-#3059 behaviour. With the regex state, the whole
+		// `/[/*]/` literal (including its embedded `/*`) is skipped as one
+		// unit and never reaches the block-comment branch.
+		const lines = [
+			"const re = /[/*]/;",
+			"const s = `",
+			"  text",
+			"`;",
+			"code();",
+		];
+		expect(templateLiteralInteriorMask(lines)).toEqual([
+			false,
+			false,
+			true,
+			true,
+			false,
+		]);
+	});
+
+	it("leaves a genuine division expression alone: the unambiguous-position gate does not fire after an identifier or a digit (#3120)", () => {
+		// The regex-opener gate only fires in unambiguous positions (after
+		// `(`, `,`, `=`, `:`, `[`, `!`, `&`, `|`, `?`, `{`, `}`, `;`, a
+		// return/typeof/case keyword, or line start). The `/` right after `10`
+		// (a digit -- real division) must stay ungated: a mutation that fires
+		// the gate unconditionally instead treats that `/` as a regex opener
+		// and walks forward for the next unescaped `/`, which it finds inside
+		// "text/ more" -- consuming the real opening backtick along the way
+		// without ever pushing a "template" frame. The backtick that was meant
+		// to CLOSE that real template is then seen fresh on line 0 and opens a
+		// phantom template instead, which line 2's stray backtick closes
+		// cleanly -- giving the phantom frame something to close against so
+		// the opener-never-closes fail-safe does not erase the difference (the
+		// same two-backtick shape the #3059 tests above use). Correct (gated)
+		// code never opens any frame here, so every line stays false; the
+		// mutation wrongly masks lines 1-2 as template interior.
+		const lines = [
+			"const n = 10 / `text/ more`; code();",
+			"next();",
+			"closes_here`;",
+		];
+		expect(templateLiteralInteriorMask(lines)).toEqual([false, false, false]);
+	});
+
+	it("recognises a regex opener at line start (#3120, position gate)", () => {
+		// Mirrors the R3 shape above (two backtick-bearing regexes bracketing
+		// real code), but both `/`/`  literals sit at the START of their own
+		// line rather than after `=`, pinning the position gate's line-start
+		// branch specifically. A mutation that drops that branch (falling
+		// through to the keyword/punctuation checks, both of which miss an
+		// empty "before") ungates both openers, so the real function body
+		// between them is wrongly swallowed as template interior again.
+		const lines = [
+			"/`/;",
+			"function f() {",
+			"  go();",
+			"}",
+			"/`/;",
+			"const s = `",
+			"  text",
+			"`;",
+			"code();",
+		];
+		expect(templateLiteralInteriorMask(lines)).toEqual([
+			false,
+			false,
+			false,
+			false,
+			false,
+			false,
+			true,
+			true,
+			false,
+		]);
+	});
+
+	it("recognises a regex opener after a return/typeof/case keyword (#3120, position gate)", () => {
+		// Same R3 shape again, gated by the `return` keyword branch instead of
+		// `=` or line start. A mutation that drops the keyword check ungates
+		// both `return /`/;` occurrences, wrongly swallowing the code between
+		// them as template interior.
+		const lines = [
+			"function f() { return /`/; }",
+			"  more();",
+			"return /`/;",
+			"const s = `",
+			"  text",
+			"`;",
+			"code();",
+		];
+		expect(templateLiteralInteriorMask(lines)).toEqual([
+			false,
+			false,
+			false,
+			false,
+			true,
+			true,
+			false,
+		]);
+	});
+
+	it("honours a `[...]` character class while scanning for the regex's own closing / (#3120)", () => {
+		// The regex `/[/]middle/` has a `/` INSIDE its character class, which
+		// must not count as the closing delimiter. A mutation that stops
+		// tracking character-class state treats that inner `/` as the close,
+		// prematurely ending the scan three characters in; the backtick that
+		// was meant to stay inert inside the regex body is then read fresh at
+		// the top level, opening then immediately re-closing a phantom
+		// template against the line's real opening backtick -- so the real,
+		// genuinely unclosed template on this line never gets a frame pushed
+		// at all, and the following lines are wrongly left unmasked.
+		const lines = [
+			"const re = /[/]`middle/; const s = `",
+			"  text",
+			"`;",
+			"code();",
+		];
+		expect(templateLiteralInteriorMask(lines)).toEqual([
+			false,
+			true,
+			true,
+			false,
+		]);
+	});
+
+	it("honours a `\\` escape while scanning for the regex's own closing / (#3120)", () => {
+		// The regex `/a\/b/` has an escaped `/` that must not count as the
+		// closing delimiter either. A mutation that stops skipping the
+		// character after `\\` treats the escaped `/` as the close, exposing
+		// the regex body's own backtick to top-level scanning the same way
+		// the character-class case above does -- the real template on this
+		// line never gets a frame pushed, and the following lines are wrongly
+		// left unmasked.
+		const lines = [
+			"const re = /a\\/b`middle/; const s = `",
+			"  text",
+			"`;",
+			"code();",
+		];
+		expect(templateLiteralInteriorMask(lines)).toEqual([
+			false,
+			true,
+			true,
+			false,
+		]);
+	});
+
+	it("leaves `/` alone when no closing / is found before EOL, instead of consuming the rest of the line (#3120, fallback safety)", () => {
+		// `return /oops` (the gate fires on `return`) never finds a second `/`
+		// on this line, so it is not actually a regex literal here -- the
+		// fallback must leave `/` as an ordinary character so the line's real
+		// opening backtick is still found by normal scanning. A mutation that
+		// forces a skip to EOL regardless (ignoring the -1 "not found" result)
+		// swallows that backtick along with the rest of the line, so the real
+		// template never gets a frame pushed and the following lines are
+		// wrongly left unmasked.
+		const lines = ["return /oops`text", "  text", "`;", "code();"];
+		expect(templateLiteralInteriorMask(lines)).toEqual([
+			false,
+			true,
+			true,
+			false,
+		]);
+	});
+
+	it("does not treat `}` as a regex-opener position: a division right after an object literal stays division (#3120 round 2, S3)", () => {
+		// `}` was tried in the position gate and dropped: `x = {a:1} / 2` is
+		// division in real JS grammar, never a regex opener, and measurement
+		// (PR body) showed zero verdict differences from including it anyway --
+		// so its exclusion is grammatical soundness, not just an unused entry.
+		// A mutation that adds `}` back to REGEX_OPENER_PUNCTUATION treats the
+		// `/` right after `{a:1}` as an opener, walks forward for the next
+		// unescaped `/` (found inside "text/ more"), and swallows this line's
+		// real opening backtick along the way -- the same corruption shape as
+		// the division-gate test above, gated through `}` instead of a digit.
+		const lines = [
+			"const x = {a:1} / `text/ more`; code();",
+			"next();",
+			"closes_here`;",
+		];
+		expect(templateLiteralInteriorMask(lines)).toEqual([false, false, false]);
+	});
+
+	it("rejects a regex-shaped close whose flags are immediately followed by an identifier character (#3120 round 3, F2: identifier-terminator sub-shape)", () => {
+		// Round 2 review finding: the position gate fires on every `/` at an
+		// unambiguous position, including plain prose -- `Layout: /src ...`
+		// gates on the `:` before `/src` the same way real code would. Without
+		// this check, the scan for the next unescaped `/` finds the one inside
+		// the backticked `` `bin/cli` `` and accepts it as the literal's close,
+		// swallowing that backtick; the second backtick (after "cli") then
+		// opens a phantom template that stays live through the whole following
+		// 2-space bullet list, excluding it from indentation evidence and
+		// leaving only the trailing 4-space function body -- detectIndentation
+		// returns space/4 instead of the file's real space/2. A regex literal's
+		// flags must be followed by a statement boundary, never more identifier
+		// text, so requiring a non-identifier character (or EOL) after any
+		// flag letters rejects this false close and falls back to ordinary
+		// scanning, which finds the real backtick as its own opener instead.
+		//
+		// This pins ONE sub-shape only, named precisely because it is not the
+		// whole defect: round 3 F2 found the false close's next character can
+		// also be a NON-identifier (a backtick, space, `)`, `.`) and still
+		// swallow a real backtick undetected by this check -- see
+		// `skipRegexLiteral`'s doc comment for the measured, documented,
+		// deliberately-unfixed residual (closing it needs rejecting any
+		// consumed span with an odd backtick count, which is the shape this
+		// whole PR exists to recognise as a regex, not reject).
+		const lines = [
+			"Layout: /src `bin/cli` and friends.",
+			"",
+			"  - one",
+			"  - two",
+			"    - nested",
+			"",
+			"closes it here `",
+			"function f() {",
+			"    go();",
+			"}",
+		];
+		expect(templateLiteralInteriorMask(lines)).toEqual([
+			false,
+			false,
+			false,
+			false,
+			false,
+			false,
+			false,
+			false,
+			false,
+			false,
+		]);
+		expect(detectIndentation(`${lines.join("\n")}\n`)).toEqual({
+			style: "space",
+			width: 2,
+		});
+	});
 });
