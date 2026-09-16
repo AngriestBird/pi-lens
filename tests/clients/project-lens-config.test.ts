@@ -1092,6 +1092,20 @@ describe("project-scope tools.<name>.enabled (#3112)", () => {
 		expect(warnedFor('unknown key "tools.lazy"')).toBe(false);
 	});
 
+	it("reports a global-only sub-key ONCE, however many scans see it", () => {
+		// `lsp.enabled` is reported by the enumerated-honored-keys scan AND by the
+		// mixed-scope scan, with the same key and the same reason; the warn-once
+		// latch is what collapses them. This pins that: it is why the mixed-scope
+		// loop needs no per-namespace skip, and it is the assertion that reds if a
+		// future scan grows a second spelling for one setting.
+		fs.writeFileSync(
+			path.join(tmpDir, ".pi-lens.json"),
+			JSON.stringify({ lsp: { enabled: false, disabledServers: ["go"] } }),
+		);
+		loadPiLensProjectConfig(tmpDir);
+		expect(warnCountFor('"lsp.enabled" is a global-only')).toBe(1);
+	});
+
 	it("leaves an unknown tool name to readToolConfig — one notice, not two", () => {
 		// `readToolConfig` already reports an unrecognized tool name with its own
 		// code (`PILENS_CFG_0009`). A second, generic "check for a typo" notice
@@ -1116,5 +1130,8 @@ describe("project-scope tools.<name>.enabled (#3112)", () => {
 		loadPiLensProjectConfig(tmpDir);
 		expect(warnedFor('"delta" is a global-only')).toBe(true);
 		expect(warnedFor('"tools" is a global-only')).toBe(false);
+		// Once, as the SECTION — the mixed-scope scan must not report
+		// `delta.enabled` as a second notice for the same setting.
+		expect(warnCountFor("delta")).toBe(1);
 	});
 });

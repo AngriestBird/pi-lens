@@ -1062,21 +1062,22 @@ function parseConfigFile(configPath: string): ParsedConfigFile {
 	// all — the thing `docs/configuration.md` promises never happens.
 	//
 	// WHICH sub-keys those are is DERIVED from the flag registry, never listed
-	// here, so there is no second scope table to drift from the first. Two
-	// namespaces are deliberately skipped: one with an enumerated project-honored
-	// set (`lsp`), already scanned key-by-key by the loop above, and any key
-	// whose section is not recognized at project scope at all, already reported
-	// as a whole section. Everything else under a section is left to that
-	// section's own parser — `readToolConfig` reports an unknown tool name under
-	// its own code (`PILENS_CFG_0009`), and a second, generic "check for a typo"
-	// notice for the same key is exactly the duplicate-notice noise #2426 review
-	// round 6 removed.
+	// here, so there is no second scope table to drift from the first. A key
+	// whose SECTION is not recognized at project scope is skipped: the top-level
+	// scan already reported that whole section, and a second notice naming the
+	// same setting twice under two spellings is the duplicate-notice noise #2426
+	// review round 6 removed. Everything else under a recognized section is left
+	// to that section's own parser — `readToolConfig` reports an unknown tool
+	// name under its own code (`PILENS_CFG_0009`).
+	//
+	// An enumerated-honored-keys namespace (`lsp`) needs no skip here: the loop
+	// above reports the very same dotted key with the very same reason, and
+	// `warnIgnoredConfigOnce`'s latch collapses the two into one notice. A skip
+	// for it was written and then deleted — mutating it out changed no output.
 	for (const configKey of globalScopeOnlyFlagKeys) {
 		const segments = configKey.split(".");
 		if (segments.length < 2) continue;
-		const namespace = segments[0];
-		if (!knownProjectKeys.has(namespace)) continue;
-		if (PROJECT_FOREIGN_NAMESPACE_HONORED_KEYS.has(namespace)) continue;
+		if (!knownProjectKeys.has(segments[0])) continue;
 		if (!hasConfigPath(obj, segments)) continue;
 		warnUnhonoredKey(configKey, true);
 	}
