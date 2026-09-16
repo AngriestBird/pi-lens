@@ -674,60 +674,6 @@ export function buildCommentBody({
 	return `${line} ${buildMarker(sha, rerunState, runAttempt)}`;
 }
 
-/**
- * Decide a classification and the comment body ASSUMING any eligible rerun
- * would succeed. Pure -- no I/O -- used for testing the classification and
- * guard logic in isolation. The real orchestration (runClassifier) does NOT
- * use this to decide the final marker state: it attempts the rerun FIRST
- * and only then knows whether "true" or "failed:<status>" is honest (review
- * round 1, F4) -- see runClassifier.
- *
- * @param {{ rawLog: string, sha: string, runAttempt?: number, existingCommentBody: string | null | undefined }} args
- */
-export function decideClassifierAction({
-	rawLog,
-	sha,
-	runAttempt = 1,
-	existingCommentBody,
-}) {
-	const classification = classifyFailureLog(rawLog);
-	const existingMarker = parseClassifierMarker(existingCommentBody);
-	const eligibleForRerun = shouldTriggerRerun({
-		classification,
-		sha,
-		runAttempt,
-		existingMarker,
-	});
-	const carriedForward =
-		!eligibleForRerun &&
-		existingMarker !== null &&
-		existingMarker.sha === sha &&
-		existingMarker.rerunTriggered;
-	const rerunState = eligibleForRerun || carriedForward ? "true" : "false";
-	const commentBody = buildCommentBody({
-		classification,
-		sha,
-		rerunState,
-		// The marker names the attempt the recorded rerun BELONGS to: this
-		// attempt when the rerun fires now, the earlier attempt when this pass
-		// is only carrying a previous one forward. Stamping the current attempt
-		// on a carried-forward marker would silently re-open eligibility for an
-		// attempt that already had its try.
-		runAttempt: carriedForward ? existingMarker.runAttempt : runAttempt,
-	});
-	// Review round 2, V5: `rerunTriggeredThisPass` (not `rerunTriggered`,
-	// which parseClassifierMarker's return keeps for the CUMULATIVE
-	// marker-state meaning) -- this field means "did THIS pass trigger a
-	// rerun". eligibleForRerun already IS that this-pass answer (this pure
-	// function assumes an eligible attempt always succeeds; see
-	// runClassifier for the real, attempt-then-record version).
-	return {
-		classification,
-		rerunTriggeredThisPass: eligibleForRerun,
-		commentBody,
-	};
-}
-
 // ---------------------------------------------------------------------------
 // I/O layer. Every function below takes an injected `fetcher` (the
 // merge-train-warden.mjs pattern, scripts/lib/merge-train-warden.mjs:138) so
@@ -1090,7 +1036,12 @@ export async function runClassifier({
 	let rerunTriggeredThisPass = false;
 	// The attempt the marker's rerun state BELONGS to -- this attempt when the
 	// rerun (or its failure) happens now, the earlier attempt when this pass
-	// only carries a prior success forward. See decideClassifierAction.
+	// only carries a prior success forward (the `else if` below). #3086:
+	// this is the ONLY writer of the carry-forward rule -- the pure
+	// decideClassifierAction that used to duplicate it (and needed its own
+	// twin test, #3079) is deleted; see the "#2042: a real classification
+	// at attempt 2..." test in ci-failure-classifier.test.ts for the
+	// mutation this branch guards.
 	let markerRunAttempt = runAttempt;
 	if (eligibleForRerun) {
 		const result = await attemptRerun({ fetcher, owner, repo, runId });
