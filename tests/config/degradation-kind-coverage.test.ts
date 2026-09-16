@@ -603,4 +603,27 @@ describe("DegradationKind union coverage (#3071, #3140)", () => {
 
 		expect(audit.problems).toEqual([]);
 	});
+
+	// A declared-but-unflagged union member is FINE by design
+	// (`auditRegistry`'s own asymmetric policy, module header above) — so the
+	// assertion above alone would stay green even if the LEDGER_PUSH_CALLEES
+	// branch or the bare-identifier resolution path were deleted entirely,
+	// as long as the union still declares the two kinds. These two checks
+	// independently confirm the scan actually OBSERVES the occurrence, not
+	// only that the union happens to declare it.
+	it("actually scans LEDGER_FILE's summary.push emitters, not just the union declaration", () => {
+		const { occurrences } = scanCallSites();
+		const kinds = new Set(occurrences.map((occurrence) => occurrence.kind));
+		expect(kinds.has("process-singleton-reset")).toBe(true);
+	});
+
+	it("actually resolves TRUST_REFUSAL_KIND at its own call site, not only via project-trust.ts's bare literal", () => {
+		const { occurrences } = scanCallSites();
+		const resolvedAtProcessSpec = occurrences.some(
+			(occurrence) =>
+				occurrence.kind === "trust-refusal" &&
+				occurrence.detail.includes("process-spec.ts"),
+		);
+		expect(resolvedAtProcessSpec).toBe(true);
+	});
 });
