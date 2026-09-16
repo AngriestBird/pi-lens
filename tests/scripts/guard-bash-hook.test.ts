@@ -453,6 +453,65 @@ describe("scripts/hooks/guard-bash.mjs -- never throws (#2699)", () => {
 	}, 180_000);
 });
 
+// #3089: readStdin drains fd 0 to EOF instead of a single readFileSync(0)
+// call. Measured on this host: spawnSync's `input` option pumps the
+// child's stdin pipe non-blocking while its own synchronous event loop
+// feeds it, so a `read(2)` issued before the next chunk has landed can
+// throw EAGAIN -- reproducible from ~500 KB of JSON payload, reliably at
+// the 1 MB+ sizes below. Pre-fix, `readFileSync(0, "utf8")` does not retry
+// that EAGAIN; the throw was swallowed by readStdin's own catch-all,
+// producing "no payload" for a payload that was still arriving, and the
+// hook failed OPEN (exit 0) on a command it would otherwise have denied.
+// This is the real script (HOOK, spawned exactly as runHook() above does)
+// over a real OS pipe (spawnSync's own child stdio pipe) -- not a hand-fed
+// classifyPayload() call, which never touches readStdin at all.
+describe("scripts/hooks/guard-bash.mjs -- drains stdin to EOF on a large payload (#3089)", () => {
+	function payloadOfAtLeast(bytes: number, tailCommand: string): string {
+		const pad = "x".repeat(bytes);
+		return `echo ${pad} && ${tailCommand}`;
+	}
+
+	it.each([
+		["~500 KB", 500_000],
+		["1 MB", 1_000_000],
+		["2 MB", 2_000_000],
+		["9 MB", 9_000_000],
+	])(
+		"still denies a %s payload (a single readFileSync(0) fails open here)",
+		(_label, bytes) => {
+			const command = payloadOfAtLeast(bytes, "git stash");
+			const result = runHook(command);
+			expect(result.status, `payload length ${command.length}`).toBe(2);
+			expect(result.stderr.toLowerCase()).toContain("stash");
+		},
+	);
+
+	// The never-throws contract from #2699 is unchanged by the drain loop:
+	// a read error or a genuinely empty stream is still "no payload", not a
+	// crash and not a deny.
+	it("still exits 0 on a genuinely empty stream", () => {
+		const result = spawnSync(process.execPath, [HOOK], {
+			input: "",
+			encoding: "utf8",
+			env: BASE_ENV,
+		});
+		expect(result.status).toBe(0);
+		expect(result.stderr).toBe("");
+	});
+
+	it("still exits 0 when fd 0 is closed rather than piped (a read error, not EAGAIN)", () => {
+		// stdio: "ignore" gives the child a closed/no-data fd 0 -- the "read
+		// error" half of the acceptance criterion, distinct from the
+		// EAGAIN-retry path the payload cases above exercise.
+		const result = spawnSync(process.execPath, [HOOK], {
+			stdio: ["ignore", "pipe", "pipe"],
+			encoding: "utf8",
+			env: BASE_ENV,
+		});
+		expect(result.status).toBe(0);
+	});
+});
+
 describe("scripts/hooks/guard-bash.mjs -- registration (review round 2 F3)", () => {
 	it(".claude/settings.json's PreToolUse Bash hook does not start with a relative path", () => {
 		const settings = JSON.parse(

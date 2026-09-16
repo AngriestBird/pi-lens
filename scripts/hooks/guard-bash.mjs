@@ -126,7 +126,7 @@
  * and allows. (Round 2 capped nesting at depth 8, which silently ALLOWED
  * anything nested deeper; the cap is deleted rather than raised.)
  */
-import { readFileSync } from "node:fs";
+import { readSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 /** @typedef {"stash"|"reset"|"worktreeForce"|"probe"|"tmpdirCollision"} DenyRule */
@@ -1028,17 +1028,60 @@ export function classifyPayload(payload) {
 	return findDeny(command);
 }
 
+// #3089: nothing in the stdlib waits for fd 0 to become readable
+// synchronously, and a bare retry loop would spin a core while the payload
+// is still arriving. `Atomics.wait` is the one sleep that yields the CPU --
+// same mechanism scripts/with-memory-watch.mjs uses for its own EAGAIN
+// retry on the write side.
+const READ_RETRY_SLEEP_MS = 5;
+const readRetryPark = new Int32Array(new SharedArrayBuffer(4));
+
 /**
- * Read stdin synchronously. Never blocks on an interactive terminal and
- * never throws -- any read failure is "no payload", which {@link run}
- * treats as allow.
+ * Read stdin synchronously, draining fd 0 to EOF. Never blocks on an
+ * interactive terminal and never throws -- any read failure (besides a
+ * retryable EAGAIN) is "no payload", which {@link run} treats as allow.
+ *
+ * #3089: `readFileSync(0, "utf8")` fails open on a payload larger than a
+ * pipe buffer. Node's spawnSync sets the child's stdin pipe to
+ * non-blocking once the parent starts pumping its own synchronous event
+ * loop to feed `input`; a `read(2)` issued before the next chunk has
+ * landed then returns EAGAIN, `readFileSync` does not retry, and the
+ * thrown error was swallowed by this function's own catch-all, returning
+ * "" for a payload that was still arriving. Measured on this host,
+ * reproducible from ~500 KB: `spawnSync(HOOK, { input })` for a
+ * >=1 MB PreToolUse JSON payload throws
+ * `EAGAIN: resource temporarily unavailable, read` out of
+ * `readFileSync(0, "utf8")`, and the hook exits 0 instead of denying. A
+ * `read(2)` loop that retries EAGAIN (this function) and keeps
+ * accumulating chunks until a read returns 0 -- true EOF, not "nothing
+ * available yet" -- closes that gap regardless of how many chunks the
+ * payload arrives in or how far apart in time they land.
  *
  * @returns {string}
  */
 function readStdin() {
 	if (process.stdin.isTTY) return "";
 	try {
-		return readFileSync(0, "utf8");
+		const chunks = [];
+		const chunk = Buffer.alloc(65536);
+		for (;;) {
+			let bytesRead;
+			try {
+				bytesRead = readSync(0, chunk, 0, chunk.length, null);
+			} catch (error) {
+				if (error?.code === "EAGAIN") {
+					Atomics.wait(readRetryPark, 0, 0, READ_RETRY_SLEEP_MS);
+					continue;
+				}
+				// A read error that is not "try again" (EBADF, a closed fd, ...)
+				// is the same "no payload" outcome the old single-shot read gave
+				// for any thrown error -- run() must still exit 0, never throw.
+				throw error;
+			}
+			if (bytesRead === 0) break; // true EOF: the writer closed its end.
+			chunks.push(Buffer.from(chunk.subarray(0, bytesRead)));
+		}
+		return Buffer.concat(chunks).toString("utf8");
 	} catch {
 		return "";
 	}
