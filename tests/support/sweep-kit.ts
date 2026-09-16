@@ -396,17 +396,47 @@ function matchIsCode(
  * (open/close fixed to `{`/`}`) plus two more inline copies of the same loop
  * (the parameter-list paren balance in `bodyBraceAfterParams`, and the
  * `vi.mock(...)` call's paren balance in `findMockCallText`).
+ *
+ * `options.quoteAware` (#3134) folds in the second convention the sibling
+ * copies split on: skip over `"`/`'`/`` ` ``-quoted spans (backslash-escaped
+ * chars included) so a delimiter INSIDE a string argument cannot unbalance
+ * the count. Default `false` reproduces the exact loop above with no added
+ * branch cost for every pre-#3134 caller (`vacuous-skip-scan.ts`,
+ * `pi-lens-home-hermeticity.test.ts`) — none of them need it, because they
+ * already scan `stripSource`-blanked text where string contents cannot hide
+ * a delimiter. The two #3134 callers that DO pass `true`
+ * (`availability-classifiedby-scan.ts`, `latency-logger-mock-shape.test.ts`)
+ * scan `strings: "keep"` text instead — they read `cause`/`classifiedBy`
+ * values and a mock's module-specifier string, which stripping would blind
+ * them to — so the delimiter-in-a-string case is real for them, not
+ * hypothetical. One option on one seam rather than a second exported
+ * function, per the fold's "at most one quote-aware variant" rule.
  */
 export function matchingCloseIndex(
 	source: string,
 	openIndex: number,
 	open: string,
 	close: string,
+	options?: { quoteAware?: boolean },
 ): number {
+	const quoteAware = options?.quoteAware === true;
 	let depth = 0;
+	let quote: string | undefined;
 	for (let i = openIndex; i < source.length; i++) {
-		if (source[i] === open) depth++;
-		else if (source[i] === close) {
+		const ch = source[i];
+		if (quoteAware) {
+			if (quote !== undefined) {
+				if (ch === "\\") i++;
+				else if (ch === quote) quote = undefined;
+				continue;
+			}
+			if (ch === '"' || ch === "'" || ch === "`") {
+				quote = ch;
+				continue;
+			}
+		}
+		if (ch === open) depth++;
+		else if (ch === close) {
 			depth--;
 			if (depth === 0) return i;
 		}

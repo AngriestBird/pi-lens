@@ -21,6 +21,7 @@ import { jsTsCandidatePaths } from "../../clients/review-graph/import-resolvers.
 import { lineContentHash } from "../../clients/read-guard.js";
 import {
 	listSourceFiles,
+	matchingCloseIndex,
 	readWalkedFile,
 	relativePosix,
 	stableOccurrenceKey,
@@ -76,17 +77,15 @@ function callArguments(
 ): string {
 	const open = stripped.indexOf("(", from);
 	if (open < 0) return "";
-	let depth = 0;
 	const end = Math.min(stripped.length, open + maxChars);
-	for (let i = open; i < end; i++) {
-		const ch = stripped[i];
-		if (ch === "(") depth++;
-		else if (ch === ")") {
-			depth--;
-			if (depth === 0) return stripped.slice(open, i + 1);
-		}
-	}
-	return stripped.slice(open, end);
+	// #3134: the depth count is `sweep-kit.ts`'s `matchingCloseIndex`, run
+	// over a `maxChars`-bounded WINDOW (`stripped.slice(open, end)`, not the
+	// whole `stripped` prefix) so the cap this function exists for — "one
+	// pathological expression cannot turn this into a whole-file scan" —
+	// still bounds both the scan and the allocation, not just the scan.
+	const window = stripped.slice(open, end);
+	const close = matchingCloseIndex(window, 0, "(", ")");
+	return close === -1 ? window : window.slice(0, close + 1);
 }
 
 /**
