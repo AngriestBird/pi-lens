@@ -66,8 +66,6 @@ class FakeChild extends EventEmitter {
 	}
 }
 
-const posixOnly = it.skipIf(process.platform !== "linux");
-
 describe("kill-by-pid ownership (#2042)", () => {
 	let exitListenersBefore: ReadonlyArray<unknown> = [];
 
@@ -144,169 +142,163 @@ describe("kill-by-pid ownership (#2042)", () => {
 		}
 	});
 
-	/**
-	 * #3091 F4: `process.platform === "linux"` is not the same question as "can
-	 * I read /proc". A Linux host with `/proc` unmounted made every per-pid read
-	 * fail exactly the way a dead pid does, so nothing was ever registered and
-	 * the host-exit tree kill silently stopped working.
-	 */
-	posixOnly(
-		"falls back to best-effort, with a record, when /proc is unreadable on Linux",
-		async () => {
-			vi.resetModules();
-			vi.doMock("node:fs", async (importOriginal) => {
-				const actual = await importOriginal<typeof import("node:fs")>();
-				return {
-					...actual,
-					default: actual,
-					readFileSync: (file: unknown, ...rest: unknown[]) => {
-						if (typeof file === "string" && file.startsWith("/proc/"))
-							throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
-						return (actual.readFileSync as (...args: unknown[]) => unknown)(
-							file,
-							...rest,
-						);
-					},
-				};
-			});
-			const { isOwnLiveChild: fresh } =
-				await import("../../clients/safe-spawn.js");
-			// The ledger must be the instance the FRESH safe-spawn writes to —
-			// `vi.resetModules()` gives it a new one, and reading the statically
-			// imported twin would report an empty ledger (defect shape 14).
-			const { getDegradationSummary: freshSummary } =
-				await import("../../clients/degradation-ledger.js");
-
-			// Best-effort, exactly as on a platform that never had /proc — NOT a
-			// silent refusal that disables every kill (defect shape 10).
-			expect(fresh(process.ppid, "proc-unreadable-site")).toBe(true);
-			fresh(process.ppid, "proc-unreadable-site");
-
-			const group = freshSummary().find(
-				(entry) => entry.kind === "kill-ownership-unverifiable",
-			);
-			expect(group?.latestReasons.map((entry) => entry.subject)).toEqual([
-				"proc-unreadable-site",
-			]);
-			// Once per session, not once per call.
-			expect(group?.count).toBe(1);
-		},
-	);
-
-	posixOnly(
-		"refuses a live pid belonging to another parent, and records it once per site",
+	// Everything below reads `/proc`, which only Linux has. The Windows and
+	// macOS arms of the same predicate are covered above WITHOUT a lane, by the
+	// fresh-import case that stubs the platform before module load.
+	// lane: ubuntu Unit tests.
+	describe.skipIf(process.platform !== "linux")(
+		"on Linux, where /proc answers",
 		() => {
-			expect(isOwnLiveChild(process.ppid, "test-site")).toBe(false);
-			const group = getDegradationSummary().find(
-				(entry) => entry.kind === "kill-foreign-pid-refused",
-			);
-			expect(group?.latestReasons.map((entry) => entry.subject)).toEqual([
-				"test-site",
-			]);
-			expect(group?.latestReasons[0]?.reason).toContain(
-				`pid ${process.ppid} has parent`,
-			);
-			// Bounded: the subject is the SITE, so a second refusal of a
-			// different pid raises the count and never the entry list.
-			isOwnLiveChild(process.ppid, "test-site");
-			const after = getDegradationSummary().find(
-				(entry) => entry.kind === "kill-foreign-pid-refused",
-			);
-			expect(after?.count).toBe(2);
-			expect(after?.latestReasons).toHaveLength(1);
-		},
-	);
+			/**
+			 * #3091 F4: `process.platform === "linux"` is not the same question as "can
+			 * I read /proc". A Linux host with `/proc` unmounted made every per-pid read
+			 * fail exactly the way a dead pid does, so nothing was ever registered and
+			 * the host-exit tree kill silently stopped working.
+			 */
+			it("falls back to best-effort, with a record, when /proc is unreadable on Linux", async () => {
+				vi.resetModules();
+				vi.doMock("node:fs", async (importOriginal) => {
+					const actual = await importOriginal<typeof import("node:fs")>();
+					return {
+						...actual,
+						default: actual,
+						readFileSync: (file: unknown, ...rest: unknown[]) => {
+							if (typeof file === "string" && file.startsWith("/proc/"))
+								throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+							return (actual.readFileSync as (...args: unknown[]) => unknown)(
+								file,
+								...rest,
+							);
+						},
+					};
+				});
+				const { isOwnLiveChild: fresh } =
+					await import("../../clients/safe-spawn.js");
+				// The ledger must be the instance the FRESH safe-spawn writes to —
+				// `vi.resetModules()` gives it a new one, and reading the statically
+				// imported twin would report an empty ledger (defect shape 14).
+				const { getDegradationSummary: freshSummary } =
+					await import("../../clients/degradation-ledger.js");
 
-	posixOnly(
-		"a fabricated child pid never enters the lifetime registry, so host exit never signals it",
-		async () => {
-			const foreignPid = process.ppid;
-			const child = new FakeChild(foreignPid);
-			// Resolved by the double the instant production spawns: registration
-			// is the next synchronous statement, so one microtask later the
-			// registry has seen everything this call will ever add to it. No
-			// wall-clock wait.
-			let spawned!: () => void;
-			const hasSpawned = new Promise<void>((resolve) => {
-				spawned = resolve;
+				// Best-effort, exactly as on a platform that never had /proc — NOT a
+				// silent refusal that disables every kill (defect shape 10).
+				expect(fresh(process.ppid, "proc-unreadable-site")).toBe(true);
+				fresh(process.ppid, "proc-unreadable-site");
+
+				const group = freshSummary().find(
+					(entry) => entry.kind === "kill-ownership-unverifiable",
+				);
+				expect(group?.latestReasons.map((entry) => entry.subject)).toEqual([
+					"proc-unreadable-site",
+				]);
+				// Once per session, not once per call.
+				expect(group?.count).toBe(1);
 			});
-			vi.doMock("node:child_process", () => ({
-				spawn: vi.fn(() => {
-					queueMicrotask(spawned);
-					return child;
-				}),
-				spawnSync: vi.fn(() => ({ status: 0, stdout: "", stderr: "" })),
-				execSync: vi.fn(() => ""),
-				execFileSync: vi.fn(() => ""),
-			}));
-			const { safeSpawnAsync } = await import("../../clients/safe-spawn.js");
 
-			const pending = safeSpawnAsync("which", ["node"], { timeout: 50_000 });
-			await hasSpawned;
+			it("refuses a live pid belonging to another parent, and records it once per site", () => {
+				expect(isOwnLiveChild(process.ppid, "test-site")).toBe(false);
+				const group = getDegradationSummary().find(
+					(entry) => entry.kind === "kill-foreign-pid-refused",
+				);
+				expect(group?.latestReasons.map((entry) => entry.subject)).toEqual([
+					"test-site",
+				]);
+				expect(group?.latestReasons[0]?.reason).toContain(
+					`pid ${process.ppid} has parent`,
+				);
+				// Bounded: the subject is the SITE, so a second refusal of a
+				// different pid raises the count and never the entry list.
+				isOwnLiveChild(process.ppid, "test-site");
+				const after = getDegradationSummary().find(
+					(entry) => entry.kind === "kill-foreign-pid-refused",
+				);
+				expect(after?.count).toBe(2);
+				expect(after?.latestReasons).toHaveLength(1);
+			});
 
-			expect([...lifetimePids()]).not.toContain(foreignPid);
+			it("a fabricated child pid never enters the lifetime registry, so host exit never signals it", async () => {
+				const foreignPid = process.ppid;
+				const child = new FakeChild(foreignPid);
+				// Resolved by the double the instant production spawns: registration
+				// is the next synchronous statement, so one microtask later the
+				// registry has seen everything this call will ever add to it. No
+				// wall-clock wait.
+				let spawned!: () => void;
+				const hasSpawned = new Promise<void>((resolve) => {
+					spawned = resolve;
+				});
+				vi.doMock("node:child_process", () => ({
+					spawn: vi.fn(() => {
+						queueMicrotask(spawned);
+						return child;
+					}),
+					spawnSync: vi.fn(() => ({ status: 0, stdout: "", stderr: "" })),
+					execSync: vi.fn(() => ""),
+					execFileSync: vi.fn(() => ""),
+				}));
+				const { safeSpawnAsync } = await import("../../clients/safe-spawn.js");
 
-			// Fire whatever exit handlers production installed during the call —
-			// the seam that shipped `process.kill(-2468, "SIGKILL")`.
-			const killSpy = vi
-				.spyOn(process, "kill")
-				.mockImplementation(() => true as never);
-			for (const listener of process.listeners("exit")) {
-				if (!exitListenersBefore.includes(listener))
-					(listener as (code: number) => void)(0);
-			}
-			expect(killSpy).not.toHaveBeenCalled();
+				const pending = safeSpawnAsync("which", ["node"], { timeout: 50_000 });
+				await hasSpawned;
 
-			child.emit("close", 0, null);
-			await pending;
-		},
-	);
+				expect([...lifetimePids()]).not.toContain(foreignPid);
 
-	posixOnly(
-		"a timeout kill on a fabricated child pid signals the handle, never the process group",
-		async () => {
-			const foreignPid = process.ppid;
-			const child = new FakeChild(foreignPid);
-			// The double terminates the way a real child does — on whichever
-			// kill production actually chooses — so the call settles without a
-			// wall-clock wait, and the assertions below read which one it was.
-			const settle = () => {
-				queueMicrotask(() => child.emit("close", null, "SIGTERM"));
-				return true as never;
-			};
-			child.kill.mockImplementation(settle);
-			vi.doMock("node:child_process", () => ({
-				spawn: vi.fn(() => child),
-				spawnSync: vi.fn(() => ({ status: 0, stdout: "", stderr: "" })),
-				execSync: vi.fn(() => ""),
-				execFileSync: vi.fn(() => ""),
-			}));
-			const { safeSpawnAsync } = await import("../../clients/safe-spawn.js");
-			const killSpy = vi.spyOn(process, "kill").mockImplementation(settle);
+				// Fire whatever exit handlers production installed during the call —
+				// the seam that shipped `process.kill(-2468, "SIGKILL")`.
+				const killSpy = vi
+					.spyOn(process, "kill")
+					.mockImplementation(() => true as never);
+				for (const listener of process.listeners("exit")) {
+					if (!exitListenersBefore.includes(listener))
+						(listener as (code: number) => void)(0);
+				}
+				expect(killSpy).not.toHaveBeenCalled();
 
-			await safeSpawnAsync("which", ["node"], { timeout: 10 });
+				child.emit("close", 0, null);
+				await pending;
+			});
 
-			expect(killSpy).not.toHaveBeenCalled();
-			expect(child.kill).toHaveBeenCalledWith("SIGTERM");
-		},
-	);
+			it("a timeout kill on a fabricated child pid signals the handle, never the process group", async () => {
+				const foreignPid = process.ppid;
+				const child = new FakeChild(foreignPid);
+				// The double terminates the way a real child does — on whichever
+				// kill production actually chooses — so the call settles without a
+				// wall-clock wait, and the assertions below read which one it was.
+				const settle = () => {
+					queueMicrotask(() => child.emit("close", null, "SIGTERM"));
+					return true as never;
+				};
+				child.kill.mockImplementation(settle);
+				vi.doMock("node:child_process", () => ({
+					spawn: vi.fn(() => child),
+					spawnSync: vi.fn(() => ({ status: 0, stdout: "", stderr: "" })),
+					execSync: vi.fn(() => ""),
+					execFileSync: vi.fn(() => ""),
+				}));
+				const { safeSpawnAsync } = await import("../../clients/safe-spawn.js");
+				const killSpy = vi.spyOn(process, "kill").mockImplementation(settle);
 
-	posixOnly(
-		"killProcessTree's POSIX group kill refuses a pid the process does not own",
-		async () => {
-			const foreignPid = process.ppid;
-			const proc = new FakeChild(foreignPid);
-			const killSpy = vi
-				.spyOn(process, "kill")
-				.mockImplementation(() => true as never);
-			const { killProcessTree } = await import("../../clients/lsp/client.js");
+				await safeSpawnAsync("which", ["node"], { timeout: 10 });
 
-			await killProcessTree(proc as never, foreignPid, { fast: true });
+				expect(killSpy).not.toHaveBeenCalled();
+				expect(child.kill).toHaveBeenCalledWith("SIGTERM");
+			});
 
-			expect(killSpy).not.toHaveBeenCalled();
-			// The handle-based fallback still runs: an unowned pid must not turn
-			// shutdown into a no-op (defect shape 10, silencing as fixing).
-			expect(proc.kill).toHaveBeenCalledWith("SIGTERM");
+			it("killProcessTree's POSIX group kill refuses a pid the process does not own", async () => {
+				const foreignPid = process.ppid;
+				const proc = new FakeChild(foreignPid);
+				const killSpy = vi
+					.spyOn(process, "kill")
+					.mockImplementation(() => true as never);
+				const { killProcessTree } = await import("../../clients/lsp/client.js");
+
+				await killProcessTree(proc as never, foreignPid, { fast: true });
+
+				expect(killSpy).not.toHaveBeenCalled();
+				// The handle-based fallback still runs: an unowned pid must not turn
+				// shutdown into a no-op (defect shape 10, silencing as fixing).
+				expect(proc.kill).toHaveBeenCalledWith("SIGTERM");
+			});
 		},
 	);
 });

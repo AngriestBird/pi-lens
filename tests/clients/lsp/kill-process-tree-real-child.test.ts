@@ -17,7 +17,7 @@
  * could see it. These do not stub anything: they spawn a real detached child,
  * whose `/proc/<pid>/status` really does carry `PPid: <this process>`.
  *
- * lane: ubuntu Unit tests (`it.skipIf(process.platform !== "linux")` — the
+ * lane: ubuntu Unit tests (`describe.skipIf(process.platform !== "linux")` — the
  * ownership arm reads `/proc`, which only exists there; the Windows arm is
  * covered without a lane by the platform-stubbed case in
  * tests/clients/safe-spawn-kill-ownership.test.ts).
@@ -27,8 +27,6 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { killProcessTree } from "../../../clients/lsp/client.js";
 import { isOwnLiveChild } from "../../../clients/safe-spawn.js";
-
-const linuxOnly = it.skipIf(process.platform !== "linux");
 
 const children: ChildProcess[] = [];
 
@@ -66,10 +64,10 @@ afterEach(async () => {
 	}
 });
 
-describe("killProcessTree ownership, against a real child (#2042)", () => {
-	linuxOnly(
-		"signals the process group of a live child this process really owns",
-		async () => {
+describe.skipIf(process.platform !== "linux")(
+	"killProcessTree ownership, against a real child (#2042)",
+	() => {
+		it("signals the process group of a live child this process really owns", async () => {
 			const child = spawnDetachedSleeper();
 			const pid = child.pid as number;
 			// callThrough: the signal is REAL, and it is our own child — the
@@ -84,12 +82,9 @@ describe("killProcessTree ownership, against a real child (#2042)", () => {
 
 			expect(killSpy).toHaveBeenCalledWith(-pid, "SIGTERM");
 			await exited(child);
-		},
-	);
+		});
 
-	linuxOnly(
-		"still group-kills at host exit when the handle already reported exit (F1)",
-		async () => {
+		it("still group-kills at host exit when the handle already reported exit (F1)", async () => {
 			// The `processExiting` path: `killProcessTree`'s exited early return
 			// is skipped, and the handle can legitimately say "exited" while the
 			// GROUP is still alive with grandchildren in it. Ownership must come
@@ -106,12 +101,9 @@ describe("killProcessTree ownership, against a real child (#2042)", () => {
 
 			expect(killSpy).toHaveBeenCalledWith(-pid, "SIGTERM");
 			await exited(child);
-		},
-	);
+		});
 
-	linuxOnly(
-		"a leader verified while alive stays signalable once it dies; one never verified does not",
-		async () => {
+		it("a leader verified while alive stays signalable once it dies; one never verified does not", async () => {
 			// #2026/#2027: the 1.5s escalation SIGKILLs the GROUP after the direct
 			// child has already died, which is how a SIGTERM-hardy grandchild is
 			// reached. `/proc/<leader>` is gone by then, so ownership has to be
@@ -130,6 +122,6 @@ describe("killProcessTree ownership, against a real child (#2042)", () => {
 
 			expect(isOwnLiveChild(verifiedPid, "test-memo")).toBe(true);
 			expect(isOwnLiveChild(unverifiedPid, "test-memo")).toBe(false);
-		},
-	);
-});
+		});
+	},
+);
