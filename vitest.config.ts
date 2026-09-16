@@ -54,6 +54,10 @@ const sharedGlobalSetup = [
 	// After check-build-freshness: the seed analyze runs the in-place build.
 	"./tests/support/prewarm-tool-home.ts",
 	"./tests/support/git-config-guard-setup.ts",
+	// Last: every earlier step (the in-place build, the grammar prewarm, the
+	// tool-home seed) has finished, so the baseline this guard snapshots is the
+	// tree the test files will actually walk (#3082).
+	"./tests/support/tests-tree-write-guard-setup.ts",
 ];
 
 const sharedSetupFiles = ["./tests/support/vitest-setup.ts"];
@@ -470,6 +474,11 @@ export const wallClockBudgetInclude = [
 	"tests/support/fault-injection.test.ts",
 	"tests/support/git-config-guard.test.ts",
 	"tests/support/git-fixture-env.test.ts",
+	// #3082: the tests-tree write guard's one real-watcher case. A recursive
+	// `fs.watch` delivers on the kernel's schedule, so the case retries the
+	// create/remove and polls the guard's own report (real setTimeout, bounded)
+	// rather than sleeping a guessed settle time (flake-shape admission).
+	"tests/support/tests-tree-write-guard.test.ts",
 ];
 
 // #2912: the tmp-fixture governance sweep compares the real process-wide
