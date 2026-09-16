@@ -285,6 +285,11 @@ and PR language; detailed historical examples are in `HISTORY.md`.
 - Probes and child processes pin `PI_LENS_HOME`, `PILENS_DATA_DIR`, `HOME`, and
   install/log/cache directories beneath the worktree or test temp directory.
   Tests set a writable `PI_LENS_HOME`; never write the maintainer's real home.
+  Pin those variables to `.probe-home`, never `TMPDIR`/`TMP`/`TEMP`: the vitest
+  harness keeps the real temp directory deliberately and mkdtemps its own
+  `PI_LENS_HOME` under `os.tmpdir()`, so a `TMPDIR` aimed at `.probe-home` moves
+  the harness home into a git-ignored directory inside the checkout and reds
+  unrelated suites (#3026). `scripts/hooks/guard-bash.mjs` denies it.
 - New filesystem walkers use shared exclusions and ignore matching, cap
   walk-down work, and use the correct home-ceiling policy for walk-up discovery.
 
@@ -485,7 +490,10 @@ A workflow edit whose only executing lane is master-only (a job gated
 run it on the branch with `gh workflow run <file> --ref <branch>` and quote
 the run id and per-job conclusions, or give the edited lane one PR-eligible
 cell (#3043, where six install-smoke cells failed on every master push for a
-day because #3033's PR could not run the arm it changed).
+day because #3033's PR could not run the arm it changed). This rule is now
+mechanical: `tests/config/workflow-pull-request-reachability.test.ts` fails
+any job whose `if:` no pull_request context can satisfy unless the lane is
+registered there with the reason a pull request cannot exercise it.
 
 Build after TypeScript changes before tests. The stale-build guard rejects a
 missing or older compiled twin. Run targeted tests while iterating and one
