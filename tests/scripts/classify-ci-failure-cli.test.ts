@@ -190,7 +190,7 @@ describe("classify-ci-failure.mjs CLI (#2668 review F2 -- real child process, re
 		const calls = readCalls();
 		const rerun = calls.find((c) => c.url.includes("rerun-failed-jobs"));
 		expect(rerun?.method).toBe("POST");
-		// Upsert, not append: the one existing comment is PATCHed, and its
+		// Upsert, not append: the one existing comment is updated via PATCH, and its
 		// new body names THIS attempt so a repeat invocation on attempt 2 is
 		// refused while attempt 3 was never eligible.
 		const patched = calls.find((c) => c.method === "PATCHED_BODY");
