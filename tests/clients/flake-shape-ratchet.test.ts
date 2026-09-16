@@ -137,11 +137,15 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 	// wrapper's own real setInterval loop in a separate process; a poll waits
 	// for that file's first write rather than a fixed sleep, and one case kills
 	// the wrapper's real process to prove the tail survives that exact victim
-	// shape (master 1701d01).
+	// shape (master 1701d01). 2026-09-16 (#3110 round 2 S1): the same shape
+	// from two more angles -- a slow reader's resume cadence has to be a real
+	// timer against a real OS pipe's backpressure (no fake clock drains a
+	// kernel buffer), and the note-write retry cap and the hang/exit-code
+	// bound both wait on a real, separately spawned process's real exit.
 	"raw-timer-wait:scripts/with-memory-watch.test.ts": {
 		detector: "raw-timer-wait",
 		reason:
-			"the sample file is written by the wrapper's own real interval loop in a separate process; a real poll and a real kill are the subject",
+			"real interval loop / real pipe backpressure / real spawned-process exit in a separate process; polls, resume cadences, and hang bounds are the subject, not fakeable",
 	},
 	"raw-timer-wait:support/fault-injection.ts": {
 		detector: "raw-timer-wait",
