@@ -11,6 +11,7 @@ import {
 import {
 	cleanupTmpHygiene,
 	removeRunBackstopDirs,
+	unadmittedRootBackstopEntries,
 	tmpHygieneAdmissionFor,
 	tmpHygieneLeakReport,
 	tmpHygieneObservedEntries,
@@ -173,17 +174,54 @@ describe("tmp-fixture-hygiene", () => {
 				JSON.stringify({ lastSweepAt: 1 }),
 			);
 		}
+		// Round 4 F4, second half: root-level residue is reclaimed on the same
+		// window. It is a FILE, which is why the seam's directory-only sweep
+		// cannot be the whole rule.
+		const oldRoot = path.join(fixture, "orphan-backstop-owner-guard-old");
+		const liveRoot = path.join(fixture, "orphan-backstop-owner-guard-live");
+		for (const file of [oldRoot, liveRoot])
+			fs.writeFileSync(file, JSON.stringify({ lastSweepAt: 1 }));
 		// A day old: past any six-hour window, and far past the 16-minute
 		// worst-case vitest invocation the window is sized against.
 		const dayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
 		fs.utimesSync(oldForeign, dayAgo, dayAgo);
+		fs.utimesSync(oldRoot, dayAgo, dayAgo);
 		try {
 			removeRunBackstopDirs(fixture);
 			expect(fs.existsSync(mine)).toBe(false);
 			expect(fs.existsSync(liveForeign)).toBe(true);
 			expect(fs.existsSync(oldForeign)).toBe(false);
+			expect(fs.existsSync(oldRoot)).toBe(false);
+			expect(fs.existsSync(liveRoot)).toBe(true);
 		} finally {
 			fs.rmSync(fixture, { recursive: true, force: true });
+		}
+	});
+
+	// PR #3100 round 4 F4. The per-file detector used to assert the shared root
+	// holds NO backstop residue at all, while the tmp gate in the same file has
+	// always diffed against a setup snapshot. A checkout that had run master
+	// first — the expected first state for this change — therefore redded every
+	// test file for ever, naming an innocent file as the writer: with
+	// `.probe-home/orphan-backstop.json` planted, all 8 tests of
+	// bootstrap-lazy-liveness passed and the FILE failed. CI never sees it,
+	// because CI checks out fresh.
+	//
+	// `before` is injected because the real baseline is captured at setup, so no
+	// test can plant an entry into it; the directory read and the filter are the
+	// shipped ones. Both directions matter — the second is the guarantee round 3
+	// had and must not lose: a producer writing DURING the run is still named.
+	it("names only root backstop residue this run is answerable for", () => {
+		const home = process.env.PI_LENS_HOME as string;
+		const planted = `orphan-backstop-round4-guard-${process.env.PI_LENS_TMP_HYGIENE_RUN_ID}`;
+		fs.writeFileSync(path.join(home, planted), "{}");
+		try {
+			expect(unadmittedRootBackstopEntries(new Set([planted]))).not.toContain(
+				planted,
+			);
+			expect(unadmittedRootBackstopEntries(new Set())).toContain(planted);
+		} finally {
+			fs.rmSync(path.join(home, planted), { force: true });
 		}
 	});
 
