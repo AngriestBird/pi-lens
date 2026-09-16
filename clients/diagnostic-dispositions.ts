@@ -174,7 +174,8 @@ export const normalizeMessage = sharedNormalizeMessage;
 // case, symlink/realpath, or slash difference between the two forms silently
 // orphans the agent's own false-positive/flagged mark (a #533 dropped-signal).
 // Canonicalize BOTH inputs through `normalizeMapKey` (the SAME normalizer the
-// read side already relies on — realpathSync.native on Windows) BEFORE computing
+// read side already relies on — realpathSync.native on Windows, and on POSIX
+// too since #3098) BEFORE computing
 // the relative path, so write and read produce identical anchors regardless of
 // the form the caller held. `normalizeMapKey` is idempotent, so the already-
 // canonicalized read side is unaffected; the realpath I/O is acceptable here

@@ -282,6 +282,88 @@ describe("normalizeFilePath: POSIX adopts on-disk casing (#3098, the live half o
 		}
 	});
 
+	// RECURRENCE GUARDED (#3159 review round 2, F1): the casing rewrite is pure
+	// string algebra — it replaces a segment that is a case variant of the
+	// canonical one while KEEPING the caller's parent. For a symlink whose
+	// basename is a case variant of its TARGET's basename, that lands on a
+	// different place entirely. The first shipped version of this fix did
+	// exactly that, and its non-goal test did not catch it because the fixture
+	// built `sub`/`SUB` as siblings, where link-parent and target-parent are
+	// the same directory. These two build the everyday shapes where they are
+	// not. Both run on the ubuntu Unit tests lane; on Windows (and any other
+	// case-insensitive filesystem) the fixture cannot exist — `MyProject` and
+	// `myproject` are one directory there — so they skip visibly.
+	it("a case-variant symlink to a different directory never collapses two real files onto one key", (ctx) => {
+		const { tmpDir, cleanup } = setupTestEnvironment("pi-lens-case-");
+		try {
+			// <B>/MyProject -> work/myproject, plus a REAL <B>/myproject.
+			fs.mkdirSync(path.join(tmpDir, "work", "myproject", "src"), {
+				recursive: true,
+			});
+			fs.writeFileSync(
+				path.join(tmpDir, "work", "myproject", "src", "a.ts"),
+				"link target\n",
+			);
+			ctx.skip(
+				fs.existsSync(path.join(tmpDir, "MYPROJECT")),
+				"case-insensitive filesystem: MyProject and myproject cannot be two entries here",
+			);
+			fs.mkdirSync(path.join(tmpDir, "myproject", "src"), { recursive: true });
+			fs.writeFileSync(
+				path.join(tmpDir, "myproject", "src", "a.ts"),
+				"a different file\n",
+			);
+			fs.symlinkSync(
+				path.join("work", "myproject"),
+				path.join(tmpDir, "MyProject"),
+				"dir",
+			);
+
+			const viaLink = path.join(tmpDir, "MyProject", "src", "a.ts");
+			const other = path.join(tmpDir, "myproject", "src", "a.ts");
+			// Two inodes. One key would be the #1024 defect INVERTED: one file's
+			// disposition/read-guard/cache record answering for another's.
+			expect(fs.statSync(viaLink).ino).not.toBe(fs.statSync(other).ino);
+			expect(normalizeMapKey(viaLink)).not.toBe(normalizeMapKey(other));
+			expect(normalizeMapKey(viaLink)).toBe(viaLink);
+		} finally {
+			cleanup();
+		}
+	});
+
+	it("a case-variant symlink with no colliding sibling keys under a path that exists", (ctx) => {
+		const { tmpDir, cleanup } = setupTestEnvironment("pi-lens-case-");
+		try {
+			// node_modules/Foo -> ../pkgs/foo: the everyday symlinked-package
+			// layout. Rewriting `Foo` to `foo` produces node_modules/foo, which
+			// is nowhere on disk — the key stops naming a file at all, and the
+			// #2490 bound ("a symlinked package keys under the held path") is
+			// broken.
+			fs.mkdirSync(path.join(tmpDir, "node_modules"), { recursive: true });
+			fs.mkdirSync(path.join(tmpDir, "pkgs", "foo"), { recursive: true });
+			fs.writeFileSync(
+				path.join(tmpDir, "pkgs", "foo", "i.ts"),
+				"export const i = 1;\n",
+			);
+			ctx.skip(
+				fs.existsSync(path.join(tmpDir, "node_modules", "FOO")),
+				"case-insensitive filesystem: node_modules/Foo and node_modules/foo are one entry here",
+			);
+			fs.symlinkSync(
+				path.join("..", "pkgs", "foo"),
+				path.join(tmpDir, "node_modules", "Foo"),
+				"dir",
+			);
+
+			const held = path.join(tmpDir, "node_modules", "Foo", "i.ts");
+			const key = normalizeMapKey(held);
+			expect(fs.existsSync(key)).toBe(true);
+			expect(key).toBe(held);
+		} finally {
+			cleanup();
+		}
+	});
+
 	it("two genuinely distinct files on a case-sensitive filesystem keep two keys", (ctx) => {
 		const { tmpDir, cleanup } = setupTestEnvironment("pi-lens-case-");
 		try {

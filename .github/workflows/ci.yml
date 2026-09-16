@@ -831,6 +831,20 @@ jobs:
       - name: Install dependencies
         run: npm install --no-audit --no-fund
 
+      # refs #3098: the ONLY case-insensitive POSIX filesystem in CI is this
+      # leg's macOS APFS. The cross-case anchor cases in these two files
+      # manufacture their fixture with a case-variant symlink on the
+      # case-sensitive ubuntu lane; here they exercise the real aliasing, which
+      # is where #1024 was actually live. No extra install cost: `npm install`
+      # above already ran `prepare`, so devDependencies and the core grammars
+      # the vitest globalSetup pre-warms are already present.
+      - name: POSIX case-insensitive anchors (APFS)
+        if: matrix.os == 'macos-latest'
+        shell: bash
+        run: |
+          npm run build
+          npx vitest run tests/clients/path-utils.test.ts tests/clients/diagnostic-dispositions.test.ts
+
       - name: Rule catalog report (non-blocking)
         continue-on-error: true
         run: npm run audit:rule-catalog

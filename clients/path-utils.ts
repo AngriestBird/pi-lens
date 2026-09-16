@@ -129,10 +129,18 @@ export function splitPathSegments(filePath: string): string[] {
  * a symlink, so a symlinked monorepo package keeps keying under the path the
  * caller held (refs #2490 — a cwd fold for its own sake broke every monorepo).
  *
- * The one input this cannot separate is a symlink whose own name is a case
- * variant of its target in the same directory (`x/LINK` → `x/link`); that
- * resolves. It cannot exist on a case-insensitive filesystem at all, and on a
- * case-sensitive one it is a deliberately pathological layout.
+ * PURE string algebra: this pins what the rewrite DOES, never what the kernel
+ * reports — and from two strings alone it cannot tell "the same file, spelled
+ * with different case" from "a different file whose name happens to be a case
+ * variant". Any symlink whose BASENAME is a case variant of its target's
+ * basename (`<root>/MyProject` → `work/myproject`, `node_modules/Foo` →
+ * `../pkgs/foo`) has its name replaced while its own parent is kept, so the
+ * result names a different place — or no place at all. Measured in #3159
+ * review round 2 (F1): two different inodes collapsed onto ONE key (the #1024
+ * defect inverted — false suppression), and a symlinked package keyed under a
+ * path that does not exist on disk, breaking the #2490 bound above. The caller
+ * therefore CONFIRMS every rewrite against the filesystem before adopting it
+ * (see `normalizeFilePath`); do not use this function without that step.
  */
 function adoptCanonicalCasing(held: string, canonical: string): string {
 	const heldParts = held.split("/");
@@ -207,9 +215,19 @@ export function normalizeFilePath(filePath: string): string {
 			// Fast path, not a guard: both arms answer `normalized` when the
 			// strings match, but skipping the two `split`s there is a measured
 			// 1.9 vs 2.3 microseconds per call on the per-edit seam (#3098).
-			return canonical === normalized
-				? normalized
-				: adoptCanonicalCasing(normalized, canonical);
+			if (canonical === normalized) return normalized;
+			const adopted = adoptCanonicalCasing(normalized, canonical);
+			if (adopted === normalized) return normalized;
+			// The rewrite is string algebra and can land on a DIFFERENT file
+			// (#3159 review round 2, F1 — see `adoptCanonicalCasing`). Adopt it
+			// only once the filesystem agrees it still names the file the caller
+			// held: `canonical` IS `realpath(normalized)`, so this asks exactly
+			// "does the rewritten spelling resolve to the same file?". One extra
+			// syscall, and only on the rare branch where casing actually moved —
+			// never on an already-canonical path. A throw here (the rewritten
+			// path does not exist, the #2490 monorepo case) lands in the catch
+			// below and keeps the caller's spelling, which is the same answer.
+			return realpathSync.native(adopted) === canonical ? adopted : normalized;
 		} catch {
 			// Does not exist (or is unreadable): case-preserving, as above.
 			return normalized;
