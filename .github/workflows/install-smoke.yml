@@ -111,6 +111,9 @@ jobs:
   validate-merge-train-dispatch:
     name: Validate merge-train dispatch
     runs-on: ubuntu-latest
+    # refs #3123: bounds a hang against GitHub's 360-min default.
+    # Measured max over last 10 successful master runs: 4s; timeout = floor of 10 min.
+    timeout-minutes: 10
     permissions:
       contents: read
     steps:
@@ -136,6 +139,12 @@ jobs:
     needs:
       [validate-merge-train-dispatch, smoke, pi-load, mise-repro, host-range-smoke]
     runs-on: ubuntu-latest
+    # refs #3123: bounds a hang against GitHub's 360-min default.
+    # No successful run found (job requires github.event_name ==
+    # 'repository_dispatch'; it has failed 3/3 times it has ever run, never
+    # succeeded, across the visible history) -- defaulted to the floor of 10 min
+    # for this single-step job.
+    timeout-minutes: 10
     permissions:
       issues: write
     steps:
@@ -191,6 +200,10 @@ jobs:
     # macOS-capable; the PR-time narrowing is done with `exclude`.
     needs: validate-merge-train-dispatch
     runs-on: ${{ matrix.os }}
+    # refs #3123: bounds a hang against GitHub's 360-min default.
+    # Measured max leg over last 10 successful master runs (220 matrix legs):
+    # 60s; timeout = floor of 10 min.
+    timeout-minutes: 10
     permissions:
       contents: read
     strategy:
@@ -321,6 +334,10 @@ jobs:
     # macOS-capable; the PR-time narrowing is done with `exclude`.
     needs: validate-merge-train-dispatch
     runs-on: ${{ matrix.os }}
+    # refs #3123: bounds a hang against GitHub's 360-min default.
+    # Measured max leg over last 10 successful master runs (80 matrix legs):
+    # 51s; timeout = floor of 10 min.
+    timeout-minutes: 10
     permissions:
       contents: read
     strategy:
@@ -498,6 +515,10 @@ jobs:
     # portability sweep; the narrowing is done with `exclude`.
     needs: validate-merge-train-dispatch
     runs-on: ${{ matrix.os }}
+    # refs #3123: bounds a hang against GitHub's 360-min default.
+    # Measured max leg over last 10 successful master runs (40 matrix legs):
+    # 44s; timeout = floor of 10 min.
+    timeout-minutes: 10
     permissions:
       contents: read
     continue-on-error: true
@@ -687,6 +708,10 @@ jobs:
     name: host range · ${{ matrix.pi_host }}
     needs: validate-merge-train-dispatch
     runs-on: ubuntu-latest
+    # refs #3123: bounds a hang against GitHub's 360-min default.
+    # Measured max leg over last 10 successful master runs (20 matrix legs):
+    # 59s; timeout = floor of 10 min.
+    timeout-minutes: 10
     permissions:
       contents: read
       actions: read # read master's last install-smoke run to classify drift
@@ -871,6 +896,10 @@ jobs:
     name: host latest nightly (advisory)
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
+    # refs #3123: bounds a hang against GitHub's 360-min default.
+    # Only 1 successful master run in the window; measured 40s; timeout = floor
+    # of 10 min.
+    timeout-minutes: 10
     permissions:
       contents: read
       issues: write # file/refresh/close the drift tracking issue
