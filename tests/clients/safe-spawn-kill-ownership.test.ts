@@ -223,7 +223,7 @@ describe("kill-by-pid ownership (#2042)", () => {
 	);
 
 	posixOnly(
-		"stopLSP's POSIX group kill refuses a pid the process does not own",
+		"killProcessTree's POSIX group kill refuses a pid the process does not own",
 		async () => {
 			const foreignPid = process.ppid;
 			const proc = new FakeChild(foreignPid);
