@@ -326,6 +326,19 @@ export const PROJECT_NON_FLAG_CONFIG_SECTIONS: readonly string[] = [
 	"trivy",
 	"helm",
 	"startup",
+	// `tools` is MIXED-SCOPE, and belongs here for the project-scoped half
+	// (#3112). `tools.<name>.enabled` is not a registry flag at all: it is
+	// hand-parsed by `readToolConfig` against `TOOL_REGISTRY` in BOTH loaders,
+	// and `resolveLensToolEnabled` reads the project document's value ahead of
+	// the global one — which is what `docs/settings.md` and
+	// `docs/globalconfig.md` document. Deriving the project-accepted sections
+	// from the flag registry alone therefore put the whole section in
+	// `globalScopeOnlyKeys` (its only registry flag, `tools.lazy`, IS global)
+	// and told every user of a documented per-tool override that it was being
+	// ignored. The global-only half is not lost: `tools.lazy` is still reported
+	// at project scope by the project loader's mixed-scope sub-key scan, which
+	// derives WHICH sub-keys those are from this same registry.
+	"tools",
 ];
 
 /**
@@ -436,6 +449,25 @@ function resolveFlagConfigPath(
 	const finalSource = asConfigObject(source);
 	if (!finalSource) return undefined;
 	return { source: finalSource, segments };
+}
+
+/**
+ * Whether a parsed config document actually SETS the dotted `configKey` —
+ * presence, not validity (#3112). The project loader's mixed-scope scan must
+ * report `tools: { lazy: "yes" }` exactly as it reports `tools: { lazy: false }`:
+ * the user wrote a global-only setting in a project file either way, and
+ * {@link readFlagConfigValue} would return `undefined` for the malformed one and
+ * silently skip it. Shares {@link resolveFlagConfigPath} with every other reader
+ * so "which segments does this key name" is answered in exactly one place.
+ */
+export function hasFlagConfigPath(
+	raw: Record<string, unknown>,
+	configKey: string,
+): boolean {
+	const resolved = resolveFlagConfigPath(raw, configKey);
+	if (!resolved) return false;
+	const leaf = resolved.segments.at(-1);
+	return leaf !== undefined && leaf in resolved.source;
 }
 
 /**

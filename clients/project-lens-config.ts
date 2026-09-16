@@ -70,6 +70,7 @@ import {
 	assignFlagConfigSection,
 	flagConfigSectionKeys,
 	GLOBAL_NON_FLAG_CONFIG_SECTIONS,
+	hasFlagConfigPath,
 	LENS_FLAGS,
 	type LensFlagSpec,
 	PROJECT_FOREIGN_CONFIG_NAMESPACES,
@@ -1028,6 +1029,35 @@ function parseConfigFile(configPath: string): ParsedConfigFile {
 				),
 			);
 		}
+	}
+
+	// MIXED-SCOPE SECTIONS (#3112). A section can be project-scoped as a whole
+	// and still hold a `scope: "global"` flag: `tools` carries the project-owned
+	// per-tool `enabled` leaves AND the global `tools.lazy` (`--no-lazy-tools`),
+	// the same split `lsp` has (#2426 review round 2, F3). The top-level scan
+	// above sees only the SECTION name, so before #3112 a global-only flag
+	// written inside a recognized project section was dropped with no signal at
+	// all — the thing `docs/configuration.md` promises never happens.
+	//
+	// WHICH sub-keys those are is DERIVED from the flag registry, never listed
+	// here, so there is no second scope table to drift from the first. A key
+	// whose SECTION is not recognized at project scope is skipped: the top-level
+	// scan already reported that whole section, and a second notice naming the
+	// same setting twice under two spellings is the duplicate-notice noise #2426
+	// review round 6 removed. Everything else under a recognized section is left
+	// to that section's own parser — `readToolConfig` reports an unknown tool
+	// name under its own code (`PILENS_CFG_0009`).
+	//
+	// An enumerated-honored-keys namespace (`lsp`) needs no skip here: the loop
+	// above reports the very same dotted key with the very same reason, and
+	// `warnIgnoredConfigOnce`'s latch collapses the two into one notice. A skip
+	// for it was written and then deleted — mutating it out changed no output.
+	for (const configKey of globalScopeOnlyFlagKeys) {
+		const dotIndex = configKey.indexOf(".");
+		if (dotIndex < 0) continue;
+		if (!knownProjectKeys.has(configKey.slice(0, dotIndex))) continue;
+		if (!hasFlagConfigPath(obj, configKey)) continue;
+		warnUnhonoredKey(configKey, true);
 	}
 
 	return {

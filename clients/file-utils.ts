@@ -359,6 +359,14 @@ export const EXCLUDED_DIRS = [
 	".next",
 	".pi-lens",
 	".pi", // pi agent directory
+	// The SAME agent, rebranded: pi derives its config-dir name as
+	// `pkg.piConfig?.configDir || ".pi"` (pi-coding-agent 0.85.1,
+	// `dist/bundle/chunks/chunk-JVUZSMYM.js`), so a redistribution spells its
+	// `<configDir>/agent/sessions` history `.omp/agent/sessions` instead.
+	// #3112: a project-local one was walked entry-by-entry and spent the whole
+	// startup-scan entry budget, so a five-file project reported
+	// `too-many-entries` and never warmed its caches.
+	".omp",
 	".ruff_cache", // Python linter cache
 	".worktrees",
 	".claude",
