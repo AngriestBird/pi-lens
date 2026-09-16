@@ -146,6 +146,8 @@ const SPAWN_EXEMPTIONS: Readonly<Record<string, string>> = {
 		"real wedged child and CPU sampling run in the serialized wall-clock-budget phase; the lower-bound wedge assertion needs that quiet phase",
 	"tests/clients/lsp/headless-tool-call-keepalive.test.ts":
 		"#2507: the real LSP child is spawned by a headless NODE child this test runs, not by this process; it is phased in the serialized wall-clock-budget lane (the flake-shape admission gate requires that lane), and its assertions are the child's exit code and stdout, not a handshake budget",
+	"tests/clients/lsp/kill-process-tree-real-child.test.ts":
+		"#2042/#3091: the real child is `/bin/sh` launched through `launchLSP` purely to obtain a pid whose `/proc` PPid is this process — there is no language server, no handshake and no diagnostics wait to starve; the leader is killed within milliseconds and the assertions read which signal `killProcessTree` issued. It is already phased in the serialized wall-clock-budget lane, which the flake-shape admission gate requires, and a file cannot sit in both lanes without running twice (same shape as the two entries above).",
 	"tests/clients/lsp/initialize-timeout-backstop.test.ts":
 		"POSIX-only real-child initialize-timeout backstop; waits on a 50ms timeout firing then sleeps past kill escalation — deterministic and short",
 	"tests/clients/lsp/launch.test.ts":

@@ -22,7 +22,7 @@ import {
 } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { BoundedFifoMap } from "./bounded-cache.js";
+import { BoundedFifoMap, BoundedSet } from "./bounded-cache.js";
 import { logLatency } from "./latency-logger.js";
 import {
 	incrementDegradationCount,
@@ -466,15 +466,16 @@ const verifiedOwnPids = new BoundedFifoMap<number, true>(VERIFIED_OWN_PID_CAP);
  * below for the paths that never reach a ladder (a server that crashes, or a
  * host killed mid-session).
  *
- * The bound that remains, stated rather than implied: one entry per LIVE LSP
- * child, plus at most `HELD_OWN_PID_SWEEP_AT` entries whose group has not yet
- * been confirmed dead. A crash-looping server cannot grow it without bound
+ * The bound that remains, stated rather than implied: at most
+ * `HELD_OWN_PID_SWEEP_AT` entries — the confirmed-dead sweep below runs before
+ * every insert, and `BoundedSet`'s own FIFO overflow is the last resort for the
+ * case where every held group really is still alive. A crash-looping server cannot grow it without bound
  * because each sweep drops every pid whose process GROUP no longer exists,
  * which is exactly the condition under which the entry can never be needed
  * again.
  */
 const HELD_OWN_PID_SWEEP_AT = 256;
-const heldOwnPids = new Set<number>();
+const heldOwnPids = new BoundedSet<number>(HELD_OWN_PID_SWEEP_AT);
 
 /** A process group that no longer exists can never need another signal. */
 function groupIsGone(pid: number): boolean {
@@ -493,12 +494,9 @@ function sweepHeldOwnPids(): void {
 	for (const pid of heldOwnPids) {
 		if (groupIsGone(pid)) heldOwnPids.delete(pid);
 	}
-	// Last resort if every held group is still alive: drop the oldest, which is
-	// the only entry whose owner has had the longest chance to release it.
-	if (heldOwnPids.size >= HELD_OWN_PID_SWEEP_AT) {
-		const oldest = heldOwnPids.values().next().value;
-		if (oldest !== undefined) heldOwnPids.delete(oldest);
-	}
+	// No hand-rolled "drop the oldest" block (#2442 / #3091 round 4): the
+	// last-resort eviction, for the case where every held group is still alive
+	// at the ceiling, is `BoundedSet.add`'s own FIFO overflow.
 }
 
 /**
