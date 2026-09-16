@@ -592,8 +592,8 @@ export class RuntimeCoordinator {
 		}
 		this._mutationReceipts.push({
 			seq: projectSeq,
-			// Reuse the bump's normalized key (~200us realpath on Windows) —
-			// never re-derive it here.
+			// Reuse the bump's normalized key (a realpath syscall: ~200us on
+			// Windows, ~1.8us on POSIX since #3098) — never re-derive it here.
 			filePath: key,
 			source: args.source,
 			turnIndex: this._turnIndex,
@@ -793,8 +793,9 @@ export class RuntimeCoordinator {
 		/** The normalized key the bump was recorded under — reuse, never re-derive. */
 		key: string;
 	} {
-		// normalizeMapKey costs ~200us/call on Windows (realpath); every caller
-		// that also needs the key must reuse this one instead of paying it twice.
+		// normalizeMapKey costs a realpath syscall per call — ~200us on Windows,
+		// ~1.8us on POSIX since #3098; every caller that also needs the key must
+		// reuse this one instead of paying it twice.
 		const key = normalizeMapKey(path.resolve(filePath));
 		this._projectSeq += 1;
 		const fileSeq = (this._fileSeq.get(key) ?? 0) + 1;

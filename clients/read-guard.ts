@@ -553,13 +553,16 @@ export class ReadGuard {
 	private readonly unchangedThisSession = new Set<string>();
 	// Existence-independent index for hasKnownPath/forgetPath (#1668 review
 	// F1). `this.key()` (normalizeFilePath) branches on whether `filePath`
-	// currently exists on disk: an existing file resolves to realpathSync
-	// canonical casing, a missing one to a lowercased tail. recordRead/
-	// recordWritten always key while the file is still on disk (real
-	// casing); hasKnownPath/forgetPath are queried AFTER an external delete
-	// already landed, when the path no longer exists — recomputing
+	// currently exists on disk, on EVERY platform since #3098 — an existing
+	// file resolves to its on-disk casing (win32: `realpathSync.native`;
+	// POSIX: the on-disk casing of the trailing segments), a missing one to a
+	// lowercased tail on win32 and to the caller's own spelling on POSIX.
+	// recordRead/recordWritten always key while the file is still on disk
+	// (real casing); hasKnownPath/forgetPath are queried AFTER an external
+	// delete already landed, when the path no longer exists — recomputing
 	// `this.key()` at that point returns a DIFFERENT string for any
-	// mixed-case basename (`MyModule.ts` → `mymodule.ts`), so a lookup
+	// mixed-case basename (win32 `MyModule.ts` → `mymodule.ts`; POSIX
+	// `Components/x.ts` held against an on-disk `components/`), so a lookup
 	// against `reads`/`writtenThisSession` silently misses. This index maps
 	// a purely syntactic key (`normalizeEphemeralMapKey` — slash-fold +
 	// lowercase, no filesystem access, so it never depends on current disk
@@ -567,6 +570,13 @@ export class ReadGuard {
 	// time, so a post-delete lookup finds the same entry regardless of what
 	// happened to the file since. Pruned inside `evictFile` so it never
 	// outlives the record it points at.
+	//
+	// ONLY hasKnownPath/forgetPath route through this index. `noteCreatedFile`
+	// (keys while the file is still absent) and `recordWritten` (keys after it
+	// exists) straddle the same state change through `this.key()` directly, so
+	// a mis-cased spelling orphans the `pendingCreations` entry and the
+	// creation read is never injected — pre-existing on win32, reachable on
+	// POSIX since #3098, filed with its table as #3163.
 	private readonly knownPathIndex = new Map<string, string>();
 	/** Running per-file record-cap trim totals for this session (#1913 F1). */
 	private readonly trimAccumulators = new Map<string, FileTrimStats>();
