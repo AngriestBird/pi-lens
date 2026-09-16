@@ -135,6 +135,14 @@ function hasLiveFrame(stack: TemplateFrame[]): boolean {
  * everything up to their own unescaped terminator, taking a backtick inside
  * them out of consideration the same way; a block comment skips everything,
  * backticks included, up to its own `*\/`, possibly spanning lines).
+ *
+ * Known gap: a regex literal has no state here, so a backtick inside one
+ * (`` /`foo/ ``) is indistinguishable from a real opener — the same caveat
+ * `opensBlockComment` already concedes for `/*`. An even count across a
+ * file can mask code between two such regexes without tripping the
+ * opener-never-closes fail-safe; tracked as #3120 rather than fixed here (a
+ * first-pass regex-opener heuristic over-declined the corpus 54 files vs 5
+ * for a real fix elsewhere in this lexer).
  */
 function advanceTemplateState(line: string, stack: TemplateFrame[]): void {
 	let j = 0;
