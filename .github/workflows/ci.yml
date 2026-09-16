@@ -19,6 +19,10 @@ jobs:
   validate-merge-train-dispatch:
     name: Validate merge-train dispatch
     runs-on: ubuntu-latest
+    # refs #3123: bounds a hang against GitHub's 360-min default.
+    # Measured max over last 10 successful master runs: 9s; timeout = floor of
+    # 10 min.
+    timeout-minutes: 10
     permissions:
       contents: read
     steps:
@@ -42,6 +46,10 @@ jobs:
     name: Dependency boundaries
     needs: validate-merge-train-dispatch
     runs-on: ubuntu-latest
+    # refs #3123: bounds a hang against GitHub's 360-min default.
+    # Measured max over last 10 successful master runs: 23s; timeout = floor of
+    # 10 min.
+    timeout-minutes: 10
     permissions:
       contents: read
 
@@ -97,6 +105,10 @@ jobs:
     needs: validate-merge-train-dispatch
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    # refs #3123: bounds a hang against GitHub's 360-min default. This job runs
+    # on pull_request so --branch master matched no runs; measured max over 6
+    # successful runs regardless of branch: 10s; timeout = floor of 10 min.
+    timeout-minutes: 10
     permissions:
       contents: read
     steps:
@@ -134,6 +146,10 @@ jobs:
     name: Lint & type-check
     needs: validate-merge-train-dispatch
     runs-on: ubuntu-latest
+    # refs #3123: bounds a hang against GitHub's 360-min default.
+    # Measured max over last 10 successful master runs: 32s; timeout = floor of
+    # 10 min.
+    timeout-minutes: 10
     permissions:
       contents: read
 
@@ -517,6 +533,10 @@ jobs:
     name: Production install build (--omit=dev, from source)
     needs: validate-merge-train-dispatch
     runs-on: ubuntu-latest
+    # refs #3123: bounds a hang against GitHub's 360-min default.
+    # Measured max over last 10 successful master runs: 72s; timeout = floor of
+    # 10 min.
+    timeout-minutes: 10
     permissions:
       contents: read
 
@@ -720,6 +740,12 @@ jobs:
     needs:
       [validate-merge-train-dispatch, dependency-boundaries, lint-and-typecheck, test, prod-install-build, install-test]
     runs-on: ubuntu-latest
+    # refs #3123: bounds a hang against GitHub's 360-min default.
+    # No successful run found (job requires github.event_name ==
+    # 'repository_dispatch'; 0 repository_dispatch-triggered runs of this
+    # workflow exist in the last 300 runs) -- defaulted to the floor of 10 min
+    # for this single-step job.
+    timeout-minutes: 10
     permissions:
       issues: write
     steps:
@@ -757,6 +783,10 @@ jobs:
   install-test:
     name: Install test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    # refs #3123: bounds a hang against GitHub's 360-min default.
+    # Measured max leg over last 10 successful master runs (30 matrix legs,
+    # windows-latest slowest): 272s (4m32s); sized at ~2x + margin.
+    timeout-minutes: 15
     needs: [validate-merge-train-dispatch, lint-and-typecheck, test]
     permissions:
       contents: read

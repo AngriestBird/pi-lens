@@ -22,6 +22,11 @@ jobs:
       github.event.action == 'synchronize' &&
       github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
+    # refs #3123: bounds a hang against GitHub's 360-min default. This job
+    # requires a pull_request synchronize event so --branch master matched
+    # none; measured max over the last 9 successful runs regardless of branch:
+    # 8s; timeout = floor of 10 min.
+    timeout-minutes: 10
     permissions:
       pull-requests: write
     env:
@@ -116,6 +121,10 @@ jobs:
       github.event.workflow_run.conclusion == 'failure' &&
       github.event.workflow_run.run_attempt <= 2
     runs-on: ubuntu-latest
+    # refs #3123: bounds a hang against GitHub's 360-min default.
+    # Measured max over last 10 successful master runs: 15s; timeout = floor of
+    # 10 min.
+    timeout-minutes: 10
     permissions:
       actions: write
       contents: read
@@ -182,6 +191,12 @@ jobs:
       ) &&
       (github.event.workflow_run.conclusion == 'failure' || github.event.workflow_run.conclusion == 'success')
     runs-on: ubuntu-latest
+    # refs #3123: bounds a hang against GitHub's 360-min default. This job only
+    # runs on a CI-infra-kill rerun (run_attempt 2 or 3); no successful run
+    # found across the last 300 runs of this workflow -- defaulted to the floor
+    # of 10 min, matching sibling jobs classify/clear-stale-verdict-labels
+    # (5-15s) in the same workflow.
+    timeout-minutes: 10
     permissions:
       pull-requests: write
     env:

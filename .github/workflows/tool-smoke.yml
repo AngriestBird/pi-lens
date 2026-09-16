@@ -25,6 +25,10 @@ jobs:
   tool-smoke:
     name: Live tool + LSP smoke
     runs-on: ubuntu-latest
+    # refs #3123: bounds a hang against GitHub's 360-min default.
+    # Measured max over last 10 successful master runs: 855s (14m15s); sized at
+    # ~2x + margin.
+    timeout-minutes: 35
     permissions:
       contents: write # commit-back branch for the LSP-docs refresh PR (#390)
       pull-requests: write # open/update the auto-refresh PR (#390)
