@@ -163,7 +163,9 @@ describe("ReadGuard path-key normalization (zero_read false-block regression)", 
  * rather than reporting a PASS (#2089).
  */
 function tmpdirFoldsCase(): boolean {
-	const probeDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-case-probe-"));
+	const probeDir = fs.mkdtempSync(
+		path.join(os.tmpdir(), "pi-lens-case-probe-"),
+	);
 	try {
 		fs.writeFileSync(path.join(probeDir, "probe.tmp"), "");
 		return fs.existsSync(path.join(probeDir, "PROBE.TMP"));
@@ -262,7 +264,9 @@ describe("ReadGuard pendingCreations key (#3163 existence-straddle)", () => {
 	it.skipIf(TMPDIR_FOLDS_CASE)(
 		"keeps the just-created file editable across an idle window when mtime is unreliable",
 		() => {
-			const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-rg-3163b-"));
+			const tmpDir = fs.mkdtempSync(
+				path.join(os.tmpdir(), "pi-lens-rg-3163b-"),
+			);
 			const previousIdle = process.env.PI_LENS_READ_GUARD_IDLE_EVICT_MS;
 			process.env.PI_LENS_READ_GUARD_IDLE_EVICT_MS = "1000";
 			vi.useFakeTimers();
@@ -302,7 +306,9 @@ describe("ReadGuard pendingCreations key (#3163 existence-straddle)", () => {
 	it.skipIf(TMPDIR_FOLDS_CASE)(
 		"injects the creation read when the announced file already existed",
 		() => {
-			const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-rg-3163c-"));
+			const tmpDir = fs.mkdtempSync(
+				path.join(os.tmpdir(), "pi-lens-rg-3163c-"),
+			);
 			try {
 				const held = makeCaseVariantPackage(tmpDir);
 				fs.writeFileSync(held, "export const i = 0;\n");
@@ -322,18 +328,20 @@ describe("ReadGuard pendingCreations key (#3163 existence-straddle)", () => {
 		},
 	);
 
-	// lane: windows-vitest (advisory). The win32 arm is broader than the POSIX
-	// one and needs no symlink: `resolveNonExisting` lower-cases the tail of any
-	// path that does not exist yet, so EVERY newly created file with an
-	// upper-case letter in its basename (`Button.tsx`, `NewModule.ts`) stored a
-	// key `realpathSync.native` no longer produces once the file lands. Not
-	// expressible on the ubuntu lane: a win32-shaped path can never EXIST on
-	// Linux, so both sides of the straddle take the absent branch there and the
-	// divergence this guards cannot be produced.
+	// The win32 arm is broader than the POSIX one and needs no symlink:
+	// `resolveNonExisting` lower-cases the tail of any path that does not exist
+	// yet, so EVERY newly created file with an upper-case letter in its basename
+	// (`Button.tsx`, `NewModule.ts`) stored a key `realpathSync.native` no
+	// longer produces once the file lands. Not expressible on the ubuntu lane: a
+	// win32-shaped path can never EXIST on Linux, so both sides of the straddle
+	// take the absent branch there and the divergence cannot be produced at all.
+	// lane: windows-vitest
 	it.skipIf(process.platform !== "win32")(
 		"injects the creation read for a mixed-case basename on win32",
 		() => {
-			const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-rg-3163w-"));
+			const tmpDir = fs.mkdtempSync(
+				path.join(os.tmpdir(), "pi-lens-rg-3163w-"),
+			);
 			try {
 				fs.mkdirSync(path.join(tmpDir, "src"));
 				const held = path.join(tmpDir, "src", "NewModule.ts");
