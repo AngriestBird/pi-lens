@@ -115,9 +115,7 @@ describe("kill-by-pid ownership (#2042)", () => {
 			// Best-effort stays best-effort where ownership is unverifiable...
 			expect(isOwnLiveChild(process.ppid, "test")).toBe(true);
 			// ...but a handle that already reported exit is proof it is dead.
-			expect(isOwnLiveChild(process.ppid, "test", { exitCode: 0 })).toBe(
-				false,
-			);
+			expect(isOwnLiveChild(process.ppid, "test", { exitCode: 0 })).toBe(false);
 			expect(
 				isOwnLiveChild(process.ppid, "test", { signalCode: "SIGTERM" }),
 			).toBe(false);
