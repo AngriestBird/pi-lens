@@ -17,6 +17,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { createReadGuard, type ReadRecord } from "../../clients/read-guard.js";
+import { logReadGuardEvent } from "../../clients/read-guard-logger.js";
 
 vi.mock("../../clients/read-guard-logger.js", () => ({
 	logReadGuardEvent: vi.fn(),
@@ -244,6 +245,17 @@ describe("ReadGuard pendingCreations key (#3163 existence-straddle)", () => {
 				expect(history[0].effectiveLimit).toBe(authored.split("\n").length);
 				expect(history[0].turnIndex).toBe(7);
 				expect(history[0].writeIndex).toBe(3);
+				// The injected read is also the observable one: read-guard.log gets
+				// the `read_recorded` row (clients/read-guard.ts:788) carrying the
+				// announced turn/write index, which is what a session read back
+				// from the log lacked entirely while the entry was orphaned.
+				expect(logReadGuardEvent).toHaveBeenCalledWith(
+					expect.objectContaining({
+						event: "read_recorded",
+						filePath: expect.stringContaining("i.ts"),
+						metadata: expect.objectContaining({ turnIndex: 7, writeIndex: 3 }),
+					}),
+				);
 			} finally {
 				fs.rmSync(tmpDir, { recursive: true, force: true, maxRetries: 5 });
 			}
