@@ -11,6 +11,7 @@ import { fileURLToPath } from "node:url";
 import {
 	claimScratchDir,
 	SCRATCH_DIR_ROOT,
+	SWEEP_ANY_AGE,
 	sweepScratchDirs,
 } from "../../scripts/lib/scratch-dir.mjs";
 
@@ -139,7 +140,7 @@ function startRealPi(
 	projectOverride?: string,
 ) {
 	const scratchRoot = homeOverride ?? SCRATCH_DIR_ROOT;
-	sweepScratchDirs(scratchRoot, "real-pi-", { maxAgeMs: 0 });
+	sweepScratchDirs(scratchRoot, "real-pi-", { maxAgeMs: SWEEP_ANY_AGE });
 	const project = projectOverride ?? createRealPiProject(scenario, scratchRoot);
 	const home = homeOverride ?? claimScratchDir(scratchRoot, "real-pi-home");
 	const providerLog = path.join(home, "provider.jsonl");

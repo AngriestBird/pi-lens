@@ -1,0 +1,5 @@
+---
+section: Fixed
+---
+
+- **Governance sweeps no longer race a scratch test file written into `tests/` (closes #3082, closes #3092)** — the `#3050` registry-isolation detector's red-first proof wrote a real `tests/scratch-3050-pre-3048-vanished-wiring.test.ts` into the repo's own test tree for the length of one assertion, so any sibling sweep that was mid-enumeration died with `ENOENT` on a file that exists on no branch (`sweep-floor-coverage`, `vacuous-skip-coverage`, `latency-logger-mock-shape` and `lsp-spawn-heavy-coverage` took the hit on rotating runs). The proof now walks a private `mkdtemp` root through the same walker and options; every walk-then-read over the `tests/` tree goes through sweep-kit's new `readWalkedFile`, which drops a path that vanished between the walk and the read, records it once, and never counts it as a finding; and a recursive-watch guard installed from `globalSetup` (once per activated Vitest project, not per test-file fork) fails the run, naming the path, if any test creates a source file inside `tests/` again.

@@ -16,16 +16,37 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	auditRegistry,
 	assertNonEmptyScan,
 	escapeRegExp,
 	listSourceFiles,
+	readWalkedFiles,
 	relativePosix,
 	stripSource,
 } from "../support/sweep-kit.js";
 import { removeTempDirSync } from "./test-utils.js";
+
+import { EventEmitter } from "node:events";
+import { waitFor } from "./interleaving-kit.js";
+import { createPiMock, makeCtx } from "../support/pi-mock.js";
+import { makeSessionStartEvent } from "../support/host-event-factory.js";
+
+vi.mock("node:child_process", async (importOriginal) => ({
+	...(await importOriginal<typeof import("node:child_process")>()),
+	spawn: () => {
+		const child = new EventEmitter();
+		const stdout = Object.assign(new EventEmitter(), { unref() {} });
+		queueMicrotask(() => child.emit("close", 0, null));
+		return Object.assign(child, { stdout, stderr: null, unref() {} });
+	},
+}));
+
+import extension from "../../index.js";
+import { _resetSessionLifecycleForTests } from "../../clients/session-lifecycle.js";
+
+const sharedHome = process.env.PI_LENS_HOME!;
 
 const realGlobalDir = path.join(os.homedir(), ".pi-lens");
 const realRegistryPath = path.join(realGlobalDir, "instances.json");
@@ -42,7 +63,7 @@ describe("machine-global writers route through PI_LENS_HOME, never the real home
 
 	afterEach(() => {
 		removeTempDirSync(overrideDir);
-		delete process.env.PI_LENS_HOME;
+		process.env.PI_LENS_HOME = sharedHome;
 	});
 
 	it("getGlobalPiLensDir resolves to PI_LENS_HOME", async () => {
@@ -564,10 +585,20 @@ describe("clients/ hazardous exported registry symbols stay derived, not guessed
 	});
 });
 
+/** The walk options the registry-isolation population is built with. Shared
+ *  with the red-first proof below so that proof exercises the SAME walk — same
+ *  function, same options — over its own private root (#3082). */
+const REGISTRY_WALK_OPTIONS = { skipDeclarations: true } as const;
+
+/** Every `tests/**​/*.test.ts` file under `root`, absolute and sorted. */
+function walkTestFiles(root: string): string[] {
+	return listSourceFiles(root, REGISTRY_WALK_OPTIONS).filter((file) =>
+		file.endsWith(".test.ts"),
+	);
+}
+
 /** Every `tests/**​/*.test.ts` file, repo-relative to `TESTS_ROOT`. */
-const testFiles = listSourceFiles(TESTS_ROOT, {
-	skipDeclarations: true,
-}).filter((file) => file.endsWith(".test.ts"));
+const testFiles = walkTestFiles(TESTS_ROOT);
 
 /** The literal target filenames the two registered producers write — the
  *  raw-`fs` idiom `tests/index-vanished-instance-wiring.test.ts` and
@@ -807,10 +838,12 @@ const PRE_3048_VANISHED_WIRING_CONTENT = fs.readFileSync(
 );
 
 describe("no tests/**/*.test.ts file drives a producer's registry against the run-shared PI_LENS_HOME (#3042 recurrence)", () => {
-	function scanFlagged(files: readonly string[] = testFiles): string[] {
+	function scanFlagged(
+		files: readonly string[] = testFiles,
+		root: string = TESTS_ROOT,
+	): string[] {
 		const flagged: string[] = [];
-		for (const file of files) {
-			const source = fs.readFileSync(file, "utf8");
+		for (const { file, source } of readWalkedFiles(files)) {
 			const commentsBlankedStringsKept = stripSource(source, {
 				strings: "keep",
 			});
@@ -828,7 +861,7 @@ describe("no tests/**/*.test.ts file drives a producer's registry against the ru
 				)
 			)
 				continue;
-			flagged.push(relativePosix(TESTS_ROOT, file));
+			flagged.push(relativePosix(root, file));
 		}
 		return flagged;
 	}
@@ -857,35 +890,48 @@ describe("no tests/**/*.test.ts file drives a producer's registry against the ru
 		expect(audit.problems).toEqual([]);
 	});
 
-	it("red-first proof: the FULL scan catches the pre-#3048 shape (temporary scratch copy under tests/, removed after)", () => {
+	it("red-first proof: the same walk catches the pre-#3048 shape (scratch copy in a private root, never under tests/)", () => {
 		// #3042's own recurrence is fixed on master now, so this proves the
 		// detector against its real, historical, pre-fix content instead of a
-		// hand-shaped stand-in — placed under tests/ so `listSourceFiles` walks
-		// it exactly like any other file, then removed so it never lingers.
-		const scratchPath = path.join(
-			TESTS_ROOT,
-			"scratch-3050-pre-3048-vanished-wiring.test.ts",
+		// hand-shaped stand-in.
+		//
+		// The copy lives in a PRIVATE root, not under tests/ (#3082). Writing it
+		// into the repo's own test tree — which the first version of this proof
+		// did, to be walked "exactly like any other file" — made every sibling
+		// governance sweep that lists tests/** and then reads each path die with
+		// ENOENT whenever it was mid-enumeration during the ~1 ms the scratch
+		// file existed: four different suites took the hit on rotating runs
+		// (#3082/#3092). The walk is what is under proof, and the walk does not
+		// care which root it is given: `walkTestFiles` is the SAME function with
+		// the SAME options the production population above is built from, so the
+		// claim ("the full `listSourceFiles` walk reaches this file and
+		// `scanFlagged` flags it") survives intact, without driving shared state
+		// this test does not own.
+		const scratchRoot = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-3082-registry-scratch-"),
 		);
+		const scratchName = "scratch-3050-pre-3048-vanished-wiring.test.ts";
+		// A nested directory, so the walk has to recurse to reach it exactly as
+		// it recurses into tests/clients/ for the real population.
+		const scratchDir = path.join(scratchRoot, "clients");
+		fs.mkdirSync(scratchDir, { recursive: true });
+		const scratchPath = path.join(scratchDir, scratchName);
 		fs.writeFileSync(scratchPath, PRE_3048_VANISHED_WIRING_CONTENT);
 		try {
-			const freshTestFiles = listSourceFiles(TESTS_ROOT, {
-				skipDeclarations: true,
-			}).filter((file) => file.endsWith(".test.ts"));
+			const freshTestFiles = walkTestFiles(scratchRoot);
 			expect(freshTestFiles).toContain(scratchPath);
 
 			const audit = auditRegistry({
 				sweepName: "tests/ registry isolation (pre-#3048 scratch copy)",
-				flagged: scanFlagged(freshTestFiles),
+				flagged: scanFlagged(freshTestFiles, scratchRoot),
 				registered: [],
 				exemptions: REGISTRY_ISOLATION_EXEMPTIONS,
 				minFlagged: 1,
 			});
 			expect(audit.problems.length).toBeGreaterThan(0);
-			expect(audit.unaccounted).toContain(
-				"scratch-3050-pre-3048-vanished-wiring.test.ts",
-			);
+			expect(audit.unaccounted).toContain(`clients/${scratchName}`);
 		} finally {
-			fs.rmSync(scratchPath, { force: true });
+			removeTempDirSync(scratchRoot);
 		}
 	});
 
@@ -963,6 +1009,10 @@ describe("no tests/**/*.test.ts file drives a producer's registry against the ru
 			candidate.endsWith("/index-vanished-instance-wiring.test.ts"),
 		);
 		expect(file, "fixture moved or renamed").toBeDefined();
+		// A REQUIRED, committed fixture, not a population member: read it raw so
+		// its absence is a clean ENOENT naming the path (#3104 review note (a) —
+		// routing it through readWalkedFile turned a missing fixture into a
+		// TypeError inside stripSource, which names nothing).
 		const source = fs.readFileSync(file as string, "utf8");
 		const commentsBlankedStringsKept = stripSource(source, { strings: "keep" });
 		const stringsBlankedCode = stripSource(source, { strings: "blank" });
@@ -1132,5 +1182,153 @@ describe("no tests/**/*.test.ts file drives a producer's registry against the ru
 			findMockCallText(commentsBlankedStringsKept, "file-utils.js") ?? "";
 		const naiveFallsThrough = /\bactual\.getGlobalPiLensDir\b/.test(callText);
 		expect(naiveFallsThrough).toBe(false);
+	});
+});
+
+// #3083, master red 038e28b: the existing source detector cannot see
+// writers reached transitively through index.js. Exercise the real handler,
+// scheduler, registry, lock and disk with only the clock and OS child mocked.
+describe("transitive session_start backstop isolation", () => {
+	// The 30-minute cooldown stamp is real, and both cases share one private
+	// directory, so without this the second sweep takes the cooldown branch,
+	// writes nothing, and the case reads the FIRST case's stamp — measured, and
+	// the reason each case dates its stamp against its own start time below.
+	// Clear the stamps (never plant one) so each case observes its OWN write.
+	// The run-shared root is cleared for the same reason: each case must red on
+	// the state it produced, not on a neighbour's.
+	//
+	// Scoped to THIS run's directories, the same prefix the harness sweep uses
+	// (PR #3100 round 3 F2). `backstop-` alone also deleted a concurrent sibling
+	// invocation's live cooldown stamp — production writes it once per run, so
+	// the sibling never recovered it and its own case then hung until
+	// `waitFor exhausted after 10000ms`, reproduced by the reviewer in 1 of 3
+	// concurrent pairs and deterministically with an external deleter.
+	const ownBackstopPrefix = `backstop-${process.env.PI_LENS_TMP_HYGIENE_RUN_ID}-`;
+
+	function clearOwnBackstopStamps(): void {
+		for (const name of fs.readdirSync(sharedHome))
+			if (name.startsWith(ownBackstopPrefix))
+				fs.rmSync(path.join(sharedHome, name, "orphan-backstop.json"), {
+					force: true,
+				});
+		fs.rmSync(path.join(sharedHome, "orphan-backstop.json"), { force: true });
+	}
+
+	beforeEach(clearOwnBackstopStamps);
+
+	afterEach(() => {
+		vi.clearAllTimers();
+		vi.useRealTimers();
+		vi.restoreAllMocks();
+		vi.unstubAllEnvs();
+		_resetSessionLifecycleForTests();
+	});
+
+	/** Drive the real host handler to a settled backstop sweep, and report the
+	 *  directories production actually chose: every `orphan-backstop.lock`
+	 *  parent it mkdir'd, and the stamp beside the first of them. */
+	async function driveSessionStartSweep(): Promise<{
+		lockPaths: string[];
+		stamp: string;
+		startedAt: number;
+	}> {
+		// Real wall clock: only setTimeout/clearTimeout are faked below, so this
+		// dates the stamp THIS call produces apart from any earlier case's.
+		const startedAt = Date.now();
+		_resetSessionLifecycleForTests();
+		vi.stubEnv("PI_LENS_STARTUP_MODE", "quick");
+		const mkdir = vi.spyOn(fs.promises, "mkdir");
+		const pi = createPiMock();
+		extension(pi.asExtensionAPI());
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+		await pi.emit(
+			"session_start",
+			makeSessionStartEvent(),
+			makeCtx({ cwd: process.cwd() }),
+		);
+		await vi.advanceTimersByTimeAsync(30_000);
+		const lockPaths = () =>
+			mkdir.mock.calls
+				.map(([dir]) => String(dir))
+				.filter((dir) => path.basename(dir) === "orphan-backstop.lock");
+		await waitFor(lockPaths, (paths) => paths.length > 0, {
+			yieldControl: () => new Promise((resolve) => setImmediate(resolve)),
+		});
+		const lock = lockPaths()[0];
+		const stamp = path.join(path.dirname(lock), "orphan-backstop.json");
+		await waitFor(() => fs.existsSync(stamp) && !fs.existsSync(lock), Boolean, {
+			yieldControl: () => new Promise((resolve) => setImmediate(resolve)),
+		});
+		return { lockPaths: lockPaths(), stamp, startedAt };
+	}
+
+	it("session_start keeps the backstop stamp and transient lock out of the run-shared home", async () => {
+		const { lockPaths, stamp, startedAt } = await driveSessionStartSweep();
+		expect(
+			JSON.parse(fs.readFileSync(stamp, "utf8")).lastSweepAt,
+		).toBeGreaterThanOrEqual(startedAt);
+		expect(lockPaths).not.toContain(
+			path.join(sharedHome, "orphan-backstop.lock"),
+		);
+		expect(fs.existsSync(path.join(sharedHome, "orphan-backstop.json"))).toBe(
+			false,
+		);
+	}, 30_000);
+
+	// PR #3100 review F1, reproduced: a SYMLINK alias of the run-shared home in
+	// PI_LENS_HOME is a different string but the same directory. A string
+	// compare in the harness read it as a separate explicit home, so the real
+	// stamp and the real lock landed at the shared root through the link.
+	it("session_start keeps backstop state out of a symlink alias of the run-shared home", async () => {
+		const alias = path.join(sharedHome, `alias-${process.pid}`);
+		fs.rmSync(alias, { force: true });
+		fs.symlinkSync(sharedHome, alias, "dir");
+		try {
+			vi.stubEnv("PI_LENS_HOME", alias);
+			const { lockPaths, stamp, startedAt } = await driveSessionStartSweep();
+			expect(
+				JSON.parse(fs.readFileSync(stamp, "utf8")).lastSweepAt,
+			).toBeGreaterThanOrEqual(startedAt);
+			expect(lockPaths).not.toContain(path.join(alias, "orphan-backstop.lock"));
+			expect(lockPaths).not.toContain(
+				path.join(sharedHome, "orphan-backstop.lock"),
+			);
+			expect(fs.existsSync(path.join(sharedHome, "orphan-backstop.json"))).toBe(
+				false,
+			);
+		} finally {
+			fs.rmSync(alias, { force: true });
+		}
+	}, 30_000);
+
+	// PR #3100 round 3 F2, reproduced: this file's own per-case stamp clearing
+	// used the bare `backstop-` prefix, so it deleted the LIVE cooldown stamp of
+	// a concurrent vitest invocation sharing this checkout's home. Production
+	// writes that stamp once per run, so the sibling never got it back and its
+	// own settle loop ran out of time. The clearing must see exactly what the
+	// harness sweep sees: this run's directories only.
+	it("per-case stamp clearing spares a concurrent invocation's cooldown stamp", () => {
+		const sibling = path.join(sharedHome, "backstop-0000000000-0-sibling");
+		const own = path.join(
+			sharedHome,
+			`backstop-${process.env.PI_LENS_TMP_HYGIENE_RUN_ID}-clearing-guard`,
+		);
+		for (const dir of [sibling, own]) {
+			fs.mkdirSync(dir, { recursive: true });
+			fs.writeFileSync(
+				path.join(dir, "orphan-backstop.json"),
+				JSON.stringify({ lastSweepAt: 1 }),
+			);
+		}
+		try {
+			clearOwnBackstopStamps();
+			expect(fs.existsSync(path.join(sibling, "orphan-backstop.json"))).toBe(
+				true,
+			);
+			expect(fs.existsSync(path.join(own, "orphan-backstop.json"))).toBe(false);
+		} finally {
+			for (const dir of [sibling, own])
+				fs.rmSync(dir, { recursive: true, force: true });
+		}
 	});
 });

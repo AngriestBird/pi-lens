@@ -1,7 +1,8 @@
-import { spawn } from "node:child_process";
+import { type ChildProcessByStdio, spawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import type { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
@@ -30,11 +31,19 @@ interface Run {
  * folded in here rather than kept as a second, near-duplicate spawn helper
  * (the net-count rule: `runWrapperWithEnv` repeated 18 of this function's 24
  * lines for one added `env` key).
+ *
+ * `onFirstStdoutChunk` (#3097) hands the live child to the caller once the
+ * wrapper has written its first line, which is the only moment at which a test
+ * can kill the READ end of the pipe out from under a wrapper that is already
+ * running. Folded in here for the same net-count reason as `extraEnv`.
  */
 function runWrapper(
 	args: string[],
 	throttleMs = 0,
 	extraEnv: Record<string, string> = {},
+	onFirstStdoutChunk?: (
+		child: ChildProcessByStdio<null, Readable, Readable>,
+	) => void,
 ): Promise<Run> {
 	return new Promise((resolve, reject) => {
 		const child = spawn(process.execPath, [wrapper, ...args], {
@@ -46,8 +55,13 @@ function runWrapper(
 		let stderr = "";
 		child.stdout.setEncoding("utf8");
 		child.stderr.setEncoding("utf8");
+		let sawFirstChunk = false;
 		child.stdout.on("data", (chunk: string) => {
 			stdout += chunk;
+			if (!sawFirstChunk) {
+				sawFirstChunk = true;
+				onFirstStdoutChunk?.(child);
+			}
 			if (throttleMs > 0) {
 				child.stdout.pause();
 				setTimeout(() => child.stdout.resume(), throttleMs);
@@ -158,6 +172,67 @@ describe("with-memory-watch verdict durability (#2042)", () => {
 		expect(run.stdout).toContain("[mem-watch] done.");
 		expect(run.stdout).toContain("lowWaterAvailableMb=");
 	}, 60_000);
+
+	it("survives a sampler tick that fires while the full pipe is non-blocking", async () => {
+		// Recurrence guarded: #3097, CI run 35067086859 job 104699844872 --
+		// `Error: EAGAIN ... at emit (with-memory-watch.mjs:77) at
+		// Timeout._onTimeout (with-memory-watch.mjs:130)`, wrapper exit 1.
+		//
+		// The CHILD flips fd 1 to non-blocking, not the wrapper: `stdio:
+		// "inherit"` gives both processes one shared open file description, and
+		// libuv sets O_NONBLOCK on it the moment the child initialises its own
+		// `process.stdout` on a pipe. From then on the wrapper's blocking-write
+		// durability mechanism (#2093) is not blocking at all -- every
+		// `fs.writeSync(1, ...)` throws EAGAIN while the reader has let the
+		// 64 KB pipe fill, and a throw inside the `setInterval` callback has
+		// nothing to catch it. That is the wrapper dying under exactly the
+		// backpressure it exists to survive.
+		//
+		// 20 ms ticks with every sample forced to print puts a tick inside the
+		// window the 4 MB / 20 ms-stall reader holds the pipe full; the shipped
+		// 2000 ms cadence is only why it was a 3-of-4 flake rather than a
+		// constant. Pre-fix this case is exit 1 with the stack above.
+		const run = await runWrapper(
+			["--", nodeCmd, "-e", "process.stdout.write('x'.repeat(4194304))"],
+			20,
+			{
+				PI_LENS_MEM_WATCH_INTERVAL_MS: "20",
+				PI_LENS_MEM_WATCH_LOW_MB: "999999999",
+			},
+		);
+		expect(run.code, run.stderr).toBe(0);
+		expect(
+			run.stderr,
+			"an EAGAIN must never reach the top level",
+		).not.toContain("EAGAIN");
+		expect(run.stdout).toContain("[mem-watch] done.");
+	}, 60_000);
+
+	it("degrades a write failure that is not EAGAIN to one stderr note", async () => {
+		// Recurrence guarded: #3097 again, the other half. A retry loop that
+		// only ever retries would spin forever on a permanent failure, and a
+		// wrapper that rethrows it still kills the job it was wrapping. Killing
+		// the READ end mid-run makes every later `emit` fail with EPIPE:
+		// the wrapper must still forward the child's code, and must record the
+		// loss exactly ONCE however many ticks hit the dead pipe (~20 here at a
+		// 20 ms cadence) -- the bounded-observability rule, and the reason the
+		// note is latched rather than printed per occurrence.
+		const run = await runWrapper(
+			["--", nodeCmd, "-e", "setTimeout(()=>{},400)"],
+			0,
+			{
+				PI_LENS_MEM_WATCH_INTERVAL_MS: "20",
+				PI_LENS_MEM_WATCH_LOW_MB: "999999999",
+			},
+			(child) => child.stdout.destroy(),
+		);
+		expect(run.code, run.stderr).toBe(0);
+		expect(
+			run.stderr.match(/\[mem-watch\] record dropped:/g)?.length ?? 0,
+			run.stderr,
+		).toBe(1);
+		expect(run.stderr).toContain("record dropped: EPIPE");
+	}, 30_000);
 });
 
 /**

@@ -153,6 +153,15 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		reason:
 			"the harness timeout models real child-process progress and must remain bounded across teardown",
 	},
+	// 2026-09-16 (#3082): a recursive fs.watch event arrives on the kernel's
+	// schedule, in another process than the one that wrote the file. There is
+	// no fake clock for inotify, and a stubbed watcher would prove only that
+	// the stub calls its own callback.
+	"raw-timer-wait:support/tests-tree-write-guard.test.ts": {
+		detector: "raw-timer-wait",
+		reason:
+			"a real recursive fs.watch delivery is the subject; no fake clock delivers an inotify event and a stubbed watcher proves nothing",
+	},
 	"real-process-spawn:clients/biome-config-decorator-metadata.test.ts": {
 		detector: "real-process-spawn",
 		reason:
