@@ -1159,6 +1159,20 @@ describe("no tests/**/*.test.ts file drives a producer's registry against the ru
 // writers reached transitively through index.js. Exercise the real handler,
 // scheduler, registry, lock and disk with only the clock and OS child mocked.
 describe("transitive session_start backstop isolation", () => {
+	// The 30-minute cooldown stamp is real, and both cases share one private
+	// directory, so the second sweep would otherwise skip without ever touching
+	// the disk and assert nothing. Clear the stamps (never plant one) so each
+	// case observes its OWN write. The run-shared root is cleared for the same
+	// reason: each case must red on the state it produced, not on a neighbour's.
+	beforeEach(() => {
+		for (const name of fs.readdirSync(sharedHome))
+			if (name.startsWith("backstop-"))
+				fs.rmSync(path.join(sharedHome, name, "orphan-backstop.json"), {
+					force: true,
+				});
+		fs.rmSync(path.join(sharedHome, "orphan-backstop.json"), { force: true });
+	});
+
 	afterEach(() => {
 		vi.clearAllTimers();
 		vi.useRealTimers();
@@ -1167,7 +1181,13 @@ describe("transitive session_start backstop isolation", () => {
 		_resetSessionLifecycleForTests();
 	});
 
-	it("session_start keeps the backstop stamp and transient lock out of the run-shared home", async () => {
+	/** Drive the real host handler to a settled backstop sweep, and report the
+	 *  directories production actually chose: every `orphan-backstop.lock`
+	 *  parent it mkdir'd, and the stamp beside the first of them. */
+	async function driveSessionStartSweep(): Promise<{
+		lockPaths: string[];
+		stamp: string;
+	}> {
 		_resetSessionLifecycleForTests();
 		vi.stubEnv("PI_LENS_STARTUP_MODE", "quick");
 		const mkdir = vi.spyOn(fs.promises, "mkdir");
@@ -1192,14 +1212,45 @@ describe("transitive session_start backstop isolation", () => {
 		await waitFor(() => fs.existsSync(stamp) && !fs.existsSync(lock), Boolean, {
 			yieldControl: () => new Promise((resolve) => setImmediate(resolve)),
 		});
+		return { lockPaths: lockPaths(), stamp };
+	}
+
+	it("session_start keeps the backstop stamp and transient lock out of the run-shared home", async () => {
+		const { lockPaths, stamp } = await driveSessionStartSweep();
 		expect(JSON.parse(fs.readFileSync(stamp, "utf8")).lastSweepAt).toEqual(
 			expect.any(Number),
 		);
-		expect(lockPaths()).not.toContain(
+		expect(lockPaths).not.toContain(
 			path.join(sharedHome, "orphan-backstop.lock"),
 		);
 		expect(fs.existsSync(path.join(sharedHome, "orphan-backstop.json"))).toBe(
 			false,
 		);
+	}, 30_000);
+
+	// PR #3100 review F1, reproduced: a SYMLINK alias of the run-shared home in
+	// PI_LENS_HOME is a different string but the same directory. A string
+	// compare in the harness read it as a separate explicit home, so the real
+	// stamp and the real lock landed at the shared root through the link.
+	it("session_start keeps backstop state out of a symlink alias of the run-shared home", async () => {
+		const alias = path.join(sharedHome, `alias-${process.pid}`);
+		fs.rmSync(alias, { force: true });
+		fs.symlinkSync(sharedHome, alias, "dir");
+		try {
+			vi.stubEnv("PI_LENS_HOME", alias);
+			const { lockPaths, stamp } = await driveSessionStartSweep();
+			expect(JSON.parse(fs.readFileSync(stamp, "utf8")).lastSweepAt).toEqual(
+				expect.any(Number),
+			);
+			expect(lockPaths).not.toContain(path.join(alias, "orphan-backstop.lock"));
+			expect(lockPaths).not.toContain(
+				path.join(sharedHome, "orphan-backstop.lock"),
+			);
+			expect(fs.existsSync(path.join(sharedHome, "orphan-backstop.json"))).toBe(
+				false,
+			);
+		} finally {
+			fs.rmSync(alias, { force: true });
+		}
 	}, 30_000);
 });

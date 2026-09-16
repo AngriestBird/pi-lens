@@ -104,14 +104,65 @@ installGitFixtureEnv(tmpHygieneHome);
 // Pin the filesystem location once for every file, without a caller registry
 // or changing #2912's shared home. Explicit per-case homes remain authoritative.
 // A module mock survives resetModules; no scheduler, store or lock is mocked.
-vi.mock("../../clients/instance-reaper-state.js", () => {
-	const privateHome = fs.mkdtempSync(path.join(tmpHygieneHome, "backstop-"));
-	process.once("exit", () => removeTempDirSync(privateHome));
-	return {
-		resolveBackstopStateDir: (machineHome: string): string =>
-			machineHome === tmpHygieneHome ? privateHome : machineHome,
-	};
-});
+//
+// PR #3100 review F1: the question this asks is "is this the run-shared home?",
+// and that is a question about a DIRECTORY, not about a string. `PI_LENS_HOME`
+// pointed at a symlink of the run-shared home produced a different string, so a
+// string compare called it a separate explicit home and the real stamp and lock
+// landed at the shared root anyway. One rule — same st_dev + st_ino — answers
+// every spelling: the same path, a trailing slash or `..` (already normalised by
+// getGlobalPiLensDir's path.resolve), a symlink alias, and a second mount of the
+// same directory, which realpath alone would NOT catch. A path that does not
+// exist cannot be the run-shared home (mkdir'd above), so an absent stat is a
+// pass-through and no separate clause is needed for it.
+const backstopRunPrefix = `backstop-${process.env.PI_LENS_TMP_HYGIENE_RUN_ID}-`;
+let backstopPrivateDir: string | undefined;
+
+function isRunSharedHome(candidate: string): boolean {
+	const self = fs.statSync(candidate, { throwIfNoEntry: false });
+	const shared = fs.statSync(tmpHygieneHome, { throwIfNoEntry: false });
+	return (
+		self !== undefined &&
+		shared !== undefined &&
+		self.dev === shared.dev &&
+		self.ino === shared.ino
+	);
+}
+
+vi.mock("../../clients/instance-reaper-state.js", () => ({
+	resolveBackstopStateDir: (machineHome: string): string => {
+		if (!isRunSharedHome(machineHome)) return machineHome;
+		// On first use, not at import: most files that pull in the reaper never
+		// reach the backstop, and an eager mkdtemp left one empty directory per
+		// such file behind (measured on this batch, see PR #3100 round 2).
+		backstopPrivateDir ??= fs.mkdtempSync(
+			path.join(tmpHygieneHome, backstopRunPrefix),
+		);
+		return backstopPrivateDir;
+	},
+}));
+
+/**
+ * PR #3100 review F2. The run-shared home is NOT removed at run end: nothing in
+ * the repo removes `<cwd>/.probe-home`, and `cleanupTmpHygiene` below sweeps
+ * `os.tmpdir()` only. Round 1's `process.once("exit")` never fired either —
+ * vitest terminates a fork with SIGTERM — so two green runs left one, then two,
+ * private directories holding real stamps. Cleanup therefore belongs to the
+ * #2912 serialized hygiene owner (`tests/config/tmp-fixture-hygiene.test.ts`,
+ * groupOrder 6, maxWorkers 1), which runs after every other project has drained:
+ * no live worker's delayed callback can recreate a directory it removes, which a
+ * per-file `afterAll` could not promise. Scoped to this run's id because a
+ * concurrent sibling vitest invocation in the same checkout shares `.probe-home`
+ * and owns its own directories — the same reasoning as the `pi-lens-test-home-`
+ * admission below. A run that excludes the hygiene owner keeps its directories,
+ * exactly as it already keeps its `tmp-hygiene-baseline-<run>.json`.
+ */
+export function removeRunBackstopDirs(): void {
+	for (const name of readTmpDirEntries(tmpHygieneHome)) {
+		if (!name.startsWith(backstopRunPrefix)) continue;
+		removeTempDirSync(path.join(tmpHygieneHome, name));
+	}
+}
 
 // #3083, master red 038e28b: catch a new transitive writer in whichever
 // file introduced it. The runtime hermeticity test also observes released locks.
@@ -327,6 +378,7 @@ export function cleanupTmpHygiene(): void {
 			continue;
 		removeTempDirSync(path.join(tmpHygieneRealTmp, name));
 	}
+	removeRunBackstopDirs();
 	try {
 		fs.rmSync(tmpHygieneBaselinePath, { force: true });
 	} catch {

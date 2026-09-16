@@ -10,6 +10,7 @@ import {
 } from "../support/sweep-kit.js";
 import {
 	cleanupTmpHygiene,
+	removeRunBackstopDirs,
 	tmpHygieneAdmissionFor,
 	tmpHygieneLeakReport,
 	tmpHygieneObservedEntries,
@@ -125,6 +126,45 @@ describe("tmp-fixture-hygiene", () => {
 		expect(
 			escapees.map((site) => `${site.file}:${site.line}: ${site.text}`),
 		).toEqual([]);
+	});
+
+	// PR #3100 review F2: #3083's per-file backstop directories live under the
+	// run-shared home, which no owner removes, and round 1's
+	// `process.once("exit")` never fired under vitest's SIGTERM fork teardown —
+	// two green runs left one, then two, directories holding real stamps. This
+	// file is the owner that sweeps them, dead last, when no worker is alive to
+	// recreate one from a delayed callback; the sibling row is the recurrence in
+	// the other direction, a second vitest invocation sharing this checkout's
+	// `.probe-home` losing its live directory to our sweep.
+	// The planted directories hold a nested `stamp.json` standing in for the real
+	// cooldown stamp, so the sweep is proven to remove a NON-EMPTY tree. The
+	// production filename is deliberately not spelled here: the #3042
+	// registry-isolation sweep in tests/clients/pi-lens-home-hermeticity.test.ts
+	// flags any file naming a producer's target filename beside PI_LENS_HOME
+	// without its own pin, and this owner cannot pin a home — the run-shared one
+	// is its subject. Comments are blanked before that scan, so this note neither
+	// trips nor excuses it.
+	it("sweeps this run's private backstop directories and spares a sibling invocation's", () => {
+		const home = process.env.PI_LENS_HOME as string;
+		const mine = path.join(
+			home,
+			`backstop-${process.env.PI_LENS_TMP_HYGIENE_RUN_ID}-owner-guard`,
+		);
+		const sibling = path.join(home, "backstop-0000000000-0-owner-guard");
+		for (const dir of [mine, sibling]) {
+			fs.mkdirSync(path.join(dir, "nested"), { recursive: true });
+			fs.writeFileSync(
+				path.join(dir, "nested", "stamp.json"),
+				JSON.stringify({ lastSweepAt: 1 }),
+			);
+		}
+		try {
+			removeRunBackstopDirs();
+			expect(fs.existsSync(mine)).toBe(false);
+			expect(fs.existsSync(sibling)).toBe(true);
+		} finally {
+			fs.rmSync(sibling, { recursive: true, force: true });
+		}
 	});
 
 	it("registers the tmp-hygiene setup hook in every vitest project", () => {
