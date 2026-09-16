@@ -933,7 +933,6 @@ describe("shouldTriggerRerun per-attempt keying and the two-rerun bound (#2042)"
 			}),
 		).toBe(true);
 	});
-
 });
 
 describe("runClassifier orchestration against a mocked, STATEFUL GitHub API (#2103)", () => {
