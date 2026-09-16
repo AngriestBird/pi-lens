@@ -7,6 +7,10 @@ import { getEffectiveLspIdleResetMs } from "../clients/runtime-turn.js";
 import { createPiMock, makeCtx, makeStaleCtx } from "./support/pi-mock.js";
 import { removeTempDirSync } from "./clients/test-utils.js";
 import { makeLspServiceDouble } from "./support/lsp-service-double.js";
+import {
+	aliveServerHolder,
+	lspStatusRecorder,
+} from "./support/lsp-status-repaint.js";
 import { makeSessionStartEvent } from "./support/host-event-factory.js";
 // #2146: process-scope state (the primary-session registration, the instance
 // registry's mutation tail) now lives on `globalThis`, so `vi.resetModules()`
@@ -1533,16 +1537,9 @@ describe("index.ts integration", () => {
 			// The idle reset releases the warm servers from a detached timer with no pi
 			// event in flight; without the wrapped reset the footer would keep showing a
 			// stale "LSP Active" until the next turn. Assert the timer firing repaints it.
-			let aliveIds: string[] = ["typescript"];
-			const resetLSPService = vi.fn(() => {
-				aliveIds = [];
-			});
+			const { resetLSPService, service } = aliveServerHolder();
 			vi.doMock("../clients/lsp/index.js", () => ({
-				getLSPService: () =>
-					makeLspServiceDouble({
-						getAliveClientCount: () => aliveIds.length,
-						getAliveServerIds: () => aliveIds,
-					}),
+				getLSPService: service,
 				resetLSPService,
 			}));
 			vi.doMock("../clients/bootstrap.js", async () => {
@@ -1569,19 +1566,9 @@ describe("index.ts integration", () => {
 			const turnEnd = handlers.turn_end?.[0];
 			expect(turnEnd).toBeTypeOf("function");
 
-			const statusUpdates: Array<[string, string | undefined]> = [];
-			const ctx = {
-				cwd: tmpDir,
-				ui: {
-					notify: vi.fn(),
-					setStatus: (id: string, text: string | undefined) =>
-						statusUpdates.push([id, text]),
-					// identity theme so the asserted strings are the raw labels
-					theme: { fg: (_c: string, s: string) => s },
-				},
-			};
-			const lspStatuses = () =>
-				statusUpdates.filter(([id]) => id === "pi-lens-lsp").map(([, t]) => t);
+			// identity theme so the asserted strings are the raw labels
+			const { ui, lspStatuses } = lspStatusRecorder();
+			const ctx = { cwd: tmpDir, ui };
 
 			vi.useFakeTimers();
 			try {
