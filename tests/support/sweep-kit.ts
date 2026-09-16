@@ -533,6 +533,79 @@ export function relativePosix(root: string, absolute: string): string {
 }
 
 /**
+ * Paths this worker found gone between the walk and the read, newest last.
+ * One entry per distinct path: a scan that retries the same walk inside two
+ * `it` bodies must not turn one vanished file into two records (bounded
+ * observability, AGENTS.md shape 9).
+ */
+const vanishedBetweenWalkAndRead = new Set<string>();
+
+/** Every path {@link readWalkedFile} found gone, for this worker fork. */
+export function walkedFilesVanished(): readonly string[] {
+	return [...vanishedBetweenWalkAndRead];
+}
+
+/**
+ * Read a file a directory walk just produced, tolerating its disappearance
+ * between the walk and the read.
+ *
+ * Named recurrence (#3082/#3092): every sweep here lists `tests/**` and then
+ * `readFileSync`s what the walk returned. A sibling test file running
+ * concurrently in another fork that creates a source file under the walked
+ * root and removes it again — `tests/clients/pi-lens-home-hermeticity.test.ts`
+ * wrote `tests/scratch-3050-pre-3048-vanished-wiring.test.ts` for the length
+ * of one assertion — makes that read throw `ENOENT` in whichever walker
+ * happened to be mid-enumeration. Four different governance suites took the
+ * hit on rotating runs (`sweep-floor-coverage`, `vacuous-skip-coverage`,
+ * `latency-logger-mock-shape`, `lsp-spawn-heavy-coverage`), each time with an
+ * error naming a file that never existed on any branch.
+ *
+ * `undefined` means "this path is no longer part of the population": the
+ * caller skips it rather than counting it as a finding — a file that is gone
+ * cannot violate anything, and a sweep that reported it would be reporting
+ * its own race. The disappearance is NOT swallowed (AGENTS.md shape 10): it
+ * is recorded once per distinct path in {@link walkedFilesVanished} and
+ * printed once, so a genuinely churning tree is visible in the run log
+ * instead of quietly shrinking every scan's population. The `minScanned`
+ * floors every sweep already carries are what catch a walk that loses its
+ * whole population this way.
+ *
+ * Any other error (EACCES, EISDIR, a decode failure) is rethrown untouched —
+ * only the vanished-file race is tolerated.
+ */
+export function readWalkedFile(file: string): string | undefined {
+	try {
+		return fs.readFileSync(file, "utf8");
+	} catch (error) {
+		const code = (error as NodeJS.ErrnoException).code;
+		if (code !== "ENOENT" && code !== "ENOTDIR") throw error;
+		if (!vanishedBetweenWalkAndRead.has(file)) {
+			vanishedBetweenWalkAndRead.add(file);
+			console.warn(
+				`[sweep-kit] ${file} vanished between the walk and the read; skipped (#3082)`,
+			);
+		}
+		return undefined;
+	}
+}
+
+/**
+ * {@link readWalkedFile} over a whole walk result, dropping the files that
+ * vanished. The pairing is what most sweeps want: they scan `source` and
+ * report `file`.
+ */
+export function readWalkedFiles(
+	files: readonly string[],
+): Array<{ file: string; source: string }> {
+	const read: Array<{ file: string; source: string }> = [];
+	for (const file of files) {
+		const source = readWalkedFile(file);
+		if (source !== undefined) read.push({ file, source });
+	}
+	return read;
+}
+
+/**
  * Nearest named function/class/const-or-let declaration STRICTLY ABOVE
  * `lineIndex` (0-based) in `lines` — a cheap line-scan heuristic, not a
  * parser. Built for {@link stableOccurrenceKey}: keying a per-occurrence
