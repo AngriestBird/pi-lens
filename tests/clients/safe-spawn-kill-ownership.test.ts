@@ -182,11 +182,17 @@ describe("kill-by-pid ownership (#2042)", () => {
 				.mockImplementation(() => true as never);
 
 			const pending = safeSpawnAsync("which", ["node"], { timeout: 10 });
-			await vi.waitFor(() => expect(child.kill).toHaveBeenCalled());
-
-			expect(killSpy).not.toHaveBeenCalled();
+			// The timeout fires killTree; settle the double so the call returns.
+			await vi.waitFor(() =>
+				expect(
+					child.kill.mock.calls.length + killSpy.mock.calls.length,
+				).toBeGreaterThan(0),
+			);
 			child.emit("close", null, "SIGTERM");
 			await pending;
+
+			expect(killSpy).not.toHaveBeenCalled();
+			expect(child.kill).toHaveBeenCalledWith("SIGTERM");
 		},
 	);
 
