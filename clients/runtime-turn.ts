@@ -3675,11 +3675,15 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				// #3102: the file's CURRENT bytes, for the two content-bound halves
 				// of the policy stack (inline `pi-lens-ignore` and the STRICT
 				// `false-positive` anchor) and for the auxiliary profile's own
-				// native suppression. Read at most ONCE per file per drain, and only
-				// once a pair actually has findings to render — so a turn that
-				// drains nothing, re-arms, or confirms clean pays no I/O at all. A
-				// read failure yields `undefined`: the content-free half still
-				// applies and nothing is hidden on an I/O error (shape 48).
+				// native suppression. Read at most ONCE per file per drain, lazily:
+				// a turn that drains nothing, finds no live client, re-arms, or
+				// confirms clean pays no I/O at all, and a file with several pending
+				// servers pays one read for all of them. Measured cost on the one
+				// file that does publish: 0.10-0.20 ms typical, 4.0 ms worst case
+				// (a 180 KB file, 5 findings, a populated disposition store) against
+				// the 3000 ms `HOOK_WALL_BUDGET_MS.turn_end`. A read failure yields
+				// `undefined`: the content-free half still applies and nothing is
+				// hidden on an I/O error (shape 48).
 				let lateAuxContentRead = false;
 				let lateAuxContentValue: string | undefined;
 				const readLateAuxContent = (): string | undefined => {
