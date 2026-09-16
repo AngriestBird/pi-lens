@@ -39,9 +39,9 @@ function createMockPi(overrides: Record<string, boolean> = {}) {
  * (#281).
  */
 async function setupLspStatusRepaint(
-	options: { aliveIds?: string[]; flags?: Record<string, boolean> } = {},
+	options: { flags?: Record<string, boolean> } = {},
 ) {
-	const { resetLSPService, service } = aliveServerHolder(options.aliveIds);
+	const { resetLSPService, service } = aliveServerHolder();
 	vi.doMock("../clients/lsp/index.js", () => ({
 		getLSPService: service,
 		resetLSPService,
@@ -178,6 +178,47 @@ describe("index.ts LSP idle reset", () => {
 				await vi.advanceTimersByTimeAsync(getEffectiveLspIdleResetMs());
 
 				expect(resetLSPService).toHaveBeenCalledTimes(1);
+				expect(lspStatuses().at(-1)).toBe("LSP ✗");
+			} finally {
+				vi.useRealTimers();
+			}
+		},
+		INTEGRATION_TIMEOUT_MS,
+	);
+
+	// #3099: the compact FAILED branch has no coverage above — that case only
+	// records an idle-released active server, never a failed one. Mutating
+	// `failedText`'s compact arm (`"LSP ✗"` → `"LSP ✓"`) leaves the suite
+	// green without this. Drives the real turn_end → updateLspStatus path
+	// with a recorded failure (`recordLsp` + `setSessionLanguages`, the same
+	// seam `selectLspStatus` reads) so it observes the published string, not
+	// the branch. One turn covers both states the review asked for: mixed
+	// (typescript alive + python failed) while the default alive server is
+	// still up, then failed-alone once the idle timer releases it.
+	it(
+		"renders the compact LSP status glyph for a failed server, alone and mixed with an active one (#3099)",
+		async () => {
+			const { turnEnd, ui, lspStatuses, resetLSPService } =
+				await setupLspStatusRepaint({
+					flags: { "lens-compact-lsp-status": true },
+				});
+			const { recordLsp, setSessionLanguages } =
+				await import("../clients/widget-state.js");
+			setSessionLanguages(["python"]);
+			recordLsp("python", tmpDir, "spawn_failed");
+			const ctx = { cwd: tmpDir, ui };
+
+			vi.useFakeTimers();
+			try {
+				await turnEnd?.({}, ctx);
+				// typescript alive (default) + python failed, side by side.
+				expect(lspStatuses().at(-1)).toBe("LSP ✓ · LSP ✗");
+
+				await vi.advanceTimersByTimeAsync(getEffectiveLspIdleResetMs());
+
+				expect(resetLSPService).toHaveBeenCalledTimes(1);
+				// typescript released; python's failure is all that remains, with
+				// no live server to show alongside it.
 				expect(lspStatuses().at(-1)).toBe("LSP ✗");
 			} finally {
 				vi.useRealTimers();

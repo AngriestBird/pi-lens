@@ -12,25 +12,21 @@ import { makeLspServiceDouble } from "./lsp-service-double.js";
  * resolve against that file's directory.
  */
 
-export interface AliveServerHolder {
-	aliveIds: string[];
-}
-
 /**
  * Alive-server holder + the reset double that empties it. `service` is the
  * `getLSPService` factory to install through the test's own `vi.doMock`.
  */
 export function aliveServerHolder(initialAliveIds: string[] = ["typescript"]) {
-	const holder: AliveServerHolder = { aliveIds: initialAliveIds };
+	let aliveIds = initialAliveIds;
 	const resetLSPService = vi.fn(() => {
-		holder.aliveIds = [];
+		aliveIds = [];
 	});
 	const service = () =>
 		makeLspServiceDouble({
-			getAliveClientCount: () => holder.aliveIds.length,
-			getAliveServerIds: () => holder.aliveIds,
+			getAliveClientCount: () => aliveIds.length,
+			getAliveServerIds: () => aliveIds,
 		});
-	return { holder, resetLSPService, service };
+	return { resetLSPService, service };
 }
 
 /**
