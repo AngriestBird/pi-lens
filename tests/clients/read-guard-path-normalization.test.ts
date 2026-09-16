@@ -290,6 +290,38 @@ describe("ReadGuard pendingCreations key (#3163 existence-straddle)", () => {
 		},
 	);
 
+	// lane: Unit tests (ubuntu), as above.
+	//
+	// The OTHER half of the pair, and the one that pins the fix's own risk:
+	// `noteCreatedFile` fires for EVERY non-edit Write (runtime-tool-call.ts),
+	// including an overwrite of a file that already exists, so its key must keep
+	// matching `recordWritten` in that state too. Before #3163 both sides were
+	// `this.key()` and this case already worked; it reds the moment
+	// `noteCreatedFile` is put back on `this.key()` while `recordWritten` looks
+	// up the syntactic spelling, which is exactly the half-applied fix.
+	it.skipIf(TMPDIR_FOLDS_CASE)(
+		"injects the creation read when the announced file already existed",
+		() => {
+			const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-rg-3163c-"));
+			try {
+				const held = makeCaseVariantPackage(tmpDir);
+				fs.writeFileSync(held, "export const i = 0;\n");
+				const guard = createReadGuard("test-session");
+
+				guard.noteCreatedFile(held, 5, 2);
+				fs.writeFileSync(held, "export const i = 1;\n");
+				guard.recordWritten(held);
+
+				const history = guard.getReadHistory(held);
+				expect(history).toHaveLength(1);
+				expect(history[0].turnIndex).toBe(5);
+				expect(history[0].writeIndex).toBe(2);
+			} finally {
+				fs.rmSync(tmpDir, { recursive: true, force: true, maxRetries: 5 });
+			}
+		},
+	);
+
 	// lane: windows-vitest (advisory). The win32 arm is broader than the POSIX
 	// one and needs no symlink: `resolveNonExisting` lower-cases the tail of any
 	// path that does not exist yet, so EVERY newly created file with an
