@@ -37,6 +37,13 @@ import { getProbeHomeRedirectEvent } from "./probe-home-state.js";
 export { LEDGER_FIELD_MAX, truncateForLedger };
 
 export type DegradationKind =
+	/**
+	 * #3071: an actionable-warnings phase (LSP code-action enrichment, the
+	 * fix-application batch) truncated its eligible file/fix set at a bound —
+	 * `clients/actionable-warnings.ts`'s several file/fix caps all share this
+	 * one kind, distinguished by `subject`.
+	 */
+	| "actionable-warnings-cap"
 	/** A configured analyzer was deliberately skipped for this session. */
 	| "actionable-warnings-deferred-superseded"
 	/**
@@ -245,8 +252,20 @@ export type DegradationKind =
 	 * checks stay attributable.
 	 */
 	| "git-tracked-ignore-truncated"
+	/**
+	 * #3071: gitleaks finding classification (`classifyAndFilterFindings`)
+	 * exceeded its `turn_end` wall budget. `runtime-turn.ts` fails OPEN —
+	 * retains the raw, unclassified findings rather than dropping them.
+	 */
+	| "gitleaks_classification_timeout"
 	/** Automatic test-result delivery could not reach the host entry surface. */
 	| "global-dir-probe-redirect"
+	/**
+	 * #3071: the Gradle build-logic ownership scan (`tool-policy.ts`) exceeded
+	 * its entry budget, so ownership could not be established and ktlint
+	 * autofix is declined for that scan rather than guessed at.
+	 */
+	| "gradle-ktlint-scan-budget-exceeded"
 	| "grammar-blocked"
 	/**
 	 * A selected formatter's executable was proven absent (#2413): its
@@ -273,6 +292,24 @@ export type DegradationKind =
 	| "installer-verification-output-truncated"
 	/** A busy notify-stall discriminator was deferred; detail is rising-edge bounded. */
 	| "instance-registry-corrupt"
+	/**
+	 * #3071: a registration-record write fell back to the process cwd because
+	 * the session's identity carried no `projectRoot` — `instance-registry.ts`
+	 * still records the child, just without the caller-supplied root.
+	 */
+	| "instance-registry-identity-fallback"
+	/**
+	 * #3071: a registry-file lock acquisition exhausted its retry budget
+	 * (`instance-registry-lock.ts`'s `recordLockTimeout`). Subject is the
+	 * resolved lock target path.
+	 */
+	| "instance-registry-lock-timeout"
+	/**
+	 * #3071: an LSP child was recorded before `registerInstance` had run for
+	 * this process (or its entry was reaped) — `instance-registry.ts`
+	 * synthesizes a minimal host entry so the child stays tracked.
+	 */
+	| "instance-registry-registration-missing"
 	/**
 	 * #2042: a kill-by-raw-pid was REFUSED because `/proc/<pid>/status` showed
 	 * the pid alive under a different parent — someone else's process. Subject
@@ -330,6 +367,13 @@ export type DegradationKind =
 	| "lsp-diagnostics-compatibility"
 	| "lsp-diagnostics-timeout"
 	| "lsp-diagnostics-unsupported"
+	/**
+	 * #3071: a live client's `onDrift` observer fired for a real resync or a
+	 * pacing-deferred heal (never for `unchanged`/`vanished`/`unheld`
+	 * bookkeeping) — `clients/lsp/index.ts`. Subject is the file path, and
+	 * `incrementDegradationCount` keeps one bounded entry per file.
+	 */
+	| "lsp-document-drift"
 	| "lsp-document-send-order"
 	| "lsp-liveness-probe-unsupported"
 	/**
@@ -368,6 +412,12 @@ export type DegradationKind =
 	 * vocabulary is kebab-case, so it is spelled that way here.
 	 */
 	| "lsp-notify-stall-cpu-busy"
+	/**
+	 * #3071: `tools/lsp-diagnostics.ts`'s probe-disposition filter threw while
+	 * applying policy to a batch of findings; the batch is returned unfiltered
+	 * (nothing suppressed) rather than dropped. Subject is the cwd.
+	 */
+	| "lsp-probe-finding-policy"
 	/**
 	 * A deferred-format record's origin (the cwd/worktree it was queued
 	 * under) does not match the flush attempting to claim it as an orphan,
@@ -487,6 +537,12 @@ export type DegradationKind =
 	 * this guard reached review vacuous. Subject carries the source name and
 	 * the identity of the dropped write.
 	 */
+	/**
+	 * #3071: a managed-tool archive extraction (tgz/zip) failed —
+	 * `clients/installer/index.ts`'s `recordArchiveExtractionDegradation`.
+	 * Subject is `<toolId>:<format>`, reason names the extraction failure.
+	 */
+	| "managed-tool-install"
 	| "managed-tool-refresh"
 	/** A complete MCP result exceeded the hard input budget (#2848). */
 	| "mcp-complete-result-budget-exceeded"
@@ -560,6 +616,12 @@ export type DegradationKind =
 	| "path-variant-unresolved"
 	| "pip-install-strategy-succeeded"
 	| "pip-pep668-strategy-refused"
+	/**
+	 * #3071: `clients/pipeline.ts` could not hash a just-written file to attach
+	 * a post-write state fingerprint (`fs.readFileSync` failed). The write
+	 * itself already landed; only the hash is missing. Subject is the file path.
+	 */
+	| "pipeline-post-write-hash-unavailable"
 	/**
 	 * The orphan backstop's OWN process-table scanner blew the scan timeout and
 	 * had to be tree-killed (#1864 review F3). Reason carries the kill verdict,
@@ -662,6 +724,19 @@ export type DegradationKind =
 	 * `read_file_evicted` read-guard.log line says which. Rising edge gates
 	 * that log line per file per session, same as `read-guard-record-cap-trim`.
 	 */
+	/**
+	 * #3071: the live review graph exceeded its element/byte cap
+	 * (`clients/review-graph/builder.ts`) and centrality selection had to trim
+	 * to the cap. Subject is the cwd; reason carries the pre-trim size.
+	 */
+	| "review-graph-memory-cap"
+	/**
+	 * #3071: the SAME cap's centrality selection retained ZERO nodes from a
+	 * non-empty graph, which would otherwise read as an empty graph rather
+	 * than a capped one — `builder.ts` falls back to a deterministic head
+	 * slice instead and records the fallback under this distinct kind.
+	 */
+	| "review-graph-memory-cap-floor"
 	| "review-graph-non-absolute-entity-path"
 	/**
 	 * `read-guard.ts`'s per-file edits-cap splice (`READ_GUARD_MAX_EDITS_PER_FILE`)
@@ -744,6 +819,12 @@ export type DegradationKind =
 	| "self-drift-hash-budget-exhausted"
 	| "self-drift-unverifiable"
 	| "session-start-duplicate"
+	/**
+	 * #3071: `clients/sgconfig.ts` evicted the oldest sg-config baseline
+	 * entries over its retained-entry cap. Subject is the baseline directory;
+	 * reason carries the evicted count.
+	 */
+	| "sgconfig-baseline-cap-evict"
 	/** Incremental word-index churn required an arena re-compaction. */
 	| "shared-checkout-probe"
 	/**
@@ -815,6 +896,14 @@ export type DegradationKind =
 	 */
 	| "startup-analyzer-disabled"
 	/**
+	 * #3071: a deferred turn-end test target hit `TEST_RUNNER_MAX_DEFERRALS`
+	 * and was retired from turn-end selection for the rest of the session —
+	 * `runtime-turn.ts`, subject `<cwd>:deferral-exhausted`. Counted, not
+	 * once-only, so the durable tally is the exact number of suites cut this
+	 * way; run the retired target explicitly.
+	 */
+	| "test-runner-batch-capped"
+	/**
 	 * The `script_element` scan of an HTML root threw while napi prepared the
 	 * embedded-`<script>` evaluation (#2347). The embedded coverage degrades to
 	 * nothing for the file, silently prior to this kind. Once per file per
@@ -882,6 +971,14 @@ export type DegradationKind =
 	 * (deprecated key) or `PILENS_CFG_0003` (deprecated file location).
 	 */
 	| "tree-sitter-queries-dir-missing"
+	/**
+	 * #3071: a bundled or project tree-sitter query file failed to parse
+	 * (`tree-sitter-query-loader.ts`'s `recordQueryParseFailure`). Replayed
+	 * into the ledger once per generation from the loader's own cross-session
+	 * memo (#3070 N1), since a memoized `loadQueries` skips re-parsing.
+	 * Subject is the query file path.
+	 */
+	| "tree-sitter-query-parse-failed"
 	/**
 	 * A config file's NOTICE LIST was truncated by the per-resolution bound, and
 	 * this row carries how many notices were summarised away (#2426 review round
