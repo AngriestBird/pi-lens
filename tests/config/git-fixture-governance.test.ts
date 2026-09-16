@@ -764,11 +764,17 @@ describe("real Git fixture governance", () => {
 	});
 
 	it("does not flag a hex argument to a spawn that is not git", () => {
+		// The argument vector deliberately LOOKS like `git diff <sha>` --
+		// `docker diff <container-id>` takes a hex id in exactly that shape.
+		// Only the git gate can tell these apart, and round 2's subcommand
+		// narrowing made the previous `node -e` fixture unable to show that:
+		// its own argument vector never reached a history subcommand, so the
+		// row went green under the always-a-git-spawn mutation.
 		expect(
 			findHistoricalCommitIshOffenders([
 				{
 					file: "tests/clients/synthetic.test.ts",
-					source: 'execFileSync("node", ["-e", "console.log(\'deadbeef1\')"]);',
+					source: 'execFileSync("docker", ["diff", "3f2a1b8c9d"]);',
 				},
 			]),
 		).toEqual([]);
