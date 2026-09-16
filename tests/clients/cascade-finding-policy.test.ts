@@ -255,7 +255,7 @@ describe("cold-neighbour cascade run applies the finding policy (#3102)", () => 
 			errorDiag(1, OTHER_MESSAGE, 2304),
 		]);
 		const phases = logLatency.mock.calls
-			.map(([entry]) => entry as Record<string, any>)
+			.map(([entry]) => entry as Record<string, unknown>)
 			.filter((entry) => entry?.phase === "cascade_finding_policy");
 		expect(phases).toHaveLength(1);
 		expect(phases[0]?.filePath).toBe(neighbor);
