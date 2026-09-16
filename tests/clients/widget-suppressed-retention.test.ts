@@ -45,6 +45,7 @@ import {
 	_resetStateCacheForTests,
 	markDisposition,
 } from "../../clients/diagnostic-dispositions.js";
+import { clearAllWorkspaceDiagnosticsCaches } from "../../clients/lsp/workspace-diagnostics-cache.js";
 import { resetProjectLensConfigCache } from "../../clients/project-lens-config.js";
 import {
 	clearWidgetState,
@@ -157,6 +158,7 @@ beforeEach(() => {
 	_resetStateCacheForTests();
 	resetProjectLensConfigCache();
 	resetDegradationLedger();
+	clearAllWorkspaceDiagnosticsCaches();
 	clearWidgetState();
 });
 
@@ -239,6 +241,10 @@ describe("the widget keeps a suppressed row across a fresh probe (#3158)", () =>
 		await probe(service);
 		expect(getFileDiagnostics(filePath)).toHaveLength(2);
 
+		// A genuinely NEW observation: without this the probe replays the
+		// workspace-diagnostics cache entry the first call wrote, so the second
+		// service double would never be asked.
+		clearAllWorkspaceDiagnosticsCaches();
 		await probe(makeService([diag(OTHER_MESSAGE, 2304, 2)]));
 
 		expect(getFileDiagnostics(filePath)).toEqual([
@@ -319,10 +325,14 @@ describe("the retained row's lifetime is enforced (#3158)", () => {
 		expect(suppressedChip()).toBeUndefined();
 	});
 
-	it("retires the retained row when the mark becomes a non-suppressing one", async () => {
-		// Retirement (c): `flagged` is not a suppression, so the row loses the tag
-		// that earned it retention. It must be dropped, never re-armed as a live
-		// finding the fresh scan does not report.
+	it("retires the retained row instead of re-arming it when its mark stops suppressing", async () => {
+		// Retirement (c): a strict `false-positive` anchor hashes the marked line,
+		// so rewriting that line stops the mark from applying. The next mark on the
+		// file re-runs `reconcileWidgetDisposition`, which must DROP the retained
+		// row — re-arming it would put a finding no scan reported back in front of
+		// the agent as live. `reconcileStaleWidgetFiles` has not run in this
+		// window, so the store is the only thing standing between the row and
+		// `mode=all`.
 		const service = makeService([diag(MESSAGE, 2322, 1)]);
 		await probe(service);
 		await mark({
@@ -335,12 +345,14 @@ describe("the retained row's lifetime is enforced (#3158)", () => {
 		await probe(service);
 		expect(getFileDiagnostics(filePath)).toHaveLength(1);
 
+		fs.writeFileSync(filePath, "const value = 1;\nexport const other = 1;\n");
 		await mark({
 			filePath,
-			line: 1,
-			message: MESSAGE,
-			...CANONICAL_MARK,
-			disposition: "flagged",
+			line: 2,
+			message: OTHER_MESSAGE,
+			rule: "typescript:2304",
+			tool: "lsp",
+			disposition: "false-positive",
 		});
 
 		expect(getFileDiagnostics(filePath) ?? []).toHaveLength(0);
