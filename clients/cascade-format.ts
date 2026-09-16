@@ -105,9 +105,21 @@ export function buildResolvedFoundCascadeRun(
 	// no-op and a STRICT `false-positive` anchor hashes an empty line, so a
 	// finding is never hidden by an I/O error (AGENTS.md shape 48).
 	const content = readNeighborContent(filePath);
+	// No `range.start.line` pre-partition here, unlike the late-auxiliary drain
+	// (`clients/runtime-turn.ts`): both lanes read the same
+	// `client.getAllDiagnostics()` map, whose `mergeDiagnosticLists`
+	// (`clients/lsp/client.ts:1503`) already dereferences
+	// `diagnostic.range.start.line` unguarded, so a line-less entry throws long
+	// before either builder sees it and `converted` is always 1:1 with `errors`.
+	// The drain partitions to preserve its own `missing` counting arm, not as a
+	// guard against that (round 2, F3).
 	const converted = convertLspDiagnostics(errors, filePath);
 	// #692/#3046: identity comes from the ONE shared derivation every other
-	// surface anchors a mark against — never a hardcoded `tool: "lsp"`.
+	// surface anchors a mark against — never a hardcoded `tool: "lsp"`. Its drop
+	// set is KEPT: these diagnostics come straight off the client's cache, so
+	// nothing upstream applied `applyAuxiliarySuppressions` and this is the
+	// FIRST application of the profile's own native comment / test-file gate,
+	// not a double-apply (which is why the probe lane ignores it).
 	const retained = retagAuxiliaryDiagnostics(converted, errors, content ?? "", {
 		cwd,
 		fileRole: detectFileRole(filePath, content),
@@ -123,7 +135,13 @@ export function buildResolvedFoundCascadeRun(
 	// the `late_auxiliary_findings` record uses, so one operator reading both
 	// records does not have to know that one nests and the other does not.
 	const suppressed = retained.length - diagnostics.length;
-	if (suppressed > 0) {
+	const auxSuppressed = converted.length - retained.length;
+	// Round 2 F1: gated on EITHER counter. Gating on the policy count alone made
+	// an aux-only drop — an ERROR master rendered, removed here by the profile's
+	// own `# nosemgrep` / `skipTestFiles` rule — vanish with no row at all, the
+	// silent-drop shape this record exists to prevent (shape 10). The
+	// `late_auxiliary_findings` twin reports both counters every drain.
+	if (suppressed > 0 || auxSuppressed > 0) {
 		// One bounded record per RUN, never one per finding (AGENTS.md "bounded
 		// observability"). This is a PUSH surface: silence after a mark is the
 		// mark working, not a clean verdict, so the count is recorded here rather
@@ -136,11 +154,7 @@ export function buildResolvedFoundCascadeRun(
 			filePath,
 			phase: "cascade_finding_policy",
 			durationMs: Date.now() - policyStart,
-			metadata: {
-				suppressed,
-				total: converted.length,
-				auxSuppressed: converted.length - retained.length,
-			},
+			metadata: { suppressed, total: converted.length, auxSuppressed },
 		});
 	}
 	// No zero-length early return here: `formatCascadeNeighborDiagnostics`
@@ -150,10 +164,21 @@ export function buildResolvedFoundCascadeRun(
 	const neighbors: CascadeNeighborResult[] = [
 		{ filePath, reason: "references", diagnostics, lspTouched: true },
 	];
-	const formatted = formatCascadeNeighborDiagnostics(cwd, neighbors, {
+	const rendered = formatCascadeNeighborDiagnostics(cwd, neighbors, {
 		noun: "cold neighbor",
 	});
-	if (!formatted) return undefined;
+	if (!rendered) return undefined;
+	// #1616 / #3102 AC 4, round 2 F2: a delivery that still has something to say
+	// states what it dropped, once per delivery — the same sentence the
+	// late-auxiliary advisory renders (`clients/runtime-turn.ts`). Policy drops
+	// only: an aux drop is the file's own suppression comment, which the
+	// per-edit dispatch path honours silently too, and it stays in the record
+	// above. A delivery with NOTHING left says nothing at all — silence on a
+	// push surface is not a claim that the neighbour is clean.
+	const formatted =
+		suppressed > 0
+			? `${rendered}\nsuppressed by disposition: ${suppressed} finding(s) (marked false-positive or won't-fix).`
+			: rendered;
 	return {
 		filePath,
 		result: {
