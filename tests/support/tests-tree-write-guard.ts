@@ -114,6 +114,26 @@ export function isGuardedTreeEntry(relative: string): boolean {
 }
 
 /**
+ * Direct children of `root` only — no recursion into subdirectories. Used by
+ * the `recursive: false` mode (#3105): the repo root's `node_modules` alone
+ * holds ~3,000 directories, and Node's recursive `fs.watch` on Linux installs
+ * one inotify watch per subdirectory, so rooting a recursive watch at the
+ * repo root would multiply the existing ~300 watches roughly tenfold for a
+ * defect shape (a file appearing directly in the repo root) that recursion
+ * cannot help catch, since a nested one is `tests/`'s to catch already.
+ */
+function listTopLevelSourceFiles(root: string): string[] {
+	return fs
+		.readdirSync(root, { withFileTypes: true })
+		.filter(
+			(entry) =>
+				entry.isFile() &&
+				GUARDED_EXTENSIONS.some((extension) => entry.name.endsWith(extension)),
+		)
+		.map((entry) => path.join(root, entry.name));
+}
+
+/**
  * Start watching `root` for source files that did not exist when the run
  * started.
  *
@@ -122,16 +142,37 @@ export function isGuardedTreeEntry(relative: string): boolean {
  * and any other function stands in for `fs.watch` — the failure case uses one
  * that throws. The default is the real `fs.watch`; no test replaces it to
  * prove delivery.
+ *
+ * `recursive` (default `true`) is the `tests/` arm's shape: watch and walk
+ * the whole subtree. `false` restricts both the baseline walk and the watch
+ * to `root`'s own direct children — the repo-root arm's shape (#3105), sized
+ * to the one known producer shape (a file appearing directly in the repo
+ * root) without paying to watch every subdirectory underneath it.
+ *
+ * `allow` names relative (to `root`) filenames that never count as a
+ * violation even though they are not in the baseline — a known, test-owned
+ * producer that writes and removes a file inside one run, same as `tests/`'s
+ * own producers, but at a root the walkers do not enumerate today. Every
+ * entry must be justified at its call site; this function does not invent a
+ * default.
  */
 export function installTestsTreeWriteGuard(
 	root: string,
-	options: { watch?: typeof fs.watch | false } = {},
+	options: {
+		watch?: typeof fs.watch | false;
+		recursive?: boolean;
+		allow?: ReadonlySet<string>;
+	} = {},
 ): TestsTreeWriteGuard {
+	const recursive = options.recursive ?? true;
+	const allow = options.allow ?? new Set<string>();
 	const baseline = new Set(
-		listSourceFiles(root, {
-			extensions: GUARDED_EXTENSIONS,
-			skipDeclarations: false,
-		}),
+		recursive
+			? listSourceFiles(root, {
+					extensions: GUARDED_EXTENSIONS,
+					skipDeclarations: false,
+				})
+			: listTopLevelSourceFiles(root),
 	);
 	const created: string[] = [];
 	const seen = new Set<string>();
@@ -140,6 +181,7 @@ export function installTestsTreeWriteGuard(
 	const record = (filename: string | null): void => {
 		if (filename === null) return;
 		if (!isGuardedTreeEntry(filename)) return;
+		if (allow.has(filename)) return;
 		const absolute = path.join(root, filename);
 		if (baseline.has(absolute)) return;
 		if (seen.has(absolute)) return;
@@ -155,7 +197,7 @@ export function installTestsTreeWriteGuard(
 	const watch = options.watch ?? fs.watch;
 	if (watch !== false) {
 		try {
-			watcher = watch(root, { recursive: true }, (_event, filename) =>
+			watcher = watch(root, { recursive }, (_event, filename) =>
 				record(filename === null ? null : String(filename)),
 			);
 			// Unref'd: the guard must never be the reason the process stays

@@ -22,7 +22,10 @@ import {
 	installTestsTreeWriteGuard,
 	isGuardedTreeEntry,
 } from "./tests-tree-write-guard.js";
-import { runTestsTreeWriteGuardSetup } from "./tests-tree-write-guard-setup.js";
+import {
+	combineGuardTeardowns,
+	runTestsTreeWriteGuardSetup,
+} from "./tests-tree-write-guard-setup.js";
 
 const scratch: string[] = [];
 afterEach(() => {
@@ -67,6 +70,56 @@ describe("tests-tree write guard (#3082)", () => {
 		// with this path, so no sweep can be surprised by it.
 		guard.record(path.join("clients", "tracked.test.ts"));
 		expect(guard.report()).toBeUndefined();
+	});
+
+	// #3105: the repo-root arm roots at a directory whose subtree includes
+	// node_modules (thousands of directories), so it watches non-recursively —
+	// only root's own direct children. Without `recursive: false` narrowing the
+	// BASELINE walk to match, a pre-existing nested file the shallow walk never
+	// saw would misreport as newly created the first time anything records it.
+	it("a non-recursive guard's baseline does not reach into a nested pre-existing file", () => {
+		const root = fixtureTree();
+		const guard = installTestsTreeWriteGuard(root, {
+			watch: false,
+			recursive: false,
+		});
+		// Contrast with the recursive-baseline case two tests up: the identical
+		// pre-existing path, fed the identical way, is silent there and flagged
+		// here — recursive:false's baseline never walked into `clients/` to see
+		// it.
+		guard.record(path.join("clients", "tracked.test.ts"));
+		expect(guard.report()).toMatch(/tracked\.test\.ts/);
+	});
+
+	it("a non-recursive guard still baselines root's own direct children", () => {
+		const root = fixtureTree();
+		fs.writeFileSync(path.join(root, "existing-root-file.ts"), "// existing");
+		const guard = installTestsTreeWriteGuard(root, {
+			watch: false,
+			recursive: false,
+		});
+		guard.record("existing-root-file.ts");
+		expect(guard.report()).toBeUndefined();
+	});
+
+	// #3105 recurrence: tests/index-2992-integration.test.ts writes
+	// index-2992-probe.ts and index-2992-recovered.ts at the repo root — the
+	// same producer shape the #3082 tests/ guard exists for, one directory up,
+	// where isRecordableProjectPath (clients/file-utils.ts) requires the file
+	// stay under the project root and un-gitignored. Without `allow` excusing
+	// those two exact names, the widened root guard would fail every run of
+	// that (unrelated, already-passing) test file.
+	it("the allow list excuses a named root file without weakening coverage of everything else", () => {
+		const root = fixtureTree();
+		const guard = installTestsTreeWriteGuard(root, {
+			watch: false,
+			recursive: false,
+			allow: new Set(["index-2992-probe.ts"]),
+		});
+		guard.record("index-2992-probe.ts");
+		guard.record("index-2992-recovered.ts");
+		expect(guard.report()).toMatch(/index-2992-recovered\.ts/);
+		expect(guard.report()).not.toMatch(/index-2992-probe\.ts/);
 	});
 
 	it("stays silent for file kinds no walker under tests/ enumerates", () => {
@@ -141,6 +194,58 @@ describe("tests-tree write guard (#3082)", () => {
 		guard.record("scratch-setup.test.ts");
 		expect(() => teardown()).toThrow(/scratch-setup\.test\.ts/);
 		// The throw must not leak the inotify handle (AGENTS.md shape 4).
+		expect(closed).toBe(1);
+	});
+
+	// #3105: the default setup() now runs the tests/ arm and the repo-root arm
+	// as ONE teardown. Without combining reports, whichever guard's `report()`
+	// vitest never called (either because the code short-circuited on the
+	// first throw, or because only one guard was closed) would silently drop
+	// that guard's violations, the exact silent-degradation shape AGENTS.md
+	// shape 10 already screens for.
+	it("combineGuardTeardowns reports every violating guard and closes every guard, even when only one reports", () => {
+		const rootA = fixtureTree();
+		const rootB = fixtureTree();
+		const guardA = offlineGuard(rootA);
+		const guardB = offlineGuard(rootB);
+		let closedA = 0;
+		let closedB = 0;
+		const teardown = combineGuardTeardowns([
+			{ ...guardA, close: () => (closedA += 1) },
+			{ ...guardB, close: () => (closedB += 1) },
+		]);
+		guardB.record("only-b-violates.test.ts");
+		expect(() => teardown()).toThrow(/only-b-violates\.test\.ts/);
+		expect(closedA).toBe(1);
+		expect(closedB).toBe(1);
+	});
+
+	it("combineGuardTeardowns joins reports from more than one violating guard into one throw", () => {
+		const rootA = fixtureTree();
+		const rootB = fixtureTree();
+		const guardA = offlineGuard(rootA);
+		const guardB = offlineGuard(rootB);
+		guardA.record("violates-a.test.ts");
+		guardB.record("violates-b.test.ts");
+		const teardown = combineGuardTeardowns([guardA, guardB]);
+		let thrown: unknown;
+		try {
+			teardown();
+		} catch (error) {
+			thrown = error;
+		}
+		expect(String(thrown)).toMatch(/violates-a\.test\.ts/);
+		expect(String(thrown)).toMatch(/violates-b\.test\.ts/);
+	});
+
+	it("combineGuardTeardowns stays silent and still closes every guard when nothing violated", () => {
+		const root = fixtureTree();
+		const guard = offlineGuard(root);
+		let closed = 0;
+		const teardown = combineGuardTeardowns([
+			{ ...guard, close: () => (closed += 1) },
+		]);
+		expect(() => teardown()).not.toThrow();
 		expect(closed).toBe(1);
 	});
 

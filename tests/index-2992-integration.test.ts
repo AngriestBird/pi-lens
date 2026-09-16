@@ -27,6 +27,14 @@ describe("#2992 read bridge lifecycle", () => {
 		removeTempDirSync(probeHome);
 		fs.mkdirSync(probeHome, { recursive: true });
 		process.env.PI_LENS_HOME = probeHome;
+		// #3105: stays at the repo root, not a scratch dir — see
+		// tests/support/tests-tree-write-guard-setup.ts's ROOT_WRITE_ALLOWLIST
+		// doc comment for why (isRecordableProjectPath needs a path that is
+		// both under the project root and not gitignored, which a mkdtemp root,
+		// TMPDIR, or this file's own `.probe-home` above all fail). The repo
+		// root's write guard allowlists this exact filename for that reason;
+		// widening it is this test's responsibility to keep true, not the
+		// guard's to assume.
 		filePath = path.join(process.cwd(), "index-2992-probe.ts");
 		fs.writeFileSync(filePath, "export const guarded = true;\n");
 	});
@@ -128,7 +136,11 @@ describe("#2992 read bridge lifecycle", () => {
 			{ reason: "reload" },
 			makeCtx({ cwd: process.cwd(), sessionId: "session-after" }),
 		);
-		const recoveredPath = path.join(process.cwd(), "index-2992-recovered.ts");
+		// #3105: same scratch dir as filePath above, same reason.
+		const recoveredPath = path.join(
+			path.dirname(filePath),
+			"index-2992-recovered.ts",
+		);
 		fs.writeFileSync(recoveredPath, "export const recovered = true;\n");
 		try {
 			// The replacement session re-arms the session ledger; reset explicitly
