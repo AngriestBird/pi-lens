@@ -1162,7 +1162,7 @@ describe("transitive session_start backstop isolation", () => {
 	// The 30-minute cooldown stamp is real, and both cases share one private
 	// directory, so without this the second sweep takes the cooldown branch,
 	// writes nothing, and the case reads the FIRST case's stamp — measured, and
-	// the reason each case dates its stamp against its own start time above.
+	// the reason each case dates its stamp against its own start time below.
 	// Clear the stamps (never plant one) so each case observes its OWN write.
 	// The run-shared root is cleared for the same reason: each case must red on
 	// the state it produced, not on a neighbour's.
