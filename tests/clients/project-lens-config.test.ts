@@ -13,6 +13,7 @@ import {
 	getDegradationSummary,
 	resetDegradationLedger,
 } from "../../clients/degradation-ledger.js";
+import { resolveLensToolEnabled } from "../../clients/tool-config.js";
 import { removeTempDirSync } from "./test-utils.js";
 
 // #1333: these config/telemetry warnings no longer reach the terminal — pi owns
@@ -1027,5 +1028,93 @@ describe("a global-only setting's notice names the file the resolver actually re
 		// whether `tmpDir` happens to sit under the real home directory).
 		expect(warnedFor("pi-lens-config.json")).toBe(true);
 		expect(warnedFor("elsewhere")).toBe(true);
+	});
+});
+
+/**
+ * #3112 — `tools.<name>.enabled` is documented as a PROJECT-scope setting
+ * (`docs/settings.md`, `docs/globalconfig.md`) and is read out of the project
+ * document by `resolveLensToolEnabled`, but the loader's scope scan derived its
+ * accepted set from the flag registry alone. The only registry flag under
+ * `tools` is the global `tools.lazy` (`--no-lazy-tools`), so the whole `tools`
+ * section landed in `globalScopeOnlyKeys` and every project-scope per-tool
+ * override was announced as `ignoring invalid project config … "tools" is a
+ * global-only pi-lens setting … ignored` (`PILENS_CFG_0001`) — a warning that
+ * told the user their honoured setting was being dropped.
+ *
+ * `tools` is a MIXED-SCOPE section: the per-tool leaves are project-owned and
+ * validated by `readToolConfig` against `TOOL_REGISTRY`; `tools.lazy` is not.
+ */
+describe("project-scope tools.<name>.enabled (#3112)", () => {
+	function warnedFor(substring: string): boolean {
+		return (console.error as ReturnType<typeof vi.fn>).mock.calls
+			.flat()
+			.some((arg) => typeof arg === "string" && arg.includes(substring));
+	}
+
+	function warnCountFor(substring: string): number {
+		return (console.error as ReturnType<typeof vi.fn>).mock.calls
+			.flat()
+			.filter((arg) => typeof arg === "string" && arg.includes(substring))
+			.length;
+	}
+
+	it("accepts a per-tool override with no ignored-config warning, and it takes effect", () => {
+		fs.writeFileSync(
+			path.join(tmpDir, ".pi-lens.json"),
+			JSON.stringify({ tools: { ast_grep_replace: { enabled: false } } }),
+		);
+		const cfg = loadPiLensProjectConfig(tmpDir);
+		expect(warnedFor('"tools" is a global-only')).toBe(false);
+		expect(warnedFor("ignoring invalid project config")).toBe(false);
+		expect(console.error).not.toHaveBeenCalled();
+		// Effective through the production resolver the pi and MCP hosts call.
+		expect(resolveLensToolEnabled("ast_grep_replace", undefined, cfg.raw)).toBe(
+			false,
+		);
+		expect(resolveLensToolEnabled("symbol_search", undefined, cfg.raw)).toBe(
+			true,
+		);
+	});
+
+	it("still says tools.lazy is global-only at project scope", () => {
+		// The other half of a mixed-scope section: `tools.lazy` IS `scope:
+		// "global"` (`--no-lazy-tools`), and `readToolConfig` skips it, so without
+		// the sub-key scan a project file setting it would be ignored in silence —
+		// the #2426 review-round-2 F3 defect (`lsp.enabled`) arriving through a
+		// second namespace.
+		fs.writeFileSync(
+			path.join(tmpDir, ".pi-lens.json"),
+			JSON.stringify({ tools: { lazy: false } }),
+		);
+		loadPiLensProjectConfig(tmpDir);
+		expect(warnedFor('"tools.lazy" is a global-only')).toBe(true);
+		expect(warnedFor('unknown key "tools.lazy"')).toBe(false);
+	});
+
+	it("leaves an unknown tool name to readToolConfig — one notice, not two", () => {
+		// `readToolConfig` already reports an unrecognized tool name with its own
+		// code (`PILENS_CFG_0009`). A second, generic "check for a typo" notice
+		// from the scope scan for the same key is the duplicate-notice noise
+		// #2426 review round 6 called out.
+		fs.writeFileSync(
+			path.join(tmpDir, ".pi-lens.json"),
+			JSON.stringify({ tools: { no_such_tool: { enabled: false } } }),
+		);
+		loadPiLensProjectConfig(tmpDir);
+		expect(warnedFor("is not a recognized pi-lens tool")).toBe(true);
+		expect(warnCountFor("no_such_tool")).toBe(1);
+	});
+
+	it("keeps warning about a genuinely global-only section", () => {
+		// The scope table did not get looser: a section with no project-scoped
+		// surface at all still reports itself.
+		fs.writeFileSync(
+			path.join(tmpDir, ".pi-lens.json"),
+			JSON.stringify({ tools: { ast_grep_replace: { enabled: false } }, delta: { enabled: false } }),
+		);
+		loadPiLensProjectConfig(tmpDir);
+		expect(warnedFor('"delta" is a global-only')).toBe(true);
+		expect(warnedFor('"tools" is a global-only')).toBe(false);
 	});
 });
