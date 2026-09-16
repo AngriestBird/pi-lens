@@ -63,17 +63,15 @@ import * as path from "node:path";
 import { listSourceFiles } from "./sweep-kit.js";
 
 /**
- * Extensions a governance walker reads under `tests/`. `.js`/`.cjs` are
- * deliberately absent: no walker enumerates them under `tests/`, and a
- * fixture `npm install` dropping JavaScript into a fixture workspace is not
- * this defect.
+ * Exactly the extensions a governance walker enumerates under `tests/` today:
+ * `.ts` (every `listSourceFiles(TESTS_ROOT …)` caller), `.mts`
+ * (tests/support/flake-shape-scan.ts's support population) and `.mjs`
+ * (tests/config/tmp-fixture-hygiene.test.ts). `.js`/`.cjs` are deliberately
+ * absent — no walker enumerates them under `tests/`, and a fixture
+ * `npm install` dropping JavaScript into a fixture workspace is not this
+ * defect. A walker that adds an extension adds it here.
  */
-export const GUARDED_EXTENSIONS: readonly string[] = [
-	".ts",
-	".mts",
-	".cts",
-	".mjs",
-];
+export const GUARDED_EXTENSIONS: readonly string[] = [".ts", ".mts", ".mjs"];
 
 /** Per-run record cap (bounded observability, AGENTS.md shape 9): a runaway
  *  producer must not retain an unbounded list. The first paths are the

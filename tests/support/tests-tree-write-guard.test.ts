@@ -122,12 +122,21 @@ describe("tests-tree write guard (#3082)", () => {
 		}
 	});
 
-	it("the setup arm throws the report, and closes the watch either way", () => {
+	it("the setup arm throws the report, and closes the watch on the way out", () => {
 		const root = fixtureTree();
 		const guard = offlineGuard(root);
-		const teardown = runTestsTreeWriteGuardSetup(root, guard);
+		let closed = 0;
+		const teardown = runTestsTreeWriteGuardSetup(root, {
+			...guard,
+			close: () => {
+				closed += 1;
+				guard.close();
+			},
+		});
 		guard.record("scratch-setup.test.ts");
 		expect(() => teardown()).toThrow(/scratch-setup\.test\.ts/);
+		// The throw must not leak the inotify handle (AGENTS.md shape 4).
+		expect(closed).toBe(1);
 	});
 
 	it("the setup arm is silent on a tree nothing created a source file in", () => {

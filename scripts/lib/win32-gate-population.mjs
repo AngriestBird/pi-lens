@@ -80,7 +80,7 @@ function readWalkedFile(absolute) {
 	try {
 		return readFileSync(absolute, "utf8");
 	} catch (error) {
-		if (error?.code !== "ENOENT" && error?.code !== "ENOTDIR") throw error;
+		if (error?.code !== "ENOENT") throw error;
 		console.warn(
 			`[win32-gate-population] ${absolute} vanished between the walk and the read; skipped (#3082)`,
 		);

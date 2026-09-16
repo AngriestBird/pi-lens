@@ -577,8 +577,7 @@ export function readWalkedFile(file: string): string | undefined {
 	try {
 		return fs.readFileSync(file, "utf8");
 	} catch (error) {
-		const code = (error as NodeJS.ErrnoException).code;
-		if (code !== "ENOENT" && code !== "ENOTDIR") throw error;
+		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
 		if (!vanishedBetweenWalkAndRead.has(file)) {
 			vanishedBetweenWalkAndRead.add(file);
 			console.warn(
