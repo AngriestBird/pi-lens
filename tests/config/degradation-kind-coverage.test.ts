@@ -257,11 +257,23 @@ function bareIdentifierKind(optionsLiteral: string): string | undefined {
  * false-negative half of the #3071 gap: the scan returned `[]` with no
  * "unresolvable" signal for a value it could have read one line away.
  *
- * Returns `undefined` when no such SAME-FILE binding exists, including a
- * binding reached only through an import — `AUDITED_IDENTIFIER_KIND_SITES`
- * names that case explicitly instead of this function chasing it: an
- * import's own resolution rules (relative path, `.js`/`.ts` extension,
- * barrel re-exports) would turn this from one rule into a heuristic pile.
+ * Returns `undefined` when no such SAME-FILE TOP-LEVEL binding exists,
+ * including a binding reached only through an import —
+ * `AUDITED_IDENTIFIER_KIND_SITES` names that case explicitly instead of this
+ * function chasing it: an import's own resolution rules (relative path,
+ * `.js`/`.ts` extension, barrel re-exports) would turn this from one rule
+ * into a heuristic pile — and including a FUNCTION-SCOPED `const` of the
+ * same name (round 2 finding, #3140): every module-level statement in this
+ * repo's own oxfmt-enforced style starts at COLUMN 0, and anything nested
+ * inside a block is indented at least one level, so `^(?:export\s+)?const`
+ * anchored with the `m` flag is genuine top-level structure, not a
+ * heuristic — a shadowing function-scoped `const TRUST_REFUSAL_KIND = "…"`
+ * inside some unrelated function must never satisfy this and hand back its
+ * value instead of falling through to the loud "unresolvable" report; that
+ * silently-wrong resolution is exactly the failure mode this design exists
+ * to prevent. When BOTH a top-level const and a same-named function-scoped
+ * shadow exist, the top-level one's value is what resolves — the anchor
+ * only excludes the shadow, it does not refuse the file.
  */
 function resolveSameFileConstKind(
 	fileSource: string,
@@ -273,8 +285,14 @@ function resolveSameFileConstKind(
 	// object literal whose STRUCTURE this scan needs to walk.
 	const commentsBlanked = stripSource(fileSource, { strings: "keep" });
 	const STR = `("(?:[^"\\\\]|\\\\.)*"|'(?:[^'\\\\]|\\\\.)*')`;
+	// `^` (with `m`) anchors "const" — or "export const" — to the START of a
+	// LINE: genuine top-level structure in this repo's own tab-indented
+	// style, since anything nested inside a block carries at least one
+	// leading tab. A function-scoped shadow of the same name is therefore
+	// never a match, however far down the file it sits.
 	const pattern = new RegExp(
-		`(?<![\\w$.])const\\s+${identifier}\\s*=\\s*${STR}\\s*;`,
+		`^(?:export\\s+)?const\\s+${identifier}\\s*=\\s*${STR}\\s*;`,
+		"m",
 	);
 	const match = pattern.exec(commentsBlanked);
 	if (!match) return undefined;
@@ -495,6 +513,37 @@ describe("DegradationKind bare-identifier resolution (#3140)", () => {
 		expect(
 			resolveSameFileConstKind(fixtureSource, "TRUST_REFUSAL_KIND"),
 		).toBeUndefined();
+	});
+
+	// Round 2 finding: the doc comment above promises SAME-FILE TOP-LEVEL, but
+	// the regex before this fix had no top-level anchor, so a function-scoped
+	// `const` shadowing the same name resolved to ITS value instead of falling
+	// through to the loud "unresolvable" report — silently-wrong resolution,
+	// exactly the failure mode this design exists to prevent. Latent today (no
+	// real call site is shadowed), pinned so it stays that way.
+	it("does not resolve a function-scoped const shadowing the same name (no top-level binding)", () => {
+		const fixtureSource =
+			"function unrelated() {\n" +
+			'\tconst TRUST_REFUSAL_KIND = "shadowed-wrong-value";\n' +
+			"\treturn TRUST_REFUSAL_KIND;\n" +
+			"}\n" +
+			"someOtherCall({ kind: TRUST_REFUSAL_KIND });\n";
+		expect(
+			resolveSameFileConstKind(fixtureSource, "TRUST_REFUSAL_KIND"),
+		).toBeUndefined();
+	});
+
+	it("resolves the TOP-LEVEL const, not a function-scoped shadow of the same name", () => {
+		const fixtureSource =
+			'const TRUST_REFUSAL_KIND = "trust-refusal";\n' +
+			"function unrelated() {\n" +
+			'\tconst TRUST_REFUSAL_KIND = "shadowed-wrong-value";\n' +
+			"\treturn TRUST_REFUSAL_KIND;\n" +
+			"}\n" +
+			"someOtherCall({ kind: TRUST_REFUSAL_KIND });\n";
+		expect(resolveSameFileConstKind(fixtureSource, "TRUST_REFUSAL_KIND")).toBe(
+			"trust-refusal",
+		);
 	});
 
 	it("classifies a same-file const identifier as a resolved kind", () => {
