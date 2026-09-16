@@ -36,6 +36,8 @@
  */
 import * as fs from "node:fs";
 
+import { BoundedFifoMap } from "../../clients/bounded-cache.js";
+
 /**
  * Per-worker record cap (bounded observability, AGENTS.md shape 9): a runaway
  * loop must not retain an unbounded list. The first records are the
@@ -65,11 +67,15 @@ let dropped = 0;
  * the group again to reach a SIGTERM-hardy grandchild (#2026/#2027). By then
  * `/proc/<leader>` is gone, which `/proc` alone cannot tell apart from a
  * fabricated pid — so ownership is remembered from the moment it was
- * verifiable, exactly as production resolves it at spawn time. Bounded: a
- * worker that spawns thousands of children clears rather than grows.
+ * verifiable, exactly as production resolves it at spawn time.
+ *
+ * FIFO-bounded rather than cleared wholesale (#3091 F5): a worker that spawns
+ * more than the cap and then group-kills an earlier, already-dead leader would
+ * get a FALSE violation from a wholesale clear — a flake shape inside the
+ * detector itself.
  */
-const ownedSeen = new Set<number>();
 const MAX_OWNED_SEEN = 512;
+const ownedSeen = new BoundedFifoMap<number, true>(MAX_OWNED_SEEN);
 
 /**
  * Ownership, read from the kernel.
@@ -92,8 +98,7 @@ function ownsPid(pid: number): boolean {
 	}
 	const match = /^PPid:\s*(\d+)$/m.exec(status);
 	if (!match || Number(match[1]) !== process.pid) return false;
-	if (ownedSeen.size >= MAX_OWNED_SEEN) ownedSeen.clear();
-	ownedSeen.add(pid);
+	ownedSeen.set(pid, true);
 	return true;
 }
 

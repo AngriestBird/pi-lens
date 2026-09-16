@@ -12,7 +12,15 @@
  * mid-session shutdowns where the host keeps running.
  */
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+	afterEach,
+	beforeAll,
+	beforeEach,
+	describe,
+	expect,
+	it,
+	vi,
+} from "vitest";
 
 const spawnMock = vi.fn((..._args: unknown[]) => ({
 	once: vi.fn(),
@@ -23,10 +31,32 @@ vi.mock("node:child_process", async (importOriginal) => {
 	return { ...actual, spawn: spawnMock };
 });
 
-const { killProcessTree } = await import("../../../clients/lsp/client.js");
+/**
+ * #3091 F4 made `/proc` availability a MODULE-LOAD probe in
+ * `clients/safe-spawn.ts`, so a platform stub applied inside a test no longer
+ * reaches the ownership predicate — the stub has to be in place before the
+ * module graph is imported. Each block below therefore loads its own instance
+ * with its own platform (AGENTS.md shape 30: "use a live platform read or an
+ * isolated fresh import for every platform branch test"), instead of one
+ * top-level import shared by two platforms.
+ */
+type KillProcessTree =
+	(typeof import("../../../clients/lsp/client.js"))["killProcessTree"];
+
+async function importForPlatform(
+	platform: NodeJS.Platform,
+): Promise<KillProcessTree> {
+	Object.defineProperty(process, "platform", {
+		value: platform,
+		configurable: true,
+	});
+	vi.resetModules();
+	return (await import("../../../clients/lsp/client.js")).killProcessTree;
+}
 
 describe("killProcessTree", () => {
 	const realPlatform = process.platform;
+	let killProcessTree: KillProcessTree;
 	let processKillSpy: ReturnType<typeof vi.spyOn> | undefined;
 
 	afterEach(() => {
@@ -40,6 +70,10 @@ describe("killProcessTree", () => {
 	});
 
 	describe("Windows process-exit teardown", () => {
+		beforeAll(async () => {
+			killProcessTree = await importForPlatform("win32");
+		});
+
 		beforeEach(() => {
 			spawnMock.mockClear();
 			Object.defineProperty(process, "platform", {
@@ -68,18 +102,23 @@ describe("killProcessTree", () => {
 	});
 
 	describe("POSIX process-group teardown", () => {
+		// "darwin", not "linux". These cases exercise the escalation LADDER
+		// (group SIGTERM -> 1.5s -> group SIGKILL, direct-child fallback)
+		// against the fabricated pid 4242, and on Linux the #2042 ownership
+		// predicate reads /proc and refuses to signal a pid this process does
+		// not own — which is the point of the fix, and would make every
+		// assertion below about a pid that belongs to nobody. A POSIX platform
+		// without /proc keeps ownership unverifiable, which is the best-effort
+		// behaviour these cases were written for. The LINUX arm of the same
+		// ladder is driven against a REAL owned child in
+		// tests/clients/lsp/kill-process-tree-real-child.test.ts, and the Linux
+		// refusal in tests/clients/safe-spawn-kill-ownership.test.ts.
+		beforeAll(async () => {
+			killProcessTree = await importForPlatform("darwin");
+		});
+
 		beforeEach(() => {
 			spawnMock.mockClear();
-			// #2042: "darwin", not "linux". These cases exercise the escalation
-			// LADDER (group SIGTERM -> 1.5s -> group SIGKILL, direct-child
-			// fallback) against a fabricated pid, and on Linux the ownership
-			// predicate now reads /proc and refuses to signal a pid this
-			// process does not own — which is the point of the fix, and would
-			// make every assertion below about a pid 4242 that belongs to
-			// nobody. A POSIX platform without /proc keeps ownership
-			// unverifiable, which is exactly the best-effort behaviour these
-			// cases were written for. The Linux refusal itself is asserted in
-			// tests/clients/safe-spawn-kill-ownership.test.ts.
 			Object.defineProperty(process, "platform", {
 				value: "darwin",
 				configurable: true,

@@ -84,8 +84,12 @@ describe("kill-by-pid ownership (#2042)", () => {
 				process.off("exit", listener as () => void);
 		}
 		vi.restoreAllMocks();
-		vi.resetModules();
 		vi.doUnmock("node:child_process");
+		// node:fs is mocked by the /proc-unreadable case; a leaked fs mock makes
+		// every later ownership read fail, which is silently INDISTINGUISHABLE
+		// from the fix working (defect shape 7).
+		vi.doUnmock("node:fs");
+		vi.resetModules();
 	});
 
 	it("refuses a malformed pid at every site", () => {
@@ -96,33 +100,87 @@ describe("kill-by-pid ownership (#2042)", () => {
 	});
 
 	/**
-	 * The handle arm is the ONLY ownership evidence Windows has — there is no
-	 * `/proc` to read there, so `lsp/launch.ts#killWindowsTree`'s recycled-pid
-	 * protection (a `taskkill /F /T` on a dead pid destroys whatever process
-	 * inherited the number, and once took out a vitest worker fork) now lives
-	 * in this predicate. Driven through a live `process.platform` read rather
-	 * than a Windows-only lane (AGENTS.md shape 30 / the platform rule): the
-	 * divergence is a `/proc` availability artifact, not real Windows
-	 * behaviour, so the ubuntu lane runs it.
+	 * The handle arm is the ONLY ownership evidence a platform without `/proc`
+	 * has — `lsp/launch.ts#killWindowsTree`'s recycled-pid protection (a
+	 * `taskkill /F /T` on a dead pid destroys whatever process inherited the
+	 * number, and once took out a vitest worker fork) now lives in this
+	 * predicate. `/proc` availability is probed once at MODULE LOAD (#3091 F4),
+	 * so this drives a fresh import with the platform already stubbed rather
+	 * than a Windows-only lane — AGENTS.md shape 30, and the platform rule's
+	 * preferred cross-platform variant: the divergence is a `/proc` artifact,
+	 * not real Windows behaviour, so the ubuntu lane runs it.
 	 */
-	it("on a platform without /proc, only the handle can refuse a pid", () => {
+	it("on a platform without /proc, only the handle can refuse a pid", async () => {
 		const real = Object.getOwnPropertyDescriptor(process, "platform");
 		Object.defineProperty(process, "platform", {
 			value: "win32",
 			configurable: true,
 		});
 		try {
+			vi.resetModules();
+			const { isOwnLiveChild: fresh } =
+				await import("../../clients/safe-spawn.js");
 			// Best-effort stays best-effort where ownership is unverifiable...
-			expect(isOwnLiveChild(process.ppid, "test")).toBe(true);
-			// ...but a handle that already reported exit is proof it is dead.
-			expect(isOwnLiveChild(process.ppid, "test", { exitCode: 0 })).toBe(false);
-			expect(
-				isOwnLiveChild(process.ppid, "test", { signalCode: "SIGTERM" }),
-			).toBe(false);
+			expect(fresh(process.ppid, "test")).toBe(true);
+			// ...but a handle that already reported exit is proof it is dead, and
+			// it overrides everything, including the memo.
+			expect(fresh(process.ppid, "test", { exitCode: 0 })).toBe(false);
+			expect(fresh(process.ppid, "test", { signalCode: "SIGTERM" })).toBe(
+				false,
+			);
 		} finally {
 			if (real) Object.defineProperty(process, "platform", real);
 		}
 	});
+
+	/**
+	 * #3091 F4: `process.platform === "linux"` is not the same question as "can
+	 * I read /proc". A Linux host with `/proc` unmounted made every per-pid read
+	 * fail exactly the way a dead pid does, so nothing was ever registered and
+	 * the host-exit tree kill silently stopped working.
+	 */
+	posixOnly(
+		"falls back to best-effort, with a record, when /proc is unreadable on Linux",
+		async () => {
+			vi.resetModules();
+			vi.doMock("node:fs", async (importOriginal) => {
+				const actual = await importOriginal<typeof import("node:fs")>();
+				return {
+					...actual,
+					default: actual,
+					readFileSync: (file: unknown, ...rest: unknown[]) => {
+						if (typeof file === "string" && file.startsWith("/proc/"))
+							throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+						return (actual.readFileSync as (...args: unknown[]) => unknown)(
+							file,
+							...rest,
+						);
+					},
+				};
+			});
+			const { isOwnLiveChild: fresh } =
+				await import("../../clients/safe-spawn.js");
+			// The ledger must be the instance the FRESH safe-spawn writes to —
+			// `vi.resetModules()` gives it a new one, and reading the statically
+			// imported twin would report an empty ledger (defect shape 14).
+			const { getDegradationSummary: freshSummary } =
+				await import("../../clients/degradation-ledger.js");
+
+			// Best-effort, exactly as on a platform that never had /proc — NOT a
+			// silent refusal that disables every kill (defect shape 10).
+			expect(fresh(process.ppid, "proc-unreadable-site")).toBe(true);
+			fresh(process.ppid, "proc-unreadable-site");
+
+			const group = freshSummary().find(
+				(entry) => entry.kind === "kill-ownership-unverifiable",
+			);
+			expect(group?.latestReasons.map((entry) => entry.subject)).toEqual([
+				"proc-unreadable-site",
+			]);
+			// Once per session, not once per call.
+			expect(group?.count).toBe(1);
+		},
+	);
 
 	posixOnly(
 		"refuses a live pid belonging to another parent, and records it once per site",

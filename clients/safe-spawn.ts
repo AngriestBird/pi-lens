@@ -27,6 +27,7 @@ import { logLatency } from "./latency-logger.js";
 import {
 	incrementDegradationCount,
 	recordDegradation,
+	recordDegradationOnce,
 } from "./degradation-ledger.js";
 import { logExtension } from "./extension-log.js";
 import { isFullyQualifiedWin32 } from "./path-utils.js";
@@ -414,11 +415,52 @@ const lifetimeState =
  *    `/proc/<pid>/status` is the kernel's own answer. Missing entry = the pid
  *    does not exist, so there is nothing of ours to kill; `PPid` other than
  *    ours = someone else's process, which is recorded and never signalled.
- *  - Windows and macOS have no `/proc`, so ownership is unverifiable from a
- *    raw pid and the predicate keeps today's best-effort behaviour. The
- *    `handle` arm still applies there: it is the only ownership evidence
- *    Windows has, and it is what `killWindowsTree` already used.
+ *  - Windows and macOS have no `/proc` (and neither does a Linux host with
+ *    `/proc` unmounted — probed once, not assumed from `process.platform`),
+ *    so ownership is unverifiable from a raw pid and the predicate keeps
+ *    today's best-effort behaviour. The `handle` arm applies THERE and only
+ *    there: it is the only ownership evidence Windows has, and it is what
+ *    `killWindowsTree` already used. It must not gate the POSIX group kill,
+ *    which legitimately runs after its leader has died (#3091 F1).
  */
+/**
+ * Whether `/proc/<pid>/status` can actually be read here, probed ONCE against
+ * this process's own entry (#3091 F4). `process.platform === "linux"` is not
+ * the same question: a container or a hardened host can run Linux with no
+ * `/proc` mounted, and there the per-pid read fails exactly the way a dead pid
+ * does. Without this probe that silently refused every registration, so
+ * `lifetimeState.pids` stayed empty and the host-exit tree kill stopped working
+ * with no record anywhere.
+ */
+const PROC_PPID_READABLE = ((): boolean => {
+	if (process.platform !== "linux") return false;
+	try {
+		return /^PPid:\s*\d+$/m.test(fs.readFileSync("/proc/self/status", "utf8"));
+	} catch {
+		return false;
+	}
+})();
+
+/**
+ * Pids this process has PROVEN, from the kernel, to be its own live children.
+ * FIFO-bounded (`BoundedFifoMap`, not a wholesale clear): a process that spawns
+ * more than the cap drops its OLDEST verdicts, where a wholesale clear would
+ * drop the one it is about to need.
+ */
+const VERIFIED_OWN_PID_CAP = 512;
+const verifiedOwnPids = new BoundedFifoMap<number, true>(VERIFIED_OWN_PID_CAP);
+
+/** Once per session: a Linux host whose `/proc` cannot answer the question. */
+function recordProcUnavailable(site: string): void {
+	if (process.platform !== "linux") return;
+	recordDegradationOnce({
+		kind: "kill-ownership-unverifiable",
+		subject: site,
+		reason:
+			"/proc/self/status is unreadable on this Linux host; kill-by-pid ownership falls back to best-effort",
+	});
+}
+
 export function isOwnLiveChild(
 	pid: number | undefined,
 	site: string,
@@ -426,22 +468,41 @@ export function isOwnLiveChild(
 ): boolean {
 	if (typeof pid !== "number" || !Number.isInteger(pid) || pid <= 0)
 		return false;
-	// A handle that has already reported exit is proof the pid is dead — and
-	// therefore possibly recycled to an unrelated process.
-	if (handle && (handle.exitCode != null || handle.signalCode != null))
-		return false;
-	if (process.platform !== "linux") return true;
+	if (!PROC_PPID_READABLE) {
+		// No `/proc` to consult. A handle that has already reported exit is then
+		// the ONLY ownership evidence available, and it is exactly what
+		// `killWindowsTree` used before this predicate existed: a dead pid may
+		// have been recycled, and `taskkill /F /T` on a recycled pid destroys an
+		// unrelated tree. It overrides the memo below deliberately.
+		if (handle && (handle.exitCode != null || handle.signalCode != null))
+			return false;
+		recordProcUnavailable(site);
+		return true;
+	}
 	let status: string;
 	try {
 		status = fs.readFileSync(`/proc/${pid}/status`, "utf8");
 	} catch {
-		// No such process. Not a degradation: a child that exited before the
-		// teardown signal is the ordinary case, and nothing is at risk.
-		return false;
+		// The pid does not exist. Not a degradation — a child that exited before
+		// the teardown signal is the ordinary case — but not automatically a
+		// refusal either: a POSIX process GROUP outlives its leader, and #2026's
+		// whole point is that the escalation must still reach a SIGTERM-hardy
+		// grandchild after the direct child has died. Ownership verified while
+		// the leader was alive is what answers that; a pid this process never
+		// owned is still refused.
+		return verifiedOwnPids.has(pid);
 	}
 	const parent = /^PPid:\s*(\d+)$/m.exec(status);
 	if (!parent) return true;
-	if (Number(parent[1]) === process.pid) return true;
+	if (Number(parent[1]) === process.pid) {
+		// Memoized only on a KERNEL-verified verdict, and only here: a pid we
+		// never proved was ours can never enter the memo, and a pid that is
+		// alive under a different parent is refused above regardless of what the
+		// memo holds — so a recycled pid cannot be signalled on the strength of
+		// its previous owner.
+		verifiedOwnPids.set(pid, true);
+		return true;
+	}
 	// Alive AND someone else's: the dangerous case, and the only one worth a
 	// record. Subject is the SITE (a fixed, tiny set), never the pid, so the
 	// ledger stays bounded however often it fires.

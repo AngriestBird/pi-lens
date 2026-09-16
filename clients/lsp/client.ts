@@ -1349,7 +1349,15 @@ export async function killProcessTree(
 		// through. A pid we do not own falls back to `killDirectChild` below,
 		// which signals through the retained handle and can only ever reach
 		// our own child.
-		if (!isOwnLiveChild(pid, "lsp-stop-posix-group", proc)) return false;
+		//
+		// #3091 F1: `proc` is deliberately NOT passed. The handle arm means
+		// "already exited ⇒ refuse", and this group kill must still fire when
+		// the direct child is dead — the early return at :1269 is skipped under
+		// `options.processExiting`, and a POSIX group outlives its leader, so
+		// the group signal is the only thing that reaps surviving grandchildren
+		// at host exit (#2026). Ownership here comes from the kernel and, once
+		// the leader is gone, from the verdict recorded while it was alive.
+		if (!isOwnLiveChild(pid, "lsp-stop-posix-group")) return false;
 		try {
 			process.kill(-pid, signal);
 			return true;

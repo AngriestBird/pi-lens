@@ -284,6 +284,14 @@ export type DegradationKind =
 	 * nothing is at risk.
 	 */
 	| "kill-foreign-pid-refused"
+	/**
+	 * #3091 F4: this Linux host cannot read `/proc/self/status`, so
+	 * kill-by-raw-pid ownership cannot be verified and falls back to the
+	 * best-effort behaviour the non-Linux platforms get. Once per session
+	 * (`recordDegradationOnce`); subject is the first call site that hit it.
+	 * Without this row the fallback is indistinguishable from a healthy run.
+	 */
+	| "kill-ownership-unverifiable"
 	/** A didChange content mirror was recorded behind a newer document version. */
 	| "lens-diagnostics-analysis-root-rejected"
 	/** Cross-graph rotation options disagreed; the first writer retained ownership. */
