@@ -156,11 +156,17 @@ vi.mock("../../clients/instance-reaper-state.js", () => ({
  * and owns its own directories — the same reasoning as the `pi-lens-test-home-`
  * admission below. A run that excludes the hygiene owner keeps its directories,
  * exactly as it already keeps its `tmp-hygiene-baseline-<run>.json`.
+ *
+ * `home` exists so the owner's own guard can drive this rule over a fixture
+ * directory. The sweep is destructive and the guard runs inside the LAST
+ * worker, so a guard aimed at the live home would perform the cleanup itself
+ * and hide whether `cleanupTmpHygiene` still calls this at all — measured:
+ * with the call deleted, a guard on the live home held the leftover count at 0.
  */
-export function removeRunBackstopDirs(): void {
-	for (const name of readTmpDirEntries(tmpHygieneHome)) {
+export function removeRunBackstopDirs(home: string = tmpHygieneHome): void {
+	for (const name of readTmpDirEntries(home)) {
 		if (!name.startsWith(backstopRunPrefix)) continue;
-		removeTempDirSync(path.join(tmpHygieneHome, name));
+		removeTempDirSync(path.join(home, name));
 	}
 }
 

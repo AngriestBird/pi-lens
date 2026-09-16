@@ -144,13 +144,22 @@ describe("tmp-fixture-hygiene", () => {
 	// without its own pin, and this owner cannot pin a home — the run-shared one
 	// is its subject. Comments are blanked before that scan, so this note neither
 	// trips nor excuses it.
+	//
+	// Over a FIXTURE directory, not the live home: the sweep is destructive and
+	// this file is the last worker, so pointing the guard at the live home would
+	// perform the run's cleanup from inside the assertion and hide whether
+	// `cleanupTmpHygiene` still calls the sweep at all. That the default target
+	// is the live home is what the out-of-process leftover count proves.
 	it("sweeps this run's private backstop directories and spares a sibling invocation's", () => {
-		const home = process.env.PI_LENS_HOME as string;
+		const fixture = path.join(
+			process.env.PI_LENS_HOME as string,
+			`hygiene-backstop-guard-${process.env.PI_LENS_TMP_HYGIENE_RUN_ID}`,
+		);
 		const mine = path.join(
-			home,
+			fixture,
 			`backstop-${process.env.PI_LENS_TMP_HYGIENE_RUN_ID}-owner-guard`,
 		);
-		const sibling = path.join(home, "backstop-0000000000-0-owner-guard");
+		const sibling = path.join(fixture, "backstop-0000000000-0-owner-guard");
 		for (const dir of [mine, sibling]) {
 			fs.mkdirSync(path.join(dir, "nested"), { recursive: true });
 			fs.writeFileSync(
@@ -159,11 +168,11 @@ describe("tmp-fixture-hygiene", () => {
 			);
 		}
 		try {
-			removeRunBackstopDirs();
+			removeRunBackstopDirs(fixture);
 			expect(fs.existsSync(mine)).toBe(false);
 			expect(fs.existsSync(sibling)).toBe(true);
 		} finally {
-			fs.rmSync(sibling, { recursive: true, force: true });
+			fs.rmSync(fixture, { recursive: true, force: true });
 		}
 	});
 
