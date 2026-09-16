@@ -14,7 +14,7 @@
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { CacheManager } from "../../clients/cache-manager.js";
 import { buildResolvedFoundCascadeRun } from "../../clients/cascade-format.js";
 import {
@@ -32,12 +32,6 @@ import { consumeTurnEndFindings } from "../../clients/runtime-context.js";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
 import { handleTurnEnd } from "../../clients/runtime-turn.js";
 import { removeTempDirSync, setupTestEnvironment } from "./test-utils.js";
-
-vi.mock("../../clients/cascade-logger.js", () => ({
-	logCascade: vi.fn(),
-	flushCascadeLog: vi.fn().mockResolvedValue(undefined),
-	getCascadeLogPath: vi.fn().mockReturnValue("/dev/null"),
-}));
 
 const MARKED_MESSAGE = "cold neighbour error the agent dismissed";
 const OTHER_MESSAGE = "cold neighbour error nobody marked";
@@ -94,9 +88,7 @@ async function reconcileAndDeliver(diags: LSPDiagnostic[]): Promise<string> {
 			client: {
 				serverId: "typescript",
 				getAllDiagnostics: () =>
-					new Map([
-						[normalizeMapKey(neighbor), { ts: Date.now(), diags }],
-					]),
+					new Map([[normalizeMapKey(neighbor), { ts: Date.now(), diags }]]),
 			},
 		}),
 	} as never);
@@ -136,9 +128,8 @@ async function reconcileAndDeliver(diags: LSPDiagnostic[]): Promise<string> {
 }
 
 async function mark(params: Record<string, unknown>) {
-	const { createLensDiagnosticMarkTool } = await import(
-		"../../tools/lens-diagnostic-mark.js"
-	);
+	const { createLensDiagnosticMarkTool } =
+		await import("../../tools/lens-diagnostic-mark.js");
 	const markTool = createLensDiagnosticMarkTool(() => env.tmpDir);
 	return markTool.execute("mark-3102", params, undefined, () => {}, {
 		cwd: env.tmpDir,

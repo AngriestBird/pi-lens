@@ -70,6 +70,15 @@ policy (`clients/dispatch/finding-policy.ts`). That covers the per-edit
 feedback, `lens_diagnostics` `mode=delta`/`mode=all`/`mode=full`, and — since
 #3088 — the `lens_diagnostics` `source=lsp` probe lane together with the legacy
 `lsp_diagnostics` tool and the MCP `pilens_lsp_diagnostics` shim that share it.
+Since #3102 it also covers the two PUSH surfaces that were still unfiltered:
+the turn-end **late-auxiliary advisory** (findings an auxiliary LSP published
+after its grace window, drained at the next `turn_end`) and the **cold-neighbour
+cascade run** (`buildResolvedFoundCascadeRun`, built in the quiet-window
+reconcile). Both are pushed rather than asked for, so when a mark suppresses
+everything they had to say they say nothing at all — silence on a push surface
+is not a claim that the file is clean, and the drop count is recorded in the
+lane's own `late_auxiliary_findings` / `cascade_finding_policy` latency row. A
+delivery that still has something to say states what it dropped inline.
 
 Before #3088 the probe lane was the one exception: it returned the raw LSP
 result, so a finding marked `false-positive` stayed hidden in `delta`/`full`
