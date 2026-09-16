@@ -336,6 +336,29 @@ function replayConfigNotices(entry: {
  * Walk up from `startDir` looking for a `.pi-lens.json` or `pi-lens.json`.
  * Returns the parsed config, or an empty config if none was found.
  */
+/**
+ * Whether a config document actually SETS the dotted key `segments` spells —
+ * presence, not validity. A mixed-scope notice (#3112) must fire for
+ * `tools: { lazy: "yes" }` as much as for `tools: { lazy: false }`: the user
+ * wrote a global-only setting in a project file either way, and reading the
+ * VALUE (via `readFlagConfigValue`) would silently skip the malformed one.
+ */
+function hasConfigPath(
+	root: Record<string, unknown>,
+	segments: readonly string[],
+): boolean {
+	let current: unknown = root;
+	for (const segment of segments) {
+		if (!current || typeof current !== "object" || Array.isArray(current)) {
+			return false;
+		}
+		const record = current as Record<string, unknown>;
+		if (!(segment in record)) return false;
+		current = record[segment];
+	}
+	return true;
+}
+
 export function loadPiLensProjectConfig(
 	startDir: string,
 	preloadedInfo?: PiLensProjectConfigFileInfo,
@@ -1028,6 +1051,34 @@ function parseConfigFile(configPath: string): ParsedConfigFile {
 				),
 			);
 		}
+	}
+
+	// MIXED-SCOPE SECTIONS (#3112). A section can be project-scoped as a whole
+	// and still hold a `scope: "global"` flag: `tools` carries the project-owned
+	// per-tool `enabled` leaves AND the global `tools.lazy` (`--no-lazy-tools`),
+	// the same split `lsp` has (#2426 review round 2, F3). The top-level scan
+	// above sees only the SECTION name, so before #3112 a global-only flag
+	// written inside a recognized project section was dropped with no signal at
+	// all — the thing `docs/configuration.md` promises never happens.
+	//
+	// WHICH sub-keys those are is DERIVED from the flag registry, never listed
+	// here, so there is no second scope table to drift from the first. Two
+	// namespaces are deliberately skipped: one with an enumerated project-honored
+	// set (`lsp`), already scanned key-by-key by the loop above, and any key
+	// whose section is not recognized at project scope at all, already reported
+	// as a whole section. Everything else under a section is left to that
+	// section's own parser — `readToolConfig` reports an unknown tool name under
+	// its own code (`PILENS_CFG_0009`), and a second, generic "check for a typo"
+	// notice for the same key is exactly the duplicate-notice noise #2426 review
+	// round 6 removed.
+	for (const configKey of globalScopeOnlyFlagKeys) {
+		const segments = configKey.split(".");
+		if (segments.length < 2) continue;
+		const namespace = segments[0];
+		if (!knownProjectKeys.has(namespace)) continue;
+		if (PROJECT_FOREIGN_NAMESPACE_HONORED_KEYS.has(namespace)) continue;
+		if (!hasConfigPath(obj, segments)) continue;
+		warnUnhonoredKey(configKey, true);
 	}
 
 	return {

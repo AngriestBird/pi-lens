@@ -317,6 +317,19 @@ export const PROJECT_NON_FLAG_CONFIG_SECTIONS: readonly string[] = [
 	"trivy",
 	"helm",
 	"startup",
+	// `tools` is MIXED-SCOPE, and belongs here for the project-scoped half
+	// (#3112). `tools.<name>.enabled` is not a registry flag at all: it is
+	// hand-parsed by `readToolConfig` against `TOOL_REGISTRY` in BOTH loaders,
+	// and `resolveLensToolEnabled` reads the project document's value ahead of
+	// the global one — which is what `docs/settings.md` and
+	// `docs/globalconfig.md` document. Deriving the project-accepted sections
+	// from the flag registry alone therefore put the whole section in
+	// `globalScopeOnlyKeys` (its only registry flag, `tools.lazy`, IS global)
+	// and told every user of a documented per-tool override that it was being
+	// ignored. The global-only half is not lost: `tools.lazy` is still reported
+	// at project scope by the project loader's mixed-scope sub-key scan, which
+	// derives WHICH sub-keys those are from this same registry.
+	"tools",
 ];
 
 /**
