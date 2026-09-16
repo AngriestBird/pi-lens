@@ -382,6 +382,40 @@ describe("cache-replay probes honor marks like fresh ones (#3088)", () => {
 		expect(after.content[0].text).not.toContain(MESSAGE);
 	});
 
+	// The cache entry records the INLINE-suppressed set, never the
+	// disposition-filtered one: a mark can be revoked at any moment, and an
+	// entry that baked the mark in would keep the finding hidden until the file
+	// itself changed — the #571 class of stale hidden state. Mutation: record
+	// `effectiveRawDiags` (already policy-filtered at that point) instead of
+	// `policy.inlineKept` and this case reds.
+	it("resurfaces a finding on a replay once its mark is gone from the store", async () => {
+		const service = makeService();
+		await probe(service);
+		await mark({
+			filePath,
+			line: 1,
+			message: MESSAGE,
+			...CANONICAL_MARK,
+			disposition: "false-positive",
+		});
+		expect((await probe(service)).content[0].text).not.toContain(MESSAGE);
+
+		fs.rmSync(
+			path.join(
+				process.env.PILENS_DATA_DIR as string,
+				...fs
+					.readdirSync(process.env.PILENS_DATA_DIR as string)
+					.map((slug) => path.join(slug, "cache")),
+				"diagnostic-dispositions.json",
+			),
+		);
+		_resetStateCacheForTests();
+
+		const after = await probe(service);
+		expect(service.touchFile).toHaveBeenCalledTimes(1);
+		expect(after.content[0].text).toContain(MESSAGE);
+	});
+
 	it("drops a weak-marked finding on a replay with no content read at all", async () => {
 		const service = makeService(2);
 		await probe(service);
