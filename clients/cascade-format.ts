@@ -168,7 +168,7 @@ export function buildResolvedFoundCascadeRun(
 
 /** What one cascade neighbour's display list looks like after the stack. */
 export interface CascadeDisplayPolicyResult {
-	/** Survivors — what the cascade block renders. */
+	/** Survivors — what the cascade block renders, after `displayCap`. */
 	diagnostics: Diagnostic[];
 	/** Dropped by the policy stack (inline ignore / disposition / rule policy). */
 	suppressed: number;
@@ -243,6 +243,18 @@ export function applyCascadeDisplayPolicy(
 		 * this reads the file once — only now that there is something to render.
 		 */
 		content?: string;
+		/**
+		 * How many SURVIVORS one neighbour may render. Applied last, after the
+		 * policy, so a policy drop can never consume a display slot (#3157 round
+		 * 2, F1: with the cap applied first, a neighbour whose first 20 ERRORs
+		 * were all marked `false-positive` rendered NOTHING while genuine
+		 * unmarked errors sat below the cap — a false clean, and worse than the
+		 * unfiltered behaviour for that input). It also has to stay after
+		 * `retagAuxiliaryDiagnostics`, which needs `converted` index-aligned 1:1
+		 * with `errors`. Omitted → no display cap, which is the quiet-window
+		 * lane's single-neighbour case.
+		 */
+		displayCap?: number;
 	},
 ): CascadeDisplayPolicyResult {
 	if (errors.length === 0) {
@@ -268,7 +280,10 @@ export function applyCascadeDisplayPolicy(
 		identities: renderedRuleIdentities,
 	});
 	return {
-		diagnostics: kept,
+		diagnostics:
+			options.displayCap === undefined
+				? kept
+				: kept.slice(0, options.displayCap),
 		// Policy drops only, DISJOINT from `auxSuppressed` — the same split the
 		// `late_auxiliary_findings` record uses, so one operator reading both
 		// records does not have to know that one nests and the other does not.
@@ -296,8 +311,22 @@ export function recordCascadeFindingPolicy(entry: {
 	suppressed: number;
 	total: number;
 	auxSuppressed: number;
+	/**
+	 * ERRORs the policy never LOOKED at, because the caller's pre-policy input
+	 * bound cut them (#3157 round 2). Reported whenever it is non-zero even if
+	 * nothing else was dropped: an input bound whose loss is invisible is the
+	 * exact shape F1 found in the display cap, and this is the one counter that
+	 * keeps `total` from reading as the neighbour's whole error set.
+	 */
+	inputTruncated?: number;
 }): void {
-	if (entry.suppressed === 0 && entry.auxSuppressed === 0) return;
+	const inputTruncated = entry.inputTruncated ?? 0;
+	if (
+		entry.suppressed === 0 &&
+		entry.auxSuppressed === 0 &&
+		inputTruncated === 0
+	)
+		return;
 	logLatency({
 		type: "phase",
 		toolName: "cascade",
@@ -308,6 +337,7 @@ export function recordCascadeFindingPolicy(entry: {
 			suppressed: entry.suppressed,
 			total: entry.total,
 			auxSuppressed: entry.auxSuppressed,
+			...(inputTruncated > 0 && { inputTruncated }),
 		},
 	});
 }
@@ -315,13 +345,26 @@ export function recordCascadeFindingPolicy(entry: {
 /**
  * The neighbour's current bytes, for the two content-bound halves of the
  * policy stack (inline `pi-lens-ignore` and the STRICT `false-positive`
- * anchor). One synchronous read, paid only once a neighbour actually has
- * ERROR diagnostics to render — the same read `mode=full` pays per flagged
- * file and the probe lane pays per cache replay, and on the in-lane path the
- * binding verify (`boundToCurrentDisk`, `clients/lsp/diagnostic-binding.ts`)
- * already `readFileSync`s the same neighbour on the same line. `undefined` on
- * any failure: the caller degrades to the content-free half rather than
- * hiding a finding it could not identify.
+ * anchor). One synchronous read, paid only once a neighbour actually has ERROR
+ * diagnostics to render — the same read `mode=full` pays per flagged file and
+ * the probe lane pays per cache replay.
+ *
+ * SYNC here, while the in-lane cascade's own neighbour read at
+ * `clients/dispatch/integration.ts` (the active touch, under its "A6: async
+ * read to avoid blocking event loop on network-mounted drives" comment) is
+ * ASYNC. The asymmetry is deliberate and measured, not an oversight: that read
+ * happens for EVERY actively-touched neighbour in a parallel fan-out, while
+ * this one is paid at most once per DELIVERING neighbour — 0.0125 ms per
+ * neighbour measured on 40 real 15.6 KiB sources (#3157 AC 3), on loops that
+ * already do synchronous fs work (`nodeFs.existsSync` in the degraded
+ * fallback, and the `boundToCurrentDisk` verify whenever the producer attached
+ * a content hash and its (path, mtime, size) memo misses —
+ * `clients/lsp/diagnostic-binding.ts`). An async read here would force the
+ * quiet-window builder's synchronous callback to become async for no
+ * measurable gain.
+ *
+ * `undefined` on any failure: the caller degrades to the content-free half
+ * rather than hiding a finding it could not identify.
  */
 function readNeighborContent(filePath: string): string | undefined {
 	try {

@@ -573,6 +573,134 @@ describe("in-lane cascade neighbour diagnostics take the finding policy (#3157)"
 		expect(formatted).toContain(OTHER);
 	});
 
+	it("renders the genuine errors BELOW the display cap when the first MAX_PER_FILE are all marked", async () => {
+		// Round 2 F1: the `slice(0, MAX_PER_FILE)` display cap used to run BEFORE
+		// the policy, so policy drops consumed cap slots. A neighbour with 25
+		// ERRORs whose first 20 are marked false-positive rendered NOTHING — the
+		// five genuine ones were never looked at, the record said `total: 20`, and
+		// the empty block suppressed the #1616 sentence too. A false clean
+		// (AGENTS.md shape 10), and strictly worse than the pre-#3157 behaviour
+		// for this input.
+		fs.writeFileSync(
+			neighbor,
+			Array.from({ length: 25 }, (_, i) => `const v${i} = ${i};`).join("\n") +
+				"\n",
+		);
+		const diags = Array.from({ length: 25 }, (_, i) =>
+			errorDiag(i, `err-${i}`, 2300 + i),
+		);
+		for (let i = 0; i < 20; i++) {
+			await mark({
+				filePath: neighbor,
+				line: i + 1,
+				message: `err-${i}`,
+				tool: "lsp",
+				rule: `typescript:${2300 + i}`,
+				disposition: "false-positive",
+			});
+		}
+		const formatted = await cascadeFor(snapshotService(diags));
+		expect(formatted).toContain("err-20");
+		expect(formatted).toContain("err-24");
+		expect(formatted).not.toContain("err-19");
+		expect(formatted).toContain("suppressed by disposition: 20 finding(s)");
+		// The denominator is the neighbour's full ERROR count, not the cap.
+		expect(cascadePolicyRows()[0]?.metadata).toMatchObject({
+			suppressed: 20,
+			total: 25,
+			auxSuppressed: 0,
+		});
+	});
+
+	it("caps the SURVIVORS at MAX_PER_FILE, not the input", async () => {
+		// The display cap still bounds what one neighbour may print; it now cuts
+		// the tail of the KEPT list instead of the head of the raw list.
+		fs.writeFileSync(
+			neighbor,
+			Array.from({ length: 25 }, (_, i) => `const v${i} = ${i};`).join("\n") +
+				"\n",
+		);
+		const formatted = await cascadeFor(
+			snapshotService(
+				Array.from({ length: 25 }, (_, i) =>
+					errorDiag(i, `err-${i}`, 2300 + i),
+				),
+			),
+		);
+		expect(formatted).toContain("err-0");
+		expect(formatted).toContain("err-19");
+		expect(formatted).not.toContain("err-20");
+	});
+
+	it("counts the ERRORs the pre-policy input bound never showed the policy", async () => {
+		// The input bound (MAX_POLICY_INPUT_PER_FILE = 4x the display cap) exists
+		// for cost — the policy is linear in the finding count once the project has
+		// any mark. An input bound whose loss is INVISIBLE is the same defect F1
+		// found in the display cap, so the loss is counted even when the policy
+		// itself dropped nothing.
+		fs.writeFileSync(
+			neighbor,
+			Array.from({ length: 100 }, (_, i) => `const v${i} = ${i};`).join("\n") +
+				"\n",
+		);
+		await cascadeFor(
+			snapshotService(
+				Array.from({ length: 100 }, (_, i) =>
+					errorDiag(i, `err-${i}`, 2300 + i),
+				),
+			),
+		);
+		expect(cascadePolicyRows()[0]?.metadata).toMatchObject({
+			suppressed: 0,
+			auxSuppressed: 0,
+			total: 80,
+			inputTruncated: 20,
+		});
+	});
+
+	it("times the policy stack only, not the neighbour touch fan-out", async () => {
+		// Round 2 F2: `policyStart` was taken before the whole `touchFile` fan-out,
+		// so the in-lane `cascade_finding_policy` row reported the WALK (hundreds
+		// of ms) as the policy phase — three orders off what AC 3 measured, and
+		// incompatible with the quiet-window lane writing the same phase literal.
+		// The clock is faked (Date only, no real wait) so the slow touch costs
+		// nothing in wall time and the assertion is deterministic.
+		vi.useFakeTimers({ toFake: ["Date"] });
+		try {
+			const pyNeighbor = path.join(env.tmpDir, "neighbor.py");
+			fs.writeFileSync(pyNeighbor, "marked = 1\nother = 2\n");
+			await mark({
+				filePath: pyNeighbor,
+				line: 1,
+				message: MARKED,
+				tool: "lsp",
+				rule: "pyright:reportGeneralTypeIssues",
+				disposition: "false-positive",
+			});
+			const service = {
+				...makeLspServiceDouble(),
+				getAllDiagnostics: vi.fn().mockResolvedValue(new Map()),
+				touchFile: vi.fn(async () => {
+					// The neighbour walk's own cost, charged to the fan-out.
+					vi.setSystemTime(Date.now() + 300);
+					return {
+						diags: [
+							errorDiag(0, MARKED, "reportGeneralTypeIssues", "pyright"),
+							errorDiag(1, OTHER, "reportUnusedVariable", "pyright"),
+						],
+					};
+				}),
+			};
+			const formatted = await cascadeFor(service, [pyNeighbor]);
+			expect(formatted).not.toContain(MARKED);
+			const row = cascadePolicyRows()[0];
+			expect(row).toBeDefined();
+			expect(row?.durationMs).toBeLessThan(300);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
 	it("reads nothing for a neighbour with no ERROR diagnostics to render", async () => {
 		// The cost guard on the per-edit path: a cascade walks up to
 		// CASCADE_NEIGHBOUR_BUDGET (40) neighbours, and most of them are clean.
@@ -604,6 +732,56 @@ describe("in-lane cascade neighbour diagnostics take the finding policy (#3157)"
 		const formatted = await cascadeFor(service, [pyNeighbor]);
 		expect(formatted).toContain(MARKED);
 		expect(fsReads.byPath.get(pyNeighbor) ?? 0).toBe(0);
+	});
+
+	/**
+	 * Round 2 F3: the LANGUAGE-root half of the two-root split. `cwd` reaches
+	 * exactly one consumer — `profile.allowBlocking(cwd)`
+	 * (`clients/dispatch/auxiliary-lsp.ts:413`), which for opengrep is
+	 * `Boolean(findLocalOpengrepConfig(cwd))`, a WALK-UP from `cwd`
+	 * (`clients/path-utils.ts:556`). A config inside the language root is found
+	 * from there and NOT from the project root, which flips the aux finding's
+	 * `semantic` — and `applyDispositions` gates two of its three drop arms on
+	 * `d.semantic === "blocking"`. So the root choice decides whether a weak
+	 * `defer` mark hides this finding, on the display path, observably.
+	 *
+	 * The pair is deliberate: the second case is the control that proves the
+	 * defer mark matches at all, so the first cannot pass vacuously.
+	 */
+	async function deferredAuxNeighbour(withLocalOpengrepConfig: boolean) {
+		const languageRoot = path.join(env.tmpDir, "packages", "app");
+		fs.mkdirSync(languageRoot, { recursive: true });
+		const nested = path.join(languageRoot, "neighbor.ts");
+		fs.writeFileSync(nested, NEIGHBOR_BODY);
+		if (withLocalOpengrepConfig) {
+			fs.writeFileSync(path.join(languageRoot, ".opengrep.yml"), "rules: []\n");
+		}
+		// Premise: nothing ABOVE the project root supplies a config, or the two
+		// roots would not differ and this case would prove nothing.
+		const { findLocalOpengrepConfig } =
+			await import("../../clients/opengrep-config.js");
+		expect(findLocalOpengrepConfig(env.tmpDir)).toBeUndefined();
+		await mark({
+			filePath: nested,
+			line: 1,
+			message: MARKED,
+			tool: "opengrep",
+			rule: "opengrep:aux-rule",
+			disposition: "defer",
+		});
+		return cascadeFor(
+			snapshotService([errorDiag(0, MARKED, "aux-rule", "opengrep")], nested),
+			[nested],
+			{ cwd: languageRoot, projectRoot: env.tmpDir },
+		);
+	}
+
+	it("keeps an aux error BLOCKING when the local config sits at the language root, so a weak defer cannot hide it", async () => {
+		expect(await deferredAuxNeighbour(true)).toContain(MARKED);
+	});
+
+	it("control: with no local config the same aux error is advisory and the defer DOES hide it", async () => {
+		expect(await deferredAuxNeighbour(false)).not.toContain(MARKED);
 	});
 
 	it("keeps neighbour errors visible when the neighbour cannot be read (fail open)", async () => {

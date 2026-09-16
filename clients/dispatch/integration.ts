@@ -605,6 +605,25 @@ function ensureCascadeTurnScope(turnSeq: number): void {
 
 const MAX_PER_FILE = RUNTIME_CONFIG.pipeline.cascadeMaxDiagnosticsPerFile;
 const MAX_FILES = RUNTIME_CONFIG.pipeline.cascadeMaxFiles;
+/**
+ * How many of ONE neighbour's ERRORs the display policy may look at (#3157
+ * round 2, F1). `MAX_PER_FILE` is the DISPLAY cap and now applies to the
+ * survivors, so this is the separate, deliberately generous bound on the
+ * policy's INPUT — four full display caps of headroom, so a neighbour would
+ * need 80 suppressed findings before a genuine one could fall off the end
+ * again.
+ *
+ * It exists because the policy's cost is linear in the finding count once a
+ * project has ANY disposition mark (the zero-I/O hoist in
+ * `finding-policy.ts` stops firing and every finding expands into its
+ * candidate identities): measured on 40 real neighbours, 1.31 ms/neighbour at
+ * 20 findings, 4.74 ms at 80, and 28.29 ms at 500 — that last one is 1131
+ * ms/edit across a full 40-neighbour walk, a quarter of the `cascadeSettleWaitMs`
+ * window, for a neighbour nobody can read anyway. Truncation here is COUNTED
+ * (`inputTruncated` on the `cascade_finding_policy` row), because an input
+ * bound whose loss is invisible is exactly the defect F1 found.
+ */
+const MAX_POLICY_INPUT_PER_FILE = MAX_PER_FILE * 4;
 
 /**
  * The genuine language-server ERROR diagnostics from a cascade neighbor
@@ -627,8 +646,14 @@ const MAX_FILES = RUNTIME_CONFIG.pipeline.cascadeMaxFiles;
  * entries untouched. This keeps `isLspErrorEntry`'s "tool === 'lsp' uniquely
  * identifies a genuine language-server entry" contract true for what we write.
  *
- * The DISPLAY list (`diags` at each call site) is deliberately left as-is —
- * that is pre-existing cascade output behavior, out of scope for #1093.
+ * The DISPLAY list is no longer "left as-is" as it was for #1093: since #3157
+ * every display site runs `cascadeDisplay` → `applyCascadeDisplayPolicy`, which
+ * applies the finding-policy stack AND keeps the auxiliary retag's own drop set
+ * — so the display drops natively-suppressed aux findings while still RENDERING
+ * the aux findings this widget writer excludes wholesale. The two remain
+ * deliberately different: this one protects `isLspErrorEntry`'s "tool === 'lsp'"
+ * contract for PERSISTED widget state, which the ephemeral display list never
+ * touches.
  */
 function cascadeReconcilableLspErrors(
 	rawDiags: readonly import("../lsp/client.js").LSPDiagnostic[],
@@ -1698,8 +1723,18 @@ export async function computeCascadeForFile(
 		// cascade walks up to `CASCADE_NEIGHBOUR_BUDGET` (40) neighbours per edit,
 		// so a record inside the loop would be per-occurrence logging on a per-edit
 		// path — one bounded row per RUN instead (AGENTS.md "bounded observability").
-		const policyStart = Date.now();
-		const policyCounts = { suppressed: 0, auxSuppressed: 0, total: 0 };
+		// `policyElapsedMs` accumulates ONLY the stack's own time (round 2, F2): a
+		// clock started here would have spanned the whole `touchFile` fan-out and
+		// reported the neighbour WALK as the policy phase — hundreds of ms against
+		// the sub-millisecond cost AC 3 measured, under the same phase literal the
+		// quiet-window lane writes.
+		let policyElapsedMs = 0;
+		const policyCounts = {
+			suppressed: 0,
+			auxSuppressed: 0,
+			total: 0,
+			inputTruncated: 0,
+		};
 		/**
 		 * The ONE seam every in-lane cascade DISPLAY list goes through (#3157).
 		 *
@@ -1717,24 +1752,32 @@ export async function computeCascadeForFile(
 		 * exact bytes the diagnostics were computed against, so it is both free and
 		 * more faithful than a re-read. The other three sites let the shared helper
 		 * read once, and only once a neighbour actually has an ERROR to render.
+		 *
+		 * Stage order (round 2, F1): severity filter → input bound → convert →
+		 * retag → policy → DISPLAY cap. `MAX_PER_FILE` is applied to the survivors
+		 * inside the helper; applying it here, before the policy, let policy drops
+		 * consume display slots and rendered a false clean.
 		 */
 		const cascadeDisplay = (
 			rawDiags: readonly import("../lsp/client.js").LSPDiagnostic[],
 			neighborPath: string,
 			neighborContent?: string,
 		): CascadeResult["neighbors"][number]["diagnostics"] => {
-			const result = applyCascadeDisplayPolicy(
-				rawDiags.filter((d) => d.severity === 1).slice(0, MAX_PER_FILE),
-				{
-					cwd,
-					policyRoot: projectRoot ?? cwd,
-					filePath: neighborPath,
-					...(neighborContent !== undefined && { content: neighborContent }),
-				},
-			);
+			const started = Date.now();
+			const errors = rawDiags.filter((d) => d.severity === 1);
+			const policyInput = errors.slice(0, MAX_POLICY_INPUT_PER_FILE);
+			const result = applyCascadeDisplayPolicy(policyInput, {
+				cwd,
+				policyRoot: projectRoot ?? cwd,
+				filePath: neighborPath,
+				displayCap: MAX_PER_FILE,
+				...(neighborContent !== undefined && { content: neighborContent }),
+			});
 			policyCounts.suppressed += result.suppressed;
 			policyCounts.auxSuppressed += result.auxSuppressed;
 			policyCounts.total += result.total;
+			policyCounts.inputTruncated += errors.length - policyInput.length;
+			policyElapsedMs += Date.now() - started;
 			return result.diagnostics;
 		};
 
@@ -2279,16 +2322,19 @@ export async function computeCascadeForFile(
 		}
 
 		// #3157: ONE row per cascade run, covering every neighbour the four display
-		// sites filtered — never one per neighbour. `durationMs` covers the content
-		// reads the fold added, so the cost AC 3 measures is visible in the same
-		// per-phase record as every other cascade cost. Silent when nothing was
-		// dropped; gated on EITHER counter inside `recordCascadeFindingPolicy`.
+		// sites filtered — never one per neighbour. `durationMs` is the stack's own
+		// accumulated time (the content reads the fold added included), NOT the
+		// neighbour walk it runs inside, so this row stays comparable with the
+		// quiet-window lane's row under the same phase literal (round 2, F2).
+		// Silent when nothing was dropped or truncated; gated inside
+		// `recordCascadeFindingPolicy`.
 		recordCascadeFindingPolicy({
 			filePath,
-			durationMs: Date.now() - policyStart,
+			durationMs: policyElapsedMs,
 			suppressed: policyCounts.suppressed,
 			total: policyCounts.total,
 			auxSuppressed: policyCounts.auxSuppressed,
+			inputTruncated: policyCounts.inputTruncated,
 		});
 
 		const visibleNeighbors = applyCascadeDeltaBaselines(neighbors);
