@@ -166,13 +166,18 @@ export function removeRunBackstopDirs(): void {
 
 // #3083, master red 038e28b: catch a new transitive writer in whichever
 // file introduced it. The runtime hermeticity test also observes released locks.
+// By PREFIX, not by the two exact names (PR #3100 round 2): reverting the
+// identity rule left `orphan-backstop.lock.quarantine-<pid>-release-…/` at the
+// shared root beside the stamp — durable residue of a contended lock that
+// neither exact name covers, and the only residue left by a writer that
+// quarantines a lock without reaching the stamp.
 afterAll(() => {
-	for (const name of ["orphan-backstop.json", "orphan-backstop.lock"]) {
-		expect(
-			fs.existsSync(path.join(tmpHygieneHome, name)),
-			`#3083: test wrote run-shared ${name}`,
-		).toBe(false);
-	}
+	expect(
+		readTmpDirEntries(tmpHygieneHome).filter((entry) =>
+			entry.startsWith("orphan-backstop"),
+		),
+		"#3083: test wrote run-shared orphan-backstop state",
+	).toEqual([]);
 });
 
 interface TmpLeakAdmission {
