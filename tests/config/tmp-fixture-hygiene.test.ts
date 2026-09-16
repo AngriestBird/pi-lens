@@ -150,6 +150,11 @@ describe("tmp-fixture-hygiene", () => {
 	// perform the run's cleanup from inside the assertion and hide whether
 	// `cleanupTmpHygiene` still calls the sweep at all. That the default target
 	// is the live home is what the out-of-process leftover count proves.
+	//
+	// All four cells of the cleanup axis in one case (round 3 F1). Before the
+	// stale arm, `oldForeign` had no remover at all: a run-id-only sweep cleans
+	// only itself, so every targeted invocation that excludes this file left one
+	// more stamped directory under the persistent home for ever.
 	it("sweeps this run's private backstop directories and spares a sibling invocation's", () => {
 		const fixture = path.join(
 			process.env.PI_LENS_HOME as string,
@@ -159,21 +164,52 @@ describe("tmp-fixture-hygiene", () => {
 			fixture,
 			`backstop-${process.env.PI_LENS_TMP_HYGIENE_RUN_ID}-owner-guard`,
 		);
-		const sibling = path.join(fixture, "backstop-0000000000-0-owner-guard");
-		for (const dir of [mine, sibling]) {
+		const liveForeign = path.join(fixture, "backstop-0000000000-0-owner-guard");
+		const oldForeign = path.join(fixture, "backstop-0000000001-0-owner-guard");
+		for (const dir of [mine, liveForeign, oldForeign]) {
 			fs.mkdirSync(path.join(dir, "nested"), { recursive: true });
 			fs.writeFileSync(
 				path.join(dir, "nested", "stamp.json"),
 				JSON.stringify({ lastSweepAt: 1 }),
 			);
 		}
+		// A day old: past any six-hour window, and far past the 16-minute
+		// worst-case vitest invocation the window is sized against.
+		const dayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
+		fs.utimesSync(oldForeign, dayAgo, dayAgo);
 		try {
 			removeRunBackstopDirs(fixture);
 			expect(fs.existsSync(mine)).toBe(false);
-			expect(fs.existsSync(sibling)).toBe(true);
+			expect(fs.existsSync(liveForeign)).toBe(true);
+			expect(fs.existsSync(oldForeign)).toBe(false);
 		} finally {
 			fs.rmSync(fixture, { recursive: true, force: true });
 		}
+	});
+
+	// PR #3100 round 3 F3. The wiring — that `cleanupTmpHygiene` still calls the
+	// sweep — has no behavioural guard available: this file is the LAST worker,
+	// so a guard driving the live home would perform the run's cleanup from
+	// inside its own assertion and stay green with the call deleted (measured:
+	// the whole hermeticity file and all 61 tests/config files passed while one
+	// directory leaked). The same source-scan idiom this file already uses for
+	// the setup-hook registration above, over comment-and-string-blanked text so
+	// a comment naming the call can never satisfy it.
+	it("keeps the backstop sweep wired into cleanupTmpHygiene", () => {
+		const setup = stripSource(
+			fs.readFileSync(
+				path.join(REPO_ROOT, "tests/support/vitest-setup.ts"),
+				"utf8",
+			),
+		);
+		const body = setup.match(
+			/export function cleanupTmpHygiene\(\): void \{[\s\S]*?\n\}/,
+		)?.[0];
+		expect(
+			body,
+			"cleanupTmpHygiene is no longer declared as expected",
+		).toBeTypeOf("string");
+		expect(body).toMatch(/\bremoveRunBackstopDirs\s*\(/);
 	});
 
 	it("registers the tmp-hygiene setup hook in every vitest project", () => {

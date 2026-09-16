@@ -7,6 +7,7 @@ import { installGitFixtureEnv } from "./git-fixture-env.js";
 import { installKillGuard, killGuardReport } from "./kill-guard.js";
 import { reportPeakRss } from "./worker-peak-rss.js";
 import { removeTempDirSync } from "../clients/test-utils.js";
+import { sweepScratchDirs } from "../../scripts/lib/scratch-dir.mjs";
 
 // #2042: before anything else in the worker, so the guard is already in place
 // when a test's own `process.once("exit")` handler fires at fork teardown.
@@ -155,20 +156,46 @@ vi.mock("../../clients/instance-reaper-state.js", () => ({
  * per-file `afterAll` could not promise. Scoped to this run's id because a
  * concurrent sibling vitest invocation in the same checkout shares `.probe-home`
  * and owns its own directories — the same reasoning as the `pi-lens-test-home-`
- * admission below. A run that excludes the hygiene owner keeps its directories,
- * exactly as it already keeps its `tmp-hygiene-baseline-<run>.json`.
+ * admission below.
+ *
+ * Round 3 F1: a run-id-only sweep means a run only ever cleans ITSELF, so every
+ * invocation that excludes the hygiene owner — the targeted-run loop this repo
+ * runs all day — left one more directory with a real stamp under the persistent
+ * home, for ever. Master overwrote ONE stamp per run; that must not become
+ * unbounded growth, and the #2912 owner's own rule below says it: "so admissions
+ * cannot become a permanent inode leak". The cleanup axis has four cells and one
+ * rule covers them, expressed through the repo's existing stale-scratch seam
+ * (`scripts/lib/scratch-dir.mjs`, already imported by
+ * `tests/support/real-pi-harness.ts`) rather than a second hand-rolled loop:
+ *
+ * - this run's directories — `backstopRunPrefix`, `maxAgeMs: 0`: the run is
+ *   finishing and no worker of it is alive, so age is irrelevant;
+ * - a LIVE sibling invocation's — matches neither arm (different run id, and its
+ *   directories were written minutes ago at most), so it keeps its cooldown
+ *   stamp and its own owner removes them at the end of ITS run;
+ * - an ABANDONED foreign run's (a targeted run without the owner file) and
+ *   a KILLED run's (OOM/SIGKILL — seen on this host) — the same age arm
+ *   reclaims both, since in neither case will an owner ever run for them.
+ *
+ * `BACKSTOP_STALE_MS` is deliberately generous. Sweeping a live sibling's
+ * directory is the F2 flake class (its next sweep loses its cooldown stamp);
+ * reclaiming late only delays recovery. The longest observed whole-`ci.yml`
+ * workflow on master is 16 minutes (runs 35057763476, 35050766324), so six hours
+ * is ~22x the longest invocation this repo produces.
  *
  * `home` exists so the owner's own guard can drive this rule over a fixture
  * directory. The sweep is destructive and the guard runs inside the LAST
  * worker, so a guard aimed at the live home would perform the cleanup itself
  * and hide whether `cleanupTmpHygiene` still calls this at all — measured:
  * with the call deleted, a guard on the live home held the leftover count at 0.
+ * That wiring is pinned by a source scan in the owner's file instead (round 3
+ * F3).
  */
+const BACKSTOP_STALE_MS = 6 * 60 * 60 * 1000;
+
 export function removeRunBackstopDirs(home: string = tmpHygieneHome): void {
-	for (const name of readTmpDirEntries(home)) {
-		if (!name.startsWith(backstopRunPrefix)) continue;
-		removeTempDirSync(path.join(home, name));
-	}
+	sweepScratchDirs(home, backstopRunPrefix, { maxAgeMs: 0 });
+	sweepScratchDirs(home, "backstop-", { maxAgeMs: BACKSTOP_STALE_MS });
 }
 
 // #3083, master red 038e28b: catch a new transitive writer in whichever

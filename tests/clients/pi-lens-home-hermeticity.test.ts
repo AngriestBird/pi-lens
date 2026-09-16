@@ -1166,14 +1166,25 @@ describe("transitive session_start backstop isolation", () => {
 	// Clear the stamps (never plant one) so each case observes its OWN write.
 	// The run-shared root is cleared for the same reason: each case must red on
 	// the state it produced, not on a neighbour's.
-	beforeEach(() => {
+	//
+	// Scoped to THIS run's directories, the same prefix the harness sweep uses
+	// (PR #3100 round 3 F2). `backstop-` alone also deleted a concurrent sibling
+	// invocation's live cooldown stamp — production writes it once per run, so
+	// the sibling never recovered it and its own case then hung until
+	// `waitFor exhausted after 10000ms`, reproduced by the reviewer in 1 of 3
+	// concurrent pairs and deterministically with an external deleter.
+	const ownBackstopPrefix = `backstop-${process.env.PI_LENS_TMP_HYGIENE_RUN_ID}-`;
+
+	function clearOwnBackstopStamps(): void {
 		for (const name of fs.readdirSync(sharedHome))
-			if (name.startsWith("backstop-"))
+			if (name.startsWith(ownBackstopPrefix))
 				fs.rmSync(path.join(sharedHome, name, "orphan-backstop.json"), {
 					force: true,
 				});
 		fs.rmSync(path.join(sharedHome, "orphan-backstop.json"), { force: true });
-	});
+	}
+
+	beforeEach(clearOwnBackstopStamps);
 
 	afterEach(() => {
 		vi.clearAllTimers();
@@ -1259,4 +1270,35 @@ describe("transitive session_start backstop isolation", () => {
 			fs.rmSync(alias, { force: true });
 		}
 	}, 30_000);
+
+	// PR #3100 round 3 F2, reproduced: this file's own per-case stamp clearing
+	// used the bare `backstop-` prefix, so it deleted the LIVE cooldown stamp of
+	// a concurrent vitest invocation sharing this checkout's home. Production
+	// writes that stamp once per run, so the sibling never got it back and its
+	// own settle loop ran out of time. The clearing must see exactly what the
+	// harness sweep sees: this run's directories only.
+	it("per-case stamp clearing spares a concurrent invocation's cooldown stamp", () => {
+		const sibling = path.join(sharedHome, "backstop-0000000000-0-sibling");
+		const own = path.join(
+			sharedHome,
+			`backstop-${process.env.PI_LENS_TMP_HYGIENE_RUN_ID}-clearing-guard`,
+		);
+		for (const dir of [sibling, own]) {
+			fs.mkdirSync(dir, { recursive: true });
+			fs.writeFileSync(
+				path.join(dir, "orphan-backstop.json"),
+				JSON.stringify({ lastSweepAt: 1 }),
+			);
+		}
+		try {
+			clearOwnBackstopStamps();
+			expect(fs.existsSync(path.join(sibling, "orphan-backstop.json"))).toBe(
+				true,
+			);
+			expect(fs.existsSync(path.join(own, "orphan-backstop.json"))).toBe(false);
+		} finally {
+			for (const dir of [sibling, own])
+				fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
 });
