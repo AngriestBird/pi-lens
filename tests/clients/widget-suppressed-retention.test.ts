@@ -460,6 +460,46 @@ describe("the retained row's lifetime is enforced (#3158)", () => {
 		).toBe(1);
 	});
 
+	it("retires the retained row on ANY edit, including an unrelated one", async () => {
+		// Round 2 F3, the stated window (reviewer probe P1). Retirement rule 1 is
+		// WIDER than the mark's own lifetime: an edit that leaves the marked line
+		// byte-identical still retires the row, and nothing re-creates it. A fresh
+		// probe alone does not retire it — only the read-path sweep does — so both
+		// halves are pinned here rather than left to prose.
+		const service = makeService([diag(MESSAGE, 2322, 1)]);
+		await probe(service);
+		await mark({
+			filePath,
+			line: 1,
+			message: MESSAGE,
+			...CANONICAL_MARK,
+			disposition: "false-positive",
+		});
+		await probe(service);
+		expect(suppressedChip()).toContain("suppressed: 1");
+
+		// Line 1 — the marked line — is byte-identical; only line 2 changes.
+		const later = Date.now() + 60_000;
+		fs.writeFileSync(
+			filePath,
+			"const value: number = 'bad';\nexport const other = 2;\n",
+		);
+		fs.utimesSync(filePath, later / 1000, later / 1000);
+		clearAllWorkspaceDiagnosticsCaches();
+		await probe(service);
+
+		// The scan path alone leaves it: the mark still applies and the probe still
+		// filters the finding out.
+		expect(suppressedChip()).toContain("suppressed: 1");
+
+		// The read-path sweep retires it, and there is no path back.
+		expect(await reconcileStaleWidgetFiles()).toBe(1);
+		expect(suppressedChip()).toBeUndefined();
+		clearAllWorkspaceDiagnosticsCaches();
+		await probe(service);
+		expect(suppressedChip()).toBeUndefined();
+	});
+
 	it("carries the retained row through a session-restore round trip", async () => {
 		// Lifetime: retention is content-bound, not session-bound — the mark is
 		// durable and the file's mtime is on disk, so both retirement rules still

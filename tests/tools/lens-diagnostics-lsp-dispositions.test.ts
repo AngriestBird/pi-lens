@@ -153,6 +153,16 @@ async function legacyProbe(service: ServiceDouble) {
 	)) as { content: Array<{ text: string }>; details?: Record<string, unknown> };
 }
 
+/** The single `lsp_probe_disposition_filter` record this lane emits for the
+ * file, as the latency sink received it. */
+function phaseMetadata(): Record<string, unknown> | undefined {
+	const phases = logLatency.mock.calls
+		.map(([entry]) => entry as Record<string, unknown>)
+		.filter((entry) => entry.phase === "lsp_probe_disposition_filter");
+	expect(phases).toHaveLength(1);
+	return phases[0]?.metadata as Record<string, unknown> | undefined;
+}
+
 async function mark(params: Record<string, unknown>) {
 	const markTool = createLensDiagnosticMarkTool(() => cwd);
 	return markTool.execute("mark-3088", params, undefined, () => {}, { cwd });
@@ -241,6 +251,37 @@ describe("lens_diagnostics source=lsp honors dispositions (#3088)", () => {
 		expect(phases).toHaveLength(1);
 		expect(phases[0]?.metadata).toMatchObject({ suppressed: 1, total: 1 });
 		expect(phases[0]?.filePath).toBe(filePath);
+	});
+
+	it("reports the widget's retained suppressed count on that same phase", async () => {
+		// #3158 round 2 F4: retention's SUCCESS path had no record — the ledger
+		// only heard about it when the per-file cap truncated. The count is folded
+		// into the phase this lane already emits, so the cardinality is unchanged
+		// (one per filtered file per scan), and it is live: zero on the scan that
+		// first honours the mark, one once that scan's write has retained the row.
+		const service = makeService();
+		await probe(service);
+		await mark({
+			filePath,
+			line: 1,
+			message: MESSAGE,
+			...CANONICAL_MARK,
+			disposition: "false-positive",
+		});
+
+		logLatency.mockReset();
+		await probe(service);
+		expect(phaseMetadata()).toMatchObject({
+			suppressed: 1,
+			retainedSuppressed: 0,
+		});
+
+		logLatency.mockReset();
+		await probe(service);
+		expect(phaseMetadata()).toMatchObject({
+			suppressed: 1,
+			retainedSuppressed: 1,
+		});
 	});
 
 	it("emits no filter phase when nothing was dropped", async () => {
