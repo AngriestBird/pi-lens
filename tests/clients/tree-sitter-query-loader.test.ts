@@ -460,6 +460,56 @@ query: |
 		// A loosened guard would stringify the mapping to "[object Object]".
 		expect(query?.message).toBe("Pattern: mapping-message");
 	});
+
+	// #3070 N1 companion: a FIXED rule must stop replaying once a fresh
+	// (`force`) load re-parses it clean — the per-file memo the replay draws
+	// on is repopulated on every non-memoized load, not merely appended to,
+	// or a file corrected on disk keeps reporting its stale failure forever
+	// across every later session boundary.
+	it("stops replaying a parse failure once the rule file is fixed and force-reloaded", async () => {
+		const root = makeTempRulesRoot();
+		const relPath = "rules/tree-sitter-queries/typescript/fixable.yml";
+		writeRule(
+			root,
+			relPath,
+			`id: fixable
+name: Fixable
+severity: warning
+category: quality
+language: typescript
+message: some: unquoted colon breaks YAML
+query: |
+  (identifier) @X
+`,
+		);
+
+		const loader = new TreeSitterQueryLoader();
+		await loader.loadQueries(root);
+		expect(parseFailureGroup()?.count).toBe(1);
+
+		// Fix the file on disk, then force-reload (the RuleCache-miss path).
+		writeRule(
+			root,
+			relPath,
+			`id: fixable
+name: Fixable
+severity: warning
+category: quality
+language: typescript
+message: "no more colon problem"
+query: |
+  (identifier) @X
+`,
+		);
+		await loader.loadQueries(root, { force: true });
+		expect(loader.getQueryById("fixable")).toBeTruthy();
+
+		// A later session must not resurrect the stale failure for a file
+		// that is clean now.
+		resetDegradationLedger();
+		await loader.loadQueries(root);
+		expect(parseFailureGroup()).toBeUndefined();
+	});
 });
 
 // #3054 review F2: pins the corpus-wide equivalence claim in CI, not only in
