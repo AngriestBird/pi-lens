@@ -70,6 +70,7 @@ import {
 	assignFlagConfigSection,
 	flagConfigSectionKeys,
 	GLOBAL_NON_FLAG_CONFIG_SECTIONS,
+	hasFlagConfigPath,
 	LENS_FLAGS,
 	type LensFlagSpec,
 	PROJECT_FOREIGN_CONFIG_NAMESPACES,
@@ -336,29 +337,6 @@ function replayConfigNotices(entry: {
  * Walk up from `startDir` looking for a `.pi-lens.json` or `pi-lens.json`.
  * Returns the parsed config, or an empty config if none was found.
  */
-/**
- * Whether a config document actually SETS the dotted key `segments` spells —
- * presence, not validity. A mixed-scope notice (#3112) must fire for
- * `tools: { lazy: "yes" }` as much as for `tools: { lazy: false }`: the user
- * wrote a global-only setting in a project file either way, and reading the
- * VALUE (via `readFlagConfigValue`) would silently skip the malformed one.
- */
-function hasConfigPath(
-	root: Record<string, unknown>,
-	segments: readonly string[],
-): boolean {
-	let current: unknown = root;
-	for (const segment of segments) {
-		if (!current || typeof current !== "object" || Array.isArray(current)) {
-			return false;
-		}
-		const record = current as Record<string, unknown>;
-		if (!(segment in record)) return false;
-		current = record[segment];
-	}
-	return true;
-}
-
 export function loadPiLensProjectConfig(
 	startDir: string,
 	preloadedInfo?: PiLensProjectConfigFileInfo,
@@ -1078,7 +1056,7 @@ function parseConfigFile(configPath: string): ParsedConfigFile {
 		const dotIndex = configKey.indexOf(".");
 		if (dotIndex < 0) continue;
 		if (!knownProjectKeys.has(configKey.slice(0, dotIndex))) continue;
-		if (!hasConfigPath(obj, configKey.split("."))) continue;
+		if (!hasFlagConfigPath(obj, configKey)) continue;
 		warnUnhonoredKey(configKey, true);
 	}
 

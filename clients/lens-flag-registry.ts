@@ -452,6 +452,25 @@ function resolveFlagConfigPath(
 }
 
 /**
+ * Whether a parsed config document actually SETS the dotted `configKey` —
+ * presence, not validity (#3112). The project loader's mixed-scope scan must
+ * report `tools: { lazy: "yes" }` exactly as it reports `tools: { lazy: false }`:
+ * the user wrote a global-only setting in a project file either way, and
+ * {@link readFlagConfigValue} would return `undefined` for the malformed one and
+ * silently skip it. Shares {@link resolveFlagConfigPath} with every other reader
+ * so "which segments does this key name" is answered in exactly one place.
+ */
+export function hasFlagConfigPath(
+	raw: Record<string, unknown>,
+	configKey: string,
+): boolean {
+	const resolved = resolveFlagConfigPath(raw, configKey);
+	if (!resolved) return false;
+	const leaf = resolved.segments.at(-1);
+	return leaf !== undefined && leaf in resolved.source;
+}
+
+/**
  * Read the boolean at a spec's dotted `configKey` out of an already-parsed
  * config object. Returns undefined when any segment is missing or the leaf is
  * not a boolean — callers treat that as "this tier does not decide".

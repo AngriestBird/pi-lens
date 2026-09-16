@@ -1092,6 +1092,20 @@ describe("project-scope tools.<name>.enabled (#3112)", () => {
 		expect(warnedFor('unknown key "tools.lazy"')).toBe(false);
 	});
 
+	it("reports a MALFORMED global-only sub-key too — presence, not validity", () => {
+		// `{"tools":{"lazy":"yes"}}` is a global-only setting written in a project
+		// file exactly as `false` would be, and the user deserves the same notice.
+		// Resolving the key by its VALUE (`readFlagConfigValue`, which returns
+		// `undefined` for a non-boolean leaf) would drop this one in silence, so
+		// the scan asks `hasFlagConfigPath` whether the key is PRESENT.
+		fs.writeFileSync(
+			path.join(tmpDir, ".pi-lens.json"),
+			JSON.stringify({ tools: { lazy: "yes" } }),
+		);
+		loadPiLensProjectConfig(tmpDir);
+		expect(warnedFor('"tools.lazy" is a global-only')).toBe(true);
+	});
+
 	it("reports a global-only sub-key ONCE, however many scans see it", () => {
 		// `lsp.enabled` is reported by the enumerated-honored-keys scan AND by the
 		// mixed-scope scan, with the same key and the same reason; the warn-once
