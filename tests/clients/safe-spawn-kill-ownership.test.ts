@@ -155,8 +155,19 @@ describe("kill-by-pid ownership (#2042)", () => {
 		async () => {
 			const foreignPid = process.ppid;
 			const child = new FakeChild(foreignPid);
+			// Resolved by the double the instant production spawns: registration
+			// is the next synchronous statement, so one microtask later the
+			// registry has seen everything this call will ever add to it. No
+			// wall-clock wait.
+			let spawned!: () => void;
+			const hasSpawned = new Promise<void>((resolve) => {
+				spawned = resolve;
+			});
 			vi.doMock("node:child_process", () => ({
-				spawn: vi.fn(() => child),
+				spawn: vi.fn(() => {
+					queueMicrotask(spawned);
+					return child;
+				}),
 				spawnSync: vi.fn(() => ({ status: 0, stdout: "", stderr: "" })),
 				execSync: vi.fn(() => ""),
 				execFileSync: vi.fn(() => ""),
@@ -164,9 +175,7 @@ describe("kill-by-pid ownership (#2042)", () => {
 			const { safeSpawnAsync } = await import("../../clients/safe-spawn.js");
 
 			const pending = safeSpawnAsync("which", ["node"], { timeout: 50_000 });
-			await vi.waitFor(() =>
-				expect(child.listenerCount("close")).toBeGreaterThan(0),
-			);
+			await hasSpawned;
 
 			expect([...lifetimePids()]).not.toContain(foreignPid);
 
@@ -191,6 +200,14 @@ describe("kill-by-pid ownership (#2042)", () => {
 		async () => {
 			const foreignPid = process.ppid;
 			const child = new FakeChild(foreignPid);
+			// The double terminates the way a real child does — on whichever
+			// kill production actually chooses — so the call settles without a
+			// wall-clock wait, and the assertions below read which one it was.
+			const settle = () => {
+				queueMicrotask(() => child.emit("close", null, "SIGTERM"));
+				return true as never;
+			};
+			child.kill.mockImplementation(settle);
 			vi.doMock("node:child_process", () => ({
 				spawn: vi.fn(() => child),
 				spawnSync: vi.fn(() => ({ status: 0, stdout: "", stderr: "" })),
@@ -198,19 +215,9 @@ describe("kill-by-pid ownership (#2042)", () => {
 				execFileSync: vi.fn(() => ""),
 			}));
 			const { safeSpawnAsync } = await import("../../clients/safe-spawn.js");
-			const killSpy = vi
-				.spyOn(process, "kill")
-				.mockImplementation(() => true as never);
+			const killSpy = vi.spyOn(process, "kill").mockImplementation(settle);
 
-			const pending = safeSpawnAsync("which", ["node"], { timeout: 10 });
-			// The timeout fires killTree; settle the double so the call returns.
-			await vi.waitFor(() =>
-				expect(
-					child.kill.mock.calls.length + killSpy.mock.calls.length,
-				).toBeGreaterThan(0),
-			);
-			child.emit("close", null, "SIGTERM");
-			await pending;
+			await safeSpawnAsync("which", ["node"], { timeout: 10 });
 
 			expect(killSpy).not.toHaveBeenCalled();
 			expect(child.kill).toHaveBeenCalledWith("SIGTERM");
