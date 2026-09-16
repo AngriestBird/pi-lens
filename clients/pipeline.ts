@@ -1777,6 +1777,11 @@ export async function runPipeline(
 				dbg,
 				turnSeq: ctx.telemetry?.turnIndex,
 				writeSeq: ctx.telemetry?.writeIndex,
+				// #3157: `cwd` here is the LANGUAGE root. The cascade's display
+				// filter reads the disposition store and the `.pi-lens.json` rule
+				// policy, both written under the PROJECT root (#1030) — the same
+				// pair the dispatcher is handed above.
+				projectRoot: ctx.projectRoot,
 				seqState: ctx.seqState,
 				turnEndCascadeSettleStart: ctx.turnEndCascadeSettleStart,
 				fileContent,

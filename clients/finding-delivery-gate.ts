@@ -506,6 +506,33 @@ export const DELIVERY_SURFACES: Record<string, DeliverySurfaceEntry> = {
 		["applyFindingPolicy"],
 		["applyFindingPolicy(retained, {"],
 	),
+	// #3157: the IN-LANE cascade — a different delivery lane from the
+	// quiet-window run above, and the one #3102's sweep cleared WRONGLY. Its four
+	// display sites (passive cold snapshot, fresh touch, touch-error fallback,
+	// degraded fallback) assemble `CascadeNeighborResult.diagnostics` and reach
+	// the agent through `formatCascadeNeighborDiagnostics` without ever entering
+	// the dispatcher's `applyOutputFilters` pipeline: the sweep's file-level
+	// verdict ("the per-edit dispatch path, which already filters in
+	// dispatcher.ts") was true only of the per-edit RUNNER output in
+	// `runners/lsp.ts`, which is a different call site in a different file.
+	//
+	// Evidence is the CALL TEXT (#3088 round-2 F4), counted: `cascadeDisplay(` is
+	// the one seam all four sites route through, so `evidenceMin: 4` is the count
+	// of display sites in the file and dropping ANY of them back to a raw
+	// `convertLspDiagnostics` reds this suite. Identity-stubbing the callee
+	// instead is caught behaviourally — it reds twelve cases in
+	// `tests/clients/inlane-cascade-finding-policy.test.ts`, which is a stronger
+	// signal than the R2 proximity heuristic. Residual, stated: a FIFTH display
+	// site that open-codes the conversion keeps the count at 4 and is caught by
+	// review, not by this row.
+	"dispatch-integration:in-lane-cascade": gated(
+		"clients/dispatch/integration.ts",
+		"In-lane per-edit cascade neighbour ERROR diagnostics, rendered into the " +
+			"turn-end cascade block by `computeCascadeForFile`.",
+		["applyCascadeDisplayPolicy"],
+		["cascadeDisplay("],
+		{ evidenceMin: 4 },
+	),
 	"runtime-turn:call-graph-advisory": labeled(
 		RUNTIME_TURN_FILE,
 		"Turn-end 📊 call-graph impact advisory.",

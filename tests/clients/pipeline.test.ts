@@ -73,7 +73,10 @@ vi.mock("../../clients/dispatch/integration.js", () => ({
 	computeCascadeForFile: vi.fn().mockResolvedValue(undefined),
 }));
 
-import { dispatchLintWithResult } from "../../clients/dispatch/integration.js";
+import {
+	computeCascadeForFile,
+	dispatchLintWithResult,
+} from "../../clients/dispatch/integration.js";
 
 // Mock LSP service
 vi.mock("../../clients/lsp/index.js", () => ({
@@ -349,6 +352,47 @@ describe("Pipeline", () => {
 			size: Buffer.byteLength("const x = 1;\n"),
 			sha256: createHash("sha256").update("const x = 1;\n").digest("hex"),
 		});
+	});
+
+	it("hands the cascade the PROJECT root alongside the language cwd (#3157)", async () => {
+		// The cascade's display filter reads the disposition store and the
+		// `.pi-lens.json` rule policy, both written under the project root
+		// (`lens_diagnostic_mark` is wired with `() => runtime.projectRoot`), while
+		// `ctx.cwd` is `resolveLanguageRootForFile`'s nested answer. Without this
+		// argument every mark is silently missed in a monorepo and #3157's whole
+		// filter is inert there — the #1030 recurrence.
+		const languageRoot = path.join(tmpDir, "packages", "app");
+		fs.mkdirSync(languageRoot, { recursive: true });
+		const filePath = createTempFile(
+			languageRoot,
+			"cascade-root.ts",
+			"const x=1",
+		);
+		vi.mocked(dispatchLintWithResult).mockResolvedValue({
+			diagnostics: [],
+			blockers: [],
+			warnings: [],
+			baselineWarningCount: 0,
+			fixed: [],
+			resolvedCount: 0,
+			output: "",
+			blockerOutput: "",
+			hasBlockers: false,
+		});
+
+		await runPipeline(
+			createMockContext(filePath, {
+				cwd: languageRoot,
+				projectRoot: tmpDir,
+			}),
+			createMockDeps(),
+		);
+
+		expect(computeCascadeForFile).toHaveBeenCalledWith(
+			filePath,
+			languageRoot,
+			expect.objectContaining({ projectRoot: tmpDir }),
+		);
 	});
 
 	describe("Format phase", () => {
