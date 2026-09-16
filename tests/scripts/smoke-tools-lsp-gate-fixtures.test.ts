@@ -20,9 +20,9 @@ const repoRoot = path.resolve(
 );
 
 describe("LSP clean-gate fixture population (#2780 round 2)", () => {
-	it("contains exactly the five seeded primary fixtures and the custom row", () => {
+	it("contains exactly the six seeded primary fixtures and the custom row", () => {
 		const gated = gateFixtures.filter((fixture) => fixture.lspGate === true);
-		expect(gated).toHaveLength(6);
+		expect(gated).toHaveLength(7);
 		expect(gated.map((fixture) => fixture.lang)).toEqual([
 			"typescript",
 			"json",
@@ -30,6 +30,7 @@ describe("LSP clean-gate fixture population (#2780 round 2)", () => {
 			"toml",
 			"cue",
 			"lua-custom-provenance",
+			"typst",
 		]);
 	});
 

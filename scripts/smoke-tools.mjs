@@ -796,6 +796,8 @@ const LSP_FIXTURES = [
 		file: "main.typ",
 		serverHint: "tinymist",
 		tools: ["tinymist"],
+		lspGate: true,
+		lspGateMarker: "#undefined_function",
 	},
 	{
 		lang: "ocaml",
