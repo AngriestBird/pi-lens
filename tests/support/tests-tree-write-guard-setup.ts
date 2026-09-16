@@ -6,6 +6,41 @@ import {
 } from "./tests-tree-write-guard.js";
 
 /**
+ * `tests/index-2992-integration.test.ts` writes `index-2992-probe.ts` and
+ * `index-2992-recovered.ts` into this scratch dir at runtime and removes
+ * them before the `it` that created them returns (`afterEach`/`finally`) —
+ * the exact producer shape this guard exists for
+ * (`tests/clients/pi-lens-home-hermeticity.test.ts` is the guard's own
+ * worked example of the same pattern, cleaned up).
+ *
+ * NOT gitignored, and it must not become so: `isRecordableProjectPath`
+ * (`clients/file-utils.ts`) drops any path `.gitignore` matches, and that
+ * test drives the real read/mutation bridges through it. Measured directly
+ * against the built runtime — `isRecordableProjectPath` for a path under
+ * this dir is `true`; for a path under this same test's own gitignored
+ * `.probe-home` (used for `PI_LENS_HOME`) it is `false`. A path under the
+ * bare repo root is ALSO `true` (`isExternalOrVendorFile`,
+ * `clients/path-utils.ts`, only checks containment under the project root
+ * and a `node_modules`-style vendor segment — not "is this the root
+ * specifically"), so the repo root was never the only option; this
+ * directory, inside the tree the #3082 guard already watches, is simply the
+ * one that needs no separate arm.
+ */
+const INDEX_2992_SCRATCH_PREFIX = ["support", ".index-2992-scratch"];
+
+/**
+ * Excuses `INDEX_2992_SCRATCH_PREFIX` by directory, not by the two filenames
+ * inside it: a producer adding a third scratch file to its own directory
+ * needs no update here.
+ */
+export function isUnderIndex2992Scratch(relative: string): boolean {
+	const segments = relative.split(/[\\/]/);
+	return INDEX_2992_SCRATCH_PREFIX.every(
+		(segment, index) => segments[index] === segment,
+	);
+}
+
+/**
  * globalSetup arm of the #3082 guard — one watcher per activated PROJECT, not
  * one per test-file fork, so the cost is independent of the fork count.
  *
@@ -47,5 +82,9 @@ export function runTestsTreeWriteGuardSetup(
 }
 
 export default function setup(): () => void {
-	return runTestsTreeWriteGuardSetup(path.join(process.cwd(), "tests"));
+	const root = path.join(process.cwd(), "tests");
+	return runTestsTreeWriteGuardSetup(
+		root,
+		installTestsTreeWriteGuard(root, { allow: isUnderIndex2992Scratch }),
+	);
 }

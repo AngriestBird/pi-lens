@@ -122,10 +122,22 @@ export function isGuardedTreeEntry(relative: string): boolean {
  * and any other function stands in for `fs.watch` — the failure case uses one
  * that throws. The default is the real `fs.watch`; no test replaces it to
  * prove delivery.
+ *
+ * `allow` excuses a path that WOULD otherwise violate — a test-owned scratch
+ * dir under the watched root whose producer writes and removes a file inside
+ * one run, the same shape `tests/clients/pi-lens-home-hermeticity.test.ts`
+ * causes for a moment and cleans up (#3105). Takes the relative path (as
+ * `record` receives it) and returns whether to excuse it; callers are
+ * expected to match a whole scratch-directory prefix rather than enumerate
+ * filenames, so a producer adding a second file to its own scratch dir needs
+ * no guard update.
  */
 export function installTestsTreeWriteGuard(
 	root: string,
-	options: { watch?: typeof fs.watch | false } = {},
+	options: {
+		watch?: typeof fs.watch | false;
+		allow?: (relative: string) => boolean;
+	} = {},
 ): TestsTreeWriteGuard {
 	const baseline = new Set(
 		listSourceFiles(root, {
@@ -140,6 +152,7 @@ export function installTestsTreeWriteGuard(
 	const record = (filename: string | null): void => {
 		if (filename === null) return;
 		if (!isGuardedTreeEntry(filename)) return;
+		if (options.allow?.(filename)) return;
 		const absolute = path.join(root, filename);
 		if (baseline.has(absolute)) return;
 		if (seen.has(absolute)) return;

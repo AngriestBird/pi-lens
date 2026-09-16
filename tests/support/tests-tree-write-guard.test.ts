@@ -22,7 +22,10 @@ import {
 	installTestsTreeWriteGuard,
 	isGuardedTreeEntry,
 } from "./tests-tree-write-guard.js";
-import { runTestsTreeWriteGuardSetup } from "./tests-tree-write-guard-setup.js";
+import {
+	isUnderIndex2992Scratch,
+	runTestsTreeWriteGuardSetup,
+} from "./tests-tree-write-guard-setup.js";
 
 const scratch: string[] = [];
 afterEach(() => {
@@ -67,6 +70,53 @@ describe("tests-tree write guard (#3082)", () => {
 		// with this path, so no sweep can be surprised by it.
 		guard.record(path.join("clients", "tracked.test.ts"));
 		expect(guard.report()).toBeUndefined();
+	});
+
+	// #3105: tests/index-2992-integration.test.ts writes two files into its
+	// own tests/support/.index-2992-scratch/ dir at runtime — the guard's own
+	// producer shape, cleaned up. `allow` is how the setup file excuses that
+	// scratch dir (by directory prefix, tests-tree-write-guard-setup.ts's
+	// isUnderIndex2992Scratch) without weakening coverage of anything else
+	// under the watched root.
+	it("the allow option excuses a matched path while leaving every other path covered", () => {
+		const root = fixtureTree();
+		const guard = installTestsTreeWriteGuard(root, {
+			watch: false,
+			allow: (relative) => relative.startsWith(path.join("scratch") + path.sep),
+		});
+		guard.record(path.join("scratch", "owned.test.ts"));
+		guard.record("unrelated.test.ts");
+		expect(guard.report()).toMatch(/unrelated\.test\.ts/);
+		expect(guard.report()).not.toMatch(/owned\.test\.ts/);
+	});
+
+	// #3105: matches by DIRECTORY, not by the two filenames the real producer
+	// happens to write today — a look-alike sibling directory or a file
+	// directly in `support/` must still be covered.
+	it("isUnderIndex2992Scratch matches only inside the named scratch directory, not a look-alike neighbor", () => {
+		expect(
+			isUnderIndex2992Scratch(
+				path.join("support", ".index-2992-scratch", "index-2992-probe.ts"),
+			),
+		).toBe(true);
+		expect(
+			isUnderIndex2992Scratch(
+				path.join("support", ".index-2992-scratch", "anything-else.ts"),
+			),
+		).toBe(true);
+		expect(
+			isUnderIndex2992Scratch(
+				path.join(
+					"support",
+					".index-2992-scratch-other",
+					"index-2992-probe.ts",
+				),
+			),
+		).toBe(false);
+		expect(
+			isUnderIndex2992Scratch(path.join("support", "index-2992-probe.ts")),
+		).toBe(false);
+		expect(isUnderIndex2992Scratch("index-2992-probe.ts")).toBe(false);
 	});
 
 	it("stays silent for file kinds no walker under tests/ enumerates", () => {
