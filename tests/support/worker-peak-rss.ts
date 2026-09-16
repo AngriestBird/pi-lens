@@ -39,9 +39,20 @@ export interface PeakRssAdmission {
 	reason: string;
 }
 
-/** Keys are repo-relative POSIX paths, exactly as `[mem-file]` prints them. */
+/**
+ * Keys are repo-relative POSIX paths, exactly as `[mem-file]` prints them.
+ *
+ * #3067 (#3062 review L1): `Object.freeze`, not just the `Readonly<>` type.
+ * The type only stops the TypeScript compiler; `peakRssProblem`'s default
+ * parameter reads this exact live object at call time, so without a real
+ * runtime freeze a test file could mutate it in its own fork and admit
+ * itself past the budget — `PEAK_RSS_ADMISSIONS["self"] = {...}` compiled
+ * and ran clean. Every module here runs in ES module strict mode, so
+ * mutating a frozen object throws a `TypeError` instead of silently
+ * succeeding.
+ */
 export const PEAK_RSS_ADMISSIONS: Readonly<Record<string, PeakRssAdmission>> =
-	{};
+	Object.freeze({});
 
 /**
  * The failure text for a file that exceeded its ceiling, or `undefined`.

@@ -303,6 +303,76 @@ export function unadmittedRootBackstopEntries(
 		.map(([name]) => name);
 }
 
+// #2042: per-file peak memory, for the files big enough to matter.
+//
+// Vitest's forks pool with `isolate: true` gives every test FILE its own child
+// process (verified 2026-08-25: 20 files at `maxWorkers: 1` produced 20 distinct
+// pids), so `process.resourceUsage().maxRSS` at the end of a file is that
+// file's own peak, uncontaminated by its neighbours. Measured over all 740
+// files of the default project: p50 93 MB, p90 389 MB, p99 1405 MB, max
+// 2267 MB. The heavy tail is NATIVE memory — tree-sitter wasm grammar compiles
+// and @ast-grep/napi arenas — which no V8 flag bounds and no reporter shows.
+//
+// What this record can and cannot say. It is an `afterAll` hook, so it only
+// fires for a file that FINISHED. The file that was mid-run when the OS killed
+// the job never reports its own peak. What the last lines before a kill name is
+// the completed co-residents -- the memory profile of the phase the run died
+// in, not the culprit. That is still far better than the nothing there was
+// before, but it is circumstantial evidence, not attribution, and the
+// `[mem-watch]` low-water mark is the record that says how close the run
+// actually came.
+//
+// `maxRSS` is kilobytes on every platform: libuv normalizes the Win32 peak
+// working set for `uv_getrusage`, so no per-platform scaling is needed.
+//
+// #3067 (#3062 review L2): registered FIRST, ahead of every other afterAll in
+// this file (the #3083 backstop, tmp-hygiene, kill-guard below). Vitest runs
+// afterAll hooks LIFO — the LAST one registered runs FIRST (verified
+// empirically: three afterAll() calls registered 1, 2, 3 in a real vitest run
+// report completion in the order 3, 2, 1) — so the FIRST one registered runs
+// LAST. `maxRSS` is a running high-water mark: a reading taken before another
+// hook's teardown allocates cannot reflect that allocation. Registering this
+// hook first is what makes its reading the last word on the file's peak,
+// instead of (as before) reading first and letting the #3083 backstop,
+// tmp-hygiene, and kill-guard hooks run — and allocate — after the number was
+// already taken and reported. It also means an over-budget throw here no
+// longer preempts the tmp-hygiene `[tmp-hygiene-trace]` diagnostic for the
+// same file, which used to be skipped because this hook threw before
+// tmp-hygiene's `afterAll` (registered earlier, hence running later under the
+// old bottom-of-file position) ever got to run.
+const memReportThresholdMb = Number(
+	process.env.PI_LENS_TEST_MEM_REPORT_MB ?? (process.env.CI ? "512" : "0"),
+);
+if (memReportThresholdMb > 0) {
+	afterAll(() => {
+		const usage = process.memoryUsage();
+		const peakMb = Math.round(process.resourceUsage().maxRSS / 1024);
+		if (peakMb < memReportThresholdMb) return;
+		const file = String(expect.getState().testPath ?? "unknown")
+			.replace(/\\/g, "/")
+			.split("/tests/")
+			.pop();
+		// #3058: the record, and the budget it is measured against, both live
+		// in tests/support/worker-peak-rss.ts so the ceiling has a seam a test
+		// can drive. A file over it fails its own suite here, naming itself,
+		// instead of surfacing five days later as a rising SIGKILL rate.
+		//
+		// Straight to the fork's stderr, not `console.log`: vitest intercepts
+		// worker console output and routes it through the reporter, which
+		// attributes it to a task and can drop it entirely for a hook that runs
+		// after the last test (verified 2026-08-25 — the console form printed
+		// nothing). A raw write lands in the job log unconditionally, which is the
+		// whole point of a line whose only reader is a post-mortem.
+		reportPeakRss({
+			file: `tests/${file}`,
+			peakRssMb: peakMb,
+			heapUsedMb: Math.round(usage.heapUsed / 1048576),
+			externalMb: Math.round(usage.external / 1048576),
+			write: (line) => process.stderr.write(line),
+		});
+	});
+}
+
 // #3083, master red 038e28b: catch a new transitive writer in whichever
 // file introduced it. The runtime hermeticity test also observes released locks.
 // By PREFIX, not by the two exact names (PR #3100 round 2): reverting the
@@ -562,58 +632,4 @@ if (toolTemplate) {
 	} catch {
 		// missing template file — worker simply runs cold, as before
 	}
-}
-
-// #2042: per-file peak memory, for the files big enough to matter.
-//
-// Vitest's forks pool with `isolate: true` gives every test FILE its own child
-// process (verified 2026-08-25: 20 files at `maxWorkers: 1` produced 20 distinct
-// pids), so `process.resourceUsage().maxRSS` at the end of a file is that
-// file's own peak, uncontaminated by its neighbours. Measured over all 740
-// files of the default project: p50 93 MB, p90 389 MB, p99 1405 MB, max
-// 2267 MB. The heavy tail is NATIVE memory — tree-sitter wasm grammar compiles
-// and @ast-grep/napi arenas — which no V8 flag bounds and no reporter shows.
-//
-// What this record can and cannot say. It is an `afterAll` hook, so it only
-// fires for a file that FINISHED. The file that was mid-run when the OS killed
-// the job never reports its own peak. What the last lines before a kill name is
-// the completed co-residents -- the memory profile of the phase the run died
-// in, not the culprit. That is still far better than the nothing there was
-// before, but it is circumstantial evidence, not attribution, and the
-// `[mem-watch]` low-water mark is the record that says how close the run
-// actually came.
-//
-// `maxRSS` is kilobytes on every platform: libuv normalizes the Win32 peak
-// working set for `uv_getrusage`, so no per-platform scaling is needed.
-const memReportThresholdMb = Number(
-	process.env.PI_LENS_TEST_MEM_REPORT_MB ?? (process.env.CI ? "512" : "0"),
-);
-if (memReportThresholdMb > 0) {
-	afterAll(() => {
-		const usage = process.memoryUsage();
-		const peakMb = Math.round(process.resourceUsage().maxRSS / 1024);
-		if (peakMb < memReportThresholdMb) return;
-		const file = String(expect.getState().testPath ?? "unknown")
-			.replace(/\\/g, "/")
-			.split("/tests/")
-			.pop();
-		// #3058: the record, and the budget it is measured against, both live
-		// in tests/support/worker-peak-rss.ts so the ceiling has a seam a test
-		// can drive. A file over it fails its own suite here, naming itself,
-		// instead of surfacing five days later as a rising SIGKILL rate.
-		//
-		// Straight to the fork's stderr, not `console.log`: vitest intercepts
-		// worker console output and routes it through the reporter, which
-		// attributes it to a task and can drop it entirely for a hook that runs
-		// after the last test (verified 2026-08-25 — the console form printed
-		// nothing). A raw write lands in the job log unconditionally, which is the
-		// whole point of a line whose only reader is a post-mortem.
-		reportPeakRss({
-			file: `tests/${file}`,
-			peakRssMb: peakMb,
-			heapUsedMb: Math.round(usage.heapUsed / 1048576),
-			externalMb: Math.round(usage.external / 1048576),
-			write: (line) => process.stderr.write(line),
-		});
-	});
 }
