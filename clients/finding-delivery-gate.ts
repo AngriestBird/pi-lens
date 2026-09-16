@@ -464,32 +464,19 @@ export const DELIVERY_SURFACES: Record<string, DeliverySurfaceEntry> = {
 		"Turn-end 🧪 cascade neighbor blocker.",
 		"Cascade results settle synchronously this turn where possible " +
 			"(`settleCascadeRuns`), but an unsettled compute can carry over to a " +
-			"later turn (bounded by a carry cap) — this round does not freshness-" +
-			"gate that carry-over window.",
+			"later turn (bounded by a carry cap) — a carried-over result renders " +
+			"with an explicit `(carried N turns)` label (#3167), so the agent can " +
+			"tell it from a fresh observation.",
 		"live",
-		[],
-		{
-			status: "partial",
-			partialReason:
-				"A carried-over cascade result (run.carriedTurns > 0) is rendered " +
-				"without an age label. Follow-up: surface carriedTurns as an explicit " +
-				"label when > 0, or route through formatCacheAgeLabel using the run's " +
-				"own timestamp.",
-		},
 	),
 	"runtime-turn:cascade-coverage-advisory": labeled(
 		RUNTIME_TURN_FILE,
 		"Turn-end cascade-coverage-gap advisories (graph/binding/budget).",
 		"Explains what the cascade check could NOT confirm this turn — not a " +
 			"finding with a cited path, an absence-of-coverage disclosure computed " +
-			"from this turn's own indeterminate-run list.",
+			"from this turn's own indeterminate-run list. An advisory computed from " +
+			"a carried indeterminate run is labeled `(carried N turns)` (#3167).",
 		"live",
-		[],
-		{
-			status: "partial",
-			partialReason:
-				"Same cascade carry-over caveat as runtime-turn:cascade-blocker.",
-		},
 	),
 	// #3102: the cold-neighbour cascade run is BUILT here, in the quiet-window
 	// reconcile (`onResolvedFound` in index.ts), a turn earlier than the

@@ -220,3 +220,19 @@ function readNeighborContent(filePath: string): string | undefined {
 		return undefined;
 	}
 }
+
+/**
+ * Fix B (#3167): the carry label for a cascade run re-rendered at a later
+ * turn_end. The carry is bounded to ONE turn (`RuntimeCoordinator.beginTurn`
+ * drops anything that would reach 2), so the honest label names the carry
+ * count; the run carries no observation timestamp, so no age half is claimed
+ * here (the registry's own alternative — `formatCacheAgeLabel` from a run
+ * stamp — has no stamp to read; the stamped surfaces, the demoted delta rows,
+ * take the `formatCacheAgeLabel` label instead). Returns `undefined` for
+ * non-carried runs: no label noise on fresh observations.
+ */
+export function cascadeCarrySuffix(carriedTurns?: number): string | undefined {
+	if (carriedTurns === undefined || carriedTurns < 1) return undefined;
+	const noun = carriedTurns === 1 ? "turn" : "turns";
+	return `(carried ${carriedTurns} ${noun})`;
+}

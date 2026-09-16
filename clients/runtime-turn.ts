@@ -122,6 +122,7 @@ import {
 import type { LSPDiagnostic } from "./lsp/client.js";
 import { convertLspDiagnostics } from "./dispatch/utils/lsp-diagnostics.js";
 import { retagAuxiliaryDiagnostics } from "./dispatch/auxiliary-lsp.js";
+import { cascadeCarrySuffix } from "./cascade-format.js";
 import {
 	applyFindingPolicy,
 	loadProjectRulePolicyMap,
@@ -1193,6 +1194,18 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	const cascadeResults = cascadeRuns.flatMap((r) =>
 		r.result ? [r.result] : [],
 	);
+	// Fix B (#3167): which results belong to a CARRIED run — the label is
+	// per-result at render time, so the run→result pairing must survive the
+	// flatMap above (which discards the wrapper).
+	const carriedTurnsByResult = new Map<
+		NonNullable<(typeof cascadeRuns)[number]["result"]>,
+		number
+	>();
+	for (const r of cascadeRuns) {
+		if (r.result && (r.carriedTurns ?? 0) > 0 && r.carriedTurns !== undefined) {
+			carriedTurnsByResult.set(r.result, r.carriedTurns);
+		}
+	}
 	// #1550 class sweep: every cascade record below summarises `cascadeResults`
 	// — runs, which carry their own paths and can be carried across turns
 	// (#1443) — so labelling them with the turn's first EDITED file is the same
@@ -1231,7 +1244,17 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				(n) => neighborOwner.get(normalizeMapKey(n.filePath)) === pk,
 			);
 			if (ownsAny && result.formatted) {
-				parts.push(result.formatted);
+				// Fix B (#3167): a carried run's re-rendered blocker is labeled so
+				// the agent can tell it from a fresh observation. The carry is
+				// bounded to one turn, so the label reads `(carried 1 turn)`.
+				const carrySuffix = cascadeCarrySuffix(
+					carriedTurnsByResult.get(result),
+				);
+				parts.push(
+					carrySuffix
+						? `${result.formatted}\n${carrySuffix}`
+						: result.formatted,
+				);
 				injectedNeighborCount += result.neighbors.length;
 				injectedDiagnosticCount += result.neighbors.reduce(
 					(s, n) => s + n.diagnostics.length,
@@ -1410,43 +1433,67 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		// "ℹ️ Advisory — no action required this turn:" label, so an imperative
 		// ("review dependents manually") would contradict it. The #533 substance
 		// stays: a clean cascade result does NOT cover these files' dependents.
-		const graphAdvisory = buildAdvisory(graphRuns, {
-			lead: (fileCount, reasons) =>
-				`Cascade could not compute downstream impact for ${fileCount} edited file(s) this turn — ` +
-				`the review graph was unavailable (${reasons}), so their dependents were not ` +
-				`cascade-checked and a clean cascade result does not cover them.`,
-			fallbackDetail: (r) =>
-				r.indeterminate?.reason === "missing_node"
-					? "changed file not in the review graph"
-					: "review graph unavailable",
-		});
+		// Fix B (#3167): a coverage advisory computed from a CARRIED
+		// indeterminate run describes the previous turn's evidence — label it so
+		// the absence-of-coverage statement is not read as current.
+		const withCarryLabel = (
+			advisory: string | undefined,
+			runs: ReadonlyArray<{ carriedTurns?: number }>,
+		): string | undefined => {
+			if (advisory === undefined) return undefined;
+			const maxCarry = runs.reduce(
+				(max, r) => Math.max(max, r.carriedTurns ?? 0),
+				0,
+			);
+			const suffix = cascadeCarrySuffix(maxCarry > 0 ? maxCarry : undefined);
+			return suffix ? `${advisory} ${suffix}` : advisory;
+		};
+		const graphAdvisory = withCarryLabel(
+			buildAdvisory(graphRuns, {
+				lead: (fileCount, reasons) =>
+					`Cascade could not compute downstream impact for ${fileCount} edited file(s) this turn — ` +
+					`the review graph was unavailable (${reasons}), so their dependents were not ` +
+					`cascade-checked and a clean cascade result does not cover them.`,
+				fallbackDetail: (r) =>
+					r.indeterminate?.reason === "missing_node"
+						? "changed file not in the review graph"
+						: "review graph unavailable",
+			}),
+			graphRuns,
+		);
 		// @delivery-surface: runtime-turn:cascade-coverage-advisory
 		if (graphAdvisory) advisoryParts.push(graphAdvisory);
 
-		const bindingAdvisory = buildAdvisory(bindingRuns, {
-			lead: (fileCount, reasons) =>
-				`Cascade identified dependents for ${fileCount} edited file(s) this turn, but their ` +
-				`diagnostics could not be freshly confirmed (${reasons}) and were withheld — a clean ` +
-				`cascade result does not cover them.`,
-			fallbackDetail: () => "cascade diagnostics withheld (binding rejected)",
-		});
+		const bindingAdvisory = withCarryLabel(
+			buildAdvisory(bindingRuns, {
+				lead: (fileCount, reasons) =>
+					`Cascade identified dependents for ${fileCount} edited file(s) this turn, but their ` +
+					`diagnostics could not be freshly confirmed (${reasons}) and were withheld — a clean ` +
+					`cascade result does not cover them.`,
+				fallbackDetail: () => "cascade diagnostics withheld (binding rejected)",
+			}),
+			bindingRuns,
+		);
 		// @delivery-surface: runtime-turn:cascade-coverage-advisory
 		if (bindingAdvisory) advisoryParts.push(bindingAdvisory);
 
-		const budgetAdvisory = buildAdvisory(budgetRuns, {
-			lead: (fileCount, reasons) =>
-				`Cascade checked the selected neighbors for ${fileCount} edited file(s) this turn, ` +
-				`but some eligible dependents were not checked because the cascade budget ` +
-				`was exhausted (${reasons}); a clean cascade result does not cover them.`,
-			fallbackDetail: (r) => {
-				const budget = r.indeterminate?.budget;
-				if (!budget) return "cascade budget omitted eligible dependents";
-				const detail = `cascade budget checked ${budget.selectedCount} of ${budget.eligibleCount} eligible dependents (${budget.truncatedCount} omitted)`;
-				return budget.transitiveTruncated
-					? `${detail}; transitive expansion was capped before all eligible dependents were enumerated`
-					: detail;
-			},
-		});
+		const budgetAdvisory = withCarryLabel(
+			buildAdvisory(budgetRuns, {
+				lead: (fileCount, reasons) =>
+					`Cascade checked the selected neighbors for ${fileCount} edited file(s) this turn, ` +
+					`but some eligible dependents were not checked because the cascade budget ` +
+					`was exhausted (${reasons}); a clean cascade result does not cover them.`,
+				fallbackDetail: (r) => {
+					const budget = r.indeterminate?.budget;
+					if (!budget) return "cascade budget omitted eligible dependents";
+					const detail = `cascade budget checked ${budget.selectedCount} of ${budget.eligibleCount} eligible dependents (${budget.truncatedCount} omitted)`;
+					return budget.transitiveTruncated
+						? `${detail}; transitive expansion was capped before all eligible dependents were enumerated`
+						: detail;
+				},
+			}),
+			budgetRuns,
+		);
 		// @delivery-surface: runtime-turn:cascade-coverage-advisory
 		if (budgetAdvisory) advisoryParts.push(budgetAdvisory);
 

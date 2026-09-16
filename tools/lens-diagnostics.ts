@@ -30,7 +30,10 @@ import {
 	loadProjectRulePolicyMap,
 } from "../clients/dispatch/finding-policy.js";
 import { gateFindingsByPathFreshness } from "../clients/advisory-provenance.js";
-import { markUnreconciledFindings } from "../clients/finding-delivery-gate.js";
+import {
+	formatCacheAgeLabel,
+	markUnreconciledFindings,
+} from "../clients/finding-delivery-gate.js";
 import { normalizeRuleId } from "../clients/dispatch/rule-id-normalize.js";
 import {
 	applyRulePolicy,
@@ -964,7 +967,10 @@ function applyDeltaFreshnessGate<W extends DispositionCandidate>(
 	files: Array<{ filePath: string; warnings: W[]; generatedAt?: string }>,
 	cwd: string,
 	generatedAt: string | undefined,
-): Array<{ filePath: string; warnings: Array<W & { stale?: boolean }> }> {
+): Array<{
+	filePath: string;
+	warnings: Array<W & { stale?: boolean; staleAsOf?: string }>;
+}> {
 	// #2504 review round 4 (F1): an actionable-warnings report is no longer the
 	// product of exactly ONE pass. A deferred off-hook LSP pull upserts its
 	// per-file entries into whatever report is persisted when it lands, so one
@@ -1030,7 +1036,10 @@ function applyDeltaFreshnessGate<W extends DispositionCandidate>(
 	// Two passes (live, then stale) reorder a file's demoted rows to the end
 	// of its warnings array rather than the original report order — cosmetic
 	// only, nothing is dropped or duplicated.
-	const byFile = new Map<string, Array<W & { stale?: boolean }>>();
+	const byFile = new Map<
+		string,
+		Array<W & { stale?: boolean; staleAsOf?: string }>
+	>();
 	for (const f of gated.live) {
 		const arr = byFile.get(f.filePath) ?? [];
 		arr.push(f.warning);
@@ -1038,7 +1047,15 @@ function applyDeltaFreshnessGate<W extends DispositionCandidate>(
 	}
 	for (const f of gated.stale) {
 		const arr = byFile.get(f.filePath) ?? [];
-		arr.push({ ...f.warning, stale: true, line: undefined });
+		// Fix B (#3167): carry the stamp the row was judged against so the render
+		// can emit one age label per file group — the row's own observation stamp,
+		// not the report-level one (the #2504 r4 multi-stamp case).
+		arr.push({
+			...f.warning,
+			stale: true,
+			line: undefined,
+			staleAsOf: effectiveAt,
+		});
 		byFile.set(f.filePath, arr);
 	}
 	return files
@@ -1047,6 +1064,21 @@ function applyDeltaFreshnessGate<W extends DispositionCandidate>(
 			warnings: byFile.get(file.filePath) ?? [],
 		}))
 		.filter((file) => file.warnings.length > 0);
+}
+
+/**
+ * Fix B (#3167): one age label per file group that has demoted rows — the
+ * group's own observation stamp through `formatCacheAgeLabel`, so an agent
+ * can tell a just-observed finding from one re-served from cache. Emitted
+ * AFTER the group's rows; never on a group with live rows only.
+ */
+function appendGroupAgeLabel(
+	lines: string[],
+	warnings: ReadonlyArray<{ stale?: boolean; staleAsOf?: string }>,
+): void {
+	const staleRow = warnings.find((w) => w.stale);
+	if (!staleRow) return;
+	lines.push(`  (${formatCacheAgeLabel(staleRow.staleAsOf)})`);
 }
 
 // @delivery-surface: lens-diagnostics:mode-delta
@@ -1143,6 +1175,7 @@ function formatDeltaMode(
 				const where = w.stale ? STALE_LINE_MARKER : `L${w.line ?? "?"}`;
 				lines.push(`  ⚠ ${where}  ${w.rule ?? w.code ?? w.tool}  ${w.message}`);
 			}
+			appendGroupAgeLabel(lines, file.warnings);
 		}
 	}
 
@@ -1155,6 +1188,7 @@ function formatDeltaMode(
 				const where = w.stale ? STALE_LINE_MARKER : `L${w.line ?? "?"}`;
 				lines.push(`  ℹ ${where}  ${w.rule ?? w.code ?? w.tool}  ${w.message}`);
 			}
+			appendGroupAgeLabel(lines, file.warnings);
 		}
 	}
 
