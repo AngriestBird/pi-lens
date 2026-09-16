@@ -25,7 +25,10 @@ import {
 } from "../clients/diagnostic-dispositions.js";
 import { DEPENDENCY_DRIFT_MAX_DELIVERIES } from "../clients/blocker-freshness.js";
 import { freshnessFromMtime } from "../clients/freshness.js";
-import { applyInlineSuppressions } from "../clients/dispatch/inline-suppressions.js";
+import {
+	applyFindingPolicy,
+	loadProjectRulePolicyMap,
+} from "../clients/dispatch/finding-policy.js";
 import { gateFindingsByPathFreshness } from "../clients/advisory-provenance.js";
 import { markUnreconciledFindings } from "../clients/finding-delivery-gate.js";
 import { normalizeRuleId } from "../clients/dispatch/rule-id-normalize.js";
@@ -33,7 +36,6 @@ import {
 	applyRulePolicy,
 	rulePolicyMapFromConfig,
 } from "../clients/dispatch/rule-policy.js";
-import { loadPiLensProjectConfig } from "../clients/project-lens-config.js";
 import { compactRenderResult } from "./render-compact.js";
 import { combineAbortSignals } from "../clients/deadline-utils.js";
 import { getProjectIgnoreMatcher } from "../clients/file-utils.js";
@@ -946,17 +948,6 @@ function filterDeltaReportDispositions(
 	return { ...report, diagnostics: policyKept };
 }
 
-/**
- * Load the rule-policy map from a project's `.pi-lens.json` — same source the
- * per-edit dispatch path uses, so a project's policy applies consistently
- * across every output surface. `loadPiLensProjectConfig` is mtime-cached, and
- * the map is filtered to entries that actually have a `disable`/`select` list
- * (thresholds are handled elsewhere), so the common case returns undefined and
- * the filter step is skipped outright.
- */
-function loadProjectRulePolicyMap(cwd: string) {
-	return rulePolicyMapFromConfig(loadPiLensProjectConfig(cwd).rules);
-}
 
 /**
  * #1634 review round: `formatDeltaMode` re-serves the `actionable-warnings`/
@@ -1957,22 +1948,20 @@ async function applyInlineSuppressionsToSummaries(
 							summary.hasFinalSnapshot,
 						);
 			}
-			const inlineKept = applyInlineSuppressions(summary.diagnostics, content);
-			// #690: same false-positive/suppress/defer disposition filter the
-			// per-edit dispatch path applies (dispatcher.ts) — mode=full merges in
-			// diagnostics from a fresh LSP sweep/project scan that never went
-			// through that path, so without this a disposed finding reappears here.
-			const kept = applyDispositions(
-				inlineKept,
+			// #690/#3088: inline `pi-lens-ignore` → the same false-positive/
+			// suppress/defer disposition filter the per-edit dispatch path applies
+			// (dispatcher.ts) → the project's `.pi-lens.json` rule policy. mode=full
+			// merges in diagnostics from a fresh LSP sweep/project scan that never
+			// went through the dispatch path, so without this a disposed finding
+			// reappears here. #3088 folded the three calls onto the shared
+			// `applyFindingPolicy` seam, which the `source=lsp` probe lane now calls
+			// too — one stack, one order, for every model-facing surface.
+			const { kept: policyKept } = applyFindingPolicy(summary.diagnostics, {
 				cwd,
-				summary.filePath,
+				filePath: summary.filePath,
 				content,
-			);
-			// Project rule policy (`.pi-lens.json` `rules.<id>.disable`/`select`).
-			// Applied after inline suppression / disposition so the policy's
-			// output-only filtering affects the same surface the per-edit path
-			// produces (no double-counting, no leftover policy-rejected findings).
-			const policyKept = applyRulePolicy(kept, policyMap);
+				policyMap,
+			});
 			// Tag `flagged` diagnostics for the render loop (formatAllMode). Content
 			// is already in hand here (unlike mode=all/delta's cache-only path), so
 			// this is the one place the tag can be computed without adding I/O to

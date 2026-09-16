@@ -18,6 +18,13 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+const { logLatency } = vi.hoisted(() => ({ logLatency: vi.fn() }));
+vi.mock("../../clients/latency-logger.js", async (importOriginal) => ({
+	...(await importOriginal()),
+	logLatency,
+}));
+
 import {
 	_resetDeferredForTests,
 	_resetStateCacheForTests,
@@ -38,21 +45,30 @@ let cwd: string;
 let filePath: string;
 let previousDataDir: string | undefined;
 
+/**
+ * A single LSP finding as a real server publishes it: `source`/`code` are the
+ * identity the probe's own `formatDiag` renders, `serverId` is what the
+ * workspace-diagnostics cache requires before it will persist an entry.
+ */
 function makeService(severity = 2) {
-	return {
-		touchFile: vi.fn(async () => undefined),
-		getDiagnostics: vi.fn(async () => [
+	const touchFile = vi.fn(async () => ({
+		diags: [
 			{
 				severity,
 				message: MESSAGE,
 				source: "typescript",
 				code: 2322,
+				serverId: "typescript",
 				range: {
 					start: { line: 0, character: 6 },
 					end: { line: 0, character: 11 },
 				},
 			},
-		]),
+		],
+	}));
+	return {
+		touchFile,
+		getDiagnostics: vi.fn(async () => []),
 		getCapabilitySnapshots: vi.fn(async () => []),
 	};
 }
@@ -96,12 +112,17 @@ async function mark(params: Record<string, unknown>) {
 	return markTool.execute("mark-3088", params, undefined, () => {}, { cwd });
 }
 
+/** The canonical spelling: what the widget footer / mode=full / mode=delta
+ * render, and therefore the spelling of a mark made anywhere else. */
+const CANONICAL_MARK = { rule: "typescript:2322", tool: "lsp" };
+
 beforeEach(() => {
 	cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-3088-"));
 	filePath = path.join(cwd, "app.ts");
 	fs.writeFileSync(filePath, FILE_BODY);
 	previousDataDir = process.env.PILENS_DATA_DIR;
 	process.env.PILENS_DATA_DIR = path.join(cwd, "data");
+	logLatency.mockReset();
 	_resetDeferredForTests();
 	_resetStateCacheForTests();
 	clearWidgetState();
@@ -126,8 +147,7 @@ describe("lens_diagnostics source=lsp honors dispositions (#3088)", () => {
 			filePath,
 			line: 1,
 			message: MESSAGE,
-			rule: "typescript:2322",
-			tool: "lsp",
+			...CANONICAL_MARK,
 			disposition: "false-positive",
 		});
 		expect(marked.isError).toBeFalsy();
@@ -137,53 +157,106 @@ describe("lens_diagnostics source=lsp honors dispositions (#3088)", () => {
 		expect(after.details?.totalDiagnostics).toBe(0);
 	});
 
-	it("drops a non-blocking finding marked suppress (weak anchor)", async () => {
-		const service = makeService(2);
+	it("states the drop as a visible count instead of rendering clean (#1616)", async () => {
+		const service = makeService();
 		await probe(service);
-		const marked = await mark({
+		await mark({
 			filePath,
 			line: 1,
 			message: MESSAGE,
-			rule: "typescript:2322",
-			tool: "lsp",
+			...CANONICAL_MARK,
+			disposition: "false-positive",
+		});
+
+		const after = await probe(service);
+		expect(after.content[0].text).toContain(
+			"suppressed by disposition: 1 finding(s)",
+		);
+		expect(after.details?.dispositionSuppressed).toBe(1);
+	});
+
+	it("records one bounded lsp_probe_disposition_filter phase per filtered file", async () => {
+		const service = makeService();
+		await probe(service);
+		await mark({
+			filePath,
+			line: 1,
+			message: MESSAGE,
+			...CANONICAL_MARK,
+			disposition: "false-positive",
+		});
+		logLatency.mockReset();
+
+		await probe(service);
+
+		const phases = logLatency.mock.calls
+			.map(([entry]) => entry as Record<string, unknown>)
+			.filter((entry) => entry.phase === "lsp_probe_disposition_filter");
+		expect(phases).toHaveLength(1);
+		expect(phases[0]?.metadata).toMatchObject({ suppressed: 1, total: 1 });
+		expect(phases[0]?.filePath).toBe(filePath);
+	});
+
+	it("emits no filter phase when nothing was dropped", async () => {
+		const service = makeService();
+		await probe(service);
+		expect(
+			logLatency.mock.calls.filter(
+				([entry]) =>
+					(entry as { phase?: string }).phase ===
+					"lsp_probe_disposition_filter",
+			),
+		).toHaveLength(0);
+	});
+
+	it("drops a non-blocking finding held only by a weak suppress mark", async () => {
+		const service = makeService(2);
+		await probe(service);
+		await mark({
+			filePath,
+			line: 1,
+			message: MESSAGE,
+			...CANONICAL_MARK,
 			disposition: "suppress",
 		});
-		expect(marked.isError).toBeFalsy();
-		// The suppress writer inserts an inline comment, which shifts the finding;
-		// re-point the service at the new line so the probe result is about the
-		// disposition, not the edit.
+		// `suppress` also writes an inline `pi-lens-ignore` comment. Restore the
+		// original bytes so the ONLY thing that can drop the finding is the
+		// weak-anchored store entry — otherwise this case would pass on the
+		// inline filter and say nothing about the disposition.
+		fs.writeFileSync(filePath, FILE_BODY);
+
 		const after = await probe(service);
 		expect(after.content[0].text).not.toContain(MESSAGE);
 	});
 
-	it("keeps a BLOCKING finding under a weak suppress mark (#1625 F1)", async () => {
+	it("keeps a BLOCKING finding under a weak defer mark (#1625 F1)", async () => {
 		const service = makeService(1);
 		await probe(service);
 		await mark({
 			filePath,
 			line: 1,
 			message: MESSAGE,
-			rule: "typescript:2322",
-			tool: "lsp",
+			...CANONICAL_MARK,
 			disposition: "defer",
 		});
 		const after = await probe(service);
 		expect(after.content[0].text).toContain(MESSAGE);
 	});
 
-	it("drops a deferred non-blocking finding for the session", async () => {
+	it("drops a deferred non-blocking finding, and resurfaces it after a session reset", async () => {
 		const service = makeService(2);
 		await probe(service);
 		await mark({
 			filePath,
 			line: 1,
 			message: MESSAGE,
-			rule: "typescript:2322",
-			tool: "lsp",
+			...CANONICAL_MARK,
 			disposition: "defer",
 		});
-		const after = await probe(service);
-		expect(after.content[0].text).not.toContain(MESSAGE);
+		expect((await probe(service)).content[0].text).not.toContain(MESSAGE);
+
+		_resetDeferredForTests();
+		expect((await probe(service)).content[0].text).toContain(MESSAGE);
 	});
 
 	it("applies the same filter on the legacy lsp_diagnostics tool", async () => {
@@ -193,13 +266,46 @@ describe("lens_diagnostics source=lsp honors dispositions (#3088)", () => {
 			filePath,
 			line: 1,
 			message: MESSAGE,
-			rule: "typescript:2322",
-			tool: "lsp",
+			...CANONICAL_MARK,
 			disposition: "false-positive",
 		});
 		const after = await legacyProbe(service);
 		expect(after.content[0].text).not.toContain(MESSAGE);
 	});
+});
+
+/**
+ * AGENTS.md shape 26 / #3088 AC6. The probe's own text render is
+ * `[<source>] (<code>)`, while the widget footer and `mode=full` render the
+ * canonical `tool: "lsp"` / `rule: "<source>:<code>"`, and
+ * `lens_diagnostic_mark`'s `tool` parameter is optional. A filter that matched
+ * only ONE of those spellings honored a mark made on one surface while
+ * re-reporting the identical finding when the mark came from another.
+ */
+describe("marks converge across every spelling the surfaces render (#3088)", () => {
+	const spellings: Array<[string, Record<string, unknown>]> = [
+		["canonical (widget footer / mode=full)", CANONICAL_MARK],
+		["probe render — [source] (code)", { tool: "typescript", rule: "2322" }],
+		["rule-only, tool omitted", { rule: "typescript:2322" }],
+	];
+
+	for (const [label, identity] of spellings) {
+		it(`converges for a false-positive marked with the ${label} identity`, async () => {
+			const service = makeService();
+			await probe(service);
+			const marked = await mark({
+				filePath,
+				line: 1,
+				message: MESSAGE,
+				...identity,
+				disposition: "false-positive",
+			});
+			expect(marked.isError).toBeFalsy();
+
+			const after = await probe(service);
+			expect(after.content[0].text).not.toContain(MESSAGE);
+		});
+	}
 });
 
 describe("lens_diagnostics source=lsp honors project rule policy (#3088)", () => {
@@ -231,20 +337,65 @@ describe("lens_diagnostics source=lsp honors inline pi-lens-ignore (#3088)", () 
 			filePath,
 			`// pi-lens-ignore: typescript:2322\n${FILE_BODY}`,
 		);
-		service.getDiagnostics = vi.fn(async () => [
-			{
-				severity: 2,
-				message: MESSAGE,
-				source: "typescript",
-				code: 2322,
-				range: {
-					start: { line: 1, character: 6 },
-					end: { line: 1, character: 11 },
+		service.touchFile = vi.fn(async () => ({
+			diags: [
+				{
+					severity: 2,
+					message: MESSAGE,
+					source: "typescript",
+					code: 2322,
+					serverId: "typescript",
+					range: {
+						start: { line: 1, character: 6 },
+						end: { line: 1, character: 11 },
+					},
 				},
-			},
-		]);
+			],
+		}));
 		const result = await probe(service);
 		expect(result.content[0].text).not.toContain(MESSAGE);
+	});
+});
+
+/**
+ * #3088 AC5. The batch sweep's workspace-diagnostics cache (#671) replays an
+ * earlier observation without touching the server again. That replay is served
+ * to the agent exactly like a fresh probe, so it passes the same filter — the
+ * strict (`false-positive`) branch included, which needs the file's content to
+ * re-derive its line hash.
+ */
+describe("cache-replay probes honor marks like fresh ones (#3088)", () => {
+	it("drops a false-positive finding on a replay that never re-touched the server", async () => {
+		const service = makeService();
+		await probe(service);
+		expect(service.touchFile).toHaveBeenCalledTimes(1);
+		await mark({
+			filePath,
+			line: 1,
+			message: MESSAGE,
+			...CANONICAL_MARK,
+			disposition: "false-positive",
+		});
+
+		const after = await probe(service);
+		expect(service.touchFile).toHaveBeenCalledTimes(1);
+		expect(after.content[0].text).not.toContain(MESSAGE);
+	});
+
+	it("drops a weak-marked finding on a replay with no content read at all", async () => {
+		const service = makeService(2);
+		await probe(service);
+		await mark({
+			filePath,
+			line: 1,
+			message: MESSAGE,
+			...CANONICAL_MARK,
+			disposition: "defer",
+		});
+
+		const after = await probe(service);
+		expect(service.touchFile).toHaveBeenCalledTimes(1);
+		expect(after.content[0].text).not.toContain(MESSAGE);
 	});
 });
 
@@ -256,14 +407,11 @@ describe("the source=lsp footer reconcile respects mark-time demotion (#3088)", 
 			filePath,
 			line: 1,
 			message: MESSAGE,
-			rule: "typescript:2322",
-			tool: "lsp",
+			...CANONICAL_MARK,
 			disposition: "false-positive",
 		});
 		const demoted = getFileDiagnostics(filePath) ?? [];
-		expect(
-			demoted.some((d) => d.disposition === "false-positive"),
-		).toBe(true);
+		expect(demoted.some((d) => d.disposition === "false-positive")).toBe(true);
 
 		await probe(service);
 
