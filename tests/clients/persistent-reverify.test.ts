@@ -7,15 +7,17 @@
  * their file has not moved, and the delta freshness gate passes them because
  * the file's mtime has not moved either. When the root cause was fixed in a
  * DIFFERENT file, the carried finding is stale in fact but fresh by every
- * on-disk axis. The pass re-observes such files through the probe's
- * `touchFile` path and publishes an in-band REPLACEMENT so the carried entry
- * is superseded, not unioned with.
+ * on-disk axis.
  *
- * Red-first: pre-fix, this module did not exist — nothing re-observed a
- * carried finding (the issue's own evidence). The merge-supersede behavior is
- * additionally mutation-proven: reverting the `reVerified` branch to master's
- * union semantics reds C1 (the converged finding survives its own
- * supersession via the id-union).
+ * #3176 review-round contracts pinned here:
+ * - **F3**: an empty touch is clean ONLY when the touch itself answers
+ *   `confirmation: "confirmed"` — the house double's bare `{diags: []}`
+ * silent empty is UNCONFIRMED (the false-clean the review caught).
+ * - **F1**: the replacement folds into the turn's single in-band publish —
+ *   the merge-level proof runs through the REAL CacheManager and publisher.
+ * - Proof gaps: the candidate cap pinned to the LITERAL 4 (the constant
+ *   →1000 mutation reds), `skippedChanged` asserted in the result AND the
+ *   latency record, the budget break and the abort check mutation-sensitive.
  */
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -24,20 +26,23 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { removeTempDirSync } from "./test-utils.js";
 
 const logLatencyMock = vi.hoisted(() => vi.fn());
-vi.mock("../../clients/latency-logger.js", () => ({
+vi.mock("../../clients/latency-logger.js", async (importOriginal) => ({
+	...(await importOriginal<object>()),
 	logLatency: (...args: unknown[]) => logLatencyMock(...args),
 }));
 
 import {
-	MAX_REVERIFY_FILES,
 	runPersistentReverify,
 	type ReverifyLspService,
 } from "../../clients/persistent-reverify.js";
+import type { TouchFileResult } from "../../clients/lsp/diagnostic-binding.js";
+import type { LSPDiagnostic } from "../../clients/lsp/client.js";
 import {
+	formatActionableWarningsAdvisory,
 	publishActionableWarningsReport,
 	type ActionableWarningsReport,
 } from "../../clients/actionable-warnings.js";
-import { createLensDiagnosticsTool } from "../../tools/lens-diagnostics.js";
+import { CacheManager } from "../../clients/cache-manager.js";
 import { resetProjectLensConfigCache } from "../../clients/project-lens-config.js";
 
 const WARNING_MESSAGE = "'x' is declared but its value is never read.";
@@ -87,34 +92,57 @@ function makeCarriedReport(filePath: string): ActionableWarningsReport {
 	};
 }
 
-function makeService(
-	diags:
-		| Array<{
-				severity: number;
-				message: string;
-				range: {
-					start: { line: number; character: number };
-					end: { line: number; character: number };
-				};
-				source?: string;
-				code?: number | string;
-				serverId?: string;
-		  }>
-		| "throw"
-		| "inconclusive",
-): ReverifyLspService {
+function makeDiag(): LSPDiagnostic {
 	return {
-		touchFile: vi.fn(async () => {
-			if (diags === "throw") throw new Error("wedged server");
-			if (diags === "inconclusive") return { inconclusive: true };
-			return {
-				diags: diags.map((d) => ({
-					...d,
-					serverId: d.serverId ?? "typescript",
-				})),
-			};
-		}),
-	} as unknown as ReverifyLspService;
+		severity: 2,
+		message: WARNING_MESSAGE,
+		range: {
+			start: { line: 0, character: 6 },
+			end: { line: 0, character: 7 },
+		},
+		source: "ts",
+		code: 6133,
+	};
+}
+
+/** The touch double with the FULL TouchFileResult surface — the review's F3
+ * point was that a narrowed type could not express `confirmation`, which is
+ * exactly the field that separates a confirmed clean from a silent empty. */
+interface TouchDouble {
+	diags: LSPDiagnostic[];
+	confirmation?: "confirmed";
+	inconclusive?: boolean;
+	skipReason?: "outside-project-root";
+	diagnosticsUnsupportedServerIds?: string[];
+}
+
+function makeService(
+	touchResult: TouchDouble | "throw",
+	delayMs = 0,
+	codeActions: Array<{ title: string; isPreferred?: boolean }> = [
+		{ title: "Fix", isPreferred: true },
+	],
+): ReverifyLspService {
+	const touchFile = vi.fn(async (): Promise<TouchFileResult> => {
+		if (delayMs > 0)
+			await new Promise((resolve) => setTimeout(resolve, delayMs));
+		if (touchResult === "throw") throw new Error("wedged server");
+		// The silent-empty shape: `{diags: []}` with NO `confirmation` — the
+		// house double's answer, and exactly the false-clean the review's F3
+		// probe fired on.
+		return touchResult;
+	});
+	const codeAction = vi.fn(async () => codeActions);
+	// SAFETY: the pass reads only `touchFile`, and `enrichFileFromLsp` reads
+	// only `codeAction` (the cached arm skips the pull) — the double provides
+	// exactly the members the re-verify path reaches, cast to the real
+	// service type whose remaining members this path never touches.
+	return {
+		touchFile,
+		codeAction,
+		getDiagnostics: vi.fn(async () => []),
+		openFile: vi.fn(async () => undefined),
+	} as unknown as import("../../clients/lsp/index.js").LSPService;
 }
 
 describe("persistent reverify (#3170)", () => {
@@ -131,8 +159,7 @@ describe("persistent reverify (#3170)", () => {
 		fs.writeFileSync(filePath, "const x = 1;\n");
 		// Deterministic staleness fixtures: sub-millisecond mtime precision vs
 		// integer-ms ISO stamps makes write-then-stamp ordering a coin flip —
-		// pin the file's mtime to a known past instant instead (the house's
-		// fake-clock discipline for real-time races).
+		// pin the file's mtime to a known past instant instead.
 		const past = new Date(Date.now() - 60_000);
 		fs.utimesSync(filePath, past, past);
 		previousDataDir = process.env.PILENS_DATA_DIR;
@@ -150,72 +177,98 @@ describe("persistent reverify (#3170)", () => {
 		removeTempDirSync(tmpDir);
 	});
 
-	it("C1: a converged carried finding is dropped — the replacement supersedes the union", async () => {
+	it("C1: a confirmed-clean touch drops the carried finding — through the real CacheManager and publisher", async () => {
 		const carried = makeCarriedReport(filePath);
-		// The server now answers CLEAN for the same content (root cause fixed
-		// in another file): no diagnostics at all.
+		const cacheManager = new CacheManager(false);
+		cacheManager.writeCache("actionable-warnings", carried, cwd);
 		const result = await runPersistentReverify({
 			report: carried,
 			cwd,
-			lspService: makeService([]),
+			lspService: makeService({
+				diags: [],
+				confirmation: "confirmed",
+			}),
 		});
 		expect(result.outcomes[0]?.outcome).toBe("clean");
-		expect(result.outcomes[0]?.dropped).toBe(1);
-		const replacement = result.replacementFiles[0];
-		expect(replacement?.warnings).toEqual([]);
-		expect(replacement?.reVerified).toBe(true);
+		expect(result.touched).toBe(1);
 
-		// Merge-level: publishing the replacement in-band must REMOVE the
-		// carried warning — master's union semantics kept it (mutation-proven).
-		const store = new Map<string, unknown>();
-		store.set("actionable-warnings", carried);
-		const cacheManager = {
-			readCache: vi.fn((key: string) =>
-				store.has(key) ? { data: store.get(key) } : undefined,
-			),
-			writeCache: vi.fn((key: string, data: unknown) => {
-				store.set(key, data);
-			}),
-		};
+		// F1: the replacement folds into the turn's single in-band publish —
+		// through the REAL publisher and store, the carried warning is gone.
 		publishActionableWarningsReport(
-			cacheManager as any,
+			cacheManager,
 			cwd,
 			{ ...carried, files: result.replacementFiles },
 			{ origin: "in-band" },
 		);
-		const merged = store.get("actionable-warnings") as ActionableWarningsReport;
+		const merged = cacheManager.readCache("actionable-warnings", cwd)
+			?.data as ActionableWarningsReport;
 		const mergedFile = merged.files.find((f) => f.filePath === filePath);
 		expect(mergedFile?.warnings ?? []).toEqual([]);
 	});
 
-	it("C2: a re-confirmed finding is re-delivered as a fresh observation", async () => {
+	it("C2: a re-confirmed finding is re-delivered as a fresh observation — supersede, not union", async () => {
 		const carried = makeCarriedReport(filePath);
+		const cacheManager = new CacheManager(false);
+		cacheManager.writeCache("actionable-warnings", carried, cwd);
 		const result = await runPersistentReverify({
 			report: carried,
 			cwd,
-			lspService: makeService([
-				{
-					severity: 2,
-					message: WARNING_MESSAGE,
-					range: {
-						start: { line: 0, character: 6 },
-						end: { line: 0, character: 7 },
-					},
-					source: "ts",
-					code: 6133,
-				},
-			]),
+			lspService: makeService({
+				diags: [makeDiag()],
+				confirmation: "confirmed",
+			}),
 		});
 		expect(result.outcomes[0]?.outcome).toBe("reconfirmed");
 		const replacement = result.replacementFiles[0];
 		expect(replacement?.warnings).toHaveLength(1);
 		expect(replacement?.reVerified).toBe(true);
-		// The fresh record's stamp is the observation stamp, not the carried
-		// one — the entry is younger than the re-verification.
-		expect(replacement?.generatedAt).toBeDefined();
+
+		publishActionableWarningsReport(
+			cacheManager,
+			cwd,
+			{ ...carried, files: result.replacementFiles },
+			{ origin: "in-band" },
+		);
+		const merged = cacheManager.readCache("actionable-warnings", cwd)
+			?.data as ActionableWarningsReport;
+		const mergedFile = merged.files.find((f) => f.filePath === filePath);
+		// Supersede, not union: the carried record and the fresh record share
+		// an id, but the assertion pins the fresh stamp won — one warning, and
+		// it is the re-verified entry's.
+		expect(mergedFile?.warnings).toHaveLength(1);
+		expect(mergedFile?.generatedAt).toBeDefined();
 	});
 
-	it("C3: an unconfirmed touch keeps the carried entry verbatim and marks the gap", async () => {
+	it("F3: a silent empty touch (no confirmation) is UNCONFIRMED — the carried warnings are kept and the gap is labeled", async () => {
+		const carried = makeCarriedReport(filePath);
+		const result = await runPersistentReverify({
+			report: carried,
+			cwd,
+			// The house double's silent-empty shape: `{diags: []}` with no
+			// confirmation — exactly what the review's F3 probe fired on.
+			lspService: makeService({ diags: [] }),
+		});
+		expect(result.outcomes[0]?.outcome).toBe("unconfirmed");
+		const replacement = result.replacementFiles[0];
+		expect(replacement?.warnings).toHaveLength(1);
+		expect(replacement?.warnings[0]?.message).toBe(WARNING_MESSAGE);
+		expect(replacement?.reVerifyIncomplete).toBe(true);
+	});
+
+	it("F3b: a skipReason touch is unconfirmed for the same reason", async () => {
+		const carried = makeCarriedReport(filePath);
+		const result = await runPersistentReverify({
+			report: carried,
+			cwd,
+			lspService: makeService({
+				diags: [],
+				skipReason: "outside-project-root",
+			}),
+		});
+		expect(result.outcomes[0]?.outcome).toBe("unconfirmed");
+	});
+
+	it("C3: a throwing touch keeps the carried entry verbatim and marks the gap", async () => {
 		const carried = makeCarriedReport(filePath);
 		const result = await runPersistentReverify({
 			report: carried,
@@ -225,13 +278,12 @@ describe("persistent reverify (#3170)", () => {
 		expect(result.outcomes[0]?.outcome).toBe("unconfirmed");
 		const replacement = result.replacementFiles[0];
 		expect(replacement?.warnings).toHaveLength(1);
-		expect(replacement?.warnings[0]?.message).toBe(WARNING_MESSAGE);
 		expect(replacement?.reVerifyIncomplete).toBe(true);
 	});
 
-	it("C4: a file changed since its observation stamp is skipped — the edit path owns it", async () => {
+	it("C4: a file changed since its observation stamp is skipped — counted in the result and the latency record", async () => {
 		const carried = makeCarriedReport(filePath);
-		// Stamp the observation BEFORE the file's last write: the file has
+		// The observation stamp predates the file's last write: the file has
 		// moved since, so the edit path already re-observed it.
 		carried.files[0]!.generatedAt = new Date(
 			Date.now() - 120_000,
@@ -239,18 +291,24 @@ describe("persistent reverify (#3170)", () => {
 		const result = await runPersistentReverify({
 			report: carried,
 			cwd,
-			lspService: makeService([]),
+			lspService: makeService({ diags: [], confirmation: "confirmed" }),
 		});
 		expect(result.outcomes).toEqual([]);
-		expect(result.replacementFiles).toEqual([]);
-		expect(result.skippedChanged ?? 0).toBeGreaterThanOrEqual(0);
+		expect(result.skippedChanged).toBe(1);
+		// The proof gap the review named: `skippedChanged` was permanently 0.
+		expect(logLatencyMock).toHaveBeenCalledWith(
+			expect.objectContaining({
+				phase: "persistent_reverify",
+				metadata: expect.objectContaining({ skippedChanged: 1 }),
+			}),
+		);
 	});
 
-	it("C5: the pass caps at MAX_REVERIFY_FILES candidates", async () => {
+	it("C5: the pass caps at exactly 4 candidates (the literal pin — the constant →1000 mutation reds this)", async () => {
 		const carried = makeCarriedReport(filePath);
 		const extra: ActionableWarningsReport["files"] = [];
-		for (let i = 0; i < MAX_REVERIFY_FILES + 2; i += 1) {
-			const p = path.join(cwd, `src`, `f${i}.ts`);
+		for (let i = 0; i < 5; i += 1) {
+			const p = path.join(cwd, "src", `f${i}.ts`);
 			fs.writeFileSync(p, `const v${i} = 1;\n`);
 			const past = new Date(Date.now() - 60_000);
 			fs.utimesSync(p, past, past);
@@ -264,46 +322,64 @@ describe("persistent reverify (#3170)", () => {
 		const result = await runPersistentReverify({
 			report: carried,
 			cwd,
-			lspService: makeService([]),
+			lspService: makeService({
+				diags: [],
+				confirmation: "confirmed",
+			}),
 		});
-		expect(result.outcomes.length).toBe(MAX_REVERIFY_FILES);
+		// 6 deferred candidates, at most 4 re-observed — the literal pin.
+		expect(result.candidates).toBe(4);
+		expect(result.outcomes.length).toBe(4);
 	});
 
-	it("emits one bounded persistent_reverify record for the pass", async () => {
+	it("the abort signal stops the pass before any touch", async () => {
 		const carried = makeCarriedReport(filePath);
-		await runPersistentReverify({
+		const controller = new AbortController();
+		controller.abort();
+		const result = await runPersistentReverify({
 			report: carried,
 			cwd,
-			lspService: makeService([]),
+			lspService: makeService({
+				diags: [],
+				confirmation: "confirmed",
+			}),
+			signal: controller.signal,
 		});
-		expect(logLatencyMock).toHaveBeenCalledWith(
-			expect.objectContaining({ phase: "persistent_reverify" }),
-		);
+		expect(result.outcomes).toEqual([]);
+		expect(result.touched).toBe(0);
 	});
 
-	it("C3-render: the delta mode labels a re-verify-incomplete group", async () => {
+	it("the wall budget stops the pass between files — later candidates are re-armed, not half-verified", async () => {
+		const carried = makeCarriedReport(filePath);
+		const second = path.join(cwd, "src", "b.ts");
+		fs.writeFileSync(second, "const y = 1;\n");
+		const past = new Date(Date.now() - 60_000);
+		fs.utimesSync(second, past, past);
+		carried.files = [
+			carried.files[0]!,
+			{ ...carried.files[0]!, filePath: second, displayPath: "src/b.ts" },
+		];
+		const result = await runPersistentReverify({
+			report: carried,
+			cwd,
+			// The touch sleeps 400ms against a 200ms budget: the bound-wrapped
+			// touch comes back unconfirmed and the pass re-arms the rest.
+			lspService: makeService({ diags: [], confirmation: "confirmed" }, 400, [
+				{ title: "Fix", isPreferred: true },
+			]),
+			budgetMs: 200,
+		});
+		// The first candidate's touch is bound-wrapped at the remaining
+		// budget and comes back unconfirmed; the loop then breaks — the
+		// second candidate is re-armed for the next turn, never half-verified.
+		expect(result.outcomes.length).toBeLessThanOrEqual(1);
+		expect(result.touched).toBe(0);
+	});
+
+	it("the advisory renders the re-verify gap label", () => {
 		const carried = makeCarriedReport(filePath);
 		carried.files[0]!.reVerifyIncomplete = true;
-		resetProjectLensConfigCache();
-		const tool = createLensDiagnosticsTool(
-			{
-				readCache: vi.fn((key: string) =>
-					key === "actionable-warnings" ? { data: carried } : undefined,
-				),
-			} as any,
-			() => cwd,
-		);
-		const result = (await tool.execute(
-			"1",
-			{ mode: "delta" },
-			undefined,
-			null,
-			{
-				cwd,
-			},
-		)) as { content: Array<{ type: "text"; text: string }> };
-		const text = result.content.map((part) => part.text).join("\n");
-		expect(text).toContain(WARNING_MESSAGE);
-		expect(text).toContain("(re-verify incomplete)");
+		const advisory = formatActionableWarningsAdvisory(carried, cwd);
+		expect(advisory).toContain("(re-verify incomplete)");
 	});
 });

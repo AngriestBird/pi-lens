@@ -123,7 +123,10 @@ import {
 import type { LSPDiagnostic } from "./lsp/client.js";
 import { convertLspDiagnostics } from "./dispatch/utils/lsp-diagnostics.js";
 import { retagAuxiliaryDiagnostics } from "./dispatch/auxiliary-lsp.js";
-import { runPersistentReverify } from "./persistent-reverify.js";
+import {
+	type PersistentReverifyResult,
+	runPersistentReverify,
+} from "./persistent-reverify.js";
 import { cascadeCarrySuffix } from "./cascade-format.js";
 import {
 	applyFindingPolicy,
@@ -3377,13 +3380,17 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			fileSeqByPath.set(filePath, getFileSeq.call(runtime, filePath));
 		}
 	}
+	let reverify: PersistentReverifyResult | undefined;
 	if (getFlag("lens-actionable-warnings")) {
 		// #3170: re-verify carried deferred findings before the advisory
 		// assembles — a finding whose file is unchanged re-serves from the
 		// persisted report without ever being re-observed; root-cause-fixed-
 		// elsewhere findings converge here instead of repeating. Bounded in the
-		// module (≤4 files, wall budget, abort signal); the replacement publishes
-		// in-band so the carried entry is superseded, not unioned with.
+		// module (≤4 files, wall budget, abort signal). #3176 F1: the
+		// replacement entries fold into THIS turn's single in-band publish
+		// below — a separate replacement publish spends the carry marker and
+		// this publish then drops the entries at the scope guard (the blocker
+		// the review caught).
 		const persistedReport = cacheManager.readCache<ActionableWarningsReport>(
 			"actionable-warnings",
 			cwd,
@@ -3392,39 +3399,12 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		if (persistedReport?.files?.some((entry) => entry.origin === "deferred")) {
 			const reverifyLspService = getLSPService();
 			if (reverifyLspService) {
-				const reverify = await runPersistentReverify({
+				reverify = await runPersistentReverify({
 					report: persistedReport,
 					cwd,
 					lspService: reverifyLspService,
-					signal: deps.signal,
+					...(deps.signal === undefined ? {} : { signal: deps.signal }),
 				});
-				if (reverify.replacementFiles.length > 0) {
-					const replacementByPath = new Map(
-						reverify.replacementFiles.map((file) => [
-							normalizeMapKey(file.filePath),
-							file,
-						]),
-					);
-					publishActionableWarningsReport(
-						cacheManager,
-						cwd,
-						{
-							...persistedReport,
-							files: (persistedReport.files ?? []).map(
-								(file) =>
-									replacementByPath.get(normalizeMapKey(file.filePath)) ?? file,
-							),
-							generatedAt: new Date().toISOString(),
-						},
-						{
-							origin: "in-band",
-							getFileSeq: getFileSeq
-								? (filePath: string) => getFileSeq.call(runtime, filePath)
-								: undefined,
-							dbg,
-						},
-					);
-				}
 			}
 		}
 		try {
@@ -3513,6 +3493,34 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			// forward only entries a DEFERRAL produced, and only while their
 			// file has not moved, so a `turn_delta` report does not accumulate
 			// every prior turn's findings.
+			// #3176 F1: the re-verify replacements fold into THIS report — one
+			// in-band publish total, so the carry marker is spent exactly once and
+			// the merged report cannot drop the entries behind the publish (the
+			// blocker the review caught).
+			if (reverify?.replacementFiles.length) {
+				const replacementByPath = new Map(
+					reverify.replacementFiles.map((file) => [
+						normalizeMapKey(file.filePath),
+						file,
+					]),
+				);
+				const files = (report.files ?? []).map(
+					(file) =>
+						replacementByPath.get(normalizeMapKey(file.filePath)) ?? file,
+				);
+				for (const replacement of reverify.replacementFiles) {
+					if (
+						!files.some(
+							(file) =>
+								normalizeMapKey(file.filePath) ===
+								normalizeMapKey(replacement.filePath),
+						)
+					) {
+						files.push(replacement);
+					}
+				}
+				report.files = files;
+			}
 			const publishResult = publishActionableWarningsReport(
 				cacheManager,
 				cwd,

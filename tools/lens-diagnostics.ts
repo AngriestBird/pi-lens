@@ -1073,13 +1073,14 @@ function applyDeltaFreshnessGate<W extends DispositionCandidate>(
  * can tell a just-observed finding from one re-served from cache. Emitted
  * AFTER the group's rows; never on a group with live rows only.
  */
-function appendGroupAgeLabel(
+function appendGroupLabels(
 	lines: string[],
 	warnings: ReadonlyArray<{ stale?: boolean; staleAsOf?: string }>,
+	incomplete: boolean,
 ): void {
 	const staleRow = warnings.find((w) => w.stale);
-	if (!staleRow) return;
-	lines.push(`  (${formatCacheAgeLabel(staleRow.staleAsOf)})`);
+	if (staleRow) lines.push(`  (${formatCacheAgeLabel(staleRow.staleAsOf)})`);
+	if (incomplete) lines.push("  (re-verify incomplete)");
 }
 
 // @delivery-surface: lens-diagnostics:mode-delta
@@ -1196,11 +1197,11 @@ function formatDeltaMode(
 				const where = w.stale ? STALE_LINE_MARKER : `L${w.line ?? "?"}`;
 				lines.push(`  ⚠ ${where}  ${w.rule ?? w.code ?? w.tool}  ${w.message}`);
 			}
-			if (!qualityLabeledFiles.has(normalizeMapKey(file.filePath))) {
-				appendGroupAgeLabel(lines, file.warnings);
-			}
-			if (reverifyIncompletePaths.has(normalizeMapKey(file.filePath))) {
-				lines.push("  (re-verify incomplete)");
+			const key = normalizeMapKey(file.filePath);
+			const hasStale = file.warnings.some((w) => w.stale);
+			const incomplete = reverifyIncompletePaths.has(key);
+			if ((hasStale || incomplete) && !qualityLabeledFiles.has(key)) {
+				appendGroupLabels(lines, file.warnings, incomplete);
 			}
 		}
 	}
@@ -1214,9 +1215,11 @@ function formatDeltaMode(
 				const where = w.stale ? STALE_LINE_MARKER : `L${w.line ?? "?"}`;
 				lines.push(`  ℹ ${where}  ${w.rule ?? w.code ?? w.tool}  ${w.message}`);
 			}
-			appendGroupAgeLabel(lines, file.warnings);
-			if (reverifyIncompletePaths.has(normalizeMapKey(file.filePath))) {
-				lines.push("  (re-verify incomplete)");
+			const key = normalizeMapKey(file.filePath);
+			const hasStale = file.warnings.some((w) => w.stale);
+			const incomplete = reverifyIncompletePaths.has(key);
+			if (hasStale || incomplete) {
+				appendGroupLabels(lines, file.warnings, incomplete);
 			}
 		}
 	}

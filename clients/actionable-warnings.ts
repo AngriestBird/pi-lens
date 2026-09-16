@@ -1150,7 +1150,7 @@ export async function buildActionableWarningsReport(
  * off-hook loop run byte-identical logic — the deferral must not become a
  * second, drifting copy of the enrichment.
  */
-async function enrichFileFromLsp(
+export async function enrichFileFromLsp(
 	cwd: string,
 	args: BuildActionableWarningsArgs,
 	target: LspEnrichmentTarget,
