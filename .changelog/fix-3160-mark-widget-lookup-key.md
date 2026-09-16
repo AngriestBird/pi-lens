@@ -8,4 +8,6 @@ section: Fixed
   case-insensitive filesystem (macOS APFS, `nocase` vfat/ntfs3/cifs) this
   silently missed the live diagnostic and fell back to the fuzzy line guess.
   The lookup now normalizes the path to on-disk casing before checking
-  widget state, matching how the widget's own writers key their records.
+  widget state. `pilens_analyze` also recorded diagnostics under the raw,
+  un-normalized spelling of its agent-supplied `file` argument, so it now
+  normalizes on write too — both sides key on-disk casing consistently.
