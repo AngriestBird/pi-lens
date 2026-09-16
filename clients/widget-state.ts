@@ -362,7 +362,9 @@ export function reconcileWidgetDisposition(
 			(entry?.disposition === "false-positive" ||
 				entry?.disposition === "suppress")
 		) {
-			return [{ ...diagnostic, disposition: entry.disposition, flagged: false }];
+			return [
+				{ ...diagnostic, disposition: entry.disposition, flagged: false },
+			];
 		}
 		// #3158 retirement rule 3: a row the store holds ONLY because it was
 		// suppressed (`suppressedRetained`) has no live scan behind it — the last
@@ -848,7 +850,12 @@ function normalizeDiagnostics(
  * through the mtime gate anyway.
  */
 function retentionIdentity(d: WidgetDiagnostic): string {
-	return JSON.stringify([d.tool ?? "", d.rule ?? "", d.line ?? null, d.message]);
+	return JSON.stringify([
+		d.tool ?? "",
+		d.rule ?? "",
+		d.line ?? null,
+		d.message,
+	]);
 }
 
 /**
@@ -860,18 +867,20 @@ function retentionIdentity(d: WidgetDiagnostic): string {
  * Retained rows are APPENDED after the incoming ones: `capStoredDiagnostics`
  * fills the TUI's display list from the front, so a retained row never evicts a
  * live finding from the rendered set.
+ *
+ * The tagged-row check comes FIRST so a project with no disposition marks — the
+ * overwhelmingly common case, and this runs on the per-edit write path — pays
+ * one predicate per stored row and never builds the identity set.
  */
 function retainSuppressedRows(
 	previous: WidgetDiagnostic[],
 	incoming: WidgetDiagnostic[],
 	filePath: string,
 ): WidgetDiagnostic[] {
-	if (previous.length === 0) return incoming;
+	const tagged = previous.filter((d) => d.disposition !== undefined);
+	if (tagged.length === 0) return incoming;
 	const reported = new Set(incoming.map(retentionIdentity));
-	const retained = previous.filter(
-		(d) => d.disposition !== undefined && !reported.has(retentionIdentity(d)),
-	);
-	if (retained.length === 0) return incoming;
+	const retained = tagged.filter((d) => !reported.has(retentionIdentity(d)));
 	if (retained.length > MAX_RETAINED_SUPPRESSED_PER_FILE) {
 		// Freshest observations win the cap. One record per FILE, never one per
 		// dropped row (AGENTS.md "bounded observability"): the chip under-counts
