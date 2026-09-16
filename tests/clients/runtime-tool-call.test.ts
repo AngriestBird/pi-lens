@@ -829,3 +829,47 @@ describe("#3052 indent autopatch does not retarget from a comment's alignment", 
 		}
 	});
 });
+
+// #3116: the same indent-autopatch bridge must not pick a multi-line
+// template literal's interior alignment as the base nesting unit either
+// (AGENTS.md defect 49, fourth member; #3052's own case for block comments).
+// Drives the actual production sequence end to end (no hand-rolled
+// reimplementation of retargetReplacementIndentation).
+describe("#3116 indent autopatch does not retarget from a template literal's alignment", () => {
+	it("patches newText's deeper nesting from the code's own indent unit, not the template's", async () => {
+		mockPipelineSucceeds();
+		const env = setupTestEnvironment("pi-lens-3116-premise-");
+		try {
+			// The real file already has the corrected indentation: a 1-space
+			// template-literal interior (template ratio 1->2) and a 4-space code
+			// line whose OWN ratio (4->3) differs from the template's.
+			const corrected =
+				"const HELP = `\n  text\n`;\nfunction f() {\n   go();\n}\n";
+			const filePath = createTempFile(env.tmpDir, "src/f.ts", corrected);
+			// The model's oldText guess (mismatched vs. the real file) and a
+			// newText whose second line nests one level deeper than anything
+			// oldText showed the corrector.
+			const oldText = "const HELP = `\n text\n`;\nfunction f() {\n    go();\n}";
+			const newText = "function g() {\n    a();\n        b();\n}";
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			const event = {
+				toolName: "edit",
+				input: { path: filePath, oldText, newText },
+			};
+
+			await handleToolCall(
+				baseDeps({ runtime, ctx: { cwd: env.tmpDir }, event }),
+			);
+
+			// Pre-fix, this exact input patched `b();` to 16 literal spaces (the
+			// template's 1-space unit doubled 8 times) instead of the
+			// code-derived 6 — quoted in the PR body's premise transcript.
+			expect((event.input as { newText: string }).newText).toBe(
+				"function g() {\n   a();\n      b();\n}",
+			);
+		} finally {
+			env.cleanup();
+		}
+	});
+});

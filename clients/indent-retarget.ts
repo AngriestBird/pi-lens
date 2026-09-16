@@ -1,4 +1,7 @@
-import { blockCommentInteriorMask } from "./dispatch/indent-detect.js";
+import {
+	blockCommentInteriorMask,
+	templateLiteralInteriorMask,
+} from "./dispatch/indent-detect.js";
 
 /**
  * Retargets the leading-whitespace style of newText to match the indentation
@@ -10,17 +13,18 @@ import { blockCommentInteriorMask } from "./dispatch/indent-detect.js";
  * newText has indentation that cannot be resolved, to avoid producing
  * mixed-indentation output.
  *
- * A line inside a terminated `/* … *\/` block comment still gets an exact
- * entry in the map — a replacement that reintroduces that SAME indent
- * (adding another JSDoc continuation, say) still resolves by direct
+ * A line inside a terminated `/* … *\/` block comment, or inside a
+ * multi-line template literal, still gets an exact entry in the map — a
+ * replacement that reintroduces that SAME indent (adding another JSDoc
+ * continuation, or another template line, say) still resolves by direct
  * lookup — but that indent is never eligible to be picked as the shortest
  * ("base") unit and extrapolated to a deeper level `newText` adds that
- * oldText never showed: its leading space is alignment on the opener's `*`
- * column, not a nesting unit, and a doc comment's own alignment ratio can
- * differ from the code's own indentation ratio, silently mis-scaling every
- * such deeper line (#3052). Uses the same lexer as
- * `clients/dispatch/indent-detect.ts`'s `detectIndentation` (#3039) rather
- * than a second one.
+ * oldText never showed: its leading space is alignment (on the comment
+ * opener's `*` column, or on the template string's own content), not a
+ * nesting unit, and that alignment's ratio can differ from the code's own
+ * indentation ratio, silently mis-scaling every such deeper line (#3052,
+ * #3116). Uses the same lexer as `clients/dispatch/indent-detect.ts`'s
+ * `detectIndentation` (#3039, #3059) rather than a second one.
  */
 export function retargetReplacementIndentation(
 	newText: string,
@@ -32,12 +36,14 @@ export function retargetReplacementIndentation(
 	const correctedLines = correctedOldText.replace(/\r\n/g, "\n").split("\n");
 	if (oldLines.length !== correctedLines.length) return undefined;
 	const commentInterior = blockCommentInteriorMask(oldLines);
+	const templateInterior = templateLiteralInteriorMask(oldLines);
 
 	const indentMap = new Map<string, string>();
-	// oldIndent keys backed by at least one line OUTSIDE a comment interior —
-	// the only keys eligible to be picked as the base unit below. A
-	// comment-interior line still lands in indentMap (exact-width lookups
-	// must still resolve, #3052 F1), it just cannot anchor the extrapolation.
+	// oldIndent keys backed by at least one line OUTSIDE a comment or
+	// template-literal interior — the only keys eligible to be picked as the
+	// base unit below. An interior line still lands in indentMap (exact-width
+	// lookups must still resolve, #3052 F1), it just cannot anchor the
+	// extrapolation.
 	const structuralIndents = new Set<string>();
 	const ambiguousIndents = new Set<string>();
 	for (const [i, oldLine] of oldLines.entries()) {
@@ -56,7 +62,9 @@ export function retargetReplacementIndentation(
 		}
 		if (!ambiguousIndents.has(oldIndent)) {
 			indentMap.set(oldIndent, correctedIndent);
-			if (!commentInterior[i]) structuralIndents.add(oldIndent);
+			if (!commentInterior[i] && !templateInterior[i]) {
+				structuralIndents.add(oldIndent);
+			}
 		}
 	}
 	if (indentMap.size === 0) return undefined;
@@ -64,8 +72,8 @@ export function retargetReplacementIndentation(
 	// Find the shortest structurally-backed mapped key as the base unit so
 	// that nesting levels in newText that are deeper than anything in
 	// oldText can be remapped as n × baseFrom → n × baseTo. A key backed
-	// only by comment-interior lines is skipped here (but stays in
-	// indentMap for direct lookups above).
+	// only by comment- or template-interior lines is skipped here (but stays
+	// in indentMap for direct lookups above).
 	let baseFrom = "";
 	let baseTo = "";
 	for (const [from, to] of indentMap) {

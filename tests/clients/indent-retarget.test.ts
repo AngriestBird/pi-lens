@@ -234,3 +234,103 @@ describe("retargetReplacementIndentation — block-comment interior excluded fro
 		);
 	});
 });
+
+// ── #3116: a template-literal interior's alignment must not become the ────
+// base nesting unit either (AGENTS.md defect 49, fourth member — same shape
+// #3052 fixed for block comments, now via templateLiteralInteriorMask,
+// #3059). Each row gives the template's interior and the code line DIFFERENT
+// correction ratios so a base-unit mix-up produces a visibly wrong (not
+// coincidentally right) deeper-nesting value. Premise probe (quoted in the
+// PR body): pre-fix, row1's exact input produced 16 literal spaces for
+// `b();` (the template's 1-space unit doubled 8 times) instead of the
+// code-derived 6.
+describe("retargetReplacementIndentation — template-literal interior excluded from the base unit (#3116)", () => {
+	it("bases a 4-space file's deeper nesting on the code line, not the template's 1-space alignment", () => {
+		const oldText = "const HELP = `\n text\n`;\nfunction f() {\n    go();\n}";
+		// Template ratio 1->2; code ratio 4->3 (deliberately different so a
+		// template-derived base would silently mis-scale, not coincide).
+		const corrected = "const HELP = `\n  text\n`;\nfunction f() {\n   go();\n}";
+		// "b();" nests one level deeper than anything in oldText — its indent
+		// must extend from the code's own 4-space unit (4->3), not the
+		// template's 1-space one (1->2).
+		const newText = "function g() {\n    a();\n        b();\n}";
+		expect(retargetReplacementIndentation(newText, oldText, corrected)).toBe(
+			"function g() {\n   a();\n      b();\n}",
+		);
+	});
+
+	it("bases a 2-space file's deeper nesting on the code line, not the template's 1-space alignment", () => {
+		const oldText = "const HELP = `\n text\n`;\nfunction f() {\n  go();\n}";
+		// Template ratio 1->3; code ratio 2->4.
+		const corrected =
+			"const HELP = `\n   text\n`;\nfunction f() {\n    go();\n}";
+		const newText = "function g() {\n  a();\n      b();\n}";
+		expect(retargetReplacementIndentation(newText, oldText, corrected)).toBe(
+			"function g() {\n    a();\n            b();\n}",
+		);
+	});
+
+	it("keeps a tab file's deeper nesting in tabs instead of mixing in the template's space alignment", () => {
+		// The template's interior line went from 2-space to 1-space alignment;
+		// the code went from 4-space to tabs. A template-derived base would put
+		// literal SPACES into a tab file.
+		const oldText = "const HELP = `\n  text\n`;\nfunction f() {\n    go();\n}";
+		const corrected = "const HELP = `\n text\n`;\nfunction f() {\n\tgo();\n}";
+		const newText = "function g() {\n    a();\n        b();\n}";
+		expect(retargetReplacementIndentation(newText, oldText, corrected)).toBe(
+			"function g() {\n\ta();\n\t\tb();\n}",
+		);
+	});
+
+	it("does not treat a backtick inside a string literal as a template opener", () => {
+		// Guards against an over-broad exclusion (any line with a backtick
+		// anywhere) swallowing ordinary code — the decoy backtick here is
+		// inside a quoted string, so templateLiteralInteriorMask (and thus
+		// retarget) must never open a template region for it.
+		const oldText = 'const s = "a ` decoy";\nfunction f() {\n  go();\n}';
+		const corrected = 'const s = "a ` decoy";\nfunction f() {\n\tgo();\n}';
+		const newText = "function g() {\n  a();\n    b();\n}";
+		expect(retargetReplacementIndentation(newText, oldText, corrected)).toBe(
+			"function g() {\n\ta();\n\t\tb();\n}",
+		);
+	});
+
+	it("keeps lines after a template that never closes as structural evidence", () => {
+		// The opening backtick here has no matching closer anywhere in oldText —
+		// templateLiteralInteriorMask's own fail-safe leaves those lines
+		// unmasked (structural) rather than silently swallowing the rest of the
+		// file; retarget must match that rule via the same shared lexer.
+		const oldText = "const s = `never closes\nfunction f() {\n  go();\n}";
+		const corrected = "const s = `never closes\nfunction f() {\n\tgo();\n}";
+		const newText = "function g() {\n  a();\n    b();\n}";
+		expect(retargetReplacementIndentation(newText, oldText, corrected)).toBe(
+			"function g() {\n\ta();\n\t\tb();\n}",
+		);
+	});
+
+	it("excludes the template interior under CRLF line endings too", () => {
+		const oldText =
+			"const HELP = `\r\n text\r\n`;\r\nfunction f() {\r\n    go();\r\n}";
+		const corrected =
+			"const HELP = `\r\n  text\r\n`;\r\nfunction f() {\r\n   go();\r\n}";
+		const newText = "function g() {\r\n    a();\r\n        b();\r\n}";
+		expect(retargetReplacementIndentation(newText, oldText, corrected)).toBe(
+			"function g() {\r\n   a();\r\n      b();\r\n}",
+		);
+	});
+
+	// A template-interior indent must still resolve by DIRECT lookup — only
+	// its eligibility as the extrapolation BASE unit is revoked, mirroring
+	// #3052's P3 row for comments. A replacement that reintroduces the same
+	// template indent (here, another template literal with the same interior
+	// alignment) must still retarget instead of aborting.
+	it("still resolves a template-interior indent by direct lookup when newText reintroduces it", () => {
+		const oldText = "const HELP = `\n text\n`;\nfunction f() {\n    go();\n}";
+		const corrected = "const HELP = `\n  text\n`;\nfunction f() {\n   go();\n}";
+		const newText =
+			"const OTHER = `\n text more\n`;\nfunction g() {\n    a();\n}";
+		expect(retargetReplacementIndentation(newText, oldText, corrected)).toBe(
+			"const OTHER = `\n  text more\n`;\nfunction g() {\n   a();\n}",
+		);
+	});
+});
