@@ -315,17 +315,33 @@ const REGEX_FLAG_CHARS = "dgimsuvy";
  * `bin/cli` and friends. `` gates on the `:` before `/src`, and the first
  * `/` found afterward (inside the backticked `` `bin/cli` ``) would
  * otherwise read as a valid close, swallowing the backtick and inverting
- * template-tracking parity for the rest of the file (round 2 review S4;
- * this exact shape changed 0 files' verdicts across the same 25,553-file
- * corpus, but the shape itself is real, not hypothetical — of 181 gate
- * firings across the corpus's 882 Markdown files, 158 found what looked
- * like a valid close before this check existed, cut to 19 by it). A closing `/`
- * is accepted only when it is followed by zero or more regex flag letters
- * ({@link REGEX_FLAG_CHARS}) and then a non-identifier character (or EOL) —
- * `/src/cli` and friends` has an identifier character (`c`) right after
- * the candidate close, which a real regex literal's own syntax forbids
- * (flags must be immediately followed by a statement terminator, not more
- * identifier text), so it is rejected and the scan returns -1 instead.
+ * template-tracking parity for the rest of the file. A closing `/` is
+ * accepted only when it is followed by zero or more regex flag letters
+ * ({@link REGEX_FLAG_CHARS}) and then a NON-IDENTIFIER character (or
+ * EOL) — `/src/cli` and friends` has an identifier character (`c`) right
+ * after the candidate close, which a real regex literal's own syntax
+ * forbids (flags must be immediately followed by a statement terminator,
+ * not more identifier text), so it is rejected and the scan returns -1
+ * instead.
+ *
+ * This narrows the false-close family, it does not close it: when what
+ * follows the false close is instead a NON-identifier character (a
+ * backtick, a space, `)`, `.` — anything outside `[A-Za-z0-9_$]`), this
+ * check does not fire either, and the same corruption is still possible
+ * in principle. Round 3 F2 measured the residual directly rather than
+ * asserting it away: of the 19 regex-shaped matches that still survive
+ * in the corpus's Markdown files after this check (round 2's own count),
+ * NONE has a backtick inside its matched span — every survivor is either
+ * a genuine regex literal in a fenced code sample or ASCII-art/prose that
+ * happens to satisfy the grammar without ever touching a `` ` `` — so the
+ * residual is 0 of 25,553 corpus files and 0 of those 19 matches, not
+ * merely untested. The only check that closes the family completely is
+ * counting backticks in the consumed span and rejecting an odd count —
+ * which is exactly the shape a real `` /`foo`/ `` regex literal (a
+ * pattern that legitimately contains backticks) also has, so rejecting
+ * it would re-introduce the over-decline this PR's own first-pass
+ * heuristic was rejected for (#3120's own history). Left as a measured,
+ * documented limit rather than tightened further.
  */
 function skipRegexLiteral(line: string, start: number): number {
 	let j = start + 1;

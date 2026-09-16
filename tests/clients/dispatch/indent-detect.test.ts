@@ -593,21 +593,27 @@ describe("templateLiteralInteriorMask", () => {
 	});
 
 	it("does not open a phantom template for a backtick inside an unambiguous regex literal (#3120 R3, two regexes with backticks)", () => {
-		// Before the regex-literal state: `/`/` `'s backtick (after `=`, an
+		// Before the regex-literal state: `/`/g`'s backtick (after `=`, an
 		// unambiguous opener position) reads as a real template opener, so the
 		// real function body between the two regex literals is wrongly
 		// swallowed as "template interior" (excluded from indentation
 		// evidence) -- an even count of stray backticks closes the phantom
 		// pair cleanly, so the opener-never-closes fail-safe never trips and
-		// the corruption is silent. With the regex state, both `/`/` `
+		// the corruption is silent. With the regex state, both `/`/g`
 		// literals are recognised and skipped whole, so their backticks never
-		// reach the template branch at all.
+		// reach the template branch at all. The trailing `g` flag on both
+		// (round 3, F1) pins the flag-skip loop in `skipRegexLiteral`: a
+		// mutation that disables it (`while (false)` instead of consuming
+		// flag letters) checks the character right after the closing `/` --
+		// `g`, an identifier character -- and wrongly rejects this as not a
+		// regex literal at all, letting both backticks fall through to the
+		// same phantom-template corruption this test exists to catch.
 		const lines = [
-			"const a = /`/;",
+			"const a = /`/g;",
 			"function f() {",
 			"  go();",
 			"}",
-			"const b = /`/;",
+			"const b = /`/g;",
 			"const s = `",
 			"  text",
 			"`;",
@@ -815,7 +821,7 @@ describe("templateLiteralInteriorMask", () => {
 		expect(templateLiteralInteriorMask(lines)).toEqual([false, false, false]);
 	});
 
-	it("does not accept a regex-shaped close when an identifier immediately follows its flags: Markdown prose is not corrupted (#3120 round 2, S4)", () => {
+	it("rejects a regex-shaped close whose flags are immediately followed by an identifier character (#3120 round 3, F2: identifier-terminator sub-shape)", () => {
 		// Round 2 review finding: the position gate fires on every `/` at an
 		// unambiguous position, including plain prose -- `Layout: /src ...`
 		// gates on the `:` before `/src` the same way real code would. Without
@@ -830,6 +836,15 @@ describe("templateLiteralInteriorMask", () => {
 		// text, so requiring a non-identifier character (or EOL) after any
 		// flag letters rejects this false close and falls back to ordinary
 		// scanning, which finds the real backtick as its own opener instead.
+		//
+		// This pins ONE sub-shape only, named precisely because it is not the
+		// whole defect: round 3 F2 found the false close's next character can
+		// also be a NON-identifier (a backtick, space, `)`, `.`) and still
+		// swallow a real backtick undetected by this check -- see
+		// `skipRegexLiteral`'s doc comment for the measured, documented,
+		// deliberately-unfixed residual (closing it needs rejecting any
+		// consumed span with an odd backtick count, which is the shape this
+		// whole PR exists to recognise as a regex, not reject).
 		const lines = [
 			"Layout: /src `bin/cli` and friends.",
 			"",
