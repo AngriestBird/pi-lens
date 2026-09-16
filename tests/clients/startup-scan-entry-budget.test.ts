@@ -226,7 +226,10 @@ describe("nested agent-data directories and the startup entry budget (#3112)", (
 			"pi-lens-omp-nested-",
 			path.join(".omp", "agent", "sessions"),
 		);
-		const ctx = resolveStartupScanContext(root, { homeDir, maxScanEntries: 20 });
+		const ctx = resolveStartupScanContext(root, {
+			homeDir,
+			maxScanEntries: 20,
+		});
 		expect(ctx.reason).toBeUndefined();
 		expect(ctx.canWarmCaches).toBe(true);
 		expect(ctx.sourceFileCount).toBe(3);
@@ -254,7 +257,10 @@ describe("nested agent-data directories and the startup entry budget (#3112)", (
 			"pi-lens-omp-control-",
 			path.join("data", "sessions"),
 		);
-		const ctx = resolveStartupScanContext(root, { homeDir, maxScanEntries: 20 });
+		const ctx = resolveStartupScanContext(root, {
+			homeDir,
+			maxScanEntries: 20,
+		});
 		expect(ctx.canWarmCaches).toBe(false);
 		expect(ctx.reason).toBe("too-many-entries");
 	});

@@ -43,10 +43,11 @@ For a single toggle, highest priority first:
 1. **Environment variable**, for the toggles that have one bound (only
    `PI_LENS_NO_CONTEXT_INJECTION` today).
 2. **CLI flag**.
-3. **Nearest project `.pi-lens.json`** that defines the key — for the three
-   project-scoped mutation controls only (`format.enabled`, `autofix.enabled`,
-   `actionableWarnings.autoFix.enabled`). In a monorepo the closest config to the
-   edited file wins.
+3. **Nearest project `.pi-lens.json`** that defines the key — for the
+   project-scoped keys only: the three mutation controls (`format.enabled`,
+   `autofix.enabled`, `actionableWarnings.autoFix.enabled`) and the per-tool
+   switches `tools.<name>.enabled` (`tools.lazy` itself stays global-only). In a
+   monorepo the closest config to the edited file wins.
 4. **Global `~/.pi-lens/config.json`**.
 5. **Built-in default**.
 

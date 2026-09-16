@@ -1125,7 +1125,10 @@ describe("project-scope tools.<name>.enabled (#3112)", () => {
 		// surface at all still reports itself.
 		fs.writeFileSync(
 			path.join(tmpDir, ".pi-lens.json"),
-			JSON.stringify({ tools: { ast_grep_replace: { enabled: false } }, delta: { enabled: false } }),
+			JSON.stringify({
+				tools: { ast_grep_replace: { enabled: false } },
+				delta: { enabled: false },
+			}),
 		);
 		loadPiLensProjectConfig(tmpDir);
 		expect(warnedFor('"delta" is a global-only')).toBe(true);
