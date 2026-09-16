@@ -38,6 +38,7 @@ import {
 	exportWidgetState,
 	getFileDiagnostics,
 	getFileDiagnosticSummaries,
+	getWidgetBlockingFilesForSweep,
 	importWidgetState,
 	recordDiagnostics,
 	reconcileStaleWidgetFiles,
@@ -485,5 +486,120 @@ describe("the retained row's lifetime is enforced (#3158)", () => {
 				suppressedRetained: true,
 			}),
 		]);
+	});
+});
+
+/**
+ * Round 2 F1 (reviewer probe P2). `isBlocking` ignored `disposition`, so a
+ * retained suppressed ERROR still answered "yes, hard stop" to every consumer
+ * that asks the predicate — the footer's blocker rows, `capStoredDiagnostics`'
+ * hoist (which fills the display list from the blockers FIRST, evicting a live
+ * warning), and `getWidgetBlockingFilesForSweep`. The header meanwhile reads
+ * the disposition-aware `countDiagnostics`, so the agent saw a red ● row under
+ * a header that counted zero errors.
+ */
+describe("a retained suppressed row is never a blocker (#3158 round 2 F1)", () => {
+	/** Twelve live warnings — exactly `MAX_STORED_DIAGNOSTICS_PER_FILE` — so a
+	 * hoisted blocker must evict one of them to fit the display list. */
+	const LIVE_WARNINGS = 12;
+
+	function twelveWarningsAndOneError() {
+		const diags = [diag(MESSAGE, 2322, 1, 1)];
+		for (let i = 0; i < LIVE_WARNINGS; i += 1) {
+			diags.push(diag(`live warning ${i}`, 3000 + i, i + 2, 2));
+		}
+		return makeService(diags);
+	}
+
+	beforeEach(() => {
+		fs.writeFileSync(
+			filePath,
+			[
+				"const value: number = 'bad';",
+				...Array.from(
+					{ length: LIVE_WARNINGS },
+					(_, i) => `const w${i} = ${i};`,
+				),
+			].join("\n") + "\n",
+		);
+	});
+
+	it("keeps the footer free of a blocker row for a retained suppressed error", async () => {
+		const service = twelveWarningsAndOneError();
+		await probe(service);
+		await mark({
+			filePath,
+			line: 1,
+			message: MESSAGE,
+			...CANONICAL_MARK,
+			disposition: "false-positive",
+		});
+
+		await probe(service);
+
+		const footer = renderWidget(100, theme).join("\n");
+		expect(footer).toContain(`!${LIVE_WARNINGS}W`);
+		expect(footer).not.toContain("●");
+		expect(footer).not.toContain(MESSAGE);
+		expect(suppressedChip()).toContain("suppressed: 1");
+	});
+
+	it("keeps a retained suppressed error out of the turn-end blocker sweep", async () => {
+		const service = twelveWarningsAndOneError();
+		await probe(service);
+		await mark({
+			filePath,
+			line: 1,
+			message: MESSAGE,
+			...CANONICAL_MARK,
+			disposition: "false-positive",
+		});
+
+		await probe(service);
+
+		expect(getWidgetBlockingFilesForSweep()).toEqual([]);
+	});
+});
+
+/**
+ * Round 2 F2 (reviewer probe P3). The retention identity keyed on `line`, so a
+ * writer that re-reports the marked finding at a SHIFTED line left the retained
+ * row standing beside it — one finding counted live AND in `suppressed: N`.
+ * Driven through `recordDiagnostics`, the seam `clients/pipeline.ts` calls on
+ * every edit: it applies no disposition filter of its own and never runs
+ * `reconcileStaleWidgetFiles`, so the store is the only thing that can refuse
+ * the duplicate.
+ */
+describe("retention identity survives a line shift (#3158 round 2 F2)", () => {
+	const finding = {
+		tool: "lsp",
+		rule: "typescript:2322",
+		message: MESSAGE,
+		severity: "warning",
+	};
+
+	it("replaces the retained row when the finding re-reports at a shifted line", async () => {
+		recordDiagnostics(filePath, [{ ...finding, line: 1 }], 1);
+		await mark({
+			filePath,
+			line: 1,
+			message: MESSAGE,
+			...CANONICAL_MARK,
+			disposition: "false-positive",
+		});
+		recordDiagnostics(filePath, [], 2);
+		expect(suppressedChip()).toContain("suppressed: 1");
+
+		// An edit inserts a line above; the per-edit pipeline re-reports the same
+		// finding one line down.
+		fs.writeFileSync(filePath, `// header\n${FILE_BODY}`);
+		recordDiagnostics(filePath, [{ ...finding, line: 2 }], 3);
+
+		const stored = getFileDiagnostics(filePath) ?? [];
+		expect(stored.filter((d) => d.message === MESSAGE)).toEqual([
+			expect.objectContaining({ line: 2 }),
+		]);
+		expect(stored[0]?.suppressedRetained).toBeUndefined();
+		expect(suppressedChip()).toBeUndefined();
 	});
 });
