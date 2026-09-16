@@ -1,6 +1,7 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
+import { BoundedSet } from "../../clients/bounded-cache.js";
 
 const TESTS_ROOT = "tests";
 const TEST_FILE = /\.test\.ts$/;
@@ -69,9 +70,19 @@ function sourceFiles(root) {
  * warning however many times the population is rebuilt (`findWin32Gates` is
  * called twice by `getWin32LaneFiles` alone). Matches the TypeScript seam's
  * once-per-distinct-path rule; bounded for the same reason it is there.
+ *
+ * Backed by the same {@link BoundedSet} the TypeScript seam uses (imported
+ * from the build output, since `scripts/` cannot import from `tests/` but
+ * can import from `clients/` — see `scripts/lib/astgrep-self-scan.mjs` for
+ * precedent) rather than a hand-rolled `Set` with its own eviction: a second,
+ * divergent eviction policy here (#3104 review F6 found this copy warning
+ * once per OCCURRENCE instead of once per distinct path; a later hand-rolled
+ * `clear()`-on-overflow policy would have been a second divergence of the
+ * same shape) is exactly the drift a shared bounded-collection primitive
+ * exists to prevent.
  */
 const VANISHED_PATH_RECORD_CAP = 256;
-const vanishedBetweenWalkAndRead = new Set();
+const vanishedBetweenWalkAndRead = new BoundedSet(VANISHED_PATH_RECORD_CAP);
 
 /**
  * Read a file this module's own walk just produced, tolerating the file
@@ -83,9 +94,13 @@ const vanishedBetweenWalkAndRead = new Set();
  * The TypeScript-side seam for the same rule is `readWalkedFile` in
  * tests/support/sweep-kit.ts, which every other walker in the repo now uses;
  * scripts/ cannot import from tests/, so this one repeats it rather than
- * inverting the layering. Behaviour is deliberately IDENTICAL, including the
- * once-per-distinct-path record (#3104 review F6, which found this copy
- * warning once per occurrence instead) and its bound.
+ * inverting the layering. Behaviour is IDENTICAL, including the
+ * once-per-distinct-path record and its bound (both now backed by the same
+ * {@link BoundedSet}, oldest-first eviction) and the channel: a raw
+ * `process.stderr.write`, not `console.warn` (#3107) — Vitest's default
+ * reporter (every `npm test` script uses it) intercepts a worker's
+ * `console.warn` and can drop it entirely on a passing run, so this line
+ * would never reach CI's job log through `console.warn`.
  */
 export function readWalkedFile(absolute) {
 	try {
@@ -93,11 +108,9 @@ export function readWalkedFile(absolute) {
 	} catch (error) {
 		if (error?.code !== "ENOENT") throw error;
 		if (!vanishedBetweenWalkAndRead.has(absolute)) {
-			if (vanishedBetweenWalkAndRead.size >= VANISHED_PATH_RECORD_CAP)
-				vanishedBetweenWalkAndRead.clear();
 			vanishedBetweenWalkAndRead.add(absolute);
-			console.warn(
-				`[win32-gate-population] ${absolute} vanished between the walk and the read; skipped (#3082)`,
+			process.stderr.write(
+				`[win32-gate-population] ${absolute} vanished between the walk and the read; skipped (#3082)\n`,
 			);
 		}
 		return undefined;

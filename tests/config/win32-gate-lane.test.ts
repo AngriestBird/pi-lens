@@ -141,14 +141,17 @@ describe("win32 gate lane governance (#2536)", () => {
 	// occurrence — is pinned here instead of assumed.
 	it("tolerates a vanished walked file and warns once per distinct path (#3082)", () => {
 		const gone = resolve(ROOT, "tests/definitely-not-a-real-file-3082.ts");
-		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+		// The record goes through a raw stderr write, not console.warn (#3107):
+		// Vitest's default reporter swallows a worker's console.warn on a
+		// passing run, so the record would never reach CI's job log otherwise.
+		const write = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
 		try {
 			expect(readWalkedFile(gone)).toBeUndefined();
 			expect(readWalkedFile(gone)).toBeUndefined();
-			expect(warn).toHaveBeenCalledTimes(1);
-			expect(warn.mock.calls[0]?.[0]).toMatch(/vanished between the walk/);
+			expect(write).toHaveBeenCalledTimes(1);
+			expect(write.mock.calls[0]?.[0]).toMatch(/vanished between the walk/);
 		} finally {
-			warn.mockRestore();
+			write.mockRestore();
 		}
 		// A directory is EISDIR, not a vanished file: a real failure must not be
 		// laundered into "this file left the population".

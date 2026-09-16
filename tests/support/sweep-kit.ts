@@ -595,10 +595,15 @@ export function recordedVanishedPathCount(): number {
  * cannot violate anything, and a sweep that reported it would be reporting
  * its own race. The disappearance is NOT swallowed (AGENTS.md shape 10): it
  * is recorded once per distinct path in {@link walkedFilesVanished} and
- * printed once, so a genuinely churning tree is visible in the run log
- * instead of quietly shrinking every scan's population. The `minScanned`
- * floors every sweep already carries are what catch a walk that loses its
- * whole population this way.
+ * printed once, via a raw `process.stderr.write` rather than `console.warn`
+ * (#3107) — Vitest's default reporter (every `npm test` script uses it; no
+ * `--reporter` anywhere) intercepts a worker's `console.warn` and can drop it
+ * entirely on a passing run, so a `console.warn` call here would be recorded
+ * but never actually visible in the run log. A raw stderr write bypasses that
+ * interception and lands in the job log unconditionally, so a genuinely
+ * churning tree is visible in the run log instead of quietly shrinking every
+ * scan's population. The `minScanned` floors every sweep already carries are
+ * what catch a walk that loses its whole population this way.
  *
  * Any other error (EACCES, EISDIR, a decode failure) is rethrown untouched —
  * only the vanished-file race is tolerated.
@@ -610,8 +615,11 @@ export function readWalkedFile(file: string): string | undefined {
 		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
 		if (!vanishedBetweenWalkAndRead.has(file)) {
 			vanishedBetweenWalkAndRead.add(file);
-			console.warn(
-				`[sweep-kit] ${file} vanished between the walk and the read; skipped (#3082)`,
+			// Raw stderr write, not console.warn (#3107): Vitest's default
+			// reporter swallows a worker's console.warn on a passing run, so
+			// this line would never reach CI's log. See the docstring above.
+			process.stderr.write(
+				`[sweep-kit] ${file} vanished between the walk and the read; skipped (#3082)\n`,
 			);
 		}
 		return undefined;
