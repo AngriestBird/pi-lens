@@ -6,6 +6,8 @@ import { afterAll, describe, expect, it } from "vitest";
 import {
 	assertNonEmptyScan,
 	listSourceFiles,
+	readWalkedFile,
+	readWalkedFiles,
 	stripSource,
 } from "../support/sweep-kit.js";
 import {
@@ -61,9 +63,12 @@ function scanMkdtempSites(): { file: string; line: number; text: string }[] {
 	const sites: { file: string; line: number; text: string }[] = [];
 	let fileCount = 0;
 	for (const root of roots) {
-		for (const file of listSourceFiles(root, { extensions: [".ts", ".mjs"] })) {
+		// readWalkedFiles: a path that vanished between the walk and the read is
+		// out of the population, not a finding (#3082).
+		for (const { file, source: raw } of readWalkedFiles(
+			listSourceFiles(root, { extensions: [".ts", ".mjs"] }),
+		)) {
 			fileCount += 1;
-			const raw = fs.readFileSync(file, "utf8");
 			const code = stripSource(raw);
 			const lines = code.split("\n");
 			for (const [index, line] of lines.entries()) {
@@ -99,7 +104,8 @@ describe("tmp-fixture-hygiene", () => {
 		const escapees = scanMkdtempSites().filter((site) => {
 			if (site.file === "tests/support/vitest-setup.ts") return false;
 			const file = path.join(REPO_ROOT, site.file);
-			const raw = fs.readFileSync(file, "utf8");
+			const raw = readWalkedFile(file);
+			if (raw === undefined) return false;
 			const rawLines = raw.split("\n");
 			// Multi-line calls carry path.join(os.tmpdir(), ...) on the
 			// following lines; read the call window, not the call line.

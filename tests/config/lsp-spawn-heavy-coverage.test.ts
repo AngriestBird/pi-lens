@@ -54,6 +54,7 @@ import vitestConfig from "../../vitest.config.ts";
 import {
 	auditRegistry,
 	listSourceFiles,
+	readWalkedFiles,
 	relativePosix,
 	stripSource,
 } from "../support/sweep-kit.js";
@@ -197,11 +198,12 @@ describe("lsp-spawn-heavy Vitest project coverage", () => {
 			exclude: (rel) => rel.startsWith("tests/fixtures/"),
 		}).filter((file) => file.endsWith(".test.ts"));
 
-		const candidates = files
-			.map((file) => relativePosix(repoRoot, file))
-			.filter((file) =>
-				isLspSpawnHeavy(fs.readFileSync(path.join(repoRoot, file), "utf8")),
-			);
+		// readWalkedFiles: a path that vanished between the walk and the read is
+		// out of the population, not a finding (#3082 — this scan was one of the
+		// four rotating ENOENT victims).
+		const candidates = readWalkedFiles(files)
+			.filter(({ source }) => isLspSpawnHeavy(source))
+			.map(({ file }) => relativePosix(repoRoot, file));
 
 		const audit = auditRegistry({
 			sweepName: "lsp-spawn-heavy lane coverage",

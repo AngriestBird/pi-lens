@@ -6,6 +6,7 @@ import {
 	callSites,
 	codeMatches,
 	escapeRegExp,
+	readWalkedFiles,
 	stripSource,
 } from "../support/sweep-kit.js";
 import {
@@ -380,17 +381,18 @@ function walkFiles(
 	root: string,
 	matches: (name: string) => boolean,
 ): Array<{ file: string; source: string }> {
-	const files: Array<{ file: string; source: string }> = [];
+	const walked: string[] = [];
 	function walk(dir: string): void {
 		for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
 			const file = path.join(dir, entry.name);
 			if (entry.isDirectory()) walk(file);
-			else if (matches(entry.name))
-				files.push({ file, source: fs.readFileSync(file, "utf8") });
+			else if (matches(entry.name)) walked.push(file);
 		}
 	}
 	walk(root);
-	return files;
+	// readWalkedFiles: a path that vanished between the walk and the read is
+	// out of the population, not a finding (#3082).
+	return readWalkedFiles(walked);
 }
 
 function testFiles(root: string): Array<{ file: string; source: string }> {

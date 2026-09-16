@@ -497,17 +497,19 @@ export const DELIVERY_SURFACES: Record<string, DeliverySurfaceEntry> = {
 				"tracked as a follow-up, not silently assumed fresh.",
 		},
 	),
+	// #3088 round 2 F4: this row used to name `applyDispositions`/`applyRulePolicy`
+	// with whole-file evidence literals. Once #3088 folded mode=full's stack onto
+	// `applyFindingPolicy`, those two literals survived only in UNRELATED
+	// mode=delta helpers in the same file, so deleting the entire policy stack out
+	// of `applyInlineSuppressionsToSummaries` left this gate — and the ratchet —
+	// green while five behaviour cases redded. The evidence is now the call text
+	// of the merge's own filter, which exists nowhere else in the file.
 	"lens-diagnostics:mode-full": gated(
 		LENS_DIAGNOSTICS_FILE,
 		"`lens_diagnostics mode=full` report.",
+		["applyFindingPolicy", "reconcileProjectDiagnosticsSnapshot"],
 		[
-			"applyDispositions",
-			"applyRulePolicy",
-			"reconcileProjectDiagnosticsSnapshot",
-		],
-		[
-			"applyDispositions(",
-			"applyRulePolicy(",
+			"applyFindingPolicy(summary.diagnostics, {",
 			"reconcileProjectDiagnosticsSnapshot(",
 		],
 	),
@@ -586,15 +588,20 @@ export const DELIVERY_SURFACES: Record<string, DeliverySurfaceEntry> = {
 			"the shared workspace-diagnostics cache: createWorkspaceDiagnosticsCacheContext " +
 			"is the tool's entry, and its lookup() applies the #671/#672 freshness stack " +
 			"(own-file mtime + reverse-dependency mtimes via isEntryFresh) plus the " +
-			"#1095 content binding.",
+			"#1095 content binding. #3088: every route out of this tool — fresh, " +
+			"cache replay, single file, directory — also passes applyProbeFindingPolicy, " +
+			"the stored-disposition / .pi-lens.json rule-policy / inline pi-lens-ignore " +
+			"stack the per-edit dispatch path and mode=full apply.",
 		[
 			"createWorkspaceDiagnosticsCacheContext",
 			"isEntryFresh",
 			"cacheCtx.lookup",
+			"applyProbeFindingPolicy",
 		],
 		[
 			"createWorkspaceDiagnosticsCacheContext(resolvedCwd)",
 			"cacheCtx.lookup(file, scopeKey)",
+			"applyProbeFindingPolicy(",
 		],
 	),
 	"git-guard:commit-blocked": labeled(

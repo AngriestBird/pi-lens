@@ -10,21 +10,20 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { describe, expect, it } from "vitest";
 import { repoRoot } from "../support/module-instance-scan.js";
-import { assertNonEmptyScan, stripSource } from "../support/sweep-kit.js";
+import {
+	assertNonEmptyScan,
+	listSourceFiles,
+	readWalkedFiles,
+	stripSource,
+} from "../support/sweep-kit.js";
 
+/** Every `*.test.ts` under `root`, through the shared walker (#3082): this
+ *  file used to hand-roll the identical recursive `readdirSync` walk. */
 function walkTestFiles(root: string): string[] {
 	if (!fs.existsSync(root)) return [];
-	const files: string[] = [];
-	const walk = (directory: string): void => {
-		for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
-			const file = path.join(directory, entry.name);
-			if (entry.isDirectory()) walk(file);
-			else if (entry.isFile() && entry.name.endsWith(".test.ts"))
-				files.push(file);
-		}
-	};
-	walk(root);
-	return files.sort();
+	return listSourceFiles(root, { extensions: [".ts"] }).filter((file) =>
+		file.endsWith(".test.ts"),
+	);
 }
 
 type LatencyMock = { relativePath: string; factory: string };
@@ -49,8 +48,13 @@ function callEnd(source: string, openParen: number): number {
 	throw new Error(`Unclosed vi.mock call in ${source.slice(0, openParen)}`);
 }
 
-function findLatencyMocks(file: string): LatencyMock[] {
-	const source = fs.readFileSync(file, "utf8");
+function findLatencyMocks({
+	file,
+	source,
+}: {
+	file: string;
+	source: string;
+}): LatencyMock[] {
 	const code = stripSource(source);
 	const mocks: LatencyMock[] = [];
 	const pattern = /vi\.mock\s*\(/g;
@@ -81,7 +85,10 @@ describe("latency-logger mock shape (#2281)", () => {
 		// `.changelog/` roll) never delete.
 		const files = walkTestFiles(path.join(repoRoot, "tests"));
 		assertNonEmptyScan("latency-logger test file walk", files.length, 900);
-		const mocks = files.flatMap(findLatencyMocks);
+		// readWalkedFiles: a path that vanished between the walk and the read is
+		// out of the population, not a finding (#3082 — this scan was one of the
+		// four rotating ENOENT victims).
+		const mocks = readWalkedFiles(files).flatMap(findLatencyMocks);
 		assertNonEmptyScan("latency-logger mock scan", mocks.length, 80);
 		const bare = mocks.filter(
 			({ factory }) =>

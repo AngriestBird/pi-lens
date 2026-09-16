@@ -21,6 +21,7 @@ import { jsTsCandidatePaths } from "../../clients/review-graph/import-resolvers.
 import { lineContentHash } from "../../clients/read-guard.js";
 import {
 	listSourceFiles,
+	readWalkedFile,
 	relativePosix,
 	stableOccurrenceKey,
 	stripSource,
@@ -330,7 +331,12 @@ export function localImportTargets(absolute: string): string[] {
 	// the default blanking policy (which every other scan in this file wants,
 	// because an identifier inside a string is not a call) would erase every
 	// specifier and return an empty set. It did, on the first cut here.
-	const stripped = stripSource(fs.readFileSync(absolute, "utf8"), {
+	// readWalkedFile: callers pass paths a directory walk produced (the
+	// flake-shape ratchet's import graph walks every tests/**/*.test.ts), and a
+	// path that vanished between the walk and the read imports nothing (#3082).
+	const source = readWalkedFile(absolute);
+	if (source === undefined) return [];
+	const stripped = stripSource(source, {
 		strings: "keep",
 	});
 	// Every `import type …` / `export type …` declaration's span — a type
