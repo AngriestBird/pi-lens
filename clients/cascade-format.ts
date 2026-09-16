@@ -105,14 +105,19 @@ export function buildResolvedFoundCascadeRun(
 	// no-op and a STRICT `false-positive` anchor hashes an empty line, so a
 	// finding is never hidden by an I/O error (AGENTS.md shape 48).
 	const content = readNeighborContent(filePath);
-	// No `range.start.line` pre-partition here, unlike the late-auxiliary drain
-	// (`clients/runtime-turn.ts`): both lanes read the same
-	// `client.getAllDiagnostics()` map, whose `mergeDiagnosticLists`
-	// (`clients/lsp/client.ts:1503`) already dereferences
+	// No `range.start.line` pre-partition here, unlike the late-auxiliary drain,
+	// whose own comment gives the alignment reason (`clients/runtime-turn.ts`,
+	// above its `anchored` filter): `convertLspDiagnostics` drops line-less
+	// entries, which would break the 1:1 index pairing `retagAuxiliaryDiagnostics`
+	// needs. That reason holds here too — it is simply already satisfied. Both
+	// lanes read the same `client.getAllDiagnostics()` map, whose
+	// `mergeDiagnosticLists` (`clients/lsp/client.ts:1503`) dereferences
 	// `diagnostic.range.start.line` unguarded, so a line-less entry throws long
 	// before either builder sees it and `converted` is always 1:1 with `errors`.
-	// The drain partitions to preserve its own `missing` counting arm, not as a
-	// guard against that (round 2, F3).
+	// The drain still partitions because its filter ALSO feeds a behaviour the
+	// pairing does not: the `lateAuxMissing += rawDiags.length` arm it kept from
+	// the pre-#3102 code. This builder has no such arm, so an unreachable copy
+	// of the filter would buy nothing (round 2, F3).
 	const converted = convertLspDiagnostics(errors, filePath);
 	// #692/#3046: identity comes from the ONE shared derivation every other
 	// surface anchors a mark against — never a hardcoded `tool: "lsp"`. Its drop

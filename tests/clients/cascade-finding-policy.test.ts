@@ -41,6 +41,7 @@ import { handleTurnEnd } from "../../clients/runtime-turn.js";
 import { removeTempDirSync, setupTestEnvironment } from "./test-utils.js";
 
 const MARKED_MESSAGE = "cold neighbour error the agent dismissed";
+const SECOND_MARKED_MESSAGE = "second cold neighbour error the agent dismissed";
 const OTHER_MESSAGE = "cold neighbour error nobody marked";
 const NEIGHBOR_BODY = "const marked = 1;\nconst other = 2;\n";
 
@@ -194,6 +195,10 @@ describe("cold-neighbour cascade run applies the finding policy (#3102)", () => 
 		]);
 		expect(content).toContain(MARKED_MESSAGE);
 		expect(content).toContain(OTHER_MESSAGE);
+		// Round 3 (R2-F1): the FALSE arm of the #1616 sentence. Without this a
+		// delivery that dropped nothing could still announce
+		// "suppressed by disposition: 0 finding(s)" and no case would notice.
+		expect(content).not.toContain("suppressed by disposition:");
 	});
 
 	it("drops a neighbour error marked false-positive", async () => {
@@ -382,6 +387,40 @@ describe("cold-neighbour cascade run applies the finding policy (#3102)", () => 
 		]);
 		expect(content).toContain(OTHER_MESSAGE);
 		expect(content).toContain("suppressed by disposition: 1 finding(s)");
+	});
+
+	it("counts EVERY policy drop in the delivery's suppression line", async () => {
+		// Round 3 (R2-F1): the interpolated VALUE, not just the sentence. The
+		// single-drop case above reads the same under a hardcoded `1`, so this
+		// one drops two of three and demands the 2.
+		fs.writeFileSync(
+			neighbor,
+			"const one = 1;\nconst two = 2;\nconst three = 3;\n",
+		);
+		for (const [line, message, code] of [
+			[1, MARKED_MESSAGE, 2345],
+			[2, SECOND_MARKED_MESSAGE, 2339],
+		] as const) {
+			const marked = await mark({
+				filePath: neighbor,
+				line,
+				message,
+				tool: "lsp",
+				rule: `typescript:${code}`,
+				disposition: "false-positive",
+			});
+			expect(marked.isError).toBeFalsy();
+		}
+
+		const content = await reconcileAndDeliver([
+			errorDiag(0, MARKED_MESSAGE),
+			errorDiag(1, SECOND_MARKED_MESSAGE, 2339),
+			errorDiag(2, OTHER_MESSAGE, 2304),
+		]);
+		expect(content).not.toContain(MARKED_MESSAGE);
+		expect(content).not.toContain(SECOND_MARKED_MESSAGE);
+		expect(content).toContain(OTHER_MESSAGE);
+		expect(content).toContain("suppressed by disposition: 2 finding(s)");
 	});
 
 	it("builds no cascade run at all when every neighbour error was suppressed", async () => {
