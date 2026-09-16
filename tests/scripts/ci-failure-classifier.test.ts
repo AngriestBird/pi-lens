@@ -59,7 +59,6 @@ import {
 	buildCommentBody,
 	buildMarker,
 	classifyFailureLog,
-	decideClassifierAction,
 	describeKernelKillEvidence,
 	MAX_AUTO_RERUN_ATTEMPT,
 	parseClassifierMarker,
@@ -849,28 +848,6 @@ describe("shouldTriggerRerun once-per-SHA guard (#2103)", () => {
 			}),
 		).toBe(true);
 	});
-
-	it("simulates two consecutive classifier passes on the same SHA end-to-end via decideClassifierAction", () => {
-		const rawLog = fixture("infra-kill-wrapper-killed.real.log");
-		const sha = "deadbeef";
-
-		const first = decideClassifierAction({
-			rawLog,
-			sha,
-			existingCommentBody: null,
-		});
-		expect(first.rerunTriggeredThisPass).toBe(true);
-
-		// The second pass reads back the comment the first pass would have
-		// posted -- this is the realistic call shape the CLI's runClassifier
-		// uses (existing comment body -> marker -> guard).
-		const second = decideClassifierAction({
-			rawLog,
-			sha,
-			existingCommentBody: first.commentBody,
-		});
-		expect(second.rerunTriggeredThisPass).toBe(false);
-	});
 });
 
 // The recurrence these guard: on 2026-09-15 the runner 137-killed #3048's CI
@@ -955,63 +932,6 @@ describe("shouldTriggerRerun per-attempt keying and the two-rerun bound (#2042)"
 				existingMarker: parseClassifierMarker(legacy),
 			}),
 		).toBe(true);
-	});
-
-	it("does not re-trigger for a repeat invocation on the same attempt, and keeps naming that attempt", () => {
-		const rawLog = fixture("infra-kill-wrapper-killed.real.log");
-		const sha = "deadbeef";
-		const first = decideClassifierAction({
-			rawLog,
-			sha,
-			runAttempt: 2,
-			existingCommentBody: null,
-		});
-		expect(first.rerunTriggeredThisPass).toBe(true);
-		expect(first.commentBody).toContain(buildMarker(sha, "true", 2));
-
-		const repeat = decideClassifierAction({
-			rawLog,
-			sha,
-			runAttempt: 2,
-			existingCommentBody: first.commentBody,
-		});
-		expect(repeat.rerunTriggeredThisPass).toBe(false);
-		expect(repeat.commentBody).toContain(buildMarker(sha, "true", 2));
-	});
-
-	// A carried-forward marker keeps the attempt its rerun ACTUALLY belongs
-	// to. Restamping the current attempt onto it looks harmless -- this pass
-	// triggered nothing either way -- but it silently spends that attempt's
-	// rerun budget: a REAL classification at attempt 2 (which is never
-	// rerun-eligible by kind) would leave a marker reading "attempt 2 already
-	// reran", so a later infra classification on the same attempt would be
-	// refused the rerun it is owed.
-	it("a real classification at attempt 2 does not consume attempt 2's rerun budget", () => {
-		const sha = "deadbeef";
-		const afterAttempt1 = decideClassifierAction({
-			rawLog: fixture("infra-kill-wrapper-killed.real.log"),
-			sha,
-			runAttempt: 1,
-			existingCommentBody: null,
-		});
-		expect(afterAttempt1.commentBody).toContain(buildMarker(sha, "true", 1));
-
-		const realAtAttempt2 = decideClassifierAction({
-			rawLog: fixture("real-assertion-failure.real.log"),
-			sha,
-			runAttempt: 2,
-			existingCommentBody: afterAttempt1.commentBody,
-		});
-		expect(realAtAttempt2.rerunTriggeredThisPass).toBe(false);
-		expect(realAtAttempt2.commentBody).toContain(buildMarker(sha, "true", 1));
-
-		const infraAtAttempt2 = decideClassifierAction({
-			rawLog: fixture("infra-kill-wrapper-killed.real.log"),
-			sha,
-			runAttempt: 2,
-			existingCommentBody: realAtAttempt2.commentBody,
-		});
-		expect(infraAtAttempt2.rerunTriggeredThisPass).toBe(true);
 	});
 });
 
@@ -1350,12 +1270,16 @@ describe("runClassifier orchestration against a mocked, STATEFUL GitHub API (#21
 		expect(api.rerunCallCount).toBe(0);
 	});
 
-	// The orchestration half of the carry-forward rule (its pure twin is in
-	// decideClassifierAction above; runClassifier deliberately does not reuse
-	// that function -- see the F4 attempt-then-record note -- so the rule
-	// lives in two places and both need a row). A REAL classification at
-	// attempt 2 must leave the marker naming attempt 1: restamping attempt 2
-	// onto it would spend a rerun budget nothing ever used.
+	// #3086: this is now the ONLY test of the carry-forward rule's attempt
+	// bookkeeping. It used to have a pure twin in decideClassifierAction --
+	// a second writer of this same rule (deleted here, no production
+	// caller) whose own version of this exact case (runAttempt/sha/mutation
+	// MC3) had to be added separately in #3079 after a mutation on
+	// runClassifier's line alone stayed green. With one writer left, this
+	// is the case that must catch MC3 (restamping the current attempt onto
+	// a carried-forward marker) by itself. A REAL classification at attempt
+	// 2 must leave the marker naming attempt 1: restamping attempt 2 onto
+	// it would spend a rerun budget nothing ever used.
 	it("#2042: a real classification at attempt 2 leaves the carried-forward marker on attempt 1", async () => {
 		const priorBody = `ci-classifier: infra-kill (no failing assertion; auto-rerun triggered) ${buildMarker("deadbeef", "true", 1)}`;
 		const api = makeStatefulApi({
@@ -1375,6 +1299,32 @@ describe("runClassifier orchestration against a mocked, STATEFUL GitHub API (#21
 		expect(result.rerunTriggeredThisPass).toBe(false);
 		expect(api.rerunCallCount).toBe(0);
 		expect(api.comments[0].body).toContain(buildMarker("deadbeef", "true", 1));
+	});
+
+	// #3086 round 2, F1: the ONLY pin on parseClassifierMarker's attempt
+	// read-back (scripts/lib/ci-failure-classifier.mjs:550, `runAttempt:
+	// match[3] === undefined ? 1 : Number(match[3])`) through the real
+	// orchestration. Deleting decideClassifierAction's twin cost this
+	// coverage -- every other attempt-keyed test here either builds
+	// existingMarker as a literal (never parses a comment body) or uses no
+	// attempt at all. Without this test, a marker written at attempt 2 that
+	// reads back as attempt 1 (M8: `runAttempt: 1,` unconditionally) would
+	// silently re-open the once-per-attempt guard and issue a second rerun.
+	it("a repeat invocation on attempt 2 with an attempt-2 marker issues no second rerun", async () => {
+		const priorBody = `ci-classifier: infra-kill (no failing assertion; auto-rerun triggered) ${buildMarker("deadbeef", "true", 2)}`;
+		const api = makeStatefulApi({
+			initialComments: [{ id: 555, body: priorBody }],
+			runAttempt: 2,
+		});
+		const result = await runClassifier({
+			fetcher: api.fetcher,
+			owner: "acme",
+			repo: "repo",
+			runId: 999,
+		});
+		expect(result.rerunTriggeredThisPass).toBe(false);
+		expect(api.rerunCallCount).toBe(0);
+		expect(api.comments[0].body).toContain(buildMarker("deadbeef", "true", 2));
 	});
 
 	// F4 (BLOCKING, red-proof with a throwing rerun stub): the marker must

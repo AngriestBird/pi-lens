@@ -62,13 +62,6 @@ export declare function buildCommentBody(args: {
 	rerunState: string;
 	runAttempt?: number;
 }): string;
-export declare function decideClassifierAction(args: {
-	rawLog: string;
-	sha: string;
-	runAttempt?: number;
-	existingCommentBody: string | null | undefined;
-}): ClassifierDecision;
-
 export interface FetchedJob {
 	sha: string;
 	prNumber: number | null;
