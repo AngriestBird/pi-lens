@@ -88,21 +88,42 @@ describe("kill-by-pid ownership (#2042)", () => {
 		vi.doUnmock("node:child_process");
 	});
 
-	/**
-	 * The handle arm, which is all the ownership evidence Windows has (there
-	 * is no `/proc` to read): `lsp/launch.ts#killWindowsTree` folded its
-	 * already-exited check into this predicate, and a dead pid may have been
-	 * recycled to an unrelated process that `taskkill /F /T` would destroy.
-	 * Runs on every lane — the arm is platform-independent by construction.
-	 */
-	it("refuses a pid whose handle has already reported exit", () => {
-		expect(isOwnLiveChild(process.ppid, "test", { exitCode: 0 })).toBe(false);
-		expect(
-			isOwnLiveChild(process.ppid, "test", { signalCode: "SIGTERM" }),
-		).toBe(false);
+	it("refuses a malformed pid at every site", () => {
 		expect(isOwnLiveChild(0, "test")).toBe(false);
 		expect(isOwnLiveChild(-1, "test")).toBe(false);
 		expect(isOwnLiveChild(undefined, "test")).toBe(false);
+		expect(isOwnLiveChild(Number.NaN, "test")).toBe(false);
+	});
+
+	/**
+	 * The handle arm is the ONLY ownership evidence Windows has — there is no
+	 * `/proc` to read there, so `lsp/launch.ts#killWindowsTree`'s recycled-pid
+	 * protection (a `taskkill /F /T` on a dead pid destroys whatever process
+	 * inherited the number, and once took out a vitest worker fork) now lives
+	 * in this predicate. Driven through a live `process.platform` read rather
+	 * than a Windows-only lane (AGENTS.md shape 30 / the platform rule): the
+	 * divergence is a `/proc` availability artifact, not real Windows
+	 * behaviour, so the ubuntu lane runs it.
+	 */
+	it("on a platform without /proc, only the handle can refuse a pid", () => {
+		const real = Object.getOwnPropertyDescriptor(process, "platform");
+		Object.defineProperty(process, "platform", {
+			value: "win32",
+			configurable: true,
+		});
+		try {
+			// Best-effort stays best-effort where ownership is unverifiable...
+			expect(isOwnLiveChild(process.ppid, "test")).toBe(true);
+			// ...but a handle that already reported exit is proof it is dead.
+			expect(isOwnLiveChild(process.ppid, "test", { exitCode: 0 })).toBe(
+				false,
+			);
+			expect(
+				isOwnLiveChild(process.ppid, "test", { signalCode: "SIGTERM" }),
+			).toBe(false);
+		} finally {
+			if (real) Object.defineProperty(process, "platform", real);
+		}
 	});
 
 	posixOnly(

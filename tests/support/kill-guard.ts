@@ -58,6 +58,20 @@ const violations: KillGuardViolation[] = [];
 let dropped = 0;
 
 /**
+ * Pids this worker has already SEEN as its own live child.
+ *
+ * A POSIX group kill legitimately outlives its leader: `safeSpawnAsync`
+ * SIGTERMs the group, the direct child dies, and the 1 s escalation SIGKILLs
+ * the group again to reach a SIGTERM-hardy grandchild (#2026/#2027). By then
+ * `/proc/<leader>` is gone, which `/proc` alone cannot tell apart from a
+ * fabricated pid — so ownership is remembered from the moment it was
+ * verifiable, exactly as production resolves it at spawn time. Bounded: a
+ * worker that spawns thousands of children clears rather than grows.
+ */
+const ownedSeen = new Set<number>();
+const MAX_OWNED_SEEN = 512;
+
+/**
  * Ownership, read from the kernel.
  *
  * `/proc/<pid>/status` is authoritative on Linux, the lane that gates this
@@ -69,6 +83,7 @@ let dropped = 0;
 function ownsPid(pid: number): boolean {
 	if (!Number.isInteger(pid) || pid <= 0) return false;
 	if (pid === process.pid) return true;
+	if (ownedSeen.has(pid)) return true;
 	let status: string;
 	try {
 		status = fs.readFileSync(`/proc/${pid}/status`, "utf8");
@@ -76,7 +91,10 @@ function ownsPid(pid: number): boolean {
 		return false;
 	}
 	const match = /^PPid:\s*(\d+)$/m.exec(status);
-	return match ? Number(match[1]) === process.pid : false;
+	if (!match || Number(match[1]) !== process.pid) return false;
+	if (ownedSeen.size >= MAX_OWNED_SEEN) ownedSeen.clear();
+	ownedSeen.add(pid);
+	return true;
 }
 
 function record(site: "kill" | "register", target: number, detail: string) {
