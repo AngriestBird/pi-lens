@@ -491,24 +491,58 @@ describe("with-memory-watch verdict durability (#2042)", () => {
  * These are source-text pins for the same reason the durability mechanism above
  * is one: the behaviour they guard only appears in a real CI kill, which no
  * unit test can stage.
+ *
+ * #3108: the mutation (advisory) lane mutates this file in place and runs
+ * these tests against the INSTRUMENTED copy — same path, same repo root
+ * (stryker.config.mjs sets `inPlace: true`, so there is no separate sandbox
+ * directory to resolve away from), but every expression Stryker's
+ * switch-mutant technique touches gets rewritten to
+ * `stryMutAct_<ns>("<id>") ? <mutant> : (stryCov_<ns>("<id>"), <original>)`
+ * even with no mutant active (the dry run). A strict adjacency match only
+ * ever sees the real fragment in the un-instrumented file, so it false-reds
+ * the dry run on every PR that touches this file (#3108: PR #3061, PR #3106).
+ * `strykerTolerant` swallows that OPTIONAL wrapper so the pin reads the same
+ * real fragment in both lanes; it still cannot find the fragment when the
+ * fragment itself is genuinely gone (a plain, non-wrapped deletion), so the
+ * pins keep catching that.
  */
 describe("with-memory-watch verdict wiring (#2042)", () => {
 	const source = (): string => fs.readFileSync(wrapper, "utf8");
 
+	/**
+	 * Builds a regex source fragment that optionally swallows Stryker's
+	 * switch-mutant scaffolding immediately in front of a real fragment, so a
+	 * text pin built from it matches the same fragment whether or not the
+	 * mutation lane instrumented the file (#3108). `truePattern` is the regex
+	 * source for what Stryker puts in the mutant (kept) branch, bounded to one
+	 * line so it can never swallow the fragment being pinned itself; the
+	 * mutant id is captured and back-referenced into the coverage-tracking
+	 * call so the wrapper only matches its OWN ternary, not an unrelated one.
+	 */
+	function strykerTolerant(truePattern: string): string {
+		return `(?:stryMutAct_\\w+\\("(\\d+)"\\)\\s*\\?\\s*${truePattern}\\s*:\\s*\\(stryCov_\\w+\\("\\1"\\),\\s*)?`;
+	}
+
 	it("hands the sampling cadence to the verdict", () => {
-		const literal = /const watch = \{([\s\S]*?)\n\};/.exec(source());
+		const watchLiteral = new RegExp(
+			`const watch = ${strykerTolerant("\\{\\}")}\\{([\\s\\S]*?)\\n\\}\\)?;`,
+		);
+		const literal = watchLiteral.exec(source());
 		expect(literal, "the wrapper's `watch` object literal").not.toBeNull();
 		expect(
-			literal?.[1],
+			literal?.[2],
 			"watch.intervalMs feeds formatVerdict's cadence caveat",
 		).toMatch(/^\s*intervalMs\b/m);
 	});
 
 	it("records the pid it spawned, so the kernel's victim is nameable", () => {
+		const childPidPin = new RegExp(
+			`watch\\.childPid\\s*=\\s*${strykerTolerant("[^\\n]*?")}child\\.pid`,
+		);
 		expect(
 			source(),
 			"watch.childPid must be set from the spawned child",
-		).toMatch(/watch\.childPid\s*=\s*child\.pid/);
+		).toMatch(childPidPin);
 	});
 });
 
