@@ -374,6 +374,75 @@ function matchIsCode(
 	return /[^\s"'`]/.test(stringsBlanked.slice(start, end));
 }
 
+/**
+ * Index of the `close` character balancing the `open` character AT
+ * `openIndex`, scanning forward, or -1 when unbalanced. Depth-counts both
+ * characters, so a nested pair of the same delimiter (`"(a(b)c)"` from index
+ * 0) resolves to the OUTER close, never the first one seen.
+ *
+ * Assumes `source[openIndex] === open` — same contract every prior private
+ * copy carried, checked by the CALLER (a mismatched index is a caller bug,
+ * not a value this function can usefully report beyond `-1`).
+ *
+ * Callers are expected to run this over already comment/string-blanked text
+ * (via {@link stripSource}) when a delimiter char could otherwise hide inside
+ * a string or comment; this function itself is a pure character scan and
+ * applies no stripping of its own.
+ *
+ * Folded from three byte-for-byte-identical private copies (#3072):
+ * `tests/support/vacuous-skip-scan.ts`'s `matchingCloseBrace` (open/close
+ * fixed to `{`/`}`) and `skipGroup` (open/close taken from the call site),
+ * and `tests/clients/pi-lens-home-hermeticity.test.ts`'s `balancedBraceEnd`
+ * (open/close fixed to `{`/`}`) plus two more inline copies of the same loop
+ * (the parameter-list paren balance in `bodyBraceAfterParams`, and the
+ * `vi.mock(...)` call's paren balance in `findMockCallText`).
+ */
+export function matchingCloseIndex(
+	source: string,
+	openIndex: number,
+	open: string,
+	close: string,
+): number {
+	let depth = 0;
+	for (let i = openIndex; i < source.length; i++) {
+		if (source[i] === open) depth++;
+		else if (source[i] === close) {
+			depth--;
+			if (depth === 0) return i;
+		}
+	}
+	return -1;
+}
+
+/**
+ * Index of the `open` character balancing the `close` character AT
+ * `closeIndex`, scanning backward, or -1 when unbalanced. The backward twin
+ * of {@link matchingCloseIndex}, same contract (assumes
+ * `source[closeIndex] === close`, no stripping of its own).
+ *
+ * Folded from `tests/support/vacuous-skip-scan.ts`'s `matchingOpenParen`
+ * (#3072) — the only backward direction any current consumer needs, so
+ * `open`/`close` here are still explicit rather than assumed to be
+ * `(`/`)`, matching {@link matchingCloseIndex}'s signature for one
+ * consistent shape.
+ */
+export function matchingOpenIndex(
+	source: string,
+	closeIndex: number,
+	open: string,
+	close: string,
+): number {
+	let depth = 0;
+	for (let i = closeIndex; i >= 0; i--) {
+		if (source[i] === close) depth++;
+		else if (source[i] === open) {
+			depth--;
+			if (depth === 0) return i;
+		}
+	}
+	return -1;
+}
+
 /** Return every raw match whose span contains source code. */
 export function codeMatches(source: string, regex: RegExp): RegExpMatchArray[] {
 	const stringsBlanked = stripSource(source, { strings: "blank" });
