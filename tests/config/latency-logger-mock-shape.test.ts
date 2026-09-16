@@ -95,4 +95,27 @@ describe("latency-logger mock shape (#2281)", () => {
 		);
 		expect(bare).toEqual([]);
 	});
+
+	it("keeps the factory boundary quote-aware when a string inside it carries a bare `)` (#3145 review round 2)", () => {
+		// Regression pin for the #3145 review finding: the `quoteAware` option
+		// on `matchingCloseIndex` looked dead by mutation (neutering it reds no
+		// existing test) until the reviewer probed a factory whose own body
+		// contains a string with an unbalanced `)`. Without quote-awareness,
+		// that `)` reads as the call's OWN closing paren, truncating `factory`
+		// long before the real end — dropping the `importActual` call this
+		// sweep exists to require, and silently passing a bare-replacement mock
+		// the sweep is supposed to catch.
+		const source = [
+			'vi.mock("../../clients/latency-logger.js", () => {',
+			'\tconst note = "see docs)";',
+			"\treturn {",
+			'\t\t...vi.importActual("../../clients/latency-logger.js"),',
+			"\t\tlogLatency: vi.fn(),",
+			"\t};",
+			"});",
+		].join("\n");
+		const mocks = findLatencyMocks({ file: "fixture.test.ts", source });
+		expect(mocks).toHaveLength(1);
+		expect(mocks[0]?.factory).toContain("importActual");
+	});
 });
