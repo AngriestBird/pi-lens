@@ -641,6 +641,26 @@ describe("real Git fixture governance", () => {
 		).toEqual([]);
 	});
 
+	it("does not let a COMMENTED-OUT binding make a live variable a sha", () => {
+		// The remedy's own residue: a note saying what the pin used to be,
+		// beside a same-named variable that now holds a runtime revision. Read
+		// from raw source the comment would bind `SHA` to a sha and flag a
+		// spawn that names nothing historical. `COLOR` is there so the file
+		// reaches the argument scan at all.
+		expect(
+			findHistoricalCommitIshOffenders([
+				{
+					file: "tests/clients/synthetic.test.ts",
+					source:
+						'// const SHA = "20896a56b"; // the old pin, before the fixture\n' +
+						'const SHA = process.env.FIXTURE_SHA ?? "HEAD";\n' +
+						'const COLOR = "abcdef1";\n' +
+						'gitExecFileSync("git", ["show", `${SHA}:src/a.ts`], { cwd: COLOR });',
+				},
+			]),
+		).toEqual([]);
+	});
+
 	it("does not scan the arguments of a subcommand that cannot name a commit", () => {
 		// Round 2 S3, all four verbatim: a commit message, an author date in
 		// the options object, and a fixture path that happens to be hex.
