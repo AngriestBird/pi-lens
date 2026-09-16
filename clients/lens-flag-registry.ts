@@ -225,6 +225,15 @@ export const LENS_FLAGS: readonly LensFlagSpec[] = [
 		scope: "global",
 	},
 	{
+		name: "lens-compact-lsp-status",
+		description:
+			"Opt-in (#3099): collapse the footer LSP status to one state glyph per group (LSP ✓ green, LSP ✗ red, dim LSP ✗ when nothing is warm) instead of listing the active server names. Default off. Also via ui.compactLspStatus=true in ~/.pi-lens/config.json.",
+		configKey: "ui.compactLspStatus",
+		negated: false,
+		default: false,
+		scope: "global",
+	},
+	{
 		name: "no-lazy-tools",
 		description:
 			"Keep all pi-lens tools active to avoid tool-list cache changes. Also via tools.lazy=false in ~/.pi-lens/config.json.",

@@ -852,18 +852,30 @@ function activateExtension(hostPi: ExtensionAPI) {
 				getSessionLanguages(),
 			);
 			const parts: string[] = [];
+			// #3099: opt-in compact rendering. Server names stay the default (#267);
+			// the compact form trades them for one glyph per state group so the line
+			// fits a statusline that cannot spare the width. Nothing leaves the
+			// surface — the ids stay reachable through /lens-tools and lens_health.
+			const compact = getLensFlag("lens-compact-lsp-status") === true;
+			const activeText = compact
+				? "LSP ✓"
+				: `LSP Active: ${activeIds.join(", ")}`;
+			const failedText = compact
+				? "LSP ✗"
+				: `LSP Failed: ${failedIds.join(", ")}`;
+			const inactiveText = compact ? "LSP ✗" : "LSP Inactive";
 			if (activeIds.length > 0) {
-				parts.push(theme.fg("success", `LSP Active: ${activeIds.join(", ")}`));
+				parts.push(theme.fg("success", activeText));
 			}
 			if (failedIds.length > 0) {
-				parts.push(theme.fg("error", `LSP Failed: ${failedIds.join(", ")}`));
+				parts.push(theme.fg("error", failedText));
 			}
 			// Inactive is a passive state (no server running for this file, or the
 			// idle timer released them) — not a fault. Render it neutral/grey, not
 			// red, only when there is nothing else to show.
 			setStatus(
 				"pi-lens-lsp",
-				parts.length > 0 ? parts.join(" · ") : theme.fg("dim", "LSP Inactive"),
+				parts.length > 0 ? parts.join(" · ") : theme.fg("dim", inactiveText),
 			);
 		} catch (err) {
 			// Theme may not be fully initialized during early session startup.
