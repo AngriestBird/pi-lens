@@ -325,51 +325,57 @@ export function unadmittedRootBackstopEntries(
 // `maxRSS` is kilobytes on every platform: libuv normalizes the Win32 peak
 // working set for `uv_getrusage`, so no per-platform scaling is needed.
 //
-// #3067 (#3062 review L2): registered FIRST, ahead of every other afterAll in
-// this file (the #3083 backstop, tmp-hygiene, kill-guard below). Vitest runs
-// afterAll hooks LIFO — the LAST one registered runs FIRST (verified
-// empirically: three afterAll() calls registered 1, 2, 3 in a real vitest run
-// report completion in the order 3, 2, 1) — so the FIRST one registered runs
-// LAST. `maxRSS` is a running high-water mark: a reading taken before another
-// hook's teardown allocates cannot reflect that allocation. Registering this
-// hook first is what makes its reading the last word on the file's peak,
-// instead of (as before) reading first and letting the #3083 backstop,
-// tmp-hygiene, and kill-guard hooks run — and allocate — after the number was
-// already taken and reported. It also means an over-budget throw here no
-// longer preempts the tmp-hygiene `[tmp-hygiene-trace]` diagnostic for the
-// same file, which used to be skipped because this hook threw before
-// tmp-hygiene's `afterAll` (registered earlier, hence running later under the
-// old bottom-of-file position) ever got to run.
+// #3139 (#3137 review): this used to be its own top-level `afterAll`,
+// registered FIRST so Vitest's LIFO afterAll order ran it LAST — the reading
+// then included every other hook's teardown allocation. That fixed the OLD
+// direction (an over-budget file's own throw here used to preempt the #3083
+// backstop, tmp-hygiene and kill-guard hooks, which ran AFTER it under the
+// old bottom-of-file position) but created the INVERSE: Vitest's
+// `callSuiteHook` for `afterAll` under `sequence.hooks: "stack"` (this repo's
+// default) has no per-hook try/catch — confirmed directly against the
+// installed vitest@5.0.0 source (node_modules/vitest/dist/chunks/
+// run.CQOUYP-x.js:3544-3548 reverses afterAll order for "stack"; :3566-3569's
+// execution loop, `for (const hook of hooks) callbacks.push(await
+// runHook(hook))`, has no try/catch around `runHook`) — so any one of those
+// three throwing aborted the remaining hooks in that pass, dropping the
+// `[mem-file]` line for exactly the file worth investigating.
+//
+// The fix is not a fourth position for a fourth top-level hook: it is
+// collapsing to the single `afterAll` below (`runTeardownWithMemReport`),
+// so there is only ever ONE suite-level afterAll in this file and no
+// registration order for Vitest's LIFO to apply to. `maxRSS` is a running
+// high-water mark, so this function still reads it AFTER the other checks'
+// teardown (see `runTeardownWithMemReport`'s own doc comment) — the ordering
+// guarantee moved from "register first" to "call last, from `finally`".
 const memReportThresholdMb = Number(
 	process.env.PI_LENS_TEST_MEM_REPORT_MB ?? (process.env.CI ? "512" : "0"),
 );
-if (memReportThresholdMb > 0) {
-	afterAll(() => {
-		const usage = process.memoryUsage();
-		const peakMb = Math.round(process.resourceUsage().maxRSS / 1024);
-		if (peakMb < memReportThresholdMb) return;
-		const file = String(expect.getState().testPath ?? "unknown")
-			.replace(/\\/g, "/")
-			.split("/tests/")
-			.pop();
-		// #3058: the record, and the budget it is measured against, both live
-		// in tests/support/worker-peak-rss.ts so the ceiling has a seam a test
-		// can drive. A file over it fails its own suite here, naming itself,
-		// instead of surfacing five days later as a rising SIGKILL rate.
-		//
-		// Straight to the fork's stderr, not `console.log`: vitest intercepts
-		// worker console output and routes it through the reporter, which
-		// attributes it to a task and can drop it entirely for a hook that runs
-		// after the last test (verified 2026-08-25 — the console form printed
-		// nothing). A raw write lands in the job log unconditionally, which is the
-		// whole point of a line whose only reader is a post-mortem.
-		reportPeakRss({
-			file: `tests/${file}`,
-			peakRssMb: peakMb,
-			heapUsedMb: Math.round(usage.heapUsed / 1048576),
-			externalMb: Math.round(usage.external / 1048576),
-			write: (line) => process.stderr.write(line),
-		});
+function emitMemReport(): void {
+	if (memReportThresholdMb <= 0) return;
+	const usage = process.memoryUsage();
+	const peakMb = Math.round(process.resourceUsage().maxRSS / 1024);
+	if (peakMb < memReportThresholdMb) return;
+	const file = String(expect.getState().testPath ?? "unknown")
+		.replace(/\\/g, "/")
+		.split("/tests/")
+		.pop();
+	// #3058: the record, and the budget it is measured against, both live
+	// in tests/support/worker-peak-rss.ts so the ceiling has a seam a test
+	// can drive. A file over it fails its own suite here, naming itself,
+	// instead of surfacing five days later as a rising SIGKILL rate.
+	//
+	// Straight to the fork's stderr, not `console.log`: vitest intercepts
+	// worker console output and routes it through the reporter, which
+	// attributes it to a task and can drop it entirely for a hook that runs
+	// after the last test (verified 2026-08-25 — the console form printed
+	// nothing). A raw write lands in the job log unconditionally, which is the
+	// whole point of a line whose only reader is a post-mortem.
+	reportPeakRss({
+		file: `tests/${file}`,
+		peakRssMb: peakMb,
+		heapUsedMb: Math.round(usage.heapUsed / 1048576),
+		externalMb: Math.round(usage.external / 1048576),
+		write: (line) => process.stderr.write(line),
 	});
 }
 
@@ -384,12 +390,12 @@ if (memReportThresholdMb > 0) {
 // Against the setup snapshot, not against emptiness (round 4 F4): residue this
 // run did not write is not this file's doing, and accusing it made the whole
 // suite unrunnable on any checkout that had run master first.
-afterAll(() => {
+function checkBackstop(): void {
 	expect(
 		unadmittedRootBackstopEntries(),
 		"#3083: test wrote run-shared orphan-backstop state",
 	).toEqual([]);
-});
+}
 
 interface TmpLeakAdmission {
 	/** Test file (repo-relative) or "*" for every file. */
@@ -560,7 +566,7 @@ export function tmpHygieneLeakReport(): {
 	};
 }
 
-afterAll(() => {
+function checkTmpHygiene(): void {
 	const { testFile, leftovers } = tmpHygieneLeakReport();
 	const after = new Set(
 		snapshotTmpPiLensEntries(readTmpDirEntries(tmpHygieneRealTmp)),
@@ -575,13 +581,45 @@ afterAll(() => {
 		console.warn(
 			`[tmp-hygiene] observed ${leakedCount} unadmitted entry(s) from ${tmpHygieneRealTmp}; the serialized governance owner cleans them`,
 		);
-});
+}
 
 // #2042: fail the FILE that handed a pid it does not own to production kill or
 // spawn code, naming the pid and the stack. See tests/support/kill-guard.ts.
-afterAll(() => {
+function checkKillGuard(): void {
 	const report = killGuardReport();
 	if (report) throw new Error(report);
+}
+
+/**
+ * Run every other per-file teardown check, then emit the `[mem-file]` record
+ * from `finally` — reached whether a check threw or not (#3139). This is the
+ * ONE top-level `afterAll` this file registers: see the comment above
+ * `emitMemReport` for why a second suite-level hook, in any position, is the
+ * wrong shape again.
+ *
+ * `checks` runs in registration order and a throw still aborts the checks
+ * after it — the same relationship Vitest's real (no per-hook try/catch)
+ * afterAll loop already gave them, so this is not a behavior change for the
+ * three checks themselves, only for whether the mem line survives it. The
+ * first check's error (if any) is re-thrown after the mem report runs, so
+ * the file still fails exactly as it always has.
+ */
+export function runTeardownWithMemReport(
+	checks: ReadonlyArray<() => void>,
+	emitMemReport: () => void,
+): void {
+	try {
+		for (const check of checks) check();
+	} finally {
+		emitMemReport();
+	}
+}
+
+afterAll(() => {
+	runTeardownWithMemReport(
+		[checkKillGuard, checkTmpHygiene, checkBackstop],
+		emitMemReport,
+	);
 });
 
 export function cleanupTmpHygiene(): void {
