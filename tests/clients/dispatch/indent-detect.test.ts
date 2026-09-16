@@ -591,4 +591,91 @@ describe("templateLiteralInteriorMask", () => {
 			false,
 		]);
 	});
+
+	it("does not open a phantom template for a backtick inside an unambiguous regex literal (#3120 R3, two regexes with backticks)", () => {
+		// Before the regex-literal state: `/`/` `'s backtick (after `=`, an
+		// unambiguous opener position) reads as a real template opener, so the
+		// real function body between the two regex literals is wrongly
+		// swallowed as "template interior" (excluded from indentation
+		// evidence) -- an even count of stray backticks closes the phantom
+		// pair cleanly, so the opener-never-closes fail-safe never trips and
+		// the corruption is silent. With the regex state, both `/`/` `
+		// literals are recognised and skipped whole, so their backticks never
+		// reach the template branch at all.
+		const lines = [
+			"const a = /`/;",
+			"function f() {",
+			"  go();",
+			"}",
+			"const b = /`/;",
+			"const s = `",
+			"  text",
+			"`;",
+			"code();",
+		];
+		expect(templateLiteralInteriorMask(lines)).toEqual([
+			false,
+			false,
+			false,
+			false,
+			false,
+			false,
+			true,
+			true,
+			false,
+		]);
+	});
+
+	it("does not open a phantom block frame for a /* inside a regex character class (#3120, #3118 round-2 verify addendum 1, /[/*]/ case)", () => {
+		// Before the regex-literal state: the `/*` inside `/[/*]/` (a regex
+		// matching a literal `/` or `*`) reads as a block-comment opener that
+		// never finds a `*/` to close against, so it pushes a "block" frame
+		// that stays on the stack for the rest of the file. hasLiveFrame
+		// treats a lone "block" frame as not template evidence, so the real
+		// template two lines later is never masked at all -- under-masking,
+		// degrading to pre-#3059 behaviour. With the regex state, the whole
+		// `/[/*]/` literal (including its embedded `/*`) is skipped as one
+		// unit and never reaches the block-comment branch.
+		const lines = [
+			"const re = /[/*]/;",
+			"const s = `",
+			"  text",
+			"`;",
+			"code();",
+		];
+		expect(templateLiteralInteriorMask(lines)).toEqual([
+			false,
+			false,
+			true,
+			true,
+			false,
+		]);
+	});
+
+	it("leaves a genuine division expression alone: the unambiguous-position gate does not fire after an identifier or a digit (#3120)", () => {
+		// The regex-opener gate only fires in unambiguous positions (after
+		// `(`, `,`, `=`, `:`, `[`, `!`, `&`, `|`, `?`, `{`, `}`, `;`, a
+		// return/typeof/case keyword, or line start). A `/` immediately after
+		// an identifier or a digit -- real division -- must fall through
+		// unskipped, so a later real template's opening backtick on the SAME
+		// line is still found by ordinary per-character scanning instead of
+		// being swallowed as a bogus regex body. A gate that accepted any
+		// preceding character would treat the first `/` in `10 / 20` as a
+		// regex opener and walk forward looking for the next unescaped `/`,
+		// consuming straight through this line's real opening backtick before
+		// it finds one -- never pushing a "template" frame, so line 1's text
+		// is wrongly left unmasked.
+		const lines = [
+			"const n = 10 / 20; const s = `",
+			"  text",
+			"`;",
+			"code();",
+		];
+		expect(templateLiteralInteriorMask(lines)).toEqual([
+			false,
+			true,
+			true,
+			false,
+		]);
+	});
 });
