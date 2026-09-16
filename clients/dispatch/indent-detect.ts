@@ -283,7 +283,7 @@ function isRegexOpenerPosition(line: string, at: number): boolean {
 	const before = line.slice(0, at).replace(/[ \t]+$/, "");
 	if (before === "") return true; // line start (modulo leading whitespace)
 	if (REGEX_OPENER_KEYWORD.test(before)) return true;
-	return REGEX_OPENER_PUNCTUATION.has(before[before.length - 1]);
+	return REGEX_OPENER_PUNCTUATION.has(before.at(-1) ?? "");
 }
 
 /**
