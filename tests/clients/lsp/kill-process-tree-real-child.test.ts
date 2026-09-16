@@ -30,6 +30,7 @@ import { killProcessTree } from "../../../clients/lsp/client.js";
 import { launchLSP, type LSPProcess } from "../../../clients/lsp/launch.js";
 import {
 	isOwnLiveChild,
+	releaseOwnChildPid,
 	VERIFIED_OWN_PID_CAP,
 } from "../../../clients/safe-spawn.js";
 
@@ -190,6 +191,26 @@ describe.skipIf(process.platform !== "linux")(
 			} finally {
 				vi.useRealTimers();
 			}
+		});
+
+		it("a released hold is gone from BOTH stores, not just the held one", async () => {
+			// The independent assertion that "one home" holds. `holdOwnChildPid`
+			// deletes the FIFO copy the verification it performs would otherwise
+			// leave behind; without that deletion a RELEASED pid still answers
+			// true out of the FIFO, and — the reason this case exists — the FIFO
+			// copy also answers for the held copy, which is what made the
+			// held-store and release-ordering mutations undetectable in this
+			// file's first draft (#3091 round 3).
+			const handle = await launchLspGroup();
+			const pid = handle.pid;
+			expect(isOwnLiveChild(pid, "held-while-alive")).toBe(true);
+
+			releaseOwnChildPid(pid);
+			process.kill(pid, "SIGKILL");
+			await exited(handle.process);
+			expect(fs.existsSync(`/proc/${pid}`)).toBe(false);
+
+			expect(isOwnLiveChild(pid, "after-release")).toBe(false);
 		});
 
 		it("a held pid survives past the FIFO cap, where an aged verdict does not (F1-r2b)", async () => {

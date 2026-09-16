@@ -585,7 +585,14 @@ export function isOwnLiveChild(
 		// alive under a different parent is refused above regardless of what the
 		// memo holds — so a recycled pid cannot be signalled on the strength of
 		// its previous owner.
-		verifiedOwnPids.set(pid, true);
+		//
+		// Never for a pid already HELD, though: the shutdown ladder verifies a
+		// still-live leader on its way to the group signal, and filing that
+		// verdict in the FIFO too would put a held pid back in both stores —
+		// which outlives `releaseOwnChildPid` (the FIFO copy would keep
+		// answering for a pid this process has explicitly stopped claiming) and
+		// makes the held store's own tests unable to fail.
+		if (!heldOwnPids.has(pid)) verifiedOwnPids.set(pid, true);
 		return true;
 	}
 	// Alive AND someone else's: the dangerous case, and the only one worth a
