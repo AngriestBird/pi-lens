@@ -623,6 +623,58 @@ describe("scripts/hooks/guard-bash.mjs -- drains stdin to EOF on a large payload
 	});
 });
 
+// #3089 review trailing round (#3121): the ALLOW-path notes (round 2/3)
+// were mutation-tested against a broken stderr; the DENY path's OWN write
+// -- `note(`${RULE_MESSAGES[rule]}\n`)` -- never was. Reverting just that
+// one call site to `process.stderr.write` (note() itself untouched) keeps
+// every prior test in this file green (none of them deny through a broken
+// stderr) while reintroducing exactly #3121's bug: a `git stash` a caller
+// asked to have denied gets ALLOWED (exit 1, an uncaught exception, not
+// exit 2) whenever stderr happens to be unwritable. The verdict (deny) and
+// the message (why) are two different guarantees; only the message may be
+// lost to a broken stderr, never the verdict.
+describe("scripts/hooks/guard-bash.mjs -- deny verdict survives a broken stderr (#3121)", () => {
+	const DENY_RULE_COMMANDS: Array<[rule: string, command: string]> = [
+		["stash", "git stash"],
+		["reset", "git reset --hard HEAD"],
+		["worktree", "git worktree remove -f -f /tmp/tree"],
+		[
+			"tmpdirCollision",
+			"TMPDIR=$PWD/.probe-home npx vitest run tests/clients/ext-gate-before-ignore.test.ts",
+		],
+		["probe", "node -e \"require('./clients/foo.js')\""],
+	];
+
+	it.each(DENY_RULE_COMMANDS)(
+		"still denies (%s) when stderr is a read-only fd -- message lost, verdict kept",
+		(_rule, command) => {
+			const dir = mkdtempSync(join(tmpdir(), "guard-bash-deny-ro-"));
+			const readOnlyFile = join(dir, "stderr-ro");
+			writeFileSync(readOnlyFile, "");
+			const readOnlyFd = openSync(readOnlyFile, "r");
+			try {
+				const result = spawnSync(process.execPath, [HOOK], {
+					input: JSON.stringify({
+						session_id: "probe",
+						cwd: repoRoot,
+						permission_mode: "default",
+						hook_event_name: "PreToolUse",
+						tool_name: "Bash",
+						tool_input: { command },
+					}),
+					stdio: ["pipe", "pipe", readOnlyFd],
+					encoding: "utf8",
+					env: BASE_ENV,
+				});
+				expect(result.status).toBe(2);
+			} finally {
+				closeSync(readOnlyFd);
+				rmSync(dir, { recursive: true, force: true });
+			}
+		},
+	);
+});
+
 describe("scripts/hooks/guard-bash.mjs -- registration (review round 2 F3)", () => {
 	it(".claude/settings.json's PreToolUse Bash hook does not start with a relative path", () => {
 		const settings = JSON.parse(
