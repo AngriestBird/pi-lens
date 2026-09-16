@@ -42,7 +42,11 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { toPosix } from "../../clients/path-utils.js";
 import { stripCommentsAndStrings } from "./session-state-scan.ts";
-import { listSourceFiles, readWalkedFiles } from "./sweep-kit.js";
+import {
+	listSourceFiles,
+	matchingCloseIndex,
+	readWalkedFiles,
+} from "./sweep-kit.js";
 
 const repoRoot = path.resolve(
 	path.dirname(fileURLToPath(import.meta.url)),
@@ -107,16 +111,12 @@ function eventArgLiteral(
 	// later, unrelated argument (e.g. a third `ctx` argument's own literal).
 	const between = source.slice(matchEnd, openBrace);
 	if (!/^[\s,]*$/.test(between)) return undefined;
-	let depth = 0;
-	for (let i = openBrace; i < source.length; i++) {
-		if (source[i] === "{") depth++;
-		else if (source[i] === "}") {
-			depth--;
-			if (depth === 0)
-				return { text: source.slice(openBrace, i + 1), start: openBrace };
-		}
-	}
-	return undefined;
+	// #3134: the depth count is `sweep-kit.ts`'s `matchingCloseIndex`; the
+	// slice+start wrapper and the undefined-on-unbalanced fallback stay
+	// local, matching `session-state-scan.ts`'s `functionBody` brace match.
+	const close = matchingCloseIndex(source, openBrace, "{", "}");
+	if (close === -1) return undefined;
+	return { text: source.slice(openBrace, close + 1), start: openBrace };
 }
 
 /**

@@ -13,6 +13,7 @@ import { repoRoot } from "../support/module-instance-scan.js";
 import {
 	assertNonEmptyScan,
 	listSourceFiles,
+	matchingCloseIndex,
 	readWalkedFiles,
 	stripSource,
 } from "../support/sweep-kit.js";
@@ -28,24 +29,21 @@ function walkTestFiles(root: string): string[] {
 
 type LatencyMock = { relativePath: string; factory: string };
 
+/**
+ * Index of the `)` balancing the `(` at `openParen`, quote-aware. #3134: the
+ * depth count is `sweep-kit.ts`'s `matchingCloseIndex` with the same
+ * `quoteAware: true` option `availability-classifiedby-scan.ts`'s
+ * `readBalancedArgs` uses; only this member throws instead of returning -1
+ * on an unclosed call, so that convention stays local to this caller.
+ */
 function callEnd(source: string, openParen: number): number {
-	let depth = 0;
-	let quote = "";
-	for (let index = openParen; index < source.length; index += 1) {
-		const character = source[index];
-		if (quote) {
-			if (character === "\\") index += 1;
-			else if (character === quote) quote = "";
-			continue;
-		}
-		if (character === '"' || character === "'" || character === "`") {
-			quote = character;
-			continue;
-		}
-		if (character === "(") depth += 1;
-		if (character === ")" && --depth === 0) return index;
+	const close = matchingCloseIndex(source, openParen, "(", ")", {
+		quoteAware: true,
+	});
+	if (close === -1) {
+		throw new Error(`Unclosed vi.mock call in ${source.slice(0, openParen)}`);
 	}
-	throw new Error(`Unclosed vi.mock call in ${source.slice(0, openParen)}`);
+	return close;
 }
 
 function findLatencyMocks({
