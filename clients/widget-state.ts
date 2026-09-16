@@ -848,7 +848,7 @@ function normalizeDiagnostics(
  * through the mtime gate anyway.
  */
 function retentionIdentity(d: WidgetDiagnostic): string {
-	return `${d.tool ?? ""} ${d.rule ?? ""} ${d.line ?? ""} ${d.message}`;
+	return JSON.stringify([d.tool ?? "", d.rule ?? "", d.line ?? null, d.message]);
 }
 
 /**

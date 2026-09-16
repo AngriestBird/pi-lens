@@ -22,20 +22,6 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-// mode=all never calls these, but `tools/lens-diagnostics.ts` imports the seams
-// at module load and constructing them would spawn real analyzer clients.
-vi.mock("../../clients/project-diagnostics/fresh-fetch.js", () => ({
-	fetchFreshProjectDiagnostics: vi.fn().mockResolvedValue({
-		diagnostics: [],
-		runners: [],
-		cold: [],
-		timings: {},
-	}),
-}));
-vi.mock("../../clients/bootstrap.js", () => ({
-	loadBootstrapClients: vi.fn().mockResolvedValue({}),
-}));
-
 import {
 	getDegradationSummary,
 	resetDegradationLedger,
