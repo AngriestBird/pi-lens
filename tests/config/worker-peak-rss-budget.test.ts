@@ -14,8 +14,9 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { WORKER_PEAK_RSS_BUDGET_MB } from "../../scripts/lib/worker-budget.mjs";
+import { runTeardownWithMemReport } from "../support/vitest-setup.js";
 import {
 	PEAK_RSS_ADMISSIONS,
 	type PeakRssAdmission,
@@ -171,67 +172,78 @@ describe("#3058 per-file peak RSS is registered or fails", () => {
 		}).toThrow(TypeError);
 	});
 
-	describe("registers the mem-report afterAll to run last (#3067, #3062 review L2)", () => {
-		// Vitest's afterAll hooks run LIFO within a file: the LAST hook
-		// registered runs FIRST. Verified empirically (not asserted from source)
-		// by registering three plain afterAll() calls in a real vitest run in
-		// this repo's own harness: registration order 1, 2, 3 reported
-		// completion in the order 3, 2, 1. `process.resourceUsage().maxRSS` is a
-		// running high-water mark, so a hook's reading of it can never reflect
-		// an allocation another hook makes AFTER that reading was taken.
+	describe("the [mem-file] record survives any other afterAll throwing (#3139, #3137 review)", () => {
+		// #3137 registered the mem-report hook first (so Vitest's LIFO afterAll
+		// order ran it last), fixing the direction where an over-budget file's
+		// own throw preempted the #3083 backstop, tmp-hygiene and kill-guard
+		// hooks. That created the inverse: confirmed directly against the
+		// installed vitest@5.0.0 source (node_modules/vitest/dist/chunks/
+		// run.CQOUYP-x.js:3544-3548 reverses afterAll order for "stack";
+		// :3566-3569's execution loop has no try/catch around a hook), any ONE
+		// of those three throwing aborted the remaining hooks in that pass —
+		// including the mem-report hook, dropping `[mem-file]` for exactly the
+		// file worth investigating.
 		//
-		// tests/support/vitest-setup.ts registers four top-level afterAll
-		// hooks: the mem-report one (reportPeakRss), the #3083 root-backstop
-		// one (unadmittedRootBackstopEntries), the tmp-hygiene one
-		// (tmpHygieneLeakReport), and the kill-guard one (killGuardReport). For
-		// the mem reading to include what every other hook's teardown does, the
-		// mem hook must be registered BEFORE (i.e. textually above) the other
-		// three, so LIFO makes it run LAST. Before this fix it was registered
-		// LAST (at the bottom of the file), so it ran FIRST — its own throw for
-		// an over-budget file preempted the other three, including the
-		// tmp-hygiene hook whose `[tmp-hygiene-trace]` diagnostic never printed
-		// for that file (the #3062 review finding this guards against).
-		//
-		// A full runtime differential (spawn a real vitest subprocess and push
-		// one of the other three hooks' own memory past the 2,048 MB budget) is
-		// deliberately not built: none of the other three hooks allocates
-		// meaningfully on its own, so forcing one to would mean adding
-		// test-only allocation to production teardown code, and reproducing the
-		// budget honestly would mean a real ~2 GB allocation in a test — the
-		// exact failure mode this gate exists to catch. Registration order IS
-		// what LIFO execution order is computed from, so this structural check
-		// is a direct, real proxy for the runtime order it verified above.
-		const setupSource = fs.readFileSync(
-			path.join(REPO_ROOT, "tests/support/vitest-setup.ts"),
-			"utf8",
-		);
-		const memIndex = setupSource.indexOf("reportPeakRss({");
-		const otherHooks: [name: string, marker: string][] = [
-			["#3083 root-backstop", "unadmittedRootBackstopEntries()"],
-			["tmp-hygiene", "tmpHygieneLeakReport()"],
-			["kill-guard", "killGuardReport()"],
-		];
-
-		it("finds the mem-report call site", () => {
-			expect(
-				memIndex,
-				"reportPeakRss({ call not found in tests/support/vitest-setup.ts",
-			).toBeGreaterThanOrEqual(0);
+		// The fix (tests/support/vitest-setup.ts) is not a fourth registration
+		// position: it collapses to the single `afterAll` below, calling
+		// `runTeardownWithMemReport` — the real, exported mechanism under test
+		// here, not a stand-in for it. Ordering between multiple top-level
+		// afterAll hooks is moot once there is only one, so the old structural
+		// "registered before" guard (#3067, #3062 review L2) is replaced by
+		// this behavioural pair rather than pinning a position that no longer
+		// has meaning.
+		it("emits the mem report even when an earlier check throws (red-first: #3139)", () => {
+			const emitMemReport = vi.fn();
+			const tmpHygieneThrow = () => {
+				throw new Error("tmp-hygiene leaked an unadmitted entry");
+			};
+			expect(() =>
+				runTeardownWithMemReport(
+					[() => {}, tmpHygieneThrow, () => {}],
+					emitMemReport,
+				),
+			).toThrow("tmp-hygiene leaked an unadmitted entry");
+			expect(emitMemReport).toHaveBeenCalledTimes(1);
 		});
 
-		it.each(otherHooks)(
-			"is registered before the %s afterAll",
-			(name, marker) => {
-				const otherIndex = setupSource.indexOf(marker);
-				expect(
-					otherIndex,
-					`${marker} call not found in tests/support/vitest-setup.ts`,
-				).toBeGreaterThanOrEqual(0);
-				expect(
-					memIndex,
-					`the mem-report afterAll must be registered BEFORE the ${name} afterAll — afterAll runs LIFO (registered-first runs last), so this is what makes the mem reading include ${name}'s teardown`,
-				).toBeLessThan(otherIndex);
-			},
-		);
+		it("still runs every check when the mem report itself throws", () => {
+			const killGuard = vi.fn();
+			const tmpHygiene = vi.fn();
+			const backstop = vi.fn();
+			const emitMemReport = () => {
+				throw new Error("mem report write failed");
+			};
+			expect(() =>
+				runTeardownWithMemReport(
+					[killGuard, tmpHygiene, backstop],
+					emitMemReport,
+				),
+			).toThrow("mem report write failed");
+			expect(killGuard).toHaveBeenCalledTimes(1);
+			expect(tmpHygiene).toHaveBeenCalledTimes(1);
+			expect(backstop).toHaveBeenCalledTimes(1);
+		});
+
+		it("still fails the file — a passing run never re-throws", () => {
+			const emitMemReport = vi.fn();
+			expect(() =>
+				runTeardownWithMemReport([() => {}, () => {}], emitMemReport),
+			).not.toThrow();
+			expect(emitMemReport).toHaveBeenCalledTimes(1);
+		});
+
+		it("registers exactly one top-level afterAll in vitest-setup.ts", () => {
+			// Do not add a fifth hook that merely reorders (#3139 brief): pin
+			// that the file has collapsed to ONE suite-level afterAll, so a
+			// future edit that bolts on a second one — reintroducing the exact
+			// ordering hazard this fix removes — reds here instead of waiting
+			// for a flaky CI kill to notice.
+			const setupSource = fs.readFileSync(
+				path.join(REPO_ROOT, "tests/support/vitest-setup.ts"),
+				"utf8",
+			);
+			const topLevelAfterAll = setupSource.match(/^afterAll\(/gm) ?? [];
+			expect(topLevelAfterAll).toHaveLength(1);
+		});
 	});
 });
