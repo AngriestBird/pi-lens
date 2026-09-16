@@ -1075,10 +1075,10 @@ function parseConfigFile(configPath: string): ParsedConfigFile {
 	// `warnIgnoredConfigOnce`'s latch collapses the two into one notice. A skip
 	// for it was written and then deleted — mutating it out changed no output.
 	for (const configKey of globalScopeOnlyFlagKeys) {
-		const segments = configKey.split(".");
-		if (segments.length < 2) continue;
-		if (!knownProjectKeys.has(segments[0])) continue;
-		if (!hasConfigPath(obj, segments)) continue;
+		const dotIndex = configKey.indexOf(".");
+		if (dotIndex < 0) continue;
+		if (!knownProjectKeys.has(configKey.slice(0, dotIndex))) continue;
+		if (!hasConfigPath(obj, configKey.split("."))) continue;
 		warnUnhonoredKey(configKey, true);
 	}
 
