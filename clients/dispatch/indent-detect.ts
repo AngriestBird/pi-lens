@@ -103,7 +103,17 @@ export function blockCommentInteriorMask(lines: string[]): boolean[] {
 
 type TemplateFrame =
 	| { kind: "template" }
-	| { kind: "expr"; braceDepth: number };
+	| { kind: "expr"; braceDepth: number }
+	| { kind: "block" };
+
+/** Whether `stack` holds a frame the mask (or its fail-safe) must treat as
+ * "inside a template" — every frame except `"block"`. A `/* … *\/` comment
+ * nested in the tracked span (plain code, or inside a `${ … }` substitution)
+ * is not itself template evidence; {@link blockCommentInteriorMask} already
+ * excludes a top-level block comment's own lines. */
+function hasLiveFrame(stack: TemplateFrame[]): boolean {
+	return stack.some((frame) => frame.kind !== "block");
+}
 
 /**
  * Advance a lexical stack over one line of source, mutating it in place.
@@ -112,13 +122,19 @@ type TemplateFrame =
  * `"expr"` frame means code inside a `${ … }` substitution, with its own
  * brace-depth counter so a nested `{`/`}` (an object literal, a block) does
  * not close the substitution early — only the brace that returns the counter
- * to 0, the one that matches the `${`, does.
+ * to 0, the one that matches the `${`, does; a `"block"` frame means a
+ * `/* … *\/` comment, so a JSDoc's own backtick (a fenced code sample, an
+ * inline `` `x` ``) never opens a tracked template that then swallows real
+ * code up to whatever later backtick happens to close it (#3059 review F1,
+ * AGENTS.md shape 43 — prose mistaken for executable structure).
  *
- * A backtick, `//`, or quote character means nothing while `//` has already
- * started a line comment or a quoted string is open, so both states resolve
- * before the general per-character switch (line comments run to EOL; quoted
- * strings skip everything up to their own unescaped terminator, taking a
- * backtick inside them out of consideration the same way).
+ * A backtick, `//`, `/*`, or quote character means nothing while `//` has
+ * already started a line comment, a `/* … *\/` comment is open, or a quoted
+ * string is open, so all three states resolve before the general
+ * per-character switch (line comments run to EOL; quoted strings skip
+ * everything up to their own unescaped terminator, taking a backtick inside
+ * them out of consideration the same way; a block comment skips everything,
+ * backticks included, up to its own `*\/`, possibly spanning lines).
  */
 function advanceTemplateState(line: string, stack: TemplateFrame[]): void {
 	let j = 0;
@@ -142,8 +158,20 @@ function advanceTemplateState(line: string, stack: TemplateFrame[]): void {
 			j += 1;
 			continue;
 		}
+		if (top?.kind === "block") {
+			const closeAt = line.indexOf("*/", j);
+			if (closeAt < 0) return; // still inside the comment at EOL
+			stack.pop();
+			j = closeAt + 2;
+			continue;
+		}
 		// Plain code, at the top level or inside a `${ … }` substitution.
 		if (line.startsWith("//", j)) return; // rest of line is a line comment
+		if (line.startsWith("/*", j)) {
+			stack.push({ kind: "block" });
+			j += 2;
+			continue;
+		}
 		const ch = line[j];
 		if (ch === '"' || ch === "'") {
 			j = skipQuoted(line, j, ch);
@@ -207,14 +235,14 @@ export function templateLiteralInteriorMask(lines: string[]): boolean[] {
 	const stack: TemplateFrame[] = [];
 	let openLine = -1;
 	for (const [i, line] of lines.entries()) {
-		if (stack.length > 0) {
+		if (hasLiveFrame(stack)) {
 			mask[i] = true;
 		} else {
 			openLine = i;
 		}
 		advanceTemplateState(line, stack);
 	}
-	if (stack.length > 0) {
+	if (hasLiveFrame(stack)) {
 		for (let i = openLine + 1; i < lines.length; i += 1) mask[i] = false;
 	}
 	return mask;
