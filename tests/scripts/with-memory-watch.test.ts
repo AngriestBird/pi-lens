@@ -19,6 +19,18 @@ interface Run {
 }
 
 /**
+ * A private, per-call sample-file path under the real TMPDIR, never the
+ * wrapper's own default (`<tmpdir>/pi-lens-mem-watch-samples.log`, a single
+ * shared name every unpinned run would collide on and leak).
+ */
+function makeSampleFile(): string {
+	return path.join(
+		os.tmpdir(),
+		`pi-lens-mem-watch-test-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.log`,
+	);
+}
+
+/**
  * Run the wrapper and collect everything it wrote.
  *
  * `throttleMs` starves the stdout reader: each chunk pauses the stream and
@@ -36,6 +48,16 @@ interface Run {
  * wrapper has written its first line, which is the only moment at which a test
  * can kill the READ end of the pipe out from under a wrapper that is already
  * running. Folded in here for the same net-count reason as `extraEnv`.
+ *
+ * #3115: every case here runs the real wrapper, which falls back to a single
+ * shared `<tmpdir>/pi-lens-mem-watch-samples.log` whenever
+ * `PI_LENS_MEM_WATCH_SAMPLE_FILE` is unset -- only 2 of the file's 12 cases
+ * pinned it, so the other 10 leaked that fixed name into the shared TMPDIR,
+ * redding `tmp-fixture-hygiene` in a shared batch. Pinned here, once, for
+ * every caller that does not already want a specific path to read back; the
+ * file is removed once the wrapper has exited so a caller that DOES pass its
+ * own `PI_LENS_MEM_WATCH_SAMPLE_FILE` (to inspect it afterwards) keeps sole
+ * ownership of its cleanup.
  */
 function runWrapper(
 	args: string[],
@@ -45,11 +67,19 @@ function runWrapper(
 		child: ChildProcessByStdio<null, Readable, Readable>,
 	) => void,
 ): Promise<Run> {
+	const ownsSampleFile = extraEnv.PI_LENS_MEM_WATCH_SAMPLE_FILE === undefined;
+	const sampleFile = ownsSampleFile
+		? makeSampleFile()
+		: extraEnv.PI_LENS_MEM_WATCH_SAMPLE_FILE;
 	return new Promise((resolve, reject) => {
 		const child = spawn(process.execPath, [wrapper, ...args], {
 			cwd: repoRoot,
 			stdio: ["ignore", "pipe", "pipe"],
-			env: { ...process.env, ...extraEnv },
+			env: {
+				...process.env,
+				PI_LENS_MEM_WATCH_SAMPLE_FILE: sampleFile,
+				...extraEnv,
+			},
 		});
 		let stdout = "";
 		let stderr = "";
@@ -71,7 +101,10 @@ function runWrapper(
 			stderr += chunk;
 		});
 		child.on("error", reject);
-		child.on("close", (code) => resolve({ code, stdout, stderr }));
+		child.on("close", (code) => {
+			if (ownsSampleFile) fs.rmSync(sampleFile, { force: true });
+			resolve({ code, stdout, stderr });
+		});
 	});
 }
 
@@ -233,6 +266,78 @@ describe("with-memory-watch verdict durability (#2042)", () => {
 		).toBe(1);
 		expect(run.stderr).toContain("record dropped: EPIPE");
 	}, 30_000);
+
+	it("still writes the failure note when stderr is merely full, not dead", async () => {
+		// #3110, from the #3106 review: the case above kills stdout while
+		// stderr stays a healthy pipe the test reads immediately, so the
+		// wrapper's raw `fs.writeSync(2, ...)` note-write always had room and
+		// always succeeded there. It does NOT cover fd 2 being a live but
+		// FULL pipe -- a slow reader on stderr, not a dead one -- which is
+		// EAGAIN, not EPIPE, on the write. A bare `try { writeSync } catch {}`
+		// around that write drops the note for good on that path: reproduced
+		// 3/3 with this exact scenario before the fix (see PR body).
+		//
+		// Bypasses `runWrapper`'s single stdout throttle: this needs stdout
+		// DESTROYED (dead) and stderr merely BACKED UP (full) at the same
+		// time, which needs independent control of both streams. The
+		// grandchild floods stderr continuously (not stdout) so the pipe
+		// wrapper and grandchild share via `stdio: "inherit"` backs up while
+		// this test's own stderr reader is paused; stdout is destroyed once
+		// there has been time for that backpressure to build, so the next
+		// tick's normal stdout write throws EPIPE and the resulting note-write
+		// attempt on stderr lands while stderr is still full.
+		const sampleFile = makeSampleFile();
+		const grandchildScript =
+			"const iv=setInterval(()=>{process.stderr.write('x'.repeat(65536));},2);" +
+			"setTimeout(()=>{clearInterval(iv);process.exit(0);},600);";
+		const run = await new Promise<Run>((resolve, reject) => {
+			const child = spawn(
+				process.execPath,
+				[wrapper, "--", nodeCmd, "-e", grandchildScript],
+				{
+					cwd: repoRoot,
+					stdio: ["ignore", "pipe", "pipe"],
+					env: {
+						...process.env,
+						PI_LENS_MEM_WATCH_INTERVAL_MS: "20",
+						PI_LENS_MEM_WATCH_LOW_MB: "999999999",
+						PI_LENS_MEM_WATCH_SAMPLE_FILE: sampleFile,
+					},
+				},
+			);
+			let stdout = "";
+			let stderr = "";
+			child.stdout.setEncoding("utf8");
+			child.stderr.setEncoding("utf8");
+			child.stdout.on("data", (chunk: string) => {
+				stdout += chunk;
+			});
+			child.stderr.on("data", (chunk: string) => {
+				stderr += chunk;
+				child.stderr.pause();
+				setTimeout(() => child.stderr.resume(), 100);
+			});
+			setTimeout(() => {
+				try {
+					child.stdout.destroy();
+				} catch {
+					// already gone
+				}
+			}, 150);
+			child.on("error", reject);
+			child.on("close", (code) => resolve({ code, stdout, stderr }));
+		});
+		try {
+			expect(run.code, run.stderr).toBe(0);
+			expect(
+				run.stderr.match(/\[mem-watch\] record dropped:/g)?.length ?? 0,
+				run.stderr,
+			).toBe(1);
+			expect(run.stderr).toContain("record dropped: EPIPE");
+		} finally {
+			fs.rmSync(sampleFile, { force: true });
+		}
+	}, 30_000);
 });
 
 /**
@@ -277,13 +382,6 @@ describe("with-memory-watch verdict wiring (#2042)", () => {
  * between the interval tick and the on-disk file is what is under test.
  */
 describe("with-memory-watch sample tail (#2042 2026-09-15)", () => {
-	function makeSampleFile(): string {
-		return path.join(
-			os.tmpdir(),
-			`pi-lens-mem-watch-test-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.log`,
-		);
-	}
-
 	// Round-2 review F2: replaces the old ring-buffer "never grows past the
 	// cap" case. The sampler no longer caps anything it writes -- an
 	// append-only file can never lose an earlier line to a rewrite, which is

@@ -102,16 +102,21 @@ let writeFailureNoted = false;
  * cannot help and throwing kills the wrapped job. Record it once -- once per
  * process, not once per tick, because every later tick hits the same dead fd --
  * and let the child's exit code stay the story.
+ *
+ * #3110: this used to write the note with a raw, un-retried `fs.writeSync(2,
+ * ...)` in a bare catch. Fd 1 dying (EPIPE) says nothing about fd 2's health --
+ * a slow reader on stderr leaves it merely FULL, which is EAGAIN, not EPIPE --
+ * and a raw write there dropped the note for good (reproduced 3/3: full stderr
+ * pipe + destroyed stdout -> noteCount 0, catch code EAGAIN). `emit()` already
+ * retries EAGAIN until the pipe drains; routing through it here is recursion
+ * safe because `writeFailureNoted` is set BEFORE calling it, so a genuinely
+ * dead stderr (EPIPE from emit's own catch) re-enters this function and
+ * returns immediately instead of looping.
  */
 function noteWriteFailureOnce(error) {
 	if (writeFailureNoted) return;
 	writeFailureNoted = true;
-	try {
-		fs.writeSync(2, `[mem-watch] record dropped: ${error.message}\n`);
-	} catch {
-		// stderr is no healthier than stdout was. The record is already lost;
-		// dying while reporting that would lose the exit code too.
-	}
+	emit(`[mem-watch] record dropped: ${error.message}\n`, 2);
 }
 
 function emit(line, fd = 1) {
