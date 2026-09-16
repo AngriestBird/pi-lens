@@ -641,6 +641,28 @@ describe("real Git fixture governance", () => {
 		).toEqual([]);
 	});
 
+	it("still sees a literal sha on the line after a comment inside the argument list", () => {
+		// Round 2 S2, corrected. The reviewer's finding is real but its
+		// signature is the FALSE-NEGATIVE direction, not the false-positive
+		// one: without the argument-side comment blanking, the comment fuses
+		// with the element that follows it, the element stops being a bare
+		// quoted literal, and the real sha on the next line is swallowed as an
+		// opaque expression. That is a guard going silent, so it gets the row.
+		expect(
+			findHistoricalCommitIshOffenders([
+				{
+					file: "tests/clients/synthetic.test.ts",
+					source:
+						'gitExecFileSync("git", [\n' +
+						'  "show",\n' +
+						"  // the pre-#3048 pin\n" +
+						'  "20896a56b:tests/index-vanished-instance-wiring.test.ts",\n' +
+						"]);",
+				},
+			]),
+		).toEqual(["tests/clients/synthetic.test.ts:1 20896a56b"]);
+	});
+
 	it("does not let a COMMENTED-OUT binding make a live variable a sha", () => {
 		// The remedy's own residue: a note saying what the pin used to be,
 		// beside a same-named variable that now holds a runtime revision. Read
