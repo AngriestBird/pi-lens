@@ -2,7 +2,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { afterAll, expect } from "vitest";
+import { afterAll, expect, vi } from "vitest";
 import { installGitFixtureEnv } from "./git-fixture-env.js";
 import { installKillGuard, killGuardReport } from "./kill-guard.js";
 import { reportPeakRss } from "./worker-peak-rss.js";
@@ -99,6 +99,30 @@ const tmpHygieneHome = process.env.PI_LENS_HOME
 fs.mkdirSync(tmpHygieneHome, { recursive: true });
 process.env.PI_LENS_HOME = tmpHygieneHome;
 installGitFixtureEnv(tmpHygieneHome);
+
+// #3083: session_start reaches the backstop transitively through index.js.
+// Pin the filesystem location once for every file, without a caller registry
+// or changing #2912's shared home. Explicit per-case homes remain authoritative.
+// A module mock survives resetModules; no scheduler, store or lock is mocked.
+vi.mock("../../clients/instance-reaper-state.js", () => {
+	const privateHome = fs.mkdtempSync(path.join(tmpHygieneHome, "backstop-"));
+	process.once("exit", () => removeTempDirSync(privateHome));
+	return {
+		resolveBackstopStateDir: (machineHome: string): string =>
+			machineHome === tmpHygieneHome ? privateHome : machineHome,
+	};
+});
+
+// #3083, master red 038e28b: catch a new transitive writer in whichever
+// file introduced it. The runtime hermeticity test also observes released locks.
+afterAll(() => {
+	for (const name of ["orphan-backstop.json", "orphan-backstop.lock"]) {
+		expect(
+			fs.existsSync(path.join(tmpHygieneHome, name)),
+			`#3083: test wrote run-shared ${name}`,
+		).toBe(false);
+	}
+});
 
 interface TmpLeakAdmission {
 	/** Test file (repo-relative) or "*" for every file. */

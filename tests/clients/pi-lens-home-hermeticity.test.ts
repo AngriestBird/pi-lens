@@ -16,7 +16,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	auditRegistry,
 	assertNonEmptyScan,
@@ -26,6 +26,26 @@ import {
 	stripSource,
 } from "../support/sweep-kit.js";
 import { removeTempDirSync } from "./test-utils.js";
+
+import { EventEmitter } from "node:events";
+import { waitFor } from "./interleaving-kit.js";
+import { createPiMock, makeCtx } from "../support/pi-mock.js";
+import { makeSessionStartEvent } from "../support/host-event-factory.js";
+
+vi.mock("node:child_process", async (importOriginal) => ({
+	...(await importOriginal<typeof import("node:child_process")>()),
+	spawn: () => {
+		const child = new EventEmitter();
+		const stdout = Object.assign(new EventEmitter(), { unref() {} });
+		queueMicrotask(() => child.emit("close", 0, null));
+		return Object.assign(child, { stdout, stderr: null, unref() {} });
+	},
+}));
+
+import extension from "../../index.js";
+import { _resetSessionLifecycleForTests } from "../../clients/session-lifecycle.js";
+
+const sharedHome = process.env.PI_LENS_HOME!;
 
 const realGlobalDir = path.join(os.homedir(), ".pi-lens");
 const realRegistryPath = path.join(realGlobalDir, "instances.json");
@@ -42,7 +62,7 @@ describe("machine-global writers route through PI_LENS_HOME, never the real home
 
 	afterEach(() => {
 		removeTempDirSync(overrideDir);
-		delete process.env.PI_LENS_HOME;
+		process.env.PI_LENS_HOME = sharedHome;
 	});
 
 	it("getGlobalPiLensDir resolves to PI_LENS_HOME", async () => {
@@ -1133,4 +1153,53 @@ describe("no tests/**/*.test.ts file drives a producer's registry against the ru
 		const naiveFallsThrough = /\bactual\.getGlobalPiLensDir\b/.test(callText);
 		expect(naiveFallsThrough).toBe(false);
 	});
+});
+
+// #3083, master red 038e28b: the existing source detector cannot see
+// writers reached transitively through index.js. Exercise the real handler,
+// scheduler, registry, lock and disk with only the clock and OS child mocked.
+describe("transitive session_start backstop isolation", () => {
+	afterEach(() => {
+		vi.clearAllTimers();
+		vi.useRealTimers();
+		vi.restoreAllMocks();
+		vi.unstubAllEnvs();
+		_resetSessionLifecycleForTests();
+	});
+
+	it("session_start keeps the backstop stamp and transient lock out of the run-shared home", async () => {
+		_resetSessionLifecycleForTests();
+		vi.stubEnv("PI_LENS_STARTUP_MODE", "quick");
+		const mkdir = vi.spyOn(fs.promises, "mkdir");
+		const pi = createPiMock();
+		extension(pi.asExtensionAPI());
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+		await pi.emit(
+			"session_start",
+			makeSessionStartEvent(),
+			makeCtx({ cwd: process.cwd() }),
+		);
+		await vi.advanceTimersByTimeAsync(30_000);
+		const lockPaths = () =>
+			mkdir.mock.calls
+				.map(([dir]) => String(dir))
+				.filter((dir) => path.basename(dir) === "orphan-backstop.lock");
+		await waitFor(lockPaths, (paths) => paths.length > 0, {
+			yieldControl: () => new Promise((resolve) => setImmediate(resolve)),
+		});
+		const lock = lockPaths()[0];
+		const stamp = path.join(path.dirname(lock), "orphan-backstop.json");
+		await waitFor(() => fs.existsSync(stamp) && !fs.existsSync(lock), Boolean, {
+			yieldControl: () => new Promise((resolve) => setImmediate(resolve)),
+		});
+		expect(JSON.parse(fs.readFileSync(stamp, "utf8")).lastSweepAt).toEqual(
+			expect.any(Number),
+		);
+		expect(lockPaths()).not.toContain(
+			path.join(sharedHome, "orphan-backstop.lock"),
+		);
+		expect(fs.existsSync(path.join(sharedHome, "orphan-backstop.json"))).toBe(
+			false,
+		);
+	}, 30_000);
 });
