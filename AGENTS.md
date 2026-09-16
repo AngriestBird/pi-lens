@@ -285,6 +285,11 @@ and PR language; detailed historical examples are in `HISTORY.md`.
 - Probes and child processes pin `PI_LENS_HOME`, `PILENS_DATA_DIR`, `HOME`, and
   install/log/cache directories beneath the worktree or test temp directory.
   Tests set a writable `PI_LENS_HOME`; never write the maintainer's real home.
+  Pin those variables to `.probe-home`, never `TMPDIR`/`TMP`/`TEMP`: the vitest
+  harness keeps the real temp directory deliberately and mkdtemps its own
+  `PI_LENS_HOME` under `os.tmpdir()`, so a `TMPDIR` aimed at `.probe-home` moves
+  the harness home into a git-ignored directory inside the checkout and reds
+  unrelated suites (#3026). `scripts/hooks/guard-bash.mjs` denies it.
 - New filesystem walkers use shared exclusions and ignore matching, cap
   walk-down work, and use the correct home-ceiling policy for walk-up discovery.
 

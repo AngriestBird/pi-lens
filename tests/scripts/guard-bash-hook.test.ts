@@ -23,11 +23,13 @@ import { describe, expect, it } from "vitest";
 import {
 	classifyPayload,
 	findDeny,
+	RULE_MESSAGES,
 	scannableRegions,
 	splitSegments,
 	splitWords,
 	stripEnvAssignments,
 } from "../../scripts/hooks/guard-bash.mjs";
+import type { DenyRule } from "../../scripts/hooks/guard-bash.d.mts";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = join(here, "..", "..");
@@ -138,6 +140,33 @@ const DENY_CASES: Array<[command: string, ruleNeedle: string]> = [
 	// W1 (#2726): a here-string is not a heredoc marker.  The command after
 	// it remains live and must still be classified.
 	["grep x <<< foo\ngit stash", "stash"],
+	// #3026 (2026-09-15), the recurrence this rule prevents: a fixer aimed
+	// TMPDIR at the vitest harness's own PI_LENS_HOME, then reported "16
+	// suites red on origin/master" from a tree that was green. The command
+	// is VERBATIM from that PR body. Measured on this branch:
+	// tests/clients/ext-gate-before-ignore.test.ts is 8/8 green with TMPDIR
+	// elsewhere and 7 failed / 1 passed with this prefix.
+	[
+		"TMPDIR=$PWD/.probe-home npx vitest run tests/clients/ext-gate-before-ignore.test.ts",
+		"tmpdir",
+	],
+	// The export spelling of the same offence -- a separate branch of
+	// classifySegment (the export builtin never runs a trailing command, so
+	// it returns before the command dispatch).
+	["export TMPDIR=$PWD/.probe-home && npm test", "tmpdir"],
+	// A quoted value, and an absolute path: segment membership, not a
+	// $PWD-prefix string match, is what decides.
+	['TMPDIR="/home/dev/wt/.probe-home" npm test', "tmpdir"],
+	// A directory UNDER the harness home is the same collision.
+	["TMPDIR=$PWD/.probe-home/tmp npm test", "tmpdir"],
+	// TMP and TEMP reach os.tmpdir() too (measured; see TEMP_DIR_VARS).
+	["TMP=$PWD/.probe-home npm test", "tmpdir"],
+	["TEMP=$PWD/.probe-home npm test", "tmpdir"],
+	// The variable spelling of the same directory -- what an agent reaches
+	// for straight after reading the `probe` rule's own message.
+	["TMPDIR=$PI_LENS_HOME npx vitest run tests/config", "tmpdir"],
+	["TMPDIR=${PI_LENS_HOME}/x npx vitest run tests/config", "tmpdir"],
+	["TMPDIR=$PI_LENS_HOME/sub npx vitest run tests/config", "tmpdir"],
 ];
 
 // Every allow string the issue lists, which must stay green.
@@ -212,6 +241,29 @@ const ALLOW_CASES: string[] = [
 	// Real bash reports the malformed outer substitution and does not run a
 	// nested substitution inside it.
 	"cat <<EOF\n$(echo x\n$(git stash)\nEOF",
+	// #3026: the COMPLIANT shapes of the tmpdirCollision rule. TMPDIR aimed
+	// at its own directory, with PI_LENS_HOME still pinned at .probe-home
+	// exactly as AGENTS.md "Probe hygiene" prescribes.
+	"PI_LENS_HOME=$PWD/.probe-home TMPDIR=$PWD/.tmp-disk npx vitest run tests/config",
+	"export TMPDIR=/home/dev/.cache/lane-tmp\nnpx vitest run tests/config",
+	// TMPDIR untouched -- the harness keeps the real one on purpose.
+	"PI_LENS_HOME=$PWD/.probe-home npx vitest run tests/config",
+	// A neighbouring directory whose NAME merely starts with the harness
+	// segment is a different directory (segment equality, not prefix).
+	"TMPDIR=$PWD/.probe-home-2 npm test",
+	// PI_LENS_HOME itself pointed at .probe-home is the PRESCRIBED form and
+	// must never be caught by the TMPDIR rule.
+	"PI_LENS_HOME=$PWD/.probe-home npm test",
+	"export PI_LENS_HOME=$PWD/.probe-home && npm test",
+	// Review round 2 T3: a DIFFERENT variable whose name merely starts with
+	// PI_LENS_HOME names a different directory. Both were denied before the
+	// name boundary landed.
+	"TMPDIR=$PI_LENS_HOME_TMP npm test",
+	"TMPDIR=$PI_LENS_HOMEDIR/x npm test",
+	// Review round 2, named limit: a third variable hides the path from a
+	// static scan, so this ALLOWS. The row exists so the limit is a pinned,
+	// visible behaviour rather than an untested claim in a docblock.
+	"export PROBE_HOME=$PWD/.probe-home; export TMPDIR=$PROBE_HOME; npm test",
 ];
 
 // Round-2 survey harness retained as a regression fixture for #2705. The
@@ -266,6 +318,17 @@ describe("scripts/hooks/guard-bash.mjs -- allow list (#2699)", () => {
 	});
 });
 
+describe("scripts/hooks/guard-bash.mjs -- rule declarations (review round 2 T1)", () => {
+	it("declares tmpdirCollision in the DenyRule union the .d.mts exports", () => {
+		// The union in scripts/hooks/guard-bash.d.mts is what every .ts caller
+		// sees. It shipped without the fifth rule in round 1, so this typed
+		// binding is the guard: remove "tmpdirCollision" from the union and
+		// `npm run lint` fails with TS2322 before the suite even runs.
+		const rule: DenyRule = "tmpdirCollision";
+		expect(RULE_MESSAGES[rule]).toContain("TMPDIR");
+	});
+});
+
 describe("scripts/hooks/guard-bash.mjs -- ambient PI_LENS_HOME (#2699)", () => {
 	it("allows an unpinned-looking node probe when PI_LENS_HOME is only in process.env, not the command text", () => {
 		const result = runHook("node -e \"require('./clients/foo.js')\"", {
@@ -287,7 +350,7 @@ describe("scripts/hooks/guard-bash.mjs -- round-2 survey corpus (#2705)", () => 
 			} else {
 				expect(result.status, command).toBe(2);
 				expect(result.stderr.toLowerCase(), command).toMatch(
-					/stash|reset|worktree|probe/,
+					/stash|reset|worktree|probe|tmpdir/,
 				);
 			}
 		},

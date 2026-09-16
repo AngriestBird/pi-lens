@@ -3,7 +3,12 @@
 // side effects (`run`, the main-guard block) are exercised only by spawning
 // the real script as a child process, not by importing it.
 
-export type DenyRule = "stash" | "reset" | "worktreeForce" | "probe";
+export type DenyRule =
+	| "stash"
+	| "reset"
+	| "worktreeForce"
+	| "probe"
+	| "tmpdirCollision";
 
 export const RULE_MESSAGES: Readonly<Record<DenyRule, string>>;
 
