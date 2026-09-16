@@ -126,9 +126,12 @@ function kindLiteralsInOptions(optionsLiteral: string): string[] {
 	// widened, and would fail LOUD here (`bare`/`ternary` below matching
 	// nothing) rather than silently misreading — the safe direction.
 	const start = keyMatch.index + keyMatch[0].length;
-	const candidates = [structure.indexOf(",", start), structure.indexOf("}", start)]
-		.filter((index) => index !== -1);
-	const end = candidates.length > 0 ? Math.min(...candidates) : structure.length;
+	const candidates = [
+		structure.indexOf(",", start),
+		structure.indexOf("}", start),
+	].filter((index) => index !== -1);
+	const end =
+		candidates.length > 0 ? Math.min(...candidates) : structure.length;
 
 	const valueText = optionsLiteral.slice(
 		keyMatch.index + keyMatch[0].length,
@@ -167,7 +170,10 @@ interface KindOccurrence {
 }
 
 /** Every `kind` literal found at a {@link RECORD_CALLEES} call site. */
-function scanCallSites(): { occurrences: KindOccurrence[]; scannedFiles: number } {
+function scanCallSites(): {
+	occurrences: KindOccurrence[];
+	scannedFiles: number;
+} {
 	const files = SCAN_ROOTS.flatMap((root) => {
 		const abs = path.join(REPO_ROOT, root);
 		if (!fs.existsSync(abs)) return [];
@@ -221,9 +227,9 @@ describe("DegradationKind call-site literal extraction (#3071)", () => {
 	});
 
 	it("returns nothing for a pass-through identifier or property access", () => {
-		expect(kindLiteralsInOptions("{ kind: options.ledgerKind, subject: x }")).toEqual(
-			[],
-		);
+		expect(
+			kindLiteralsInOptions("{ kind: options.ledgerKind, subject: x }"),
+		).toEqual([]);
 		expect(kindLiteralsInOptions("{ kind, subject: x }")).toEqual([]);
 		expect(
 			kindLiteralsInOptions("{ kind: degradationKindFor(a, b), subject: x }"),
@@ -254,7 +260,11 @@ describe("DegradationKind union coverage (#3071)", () => {
 		// #1718 shape: a walk that resolved to nothing would read as a clean
 		// sweep. 400 is comfortably under the ~470 TypeScript files these four
 		// trees held at authoring time, so ordinary churn does not trip it.
-		assertNonEmptyScan("DegradationKind call-site coverage (files)", scannedFiles, 400);
+		assertNonEmptyScan(
+			"DegradationKind call-site coverage (files)",
+			scannedFiles,
+			400,
+		);
 		// 100 is comfortably under the 118 distinct kinds / 169 occurrences
 		// measured at authoring time.
 		assertNonEmptyScan(
