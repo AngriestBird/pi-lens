@@ -55,6 +55,7 @@ import { attemptTsserverSyncDiagnostics } from "../clients/lsp/tsserver-sync.js"
 import { convertLspDiagnostics } from "../clients/dispatch/utils/lsp-diagnostics.js";
 import { demoteInferredProjectDiagnostics } from "../clients/lsp/inferred-project.js";
 import {
+	countRetainedSuppressedRows,
 	isBlocking,
 	reconcileScanDiagnostics,
 } from "../clients/widget-state.js";
@@ -974,6 +975,17 @@ function applyProbeFindingPolicy(
 			// otherwise have SEEN, never one per finding (AGENTS.md "bounded
 			// observability"). `total` is the in-scope population for the same
 			// reason the count is, so the record and the rendered line agree.
+			//
+			// #3158 round 2 F4: `retainedSuppressed` is the widget store's
+			// SUCCESS-path number — how many suppressed rows the store is carrying
+			// INTO this scan, written by the scans before it. Until this, retention
+			// was observable only when its per-file cap truncated
+			// (`widget-suppressed-retention-capped`), so a healthy footer chip had no
+			// record behind it at all. Folded into the record this lane already emits
+			// rather than added as a second one: same cardinality (one per filtered
+			// file per scan, never one per row), no new sink, and the two numbers are
+			// read together — `suppressed` is what THIS scan dropped,
+			// `retainedSuppressed` is what the footer chip is still counting.
 			logLatency({
 				type: "phase",
 				toolName: "lsp_diagnostics",
@@ -983,6 +995,7 @@ function applyProbeFindingPolicy(
 				metadata: {
 					suppressed,
 					total: inScopeBefore,
+					retainedSuppressed: countRetainedSuppressedRows(file),
 				},
 			});
 		}
