@@ -304,14 +304,19 @@ describe("normalizeFilePath: POSIX adopts on-disk casing (#3098, the live half o
 				path.join(tmpDir, "work", "myproject", "src", "a.ts"),
 				"link target\n",
 			);
-			ctx.skip(
-				fs.existsSync(path.join(tmpDir, "MYPROJECT")),
-				"case-insensitive filesystem: MyProject and myproject cannot be two entries here",
-			);
 			fs.mkdirSync(path.join(tmpDir, "myproject", "src"), { recursive: true });
 			fs.writeFileSync(
 				path.join(tmpDir, "myproject", "src", "a.ts"),
 				"a different file\n",
+			);
+			// Probe AFTER `myproject` exists, or the probe answers "no aliasing"
+			// on every filesystem and the `symlinkSync` below throws EEXIST on a
+			// case-insensitive one instead of skipping (#3159 round 3: the
+			// round-2 ordering would have FAILED the macOS leg it added, not
+			// skipped it).
+			ctx.skip(
+				fs.existsSync(path.join(tmpDir, "MYPROJECT")),
+				"case-insensitive filesystem: MyProject and myproject cannot be two entries here",
 			);
 			fs.symlinkSync(
 				path.join("work", "myproject"),
@@ -345,8 +350,16 @@ describe("normalizeFilePath: POSIX adopts on-disk casing (#3098, the live half o
 				path.join(tmpDir, "pkgs", "foo", "i.ts"),
 				"export const i = 1;\n",
 			);
+			// `pkgs` exists by now, so this answers the real question: does this
+			// filesystem alias two spellings? On one that does, `node_modules/foo`
+			// and `node_modules/Foo` ARE one entry, the rewrite passes the
+			// confirmation, and keying under either spelling names the same file
+			// — the invariant holds, but `key === held` is the wrong assertion
+			// there. Probing `node_modules/FOO` before the symlink exists (the
+			// round-2 form) answered "no aliasing" everywhere and would have
+			// FAILED the macOS leg rather than skipping it.
 			ctx.skip(
-				fs.existsSync(path.join(tmpDir, "node_modules", "FOO")),
+				fs.existsSync(path.join(tmpDir, "PKGS")),
 				"case-insensitive filesystem: node_modules/Foo and node_modules/foo are one entry here",
 			);
 			fs.symlinkSync(

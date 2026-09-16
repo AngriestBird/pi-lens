@@ -113,9 +113,14 @@ describe("ReadGuard path-key normalization (zero_read false-block regression)", 
 	// directory that does not exist (`node_modules/Foo` → `node_modules/foo`),
 	// so the block told the agent to read a path that ENOENTs and the edit
 	// could never be unblocked — a permanent block, worse than the defect
-	// #3098 set out to fix. lane: ubuntu Unit tests (the fixture needs two
-	// case-distinct entries, impossible on a case-insensitive filesystem).
-	it("the retryable block names a path that exists, under a case-variant symlinked package", (ctx) => {
+	// #3098 set out to fix. Runs on EVERY filesystem and needs no skip: the
+	// assertion is that the quoted path EXISTS, which holds on a case-sensitive
+	// one (the key stays `Foo`) and on a case-insensitive one (`foo` and `Foo`
+	// name the same file, so the rewritten key exists too). #3159 round 3
+	// deleted the skip it used to carry — its probe ran before the symlink
+	// existed, so it answered "no aliasing" on every platform and guarded
+	// nothing.
+	it("the retryable block names a path that exists, under a case-variant symlinked package", () => {
 		const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-rg-case-"));
 		try {
 			fs.mkdirSync(path.join(tmpDir, "node_modules"), { recursive: true });
@@ -130,10 +135,6 @@ describe("ReadGuard path-key normalization (zero_read false-block regression)", 
 			// here is which path the block names, not mtime semantics.
 			const anHourAgo = new Date(Date.now() - 3_600_000);
 			fs.utimesSync(target, anHourAgo, anHourAgo);
-			ctx.skip(
-				fs.existsSync(path.join(tmpDir, "node_modules", "FOO")),
-				"case-insensitive filesystem: node_modules/Foo and node_modules/foo are one entry here",
-			);
 			fs.symlinkSync(
 				path.join("..", "pkgs", "foo"),
 				path.join(tmpDir, "node_modules", "Foo"),
