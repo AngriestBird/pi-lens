@@ -62,6 +62,25 @@ function errorDiag(
 	};
 }
 
+/** An ERROR published by an AUXILIARY scanner rather than the file's language
+ * server. `source` is what `findAuxiliaryProfileForSource` matches on, so this
+ * is the input `retagAuxiliaryDiagnostics` acts on — both for the real tool id
+ * a mark anchors against and for the profile's own native suppression. */
+function auxErrorDiag(
+	line: number,
+	message: string,
+	source: string,
+	code: string,
+): LSPDiagnostic {
+	return {
+		severity: 1,
+		message,
+		source,
+		code,
+		range: { start: { line, character: 0 }, end: { line, character: 5 } },
+	};
+}
+
 let env: { tmpDir: string; cleanup: () => void };
 let primary: string;
 let neighbor: string;
@@ -266,7 +285,9 @@ describe("cold-neighbour cascade run applies the finding policy (#3102)", () => 
 		});
 	});
 
-	it("emits no cascade_finding_policy phase when nothing was dropped", async () => {
+	it("emits no cascade_finding_policy phase when NEITHER counter moved", async () => {
+		// Narrowed in round 2 (F1): the old wording was satisfied by an aux-only
+		// drop, which is exactly the silent drop the record has to catch.
 		await reconcileAndDeliver([errorDiag(0, MARKED_MESSAGE)]);
 		expect(
 			logLatency.mock.calls.filter(
@@ -274,6 +295,93 @@ describe("cold-neighbour cascade run applies the finding policy (#3102)", () => 
 					(entry as { phase?: string })?.phase === "cascade_finding_policy",
 			),
 		).toHaveLength(0);
+	});
+
+	it("drops a neighbour error marked false-positive under the auxiliary's real tool id", async () => {
+		// #3046/#3047: `retagAuxiliaryDiagnostics` is what makes the anchor say
+		// `opengrep` here instead of the generic `lsp` every other surface stopped
+		// using — a mark made from the widget or mode=full carries that spelling.
+		const marked = await mark({
+			filePath: neighbor,
+			line: 1,
+			message: MARKED_MESSAGE,
+			tool: "opengrep",
+			rule: "opengrep:aux-rule",
+			disposition: "false-positive",
+		});
+		expect(marked.isError).toBeFalsy();
+
+		const content = await reconcileAndDeliver([
+			auxErrorDiag(0, MARKED_MESSAGE, "opengrep", "aux-rule"),
+			auxErrorDiag(1, OTHER_MESSAGE, "opengrep", "other-rule"),
+		]);
+		expect(content).not.toContain(MARKED_MESSAGE);
+		expect(content).toContain(OTHER_MESSAGE);
+	});
+
+	it("honours the auxiliary's own native nosemgrep suppression", async () => {
+		// #586: the profile's own inline comment, honoured by the per-edit
+		// dispatch path. These diagnostics come straight off the client cache, so
+		// nothing upstream applied it — dropping here is the FIRST application,
+		// and it must leave a trace rather than vanishing (#1616 / shape 10).
+		fs.writeFileSync(
+			neighbor,
+			"const marked = 1; // nosemgrep: aux-rule\nconst other = 2;\n",
+		);
+		const content = await reconcileAndDeliver([
+			auxErrorDiag(0, MARKED_MESSAGE, "opengrep", "aux-rule"),
+			auxErrorDiag(1, OTHER_MESSAGE, "opengrep", "other-rule"),
+		]);
+		expect(content).not.toContain(MARKED_MESSAGE);
+		expect(content).toContain(OTHER_MESSAGE);
+
+		const phases = logLatency.mock.calls
+			.map(([entry]) => entry as Record<string, unknown>)
+			.filter((entry) => entry?.phase === "cascade_finding_policy");
+		expect(phases).toHaveLength(1);
+		expect(phases[0]?.metadata).toMatchObject({
+			suppressed: 0,
+			total: 2,
+			auxSuppressed: 1,
+		});
+	});
+
+	it("drops an ast-grep error on a test-file neighbour and records it", async () => {
+		// ast-grep's profile carries skipTestFiles (#687/#688) — the other half of
+		// the retag's drop set, on the same record.
+		const testNeighbor = path.join(env.tmpDir, "neighbor.test.ts");
+		fs.writeFileSync(testNeighbor, NEIGHBOR_BODY);
+		neighbor = testNeighbor;
+		const content = await reconcileAndDeliver([
+			auxErrorDiag(0, MARKED_MESSAGE, "ast-grep", "no-eval"),
+		]);
+		expect(content).not.toContain(MARKED_MESSAGE);
+
+		const phases = logLatency.mock.calls
+			.map(([entry]) => entry as Record<string, unknown>)
+			.filter((entry) => entry?.phase === "cascade_finding_policy");
+		expect(phases).toHaveLength(1);
+		expect(phases[0]?.metadata).toMatchObject({
+			suppressed: 0,
+			total: 1,
+			auxSuppressed: 1,
+		});
+	});
+
+	it("states the drop count on the cascade delivery itself (#1616 / AC 4)", async () => {
+		await mark({
+			filePath: neighbor,
+			line: 1,
+			message: MARKED_MESSAGE,
+			...CANONICAL_MARK,
+			disposition: "false-positive",
+		});
+		const content = await reconcileAndDeliver([
+			errorDiag(0, MARKED_MESSAGE),
+			errorDiag(1, OTHER_MESSAGE, 2304),
+		]);
+		expect(content).toContain(OTHER_MESSAGE);
+		expect(content).toContain("suppressed by disposition: 1 finding(s)");
 	});
 
 	it("builds no cascade run at all when every neighbour error was suppressed", async () => {
