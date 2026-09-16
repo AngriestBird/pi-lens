@@ -57,10 +57,14 @@
  * the sweep can miss a defect, but it cannot manufacture one.
  */
 
-import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import { listSourceFiles, relativePosix, stripSource } from "./sweep-kit.js";
+import {
+	listSourceFiles,
+	readWalkedFiles,
+	relativePosix,
+	stripSource,
+} from "./sweep-kit.js";
 
 export const repoRoot = path.resolve(
 	path.dirname(fileURLToPath(import.meta.url)),
@@ -368,12 +372,13 @@ export function listTestFiles(): string[] {
 	}).filter((file) => file.endsWith(".test.ts"));
 }
 
-/** Scan the whole `tests/` tree for tests that pass by returning early. */
+/** Scan the whole `tests/` tree for tests that pass by returning early.
+ *
+ *  Reads through `readWalkedFile`: a path that vanished between the walk and
+ *  the read is out of the population, not a finding (#3082 — this scan was
+ *  one of the four rotating ENOENT victims). */
 export function scanVacuousSkips(): VacuousSkip[] {
-	return listTestFiles().flatMap((absolute) =>
-		scanVacuousSkipsInSource(
-			relativePosix(repoRoot, absolute),
-			fs.readFileSync(absolute, "utf8"),
-		),
+	return readWalkedFiles(listTestFiles()).flatMap(({ file, source }) =>
+		scanVacuousSkipsInSource(relativePosix(repoRoot, file), source),
 	);
 }

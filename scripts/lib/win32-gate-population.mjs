@@ -64,6 +64,30 @@ function sourceFiles(root) {
 	return files.sort();
 }
 
+/**
+ * Read a file this module's own walk just produced, tolerating the file
+ * vanishing between the walk and the read (#3082): a concurrently running
+ * test that creates a source file under `tests/` and removes it again makes
+ * this read throw ENOENT in whichever walker was mid-enumeration. `undefined`
+ * means "no longer part of the population" — a gone file has no gates.
+ *
+ * The TypeScript-side seam for the same rule is `readWalkedFile` in
+ * tests/support/sweep-kit.ts, which every other walker in the repo now uses;
+ * scripts/ cannot import from tests/, so this one repeats the six lines
+ * rather than inverting the layering.
+ */
+function readWalkedFile(absolute) {
+	try {
+		return readFileSync(absolute, "utf8");
+	} catch (error) {
+		if (error?.code !== "ENOENT" && error?.code !== "ENOTDIR") throw error;
+		console.warn(
+			`[win32-gate-population] ${absolute} vanished between the walk and the read; skipped (#3082)`,
+		);
+		return undefined;
+	}
+}
+
 function isWindowsOnlyGate(match, rawSpan) {
 	if (!/["']win32["']/.test(rawSpan)) return false;
 	return (
@@ -77,7 +101,8 @@ export function findWin32Gates(cwd = process.cwd()) {
 	const gates = [];
 	for (const absolute of sourceFiles(root)) {
 		if (absolute.startsWith(join(root, TESTS_ROOT, "fixtures") + sep)) continue;
-		const raw = readFileSync(absolute, "utf8");
+		const raw = readWalkedFile(absolute);
+		if (raw === undefined) continue;
 		for (const match of blankSource(raw).matchAll(GATE_PATTERN)) {
 			const offset = match.index ?? 0;
 			if (

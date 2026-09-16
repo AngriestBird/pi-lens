@@ -10,6 +10,7 @@ import {
 import {
 	assertNonEmptyScan,
 	listSourceFiles,
+	readWalkedFiles,
 	relativePosix,
 	stripSource,
 } from "../support/sweep-kit.js";
@@ -51,8 +52,9 @@ function detectedWin32GateFiles(): string[] {
 		exclude: (file) => file.includes("/fixtures/"),
 	});
 	const detected = new Set<string>();
-	for (const absolute of files) {
-		const raw = readFileSync(absolute, "utf8");
+	// readWalkedFiles: a path that vanished between the walk and the read is
+	// out of the population, not a finding (#3082).
+	for (const { file: absolute, source: raw } of readWalkedFiles(files)) {
 		const stripped = stripSource(raw);
 		for (const match of stripped.matchAll(windowsGatePattern())) {
 			const offset = match.index ?? 0;
@@ -74,8 +76,7 @@ describe("win32 gate lane governance (#2536)", () => {
 		const missing: string[] = [];
 		let gates = 0;
 
-		for (const absolute of files) {
-			const raw = readFileSync(absolute, "utf8");
+		for (const { file: absolute, source: raw } of readWalkedFiles(files)) {
 			const stripped = stripSource(raw);
 			for (const match of stripped.matchAll(windowsGatePattern())) {
 				const offset = match.index ?? 0;
