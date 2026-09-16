@@ -14,7 +14,14 @@
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+const logLatency = vi.hoisted(() => vi.fn());
+vi.mock("../../clients/latency-logger.js", async (importOriginal) => ({
+	...(await importOriginal<typeof import("../../clients/latency-logger.js")>()),
+	logLatency,
+}));
+
 import { CacheManager } from "../../clients/cache-manager.js";
 import { buildResolvedFoundCascadeRun } from "../../clients/cascade-format.js";
 import {
@@ -147,6 +154,7 @@ beforeEach(() => {
 	_resetOutstandingCascadeTouchesForTests();
 	_resetDeferredForTests();
 	_resetStateCacheForTests();
+	logLatency.mockClear();
 });
 
 afterEach(() => {
@@ -232,6 +240,40 @@ describe("cold-neighbour cascade run applies the finding policy (#3102)", () => 
 		]);
 		expect(content).not.toContain(MARKED_MESSAGE);
 		expect(content).toContain(OTHER_MESSAGE);
+	});
+
+	it("records the drop in one bounded cascade_finding_policy phase per run", async () => {
+		await mark({
+			filePath: neighbor,
+			line: 1,
+			message: MARKED_MESSAGE,
+			...CANONICAL_MARK,
+			disposition: "false-positive",
+		});
+		await reconcileAndDeliver([
+			errorDiag(0, MARKED_MESSAGE),
+			errorDiag(1, OTHER_MESSAGE, 2304),
+		]);
+		const phases = logLatency.mock.calls
+			.map(([entry]) => entry as Record<string, any>)
+			.filter((entry) => entry?.phase === "cascade_finding_policy");
+		expect(phases).toHaveLength(1);
+		expect(phases[0]?.filePath).toBe(neighbor);
+		expect(phases[0]?.metadata).toMatchObject({
+			suppressed: 1,
+			total: 2,
+			auxSuppressed: 0,
+		});
+	});
+
+	it("emits no cascade_finding_policy phase when nothing was dropped", async () => {
+		await reconcileAndDeliver([errorDiag(0, MARKED_MESSAGE)]);
+		expect(
+			logLatency.mock.calls.filter(
+				([entry]) =>
+					(entry as { phase?: string })?.phase === "cascade_finding_policy",
+			),
+		).toHaveLength(0);
 	});
 
 	it("builds no cascade run at all when every neighbour error was suppressed", async () => {

@@ -140,7 +140,10 @@ export function buildResolvedFoundCascadeRun(
 			},
 		});
 	}
-	if (diagnostics.length === 0) return undefined;
+	// No zero-length early return here: `formatCascadeNeighborDiagnostics`
+	// renders "" for a neighbour with no diagnostics and the `!formatted` guard
+	// below already returns `undefined` for it — a second check was mutation-
+	// inert (M7: deleting it left all 7 cascade cases green).
 	const neighbors: CascadeNeighborResult[] = [
 		{ filePath, reason: "references", diagnostics, lspTouched: true },
 	];

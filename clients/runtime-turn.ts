@@ -3620,9 +3620,6 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	const lateAuxStuckPairs: Array<{ filePath: string; serverId: string }> = [];
 	if (drainedPairs.length > 0) {
 		const lateObserverDeadline = Date.now() + HOOK_WALL_BUDGET_MS.turn_end;
-		// One derivation per drain for every file below — `loadPiLensProjectConfig`
-		// is mtime-cached, so this is one stat for the whole turn.
-		const lateAuxPolicyMap = loadProjectRulePolicyMap(cwd);
 		const byFile = new Map<string, typeof drainedPairs>();
 		for (const pair of drainedPairs) {
 			const list = byFile.get(pair.filePath);
@@ -3883,7 +3880,8 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 						cwd,
 						filePath: lateAuxPath,
 						content: lateAuxContent ?? "",
-						policyMap: lateAuxPolicyMap,
+						// mtime-cached, so a drain of several files costs one stat.
+						policyMap: loadProjectRulePolicyMap(cwd),
 						identities: renderedRuleIdentities,
 					});
 					const lateAuxSuppressedHere = gate.live.length - lateAuxKept.length;
