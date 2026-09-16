@@ -369,7 +369,7 @@ describe("with-memory-watch verdict durability (#2042)", () => {
 		const sampleFile = makeSampleFile();
 		const grandchildScript =
 			"const iv=setInterval(()=>{process.stderr.write('x'.repeat(65536));},2);" +
-			"setTimeout(()=>{clearInterval(iv);process.exit(7);},600);";
+			"setTimeout(()=>{clearInterval(iv);process.exit(7);},3000);";
 		try {
 			const run = await new Promise<{
 				code: number | null;
