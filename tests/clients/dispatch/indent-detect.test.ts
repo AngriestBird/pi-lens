@@ -380,13 +380,23 @@ describe("templateLiteralInteriorMask", () => {
 	});
 
 	it("does not open a template for a backtick inside a // comment (#3059 acceptance)", () => {
+		// A second stray backtick in a later comment is deliberate: a mutation
+		// that stops skipping `//` opens a phantom template on line 0 that stays
+		// unclosed through the real function body and only closes on line 4,
+		// wrongly masking lines 1-4. A single stray backtick alone would leave
+		// that phantom open at EOF, where the opener-never-closes fail-safe
+		// (below) would unmask it again and hide the mutation.
 		const lines = [
 			"// a stray ` backtick",
 			"function f() {",
 			"  go();",
 			"}",
+			"// closes it here `",
+			"code();",
 		];
 		expect(templateLiteralInteriorMask(lines)).toEqual([
+			false,
+			false,
 			false,
 			false,
 			false,
@@ -395,13 +405,21 @@ describe("templateLiteralInteriorMask", () => {
 	});
 
 	it("does not open a template for a backtick inside a string literal (#3059 acceptance)", () => {
+		// Same reasoning as the // comment case above: a second string with a
+		// stray backtick gives a mutated quote-skip something to (wrongly)
+		// close against, so the phantom template's mask survives the
+		// opener-never-closes fail-safe instead of being absorbed by it.
 		const lines = [
 			'const s = "a ` stray backtick";',
 			"function f() {",
 			"  go();",
 			"}",
+			'const t = "closes ` here";',
+			"code();",
 		];
 		expect(templateLiteralInteriorMask(lines)).toEqual([
+			false,
+			false,
 			false,
 			false,
 			false,
