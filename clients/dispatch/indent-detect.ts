@@ -142,7 +142,14 @@ function hasLiveFrame(stack: TemplateFrame[]): boolean {
  * file can mask code between two such regexes without tripping the
  * opener-never-closes fail-safe; tracked as #3120 rather than fixed here (a
  * first-pass regex-opener heuristic over-declined the corpus 54 files vs 5
- * for a real fix elsewhere in this lexer).
+ * for a real fix elsewhere in this lexer). The same regex blindness has a
+ * second, block-frame face: a `/*` inside a regex literal (`` /[/*]/ ``) is
+ * read the same way — it pushes a `"block"` frame that then waits for a
+ * closing `*\/` the regex never produced, so it stays open for the rest of
+ * the file and silently disables the template mask past that point. Both
+ * faces are monotonically safe (under-masking only, degrading to pre-#3059
+ * behaviour) and are covered by the same #3120 known-limit decision rather
+ * than a lexer change here.
  */
 function advanceTemplateState(line: string, stack: TemplateFrame[]): void {
 	let j = 0;

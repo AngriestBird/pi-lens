@@ -549,4 +549,46 @@ describe("templateLiteralInteriorMask", () => {
 			false,
 		]);
 	});
+
+	it("pops the block frame at its own */ close, so a self-closing comment before a real template does not swallow it (#3120, #3118 round-2 verify, E9)", () => {
+		// A mutation that stops the block-comment branch from popping its frame
+		// once it hits `*/` (so `stack` keeps the "block" frame forever) leaves
+		// `hasLiveFrame` false for the rest of the file — a live "block" frame
+		// alone is not template evidence, and it also swallows the real
+		// template's opening backtick without ever pushing a "template" frame,
+		// so lines 2-3 wrongly read as [false, false] instead of [true, true].
+		const lines = ["/* banner */", "const s = `", "  text", "`;", "code();"];
+		expect(templateLiteralInteriorMask(lines)).toEqual([
+			false,
+			false,
+			true,
+			true,
+			false,
+		]);
+	});
+
+	it("checks the live template frame before the block-comment opener, so a /* inside template text stays plain content (#3120, #3118 round-2 verify, E2)", () => {
+		// A mutation that hoists the `/*` block-opener push above the
+		// `top?.kind === "template"` branch fires it unconditionally, even
+		// while a template frame is already open — pushing a spurious "block"
+		// frame on top mid-template. That frame then swallows the template's
+		// own closing backtick on line 3 (the block branch never looks for
+		// backticks), so the template frame is still live at EOF and the
+		// opener-never-closes fail-safe resets every line after the opener to
+		// false, instead of masking lines 1-3 as template interior.
+		const lines = [
+			"const s = `",
+			"  /* not a comment",
+			"  more",
+			"`;",
+			"code();",
+		];
+		expect(templateLiteralInteriorMask(lines)).toEqual([
+			false,
+			true,
+			true,
+			true,
+			false,
+		]);
+	});
 });
