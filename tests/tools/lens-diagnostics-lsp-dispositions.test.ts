@@ -870,4 +870,77 @@ describe("lens_diagnostics source=lsp scope=paths / legacy lsp_diagnostics paths
 			/reanchored from line 2 to 3/,
 		);
 	});
+
+	// #3160 round 4: normalizeMapKey alone does NOT fold dot segments on POSIX
+	// when the casing is already right — realpathSync.native's canonical form
+	// for a dot-segment path has a DIFFERENT segment count than the raw input,
+	// so adoptCanonicalCasing (a casing-only rewrite) declines and returns the
+	// input unchanged. Round 3's fix relied on normalizeMapKey alone, so an
+	// absolute `paths` entry carrying a `/../` segment (a legitimate shape:
+	// e.g. an agent-constructed path via a relative import resolution) kept
+	// its raw, un-folded spelling as the widget-state key, diverging from
+	// every canonical writer/reader that resolves the SAME file to its plain
+	// spelling — orphaning its own widget-state record exactly like the
+	// case-folding arm this same seam already fixed.
+	it("an absolute paths-mode entry with a dot segment lets lens_diagnostic_mark reanchor under the plain spelling", async () => {
+		const subDir = path.join(cwd, "sub");
+		fs.mkdirSync(subDir, { recursive: true });
+		const plainAbs = path.join(subDir, "a.ts");
+		fs.writeFileSync(
+			plainAbs,
+			"const a = 1;\nconst b = 2;\nconst target = bad();\n",
+		);
+		// Absolute, and already correctly cased — the ONLY thing wrong with it
+		// is the un-folded `/../` segment. Built by string concatenation, NOT
+		// `path.join`/`path.resolve` — both of those normalize dot segments
+		// themselves, which would silently defeat the point of this fixture.
+		const dotSegmentAbs = `${subDir}${path.sep}..${path.sep}sub${path.sep}a.ts`;
+		expect(dotSegmentAbs).not.toBe(plainAbs);
+		expect(fs.realpathSync.native(dotSegmentAbs)).toBe(
+			fs.realpathSync.native(plainAbs),
+		);
+
+		const service = makeBadCallService();
+		const tool = createLensDiagnosticsTool(
+			makeCacheManager(),
+			() => cwd,
+			() => service as never,
+		);
+		const result = (await tool.execute(
+			"diag-3160-r4",
+			{
+				source: "lsp",
+				scope: "paths",
+				paths: [dotSegmentAbs],
+				severity: "all",
+			},
+			new AbortController().signal,
+			null,
+			{ cwd },
+		)) as {
+			content: Array<{ text: string }>;
+			details?: Record<string, unknown>;
+		};
+		expect(result.content[0]?.text).toContain("bad call");
+
+		const plainRelative = path.relative(cwd, plainAbs);
+		const marked = await createLensDiagnosticMarkTool(() => cwd).execute(
+			"mark-3160-r4",
+			{
+				filePath: plainRelative,
+				line: 2, // stale
+				message: "bad call",
+				rule: "typescript:9999",
+				tool: "lsp",
+				disposition: "false-positive",
+			},
+			undefined,
+			() => {},
+			{ cwd },
+		);
+		expect(marked.isError).toBeFalsy();
+		expect(String(marked.content[0]?.text)).toMatch(
+			/reanchored from line 2 to 3/,
+		);
+	});
 });

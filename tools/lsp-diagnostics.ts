@@ -426,17 +426,21 @@ export function createLspDiagnosticsTool(
 				// Preserve input order (including duplicate entries); normalize each
 				// path before grouping so Windows separators and dot segments cannot
 				// change cache/group identity. Explicit lists never enter the walker.
-				// #3160/#3182: normalizeMapKey (filesystem-aware, adopts on-disk
-				// casing where the path exists) subsumes path.normalize's separator/
-				// dot-segment folding — an agent-typed, possibly mis-cased `paths`
-				// entry must key `reconcileScanDiagnostics`'s widget-state write the
-				// same way a canonical writer (clients/pipeline.ts's ctx.filePath) or
-				// the #3160-fixed lens_diagnostic_mark reader would, or a mis-cased
-				// batch call silently orphans its own widget-state record.
+				// #3160/#3182: `path.resolve(cwd, entry)` folds dot segments (and
+				// separators) structurally — it ignores `cwd` whenever `entry` is
+				// already absolute, so the old `path.isAbsolute` ternary is
+				// redundant. `normalizeMapKey` then adopts on-disk CASING where the
+				// path exists — an agent-typed, possibly mis-cased `paths` entry
+				// must key `reconcileScanDiagnostics`'s widget-state write the same
+				// way a canonical writer (clients/pipeline.ts's ctx.filePath) or the
+				// #3160-fixed lens_diagnostic_mark reader would. `normalizeMapKey`
+				// alone does NOT fold dot segments on POSIX when casing is already
+				// right (`realpathSync.native`'s canonical form has a different
+				// segment count than the raw dot-segment input, so
+				// `adoptCanonicalCasing` — a casing-only rewrite — declines and
+				// returns the input unchanged) — `path.resolve` must run first.
 				const absPaths = rawPaths.map((entry) =>
-					normalizeMapKey(
-						path.isAbsolute(entry) ? entry : path.resolve(cwd, entry),
-					),
+					normalizeMapKey(path.resolve(cwd, entry)),
 				);
 				return runBatchFileDiagnostics(absPaths, severity, lspService, {
 					concurrency,
