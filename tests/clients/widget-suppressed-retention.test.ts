@@ -238,6 +238,35 @@ describe("the widget keeps a suppressed row across a fresh probe (#3158)", () =>
 		]);
 		expect(suppressedChip()).toBeUndefined();
 	});
+
+	it("replaces the retained row when a scan reports that finding again", async () => {
+		// Retirement (b). Reachable whenever a mark stops applying WITHOUT a mark
+		// being made: a strict `false-positive` anchor hashes the marked line, so
+		// rewriting it lets the probe's #3088 filter report the finding again while
+		// the retained row is still in the record. Keeping both would show the
+		// agent a live finding AND count it in `suppressed: N` at the same time.
+		const service = makeService([diag(MESSAGE, 2322, 1)]);
+		await probe(service);
+		await mark({
+			filePath,
+			line: 1,
+			message: MESSAGE,
+			...CANONICAL_MARK,
+			disposition: "false-positive",
+		});
+		await probe(service);
+		expect(suppressedChip()).toContain("suppressed: 1");
+
+		fs.writeFileSync(filePath, "const value: number = 'other';\n");
+		clearAllWorkspaceDiagnosticsCaches();
+		await probe(service);
+
+		const stored = getFileDiagnostics(filePath) ?? [];
+		expect(stored.filter((d) => d.message === MESSAGE)).toEqual([
+			expect.not.objectContaining({ suppressedRetained: true }),
+		]);
+		expect(suppressedChip()).toBeUndefined();
+	});
 });
 
 describe("the retained row is not live on the other two surfaces (#3158)", () => {
@@ -289,9 +318,26 @@ describe("the retained row is not live on the other two surfaces (#3158)", () =>
 describe("the retained row's lifetime is enforced (#3158)", () => {
 	it("retires the retained row when the file changes on disk", async () => {
 		// Retirement (a): the retained row keeps its ORIGINAL `observedAt`, so the
-		// per-entry mtime gate that retires every other row retires it too.
-		const service = makeService([diag(MESSAGE, 2322, 1)]);
-		await probe(service);
+		// per-entry mtime gate retires it while the rows a LATER scan observed
+		// survive. The later live row is what makes this discriminating — without
+		// it the record-level `touchedAt` fallback drops the whole record either
+		// way, and a retained row restamped to the write's own observation time
+		// would outlive the change that invalidated it.
+		const observedAt = Date.now() - 60_000;
+		recordDiagnostics(
+			filePath,
+			[
+				{
+					tool: "lsp",
+					rule: "typescript:2322",
+					message: MESSAGE,
+					line: 1,
+					severity: "warning",
+				},
+			],
+			1,
+			observedAt,
+		);
 		await mark({
 			filePath,
 			line: 1,
@@ -299,15 +345,33 @@ describe("the retained row's lifetime is enforced (#3158)", () => {
 			...CANONICAL_MARK,
 			disposition: "false-positive",
 		});
-		await probe(service);
+		// The scan that no longer reports the marked finding — it is retained here.
+		recordDiagnostics(filePath, [], 2, observedAt);
 		expect(suppressedChip()).toContain("suppressed: 1");
 
-		const future = Date.now() + 60_000;
+		const changedAt = Date.now() - 30_000;
 		fs.writeFileSync(filePath, "export const value = 1;\n");
-		fs.utimesSync(filePath, future / 1000, future / 1000);
+		fs.utimesSync(filePath, changedAt / 1000, changedAt / 1000);
+		// A scan of the NEW content, observed after the change.
+		recordDiagnostics(
+			filePath,
+			[
+				{
+					tool: "lsp",
+					rule: "typescript:2304",
+					message: OTHER_MESSAGE,
+					line: 1,
+					severity: "warning",
+				},
+			],
+			3,
+			Date.now(),
+		);
 		await reconcileStaleWidgetFiles();
 
-		expect(getFileDiagnostics(filePath) ?? []).toHaveLength(0);
+		expect(getFileDiagnostics(filePath)).toEqual([
+			expect.objectContaining({ message: OTHER_MESSAGE }),
+		]);
 		expect(suppressedChip()).toBeUndefined();
 	});
 
