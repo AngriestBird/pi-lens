@@ -16,7 +16,14 @@
 // stdin shape, the exit code, or which stream carries the message.
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
+import {
+	closeSync,
+	mkdtempSync,
+	openSync,
+	readFileSync,
+	rmSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -484,6 +491,12 @@ describe("scripts/hooks/guard-bash.mjs -- drains stdin to EOF on a large payload
 			expect(result.status, `payload length ${command.length}`).toBe(2);
 			expect(result.stderr.toLowerCase()).toContain("stash");
 		},
+		// review round 2 F1: no explicit timeout inherits vitest's 5000ms
+		// default (vitest.config.ts sets hookTimeout, not testTimeout), which
+		// the 2 MB/9 MB cases blow through under Stryker's dry run -- Stryker
+		// then aborts before mutating this PR's own file. The file's own
+		// convention for a real spawn this size is 180_000 (see :391, :453).
+		60_000,
 	);
 
 	// The never-throws contract from #2699 is unchanged by the drain loop:
@@ -499,16 +512,69 @@ describe("scripts/hooks/guard-bash.mjs -- drains stdin to EOF on a large payload
 		expect(result.stderr).toBe("");
 	});
 
-	it("still exits 0 when fd 0 is closed rather than piped (a read error, not EAGAIN)", () => {
-		// stdio: "ignore" gives the child a closed/no-data fd 0 -- the "read
-		// error" half of the acceptance criterion, distinct from the
-		// EAGAIN-retry path the payload cases above exercise.
+	it("still exits 0 on a genuine read error (EBADF, not EAGAIN) -- and notes it (#3089 review round 2 F2/F3)", () => {
+		// review round 2 F2: stdio: "ignore" hands the child /dev/null, which
+		// reads 0 bytes cleanly -- the same EOF branch as the empty-stream
+		// case above, never reaching readStdin's `throw error` at :1079-ish.
+		// A WRITE-ONLY fd handed to the child as fd 0 instead produces a
+		// GENUINE EBADF on the child's first read(2) (probed directly:
+		// fs.readSync on a write-only fd throws
+		// "EBADF: bad file descriptor, read"), which is the branch that
+		// mutation-tests `throw error` -- reverting it to `break` would
+		// silently fold this case into the empty-stream case (chunks stays
+		// [], "" is returned instead of the error propagating), losing the
+		// note asserted below.
+		const dir = mkdtempSync(join(tmpdir(), "guard-bash-ebadf-"));
+		const writeOnlyFile = join(dir, "write-only");
+		const writeOnlyFd = openSync(writeOnlyFile, "w");
+		try {
+			const result = spawnSync(process.execPath, [HOOK], {
+				stdio: [writeOnlyFd, "pipe", "pipe"],
+				encoding: "utf8",
+				env: BASE_ENV,
+			});
+			expect(result.status).toBe(0);
+			// review round 2 F3: a genuine read error is a FAILURE, not an
+			// ordinary "nothing to check" allow -- unlike the true-empty-
+			// stream case above, it is noted so the hook's own stderr says
+			// why nothing was checked instead of looking identical to every
+			// other allow.
+			expect(result.stderr).toBe(
+				"guard-bash: payload unreadable or unparseable; allowing\n",
+			);
+		} finally {
+			closeSync(writeOnlyFd);
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	// #3089 review round 2 F3: the JSON.parse failure path is the OTHER
+	// "saw real input, failed to make sense of it" failure (distinct from
+	// the read-error case above) -- a payload cut off mid-document, the
+	// literal shape a short read produces. Built directly (sliced valid
+	// JSON) rather than raced through spawnSync's own EAGAIN timing, so the
+	// truncation point is deterministic.
+	it("notes an unparseable (truncated) payload instead of allowing silently", () => {
+		const fullPayload = JSON.stringify({
+			session_id: "probe",
+			cwd: repoRoot,
+			permission_mode: "default",
+			hook_event_name: "PreToolUse",
+			tool_name: "Bash",
+			tool_input: { command: `echo ${"x".repeat(1_000_000)} && git stash` },
+		});
+		const truncated = fullPayload.slice(0, 500_105);
+		expect(truncated.length).toBeLessThan(fullPayload.length);
+		expect(() => JSON.parse(truncated)).toThrow();
 		const result = spawnSync(process.execPath, [HOOK], {
-			stdio: ["ignore", "pipe", "pipe"],
+			input: truncated,
 			encoding: "utf8",
 			env: BASE_ENV,
 		});
 		expect(result.status).toBe(0);
+		expect(result.stderr).toBe(
+			"guard-bash: payload unreadable or unparseable; allowing\n",
+		);
 	});
 });
 

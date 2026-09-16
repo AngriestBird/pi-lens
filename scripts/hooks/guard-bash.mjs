@@ -1036,10 +1036,26 @@ export function classifyPayload(payload) {
 const READ_RETRY_SLEEP_MS = 5;
 const readRetryPark = new Int32Array(new SharedArrayBuffer(4));
 
+// #3089 review round 2 F3: the three ALLOW-BY-FAILURE paths in run() below
+// (empty-or-unparseable raw text, a JSON.parse failure, and this function's
+// own crash guard) used to exit 0 with empty stderr -- indistinguishable
+// from a genuine "nothing to check" allow, which is exactly why the
+// original readFileSync(0) short read was invisible for a release cycle.
+// This note fires on the two paths that saw SOME input and failed to make
+// sense of it; a genuinely empty stream (nothing ever arrived, no error) is
+// still silent -- that is the ordinary "hook invoked with no payload" case,
+// not a failure.
+const UNREADABLE_PAYLOAD_NOTE =
+	"guard-bash: payload unreadable or unparseable; allowing\n";
+
 /**
  * Read stdin synchronously, draining fd 0 to EOF. Never blocks on an
- * interactive terminal and never throws -- any read failure (besides a
- * retryable EAGAIN) is "no payload", which {@link run} treats as allow.
+ * interactive terminal. Returns "" for a genuine empty stream (a read that
+ * cleanly hits EOF on the first call, no bytes ever seen); THROWS a
+ * genuine, non-retryable read error (EBADF, a closed fd, ...) instead of
+ * swallowing it, so {@link run}'s own crash guard can tell "nothing to
+ * read" apart from "reading failed" and note the latter (review round 2
+ * F3) while keeping the never-throws contract at the run() boundary.
  *
  * #3089: `readFileSync(0, "utf8")` fails open on a payload larger than a
  * pipe buffer. Node's spawnSync sets the child's stdin pipe to
@@ -1061,30 +1077,26 @@ const readRetryPark = new Int32Array(new SharedArrayBuffer(4));
  */
 function readStdin() {
 	if (process.stdin.isTTY) return "";
-	try {
-		const chunks = [];
-		const chunk = Buffer.alloc(65536);
-		for (;;) {
-			let bytesRead;
-			try {
-				bytesRead = readSync(0, chunk, 0, chunk.length, null);
-			} catch (error) {
-				if (error?.code === "EAGAIN") {
-					Atomics.wait(readRetryPark, 0, 0, READ_RETRY_SLEEP_MS);
-					continue;
-				}
-				// A read error that is not "try again" (EBADF, a closed fd, ...)
-				// is the same "no payload" outcome the old single-shot read gave
-				// for any thrown error -- run() must still exit 0, never throw.
-				throw error;
+	const chunks = [];
+	const chunk = Buffer.alloc(65536);
+	for (;;) {
+		let bytesRead;
+		try {
+			bytesRead = readSync(0, chunk, 0, chunk.length, null);
+		} catch (error) {
+			if (error?.code === "EAGAIN") {
+				Atomics.wait(readRetryPark, 0, 0, READ_RETRY_SLEEP_MS);
+				continue;
 			}
-			if (bytesRead === 0) break; // true EOF: the writer closed its end.
-			chunks.push(Buffer.from(chunk.subarray(0, bytesRead)));
+			// A read error that is not "try again" (EBADF, a closed fd, ...)
+			// propagates to run()'s crash guard, which notes it and still
+			// exits 0 -- never throws past that boundary.
+			throw error;
 		}
-		return Buffer.concat(chunks).toString("utf8");
-	} catch {
-		return "";
+		if (bytesRead === 0) break; // true EOF: the writer closed its end.
+		chunks.push(Buffer.from(chunk.subarray(0, bytesRead)));
 	}
+	return Buffer.concat(chunks).toString("utf8");
 }
 
 /**
@@ -1099,6 +1111,7 @@ export function run() {
 		try {
 			payload = JSON.parse(raw);
 		} catch {
+			process.stderr.write(UNREADABLE_PAYLOAD_NOTE);
 			return 0;
 		}
 		const rule = classifyPayload(payload);
@@ -1106,7 +1119,11 @@ export function run() {
 		process.stderr.write(`${RULE_MESSAGES[rule]}\n`);
 		return 2;
 	} catch {
-		// A crash in this hook must never be the thing that blocks the tool.
+		// A crash in this hook -- including a genuine readStdin() read error
+		// -- must never be the thing that blocks the tool, but it also must
+		// not be silently indistinguishable from an ordinary allow (#3089
+		// review round 2 F3).
+		process.stderr.write(UNREADABLE_PAYLOAD_NOTE);
 		return 0;
 	}
 }
