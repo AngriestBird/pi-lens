@@ -344,14 +344,7 @@ describe("templateLiteralInteriorMask", () => {
 		// any `}` pops it) sends this exact input's mask to
 		// [false, true, false, false, true, false] instead — see the PR body's
 		// mutation transcript.
-		const lines = [
-			"const s = `",
-			"${ {} `",
-			"  more",
-			"` }",
-			"`;",
-			"code();",
-		];
+		const lines = ["const s = `", "${ {} `", "  more", "` }", "`;", "code();"];
 		expect(templateLiteralInteriorMask(lines)).toEqual([
 			false,
 			true,
