@@ -120,8 +120,19 @@ describe("kill-by-pid ownership (#2042)", () => {
 			vi.resetModules();
 			const { isOwnLiveChild: fresh } =
 				await import("../../clients/safe-spawn.js");
+			const { getDegradationSummary: freshSummary } =
+				await import("../../clients/degradation-ledger.js");
 			// Best-effort stays best-effort where ownership is unverifiable...
 			expect(fresh(process.ppid, "test")).toBe(true);
+			// ...and it is NOT a degradation here: a platform that never had
+			// /proc is the expected case, so the fallback row must stay silent
+			// rather than fire on every Windows and macOS spawn. That row exists
+			// for a LINUX host whose /proc cannot answer (#3091 F4).
+			expect(
+				freshSummary().some(
+					(entry) => entry.kind === "kill-ownership-unverifiable",
+				),
+			).toBe(false);
 			// ...but a handle that already reported exit is proof it is dead, and
 			// it overrides everything, including the memo.
 			expect(fresh(process.ppid, "test", { exitCode: 0 })).toBe(false);
