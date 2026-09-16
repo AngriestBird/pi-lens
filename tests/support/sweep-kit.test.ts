@@ -14,7 +14,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it, vi } from "vitest";
 import {
 	assertNonEmptyScan,
 	assignNearestExclusive,
@@ -27,6 +27,8 @@ import {
 	hasNearbyCallSite,
 	listSourceFiles,
 	occurrenceLines,
+	readWalkedFile,
+	readWalkedFiles,
 	relativePosix,
 	scanTaggedSeams,
 	stableOccurrenceKey,
@@ -34,6 +36,7 @@ import {
 	callSites,
 	tagPattern,
 	assertSortedRegistry,
+	walkedFilesVanished,
 } from "./sweep-kit.js";
 
 describe("sweep-kit: callSites", () => {
@@ -422,6 +425,61 @@ describe("sweep-kit: listSourceFiles", () => {
 			exclude: (rel) => rel === "skip-me.ts",
 		}).map((p) => relativePosix(root, p));
 		expect(found).toEqual(["a.ts", "nested/b.ts", "nested/c.mjs"]);
+	});
+});
+
+describe("sweep-kit: readWalkedFile (#3082)", () => {
+	// Named recurrence: tests/clients/pi-lens-home-hermeticity.test.ts wrote a
+	// scratch *.test.ts into the repo's own tests/ tree and removed it inside
+	// one assertion, so whichever sibling sweep was mid-enumeration died with
+	// ENOENT on a path that exists on no branch — four rotating victims
+	// (#3082/#3092).
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-3082-read-"));
+	afterAll(() => fs.rmSync(root, { recursive: true, force: true }));
+
+	it("returns the source of a file the walk still finds", () => {
+		const present = path.join(root, "present.ts");
+		fs.writeFileSync(present, "export const x = 1;\n");
+		expect(readWalkedFile(present)).toBe("export const x = 1;\n");
+	});
+
+	it("returns undefined, and warns once, for a file that vanished after the walk", () => {
+		const vanished = path.join(root, "vanished.ts");
+		fs.writeFileSync(vanished, "gone soon");
+		const walked = listSourceFiles(root);
+		expect(walked).toContain(vanished);
+		fs.rmSync(vanished);
+
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+		try {
+			expect(readWalkedFile(vanished)).toBeUndefined();
+			// Second read of the SAME path: still tolerated, still one record.
+			expect(readWalkedFile(vanished)).toBeUndefined();
+			expect(warn).toHaveBeenCalledTimes(1);
+			expect(warn.mock.calls[0]?.[0]).toMatch(/vanished between the walk/);
+		} finally {
+			warn.mockRestore();
+		}
+		expect(walkedFilesVanished()).toContain(vanished);
+	});
+
+	it("rethrows anything that is not a vanished file", () => {
+		// A directory read as a file is EISDIR, not ENOENT: a real, unrelated
+		// failure must not be laundered into "this file left the population".
+		expect(() => readWalkedFile(root)).toThrow();
+	});
+
+	it("readWalkedFiles drops the vanished entries and keeps the rest paired", () => {
+		const kept = path.join(root, "kept.ts");
+		const gone = path.join(root, "gone.ts");
+		fs.writeFileSync(kept, "kept");
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+		try {
+			const read = readWalkedFiles([kept, gone]);
+			expect(read).toEqual([{ file: kept, source: "kept" }]);
+		} finally {
+			warn.mockRestore();
+		}
 	});
 });
 
