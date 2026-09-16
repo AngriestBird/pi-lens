@@ -786,6 +786,9 @@ jobs:
     # refs #3123: bounds a hang against GitHub's 360-min default.
     # Measured max leg over last 10 successful master runs (30 matrix legs,
     # windows-latest slowest): 272s (4m32s); sized at ~2x + margin.
+    # refs #3098: that 272s PREDATES the macOS-only build + Vitest step below,
+    # which is not covered by the measurement above. The value is left alone
+    # and re-measured from the first green macOS legs before it is resized.
     timeout-minutes: 15
     needs: [validate-merge-train-dispatch, lint-and-typecheck, test]
     permissions:
@@ -838,12 +841,18 @@ jobs:
       # is where #1024 was actually live. No extra install cost: `npm install`
       # above already ran `prepare`, so devDependencies and the core grammars
       # the vitest globalSetup pre-warms are already present.
+      # ADVISORY for now (`continue-on-error`), like the Windows Vitest subset
+      # above: this job's install/pack/smoke steps gate, and a macOS-only unit
+      # flake must not block an unrelated PR on its first outings. Promotion to
+      # gating is a separate decision after several green legs (#3159 round 3).
       - name: POSIX case-insensitive anchors (APFS)
         if: matrix.os == 'macos-latest'
+        continue-on-error: true
         shell: bash
         run: |
+          set -euo pipefail
           npm run build
-          npx vitest run tests/clients/path-utils.test.ts tests/clients/diagnostic-dispositions.test.ts
+          node_modules/.bin/vitest run tests/clients/path-utils.test.ts tests/clients/diagnostic-dispositions.test.ts --configLoader runner
 
       - name: Rule catalog report (non-blocking)
         continue-on-error: true

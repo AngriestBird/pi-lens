@@ -364,6 +364,34 @@ describe("normalizeFilePath: POSIX adopts on-disk casing (#3098, the live half o
 		}
 	});
 
+	// The remaining row of the #3159 round-2 state-space table with no test:
+	// a case-variant symlink whose target sits in the SAME directory. Here the
+	// rewrite passes the filesystem confirmation — `link` and `LINK` really are
+	// one file — so the key resolves through the symlink, which is the one
+	// shape where POSIX normalization does. Documenting the answer so a future
+	// reading of `adoptCanonicalCasing` cannot mistake the two cases above
+	// (different parent → held) for this one. It pins the row's ANSWER only: it
+	// reds when the POSIX arm is reverted wholesale, not under the confirmation
+	// mutation, because dropping the confirmation returns the same string here.
+	it("a case-variant symlink whose target is its own sibling resolves through it", (ctx) => {
+		const { tmpDir, cleanup } = setupTestEnvironment("pi-lens-case-");
+		try {
+			fs.mkdirSync(path.join(tmpDir, "link"), { recursive: true });
+			fs.writeFileSync(path.join(tmpDir, "link", "a.ts"), "x\n");
+			ctx.skip(
+				fs.existsSync(path.join(tmpDir, "LINK")),
+				"case-insensitive filesystem: LINK and link cannot be two entries here",
+			);
+			fs.symlinkSync("link", path.join(tmpDir, "LINK"), "dir");
+
+			expect(normalizeMapKey(path.join(tmpDir, "LINK", "a.ts"))).toBe(
+				path.join(tmpDir, "link", "a.ts"),
+			);
+		} finally {
+			cleanup();
+		}
+	});
+
 	it("two genuinely distinct files on a case-sensitive filesystem keep two keys", (ctx) => {
 		const { tmpDir, cleanup } = setupTestEnvironment("pi-lens-case-");
 		try {
