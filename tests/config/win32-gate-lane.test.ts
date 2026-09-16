@@ -7,6 +7,8 @@ import {
 	getWin32GateFiles,
 	getWin32LaneFiles,
 	readWalkedFile,
+	recordedVanishedPathCount,
+	VANISHED_PATH_RECORD_CAP,
 } from "../../scripts/lib/win32-gate-population.mjs";
 import {
 	assertNonEmptyScan,
@@ -141,17 +143,45 @@ describe("win32 gate lane governance (#2536)", () => {
 	// occurrence — is pinned here instead of assumed.
 	it("tolerates a vanished walked file and warns once per distinct path (#3082)", () => {
 		const gone = resolve(ROOT, "tests/definitely-not-a-real-file-3082.ts");
-		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+		// The record goes through a raw stderr write, not console.warn (#3107):
+		// Vitest's default reporter swallows a worker's console.warn on a
+		// passing run, so the record would never reach CI's job log otherwise.
+		const write = vi
+			.spyOn(process.stderr, "write")
+			.mockImplementation(() => true);
 		try {
 			expect(readWalkedFile(gone)).toBeUndefined();
 			expect(readWalkedFile(gone)).toBeUndefined();
-			expect(warn).toHaveBeenCalledTimes(1);
-			expect(warn.mock.calls[0]?.[0]).toMatch(/vanished between the walk/);
+			expect(write).toHaveBeenCalledTimes(1);
+			expect(write.mock.calls[0]?.[0]).toMatch(/vanished between the walk/);
 		} finally {
-			warn.mockRestore();
+			write.mockRestore();
 		}
 		// A directory is EISDIR, not a vanished file: a real failure must not be
 		// laundered into "this file left the population".
 		expect(() => readWalkedFile(resolve(ROOT, "tests"))).toThrow();
+	});
+
+	// #3107: the parity comment above readWalkedFile in
+	// win32-gate-population.mjs claims the bound is identical to the
+	// TypeScript seam's oldest-first BoundedSet eviction. Pin that claim here
+	// too, the same way the TypeScript seam's own
+	// "bounds the vanished-path record" test pins it — a hand-rolled
+	// clear()-on-overflow Set (the pre-fix shape) passes every other test in
+	// this file but caps below VANISHED_PATH_RECORD_CAP after clearing, so
+	// this is the one assertion that would catch that regression.
+	it("bounds the vanished-path record at VANISHED_PATH_RECORD_CAP (#3107)", () => {
+		const before = recordedVanishedPathCount();
+		const write = vi
+			.spyOn(process.stderr, "write")
+			.mockImplementation(() => true);
+		try {
+			for (let index = 0; index < VANISHED_PATH_RECORD_CAP + 50; index++)
+				readWalkedFile(resolve(ROOT, `tests/absent-3107-${index}.ts`));
+		} finally {
+			write.mockRestore();
+		}
+		expect(before).toBeLessThanOrEqual(VANISHED_PATH_RECORD_CAP);
+		expect(recordedVanishedPathCount()).toBe(VANISHED_PATH_RECORD_CAP);
 	});
 });

@@ -452,15 +452,20 @@ describe("sweep-kit: readWalkedFile (#3082)", () => {
 		expect(walked).toContain(vanished);
 		fs.rmSync(vanished);
 
-		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+		// The record goes through a raw stderr write, not console.warn (#3107):
+		// Vitest's default reporter swallows a worker's console.warn on a
+		// passing run, so the record would never reach CI's job log otherwise.
+		const write = vi
+			.spyOn(process.stderr, "write")
+			.mockImplementation(() => true);
 		try {
 			expect(readWalkedFile(vanished)).toBeUndefined();
 			// Second read of the SAME path: still tolerated, still one record.
 			expect(readWalkedFile(vanished)).toBeUndefined();
-			expect(warn).toHaveBeenCalledTimes(1);
-			expect(warn.mock.calls[0]?.[0]).toMatch(/vanished between the walk/);
+			expect(write).toHaveBeenCalledTimes(1);
+			expect(write.mock.calls[0]?.[0]).toMatch(/vanished between the walk/);
 		} finally {
-			warn.mockRestore();
+			write.mockRestore();
 		}
 		expect(walkedFilesVanished()).toContain(vanished);
 	});
@@ -471,12 +476,14 @@ describe("sweep-kit: readWalkedFile (#3082)", () => {
 		// without limit. Drives the real recorder through readWalkedFile on paths
 		// that do not exist, then reads the live size.
 		const before = recordedVanishedPathCount();
-		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+		const write = vi
+			.spyOn(process.stderr, "write")
+			.mockImplementation(() => true);
 		try {
 			for (let index = 0; index < VANISHED_PATH_RECORD_CAP + 50; index++)
 				readWalkedFile(path.join(root, `absent-${index}.ts`));
 		} finally {
-			warn.mockRestore();
+			write.mockRestore();
 		}
 		expect(before).toBeLessThanOrEqual(VANISHED_PATH_RECORD_CAP);
 		expect(recordedVanishedPathCount()).toBe(VANISHED_PATH_RECORD_CAP);
@@ -492,12 +499,16 @@ describe("sweep-kit: readWalkedFile (#3082)", () => {
 		const kept = path.join(root, "kept.ts");
 		const gone = path.join(root, "gone.ts");
 		fs.writeFileSync(kept, "kept");
-		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+		// Suppresses the raw stderr write readWalkedFile emits for `gone` —
+		// nothing here asserts on it (that's covered above).
+		const write = vi
+			.spyOn(process.stderr, "write")
+			.mockImplementation(() => true);
 		try {
 			const read = readWalkedFiles([kept, gone]);
 			expect(read).toEqual([{ file: kept, source: "kept" }]);
 		} finally {
-			warn.mockRestore();
+			write.mockRestore();
 		}
 	});
 });
