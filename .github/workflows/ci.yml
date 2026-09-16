@@ -215,6 +215,12 @@ jobs:
     name: Unit tests
     needs: validate-merge-train-dispatch
     runs-on: ubuntu-latest
+    # Bounds the job so a reader that is alive but never drains (e.g. an
+    # unbounded stdout stall in the mem-watch wrapper, #3106) cannot hold the
+    # runner for GitHub's 360-minute default. Sized at measured-max x2 plus margin
+    # headroom: the longest Unit job over 9 successful master runs
+    # (2026-09-15/16) was 12m42s; 26m would sit exactly on a 2x-slow runner, so 30m (refs #3111).
+    timeout-minutes: 30
     permissions:
       contents: read
 
