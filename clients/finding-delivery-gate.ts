@@ -436,12 +436,21 @@ export const DELIVERY_SURFACES: Record<string, DeliverySurfaceEntry> = {
 	// drifting edit already re-touched the file — a fresh pending pair
 	// supersedes this one), with both drop arms counted in the
 	// `late_auxiliary_findings` latency record rather than silenced.
+	//
+	// #3102: freshness is only half the gate. The survivors also take the shared
+	// `clients/dispatch/finding-policy.ts` stack (inline `pi-lens-ignore` →
+	// stored dispositions → `.pi-lens.json` rule policy) the per-edit dispatcher,
+	// `mode=full` and the `source=lsp` probe lane apply — without it a finding
+	// the agent marked `false-positive` re-reported on every drain. Per #3088
+	// round-2 F4, the evidence is the CALL TEXT of that filter, which exists
+	// nowhere else in this file: a bare `applyFindingPolicy` would also be
+	// satisfied by an import line or an unrelated caller.
 	"runtime-turn:late-auxiliary-findings": gated(
 		RUNTIME_TURN_FILE,
 		"Turn-end late-auxiliary LSP findings (collect-later probe of aux " +
 			"client caches whose grace window expired).",
-		["gateFindingsByPathFreshness"],
-		['store: "late-auxiliary-findings"'],
+		["gateFindingsByPathFreshness", "applyFindingPolicy"],
+		['store: "late-auxiliary-findings"', "applyFindingPolicy(gate.live, {"],
 	),
 	"runtime-turn:late-runner-findings": gated(
 		RUNTIME_TURN_FILE,
@@ -481,6 +490,21 @@ export const DELIVERY_SURFACES: Record<string, DeliverySurfaceEntry> = {
 			partialReason:
 				"Same cascade carry-over caveat as runtime-turn:cascade-blocker.",
 		},
+	),
+	// #3102: the cold-neighbour cascade run is BUILT here, in the quiet-window
+	// reconcile (`onResolvedFound` in index.ts), a turn earlier than the
+	// `runtime-turn:cascade-blocker` render that finally carries it — so it is
+	// its own delivery lane, and it was the one that rendered raw LSP findings
+	// with no policy filter at all. The evidence is the CALL TEXT of the shared
+	// filter (#3088 round-2 F4): a bare `applyFindingPolicy` would also be
+	// satisfied by the import line.
+	"cascade-format:resolved-found-run": gated(
+		"clients/cascade-format.ts",
+		"Cold-neighbour ERROR diagnostics formatted into the turn-end cascade " +
+			"run by `buildResolvedFoundCascadeRun` (quiet-window reconcile of a " +
+			"cascade touch that skipped its in-lane wait).",
+		["applyFindingPolicy"],
+		["applyFindingPolicy(retained, {"],
 	),
 	"runtime-turn:call-graph-advisory": labeled(
 		RUNTIME_TURN_FILE,

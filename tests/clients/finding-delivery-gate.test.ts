@@ -68,6 +68,9 @@ const EXPECTED_SURFACE_IDS = [
 	"runtime-turn:late-runner-findings",
 	"runtime-turn:cascade-blocker",
 	"runtime-turn:cascade-coverage-advisory",
+	// #3102: the cold-neighbour cascade run's own build-time lane, a turn
+	// earlier than the runtime-turn render that carries it.
+	"cascade-format:resolved-found-run",
 	"runtime-turn:call-graph-advisory",
 	"lens-diagnostics:mode-full",
 	"lens-diagnostics:mode-all",
