@@ -1,0 +1,427 @@
+/**
+ * #3158: a `false-positive`/`suppress` mark stopped contributing to the TUI
+ * widget's `suppressed: N` chip as soon as ANY fresh probe of that file ran.
+ *
+ * The write path, from the production tool pair rather than asserted:
+ * `lens_diagnostic_mark` → `reconcileWidgetDisposition` tags the file's widget
+ * entry and leaves it in the store; a fresh `lens_diagnostics source=lsp` probe
+ * reconciles its footer through `reconcileWidgetFromLspResult` →
+ * `reconcileScanDiagnostics` → `recordDiagnostics`, which REPLACES the file's
+ * entries with the list it is handed. Since #3088 that list is the FILTERED set
+ * — the marked finding is not in it — so the tagged entry was deleted rather
+ * than kept-and-tagged and the chip lost that file's contribution.
+ *
+ * Every case drives a real seam: the production `lens_diagnostic_mark` /
+ * `createLensDiagnosticsTool` pair for the reported defect and the three
+ * surfaces the store backs, and `markDisposition` + `recordDiagnostics` (the
+ * same production functions the tools call) for the retention rule's bound and
+ * its retirement arms.
+ */
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+// mode=all never calls these, but `tools/lens-diagnostics.ts` imports the seams
+// at module load and constructing them would spawn real analyzer clients.
+vi.mock("../../clients/project-diagnostics/fresh-fetch.js", () => ({
+	fetchFreshProjectDiagnostics: vi.fn().mockResolvedValue({
+		diagnostics: [],
+		runners: [],
+		cold: [],
+		timings: {},
+	}),
+}));
+vi.mock("../../clients/bootstrap.js", () => ({
+	loadBootstrapClients: vi.fn().mockResolvedValue({}),
+}));
+
+import {
+	getDegradationSummary,
+	resetDegradationLedger,
+} from "../../clients/degradation-ledger.js";
+import {
+	_resetDeferredForTests,
+	_resetStateCacheForTests,
+	markDisposition,
+} from "../../clients/diagnostic-dispositions.js";
+import { resetProjectLensConfigCache } from "../../clients/project-lens-config.js";
+import {
+	clearWidgetState,
+	exportWidgetState,
+	getFileDiagnostics,
+	getFileDiagnosticSummaries,
+	importWidgetState,
+	recordDiagnostics,
+	reconcileStaleWidgetFiles,
+	renderWidget,
+} from "../../clients/widget-state.js";
+import { createLensDiagnosticMarkTool } from "../../tools/lens-diagnostic-mark.js";
+import { createLensDiagnosticsTool } from "../../tools/lens-diagnostics.js";
+import { removeTempDirSync } from "./test-utils.js";
+
+const MESSAGE = "Type 'string' is not assignable to type 'number'.";
+const OTHER_MESSAGE = "Cannot find name 'other'.";
+const FILE_BODY = "const value: number = 'bad';\nexport const other = 1;\n";
+/** The spelling the widget footer and mode=full render, and therefore the
+ * spelling of a mark made from either. */
+const CANONICAL_MARK = { rule: "typescript:2322", tool: "lsp" };
+const theme = { fg: (_color: string, value: string) => value };
+
+let cwd: string;
+let filePath: string;
+let previousDataDir: string | undefined;
+
+/** One LSP finding as a real server publishes it. */
+function diag(
+	message: string,
+	code: number,
+	line: number,
+	severity = 2,
+): Record<string, unknown> {
+	return {
+		severity,
+		message,
+		source: "typescript",
+		code,
+		serverId: "typescript",
+		range: {
+			start: { line: line - 1, character: 6 },
+			end: { line: line - 1, character: 11 },
+		},
+	};
+}
+
+function makeService(diags: Array<Record<string, unknown>>) {
+	return {
+		touchFile: vi.fn(async () => ({ diags })),
+		getDiagnostics: vi.fn(async () => []),
+		getCapabilitySnapshots: vi.fn(async () => []),
+	};
+}
+
+type ServiceDouble = ReturnType<typeof makeService>;
+
+async function probe(service: ServiceDouble) {
+	const tool = createLensDiagnosticsTool(
+		{ readCache: vi.fn(() => undefined) } as never,
+		() => cwd,
+		() => service as never,
+	);
+	return (await tool.execute(
+		"diag-3158",
+		{ source: "lsp", scope: "paths", paths: [filePath] },
+		new AbortController().signal,
+		null,
+		{ cwd },
+	)) as { content: Array<{ text: string }>; details?: Record<string, unknown> };
+}
+
+async function modeAll() {
+	const tool = createLensDiagnosticsTool(
+		{ readCache: vi.fn(() => undefined) } as never,
+		() => cwd,
+		() => undefined as never,
+	);
+	return (await tool.execute(
+		"all-3158",
+		{ mode: "all" },
+		new AbortController().signal,
+		null,
+		{ cwd },
+	)) as { content: Array<{ text: string }>; details?: Record<string, unknown> };
+}
+
+async function mark(params: Record<string, unknown>) {
+	const markTool = createLensDiagnosticMarkTool(() => cwd);
+	return (await markTool.execute("mark-3158", params, undefined, () => {}, {
+		cwd,
+	})) as {
+		content: Array<{ text: string }>;
+		isError?: boolean;
+		details?: Record<string, unknown>;
+	};
+}
+
+function suppressedChip(): string | undefined {
+	return renderWidget(100, theme).find((line) => line.includes("suppressed:"));
+}
+
+beforeEach(() => {
+	cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-3158-"));
+	filePath = path.join(cwd, "app.ts");
+	fs.writeFileSync(filePath, FILE_BODY);
+	previousDataDir = process.env.PILENS_DATA_DIR;
+	process.env.PILENS_DATA_DIR = path.join(cwd, "data");
+	_resetDeferredForTests();
+	_resetStateCacheForTests();
+	resetProjectLensConfigCache();
+	resetDegradationLedger();
+	clearWidgetState();
+});
+
+afterEach(() => {
+	if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+	else process.env.PILENS_DATA_DIR = previousDataDir;
+	_resetDeferredForTests();
+	_resetStateCacheForTests();
+	resetProjectLensConfigCache();
+	resetDegradationLedger();
+	clearWidgetState();
+	removeTempDirSync(cwd);
+});
+
+describe("the widget keeps a suppressed row across a fresh probe (#3158)", () => {
+	it("keeps the suppressed chip contribution across a fresh source=lsp probe", async () => {
+		// Recurrence: #3158 — `recordDiagnostics` replaced the file's entries with
+		// the post-#3088 FILTERED scan set, deleting the disposition-tagged row the
+		// chip counts.
+		const service = makeService([diag(MESSAGE, 2322, 1)]);
+		await probe(service);
+		const marked = await mark({
+			filePath,
+			line: 1,
+			message: MESSAGE,
+			...CANONICAL_MARK,
+			disposition: "false-positive",
+		});
+		expect(marked.isError).toBeFalsy();
+		expect(suppressedChip()).toContain("suppressed: 1");
+
+		await probe(service);
+
+		expect(suppressedChip()).toContain("suppressed: 1");
+		expect(getFileDiagnostics(filePath)).toEqual([
+			expect.objectContaining({
+				message: MESSAGE,
+				disposition: "false-positive",
+				suppressedRetained: true,
+			}),
+		]);
+	});
+
+	it("keeps the live finding beside the retained row and counts each once", async () => {
+		// Recurrence: a retention rule that re-added the row without matching the
+		// incoming set would double-count, and one that replaced the record would
+		// lose the surviving live finding (#533's shape).
+		const service = makeService([
+			diag(MESSAGE, 2322, 1),
+			diag(OTHER_MESSAGE, 2304, 2),
+		]);
+		await probe(service);
+		await mark({
+			filePath,
+			line: 1,
+			message: MESSAGE,
+			...CANONICAL_MARK,
+			disposition: "false-positive",
+		});
+
+		await probe(service);
+
+		const stored = getFileDiagnostics(filePath) ?? [];
+		expect(stored.filter((d) => d.message === MESSAGE)).toHaveLength(1);
+		expect(stored.filter((d) => d.message === OTHER_MESSAGE)).toHaveLength(1);
+		expect(suppressedChip()).toContain("suppressed: 1");
+		const summary = getFileDiagnosticSummaries().find(
+			(s) => s.filePath === filePath,
+		);
+		expect(summary).toMatchObject({ blocking: 0, errors: 0, warnings: 1 });
+	});
+
+	it("drops an UNTAGGED finding the fresh scan no longer reports", async () => {
+		// Recurrence: the retention rule must key on the disposition tag, not on
+		// "was here before" — a finding the agent FIXED has to disappear.
+		const service = makeService([
+			diag(MESSAGE, 2322, 1),
+			diag(OTHER_MESSAGE, 2304, 2),
+		]);
+		await probe(service);
+		expect(getFileDiagnostics(filePath)).toHaveLength(2);
+
+		await probe(makeService([diag(OTHER_MESSAGE, 2304, 2)]));
+
+		expect(getFileDiagnostics(filePath)).toEqual([
+			expect.objectContaining({ message: OTHER_MESSAGE }),
+		]);
+		expect(suppressedChip()).toBeUndefined();
+	});
+});
+
+describe("the retained row is not live on the other two surfaces (#3158)", () => {
+	it("mode=all does not report the retained row as a live finding", async () => {
+		const service = makeService([diag(MESSAGE, 2322, 1)]);
+		await probe(service);
+		await mark({
+			filePath,
+			line: 1,
+			message: MESSAGE,
+			...CANONICAL_MARK,
+			disposition: "false-positive",
+		});
+		await probe(service);
+		expect(suppressedChip()).toContain("suppressed: 1");
+
+		const all = await modeAll();
+
+		expect(all.content[0].text).not.toContain(MESSAGE);
+		expect(all.details?.totalDiagnostics ?? 0).toBe(0);
+	});
+
+	it("lens_diagnostic_mark reads the retained row without a live-match reanchor note", async () => {
+		const service = makeService([diag(MESSAGE, 2322, 1)]);
+		await probe(service);
+		await mark({
+			filePath,
+			line: 1,
+			message: MESSAGE,
+			...CANONICAL_MARK,
+			disposition: "false-positive",
+		});
+		await probe(service);
+
+		const again = await mark({
+			filePath,
+			line: 1,
+			message: MESSAGE,
+			...CANONICAL_MARK,
+			disposition: "false-positive",
+		});
+
+		expect(again.isError).toBeFalsy();
+		expect(again.content[0].text).not.toContain("reanchored");
+		expect(again.content[0].text).not.toContain("multiple live matches");
+	});
+});
+
+describe("the retained row's lifetime is enforced (#3158)", () => {
+	it("retires the retained row when the file changes on disk", async () => {
+		// Retirement (a): the retained row keeps its ORIGINAL `observedAt`, so the
+		// per-entry mtime gate that retires every other row retires it too.
+		const service = makeService([diag(MESSAGE, 2322, 1)]);
+		await probe(service);
+		await mark({
+			filePath,
+			line: 1,
+			message: MESSAGE,
+			...CANONICAL_MARK,
+			disposition: "false-positive",
+		});
+		await probe(service);
+		expect(suppressedChip()).toContain("suppressed: 1");
+
+		const future = Date.now() + 60_000;
+		fs.writeFileSync(filePath, "export const value = 1;\n");
+		fs.utimesSync(filePath, future / 1000, future / 1000);
+		await reconcileStaleWidgetFiles();
+
+		expect(getFileDiagnostics(filePath) ?? []).toHaveLength(0);
+		expect(suppressedChip()).toBeUndefined();
+	});
+
+	it("retires the retained row when the mark becomes a non-suppressing one", async () => {
+		// Retirement (c): `flagged` is not a suppression, so the row loses the tag
+		// that earned it retention. It must be dropped, never re-armed as a live
+		// finding the fresh scan does not report.
+		const service = makeService([diag(MESSAGE, 2322, 1)]);
+		await probe(service);
+		await mark({
+			filePath,
+			line: 1,
+			message: MESSAGE,
+			...CANONICAL_MARK,
+			disposition: "false-positive",
+		});
+		await probe(service);
+		expect(getFileDiagnostics(filePath)).toHaveLength(1);
+
+		await mark({
+			filePath,
+			line: 1,
+			message: MESSAGE,
+			...CANONICAL_MARK,
+			disposition: "flagged",
+		});
+
+		expect(getFileDiagnostics(filePath) ?? []).toHaveLength(0);
+		expect(suppressedChip()).toBeUndefined();
+		const summary = getFileDiagnosticSummaries().find(
+			(s) => s.filePath === filePath,
+		);
+		expect(summary).toMatchObject({ blocking: 0, errors: 0 });
+	});
+
+	it("caps retained rows per file and records one bounded degradation", () => {
+		// Retirement (d) / AGENTS.md shape 9: retention is the one axis that can
+		// hold rows a live scan no longer reports, so it carries its own cap and
+		// the truncation is counted once per file, never once per row.
+		const body = Array.from({ length: 20 }, (_, i) => `const a${i} = ${i};`)
+			.join("\n")
+			.concat("\n");
+		fs.writeFileSync(filePath, body);
+		const findings = Array.from({ length: 20 }, (_, i) => ({
+			tool: "lsp",
+			rule: `typescript:${9000 + i}`,
+			message: `fake finding ${i}`,
+			line: i + 1,
+			severity: "warning",
+		}));
+		recordDiagnostics(filePath, findings);
+		for (const finding of findings) {
+			markDisposition(
+				cwd,
+				{ ...finding, cwd, filePath, content: body },
+				"false-positive",
+			);
+		}
+		expect(getFileDiagnostics(filePath)).toHaveLength(20);
+
+		// A fresh scan that reports none of them: every tagged row is a retention
+		// candidate, and the cap decides how many survive.
+		recordDiagnostics(filePath, []);
+
+		expect(getFileDiagnostics(filePath)).toHaveLength(12);
+		expect(suppressedChip()).toContain("suppressed: 12");
+		const capped = getDegradationSummary().find(
+			(group) => group.kind === "widget-suppressed-retention-capped",
+		);
+		expect(capped?.count).toBe(1);
+		expect(capped?.latestReasons[0]?.reason).toContain("8");
+
+		// Bounded: a second truncating write for the same file adds no new record.
+		recordDiagnostics(filePath, []);
+		expect(
+			getDegradationSummary().find(
+				(group) => group.kind === "widget-suppressed-retention-capped",
+			)?.count,
+		).toBe(1);
+	});
+
+	it("carries the retained row through a session-restore round trip", async () => {
+		// Lifetime: retention is content-bound, not session-bound — the mark is
+		// durable and the file's mtime is on disk, so both retirement rules still
+		// apply after a resume. Unlike `stale`, it is not stripped on import.
+		const service = makeService([diag(MESSAGE, 2322, 1)]);
+		await probe(service);
+		await mark({
+			filePath,
+			line: 1,
+			message: MESSAGE,
+			...CANONICAL_MARK,
+			disposition: "false-positive",
+		});
+		await probe(service);
+
+		const snapshot = JSON.parse(JSON.stringify(exportWidgetState()));
+		clearWidgetState();
+		expect(importWidgetState(snapshot)).toBe(true);
+
+		expect(suppressedChip()).toContain("suppressed: 1");
+		expect(getFileDiagnostics(filePath)).toEqual([
+			expect.objectContaining({
+				disposition: "false-positive",
+				suppressedRetained: true,
+			}),
+		]);
+	});
+});
