@@ -133,8 +133,9 @@ vi.mock("../../clients/instance-reaper-state.js", () => ({
 	resolveBackstopStateDir: (machineHome: string): string => {
 		if (!isRunSharedHome(machineHome)) return machineHome;
 		// On first use, not at import: most files that pull in the reaper never
-		// reach the backstop, and an eager mkdtemp left one empty directory per
-		// such file behind (measured on this batch, see PR #3100 round 2).
+		// reach the backstop. Measured over the eight-file reaper batch (PR #3100
+		// round 2): mkdtemp in the factory left 8 directories, 7 of them empty;
+		// on first use it leaves the 1 that holds a stamp.
 		backstopPrivateDir ??= fs.mkdtempSync(
 			path.join(tmpHygieneHome, backstopRunPrefix),
 		);
