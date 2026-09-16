@@ -61,6 +61,8 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
 	listSourceFiles,
+	matchingCloseIndex,
+	matchingOpenIndex,
 	readWalkedFiles,
 	relativePosix,
 	stripSource,
@@ -139,18 +141,6 @@ function wordEndingAt(source: string, end: number): string {
 	return source.slice(start, end + 1);
 }
 
-function matchingOpenParen(source: string, closeIndex: number): number {
-	let depth = 0;
-	for (let i = closeIndex; i >= 0; i--) {
-		if (source[i] === ")") depth++;
-		else if (source[i] === "(") {
-			depth--;
-			if (depth === 0) return i;
-		}
-	}
-	return -1;
-}
-
 /**
  * Does the `{` at `index` open a FUNCTION body (as opposed to a block or an
  * object literal)? Decided from the preceding token: `=> {` and `) {` are
@@ -161,7 +151,7 @@ function isFunctionBrace(source: string, index: number): boolean {
 	if (j < 0) return false;
 	if (source[j] === ">" && source[j - 1] === "=") return true;
 	if (source[j] === ")") {
-		const open = matchingOpenParen(source, j);
+		const open = matchingOpenIndex(source, j, "(", ")");
 		if (open < 0) return false;
 		const head = wordEndingAt(source, prevNonSpace(source, open - 1));
 		return !CONTROL_KEYWORDS.has(head);
@@ -169,31 +159,6 @@ function isFunctionBrace(source: string, index: number): boolean {
 	const word = wordEndingAt(source, j);
 	if (word) return !BLOCK_KEYWORDS.has(word);
 	return false;
-}
-
-function matchingCloseBrace(source: string, openIndex: number): number {
-	let depth = 0;
-	for (let i = openIndex; i < source.length; i++) {
-		if (source[i] === "{") depth++;
-		else if (source[i] === "}") {
-			depth--;
-			if (depth === 0) return i;
-		}
-	}
-	return -1;
-}
-
-function skipGroup(source: string, openIndex: number, close: string): number {
-	const open = source[openIndex];
-	let depth = 0;
-	for (let i = openIndex; i < source.length; i++) {
-		if (source[i] === open) depth++;
-		else if (source[i] === close) {
-			depth--;
-			if (depth === 0) return i;
-		}
-	}
-	return -1;
 }
 
 /**
@@ -227,7 +192,7 @@ function testCallParen(source: string, identifierEnd: number): number {
 		}
 		if (ch === "(") {
 			if (!ARGUMENT_TAKING_MODIFIERS.has(lastModifier)) return i;
-			const close = skipGroup(source, i, ")");
+			const close = matchingCloseIndex(source, i, "(", ")");
 			if (close < 0) return -1;
 			lastModifier = "";
 			i = close + 1;
@@ -279,13 +244,13 @@ function callbackBodyBrace(
 	for (let i = callParen + 1; i < callEnd; i++) {
 		const ch = stripped[i];
 		if (ch === "(" || ch === "[") {
-			i = skipGroup(stripped, i, ch === "(" ? ")" : "]");
+			i = matchingCloseIndex(stripped, i, ch, ch === "(" ? ")" : "]");
 			if (i < 0) return -1;
 			continue;
 		}
 		if (ch !== "{") continue;
 		if (isFunctionBrace(stripped, i)) return i;
-		i = matchingCloseBrace(stripped, i);
+		i = matchingCloseIndex(stripped, i, "{", "}");
 		if (i < 0) return -1;
 	}
 	return -1;
@@ -302,11 +267,11 @@ export function scanVacuousSkipsInSource(
 	for (const match of stripped.matchAll(TEST_IDENTIFIER)) {
 		const callParen = testCallParen(stripped, match.index + match[0].length);
 		if (callParen < 0) continue;
-		const callEnd = skipGroup(stripped, callParen, ")");
+		const callEnd = matchingCloseIndex(stripped, callParen, "(", ")");
 		if (callEnd < 0) continue;
 		const bodyOpen = callbackBodyBrace(stripped, callParen, callEnd);
 		if (bodyOpen < 0) continue;
-		const bodyClose = matchingCloseBrace(stripped, bodyOpen);
+		const bodyClose = matchingCloseIndex(stripped, bodyOpen, "{", "}");
 		if (bodyClose < 0) continue;
 		const hit = firstVacuousReturn(stripped, bodyOpen, bodyClose);
 		if (hit < 0) continue;

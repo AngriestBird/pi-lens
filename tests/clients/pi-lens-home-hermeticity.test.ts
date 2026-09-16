@@ -22,6 +22,7 @@ import {
 	assertNonEmptyScan,
 	escapeRegExp,
 	listSourceFiles,
+	matchingCloseIndex,
 	readWalkedFiles,
 	relativePosix,
 	stripSource,
@@ -290,18 +291,7 @@ describe("clients/ best-effort getGlobalPiLensDir() writers stay a named, regist
  *  the annotation continues, anything else means the group WAS the body). */
 function bodyBraceAfterParams(code: string, openParen: number): number {
 	if (code[openParen] !== "(") return -1;
-	let parens = 0;
-	let close = -1;
-	for (let i = openParen; i < code.length; i++) {
-		if (code[i] === "(") parens++;
-		else if (code[i] === ")") {
-			parens--;
-			if (parens === 0) {
-				close = i;
-				break;
-			}
-		}
-	}
+	const close = matchingCloseIndex(code, openParen, "(", ")");
 	if (close < 0) return -1;
 	const nextNonSpace = (from: number): number => {
 		let i = from;
@@ -318,24 +308,11 @@ function bodyBraceAfterParams(code: string, openParen: number): number {
 		} else if (ch === ";") return -1;
 		else if (ch === "{" && angle === 0) {
 			if (!hasReturnType) return i;
-			const end = balancedBraceEnd(code, i);
+			const end = matchingCloseIndex(code, i, "{", "}");
 			if (end < 0) return -1;
 			const after = code[nextNonSpace(end + 1)];
 			if (after !== "{" && after !== "|" && after !== "&") return i;
 			i = end;
-		}
-	}
-	return -1;
-}
-
-/** Index of the `}` closing the `{` at `braceStart`, or -1 when unbalanced. */
-function balancedBraceEnd(code: string, braceStart: number): number {
-	let depth = 0;
-	for (let i = braceStart; i < code.length; i++) {
-		if (code[i] === "{") depth++;
-		else if (code[i] === "}") {
-			depth--;
-			if (depth === 0) return i;
 		}
 	}
 	return -1;
@@ -348,7 +325,7 @@ function topLevelFunctionBodies(strippedCode: string): Map<string, string> {
 	 *  name — shared tail for both declaration shapes below. */
 	const record = (name: string, braceStart: number): void => {
 		if (strippedCode[braceStart] !== "{") return;
-		const end = balancedBraceEnd(strippedCode, braceStart);
+		const end = matchingCloseIndex(strippedCode, braceStart, "{", "}");
 		if (end < 0) return;
 		bodies.set(name, strippedCode.slice(braceStart, end + 1));
 	};
@@ -684,19 +661,12 @@ function findMockCallText(
 	).exec(commentsBlankedStringsKept);
 	if (!target) return undefined;
 	const openParenIndex = commentsBlankedStringsKept.indexOf("(", target.index);
-	let depth = 0;
-	let end = -1;
-	for (let i = openParenIndex; i < commentsBlankedStringsKept.length; i++) {
-		const ch = commentsBlankedStringsKept[i];
-		if (ch === "(") depth++;
-		else if (ch === ")") {
-			depth--;
-			if (depth === 0) {
-				end = i;
-				break;
-			}
-		}
-	}
+	const end = matchingCloseIndex(
+		commentsBlankedStringsKept,
+		openParenIndex,
+		"(",
+		")",
+	);
 	if (end < 0) return undefined;
 	return commentsBlankedStringsKept.slice(openParenIndex, end + 1);
 }
