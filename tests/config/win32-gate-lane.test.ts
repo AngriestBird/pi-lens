@@ -1,11 +1,12 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import yaml from "../../clients/deps/js-yaml.js";
 import {
 	findWin32Gates,
 	getWin32GateFiles,
 	getWin32LaneFiles,
+	readWalkedFile,
 } from "../../scripts/lib/win32-gate-population.mjs";
 import {
 	assertNonEmptyScan,
@@ -128,5 +129,29 @@ describe("win32 gate lane governance (#2536)", () => {
 		expect(population).toEqual(expect.arrayContaining(detectedFiles));
 		expect(runnerRun).toContain('vitest run "${FILES[@]}"');
 		expect(runner?.shell).toBe("bash");
+		// #3104 review F4: two full tests/-tree walks (`detectedWin32GateFiles`
+		// and `getWin32LaneFiles`) measured 22.8 s under Stryker's dry run,
+		// past vitest's 5 s default. Walk time, not wall-clock waiting.
+	}, 60_000);
+
+	// #3104 review F6: this module walks the tests/ tree and reads what the walk
+	// returned, so it carries the #3082 tolerant read. It cannot import
+	// tests/support/sweep-kit.ts (scripts/ must not depend on tests/), so the
+	// behaviour parity — including once per DISTINCT path, not once per
+	// occurrence — is pinned here instead of assumed.
+	it("tolerates a vanished walked file and warns once per distinct path (#3082)", () => {
+		const gone = resolve(ROOT, "tests/definitely-not-a-real-file-3082.ts");
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+		try {
+			expect(readWalkedFile(gone)).toBeUndefined();
+			expect(readWalkedFile(gone)).toBeUndefined();
+			expect(warn).toHaveBeenCalledTimes(1);
+			expect(warn.mock.calls[0]?.[0]).toMatch(/vanished between the walk/);
+		} finally {
+			warn.mockRestore();
+		}
+		// A directory is EISDIR, not a vanished file: a real failure must not be
+		// laundered into "this file left the population".
+		expect(() => readWalkedFile(resolve(ROOT, "tests"))).toThrow();
 	});
 });

@@ -44,6 +44,17 @@
  * and only a file the walk did not start with can surprise a sweep that has
  * already enumerated.
  *
+ * ## Known blind spot: a file that was already there
+ *
+ * The baseline is snapshotted at `globalSetup`, so a scratch file a KILLED
+ * earlier run left behind (a `finally` does not run through SIGKILL) is part
+ * of the baseline and invisible to this guard for the whole run — it will also
+ * be read happily by every sweep, since it is simply a file now. Nothing else
+ * in the suite catches it either: no governance test asserts "no untracked
+ * source file under tests/" (#3104 review note (b)). `git status` shows it,
+ * and that is the current answer; a guard that shelled out to `git ls-files`
+ * at globalSetup would trade this gap for a real child process on every run.
+ *
  * ## What it cannot see, measured rather than assumed
  *
  * A file created and removed without the WATCHING process's event loop

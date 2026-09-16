@@ -29,6 +29,7 @@ import {
 	occurrenceLines,
 	readWalkedFile,
 	readWalkedFiles,
+	recordedVanishedPathCount,
 	relativePosix,
 	scanTaggedSeams,
 	stableOccurrenceKey,
@@ -36,6 +37,7 @@ import {
 	callSites,
 	tagPattern,
 	assertSortedRegistry,
+	VANISHED_PATH_RECORD_CAP,
 	walkedFilesVanished,
 } from "./sweep-kit.js";
 
@@ -461,6 +463,23 @@ describe("sweep-kit: readWalkedFile (#3082)", () => {
 			warn.mockRestore();
 		}
 		expect(walkedFilesVanished()).toContain(vanished);
+	});
+
+	it("bounds the vanished-path record at VANISHED_PATH_RECORD_CAP", () => {
+		// AGENTS.md shape 9 (#3104 review F5): the diagnostic set is per-fork and
+		// never reset, so a tree something rewrites in a loop must not grow it
+		// without limit. Drives the real recorder through readWalkedFile on paths
+		// that do not exist, then reads the live size.
+		const before = recordedVanishedPathCount();
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+		try {
+			for (let index = 0; index < VANISHED_PATH_RECORD_CAP + 50; index++)
+				readWalkedFile(path.join(root, `absent-${index}.ts`));
+		} finally {
+			warn.mockRestore();
+		}
+		expect(before).toBeLessThanOrEqual(VANISHED_PATH_RECORD_CAP);
+		expect(recordedVanishedPathCount()).toBe(VANISHED_PATH_RECORD_CAP);
 	});
 
 	it("rethrows anything that is not a vanished file", () => {

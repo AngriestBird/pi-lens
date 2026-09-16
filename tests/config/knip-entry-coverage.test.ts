@@ -240,5 +240,9 @@ describe("knip entry coverage (#2698)", () => {
 			audit.problems.concat(missing),
 			"every real-harness, Windows, and wall-clock Vitest member must be a knip entry",
 		).toEqual([]);
-	});
+		// #3104 review F4: this case walks the whole tests/ tree through
+		// `windowsVitestFiles()` and measured 8.0 s under Stryker's dry run,
+		// which times out at vitest's 5 s default and reds the mutation lane.
+		// The work is a directory walk, not a wait, so the budget is explicit.
+	}, 60_000);
 });

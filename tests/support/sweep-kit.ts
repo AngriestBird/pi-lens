@@ -104,11 +104,24 @@
  * This module is deliberately STATELESS — no module-level caches, no latches.
  * A sweep helper that memoized its own scan would be exactly the
  * process-lifetime-state shape the session-state sweep exists to catch.
+ *
+ * ONE carve-out, added with {@link readWalkedFile} (#3082, named in review
+ * round 2 F5): the set of paths that vanished between a walk and its read. It
+ * is per-FORK, never reset, and deliberately so — the rule it implements is
+ * "warn once per distinct path per worker", which a reset would turn back into
+ * one warning per occurrence. It is safe because it is purely diagnostic: no
+ * sweep reads it, no verdict depends on it, and a stale entry can only
+ * suppress a repeat WARNING, never change a finding. It is BOUNDED
+ * ({@link BoundedSet}, {@link VANISHED_PATH_RECORD_CAP}) rather than a raw
+ * `Set`, so a pathological churning tree cannot grow it without limit
+ * (AGENTS.md shape 9); past the cap the oldest path can warn a second time,
+ * which is the harmless direction.
  */
 
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { Lang, parse } from "@ast-grep/napi";
+import { BoundedSet } from "../../clients/bounded-cache.js";
 import { lineContentHash } from "../../clients/read-guard.js";
 import { toPosix } from "../../clients/path-utils.js";
 import type { SgNode } from "../../clients/deps/ast-grep-napi.js";
@@ -533,16 +546,33 @@ export function relativePosix(root: string, absolute: string): string {
 }
 
 /**
- * Paths this worker found gone between the walk and the read, newest last.
+ * Per-fork cap on remembered vanished paths (AGENTS.md shape 9). One `tests/`
+ * tree holds ~1,200 source files, so a cap of 256 is far above any real
+ * churn while keeping the diagnostic set finite for a worker that scans a
+ * tree something is rewriting in a loop. Eviction costs at most one repeated
+ * warning for the oldest path.
+ */
+export const VANISHED_PATH_RECORD_CAP = 256;
+
+/**
+ * Paths this worker found gone between the walk and the read, oldest first.
  * One entry per distinct path: a scan that retries the same walk inside two
  * `it` bodies must not turn one vanished file into two records (bounded
- * observability, AGENTS.md shape 9).
+ * observability, AGENTS.md shape 9). Bounded, not a raw `Set` — see the
+ * module docstring's carve-out for why this one piece of module state exists.
  */
-const vanishedBetweenWalkAndRead = new Set<string>();
+const vanishedBetweenWalkAndRead = new BoundedSet<string>(
+	VANISHED_PATH_RECORD_CAP,
+);
 
 /** Every path {@link readWalkedFile} found gone, for this worker fork. */
 export function walkedFilesVanished(): readonly string[] {
 	return [...vanishedBetweenWalkAndRead];
+}
+
+/** Test seam: the cap is only observable through many recorded paths. */
+export function recordedVanishedPathCount(): number {
+	return vanishedBetweenWalkAndRead.size;
 }
 
 /**

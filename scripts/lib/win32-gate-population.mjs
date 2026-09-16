@@ -65,6 +65,15 @@ function sourceFiles(root) {
 }
 
 /**
+ * Paths this process already warned about, so one vanished file is one
+ * warning however many times the population is rebuilt (`findWin32Gates` is
+ * called twice by `getWin32LaneFiles` alone). Matches the TypeScript seam's
+ * once-per-distinct-path rule; bounded for the same reason it is there.
+ */
+const VANISHED_PATH_RECORD_CAP = 256;
+const vanishedBetweenWalkAndRead = new Set();
+
+/**
  * Read a file this module's own walk just produced, tolerating the file
  * vanishing between the walk and the read (#3082): a concurrently running
  * test that creates a source file under `tests/` and removes it again makes
@@ -73,17 +82,24 @@ function sourceFiles(root) {
  *
  * The TypeScript-side seam for the same rule is `readWalkedFile` in
  * tests/support/sweep-kit.ts, which every other walker in the repo now uses;
- * scripts/ cannot import from tests/, so this one repeats the six lines
- * rather than inverting the layering.
+ * scripts/ cannot import from tests/, so this one repeats it rather than
+ * inverting the layering. Behaviour is deliberately IDENTICAL, including the
+ * once-per-distinct-path record (#3104 review F6, which found this copy
+ * warning once per occurrence instead) and its bound.
  */
-function readWalkedFile(absolute) {
+export function readWalkedFile(absolute) {
 	try {
 		return readFileSync(absolute, "utf8");
 	} catch (error) {
 		if (error?.code !== "ENOENT") throw error;
-		console.warn(
-			`[win32-gate-population] ${absolute} vanished between the walk and the read; skipped (#3082)`,
-		);
+		if (!vanishedBetweenWalkAndRead.has(absolute)) {
+			if (vanishedBetweenWalkAndRead.size >= VANISHED_PATH_RECORD_CAP)
+				vanishedBetweenWalkAndRead.clear();
+			vanishedBetweenWalkAndRead.add(absolute);
+			console.warn(
+				`[win32-gate-population] ${absolute} vanished between the walk and the read; skipped (#3082)`,
+			);
+		}
 		return undefined;
 	}
 }

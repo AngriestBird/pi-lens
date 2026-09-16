@@ -22,7 +22,6 @@ import {
 	assertNonEmptyScan,
 	escapeRegExp,
 	listSourceFiles,
-	readWalkedFile,
 	readWalkedFiles,
 	relativePosix,
 	stripSource,
@@ -990,7 +989,11 @@ describe("no tests/**/*.test.ts file drives a producer's registry against the ru
 			candidate.endsWith("/index-vanished-instance-wiring.test.ts"),
 		);
 		expect(file, "fixture moved or renamed").toBeDefined();
-		const source = readWalkedFile(file as string) as string;
+		// A REQUIRED, committed fixture, not a population member: read it raw so
+		// its absence is a clean ENOENT naming the path (#3104 review note (a) —
+		// routing it through readWalkedFile turned a missing fixture into a
+		// TypeError inside stripSource, which names nothing).
+		const source = fs.readFileSync(file as string, "utf8");
 		const commentsBlankedStringsKept = stripSource(source, { strings: "keep" });
 		const stringsBlankedCode = stripSource(source, { strings: "blank" });
 
