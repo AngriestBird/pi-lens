@@ -143,21 +143,36 @@ function hasLiveFrame(stack: TemplateFrame[]): boolean {
  * tokenizer with full grammar context — a first-pass heuristic tried here
  * over-declined the corpus 54 files vs 5 for a real fix, so {@link
  * isRegexOpenerPosition} only recognises `/` as an opener in positions
- * where JS grammar makes a value expression, never a divisor, the only
- * legal read: immediately after `(`, `,`, `=`, `:`, `[`, `!`, `&`, `|`,
- * `?`, `{`, `}`, `;`, a `return`/`typeof`/`case` keyword, or at line start.
- * Anywhere else (after an identifier, a digit, `)`, `]`, a string, or a
- * template) is left alone exactly as before this state existed — division
- * stays division, so the gate can only ever add masking correctness, never
- * remove it. A recognised opener is skipped to its own unescaped closing
- * `/` (honouring `[...]` character classes and `\` escapes) by {@link
- * skipRegexLiteral} the same way `skipQuoted` skips a string; everything
- * inside — backticks, `/*`, quotes — is consumed without touching `stack`.
- * A regex literal cannot itself contain a literal newline, so this
- * resolves entirely within one line; if no closing `/` is found before EOL
- * (the position heuristic never fires on a shape that can't close on the
- * same line, but the fallback stays safe regardless), the `/` is left
- * alone and scanned as an ordinary character, same as before.
+ * where JS grammar makes a value expression, never a divisor: immediately
+ * after `(`, `,`, `=`, `:`, `[`, `!`, `&`, `|`, `?`, a `return`/`typeof`/
+ * `case` keyword, or at line start. (`{`, `}`, and `;` were tried too —
+ * dropped, not just unused: `}` is grammatically unsound on its own
+ * (`x = {a:1} / 2` is division, not a regex opener, and both sibling
+ * lexers in this tree — `tests/support/sweep-kit.ts`,
+ * `scripts/check-pr-body.mjs`'s `blankCommentsAndStrings` — exclude it for
+ * that reason), and measurement showed `{`/`}`/`;` firing 10/0/6 times
+ * across a 25,553-file corpus (own tree plus `node_modules`, every
+ * extension biome/prettier/ruff/shfmt format) with zero verdict
+ * differences either way — see #3120 PR round 2.) Anywhere else (after an
+ * identifier, a digit, `)`, `]`, a string, or a template) is left alone
+ * exactly as before this state existed — division stays division, so the
+ * gate can only ever add masking correctness, never remove it, MODULO the
+ * closing-scan's own correctness (see {@link skipRegexLiteral}'s doc
+ * comment: the position gate alone is not sufficient — a misfired skip
+ * that swallows an odd number of backticks can still invert parity for
+ * the rest of the file; measured against the same corpus, this changed
+ * 0 files' verdicts, but 158 of 181 gate firings on the corpus's 882
+ * Markdown files alone accepted a false close before the closing-scan's
+ * own tightening below cut that to 19). A recognised opener is skipped to its own
+ * closing `/` (honouring `[...]` character classes and `\` escapes) by
+ * {@link skipRegexLiteral} the same way `skipQuoted` skips a string;
+ * everything inside — backticks, `/*`, quotes — is consumed without
+ * touching `stack`. A regex literal cannot itself contain a literal
+ * newline, so this resolves entirely within one line; the position gate
+ * fires on every `/` that starts a line (for instance a Markdown path
+ * like `/src`), not only on shapes that can actually close as a regex —
+ * it is the closing scan's own `-1` fallback, not the gate, that makes an
+ * unclosed or wrongly-shaped match safe.
  */
 function advanceTemplateState(line: string, stack: TemplateFrame[]): void {
 	let j = 0;
@@ -260,9 +275,6 @@ const REGEX_OPENER_PUNCTUATION = new Set([
 	"&",
 	"|",
 	"?",
-	"{",
-	"}",
-	";",
 ]);
 
 /** A `return`, `typeof`, or `case` keyword, word-bounded, immediately before
@@ -286,6 +298,9 @@ function isRegexOpenerPosition(line: string, at: number): boolean {
 	return REGEX_OPENER_PUNCTUATION.has(before.at(-1) ?? "");
 }
 
+/** Regex flag letters JS accepts after a literal's closing `/`. */
+const REGEX_FLAG_CHARS = "dgimsuvy";
+
 /**
  * Skip a regex literal starting at its opening `/` (`start`), honoring
  * `[...]` character classes (a `/` or unescaped `]` inside one closes
@@ -293,6 +308,24 @@ function isRegexOpenerPosition(line: string, at: number): boolean {
  * just past the closing `/`, or -1 if none is found before EOL — a regex
  * literal cannot contain a literal newline, so an unclosed scan means this
  * was not actually one.
+ *
+ * The position gate ({@link isRegexOpenerPosition}) alone is not enough:
+ * it fires on every `/` that starts a value-expression position, including
+ * prose that merely looks like one — a Markdown line like `` Layout: /src
+ * `bin/cli` and friends. `` gates on the `:` before `/src`, and the first
+ * `/` found afterward (inside the backticked `` `bin/cli` ``) would
+ * otherwise read as a valid close, swallowing the backtick and inverting
+ * template-tracking parity for the rest of the file (round 2 review S4;
+ * this exact shape changed 0 files' verdicts across the same 25,553-file
+ * corpus, but the shape itself is real, not hypothetical — of 181 gate
+ * firings across the corpus's 882 Markdown files, 158 found what looked
+ * like a valid close before this check existed, cut to 19 by it). A closing `/`
+ * is accepted only when it is followed by zero or more regex flag letters
+ * ({@link REGEX_FLAG_CHARS}) and then a non-identifier character (or EOL) —
+ * `/src/cli` and friends` has an identifier character (`c`) right after
+ * the candidate close, which a real regex literal's own syntax forbids
+ * (flags must be immediately followed by a statement terminator, not more
+ * identifier text), so it is rejected and the scan returns -1 instead.
  */
 function skipRegexLiteral(line: string, start: number): number {
 	let j = start + 1;
@@ -313,7 +346,13 @@ function skipRegexLiteral(line: string, start: number): number {
 			j += 1;
 			continue;
 		}
-		if (c === "/") return j + 1;
+		if (c === "/") {
+			let k = j + 1;
+			while (k < line.length && REGEX_FLAG_CHARS.includes(line[k] ?? ""))
+				k += 1;
+			if (k < line.length && /[A-Za-z0-9_$]/.test(line[k] ?? "")) return -1;
+			return j + 1;
+		}
 		j += 1;
 	}
 	return -1; // unterminated on this line; not a regex literal after all

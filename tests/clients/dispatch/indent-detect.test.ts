@@ -796,4 +796,67 @@ describe("templateLiteralInteriorMask", () => {
 			false,
 		]);
 	});
+
+	it("does not treat `}` as a regex-opener position: a division right after an object literal stays division (#3120 round 2, S3)", () => {
+		// `}` was tried in the position gate and dropped: `x = {a:1} / 2` is
+		// division in real JS grammar, never a regex opener, and measurement
+		// (PR body) showed zero verdict differences from including it anyway --
+		// so its exclusion is grammatical soundness, not just an unused entry.
+		// A mutation that adds `}` back to REGEX_OPENER_PUNCTUATION treats the
+		// `/` right after `{a:1}` as an opener, walks forward for the next
+		// unescaped `/` (found inside "text/ more"), and swallows this line's
+		// real opening backtick along the way -- the same corruption shape as
+		// the division-gate test above, gated through `}` instead of a digit.
+		const lines = [
+			"const x = {a:1} / `text/ more`; code();",
+			"next();",
+			"closes_here`;",
+		];
+		expect(templateLiteralInteriorMask(lines)).toEqual([false, false, false]);
+	});
+
+	it("does not accept a regex-shaped close when an identifier immediately follows its flags: Markdown prose is not corrupted (#3120 round 2, S4)", () => {
+		// Round 2 review finding: the position gate fires on every `/` at an
+		// unambiguous position, including plain prose -- `Layout: /src ...`
+		// gates on the `:` before `/src` the same way real code would. Without
+		// this check, the scan for the next unescaped `/` finds the one inside
+		// the backticked `` `bin/cli` `` and accepts it as the literal's close,
+		// swallowing that backtick; the second backtick (after "cli") then
+		// opens a phantom template that stays live through the whole following
+		// 2-space bullet list, excluding it from indentation evidence and
+		// leaving only the trailing 4-space function body -- detectIndentation
+		// returns space/4 instead of the file's real space/2. A regex literal's
+		// flags must be followed by a statement boundary, never more identifier
+		// text, so requiring a non-identifier character (or EOL) after any
+		// flag letters rejects this false close and falls back to ordinary
+		// scanning, which finds the real backtick as its own opener instead.
+		const lines = [
+			"Layout: /src `bin/cli` and friends.",
+			"",
+			"  - one",
+			"  - two",
+			"    - nested",
+			"",
+			"closes it here `",
+			"function f() {",
+			"    go();",
+			"}",
+		];
+		expect(templateLiteralInteriorMask(lines)).toEqual([
+			false,
+			false,
+			false,
+			false,
+			false,
+			false,
+			false,
+			false,
+			false,
+			false,
+		]);
+		expect(detectIndentation(`${lines.join("\n")}\n`)).toEqual({
+			style: "space",
+			width: 2,
+		});
+	});
 });
