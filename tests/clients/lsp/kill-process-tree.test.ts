@@ -70,8 +70,18 @@ describe("killProcessTree", () => {
 	describe("POSIX process-group teardown", () => {
 		beforeEach(() => {
 			spawnMock.mockClear();
+			// #2042: "darwin", not "linux". These cases exercise the escalation
+			// LADDER (group SIGTERM -> 1.5s -> group SIGKILL, direct-child
+			// fallback) against a fabricated pid, and on Linux the ownership
+			// predicate now reads /proc and refuses to signal a pid this
+			// process does not own — which is the point of the fix, and would
+			// make every assertion below about a pid 4242 that belongs to
+			// nobody. A POSIX platform without /proc keeps ownership
+			// unverifiable, which is exactly the best-effort behaviour these
+			// cases were written for. The Linux refusal itself is asserted in
+			// tests/clients/safe-spawn-kill-ownership.test.ts.
 			Object.defineProperty(process, "platform", {
-				value: "linux",
+				value: "darwin",
 				configurable: true,
 			});
 			// Fake timers keep the escalation test deterministic and stop the
