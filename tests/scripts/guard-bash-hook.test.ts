@@ -22,6 +22,7 @@ import {
 	openSync,
 	readFileSync,
 	rmSync,
+	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -538,9 +539,13 @@ describe("scripts/hooks/guard-bash.mjs -- drains stdin to EOF on a large payload
 			// ordinary "nothing to check" allow -- unlike the true-empty-
 			// stream case above, it is noted so the hook's own stderr says
 			// why nothing was checked instead of looking identical to every
-			// other allow.
+			// other allow. review round 3 N1: the note names the actual
+			// cause (error.code, EBADF here) via the crash guard's shared
+			// template -- NOT the JSON.parse-only "unreadable or
+			// unparseable" wording, which this path never reaches (readStdin
+			// throws before run() ever gets to `raw.trim()` or JSON.parse).
 			expect(result.stderr).toBe(
-				"guard-bash: payload unreadable or unparseable; allowing\n",
+				"guard-bash: EBADF while checking payload; allowing\n",
 			);
 		} finally {
 			closeSync(writeOnlyFd);
@@ -575,6 +580,46 @@ describe("scripts/hooks/guard-bash.mjs -- drains stdin to EOF on a large payload
 		expect(result.stderr).toBe(
 			"guard-bash: payload unreadable or unparseable; allowing\n",
 		);
+	});
+
+	// #3089 review round 3 N2: the note() write itself must never be the
+	// thing that turns an intended exit-0 allow into an uncaught-exception
+	// exit 1. A read-only fd handed to the child as stderr reproduces this:
+	// the crash-guard path (forced here via the same depth-5000 nesting
+	// that crashes the tokenizer, a real command containing `git stash`)
+	// tries to note the failure, that write itself fails, and pre-fix that
+	// second failure was unguarded.
+	it("still exits 0 (not 1) when the crash-guard's own note write fails (read-only stderr fd)", () => {
+		const dir = mkdtempSync(join(tmpdir(), "guard-bash-stderr-ro-"));
+		const readOnlyFile = join(dir, "stderr-ro");
+		writeFileSync(readOnlyFile, "");
+		const readOnlyFd = openSync(readOnlyFile, "r");
+		try {
+			const deep = `${"$(".repeat(5000)}git stash${")".repeat(5000)}`;
+			const result = spawnSync(process.execPath, [HOOK], {
+				input: JSON.stringify({
+					session_id: "probe",
+					cwd: repoRoot,
+					permission_mode: "default",
+					hook_event_name: "PreToolUse",
+					tool_name: "Bash",
+					tool_input: { command: `echo ${deep}` },
+				}),
+				stdio: ["pipe", "pipe", readOnlyFd],
+				encoding: "utf8",
+				env: BASE_ENV,
+			});
+			// Pre-fix (`try { process.stderr.write(text) } catch {}` alone):
+			// exit 1, an uncaught 'error' event from the Writable stream's
+			// own async I/O failure, which a synchronous try/catch around
+			// process.stderr.write cannot catch -- confirmed exit 1 in that
+			// configuration. Post-fix (fs.writeSync, which throws EBADF
+			// synchronously for this same fd): exit 0.
+			expect(result.status).toBe(0);
+		} finally {
+			closeSync(readOnlyFd);
+			rmSync(dir, { recursive: true, force: true });
+		}
 	});
 });
 
@@ -1249,5 +1294,29 @@ describe("scripts/hooks/guard-bash.mjs -- unbounded nesting never throws (review
 	it("catches nesting far deeper than round 2's depth cap of 8", () => {
 		const deep = `${"$(".repeat(20)}git stash${")".repeat(20)}`;
 		expect(findDeny(`echo ${deep}`)).toBe("stash");
+	});
+
+	// #3089 review round 3 N1: the depth-5000 case above IS this hook's most
+	// important fail-open -- the payload is read and JSON.parse'd perfectly
+	// (it contains a real `git stash`, which should have been denied), and
+	// ONLY the tokenizer crashes (RangeError: Maximum call stack size
+	// exceeded, confirmed directly against classifyPayload on this host).
+	// Before this round the crash guard's note claimed the payload was
+	// "unreadable or unparseable" -- false; a wrong label on the most
+	// important fail-open is worse than the silence it replaced. The note
+	// must name the real cause (error.name here, since a RangeError has no
+	// .code) instead.
+	it("names RangeError, not 'unreadable or unparseable', when the classifier (not the read) crashes", () => {
+		const deep = `${"$(".repeat(5000)}git stash${")".repeat(5000)}`;
+		const result = runHook(`echo ${deep}`);
+		// Measured on this host (and required by the finding this test
+		// pins): depth 5000 deterministically overflows the tokenizer's own
+		// recursion, so the crash guard is what's under test, not the
+		// tokenizer's variable stack-depth tolerance the sibling test above
+		// allows for.
+		expect(result.status).toBe(0);
+		expect(result.stderr).toContain("RangeError");
+		expect(result.stderr).not.toContain("unreadable");
+		expect(result.stderr).not.toContain("unparseable");
 	});
 });

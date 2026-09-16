@@ -126,7 +126,7 @@
  * and allows. (Round 2 capped nesting at depth 8, which silently ALLOWED
  * anything nested deeper; the cap is deleted rather than raised.)
  */
-import { readSync } from "node:fs";
+import { readSync, writeSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 /** @typedef {"stash"|"reset"|"worktreeForce"|"probe"|"tmpdirCollision"} DenyRule */
@@ -1044,9 +1044,38 @@ const readRetryPark = new Int32Array(new SharedArrayBuffer(4));
 // This note fires on the two paths that saw SOME input and failed to make
 // sense of it; a genuinely empty stream (nothing ever arrived, no error) is
 // still silent -- that is the ordinary "hook invoked with no payload" case,
-// not a failure.
+// not a failure. Used ONLY on the JSON.parse failure path -- the payload
+// genuinely could not be parsed there. The crash guard (any other throw,
+// including a classifier crash on a payload that WAS read and parsed fine)
+// gets its own cause-bearing message instead (#3089 review round 3 N1):
+// labeling a classifier crash "unreadable or unparseable" is a wrong label
+// on the most important fail-open this hook has -- worse than the silence
+// it replaced, because it actively misdescribes what happened.
 const UNREADABLE_PAYLOAD_NOTE =
 	"guard-bash: payload unreadable or unparseable; allowing\n";
+
+// #3089 review round 3 N2: a closed or read-only stderr fd (EBADF, EPIPE,
+// ...) must never turn an intended exit-0 allow into an uncaught-exception
+// exit 1. `process.stderr.write` is the wrong primitive to guard here --
+// verified directly: it goes through Node's Writable stream machinery,
+// which never throws synchronously for an I/O failure (it reports one via
+// an async `'error'` event instead), so `try { process.stderr.write(text)
+// } catch {}` alone still crashed with exit 1 in the read-only-fd
+// reproduction below. `fs.writeSync(2, text)` bypasses that machinery and
+// writes the fd directly -- confirmed to throw EBADF SYNCHRONOUSLY for the
+// same read-only fd, which a try/catch can actually catch. Every stderr
+// write in this file's hook path goes through this helper so a broken
+// stderr can never be the thing that blocks (or crashes) the tool -- the
+// same "must never throw" promise the file's header already makes for a
+// classification crash.
+function note(text) {
+	try {
+		writeSync(2, text);
+	} catch {
+		// The record is lost, but losing a record must never cost the exit
+		// code that record was trying to explain.
+	}
+}
 
 /**
  * Read stdin synchronously, draining fd 0 to EOF. Never blocks on an
@@ -1111,19 +1140,28 @@ export function run() {
 		try {
 			payload = JSON.parse(raw);
 		} catch {
-			process.stderr.write(UNREADABLE_PAYLOAD_NOTE);
+			note(UNREADABLE_PAYLOAD_NOTE);
 			return 0;
 		}
 		const rule = classifyPayload(payload);
 		if (!rule) return 0;
-		process.stderr.write(`${RULE_MESSAGES[rule]}\n`);
+		note(`${RULE_MESSAGES[rule]}\n`);
 		return 2;
-	} catch {
-		// A crash in this hook -- including a genuine readStdin() read error
-		// -- must never be the thing that blocks the tool, but it also must
-		// not be silently indistinguishable from an ordinary allow (#3089
-		// review round 2 F3).
-		process.stderr.write(UNREADABLE_PAYLOAD_NOTE);
+	} catch (error) {
+		// A crash in this hook -- a genuine readStdin() read error (EBADF, a
+		// closed fd, ...) OR a classifier crash on a payload that WAS read
+		// and parsed fine (the #2699 r3 depth-5000 nesting case throws
+		// RangeError here, not in readStdin or JSON.parse) -- must never be
+		// the thing that blocks the tool, but it also must not be silently
+		// indistinguishable from an ordinary allow (#3089 review round 2
+		// F3), and it must not claim the payload was "unreadable or
+		// unparseable" when it demonstrably was read and parsed (#3089
+		// review round 3 N1) -- error.code (a read error) or error.name (a
+		// RangeError, or anything else classification can throw) names the
+		// actual cause instead.
+		note(
+			`guard-bash: ${error?.code ?? error?.name ?? "error"} while checking payload; allowing\n`,
+		);
 		return 0;
 	}
 }
