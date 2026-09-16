@@ -223,6 +223,7 @@ describe("ReadGuard pendingCreations key (#3163 existence-straddle)", () => {
 			const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-rg-3163-"));
 			try {
 				const held = makeCaseVariantPackage(tmpDir);
+				const authored = "export const i = 1;\nexport const j = 2;\n";
 				const guard = createReadGuard("test-session");
 
 				// The pi Write tool's lifecycle: tool_call announces the creation
@@ -230,13 +231,15 @@ describe("ReadGuard pendingCreations key (#3163 existence-straddle)", () => {
 				// recordWritten — which must find the announcement and inject the
 				// synthetic read covering everything the agent just authored.
 				guard.noteCreatedFile(held, 7, 3);
-				fs.writeFileSync(held, "export const i = 1;\nexport const j = 2;\n");
+				fs.writeFileSync(held, authored);
 				guard.recordWritten(held);
 
 				const history = guard.getReadHistory(held);
 				expect(history).toHaveLength(1);
 				expect(history[0].effectiveOffset).toBe(1);
-				expect(history[0].effectiveLimit).toBe(2);
+				// Covers the whole file the agent just authored, counted from the
+				// fixture rather than re-deriving it from the guard's own split.
+				expect(history[0].effectiveLimit).toBe(authored.split("\n").length);
 				expect(history[0].turnIndex).toBe(7);
 				expect(history[0].writeIndex).toBe(3);
 			} finally {
