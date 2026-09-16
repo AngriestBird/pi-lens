@@ -306,6 +306,41 @@ export const GLOBAL_NON_FLAG_CONFIG_SECTIONS: readonly string[] = [
 ];
 
 /**
+ * Dotted GLOBAL-only config keys that are NOT `LENS_FLAGS` entries — no CLI
+ * flag, not a boolean — but still sit inside a section a project
+ * `.pi-lens.json` is otherwise recognized to touch (#3131). The project
+ * loader's mixed-scope sub-key scan (`project-lens-config.ts`) already derives
+ * its FLAG population from `LENS_FLAGS`; that derivation structurally cannot
+ * see a key like `actionableWarnings.autoFix.maxFixes` — a numeric cap with no
+ * `--flag` counterpart, documented global-only (`docs/settings.md`), read only
+ * through `getGlobalActionableWarningMaxFixes()` (`clients/lens-config.ts`) —
+ * because it was never a `LensFlagSpec` to begin with. `actionableWarnings` is
+ * itself recognized at project scope only because its SIBLING
+ * `actionableWarnings.autoFix.enabled` is a `scope: "project"` flag, so before
+ * this registry existed the loader parsed `maxFixes` away with no signal at
+ * all — the same silent-drop shape #2426 review round 2 (F3) fixed for
+ * `lsp.enabled` and #3112 fixed for `tools.lazy`.
+ *
+ * This is the single source that population is derived from: the mixed-scope
+ * scan reads `LENS_FLAGS` for flag keys and this list for everything else, so
+ * a future non-flag global-only key needs one line HERE, never a second
+ * hand-typed list inside the loader.
+ *
+ * A key belongs here ONLY when all three hold: (a) it is global-only — read
+ * solely off `~/.pi-lens/config.json`, never honored from a project document;
+ * (b) it is not a `LENS_FLAGS` entry; (c) its SECTION is recognized at project
+ * scope for some OTHER reason. A key whose whole section is unrecognized at
+ * project scope needs no entry — the top-level unknown-key scan already
+ * reports the section. Swept at #3131: every other non-flag dotted key either
+ * loader parses (`dispatch.runnerTimeoutFloorMs`, `widget.visible`,
+ * `startup.mode`, `startup.scans.enabled`) fails (a) or (c) — see that PR's
+ * body for the per-member table — so this is currently the only member.
+ */
+export const GLOBAL_ONLY_NON_FLAG_KEYS: readonly string[] = [
+	"actionableWarnings.autoFix.maxFixes",
+];
+
+/**
  * Recognized TOP-LEVEL sections of a project `.pi-lens.json` that are NOT
  * derived from the flag registry — the project loader's own hand-parsed
  * sections (`ignore`, `rules`, `maxProjectFiles`, `reviewGraph`) plus the two

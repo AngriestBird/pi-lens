@@ -1152,3 +1152,69 @@ describe("project-scope tools.<name>.enabled (#3112)", () => {
 		expect(warnCountFor("delta")).toBe(1);
 	});
 });
+
+describe("non-flag global-only key inside a mixed-scope section (#3131)", () => {
+	function warnedFor(substring: string): boolean {
+		return (console.error as ReturnType<typeof vi.fn>).mock.calls
+			.flat()
+			.some((arg) => typeof arg === "string" && arg.includes(substring));
+	}
+
+	function warnCountFor(substring: string): number {
+		return (console.error as ReturnType<typeof vi.fn>).mock.calls
+			.flat()
+			.filter((arg) => typeof arg === "string" && arg.includes(substring))
+			.length;
+	}
+
+	it("warns that actionableWarnings.autoFix.maxFixes is global-only, and drops the value", () => {
+		// `actionableWarnings` is recognized at project scope only because its
+		// SIBLING `autoFix.enabled` is a project-scoped flag — `maxFixes` is not a
+		// `LENS_FLAGS` entry at all (no CLI flag, not boolean), documented global
+		// (docs/settings.md), read only through
+		// `getGlobalActionableWarningMaxFixes()`. Before #3131 it was parsed away
+		// with no signal.
+		fs.writeFileSync(
+			path.join(tmpDir, ".pi-lens.json"),
+			JSON.stringify({
+				actionableWarnings: { autoFix: { enabled: true, maxFixes: 99 } },
+			}),
+		);
+		const cfg = loadPiLensProjectConfig(tmpDir);
+		expect(
+			warnedFor('"actionableWarnings.autoFix.maxFixes" is a global-only'),
+		).toBe(true);
+		expect(warnCountFor("actionableWarnings.autoFix.maxFixes")).toBe(1);
+		// The value never reaches the parsed project config — same non-goal #3126
+		// left this key with: the notice is new, the scope is not.
+		expect(
+			(cfg.actionableWarnings?.autoFix as { maxFixes?: number } | undefined)
+				?.maxFixes,
+		).toBeUndefined();
+		expect(cfg.actionableWarnings?.autoFix?.enabled).toBe(true);
+	});
+
+	it("control: the project-scoped sibling autoFix.enabled stays silent", () => {
+		fs.writeFileSync(
+			path.join(tmpDir, ".pi-lens.json"),
+			JSON.stringify({ actionableWarnings: { autoFix: { enabled: false } } }),
+		);
+		const cfg = loadPiLensProjectConfig(tmpDir);
+		expect(warnedFor("global-only")).toBe(false);
+		expect(console.error).not.toHaveBeenCalled();
+		expect(cfg.actionableWarnings?.autoFix?.enabled).toBe(false);
+	});
+
+	it("does not duplicate the notice alongside a genuinely global-only sibling section", () => {
+		fs.writeFileSync(
+			path.join(tmpDir, ".pi-lens.json"),
+			JSON.stringify({
+				actionableWarnings: { autoFix: { enabled: true, maxFixes: 1 } },
+				delta: { enabled: false },
+			}),
+		);
+		loadPiLensProjectConfig(tmpDir);
+		expect(warnCountFor("actionableWarnings.autoFix.maxFixes")).toBe(1);
+		expect(warnCountFor('"delta" is a global-only')).toBe(1);
+	});
+});
