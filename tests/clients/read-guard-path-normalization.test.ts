@@ -218,11 +218,10 @@ function makeCaseVariantPackage(tmpDir: string): string {
  */
 describe("ReadGuard pendingCreations key (#3163 existence-straddle)", () => {
 	// lane: Unit tests (ubuntu) — the authoritative lane, whose filesystem is
-	// case-sensitive; declared skipped on a folding filesystem (macOS APFS),
-	// where the two case-variant entries cannot coexist.
-	it.skipIf(TMPDIR_FOLDS_CASE)(
-		"injects the creation read when the Write tool announced a case-variant parent",
-		() => {
+	// case-sensitive. Declared skipped on a folding filesystem (macOS APFS),
+	// where the two case-variant entries cannot coexist at all.
+	describe.skipIf(TMPDIR_FOLDS_CASE)("POSIX case-variant parent", () => {
+		it("injects the creation read for a case-variant announced parent", () => {
 			const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-rg-3163-"));
 			try {
 				const held = makeCaseVariantPackage(tmpDir);
@@ -259,23 +258,18 @@ describe("ReadGuard pendingCreations key (#3163 existence-straddle)", () => {
 			} finally {
 				fs.rmSync(tmpDir, { recursive: true, force: true, maxRetries: 5 });
 			}
-		},
-	);
+		});
 
-	// lane: Unit tests (ubuntu), as above.
-	//
-	// The user-visible consequence, end to end. An injected creation read is
-	// OUTSTANDING enforcement state, so `touchFile` deliberately arms no idle
-	// timer for it (read-guard.ts:683) and the file's write record survives an
-	// idle session. With the entry orphaned there is no read, the idle timer
-	// runs, `evictFile` drops `writtenThisSession`, and the mtime backstop in
-	// `wasWrittenThisSession` is the only thing left — which is exactly what
-	// that set exists to cover for (FAT32 granularity, NFS clock skew, a
-	// formatter that rewinds mtime). Then the follow-up edit of the file the
-	// agent itself just created is blocked with `zero_read`.
-	it.skipIf(TMPDIR_FOLDS_CASE)(
-		"keeps the just-created file editable across an idle window when mtime is unreliable",
-		() => {
+		// The user-visible consequence, end to end. An injected creation read is
+		// OUTSTANDING enforcement state, so `touchFile` deliberately arms no idle
+		// timer for it (read-guard.ts:683) and the file's write record survives an
+		// idle session. With the entry orphaned there is no read, the idle timer
+		// runs, `evictFile` drops `writtenThisSession`, and the mtime backstop in
+		// `wasWrittenThisSession` is the only thing left — which is exactly what
+		// that set exists to cover for (FAT32 granularity, NFS clock skew, a
+		// formatter that rewinds mtime). Then the follow-up edit of the file the
+		// agent itself just created is blocked with `zero_read`.
+		it("keeps a just-created file editable across an idle window when mtime is unreliable", () => {
 			const tmpDir = fs.mkdtempSync(
 				path.join(os.tmpdir(), "pi-lens-rg-3163b-"),
 			);
@@ -303,21 +297,16 @@ describe("ReadGuard pendingCreations key (#3163 existence-straddle)", () => {
 				else process.env.PI_LENS_READ_GUARD_IDLE_EVICT_MS = previousIdle;
 				fs.rmSync(tmpDir, { recursive: true, force: true, maxRetries: 5 });
 			}
-		},
-	);
+		});
 
-	// lane: Unit tests (ubuntu), as above.
-	//
-	// The OTHER half of the pair, and the one that pins the fix's own risk:
-	// `noteCreatedFile` fires for EVERY non-edit Write (runtime-tool-call.ts),
-	// including an overwrite of a file that already exists, so its key must keep
-	// matching `recordWritten` in that state too. Before #3163 both sides were
-	// `this.key()` and this case already worked; it reds the moment
-	// `noteCreatedFile` is put back on `this.key()` while `recordWritten` looks
-	// up the syntactic spelling, which is exactly the half-applied fix.
-	it.skipIf(TMPDIR_FOLDS_CASE)(
-		"injects the creation read when the announced file already existed",
-		() => {
+		// The OTHER half of the pair, and the one that pins the fix's own risk:
+		// `noteCreatedFile` fires for EVERY non-edit Write (runtime-tool-call.ts),
+		// including an overwrite of a file that already exists, so its key must
+		// keep matching `recordWritten` in that state too. Both sides used to be
+		// `this.key()` and this case already worked; it reds the moment
+		// `noteCreatedFile` is put back on `this.key()` while `recordWritten`
+		// looks up the syntactic spelling, which is the half-applied fix.
+		it("injects the creation read when the announced file already existed", () => {
 			const tmpDir = fs.mkdtempSync(
 				path.join(os.tmpdir(), "pi-lens-rg-3163c-"),
 			);
@@ -337,8 +326,8 @@ describe("ReadGuard pendingCreations key (#3163 existence-straddle)", () => {
 			} finally {
 				fs.rmSync(tmpDir, { recursive: true, force: true, maxRetries: 5 });
 			}
-		},
-	);
+		});
+	});
 
 	// The win32 arm is broader than the POSIX one and needs no symlink:
 	// `resolveNonExisting` lower-cases the tail of any path that does not exist
@@ -348,28 +337,30 @@ describe("ReadGuard pendingCreations key (#3163 existence-straddle)", () => {
 	// win32-shaped path can never EXIST on Linux, so both sides of the straddle
 	// take the absent branch there and the divergence cannot be produced at all.
 	// lane: windows-vitest
-	it.skipIf(process.platform !== "win32")(
-		"injects the creation read for a mixed-case basename on win32",
+	describe.skipIf(process.platform !== "win32")(
+		"win32 mixed-case basename",
 		() => {
-			const tmpDir = fs.mkdtempSync(
-				path.join(os.tmpdir(), "pi-lens-rg-3163w-"),
-			);
-			try {
-				fs.mkdirSync(path.join(tmpDir, "src"));
-				const held = path.join(tmpDir, "src", "NewModule.ts");
-				const guard = createReadGuard("test-session");
+			it("injects the creation read for a mixed-case basename on win32", () => {
+				const tmpDir = fs.mkdtempSync(
+					path.join(os.tmpdir(), "pi-lens-rg-3163w-"),
+				);
+				try {
+					fs.mkdirSync(path.join(tmpDir, "src"));
+					const held = path.join(tmpDir, "src", "NewModule.ts");
+					const guard = createReadGuard("test-session");
 
-				guard.noteCreatedFile(held, 2, 1);
-				fs.writeFileSync(held, "export const x = 1;\n");
-				guard.recordWritten(held);
+					guard.noteCreatedFile(held, 2, 1);
+					fs.writeFileSync(held, "export const x = 1;\n");
+					guard.recordWritten(held);
 
-				const history = guard.getReadHistory(held);
-				expect(history).toHaveLength(1);
-				expect(history[0].turnIndex).toBe(2);
-				expect(history[0].writeIndex).toBe(1);
-			} finally {
-				fs.rmSync(tmpDir, { recursive: true, force: true, maxRetries: 5 });
-			}
+					const history = guard.getReadHistory(held);
+					expect(history).toHaveLength(1);
+					expect(history[0].turnIndex).toBe(2);
+					expect(history[0].writeIndex).toBe(1);
+				} finally {
+					fs.rmSync(tmpDir, { recursive: true, force: true, maxRetries: 5 });
+				}
+			});
 		},
 	);
 });
