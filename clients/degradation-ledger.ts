@@ -623,6 +623,16 @@ export type DegradationKind =
 	 */
 	| "pipeline-post-write-hash-unavailable"
 	/**
+	 * #2146, #3140: an incompatible process-singleton cell was discarded and
+	 * replaced with a fresh value (`clients/process-singletons.ts`,
+	 * `PROCESS_SINGLETON_RESET_KIND`) — same read-time fold as
+	 * `log-sink-write-failure`: that module cannot import this one back
+	 * without closing a `no-client-cycles` cycle, so `getDegradationSummary()`
+	 * PULLS its bounded reset log instead of writing through
+	 * `recordDegradation`. One entry per family per process.
+	 */
+	| "process-singleton-reset"
+	/**
 	 * The orphan backstop's OWN process-table scanner blew the scan timeout and
 	 * had to be tree-killed (#1864 review F3). Reason carries the kill verdict,
 	 * so a scanner that survived its own sweep's escalation — an orphan sweep
