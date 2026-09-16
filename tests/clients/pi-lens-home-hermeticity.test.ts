@@ -1160,10 +1160,12 @@ describe("no tests/**/*.test.ts file drives a producer's registry against the ru
 // scheduler, registry, lock and disk with only the clock and OS child mocked.
 describe("transitive session_start backstop isolation", () => {
 	// The 30-minute cooldown stamp is real, and both cases share one private
-	// directory, so the second sweep would otherwise skip without ever touching
-	// the disk and assert nothing. Clear the stamps (never plant one) so each
-	// case observes its OWN write. The run-shared root is cleared for the same
-	// reason: each case must red on the state it produced, not on a neighbour's.
+	// directory, so without this the second sweep takes the cooldown branch,
+	// writes nothing, and the case reads the FIRST case's stamp — measured, and
+	// the reason each case dates its stamp against its own start time above.
+	// Clear the stamps (never plant one) so each case observes its OWN write.
+	// The run-shared root is cleared for the same reason: each case must red on
+	// the state it produced, not on a neighbour's.
 	beforeEach(() => {
 		for (const name of fs.readdirSync(sharedHome))
 			if (name.startsWith("backstop-"))
@@ -1187,7 +1189,11 @@ describe("transitive session_start backstop isolation", () => {
 	async function driveSessionStartSweep(): Promise<{
 		lockPaths: string[];
 		stamp: string;
+		startedAt: number;
 	}> {
+		// Real wall clock: only setTimeout/clearTimeout are faked below, so this
+		// dates the stamp THIS call produces apart from any earlier case's.
+		const startedAt = Date.now();
 		_resetSessionLifecycleForTests();
 		vi.stubEnv("PI_LENS_STARTUP_MODE", "quick");
 		const mkdir = vi.spyOn(fs.promises, "mkdir");
@@ -1212,14 +1218,14 @@ describe("transitive session_start backstop isolation", () => {
 		await waitFor(() => fs.existsSync(stamp) && !fs.existsSync(lock), Boolean, {
 			yieldControl: () => new Promise((resolve) => setImmediate(resolve)),
 		});
-		return { lockPaths: lockPaths(), stamp };
+		return { lockPaths: lockPaths(), stamp, startedAt };
 	}
 
 	it("session_start keeps the backstop stamp and transient lock out of the run-shared home", async () => {
-		const { lockPaths, stamp } = await driveSessionStartSweep();
-		expect(JSON.parse(fs.readFileSync(stamp, "utf8")).lastSweepAt).toEqual(
-			expect.any(Number),
-		);
+		const { lockPaths, stamp, startedAt } = await driveSessionStartSweep();
+		expect(
+			JSON.parse(fs.readFileSync(stamp, "utf8")).lastSweepAt,
+		).toBeGreaterThanOrEqual(startedAt);
 		expect(lockPaths).not.toContain(
 			path.join(sharedHome, "orphan-backstop.lock"),
 		);
@@ -1238,10 +1244,10 @@ describe("transitive session_start backstop isolation", () => {
 		fs.symlinkSync(sharedHome, alias, "dir");
 		try {
 			vi.stubEnv("PI_LENS_HOME", alias);
-			const { lockPaths, stamp } = await driveSessionStartSweep();
-			expect(JSON.parse(fs.readFileSync(stamp, "utf8")).lastSweepAt).toEqual(
-				expect.any(Number),
-			);
+			const { lockPaths, stamp, startedAt } = await driveSessionStartSweep();
+			expect(
+				JSON.parse(fs.readFileSync(stamp, "utf8")).lastSweepAt,
+			).toBeGreaterThanOrEqual(startedAt);
 			expect(lockPaths).not.toContain(path.join(alias, "orphan-backstop.lock"));
 			expect(lockPaths).not.toContain(
 				path.join(sharedHome, "orphan-backstop.lock"),
