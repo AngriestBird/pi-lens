@@ -1301,6 +1301,32 @@ describe("runClassifier orchestration against a mocked, STATEFUL GitHub API (#21
 		expect(api.comments[0].body).toContain(buildMarker("deadbeef", "true", 1));
 	});
 
+	// #3086 round 2, F1: the ONLY pin on parseClassifierMarker's attempt
+	// read-back (scripts/lib/ci-failure-classifier.mjs:550, `runAttempt:
+	// match[3] === undefined ? 1 : Number(match[3])`) through the real
+	// orchestration. Deleting decideClassifierAction's twin cost this
+	// coverage -- every other attempt-keyed test here either builds
+	// existingMarker as a literal (never parses a comment body) or uses no
+	// attempt at all. Without this test, a marker written at attempt 2 that
+	// reads back as attempt 1 (M8: `runAttempt: 1,` unconditionally) would
+	// silently re-open the once-per-attempt guard and issue a second rerun.
+	it("a repeat invocation on attempt 2 with an attempt-2 marker issues no second rerun", async () => {
+		const priorBody = `ci-classifier: infra-kill (no failing assertion; auto-rerun triggered) ${buildMarker("deadbeef", "true", 2)}`;
+		const api = makeStatefulApi({
+			initialComments: [{ id: 555, body: priorBody }],
+			runAttempt: 2,
+		});
+		const result = await runClassifier({
+			fetcher: api.fetcher,
+			owner: "acme",
+			repo: "repo",
+			runId: 999,
+		});
+		expect(result.rerunTriggeredThisPass).toBe(false);
+		expect(api.rerunCallCount).toBe(0);
+		expect(api.comments[0].body).toContain(buildMarker("deadbeef", "true", 2));
+	});
+
 	// F4 (BLOCKING, red-proof with a throwing rerun stub): the marker must
 	// reflect the ACTUAL outcome of the rerun call, not an assumed one. A
 	// 403 (the realistic first outcome while actions:write is undecided,
