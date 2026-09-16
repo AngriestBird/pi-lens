@@ -943,6 +943,19 @@ function applyProbeFindingPolicy(
 	diagnostics: LSPDiagnostic[],
 	cwd: string,
 	content: string | undefined,
+	/**
+	 * Round 2 F1: the caller's severity threshold. The count reported to the
+	 * agent must be scoped to the SAME threshold the rendered result is, or a
+	 * `severity: "error"` probe of a repo carrying warning-level marks prints
+	 * "suppressed by disposition: N … Not a clean verdict" on a result that IS
+	 * clean at that threshold — the skill's own folder-check recipe would emit
+	 * the banner on every check. The threshold is applied HERE, in the tool that
+	 * owns both the render and the record, rather than in the three call sites
+	 * (three copies of one subtraction) or in
+	 * `clients/dispatch/finding-policy.ts`, which must stay threshold-free: its
+	 * other caller (`mode=full`) has no severity axis at all.
+	 */
+	severity: string,
 ): { kept: LSPDiagnostic[]; inlineKept: LSPDiagnostic[]; suppressed: number } {
 	const started = Date.now();
 	try {
@@ -953,9 +966,14 @@ function applyProbeFindingPolicy(
 			policyMap: loadProjectRulePolicyMap(cwd),
 			fileRole: detectFileRole(file, content),
 		});
-		if (result.suppressed > 0) {
-			// One record per FILE that actually dropped something, never one per
-			// finding (AGENTS.md "bounded observability").
+		const inScopeBefore = applySeverityFilter(diagnostics, severity).length;
+		const suppressed =
+			inScopeBefore - applySeverityFilter(result.kept, severity).length;
+		if (suppressed > 0) {
+			// One record per FILE that actually dropped something the caller would
+			// otherwise have SEEN, never one per finding (AGENTS.md "bounded
+			// observability"). `total` is the in-scope population for the same
+			// reason the count is, so the record and the rendered line agree.
 			logLatency({
 				type: "phase",
 				toolName: "lsp_diagnostics",
@@ -963,12 +981,12 @@ function applyProbeFindingPolicy(
 				phase: "lsp_probe_disposition_filter",
 				durationMs: Date.now() - started,
 				metadata: {
-					suppressed: result.suppressed,
-					total: diagnostics.length,
+					suppressed,
+					total: inScopeBefore,
 				},
 			});
 		}
-		return result;
+		return { kept: result.kept, inlineKept: result.inlineKept, suppressed };
 	} catch (err) {
 		recordDegradationOnce({
 			kind: "lsp-probe-finding-policy",
@@ -1133,6 +1151,7 @@ async function collectFileDiagnosticResult(
 				demotedCached,
 				cwd,
 				replayContentForStrictMarks(file, cwd),
+				severity,
 			);
 			const cachedDiags = cachedPolicy.kept;
 			const filteredDiags = applySeverityFilter(cachedDiags, severity);
@@ -1251,6 +1270,7 @@ async function collectFileDiagnosticResult(
 		effectiveRawDiags,
 		cwd,
 		collectedContent,
+		severity,
 	);
 	effectiveRawDiags = policy.kept;
 	const filteredDiags = applySeverityFilter(effectiveRawDiags, severity);
@@ -1421,6 +1441,7 @@ async function runFileDiagnostics(
 		effectiveRawDiags,
 		cwd,
 		collectedContent,
+		severity,
 	);
 	effectiveRawDiags = policy.kept;
 	const filtered = applySeverityFilter(effectiveRawDiags, severity);

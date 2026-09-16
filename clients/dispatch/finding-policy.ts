@@ -218,9 +218,12 @@ export interface LspFindingPolicyResult {
 	/** Survivors of inline suppression alone — what a content-keyed cache
 	 * records; see `FindingPolicyResult.inlineKept`. */
 	inlineKept: LSPDiagnostic[];
-	/** How many were dropped — the count the visible trace reports (#1616). */
-	suppressed: number;
 }
+
+/* No drop COUNT is returned here on purpose (round 2 F1): the number an agent
+ * is shown has to be scoped to that caller's severity threshold, and this
+ * module must not learn about a threshold its other caller (`mode=full`) does
+ * not have. `kept` versus the input is all a caller needs to derive its own. */
 
 /**
  * The probe lane's entry point: the same stack, over RAW LSP diagnostics.
@@ -248,9 +251,8 @@ export function applyLspFindingPolicy(
 		fileRole: FileRole;
 	},
 ): LspFindingPolicyResult {
-	if (!diagnostics.length) {
-		return { kept: diagnostics, inlineKept: diagnostics, suppressed: 0 };
-	}
+	if (!diagnostics.length)
+		return { kept: diagnostics, inlineKept: diagnostics };
 	const content = options.content ?? "";
 	// `convertLspDiagnostics` drops entries with no start line, which would
 	// break the 1:1 index alignment `retagAuxiliaryDiagnostics` and the map-back
@@ -262,9 +264,7 @@ export function applyLspFindingPolicy(
 	for (const diagnostic of diagnostics) {
 		if (diagnostic.range?.start?.line !== undefined) anchored.push(diagnostic);
 	}
-	if (!anchored.length) {
-		return { kept: diagnostics, inlineKept: diagnostics, suppressed: 0 };
-	}
+	if (!anchored.length) return { kept: diagnostics, inlineKept: diagnostics };
 	const converted = convertLspDiagnostics(anchored, options.filePath);
 	retagAuxiliaryDiagnostics(converted, anchored, content, {
 		cwd: options.cwd,
@@ -296,10 +296,5 @@ export function applyLspFindingPolicy(
 		}
 		return diagnostics.filter((d) => !dropped.has(d));
 	};
-	const keptRaw = survivorsOf(kept);
-	return {
-		kept: keptRaw,
-		inlineKept: survivorsOf(inlineKept),
-		suppressed: diagnostics.length - keptRaw.length,
-	};
+	return { kept: survivorsOf(kept), inlineKept: survivorsOf(inlineKept) };
 }

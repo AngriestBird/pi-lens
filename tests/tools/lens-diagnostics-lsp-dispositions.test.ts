@@ -74,11 +74,51 @@ function makeService(severity = 2) {
 	};
 }
 
+/** The same file carrying a SECOND, unmarked finding — so a filtered result is
+ * distinguishable from an empty one and an assertion about the marked finding's
+ * absence cannot pass vacuously. */
+const OTHER_MESSAGE = "Cannot find name 'other'.";
+
+function makeTwoFindingService(severity = 2, otherSeverity = severity) {
+	return {
+		touchFile: vi.fn(async () => ({
+			diags: [
+				{
+					severity,
+					message: MESSAGE,
+					source: "typescript",
+					code: 2322,
+					serverId: "typescript",
+					range: {
+						start: { line: 0, character: 6 },
+						end: { line: 0, character: 11 },
+					},
+				},
+				{
+					severity: otherSeverity,
+					message: OTHER_MESSAGE,
+					source: "typescript",
+					code: 2304,
+					serverId: "typescript",
+					range: {
+						start: { line: 1, character: 13 },
+						end: { line: 1, character: 18 },
+					},
+				},
+			],
+		})),
+		getDiagnostics: vi.fn(async () => []),
+		getCapabilitySnapshots: vi.fn(async () => []),
+	};
+}
+
 function makeCacheManager() {
 	return { readCache: vi.fn(() => undefined) } as never;
 }
 
-async function probe(service: ReturnType<typeof makeService>) {
+type ServiceDouble = ReturnType<typeof makeService>;
+
+async function probe(service: ServiceDouble, severity?: string) {
 	const tool = createLensDiagnosticsTool(
 		makeCacheManager(),
 		() => cwd,
@@ -86,14 +126,19 @@ async function probe(service: ReturnType<typeof makeService>) {
 	);
 	return (await tool.execute(
 		"diag-3088",
-		{ source: "lsp", scope: "paths", paths: [filePath] },
+		{
+			source: "lsp",
+			scope: "paths",
+			paths: [filePath],
+			...(severity === undefined ? {} : { severity }),
+		},
 		new AbortController().signal,
 		null,
 		{ cwd },
 	)) as { content: Array<{ text: string }>; details?: Record<string, unknown> };
 }
 
-async function legacyProbe(service: ReturnType<typeof makeService>) {
+async function legacyProbe(service: ServiceDouble) {
 	const tool = createLspDiagnosticsTool(
 		undefined,
 		undefined,
@@ -580,6 +625,86 @@ describe("cache-replay probes honor marks like fresh ones (#3088)", () => {
 	});
 });
 
+/**
+ * Round 2 F1. The banner tells the agent "Not a clean verdict for those
+ * locations", so it has to be about locations the caller ASKED for. Counting
+ * drops before the severity filter made a `severity: "error"` probe of a repo
+ * carrying warning-level marks print the banner on a result that is genuinely
+ * clean at that threshold — on every check, since the mark never expires.
+ */
+describe("the suppressed count is scoped to the requested severity (#3088 r2 F1)", () => {
+	it("says nothing about a warning-level mark on a severity=error probe", async () => {
+		const service = makeService(2);
+		await probe(service);
+		await mark({
+			filePath,
+			line: 1,
+			message: MESSAGE,
+			...CANONICAL_MARK,
+			disposition: "false-positive",
+		});
+
+		const after = await probe(service, "error");
+		expect(after.details?.totalDiagnostics).toBe(0);
+		expect(after.content[0].text).not.toContain("suppressed by disposition");
+		expect(after.details?.dispositionSuppressed).toBeUndefined();
+	});
+
+	it("counts only the in-scope drop when a probe spans both severities", async () => {
+		// An ERROR finding and a WARNING finding, both marked; a severity=error
+		// probe may report exactly one drop, not two.
+		const service = makeTwoFindingService(1, 2);
+		await probe(service);
+		for (const [message, rule] of [
+			[MESSAGE, "typescript:2322"],
+			[OTHER_MESSAGE, "typescript:2304"],
+		] as const) {
+			await mark({
+				filePath,
+				line: 1,
+				message,
+				rule,
+				tool: "lsp",
+				disposition: "false-positive",
+			});
+		}
+
+		const after = await probe(service, "error");
+		expect(after.content[0].text).toContain("suppressed by disposition: 1");
+		expect(after.details?.dispositionSuppressed).toBe(1);
+		// The same probe without a threshold sees both.
+		const all = await probe(service);
+		expect(all.details?.dispositionSuppressed).toBe(2);
+	});
+
+	it("records the in-scope count in the latency phase too", async () => {
+		const service = makeTwoFindingService(1, 2);
+		await probe(service);
+		for (const [message, rule] of [
+			[MESSAGE, "typescript:2322"],
+			[OTHER_MESSAGE, "typescript:2304"],
+		] as const) {
+			await mark({
+				filePath,
+				line: 1,
+				message,
+				rule,
+				tool: "lsp",
+				disposition: "false-positive",
+			});
+		}
+		logLatency.mockReset();
+
+		await probe(service, "error");
+
+		const phases = logLatency.mock.calls
+			.map(([entry]) => entry as Record<string, unknown>)
+			.filter((entry) => entry.phase === "lsp_probe_disposition_filter");
+		expect(phases).toHaveLength(1);
+		expect(phases[0]?.metadata).toMatchObject({ suppressed: 1, total: 1 });
+	});
+});
+
 describe("the source=lsp footer reconcile respects mark-time demotion (#3088)", () => {
 	it("does not re-arm a disposed finding in the widget footer", async () => {
 		const service = makeService();
@@ -602,5 +727,45 @@ describe("the source=lsp footer reconcile respects mark-time demotion (#3088)", 
 				(d) => d.message === MESSAGE && d.disposition === undefined,
 			),
 		).toHaveLength(0);
+	});
+
+	// Round 2 F2: the case above only reaches the REPLAY reconcile arm (its
+	// second probe is served from the workspace cache). These two reach the
+	// other two arms — `collectFileDiagnosticResult`'s fresh path and
+	// `runFileDiagnostics` — by marking BEFORE the only observation, so the
+	// probe that writes the footer is a fresh one. The second, unmarked finding
+	// keeps the assertion honest: the record must hold it and only it, so
+	// "marked finding absent" cannot pass on an empty record.
+	it("does not re-arm a disposed finding on the batch FRESH reconcile arm", async () => {
+		const service = makeTwoFindingService();
+		await mark({
+			filePath,
+			line: 1,
+			message: MESSAGE,
+			...CANONICAL_MARK,
+			disposition: "false-positive",
+		});
+
+		await probe(service);
+		expect(service.touchFile).toHaveBeenCalledTimes(1);
+
+		const recorded = getFileDiagnostics(filePath) ?? [];
+		expect(recorded.map((d) => d.message)).toEqual([OTHER_MESSAGE]);
+	});
+
+	it("does not re-arm a disposed finding through the legacy single-file tool", async () => {
+		const service = makeTwoFindingService();
+		await mark({
+			filePath,
+			line: 1,
+			message: MESSAGE,
+			...CANONICAL_MARK,
+			disposition: "false-positive",
+		});
+
+		await legacyProbe(service);
+
+		const recorded = getFileDiagnostics(filePath) ?? [];
+		expect(recorded.map((d) => d.message)).toEqual([OTHER_MESSAGE]);
 	});
 });
