@@ -195,6 +195,33 @@ function probeIdentities(
 			raw.code === undefined ? undefined : String(raw.code),
 		]);
 	}
+	return expandRenderedIdentities(rendered);
+}
+
+/**
+ * #3102: the identity spellings a mark against a surface that renders a
+ * finding's RULE but never its TOOL can carry — the turn-end late-auxiliary
+ * advisory (`<file>:<line>:<col> [<rule>] <message>`) and the cold-neighbour
+ * cascade run (`line N, col M rule=<rule>: <message>`). Both print the
+ * canonical dispatch `rule`, so a mark made ELSEWHERE (the widget, `mode=full`)
+ * carries the full `(tool, rule)` pair while a mark made from the surface's own
+ * output has no tool to pass on — and `lens_diagnostic_mark`'s `tool` parameter
+ * is optional. Honoring only one of the two spellings is exactly the
+ * non-convergence #3088 reported, so both go through the SAME expansion
+ * `probeIdentities` uses.
+ */
+export function renderedRuleIdentities(diagnostic: {
+	tool?: string;
+	rule?: string;
+}): FindingIdentity[] {
+	return expandRenderedIdentities([[diagnostic.tool, diagnostic.rule]]);
+}
+
+/** Every rendered `(tool, rule)` spelling plus the `tool`-omitted form of
+ * each, de-duplicated, in order. One derivation for both callers. */
+function expandRenderedIdentities(
+	rendered: Array<[string | undefined, string | undefined]>,
+): FindingIdentity[] {
 	const out: FindingIdentity[] = [];
 	const seen = new Set<string>();
 	for (const [tool, rule] of rendered) {

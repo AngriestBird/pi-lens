@@ -121,6 +121,13 @@ import {
 } from "./lsp/pending-aux-coverage.js";
 import type { LSPDiagnostic } from "./lsp/client.js";
 import { convertLspDiagnostics } from "./dispatch/utils/lsp-diagnostics.js";
+import { retagAuxiliaryDiagnostics } from "./dispatch/auxiliary-lsp.js";
+import {
+	applyFindingPolicy,
+	loadProjectRulePolicyMap,
+	renderedRuleIdentities,
+} from "./dispatch/finding-policy.js";
+import { detectFileRole } from "./file-role.js";
 import {
 	drainPendingRunnerFindings,
 	dropStaleRunnerFindings,
@@ -3597,6 +3604,13 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	let lateAuxCeilingExhausted = 0;
 	let lateAuxAnswered = 0;
 	let lateAuxNotifyStallDemoted = 0;
+	// #3102: dropped by the shared finding-policy stack (inline `pi-lens-ignore`
+	// / stored disposition / `.pi-lens.json` rule policy) and, separately, by the
+	// auxiliary profile's OWN native suppression inside `retagAuxiliaryDiagnostics`.
+	// Both are reported in the one bounded per-turn record below — a drop is
+	// never silent (shape 10).
+	let lateAuxDispositionSuppressed = 0;
+	let lateAuxAuxSuppressed = 0;
 	const lateAuxCoverageGapPairs: Array<{
 		filePath: string;
 		serverId: string;
@@ -3655,6 +3669,31 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 					continue;
 				}
 				const displayLateAuxPath = toRunnerDisplayPath(cwd, lateAuxPath);
+				// #3102: the file's CURRENT bytes, for the two content-bound halves
+				// of the policy stack (inline `pi-lens-ignore` and the STRICT
+				// `false-positive` anchor) and for the auxiliary profile's own
+				// native suppression. Read at most ONCE per file per drain, lazily:
+				// a turn that drains nothing, finds no live client, re-arms, or
+				// confirms clean pays no I/O at all, and a file with several pending
+				// servers pays one read for all of them. Measured cost on the one
+				// file that does publish: 0.10-0.20 ms typical, 4.0 ms worst case
+				// (a 180 KB file, 5 findings, a populated disposition store) against
+				// the 3000 ms `HOOK_WALL_BUDGET_MS.turn_end`. A read failure yields
+				// `undefined`: the content-free half still applies and nothing is
+				// hidden on an I/O error (shape 48).
+				let lateAuxContentRead = false;
+				let lateAuxContentValue: string | undefined;
+				const readLateAuxContent = (): string | undefined => {
+					if (!lateAuxContentRead) {
+						lateAuxContentRead = true;
+						try {
+							lateAuxContentValue = fs.readFileSync(lateAuxPath, "utf-8");
+						} catch {
+							lateAuxContentValue = undefined;
+						}
+					}
+					return lateAuxContentValue;
+				};
 				for (const pair of pairs) {
 					const cachedEntry = cached.get(pair.serverId);
 					if (cachedEntry === undefined) {
@@ -3749,11 +3788,33 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 						lateAuxCleanConfirmed += 1;
 						continue;
 					}
-					const converted = convertLspDiagnostics(rawDiags, lateAuxPath, {
-						tool: "lsp",
-					});
-					if (converted.length === 0) {
+					// `convertLspDiagnostics` drops entries with no start line, which
+					// would break the 1:1 index alignment `retagAuxiliaryDiagnostics`
+					// needs. Partition first so `converted[i]` IS `anchored[i]` —
+					// the same pre-partition `applyLspFindingPolicy` does.
+					const anchored = rawDiags.filter(
+						(d) => d.range?.start?.line !== undefined,
+					);
+					if (anchored.length === 0) {
 						lateAuxMissing += rawDiags.length;
+						lateAuxAnswered += 1;
+						continue;
+					}
+					const lateAuxContent = readLateAuxContent();
+					const converted = convertLspDiagnostics(anchored, lateAuxPath);
+					// #3046/#3047: the auxiliary's REAL tool id (and its own native
+					// inline suppression — opengrep's `# nosemgrep`, ast-grep's
+					// test-file gate), from the ONE shared derivation every other
+					// surface anchors a mark against. These diagnostics come straight
+					// off the aux client's cache, so nothing upstream applied it.
+					const retained = retagAuxiliaryDiagnostics(
+						converted,
+						anchored,
+						lateAuxContent ?? "",
+						{ cwd, fileRole: detectFileRole(lateAuxPath, lateAuxContent) },
+					);
+					lateAuxAuxSuppressed += converted.length - retained.length;
+					if (retained.length === 0) {
 						lateAuxAnswered += 1;
 						continue;
 					}
@@ -3768,14 +3829,14 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 					// never silent (shape 10).
 					const gate = gateFindingsByPathFreshness({
 						store: "late-auxiliary-findings",
-						findings: converted,
+						findings: retained,
 						cwd,
 						scannedAt: pair.markedAtMs,
 						citedPath: () => lateAuxPath,
 					});
 					lateAuxStale += gate.stale.length;
 					lateAuxMissing +=
-						converted.length - gate.live.length - gate.stale.length;
+						retained.length - gate.live.length - gate.stale.length;
 					if (gate.live.length === 0) {
 						if (gate.stale.length > 0) {
 							// Stale findings mean the scan predates the last edit. Re-arm
@@ -3806,15 +3867,48 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 					// merged one). Late findings reach the agent as the gated advisory
 					// below; the turn-end hash-guarded fast path stays cold for a file
 					// whose touch was partial, which is exactly what #1470 requires.
-					const lines = gate.live.map(
+					// #3102: the survivors are what the agent READS, so they take the
+					// same `clients/dispatch/finding-policy.ts` stack — inline
+					// `pi-lens-ignore` → stored dispositions → `.pi-lens.json` rule
+					// policy — the per-edit dispatcher, `mode=full` and the
+					// `source=lsp` probe lane apply. Without it a finding the agent
+					// marked `false-positive` re-reported on every turn that drained
+					// a late pair. Runs AFTER the freshness gate, like the #1625
+					// govulncheck/secrets filters: the anchor is derived from the
+					// post-gate identity, never the raw pre-gate set.
+					const { kept: lateAuxKept } = applyFindingPolicy(gate.live, {
+						cwd,
+						filePath: lateAuxPath,
+						content: lateAuxContent ?? "",
+						// mtime-cached, so a drain of several files costs one stat.
+						policyMap: loadProjectRulePolicyMap(cwd),
+						identities: renderedRuleIdentities,
+					});
+					const lateAuxSuppressedHere = gate.live.length - lateAuxKept.length;
+					lateAuxDispositionSuppressed += lateAuxSuppressedHere;
+					if (lateAuxKept.length === 0) {
+						// Every late finding was suppressed. This is a PUSH surface:
+						// silence after a mark is the mark working, not a clean
+						// verdict, so the count rides the bounded per-turn record below
+						// instead of re-announcing the suppression every single turn.
+						lateAuxAnswered += 1;
+						continue;
+					}
+					const lines = lateAuxKept.map(
 						(f) =>
 							`  ${displayLateAuxPath}:${f.line}:${f.column} [${f.rule}] ${f.message}`,
 					);
-					lateAuxDelivered += gate.live.length;
+					lateAuxDelivered += lateAuxKept.length;
 					lateAuxAnswered += 1;
+					// #1616 suppressed-bucket rule: a delivery that still has
+					// something to say states what it dropped, once per delivery.
+					const lateAuxSuppressedNote =
+						lateAuxSuppressedHere > 0
+							? `; suppressed by disposition: ${lateAuxSuppressedHere} finding(s)`
+							: "";
 					// @delivery-surface: runtime-turn:late-auxiliary-findings
 					advisoryParts.push(
-						`🕐 Late auxiliary diagnostics (${pair.serverId} answered after its grace window):\n${lines.join("\n")}`,
+						`🕐 Late auxiliary diagnostics (${pair.serverId} answered after its grace window${lateAuxSuppressedNote}):\n${lines.join("\n")}`,
 					);
 				}
 			}
@@ -3872,6 +3966,8 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				expired: lateAuxExpired,
 				ceilingExhausted: lateAuxCeilingExhausted,
 				answered: lateAuxAnswered,
+				dispositionSuppressed: lateAuxDispositionSuppressed,
+				auxSuppressed: lateAuxAuxSuppressed,
 				notifyStallDemoted: lateAuxNotifyStallDemoted,
 				coverageGapReRaised: lateAuxCoverageGapPairs.length,
 				coverageGapReRaisedDetailed: lateAuxCoverageGapDetailCount,
