@@ -16,7 +16,15 @@
 // stdin shape, the exit code, or which stream carries the message.
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
+import {
+	closeSync,
+	mkdtempSync,
+	openSync,
+	readFileSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -451,6 +459,220 @@ describe("scripts/hooks/guard-bash.mjs -- never throws (#2699)", () => {
 		});
 		expect(result.status).toBe(0);
 	}, 180_000);
+});
+
+// #3089: readStdin drains fd 0 to EOF instead of a single readFileSync(0)
+// call. Measured on this host: spawnSync's `input` option pumps the
+// child's stdin pipe non-blocking while its own synchronous event loop
+// feeds it, so a `read(2)` issued before the next chunk has landed can
+// throw EAGAIN -- reproducible from ~500 KB of JSON payload, reliably at
+// the 1 MB+ sizes below. Pre-fix, `readFileSync(0, "utf8")` does not retry
+// that EAGAIN; the throw was swallowed by readStdin's own catch-all,
+// producing "no payload" for a payload that was still arriving, and the
+// hook failed OPEN (exit 0) on a command it would otherwise have denied.
+// This is the real script (HOOK, spawned exactly as runHook() above does)
+// over a real OS pipe (spawnSync's own child stdio pipe) -- not a hand-fed
+// classifyPayload() call, which never touches readStdin at all.
+describe("scripts/hooks/guard-bash.mjs -- drains stdin to EOF on a large payload (#3089)", () => {
+	function payloadOfAtLeast(bytes: number, tailCommand: string): string {
+		const pad = "x".repeat(bytes);
+		return `echo ${pad} && ${tailCommand}`;
+	}
+
+	it.each([
+		["~500 KB", 500_000],
+		["1 MB", 1_000_000],
+		["2 MB", 2_000_000],
+		["9 MB", 9_000_000],
+	])(
+		"still denies a %s payload (a single readFileSync(0) fails open here)",
+		(_label, bytes) => {
+			const command = payloadOfAtLeast(bytes, "git stash");
+			const result = runHook(command);
+			expect(result.status, `payload length ${command.length}`).toBe(2);
+			expect(result.stderr.toLowerCase()).toContain("stash");
+		},
+		// review round 2 F1: no explicit timeout inherits vitest's 5000ms
+		// default (vitest.config.ts sets hookTimeout, not testTimeout), which
+		// the 2 MB/9 MB cases blow through under Stryker's dry run -- Stryker
+		// then aborts before mutating this PR's own file. The file's own
+		// convention for a real spawn this size is 180_000 (see :391, :453).
+		60_000,
+	);
+
+	// The never-throws contract from #2699 is unchanged by the drain loop:
+	// a read error or a genuinely empty stream is still "no payload", not a
+	// crash and not a deny.
+	it("still exits 0 on a genuinely empty stream", () => {
+		const result = spawnSync(process.execPath, [HOOK], {
+			input: "",
+			encoding: "utf8",
+			env: BASE_ENV,
+		});
+		expect(result.status).toBe(0);
+		expect(result.stderr).toBe("");
+	});
+
+	it("still exits 0 on a genuine read error (EBADF, not EAGAIN) -- and notes it (#3089 review round 2 F2/F3)", () => {
+		// review round 2 F2: stdio: "ignore" hands the child /dev/null, which
+		// reads 0 bytes cleanly -- the same EOF branch as the empty-stream
+		// case above, never reaching readStdin's `throw error` at :1079-ish.
+		// A WRITE-ONLY fd handed to the child as fd 0 instead produces a
+		// GENUINE EBADF on the child's first read(2) (probed directly:
+		// fs.readSync on a write-only fd throws
+		// "EBADF: bad file descriptor, read"), which is the branch that
+		// mutation-tests `throw error` -- reverting it to `break` would
+		// silently fold this case into the empty-stream case (chunks stays
+		// [], "" is returned instead of the error propagating), losing the
+		// note asserted below.
+		const dir = mkdtempSync(join(tmpdir(), "guard-bash-ebadf-"));
+		const writeOnlyFile = join(dir, "write-only");
+		const writeOnlyFd = openSync(writeOnlyFile, "w");
+		try {
+			const result = spawnSync(process.execPath, [HOOK], {
+				stdio: [writeOnlyFd, "pipe", "pipe"],
+				encoding: "utf8",
+				env: BASE_ENV,
+			});
+			expect(result.status).toBe(0);
+			// review round 2 F3: a genuine read error is a FAILURE, not an
+			// ordinary "nothing to check" allow -- unlike the true-empty-
+			// stream case above, it is noted so the hook's own stderr says
+			// why nothing was checked instead of looking identical to every
+			// other allow. review round 3 N1: the note names the actual
+			// cause (error.code, EBADF here) via the crash guard's shared
+			// template -- NOT the JSON.parse-only "unreadable or
+			// unparseable" wording, which this path never reaches (readStdin
+			// throws before run() ever gets to `raw.trim()` or JSON.parse).
+			expect(result.stderr).toBe(
+				"guard-bash: EBADF while checking payload; allowing\n",
+			);
+		} finally {
+			closeSync(writeOnlyFd);
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	// #3089 review round 2 F3: the JSON.parse failure path is the OTHER
+	// "saw real input, failed to make sense of it" failure (distinct from
+	// the read-error case above) -- a payload cut off mid-document, the
+	// literal shape a short read produces. Built directly (sliced valid
+	// JSON) rather than raced through spawnSync's own EAGAIN timing, so the
+	// truncation point is deterministic.
+	it("notes an unparseable (truncated) payload instead of allowing silently", () => {
+		const fullPayload = JSON.stringify({
+			session_id: "probe",
+			cwd: repoRoot,
+			permission_mode: "default",
+			hook_event_name: "PreToolUse",
+			tool_name: "Bash",
+			tool_input: { command: `echo ${"x".repeat(1_000_000)} && git stash` },
+		});
+		const truncated = fullPayload.slice(0, 500_105);
+		expect(truncated.length).toBeLessThan(fullPayload.length);
+		expect(() => JSON.parse(truncated)).toThrow();
+		const result = spawnSync(process.execPath, [HOOK], {
+			input: truncated,
+			encoding: "utf8",
+			env: BASE_ENV,
+		});
+		expect(result.status).toBe(0);
+		expect(result.stderr).toBe(
+			"guard-bash: payload unreadable or unparseable; allowing\n",
+		);
+	});
+
+	// #3089 review round 3 N2: the note() write itself must never be the
+	// thing that turns an intended exit-0 allow into an uncaught-exception
+	// exit 1. A read-only fd handed to the child as stderr reproduces this:
+	// the crash-guard path (forced here via the same depth-5000 nesting
+	// that crashes the tokenizer, a real command containing `git stash`)
+	// tries to note the failure, that write itself fails, and pre-fix that
+	// second failure was unguarded.
+	it("still exits 0 (not 1) when the crash-guard's own note write fails (read-only stderr fd)", () => {
+		const dir = mkdtempSync(join(tmpdir(), "guard-bash-stderr-ro-"));
+		const readOnlyFile = join(dir, "stderr-ro");
+		writeFileSync(readOnlyFile, "");
+		const readOnlyFd = openSync(readOnlyFile, "r");
+		try {
+			const deep = `${"$(".repeat(5000)}git stash${")".repeat(5000)}`;
+			const result = spawnSync(process.execPath, [HOOK], {
+				input: JSON.stringify({
+					session_id: "probe",
+					cwd: repoRoot,
+					permission_mode: "default",
+					hook_event_name: "PreToolUse",
+					tool_name: "Bash",
+					tool_input: { command: `echo ${deep}` },
+				}),
+				stdio: ["pipe", "pipe", readOnlyFd],
+				encoding: "utf8",
+				env: BASE_ENV,
+			});
+			// Pre-fix (`try { process.stderr.write(text) } catch {}` alone):
+			// exit 1, an uncaught 'error' event from the Writable stream's
+			// own async I/O failure, which a synchronous try/catch around
+			// process.stderr.write cannot catch -- confirmed exit 1 in that
+			// configuration. Post-fix (fs.writeSync, which throws EBADF
+			// synchronously for this same fd): exit 0.
+			expect(result.status).toBe(0);
+		} finally {
+			closeSync(readOnlyFd);
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+});
+
+// #3089 review trailing round (#3121): the ALLOW-path notes (round 2/3)
+// were mutation-tested against a broken stderr; the DENY path's OWN write
+// -- `note(`${RULE_MESSAGES[rule]}\n`)` -- never was. Reverting just that
+// one call site to `process.stderr.write` (note() itself untouched) keeps
+// every prior test in this file green (none of them deny through a broken
+// stderr) while reintroducing exactly #3121's bug: a `git stash` a caller
+// asked to have denied gets ALLOWED (exit 1, an uncaught exception, not
+// exit 2) whenever stderr happens to be unwritable. The verdict (deny) and
+// the message (why) are two different guarantees; only the message may be
+// lost to a broken stderr, never the verdict.
+describe("scripts/hooks/guard-bash.mjs -- deny verdict survives a broken stderr (#3121)", () => {
+	const DENY_RULE_COMMANDS: Array<[rule: string, command: string]> = [
+		["stash", "git stash"],
+		["reset", "git reset --hard HEAD"],
+		["worktree", "git worktree remove -f -f /tmp/tree"],
+		[
+			"tmpdirCollision",
+			"TMPDIR=$PWD/.probe-home npx vitest run tests/clients/ext-gate-before-ignore.test.ts",
+		],
+		["probe", "node -e \"require('./clients/foo.js')\""],
+	];
+
+	it.each(DENY_RULE_COMMANDS)(
+		"still denies (%s) when stderr is a read-only fd -- message lost, verdict kept",
+		(_rule, command) => {
+			const dir = mkdtempSync(join(tmpdir(), "guard-bash-deny-ro-"));
+			const readOnlyFile = join(dir, "stderr-ro");
+			writeFileSync(readOnlyFile, "");
+			const readOnlyFd = openSync(readOnlyFile, "r");
+			try {
+				const result = spawnSync(process.execPath, [HOOK], {
+					input: JSON.stringify({
+						session_id: "probe",
+						cwd: repoRoot,
+						permission_mode: "default",
+						hook_event_name: "PreToolUse",
+						tool_name: "Bash",
+						tool_input: { command },
+					}),
+					stdio: ["pipe", "pipe", readOnlyFd],
+					encoding: "utf8",
+					env: BASE_ENV,
+				});
+				expect(result.status).toBe(2);
+			} finally {
+				closeSync(readOnlyFd);
+				rmSync(dir, { recursive: true, force: true });
+			}
+		},
+	);
 });
 
 describe("scripts/hooks/guard-bash.mjs -- registration (review round 2 F3)", () => {
@@ -1124,5 +1346,29 @@ describe("scripts/hooks/guard-bash.mjs -- unbounded nesting never throws (review
 	it("catches nesting far deeper than round 2's depth cap of 8", () => {
 		const deep = `${"$(".repeat(20)}git stash${")".repeat(20)}`;
 		expect(findDeny(`echo ${deep}`)).toBe("stash");
+	});
+
+	// #3089 review round 3 N1: the depth-5000 case above IS this hook's most
+	// important fail-open -- the payload is read and JSON.parse'd perfectly
+	// (it contains a real `git stash`, which should have been denied), and
+	// ONLY the tokenizer crashes (RangeError: Maximum call stack size
+	// exceeded, confirmed directly against classifyPayload on this host).
+	// Before this round the crash guard's note claimed the payload was
+	// "unreadable or unparseable" -- false; a wrong label on the most
+	// important fail-open is worse than the silence it replaced. The note
+	// must name the real cause (error.name here, since a RangeError has no
+	// .code) instead.
+	it("names RangeError, not 'unreadable or unparseable', when the classifier (not the read) crashes", () => {
+		const deep = `${"$(".repeat(5000)}git stash${")".repeat(5000)}`;
+		const result = runHook(`echo ${deep}`);
+		// Measured on this host (and required by the finding this test
+		// pins): depth 5000 deterministically overflows the tokenizer's own
+		// recursion, so the crash guard is what's under test, not the
+		// tokenizer's variable stack-depth tolerance the sibling test above
+		// allows for.
+		expect(result.status).toBe(0);
+		expect(result.stderr).toContain("RangeError");
+		expect(result.stderr).not.toContain("unreadable");
+		expect(result.stderr).not.toContain("unparseable");
 	});
 });
