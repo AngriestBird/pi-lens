@@ -48,7 +48,13 @@ const integrationInclude = [
 const unitOnlyExclude =
 	process.env.npm_lifecycle_event === "test:unit" ? integrationInclude : [];
 
-const sharedGlobalSetup = [
+/**
+ * The run-level setup arms. EXPORTED (#3104 review F2) so
+ * tests/support/tests-tree-write-guard.test.ts can assert membership: every
+ * arm here is a guard whose absence is silent — delete a row and the guard's
+ * own unit tests stay green while the guard stops running for the whole suite.
+ */
+export const sharedGlobalSetup = [
 	"./tests/support/check-build-freshness.ts",
 	"./tests/support/prewarm-grammars.ts",
 	// After check-build-freshness: the seed analyze runs the in-place build.

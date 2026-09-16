@@ -13,6 +13,11 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+// The live config source, not the stale compiled vitest.config.js the build
+// emits at the repo root (allowlisted in
+// tests/config/module-instance-coverage.test.ts, same reason as its four
+// siblings).
+import vitestConfig, { sharedGlobalSetup } from "../../vitest.config.ts";
 import {
 	installTestsTreeWriteGuard,
 	isGuardedTreeEntry,
@@ -144,6 +149,34 @@ describe("tests-tree write guard (#3082)", () => {
 		const teardown = runTestsTreeWriteGuardSetup(root);
 		fs.writeFileSync(path.join(root, "clients", "tracked.test.ts"), "// edit");
 		expect(() => teardown()).not.toThrow();
+	});
+
+	// #3104 review F2: without this case, deleting the guard's row from
+	// vitest.config.ts's sharedGlobalSetup leaves all ten cases above green
+	// while the guard stops running for the entire suite — the restored #3082
+	// producer goes completely uncaught (EXIT=0). Every arm in that list has the
+	// same silent-absence property, so the assertion covers the whole list, the
+	// shape tests/clients/flake-shape-ratchet.test.ts uses for
+	// wallClockBudgetInclude.
+	it("every run-level guard is registered in vitest.config.ts, on every project", () => {
+		expect(sharedGlobalSetup).toEqual([
+			"./tests/support/check-build-freshness.ts",
+			"./tests/support/prewarm-grammars.ts",
+			"./tests/support/prewarm-tool-home.ts",
+			"./tests/support/git-config-guard-setup.ts",
+			"./tests/support/tests-tree-write-guard-setup.ts",
+		]);
+
+		// Registration in the shared list is only half of it: a project that
+		// declares its own globalSetup, or none, runs without every guard above.
+		const projects = vitestConfig.test?.projects;
+		expect(Array.isArray(projects)).toBe(true);
+		const withoutSharedSetup = (
+			projects as Array<{ test?: { name?: unknown; globalSetup?: unknown } }>
+		)
+			.filter((project) => project.test?.globalSetup !== sharedGlobalSetup)
+			.map((project) => String(project.test?.name ?? "<unnamed>"));
+		expect(withoutSharedSetup).toEqual([]);
 	});
 
 	// The one real-watcher case, with no stand-in for `fs.watch`: a source file
