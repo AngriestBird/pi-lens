@@ -71,6 +71,10 @@ const EXPECTED_SURFACE_IDS = [
 	// #3102: the cold-neighbour cascade run's own build-time lane, a turn
 	// earlier than the runtime-turn render that carries it.
 	"cascade-format:resolved-found-run",
+	// #3157: the IN-LANE cascade's four display sites, which never enter the
+	// dispatcher's filter pipeline — a separate lane from the quiet-window run
+	// above, and the one #3102's file-level sweep verdict cleared wrongly.
+	"dispatch-integration:in-lane-cascade",
 	"runtime-turn:call-graph-advisory",
 	"lens-diagnostics:mode-full",
 	"lens-diagnostics:mode-all",

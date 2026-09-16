@@ -52,7 +52,11 @@ import {
 	type CascadeBudgetZone,
 	deriveCascadeNeighbourBudget,
 } from "../cascade-budget.js";
-import { formatCascadeNeighborDiagnostics } from "../cascade-format.js";
+import {
+	applyCascadeDisplayPolicy,
+	formatCascadeNeighborDiagnostics,
+	recordCascadeFindingPolicy,
+} from "../cascade-format.js";
 import { logCascade } from "../cascade-logger.js";
 import type {
 	CascadeResult,
@@ -969,6 +973,19 @@ export async function computeCascadeForFile(
 		turnSeq?: number;
 		writeSeq?: number;
 		/**
+		 * Authoritative workspace root (`PipelineContext.projectRoot`). `cwd` above
+		 * is the LANGUAGE root (`resolveLanguageRootForFile`), which in a monorepo
+		 * is a nested directory — while the disposition store and the
+		 * `.pi-lens.json` rule policy the cascade display filter consults are
+		 * written under the PROJECT root (`lens_diagnostic_mark` is wired with
+		 * `() => runtime.projectRoot`). Reading them from a nested language root
+		 * opens a different `diagnostic-dispositions.json` and silently no-ops
+		 * every mark — the #1030 defect, which is why `dispatcher.ts` reads both
+		 * with `ctx.projectRoot ?? ctx.cwd`. Omitted, `cwd` is used, which is also
+		 * the single-root case.
+		 */
+		projectRoot?: string;
+		/**
 		 * RuntimeCoordinator sequence state (#451). When present, the graph build
 		 * below can take the seq fast path and skip the O(project) walk+stat sweep.
 		 * `projectSeq` is read at build time (deferred cascade, #450).
@@ -1014,6 +1031,7 @@ export async function computeCascadeForFile(
 			dbg,
 			turnSeq = 0,
 			writeSeq,
+			projectRoot,
 			seqState,
 			turnEndCascadeSettleStart,
 			fileContent,
@@ -1675,6 +1693,50 @@ export async function computeCascadeForFile(
 		let passiveSnapshotHits = 0;
 		let noLspConfigured = 0;
 		let touchFailures = 0;
+		// #3157: this run's AGGREGATE display-policy drops, across every neighbour
+		// the four display sites below rendered. Aggregate, not per neighbour: a
+		// cascade walks up to `CASCADE_NEIGHBOUR_BUDGET` (40) neighbours per edit,
+		// so a record inside the loop would be per-occurrence logging on a per-edit
+		// path — one bounded row per RUN instead (AGENTS.md "bounded observability").
+		const policyStart = Date.now();
+		const policyCounts = { suppressed: 0, auxSuppressed: 0, total: 0 };
+		/**
+		 * The ONE seam every in-lane cascade DISPLAY list goes through (#3157).
+		 *
+		 * Before this, all four sites open-coded `convertLspDiagnostics(...)` and
+		 * rendered the result raw: `grep applyFindingPolicy clients/dispatch/
+		 * integration.ts` returned nothing, so a neighbour ERROR the agent had
+		 * marked `false-positive` was hidden by `mode=delta`/`mode=full`/the
+		 * per-edit dispatcher/the probe lane/the quiet-window cascade run and STILL
+		 * re-reported here on every edit that cascaded to it. The severity filter
+		 * and the `MAX_PER_FILE` display cap were the fourth copy of the same three
+		 * lines and fold in with it.
+		 *
+		 * `neighborContent` is passed by the ONE caller that has already read the
+		 * neighbour (the active touch reads it to feed `touchFile`) — those are the
+		 * exact bytes the diagnostics were computed against, so it is both free and
+		 * more faithful than a re-read. The other three sites let the shared helper
+		 * read once, and only once a neighbour actually has an ERROR to render.
+		 */
+		const cascadeDisplay = (
+			rawDiags: readonly import("../lsp/client.js").LSPDiagnostic[],
+			neighborPath: string,
+			neighborContent?: string,
+		): CascadeResult["neighbors"][number]["diagnostics"] => {
+			const result = applyCascadeDisplayPolicy(
+				rawDiags.filter((d) => d.severity === 1).slice(0, MAX_PER_FILE),
+				{
+					cwd,
+					policyRoot: projectRoot ?? cwd,
+					filePath: neighborPath,
+					...(neighborContent !== undefined && { content: neighborContent }),
+				},
+			);
+			policyCounts.suppressed += result.suppressed;
+			policyCounts.auxSuppressed += result.auxSuppressed;
+			policyCounts.total += result.total;
+			return result.diagnostics;
+		};
 
 		if (sortedNeighbors.length > 0) {
 			const snapshotPaths = sortedNeighbors.filter(
@@ -1744,10 +1806,8 @@ export async function computeCascadeForFile(
 				// cascade neighbor diagnostics are ephemeral display-only output
 				// (never reconciled into persisted widget/dedup state), so the label
 				// had no remaining purpose and is simply dropped rather than migrated.
-				const diags = convertLspDiagnostics(
-					entry.diags.filter((d) => d.severity === 1).slice(0, MAX_PER_FILE),
-					neighborPath,
-				);
+				// #3157 site 1 of 4: the passive cold-snapshot hit.
+				const diags = cascadeDisplay(entry.diags, neighborPath);
 				producedLspData = true;
 				passiveSnapshotHits++;
 				const durationMs = Date.now() - neighborStart;
@@ -2026,15 +2086,12 @@ export async function computeCascadeForFile(
 					// doc comment on the sibling call above) — dropped rather than
 					// migrated to `scanOrigin` since cascade output never touches
 					// persisted widget/dedup state.
-					// #1179: `.filter()` here operates on `rawDiags.diags`; the
-					// `inconclusive`/`binding` flags read above stay on the `rawDiags`
-					// wrapper and are unaffected by this copy (the shape-5 fix).
-					const diags = convertLspDiagnostics(
-						rawDiags.diags
-							.filter((d) => d.severity === 1)
-							.slice(0, MAX_PER_FILE),
-						neighborPath,
-					);
+					// #1179: the severity filter inside `cascadeDisplay` operates on
+					// `rawDiags.diags`; the `inconclusive`/`binding` flags read above
+					// stay on the `rawDiags` wrapper and are unaffected (the shape-5 fix).
+					// #3157 site 2 of 4: the fresh in-lane touch. `content` is the copy
+					// this touch was computed against — no second read.
+					const diags = cascadeDisplay(rawDiags.diags, neighborPath, content);
 					const durationMs = Date.now() - neighborStart;
 
 					// #1899: the A5 same-write cache write stood here.
@@ -2170,14 +2227,11 @@ export async function computeCascadeForFile(
 					// #692: `source: "cascade"` dropped (see the doc comment above the
 					// first cascade call site in this file) — no longer affects `rule`
 					// and cascade output never touches persisted widget/dedup state.
+					// #3157 site 3 of 4: the touch-error fallback. The touch failed, so
+					// no content was read for this neighbour — the helper reads it.
 					const diags =
 						ttlFresh && !bindingRejected
-							? convertLspDiagnostics(
-									entry.diags
-										.filter((d) => d.severity === 1)
-										.slice(0, MAX_PER_FILE),
-									neighborPath,
-								)
+							? cascadeDisplay(entry.diags, neighborPath)
 							: [];
 					neighbors.push({
 						filePath: neighborPath,
@@ -2200,6 +2254,7 @@ export async function computeCascadeForFile(
 				normalizedFileKey,
 				cwd,
 				filePath,
+				cascadeDisplay,
 				noLspCandidatePaths,
 			);
 			if (bindingRejected) fallbackBindingRejected = true;
@@ -2210,6 +2265,7 @@ export async function computeCascadeForFile(
 				normalizedFileKey,
 				cwd,
 				filePath,
+				cascadeDisplay,
 			);
 			if (bindingRejected) fallbackBindingRejected = true;
 			if (neighbors.some((n) => n.reason === "fallback")) {
@@ -2222,6 +2278,19 @@ export async function computeCascadeForFile(
 			}
 		}
 
+		// #3157: ONE row per cascade run, covering every neighbour the four display
+		// sites filtered — never one per neighbour. `durationMs` covers the content
+		// reads the fold added, so the cost AC 3 measures is visible in the same
+		// per-phase record as every other cascade cost. Silent when nothing was
+		// dropped; gated on EITHER counter inside `recordCascadeFindingPolicy`.
+		recordCascadeFindingPolicy({
+			filePath,
+			durationMs: Date.now() - policyStart,
+			suppressed: policyCounts.suppressed,
+			total: policyCounts.total,
+			auxSuppressed: policyCounts.auxSuppressed,
+		});
+
 		const visibleNeighbors = applyCascadeDeltaBaselines(neighbors);
 
 		const formatted = formatCascadeResult(
@@ -2229,6 +2298,7 @@ export async function computeCascadeForFile(
 			impact,
 			visibleNeighbors,
 			impact.neighborFiles.length,
+			policyCounts.suppressed,
 		);
 
 		// #1104 HONESTY: filtering a bound-false display candidate must not turn a
@@ -2455,6 +2525,12 @@ function appendFallbackNeighbors(
 	normalizedFileKey: string,
 	cwd: string,
 	filePath: string,
+	/** The run's shared display-policy seam (#3157) — see `cascadeDisplay` in
+	 * `computeCascadeForFile`. */
+	cascadeDisplay: (
+		rawDiags: readonly import("../lsp/client.js").LSPDiagnostic[],
+		neighborPath: string,
+	) => CascadeResult["neighbors"][number]["diagnostics"],
 	allowedPaths?: ReadonlySet<string>,
 ): boolean {
 	const now = Date.now();
@@ -2493,11 +2569,10 @@ function appendFallbackNeighbors(
 			continue;
 		}
 		// #692: `source: "cascade"` dropped — see the doc comment above the
-		// first cascade `convertLspDiagnostics` call site in this file.
-		const errors = convertLspDiagnostics(
-			diags.filter((d) => d.severity === 1).slice(0, MAX_PER_FILE),
-			diagPath,
-		);
+		// first cascade display call site in this file.
+		// #3157 site 4 of 4: the degraded fallback. `cascadeDisplay` is passed in
+		// rather than re-derived so this run's aggregate drop counters see it too.
+		const errors = cascadeDisplay(diags, diagPath);
 		if (errors.length === 0) continue;
 		neighbors.push({
 			filePath: diagPath,
@@ -2532,6 +2607,8 @@ function formatCascadeResult(
 	impact: ReturnType<typeof computeImpactCascade>,
 	neighbors: CascadeResult["neighbors"],
 	totalNeighbors: number,
+	/** This run's aggregate policy-stack drops (#3157). */
+	policySuppressed: number,
 ): string {
 	const diagnosticsBlock = formatCascadeNeighborDiagnostics(cwd, neighbors, {
 		noun: "neighbor",
@@ -2558,6 +2635,19 @@ function formatCascadeResult(
 			? `${truncated} more dependent file(s): ${truncatedNames}`
 			: `${truncated} more dependent file(s)`;
 		out += `\n... and ${moreLabel}`;
+	}
+
+	// #1616 / #3157: a delivery that still has something to say states what it
+	// dropped, once per delivery — the same sentence the quiet-window cascade run
+	// (`buildResolvedFoundCascadeRun`) and the late-auxiliary advisory render, so
+	// the two cascade lanes do not disagree about whether a mark is worth
+	// mentioning. Policy drops only: an aux drop is the file's own suppression
+	// comment, which the per-edit dispatch path honours silently too, and it stays
+	// in the `cascade_finding_policy` record. A run with NOTHING left returned ""
+	// above and says nothing at all — silence is not a claim that a neighbour is
+	// clean.
+	if (policySuppressed > 0) {
+		out += `\nsuppressed by disposition: ${policySuppressed} finding(s) (marked false-positive or won't-fix).`;
 	}
 
 	return out;
