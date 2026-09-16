@@ -187,11 +187,31 @@ describe("tmp-fixture-hygiene", () => {
 		const liveRoot = path.join(fixture, "orphan-backstop-owner-guard-live");
 		for (const file of [oldRoot, liveRoot])
 			fs.writeFileSync(file, JSON.stringify({ lastSweepAt: 1 }));
+		// #3109: the last member of this class in this directory. The
+		// `tmp-hygiene-baseline-<run>.json` record is written once per run and
+		// only ever removed by the owner-inclusive run that wrote it
+		// (`cleanupTmpHygiene`'s own `fs.rmSync`) — an owner-less (targeted) run
+		// never reaches that line, so a foreign one accumulates for ever, the
+		// same shape as `oldRoot` above. `liveBaseline` stands in for THIS run's
+		// own record: fresh, and must survive this call the way `mine` above
+		// does not, because it is consumed explicitly afterward, not by this
+		// sweep.
+		const oldBaseline = path.join(
+			fixture,
+			"tmp-hygiene-baseline-owner-guard-old.json",
+		);
+		const liveBaseline = path.join(
+			fixture,
+			"tmp-hygiene-baseline-owner-guard-live.json",
+		);
+		for (const file of [oldBaseline, liveBaseline])
+			fs.writeFileSync(file, JSON.stringify({ tmp: [], backstopRoot: {} }));
 		// A day old: past any six-hour window, and far past the 16-minute
 		// worst-case vitest invocation the window is sized against.
 		const dayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
 		fs.utimesSync(oldForeign, dayAgo, dayAgo);
 		fs.utimesSync(oldRoot, dayAgo, dayAgo);
+		fs.utimesSync(oldBaseline, dayAgo, dayAgo);
 		// Round 5: `mine`'s mtime is put two seconds INTO THE FUTURE, the
 		// boundary that redded CI (run 35072411511). A directory created
 		// microseconds before the sweep can carry a filesystem timestamp later
@@ -201,12 +221,14 @@ describe("tmp-fixture-hygiene", () => {
 		const soon = new Date(Date.now() + 2_000);
 		fs.utimesSync(mine, soon, soon);
 		try {
-			removeRunBackstopDirs(fixture);
+			removeRunBackstopDirs(fixture, fixture);
 			expect(fs.existsSync(mine)).toBe(false);
 			expect(fs.existsSync(liveForeign)).toBe(true);
 			expect(fs.existsSync(oldForeign)).toBe(false);
 			expect(fs.existsSync(oldRoot)).toBe(false);
 			expect(fs.existsSync(liveRoot)).toBe(true);
+			expect(fs.existsSync(oldBaseline)).toBe(false);
+			expect(fs.existsSync(liveBaseline)).toBe(true);
 		} finally {
 			fs.rmSync(fixture, { recursive: true, force: true });
 		}

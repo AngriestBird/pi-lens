@@ -251,7 +251,10 @@ vi.mock("../../clients/instance-reaper-state.js", () => ({
  */
 const BACKSTOP_STALE_MS = 6 * 60 * 60 * 1000;
 
-export function removeRunBackstopDirs(home: string = tmpHygieneHome): void {
+export function removeRunBackstopDirs(
+	home: string = tmpHygieneHome,
+	baselineDir: string = path.dirname(tmpHygieneBaselinePath),
+): void {
 	sweepScratchDirs(home, backstopRunPrefix, { maxAgeMs: SWEEP_ANY_AGE });
 	sweepScratchDirs(home, "backstop-", { maxAgeMs: BACKSTOP_STALE_MS });
 	// Round 4 F4, second half: the baseline stops root-level residue accusing an
@@ -264,6 +267,25 @@ export function removeRunBackstopDirs(home: string = tmpHygieneHome): void {
 	for (const [name, mtimeMs] of Object.entries(rootBackstopSnapshot(home))) {
 		if (Date.now() - mtimeMs < BACKSTOP_STALE_MS) continue;
 		removeTempDirSync(path.join(home, name));
+	}
+	// #3109: the last member of this class in this directory. The baseline
+	// record above (`tmpHygieneBaselinePath`) is written once per run and only
+	// ever consumed by `cleanupTmpHygiene`'s own `fs.rmSync` below — an
+	// owner-less (targeted) run never reaches that line, so its file
+	// accumulates under the persistent home for the checkout's lifetime, the
+	// same unbounded shape as the two rows above. Same window, same rule: a
+	// file this run did not just write and that is older than
+	// `BACKSTOP_STALE_MS` belongs to a run whose owner never ran. This run's
+	// OWN file is always younger than the window at this point in
+	// `cleanupTmpHygiene` (it was read or written at setup, moments ago), so it
+	// is untouched here and removed explicitly afterward.
+	for (const name of readTmpDirEntries(baselineDir)) {
+		if (!name.startsWith("tmp-hygiene-baseline-")) continue;
+		const entryPath = path.join(baselineDir, name);
+		const mtimeMs = fs.statSync(entryPath, { throwIfNoEntry: false })?.mtimeMs;
+		if (mtimeMs === undefined || Date.now() - mtimeMs < BACKSTOP_STALE_MS)
+			continue;
+		removeTempDirSync(entryPath);
 	}
 }
 
