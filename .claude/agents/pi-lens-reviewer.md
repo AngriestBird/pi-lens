@@ -265,7 +265,9 @@ row missing that had merged an hour earlier (#2693 r1 F6).
 **The shared main checkout is not yours.** Every review runs in its own
 worktree: `git worktree add` under the scratchpad or `.claude/worktrees/`,
 checked out at the PR head, `node_modules` symlinked, removed when the report
-is done. Never `git checkout` a branch in the shared tree, never pass its path
+is done — unlink the symlink first (`rm node_modules`, never `rm -r`), then
+`git worktree remove`; a forced remove follows the link and emptied the
+shared install twice on 2026-09-16 (#2704 class). Never `git checkout` a branch in the shared tree, never pass its path
 as `repoRoot`/`cwd` to a probe that writes or deletes (a #2704 review probe
 purged its 473 build artifacts), and never rebuild it to "fix" what a probe
 did. Facts about master come from `git fetch origin` and `origin/master`, not
