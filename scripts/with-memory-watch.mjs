@@ -72,9 +72,64 @@ import {
  * #2093 verify reproduced the loss post-fix, `ok bytes=86 of 86` and no line at
  * the reader). That is a separate OS teardown behavior no write mechanism here
  * closes. The wrapper's durability guarantee is CI-grade (Linux) only.
+ *
+ * #3097: fd 1 is not reliably blocking, and the wrapper does not get a vote.
+ * `stdio: "inherit"` hands the child the SAME open file description, and libuv
+ * sets O_NONBLOCK on it as soon as the child initialises its own
+ * `process.stdout` on a pipe -- after this wrapper has started, so nothing
+ * clearable at startup helps. A `writeSync` to a full pipe then throws EAGAIN
+ * instead of blocking, and on CI run 35067086859 that throw came out of the
+ * sampler's `setInterval` callback and killed the wrapper with exit 1, under
+ * exactly the reader backpressure it exists to survive. Retrying on EAGAIN is
+ * what restores the blocking semantics the paragraph above describes: it
+ * retries for as long as a blocking write would have waited -- indefinitely,
+ * because a blocking `writeSync` to a pipe whose reader never drains never
+ * returns either (probed on this same wrapper, exit=null after 3 s). A cap
+ * would be strictly LESS durable than the blocking write it emulates: the
+ * verdict line would be dropped in the one case #2093 exists to cover, a
+ * reader that is slow rather than gone. A reader that is GONE closes the pipe,
+ * which is EPIPE, not EAGAIN, and takes the degradation path below.
  */
+const WRITE_RETRY_SLEEP_MS = 5;
+// Nothing in the stdlib waits for a fd to become writable synchronously, and a
+// bare retry loop would spin a core on the memory-pressured host this wrapper
+// is measuring. `Atomics.wait` is the one sleep that yields the CPU.
+const retryPark = new Int32Array(new SharedArrayBuffer(4));
+let writeFailureNoted = false;
+
+/**
+ * A write failure that is not EAGAIN is permanent (EPIPE, EBADF): retrying
+ * cannot help and throwing kills the wrapped job. Record it once -- once per
+ * process, not once per tick, because every later tick hits the same dead fd --
+ * and let the child's exit code stay the story.
+ */
+function noteWriteFailureOnce(error) {
+	if (writeFailureNoted) return;
+	writeFailureNoted = true;
+	try {
+		fs.writeSync(2, `[mem-watch] record dropped: ${error.message}\n`);
+	} catch {
+		// stderr is no healthier than stdout was. The record is already lost;
+		// dying while reporting that would lose the exit code too.
+	}
+}
+
 function emit(line, fd = 1) {
-	fs.writeSync(fd, line);
+	for (;;) {
+		try {
+			fs.writeSync(fd, line);
+			return;
+		} catch (error) {
+			// A `writeSync` that throws wrote nothing (the syscall returned -1),
+			// so the whole line is retried without risking a duplicated prefix.
+			if (error?.code === "EAGAIN") {
+				Atomics.wait(retryPark, 0, 0, WRITE_RETRY_SLEEP_MS);
+				continue;
+			}
+			noteWriteFailureOnce(error);
+			return;
+		}
+	}
 }
 
 const separator = process.argv.indexOf("--");
