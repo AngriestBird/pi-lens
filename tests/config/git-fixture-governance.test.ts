@@ -212,11 +212,30 @@ function gitArgumentTokens(argsText: string): string[] {
  * The argument tokens of a HISTORY subcommand, or an empty list when this
  * spawn is not one. Global options are stepped over the way git steps over
  * them, so `["-C", dir, "show", rev]` resolves to `show` and not to `-C`.
+ *
+ * #3093: the walk resolves a subcommand by POSITION, and a position can be
+ * {@link OPAQUE_ELEMENT} instead of a flag or a subcommand name -- a spread
+ * (`[...base, "show", sha]`) or a bare variable ahead of the subcommand.
+ * `execFileSync("git", [...base, "show", sha])` used to resolve `subcommand`
+ * to the placeholder, fail `HISTORY_SUBCOMMANDS.has()`, and return `[]`:
+ * silent, not a red flag, even though the real argv git receives could well
+ * start with `show`. The walk cannot know what an opaque prefix hides -- it
+ * could be more flags, or the subcommand itself -- so the moment the walk
+ * would classify an opaque element as a flag or as the subcommand, it stops
+ * resolving and scans EVERY token instead of none: an unknown subcommand
+ * position is flagged, not cleared. That is the safe direction (a stray
+ * fixture path or flag value re-scanned as an argument is a false positive
+ * that reds loudly; a silently skipped file is not).
+ *
+ * `--git-dir=<path>` and `--work-tree=<path>` need no entry in
+ * {@link GIT_TWO_TOKEN_FLAGS}: each is one self-contained token, already
+ * stepped over by the generic `token.startsWith("-")` branch below.
  */
 function historyArgumentTokens(tokens: readonly string[]): string[] {
 	let index = 0;
 	while (index < tokens.length) {
 		const token = tokens[index] ?? "";
+		if (token === OPAQUE_ELEMENT) return [...tokens];
 		if (GIT_TWO_TOKEN_FLAGS.has(token)) {
 			index += 2;
 			continue;
@@ -742,6 +761,71 @@ describe("real Git fixture governance", () => {
 					file: "tests/clients/synthetic.test.ts",
 					source:
 						'execFileSync("git", ["-C", dir, "show", "ca2639524:clients/x.ts"]);',
+				},
+			]),
+		).toEqual(["tests/clients/synthetic.test.ts:1 ca2639524"]);
+	});
+
+	it("steps over --git-dir=<path> and --work-tree=<path> to find the subcommand", () => {
+		// Already correct before #3093: each is one self-contained token, so
+		// the generic `token.startsWith("-")` branch steps over it. Pinned here
+		// so the #3093 opaque-prefix fix cannot regress the already-working
+		// forms named in its acceptance criteria alongside `-C`/`-c`.
+		expect(
+			findHistoricalCommitIshOffenders([
+				{
+					file: "tests/clients/synthetic.test.ts",
+					source:
+						'execFileSync("git", ["--git-dir=/f/.git", "show", "ca2639524:clients/x.ts"]);\n' +
+						'execFileSync("git", ["--work-tree=/f", "show", "20896a56b:clients/y.ts"]);',
+				},
+			]),
+		).toEqual([
+			"tests/clients/synthetic.test.ts:1 ca2639524",
+			"tests/clients/synthetic.test.ts:2 20896a56b",
+		]);
+	});
+
+	it("flags a spread ahead of the subcommand instead of silently clearing the site (#3093)", () => {
+		// The bug this issue exists to fix. `base` occupies the position the
+		// walk resolves as a flag-or-subcommand; before the fix it collapsed to
+		// OPAQUE_ELEMENT, failed HISTORY_SUBCOMMANDS.has(), and the whole site
+		// returned [] -- a real `git show <sha>` spawn went unscanned.
+		expect(
+			findHistoricalCommitIshOffenders([
+				{
+					file: "tests/clients/synthetic.test.ts",
+					source:
+						'execFileSync("git", [...base, "show", "ca2639524:clients/x.ts"]);',
+				},
+			]),
+		).toEqual(["tests/clients/synthetic.test.ts:1 ca2639524"]);
+	});
+
+	it("flags a bare variable ahead of the subcommand the same way as a spread (#3093)", () => {
+		// A non-spread opaque element (a variable standing in for a flag list,
+		// not a literal) in the same position must be treated identically --
+		// the walk has no way to tell the two apart once the array element
+		// fails {@link QUOTED_ITEM} and collapses to the same placeholder.
+		expect(
+			findHistoricalCommitIshOffenders([
+				{
+					file: "tests/clients/synthetic.test.ts",
+					source:
+						'execFileSync("git", [globalArgs, "show", "ca2639524:x.ts"]);',
+				},
+			]),
+		).toEqual(["tests/clients/synthetic.test.ts:1 ca2639524"]);
+	});
+
+	it("still resolves the subcommand when a spread trails behind it, not ahead (#3093)", () => {
+		// Round-1 shape already worked and must stay working: the opaque
+		// element after "show" is not on the walk's flag/subcommand path.
+		expect(
+			findHistoricalCommitIshOffenders([
+				{
+					file: "tests/clients/synthetic.test.ts",
+					source: 'execFileSync("git", ["show", ...extra, "ca2639524:a.ts"]);',
 				},
 			]),
 		).toEqual(["tests/clients/synthetic.test.ts:1 ca2639524"]);
