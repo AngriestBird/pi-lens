@@ -154,6 +154,30 @@ describe("killProcessTree", () => {
 			expect(proc.unref).toHaveBeenCalled();
 		});
 
+		it("host-exit group kill still fires when the handle already reported exit", async () => {
+			// #3091 F1, the arm a Linux lane cannot reach: on a platform WITHOUT
+			// /proc the handle is the only ownership evidence, so passing it at
+			// this site would refuse the group kill whenever the direct child had
+			// already died — and `processExiting` deliberately skips the exited
+			// early return precisely so an already-dead child can still have its
+			// GROUP reaped (#2026). `killPosixProcessGroup` therefore does not
+			// pass the handle; `killWindowsTree` still does, because a recycled
+			// Windows pid under `taskkill /F /T` is what that check exists for.
+			const proc = {
+				kill: vi.fn(() => true),
+				unref: vi.fn(),
+				exitCode: 0,
+				once: vi.fn(),
+				off: vi.fn(),
+			};
+			await killProcessTree(proc, 4242, {
+				fast: true,
+				processExiting: true,
+			});
+
+			expect(processKillSpy).toHaveBeenCalledWith(-4242, "SIGTERM");
+		});
+
 		it("never negates a non-positive pid into a group kill (guards process.kill(-0))", async () => {
 			// process.kill(-0, sig) would signal pi-lens's OWN process group.
 			// The pid<=0 guard must skip the group path entirely and only touch
