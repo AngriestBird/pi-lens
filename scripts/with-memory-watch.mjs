@@ -98,23 +98,73 @@ const retryPark = new Int32Array(new SharedArrayBuffer(4));
 let writeFailureNoted = false;
 
 /**
+ * #3110 round 2 review F1: routing the once-only note through `emit()`
+ * inherits its UNBOUNDED EAGAIN park (the paragraph above -- correct for the
+ * verdict line, which #2093 requires never drop). The note is a different
+ * contract: it exists to survive a reader that is merely SLOW (#3110), not
+ * one that never drains at all. With stdout dead and stderr live-but-never-
+ * draining, an unbounded retry INSIDE the sampler's `setInterval` callback
+ * blocks the event loop forever -- `child.on("exit")` never runs, the
+ * wrapper never forwards the exit code, and CI sees a job timeout with no
+ * exit status, which is worse than the dropped note #3110 fixes. Only the
+ * note's own `emit()` call takes this cap (below); the verdict line and every
+ * other call keep the unbounded park unconditionally.
+ *
+ * 400ms: generous next to the #3110 recovery shape this cap exists for (a
+ * reader that resumes on a ~100ms cadence gets several chances well inside
+ * it), and short next to a typical wrapped command's own runtime. Measured,
+ * not guessed: with the WRAPPED COMMAND still alive, the retry loop parks
+ * cleanly on EAGAIN and gives up exactly at the deadline for any cap tried
+ * (500ms-2000ms, hundreds of iterations, no stall). The moment the wrapped
+ * command itself has already exited while the retry is still in flight,
+ * further `writeSync` calls on the fd it shared via `stdio: "inherit"` were
+ * observed to stop returning EAGAIN and block outright -- a real hang no
+ * `Date.now()` check between retries can preempt, reproduced 3/3 at every
+ * cap from 1000ms up against a probe whose command exits at 600ms, clean 5/5
+ * at every cap from 500ms down. 400ms keeps a safety margin under that
+ * boundary rather than riding it.
+ */
+const NOTE_WRITE_MAX_WAIT_MS = 400;
+
+/**
  * A write failure that is not EAGAIN is permanent (EPIPE, EBADF): retrying
  * cannot help and throwing kills the wrapped job. Record it once -- once per
  * process, not once per tick, because every later tick hits the same dead fd --
  * and let the child's exit code stay the story.
+ *
+ * #3110: this used to write the note with a raw, un-retried `fs.writeSync(2,
+ * ...)` in a bare catch. Fd 1 dying (EPIPE) says nothing about fd 2's health --
+ * a slow reader on stderr leaves it merely FULL, which is EAGAIN, not EPIPE --
+ * and a raw write there dropped the note for good (reproduced 3/3: full stderr
+ * pipe + destroyed stdout -> noteCount 0, catch code EAGAIN). `emit()` already
+ * retries EAGAIN until the pipe drains; routing through it here is recursion
+ * safe ONLY because `writeFailureNoted` is set BEFORE calling it -- a
+ * genuinely dead stderr (EPIPE from emit's own catch) re-enters this function
+ * and returns immediately instead of looping. Setting the latch after the
+ * call reopens the #3097 unbounded-recursion failure mode (round 2 review
+ * F2): swapping the two lines below is what plants that mutation.
  */
 function noteWriteFailureOnce(error) {
 	if (writeFailureNoted) return;
 	writeFailureNoted = true;
-	try {
-		fs.writeSync(2, `[mem-watch] record dropped: ${error.message}\n`);
-	} catch {
-		// stderr is no healthier than stdout was. The record is already lost;
-		// dying while reporting that would lose the exit code too.
-	}
+	emit(
+		`[mem-watch] record dropped: ${error.message}\n`,
+		2,
+		NOTE_WRITE_MAX_WAIT_MS,
+	);
 }
 
-function emit(line, fd = 1) {
+/**
+ * @param {string} line
+ * @param {number} [fd]
+ * @param {number} [maxWaitMs] Give up (and degrade through
+ *   `noteWriteFailureOnce`) once this many milliseconds have been spent
+ *   parked on EAGAIN. Default `Infinity` preserves #2093's unconditional
+ *   blocking-write guarantee for every caller except the note (round 2
+ *   review F1).
+ */
+function emit(line, fd = 1, maxWaitMs = Number.POSITIVE_INFINITY) {
+	const deadline = Date.now() + maxWaitMs;
 	for (;;) {
 		try {
 			fs.writeSync(fd, line);
@@ -122,7 +172,7 @@ function emit(line, fd = 1) {
 		} catch (error) {
 			// A `writeSync` that throws wrote nothing (the syscall returned -1),
 			// so the whole line is retried without risking a duplicated prefix.
-			if (error?.code === "EAGAIN") {
+			if (error?.code === "EAGAIN" && Date.now() < deadline) {
 				Atomics.wait(retryPark, 0, 0, WRITE_RETRY_SLEEP_MS);
 				continue;
 			}

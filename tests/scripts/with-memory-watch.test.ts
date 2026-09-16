@@ -19,6 +19,18 @@ interface Run {
 }
 
 /**
+ * A private, per-call sample-file path under the real TMPDIR, never the
+ * wrapper's own default (`<tmpdir>/pi-lens-mem-watch-samples.log`, a single
+ * shared name every unpinned run would collide on and leak).
+ */
+function makeSampleFile(): string {
+	return path.join(
+		os.tmpdir(),
+		`pi-lens-mem-watch-test-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.log`,
+	);
+}
+
+/**
  * Run the wrapper and collect everything it wrote.
  *
  * `throttleMs` starves the stdout reader: each chunk pauses the stream and
@@ -36,6 +48,16 @@ interface Run {
  * wrapper has written its first line, which is the only moment at which a test
  * can kill the READ end of the pipe out from under a wrapper that is already
  * running. Folded in here for the same net-count reason as `extraEnv`.
+ *
+ * #3115: every case here runs the real wrapper, which falls back to a single
+ * shared `<tmpdir>/pi-lens-mem-watch-samples.log` whenever
+ * `PI_LENS_MEM_WATCH_SAMPLE_FILE` is unset -- only 2 of the file's 12 cases
+ * pinned it, so the other 10 leaked that fixed name into the shared TMPDIR,
+ * redding `tmp-fixture-hygiene` in a shared batch. Pinned here, once, for
+ * every caller that does not already want a specific path to read back; the
+ * file is removed once the wrapper has exited so a caller that DOES pass its
+ * own `PI_LENS_MEM_WATCH_SAMPLE_FILE` (to inspect it afterwards) keeps sole
+ * ownership of its cleanup.
  */
 function runWrapper(
 	args: string[],
@@ -45,11 +67,19 @@ function runWrapper(
 		child: ChildProcessByStdio<null, Readable, Readable>,
 	) => void,
 ): Promise<Run> {
+	const ownsSampleFile = extraEnv.PI_LENS_MEM_WATCH_SAMPLE_FILE === undefined;
+	const sampleFile = ownsSampleFile
+		? makeSampleFile()
+		: extraEnv.PI_LENS_MEM_WATCH_SAMPLE_FILE;
 	return new Promise((resolve, reject) => {
 		const child = spawn(process.execPath, [wrapper, ...args], {
 			cwd: repoRoot,
 			stdio: ["ignore", "pipe", "pipe"],
-			env: { ...process.env, ...extraEnv },
+			env: {
+				...process.env,
+				PI_LENS_MEM_WATCH_SAMPLE_FILE: sampleFile,
+				...extraEnv,
+			},
 		});
 		let stdout = "";
 		let stderr = "";
@@ -71,7 +101,10 @@ function runWrapper(
 			stderr += chunk;
 		});
 		child.on("error", reject);
-		child.on("close", (code) => resolve({ code, stdout, stderr }));
+		child.on("close", (code) => {
+			if (ownsSampleFile) fs.rmSync(sampleFile, { force: true });
+			resolve({ code, stdout, stderr });
+		});
 	});
 }
 
@@ -233,6 +266,219 @@ describe("with-memory-watch verdict durability (#2042)", () => {
 		).toBe(1);
 		expect(run.stderr).toContain("record dropped: EPIPE");
 	}, 30_000);
+
+	it("still writes the failure note when stderr is merely full, not dead", async () => {
+		// #3110, from the #3106 review: the case above kills stdout while
+		// stderr stays a healthy pipe the test reads immediately, so the
+		// wrapper's raw `fs.writeSync(2, ...)` note-write always had room and
+		// always succeeded there. It does NOT cover fd 2 being a live but
+		// FULL pipe -- a slow reader on stderr, not a dead one -- which is
+		// EAGAIN, not EPIPE, on the write. A bare `try { writeSync } catch {}`
+		// around that write drops the note for good on that path: reproduced
+		// 3/3 with this exact scenario before the fix (see PR body).
+		//
+		// Bypasses `runWrapper`'s single stdout throttle: this needs stdout
+		// DESTROYED (dead) and stderr merely BACKED UP (full) at the same
+		// time, which needs independent control of both streams. The
+		// grandchild floods stderr continuously (not stdout) so the pipe
+		// wrapper and grandchild share via `stdio: "inherit"` backs up while
+		// this test's own stderr reader is paused; stdout is destroyed once
+		// there has been time for that backpressure to build, so the next
+		// tick's normal stdout write throws EPIPE and the resulting note-write
+		// attempt on stderr lands while stderr is still full.
+		//
+		// Round-2 review F3: a fixed 100ms stderr-resume cadence from the
+		// START left room in the pipe often enough that the 150ms stdout kill
+		// could land on a write that just succeeds -- measured 1 lap in 5
+		// green on PRE-FIX code (the raw `fs.writeSync` + bare catch), which
+		// proves nothing. Resuming on a SLOW 400ms cadence until stdout is
+		// confirmed dead keeps the pipe reliably full at the moment that
+		// matters; only once `stdoutDead` flips does the reader speed back up
+		// to 100ms, which is what lets a FIXED wrapper's note through.
+		const sampleFile = makeSampleFile();
+		const grandchildScript =
+			"const iv=setInterval(()=>{process.stderr.write('x'.repeat(65536));},2);" +
+			"setTimeout(()=>{clearInterval(iv);process.exit(0);},600);";
+		const run = await new Promise<Run>((resolve, reject) => {
+			const child = spawn(
+				process.execPath,
+				[wrapper, "--", nodeCmd, "-e", grandchildScript],
+				{
+					cwd: repoRoot,
+					stdio: ["ignore", "pipe", "pipe"],
+					env: {
+						...process.env,
+						PI_LENS_MEM_WATCH_INTERVAL_MS: "20",
+						PI_LENS_MEM_WATCH_LOW_MB: "999999999",
+						PI_LENS_MEM_WATCH_SAMPLE_FILE: sampleFile,
+					},
+				},
+			);
+			let stdout = "";
+			let stderr = "";
+			let stdoutDead = false;
+			child.stdout.setEncoding("utf8");
+			child.stderr.setEncoding("utf8");
+			child.stdout.on("data", (chunk: string) => {
+				stdout += chunk;
+			});
+			child.stderr.on("data", (chunk: string) => {
+				stderr += chunk;
+				child.stderr.pause();
+				setTimeout(() => child.stderr.resume(), stdoutDead ? 100 : 400);
+			});
+			setTimeout(() => {
+				try {
+					child.stdout.destroy();
+				} catch {
+					// already gone
+				}
+				stdoutDead = true;
+			}, 150);
+			child.on("error", reject);
+			child.on("close", (code) => resolve({ code, stdout, stderr }));
+		});
+		try {
+			expect(run.code, run.stderr.slice(-2000)).toBe(0);
+			expect(
+				run.stderr.match(/\[mem-watch\] record dropped:/g)?.length ?? 0,
+				run.stderr.slice(-2000),
+			).toBe(1);
+			expect(run.stderr).toContain("record dropped: EPIPE");
+		} finally {
+			fs.rmSync(sampleFile, { force: true });
+		}
+	}, 30_000);
+
+	it("bounds the note-write retry so a permanently full stderr cannot hang the wrapper", async () => {
+		// Round-2 review F1: routing the once-only note through the retrying
+		// `emit()` inherits its UNBOUNDED EAGAIN park. With stdout dead and
+		// stderr live but NEVER drained at all (the reader here attaches no
+		// listener, so the OS pipe fills and stays full), the note-write
+		// retry loop parks inside the sampler's `setInterval` callback and
+		// blocks the event loop forever: `child.on("exit")` never runs, and a
+		// CI job sees a timeout with no exit status at all -- worse than the
+		// dropped note #3110 fixes. Reproduced 3/3 on the round-1 fix (an
+		// uncapped `emit()`): no close within 8s. A capped retry gives up and
+		// lets the wrapper forward the child's exit code.
+		//
+		// Deliberately does NOT attach any `data` listener to `child.stderr`
+		// -- attaching one, even to just discard chunks, switches the stream
+		// into flowing mode and drains the underlying pipe, which is exactly
+		// the condition this case must NOT have.
+		const sampleFile = makeSampleFile();
+		const grandchildScript =
+			"const iv=setInterval(()=>{process.stderr.write('x'.repeat(65536));},2);" +
+			"setTimeout(()=>{clearInterval(iv);process.exit(7);},3000);";
+		try {
+			const run = await new Promise<{
+				code: number | null;
+				timedOut: boolean;
+			}>((resolve, reject) => {
+				const child = spawn(
+					process.execPath,
+					[wrapper, "--", nodeCmd, "-e", grandchildScript],
+					{
+						cwd: repoRoot,
+						stdio: ["ignore", "pipe", "pipe"],
+						env: {
+							...process.env,
+							PI_LENS_MEM_WATCH_INTERVAL_MS: "20",
+							PI_LENS_MEM_WATCH_LOW_MB: "999999999",
+							PI_LENS_MEM_WATCH_SAMPLE_FILE: sampleFile,
+						},
+					},
+				);
+				child.stdout.on("data", () => {
+					// Drained (unlike stderr): destroying it below is what forces
+					// the wrapper's regular ticks into the EPIPE/note-write path.
+				});
+				setTimeout(() => {
+					try {
+						child.stdout.destroy();
+					} catch {
+						// already gone
+					}
+				}, 150);
+				child.on("error", reject);
+				child.on("close", (code) => resolve({ code, timedOut: false }));
+				setTimeout(() => {
+					child.kill("SIGKILL");
+					resolve({ code: null, timedOut: true });
+				}, 8_000);
+			});
+			expect(run.timedOut, "wrapper did not exit within 8s -- hung").toBe(
+				false,
+			);
+			expect(run.code).toBe(7);
+		} finally {
+			fs.rmSync(sampleFile, { force: true });
+		}
+	}, 15_000);
+
+	it("still forwards the child's exit code when stdout and stderr die together", async () => {
+		// Round-2 review F2: the recursion-termination claim in
+		// `noteWriteFailureOnce`'s docstring ("writeFailureNoted set BEFORE
+		// calling emit") had no test -- swapping the two lines (compile-valid)
+		// left every existing case green, because every existing case kills
+		// at most ONE of the two fds. With BOTH fds dead, every `emit` call --
+		// the tick's own AND the note's -- throws EPIPE; the latch-after-call
+		// order lets `noteWriteFailureOnce` re-enter itself before the latch
+		// is set, recursing once per tick until the call stack overflows and
+		// an uncaught `RangeError` kills the wrapper with Node's default exit
+		// code 1 instead of forwarding the child's real exit code (the #3097
+		// failure mode). Measured on the mutation: 3/3 runs close at ~120ms
+		// with code 1, never 7.
+		const sampleFile = makeSampleFile();
+		const grandchildScript = "setTimeout(()=>{process.exit(7);},300);";
+		try {
+			const run = await new Promise<Run>((resolve, reject) => {
+				const child = spawn(
+					process.execPath,
+					[wrapper, "--", nodeCmd, "-e", grandchildScript],
+					{
+						cwd: repoRoot,
+						stdio: ["ignore", "pipe", "pipe"],
+						env: {
+							...process.env,
+							PI_LENS_MEM_WATCH_INTERVAL_MS: "20",
+							PI_LENS_MEM_WATCH_LOW_MB: "999999999",
+							PI_LENS_MEM_WATCH_SAMPLE_FILE: sampleFile,
+						},
+					},
+				);
+				let stdout = "";
+				let stderr = "";
+				let sawFirstChunk = false;
+				child.stdout.setEncoding("utf8");
+				child.stderr.setEncoding("utf8");
+				child.stdout.on("data", (chunk: string) => {
+					stdout += chunk;
+					if (!sawFirstChunk) {
+						sawFirstChunk = true;
+						try {
+							child.stdout.destroy();
+						} catch {
+							// already gone
+						}
+						try {
+							child.stderr.destroy();
+						} catch {
+							// already gone
+						}
+					}
+				});
+				child.stderr.on("data", (chunk: string) => {
+					stderr += chunk;
+				});
+				child.on("error", reject);
+				child.on("close", (code) => resolve({ code, stdout, stderr }));
+			});
+			expect(run.code).toBe(7);
+		} finally {
+			fs.rmSync(sampleFile, { force: true });
+		}
+	}, 15_000);
 });
 
 /**
@@ -270,20 +516,19 @@ describe("with-memory-watch verdict wiring (#2042)", () => {
 // OWN real setInterval sampling tick to reach disk, which cannot be faked
 // from the test process (a separate real child process); a fixed sleep here
 // flaked under concurrent vitest workers, so this waits for the actual
-// condition (file exists) instead.
+// condition (file exists) instead. Round-2 review S1: the file's other raw
+// timer waits are the same non-fakeable shape from a different angle -- a
+// slow-reader's resume cadence (stderr backpressure a real OS pipe has to
+// actually drain) and a fixed grace delay before a real, separately spawned
+// process is expected to have exited (`stdout`/`stderr` destroy timing and
+// the note-write cap's own bound) -- not the sample-tail poll this comment
+// originally named.
 /**
  * #2042 2026-09-15 diagnosis, section A: the cheapest probe. End-to-end
  * through the real wrapper, not the library functions directly, so the wiring
  * between the interval tick and the on-disk file is what is under test.
  */
 describe("with-memory-watch sample tail (#2042 2026-09-15)", () => {
-	function makeSampleFile(): string {
-		return path.join(
-			os.tmpdir(),
-			`pi-lens-mem-watch-test-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.log`,
-		);
-	}
-
 	// Round-2 review F2: replaces the old ring-buffer "never grows past the
 	// cap" case. The sampler no longer caps anything it writes -- an
 	// append-only file can never lose an earlier line to a rewrite, which is
