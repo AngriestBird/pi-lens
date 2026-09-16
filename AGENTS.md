@@ -241,10 +241,12 @@ and PR language; detailed historical examples are in `HISTORY.md`.
     be alignment, not one nesting unit. Known members: an aligned continuation
     inside a call (#3038), the interior of a block comment, whose ` * ` lines
     sit one column past their opener (#3039), the same block-comment interior
-    picked as `indent-retarget.ts`'s extrapolation base unit (#3052), and a
-    multi-line template literal's interior (#3059). Name which lines carry
-    structure and exclude the rest before counting; decline rather than pin a
-    style when only ambiguous runs remain.
+    picked as `indent-retarget.ts`'s extrapolation base unit (#3052), a
+    multi-line template literal's interior (#3059), and the same
+    template-literal interior picked as `indent-retarget.ts`'s extrapolation
+    base unit (#3116). Name which lines carry structure and exclude the rest
+    before counting; decline rather than pin a style when only ambiguous runs
+    remain.
 50. **Test double's fabricated identifier reaching code that acts on it:** a
     pid, fd, port, lock path or handle invented by a mock is handed to
     PRODUCTION code that registers, signals, writes or deletes by that

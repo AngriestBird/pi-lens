@@ -829,3 +829,99 @@ describe("#3052 indent autopatch does not retarget from a comment's alignment", 
 		}
 	});
 });
+
+// #3116: the same indent-autopatch bridge must not pick a multi-line
+// template literal's interior alignment as the base nesting unit either
+// (AGENTS.md defect 49, fifth member; #3052's own case for block comments).
+// Drives the actual production sequence end to end (no hand-rolled
+// reimplementation of retargetReplacementIndentation).
+describe("#3116 indent autopatch does not retarget from a template literal's alignment", () => {
+	it("patches newText's deeper nesting from the code's own indent unit, not the template's", async () => {
+		mockPipelineSucceeds();
+		const env = setupTestEnvironment("pi-lens-3116-premise-");
+		try {
+			// The real file already has the corrected indentation: a 1-space
+			// template-literal interior (template ratio 1->2) and a 4-space code
+			// line whose OWN ratio (4->3) differs from the template's.
+			const corrected =
+				"const HELP = `\n  text\n`;\nfunction f() {\n   go();\n}\n";
+			const filePath = createTempFile(env.tmpDir, "src/f.ts", corrected);
+			// The model's oldText guess (mismatched vs. the real file) and a
+			// newText whose second line nests one level deeper than anything
+			// oldText showed the corrector.
+			const oldText = "const HELP = `\n text\n`;\nfunction f() {\n    go();\n}";
+			const newText = "function g() {\n    a();\n        b();\n}";
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			const event = {
+				toolName: "edit",
+				input: { path: filePath, oldText, newText },
+			};
+
+			await handleToolCall(
+				baseDeps({ runtime, ctx: { cwd: env.tmpDir }, event }),
+			);
+
+			// Pre-fix, this exact input patched `b();` to 16 literal spaces (the
+			// template's 1-space unit doubled 8 times) instead of the
+			// code-derived 6 — quoted in the PR body's premise transcript.
+			expect((event.input as { newText: string }).newText).toBe(
+				"function g() {\n   a();\n      b();\n}",
+			);
+		} finally {
+			env.cleanup();
+		}
+	});
+});
+
+// #3116 review round 2, F1 probe (b): the same bridge must not mis-scale
+// when the agent's oldText fragment crosses a template-literal boundary —
+// here, from one template's closer, through real code, into a SECOND
+// template's own interior line. Drives the actual production sequence (real
+// file on disk, real handleToolCall -> tryCorrectIndentationMismatchFromContent
+// -> retargetReplacementIndentation) so the fix is proven through the same
+// matchNormalizedContent/findUniqueMatchLineRange wiring runtime-tool-call.ts
+// uses, not a hand-fed fileContext.
+describe("#3116 review round 2 — indent autopatch resolves a boundary-crossing fragment via the real file", () => {
+	it("resolves the deeper newText line from the code's own ratio, not the second template's", async () => {
+		mockPipelineSucceeds();
+		const env = setupTestEnvironment("pi-lens-3116-r2-f1b-");
+		try {
+			// Real file: template A (interior "   p", 3sp), real code ("go();",
+			// 2sp), template B (interior "   q", 3sp).
+			const corrected =
+				"const A = `\n   p\n`;\nfunction f() {\n  go();\n}\nconst B = `\n   q\n`;\n";
+			const filePath = createTempFile(env.tmpDir, "src/f.ts", corrected);
+			// The agent's oldText fragment starts at template A's CLOSER and ends
+			// at template B's interior line — crossing straight through B's
+			// opener. Both indentation-mismatched vs. the real file: "go();" at
+			// 4sp (real: 2sp) and "q" at 2sp (real: 3sp).
+			const oldText = "`;\nfunction f() {\n    go();\n}\nconst B = `\n  q";
+			const newText = "function g() {\n    a();\n        b();\n}";
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			const event = {
+				toolName: "edit",
+				input: { path: filePath, oldText, newText },
+			};
+
+			await handleToolCall(
+				baseDeps({ runtime, ctx: { cwd: env.tmpDir }, event }),
+			);
+
+			// A fragment-only lexer reads A's closer backtick as an opener and
+			// B's opener backtick as a closer, wrongly excluding "go();"'s
+			// indent from the base pick while wrongly leaving "q"'s indent
+			// eligible — producing 12 literal spaces for `b();` (the template's
+			// 2->3 ratio, scaled x4) instead of the code-derived 4 (its own
+			// 4->2 ratio, halved twice). Reproduced directly against
+			// retargetReplacementIndentation before this test was written (PR
+			// body, F1 probe b transcript).
+			expect((event.input as { newText: string }).newText).toBe(
+				"function g() {\n  a();\n    b();\n}",
+			);
+		} finally {
+			env.cleanup();
+		}
+	});
+});
