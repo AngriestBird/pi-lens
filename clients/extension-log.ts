@@ -304,8 +304,10 @@ function isCaptureSeam(prop: PropertyKey): boolean {
  * unbound for exactly this hazard ("`bind()` … drops the schema surface …
  * so a bound schema later stringifies to `undefined`"). Matching it means
  * pi-lens declines to wrap precisely the values the host reads as schemas,
- * and still wraps everything else; `scripts/lib/compat-contracts.mjs`'s
- * `ompi.ark-schema-predicate` contract alerts when upstream changes it.
+ * and still wraps everything else.
+ * `tests/clients/pi-host-callable-schema-contract.test.ts` asserts against
+ * that upstream predicate (and against a fixture measured from a real
+ * `@oh-my-pi/omptype@18.2.4` schema), not against this copy of it.
  *
  * Deliberately NOT an allow-list of handler keys (`execute`, `renderResult`,
  * `handler` — the measured set today): that is `isCaptureSeam`'s #1434 S1a

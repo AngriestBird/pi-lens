@@ -31,10 +31,11 @@
  *
  * `ARK_SCHEMA_VECTOR` records what a real `@oh-my-pi/omptype@18.2.4`
  * `Type.Object({...})` measured on 2026-09-17, so `arkStyleTypeBuilder`'s
- * fixture cannot quietly drift into a shape no host produces. omptype is not
- * a pi-lens dependency (it is the HOST's), so the shape is mirrored here and
- * the live predicate is re-verified nightly by
- * `scripts/lib/compat-contracts.mjs`'s `ompi.ark-schema-predicate` contract.
+ * fixture cannot quietly drift into a shape no host produces. omptype is the
+ * HOST's package, not a pi-lens dependency, so the shape is mirrored here
+ * rather than imported; nothing in this repo re-reads the live upstream
+ * predicate, so a change to it upstream reaches us through a report, not a
+ * red test.
  */
 
 import * as fs from "node:fs";
@@ -132,7 +133,9 @@ vi.mock("../../clients/deps/typebox.js", async (importOriginal) => {
 	const actual =
 		await importOriginal<typeof import("../../clients/deps/typebox.js")>();
 	return {
-		Type: arkStyleTypeBuilder(actual.Type as unknown as Record<string, unknown>),
+		Type: arkStyleTypeBuilder(
+			actual.Type as unknown as Record<string, unknown>,
+		),
 	};
 });
 
@@ -261,11 +264,11 @@ describe("#3195 — the console-capture seam, directly", () => {
 				| { execute?: () => unknown; renderResult?: () => unknown }
 				| undefined;
 			const proxy = sink.withConsoleCaptureWindows({
-				registerTool(tool: {
-					execute?: () => unknown;
-					renderResult?: () => unknown;
-				}) {
-					registered = tool;
+				registerTool(tool: Record<string, unknown>) {
+					registered = tool as {
+						execute?: () => unknown;
+						renderResult?: () => unknown;
+					};
 				},
 			});
 			let executeSawWindow: boolean | undefined;
