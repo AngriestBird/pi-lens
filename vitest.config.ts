@@ -481,6 +481,12 @@ export const wallClockBudgetInclude = [
 	"tests/support/fault-injection.test.ts",
 	"tests/support/git-config-guard.test.ts",
 	"tests/support/git-fixture-env.test.ts",
+	// #3179: the guard's #3179 fix's one real, cross-process reproduction. A
+	// separately spawned process races node's own recursive-watch readdirSync
+	// against a directory removal — the same race PR #3178 hit in CI — which
+	// no in-process stand-in can occupy the other side of (flake-shape
+	// admission).
+	"tests/support/tests-tree-write-guard-race.test.ts",
 	// #3082: the tests-tree write guard's one real-watcher case. A recursive
 	// `fs.watch` delivers on the kernel's schedule, so the case retries the
 	// create/remove and polls the guard's own report (real setTimeout, bounded)

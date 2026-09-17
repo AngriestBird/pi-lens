@@ -176,6 +176,7 @@ function adoptCanonicalCasing(held: string, canonical: string): string {
  *   (needed for new files where we haven't written yet)
  *
  * On POSIX:
+ * - Folds `.`, `..` and duplicate separators first (#3184, see below).
  * - If the file exists: adopts the on-disk CASING of the trailing segments
  *   (see `adoptCanonicalCasing`) — no lowercasing, no symlink resolution.
  * - If the file doesn't exist: returns the path as-is, case-PRESERVING. On a
@@ -183,6 +184,26 @@ function adoptCanonicalCasing(held: string, canonical: string): string {
  *   files, and nothing may fold one into the other; only the filesystem's own
  *   answer for a path that EXISTS can tell the two apart, and for a path that
  *   does not exist there is no such answer to ask for.
+ *
+ * Why the POSIX arm folds dot segments (#3184): the casing arm returns the
+ * caller's own spelling whenever `adoptCanonicalCasing` changes nothing, and
+ * for `<base>/src/../src/a.ts` it always changes nothing — `realpath` answers
+ * a string with FEWER segments, which a casing-only rewrite cannot express, so
+ * it declines and the caller's un-folded spelling came back as the map key.
+ * Every canonical writer keys through `path.resolve` first (`ctx.filePath` =
+ * `normalizeMapKey(resolveAgainstAncestors(...))`, `clients/dispatch/
+ * runner-context.ts:49`), so a consumer that passes an ALREADY-absolute
+ * agent-typed path straight in (`tools/lens-diagnostic-mark.ts`,
+ * `clients/mcp/analyze.ts`) derived an orphan key that no reader could reach.
+ * Folding here is pure string algebra — no cwd, no filesystem — so a relative
+ * path stays relative (`src/../x` → `x`, `../x` → `../x`, never resolved
+ * against `process.cwd()`; refs #2490, where a cwd fold broke every monorepo)
+ * and a symlinked package still keys under the path the caller held. These
+ * are `path.resolve`'s own TEXTUAL `..` semantics, which is exactly what
+ * makes a folded reader key equal to the canonical writer's key: where a
+ * `..` sits right after a symlinked directory, textual folding and the
+ * kernel disagree, and both sides of every comparison take the textual
+ * answer because every canonical writer already resolved that way.
  *
  * Why POSIX canonicalizes casing at all (#3098, the #1024 defect's live half):
  * a case-insensitive POSIX filesystem — macOS's default APFS, `nocase` vfat /
@@ -210,14 +231,36 @@ export function normalizeFilePath(filePath: string): string {
 	const normalized = filePath.replace(/\\/g, "/");
 
 	if (process.platform !== "win32" && !isWindowsPath(normalized)) {
+		// #3184. `path.posix`, not the host default: this branch is already
+		// committed to POSIX parsing of a slash-folded string (shape 2). Only
+		// the POSIX arm needs this — the win32 arm below reaches `realpath` or
+		// `win32.resolve`/`win32.normalize` on every path, all of which fold
+		// dot segments already (measured: `C:\repo\src\..\src\a.ts` →
+		// `c:/repo/src/a.ts` on this POSIX host, before this change) — and
+		// folding BEFORE the arms would also move which arm a degenerate
+		// drive-letter path selects (`path.posix.normalize("C:/repo/../..")`
+		// is `"."`, no longer Windows-shaped).
+		// Two inputs keep the caller's spelling instead:
+		// - "" is a non-path sentinel in this codebase's path-typed fields
+		//   (see `normalizeLoggedPath`'s doc); `posix.normalize("")` invents
+		//   ".", the process cwd.
+		// - a UNC root (`\\server\share`, slash-folded to `//server/share`)
+		//   reaches THIS arm on a POSIX host, because `isWindowsPath` tests
+		//   the already-folded string and sees no backslash; POSIX
+		//   `normalize` collapses its leading `//` to `/`, renaming the path
+		//   to an unrelated local one.
+		const folded =
+			normalized === "" || normalized.startsWith("//")
+				? normalized
+				: path.posix.normalize(normalized);
 		try {
-			const canonical = realpathSync.native(normalized);
-			// Fast path, not a guard: both arms answer `normalized` when the
+			const canonical = realpathSync.native(folded);
+			// Fast path, not a guard: both arms answer `folded` when the
 			// strings match, but skipping the two `split`s there is a measured
 			// 1.9 vs 2.3 microseconds per call on the per-edit seam (#3098).
-			if (canonical === normalized) return normalized;
-			const adopted = adoptCanonicalCasing(normalized, canonical);
-			if (adopted === normalized) return normalized;
+			if (canonical === folded) return folded;
+			const adopted = adoptCanonicalCasing(folded, canonical);
+			if (adopted === folded) return folded;
 			// The rewrite is string algebra and can land on a DIFFERENT file
 			// (#3159 review round 2, F1 — see `adoptCanonicalCasing`). Adopt it
 			// only once the filesystem agrees it still names the file the caller
@@ -227,10 +270,10 @@ export function normalizeFilePath(filePath: string): string {
 			// never on an already-canonical path. A throw here (the rewritten
 			// path does not exist, the #2490 monorepo case) lands in the catch
 			// below and keeps the caller's spelling, which is the same answer.
-			return realpathSync.native(adopted) === canonical ? adopted : normalized;
+			return realpathSync.native(adopted) === canonical ? adopted : folded;
 		} catch {
 			// Does not exist (or is unreadable): case-preserving, as above.
-			return normalized;
+			return folded;
 		}
 	}
 

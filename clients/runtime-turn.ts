@@ -1465,16 +1465,23 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			if (carried.length === 0 || carried.length !== runs.length) {
 				return advisory;
 			}
-			const oldestObservedAt = carried.reduce(
-				(min, r) => Math.min(min, r.observedAt ?? Number.MAX_SAFE_INTEGER),
-				Number.MAX_SAFE_INTEGER,
-			);
-			let observedAt: number | undefined = oldestObservedAt;
-			if (observedAt === Number.MAX_SAFE_INTEGER) observedAt = undefined;
+			// #3168 F13: the bucket's age is the OLDEST carried observation, and
+			// only when EVERY carried run carries one. A `Math.min` sentinel
+			// (`?? Number.MAX_SAFE_INTEGER`) silently ignored the unstamped runs
+			// and stated a confident age for a bucket that contains an unaged
+			// one; one missing stamp collapses the age half to the helper's
+			// neutral "scan age unknown" wording instead.
+			const stamps = carried.map((r) => r.observedAt);
+			const observedAt = stamps.every((s): s is number => s !== undefined)
+				? Math.min(...stamps)
+				: undefined;
 			const suffix = cascadeCarrySuffix(carried[0]?.carriedTurns, observedAt);
 			if (!suffix) return advisory;
 			labeledAdvisories += 1;
-			return `${advisory} ${suffix}`;
+			// #3168 F11: newline, as the blocker path does above. A space join
+			// welded the suffix onto the LAST bullet of a multi-bullet advisory,
+			// so the carry label read as a property of that one file.
+			return `${advisory}\n${suffix}`;
 		};
 		const graphAdvisory = withCarryLabel(
 			buildAdvisory(graphRuns, {

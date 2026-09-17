@@ -241,10 +241,6 @@ interface LabeledDeliverySurface extends DeliverySurfaceBase {
 	reason: string;
 	/** What supplies the age shown to the agent (a scannedAt field, "live", or "n/a"). */
 	ageSource: string;
-	/** #3168 F2: labeled surfaces that DO call a shared helper claim it here —
-	 * same evidence contract as the gated entries (a bare status flip without
-	 * the call-shape evidence is the #1634 F1 recurrence). */
-	evidenceMin?: number;
 }
 
 export type DeliverySurfaceEntry =
@@ -483,8 +479,13 @@ export const DELIVERY_SURFACES: Record<string, DeliverySurfaceEntry> = {
 		"Explains what the cascade check could NOT confirm this turn — not a " +
 			"finding with a cited path, an absence-of-coverage disclosure computed " +
 			"from this turn's own indeterminate-run list. An advisory computed from " +
-			"a carried indeterminate run is labeled `(carried N turns · scanned Xm ago)` " +
-			"(#3167, #3168 F4 — dropped on mixed carried/fresh buckets).",
+			"a carried indeterminate run is labeled `(carried N turns · <age>)` " +
+			"(#3167, #3168 F4 — dropped on mixed carried/fresh buckets). The age " +
+			"half reads `scan age unknown` on this surface today: no indeterminate-" +
+			"run producer stamps `observedAt` (only the resolved-found plumb does, " +
+			"`clients/cascade-format.ts`), and one unstamped carried run collapses " +
+			"the whole bucket's age rather than claiming the stamped runs' (#3168 " +
+			"F13). The carry COUNT is always real.",
 		"live",
 		["withCarryLabel("],
 		{ evidenceMin: 3 },
@@ -503,6 +504,33 @@ export const DELIVERY_SURFACES: Record<string, DeliverySurfaceEntry> = {
 			"cascade touch that skipped its in-lane wait).",
 		["applyFindingPolicy"],
 		["applyFindingPolicy(retained, {"],
+	),
+	// #3157: the IN-LANE cascade — a different delivery lane from the
+	// quiet-window run above, and the one #3102's sweep cleared WRONGLY. Its four
+	// display sites (passive cold snapshot, fresh touch, touch-error fallback,
+	// degraded fallback) assemble `CascadeNeighborResult.diagnostics` and reach
+	// the agent through `formatCascadeNeighborDiagnostics` without ever entering
+	// the dispatcher's `applyOutputFilters` pipeline: the sweep's file-level
+	// verdict ("the per-edit dispatch path, which already filters in
+	// dispatcher.ts") was true only of the per-edit RUNNER output in
+	// `runners/lsp.ts`, which is a different call site in a different file.
+	//
+	// Evidence is the CALL TEXT (#3088 round-2 F4), counted: `cascadeDisplay(` is
+	// the one seam all four sites route through, so `evidenceMin: 4` is the count
+	// of display sites in the file and dropping ANY of them back to a raw
+	// `convertLspDiagnostics` reds this suite. Identity-stubbing the callee
+	// instead is caught behaviourally — it reds twelve cases in
+	// `tests/clients/inlane-cascade-finding-policy.test.ts`, which is a stronger
+	// signal than the R2 proximity heuristic. Residual, stated: a FIFTH display
+	// site that open-codes the conversion keeps the count at 4 and is caught by
+	// review, not by this row.
+	"dispatch-integration:in-lane-cascade": gated(
+		"clients/dispatch/integration.ts",
+		"In-lane per-edit cascade neighbour ERROR diagnostics, rendered into the " +
+			"turn-end cascade block by `computeCascadeForFile`.",
+		["applyCascadeDisplayPolicy"],
+		["cascadeDisplay("],
+		{ evidenceMin: 4 },
 	),
 	"runtime-turn:call-graph-advisory": labeled(
 		RUNTIME_TURN_FILE,

@@ -474,6 +474,15 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		reason:
 			"real git children prove the support-side fixture scrubs GIT_DIR/GIT_WORK_TREE and pins cwd before a test spawns git",
 	},
+	// 2026-09-17 (#3179): the race is cross-process by construction —
+	// readdirSync/statSync inside node's own recursive-watch polyfill are
+	// blocking syscalls on one thread, so only a separately spawned process
+	// removing the watched directory can land inside that window.
+	"real-process-spawn:support/tests-tree-write-guard-race.test.ts": {
+		detector: "real-process-spawn",
+		reason:
+			"a real cross-process directory removal races node's own recursive-watch readdirSync; no in-process stand-in can occupy the other side of that window",
+	},
 };
 
 /** The `wallClockBudgetInclude` project's `include` list, read from the live config — not a hand-copied mirror of it (single-source-of-truth). */

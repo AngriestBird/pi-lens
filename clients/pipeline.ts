@@ -1372,6 +1372,14 @@ function buildEnrichedBlockerOutput(
 	blockers: Diagnostic[],
 	fileContent = "",
 ): string {
+	// #3188: no blockers, no banner. The delivery gate above can retract every
+	// blocker (all cited files deleted), and the header interpolates the count,
+	// so without this the agent reads "🔴 STOP — 0 issue(s) must be fixed:" with
+	// nothing under it. Same guard, same reason, as `formatDiagnostics` in
+	// dispatch/utils/format-utils.ts — it belongs to the renderer, not to each
+	// call site, because the #2028 branch below cannot gate on the count without
+	// falling through to the UNGATED raw output.
+	if (blockers.length === 0) return "";
 	// Empty fileContent (readback failed, e.g. deleted-file race) still
 	// renders the gated blocker list - just without per-line snippets.
 	const fileLines = fileContent ? fileContent.split("\n") : [];
@@ -1723,7 +1731,11 @@ export async function runPipeline(
 				dispatchResult.blockerOutput.length,
 			);
 			if (rest) gatedOut += rest;
-			output += `\n\n${gatedOut}`;
+			// #3188: every blocker retracted and nothing after the blocker
+			// section leaves nothing to say — appending the separator alone would
+			// still deliver a (whitespace-only) tool-result block, because
+			// `handleToolResult` decides delivery on `output` truthiness.
+			if (gatedOut) output += `\n\n${gatedOut}`;
 		} else {
 			output += `\n\n${dispatchResult.output}`;
 		}
@@ -1777,6 +1789,11 @@ export async function runPipeline(
 				dbg,
 				turnSeq: ctx.telemetry?.turnIndex,
 				writeSeq: ctx.telemetry?.writeIndex,
+				// #3157: `cwd` here is the LANGUAGE root. The cascade's display
+				// filter reads the disposition store and the `.pi-lens.json` rule
+				// policy, both written under the PROJECT root (#1030) — the same
+				// pair the dispatcher is handed above.
+				projectRoot: ctx.projectRoot,
 				seqState: ctx.seqState,
 				turnEndCascadeSettleStart: ctx.turnEndCascadeSettleStart,
 				fileContent,

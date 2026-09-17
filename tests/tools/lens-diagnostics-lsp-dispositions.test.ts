@@ -37,7 +37,10 @@ import {
 import { createLensDiagnosticMarkTool } from "../../tools/lens-diagnostic-mark.js";
 import { createLensDiagnosticsTool } from "../../tools/lens-diagnostics.js";
 import { createLspDiagnosticsTool } from "../../tools/lsp-diagnostics.js";
-import { removeTempDirSync } from "../clients/test-utils.js";
+import {
+	createCaseAliasFixture,
+	removeTempDirSync,
+} from "../clients/test-utils.js";
 
 const MESSAGE = "Type 'string' is not assignable to type 'number'.";
 const FILE_BODY = "const value: number = 'bad';\nexport const other = 1;\n";
@@ -153,6 +156,16 @@ async function legacyProbe(service: ServiceDouble) {
 	)) as { content: Array<{ text: string }>; details?: Record<string, unknown> };
 }
 
+/** The single `lsp_probe_disposition_filter` record this lane emits for the
+ * file, as the latency sink received it. */
+function phaseMetadata(): Record<string, unknown> | undefined {
+	const phases = logLatency.mock.calls
+		.map(([entry]) => entry as Record<string, unknown>)
+		.filter((entry) => entry.phase === "lsp_probe_disposition_filter");
+	expect(phases).toHaveLength(1);
+	return phases[0]?.metadata as Record<string, unknown> | undefined;
+}
+
 async function mark(params: Record<string, unknown>) {
 	const markTool = createLensDiagnosticMarkTool(() => cwd);
 	return markTool.execute("mark-3088", params, undefined, () => {}, { cwd });
@@ -241,6 +254,37 @@ describe("lens_diagnostics source=lsp honors dispositions (#3088)", () => {
 		expect(phases).toHaveLength(1);
 		expect(phases[0]?.metadata).toMatchObject({ suppressed: 1, total: 1 });
 		expect(phases[0]?.filePath).toBe(filePath);
+	});
+
+	it("reports the widget's retained suppressed count on that same phase", async () => {
+		// #3158 round 2 F4: retention's SUCCESS path had no record — the ledger
+		// only heard about it when the per-file cap truncated. The count is folded
+		// into the phase this lane already emits, so the cardinality is unchanged
+		// (one per filtered file per scan), and it is live: zero on the scan that
+		// first honours the mark, one once that scan's write has retained the row.
+		const service = makeService();
+		await probe(service);
+		await mark({
+			filePath,
+			line: 1,
+			message: MESSAGE,
+			...CANONICAL_MARK,
+			disposition: "false-positive",
+		});
+
+		logLatency.mockReset();
+		await probe(service);
+		expect(phaseMetadata()).toMatchObject({
+			suppressed: 1,
+			retainedSuppressed: 0,
+		});
+
+		logLatency.mockReset();
+		await probe(service);
+		expect(phaseMetadata()).toMatchObject({
+			suppressed: 1,
+			retainedSuppressed: 1,
+		});
 	});
 
 	it("emits no filter phase when nothing was dropped", async () => {
@@ -767,5 +811,296 @@ describe("the source=lsp footer reconcile respects mark-time demotion (#3088)", 
 
 		const recorded = getFileDiagnostics(filePath) ?? [];
 		expect(recorded.map((d) => d.message)).toEqual([OTHER_MESSAGE]);
+	});
+});
+
+// #3160/#3182: the `paths`-mode batch (tools/lsp-diagnostics.ts:428-433,
+// reached identically from the legacy `lsp_diagnostics` tool's own `paths`
+// param and from `lens_diagnostics {source:"lsp", scope:"paths"}`, which
+// forwards `paths` VERBATIM to the same `lspProbe` — tools/lens-diagnostics.ts
+// :581, lspParams = {...params} minus source/scope) derived its per-file
+// lookup key with `path.normalize` only, which folds separators/dot-segments
+// but never adopts on-disk casing. `reconcileScanDiagnostics`
+// (clients/widget-state.ts) records under that RAW key. A canonical writer
+// (clients/pipeline.ts's ctx.filePath, or `lens_diagnostic_mark`'s own
+// #3160-fixed reader) never derives that same raw key on a case-insensitive
+// filesystem, so a mis-cased `paths` entry silently orphaned its own
+// widget-state record — the `directory`-mode batch (tools/lsp-diagnostics.ts
+// `collectFiles`, a real filesystem walk) never had this problem, since a
+// directory listing already returns on-disk-accurate casing.
+describe("lens_diagnostics source=lsp scope=paths / legacy lsp_diagnostics paths-mode batch widget-state key parity (#3160/#3182)", () => {
+	function makeBadCallService() {
+		return {
+			touchFile: vi.fn(async () => ({
+				diags: [
+					{
+						severity: 1,
+						message: "bad call",
+						source: "typescript",
+						code: 9999,
+						serverId: "typescript",
+						range: {
+							start: { line: 2, character: 0 },
+							end: { line: 2, character: 5 },
+						},
+					},
+				],
+			})),
+			getDiagnostics: vi.fn(async () => []),
+			getCapabilitySnapshots: vi.fn(async () => []),
+		};
+	}
+
+	it("a mis-cased paths-mode entry (lens_diagnostics source=lsp scope=paths) lets lens_diagnostic_mark reanchor under EITHER spelling", async (ctx) => {
+		const fixture = createCaseAliasFixture(cwd, {
+			content: "const a = 1;\nconst b = 2;\nconst target = bad();\n",
+		});
+		ctx.skip(fixture.skipReason !== undefined, fixture.skipReason ?? "");
+
+		const misCasedRelative = path.relative(cwd, fixture.rawMisCased);
+		const onDiskRelative = path.relative(cwd, fixture.onDisk);
+
+		const service = makeBadCallService();
+		const tool = createLensDiagnosticsTool(
+			makeCacheManager(),
+			() => cwd,
+			() => service as never,
+		);
+		const result = (await tool.execute(
+			"diag-3182",
+			{
+				source: "lsp",
+				scope: "paths",
+				paths: [misCasedRelative],
+				severity: "all",
+			},
+			new AbortController().signal,
+			null,
+			{ cwd },
+		)) as {
+			content: Array<{ text: string }>;
+			details?: Record<string, unknown>;
+		};
+		expect(result.content[0]?.text).toContain("bad call");
+
+		const runMark = (targetFilePath: string) =>
+			createLensDiagnosticMarkTool(() => cwd).execute(
+				"mark-3182",
+				{
+					filePath: targetFilePath,
+					line: 2, // stale
+					message: "bad call",
+					rule: "typescript:9999",
+					tool: "lsp",
+					disposition: "false-positive",
+				},
+				undefined,
+				() => {},
+				{ cwd },
+			);
+
+		const viaCanonical = await runMark(onDiskRelative);
+		expect(viaCanonical.isError).toBeFalsy();
+		expect(String(viaCanonical.content[0]?.text)).toMatch(
+			/reanchored from line 2 to 3/,
+		);
+
+		const viaMisCased = await runMark(misCasedRelative);
+		expect(viaMisCased.isError).toBeFalsy();
+		expect(String(viaMisCased.content[0]?.text)).toMatch(
+			/reanchored from line 2 to 3/,
+		);
+	});
+
+	// #3160 round 4: normalizeMapKey alone does NOT fold dot segments on POSIX
+	// when the casing is already right — realpathSync.native's canonical form
+	// for a dot-segment path has a DIFFERENT segment count than the raw input,
+	// so adoptCanonicalCasing (a casing-only rewrite) declines and returns the
+	// input unchanged. Round 3's fix relied on normalizeMapKey alone, so an
+	// absolute `paths` entry carrying a `/../` segment (a legitimate shape:
+	// e.g. an agent-constructed path via a relative import resolution) kept
+	// its raw, un-folded spelling as the widget-state key, diverging from
+	// every canonical writer/reader that resolves the SAME file to its plain
+	// spelling — orphaning its own widget-state record exactly like the
+	// case-folding arm this same seam already fixed.
+	it("an absolute paths-mode entry with a dot segment lets lens_diagnostic_mark reanchor under the plain spelling", async () => {
+		const subDir = path.join(cwd, "sub");
+		fs.mkdirSync(subDir, { recursive: true });
+		const plainAbs = path.join(subDir, "a.ts");
+		fs.writeFileSync(
+			plainAbs,
+			"const a = 1;\nconst b = 2;\nconst target = bad();\n",
+		);
+		// Absolute, and already correctly cased — the ONLY thing wrong with it
+		// is the un-folded `/../` segment. Built by string concatenation, NOT
+		// `path.join`/`path.resolve` — both of those normalize dot segments
+		// themselves, which would silently defeat the point of this fixture.
+		const dotSegmentAbs = `${subDir}${path.sep}..${path.sep}sub${path.sep}a.ts`;
+		expect(dotSegmentAbs).not.toBe(plainAbs);
+		expect(fs.realpathSync.native(dotSegmentAbs)).toBe(
+			fs.realpathSync.native(plainAbs),
+		);
+
+		const service = makeBadCallService();
+		const tool = createLensDiagnosticsTool(
+			makeCacheManager(),
+			() => cwd,
+			() => service as never,
+		);
+		const result = (await tool.execute(
+			"diag-3160-r4",
+			{
+				source: "lsp",
+				scope: "paths",
+				paths: [dotSegmentAbs],
+				severity: "all",
+			},
+			new AbortController().signal,
+			null,
+			{ cwd },
+		)) as {
+			content: Array<{ text: string }>;
+			details?: Record<string, unknown>;
+		};
+		expect(result.content[0]?.text).toContain("bad call");
+
+		const plainRelative = path.relative(cwd, plainAbs);
+		const marked = await createLensDiagnosticMarkTool(() => cwd).execute(
+			"mark-3160-r4",
+			{
+				filePath: plainRelative,
+				line: 2, // stale
+				message: "bad call",
+				rule: "typescript:9999",
+				tool: "lsp",
+				disposition: "false-positive",
+			},
+			undefined,
+			() => {},
+			{ cwd },
+		);
+		expect(marked.isError).toBeFalsy();
+		expect(String(marked.content[0]?.text)).toMatch(
+			/reanchored from line 2 to 3/,
+		);
+	});
+
+	// #3184 sweep: the SINGLE-`path` mode of the same tool
+	// (tools/lsp-diagnostics.ts:471) derives its key with the bare
+	// `path.isAbsolute(x) ? x : path.resolve(cwd, x)` shape and hands the raw
+	// result to `runFileDiagnostics` → `reconcileWidgetFromLspResult` →
+	// `reconcileScanDiagnostics`, which keys with `normalizeEphemeralMapKey`
+	// — no `path.resolve`, no `normalizeMapKey`, so the #3184 path-utils fold
+	// never reaches it. #3178 round 4 fixed the `paths` ARRAY at :444 and left
+	// this sibling twenty lines away: exactly the "sweep by shape, not by
+	// symbol" miss. Reached from `lens_diagnostics {source:"lsp", path}`
+	// (forwarded verbatim, tools/lens-diagnostics.ts:563-573) and from the
+	// legacy tool's own `path`. Dot segment built by string CONCATENATION, as
+	// above.
+	it("an absolute single-path entry with a dot segment lets lens_diagnostic_mark reanchor under the plain spelling (#3184)", async () => {
+		const subDir = path.join(cwd, "single");
+		fs.mkdirSync(subDir, { recursive: true });
+		const plainAbs = path.join(subDir, "a.ts");
+		fs.writeFileSync(
+			plainAbs,
+			"const a = 1;\nconst b = 2;\nconst target = bad();\n",
+		);
+		const dotSegmentAbs = `${subDir}${path.sep}..${path.sep}single${path.sep}a.ts`;
+		expect(dotSegmentAbs).not.toBe(plainAbs);
+		expect(fs.realpathSync.native(dotSegmentAbs)).toBe(
+			fs.realpathSync.native(plainAbs),
+		);
+
+		const service = makeBadCallService();
+		const tool = createLensDiagnosticsTool(
+			makeCacheManager(),
+			() => cwd,
+			() => service as never,
+		);
+		const result = (await tool.execute(
+			"diag-3184-single",
+			{ source: "lsp", path: dotSegmentAbs, severity: "all" },
+			new AbortController().signal,
+			null,
+			{ cwd },
+		)) as {
+			content: Array<{ text: string }>;
+			details?: Record<string, unknown>;
+		};
+		expect(result.content[0]?.text).toContain("bad call");
+
+		const marked = await createLensDiagnosticMarkTool(() => cwd).execute(
+			"mark-3184-single",
+			{
+				filePath: path.relative(cwd, plainAbs),
+				line: 2, // stale
+				message: "bad call",
+				rule: "typescript:9999",
+				tool: "lsp",
+				disposition: "false-positive",
+			},
+			undefined,
+			() => {},
+			{ cwd },
+		);
+		expect(marked.isError).toBeFalsy();
+		expect(String(marked.content[0]?.text)).toMatch(
+			/reanchored from line 2 to 3/,
+		);
+	});
+
+	// #3184 sweep, casing half: the single-`path` mode's key must also adopt
+	// on-disk casing, for the same reason the `paths` batch does (#3160/#3182)
+	// — a mis-cased agent-typed `path` on a case-insensitive filesystem
+	// otherwise writes a widget-state record under a spelling no canonical
+	// writer or the #3160-fixed mark reader ever derives. `path.resolve` alone
+	// would fold the dot segment above and leave THIS arm broken, so both
+	// halves of the one expression are guarded.
+	it("a mis-cased single-path entry lets lens_diagnostic_mark reanchor under EITHER spelling (#3184)", async (ctx) => {
+		const fixture = createCaseAliasFixture(cwd, {
+			content: "const a = 1;\nconst b = 2;\nconst target = bad();\n",
+			dirName: "singlecase",
+		});
+		ctx.skip(fixture.skipReason !== undefined, fixture.skipReason ?? "");
+
+		const service = makeBadCallService();
+		const tool = createLensDiagnosticsTool(
+			makeCacheManager(),
+			() => cwd,
+			() => service as never,
+		);
+		const result = (await tool.execute(
+			"diag-3184-single-case",
+			{ source: "lsp", path: fixture.rawMisCased, severity: "all" },
+			new AbortController().signal,
+			null,
+			{ cwd },
+		)) as { content: Array<{ text: string }> };
+		expect(result.content[0]?.text).toContain("bad call");
+
+		const runMark = (targetFilePath: string) =>
+			createLensDiagnosticMarkTool(() => cwd).execute(
+				"mark-3184-single-case",
+				{
+					filePath: targetFilePath,
+					line: 2, // stale
+					message: "bad call",
+					rule: "typescript:9999",
+					tool: "lsp",
+					disposition: "false-positive",
+				},
+				undefined,
+				() => {},
+				{ cwd },
+			);
+
+		const viaCanonical = await runMark(path.relative(cwd, fixture.onDisk));
+		expect(String(viaCanonical.content[0]?.text)).toMatch(
+			/reanchored from line 2 to 3/,
+		);
+		const viaMisCased = await runMark(path.relative(cwd, fixture.rawMisCased));
+		expect(String(viaMisCased.content[0]?.text)).toMatch(
+			/reanchored from line 2 to 3/,
+		);
 	});
 });

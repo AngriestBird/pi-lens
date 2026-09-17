@@ -426,6 +426,119 @@ describe("normalizeFilePath: POSIX adopts on-disk casing (#3098, the live half o
 	});
 });
 
+describe("normalizeFilePath: dot segments fold into the canonical key (#3184)", () => {
+	// RECURRENCE GUARDED: the POSIX arm returned the caller's spelling whenever
+	// `adoptCanonicalCasing` changed nothing, and for a dot-segment path it
+	// ALWAYS changes nothing — `realpath` answers a string with fewer segments,
+	// which a casing-only rewrite cannot express, so it declined and the raw
+	// `<base>/src/../src/a.ts` came back as the map key. Every canonical writer
+	// keys through `path.resolve` first (`ctx.filePath`,
+	// `clients/dispatch/runner-context.ts:49`), so an ALREADY-absolute
+	// agent-typed path handed straight to `normalizeMapKey` by
+	// `tools/lens-diagnostic-mark.ts` / `clients/mcp/analyze.ts` derived an
+	// orphan key: orphan widget row, missed reanchor, split disposition anchor
+	// (#3184, the class behind #3160/#3182). Dot segments are built by string
+	// CONCATENATION throughout — `path.join`/`path.resolve` would fold them
+	// here and defeat the fixture.
+	const dotted = (...parts: string[]) => parts.join(path.sep);
+
+	it("an absolute dot-segment path that EXISTS keys the same as the plain spelling", () => {
+		const { tmpDir, cleanup } = setupTestEnvironment("pi-lens-dot-");
+		try {
+			fs.mkdirSync(path.join(tmpDir, "src"), { recursive: true });
+			const plain = path.join(tmpDir, "src", "a.ts");
+			fs.writeFileSync(plain, "const a = 1;\n");
+			const withDots = dotted(path.join(tmpDir, "src"), "..", "src", "a.ts");
+			expect(withDots).toContain("..");
+			expect(fs.realpathSync.native(withDots)).toBe(
+				fs.realpathSync.native(plain),
+			);
+			expect(normalizeMapKey(withDots)).toBe(normalizeMapKey(plain));
+		} finally {
+			cleanup();
+		}
+	});
+
+	it("an absolute dot-segment path that does NOT exist folds too", () => {
+		const { tmpDir, cleanup } = setupTestEnvironment("pi-lens-dot-");
+		try {
+			fs.mkdirSync(path.join(tmpDir, "src"), { recursive: true });
+			const absent = path.join(tmpDir, "src", "gone.ts");
+			const withDots = dotted(path.join(tmpDir, "src"), "..", "src", "gone.ts");
+			expect(fs.existsSync(absent)).toBe(false);
+			expect(normalizeMapKey(withDots)).toBe(normalizeMapKey(absent));
+		} finally {
+			cleanup();
+		}
+	});
+
+	it("`.` segments and duplicate separators fold as well", () => {
+		const { tmpDir, cleanup } = setupTestEnvironment("pi-lens-dot-");
+		try {
+			fs.mkdirSync(path.join(tmpDir, "src"), { recursive: true });
+			const plain = path.join(tmpDir, "src", "a.ts");
+			fs.writeFileSync(plain, "const a = 1;\n");
+			const withDot = dotted(tmpDir, "src", ".", "a.ts");
+			const withDoubled = `${tmpDir}${path.sep}src${path.sep}${path.sep}a.ts`;
+			expect(normalizeMapKey(withDot)).toBe(normalizeMapKey(plain));
+			expect(normalizeMapKey(withDoubled)).toBe(normalizeMapKey(plain));
+		} finally {
+			cleanup();
+		}
+	});
+
+	it("a RELATIVE path stays relative — the fold never resolves against process.cwd() (#2490)", () => {
+		// #2490's bound: a cwd fold for a path-only key broke every monorepo.
+		// `path.posix.normalize` is pure string algebra, so an interior `..`
+		// collapses while a leading one survives and nothing acquires a root.
+		expect(normalizeMapKey("src/../src/a.ts")).toBe("src/a.ts");
+		expect(normalizeMapKey("../src/a.ts")).toBe("../src/a.ts");
+		expect(normalizeMapKey("src/a.ts")).toBe("src/a.ts");
+		expect(normalizeMapKey("../src/a.ts")).not.toContain(
+			process.cwd().replace(/\\/g, "/"),
+		);
+	});
+
+	it("an empty string is returned unchanged, not invented into the cwd", () => {
+		// `path.posix.normalize("")` is "." — the process cwd. Empty is a
+		// documented non-path sentinel in this codebase's path-typed fields
+		// (see `normalizeLoggedPath`'s doc), never a request for the cwd.
+		expect(normalizeMapKey("")).toBe("");
+	});
+
+	it("a UNC-shaped root keeps its leading double slash on POSIX", (ctx) => {
+		// A UNC path reaches the POSIX arm on a POSIX host: `isWindowsPath`
+		// tests the ALREADY slash-folded string, which has no backslash left.
+		// POSIX `normalize` would collapse `//server/share` to `/server/share`
+		// — renaming a remote share to an unrelated local path.
+		// Runs on the authoritative ubuntu Unit tests lane (and macOS); skipped
+		// only on a Windows dev box, where `process.platform === "win32"` routes
+		// every path through the win32 arm and this POSIX-arm guard has no arm to
+		// pin.
+		ctx.skip(
+			process.platform === "win32",
+			"win32 host routes UNC through the win32 arm; this pins the POSIX arm",
+		);
+		expect(normalizeMapKey("\\\\server\\share\\src\\a.ts")).toBe(
+			"//server/share/src/a.ts",
+		);
+	});
+
+	it("a Windows-shaped path still folds dot segments through the win32 arm, unchanged by this fix", () => {
+		// The win32 arm reaches `realpath` or `win32.resolve`/`win32.normalize`
+		// on every path, all of which fold dot segments already — which is why
+		// the fold above lives in the POSIX arm only. Guaranteed non-existent so
+		// `resolveNonExisting`'s lowercased tail runs on BOTH OSes (the #1150
+		// shape-committed branch on Linux, natively on Windows).
+		const plain = "C:/__pi_lens_3184_nonexistent__/sub/file.ts";
+		const withDots = "C:/__pi_lens_3184_nonexistent__/sub/../sub/file.ts";
+		expect(normalizeMapKey(withDots)).toBe(normalizeMapKey(plain));
+		expect(normalizeMapKey(withDots).toLowerCase()).toContain(
+			"/__pi_lens_3184_nonexistent__/sub/file.ts",
+		);
+	});
+});
+
 describe("toProjectRelativePath: Windows-shaped path relativizes on ANY OS (refs #1163, class #1150/#1024)", () => {
 	// A drive-letter-shaped filePath UNDER a drive-letter-shaped projectRoot must
 	// relativize by win32 semantics on any OS — the shape decides the parser, not

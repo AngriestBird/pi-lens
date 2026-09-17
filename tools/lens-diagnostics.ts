@@ -1071,16 +1071,23 @@ function applyDeltaFreshnessGate<W extends DispositionCandidate>(
  * Fix B (#3167): one age label per file group that has demoted rows — the
  * group's own observation stamp through `formatCacheAgeLabel`, so an agent
  * can tell a just-observed finding from one re-served from cache. Emitted
- * AFTER the group's rows; never on a group with live rows only.
+ * AFTER the group's rows; never on a group with live rows only. #3170 adds
+ * the `(re-verify incomplete)` gap label to the same group, so a budget-cut
+ * re-verify is never rendered as a clean re-observation.
+ *
+ * Returns whether ANY label was pushed, so the caller can dedupe across the
+ * two render loops from what actually happened instead of PREDICTING which
+ * loop will label (#3168 F10).
  */
 function appendGroupLabels(
 	lines: string[],
 	warnings: ReadonlyArray<{ stale?: boolean; staleAsOf?: string }>,
 	incomplete: boolean,
-): void {
+): boolean {
 	const staleRow = warnings.find((w) => w.stale);
 	if (staleRow) lines.push(`  (${formatCacheAgeLabel(staleRow.staleAsOf)})`);
 	if (incomplete) lines.push("  (re-verify incomplete)");
+	return staleRow !== undefined || incomplete;
 }
 
 // @delivery-surface: lens-diagnostics:mode-delta
@@ -1180,15 +1187,18 @@ function formatDeltaMode(
 
 	// Fixable warnings from actionable-warnings and quality cache entries retain
 	// their own severity tier. Apply the same threshold semantics as the LSP path.
-	// F5 (#3168): at most ONE age label per file — a file demoted in BOTH
-	// reports is labeled once, by the quality loop that renders last; the
-	// actionable loop skips files the quality loop will label. (The quality
-	// loop's pre-existing header suppression — a file's quality rows rendering
-	// under an earlier header — predates #3168 and is not worsened: the label
-	// follows the same rows it always did.)
-	const qualityLabeledFiles = new Set(
-		filteredQualityFiles.map((file) => normalizeMapKey(file.filePath)),
-	);
+	// F5/F10 (#3168): at most ONE label group (age and/or #3170's re-verify
+	// gap) per file, under that file's own header. Round 2 (F5) PREDICTED which loop would label, from the file's
+	// mere presence in the quality report, and was wrong in both directions:
+	// (a) a file demoted in BOTH reports lost its label to a group it does not
+	// head, because the quality loop's pre-existing header suppression renders
+	// its rows under an earlier file's header; (b) a file demoted in actionable
+	// but LIVE in quality got NO label at all, because the quality loop has no
+	// stale row and `appendGroupLabels` returns false — the pre-#3167 defect
+	// this work exists to remove. So do not predict: the actionable loop
+	// labels first (it always emits the file's own header) and records what it
+	// actually labelled; the quality loop no-ops for those files only.
+	const labelledFiles = new Set<string>();
 	if (filteredActionableFiles.length > 0) {
 		for (const file of filteredActionableFiles) {
 			const rel = path.relative(cwd, file.filePath);
@@ -1198,10 +1208,8 @@ function formatDeltaMode(
 				lines.push(`  ⚠ ${where}  ${w.rule ?? w.code ?? w.tool}  ${w.message}`);
 			}
 			const key = normalizeMapKey(file.filePath);
-			const hasStale = file.warnings.some((w) => w.stale);
-			const incomplete = reverifyIncompletePaths.has(key);
-			if ((hasStale || incomplete) && !qualityLabeledFiles.has(key)) {
-				appendGroupLabels(lines, file.warnings, incomplete);
+			if (appendGroupLabels(lines, file.warnings, reverifyIncompletePaths.has(key))) {
+				labelledFiles.add(key);
 			}
 		}
 	}
@@ -1216,10 +1224,8 @@ function formatDeltaMode(
 				lines.push(`  ℹ ${where}  ${w.rule ?? w.code ?? w.tool}  ${w.message}`);
 			}
 			const key = normalizeMapKey(file.filePath);
-			const hasStale = file.warnings.some((w) => w.stale);
-			const incomplete = reverifyIncompletePaths.has(key);
-			if (hasStale || incomplete) {
-				appendGroupLabels(lines, file.warnings, incomplete);
+			if (!labelledFiles.has(key)) {
+				appendGroupLabels(lines, file.warnings, reverifyIncompletePaths.has(key));
 			}
 		}
 	}

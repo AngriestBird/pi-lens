@@ -1,0 +1,5 @@
+---
+section: Fixed
+---
+
+- **A cold diagnostics sweep no longer burns its whole warm-up budget on a silent TypeScript server (closes #3187)** — The shared pre-sweep warm-up (`LSPService.ensureWarmForSweep`) touches a representative file to prove the server can answer, and that touch collects nothing. The tsserver sync clean-confirm race was gated on a collecting touch, so on a project whose classic typescript-language-server publishes nothing for clean files the warm-up could only reach a verdict by waiting out its entire cold-start budget — measured on a real session at 6,972 ms of a 20,000 ms budget, and on a fake tier3-silent server through the real service at 4,509 ms (initial attempt plus the retry) against 308 ms after the fix. The warm-up is now eligible for the sync confirm on its own identity while still collecting nothing, so it neither primes nor erases the file's last-known diagnostics, and a server that does not offer the sync commands still certifies through the existing silent-clean fallback instead of failing warm-up and skipping the sweep group.

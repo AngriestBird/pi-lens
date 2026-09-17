@@ -53,6 +53,49 @@ reviewer's three-value strength vocabulary (0 labels on 2 named outputs).
 Refuted: "close keywords in PR titles are ungated" —
 `lintCloseKeywordPlacement` already gates it and redded #3044.
 
+## 2026-09-16 — merge train to v4.2.0, and the post-tag patch window
+
+Forty-five PRs merged in the calendar day; v4.2.0 shipped at 21:30Z from bump
+PR #3177 (110 fragments: Added 6 / Changed 23 / Fixed 80 / Removed 1) with
+release-qa SHIP 13/13 on pi 0.85.1 and on the 0.80.10 host floor, both against
+the pushed base. The release gate the maintainer set — clear external issues,
+then land #3157 and #3163 — was met by #3166 (in-lane cascade finding policy,
+three rounds) and #3169 (read-guard pendingCreations keyed by the syntactic
+spelling on both sides; the win32 red-first was waived on the POSIX transcript
+plus the Windows lane's post-fix green). #2042 (CI exit-137 kill) closed after
+sixteen consecutive kill-free master runs following #3091. The external
+report #3090 closed via #3159, which also added the first macOS APFS test leg;
+its first run redded two new guards that both fixer and reviewer had asserted
+would skip, because the fixture created the case-variant sibling before the
+skip probe. Typst, the newest language, gained a diagnostic-bearing nightly
+LSP-gate fixture (#3171) after a local smoke showed the nightly only proved a
+handshake.
+
+What the train taught, mostly through reviewers attacking their own
+prescriptions: a fold onto a shared seam moved the finding-policy filter after
+a pre-existing display cap, so marked findings consumed the cap and genuine
+ones vanished (#3166 r1), then the bound added to fix it hid the same loss one
+threshold up until the block itself disclosed it (r2/r3); a reader-side
+normalizer change on a path-keyed map inverted two writer arms it never
+probed and then swapped a transformation on an unmeasured "subsumes" claim
+(#3178, four rounds — path-key changes now route to the strongest model
+regardless of label); a narrowing prescription was handed over without its
+residual family measured (#3155); a changelog fragment kept a retracted
+narrative while the body was rewritten; a body quoted "mutated in both
+directions" with one direction missing (#3156). Two teardown incidents where
+`git worktree remove --force` followed the `node_modules` symlink and emptied
+the shared checkout produced the contract line in #3174 (unlink first) and the
+Bash-hook mechanisation #3173. A recursive `fs.watch` in the tests-tree write
+guard emitted an unhandled ENOENT and killed a whole Unit-tests job with no
+failing test (#3179). Two external PRs (#3168, #3176) arrived after the
+release base was cut and go into 4.2.1 after full reviews; their reviews
+surfaced a delivery inversion (an extra in-band publish spending the carry
+marker) and a false-clean on empty server answers, both caught by the repo's
+own #2504 guards once run. Post-tag lanes landed the same evening: #3180
+(mutation-lane dry run under in-place Stryker), #3181 (widget suppressed-chip
+retention, window filed as #3183), #3178 (mark/analyze/paths-mode key parity,
+class filed as #3184).
+
 ## Archived pre-trim agent context (2026-09-14)
 
 The detailed incident narratives, closed decisions, and subsystem evidence below

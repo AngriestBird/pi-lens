@@ -2,3 +2,5 @@
 #show: it => emph(it)
 
 This is a Typst smoke fixture.
+
+#undefined_function(answer)
