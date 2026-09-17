@@ -17,6 +17,11 @@ import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const logLatency = vi.hoisted(() => vi.fn());
+const logCascadeMock = vi.hoisted(() => vi.fn());
+vi.mock("../../clients/cascade-logger.js", async (importOriginal) => ({
+	...(await importOriginal<object>()),
+	logCascade: (...args: unknown[]) => logCascadeMock(...args),
+}));
 vi.mock("../../clients/latency-logger.js", async (importOriginal) => ({
 	...(await importOriginal<typeof import("../../clients/latency-logger.js")>()),
 	logLatency,
@@ -24,6 +29,7 @@ vi.mock("../../clients/latency-logger.js", async (importOriginal) => ({
 
 import { CacheManager } from "../../clients/cache-manager.js";
 import { buildResolvedFoundCascadeRun } from "../../clients/cascade-format.js";
+import type { CascadeRun } from "../../clients/cascade-types.js";
 import {
 	_resetDeferredForTests,
 	_resetStateCacheForTests,
@@ -120,9 +126,15 @@ async function reconcileAndDeliver(diags: LSPDiagnostic[]): Promise<string> {
 		}),
 	} as never);
 	expect(outcomes[0]?.outcome).toBe("resolved-found");
+	// #3168 F3/F9: the stamp comes from the RECONCILE OUTCOME, exactly as
+	// index.ts's `onResolvedFound` receives it — not `Date.now()`. Round 2
+	// hand-supplied it and then asserted the age it had just supplied, so the
+	// whole plumb was untested (F9).
+	const publishedAt = outcomes[0]?.publishedAt;
 	const run = buildResolvedFoundCascadeRun(env.tmpDir, {
 		filePath: neighbor,
 		diagnostics: outcomes[0]?.diagnostics ?? [],
+		...(publishedAt !== undefined ? { publishedAt } : {}),
 	});
 	if (run) runtime.appendCascadeRun(run);
 
@@ -154,6 +166,65 @@ async function reconcileAndDeliver(diags: LSPDiagnostic[]): Promise<string> {
 	);
 }
 
+/** One indeterminate cascade run — the input the coverage advisory is built
+ * from. `observedAt` is omitted unless given, exactly as every production
+ * indeterminate producer leaves it (only the resolved-found plumb stamps it). */
+function indeterminateRun(
+	filePath: string,
+	detail: string,
+	observedAt?: number,
+): CascadeRun {
+	return {
+		filePath,
+		result: undefined,
+		neighborCount: 0,
+		diagnosticCount: 0,
+		indeterminate: { reason: "missing_node", detail },
+		...(observedAt !== undefined ? { observedAt } : {}),
+	};
+}
+
+/**
+ * The coverage-advisory half of the same production turn_end: append the
+ * `carried` runs, cross a turn boundary so `RuntimeCoordinator.beginTurn`
+ * stamps them `carriedTurns: 1`, append the `fresh` runs AFTER the boundary
+ * (so they carry no stamp), then deliver. Returns the agent-visible content.
+ */
+async function deliverIndeterminate(
+	carried: readonly CascadeRun[],
+	fresh: readonly CascadeRun[] = [],
+): Promise<string> {
+	const runtime = new RuntimeCoordinator();
+	const cacheManager = new CacheManager(false);
+	for (const run of carried) runtime.appendCascadeRun(run);
+	runtime.beginTurn();
+	for (const run of fresh) runtime.appendCascadeRun(run);
+	await handleTurnEnd({
+		ctxCwd: env.tmpDir,
+		getFlag: () => false,
+		dbg: () => {},
+		runtime,
+		cacheManager,
+		knipClient: {
+			ensureAvailable: async () => false,
+			analyze: async () => EMPTY_KNIP_RESULT,
+		},
+		deadCodeClients: [],
+		depChecker: { ensureAvailable: async () => false },
+		testRunnerClient: { getTestRunTarget: () => null },
+		resetLSPService: () => {},
+		resetFormatService: () => {},
+	} as never);
+	return (
+		consumeTurnEndFindings(cacheManager, env.tmpDir)?.messages[0]?.content ?? ""
+	);
+}
+
+/** The `• <detail>: <files>` bullet lines of a rendered coverage advisory. */
+function advisoryBullets(content: string): string[] {
+	return content.split("\n").filter((line) => line.trimStart().startsWith("•"));
+}
+
 async function mark(params: Record<string, unknown>) {
 	const { createLensDiagnosticMarkTool } =
 		await import("../../tools/lens-diagnostic-mark.js");
@@ -175,6 +246,11 @@ beforeEach(() => {
 	_resetDeferredForTests();
 	_resetStateCacheForTests();
 	logLatency.mockClear();
+	// #3168 F11/F13 add sibling cases that emit the SAME
+	// `cascade_carry_rendered` record shape the F6 case asserts, so without
+	// this the F6 assertion could be satisfied by a neighbour's record rather
+	// than its own (shape 7 — vacuous test).
+	logCascadeMock.mockClear();
 });
 
 afterEach(() => {
@@ -199,6 +275,105 @@ describe("cold-neighbour cascade run applies the finding policy (#3102)", () => 
 		// delivery that dropped nothing could still announce
 		// "suppressed by disposition: 0 finding(s)" and no case would notice.
 		expect(content).not.toContain("suppressed by disposition:");
+	});
+
+	it("#3168 F2: a carried run's re-rendered blocker is labeled with its observation age", async () => {
+		// The harness's beginTurn stamps the appended run carriedTurns: 1 — the
+		// re-rendered blocker must carry the carry label with the run's own
+		// observation age (#1444's publishedAt, threaded through the plumb).
+		// Red on master's shape: neutering either cascadeCarrySuffix call site
+		// removes the label and this assertion fails.
+		const content = await reconcileAndDeliver([
+			errorDiag(0, MARKED_MESSAGE),
+			errorDiag(1, OTHER_MESSAGE, 2304),
+		]);
+		expect(content).toContain("(carried 1 turn ·");
+		const labelCount = content.match(/\(carried 1 turn ·/g) ?? [];
+		expect(labelCount.length).toBe(1);
+		expect(content).toContain("scanned <1m ago");
+	});
+
+	it("#3168 F4: a MIXED carried/fresh coverage bucket is left unlabeled", async () => {
+		// One carried run (stamped by beginTurn) + one fresh run in the same
+		// graph bucket: a Math.max suffix would attach the carry to a file that
+		// was not carried (#3168 F4) — the bucket is left unlabeled.
+		const content = await deliverIndeterminate(
+			[indeterminateRun(neighbor, "graph degraded")],
+			[indeterminateRun(primary, "graph degraded")],
+		);
+		expect(content).toContain("Cascade could not compute downstream impact");
+		expect(content).not.toContain("(carried");
+	});
+
+	it("#3168 F6: an all-carried bucket renders the label and emits the success record", async () => {
+		const content = await deliverIndeterminate([
+			indeterminateRun(neighbor, "graph degraded", Date.now()),
+		]);
+		expect(content).toContain("(carried 1 turn · scanned <1m ago)");
+		expect(logCascadeMock).toHaveBeenCalledWith(
+			expect.objectContaining({
+				phase: "cascade_carry_rendered",
+				metadata: expect.objectContaining({
+					carriedRunsRendered: 0,
+					labeledAdvisories: 1,
+				}),
+			}),
+		);
+	});
+
+	// Recurrence this prevents (#3168 F11): round 2 applied only F4's
+	// mixed-bucket half and left the `${advisory} ${suffix}` SPACE join, so an
+	// all-carried bucket with two detail bullets welded the carry label onto
+	// the SECOND bullet — reading as "this one file was carried" while the
+	// first, carried identically, looked fresh. The blocker path has always
+	// joined with a newline. The round-2 F4 case used a single detail and
+	// structurally could not see it.
+	it("#3168 F11: an all-carried advisory with two bullets carries the label on its own line", async () => {
+		const observedAt = Date.now() - 12 * 60_000;
+		const content = await deliverIndeterminate([
+			indeterminateRun(neighbor, "review graph degraded", observedAt),
+			indeterminateRun(
+				primary,
+				"changed file not in the review graph",
+				observedAt,
+			),
+		]);
+		const bullets = advisoryBullets(content);
+		expect(bullets).toHaveLength(2);
+		for (const bullet of bullets) expect(bullet).not.toContain("(carried");
+		expect(content.split("\n")).toContain("(carried 1 turn · scanned 12m ago)");
+	});
+
+	// Recurrence this prevents (#3168 F13): the fold used
+	// `Math.min(min, r.observedAt ?? Number.MAX_SAFE_INTEGER)`, so an UNSTAMPED
+	// carried run fell out of the minimum and the label stated the stamped
+	// run's confident age for a bucket that contains an unaged one — a
+	// fabricated age, which is exactly what AC 4 forbids.
+	it("#3168 F13: one unstamped carried run collapses the bucket age to the neutral wording", async () => {
+		const content = await deliverIndeterminate([
+			indeterminateRun(
+				neighbor,
+				"review graph degraded",
+				Date.now() - 12 * 60_000,
+			),
+			indeterminateRun(primary, "changed file not in the review graph"),
+		]);
+		expect(content).toContain("(carried 1 turn · scan age unknown)");
+		expect(content).not.toContain("scanned 12m ago");
+	});
+
+	// #3168 F13, the production-today shape: NO indeterminate-run producer
+	// stamps `observedAt` (only the resolved-found plumb does), so the
+	// coverage advisory's age half is `scan age unknown` on every real carry
+	// — which is why the registry entry no longer promises an age. The carry
+	// COUNT is still real, and a fabricated number here would violate AC 4.
+	it("#3168 F13: an all-carried bucket with no stamps at all renders the carry count and the neutral age", async () => {
+		const content = await deliverIndeterminate([
+			indeterminateRun(neighbor, "review graph degraded"),
+			indeterminateRun(primary, "changed file not in the review graph"),
+		]);
+		expect(content).toContain("(carried 1 turn · scan age unknown)");
+		expect(content).not.toContain("scanned");
 	});
 
 	it("drops a neighbour error marked false-positive", async () => {

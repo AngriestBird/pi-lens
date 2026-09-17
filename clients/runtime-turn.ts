@@ -122,6 +122,7 @@ import {
 import type { LSPDiagnostic } from "./lsp/client.js";
 import { convertLspDiagnostics } from "./dispatch/utils/lsp-diagnostics.js";
 import { retagAuxiliaryDiagnostics } from "./dispatch/auxiliary-lsp.js";
+import { cascadeCarrySuffix } from "./cascade-format.js";
 import {
 	applyFindingPolicy,
 	loadProjectRulePolicyMap,
@@ -1193,6 +1194,27 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	const cascadeResults = cascadeRuns.flatMap((r) =>
 		r.result ? [r.result] : [],
 	);
+	// Fix B (#3167): which results belong to a CARRIED run — the label is
+	// per-result at render time, so the run→result pairing must survive the
+	// flatMap above (which discards the wrapper).
+	// Fix B (#3168 F6): the success-path record — latency.log could not show
+	// the feature ever rendered without it (the only phases were the drop/
+	// settle records). One bounded record per turn, emitted after both render
+	// sections below.
+	let carriedRunsRendered = 0;
+	let labeledAdvisories = 0;
+	const carriedMetaByResult = new Map<
+		NonNullable<(typeof cascadeRuns)[number]["result"]>,
+		{ carriedTurns: number; observedAt: number | undefined }
+	>();
+	for (const r of cascadeRuns) {
+		if (r.result && (r.carriedTurns ?? 0) > 0 && r.carriedTurns !== undefined) {
+			carriedMetaByResult.set(r.result, {
+				carriedTurns: r.carriedTurns,
+				observedAt: r.observedAt,
+			});
+		}
+	}
 	// #1550 class sweep: every cascade record below summarises `cascadeResults`
 	// — runs, which carry their own paths and can be carried across turns
 	// (#1443) — so labelling them with the turn's first EDITED file is the same
@@ -1231,7 +1253,20 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				(n) => neighborOwner.get(normalizeMapKey(n.filePath)) === pk,
 			);
 			if (ownsAny && result.formatted) {
-				parts.push(result.formatted);
+				// Fix B (#3167/#3168): a carried run's re-rendered blocker is labeled
+				// so the agent can tell it from a fresh observation — with the
+				// run's own observation age (#3168 F3).
+				const carryMeta = carriedMetaByResult.get(result);
+				const carrySuffix = cascadeCarrySuffix(
+					carryMeta?.carriedTurns,
+					carryMeta?.observedAt,
+				);
+				parts.push(
+					carrySuffix
+						? `${result.formatted}\n${carrySuffix}`
+						: result.formatted,
+				);
+				if (carrySuffix) carriedRunsRendered += 1;
 				injectedNeighborCount += result.neighbors.length;
 				injectedDiagnosticCount += result.neighbors.reduce(
 					(s, n) => s + n.diagnostics.length,
@@ -1410,43 +1445,85 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		// "ℹ️ Advisory — no action required this turn:" label, so an imperative
 		// ("review dependents manually") would contradict it. The #533 substance
 		// stays: a clean cascade result does NOT cover these files' dependents.
-		const graphAdvisory = buildAdvisory(graphRuns, {
-			lead: (fileCount, reasons) =>
-				`Cascade could not compute downstream impact for ${fileCount} edited file(s) this turn — ` +
-				`the review graph was unavailable (${reasons}), so their dependents were not ` +
-				`cascade-checked and a clean cascade result does not cover them.`,
-			fallbackDetail: (r) =>
-				r.indeterminate?.reason === "missing_node"
-					? "changed file not in the review graph"
-					: "review graph unavailable",
-		});
+		// Fix B (#3167/#3168 F4): a coverage advisory computed from a CARRIED
+		// indeterminate run describes the previous turn's evidence — label it so
+		// the absence-of-coverage statement is not read as current. A MIXED
+		// bucket (some carried, some fresh) is left UNLABELED: a Math.max
+		// suffix on the finished multi-line advisory would attach the carry to
+		// a file that was not carried.
+		const withCarryLabel = (
+			advisory: string | undefined,
+			runs: ReadonlyArray<{ carriedTurns?: number; observedAt?: number }>,
+		): string | undefined => {
+			if (advisory === undefined) return undefined;
+			const carried = runs.filter((r) => (r.carriedTurns ?? 0) > 0);
+			if (carried.length === 0 || carried.length !== runs.length) {
+				return advisory;
+			}
+			// #3168 F13: the bucket's age is the OLDEST carried observation, and
+			// only when EVERY carried run carries one. A `Math.min` sentinel
+			// (`?? Number.MAX_SAFE_INTEGER`) silently ignored the unstamped runs
+			// and stated a confident age for a bucket that contains an unaged
+			// one; one missing stamp collapses the age half to the helper's
+			// neutral "scan age unknown" wording instead.
+			const stamps = carried.map((r) => r.observedAt);
+			const observedAt = stamps.every((s): s is number => s !== undefined)
+				? Math.min(...stamps)
+				: undefined;
+			const suffix = cascadeCarrySuffix(carried[0]?.carriedTurns, observedAt);
+			if (!suffix) return advisory;
+			labeledAdvisories += 1;
+			// #3168 F11: newline, as the blocker path does above. A space join
+			// welded the suffix onto the LAST bullet of a multi-bullet advisory,
+			// so the carry label read as a property of that one file.
+			return `${advisory}\n${suffix}`;
+		};
+		const graphAdvisory = withCarryLabel(
+			buildAdvisory(graphRuns, {
+				lead: (fileCount, reasons) =>
+					`Cascade could not compute downstream impact for ${fileCount} edited file(s) this turn — ` +
+					`the review graph was unavailable (${reasons}), so their dependents were not ` +
+					`cascade-checked and a clean cascade result does not cover them.`,
+				fallbackDetail: (r) =>
+					r.indeterminate?.reason === "missing_node"
+						? "changed file not in the review graph"
+						: "review graph unavailable",
+			}),
+			graphRuns,
+		);
 		// @delivery-surface: runtime-turn:cascade-coverage-advisory
 		if (graphAdvisory) advisoryParts.push(graphAdvisory);
 
-		const bindingAdvisory = buildAdvisory(bindingRuns, {
-			lead: (fileCount, reasons) =>
-				`Cascade identified dependents for ${fileCount} edited file(s) this turn, but their ` +
-				`diagnostics could not be freshly confirmed (${reasons}) and were withheld — a clean ` +
-				`cascade result does not cover them.`,
-			fallbackDetail: () => "cascade diagnostics withheld (binding rejected)",
-		});
+		const bindingAdvisory = withCarryLabel(
+			buildAdvisory(bindingRuns, {
+				lead: (fileCount, reasons) =>
+					`Cascade identified dependents for ${fileCount} edited file(s) this turn, but their ` +
+					`diagnostics could not be freshly confirmed (${reasons}) and were withheld — a clean ` +
+					`cascade result does not cover them.`,
+				fallbackDetail: () => "cascade diagnostics withheld (binding rejected)",
+			}),
+			bindingRuns,
+		);
 		// @delivery-surface: runtime-turn:cascade-coverage-advisory
 		if (bindingAdvisory) advisoryParts.push(bindingAdvisory);
 
-		const budgetAdvisory = buildAdvisory(budgetRuns, {
-			lead: (fileCount, reasons) =>
-				`Cascade checked the selected neighbors for ${fileCount} edited file(s) this turn, ` +
-				`but some eligible dependents were not checked because the cascade budget ` +
-				`was exhausted (${reasons}); a clean cascade result does not cover them.`,
-			fallbackDetail: (r) => {
-				const budget = r.indeterminate?.budget;
-				if (!budget) return "cascade budget omitted eligible dependents";
-				const detail = `cascade budget checked ${budget.selectedCount} of ${budget.eligibleCount} eligible dependents (${budget.truncatedCount} omitted)`;
-				return budget.transitiveTruncated
-					? `${detail}; transitive expansion was capped before all eligible dependents were enumerated`
-					: detail;
-			},
-		});
+		const budgetAdvisory = withCarryLabel(
+			buildAdvisory(budgetRuns, {
+				lead: (fileCount, reasons) =>
+					`Cascade checked the selected neighbors for ${fileCount} edited file(s) this turn, ` +
+					`but some eligible dependents were not checked because the cascade budget ` +
+					`was exhausted (${reasons}); a clean cascade result does not cover them.`,
+				fallbackDetail: (r) => {
+					const budget = r.indeterminate?.budget;
+					if (!budget) return "cascade budget omitted eligible dependents";
+					const detail = `cascade budget checked ${budget.selectedCount} of ${budget.eligibleCount} eligible dependents (${budget.truncatedCount} omitted)`;
+					return budget.transitiveTruncated
+						? `${detail}; transitive expansion was capped before all eligible dependents were enumerated`
+						: detail;
+				},
+			}),
+			budgetRuns,
+		);
 		// @delivery-surface: runtime-turn:cascade-coverage-advisory
 		if (budgetAdvisory) advisoryParts.push(budgetAdvisory);
 
@@ -1484,6 +1561,15 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				byFile: byFile.slice(0, 20),
 				...(byFile.length > 20 && { byFileTruncated: byFile.length - 20 }),
 			},
+		});
+	}
+
+	// Fix B (#3168 F6): the success-path record — see the counters above.
+	if (carriedRunsRendered > 0 || labeledAdvisories > 0) {
+		logCascade({
+			phase: "cascade_carry_rendered",
+			filePath: cascadeLogFilePath,
+			metadata: { carriedRunsRendered, labeledAdvisories },
 		});
 	}
 

@@ -8,6 +8,7 @@ import {
 } from "./dispatch/finding-policy.js";
 import { detectFileRole } from "./file-role.js";
 import { logLatency } from "./latency-logger.js";
+import { formatCacheAgeLabel } from "./finding-delivery-gate.js";
 import type { LSPDiagnostic } from "./lsp/client.js";
 import type { Diagnostic } from "./dispatch/types.js";
 import { convertLspDiagnostics } from "./dispatch/utils/lsp-diagnostics.js";
@@ -95,7 +96,13 @@ export function formatCascadeNeighborDiagnostics(
  */
 export function buildResolvedFoundCascadeRun(
 	cwd: string,
-	neighbor: { filePath: string; diagnostics: LSPDiagnostic[] },
+	neighbor: {
+		filePath: string;
+		diagnostics: LSPDiagnostic[];
+		/** #3168 F3: the #1444 publish stamp, threaded to the run so the carried
+		 * age label renders the real observation age. */
+		publishedAt?: number;
+	},
 ): CascadeRun | undefined {
 	const { filePath } = neighbor;
 	const errors = neighbor.diagnostics.filter((d) => d.severity === 1);
@@ -163,6 +170,12 @@ export function buildResolvedFoundCascadeRun(
 		},
 		neighborCount: 1,
 		diagnosticCount: diagnostics.length,
+		// #3168 F3: the #1444 publish stamp — the run's own observation time, so
+		// the carried-render age label states the real age instead of claiming
+		// no stamp exists.
+		...(neighbor.publishedAt !== undefined
+			? { observedAt: neighbor.publishedAt }
+			: {}),
 	};
 }
 
@@ -372,4 +385,24 @@ function readNeighborContent(filePath: string): string | undefined {
 	} catch {
 		return undefined;
 	}
+}
+
+/**
+ * Fix B (#3167/#3168): the carry label for a cascade run re-rendered at a
+ * later turn_end. The carry is bounded to ONE turn (`RuntimeCoordinator.beginTurn`
+ * drops anything that would reach 2), so the honest label names the carry
+ * count. #3168 F3 corrected this docstring's earlier claim that no stamp
+ * exists: the run DOES carry one (`observedAt`, threaded from #1444's
+ * `publishedAt` through the resolved-found plumb), so the age half renders
+ * from it via `formatCacheAgeLabel`. The deferred-compute re-park arm has no
+ * stamp and correctly falls to the neutral wording. Returns `undefined` for
+ * non-carried runs: no label noise on fresh observations.
+ */
+export function cascadeCarrySuffix(
+	carriedTurns?: number,
+	observedAt?: number | undefined,
+): string | undefined {
+	if (carriedTurns === undefined || carriedTurns < 1) return undefined;
+	const noun = carriedTurns === 1 ? "turn" : "turns";
+	return `(carried ${carriedTurns} ${noun} · ${formatCacheAgeLabel(observedAt)})`;
 }

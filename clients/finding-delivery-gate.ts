@@ -298,7 +298,9 @@ function labeled(
 	reason: string,
 	ageSource: string,
 	evidence: string[] = [],
-	extra: Partial<Pick<LabeledDeliverySurface, "status" | "partialReason">> = {},
+	extra: Partial<
+		Pick<LabeledDeliverySurface, "status" | "partialReason" | "evidenceMin">
+	> = {},
 ): LabeledDeliverySurface {
 	return {
 		mode: "labeled",
@@ -464,32 +466,29 @@ export const DELIVERY_SURFACES: Record<string, DeliverySurfaceEntry> = {
 		"Turn-end 🧪 cascade neighbor blocker.",
 		"Cascade results settle synchronously this turn where possible " +
 			"(`settleCascadeRuns`), but an unsettled compute can carry over to a " +
-			"later turn (bounded by a carry cap) — this round does not freshness-" +
-			"gate that carry-over window.",
+			"later turn (bounded by a carry cap) — a carried-over result renders " +
+			"with an explicit `(carried N turns · scanned Xm ago)` label (#3167, " +
+			"#3168 F3), so the agent can tell it from a fresh observation.",
 		"live",
-		[],
-		{
-			status: "partial",
-			partialReason:
-				"A carried-over cascade result (run.carriedTurns > 0) is rendered " +
-				"without an age label. Follow-up: surface carriedTurns as an explicit " +
-				"label when > 0, or route through formatCacheAgeLabel using the run's " +
-				"own timestamp.",
-		},
+		["cascadeCarrySuffix("],
+		{ evidenceMin: 1 },
 	),
 	"runtime-turn:cascade-coverage-advisory": labeled(
 		RUNTIME_TURN_FILE,
 		"Turn-end cascade-coverage-gap advisories (graph/binding/budget).",
 		"Explains what the cascade check could NOT confirm this turn — not a " +
 			"finding with a cited path, an absence-of-coverage disclosure computed " +
-			"from this turn's own indeterminate-run list.",
+			"from this turn's own indeterminate-run list. An advisory computed from " +
+			"a carried indeterminate run is labeled `(carried N turns · <age>)` " +
+			"(#3167, #3168 F4 — dropped on mixed carried/fresh buckets). The age " +
+			"half reads `scan age unknown` on this surface today: no indeterminate-" +
+			"run producer stamps `observedAt` (only the resolved-found plumb does, " +
+			"`clients/cascade-format.ts`), and one unstamped carried run collapses " +
+			"the whole bucket's age rather than claiming the stamped runs' (#3168 " +
+			"F13). The carry COUNT is always real.",
 		"live",
-		[],
-		{
-			status: "partial",
-			partialReason:
-				"Same cascade carry-over caveat as runtime-turn:cascade-blocker.",
-		},
+		["withCarryLabel("],
+		{ evidenceMin: 3 },
 	),
 	// #3102: the cold-neighbour cascade run is BUILT here, in the quiet-window
 	// reconcile (`onResolvedFound` in index.ts), a turn earlier than the

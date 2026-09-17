@@ -30,7 +30,10 @@ import {
 	loadProjectRulePolicyMap,
 } from "../clients/dispatch/finding-policy.js";
 import { gateFindingsByPathFreshness } from "../clients/advisory-provenance.js";
-import { markUnreconciledFindings } from "../clients/finding-delivery-gate.js";
+import {
+	formatCacheAgeLabel,
+	markUnreconciledFindings,
+} from "../clients/finding-delivery-gate.js";
 import { normalizeRuleId } from "../clients/dispatch/rule-id-normalize.js";
 import {
 	applyRulePolicy,
@@ -43,6 +46,7 @@ import {
 	isAtOrAboveHomeDir,
 	normalizeEphemeralMapKey,
 	normalizeFilePath,
+	normalizeMapKey,
 	realpathOrResolve,
 } from "../clients/path-utils.js";
 import { getLSPService } from "../clients/lsp/index.js";
@@ -964,7 +968,10 @@ function applyDeltaFreshnessGate<W extends DispositionCandidate>(
 	files: Array<{ filePath: string; warnings: W[]; generatedAt?: string }>,
 	cwd: string,
 	generatedAt: string | undefined,
-): Array<{ filePath: string; warnings: Array<W & { stale?: boolean }> }> {
+): Array<{
+	filePath: string;
+	warnings: Array<W & { stale?: boolean; staleAsOf?: string }>;
+}> {
 	// #2504 review round 4 (F1): an actionable-warnings report is no longer the
 	// product of exactly ONE pass. A deferred off-hook LSP pull upserts its
 	// per-file entries into whatever report is persisted when it lands, so one
@@ -1030,7 +1037,10 @@ function applyDeltaFreshnessGate<W extends DispositionCandidate>(
 	// Two passes (live, then stale) reorder a file's demoted rows to the end
 	// of its warnings array rather than the original report order — cosmetic
 	// only, nothing is dropped or duplicated.
-	const byFile = new Map<string, Array<W & { stale?: boolean }>>();
+	const byFile = new Map<
+		string,
+		Array<W & { stale?: boolean; staleAsOf?: string }>
+	>();
 	for (const f of gated.live) {
 		const arr = byFile.get(f.filePath) ?? [];
 		arr.push(f.warning);
@@ -1038,7 +1048,15 @@ function applyDeltaFreshnessGate<W extends DispositionCandidate>(
 	}
 	for (const f of gated.stale) {
 		const arr = byFile.get(f.filePath) ?? [];
-		arr.push({ ...f.warning, stale: true, line: undefined });
+		// Fix B (#3167): carry the stamp the row was judged against so the render
+		// can emit one age label per file group — the row's own observation stamp,
+		// not the report-level one (the #2504 r4 multi-stamp case).
+		arr.push({
+			...f.warning,
+			stale: true,
+			line: undefined,
+			staleAsOf: effectiveAt,
+		});
 		byFile.set(f.filePath, arr);
 	}
 	return files
@@ -1047,6 +1065,26 @@ function applyDeltaFreshnessGate<W extends DispositionCandidate>(
 			warnings: byFile.get(file.filePath) ?? [],
 		}))
 		.filter((file) => file.warnings.length > 0);
+}
+
+/**
+ * Fix B (#3167): one age label per file group that has demoted rows — the
+ * group's own observation stamp through `formatCacheAgeLabel`, so an agent
+ * can tell a just-observed finding from one re-served from cache. Emitted
+ * AFTER the group's rows; never on a group with live rows only.
+ *
+ * Returns whether a label was pushed, so the caller can dedupe across the two
+ * render loops from what actually happened instead of PREDICTING which loop
+ * will label (#3168 F10).
+ */
+function appendGroupAgeLabel(
+	lines: string[],
+	warnings: ReadonlyArray<{ stale?: boolean; staleAsOf?: string }>,
+): boolean {
+	const staleRow = warnings.find((w) => w.stale);
+	if (!staleRow) return false;
+	lines.push(`  (${formatCacheAgeLabel(staleRow.staleAsOf)})`);
+	return true;
 }
 
 // @delivery-surface: lens-diagnostics:mode-delta
@@ -1135,6 +1173,18 @@ function formatDeltaMode(
 
 	// Fixable warnings from actionable-warnings and quality cache entries retain
 	// their own severity tier. Apply the same threshold semantics as the LSP path.
+	// F5/F10 (#3168): at most ONE age label per file, under that file's own
+	// header. Round 2 (F5) PREDICTED which loop would label, from the file's
+	// mere presence in the quality report, and was wrong in both directions:
+	// (a) a file demoted in BOTH reports lost its label to a group it does not
+	// head, because the quality loop's pre-existing header suppression renders
+	// its rows under an earlier file's header; (b) a file demoted in actionable
+	// but LIVE in quality got NO label at all, because the quality loop has no
+	// stale row and `appendGroupAgeLabel` returns early — the pre-#3167 defect
+	// this work exists to remove. So do not predict: the actionable loop
+	// labels first (it always emits the file's own header) and records what it
+	// actually labelled; the quality loop no-ops for those files only.
+	const labelledFiles = new Set<string>();
 	if (filteredActionableFiles.length > 0) {
 		for (const file of filteredActionableFiles) {
 			const rel = path.relative(cwd, file.filePath);
@@ -1142,6 +1192,9 @@ function formatDeltaMode(
 			for (const w of file.warnings) {
 				const where = w.stale ? STALE_LINE_MARKER : `L${w.line ?? "?"}`;
 				lines.push(`  ⚠ ${where}  ${w.rule ?? w.code ?? w.tool}  ${w.message}`);
+			}
+			if (appendGroupAgeLabel(lines, file.warnings)) {
+				labelledFiles.add(normalizeMapKey(file.filePath));
 			}
 		}
 	}
@@ -1154,6 +1207,9 @@ function formatDeltaMode(
 			for (const w of file.warnings) {
 				const where = w.stale ? STALE_LINE_MARKER : `L${w.line ?? "?"}`;
 				lines.push(`  ℹ ${where}  ${w.rule ?? w.code ?? w.tool}  ${w.message}`);
+			}
+			if (!labelledFiles.has(normalizeMapKey(file.filePath))) {
+				appendGroupAgeLabel(lines, file.warnings);
 			}
 		}
 	}
