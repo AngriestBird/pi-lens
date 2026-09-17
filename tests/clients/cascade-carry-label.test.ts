@@ -265,10 +265,15 @@ describe("demoted delta rows (#3167)", () => {
 
 	/**
 	 * Recurrence this prevents (#3168 F10, shape (b)): with a.ts demoted in the
-	 * actionable report but LIVE in the quality report, round 2's actionable
-	 * loop deferred to a quality loop that has no stale row at all, so
-	 * `appendGroupLabels` returned false and the demoted row shipped with NO
-	 * age label — the pre-#3167 defect the issue exists to remove.
+	 * actionable report but LIVE in the quality report, an implementation that
+	 * predicts which tier supplies the label (rather than recording it as a
+	 * fact on the group, #3196's `group.staleRow`) can defer to the quality
+	 * tier — which has no stale row here — and never reach the actionable
+	 * tier's real one. Mutation: skipping the `if (!group.staleRow)` update in
+	 * the actionable tier's loop (`tools/lens-diagnostics.ts`, so only the
+	 * quality tier can ever set `group.staleRow`) reproduces exactly this: the
+	 * demoted row ships with NO age label — the pre-#3167 defect the issue
+	 * exists to remove.
 	 */
 	it("F10(b): a file demoted in actionable but live in quality still gets its label", async () => {
 		const aPath = path.join(cwd, "src", "a.ts");
@@ -364,12 +369,16 @@ describe("demoted delta rows (#3167)", () => {
 
 	/**
 	 * Recurrence this prevents (#3168 F10, carried onto #3170's second label):
-	 * the two render loops each push a group label, so a file present in BOTH
-	 * reports renders it twice unless the second loop no-ops on what the first
-	 * actually pushed. Round 2 of #3176 deduped by PREDICTING the quality loop
-	 * would label (`qualityLabeledFiles`) — the same prediction #3168 F10
-	 * removed. Mutation: `appendGroupLabels` returning `false` duplicates both
-	 * labels under `src/a.ts` here.
+	 * a file present in BOTH reports must contribute exactly one age label and
+	 * one re-verify-incomplete label to its group, no matter how many tiers
+	 * touched it. #3196's shared group-emit loop (`tools/lens-diagnostics.ts`,
+	 * `for (const group of groups.values())`) renders `group.staleRow`/
+	 * `group.incomplete` exactly once per file, after every tier has folded in
+	 * — round 2 of #3176 instead deduped by PREDICTING the quality loop would
+	 * label (`qualityLabeledFiles`), the same prediction #3168 F10 removed.
+	 * Mutation: pushing the age-label and incomplete lines a SECOND time
+	 * inside the emit loop (as if each tier still rendered its own trailer)
+	 * duplicates both labels under `src/a.ts` here.
 	 */
 	it("#3170: a re-verify-incomplete file demoted in both reports carries both labels ONCE, under its own header", async () => {
 		const aPath = path.join(cwd, "src", "a.ts");
@@ -428,9 +437,10 @@ describe("demoted delta rows (#3167)", () => {
 	 * Recurrence this prevents: the same F10 duplication for a file whose rows
 	 * are LIVE (its own file has not moved since the report stamp, so nothing
 	 * is demoted) but whose re-verify was cut — the group's only label is the
-	 * gap label. Mutation: dropping `|| incomplete` from `appendGroupLabels`'s
-	 * return leaves the actionable loop's push unrecorded and the quality loop
-	 * repeats it.
+	 * gap label. Mutation: pushing `"  (re-verify incomplete)"` a second time
+	 * in the shared group-emit loop (`tools/lens-diagnostics.ts`, `if
+	 * (group.incomplete) lines.push(...)`) duplicates the label under
+	 * `src/a.ts`.
 	 */
 	it("#3170: a LIVE re-verify-incomplete file present in both reports carries the gap label once", async () => {
 		const aPath = path.join(cwd, "src", "a.ts");

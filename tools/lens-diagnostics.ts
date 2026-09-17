@@ -766,7 +766,7 @@ function formatProjectDeltaDiagnostic(
  * surface `lens-diagnostics:mode-delta`.
  */
 function appendProjectDiagnosticsDeltaLines(
-	lines: string[],
+	groups: Map<string, DeltaFileGroup>,
 	cwd: string,
 	report: ProjectDiagnosticsDeltaReport | undefined,
 	severity: string,
@@ -801,10 +801,9 @@ function appendProjectDiagnosticsDeltaLines(
 		byFile.set(filePath, bucket);
 	}
 	for (const [filePath, fileDiagnostics] of byFile) {
-		const rel = path.relative(cwd, filePath);
-		if (!lines.includes(rel)) lines.push(rel);
+		const group = getDeltaFileGroup(groups, cwd, filePath);
 		for (const diagnostic of fileDiagnostics) {
-			lines.push(
+			group.projectLines.push(
 				formatProjectDeltaDiagnostic(diagnostic, staleSet.has(diagnostic)),
 			);
 		}
@@ -1068,26 +1067,55 @@ function applyDeltaFreshnessGate<W extends DispositionCandidate>(
 }
 
 /**
- * Fix B (#3167): one age label per file group that has demoted rows — the
- * group's own observation stamp through `formatCacheAgeLabel`, so an agent
- * can tell a just-observed finding from one re-served from cache. Emitted
- * AFTER the group's rows; never on a group with live rows only. #3170 adds
- * the `(re-verify incomplete)` gap label to the same group, so a budget-cut
- * re-verify is never rendered as a clean re-observation.
+ * #3196: one render pass grouped by file — every tier (actionable, quality,
+ * project) appends its rows into the SAME group instead of pushing a header
+ * onto a flat `lines` buffer and testing `lines.includes(rel)` to guess
+ * whether that file's group is still open. That membership test only proves
+ * the header was pushed somewhere in the buffer, not that the group being
+ * appended to is the one it heads — a file present in more than one report
+ * had its later tier's rows land under whichever OTHER file's header was
+ * last pushed. Keying by file up front makes the question unaskable: a
+ * tier's rows for a file always land in that file's own bucket, wherever in
+ * the buffer its header ends up.
  *
- * Returns whether ANY label was pushed, so the caller can dedupe across the
- * two render loops from what actually happened instead of PREDICTING which
- * loop will label (#3168 F10).
+ * One age label (Fix B, #3167) plus the `(re-verify incomplete)` gap label
+ * (#3170) per group, in a single trailer AFTER every content row — actionable,
+ * then quality, then project — so the labels never read as describing only
+ * the tier rendered directly above them (round 2, #3196: project rows were
+ * pushed after the trailer, so a file with both cache and project-diagnostics
+ * rows rendered its labels ahead of the project rows instead of trailing all
+ * of them). The actionable tier's stale row wins the label when present (it
+ * is processed first), the quality tier's only when actionable had none —
+ * matching the precedence #3168 F10 fixed, but as a fact recorded on the
+ * group instead of a prediction about which loop renders first.
  */
-function appendGroupLabels(
-	lines: string[],
-	warnings: ReadonlyArray<{ stale?: boolean; staleAsOf?: string }>,
-	incomplete: boolean,
-): boolean {
-	const staleRow = warnings.find((w) => w.stale);
-	if (staleRow) lines.push(`  (${formatCacheAgeLabel(staleRow.staleAsOf)})`);
-	if (incomplete) lines.push("  (re-verify incomplete)");
-	return staleRow !== undefined || incomplete;
+interface DeltaFileGroup {
+	readonly rel: string;
+	readonly actionableLines: string[];
+	readonly qualityLines: string[];
+	readonly projectLines: string[];
+	staleRow?: { staleAsOf: string | undefined };
+	incomplete: boolean;
+}
+
+function getDeltaFileGroup(
+	groups: Map<string, DeltaFileGroup>,
+	cwd: string,
+	filePath: string,
+): DeltaFileGroup {
+	const rel = path.relative(cwd, filePath);
+	let group = groups.get(rel);
+	if (!group) {
+		group = {
+			rel,
+			actionableLines: [],
+			qualityLines: [],
+			projectLines: [],
+			incomplete: false,
+		};
+		groups.set(rel, group);
+	}
+	return group;
 }
 
 // @delivery-surface: lens-diagnostics:mode-delta
@@ -1183,39 +1211,37 @@ function formatDeltaMode(
 		}))
 		.filter((file) => file.warnings.length > 0);
 
-	const lines: string[] = [];
+	// #3196: one grouping pass keyed by file — every tier below appends into
+	// the SAME per-file group (see `DeltaFileGroup`/`getDeltaFileGroup`), so a
+	// file present in more than one report always renders its rows under its
+	// own header, wherever that header ends up in the final buffer.
+	const groups = new Map<string, DeltaFileGroup>();
 
 	// Fixable warnings from actionable-warnings and quality cache entries retain
 	// their own severity tier. Apply the same threshold semantics as the LSP path.
 	// F5/F10 (#3168): at most ONE label group (age and/or #3170's re-verify
-	// gap) per file, under that file's own header. Round 2 (F5) PREDICTED which loop would label, from the file's
-	// mere presence in the quality report, and was wrong in both directions:
-	// (a) a file demoted in BOTH reports lost its label to a group it does not
-	// head, because the quality loop's pre-existing header suppression renders
-	// its rows under an earlier file's header; (b) a file demoted in actionable
-	// but LIVE in quality got NO label at all, because the quality loop has no
-	// stale row and `appendGroupLabels` returns false — the pre-#3167 defect
-	// this work exists to remove. So do not predict: the actionable loop
-	// labels first (it always emits the file's own header) and records what it
-	// actually labelled; the quality loop no-ops for those files only.
-	const labelledFiles = new Set<string>();
+	// gap) per file. The actionable tier is folded first, so its stale row (if
+	// any) wins the group's age label; the quality tier only supplies one when
+	// the actionable tier had none for that file (#3168 F10(c)'s quality-only
+	// shape). The `(re-verify incomplete)` flag is a fact about the file (from
+	// the raw actionable cache, independent of which tier's rows happen to
+	// render it), so it is recorded on the group the first time either tier
+	// touches that file and never predicted.
 	if (filteredActionableFiles.length > 0) {
 		for (const file of filteredActionableFiles) {
-			const rel = path.relative(cwd, file.filePath);
-			lines.push(`${rel}`);
+			const group = getDeltaFileGroup(groups, cwd, file.filePath);
 			for (const w of file.warnings) {
 				const where = w.stale ? STALE_LINE_MARKER : `L${w.line ?? "?"}`;
-				lines.push(`  ⚠ ${where}  ${w.rule ?? w.code ?? w.tool}  ${w.message}`);
+				group.actionableLines.push(
+					`  ⚠ ${where}  ${w.rule ?? w.code ?? w.tool}  ${w.message}`,
+				);
 			}
 			const key = normalizeMapKey(file.filePath);
-			if (
-				appendGroupLabels(
-					lines,
-					file.warnings,
-					reverifyIncompletePaths.has(key),
-				)
-			) {
-				labelledFiles.add(key);
+			if (reverifyIncompletePaths.has(key)) group.incomplete = true;
+			if (!group.staleRow) {
+				const staleWarning = file.warnings.find((w) => w.stale);
+				if (staleWarning)
+					group.staleRow = { staleAsOf: staleWarning.staleAsOf };
 			}
 		}
 	}
@@ -1223,30 +1249,42 @@ function formatDeltaMode(
 	// Quality issues
 	if (filteredQualityFiles.length > 0) {
 		for (const file of filteredQualityFiles) {
-			const rel = path.relative(cwd, file.filePath);
-			if (!lines.includes(rel)) lines.push(rel);
+			const group = getDeltaFileGroup(groups, cwd, file.filePath);
 			for (const w of file.warnings) {
 				const where = w.stale ? STALE_LINE_MARKER : `L${w.line ?? "?"}`;
-				lines.push(`  ℹ ${where}  ${w.rule ?? w.code ?? w.tool}  ${w.message}`);
+				group.qualityLines.push(
+					`  ℹ ${where}  ${w.rule ?? w.code ?? w.tool}  ${w.message}`,
+				);
 			}
 			const key = normalizeMapKey(file.filePath);
-			if (!labelledFiles.has(key)) {
-				appendGroupLabels(
-					lines,
-					file.warnings,
-					reverifyIncompletePaths.has(key),
-				);
+			if (reverifyIncompletePaths.has(key)) group.incomplete = true;
+			if (!group.staleRow) {
+				const staleWarning = file.warnings.find((w) => w.stale);
+				if (staleWarning)
+					group.staleRow = { staleAsOf: staleWarning.staleAsOf };
 			}
 		}
 	}
 
 	const projectDeltaCount = appendProjectDiagnosticsDeltaLines(
-		lines,
+		groups,
 		cwd,
 		projectDelta,
 		severity,
 		includeFile,
 	);
+
+	const lines: string[] = [];
+	for (const group of groups.values()) {
+		lines.push(group.rel);
+		lines.push(...group.actionableLines);
+		lines.push(...group.qualityLines);
+		lines.push(...group.projectLines);
+		if (group.staleRow) {
+			lines.push(`  (${formatCacheAgeLabel(group.staleRow.staleAsOf)})`);
+		}
+		if (group.incomplete) lines.push("  (re-verify incomplete)");
+	}
 
 	const selectedActionableFiles = filteredActionableFiles;
 	const selectedQualityFiles = filteredQualityFiles;
