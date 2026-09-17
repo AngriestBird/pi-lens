@@ -137,6 +137,13 @@ can trip, and say in your report which you ran and what each returned.
   left no trace (#2526). For a new or replaced seam demand a SUCCESS-path
   record too — the failure-path rule in AGENTS.md does not cover "did the new
   code run at all".
+- **Platform-skip claim for a fixture.** A claimed OS/filesystem skip (APFS
+  case-insensitivity, a case-variant collision) is a finding until the
+  filesystem was actually probed for the collision before the skip was
+  written and the sibling fixture case exists after that probe. An asserted
+  skip that neither side measured is not evidence (#3159 r2: fixer and
+  reviewer both asserted a skip that redded EEXIST on the first real macOS
+  run).
 - **Sort comparators.** Any new `.sort()` or `.toSorted()` needs an explicit
   comparator (SonarCloud S2871). Where the sorted order feeds an identity — a
   dedupe key, a cache key, a hash input — the comparator must be
@@ -214,6 +221,11 @@ that missed two direct `loadLSPConfig` callers; the fixer's key-derivation
 table caught it and the verify confirmed the override. A prescription the
 fixer proves insufficient with a red is the fixer being right — verify the
 override on its merits, not against the prescription.
+A prescription that NARROWS an existing guard (a tighter predicate, a smaller
+matched set) names its residual family and the measured incidence left
+uncaught before hand-over, not after the next verify finds it (#3155 r2: the
+S4 prescription narrowed a markdown misfire, and the residual surfaced only in
+verify).
 
 **Exemptions added in a fix round are findings until cleared.** A round that
 resolves a red sweep by adding an entry to `DECLARED_EXCEPTIONS`,
@@ -291,6 +303,12 @@ fixture garbage into the real telemetry (#2506). Before every such probe:
 `export PI_LENS_HOME=<your worktree>/.probe-home` (or set it inline), and
 `PILENS_DATA_DIR` likewise when the probe touches project-scoped data. A probe
 that forgets is a finding against YOUR report, not the PR's.
+
+Never run a full in-place Stryker mutation run in this shared or long-lived
+worktree: an interrupted run leaves the tree instrumented and unusable for
+anyone else (#3180 killed one run and left ~1,924 instrumented files behind).
+Reproduce a mutation claim with `--dryRunOnly`, and never under a kill
+timeout.
 
 ## Report format
 
