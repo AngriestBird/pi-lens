@@ -198,9 +198,12 @@ function adoptCanonicalCasing(held: string, canonical: string): string {
  * Folding here is pure string algebra — no cwd, no filesystem — so a relative
  * path stays relative (`src/../x` → `x`, `../x` → `../x`, never resolved
  * against `process.cwd()`; refs #2490, where a cwd fold broke every monorepo)
- * and a symlinked package still keys under the path the caller held. It is
- * `path.resolve`'s own textual `..` semantics, which is exactly what makes a
- * folded reader key equal to the canonical writer's key.
+ * and a symlinked package still keys under the path the caller held. These
+ * are `path.resolve`'s own TEXTUAL `..` semantics, which is exactly what
+ * makes a folded reader key equal to the canonical writer's key: where a
+ * `..` sits right after a symlinked directory, textual folding and the
+ * kernel disagree, and both sides of every comparison take the textual
+ * answer because every canonical writer already resolved that way.
  *
  * Why POSIX canonicalizes casing at all (#3098, the #1024 defect's live half):
  * a case-insensitive POSIX filesystem — macOS's default APFS, `nocase` vfat /
