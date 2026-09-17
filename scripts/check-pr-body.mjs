@@ -310,6 +310,13 @@ function recordLocationsFromRuntimeSource(source) {
 		["incrementDegradationCount", ["kind"]],
 		["logExtension", ["subsystem", "message"]],
 		["logLatency", ["phase", "event", "eventName", "name"]],
+		// #3168 F12: `logCascade` (clients/cascade-logger.ts) is a
+		// `createNdjsonLogger` sink with the same `phase` discriminator as
+		// `logLatency`, so a PR whose only new bounded record goes to
+		// cascade.log could not state it in any of the three accepted forms —
+		// the honest section was refused and the only passing wording was the
+		// false "no record added." sentence.
+		["logCascade", ["phase"]],
 		["emitBounded", ["kind", "event", "eventName"]],
 	];
 	for (const [name, fields] of calls) {
