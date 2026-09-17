@@ -231,11 +231,6 @@ export async function runPersistentReverify(args: {
 			// (kept verbatim, labeled), never an escaped error.
 			touchedResult = undefined;
 		}
-		// F3: an empty result is clean ONLY when the touch itself answers
-		// `confirmation: "confirmed"` — the silent-on-clean rule. A bare
-		// `{diags: []}` (the house double's silent empty, a tier-3 server
-		// still analyzing) or a `skipReason` is UNCONFIRMED: the carried
-		// warnings are kept verbatim and the render labels the gap.
 		// F3 (#3176): an empty result is clean ONLY when the touch COMPLETED
 		// its confirmation policy — the silent-on-clean rule (#240/#533/#1253).
 		// A bare `{diags: []}` (the house double's silent empty, a tier-3
