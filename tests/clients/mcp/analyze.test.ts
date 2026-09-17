@@ -682,7 +682,10 @@ describe("analyzeFile — absolute dot-segment `file` argument (#3184)", () => {
 	it("an absolute pilens_analyze `file` argument with a dot segment lands under the canonical widget-state key", async () => {
 		fs.mkdirSync(path.join(tmpDir, "sub"), { recursive: true });
 		const plainAbs = path.join(tmpDir, "sub", "a.ts");
-		fs.writeFileSync(plainAbs, "const a = 1;\nconst b = 2;\nconst t = bad();\n");
+		fs.writeFileSync(
+			plainAbs,
+			"const a = 1;\nconst b = 2;\nconst t = bad();\n",
+		);
 		const dotSegmentAbs = `${path.join(tmpDir, "sub")}${path.sep}..${path.sep}sub${path.sep}a.ts`;
 		expect(dotSegmentAbs).toContain("..");
 		expect(fs.realpathSync.native(dotSegmentAbs)).toBe(
