@@ -19,6 +19,7 @@ import {
 	tmpHygieneObservedEntries,
 	tmpHygieneUnadmittedEntries,
 } from "../support/vitest-setup.js";
+import { setupTestEnvironment } from "../clients/test-utils.js";
 
 const REPO_ROOT = path.resolve(
 	path.dirname(fileURLToPath(import.meta.url)),
@@ -436,5 +437,50 @@ describe("tmp-fixture-hygiene", () => {
 			],
 		);
 		expect(admission?.prefix).toBe("pi-lens-which-latch-sh");
+	});
+
+	// #3186: PR #3168 CI run 35160969016 redded THIS file over
+	// pi-lens-tool-policy-conventions-{4irwKN,BDRp7z,PQRGdj} — dirs owned by
+	// tests/clients/tool-policy-conventions.test.ts, whose afterEach removes
+	// its setupTestEnvironment dir synchronously. Premise-first repro against
+	// the real production call (clients/project-snapshot.ts saveProjectSnapshot,
+	// no mock): a bare Node invocation that calls it, then removes the
+	// directory the instant it returns (the same sequence
+	// tool-policy-conventions.test.ts's beforeEach/afterEach run), saw the
+	// directory back on disk ~10-50ms later, unforced, on every trial —
+	// saveProjectSnapshot dispatches its body persist to a worker
+	// thread/main-thread fallback (dispatchSnapshotPersist) that is NOT
+	// awaited by the caller, and that persist's write path
+	// (clients/gzip-stage-write.ts) does `fs.promises.mkdir(dirname,
+	// {recursive:true})` before writing — recreating whatever ancestor
+	// directories the caller's own synchronous cleanup just removed. Same
+	// class already admitted for other async-persist owners in
+	// tests/config/tmp-fixture-hygiene-baseline.json (e.g.
+	// pi-lens-session-nested-snapshot-, pi-lens-warmup-prewarm-: "can retain
+	// its asynchronous root across worker teardown").
+	//
+	// This recreates the OBSERVABLE end state that late write leaves — a
+	// fresh directory under the same prefix, after the owning file's own
+	// cleanup — synchronously (no real worker, no wall-clock wait: the
+	// timing is independently verified above, not the thing this test
+	// checks). What's under test is the DETECTOR's attribution given that
+	// state, run from inside this file exactly as the CI red was.
+	it("does not attribute a recreated pi-lens-tool-policy-conventions dir to this file", () => {
+		const env = setupTestEnvironment("pi-lens-tool-policy-conventions-");
+		env.cleanup(); // the owning file's synchronous afterEach
+		fs.mkdirSync(env.tmpDir, { recursive: true }); // the late persist's recreate
+		try {
+			const name = path.basename(env.tmpDir);
+			const observed = tmpHygieneObservedEntries();
+			expect(observed).toContain(name);
+			expect(
+				tmpHygieneUnadmittedEntries(
+					observed,
+					"config/tmp-fixture-hygiene.test.ts",
+				),
+			).not.toContain(name);
+		} finally {
+			fs.rmSync(env.tmpDir, { recursive: true, force: true });
+		}
 	});
 });
