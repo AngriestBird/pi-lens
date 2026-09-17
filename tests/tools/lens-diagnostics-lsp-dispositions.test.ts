@@ -1048,4 +1048,59 @@ describe("lens_diagnostics source=lsp scope=paths / legacy lsp_diagnostics paths
 			/reanchored from line 2 to 3/,
 		);
 	});
+
+	// #3184 sweep, casing half: the single-`path` mode's key must also adopt
+	// on-disk casing, for the same reason the `paths` batch does (#3160/#3182)
+	// — a mis-cased agent-typed `path` on a case-insensitive filesystem
+	// otherwise writes a widget-state record under a spelling no canonical
+	// writer or the #3160-fixed mark reader ever derives. `path.resolve` alone
+	// would fold the dot segment above and leave THIS arm broken, so both
+	// halves of the one expression are guarded.
+	it("a mis-cased single-path entry lets lens_diagnostic_mark reanchor under EITHER spelling (#3184)", async (ctx) => {
+		const fixture = createCaseAliasFixture(cwd, {
+			content: "const a = 1;\nconst b = 2;\nconst target = bad();\n",
+			dirName: "singlecase",
+		});
+		ctx.skip(fixture.skipReason !== undefined, fixture.skipReason ?? "");
+
+		const service = makeBadCallService();
+		const tool = createLensDiagnosticsTool(
+			makeCacheManager(),
+			() => cwd,
+			() => service as never,
+		);
+		const result = (await tool.execute(
+			"diag-3184-single-case",
+			{ source: "lsp", path: fixture.rawMisCased, severity: "all" },
+			new AbortController().signal,
+			null,
+			{ cwd },
+		)) as { content: Array<{ text: string }> };
+		expect(result.content[0]?.text).toContain("bad call");
+
+		const runMark = (targetFilePath: string) =>
+			createLensDiagnosticMarkTool(() => cwd).execute(
+				"mark-3184-single-case",
+				{
+					filePath: targetFilePath,
+					line: 2, // stale
+					message: "bad call",
+					rule: "typescript:9999",
+					tool: "lsp",
+					disposition: "false-positive",
+				},
+				undefined,
+				() => {},
+				{ cwd },
+			);
+
+		const viaCanonical = await runMark(path.relative(cwd, fixture.onDisk));
+		expect(String(viaCanonical.content[0]?.text)).toMatch(
+			/reanchored from line 2 to 3/,
+		);
+		const viaMisCased = await runMark(path.relative(cwd, fixture.rawMisCased));
+		expect(String(viaMisCased.content[0]?.text)).toMatch(
+			/reanchored from line 2 to 3/,
+		);
+	});
 });
