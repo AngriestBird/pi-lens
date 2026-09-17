@@ -8,6 +8,7 @@
  * sweeps with ENOENT on rotating runs (#3082/#3092).
  */
 // flake-shape: raw-timer-wait — the guard's entire claim is that a REAL filesystem event reaches it; no fake clock delivers an inotify event, and a stubbed watcher would prove only that the stub calls its own callback. The wait is a bounded poll on the guard's own report, not a fixed sleep.
+import { EventEmitter } from "node:events";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -267,4 +268,126 @@ describe("tests-tree write guard (#3082)", () => {
 			}
 		},
 	);
+
+	/**
+	 * #3179: node's non-native recursive watch (the JS polyfill used on Linux,
+	 * where inotify has no recursive primitive — lib/internal/fs/
+	 * recursive_watch.js) re-scans a changed subfolder with a synchronous
+	 * `readdirSync`. When that subfolder is removed between the change event
+	 * and the rescan, `#watchFolder`'s own catch re-emits the failure as an
+	 * 'error' event on the FSWatcher. With no listener, that is an unhandled
+	 * 'error' event: Node throws it back onto the event loop and, absent a
+	 * process-level `uncaughtException` handler, the whole vitest process
+	 * died with exit 1 and no failing test (PR #3178 run 35154740539, ENOENT
+	 * scandir on `tests/support/.index-2992-scratch`, the exempt scratch
+	 * directory `tests/index-2992-integration.test.ts` creates and removes at
+	 * runtime).
+	 *
+	 * A minimal fake FSWatcher (a plain EventEmitter standing in for
+	 * `fs.watch`'s return value) drives the installed handler directly, so
+	 * the swallow-vs-record-once LOGIC is covered deterministically — no
+	 * racing a real removal. The one real-watcher reproduction of the crash
+	 * itself lives in the last case below.
+	 */
+	function fakeWatcher(): fs.FSWatcher & { emitError(error: unknown): void } {
+		const emitter = new EventEmitter() as unknown as fs.FSWatcher & {
+			emitError(error: unknown): void;
+		};
+		(emitter as unknown as { unref(): void }).unref = () => {};
+		(emitter as unknown as { close(): void }).close = () => {};
+		(emitter as unknown as { emitError(error: unknown): void }).emitError = (
+			error,
+		) => emitter.emit("error", error);
+		return emitter;
+	}
+
+	function enoentAt(root: string, relative: string): NodeJS.ErrnoException {
+		const absolute = path.join(root, relative);
+		return Object.assign(
+			new Error(`ENOENT: no such file or directory, scandir '${absolute}'`),
+			{ code: "ENOENT", path: absolute },
+		);
+	}
+
+	function guardWithFakeWatcher(
+		root: string,
+		allow?: (relative: string) => boolean,
+	) {
+		const instances: Array<ReturnType<typeof fakeWatcher>> = [];
+		const guard = installTestsTreeWriteGuard(root, {
+			watch: (() => {
+				const instance = fakeWatcher();
+				instances.push(instance);
+				return instance;
+			}) as unknown as typeof fs.watch,
+			allow,
+		});
+		return { guard, instance: () => instances[0]! };
+	}
+
+	it("swallows an ENOENT fs.watch error for a folder under an allowed prefix (#3179)", () => {
+		const root = fixtureTree();
+		const { guard, instance } = guardWithFakeWatcher(
+			root,
+			isUnderIndex2992Scratch,
+		);
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+		try {
+			instance().emitError(
+				enoentAt(root, path.join("support", ".index-2992-scratch")),
+			);
+			expect(warn).not.toHaveBeenCalled();
+		} finally {
+			warn.mockRestore();
+			guard.close();
+		}
+	});
+
+	it("records an fs.watch error once, never silently, when it is not an allowed ENOENT (#3179)", () => {
+		const root = fixtureTree();
+		const { guard, instance } = guardWithFakeWatcher(
+			root,
+			isUnderIndex2992Scratch,
+		);
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+		try {
+			// A path OUTSIDE the allowed prefix — same error code, not excused.
+			const outside = enoentAt(root, "clients");
+			instance().emitError(outside);
+			instance().emitError(outside);
+			expect(warn).toHaveBeenCalledTimes(1);
+			expect(warn.mock.calls[0]?.[0]).toContain(root);
+		} finally {
+			warn.mockRestore();
+			guard.close();
+		}
+	});
+
+	it("does not widen the exemption to a non-ENOENT error under an allowed prefix (#3179)", () => {
+		const root = fixtureTree();
+		const { guard, instance } = guardWithFakeWatcher(
+			root,
+			isUnderIndex2992Scratch,
+		);
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+		try {
+			const eacces = Object.assign(new Error("EACCES: permission denied"), {
+				code: "EACCES",
+				path: path.join(root, "support", ".index-2992-scratch"),
+			});
+			instance().emitError(eacces);
+			expect(warn).toHaveBeenCalledTimes(1);
+		} finally {
+			warn.mockRestore();
+			guard.close();
+		}
+	});
+
+	// The one real, cross-process reproduction of the #3179 crash (no
+	// stand-in for `fs.watch`, no stand-in for the removal) lives in
+	// tests/support/tests-tree-write-guard-race.test.ts, a separate file: it
+	// needs its own real-process-spawn admission, and admissionHeader only
+	// ever reads a file's FIRST `// flake-shape:` header — a second header
+	// for a different detector in THIS file would silently misvalidate the
+	// raw-timer-wait admission already above.
 });
