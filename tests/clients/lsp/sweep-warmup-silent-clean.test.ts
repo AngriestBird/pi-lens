@@ -200,8 +200,7 @@ describe("ensureWarmForSweep on a tier3-silent server (#3187)", () => {
 		getServersForFileWithConfig.mockImplementation((fp: string) =>
 			fp.endsWith(".ts") ? [server] : [],
 		);
-		const { client, executeCommand, waitCalls } =
-			makeTier3SilentTsClient(tmp);
+		const { client, executeCommand, waitCalls } = makeTier3SilentTsClient(tmp);
 		createLSPClient.mockResolvedValue(client);
 
 		const { LSPService } = await import("../../../clients/lsp/index.js");
