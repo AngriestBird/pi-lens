@@ -307,6 +307,54 @@ describe("demoted delta rows (#3167)", () => {
 		});
 	});
 
+	/**
+	 * Recurrence this prevents (#3168 F10, the quality-only shape): the dedupe
+	 * must no-op the quality loop only for files the actionable loop ACTUALLY
+	 * labelled. Forcing that guard closed drops the label from every file whose
+	 * demoted rows exist in the quality report alone — the same silent-age
+	 * defect from the other side, and the mutation direction the two shapes
+	 * above cannot see.
+	 */
+	it("F10(c): a file demoted in the quality report alone is labelled under its own header", async () => {
+		const aPath = path.join(cwd, "src", "a.ts");
+		fs.writeFileSync(aPath, "const a = 1;\n");
+		const editedAtSec = (Date.now() - 5 * 60_000) / 1000;
+		fs.utimesSync(aPath, editedAtSec, editedAtSec);
+		const tool = makeTool({
+			"code-quality-warnings": {
+				files: [
+					{
+						filePath: aPath,
+						warnings: [
+							{
+								line: 1,
+								rule: "no-unused-vars",
+								tool: "eslint",
+								message: "a quality nit",
+							},
+						],
+					},
+				],
+				generatedAt: new Date(Date.now() - 10 * 60_000).toISOString(),
+				summary: { warnings: 1 },
+			},
+		});
+		const result = (await tool.execute(
+			"1",
+			{ mode: "delta" },
+			undefined,
+			null,
+			{
+				cwd,
+			},
+		)) as { content: Array<{ type: "text"; text: string }> };
+		const text = result.content.map((part) => part.text).join("\n");
+		expect(text).toContain(`ℹ ${STALE_LINE_MARKER}`);
+		expect(labelsByHeader(text), text).toEqual({
+			"src/a.ts": ["(scanned 10m ago)"],
+		});
+	});
+
 	it("B4: a missing observation stamp renders the neutral label, never a fabricated number", async () => {
 		fs.writeFileSync(filePath, "const x = 1;\n");
 		// No generatedAt at all: applyDeltaFreshnessGate returns files unchanged

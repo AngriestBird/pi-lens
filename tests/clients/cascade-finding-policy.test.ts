@@ -362,6 +362,20 @@ describe("cold-neighbour cascade run applies the finding policy (#3102)", () => 
 		expect(content).not.toContain("scanned 12m ago");
 	});
 
+	// #3168 F13, the production-today shape: NO indeterminate-run producer
+	// stamps `observedAt` (only the resolved-found plumb does), so the
+	// coverage advisory's age half is `scan age unknown` on every real carry
+	// — which is why the registry entry no longer promises an age. The carry
+	// COUNT is still real, and a fabricated number here would violate AC 4.
+	it("#3168 F13: an all-carried bucket with no stamps at all renders the carry count and the neutral age", async () => {
+		const content = await deliverIndeterminate([
+			indeterminateRun(neighbor, "review graph degraded"),
+			indeterminateRun(primary, "changed file not in the review graph"),
+		]);
+		expect(content).toContain("(carried 1 turn · scan age unknown)");
+		expect(content).not.toContain("scanned");
+	});
+
 	it("drops a neighbour error marked false-positive", async () => {
 		const marked = await mark({
 			filePath: neighbor,
