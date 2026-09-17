@@ -256,6 +256,50 @@ describe("#3195 — the console-capture seam, directly", () => {
 		}
 	});
 
+	/**
+	 * The loosening direction. `isCallableSchema` requires BOTH markers
+	 * because upstream's `isArkSchema` does; relaxing it to either one
+	 * (`toJsonSchema || assert`) is a one-character edit that reds nothing
+	 * else — and it would drop the capture window from any handler that
+	 * carries one of those names, which is the #1333 shape this seam exists
+	 * to prevent (a pi-lens callback writing straight to pi's terminal).
+	 * A validator callback carrying `assert` is the realistic member: it is
+	 * callable, host-invoked, and NOT a schema by the host's own test.
+	 */
+	it("still wraps a handler that carries assert but no toJsonSchema", async () => {
+		const sink = await loadSink();
+		expect(sink.installConsoleGuard()).toBe(true);
+		try {
+			let registered: Record<string, unknown> | undefined;
+			const proxy = sink.withConsoleCaptureWindows({
+				registerTool(tool: Record<string, unknown>) {
+					registered = tool;
+				},
+			});
+			let sawWindow: boolean | undefined;
+			const execute = Object.assign(
+				() => {
+					sawWindow = sink.isConsoleCaptureActive();
+					return "tool-result";
+				},
+				{ assert: (value: unknown) => value },
+			);
+			// The host would not read this as a schema, so pi-lens must not
+			// treat it as one either.
+			expect(isArkSchema(execute)).toBe(false);
+			proxy.registerTool({
+				name: "lens_diagnostics",
+				parameters: callableSchema({ type: "object", properties: {} }),
+				execute,
+			});
+			expect(registered?.execute).not.toBe(execute);
+			expect((registered?.execute as () => unknown)()).toBe("tool-result");
+			expect(sawWindow).toBe(true);
+		} finally {
+			sink.uninstallConsoleGuard();
+		}
+	});
+
 	it("still opens a capture window around execute and renderResult beside a callable schema", async () => {
 		const sink = await loadSink();
 		expect(sink.installConsoleGuard()).toBe(true);
