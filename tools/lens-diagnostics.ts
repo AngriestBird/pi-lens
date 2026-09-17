@@ -1079,9 +1079,13 @@ function applyDeltaFreshnessGate<W extends DispositionCandidate>(
  * the buffer its header ends up.
  *
  * One age label (Fix B, #3167) plus the `(re-verify incomplete)` gap label
- * (#3170) per group, in a single trailer after the group's actionable and
- * quality rows: the actionable tier's stale row wins when present (it is
- * processed first), the quality tier's only when actionable had none —
+ * (#3170) per group, in a single trailer AFTER every content row — actionable,
+ * then quality, then project — so the labels never read as describing only
+ * the tier rendered directly above them (round 2, #3196: project rows were
+ * pushed after the trailer, so a file with both cache and project-diagnostics
+ * rows rendered its labels ahead of the project rows instead of trailing all
+ * of them). The actionable tier's stale row wins the label when present (it
+ * is processed first), the quality tier's only when actionable had none —
  * matching the precedence #3168 F10 fixed, but as a fact recorded on the
  * group instead of a prediction about which loop renders first.
  */
@@ -1275,11 +1279,11 @@ function formatDeltaMode(
 		lines.push(group.rel);
 		lines.push(...group.actionableLines);
 		lines.push(...group.qualityLines);
+		lines.push(...group.projectLines);
 		if (group.staleRow) {
 			lines.push(`  (${formatCacheAgeLabel(group.staleRow.staleAsOf)})`);
 		}
 		if (group.incomplete) lines.push("  (re-verify incomplete)");
-		lines.push(...group.projectLines);
 	}
 
 	const selectedActionableFiles = filteredActionableFiles;
