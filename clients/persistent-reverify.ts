@@ -175,7 +175,7 @@ export async function runPersistentReverify(args: {
 		dispatchWarnings: [],
 		includeLspCodeActions: true,
 		deltaOnly: false,
-		signal: args.signal,
+		...(args.signal !== undefined ? { signal: args.signal } : {}),
 		lspBudgetMs: REVERIFY_BUDGET_MS,
 		dbg: () => {},
 	};
@@ -260,7 +260,7 @@ export async function runPersistentReverify(args: {
 				lspService: args.lspService,
 				pullTimeoutMs: 2000,
 				deadlineAt,
-				signal: args.signal,
+				...(args.signal !== undefined ? { signal: args.signal } : {}),
 				site: { hook: "turn_end", label: "persistent_reverify" },
 			},
 		);

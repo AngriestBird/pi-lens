@@ -420,6 +420,40 @@ describe("persistent reverify (#3170)", () => {
 		expect(result.touched).toBe(0);
 	});
 
+	it("F1-probe: a re-confirmed finding is still in the advisory after the fold", async () => {
+		const carried = makeCarriedReport(filePath);
+		const cacheManager = new CacheManager(false);
+		cacheManager.writeCache("actionable-warnings", carried, cwd);
+		const result = await runPersistentReverify({
+			report: carried,
+			cwd,
+			lspService: makeService({
+				diags: [makeDiag()],
+				confirmation: "confirmed",
+			}),
+		});
+		// The maintainer's demanded F1 proof: the re-confirmed finding is
+		// still in the turn-end advisory after the fold — not deleted by the
+		// marker spend.
+		publishActionableWarningsReport(
+			cacheManager,
+			cwd,
+			{ ...carried, files: result.replacementFiles },
+			{ origin: "in-band" },
+		);
+		const merged = cacheManager.readCache("actionable-warnings", cwd)
+			?.data as ActionableWarningsReport;
+		const advisory = formatActionableWarningsAdvisory(merged, cwd);
+		// The advisory renders per-file counts: the re-confirmed finding is
+		// still in it — the file entry survived the marker spend with its
+		// warning intact and counted.
+		expect(advisory).toContain("src/a.ts: 1");
+		expect(advisory).not.toContain("(re-verify incomplete)");
+		const mergedFile = merged.files.find((f) => f.filePath === filePath);
+		expect(mergedFile?.warnings).toHaveLength(1);
+		expect(mergedFile?.warnings[0]?.message).toBe(WARNING_MESSAGE);
+	});
+
 	it("the advisory renders the re-verify gap label", () => {
 		const carried = makeCarriedReport(filePath);
 		carried.files[0]!.reVerifyIncomplete = true;
