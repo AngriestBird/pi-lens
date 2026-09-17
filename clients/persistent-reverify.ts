@@ -50,6 +50,7 @@ import { bounded } from "./deadline-utils.js";
 import { logLatency } from "./latency-logger.js";
 import type { TouchFileResult } from "./lsp/diagnostic-binding.js";
 import { type getLSPService } from "./lsp/index.js";
+import { findAuxiliaryProfileForSource } from "./dispatch/auxiliary-lsp.js";
 
 /** At most this many files are re-observed per turn_end (the drift backstop's
  * own 4-resyncs-per-pass precedent). */
@@ -106,6 +107,17 @@ export function selectPersistentReverifyFiles(
 	let skippedChanged = 0;
 	for (const entry of report.files) {
 		if (entry.origin !== "deferred") continue;
+		// F3 (population half): the pass re-observes through a PRIMARY-scope
+		// touch, so an auxiliary-lane finding can never be re-confirmed — an
+		// entry carrying aux-sourced warnings is skipped (kept verbatim),
+		// never scored dropped. The aux lookup is the one shared seam.
+		if (
+			entry.warnings.some(
+				(w) => findAuxiliaryProfileForSource(w.source ?? "") !== undefined,
+			)
+		) {
+			continue;
+		}
 		const stamp = entry.generatedAt ? Date.parse(entry.generatedAt) : NaN;
 		if (!Number.isFinite(stamp) || stamp > nowMs) continue;
 		let mtimeMs: number;

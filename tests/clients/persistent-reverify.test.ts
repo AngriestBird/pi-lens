@@ -281,6 +281,50 @@ describe("persistent reverify (#3170)", () => {
 		expect(replacement?.reVerifyIncomplete).toBe(true);
 	});
 
+	it("F6: an entry re-arms — the pass re-verifies it again on the next run", async () => {
+		const carried = makeCarriedReport(filePath);
+		const service = makeService({
+			diags: [makeDiag()],
+			confirmation: "confirmed",
+		});
+		const first = await runPersistentReverify({
+			report: carried,
+			cwd,
+			lspService: service,
+		});
+		expect(first.outcomes[0]?.outcome).toBe("reconfirmed");
+		// The replacement IS the next turn's persisted state — and the entry
+		// re-verifies AGAIN (no skip guard, #3176 F6). The skip-guard mutation
+		// reds this: the second run would find zero candidates.
+		const updated = { ...carried, files: first.replacementFiles };
+		const second = await runPersistentReverify({
+			report: updated,
+			cwd,
+			lspService: service,
+		});
+		expect(second.outcomes[0]?.outcome).toBe("reconfirmed");
+		expect(second.touched).toBe(1);
+	});
+
+	it("F3-population: an entry with auxiliary-sourced warnings is not re-verified by a primary-scope touch", async () => {
+		const carried = makeCarriedReport(filePath);
+		carried.files[0]!.warnings[0]!.source = "opengrep";
+		carried.files[0]!.warnings[0]!.rule = "opengrep:secret-rule";
+		const result = await runPersistentReverify({
+			report: carried,
+			cwd,
+			lspService: makeService({
+				diags: [],
+				confirmation: "confirmed",
+			}),
+		});
+		// A primary-scope touch cannot re-observe an auxiliary-lane finding —
+		// the entry is kept verbatim (never scored dropped): outcomes empty,
+		// no replacement.
+		expect(result.outcomes).toEqual([]);
+		expect(result.replacementFiles).toEqual([]);
+	});
+
 	it("C4: a file changed since its observation stamp is skipped — counted in the result and the latency record", async () => {
 		const carried = makeCarriedReport(filePath);
 		// The observation stamp predates the file's last write: the file has
