@@ -39,11 +39,18 @@ import { removeTempDirSync } from "../test-utils.js";
 const getServersForFileWithConfig = vi.fn();
 const createLSPClient = vi.fn();
 
-vi.mock("../../../clients/lsp/config.js", () => ({
+// Partial mocks (#2281): spread the real module and override only the two
+// seams this file drives, so a production export added to either module later
+// cannot go missing from the double.
+vi.mock("../../../clients/lsp/config.js", async (importActual) => ({
+	...(await importActual<typeof import("../../../clients/lsp/config.js")>()),
 	getServersForFileWithConfig,
 	getServerInitOverride: vi.fn().mockReturnValue(undefined),
 }));
-vi.mock("../../../clients/lsp/client.js", () => ({ createLSPClient }));
+vi.mock("../../../clients/lsp/client.js", async (importActual) => ({
+	...(await importActual<typeof import("../../../clients/lsp/client.js")>()),
+	createLSPClient,
+}));
 
 function makeTsServer(root: string) {
 	return {
