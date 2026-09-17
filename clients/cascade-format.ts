@@ -211,7 +211,9 @@ export function buildResolvedFoundCascadeRun(
 		// #3168 F3: the #1444 publish stamp — the run's own observation time, so
 		// the carried-render age label states the real age instead of claiming
 		// no stamp exists.
-		observedAt: neighbor.publishedAt,
+		...(neighbor.publishedAt !== undefined
+			? { observedAt: neighbor.publishedAt }
+			: {}),
 	};
 }
 
@@ -245,7 +247,7 @@ function readNeighborContent(filePath: string): string | undefined {
  */
 export function cascadeCarrySuffix(
 	carriedTurns?: number,
-	observedAt?: number,
+	observedAt?: number | undefined,
 ): string | undefined {
 	if (carriedTurns === undefined || carriedTurns < 1) return undefined;
 	const noun = carriedTurns === 1 ? "turn" : "turns";

@@ -1205,7 +1205,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	let labeledAdvisories = 0;
 	const carriedMetaByResult = new Map<
 		NonNullable<(typeof cascadeRuns)[number]["result"]>,
-		{ carriedTurns: number; observedAt?: number }
+		{ carriedTurns: number; observedAt: number | undefined }
 	>();
 	for (const r of cascadeRuns) {
 		if (r.result && (r.carriedTurns ?? 0) > 0 && r.carriedTurns !== undefined) {
