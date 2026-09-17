@@ -517,6 +517,7 @@ Each row cost a lane at least once; the prose above carries the record.
 | Sweeping a shape by grep-counting tokens | A ratchet reads the exact literal it governs (#2693: four sites counted, six real) |
 | `npx <tool>@latest` inside the repo to measure something | It rewrote package-lock.json (108 deletions) on 2026-09-07; run one-off tools from a scratch prefix, and `git diff --stat` before every commit |
 | `git add -A` in a worktree that links `node_modules` | The ignore rule `node_modules/` does not match a SYMLINK; #2703 committed one and broke the clean-clone install and the tracked-shadow test. `git add <paths>`, and `.gitignore` now says `node_modules` without the slash |
+| `git worktree remove --force` on a tree whose `node_modules` is a symlink | Git follows the link and empties the shared checkout's install (twice on 2026-09-16, #2704 class; every other lane's build broke). `rm node_modules` first (unlink, never `rm -r`), then remove; mechanisation in the Bash hook is filed |
 | Checking a branch out in the shared main tree for your own fix | Reviewers saw the checkout switch under them three times on 2026-09-07; use a throwaway `git worktree add` under the scratchpad, remove it after the push |
 | `gh run rerun --failed` while the run is still in progress | GitHub refuses it; wait for the run to complete (poll `gh run view --json status`), then rerun, then re-read the verdict |
 | Reading a failed job's log before its run completes | Empty output; the log is withheld until the whole run finishes |

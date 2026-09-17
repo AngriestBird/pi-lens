@@ -523,7 +523,9 @@ missing or older compiled twin. Run targeted tests while iterating and one
 bounded full suite at the end; CI is authoritative under contention.
 
 Never hand-edit generated `.js` or `dist/`. Never use `git stash`, destructive
-resets, or ad hoc double-force worktree removal. The Bash hook enforces the
+resets, or ad hoc double-force worktree removal. A worktree whose `node_modules`
+is a symlink is unlinked (`rm node_modules`) before `git worktree remove`; the
+forced remove follows the link into the shared install (#2704 class). The Bash hook enforces the
 mechanically classifiable subset of these rules.
 
 ## Data directories and logs

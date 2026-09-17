@@ -70,6 +70,10 @@ instructions say so.
    `sweep-floor-coverage` red). A red is environmental ONLY when the same
    file is red on `origin/master` in the same tree — run it there and quote
    both results, or treat it as yours.
+   Tear the tree down in this order: `rm node_modules` (unlinks the symlink;
+   never `rm -r`), then `git worktree remove`. `git worktree remove --force`
+   follows the symlink and empties the main checkout's install — it did so
+   twice on 2026-09-16 (#2704 class), breaking every other live lane's build.
    Commit after every proven step, on your branch, before the next probe. Two
    trees lost uncommitted work the same day: #2358's was removed by a prune
    that saw a branch with no commits, and #2518 r2's edits died under a

@@ -54,7 +54,9 @@ import { classifyCascadeWaitTier } from "../clients/lsp/wait-policy/index.js";
 import { attemptTsserverSyncDiagnostics } from "../clients/lsp/tsserver-sync.js";
 import { convertLspDiagnostics } from "../clients/dispatch/utils/lsp-diagnostics.js";
 import { demoteInferredProjectDiagnostics } from "../clients/lsp/inferred-project.js";
+import { normalizeMapKey } from "../clients/path-utils.js";
 import {
+	countRetainedSuppressedRows,
 	isBlocking,
 	reconcileScanDiagnostics,
 } from "../clients/widget-state.js";
@@ -425,10 +427,19 @@ export function createLspDiagnosticsTool(
 				// Preserve input order (including duplicate entries); normalize each
 				// path before grouping so Windows separators and dot segments cannot
 				// change cache/group identity. Explicit lists never enter the walker.
+				// #3160/#3182: `path.resolve(cwd, entry)` folds dot segments (and
+				// separators) structurally — it ignores `cwd` whenever `entry` is
+				// already absolute, so the old `path.isAbsolute` ternary is
+				// redundant. `normalizeMapKey` then adopts on-disk CASING where the
+				// path exists — an agent-typed, possibly mis-cased `paths` entry
+				// must key `reconcileScanDiagnostics`'s widget-state write the same
+				// way a canonical writer (clients/pipeline.ts's ctx.filePath) or the
+				// #3160-fixed lens_diagnostic_mark reader would. `path.resolve`
+				// stays required for the relative→absolute step: `normalizeMapKey`
+				// folds dot segments itself since #3184, but never resolves against
+				// `cwd` (a cwd fold there broke every monorepo, #2490).
 				const absPaths = rawPaths.map((entry) =>
-					path.normalize(
-						path.isAbsolute(entry) ? entry : path.resolve(cwd, entry),
-					),
+					normalizeMapKey(path.resolve(cwd, entry)),
 				);
 				return runBatchFileDiagnostics(absPaths, severity, lspService, {
 					concurrency,
@@ -455,9 +466,12 @@ export function createLspDiagnosticsTool(
 					details: {},
 				};
 			}
-			const absPath = path.isAbsolute(rawPath)
-				? rawPath
-				: path.resolve(cwd, rawPath);
+			// #3184: the single-`path` sibling of the `paths` batch above, and
+			// keyed the same way — `runFileDiagnostics` hands this straight to
+			// `reconcileScanDiagnostics`, whose `normalizeEphemeralMapKey` key
+			// derivation folds neither dot segments nor casing. Same expression as
+			// :444 so both modes of this tool write under ONE key per file.
+			const absPath = normalizeMapKey(path.resolve(cwd, rawPath));
 
 			let stat: fs.Stats;
 			try {
@@ -974,6 +988,17 @@ function applyProbeFindingPolicy(
 			// otherwise have SEEN, never one per finding (AGENTS.md "bounded
 			// observability"). `total` is the in-scope population for the same
 			// reason the count is, so the record and the rendered line agree.
+			//
+			// #3158 round 2 F4: `retainedSuppressed` is the widget store's
+			// SUCCESS-path number — how many suppressed rows the store is carrying
+			// INTO this scan, written by the scans before it. Until this, retention
+			// was observable only when its per-file cap truncated
+			// (`widget-suppressed-retention-capped`), so a healthy footer chip had no
+			// record behind it at all. Folded into the record this lane already emits
+			// rather than added as a second one: same cardinality (one per filtered
+			// file per scan, never one per row), no new sink, and the two numbers are
+			// read together — `suppressed` is what THIS scan dropped,
+			// `retainedSuppressed` is what the footer chip is still counting.
 			logLatency({
 				type: "phase",
 				toolName: "lsp_diagnostics",
@@ -983,6 +1008,7 @@ function applyProbeFindingPolicy(
 				metadata: {
 					suppressed,
 					total: inScopeBefore,
+					retainedSuppressed: countRetainedSuppressedRows(file),
 				},
 			});
 		}

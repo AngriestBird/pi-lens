@@ -12,6 +12,7 @@ import { normalizeEphemeralMapKey, normalizeMapKey } from "./path-utils.js";
 import { fitLine } from "./tui-fit.js";
 import { WriteOrderingGuard } from "./write-ordering-guard.js";
 import { collectForwardImportMtimes } from "./blocker-freshness.js";
+import { normalizeMessage } from "./finding-identity.js";
 import { freshnessFromMtime } from "./freshness.js";
 import { PAST_EOF_STALE_MARKER } from "./diagnostic-line-freshness.js";
 import { STALE_LINE_MARKER } from "./stale-marker.js";
@@ -149,6 +150,62 @@ export interface WidgetDiagnostic {
 	 * wholesale), and stripped on session restore alongside `stale`.
 	 */
 	footerRetired?: boolean;
+	/**
+	 * #3158: this suppressed row is carried by the store even though the LAST
+	 * scan of the file did not report it.
+	 *
+	 * `recordDiagnostics` (and every other seam that reaches
+	 * {@link commitDiagnostics}) REPLACES the file's entries with the list it is
+	 * handed, and since #3088 the `lens_diagnostics source=lsp` probe hands it
+	 * the post-disposition FILTERED set. A finding the agent marked
+	 * `false-positive`/`suppress` is therefore absent from every later scan, so
+	 * the tagged row the `suppressed: N` chip counts (`countSuppressedIn`) was
+	 * deleted by the first fresh probe and the file stopped contributing. The
+	 * retention rule below keeps it and stamps this flag; #2275 is the precedent
+	 * (hide, never drop, because `allDiagnostics` also backs
+	 * `lens_diagnostics mode=all` and `lens_diagnostic_mark`'s cross-check).
+	 *
+	 * Lifetime — a retained row is retired by, and ONLY by:
+	 * 1. the file changing on disk. The row keeps its ORIGINAL `observedAt`, so
+	 *    `reconcileStaleWidgetFiles`' per-entry `mtimeMs > observedAt` gate drops
+	 *    it exactly as it drops any other row observed against superseded bytes.
+	 *    **This is wider than the mark's own lifetime, and the window is stated
+	 *    rather than hidden (#3158 round 2 F3):** ANY edit to the file retires the
+	 *    row, including one that leaves the marked line byte-identical and the
+	 *    mark still applying — and nothing re-creates it, because later scans
+	 *    filter the finding out and `reconcileWidgetDisposition` bails on an
+	 *    absent record. So the chip counts a mark until the file's next edit, not
+	 *    for as long as the mark stands. Narrowing rule 1 to "the mark stopped
+	 *    applying" means exempting retained rows from the mtime gate, which in
+	 *    turn requires `getFileDiagnosticSummaries` to stop projecting them —
+	 *    otherwise `mode=all`'s weak-fallback branch (used exactly when the mtime
+	 *    moved) would serve a strict-marked row as LIVE. That projection is
+	 *    consumed by `tools/lens-diagnostics.ts`'s mode=full merge; it is tracked
+	 *    as the #3158 remainder rather than done here;
+	 * 2. a later scan reporting the same finding again — the incoming entry
+	 *    matches by {@link retentionIdentity} (the weak anchor's identity parts)
+	 *    and wins, so a row is never both retained and live. This is also what
+	 *    retires a row whose strict `false-positive` anchor an edit to the marked
+	 *    LINE invalidated: the filter stops dropping the finding, the scan reports
+	 *    it, and the live entry replaces the retained one;
+	 * 3. its mark ceasing to suppress it. `reconcileWidgetDisposition` drops a
+	 *    row carrying this flag rather than re-arming it as a live finding the
+	 *    last scan did not report;
+	 * 4. {@link MAX_RETAINED_SUPPRESSED_PER_FILE}, the per-file bound on this
+	 *    axis — the one axis that can hold rows no live scan reports.
+	 *
+	 * A retained row is never blocking: `isBlocking` answers `false` for any
+	 * `disposition`, so it cannot draw a footer ● row, cannot be hoisted past a
+	 * live finding by `capStoredDiagnostics`, and cannot enter the turn-end
+	 * blocker sweep (#3158 round 2 F1).
+	 *
+	 * NOT stripped on session restore, unlike `stale`/`footerRetired`: those are
+	 * verdicts about one session's disk state, whereas both content-bound
+	 * retirement rules above outlive a resume — the mark is durable (the
+	 * `.pi-lens` disposition store) and the file's mtime is on disk, so a
+	 * restored row is re-evaluated by the same gates a live one is.
+	 */
+	suppressedRetained?: true;
 }
 
 /**
@@ -162,6 +219,18 @@ export interface WidgetDiagnostic {
  * from what the footer counts.
  */
 export function isBlocking(d: WidgetDiagnostic): boolean {
+	// #3158 round 2 F1: a finding the agent marked `false-positive`/`suppress` is
+	// not a hard stop — it is an explicitly dismissed one. Before this line only
+	// `countDiagnostics` knew that (it skips tagged entries), so the footer header
+	// counted zero errors while every consumer that asks THIS predicate still
+	// treated the row as blocking: `renderWidget` drew a red ● row for it,
+	// `capStoredDiagnostics` hoisted it ahead of live findings (evicting one at the
+	// display cap), and `getWidgetBlockingFilesForSweep`,
+	// `markWidgetFileBlockersStale` and `reconcileStaleWidgetDependencyBlockers`
+	// admitted it to the turn-end blocker sweep. The mismatch was latent while a
+	// tagged row lived only between a mark and the next scan; retention makes it
+	// durable, so the predicate has to answer for the tag.
+	if (d.disposition) return false;
 	// #1631: a dependency-drift-demoted finding is no longer a hard stop. The gate
 	// sets `stale` rather than dropping the entry (#1419 demote-not-drop), so every
 	// tally and render that asks "is this blocking?" must answer no once demoted.
@@ -228,6 +297,20 @@ const diagnosticsWriteGuard = new WriteOrderingGuard<string, number>();
 const runnerWriteGuard = new WriteOrderingGuard<string, number>();
 
 const MAX_STORED_DIAGNOSTICS_PER_FILE = 12;
+/**
+ * #3158 / AGENTS.md shape 9: the per-file bound on
+ * {@link WidgetDiagnostic.suppressedRetained} rows. Retention is the only rule
+ * that lets a record hold findings the latest scan did not report, so it is the
+ * only axis of `allDiagnostics` that can grow while the live set shrinks — every
+ * other row is replaced wholesale by the next write. Its own constant rather
+ * than `MAX_STORED_DIAGNOSTICS_PER_FILE`: that one is the TUI's display cap
+ * (`capStoredDiagnostics`) and the two would drift the moment either policy
+ * moved. Twelve because the chip is a COUNT, not a list — past a dozen
+ * suppressed findings on one unchanged file the exact total stops informing the
+ * footer, and the truncation is stated once per file through the ledger rather
+ * than dropped silently.
+ */
+const MAX_RETAINED_SUPPRESSED_PER_FILE = 12;
 const MAX_INACTIVE_FILE_RECORDS = 1024;
 const ACTIVE_FILE_IDLE_MS = 30 * 60_000;
 export const MAX_LSP_SERVER_RECORDS = 128;
@@ -299,7 +382,7 @@ export function reconcileWidgetDisposition(
 	const active = new Set(
 		applyDispositions(current, cwd, target.filePath, source),
 	);
-	const normalized: WidgetDiagnostic[] = current.map((diagnostic) => {
+	const normalized: WidgetDiagnostic[] = current.flatMap((diagnostic) => {
 		const { strict, weak } = anchorsForDiagnostic(
 			cwd,
 			target.filePath,
@@ -312,16 +395,25 @@ export function reconcileWidgetDisposition(
 			(entry?.disposition === "false-positive" ||
 				entry?.disposition === "suppress")
 		) {
-			return { ...diagnostic, disposition: entry.disposition, flagged: false };
+			return [
+				{ ...diagnostic, disposition: entry.disposition, flagged: false },
+			];
 		}
+		// #3158 retirement rule 3: a row the store holds ONLY because it was
+		// suppressed (`suppressedRetained`) has no live scan behind it — the last
+		// scan of this file did not report it. Once its mark stops suppressing it
+		// (a strict `false-positive` anchor whose marked line changed), retire it
+		// rather than re-arming it below as a finding the agent would read as
+		// currently present.
+		if (diagnostic.suppressedRetained) return [];
 		const {
 			disposition: _disposition,
 			flagged: _flagged,
 			...baseDiagnostic
 		} = diagnostic;
 		return entry?.disposition === "flagged"
-			? { ...baseDiagnostic, flagged: true }
-			: baseDiagnostic;
+			? [{ ...baseDiagnostic, flagged: true }]
+			: [baseDiagnostic];
 	});
 	const rec = getOrCreate(target.filePath);
 	const writeIndex = admitWidgetDiagnosticsWrite(target.filePath);
@@ -329,7 +421,14 @@ export function reconcileWidgetDisposition(
 		!diagnosticsWriteGuard.shouldWrite(fileMapKey(target.filePath), writeIndex)
 	)
 		return;
-	commitDiagnostics(rec, target.filePath, normalized, Date.now());
+	commitDiagnostics(
+		rec,
+		target.filePath,
+		normalized,
+		Date.now(),
+		fileMapKey(target.filePath),
+		false,
+	);
 }
 
 /** Reserve a widget write for a producer that has no runtime write index. */
@@ -774,6 +873,85 @@ function normalizeDiagnostics(
 	});
 }
 
+/**
+ * The identity a retained suppressed row is matched against a later scan's
+ * entries by (#3158), so a scan that reports the finding AGAIN replaces the
+ * retained row instead of standing beside it as a duplicate.
+ *
+ * These are the WEAK ANCHOR's identity parts — `computeWeakAnchor`
+ * (`clients/diagnostic-dispositions.ts`) hashes `[tool, rule,
+ * normalizeMessage(message)]` over the file — deliberately, because the weak
+ * anchor is how the disposition store itself decides which findings a mark
+ * covers. Matching at any finer granularity means the store can disagree with
+ * the mark that created the row.
+ *
+ * Round 2 F2: `line` USED to be part of it, and that was the finer granularity
+ * the paragraph above forbids. A writer that re-reports the marked finding one
+ * line down — `clients/pipeline.ts`'s per-edit `recordDiagnostics`, or
+ * `reconcileCascadeNeighborLspErrors`, neither of which runs
+ * `reconcileStaleWidgetFiles` — left the retained row standing beside the live
+ * one, so a single finding was counted live AND in `suppressed: N`.
+ *
+ * `computeWeakAnchor` itself is not called here: it needs `cwd` to build its
+ * path component, which `commitDiagnostics` does not have and could only get by
+ * widening `recordDiagnostics`, `reconcileScanDiagnostics` and
+ * `reconcileCorrelatedScanDiagnostics` up through `tools/`. That component is
+ * constant across one file record — both sides of this comparison are the same
+ * file — so it would discriminate nothing. `normalizeMessage` is the shared
+ * derivation from `clients/finding-identity.ts` that the anchor uses, imported
+ * rather than re-spelled.
+ */
+function retentionIdentity(d: WidgetDiagnostic): string {
+	return JSON.stringify([
+		d.tool ?? "",
+		d.rule ?? "",
+		normalizeMessage(d.message),
+	]);
+}
+
+/**
+ * #3158: carry the record's disposition-tagged rows across a whole-replace
+ * write when the incoming set no longer reports them, so a `false-positive` /
+ * `suppress` mark keeps contributing to the footer's `suppressed: N` chip. See
+ * {@link WidgetDiagnostic.suppressedRetained} for the full lifetime statement.
+ *
+ * Retained rows are APPENDED after the incoming ones: `capStoredDiagnostics`
+ * fills the TUI's display list from the front, so a retained row never evicts a
+ * live finding from the rendered set.
+ *
+ * The tagged-row check comes FIRST so a project with no disposition marks — the
+ * overwhelmingly common case, and this runs on the per-edit write path — pays
+ * one predicate per stored row and never builds the identity set.
+ */
+function retainSuppressedRows(
+	previous: WidgetDiagnostic[],
+	incoming: WidgetDiagnostic[],
+	filePath: string,
+): WidgetDiagnostic[] {
+	const tagged = previous.filter((d) => d.disposition !== undefined);
+	if (tagged.length === 0) return incoming;
+	const reported = new Set(incoming.map(retentionIdentity));
+	const retained = tagged.filter((d) => !reported.has(retentionIdentity(d)));
+	if (retained.length > MAX_RETAINED_SUPPRESSED_PER_FILE) {
+		// Freshest observations win the cap. One record per FILE, never one per
+		// dropped row (AGENTS.md "bounded observability"): the chip under-counts
+		// by exactly `dropped` for this file until its content changes.
+		retained.sort((a, b) => (b.observedAt ?? 0) - (a.observedAt ?? 0));
+		recordDegradationOnce({
+			kind: "widget-suppressed-retention-capped",
+			subject: filePath,
+			reason: `${retained.length - MAX_RETAINED_SUPPRESSED_PER_FILE} suppressed row(s) beyond the ${MAX_RETAINED_SUPPRESSED_PER_FILE}-row per-file retention cap are no longer counted by the footer chip`,
+		});
+		retained.length = MAX_RETAINED_SUPPRESSED_PER_FILE;
+	}
+	return [
+		...incoming,
+		...retained.map((d) =>
+			d.suppressedRetained ? d : { ...d, suppressedRetained: true as const },
+		),
+	];
+}
+
 /** Store `normalized` as the record's complete diagnostic set: recompute counts,
  * cap the display list, stamp `touchedAt` (at `observedAt` when given, else now
  * — #1093), persist, and re-render. The caller decides what `normalized`
@@ -781,10 +959,21 @@ function normalizeDiagnostics(
 function commitDiagnostics(
 	rec: FileRecord,
 	filePath: string,
-	normalized: WidgetDiagnostic[],
+	incoming: WidgetDiagnostic[],
 	observedAt: number | undefined,
 	key = fileMapKey(filePath),
+	/**
+	 * #3158: apply the suppressed-row retention rule to this write. True for
+	 * every seam that hands in a fresh SCAN of the file (`recordDiagnostics` and
+	 * both reconciles), false for `reconcileWidgetDisposition`, which re-maps the
+	 * record's own current rows and is the seam that RETIRES a retained row —
+	 * re-adding what it just dropped would make retirement rule 3 inert.
+	 */
+	retainSuppressed = true,
 ): void {
+	const normalized = retainSuppressed
+		? retainSuppressedRows(rec.allDiagnostics, incoming, filePath)
+		: incoming;
 	rec.diagnosticCounts = countDiagnostics(normalized);
 	rec.diagnostics = capStoredDiagnostics(normalized);
 	rec.allDiagnostics = normalized;
@@ -1544,6 +1733,29 @@ export function getFileDiagnosticSummaries(): FileDiagnosticSummary[] {
 			diagnostics: rec.allDiagnostics.map((d) => ({ ...d })),
 		};
 	});
+}
+
+/**
+ * How many {@link WidgetDiagnostic.suppressedRetained} rows this file's record
+ * is currently carrying (#3158 round 2 F4).
+ *
+ * The success-path counterpart of `widget-suppressed-retention-capped`: the
+ * ledger only hears about retention when the per-file cap TRUNCATES it, so
+ * nothing observed the healthy case. `tools/lsp-diagnostics.ts` folds this into
+ * the `lsp_probe_disposition_filter` phase it already emits once per filtered
+ * file per scan, so the count is bounded by that record's existing cardinality
+ * — never one row per retained finding.
+ *
+ * Deliberately not {@link getFileDiagnostics}: that applies the past-EOF gate,
+ * which can `stat` the file. This is a map lookup plus a count over rows the
+ * caller's own scan just filtered, so it adds no I/O to the probe path.
+ */
+export function countRetainedSuppressedRows(filePath: string): number {
+	const rec = files.get(fileMapKey(filePath));
+	if (!rec) return 0;
+	let n = 0;
+	for (const d of rec.allDiagnostics) if (d.suppressedRetained) n += 1;
+	return n;
 }
 
 /**

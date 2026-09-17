@@ -1072,6 +1072,15 @@ export type DegradationKind =
 	| "web-tree-sitter-load-failed"
 	| "widget-disposition-reconcile-fallback"
 	/**
+	 * #3158: a file's disposition-tagged widget rows exceeded
+	 * `MAX_RETAINED_SUPPRESSED_PER_FILE`, so the footer's `suppressed: N` chip
+	 * under-counts that file by the stated number until its content changes.
+	 * Bounded at one record per file per session (`recordDegradationOnce`), never
+	 * one per dropped row; subject is the file path. See
+	 * `WidgetDiagnostic.suppressedRetained` in `clients/widget-state.ts`.
+	 */
+	| "widget-suppressed-retention-capped"
+	/**
 	 * #2636 (the #2626 class sweep's ast-grep leg): `AstGrepClient`'s
 	 * `ruleDir` fell back to `resolvePackagePath(import.meta.url, "rules")`
 	 * with no existence check when the project has no `rules/` of its own —

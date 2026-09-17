@@ -1,5 +1,0 @@
----
-section: Fixed
----
-
-- **A global-only `actionableWarnings.autoFix.maxFixes` written in a project `.pi-lens.json` is no longer dropped in silence (fixes #3131)** — `#3112`'s mixed-scope sub-key scan derived its population from the flag registry alone (`LENS_FLAGS`, booleans only), so a global-only setting with no CLI flag counterpart — `actionableWarnings.autoFix.maxFixes`, documented global, read only through `getGlobalActionableWarningMaxFixes()` — was invisible to it even though its section (`actionableWarnings`) is recognized at project scope for its sibling `autoFix.enabled`. A new single-source registry, `GLOBAL_ONLY_NON_FLAG_KEYS` beside `LENS_FLAGS` in `clients/lens-flag-registry.ts`, names non-flag global-only dotted keys the same way the flag registry names flag ones; the scan now derives its full population from both, so a project file setting `maxFixes` gets the same one-time `PILENS_CFG_0001` global-only notice `tools.lazy` does, and the value still is not honored at project scope.

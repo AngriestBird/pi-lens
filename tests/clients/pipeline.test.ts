@@ -73,7 +73,10 @@ vi.mock("../../clients/dispatch/integration.js", () => ({
 	computeCascadeForFile: vi.fn().mockResolvedValue(undefined),
 }));
 
-import { dispatchLintWithResult } from "../../clients/dispatch/integration.js";
+import {
+	computeCascadeForFile,
+	dispatchLintWithResult,
+} from "../../clients/dispatch/integration.js";
 
 // Mock LSP service
 vi.mock("../../clients/lsp/index.js", () => ({
@@ -349,6 +352,47 @@ describe("Pipeline", () => {
 			size: Buffer.byteLength("const x = 1;\n"),
 			sha256: createHash("sha256").update("const x = 1;\n").digest("hex"),
 		});
+	});
+
+	it("hands the cascade the PROJECT root alongside the language cwd (#3157)", async () => {
+		// The cascade's display filter reads the disposition store and the
+		// `.pi-lens.json` rule policy, both written under the project root
+		// (`lens_diagnostic_mark` is wired with `() => runtime.projectRoot`), while
+		// `ctx.cwd` is `resolveLanguageRootForFile`'s nested answer. Without this
+		// argument every mark is silently missed in a monorepo and #3157's whole
+		// filter is inert there — the #1030 recurrence.
+		const languageRoot = path.join(tmpDir, "packages", "app");
+		fs.mkdirSync(languageRoot, { recursive: true });
+		const filePath = createTempFile(
+			languageRoot,
+			"cascade-root.ts",
+			"const x=1",
+		);
+		vi.mocked(dispatchLintWithResult).mockResolvedValue({
+			diagnostics: [],
+			blockers: [],
+			warnings: [],
+			baselineWarningCount: 0,
+			fixed: [],
+			resolvedCount: 0,
+			output: "",
+			blockerOutput: "",
+			hasBlockers: false,
+		});
+
+		await runPipeline(
+			createMockContext(filePath, {
+				cwd: languageRoot,
+				projectRoot: tmpDir,
+			}),
+			createMockDeps(),
+		);
+
+		expect(computeCascadeForFile).toHaveBeenCalledWith(
+			filePath,
+			languageRoot,
+			expect.objectContaining({ projectRoot: tmpDir }),
+		);
 	});
 
 	describe("Format phase", () => {
@@ -1359,6 +1403,144 @@ describe("Pipeline", () => {
 			// blocker text either.
 			expect(result.output).not.toContain("🔴 STOP");
 			expect(result.output).not.toContain("GHOST-BLOCKER-MARKER");
+		});
+
+		// #3188: the readback-FAILED sibling of the case above. The reporter's
+		// shape is a bash-written file the same command deleted (`cat > probe.py
+		// … ; rm probe.py`): opaque-mutation recovery hands the recovered path to
+		// runPipeline, the readback throws, and the real dispatcher still returns
+		// one blocker citing the now-missing path — the DispatchResult below is
+		// the exact shape measured from `dispatchLintWithResult` on a deleted
+		// `.py` file. The gate then retracts every blocker, and this branch
+		// rendered `🔴 STOP — 0 issue(s) must be fixed:` with nothing under it.
+		describe("#3188 readback-failed branch with a total retraction", () => {
+			// Measured from the real dispatcher (ruff on a deleted path).
+			const DEAD_BLOCKER_OUTPUT =
+				"\n🔴 STOP — 1 issue(s) must be fixed:\n  L1: DEAD-PATH-BLOCKER-MARKER No such file or directory (os error 2)\n";
+
+			function deadPathDispatch(
+				deletedPath: string,
+				tail = "",
+			): Awaited<ReturnType<typeof dispatchLintWithResult>> {
+				return {
+					diagnostics: [],
+					blockers: [
+						{
+							id: "dead-3",
+							message:
+								"DEAD-PATH-BLOCKER-MARKER No such file or directory (os error 2)",
+							filePath: deletedPath,
+							line: 1,
+							severity: "error",
+							semantic: "blocking",
+							tool: "ruff",
+						},
+					],
+					warnings: [],
+					baselineWarningCount: 0,
+					fixed: [],
+					resolvedCount: 0,
+					output: `${DEAD_BLOCKER_OUTPUT}${tail}`,
+					blockerOutput: DEAD_BLOCKER_OUTPUT,
+					hasBlockers: true,
+				};
+			}
+
+			it("delivers nothing at all when the readback failed and every blocker cites a deleted path", async () => {
+				// The pipeline's own target file is the deleted one, so
+				// `fileContent` is undefined and the #2028 re-render branch runs.
+				const deletedPath = path.join(tmpDir, "probe.py");
+				vi.mocked(dispatchLintWithResult).mockResolvedValue(
+					deadPathDispatch(deletedPath),
+				);
+
+				const result = await runPipeline(
+					createMockContext(deletedPath),
+					createMockDeps(),
+				);
+
+				// No ghost banner…
+				expect(result.output).not.toContain("🔴 STOP");
+				expect(result.output).not.toContain("0 issue(s)");
+				// …no ungated replay of the retracted blocker text (#2028)…
+				expect(result.output).not.toContain("DEAD-PATH-BLOCKER-MARKER");
+				// …and not even a bare separator. `handleToolResult` decides on
+				// `output` truthiness (runtime-tool-result.ts's
+				// `if (!output && !result.postMutation) return;` and the
+				// `result: output ? "completed" : "no_output"` latency row), so a
+				// whitespace-only string is still a delivered tool-result block —
+				// and it would also displace the pipeline's own all-clear line,
+				// which is exactly what the #2028 guarded sibling branch renders
+				// for this same input class.
+				expect(result.output).not.toMatch(/^\s*$/);
+				expect(result.output).toMatch(/^✓ .*clean/);
+			});
+
+			it("still delivers the post-blocker slice when the readback failed and every blocker cites a deleted path", async () => {
+				// Total retraction does NOT mean the whole branch is skipped: the
+				// coverage/fixed tail after `blockerOutput` is not gated content
+				// and must survive.
+				const deletedPath = path.join(tmpDir, "probe-with-tail.py");
+				vi.mocked(dispatchLintWithResult).mockResolvedValue(
+					deadPathDispatch(deletedPath, "COVERAGE-TAIL-MARKER: ok\n"),
+				);
+
+				const result = await runPipeline(
+					createMockContext(deletedPath),
+					createMockDeps(),
+				);
+
+				expect(result.output).toContain("COVERAGE-TAIL-MARKER");
+				expect(result.output).not.toContain("🔴 STOP");
+				expect(result.output).not.toContain("DEAD-PATH-BLOCKER-MARKER");
+			});
+
+			it("keeps the surviving blocker when the readback failed and only some blockers cite a deleted path", async () => {
+				// The 5-in-159 non-zero form from the report: a partial retraction
+				// must still render the gated banner with the surviving count.
+				const deletedPath = path.join(tmpDir, "gone.py");
+				const livePath = createTempFile(tmpDir, "still-here.py", "x = 1\n");
+				vi.mocked(dispatchLintWithResult).mockResolvedValue({
+					diagnostics: [],
+					blockers: [
+						{
+							id: "dead-4",
+							message: "DEAD-PATH-BLOCKER-MARKER finding in removed file",
+							filePath: deletedPath,
+							line: 1,
+							severity: "error",
+							semantic: "blocking",
+							tool: "ruff",
+						},
+						{
+							id: "live-4",
+							message: "SURVIVING-BLOCKER-MARKER undefined name",
+							filePath: livePath,
+							line: 1,
+							severity: "error",
+							semantic: "blocking",
+							tool: "ruff",
+						},
+					],
+					warnings: [],
+					baselineWarningCount: 0,
+					fixed: [],
+					resolvedCount: 0,
+					output: "\n🔴 STOP — 2 issue(s) must be fixed:\n",
+					blockerOutput: "\n🔴 STOP — 2 issue(s) must be fixed:\n",
+					hasBlockers: true,
+				});
+
+				// Target path is deleted ⇒ readback fails ⇒ same branch as above.
+				const result = await runPipeline(
+					createMockContext(path.join(tmpDir, "deleted-target.py")),
+					createMockDeps(),
+				);
+
+				expect(result.output).toContain("🔴 STOP — 1 issue(s)");
+				expect(result.output).toContain("SURVIVING-BLOCKER-MARKER");
+				expect(result.output).not.toContain("DEAD-PATH-BLOCKER-MARKER");
+			});
 		});
 	});
 });
