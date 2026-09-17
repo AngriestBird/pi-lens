@@ -48,7 +48,10 @@ import type {
 import { enrichFileFromLsp } from "./actionable-warnings.js";
 import { bounded } from "./deadline-utils.js";
 import { logLatency } from "./latency-logger.js";
-import type { TouchFileResult } from "./lsp/diagnostic-binding.js";
+import {
+	touchCompletedConfirmationPolicy,
+	type TouchFileResult,
+} from "./lsp/diagnostic-binding.js";
 import { type getLSPService } from "./lsp/index.js";
 import { findAuxiliaryProfileForSource } from "./dispatch/auxiliary-lsp.js";
 
@@ -146,7 +149,11 @@ export async function runPersistentReverify(args: {
 	report: ActionableWarningsReport;
 	cwd: string;
 	lspService: ReverifyLspService;
-	signal?: AbortSignal;
+	/** The turn's ambient abort signal. `AbortSignal | undefined` rather than a
+	 * plain optional because the caller reads `getAmbientAbortSignal()`, which
+	 * is `undefined` whenever the host supplies no ctx.signal (index.ts:3068) —
+	 * the pass is best-effort by contract and the wall budget is the floor. */
+	signal?: AbortSignal | undefined;
 	nowMs?: number;
 	/** Test seam: the wall budget, injected so the budget-check mutation is
 	 * observable without real-second sleeps (#3176 proof gaps). */
@@ -180,8 +187,13 @@ export async function runPersistentReverify(args: {
 		dbg: () => {},
 	};
 
+	// R3-4: every candidate the budget or the abort cut, so the phase row
+	// distinguishes "the pass ran out of time" from "the server answered
+	// nothing". Counted from what the loop actually reached, never predicted.
+	let processed = 0;
 	for (const entry of candidates) {
 		if (args.signal?.aborted || Date.now() >= deadlineAt) break;
+		processed += 1;
 		let content: string;
 		try {
 			content = fs.readFileSync(entry.filePath, "utf-8");
@@ -224,19 +236,26 @@ export async function runPersistentReverify(args: {
 		// `{diags: []}` (the house double's silent empty, a tier-3 server
 		// still analyzing) or a `skipReason` is UNCONFIRMED: the carried
 		// warnings are kept verbatim and the render labels the gap.
-		// F3 (#3176): an empty result is clean ONLY when the touch itself
-		// answers `confirmation: "confirmed"` — the silent-on-clean rule
-		// (#240/#533/#1253). A bare `{diags: []}` (the house double's silent
-		// empty, a tier-3 server still analyzing) or a `skipReason` is
-		// UNCONFIRMED: the carried warnings are kept verbatim and the render
-		// labels the gap. `touched.inconclusive` is resolveTouchVerdict's
-		// output, computed service-side, and is honored directly.
+		// F3 (#3176): an empty result is clean ONLY when the touch COMPLETED
+		// its confirmation policy — the silent-on-clean rule (#240/#533/#1253).
+		// A bare `{diags: []}` (the house double's silent empty, a tier-3
+		// server still analyzing) or a `skipReason` is UNCONFIRMED: the carried
+		// warnings are kept verbatim and the render labels the gap.
+		// `touched.inconclusive` is resolveTouchVerdict's output, computed
+		// service-side, and is honored directly.
+		// R3-3: read the policy through `touchCompletedConfirmationPolicy`, the
+		// #1470 seam, NOT the literal `confirmation !== "confirmed"` that
+		// `diagnostic-binding.ts:274-288` exists to forbid: `partial` means
+		// every server except the named cut-off auxiliaries answered, so the
+		// primary's silent-clean gates ran to completion and its observation is
+		// as trustworthy as a full confirmation. The literal labels a file the
+		// primary fully answered and keeps a finding the touch just re-derived.
 		if (
 			touchedResult === undefined ||
 			touchedResult.inconclusive === true ||
 			touchedResult.skipReason !== undefined ||
 			(touchedResult.diagnosticsUnsupportedServerIds ?? []).length > 0 ||
-			touchedResult.confirmation !== "confirmed"
+			!touchCompletedConfirmationPolicy(touchedResult)
 		) {
 			outcomes.push({
 				filePath: entry.filePath,
@@ -321,6 +340,7 @@ export async function runPersistentReverify(args: {
 			mixed: outcomes.filter((o) => o.outcome === "mixed").length,
 			unconfirmed: outcomes.filter((o) => o.outcome === "unconfirmed").length,
 			skippedChanged,
+			skippedBudget: candidates.length - processed,
 		},
 	});
 

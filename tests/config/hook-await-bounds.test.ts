@@ -2363,11 +2363,13 @@ const BOUNDED_CALL_SITES: Readonly<Record<string, string>> = {
 		"turn_end wall budget is always live, and timeout falls back to raw findings " +
 		"so security findings remain blockers.",
 	"call:clients/runtime-turn.ts#4da1e4ca~7e52ce49":
-		"`getAmbientAbortSignal()` — the turn's registered abort signal, " +
-		"ALWAYS defined on this path (the ambient registration is set when the " +
-		"hook fires). Never wall-clock: the bound composes with the pass's own " +
-		"internal deadline (3s) and the per-touch floor, and the hook's budget " +
-		"(HOOK_WALL_BUDGET_MS.turn_end) caps the whole pass.",
+		"`getAmbientAbortSignal(): AbortSignal | undefined` (clients/safe-spawn.ts) " +
+		"— the turn's registered abort signal, set from the host's `ctx.signal` " +
+		"when the turn_end hook fires (index.ts:3068). ABSENT when the host " +
+		"supplies no signal there, and in a bare unit harness; the bound is then " +
+		"wall-clock only. Either way the wall budget is live: the hook's " +
+		"HOOK_WALL_BUDGET_MS.turn_end caps the whole pass and composes with the " +
+		"pass's own internal deadline (3s) and the per-touch floor.",
 	"call:clients/runtime-turn.ts#e953bca9~404f0b0f":
 		"The late auxiliary re-promotion observer receives the live `turn_end` " +
 		"ctx.signal from `deps.signal` when pi supplies one, but that signal is " +
