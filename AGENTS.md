@@ -76,9 +76,13 @@ resolution or architectural change.
 
 Sweep the whole defect shape, not only the reported instance. End every sweep
 with a verdict: fold consumers onto a named seam, or stay distributed with the
-reason. Deletion requests sweep callers and test doubles first. A second writer
-of shared state requires an identity, generation, reason, or kind discriminator
-before it lands.
+reason. A fold verdict tables the ordered stages each site passes through and
+the count each stage sees, not only the participant identities — moving a
+filter one stage late can silently starve it of the population it was meant to
+guard (#3166 r1: a policy moved after a pre-existing display cap and genuine
+findings vanished). Deletion requests sweep callers and test doubles first. A
+second writer of shared state requires an identity, generation, reason, or kind
+discriminator before it lands.
 
 ## Orchestration and delegated work
 
@@ -96,7 +100,11 @@ Git and GitHub authority stays with the orchestrator.
 After every worker completion, push, review verdict, CI verdict, merge, or
 status request, trigger the next named owner in the same orchestration pass.
 A brief that adds or edits a `tests/support/sweep-kit.ts` registered-or-fail
-sweep is not contained work; route it to the strongest available fixer. Keep a durable handoff on the PR or shared ledger with the
+sweep is not contained work; route it to the strongest available fixer. A
+path-key or normalizer change on a shared map routes the same way, regardless
+of priority label — the failure mode is inverted arms and unmeasured
+"subsumes" claims, not effort (#3178: four rounds, two inverted arms, one
+unmeasured swap). Keep a durable handoff on the PR or shared ledger with the
 exact head, verdict, dispositions, and next owner.
 
 Plegma reads are token-budgeted (#417). Do not call `plegma result` merely to
@@ -130,6 +138,11 @@ and PR language; detailed historical examples are in `HISTORY.md`.
 
 1. **Divergent path keys:** path-keyed maps use `PathKeyedMap` and normalize on
    write, read, delete, and rehydrate. Tests use mixed separators and casing.
+   A normalizer change tables every writer and reader of the map with the
+   normalizer each uses; a claim that one normalizer subsumes another is
+   measured per transformation (separators, dot segments, case, symlinks,
+   existence), never asserted (#3178: four rounds, two inverted arms, one
+   unmeasured swap).
 2. **Host path functions in a shape branch:** once a path is classified as
    Windows-shaped, use `path.win32`; do not use host-default `path` functions.
    Prefer `toPosix`, `splitPathSegments`, and the canonical path helpers.
@@ -149,7 +162,10 @@ and PR language; detailed historical examples are in `HISTORY.md`.
 9. **One-axis bound:** bound the resource axis that grows, including bytes,
    timers, WASM objects, and retained evidence.
 10. **Silencing as fixing:** distinguish clean, filtered, unavailable, errored,
-    suppressed, deferred, and partial results.
+    suppressed, deferred, and partial results. Any bound on an agent-facing
+    path discloses its truncation on the rendered surface; a count recorded
+    only in `latency.log` is not disclosure (#3166 r2: an 80-finding input
+    bound zeroed a neighbour's genuine errors, counted only in the log).
 11. **Skipped CI as green:** absent required checks are not passing checks.
 12. **Out-of-guard mirror refresh:** refresh behavior-gating mirrors before the
     guard releases, or validate the committed generation/object identity.
@@ -621,7 +637,10 @@ include `Test assessment`.
 Observability is part of correctness. Name the record, sink, ledger, or test
 that proves a change. If no telemetry is appropriate, state why. Keep records
 bounded and preserve the identity that distinguishes one degradation from
-another.
+another. A phase record's timer wraps only its own call; when two writers
+share one phase literal they share one stated semantic, not one writer's
+meaning attributed to the other's work (#3166 r1: a walk was reported as the
+policy phase).
 
 ## Issue triage & labels
 

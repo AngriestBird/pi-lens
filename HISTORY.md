@@ -96,6 +96,28 @@ own #2504 guards once run. Post-tag lanes landed the same evening: #3180
 retention, window filed as #3183), #3178 (mark/analyze/paths-mode key parity,
 class filed as #3184).
 
+## 2026-09-17 — rules adopted from the train's retro rows
+
+Rules adopted 2026-09-17 from the train's retro rows: prescribed-narrowing
+residual family (reviewer contract, verification-rounds section, #3155 r2);
+changelog re-read on body rework (fixer contract's Fix rounds section, and a
+merge-train Mistake|Fix row, #3155 r2); one mutation-table row per direction
+(fixer contract, step 1, #3156 r2 / #3168 r1); measured platform-skip claims
+for case-variant fixtures (fixer contract step 1 and reviewer Standing probes,
+#3159 r2); fold-verdict ordered stages per site (AGENTS.md "Issue and PR
+design contract", #3166 r1); one phase, one semantic, own-call timers
+(AGENTS.md "Commit, prose, issue, and observability conventions", #3166 r1);
+bound disclosure on the rendered surface (AGENTS.md shape 10, #3166 r2);
+commit tests before the mutation loop, restore names source only (fixer
+contract step 4, #3166 r2); normalizer writer/reader tables and measured
+"subsumes" claims routed to the strongest model (AGENTS.md shape 1 and
+"Orchestration and delegated work", #3178); PI_LENS_HOME/PILENS_DATA_DIR
+pinned for probes only, never a blanket vitest export (fixer contract's Probe
+hygiene section, #3178 r3); no full in-place Stryker runs in a shared
+worktree, `--dryRunOnly` for reproductions (fixer and reviewer Probe hygiene
+sections, #3180); and the release-bump PR title format (release-qa skill's
+pre-bump dry-roll step, the 4.2.0 retitle).
+
 ## Archived pre-trim agent context (2026-09-14)
 
 The detailed incident narratives, closed decisions, and subsystem evidence below
