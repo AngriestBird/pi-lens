@@ -19,6 +19,14 @@ import {
 	tmpHygieneObservedEntries,
 	tmpHygieneUnadmittedEntries,
 } from "../support/vitest-setup.js";
+import { setupTestEnvironment } from "../clients/test-utils.js";
+import {
+	buildProjectSnapshotFromRuntime,
+	getProjectSnapshotPath,
+	saveProjectSnapshot,
+	waitForProjectSnapshotPersistsForTests,
+} from "../../clients/project-snapshot.js";
+import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
 
 const REPO_ROOT = path.resolve(
 	path.dirname(fileURLToPath(import.meta.url)),
@@ -436,5 +444,73 @@ describe("tmp-fixture-hygiene", () => {
 			],
 		);
 		expect(admission?.prefix).toBe("pi-lens-which-latch-sh");
+	});
+
+	// #3186: PR #3168 CI run 35160969016 redded THIS file over
+	// pi-lens-tool-policy-conventions-{4irwKN,BDRp7z,PQRGdj} — dirs owned by
+	// tests/clients/tool-policy-conventions.test.ts, whose afterEach removed
+	// its setupTestEnvironment dir synchronously while saveProjectSnapshot's
+	// body persist was still in flight. Premise-first repro against the real
+	// production call (clients/project-snapshot.ts saveProjectSnapshot, no
+	// mock): a bare Node invocation that calls it, then removes the directory
+	// the instant it returns, saw the directory back on disk ~10-50ms later,
+	// unforced, on every trial — saveProjectSnapshot dispatches its body
+	// persist to a worker thread/main-thread fallback the caller never
+	// awaits, and that persist's write path (clients/gzip-stage-write.ts)
+	// does `fs.promises.mkdir(dirname, {recursive:true})` before writing,
+	// recreating whatever ancestor directory a synchronous cleanup already
+	// removed.
+	//
+	// The real fix is at the producer, not an admission here: every call
+	// site (including tool-policy-conventions.test.ts's own afterEach, as of
+	// this change) awaits the drain seam the repo already ships for exactly
+	// this — waitForProjectSnapshotPersistsForTests — before its cleanup
+	// runs, so nothing is left in flight to recreate the directory once
+	// removed. Proven WITHOUT a raw wall-clock wait (this file's own
+	// dedicated, fully-serialized project is not in vitest.config.ts's
+	// wallClockBudgetInclude/realHarnessInclude, so a new raw timer here
+	// would need moving the file's whole project assignment just for one
+	// case): JS is single-threaded, so immediately after the synchronous
+	// saveProjectSnapshot() call returns, NO microtask or macrotask of its
+	// fire-and-forget worker/main-thread-fallback dispatch has run yet —
+	// the body file cannot exist. Awaiting the real drain seam instead of a
+	// fixed pause is what proves completion, not elapsed time: once it
+	// resolves, the body file is verifiably ON DISK (not "probably done by
+	// now"), so cleanup right after it can leave nothing pending to recreate
+	// what it removes — checked synchronously, no wait either side.
+	it("draining the real project-snapshot persist before cleanup leaves nothing to recreate pi-lens-tool-policy-conventions dirs", async () => {
+		const env = setupTestEnvironment("pi-lens-tool-policy-conventions-");
+		const cwd = path.join(env.tmpDir, "project");
+		fs.mkdirSync(cwd, { recursive: true });
+		const runtime = new RuntimeCoordinator();
+		runtime.seedProjectSequence(1);
+		const snapshot = buildProjectSnapshotFromRuntime({
+			cwd,
+			runtime,
+			conventions: {
+				frameworks: [
+					{ id: "react", confidence: "high", signals: ["fixture:react"] },
+				],
+				testRunners: [],
+				buildTools: [],
+				agentDocs: [],
+			},
+		});
+		const gzPath = getProjectSnapshotPath(cwd);
+		saveProjectSnapshot(cwd, snapshot);
+		expect(
+			fs.existsSync(gzPath),
+			"the persist is dispatched fire-and-forget; it cannot have landed in the same synchronous tick",
+		).toBe(false);
+		await waitForProjectSnapshotPersistsForTests(); // the #3186 fix
+		expect(
+			fs.existsSync(gzPath),
+			"the drain must not resolve before the persist actually reaches disk",
+		).toBe(true);
+		env.cleanup();
+		expect(
+			fs.existsSync(env.tmpDir),
+			"nothing was left pending to recreate the directory cleanup just removed",
+		).toBe(false);
 	});
 });
