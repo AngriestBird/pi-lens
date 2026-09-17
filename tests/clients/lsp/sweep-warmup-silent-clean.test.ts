@@ -38,6 +38,7 @@ import { removeTempDirSync } from "../test-utils.js";
 
 const getServersForFileWithConfig = vi.fn();
 const createLSPClient = vi.fn();
+const logLatency = vi.fn();
 
 // Partial mocks (#2281): spread the real module and override only the two
 // seams this file drives, so a production export added to either module later
@@ -51,6 +52,25 @@ vi.mock("../../../clients/lsp/client.js", async (importActual) => ({
 	...(await importActual<typeof import("../../../clients/lsp/client.js")>()),
 	createLSPClient,
 }));
+// Read the real latency rows this change is observable through — the sink,
+// not a claim about it.
+vi.mock("../../../clients/latency-logger.js", async (importActual) => ({
+	...(await importActual<
+		typeof import("../../../clients/latency-logger.js")
+	>()),
+	logLatency,
+}));
+
+type LatencyRow = {
+	phase?: string;
+	metadata?: Record<string, unknown>;
+};
+
+function latencyRows(phase: string): LatencyRow[] {
+	return logLatency.mock.calls
+		.map(([row]) => row as LatencyRow)
+		.filter((row) => row.phase === phase);
+}
 
 function makeTsServer(root: string) {
 	return {
@@ -180,6 +200,7 @@ describe("ensureWarmForSweep on a tier3-silent server (#3187)", () => {
 		vi.resetModules();
 		getServersForFileWithConfig.mockReset();
 		createLSPClient.mockReset();
+		logLatency.mockReset();
 		tmp = fs.mkdtempSync(path.join(os.tmpdir(), "lsp-warmup-silent-"));
 		// Production's own grace timer decides the race; pin it low so the
 		// sync racer is not the slow part of the test.
@@ -226,6 +247,25 @@ describe("ensureWarmForSweep on a tier3-silent server (#3187)", () => {
 		// is the race, not a shrunken wait.
 		expect(waitCalls.length).toBe(1);
 		expect(waitCalls[0]!.ms).toBe(1000);
+
+		// Observability: ONE `lsp_tsserver_sync_confirm` row for this warm-up,
+		// attributed to the warm-up source and the racing mode, beside the one
+		// `lsp_sweep_warmup_start`/`_done` pair. That row is what tells a field
+		// reader the warm-up certified through the race rather than through an
+		// expired budget, and `budgetMs` is the budget it did not spend.
+		const confirms = latencyRows("lsp_tsserver_sync_confirm");
+		expect(confirms).toHaveLength(1);
+		expect(confirms[0]!.metadata).toMatchObject({
+			source: "lsp_sweep_warmup",
+			mode: "race",
+			serverId: "typescript",
+			clientScope: "primary",
+			confirmedDiagnosticCount: 0,
+			budgetMs: 1000,
+		});
+		expect(latencyRows("lsp_sweep_warmup_start")).toHaveLength(1);
+		expect(latencyRows("lsp_sweep_warmup_done")).toHaveLength(1);
+		expect(latencyRows("lsp_sweep_warmup_failed")).toHaveLength(0);
 
 		// The server is now demonstratedReady: a second check is a no-op.
 		const second = await service.ensureWarmForSweep(filePath, {
@@ -309,6 +349,7 @@ describe("runWorkspaceDiagnostics warm-up on a tier3-silent group (#3187)", () =
 		vi.resetModules();
 		getServersForFileWithConfig.mockReset();
 		createLSPClient.mockReset();
+		logLatency.mockReset();
 		tmp = fs.mkdtempSync(path.join(os.tmpdir(), "lsp-sweep-silent-"));
 		process.env.PI_LENS_TSSERVER_SYNC_GRACE_MS = "1";
 		process.env.PI_LENS_LSP_WARMUP_RETRY_BACKOFF_MS = "0";
