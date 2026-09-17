@@ -111,7 +111,8 @@ function makeDiag(): LSPDiagnostic {
  * exactly the field that separates a confirmed clean from a silent empty. */
 interface TouchDouble {
 	diags: LSPDiagnostic[];
-	confirmation?: "confirmed";
+	confirmation?: "confirmed" | "partial";
+	unconfirmedServerIds?: string[];
 	inconclusive?: boolean;
 	skipReason?: "outside-project-root";
 	diagnosticsUnsupportedServerIds?: string[];
@@ -254,6 +255,33 @@ describe("persistent reverify (#3170)", () => {
 		expect(replacement?.warnings).toHaveLength(1);
 		expect(replacement?.warnings[0]?.message).toBe(WARNING_MESSAGE);
 		expect(replacement?.reVerifyIncomplete).toBe(true);
+	});
+
+	it("R3-3: a PARTIAL confirmation is a completed touch — the primary's answer is honored, not labelled incomplete", async () => {
+		const carried = makeCarriedReport(filePath);
+		const result = await runPersistentReverify({
+			report: carried,
+			cwd,
+			// Recurrence this guards (shape 10, silencing-as-fixing): the gate
+			// read the literal `confirmation !== "confirmed"`, which
+			// `diagnostic-binding.ts:274-288` exists to forbid. `partial` means
+			// every server EXCEPT the named cut-off auxiliaries answered — the
+			// notify write and the diagnostics wait both ran to completion, so
+			// the primary's observation is exactly as trustworthy as a full
+			// confirmation. Reading the literal labels a file the primary fully
+			// answered `(re-verify incomplete)` and keeps a finding the fresh
+			// observation just re-derived.
+			lspService: makeService({
+				diags: [makeDiag()],
+				confirmation: "partial",
+				unconfirmedServerIds: ["opengrep"],
+			}),
+		});
+		expect(result.outcomes[0]?.outcome).toBe("reconfirmed");
+		expect(result.touched).toBe(1);
+		const replacement = result.replacementFiles[0];
+		expect(replacement?.reVerified).toBe(true);
+		expect(replacement?.reVerifyIncomplete).toBeUndefined();
 	});
 
 	it("F3b: a skipReason touch is unconfirmed for the same reason", async () => {
@@ -419,6 +447,19 @@ describe("persistent reverify (#3170)", () => {
 		// second candidate is re-armed for the next turn, never half-verified.
 		expect(result.outcomes.length).toBeLessThanOrEqual(1);
 		expect(result.touched).toBe(0);
+		// R3-4: the record says how many candidates the budget cut. Without
+		// `skippedBudget` the phase row reads "2 candidates, 0 touched" and
+		// nothing distinguishes a budget cut from a server that answered
+		// nothing — the pull-only-observability shape (31) the review named.
+		expect(logLatencyMock).toHaveBeenCalledWith(
+			expect.objectContaining({
+				phase: "persistent_reverify",
+				metadata: expect.objectContaining({
+					candidates: 2,
+					skippedBudget: 1,
+				}),
+			}),
+		);
 	});
 
 	it("F1-probe: a re-confirmed finding is still in the advisory after the fold", async () => {
