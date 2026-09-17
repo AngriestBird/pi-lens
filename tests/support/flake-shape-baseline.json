@@ -192,6 +192,7 @@
 		"clients/observed-mutation-net.test.ts": 1,
 		"clients/package-manager-availability-latch.test.ts": 2,
 		"clients/persistence-worker-exit.test.ts": 1,
+		"clients/persistent-reverify.test.ts": 1,
 		"clients/pipeline-lsp-sync.test.ts": 2,
 		"clients/project-diagnostics/fresh-fetch.test.ts": 2,
 		"clients/project-lens-config.test.ts": 2,

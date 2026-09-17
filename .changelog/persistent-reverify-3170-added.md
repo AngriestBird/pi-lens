@@ -1,0 +1,5 @@
+---
+section: Added
+---
+
+- **Stale carried findings are now re-verified against the live server before re-delivery (refs #3170)** — a deferred-origin finding whose file has not moved re-served turn after turn even when the root cause was fixed elsewhere (the #1093 cross-file class on the advisory lane). At turn_end, up to four such files per turn are re-observed through the probe's `touchFile` path (bounded by a wall budget and the turn's abort signal, both of which re-arm the rest for the next turn). A carried finding is dropped only when the touch itself completed its confirmation policy and no longer reports it; a silent, skipped or wedged answer keeps the finding verbatim and renders an explicit "(re-verify incomplete)" label in the turn-end advisory and in `lens_diagnostics` delta output — never a false clean. Findings sourced from an auxiliary scanner are left to their own lane rather than scored against a primary-scope answer. One `persistent_reverify` latency record per pass, carrying the candidate, touched, outcome and skip counts.

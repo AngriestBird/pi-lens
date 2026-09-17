@@ -1071,20 +1071,23 @@ function applyDeltaFreshnessGate<W extends DispositionCandidate>(
  * Fix B (#3167): one age label per file group that has demoted rows — the
  * group's own observation stamp through `formatCacheAgeLabel`, so an agent
  * can tell a just-observed finding from one re-served from cache. Emitted
- * AFTER the group's rows; never on a group with live rows only.
+ * AFTER the group's rows; never on a group with live rows only. #3170 adds
+ * the `(re-verify incomplete)` gap label to the same group, so a budget-cut
+ * re-verify is never rendered as a clean re-observation.
  *
- * Returns whether a label was pushed, so the caller can dedupe across the two
- * render loops from what actually happened instead of PREDICTING which loop
- * will label (#3168 F10).
+ * Returns whether ANY label was pushed, so the caller can dedupe across the
+ * two render loops from what actually happened instead of PREDICTING which
+ * loop will label (#3168 F10).
  */
-function appendGroupAgeLabel(
+function appendGroupLabels(
 	lines: string[],
 	warnings: ReadonlyArray<{ stale?: boolean; staleAsOf?: string }>,
+	incomplete: boolean,
 ): boolean {
 	const staleRow = warnings.find((w) => w.stale);
-	if (!staleRow) return false;
-	lines.push(`  (${formatCacheAgeLabel(staleRow.staleAsOf)})`);
-	return true;
+	if (staleRow) lines.push(`  (${formatCacheAgeLabel(staleRow.staleAsOf)})`);
+	if (incomplete) lines.push("  (re-verify incomplete)");
+	return staleRow !== undefined || incomplete;
 }
 
 // @delivery-surface: lens-diagnostics:mode-delta
@@ -1101,6 +1104,17 @@ function formatDeltaMode(
 	const qualityEntry = cacheManager.readCache<CodeQualityWarningsReport>(
 		"code-quality-warnings",
 		cwd,
+	);
+	// #3170: files whose re-verify pass could not complete inside its budget —
+	// their rows render as carried, plus this explicit gap label (never a
+	// false clean). Computed from the RAW actionable-warnings cache entries
+	// because the freshness pipeline below rebuilds the file shape. The
+	// re-verify only ever writes the actionable-warnings cache — the quality
+	// report's file shape carries no such marker.
+	const reverifyIncompletePaths = new Set(
+		(actionableEntry?.data?.files ?? [])
+			.filter((file) => file.reVerifyIncomplete)
+			.map((file) => normalizeMapKey(file.filePath)),
 	);
 	const actionable = actionableEntry?.data;
 	const quality = qualityEntry?.data;
@@ -1173,14 +1187,14 @@ function formatDeltaMode(
 
 	// Fixable warnings from actionable-warnings and quality cache entries retain
 	// their own severity tier. Apply the same threshold semantics as the LSP path.
-	// F5/F10 (#3168): at most ONE age label per file, under that file's own
-	// header. Round 2 (F5) PREDICTED which loop would label, from the file's
+	// F5/F10 (#3168): at most ONE label group (age and/or #3170's re-verify
+	// gap) per file, under that file's own header. Round 2 (F5) PREDICTED which loop would label, from the file's
 	// mere presence in the quality report, and was wrong in both directions:
 	// (a) a file demoted in BOTH reports lost its label to a group it does not
 	// head, because the quality loop's pre-existing header suppression renders
 	// its rows under an earlier file's header; (b) a file demoted in actionable
 	// but LIVE in quality got NO label at all, because the quality loop has no
-	// stale row and `appendGroupAgeLabel` returns early — the pre-#3167 defect
+	// stale row and `appendGroupLabels` returns false — the pre-#3167 defect
 	// this work exists to remove. So do not predict: the actionable loop
 	// labels first (it always emits the file's own header) and records what it
 	// actually labelled; the quality loop no-ops for those files only.
@@ -1193,8 +1207,15 @@ function formatDeltaMode(
 				const where = w.stale ? STALE_LINE_MARKER : `L${w.line ?? "?"}`;
 				lines.push(`  ⚠ ${where}  ${w.rule ?? w.code ?? w.tool}  ${w.message}`);
 			}
-			if (appendGroupAgeLabel(lines, file.warnings)) {
-				labelledFiles.add(normalizeMapKey(file.filePath));
+			const key = normalizeMapKey(file.filePath);
+			if (
+				appendGroupLabels(
+					lines,
+					file.warnings,
+					reverifyIncompletePaths.has(key),
+				)
+			) {
+				labelledFiles.add(key);
 			}
 		}
 	}
@@ -1208,8 +1229,13 @@ function formatDeltaMode(
 				const where = w.stale ? STALE_LINE_MARKER : `L${w.line ?? "?"}`;
 				lines.push(`  ℹ ${where}  ${w.rule ?? w.code ?? w.tool}  ${w.message}`);
 			}
-			if (!labelledFiles.has(normalizeMapKey(file.filePath))) {
-				appendGroupAgeLabel(lines, file.warnings);
+			const key = normalizeMapKey(file.filePath);
+			if (!labelledFiles.has(key)) {
+				appendGroupLabels(
+					lines,
+					file.warnings,
+					reverifyIncompletePaths.has(key),
+				);
 			}
 		}
 	}

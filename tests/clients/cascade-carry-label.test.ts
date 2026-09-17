@@ -82,7 +82,14 @@ function labelsByHeader(text: string): Record<string, string[]> {
 		if (!line.startsWith(" ") && line.endsWith(".ts")) {
 			header = line;
 			out[header] ??= [];
-		} else if (/^ {2}\((?:scanned .+ ago|scan age unknown)\)$/.test(line)) {
+		} else if (
+			// #3170's `(re-verify incomplete)` shares the group-label slot with
+			// #3167's age label, so the F10 pairing question ("which header owns
+			// this label, and how many times") is asked of both.
+			/^ {2}\((?:scanned .+ ago|scan age unknown|re-verify incomplete)\)$/.test(
+				line,
+			)
+		) {
 			if (header !== undefined) out[header]?.push(line.trim());
 		}
 	}
@@ -260,7 +267,7 @@ describe("demoted delta rows (#3167)", () => {
 	 * Recurrence this prevents (#3168 F10, shape (b)): with a.ts demoted in the
 	 * actionable report but LIVE in the quality report, round 2's actionable
 	 * loop deferred to a quality loop that has no stale row at all, so
-	 * `appendGroupAgeLabel` returned early and the demoted row shipped with NO
+	 * `appendGroupLabels` returned false and the demoted row shipped with NO
 	 * age label — the pre-#3167 defect the issue exists to remove.
 	 */
 	it("F10(b): a file demoted in actionable but live in quality still gets its label", async () => {
@@ -352,6 +359,123 @@ describe("demoted delta rows (#3167)", () => {
 		expect(text).toContain(`ℹ ${STALE_LINE_MARKER}`);
 		expect(labelsByHeader(text), text).toEqual({
 			"src/a.ts": ["(scanned 10m ago)"],
+		});
+	});
+
+	/**
+	 * Recurrence this prevents (#3168 F10, carried onto #3170's second label):
+	 * the two render loops each push a group label, so a file present in BOTH
+	 * reports renders it twice unless the second loop no-ops on what the first
+	 * actually pushed. Round 2 of #3176 deduped by PREDICTING the quality loop
+	 * would label (`qualityLabeledFiles`) — the same prediction #3168 F10
+	 * removed. Mutation: `appendGroupLabels` returning `false` duplicates both
+	 * labels under `src/a.ts` here.
+	 */
+	it("#3170: a re-verify-incomplete file demoted in both reports carries both labels ONCE, under its own header", async () => {
+		const aPath = path.join(cwd, "src", "a.ts");
+		const bPath = path.join(cwd, "src", "b.ts");
+		fs.writeFileSync(aPath, "const a = 1;\n");
+		fs.writeFileSync(bPath, "const b = 1;\n");
+		const editedAtSec = (Date.now() - 5 * 60_000) / 1000;
+		fs.utimesSync(aPath, editedAtSec, editedAtSec);
+		fs.utimesSync(bPath, editedAtSec, editedAtSec);
+		const observedAt = new Date(Date.now() - 10 * 60_000).toISOString();
+		const warn = (message: string) => ({
+			line: 1,
+			rule: "no-unused-vars",
+			tool: "eslint",
+			message,
+		});
+		const tool = makeTool({
+			"actionable-warnings": {
+				files: [
+					// The bounded re-verify could not complete for a.ts: the entry
+					// is carried verbatim and the gap is labelled, never a false
+					// clean (#3170 AC 3).
+					{
+						filePath: aPath,
+						warnings: [warn("a is unused")],
+						reVerifyIncomplete: true,
+					},
+					{ filePath: bPath, warnings: [warn("b is unused")] },
+				],
+				generatedAt: observedAt,
+				summary: { warnings: 2 },
+			},
+			"code-quality-warnings": {
+				files: [{ filePath: aPath, warnings: [warn("a quality nit")] }],
+				generatedAt: observedAt,
+				summary: { warnings: 1 },
+			},
+		});
+		const result = (await tool.execute(
+			"1",
+			{ mode: "delta" },
+			undefined,
+			null,
+			{
+				cwd,
+			},
+		)) as { content: Array<{ type: "text"; text: string }> };
+		const text = result.content.map((part) => part.text).join("\n");
+		expect(labelsByHeader(text), text).toEqual({
+			"src/a.ts": ["(scanned 10m ago)", "(re-verify incomplete)"],
+			"src/b.ts": ["(scanned 10m ago)"],
+		});
+	});
+
+	/**
+	 * Recurrence this prevents: the same F10 duplication for a file whose rows
+	 * are LIVE (its own file has not moved since the report stamp, so nothing
+	 * is demoted) but whose re-verify was cut — the group's only label is the
+	 * gap label. Mutation: dropping `|| incomplete` from `appendGroupLabels`'s
+	 * return leaves the actionable loop's push unrecorded and the quality loop
+	 * repeats it.
+	 */
+	it("#3170: a LIVE re-verify-incomplete file present in both reports carries the gap label once", async () => {
+		const aPath = path.join(cwd, "src", "a.ts");
+		fs.writeFileSync(aPath, "const a = 1;\n");
+		// Written 10m ago, both reports observed 5m ago: nothing is demoted.
+		const editedAtSec = (Date.now() - 10 * 60_000) / 1000;
+		fs.utimesSync(aPath, editedAtSec, editedAtSec);
+		const observedAt = new Date(Date.now() - 5 * 60_000).toISOString();
+		const warn = (message: string) => ({
+			line: 1,
+			rule: "no-unused-vars",
+			tool: "eslint",
+			message,
+		});
+		const tool = makeTool({
+			"actionable-warnings": {
+				files: [
+					{
+						filePath: aPath,
+						warnings: [warn("a is unused")],
+						reVerifyIncomplete: true,
+					},
+				],
+				generatedAt: observedAt,
+				summary: { warnings: 1 },
+			},
+			"code-quality-warnings": {
+				files: [{ filePath: aPath, warnings: [warn("a quality nit")] }],
+				generatedAt: observedAt,
+				summary: { warnings: 1 },
+			},
+		});
+		const result = (await tool.execute(
+			"1",
+			{ mode: "delta" },
+			undefined,
+			null,
+			{
+				cwd,
+			},
+		)) as { content: Array<{ type: "text"; text: string }> };
+		const text = result.content.map((part) => part.text).join("\n");
+		expect(text).not.toContain(STALE_LINE_MARKER);
+		expect(labelsByHeader(text), text).toEqual({
+			"src/a.ts": ["(re-verify incomplete)"],
 		});
 	});
 

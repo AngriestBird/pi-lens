@@ -118,6 +118,20 @@ export interface ActionableWarningsReportFile {
 	 */
 	generatedAt?: string;
 	/**
+	 * #3170: set by the bounded persistent-reverify pass — the runtime just
+	 * re-observed this file against the live server, so this entry's warnings
+	 * are a FRESH observation and the merge must SUPERSEDE (not union with)
+	 * the carried entry they replace: a converged finding would otherwise
+	 * survive its own supersession via the id-union in `mergeWarnings`.
+	 */
+	reVerified?: boolean;
+	/**
+	 * #3170: the re-observation could not complete inside the budget — the
+	 * carried warnings are kept verbatim and the render marks the gap
+	 * ("re-verify incomplete"), never a false clean.
+	 */
+	reVerifyIncomplete?: boolean;
+	/**
 	 * Set only on an entry a DEFERRED publish contributed to (#2504 review
 	 * round 5, F1). Distinct from {@link ActionableWarningRecord.origin}, which
 	 * says which analyzer found a warning; this says which PUBLISH produced the
@@ -486,7 +500,7 @@ function lineInModifiedRanges(
 	);
 }
 
-function recordFromLspDiagnostic(
+export function recordFromLspDiagnostic(
 	diag: LSPDiagnostic,
 	filePath: string,
 	cwd: string,
@@ -1136,7 +1150,7 @@ export async function buildActionableWarningsReport(
  * off-hook loop run byte-identical logic — the deferral must not become a
  * second, drifting copy of the enrichment.
  */
-async function enrichFileFromLsp(
+export async function enrichFileFromLsp(
 	cwd: string,
 	args: BuildActionableWarningsArgs,
 	target: LspEnrichmentTarget,
@@ -1590,15 +1604,30 @@ export function mergeActionableWarningsReports(args: {
 		}
 		mergedFiles++;
 		const merged: ActionableWarningsReportFile = incumbent
-			? {
-					...incumbent,
-					fileSeq: incumbent.fileSeq ?? entry.fileSeq,
-					generatedAt: olderStamp(
-						incumbent.generatedAt ?? newerReport?.generatedAt,
-						entry.generatedAt ?? olderReport?.generatedAt,
-					),
-					warnings: mergeWarnings([...incumbent.warnings, ...entry.warnings]),
-				}
+			? incumbent.reVerified || incumbent.reVerifyIncomplete
+				? // #3170: the runtime just RE-OBSERVED this file (the bounded
+					// persistent-reverify pass) — the fresh observation supersedes
+					// the carried entry instead of unioning with it: a converged
+					// finding would otherwise survive its own supersession via the
+					// id-union in `mergeWarnings`.
+					{
+						...incumbent,
+						fileSeq: incumbent.fileSeq ?? entry.fileSeq,
+						generatedAt: olderStamp(
+							incumbent.generatedAt ?? newerReport?.generatedAt,
+							entry.generatedAt ?? olderReport?.generatedAt,
+						),
+						warnings: incumbent.warnings,
+					}
+				: {
+						...incumbent,
+						fileSeq: incumbent.fileSeq ?? entry.fileSeq,
+						generatedAt: olderStamp(
+							incumbent.generatedAt ?? newerReport?.generatedAt,
+							entry.generatedAt ?? olderReport?.generatedAt,
+						),
+						warnings: mergeWarnings([...incumbent.warnings, ...entry.warnings]),
+					}
 			: { ...entry };
 		if (deferredPublish) {
 			// Mark it, so the next in-band publish carries it forward across the
@@ -2156,7 +2185,7 @@ export function formatActionableWarningsAdvisory(
 		.slice(0, 5)
 		.map(
 			(file) =>
-				`  ${file.displayPath}: ${file.warnings.filter((warning) => !warning.suppressed).length}`,
+				`  ${file.displayPath}: ${file.warnings.filter((warning) => !warning.suppressed).length}${file.reVerifyIncomplete ? " (re-verify incomplete)" : ""}`,
 		)
 		.join("\n");
 	const more =

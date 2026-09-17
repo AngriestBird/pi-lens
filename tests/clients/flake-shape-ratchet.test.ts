@@ -133,6 +133,15 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		reason:
 			"the hook remainder is the defect; fake timers isolate the delayed pre-snapshot work from scheduler contention",
 	},
+	// #3176 F4: the budget test's contract is REAL elapsed time —
+	// `bounded()` races the touch against a live wall deadline; fake timers
+	// would settle the bound instantly and the budget semantics would be
+	// unmeasurable. The assertion is on outcomes and counts, never elapsed ms.
+	"raw-timer-wait:clients/persistent-reverify.test.ts": {
+		detector: "raw-timer-wait",
+		reason:
+			"bounded() races the touch against a live wall budget; fake timers settle the bound instantly and the budget semantics are unmeasurable",
+	},
 	// 2026-09-15 (#2042 cheapest probe): the sample-tail file is written by the
 	// wrapper's own real setInterval loop in a separate process; a poll waits
 	// for that file's first write rather than a fixed sleep, and one case kills
