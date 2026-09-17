@@ -2315,6 +2315,23 @@ const BOUNDED_CALL_SITES: Readonly<Record<string, string>> = {
 		"type; filled by every production hook path (tool_call arm, " +
 		"tool_result_edit settle, agent_settled sweeps). The fallback is " +
 		"fail-safe, not the normal case, and the wall budget is live regardless.",
+	"call:clients/persistent-reverify.ts#runPersistentReverify:1e569f4c~7408bac3":
+		"`deps.signal` — the turn-end abort signal, passed through the wiring " +
+		"conditionally (#3176 round: `deps.signal === undefined ? {} : {signal}`). " +
+		"OPTIONAL by design: the pass runs on the turn_end hook, and bounded() " +
+		"reads a missing signal as one that never aborts — the wall budget " +
+		"(budgetMs/REVERIFY_BUDGET_MS) and the per-touch floor (250ms) still " +
+		"bound every call. The optionality is a written decision: the re-verify " +
+		"is best-effort by contract (an unconfirmed touch is kept verbatim and " +
+		"labeled, never a false clean), so a wall-clock-only run degrades " +
+		"honestly rather than blocking the hook.",
+	"call:clients/persistent-reverify.ts#runPersistentReverify:df18bffa~a607d75c":
+		"`deps.signal` — the same turn-end abort signal as the touch site above; " +
+		"this is the outer await around `enrichFileFromLsp` (the producer " +
+		"pipeline's own internals are deadline-bounded). OPTIONAL by design, " +
+		"same written decision as the touch site: the pass is best-effort by " +
+		"contract, and the wall budget plus the per-touch floor still bound " +
+		"every call.",
 	"call:clients/pipeline.ts#resyncLspFile:194d22cb~34c8c753":
 		"The AMBIENT turn abort signal, set for the whole tool_result path and " +
 		"absent only in a bare unit harness. PI_LENS_LSP_SYNC_BUDGET_MS is the " +
@@ -2345,6 +2362,12 @@ const BOUNDED_CALL_SITES: Readonly<Record<string, string>> = {
 		"optional only for the standalone MCP adapter and unit harnesses. The " +
 		"turn_end wall budget is always live, and timeout falls back to raw findings " +
 		"so security findings remain blockers.",
+	"call:clients/runtime-turn.ts#4da1e4ca~7e52ce49":
+		"`getAmbientAbortSignal()` — the turn's registered abort signal, " +
+		"ALWAYS defined on this path (the ambient registration is set when the " +
+		"hook fires). Never wall-clock: the bound composes with the pass's own " +
+		"internal deadline (3s) and the per-touch floor, and the hook's budget " +
+		"(HOOK_WALL_BUDGET_MS.turn_end) caps the whole pass.",
 	"call:clients/runtime-turn.ts#e953bca9~404f0b0f":
 		"The late auxiliary re-promotion observer receives the live `turn_end` " +
 		"ctx.signal from `deps.signal` when pi supplies one, but that signal is " +

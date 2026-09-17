@@ -252,18 +252,30 @@ export async function runPersistentReverify(args: {
 		// F2: the touch's collected diagnostics feed the producer's pipeline
 		// as the cached arm — no second pull, the producer's filters and
 		// caps are reused verbatim.
-		const freshRecords = await enrichFileFromLsp(
-			args.cwd,
-			buildArgs,
-			{ filePath: entry.filePath, cached: touchedResult.diags },
-			{
-				lspService: args.lspService,
-				pullTimeoutMs: 2000,
-				deadlineAt,
-				...(args.signal !== undefined ? { signal: args.signal } : {}),
-				site: { hook: "turn_end", label: "persistent_reverify" },
-			},
-		);
+		// F4: the outer await is bound-wrapped too — the module carries ZERO
+		// syntactic unbounded awaits (#2523 slice-3 worklist), and the hard
+		// ceiling composes with enrichFileFromLsp's own internal deadline.
+		const freshRecords =
+			(await bounded(
+				enrichFileFromLsp(
+					args.cwd,
+					buildArgs,
+					{ filePath: entry.filePath, cached: touchedResult.diags },
+					{
+						lspService: args.lspService,
+						pullTimeoutMs: 2000,
+						deadlineAt,
+						...(args.signal !== undefined ? { signal: args.signal } : {}),
+						site: { hook: "turn_end", label: "persistent_reverify" },
+					},
+				),
+				{
+					ms: Math.max(250, deadlineAt - Date.now()),
+					signal: args.signal,
+					hook: "turn_end",
+					label: "persistent_reverify_enrich",
+				},
+			)) ?? [];
 		let dropped = 0;
 		let kept = 0;
 		for (const warning of entry.warnings) {

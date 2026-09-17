@@ -1,3 +1,4 @@
+// flake-shape: raw-timer-wait — the budget test's contract is real elapsed time: bounded() races the touch against a live wall deadline, and fake timers would settle the bound instantly, making the budget semantics unmeasurable. The assertions are on outcomes and counts, never elapsed ms.
 /**
  * #3170 — the bounded persistent-reverify pass.
  *

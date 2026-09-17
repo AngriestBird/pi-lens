@@ -3399,12 +3399,23 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		if (persistedReport?.files?.some((entry) => entry.origin === "deferred")) {
 			const reverifyLspService = getLSPService();
 			if (reverifyLspService) {
-				reverify = await runPersistentReverify({
-					report: persistedReport,
-					cwd,
-					lspService: reverifyLspService,
-					...(deps.signal === undefined ? {} : { signal: deps.signal }),
-				});
+				// #2523: the hook-path await is bound-wrapped with the hook's own
+				// budget and signal; the pass's internal deadline (3s) is the
+				// tighter of the two.
+				reverify = await bounded(
+					runPersistentReverify({
+						report: persistedReport,
+						cwd,
+						lspService: reverifyLspService,
+						signal: getAmbientAbortSignal(),
+					}),
+					{
+						ms: HOOK_WALL_BUDGET_MS.turn_end,
+						signal: getAmbientAbortSignal(),
+						hook: "turn_end",
+						label: "persistent_reverify",
+					},
+				);
 			}
 		}
 		try {

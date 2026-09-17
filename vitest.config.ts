@@ -380,6 +380,7 @@ export const wallClockBudgetInclude = [
 	// block growth), so the file runs here, fully serialized (flake-shape
 	// admission).
 	"tests/clients/performance-report-occupancy.test.ts",
+	"tests/clients/persistent-reverify.test.ts",
 	"tests/clients/pipeline-lsp-sync.test.ts",
 	"tests/clients/project-data-dir-slug.test.ts",
 	"tests/clients/read-expansion-enrichment.test.ts",

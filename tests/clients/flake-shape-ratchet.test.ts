@@ -142,6 +142,11 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 	// timer against a real OS pipe's backpressure (no fake clock drains a
 	// kernel buffer), and the note-write retry cap and the hang/exit-code
 	// bound both wait on a real, separately spawned process's real exit.
+	"raw-timer-wait:clients/persistent-reverify.test.ts": {
+		detector: "raw-timer-wait",
+		reason:
+			"bounded() races the touch against a live wall budget; fake timers settle the bound instantly and the budget semantics are unmeasurable",
+	},
 	"raw-timer-wait:scripts/with-memory-watch.test.ts": {
 		detector: "raw-timer-wait",
 		reason:
@@ -166,6 +171,10 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		reason:
 			"a real recursive fs.watch delivery is the subject; no fake clock delivers an inotify event and a stubbed watcher proves nothing",
 	},
+	// #3176 F4: the budget test's contract is REAL elapsed time —
+	// `bounded()` races the touch against a live wall deadline; fake timers
+	// would settle the bound instantly and the budget semantics would be
+	// unmeasurable. The assertion is on outcomes and counts, never elapsed ms.
 	"real-process-spawn:clients/biome-config-decorator-metadata.test.ts": {
 		detector: "real-process-spawn",
 		reason:
