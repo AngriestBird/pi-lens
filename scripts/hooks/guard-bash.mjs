@@ -132,13 +132,7 @@
  * and allows. (Round 2 capped nesting at depth 8, which silently ALLOWED
  * anything nested deeper; the cap is deleted rather than raised.)
  */
-import {
-	lstatSync,
-	readFileSync,
-	readlinkSync,
-	readSync,
-	writeSync,
-} from "node:fs";
+import { readFileSync, readlinkSync, readSync, writeSync } from "node:fs";
 import {
 	dirname,
 	isAbsolute,
@@ -731,24 +725,25 @@ const GIT_TWO_TOKEN_FLAGS = new Set(["-C", "-c"]);
  * linked worktree's top-level `.git` is a FILE whose content starts with
  * `gitdir:` (the main checkout's `.git` is a directory; an ordinary
  * directory that happens to share a name has no `.git` at all). Never
- * throws: a missing/unreadable `.git`, or one that is a directory, is
- * simply "not a worktree" -- acceptance #3, a path that is not a worktree
- * is left to git, never a false deny.
+ * throws: a missing `.git`, or `readFileSync` on it failing for ANY reason
+ * -- ENOENT, or EISDIR (reading a directory as a file, exactly what the
+ * MAIN checkout's own `.git` is) -- both land in the one catch below, so
+ * it is simply "not a worktree" -- acceptance #3, a path that is not a
+ * worktree is left to git, never a false deny. A separate `lstatSync`
+ * "is this a file?" pre-check was tried and DELETED: `readFileSync`
+ * already throws EISDIR for exactly the directory case that pre-check
+ * existed to catch (measured directly: `fs.readFileSync` on a real
+ * directory throws `EISDIR`), so the pre-check never changed the verdict
+ * and mutating it out left every test in this file green.
  *
  * @param {string} dir
  * @returns {boolean}
  */
 function looksLikeGitWorktree(dir) {
-	const gitPath = join(dir, ".git");
-	let stat;
 	try {
-		stat = lstatSync(gitPath);
-	} catch {
-		return false;
-	}
-	if (!stat.isFile()) return false;
-	try {
-		return readFileSync(gitPath, "utf8").trimStart().startsWith("gitdir:");
+		return readFileSync(join(dir, ".git"), "utf8")
+			.trimStart()
+			.startsWith("gitdir:");
 	} catch {
 		return false;
 	}
@@ -764,22 +759,22 @@ function looksLikeGitWorktree(dir) {
  * real `node_modules` DIRECTORY, a missing entry, and a symlink that stays
  * INSIDE the worktree are all fine and return false -- deliberately
  * narrower than "any symlink", since only an OUTSIDE target can empty
- * something other than this worktree. `readlinkSync` (the raw link text),
- * not `realpathSync`, so a dangling symlink (target does not exist) is
- * still classified correctly instead of throwing ENOENT.
+ * something other than this worktree.
+ *
+ * `readlinkSync` alone decides "is this even a symlink" -- no separate
+ * `lstatSync` type check, the same deletion as {@link looksLikeGitWorktree}'s:
+ * measured directly, `readlinkSync` throws ENOENT for a missing entry and
+ * EINVAL for a REAL directory or file, both caught below, so a pre-check
+ * never changed the verdict and mutating it out left every test green. Its
+ * raw link text (not `realpathSync`'s resolved target), so a dangling
+ * symlink (target does not exist) is still classified correctly instead of
+ * throwing ENOENT on the target.
  *
  * @param {string} worktreeDir
  * @returns {boolean}
  */
 function hasNodeModulesSymlinkOutside(worktreeDir) {
 	const nodeModulesPath = join(worktreeDir, "node_modules");
-	let linkStat;
-	try {
-		linkStat = lstatSync(nodeModulesPath);
-	} catch {
-		return false;
-	}
-	if (!linkStat.isSymbolicLink()) return false;
 	let target;
 	try {
 		target = readlinkSync(nodeModulesPath);
