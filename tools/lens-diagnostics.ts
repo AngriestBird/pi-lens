@@ -1208,7 +1208,13 @@ function formatDeltaMode(
 				lines.push(`  ⚠ ${where}  ${w.rule ?? w.code ?? w.tool}  ${w.message}`);
 			}
 			const key = normalizeMapKey(file.filePath);
-			if (appendGroupLabels(lines, file.warnings, reverifyIncompletePaths.has(key))) {
+			if (
+				appendGroupLabels(
+					lines,
+					file.warnings,
+					reverifyIncompletePaths.has(key),
+				)
+			) {
 				labelledFiles.add(key);
 			}
 		}
@@ -1225,7 +1231,11 @@ function formatDeltaMode(
 			}
 			const key = normalizeMapKey(file.filePath);
 			if (!labelledFiles.has(key)) {
-				appendGroupLabels(lines, file.warnings, reverifyIncompletePaths.has(key));
+				appendGroupLabels(
+					lines,
+					file.warnings,
+					reverifyIncompletePaths.has(key),
+				);
 			}
 		}
 	}
