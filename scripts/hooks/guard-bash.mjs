@@ -2,18 +2,24 @@
 /**
  * scripts/hooks/guard-bash.mjs (#2699, refs umbrella #2697)
  *
- * PreToolUse hook for the Bash tool. Mechanically enforces five
+ * PreToolUse hook for the Bash tool. Mechanically enforces six
  * non-negotiables that previously lived only as prose in CLAUDE.md and the
  * fixer/reviewer playbooks -- a fixer ran `git stash` on 2026-09-07 (the
  * #2686 lane), two review probes wrote into the real `~/.pi-lens` on
- * 2026-09-02 (#2506), and a fixer pointed TMPDIR at the vitest harness home
- * on 2026-09-15 (#3026), all rules a hook can catch that prose could not:
+ * 2026-09-02 (#2506), a fixer pointed TMPDIR at the vitest harness home
+ * on 2026-09-15 (#3026), and twice on 2026-09-16 a fixer ran
+ * `git worktree remove` on a tree whose `node_modules` was a symlink into
+ * the shared checkout, so git followed the link and emptied the shared
+ * install (#3173), all rules a hook can catch that prose could not:
  *
  *   - `git stash` in any form (CLAUDE.md non-negotiable)
  *   - `git reset --soft origin/<branch>` / `git reset --hard <anything>`
  *   - a HAND-typed `git worktree remove` with two force flags (the
  *     sanctioned removal is `node scripts/prune-agent-worktrees.mjs`,
  *     liveness-checked, or unlock + single force)
+ *   - ANY `git worktree remove` (force or not) on a worktree whose
+ *     `node_modules` is a symlink pointing OUTSIDE that worktree (#3173,
+ *     the #2704 class) -- see {@link hasNodeModulesSymlinkOutside}
  *   - an unpinned `node` probe that LOADS built runtime code from clients/
  *     or dist/ (not merely a payload that mentions "clients/" in passing --
  *     review round 2 F5) with no PI_LENS_HOME pin (AGENTS.md "Probe
@@ -126,10 +132,24 @@
  * and allows. (Round 2 capped nesting at depth 8, which silently ALLOWED
  * anything nested deeper; the cap is deleted rather than raised.)
  */
-import { readSync, writeSync } from "node:fs";
+import {
+	lstatSync,
+	readFileSync,
+	readlinkSync,
+	readSync,
+	writeSync,
+} from "node:fs";
+import {
+	dirname,
+	isAbsolute,
+	join,
+	relative,
+	resolve,
+	sep as SEP,
+} from "node:path";
 import { fileURLToPath } from "node:url";
 
-/** @typedef {"stash"|"reset"|"worktreeForce"|"probe"|"tmpdirCollision"} DenyRule */
+/** @typedef {"stash"|"reset"|"worktreeForce"|"worktreeSymlink"|"probe"|"tmpdirCollision"} DenyRule */
 
 /** @type {Record<DenyRule, string>} */
 export const RULE_MESSAGES = {
@@ -139,6 +159,8 @@ export const RULE_MESSAGES = {
 		"`git reset --soft origin/<branch>` / `git reset --hard` is forbidden (fixer playbook rule) -- use `git checkout HEAD -- <path>` to discard a single file instead.",
 	worktreeForce:
 		"a HAND-typed `git worktree remove` with two force flags is forbidden (fixer playbook rule) -- use `node scripts/prune-agent-worktrees.mjs` (liveness-checked; it applies the same double force internally once a tree is confirmed dead) for a stuck worktree, or `git worktree unlock` then a single-force remove.",
+	worktreeSymlink:
+		"git worktree remove on a tree whose node_modules is a symlink into another checkout is forbidden (#3173, the #2704 class -- git follows the link and empties the SHARED install, not just this worktree's copy) -- unlink it first: `rm <tree>/node_modules` (removes only the symlink, not the shared install), then retry the remove.",
 	probe:
 		"an unpinned node probe that LOADS runtime code from clients/ or dist/ is forbidden (AGENTS.md Probe hygiene) -- prefix `PI_LENS_HOME=<worktree>/.probe-home`.",
 	tmpdirCollision:
@@ -704,16 +726,95 @@ export function stripEnvAssignments(words) {
 const GIT_TWO_TOKEN_FLAGS = new Set(["-C", "-c"]);
 
 /**
+ * Does `dir` look like a git WORKTREE checkout -- checked the same way git
+ * itself tells a linked worktree apart from the main repository: only a
+ * linked worktree's top-level `.git` is a FILE whose content starts with
+ * `gitdir:` (the main checkout's `.git` is a directory; an ordinary
+ * directory that happens to share a name has no `.git` at all). Never
+ * throws: a missing/unreadable `.git`, or one that is a directory, is
+ * simply "not a worktree" -- acceptance #3, a path that is not a worktree
+ * is left to git, never a false deny.
+ *
+ * @param {string} dir
+ * @returns {boolean}
+ */
+function looksLikeGitWorktree(dir) {
+	const gitPath = join(dir, ".git");
+	let stat;
+	try {
+		stat = lstatSync(gitPath);
+	} catch {
+		return false;
+	}
+	if (!stat.isFile()) return false;
+	try {
+		return readFileSync(gitPath, "utf8").trimStart().startsWith("gitdir:");
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * Does `worktreeDir` contain a `node_modules` entry that is a SYMLINK whose
+ * target resolves OUTSIDE `worktreeDir` -- the #3173 hazard (twice on
+ * 2026-09-16, the #2704 class): the fixer playbook's own speed convention
+ * (`ln -s <main checkout>/node_modules node_modules`) means a plain
+ * `git worktree remove` on that tree makes git follow the link and empty
+ * the SHARED install it points at, not just this worktree's own copy. A
+ * real `node_modules` DIRECTORY, a missing entry, and a symlink that stays
+ * INSIDE the worktree are all fine and return false -- deliberately
+ * narrower than "any symlink", since only an OUTSIDE target can empty
+ * something other than this worktree. `readlinkSync` (the raw link text),
+ * not `realpathSync`, so a dangling symlink (target does not exist) is
+ * still classified correctly instead of throwing ENOENT.
+ *
+ * @param {string} worktreeDir
+ * @returns {boolean}
+ */
+function hasNodeModulesSymlinkOutside(worktreeDir) {
+	const nodeModulesPath = join(worktreeDir, "node_modules");
+	let linkStat;
+	try {
+		linkStat = lstatSync(nodeModulesPath);
+	} catch {
+		return false;
+	}
+	if (!linkStat.isSymbolicLink()) return false;
+	let target;
+	try {
+		target = readlinkSync(nodeModulesPath);
+	} catch {
+		return false;
+	}
+	const resolvedTarget = resolve(dirname(nodeModulesPath), target);
+	const rel = relative(worktreeDir, resolvedTarget);
+	return rel === ".." || rel.startsWith(`..${SEP}`) || isAbsolute(rel);
+}
+
+/**
  * Classify a `git` invocation's args (after the leading "git" word).
  * Walks past global options (`-C <dir>` and `-c <key>=<value>` are treated
  * as taking a separate value; every other `-x`/`--x` global option is
  * assumed to take none, which is all #2699's deny/allow strings need) to
  * find the subcommand.
  *
+ * `cwd` (the PreToolUse payload's own `cwd`, threaded down from
+ * {@link classifyPayload}) resolves a RELATIVE `git worktree remove <path>`
+ * argument the same way git itself would, for the {@link
+ * hasNodeModulesSymlinkOutside} check -- an absolute argument is used as
+ * given. NOT handled (documented, not fixed, matching this file's other
+ * blind spots): a leading `-C <dir>` global option changes git's own
+ * working directory, which would change what a relative worktree argument
+ * resolves against; this scan does not track it, so a `-C`-relative
+ * worktree path resolves against the PAYLOAD cwd instead -- proportionate,
+ * since every fixer/orchestrator convention in this repo names the
+ * worktree by its absolute path.
+ *
  * @param {string[]} args
+ * @param {string} [cwd]
  * @returns {DenyRule | null}
  */
-function classifyGit(args) {
+function classifyGit(args, cwd) {
 	let i = 0;
 	while (i < args.length) {
 		if (GIT_TWO_TOKEN_FLAGS.has(args[i])) {
@@ -738,11 +839,24 @@ function classifyGit(args) {
 	if (subcommand === "worktree" && args[i + 1] === "remove") {
 		const rest = args.slice(i + 2);
 		let forceCount = 0;
+		const positionals = [];
 		for (const a of rest) {
 			if (a === "-f" || a === "--force") forceCount++;
 			else if (/^-f{2,}$/.test(a)) forceCount += a.length - 1;
+			else if (!a.startsWith("-")) positionals.push(a);
 		}
 		if (forceCount >= 2) return "worktreeForce";
+		const worktreeArg = positionals[0];
+		if (worktreeArg) {
+			const worktreeDir = isAbsolute(worktreeArg)
+				? worktreeArg
+				: resolve(cwd ?? process.cwd(), worktreeArg);
+			if (
+				looksLikeGitWorktree(worktreeDir) &&
+				hasNodeModulesSymlinkOutside(worktreeDir)
+			)
+				return "worktreeSymlink";
+		}
 		return null;
 	}
 	return null;
@@ -942,9 +1056,10 @@ function commandBasename(cmd) {
  *
  * @param {string} rawSegment
  * @param {Record<string, string>} sharedEnv
+ * @param {string} [cwd] the PreToolUse payload's own cwd, for {@link classifyGit}'s worktree-path resolution
  * @returns {DenyRule | null}
  */
-export function classifySegment(rawSegment, sharedEnv = {}) {
+export function classifySegment(rawSegment, sharedEnv = {}, cwd) {
 	const rawWords = splitWords(rawSegment);
 	if (rawWords.length === 0) return null;
 	const words = stripCommandGroupAndRunnerPrefixes(rawWords);
@@ -972,7 +1087,7 @@ export function classifySegment(rawSegment, sharedEnv = {}) {
 	const effectiveEnv = { ...sharedEnv, ...segmentEnv };
 	const cmd = commandBasename(rest[0]);
 	const args = rest.slice(1);
-	if (cmd === "git") return classifyGit(args);
+	if (cmd === "git") return classifyGit(args, cwd);
 	if (cmd === "node" || cmd === "nodejs")
 		return classifyNode(args, effectiveEnv, rawSegment);
 	return null;
@@ -988,16 +1103,17 @@ export function classifySegment(rawSegment, sharedEnv = {}) {
  * `$( )`/backtick span (#2699 review round 2 F2).
  *
  * @param {string} commandText
+ * @param {string} [cwd] the PreToolUse payload's own cwd, threaded to every segment
  * @returns {DenyRule | null}
  */
-export function findDeny(commandText) {
+export function findDeny(commandText, cwd) {
 	const regions = scannableRegions(commandText);
 	/** @type {Record<string, string>} */
 	const sharedEnv = {};
 	for (let index = 0; index < regions.length; index++) {
 		const env = index === 0 ? sharedEnv : { ...sharedEnv };
 		for (const segment of splitSegments(regions[index])) {
-			const rule = classifySegment(segment, env);
+			const rule = classifySegment(segment, env, cwd);
 			if (rule) return rule;
 		}
 	}
@@ -1017,15 +1133,17 @@ export function findDeny(commandText) {
  */
 export function classifyPayload(payload) {
 	if (!payload || typeof payload !== "object") return null;
-	const p = /** @type {{ tool_name?: unknown; tool_input?: unknown }} */ (
-		payload
-	);
+	const p =
+		/** @type {{ tool_name?: unknown; tool_input?: unknown; cwd?: unknown }} */ (
+			payload
+		);
 	if (p.tool_name !== "Bash") return null;
 	const toolInput = p.tool_input;
 	if (!toolInput || typeof toolInput !== "object") return null;
 	const command = /** @type {{ command?: unknown }} */ (toolInput).command;
 	if (typeof command !== "string" || !command.trim()) return null;
-	return findDeny(command);
+	const cwd = typeof p.cwd === "string" ? p.cwd : undefined;
+	return findDeny(command, cwd);
 }
 
 // #3089: nothing in the stdlib waits for fd 0 to become readable
