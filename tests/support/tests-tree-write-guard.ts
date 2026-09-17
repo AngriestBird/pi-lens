@@ -164,6 +164,8 @@ export function installTestsTreeWriteGuard(
 		created.push(absolute);
 	};
 
+	let warnedUnexpectedError = false;
+
 	let watcher: fs.FSWatcher | undefined;
 	const watch = options.watch ?? fs.watch;
 	if (watch !== false) {
@@ -174,6 +176,45 @@ export function installTestsTreeWriteGuard(
 			// Unref'd: the guard must never be the reason the process stays
 			// alive (AGENTS.md shape 4). Events are still delivered.
 			watcher.unref();
+			// #3179: on Linux (inotify has no recursive primitive) node's
+			// recursive watch is the JS polyfill in
+			// lib/internal/fs/recursive_watch.js, which re-scans a changed
+			// subfolder with a synchronous readdirSync (`#watchFolder`). When
+			// that subfolder is removed between the change event that triggers
+			// the rescan and the readdirSync itself, `#watchFolder`'s own catch
+			// unconditionally re-emits the failure as an 'error' event on this
+			// FSWatcher. With no listener, that is an unhandled 'error' event —
+			// Node throws it back onto the event loop and, absent a process-level
+			// uncaughtException handler, the whole vitest process dies with exit
+			// 1 and no failing test (PR #3178 run 35154740539). The race is
+			// cross-process (the removal happens in whichever worker fork owns
+			// the exempt scratch producer while this watcher runs in the main
+			// globalSetup process), so nothing on this side can close the
+			// window — only handling the event can. ENOENT whose folder falls
+			// under an exempt prefix (the same `allow` callback callers already
+			// use to excuse a producer's own create/remove churn from being
+			// reported as a #3082 violation) is exactly that expected churn and
+			// is swallowed; every other error is recorded once — never silently
+			// dropped (AGENTS.md shape 10) and never used to widen `allow`'s
+			// existing exemptions.
+			watcher.on("error", (error: NodeJS.ErrnoException) => {
+				const errorPath =
+					typeof error.path === "string" ? error.path : undefined;
+				const relative =
+					errorPath !== undefined ? path.relative(root, errorPath) : undefined;
+				if (
+					error.code === "ENOENT" &&
+					relative !== undefined &&
+					options.allow?.(relative)
+				) {
+					return;
+				}
+				if (warnedUnexpectedError) return;
+				warnedUnexpectedError = true;
+				console.warn(
+					`[tests-tree-write-guard] fs.watch error on ${root}: ${String(error)}`,
+				);
+			});
 		} catch (error) {
 			// Recursive watch is unavailable on some platforms/filesystems. Say
 			// so once rather than failing the run over a missing detector, and
