@@ -984,4 +984,68 @@ describe("lens_diagnostics source=lsp scope=paths / legacy lsp_diagnostics paths
 			/reanchored from line 2 to 3/,
 		);
 	});
+
+	// #3184 sweep: the SINGLE-`path` mode of the same tool
+	// (tools/lsp-diagnostics.ts:471) derives its key with the bare
+	// `path.isAbsolute(x) ? x : path.resolve(cwd, x)` shape and hands the raw
+	// result to `runFileDiagnostics` → `reconcileWidgetFromLspResult` →
+	// `reconcileScanDiagnostics`, which keys with `normalizeEphemeralMapKey`
+	// — no `path.resolve`, no `normalizeMapKey`, so the #3184 path-utils fold
+	// never reaches it. #3178 round 4 fixed the `paths` ARRAY at :444 and left
+	// this sibling twenty lines away: exactly the "sweep by shape, not by
+	// symbol" miss. Reached from `lens_diagnostics {source:"lsp", path}`
+	// (forwarded verbatim, tools/lens-diagnostics.ts:563-573) and from the
+	// legacy tool's own `path`. Dot segment built by string CONCATENATION, as
+	// above.
+	it("an absolute single-path entry with a dot segment lets lens_diagnostic_mark reanchor under the plain spelling (#3184)", async () => {
+		const subDir = path.join(cwd, "single");
+		fs.mkdirSync(subDir, { recursive: true });
+		const plainAbs = path.join(subDir, "a.ts");
+		fs.writeFileSync(
+			plainAbs,
+			"const a = 1;\nconst b = 2;\nconst target = bad();\n",
+		);
+		const dotSegmentAbs = `${subDir}${path.sep}..${path.sep}single${path.sep}a.ts`;
+		expect(dotSegmentAbs).not.toBe(plainAbs);
+		expect(fs.realpathSync.native(dotSegmentAbs)).toBe(
+			fs.realpathSync.native(plainAbs),
+		);
+
+		const service = makeBadCallService();
+		const tool = createLensDiagnosticsTool(
+			makeCacheManager(),
+			() => cwd,
+			() => service as never,
+		);
+		const result = (await tool.execute(
+			"diag-3184-single",
+			{ source: "lsp", path: dotSegmentAbs, severity: "all" },
+			new AbortController().signal,
+			null,
+			{ cwd },
+		)) as {
+			content: Array<{ text: string }>;
+			details?: Record<string, unknown>;
+		};
+		expect(result.content[0]?.text).toContain("bad call");
+
+		const marked = await createLensDiagnosticMarkTool(() => cwd).execute(
+			"mark-3184-single",
+			{
+				filePath: path.relative(cwd, plainAbs),
+				line: 2, // stale
+				message: "bad call",
+				rule: "typescript:9999",
+				tool: "lsp",
+				disposition: "false-positive",
+			},
+			undefined,
+			() => {},
+			{ cwd },
+		);
+		expect(marked.isError).toBeFalsy();
+		expect(String(marked.content[0]?.text)).toMatch(
+			/reanchored from line 2 to 3/,
+		);
+	});
 });
