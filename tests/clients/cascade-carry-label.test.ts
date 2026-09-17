@@ -11,10 +11,9 @@
  * pre-fix production path.
  */
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { removeTempDirSync } from "./test-utils.js";
+import { setupTestEnvironment } from "./test-utils.js";
 
 import { cascadeCarrySuffix } from "../../clients/cascade-format.js";
 import { DELIVERY_SURFACES } from "../../clients/finding-delivery-gate.js";
@@ -71,21 +70,42 @@ describe("delivery-gate registry (#3167)", () => {
 	});
 });
 
+/**
+ * The age-label lines each file HEADER owns. F10 is precisely about this
+ * pairing: round 2 rendered `src/a.ts`'s label under `src/b.ts`'s header while
+ * a.ts's own group carried none, so a count-only assertion could not see it.
+ */
+function labelsByHeader(text: string): Record<string, string[]> {
+	const out: Record<string, string[]> = {};
+	let header: string | undefined;
+	for (const line of text.split("\n")) {
+		if (!line.startsWith(" ") && line.endsWith(".ts")) {
+			header = line;
+			out[header] ??= [];
+		} else if (/^ {2}\((?:scanned .+ ago|scan age unknown)\)$/.test(line)) {
+			if (header !== undefined) out[header]?.push(line.trim());
+		}
+	}
+	return out;
+}
+
 describe("demoted delta rows (#3167)", () => {
-	let tmpDir: string;
+	let env: { tmpDir: string; cleanup: () => void };
 	let cwd: string;
 	let filePath: string;
 
 	beforeEach(() => {
-		tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-age-label-"));
-		cwd = tmpDir;
+		// #3168: tracked fixture root, so `tests/config/tmp-fixture-hygiene`
+		// sees this family's dirs instead of a raw untracked mkdtemp.
+		env = setupTestEnvironment("pi-lens-age-label-");
+		cwd = env.tmpDir;
 		filePath = path.join(cwd, "src", "foo.ts");
 		fs.mkdirSync(path.dirname(filePath), { recursive: true });
 		resetProjectLensConfigCache();
 	});
 
 	afterEach(() => {
-		removeTempDirSync(tmpDir);
+		env.cleanup();
 	});
 
 	function makeTool(cacheData: Record<string, unknown>) {
@@ -176,6 +196,115 @@ describe("demoted delta rows (#3167)", () => {
 		const text = result.content.map((part) => part.text).join("\n");
 		const ageLabels = text.match(/\(scanned 1m ago\)/g) ?? [];
 		expect(ageLabels.length, text).toBe(1);
+	});
+
+	/**
+	 * Recurrence this prevents (#3168 F10, shape (a)): round 2's F5 dedupe
+	 * PREDICTED which loop would label, from the file's mere presence in the
+	 * quality report, and so skipped the actionable label for `src/a.ts` — but
+	 * the quality loop's header suppression renders a.ts's quality rows (and
+	 * therefore its label) under `src/b.ts`'s header. a.ts's own group ended up
+	 * with ZERO labels while b.ts's carried two. Labelling in the actionable
+	 * loop first puts each label under the header it describes.
+	 */
+	it("F10(a): a file demoted in both reports is labelled under its OWN header, once", async () => {
+		const aPath = path.join(cwd, "src", "a.ts");
+		const bPath = path.join(cwd, "src", "b.ts");
+		fs.writeFileSync(aPath, "const a = 1;\n");
+		fs.writeFileSync(bPath, "const b = 1;\n");
+		// Both files were last written 5m ago; both reports were observed 10m
+		// ago — so the freshness gate demotes every row (edited since observed).
+		const editedAtSec = (Date.now() - 5 * 60_000) / 1000;
+		fs.utimesSync(aPath, editedAtSec, editedAtSec);
+		fs.utimesSync(bPath, editedAtSec, editedAtSec);
+		const observedAt = new Date(Date.now() - 10 * 60_000).toISOString();
+		const warn = (message: string) => ({
+			line: 1,
+			rule: "no-unused-vars",
+			tool: "eslint",
+			message,
+		});
+		const tool = makeTool({
+			"actionable-warnings": {
+				files: [
+					{ filePath: aPath, warnings: [warn("a is unused")] },
+					{ filePath: bPath, warnings: [warn("b is unused")] },
+				],
+				generatedAt: observedAt,
+				summary: { warnings: 2 },
+			},
+			"code-quality-warnings": {
+				files: [{ filePath: aPath, warnings: [warn("a quality nit")] }],
+				generatedAt: observedAt,
+				summary: { warnings: 1 },
+			},
+		});
+		const result = (await tool.execute(
+			"1",
+			{ mode: "delta" },
+			undefined,
+			null,
+			{
+				cwd,
+			},
+		)) as { content: Array<{ type: "text"; text: string }> };
+		const text = result.content.map((part) => part.text).join("\n");
+		expect(text).toContain(STALE_LINE_MARKER);
+		expect(labelsByHeader(text), text).toEqual({
+			"src/a.ts": ["(scanned 10m ago)"],
+			"src/b.ts": ["(scanned 10m ago)"],
+		});
+	});
+
+	/**
+	 * Recurrence this prevents (#3168 F10, shape (b)): with a.ts demoted in the
+	 * actionable report but LIVE in the quality report, round 2's actionable
+	 * loop deferred to a quality loop that has no stale row at all, so
+	 * `appendGroupAgeLabel` returned early and the demoted row shipped with NO
+	 * age label — the pre-#3167 defect the issue exists to remove.
+	 */
+	it("F10(b): a file demoted in actionable but live in quality still gets its label", async () => {
+		const aPath = path.join(cwd, "src", "a.ts");
+		fs.writeFileSync(aPath, "const a = 1;\n");
+		// Written 5m ago. The actionable report predates the write (demote); the
+		// quality report postdates it (live), so the quality loop has no stale
+		// row and cannot carry the label for it.
+		const editedAtSec = (Date.now() - 5 * 60_000) / 1000;
+		fs.utimesSync(aPath, editedAtSec, editedAtSec);
+		const warn = (message: string) => ({
+			line: 1,
+			rule: "no-unused-vars",
+			tool: "eslint",
+			message,
+		});
+		const tool = makeTool({
+			"actionable-warnings": {
+				files: [{ filePath: aPath, warnings: [warn("a is unused")] }],
+				generatedAt: new Date(Date.now() - 10 * 60_000).toISOString(),
+				summary: { warnings: 1 },
+			},
+			"code-quality-warnings": {
+				files: [{ filePath: aPath, warnings: [warn("a quality nit")] }],
+				generatedAt: new Date(Date.now() - 60_000).toISOString(),
+				summary: { warnings: 1 },
+			},
+		});
+		const result = (await tool.execute(
+			"1",
+			{ mode: "delta" },
+			undefined,
+			null,
+			{
+				cwd,
+			},
+		)) as { content: Array<{ type: "text"; text: string }> };
+		const text = result.content.map((part) => part.text).join("\n");
+		// Premise: the actionable row IS demoted and the quality row is NOT.
+		expect(text).toContain(`⚠ ${STALE_LINE_MARKER}`);
+		expect(text).toContain("ℹ L1");
+		expect(labelsByHeader(text), text).toEqual({
+			"src/a.ts": ["(scanned 10m ago)"],
+		});
 	});
 
 	it("B4: a missing observation stamp renders the neutral label, never a fabricated number", async () => {

@@ -241,10 +241,6 @@ interface LabeledDeliverySurface extends DeliverySurfaceBase {
 	reason: string;
 	/** What supplies the age shown to the agent (a scannedAt field, "live", or "n/a"). */
 	ageSource: string;
-	/** #3168 F2: labeled surfaces that DO call a shared helper claim it here —
-	 * same evidence contract as the gated entries (a bare status flip without
-	 * the call-shape evidence is the #1634 F1 recurrence). */
-	evidenceMin?: number;
 }
 
 export type DeliverySurfaceEntry =
@@ -483,8 +479,13 @@ export const DELIVERY_SURFACES: Record<string, DeliverySurfaceEntry> = {
 		"Explains what the cascade check could NOT confirm this turn — not a " +
 			"finding with a cited path, an absence-of-coverage disclosure computed " +
 			"from this turn's own indeterminate-run list. An advisory computed from " +
-			"a carried indeterminate run is labeled `(carried N turns · scanned Xm ago)` " +
-			"(#3167, #3168 F4 — dropped on mixed carried/fresh buckets).",
+			"a carried indeterminate run is labeled `(carried N turns · <age>)` " +
+			"(#3167, #3168 F4 — dropped on mixed carried/fresh buckets). The age " +
+			"half reads `scan age unknown` on this surface today: no indeterminate-" +
+			"run producer stamps `observedAt` (only the resolved-found plumb does, " +
+			"`clients/cascade-format.ts`), and one unstamped carried run collapses " +
+			"the whole bucket's age rather than claiming the stamped runs' (#3168 " +
+			"F13). The carry COUNT is always real.",
 		"live",
 		["withCarryLabel("],
 		{ evidenceMin: 3 },
