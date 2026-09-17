@@ -434,12 +434,10 @@ export function createLspDiagnosticsTool(
 				// path exists — an agent-typed, possibly mis-cased `paths` entry
 				// must key `reconcileScanDiagnostics`'s widget-state write the same
 				// way a canonical writer (clients/pipeline.ts's ctx.filePath) or the
-				// #3160-fixed lens_diagnostic_mark reader would. `normalizeMapKey`
-				// alone does NOT fold dot segments on POSIX when casing is already
-				// right (`realpathSync.native`'s canonical form has a different
-				// segment count than the raw dot-segment input, so
-				// `adoptCanonicalCasing` — a casing-only rewrite — declines and
-				// returns the input unchanged) — `path.resolve` must run first.
+				// #3160-fixed lens_diagnostic_mark reader would. `path.resolve`
+				// stays required for the relative→absolute step: `normalizeMapKey`
+				// folds dot segments itself since #3184, but never resolves against
+				// `cwd` (a cwd fold there broke every monorepo, #2490).
 				const absPaths = rawPaths.map((entry) =>
 					normalizeMapKey(path.resolve(cwd, entry)),
 				);
@@ -468,9 +466,12 @@ export function createLspDiagnosticsTool(
 					details: {},
 				};
 			}
-			const absPath = path.isAbsolute(rawPath)
-				? rawPath
-				: path.resolve(cwd, rawPath);
+			// #3184: the single-`path` sibling of the `paths` batch above, and
+			// keyed the same way — `runFileDiagnostics` hands this straight to
+			// `reconcileScanDiagnostics`, whose `normalizeEphemeralMapKey` key
+			// derivation folds neither dot segments nor casing. Same expression as
+			// :444 so both modes of this tool write under ONE key per file.
+			const absPath = normalizeMapKey(path.resolve(cwd, rawPath));
 
 			let stat: fs.Stats;
 			try {

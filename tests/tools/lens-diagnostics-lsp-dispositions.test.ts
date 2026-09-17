@@ -984,4 +984,123 @@ describe("lens_diagnostics source=lsp scope=paths / legacy lsp_diagnostics paths
 			/reanchored from line 2 to 3/,
 		);
 	});
+
+	// #3184 sweep: the SINGLE-`path` mode of the same tool
+	// (tools/lsp-diagnostics.ts:471) derives its key with the bare
+	// `path.isAbsolute(x) ? x : path.resolve(cwd, x)` shape and hands the raw
+	// result to `runFileDiagnostics` → `reconcileWidgetFromLspResult` →
+	// `reconcileScanDiagnostics`, which keys with `normalizeEphemeralMapKey`
+	// — no `path.resolve`, no `normalizeMapKey`, so the #3184 path-utils fold
+	// never reaches it. #3178 round 4 fixed the `paths` ARRAY at :444 and left
+	// this sibling twenty lines away: exactly the "sweep by shape, not by
+	// symbol" miss. Reached from `lens_diagnostics {source:"lsp", path}`
+	// (forwarded verbatim, tools/lens-diagnostics.ts:563-573) and from the
+	// legacy tool's own `path`. Dot segment built by string CONCATENATION, as
+	// above.
+	it("an absolute single-path entry with a dot segment lets lens_diagnostic_mark reanchor under the plain spelling (#3184)", async () => {
+		const subDir = path.join(cwd, "single");
+		fs.mkdirSync(subDir, { recursive: true });
+		const plainAbs = path.join(subDir, "a.ts");
+		fs.writeFileSync(
+			plainAbs,
+			"const a = 1;\nconst b = 2;\nconst target = bad();\n",
+		);
+		const dotSegmentAbs = `${subDir}${path.sep}..${path.sep}single${path.sep}a.ts`;
+		expect(dotSegmentAbs).not.toBe(plainAbs);
+		expect(fs.realpathSync.native(dotSegmentAbs)).toBe(
+			fs.realpathSync.native(plainAbs),
+		);
+
+		const service = makeBadCallService();
+		const tool = createLensDiagnosticsTool(
+			makeCacheManager(),
+			() => cwd,
+			() => service as never,
+		);
+		const result = (await tool.execute(
+			"diag-3184-single",
+			{ source: "lsp", path: dotSegmentAbs, severity: "all" },
+			new AbortController().signal,
+			null,
+			{ cwd },
+		)) as {
+			content: Array<{ text: string }>;
+			details?: Record<string, unknown>;
+		};
+		expect(result.content[0]?.text).toContain("bad call");
+
+		const marked = await createLensDiagnosticMarkTool(() => cwd).execute(
+			"mark-3184-single",
+			{
+				filePath: path.relative(cwd, plainAbs),
+				line: 2, // stale
+				message: "bad call",
+				rule: "typescript:9999",
+				tool: "lsp",
+				disposition: "false-positive",
+			},
+			undefined,
+			() => {},
+			{ cwd },
+		);
+		expect(marked.isError).toBeFalsy();
+		expect(String(marked.content[0]?.text)).toMatch(
+			/reanchored from line 2 to 3/,
+		);
+	});
+
+	// #3184 sweep, casing half: the single-`path` mode's key must also adopt
+	// on-disk casing, for the same reason the `paths` batch does (#3160/#3182)
+	// — a mis-cased agent-typed `path` on a case-insensitive filesystem
+	// otherwise writes a widget-state record under a spelling no canonical
+	// writer or the #3160-fixed mark reader ever derives. `path.resolve` alone
+	// would fold the dot segment above and leave THIS arm broken, so both
+	// halves of the one expression are guarded.
+	it("a mis-cased single-path entry lets lens_diagnostic_mark reanchor under EITHER spelling (#3184)", async (ctx) => {
+		const fixture = createCaseAliasFixture(cwd, {
+			content: "const a = 1;\nconst b = 2;\nconst target = bad();\n",
+			dirName: "singlecase",
+		});
+		ctx.skip(fixture.skipReason !== undefined, fixture.skipReason ?? "");
+
+		const service = makeBadCallService();
+		const tool = createLensDiagnosticsTool(
+			makeCacheManager(),
+			() => cwd,
+			() => service as never,
+		);
+		const result = (await tool.execute(
+			"diag-3184-single-case",
+			{ source: "lsp", path: fixture.rawMisCased, severity: "all" },
+			new AbortController().signal,
+			null,
+			{ cwd },
+		)) as { content: Array<{ text: string }> };
+		expect(result.content[0]?.text).toContain("bad call");
+
+		const runMark = (targetFilePath: string) =>
+			createLensDiagnosticMarkTool(() => cwd).execute(
+				"mark-3184-single-case",
+				{
+					filePath: targetFilePath,
+					line: 2, // stale
+					message: "bad call",
+					rule: "typescript:9999",
+					tool: "lsp",
+					disposition: "false-positive",
+				},
+				undefined,
+				() => {},
+				{ cwd },
+			);
+
+		const viaCanonical = await runMark(path.relative(cwd, fixture.onDisk));
+		expect(String(viaCanonical.content[0]?.text)).toMatch(
+			/reanchored from line 2 to 3/,
+		);
+		const viaMisCased = await runMark(path.relative(cwd, fixture.rawMisCased));
+		expect(String(viaMisCased.content[0]?.text)).toMatch(
+			/reanchored from line 2 to 3/,
+		);
+	});
 });
