@@ -511,6 +511,10 @@ describe("normalizeFilePath: dot segments fold into the canonical key (#3184)", 
 		// tests the ALREADY slash-folded string, which has no backslash left.
 		// POSIX `normalize` would collapse `//server/share` to `/server/share`
 		// — renaming a remote share to an unrelated local path.
+		// Runs on the authoritative ubuntu Unit tests lane (and macOS); skipped
+		// only on a Windows dev box, where `process.platform === "win32"` routes
+		// every path through the win32 arm and this POSIX-arm guard has no arm to
+		// pin.
 		ctx.skip(
 			process.platform === "win32",
 			"win32 host routes UNC through the win32 arm; this pins the POSIX arm",
