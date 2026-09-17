@@ -208,6 +208,52 @@ describe("lens_diagnostic_mark tool — line verification/reanchoring (#802)", (
 		expect((result.details as { line: number }).line).toBe(3);
 	});
 
+	// #3184: the mark tool takes an ALREADY-absolute `filePath` argument
+	// through untouched (`tools/lens-diagnostic-mark.ts:324-326`,
+	// `path.isAbsolute(x) ? x : path.resolve(cwd, x)`), and before the
+	// path-utils fix `normalizeMapKey` passed dot segments through on POSIX —
+	// its casing arm returns the caller's spelling whenever
+	// `adoptCanonicalCasing` changes nothing, and for `<dir>/../<dir>/a.ts` it
+	// always does. So an agent-typed absolute path containing `/../` derived a
+	// key no writer ever used (every canonical writer keys through
+	// `path.resolve` first), the cross-check missed the live diagnostic, and
+	// the mark silently fell through to the fuzzy fallback — the #802
+	// cross-check's own defeat condition. The dot segment is built by string
+	// CONCATENATION: `path.join`/`path.resolve` would fold it and make the
+	// fixture vacuous.
+	it("an absolute filePath with a dot segment still finds the live widget diagnostic to reanchor (#3184)", async () => {
+		const absPath = writeFile(
+			"a.ts",
+			"const a = 1;\nconst b = 2;\nconst target = bad();\n",
+		);
+		// Canonical write, exactly as a per-edit dispatch keys it (ctx.filePath).
+		recordDiagnostics(absPath, [
+			{ tool: "eslint", rule: "no-bad", message: "bad call", line: 3 },
+		]);
+
+		const dotSegmentAbs = `${tmpDir}${path.sep}..${path.sep}${path.basename(tmpDir)}${path.sep}a.ts`;
+		expect(dotSegmentAbs).toContain("..");
+		expect(path.isAbsolute(dotSegmentAbs)).toBe(true);
+		expect(fs.realpathSync.native(dotSegmentAbs)).toBe(
+			fs.realpathSync.native(absPath),
+		);
+
+		const result = await run({
+			filePath: dotSegmentAbs,
+			line: 2, // stale
+			message: "bad call",
+			rule: "no-bad",
+			tool: "eslint",
+			disposition: "false-positive",
+		});
+
+		expect(result.isError).toBeFalsy();
+		expect(String(result.content[0]?.text)).toMatch(
+			/reanchored from line 2 to 3/,
+		);
+		expect((result.details as { line: number }).line).toBe(3);
+	});
+
 	// #2275 review F2: the widget footer's dependency-drift delivery cap stops
 	// RENDERING a demoted row after N unconfirmed deliveries. It must not
 	// splice the entry out of widget-state — this tool cross-checks that same
