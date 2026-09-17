@@ -165,6 +165,13 @@ const LANE_ALREADY_REACHED: Readonly<Record<string, string>> = {
 	// "tests/support/tests-tree-write-guard.test.ts" added to knip.jsonc's
 	// entry list reported "Remove redundant entry pattern" for exactly that
 	// line, and without it knip reports no unused file.
+	// #3179: verified the same way as its sibling below — `npm run knip` with
+	// "tests/support/tests-tree-write-guard-race.test.ts" added to
+	// knip.jsonc's entry list reported "Remove redundant entry pattern" for
+	// exactly that line.
+	"tests/support/tests-tree-write-guard-race.test.ts":
+		"already reached through the Vitest config's default project graph; " +
+		"Knip reports an explicit entry as redundant",
 	"tests/support/tests-tree-write-guard.test.ts":
 		"already reached through the Vitest config's default project graph; " +
 		"Knip reports an explicit entry as redundant",
