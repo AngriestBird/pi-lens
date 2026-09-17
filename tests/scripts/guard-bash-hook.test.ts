@@ -18,10 +18,13 @@ import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
 	closeSync,
+	mkdirSync,
 	mkdtempSync,
 	openSync,
 	readFileSync,
 	rmSync,
+	symlinkSync,
+	unlinkSync,
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -334,6 +337,157 @@ describe("scripts/hooks/guard-bash.mjs -- rule declarations (review round 2 T1)"
 		// `npm run lint` fails with TS2322 before the suite even runs.
 		const rule: DenyRule = "tmpdirCollision";
 		expect(RULE_MESSAGES[rule]).toContain("TMPDIR");
+	});
+
+	it("declares worktreeSymlink in the DenyRule union the .d.mts exports", () => {
+		// Same guard as the tmpdirCollision case above, for the sixth rule
+		// (#3173): remove "worktreeSymlink" from the union and `npm run lint`
+		// fails with TS2322 before the suite even runs.
+		const rule: DenyRule = "worktreeSymlink";
+		expect(RULE_MESSAGES[rule]).toContain("node_modules");
+	});
+});
+
+// #3173 (twice on 2026-09-16): a fixer ran `git worktree remove` on a tree
+// whose node_modules was a symlink into the shared checkout
+// (`ln -s <main checkout>/node_modules node_modules`, the fixer playbook's
+// own speed convention). Git followed the link and emptied the SHARED
+// install; any other agent building or testing in that window saw spurious
+// ERR_MODULE_NOT_FOUND. This is a real filesystem check (not pure text
+// classification like every other rule above), so each case builds a real
+// fixture directory rather than a fictitious path string.
+describe("scripts/hooks/guard-bash.mjs -- git worktree remove node_modules symlink hazard (#3173)", () => {
+	// A linked git worktree's top-level .git is a FILE containing
+	// "gitdir: ..." (never a directory -- that is the main checkout). This
+	// is the only thing {@link looksLikeGitWorktree} checks; the content
+	// need not resolve to a real repository for the classifier to accept it.
+	function makeWorktreeDir(prefix: string): string {
+		const dir = mkdtempSync(join(tmpdir(), prefix));
+		writeFileSync(
+			join(dir, ".git"),
+			"gitdir: /some/main/checkout/.git/worktrees/fixture\n",
+		);
+		return dir;
+	}
+
+	it("denies git worktree remove on a tree whose node_modules is a symlink OUTSIDE it", () => {
+		const shared = mkdtempSync(join(tmpdir(), "guard-bash-shared-nm-"));
+		const tree = makeWorktreeDir("guard-bash-worktree-symlink-");
+		symlinkSync(shared, join(tree, "node_modules"));
+		try {
+			const result = runHook(`git worktree remove ${tree}`);
+			expect(result.status).toBe(2);
+			expect(result.stderr.toLowerCase()).toContain("worktree");
+			// The note names the fix (acceptance #1).
+			expect(result.stderr).toContain(`rm <tree>/node_modules`);
+		} finally {
+			rmSync(tree, { recursive: true, force: true });
+			rmSync(shared, { recursive: true, force: true });
+		}
+	});
+
+	it("allows the SAME tree once node_modules is unlinked (the note's own prescribed fix)", () => {
+		const shared = mkdtempSync(join(tmpdir(), "guard-bash-shared-nm-"));
+		const tree = makeWorktreeDir("guard-bash-worktree-symlink-");
+		const nodeModules = join(tree, "node_modules");
+		symlinkSync(shared, nodeModules);
+		unlinkSync(nodeModules);
+		try {
+			const result = runHook(`git worktree remove ${tree}`);
+			expect(result.status).toBe(0);
+			expect(result.stderr).toBe("");
+		} finally {
+			rmSync(tree, { recursive: true, force: true });
+			rmSync(shared, { recursive: true, force: true });
+		}
+	});
+
+	it("allows a tree with a REAL node_modules directory (not a symlink)", () => {
+		const tree = makeWorktreeDir("guard-bash-worktree-real-nm-");
+		mkdirSync(join(tree, "node_modules"));
+		try {
+			const result = runHook(`git worktree remove ${tree}`);
+			expect(result.status).toBe(0);
+			expect(result.stderr).toBe("");
+		} finally {
+			rmSync(tree, { recursive: true, force: true });
+		}
+	});
+
+	it("allows a symlinked node_modules whose target stays INSIDE the worktree (only an OUTSIDE target is the hazard)", () => {
+		const tree = makeWorktreeDir("guard-bash-worktree-inside-symlink-");
+		const realInside = join(tree, "vendor", "node_modules");
+		mkdirSync(dirname(realInside), { recursive: true });
+		mkdirSync(realInside);
+		symlinkSync(realInside, join(tree, "node_modules"));
+		try {
+			const result = runHook(`git worktree remove ${tree}`);
+			expect(result.status).toBe(0);
+			expect(result.stderr).toBe("");
+		} finally {
+			rmSync(tree, { recursive: true, force: true });
+		}
+	});
+
+	it("allows a git worktree remove on a path that does not exist -- left to git, no false deny", () => {
+		const doesNotExist = join(
+			tmpdir(),
+			"guard-bash-worktree-does-not-exist-3173",
+		);
+		const result = runHook(`git worktree remove ${doesNotExist}`);
+		expect(result.status).toBe(0);
+		expect(result.stderr).toBe("");
+	});
+
+	it("allows a git worktree remove on an ordinary directory that is NOT a git worktree, even with a hazard-shaped symlink", () => {
+		// Same symlink-outside shape as the deny case above, but with no .git
+		// file at all -- looksLikeGitWorktree must gate BEFORE the symlink
+		// check runs, or an ordinary directory that merely contains a
+		// "node_modules" symlink (e.g. a project's own dependency symlink)
+		// would be denied.
+		const shared = mkdtempSync(join(tmpdir(), "guard-bash-shared-nm-"));
+		const dir = mkdtempSync(join(tmpdir(), "guard-bash-not-a-worktree-"));
+		symlinkSync(shared, join(dir, "node_modules"));
+		try {
+			const result = runHook(`git worktree remove ${dir}`);
+			expect(result.status).toBe(0);
+			expect(result.stderr).toBe("");
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+			rmSync(shared, { recursive: true, force: true });
+		}
+	});
+
+	it("still detects git worktree remove embedded in a chained command (&&, ;)", () => {
+		const shared = mkdtempSync(join(tmpdir(), "guard-bash-shared-nm-"));
+		const tree = makeWorktreeDir("guard-bash-worktree-symlink-chained-");
+		symlinkSync(shared, join(tree, "node_modules"));
+		try {
+			const chainedAnd = runHook(`cd /tmp && git worktree remove ${tree}`);
+			expect(chainedAnd.status).toBe(2);
+			expect(chainedAnd.stderr.toLowerCase()).toContain("worktree");
+
+			const chainedSemi = runHook(`echo hi; git worktree remove ${tree}`);
+			expect(chainedSemi.status).toBe(2);
+			expect(chainedSemi.stderr.toLowerCase()).toContain("worktree");
+		} finally {
+			rmSync(tree, { recursive: true, force: true });
+			rmSync(shared, { recursive: true, force: true });
+		}
+	});
+
+	it("still denies with a single --force (this rule is not gated by the double-force worktreeForce rule)", () => {
+		const shared = mkdtempSync(join(tmpdir(), "guard-bash-shared-nm-"));
+		const tree = makeWorktreeDir("guard-bash-worktree-symlink-force-");
+		symlinkSync(shared, join(tree, "node_modules"));
+		try {
+			const result = runHook(`git worktree remove --force ${tree}`);
+			expect(result.status).toBe(2);
+			expect(result.stderr.toLowerCase()).toContain("worktree");
+		} finally {
+			rmSync(tree, { recursive: true, force: true });
+			rmSync(shared, { recursive: true, force: true });
+		}
 	});
 });
 

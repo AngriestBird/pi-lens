@@ -7,6 +7,7 @@ export type DenyRule =
 	| "stash"
 	| "reset"
 	| "worktreeForce"
+	| "worktreeSymlink"
 	| "probe"
 	| "tmpdirCollision";
 
@@ -31,9 +32,10 @@ export function stripEnvAssignments(words: string[]): {
 export function classifySegment(
 	rawSegment: string,
 	sharedEnv?: Record<string, string>,
+	cwd?: string,
 ): DenyRule | null;
 
-export function findDeny(commandText: string): DenyRule | null;
+export function findDeny(commandText: string, cwd?: string): DenyRule | null;
 
 export function classifyPayload(payload: unknown): DenyRule | null;
 
