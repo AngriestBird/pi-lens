@@ -1,5 +1,0 @@
----
-section: Fixed
----
-
-- **`tmp-fixture-hygiene`'s governance owner attributed another test file's async-recreated directory to itself (refs #3186)** — PR #3168's CI run redded `tests/config/tmp-fixture-hygiene.test.ts` over `pi-lens-tool-policy-conventions-*` directories owned by `tests/clients/tool-policy-conventions.test.ts`. That file's `afterEach` removed its `setupTestEnvironment` directory synchronously while `saveProjectSnapshot` (called from within the test) was still mid-flight: its body persist is dispatched to a worker thread / main-thread fallback the caller never awaited, and that persist's write path recreates the just-removed directory via a recursive `mkdir` — measured directly landing ~10-50ms later, unforced, on a bare invocation of the real function. Fixed at the producer: the `afterEach` now awaits the repo's own `waitForProjectSnapshotPersistsForTests()` drain seam before cleanup, the same seam five other test files already use for this, closing the race instead of admitting its symptom in the tmp-hygiene baseline.
