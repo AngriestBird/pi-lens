@@ -491,7 +491,9 @@ export function registerCascadeTierReconcileTask(
 						filePath: o.filePath,
 						serverId: o.serverId,
 						diagnostics: o.diagnostics,
-						publishedAt: o.publishedAt,
+						...(o.publishedAt !== undefined
+							? { publishedAt: o.publishedAt }
+							: {}),
 					});
 				} else if (o.outcome === "resolved-clean" && o.publishedAt != null) {
 					// #1444: the stale-footer half of the same honesty problem — the
