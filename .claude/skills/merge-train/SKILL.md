@@ -200,6 +200,7 @@ operator's private notes, so a different orchestrator can run the same train.
   | a new fixture under `tests/fixtures/` | the fixture-contract sweeps for that directory (style-preserving, population guards) — #2782 r2 |
   | a changelog fragment | exactly one top-level entry, never `CHANGELOG.md` — #2775 r4, two hand-edits today |
   | a raw poll in a test | the flake-shape ratchet; the fix is the governed wait, never a header admission — #2781 r1 |
+  | a new, renamed or deleted rule file under `rules/` | `npm run docs:rule-catalogs` and commit the generated catalog; `tests/scripts/rule-catalogs.test.ts` is a strict consumer of every rule file, not of rule ids — #3214 r1 |
 
 - **Sandbox by test shape (2026-09-09).** A lane whose tests spawn children
   (LSP fake server, tool smoke, installer, formatter wire) is dispatched with
