@@ -828,6 +828,8 @@ export type DegradationKind =
 	 * the per-kind entry bound is reached.
 	 */
 	| "runner-parsed-nothing"
+	/** Windows/libuv cannot self-send SIGHUP after console-close cleanup. */
+	| "safe-spawn-signal-reraise-unsupported"
 	/** A duplicate RPC session start was suppressed after its first full pass. */
 	/** A self-drift baseline could not be verified within its available evidence. */
 	| "self-drift-hash-budget-exhausted"

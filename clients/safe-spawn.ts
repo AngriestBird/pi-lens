@@ -653,6 +653,23 @@ function installLifetimeCleanup(): void {
 	for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as NodeJS.Signals[]) {
 		process.once(signal, () => {
 			for (const pid of lifetimeState.pids) killPidTreeSync(pid);
+			if (process.platform === "win32" && signal === "SIGHUP") {
+				// Windows emits SIGHUP when its console closes, but libuv cannot
+				// self-send it (process.kill(..., "SIGHUP") throws ENOSYS). The
+				// child cleanup above remains the required shutdown action; record
+				// the intentional decline synchronously and let the host exit cleanly.
+				recordDegradationOnce({
+					kind: "safe-spawn-signal-reraise-unsupported",
+					subject: `${process.platform}:${signal}`,
+					reason: `${process.platform} ${signal}: self signal re-raise is unsupported by the Windows libuv signal capability`,
+					metadata: {
+						platform: process.platform,
+						signal,
+						reason: "unsupported",
+					},
+				});
+				return;
+			}
 			process.kill(process.pid, signal);
 		});
 	}
