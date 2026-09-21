@@ -58,7 +58,10 @@ vi.mock("../../clients/pipeline.js", () => ({
 }));
 
 const notifyExternalFileChange = vi.hoisted(() => vi.fn(async () => undefined));
-vi.mock("../../clients/lsp/index.js", () => ({ notifyExternalFileChange }));
+vi.mock("../../clients/lsp/index.js", async (importOriginal) => ({
+	...(await importOriginal<typeof import("../../clients/lsp/index.js")>()),
+	notifyExternalFileChange,
+}));
 
 const readdirMock = vi.mocked(fsp.readdir);
 const realReaddir = readdirMock.getMockImplementation()!;
@@ -1659,6 +1662,113 @@ describe("runtime-tool-result inline behavior warnings", () => {
 			expect(
 				returned?.content.some((part) => part.text?.includes("authoritative")),
 			).toBe(true);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("recovers opaque multi-file bash changes without granting ownership", async () => {
+		const { runPipeline } = await import("../../clients/pipeline.js");
+		const env = setupTestEnvironment("pi-lens-3226-opaque-ownership-");
+		try {
+			vi.mocked(runPipeline).mockImplementation(async () => ({
+				output: "",
+				hasBlockers: false,
+				isError: false,
+				fileModified: false,
+			}));
+			const existingPath = createTempFile(
+				env.tmpDir,
+				"extracted/existing.js",
+				"(function(){ return 1; })();\n",
+			);
+			const createdPath = path.join(env.tmpDir, "extracted", "created.js");
+			const directPath = createTempFile(
+				env.tmpDir,
+				"direct.js",
+				"const direct = 1;\n",
+			);
+			const command = `echo direct > "${directPath}"; node opaque-extractor.js`;
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			const recordWritten = vi.spyOn(runtime.readGuard, "recordWritten");
+			await handleToolCall({
+				event: {
+					toolName: "bash",
+					toolCallId: "3226-opaque",
+					input: { command },
+				},
+				ctx: { cwd: env.tmpDir },
+				lensEnabled: true,
+				getFlag: () => false,
+				dbg: () => {},
+				runtime,
+				cacheManager: new CacheManager(false),
+				ensureLSPConfigInitialized: async () => {},
+				updateLspStatus: () => {},
+				resetLSPService: () => {},
+			} as any);
+
+			// Stand in for the true extraction/download child boundary: the
+			// tool_result path sees only the resulting filesystem state.
+			fs.writeFileSync(existingPath, "(function(){ return 2; })();\n");
+			fs.writeFileSync(createdPath, "(function(){ return 3; })();\n");
+			fs.writeFileSync(directPath, "const direct = 2;\n");
+			const opaqueBytesBeforePipeline = new Map([
+				[existingPath, fs.readFileSync(existingPath)],
+				[createdPath, fs.readFileSync(createdPath)],
+			]);
+			await handleToolResult({
+				event: {
+					toolName: "bash",
+					toolCallId: "3226-opaque",
+					input: { command },
+					content: [{ type: "text", text: "extracted" }],
+				},
+				getFlag: () => false,
+				dbg: () => {},
+				runtime,
+				cacheManager: new CacheManager(false),
+				resetLSPService: () => {},
+				agentBehaviorRecord: () => [],
+				formatBehaviorWarnings: () => "",
+				readGuard: runtime.readGuard,
+			} as any);
+
+			expect(vi.mocked(runPipeline).mock.calls).toHaveLength(3);
+			expect(
+				vi
+					.mocked(runPipeline)
+					.mock.calls.filter(([ctx]) => ctx.allowAutonomousWriters === true),
+			).toHaveLength(1);
+			expect(
+				vi
+					.mocked(runPipeline)
+					.mock.calls.filter(([ctx]) => ctx.allowAutonomousWriters === false),
+			).toHaveLength(2);
+			expect(runtime.pendingDeferredMutationCount).toBe(1);
+			expect(recordWritten).toHaveBeenCalledWith(directPath);
+			expect(recordWritten).not.toHaveBeenCalledWith(existingPath);
+			expect(recordWritten).not.toHaveBeenCalledWith(createdPath);
+			for (const [filePath, bytes] of opaqueBytesBeforePipeline) {
+				expect(fs.readFileSync(filePath)).toEqual(bytes);
+			}
+			expect(readChangesSince(env.tmpDir, 0)).toEqual(
+				expect.arrayContaining([
+					expect.objectContaining({
+						source: "opaque-script",
+						filePath: existingPath,
+					}),
+					expect.objectContaining({
+						source: "opaque-script",
+						filePath: createdPath,
+					}),
+					expect.objectContaining({
+						source: "agent-write",
+						filePath: directPath,
+					}),
+				]),
+			);
 		} finally {
 			env.cleanup();
 		}
