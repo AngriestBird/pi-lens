@@ -26,6 +26,7 @@ import { loadPiLensProjectConfig } from "../../clients/project-lens-config.js";
 import type { RuffClient } from "../../clients/ruff-client.js";
 import { TestRunnerClient } from "../../clients/test-runner-client.js";
 import {
+	_getDegradationLedgerStateForTests,
 	getDegradationSummary,
 	resetDegradationLedger,
 } from "../../clients/degradation-ledger.js";
@@ -628,6 +629,65 @@ describe("Pipeline", () => {
 			expect(result.actionableWarnings).toEqual([]);
 			expect(result.output).toContain("OPAQUE-ACTIONABLE");
 			expect(result.output).not.toContain("OPAQUE-BLOCKER");
+		});
+
+		it("bounds opaque ownership telemetry across many paths (#3226 review P2)", async () => {
+			// Recurrence: per-path once keys made opaque recovery retain one hidden
+			// identity per artifact. Drive the real pipeline seam with the reviewer's
+			// 10,000-path population and inspect both hidden ledger populations and
+			// the independent public count/dropped evidence.
+			vi.mocked(dispatchLintWithResult).mockResolvedValue({
+				diagnostics: [],
+				blockers: [],
+				warnings: [],
+				baselineWarningCount: 0,
+				fixed: [],
+				resolvedCount: 0,
+				output: "",
+				blockerOutput: "",
+				hasBlockers: false,
+			});
+			const deps = createMockDeps({ getFormatService: () => ({}) as any });
+			const firstPath = path.join(tmpDir, "opaque-0.js");
+			await runPipeline(
+				createMockContext(firstPath, { allowAutonomousWriters: false }),
+				deps,
+			);
+			await runPipeline(
+				createMockContext(firstPath, { allowAutonomousWriters: false }),
+				deps,
+			);
+			for (let index = 1; index < 10_000; index++) {
+				await runPipeline(
+					createMockContext(path.join(tmpDir, `opaque-${index}.js`), {
+						allowAutonomousWriters: false,
+					}),
+					deps,
+				);
+			}
+
+			const state = _getDegradationLedgerStateForTests();
+			expect(state.onceKeys).toBe(0);
+			expect(state.tallies).toBe(1);
+			expect(state.retainedEntries).toBe(1);
+			expect(getDegradationSummary()).toEqual([
+				expect.objectContaining({
+					kind: "opaque-mutation-ownership-boundary",
+					count: 10_001,
+					droppedCount: 10_001 - 1,
+					latestReasons: expect.arrayContaining([
+						expect.objectContaining({ subject: "pipeline" }),
+					]),
+				}),
+			]);
+
+			resetDegradationLedger();
+			expect(_getDegradationLedgerStateForTests()).toEqual({
+				onceKeys: 0,
+				tallies: 0,
+				retainedEntries: 0,
+			});
+			expect(getDegradationSummary()).toEqual([]);
 		});
 
 		it("surfaces formatter failures instead of plain clean output", async () => {

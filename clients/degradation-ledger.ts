@@ -1155,6 +1155,25 @@ export function getDegradationLedgerGeneration(): number {
 	return ledgerGeneration;
 }
 
+/**
+ * Test-only population probe for bounded-container regressions. Keep this
+ * read-only and deliberately expose sizes, not the retained identities.
+ */
+export function _getDegradationLedgerStateForTests(): {
+	onceKeys: number;
+	tallies: number;
+	retainedEntries: number;
+} {
+	return {
+		onceKeys: onceKeys.size,
+		tallies: tallies.size,
+		retainedEntries: [...groups.values()].reduce(
+			(total, group) => total + group.entries.length,
+			0,
+		),
+	};
+}
+
 export function recordDegradation(record: DegradationRecord): boolean {
 	try {
 		const kind = boundedKind(record.kind);

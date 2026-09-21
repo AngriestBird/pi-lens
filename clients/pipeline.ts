@@ -82,7 +82,10 @@ import { bounded } from "./deadline-utils.js";
 import { HOOK_WALL_BUDGET_MS } from "./hook-budgets.js";
 import type { LedgerHookKey } from "./hook-budgets.js";
 import { enabledAuxiliaryLspServerIds } from "./dispatch/auxiliary-lsp.js";
-import { recordDegradationOnce } from "./degradation-ledger.js";
+import {
+	incrementDegradationCount,
+	recordDegradationOnce,
+} from "./degradation-ledger.js";
 import { establishToolAgreement } from "./tool-agreement.js";
 import { dropFindingsForMissingPaths } from "./advisory-provenance.js";
 import {
@@ -1424,10 +1427,10 @@ export async function runPipeline(
 	const { getFormatService } = deps;
 	const allowAutonomousWriters = ctx.allowAutonomousWriters !== false;
 	if (!allowAutonomousWriters) {
-		recordDegradationOnce({
+		incrementDegradationCount({
 			kind: "opaque-mutation-ownership-boundary",
-			subject: filePath,
-			reason: "observed mutation is not evidence of agent authorship",
+			subject: "pipeline",
+			reason: `observed mutation is not evidence of agent authorship (${filePath})`,
 		});
 	}
 	admitWidgetDiagnosticsWrite(filePath, ctx.telemetry?.writeIndex);
