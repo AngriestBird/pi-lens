@@ -323,8 +323,6 @@ export type DegradationKind =
 	 * nothing is at risk.
 	 */
 	| "kill-foreign-pid-refused"
-	/** Windows/libuv cannot self-send SIGHUP after console-close cleanup. */
-	| "safe-spawn-signal-reraise-unsupported"
 	/**
 	 * #3091 F4: this Linux host cannot read `/proc/self/status`, so
 	 * kill-by-raw-pid ownership cannot be verified and falls back to the
@@ -828,6 +826,8 @@ export type DegradationKind =
 	 * the per-kind entry bound is reached.
 	 */
 	| "runner-parsed-nothing"
+	/** Windows/libuv cannot self-send SIGHUP after console-close cleanup. */
+	| "safe-spawn-signal-reraise-unsupported"
 	/** A duplicate RPC session start was suppressed after its first full pass. */
 	/** A self-drift baseline could not be verified within its available evidence. */
 	| "self-drift-hash-budget-exhausted"
