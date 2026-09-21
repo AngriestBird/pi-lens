@@ -2156,7 +2156,13 @@ const HELPER_UNBOUNDED: Readonly<Record<string, number>> = {
 	// archive extraction cleanup. They remain on the existing intentionally
 	// unbounded worklist until #2523 AC4 threads hook signals through installer
 	// dependencies; this records the measured increase rather than hiding it.
-	"clients/installer/index.ts": 218,
+	// #3221 adds githubApiAuthHeaders' await of resolveGitHubToken. Its cold
+	// branch is intrinsically bounded by one safeSpawnAsync gh auth token probe
+	// with GH_TOKEN_PROBE_TIMEOUT_MS=5000; the session latch suppresses repeat
+	// probes and is reset at session_start. The helper deliberately ignores the
+	// ambient hook signal, so wrapping here would duplicate the wall bound
+	// without adding cancellation and would misstate the credential contract.
+	"clients/installer/index.ts": 221,
 	"clients/installer/managed-tool-refresh.ts": 29,
 	"clients/instance-reaper.ts": 26,
 	"clients/instance-registry.ts": 23,

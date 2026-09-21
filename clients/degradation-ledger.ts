@@ -252,6 +252,8 @@ export type DegradationKind =
 	 * checks stay attributable.
 	 */
 	| "git-tracked-ignore-truncated"
+	/** An anonymous GitHub API request was rejected after its rate limit was exhausted. */
+	| "github-api-rate-limit"
 	/**
 	 * #3071: gitleaks finding classification (`classifyAndFilterFindings`)
 	 * exceeded its `turn_end` wall budget. `runtime-turn.ts` fails OPEN —

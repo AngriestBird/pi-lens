@@ -87,6 +87,7 @@ import {
 } from "../safe-spawn.js";
 import { probeToolAsync } from "../tool-probe.js";
 import { logSessionStart } from "../sessionstart-logger.js";
+import { resolveGitHubToken } from "../zizmor-config.js";
 
 // Global installation directory for pi-lens tools
 const TOOLS_DIR = path.join(getGlobalPiLensDir(), "tools");
@@ -3433,9 +3434,57 @@ async function getPythonUserBaseCandidates(): Promise<string[]> {
  * call, never the asset download (see installGitHubTool) — the release CDN must
  * not receive the token.
  */
-function githubApiAuthHeaders(): Record<string, string> {
-	const token = process.env.GITHUB_TOKEN || process.env.GH_TOKEN;
+async function githubApiAuthHeaders(): Promise<Record<string, string>> {
+	const token = await resolveGitHubToken();
 	return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
+class HttpStatusError extends Error {
+	readonly statusCode: number;
+
+	constructor(statusCode: number, url?: string) {
+		super(url ? `HTTP ${statusCode} for ${url}` : `HTTP ${statusCode}`);
+		this.name = "HttpStatusError";
+		this.statusCode = statusCode;
+	}
+}
+
+class GitHubHttpError extends HttpStatusError {
+	readonly anonymousRateLimitExhausted: boolean;
+
+	constructor(
+		statusCode: number,
+		requestHeaders: Record<string, string>,
+		responseHeaders: Record<string, string | string[] | undefined>,
+	) {
+		super(statusCode);
+		this.name = "GitHubHttpError";
+		this.message = `GitHub API HTTP ${statusCode}`;
+		this.anonymousRateLimitExhausted =
+			statusCode === 403 &&
+			!Object.keys(requestHeaders).some(
+				(key) => key.toLowerCase() === "authorization",
+			) &&
+			readHeader(responseHeaders, "x-ratelimit-remaining") === "0";
+	}
+}
+
+function readHeader(
+	headers: Record<string, string | string[] | undefined>,
+	name: string,
+): string | undefined {
+	const entry = Object.entries(headers).find(
+		([key]) => key.toLowerCase() === name.toLowerCase(),
+	)?.[1];
+	return Array.isArray(entry) ? entry[0]?.trim() : entry?.trim();
+}
+
+function isGitHubApiUrl(url: string): boolean {
+	try {
+		return new URL(url).host.toLowerCase() === "api.github.com";
+	} catch {
+		return false;
+	}
 }
 
 function sameHost(a: string, b: string): boolean {
@@ -3505,7 +3554,11 @@ function httpsGetWithMeta(
 					}
 					if (res.statusCode !== 200) {
 						res.resume();
-						return reject(new Error(`HTTP ${res.statusCode} for ${url}`));
+						return reject(
+							isGitHubApiUrl(url)
+								? new GitHubHttpError(res.statusCode ?? 0, headers, res.headers)
+								: new HttpStatusError(res.statusCode ?? 0, url),
+						);
 					}
 					const chunks: Buffer[] = [];
 					res.on("data", (chunk: Buffer) => chunks.push(chunk));
@@ -3605,13 +3658,22 @@ async function installGitHubTool(
 			const body = await httpsGet(
 				`https://api.github.com/repos/${spec.repo}/releases/latest`,
 				5,
-				githubApiAuthHeaders(),
+				await githubApiAuthHeaders(),
 			);
 			releaseJson = JSON.parse(body.toString("utf8"));
 		} catch (err) {
-			logSessionStart(
-				`github-install ${tool.id}: release fetch failed: ${(err as Error).message}`,
-			);
+			const reason =
+				err instanceof GitHubHttpError && err.anonymousRateLimitExhausted
+					? "GitHub API rate limit exhausted; authenticate with `gh auth login` or set GITHUB_TOKEN/GH_TOKEN and retry"
+					: `release fetch failed: ${(err as Error).message}`;
+			if (err instanceof GitHubHttpError && err.anonymousRateLimitExhausted) {
+				recordDegradationOnce({
+					kind: "github-api-rate-limit",
+					subject: tool.id,
+					reason,
+				});
+			}
+			logSessionStart(`github-install ${tool.id}: ${reason}`);
 			return undefined;
 		}
 	}
@@ -4343,15 +4405,26 @@ async function refreshGitHubManagedTool(
 			`https://api.github.com/repos/${spec.repo}/releases/latest`,
 			5,
 			{
-				...githubApiAuthHeaders(),
+				...(await githubApiAuthHeaders()),
 				...(known.etag ? { "If-None-Match": known.etag } : {}),
 			},
 		);
 	} catch (err) {
+		const reason =
+			err instanceof GitHubHttpError && err.anonymousRateLimitExhausted
+				? "GitHub API rate limit exhausted; authenticate with `gh auth login` or set GITHUB_TOKEN/GH_TOKEN and retry"
+				: `release query failed: ${(err as Error).message}`;
+		if (err instanceof GitHubHttpError && err.anonymousRateLimitExhausted) {
+			recordDegradationOnce({
+				kind: "github-api-rate-limit",
+				subject: tool.id,
+				reason,
+			});
+		}
 		return {
 			ok: false,
 			unchanged: true,
-			reason: `release query failed: ${(err as Error).message}`,
+			reason,
 		};
 	}
 
