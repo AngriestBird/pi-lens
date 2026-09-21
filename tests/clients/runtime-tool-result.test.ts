@@ -58,10 +58,9 @@ vi.mock("../../clients/pipeline.js", () => ({
 }));
 
 const notifyExternalFileChange = vi.hoisted(() => vi.fn(async () => undefined));
-const resyncGitChangedFiles = vi.hoisted(() => vi.fn(async () => undefined));
-vi.mock("../../clients/lsp/index.js", () => ({
+vi.mock("../../clients/lsp/index.js", async (importOriginal) => ({
+	...(await importOriginal<typeof import("../../clients/lsp/index.js")>()),
 	notifyExternalFileChange,
-	resyncGitChangedFiles,
 }));
 
 const readdirMock = vi.mocked(fsp.readdir);

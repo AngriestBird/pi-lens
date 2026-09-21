@@ -203,12 +203,11 @@ describe("#1590 post-autofix instruction has one author", () => {
 		}
 	});
 
-	it("an aggregate-degraded path in a bash write says re-read once", async () => {
+	it("an opaque bash path never claims authoritative content", async () => {
 		const env = setupTestEnvironment("pi-lens-1590-aggregate-");
 		try {
-			// Each file fits the 2 MiB per-file cap alone; the pair does not, so
-			// the second path degrades to the re-read warning. Its pipeline half
-			// used to still call its own attachment authoritative.
+			// Opaque bash recovery proves changed bytes, not authorship. Neither
+			// path may receive an authoritative attachment or edit-directed output.
 			const big = `${"x".repeat(1.5 * 1024 * 1024)}\n`;
 			const fileA = createTempFile(env.tmpDir, "agg-a.ts", "const a=1;\n");
 			const fileB = createTempFile(env.tmpDir, "agg-b.ts", "const b=1;\n");
@@ -230,24 +229,24 @@ describe("#1590 post-autofix instruction has one author", () => {
 			const attachments = (returned?.content ?? []).filter((part) =>
 				part.text?.startsWith(ATTACHMENT_PREFIX),
 			);
-			expect(attachments).toHaveLength(1);
-			expect(attachments[0].text).toContain(path.basename(fileA));
+			expect(attachments).toHaveLength(0);
 
 			const lines = instructions(returned);
-			expect(lines).toHaveLength(2);
+			expect(lines).toHaveLength(0);
 			const attachedLines = lines.filter((line) =>
 				line.includes(ATTACHED_CLAIM),
 			);
-			expect(attachedLines).toHaveLength(1);
-			expect(attachedLines[0]).toContain(path.basename(fileA));
-			const degraded = lines.filter((line) => line.includes(AGGREGATE_CLAIM));
-			expect(degraded).toHaveLength(1);
-			expect(degraded[0]).toContain(path.basename(fileB));
-			// One row per path, and the reason is on the row.
-			expect(decisionRows().map((row) => row.decision)).toEqual([
-				"attached",
-				"aggregate-budget-degraded",
-			]);
+			expect(attachedLines).toHaveLength(0);
+			expect(lines.some((line) => line.includes(AGGREGATE_CLAIM))).toBe(false);
+			expect(
+				(returned?.content ?? []).some((part) =>
+					part.text?.includes("authoritative"),
+				),
+			).toBe(false);
+			// No autonomous writer ran, so there is no attachment decision row;
+			// the ownership boundary is asserted independently by the absence of
+			// both authoritative content and edit-directed instructions.
+			expect(decisionRows()).toEqual([]);
 		} finally {
 			env.cleanup();
 		}

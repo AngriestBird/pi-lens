@@ -291,7 +291,6 @@
 	"tests/clients/runtime-session-warmup-supersession.test.ts:../../clients/lsp/index.js:[\"getLSPService\"]": 14,
 	"tests/clients/runtime-tool-call.test.ts:../../clients/lsp/index.js:[\"getLSPService\",\"resetLSPService\"]": 13,
 	"tests/clients/runtime-tool-result-debounce.test.ts:../../clients/pipeline.js:[\"runPipeline\"]": 7,
-	"tests/clients/runtime-tool-result.test.ts:../../clients/lsp/index.js:[\"notifyExternalFileChange\"]": 14,
 	"tests/clients/runtime-tool-result.test.ts:../../clients/pipeline.js:[\"runPipeline\"]": 7,
 	"tests/clients/scratch-tree-policy-coverage.test.ts:../../clients/safe-spawn.js:[\"safeSpawn\",\"safeSpawnAsync\"]": 5,
 	"tests/clients/search-read-registration.test.ts:../../clients/read-guard-logger.js:[\"getReadGuardLogPath\",\"logReadGuardEvent\"]": 3,

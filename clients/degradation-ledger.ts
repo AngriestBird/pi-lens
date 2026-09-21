@@ -93,8 +93,6 @@ export type DegradationKind =
 	 */
 	| "ast-grep-rules-dir-missing"
 	| "autofix-agreement-unavailable"
-	/** Opaque mutation was analyzed without granting autonomous writer rights. */
-	| "opaque-mutation-ownership-boundary"
 	/** A git ls-files collection was truncated before parsing completed (#2075). */
 	| "aux-runner-findings-lost"
 	| "aux_wait_demoted"
@@ -579,6 +577,8 @@ export type DegradationKind =
 	| "observed-mutation-dir-cap"
 	/** An observed directory mutation exceeded the same-turn analysis fan-out. */
 	| "observed-mutation-dispatch-cap"
+	/** Opaque mutation was analyzed without granting autonomous writer rights. */
+	| "opaque-mutation-ownership-boundary"
 	/** Opengrep completed with partial parsing warnings (#2943). */
 	| "opengrep-partial-scan"
 	/** Opengrep refused the requested root or reported a scan error (#2943). */
