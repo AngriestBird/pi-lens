@@ -22,8 +22,10 @@ import { buildEffectiveAstGrepCatalog } from "./ast-grep-catalog.js";
  *
  * The glob is matched against `filePath` relative to `root`, forward-slashed.
  * Falls back to the absolute (slash-normalized) path when `filePath` isn't
- * under `root` (e.g. an out-of-tree temp file), so a glob like `scripts/**`
- * simply never matches rather than throwing.
+ * under `root` (e.g. an out-of-tree temp file). Leaf-file patterns retain that
+ * fallback for sinks such as a double-star logger leaf; directory carve-outs
+ * ending in a slash plus double-star remain root-contained so a project's CLI
+ * exemption cannot suppress a finding in an unrelated out-of-tree file.
  */
 export function isRuleIgnoredForPath(
 	filePath: string,
@@ -32,11 +34,14 @@ export function isRuleIgnoredForPath(
 ): boolean {
 	if (!patterns || patterns.length === 0) return false;
 	const relative = path.relative(root, filePath);
-	const displayPath = (relative.startsWith("..") ? filePath : relative)
+	const outsideRoot = relative.startsWith("..");
+	const displayPath = (outsideRoot ? filePath : relative)
 		.split(path.sep)
 		.join("/");
-	return patterns.some((pattern) =>
-		minimatch(displayPath, pattern, { dot: true }),
+	return patterns.some(
+		(pattern) =>
+			(!outsideRoot || !pattern.replaceAll("\\", "/").endsWith("/**")) &&
+			minimatch(displayPath, pattern, { dot: true }),
 	);
 }
 
