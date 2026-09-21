@@ -93,6 +93,8 @@ export type DegradationKind =
 	 */
 	| "ast-grep-rules-dir-missing"
 	| "autofix-agreement-unavailable"
+	/** Opaque mutation was analyzed without granting autonomous writer rights. */
+	| "opaque-mutation-ownership-boundary"
 	/** A git ls-files collection was truncated before parsing completed (#2075). */
 	| "aux-runner-findings-lost"
 	| "aux_wait_demoted"

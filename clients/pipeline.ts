@@ -264,6 +264,12 @@ export interface PipelineContext {
 	toolName: string;
 	/** Receipt-time decision; never infer this after debounce coalescing. */
 	autofixMode?: "immediate" | "deferred";
+	/**
+	 * Whether this producer explicitly owns the bytes as an agent-authored
+	 * mutation. Opaque observation is still analyzed, but it cannot authorize
+	 * pi-lens writers or edit-directed finding delivery (#3226).
+	 */
+	allowAutonomousWriters?: boolean;
 	modifiedRanges?: { start: number; end: number }[];
 	telemetry?: {
 		model: string;
@@ -1416,6 +1422,14 @@ export async function runPipeline(
 ): Promise<PipelineResult> {
 	const { filePath, cwd, toolName, getFlag, getFlagSource, dbg } = ctx;
 	const { getFormatService } = deps;
+	const allowAutonomousWriters = ctx.allowAutonomousWriters !== false;
+	if (!allowAutonomousWriters) {
+		recordDegradationOnce({
+			kind: "opaque-mutation-ownership-boundary",
+			subject: filePath,
+			reason: "observed mutation is not evidence of agent authorship",
+		});
+	}
 	admitWidgetDiagnosticsWrite(filePath, ctx.telemetry?.writeIndex);
 
 	const phase = createPhaseTracker(toolName, filePath);
@@ -1442,8 +1456,16 @@ export async function runPipeline(
 	const autoformatDisabled = !!getFlag("no-autoformat", filePath);
 	const immediateFormat = !!getFlag("immediate-format");
 	const formatDeferred =
-		!autoformatDisabled && !immediateFormat && !!fileContent;
-	if (!autoformatDisabled && immediateFormat && fileContent) {
+		allowAutonomousWriters &&
+		!autoformatDisabled &&
+		!immediateFormat &&
+		!!fileContent;
+	if (
+		allowAutonomousWriters &&
+		!autoformatDisabled &&
+		immediateFormat &&
+		fileContent
+	) {
 		const formatResult = await runFormatPhase(
 			filePath,
 			getFormatService,
@@ -1471,6 +1493,8 @@ export async function runPipeline(
 		}
 	} else if (formatDeferred) {
 		dbg(`autoformat: deferred until agent_end for ${filePath}`);
+	} else if (!allowAutonomousWriters) {
+		dbg(`autoformat: skipped for ${filePath} (mutation ownership is unproven)`);
 	} else if (autoformatDisabled) {
 		const source = getFlagSource?.("no-autoformat", filePath);
 		dbg(
@@ -1491,7 +1515,10 @@ export async function runPipeline(
 	let autofixChangedFiles: string[] = [];
 	let fixRefresh = false;
 	let autofixSkipReason: string | undefined;
-	if (ctx.autofixMode === "deferred") {
+	if (!allowAutonomousWriters) {
+		autofixSkipReason = "mutation_ownership_unproven";
+		dbg(`autofix: skipped for ${filePath} (mutation ownership is unproven)`);
+	} else if (ctx.autofixMode === "deferred") {
 		autofixSkipReason = "deferred_to_agent_end";
 		dbg(`autofix: deferred until agent_end for ${filePath}`);
 	} else
@@ -1648,10 +1675,18 @@ export async function runPipeline(
 			});
 		}
 	}
-	const hasBlockers = dispatchResult.hasBlockers;
-	const actionableWarnings = dispatchResult.warnings
-		.map((diagnostic) => recordFromDispatchDiagnostic(diagnostic, cwd))
-		.filter((warning): warning is ActionableWarningRecord => Boolean(warning));
+	// Opaque recovery is a valid analysis input, but its bytes are not an agent
+	// authored surface. Keep diagnostics and advisory output visible while
+	// withholding the edit-directed channels that would tell the agent to mutate
+	// the observed artifact (#3226).
+	const hasBlockers = allowAutonomousWriters && dispatchResult.hasBlockers;
+	const actionableWarnings = allowAutonomousWriters
+		? dispatchResult.warnings
+				.map((diagnostic) => recordFromDispatchDiagnostic(diagnostic, cwd))
+				.filter((warning): warning is ActionableWarningRecord =>
+					Boolean(warning),
+				)
+		: [];
 	const codeQualityWarnings = dispatchResult.warnings
 		.map((diagnostic) => recordFromCodeQualityDiagnostic(diagnostic, cwd))
 		.filter((warning): warning is CodeQualityWarningRecord => Boolean(warning));
@@ -1698,15 +1733,19 @@ export async function runPipeline(
 	// the deleted file's content), so it is dropped here rather than re-asserted.
 	// One bounded stat per unique cited path, only when blockers exist — zero
 	// cost on the clean/fast paths.
-	const deliverableBlockers = dispatchResult.hasBlockers
+	const deliverableBlockers = hasBlockers
 		? dropFindingsForMissingPaths({
 				store: "stop-blocker",
 				findings: dispatchResult.blockers,
 				cwd,
 				citedPath: (b) => b.filePath || undefined,
 			})
-		: dispatchResult.blockers;
-	if (dispatchResult.hasBlockers && fileContent) {
+		: [];
+	const deliveredOutput =
+		!allowAutonomousWriters && dispatchResult.hasBlockers
+			? dispatchResult.output.slice(dispatchResult.blockerOutput.length)
+			: dispatchResult.output;
+	if (hasBlockers && fileContent) {
 		// Enrich blocker output with a code snippet so the agent can see the
 		// exact line it wrote that caused each violation — no re-read needed.
 		if (deliverableBlockers.length > 0) {
@@ -1718,12 +1757,12 @@ export async function runPipeline(
 			dispatchResult.blockerOutput.length,
 		);
 		if (rest) output += rest;
-	} else if (dispatchResult.output) {
+	} else if (deliveredOutput) {
 		// #2028 review P3: this path fires when readback FAILED - raw output
 		// still cites possibly-deleted files. Re-render from the gated set
 		// (no snippets without fileContent) and keep the post-blocker slice.
 		if (
-			dispatchResult.hasBlockers &&
+			hasBlockers &&
 			deliverableBlockers.length !== dispatchResult.blockers.length
 		) {
 			let gatedOut = buildEnrichedBlockerOutput(deliverableBlockers);
@@ -1737,7 +1776,7 @@ export async function runPipeline(
 			// `handleToolResult` decides delivery on `output` truthiness.
 			if (gatedOut) output += `\n\n${gatedOut}`;
 		} else {
-			output += `\n\n${dispatchResult.output}`;
+			output += `\n\n${deliveredOutput}`;
 		}
 	}
 	if (fixedCount > 0) {
@@ -1841,7 +1880,7 @@ export async function runPipeline(
 		turnIndex: ctx.telemetry?.turnIndex ?? 0,
 		writeIndex: ctx.telemetry?.writeIndex ?? 0,
 		diagnostics: dispatchResult.diagnostics,
-		blockers: dispatchResult.blockers,
+		blockers: hasBlockers ? dispatchResult.blockers : [],
 		warnings: dispatchResult.warnings,
 		fixed: dispatchResult.fixed,
 		resolvedCount: dispatchResult.resolvedCount,
@@ -1859,7 +1898,7 @@ export async function runPipeline(
 		fileModified,
 		postWriteStateHash,
 		changedFiles,
-		inlineBlockerSummary: dispatchResult.hasBlockers
+		inlineBlockerSummary: hasBlockers
 			? dispatchResult.blockerOutput.trim() || undefined
 			: undefined,
 		// #1561 F1: taken from the very diagnostics `blockerOutput` was rendered
@@ -1867,14 +1906,14 @@ export async function runPipeline(
 		// untagged diagnostic contributes the literal "unknown", which no verdict
 		// claims coverage for — it pins the entry rather than silently widening
 		// what an LSP check is allowed to clear.
-		inlineBlockerSources: dispatchResult.hasBlockers
+		inlineBlockerSources: hasBlockers
 			? [
 					...new Set(
 						dispatchResult.blockers.map((d) => d.tool?.trim() || "unknown"),
 					),
 				]
 			: undefined,
-		inlineBlockerLines: dispatchResult.hasBlockers
+		inlineBlockerLines: hasBlockers
 			? dispatchResult.blockers
 					// #1641 review F2: `dispatchResult.blockers` is NOT guaranteed to be
 					// scoped to THIS file — a chart-wide runner (helm-lint, helm-render)
@@ -1928,7 +1967,7 @@ export async function runPipeline(
 						source: "autofix",
 					}
 				: undefined,
-		inlineBlockerFileContent: dispatchResult.hasBlockers
+		inlineBlockerFileContent: hasBlockers
 			? inlineBlockerFileContent
 			: undefined,
 	};

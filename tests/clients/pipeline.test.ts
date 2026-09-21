@@ -517,6 +517,119 @@ describe("Pipeline", () => {
 			expect(result.postWriteStateHash).toBe(formatterStateHash);
 		});
 
+		it("does not autonomously rewrite an observed opaque mutation", async () => {
+			// Regression #3226: opaque bash recovery proves only that bytes changed;
+			// treating that observation as model authorship lets the normal pipeline
+			// rewrite extracted/downloaded/generated artifacts.
+			const filePath = createTempFile(
+				tmpDir,
+				"opaque-artifact.js",
+				"(function(){\n  return 1;\n})();\n",
+			);
+			const before = fs.readFileSync(filePath, "utf8");
+			vi.mocked(dispatchLintWithResult).mockResolvedValue({
+				diagnostics: [],
+				blockers: [],
+				warnings: [],
+				baselineWarningCount: 0,
+				fixed: [],
+				resolvedCount: 0,
+				output: "",
+				blockerOutput: "",
+				hasBlockers: false,
+			});
+			const formatFile = vi.fn(async (fp: string) => {
+				fs.writeFileSync(fp, "(() => 1)();\n");
+				return {
+					filePath: fp,
+					formatters: [
+						{
+							name: "biome",
+							success: true,
+							changed: true,
+							outcome: "formatted" as const,
+						},
+					],
+					anyChanged: true,
+					allSucceeded: true,
+				};
+			});
+
+			const result = await runPipeline(
+				createMockContext(filePath, {
+					getFlag: (name) => name === "immediate-format",
+					allowAutonomousWriters: false,
+				}),
+				createMockDeps({
+					getFormatService: () => ({ recordRead: vi.fn(), formatFile }) as any,
+				}),
+			);
+
+			expect(formatFile).not.toHaveBeenCalled();
+			expect(fs.readFileSync(filePath, "utf8")).toBe(before);
+			expect(result.fileModified).toBe(false);
+			expect(result.postAutofixNotice).toBeUndefined();
+			expect(
+				getDegradationSummary().some(
+					(entry) => entry.kind === "opaque-mutation-ownership-boundary",
+				),
+			).toBe(true);
+		});
+
+		it("keeps opaque findings advisory instead of directing an edit", async () => {
+			// The artifact remains analyzable, but blocker/actionable delivery must
+			// not turn third-party bytes into instructions for the model to edit.
+			const filePath = createTempFile(
+				tmpDir,
+				"opaque-findings.js",
+				"const x=1;\n",
+			);
+			const blocker = {
+				id: "opaque-blocker",
+				message: "OPAQUE-BLOCKER",
+				filePath,
+				severity: "error" as const,
+				semantic: "blocking" as const,
+				tool: "biome",
+				line: 1,
+			};
+			const warning = {
+				id: "opaque-actionable",
+				message: "OPAQUE-ACTIONABLE",
+				filePath,
+				severity: "warning" as const,
+				semantic: "warning" as const,
+				tool: "biome",
+				line: 1,
+				fixable: true,
+				fixKind: "pipeline" as const,
+				fixSuggestion: "edit this file",
+			};
+			vi.mocked(dispatchLintWithResult).mockResolvedValue({
+				diagnostics: [blocker, warning],
+				blockers: [blocker],
+				warnings: [warning],
+				baselineWarningCount: 0,
+				fixed: [],
+				resolvedCount: 0,
+				output: "OPAQUE-BLOCKER\nOPAQUE-ACTIONABLE",
+				blockerOutput: "OPAQUE-BLOCKER",
+				hasBlockers: true,
+			});
+
+			const result = await runPipeline(
+				createMockContext(filePath, { allowAutonomousWriters: false }),
+				createMockDeps(),
+			);
+
+			expect(result.diagnostics).toEqual([blocker, warning]);
+			expect(result.hasBlockers).toBe(false);
+			expect(result.inlineBlockerSummary).toBeUndefined();
+			expect(result.actionableWarnings).toEqual([]);
+			expect(result.output).toContain("OPAQUE-ACTIONABLE");
+			expect(result.output).not.toContain("OPAQUE-BLOCKER");
+		});
+
 		it("surfaces formatter failures instead of plain clean output", async () => {
 			const filePath = createTempFile(
 				tmpDir,
