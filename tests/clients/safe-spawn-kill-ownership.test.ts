@@ -66,6 +66,174 @@ class FakeChild extends EventEmitter {
 	}
 }
 
+describe("lifetime signal cleanup (#3239)", () => {
+	it("cleans tracked children without re-raising unsupported Windows SIGHUP", async () => {
+		// Regression for #3239: Windows emits SIGHUP when its console closes, but
+		// libuv cannot self-send SIGHUP and throws ENOSYS. Drive the real
+		// safeSpawnAsync admission and installLifetimeCleanup listener so cleanup
+		// remains independently observable from the guarded self-signal.
+		const realPlatform = Object.getOwnPropertyDescriptor(process, "platform");
+		const signalNames = ["SIGINT", "SIGTERM", "SIGHUP"] as const;
+		const listenersBefore = new Map(
+			signalNames.map((signal) => [signal, process.listeners(signal)]),
+		);
+		const lifetimeState = process as typeof process & {
+			[LIFETIME_STATE_KEY]?: { pids: Set<number>; installed: boolean };
+		};
+		const state = lifetimeState[LIFETIME_STATE_KEY];
+		state?.pids.clear();
+		if (state) state.installed = false;
+		vi.resetModules();
+		const { spawn: realSpawn } =
+			await vi.importActual<typeof import("node:child_process")>(
+				"node:child_process",
+			);
+		const ownedChild = realSpawn(
+			process.execPath,
+			["-e", "setTimeout(() => {}, 5000)"],
+			{
+				stdio: "ignore",
+			},
+		);
+		const ownedPid = ownedChild.pid;
+		if (ownedPid === undefined)
+			throw new Error("fixture child did not get a pid");
+		const child = new FakeChild(ownedPid);
+		const taskkill = vi.fn();
+		const selfKill = vi.spyOn(process, "kill").mockImplementation(((
+			pid: number,
+			signal?: NodeJS.Signals | 0,
+		) => {
+			if (
+				process.platform === "win32" &&
+				pid === process.pid &&
+				signal === "SIGHUP"
+			) {
+				throw Object.assign(new Error("kill ENOSYS"), { code: "ENOSYS" });
+			}
+			return true;
+		}) as typeof process.kill);
+		Object.defineProperty(process, "platform", {
+			value: "win32",
+			configurable: true,
+		});
+		vi.doMock("node:child_process", () => ({
+			spawn: vi.fn(() => child),
+			spawnSync: taskkill,
+			execSync: vi.fn(() => ""),
+			execFileSync: vi.fn(() => ""),
+		}));
+		vi.doMock("node:fs", async (importOriginal) => {
+			const actual = await importOriginal<typeof import("node:fs")>();
+			return {
+				...actual,
+				default: actual,
+				statSync: (file: unknown, ...rest: unknown[]) => {
+					if (file === "C:\\fixture\\node.exe") return { isFile: () => true };
+					return (actual.statSync as (...args: unknown[]) => unknown)(
+						file,
+						...rest,
+					);
+				},
+			};
+		});
+		try {
+			const { safeSpawnAsync } = await import("../../clients/safe-spawn.js");
+			const {
+				getDegradationSummary: freshSummary,
+				resetDegradationLedger: freshReset,
+			} = await import("../../clients/degradation-ledger.js");
+			freshReset();
+			const pending = safeSpawnAsync("node.exe", [], {
+				lifetimeCoupled: true,
+				timeout: 50_000,
+				env: { PATH: "C:\\fixture", PATHEXT: ".EXE" },
+			});
+
+			expect([...lifetimePids()]).toContain(ownedPid);
+			const cleanupListeners = new Map(
+				signalNames.map((signal) => [
+					signal,
+					process
+						.listeners(signal)
+						.find(
+							(listener) => !listenersBefore.get(signal)?.includes(listener),
+						) as (() => void) | undefined,
+				]),
+			);
+			for (const [platform, signal] of [
+				["win32", "SIGINT"],
+				["win32", "SIGTERM"],
+				["linux", "SIGINT"],
+				["linux", "SIGTERM"],
+				["linux", "SIGHUP"],
+			] as const) {
+				Object.defineProperty(process, "platform", {
+					value: platform,
+					configurable: true,
+				});
+				selfKill.mockClear();
+				taskkill.mockClear();
+				cleanupListeners.get(signal)?.();
+				expect(selfKill).toHaveBeenLastCalledWith(process.pid, signal);
+				if (platform === "win32") {
+					expect(taskkill).toHaveBeenCalledTimes(1);
+				} else {
+					expect(selfKill).toHaveBeenNthCalledWith(2, process.pid, signal);
+				}
+			}
+			Object.defineProperty(process, "platform", {
+				value: "win32",
+				configurable: true,
+			});
+			selfKill.mockClear();
+			taskkill.mockClear();
+			expect(() => process.emit("SIGHUP")).not.toThrow();
+			expect(taskkill).toHaveBeenCalledWith(
+				`${process.env.SystemRoot ?? "C:\\Windows"}\\System32\\taskkill.exe`,
+				["/F", "/T", "/PID", String(ownedPid)],
+				{ shell: false, windowsHide: true, stdio: "ignore" },
+			);
+			expect(selfKill).not.toHaveBeenCalledWith(process.pid, "SIGHUP");
+			const record = freshSummary().find(
+				(entry) => entry.kind === "safe-spawn-signal-reraise-unsupported",
+			);
+			expect(record?.count).toBe(1);
+			expect(record?.latestReasons[0]?.subject).toContain("SIGHUP");
+			expect(record?.latestReasons[0]?.reason).toContain("win32");
+			cleanupListeners.get("SIGHUP")?.();
+			expect(
+				freshSummary().find(
+					(entry) => entry.kind === "safe-spawn-signal-reraise-unsupported",
+				)?.count,
+			).toBe(1);
+
+			child.emit("close", 0, null);
+			await pending;
+		} finally {
+			for (const signal of signalNames) {
+				for (const listener of process.listeners(signal)) {
+					if (!listenersBefore.get(signal)?.includes(listener))
+						process.off(signal, listener);
+				}
+			}
+			state?.pids.clear();
+			if (state) state.installed = false;
+			vi.doUnmock("node:child_process");
+			vi.doUnmock("node:fs");
+			vi.restoreAllMocks();
+			try {
+				ownedChild.kill("SIGKILL");
+			} catch {
+				// The fixture may already have exited.
+			}
+			vi.resetModules();
+			if (realPlatform)
+				Object.defineProperty(process, "platform", realPlatform);
+		}
+	});
+});
+
 describe("kill-by-pid ownership (#2042)", () => {
 	let exitListenersBefore: ReadonlyArray<unknown> = [];
 

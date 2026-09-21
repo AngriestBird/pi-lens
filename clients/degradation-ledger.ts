@@ -323,6 +323,8 @@ export type DegradationKind =
 	 * nothing is at risk.
 	 */
 	| "kill-foreign-pid-refused"
+	/** Windows/libuv cannot self-send SIGHUP after console-close cleanup. */
+	| "safe-spawn-signal-reraise-unsupported"
 	/**
 	 * #3091 F4: this Linux host cannot read `/proc/self/status`, so
 	 * kill-by-raw-pid ownership cannot be verified and falls back to the
