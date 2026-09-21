@@ -16,14 +16,17 @@
 import * as path from "node:path";
 import { minimatch } from "../deps/minimatch.js";
 import { buildEffectiveAstGrepCatalog } from "./ast-grep-catalog.js";
+import { isWindowsPath, toPosix } from "../path-utils.js";
 
 /**
  * True when `filePath` is carved out of a rule by one of its glob `patterns`.
  *
  * The glob is matched against `filePath` relative to `root`, forward-slashed.
  * Falls back to the absolute (slash-normalized) path when `filePath` isn't
- * under `root` (e.g. an out-of-tree temp file), so a glob like `scripts/**`
- * simply never matches rather than throwing.
+ * under `root` (e.g. an out-of-tree temp file). Leaf-file patterns retain that
+ * fallback for sinks such as a double-star logger leaf; directory carve-outs
+ * ending in a slash plus double-star remain root-contained so a project's CLI
+ * exemption cannot suppress a finding in an unrelated out-of-tree file.
  */
 export function isRuleIgnoredForPath(
 	filePath: string,
@@ -31,12 +34,19 @@ export function isRuleIgnoredForPath(
 	patterns: readonly string[] | undefined,
 ): boolean {
 	if (!patterns || patterns.length === 0) return false;
-	const relative = path.relative(root, filePath);
-	const displayPath = (relative.startsWith("..") ? filePath : relative)
-		.split(path.sep)
-		.join("/");
-	return patterns.some((pattern) =>
-		minimatch(displayPath, pattern, { dot: true }),
+	const pathApi =
+		isWindowsPath(root) || isWindowsPath(filePath) ? path.win32 : path.posix;
+	const relative = pathApi.relative(root, filePath);
+	const outsideRoot =
+		relative !== "" &&
+		(relative === ".." ||
+			relative.startsWith(`..${pathApi.sep}`) ||
+			pathApi.isAbsolute(relative));
+	const displayPath = toPosix(outsideRoot ? filePath : relative);
+	return patterns.some(
+		(pattern) =>
+			(!outsideRoot || !pattern.replaceAll("\\", "/").endsWith("/**")) &&
+			minimatch(displayPath, pattern, { dot: true }),
 	);
 }
 
