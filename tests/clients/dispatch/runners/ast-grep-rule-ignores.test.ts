@@ -51,7 +51,12 @@ describe("no-console-except-error ignores CLI scripts and logger sinks (#965)", 
 			["no-system-out-println", ["**/test/**", "**/*Test.java"]],
 			[
 				"go-no-fmt-println",
-				["**/*_test.go", "**/examples/**", "tests/fixtures/**", "cases/**"],
+				[
+					"**/*_test.go",
+					"**/examples/**",
+					"**/tests/fixtures/**",
+					"**/cases/**",
+				],
 			],
 			["go-no-panic-in-lib", ["**/*_test.go", "**/cmd/**"]],
 			["go-no-underscore-func-name", ["**/*_test.go"]],
@@ -81,6 +86,34 @@ describe("no-console-except-error ignores CLI scripts and logger sinks (#965)", 
 		);
 		const result = await astGrepNapiRunner.run(ctx);
 		expect(linesFor(result.diagnostics, "no-console-except-error")).toEqual([]);
+	});
+
+	it("ignores nested scripts/bin directories but not similarly named paths", async () => {
+		for (const relPath of [
+			"packages/tool/scripts/bench-startup.ts",
+			"packages/tool/bin/runner.ts",
+		]) {
+			const { ctx } = env.addFile(relPath, 'console.log("cli output");\n');
+			const result = await astGrepNapiRunner.run(ctx);
+			expect(linesFor(result.diagnostics, "no-console-except-error")).toEqual(
+				[],
+			);
+		}
+
+		for (const relPath of [
+			"src/myscripts/real-app.ts",
+			"src/scripts-file.ts",
+			"src/bin-helper.ts",
+		]) {
+			const { ctx } = env.addFile(
+				relPath,
+				'console.log("application output");\n',
+			);
+			const result = await astGrepNapiRunner.run(ctx);
+			expect(linesFor(result.diagnostics, "no-console-except-error")).toEqual([
+				1,
+			]);
+		}
 	});
 
 	it("does not flag console output inside a logger.ts implementation", async () => {
