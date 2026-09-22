@@ -11,6 +11,7 @@ import type {
 	RunnerResult,
 } from "../types.js";
 import { createAvailabilityChecker } from "./utils/runner-helpers.js";
+import { finishParsedRun, parseToolRun } from "./utils/tool-failure.js";
 
 // Per-cwd cached `--version` probes (#120). Before this, each dispatch
 // invocation fired a fresh `safeSpawnAsync` per command — once per Elixir
@@ -152,13 +153,6 @@ function parseElixirOutput(
 	return diagnostics;
 }
 
-function firstOutputLine(result: { stdout?: string; stderr?: string }): string {
-	return `${result.stderr || ""}\n${result.stdout || ""}`
-		.trim()
-		.split(/\r?\n/, 1)[0]
-		.slice(0, 200);
-}
-
 const elixirCheckRunner: RunnerDefinition = {
 	id: "elixir-check",
 	appliesTo: ["elixir"],
@@ -189,52 +183,37 @@ const elixirCheckRunner: RunnerDefinition = {
 			cwd,
 			timeout: 30000,
 		});
-		if (result.error && !result.stdout && !result.stderr) {
-			return { status: "skipped", diagnostics: [], semantic: "none" };
-		}
-
 		const raw = `${result.stderr || ""}\n${result.stdout || ""}`;
 		const hasProjectContext = command === "mix";
-		const diagnostics = parseElixirOutput(raw, ctx.filePath, cwd).map((d) =>
-			hasProjectContext
-				? d
-				: {
-						...d,
-						// A direct elixirc invocation cannot resolve Mix dependencies.
-						// Standalone findings inform the agent, but cannot block it.
-						semantic: "warning" as const,
-					},
+		const parsed = parseToolRun(
+			"elixir-check",
+			{ result, output: raw },
+			(out) =>
+				parseElixirOutput(out, ctx.filePath, cwd).map((d) =>
+					hasProjectContext
+						? d
+						: {
+								...d,
+								// A direct elixirc invocation cannot resolve Mix dependencies.
+								// Standalone findings inform the agent, but cannot block it.
+								semantic: "warning" as const,
+							},
+				),
 		);
-		if (diagnostics.length === 0) {
-			if (result.status && result.status !== 0) {
+		if (parsed.skipped) return parsed.skipped;
+		return finishParsedRun({
+			tool: "elixir-check",
+			ctx,
+			result,
+			diagnostics: parsed.diagnostics,
+			classify: (diagnostics) => {
+				const hasBlocking = diagnostics.some((d) => d.semantic === "blocking");
 				return {
-					status: "failed",
-					diagnostics: [
-						{
-							id: "elixir-check-nonzero-no-diagnostics",
-							message:
-								firstOutputLine(result) ||
-								`${command} exited non-zero without structured diagnostics`,
-							filePath: ctx.filePath,
-							severity: "error",
-							semantic: hasProjectContext ? "blocking" : "warning",
-							tool: "elixir-check",
-							rule: command,
-							fixable: false,
-						},
-					],
-					semantic: hasProjectContext ? "blocking" : "warning",
+					status: hasBlocking ? "failed" : "succeeded",
+					semantic: hasBlocking ? "blocking" : "warning",
 				};
-			}
-			return { status: "succeeded", diagnostics: [], semantic: "none" };
-		}
-
-		const hasBlocking = diagnostics.some((d) => d.semantic === "blocking");
-		return {
-			status: hasBlocking ? "failed" : "succeeded",
-			diagnostics,
-			semantic: hasBlocking ? "blocking" : "warning",
-		};
+			},
+		});
 	},
 };
 

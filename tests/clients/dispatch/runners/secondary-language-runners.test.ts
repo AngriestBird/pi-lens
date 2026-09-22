@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { FactStore } from "../../../../clients/dispatch/fact-store.js";
 import { makeRunnerCtx } from "../../../support/runner-ctx.js";
 import { setupTestEnvironment } from "../../test-utils.js";
 
@@ -39,6 +40,92 @@ function createCtx(
 	return makeRunnerCtx(filePath, cwd, { kind });
 }
 
+interface SpawnShape {
+	error?: Error | null;
+	status: number | null;
+	signal?: NodeJS.Signals | null;
+	stdout: string;
+	stderr: string;
+}
+
+/**
+ * Drive one runner outcome through the REAL dispatcher: registry lookup,
+ * `dispatchForFile`, the in-process degradation ledger and the model-facing
+ * renderer. Every failure-list cell for `dart-analyze` and `elixir-check`
+ * enters here rather than calling `runner.run` directly — review round 2 found
+ * a direct-runner signal test that stayed green under a mutation erasing the
+ * signal from the shared `parseToolRun` input (#1816).
+ */
+async function dispatchOutcome(
+	tool: "dart-analyze" | "elixir-check",
+	caseName: string,
+	spawnResult: SpawnShape | ((filePath: string) => SpawnShape),
+	options: { available?: boolean; mixProject?: boolean } = {},
+) {
+	vi.resetModules();
+	const env = setupTestEnvironment(`pi-lens-${tool}-${caseName}-`);
+	try {
+		const kind = tool === "dart-analyze" ? "dart" : "elixir";
+		const extension = kind === "dart" ? "main.dart" : "lib/app.ex";
+		const filePath = path.join(env.tmpDir, extension);
+		fs.mkdirSync(path.dirname(filePath), { recursive: true });
+		fs.writeFileSync(
+			filePath,
+			kind === "dart" ? "void main() {}\n" : "defmodule App do\n",
+		);
+		if (kind === "elixir" && (options.mixProject ?? true)) {
+			fs.writeFileSync(
+				path.join(env.tmpDir, "mix.exs"),
+				"defmodule Demo.MixProject do end\n",
+			);
+		}
+
+		mockRunnerHelpers(() => options.available ?? true);
+		if (options.available ?? true)
+			safeSpawnAsync.mockResolvedValue(
+				typeof spawnResult === "function" ? spawnResult(filePath) : spawnResult,
+			);
+		const { createDispatchContext, dispatchForFile, RunnerRegistry } =
+			await import("../../../../clients/dispatch/dispatcher.js");
+		const runner = (
+			await import(`../../../../clients/dispatch/runners/${tool}.js`)
+		).default;
+		const { getDegradationSummary, resetDegradationLedger } =
+			await import("../../../../clients/degradation-ledger.js");
+		resetDegradationLedger();
+		const registry = new RunnerRegistry();
+		registry.register(runner);
+		let observedStatus: string | undefined;
+		let observedSemantic: string | undefined;
+		let observedDiagnostics: Array<{ id?: string; semantic?: string }> = [];
+		const result = await dispatchForFile(
+			createDispatchContext(
+				filePath,
+				env.tmpDir,
+				{ getFlag: () => false },
+				new FactStore(),
+			),
+			[{ mode: "all", runnerIds: [tool] }],
+			registry,
+			(_runnerId, runnerResult) => {
+				observedStatus = runnerResult.status;
+				observedSemantic = runnerResult.semantic;
+				observedDiagnostics = runnerResult.diagnostics;
+			},
+		);
+		return {
+			status: observedStatus,
+			semantic: observedSemantic,
+			diagnostics: observedDiagnostics,
+			output: result.output,
+			ledger: getDegradationSummary(),
+			spawnCalls: safeSpawnAsync.mock.calls.length,
+		};
+	} finally {
+		env.cleanup();
+	}
+}
+
 describe("secondary language fallback runners", () => {
 	beforeEach(() => {
 		vi.resetModules();
@@ -47,34 +134,102 @@ describe("secondary language fallback runners", () => {
 		mockRunnerHelpers();
 	});
 
-	it("surfaces a warning when dart analyze exits non-zero without machine diagnostics", async () => {
-		const env = setupTestEnvironment("pi-lens-dart-runner-");
-		try {
-			const filePath = path.join(env.tmpDir, "lib", "main.dart");
-			fs.mkdirSync(path.dirname(filePath), { recursive: true });
-			fs.writeFileSync(filePath, "void main() {}\n");
+	it("keeps a clean dart run with no output clean through dispatch (#1816)", async () => {
+		// Prevents the empty-output guard from swallowing the ordinary clean
+		// save: exit 0 with neither stream written is a clean file, not a
+		// degraded run. The opposite direction of `guards dart empty output`.
+		const observed = await dispatchOutcome("dart-analyze", "clean", {
+			error: null,
+			status: 0,
+			stdout: "",
+			stderr: "",
+		});
+		expect(observed.status).toBe("succeeded");
+		expect(observed.diagnostics).toEqual([]);
+		expect(observed.output).toBe("");
+		expect(observed.ledger).toEqual([]);
+	});
 
-			safeSpawnAsync.mockResolvedValue({
+	it("renders dart findings from a nonzero run through dispatch (#1816)", async () => {
+		// Prevents a machine-format finding from being downgraded or dropped
+		// between the parser and the model-facing render.
+		const observed = await dispatchOutcome(
+			"dart-analyze",
+			"findings",
+			(filePath) => ({
 				error: null,
 				status: 1,
 				stdout: "",
-				stderr: "dart analyze failed unexpectedly",
-			});
+				stderr: `ERROR|LINT|unused_local_variable|${filePath}|2|1|1|unused value`,
+			}),
+		);
+		expect(observed.status).toBe("failed");
+		expect(observed.semantic).toBe("blocking");
+		expect(observed.diagnostics).toHaveLength(1);
+		expect(observed.output).toContain("🔴 STOP — 1 issue(s) must be fixed:");
+		expect(observed.output).toContain("[unused_local_variable] unused value");
+	});
 
-			const runner = (
-				await import("../../../../clients/dispatch/runners/dart-analyze.js")
-			).default;
+	it("guards dart nonzero unparseable stdout through dispatch (#1816)", async () => {
+		// Prevents a failed dart run whose stdout the parser cannot read from
+		// being rendered as a clean file (#1781 shape).
+		const observed = await dispatchOutcome("dart-analyze", "unparseable", {
+			error: null,
+			status: 1,
+			stdout: "dart analyze failed unexpectedly",
+			stderr: "",
+		});
+		expect(observed.status).toBe("failed");
+		expect(observed.semantic).toBe("warning");
+		expect(observed.diagnostics[0]?.id).toBe("dart-analyze:parse-error:1");
+		expect(observed.ledger[0]?.kind).toBe("runner-parsed-nothing");
+	});
 
-			const result = await runner.run(
-				createCtx("dart", filePath, env.tmpDir) as never,
-			);
+	it("guards dart stderr-only nonzero output through dispatch (#1816)", async () => {
+		// dart analyze writes its machine diagnostics to stderr, so a runner
+		// that parsed stdout alone would call every failing run clean.
+		const observed = await dispatchOutcome("dart-analyze", "stderr-only", {
+			error: null,
+			status: 1,
+			stdout: "",
+			stderr: "dart analyze failed unexpectedly",
+		});
+		expect(observed.status).toBe("failed");
+		expect(observed.semantic).toBe("warning");
+		expect(observed.diagnostics[0]?.id).toBe("dart-analyze:parse-error:1");
+		expect(observed.ledger[0]?.kind).toBe("runner-parsed-nothing");
+	});
 
-			expect(result.status).toBe("failed");
-			expect(result.semantic).toBe("warning");
-			expect(result.diagnostics[0]?.message).toContain("dart analyze failed");
-		} finally {
-			env.cleanup();
-		}
+	it("keeps dart status-0 stderr noise clean through dispatch (#1816)", async () => {
+		// Prevents harmless dart stderr banners from becoming a false finding
+		// or a degradation row.
+		const observed = await dispatchOutcome("dart-analyze", "stderr-noise", {
+			error: null,
+			status: 0,
+			stdout: "",
+			stderr: "dart analyze: no issues\n",
+		});
+		expect(observed.status).toBe("succeeded");
+		expect(observed.diagnostics).toEqual([]);
+		expect(observed.output).toBe("");
+		expect(observed.ledger).toEqual([]);
+	});
+
+	it("guards dart signal termination through dispatch (#1816)", async () => {
+		// Prevents a signal-killed dart run from becoming a clean rendered
+		// result, and keeps the signal named in the ledger reason. Round 2
+		// found the direct-runner version of this test green under a mutation
+		// that erased `signal` from the `parseToolRun` input.
+		const observed = await dispatchOutcome("dart-analyze", "signal", {
+			error: null,
+			status: null,
+			signal: "SIGTERM",
+			stdout: "",
+			stderr: "",
+		});
+		expect(observed.status).toBe("skipped");
+		expect(observed.output).toContain("not a clean result");
+		expect(observed.ledger[0]?.latestReasons[0]?.reason).toContain("SIGTERM");
 	});
 
 	it("falls back to flutter analyze when dart is unavailable", async () => {
@@ -108,6 +263,46 @@ describe("secondary language fallback runners", () => {
 		} finally {
 			env.cleanup();
 		}
+	});
+
+	it("guards dart rejection through dispatch (#1816)", async () => {
+		// Prevents a rejected dart invocation from becoming a clean rendered result.
+		const observed = await dispatchOutcome("dart-analyze", "rejected", {
+			error: null,
+			status: 2,
+			stdout: "",
+			stderr: "unknown dart analyze option",
+		});
+		expect(observed.status).toBe("failed");
+		expect(observed.diagnostics[0]?.id).toBe("dart-analyze:parse-error:1");
+		expect(observed.ledger[0]?.kind).toBe("runner-parsed-nothing");
+	});
+
+	it("guards dart empty output through dispatch (#1816)", async () => {
+		// Prevents a failed Dart run with no parser input from becoming clean.
+		const observed = await dispatchOutcome("dart-analyze", "empty", {
+			error: null,
+			status: 1,
+			stdout: "",
+			stderr: "",
+		});
+		expect(observed.status).toBe("skipped");
+		expect(observed.output).toContain("not a clean result");
+		expect(observed.ledger[0]?.latestReasons[0]?.reason).toContain("no output");
+	});
+
+	it("guards actual dart unavailability through dispatch (#1816)", async () => {
+		// Prevents absent dart and flutter binaries from being reported as clean.
+		const observed = await dispatchOutcome(
+			"dart-analyze",
+			"unavailable",
+			{ error: null, status: 0, stdout: "", stderr: "" },
+			{ available: false },
+		);
+		expect(observed.status).toBe("skipped");
+		expect(observed.output).toContain("not a clean result");
+		expect(observed.spawnCalls).toBe(0);
+		expect(observed.ledger).toEqual([]);
 	});
 
 	it("surfaces a warning when zig exits non-zero without structured diagnostics", async () => {
@@ -198,8 +393,121 @@ describe("secondary language fallback runners", () => {
 		}
 	});
 
-	it("surfaces a blocking diagnostic when elixir compile exits non-zero without structured output", async () => {
-		const env = setupTestEnvironment("pi-lens-elixir-runner-");
+	it("keeps a clean elixir run with no output clean through dispatch (#1816)", async () => {
+		// Prevents the empty-output guard from swallowing the ordinary clean
+		// save: exit 0 with neither stream written is a clean file, not a
+		// degraded run. The opposite direction of `guards elixir empty output`.
+		const observed = await dispatchOutcome("elixir-check", "clean", {
+			error: null,
+			status: 0,
+			stdout: "",
+			stderr: "",
+		});
+		expect(observed.status).toBe("succeeded");
+		expect(observed.diagnostics).toEqual([]);
+		expect(observed.output).toBe("");
+		expect(observed.ledger).toEqual([]);
+	});
+
+	it("guards elixir nonzero unparseable stdout through dispatch (#1816)", async () => {
+		// Prevents a failed Mix run whose stdout the parser cannot read from
+		// being rendered as a clean file (#1781 shape).
+		const observed = await dispatchOutcome("elixir-check", "unparseable", {
+			error: null,
+			status: 1,
+			stdout: "elixir compiler failed before emitting diagnostics",
+			stderr: "",
+		});
+		expect(observed.status).toBe("failed");
+		expect(observed.semantic).toBe("warning");
+		expect(observed.diagnostics[0]?.id).toBe("elixir-check:parse-error:1");
+		expect(observed.ledger[0]?.kind).toBe("runner-parsed-nothing");
+	});
+
+	it("guards elixir stderr-only nonzero output through dispatch (#1816)", async () => {
+		// Mix writes its compiler diagnostics to stderr, so a runner that
+		// parsed stdout alone would call every failing compile clean.
+		const observed = await dispatchOutcome("elixir-check", "stderr-only", {
+			error: null,
+			status: 1,
+			stdout: "",
+			stderr: "elixir compiler failed before emitting diagnostics",
+		});
+		expect(observed.status).toBe("failed");
+		expect(observed.semantic).toBe("warning");
+		expect(observed.diagnostics[0]?.id).toBe("elixir-check:parse-error:1");
+		expect(observed.ledger[0]?.kind).toBe("runner-parsed-nothing");
+	});
+
+	it("guards elixir empty output through dispatch (#1816)", async () => {
+		// Prevents a failed Mix run with no parser input from becoming clean.
+		const observed = await dispatchOutcome("elixir-check", "empty", {
+			error: null,
+			status: 1,
+			stdout: "",
+			stderr: "",
+		});
+		expect(observed.status).toBe("skipped");
+		expect(observed.output).toContain("not a clean result");
+		expect(observed.ledger[0]?.latestReasons[0]?.reason).toContain("no output");
+	});
+
+	it("guards elixir signal termination through dispatch (#1816)", async () => {
+		// Prevents a signal-killed Mix run from becoming a clean rendered result.
+		const observed = await dispatchOutcome("elixir-check", "signal", {
+			error: null,
+			status: null,
+			signal: "SIGTERM",
+			stdout: "",
+			stderr: "",
+		});
+		expect(observed.status).toBe("skipped");
+		expect(observed.output).toContain("not a clean result");
+		expect(observed.ledger[0]?.latestReasons[0]?.reason).toContain("SIGTERM");
+	});
+
+	it("keeps elixir status-0 stderr noise clean through dispatch (#1816)", async () => {
+		// Prevents harmless Mix stderr noise from becoming a false diagnostic.
+		const observed = await dispatchOutcome("elixir-check", "stderr-noise", {
+			error: null,
+			status: 0,
+			stdout: "",
+			stderr: "Compiling 1 file (.ex)\n",
+		});
+		expect(observed.status).toBe("succeeded");
+		expect(observed.output).toBe("");
+		expect(observed.ledger).toEqual([]);
+	});
+
+	it("guards elixir rejection through dispatch (#1816)", async () => {
+		// Prevents a rejected Mix invocation from becoming a clean rendered result.
+		const observed = await dispatchOutcome("elixir-check", "rejected", {
+			error: null,
+			status: 2,
+			stdout: "",
+			stderr: "unknown Mix option",
+		});
+		expect(observed.status).toBe("failed");
+		expect(observed.diagnostics[0]?.id).toBe("elixir-check:parse-error:1");
+		expect(observed.ledger[0]?.kind).toBe("runner-parsed-nothing");
+	});
+
+	it("guards actual elixir unavailability through dispatch (#1816)", async () => {
+		// Prevents absent Mix and elixirc binaries from being reported as clean.
+		const observed = await dispatchOutcome(
+			"elixir-check",
+			"unavailable",
+			{ error: null, status: 0, stdout: "", stderr: "" },
+			{ available: false },
+		);
+		expect(observed.status).toBe("skipped");
+		expect(observed.output).toContain("not a clean result");
+		expect(observed.spawnCalls).toBe(0);
+		expect(observed.ledger).toEqual([]);
+	});
+
+	it("real dispatcher renders an elixir nonzero finding (#1816)", async () => {
+		const env = setupTestEnvironment("pi-lens-elixir-dispatch-witness-");
 		try {
 			const filePath = path.join(env.tmpDir, "lib", "app.ex");
 			fs.mkdirSync(path.dirname(filePath), { recursive: true });
@@ -208,56 +516,62 @@ describe("secondary language fallback runners", () => {
 				"defmodule Demo.MixProject do end\n",
 			);
 			fs.writeFileSync(filePath, "defmodule App do\n");
-
-			// mix availability is now answered by the mocked createAvailabilityChecker
-			// (#120), so only the actual `mix compile` spawn needs mocking here.
-			safeSpawnAsync.mockResolvedValueOnce({
+			safeSpawnAsync.mockResolvedValue({
 				error: null,
 				status: 1,
 				stdout: "",
-				stderr: "** (SyntaxError) lib/app.ex:1:1: unexpected end of file",
+				stderr: `** (SyntaxError) lib/app.ex:1:1: unexpected end of file`,
 			});
-
+			const { createDispatchContext, dispatchForFile, RunnerRegistry } =
+				await import("../../../../clients/dispatch/dispatcher.js");
 			const runner = (
 				await import("../../../../clients/dispatch/runners/elixir-check.js")
 			).default;
-
-			const result = await runner.run(
-				createCtx("elixir", filePath, env.tmpDir) as never,
+			const registry = new RunnerRegistry();
+			registry.register(runner);
+			let observedStatus: string | undefined;
+			const result = await dispatchForFile(
+				createDispatchContext(
+					filePath,
+					env.tmpDir,
+					{ getFlag: () => false },
+					new FactStore(),
+				),
+				[{ mode: "all", runnerIds: ["elixir-check"] }],
+				registry,
+				(_runnerId, runnerResult) => {
+					observedStatus = runnerResult.status;
+				},
 			);
-
-			expect(result.status).toBe("failed");
-			expect(result.semantic).toBe("blocking");
-			expect(result.diagnostics[0]?.tool).toBe("elixir-check");
+			expect(observedStatus).toBe("failed");
+			expect(result.output).toContain("🔴 STOP — 1 issue(s) must be fixed:");
+			await expect(result.output).toMatchFileSnapshot(
+				"../../../fixtures/witness/runner-outcome-dart-analyze-elixir-check/elixir-nonzero-findings.txt",
+			);
 		} finally {
 			env.cleanup();
 		}
 	});
 
-	it("keeps standalone elixirc diagnostics non-blocking", async () => {
-		const env = setupTestEnvironment("pi-lens-elixirc-contextless-");
-		try {
-			const filePath = path.join(env.tmpDir, "app.ex");
-			fs.writeFileSync(filePath, "defmodule App do\n");
-			safeSpawnAsync.mockResolvedValue({
+	it("keeps standalone elixirc diagnostics non-blocking through dispatch (#1816)", async () => {
+		// A direct `elixirc` invocation cannot resolve Mix dependencies, so its
+		// findings must inform without blocking — and must not reach the model
+		// as a STOP the way the Mix-context render does.
+		const observed = await dispatchOutcome(
+			"elixir-check",
+			"elixirc-contextless",
+			{
 				error: null,
 				status: 1,
 				stdout: "",
-				stderr: "** (CompileError) app.ex:1:1: module Dependency is not loaded",
-			});
-
-			const runner = (
-				await import("../../../../clients/dispatch/runners/elixir-check.js")
-			).default;
-			const result = await runner.run(
-				createCtx("elixir", filePath, env.tmpDir) as never,
-			);
-
-			expect(result.status).toBe("succeeded");
-			expect(result.semantic).toBe("warning");
-			expect(result.diagnostics[0]?.semantic).toBe("warning");
-		} finally {
-			env.cleanup();
-		}
+				stderr:
+					"** (CompileError) lib/app.ex:1:1: module Dependency is not loaded",
+			},
+			{ mixProject: false },
+		);
+		expect(observed.status).toBe("succeeded");
+		expect(observed.semantic).toBe("warning");
+		expect(observed.diagnostics[0]?.semantic).toBe("warning");
+		expect(observed.output).not.toContain("🔴 STOP");
 	});
 });
