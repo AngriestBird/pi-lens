@@ -177,3 +177,66 @@ export function applyInlineBlockerPolicy(
 		unstructured: false,
 	};
 }
+
+/**
+ * How many file/tool identities {@link summarizeInlineBlockerPolicy}'s one
+ * per-turn record names. The COUNTS are always exact; only the identity lists
+ * are capped, so a turn that touched a hundred files writes a bounded row
+ * rather than a file listing (AGENTS.md shape 17).
+ */
+const IDENTITY_CAP = 10;
+
+/** One inline-blocker record's contribution to the per-turn policy record. */
+export interface InlineBlockerPolicyTallyEntry {
+	displayPath: string;
+	sources: readonly string[] | undefined;
+	/**
+	 * True for a record the freshness/past-EOF gates demoted. Those render
+	 * through the advisory channel and the policy does not run on them, so they
+	 * are counted but contribute no candidates.
+	 */
+	stale: boolean;
+	outcome?: InlineBlockerPolicyOutcome;
+}
+
+/**
+ * The ONE bounded record the turn writes for this pass — never one per
+ * finding. Derived here rather than accumulated at the call site so the shape
+ * and its bound live with the policy they describe.
+ */
+export function summarizeInlineBlockerPolicy(
+	entries: readonly InlineBlockerPolicyTallyEntry[],
+): Record<string, unknown> {
+	const files: string[] = [];
+	const tools = new Set<string>();
+	let stale = 0;
+	let candidates = 0;
+	let kept = 0;
+	let suppressed = 0;
+	let unstructured = 0;
+	for (const entry of entries) {
+		for (const tool of entry.sources ?? []) tools.add(tool);
+		if (entry.stale) stale += 1;
+		const outcome = entry.outcome;
+		if (outcome === undefined) continue;
+		candidates += outcome.candidates;
+		kept += outcome.kept;
+		suppressed += outcome.suppressed;
+		if (outcome.unstructured) unstructured += 1;
+		// The files a mark actually acted on — the identity a reader needs to
+		// reconstruct a replay report.
+		if (outcome.suppressed > 0 && files.length < IDENTITY_CAP) {
+			files.push(entry.displayPath);
+		}
+	}
+	return {
+		records: entries.length,
+		stale,
+		candidates,
+		kept,
+		dispositionSuppressed: suppressed,
+		unstructured,
+		files,
+		tools: [...tools].slice(0, IDENTITY_CAP),
+	};
+}

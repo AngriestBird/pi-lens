@@ -43,6 +43,13 @@ const EXEMPT: Record<string, string> = {
 		"advisory text built here but delivered by runtime-turn.ts (registered)",
 	"demoted-finding-render.ts":
 		"transforms pipeline stop-blocker output; follows that registration",
+	// #3246, the same shape as demoted-finding-render.ts one line up: this
+	// module re-derives the body of the blocker that runtime-turn.ts's
+	// registered `runtime-turn:unresolved-inline-blocker` seam delivers, and
+	// pushes nothing itself. The marker appears only in its doc comment, which
+	// the sibling test below keeps honest.
+	"inline-blocker-dispositions.ts":
+		"re-derives the unresolved-blocker body; delivered by runtime-turn.ts (registered)",
 	"runtime-context.ts":
 		"framing wrapper over registered context injections; no own delivery",
 	"format-utils.ts":
