@@ -1125,6 +1125,75 @@ let report = \`CRITICAL dependency CVEs (trivy, \${trivyAgeLabel}). Upgrade befo
 		expect(problems[0]).toMatch(/possible identity-stub/);
 	});
 
+		const spacer = (n: number) =>
+			Array.from({ length: n }, (_, i) => `  // shadow spacer ${i}`);
+
+	// #3264 verify F1-A: reject-on-ambiguity must not red code that IS gated.
+	// A nested function, or a block, may legitimately bind its own gate result
+	// under the same name as an outer one — both initializers are gate calls, so
+	// whichever binding the use site means, the arm came from a gate.
+	it("control: a same-name shadow whose every declaration is a gate call is accepted", () => {
+		// The spacers are load-bearing: without them the arm read sits within
+		// `CALLEE_PROXIMITY_LINES` of the INNER gate call and the occurrence-level
+		// check accepts it before the binding chain is ever consulted, so the
+		// fixture would pass for a reason that has nothing to do with F1-A.
+		const shadowedGateSource = (open: string) =>
+			[
+				"const scannerGates = gateFindingsByPathFreshness({ sources: {} });",
+				open,
+				"  const scannerGates = gateFindingsByPathFreshness({ sources: {} });",
+				...spacer(10),
+				"  const gitleaksGate = scannerGates.gitleaks;",
+				...spacer(10),
+				"  const keptLive = filterFindingsByDisposition(",
+				"    gitleaksGate.live,",
+				"  );",
+				"  // @delivery-surface: runtime-turn:secrets-gitleaks",
+				'  advisoryParts.push("finding");',
+				"}",
+			].join("\n");
+		const nestedFunction = shadowedGateSource("function nested() {");
+		const nestedBlock = shadowedGateSource("{");
+		for (const source of [nestedFunction, nestedBlock]) {
+			const problems = checkRuntimeTurnSeamEvidenceExclusive(
+				"runtime-turn:secrets-gitleaks",
+				DELIVERY_SURFACES["runtime-turn:secrets-gitleaks"],
+				scanTaggedSeams(source, RUNTIME_TURN_SEAM_PATTERN),
+				stripCommentsOnly(source).split("\n"),
+			);
+			expect(problems, problems.join("\n")).toEqual([]);
+		}
+	});
+
+	// The other half of F1-A's refinement: "every declaration is a gate call" is
+	// the accepting condition, so a duplicate where ONE declaration is
+	// hand-built is still laundering — the detector cannot tell which binding
+	// the use site meant, and one of the candidates never saw a gate.
+	it("RED PROOF: a duplicated name is rejected when any one declaration is not gated", () => {
+		const mixedSource = [
+			"const scannerGates = gateFindingsByPathFreshness({ sources: {} });",
+			"function nested() {",
+			"  const scannerGates = { gitleaks: { live: raw, stale: [] } };",
+			...spacer(10),
+			"  const gitleaksGate = scannerGates.gitleaks;",
+			...spacer(10),
+			"  const keptLive = filterFindingsByDisposition(",
+			"    gitleaksGate.live,",
+			"  );",
+			"  // @delivery-surface: runtime-turn:secrets-gitleaks",
+			'  advisoryParts.push("finding");',
+			"}",
+		].join("\n");
+		const problems = checkRuntimeTurnSeamEvidenceExclusive(
+			"runtime-turn:secrets-gitleaks",
+			DELIVERY_SURFACES["runtime-turn:secrets-gitleaks"],
+			scanTaggedSeams(mixedSource, RUNTIME_TURN_SEAM_PATTERN),
+			stripCommentsOnly(mixedSource).split("\n"),
+		);
+		expect(problems.length).toBeGreaterThan(0);
+		expect(problems[0]).toMatch(/possible identity-stub/);
+	});
+
 	it("control: a two-hop alias and a destructuring rename both still resolve to the gate", () => {
 		const aliasSource = [
 			"const scannerGates = gateFindingsByPathFreshness({",
