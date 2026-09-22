@@ -40,6 +40,77 @@ function createCtx(
 	return makeRunnerCtx(filePath, cwd, { kind });
 }
 
+async function dispatchOutcome(
+	tool: "dart-analyze" | "elixir-check",
+	caseName: string,
+	spawnResult: {
+		error?: Error | null;
+		status: number | null;
+		signal?: NodeJS.Signals | null;
+		stdout: string;
+		stderr: string;
+	},
+	options: { available?: boolean } = {},
+) {
+	vi.resetModules();
+	const env = setupTestEnvironment(`pi-lens-${tool}-${caseName}-`);
+	try {
+		const kind = tool === "dart-analyze" ? "dart" : "elixir";
+		const extension = kind === "dart" ? "main.dart" : "lib/app.ex";
+		const filePath = path.join(env.tmpDir, extension);
+		fs.mkdirSync(path.dirname(filePath), { recursive: true });
+		fs.writeFileSync(
+			filePath,
+			kind === "dart" ? "void main() {}\n" : "defmodule App do\n",
+		);
+		if (kind === "elixir") {
+			fs.writeFileSync(
+				path.join(env.tmpDir, "mix.exs"),
+				"defmodule Demo.MixProject do end\n",
+			);
+		}
+
+		mockRunnerHelpers(() => options.available ?? true);
+		if (options.available ?? true)
+			safeSpawnAsync.mockResolvedValue(spawnResult);
+		const { createDispatchContext, dispatchForFile, RunnerRegistry } =
+			await import("../../../../clients/dispatch/dispatcher.js");
+		const runner = (
+			await import(`../../../../clients/dispatch/runners/${tool}.js`)
+		).default;
+		const { getDegradationSummary, resetDegradationLedger } =
+			await import("../../../../clients/degradation-ledger.js");
+		resetDegradationLedger();
+		const registry = new RunnerRegistry();
+		registry.register(runner);
+		let observedStatus: string | undefined;
+		let observedDiagnostics: Array<{ id?: string }> = [];
+		const result = await dispatchForFile(
+			createDispatchContext(
+				filePath,
+				env.tmpDir,
+				{ getFlag: () => false },
+				new FactStore(),
+			),
+			[{ mode: "all", runnerIds: [tool] }],
+			registry,
+			(_runnerId, runnerResult) => {
+				observedStatus = runnerResult.status;
+				observedDiagnostics = runnerResult.diagnostics;
+			},
+		);
+		return {
+			status: observedStatus,
+			diagnostics: observedDiagnostics,
+			output: result.output,
+			ledger: getDegradationSummary(),
+			spawnCalls: safeSpawnAsync.mock.calls.length,
+		};
+	} finally {
+		env.cleanup();
+	}
+}
+
 describe("secondary language fallback runners", () => {
 	beforeEach(() => {
 		vi.resetModules();
@@ -176,6 +247,46 @@ describe("secondary language fallback runners", () => {
 		}
 	});
 
+	it("guards dart rejection through dispatch (#1816)", async () => {
+		// Prevents a rejected dart invocation from becoming a clean rendered result.
+		const observed = await dispatchOutcome("dart-analyze", "rejected", {
+			error: null,
+			status: 2,
+			stdout: "",
+			stderr: "unknown dart analyze option",
+		});
+		expect(observed.status).toBe("failed");
+		expect(observed.diagnostics[0]?.id).toBe("dart-analyze:parse-error:1");
+		expect(observed.ledger[0]?.kind).toBe("runner-parsed-nothing");
+	});
+
+	it("guards dart empty output through dispatch (#1816)", async () => {
+		// Prevents a failed Dart run with no parser input from becoming clean.
+		const observed = await dispatchOutcome("dart-analyze", "empty", {
+			error: null,
+			status: 1,
+			stdout: "",
+			stderr: "",
+		});
+		expect(observed.status).toBe("skipped");
+		expect(observed.output).toContain("not a clean result");
+		expect(observed.ledger[0]?.latestReasons[0]?.reason).toContain("no output");
+	});
+
+	it("guards actual dart unavailability through dispatch (#1816)", async () => {
+		// Prevents absent dart and flutter binaries from being reported as clean.
+		const observed = await dispatchOutcome(
+			"dart-analyze",
+			"unavailable",
+			{ error: null, status: 0, stdout: "", stderr: "" },
+			{ available: false },
+		);
+		expect(observed.status).toBe("skipped");
+		expect(observed.output).toContain("not a clean result");
+		expect(observed.spawnCalls).toBe(0);
+		expect(observed.ledger).toEqual([]);
+	});
+
 	it("surfaces a warning when zig exits non-zero without structured diagnostics", async () => {
 		const env = setupTestEnvironment("pi-lens-zig-runner-");
 		try {
@@ -298,6 +409,73 @@ describe("secondary language fallback runners", () => {
 		} finally {
 			env.cleanup();
 		}
+	});
+
+	it("guards elixir empty output through dispatch (#1816)", async () => {
+		// Prevents a failed Mix run with no parser input from becoming clean.
+		const observed = await dispatchOutcome("elixir-check", "empty", {
+			error: null,
+			status: 1,
+			stdout: "",
+			stderr: "",
+		});
+		expect(observed.status).toBe("skipped");
+		expect(observed.output).toContain("not a clean result");
+		expect(observed.ledger[0]?.latestReasons[0]?.reason).toContain("no output");
+	});
+
+	it("guards elixir signal termination through dispatch (#1816)", async () => {
+		// Prevents a signal-killed Mix run from becoming a clean rendered result.
+		const observed = await dispatchOutcome("elixir-check", "signal", {
+			error: null,
+			status: null,
+			signal: "SIGTERM",
+			stdout: "",
+			stderr: "",
+		});
+		expect(observed.status).toBe("skipped");
+		expect(observed.output).toContain("not a clean result");
+		expect(observed.ledger[0]?.latestReasons[0]?.reason).toContain("SIGTERM");
+	});
+
+	it("keeps elixir status-0 stderr noise clean through dispatch (#1816)", async () => {
+		// Prevents harmless Mix stderr noise from becoming a false diagnostic.
+		const observed = await dispatchOutcome("elixir-check", "stderr-noise", {
+			error: null,
+			status: 0,
+			stdout: "",
+			stderr: "Compiling 1 file (.ex)\n",
+		});
+		expect(observed.status).toBe("succeeded");
+		expect(observed.output).toBe("");
+		expect(observed.ledger).toEqual([]);
+	});
+
+	it("guards elixir rejection through dispatch (#1816)", async () => {
+		// Prevents a rejected Mix invocation from becoming a clean rendered result.
+		const observed = await dispatchOutcome("elixir-check", "rejected", {
+			error: null,
+			status: 2,
+			stdout: "",
+			stderr: "unknown Mix option",
+		});
+		expect(observed.status).toBe("failed");
+		expect(observed.diagnostics[0]?.id).toBe("elixir-check:parse-error:1");
+		expect(observed.ledger[0]?.kind).toBe("runner-parsed-nothing");
+	});
+
+	it("guards actual elixir unavailability through dispatch (#1816)", async () => {
+		// Prevents absent Mix and elixirc binaries from being reported as clean.
+		const observed = await dispatchOutcome(
+			"elixir-check",
+			"unavailable",
+			{ error: null, status: 0, stdout: "", stderr: "" },
+			{ available: false },
+		);
+		expect(observed.status).toBe("skipped");
+		expect(observed.output).toContain("not a clean result");
+		expect(observed.spawnCalls).toBe(0);
+		expect(observed.ledger).toEqual([]);
 	});
 
 	it("real dispatcher renders an elixir nonzero finding (#1816)", async () => {
