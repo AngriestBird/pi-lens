@@ -280,6 +280,30 @@ and PR language; detailed historical examples are in `HISTORY.md`.
     file that hands an unowned pid to a production kill or spawn seam; the
     other identifier kinds have no detector yet, so screen them by hand.
 
+51. **Cross-request derived-state cache where a request-local pass is
+    affordable:** a signature, line count, content hash, import graph or other
+    DERIVED value is memoised across requests, and its invalidation key cannot
+    express the truth (rename, existence flip, casing, generation). The
+    2026-08 staleness arc (#1461, #1622, #1630, #1631, #1633, #1634) was six
+    fixes to keys that could not say when they were wrong. Rule, from #1644:
+    for derived state on a hot path, first measure a request-local bounded
+    recompute; add a persistent cache only when the fresh-process benchmark
+    shows the recompute is the cost, and then the entry carries the generation
+    it was derived from. Tool-run caches (gitleaks, knip, trivy) are not
+    derived state; their freshness is governed by the delivery gate. A cache
+    that does not exist cannot serve stale.
+
+52. **A second store answering the same availability question:** a new latch,
+    map or cache that answers "can `<tool>` run right now, at what path"
+    beside the shared availability policy (`availability-policy.ts`,
+    `createAvailabilityLatch`). Nine such stores existed on 2026-08-20; with no
+    cross-store invalidation a mid-session uninstall is seen by the dispatch
+    runner and not by the formatter, which keeps spawning the vanished binary
+    (#1894). Rule: every store of that shape is pinned by name in the #1894
+    registry ratchet, the registry never grows, and a change that touches a
+    registered store moves it onto the shared policy and deletes it from the
+    registry in the same change.
+
 ## Standing invariants
 
 ### Language and configuration
