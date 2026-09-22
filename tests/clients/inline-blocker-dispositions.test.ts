@@ -501,6 +501,78 @@ describe("turn-end unresolved inline blockers honor dispositions (#3246)", () =>
 		}
 	});
 
+	it("leaves a dependency-drift demotion to its re-run advisory even when every finding is marked", async () => {
+		// THE RULE, stated (review round 2): the policy runs on the LIVE arm
+		// only. A record the freshness sweep demoted for dependency drift keeps
+		// rendering its `[stale — re-run to confirm]` advisory even when every
+		// finding on it is marked `false-positive`, and the bounded record counts
+		// it as stale with ZERO candidates rather than as a suppressed live set.
+		//
+		// Why that is the right arm to leave alone, not an oversight:
+		//   1. The stale advisory is not an assertion that the finding is true —
+		//      it asks for a re-run. Suppressing it would turn "unconfirmed" into
+		//      silence, which reads as "confirmed clean".
+		//   2. The re-run honors the mark at its own source: a fresh dispatch
+		//      filters through `applyDispositions` before it ever builds a
+		//      record, so the mark takes effect the moment the record is
+		//      replaced.
+		//   3. This arm drives #1950's delivery-count commits and #1944's
+		//      one-delivery retirement. Skipping a delivery here would silently
+		//      change cap accounting — a redesign of gates #3246's non-goals put
+		//      out of scope.
+		//   4. It is BOUNDED: the dependency-drift arm retires after
+		//      DEPENDENCY_DRIFT_MAX_DELIVERIES, so a marked-but-stale finding
+		//      cannot reproduce the unbounded session-long replay #3246 reports.
+		//
+		// The demotion here is the REAL sweep's: a forward import drifts on disk
+		// after the verdict, with the target's own bytes untouched — so the
+		// strict anchor still matches and the mark is genuinely applicable.
+		const env = setupTestEnvironment("pi-lens-3246-dependency-drift-");
+		try {
+			const cwd = env.tmpDir;
+			const dep = path.join(cwd, "dep.js");
+			const consumer = path.join(cwd, "consumer.js");
+			fs.writeFileSync(dep, "export const other = 1;\n");
+			fs.writeFileSync(
+				consumer,
+				'import { other } from "./dep.js";\nexport const t = other;\n',
+			);
+
+			const runtime = new RuntimeCoordinator();
+			runtime.setTelemetryIdentity({ sessionId: SESSION_ID });
+			const cacheManager = new CacheManager(false);
+			const diagnostic = blockingDiagnostic(consumer, 1, "unresolved import", {
+				tool: "lsp",
+				rule: "ts:2307",
+			});
+			recordBlockers(runtime, consumer, [diagnostic]);
+			markFalsePositive(cwd, diagnostic);
+
+			// The dependency drifts out-of-band after the verdict; the target's
+			// own bytes are untouched.
+			const future = new Date(Date.now() + 60_000);
+			fs.utimesSync(dep, future, future);
+
+			registerEdit(cacheManager, cwd, consumer);
+			await handleTurnEnd(makeTurnEndDeps(runtime, cacheManager, cwd));
+
+			const text = turnEndText(cacheManager, cwd, runtime);
+			expect(text).toContain("[stale — re-run to confirm]");
+			expect(text).not.toContain("Unresolved from this turn");
+			// The marked finding is still named on the advisory arm — the
+			// asymmetry this case exists to pin.
+			expect(text).toContain("unresolved import");
+			expect(inlinePolicyRows()[0]?.metadata).toMatchObject({
+				records: 1,
+				stale: 1,
+				candidates: 0,
+				dispositionSuppressed: 0,
+			});
+		} finally {
+			env.cleanup();
+		}
+	});
+
 	it("fails open when the file's current bytes cannot be read", async () => {
 		// AGENTS.md shape 48: a blocking finding is never hidden over an I/O
 		// error. The record survives the existence reconcile (the path exists),
@@ -778,10 +850,16 @@ describe("turn-end unresolved inline blockers honor dispositions (#3246)", () =>
 		}
 	});
 
-	it("delivers the same result through the pi and the MCP turn-end adapters", async () => {
-		// Both adapters call the SAME `handleTurnEnd` + `consumeTurnEndFindings`
-		// pair; the MCP one (`clients/mcp/session.ts`) differs only in the `host`
-		// and `owner` it passes and the owner id it registers turn state under.
+	it("produces the same result whether the shared engine is called with the pi or the MCP host argument", async () => {
+		// SCOPE, corrected in review round 2 (R3247-1): this is the shared ENGINE
+		// seam, not an adapter test. It calls `handleTurnEnd` directly with each
+		// host's own `host`/`owner` arguments and the owner id each registers turn
+		// state under, and proves the engine's answer does not depend on them.
+		// The ADAPTERS themselves — `index.ts`'s `turn_end`/`context` hook chain
+		// and `clients/mcp/session.ts`'s `runTurnEnd` — are driven end to end by
+		// `tests/index-3246-turn-end-delivery.test.ts` and
+		// `tests/clients/mcp/session-inline-blocker-dispositions.test.ts`; round 1
+		// claimed adapter coverage from this case alone, which it never had.
 		// Separate project roots, because the durable disposition store and the
 		// turn-end signature memo are both per-cwd.
 		async function run(host: "pi" | "mcp"): Promise<string> {
