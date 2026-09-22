@@ -1,4 +1,5 @@
 import * as fs from "node:fs";
+import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -7,6 +8,7 @@ import {
 	resetDegradationLedger,
 } from "../../clients/degradation-ledger.js";
 import type { InstanceEntry } from "../../clients/instance-registry.js";
+import { diagnosticsIpcPathForCwd } from "../../clients/mcp/ipc.js";
 import { STALE_HEARTBEAT_MS } from "../../clients/instance-reaper.js";
 import { normalizeFilePath } from "../../clients/path-utils.js";
 import { selectWarmAttachIncumbent } from "../../clients/warm-attach.js";
@@ -139,5 +141,42 @@ describe("warm-attach records a missing incumbent endpoint (#3255)", () => {
 		// name, so "no peer" would send the reader looking for a dead process.
 		expect(group?.latestReasons[0]?.reason).toMatch(/restart/i);
 		expect(isWarmAttached()).toBe(false);
+	});
+
+	it("does not record it when the incumbent is listening but slow", async () => {
+		// The negative direction of the same discriminator. A reachable incumbent
+		// that misses the deadline is a TIMEOUT: restarting it is the wrong advice
+		// and a ledger entry here would be noise on a healthy warm path.
+		const endpoint = diagnosticsIpcPathForCwd(root, process.ppid);
+		if (process.platform !== "win32") {
+			try {
+				fs.unlinkSync(endpoint);
+			} catch {
+				/* none */
+			}
+		}
+		const silent = net.createServer(() => {
+			// Accept and never answer.
+		});
+		await new Promise<void>((resolve) => silent.listen(endpoint, resolve));
+		try {
+			await tryWarmAttachedDiagnostics("app.ts", "x", 30);
+			expect(
+				getDegradationSummary().find(
+					(candidate) => candidate.kind === "warm-ipc-endpoint-missing",
+				),
+			).toBeUndefined();
+			// Still promoted — the session gave up on the incumbent either way; it
+			// is the ADVICE that differs.
+			expect(isWarmAttached()).toBe(false);
+		} finally {
+			// Same teardown as the ipc suite's `afterEach`: drop the connections,
+			// then close without awaiting the callback — a still-open peer socket
+			// makes `close(cb)` wait out the whole test budget.
+			(
+				silent as net.Server & { closeAllConnections?: () => void }
+			).closeAllConnections?.();
+			silent.close();
+		}
 	});
 });
