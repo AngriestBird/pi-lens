@@ -580,6 +580,26 @@ function splitMarkdownSentences(text) {
 	return sentences;
 }
 
+function countSentenceTerminators(lines) {
+	let count = 0;
+	for (const line of lines) {
+		const text = line.trim();
+		if (!text) continue;
+		const masked = codeSpanMasked(text);
+		for (let index = 0; index < masked.length; index += 1) {
+			if (!".!?".includes(masked[index])) continue;
+			if (
+				masked[index] === "." &&
+				/\d\.\d/.test(masked.slice(Math.max(0, index - 1), index + 2))
+			)
+				continue;
+			const next = masked[index + 1] ?? "";
+			if (/\s/.test(next) || !next) count += 1;
+		}
+	}
+	return count;
+}
+
 export function splitMarkdownUnits(body = "") {
 	const units = [];
 	for (const block of markdownBlocks(body)) {
@@ -1178,7 +1198,13 @@ export function lintPrBody(body = "", options = {}) {
 			? [...REQUIRED_SECTIONS, "Test assessment"]
 			: REQUIRED_SECTIONS
 		: options.requireTestAssessment
-			? ["Tests", "Blast radius", "Class sweep", "Observability", "Test assessment"]
+			? [
+					"Tests",
+					"Blast radius",
+					"Class sweep",
+					"Observability",
+					"Test assessment",
+				]
 			: ["Tests", "Blast radius", "Class sweep", "Observability"];
 
 	for (const name of requiredSections) {
@@ -1197,6 +1223,20 @@ export function lintPrBody(body = "", options = {}) {
 		if (!hasRealContent(rawContent, name.toLowerCase(), placeholders))
 			errors.push(
 				sectionMessage(name, "has no content before the next heading"),
+			);
+	}
+	const why = headings.find((heading) => hasSection(heading, "why"));
+	if (why) {
+		const nextHeading = nextSectionHeading(why);
+		const whyLines = rawLines.slice(
+			why.index + 1,
+			nextHeading?.index ?? lines.length,
+		);
+		if (countSentenceTerminators(whyLines) !== 1)
+			errors.push(
+				'PR body "## Why" must contain exactly one sentence. See ' +
+					TEMPLATE_PATH +
+					".",
 			);
 	}
 	if (options.diff)

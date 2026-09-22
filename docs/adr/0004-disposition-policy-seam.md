@@ -22,11 +22,14 @@ measured structured-store slice with a deletion sweep.
 Existing producers keep their freshness, identity, and coverage contracts while
 delivery surfaces converge on the shared policy. A future store migration must
 measure the request and delete parallel identity/count logic in the same slice.
-The adapter-count heuristic is: one adapter is a hypothetical seam, two
-adapters are a real one. #1358 (the ports layer) stays held because there is
-one host adapter today: `LensEngine` (`clients/lens-engine.ts:2`) and its
-`HostPorts` contract (`clients/host-ports.ts:10`) are the single internal
-adapter seam, not two independent host adapters.
+The measured host-adapter population is two: the pi extension adapter activates
+through `activateExtension` and assembles `HostPorts` in `index.ts:725-767`, and
+the MCP server imports the host-neutral facade and serves requests in
+`mcp/server.ts:40-45,1881`. `LensEngine` (`clients/lens-engine.ts:2`) and
+`HostPorts` (`clients/host-ports.ts:10`) are the shared internal engine/ports
+seam, not additional adapters. Because the heuristic says two adapters are a
+real seam, #1358 (the ports layer) is **re-assess**, not held on a one-adapter
+claim.
 
 ## Links
 

@@ -1,6 +1,6 @@
 ## Why
 
-One sentence explaining the user or maintainer outcome.
+Exactly one sentence explaining the user or maintainer outcome.
 
 ## Notes for the reviewer
 

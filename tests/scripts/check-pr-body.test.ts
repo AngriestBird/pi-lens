@@ -1341,6 +1341,20 @@ describe("PR body lint (#1844)", () => {
 		expect(lintPrBody(body)).toEqual({ valid: true, errors: [] });
 	});
 
+	it("rejects two sentences in Why but accepts one", () => {
+		const rejected = lintPrBody(
+			body.replace(
+				"The body gate makes review intent explicit.",
+				"The body gate makes review intent explicit. It keeps the contract strict.",
+			),
+		);
+		expect(rejected.valid).toBe(false);
+		expect(rejected.errors.join(" ")).toContain(
+			'"## Why" must contain exactly one sentence',
+		);
+		expect(lintPrBody(body)).toEqual({ valid: true, errors: [] });
+	});
+
 	it.each(["Tests", "Blast radius", "Class sweep", "Observability"])(
 		"rejects a missing %s section",
 		(section) => {

@@ -27,7 +27,6 @@ export declare function lintPrBody(
 		diff?: string;
 		cwd?: string;
 		git?: (args: string[], options?: Record<string, unknown>) => string;
-		workingTree?: boolean;
 		headFiles?: Map<string, string>;
 	},
 ): {
