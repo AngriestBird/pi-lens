@@ -452,10 +452,7 @@ function globalConfigEnvFingerprint(): string {
 
 export function getProductionGlobalConfigResolution(): GlobalConfigResolution {
 	const fingerprint = globalConfigEnvFingerprint();
-	if (
-		memoizedGlobalConfigResolution === undefined ||
-		memoizedGlobalConfigResolution.fingerprint !== fingerprint
-	) {
+	if (memoizedGlobalConfigResolution?.fingerprint !== fingerprint) {
 		memoizedGlobalConfigResolution = {
 			fingerprint,
 			resolution: resolveGlobalConfigLocation(),
@@ -543,10 +540,7 @@ let recognizedCache: { fingerprint: string; paths: Set<string> } | undefined;
 
 function recognizedGlobalConfigPaths(): Set<string> {
 	const fingerprint = globalConfigEnvFingerprint();
-	if (
-		recognizedCache === undefined ||
-		recognizedCache.fingerprint !== fingerprint
-	) {
+	if (recognizedCache?.fingerprint !== fingerprint) {
 		const paths = new Set<string>();
 		const override = process.env.PI_LENS_CONFIG_PATH;
 		if (override) paths.add(canonicalPathIdentity(path.resolve(override)));
