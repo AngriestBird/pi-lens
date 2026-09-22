@@ -377,12 +377,12 @@ describe("turn-end unresolved inline blockers honor dispositions (#3246)", () =>
 				dispositionSuppressed: 2,
 				unstructured: 0,
 			});
-			expect((rows[0]?.metadata as { files: string[] }).files).toEqual([
-				"a.ts",
-			]);
-			expect((rows[0]?.metadata as { tools: string[] }).tools).toEqual([
-				"ast-grep",
-			]);
+			const metadata = rows[0]?.metadata as {
+				files: string[];
+				tools: string[];
+			};
+			expect(metadata.files).toEqual(["a.ts"]);
+			expect(metadata.tools).toEqual(["ast-grep"]);
 		} finally {
 			env.cleanup();
 		}
