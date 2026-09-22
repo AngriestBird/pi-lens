@@ -105,7 +105,7 @@ const ruffRunner: RunnerDefinition = {
 		// unparsable output must never become clean (#1816).
 		const run = parseToolRun(
 			"ruff",
-			{ result: checkResult, output: raw, exitCodes: { ran: [1] } },
+			{ result: checkResult, output: raw, exitCodes: { ran: [1, 2] } },
 			(output) => {
 				const diagnostics = parseRuffJson(output, ctx.filePath);
 				return diagnostics.length > 0

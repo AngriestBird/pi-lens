@@ -265,7 +265,82 @@ describe("runner status/semantic edge cases", () => {
 		}
 	});
 
-	it("rubocop preserves rejected and signaled outcomes as skipped (#1816)", async () => {
+	it("rubocop preserves valid findings on status 2 (#1816)", async () => {
+		const runner = (
+			await import("../../../../clients/dispatch/runners/rubocop.js")
+		).default;
+		const env = setupTestEnvironment("pi-lens-rb-status-2-findings-");
+		try {
+			const filePath = path.join(env.tmpDir, "main.rb");
+			fs.writeFileSync(filePath, "puts 'hi'\n");
+			safeSpawnAsync
+				.mockResolvedValueOnce({
+					error: null,
+					status: 0,
+					stdout: "rubocop",
+					stderr: "",
+				})
+				.mockResolvedValueOnce({
+					error: null,
+					status: 2,
+					stdout: JSON.stringify({
+						files: [
+							{
+								path: filePath,
+								offenses: [
+									{
+										severity: "warning",
+										message: "Style/SomeCop",
+										cop_name: "Style/SomeCop",
+										correctable: false,
+										location: { line: 1, column: 1 },
+									},
+								],
+							},
+						],
+					}),
+					stderr: "",
+				});
+			const result = await runner.run(ctx(filePath, env.tmpDir) as never);
+			expect(result.status).toBe("succeeded");
+			expect(result.diagnostics).toHaveLength(1);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("rubocop reports a parse error for status 1 stderr-only output (#1816)", async () => {
+		const runner = (
+			await import("../../../../clients/dispatch/runners/rubocop.js")
+		).default;
+		const env = setupTestEnvironment("pi-lens-rb-stderr-only-");
+		try {
+			const filePath = path.join(env.tmpDir, "main.rb");
+			fs.writeFileSync(filePath, "puts 'hi'\n");
+			safeSpawnAsync
+				.mockResolvedValueOnce({
+					error: null,
+					status: 0,
+					stdout: "rubocop",
+					stderr: "",
+				})
+				.mockResolvedValueOnce({
+					error: null,
+					status: 1,
+					stdout: "",
+					stderr: "rubocop failed on stderr",
+				});
+			const result = await runner.run(ctx(filePath, env.tmpDir) as never);
+			expect(result.status).toBe("failed");
+			expect(result.diagnostics).toMatchObject([
+				{ id: "rubocop:parse-error:1" },
+			]);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("rubocop keeps status-2 output failures non-clean and signals skipped (#1816)", async () => {
 		const runner = (
 			await import("../../../../clients/dispatch/runners/rubocop.js")
 		).default;
@@ -287,7 +362,10 @@ describe("runner status/semantic edge cases", () => {
 					stderr: "invalid option",
 				});
 			const rejected = await runner.run(ctx(filePath, env.tmpDir) as never);
-			expect(rejected.status).toBe("skipped");
+			expect(rejected.status).toBe("failed");
+			expect(rejected.diagnostics).toMatchObject([
+				{ id: "rubocop:parse-error:1" },
+			]);
 
 			safeSpawnAsync
 				.mockResolvedValueOnce({
