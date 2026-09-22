@@ -17,10 +17,13 @@ import {
 	createWarmIpcRequestQueue,
 	diagnosticsIpcPathForCwd,
 	ipcPathForCwd,
+	readTurnEndStatus,
+	recordTurnEndOutcome,
 	requestWarmCodeActions,
 	requestWarmDiagnostics,
 	requestWarmAnalyze,
 	requestWarmTurnEnd,
+	turnEndStatusPathForCwd,
 	WARM_DIAGNOSTICS_SCHEMA_VERSION,
 	WARM_TURN_END_SCHEMA_VERSION,
 } from "../../../clients/mcp/ipc.js";
@@ -259,6 +262,177 @@ describe("ipcPathForCwd", () => {
 		} else {
 			expect(p.endsWith(".sock")).toBe(true);
 		}
+	});
+});
+
+// --- #3255: the case axis of the workspace rendezvous id --------------------
+//
+// Recurrence these cases prevent: `workspaceHash` lowercased its input
+// UNCONDITIONALLY, so on a case-sensitive host `/repo/Alpha` and `/repo/alpha`
+// — two different directories — derived ONE warm-IPC socket, one pid-scoped
+// diagnostics socket and one `pi-lens-turn-end-<hash>.json`. A PostToolUse or
+// Stop hook in one workspace then reached the other workspace's warm server
+// and its turn-end counters. The fold must survive on the platforms whose
+// filesystem folds case (win32, darwin), where the two spellings are ONE
+// directory and the server's `--cwd=` spelling can legitimately differ from
+// the hook payload's.
+
+/** The 16 hex characters every per-workspace name embeds. */
+function workspaceIdIn(derivedPath: string): string {
+	const found = /pi-lens-(?:mcp|turn-end)-([0-9a-f]{16})/.exec(derivedPath);
+	if (!found) throw new Error(`no workspace id in ${derivedPath}`);
+	return found[1];
+}
+
+/**
+ * MEASURED, not asserted: create one directory and ask the filesystem whether
+ * the other spelling already exists. The sibling fixture in the cases below is
+ * created only after this says the host really keeps the two apart, so the
+ * skip can never be an `EEXIST` waiting to happen on someone's APFS box.
+ */
+const TMPDIR_IS_CASE_SENSITIVE = (() => {
+	const probe = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-ipc-Case-"));
+	try {
+		return !fs.existsSync(probe.replace("pi-lens-ipc-Case-", "pi-lens-ipc-case-"));
+	} finally {
+		removeTempDirSync(probe);
+	}
+})();
+
+/** Sibling of `dir` differing ONLY in the case of the fixture prefix. */
+function caseVariantSibling(dir: string, prefix: string): string {
+	const sibling = dir.replace(prefix, prefix.toLowerCase());
+	expect(sibling).not.toBe(dir);
+	fs.mkdirSync(sibling);
+	return sibling;
+}
+
+// lane: Unit tests (ubuntu) — and any other case-sensitive host. Skipped on a
+// case-insensitive filesystem because there the two spellings ARE one
+// directory, so there is no second workspace to keep apart.
+describe.skipIf(!TMPDIR_IS_CASE_SENSITIVE)(
+	"case-distinct workspaces on a case-sensitive host (#3255)",
+	() => {
+		it("does not serve one workspace's warm analysis to its case-variant sibling", async () => {
+			const served = fs.mkdtempSync(
+				path.join(os.tmpdir(), "pi-lens-ipc-Leak-"),
+			);
+			const sibling = caseVariantSibling(served, "pi-lens-ipc-Leak-");
+			await listenOnWorkspaceEndpoint(served, (socket) => {
+				socket.setEncoding("utf8");
+				socket.once("data", () =>
+					socket.end(`${JSON.stringify({ result: SENTINEL })}\n`),
+				);
+			});
+
+			// Control: the stub really is reachable from the workspace it serves.
+			await expect(requestWarmAnalyze(served, "/x/app.ts", 2000)).resolves.toEqual(
+				SENTINEL,
+			);
+
+			// The defect: the sibling workspace must NOT reach that server. Cold
+			// fallback (`undefined`) is the correct answer for a workspace with no
+			// warm server of its own.
+			await expect(
+				requestWarmAnalyze(sibling, "/x/app.ts", 2000),
+			).resolves.toBeUndefined();
+
+			removeTempDirSync(sibling);
+			removeTempDirSync(served);
+		});
+
+		it("does not merge two case-variant workspaces into one turn-end status file", () => {
+			const recorded = fs.mkdtempSync(
+				path.join(os.tmpdir(), "pi-lens-ipc-Turnstat-"),
+			);
+			const sibling = caseVariantSibling(recorded, "pi-lens-ipc-Turnstat-");
+			try {
+				recordTurnEndOutcome(recorded, { ran: true });
+
+				// Control: the writer's own workspace reads its own counters back.
+				expect(readTurnEndStatus(recorded)).toMatchObject({ ran: 1 });
+
+				// The defect: `pilens_health` for the sibling reported the other
+				// workspace's turn-end activity under its own name.
+				expect(readTurnEndStatus(sibling)).toBeUndefined();
+			} finally {
+				fs.rmSync(turnEndStatusPathForCwd(recorded), { force: true });
+				fs.rmSync(turnEndStatusPathForCwd(sibling), { force: true });
+				removeTempDirSync(sibling);
+				removeTempDirSync(recorded);
+			}
+		});
+	},
+);
+
+// Platform is an injected ARGUMENT (the seam `normalizePathEntry` uses in
+// clients/lsp/launch.ts), so every arm below runs on every lane — no
+// `skipIf(process.platform …)` and no Windows-only assertion.
+describe("workspace id under an injected platform (#3255)", () => {
+	const ALPHA = "/repo/Alpha";
+	const LOWER = "/repo/alpha";
+
+	// Case-INSENSITIVE by default: the two spellings name one directory, so
+	// folding is what makes the server and the hook meet.
+	it.each<NodeJS.Platform>(["win32", "darwin"])(
+		"folds case on %s, where the filesystem folds it",
+		(platform) => {
+			expect(ipcPathForCwd(ALPHA, platform)).toBe(
+				ipcPathForCwd(LOWER, platform),
+			);
+			expect(turnEndStatusPathForCwd(ALPHA, platform)).toBe(
+				turnEndStatusPathForCwd(LOWER, platform),
+			);
+			expect(diagnosticsIpcPathForCwd(ALPHA, 4242, platform)).toBe(
+				diagnosticsIpcPathForCwd(LOWER, 4242, platform),
+			);
+		},
+	);
+
+	// Case-SENSITIVE: two spellings are two directories and must not collide.
+	it.each<NodeJS.Platform>(["linux", "freebsd"])(
+		"keeps case on %s, where the filesystem keeps it",
+		(platform) => {
+			expect(ipcPathForCwd(ALPHA, platform)).not.toBe(
+				ipcPathForCwd(LOWER, platform),
+			);
+			expect(turnEndStatusPathForCwd(ALPHA, platform)).not.toBe(
+				turnEndStatusPathForCwd(LOWER, platform),
+			);
+			expect(diagnosticsIpcPathForCwd(ALPHA, 4242, platform)).not.toBe(
+				diagnosticsIpcPathForCwd(LOWER, 4242, platform),
+			);
+		},
+	);
+
+	// The four derivation sites of the table in PR #3257 / the `workspaceHash`
+	// doc comment: every per-workspace name must carry the SAME id, or a future
+	// edit to one of them splits the rendezvous silently.
+	it.each<NodeJS.Platform>(["win32", "darwin", "linux"])(
+		"gives every per-workspace name the same id on %s",
+		(platform) => {
+			const ids = [
+				workspaceIdIn(ipcPathForCwd(ALPHA, platform)),
+				workspaceIdIn(diagnosticsIpcPathForCwd(ALPHA, 4242, platform)),
+				workspaceIdIn(turnEndStatusPathForCwd(ALPHA, platform)),
+			];
+			expect(new Set(ids).size).toBe(1);
+		},
+	);
+
+	it.each<[NodeJS.Platform, boolean]>([
+		["win32", true],
+		["linux", false],
+		["darwin", false],
+	])("uses the %s endpoint form for the injected platform", (platform, pipe) => {
+		const endpoint = ipcPathForCwd(ALPHA, platform);
+		expect(endpoint.startsWith("\\\\.\\pipe\\pi-lens-mcp-")).toBe(pipe);
+		expect(endpoint.endsWith(".sock")).toBe(!pipe);
+		expect(
+			diagnosticsIpcPathForCwd(ALPHA, 4242, platform).endsWith(
+				pipe ? "-diagnostics-4242" : "-diagnostics-4242.sock",
+			),
+		).toBe(true);
 	});
 });
 
