@@ -1355,6 +1355,47 @@ describe("PR body lint (#1844)", () => {
 		expect(lintPrBody(body)).toEqual({ valid: true, errors: [] });
 	});
 
+	it.each([
+		["e.g. abbreviation", "The change handles e.g. ordinary input."],
+		["i.e. abbreviation", "The change handles i.e. ordinary input."],
+		["etc. abbreviation", "The change handles etc. ordinary input."],
+		["vs. abbreviation", "The change handles vs. ordinary input."],
+		["cf. abbreviation", "The change handles cf. ordinary input."],
+		["version", "The change handles version 4.2.1 correctly."],
+		["file path", "The change handles foo.ts correctly."],
+		["nested file path", "The change handles scripts/x.mjs correctly."],
+		["issue reference", "The change addresses issue #3262 directly."],
+		["trailing terminator", "The change needs one clear rule."],
+		["question ending", "The change answers the question?"],
+		["exclamation ending", "The change works!"],
+		["quoted period", 'The change preserves the quoted "foo.bar" string.'],
+	])(
+		"accepts one Why sentence without counting %s (#3262 F-3262-V1)",
+		(_name, whyText) => {
+			expect(
+				lintPrBody(
+					body.replace("The body gate makes review intent explicit.", whyText),
+				),
+			).toEqual({
+				valid: true,
+				errors: [],
+			});
+		},
+	);
+
+	it("rejects two real Why sentences (#3262 F-3262-V1)", () => {
+		const result = lintPrBody(
+			body.replace(
+				"The body gate makes review intent explicit.",
+				"The body gate makes review intent explicit. It keeps the contract strict.",
+			),
+		);
+		expect(result.valid).toBe(false);
+		expect(result.errors.join(" ")).toContain(
+			'"## Why" must contain exactly one sentence',
+		);
+	});
+
 	it.each(["Tests", "Blast radius", "Class sweep", "Observability"])(
 		"rejects a missing %s section",
 		(section) => {

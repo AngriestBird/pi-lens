@@ -553,16 +553,13 @@ function codeSpanMasked(text) {
 
 function endsSentence(text, index) {
 	const char = text[index];
-	if (!".!?".includes(char) || !/\s/.test(text[index + 1] ?? "")) return false;
-	if (char === ".") {
-		if (text[index - 1] === "." || text[index + 1] === ".") return false;
-		if (/\d\.\d/.test(text.slice(Math.max(0, index - 1), index + 2)))
-			return false;
-		const word = text.slice(0, index).match(/[A-Za-z]+$/)?.[0] ?? "";
-		const token = text.slice(text.lastIndexOf(" ", index - 1) + 1, index);
-		if (word.length <= 3 && !/[/:]/.test(token)) return false;
-	}
-	return true;
+	if (!".!?".includes(char)) return false;
+	if (char === "." && (text[index - 1] === "." || text[index + 1] === "."))
+		return false;
+	const next = text[index + 1] ?? "";
+	if (next && !/\s/.test(next)) return false;
+	const following = text.slice(index + 1).match(/\S/)?.[0];
+	return following === undefined || /[A-Z]/.test(following);
 }
 
 function splitMarkdownSentences(text) {
@@ -582,20 +579,9 @@ function splitMarkdownSentences(text) {
 
 function countSentenceTerminators(lines) {
 	let count = 0;
-	for (const line of lines) {
-		const text = line.trim();
-		if (!text) continue;
-		const masked = codeSpanMasked(text);
-		for (let index = 0; index < masked.length; index += 1) {
-			if (!".!?".includes(masked[index])) continue;
-			if (
-				masked[index] === "." &&
-				/\d\.\d/.test(masked.slice(Math.max(0, index - 1), index + 2))
-			)
-				continue;
-			const next = masked[index + 1] ?? "";
-			if (/\s/.test(next) || !next) count += 1;
-		}
+	const masked = codeSpanMasked(lines.join("\n").trim());
+	for (let index = 0; index < masked.length; index += 1) {
+		if (endsSentence(masked, index)) count += 1;
 	}
 	return count;
 }
