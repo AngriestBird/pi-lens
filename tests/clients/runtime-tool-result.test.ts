@@ -2875,6 +2875,76 @@ describe("#484 turn-summary collection gate", () => {
 	});
 });
 
+describe("#3246 inline blocker provenance", () => {
+	beforeEach(async () => {
+		const pipeline = await import("../../clients/pipeline.js");
+		vi.mocked(pipeline.runPipeline).mockReset();
+	});
+
+	it("stores the structured blockers the summary was rendered from", async () => {
+		// The turn-end replay can only honor a later `lens_diagnostic_mark` if
+		// the record carries a diagnostic IDENTITY; before #3246 this hop dropped
+		// `dispatchResult.blockers` on the floor and kept only the rendered text.
+		const { runPipeline } = await import("../../clients/pipeline.js");
+		const env = setupTestEnvironment("pi-lens-3246-record-provenance-");
+		try {
+			const filePath = path.join(env.tmpDir, "app.ts");
+			fs.writeFileSync(filePath, "eval(input);\n");
+			const blocker = {
+				id: "b1",
+				message: "eval() is banned",
+				filePath,
+				line: 1,
+				severity: "error" as const,
+				semantic: "blocking" as const,
+				tool: "ast-grep",
+				rule: "no-eval",
+			};
+			vi.mocked(runPipeline).mockResolvedValue({
+				output: "🔴 STOP — 1 issue(s) must be fixed:\n  L1: eval() is banned",
+				hasBlockers: true,
+				isError: false,
+				fileModified: false,
+				inlineBlockerSummary:
+					"🔴 STOP — 1 issue(s) must be fixed:\n  L1: eval() is banned",
+				inlineBlockerSources: ["ast-grep"],
+				inlineBlockerLines: [1],
+				inlineBlockerDiagnostics: [blocker],
+			});
+
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			runtime.beginTurn();
+			await handleToolResult({
+				event: {
+					toolName: "edit",
+					input: { path: filePath },
+					details: { diff: "+  1 eval(input);" },
+					content: [{ type: "text", text: "base" }],
+				},
+				getFlag: () => false,
+				dbg: () => {},
+				runtime,
+				cacheManager: new CacheManager(false),
+				biomeClient: {},
+				ruffClient: {},
+				testRunnerClient: {},
+				metricsClient: {},
+				resetLSPService: () => {},
+				agentBehaviorRecord: () => [],
+				formatBehaviorWarnings: () => "",
+				// biome-ignore lint/suspicious/noExplicitAny: partial dep surface.
+			} as any);
+
+			const record = runtime.getInlineBlockersSnapshot()[0];
+			expect(record?.summary).toContain("eval() is banned");
+			expect(record?.diagnostics).toEqual([blocker]);
+		} finally {
+			env.cleanup();
+		}
+	});
+});
+
 describe("path attribution across tool_call/tool_result (#1642)", () => {
 	beforeEach(async () => {
 		const pipeline = await import("../../clients/pipeline.js");
