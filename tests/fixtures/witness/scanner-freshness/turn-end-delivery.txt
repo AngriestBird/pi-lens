@@ -19,6 +19,6 @@ keep working
 
 === bounded freshness decision rows ===
 finding_dead_path_drop {"store":"gitleaks","byStore":{"gitleaks":1},"droppedDeadPaths":1,"deadPathCount":1,"deliveredCount":1,"statCount":2,"samplePaths":["gone/main.go"]}
-finding_stale_line_demote {"store":"govulncheck+gitleaks","byStore":{"govulncheck":1,"gitleaks":1},"demotedStalePaths":2,"stalePathCount":2,"deliveredCount":1,"statCount":2,"samplePaths":["gone/main.go","src/shared.ts"],"scannedAtByStore":{"govulncheck":"2026-08-18T07:00:00.000Z","gitleaks":"2026-08-18T07:00:00.000Z"}}
+finding_stale_line_demote {"store":"gitleaks+govulncheck","byStore":{"gitleaks":1,"govulncheck":1},"demotedStalePaths":2,"stalePathCount":2,"deliveredCount":1,"statCount":2,"samplePaths":["src/shared.ts","gone/main.go"],"scannedAtByStore":{"gitleaks":"2026-08-18T07:00:00.000Z","govulncheck":"2026-08-18T07:00:00.000Z"}}
 
 === degradation ledger ===

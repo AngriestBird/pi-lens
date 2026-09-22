@@ -465,6 +465,8 @@ export interface FindingPathPartition<T> {
  * every later turn, which is the very defect this gate exists to close.
  */
 export function partitionFindingsByCitedPath<T>(args: {
+	/** Cache/store name; the stat allowance is per store. */
+	store?: string;
 	findings: readonly T[];
 	cwd: string;
 	citedPath: (finding: T) => string | undefined;
@@ -475,7 +477,10 @@ export function partitionFindingsByCitedPath<T>(args: {
 	onMissing?: FindingMissingPolicy;
 	probePath?: (resolvedPath: string) => FindingPathFacts;
 }): FindingPathPartition<T> {
-	return partitionOneSource(args, createPathFactsMemo(args));
+	return partitionOneSource(
+		{ ...args, store: args.store ?? "" },
+		createPathFactsMemo(args),
+	);
 }
 
 /**
@@ -490,8 +495,19 @@ export function partitionFindingsByCitedPath<T>(args: {
 interface PathFactsMemo {
 	facts: Map<string, FindingPathFacts>;
 	probe: (resolvedPath: string) => FindingPathFacts;
+	/**
+	 * Stat allowance per SOURCE, not a shared pool (#3264 review F2). The facts
+	 * are shared; the budget is not. A shared pool would let the first source
+	 * spend it and leave a later one failing open as `live` — re-rendering an
+	 * edited cited line as current on a lane that never hit its own cap before
+	 * the fold. With a per-source allowance no lane can regress: a path an
+	 * earlier source already probed is a free memo hit for every later one, so
+	 * the folded delivery always probes FEWER paths than the pre-fold lanes did,
+	 * never more.
+	 */
 	limit: number;
-	truncated: boolean;
+	/** Findings that failed open past the allowance, by source name. */
+	starved: Map<string, number>;
 }
 
 function createPathFactsMemo(args: {
@@ -502,12 +518,13 @@ function createPathFactsMemo(args: {
 		facts: new Map(),
 		probe: args.probePath ?? statFindingPath,
 		limit: args.maxUniquePaths ?? MAX_FINDING_PATH_STATS,
-		truncated: false,
+		starved: new Map(),
 	};
 }
 
 function partitionOneSource<T>(
 	args: {
+		store: string;
 		findings: readonly T[];
 		cwd: string;
 		citedPath: (finding: T) => string | undefined;
@@ -538,6 +555,9 @@ function partitionOneSource<T>(
 	const deadPaths: string[] = [];
 	const stalePaths: string[] = [];
 	const seenPaths = new Set<string>();
+	// This SOURCE's own probes. A memo hit costs nothing, so an earlier source
+	// having paid for a path only ever helps this one (#3264 review F2).
+	let probed = 0;
 	for (const finding of args.findings) {
 		const cited = args.citedPath(finding);
 		if (!cited) {
@@ -556,12 +576,15 @@ function partitionOneSource<T>(
 			const resolved = resolveRunnerPath(args.cwd, cited);
 			let facts = memo.facts.get(resolved);
 			if (facts === undefined) {
-				if (memo.facts.size >= memo.limit) {
-					// Budget spent on paths we have not seen before — deliver rather
-					// than guess. Already-probed paths keep their cached facts.
-					memo.truncated = true;
+				if (probed >= memo.limit) {
+					// Allowance spent on paths nobody in this delivery has seen —
+					// deliver rather than guess, exactly as the pre-fold per-lane cap
+					// did. Guessing a verdict for a path nobody looked at is the worse
+					// error; what the fold adds is that the guess is now RECORDED.
+					memo.starved.set(args.store, (memo.starved.get(args.store) ?? 0) + 1);
 					facts = { state: "unknown" };
 				} else {
+					probed += 1;
 					facts = memo.probe(resolved);
 					memo.facts.set(resolved, facts);
 				}
@@ -591,7 +614,7 @@ function partitionOneSource<T>(
 		deadPaths,
 		stalePaths,
 		statCount: memo.facts.size,
-		truncated: memo.truncated,
+		truncated: (memo.starved.get(args.store) ?? 0) > 0,
 	};
 }
 
@@ -674,7 +697,10 @@ export function gateFindingsByPathFreshness<
 	probePath?: (resolvedPath: string) => FindingPathFacts;
 }): { [K in keyof S]: FindingFreshnessGate<SourceFinding<S[K]>> } {
 	const memo = createPathFactsMemo(args);
-	const names = Object.keys(args.sources);
+	// Sorted, not literal order: which source pays for a shared path, and the
+	// order stores appear in the records, must not depend on how the CALLER
+	// happened to write the object (#3264 review F2).
+	const names = Object.keys(args.sources).sort();
 	const gates = {} as Record<string, FindingFreshnessGate<unknown>>;
 	const dropped: Record<string, number> = {};
 	const demoted: Record<string, number> = {};
@@ -690,7 +716,10 @@ export function gateFindingsByPathFreshness<
 	const scannedAtByStore: Record<string, string> = {};
 	for (const name of names) {
 		const source = args.sources[name] as FindingFreshnessSource<unknown>;
-		const partition = partitionOneSource({ ...source, cwd: args.cwd }, memo);
+		const partition = partitionOneSource(
+			{ ...source, store: name, cwd: args.cwd },
+			memo,
+		);
 		gates[name] = { live: partition.live, stale: partition.stale };
 		if (partition.dropped.length > 0) dropped[name] = partition.dropped.length;
 		if (partition.stale.length > 0) demoted[name] = partition.stale.length;
@@ -710,9 +739,10 @@ export function gateFindingsByPathFreshness<
 		}
 	}
 	merged.statCount = memo.facts.size;
-	merged.truncated = memo.truncated;
+	merged.truncated = memo.starved.size > 0;
 	emitDeadPathDropRecord(args.cwd, merged, dropped);
 	emitStaleLineDemoteRecord(args.cwd, scannedAtByStore, merged, demoted);
+	emitStatBudgetRecord(args.cwd, memo);
 	return gates as { [K in keyof S]: FindingFreshnessGate<SourceFinding<S[K]>> };
 }
 
@@ -793,6 +823,33 @@ function emitStaleLineDemoteRecord<T>(
 					}
 				: {}),
 			...(partition.truncated ? { truncated: true } : {}),
+		},
+	});
+}
+
+/**
+ * #3264 review F2: the drop and demote records both return early when nothing
+ * was dropped or demoted, so a delivery whose only casualty was the stat
+ * allowance — every starved finding failing OPEN, delivered at full severity
+ * against a path nobody looked at — wrote no row at all. This is that row: one
+ * per delivery, naming the cap and every source that hit it, never one per
+ * finding.
+ */
+function emitStatBudgetRecord(cwd: string, memo: PathFactsMemo): void {
+	if (memo.starved.size === 0) return;
+	const stores = [...memo.starved.keys()].sort();
+	logLatency({
+		type: "phase",
+		phase: "finding_path_stat_budget_exhausted",
+		filePath: cwd,
+		durationMs: 0,
+		metadata: {
+			store: stores.join("+"),
+			byStore: Object.fromEntries(
+				stores.map((name) => [name, memo.starved.get(name) ?? 0]),
+			),
+			maxUniquePaths: memo.limit,
+			statCount: memo.facts.size,
 		},
 	});
 }

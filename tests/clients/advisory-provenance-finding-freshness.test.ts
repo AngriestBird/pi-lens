@@ -502,21 +502,26 @@ describe("stat budget across sources (#3264 review F2)", () => {
 	});
 
 	// A path already in the shared memo costs the later source nothing, so the
-	// fold can only ever probe FEWER paths than the pre-fold lanes did.
+	// fold can only ever probe FEWER paths than the pre-fold lanes did. Sources
+	// run in sorted order, so `gitleaks` pays for `shared.ts` and `govulncheck`
+	// gets it free — spending its own allowance on `own.go` instead. Pre-fold,
+	// with a cap of one each, both lanes would have probed `shared.ts`.
 	it("charges a source nothing for a path an earlier source already stat'd", () => {
 		const probe = vi.fn((): FindingPathFacts => EDITED_AFTER);
 		const gates = gateFindingsByPathFreshness({
 			cwd: "/repo",
 			sources: {
-				govulncheck: {
-					findings: [{ file: "/repo/shared.ts", rule: "GO-1" }] as Finding[],
-					scannedAt: GATE_SCANNED_AT,
-					citedPath,
-				},
 				gitleaks: {
 					findings: [
 						{ file: "/repo/shared.ts", rule: "aws-access-token" },
-						{ file: "/repo/own.ts", rule: "generic-api-key" },
+					] as Finding[],
+					scannedAt: GATE_SCANNED_AT,
+					citedPath,
+				},
+				govulncheck: {
+					findings: [
+						{ file: "/repo/shared.ts", rule: "GO-1" },
+						{ file: "/repo/own.go", rule: "GO-2" },
 					] as Finding[],
 					scannedAt: GATE_SCANNED_AT,
 					citedPath,
@@ -525,12 +530,12 @@ describe("stat budget across sources (#3264 review F2)", () => {
 			maxUniquePaths: 1,
 			probePath: probe,
 		});
-		// gitleaks' allowance paid only for `own.ts`; `shared.ts` was a memo hit.
 		expect(probe).toHaveBeenCalledTimes(2);
-		expect(gates.gitleaks.stale.map((f) => f.rule)).toEqual([
-			"aws-access-token",
-			"generic-api-key",
+		expect(gates.govulncheck.stale.map((f) => f.rule)).toEqual([
+			"GO-1",
+			"GO-2",
 		]);
+		expect(gates.govulncheck.live).toEqual([]);
 	});
 
 	// A finding past the budget fails OPEN — the pre-fold posture, preserved on

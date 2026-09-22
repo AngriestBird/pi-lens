@@ -145,6 +145,7 @@ const LAST_PHASE_EXCLUDED = new Set([
 	"availability_decision",
 	"finding_dead_path_drop",
 	"finding_stale_line_demote",
+	"finding_path_stat_budget_exhausted",
 	"lsp_scanner_coverage_gap",
 	"lsp_notify_resync_deferred",
 	"lsp_notify_write_late_landed",

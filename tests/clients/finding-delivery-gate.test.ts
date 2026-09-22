@@ -578,11 +578,29 @@ function rootIdentifier(text: string): string | undefined {
 	return /^[A-Za-z_$][\w$]*/.exec(text.trim())?.[0];
 }
 
-/** Index of the `const <ident> = …` line that binds `ident`, if any. */
-function bindingLineOf(lines: string[], ident: string): number | undefined {
+/**
+ * Index of the `const <ident> = …` line that binds `ident` — `"ambiguous"` when
+ * the file declares that name more than once.
+ *
+ * #3264 review F1: taking the FIRST file-wide match ignores lexical scope, and
+ * an outer gate-bound name shadowed by an inner hand-built object laundered
+ * through it. The rule is reject-on-ambiguity rather than resolve-by-brace-depth:
+ * a brace-depth walk over `stripCommentsOnly` text counts braces inside string
+ * literals too (this file's own fixtures contain them), so it would be a second,
+ * fooled parser deciding a security question. A governance detector must fail
+ * loudly when it cannot tell which binding a use site means — and a real surface
+ * that shadows its gate-arm binding name should rename it, which this asks for
+ * by name in the failure text.
+ */
+function bindingLineOf(
+	lines: string[],
+	ident: string,
+): number | "ambiguous" | undefined {
 	const re = new RegExp(`\\bconst\\b[^=]*\\b${ident}\\b[^=]*=`);
-	for (let i = 0; i < lines.length; i++) if (re.test(lines[i])) return i;
-	return undefined;
+	const found: number[] = [];
+	for (let i = 0; i < lines.length; i++) if (re.test(lines[i])) found.push(i);
+	if (found.length > 1) return "ambiguous";
+	return found[0];
 }
 
 /**
@@ -596,6 +614,13 @@ function bindingLineOf(lines: string[], ident: string): number | undefined {
  * bound to anything that is not a call-shaped gate — an identity stub, a
  * hand-built `{ live, stale }` object — still reds. Only the ROUTE from
  * evidence to gate got longer, never the set of things that count as a gate.
+ *
+ * #3264 review F1 sharpened two halves of that route. A binding is certified by
+ * its OWN right-hand side (`bindingRhsIsGateCall`), never by a gate call that
+ * merely sits within three lines of it — otherwise a hand-built object declared
+ * just below a real gate call inherits its certification. And a name the file
+ * declares twice is `"ambiguous"`, never resolved to the first match — otherwise
+ * a distant outer binding certifies an inner shadow.
  */
 function evidenceReachesGateCall(
 	lines: string[],
@@ -611,9 +636,33 @@ function evidenceReachesGateCall(
 	let ident = rootIdentifier(needle);
 	for (let hop = 0; ident !== undefined && hop < BINDING_CHAIN_HOPS; hop++) {
 		const bound = bindingLineOf(lines, ident);
-		if (bound === undefined) return false;
-		if (atGate(bound)) return true;
+		if (bound === undefined || bound === "ambiguous") return false;
+		if (bindingRhsIsGateCall(lines, bound, gates)) return true;
 		ident = rootIdentifier(lines[bound].slice(lines[bound].indexOf("=") + 1));
+	}
+	return false;
+}
+
+/**
+ * Is the gate call this binding's OWN initializer? Proximity is not enough: a
+ * hand-built `{ live, stale }` object declared three lines under a real gate
+ * call would otherwise inherit its certification (#3264 review F1's instance).
+ * A wrapped assignment (`const { x } =` with the call on the following line) is
+ * the one continuation accepted, because that is how the formatter breaks it.
+ */
+function bindingRhsIsGateCall(
+	lines: string[],
+	bound: number,
+	gates: readonly string[],
+): boolean {
+	const hasGate = (text: string) =>
+		gates.some((gate) => text.includes(`${gate}(`));
+	const rhs = lines[bound].slice(lines[bound].indexOf("=") + 1);
+	if (hasGate(rhs)) return true;
+	if (rhs.trim() !== "") return false;
+	for (let i = bound + 1; i < lines.length; i++) {
+		if (lines[i].trim() === "") continue;
+		return hasGate(lines[i]);
 	}
 	return false;
 }
@@ -1045,6 +1094,32 @@ let report = \`CRITICAL dependency CVEs (trivy, \${trivyAgeLabel}). Upgrade befo
 			DELIVERY_SURFACES["runtime-turn:secrets-gitleaks"],
 			seams,
 			strippedLines,
+		);
+		expect(problems.length).toBeGreaterThan(0);
+		expect(problems[0]).toMatch(/possible identity-stub/);
+	});
+
+	// RED PROOF (#3264 review F1, distant case): the shadow does not have to be
+	// near the real gate call. Reject-on-ambiguity is what catches this one —
+	// `bindingRhsIsGateCall` alone would happily certify the outer binding.
+	it("RED PROOF: a shadow far from the real gate call does not launder either", () => {
+		const spacer = Array.from({ length: 40 }, (_, i) => `// spacer ${i}`);
+		const shadowedSource = [
+			"const scannerGates = gateFindingsByPathFreshness({ sources: {} });",
+			...spacer,
+			"const scannerGates = { gitleaks: { live: raw, stale: [] } };",
+			"const gitleaksGate = scannerGates.gitleaks;",
+			"const keptLive = filterFindingsByDisposition(",
+			"  gitleaksGate.live,",
+			");",
+			"// @delivery-surface: runtime-turn:secrets-gitleaks",
+			'advisoryParts.push("finding");',
+		].join("\n");
+		const problems = checkRuntimeTurnSeamEvidenceExclusive(
+			"runtime-turn:secrets-gitleaks",
+			DELIVERY_SURFACES["runtime-turn:secrets-gitleaks"],
+			scanTaggedSeams(shadowedSource, RUNTIME_TURN_SEAM_PATTERN),
+			stripCommentsOnly(shadowedSource).split("\n"),
 		);
 		expect(problems.length).toBeGreaterThan(0);
 		expect(problems[0]).toMatch(/possible identity-stub/);
