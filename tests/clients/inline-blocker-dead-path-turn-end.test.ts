@@ -28,12 +28,21 @@ vi.mock("../../clients/latency-logger.js", async (importOriginal) => {
 	return { ...actual, logLatency };
 });
 
-// Real runPipeline; only the dispatcher seam is mocked (same shape the #2028
-// pipeline tests use), so the producer-side deleted-path gate runs for real.
-vi.mock("../../clients/dispatch/integration.js", () => ({
-	dispatchLintWithResult: vi.fn(),
-	computeCascadeForFile: vi.fn().mockResolvedValue(undefined),
-}));
+// Real runPipeline; only the dispatcher seam is mocked. The factory spreads
+// the original module (#2281 whole-module ratchet: a partial object-literal
+// factory silently drops newly added production exports) and overrides just
+// the two seams the pipeline consumes.
+vi.mock("../../clients/dispatch/integration.js", async (importOriginal) => {
+	const actual =
+		await importOriginal<
+			typeof import("../../clients/dispatch/integration.js")
+		>();
+	return {
+		...actual,
+		dispatchLintWithResult: vi.fn(),
+		computeCascadeForFile: vi.fn().mockResolvedValue(undefined),
+	};
+});
 
 import { dispatchLintWithResult } from "../../clients/dispatch/integration.js";
 import { CacheManager } from "../../clients/cache-manager.js";
@@ -50,7 +59,8 @@ import { resetDegradationLedger } from "../../clients/degradation-ledger.js";
 import { setupTestEnvironment } from "./test-utils.js";
 import { makeLspServiceDouble } from "../support/lsp-service-double.js";
 
-vi.mock("../../clients/lsp/index.js", () => ({
+vi.mock("../../clients/lsp/index.js", async (importOriginal) => ({
+	...(await importOriginal<typeof import("../../clients/lsp/index.js")>()),
 	getLSPService: vi.fn(),
 }));
 
