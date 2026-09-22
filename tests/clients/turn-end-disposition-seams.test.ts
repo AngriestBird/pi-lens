@@ -150,7 +150,7 @@ describe("knip turn-end seams honor dispositions (#3248)", () => {
 	 * to files this turn edited — so the fixture needs a previous cache, a new
 	 * issue, and that file registered as edited.
 	 */
-	function knipScenario(cwd: string, issues: unknown[]) {
+	function knipScenario(issues: unknown[]) {
 		return {
 			knipClient: {
 				ensureAvailable: async () => true,
@@ -194,7 +194,7 @@ describe("knip turn-end seams honor dispositions (#3248)", () => {
 			});
 
 			await handleTurnEnd(
-				makeTurnEndDeps(runtime, cacheManager, cwd, knipScenario(cwd, issues)),
+				makeTurnEndDeps(runtime, cacheManager, cwd, knipScenario(issues)),
 			);
 
 			const text = turnEndText(cacheManager, cwd, runtime);
@@ -232,7 +232,7 @@ describe("knip turn-end seams honor dispositions (#3248)", () => {
 					runtime,
 					cacheManager,
 					cwd,
-					knipScenario(cwd, [
+					knipScenario([
 						{ type: "unlisted", file: filePath, name: "missing-dep", line: 1 },
 					]),
 				),
@@ -272,7 +272,7 @@ describe("knip turn-end seams honor dispositions (#3248)", () => {
 					runtime,
 					cacheManager,
 					cwd,
-					knipScenario(cwd, [
+					knipScenario([
 						{ type: "export", file: filePath, name: "deadExport", line: 1 },
 						{ type: "export", file: filePath, name: "liveExport", line: 2 },
 					]),
@@ -289,7 +289,7 @@ describe("knip turn-end seams honor dispositions (#3248)", () => {
 });
 
 describe("dead-code turn-end advisory honors dispositions (#3248)", () => {
-	function deadCodeClient(cwd: string, issues: Record<string, unknown>[]) {
+	function deadCodeClient(issues: Record<string, unknown>[]) {
 		return {
 			id: "vulture",
 			language: "python",
@@ -348,7 +348,7 @@ describe("dead-code turn-end advisory honors dispositions (#3248)", () => {
 			await handleTurnEnd(
 				makeTurnEndDeps(runtime, cacheManager, cwd, {
 					deadCodeClients: [
-						deadCodeClient(cwd, [
+						deadCodeClient([
 							{
 								category: "export",
 								kind: "function",
