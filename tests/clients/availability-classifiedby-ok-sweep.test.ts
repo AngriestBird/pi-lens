@@ -119,6 +119,22 @@ describe("availability-classifiedby scanner self-test", () => {
 		expect(found.some((site) => site.line === 8)).toBe(false);
 	});
 
+	it("does not count a call written only as template-literal text (#3257)", () => {
+		const needle =
+			'logAvailabilityDecision({ cause: "ok", classifiedBy: "probe" });';
+		expect(scanSource("const doc = `" + needle + "`;", "fixture.ts")).toEqual(
+			[],
+		);
+	});
+
+	it("counts a call inside a template interpolation (#3257)", () => {
+		const needle =
+			'logAvailabilityDecision({ cause: "ok", classifiedBy: "probe" });';
+		expect(
+			scanSource("const doc = `${" + needle + "}`;", "fixture.ts"),
+		).toMatchObject([{ causeOk: true, hasClassifiedBy: true }]);
+	});
+
 	it("excludes the function's own declaration (#2226 review F3)", () => {
 		expect(found.some((site) => site.line === 9)).toBe(false);
 	});
