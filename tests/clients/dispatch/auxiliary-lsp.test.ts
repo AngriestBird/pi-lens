@@ -634,20 +634,19 @@ describe("rule-ignore catalog precedence (#3041)", () => {
 	it("matches an out-of-tree file by its absolute path", () => {
 		const outside = fs.mkdtempSync(path.join(os.tmpdir(), "rule-ignores-out-"));
 		try {
-			const loggerKept = applyAuxiliarySuppressions(
-				[diag({ source: "ast-grep", code: RULE })],
-				content,
-				{ filePath: path.join(outside, "lib", "logger.ts"), scanRoot: tmp },
-			).length;
-			const scriptKept = applyAuxiliarySuppressions(
-				[diag({ source: "ast-grep", code: RULE })],
-				content,
-				{ filePath: path.join(outside, "scripts", "cli.ts"), scanRoot: tmp },
-			).length;
-			// `**/logger.ts` reaches an absolute path; the root-anchored
-			// `scripts/**` deliberately does not.
-			expect(loggerKept).toBe(0);
-			expect(scriptKept).toBe(1);
+			const keptFor = (relative: string) =>
+				applyAuxiliarySuppressions(
+					[diag({ source: "ast-grep", code: RULE })],
+					content,
+					{ filePath: path.join(outside, relative), scanRoot: tmp },
+				).length;
+			// `**/logger.ts` reaches an absolute path; directory carve-outs
+			// deliberately remain contained by the scan root.
+			expect(keptFor(path.join("lib", "logger.ts"))).toBe(0);
+			expect(keptFor(path.join("lib", "logger.js"))).toBe(0);
+			expect(keptFor(path.join("lib", "logger.mjs"))).toBe(0);
+			expect(keptFor(path.join("scripts", "cli.ts"))).toBe(1);
+			expect(keptFor(path.join("bin", "cli.ts"))).toBe(1);
 		} finally {
 			removeTempDirSync(outside);
 		}

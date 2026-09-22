@@ -26,6 +26,7 @@ import { loadPiLensProjectConfig } from "../../clients/project-lens-config.js";
 import type { RuffClient } from "../../clients/ruff-client.js";
 import { TestRunnerClient } from "../../clients/test-runner-client.js";
 import {
+	_getDegradationLedgerStateForTests,
 	getDegradationSummary,
 	resetDegradationLedger,
 } from "../../clients/degradation-ledger.js";
@@ -515,6 +516,178 @@ describe("Pipeline", () => {
 			expect(result.output).not.toContain("clean");
 			expect(result.output).toBe("");
 			expect(result.postWriteStateHash).toBe(formatterStateHash);
+		});
+
+		it("does not autonomously rewrite an observed opaque mutation", async () => {
+			// Regression #3226: opaque bash recovery proves only that bytes changed;
+			// treating that observation as model authorship lets the normal pipeline
+			// rewrite extracted/downloaded/generated artifacts.
+			const filePath = createTempFile(
+				tmpDir,
+				"opaque-artifact.js",
+				"(function(){\n  return 1;\n})();\n",
+			);
+			const before = fs.readFileSync(filePath, "utf8");
+			vi.mocked(dispatchLintWithResult).mockResolvedValue({
+				diagnostics: [],
+				blockers: [],
+				warnings: [],
+				baselineWarningCount: 0,
+				fixed: [],
+				resolvedCount: 0,
+				output: "",
+				blockerOutput: "",
+				hasBlockers: false,
+			});
+			const formatFile = vi.fn(async (fp: string) => {
+				fs.writeFileSync(fp, "(() => 1)();\n");
+				return {
+					filePath: fp,
+					formatters: [
+						{
+							name: "biome",
+							success: true,
+							changed: true,
+							outcome: "formatted" as const,
+						},
+					],
+					anyChanged: true,
+					allSucceeded: true,
+				};
+			});
+
+			const result = await runPipeline(
+				createMockContext(filePath, {
+					getFlag: (name) => name === "immediate-format",
+					allowAutonomousWriters: false,
+				}),
+				createMockDeps({
+					getFormatService: () => ({ recordRead: vi.fn(), formatFile }) as any,
+				}),
+			);
+
+			expect(formatFile).not.toHaveBeenCalled();
+			expect(fs.readFileSync(filePath, "utf8")).toBe(before);
+			expect(result.fileModified).toBe(false);
+			expect(result.postAutofixNotice).toBeUndefined();
+			expect(
+				getDegradationSummary().some(
+					(entry) => entry.kind === "opaque-mutation-ownership-boundary",
+				),
+			).toBe(true);
+		});
+
+		it("keeps opaque findings advisory instead of directing an edit", async () => {
+			// The artifact remains analyzable, but blocker/actionable delivery must
+			// not turn third-party bytes into instructions for the model to edit.
+			const filePath = createTempFile(
+				tmpDir,
+				"opaque-findings.js",
+				"const x=1;\n",
+			);
+			const blocker = {
+				id: "opaque-blocker",
+				message: "OPAQUE-BLOCKER",
+				filePath,
+				severity: "error" as const,
+				semantic: "blocking" as const,
+				tool: "biome",
+				line: 1,
+			};
+			const warning = {
+				id: "opaque-actionable",
+				message: "OPAQUE-ACTIONABLE",
+				filePath,
+				severity: "warning" as const,
+				semantic: "warning" as const,
+				tool: "biome",
+				line: 1,
+				fixable: true,
+				fixKind: "pipeline" as const,
+				fixSuggestion: "edit this file",
+			};
+			vi.mocked(dispatchLintWithResult).mockResolvedValue({
+				diagnostics: [blocker, warning],
+				blockers: [blocker],
+				warnings: [warning],
+				baselineWarningCount: 0,
+				fixed: [],
+				resolvedCount: 0,
+				output: "OPAQUE-BLOCKER\nOPAQUE-ACTIONABLE",
+				blockerOutput: "OPAQUE-BLOCKER",
+				hasBlockers: true,
+			});
+
+			const result = await runPipeline(
+				createMockContext(filePath, { allowAutonomousWriters: false }),
+				createMockDeps(),
+			);
+
+			expect(result.diagnostics).toEqual([blocker, warning]);
+			expect(result.hasBlockers).toBe(false);
+			expect(result.inlineBlockerSummary).toBeUndefined();
+			expect(result.actionableWarnings).toEqual([]);
+			expect(result.output).toContain("OPAQUE-ACTIONABLE");
+			expect(result.output).not.toContain("OPAQUE-BLOCKER");
+		});
+
+		it("bounds opaque ownership telemetry across many paths (#3226 review P2)", async () => {
+			// Recurrence: per-path once keys made opaque recovery retain one hidden
+			// identity per artifact. Drive the real pipeline seam with the reviewer's
+			// 10,000-path population and inspect both hidden ledger populations and
+			// the independent public count/dropped evidence.
+			vi.mocked(dispatchLintWithResult).mockResolvedValue({
+				diagnostics: [],
+				blockers: [],
+				warnings: [],
+				baselineWarningCount: 0,
+				fixed: [],
+				resolvedCount: 0,
+				output: "",
+				blockerOutput: "",
+				hasBlockers: false,
+			});
+			const deps = createMockDeps({ getFormatService: () => ({}) as any });
+			const firstPath = path.join(tmpDir, "opaque-0.js");
+			await runPipeline(
+				createMockContext(firstPath, { allowAutonomousWriters: false }),
+				deps,
+			);
+			await runPipeline(
+				createMockContext(firstPath, { allowAutonomousWriters: false }),
+				deps,
+			);
+			for (let index = 1; index < 10_000; index++) {
+				await runPipeline(
+					createMockContext(path.join(tmpDir, `opaque-${index}.js`), {
+						allowAutonomousWriters: false,
+					}),
+					deps,
+				);
+			}
+
+			const state = _getDegradationLedgerStateForTests();
+			expect(state.onceKeys).toBe(0);
+			expect(state.tallies).toBe(1);
+			expect(state.retainedEntries).toBe(1);
+			expect(getDegradationSummary()).toEqual([
+				expect.objectContaining({
+					kind: "opaque-mutation-ownership-boundary",
+					count: 10_001,
+					droppedCount: 10_001 - 1,
+					latestReasons: expect.arrayContaining([
+						expect.objectContaining({ subject: "pipeline" }),
+					]),
+				}),
+			]);
+
+			resetDegradationLedger();
+			expect(_getDegradationLedgerStateForTests()).toEqual({
+				onceKeys: 0,
+				tallies: 0,
+				retainedEntries: 0,
+			});
+			expect(getDegradationSummary()).toEqual([]);
 		});
 
 		it("surfaces formatter failures instead of plain clean output", async () => {

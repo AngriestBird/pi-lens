@@ -108,6 +108,29 @@ describe("tree-sitter runner — dispatch filtering (#448)", () => {
 		expect(firedRuleIds(kept)).toContain("console-statement");
 	}, 30_000);
 
+	it("applies console directory carve-outs at nested depths only", async () => {
+		for (const relPath of [
+			"packages/tool/scripts/cli.ts",
+			"packages/tool/bin/runner.ts",
+		]) {
+			const carved = await treeSitterRunner.run(
+				env.addFile(relPath, "console.log('cli output');\n").ctx,
+			);
+			expect(firedRuleIds(carved)).not.toContain("console-statement");
+		}
+
+		for (const relPath of [
+			"src/myscripts/app.ts",
+			"src/scripts-file.ts",
+			"src/bin-helper.ts",
+		]) {
+			const kept = await treeSitterRunner.run(
+				env.addFile(relPath, "console.log('application output');\n").ctx,
+			);
+			expect(firedRuleIds(kept)).toContain("console-statement");
+		}
+	}, 30_000);
+
 	it("applies inline suppression to a diagnostic produced by the real rule", async () => {
 		const content = [
 			"function suppressed() {",

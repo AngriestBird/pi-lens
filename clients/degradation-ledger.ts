@@ -577,6 +577,8 @@ export type DegradationKind =
 	| "observed-mutation-dir-cap"
 	/** An observed directory mutation exceeded the same-turn analysis fan-out. */
 	| "observed-mutation-dispatch-cap"
+	/** Opaque mutation was analyzed without granting autonomous writer rights. */
+	| "opaque-mutation-ownership-boundary"
 	/** Opengrep completed with partial parsing warnings (#2943). */
 	| "opengrep-partial-scan"
 	/** Opengrep refused the requested root or reported a scan error (#2943). */
@@ -826,6 +828,8 @@ export type DegradationKind =
 	 * the per-kind entry bound is reached.
 	 */
 	| "runner-parsed-nothing"
+	/** Windows/libuv cannot self-send SIGHUP after console-close cleanup. */
+	| "safe-spawn-signal-reraise-unsupported"
 	/** A duplicate RPC session start was suppressed after its first full pass. */
 	/** A self-drift baseline could not be verified within its available evidence. */
 	| "self-drift-hash-budget-exhausted"
@@ -1151,6 +1155,25 @@ let ledgerGeneration = 0;
 /** Current session generation. Bump on every `resetDegradationLedger()`. */
 export function getDegradationLedgerGeneration(): number {
 	return ledgerGeneration;
+}
+
+/**
+ * Test-only population probe for bounded-container regressions. Keep this
+ * read-only and deliberately expose sizes, not the retained identities.
+ */
+export function _getDegradationLedgerStateForTests(): {
+	onceKeys: number;
+	tallies: number;
+	retainedEntries: number;
+} {
+	return {
+		onceKeys: onceKeys.size,
+		tallies: tallies.size,
+		retainedEntries: [...groups.values()].reduce(
+			(total, group) => total + group.entries.length,
+			0,
+		),
+	};
 }
 
 export function recordDegradation(record: DegradationRecord): boolean {

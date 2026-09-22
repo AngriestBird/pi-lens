@@ -592,10 +592,11 @@ jobs:
       # this job carries no continue-on-error, would otherwise be
       # INDISTINGUISHABLE at the check level from a healthy run that found
       # real issues (also exit 1: #2697's findings are still un-triaged).
-      # `--format default` (pinned below, also fixing the CI auto-selected
-      # `github` reporter stripping every rule id from #2700's per-rule
-      # table) prints a `Finished in … on N files with R rules using T
-      # threads.` trailer this step parses. The step's own natural exit
+      # The advisory command uses Unix output because the pinned
+      # oxlint-tsgolint toolchain's default reporter can panic. Unix output
+      # has no rule-count trailer, so the step asks the SAME advisory argv for
+      # oxlint's machine-readable --print-config surface and counts enabled
+      # rules. The step's own natural exit
       # code ($status) is deliberately NOT what decides this job's
       # conclusion (#2700 review round 3): a healthy run with 4900+
       # un-triaged findings must read GREEN (type-aware ran correctly),
@@ -613,7 +614,8 @@ jobs:
           echo "$output"
           echo "(lint:js:advisory exited $status -- findings, if any, are advisory and do not affect this job's conclusion; only the rule-count floor below does)"
           RULE_FLOOR=100
-          rules="$(printf '%s\n' "$output" | grep -oE 'with [0-9]+ rules' | grep -oE '[0-9]+' | tail -1 || true)"
+          config="$(npm run lint:js:advisory --silent -- --print-config 2>/dev/null || true)"
+          rules="$(printf '%s\n' "$config" | node scripts/count-oxlint-rules.mjs)"
           rules="${rules:-0}"
           if [ "$rules" -lt "$RULE_FLOOR" ]; then
             echo "::error::oxlint advisory ran with only $rules rules (floor $RULE_FLOOR) -- oxlint-tsgolint is likely missing or --type-aware silently degraded; this is NOT the same as a clean or lightly-findinged run"
