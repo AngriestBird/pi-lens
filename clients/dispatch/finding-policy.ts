@@ -242,6 +242,46 @@ export function inlineBlockerIdentities(diagnostic: {
 	]);
 }
 
+/**
+ * The whole stack for a turn-end PUSH surface that renders dispatch
+ * diagnostics for ONE file — the late-auxiliary drain (#3102) and the
+ * late-runner drain (#3248), which are the same shape: a post-freshness-gate
+ * `Diagnostic[]`, a `<file>:<line>:<col> [<rule>] <message>` rendering that
+ * prints the rule but never the tool, and a suppressed count the caller
+ * surfaces once per delivery (#1616).
+ *
+ * It exists so those two lanes cannot drift apart: this used to be open-coded
+ * at the late-auxiliary site, and #3248 would have made a second copy of the
+ * identical four arguments — the single-source rule's exact failure shape. The
+ * caller still owns its own content read, because the two lanes read on
+ * different schedules (the auxiliary drain reads once per FILE across several
+ * server pairs; the runner drain reads once per pending runner).
+ *
+ * `content` is `undefined` when the file could not be read: it becomes `""`,
+ * `FindingPolicyOptions.content`'s documented fail-open input, so the STRICT
+ * anchor cannot match and nothing is hidden over an I/O error (shape 48).
+ */
+export function applyPushedFindingPolicy<
+	T extends DispositionCandidate & {
+		rule?: string;
+		code?: string;
+		id?: string;
+	},
+>(
+	findings: T[],
+	options: { cwd: string; filePath: string; content: string | undefined },
+): { kept: T[]; suppressed: number } {
+	const { kept } = applyFindingPolicy(findings, {
+		cwd: options.cwd,
+		filePath: options.filePath,
+		content: options.content ?? "",
+		// mtime-cached, so several files in one drain cost one stat.
+		policyMap: loadProjectRulePolicyMap(options.cwd),
+		identities: renderedRuleIdentities,
+	});
+	return { kept, suppressed: findings.length - kept.length };
+}
+
 /** Every rendered `(tool, rule)` spelling plus the `tool`-omitted form of
  * each, de-duplicated, in order. One derivation for both callers. */
 function expandRenderedIdentities(

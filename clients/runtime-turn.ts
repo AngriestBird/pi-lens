@@ -11,6 +11,7 @@ import { logActionableWarningsEvent } from "./actionable-warnings-logger.js";
 import {
 	appendCodeQualityWarningsHistory,
 	buildCodeQualityWarningsReport,
+	type CodeQualityWarningRecord,
 	formatCodeQualityWarningsAdvisory,
 	writeCodeQualityWarningsReport,
 } from "./code-quality-warnings.js";
@@ -79,7 +80,10 @@ import {
 } from "./project-diagnostics/runner-adapters/trivy.js";
 import { knipIssuesToProjectDiagnostics } from "./project-diagnostics/runner-adapters/knip.js";
 import type { ProjectDiagnostic } from "./project-diagnostics/types.js";
-import { applyDispositionsMultiFile } from "./diagnostic-dispositions.js";
+import {
+	applyDispositionsMultiFile,
+	type DispositionCandidate,
+} from "./diagnostic-dispositions.js";
 import { logLatency } from "./latency-logger.js";
 import {
 	getLspBudgetIdleTimeoutMs,
@@ -129,8 +133,7 @@ import {
 } from "./persistent-reverify.js";
 import { cascadeCarrySuffix } from "./cascade-format.js";
 import {
-	applyFindingPolicy,
-	loadProjectRulePolicyMap,
+	applyPushedFindingPolicy,
 	renderedRuleIdentities,
 } from "./dispatch/finding-policy.js";
 import { detectFileRole } from "./file-role.js";
@@ -505,20 +508,52 @@ function filterFindingsByDisposition<F>(
 	toDiagnostic: (finding: F) => ProjectDiagnostic,
 ): { kept: F[]; suppressed: number } {
 	if (findings.length === 0) return { kept: findings, suppressed: 0 };
-	const candidates = findings.map((finding) => ({
-		finding,
-		diagnostic: toDiagnostic(finding),
-	}));
+	// #3248: every `(tool, rule)` spelling a mark against these findings can
+	// carry, not just the canonical one. NONE of these turn-end surfaces prints
+	// a tool — knip renders `<file>:<line> — <type>: <name>`, dead-code
+	// `unused <kind> <name>`, the security lanes `Potential secret: <rule>` —
+	// so an agent marking from what it was SHOWN has no tool to pass, and
+	// `lens_diagnostic_mark`'s `tool` parameter is optional. Honouring only the
+	// spelling `lens_diagnostics` happens to show is the #3088 non-convergence,
+	// and it is fixed HERE, once, for every caller of this helper rather than
+	// per lane. Widening is safe for the blocking members because a
+	// `semantic: "blocking"` finding can still only be dropped by the STRICT,
+	// content-bound false-positive anchor, which keeps binding the normalized
+	// message and the flagged line's content.
+	// The expanded candidate is a `DispositionCandidate` with a path, NOT a
+	// `ProjectDiagnostic`: the tool-omitted spelling has no `tool`, which that
+	// type requires. Only the anchor derivation reads it.
+	const candidates = findings.flatMap((finding) => {
+		const diagnostic = toDiagnostic(finding);
+		return renderedRuleIdentities(diagnostic).map((identity) => ({
+			finding,
+			candidate: {
+				filePath: diagnostic.filePath,
+				message: diagnostic.message,
+				...(diagnostic.line !== undefined && { line: diagnostic.line }),
+				...(diagnostic.semantic !== undefined && {
+					semantic: diagnostic.semantic,
+				}),
+				...(identity.tool !== undefined && { tool: identity.tool }),
+				...(identity.rule !== undefined && { rule: identity.rule }),
+			} satisfies DispositionCandidate & { filePath: string },
+		}));
+	});
 	const survivors = new Set(
 		applyDispositionsMultiFile(
-			candidates.map((c) => c.diagnostic),
+			candidates.map((c) => c.candidate),
 			cwd,
 			(d) => d.filePath,
 		),
 	);
-	const kept = candidates
-		.filter((c) => survivors.has(c.diagnostic))
-		.map((c) => c.finding);
+	const disposed = new Set<F>();
+	for (const candidate of candidates) {
+		if (!survivors.has(candidate.candidate)) disposed.add(candidate.finding);
+	}
+	const kept =
+		disposed.size === 0
+			? findings
+			: findings.filter((finding) => !disposed.has(finding));
 	return { kept, suppressed: findings.length - kept.length };
 }
 
@@ -1650,6 +1685,8 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		totalIssues?: number;
 		newIssues?: number;
 		blockerIssues?: number;
+		/** #3248: findings dropped by a stored disposition before rendering. */
+		dispositionSuppressed?: number;
 		reason?: string;
 		/** Set when the failure was an availability verdict, not a knip run. */
 		failureKind?: string;
@@ -1703,6 +1740,9 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				totalIssues: knipResult.issues.length,
 				newIssues: 0,
 				blockerIssues: 0,
+				// #3248: bounded per-turn, on the row this lane already writes —
+				// never one record per finding.
+				dispositionSuppressed: 0,
 				...(!knipResult.success && { reason: knipResult.summary }),
 				...(knipResult.failureKind && { failureKind: knipResult.failureKind }),
 				...(knipWouldPoison && { cacheKept: true }),
@@ -1732,7 +1772,37 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 					projectDiagnosticsSources.add("knip");
 				}
 
-				const blockerIssues = newIssues.filter(
+				// #3248: what the agent READS goes through the same stored-
+				// disposition filter every other findings surface applies, keyed off
+				// knip's OWN `ProjectDiagnostic` adapter — the identity
+				// `lens_diagnostics` surfaces and `lens_diagnostic_mark` anchors
+				// against — so a marked finding stops re-reporting here. The
+				// `projectDiagnosticsDelta` push above deliberately keeps the
+				// UNFILTERED set: that record is what the scan found, and its reader
+				// (`lens_diagnostics`) applies dispositions on read, so filtering it
+				// here would apply the same policy twice on one lane.
+				// Paired through `flatMap` rather than indexing the adapter's array:
+				// `knipIssuesToProjectDiagnostics` is a straight `issues.map(...)`
+				// (one diagnostic per issue, never empty), so this keeps the pairing
+				// total while staying honest under `noUncheckedIndexedAccess`.
+				const knipPaired = newIssues.flatMap((issue) =>
+					knipIssuesToProjectDiagnostics(cwd, [issue]).map((diagnostic) => ({
+						issue,
+						diagnostic,
+					})),
+				);
+				const knipFiltered = filterFindingsByDisposition(
+					knipPaired,
+					cwd,
+					(pair) => pair.diagnostic,
+				);
+				const knipDeliverable = {
+					kept: knipFiltered.kept.map((pair) => pair.issue),
+					suppressed: knipFiltered.suppressed,
+				};
+				knipMeta.dispositionSuppressed = knipDeliverable.suppressed;
+
+				const blockerIssues = knipDeliverable.kept.filter(
 					(i) => i.type === "unlisted" || i.type === "bin",
 				);
 				knipMeta.blockerIssues = blockerIssues.length;
@@ -1762,7 +1832,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				// drown the blockers and burn context every turn); it's available
 				// on demand via lens_diagnostics. The delta also feeds the session-slop
 				// record (`projectDiagnosticsDelta`) above.
-				const unusedExportDelta = newIssues.filter(
+				const unusedExportDelta = knipDeliverable.kept.filter(
 					(i) => i.type === "export" || i.type === "enumMember",
 				);
 				if (unusedExportDelta.length > 0) {
@@ -1802,6 +1872,8 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		success?: boolean;
 		totalIssues?: number;
 		newIssues?: number;
+		/** #3248: findings dropped by a stored disposition before rendering. */
+		dispositionSuppressed?: number;
 		/** Why this turn produced no delta — the five states are otherwise identical. */
 		reason?: string;
 		/** True when a failed run left the previous good cache in place (#1467). */
@@ -1822,6 +1894,8 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		const modifiedFiles = (): Set<string> =>
 			(modifiedSet ??= new Set(files.map((f) => resolveRunnerPath(cwd, f))));
 		let newIssueTotal = 0;
+		/** #3248: bounded per-turn on this lane's own row, never per finding. */
+		let deadCodeDispositionSuppressed = 0;
 		const reasons: string[] = [];
 		// A malformed client or deps object must never abort turn_end. Before the
 		// per-turn delta this block only read a cache; now it iterates and awaits,
@@ -1916,8 +1990,28 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 						),
 					);
 					projectDiagnosticsSources.add("dead-code");
+					// #3248: the rendered advisory takes the stored-disposition
+					// filter, keyed off this lane's OWN adapter. The delta record
+					// above keeps the unfiltered set — its reader applies the policy
+					// on read, so filtering both would double-apply on one lane.
+					const deadCodeDeliverable = filterFindingsByDisposition(
+						newIssues,
+						cwd,
+						(issue) =>
+							deadCodeIssueToProjectDiagnostic(cwd, issue, result.language),
+					);
+					deadCodeDispositionSuppressed += deadCodeDeliverable.suppressed;
+					// Every finding on this scan was marked: a PUSH surface stays
+					// silent rather than re-announcing that the mark is working; the
+					// count rides this lane's bounded per-turn row.
+					if (deadCodeDeliverable.kept.length === 0) {
+						reasons.push(`${client.id}:all_disposed`);
+						continue;
+					}
 					// @delivery-surface: runtime-turn:dead-code-advisory
-					advisoryParts.push(formatDeadCodeDelta(newIssues, result.language));
+					advisoryParts.push(
+						formatDeadCodeDelta(deadCodeDeliverable.kept, result.language),
+					);
 				} catch (err) {
 					dbg(`turn_end: dead-code(${client.id}) failed: ${err}`);
 					reasons.push(`${client.id}:threw`);
@@ -1928,6 +2022,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			reasons.push("block_threw");
 		}
 		deadCodeMeta.newIssues = newIssueTotal;
+		deadCodeMeta.dispositionSuppressed = deadCodeDispositionSuppressed;
 		if (reasons.length > 0) deadCodeMeta.reason = reasons.join(",");
 	}
 	logLatency({
@@ -3318,12 +3413,15 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 					"the affected files may have unreported callers.",
 			);
 		} else {
+			const callGraphStart = Date.now();
 			try {
 				const { impact, formatImpact, parseSymbolKey } =
 					await import("./call-graph.js");
 				const { callGraphImpactToProjectDiagnostics } =
 					await import("./project-diagnostics/runner-adapters/call-graph-impact.js");
 				const impactLines: string[] = [];
+				/** #3248: bounded per-turn, never per finding. */
+				let callGraphDispositionSuppressed = 0;
 				const impactFindings: {
 					calleeKey: string;
 					results: ReturnType<typeof impact>;
@@ -3362,7 +3460,43 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 						});
 						if (results.length > 0) {
 							impactFindings.push({ calleeKey, results });
-							const summary = formatImpact(results, cwd);
+							// #3248: the rendered line takes the stored-disposition
+							// filter. A result is mapped to its diagnostic by the
+							// lane's OWN adapter, ONE result at a time, so the
+							// identity can never diverge from the one
+							// `lens_diagnostics` surfaces and a mark anchors against
+							// — and a result the adapter does not map (the Review
+							// tier, an unattributable key, a test-role caller) is
+							// kept unconditionally: it is not markable, so nothing
+							// may suppress it. Re-rendered with `formatImpact`, the
+							// same renderer, never a second one.
+							// `flatMap` rather than a push-under-an-`if`: an entry the
+							// adapter does not map simply yields nothing, so the array
+							// is well-typed with no branch whose removal changes no
+							// behaviour (there is nothing here to mutate).
+							const markable = results.flatMap((result) =>
+								callGraphImpactToProjectDiagnostics(cwd, [
+									{ calleeKey, results: [result] },
+								]).map((diagnostic) => ({ result, diagnostic })),
+							);
+							const filtered = filterFindingsByDisposition(
+								markable,
+								cwd,
+								(entry) => entry.diagnostic,
+							);
+							callGraphDispositionSuppressed += filtered.suppressed;
+							const keptEntries = new Set(filtered.kept);
+							const dropped = new Set(
+								markable
+									.filter((entry) => !keptEntries.has(entry))
+									.map((entry) => entry.result),
+							);
+							const survivors =
+								dropped.size === 0
+									? results
+									: results.filter((r) => !dropped.has(r));
+							const summary =
+								survivors.length > 0 ? formatImpact(survivors, cwd) : "";
 							if (summary)
 								impactLines.push(
 									`  ${parseSymbolKey(calleeKey).symbolName ?? calleeKey}: ${summary}`,
@@ -3385,6 +3519,23 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 						projectDiagnosticsDelta.push(...impactDiagnostics);
 						projectDiagnosticsSources.add("call-graph");
 					}
+				}
+				// #3248: this lane wrote nothing per turn, so its delivery decision
+				// — including how many callers a stored disposition dropped — was
+				// unobservable. One bounded row per turn, only when the lane ran.
+				if (impactFindings.length > 0 || callGraphDispositionSuppressed > 0) {
+					logLatency({
+						type: "phase",
+						toolName: "turn_end",
+						filePath: cwd,
+						phase: "call_graph_impact",
+						durationMs: Date.now() - callGraphStart,
+						metadata: {
+							callees: impactFindings.length,
+							lines: impactLines.length,
+							dispositionSuppressed: callGraphDispositionSuppressed,
+						},
+					});
 				}
 				// Non-fatal — call graph is best-effort
 			} catch {
@@ -3643,11 +3794,43 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 
 	const t5 = Date.now();
 	try {
+		// #3248: the code-quality records were filtered at DISPATCH time, before
+		// any `lens_diagnostic_mark`. `lens_diagnostics mode=delta` re-applies
+		// dispositions when it re-serves this same cache
+		// (`tools/lens-diagnostics.ts`'s `visibleWarningFiles`), so without this
+		// the turn-end advisory counted warnings the delta view had already
+		// dropped — the two surfaces disagreed about the same records. Filtered
+		// at the report INPUT so the advisory, the persisted report and the delta
+		// view all agree; the delta view's own filter then re-applies to the same
+		// set and is idempotent. Per file, because the anchor is content-bound.
+		const qualityWarningsByFile = new Map<string, CodeQualityWarningRecord[]>();
+		for (const warning of runtime.peekCodeQualityWarnings()) {
+			const group = qualityWarningsByFile.get(warning.filePath);
+			if (group) group.push(warning);
+			else qualityWarningsByFile.set(warning.filePath, [warning]);
+		}
+		const qualityWarnings: CodeQualityWarningRecord[] = [];
+		let qualityDispositionSuppressed = 0;
+		for (const [filePath, group] of qualityWarningsByFile) {
+			let content: string | undefined;
+			try {
+				content = fs.readFileSync(filePath, "utf-8");
+			} catch {
+				content = undefined;
+			}
+			const { kept, suppressed } = applyPushedFindingPolicy(group, {
+				cwd,
+				filePath,
+				content,
+			});
+			qualityWarnings.push(...kept);
+			qualityDispositionSuppressed += suppressed;
+		}
 		const qualityReport = buildCodeQualityWarningsReport({
 			cwd,
 			sessionId: runtime.telemetrySessionId,
 			turnIndex: runtime.turnIndex,
-			warnings: runtime.peekCodeQualityWarnings(),
+			warnings: qualityWarnings,
 			modifiedRangesByFile,
 			projectSeqStart: runtime.turnStartProjectSeq,
 			projectSeqEnd: runtime.projectSeq,
@@ -3668,7 +3851,11 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			filePath: cwd,
 			phase: "code_quality_warnings_report",
 			durationMs: Date.now() - t5,
-			metadata: qualityReport.summary,
+			metadata: {
+				...qualityReport.summary,
+				// #3248: bounded per-turn on this lane's own row.
+				dispositionSuppressed: qualityDispositionSuppressed,
+			},
 		});
 	} catch (err) {
 		dbg(`turn_end: code quality warning report failed: ${err}`);
@@ -3700,6 +3887,8 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	let runnerFindingsStale = 0;
 	let runnerFindingsFailed = 0;
 	let runnerFindingsDropped = 0;
+	/** #3248: bounded per-turn on this lane's own row, never per finding. */
+	let runnerFindingsDispositionSuppressed = 0;
 	const runnerFindingsDeliveredIds: string[] = [];
 	for (const pending of pendingRunnerFindings) {
 		const result = pending.result;
@@ -3740,19 +3929,51 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		}
 		if (gate.live.length === 0) continue;
 		const displayPath = toRunnerDisplayPath(cwd, pending.filePath);
-		const lines = gate.live.map(
+		// #3248: the survivors are what the agent READS, so they take the same
+		// policy stack the late-AUXILIARY drain below applies — this lane is its
+		// twin (same post-gate `Diagnostic[]`, same rendering) and was the one
+		// push surface still re-reporting a finding the agent had marked. AFTER
+		// the freshness gate, like every other lane: the anchor is derived from
+		// the post-gate identity, never the raw pre-gate set. The file's CURRENT
+		// bytes; an unreadable file fails open inside the helper.
+		let runnerContent: string | undefined;
+		try {
+			runnerContent = fs.readFileSync(pending.filePath, "utf-8");
+		} catch {
+			runnerContent = undefined;
+		}
+		const { kept: runnerKept, suppressed: runnerSuppressedHere } =
+			applyPushedFindingPolicy(gate.live, {
+				cwd,
+				filePath: pending.filePath,
+				content: runnerContent,
+			});
+		runnerFindingsDispositionSuppressed += runnerSuppressedHere;
+		if (runnerKept.length === 0) {
+			// Every late finding was marked. A PUSH surface stays silent rather
+			// than re-announcing that the mark is working; the count rides this
+			// lane's bounded per-turn row below.
+			continue;
+		}
+		const lines = runnerKept.map(
 			(finding) =>
 				`  ${displayPath}:${finding.line ?? 1}:${finding.column ?? 1} [${finding.rule ?? finding.id}] ${finding.message}`,
 		);
-		runnerFindingsDelivered += gate.live.length;
-		for (const finding of gate.live) {
+		runnerFindingsDelivered += runnerKept.length;
+		for (const finding of runnerKept) {
 			if (runnerFindingsDeliveredIds.length < 50) {
 				runnerFindingsDeliveredIds.push(finding.id);
 			}
 		}
+		// #1616 suppressed-bucket rule: a delivery that still has something to
+		// say states what it dropped, once per delivery.
+		const runnerSuppressedNote =
+			runnerSuppressedHere > 0
+				? `; suppressed by disposition: ${runnerSuppressedHere} finding(s)`
+				: "";
 		// @delivery-surface: runtime-turn:late-runner-findings
 		advisoryParts.push(
-			`⏱️ Late runner diagnostics (${pending.runnerId} completed after the edit):\n${lines.join("\n")}`,
+			`⏱️ Late runner diagnostics (${pending.runnerId} completed after the edit${runnerSuppressedNote}):\n${lines.join("\n")}`,
 		);
 	}
 	logLatency({
@@ -3767,6 +3988,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			stale: runnerFindingsStale,
 			failed: runnerFindingsFailed,
 			dropped: runnerFindingsDropped,
+			dispositionSuppressed: runnerFindingsDispositionSuppressed,
 			deliveredIds: runnerFindingsDeliveredIds,
 		},
 	});
@@ -4069,15 +4291,16 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 					// a late pair. Runs AFTER the freshness gate, like the #1625
 					// govulncheck/secrets filters: the anchor is derived from the
 					// post-gate identity, never the raw pre-gate set.
-					const { kept: lateAuxKept } = applyFindingPolicy(gate.live, {
-						cwd,
-						filePath: lateAuxPath,
-						content: lateAuxContent ?? "",
-						// mtime-cached, so a drain of several files costs one stat.
-						policyMap: loadProjectRulePolicyMap(cwd),
-						identities: renderedRuleIdentities,
-					});
-					const lateAuxSuppressedHere = gate.live.length - lateAuxKept.length;
+					// #3248: the four arguments moved into
+					// `applyPushedFindingPolicy` so the late-RUNNER drain below
+					// cannot make a second copy of them. Same stack, same
+					// identities, same fail-open content rule.
+					const { kept: lateAuxKept, suppressed: lateAuxSuppressedHere } =
+						applyPushedFindingPolicy(gate.live, {
+							cwd,
+							filePath: lateAuxPath,
+							content: lateAuxContent,
+						});
 					lateAuxDispositionSuppressed += lateAuxSuppressedHere;
 					if (lateAuxKept.length === 0) {
 						// Every late finding was suppressed. This is a PUSH surface:
