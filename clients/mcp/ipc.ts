@@ -32,9 +32,12 @@ export const WARM_CODE_ACTION_LOOKUP_LIMIT = 6;
  * resolved root (lowercased for case-insensitive filesystems), so when they're
  * the same project they meet. Mismatch → the client just falls back to cold.
  */
-export function ipcPathForCwd(cwd: string): string {
-	const hash = workspaceHash(cwd);
-	if (process.platform === "win32") {
+export function ipcPathForCwd(
+	cwd: string,
+	platform: NodeJS.Platform = process.platform,
+): string {
+	const hash = workspaceHash(cwd, platform);
+	if (platform === "win32") {
 		return `\\\\.\\pipe\\pi-lens-mcp-${hash}`;
 	}
 	return path.join(os.tmpdir(), `pi-lens-mcp-${hash}.sock`);
@@ -67,18 +70,46 @@ export function ipcPathForCwd(cwd: string): string {
  * LSP seam. `normalizeEphemeralMapKey` is excluded by its own contract — it is
  * scoped to process-local, same-run keys and says so.
  *
- * So the derivation stays pure string math. Its unconditional `toLowerCase` is
- * deliberate for the Windows rendezvous (Claude Code's Stop-hook cwd can differ
- * in case from the server's own — see
- * `tests/mcp/turn-end-route.smoke.test.ts`), and its known cost is that two
- * case-distinct directories on a case-SENSITIVE host collide onto one endpoint.
- * Narrowing the fold to win32 would change these bytes for every POSIX
- * workspace — orphaning live sockets and `pi-lens-turn-end-*.json` files — so
- * it needs its own invalidation decision and is filed separately, not smuggled
- * into a fold slice.
+ * So the derivation stays pure string math — and #3255 narrowed its case fold
+ * to the platforms whose FILESYSTEM folds case, because "pure" and
+ * "unconditional" are not the same thing:
+ *
+ * - case-INSENSITIVE default (`win32`, `darwin` APFS/HFS+): `Alpha` and `alpha`
+ *   are ONE directory, so the only failure mode is a MISS. The server row and
+ *   the hook rows can hold different spellings of it — the server's cwd can be
+ *   a hand-written `--cwd=` / `PI_LENS_MCP_CWD` while the hook's comes from the
+ *   payload (see `tests/mcp/turn-end-route.smoke.test.ts`'s win32 case) — so the
+ *   fold is what makes them meet, and it stays. `darwin` belongs here for a
+ *   reason in this tree, not by analogy: the incumbent selection that decides
+ *   two sessions share a root already compares through `normalizeFilePath`
+ *   (`clients/instance-registry.ts:837`), whose `realpathSync.native` returns
+ *   on-disk casing on Darwin. A pair that SELECTS each other case-insensitively
+ *   must be able to MEET.
+ * - case-SENSITIVE (Linux, *BSD): `Alpha` and `alpha` are TWO directories, and
+ *   two spellings of one workspace cannot occur (a mis-cased `--cwd=` names a
+ *   directory that does not exist). Folding there bought nothing and collided
+ *   two workspaces onto one socket and one status file — #3255.
+ *
+ * Known residuals, both fail-safe and both un-closable without a filesystem
+ * read this derivation is forbidden to do: a case-insensitive MOUNT on a
+ * case-sensitive platform (`nocase` vfat/ntfs3/cifs, ext4 `chattr +F`) now
+ * misses instead of meeting — the same blind spot `normalizeFilePath` has
+ * there, measured and filed as #3154 — and a case-SENSITIVE APFS volume keeps
+ * today's collision.
+ *
+ * `platform` is an argument, not a `process.platform` read, so every arm is
+ * testable from one lane (the seam `normalizePathEntry` uses in
+ * `clients/lsp/launch.ts`).
  */
-function workspaceHash(cwd: string): string {
-	const root = path.resolve(cwd).toLowerCase();
+function workspaceHash(
+	cwd: string,
+	platform: NodeJS.Platform = process.platform,
+): string {
+	const resolved = path.resolve(cwd);
+	const root =
+		platform === "win32" || platform === "darwin"
+			? resolved.toLowerCase()
+			: resolved;
 	// sha256 (not for security — just a stable short id for the IPC socket/pipe
 	// name keyed by cwd; sha256 over sha1 keeps SonarCloud's weak-hash check quiet)
 	return crypto.createHash("sha256").update(root).digest("hex").slice(0, 16);
@@ -86,9 +117,13 @@ function workspaceHash(cwd: string): string {
 
 /** PID-scoped endpoint used by pi sessions. The legacy MCP analyze endpoint
  * remains workspace-scoped for compatibility with the PostToolUse hook. */
-export function diagnosticsIpcPathForCwd(cwd: string, pid: number): string {
-	const base = ipcPathForCwd(cwd);
-	if (process.platform === "win32") return `${base}-diagnostics-${pid}`;
+export function diagnosticsIpcPathForCwd(
+	cwd: string,
+	pid: number,
+	platform: NodeJS.Platform = process.platform,
+): string {
+	const base = ipcPathForCwd(cwd, platform);
+	if (platform === "win32") return `${base}-diagnostics-${pid}`;
 	return base.replace(/\.sock$/, `-diagnostics-${pid}.sock`);
 }
 
@@ -447,8 +482,14 @@ export interface TurnEndStatus {
 }
 
 /** Per-workspace status file, keyed by the same hash as the IPC endpoint. */
-export function turnEndStatusPathForCwd(cwd: string): string {
-	return path.join(os.tmpdir(), `pi-lens-turn-end-${workspaceHash(cwd)}.json`);
+export function turnEndStatusPathForCwd(
+	cwd: string,
+	platform: NodeJS.Platform = process.platform,
+): string {
+	return path.join(
+		os.tmpdir(),
+		`pi-lens-turn-end-${workspaceHash(cwd, platform)}.json`,
+	);
 }
 
 export function readTurnEndStatus(cwd: string): TurnEndStatus | undefined {
