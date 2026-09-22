@@ -1781,11 +1781,25 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				// UNFILTERED set: that record is what the scan found, and its reader
 				// (`lens_diagnostics`) applies dispositions on read, so filtering it
 				// here would apply the same policy twice on one lane.
-				const knipDeliverable = filterFindingsByDisposition(
-					newIssues,
-					cwd,
-					(issue) => knipIssuesToProjectDiagnostics(cwd, [issue])[0],
+				// Paired through `flatMap` rather than indexing the adapter's array:
+				// `knipIssuesToProjectDiagnostics` is a straight `issues.map(...)`
+				// (one diagnostic per issue, never empty), so this keeps the pairing
+				// total while staying honest under `noUncheckedIndexedAccess`.
+				const knipPaired = newIssues.flatMap((issue) =>
+					knipIssuesToProjectDiagnostics(cwd, [issue]).map((diagnostic) => ({
+						issue,
+						diagnostic,
+					})),
 				);
+				const knipFiltered = filterFindingsByDisposition(
+					knipPaired,
+					cwd,
+					(pair) => pair.diagnostic,
+				);
+				const knipDeliverable = {
+					kept: knipFiltered.kept.map((pair) => pair.issue),
+					suppressed: knipFiltered.suppressed,
+				};
 				knipMeta.dispositionSuppressed = knipDeliverable.suppressed;
 
 				const blockerIssues = knipDeliverable.kept.filter(

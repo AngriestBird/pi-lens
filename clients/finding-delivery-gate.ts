@@ -451,13 +451,23 @@ export const DELIVERY_SURFACES: Record<string, DeliverySurfaceEntry> = {
 		RUNTIME_TURN_FILE,
 		"Turn-end late-auxiliary LSP findings (collect-later probe of aux " +
 			"client caches whose grace window expired).",
-		["gateFindingsByPathFreshness", "applyFindingPolicy"],
-		['store: "late-auxiliary-findings"', "applyFindingPolicy(gate.live, {"],
+		// #3248: the open-coded `applyFindingPolicy(...)` here and the identical
+		// one the late-RUNNER lane needed are now one `applyPushedFindingPolicy`
+		// call, so the gate and the evidence name that call. Same stack, same
+		// identities — only the spelling moved.
+		["gateFindingsByPathFreshness", "applyPushedFindingPolicy"],
+		[
+			'store: "late-auxiliary-findings"',
+			"applyPushedFindingPolicy(gate.live, {",
+		],
 	),
 	"runtime-turn:late-runner-findings": gated(
 		RUNTIME_TURN_FILE,
 		"Turn-end CLI runner findings collected after the post-write path.",
-		["gateFindingsByPathFreshness"],
+		// #3248: this lane was the last push surface with no disposition stage;
+		// it now routes through the same shared policy call as its
+		// late-auxiliary twin, which is what this gate pins.
+		["gateFindingsByPathFreshness", "applyPushedFindingPolicy"],
 		['store: "late-runner-findings"'],
 		{ evidenceMin: 2 },
 	),
