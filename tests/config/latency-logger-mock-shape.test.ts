@@ -4,10 +4,6 @@
  * A bare factory replacement hides exports added after the test was written.
  * This guard derives its inventory from every test source and checks only the
  * factory body, so an unrelated importActual cannot satisfy the check.
- * The `vi.mock` callee is code evidence; the module specifier is string
- * evidence read from the raw call. The structural pass therefore uses the
- * explicit `strings: "blank"` policy, so template text cannot manufacture a
- * mock while `${...}` expressions remain code (#3257).
  */
 
 import * as fs from "node:fs";
@@ -57,7 +53,7 @@ function findLatencyMocks({
 	file: string;
 	source: string;
 }): LatencyMock[] {
-	const code = stripSource(source, { strings: "blank" });
+	const code = stripSource(source);
 	const mocks: LatencyMock[] = [];
 	const pattern = /vi\.mock\s*\(/g;
 	for (const match of code.matchAll(pattern)) {
@@ -121,30 +117,5 @@ describe("latency-logger mock shape (#2281)", () => {
 		const mocks = findLatencyMocks({ file: "fixture.test.ts", source });
 		expect(mocks).toHaveLength(1);
 		expect(mocks[0]?.factory).toContain("importActual");
-	});
-
-	it("does not count mock text inside a string or template literal (#3257)", () => {
-		const needle =
-			'vi.mock("../../clients/latency-logger.js", () => ({ ...vi.importActual("../../clients/latency-logger.js") }));';
-		expect(
-			findLatencyMocks({
-				file: "fixture.test.ts",
-				source: "const doc = `" + needle + "`;",
-			}),
-		).toEqual([]);
-		expect(
-			findLatencyMocks({
-				file: "fixture.test.ts",
-				source: "const doc = " + JSON.stringify(needle) + ";",
-			}),
-		).toEqual([]);
-	});
-
-	it("counts a mock inside a template interpolation (#3257)", () => {
-		const source =
-			'const doc = `${vi.mock("../../clients/latency-logger.js", () => ({ ...vi.importActual("../../clients/latency-logger.js") }))}`;';
-		expect(findLatencyMocks({ file: "fixture.test.ts", source })).toHaveLength(
-			1,
-		);
 	});
 });

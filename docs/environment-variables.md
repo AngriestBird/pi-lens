@@ -30,12 +30,35 @@ config JSON) and how they interact, see [Settings](settings.md).
 
 ### `PI_LENS_CONFIG_PATH`
 
-Override the path of the global config file. **Default:** `~/.pi-lens/config.json`
-(`%USERPROFILE%\.pi-lens\config.json` on Windows). When set, the value is
-resolved to an absolute path and used verbatim.
+Override the path of the global config file. **Default:** the resolution order
+below. When set, the value is resolved to an absolute path and used verbatim.
 
 **When to set it:** keeping the config under version control or a dotfiles
 manager at a non-default location, or pointing CI at a fixture config.
+
+### `PI_CODING_AGENT_DIR`
+
+Host-relative global config location, honored by pi-lens when pi sets it.
+**Resolved path:** `$PI_CODING_AGENT_DIR/extensions/pi-lens.json`. The tier is
+opt-in by creation: the file is read when it EXISTS and the legacy default
+does not. Absent, nothing changes.
+
+The full resolution order for the global config file, highest first:
+
+1. `PI_LENS_CONFIG_PATH` — an explicit file override, used verbatim.
+2. `~/.pi-lens/config.json` — **only when it already exists**; current users
+   never move.
+3. `$PI_CODING_AGENT_DIR/extensions/pi-lens.json` — **only when it exists**
+   and step 2 missed.
+4. `~/.pi-lens/config.json` — the canonical default (unchanged).
+
+Settings editors follow the same resolution with one exception: when NEITHER
+file exists, they create in the agent-dir location ("edit the one that
+exists; prefer the new one if neither does"). `effective_config` shows which
+file supplies the global tier. A path that cannot even be stated (a file
+where a directory belongs, permission errors) is treated as absent, and a
+degraded config read is reported through the ordinary config-read-failure
+notice.
 
 ## Data directory
 

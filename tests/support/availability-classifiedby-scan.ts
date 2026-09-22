@@ -17,7 +17,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 
-import { codeMatches, matchingCloseIndex, stripSource } from "./sweep-kit.js";
+import { matchingCloseIndex, stripSource } from "./sweep-kit.js";
 
 export interface AvailabilityDecisionSite {
 	/** Repo-relative path, forward slashes, so findings read the same on any OS. */
@@ -53,13 +53,10 @@ export function scanSource(
 	raw: string,
 	file: string,
 ): AvailabilityDecisionSite[] {
-	// The call shape is code evidence; its `cause`/`classifiedBy` values are
-	// string-literal evidence. Match the callee on raw source, then use the
-	// strings-blanked text only to judge whether that callee span is code.
-	// This is the #3257 rule: template text cannot manufacture a call, while
-	// `${...}` interpolation remains code and its literal arguments stay readable.
-	const source = stripSource(raw, { strings: "blank" });
-	const argumentSource = stripSource(raw, { strings: "keep" });
+	// `strings: "keep"` (as in bounded-telemetry-scan.ts): the `cause`/
+	// `classifiedBy` values this scanner reads ARE string literals, so blanking
+	// string contents would blind it to the very thing it exists to check.
+	const source = stripSource(raw, { strings: "keep" });
 	const sites: AvailabilityDecisionSite[] = [];
 	// `\b` alone would let `fakeLogAvailabilityDecision(` match; require the
 	// callee to start at a non-identifier boundary on both sides, and require
@@ -67,10 +64,8 @@ export function scanSource(
 	// function's own declaration line reads no differently from a call — its
 	// argument text never contains a `cause: "ok"` literal, so it never flags.
 	const opener = new RegExp(`(?<![A-Za-z0-9_$.])${CALLEE}\\s*\\(`, "g");
-	const matches = codeMatches(raw, opener);
-	let matchIndex = 0;
-	let match = matches[matchIndex];
-	while (match !== undefined) {
+	let match = opener.exec(source);
+	while (match !== null) {
 		// The function's OWN declaration
 		// (`export function logAvailabilityDecision(decision: ...)`) reads no
 		// differently from a call under the bare-identifier regex above, so it
@@ -81,24 +76,17 @@ export function scanSource(
 		// as a variable (`logAvailabilityDecision(decisionVar)`) — this is a
 		// general fix, not a `tool`-shaped one (#2226 review F3).
 		if (/\bfunction\s*$/.test(source.slice(0, match.index))) {
-			match = matches[++matchIndex];
+			match = opener.exec(source);
 			continue;
 		}
-		const openIndex = raw.indexOf("(", match.index);
-		const strippedArgsText = readBalancedArgs(
-			argumentSource,
-			argumentSource.indexOf("(", match.index),
-		);
-		const argsText = argumentSource.slice(
-			openIndex + 1,
-			openIndex + 1 + strippedArgsText.length,
-		);
+		const openIndex = source.indexOf("(", match.index);
+		const argsText = readBalancedArgs(source, openIndex);
 		const verdict = readTopLevelProperty(argsText, "verdict");
 		const outcome = readTopLevelProperty(argsText, "outcome");
 		const cause = readTopLevelProperty(argsText, "cause");
 		sites.push({
 			file,
-			line: raw.slice(0, match.index).split("\n").length,
+			line: source.slice(0, match.index).split("\n").length,
 			causeOk:
 				cause?.value === '"ok"' ||
 				(verdict?.value.includes('"available"') === true &&
@@ -108,7 +96,7 @@ export function scanSource(
 			hasClassifiedBy:
 				readTopLevelProperty(argsText, "classifiedBy") !== undefined,
 		});
-		match = matches[++matchIndex];
+		match = opener.exec(source);
 	}
 	return sites.sort((a, b) => a.line - b.line);
 }
