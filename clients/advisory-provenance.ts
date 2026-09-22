@@ -636,10 +636,16 @@ export interface FindingFreshnessGate<T> {
 export interface FindingFreshnessSource<T> {
 	findings: readonly T[];
 	citedPath: (finding: T) => string | undefined;
-	/** The store envelope's scan timestamp. Absent/unparseable disables demotion. */
-	scannedAt?: string | number;
+	/**
+	 * The store envelope's scan timestamp. Absent/unparseable disables demotion.
+	 * Explicitly `| undefined`: every caller reads it off an optional cache entry
+	 * (`entry?.data?.scannedAt`), and under `exactOptionalPropertyTypes` the bare
+	 * optional would reject that — degrading the source's inferred finding type
+	 * to `any` and taking the citedPath callbacks with it.
+	 */
+	scannedAt?: string | number | undefined;
 	/** Defaults to `"drop"`, matching #1460's secrets behaviour. */
-	onMissing?: FindingMissingPolicy;
+	onMissing?: FindingMissingPolicy | undefined;
 }
 
 type SourceFinding<X> = X extends FindingFreshnessSource<infer T> ? T : never;
@@ -684,10 +690,7 @@ export function gateFindingsByPathFreshness<
 	const scannedAtByStore: Record<string, string> = {};
 	for (const name of names) {
 		const source = args.sources[name] as FindingFreshnessSource<unknown>;
-		const partition = partitionOneSource(
-			{ ...source, cwd: args.cwd },
-			memo,
-		);
+		const partition = partitionOneSource({ ...source, cwd: args.cwd }, memo);
 		gates[name] = { live: partition.live, stale: partition.stale };
 		if (partition.dropped.length > 0) dropped[name] = partition.dropped.length;
 		if (partition.stale.length > 0) demoted[name] = partition.stale.length;

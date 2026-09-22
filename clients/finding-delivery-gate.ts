@@ -460,10 +460,7 @@ export const DELIVERY_SURFACES: Record<string, DeliverySurfaceEntry> = {
 		// call, so the gate and the evidence name that call. Same stack, same
 		// identities — only the spelling moved.
 		["gateFindingsByPathFreshness", "applyPushedFindingPolicy"],
-		[
-			'"late-auxiliary-findings": {',
-			"applyPushedFindingPolicy(gate.live, {",
-		],
+		['"late-auxiliary-findings": {', "applyPushedFindingPolicy(gate.live, {"],
 	),
 	"runtime-turn:late-runner-findings": gated(
 		RUNTIME_TURN_FILE,

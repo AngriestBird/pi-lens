@@ -153,9 +153,7 @@ describe("#1892: one shared freshness pass for the turn-end scanner lanes", () =
 					success: true,
 					scannedAt: SCAN_AT,
 					findings: [],
-					secrets: [
-						{ ruleId: "aws-access-key-id", file: shared, line: 234 },
-					],
+					secrets: [{ ruleId: "aws-access-key-id", file: shared, line: 234 }],
 					licenses: [],
 				} satisfies TrivyResult,
 				env.tmpDir,
@@ -213,9 +211,7 @@ describe("#1892: one shared freshness pass for the turn-end scanner lanes", () =
 					// Newer than the file's mtime → this store saw the current bytes.
 					scannedAt: new Date(SCAN_MS + 60_000).toISOString(),
 					findings: [],
-					secrets: [
-						{ ruleId: "aws-access-key-id", file: shared, line: 234 },
-					],
+					secrets: [{ ruleId: "aws-access-key-id", file: shared, line: 234 }],
 					licenses: [],
 				} satisfies TrivyResult,
 				env.tmpDir,
