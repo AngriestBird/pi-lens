@@ -108,9 +108,29 @@ function splitPathEntries(
 		.filter((entry) => entry.length > 0);
 }
 
+/**
+ * Dedupe key for one PATH entry, under `platform`'s rules.
+ *
+ * #1193 P3: the body used the HOST-DEFAULT `path.normalize` inside a branch
+ * already committed to `platform` (AGENTS.md defect shape 2), so on the ubuntu
+ * lane the win32 arm lowercased without folding separators or dot segments and
+ * `C:\Tools` / `C:/Tools` / `C:\x\..\Tools` were three keys for one directory.
+ * Each arm now parses with its own `path` flavor. That is the whole fix: a
+ * `toPosix` call on the win32 arm would be INERT — `win32.normalize` already
+ * answers backslashes for either input separator (measured: adding it left
+ * every case green) — and the POSIX arm must NOT fold separators at all,
+ * because a backslash is a legal POSIX filename character and `/opt/a\b` and
+ * `/opt/a/b` are two directories there.
+ *
+ * Ephemeral by construction: the key exists only inside one
+ * `combinePathValuesForPlatform` call's `seen` set — the ORIGINAL entry string
+ * is what survives into the joined PATH — so it never reaches a persisted or
+ * cross-process record and `normalizeEphemeralMapKey`'s `process.platform` read
+ * would defeat the explicit-`platform` seam these arms exist for.
+ */
 function normalizePathEntry(entry: string, platform: NodeJS.Platform): string {
-	const normalized = path.normalize(entry);
-	return platform === "win32" ? normalized.toLowerCase() : normalized;
+	if (platform !== "win32") return path.posix.normalize(entry);
+	return path.win32.normalize(entry).toLowerCase();
 }
 
 export function combinePathValuesForPlatform(

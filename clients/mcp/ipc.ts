@@ -44,6 +44,38 @@ export function ipcPathForCwd(cwd: string): string {
  * The single stable per-workspace id both endpoint derivations key on. Every
  * per-workspace side-channel name (socket/pipe, turn-end status file) must come
  * from HERE, so the hook process and the server process cannot drift apart.
+ *
+ * #1193 P3 decision: this input is NOT a map key and neither path-utils seam
+ * belongs here. Writers and readers of this id, and what each one holds:
+ *
+ * | process            | site                                          | input |
+ * |--------------------|-----------------------------------------------|-------|
+ * | MCP server (warm)  | `mcp/server.ts` `IPC_PATH` — listen            | its launch cwd |
+ * | pi session (warm)  | `clients/warm-attach.ts` — listen (pid-scoped) | runtime cwd |
+ * | PostToolUse hook   | `requestWarmAnalyze` — connect                 | hook cwd |
+ * | Stop hook          | `requestWarmTurnEnd` — connect                 | hook cwd |
+ * | Stop hook / health | `turnEndStatusPathForCwd` — write + read a file in tmpdir | cwd |
+ *
+ * Every row is a SEPARATE process that must reproduce the same 16 hex
+ * characters with no shared state, and the rows do not run at the same time —
+ * the server derives its id at launch, a hook derives its own minutes or hours
+ * later. `normalizeMapKey`/`normalizeFilePath` would make the id depend on
+ * filesystem state (`realpathSync.native`, on-disk casing) read at two
+ * different moments: a case-only rename, a remounted symlink, or a hook running
+ * in a different mount namespace than the server would silently stop the two
+ * from meeting. That is the exact staleness PR #2193 was rejected for on the
+ * LSP seam. `normalizeEphemeralMapKey` is excluded by its own contract — it is
+ * scoped to process-local, same-run keys and says so.
+ *
+ * So the derivation stays pure string math. Its unconditional `toLowerCase` is
+ * deliberate for the Windows rendezvous (Claude Code's Stop-hook cwd can differ
+ * in case from the server's own — see
+ * `tests/mcp/turn-end-route.smoke.test.ts`), and its known cost is that two
+ * case-distinct directories on a case-SENSITIVE host collide onto one endpoint.
+ * Narrowing the fold to win32 would change these bytes for every POSIX
+ * workspace — orphaning live sockets and `pi-lens-turn-end-*.json` files — so
+ * it needs its own invalidation decision and is filed separately, not smuggled
+ * into a fold slice.
  */
 function workspaceHash(cwd: string): string {
 	const root = path.resolve(cwd).toLowerCase();

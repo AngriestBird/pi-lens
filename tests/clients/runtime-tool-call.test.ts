@@ -925,3 +925,68 @@ describe("#3116 review round 2 — indent autopatch resolves a boundary-crossing
 		}
 	});
 });
+
+/**
+ * #1193 P3: `shouldSkipLspAutoTouch` hand-rolled `.replace(/\\/g, "/")` — the
+ * ~55th inline copy of the idiom `toPosix` exists to own. These cases drive the
+ * real `handleToolCall` entry point and observe the seam through the LSP
+ * double's `touchFile`, so the separator fold and the marker case-fold are each
+ * pinned by an independent effect rather than by reading the source.
+ *
+ * The fold is behaviour-preserving by construction (`toPosix` IS the deleted
+ * expression). On a POSIX host `path.resolve` already answers forward slashes,
+ * so the separator case below is the ONLY one whose verdict the fold decides on
+ * this lane — a Windows-shaped spelling reaching a POSIX host, which is the
+ * cross-platform variant of the Windows-only property (AGENTS.md shape 35)
+ * rather than a `skipIf(process.platform)` the ubuntu lane never runs.
+ */
+describe("LSP auto-touch skip path folding (#1193)", () => {
+	async function touchedFor(relativePath: string): Promise<boolean> {
+		touchFileMock.mockClear();
+		const env = setupTestEnvironment("pi-lens-autotouch-fold-");
+		try {
+			const filePath = createTempFile(env.tmpDir, relativePath, "export {};\n");
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			await handleToolCall(
+				baseDeps({
+					runtime,
+					event: { toolName: "read", input: { path: filePath } },
+					ctx: { cwd: env.tmpDir },
+				}),
+			);
+			return touchFileMock.mock.calls.length > 0;
+		} finally {
+			env.cleanup();
+		}
+	}
+
+	it("auto-touches an ordinary source file", async () => {
+		expect(await touchedFor("src/a.ts")).toBe(true);
+	});
+
+	it("skips an internal artifact under a forward-slash marker directory", async () => {
+		expect(await touchedFor(".pi-lens/scratch.ts")).toBe(false);
+	});
+
+	it("skips an internal artifact whose marker segment is mis-cased", async () => {
+		// The marker match is deliberately case-folded: on a case-insensitive
+		// filesystem `.PI-Lens` and `.pi-lens` are ONE directory, and an
+		// artifact under it must not be handed to the LSP either way.
+		expect(await touchedFor(".PI-Lens/scratch.ts")).toBe(false);
+	});
+
+	it("skips an internal artifact whose marker separator is a backslash", async () => {
+		// A Windows-shaped spelling arriving on a POSIX host, where a backslash
+		// is an ordinary filename character: only the separator fold turns
+		// `<tmp>/.pi-lens\\scratch.ts` into a path containing `/.pi-lens/`.
+		// This is the one case on this lane whose verdict `toPosix` decides.
+		expect(await touchedFor(".pi-lens\\scratch.ts")).toBe(false);
+	});
+
+	it("does not skip a non-path sentinel basename outside its marker directory", async () => {
+		// `case.json` is only an internal artifact under a `/cases/` directory;
+		// elsewhere `case.*` is an ordinary project file.
+		expect(await touchedFor("cases/case.ts")).toBe(true);
+	});
+});
