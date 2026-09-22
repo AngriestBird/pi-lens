@@ -289,6 +289,20 @@ export type DegradationKind =
 	 * must not turn the durable log into a stack-trace firehose.
 	 */
 	| "hook-handler-crash"
+	/**
+	 * #3246: a live inline-blocker record re-served at turn end carried no
+	 * structured diagnostics, so the shared finding policy had no identity to
+	 * anchor a stored disposition against and the record's rendered summary was
+	 * re-served verbatim (fail-open — a blocking finding is never hidden
+	 * because its identity was unavailable). Subject is
+	 * `inline-blocker:<display path>`, recorded ONCE per record and only while
+	 * the project actually holds marks: the condition recurs on every turn end
+	 * for the same record, so a counted row would grow without adding
+	 * information, and with an empty store there is nothing the record failed
+	 * to honor. Production pairs the two fields at the single writer
+	 * (`runtime-tool-result.ts`); a row here names a producer that did not.
+	 */
+	| "inline-blocker-unstructured"
 	| "install-retry-exhausted"
 	| "installer-verification-inconclusive"
 	| "installer-verification-output-truncated"

@@ -135,6 +135,11 @@ import {
 } from "./dispatch/finding-policy.js";
 import { detectFileRole } from "./file-role.js";
 import {
+	applyInlineBlockerPolicy,
+	type InlineBlockerPolicyTallyEntry,
+	summarizeInlineBlockerPolicy,
+} from "./inline-blocker-dispositions.js";
+import {
 	drainPendingRunnerFindings,
 	dropStaleRunnerFindings,
 	pendingRunnerFindingsSize,
@@ -1031,14 +1036,15 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	 * branch below.
 	 */
 	const pendingDependencyDriftDeliveries: Array<() => void> = [];
-	for (const {
-		filePath: bPath,
-		summary,
-		stale,
-		staleReason,
-	} of unresolvedBlockers) {
+	/** #3246: one bounded record per TURN for the policy pass, never per finding. */
+	const inlinePolicyEntries: InlineBlockerPolicyTallyEntry[] = [];
+	const inlinePolicyStart = Date.now();
+	for (const record of unresolvedBlockers) {
+		const { filePath: bPath, summary, stale, staleReason } = record;
 		const displayPath = toRunnerDisplayPath(cwd, bPath);
+		const tally = { displayPath, sources: record.sources };
 		if (stale) {
+			inlinePolicyEntries.push({ ...tally, stale: true });
 			// #1631: demoted — out of the authoritative blocker channel and into the
 			// advisory channel with a stale marker, so the agent is told to re-run
 			// rather than pressured by a verdict that may already be resolved.
@@ -1105,11 +1111,42 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 					(retirementNote ? `\n${retirementNote}` : ""),
 			);
 		} else {
+			// #3246: the agent may have marked one of these blockers
+			// `false-positive` AFTER the record was written, via
+			// `lens_diagnostic_mark` — which every other findings surface honors.
+			// Re-derive the body from the record's structured diagnostics through
+			// the shared `dispatch/finding-policy.ts` stack against the file's
+			// CURRENT bytes, exactly as the late-auxiliary lane below does.
+			const policy = applyInlineBlockerPolicy(record, cwd);
+			inlinePolicyEntries.push({ ...tally, stale: false, outcome: policy });
+			if (policy.body === undefined) {
+				// Every blocker on this file was suppressed. This is a PUSH
+				// surface: silence after a mark is the mark working, not a clean
+				// verdict, so the count rides the bounded per-turn record below
+				// instead of announcing the suppression on every later turn.
+				continue;
+			}
+			// #1616 suppressed-bucket rule: a delivery that still has something to
+			// say states what it dropped, once per delivery.
+			const suppressedNote =
+				policy.suppressed > 0
+					? ` (suppressed by disposition: ${policy.suppressed} finding(s))`
+					: "";
 			// @delivery-surface: runtime-turn:unresolved-inline-blocker
 			blockerParts.push(
-				`Unresolved from this turn — ${displayPath}:\n${summary}`,
+				`Unresolved from this turn — ${displayPath}${suppressedNote}:\n${policy.body}`,
 			);
 		}
+	}
+	if (inlinePolicyEntries.length > 0) {
+		logLatency({
+			type: "phase",
+			toolName: "turn_end",
+			filePath: cwd,
+			phase: "inline_blocker_policy",
+			durationMs: Date.now() - inlinePolicyStart,
+			metadata: summarizeInlineBlockerPolicy(inlinePolicyEntries),
+		});
 	}
 
 	// Drain the deferred cascade computes kicked off this turn (#450). They ran

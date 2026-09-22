@@ -12,6 +12,7 @@ import {
 	type ProjectChangeSource,
 } from "./project-changes.js";
 import type { CodeQualityWarningRecord } from "./code-quality-warnings.js";
+import type { Diagnostic } from "./dispatch/types.js";
 import type { FileComplexity } from "./complexity-client.js";
 import type { MutationKind } from "./mutating-tool.js";
 import { normalizeMapKey, pathsEqual } from "./path-utils.js";
@@ -236,6 +237,19 @@ export interface InlineBlockerRecord {
 	 * when no blocker in this record cited a line.
 	 */
 	lines?: readonly number[];
+	/**
+	 * #3246: the blocking diagnostics `summary` was rendered from, captured at
+	 * write time from the same `dispatchResult.blockers` array
+	 * (`PipelineResult.inlineBlockerDiagnostics`). The turn-end replay needs a
+	 * diagnostic IDENTITY — tool, rule, message, line — to derive a disposition
+	 * anchor from; with only the rendered string, a `lens_diagnostic_mark` made
+	 * after this record was written could never reach it, and the marked
+	 * blocker re-surfaced every turn while every other findings surface had
+	 * already dropped it. Read by `clients/inline-blocker-dispositions.ts`;
+	 * absent on a legacy/hand-authored record, which is re-served verbatim
+	 * (fail-open) with one bounded degradation row.
+	 */
+	diagnostics?: readonly Diagnostic[];
 	/**
 	 * #1950: how many turn ends have re-served this record while `stale`.
 	 * Only incremented for the `"dependency-drift"` reason — `"past-eof"`
@@ -1037,6 +1051,7 @@ export class RuntimeCoordinator {
 		sources?: readonly string[],
 		lines?: readonly number[],
 		contentBaseline?: { size: number; sha256: string },
+		diagnostics?: readonly Diagnostic[],
 	): number {
 		const recordedAtMs = Date.now();
 		this._pendingInlineBlockers.set(path.resolve(filePath), {
@@ -1045,6 +1060,7 @@ export class RuntimeCoordinator {
 			writeIndex,
 			sources,
 			lines,
+			diagnostics,
 			recordedAtMs,
 			stale: false,
 			...(contentBaseline

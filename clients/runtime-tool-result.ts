@@ -2534,6 +2534,10 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 			result.inlineBlockerSources,
 			result.inlineBlockerLines,
 			result.inlineBlockerFileContent,
+			// #3246: the structured blockers the summary was rendered from, so a
+			// later `lens_diagnostic_mark` can be applied to this record at turn
+			// end instead of replaying pre-mark text.
+			result.inlineBlockerDiagnostics,
 		);
 	} else {
 		runtime.clearInlineBlockers(filePath);
