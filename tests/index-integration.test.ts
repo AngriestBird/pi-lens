@@ -2621,6 +2621,15 @@ describe("index.ts integration", () => {
 					subject: "/tmp/pi-lens-mcp-abc-diagnostics-42.sock",
 					reason: "nothing is listening on its derived endpoint — restart it",
 				});
+				// An unrelated live ledger row. This round added ONE bounded row to
+				// `/lens-health`, not a degradation dashboard: the full ledger has
+				// its own surfaces (`/lens-perf`, MCP `pilens_health`), and widening
+				// this command is a behaviour change nobody asked for.
+				recordDegradationOnce({
+					kind: "wasm-abort",
+					subject: "tree-sitter",
+					reason: "unrelated row that must not reach /lens-health",
+				});
 
 				const notify = vi.fn();
 				await commands.get("lens-health")?.handler?.({}, { ui: { notify } });
@@ -2628,6 +2637,7 @@ describe("index.ts integration", () => {
 				const [message] = notify.mock.calls[0];
 				expect(message).toContain("warm-ipc-endpoint-missing");
 				expect(message).toContain("restart it");
+				expect(message).not.toContain("wasm-abort");
 			} finally {
 				resetDegradationLedger();
 			}
