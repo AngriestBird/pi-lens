@@ -21,4 +21,4 @@ complete.
 | [0004](0004-disposition-policy-seam.md) | Dispositions fold onto `applyFindingPolicy`; no new store before measured #1892 work. | 10, 26 | Accepted |
 | [0005](0005-tool-availability-enforcement-seam.md) | Tool availability is one seam by enforcement, with migrate-on-touch. | 52 | Accepted |
 | [0006](0006-derived-state-benchmark-first.md) | No cross-request derived-state cache without a fresh-process benchmark. | 51 | Accepted |
-
+| [0007](0007-end-to-end-witness-per-seam-slice.md) | Every seam slice commits an end-to-end host witness and degradation ledger artifact. | #1605 umbrella; #1892, #1816, #1193, #1894, #1844 | Accepted |

@@ -168,6 +168,7 @@ ADR: docs/adr/0003-git-guard-latch-writer.md
 ADR: docs/adr/0004-disposition-policy-seam.md
 ADR: docs/adr/0005-tool-availability-enforcement-seam.md
 ADR: docs/adr/0006-derived-state-benchmark-first.md
+ADR: docs/adr/0007-end-to-end-witness-per-seam-slice.md
 
 ## Recurring defect shapes
 

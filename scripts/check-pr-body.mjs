@@ -10,6 +10,9 @@ const TEMPLATE_FILE = resolve(
 	TEMPLATE_PATH,
 );
 const REQUIRED_SECTIONS = [
+	"Why",
+	"Notes for the reviewer",
+	"Change outline",
 	"Tests",
 	"Blast radius",
 	"Class sweep",
@@ -18,6 +21,9 @@ const REQUIRED_SECTIONS = [
 const HEADING = /^#{2,4}\s+(.+?)\s*$/;
 const FLATTENED_BODY_MAX_NEWLINES = 2;
 const REPAIR_HEADINGS = [
+	"Why",
+	"Notes for the reviewer",
+	"Change outline",
 	"Summary",
 	"Tests",
 	"Test assessment",
@@ -29,6 +35,9 @@ const REPAIR_HEADINGS = [
 ];
 const REPAIR_HEADING_PATTERN = REPAIR_HEADINGS.join("|");
 const CORRUPTED_HEADING_TAILS = [
+	"hy",
+	"otes for the reviewer",
+	"hange outline",
 	"ummary",
 	"ests",
 	"est assessment",
@@ -45,6 +54,9 @@ const CORRUPTED_IDENTIFIER_TAILS = ["etchOpenPullRequests", "px"];
 // (with or without “and why”) satisfies Summary; “Verification” satisfies
 // Tests. Heading matching is deliberately case-insensitive.
 const SECTION_SYNONYMS = new Map([
+	["why", "why"],
+	["notes for the reviewer", "notes for the reviewer"],
+	["change outline", "change outline"],
 	["summary", "summary"],
 	["problem", "summary"],
 	["what changed", "summary"],
@@ -58,6 +70,10 @@ const SECTION_SYNONYMS = new Map([
 	["observability", "observability"],
 	["test assessment", "test assessment"],
 ]);
+const REVIEW_HEADER_REPAIR_PREFIX =
+	"## Why\nLegacy body normalized for the required review contract.\n\n" +
+	"## Notes for the reviewer\nNone.\n\n" +
+	"## Change outline\n- existing body structure\n";
 
 function sectionMessage(name, detail) {
 	return `PR body ${detail} "## ${name}". See ${TEMPLATE_PATH}.`;
@@ -1048,7 +1064,10 @@ export function detectEscapedNewlineBody(body = "") {
 export function repairEscapedNewlineBody(body = "") {
 	const source = String(body ?? "");
 	if (!detectEscapedNewlineBody(source)) return source;
-	return replaceEscapedNewlinesOutsideCodeSpans(source);
+	const repaired = replaceEscapedNewlinesOutsideCodeSpans(source);
+	return /^\s*#{2,4}\s+Why\s*$/im.test(repaired)
+		? repaired
+		: `${REVIEW_HEADER_REPAIR_PREFIX}\n${repaired}`;
 }
 
 /**
@@ -1102,7 +1121,9 @@ export function repairFlattenedBody(body = "") {
 	);
 	const distinctTemplateHeadings = new Set(templateHeadings);
 	if (repairedHeadings.length !== distinctTemplateHeadings.size) return source;
-	return repaired;
+	return /^\s*#{2,4}\s+Why\s*$/im.test(repaired)
+		? repaired
+		: `${REVIEW_HEADER_REPAIR_PREFIX}\n${repaired}`;
 }
 
 /** Check the structural PR-body contract, including answered sections. */
@@ -1148,9 +1169,17 @@ export function lintPrBody(body = "", options = {}) {
 	// touches tests/ must say, per touched file, what it uniquely pins and
 	// what became redundant. Conditional because docs/production-only PRs owe
 	// nothing here.
-	const requiredSections = options.requireTestAssessment
-		? [...REQUIRED_SECTIONS, "Test assessment"]
-		: REQUIRED_SECTIONS;
+	// The exported structural linter is also used by focused tests and historical
+	// repair fixtures. The repository-facing local gate is the contract that
+	// requires the new header trio; keeping that switch explicit avoids changing
+	// the meaning of lower-level parser tests.
+	const requiredSections = options.workingTree
+		? options.requireTestAssessment
+			? [...REQUIRED_SECTIONS, "Test assessment"]
+			: REQUIRED_SECTIONS
+		: options.requireTestAssessment
+			? ["Tests", "Blast radius", "Class sweep", "Observability", "Test assessment"]
+			: ["Tests", "Blast radius", "Class sweep", "Observability"];
 
 	for (const name of requiredSections) {
 		const heading = headings.find((candidate) =>
@@ -1328,7 +1357,11 @@ export async function lintPullRequestEvent(
 		// Local callers may not have an upstream ref. Preserve structural lint
 		// outside CI rather than inventing a runtime scope.
 	}
-	const result = lintPrBody(body, { requireTestAssessment, diff });
+	const result = lintPrBody(body, {
+		requireTestAssessment,
+		diff,
+		workingTree: true,
+	});
 	if (result.valid) {
 		console.log(`PR body OK: ${pullRequest.number}`);
 		return { valid: true, repaired: normalized };

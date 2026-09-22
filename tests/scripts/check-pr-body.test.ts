@@ -29,7 +29,7 @@ import {
 } from "../../scripts/check-pr-body.mjs";
 import { blankCommentsAndStrings } from "../../scripts/check-pr-body.mjs";
 
-const body = `Summary\nOpening context.\n\n## Tests\nTargeted tests pass.\n\n## Blast radius\nNo runtime module touched.\n\n## Class sweep\nWhole-tree grep completed.\n\n## Observability\nThe advisory check run is the record.`;
+const body = `## Why\nThe body gate makes review intent explicit.\n\n## Notes for the reviewer\nNone.\n\n## Change outline\n- caller\n  + changed symbol\n    + callee\n\n## Summary\nOpening context.\n\n## Tests\nTargeted tests pass.\n\n## Blast radius\nNo runtime module touched.\n\n## Class sweep\nWhole-tree grep completed.\n\n## Observability\nThe advisory check run is the record.`;
 const repositoryRoot = process.cwd();
 type MergedRuntimeRecord = { name: string; kind: string; diff: string };
 const mergedRuntimeRecords = JSON.parse(
@@ -1361,6 +1361,12 @@ describe("PR body lint (#1844)", () => {
 		},
 	);
 
+	it("rejects a local body missing Why", () => {
+		const result = lintLocalPrBody(body.replace("## Why\n", ""));
+		expect(result.valid).toBe(false);
+		expect(result.errors.join(" ")).toContain('"## Why"');
+	});
+
 	it("accepts not applicable with a reason", () => {
 		expect(
 			lintPrBody(
@@ -1447,7 +1453,9 @@ describe("PR body lint (#1844)", () => {
 	it("accepts an opening paragraph instead of a Summary heading", () => {
 		expect(
 			lintPrBody(
-				body.replace("Summary\nOpening context.\n\n", "Opening context.\n\n"),
+				body
+					.replace("## Why\n", "Opening context.\n\n## Why\n")
+					.replace("## Summary\nOpening context.\n\n", ""),
 			),
 		).toMatchObject({ valid: true });
 	});
