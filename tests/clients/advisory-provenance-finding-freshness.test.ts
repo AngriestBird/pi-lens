@@ -463,3 +463,146 @@ describe("gateFindingsByPathFreshness onMissing (#1622 review H1)", () => {
 		expect(phases).toEqual(["finding_dead_path_drop"]);
 	});
 });
+
+// ── #3264 review F2: the stat budget under a shared facts memo ───────────────
+
+describe("stat budget across sources (#3264 review F2)", () => {
+	afterEach(() => logLatency.mockReset());
+
+	const twoStaleSources = {
+		govulncheck: {
+			findings: [{ file: "/repo/a.go", rule: "GO-1" }] as Finding[],
+			scannedAt: GATE_SCANNED_AT,
+			citedPath,
+		},
+		gitleaks: {
+			findings: [{ file: "/repo/b.ts", rule: "aws-access-token" }] as Finding[],
+			scannedAt: GATE_SCANNED_AT,
+			citedPath,
+		},
+	};
+
+	// The recurrence this prevents: #1892 folded three per-lane gate calls into
+	// one, and a SHARED stat pool would let the first source spend the whole
+	// budget and leave the second failing open as LIVE — re-rendering an edited
+	// cited line as current on a lane that never hit its own cap before the
+	// fold. The allowance is per SOURCE; only the shared stat is shared.
+	it("does not starve a later source: each source keeps its own allowance", () => {
+		const gates = gateFindingsByPathFreshness({
+			cwd: "/repo",
+			sources: twoStaleSources,
+			maxUniquePaths: 1,
+			probePath: () => EDITED_AFTER,
+		});
+		expect(gates.govulncheck.stale.map((f) => f.rule)).toEqual(["GO-1"]);
+		expect(gates.gitleaks.stale.map((f) => f.rule)).toEqual([
+			"aws-access-token",
+		]);
+		expect(gates.gitleaks.live).toEqual([]);
+	});
+
+	// A path already in the shared memo costs the later source nothing, so the
+	// fold can only ever probe FEWER paths than the pre-fold lanes did.
+	it("charges a source nothing for a path an earlier source already stat'd", () => {
+		const probe = vi.fn((): FindingPathFacts => EDITED_AFTER);
+		const gates = gateFindingsByPathFreshness({
+			cwd: "/repo",
+			sources: {
+				govulncheck: {
+					findings: [{ file: "/repo/shared.ts", rule: "GO-1" }] as Finding[],
+					scannedAt: GATE_SCANNED_AT,
+					citedPath,
+				},
+				gitleaks: {
+					findings: [
+						{ file: "/repo/shared.ts", rule: "aws-access-token" },
+						{ file: "/repo/own.ts", rule: "generic-api-key" },
+					] as Finding[],
+					scannedAt: GATE_SCANNED_AT,
+					citedPath,
+				},
+			},
+			maxUniquePaths: 1,
+			probePath: probe,
+		});
+		// gitleaks' allowance paid only for `own.ts`; `shared.ts` was a memo hit.
+		expect(probe).toHaveBeenCalledTimes(2);
+		expect(gates.gitleaks.stale.map((f) => f.rule)).toEqual([
+			"aws-access-token",
+			"generic-api-key",
+		]);
+	});
+
+	// A finding past the budget fails OPEN — the pre-fold posture, preserved on
+	// purpose (guessing a verdict for a path nobody looked at is worse than
+	// delivering it). What was missing is the disclosure: the drop and demote
+	// records both return early when nothing was dropped or demoted, so a
+	// truncation whose findings all failed open wrote no row at all.
+	it("emits one bounded record naming the cap and every source that hit it", () => {
+		gateFindingsByPathFreshness({
+			cwd: "/repo",
+			sources: {
+				gitleaks: {
+					findings: [
+						{ file: "/repo/a.ts", rule: "a" },
+						{ file: "/repo/b.ts", rule: "b" },
+						{ file: "/repo/c.ts", rule: "c" },
+					] as Finding[],
+					scannedAt: GATE_SCANNED_AT,
+					citedPath,
+				},
+			},
+			maxUniquePaths: 1,
+			// Untouched files, so nothing is dropped and nothing is demoted: the
+			// two existing records stay silent and this row is the only trace.
+			probePath: () => UNTOUCHED,
+		});
+		const rows = logLatency.mock.calls.map(
+			(call) => call[0] as { phase: string; metadata: Record<string, unknown> },
+		);
+		expect(rows.map((row) => row.phase)).toEqual([
+			"finding_path_stat_budget_exhausted",
+		]);
+		expect(rows[0]!.metadata).toMatchObject({
+			store: "gitleaks",
+			byStore: { gitleaks: 2 },
+			maxUniquePaths: 1,
+			statCount: 1,
+		});
+	});
+
+	// Records and verdicts must not depend on how the CALLER happened to order
+	// the `sources` literal — the gate iterates source names in sorted order.
+	it("is independent of the order the sources literal was written in", () => {
+		const run = (sources: typeof twoStaleSources) => {
+			logLatency.mockReset();
+			const gates = gateFindingsByPathFreshness({
+				cwd: "/repo",
+				sources,
+				maxUniquePaths: 1,
+				probePath: () => EDITED_AFTER,
+			});
+			return {
+				stale: Object.fromEntries(
+					Object.entries(gates).map(([name, gate]) => [
+						name,
+						gate.stale.map((f: Finding) => f.rule),
+					]),
+				),
+				rows: logLatency.mock.calls.map(
+					(call) =>
+						`${(call[0] as { phase: string }).phase} ${JSON.stringify(
+							(call[0] as { metadata: unknown }).metadata,
+						)}`,
+				),
+			};
+		};
+		const written = run(twoStaleSources);
+		const reversed = run({
+			gitleaks: twoStaleSources.gitleaks,
+			govulncheck: twoStaleSources.govulncheck,
+		});
+		expect(reversed).toEqual(written);
+		expect(written.rows[0]).toContain('"store":"gitleaks+govulncheck"');
+	});
+});

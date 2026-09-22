@@ -1020,6 +1020,71 @@ let report = \`CRITICAL dependency CVEs (trivy, \${trivyAgeLabel}). Upgrade befo
 		expect(problems[0]).toMatch(/possible identity-stub/);
 	});
 
+	// RED PROOF (#3264 review F1): the binding chain must resolve the identifier
+	// the USE SITE means, not the first one in the file. An outer gate-bound name
+	// shadowed by an inner hand-built object used to launder: the detector
+	// resolved the inner `outerArms` to the outer gate call and accepted an arm
+	// that never passed through a gate.
+	it("RED PROOF: a shadowed hand-built arm does not launder through an outer gate binding", () => {
+		const shadowedSource = [
+			"const outerArms = gateFindingsByPathFreshness({ sources: {} });",
+			"{",
+			"  const outerArms = { gitleaks: { live: raw, stale: [] } };",
+			"  const gitleaksGate = outerArms.gitleaks;",
+			"  const keptLive = filterFindingsByDisposition(",
+			"    gitleaksGate.live,",
+			"  );",
+			"  // @delivery-surface: runtime-turn:secrets-gitleaks",
+			'  advisoryParts.push("finding");',
+			"}",
+		].join("\n");
+		const strippedLines = stripCommentsOnly(shadowedSource).split("\n");
+		const seams = scanTaggedSeams(shadowedSource, RUNTIME_TURN_SEAM_PATTERN);
+		const problems = checkRuntimeTurnSeamEvidenceExclusive(
+			"runtime-turn:secrets-gitleaks",
+			DELIVERY_SURFACES["runtime-turn:secrets-gitleaks"],
+			seams,
+			strippedLines,
+		);
+		expect(problems.length).toBeGreaterThan(0);
+		expect(problems[0]).toMatch(/possible identity-stub/);
+	});
+
+	it("control: a two-hop alias and a destructuring rename both still resolve to the gate", () => {
+		const aliasSource = [
+			"const scannerGates = gateFindingsByPathFreshness({",
+			"  cwd,",
+			"  sources: { gitleaks: { findings: [] } },",
+			"});",
+			"const gitleaksGate = scannerGates.gitleaks;",
+			"const keptLive = filterFindingsByDisposition(",
+			"  gitleaksGate.live,",
+			");",
+			"// @delivery-surface: runtime-turn:secrets-gitleaks",
+			'advisoryParts.push("finding");',
+		].join("\n");
+		const renameSource = [
+			"const { gitleaks: gitleaksGate } = gateFindingsByPathFreshness({",
+			"  cwd,",
+			"  sources: { gitleaks: { findings: [] } },",
+			"});",
+			"const keptLive = filterFindingsByDisposition(",
+			"  gitleaksGate.live,",
+			");",
+			"// @delivery-surface: runtime-turn:secrets-gitleaks",
+			'advisoryParts.push("finding");',
+		].join("\n");
+		for (const source of [aliasSource, renameSource]) {
+			const problems = checkRuntimeTurnSeamEvidenceExclusive(
+				"runtime-turn:secrets-gitleaks",
+				DELIVERY_SURFACES["runtime-turn:secrets-gitleaks"],
+				scanTaggedSeams(source, RUNTIME_TURN_SEAM_PATTERN),
+				stripCommentsOnly(source).split("\n"),
+			);
+			expect(problems, problems.join("\n")).toEqual([]);
+		}
+	});
+
 	it("control: the real (un-stubbed) call site satisfies both the argument and the callee-proximity check", () => {
 		const realSource = [
 			"const scannerGates = gateFindingsByPathFreshness({",
