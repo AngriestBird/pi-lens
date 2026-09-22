@@ -83,9 +83,7 @@ async function dispatchOutcome(
 		mockRunnerHelpers(() => options.available ?? true);
 		if (options.available ?? true)
 			safeSpawnAsync.mockResolvedValue(
-				typeof spawnResult === "function"
-					? spawnResult(filePath)
-					: spawnResult,
+				typeof spawnResult === "function" ? spawnResult(filePath) : spawnResult,
 			);
 		const { createDispatchContext, dispatchForFile, RunnerRegistry } =
 			await import("../../../../clients/dispatch/dispatcher.js");
