@@ -579,28 +579,53 @@ function rootIdentifier(text: string): string | undefined {
 }
 
 /**
- * Index of the `const <ident> = …` line that binds `ident` — `"ambiguous"` when
- * the file declares that name more than once.
+ * EVERY `const <ident> = …` line in the file that binds `ident`.
  *
- * #3264 review F1: taking the FIRST file-wide match ignores lexical scope, and
- * an outer gate-bound name shadowed by an inner hand-built object laundered
- * through it. The rule is reject-on-ambiguity rather than resolve-by-brace-depth:
- * a brace-depth walk over `stripCommentsOnly` text counts braces inside string
- * literals too (this file's own fixtures contain them), so it would be a second,
- * fooled parser deciding a security question. A governance detector must fail
- * loudly when it cannot tell which binding a use site means — and a real surface
- * that shadows its gate-arm binding name should rename it, which this asks for
- * by name in the failure text.
+ * #3264 review F1: taking the FIRST match ignores lexical scope, so an outer
+ * gate-bound name shadowed by an inner hand-built object laundered through it.
+ * Round 2 answered that by rejecting any duplicated name outright, and the
+ * verify round found the false negative that creates: a nested function or block
+ * may legitimately bind its OWN gate result under the same name, and rejecting
+ * that reds code which is correctly gated — the opposite of this detector's
+ * contract (#3264 verify F1-A).
+ *
+ * So the candidates are all returned and `identifierReachesGate` requires EVERY
+ * one of them to reach a gate. Whichever binding the use site meant, the arm
+ * came from a gate; one ungated candidate and it is laundering again. This is
+ * deliberately not resolve-by-brace-depth: a brace walk over
+ * `stripCommentsOnly` text counts braces inside string literals too (this
+ * file's own fixtures contain them), so it would be a second, fool-able parser
+ * deciding a security question.
  */
-function bindingLineOf(
-	lines: string[],
-	ident: string,
-): number | "ambiguous" | undefined {
+function bindingLinesOf(lines: string[], ident: string): number[] {
 	const re = new RegExp(`\\bconst\\b[^=]*\\b${ident}\\b[^=]*=`);
 	const found: number[] = [];
 	for (let i = 0; i < lines.length; i++) if (re.test(lines[i])) found.push(i);
-	if (found.length > 1) return "ambiguous";
-	return found[0];
+	return found;
+}
+
+/**
+ * Does every declaration of `ident` reach a call-shaped gate, directly through
+ * its own initializer or through a bounded chain of aliases?
+ */
+function identifierReachesGate(
+	lines: string[],
+	ident: string,
+	gates: readonly string[],
+	hopsLeft: number,
+): boolean {
+	if (hopsLeft <= 0) return false;
+	const declarations = bindingLinesOf(lines, ident);
+	if (declarations.length === 0) return false;
+	return declarations.every((declaration) => {
+		if (bindingRhsIsGateCall(lines, declaration, gates)) return true;
+		const line = lines[declaration];
+		const next = rootIdentifier(line.slice(line.indexOf("=") + 1));
+		return (
+			next !== undefined &&
+			identifierReachesGate(lines, next, gates, hopsLeft - 1)
+		);
+	});
 }
 
 /**
@@ -619,8 +644,10 @@ function bindingLineOf(
  * its OWN right-hand side (`bindingRhsIsGateCall`), never by a gate call that
  * merely sits within three lines of it — otherwise a hand-built object declared
  * just below a real gate call inherits its certification. And a name the file
- * declares twice is `"ambiguous"`, never resolved to the first match — otherwise
- * a distant outer binding certifies an inner shadow.
+ * declares more than once is certified only when EVERY declaration reaches a
+ * gate (`identifierReachesGate`) — otherwise a distant outer binding certifies
+ * an inner shadow, while a nested scope that legitimately re-binds its own gate
+ * result under the same name is still accepted (#3264 verify F1-A).
  */
 function evidenceReachesGateCall(
 	lines: string[],
@@ -633,14 +660,11 @@ function evidenceReachesGateCall(
 			hasNearbyCallSite(lines, idx, gate, CALLEE_PROXIMITY_LINES),
 		);
 	if (atGate(occurrenceIdx)) return true;
-	let ident = rootIdentifier(needle);
-	for (let hop = 0; ident !== undefined && hop < BINDING_CHAIN_HOPS; hop++) {
-		const bound = bindingLineOf(lines, ident);
-		if (bound === undefined || bound === "ambiguous") return false;
-		if (bindingRhsIsGateCall(lines, bound, gates)) return true;
-		ident = rootIdentifier(lines[bound].slice(lines[bound].indexOf("=") + 1));
-	}
-	return false;
+	const ident = rootIdentifier(needle);
+	return (
+		ident !== undefined &&
+		identifierReachesGate(lines, ident, gates, BINDING_CHAIN_HOPS)
+	);
 }
 
 /**
@@ -1125,8 +1149,8 @@ let report = \`CRITICAL dependency CVEs (trivy, \${trivyAgeLabel}). Upgrade befo
 		expect(problems[0]).toMatch(/possible identity-stub/);
 	});
 
-		const spacer = (n: number) =>
-			Array.from({ length: n }, (_, i) => `  // shadow spacer ${i}`);
+	const spacer = (n: number) =>
+		Array.from({ length: n }, (_, i) => `  // shadow spacer ${i}`);
 
 	// #3264 verify F1-A: reject-on-ambiguity must not red code that IS gated.
 	// A nested function, or a block, may legitimately bind its own gate result
