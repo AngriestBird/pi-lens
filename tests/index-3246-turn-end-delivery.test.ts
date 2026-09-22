@@ -79,22 +79,54 @@ function blockingPipelineResult(blockers: Diagnostic[]) {
 	};
 }
 
-/** Everything the agent would be shown by this turn's context injection. */
+/** A clean run — what every file other than the target gets. */
+const CLEAN_PIPELINE_RESULT = {
+	output: "",
+	hasBlockers: false,
+	isError: false,
+	fileModified: false,
+};
+
+/** Blockers for the target file only, exactly as a real dispatch would. */
+function stubPipeline(target: string, blockers: Diagnostic[]): void {
+	const blocking = blockingPipelineResult(blockers);
+	pipeline.runPipeline.mockImplementation(async (ctx: { filePath: string }) =>
+		path.resolve(ctx.filePath) === path.resolve(target)
+			? blocking
+			: CLEAN_PIPELINE_RESULT,
+	);
+}
+
+/**
+ * Everything the agent would be shown by this turn's context injection.
+ *
+ * `alsoEdit` exists to defeat the turn-end signature dedupe, NOT to decorate
+ * the scenario: that memo silences a turn whose touched-file set AND rendered
+ * content both repeat, so a second turn identical to the first is suppressed
+ * for a reason that has nothing to do with the policy under test — which would
+ * make the pre-fix run red for the wrong reason (round 2: it did). Editing one
+ * extra file on the later turn changes the file set, so what the agent sees is
+ * decided by the policy and nothing else. It is also the reported shape: "it
+ * came back on a turn where I touched something else".
+ */
 async function driveTurn(
 	pi: ReturnType<typeof createPiMock>,
 	filePath: string,
+	alsoEdit?: string,
 ): Promise<string> {
 	await pi.emit("turn_start", {}, makeCtx({ cwd: tmpDir }));
-	await pi.emit(
-		"tool_result",
-		{
-			toolName: "edit",
-			input: { path: filePath },
-			details: { diff: "+  1 alpha();" },
-			content: [{ type: "text", text: "base" }],
-		},
-		makeCtx({ cwd: tmpDir }),
-	);
+	for (const edited of alsoEdit ? [filePath, alsoEdit] : [filePath]) {
+		await pi.emit(
+			"tool_result",
+			{
+				toolName: "edit",
+				input: { path: edited },
+				details: { diff: "+  1 alpha();" },
+				content: [{ type: "text", text: "base" }],
+			},
+			makeCtx({ cwd: tmpDir }),
+		);
+	}
 	await pi.emit("turn_end", {}, makeCtx({ cwd: tmpDir }));
 	const injected = (await pi.emit(
 		"context",
@@ -107,12 +139,14 @@ async function driveTurn(
 describe("pi turn_end → context delivery honors inline-blocker dispositions (#3246)", () => {
 	it("injects only the unmarked blocker after a false-positive mark", async () => {
 		const filePath = path.join(tmpDir, "shared.ts");
+		const unrelated = path.join(tmpDir, "notes.ts");
 		fs.writeFileSync(filePath, "alpha();\nbeta();\n");
+		fs.writeFileSync(unrelated, "export const note = 1;\n");
 		const blockers = [
 			blockingDiagnostic(filePath, 1, "alpha is unsafe"),
 			blockingDiagnostic(filePath, 2, "beta is unsafe"),
 		];
-		pipeline.runPipeline.mockResolvedValue(blockingPipelineResult(blockers));
+		stubPipeline(filePath, blockers);
 
 		const pi = createPiMock();
 		extension(pi.asExtensionAPI());
@@ -144,7 +178,7 @@ describe("pi turn_end → context delivery honors inline-blocker dispositions (#
 			"false-positive",
 		);
 
-		const after = await driveTurn(pi, filePath);
+		const after = await driveTurn(pi, filePath, unrelated);
 		expect(after).toContain("L2: beta is unsafe");
 		expect(after).not.toContain("alpha is unsafe");
 		expect(after).toContain("suppressed by disposition: 1 finding(s)");
@@ -152,9 +186,11 @@ describe("pi turn_end → context delivery honors inline-blocker dispositions (#
 
 	it("injects no blocker section at all once every blocker is marked", async () => {
 		const filePath = path.join(tmpDir, "all-marked.ts");
+		const unrelated = path.join(tmpDir, "notes.ts");
 		fs.writeFileSync(filePath, "alpha();\n");
+		fs.writeFileSync(unrelated, "export const note = 1;\n");
 		const blockers = [blockingDiagnostic(filePath, 1, "alpha is unsafe")];
-		pipeline.runPipeline.mockResolvedValue(blockingPipelineResult(blockers));
+		stubPipeline(filePath, blockers);
 
 		const pi = createPiMock();
 		extension(pi.asExtensionAPI());
@@ -180,7 +216,7 @@ describe("pi turn_end → context delivery honors inline-blocker dispositions (#
 			"false-positive",
 		);
 
-		const after = await driveTurn(pi, filePath);
+		const after = await driveTurn(pi, filePath, unrelated);
 		expect(after).not.toContain("Unresolved from this turn");
 		expect(after).not.toContain("🔴 STOP");
 		expect(after).not.toContain("alpha is unsafe");
