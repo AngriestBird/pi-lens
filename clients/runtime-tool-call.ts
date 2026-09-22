@@ -9,7 +9,7 @@ import { evaluateGitGuard, isGitCommitOrPushAttempt } from "./git-guard.js";
 import { dropHashlineAnchorMemo } from "./hashline-anchor.js";
 import { evaluateSharedCheckoutGuard } from "./shared-checkout-guard.js";
 import { logLatency } from "./latency-logger.js";
-import { normalizeMapKey } from "./path-utils.js";
+import { normalizeMapKey, toPosix } from "./path-utils.js";
 import {
 	captureFileStats,
 	getOpaqueBaselineStore,
@@ -222,7 +222,12 @@ function shouldSkipLspAutoTouch(
 	filePath: string,
 	projectRoot: string,
 ): boolean {
-	const normalized = path.resolve(filePath).replace(/\\/g, "/").toLowerCase();
+	// #1193 P3: the separator fold is `toPosix`, not a fourth inline copy of
+	// `.replace(/\\/g, "/")`. The `toLowerCase` stays and is NOT a path-key case
+	// fold: `normalized` is never a map key, only the haystack for the
+	// lowercase marker substrings below, which must match a mis-cased spelling
+	// of the same marker directory on a case-insensitive filesystem.
+	const normalized = toPosix(path.resolve(filePath)).toLowerCase();
 	const base = path.basename(filePath).toLowerCase();
 
 	if (normalized.includes("/.pi-lens/")) return true;
