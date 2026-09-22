@@ -136,7 +136,10 @@ export function applyInlineBlockerPolicy(
 
 	const byFile = new Map<string, Diagnostic[]>();
 	for (const diagnostic of diagnostics) {
-		const owner = path.resolve(diagnostic.filePath || record.filePath);
+		// Resolved against the PROJECT root, never `process.cwd()`: a runner that
+		// reports a project-relative path would otherwise be grouped under the
+		// agent host's working directory and read the wrong file's bytes.
+		const owner = path.resolve(cwd, diagnostic.filePath);
 		const group = byFile.get(owner);
 		if (group) group.push(diagnostic);
 		else byFile.set(owner, [diagnostic]);
@@ -153,7 +156,6 @@ export function applyInlineBlockerPolicy(
 			policyMap,
 			identities: inlineBlockerIdentities,
 		});
-		if (kept.length === group.length) continue;
 		const survivors = new Set(kept);
 		for (const diagnostic of group) {
 			if (!survivors.has(diagnostic)) dropped.add(diagnostic);

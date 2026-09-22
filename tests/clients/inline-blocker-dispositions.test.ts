@@ -562,6 +562,144 @@ describe("turn-end unresolved inline blockers honor dispositions (#3246)", () =>
 		}
 	});
 
+	it("records no degradation for a legacy record while the project holds no marks", async () => {
+		// The row names a producer that failed to pair summary and diagnostics.
+		// With an empty store there is nothing the record failed to honor, so a
+		// row here would be noise on every session that ever recorded one.
+		const env = setupTestEnvironment("pi-lens-3246-legacy-no-marks-");
+		try {
+			const cwd = env.tmpDir;
+			const filePath = path.join(cwd, "legacy.ts");
+			fs.writeFileSync(filePath, "alpha();\n");
+
+			const runtime = new RuntimeCoordinator();
+			runtime.setTelemetryIdentity({ sessionId: SESSION_ID });
+			const cacheManager = new CacheManager(false);
+			recordBlockers(
+				runtime,
+				filePath,
+				[blockingDiagnostic(filePath, 1, "alpha is unsafe")],
+				{ structured: false },
+			);
+
+			registerEdit(cacheManager, cwd, filePath);
+			await handleTurnEnd(makeTurnEndDeps(runtime, cacheManager, cwd));
+
+			expect(turnEndText(cacheManager, cwd, runtime)).toContain(
+				"alpha is unsafe",
+			);
+			expect(
+				getDegradationSummary().some(
+					(g) => g.kind === "inline-blocker-unstructured",
+				),
+			).toBe(false);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("writes no policy record at all on a turn that carries no inline blockers", async () => {
+		// One row per turn that HAS candidates — not an all-zero row on every
+		// turn end of every session.
+		const env = setupTestEnvironment("pi-lens-3246-no-records-");
+		try {
+			const cwd = env.tmpDir;
+			const filePath = path.join(cwd, "clean.ts");
+			fs.writeFileSync(filePath, "alpha();\n");
+
+			const runtime = new RuntimeCoordinator();
+			runtime.setTelemetryIdentity({ sessionId: SESSION_ID });
+			const cacheManager = new CacheManager(false);
+			registerEdit(cacheManager, cwd, filePath);
+			await handleTurnEnd(makeTurnEndDeps(runtime, cacheManager, cwd));
+
+			expect(inlinePolicyRows()).toHaveLength(0);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("bounds the identity lists in the per-turn record while keeping the counts exact", async () => {
+		// AGENTS.md shape 17: the counts are always exact; only the file/tool
+		// LISTS are capped, so a turn that touched many files writes a bounded
+		// row rather than a file listing.
+		const env = setupTestEnvironment("pi-lens-3246-identity-cap-");
+		try {
+			const cwd = env.tmpDir;
+			const runtime = new RuntimeCoordinator();
+			runtime.setTelemetryIdentity({ sessionId: SESSION_ID });
+			const cacheManager = new CacheManager(false);
+			for (let i = 0; i < 12; i++) {
+				const filePath = path.join(cwd, `f${i}.ts`);
+				fs.writeFileSync(filePath, "alpha();\nbeta();\n");
+				const diagnostics = [
+					blockingDiagnostic(filePath, 1, `marked ${i}`, { tool: `tool${i}` }),
+					blockingDiagnostic(filePath, 2, `kept ${i}`, { tool: `tool${i}` }),
+				];
+				recordBlockers(runtime, filePath, diagnostics);
+				markFalsePositive(cwd, diagnostics[0]);
+				registerEdit(cacheManager, cwd, filePath);
+			}
+
+			await handleTurnEnd(makeTurnEndDeps(runtime, cacheManager, cwd));
+
+			const metadata = inlinePolicyRows()[0]?.metadata as {
+				records: number;
+				candidates: number;
+				kept: number;
+				dispositionSuppressed: number;
+				files: string[];
+				tools: string[];
+			};
+			expect(metadata.records).toBe(12);
+			expect(metadata.candidates).toBe(24);
+			expect(metadata.kept).toBe(12);
+			expect(metadata.dispositionSuppressed).toBe(12);
+			expect(metadata.files).toHaveLength(10);
+			expect(metadata.tools).toHaveLength(10);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("anchors a cross-file blocker against its OWN file, not the record's", async () => {
+		// `dispatchResult.blockers` is pooled across every runner dispatched for
+		// the edited file, and a chart-wide runner (helm-lint, helm-render)
+		// reports blocking diagnostics against sibling files — the cross-file
+		// population `pipeline.ts` already filters out of `inlineBlockerLines`.
+		const env = setupTestEnvironment("pi-lens-3246-cross-file-");
+		try {
+			const cwd = env.tmpDir;
+			const chartPath = path.join(cwd, "Chart.yaml");
+			const valuesPath = path.join(cwd, "values.yaml");
+			fs.writeFileSync(chartPath, "name: demo\n");
+			fs.writeFileSync(valuesPath, "image: latest\n");
+
+			const runtime = new RuntimeCoordinator();
+			runtime.setTelemetryIdentity({ sessionId: SESSION_ID });
+			const cacheManager = new CacheManager(false);
+			const own = blockingDiagnostic(chartPath, 1, "chart name is reserved", {
+				tool: "helm-lint",
+			});
+			const sibling = blockingDiagnostic(valuesPath, 1, "image tag is latest", {
+				tool: "helm-lint",
+			});
+			recordBlockers(runtime, chartPath, [own, sibling]);
+			// Marked against values.yaml's own path and bytes — the only way the
+			// strict anchor can match is if the policy groups it under that file.
+			markFalsePositive(cwd, sibling);
+
+			registerEdit(cacheManager, cwd, chartPath);
+			await handleTurnEnd(makeTurnEndDeps(runtime, cacheManager, cwd));
+
+			const text = turnEndText(cacheManager, cwd, runtime);
+			expect(text).toContain("chart name is reserved");
+			expect(text).not.toContain("image tag is latest");
+		} finally {
+			env.cleanup();
+		}
+	});
+
 	it("lets the inline record and a cached scanner lane each apply their policy once", async () => {
 		// Mixed population: one inline blocker plus one cached gitleaks finding,
 		// both marked. Each lane suppresses its own finding, and the inline
