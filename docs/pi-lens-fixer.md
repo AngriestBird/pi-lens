@@ -9,6 +9,17 @@
 - Preserve contributor authorship and leave Git authority to the orchestrator
   unless the delegation grants it explicitly.
 
+## Standing procedure
+
+### Failure list before code
+
+Before the first edit of any fix, write the list of ways the change could fail
+(the directions the mutation table will later prove) in the PR body. The
+mutation table is that list with transcripts, never a list invented after the
+code. This week's evidence: #3252 r1 shipped an exit table whose inverse
+direction (nonzero WITH findings) was never listed and was caught by the
+reviewer.
+
 ## Evidence
 
 - Add a regression test through the production path.
