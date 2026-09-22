@@ -34,9 +34,7 @@ const NOT_YET_ON_PRIMITIVE: Record<string, string> = {
 	"actionlint.ts": "reads its own exit status; #1737 strangler",
 	"cpp-check.ts": "reads its own exit status; #1737 strangler",
 	"credo.ts": "reads its own exit status; #1737 strangler",
-	"dart-analyze.ts": "reads its own exit status; #1737 strangler",
 	"dotnet-build.ts": "reads its own exit status; #1737 strangler",
-	"elixir-check.ts": "reads its own exit status; #1737 strangler",
 	"eslint.ts": "reads its own exit status; #1737 strangler",
 	"fish-indent.ts": "reads its own exit status; #1737 strangler",
 	"gleam-check.ts": "reads its own exit status; #1737 strangler",
@@ -122,6 +120,8 @@ describe("run-outcome primitive ratchet", () => {
 			"swiftlint.ts",
 			"vale.ts",
 			"yamllint.ts",
+			"dart-analyze.ts",
+			"elixir-check.ts",
 			"rubocop.ts",
 			"ruff.ts",
 		]) {

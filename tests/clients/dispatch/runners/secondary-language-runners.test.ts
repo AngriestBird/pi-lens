@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { FactStore } from "../../../../clients/dispatch/fact-store.js";
 import { makeRunnerCtx } from "../../../support/runner-ctx.js";
 import { setupTestEnvironment } from "../../test-utils.js";
 
@@ -71,7 +72,72 @@ describe("secondary language fallback runners", () => {
 
 			expect(result.status).toBe("failed");
 			expect(result.semantic).toBe("warning");
-			expect(result.diagnostics[0]?.message).toContain("dart analyze failed");
+			expect(result.diagnostics[0]?.id).toBe("dart-analyze:parse-error:1");
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("preserves dart findings on a nonzero run and keeps exit-0 stderr noise clean (#1816)", async () => {
+		const env = setupTestEnvironment("pi-lens-dart-outcomes-");
+		try {
+			const filePath = path.join(env.tmpDir, "lib", "main.dart");
+			fs.mkdirSync(path.dirname(filePath), { recursive: true });
+			fs.writeFileSync(filePath, "void main() {}\n");
+			const runner = (
+				await import("../../../../clients/dispatch/runners/dart-analyze.js")
+			).default;
+
+			safeSpawnAsync.mockResolvedValueOnce({
+				error: null,
+				status: 1,
+				stdout: "",
+				stderr: `ERROR|LINT|unused_local_variable|${filePath}|2|1|1|unused value`,
+			});
+			const findings = await runner.run(
+				createCtx("dart", filePath, env.tmpDir) as never,
+			);
+			expect(findings.status).toBe("failed");
+			expect(findings.diagnostics).toHaveLength(1);
+
+			safeSpawnAsync.mockResolvedValueOnce({
+				error: null,
+				status: 0,
+				stdout: "",
+				stderr: "dart analyze: no issues\n",
+			});
+			const clean = await runner.run(
+				createCtx("dart", filePath, env.tmpDir) as never,
+			);
+			expect(clean).toMatchObject({
+				status: "succeeded",
+				diagnostics: [],
+				semantic: "none",
+			});
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("does not turn a signaled dart run into success (#1816)", async () => {
+		const env = setupTestEnvironment("pi-lens-dart-signal-");
+		try {
+			const filePath = path.join(env.tmpDir, "main.dart");
+			fs.writeFileSync(filePath, "void main() {}\n");
+			safeSpawnAsync.mockResolvedValue({
+				error: null,
+				status: null,
+				signal: "SIGTERM",
+				stdout: "",
+				stderr: "",
+			});
+			const runner = (
+				await import("../../../../clients/dispatch/runners/dart-analyze.js")
+			).default;
+			const result = await runner.run(
+				createCtx("dart", filePath, env.tmpDir) as never,
+			);
+			expect(result.status).toBe("skipped");
 		} finally {
 			env.cleanup();
 		}
@@ -215,7 +281,7 @@ describe("secondary language fallback runners", () => {
 				error: null,
 				status: 1,
 				stdout: "",
-				stderr: "** (SyntaxError) lib/app.ex:1:1: unexpected end of file",
+				stderr: "elixir compiler failed before emitting diagnostics",
 			});
 
 			const runner = (
@@ -227,8 +293,55 @@ describe("secondary language fallback runners", () => {
 			);
 
 			expect(result.status).toBe("failed");
-			expect(result.semantic).toBe("blocking");
-			expect(result.diagnostics[0]?.tool).toBe("elixir-check");
+			expect(result.semantic).toBe("warning");
+			expect(result.diagnostics[0]?.id).toBe("elixir-check:parse-error:1");
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("real dispatcher renders an elixir nonzero finding (#1816)", async () => {
+		const env = setupTestEnvironment("pi-lens-elixir-dispatch-witness-");
+		try {
+			const filePath = path.join(env.tmpDir, "lib", "app.ex");
+			fs.mkdirSync(path.dirname(filePath), { recursive: true });
+			fs.writeFileSync(
+				path.join(env.tmpDir, "mix.exs"),
+				"defmodule Demo.MixProject do end\n",
+			);
+			fs.writeFileSync(filePath, "defmodule App do\n");
+			safeSpawnAsync.mockResolvedValue({
+				error: null,
+				status: 1,
+				stdout: "",
+				stderr: `** (SyntaxError) lib/app.ex:1:1: unexpected end of file`,
+			});
+			const { createDispatchContext, dispatchForFile, RunnerRegistry } =
+				await import("../../../../clients/dispatch/dispatcher.js");
+			const runner = (
+				await import("../../../../clients/dispatch/runners/elixir-check.js")
+			).default;
+			const registry = new RunnerRegistry();
+			registry.register(runner);
+			let observedStatus: string | undefined;
+			const result = await dispatchForFile(
+				createDispatchContext(
+					filePath,
+					env.tmpDir,
+					{ getFlag: () => false },
+					new FactStore(),
+				),
+				[{ mode: "all", runnerIds: ["elixir-check"] }],
+				registry,
+				(_runnerId, runnerResult) => {
+					observedStatus = runnerResult.status;
+				},
+			);
+			expect(observedStatus).toBe("failed");
+			expect(result.output).toContain("🔴 STOP — 1 issue(s) must be fixed:");
+			await expect(result.output).toMatchFileSnapshot(
+				"../../../fixtures/witness/runner-outcome-dart-analyze-elixir-check/elixir-nonzero-findings.txt",
+			);
 		} finally {
 			env.cleanup();
 		}

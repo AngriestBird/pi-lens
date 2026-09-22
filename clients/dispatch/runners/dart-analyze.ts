@@ -2,6 +2,7 @@ import * as path from "node:path";
 import { safeSpawnAsync } from "../../safe-spawn.js";
 import { resolveRunnerCwd } from "../../tool-cwd.js";
 import { createAvailabilityChecker } from "./utils/runner-helpers.js";
+import { finishParsedRun, parseToolRun } from "./utils/tool-failure.js";
 import type {
 	Diagnostic,
 	DispatchContext,
@@ -150,13 +151,6 @@ function parseDartMachineOutput(raw: string, filePath: string): Diagnostic[] {
 	return diagnostics;
 }
 
-function firstOutputLine(result: { stdout?: string; stderr?: string }): string {
-	return `${result.stderr || ""}\n${result.stdout || ""}`
-		.trim()
-		.split(/\r?\n/, 1)[0]
-		.slice(0, 200);
-}
-
 const dartAnalyzeRunner: RunnerDefinition = {
 	id: "dart-analyze",
 	appliesTo: ["dart"],
@@ -181,44 +175,20 @@ const dartAnalyzeRunner: RunnerDefinition = {
 
 		const result = await safeSpawnAsync(cmd, args, { cwd, timeout: 30000 });
 
-		if (result.error && !result.stdout && !result.stderr) {
-			return { status: "skipped", diagnostics: [], semantic: "none" };
-		}
-
 		// dart analyze writes diagnostics to stderr in machine format
 		const raw = (result.stderr || "") + (result.stdout || "");
-		const diagnostics = parseDartMachineOutput(raw, ctx.filePath);
-
-		if (diagnostics.length === 0) {
-			if (result.status && result.status !== 0) {
-				return {
-					status: "failed",
-					diagnostics: [
-						{
-							id: "dart-analyze-nonzero-no-diagnostics",
-							message:
-								firstOutputLine(result) ||
-								"dart analyze exited non-zero without machine diagnostics",
-							filePath: ctx.filePath,
-							severity: "warning",
-							semantic: "warning",
-							tool: "dart",
-							rule: "dart-analyze",
-							fixable: false,
-						},
-					],
-					semantic: "warning",
-				};
-			}
-			return { status: "succeeded", diagnostics: [], semantic: "none" };
-		}
-
-		const hasErrors = diagnostics.some((d) => d.severity === "error");
-		return {
-			status: hasErrors ? "failed" : "succeeded",
-			diagnostics,
-			semantic: hasErrors ? "blocking" : "warning",
-		};
+		const parsed = parseToolRun(
+			"dart-analyze",
+			{ result, output: raw },
+			(out) => parseDartMachineOutput(out, ctx.filePath),
+		);
+		if (parsed.skipped) return parsed.skipped;
+		return finishParsedRun({
+			tool: "dart-analyze",
+			ctx,
+			result,
+			diagnostics: parsed.diagnostics,
+		});
 	},
 };
 
