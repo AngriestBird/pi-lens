@@ -21,6 +21,7 @@ import type {
 	RunnerDefinition,
 	RunnerResult,
 } from "../types.js";
+import { finishParsedRun, parseToolRun } from "./utils/tool-failure.js";
 import { parseRuffOutput } from "./utils/diagnostic-parsers.js";
 import {
 	createAvailabilityChecker,
@@ -99,30 +100,26 @@ const ruffRunner: RunnerDefinition = {
 		);
 
 		const raw = stripAnsi(checkResult.stdout + checkResult.stderr);
-		const diagnostics = parseRuffJson(checkResult.stdout || "", ctx.filePath);
-		const parsedDiagnostics =
-			diagnostics.length > 0 ? diagnostics : parseRuffOutput(raw, ctx.filePath);
-
-		if (checkResult.status === 0 && parsedDiagnostics.length === 0) {
-			return { status: "succeeded", diagnostics: [], semantic: "none" };
-		}
-
-		if (parsedDiagnostics.length === 0) {
-			return {
-				status: "failed",
-				diagnostics: [],
-				semantic: "warning",
-				rawOutput: raw.slice(0, 500),
-			};
-		}
-
-		const hasErrors = parsedDiagnostics.some((d) => d.severity === "error");
-
-		return {
-			status: hasErrors ? "failed" : "succeeded",
-			diagnostics: parsedDiagnostics,
-			semantic: hasErrors ? "blocking" : "warning",
-		};
+		// Exit table: 0 = clean, 1 = findings, 2 = rejected invocation or
+		// tool error. A nonzero exit with valid findings stays findings; empty or
+		// unparsable output must never become clean (#1816).
+		const run = parseToolRun(
+			"ruff",
+			{ result: checkResult, output: raw, exitCodes: { ran: [1] } },
+			(output) => {
+				const diagnostics = parseRuffJson(output, ctx.filePath);
+				return diagnostics.length > 0
+					? diagnostics
+					: parseRuffOutput(output, ctx.filePath);
+			},
+		);
+		if (run.skipped) return run.skipped;
+		return finishParsedRun({
+			tool: "ruff",
+			ctx,
+			result: checkResult,
+			diagnostics: run.diagnostics,
+		});
 	},
 };
 

@@ -48,8 +48,6 @@ const NOT_YET_ON_PRIMITIVE: Record<string, string> = {
 	"php-lint.ts": "reads its own exit status; #1737 strangler",
 	"prisma-validate.ts": "reads its own exit status; #1737 strangler",
 	"psscriptanalyzer.ts": "reads its own exit status; #1737 strangler",
-	"rubocop.ts": "reads its own exit status; #1737 strangler",
-	"ruff.ts": "reads its own exit status; #1737 strangler",
 	"rust-clippy.ts": "reads its own exit status; #1737 strangler",
 	"shfmt.ts": "reads its own exit status; #1737 strangler",
 	"spotbugs.ts": "reads its own exit status; #1737 strangler",
@@ -124,6 +122,8 @@ describe("run-outcome primitive ratchet", () => {
 			"swiftlint.ts",
 			"vale.ts",
 			"yamllint.ts",
+			"rubocop.ts",
+			"ruff.ts",
 		]) {
 			expect(usesPrimitive(readRunner(name)), `${name}`).toBe(true);
 			expect(NOT_YET_ON_PRIMITIVE[name]).toBeUndefined();

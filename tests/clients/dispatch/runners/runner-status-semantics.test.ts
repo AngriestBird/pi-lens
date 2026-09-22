@@ -235,6 +235,126 @@ describe("runner status/semantic edge cases", () => {
 		}
 	});
 
+	it("rubocop does not claim clean when a failing run is unparsable (#1816)", async () => {
+		const runner = (
+			await import("../../../../clients/dispatch/runners/rubocop.js")
+		).default;
+		const env = setupTestEnvironment("pi-lens-rb-unparseable-");
+		try {
+			const filePath = path.join(env.tmpDir, "main.rb");
+			fs.writeFileSync(filePath, "puts 'hi'\n");
+			safeSpawnAsync
+				.mockResolvedValueOnce({
+					error: null,
+					status: 0,
+					stdout: "rubocop",
+					stderr: "",
+				})
+				.mockResolvedValueOnce({
+					error: null,
+					status: 1,
+					stdout: "rubocop emitted non-JSON failure output",
+					stderr: "",
+				});
+
+			const result = await runner.run(ctx(filePath, env.tmpDir) as never);
+			expect(result.status).not.toBe("succeeded");
+			expect(result.diagnostics).not.toHaveLength(0);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("rubocop preserves rejected and signaled outcomes as skipped (#1816)", async () => {
+		const runner = (
+			await import("../../../../clients/dispatch/runners/rubocop.js")
+		).default;
+		const env = setupTestEnvironment("pi-lens-rb-outcome-");
+		try {
+			const filePath = path.join(env.tmpDir, "main.rb");
+			fs.writeFileSync(filePath, "puts 'hi'\n");
+			safeSpawnAsync
+				.mockResolvedValueOnce({
+					error: null,
+					status: 0,
+					stdout: "rubocop",
+					stderr: "",
+				})
+				.mockResolvedValueOnce({
+					error: null,
+					status: 2,
+					stdout: "",
+					stderr: "invalid option",
+				});
+			const rejected = await runner.run(ctx(filePath, env.tmpDir) as never);
+			expect(rejected.status).toBe("skipped");
+
+			safeSpawnAsync
+				.mockResolvedValueOnce({
+					error: null,
+					status: 0,
+					stdout: "rubocop",
+					stderr: "",
+				})
+				.mockResolvedValueOnce({
+					error: null,
+					status: null,
+					signal: "SIGTERM",
+					stdout: "",
+					stderr: "",
+				});
+			const signaled = await runner.run(ctx(filePath, env.tmpDir) as never);
+			expect(signaled.status).toBe("skipped");
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("real dispatcher preserves a RuboCop parse failure (#1816)", async () => {
+		const { createDispatchContext, dispatchForFile, RunnerRegistry } =
+			await import("../../../../clients/dispatch/dispatcher.js");
+		const runner = (
+			await import("../../../../clients/dispatch/runners/rubocop.js")
+		).default;
+		const env = setupTestEnvironment("pi-lens-rb-dispatch-outcome-");
+		try {
+			const filePath = path.join(env.tmpDir, "main.rb");
+			fs.writeFileSync(filePath, "puts 'hi'\n");
+			safeSpawnAsync
+				.mockResolvedValueOnce({
+					error: null,
+					status: 0,
+					stdout: "rubocop",
+					stderr: "",
+				})
+				.mockResolvedValueOnce({
+					error: null,
+					status: 1,
+					stdout: "rubocop emitted non-JSON failure output",
+					stderr: "",
+				});
+			const registry = new RunnerRegistry();
+			registry.register(runner);
+			let observed: string | undefined;
+			await dispatchForFile(
+				createDispatchContext(
+					filePath,
+					env.tmpDir,
+					{ getFlag: () => false },
+					new FactStore(),
+				),
+				[{ mode: "all", runnerIds: ["rubocop"] }],
+				registry,
+				(_runnerId, result) => {
+					observed = result.status;
+				},
+			);
+			expect(observed).toBe("failed");
+		} finally {
+			env.cleanup();
+		}
+	});
+
 	it("lsp runner uses bounded document touch instead of unbounded aggregate diagnostics", async () => {
 		const runner = (await import("../../../../clients/dispatch/runners/lsp.js"))
 			.default;

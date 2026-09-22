@@ -23,6 +23,7 @@ import type {
 	RunnerResult,
 } from "../types.js";
 import { resolveCommandArgsWithInstallFallback } from "./utils/runner-helpers.js";
+import { finishParsedRun, parseToolRun } from "./utils/tool-failure.js";
 
 interface RubocopOffense {
 	severity: string;
@@ -118,26 +119,21 @@ const rubocopRunner: RunnerDefinition = {
 			{ timeout: 30000, cwd },
 		);
 
-		// rubocop exits 0 = no offenses, 1 = offenses found, 2 = fatal error
-		if (result.status === 2) {
-			return { status: "skipped", diagnostics: [], semantic: "none" };
-		}
-
-		if (result.status === 0) {
-			return { status: "succeeded", diagnostics: [], semantic: "none" };
-		}
-
-		const diagnostics = parseRubocopJson(result.stdout, ctx.filePath);
-		if (diagnostics.length === 0) {
-			return { status: "succeeded", diagnostics: [], semantic: "none" };
-		}
-
-		const hasErrors = diagnostics.some((d) => d.semantic === "blocking");
-		return {
-			status: hasErrors ? "failed" : "succeeded",
-			diagnostics,
-			semantic: hasErrors ? "blocking" : "warning",
-		};
+		// Exit table: 0 = clean, 1 = offenses/findings, 2 = fatal or rejected
+		// invocation. A nonzero exit with valid JSON remains findings; a nonzero
+		// exit with empty or unparsable JSON is never clean (#1816).
+		const run = parseToolRun(
+			"rubocop",
+			{ result, output: result.stdout, exitCodes: { ran: [1] } },
+			(output) => parseRubocopJson(output, ctx.filePath),
+		);
+		if (run.skipped) return run.skipped;
+		return finishParsedRun({
+			tool: "rubocop",
+			ctx,
+			result,
+			diagnostics: run.diagnostics,
+		});
 	},
 };
 
