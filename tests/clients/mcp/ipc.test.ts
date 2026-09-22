@@ -293,7 +293,9 @@ function workspaceIdIn(derivedPath: string): string {
 const TMPDIR_IS_CASE_SENSITIVE = (() => {
 	const probe = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-ipc-Case-"));
 	try {
-		return !fs.existsSync(probe.replace("pi-lens-ipc-Case-", "pi-lens-ipc-case-"));
+		return !fs.existsSync(
+			probe.replace("pi-lens-ipc-Case-", "pi-lens-ipc-case-"),
+		);
 	} finally {
 		removeTempDirSync(probe);
 	}
@@ -318,27 +320,29 @@ describe.skipIf(!TMPDIR_IS_CASE_SENSITIVE)(
 				path.join(os.tmpdir(), "pi-lens-ipc-Leak-"),
 			);
 			const sibling = caseVariantSibling(served, "pi-lens-ipc-Leak-");
-			await listenOnWorkspaceEndpoint(served, (socket) => {
-				socket.setEncoding("utf8");
-				socket.once("data", () =>
-					socket.end(`${JSON.stringify({ result: SENTINEL })}\n`),
-				);
-			});
+			try {
+				await listenOnWorkspaceEndpoint(served, (socket) => {
+					socket.setEncoding("utf8");
+					socket.once("data", () =>
+						socket.end(`${JSON.stringify({ result: SENTINEL })}\n`),
+					);
+				});
 
-			// Control: the stub really is reachable from the workspace it serves.
-			await expect(requestWarmAnalyze(served, "/x/app.ts", 2000)).resolves.toEqual(
-				SENTINEL,
-			);
+				// Control: the stub really is reachable from the workspace it serves.
+				await expect(
+					requestWarmAnalyze(served, "/x/app.ts", 2000),
+				).resolves.toEqual(SENTINEL);
 
-			// The defect: the sibling workspace must NOT reach that server. Cold
-			// fallback (`undefined`) is the correct answer for a workspace with no
-			// warm server of its own.
-			await expect(
-				requestWarmAnalyze(sibling, "/x/app.ts", 2000),
-			).resolves.toBeUndefined();
-
-			removeTempDirSync(sibling);
-			removeTempDirSync(served);
+				// The defect: the sibling workspace must NOT reach that server. Cold
+				// fallback (`undefined`) is the correct answer for a workspace with no
+				// warm server of its own.
+				await expect(
+					requestWarmAnalyze(sibling, "/x/app.ts", 2000),
+				).resolves.toBeUndefined();
+			} finally {
+				removeTempDirSync(sibling);
+				removeTempDirSync(served);
+			}
 		});
 
 		it("does not merge two case-variant workspaces into one turn-end status file", () => {
@@ -424,16 +428,19 @@ describe("workspace id under an injected platform (#3255)", () => {
 		["win32", true],
 		["linux", false],
 		["darwin", false],
-	])("uses the %s endpoint form for the injected platform", (platform, pipe) => {
-		const endpoint = ipcPathForCwd(ALPHA, platform);
-		expect(endpoint.startsWith("\\\\.\\pipe\\pi-lens-mcp-")).toBe(pipe);
-		expect(endpoint.endsWith(".sock")).toBe(!pipe);
-		expect(
-			diagnosticsIpcPathForCwd(ALPHA, 4242, platform).endsWith(
-				pipe ? "-diagnostics-4242" : "-diagnostics-4242.sock",
-			),
-		).toBe(true);
-	});
+	])(
+		"uses the %s endpoint form for the injected platform",
+		(platform, pipe) => {
+			const endpoint = ipcPathForCwd(ALPHA, platform);
+			expect(endpoint.startsWith("\\\\.\\pipe\\pi-lens-mcp-")).toBe(pipe);
+			expect(endpoint.endsWith(".sock")).toBe(!pipe);
+			expect(
+				diagnosticsIpcPathForCwd(ALPHA, 4242, platform).endsWith(
+					pipe ? "-diagnostics-4242" : "-diagnostics-4242.sock",
+				),
+			).toBe(true);
+		},
+	);
 });
 
 describe("requestWarmAnalyze", () => {
