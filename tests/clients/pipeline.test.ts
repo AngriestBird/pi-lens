@@ -1397,6 +1397,11 @@ describe("Pipeline", () => {
 				"a: 1\n",
 			);
 			const otherChartFile = path.join(tmpDir, "values.yaml");
+			// The cited file must EXIST: a blocker whose cited file is gone is
+			// retracted wholesale by the deleted-path gate (#3190 records nothing),
+			// so this test pins the #1641 line-attribution contract for a LIVE
+			// cross-file blocker, not the retraction path.
+			fs.writeFileSync(otherChartFile, "replicas: 1\n");
 			vi.mocked(dispatchLintWithResult).mockResolvedValue({
 				diagnostics: [],
 				blockers: [
@@ -1713,6 +1718,160 @@ describe("Pipeline", () => {
 				expect(result.output).toContain("🔴 STOP — 1 issue(s)");
 				expect(result.output).toContain("SURVIVING-BLOCKER-MARKER");
 				expect(result.output).not.toContain("DEAD-PATH-BLOCKER-MARKER");
+			});
+		});
+
+		// #3190: the turn-end inline-blocker record (inlineBlockerSummary/Sources/
+		// Lines) is a delivery surface of its own (`runtime-turn:
+		// unresolved-inline-blocker`), and the turn-end reader has no deleted-path
+		// gate — the producer must carry the gated set or a blocker retracted from
+		// the tool result re-surfaces at turn end.
+		describe("#3190 turn-end record carries the gated set", () => {
+			it("omits a retracted blocker from the turn-end record on partial retraction", async () => {
+				const filePath = createTempFile(
+					tmpDir,
+					"record-live.ts",
+					"const x = 1;\nconst y = 2;\n",
+				);
+				const deletedPath = path.join(tmpDir, "record-deleted.ts");
+				vi.mocked(dispatchLintWithResult).mockResolvedValue({
+					diagnostics: [],
+					blockers: [
+						{
+							id: "dead-5",
+							message: "DEAD-PATH-BLOCKER-MARKER secret in removed file",
+							filePath: deletedPath,
+							line: 1,
+							severity: "error",
+							semantic: "blocking",
+							tool: "gitleaks",
+						},
+						{
+							id: "live-5",
+							message: "LIVE-FILE-BLOCKER-MARKER unused var",
+							filePath,
+							line: 1,
+							severity: "error",
+							semantic: "blocking",
+							tool: "lsp",
+						},
+					],
+					warnings: [],
+					baselineWarningCount: 0,
+					fixed: [],
+					resolvedCount: 0,
+					output:
+						"DEAD-PATH-BLOCKER-MARKER secret in removed file\nLIVE-FILE-BLOCKER-MARKER unused var",
+					blockerOutput:
+						"DEAD-PATH-BLOCKER-MARKER secret in removed file\nLIVE-FILE-BLOCKER-MARKER unused var",
+					hasBlockers: true,
+				});
+
+				const result = await runPipeline(
+					createMockContext(filePath),
+					createMockDeps(),
+				);
+
+				// The summary the turn-end surface will re-serve carries only the
+				// surviving blocker — the retracted one was already dropped from the
+				// tool result and must not come back.
+				expect(result.inlineBlockerSummary).toBeDefined();
+				expect(result.inlineBlockerSummary).toContain(
+					"LIVE-FILE-BLOCKER-MARKER",
+				);
+				expect(result.inlineBlockerSummary).not.toContain(
+					"DEAD-PATH-BLOCKER-MARKER",
+				);
+				// Provenance is derived from the same gated set, so #1561's
+				// retirement check can never see a source/line the summary dropped.
+				expect(result.inlineBlockerSources).toEqual(["lsp"]);
+				expect(result.inlineBlockerLines).toEqual([1]);
+			});
+
+			it("records nothing when every blocker cites a deleted file", async () => {
+				// The record's key (this file) still exists, so the turn-end
+				// reconcile would keep the entry — the producer must not record it
+				// at all, or the retracted text re-surfaces every turn.
+				const filePath = createTempFile(
+					tmpDir,
+					"record-target.ts",
+					"const x = 1;",
+				);
+				const deletedPath = path.join(tmpDir, "record-also-deleted.ts");
+				vi.mocked(dispatchLintWithResult).mockResolvedValue({
+					diagnostics: [],
+					blockers: [
+						{
+							id: "dead-6",
+							message: "GHOST-BLOCKER-MARKER finding in removed file",
+							filePath: deletedPath,
+							line: 1,
+							severity: "error",
+							semantic: "blocking",
+							tool: "gitleaks",
+						},
+					],
+					warnings: [],
+					baselineWarningCount: 0,
+					fixed: [],
+					resolvedCount: 0,
+					output: "GHOST-BLOCKER-MARKER finding in removed file",
+					blockerOutput: "GHOST-BLOCKER-MARKER finding in removed file",
+					hasBlockers: true,
+				});
+
+				const result = await runPipeline(
+					createMockContext(filePath),
+					createMockDeps(),
+				);
+
+				expect(result.inlineBlockerSummary).toBeUndefined();
+				expect(result.inlineBlockerSources).toBeUndefined();
+				expect(result.inlineBlockerLines).toBeUndefined();
+				expect(result.inlineBlockerFileContent).toBeUndefined();
+			});
+
+			it("keeps the raw dispatcher summary when nothing is retracted", async () => {
+				// The common path is byte-identical: no retraction means the gated
+				// set IS the raw set, and the summary stays the dispatcher's own
+				// text rather than a re-render.
+				const filePath = createTempFile(
+					tmpDir,
+					"record-plain.ts",
+					"const x = 1;",
+				);
+				const RAW_BLOCKER_OUTPUT =
+					"\n🔴 STOP — 1 issue(s) must be fixed:\n  L1: PLAIN-BLOCKER-MARKER unused var\n";
+				vi.mocked(dispatchLintWithResult).mockResolvedValue({
+					diagnostics: [],
+					blockers: [
+						{
+							id: "live-7",
+							message: "PLAIN-BLOCKER-MARKER unused var",
+							filePath,
+							line: 1,
+							severity: "error",
+							semantic: "blocking",
+							tool: "ruff",
+						},
+					],
+					warnings: [],
+					baselineWarningCount: 0,
+					fixed: [],
+					resolvedCount: 0,
+					output: RAW_BLOCKER_OUTPUT,
+					blockerOutput: RAW_BLOCKER_OUTPUT,
+					hasBlockers: true,
+				});
+
+				const result = await runPipeline(
+					createMockContext(filePath),
+					createMockDeps(),
+				);
+
+				expect(result.inlineBlockerSummary).toBe(RAW_BLOCKER_OUTPUT.trim());
+				expect(result.inlineBlockerSources).toEqual(["ruff"]);
+				expect(result.inlineBlockerLines).toEqual([1]);
 			});
 		});
 	});

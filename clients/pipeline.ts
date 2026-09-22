@@ -38,6 +38,7 @@ import { getDiagnosticLogger } from "./diagnostic-logger.js";
 import { getDiagnosticTracker } from "./diagnostic-tracker.js";
 import { loadDispatchIntegration } from "./dispatch/lazy.js";
 import { toRunnerDisplayPath } from "./dispatch/runner-context.js";
+import { formatDiagnostics } from "./dispatch/utils/format-utils.js";
 import {
 	type AvailabilityLatch,
 	classifyProbeFailure,
@@ -1862,6 +1863,22 @@ export async function runPipeline(
 					};
 				});
 
+	// #3190: the turn-end inline-blocker record is built from the SAME gated set
+	// the tool result rendered, never from the raw dispatcher text —
+	// `blockerOutput` still carries every blocker the deleted-path gate above
+	// retracted, and the turn-end reader has no deleted-path gate of its own, so
+	// the ungated text re-served a finding the gate had just dropped. Total
+	// retraction records nothing (the consumer clears the file's pending
+	// entry); partial retraction re-renders the surviving set through the same
+	// renderer the dispatcher used, so Sources/Lines stay consistent with the
+	// text #1561's retirement check reads.
+	const deliverableHasBlockers = hasBlockers && deliverableBlockers.length > 0;
+	const turnEndBlockerSummary = !deliverableHasBlockers
+		? undefined
+		: deliverableBlockers.length === dispatchResult.blockers.length
+			? dispatchResult.blockerOutput.trim() || undefined
+			: formatDiagnostics(deliverableBlockers, "blocking").trim() || undefined;
+
 	// --- Final timing + all-clear ---
 	const elapsed = Date.now() - pipelineStart;
 	// #1590: `postAutofixNotice` is output this run produces, just rendered a
@@ -1901,23 +1918,23 @@ export async function runPipeline(
 		fileModified,
 		postWriteStateHash,
 		changedFiles,
-		inlineBlockerSummary: hasBlockers
-			? dispatchResult.blockerOutput.trim() || undefined
-			: undefined,
+		inlineBlockerSummary: turnEndBlockerSummary,
 		// #1561 F1: taken from the very diagnostics `blockerOutput` was rendered
 		// from, so the provenance can never disagree with the text it guards. An
 		// untagged diagnostic contributes the literal "unknown", which no verdict
 		// claims coverage for — it pins the entry rather than silently widening
-		// what an LSP check is allowed to clear.
-		inlineBlockerSources: hasBlockers
+		// what an LSP check is allowed to clear. #3190: derived from the gated
+		// set, so a retracted blocker cannot survive in provenance the summary
+		// no longer carries.
+		inlineBlockerSources: deliverableHasBlockers
 			? [
 					...new Set(
-						dispatchResult.blockers.map((d) => d.tool?.trim() || "unknown"),
+						deliverableBlockers.map((d) => d.tool?.trim() || "unknown"),
 					),
 				]
 			: undefined,
-		inlineBlockerLines: hasBlockers
-			? dispatchResult.blockers
+		inlineBlockerLines: deliverableHasBlockers
+			? deliverableBlockers
 					// #1641 review F2: `dispatchResult.blockers` is NOT guaranteed to be
 					// scoped to THIS file — a chart-wide runner (helm-lint, helm-render)
 					// reports blocking diagnostics against other files in the chart
@@ -1970,7 +1987,7 @@ export async function runPipeline(
 						source: "autofix",
 					}
 				: undefined,
-		inlineBlockerFileContent: hasBlockers
+		inlineBlockerFileContent: deliverableHasBlockers
 			? inlineBlockerFileContent
 			: undefined,
 	};
