@@ -86,7 +86,9 @@ filter one stage late can silently starve it of the population it was meant to
 guard (#3166 r1: a policy moved after a pre-existing display cap and genuine
 findings vanished). Deletion requests sweep callers and test doubles first. A
 second writer of shared state requires an identity, generation, reason, or kind
-discriminator before it lands.<important if="delegating work or coordinating a lane">
+discriminator before it lands.
+
+<important if="delegating work or coordinating a lane">
 
 ## Orchestration and delegated work
 
@@ -201,7 +203,7 @@ ADR: docs/adr/0007-end-to-end-witness-per-seam-slice.md
 
 </important>
 
-<important if="adding or reading a cache / durable record">
+<important if="adding or reading a cache, durable record, or project-intelligence state">
 
 ### adding or reading a cache / durable record
 
@@ -304,7 +306,7 @@ ADR: docs/adr/0007-end-to-end-witness-per-seam-slice.md
 
 </important>
 
-<important if="a runner or tool outcome">
+<important if="a runner outcome or tool execution">
 
 ### a runner or tool outcome
 
@@ -419,7 +421,7 @@ ADR: docs/adr/0007-end-to-end-witness-per-seam-slice.md
 
 </important>
 
-<important if="availability or installer">
+<important if="availability policy or installer">
 
 ### availability or installer
 
@@ -725,7 +727,9 @@ Never hand-edit generated `.js` or `dist/`. Never use `git stash`, destructive
 resets, or ad hoc double-force worktree removal. A worktree whose `node_modules`
 is a symlink is unlinked (`rm node_modules`) before `git worktree remove`; the
 forced remove follows the link into the shared install (#2704 class). The Bash hook enforces the
-mechanically classifiable subset of these rules.<important if="relocating project data, machine state, or telemetry">
+mechanically classifiable subset of these rules.
+
+<important if="relocating project data, machine state, or telemetry">
 
 ## Data directories and logs
 
@@ -791,7 +795,9 @@ Test authoring screens:
 Governance sweeps use `tests/support/sweep-kit.ts`, explicit source roots, and
 comment/string-blanked source. Every sweep has a real floor and a checked
 exemption reason. New mock exports, fixture shapes, path rules, spawn lanes,
-and durable fields must update their registered-or-fail coverage tests.<important if="adding or changing a rule or analyzer">
+and durable fields must update their registered-or-fail coverage tests.
+
+<important if="adding or changing a rule or analyzer">
 
 ## Rule and analyzer contracts
 
@@ -828,7 +834,9 @@ bounded and preserve the identity that distinguishes one degradation from
 another. A phase record's timer wraps only its own call; when two writers
 share one phase literal they share one stated semantic, not one writer's
 meaning attributed to the other's work (#3166 r1: a walk was reported as the
-policy phase).<important if="triaging or labeling an issue">
+policy phase).
+
+<important if="triaging or labeling an issue">
 
 ## Issue triage & labels
 
