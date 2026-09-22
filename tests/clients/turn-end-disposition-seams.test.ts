@@ -378,6 +378,67 @@ describe("dead-code turn-end advisory honors dispositions (#3248)", () => {
 			env.cleanup();
 		}
 	});
+
+	it("emits no dead-code advisory at all when every new finding is marked", async () => {
+		// A PUSH surface stays silent after a mark rather than rendering an empty
+		// advisory header; the count rides this lane's bounded per-turn row.
+		const env = setupTestEnvironment("pi-lens-3248-dead-code-silent-");
+		try {
+			const cwd = env.tmpDir;
+			const filePath = path.join(cwd, "only.py");
+			fs.writeFileSync(filePath, "def marked():\n    pass\n");
+
+			const runtime = new RuntimeCoordinator();
+			runtime.setTelemetryIdentity({ sessionId: SESSION_ID });
+			const cacheManager = new CacheManager(false);
+			cacheManager.writeCache(
+				"dead-code-vulture",
+				{
+					success: true,
+					language: "python",
+					unusedExports: [],
+					unusedFiles: [],
+					unusedDeps: [],
+					unlistedDeps: [],
+					summary: "ok",
+				},
+				cwd,
+			);
+			registerEdit(cacheManager, cwd, filePath);
+			markFalsePositive(cwd, {
+				filePath,
+				tool: "dead-code",
+				rule: "dead-code:export",
+				message: "Unused function marked",
+				line: 1,
+			});
+
+			await handleTurnEnd(
+				makeTurnEndDeps(runtime, cacheManager, cwd, {
+					deadCodeClients: [
+						deadCodeClient([
+							{
+								category: "export",
+								kind: "function",
+								name: "marked",
+								file: filePath,
+								line: 1,
+							},
+						]),
+					],
+				}),
+			);
+
+			const text = turnEndText(cacheManager, cwd, runtime);
+			expect(text).not.toContain("Newly unused");
+			expect(text).not.toContain("Advisory");
+			expect(latencyRow("dead-code")).toMatchObject({
+				dispositionSuppressed: 1,
+			});
+		} finally {
+			env.cleanup();
+		}
+	});
 });
 
 describe("call-graph impact advisory honors dispositions (#3248)", () => {
@@ -441,6 +502,47 @@ describe("call-graph impact advisory honors dispositions (#3248)", () => {
 			expect(latencyRow("call_graph_impact")).toMatchObject({
 				dispositionSuppressed: 1,
 			});
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("keeps a caller its own adapter cannot map, which is therefore unmarkable", async () => {
+		// The adapter drops a caller with no attributable file (and the Review
+		// tier) — such a caller can never carry a disposition anchor, so nothing
+		// may suppress it. Fail-open: it stays on the line even when its
+		// sibling's mark removes that sibling.
+		const env = setupTestEnvironment("pi-lens-3248-call-graph-unmappable-");
+		try {
+			const cwd = env.tmpDir;
+			const edited = path.join(cwd, "src", "core.ts");
+			const markedCaller = path.join(cwd, "src", "marked.ts");
+			fs.mkdirSync(path.join(cwd, "src"), { recursive: true });
+			for (const f of [edited, markedCaller]) {
+				fs.writeFileSync(f, "export const x = 1;\n");
+			}
+
+			const runtime = new RuntimeCoordinator();
+			runtime.setTelemetryIdentity({ sessionId: SESSION_ID });
+			runtime.callGraph = graphWith(`${edited}:doThing`, [
+				`${markedCaller}:markedCaller`,
+				"bareCaller",
+			]);
+			const cacheManager = new CacheManager(false);
+			registerEdit(cacheManager, cwd, edited);
+			markFalsePositive(cwd, {
+				filePath: markedCaller,
+				tool: "call-graph",
+				rule: "call-graph:willbreak",
+				message:
+					"Direct caller of a symbol edited this turn — verify this call site still matches its new signature/behavior. (markedCaller calls edited symbol 'doThing')",
+			});
+
+			await handleTurnEnd(makeTurnEndDeps(runtime, cacheManager, cwd));
+
+			const text = turnEndText(cacheManager, cwd, runtime);
+			expect(text).toContain("bareCaller");
+			expect(text).not.toContain("markedCaller");
 		} finally {
 			env.cleanup();
 		}
