@@ -905,6 +905,10 @@ describe("upgrade transition after the case-fold narrowing (#3255)", () => {
 			expect(turnEndStatusPathForCwd(lower, "win32")).toBe(shared);
 			recordTurnEndOutcome(upper, { ran: true }, "win32");
 			recordTurnEndOutcome(lower, { ran: true }, "win32");
+			// Read back through BOTH spellings. The uppercase one is the load-bearing
+			// read: `/repo/alpha` is already lowercase, so both rules give it the same
+			// id and it cannot tell an honored `platform` from an ignored one.
+			expect(readTurnEndStatus(upper, "win32")).toMatchObject({ ran: 2 });
 			expect(readTurnEndStatus(lower, "win32")).toMatchObject({ ran: 2 });
 		} finally {
 			fs.rmSync(shared, { force: true });
