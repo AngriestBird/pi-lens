@@ -778,13 +778,6 @@ function legacyWorkspaceId(cwd: string): string {
 		.slice(0, 16);
 }
 
-function legacyStatusPath(cwd: string): string {
-	return path.join(
-		os.tmpdir(),
-		`pi-lens-turn-end-${legacyWorkspaceId(cwd)}.json`,
-	);
-}
-
 describe("upgrade transition after the case-fold narrowing (#3255)", () => {
 	it("does not reach a pre-upgrade server still listening on the legacy endpoint", async () => {
 		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-ipc-Stranded-"));
@@ -854,47 +847,67 @@ describe("upgrade transition after the case-fold narrowing (#3255)", () => {
 		}
 	});
 
-	// Both file cases drive the platform through the SAME injected argument the
-	// round-1 derivations use, so neither needs a `skipIf` and both run on every
-	// lane: the orphan can only exist where the two rules disagree (a
-	// case-SENSITIVE platform), and the cleanup must never fire where they agree.
-	it("removes the pre-upgrade status file when it writes the new one", () => {
-		const cwd = "/repo/Alpha";
-		const legacy = legacyStatusPath(cwd);
-		const current = turnEndStatusPathForCwd(cwd, "linux");
-		// Both names live in the shared `os.tmpdir()`, so start from a known
-		// empty state rather than inheriting a sibling run's counters.
-		fs.rmSync(legacy, { force: true });
-		fs.rmSync(current, { force: true });
+	// #3255 round 3 (H2): the two status-file cases are about CROSS-WORKSPACE
+	// isolation, and both drive the platform through the same injected argument
+	// the round-1 derivations use, so neither needs a `skipIf`.
+	//
+	// Recurrence they prevent: round 2 deleted the "pre-upgrade" status file
+	// whenever its name differed from the one it had just written. On a
+	// case-sensitive host that name is not an orphan at all — it is the LIVE
+	// current file of the case-variant sibling workspace, because the retired
+	// always-fold rule maps `/repo/Alpha` onto the same id the live rule gives
+	// `/repo/alpha`. Recording one workspace's turn erased the other's history.
+	it("keeps a case-variant sibling's status file on a case-sensitive host", () => {
+		const upper = "/repo/Alpha";
+		const lower = "/repo/alpha";
+		const upperFile = turnEndStatusPathForCwd(upper, "linux");
+		const lowerFile = turnEndStatusPathForCwd(lower, "linux");
+		fs.rmSync(upperFile, { force: true });
+		fs.rmSync(lowerFile, { force: true });
 		try {
-			expect(legacy).not.toBe(current);
-			fs.writeFileSync(legacy, `${JSON.stringify({ ran: 7, skipped: 2 })}\n`);
+			expect(upperFile).not.toBe(lowerFile);
+			// The sibling has a live record of its own, written under the CURRENT
+			// rule — not a leftover.
+			recordTurnEndOutcome(lower, { ran: false, reason: "no-listener" }, "linux");
+			expect(readTurnEndStatus(lower, "linux")).toMatchObject({ skipped: 1 });
 
-			recordTurnEndOutcome(cwd, { ran: true }, "linux");
+			recordTurnEndOutcome(upper, { ran: true }, "linux");
 
-			expect(readTurnEndStatus(cwd, "linux")).toMatchObject({ ran: 1 });
-			// The orphan is gone, so nothing keeps reporting counters that no hook
-			// writes to any more.
-			expect(fs.existsSync(legacy)).toBe(false);
+			// Each workspace keeps its own counters. Recording a turn in one may
+			// never touch another workspace's telemetry.
+			expect(readTurnEndStatus(upper, "linux")).toMatchObject({
+				ran: 1,
+				skipped: 0,
+			});
+			expect(readTurnEndStatus(lower, "linux")).toMatchObject({
+				ran: 0,
+				skipped: 1,
+				lastSkipReason: "no-listener",
+			});
 		} finally {
-			fs.rmSync(legacy, { force: true });
-			fs.rmSync(current, { force: true });
+			fs.rmSync(upperFile, { force: true });
+			fs.rmSync(lowerFile, { force: true });
 		}
 	});
 
-	it("never deletes the status file it just wrote when the legacy name is the same", () => {
-		// On a folding platform the two rules produce ONE name, so the cleanup's
-		// target IS the live file. Guard case: it reds only under the mutation
-		// that drops the `legacy !== current` check.
-		const cwd = "/repo/Alpha";
-		const current = turnEndStatusPathForCwd(cwd, "win32");
-		fs.rmSync(current, { force: true });
+	it("shares one status file between case-variant spellings on a folding platform", () => {
+		// The same fixture pair with the opposite expectation: where the
+		// filesystem folds case the two spellings are ONE directory, so they must
+		// keep ONE set of counters. This is also what keeps the injected
+		// `platform` on these two functions provable from the ubuntu lane — the
+		// case-sensitive case above cannot distinguish an injected "linux" from
+		// the host default.
+		const upper = "/repo/Alpha";
+		const lower = "/repo/alpha";
+		const shared = turnEndStatusPathForCwd(upper, "win32");
+		fs.rmSync(shared, { force: true });
 		try {
-			expect(legacyStatusPath(cwd)).toBe(current);
-			recordTurnEndOutcome(cwd, { ran: true }, "win32");
-			expect(readTurnEndStatus(cwd, "win32")).toMatchObject({ ran: 1 });
+			expect(turnEndStatusPathForCwd(lower, "win32")).toBe(shared);
+			recordTurnEndOutcome(upper, { ran: true }, "win32");
+			recordTurnEndOutcome(lower, { ran: true }, "win32");
+			expect(readTurnEndStatus(lower, "win32")).toMatchObject({ ran: 2 });
 		} finally {
-			fs.rmSync(current, { force: true });
+			fs.rmSync(shared, { force: true });
 		}
 	});
 });
