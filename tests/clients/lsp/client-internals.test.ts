@@ -161,7 +161,7 @@ describe("client workspace edit normalization", () => {
 		try {
 			const normalized = await normalizeClientWorkspaceEdit(state, edit);
 			const textChange = (
-				normalized.documentChanges?.[1] as {
+				normalized.documentChanges![1] as {
 					edits: Array<{
 						range: { start: { character: number }; end: { character: number } };
 					}>;
@@ -287,7 +287,7 @@ describe("client workspace edit normalization", () => {
 				],
 			});
 			const textDocument = (
-				normalized.documentChanges?.[0] as {
+				normalized.documentChanges![0] as {
 					textDocument: { version: unknown };
 				}
 			).textDocument;
@@ -977,7 +977,7 @@ describe("handleNotifyOpen", () => {
 			(c) => c[0] === "workspace/didChangeWatchedFiles",
 		);
 		expect(watched).toBeDefined();
-		expect((watched?.[1] as { changes: unknown[] }).changes).toHaveLength(1);
+		expect((watched![1] as { changes: unknown[] }).changes).toHaveLength(1);
 	});
 
 	it("coalesces multiple file opens into ONE didChangeWatchedFiles (#271)", async () => {
@@ -1077,7 +1077,7 @@ describe("handleNotifyExternalChange (#1668)", () => {
 		);
 		expect(watched).toBeDefined();
 		const changes = (
-			watched?.[1] as { changes: Array<{ uri: string; type: number }> }
+			watched![1] as { changes: Array<{ uri: string; type: number }> }
 		).changes;
 		expect(changes).toEqual([{ uri: pathToFileURL(TEST_FILE).href, type: 3 }]);
 	});
@@ -1116,7 +1116,7 @@ describe("handleNotifyExternalChange (#1668)", () => {
 			(c) => c[0] === "workspace/didChangeWatchedFiles",
 		);
 		expect(
-			(watched?.[1] as { changes: Array<{ uri: string }> }).changes,
+			(watched![1] as { changes: Array<{ uri: string }> }).changes,
 		).toEqual([{ uri, type: 1 }]);
 	});
 

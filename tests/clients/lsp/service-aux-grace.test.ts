@@ -1475,7 +1475,7 @@ describe("R8 — aux grace: touchFile with-auxiliary path", () => {
 		// still pending (1200ms). The touch must NOT have resolved yet.
 		await vi.advanceTimersByTimeAsync(600);
 		let resolved = false;
-		touchPromise.then(() => {
+		void touchPromise.then(() => {
 			resolved = true;
 		});
 		await vi.advanceTimersByTimeAsync(1);
@@ -1946,7 +1946,7 @@ describe("R8 — aux grace: raceToCompletion per-role unit tests", () => {
 		// still pending (1200ms). Race must NOT have resolved yet — primary is
 		// not settled so aux-grace can't have started.
 		let resolved = false;
-		resultPromise.then(() => {
+		void resultPromise.then(() => {
 			resolved = true;
 		});
 		await vi.advanceTimersByTimeAsync(600);
