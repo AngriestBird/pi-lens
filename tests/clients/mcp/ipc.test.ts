@@ -5,6 +5,7 @@
  * socket on POSIX) — no real LSP.
  */
 
+import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as net from "node:net";
 import * as os from "node:os";
@@ -612,13 +613,17 @@ describe("requestWarmTurnEnd", () => {
 		removeTempDirSync(cwd);
 	});
 
-	it("reports ipc-error when no warm server is listening", async () => {
+	// #3255 H1: "nothing is listening" is its OWN reason. It used to arrive as
+	// `ipc-error`, indistinguishable from the answering-but-broken server two
+	// cases below — and after the case-fold narrowing it is also what an
+	// upgrade-stranded server looks like, which needs a different remedy.
+	it("reports no-listener when no warm server is listening", async () => {
 		const cwd = fs.mkdtempSync(
 			path.join(os.tmpdir(), "pi-lens-ipc-turn-none-"),
 		);
 		await expect(requestWarmTurnEnd(cwd, 2000)).resolves.toEqual({
 			available: false,
-			reason: "ipc-error",
+			reason: "no-listener",
 		});
 		removeTempDirSync(cwd);
 	});
@@ -745,5 +750,122 @@ describe("createWarmIpcRequestQueue", () => {
 			}),
 		).rejects.toThrow("boom");
 		await expect(queue.enqueue(async () => "next")).resolves.toBe("next");
+	});
+});
+
+// --- #3255 round 2 (H1): the upgrade transition is visible, not silent ------
+//
+// Recurrence these cases prevent: narrowing the case fold changed the derived
+// endpoint bytes, so a pre-upgrade MCP server keeps listening on the LEGACY
+// socket name while every freshly-spawned hook derives the new one. Round 1
+// shipped that transition as an ordinary cold fallback — one `ipc-error`
+// indistinguishable from "no server was ever started", and a stale
+// `pi-lens-turn-end-<legacy>.json` left in tmpdir forever. `ipc-error` is the
+// same conflation #1272 split once already: absent server, stale build and
+// schema skew have different remedies, so the wire reason must name which.
+
+/**
+ * The pre-#3255 (4.2.1) derivation, frozen here as a CROSS-VERSION FIXTURE: it
+ * is what an already-running old binary computed, not a second copy of the
+ * shipping rule. Nothing in production may derive this to READ or CONNECT — the
+ * folded id is the colliding id on a case-sensitive host.
+ */
+function legacyWorkspaceId(cwd: string): string {
+	return crypto
+		.createHash("sha256")
+		.update(path.resolve(cwd).toLowerCase())
+		.digest("hex")
+		.slice(0, 16);
+}
+
+function legacyStatusPath(cwd: string): string {
+	return path.join(os.tmpdir(), `pi-lens-turn-end-${legacyWorkspaceId(cwd)}.json`);
+}
+
+describe("upgrade transition after the case-fold narrowing (#3255)", () => {
+	it("does not reach a pre-upgrade server still listening on the legacy endpoint", async () => {
+		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-ipc-Stranded-"));
+		const legacySocket = path.join(
+			os.tmpdir(),
+			`pi-lens-mcp-${legacyWorkspaceId(cwd)}.sock`,
+		);
+		if (process.platform !== "win32") {
+			try {
+				fs.unlinkSync(legacySocket);
+			} catch {
+				/* none */
+			}
+		}
+		let dialed = 0;
+		activeServer = net.createServer((socket) => {
+			dialed++;
+			socket.setEncoding("utf8");
+			socket.once("data", () =>
+				socket.end(
+					`${JSON.stringify({
+						result: {
+							route: "turn-end",
+							version: WARM_TURN_END_SCHEMA_VERSION,
+							turnEnd: "STALE SERVER ANSWER",
+							deliveryId: "d1",
+						},
+					})}\n`,
+				),
+			);
+		});
+		try {
+			await new Promise<void>((resolve) =>
+				activeServer?.listen(legacySocket, resolve),
+			);
+			// The new hook must NOT be served by the old server (its answer is for
+			// whatever workspace the folded id named), and the miss must carry the
+			// discriminating reason rather than the generic transport error.
+			await expect(requestWarmTurnEnd(cwd, 2000)).resolves.toEqual({
+				available: false,
+				reason: "no-listener",
+			});
+			expect(dialed).toBe(0);
+		} finally {
+			removeTempDirSync(cwd);
+		}
+	});
+
+	// Both file cases drive the platform through the SAME injected argument the
+	// round-1 derivations use, so neither needs a `skipIf` and both run on every
+	// lane: the orphan can only exist where the two rules disagree (a
+	// case-SENSITIVE platform), and the cleanup must never fire where they agree.
+	it("removes the pre-upgrade status file when it writes the new one", () => {
+		const cwd = "/repo/Alpha";
+		const legacy = legacyStatusPath(cwd);
+		const current = turnEndStatusPathForCwd(cwd, "linux");
+		try {
+			expect(legacy).not.toBe(current);
+			fs.writeFileSync(legacy, `${JSON.stringify({ ran: 7, skipped: 2 })}\n`);
+
+			recordTurnEndOutcome(cwd, { ran: true }, "linux");
+
+			expect(readTurnEndStatus(cwd, "linux")).toMatchObject({ ran: 1 });
+			// The orphan is gone, so nothing keeps reporting counters that no hook
+			// writes to any more.
+			expect(fs.existsSync(legacy)).toBe(false);
+		} finally {
+			fs.rmSync(legacy, { force: true });
+			fs.rmSync(current, { force: true });
+		}
+	});
+
+	it("never deletes the status file it just wrote when the legacy name is the same", () => {
+		// On a folding platform the two rules produce ONE name, so the cleanup's
+		// target IS the live file. Guard case: it reds only under the mutation
+		// that drops the `legacy !== current` check.
+		const cwd = "/repo/Alpha";
+		const current = turnEndStatusPathForCwd(cwd, "win32");
+		try {
+			expect(legacyStatusPath(cwd)).toBe(current);
+			recordTurnEndOutcome(cwd, { ran: true }, "win32");
+			expect(readTurnEndStatus(cwd, "win32")).toMatchObject({ ran: 1 });
+		} finally {
+			fs.rmSync(current, { force: true });
+		}
 	});
 });
