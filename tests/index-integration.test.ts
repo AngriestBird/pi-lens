@@ -2608,9 +2608,8 @@ describe("index.ts integration", () => {
 		"lens-health renders the warm-ipc-endpoint-missing degradation row",
 		async () => {
 			const { default: registerExtension } = await import("../index.js");
-			const { recordDegradationOnce, resetDegradationLedger } = await import(
-				"../clients/degradation-ledger.js"
-			);
+			const { recordDegradationOnce, resetDegradationLedger } =
+				await import("../clients/degradation-ledger.js");
 			const { pi, commands } = createMockPi();
 			registerExtension(pi as any);
 

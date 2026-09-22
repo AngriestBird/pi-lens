@@ -868,7 +868,11 @@ describe("upgrade transition after the case-fold narrowing (#3255)", () => {
 			expect(upperFile).not.toBe(lowerFile);
 			// The sibling has a live record of its own, written under the CURRENT
 			// rule — not a leftover.
-			recordTurnEndOutcome(lower, { ran: false, reason: "no-listener" }, "linux");
+			recordTurnEndOutcome(
+				lower,
+				{ ran: false, reason: "no-listener" },
+				"linux",
+			);
 			expect(readTurnEndStatus(lower, "linux")).toMatchObject({ skipped: 1 });
 
 			recordTurnEndOutcome(upper, { ran: true }, "linux");
