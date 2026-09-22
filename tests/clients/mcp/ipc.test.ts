@@ -830,6 +830,27 @@ describe("upgrade transition after the case-fold narrowing (#3255)", () => {
 		}
 	});
 
+	it("keeps ipc-error when the connection opened and then failed", async () => {
+		// The other direction of the same classifier. A server that ACCEPTS and
+		// then drops the connection is present and broken, not absent — telling
+		// its user to start a server, or blaming an upgrade, is wrong advice.
+		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-ipc-Reset-"));
+		await listenOnWorkspaceEndpoint(cwd, (socket) => {
+			socket.on("error", () => {
+				/* the peer reset is the point */
+			});
+			socket.destroy(new Error("incumbent crashed mid-reply"));
+		});
+		try {
+			await expect(requestWarmTurnEnd(cwd, 2000)).resolves.toEqual({
+				available: false,
+				reason: "ipc-error",
+			});
+		} finally {
+			removeTempDirSync(cwd);
+		}
+	});
+
 	// Both file cases drive the platform through the SAME injected argument the
 	// round-1 derivations use, so neither needs a `skipIf` and both run on every
 	// lane: the orphan can only exist where the two rules disagree (a
