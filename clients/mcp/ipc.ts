@@ -568,34 +568,21 @@ export function recordTurnEndOutcome(
 					lastSkipReason: outcome.reason,
 					lastSkipAt: now,
 				};
-		const current = turnEndStatusPathForCwd(cwd, platform);
-		writeFileAtomic(current, `${JSON.stringify(next)}\n`);
-		// #3255 H1: narrowing the case fold renamed this file, orphaning the one
-		// the pre-upgrade build wrote. Left behind, an old server's `pilens_health`
-		// keeps reporting counters no hook updates any more. The legacy name is
-		// derived here for DELETION ONLY and must never be read or connected to:
-		// on a case-sensitive host it is the COLLIDING id, so its contents may
-		// belong to a case-variant sibling workspace. Guarded on the names
-		// actually differing, or this would delete the file just written.
-		const legacy = legacyTurnEndStatusPathForCwd(cwd);
-		if (legacy !== current) fs.rmSync(legacy, { force: true });
+		// Writes THIS workspace's file and nothing else. #3255 round 2 also deleted
+		// the file at the retired always-fold name; round 3 removed that, because
+		// on a case-sensitive host that name is not an orphan — it is the live
+		// current file of the case-variant sibling workspace, and the record
+		// carries no ownership field that could tell the two apart. The
+		// pre-upgrade file is left to the same existence gate every other stale
+		// tmp artifact has: nothing derives that name any more, so nothing reads
+		// it except a still-running pre-upgrade server, for which it is correct.
+		writeFileAtomic(
+			turnEndStatusPathForCwd(cwd, platform),
+			`${JSON.stringify(next)}\n`,
+		);
 	} catch {
 		// telemetry only — a read-only tmpdir must not break the Stop hook
 	}
-}
-
-/**
- * The pre-#3255 status-file name: the same derivation with the case fold
- * applied unconditionally. Exists so the orphan can be REMOVED, never read —
- * see `recordTurnEndOutcome` and the `workspaceHash` doc comment.
- */
-function legacyTurnEndStatusPathForCwd(cwd: string): string {
-	const legacyId = crypto
-		.createHash("sha256")
-		.update(path.resolve(cwd).toLowerCase())
-		.digest("hex")
-		.slice(0, 16);
-	return path.join(os.tmpdir(), `pi-lens-turn-end-${legacyId}.json`);
 }
 
 /**

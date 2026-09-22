@@ -2598,6 +2598,42 @@ describe("index.ts integration", () => {
 		},
 		INTEGRATION_TIMEOUT_MS,
 	);
+
+	// #3255 round-3 verify: the warm-attach ledger row was only reachable through
+	// `/lens-perf` and MCP `pilens_health`, so a plain pi user with no Stop hook
+	// got no notice that this session had silently lost its warm incumbent to a
+	// renamed endpoint — and the remedy, restarting that peer, is not something
+	// the local fallback can discover on its own.
+	it(
+		"lens-health renders the warm-ipc-endpoint-missing degradation row",
+		async () => {
+			const { default: registerExtension } = await import("../index.js");
+			const { recordDegradationOnce, resetDegradationLedger } = await import(
+				"../clients/degradation-ledger.js"
+			);
+			const { pi, commands } = createMockPi();
+			registerExtension(pi as any);
+
+			resetDegradationLedger();
+			try {
+				recordDegradationOnce({
+					kind: "warm-ipc-endpoint-missing",
+					subject: "/tmp/pi-lens-mcp-abc-diagnostics-42.sock",
+					reason: "nothing is listening on its derived endpoint — restart it",
+				});
+
+				const notify = vi.fn();
+				await commands.get("lens-health")?.handler?.({}, { ui: { notify } });
+
+				const [message] = notify.mock.calls[0];
+				expect(message).toContain("warm-ipc-endpoint-missing");
+				expect(message).toContain("restart it");
+			} finally {
+				resetDegradationLedger();
+			}
+		},
+		INTEGRATION_TIMEOUT_MS,
+	);
 });
 
 describe("#484 turn-summary emit at the agent_settled quiet window", () => {
