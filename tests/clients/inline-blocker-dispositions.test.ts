@@ -369,6 +369,9 @@ describe("turn-end unresolved inline blockers honor dispositions (#3246)", () =>
 			expect(rows).toHaveLength(1);
 			expect(rows[0]?.metadata).toMatchObject({
 				records: 1,
+				// A live record, not one the freshness gates demoted — the policy
+				// ran on it, so it is counted as a candidate set, not as stale.
+				stale: 0,
 				candidates: 2,
 				kept: 0,
 				dispositionSuppressed: 2,
@@ -485,6 +488,14 @@ describe("turn-end unresolved inline blockers honor dispositions (#3246)", () =>
 			expect(text).not.toContain("Unresolved from this turn");
 			expect(text).toContain("alpha is unsafe");
 			expect(text).toContain("stale");
+			// A demoted record renders through the advisory channel, so the policy
+			// never runs on it — countable as such, not as a zero-candidate live
+			// record.
+			expect(inlinePolicyRows()[0]?.metadata).toMatchObject({
+				records: 1,
+				stale: 1,
+				candidates: 0,
+			});
 		} finally {
 			env.cleanup();
 		}

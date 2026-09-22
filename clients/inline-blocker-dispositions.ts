@@ -138,7 +138,11 @@ export function applyInlineBlockerPolicy(
 	for (const diagnostic of diagnostics) {
 		// Resolved against the PROJECT root, never `process.cwd()`: a runner that
 		// reports a project-relative path would otherwise be grouped under the
-		// agent host's working directory and read the wrong file's bytes.
+		// agent host's working directory and read the wrong file's bytes. No
+		// case/separator fold on the key (catalog shape 1): two spellings of one
+		// file would only cost a duplicate read here — `anchorsForDiagnostic`
+		// canonicalizes both the cwd and the file path itself, so the anchors,
+		// and therefore the verdict, are identical either way.
 		const owner = path.resolve(cwd, diagnostic.filePath);
 		const group = byFile.get(owner);
 		if (group) group.push(diagnostic);
