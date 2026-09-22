@@ -27,8 +27,26 @@ import {
 	gateFindingsByPathFreshness,
 	parseScannedAtMs,
 	partitionFindingsByCitedPath,
-	type FindingPathFreshness,
+	type FindingPathFacts,
 } from "../../clients/advisory-provenance.js";
+
+/**
+ * #1892: the injected probe answers with the path's FACTS. A "stale" verdict is
+ * no longer injectable — it is DERIVED from an mtime past the asking store's
+ * own `scannedAt`, which is what lets one delivery serve stores whose scans
+ * differ without one of them deciding for the others.
+ */
+const GATE_SCANNED_AT = "2026-08-18T07:00:00.000Z";
+const GATE_SCANNED_AT_MS = Date.parse(GATE_SCANNED_AT);
+const EDITED_AFTER: FindingPathFacts = {
+	state: "present",
+	mtimeMs: GATE_SCANNED_AT_MS + 60_000,
+};
+const UNTOUCHED: FindingPathFacts = {
+	state: "present",
+	mtimeMs: GATE_SCANNED_AT_MS - 60_000,
+};
+const GONE: FindingPathFacts = { state: "missing" };
 import { MTIME_DRIFT_TOLERANCE_MS } from "../../clients/blocker-freshness.js";
 import { setupTestEnvironment } from "./test-utils.js";
 
@@ -170,16 +188,16 @@ describe("partitionFindingsByCitedPath freshness verdict (#1622)", () => {
 	// The memo is per call, not per process. A module-level cache here would be
 	// the process-lifetime latch shape: it would pin turn 1's verdict forever.
 	it("re-probes on every call — the stat memo does not survive the delivery", () => {
-		const probe = vi.fn((): FindingPathFreshness => "stale");
+		const probe = vi.fn((): FindingPathFacts => EDITED_AFTER);
 		const args = {
 			findings: [
 				{ file: "/repo/a.ts", rule: "a" },
 				{ file: "/repo/a.ts", rule: "b" },
 			],
 			cwd: "/repo",
-			scannedAt: new Date().toISOString(),
+			scannedAt: GATE_SCANNED_AT,
 			citedPath,
-			existence: probe,
+			probePath: probe,
 		};
 		partitionFindingsByCitedPath<Finding>(args);
 		expect(probe).toHaveBeenCalledTimes(1); // memoized WITHIN the call
@@ -201,21 +219,26 @@ describe("gateFindingsByPathFreshness records (#1622 criterion 5)", () => {
 	afterEach(() => logLatency.mockReset());
 
 	it("logs one bounded finding_stale_line_demote naming the store and count", () => {
-		const scannedAt = "2026-08-18T07:00:00.000Z";
-		const gate = gateFindingsByPathFreshness<Finding>({
-			store: "gitleaks",
-			findings: [
-				{ file: "/repo/stale/a.ts", rule: "a" },
-				{ file: "/repo/stale/b.ts", rule: "b" },
-				{ file: "/repo/stale/c.ts", rule: "c" },
-				{ file: "/repo/stale/d.ts", rule: "d" },
-				{ file: "/repo/kept.ts", rule: "kept" },
-			],
+		const scannedAt = GATE_SCANNED_AT;
+		const { gitleaks: gate } = gateFindingsByPathFreshness({
 			cwd: "/repo",
-			scannedAt,
-			citedPath,
-			existence: (resolved) =>
-				resolved.replace(/\\/g, "/").includes("/stale/") ? "stale" : "live",
+			sources: {
+				gitleaks: {
+					findings: [
+						{ file: "/repo/stale/a.ts", rule: "a" },
+						{ file: "/repo/stale/b.ts", rule: "b" },
+						{ file: "/repo/stale/c.ts", rule: "c" },
+						{ file: "/repo/stale/d.ts", rule: "d" },
+						{ file: "/repo/kept.ts", rule: "kept" },
+					] as Finding[],
+					scannedAt,
+					citedPath,
+				},
+			},
+			probePath: (resolved) =>
+				resolved.replace(/\\/g, "/").includes("/stale/")
+					? EDITED_AFTER
+					: UNTOUCHED,
 		});
 
 		expect(gate.live.map((f) => f.rule)).toEqual(["kept"]);
@@ -239,19 +262,22 @@ describe("gateFindingsByPathFreshness records (#1622 criterion 5)", () => {
 	});
 
 	it("emits the drop record and the demote record independently", () => {
-		gateFindingsByPathFreshness<Finding>({
-			store: "trivy-secrets",
-			findings: [
-				{ file: "/repo/gone/a.ts", rule: "gone" },
-				{ file: "/repo/stale/b.ts", rule: "stale" },
-			],
+		gateFindingsByPathFreshness({
 			cwd: "/repo",
-			scannedAt: "2026-08-18T07:00:00.000Z",
-			citedPath,
-			existence: (resolved) => {
+			sources: {
+				"trivy-secrets": {
+					findings: [
+						{ file: "/repo/gone/a.ts", rule: "gone" },
+						{ file: "/repo/stale/b.ts", rule: "stale" },
+					] as Finding[],
+					scannedAt: GATE_SCANNED_AT,
+					citedPath,
+				},
+			},
+			probePath: (resolved) => {
 				const p = resolved.replace(/\\/g, "/");
-				if (p.includes("/gone/")) return "missing";
-				return p.includes("/stale/") ? "stale" : "live";
+				if (p.includes("/gone/")) return GONE;
+				return p.includes("/stale/") ? EDITED_AFTER : UNTOUCHED;
 			},
 		});
 		const phases = logLatency.mock.calls.map(
@@ -264,13 +290,16 @@ describe("gateFindingsByPathFreshness records (#1622 criterion 5)", () => {
 	});
 
 	it("stays silent when every cited path is fresh", () => {
-		const gate = gateFindingsByPathFreshness<Finding>({
-			store: "gitleaks",
-			findings: [{ file: "/repo/kept.ts", rule: "kept" }],
+		const { gitleaks: gate } = gateFindingsByPathFreshness({
 			cwd: "/repo",
-			scannedAt: "2026-08-18T07:00:00.000Z",
-			citedPath,
-			existence: () => "live",
+			sources: {
+				gitleaks: {
+					findings: [{ file: "/repo/kept.ts", rule: "kept" }] as Finding[],
+					scannedAt: GATE_SCANNED_AT,
+					citedPath,
+				},
+			},
+			probePath: () => UNTOUCHED,
 		});
 		expect(gate.stale).toEqual([]);
 		expect(gate.live).toHaveLength(1);
@@ -389,14 +418,19 @@ describe("gateFindingsByPathFreshness onMissing (#1622 review H1)", () => {
 	// A govulncheck CVE is pinned by go.mod, not by the call site. Deleting one
 	// traced file does not un-pin it, so `missing` must demote, not drop.
 	it("routes a missing path into stale when onMissing is demote", () => {
-		const gate = gateFindingsByPathFreshness<Finding>({
-			store: "govulncheck",
-			findings: [{ file: "/repo/gone/main.go", rule: "GO-2024-1234" }],
+		const { govulncheck: gate } = gateFindingsByPathFreshness({
 			cwd: "/repo",
-			scannedAt: "2026-08-18T07:00:00.000Z",
-			citedPath,
-			onMissing: "demote",
-			existence: () => "missing",
+			sources: {
+				govulncheck: {
+					findings: [
+						{ file: "/repo/gone/main.go", rule: "GO-2024-1234" },
+					] as Finding[],
+					scannedAt: GATE_SCANNED_AT,
+					citedPath,
+					onMissing: "demote",
+				},
+			},
+			probePath: () => GONE,
 		});
 		expect(gate.stale.map((f) => f.rule)).toEqual(["GO-2024-1234"]);
 		expect(gate.live).toEqual([]);
@@ -408,13 +442,18 @@ describe("gateFindingsByPathFreshness onMissing (#1622 review H1)", () => {
 	});
 
 	it("still drops by default, so the secrets lanes are unchanged", () => {
-		const gate = gateFindingsByPathFreshness<Finding>({
-			store: "gitleaks",
-			findings: [{ file: "/repo/gone/a.json", rule: "generic-api-key" }],
+		const { gitleaks: gate } = gateFindingsByPathFreshness({
 			cwd: "/repo",
-			scannedAt: "2026-08-18T07:00:00.000Z",
-			citedPath,
-			existence: () => "missing",
+			sources: {
+				gitleaks: {
+					findings: [
+						{ file: "/repo/gone/a.json", rule: "generic-api-key" },
+					] as Finding[],
+					scannedAt: GATE_SCANNED_AT,
+					citedPath,
+				},
+			},
+			probePath: () => GONE,
 		});
 		expect(gate.live).toEqual([]);
 		expect(gate.stale).toEqual([]);

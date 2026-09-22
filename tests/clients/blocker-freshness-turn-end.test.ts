@@ -279,12 +279,15 @@ describe("turn-end blocker freshness (#1631)", () => {
 			driftIntoFuture(filePath);
 			expect(
 				gateFindingsByPathFreshness({
-					store: "test-runner",
-					findings: [{ filePath }],
 					cwd: env.tmpDir,
-					scannedAt: markedAtMs,
-					citedPath: (finding) => finding.filePath,
-				}).stale,
+					sources: {
+						"test-runner": {
+							findings: [{ filePath }],
+							scannedAt: markedAtMs,
+							citedPath: (finding: { filePath: string }) => finding.filePath,
+						},
+					},
+				})["test-runner"].stale,
 			).toHaveLength(1);
 
 			await handleTurnEnd(

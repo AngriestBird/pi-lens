@@ -571,6 +571,52 @@ function hasNearbyCallSite(
 const REGION_BACK_WINDOW = 150;
 const REGION_FORWARD_WINDOW = 10;
 const CALLEE_PROXIMITY_LINES = 3;
+const BINDING_CHAIN_HOPS = 3;
+
+/** Leading identifier of an argument-shaped needle: `gitleaksGate.live,` → `gitleaksGate`. */
+function rootIdentifier(text: string): string | undefined {
+	return /^[A-Za-z_$][\w$]*/.exec(text.trim())?.[0];
+}
+
+/** Index of the `const <ident> = …` line that binds `ident`, if any. */
+function bindingLineOf(lines: string[], ident: string): number | undefined {
+	const re = new RegExp(`\\bconst\\b[^=]*\\b${ident}\\b[^=]*=`);
+	for (let i = 0; i < lines.length; i++) if (re.test(lines[i])) return i;
+	return undefined;
+}
+
+/**
+ * R2, generalized for a gate call SHARED by several stores (#1892). A surface
+ * that renders one ARM of such a call (`gitleaksGate.live,`) cannot be
+ * textually adjacent to `gateFindingsByPathFreshness(` — the other stores'
+ * sources sit between them. So follow the `const` binding chain from the arm
+ * back to the call, at most `BINDING_CHAIN_HOPS` hops.
+ *
+ * The identity-stub guarantee is unchanged, and that is the point: an arm read
+ * bound to anything that is not a call-shaped gate — an identity stub, a
+ * hand-built `{ live, stale }` object — still reds. Only the ROUTE from
+ * evidence to gate got longer, never the set of things that count as a gate.
+ */
+function evidenceReachesGateCall(
+	lines: string[],
+	occurrenceIdx: number,
+	needle: string,
+	gates: readonly string[],
+): boolean {
+	const atGate = (idx: number) =>
+		gates.some((gate) =>
+			hasNearbyCallSite(lines, idx, gate, CALLEE_PROXIMITY_LINES),
+		);
+	if (atGate(occurrenceIdx)) return true;
+	let ident = rootIdentifier(needle);
+	for (let hop = 0; ident !== undefined && hop < BINDING_CHAIN_HOPS; hop++) {
+		const bound = bindingLineOf(lines, ident);
+		if (bound === undefined) return false;
+		if (atGate(bound)) return true;
+		ident = rootIdentifier(lines[bound].slice(lines[bound].indexOf("=") + 1));
+	}
+	return false;
+}
 
 /** 1-based line numbers in `strippedWholeSource` where `needle` occurs. */
 function occurrenceLinesOf(
@@ -683,13 +729,11 @@ function checkRuntimeTurnSeamEvidenceExclusive(
 			// a needle that's already call-shaped (e.g. "applyDeltaFreshnessGate(")
 			// is its own callee proof.
 			if (entry.mode === "gated" && !needle.includes("(")) {
-				const satisfied = entry.gates.some((gate) =>
-					hasNearbyCallSite(
-						wholeStrippedLines,
-						claimed - 1,
-						gate,
-						CALLEE_PROXIMITY_LINES,
-					),
+				const satisfied = evidenceReachesGateCall(
+					wholeStrippedLines,
+					claimed - 1,
+					needle,
+					entry.gates,
 				);
 				if (!satisfied) {
 					problems.push(
@@ -855,7 +899,11 @@ let report = \`CRITICAL dependency CVEs (trivy, \${trivyAgeLabel}). Upgrade befo
 			(_, i) => `// filler ${i}`,
 		);
 		const rogueLines = [
-			'const gitleaksGate = gateFindingsByPathFreshness({ store: "gitleaks" });',
+			"const scannerGates = gateFindingsByPathFreshness({ sources: {} });",
+			"const gitleaksGate = scannerGates.gitleaks;",
+			"const keptLive = filterFindingsByDisposition(",
+			"  gitleaksGate.live,",
+			");",
 			...filler,
 			"// @delivery-surface: runtime-turn:secrets-gitleaks",
 			'advisoryParts.push("a rogue finding wearing a real tag, far away");',
@@ -883,12 +931,17 @@ let report = \`CRITICAL dependency CVEs (trivy, \${trivyAgeLabel}). Upgrade befo
 	// seam — real or rogue — unsatisfied, so the overall check still reds
 	// whenever two same-id seams compete for one occurrence.
 	it("RED PROOF (near): a rogue seam placed CLOSER than the real seam to the same evidence is caught", () => {
-		const realGateLine =
-			'const gitleaksGate = gateFindingsByPathFreshness({ store: "gitleaks" });';
+		const realGateLines = [
+			"const scannerGates = gateFindingsByPathFreshness({ sources: {} });",
+			"const gitleaksGate = scannerGates.gitleaks;",
+			"const keptLive = filterFindingsByDisposition(",
+			"  gitleaksGate.live,",
+			");",
+		];
 		const spacer = (n: number) =>
 			Array.from({ length: n }, (_, i) => `// spacer ${i}`);
 		const rogueLines = [
-			realGateLine,
+			...realGateLines,
 			...spacer(69), // rogue sits 69 lines from the real gate — inside the window
 			"// @delivery-surface: runtime-turn:secrets-gitleaks",
 			'advisoryParts.push("a rogue finding, CLOSER to the real gate than the legit seam");',
@@ -919,7 +972,11 @@ let report = \`CRITICAL dependency CVEs (trivy, \${trivyAgeLabel}). Upgrade befo
 	it("RED PROOF: identity-stubbing the callee while keeping the argument literal is caught", () => {
 		const stubbedSource = [
 			"function identityStub(x) { return x; }",
-			'const gitleaksGate = identityStub({ store: "gitleaks", findings: [] });',
+			"const scannerGates = identityStub({ sources: {} });",
+			"const gitleaksGate = scannerGates.gitleaks;",
+			"const keptLive = filterFindingsByDisposition(",
+			"  gitleaksGate.live,",
+			");",
 			"// @delivery-surface: runtime-turn:secrets-gitleaks",
 			'advisoryParts.push("finding");',
 		].join("\n");
@@ -935,12 +992,44 @@ let report = \`CRITICAL dependency CVEs (trivy, \${trivyAgeLabel}). Upgrade befo
 		expect(problems[0]).toMatch(/possible identity-stub/);
 	});
 
+	// RED PROOF (#1892): the binding chain must not become a laundering route.
+	// The recurrence it prevents: the scanner lanes now render ARMS of one
+	// shared gate call, so evidence like `gitleaksGate.live,` is several hops
+	// from `gateFindingsByPathFreshness(`. A surface that hand-builds the same
+	// arm shape and skips the gate entirely — exactly what a future edit
+	// "simplifying" the fold would produce — must still red.
+	it("RED PROOF: an arm read bound to a hand-built object, never to the gate, is caught", () => {
+		const ungatedSource = [
+			"const scannerGates = { gitleaks: { live: rawFindings, stale: [] } };",
+			"const gitleaksGate = scannerGates.gitleaks;",
+			"const keptLive = filterFindingsByDisposition(",
+			"  gitleaksGate.live,",
+			");",
+			"// @delivery-surface: runtime-turn:secrets-gitleaks",
+			'advisoryParts.push("finding");',
+		].join("\n");
+		const strippedLines = stripCommentsOnly(ungatedSource).split("\n");
+		const seams = scanTaggedSeams(ungatedSource, RUNTIME_TURN_SEAM_PATTERN);
+		const problems = checkRuntimeTurnSeamEvidenceExclusive(
+			"runtime-turn:secrets-gitleaks",
+			DELIVERY_SURFACES["runtime-turn:secrets-gitleaks"],
+			seams,
+			strippedLines,
+		);
+		expect(problems.length).toBeGreaterThan(0);
+		expect(problems[0]).toMatch(/possible identity-stub/);
+	});
+
 	it("control: the real (un-stubbed) call site satisfies both the argument and the callee-proximity check", () => {
 		const realSource = [
-			"const gitleaksGate = gateFindingsByPathFreshness({",
-			'  store: "gitleaks",',
-			"  findings: [],",
+			"const scannerGates = gateFindingsByPathFreshness({",
+			"  cwd,",
+			"  sources: { gitleaks: { findings: [] } },",
 			"});",
+			"const gitleaksGate = scannerGates.gitleaks;",
+			"const keptLive = filterFindingsByDisposition(",
+			"  gitleaksGate.live,",
+			");",
 			"// @delivery-surface: runtime-turn:secrets-gitleaks",
 			'advisoryParts.push("finding");',
 		].join("\n");
