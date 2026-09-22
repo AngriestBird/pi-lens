@@ -779,7 +779,10 @@ function legacyWorkspaceId(cwd: string): string {
 }
 
 function legacyStatusPath(cwd: string): string {
-	return path.join(os.tmpdir(), `pi-lens-turn-end-${legacyWorkspaceId(cwd)}.json`);
+	return path.join(
+		os.tmpdir(),
+		`pi-lens-turn-end-${legacyWorkspaceId(cwd)}.json`,
+	);
 }
 
 describe("upgrade transition after the case-fold narrowing (#3255)", () => {

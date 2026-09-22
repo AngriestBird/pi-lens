@@ -320,16 +320,22 @@ const SLASH_FOLD_PINS: Readonly<Record<string, number>> = {
  *   explicit ARGUMENT (`combinePathValuesForPlatform`); the seam reads
  *   `process.platform`, so it cannot express the simulated arm the ubuntu lane
  *   tests. See that function's own doc comment.
- * - `mcp/ipc.ts` — the cross-process IPC rendezvous hash. Deliberately NOT a
- *   map key: see the `workspaceHash` doc comment for why a pure derivation is
- *   required there and why neither seam fits.
+ * - `mcp/ipc.ts` — TWO folds, both on the cross-process IPC rendezvous id and
+ *   both deliberately NOT map keys: see the `workspaceHash` doc comment for why
+ *   a pure derivation is required there and why neither seam fits. The first is
+ *   the live rule, folded only on the platforms whose filesystem folds case
+ *   (#3255). The second is `legacyTurnEndStatusPathForCwd`, which reproduces the
+ *   pre-#3255 always-fold rule so the orphaned status file can be DELETED; it is
+ *   never read or connected to, because on a case-sensitive host that id is the
+ *   colliding one. Neither seam could express either: one takes an injected
+ *   platform, the other must reproduce a retired rule byte-for-byte.
  * - `runtime-tool-call.ts` — `toPosix(path.resolve(f)).toLowerCase()`, where
  *   the fold is the haystack for lowercase MARKER substrings, not a key.
  */
 const CASE_FOLD_PINS: Readonly<Record<string, number>> = {
 	"clients/dispatch/runners/elixir-check.ts": 2,
 	"clients/lsp/launch.ts": 1,
-	"clients/mcp/ipc.ts": 1,
+	"clients/mcp/ipc.ts": 2,
 	"clients/runtime-tool-call.ts": 1,
 };
 
