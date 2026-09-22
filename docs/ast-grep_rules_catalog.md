@@ -271,7 +271,7 @@ See [`docs/custom-rules.md`](custom-rules.md) to add your own. Rule sources: `ru
 | `hashids-with-flask-secret-python` | warning | no | CodeRabbit | The Flask secret key is used as salt in HashIDs. The HashID mechanism is not secure. By observing sufficient HashIDs, the salt used to cons… |
 | `insecure-cipher-algorithm-rc4-python` | warning | no | CodeRabbit | Detected ARC4 cipher algorithm which is considered insecure. This algorithm is not cryptographically secure and can be reversed easily. Use… |
 | `jwt-python-hardcoded-secret-python` | warning | no | CodeRabbit | Hardcoded JWT secret or private key is used. This is a Insufficiently Protected Credentials weakness: https://cwe.mitre.org/data/definition… |
-| `no-assert-tuple` | error | no | pi-lens | Assert should not be called on a tuple literal |
+| `no-assert-tuple` | warning | no | pi-lens | Assert should not be called on a tuple literal |
 | `no-aws-access-key-literal` | error | no | pi-lens | AWS access keys should not be hardcoded — use IAM roles, environment variables, or AWS Secrets Manager |
 | `no-aws-apigateway-no-auth` | error | no | pi-lens | AWS API Gateway should require authentication |
 | `no-aws-s3-public-access` | error | no | pi-lens | S3 buckets should not grant access to all users or authenticated users |
