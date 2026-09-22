@@ -55,12 +55,10 @@
  * omits `*` and `?` from the escaped set because its caller handles those
  * two glob wildcards itself immediately afterward.
  *
- * Uses `stripSource(..., { strings: "keep" })` (`tests/support/sweep-kit.ts`)
- * so comments are blanked (a fake definition written only in a comment must
- * not count — the #1635/#1692 comment-laundering shape) while regex literals
- * and string contents are preserved (the default "blank" policy blanks
- * regex bodies too, which would erase the very escape sequence this sweep
- * matches on).
+ * The escape body is a regex-literal needle, so the census matches raw source
+ * and uses `codeMatches` (`tests/support/sweep-kit.ts:477`) to discard matches
+ * whose span is string or template-literal text. This preserves the regex
+ * evidence without allowing a copied helper in prose to satisfy the sweep.
  */
 
 import { readFileSync } from "node:fs";
@@ -69,10 +67,10 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
 	assertNonEmptyScan,
+	codeMatches,
 	listSourceFiles,
 	readWalkedFile,
 	relativePosix,
-	stripSource,
 } from "../support/sweep-kit.js";
 
 const root = path.resolve(
@@ -101,6 +99,13 @@ const ARROW_SHAPE = new RegExp(
 	String.raw`(?:\(\s*[A-Za-z_$][\w$]*[^)]*\)|[A-Za-z_$][\w$]*)\s*(?::\s*[\w$]+)?\s*=>\s*[A-Za-z_$][\w$]*` +
 		ESCAPE_CALL,
 );
+
+function hasEscapeHelper(raw: string): boolean {
+	return (
+		codeMatches(raw, FUNCTION_SHAPE).length > 0 ||
+		codeMatches(raw, ARROW_SHAPE).length > 0
+	);
+}
 
 // ".mjs", not ".js": scripts/lib/*.mjs are hand-written source, but a bare
 // ".js" would also match compiled output sitting next to its .ts source
@@ -165,8 +170,7 @@ describe("escapeRegExp single-source-of-truth (#2558)", () => {
 			if (rel === CANONICAL_FILE) continue;
 			const raw = readWalkedFile(file);
 			if (raw === undefined) continue;
-			const stripped = stripSource(raw, { strings: "keep" });
-			if (FUNCTION_SHAPE.test(stripped) || ARROW_SHAPE.test(stripped)) {
+			if (hasEscapeHelper(raw)) {
 				offenders.push(rel);
 			}
 		}
@@ -182,8 +186,21 @@ describe("escapeRegExp single-source-of-truth (#2558)", () => {
 
 	it("the canonical leaf still defines escapeRegExp with the expected body", () => {
 		const src = readFileSync(path.join(root, CANONICAL_FILE), "utf8");
-		expect(FUNCTION_SHAPE.test(stripSource(src, { strings: "keep" }))).toBe(
-			true,
-		);
+		expect(hasEscapeHelper(src)).toBe(true);
+	});
+});
+
+describe("escape-regexp detector resists string laundering (#3257)", () => {
+	const needle = readFileSync(path.join(root, CANONICAL_FILE), "utf8")
+		.match(FUNCTION_SHAPE)?.[0]
+		.replace("escapeRegExp", "escapeRegex");
+
+	it("does not flag a helper written only as template-literal text", () => {
+		// Regression pin for #3257: template text is not a helper definition.
+		expect(hasEscapeHelper("const doc = `" + needle + "`;")).toBe(false);
+	});
+
+	it("flags a helper inside a template interpolation", () => {
+		expect(hasEscapeHelper("const value = `${(" + needle + ")}`;")).toBe(true);
 	});
 });
