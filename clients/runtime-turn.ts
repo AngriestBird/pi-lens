@@ -11,6 +11,7 @@ import { logActionableWarningsEvent } from "./actionable-warnings-logger.js";
 import {
 	appendCodeQualityWarningsHistory,
 	buildCodeQualityWarningsReport,
+	type CodeQualityWarningRecord,
 	formatCodeQualityWarningsAdvisory,
 	writeCodeQualityWarningsReport,
 } from "./code-quality-warnings.js";
@@ -79,7 +80,10 @@ import {
 } from "./project-diagnostics/runner-adapters/trivy.js";
 import { knipIssuesToProjectDiagnostics } from "./project-diagnostics/runner-adapters/knip.js";
 import type { ProjectDiagnostic } from "./project-diagnostics/types.js";
-import { applyDispositionsMultiFile } from "./diagnostic-dispositions.js";
+import {
+	applyDispositionsMultiFile,
+	type DispositionCandidate,
+} from "./diagnostic-dispositions.js";
 import { logLatency } from "./latency-logger.js";
 import {
 	getLspBudgetIdleTimeoutMs,
@@ -128,7 +132,10 @@ import {
 	runPersistentReverify,
 } from "./persistent-reverify.js";
 import { cascadeCarrySuffix } from "./cascade-format.js";
-import { applyPushedFindingPolicy } from "./dispatch/finding-policy.js";
+import {
+	applyPushedFindingPolicy,
+	renderedRuleIdentities,
+} from "./dispatch/finding-policy.js";
 import { detectFileRole } from "./file-role.js";
 import {
 	applyInlineBlockerPolicy,
@@ -501,20 +508,52 @@ function filterFindingsByDisposition<F>(
 	toDiagnostic: (finding: F) => ProjectDiagnostic,
 ): { kept: F[]; suppressed: number } {
 	if (findings.length === 0) return { kept: findings, suppressed: 0 };
-	const candidates = findings.map((finding) => ({
-		finding,
-		diagnostic: toDiagnostic(finding),
-	}));
+	// #3248: every `(tool, rule)` spelling a mark against these findings can
+	// carry, not just the canonical one. NONE of these turn-end surfaces prints
+	// a tool — knip renders `<file>:<line> — <type>: <name>`, dead-code
+	// `unused <kind> <name>`, the security lanes `Potential secret: <rule>` —
+	// so an agent marking from what it was SHOWN has no tool to pass, and
+	// `lens_diagnostic_mark`'s `tool` parameter is optional. Honouring only the
+	// spelling `lens_diagnostics` happens to show is the #3088 non-convergence,
+	// and it is fixed HERE, once, for every caller of this helper rather than
+	// per lane. Widening is safe for the blocking members because a
+	// `semantic: "blocking"` finding can still only be dropped by the STRICT,
+	// content-bound false-positive anchor, which keeps binding the normalized
+	// message and the flagged line's content.
+	// The expanded candidate is a `DispositionCandidate` with a path, NOT a
+	// `ProjectDiagnostic`: the tool-omitted spelling has no `tool`, which that
+	// type requires. Only the anchor derivation reads it.
+	const candidates = findings.flatMap((finding) => {
+		const diagnostic = toDiagnostic(finding);
+		return renderedRuleIdentities(diagnostic).map((identity) => ({
+			finding,
+			candidate: {
+				filePath: diagnostic.filePath,
+				message: diagnostic.message,
+				...(diagnostic.line !== undefined && { line: diagnostic.line }),
+				...(diagnostic.semantic !== undefined && {
+					semantic: diagnostic.semantic,
+				}),
+				...(identity.tool !== undefined && { tool: identity.tool }),
+				...(identity.rule !== undefined && { rule: identity.rule }),
+			} satisfies DispositionCandidate & { filePath: string },
+		}));
+	});
 	const survivors = new Set(
 		applyDispositionsMultiFile(
-			candidates.map((c) => c.diagnostic),
+			candidates.map((c) => c.candidate),
 			cwd,
 			(d) => d.filePath,
 		),
 	);
-	const kept = candidates
-		.filter((c) => survivors.has(c.diagnostic))
-		.map((c) => c.finding);
+	const disposed = new Set<F>();
+	for (const candidate of candidates) {
+		if (!survivors.has(candidate.candidate)) disposed.add(candidate.finding);
+	}
+	const kept =
+		disposed.size === 0
+			? findings
+			: findings.filter((finding) => !disposed.has(finding));
 	return { kept, suppressed: findings.length - kept.length };
 }
 
@@ -3417,16 +3456,15 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 							// kept unconditionally: it is not markable, so nothing
 							// may suppress it. Re-rendered with `formatImpact`, the
 							// same renderer, never a second one.
-							const markable: Array<{
-								result: (typeof results)[number];
-								diagnostic: ProjectDiagnostic;
-							}> = [];
-							for (const result of results) {
-								const diagnostic = callGraphImpactToProjectDiagnostics(cwd, [
+							// `flatMap` rather than a push-under-an-`if`: an entry the
+							// adapter does not map simply yields nothing, so the array
+							// is well-typed with no branch whose removal changes no
+							// behaviour (there is nothing here to mutate).
+							const markable = results.flatMap((result) =>
+								callGraphImpactToProjectDiagnostics(cwd, [
 									{ calleeKey, results: [result] },
-								])[0];
-								if (diagnostic) markable.push({ result, diagnostic });
-							}
+								]).map((diagnostic) => ({ result, diagnostic })),
+							);
 							const filtered = filterFindingsByDisposition(
 								markable,
 								cwd,
@@ -3742,11 +3780,43 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 
 	const t5 = Date.now();
 	try {
+		// #3248: the code-quality records were filtered at DISPATCH time, before
+		// any `lens_diagnostic_mark`. `lens_diagnostics mode=delta` re-applies
+		// dispositions when it re-serves this same cache
+		// (`tools/lens-diagnostics.ts`'s `visibleWarningFiles`), so without this
+		// the turn-end advisory counted warnings the delta view had already
+		// dropped — the two surfaces disagreed about the same records. Filtered
+		// at the report INPUT so the advisory, the persisted report and the delta
+		// view all agree; the delta view's own filter then re-applies to the same
+		// set and is idempotent. Per file, because the anchor is content-bound.
+		const qualityWarningsByFile = new Map<string, CodeQualityWarningRecord[]>();
+		for (const warning of runtime.peekCodeQualityWarnings()) {
+			const group = qualityWarningsByFile.get(warning.filePath);
+			if (group) group.push(warning);
+			else qualityWarningsByFile.set(warning.filePath, [warning]);
+		}
+		const qualityWarnings: CodeQualityWarningRecord[] = [];
+		let qualityDispositionSuppressed = 0;
+		for (const [filePath, group] of qualityWarningsByFile) {
+			let content: string | undefined;
+			try {
+				content = fs.readFileSync(filePath, "utf-8");
+			} catch {
+				content = undefined;
+			}
+			const { kept, suppressed } = applyPushedFindingPolicy(group, {
+				cwd,
+				filePath,
+				content,
+			});
+			qualityWarnings.push(...kept);
+			qualityDispositionSuppressed += suppressed;
+		}
 		const qualityReport = buildCodeQualityWarningsReport({
 			cwd,
 			sessionId: runtime.telemetrySessionId,
 			turnIndex: runtime.turnIndex,
-			warnings: runtime.peekCodeQualityWarnings(),
+			warnings: qualityWarnings,
 			modifiedRangesByFile,
 			projectSeqStart: runtime.turnStartProjectSeq,
 			projectSeqEnd: runtime.projectSeq,
@@ -3767,7 +3837,11 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			filePath: cwd,
 			phase: "code_quality_warnings_report",
 			durationMs: Date.now() - t5,
-			metadata: qualityReport.summary,
+			metadata: {
+				...qualityReport.summary,
+				// #3248: bounded per-turn on this lane's own row.
+				dispositionSuppressed: qualityDispositionSuppressed,
+			},
 		});
 	} catch (err) {
 		dbg(`turn_end: code quality warning report failed: ${err}`);

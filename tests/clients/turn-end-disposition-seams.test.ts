@@ -121,8 +121,11 @@ function markFalsePositive(
 	cwd: string,
 	target: {
 		filePath: string;
-		tool: string;
-		rule: string;
+		/** Omitted for the spelling a mark made from the RENDERED text carries:
+		 * none of these surfaces prints a tool, and `lens_diagnostic_mark`'s
+		 * `tool` parameter is optional. */
+		tool?: string;
+		rule?: string;
 		message: string;
 		line?: number;
 	},
@@ -240,6 +243,50 @@ describe("knip turn-end seams honor dispositions (#3248)", () => {
 
 			const text = turnEndText(cacheManager, cwd, runtime);
 			expect(text).not.toContain("New unresolved imports/deps");
+			expect(text).not.toContain("missing-dep");
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("honors a mark that names no tool, the spelling the rendered line carries", async () => {
+		// The knip blocker renders `<file>:<line> — <type>: <name>` and names no
+		// tool, so a mark made from THAT text carries none. #3088's
+		// non-convergence shape: honouring only the canonical spelling leaves the
+		// surface unfixable from its own output.
+		const env = setupTestEnvironment("pi-lens-3248-knip-bare-identity-");
+		try {
+			const cwd = env.tmpDir;
+			const filePath = path.join(cwd, "src", "bare.ts");
+			fs.mkdirSync(path.dirname(filePath), { recursive: true });
+			fs.writeFileSync(filePath, "import x from 'missing-dep';\n");
+
+			const runtime = new RuntimeCoordinator();
+			runtime.setTelemetryIdentity({ sessionId: SESSION_ID });
+			const cacheManager = new CacheManager(false);
+			cacheManager.writeCache("knip", { ...EMPTY_KNIP_RESULT }, cwd);
+			registerEdit(cacheManager, cwd, filePath);
+			markFalsePositive(cwd, {
+				filePath,
+				rule: "knip:unlisted",
+				message: "Unlisted dependency missing-dep",
+				line: 1,
+			});
+
+			await handleTurnEnd(
+				makeTurnEndDeps(
+					runtime,
+					cacheManager,
+					cwd,
+					knipScenario([
+						{ type: "unlisted", file: filePath, name: "missing-dep", line: 1 },
+						{ type: "unlisted", file: filePath, name: "other-dep", line: 1 },
+					]),
+				),
+			);
+
+			const text = turnEndText(cacheManager, cwd, runtime);
+			expect(text).toContain("other-dep");
 			expect(text).not.toContain("missing-dep");
 		} finally {
 			env.cleanup();
@@ -379,6 +426,72 @@ describe("dead-code turn-end advisory honors dispositions (#3248)", () => {
 		}
 	});
 
+	it("honors a mark that names no tool on the dead-code advisory", async () => {
+		// `formatDeadCodeDelta` renders `unused <kind> <name>` and names no tool.
+		const env = setupTestEnvironment("pi-lens-3248-dead-code-bare-");
+		try {
+			const cwd = env.tmpDir;
+			const filePath = path.join(cwd, "bare.py");
+			fs.writeFileSync(
+				filePath,
+				"def marked():\n    pass\ndef live():\n    pass\n",
+			);
+
+			const runtime = new RuntimeCoordinator();
+			runtime.setTelemetryIdentity({ sessionId: SESSION_ID });
+			const cacheManager = new CacheManager(false);
+			cacheManager.writeCache(
+				"dead-code-vulture",
+				{
+					success: true,
+					language: "python",
+					unusedExports: [],
+					unusedFiles: [],
+					unusedDeps: [],
+					unlistedDeps: [],
+					summary: "ok",
+				},
+				cwd,
+			);
+			registerEdit(cacheManager, cwd, filePath);
+			markFalsePositive(cwd, {
+				filePath,
+				rule: "dead-code:export",
+				message: "Unused function marked",
+				line: 1,
+			});
+
+			await handleTurnEnd(
+				makeTurnEndDeps(runtime, cacheManager, cwd, {
+					deadCodeClients: [
+						deadCodeClient([
+							{
+								category: "export",
+								kind: "function",
+								name: "marked",
+								file: filePath,
+								line: 1,
+							},
+							{
+								category: "export",
+								kind: "function",
+								name: "live",
+								file: filePath,
+								line: 3,
+							},
+						]),
+					],
+				}),
+			);
+
+			const text = turnEndText(cacheManager, cwd, runtime);
+			expect(text).toContain("live");
+			expect(text).not.toContain("Unused function marked");
+		} finally {
+			env.cleanup();
+		}
+	});
+
 	it("emits no dead-code advisory at all when every new finding is marked", async () => {
 		// A PUSH surface stays silent after a mark rather than rendering an empty
 		// advisory header; the count rides this lane's bounded per-turn row.
@@ -507,6 +620,45 @@ describe("call-graph impact advisory honors dispositions (#3248)", () => {
 		}
 	});
 
+	it("honors a mark that names no tool on the impact line", async () => {
+		// The impact line renders `<symbol>: <caller> (<file>) ⚠ WillBreak` and
+		// names no tool.
+		const env = setupTestEnvironment("pi-lens-3248-call-graph-bare-");
+		try {
+			const cwd = env.tmpDir;
+			const edited = path.join(cwd, "src", "core.ts");
+			const markedCaller = path.join(cwd, "src", "marked.ts");
+			const liveCaller = path.join(cwd, "src", "live.ts");
+			fs.mkdirSync(path.join(cwd, "src"), { recursive: true });
+			for (const f of [edited, markedCaller, liveCaller]) {
+				fs.writeFileSync(f, "export const x = 1;\n");
+			}
+
+			const runtime = new RuntimeCoordinator();
+			runtime.setTelemetryIdentity({ sessionId: SESSION_ID });
+			runtime.callGraph = graphWith(`${edited}:doThing`, [
+				`${markedCaller}:markedCaller`,
+				`${liveCaller}:liveCaller`,
+			]);
+			const cacheManager = new CacheManager(false);
+			registerEdit(cacheManager, cwd, edited);
+			markFalsePositive(cwd, {
+				filePath: markedCaller,
+				rule: "call-graph:willbreak",
+				message:
+					"Direct caller of a symbol edited this turn — verify this call site still matches its new signature/behavior. (markedCaller calls edited symbol 'doThing')",
+			});
+
+			await handleTurnEnd(makeTurnEndDeps(runtime, cacheManager, cwd));
+
+			const text = turnEndText(cacheManager, cwd, runtime);
+			expect(text).toContain("liveCaller");
+			expect(text).not.toContain("markedCaller");
+		} finally {
+			env.cleanup();
+		}
+	});
+
 	it("keeps a caller its own adapter cannot map, which is therefore unmarkable", async () => {
 		// The adapter drops a caller with no attributable file (and the Review
 		// tier) — such a caller can never carry a disposition anchor, so nothing
@@ -605,8 +757,114 @@ describe("late-runner drain honors dispositions (#3248)", () => {
 			expect(text).toContain("live finding");
 			expect(text).not.toContain("marked finding");
 			expect(text).toContain("suppressed by disposition: 1 finding(s)");
+			// #1616: the note states what this delivery dropped. A delivery that
+			// dropped nothing must not carry a zero — see the sibling case below.
 			expect(latencyRow("late_runner_findings")).toMatchObject({
 				dispositionSuppressed: 1,
+			});
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("honors a mark that names no tool on the late-runner line", async () => {
+		// The line renders `<file>:<line>:<col> [<rule>] <message>` — the rule,
+		// never the tool. `renderedRuleIdentities` expands both spellings.
+		const env = setupTestEnvironment("pi-lens-3248-late-runner-bare-");
+		try {
+			const cwd = env.tmpDir;
+			const filePath = path.join(cwd, "late.ts");
+			fs.writeFileSync(filePath, "const marked = 1;\nconst live = 2;\n");
+
+			const runtime = new RuntimeCoordinator();
+			runtime.setTelemetryIdentity({ sessionId: SESSION_ID });
+			const cacheManager = new CacheManager(false);
+			registerEdit(cacheManager, cwd, filePath);
+			deferRunnerFindings({
+				filePath,
+				cwd,
+				projectRoot: cwd,
+				runnerId: "eslint",
+				markedAtMs: Date.now(),
+				promise: Promise.resolve({
+					status: "ok",
+					diagnostics: [1, 2].map((line) => ({
+						id: `late-${line}`,
+						message: line === 1 ? "marked finding" : "live finding",
+						filePath,
+						line,
+						column: 1,
+						severity: "warning",
+						semantic: "warning",
+						tool: "eslint",
+						rule: "no-unused-vars",
+					})),
+					// biome-ignore lint/suspicious/noExplicitAny: partial result.
+				}) as any,
+			});
+			markFalsePositive(cwd, {
+				filePath,
+				rule: "no-unused-vars",
+				message: "marked finding",
+				line: 1,
+			});
+
+			await handleTurnEnd(makeTurnEndDeps(runtime, cacheManager, cwd));
+
+			const text = turnEndText(cacheManager, cwd, runtime);
+			expect(text).toContain("live finding");
+			expect(text).not.toContain("marked finding");
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("carries no suppressed-by-disposition note when nothing was marked", async () => {
+		// #1616's rule is "a delivery that still has something to say states what
+		// it dropped" — not "every delivery states a zero".
+		const env = setupTestEnvironment("pi-lens-3248-late-runner-no-note-");
+		try {
+			const cwd = env.tmpDir;
+			const filePath = path.join(cwd, "late.ts");
+			fs.writeFileSync(filePath, "const live = 1;\n");
+
+			const runtime = new RuntimeCoordinator();
+			runtime.setTelemetryIdentity({ sessionId: SESSION_ID });
+			const cacheManager = new CacheManager(false);
+			registerEdit(cacheManager, cwd, filePath);
+			deferRunnerFindings({
+				filePath,
+				cwd,
+				projectRoot: cwd,
+				runnerId: "eslint",
+				markedAtMs: Date.now(),
+				promise: Promise.resolve({
+					status: "ok",
+					diagnostics: [
+						{
+							id: "late-1",
+							message: "live finding",
+							filePath,
+							line: 1,
+							column: 1,
+							severity: "warning",
+							semantic: "warning",
+							tool: "eslint",
+							rule: "no-unused-vars",
+						},
+					],
+					// biome-ignore lint/suspicious/noExplicitAny: partial result.
+				}) as any,
+			});
+
+			await handleTurnEnd(makeTurnEndDeps(runtime, cacheManager, cwd));
+
+			const text = turnEndText(cacheManager, cwd, runtime);
+			expect(text).toContain("live finding");
+			expect(text).not.toContain("suppressed by disposition");
+			expect(latencyRow("late_runner_findings")).toMatchObject({
+				dispositionSuppressed: 0,
+				delivered: 1,
 			});
 		} finally {
 			env.cleanup();
@@ -664,6 +922,83 @@ describe("late-runner drain honors dispositions (#3248)", () => {
 			expect(latencyRow("late_runner_findings")).toMatchObject({
 				dispositionSuppressed: 1,
 				delivered: 0,
+			});
+		} finally {
+			env.cleanup();
+		}
+	});
+});
+
+describe("code-quality warnings advisory honors dispositions (#3248)", () => {
+	it("drops a marked warning from the advisory count AND from the cache mode=delta re-serves", async () => {
+		// The cross-surface case: `lens_diagnostics mode=delta` re-applies
+		// dispositions when it re-serves this very cache
+		// (`tools/lens-diagnostics.ts`'s `visibleWarningFiles`), so before this
+		// the turn-end advisory counted warnings the delta view had already
+		// dropped. Filtering at the report INPUT makes the advisory, the
+		// persisted record and the delta view agree on one set.
+		const env = setupTestEnvironment("pi-lens-3248-code-quality-");
+		try {
+			const cwd = env.tmpDir;
+			const filePath = path.join(cwd, "quality.ts");
+			fs.writeFileSync(filePath, "const marked = 1;\nconst live = 2;\n");
+
+			const runtime = new RuntimeCoordinator();
+			runtime.setTelemetryIdentity({ sessionId: SESSION_ID });
+			const cacheManager = new CacheManager(false);
+			registerEdit(cacheManager, cwd, filePath);
+			runtime.recordCodeQualityWarnings([
+				{
+					id: "cq-1",
+					filePath,
+					displayPath: "quality.ts",
+					line: 1,
+					column: 1,
+					severity: "warning",
+					tool: "ast-grep",
+					rule: "no-magic-number",
+					message: "marked quality warning",
+					category: "maintainability",
+					origin: "dispatch",
+				},
+				{
+					id: "cq-2",
+					filePath,
+					displayPath: "quality.ts",
+					line: 2,
+					column: 1,
+					severity: "warning",
+					tool: "ast-grep",
+					rule: "no-magic-number",
+					message: "live quality warning",
+					category: "maintainability",
+					origin: "dispatch",
+				},
+			]);
+			markFalsePositive(cwd, {
+				filePath,
+				tool: "ast-grep",
+				rule: "no-magic-number",
+				message: "marked quality warning",
+				line: 1,
+			});
+
+			await handleTurnEnd(makeTurnEndDeps(runtime, cacheManager, cwd));
+
+			const text = turnEndText(cacheManager, cwd, runtime);
+			expect(text).toContain(
+				"Code-quality warnings introduced/touched this turn: 1",
+			);
+			const persisted = cacheManager.readCache<{
+				files?: Array<{ warnings?: Array<{ message: string }> }>;
+			}>("code-quality-warnings", cwd);
+			const messages = (persisted?.data?.files ?? []).flatMap((file) =>
+				(file.warnings ?? []).map((w) => w.message),
+			);
+			expect(messages).toContain("live quality warning");
+			expect(messages).not.toContain("marked quality warning");
+			expect(latencyRow("code_quality_warnings_report")).toMatchObject({
+				dispositionSuppressed: 1,
 			});
 		} finally {
 			env.cleanup();
