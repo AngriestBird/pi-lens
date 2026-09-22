@@ -134,6 +134,7 @@ import {
 	renderedRuleIdentities,
 } from "./dispatch/finding-policy.js";
 import { detectFileRole } from "./file-role.js";
+import { applyInlineBlockerPolicy } from "./inline-blocker-dispositions.js";
 import {
 	drainPendingRunnerFindings,
 	dropStaleRunnerFindings,
@@ -174,6 +175,14 @@ import type {
 
 /** Maximum detailed notify-stall coverage-gap rows emitted in one turn. */
 const LATE_AUX_COVERAGE_GAP_DETAIL_CAP_PER_TURN = 20;
+
+/**
+ * #3246: how many file/tool identities the one per-turn inline-blocker policy
+ * record names. The counts are always exact; only the identity LISTS are
+ * capped, so a turn that touched a hundred files writes a bounded row rather
+ * than a file listing (AGENTS.md shape 17).
+ */
+const INLINE_POLICY_IDENTITY_CAP = 10;
 
 /**
  * #2504 — bounds on the per-turn test-runner fan-out.
@@ -1031,14 +1040,30 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	 * branch below.
 	 */
 	const pendingDependencyDriftDeliveries: Array<() => void> = [];
-	for (const {
-		filePath: bPath,
-		summary,
-		stale,
-		staleReason,
-	} of unresolvedBlockers) {
+	/**
+	 * #3246: one bounded record per TURN for the inline-blocker policy pass —
+	 * never one per finding. `files`/`tools` keep the discriminating identity a
+	 * reader needs to reconstruct a replay report, capped so a turn that edited
+	 * a hundred files cannot turn the latency log into a file listing.
+	 */
+	const inlinePolicy = {
+		records: 0,
+		stale: 0,
+		candidates: 0,
+		kept: 0,
+		suppressed: 0,
+		unstructured: 0,
+		files: [] as string[],
+		tools: new Set<string>(),
+	};
+	const inlinePolicyStart = Date.now();
+	for (const record of unresolvedBlockers) {
+		const { filePath: bPath, summary, stale, staleReason } = record;
 		const displayPath = toRunnerDisplayPath(cwd, bPath);
+		inlinePolicy.records += 1;
+		for (const tool of record.sources ?? []) inlinePolicy.tools.add(tool);
 		if (stale) {
+			inlinePolicy.stale += 1;
 			// #1631: demoted — out of the authoritative blocker channel and into the
 			// advisory channel with a stale marker, so the agent is told to re-run
 			// rather than pressured by a verdict that may already be resolved.
@@ -1105,11 +1130,61 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 					(retirementNote ? `\n${retirementNote}` : ""),
 			);
 		} else {
+			// #3246: the agent may have marked one of these blockers
+			// `false-positive` AFTER the record was written — via
+			// `lens_diagnostic_mark`, which every other findings surface honors.
+			// Re-derive the body from the record's structured diagnostics through
+			// the shared `dispatch/finding-policy.ts` stack against the file's
+			// CURRENT bytes, exactly as the late-auxiliary lane below does, rather
+			// than replaying the pre-mark string.
+			const policy = applyInlineBlockerPolicy(record, cwd);
+			inlinePolicy.candidates += policy.candidates;
+			inlinePolicy.kept += policy.kept;
+			inlinePolicy.suppressed += policy.suppressed;
+			if (policy.unstructured) inlinePolicy.unstructured += 1;
+			if (
+				policy.suppressed > 0 &&
+				inlinePolicy.files.length < INLINE_POLICY_IDENTITY_CAP
+			) {
+				inlinePolicy.files.push(displayPath);
+			}
+			if (policy.body === undefined) {
+				// Every blocker on this file was suppressed. This is a PUSH
+				// surface: silence after a mark is the mark working, not a clean
+				// verdict, so the count rides the bounded per-turn record below
+				// instead of announcing the suppression on every later turn.
+				continue;
+			}
+			// #1616 suppressed-bucket rule: a delivery that still has something to
+			// say states what it dropped, once per delivery.
+			const suppressedNote =
+				policy.suppressed > 0
+					? ` (suppressed by disposition: ${policy.suppressed} finding(s))`
+					: "";
 			// @delivery-surface: runtime-turn:unresolved-inline-blocker
 			blockerParts.push(
-				`Unresolved from this turn — ${displayPath}:\n${summary}`,
+				`Unresolved from this turn — ${displayPath}${suppressedNote}:\n${policy.body}`,
 			);
 		}
+	}
+	if (inlinePolicy.records > 0) {
+		logLatency({
+			type: "phase",
+			toolName: "turn_end",
+			filePath: cwd,
+			phase: "inline_blocker_policy",
+			durationMs: Date.now() - inlinePolicyStart,
+			metadata: {
+				records: inlinePolicy.records,
+				stale: inlinePolicy.stale,
+				candidates: inlinePolicy.candidates,
+				kept: inlinePolicy.kept,
+				dispositionSuppressed: inlinePolicy.suppressed,
+				unstructured: inlinePolicy.unstructured,
+				files: inlinePolicy.files,
+				tools: [...inlinePolicy.tools].slice(0, INLINE_POLICY_IDENTITY_CAP),
+			},
+		});
 	}
 
 	// Drain the deferred cascade computes kicked off this turn (#450). They ran

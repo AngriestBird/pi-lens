@@ -371,6 +371,17 @@ export interface PipelineResult {
 	 * e.g. a whole-file secret finding).
 	 */
 	inlineBlockerLines?: number[];
+	/**
+	 * #3246: the blocking diagnostics `inlineBlockerSummary` was rendered from,
+	 * carried structurally so a LATER `lens_diagnostic_mark` can be applied to
+	 * the record at turn end. Without them the turn-end replay had only the
+	 * rendered string and no diagnostic identity to anchor a disposition
+	 * against, so a marked finding re-surfaced on every subsequent turn
+	 * (`clients/inline-blocker-dispositions.ts`). Deliberately the SAME array
+	 * `blockerOutput` was rendered from — cross-file blockers included — so the
+	 * re-render of an unmarked record is byte-identical to the stored summary.
+	 */
+	inlineBlockerDiagnostics?: Diagnostic[];
 	/** Content baseline captured from the pipeline read used to render blockers. */
 	inlineBlockerFileContent?: { size: number; sha256: string };
 	/** Fixable warning diagnostics introduced by this pipeline run. */
@@ -1973,5 +1984,10 @@ export async function runPipeline(
 		inlineBlockerFileContent: hasBlockers
 			? inlineBlockerFileContent
 			: undefined,
+		// #3246: the very array `blockerOutput` above was rendered from, so the
+		// turn-end policy filter and its re-render can never disagree with the
+		// text they guard — the same provenance argument `inlineBlockerSources`
+		// makes one field up.
+		inlineBlockerDiagnostics: hasBlockers ? dispatchResult.blockers : undefined,
 	};
 }

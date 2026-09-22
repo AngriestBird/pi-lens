@@ -217,6 +217,31 @@ export function renderedRuleIdentities(diagnostic: {
 	return expandRenderedIdentities([[diagnostic.tool, diagnostic.rule]]);
 }
 
+/**
+ * #3246: the identity spellings a mark against a surface that renders NEITHER
+ * the tool NOR the rule can carry — the turn-end unresolved-inline-blocker
+ * body, whose every line is `formatDiagnostics`' `  L<n>: <message>` (plus an
+ * optional fix hint). An agent marking from that text has only the message and
+ * the line to give `lens_diagnostic_mark`, whose `tool` AND `rule` parameters
+ * are both optional, so the mark's anchor carries neither; a mark made from the
+ * widget or `mode=full` carries the full canonical pair for the same finding.
+ * Honoring one spelling and not the other is exactly the non-convergence #3088
+ * reported, so both go through the SAME expansion `probeIdentities` uses. The
+ * bare spelling stays safe for this STOP-tier surface because a `"blocking"`
+ * diagnostic can only ever be dropped by the STRICT, content-bound
+ * false-positive anchor (`applyDispositions`' F1 rule), which still binds the
+ * normalized message and the flagged line's content hash.
+ */
+export function inlineBlockerIdentities(diagnostic: {
+	tool?: string;
+	rule?: string;
+}): FindingIdentity[] {
+	return expandRenderedIdentities([
+		[diagnostic.tool, diagnostic.rule],
+		[undefined, undefined],
+	]);
+}
+
 /** Every rendered `(tool, rule)` spelling plus the `tool`-omitted form of
  * each, de-duplicated, in order. One derivation for both callers. */
 function expandRenderedIdentities(
