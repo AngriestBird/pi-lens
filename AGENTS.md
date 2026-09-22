@@ -131,6 +131,45 @@ node scripts/ci-verdict.mjs <pr-number|sha>
 
 Never merge on absent checks, stale checks, or a green advisory row alone.
 
+## Glossary
+
+- **finding** — Umbrella term for an agent-visible result; owned by `clients/finding-delivery-gate.ts`; retires `diagnostic`, `blocker`, `advisory`, and `record` (except a durable cache row). The canonical umbrella is `finding`; structured dispatch spelling is `diagnostic` at `clients/dispatch/types.ts:59`, while the umbrella is used by the delivery gate at `clients/finding-delivery-gate.ts:1`.
+- **diagnostic** — A structured finding carrying dispatch identity such as `tool`, `rule`, and location; owned by `clients/dispatch/types.ts`; retires unqualified `finding` when a structured dispatch value is meant.
+- **blocker** — A semantic `blocking` finding that can stop progress; owned by `clients/dispatch/types.ts` (`OutputSemantic` and `Diagnostic`); retires `stop issue` and `error` when the delivery tier is meant.
+- **advisory** — A non-blocking finding delivery tier; owned by `clients/finding-delivery-gate.ts`; retires `warning` when the model-facing tier is meant.
+- **disposition** — A mark and its policy result (`false-positive`, `suppress`, `defer`, or `flagged`); owned by `clients/diagnostic-dispositions.ts`; retires `mark` and `status` for the stored policy concept.
+- **strict anchor** — A content-bound `dd:` disposition identity; owned by `clients/diagnostic-dispositions.ts`; retires `content key` and `false-positive id`.
+- **weak anchor** — A non-content-bound `ddw:` disposition identity; owned by `clients/diagnostic-dispositions.ts`; retires `soft anchor` and `persistent mark id`.
+- **freshness** — The verdict that evidence still matches its reference (`fresh`, `stale`, or `indeterminate`); owned by `clients/freshness.ts`; retires `validity` and `age` when reference drift is meant.
+- **delivery surface** — A concrete model-facing place that renders or returns findings; owned by `clients/finding-delivery-gate.ts`; retires `consumer` and `output path`.
+- **delivery gate** — The freshness, disposition, and policy admission applied before a delivery surface emits findings; owned by `clients/finding-delivery-gate.ts`; retires `filter` and `render check`.
+- **lane** — One producer-and-delivery contract within the delivery-surface registry; owned by `clients/finding-delivery-gate.ts`; retires `path` and `channel` for a registered surface.
+- **seam** — A shared call through which sibling surfaces enforce one rule; owned by `clients/dispatch/finding-policy.ts`; retires `helper` when the call is an architectural enforcement boundary.
+- **store** — The owner of durable or session rows, including their read/modify/write lifecycle; owned by `clients/durable-store.ts`; retires `cache` when state ownership, not derived reuse, is meant.
+- **mirror** — A derived copy refreshed inside the writer's guard; owned by `clients/diagnostic-dispositions.ts`; retires `replica` and `shadow`.
+- **path spelling** — The input string form of a path, before key or canonical normalization; owned by `clients/path-utils.ts`; retires `path name` and `raw path` when form is meant.
+- **path key** — A normalized process-local map key; owned by `clients/path-utils.ts` (`normalizeEphemeralMapKey`); retires `path identity` and `canonical path` for ephemeral maps.
+- **canonical path** — A filesystem-aware normalized path used for long-lived map state; owned by `clients/path-utils.ts` (`normalizeFilePath`); retires `resolved path` when canonical casing and realpath semantics are meant.
+- **rendezvous id** — A pure, cross-process string derivation shared by independent writers/readers; owned by `clients/mcp/ipc.ts`; retires `workspace key` and `IPC path key`.
+- **generation** — A monotonic/session/content/scan/disposition-store identity that rejects late work; owned by `clients/generation-guard.ts` (`GenerationSource`, `GenerationHandle`, and `createGenerationSource`); retires `epoch` and `version` when the identity's lifecycle is meant.
+- **degradation record** — A bounded once-only or counted ledger event for a partial, unavailable, or deferred result; owned by `clients/degradation-ledger.ts`; retires `log`, `warning`, and `telemetry`.
+- **ratchet** — A governance assertion whose admitted population may shrink but not silently grow; owned by `tests/support/sweep-kit.ts`; retires `allowlist` and `baseline` when shrink-only enforcement is meant.
+- **sweep** — A governance scan that enumerates a whole defect population and asserts its floor or emptiness; owned by `tests/support/sweep-kit.ts`; retires `grep check` and `spot check`.
+- **pin** — A test assertion that keeps a known site, count, or identity from moving silently; owned by `tests/support/sweep-kit.ts`; retires `snapshot` when a semantic location is meant.
+- **admission** — A recorded reason that permits a known exception into a governed population; owned by `tests/support/sweep-kit.ts`; retires `exemption` when the entry is accepted as a positive capability.
+- **exemption** — A recorded reason that excludes a known non-member from a governance population; owned by `tests/support/sweep-kit.ts`; retires `ignore` and `exception`.
+- **runner outcome** — The classified result of a tool run: clean/findings, skipped, failed, or rejected; owned by `clients/dispatch/runners/utils/spawn-outcome.ts`; retires `exit code` and `tool failure` as the user-facing classification. The canonical classifier calls it `RunOutcome` at `clients/dispatch/runners/utils/spawn-outcome.ts:40`, while the older failure wording remains `ToolFailureInput` at `clients/dispatch/runners/utils/tool-failure.ts:15`.
+
+Where two spellings are still live, use the more specific canonical term above in new text: `diagnostic` for a structured dispatch value (`clients/dispatch/types.ts:59`) and `finding` for the umbrella delivery concept (`clients/finding-delivery-gate.ts:1`); `normalizeEphemeralMapKey` for a process-local path key (`clients/path-utils.ts:492`) and `workspaceHash` for a cross-process rendezvous derivation (`clients/mcp/ipc.ts:80`).
+
+ADR: docs/adr/0001-stale-advisory-live-arm.md
+ADR: docs/adr/0002-workspace-hash-rendezvous.md
+ADR: docs/adr/0003-git-guard-latch-writer.md
+ADR: docs/adr/0004-disposition-policy-seam.md
+ADR: docs/adr/0005-tool-availability-enforcement-seam.md
+ADR: docs/adr/0006-derived-state-benchmark-first.md
+ADR: docs/adr/0007-end-to-end-witness-per-seam-slice.md
+
 ## Recurring defect shapes
 
 Use these screens before coding. The numbers are stable references for issue
@@ -291,7 +330,7 @@ and PR language; detailed historical examples are in `HISTORY.md`.
     shows the recompute is the cost, and then the entry carries the generation
     it was derived from. Tool-run caches (gitleaks, knip, trivy) are not
     derived state; their freshness is governed by the delivery gate. A cache
-    that does not exist cannot serve stale.
+    that does not exist cannot serve stale. ADR: docs/adr/0006-derived-state-benchmark-first.md
 
 52. **A second store answering the same availability question:** a new latch,
     map or cache that answers "can `<tool>` run right now, at what path"
@@ -302,7 +341,7 @@ and PR language; detailed historical examples are in `HISTORY.md`.
     (#1894). Rule: every store of that shape is pinned by name in the #1894
     registry ratchet, the registry never grows, and a change that touches a
     registered store moves it onto the shared policy and deletes it from the
-    registry in the same change.
+    registry in the same change. ADR: docs/adr/0005-tool-availability-enforcement-seam.md
 
 ## Standing invariants
 

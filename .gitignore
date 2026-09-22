@@ -81,6 +81,7 @@ migrate-*.js
 !CONTRIBUTING.md
 !LICENSE
 !SECURITY.md
+!docs/adr/*.md
 !docs/pi-lens-subagent.md
 !docs/pi-lens-monitor.md
 !docs/pi-lens-fixer.md

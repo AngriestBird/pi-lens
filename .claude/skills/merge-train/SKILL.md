@@ -12,6 +12,12 @@ description: Run the pi-lens review → verify → merge policy over one or more
 The policy that landed the 2026-08-17 arc (11 PRs, every one adversarially
 reviewed, zero unreviewed merges). Apply it to each PR in the queue.
 
+Every PR body starts with `## Why`, `## Notes for the reviewer`, and
+`## Change outline`, followed by the existing `## Summary`, `## Tests`,
+`## Blast radius`, `## Class sweep`, and `## Observability` sections. The
+change outline is the changed symbol's caller/callee tree with `+`/`-` on
+moved lines; include only structural views that changed.
+
 ## The loop, per PR
 
 1. **Review.** Spawn `pi-lens-reviewer` (worktree isolation) with the PR
