@@ -103,17 +103,19 @@ describe("warm-attach records a missing incumbent endpoint (#3255)", () => {
 	beforeEach(() => {
 		home = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-warm-3255-"));
 		process.env.PI_LENS_HOME = home;
-		// A live, same-root incumbent the registry confirms: this process itself,
-		// so `isPidAlive` is true without mocking it. Nothing listens on its
-		// derived endpoint — which is exactly the upgrade-stranded shape.
+		// A live, same-root incumbent the registry confirms. It must be a real
+		// live pid that is NOT this process — `selectLivePeerInstances` excludes
+		// `process.pid` by definition, so the parent is the honest stand-in and
+		// `isPidAlive` stays the production one, unmocked. Nothing listens on the
+		// endpoint derived for it: exactly the upgrade-stranded shape.
 		fs.writeFileSync(
 			path.join(home, "instances.json"),
 			JSON.stringify({
-				instances: [entry(process.pid, root, new Date().toISOString())],
+				instances: [entry(process.ppid, root, new Date().toISOString())],
 			}),
 		);
 		resetDegradationLedger();
-		_setWarmAttachForTests(root, process.pid);
+		_setWarmAttachForTests(root, process.ppid);
 	});
 
 	afterEach(() => {

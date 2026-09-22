@@ -1072,6 +1072,16 @@ export type DegradationKind =
 	 */
 	| "unclassified-mutating-tool"
 	/**
+	 * #3255: nothing is listening on the pid-scoped warm endpoint this session
+	 * derived for its incumbent, while the instance registry still confirms that
+	 * incumbent is alive. Narrowing the workspace-id case fold renamed the
+	 * endpoint, so a peer that registered BEFORE the upgrade keeps serving the
+	 * previous name and the two can no longer meet — the session drops to local
+	 * analysis with nothing a reader could see. Subject is the derived endpoint;
+	 * the remedy is restarting the incumbent, which no retry can substitute for.
+	 */
+	| "warm-ipc-endpoint-missing"
+	/**
 	 * #2504 review round 7 (F5): the DEFERRED sibling of
 	 * `actionable-warnings-inband-superseded` — a file changed while the
 	 * off-hook deferred LSP pull was reading it, so its carried entry is

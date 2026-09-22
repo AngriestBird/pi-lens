@@ -203,8 +203,28 @@ export type WarmCodeActionsResult =
 export type WarmDiagnosticsFailureReason =
 	| "timeout"
 	| "ipc-error"
+	/**
+	 * Nothing is listening on the endpoint this process derived — the connect
+	 * itself never landed. Split out of `ipc-error` by #3255 for the same reason
+	 * #1272 split `schema-mismatch` out of it: the remedies differ. An
+	 * answering-but-broken server needs a rebuild; an absent one needs a start;
+	 * and after #3255 narrowed the case fold, a server that was ALREADY RUNNING
+	 * when pi-lens was upgraded still owns the previous endpoint name, so it
+	 * needs a restart and nothing else will fix it.
+	 */
+	| "no-listener"
 	| "schema-mismatch"
 	| "stale-answer";
+
+/**
+ * A connect that never landed, as opposed to a socket that opened and then
+ * failed. `ENOENT` is the POSIX "no socket file there"; `ECONNREFUSED` is a
+ * socket file (or named pipe) with no live listener behind it.
+ */
+function isNoListenerError(error: unknown): boolean {
+	const code = (error as NodeJS.ErrnoException | null)?.code;
+	return code === "ENOENT" || code === "ECONNREFUSED";
+}
 
 export type WarmDiagnosticsResult =
 	| { available: true; response: WarmDiagnosticsResponse }
@@ -282,7 +302,12 @@ function requestOverWarmIpc<TResponse, TRequest extends object = object>(
 				finish({ available: false, reason: "schema-mismatch" });
 			}
 		});
-		socket.on("error", () => finish({ available: false, reason: "ipc-error" }));
+		socket.on("error", (error) =>
+			finish({
+				available: false,
+				reason: isNoListenerError(error) ? "no-listener" : "ipc-error",
+			}),
+		);
 		socket.on("close", () => finish({ available: false, reason: "ipc-error" }));
 	});
 }
@@ -492,9 +517,12 @@ export function turnEndStatusPathForCwd(
 	);
 }
 
-export function readTurnEndStatus(cwd: string): TurnEndStatus | undefined {
+export function readTurnEndStatus(
+	cwd: string,
+	platform: NodeJS.Platform = process.platform,
+): TurnEndStatus | undefined {
 	try {
-		const raw = fs.readFileSync(turnEndStatusPathForCwd(cwd), "utf8");
+		const raw = fs.readFileSync(turnEndStatusPathForCwd(cwd, platform), "utf8");
 		const parsed = JSON.parse(raw) as Partial<TurnEndStatus> | null;
 		if (!parsed || typeof parsed !== "object") return undefined;
 		return {
@@ -527,10 +555,11 @@ export function readTurnEndStatus(cwd: string): TurnEndStatus | undefined {
 export function recordTurnEndOutcome(
 	cwd: string,
 	outcome: { ran: true } | { ran: false; reason: string },
+	platform: NodeJS.Platform = process.platform,
 ): void {
 	try {
 		const now = new Date().toISOString();
-		const previous = readTurnEndStatus(cwd) ?? { ran: 0, skipped: 0 };
+		const previous = readTurnEndStatus(cwd, platform) ?? { ran: 0, skipped: 0 };
 		const next: TurnEndStatus = outcome.ran
 			? { ...previous, ran: previous.ran + 1, lastRunAt: now }
 			: {
@@ -539,10 +568,34 @@ export function recordTurnEndOutcome(
 					lastSkipReason: outcome.reason,
 					lastSkipAt: now,
 				};
-		writeFileAtomic(turnEndStatusPathForCwd(cwd), `${JSON.stringify(next)}\n`);
+		const current = turnEndStatusPathForCwd(cwd, platform);
+		writeFileAtomic(current, `${JSON.stringify(next)}\n`);
+		// #3255 H1: narrowing the case fold renamed this file, orphaning the one
+		// the pre-upgrade build wrote. Left behind, an old server's `pilens_health`
+		// keeps reporting counters no hook updates any more. The legacy name is
+		// derived here for DELETION ONLY and must never be read or connected to:
+		// on a case-sensitive host it is the COLLIDING id, so its contents may
+		// belong to a case-variant sibling workspace. Guarded on the names
+		// actually differing, or this would delete the file just written.
+		const legacy = legacyTurnEndStatusPathForCwd(cwd);
+		if (legacy !== current) fs.rmSync(legacy, { force: true });
 	} catch {
 		// telemetry only — a read-only tmpdir must not break the Stop hook
 	}
+}
+
+/**
+ * The pre-#3255 status-file name: the same derivation with the case fold
+ * applied unconditionally. Exists so the orphan can be REMOVED, never read —
+ * see `recordTurnEndOutcome` and the `workspaceHash` doc comment.
+ */
+function legacyTurnEndStatusPathForCwd(cwd: string): string {
+	const legacyId = crypto
+		.createHash("sha256")
+		.update(path.resolve(cwd).toLowerCase())
+		.digest("hex")
+		.slice(0, 16);
+	return path.join(os.tmpdir(), `pi-lens-turn-end-${legacyId}.json`);
 }
 
 /**

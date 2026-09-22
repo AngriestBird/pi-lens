@@ -838,6 +838,10 @@ describe("upgrade transition after the case-fold narrowing (#3255)", () => {
 		const cwd = "/repo/Alpha";
 		const legacy = legacyStatusPath(cwd);
 		const current = turnEndStatusPathForCwd(cwd, "linux");
+		// Both names live in the shared `os.tmpdir()`, so start from a known
+		// empty state rather than inheriting a sibling run's counters.
+		fs.rmSync(legacy, { force: true });
+		fs.rmSync(current, { force: true });
 		try {
 			expect(legacy).not.toBe(current);
 			fs.writeFileSync(legacy, `${JSON.stringify({ ran: 7, skipped: 2 })}\n`);
@@ -860,6 +864,7 @@ describe("upgrade transition after the case-fold narrowing (#3255)", () => {
 		// that drops the `legacy !== current` check.
 		const cwd = "/repo/Alpha";
 		const current = turnEndStatusPathForCwd(cwd, "win32");
+		fs.rmSync(current, { force: true });
 		try {
 			expect(legacyStatusPath(cwd)).toBe(current);
 			recordTurnEndOutcome(cwd, { ran: true }, "win32");
