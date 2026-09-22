@@ -405,6 +405,9 @@ export const wallClockBudgetInclude = [
 	// `**` chain), so a fake clock measures nothing.
 	"tests/clients/workspace-glob-nonbacktracking-budget.test.ts",
 	"tests/config/gitignore-tracked-shadow.test.ts",
+	// #3244: the advisory floor must observe the real oxlint --print-config and
+	// counter process; an in-process double would only restate the expected rule map.
+	"tests/config/oxlint-advisory-rule-floor-gate.test.ts",
 	// #2697: the strictness ratchet spawns two real tsc processes and waits for
 	// their wall-clock completion; keep its 120s budget in the quiet phase.
 	"tests/config/strictness-ratchet.test.ts",

@@ -1126,10 +1126,10 @@ describe("runClassifier orchestration against a mocked, STATEFUL GitHub API (#21
 			(c) => c.method === "POST" && c.url.includes("/comments"),
 		);
 		expect(posted).toBeDefined();
-		expect((posted?.body as { body: string }).body).toContain(
+		expect((posted!.body as { body: string }).body).toContain(
 			"ci-classifier: infra-kill",
 		);
-		expect((posted?.body as { body: string }).body).toContain(
+		expect((posted!.body as { body: string }).body).toContain(
 			"auto-rerun triggered",
 		);
 
@@ -1350,7 +1350,8 @@ describe("runClassifier orchestration against a mocked, STATEFUL GitHub API (#21
 		const posted = calls.find(
 			(c) => c.method === "POST" && c.url.includes("/comments"),
 		);
-		expect((posted?.body as { body: string }).body).toContain(
+		expect(posted).toBeDefined();
+		expect((posted!.body as { body: string }).body).toContain(
 			"rerun attempt failed",
 		);
 	});

@@ -293,7 +293,8 @@ describe("#3195 — the console-capture seam, directly", () => {
 				execute,
 			});
 			expect(registered?.execute).not.toBe(execute);
-			expect((registered?.execute as () => unknown)()).toBe("tool-result");
+			expect(registered?.execute).toBeDefined();
+			expect((registered!.execute as () => unknown)()).toBe("tool-result");
 			expect(sawWindow).toBe(true);
 		} finally {
 			sink.uninstallConsoleGuard();

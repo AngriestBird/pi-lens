@@ -511,6 +511,7 @@ Use a pinned home/data environment for probes and child processes.
 npm run build                         compile in-place runtime twins
 npm run build:dist                    build the published dist bundle
 npm run lint                          tsc plus oxlint
+npm run lint:js:tests                 required type-aware oxlint rules over tests
 npm run fmt:check                     oxfmt gate
 npm test                              serialized full suite
 npm run test:targeted -- <paths>      shared-slot targeted suite

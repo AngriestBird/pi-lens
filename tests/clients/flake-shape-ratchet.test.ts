@@ -295,6 +295,11 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		reason:
 			"real gitignore rules and index entries decide shadow files outside the test process",
 	},
+	"real-process-spawn:config/oxlint-advisory-rule-floor-gate.test.ts": {
+		detector: "real-process-spawn",
+		reason:
+			"the real advisory argv and counter process are the only faithful proof that CI sees a nonzero type-aware rule population",
+	},
 	"real-process-spawn:config/tracked-control-bytes.test.ts": {
 		detector: "real-process-spawn",
 		reason:

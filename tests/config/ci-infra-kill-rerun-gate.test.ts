@@ -305,9 +305,10 @@ describe("ci-infra-kill-rerun.yml synchronize label cleanup (#2856)", () => {
 		const job = (workflow.jobs as Record<string, WorkflowJob>)[
 			"clear-stale-verdict-labels"
 		];
+		expect(job).toBeDefined();
 		expect(job?.if).toContain("github.event_name == 'pull_request'");
 		expect(job?.if).toContain("github.event.action == 'synchronize'");
-		const run = (job?.steps as WorkflowStep[]).find((step) => step.run)?.run;
+		const run = (job!.steps as WorkflowStep[]).find((step) => step.run)?.run;
 		expect(run).toContain("--remove-label 'ci:infra'");
 		expect(run).toContain("--remove-label 'ci:real'");
 		expect(job?.env).toMatchObject({ GH_REPO: "${{ github.repository }}" });
@@ -481,7 +482,8 @@ describe("ci-infra-kill-rerun.yml terminal rerun path (#2806 F3)", () => {
 	});
 
 	it("loads the terminal label swap and no-PR summary path", () => {
-		const run = (job?.steps as WorkflowStep[]).find((step) => step.run)?.run;
+		expect(job).toBeDefined();
+		const run = (job!.steps as WorkflowStep[]).find((step) => step.run)?.run;
 		expect(run).toContain("--remove-label 'ci:infra'");
 		expect(run).toContain("--add-label 'ci:real'");
 		expect(run).toContain("GITHUB_STEP_SUMMARY");

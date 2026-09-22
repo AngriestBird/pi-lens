@@ -225,8 +225,9 @@ describe("lens_diagnostics compact filename", () => {
 		try {
 			const tool = makeTool({}, service);
 			const result = await run(tool, { source: "lsp", paths: [file] }, cwd);
+			expect(tool.renderResult).toBeDefined();
 			const rendered = (
-				tool.renderResult?.(result, { expanded: false }, {} as Theme, {
+				tool.renderResult!(result, { expanded: false }, {} as Theme, {
 					args: { source: "lsp", paths: [file] },
 				}) as any
 			)
@@ -256,8 +257,9 @@ describe("lens_diagnostics compact filename", () => {
 				{ source: "lsp", path: unrelated, paths: [diagnosed] },
 				cwd,
 			);
+			expect(tool.renderResult).toBeDefined();
 			const rendered = (
-				tool.renderResult?.(result, { expanded: false }, {} as Theme, {
+				tool.renderResult!(result, { expanded: false }, {} as Theme, {
 					args: { source: "lsp", path: unrelated, paths: [diagnosed] },
 				}) as any
 			)

@@ -1647,7 +1647,7 @@ describe("scheduleStaleReconcile — widget self-corrects fixed files (#298 foll
 				{ timeout: 5000 },
 			);
 		} finally {
-			await vi.useRealTimers();
+			vi.useRealTimers();
 			await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
 		}
 	});
@@ -1701,7 +1701,7 @@ describe("scheduleStaleReconcile — widget self-corrects fixed files (#298 foll
 			// Valid entry preserved — the fix must not drop current diagnostics.
 			expect(getFileDiagnostics(filePath)).toHaveLength(1);
 		} finally {
-			await vi.useRealTimers();
+			vi.useRealTimers();
 			await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
 		}
 	});
