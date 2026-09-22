@@ -416,8 +416,11 @@ describe("dead-code turn-end advisory honors dispositions (#3248)", () => {
 			);
 
 			const text = turnEndText(cacheManager, cwd, runtime);
-			expect(text).toContain("live");
-			expect(text).not.toContain("Unused function marked");
+			// The RENDERED form (`formatDeadCodeDelta`: `unused <kind> <name>`),
+			// not the adapter's message — asserting the adapter's wording here
+			// would pass against text that never contains it.
+			expect(text).toContain("unused function live");
+			expect(text).not.toContain("unused function marked");
 			expect(latencyRow("dead-code")).toMatchObject({
 				dispositionSuppressed: 1,
 			});
@@ -485,8 +488,11 @@ describe("dead-code turn-end advisory honors dispositions (#3248)", () => {
 			);
 
 			const text = turnEndText(cacheManager, cwd, runtime);
-			expect(text).toContain("live");
-			expect(text).not.toContain("Unused function marked");
+			// The RENDERED form (`formatDeadCodeDelta`: `unused <kind> <name>`),
+			// not the adapter's message — asserting the adapter's wording here
+			// would pass against text that never contains it.
+			expect(text).toContain("unused function live");
+			expect(text).not.toContain("unused function marked");
 		} finally {
 			env.cleanup();
 		}
