@@ -320,9 +320,15 @@ const SLASH_FOLD_PINS: Readonly<Record<string, number>> = {
  *   explicit ARGUMENT (`combinePathValuesForPlatform`); the seam reads
  *   `process.platform`, so it cannot express the simulated arm the ubuntu lane
  *   tests. See that function's own doc comment.
- * - `mcp/ipc.ts` — the cross-process IPC rendezvous hash. Deliberately NOT a
- *   map key: see the `workspaceHash` doc comment for why a pure derivation is
- *   required there and why neither seam fits.
+ * - `mcp/ipc.ts` — the cross-process IPC rendezvous hash, folded only on the
+ *   platforms whose filesystem folds case (#3255). Deliberately NOT a map key:
+ *   see the `workspaceHash` doc comment for why a pure derivation is required
+ *   there and why neither seam fits — its `platform` is an injected argument,
+ *   which `normalizeEphemeralMapKey`'s `process.platform` read cannot express.
+ *   (A second, deletion-only fold reproducing the retired always-fold rule was
+ *   pinned here at @2 for one round and then deleted: on a case-sensitive host
+ *   that id is the colliding one, so the file it named could belong to a live
+ *   case-variant sibling.)
  * - `runtime-tool-call.ts` — `toPosix(path.resolve(f)).toLowerCase()`, where
  *   the fold is the haystack for lowercase MARKER substrings, not a key.
  */

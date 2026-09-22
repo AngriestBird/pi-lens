@@ -1497,6 +1497,26 @@ function activateExtension(hostPi: ExtensionAPI) {
 				}
 			}
 
+			// #3255 round-3 verify: a pi user with no Stop hook and no `/lens-perf`
+			// read had no automatic notice that this session lost its warm
+			// incumbent to a renamed endpoint — the remedy (restart the peer) is
+			// not something the local fallback can discover. Rendered through the
+			// SHARED renderer on a summary filtered to that one kind, so the
+			// wording cannot drift from `/lens-perf` and `pilens_health` (the
+			// #2515 divergence this repo already paid for once) and `/lens-health`
+			// gains no output for any other degradation.
+			try {
+				lines.push(
+					...renderDegradationLines(
+						getDegradationSummary().filter(
+							(group) => group.kind === "warm-ipc-endpoint-missing",
+						),
+					),
+				);
+			} catch {
+				// best-effort — a health-line render must never break /lens-health
+			}
+
 			// LSP status
 			const lspClients = getLSPService().getStatus();
 			if (lspClients.length > 0) {
