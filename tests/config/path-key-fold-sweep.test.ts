@@ -31,13 +31,34 @@
  * constraint `tests/config/escape-regexp-fold-sweep.test.ts` documents for
  * `merge-train-lane.mjs`), and none of them derives a map key.
  *
- * Source is read through `stripSource(..., { strings: "keep" })`: comments
- * are blanked, so a needle written only in prose can neither be flagged nor
- * satisfy the canonical-leaf check (the #1635/#1692 comment-laundering shape,
- * AGENTS.md defect shape 38); regex literals and string contents are
- * PRESERVED, because shape A's needle IS a regex literal and shape B's
- * platform test IS a string literal — the default "blank" policy erases both
- * and would turn this sweep into a permanent false clean.
+ * Both shapes are matched against CODE ONLY, under
+ * `stripSource(..., { strings: "blank" })`: comments, string literals AND
+ * template-literal TEXT are blanked, while a template's `${...}` interpolation
+ * keeps being lexed as ordinary code (`stripSource` has done that since #2502),
+ * so a fold inside an interpolation still counts. Round 1 shipped
+ * `strings: "keep"` here and review finding F1 proved the hole with the
+ * detector's own export — `countPathCaseFolds("const doc = \`path.resolve(p)
+ * .toLowerCase()\`;")` answered **1**, and the separator needle behaved the
+ * same way. That is the self-excuse direction AGENTS.md defect shape 38 forbids:
+ * a string copy of the needle could make an unregistered fold read as live, or
+ * keep a pin looking current after its real fold was deleted.
+ *
+ * `strings: "keep"` was chosen in round 1 because shape A's needle IS a regex
+ * literal (blanking erases the regex body) and shape B's arm 2 keyed on the
+ * `"win32"` string. Both evidences are retained WITHOUT it, and each has its
+ * own test below:
+ *
+ * - shape A goes through `codeMatches` (`tests/support/sweep-kit.ts:477`),
+ *   which already solves exactly this: it matches the needle on RAW source,
+ *   then keeps only the matches whose span is still code in the
+ *   strings-blanked text. The regex body is therefore visible to the MATCH and
+ *   invisible to the laundering check. No new stripper, and no new option on
+ *   `stripSource` — the kit already owned the mechanism.
+ * - shape B arm 2 keys on the `platform` IDENTIFIER of the comparison
+ *   (`platform ===`, `process.platform !==`) rather than the `"win32"` literal
+ *   it is compared against. An identifier survives string blanking, cannot be
+ *   written inside a string to launder a site, and is the structural fact
+ *   rather than one spelling of it (AGENTS.md defect shape 34).
  *
  * SWEEP_HEURISTIC_LIMITS. Shape B's second arm keys on a `"win32"` literal in
  * the same statement, so a fold behind an already-hoisted boolean
@@ -54,6 +75,7 @@ import { describe, expect, it } from "vitest";
 import {
 	assertNonEmptyScan,
 	auditSymbolCounts,
+	codeMatches,
 	listSourceFiles,
 	matchingCloseIndex,
 	readWalkedFile,
@@ -84,6 +106,13 @@ const SLASH_FOLD = /\.replace\(\s*\/\\\\\/g\s*,\s*["'`]\/["'`]\s*\)/g;
  */
 const PATH_CALL =
 	/\b(?:(?:path|win32|posix)\s*\.\s*(?:resolve|normalize|join|relative)|toPosix)\s*\(/g;
+
+/**
+ * A comparison against a `platform` identifier — `platform === "win32"`,
+ * `process.platform !== "win32"`, `platform == WIN32`. Shape B's second arm
+ * roots here instead of on the compared string, which this scan blanks.
+ */
+const PLATFORM_TEST = /\bplatform\s*[!=]==?/;
 
 /**
  * Each method call in the chain that follows `closeIndex`, up to 8 links, with
@@ -118,17 +147,27 @@ function enclosingStatement(source: string, index: number): string {
 }
 
 /**
- * The ONE stripping policy this sweep scans under — census and the
+ * The ONE stripping policy this sweep scans under — the shape-B census and the
  * laundering self-tests below both go through it, so a single edit here can
  * never leave the self-tests guarding a policy the census no longer uses.
+ * Shape A does not call it: `codeMatches` applies the same policy internally
+ * for its own laundering filter, which is why it can match a regex body that
+ * this text has blanked.
  */
 export function stripForScan(raw: string): string {
-	return stripSource(raw, { strings: "keep" });
+	return stripSource(raw, { strings: "blank" });
 }
 
-/** Shape A occurrences in already-stripped source. */
-export function countSlashFolds(stripped: string): number {
-	return [...stripped.matchAll(SLASH_FOLD)].length;
+/**
+ * Shape A occurrences in RAW source.
+ *
+ * Takes raw, not stripped, on purpose: `codeMatches` needs the unblanked regex
+ * body to MATCH and the blanked text to JUDGE, and a caller that pre-stripped
+ * would have destroyed one of the two. Making the raw string the only accepted
+ * input removes the chance of passing the wrong text (F1's shape, one layer up).
+ */
+export function countSlashFolds(raw: string): number {
+	return codeMatches(raw, SLASH_FOLD).length;
 }
 
 /** Shape B occurrences in already-stripped source. */
@@ -143,10 +182,13 @@ export function countPathCaseFolds(stripped: string): number {
 			if (link.name === "toLowerCase") flagged.add(link.index);
 		}
 	}
-	// Arm 2: `.toLowerCase()` in the same statement as a `"win32"` platform test.
+	// Arm 2: `.toLowerCase()` in the same statement as a `platform` comparison.
+	// The IDENTIFIER, not the `"win32"` literal it is compared against (F1): a
+	// string literal is blanked by this scan's policy, and keying on one
+	// spelling of the compared value is defect shape 34 besides.
 	for (const match of stripped.matchAll(/\.\s*toLowerCase\s*\(\s*\)/g)) {
 		const statement = enclosingStatement(stripped, match.index);
-		if (!/["'`]win32["'`]/.test(statement)) continue;
+		if (!PLATFORM_TEST.test(statement)) continue;
 		flagged.add(match.index + match[0].indexOf("toLowerCase"));
 	}
 	return flagged.size;
@@ -188,9 +230,8 @@ function census(): Census {
 		if (rel === CANONICAL_FILE) continue;
 		const raw = readWalkedFile(file);
 		if (raw === undefined) continue;
-		const stripped = stripForScan(raw);
-		const slash = countSlashFolds(stripped);
-		const lower = countPathCaseFolds(stripped);
+		const slash = countSlashFolds(raw);
+		const lower = countPathCaseFolds(stripForScan(raw));
 		if (slash > 0) slashFolds[rel] = slash;
 		if (lower > 0) caseFolds[rel] = lower;
 	}
@@ -325,10 +366,9 @@ describe("path transformation single-source-of-truth (#1193)", () => {
 	}, 30_000);
 
 	it("the canonical leaf still owns both transformations", () => {
-		const stripped = stripForScan(
-			readFileSync(path.join(REPO_ROOT, CANONICAL_FILE), "utf8"),
-		);
-		expect(countSlashFolds(stripped)).toBeGreaterThan(0);
+		const raw = readFileSync(path.join(REPO_ROOT, CANONICAL_FILE), "utf8");
+		const stripped = stripForScan(raw);
+		expect(countSlashFolds(raw)).toBeGreaterThan(0);
 		expect(/export function toPosix\s*\(/.test(stripped)).toBe(true);
 		expect(/export function normalizeEphemeralMapKey\s*\(/.test(stripped)).toBe(
 			true,
@@ -338,39 +378,61 @@ describe("path transformation single-source-of-truth (#1193)", () => {
 
 /**
  * The detector's own threat model, as literal snippets — the #1692 attack
- * catalogue applied to this sweep. Each case runs the SAME `stripSource`
- * policy the census uses, so weakening that policy (dropping the comment
- * blanking, or switching `strings` to "blank") reds here and not only in a
- * whole-tree count nobody can read.
+ * catalogue applied to this sweep, one NAMED case per attack.
+ *
+ * Every case runs the SAME policy the census does (`stripForScan` for shape B,
+ * `codeMatches`'s own internal blanking for shape A), so weakening that policy
+ * reds here and not only in a whole-tree count nobody can read. The
+ * template-literal cases are review finding F1: round 1 scanned under
+ * `strings: "keep"` and both needles counted 1 when written as template TEXT.
  */
 describe("path-fold detectors resist comment and string laundering", () => {
 	const strip = stripForScan;
+	const SLASH_NEEDLE = String.raw`p.replace(/\\/g, "/")`;
+	const CASE_NEEDLE = "path.resolve(p).toLowerCase()";
 
 	it("flags a real separator fold", () => {
-		expect(countSlashFolds(strip('const a = p.replace(/\\\\/g, "/");'))).toBe(
-			1,
-		);
+		expect(countSlashFolds(`const a = ${SLASH_NEEDLE};`)).toBe(1);
 	});
 
 	it("does not flag a separator fold written only in a line comment", () => {
-		expect(
-			countSlashFolds(strip('// legacy: p.replace(/\\\\/g, "/") is banned\n')),
-		).toBe(0);
+		expect(countSlashFolds(`// legacy: ${SLASH_NEEDLE} is banned\n`)).toBe(0);
 	});
 
 	it("does not flag a separator fold written only in a block comment", () => {
-		expect(
-			countSlashFolds(strip('/** never write p.replace(/\\\\/g, "/") */\n')),
-		).toBe(0);
+		expect(countSlashFolds(`/** never write ${SLASH_NEEDLE} */\n`)).toBe(0);
+	});
+
+	it("does not flag a separator fold written only in a string literal", () => {
+		expect(countSlashFolds(`const doc = '${SLASH_NEEDLE}';`)).toBe(0);
+	});
+
+	it("does not flag a separator fold written only as template-literal text", () => {
+		// F1. Pre-fix this answered 1.
+		expect(countSlashFolds("const doc = `" + SLASH_NEEDLE + "`;")).toBe(0);
+	});
+
+	it("flags a separator fold inside a template interpolation", () => {
+		// The other half of F1's remedy: `${...}` is CODE, so a real fold there
+		// must still count. A policy that blanked whole templates would zero it.
+		expect(countSlashFolds("const t = `${" + SLASH_NEEDLE + "}`;")).toBe(1);
+	});
+
+	it("does not flag a replacement string that is not the posix separator", () => {
+		// `.replace(/\\/g, "\\\\")` is backslash ESCAPING, not a posix fold —
+		// `scripts/capture-runner-output.mjs:108` is the live example. `codeMatches`
+		// matches on RAW source, so the needle still requires the literal `/`
+		// replacement; only the laundering JUDGEMENT runs on blanked text.
+		expect(countSlashFolds(String.raw`const a = p.replace(/\\/g, "\\");`)).toBe(
+			0,
+		);
 	});
 
 	it("flags a case fold applied to a resolved path", () => {
-		expect(
-			countPathCaseFolds(strip("const k = path.resolve(p).toLowerCase();")),
-		).toBe(1);
+		expect(countPathCaseFolds(strip(`const k = ${CASE_NEEDLE};`))).toBe(1);
 	});
 
-	it("flags a case fold behind a win32 platform test", () => {
+	it("flags a case fold behind a platform test", () => {
 		expect(
 			countPathCaseFolds(
 				strip('const k = process.platform === "win32" ? n.toLowerCase() : n;'),
@@ -381,9 +443,34 @@ describe("path-fold detectors resist comment and string laundering", () => {
 	it("does not flag a case fold described only in a comment", () => {
 		expect(
 			countPathCaseFolds(
-				strip(
-					'// we used to do path.resolve(p).toLowerCase() on "win32"\nconst k = p;',
-				),
+				strip(`// we used to do ${CASE_NEEDLE} on win32\nconst k = p;`),
+			),
+		).toBe(0);
+	});
+
+	it("does not flag a case fold written only in a string literal", () => {
+		expect(countPathCaseFolds(strip(`const doc = '${CASE_NEEDLE}';`))).toBe(0);
+	});
+
+	it("does not flag a case fold written only as template-literal text", () => {
+		// F1's exact reviewer probe. Pre-fix this answered 1.
+		expect(
+			countPathCaseFolds(strip("const doc = `" + CASE_NEEDLE + "`;")),
+		).toBe(0);
+	});
+
+	it("flags a case fold inside a template interpolation", () => {
+		expect(
+			countPathCaseFolds(strip("const t = `${" + CASE_NEEDLE + "}`;")),
+		).toBe(1);
+	});
+
+	it("does not flag a platform test whose win32 spelling is only a string", () => {
+		// Arm 2 keys on the `platform` identifier, so a bare `"win32"` string
+		// next to an unrelated `.toLowerCase()` is not evidence of a path key.
+		expect(
+			countPathCaseFolds(
+				strip('const label = "win32"; const l = name.toLowerCase();'),
 			),
 		).toBe(0);
 	});
@@ -400,7 +487,7 @@ describe("path-fold detectors resist comment and string laundering", () => {
 	});
 
 	it("counts one case fold per site, not once per detecting arm", () => {
-		// `path.resolve(...).toLowerCase()` inside a `"win32"` ternary matches
+		// `path.resolve(...).toLowerCase()` inside a platform ternary matches
 		// BOTH arms; the flagged set is keyed by position so the pin stays a
 		// count of SITES.
 		expect(
