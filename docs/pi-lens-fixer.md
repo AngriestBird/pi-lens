@@ -31,6 +31,9 @@ the cost of not doing so.
 
 ## Evidence
 
+- Witness rule (ADR 0007): #1605 owns the witness lanes, and their fixtures
+  live under `tests/fixtures/witness/<slice>/`.
+
 - Add a regression test through the production path.
 - Capture the pre-fix assertion failure.
 - Prove the fixed test passes.

@@ -6,6 +6,8 @@ Read `/home/akis/.pi/agent/AGENTS.md`, then this file, then the role contract
 for the task. This file is the live repository contract. Dated incident reports,
 closed decisions, and detailed review archaeology belong in `HISTORY.md`.
 
+<important if="a code change, subsystem-specific change, delegated work, or pi documentation work">
+
 Task routing:
 
 - Any code change: read **Issue and PR design contract**, **Recurring defect
@@ -17,6 +19,8 @@ Task routing:
   from `docs/pi-lens-{fixer,reviewer,investigator,monitor,warden}.md`.
 - Pi documentation work: read the installed pi documentation named by the
   global instructions. Do not infer SDK behavior from memory.
+
+</important>
 
 ## What it is
 
@@ -82,7 +86,7 @@ filter one stage late can silently starve it of the population it was meant to
 guard (#3166 r1: a policy moved after a pre-existing display cap and genuine
 findings vanished). Deletion requests sweep callers and test doubles first. A
 second writer of shared state requires an identity, generation, reason, or kind
-discriminator before it lands.
+discriminator before it lands.<important if="delegating work or coordinating a lane">
 
 ## Orchestration and delegated work
 
@@ -131,6 +135,7 @@ node scripts/ci-verdict.mjs <pr-number|sha>
 
 Never merge on absent checks, stale checks, or a green advisory row alone.
 
+</important>
 ## Glossary
 
 - **finding** — Umbrella term for an agent-visible result; owned by `clients/finding-delivery-gate.ts`; retires `diagnostic`, `blocker`, `advisory`, and `record` (except a durable cache row). The canonical umbrella is `finding`; structured dispatch spelling is `diagnostic` at `clients/dispatch/types.ts:59`, while the umbrella is used by the delivery gate at `clients/finding-delivery-gate.ts:1`.
@@ -170,10 +175,11 @@ ADR: docs/adr/0005-tool-availability-enforcement-seam.md
 ADR: docs/adr/0006-derived-state-benchmark-first.md
 ADR: docs/adr/0007-end-to-end-witness-per-seam-slice.md
 
-## Recurring defect shapes
+<!-- markdownlint-disable MD029 -->
 
-Use these screens before coding. The numbers are stable references for issue
-and PR language; detailed historical examples are in `HISTORY.md`.
+<important if="touching a path key or path spelling">
+
+### touching a path key or path spelling
 
 1. **Divergent path keys:** path-keyed maps use `PathKeyedMap` and normalize on
    write, read, delete, and rehydrate. Tests use mixed separators and casing.
@@ -182,99 +188,55 @@ and PR language; detailed historical examples are in `HISTORY.md`.
    measured per transformation (separators, dot segments, case, symlinks,
    existence), never asserted (#3178: four rounds, two inverted arms, one
    unmeasured swap).
+
 2. **Host path functions in a shape branch:** once a path is classified as
    Windows-shaped, use `path.win32`; do not use host-default `path` functions.
    Prefer `toPosix`, `splitPathSegments`, and the canonical path helpers.
-3. **Wrong argv transform:** verify a command is the wrapper shape before
-   dropping an argv element or launcher name.
+
+32. **Mixed path comparison:** use one platform-aware containment expression;
+    do not combine case-sensitive equality with case-folded relative paths.
+
+39. **Walk-up result used as eligibility:** return ownership and start-directory
+    identity separately; enumerate root-position by ambient-input cells.
+
+</important>
+
+<important if="adding or reading a cache / durable record">
+
+### adding or reading a cache / durable record
+
 4. **Unsettled resource:** every timer, worker, child, watcher, and loser path
    is unref'd or cleared on every settle path. Tracked entries are removed on
    failure as well as success. Teardown does not await a dead resource forever.
-5. **Dropped side channel:** trace flags, bindings, and provenance through
-   spreads, maps, filters, and JSON serialization.
+
 6. **Incomplete freshness:** use the right content, size, mtime, dependency,
    and existence axes. Missing finding paths are not current findings.
-7. **Vacuous test:** prove the real entry point and real fixture arm. A skip is
-   visible, a mock has the required fields, and the test fails pre-fix.
-8. **Name heuristic:** a filename skip has an observable count and a content
-   escape hatch; never silently drop a real file.
+
 9. **One-axis bound:** bound the resource axis that grows, including bytes,
    timers, WASM objects, and retained evidence.
-10. **Silencing as fixing:** distinguish clean, filtered, unavailable, errored,
-    suppressed, deferred, and partial results. Any bound on an agent-facing
-    path discloses its truncation on the rendered surface; a count recorded
-    only in `latency.log` is not disclosure (#3166 r2: an 80-finding input
-    bound zeroed a neighbour's genuine errors, counted only in the log).
-11. **Skipped CI as green:** absent required checks are not passing checks.
+
 12. **Out-of-guard mirror refresh:** refresh behavior-gating mirrors before the
     guard releases, or validate the committed generation/object identity.
-13. **Wrong failure classification:** derive availability and verdicts from raw
-    evidence; preserve the classifier and evidence when a caller asserts a fact.
-14. **Duplicate module instance:** tests import the same `.js` artifact as the
-    runtime and never reset a private `.ts` twin.
+
 15. **Timer versus long operation:** an operation holds a counted gate for its
     lifetime; a background timer checks it at fire time and re-arms a fresh,
     bounded delay.
-16. **Unverified external-tool claim:** probe the real binary before encoding
-    exit codes, output shapes, severity names, or fixtures.
-17. **Process latch for session state:** every once-latch has a session reset;
-    session dedupe belongs in the degradation ledger where possible.
+
 18. **Cooldown beyond caller cadence:** verify both recovery suppression and
     promotion of values served during cooldown.
-19. **Re-derived identity:** carry resolved identity or correlation across
-    asynchronous stages; do not reconstruct it from ambiguous later inputs.
-20. **Staleness-only fallback:** stale work is not proof of ownership; require
-    origin provenance before claiming it.
-21. **Late loser overwrite:** concurrent writers carry a monotonic generation;
-    mutation of the generation guard must turn a test red.
-22. **Session-straddling write:** capture the session generation before an
-    await and check it before publishing.
-23. **Advanced cursor predicate:** predicates about the starting leaf receive
-    the starting path, not the loop cursor.
+
 24. **Second writer without discriminator:** enumerate all writers and add a
     reason/kind field before composing branches.
-25. **Module-scope uniqueness assumption:** process evaluation can create
-    multiple copies; process-wide registries and latches use `getProcessSingleton`.
-26. **Old-role filter on a substitute:** compare fallback output with the
-    substituted surface's contract, including non-blocking findings.
-27. **Unredacted user content:** parser messages and hand-authored strings may
-    contain file input; normalize and redact at the shared diagnostic seam.
+
 28. **Cold-path work on warm path:** compute expensive record fields only inside
     the failure or timeout branch, and measure any hot-path cost.
+
 29. **Reset cap counter:** a retire or skip records its decision where the
     selector reads it, so the same item cannot re-enter with a fresh count.
-30. **Load-time platform constant:** use a live platform read or an isolated
-    fresh import for every platform branch test.
-31. **Pull-only observability:** new behavior emits a success or decision record
-    in the streams that monitors and analyzers read.
-32. **Mixed path comparison:** use one platform-aware containment expression;
-    do not combine case-sensitive equality with case-folded relative paths.
-33. **Source assertion for runtime behavior:** prefer a runtime probe; source
-    scans need proof that runtime observation is impossible.
-34. **Spelling enumerator:** detect semantic structure, not a finite list of
-    syntactic spellings, and test an unlisted spelling.
-35. **Platform-only red:** platform-dependent tests run under injectable
-    `path.posix` and `path.win32` semantics on every authoritative lane.
-36. **Count-based baseline laundering:** maintenance tools match content
-    identity, not occurrence counts, and refuse replacement identities.
-37. **Raw control byte:** source fixtures encode control characters as escapes or
-    buffers; tracked-source sweeps enforce this.
-38. **Data-only admission:** a new exemption or baseline row requires a reason
-    in a separate checked file and a fixture that crosses the boundary.
-39. **Walk-up result used as eligibility:** return ownership and start-directory
-    identity separately; enumerate root-position by ambient-input cells.
-40. **Tool root drift:** all runner, formatter, and LSP child spawns use
-    `resolveToolCwd`; mutation of the seam, log, or fallback must turn a test red.
+
 41. **Hot bound reached at p50:** record hit rate and prefer adaptive or
     demotion behavior over a constant that has become the work.
-42. **Language-specific rule:** use `LANGUAGES` and registry facts; add a
-    non-TypeScript row whenever the rule is language-neutral.
-43. **Prose mistaken for executable structure:** define lexical states and
-    reachability before scanning shell, workflow, or source text.
-44. **Portable entry-module check:** compare `import.meta.url` with
-    `pathToFileURL(process.argv[1]).href`.
-45. **Root wrapper drops metadata:** wrappers preserve the complete marker table
-    and are checked against direct root resolution.
+
 46. **Long-lived container without a bound:** module-level or bootstrap-lived
     `Map`/`Set` state can grow per file, project, or request despite a reset.
     Classify each live occurrence as bounded, evicted, or content-keyed and
@@ -282,16 +244,53 @@ and PR language; detailed historical examples are in `HISTORY.md`.
     not a bound without a finite key-space argument. The bounded-container
     sweep scans `clients/`, `tools/`, `mcp/`, and `index.ts` with AST evidence
     and retains non-zero population and flagged floors.
+
 47. **Retry or drain loop consumes its own work list:** a bounded retry or
     drain loop must not remove its tracked item from the collection it iterates
     on the first successful pass. Later attempts must observe the resource's
     actual absence before untracking it; tests cover a resource recreated
     between attempts.
-48. **Fallback direction chosen without naming the user-facing obstruction:**
-    "fail closed" is not a universal justification. For each fallback, catch,
-    or default, name the concrete failure that reaches the user and choose the
-    direction from that harm; test unreadable, absent, and thrown lookup states
-    where the seam supports both directions.
+
+51. **Cross-request derived-state cache where a request-local pass is
+    affordable:** a signature, line count, content hash, import graph or other
+    DERIVED value is memoised across requests, and its invalidation key cannot
+    express the truth (rename, existence flip, casing, generation). The
+    2026-08 staleness arc (#1461, #1622, #1630, #1631, #1633, #1634) was six
+    fixes to keys that could not say when they were wrong. Rule, from #1644:
+    for derived state on a hot path, first measure a request-local bounded
+    recompute; add a persistent cache only when the fresh-process benchmark
+    shows the recompute is the cost, and then the entry carries the generation
+    it was derived from. Tool-run caches (gitleaks, knip, trivy) are not
+    derived state; their freshness is governed by the delivery gate. A cache
+    that does not exist cannot serve stale. ADR: docs/adr/0006-derived-state-benchmark-first.md
+
+</important>
+
+<important if="a delivery surface or lane">
+
+### a delivery surface or lane
+
+5. **Dropped side channel:** trace flags, bindings, and provenance through
+   spreads, maps, filters, and JSON serialization.
+
+10. **Silencing as fixing:** distinguish clean, filtered, unavailable, errored,
+    suppressed, deferred, and partial results. Any bound on an agent-facing
+    path discloses its truncation on the rendered surface; a count recorded
+    only in `latency.log` is not disclosure (#3166 r2: an 80-finding input
+    bound zeroed a neighbour's genuine errors, counted only in the log).
+
+26. **Old-role filter on a substitute:** compare fallback output with the
+    substituted surface's contract, including non-blocking findings.
+
+27. **Unredacted user content:** parser messages and hand-authored strings may
+    contain file input; normalize and redact at the shared diagnostic seam.
+
+31. **Pull-only observability:** new behavior emits a success or decision record
+    in the streams that monitors and analyzers read.
+
+43. **Prose mistaken for executable structure:** define lexical states and
+    reachability before scanning shell, workflow, or source text.
+
 49. **Whitespace counted as structure when it is alignment:** a leading run can
     be alignment, not one nesting unit. Known members: an aligned continuation
     inside a call (#3038), the interior of a block comment, whose ` * ` lines
@@ -302,6 +301,75 @@ and PR language; detailed historical examples are in `HISTORY.md`.
     base unit (#3116). Name which lines carry structure and exclude the rest
     before counting; decline rather than pin a style when only ambiguous runs
     remain.
+
+</important>
+
+<important if="a runner or tool outcome">
+
+### a runner or tool outcome
+
+3. **Wrong argv transform:** verify a command is the wrapper shape before
+   dropping an argv element or launcher name.
+
+13. **Wrong failure classification:** derive availability and verdicts from raw
+    evidence; preserve the classifier and evidence when a caller asserts a fact.
+
+16. **Unverified external-tool claim:** probe the real binary before encoding
+    exit codes, output shapes, severity names, or fixtures.
+
+40. **Tool root drift:** all runner, formatter, and LSP child spawns use
+    `resolveToolCwd`; mutation of the seam, log, or fallback must turn a test red.
+
+42. **Language-specific rule:** use `LANGUAGES` and registry facts; add a
+    non-TypeScript row whenever the rule is language-neutral.
+
+48. **Fallback direction chosen without naming the user-facing obstruction:**
+    "fail closed" is not a universal justification. For each fallback, catch,
+    or default, name the concrete failure that reaches the user and choose the
+    direction from that harm; test unreadable, absent, and thrown lookup states
+    where the seam supports both directions.
+
+</important>
+
+<important if="a test double, ratchet or sweep">
+
+### a test double, ratchet or sweep
+
+7. **Vacuous test:** prove the real entry point and real fixture arm. A skip is
+   visible, a mock has the required fields, and the test fails pre-fix.
+
+8. **Name heuristic:** a filename skip has an observable count and a content
+   escape hatch; never silently drop a real file.
+
+11. **Skipped CI as green:** absent required checks are not passing checks.
+
+14. **Duplicate module instance:** tests import the same `.js` artifact as the
+    runtime and never reset a private `.ts` twin.
+
+33. **Source assertion for runtime behavior:** prefer a runtime probe; source
+    scans need proof that runtime observation is impossible.
+
+34. **Spelling enumerator:** detect semantic structure, not a finite list of
+    syntactic spellings, and test an unlisted spelling.
+
+35. **Platform-only red:** platform-dependent tests run under injectable
+    `path.posix` and `path.win32` semantics on every authoritative lane.
+
+36. **Count-based baseline laundering:** maintenance tools match content
+    identity, not occurrence counts, and refuse replacement identities.
+
+37. **Raw control byte:** source fixtures encode control characters as escapes or
+    buffers; tracked-source sweeps enforce this.
+
+38. **Data-only admission:** a new exemption or baseline row requires a reason
+    in a separate checked file and a fixture that crosses the boundary.
+
+44. **Portable entry-module check:** compare `import.meta.url` with
+    `pathToFileURL(process.argv[1]).href`.
+
+45. **Root wrapper drops metadata:** wrappers preserve the complete marker table
+    and are checked against direct root resolution.
+
 50. **Test double's fabricated identifier reaching code that acts on it:** a
     pid, fd, port, lock path or handle invented by a mock is handed to
     PRODUCTION code that registers, signals, writes or deletes by that
@@ -319,18 +387,41 @@ and PR language; detailed historical examples are in `HISTORY.md`.
     file that hands an unowned pid to a production kill or spawn seam; the
     other identifier kinds have no detector yet, so screen them by hand.
 
-51. **Cross-request derived-state cache where a request-local pass is
-    affordable:** a signature, line count, content hash, import graph or other
-    DERIVED value is memoised across requests, and its invalidation key cannot
-    express the truth (rename, existence flip, casing, generation). The
-    2026-08 staleness arc (#1461, #1622, #1630, #1631, #1633, #1634) was six
-    fixes to keys that could not say when they were wrong. Rule, from #1644:
-    for derived state on a hot path, first measure a request-local bounded
-    recompute; add a persistent cache only when the fresh-process benchmark
-    shows the recompute is the cost, and then the entry carries the generation
-    it was derived from. Tool-run caches (gitleaks, knip, trivy) are not
-    derived state; their freshness is governed by the delivery gate. A cache
-    that does not exist cannot serve stale. ADR: docs/adr/0006-derived-state-benchmark-first.md
+</important>
+
+<important if="session, turn or generation lifecycle">
+
+### session, turn or generation lifecycle
+
+17. **Process latch for session state:** every once-latch has a session reset;
+    session dedupe belongs in the degradation ledger where possible.
+
+19. **Re-derived identity:** carry resolved identity or correlation across
+    asynchronous stages; do not reconstruct it from ambiguous later inputs.
+
+20. **Staleness-only fallback:** stale work is not proof of ownership; require
+    origin provenance before claiming it.
+
+21. **Late loser overwrite:** concurrent writers carry a monotonic generation;
+    mutation of the generation guard must turn a test red.
+
+22. **Session-straddling write:** capture the session generation before an
+    await and check it before publishing.
+
+23. **Advanced cursor predicate:** predicates about the starting leaf receive
+    the starting path, not the loop cursor.
+
+25. **Module-scope uniqueness assumption:** process evaluation can create
+    multiple copies; process-wide registries and latches use `getProcessSingleton`.
+
+30. **Load-time platform constant:** use a live platform read or an isolated
+    fresh import for every platform branch test.
+
+</important>
+
+<important if="availability or installer">
+
+### availability or installer
 
 52. **A second store answering the same availability question:** a new latch,
     map or cache that answers "can `<tool>` run right now, at what path"
@@ -343,7 +434,13 @@ and PR language; detailed historical examples are in `HISTORY.md`.
     registered store moves it onto the shared policy and deletes it from the
     registry in the same change. ADR: docs/adr/0005-tool-availability-enforcement-seam.md
 
+</important>
+
 ## Standing invariants
+
+<!-- markdownlint-enable MD029 -->
+
+<important if="touching language and configuration rules">
 
 ### Language and configuration
 
@@ -368,6 +465,9 @@ and PR language; detailed historical examples are in `HISTORY.md`.
   `session` or `lsp`; `scope` is `paths` or `workspace`; explicit paths always
   win. Severity is a threshold. Retired compatibility names must not widen a
   request into a workspace sweep.
+
+</important>
+<important if="touching paths, data, and operating systems rules">
 
 ### Paths, data, and operating systems
 
@@ -395,6 +495,9 @@ and PR language; detailed historical examples are in `HISTORY.md`.
 - New filesystem walkers use shared exclusions and ignore matching, cap
   walk-down work, and use the correct home-ceiling policy for walk-up discovery.
 
+</important>
+<important if="touching lsp, trust, and process execution rules">
+
 ### LSP, trust, and process execution
 
 - `safeSpawnAsync` is the subprocess seam. It carries ambient abort behavior,
@@ -419,6 +522,9 @@ and PR language; detailed historical examples are in `HISTORY.md`.
 - Every new LSP server has a smoke fixture or a documented alternate/toolchain
   exemption. Real LSP-spawn tests belong in the serialized `lsp-spawn-heavy`
   lane.
+
+</important>
+<important if="touching dispatch, runners, formatters, and installers rules">
 
 ### Dispatch, runners, formatters, and installers
 
@@ -451,6 +557,9 @@ and PR language; detailed historical examples are in `HISTORY.md`.
   guard for child cwd derivation. Add a reasoned migration row instead of a
   pin-only update.
 
+</important>
+<important if="touching caches, stores, and project intelligence rules">
+
 ### Caches, stores, and project intelligence
 
 - Behavior-gating durable stores use `clients/durable-store.ts`: lock, re-read,
@@ -470,6 +579,9 @@ and PR language; detailed historical examples are in `HISTORY.md`.
 - `module_report` and `symbol_search` are read-only orientation surfaces.
   `read_symbol` and `read_enclosing` return bodies and record pi read coverage;
   outlines do not claim body coverage. MCP adapters call `lens-engine.ts` only.
+
+</important>
+<important if="touching session, telemetry, and delivery rules">
 
 ### Session, telemetry, and delivery
 
@@ -495,6 +607,9 @@ and PR language; detailed historical examples are in `HISTORY.md`.
   identity, and honest partial/deferred delivery. It never publishes a false
   clean result after cutting work.
 
+</important>
+<important if="touching git guard and host adapters rules">
+
 ### Git guard and host adapters
 
 - Git command classification has one lexer and one guarded-verb matcher seam.
@@ -511,6 +626,7 @@ and PR language; detailed historical examples are in `HISTORY.md`.
 - Host SDK imports are type-only. Runtime dependencies belong in
   `dependencies`, not `devDependencies`.
 
+</important>
 ## Key source layout
 
 ```text
@@ -543,6 +659,8 @@ Use `module_report` with `blastRadius: true` before and after production edits.
 Use `read_symbol` or `read_enclosing` for bodies. Use LSP navigation as the
 primary code-intelligence path; use AST search for semantic population sweeps.
 
+<important if="tracing a host lifecycle hook or mutation seam">
+
 ## Lifecycle and mutation seams
 
 The four primary host hooks are:
@@ -566,6 +684,7 @@ search, LSP, bridge, bash-view, and authored-write evidence, but name-only
 `ls`/`find` output is not file content. Partial edits consume preflight-approved
 spans and never re-search stale bytes.
 
+</important>
 ## Commands and gates
 
 Use a pinned home/data environment for probes and child processes.
@@ -606,7 +725,7 @@ Never hand-edit generated `.js` or `dist/`. Never use `git stash`, destructive
 resets, or ad hoc double-force worktree removal. A worktree whose `node_modules`
 is a symlink is unlinked (`rm node_modules`) before `git worktree remove`; the
 forced remove follows the link into the shared install (#2704 class). The Bash hook enforces the
-mechanically classifiable subset of these rules.
+mechanically classifiable subset of these rules.<important if="relocating project data, machine state, or telemetry">
 
 ## Data directories and logs
 
@@ -620,6 +739,9 @@ All loggers use `createNdjsonLogger`. Flush the specific logger before reading
 its file. Relevant logs are `latency.log`, `sessionstart.log`, `cascade.log`,
 `review-graph.log`, `read-guard.log`, `actionable-warnings.log`,
 `extension.log`, `tree-sitter.log`, and `dispositions.log`.
+
+</important>
+<important if="building, packaging, or releasing">
 
 ## Build, packaging, and release
 
@@ -635,6 +757,7 @@ peer/dev dependency and must be imported type-only. Lockfiles use the pinned
 npm version. Release notes use one `.changelog/<slug>.md` fragment per PR;
 never edit `CHANGELOG.md` for ordinary PR notes.
 
+</important>
 ## Test requirements
 
 Every logic change has relevant tests. New tests use fake clocks and
@@ -668,7 +791,7 @@ Test authoring screens:
 Governance sweeps use `tests/support/sweep-kit.ts`, explicit source roots, and
 comment/string-blanked source. Every sweep has a real floor and a checked
 exemption reason. New mock exports, fixture shapes, path rules, spawn lanes,
-and durable fields must update their registered-or-fail coverage tests.
+and durable fields must update their registered-or-fail coverage tests.<important if="adding or changing a rule or analyzer">
 
 ## Rule and analyzer contracts
 
@@ -685,6 +808,7 @@ Tree-sitter work uses the shared client and file-major pass. An unsupported or
 blocked grammar produces visible bounded degradation, never a clean empty
 result.
 
+</important>
 ## Commit, prose, issue, and observability conventions
 
 Commit subjects use the repository conventional prefix, imperative mood, issue
@@ -704,7 +828,7 @@ bounded and preserve the identity that distinguishes one degradation from
 another. A phase record's timer wraps only its own call; when two writers
 share one phase literal they share one stated semantic, not one writer's
 meaning attributed to the other's work (#3166 r1: a walk was reported as the
-policy phase).
+policy phase).<important if="triaging or labeling an issue">
 
 ## Issue triage & labels
 
@@ -729,6 +853,9 @@ crash, hang, or host impact; `priority:p2` for normal contained work; and
 `priority:p3` for opportunistic polish or help-wanted work. Use the existing
 labels from `.github/labels.yml`; never create labels only through GitHub.
 
+</important>
+<important if="changing host-mode or rendered UI behavior">
+
 ## Host-mode and UI rules
 
 `ExtensionContext.mode` is read from the event context. Only `tui` supports raw
@@ -737,6 +864,7 @@ modes preserve existing behavior. Raw `Component.render(width)` output goes
 through `fitLine` or `fitLines` from `clients/tui-fit.ts`. Never write directly
 to the terminal from clients.
 
+</important>
 ## Historical context
 
 Detailed incident narratives, completed migrations, closed design threads, and
