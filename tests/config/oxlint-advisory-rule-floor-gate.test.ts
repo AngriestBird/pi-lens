@@ -1,3 +1,4 @@
+// flake-shape: real-process-spawn — the real advisory argv and counter process are the only faithful proof that CI sees a nonzero type-aware rule population
 // Pins the `oxlint advisory` job's rule-count floor guard in lint.yml
 // (#2700 review round 2, F2): with `oxlint-tsgolint` absent, oxlint's
 // `--type-aware` flag degrades SILENTLY (exit 1, zero rules run, zero
