@@ -16,5 +16,7 @@ section: Fixed
   own skip reason (`no-listener`) instead of the generic `ipc-error`, the Stop
   hook prints and records it for `pilens_health` with the remedy (an MCP
   server that was already running owns the previous endpoint name — restart
-  it), a warm-attached session records it once per session, and the orphaned
-  pre-upgrade status file is removed when the new one is written.
+  it), and a warm-attached session records it once per session, now also shown
+  by `/lens-health`. A status file written before the upgrade is simply left
+  alone: it is no longer derived by anything, and on a case-sensitive host that
+  name can belong to a live case-variant sibling workspace.
