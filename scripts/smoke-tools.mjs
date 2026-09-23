@@ -764,10 +764,10 @@ const LSP_FIXTURES = [
 	},
 	{
 		lang: "fsharp",
-		// Fresh ubuntu-latest run 35912920685: fsautocomplete's project build
-		// succeeded, but the server still returned no diagnostic for the seed.
+		// Nightly run 35917565541: the capability probe captured
+		// `file-servers=fsharp`; the dirty probe observed no diagnostic.
 		lspGateExempt:
-			"fsautocomplete returns no diagnostic even after successfully loading the built fixture project (35912920685); see #3311",
+			"server limit: fsautocomplete loaded the fixture (file-servers=fsharp) but published no diagnostic for the seeded defect; dirty probe observed dirtyDiags=0 (35917565541); see #3311",
 		dir: "tests/fixtures/tool-smoke/fsharp",
 		file: "Program.fs",
 		serverHint: "fsautocomplete",
@@ -886,10 +886,10 @@ const LSP_FIXTURES = [
 	},
 	{
 		lang: "elixir",
-		// Fresh ubuntu-latest run 35912920685: ElixirLS remained silent after
-		// compiling the Mix project, so this is a server behavior exemption.
+		// Nightly run 35917565541: the install rung reported
+		// `ensureTool(elixir-ls) → UNAVAILABLE`; no server became ready.
 		lspGateExempt:
-			"ElixirLS publishes no diagnostic for the undefined call even after Mix compilation (35912920685); see #3311",
+			"availability limit: ensureTool(elixir-ls) → UNAVAILABLE and touched=0 health=undefined; no server became ready (35917565541); see #3311",
 		dir: "tests/fixtures/tool-smoke/elixir",
 		file: "bad.ex",
 		serverHint: "elixir-ls",
@@ -898,10 +898,10 @@ const LSP_FIXTURES = [
 	{
 		// Expert is an alternate Elixir primary. Disabling ElixirLS makes this
 		// fixture exercise Expert's managed GitHub binary through initialize.
-		// Fresh ubuntu-latest run 35912920685: Expert remained silent after
-		// compiling the Mix project, so this is a server behavior exemption.
+		// Nightly run 35917565541: the capability probe captured
+		// `file-servers=expert`; the dirty probe observed no diagnostic.
 		lspGateExempt:
-			"Expert publishes no diagnostic for the undefined call even after Mix compilation (35912920685); see #3311",
+			"server limit: Expert loaded the fixture (file-servers=expert) but published no diagnostic for the seeded defect; dirty probe observed dirtyDiags=0 (35917565541); see #3311",
 		lang: "expert",
 		dir: "tests/fixtures/tool-smoke/elixir",
 		file: "bad.ex",
@@ -948,12 +948,11 @@ const LSP_FIXTURES = [
 	},
 	{
 		lang: "fish",
-		// Measured on ubuntu-latest, run 35831976090: fish-lsp installs and spawns
-		// but returns 0 diagnostics for the fixture's unterminated `if` — its
-		// diagnostic set does not cover the block-structure error the fixture
-		// seeds.
+		// Local and ubuntu probes could not establish a ready client. The
+		// documented alternate defects are unknown command, unreachable code,
+		// deprecated syntax, and missing block terminators.
 		lspGateExempt:
-			"fish-lsp publishes no diagnostic for the fixture's unterminated `if`; see #3311",
+			"harness limit: fish-lsp reported touched=undefined health=undefined and no client ready in 30000ms; documented diagnostics include unknown command and missing block terminators; see #3311",
 		dir: "tests/fixtures/tool-smoke/fish",
 		file: "bad.fish",
 		serverHint: "fish-lsp",
@@ -961,11 +960,11 @@ const LSP_FIXTURES = [
 	},
 	{
 		lang: "cmake",
-		// Measured on ubuntu-latest, run 35831976090: cmake-language-server
-		// installs and spawns but returns 0 diagnostics — it offers completion and
-		// hover over the CMake API and does not lint unknown commands.
+		// The local probe resolved cmake-language-server but could not establish
+		// a ready client. Its upstream README documents completion, hover, and
+		// formatting, but no diagnostics provider.
 		lspGateExempt:
-			"cmake-language-server does not lint unknown commands; see #3311",
+			"harness limit: cmake-language-server reported touched=undefined health=undefined and no client ready in 30000ms; upstream documents completion/hover/formatting but no diagnostics; see #3311",
 		dir: "tests/fixtures/tool-smoke/cmake",
 		file: "CMakeLists.txt",
 		serverHint: "cmake-language-server",
@@ -982,11 +981,10 @@ const LSP_FIXTURES = [
 	},
 	{
 		lang: "vue",
-		// Fresh ubuntu-latest run 35912920685: Vue remained silent after the
-		// copied workspace installed TypeScript and Vue dependencies and used a
-		// parser defect, so this is a server behavior exemption.
+		// Nightly run 35917565541: the capability probe captured
+		// `file-servers=vue`; the dirty probe observed no diagnostic.
 		lspGateExempt:
-			"@vue/language-server publishes no diagnostic for the parser defect with workspace TypeScript/Vue dependencies installed (35912920685); see #3311",
+			"server limit: @vue/language-server loaded the fixture (file-servers=vue) but published no diagnostic for the seeded defect; dirty probe observed dirtyDiags=0 (35917565541); see #3311",
 		dir: "tests/fixtures/tool-smoke/vue",
 		file: "App.vue",
 		serverHint: "@vue/language-server",
@@ -994,11 +992,10 @@ const LSP_FIXTURES = [
 	},
 	{
 		lang: "svelte",
-		// Fresh ubuntu-latest run 35912920685: Svelte remained silent after the
-		// copied workspace installed TypeScript and Svelte dependencies, so this
-		// is a server behavior exemption.
+		// Nightly run 35917565541: the capability probe captured
+		// `file-servers=svelte`; the pull probe observed no diagnostic.
 		lspGateExempt:
-			"svelte-language-server publishes no diagnostic for the TypeScript seed with workspace dependencies installed (35912920685); see #3311",
+			"server limit: svelte-language-server loaded the fixture (file-servers=svelte) but published no diagnostic for the seeded defect; pull probe observed no diagnostic (35917565541); see #3311",
 		dir: "tests/fixtures/tool-smoke/svelte",
 		file: "App.svelte",
 		serverHint: "svelte-language-server",
