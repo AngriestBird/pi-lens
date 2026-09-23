@@ -1026,7 +1026,8 @@ function retainSuppressedRows(
 	)
 		? readContentOrUndefined(filePath)
 		: undefined;
-	const spans = content === undefined ? undefined : strictAnchorSpansIn(content);
+	const spans =
+		content === undefined ? undefined : strictAnchorSpansIn(content);
 	const retained = tagged.filter((d) => {
 		const collisions = reported.get(retentionIdentity(d));
 		// Nothing re-reported this finding, so retention rule 2 has nothing to say.

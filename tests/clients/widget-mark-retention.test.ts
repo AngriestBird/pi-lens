@@ -45,6 +45,9 @@ const OTHER_MESSAGE = "Cannot find name 'other'.";
 /** Line 1 is the marked line in every case; line 2 is the unrelated one. */
 const MARKED_LINE = "const value: number = 'bad';";
 const FILE_BODY = `${MARKED_LINE}\nexport const other = 1;\n`;
+const SECOND_MESSAGE = "Type 'string' is not assignable to type 'number' here.";
+/** Two separately markable lines plus an unrelated third the edits touch. */
+const THREE_LINES = `${MARKED_LINE}\nconst other: number = 'also';\nexport const tail = 1;\n`;
 const CANONICAL_MARK = { rule: "typescript:2322", tool: "lsp" };
 const theme = { fg: (_color: string, value: string) => value };
 
@@ -239,19 +242,46 @@ describe("a mark outlives an edit that leaves the marked line unchanged (#3183)"
 
 describe("mode=all never serves a retained row as live (#3183 AC3)", () => {
 	it("reports no live finding once the file's mtime moved past the observation", async () => {
-		// #3158 AC3, re-armed by this PR: exempting the row from the mtime gate
-		// puts it in front of `applyCachedDispositions` in exactly the state that
-		// takes the WEAK fallback (mtime moved after observation), and a weak
-		// filter can never match a STRICT `false-positive` anchor — so the
-		// projection must not hand it over at all.
-		const service = makeService([diag(MESSAGE, 2322, 1)]);
+		// #3158 AC3, re-armed by this PR: retirement rule 1 keeps the row past the
+		// file's mtime, which is exactly the state `applyCachedDispositions` answers
+		// with its WEAK fallback — and a weak filter can never match a STRICT
+		// `false-positive` anchor, so the row comes back KEPT. It is then a live
+		// warning for any `mode=all` pass that re-tallies the kept set, which
+		// happens whenever the filter drops something: here a second marked row
+		// that the project's own rule policy also disables. Hence the projection
+		// must not hand a disposition row over at all.
+		fs.writeFileSync(filePath, THREE_LINES);
+		const service = makeService([
+			diag(MESSAGE, 2322, 1),
+			diag(SECOND_MESSAGE, 2999, 2),
+		]);
 		await probe(service);
 		await markLineOne();
+		const second = await mark({
+			filePath,
+			line: 2,
+			message: SECOND_MESSAGE,
+			rule: "typescript:2999",
+			tool: "lsp",
+			disposition: "false-positive",
+		});
+		expect(second.isError).toBeFalsy();
 		await probe(service);
+		expect(suppressedChip()).toContain("suppressed: 2");
 
-		editFile(`${MARKED_LINE}\nexport const other = 2;\n`);
+		// Only line 3 changes; both marked lines are byte-identical.
+		editFile(
+			THREE_LINES.replace("export const tail = 1;", "export const tail = 2;"),
+		);
 		await reconcileStaleWidgetFiles();
-		expect(suppressedChip()).toContain("suppressed: 1");
+		expect(suppressedChip()).toContain("suppressed: 2");
+		fs.writeFileSync(
+			path.join(cwd, ".pi-lens.json"),
+			JSON.stringify({
+				rules: { typescript: { disable: ["typescript:2999"] } },
+			}),
+		);
+		resetProjectLensConfigCache();
 
 		const all = await modeAll();
 
@@ -289,7 +319,8 @@ describe("the retention identity tells two occurrences of one rule apart (#3183)
 	/** Two `typescript:2322` findings with IDENTICAL normalized messages on
 	 * different lines, whose line TEXT differs — so the strict anchor of the
 	 * marked one does not cover the other, and a later scan still reports it. */
-	const TWO_OCCURRENCES = "const a: number = 'aa';\nconst b: number = 'bbbb';\n";
+	const TWO_OCCURRENCES =
+		"const a: number = 'aa';\nconst b: number = 'bbbb';\n";
 
 	it("keeps the retained row when a scan reports a different occurrence", async () => {
 		// Recurrence: #3183's second half (recorded on the issue as the
@@ -369,7 +400,7 @@ describe("the anchor span travels with the disposition tag (#3183)", () => {
 		) as ReturnType<typeof exportWidgetState>;
 		for (const file of snapshot.files) {
 			for (const row of [...file.diagnostics, ...file.allDiagnostics]) {
-				(row as Record<string, unknown>).anchorSpan = "deadbeef";
+				(row as unknown as Record<string, unknown>).anchorSpan = "deadbeef";
 			}
 		}
 		clearWidgetState();
@@ -423,7 +454,7 @@ describe("the weak arm and pre-anchor rows keep the mtime gate (#3183)", () => {
 		) as ReturnType<typeof exportWidgetState>;
 		for (const file of snapshot.files) {
 			for (const row of [...file.diagnostics, ...file.allDiagnostics]) {
-				delete (row as Record<string, unknown>).anchorSpan;
+				delete (row as unknown as Record<string, unknown>).anchorSpan;
 			}
 		}
 		clearWidgetState();
