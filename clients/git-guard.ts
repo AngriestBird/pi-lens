@@ -153,10 +153,11 @@ function blockerSectionFile(line: string): string | undefined {
  * judged untrusted for the rest of the session. The extra direction also
  * guarded nothing: the one consumer clears only when `blockingFiles` has
  * shrunk to the single file that just dispatched clean, and every section is
- * then that file's by this rule. For the same reason a duplicate section, a
- * duplicate `blockingFiles` entry and an all-blank `blockerContent` need no
- * clause of their own: none of them can make the clear drop a blocker some
- * other file owns.
+ * then that file's by this rule. For the same reason a duplicate section and a
+ * duplicate `blockingFiles` entry need no clause of their own: neither can make
+ * the clear drop a blocker some other file owns. An all-blank `blockerContent`
+ * is NOT in that company — round 1 claimed it was, and the section-count guard
+ * below is why (HIGH-3287-1).
  */
 function blockingProvenance(
 	blockerContent: unknown,
@@ -165,8 +166,13 @@ function blockingProvenance(
 ): string[] | undefined {
 	if (typeof blockerContent !== "string" || blockerContent.length === 0)
 		return undefined;
-	if (!Array.isArray(blockingFiles) || blockingFiles.length === 0)
-		return undefined;
+	// `Array.isArray` only: a non-empty `blockingFiles` is not a separate
+	// requirement (MEDIUM-3287-2, mutation M11 — it stayed green across the whole
+	// seam suite). With at least one section required below, an empty
+	// `blockingFiles` cannot satisfy the ownership test either way, so the clause
+	// decided nothing; the entry type check under it still does, and has its own
+	// red (M8).
+	if (!Array.isArray(blockingFiles)) return undefined;
 	if (
 		blockingFiles.some(
 			(file) => typeof file !== "string" || file.trim().length === 0,
@@ -195,6 +201,14 @@ function blockingProvenance(
 		sectionKeys.push(guardPathKey(file, cwd));
 		inSection = true;
 	}
+	// No line opened a section, so there is nothing for `blockingFiles` to be
+	// checked against and nothing a per-file dispatch may claim authority over.
+	// All-blank-but-non-empty text lands here (HIGH-3287-1, round 1's fail-open):
+	// `[].every(…)` is vacuously true, so treating zero sections as "nothing left
+	// to attribute" let a clean dispatch of an unrelated file DELETE a record
+	// whose `blockingFiles` named a different file, and the gate then answered
+	// `no_record`. Unattributed is not clean.
+	if (sectionKeys.length === 0) return undefined;
 	return sectionKeys.every((key) => provenanceKeys.includes(key))
 		? sectionKeys
 		: undefined;
