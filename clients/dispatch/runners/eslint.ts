@@ -163,7 +163,12 @@ const eslintRunner: RunnerDefinition = {
 
 		const parsed = parseToolRun(
 			"eslint",
-			{ result, output: raw },
+			{
+				result,
+				output: raw,
+				// EXIT TABLE (ESLint 9.10 docs https://eslint.org/docs/latest/use/command-line-interface): 0 clean; 1 findings; 2 fatal findings/error; other nonzero rejected.
+				exitCodes: { ran: [1, 2] },
+			},
 			(rawOutput) => parseEslintJson(rawOutput, ctx.filePath).diagnostics,
 		);
 		if (parsed.skipped) return parsed.skipped;

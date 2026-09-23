@@ -185,7 +185,12 @@ const dartAnalyzeRunner: RunnerDefinition = {
 		const raw = (result.stderr || "") + (result.stdout || "");
 		const parsed = parseToolRun(
 			"dart-analyze",
-			{ result, output: raw },
+			{
+				result,
+				output: raw,
+				// EXIT TABLE (Dart 3.5 measured fixture): 0 clean; 1 findings; 2 error; other nonzero rejected.
+				exitCodes: { ran: [1, 2] },
+			},
 			(out) => parseDartMachineOutput(out, ctx.filePath, cwd),
 		);
 		if (parsed.skipped) return parsed.skipped;

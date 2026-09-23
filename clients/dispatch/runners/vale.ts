@@ -165,8 +165,14 @@ const valeRunner: RunnerDefinition = {
 		// #1948: `parseToolRun` adds the second gate. Vale's `Data.Files`
 		// envelope bug produced exactly this shape — exit 1, a full JSON
 		// report on stdout, zero alerts parsed — and left no record.
-		const run = parseToolRun("vale", { result }, (raw) =>
-			parseValeOutput(raw, ctx.filePath),
+		const run = parseToolRun(
+			"vale",
+			{
+				result,
+				// EXIT TABLE (Vale 3.9.6 docs https://vale.sh/docs/topics/metrics/): 0 clean; 1 findings; 2 error; other nonzero rejected.
+				exitCodes: { ran: [1, 2] },
+			},
+			(raw) => parseValeOutput(raw, ctx.filePath),
 		);
 		if (run.skipped) return run.skipped;
 

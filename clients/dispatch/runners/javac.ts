@@ -104,8 +104,15 @@ const javacRunner: RunnerDefinition = {
 		);
 		const raw = `${result.stdout ?? ""}\n${result.stderr ?? ""}`.trim();
 
-		const parsed = parseToolRun("javac", { result, output: raw }, (output) =>
-			parseJavacOutput(output, ctx.filePath, cwd),
+		const parsed = parseToolRun(
+			"javac",
+			{
+				result,
+				output: raw,
+				// EXIT TABLE (javac 21 docs https://docs.oracle.com/en/java/javase/21/docs/specs/man/javac.html): 0 clean; 1 findings; 2 error; other nonzero rejected.
+				exitCodes: { ran: [1, 2] },
+			},
+			(output) => parseJavacOutput(output, ctx.filePath, cwd),
 		);
 		if (parsed.skipped) return parsed.skipped;
 		return finishParsedRun({

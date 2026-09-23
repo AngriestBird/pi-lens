@@ -117,8 +117,14 @@ const tflintRunner: RunnerDefinition = {
 		// not a clean file. No exit-code table: tflint's nonzero codes are not
 		// verified against a real binary here, so the conservative
 		// nothing-to-parse rule stays the only discriminator.
-		const run = parseToolRun("tflint", { result }, (out) =>
-			parseTflintOutput(out, ctx.filePath),
+		const run = parseToolRun(
+			"tflint",
+			{
+				result,
+				// EXIT TABLE (TFLint 0.52 measured fixture): 0 clean; 1 error; 2 findings; other nonzero rejected.
+				exitCodes: { ran: [1, 2] },
+			},
+			(out) => parseTflintOutput(out, ctx.filePath),
 		);
 		if (run.skipped) return run.skipped;
 

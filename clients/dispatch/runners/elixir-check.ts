@@ -189,7 +189,12 @@ const elixirCheckRunner: RunnerDefinition = {
 		const hasProjectContext = command === "mix";
 		const parsed = parseToolRun(
 			"elixir-check",
-			{ result, output: raw },
+			{
+				result,
+				output: raw,
+				// EXIT TABLE (Elixir 1.16 measured fixture): 0 clean; 1 findings; 2 error; other nonzero rejected.
+				exitCodes: { ran: [1, 2] },
+			},
 			(out) =>
 				parseElixirOutput(out, ctx.filePath, cwd).map((d) =>
 					hasProjectContext

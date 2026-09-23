@@ -33,6 +33,7 @@ const stylelint = createAvailabilityChecker("stylelint", ".cmd");
 // exists to name.
 //
 // #1937 corrected the safety argument that used to sit here: it claimed a
+// EXIT TABLE (Stylelint 16 docs https://stylelint.io/user-guide/cli): 0 clean; 1 findings; 2 fatal/error; other nonzero rejected.
 // fatal stylelint "writes nothing to stdout", which is true but useless,
 // because a stylelint that DID find problems writes nothing to stdout either.
 // `stylelintReport` below is what now separates the two.

@@ -184,8 +184,14 @@ const swiftlintRunner: RunnerDefinition = {
 		// never ran.
 		// SwiftLint exits non-zero on violations — stdout still has the JSON, so
 		// a nonzero exit whose JSON yields nothing is a parser break (#1948).
-		const run = parseToolRun("swiftlint", { result }, (out) =>
-			parseSwiftLintOutput(out, ctx.filePath),
+		const run = parseToolRun(
+			"swiftlint",
+			{
+				result,
+				// EXIT TABLE (SwiftLint 0.56 measured fixture): 0 clean; 1 findings; 2 error; other nonzero rejected.
+				exitCodes: { ran: [1, 2] },
+			},
+			(out) => parseSwiftLintOutput(out, ctx.filePath),
 		);
 		if (run.skipped) return run.skipped;
 

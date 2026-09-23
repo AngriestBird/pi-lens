@@ -179,8 +179,15 @@ const detektRunner: RunnerDefinition = {
 		// read the same concatenated string. A nonzero exit that yields zero
 		// findings out of real output is a parser break, not clean Kotlin.
 		const raw = `${result.stdout ?? ""}${result.stderr ?? ""}`;
-		const run = parseToolRun("detekt", { result, output: raw }, (out) =>
-			parseDetektOutput(out, ctx.filePath, cwd),
+		const run = parseToolRun(
+			"detekt",
+			{
+				result,
+				output: raw,
+				// EXIT TABLE (detekt 1.23 measured fixture): 0 clean; 1 findings; 2 error; other nonzero rejected.
+				exitCodes: { ran: [1, 2] },
+			},
+			(out) => parseDetektOutput(out, ctx.filePath, cwd),
 		);
 		if (run.skipped) return run.skipped;
 
