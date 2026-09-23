@@ -558,7 +558,10 @@ describe("git-guard", () => {
 			runtime.projectRoot = env.tmpDir;
 			runtime.setTelemetryIdentity({ sessionId: "session-A" });
 			const cache = new CacheManager(false);
-			const summary = productionSummary(file, ["alpha is unsafe", "beta is unsafe"]);
+			const summary = productionSummary(file, [
+				"alpha is unsafe",
+				"beta is unsafe",
+			]);
 			runtime.recordInlineBlockers(file, summary);
 			runtime.updateGitGuardStatus(true, summary);
 			syncGitGuardRecord(runtime, cache, env.tmpDir, file);
