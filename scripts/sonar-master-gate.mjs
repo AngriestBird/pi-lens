@@ -1,9 +1,8 @@
 #!/usr/bin/env node
 /**
  * Read SonarCloud's master quality gate and unresolved vulnerabilities once.
- * A gate error is a nightly quality failure; inability to read SonarCloud is
- * an outage, not evidence of a bad master, so it is reported as a warning and
- * exits successfully.
+ * A gate error is a nightly quality failure; transport outages are reported as
+ * warnings, while API and response-contract failures fail the nightly check.
  */
 
 const PROJECT_KEY = "apmantza_pi-lens";
@@ -11,6 +10,8 @@ const BRANCH = "master";
 const REQUEST_TIMEOUT_MS = 20_000;
 const MAX_RENDERED_CONDITIONS = 50;
 const MAX_RENDERED_FINDINGS = 50;
+
+class ApiFailure extends Error {}
 
 function apiUrl(pathname, params) {
 	const base = process.env.SONAR_API_BASE_URL ?? "https://sonarcloud.io/api";
@@ -26,8 +27,19 @@ async function readJson(url, signal) {
 		headers: { accept: "application/json" },
 	});
 	if (!response.ok)
-		throw new Error(`${response.status} ${response.statusText}`);
-	return response.json();
+		throw new ApiFailure(`${response.status} ${response.statusText}`);
+	try {
+		return await response.json();
+	} catch {
+		throw new ApiFailure(`invalid JSON from ${url.pathname}`);
+	}
+}
+
+function validateGate(gate) {
+	if (typeof gate?.projectStatus?.status !== "string")
+		throw new ApiFailure("missing projectStatus.status");
+	if (!Array.isArray(gate.projectStatus.conditions))
+		throw new ApiFailure("missing conditions");
 }
 
 function conditionText(condition) {
@@ -67,13 +79,14 @@ async function main() {
 				controller.signal,
 			),
 		]);
+		validateGate(gate);
 		const failingConditions = (gate.projectStatus?.conditions ?? []).filter(
 			(condition) => condition.status === "ERROR",
 		);
 		const findings = issues.issues ?? [];
 		if (gate.projectStatus?.status !== "OK") {
 			console.error(
-				`SonarCloud master quality gate: ${gate.projectStatus?.status ?? "UNKNOWN"}`,
+				`✗ SonarCloud master quality gate: ${gate.projectStatus.status}`,
 			);
 			if (failingConditions.length === 0)
 				console.error("Failing conditions: none reported by SonarCloud");
@@ -101,8 +114,12 @@ async function main() {
 		);
 		return 0;
 	} catch (error) {
+		if (error instanceof ApiFailure) {
+			console.error(`✗ SonarCloud API failure (${error.message})`);
+			return 1;
+		}
 		console.error(
-			`⚠ SonarCloud master quality gate unavailable (${error?.message ?? error}); treating outage as non-quality failure.`,
+			`⚠ SonarCloud master quality gate unreachable (${error?.message ?? error}); treating outage as non-quality failure.`,
 		);
 		return 0;
 	} finally {

@@ -28,10 +28,10 @@ function fixture(name: string) {
 	return readFileSync(resolve(FIXTURES, name), "utf8");
 }
 
-async function runWithFixtures(gate: string, issues: string) {
+async function runWithFixtures(gate: string, issues: string, gateStatus = 200) {
 	const server = createServer((request, response) => {
 		const body = request.url?.startsWith("/qualitygates/") ? gate : issues;
-		response.writeHead(200, { "content-type": "application/json" });
+		response.writeHead(gateStatus, { "content-type": "application/json" });
 		response.end(body);
 	});
 	servers.push(server);
@@ -78,6 +78,7 @@ describe("sonar-master-gate real entry point (#3319)", () => {
 			fixture("open-vulnerabilities.json"),
 		);
 		expect(result.status).toBe(1);
+		expect(result.stderr).toContain("✗ SonarCloud master quality gate: ERROR");
 		expect(result.stderr).toContain(
 			"new_vulnerabilities: actual 2, threshold 0",
 		);
@@ -90,8 +91,42 @@ describe("sonar-master-gate real entry point (#3319)", () => {
 		const result = await run({ SONAR_API_BASE_URL: "http://127.0.0.1:1" });
 		expect(result.status).toBe(0);
 		expect(result.stderr).toContain(
-			"⚠ SonarCloud master quality gate unavailable",
+			"⚠ SonarCloud master quality gate unreachable",
 		);
 		expect(result.stderr).toContain("treating outage as non-quality failure");
+	});
+
+	it("fails distinctly for an HTTP API failure (#3322 H-3322-1)", async () => {
+		const result = await runWithFixtures(
+			fixture("ok-gate.json"),
+			fixture("open-vulnerabilities.json"),
+			500,
+		);
+		expect(result.status).toBe(1);
+		expect(result.stderr).toContain(
+			"✗ SonarCloud API failure (500 Internal Server Error)",
+		);
+		expect(result.stderr).not.toContain("unreachable");
+	});
+
+	it("fails distinctly for malformed JSON (#3322 H-3322-1)", async () => {
+		const result = await runWithFixtures(
+			"not-json",
+			fixture("open-vulnerabilities.json"),
+		);
+		expect(result.status).toBe(1);
+		expect(result.stderr).toContain("✗ SonarCloud API failure (invalid JSON");
+	});
+
+	it.each([
+		["missing projectStatus.status", '{"projectStatus":{"conditions":[]}}'],
+		["missing conditions", '{"projectStatus":{"status":"OK"}}'],
+	])("fails distinctly for a gate shape error: %s", async (_reason, gate) => {
+		const result = await runWithFixtures(
+			gate,
+			fixture("open-vulnerabilities.json"),
+		);
+		expect(result.status).toBe(1);
+		expect(result.stderr).toContain(`✗ SonarCloud API failure (${_reason})`);
 	});
 });
