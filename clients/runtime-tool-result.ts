@@ -2455,7 +2455,17 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 			source: "autofix",
 			dbg,
 		});
-		if (resolvedChanged === path.resolve(filePath)) continue;
+		// Workspace-edit paths come from fileURLToPath and are normally absolute,
+		// so the turn-state cwd is inert for those values. Keep it in the resolve
+		// call because the producer's contract is cwd-relative URI resolution, and
+		// let pathsEqual ask the filesystem-aware path identity question (#3294).
+		if (
+			pathsEqual(
+				path.resolve(turnStateCwd, changedFile),
+				path.resolve(filePath),
+			)
+		)
+			continue;
 		try {
 			const content = nodeFs.readFileSync(resolvedChanged, "utf-8");
 			const lineCount = content.split("\n").length;
