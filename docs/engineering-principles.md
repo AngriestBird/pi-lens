@@ -1,8 +1,6 @@
-# Engineering principles (vendored copy)
+# Engineering principles
 
 Source of truth: https://github.com/apmantza/engineering-principles (private), file PRINCIPLES.md. Verbatim copy; the repo wins on drift. Project-level AGENTS.md / CLAUDE.md add the project catalog and win on conflict.
-
-# Engineering principles
 
 Project-neutral rules distilled from the pi-lens contracts, playbooks and merge
 train (2026-08 to 2026-09). Each rule is imperative and carries the reason it
