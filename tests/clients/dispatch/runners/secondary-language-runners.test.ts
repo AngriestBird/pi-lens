@@ -629,19 +629,15 @@ describe("secondary language fallback runners", () => {
 		// asserting a platform. This is the over-merge guard: an unconditional
 		// fold reds it on ubuntu, and dropping the fold reds it on the
 		// windows-vitest and macOS lanes.
-		const observed = await dispatchOutcome(
-			"elixir-check",
-			"case-variant",
-			{
-				error: null,
-				status: 1,
-				stdout: "",
-				stderr: [
-					"    error: undefined function boom/0",
-					"    └─ lib/App.ex:4:5: App.greet/0",
-				].join("\n"),
-			},
-		);
+		const observed = await dispatchOutcome("elixir-check", "case-variant", {
+			error: null,
+			status: 1,
+			stdout: "",
+			stderr: [
+				"    error: undefined function boom/0",
+				"    └─ lib/App.ex:4:5: App.greet/0",
+			].join("\n"),
+		});
 		expect(
 			observed.diagnostics.filter((d) => d.id === "elixir-check-error-4-5"),
 		).toHaveLength(HOST_FOLDS_PATH_CASE ? 1 : 0);
