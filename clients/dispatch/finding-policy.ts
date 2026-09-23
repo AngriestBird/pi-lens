@@ -21,11 +21,13 @@
 
 import {
 	applyDispositions,
+	applyDispositionsMultiFile,
 	hasAnyDispositionMarks,
 	type DispositionCandidate,
 } from "../diagnostic-dispositions.js";
 import type { FileRole } from "../file-role.js";
 import type { LSPDiagnostic } from "../lsp/client.js";
+import type { ProjectDiagnostic } from "../project-diagnostics/types.js";
 import { loadPiLensProjectConfig } from "../project-lens-config.js";
 import { retagAuxiliaryDiagnostics } from "./auxiliary-lsp.js";
 import { applyInlineSuppressions } from "./inline-suppressions.js";
@@ -389,4 +391,80 @@ export function applyLspFindingPolicy(
 		return diagnostics.filter((d) => !dropped.has(d));
 	};
 	return { kept: survivorsOf(kept), inlineKept: survivorsOf(inlineKept) };
+}
+
+/**
+ * #1617: turn_end reads gitleaks/govulncheck/trivy straight from their
+ * session-scan caches and formats them into advisory/blocker text — a
+ * reporting lane parallel to (and, before this fix, entirely bypassing)
+ * `dispatcher.ts:924`'s `applyDispositions` filter. An agent-marked
+ * false-positive/won't-fix on one of these findings never suppressed it
+ * here, so it re-reported on every turn.
+ *
+ * Filters `findings` through the SAME anchor derivation the dispatch path
+ * and `lens_diagnostics mode=full` use (`applyDispositionsMultiFile` in
+ * `diagnostic-dispositions.ts`), keyed off each lane's own canonical
+ * `ProjectDiagnostic` adapter (`toDiagnostic`) — the exact tool/rule/message
+ * identity `lens_diagnostics` already surfaces and `lens_diagnostic_mark`
+ * already anchors a mark against, not a second, cloned identity that would
+ * silently diverge from what the agent actually marked.
+ *
+ * Returns the surviving findings plus how many were dropped, so a caller can
+ * still surface a "suppressed by disposition: N" trace (the #1616
+ * suppressed-bucket rule — a security finding must never vanish with no
+ * trace, even when the disposition that dropped it is working as intended).
+ */
+export function filterFindingsByDisposition<F>(
+	findings: F[],
+	cwd: string,
+	toDiagnostic: (finding: F) => ProjectDiagnostic,
+): { kept: F[]; suppressed: number } {
+	if (findings.length === 0) return { kept: findings, suppressed: 0 };
+	// #3248: every `(tool, rule)` spelling a mark against these findings can
+	// carry, not just the canonical one. NONE of these turn-end surfaces prints
+	// a tool — knip renders `<file>:<line> — <type>: <name>`, dead-code
+	// `unused <kind> <name>`, the security lanes `Potential secret: <rule>` —
+	// so an agent marking from what it was SHOWN has no tool to pass, and
+	// `lens_diagnostic_mark`'s `tool` parameter is optional. Honouring only the
+	// spelling `lens_diagnostics` happens to show is the #3088 non-convergence,
+	// and it is fixed HERE, once, for every caller of this helper rather than
+	// per lane. Widening is safe for the blocking members because a
+	// `semantic: "blocking"` finding can still only be dropped by the STRICT,
+	// content-bound false-positive anchor, which keeps binding the normalized
+	// message and the flagged line's content.
+	// The expanded candidate is a `DispositionCandidate` with a path, NOT a
+	// `ProjectDiagnostic`: the tool-omitted spelling has no `tool`, which that
+	// type requires. Only the anchor derivation reads it.
+	const candidates = findings.flatMap((finding) => {
+		const diagnostic = toDiagnostic(finding);
+		return renderedRuleIdentities(diagnostic).map((identity) => ({
+			finding,
+			candidate: {
+				filePath: diagnostic.filePath,
+				message: diagnostic.message,
+				...(diagnostic.line !== undefined && { line: diagnostic.line }),
+				...(diagnostic.semantic !== undefined && {
+					semantic: diagnostic.semantic,
+				}),
+				...(identity.tool !== undefined && { tool: identity.tool }),
+				...(identity.rule !== undefined && { rule: identity.rule }),
+			} satisfies DispositionCandidate & { filePath: string },
+		}));
+	});
+	const survivors = new Set(
+		applyDispositionsMultiFile(
+			candidates.map((c) => c.candidate),
+			cwd,
+			(d) => d.filePath,
+		),
+	);
+	const disposed = new Set<F>();
+	for (const candidate of candidates) {
+		if (!survivors.has(candidate.candidate)) disposed.add(candidate.finding);
+	}
+	const kept =
+		disposed.size === 0
+			? findings
+			: findings.filter((finding) => !disposed.has(finding));
+	return { kept, suppressed: findings.length - kept.length };
 }

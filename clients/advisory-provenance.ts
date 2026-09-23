@@ -671,7 +671,9 @@ export interface FindingFreshnessSource<T> {
 	onMissing?: FindingMissingPolicy | undefined;
 }
 
-type SourceFinding<X> = X extends FindingFreshnessSource<infer T> ? T : never;
+/** The finding type one gate source carries, recovered per store key. */
+export type SourceFinding<X> =
+	X extends FindingFreshnessSource<infer T> ? T : never;
 
 /**
  * Delivery-seam wrapper with the #1622 freshness verdict, over one or more
