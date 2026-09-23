@@ -24,7 +24,18 @@ vi.mock("../../../../clients/go-client.js", () => ({
 	},
 }));
 
-vi.mock("../../../../clients/safe-spawn.js", () => ({ safeSpawnAsync }));
+// #2281 / the whole-module-mock rule: spread `importOriginal` rather than
+// replacing the module surface. The dispatch-level cells below import the real
+// `dispatchForFile`, which widens the production surface this test file
+// reaches, and a bare factory would silently drop every other `safe-spawn`
+// export the dispatcher touches. `tests/config/vi-mock-export-sweep.test.ts`
+// is the gate that caught exactly that when the dispatch cells were added.
+vi.mock("../../../../clients/safe-spawn.js", async (importOriginal) => ({
+	...(await importOriginal<
+		typeof import("../../../../clients/safe-spawn.js")
+	>()),
+	safeSpawnAsync,
+}));
 
 function makeCtx(filePath: string, cwd = process.cwd()) {
 	return {
