@@ -1355,24 +1355,51 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"build itself still runs inside the hook.",
 		owner: "#2523 slice 2",
 	},
-	// #1892: the composer awaits the govulncheck lane's `collect`. Unlike the
-	// secrets lane's below, this one has NOTHING to bound: it reads one already-
-	// memoized `readScannerCache` entry and returns the freshness declaration.
-	// The `Promise` is the `TurnEndLane` interface's shape, not work — one
-	// lane's collect does classify (and IS bounded, inside that lane), so the
-	// stage is async for every lane. Wrapping a synchronous cache read in
-	// `bounded()` would register a turn_end budget spend against a
-	// `Promise.resolve`, which is a false claim about where the turn's time can
-	// go. This exemption is the honest form: if this lane ever gains real work,
-	// the key changes and the sweep re-flags it.
+	// #1892 + #3274: the composer awaits the govulncheck lane's `collect`. This
+	// entry is a SYNC-READ ADMISSION, not a "nothing happens here" exemption —
+	// #3273 review H3273-1 caught the first version claiming "no I/O", which was
+	// false. What is true:
+	//
+	//   - The await itself suspends on nothing: `collect` is not `async` and
+	//     returns `Promise.resolve(...)`.
+	//   - Evaluating the call runs `CacheManager.readCache("govulncheck")`
+	//     (`clients/cache-manager.ts:181-206`) on the turn's FIRST read of that
+	//     store: two `fs.existsSync` plus two `readFileSync` + `JSON.parse`.
+	//     That is real blocking work on the turn_end path.
+	//   - `bounded()` cannot bound it, and no rearrangement of this call site
+	//     can. The read completes during ARGUMENT EVALUATION, before `bounded()`
+	//     is ever handed a promise. Probed against the built seam with an
+	//     already-aborted signal and `ms: 0`: `bounded()` returned `undefined`
+	//     and the read had already parsed its JSON. A wrapper here would
+	//     register a turn_end budget that can never be spent, which is a worse
+	//     false claim than the one it replaced.
+	//   - The cost is PRE-EXISTING and unchanged by the extraction: before
+	//     #3273 the identical `readCache` ran as a bare statement two lines
+	//     above this await, where no sweep population could see it at all (this
+	//     suite scans awaits and hand-rolled races, not synchronous calls). The
+	//     neighbouring `#1892` secrets entry below carries the same cost for the
+	//     `gitleaks` store and predates #3273.
+	//   - It stays at ONE read per store per delivery, which IS executable:
+	//     `reads trivy ONCE although the lane and the composer both need it`
+	//     asserts `perStore("govulncheck") === 1`.
+	//
+	// #3274 owns closing it (an async/admitted cache seam, plus a population
+	// this suite can red on), and retiring both lane entries when it lands.
 	"clients/runtime-turn.ts#400606a9~3e6599a2": {
 		family: "hook-await",
 		site: "turn_end",
 		reason:
-			"The govulncheck lane's `collect`: one memoized cache read and a " +
-			"freshness declaration, no I/O and no spawn. Async only because the " +
-			"TurnEndLane stage is; there is no operation here to bound.",
-		owner: "#1892",
+			"SYNC-READ ADMISSION: the await settles immediately (`collect` is not " +
+			"async), but evaluating it runs `CacheManager.readCache('govulncheck')` " +
+			"— 2 existsSync + 2 readFileSync/JSON.parse on the turn's first read of " +
+			"that store. `bounded()` cannot bound it: the read completes during " +
+			"argument evaluation, before bounded() receives a promise (probed with " +
+			"an already-aborted signal — bounded returned undefined, the read had " +
+			"already parsed). Pre-existing and unchanged: the same read ran as a " +
+			"bare statement two lines above on master, outside this sweep's " +
+			"populations. Capped at one read per store per delivery by `reads " +
+			"trivy ONCE although the lane and the composer both need it`.",
+		owner: "#3274",
 	},
 	"clients/runtime-turn.ts#5b570c81~b2f3321c": {
 		family: "hook-await",
