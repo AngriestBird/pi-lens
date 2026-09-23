@@ -206,7 +206,11 @@ function render(
 	const deliveredLocationKeys = new Set(
 		sessionSecrets.map((f) => secretLocationKey(f.file, f.line)),
 	);
-	const blockerParts: string[] = [];
+	// Lane-local accumulators, deliberately NOT named after the turn's tiers:
+	// `blockerParts`/`staleSecretParts` are the composer's arrays, and a lane
+	// that pushed into one would be a render seam the `@delivery-surface:` tag
+	// scan cannot see (`tests/config/turn-end-lane-boundaries.test.ts`).
+	const blockerSections: string[] = [];
 	if (sessionSecrets.length) {
 		// Fold in ast-grep provenance ONLY where it coincides with a session
 		// secret — don't promote ast-grep-only findings out of their advisory
@@ -229,7 +233,7 @@ function render(
 		if (enriched.length > shown.length) {
 			report += `  … and ${enriched.length - shown.length} more\n`;
 		}
-		blockerParts.push(report);
+		blockerSections.push(report);
 	}
 
 	// Demoted secrets are addressed by FILE, never by line — the line is the one
@@ -252,7 +256,7 @@ function render(
 			staleSecretEntries.map((e) => [`${e.file}|${e.rule}|${e.source}`, e]),
 		).values(),
 	];
-	const staleSecretParts: string[] = [];
+	const staleSections: string[] = [];
 	if (staleSecrets.length) {
 		const shown = staleSecrets.slice(0, 5);
 		let report =
@@ -264,12 +268,12 @@ function render(
 		if (staleSecrets.length > shown.length) {
 			report += `  … and ${staleSecrets.length - shown.length} more\n`;
 		}
-		staleSecretParts.push(report);
+		staleSections.push(report);
 	}
 
 	return {
-		blockerParts,
-		staleSecretParts,
+		blockerParts: blockerSections,
+		staleSecretParts: staleSections,
 		dispositionSuppressed: kept.suppressed,
 		deliveredLocationKeys,
 	};
