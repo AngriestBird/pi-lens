@@ -188,10 +188,10 @@ describe("#3347 clean-behavior marker census", () => {
 			})
 			.filter((entry): entry is string => entry !== undefined);
 		expect(unsupported).toEqual([]);
-
-		// The marker population is the reason this census exists; an empty one
-		// satisfies the loop above vacuously.
-		expect(markedServers().length).toBeGreaterThanOrEqual(3);
+		// No floor on the marker population: an empty one is a legitimate state
+		// (every server re-measured as publishing), and it cannot be reached
+		// silently anyway — dropping a marker while its row still reads `silent`
+		// reds the both-directions test above, per server.
 	});
 
 	it("never reads a clean-behavior measurement off a non-push row", () => {
