@@ -1116,6 +1116,19 @@ export type DegradationKind =
 	| "web-tree-sitter-load-failed"
 	| "widget-disposition-reconcile-fallback"
 	/**
+	 * #3183: a file whose widget record holds a `false-positive`-marked row could
+	 * not be READ when the store needed its content to ask whether the marked
+	 * line still exists ({@link WidgetDiagnostic.anchorSpan}). With no content
+	 * there is no span to ask, so that file's suppressed rows fall back to the
+	 * pre-#3183 rules — the per-entry mtime gate and the coarse retention
+	 * identity — which can retire a mark that still stands, and the footer's
+	 * `suppressed: N` chip then under-counts the file. Bounded at one record per
+	 * file per session (`recordDegradationOnce`), never one per row or one per
+	 * sweep; subject is the file path. See `readContentOrUndefined` in
+	 * `clients/widget-state.ts`.
+	 */
+	| "widget-mark-anchor-unreadable"
+	/**
 	 * #3158: a file's disposition-tagged widget rows exceeded
 	 * `MAX_RETAINED_SUPPRESSED_PER_FILE`, so the footer's `suppressed: N` chip
 	 * under-counts that file by the stated number until its content changes.
