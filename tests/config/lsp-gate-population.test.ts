@@ -20,6 +20,7 @@ import { readFileSync } from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { assertNonEmptyScan } from "../support/sweep-kit.js";
 import {
 	formatGateCensus,
 	LSP_FIXTURES,
@@ -43,6 +44,12 @@ const fixtures = LSP_FIXTURES as Fixture[];
 describe("LSP clean-gate population (#3217)", () => {
 	it("gives every gate-eligible fixture exactly one of lspGate / lspGateExempt", () => {
 		const { eligible } = lspGatePopulation() as { eligible: Fixture[] };
+		// A floor, not a pin: if the fixture table or the eligibility filter ever
+		// yields (almost) nothing, every assertion below passes on an empty set
+		// and the guard reads clean while covering nothing. 45 eligible fixtures
+		// on 2026-09-23; the floor is deliberately well under that so ordinary
+		// fixture churn never touches it.
+		assertNonEmptyScan("LSP gate-eligible fixtures", eligible.length, 30);
 		const undecided = eligible
 			.filter(
 				(fixture) =>

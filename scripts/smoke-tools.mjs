@@ -684,8 +684,14 @@ const LSP_FIXTURES = [
 	},
 	{
 		lang: "rust",
-		lspGate: true,
-		lspGateMarker: 'let v: Vec<i32> = "not a vector";',
+		// Measured on ubuntu-latest, run 35831976090: rust-analyzer's binary
+		// installs, but the same run's handshake layer reports "no client ready in
+		// 30000ms" and the gate row reads 0 diagnostics — it is still loading the
+		// cargo workspace when the gate's 8s diagnostics wait expires. Raising the
+		// gate's budget for one server is the wrong lever; the row needs a warm
+		// server, not a longer wait.
+		lspGateExempt:
+			"rust-analyzer is still loading the cargo workspace at the gate's wait budget; see #3217 follow-up",
 		dir: "tests/fixtures/tool-smoke/rust",
 		file: "src/main.rs",
 		serverHint: "rust-analyzer",
@@ -873,9 +879,13 @@ const LSP_FIXTURES = [
 	{
 		// Expert is an alternate Elixir primary. Disabling ElixirLS makes this
 		// fixture exercise Expert's managed GitHub binary through initialize.
+		// Measured on ubuntu-latest, run 35831976090: Expert's managed binary
+		// handshakes but publishes nothing for the fixture — unlike elixir-ls it
+		// needs a compiled mix project, which the bare fixture is not. `elixir`
+		// above covers ElixirLS on the same source.
+		lspGateExempt:
+			"Expert publishes no diagnostics without a compiled mix project; see #3217 follow-up",
 		lang: "expert",
-		lspGate: true,
-		lspGateMarker: "undefined_function()",
 		dir: "tests/fixtures/tool-smoke/elixir",
 		file: "bad.ex",
 		serverHint: "Expert (alternate of ElixirLS)",
@@ -921,8 +931,12 @@ const LSP_FIXTURES = [
 	},
 	{
 		lang: "fish",
-		lspGate: true,
-		lspGateMarker: "echo missing end",
+		// Measured on ubuntu-latest, run 35831976090: fish-lsp installs and spawns
+		// but returns 0 diagnostics for the fixture's unterminated `if` — its
+		// diagnostic set does not cover the block-structure error the fixture
+		// seeds.
+		lspGateExempt:
+			"fish-lsp publishes no diagnostic for the fixture's unterminated `if`; see #3217 follow-up",
 		dir: "tests/fixtures/tool-smoke/fish",
 		file: "bad.fish",
 		serverHint: "fish-lsp",
@@ -930,8 +944,11 @@ const LSP_FIXTURES = [
 	},
 	{
 		lang: "cmake",
-		lspGate: true,
-		lspGateMarker: "not_a_cmake_command()",
+		// Measured on ubuntu-latest, run 35831976090: cmake-language-server
+		// installs and spawns but returns 0 diagnostics — it offers completion and
+		// hover over the CMake API and does not lint unknown commands.
+		lspGateExempt:
+			"cmake-language-server does not lint unknown commands; see #3217 follow-up",
 		dir: "tests/fixtures/tool-smoke/cmake",
 		file: "CMakeLists.txt",
 		serverHint: "cmake-language-server",
@@ -962,8 +979,13 @@ const LSP_FIXTURES = [
 	},
 	{
 		lang: "svelte",
-		lspGate: true,
-		lspGateMarker: '"not a number"',
+		// #3217 F4, the one row where dev box and runner disagree: svelte-language-
+		// server returns 2 primary findings for this fixture on a dev box and 0 on
+		// ubuntu-latest (run 35831976090), where the same run's handshake layer
+		// still reports the server as replying. Gating it on the local result
+		// alone would red the nightly, which is the exact failure F4 names.
+		lspGateExempt:
+			"svelte-language-server serves the finding on a dev box but not on ubuntu-latest (run 35831976090); see #3217 follow-up",
 		dir: "tests/fixtures/tool-smoke/svelte",
 		file: "App.svelte",
 		serverHint: "svelte-language-server",
