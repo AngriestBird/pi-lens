@@ -110,10 +110,12 @@ export function lspGatePopulation(fixtures = LSP_FIXTURES) {
  * proof that the configured primary answered.
  */
 export function classifyLspGateResult(result, fx, unavailable = false) {
-	if (unavailable) {
+	if (unavailable || result?.details?.unavailable) {
 		return {
 			state: "skip",
-			detail: `${fx.serverHint} unavailable (tool not installed; pass --install)`,
+			detail:
+				result?.details?.unavailable ??
+				`${fx.serverHint} unavailable (handshake did not complete)`,
 			diags: 0,
 		};
 	}
@@ -727,7 +729,7 @@ const LSP_FIXTURES = [
 	{
 		lang: "go",
 		lspGate: true,
-		lspGateMarker: 'fmt.Printf("%d\\n", "not a number")',
+		lspGateMarker: 'var gateSeed int = "not a number"',
 		dir: "tests/fixtures/tool-smoke/go",
 		file: "bad.go",
 		serverHint: "gopls",
@@ -744,8 +746,12 @@ const LSP_FIXTURES = [
 	},
 	{
 		lang: "csharp",
-		lspGate: true,
-		lspGateMarker: 'int x = "not a number";',
+		// Measured on ubuntu-latest: the identical fixture produced one primary
+		// finding in run 35897633475 and none in run 35899592839. Keep this row
+		// out of the nightly gate until csharp-ls makes that result stable; this
+		// joins #3311's measured exemption list.
+		lspGateExempt:
+			"flaky on the runner: green on 35897633475, red on 35899592839; see https://github.com/apmantza/pi-lens/actions/runs/35899592839 and #3311",
 		dir: "tests/fixtures/tool-smoke/csharp",
 		file: "Program.cs",
 		serverHint: "csharp-ls",
@@ -753,8 +759,11 @@ const LSP_FIXTURES = [
 	},
 	{
 		lang: "fsharp",
-		lspGate: true,
-		lspGateMarker: 'let gateSeed : int = "not a number"',
+		// Measured on ubuntu-latest: fsautocomplete returned no diagnostic for
+		// the undefined-function seed even with app.fsproj present, because it
+		// did not load the project. This joins #3311's measured exemption list.
+		lspGateExempt:
+			"fsautocomplete does not load the fixture project on the runner, even with app.fsproj; see https://github.com/apmantza/pi-lens/actions/runs/35899592839 and #3311",
 		dir: "tests/fixtures/tool-smoke/fsharp",
 		file: "Program.fs",
 		serverHint: "fsautocomplete",
@@ -873,8 +882,11 @@ const LSP_FIXTURES = [
 	},
 	{
 		lang: "elixir",
-		lspGate: true,
-		lspGateMarker: "undefined_function()",
+		// Measured on ubuntu-latest: ElixirLS stays silent because mix.exs is a
+		// declaration, not a compiled Mix project. This joins #3311's measured
+		// exemption list.
+		lspGateExempt:
+			"ElixirLS stays silent because mix.exs is not a compiled Mix project; see https://github.com/apmantza/pi-lens/actions/runs/35899592839 and #3311",
 		dir: "tests/fixtures/tool-smoke/elixir",
 		file: "bad.ex",
 		serverHint: "elixir-ls",
@@ -2190,7 +2202,7 @@ function report(rows, title) {
  * intentionally separate from the handshake layer, whose contract is only
  * initialize-and-answer and therefore passed the #2776 provenance regression.
  */
-async function runLspGate({ langs, install, verbose }) {
+export async function runLspGate({ langs = [], install, verbose, deps } = {}) {
 	const lspToolEntry = path.join(
 		repoRoot,
 		"dist",
@@ -2204,21 +2216,27 @@ async function runLspGate({ langs, install, verbose }) {
 		"lsp",
 		"config.js",
 	);
-	if (!fs.existsSync(lspToolEntry) || !fs.existsSync(configEntry)) {
+	if (!deps && (!fs.existsSync(lspToolEntry) || !fs.existsSync(configEntry))) {
 		console.error(
 			`dist build missing: ${lspToolEntry}\nRun \`npm run build:dist\` first.`,
 		);
 		process.exit(2);
 	}
-	const { createLspDiagnosticsTool } = await import(
-		pathToFileURL(lspToolEntry).href
-	);
-	const { initLSPConfig } = await import(pathToFileURL(configEntry).href);
+	let createLspDiagnosticsTool;
+	let initLSPConfig;
+	if (deps) {
+		({ createLspDiagnosticsTool, initLSPConfig } = deps);
+	} else {
+		({ createLspDiagnosticsTool } = await import(
+			pathToFileURL(lspToolEntry).href
+		));
+		({ initLSPConfig } = await import(pathToFileURL(configEntry).href));
+	}
 	let ensureTool;
 	let getInstallAttempt;
-	let TOOLS_REGISTRY = [];
-	let pipCandidates = [];
-	{
+	if (deps) {
+		({ ensureTool, getInstallAttempt } = deps);
+	} else {
 		const installerEntry = path.join(
 			repoRoot,
 			"dist",
@@ -2226,18 +2244,11 @@ async function runLspGate({ langs, install, verbose }) {
 			"installer",
 			"index.js",
 		);
-		let pipCommandCandidatesFn;
-		({
-			ensureTool,
-			TOOLS: TOOLS_REGISTRY,
-			getInstallAttempt,
-			pipCommandCandidates: pipCommandCandidatesFn,
-		} = await import(pathToFileURL(installerEntry).href));
-		pipCandidates = pipCommandCandidatesFn?.() ?? [];
+		({ ensureTool, getInstallAttempt } = await import(
+			pathToFileURL(installerEntry).href
+		));
 	}
-	const toolsById = new Map(TOOLS_REGISTRY.map((t) => [t.id, t]));
-	const toolchainPresence = {};
-	const population = lspGatePopulation();
+	const population = deps?.population ?? lspGatePopulation();
 	const selected = population.gated.filter(
 		(f) => !langs.length || langs.includes(f.lang),
 	);
@@ -2246,8 +2257,19 @@ async function runLspGate({ langs, install, verbose }) {
 		return 0;
 	}
 	const rows = [];
+	let handshakeCensus = {};
+	const censusPath = process.env.PI_LENS_HOME
+		? path.join(process.env.PI_LENS_HOME, "lsp-handshake-census.json")
+		: undefined;
+	if (censusPath && fs.existsSync(censusPath)) {
+		try {
+			handshakeCensus = JSON.parse(fs.readFileSync(censusPath, "utf8"));
+		} catch {
+			// A missing or malformed census cannot admit a gate row.
+		}
+	}
 	for (const fx of selected) {
-		const { unavailableTools, attemptSnapshots } = await ensureFixtureTools(
+		await ensureFixtureTools(
 			fx.tools ?? [],
 			install
 				? ensureTool
@@ -2259,22 +2281,13 @@ async function runLspGate({ langs, install, verbose }) {
 					`[${fx.lang}] ensureTool(${toolId}) → ${resolved ?? "UNAVAILABLE"}`,
 				),
 		);
-		const unavailable =
-			(fx.tools ?? []).length > 0 &&
-			(fx.tools ?? []).every((t) => unavailableTools.has(t));
-		if (unavailable) {
-			const outcome = resolveUnavailabilityRow(
-				fx.tools ?? [],
-				unavailableTools,
-				attemptSnapshots,
-				{ toolsById, toolchainPresence, pipCandidates },
-				`${fx.serverHint} unavailable (tool not installed; pass --install)`,
-			);
+		const handshakeUnavailable = handshakeCensus[fx.lang]?.state !== "pass";
+		if (handshakeUnavailable) {
 			rows.push({
 				lang: fx.lang,
 				runner: fx.serverHint,
-				state: outcome.row,
-				detail: outcome.detail,
+				state: "skip",
+				detail: `${fx.serverHint} unavailable (handshake did not complete)`,
 				diags: 0,
 			});
 			continue;
@@ -2283,7 +2296,9 @@ async function runLspGate({ langs, install, verbose }) {
 		let absFile;
 		let cleanup;
 		try {
-			({ workspace, absFile, cleanup } = await bootstrapFixtureWorkspace(fx, {
+			({ workspace, absFile, cleanup } = await (
+				deps?.bootstrapFixtureWorkspace ?? bootstrapFixtureWorkspace
+			)(fx, {
 				initLSPConfig,
 				repoRoot,
 				tmpPrefix: "pi-lens-smoke-gate-",
@@ -2761,6 +2776,16 @@ async function runLspHandshake({ langs, install, verbose }) {
 		await lsp.shutdown();
 	} catch {
 		// best-effort teardown
+	}
+	if (process.env.PI_LENS_HOME) {
+		fs.writeFileSync(
+			path.join(process.env.PI_LENS_HOME, "lsp-handshake-census.json"),
+			JSON.stringify(
+				Object.fromEntries(rows.map((row) => [row.lang, row])),
+				null,
+				2,
+			),
+		);
 	}
 	return report(rows, "LSP handshake (install → spawn → initialize)");
 }

@@ -150,6 +150,13 @@ export function classifyLspGateResult(
 	fixture: Pick<LspFixture, "serverHint">,
 	unavailable?: boolean,
 ): { state: "pass" | "skip" | "fail"; detail: string; diags: number };
+/** Run the production LSP clean-gate layer, optionally with test seams. */
+export function runLspGate(options?: {
+	langs?: string[];
+	install?: boolean;
+	verbose?: boolean;
+	deps?: unknown;
+}): Promise<number>;
 /** One reported row from a smoke lane, as far as the pass floor is concerned. */
 export interface SmokeRow {
 	state: "pass" | "fail" | "skip" | "setup-failed";

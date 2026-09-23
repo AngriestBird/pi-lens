@@ -157,6 +157,8 @@ export type DegradationKind =
 	 * `recordDegradationOnce`.
 	 */
 	| "config-location-probe-failed"
+	/** Both supported global config files exist; the higher-precedence one won. */
+	| "config-location-shadowed"
 	/**
 	 * #2518: the session-root registry hit its cap and dropped a root this
 	 * process was serving, together with that root's loaded LSP config — so the
