@@ -698,7 +698,13 @@ function readTmpHygieneProcessStartTime(pid: number): string | undefined {
 export type TmpHygieneProcessProbe = {
 	/** Does this platform supply a process start time at all? Measured against
 	 *  THIS process, so it can never be true while every marker is written
-	 *  without one (HIGH-3297-V1). */
+	 *  without one (HIGH-3297-V1).
+	 *
+	 *  Same shape as `PROC_PPID_READABLE` in `clients/safe-spawn.ts` (#3091 F4),
+	 *  and for the same reason it gives: `process.platform === "linux"` is a
+	 *  different question, because a container or a hardened host runs Linux
+	 *  with no `/proc` mounted. Computed per call rather than at module load, so
+	 *  it is not a module-load platform const (AGENTS.md shape 30). */
 	startTimeSupported: boolean;
 	startTimeOf: (pid: number) => string | undefined;
 	isAlive: (pid: number) => boolean;
