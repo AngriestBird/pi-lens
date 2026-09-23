@@ -150,10 +150,13 @@ interface Observed {
 	status: string | undefined;
 	semantic: string | undefined;
 	diagnostics: Array<{
+		id?: string;
 		line?: number;
 		column?: number;
 		filePath?: string;
 		message?: string;
+		severity?: string;
+		semantic?: string;
 	}>;
 	dispatchedPath: string;
 	reported: string;
@@ -331,6 +334,14 @@ const GLEAM_VECTOR = path.resolve(
 	import.meta.dirname,
 	"../../../fixtures/gleam-codespan/gleam-v1.18.1-assert-mismatched-types.snap.txt",
 );
+const GLEAM_WARNING_VECTOR = path.resolve(
+	import.meta.dirname,
+	"../../../fixtures/gleam-codespan/gleam-v1.18.1-warning-unused-value.snap.txt",
+);
+const GLEAM_LOCATIONLESS_VECTOR = path.resolve(
+	import.meta.dirname,
+	"../../../fixtures/gleam-codespan/gleam-v1.18.1-locationless-project-error.snap.txt",
+);
 
 /** codespan's locus line inside that vector: `  ┌─ /src/one/two.gleam:1:8`. */
 const GLEAM_VECTOR_LOCUS = /^(\s*┌─ )(\S.*):(\d+):(\d+)$/m;
@@ -347,16 +358,26 @@ const GLEAM_VECTOR_COLUMN = 8;
  * vector.
  */
 /**
- * The same rendering with the gutter coloured, which is what gleam emits when
- * `FORCE_COLOR` is non-empty: codespan wraps `chars().snippet_start` in the
- * source-border style and resets after it (codespan-reporting 0.13.1
- * `src/term/renderer.rs:386-388`), cyan by default (`src/term/config.rs:246`),
- * and termcolor writes that as the SGR pair below. The exact parameters are
- * codespan's choice; what this pins is the STRUCTURE — an escape sequence
- * between the line start and the gutter.
+ * The same rendering as gleam emits when `FORCE_COLOR` is non-empty. codespan
+ * styles TWO things on the lines this parser reads, and both sit where a
+ * regex anchor would trip over them:
+ *
+ * - the title line — `render_header` sets the severity style, writes `error`,
+ *   switches to the header-message style for `: <message>` and resets at the
+ *   end of the line (codespan-reporting 0.13.1 `src/term/renderer.rs:141-171`),
+ *   so an escape sequence precedes the very first character of the line;
+ * - the locus gutter — `chars().snippet_start` is wrapped in the source-border
+ *   style and reset after it (`src/term/renderer.rs:386-388`), cyan by default
+ *   (`src/term/config.rs:246`).
+ *
+ * The exact SGR parameters are codespan's choice; what this pins is the
+ * STRUCTURE — an escape sequence before the title's `error`, and one between
+ * the line start and the gutter.
  */
-function colourTheGutter(rendered: string): string {
-	return rendered.replace("┌─", "\u001b[36m┌─\u001b[0m");
+function colourRichOutput(rendered: string): string {
+	return rendered
+		.replace(/^(error|warning): (.*)$/m, "\u001b[1;31m$1\u001b[1m: $2\u001b[0m")
+		.replace("┌─", "\u001b[36m┌─\u001b[0m");
 }
 
 function gleamCheckStderr(reported: string): string {
@@ -369,6 +390,19 @@ function gleamCheckStderr(reported: string): string {
 			`the upstream gleam vector no longer carries a codespan locus line: ${GLEAM_VECTOR}`,
 		);
 	return rendered.replace(
+		locus[0],
+		`${locus[1]}${reported}:${locus[3]}:${locus[4]}`,
+	);
+}
+
+function gleamFixtureStderr(fixture: string, reported?: string): string {
+	const rendered = fs.readFileSync(fixture, "utf8");
+	const marker = rendered.indexOf("----- ");
+	const output = rendered.slice(rendered.indexOf("\n", marker) + 1);
+	if (!reported) return output;
+	const locus = GLEAM_VECTOR_LOCUS.exec(output);
+	if (!locus) throw new Error(`fixture has no codespan locus: ${fixture}`);
+	return output.replace(
 		locus[0],
 		`${locus[1]}${reported}:${locus[3]}:${locus[4]}`,
 	);
@@ -645,7 +679,74 @@ const MEMBERS: Member[] = [
 		},
 		output: (reported) => ({
 			status: 1,
-			stderr: colourTheGutter(gleamCheckStderr(reported)),
+			stderr: colourRichOutput(gleamCheckStderr(reported)),
+		}),
+	},
+	{
+		name: "gleam-check (located warning)",
+		attached: { status: "failed", semantic: "warning" },
+		runnerId: "gleam-check",
+		modulePath: "../../../../clients/dispatch/runners/gleam-check.js",
+		file: "src/app.gleam",
+		sibling: "src/other.gleam",
+		fileContent: "pub fn main() {\n  let unused = 1\n}\n",
+		prepare(root) {
+			fs.writeFileSync(path.join(root, "gleam.toml"), 'name = "demo"\n');
+		},
+		output: (reported) => ({
+			status: 1,
+			stderr: gleamFixtureStderr(GLEAM_WARNING_VECTOR, reported),
+		}),
+	},
+	{
+		name: "gleam-check (locationless diagnostic)",
+		attached: { status: "failed", semantic: "blocking" },
+		runnerId: "gleam-check",
+		modulePath: "../../../../clients/dispatch/runners/gleam-check.js",
+		file: "src/app.gleam",
+		sibling: "src/other.gleam",
+		fileContent: "pub fn main() {\n  let unused = 1\n}\n",
+		prepare(root) {
+			fs.writeFileSync(path.join(root, "gleam.toml"), 'name = "demo"\n');
+		},
+		output: () => ({
+			status: 1,
+			stderr: gleamFixtureStderr(GLEAM_LOCATIONLESS_VECTOR),
+		}),
+	},
+	{
+		name: "gleam-check (adjacent diagnostics)",
+		attached: { status: "failed", semantic: "blocking" },
+		runnerId: "gleam-check",
+		modulePath: "../../../../clients/dispatch/runners/gleam-check.js",
+		file: "src/app.gleam",
+		sibling: "src/other.gleam",
+		fileContent: "pub fn main() {\n  assert 10\n}\n",
+		prepare(root) {
+			fs.writeFileSync(path.join(root, "gleam.toml"), 'name = "demo"\n');
+		},
+		output: (reported) => ({
+			status: 1,
+			stderr: `${gleamCheckStderr(reported)}\n${gleamFixtureStderr(
+				GLEAM_WARNING_VECTOR,
+				reported,
+			)}`,
+		}),
+	},
+	{
+		name: "gleam-check (orphan locus)",
+		attached: { status: "failed", semantic: "blocking" },
+		runnerId: "gleam-check",
+		modulePath: "../../../../clients/dispatch/runners/gleam-check.js",
+		file: "src/app.gleam",
+		sibling: "src/other.gleam",
+		fileContent: "pub fn main() {\n  assert 10\n}\n",
+		prepare(root) {
+			fs.writeFileSync(path.join(root, "gleam.toml"), 'name = "demo"\n');
+		},
+		output: (reported) => ({
+			status: 1,
+			stderr: `  ┌─ ${reported}:1:8\n  │\n1 │ assert 10\n  │        ^^\n`,
 		}),
 	},
 ];
@@ -667,6 +768,10 @@ const [
 	oxlint,
 	gleamCheck,
 	gleamCheckColoured,
+	gleamCheckWarning,
+	gleamCheckLocationless,
+	gleamCheckAdjacent,
+	gleamCheckOrphan,
 ] = MEMBERS;
 
 describe("runner reported-path attribution (#3295)", () => {
@@ -882,12 +987,8 @@ describe("dart-analyze reported-path attribution (#3278)", () => {
 
 /**
  * gleam's finding is recognized by the LINE:COLUMN the upstream vector's locus
- * names, not by a marker in the message: this runner takes the first non-blank
- * line AFTER the locus as the message, and in every codespan rich rendering
- * that line is the empty border `│` (`renderer.rs` writes the snippet start,
- * then a bordered blank line, then the source line). The #1816 fallback row a
- * nonzero exit with no parsed location produces carries NO line or column, so it
- * can never be mistaken for the finding.
+ * names, not by a marker in the message. The message comes from the title
+ * before that locus plus an optional `^^` label, never the empty border `│`.
  */
 function gleamFindings(observed: Observed) {
 	return observed.diagnostics.filter(
@@ -901,11 +1002,7 @@ function expectGleamAttached(observed: Observed, member: Member): void {
 	const attributed = gleamFindings(observed);
 	expect(attributed).toHaveLength(1);
 	expect(attributed[0]?.filePath).toBe(observed.dispatchedPath);
-	// F14: the fold must change WHICH lines attach, nothing else. This is the
-	// message today — codespan's own empty border line, because the message
-	// extraction takes the first non-blank line after the locus. Pinned as
-	// CURRENT behaviour, not endorsed: filed separately as #3293.
-	expect(attributed[0]?.message).toBe("│");
+	expect(attributed[0]?.message).toBe("error: Type mismatch");
 	expect(observed.status).toBe(member.attached.status);
 	expect(observed.semantic).toBe(member.attached.semantic);
 }
@@ -938,13 +1035,63 @@ describe("gleam-check reported-path attribution (#3285)", () => {
 		expectGleamAttached(observed, gleamCheck);
 	});
 
-	// gleam colours the gutter whenever FORCE_COLOR is non-empty, whatever stderr
-	// is (`compiler-cli/src/cli.rs:194-207`). The pre-#3285 suffix compare never
-	// saw the line's prefix; an anchored capture without `stripAnsi` refuses the
-	// whole line and drops every diagnostic in that environment.
+	// gleam colours whenever FORCE_COLOR is non-empty, whatever stderr is
+	// (`compiler-cli/src/cli.rs:194-207`). The pre-#3285 suffix compare never saw
+	// the locus line's prefix; an anchored capture without `stripAnsi` refuses
+	// the whole line and drops every diagnostic in that environment. Recurrence
+	// prevented (#3293): the TITLE line is styled too, so the same anchored
+	// capture would refuse the message this PR reads and fall back to the
+	// project record — `expectGleamAttached` pins the decoded title here.
 	it("still attributes a colour-forced gleam locus line (#3285)", async () => {
 		const observed = await dispatch(gleamCheckColoured, echoesArgv);
 		expectGleamAttached(observed, gleamCheckColoured);
+	});
+
+	it("keeps a located warning title and label, without the border glyph (#3293)", async () => {
+		const observed = await dispatch(gleamCheckWarning, echoesArgv);
+		const finding = gleamFindings(observed)[0];
+		expect(finding?.message).toBe(
+			"warning: Unused value — this value is never used",
+		);
+		expect(finding?.message).not.toContain("│");
+		expect(finding?.severity).toBe("warning");
+		expect(observed.status).toBe("failed");
+		expect(observed.semantic).toBe("blocking");
+	});
+
+	it("keeps a locationless project diagnostic unattributed (#3293)", async () => {
+		const observed = await dispatch(gleamCheckLocationless, echoesArgv);
+		// Recurrence prevented (#3293): `gleam check` analyzes the whole project,
+		// so a diagnostic without a reported locus must not be charged to the file
+		// that happened to trigger this project-scoped runner. It reaches the
+		// existing nonzero-without-diagnostics project fallback instead.
+		expect(observed.diagnostics).toHaveLength(1);
+		expect(observed.diagnostics[0]).toMatchObject({
+			id: "gleam-check-nonzero-no-diagnostics",
+			message: "error: Could not find a package required by this project",
+			severity: "error",
+			semantic: "blocking",
+		});
+		expect(observed.diagnostics[0]?.line).toBeUndefined();
+		expect(observed.diagnostics[0]?.column).toBeUndefined();
+	});
+
+	it("does not use the next diagnostic title as the prior label (#3293)", async () => {
+		const observed = await dispatch(gleamCheckAdjacent, echoesArgv);
+		expect(observed.diagnostics.map((finding) => finding.message)).toEqual([
+			"error: Type mismatch",
+			"warning: Unused value — this value is never used",
+		]);
+	});
+
+	it("uses the bounded fallback for a locus with no title (#3293)", async () => {
+		const observed = await dispatch(gleamCheckOrphan, echoesArgv);
+		expect(observed.diagnostics).toHaveLength(1);
+		expect(observed.diagnostics[0]).toMatchObject({
+			id: "gleam-check-nonzero-no-diagnostics",
+		});
+		expect(observed.diagnostics[0]?.line).toBeUndefined();
+		expect(observed.diagnostics[0]?.column).toBeUndefined();
 	});
 
 	// The over-merge direction: one gleam diagnostic renders one locus line PER
