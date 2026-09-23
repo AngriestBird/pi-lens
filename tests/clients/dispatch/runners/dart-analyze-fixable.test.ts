@@ -136,8 +136,12 @@ describe("parseDartMachineOutput — fixable propagation (#112 slice)", () => {
 	});
 
 	it("handles empty input gracefully", () => {
-		expect(parseDartMachineOutput("", "lib/main.dart", process.cwd())).toEqual([]);
-		expect(parseDartMachineOutput("\n\n", "lib/main.dart", process.cwd())).toEqual([]);
+		expect(parseDartMachineOutput("", "lib/main.dart", process.cwd())).toEqual(
+			[],
+		);
+		expect(
+			parseDartMachineOutput("\n\n", "lib/main.dart", process.cwd()),
+		).toEqual([]);
 	});
 
 	it("the allowlist covers core dart-fix lints and skips judgment-call rules", () => {

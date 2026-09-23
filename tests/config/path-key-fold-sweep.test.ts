@@ -60,12 +60,28 @@
  *   written inside a string to launder a site, and is the structural fact
  *   rather than one spelling of it (AGENTS.md defect shape 34).
  *
- * SWEEP_HEURISTIC_LIMITS. Shape B's second arm keys on a `"win32"` literal in
- * the same statement, so a fold behind an already-hoisted boolean
- * (`const isWin = process.platform === "win32"; … isWin ? x.toLowerCase() : x`)
- * is not detected. That is a known blind spot, not a silent one: shape B's
- * first arm still catches every fold applied DIRECTLY to a path expression,
- * which is how all five #1193 P3 members were written.
+ * SWEEP_HEURISTIC_LIMITS.
+ *
+ * 1. Shape B's second arm keys on a `"win32"` literal in the same statement, so
+ *    a fold behind an already-hoisted boolean
+ *    (`const isWin = process.platform === "win32"; … isWin ? x.toLowerCase() : x`)
+ *    is not detected. That is a known blind spot, not a silent one: shape B's
+ *    first arm still catches every fold applied DIRECTLY to a path expression,
+ *    which is how all five #1193 P3 members were written.
+ * 2. `PATH_CALL` requires a `path.`/`win32.`/`posix.` qualifier, so a BARE
+ *    `resolve(`/`join(` imported from `node:path` is invisible to shape B's
+ *    first arm. Measured on `clients/dispatch/runners/go-vet.ts`, whose import
+ *    style is bare: the qualified needle matched 0 occurrences there and the
+ *    bare call was the live one (#3278 criterion 4). Widening the qualifier
+ *    here would pull `relative`/`join` calls in dozens of files into a census
+ *    about KEY derivation, so the family that actually needed the bare form —
+ *    "a runner compares a tool-reported path against the dispatched file" — is
+ *    counted by its own detector instead:
+ *    `tests/config/reported-path-attribution-sweep.test.ts`, whose
+ *    `PATH_CALL_HERE` makes the qualifier optional.
+ * 3. This sweep counts FOLDS THAT EXIST. A site with no fold at all presents
+ *    nothing to count, which is why it could not see any of #3278's twelve
+ *    members; absence in this family is the other detector's job.
  */
 
 import { readFileSync } from "node:fs";
@@ -282,8 +298,6 @@ const SLASH_FOLD_PINS: Readonly<Record<string, number>> = {
 	"clients/dispatch/integration.ts": 2,
 	"clients/dispatch/runner-context.ts": 3,
 	"clients/dispatch/runners/actionlint.ts": 1,
-	"clients/dispatch/runners/cue-vet.ts": 1,
-	"clients/dispatch/runners/dart-analyze.ts": 1,
 	"clients/dispatch/runners/gleam-check.ts": 2,
 	"clients/feature-hints.ts": 1,
 	"clients/file-role.ts": 2,

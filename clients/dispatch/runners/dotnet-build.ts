@@ -119,8 +119,7 @@ function parseDotnetBuildOutput(
 		const { reportedFile, lineStr, colStr, severityLabel, rule, message } =
 			parsed;
 		// #3278: one seam for reported-path attribution — see javac.ts.
-		if (!pathsEqual(path.resolve(cwd, reportedFile.trim()), absTarget))
-			continue;
+		if (!pathsEqual(path.resolve(cwd, reportedFile), absTarget)) continue;
 
 		const severity =
 			severityLabel.toLowerCase() === "error" ? "error" : "warning";
