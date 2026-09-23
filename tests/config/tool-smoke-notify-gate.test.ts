@@ -101,6 +101,21 @@ describe("tool-smoke.yml's red-notify step runs on failure too (#2723)", () => {
 		expect(notifyStep.run).toContain("scripts/notify-tool-smoke-red.mjs");
 	});
 
+	it("keeps the Sonar master gate as a real end-of-job gate before notification (#3319)", () => {
+		const steps = workflow.jobs?.[JOB_NAME]?.steps as Step[];
+		const sonarIndex = steps.findIndex(
+			(step) => step.name === "SonarCloud master quality gate",
+		);
+		expect(sonarIndex).toBe(steps.length - 2);
+		const sonarStep = steps[sonarIndex] as Step & {
+			"continue-on-error"?: unknown;
+		};
+		expect(sonarStep.id).toBe("sonar_master_gate");
+		expect(sonarStep.if).toBe("always()");
+		expect(sonarStep.run).toBe("node scripts/sonar-master-gate.mjs");
+		expect(sonarStep["continue-on-error"]).not.toBe(true);
+	});
+
 	it("issues: write is already granted at job level (#529/#594) -- confirms, does not require re-adding", () => {
 		const permissions = workflow.jobs?.[JOB_NAME]?.permissions;
 		expect(permissions?.issues).toBe("write");
