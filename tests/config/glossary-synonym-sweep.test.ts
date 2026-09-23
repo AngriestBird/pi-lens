@@ -851,7 +851,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/knip-client.ts": 26,
 		"clients/language-profile.ts": 14,
 		"clients/latency-logger.ts": 2,
-		"clients/lens-config.ts": 8,
+		"clients/lens-config.ts": 7,
 		"clients/lens-engine.ts": 6,
 		"clients/lens-flag-registry.ts": 13,
 		"clients/lens-map.ts": 14,

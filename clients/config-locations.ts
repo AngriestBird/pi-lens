@@ -535,7 +535,7 @@ export function isResolvedGlobalConfigPath(candidate: string): boolean {
  * with the SAME helper once per env fingerprint, so both sides of the
  * comparison share one identity function.
  */
-function canonicalPathIdentity(candidate: string): string {
+export function canonicalPathIdentity(candidate: string): string {
 	// Shape-aware (defect shape 2): a Windows-shaped path is resolved with
 	// `path.win32` — the host resolver on POSIX treats a drive-letter path as
 	// RELATIVE and mangles it before any comparison could run. On a real

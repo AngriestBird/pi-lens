@@ -191,6 +191,45 @@ describe("global config location resolution", () => {
 		expect(realAgentDir).toBe(agentDir);
 	});
 
+	it("records canonical paths when both files are reached through symlink aliases", () => {
+		// Regression for #3323 M1: durable path identities must not vary with
+		// symlink spellings of HOME or PI_CODING_AGENT_DIR.
+		const root = makeTempHome();
+		const realHome = path.join(root, "real-home");
+		const realAgent = path.join(root, "real-agent");
+		const homeAlias = path.join(root, "home-alias");
+		const agentAlias = path.join(root, "agent-alias");
+		fs.mkdirSync(path.join(realHome, ".pi-lens"), { recursive: true });
+		fs.mkdirSync(path.join(realAgent, "extensions"), { recursive: true });
+		symlinkSync(realHome, homeAlias, "dir");
+		symlinkSync(realAgent, agentAlias, "dir");
+		adoptHomeEnv(homeAlias);
+		process.env.PI_CODING_AGENT_DIR = agentAlias;
+		fs.writeFileSync(path.join(homeAlias, ".pi-lens", "config.json"), "{}");
+		const shadowedPath = path.join(
+			agentAlias,
+			"extensions",
+			"pi-lens.json",
+		);
+		fs.writeFileSync(shadowedPath, "{}");
+		resetGlobalConfigLocationCache();
+
+		loadPiLensGlobalConfig();
+
+		const group = getDegradationSummary().find(
+			(candidate) => candidate.kind === "config-location-shadowed",
+		);
+		expect(group?.count).toBe(1);
+		expect(group?.latestReasons[0]?.subject).toBe(
+			fs.realpathSync(path.join(realHome, ".pi-lens", "config.json")),
+		);
+		expect(group?.latestReasons[0]?.reason).toContain(
+			fs.realpathSync(path.join(realAgent, "extensions", "pi-lens.json")),
+		);
+		expect(group?.latestReasons[0]?.reason).not.toContain("home-alias");
+		expect(group?.latestReasons[0]?.reason).not.toContain("agent-alias");
+	});
+
 	it("the agent-dir file wins only when it EXISTS and the legacy default is missing (opt-in by creation)", () => {
 		const home = makeTempHome();
 		adoptHomeEnv(home);

@@ -18,6 +18,7 @@ import {
 import {
 	type ConfigLocation,
 	CANONICAL_GLOBAL_CONFIG_FILE,
+	canonicalPathIdentity,
 	getPiLensGlobalConfigPath,
 	getProductionGlobalConfigResolution,
 	GLOBAL_CONFIG_LOCATIONS,
@@ -223,14 +224,16 @@ function reportGlobalConfigProbeRetention(): void {
 function reportGlobalConfigShadowing(): void {
 	const resolution = getProductionGlobalConfigResolution();
 	if (resolution.shadowedPath === undefined) return;
+	const winningPath = canonicalPathIdentity(resolution.path);
+	const shadowedPath = canonicalPathIdentity(resolution.shadowedPath);
 	recordDegradationOnce({
 		kind: "config-location-shadowed",
-		subject: resolution.path,
-		reason: `shadowed global config ${resolution.shadowedPath}; winning path is the record subject`,
+		subject: winningPath,
+		reason: `shadowed global config ${shadowedPath}; winning path is the record subject`,
 		metadata: {
 			subsystem: "lens-config",
-			configPath: resolution.path,
-			shadowedPath: resolution.shadowedPath,
+			configPath: winningPath,
+			shadowedPath,
 		},
 		code: "PILENS_CFG_0010",
 	});
