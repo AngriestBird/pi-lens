@@ -79,6 +79,31 @@ export function matchDiagnosticMessages(pattern, diags) {
 }
 
 /**
+ * Partition the LSP fixtures into the clean-gate population (#3217).
+ *
+ * `eligible` is every fixture the gate could ever drive: a `clean: true`
+ * fixture has no defect to find and an `auxiliaryServerIds` fixture is proved
+ * by its own `auxiliarySourceMatch` on the handshake layer, so neither belongs
+ * to the gate. Every eligible fixture then carries EXACTLY ONE of
+ * `lspGate: true` (it opts in) or `lspGateExempt: "<reason>"` (it states why
+ * it cannot), which is what `tests/config/lsp-gate-population.test.ts` pins.
+ *
+ * The gate runner, the nightly summary line and that governance test all read
+ * this one function, so the printed `gated N / handshake-only M / unavailable
+ * K` counts cannot drift from the fixture table they describe (#3217 F6).
+ */
+export function lspGatePopulation(fixtures = LSP_FIXTURES) {
+	const eligible = fixtures.filter(
+		(f) => !f.clean && !f.auxiliaryServerIds?.length,
+	);
+	return {
+		eligible,
+		gated: eligible.filter((f) => f.lspGate === true),
+		exempt: eligible.filter((f) => typeof f.lspGateExempt === "string"),
+	};
+}
+
+/**
  * Classify the lsp_diagnostics clean-gate result (#2780/#2776). The gate
  * deliberately counts the handler's primary bucket, not the raw diagnostic
  * total: a server-authored source must not make an auxiliary finding look like
@@ -507,6 +532,8 @@ const LSP_FIXTURES = [
 		lang: "typescript7",
 		lspGate: true,
 		lspGateMarker: '"not a number"',
+		lspGate: true,
+		lspGateMarker: '"not a number"',
 		dir: "tests/fixtures/tool-smoke/typescript7",
 		file: "bad.ts",
 		serverHint: "typescript native (tsc --lsp --stdio, TS7+)",
@@ -591,8 +618,13 @@ const LSP_FIXTURES = [
 	},
 	{
 		lang: "terraform",
-		lspGate: true,
-		lspGateMarker: '"${var.name}"',
+		// #3217: terraform-ls advertises no diagnosticProvider and publishes
+		// nothing for an un-initialized module — its validation diagnostics come
+		// from `terraform.validate`, which needs a real `terraform init` (network
+		// + the terraform binary) in the fixture workspace. Measured: no
+		// publishDiagnostics in 10s and no pull provider at initialize.
+		lspGateExempt:
+			"terraform-ls publishes diagnostics only after `terraform init`; see #3217 follow-up",
 		dir: "tests/fixtures/tool-smoke/terraform",
 		file: "bad.tf",
 		serverHint: "terraform-ls",
@@ -637,8 +669,14 @@ const LSP_FIXTURES = [
 	},
 	{
 		lang: "php",
-		lspGate: true,
-		lspGateMarker: "$naem",
+		// #3217: intelephense DOES publish `Undefined variable '$naem'` — but it
+		// publishes an EMPTY set first, on didOpen, before its index is warm, and
+		// pi-lens's push wait early-returns on the first publish. The gate reads
+		// 0 primary findings while a raw session sees the real diagnostic ~5s
+		// later. That is a wait-policy defect, not a fixture defect; tracked
+		// separately rather than papered over with a longer gate budget.
+		lspGateExempt:
+			"intelephense's empty first publish satisfies the push wait; see #3217 follow-up",
 		dir: "tests/fixtures/tool-smoke/php",
 		file: "bad.php",
 		serverHint: "intelephense",
@@ -646,6 +684,8 @@ const LSP_FIXTURES = [
 	},
 	{
 		lang: "rust",
+		lspGate: true,
+		lspGateMarker: 'let v: Vec<i32> = "not a vector";',
 		dir: "tests/fixtures/tool-smoke/rust",
 		file: "src/main.rs",
 		serverHint: "rust-analyzer",
@@ -656,6 +696,8 @@ const LSP_FIXTURES = [
 		// (archive tree bundle), not a binary. Needs pwsh on the runner (present on
 		// the nightly ubuntu image); installs the bundle via the archive strategy.
 		lang: "powershell",
+		lspGate: true,
+		lspGateMarker: "$unused = 'hello'",
 		dir: "tests/fixtures/tool-smoke/powershell",
 		file: "bad.ps1",
 		serverHint:
@@ -674,6 +716,8 @@ const LSP_FIXTURES = [
 	// fixture stays durable so a provisioned CI run completes the matrix.
 	{
 		lang: "go",
+		lspGate: true,
+		lspGateMarker: 'fmt.Printf("%d\\n", "not a number")',
 		dir: "tests/fixtures/tool-smoke/go",
 		file: "bad.go",
 		serverHint: "gopls",
@@ -681,6 +725,8 @@ const LSP_FIXTURES = [
 	},
 	{
 		lang: "ruby",
+		lspGate: true,
+		lspGateMarker: "x = 'unterminated",
 		dir: "tests/fixtures/tool-smoke/ruby",
 		file: "bad.rb",
 		serverHint: "ruby-lsp",
@@ -688,6 +734,8 @@ const LSP_FIXTURES = [
 	},
 	{
 		lang: "csharp",
+		lspGate: true,
+		lspGateMarker: 'int x = "not a number";',
 		dir: "tests/fixtures/tool-smoke/csharp",
 		file: "Program.cs",
 		serverHint: "csharp-ls",
@@ -695,6 +743,8 @@ const LSP_FIXTURES = [
 	},
 	{
 		lang: "fsharp",
+		lspGate: true,
+		lspGateMarker: 'let gateSeed : int = "not a number"',
 		dir: "tests/fixtures/tool-smoke/fsharp",
 		file: "Program.fs",
 		serverHint: "fsautocomplete",
@@ -702,12 +752,21 @@ const LSP_FIXTURES = [
 	},
 	{
 		lang: "java",
+		lspGate: true,
+		lspGateMarker: 'int x = "not a number";',
 		dir: "tests/fixtures/tool-smoke/java",
 		file: "Bad.java",
 		serverHint: "jdtls",
 		tools: ["jdtls"],
 	},
 	{
+		// The ONLY fixture whose contract is the ABSENCE of a diagnostic
+		// (`expectNoMessageMatch`): it proves the lombok javaagent makes the
+		// generated getter resolvable. Opting it into the clean gate would assert
+		// the opposite of what it exists to prove, and `java` above already gates
+		// jdtls. #3217 F7: two java fixtures, one gated row.
+		lspGateExempt:
+			"fixture asserts the ABSENCE of a diagnostic; jdtls is gated via the `java` fixture",
 		lang: "java-lombok",
 		dir: "tests/fixtures/tool-smoke/java-lombok",
 		file: "src/main/java/App.java",
@@ -719,6 +778,8 @@ const LSP_FIXTURES = [
 	},
 	{
 		lang: "kotlin",
+		lspGate: true,
+		lspGateMarker: 'val gateSeed: Int = "not a number"',
 		dir: "tests/fixtures/tool-smoke/kotlin",
 		file: "Bad.kt",
 		serverHint: "kotlin-language-server",
@@ -726,6 +787,8 @@ const LSP_FIXTURES = [
 	},
 	{
 		lang: "swift",
+		lspGate: true,
+		lspGateMarker: 'let gateSeed: Int = "not a number"',
 		dir: "tests/fixtures/tool-smoke/swift",
 		file: "main.swift",
 		serverHint: "sourcekit-lsp",
@@ -733,6 +796,8 @@ const LSP_FIXTURES = [
 	},
 	{
 		lang: "dart",
+		lspGate: true,
+		lspGateMarker: "int x = 'not a number';",
 		dir: "tests/fixtures/tool-smoke/dart",
 		file: "bad.dart",
 		serverHint: "dart language-server",
@@ -740,6 +805,8 @@ const LSP_FIXTURES = [
 	},
 	{
 		lang: "lua",
+		lspGate: true,
+		lspGateMarker: "undefined_global_for_gate()",
 		dir: "tests/fixtures/tool-smoke/lua",
 		file: "main.lua",
 		serverHint: "lua-language-server",
@@ -769,6 +836,8 @@ const LSP_FIXTURES = [
 	},
 	{
 		lang: "cpp",
+		lspGate: true,
+		lspGateMarker: 'int gate_seed = "not a number";',
 		dir: "tests/fixtures/tool-smoke/cpp",
 		file: "main.cpp",
 		serverHint: "clangd",
@@ -776,6 +845,8 @@ const LSP_FIXTURES = [
 	},
 	{
 		lang: "zig",
+		lspGate: true,
+		lspGateMarker: "const x: u32 = 5;",
 		dir: "tests/fixtures/tool-smoke/zig",
 		file: "bad.zig",
 		serverHint: "zls",
@@ -783,6 +854,8 @@ const LSP_FIXTURES = [
 	},
 	{
 		lang: "haskell",
+		lspGate: true,
+		lspGateMarker: 'gateSeed = "not a number"',
 		dir: "tests/fixtures/tool-smoke/haskell",
 		file: "Main.hs",
 		serverHint: "haskell-language-server",
@@ -790,6 +863,8 @@ const LSP_FIXTURES = [
 	},
 	{
 		lang: "elixir",
+		lspGate: true,
+		lspGateMarker: "undefined_function()",
 		dir: "tests/fixtures/tool-smoke/elixir",
 		file: "bad.ex",
 		serverHint: "elixir-ls",
@@ -799,6 +874,8 @@ const LSP_FIXTURES = [
 		// Expert is an alternate Elixir primary. Disabling ElixirLS makes this
 		// fixture exercise Expert's managed GitHub binary through initialize.
 		lang: "expert",
+		lspGate: true,
+		lspGateMarker: "undefined_function()",
 		dir: "tests/fixtures/tool-smoke/elixir",
 		file: "bad.ex",
 		serverHint: "Expert (alternate of ElixirLS)",
@@ -808,6 +885,8 @@ const LSP_FIXTURES = [
 	},
 	{
 		lang: "gleam",
+		lspGate: true,
+		lspGateMarker: '"not an int"',
 		dir: "tests/fixtures/tool-smoke/gleam",
 		file: "src/smoke.gleam",
 		serverHint: "gleam lsp",
@@ -824,6 +903,8 @@ const LSP_FIXTURES = [
 	},
 	{
 		lang: "ocaml",
+		lspGate: true,
+		lspGateMarker: 'let _gate_seed : int = "not a number"',
 		dir: "tests/fixtures/tool-smoke/ocaml",
 		file: "main.ml",
 		serverHint: "ocamllsp",
@@ -840,6 +921,8 @@ const LSP_FIXTURES = [
 	},
 	{
 		lang: "fish",
+		lspGate: true,
+		lspGateMarker: "echo missing end",
 		dir: "tests/fixtures/tool-smoke/fish",
 		file: "bad.fish",
 		serverHint: "fish-lsp",
@@ -847,6 +930,8 @@ const LSP_FIXTURES = [
 	},
 	{
 		lang: "cmake",
+		lspGate: true,
+		lspGateMarker: "not_a_cmake_command()",
 		dir: "tests/fixtures/tool-smoke/cmake",
 		file: "CMakeLists.txt",
 		serverHint: "cmake-language-server",
@@ -854,6 +939,8 @@ const LSP_FIXTURES = [
 	},
 	{
 		lang: "nix",
+		lspGate: true,
+		lspGateMarker: "undefinedVariableForGate",
 		dir: "tests/fixtures/tool-smoke/nix",
 		file: "flake.nix",
 		serverHint: "nixd",
@@ -861,8 +948,13 @@ const LSP_FIXTURES = [
 	},
 	{
 		lang: "vue",
-		lspGate: true,
-		lspGateMarker: '"not a number"',
+		// #3217: @vue/language-server neither publishes nor answers a pull for the
+		// fixture's TS type error — the fixture has no node_modules, so the
+		// server's own launch warning ("Vue navigation may be limited") applies to
+		// diagnostics too. Making it green needs a real `npm install` in the
+		// fixture workspace, which is the typescript7 `setup` shape.
+		lspGateExempt:
+			"@vue/language-server needs the fixture's node_modules installed; see #3217 follow-up",
 		dir: "tests/fixtures/tool-smoke/vue",
 		file: "App.vue",
 		serverHint: "@vue/language-server",
@@ -2119,12 +2211,9 @@ async function runLspGate({ langs, install, verbose }) {
 	}
 	const toolsById = new Map(TOOLS_REGISTRY.map((t) => [t.id, t]));
 	const toolchainPresence = {};
-	const selected = (
-		langs.length
-			? LSP_FIXTURES.filter((f) => langs.includes(f.lang))
-			: LSP_FIXTURES
-	).filter(
-		(f) => f.lspGate === true && !f.clean && !f.auxiliaryServerIds?.length,
+	const population = lspGatePopulation();
+	const selected = population.gated.filter(
+		(f) => !langs.length || langs.includes(f.lang),
 	);
 	if (selected.length === 0) {
 		console.log(`No opted-in LSP gate fixtures matched: ${langs.join(", ")}`);
@@ -2212,7 +2301,32 @@ async function runLspGate({ langs, install, verbose }) {
 			cleanup?.();
 		}
 	}
-	return report(rows, "LSP clean-gate (lsp_diagnostics primary findings)");
+	const failures = report(
+		rows,
+		"LSP clean-gate (lsp_diagnostics primary findings)",
+	);
+	console.log(formatGateCensus(population, rows, langs));
+	return failures;
+}
+
+/**
+ * The drift line criterion 4 of #3217 asks for: `gated N / handshake-only M /
+ * unavailable K`, derived from `lspGatePopulation()` and this run's own rows so
+ * a new fixture added without a flag is visible in the nightly summary instead
+ * of being silently absent from the gate. Exported for the governance test.
+ *
+ * `unavailable` counts the opted-in rows this runner could not install (the
+ * existing ⚠ path), so N + M + K is the whole eligible population on a full
+ * run — that identity is what makes a missing flag show up as a shortfall.
+ */
+export function formatGateCensus(population, rows, langs = []) {
+	const scoped = langs.length
+		? population.eligible.filter((f) => langs.includes(f.lang))
+		: population.eligible;
+	const unavailable = rows.filter((r) => r.state === "skip").length;
+	const gated = rows.length - unavailable;
+	const handshakeOnly = scoped.length - rows.length;
+	return `LSP clean-gate census: gated ${gated} / handshake-only ${handshakeOnly} / unavailable ${unavailable}`;
 }
 
 /**
