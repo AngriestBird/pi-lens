@@ -1576,29 +1576,44 @@ describe("no-predicate runner reported-path attribution (#3295 r3)", () => {
 	 * exactly the "the cwd the tool RAN in" clause of ADR 0009. A shared
 	 * `cwdRelative` here would feed tflint a spelling it never emits (#2432).
 	 */
-	const ROUND3: ReadonlyArray<
-		readonly [string, Member, ((spelling: Spelling) => string)?]
-	> = [
-		["stylelint", stylelintMember],
-		["rubocop", rubocopMember],
-		["eslint", eslintMember],
-		["biome-check", biomeMember],
-		["tflint", tflintMember, ({ argvPath }) => path.basename(argvPath)],
-		["swiftlint", swiftlintMember],
-		["ktlint", ktlintMember],
-		["hadolint", hadolintMember],
-		["actionlint", actionlintMember],
-		["spellcheck", spellcheckMember],
-		["sqlfluff", sqlfluffMember],
-		["vale", valeMember],
-		["markdownlint", markdownlintMember],
-		["php-lint", phpLintMember],
-		["diagnostic-parsers", ruffTextMember],
+	interface Round3Cell {
+		readonly name: string;
+		readonly member: Member;
+		/**
+		 * The one member whose tool does NOT run in the runner cwd: `tflint`
+		 * spawns with `cwd: fileDir` and names `range.filename` relative to THAT,
+		 * which is exactly the "the cwd the tool RAN in" clause of ADR 0009. A
+		 * shared `cwdRelative` here would feed tflint a spelling it never emits
+		 * (#2432).
+		 */
+		readonly ownSpelling?: (spelling: Spelling) => string;
+	}
+
+	const ROUND3: readonly Round3Cell[] = [
+		{ name: "stylelint", member: stylelintMember },
+		{ name: "rubocop", member: rubocopMember },
+		{ name: "eslint", member: eslintMember },
+		{ name: "biome-check", member: biomeMember },
+		{
+			name: "tflint",
+			member: tflintMember,
+			ownSpelling: ({ argvPath }) => path.basename(argvPath),
+		},
+		{ name: "swiftlint", member: swiftlintMember },
+		{ name: "ktlint", member: ktlintMember },
+		{ name: "hadolint", member: hadolintMember },
+		{ name: "actionlint", member: actionlintMember },
+		{ name: "spellcheck", member: spellcheckMember },
+		{ name: "sqlfluff", member: sqlfluffMember },
+		{ name: "vale", member: valeMember },
+		{ name: "markdownlint", member: markdownlintMember },
+		{ name: "php-lint", member: phpLintMember },
+		{ name: "diagnostic-parsers", member: ruffTextMember },
 	];
 
 	it.each(ROUND3)(
-		"%s keeps a finding it reported for the dispatched file",
-		async (_name, member, ownSpelling) => {
+		"$name keeps a finding it reported for the dispatched file",
+		async ({ member, ownSpelling }) => {
 			expectAttached(
 				await dispatch(member, ownSpelling ?? cwdRelative(member)),
 				member,
@@ -1607,15 +1622,15 @@ describe("no-predicate runner reported-path attribution (#3295 r3)", () => {
 	);
 
 	it.each(ROUND3)(
-		"%s rejects a finding it reported for a sibling file",
-		async (_name, member) => {
+		"$name rejects a finding it reported for a sibling file",
+		async ({ member }) => {
 			expectDetached(await dispatch(member, echoesSibling));
 		},
 	);
 
 	it.each(ROUND3)(
-		"%s treats a case-variant reported path exactly as this filesystem does",
-		async (_name, member) => {
+		"$name treats a case-variant reported path exactly as this filesystem does",
+		async ({ member }) => {
 			expectFilesystemAnswer(await dispatch(member, caseVariantOfArgv), member);
 		},
 	);
