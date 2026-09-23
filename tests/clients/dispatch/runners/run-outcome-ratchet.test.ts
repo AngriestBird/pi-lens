@@ -31,8 +31,6 @@ const NOT_YET_ON_PRIMITIVE: Record<string, string> = {
 
 	// Spawning runners that already consult the spawn outcome with their own
 	// per-tool check. Correct today, not yet unified. #1737.
-	"actionlint.ts": "reads its own exit status; #1737 strangler",
-	"credo.ts": "reads its own exit status; #1737 strangler",
 	"eslint.ts": "reads its own exit status; #1737 strangler",
 	"fish-indent.ts": "reads its own exit status; #1737 strangler",
 	"gleam-check.ts": "reads its own exit status; #1737 strangler",
