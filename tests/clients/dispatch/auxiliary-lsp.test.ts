@@ -573,7 +573,7 @@ describe("rule-ignore catalog precedence (#3041)", () => {
 	const content = "console.log('x');\n";
 
 	beforeEach(() => {
-		tmp = fs.mkdtempSync(path.join(os.tmpdir(), "rule-ignores-precedence-"));
+		tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-rule-ignores-precedence-"));
 	});
 	afterEach(() => removeTempDirSync(tmp));
 
@@ -632,7 +632,7 @@ describe("rule-ignore catalog precedence (#3041)", () => {
 	// `../../elsewhere/lib/logger.ts`. Without the fallback an out-of-tree logger
 	// sink loses its carve-out entirely.
 	it("matches an out-of-tree file by its absolute path", () => {
-		const outside = fs.mkdtempSync(path.join(os.tmpdir(), "rule-ignores-out-"));
+		const outside = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-rule-ignores-out-"));
 		try {
 			const keptFor = (relative: string) =>
 				applyAuxiliarySuppressions(

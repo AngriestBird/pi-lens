@@ -69,7 +69,7 @@ describe("classify-ci-failure.mjs CLI (#2668 review F2 -- real child process, re
 	let piLensHome: string;
 
 	beforeEach(() => {
-		tmpDir = mkdtempSync(join(tmpdir(), "classify-cli-test-"));
+		tmpDir = mkdtempSync(join(tmpdir(), "pi-lens-classify-cli-test-"));
 		callLogPath = join(tmpDir, "calls.ndjson");
 		writeFileSync(callLogPath, "");
 		// Probe hygiene (AGENTS.md): this script touches no pi-lens runtime

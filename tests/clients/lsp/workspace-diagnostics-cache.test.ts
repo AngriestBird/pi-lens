@@ -1043,7 +1043,7 @@ describe("runWorkspaceDiagnostics cache integration (#671)", () => {
 		vi.resetModules();
 		getServersForFileWithConfig.mockReset();
 		createLSPClient.mockReset();
-		tmpSweep = fs.mkdtempSync(path.join(os.tmpdir(), "lsp-sweep-cache-"));
+		tmpSweep = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-lsp-sweep-cache-"));
 		fs.mkdirSync(path.join(tmpSweep, ".pi-lens"));
 	});
 	afterEach(() => removeTempDirSync(tmpSweep));

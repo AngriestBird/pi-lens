@@ -103,7 +103,7 @@ afterEach(() => {
 
 /** A fresh, unique package root under a real temp dir — see the shape-38 note above. */
 function freshPackageRoot(): string {
-	const dir = fsSync.mkdtempSync(path.join(os.tmpdir(), "pilens-skills-test-"));
+	const dir = fsSync.mkdtempSync(path.join(os.tmpdir(), "pi-lens-pilens-skills-test-"));
 	tmpDirs.push(dir);
 	fsSync.writeFileSync(path.join(dir, "package.json"), "{}");
 	return dir;
@@ -294,7 +294,7 @@ describe("resolveSkillPaths (#2626) — layout table against pi's real loader", 
 		// pre-fix and stays green post-fix on a short CI /tmp AND on the long
 		// lane path alike.
 		const base = fsSync.mkdtempSync(
-			path.join(os.tmpdir(), "pilens-skills-test-"),
+			path.join(os.tmpdir(), "pi-lens-pilens-skills-test-"),
 		);
 		tmpDirs.push(base);
 		const TARGET_ENTRY_DIR_LEN = 150;
@@ -415,7 +415,7 @@ describe("resolveSkillPaths (#2626) — F3: notify-once gate", () => {
 		// finds walking up from the entry, so a long segment past that point
 		// would never appear in `skillsDir` at all.
 		const base = fsSync.mkdtempSync(
-			path.join(os.tmpdir(), "pilens-skills-test-"),
+			path.join(os.tmpdir(), "pi-lens-pilens-skills-test-"),
 		);
 		tmpDirs.push(base);
 		// One filesystem NAME component is capped well under 200 chars (NAME_MAX

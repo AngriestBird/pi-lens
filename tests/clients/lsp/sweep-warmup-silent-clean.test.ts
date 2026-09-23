@@ -201,7 +201,7 @@ describe("ensureWarmForSweep on a tier3-silent server (#3187)", () => {
 		getServersForFileWithConfig.mockReset();
 		createLSPClient.mockReset();
 		logLatency.mockReset();
-		tmp = fs.mkdtempSync(path.join(os.tmpdir(), "lsp-warmup-silent-"));
+		tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-lsp-warmup-silent-"));
 		// Production's own grace timer decides the race; pin it low so the
 		// sync racer is not the slow part of the test.
 		process.env.PI_LENS_TSSERVER_SYNC_GRACE_MS = "1";
@@ -350,7 +350,7 @@ describe("runWorkspaceDiagnostics warm-up on a tier3-silent group (#3187)", () =
 		getServersForFileWithConfig.mockReset();
 		createLSPClient.mockReset();
 		logLatency.mockReset();
-		tmp = fs.mkdtempSync(path.join(os.tmpdir(), "lsp-sweep-silent-"));
+		tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-lsp-sweep-silent-"));
 		process.env.PI_LENS_TSSERVER_SYNC_GRACE_MS = "1";
 		process.env.PI_LENS_LSP_WARMUP_RETRY_BACKOFF_MS = "0";
 		// Keep the pre-fix red (warm-up + one #744 retry against a server that

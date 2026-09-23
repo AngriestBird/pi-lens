@@ -371,7 +371,7 @@ describe("scripts/hooks/guard-bash.mjs -- git worktree remove node_modules symli
 	}
 
 	it("denies git worktree remove on a tree whose node_modules is a symlink OUTSIDE it", () => {
-		const shared = mkdtempSync(join(tmpdir(), "guard-bash-shared-nm-"));
+		const shared = mkdtempSync(join(tmpdir(), "pi-lens-guard-bash-shared-nm-"));
 		const tree = makeWorktreeDir("guard-bash-worktree-symlink-");
 		symlinkSync(shared, join(tree, "node_modules"));
 		try {
@@ -387,7 +387,7 @@ describe("scripts/hooks/guard-bash.mjs -- git worktree remove node_modules symli
 	});
 
 	it("allows the SAME tree once node_modules is unlinked (the note's own prescribed fix)", () => {
-		const shared = mkdtempSync(join(tmpdir(), "guard-bash-shared-nm-"));
+		const shared = mkdtempSync(join(tmpdir(), "pi-lens-guard-bash-shared-nm-"));
 		const tree = makeWorktreeDir("guard-bash-worktree-symlink-");
 		const nodeModules = join(tree, "node_modules");
 		symlinkSync(shared, nodeModules);
@@ -445,8 +445,8 @@ describe("scripts/hooks/guard-bash.mjs -- git worktree remove node_modules symli
 		// check runs, or an ordinary directory that merely contains a
 		// "node_modules" symlink (e.g. a project's own dependency symlink)
 		// would be denied.
-		const shared = mkdtempSync(join(tmpdir(), "guard-bash-shared-nm-"));
-		const dir = mkdtempSync(join(tmpdir(), "guard-bash-not-a-worktree-"));
+		const shared = mkdtempSync(join(tmpdir(), "pi-lens-guard-bash-shared-nm-"));
+		const dir = mkdtempSync(join(tmpdir(), "pi-lens-guard-bash-not-a-worktree-"));
 		symlinkSync(shared, join(dir, "node_modules"));
 		try {
 			const result = runHook(`git worktree remove ${dir}`);
@@ -459,7 +459,7 @@ describe("scripts/hooks/guard-bash.mjs -- git worktree remove node_modules symli
 	});
 
 	it("still detects git worktree remove embedded in a chained command (&&, ;)", () => {
-		const shared = mkdtempSync(join(tmpdir(), "guard-bash-shared-nm-"));
+		const shared = mkdtempSync(join(tmpdir(), "pi-lens-guard-bash-shared-nm-"));
 		const tree = makeWorktreeDir("guard-bash-worktree-symlink-chained-");
 		symlinkSync(shared, join(tree, "node_modules"));
 		try {
@@ -477,7 +477,7 @@ describe("scripts/hooks/guard-bash.mjs -- git worktree remove node_modules symli
 	});
 
 	it("still denies with a single --force (this rule is not gated by the double-force worktreeForce rule)", () => {
-		const shared = mkdtempSync(join(tmpdir(), "guard-bash-shared-nm-"));
+		const shared = mkdtempSync(join(tmpdir(), "pi-lens-guard-bash-shared-nm-"));
 		const tree = makeWorktreeDir("guard-bash-worktree-symlink-force-");
 		symlinkSync(shared, join(tree, "node_modules"));
 		try {
@@ -679,7 +679,7 @@ describe("scripts/hooks/guard-bash.mjs -- drains stdin to EOF on a large payload
 		// silently fold this case into the empty-stream case (chunks stays
 		// [], "" is returned instead of the error propagating), losing the
 		// note asserted below.
-		const dir = mkdtempSync(join(tmpdir(), "guard-bash-ebadf-"));
+		const dir = mkdtempSync(join(tmpdir(), "pi-lens-guard-bash-ebadf-"));
 		const writeOnlyFile = join(dir, "write-only");
 		const writeOnlyFd = openSync(writeOnlyFile, "w");
 		try {
@@ -744,7 +744,7 @@ describe("scripts/hooks/guard-bash.mjs -- drains stdin to EOF on a large payload
 	// tries to note the failure, that write itself fails, and pre-fix that
 	// second failure was unguarded.
 	it("still exits 0 (not 1) when the crash-guard's own note write fails (read-only stderr fd)", () => {
-		const dir = mkdtempSync(join(tmpdir(), "guard-bash-stderr-ro-"));
+		const dir = mkdtempSync(join(tmpdir(), "pi-lens-guard-bash-stderr-ro-"));
 		const readOnlyFile = join(dir, "stderr-ro");
 		writeFileSync(readOnlyFile, "");
 		const readOnlyFd = openSync(readOnlyFile, "r");
@@ -802,7 +802,7 @@ describe("scripts/hooks/guard-bash.mjs -- deny verdict survives a broken stderr 
 	it.each(DENY_RULE_COMMANDS)(
 		"still denies (%s) when stderr is a read-only fd -- message lost, verdict kept",
 		(_rule, command) => {
-			const dir = mkdtempSync(join(tmpdir(), "guard-bash-deny-ro-"));
+			const dir = mkdtempSync(join(tmpdir(), "pi-lens-guard-bash-deny-ro-"));
 			const readOnlyFile = join(dir, "stderr-ro");
 			writeFileSync(readOnlyFile, "");
 			const readOnlyFd = openSync(readOnlyFile, "r");
