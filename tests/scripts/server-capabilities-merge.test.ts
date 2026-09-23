@@ -347,6 +347,56 @@ describe("mergeServerCapabilitiesDoc (#469)", () => {
 		expect(text).not.toContain("- clangd");
 	});
 
+	it("keeps preserved rows and bullets in locale-independent order", () => {
+		// Recurrence #3342/#390: locale-sensitive preserved-value sorting made
+		// identical nightly inputs produce different documentation bytes.
+		const prior = [
+			"# doc",
+			"",
+			tableBlock(OLD_HEADER, [
+				["ä", "pull", "✓", "0"],
+				["z", "pull", "✓", "0"],
+			]),
+			"",
+			"## Raw advertised capability keys",
+			"",
+			"- **ä**: oldKey",
+			"- **z**: oldKey",
+			"",
+			"## Advertised executeCommand allowlists",
+			"",
+			"- **ä** (1): old.command",
+			"- **z** (1): old.command",
+			"",
+		].join("\n");
+		const fresh = [
+			"# doc",
+			"",
+			tableBlock(OLD_HEADER, [["z", "pull", "✓", "1"]]),
+			"",
+			"## Raw advertised capability keys",
+			"",
+			"- **z**: freshKey",
+			"",
+			"## Advertised executeCommand allowlists",
+			"",
+			"- **z** (1): fresh.command",
+			"",
+		].join("\n");
+
+		const { text } = mergeServerCapabilitiesDoc(prior, fresh);
+		const lines = text.split("\n");
+		expect(lines.indexOf("| z | pull | ✓ | 1 |")).toBeLessThan(
+			lines.indexOf("| ä | pull | ✓ | 0 |"),
+		);
+		expect(lines.indexOf("- **z**: freshKey")).toBeLessThan(
+			lines.indexOf("- **ä**: oldKey"),
+		);
+		expect(lines.indexOf("- **z** (1): fresh.command")).toBeLessThan(
+			lines.indexOf("- **ä** (1): old.command"),
+		);
+	});
+
 	it("(d) captured-this-run servers always win over prior rows", () => {
 		const prior = makeDoc(OLD_HEADER, [["go", "push-only", "·", "0"]], {
 			go: "(none reported)",

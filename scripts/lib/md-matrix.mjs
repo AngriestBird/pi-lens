@@ -364,7 +364,7 @@ export function mergeBulletSection(
 	}
 	if (!added) return newText;
 	const sortedLines = [...byKey.keys()]
-		.sort((a, b) => a.localeCompare(b))
+		.sort(compareStableStrings)
 		.map((k) => byKey.get(k));
 	const before = lines.slice(0, bodyStart);
 	const after = lines.slice(bodyEnd);
@@ -429,7 +429,7 @@ export function mergeServerCapabilitiesDoc(priorText, freshText) {
 		"server",
 	);
 	const mergedRows = [...newTbl.rows, ...reshaped].sort((a, b) =>
-		a[keyIdx].localeCompare(b[keyIdx]),
+		compareStableStrings(a[keyIdx], b[keyIdx]),
 	);
 	let text = replaceTable(
 		freshText,
