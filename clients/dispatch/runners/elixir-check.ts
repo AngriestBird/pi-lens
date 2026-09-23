@@ -51,13 +51,14 @@ function parseElixirOutput(
 
 	// elixirc reports paths RELATIVE to its cwd (e.g. `bad.ex`, not the absolute
 	// path we passed), so resolve the reported path against the runner cwd — not
-	// process.cwd(). The two spellings then still differ in ways only the
-	// filesystem can settle: Elixir 1.16+ normalizes to a lowercase drive letter
-	// and forward slashes (`c:/...`), which never string-equals `C:\...` on
-	// Windows, and a symlinked directory names one file under two prefixes.
-	// `pathsEqual` is the repo's on-disk identity seam for exactly this question
-	// (`clients/dispatch/runners/terragrunt.ts:90` asks it the same way), so the
-	// case rule lives there and not here (#1193).
+	// process.cwd(). Two resolved spellings of ONE file still differ in ways
+	// only the filesystem can settle — Elixir 1.16+ normalizes to a lowercase
+	// drive letter and forward slashes (`c:/...`), which never string-equals
+	// `C:\...` on Windows — so ask `pathsEqual`, the repo's on-disk identity
+	// seam, instead of hand-rolling a win32 case fold here. It folds case
+	// exactly where the filesystem does and nowhere else, which a
+	// `process.platform` test cannot express; `terragrunt.ts:90` asks the same
+	// question the same way (#1193).
 	const matchesTarget = (sourcePath: string): boolean =>
 		pathsEqual(path.resolve(cwd, sourcePath.trim()), resolvedTarget);
 
