@@ -351,8 +351,8 @@ export const SERVER_DIAGNOSTIC_STRATEGIES: Record<string, DiagnosticStrategy> =
 			// once the index has already had a full aggregateWaitMs window.
 			workspaceIndexing: true,
 			workspaceIndexingWarmWaitMs: 250,
-			// #799: marksman is push-only and publishes NOTHING on a clean file —
-			// there is no pull fallback and no sync-confirm protocol (unlike
+			// #799 / run 35914033696: marksman is push-only and publishes NOTHING on
+			// a clean transition — there is no pull fallback and no sync-confirm protocol (unlike
 			// typescript's tsserver commands), so a clean markdown file's touch
 			// waits its full budget with zero signal either way. Marking it
 			// `silentOnClean` lets the generic push-only clean-confirm gate
@@ -374,20 +374,9 @@ export const SERVER_DIAGNOSTIC_STRATEGIES: Record<string, DiagnosticStrategy> =
 		// diagnostics this strategy governs are a REAL but PARTIAL signal, not
 		// full CUE validation.
 		//
-		// silentOnClean: true — the load-bearing finding. A cold `didOpen` on an
-		// already-CLEAN file publishes NOTHING inside the wait budget (measured:
-		// `touchFile` returns `inconclusive: true, inconclusiveReason:
-		// "diagnostics-wait"` after the full budget, never an affirmative empty
-		// array). This reproduces the #1520 review's original "reports
-		// conclusively clean while still waiting" concern for the clean-cold-open
-		// case specifically. It is NOT silent on every transition, though: once a
-		// document is open and a `didChange` lands, the server DOES publish —
-		// both the error (edit clean→broken: confirmed, ~930ms warm) and an
-		// explicit empty array clearing it (edit broken→clean: confirmed,
-		// ~320ms warm, `contentHash`-bound). That edit-triggered empty publish is
-		// exactly what the shared push-only clean-confirm gate needs
-		// `silentOnClean` for — it only ever governs the "no publish, notify
-		// succeeded" case, never a case that already got a real publish.
+		// The repaired clean-signal probe measured cue as publishing a versioned
+		// clean-transition set (run 35914033696), so this marker stays absent:
+		// the cascade must retain its normal early-publish path.
 		//
 		// seedFirstPush: true — the one cold-open case that DOES publish (a
 		// file that is already broken) sends the complete single diagnostic on
@@ -441,6 +430,16 @@ export const SERVER_DIAGNOSTIC_STRATEGIES: Record<string, DiagnosticStrategy> =
 			aggregateWaitMs: 2000,
 			expectSemanticSecondPush: false,
 			reopenOnResync: false,
+		},
+		// lua-language-server is push-only and was silent on clean transitions in
+		// the repaired probe (run 35914033696). Keep the marker on the measured
+		// server id so the cascade can skip its in-lane wait safely.
+		lua: {
+			seedFirstPush: true,
+			pullRetryBudgetMs: 0,
+			debounceMs: 150,
+			aggregateWaitMs: 2000,
+			expectSemanticSecondPush: false,
 			silentOnClean: true,
 		},
 	};

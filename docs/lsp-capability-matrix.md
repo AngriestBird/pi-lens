@@ -82,7 +82,7 @@ the next touch probes again. Only silence through the full push budget latches
 that server id as navigation-only for the service session. A publish upgrades it
 to the ordinary push-wait policy.
 
-## Matrix (dev box + CI nightly; mode last refreshed 2026-06-17 from run 27713958681, clean-behavior probed on the dev box 2026-07-08 — #460)
+## Matrix (dev box + CI nightly; mode last refreshed 2026-06-17 from run 27713958681, clean-behavior probed in run 35914033696 — #460)
 
 `mode` from cached capabilities; `clean-behavior` from the phase-aware publish-trace
 probe. The probe attributes publishes to two phases — the **dirty touch** (proves the
@@ -108,6 +108,8 @@ classification standing.
 | ruby | ruby-lsp | pull | — | n/a (pull) | 1 | ci |
 | csharp | csharp-ls | pull | — | n/a (pull) | 1 | ci |
 | typescript | typescript-language-server | push-only | silent | direct | 3 | dev+ci |
+| markdown | marksman | push-only | silent | direct | 3 | ci |
+| lua | lua-language-server | push-only | silent | direct | 3 | dev+ci |
 | python | pyright | push-only | publishes-versioned | TBD | 2 | dev+ci |
 | jedi | jedi-language-server (alt of python) | push-only | publishes-versioned | TBD | 2 | ci |
 | yaml | yaml-language-server | push-only | publishes-unversioned | TBD | 2* | dev+ci |
@@ -124,10 +126,11 @@ classification standing.
 | clojure | clojure-lsp | push-only | publishes-unversioned | TBD | 2* | ci |
 | opengrep | opengrep (aux) | push-only | publishes-unversioned | direct | 2* | dev+ci |
 | ast-grep | ast-grep (aux) | push-only | publishes-versioned | direct | 2 | dev+ci |
+| cue | CUE Language Server (cue lsp serve) | push-only | publishes-versioned | direct | 2 | dev+ci |
 
 **Unknown — fixture exists, mode not yet captured.** The toolchain-gated family
 (no auto-install today; tracked in #241) — `go` (gopls), `java` (jdtls),
-`kotlin`, `swift` (sourcekit-lsp), `lua`, `cpp` (clangd), `haskell`, `elixir`,
+`kotlin`, `swift` (sourcekit-lsp), `cpp` (clangd), `haskell`, `elixir`,
 `ocaml`, `nix` (nixd), `fsharp`. Their servers don't install in the nightly, so
 characterize reports `unknown` (a non-failure ⚠). Once #241 lands they'll fill in
 the same way clojure-lsp/gleam now do (both auto-install via the github strategy
@@ -207,4 +210,4 @@ Telemetry only — never a CI gate. Compares each probed server's observed
 marker; a mismatch means the marker may need a human update (#529). `unknown`
 observations are never compared (a slow/absent server is not evidence either way).
 
-- **[silent-not-marked]** observed silent on clean transitions but wait-policy/strategies.ts has no silentOnClean marker for "markdown" — cascade is burning the full in-lane wait it could skip (the pre-#458 situation)
+_None observed as of the last probe run._
