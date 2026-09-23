@@ -358,16 +358,26 @@ const GLEAM_VECTOR_COLUMN = 8;
  * vector.
  */
 /**
- * The same rendering with the gutter coloured, which is what gleam emits when
- * `FORCE_COLOR` is non-empty: codespan wraps `chars().snippet_start` in the
- * source-border style and resets after it (codespan-reporting 0.13.1
- * `src/term/renderer.rs:386-388`), cyan by default (`src/term/config.rs:246`),
- * and termcolor writes that as the SGR pair below. The exact parameters are
- * codespan's choice; what this pins is the STRUCTURE — an escape sequence
- * between the line start and the gutter.
+ * The same rendering as gleam emits when `FORCE_COLOR` is non-empty. codespan
+ * styles TWO things on the lines this parser reads, and both sit where a
+ * regex anchor would trip over them:
+ *
+ * - the title line — `render_header` sets the severity style, writes `error`,
+ *   switches to the header-message style for `: <message>` and resets at the
+ *   end of the line (codespan-reporting 0.13.1 `src/term/renderer.rs:141-171`),
+ *   so an escape sequence precedes the very first character of the line;
+ * - the locus gutter — `chars().snippet_start` is wrapped in the source-border
+ *   style and reset after it (`src/term/renderer.rs:386-388`), cyan by default
+ *   (`src/term/config.rs:246`).
+ *
+ * The exact SGR parameters are codespan's choice; what this pins is the
+ * STRUCTURE — an escape sequence before the title's `error`, and one between
+ * the line start and the gutter.
  */
-function colourTheGutter(rendered: string): string {
-	return rendered.replace("┌─", "\u001b[36m┌─\u001b[0m");
+function colourRichOutput(rendered: string): string {
+	return rendered
+		.replace(/^(error|warning): (.*)$/m, "\u001b[1;31m$1\u001b[1m: $2\u001b[0m")
+		.replace("┌─", "\u001b[36m┌─\u001b[0m");
 }
 
 function gleamCheckStderr(reported: string): string {
@@ -603,7 +613,7 @@ const MEMBERS: Member[] = [
 		},
 		output: (reported) => ({
 			status: 1,
-			stderr: colourTheGutter(gleamCheckStderr(reported)),
+			stderr: colourRichOutput(gleamCheckStderr(reported)),
 		}),
 	},
 	{
@@ -932,10 +942,13 @@ describe("gleam-check reported-path attribution (#3285)", () => {
 		expectGleamAttached(observed, gleamCheck);
 	});
 
-	// gleam colours the gutter whenever FORCE_COLOR is non-empty, whatever stderr
-	// is (`compiler-cli/src/cli.rs:194-207`). The pre-#3285 suffix compare never
-	// saw the line's prefix; an anchored capture without `stripAnsi` refuses the
-	// whole line and drops every diagnostic in that environment.
+	// gleam colours whenever FORCE_COLOR is non-empty, whatever stderr is
+	// (`compiler-cli/src/cli.rs:194-207`). The pre-#3285 suffix compare never saw
+	// the locus line's prefix; an anchored capture without `stripAnsi` refuses
+	// the whole line and drops every diagnostic in that environment. Recurrence
+	// prevented (#3293): the TITLE line is styled too, so the same anchored
+	// capture would refuse the message this PR reads and fall back to the
+	// project record — `expectGleamAttached` pins the decoded title here.
 	it("still attributes a colour-forced gleam locus line (#3285)", async () => {
 		const observed = await dispatch(gleamCheckColoured, echoesArgv);
 		expectGleamAttached(observed, gleamCheckColoured);
