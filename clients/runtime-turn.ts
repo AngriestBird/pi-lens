@@ -3554,11 +3554,13 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 							dispositionSuppressed += policy.suppressed;
 							const kept = policy.kept.filter(
 								(warning) =>
-									!(isSecretWarning(warning) &&
+									!(
+										isSecretWarning(warning) &&
 										typeof warning.line === "number" &&
 										secretBlockedLocations.has(
 											secretLocationKey(warning.filePath, warning.line),
-										)),
+										)
+									),
 							);
 							return kept.length > 0 ? { ...file, warnings: kept } : undefined;
 						})

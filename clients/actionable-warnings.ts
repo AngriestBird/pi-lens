@@ -2193,10 +2193,10 @@ export function formatActionableWarningsAdvisory(
 	const filtered = filterBuiltReport?.(report);
 	const advisoryReport = filtered
 		? {
-			...report,
-			files: filtered.files,
-			summary: summarizeReportFiles(filtered.files),
-		}
+				...report,
+				files: filtered.files,
+				summary: summarizeReportFiles(filtered.files),
+			}
 		: report;
 	if (advisoryReport.summary.unsuppressed === 0) return undefined;
 	const files = advisoryReport.files.filter((file) =>
