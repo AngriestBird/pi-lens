@@ -1148,6 +1148,51 @@ export function clearGitGuardTestFailure(
 	});
 }
 
+/**
+ * The first suppression verdict in the blocker map that no longer describes the
+ * file it was computed against, if any (#3248 round 2, GG-3283-01).
+ *
+ * `policySuppressed` is a statement about BYTES: the turn-end policy read the
+ * file's current content, re-derived the record's blockers through the
+ * content-bound disposition anchors, and found every one of them suppressed. It
+ * is therefore only true while those bytes are still there. Everything that
+ * changes a file THROUGH pi-lens re-establishes the verdict on its own — a
+ * dispatch replaces the record wholesale, and the turn-end freshness sweep
+ * demotes a self-drifted record before the policy loop can suppress it, which
+ * clears the verdict. Bytes that move OUTSIDE dispatch (an external formatter, a
+ * `git checkout`, an editor write) trigger neither, and the commit gate can be
+ * reached with no turn end in between at all — so the gate, the one reader that
+ * can let a verdict OPEN a commit, confirms it here instead of trusting the
+ * latch memo.
+ *
+ * Unverifiable is not clean: a record whose dispatch could not fingerprint the
+ * file (`inlineBlockerFileContent` absent, `clients/pipeline.ts:1632`) carries
+ * nothing to confirm, so it fails CLOSED — the same rule
+ * `retireInlineBlockerOnConfirmedClean` applies to unknown provenance.
+ *
+ * Cost: nothing at all unless a verdict is live (the common case), then one
+ * read per suppressed record — on commit/push attempts, the path that already
+ * fingerprints every affected file below. A size/mtime fast path was written
+ * first and deleted: `fileFingerprint` decides the same question on its own, so
+ * the tiers were unmutatable branches, not guards. `fileFingerprint` also
+ * returns `"missing"`/`"unreadable:<code>"` rather than throwing, and neither
+ * can equal a recorded hash, so an unreadable file is expired too.
+ */
+function firstExpiredSuppressionVerdict(
+	runtime: RuntimeCoordinator,
+): { filePath: string; tier: string } | undefined {
+	for (const entry of runtime.getInlineBlockersSnapshot?.() ?? []) {
+		if (!entry.policySuppressed) continue;
+		if (entry.recordedHash === undefined) {
+			return { filePath: entry.filePath, tier: "no_baseline" };
+		}
+		if (fileFingerprint(entry.filePath) !== entry.recordedHash) {
+			return { filePath: entry.filePath, tier: "content" };
+		}
+	}
+	return undefined;
+}
+
 export function evaluateGitGuard(
 	runtime: RuntimeCoordinator,
 	cacheManager: CacheManager,
@@ -1172,6 +1217,17 @@ export function evaluateGitGuard(
 			block: true,
 			reason: `🔴 COMMIT BLOCKED (--lens-guard): unresolved blockers must be fixed before commit/push.${detail}\n${inspectLine}`,
 		};
+	}
+	// #3248 round 2 (GG-3283-01): the latch above is a MEMO of the last policy
+	// pass, and a pass can only speak for the bytes it read. A verdict whose file
+	// has moved since is no answer at all, so it must not be the reason this
+	// commit is allowed.
+	const expired = firstExpiredSuppressionVerdict(runtime);
+	if (expired) {
+		return unknown(cwd, "inline_policy_stale", {
+			file: expired.filePath,
+			tier: expired.tier,
+		});
 	}
 	if (runtime.gitGuardCacheUnknownReason) {
 		return unknown(cwd, runtime.gitGuardCacheUnknownReason);

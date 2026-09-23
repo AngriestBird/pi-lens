@@ -549,6 +549,128 @@ describe("git-guard commit gate honors the turn-end disposition policy (#3248)",
 		}
 	});
 
+	it("keeps the gate closed when the suppressed file's bytes moved outside dispatch", async () => {
+		// GG-3283-01, the reviewer's probe on PR #3283 round 1. A suppression
+		// verdict is a statement about the bytes the policy read. When those
+		// bytes move without entering pi-lens dispatch — an external formatter, a
+		// `git checkout`, an editor write — nothing re-runs the policy, and
+		// before this check the latch stayed clear, the durable record had been
+		// cleared as clean, and the commit gate ALLOWED. The finding may well be
+		// back and the mark's strict anchor no longer matches, so the honest
+		// answer is "unknown", not "allowed".
+		const env = setupTestEnvironment("pi-lens-3248-outside-dispatch-");
+		try {
+			const cwd = env.tmpDir;
+			const filePath = path.join(cwd, "app.ts");
+			fs.writeFileSync(filePath, "alpha();\n");
+
+			const runtime = newRuntime();
+			runtime.projectRoot = cwd;
+			const cacheManager = new CacheManager(false);
+			const diagnostic = blockingDiagnostic(filePath, 1, "alpha is unsafe");
+			editDispatch(runtime, cacheManager, cwd, filePath, [diagnostic]);
+			markFalsePositive(cwd, diagnostic);
+
+			registerEdit(cacheManager, cwd, filePath);
+			await handleTurnEnd(makeTurnEndDeps(runtime, cacheManager, cwd));
+			turnEndText(cacheManager, cwd, runtime);
+			// The round-1 end state: latch clear, record gone, commit allowed.
+			expect(runtime.gitGuardHasBlockers).toBe(false);
+			expect(evaluateGitGuard(runtime, cacheManager, cwd)).toEqual({
+				block: false,
+			});
+
+			// No dispatch, no turn end: just different bytes on disk.
+			fs.writeFileSync(filePath, "alpha();\nbeta();\n");
+
+			expect(evaluateGitGuard(runtime, cacheManager, cwd)).toMatchObject({
+				block: true,
+				unknown: true,
+			});
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("still allows the commit after an unjudged turn end that changed nothing", async () => {
+		// The other direction of the same rule, so the fix cannot become "any
+		// turn end without a policy population re-blocks". A read-only turn takes
+		// `handleTurnEnd`'s no-file early return and judges nothing — but the
+		// bytes the verdict was computed against are still on disk, so the
+		// verdict still describes them and the gate must stay open.
+		const env = setupTestEnvironment("pi-lens-3248-unjudged-turn-");
+		try {
+			const cwd = env.tmpDir;
+			const filePath = path.join(cwd, "app.ts");
+			fs.writeFileSync(filePath, "alpha();\n");
+
+			const runtime = newRuntime();
+			runtime.projectRoot = cwd;
+			const cacheManager = new CacheManager(false);
+			const diagnostic = blockingDiagnostic(filePath, 1, "alpha is unsafe");
+			editDispatch(runtime, cacheManager, cwd, filePath, [diagnostic]);
+			markFalsePositive(cwd, diagnostic);
+			registerEdit(cacheManager, cwd, filePath);
+			await handleTurnEnd(makeTurnEndDeps(runtime, cacheManager, cwd));
+			turnEndText(cacheManager, cwd, runtime);
+
+			// A turn that touched no file at all: the early return, no policy pass.
+			runtime.beginTurn();
+			await handleTurnEnd(makeTurnEndDeps(runtime, cacheManager, cwd));
+
+			expect(runtime.gitGuardHasBlockers).toBe(false);
+			expect(evaluateGitGuard(runtime, cacheManager, cwd)).toEqual({
+				block: false,
+			});
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("keeps the gate closed for a suppressed record with no content baseline", async () => {
+		// Fail closed on unverifiable provenance, the rule the retire path
+		// already applies: a record whose dispatch could not read the file
+		// (`inlineBlockerFileContent` absent, `clients/pipeline.ts:1632`) carries
+		// nothing that can confirm the verdict still describes current bytes, so
+		// it must not be the reason a commit is allowed.
+		const env = setupTestEnvironment("pi-lens-3248-no-baseline-");
+		try {
+			const cwd = env.tmpDir;
+			const filePath = path.join(cwd, "app.ts");
+			fs.writeFileSync(filePath, "alpha();\n");
+
+			const runtime = newRuntime();
+			runtime.projectRoot = cwd;
+			const cacheManager = new CacheManager(false);
+			const diagnostic = blockingDiagnostic(filePath, 1, "alpha is unsafe");
+			// Recorded exactly as `handleToolResult` records it when the pipeline
+			// had no readable content to fingerprint: no `contentBaseline`.
+			runtime.recordInlineBlockers(
+				filePath,
+				formatDiagnostics([diagnostic], "blocking").trim(),
+				runtime.nextWriteIndex(),
+				["ast-grep"],
+				[1],
+				undefined,
+				[diagnostic],
+			);
+			runtime.updateGitGuardStatus(true, "blocker");
+			syncGitGuardRecord(runtime, cacheManager, cwd, filePath);
+			markFalsePositive(cwd, diagnostic);
+
+			registerEdit(cacheManager, cwd, filePath);
+			await handleTurnEnd(makeTurnEndDeps(runtime, cacheManager, cwd));
+			turnEndText(cacheManager, cwd, runtime);
+
+			expect(evaluateGitGuard(runtime, cacheManager, cwd)).toMatchObject({
+				block: true,
+				unknown: true,
+			});
+		} finally {
+			env.cleanup();
+		}
+	});
+
 	it("leaves a 4.2.1-shaped record parseable and still blocking after the policy runs", async () => {
 		// Old-record proof: this fix adds NO field to `TurnEndFindingsCache`, so
 		// a record written by 4.2.1 is read by today's gate unchanged, and a

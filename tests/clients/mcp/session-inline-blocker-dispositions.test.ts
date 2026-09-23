@@ -270,5 +270,12 @@ describe("MCP turn-end adapter honors inline-blocker dispositions (#3246)", () =
 		expect(evaluateGitGuard(ctx.runtime, ctx.cacheManager, tmpDir)).toEqual({
 			block: false,
 		});
+
+		// GG-3283-01 on this host too: bytes that move outside dispatch make the
+		// verdict stale, and the gate must not keep allowing on it.
+		fs.writeFileSync(filePath, "alpha();\nbeta();\n");
+		expect(
+			evaluateGitGuard(ctx.runtime, ctx.cacheManager, tmpDir),
+		).toMatchObject({ block: true, unknown: true });
 	});
 });

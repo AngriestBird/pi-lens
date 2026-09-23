@@ -72,6 +72,47 @@ policy verdict. One identity rule, no second clause:
   record later in the SAME turn end from the same survivor set, and its clear is
   gated on the latch this pass just recomputed.
 
+### Amendment, review round 2 (GG-3283-01): the verdict is content-bound
+
+Round 1's rule said a verdict "cannot outlive the pass that made it" because
+`applyInlineBlockerPolicyVerdicts` rewrites the whole axis each turn end. The
+review probe showed that is only true while every byte change enters pi-lens
+dispatch: `handleTurnEnd` returns before the policy loop when no file was
+touched, and a commit can arrive with no turn end after the change at all.
+
+Second state table, axes: did a turn end judge this record · how the bytes moved
+since the verdict · is the durable record present.
+
+| # | judged | bytes since verdict | record | gate | case |
+|---|---|---|---|---|---|
+| 1 | yes | unchanged | cleared | allow | `clears the latch and the record when every blocker on the file is marked` |
+| 2 | yes | unchanged | present | block | `keeps the gate closed when only two of four blockers are marked` |
+| 3 | yes, then an unrelated edit | unchanged | cleared | allow | `stays clear when the NEXT turn edits an unrelated clean file` |
+| 4 | yes, then a dispatch of the same file | changed by dispatch | rewritten | block | `re-latches when a NEW blocker is dispatched on the same file after the mark` |
+| 5 | no (no-file turn end) | unchanged | cleared | allow | `still allows the commit after an unjudged turn end that changed nothing` |
+| 6 | no (no-file turn end) | changed outside dispatch | cleared | **unknown** | `keeps the gate closed when the suppressed file's bytes moved outside dispatch` |
+| 7 | no turn end at all after the change | changed outside dispatch | cleared | **unknown** | same case, and `does not allow the commit after an external change to a marked file` (pi host) |
+| 8 | yes, after an outside change | changed outside dispatch | re-rendered | block | the freshness sweep demotes the record before the policy loop, so it is never a survivor and the verdict is cleared |
+| 9 | yes | unverifiable (no content baseline) | either | **unknown** | `keeps the gate closed for a suppressed record with no content baseline` |
+
+One clause, added to the rule above rather than replacing it: **a suppression
+verdict is a statement about BYTES, so it stands only while the file still
+matches the content baseline the record carries** (`recordedHash`, the #2982
+baseline the freshness sweep already compares against — and which the sweep
+guarantees matched at stamping time, since a self-drifted record is demoted
+before the policy loop can suppress it). The gate — the one reader that can let
+a verdict OPEN a commit — confirms that before allowing, and an unverifiable
+record (no baseline) fails closed. Rejected alternatives, from the table:
+
+- a TURN generation on the stamp: reds cell 3, which is the defect #3248 is
+  about (an unrelated edit must not re-block).
+- invalidating verdicts at every unjudged turn end (the review's suggestion):
+  leaves cells 7 and 9 open, because no turn end runs between the change and the
+  commit — and reds cell 5, re-blocking a commit after a read-only turn.
+  Mutation P1 in PR #3283 quotes both.
+- clearing the verdict in the freshness sweep only: covers cell 8, which the
+  existing rewrite already covers, and none of 6, 7 or 9.
+
 ## Consequences
 
 The latch cannot be treated as a read-only projection of the blocker map.
@@ -79,6 +120,11 @@ Old-record parsing, the latch-first consumer, and the paired resynchronization
 remain strict consumers of the next fix. `TurnEndFindingsCache` is unchanged by
 this slice — the verdict is in-memory only, so a 4.2.1 commit hook reads records
 written after a policy pass with no new field.
+
+The gate now reads the blocker map itself, not only the latch memo: one content
+hash per suppressed record on a commit/push attempt, and nothing when no verdict
+is live. `logDecision`'s existing `git-guard` `decision` record carries the new
+`inline_policy_stale` reason category with the file and tier.
 
 Clearing the latch exposes the gate's SECOND reader, which has its own defect:
 `hasCompleteBlockingProvenance` parses `blockerContent` line by line while both

@@ -32,6 +32,7 @@
  * `syncGitGuardRecord` and `evaluateGitGuard` are REAL.
  */
 
+import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -83,9 +84,17 @@ function blockingDiagnostic(
 	};
 }
 
-/** The `PipelineResult` the real pipeline builds for a blocking run. */
-function blockingPipelineResult(blockers: Diagnostic[]) {
+/**
+ * The `PipelineResult` the real pipeline builds for a blocking run, including
+ * `inlineBlockerFileContent` — the size/sha256 of the bytes the dispatch read
+ * (`clients/pipeline.ts:1632`). Production attaches it whenever it could read
+ * the file, and the commit gate's round-2 check treats its absence as
+ * unverifiable, so a double that omitted it would not be faithful on the axis
+ * under test.
+ */
+function blockingPipelineResult(blockers: Diagnostic[], filePath: string) {
 	const summary = formatDiagnostics(blockers, "blocking").trim();
+	const bytes = fs.readFileSync(filePath);
 	return {
 		output: summary,
 		hasBlockers: true,
@@ -95,6 +104,10 @@ function blockingPipelineResult(blockers: Diagnostic[]) {
 		inlineBlockerSources: ["ast-grep"],
 		inlineBlockerLines: blockers.map((d) => d.line),
 		inlineBlockerDiagnostics: blockers,
+		inlineBlockerFileContent: {
+			size: bytes.byteLength,
+			sha256: createHash("sha256").update(bytes).digest("hex"),
+		},
 	};
 }
 
@@ -116,11 +129,10 @@ describe("#3248 witness: the commit gate and the banner agree through pi", () =>
 			blockingDiagnostic(filePath, 1, "alpha is unsafe"),
 			blockingDiagnostic(filePath, 2, "beta is unsafe"),
 		];
-		const blocking = blockingPipelineResult(blockers);
 		pipeline.runPipeline.mockImplementation(
 			async (ctx: { filePath: string }) =>
 				path.resolve(ctx.filePath) === path.resolve(filePath)
-					? blocking
+					? blockingPipelineResult(blockers, filePath)
 					: CLEAN_PIPELINE_RESULT,
 		);
 
@@ -235,5 +247,73 @@ describe("#3248 witness: the commit gate and the banner agree through pi", () =>
 			fs.writeFileSync(GOLDEN, actual);
 		}
 		expect(actual).toBe(fs.readFileSync(GOLDEN, "utf-8"));
+	});
+
+	it("does not allow the commit after an external change to a marked file", async () => {
+		// GG-3283-01 through the pi host, with no turn end between the change and
+		// the commit: the same hooks, the same `tool_call` gate, and bytes that
+		// moved without entering dispatch. The turn-end verdict no longer
+		// describes the file, so the gate must answer "unknown", never "allowed".
+		const filePath = path.join(tmpDir, "src", "app.ts");
+		fs.mkdirSync(path.dirname(filePath), { recursive: true });
+		fs.writeFileSync(filePath, "alpha();\n");
+		const blockers = [blockingDiagnostic(filePath, 1, "alpha is unsafe")];
+		pipeline.runPipeline.mockImplementation(
+			async (ctx: { filePath: string }) =>
+				path.resolve(ctx.filePath) === path.resolve(filePath)
+					? blockingPipelineResult(blockers, filePath)
+					: CLEAN_PIPELINE_RESULT,
+		);
+
+		const pi = createPiMock();
+		pi.setFlag("lens-guard", true);
+		extension(pi.asExtensionAPI());
+		await pi.emit(
+			"session_start",
+			makeSessionStartEvent(),
+			makeCtx({ cwd: tmpDir, sessionId: SESSION_ID }),
+		);
+		await pi.emit("turn_start", {}, makeCtx({ cwd: tmpDir }));
+		await pi.emit(
+			"tool_result",
+			{
+				toolName: "edit",
+				input: { path: filePath },
+				details: { diff: "+  1 alpha();" },
+				content: [{ type: "text", text: "base" }],
+			},
+			makeCtx({ cwd: tmpDir }),
+		);
+		markDisposition(
+			tmpDir,
+			{
+				cwd: tmpDir,
+				filePath,
+				tool: "ast-grep",
+				rule: "no-eval",
+				message: "alpha is unsafe",
+				line: 1,
+				content: fs.readFileSync(filePath, "utf8"),
+			},
+			"false-positive",
+		);
+		await pi.emit("turn_end", {}, makeCtx({ cwd: tmpDir }));
+		await pi.emit(
+			"context",
+			{ messages: [{ role: "user", content: "keep working" }] },
+			makeCtx({ cwd: tmpDir }),
+		);
+
+		// An external formatter / checkout / editor write — no dispatch, no turn.
+		fs.writeFileSync(filePath, "alpha();\nbeta();\n");
+
+		const verdict = (await pi.emit(
+			"tool_call",
+			{ toolName: "bash", input: { command: 'git commit -m "wip"' } },
+			makeCtx({ cwd: tmpDir }),
+		)) as { block?: boolean; reason?: string } | undefined;
+
+		expect(verdict?.block).toBe(true);
+		expect(verdict?.reason ?? "").toContain("inline_policy_stale");
 	});
 });
