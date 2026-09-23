@@ -281,7 +281,6 @@ function render(
 
 /** The lane. Stateless — one object, no per-turn state to reset. */
 export const secretsLane: TurnEndLane<SecretsLaneSources, SecretsLaneKept> = {
-	id: "secrets",
 	collect,
 	gate,
 	render,

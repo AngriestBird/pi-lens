@@ -28,13 +28,13 @@ unregistered surface, invisible to the mechanism built to enumerate them.
 
 ## Decision
 
-**The interface** (`clients/turn-end/lane.ts`) is three stages plus an id:
+**The interface** (`clients/turn-end/lane.ts`) is three stages, and nothing else — no lane id, because nothing would read one:
 
 | Stage | Signature | Owns |
 |---|---|---|
 | collect | `collect(ctx) → Promise<S>` where `S` maps STORE name → `FindingFreshnessSource` | which caches to read, classification, the per-store `citedPath`/`scannedAt`/`onMissing` policy. Structured rows with source identity, never a rendered string. Calls no gate. |
 | gate | `gate(gates: TurnEndLaneGates<S>, ctx) → Kept` | the policy the shared pass cannot apply: dispositions through `filterFindingsByDisposition` (the seam in `clients/dispatch/finding-policy.ts`, ADR 0004), plus any per-store existence/lifecycle contract. `Kept` is lane-private. |
-| render | `render(kept, ctx) → TurnEndLaneParts` | the sections, the display cap, the tier each section belongs to, the per-store suppressed counts, and the location keys it delivered. Returns sections; never pushes. |
+| render | `render(kept, ctx) → TurnEndLaneParts` | the sections, the display cap, the tier each section belongs to, the per-store suppressed counts, and the location keys it delivered. Returns sections; never pushes. `TurnEndLaneParts` carries a field per tier the composer actually pushes and no others — an unread field is a side channel that drops a lane's output, so the advisory tier joins the type with the lane that renders one. |
 
 `TurnEndLaneContext` is the whole window a lane gets onto the turn: `cwd`, the
 hook's `signal`, `readScannerCache` (memoized per turn by the composer) and

@@ -96,17 +96,21 @@ export type TurnEndLaneGates<S extends TurnEndLaneSources> = {
 /**
  * What a lane contributes to the turn. Sections only — the composer pushes
  * them into the tiers it owns (see the module doc for why the push stays
- * there). Every field is optional: a lane that has nothing to say this turn
- * returns an empty object, which is how "clean" stays distinguishable from
- * "this lane did not run".
+ * there).
+ *
+ * There is a field per tier the composer PUSHES, and no others: a field the
+ * composer does not read is a side channel that silently drops a lane's
+ * output (AGENTS.md shape 5), so the advisory tier joins this type in the
+ * round that extracts a lane which renders one — together with its tagged
+ * push and its registry id, which is what makes that tier a delivery surface
+ * rather than a string. Optional because the next lanes will fill one tier,
+ * not all of them.
  */
 export interface TurnEndLaneParts {
 	/** Blocker sections: findings that must be addressed before continuing. */
 	blockerParts?: readonly string[];
 	/** Demoted-finding sections (#1622 review M2's own tier). */
 	staleSecretParts?: readonly string[];
-	/** Advisory sections: informational this turn. */
-	advisoryParts?: readonly string[];
 	/**
 	 * Store name → findings this lane dropped because of a stored disposition.
 	 * The composer folds these into the turn's ONE suppressed-by-disposition
@@ -127,10 +131,12 @@ export interface TurnEndLaneParts {
  * One turn-end delivery lane. `S` is the lane's store map (so the composer's
  * gate result is typed per store) and `Kept` is the lane's own post-policy
  * shape, which only the lane reads.
+ *
+ * Three stages and nothing else — no lane id, because nothing reads one: the
+ * store names inside `S` are the identity the gate's records carry, and the
+ * module path is the identity a human needs.
  */
 export interface TurnEndLane<S extends TurnEndLaneSources, Kept> {
-	/** Stable lane id, for records and for the registry's surface ids. */
-	readonly id: string;
 	collect(ctx: TurnEndLaneContext): Promise<S>;
 	gate(gates: TurnEndLaneGates<S>, ctx: TurnEndLaneContext): Kept;
 	render(kept: Kept, ctx: TurnEndLaneContext): TurnEndLaneParts;
