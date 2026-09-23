@@ -344,6 +344,37 @@ describe("formatFile is strict by default at the seam (#1337)", () => {
 		}
 	});
 
+	// Recurrence: #3312 round 4 dropped ANY short line containing a box-drawing
+	// character, so a diagnostic whose own text OPENS with one — a source-excerpt
+	// marker, not a banner — was deleted from the tail (review R4-1). Only the two
+	// decoration shapes may go: a rule of box characters alone, and a
+	// `<word> ━━━━` heading whose remainder is box-drawing only.
+	it("keeps a short box-prefixed diagnostic line verbatim", async () => {
+		const env = setupTestEnvironment("pi-lens-exit-msg-box-prefix-");
+		try {
+			fs.writeFileSync(
+				path.join(env.tmpDir, "go.mod"),
+				"module example.com/probe\n",
+			);
+			const filePath = path.join(env.tmpDir, "main.go");
+			fs.writeFileSync(filePath, "package main\n");
+			const diagnostic = "━ traceback source excerpt\nRuntimeError: boom";
+			safeSpawnAsync.mockResolvedValue({
+				status: 1,
+				stdout: "",
+				stderr: `${diagnostic}\n`,
+			});
+
+			const { formatFile, gofmtFormatter } = await loadFormatters();
+			const result = await formatFile(filePath, gofmtFormatter);
+
+			expect(result.success).toBe(false);
+			expect(result.error).toBe(diagnostic);
+		} finally {
+			env.cleanup();
+		}
+	});
+
 	// biome, ktlint and `mix format` report on stdout. Reading stderr only threw
 	// the diagnostic away and told the user just "exited with status 1".
 	it("falls back to stdout when stderr carries nothing useful", async () => {

@@ -2249,7 +2249,10 @@ export function clearFormatterRuntimeState(): void {
 }
 
 const BOX_DRAWING_GLOBAL = /[\u2500-\u257F]/g;
-const HAS_BOX_DRAWING = /[\u2500-\u257F]/;
+/** Blank, or a rule made of box-drawing characters and spacing alone. */
+const DECORATION_RULE = /^[\u2500-\u257F\s]*$/;
+/** The renderer's section heading: one word, then box-drawing to end of line. */
+const DECORATION_HEADING = /^\S+[ \t]+[\u2500-\u257F][\u2500-\u257F\s]*$/;
 
 /**
  * First line of `text` that actually carries a diagnostic.
@@ -2275,19 +2278,20 @@ export function firstDiagnosticLine(
 }
 
 /**
- * Blank, a pure box-drawing rule, or a short decorated section heading.
+ * The two decoration SHAPES a renderer emits, and nothing else: a rule made of
+ * box-drawing characters alone (blank lines included), and a `<word> ━━━━`
+ * section heading whose remainder after the word is box-drawing only.
  *
- * The single normalization both readers below share, so the bounded tail cannot
- * surface what the first-line reader already rejects (#3312 review R3-4: the
- * tail put biome's `format ━━━━` banner back in front of the strict #1337 seam).
+ * The single normalization both readers above and below share, so the bounded
+ * tail cannot surface what the first-line reader already rejects (#3312 review
+ * R3-4: the tail put biome's `format ━━━━` banner back in front of the strict
+ * #1337 seam). Matching SHAPES rather than "contains a box character and is
+ * short" is #3312 review R4-1: the length heuristic deleted
+ * `━ traceback source excerpt`, a diagnostic whose own text opens with a box
+ * character. A line carrying any non-decorative text is never decoration.
  */
 function isDecorativeLine(line: string): boolean {
-	const stripped = line.replace(BOX_DRAWING_GLOBAL, "").trim();
-	if (!stripped) return true;
-	// "format ━━━━━━━━" is a section banner, not a diagnostic. Require a rule AND
-	// a short remainder so a real one-line error containing a box character is
-	// not discarded.
-	return HAS_BOX_DRAWING.test(line) && stripped.length <= 24;
+	return DECORATION_RULE.test(line) || DECORATION_HEADING.test(line);
 }
 
 const FORMATTER_ERROR_TAIL_LINES = 20;
