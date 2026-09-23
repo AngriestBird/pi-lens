@@ -88,7 +88,7 @@ function capAffectedFiles(
  * everything up to `disposition` reads as the file name (#3282 F5).
  */
 const TURN_END_BLOCKER_SECTION =
-	/^Unresolved from this turn — (.+?)(?: \(suppressed by disposition: \d+ finding\(s\)\))?:$/;
+	/^Unresolved from this turn — ([^\s].*?)(?: \(suppressed by disposition: \d+ finding\(s\)\))?:$/;
 
 /**
  * The file a line of `blockerContent` ATTRIBUTES a new blocker section to, or
@@ -110,11 +110,11 @@ const TURN_END_BLOCKER_SECTION =
  */
 function blockerSectionFile(line: string): string | undefined {
 	const turnEndSection = TURN_END_BLOCKER_SECTION.exec(line);
-	if (turnEndSection) return turnEndSection[1]?.trim() || undefined;
+	if (turnEndSection) return turnEndSection[1];
 	if (/^\s/.test(line)) return undefined;
 	const separator = line.indexOf(": ");
 	if (separator <= 0) return undefined;
-	return line.slice(0, separator).trim() || undefined;
+	return line.slice(0, separator);
 }
 
 /**
@@ -180,7 +180,6 @@ function hasCompleteBlockingProvenance(
 		sectionKeys.push(guardPathKey(file, cwd));
 		inSection = true;
 	}
-	if (sectionKeys.length === 0) return false;
 	const uniqueSectionKeys = new Set(sectionKeys);
 	return (
 		uniqueSectionKeys.size === sectionKeys.length &&

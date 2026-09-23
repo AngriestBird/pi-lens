@@ -855,6 +855,50 @@ describe("git-guard", () => {
 		}
 	});
 
+	it("#3282: a blank line INSIDE a diagnostic message is body, not a boundary", () => {
+		// `formatDiagnostics` renders a multi-line message as
+		// `d.message.split("\n").join("\n  ")`
+		// (`clients/dispatch/utils/format-utils.ts:21`), so a message with a blank
+		// line reaches the record as a TWO-SPACE line. Only the composer's
+		// zero-length `"\n\n"` part separator ends a section; treating a
+		// whitespace-only line as a boundary would make the rest of the message
+		// text that no blocking file owns, and re-latch the #3282 block.
+		const env = setupTestEnvironment("pi-lens-git-guard-3282-blank-body-");
+		try {
+			const file = path.join(env.tmpDir, "app.ts");
+			fs.writeFileSync(file, "alpha();\n");
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			runtime.setTelemetryIdentity({ sessionId: "session-A" });
+			const cache = new CacheManager(false);
+			const summary = formatDiagnostics(
+				[
+					blockingDiagnostic(
+						file,
+						1,
+						"alpha is unsafe\n\nuse the checked helper instead",
+					),
+				],
+				"blocking",
+			).trim();
+			expect(summary).toContain("\n  \n");
+			runtime.recordInlineBlockers(file, summary, 1, ["ast-grep"]);
+			runtime.updateGitGuardStatus(true, summary);
+			syncGitGuardRecord(runtime, cache, env.tmpDir, file);
+
+			runtime.clearInlineBlockers(file);
+			runtime.updateGitGuardStatus(false, "");
+			syncGitGuardRecord(runtime, cache, env.tmpDir, file);
+
+			expect(runtime.gitGuardCacheUnknownReason).toBeUndefined();
+			expect(evaluateGitGuard(runtime, cache, env.tmpDir)).toEqual({
+				block: false,
+			});
+		} finally {
+			env.cleanup();
+		}
+	});
+
 	it("#3282: keeps the gate closed for a blocker section no blocking file owns", () => {
 		// Named recurrence for the fail-closed direction. `blockerParts` is
 		// multi-lane: the trivy CRITICAL report (`clients/runtime-turn.ts:2141`),
