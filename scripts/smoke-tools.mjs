@@ -109,11 +109,11 @@ export function lspGatePopulation(fixtures = LSP_FIXTURES) {
  * total: a server-authored source must not make an auxiliary finding look like
  * proof that the configured primary answered.
  */
-export function classifyLspGateResult(result, fx, unavailable = false) {
-	if (unavailable) {
+export function classifyLspGateResult(result) {
+	if (result?.details?.unavailable) {
 		return {
 			state: "skip",
-			detail: `${fx.serverHint} unavailable (tool not installed; pass --install)`,
+			detail: result.details.unavailable,
 			diags: 0,
 		};
 	}
@@ -2216,8 +2216,6 @@ async function runLspGate({ langs, install, verbose }) {
 	const { initLSPConfig } = await import(pathToFileURL(configEntry).href);
 	let ensureTool;
 	let getInstallAttempt;
-	let TOOLS_REGISTRY = [];
-	let pipCandidates = [];
 	{
 		const installerEntry = path.join(
 			repoRoot,
@@ -2226,17 +2224,11 @@ async function runLspGate({ langs, install, verbose }) {
 			"installer",
 			"index.js",
 		);
-		let pipCommandCandidatesFn;
 		({
 			ensureTool,
-			TOOLS: TOOLS_REGISTRY,
 			getInstallAttempt,
-			pipCommandCandidates: pipCommandCandidatesFn,
 		} = await import(pathToFileURL(installerEntry).href));
-		pipCandidates = pipCommandCandidatesFn?.() ?? [];
 	}
-	const toolsById = new Map(TOOLS_REGISTRY.map((t) => [t.id, t]));
-	const toolchainPresence = {};
 	const population = lspGatePopulation();
 	const selected = population.gated.filter(
 		(f) => !langs.length || langs.includes(f.lang),
@@ -2247,7 +2239,7 @@ async function runLspGate({ langs, install, verbose }) {
 	}
 	const rows = [];
 	for (const fx of selected) {
-		const { unavailableTools, attemptSnapshots } = await ensureFixtureTools(
+		await ensureFixtureTools(
 			fx.tools ?? [],
 			install
 				? ensureTool
@@ -2259,26 +2251,6 @@ async function runLspGate({ langs, install, verbose }) {
 					`[${fx.lang}] ensureTool(${toolId}) → ${resolved ?? "UNAVAILABLE"}`,
 				),
 		);
-		const unavailable =
-			(fx.tools ?? []).length > 0 &&
-			(fx.tools ?? []).every((t) => unavailableTools.has(t));
-		if (unavailable) {
-			const outcome = resolveUnavailabilityRow(
-				fx.tools ?? [],
-				unavailableTools,
-				attemptSnapshots,
-				{ toolsById, toolchainPresence, pipCandidates },
-				`${fx.serverHint} unavailable (tool not installed; pass --install)`,
-			);
-			rows.push({
-				lang: fx.lang,
-				runner: fx.serverHint,
-				state: outcome.row,
-				detail: outcome.detail,
-				diags: 0,
-			});
-			continue;
-		}
 		let workspace;
 		let absFile;
 		let cleanup;
@@ -2312,7 +2284,7 @@ async function runLspGate({ langs, install, verbose }) {
 				null,
 				{ cwd: workspace },
 			);
-			const verdict = classifyLspGateResult(result, fx);
+			const verdict = classifyLspGateResult(result);
 			rows.push({ lang: fx.lang, runner: fx.serverHint, ...verdict });
 			if (verbose) console.error(`[${fx.lang}] ${verdict.detail}`);
 		} catch (err) {

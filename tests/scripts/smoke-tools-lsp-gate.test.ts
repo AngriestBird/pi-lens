@@ -1,8 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { classifyLspGateResult } from "../../scripts/smoke-tools.mjs";
 
-const fixture = { lang: "lua", serverHint: "probe-primary" };
-
 describe("LSP diagnostics clean-gate classification (#2780/#2776)", () => {
 	it("passes only when the real handler reports a primary finding", () => {
 		expect(
@@ -14,7 +12,6 @@ describe("LSP diagnostics clean-gate classification (#2780/#2776)", () => {
 						auxiliaryDiagnosticsCount: 0,
 					},
 				},
-				fixture,
 			),
 		).toMatchObject({ state: "pass", diags: 1 });
 	});
@@ -32,14 +29,30 @@ describe("LSP diagnostics clean-gate classification (#2780/#2776)", () => {
 						auxiliaryDiagnosticsCount: 1,
 					},
 				},
-				fixture,
 			),
 		).toMatchObject({ state: "fail", diags: 1 });
 	});
 
 	it("skips a server whose declared tool is unavailable", () => {
-		expect(classifyLspGateResult(undefined, fixture, true)).toMatchObject({
+		// #3309 recurrence: installer availability can disagree with a real
+		// language-toolchain server. The gate must use the handler's no_clients
+		// decision, not an ensureTool preflight.
+		expect(
+			classifyLspGateResult({
+				details: {
+					unavailable: "LSP unavailable for /tmp/bad.lua: no LSP client is currently ready",
+				},
+			}),
+		).toMatchObject({
 			state: "skip",
 		});
+	});
+
+	it("fails when the handler ran but returned no primary finding", () => {
+		expect(
+			classifyLspGateResult(
+				{ details: { totalDiagnostics: 0, primaryDiagnosticsCount: 0 } },
+			),
+		).toMatchObject({ state: "fail" });
 	});
 });

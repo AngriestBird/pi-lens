@@ -1587,6 +1587,7 @@ async function runFileDiagnostics(
 			mode: "file",
 			severity,
 			serverScope,
+			...(unavailable ? { unavailable } : {}),
 			primaryServerId: primaryId,
 			primaryDiagnosticsCount: primaryDiags.length,
 			auxiliaryDiagnosticsCount: auxiliaryDiags.length,
