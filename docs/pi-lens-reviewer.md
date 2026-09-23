@@ -19,6 +19,14 @@
 ## Verification
 
 - Use `git diff origin/master...HEAD` or the merge-base equivalent.
+- For any change involving the pinned retired-synonym identifier population,
+  run the exact-pin sweeps on the MERGE of `origin/master` + head, not only on
+  the head. `tests/config/glossary-synonym-sweep.test.ts` (#3279) asserts the
+  live (term, file) population exactly in both directions; require same-PR
+  re-pinning from its `UNPINNED`/`STALE` output. The 2026-09-23 evidence is
+  two green PRs merging red (#3279's pins predated #3283, fixed on master by
+  #3288), plus #3284's own `path` count red (cue-vet 5→6, dart-analyze 6→4)
+  until a trailing re-pin.
 - Build and run the targeted and required governance suites.
 - Revert or neuter the source fix and verify the red-first test fails.
 - Mutate every new guard, filter, cap, fallback, and lifecycle path.
