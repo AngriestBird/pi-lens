@@ -224,16 +224,72 @@ const PARSE_MARKERS: ReadonlyArray<{
 ];
 
 /** The `Diagnostic` discriminator every construction site writes. */
+/**
+ * Where a diagnostic is CONSTRUCTED, structurally rather than lexically
+ * (M3304-F9, round 4). Round 3 recognised construction only by an in-file
+ * `tool:` object literal, so a parser whose diagnostic is assembled in a HELPER
+ * — `out.push(makeRow(filePath, match))`, or a call to the shared factory in
+ * `utils/diagnostic-parsers.ts` — had no local `tool:` literal and escaped the
+ * census while still parsing tool output and stamping the dispatched path.
+ *
+ * Three arms, any of which is construction:
+ *
+ * (a) an object literal carrying `tool:` — the `Diagnostic` discriminator;
+ * (b) a call to a diagnostic-producing export of
+ *     `clients/dispatch/runners/utils/**` ({@link SANCTIONED_HELPERS}), handed
+ *     the dispatched path as an argument;
+ * (c) an object literal carrying a `filePath` property that is PUSHED or
+ *     RETURNED — a diagnostic whose other fields came from somewhere else and
+ *     which therefore never writes `tool:` here.
+ *
+ * (b)'s list cannot go stale: {@link diagnosticProducingUtilExports} recomputes
+ * it from the utils sources on every run and
+ * `pins every diagnostic-producing helper the utils modules export` reds when a
+ * new export appears that is not registered.
+ */
 const DIAGNOSTIC_LITERAL = /\btool\s*:/g;
 
-/** `filePath` as a PROPERTY of that literal — shorthand or with a value. */
-const DIAGNOSTIC_PATH_PROPERTY = /\bfilePath\s*(:|,|\}|\r?\n)/;
+/** An object literal in VALUE position: `push({`, `return {`, `return [{`. */
+const DELIVERED_LITERAL = /(?:\.\s*push\s*\(\s*|\breturn\s+\[?\s*)\{/g;
+
+/**
+ * A second `Diagnostic` field beside `filePath`, or a spread that supplies the
+ * rest of the row. Keeps arm (c) on diagnostics instead of every delivered
+ * object that happens to carry a path.
+ */
+const DIAGNOSTIC_FIELD = /(?:^|[{,\n])\s*(?:message|severity|semantic|\.\.\.)/;
+
+/**
+ * `filePath` in KEY position of that literal — shorthand or with a value. The
+ * leading `{`/`,`/newline is load-bearing: without it `{ path: filePath, … }`
+ * reads its VALUE as a shorthand key, which flagged `clients/knip-client.ts`
+ * and `clients/tree-sitter-client.ts` on this round's first measurement.
+ */
+const DIAGNOSTIC_PATH_PROPERTY = /(?:^|[{,\n])\s*filePath\s*(:|,|\}|\r?\n)/;
 
 /** The dispatch path written out longhand. */
 const DISPATCH_PATH_EXPRESSION = /^ctx\s*\.\s*filePath$/;
 
 /** A bare identifier, i.e. a name whose binding decides the question. */
 const BARE_IDENTIFIER = /^[A-Za-z_$][\w$]*$/;
+
+const RUNNERS_UTILS_ROOT = path.resolve(RUNNERS_ROOT, "utils");
+
+/**
+ * A factory in `utils/**` whose product is a diagnostic parser: a function that
+ * RETURNS an arrow annotated `: Diagnostic[] =>`. Recomputed, never pinned by
+ * name, so `createLineParser` gaining a sibling does not need an edit here.
+ */
+const DIAGNOSTIC_FACTORY =
+	/\b(?:function|const)\s+([A-Za-z_$][\w$]*)[\s\S]{0,600}?\)\s*:\s*Diagnostic\[\]\s*=>/g;
+
+/** `export function NAME(` — the annotation after its parameter list decides. */
+const EXPORTED_FUNCTION =
+	/\bexport\s+(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(/g;
+
+/** `export const NAME = callee(` — the callee decides. */
+const EXPORTED_CONST_CALL =
+	/\bexport\s+const\s+([A-Za-z_$][\w$]*)\s*(?::[^=;]*)?=\s*([A-Za-z_$][\w$]*)\s*\(/g;
 
 /**
  * The `{ … }` containing `index`, as `[open, close]`, or `null`. Walks back over
@@ -289,14 +345,118 @@ function declaresLocal(stripped: string, name: string): boolean {
 	);
 }
 
+/** Is this expression the dispatched path rather than something parsed? */
+function isDispatchPath(stripped: string, expression: string): boolean {
+	const value = expression.trim();
+	if (DISPATCH_PATH_EXPRESSION.test(value)) return true;
+	return BARE_IDENTIFIER.test(value) && !declaresLocal(stripped, value);
+}
+
+/**
+ * The exports of `clients/dispatch/runners/utils/**` that PRODUCE diagnostics,
+ * recomputed from source: an exported function whose return annotation names
+ * `Diagnostic`, or an exported const initialized by a diagnostic FACTORY.
+ */
+export function diagnosticProducingUtilExports(): string[] {
+	const names = new Set<string>();
+	const files = listSourceFiles(RUNNERS_UTILS_ROOT, { extensions: [".ts"] });
+	for (const { source } of readWalkedFiles(files)) {
+		const stripped = stripForScan(source);
+		const factories = new Set<string>();
+		for (const match of stripped.matchAll(DIAGNOSTIC_FACTORY))
+			factories.add(match[1]!);
+		for (const match of stripped.matchAll(EXPORTED_FUNCTION)) {
+			const open = (match.index ?? 0) + match[0].length - 1;
+			let depth = 0;
+			let close = open;
+			for (let i = open; i < stripped.length; i++) {
+				if (stripped[i] === "(") depth += 1;
+				else if (stripped[i] === ")") {
+					depth -= 1;
+					if (depth === 0) {
+						close = i;
+						break;
+					}
+				}
+			}
+			const body = stripped.indexOf("{", close);
+			if (body > close && stripped.slice(close, body).includes("Diagnostic"))
+				names.add(match[1]!);
+		}
+		for (const match of stripped.matchAll(EXPORTED_CONST_CALL)) {
+			if (factories.has(match[2]!) || match[0].includes("Diagnostic"))
+				names.add(match[1]!);
+		}
+	}
+	return [...names].sort();
+}
+
+/**
+ * Diagnostic-producing helpers a runner may delegate construction to. Pinned so
+ * the arm is auditable; the pin is checked against
+ * {@link diagnosticProducingUtilExports} on every run, so a new utils export
+ * that returns diagnostics cannot silently widen the escape.
+ *
+ * - `parseRuffOutput` / `parseGoVetOutput` — both are `createLineParser(...)`
+ *   products in `clients/dispatch/runners/utils/diagnostic-parsers.ts`, and the
+ *   factory builds the whole `Diagnostic` object literal itself. A caller that
+ *   hands one of them `ctx.filePath` is constructing a diagnostic stamped with
+ *   the dispatched path, with no `tool:` anywhere in its own source.
+ */
+const SANCTIONED_HELPERS: readonly string[] = [
+	"parseGoVetOutput",
+	"parseRuffOutput",
+];
+
+/** Arm (b): a call to a sanctioned helper handed the dispatched path. */
+function delegatesToSanctionedHelper(stripped: string): boolean {
+	for (const helper of SANCTIONED_HELPERS) {
+		const call = new RegExp(`\\b${escapeRegExp(helper)}\\s*\\(`, "g");
+		for (const match of stripped.matchAll(call)) {
+			const open = (match.index ?? 0) + match[0].length - 1;
+			let depth = 0;
+			let close = open;
+			for (let i = open; i < stripped.length; i++) {
+				if (stripped[i] === "(") depth += 1;
+				else if (stripped[i] === ")") {
+					depth -= 1;
+					if (depth === 0) {
+						close = i;
+						break;
+					}
+				}
+			}
+			const args = stripped.slice(open + 1, close).split(",");
+			if (args.some((argument) => isDispatchPath(stripped, argument)))
+				return true;
+		}
+	}
+	return false;
+}
+
 /**
  * Does this file construct a diagnostic stamped with the DISPATCHED path —
  * rather than with a path read out of the tool's output?
  */
 export function stampsDispatchPathOnDiagnostic(source: string): boolean {
 	const stripped = stripForScan(source);
-	for (const marker of stripped.matchAll(DIAGNOSTIC_LITERAL)) {
-		const span = enclosingBraceSpan(stripped, marker.index ?? 0);
+	const sites: number[] = [];
+	for (const marker of stripped.matchAll(DIAGNOSTIC_LITERAL))
+		sites.push(marker.index ?? 0);
+	// Arm (c): the literal is DELIVERED — pushed or returned — and carries at
+	// least one more `Diagnostic` field, so it is a diagnostic even when its
+	// `tool:` came from a spread or a helper. Without the second field this arm
+	// also flags `{ filePath, mapped }` result records and `logLatency` rows
+	// (measured: `clients/dispatch/runners/helm-render.ts`).
+	for (const marker of stripped.matchAll(DELIVERED_LITERAL)) {
+		const at = (marker.index ?? 0) + marker[0].length;
+		const span = enclosingBraceSpan(stripped, at);
+		if (!span) continue;
+		if (DIAGNOSTIC_FIELD.test(stripped.slice(span[0], span[1]))) sites.push(at);
+	}
+
+	for (const site of sites) {
+		const span = enclosingBraceSpan(stripped, site);
 		if (!span) continue;
 		const [open, close] = span;
 		const body = stripped.slice(open, close);
@@ -308,12 +468,16 @@ export function stampsDispatchPathOnDiagnostic(source: string): boolean {
 			if (!declaresLocal(stripped, "filePath")) return true;
 			continue;
 		}
-		const value = propertyValue(stripped, at + property[0].length, close);
-		if (DISPATCH_PATH_EXPRESSION.test(value)) return true;
-		if (BARE_IDENTIFIER.test(value) && !declaresLocal(stripped, value))
+		if (
+			isDispatchPath(
+				stripped,
+				propertyValue(stripped, at + property[0].length, close),
+			)
+		)
 			return true;
 	}
-	return false;
+	// Arm (b): construction delegated to a diagnostic-producing utils export.
+	return delegatesToSanctionedHelper(stripped);
 }
 
 /** Which parse markers this file trips, for the census's own report. */
@@ -507,6 +671,15 @@ const LOCAL_COMPARE_PINS: Readonly<Record<string, number>> = {};
  * - `psscriptanalyzer.ts@1` — the runner's own `PS_SCRIPT` runs
  *   `Select-Object RuleName,Severity,Line,Column,Message`, so the path is
  *   PROJECTED AWAY before `ConvertTo-Json`: no path can reach the parser.
+ * - `ruff.ts@1` — flagged by ARM (b) in round 4: it hands `ctx.filePath` to
+ *   `parseRuffOutput`, the shared factory's product, and holds no `pathsEqual`
+ *   of its own. Both of its arms are covered: the JSON arm attributes each
+ *   diagnostic to `item.filename || filePath` (the reported path, not a blanket
+ *   stamp), and the TEXT arm delegates to `parseRuffOutput`, whose predicate
+ *   lives in `utils/diagnostic-parsers.ts` — itself in this census population,
+ *   so removing it reds there — and is mutation-proved by the
+ *   `diagnostic-parsers` cells in
+ *   `tests/clients/dispatch/runners/reported-path-attribution.test.ts`.
  * - `phpstan.ts@1` — the flagged stamp is the `output.errors[]` arm, phpstan's
  *   FILE-INDEPENDENT findings (internal errors, ignore patterns that matched
  *   nothing). Those carry no file at all and attach to the edited file at line 1
@@ -519,6 +692,7 @@ const NO_PREDICATE_PINS: Readonly<Record<string, number>> = {
 	"clients/dispatch/runners/phpstan.ts": 1,
 	"clients/dispatch/runners/prisma-validate.ts": 1,
 	"clients/dispatch/runners/psscriptanalyzer.ts": 1,
+	"clients/dispatch/runners/ruff.ts": 1,
 	"clients/dispatch/runners/shfmt.ts": 1,
 };
 
@@ -801,6 +975,57 @@ describe("runner reported-path attribution single-source-of-truth (#3278)", () =
 	 * `tests/clients/dispatch/runners/reported-path-attribution.test.ts`, whose
 	 * signature is the DELIVERED diagnostic.
 	 */
+	/**
+	 * M3304-F9: "builds a diagnostic" must be STRUCTURAL, not lexical. Round 3
+	 * recognised only an in-file `tool:` literal, so a parser that delegates
+	 * construction to a helper escaped the census entirely.
+	 */
+	it("flags a parser whose diagnostic is built in a sanctioned helper", () => {
+		expect(
+			countLocationParsersWithoutPathsEqual(
+				readFileSync(
+					path.resolve(
+						REPO_ROOT,
+						"tests/fixtures/reported-path-attribution/helper-built.ts",
+					),
+					"utf8",
+				),
+			),
+			"arm (b): no `tool:` literal, construction delegated to parseRuffOutput",
+		).toBe(1);
+		expect(
+			countLocationParsersWithoutPathsEqual(
+				"const rows = raw.split('\\n');\n" +
+					"out.push({ ...base, filePath, message: rows[0] });",
+			),
+			"arm (c): a DELIVERED literal whose other fields came from a spread",
+		).toBe(1);
+		expect(
+			countLocationParsersWithoutPathsEqual(
+				"const rows = raw.split('\\n');\n" +
+					"return { filePath, mapped: rows.length > 0 };",
+			),
+			"arm (c) stays on diagnostics: a delivered result record is not one",
+		).toBe(0);
+		expect(
+			countLocationParsersWithoutPathsEqual(
+				"const parsed = JSON.parse(raw);\n" +
+					"return { path: filePath, mtimeMs: parsed.m, size: parsed.s };",
+			),
+			"`filePath` in VALUE position is not a `filePath` KEY (knip-client)",
+		).toBe(0);
+	});
+
+	/**
+	 * The arm-(b) list cannot go stale: it is recomputed from the utils sources
+	 * on every run, so a NEW export that returns diagnostics reds here until it
+	 * is registered — the failure mode that let three shapes through in rounds
+	 * 1-3 was exactly a hand-maintained list of names.
+	 */
+	it("pins every diagnostic-producing helper the utils modules export", () => {
+		expect(diagnosticProducingUtilExports()).toEqual([...SANCTIONED_HELPERS]);
+	});
+
 	it("cannot see through a pathsEqual call on unrelated operands (named limit)", () => {
 		expect(
 			countLocationParsersWithoutPathsEqual(
