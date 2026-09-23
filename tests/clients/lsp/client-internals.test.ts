@@ -530,7 +530,9 @@ describe("resolveConfigurationSection (#983)", () => {
 		expect(
 			resolveConfigurationSection(initialization, "unknown.section"),
 		).toEqual({});
-		expect(resolveConfigurationSection(initialization, "scan.nope")).toEqual({});
+		expect(resolveConfigurationSection(initialization, "scan.nope")).toEqual(
+			{},
+		);
 		expect(
 			resolveConfigurationSection(initialization, "unknown.section"),
 		).not.toBe(initialization);

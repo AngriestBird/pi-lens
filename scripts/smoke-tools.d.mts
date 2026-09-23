@@ -27,7 +27,11 @@ export function lspGatePopulation(fixtures?: LspFixture[]): {
 };
 /** The nightly's `gated N / handshake-only M / unavailable K` census line. */
 export function formatGateCensus(
-	population: { eligible: LspFixture[]; gated: LspFixture[]; exempt: LspFixture[] },
+	population: {
+		eligible: LspFixture[];
+		gated: LspFixture[];
+		exempt: LspFixture[];
+	},
 	rows: Array<{ state: string }>,
 	langs?: string[],
 ): string;

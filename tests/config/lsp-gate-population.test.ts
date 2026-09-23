@@ -53,19 +53,18 @@ describe("LSP clean-gate population (#3217)", () => {
 		const undecided = eligible
 			.filter(
 				(fixture) =>
-					fixture.lspGate !== true &&
-					typeof fixture.lspGateExempt !== "string",
+					fixture.lspGate !== true && typeof fixture.lspGateExempt !== "string",
 			)
 			.map((fixture) => fixture.lang);
-		expect(undecided, "fixtures with neither lspGate nor lspGateExempt").toEqual(
-			[],
-		);
+		expect(
+			undecided,
+			"fixtures with neither lspGate nor lspGateExempt",
+		).toEqual([]);
 
 		const both = eligible
 			.filter(
 				(fixture) =>
-					fixture.lspGate === true &&
-					typeof fixture.lspGateExempt === "string",
+					fixture.lspGate === true && typeof fixture.lspGateExempt === "string",
 			)
 			.map((fixture) => fixture.lang);
 		expect(both, "fixtures claiming both opt-in and exemption").toEqual([]);
@@ -138,9 +137,8 @@ describe("LSP clean-gate population (#3217)", () => {
 			state: index === 0 ? "skip" : "pass",
 		}));
 		const line = formatGateCensus(population, rows);
-		const match = /gated (\d+) \/ handshake-only (\d+) \/ unavailable (\d+)/.exec(
-			line,
-		);
+		const match =
+			/gated (\d+) \/ handshake-only (\d+) \/ unavailable (\d+)/.exec(line);
 		expect(match, line).not.toBeNull();
 		const [gated, handshakeOnly, unavailable] = match!
 			.slice(1)
@@ -148,6 +146,8 @@ describe("LSP clean-gate population (#3217)", () => {
 		expect(unavailable).toBe(1);
 		expect(gated).toBe(population.gated.length - 1);
 		expect(handshakeOnly).toBe(population.exempt.length);
-		expect(gated + handshakeOnly + unavailable).toBe(population.eligible.length);
+		expect(gated + handshakeOnly + unavailable).toBe(
+			population.eligible.length,
+		);
 	});
 });
