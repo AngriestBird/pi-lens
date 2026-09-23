@@ -771,6 +771,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/dispatch/runners/detekt.ts": 7,
 		"clients/dispatch/runners/dotnet-build.ts": 3,
 		"clients/dispatch/runners/elixir-check.ts": 6,
+		"clients/dispatch/runners/gleam-check.ts": 3,
 		"clients/dispatch/runners/golangci-lint.ts": 3,
 		"clients/dispatch/runners/hadolint.ts": 2,
 		"clients/dispatch/runners/helm-lint.ts": 11,

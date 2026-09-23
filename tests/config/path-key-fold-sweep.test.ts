@@ -298,7 +298,6 @@ const SLASH_FOLD_PINS: Readonly<Record<string, number>> = {
 	"clients/dispatch/integration.ts": 2,
 	"clients/dispatch/runner-context.ts": 3,
 	"clients/dispatch/runners/actionlint.ts": 1,
-	"clients/dispatch/runners/gleam-check.ts": 2,
 	"clients/feature-hints.ts": 1,
 	"clients/file-role.ts": 2,
 	"clients/file-utils.ts": 2,
