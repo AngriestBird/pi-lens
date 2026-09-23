@@ -234,13 +234,26 @@ function numericArrays(expression: string): number[] {
 	return codes;
 }
 
+/** Every `const`/`let`/`var` initializer in this file, by bound name. */
+function declaredBindings(code: string): Map<string, string[]> {
+	const bindings = new Map<string, string[]>();
+	for (const match of code.matchAll(
+		/\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*([^;]*);/g,
+	)) {
+		const initializers = bindings.get(match[1]) ?? [];
+		initializers.push(match[2]);
+		bindings.set(match[1], initializers);
+	}
+	return bindings;
+}
+
 /**
- * Numeric arrays `expression` evaluates to, following `const`/`let` bindings
- * one identifier at a time so `const statuses = [1, 3]` reached through a
+ * Numeric arrays `expression` evaluates to, following the bindings above one
+ * identifier at a time so `const statuses = [1, 3]` reached through a
  * `for ... of` still counts. `seen` keeps a cyclic binding from recursing.
  */
 function resolveArrays(
-	code: string,
+	bindings: Map<string, string[]>,
 	expression: string,
 	seen: Set<string>,
 ): number[] {
@@ -249,12 +262,8 @@ function resolveArrays(
 		const name = match[1];
 		if (seen.has(name)) continue;
 		seen.add(name);
-		const declaration = new RegExp(
-			`\\b(?:const|let|var)\\s+${name.replace(/\$/g, "\\$")}\\s*=\\s*([^;]*);`,
-			"g",
-		);
-		for (const bound of code.matchAll(declaration))
-			codes.push(...resolveArrays(code, bound[1], seen));
+		for (const initializer of bindings.get(name) ?? [])
+			codes.push(...resolveArrays(bindings, initializer, seen));
 	}
 	return codes;
 }
@@ -262,6 +271,7 @@ function resolveArrays(
 function executableStatusCells(testSource: string): Set<number> {
 	const code = stripSource(testSource, { strings: "blank" });
 	const carriers = statusCarriers(code);
+	const bindings = declaredBindings(code);
 	const cells = new Set<number>();
 	for (const match of code.matchAll(/\b(?:status|exitCode)\s*:\s*(\d+)\b/g))
 		cells.add(Number(match[1]));
@@ -273,8 +283,8 @@ function executableStatusCells(testSource: string): Set<number> {
 		const close = matchingCloseIndex(code, open, "(", ")");
 		if (close < 0) continue;
 		const iterable = code.slice(match.index + match[0].length, close);
-		for (const code_ of resolveArrays(code, iterable, new Set()))
-			cells.add(code_);
+		for (const cell of resolveArrays(bindings, iterable, new Set()))
+			cells.add(cell);
 	}
 	for (const match of code.matchAll(/\b(?:it|test|describe)\.each\s*\(/g)) {
 		const open = match.index + match[0].length - 1;
@@ -290,12 +300,12 @@ function executableStatusCells(testSource: string): Set<number> {
 			.split(",")
 			.some((parameter) => carriers.has(parameter.trim()));
 		if (!bound) continue;
-		for (const code_ of resolveArrays(
-			code,
+		for (const cell of resolveArrays(
+			bindings,
 			code.slice(open + 1, close),
 			new Set(),
 		))
-			cells.add(code_);
+			cells.add(cell);
 	}
 	return cells;
 }
