@@ -1703,33 +1703,8 @@ export async function runPipeline(
 		.filter((warning): warning is CodeQualityWarningRecord => Boolean(warning));
 
 	if (dispatchResult.diagnostics.length > 0) {
-		const logger = getDiagnosticLogger();
 		const tracker = getDiagnosticTracker();
 		tracker.trackShown(dispatchResult.diagnostics);
-		const toKey = (d: (typeof dispatchResult.diagnostics)[number]) =>
-			[
-				d.tool || "",
-				d.id || "",
-				d.rule || "",
-				d.filePath || "",
-				d.line || 0,
-				d.column || 0,
-			].join("|");
-		const inlineKeys = new Set(
-			[...dispatchResult.blockers, ...dispatchResult.fixed].map(toKey),
-		);
-		for (const d of dispatchResult.diagnostics) {
-			logger.logCaught(
-				d,
-				{
-					model: ctx.telemetry?.model ?? "unknown",
-					sessionId: ctx.telemetry?.sessionId ?? "unknown",
-					turnIndex: ctx.telemetry?.turnIndex ?? 0,
-					writeIndex: ctx.telemetry?.writeIndex ?? 0,
-				},
-				inlineKeys.has(toKey(d)),
-			);
-		}
 	}
 
 	if (fixedCount > 0) getDiagnosticTracker().trackAutoFixed(fixedCount);
@@ -1762,6 +1737,33 @@ export async function runPipeline(
 	// returns `[]` whenever `hasBlockers` is false, so this one expression is the
 	// whole condition.
 	const hasDeliverableBlockers = deliverableBlockers.length > 0;
+	if (dispatchResult.diagnostics.length > 0) {
+		const logger = getDiagnosticLogger();
+		const toKey = (d: (typeof dispatchResult.diagnostics)[number]) =>
+			[
+				d.tool || "",
+				d.id || "",
+				d.rule || "",
+				d.filePath || "",
+				d.line || 0,
+				d.column || 0,
+			].join("|");
+		const inlineKeys = new Set(
+			[...deliverableBlockers, ...dispatchResult.fixed].map(toKey),
+		);
+		for (const d of dispatchResult.diagnostics) {
+			logger.logCaught(
+				d,
+				{
+					model: ctx.telemetry?.model ?? "unknown",
+					sessionId: ctx.telemetry?.sessionId ?? "unknown",
+					turnIndex: ctx.telemetry?.turnIndex ?? 0,
+					writeIndex: ctx.telemetry?.writeIndex ?? 0,
+				},
+				inlineKeys.has(toKey(d)),
+			);
+		}
+	}
 	const deliveredOutput =
 		!allowAutonomousWriters && dispatchResult.hasBlockers
 			? dispatchResult.output.slice(dispatchResult.blockerOutput.length)
