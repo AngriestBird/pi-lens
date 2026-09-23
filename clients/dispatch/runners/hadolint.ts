@@ -1,4 +1,5 @@
 import * as path from "node:path";
+import { pathsEqual } from "../../path-utils.js";
 import { safeSpawnAsync } from "../../safe-spawn.js";
 import { resolveRunnerCwd } from "../../tool-cwd.js";
 import { getLinterPolicyForCwd } from "../../tool-policy.js";
@@ -27,25 +28,36 @@ interface HadolintResult {
 	level: "error" | "warning" | "info" | "style";
 }
 
-function parseHadolintOutput(raw: string, filePath: string): Diagnostic[] {
+function parseHadolintOutput(
+	raw: string,
+	filePath: string,
+	cwd: string,
+): Diagnostic[] {
 	try {
 		const parsed = JSON.parse(raw) as HadolintResult[];
 		if (!Array.isArray(parsed)) return [];
 
-		return parsed.map((item) => {
+		const absTarget = path.resolve(cwd, filePath);
+		return parsed.flatMap((item) => {
+			// #3295: hadolint takes a LIST of Dockerfiles and names each finding's
+			// own `file`.
+			if (item.file && !pathsEqual(path.resolve(cwd, item.file), absTarget))
+				return [];
 			const severity = item.level === "error" ? "error" : "warning";
-			return {
-				id: `hadolint-${item.code}-${item.line}`,
-				message: `[${item.code}] ${item.message}`,
-				filePath,
-				line: item.line,
-				column: item.column ?? 1,
-				severity,
-				semantic: severity === "error" ? "blocking" : "warning",
-				tool: "hadolint",
-				rule: item.code,
-				fixable: false,
-			};
+			return [
+				{
+					id: `hadolint-${item.code}-${item.line}`,
+					message: `[${item.code}] ${item.message}`,
+					filePath,
+					line: item.line,
+					column: item.column ?? 1,
+					severity,
+					semantic: severity === "error" ? "blocking" : "warning",
+					tool: "hadolint",
+					rule: item.code,
+					fixable: false,
+				},
+			];
 		});
 	} catch {
 		return [];
@@ -86,7 +98,7 @@ const hadolintRunner: RunnerDefinition = {
 		// something. A nonzero exit therefore means hadolint itself failed, and
 		// zero parsed diagnostics out of whatever it printed is a parser break.
 		const run = parseToolRun("hadolint", { result }, (out) =>
-			parseHadolintOutput(out, ctx.filePath),
+			parseHadolintOutput(out, ctx.filePath, cwd),
 		);
 		if (run.skipped) return run.skipped;
 

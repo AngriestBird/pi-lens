@@ -110,7 +110,7 @@ const ruffRunner: RunnerDefinition = {
 				const diagnostics = parseRuffJson(output, ctx.filePath);
 				return diagnostics.length > 0
 					? diagnostics
-					: parseRuffOutput(output, ctx.filePath);
+					: parseRuffOutput(output, ctx.filePath, cwd);
 			},
 		);
 		if (run.skipped) return run.skipped;

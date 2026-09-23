@@ -1,4 +1,5 @@
 import * as path from "node:path";
+import { pathsEqual } from "../../path-utils.js";
 import { safeSpawnAsync } from "../../safe-spawn.js";
 import { resolveRunnerCwd } from "../../tool-cwd.js";
 import { getLinterPolicyForCwd } from "../../tool-policy.js";
@@ -49,25 +50,41 @@ interface TflintOutput {
 	errors: Array<{ message: string }>;
 }
 
-function parseTflintOutput(raw: string, filePath: string): Diagnostic[] {
+function parseTflintOutput(
+	raw: string,
+	filePath: string,
+	toolCwd: string,
+): Diagnostic[] {
 	try {
 		const parsed = JSON.parse(raw) as TflintOutput;
 		const issues = parsed.issues ?? [];
 
-		return issues.map((issue) => {
+		// #3295: tflint loads EVERY `*.tf` in its working directory — `--filter` is
+		// best-effort — and names each issue's own `range.filename`, relative to
+		// the directory it ran in (`toolCwd`, which is the file's dir, not the
+		// runner cwd).
+		const absTarget = path.resolve(toolCwd, filePath);
+		return issues.flatMap((issue) => {
+			if (
+				issue.range?.filename &&
+				!pathsEqual(path.resolve(toolCwd, issue.range.filename), absTarget)
+			)
+				return [];
 			const severity = issue.rule.severity === "error" ? "error" : "warning";
-			return {
-				id: `tflint-${issue.rule.name}-${issue.range.start.line}`,
-				message: `[${issue.rule.name}] ${issue.message}`,
-				filePath,
-				line: issue.range.start.line,
-				column: issue.range.start.column,
-				severity,
-				semantic: severity === "error" ? "blocking" : "warning",
-				tool: "tflint",
-				rule: issue.rule.name,
-				fixable: false,
-			};
+			return [
+				{
+					id: `tflint-${issue.rule.name}-${issue.range.start.line}`,
+					message: `[${issue.rule.name}] ${issue.message}`,
+					filePath,
+					line: issue.range.start.line,
+					column: issue.range.start.column,
+					severity,
+					semantic: severity === "error" ? "blocking" : "warning",
+					tool: "tflint",
+					rule: issue.rule.name,
+					fixable: false,
+				},
+			];
 		});
 	} catch {
 		return [];
@@ -118,7 +135,7 @@ const tflintRunner: RunnerDefinition = {
 		// verified against a real binary here, so the conservative
 		// nothing-to-parse rule stays the only discriminator.
 		const run = parseToolRun("tflint", { result }, (out) =>
-			parseTflintOutput(out, ctx.filePath),
+			parseTflintOutput(out, absPath, fileDir),
 		);
 		if (run.skipped) return run.skipped;
 
