@@ -31,10 +31,8 @@ const NOT_YET_ON_PRIMITIVE: Record<string, string> = {
 
 	// Spawning runners that already consult the spawn outcome with their own
 	// per-tool check. Correct today, not yet unified. #1737.
-	"eslint.ts": "reads its own exit status; #1737 strangler",
 	"fish-indent.ts": "reads its own exit status; #1737 strangler",
 	"gleam-check.ts": "reads its own exit status; #1737 strangler",
-	"golangci-lint.ts": "reads its own exit status; #1737 strangler",
 	"helm-lint.ts": "reads its own exit status; #1737 strangler",
 	"helm-render.ts": "reads its own exit status; #1737 strangler",
 	"ktlint.ts": "reads its own exit status; #1737 strangler",
@@ -120,6 +118,8 @@ describe("run-outcome primitive ratchet", () => {
 			"zig-check.ts",
 			"rubocop.ts",
 			"ruff.ts",
+			"eslint.ts",
+			"golangci-lint.ts",
 		]) {
 			expect(usesPrimitive(readRunner(name)), `${name}`).toBe(true);
 			expect(NOT_YET_ON_PRIMITIVE[name]).toBeUndefined();

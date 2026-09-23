@@ -25,6 +25,7 @@ import {
 	createAvailabilityChecker,
 	resolveAvailableOrInstall,
 } from "./utils/runner-helpers.js";
+import { finishParsedRun, parseToolRun } from "./utils/tool-failure.js";
 
 const golangci = createAvailabilityChecker("golangci-lint", ".exe");
 
@@ -149,28 +150,30 @@ const golangciRunner: RunnerDefinition = {
 			{ timeout: 60000, cwd },
 		);
 
-		if (result.status === 0) {
-			return { status: "succeeded", diagnostics: [], semantic: "none" };
-		}
-
-		const diagnostics = parseGolangciJson(result.stdout, ctx.filePath);
-		let semantic: RunnerResult["semantic"] = "none";
-		if (diagnostics.some((d) => d.semantic === "blocking")) {
-			semantic = "blocking";
-		} else if (diagnostics.length > 0) {
-			semantic = "warning";
-		}
-
-		if (semantic === "none") {
-			// Non-zero exit but no parseable issues — likely a config/tool error
-			return { status: "skipped", diagnostics: [], semantic };
-		}
-
-		return {
-			status: semantic === "blocking" ? "failed" : "succeeded",
-			diagnostics,
-			semantic,
-		};
+		// Exit table: 0 is clean-or-findings; 1 means issues, 3 failure,
+		// 4 timeout, and 5 missing config. Every nonzero code is a ran outcome
+		// whose parser decides: JSON issues remain findings, while emitted
+		// non-JSON text becomes a parse-error diagnostic and no output stays
+		// skipped. Keep stderr as the parse input when stdout is absent so tool
+		// errors cannot be mistaken for a clean file.
+		const raw =
+			(result.stdout ?? "").length > 0
+				? (result.stdout ?? "")
+				: result.status !== 0
+					? result.stderr || ""
+					: "";
+		const parsed = parseToolRun(
+			"golangci-lint",
+			{ result, output: raw },
+			(raw) => parseGolangciJson(raw, ctx.filePath),
+		);
+		if (parsed.skipped) return parsed.skipped;
+		return finishParsedRun({
+			tool: "golangci-lint",
+			ctx,
+			result,
+			diagnostics: parsed.diagnostics,
+		});
 	},
 };
 

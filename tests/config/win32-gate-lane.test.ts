@@ -9,6 +9,7 @@ import {
 	readWalkedFile,
 	recordedVanishedPathCount,
 	VANISHED_PATH_RECORD_CAP,
+	WINDOWS_LANE_ADMISSIONS,
 } from "../../scripts/lib/win32-gate-population.mjs";
 import {
 	assertNonEmptyScan,
@@ -124,6 +125,9 @@ describe("win32 gate lane governance (#2536)", () => {
 		expect(enumerationRun).not.toMatch(/git grep/);
 		const detectedFiles = detectedWin32GateFiles();
 		const population = getWin32LaneFiles(ROOT);
+		expect(population).toContain(
+			"tests/clients/dispatch/runners/go-vet.test.ts",
+		);
 		expect(findWin32Gates(ROOT).length).toBeGreaterThan(0);
 		expect(getWin32GateFiles(ROOT)).toEqual(
 			expect.arrayContaining(detectedFiles),
@@ -135,6 +139,15 @@ describe("win32 gate lane governance (#2536)", () => {
 		// and `getWin32LaneFiles`) measured 22.8 s under Stryker's dry run,
 		// past vitest's 5 s default. Walk time, not wall-clock waiting.
 	}, 60_000);
+
+	it("keeps every explicit Windows admission live and reasoned (#3277)", () => {
+		for (const admission of WINDOWS_LANE_ADMISSIONS) {
+			const source = readFileSync(resolve(ROOT, admission.file), "utf8");
+			expect(source).toContain(LANE_HEADER);
+			expect(admission.reason).toMatch(/#\d+/);
+			expect(getWin32LaneFiles(ROOT)).toContain(admission.file);
+		}
+	});
 
 	// #3104 review F6: this module walks the tests/ tree and reads what the walk
 	// returned, so it carries the #3082 tolerant read. It cannot import
