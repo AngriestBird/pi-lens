@@ -316,7 +316,7 @@ describe("documented runner exit-table ratchet (#3292)", () => {
 			}
 			return cells;
 		};
-		const admitted = new Set<string>();
+		const pinnedKeys = new Set<string>();
 		for (const name of population) {
 			const table = exitTables(read(name))[0];
 			if (!table) continue;
@@ -328,6 +328,7 @@ describe("documented runner exit-table ratchet (#3292)", () => {
 			const cells = cellsOf(cellFile);
 			for (const code of table.codes) {
 				const key = `${name}:${code}`;
+				pinnedKeys.add(key);
 				if (cells.has(code)) {
 					if (Object.hasOwn(UNWITNESSED, key))
 						failures.push(
@@ -335,10 +336,7 @@ describe("documented runner exit-table ratchet (#3292)", () => {
 						);
 					continue;
 				}
-				if (Object.hasOwn(UNWITNESSED, key)) {
-					admitted.add(key);
-					continue;
-				}
+				if (Object.hasOwn(UNWITNESSED, key)) continue;
 				failures.push(
 					`${key}: documented ran code has no executable matrix cell in ${cellFile}`,
 				);
@@ -348,7 +346,7 @@ describe("documented runner exit-table ratchet (#3292)", () => {
 			if (!population.includes(name))
 				failures.push(`${name}: stale MATRIX row`);
 		for (const key of Object.keys(UNWITNESSED))
-			if (!admitted.has(key))
+			if (!pinnedKeys.has(key))
 				failures.push(`${key}: stale UNWITNESSED admission; no such pinned code`);
 		expect(failures).toEqual([]);
 	});
