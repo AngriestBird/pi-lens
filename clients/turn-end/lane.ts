@@ -74,8 +74,21 @@ export interface TurnEndLaneContext {
 	 * about a store they both read. The inline lanes got one-read-per-store
 	 * for free by reading into a local; a lane that reads its own store gets
 	 * it from here.
+	 *
+	 * Asynchronous since #3274, and the memo holds the PROMISE: the read
+	 * suspends (`CacheManager.readCacheAsync`) so the composer can put it
+	 * under `bounded()` with the turn_end budget and the hook's signal, which
+	 * the synchronous read made impossible — it completed during argument
+	 * evaluation, before `bounded()` was handed anything. Two lanes awaiting
+	 * one store therefore still share ONE read and ONE TTL boundary.
+	 *
+	 * `null` means "no envelope inside the bound" as well as "cold cache", and
+	 * a lane must treat the two identically — it never means an EMPTY store
+	 * (AGENTS.md defect shape 10). Every lane here already renders nothing for
+	 * a cold store, which is the correct answer for an abandoned read too: the
+	 * bound's own `hook-await-exceeded` row is what makes it visible.
 	 */
-	readScannerCache<T>(scanner: string): CacheEntry<T> | null;
+	readScannerCache<T>(scanner: string): Promise<CacheEntry<T> | null>;
 	/** This turn's dispatch actionable warnings (already disposition-filtered). */
 	peekActionableWarnings(): readonly ActionableWarningRecord[];
 }

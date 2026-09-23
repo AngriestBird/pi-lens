@@ -196,6 +196,8 @@ export const UNBOUNDED_FAILURE_PHASE_REASONS: Record<string, string> = {
 		"One record per cross-process budget evaluation, which runs on the LSP spawn path rather than per file.",
 	finding_path_stat_budget_exhausted:
 		"One batched record per delivery-gate call naming every source whose stat allowance ran out, so volume follows deliveries, not findings.",
+	scanner_cache_read_abandoned:
+		"One batched record per turn_end delivery naming every scanner store the tiers were composed without, so volume follows deliveries, not stores — the composer collects the stores in a per-delivery array and emits once, and there are only three such stores (#3274).",
 	finding_dead_path_drop:
 		"One batched record per delivery-gate call listing every dropped finding, so volume follows scans, not findings.",
 	lsp_client_unavailable:
