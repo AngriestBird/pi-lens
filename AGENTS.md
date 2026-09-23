@@ -901,3 +901,7 @@ Detailed incident narratives, completed migrations, closed design threads, and
 large evidence tables moved to `HISTORY.md` on 2026-09-14. Read that file only
 when the task needs historical rationale; do not copy its detail back into this
 live contract unless it changes a future decision.
+
+## Contributing
+
+Bare-Node scripts import only `.js`/`.mjs`; type stripping is not assumed.
