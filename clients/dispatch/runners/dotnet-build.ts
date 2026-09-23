@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { safeSpawnAsync } from "../../safe-spawn.js";
+import { pathsEqual } from "../../path-utils.js";
 import { resolveRunnerCwd } from "../../tool-cwd.js";
 import { PRIORITY } from "../priorities.js";
 import type {
@@ -104,17 +105,21 @@ function parseDotnetDiagnosticLine(line: string): DotnetDiagnosticLine | null {
 	return { reportedFile, lineStr, colStr, severityLabel, rule, message };
 }
 
-function parseDotnetBuildOutput(raw: string, filePath: string): Diagnostic[] {
+function parseDotnetBuildOutput(
+	raw: string,
+	filePath: string,
+	cwd: string,
+): Diagnostic[] {
 	const diagnostics: Diagnostic[] = [];
+	const absTarget = path.resolve(cwd, filePath);
 	for (const line of raw.split(/\r?\n/)) {
 		const parsed = parseDotnetDiagnosticLine(line);
 		if (!parsed) continue;
 
 		const { reportedFile, lineStr, colStr, severityLabel, rule, message } =
 			parsed;
-		const resolvedReported = path.resolve(reportedFile);
-		const resolvedTarget = path.resolve(filePath);
-		if (resolvedReported !== resolvedTarget) continue;
+		// #3278: one seam for reported-path attribution — see javac.ts.
+		if (!pathsEqual(path.resolve(cwd, reportedFile), absTarget)) continue;
 
 		const severity =
 			severityLabel.toLowerCase() === "error" ? "error" : "warning";
@@ -173,7 +178,7 @@ const dotnetBuildRunner: RunnerDefinition = {
 		const parsed = parseToolRun(
 			"dotnet-build",
 			{ result, output: raw },
-			(output) => parseDotnetBuildOutput(output, ctx.filePath),
+			(output) => parseDotnetBuildOutput(output, ctx.filePath, cwd),
 		);
 		if (parsed.skipped) return parsed.skipped;
 		return finishParsedRun({

@@ -75,7 +75,21 @@ const wire: Record<Tool, string> = {
 	}),
 };
 
-async function dispatchOutcome(tool: Tool, result: SpawnResult) {
+async function dispatchOutcome(
+	tool: Tool,
+	result: SpawnResult,
+	/**
+	 * Keep the tool's own RELATIVE spelling of the reported file instead of
+	 * rewriting it to the absolute temp path (#3278). golangci-lint really
+	 * reports `Pos.Filename` relative to its base path — `PathPrettifier`
+	 * overwrites the field with `filepath.Rel(basePath, …)` before the JSON
+	 * printer sees it (v1.64.8 `pkg/result/processors/path_prettifier.go:31` +
+	 * `path_relativity.go:43`) — so the substitution below, which every other
+	 * cell in this file relies on, was a double that mirrored the runner's own
+	 * wrong assumption and could not see the attribution defect.
+	 */
+	keepReportedSpelling = false,
+) {
 	vi.resetModules();
 	const env = setupTestEnvironment(`pi-lens-${tool}-outcome-`);
 	try {
@@ -87,7 +101,7 @@ async function dispatchOutcome(tool: Tool, result: SpawnResult) {
 		if (tool === "golangci-lint")
 			fs.writeFileSync(path.join(env.tmpDir, ".golangci.yml"), "run: {}\n");
 		const actualResult =
-			tool === "golangci-lint"
+			tool === "golangci-lint" && !keepReportedSpelling
 				? {
 						...result,
 						stdout: result.stdout.replace(
@@ -340,6 +354,33 @@ describe("JSON runner outcome seam (#1816)", () => {
 				expect.objectContaining({ cwd: expect.any(String) }),
 			);
 		});
+		if (tool === "golangci-lint") {
+			// ADR 0007 witness for the #3278 attribution slice: the rendered,
+			// model-facing text for a run whose reported spelling is the one
+			// golangci-lint really emits. Pre-fix this golden held the #1816
+			// parse-error row instead of the finding, because `path.resolve` with no
+			// base resolved `main.go` against the EXTENSION's cwd.
+			it("golangci-lint: a base-path-relative Pos.Filename renders as the finding (#3278)", async () => {
+				const observed = await dispatchOutcome(
+					tool,
+					{ error: null, status: 1, stdout: wire[tool], stderr: "" },
+					true,
+				);
+				expect(observed.status).toBe("failed");
+				expect(observed.diagnostics).toHaveLength(1);
+				expect(observed.output.trim()).toBe(
+					fs
+						.readFileSync(
+							path.resolve(
+								"tests/fixtures/witness/runner-outcome-eslint-golangci",
+								"golangci-lint-relative-path.txt",
+							),
+							"utf8",
+						)
+						.trim(),
+				);
+			});
+		}
 		it(`${tool}: bounds empty ledger across two files`, async () => {
 			const rows = await dispatchTwoEmptyFiles(tool);
 			expect(rows).toHaveLength(1);

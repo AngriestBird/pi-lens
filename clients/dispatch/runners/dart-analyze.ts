@@ -1,5 +1,6 @@
 import * as path from "node:path";
 import { safeSpawnAsync } from "../../safe-spawn.js";
+import { pathsEqual } from "../../path-utils.js";
 import { resolveRunnerCwd } from "../../tool-cwd.js";
 import { createAvailabilityChecker } from "./utils/runner-helpers.js";
 import { finishParsedRun, parseToolRun } from "./utils/tool-failure.js";
@@ -104,8 +105,13 @@ const DART_FIXABLE_RULES = new Set<string>([
 
 // dart analyze --format=machine output:
 // severity|type|code|file|line|col|length|message
-function parseDartMachineOutput(raw: string, filePath: string): Diagnostic[] {
+function parseDartMachineOutput(
+	raw: string,
+	filePath: string,
+	cwd: string,
+): Diagnostic[] {
 	const diagnostics: Diagnostic[] = [];
+	const absTarget = path.resolve(cwd, filePath);
 	for (const line of raw.split(/\r?\n/)) {
 		if (!line.trim()) continue;
 		const parts = line.split("|");
@@ -117,15 +123,15 @@ function parseDartMachineOutput(raw: string, filePath: string): Diagnostic[] {
 		const lineNum = parseInt(lineStr, 10);
 		const colNum = parseInt(colStr, 10);
 
-		// Only include diagnostics for the target file
-		if (
-			file &&
-			!path.resolve(file).endsWith(path.resolve(filePath).replace(/\\/g, "/"))
-		) {
-			const resolvedFile = path.resolve(file.trim());
-			const resolvedTarget = path.resolve(filePath);
-			if (resolvedFile !== resolvedTarget) continue;
-		}
+		// #3278: one seam for reported-path attribution — see javac.ts.
+		// The `endsWith` outer arm this replaces was inert on the target (a
+		// string ends with itself) and an over-merge risk everywhere else: any
+		// reported path whose TAIL spelled the absolute target attached to it.
+		// `file` is `parts[3]`, which `tsconfig.strict-indexed.json`
+		// (`noUncheckedIndexedAccess`) types as `string | undefined` even behind the
+		// `parts.length < 8` guard above — the strictness ratchet pins that, so the
+		// optional chain stays.
+		if (!pathsEqual(path.resolve(cwd, file?.trim() ?? ""), absTarget)) continue;
 
 		const severity =
 			severityStr?.trim().toLowerCase() === "error" ? "error" : "warning";
@@ -180,7 +186,7 @@ const dartAnalyzeRunner: RunnerDefinition = {
 		const parsed = parseToolRun(
 			"dart-analyze",
 			{ result, output: raw },
-			(out) => parseDartMachineOutput(out, ctx.filePath),
+			(out) => parseDartMachineOutput(out, ctx.filePath, cwd),
 		);
 		if (parsed.skipped) return parsed.skipped;
 		return finishParsedRun({

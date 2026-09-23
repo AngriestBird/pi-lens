@@ -18,6 +18,11 @@ export const WINDOWS_LANE_ADMISSIONS = Object.freeze([
 		reason:
 			"#3277: go-vet path identity uses the host filesystem's case-folding answer; the safe-spawn boundary is mocked, so no Go binary is required.",
 	}),
+	Object.freeze({
+		file: "tests/clients/dispatch/runners/reported-path-attribution.test.ts",
+		reason:
+			"#3278: the ten members' case-variant cells assert the host filesystem's own case-folding answer, and for the eight argv-echo members that arm is the only lane where restoring the local compare reds; every boundary mocked is a process boundary, so no toolchain is required.",
+	}),
 ]);
 
 function blankSource(source) {

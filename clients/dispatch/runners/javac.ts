@@ -1,4 +1,5 @@
 import * as path from "node:path";
+import { pathsEqual } from "../../path-utils.js";
 import { safeSpawnAsync } from "../../safe-spawn.js";
 import { resolveRunnerCwd } from "../../tool-cwd.js";
 import { hasJavaBuildDescriptor } from "../../tool-policy.js";
@@ -14,18 +15,29 @@ import { finishParsedRun, parseToolRun } from "./utils/tool-failure.js";
 
 const javac = createAvailabilityChecker("javac", ".exe");
 
-function parseJavacOutput(raw: string, filePath: string): Diagnostic[] {
+function parseJavacOutput(
+	raw: string,
+	filePath: string,
+	cwd: string,
+): Diagnostic[] {
 	const diagnostics: Diagnostic[] = [];
 	const lines = raw.split(/\r?\n/);
+	const absTarget = path.resolve(cwd, filePath);
 
 	for (const line of lines) {
 		const match = line.match(/^(.*?\.java):(\d+):\s+(error|warning):\s+(.+)$/i);
 		if (!match) continue;
 
 		const [, reportedFile, lineStr, severityLabel, message] = match;
-		const resolvedReported = path.resolve(reportedFile.trim());
-		const resolvedTarget = path.resolve(filePath);
-		if (resolvedReported !== resolvedTarget) continue;
+		// Is this reported diagnostic about the file we dispatched for? ONE seam
+		// answers that for every runner (#3278): resolve the tool's spelling against
+		// the cwd the tool RAN in — never `process.cwd()`, which is the extension's,
+		// not the runner's — and compare through `pathsEqual`, the repo's on-disk
+		// identity predicate. A bare `===` treats a spelling that differs only in
+		// case (the same file on Windows and on a case-folding POSIX mount) as a
+		// different file and drops every finding for the edited file (#209, #3277).
+		if (!pathsEqual(path.resolve(cwd, reportedFile.trim()), absTarget))
+			continue;
 
 		const severity =
 			severityLabel.toLowerCase() === "error" ? "error" : "warning";
@@ -93,7 +105,7 @@ const javacRunner: RunnerDefinition = {
 		const raw = `${result.stdout ?? ""}\n${result.stderr ?? ""}`.trim();
 
 		const parsed = parseToolRun("javac", { result, output: raw }, (output) =>
-			parseJavacOutput(output, ctx.filePath),
+			parseJavacOutput(output, ctx.filePath, cwd),
 		);
 		if (parsed.skipped) return parsed.skipped;
 		return finishParsedRun({

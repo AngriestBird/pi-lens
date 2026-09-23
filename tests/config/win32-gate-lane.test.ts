@@ -140,14 +140,20 @@ describe("win32 gate lane governance (#2536)", () => {
 		// past vitest's 5 s default. Walk time, not wall-clock waiting.
 	}, 60_000);
 
+	// One tests/-tree walk for the whole table, not one per admission: the walk
+	// is the expensive part (the sibling above measured 22.8 s under Stryker's
+	// dry run), and #3278 made this the SECOND admission — two walks blew
+	// vitest's 5 s default in CI's advisory mutation job. Same 60 s budget and
+	// the same reason as the sibling: walk time, not wall-clock waiting.
 	it("keeps every explicit Windows admission live and reasoned (#3277)", () => {
+		const population = getWin32LaneFiles(ROOT);
 		for (const admission of WINDOWS_LANE_ADMISSIONS) {
 			const source = readFileSync(resolve(ROOT, admission.file), "utf8");
 			expect(source).toContain(LANE_HEADER);
 			expect(admission.reason).toMatch(/#\d+/);
-			expect(getWin32LaneFiles(ROOT)).toContain(admission.file);
+			expect(population).toContain(admission.file);
 		}
-	});
+	}, 60_000);
 
 	// #3104 review F6: this module walks the tests/ tree and reads what the walk
 	// returned, so it carries the #3082 tolerant read. It cannot import

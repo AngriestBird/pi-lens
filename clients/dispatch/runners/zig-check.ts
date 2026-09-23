@@ -1,4 +1,5 @@
 import * as path from "node:path";
+import { pathsEqual } from "../../path-utils.js";
 import { safeSpawnAsync } from "../../safe-spawn.js";
 import { resolveRunnerCwd } from "../../tool-cwd.js";
 import { createAvailabilityChecker } from "./utils/runner-helpers.js";
@@ -15,8 +16,13 @@ import { finishParsedRun, parseToolRun } from "./utils/tool-failure.js";
 // default probe would make this runner skip on every machine.
 const zig = createAvailabilityChecker("zig", ".exe", ["version"]);
 
-function parseZigOutput(raw: string, filePath: string): Diagnostic[] {
+function parseZigOutput(
+	raw: string,
+	filePath: string,
+	cwd: string,
+): Diagnostic[] {
 	const diagnostics: Diagnostic[] = [];
+	const absTarget = path.resolve(cwd, filePath);
 	for (const line of raw.split(/\r?\n/)) {
 		const match = line.match(
 			/^(.*?):(\d+):(\d+):\s*(error|warning|note):\s*(.+)$/,
@@ -24,9 +30,8 @@ function parseZigOutput(raw: string, filePath: string): Diagnostic[] {
 		if (!match) continue;
 
 		const [, rawFile, lineStr, colStr, level, message] = match;
-		const resolvedSource = path.resolve(rawFile.trim());
-		const resolvedTarget = path.resolve(filePath);
-		if (resolvedSource !== resolvedTarget) continue;
+		// #3278: one seam for reported-path attribution — see javac.ts.
+		if (!pathsEqual(path.resolve(cwd, rawFile.trim()), absTarget)) continue;
 
 		const severity = level === "error" ? "error" : "warning";
 		diagnostics.push({
@@ -75,7 +80,7 @@ const zigCheckRunner: RunnerDefinition = {
 		const parsed = parseToolRun(
 			"zig-check",
 			{ result, output: raw },
-			(output) => parseZigOutput(output, ctx.filePath),
+			(output) => parseZigOutput(output, ctx.filePath, cwd),
 		);
 		if (parsed.skipped) return parsed.skipped;
 		return finishParsedRun({

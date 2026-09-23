@@ -1,5 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { pathsEqual } from "../../path-utils.js";
 import { safeSpawnAsync } from "../../safe-spawn.js";
 import { probeToolAsync } from "../../tool-probe.js";
 import { resolveRunnerCwd } from "../../tool-cwd.js";
@@ -143,17 +144,21 @@ async function resolveCompiler(
 	return undefined;
 }
 
-function parseGccLikeOutput(raw: string, filePath: string): Diagnostic[] {
+function parseGccLikeOutput(
+	raw: string,
+	filePath: string,
+	cwd: string,
+): Diagnostic[] {
 	const diagnostics: Diagnostic[] = [];
+	const absTarget = path.resolve(cwd, filePath);
 	for (const line of raw.split(/\r?\n/)) {
 		const match = line.match(
 			/^(.*?):(\d+):(?:(\d+):)?\s*(fatal error|error|warning|note):\s+(.+)$/i,
 		);
 		if (!match) continue;
 		const [, sourcePath, lineStr, colStr, severityLabel, message] = match;
-		const resolvedSource = path.resolve(sourcePath.trim());
-		const resolvedTarget = path.resolve(filePath);
-		if (resolvedSource !== resolvedTarget) continue;
+		// #3278: one seam for reported-path attribution — see javac.ts.
+		if (!pathsEqual(path.resolve(cwd, sourcePath.trim()), absTarget)) continue;
 
 		const severity = severityLabel.toLowerCase().includes("error")
 			? "error"
@@ -176,17 +181,21 @@ function parseGccLikeOutput(raw: string, filePath: string): Diagnostic[] {
 	return diagnostics;
 }
 
-function parseMsvcOutput(raw: string, filePath: string): Diagnostic[] {
+function parseMsvcOutput(
+	raw: string,
+	filePath: string,
+	cwd: string,
+): Diagnostic[] {
 	const diagnostics: Diagnostic[] = [];
+	const absTarget = path.resolve(cwd, filePath);
 	for (const line of raw.split(/\r?\n/)) {
 		const match = line.match(
 			/^(.*)\((\d+)(?:,(\d+))?\):\s*(fatal error|error|warning)\s+([A-Z]+\d+):\s+(.+)$/i,
 		);
 		if (!match) continue;
 		const [, sourcePath, lineStr, colStr, severityLabel, rule, message] = match;
-		const resolvedSource = path.resolve(sourcePath.trim());
-		const resolvedTarget = path.resolve(filePath);
-		if (resolvedSource !== resolvedTarget) continue;
+		// #3278: one seam for reported-path attribution — see javac.ts.
+		if (!pathsEqual(path.resolve(cwd, sourcePath.trim()), absTarget)) continue;
 
 		const severity = severityLabel.toLowerCase().includes("error")
 			? "error"
@@ -232,8 +241,8 @@ const cppCheckRunner: RunnerDefinition = {
 			{ result, output: raw },
 			(output) =>
 				compiler.flavor === "msvc"
-					? parseMsvcOutput(output, ctx.filePath)
-					: parseGccLikeOutput(output, ctx.filePath),
+					? parseMsvcOutput(output, ctx.filePath, cwd)
+					: parseGccLikeOutput(output, ctx.filePath, cwd),
 		);
 		if (parsed.skipped) return parsed.skipped;
 		return finishParsedRun({
