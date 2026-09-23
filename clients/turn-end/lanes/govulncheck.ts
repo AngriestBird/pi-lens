@@ -81,9 +81,12 @@ export interface GovulncheckLaneKept {
  * is also the frame `render` prints — the path the verdict is about is the
  * path the agent is shown.
  */
-function collect(ctx: TurnEndLaneContext): Promise<GovulncheckLaneSources> {
-	const data = ctx.readScannerCache<GovulncheckResult>("govulncheck")?.data;
-	return Promise.resolve({
+async function collect(
+	ctx: TurnEndLaneContext,
+): Promise<GovulncheckLaneSources> {
+	const data = (await ctx.readScannerCache<GovulncheckResult>("govulncheck"))
+		?.data;
+	return {
 		govulncheck: {
 			findings: data?.findings ?? [],
 			scannedAt: data?.scannedAt,
@@ -91,7 +94,7 @@ function collect(ctx: TurnEndLaneContext): Promise<GovulncheckLaneSources> {
 				finding.trace.find((frame) => frame.filename)?.filename,
 			onMissing: "demote",
 		},
-	});
+	};
 }
 
 /**

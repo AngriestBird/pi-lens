@@ -375,6 +375,16 @@ describe("#1892: scanner cache records written by 4.2.1 still parse and render",
 /**
  * A subclass of the REAL cache manager that counts reads — no module mock, no
  * stubbed read. Everything below it is the production path.
+ *
+ * #3274: BOTH read seams are counted, into one list keyed by store. The
+ * scanner stores moved to `readCacheAsync`, so a double that watched only the
+ * synchronous method would have reported `perStore("trivy") === 0` and passed
+ * the one-read rule by seeing nothing at all — measured on this very test when
+ * the migration landed:
+ * `expected +0 to be 1` at `expect(perStore("trivy")).toBe(1)`. Counting both
+ * also keeps the rule honest ACROSS the seams while #3300 migrates the rest: a
+ * store read once through each method is two reads of one store, which is the
+ * TTL-boundary split #1892 exists to prevent, and it reds here.
  */
 class CountingCacheManager extends CacheManager {
 	readonly reads: string[] = [];
@@ -387,6 +397,16 @@ class CountingCacheManager extends CacheManager {
 		return maxAgeMs === undefined
 			? super.readCache<T>(scanner, cwd)
 			: super.readCache<T>(scanner, cwd, maxAgeMs);
+	}
+	override readCacheAsync<T>(
+		scanner: string,
+		cwd: string,
+		maxAgeMs?: number,
+	): ReturnType<typeof CacheManager.prototype.readCacheAsync<T>> {
+		this.reads.push(scanner);
+		return maxAgeMs === undefined
+			? super.readCacheAsync<T>(scanner, cwd)
+			: super.readCacheAsync<T>(scanner, cwd, maxAgeMs);
 	}
 }
 

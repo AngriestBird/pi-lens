@@ -1,0 +1,343 @@
+/**
+ * #3274: the turn-end scanner-store reads are asynchronous and BOUNDED, and
+ * the composer's memo still hands every lane one envelope per store.
+ *
+ * Recurrence prevented: `turn_end` read gitleaks, trivy and govulncheck
+ * through the SYNCHRONOUS `CacheManager.readCache` — six `existsSync` and six
+ * `readFileSync`+`JSON.parse` on a hook path that nothing could bound, because
+ * `bounded()` takes a promise and the read completed during argument
+ * evaluation (#3274's probe: an already-aborted signal with `ms: 0` returned
+ * `undefined` while the read had already parsed). The memo now holds the
+ * PROMISE of each store, under `bounded()` with the turn_end budget and the
+ * hook's signal.
+ *
+ * Every case drives the real `handleTurnEnd`, the real lanes, the real
+ * freshness gate and the real `CacheManager`. The only thing scripted is the
+ * store read's TIMING — a subclass of the production cache manager, which is
+ * the seam a wedged filesystem would move.
+ */
+
+import * as fs from "node:fs";
+import * as path from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+import { CacheManager, type CacheEntry } from "../../clients/cache-manager.js";
+import {
+	getDegradationSummary,
+	resetDegradationLedger,
+} from "../../clients/degradation-ledger.js";
+import type { GitleaksResult } from "../../clients/gitleaks-client.js";
+import { consumeTurnEndFindings } from "../../clients/runtime-context.js";
+import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
+import { handleTurnEnd } from "../../clients/runtime-turn.js";
+import type { TrivyResult } from "../../clients/trivy-client.js";
+import { setupTestEnvironment } from "./test-utils.js";
+
+const SCAN_MS = Date.UTC(2026, 7, 18, 7, 0, 0);
+const SCAN_AT = new Date(SCAN_MS).toISOString();
+
+const EMPTY_KNIP_RESULT = {
+	success: true,
+	issues: [],
+	unusedExports: [],
+	unusedFiles: [],
+	unusedDeps: [],
+	unlistedDeps: [],
+	summary: "skipped",
+};
+
+/**
+ * The production cache manager with the scanner reads' TIMING under test
+ * control. No module mock and no stubbed parse: `hang` makes one store's read
+ * never settle (the wedged filesystem #2523 measured), `onlyFirstRead` makes a
+ * store answer once and then behave as a cold cache — which is what a TTL
+ * boundary falling between two reads looks like to the second reader.
+ */
+class ScriptedCacheManager extends CacheManager {
+	readonly reads: string[] = [];
+	readonly hang = new Set<string>();
+	readonly onlyFirstRead = new Set<string>();
+	private readonly hung: Array<(entry: CacheEntry<unknown> | null) => void> =
+		[];
+
+	override readCacheAsync<T>(
+		scanner: string,
+		cwd: string,
+		maxAgeMs?: number,
+	): Promise<CacheEntry<T> | null> {
+		const seenBefore = this.reads.includes(scanner);
+		this.reads.push(scanner);
+		if (this.hang.has(scanner)) {
+			return new Promise<CacheEntry<T> | null>((resolve) => {
+				this.hung.push(resolve as (e: CacheEntry<unknown> | null) => void);
+			});
+		}
+		if (seenBefore && this.onlyFirstRead.has(scanner)) {
+			return Promise.resolve(null);
+		}
+		return maxAgeMs === undefined
+			? super.readCacheAsync<T>(scanner, cwd)
+			: super.readCacheAsync<T>(scanner, cwd, maxAgeMs);
+	}
+
+	/** Settle every wedged read — the late answer the bound already gave up on. */
+	releaseHung(entry: CacheEntry<unknown> | null): void {
+		for (const resolve of this.hung.splice(0)) resolve(entry);
+	}
+
+	hungCount(): number {
+		return this.hung.length;
+	}
+
+	countOf(scanner: string): number {
+		return this.reads.filter((name) => name === scanner).length;
+	}
+}
+
+function makeTurnEndDeps(
+	runtime: RuntimeCoordinator,
+	cacheManager: CacheManager,
+	cwd: string,
+	signal?: AbortSignal,
+) {
+	return {
+		ctxCwd: cwd,
+		getFlag: () => false,
+		dbg: () => {},
+		runtime,
+		cacheManager,
+		...(signal === undefined ? {} : { signal }),
+		knipClient: {
+			ensureAvailable: async () => false,
+			analyze: async () => EMPTY_KNIP_RESULT,
+		},
+		deadCodeClients: [],
+		depChecker: { ensureAvailable: async () => false },
+		testRunnerClient: { getTestRunTarget: () => null },
+		resetLSPService: () => {},
+		resetFormatService: () => {},
+	} as unknown as Parameters<typeof handleTurnEnd>[0];
+}
+
+let env: ReturnType<typeof setupTestEnvironment>;
+let runtime: RuntimeCoordinator;
+let cacheManager: ScriptedCacheManager;
+
+/**
+ * One secret per store, in DIFFERENT files, each older than the scan so
+ * nothing is demoted by the freshness gate. Different files on purpose: two
+ * secrets at one location fold into a single row with combined provenance
+ * (#131 Mode 3), which would leave "did the trivy store reach the agent?"
+ * readable only from a provenance tag.
+ */
+function warmStores(): void {
+	const when = new Date(SCAN_MS - 5_000);
+	const write = (relative: string, content: string): string => {
+		const file = path.join(env.tmpDir, relative);
+		fs.mkdirSync(path.dirname(file), { recursive: true });
+		fs.writeFileSync(file, content);
+		fs.utimesSync(file, when, when);
+		return file;
+	};
+	const file = write("src/live.ts", "const k = 'AKIAIOSFODNN7EXAMPLE';\n");
+	const dep = write("src/dep.ts", "aws_secret = 'z'\n");
+	// turn_end only composes for a turn that touched something.
+	cacheManager.addModifiedRange(
+		file,
+		{ start: 1, end: 1 },
+		false,
+		env.tmpDir,
+		"bound-session",
+	);
+	cacheManager.writeCache(
+		"gitleaks",
+		{
+			success: true,
+			scannedAt: SCAN_AT,
+			findings: [
+				{
+					ruleId: "aws-access-token",
+					file,
+					startLine: 1,
+					description: "AWS key",
+				},
+			],
+		} satisfies GitleaksResult,
+		env.tmpDir,
+	);
+	cacheManager.writeCache(
+		"trivy",
+		{
+			success: true,
+			scannedAt: SCAN_AT,
+			findings: [],
+			secrets: [{ ruleId: "aws-secret-access-key", file: dep, line: 1 }],
+			licenses: [],
+		} satisfies TrivyResult,
+		env.tmpDir,
+	);
+	cacheManager.reads.length = 0;
+}
+
+async function turnEndContent(signal?: AbortSignal): Promise<string> {
+	await handleTurnEnd(
+		makeTurnEndDeps(runtime, cacheManager, env.tmpDir, signal),
+	);
+	return (
+		consumeTurnEndFindings(cacheManager, env.tmpDir)?.messages?.[0]?.content ??
+		""
+	);
+}
+
+beforeEach(() => {
+	resetDegradationLedger();
+	env = setupTestEnvironment("pi-lens-3274-bound-");
+	runtime = new RuntimeCoordinator();
+	runtime.setTelemetryIdentity({ sessionId: "bound-session" });
+	cacheManager = new ScriptedCacheManager(false);
+});
+
+afterEach(() => {
+	vi.useRealTimers();
+	env.cleanup();
+});
+
+/**
+ * Run one delivery whose `hangingStore` read never settles, with the clock
+ * under test control ONLY while the composer is blocked on that read.
+ *
+ * The narrow window matters. Advancing time in coarse steps blows deadlines
+ * the handler computed earlier — measured: a 500 ms-per-step pump over a turn
+ * with NO wedged read at all produced no delivery record whatsoever, because
+ * the freshness pass's own budget had expired by the time it ran. So the turn
+ * is walked forward 1 ms at a time (it needs SOME clock to reach the scanner
+ * reads at all) until the wedged read is in flight and everything else is
+ * waiting on it, and only then does the clock jump past the 3000 ms
+ * `HOOK_WALL_BUDGET_MS.turn_end` the memo's `bounded()` carries. The spin has
+ * a hard trip count, so a turn that never reaches the read fails loudly
+ * instead of hanging.
+ */
+async function turnEndBlockedOn(hangingStore: string): Promise<string> {
+	cacheManager.hang.add(hangingStore);
+	vi.useFakeTimers();
+	let settled = false;
+	const turn = handleTurnEnd(
+		makeTurnEndDeps(runtime, cacheManager, env.tmpDir),
+	).then(() => {
+		settled = true;
+	});
+	for (let spin = 0; spin < 200 && cacheManager.hungCount() === 0; spin++) {
+		await vi.advanceTimersByTimeAsync(1);
+	}
+	expect(cacheManager.hungCount()).toBeGreaterThan(0);
+	await vi.advanceTimersByTimeAsync(3_100);
+	await turn;
+	vi.useRealTimers();
+	expect(settled).toBe(true);
+	return (
+		consumeTurnEndFindings(cacheManager, env.tmpDir)?.messages?.[0]?.content ??
+		""
+	);
+}
+
+function summaryFor(kind: string) {
+	return getDegradationSummary().find((group) => group.kind === kind);
+}
+
+describe("#3274: the turn-end scanner reads are bounded and shared", () => {
+	it("hands both trivy consumers the SAME envelope, not a second read (F1)", async () => {
+		warmStores();
+		// A store that answers only its FIRST reader is what a TTL boundary
+		// between two reads looks like: the composer reads trivy for the
+		// CVE/license tiers, the secrets lane reads it for its rows. A memo that
+		// holds a promise per store gives both the same envelope; a memo that
+		// re-read — or no memo at all — would leave the second one with a cold
+		// cache and silently drop a secret that is really in the store.
+		cacheManager.onlyFirstRead.add("trivy");
+
+		const content = await turnEndContent();
+
+		expect(content).toContain("aws-secret-access-key");
+		expect(cacheManager.countOf("trivy")).toBe(1);
+	});
+
+	it("reads each store once per DELIVERY, never once per session (F5)", async () => {
+		warmStores();
+		await turnEndContent();
+		const afterFirst = cacheManager.countOf("gitleaks");
+		await turnEndContent();
+
+		// The memo is built inside `handleTurnEnd`, so the second delivery reads
+		// the store again — a memo that outlived the turn would serve a stale
+		// envelope for the rest of the session.
+		expect(afterFirst).toBe(1);
+		expect(cacheManager.countOf("gitleaks")).toBe(2);
+	});
+
+	it("does not read a store at all when the turn is already aborted (F6)", async () => {
+		warmStores();
+
+		const content = await turnEndContent(AbortSignal.abort());
+
+		// `bounded()` abandons the await but cannot cancel a read already
+		// dispatched, so the guard is in the memo: an aborted turn pays no file
+		// reads, and every lane sees the cold-cache answer.
+		expect(cacheManager.countOf("gitleaks")).toBe(0);
+		expect(cacheManager.countOf("trivy")).toBe(0);
+		expect(cacheManager.countOf("govulncheck")).toBe(0);
+		expect(content).not.toContain("aws-access-token");
+	});
+
+	it("abandons a wedged store read at the turn_end budget, delivers the rest, and records one row (F2)", async () => {
+		warmStores();
+
+		const content = await turnEndBlockedOn("gitleaks");
+
+		// Null is the cold-cache answer, not an empty store: the gitleaks tier is
+		// absent, the trivy secret from the store that DID answer is delivered,
+		// and the abandonment is on the ledger rather than silent. Before #3274
+		// this read could not be abandoned at all — it ran to completion during
+		// argument evaluation, so a wedged filesystem held the whole hook.
+		expect(content).not.toContain("aws-access-token");
+		expect(content).toContain("aws-secret-access-key");
+		const group = summaryFor("hook-await-exceeded");
+		expect(group?.latestReasons.at(-1)?.subject).toBe(
+			"turn_end:readScannerCache:gitleaks",
+		);
+		expect(group?.count).toBe(1);
+	});
+
+	it("is inert when the abandoned read resolves after the delivery composed (F3)", async () => {
+		warmStores();
+
+		const content = await turnEndBlockedOn("gitleaks");
+
+		// The read the bound gave up on now answers, with a store full of
+		// findings. The memo holds a SETTLED promise, so there is nothing for the
+		// late envelope to overwrite, nothing re-enters the delivery that already
+		// shipped, and no unhandled rejection can surface from it.
+		cacheManager.releaseHung({
+			data: {
+				success: true,
+				scannedAt: SCAN_AT,
+				findings: [
+					{
+						ruleId: "aws-access-token",
+						file: path.join(env.tmpDir, "src/live.ts"),
+						startLine: 1,
+					},
+				],
+			},
+			meta: { timestamp: SCAN_AT },
+		});
+		await Promise.resolve();
+		await Promise.resolve();
+
+		expect(content).not.toContain("aws-access-token");
+		// Nothing was written for the agent after the fact either: the turn's one
+		// delivery was consumed above, and the late answer produces no second one.
+		expect(
+			consumeTurnEndFindings(cacheManager, env.tmpDir)?.messages?.[0]?.content,
+		).toBeUndefined();
+	});
+});
