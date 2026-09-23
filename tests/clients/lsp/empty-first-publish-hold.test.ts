@@ -23,7 +23,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // `clients/degradation-ledger.js` imports the real logger during that window.
 const { logLatency } = vi.hoisted(() => ({ logLatency: vi.fn() }));
 vi.mock("../../../clients/latency-logger.js", async (importActual) => ({
-	...(await importActual<typeof import("../../../clients/latency-logger.js")>()),
+	...(await importActual<
+		typeof import("../../../clients/latency-logger.js")
+	>()),
 	logLatency,
 }));
 

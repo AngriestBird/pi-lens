@@ -398,9 +398,9 @@ describe("classifyFirstPublish (#3310)", () => {
 	});
 
 	it("classifies a server whose first publish carries the findings as direct", () => {
-		expect(classifyFirstPublish([{ diags: 1 }, { diags: 0 }]).firstPublish).toBe(
-			"direct",
-		);
+		expect(
+			classifyFirstPublish([{ diags: 1 }, { diags: 0 }]).firstPublish,
+		).toBe("direct");
 	});
 
 	it("refuses to classify an all-empty dirty trace in either direction", () => {

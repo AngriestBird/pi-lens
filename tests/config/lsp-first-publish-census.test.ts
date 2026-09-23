@@ -104,7 +104,9 @@ describe("#3310 first-publish census", () => {
 	it("keeps every marked server inside the measured population", () => {
 		// A marker for a server with no row at all cannot be re-measured, so it
 		// could never expire — the registry entry and its measurement ship together.
-		const langs = new Set(matrixRows().map((row) => strategyKeyForLang(row.lang)));
+		const langs = new Set(
+			matrixRows().map((row) => strategyKeyForLang(row.lang)),
+		);
 		const orphans = Object.entries(SERVER_DIAGNOSTIC_STRATEGIES)
 			.filter(([, strategy]) => strategy.emptyFirstPublish === "indexing")
 			.map(([serverId]) => serverId)

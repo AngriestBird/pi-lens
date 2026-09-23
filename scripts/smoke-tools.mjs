@@ -676,7 +676,7 @@ const LSP_FIXTURES = [
 		// and php carries the measured budget for the index window, so the row is
 		// gated again.
 		lspGate: true,
-		lspGateMarker: '$naem',
+		lspGateMarker: "$naem",
 		dir: "tests/fixtures/tool-smoke/php",
 		file: "bad.php",
 		serverHint: "intelephense",

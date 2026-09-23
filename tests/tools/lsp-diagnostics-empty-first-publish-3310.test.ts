@@ -74,16 +74,18 @@ async function runDiagnostics(
 ): Promise<{ text: string; details: Record<string, unknown> }> {
 	const config = await import("../../clients/lsp/config.js");
 	await config.initLSPConfig(workspace);
-	const { createLspDiagnosticsTool } = await import(
-		"../../tools/lsp-diagnostics.js"
-	);
+	const { createLspDiagnosticsTool } =
+		await import("../../tools/lsp-diagnostics.js");
 	const result = (await createLspDiagnosticsTool().execute(
 		"probe-3310",
 		{ path: file, waitMs, serverScope: "primary" },
 		undefined,
 		null,
 		{ cwd: workspace },
-	)) as { content: Array<{ text?: string }>; details?: Record<string, unknown> };
+	)) as {
+		content: Array<{ text?: string }>;
+		details?: Record<string, unknown>;
+	};
 	return {
 		text: String(result.content[0]?.text),
 		details: result.details ?? {},
