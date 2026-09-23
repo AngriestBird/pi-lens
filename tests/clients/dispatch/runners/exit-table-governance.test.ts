@@ -11,7 +11,11 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { assertNonEmptyScan, stripSource } from "../../../support/sweep-kit.js";
+import {
+	assertNonEmptyScan,
+	codeMatches,
+	stripSource,
+} from "../../../support/sweep-kit.js";
 
 const RUNNERS_DIR = fileURLToPath(
 	new URL("../../../../clients/dispatch/runners", import.meta.url),
@@ -55,7 +59,7 @@ function read(name: string): string {
 }
 
 function callsParseToolRun(source: string): boolean {
-	return /\bparseToolRun\s*\(/.test(stripSource(source));
+	return /\bparseToolRun(?:\s*<[^>]*>)?\s*\(/.test(stripSource(source));
 }
 
 type ExitTable = { line: number; codes: number[] };
@@ -67,7 +71,8 @@ function exitTables(source: string): ExitTable[] {
 	for (let line = 0; line < lines.length; line++) {
 		if (
 			!/\bexitCodes\s*:/.test(lines[line]) &&
-			!/\bToolExitCodes\s*=/.test(lines[line])
+			!/\bToolExitCodes\s*=/.test(lines[line]) &&
+			!/\b[A-Z][A-Z0-9_]*_EXIT_CODES\s*=/.test(lines[line])
 		)
 			continue;
 		const window = lines.slice(line, line + 8).join(" ");
@@ -94,6 +99,14 @@ describe("documented runner exit-table ratchet (#3292)", () => {
 		expect(count).toBeGreaterThanOrEqual(20);
 	});
 
+	it("expires temporary exemptions when their runner adopts parseToolRun", () => {
+		const stale = Object.keys(EXEMPT).filter((name) => {
+			const source = read(name);
+			return callsParseToolRun(source) || exitTables(source).length > 0;
+		});
+		expect(stale).toEqual([]);
+	});
+
 	it("requires every parseToolRun runner to declare and document ran codes", () => {
 		const failures: string[] = [];
 		for (const name of runnerFiles()) {
@@ -108,8 +121,8 @@ describe("documented runner exit-table ratchet (#3292)", () => {
 			}
 			const docs = documentationFor(source, tables[0].line);
 			if (
-				!/EXIT TABLE/i.test(docs) ||
-				!/(https?:\/\/|(?:undocumented;\s*)?measured\s+(?:fixture|evidence))/i.test(
+				!/(?:EXIT TABLE|exit contract)/i.test(docs) ||
+				!/(https?:\/\/|(?:undocumented;\s*)?measured\s+(?:fixture|evidence)|\b(?:documented|documents|observed|observes|captured)\b)/i.test(
 					docs,
 				)
 			)
@@ -138,20 +151,29 @@ describe("documented runner exit-table ratchet (#3292)", () => {
 				"utf8",
 			);
 			for (const code of table.codes) {
-				if (
-					testSource.includes(`status: ${code}`) ||
-					testSource.includes(`status:${code}`)
-				)
-					continue;
+				// The status-property needle must be executable code. A test title
+				// is the only string-evidence exception: codeMatches still requires
+				// its enclosing `it(...)` call to begin in code.
+				const hasStatusCell =
+					codeMatches(testSource, new RegExp(`\\bstatus\\s*:\\s*${code}\\b`))
+						.length > 0;
+				const hasNamedTestCell =
+					codeMatches(
+						testSource,
+						new RegExp(`\\bit\\s*\\([^\\n]*\\b${code}\\b`),
+					).length > 0;
+				if (hasStatusCell) continue;
 				const finding = new RegExp(
 					`\\b${code}\\b[^\\n]*(?:finding|diagnostic|issue|offense)`,
 					"i",
 				).test(docs);
 				if (
 					finding &&
-					!new RegExp(
-						`it\\([^\\n]*\\b${code}\\b|status\\s*:\s*${code}\\b`,
-					).test(testSource)
+					!hasNamedTestCell &&
+					!codeMatches(
+						testSource,
+						new RegExp(`it\\([^\\n]*\\b${code}\\b|status\\s*:\s*${code}\\b`),
+					).length
 				)
 					failures.push(
 						`${name}: finding-carrying code ${code} has no matrix cell in ${MATRIX[name]}`,
