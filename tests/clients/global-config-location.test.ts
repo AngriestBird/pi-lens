@@ -136,6 +136,12 @@ describe("global config location resolution", () => {
 		const resolution = resolveGlobalConfigLocation({ homeDir: home });
 		expect(resolution.source).toBe("pi-lens-config-path");
 		expect(resolution.path).toBe(path.resolve(override));
+		loadPiLensGlobalConfig();
+		expect(
+			getDegradationSummary().some(
+				(candidate) => candidate.kind === "config-location-shadowed",
+			),
+		).toBe(false);
 	});
 
 	it("a legacy ~/.pi-lens/config.json stays authoritative while it exists, even when the agent-dir file also exists (production)", () => {
@@ -150,7 +156,74 @@ describe("global config location resolution", () => {
 		expect(resolveGlobalConfigLocation()).toEqual({
 			path: path.join(home, ".pi-lens", "config.json"),
 			source: "legacy-default-existing",
+			shadowedPath: globalConfigPath,
 		});
+	});
+
+	it("records one bounded notice when both global config files exist", () => {
+		// Regression for #3299: selecting the grandfathered legacy file must not
+		// silently hide a separately-created agent-dir configuration.
+		const maintainerHome = os.homedir();
+		const home = makeTempHome();
+		adoptHomeEnv(home);
+		const legacyPath = writeLegacyConfig(home);
+		const { agentDir, globalConfigPath } = agentDirFixture(home);
+		fs.mkdirSync(path.dirname(globalConfigPath), { recursive: true });
+		fs.writeFileSync(globalConfigPath, "{}");
+		const realHomeConfigBefore = fs.existsSync(
+			path.join(maintainerHome, ".pi-lens"),
+		);
+		const realAgentDir = process.env.PI_CODING_AGENT_DIR;
+		resetGlobalConfigLocationCache();
+
+		loadPiLensGlobalConfig();
+		loadPiLensGlobalConfig();
+
+		const group = getDegradationSummary().find(
+			(candidate) => candidate.kind === "config-location-shadowed",
+		);
+		expect(group?.count).toBe(1);
+		expect(group?.latestReasons[0]?.subject).toBe(legacyPath);
+		expect(group?.latestReasons[0]?.reason).toContain(globalConfigPath);
+		expect(fs.existsSync(path.join(maintainerHome, ".pi-lens"))).toBe(
+			realHomeConfigBefore,
+		);
+		expect(realAgentDir).toBe(agentDir);
+	});
+
+	it("records canonical paths when both files are reached through symlink aliases", () => {
+		// Regression for #3323 M1: durable path identities must not vary with
+		// symlink spellings of HOME or PI_CODING_AGENT_DIR.
+		const root = makeTempHome();
+		const realHome = path.join(root, "real-home");
+		const realAgent = path.join(root, "real-agent");
+		const homeAlias = path.join(root, "home-alias");
+		const agentAlias = path.join(root, "agent-alias");
+		fs.mkdirSync(path.join(realHome, ".pi-lens"), { recursive: true });
+		fs.mkdirSync(path.join(realAgent, "extensions"), { recursive: true });
+		symlinkSync(realHome, homeAlias, "dir");
+		symlinkSync(realAgent, agentAlias, "dir");
+		adoptHomeEnv(homeAlias);
+		process.env.PI_CODING_AGENT_DIR = agentAlias;
+		fs.writeFileSync(path.join(homeAlias, ".pi-lens", "config.json"), "{}");
+		const shadowedPath = path.join(agentAlias, "extensions", "pi-lens.json");
+		fs.writeFileSync(shadowedPath, "{}");
+		resetGlobalConfigLocationCache();
+
+		loadPiLensGlobalConfig();
+
+		const group = getDegradationSummary().find(
+			(candidate) => candidate.kind === "config-location-shadowed",
+		);
+		expect(group?.count).toBe(1);
+		expect(group?.latestReasons[0]?.subject).toBe(
+			fs.realpathSync(path.join(realHome, ".pi-lens", "config.json")),
+		);
+		expect(group?.latestReasons[0]?.reason).toContain(
+			fs.realpathSync(path.join(realAgent, "extensions", "pi-lens.json")),
+		);
+		expect(group?.latestReasons[0]?.reason).not.toContain("home-alias");
+		expect(group?.latestReasons[0]?.reason).not.toContain("agent-alias");
 	});
 
 	it("the agent-dir file wins only when it EXISTS and the legacy default is missing (opt-in by creation)", () => {
