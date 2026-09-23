@@ -12,10 +12,60 @@ import {
 	writeGitGuardRecord,
 	type TurnEndFindingsCache,
 } from "../../clients/git-guard.js";
+import type { Diagnostic } from "../../clients/dispatch/types.js";
+import { formatDiagnostics } from "../../clients/dispatch/utils/format-utils.js";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
 import { getProjectDataDir } from "../../clients/file-utils.js";
 import { setupTestEnvironment } from "./test-utils.js";
 import { tokenizeShellCommand } from "../../clients/bash-file-access.js";
+
+/**
+ * A blocking dispatch diagnostic, shaped as the runners emit it.
+ */
+function blockingDiagnostic(
+	filePath: string,
+	line: number,
+	message: string,
+): Diagnostic {
+	return {
+		id: `ast-grep:${path.basename(filePath)}:${line}`,
+		message,
+		filePath,
+		line,
+		severity: "error",
+		semantic: "blocking",
+		tool: "ast-grep",
+		rule: "no-eval",
+	};
+}
+
+/**
+ * The inline-blocker summary PRODUCTION records, byte for byte: the pipeline
+ * hands `recordInlineBlockers` `dispatchResult.blockerOutput.trim()`
+ * (`clients/pipeline.ts:1916`), and `blockerOutput` is
+ * `formatDiagnostics(inlineBlockers, "blocking")`
+ * (`clients/dispatch/dispatcher.ts:1409`) — a `🔴 STOP` header line plus one
+ * INDENTED line per diagnostic.
+ *
+ * #3282's detection retrospective: every case in this file used to hand-type a
+ * single-line summary (`"blocker A"`), the one shape the record's provenance
+ * parse accepted. The parse never matched what either writer emits, so the
+ * commit gate answered `blocking_provenance_untrusted` for the rest of any
+ * session that recorded a blocker, and these tests stayed green. A double that
+ * is not production-faithful on the axis under test proves nothing — so the
+ * fixture is now rendered by the production renderer, and cannot diverge again.
+ */
+function productionSummary(
+	filePath: string,
+	messages: readonly string[],
+): string {
+	return formatDiagnostics(
+		messages.map((message, index) =>
+			blockingDiagnostic(filePath, index + 1, message),
+		),
+		"blocking",
+	).trim();
+}
 
 function record(
 	overrides: Partial<TurnEndFindingsCache> = {},
@@ -403,8 +453,9 @@ describe("git-guard", () => {
 			const runtime = new RuntimeCoordinator();
 			const file = path.join(env.tmpDir, "a.ts");
 			fs.writeFileSync(file, "const x = 1;\n");
-			runtime.recordInlineBlockers(file, "blocker A");
-			runtime.updateGitGuardStatus(true, "blocker A");
+			const summary = productionSummary(file, ["alpha is unsafe"]);
+			runtime.recordInlineBlockers(file, summary);
+			runtime.updateGitGuardStatus(true, summary);
 			runtime.clearInlineBlockers(path.join(env.tmpDir, "b.ts"));
 			runtime.updateGitGuardStatus(false, "clean B");
 			expect(runtime.gitGuardHasBlockers).toBe(true);
@@ -507,8 +558,9 @@ describe("git-guard", () => {
 			runtime.projectRoot = env.tmpDir;
 			runtime.setTelemetryIdentity({ sessionId: "session-A" });
 			const cache = new CacheManager(false);
-			runtime.recordInlineBlockers(file, "blocker");
-			runtime.updateGitGuardStatus(true, "blocker");
+			const summary = productionSummary(file, ["alpha is unsafe", "beta is unsafe"]);
+			runtime.recordInlineBlockers(file, summary);
+			runtime.updateGitGuardStatus(true, summary);
 			syncGitGuardRecord(runtime, cache, env.tmpDir, file);
 
 			runtime.clearInlineBlockers(file);
@@ -538,8 +590,9 @@ describe("git-guard", () => {
 			runtime.projectRoot = env.tmpDir;
 			runtime.setTelemetryIdentity({ sessionId: "session-A" });
 			const cache = new CacheManager(false);
-			runtime.recordInlineBlockers(file, "blocker", 1, ["lsp"]);
-			runtime.updateGitGuardStatus(true, "blocker");
+			const summary = productionSummary(file, ["alpha is unsafe"]);
+			runtime.recordInlineBlockers(file, summary, 1, ["lsp"]);
+			runtime.updateGitGuardStatus(true, summary);
 			syncGitGuardRecord(runtime, cache, env.tmpDir, file);
 			expect(evaluateGitGuard(runtime, cache, env.tmpDir).block).toBe(true);
 
@@ -573,8 +626,18 @@ describe("git-guard", () => {
 			runtime.projectRoot = env.tmpDir;
 			runtime.setTelemetryIdentity({ sessionId: "session-A" });
 			const cache = new CacheManager(false);
-			runtime.recordInlineBlockers(files[0], "blocker A", 1, ["lsp"]);
-			runtime.recordInlineBlockers(files[1], "blocker B", 1, ["lsp"]);
+			runtime.recordInlineBlockers(
+				files[0],
+				productionSummary(files[0], ["alpha is unsafe"]),
+				1,
+				["lsp"],
+			);
+			runtime.recordInlineBlockers(
+				files[1],
+				productionSummary(files[1], ["beta is unsafe"]),
+				1,
+				["lsp"],
+			);
 			runtime.updateGitGuardStatus(true, "blockers");
 			syncGitGuardRecord(runtime, cache, env.tmpDir, files[0]);
 
@@ -608,9 +671,12 @@ describe("git-guard", () => {
 			runtime.projectRoot = env.tmpDir;
 			runtime.setTelemetryIdentity({ sessionId: "session-A" });
 			const cache = new CacheManager(false);
-			runtime.recordInlineBlockers(file, "🔴 STOP cors-wildcard", 1, [
-				"ast-grep",
-			]);
+			runtime.recordInlineBlockers(
+				file,
+				productionSummary(file, ["cors-wildcard: origin is unbounded"]),
+				1,
+				["ast-grep"],
+			);
 			runtime.updateGitGuardStatus(true, "blocker");
 			syncGitGuardRecord(runtime, cache, env.tmpDir, file);
 
@@ -641,8 +707,14 @@ describe("git-guard", () => {
 			runtime.projectRoot = env.tmpDir;
 			runtime.setTelemetryIdentity({ sessionId: "session-A" });
 			const cache = new CacheManager(false);
-			runtime.recordInlineBlockers(files[0], "blocker A");
-			runtime.recordInlineBlockers(files[1], "blocker B");
+			runtime.recordInlineBlockers(
+				files[0],
+				productionSummary(files[0], ["alpha is unsafe"]),
+			);
+			runtime.recordInlineBlockers(
+				files[1],
+				productionSummary(files[1], ["beta is unsafe"]),
+			);
 			runtime.updateGitGuardStatus(true, "blockers");
 			syncGitGuardRecord(runtime, cache, env.tmpDir, files[0]);
 
@@ -667,13 +739,23 @@ describe("git-guard", () => {
 			runtime.projectRoot = env.tmpDir;
 			runtime.setTelemetryIdentity({ sessionId: "session-A" });
 			const cache = new CacheManager(false);
+			// The per-edit writer's own expression
+			// (`clients/git-guard.ts:1013`), with the production summary each
+			// entry carries — so the omission below is the only thing wrong
+			// with this record.
+			const siblingBlockerContent = files
+				.map(
+					(file, index) =>
+						`${file}: ${productionSummary(file, [`issue ${index + 1} is unsafe`])}`,
+				)
+				.join("\n");
 			writeGitGuardRecord(
 				cache,
 				runtime,
 				env.tmpDir,
 				record({
-					content: `${files[0]}: blocker A\n${files[1]}: blocker B`,
-					blockerContent: `${files[0]}: blocker A\n${files[1]}: blocker B`,
+					content: siblingBlockerContent,
+					blockerContent: siblingBlockerContent,
 					hasBlockers: true,
 					affectedFiles: files,
 					blockingFiles: [files[0]],
@@ -700,11 +782,12 @@ describe("git-guard", () => {
 				runtime.projectRoot = env.tmpDir;
 				runtime.setTelemetryIdentity({ sessionId: "session-A" });
 				const cache = new CacheManager(false);
+				const forgedBlockerContent = `${file}: ${productionSummary(file, ["alpha is unsafe"])}`;
 				cache.writeCache(
 					"turn-end-findings",
 					record({
-						content: `${file}: blocker`,
-						blockerContent: `${file}: blocker`,
+						content: forgedBlockerContent,
+						blockerContent: forgedBlockerContent,
 						hasBlockers: true,
 						affectedFiles: [file],
 						blockingFiles: [forged as unknown as string],
@@ -723,6 +806,168 @@ describe("git-guard", () => {
 			}
 		},
 	);
+
+	it("#3282: a fixed multi-line blocker stops gating and latches no unknown", () => {
+		// The reported defect, through the per-edit writer and the real gate. On
+		// pre-fix code the SECOND `syncGitGuardRecord` of the session reads back
+		// its own multi-line `blockerContent`, reads `  L1: alpha is unsafe` as a
+		// file named `L1`, and returns early after
+		// `markGitGuardCacheUnknown("blocking_provenance_untrusted")` — so the
+		// record is never rewritten and every later commit in the session is
+		// refused with a reason no re-run can clear.
+		const env = setupTestEnvironment("pi-lens-git-guard-3282-multiline-");
+		try {
+			const file = path.join(env.tmpDir, "app.ts");
+			fs.writeFileSync(file, "alpha();\nbeta();\n");
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			runtime.setTelemetryIdentity({ sessionId: "session-A" });
+			const cache = new CacheManager(false);
+			const summary = productionSummary(file, [
+				"alpha is unsafe",
+				"beta is unsafe",
+			]);
+			expect(summary.split("\n").length).toBeGreaterThan(1);
+
+			// Edit 1: the dispatch raises the blockers.
+			runtime.recordInlineBlockers(file, summary, 1, ["ast-grep"]);
+			runtime.updateGitGuardStatus(true, summary);
+			syncGitGuardRecord(runtime, cache, env.tmpDir, file);
+			expect(evaluateGitGuard(runtime, cache, env.tmpDir).block).toBe(true);
+
+			// Edit 2: the same file, still blocking. This is the sync that read its
+			// own record back and poisoned the session.
+			runtime.recordInlineBlockers(file, summary, 2, ["ast-grep"]);
+			runtime.updateGitGuardStatus(true, summary);
+			syncGitGuardRecord(runtime, cache, env.tmpDir, file);
+			expect(runtime.gitGuardCacheUnknownReason).toBeUndefined();
+
+			// Edit 3: the agent FIXED it — a clean dispatch, no marks involved.
+			runtime.clearInlineBlockers(file);
+			runtime.updateGitGuardStatus(false, "");
+			syncGitGuardRecord(runtime, cache, env.tmpDir, file);
+
+			expect(evaluateGitGuard(runtime, cache, env.tmpDir)).toEqual({
+				block: false,
+			});
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("#3282: keeps the gate closed for a blocker section no blocking file owns", () => {
+		// Named recurrence for the fail-closed direction. `blockerParts` is
+		// multi-lane: the trivy CRITICAL report (`clients/runtime-turn.ts:2141`),
+		// knip (`:2147`), the secrets lane (`:2099`) and cascade (`:1340`) all push
+		// sections that belong to NO file, and the composer joins them into
+		// `blockerContent` with `"\n\n"` (`:4291`). Attributing such a section to
+		// the file section beside it would let a clean dispatch of that file clear
+		// a live CVE or leaked secret out of the gate.
+		const env = setupTestEnvironment("pi-lens-git-guard-3282-unowned-");
+		try {
+			const file = path.join(env.tmpDir, "app.ts");
+			fs.writeFileSync(file, "alpha();\n");
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			runtime.setTelemetryIdentity({ sessionId: "session-A" });
+			const cache = new CacheManager(false);
+			writeGitGuardRecord(
+				cache,
+				runtime,
+				env.tmpDir,
+				record({
+					content: "unowned",
+					blockerContent: `Unresolved from this turn — ${file}:\n${productionSummary(file, ["alpha is unsafe"])}\n\n🔴 STOP — CRITICAL dependency CVEs (trivy, 3d old). Upgrade before shipping:\n  CVE-2026-1 (left-pad@1.0.0) — upgrade to 1.0.1 or later`,
+					hasBlockers: true,
+					affectedFiles: [file],
+					blockingFiles: [file],
+					sessionId: "session-A",
+				}),
+			);
+
+			// The file dispatches clean. The CVE section is not its to clear.
+			syncGitGuardRecord(runtime, cache, env.tmpDir, file);
+
+			expect(runtime.gitGuardCacheUnknownReason).toBe(
+				"blocking_provenance_untrusted",
+			);
+			expect(evaluateGitGuard(runtime, cache, env.tmpDir)).toMatchObject({
+				block: true,
+				unknown: true,
+			});
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("#3282: a 4.2.1 record whose blocker text names no file stays untrusted", () => {
+		// Old-record direction: this fix adds no field and changes no writer, so a
+		// record persisted by 4.2.1 is read with the SAME verdict as before. The
+		// fixture's `blockerContent` opens no section at all, so there is nothing
+		// `blockingFiles` can be checked against — fail closed, exactly as today.
+		const env = setupTestEnvironment("pi-lens-git-guard-3282-legacy-");
+		try {
+			const file = path.join(env.tmpDir, "legacy.ts");
+			fs.writeFileSync(file, "alpha();\n");
+			const fixture = JSON.parse(
+				fs.readFileSync(
+					path.join(
+						import.meta.dirname,
+						"../fixtures/git-guard-records/4.2.1-turn-end-findings.json",
+					),
+					"utf-8",
+				),
+			) as TurnEndFindingsCache;
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			runtime.setTelemetryIdentity({ sessionId: "session-A" });
+			const cache = new CacheManager(false);
+			writeGitGuardRecord(cache, runtime, env.tmpDir, {
+				...fixture,
+				sessionId: "session-A",
+				affectedFiles: [file],
+				blockingFiles: [file],
+			});
+
+			syncGitGuardRecord(runtime, cache, env.tmpDir, file);
+
+			expect(runtime.gitGuardCacheUnknownReason).toBe(
+				"blocking_provenance_untrusted",
+			);
+			expect(evaluateGitGuard(runtime, cache, env.tmpDir).block).toBe(true);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("#3282 acceptance 5: clearing the record as clean clears the unknown reason", () => {
+		// `clearGitGuardCacheUnknown` had exactly one caller, a successful
+		// `writeGitGuardRecord` (`clients/git-guard.ts:800`). A sync that finds
+		// nothing left to record takes the `clearCache` branch instead and never
+		// reached it, so a reason latched earlier in the session outlived the
+		// record it described and refused every commit after it.
+		const env = setupTestEnvironment("pi-lens-git-guard-3282-latch-life-");
+		try {
+			const file = path.join(env.tmpDir, "app.ts");
+			fs.writeFileSync(file, "alpha();\n");
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			runtime.setTelemetryIdentity({ sessionId: "session-A" });
+			const cache = new CacheManager(false);
+			// A pipeline error earlier in the session — the one mark that is set
+			// AFTER the sync it belongs to (`clients/runtime-tool-result.ts:2551`).
+			runtime.markGitGuardCacheUnknown("pipeline_error");
+
+			syncGitGuardRecord(runtime, cache, env.tmpDir, file);
+
+			expect(runtime.gitGuardCacheUnknownReason).toBeUndefined();
+			expect(evaluateGitGuard(runtime, cache, env.tmpDir)).toEqual({
+				block: false,
+			});
+		} finally {
+			env.cleanup();
+		}
+	});
 
 	it("allows a missing record and blocks an old unstructured record", () => {
 		const env = setupTestEnvironment("pi-lens-git-guard-empty-");
