@@ -382,7 +382,7 @@ class CountingCacheManager extends CacheManager {
 		scanner: string,
 		cwd: string,
 		maxAgeMs?: number,
-	): ReturnType<CacheManager["readCache"]> {
+	): ReturnType<typeof CacheManager.prototype.readCache<T>> {
 		this.reads.push(scanner);
 		return maxAgeMs === undefined
 			? super.readCache<T>(scanner, cwd)
@@ -418,7 +418,9 @@ describe("#1892: one read per scanner store per delivery", () => {
 				{
 					success: true,
 					scannedAt: SCAN_AT,
-					findings: [{ ruleId: "aws-access-token", file: edited, startLine: 1 }],
+					findings: [
+						{ ruleId: "aws-access-token", file: edited, startLine: 1 },
+					],
 				} satisfies GitleaksResult,
 				env.tmpDir,
 			);
