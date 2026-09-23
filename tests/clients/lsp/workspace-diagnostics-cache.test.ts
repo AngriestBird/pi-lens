@@ -1099,14 +1099,10 @@ describe("runWorkspaceDiagnostics cache integration (#671)", () => {
 		let shutdownSettled = false;
 		const tsServer = makeTsServer(tmpSweep);
 		getServersForFileWithConfig.mockReturnValue([tsServer]);
-		const { client } = makeFakeClient(
-			tmpSweep,
-			"typescript",
-			async () => {
-				await shutdownGate;
-				shutdownSettled = true;
-			},
-		);
+		const { client } = makeFakeClient(tmpSweep, "typescript", async () => {
+			await shutdownGate;
+			shutdownSettled = true;
+		});
 		createLSPClient.mockResolvedValue(client);
 		const { LSPService } = await import("../../../clients/lsp/index.js");
 		const service = new LSPService();
