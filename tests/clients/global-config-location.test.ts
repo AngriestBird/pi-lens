@@ -206,11 +206,7 @@ describe("global config location resolution", () => {
 		adoptHomeEnv(homeAlias);
 		process.env.PI_CODING_AGENT_DIR = agentAlias;
 		fs.writeFileSync(path.join(homeAlias, ".pi-lens", "config.json"), "{}");
-		const shadowedPath = path.join(
-			agentAlias,
-			"extensions",
-			"pi-lens.json",
-		);
+		const shadowedPath = path.join(agentAlias, "extensions", "pi-lens.json");
 		fs.writeFileSync(shadowedPath, "{}");
 		resetGlobalConfigLocationCache();
 
