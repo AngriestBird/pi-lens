@@ -1337,7 +1337,7 @@ describe("tmp-fixture-hygiene", () => {
 					"const decoyTmp = \"fs.mkdtempSync(path.join(os.tmpdir(), 'pi-lens-planted-strtmp-'))\";",
 					// ...and a decoy naming the OTHER file's real family, the shape that
 					// costs a sibling invocation its live root.
-					'const note = "pi-lens-planted-lit- belongs to planted.test.ts";',
+					"const note = 'setupTestEnvironment(\"pi-lens-planted-lit-\")';",
 				].join("\n"),
 			);
 			return { dir, index: buildTmpOwnerIndex(dir, { prefixes: 3, files: 2 }) };
