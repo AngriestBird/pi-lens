@@ -2,5 +2,4 @@
 section: Fixed
 ---
 
-Route cpp-check and zig-check through the shared runner outcome parser so
-failed compiler invocations cannot be reported as clean files.
+- **Share compiler runner outcome parsing (refs #1816)** — `cpp-check` and `zig-check` now distinguish failed, skipped, and clean invocations through the shared runner outcome seam.

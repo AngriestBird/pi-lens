@@ -2,7 +2,8 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { FactStore } from "../../../../clients/dispatch/fact-store.js";
-import { makeRunnerCtx } from "../../../support/runner-ctx.js";
+import type { Diagnostic } from "../../../../clients/dispatch/types.js";
+import { formatDiagnostics } from "../../../../clients/dispatch/utils/format-utils.js";
 import { setupTestEnvironment } from "../../test-utils.js";
 
 const safeSpawnAsync = vi.fn();
@@ -46,7 +47,6 @@ async function dispatchOutcome(
 	vi.resetModules();
 	const env = setupTestEnvironment(`pi-lens-${tool}-${name}-`);
 	try {
-		const kind = tool === "cpp-check" ? "cxx" : "zig";
 		const filePath = path.join(
 			env.tmpDir,
 			tool === "cpp-check" ? "main.cpp" : "main.zig",
@@ -77,7 +77,8 @@ async function dispatchOutcome(
 		let observed: {
 			status?: string;
 			semantic?: string;
-			diagnostics: unknown[];
+			diagnostics: Diagnostic[];
+			output?: string;
 		} = { diagnostics: [] };
 		const output = await dispatchForFile(
 			createDispatchContext(
@@ -112,6 +113,59 @@ function validOutput(tool: Tool, filePath: string): string {
 		tool === "cpp-check" ? "cpp-findings.txt" : "zig-findings.txt",
 	);
 	return fs.readFileSync(fixture, "utf8").replace("{{FILE}}", filePath);
+}
+
+function renderedOutput(tool: Tool): string {
+	return fs.readFileSync(
+		path.resolve(
+			"tests/fixtures/witness/runner-outcome-cpp-check-zig-check",
+			tool === "cpp-check" ? "cpp-rendered.txt" : "zig-rendered.txt",
+		),
+		"utf8",
+	);
+}
+
+async function dispatchTwoEmptyFiles(tool: Tool) {
+	vi.resetModules();
+	const env = setupTestEnvironment(`pi-lens-${tool}-session-`);
+	try {
+		const { createDispatchContext, dispatchForFile, RunnerRegistry } =
+			await import("../../../../clients/dispatch/dispatcher.js");
+		const runner = (
+			await import(`../../../../clients/dispatch/runners/${tool}.js`)
+		).default;
+		const { getDegradationSummary, resetDegradationLedger } =
+			await import("../../../../clients/degradation-ledger.js");
+		resetDegradationLedger();
+		safeSpawnAsync.mockResolvedValue({
+			error: null,
+			status: 1,
+			stdout: "",
+			stderr: "",
+		});
+		const registry = new RunnerRegistry();
+		registry.register(runner);
+		for (const filename of ["first", "second"]) {
+			const filePath = path.join(
+				env.tmpDir,
+				`${filename}.${tool === "cpp-check" ? "cpp" : "zig"}`,
+			);
+			fs.writeFileSync(filePath, "int main() { return 0; }\n");
+			await dispatchForFile(
+				createDispatchContext(
+					filePath,
+					env.tmpDir,
+					{ getFlag: () => false },
+					new FactStore(),
+				),
+				[{ mode: "all", runnerIds: [tool] }],
+				registry,
+			);
+		}
+		return getDegradationSummary();
+	} finally {
+		env.cleanup();
+	}
 }
 
 describe("compiler runner outcome seam (#1816)", () => {
@@ -149,6 +203,11 @@ describe("compiler runner outcome seam (#1816)", () => {
 			expect(observed.status).toBe("failed");
 			expect(observed.semantic).toBe("warning");
 			expect(observed.diagnostics).toHaveLength(1);
+			// #3268 M3268-1: this is a real dispatchForFile witness, so the
+			// shared model-facing renderer cannot drift while parser assertions stay green.
+			expect(formatDiagnostics(observed.diagnostics, "blocking")).toEqual(
+				renderedOutput(tool),
+			);
 		});
 
 		it(`${tool}: nonzero empty output is skipped and ledgered`, async () => {
@@ -217,6 +276,18 @@ describe("compiler runner outcome seam (#1816)", () => {
 			expect(observed.status).toBe("failed");
 			expect(observed.diagnostics[0]).toMatchObject({
 				id: `${tool}:parse-error:1`,
+			});
+		});
+
+		it(`${tool}: empty result is one ledger row across two files`, async () => {
+			// #3268 M3268-2: keep one real session ledger across two dispatches;
+			// resetting per file would falsely prove the once-per-tool bound.
+			const ledger = await dispatchTwoEmptyFiles(tool);
+			expect(ledger).toHaveLength(1);
+			expect(ledger[0]).toMatchObject({
+				kind: "runner-empty-result",
+				count: 2,
+				latestReasons: [{ subject: tool }],
 			});
 		});
 	}
