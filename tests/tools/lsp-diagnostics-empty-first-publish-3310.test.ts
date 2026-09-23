@@ -32,7 +32,7 @@ const fakeServer = fileURLToPath(
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-3310-"));
 process.env.PI_LENS_HOME = path.join(root, ".pi-lens-home");
 
-const DIRTY_PHP = `<?php\nfunction greet(string $name): string\n{\n    return "Hello " . $naem;\n}\n`;
+const DIRTY_PHP = `<?php\nfunction greet(string $name): string\n{\n    return "Hello " . $undeclared;\n}\n`;
 
 /**
  * A workspace whose `node_modules/.bin/intelephense` is the fake server,

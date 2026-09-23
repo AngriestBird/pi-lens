@@ -43,7 +43,7 @@ const PHP_DEBOUNCE_MS = 150;
 
 const FINDING: LSPDiagnostic = {
 	severity: 1,
-	message: "Undefined variable '$naem'.",
+	message: "Undefined variable '$undeclared'.",
 	range: { start: { line: 5, character: 22 }, end: { line: 5, character: 27 } },
 };
 
