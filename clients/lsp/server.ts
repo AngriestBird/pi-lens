@@ -3392,7 +3392,7 @@ export const FishServer: LSPServerInfo = {
 		return resolveAndLaunch(
 			{
 				candidates: nodeBinCandidates(root, "fish-lsp"),
-				args: ["start"],
+				args: ["start", "--stdio"],
 				cwd: root,
 				managedToolId: "fish-lsp",
 			},
