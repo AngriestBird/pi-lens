@@ -1042,6 +1042,15 @@ export interface LSPClientState {
 		}
 	>;
 	readonly openDocuments: Set<string>;
+	/**
+	 * #3310: whether this client's ONE-SHOT empty-first-publish hold has been
+	 * spent. Only ever set for a server the matrix measures as
+	 * `emptyFirstPublish: "indexing"`. The cold whole-workspace index builds once
+	 * per session, so holding at most one publish bounds the hold's cost to that
+	 * one index window: every later touch — warm, or a server that never
+	 * re-publishes — resolves on its first publish exactly as before.
+	 */
+	emptyFirstPublishHoldSpent: boolean;
 	/** Paths explicitly closed during this client lifetime; late publishes are dropped. */
 	readonly closedDocuments?: Set<string>;
 	/** Original URI spelling for each open document; path keys are normalized. */
@@ -2439,6 +2448,63 @@ export function setupIncomingHandlers(
 				const currentVersion = state.documentVersions.get(normalizedPath);
 				return currentVersion !== undefined && docVersion < currentVersion;
 			};
+
+			// #3310: HOLD the empty first publish of an asynchronously-indexing
+			// server. Measured (docs/lsp-capability-matrix.md's `first-publish`
+			// column): intelephense answers `didOpen` with `[]` while its
+			// whole-workspace index builds and publishes the real set once
+			// indexing ends, so letting that first publish through cached an empty
+			// set, bumped the publication stamp and emitted — which resolved the
+			// push wait AND satisfied the "answered" evidence check in
+			// `clients/lsp/index.ts`, rendering a file with an error as "confirmed
+			// clean". A timeout is not a false clean; an empty pre-index publish
+			// must not become one either.
+			//
+			// Held means: not cached, no version bump, no emit — so it can neither
+			// resolve a wait nor count as evidence. Nothing is scheduled and
+			// nothing is awaited: the server's OWN next publish releases the hold
+			// (it is no longer a first publish), and the existing per-server budget
+			// stays the only bound, so there is no new timer, listener or
+			// cancellation path. A genuinely clean file still gets an affirmative
+			// clean, because the measured server re-publishes `[]` at the end of
+			// indexing.
+			//
+			// Three conditions, each load-bearing:
+			//  - the MEASURED class (never every push server): a Tier 2/2* server
+			//    that publishes `[]` once for a clean file keeps resolving the wait
+			//    on it, with no added latency (#3310 AC2);
+			//  - one-shot per client session: the cold index builds once, so a warm
+			//    touch — or a class server that never re-publishes — pays nothing;
+			//  - FIRST publication for this document: no cached push AND no pending
+			//    debounce timer. An empty publish that CLEARS an earlier non-empty
+			//    one (a fix landing) is never held, in either arrival order.
+			if (
+				strategy.emptyFirstPublish === "indexing" &&
+				!state.emptyFirstPublishHoldSpent &&
+				newDiags.length === 0 &&
+				!state.pushDiagnostics.has(normalizedPath) &&
+				!state.pendingDiagnostics.has(normalizedPath)
+			) {
+				state.emptyFirstPublishHoldSpent = true;
+				// Bounded by construction: one record per client session, because
+				// the hold itself is one-shot.
+				logLatency({
+					type: "phase",
+					phase: "lsp_empty_first_publish_held",
+					filePath: normalizedPath,
+					durationMs: Math.max(
+						0,
+						publishReceivedAt -
+							(state.documentOpenedAt.get(normalizedPath) ?? publishReceivedAt),
+					),
+					metadata: {
+						serverId: state.serverId,
+						emptyFirstPublish: strategy.emptyFirstPublish,
+						version: docVersion ?? "push-unversioned",
+					},
+				});
+				return;
+			}
 
 			// Seed on first push for servers whose first push is known complete.
 			// Bypasses the debounce timer entirely — resolves waiting promises immediately.
@@ -5350,6 +5416,8 @@ export async function createLSPClient(options: {
 		pullRequestSequences: new Map(),
 		workspacePullResultCache: new Map(),
 		openDocuments: new Set(),
+		// #3310: one-shot, per client session.
+		emptyFirstPublishHoldSpent: false,
 		closedDocuments: new Set(),
 		openDocumentUris: new Map(),
 		pendingOpens: new Set(),

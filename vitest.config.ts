@@ -312,6 +312,11 @@ const lspSpawnHeavyInclude = [
 	// kill — same process-death-timing budget and contention class as the
 	// watchdog test above.
 	"tests/tools/lsp-diagnostics-2776.test.ts",
+	// #3310: launches the fake server THROUGH the production `PHPServer` entry
+	// (an executable node_modules/.bin/intelephense shim) and waits on a real
+	// initialize handshake plus a two-publish diagnostics sequence per case —
+	// the same #1022/#2332 contention class as its lane siblings.
+	"tests/tools/lsp-diagnostics-empty-first-publish-3310.test.ts",
 ];
 
 // Real pi RPC sessions execute the built extension and a real host tool. Keep
