@@ -248,8 +248,16 @@ jobs:
         with:
           node-version: '22'
 
+      # Lockfile-locked and script-free (SonarCloud githubactions:S8543 /
+      # S6505 flagged the copied `npm install` here); the one piece of
+      # `prepare` the targeted vitest files need is the grammar download, run
+      # explicitly below. The Unit job keeps `npm install` because its
+      # lockfile-in-sync check depends on it.
       - name: Install dependencies
-        run: npm install --no-audit --no-fund
+        run: npm ci --no-audit --no-fund --ignore-scripts
+
+      - name: Download core grammars
+        run: node scripts/download-grammars.js --core --dest grammars
 
       - name: Build
         run: npm run build

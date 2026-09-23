@@ -930,6 +930,25 @@ describe("lsp server policy", () => {
 		expect(commands.some((command) => command.endsWith(".ps1"))).toBe(false);
 	});
 
+	it("launches fish-lsp over stdio so diagnostics can initialize", async () => {
+		// #3311 recurrence: fish-lsp 1.1.4 accepts initialize only with its
+		// explicit stdio transport; omitting it makes the smoke gate report an
+		// unavailable server instead of the fixture's primary diagnostic.
+		const { FishServer } = await import("../../../clients/lsp/server.js");
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-fish-lsp-"));
+		dirs.push(tmp);
+		mockLaunchedProcess(6677);
+
+		const spawned = await FishServer.spawn(tmp, { allowInstall: false });
+
+		expect(spawned).toBeDefined();
+		expect(launchLSP).toHaveBeenCalledWith(
+			expect.any(String),
+			["start", "--stdio"],
+			expect.objectContaining({ cwd: tmp }),
+		);
+	});
+
 	it("skips managed TypeScript install when install is disallowed for file", async () => {
 		const { TypeScriptServer } = await import("../../../clients/lsp/server.js");
 		const tmp = fs.mkdtempSync(

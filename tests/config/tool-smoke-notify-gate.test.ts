@@ -124,7 +124,10 @@ describe("tool-smoke.yml's issue writers are scoped to nightly/default runs (#33
 			"continue-on-error"?: unknown;
 		};
 		expect(sonarStep.id).toBe("sonar_master_gate");
-		expect(sonarStep.if).toBe("always()");
+		// Reads MASTER's gate: scoped to the schedule / master ref exactly like
+		// the notifier below, so a PR's exact-head branch dispatch cannot go red
+		// on master's Sonar state (it did on 2026-09-24, PR #3350's nightly).
+		expect(sonarStep.if).toBe(NOTIFY_IF);
 		expect(sonarStep.run).toBe("node scripts/sonar-master-gate.mjs");
 		expect(sonarStep["continue-on-error"]).not.toBe(true);
 	});
