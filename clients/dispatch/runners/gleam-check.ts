@@ -1,3 +1,5 @@
+import * as path from "node:path";
+import { pathsEqual } from "../../path-utils.js";
 import { safeSpawnAsync } from "../../safe-spawn.js";
 import { resolveRunnerCwd } from "../../tool-cwd.js";
 import { createAvailabilityChecker } from "./utils/runner-helpers.js";
@@ -11,16 +13,22 @@ import { PRIORITY } from "../priorities.js";
 
 const gleam = createAvailabilityChecker("gleam", ".exe");
 
-function parseGleamOutput(raw: string, filePath: string): Diagnostic[] {
+function parseGleamOutput(
+	raw: string,
+	filePath: string,
+	cwd: string,
+): Diagnostic[] {
 	const diagnostics: Diagnostic[] = [];
 	const lines = raw.split(/\r?\n/);
+	const absTarget = path.resolve(cwd, filePath);
 	for (let i = 0; i < lines.length; i++) {
 		const location = lines[i].match(/^(.+?):(\d+):(\d+)$/);
 		if (!location) continue;
 		const [, sourcePath, lineStr, colStr] = location;
-		if (
-			!sourcePath.replace(/\\/g, "/").endsWith(filePath.replace(/\\/g, "/"))
-		) {
+		// #3278: one seam for reported-path attribution — see javac.ts. The
+		// `endsWith` arm this replaces attached ANY reported path whose tail spelled
+		// the dispatched file, and hand-rolled its own separator fold to do it.
+		if (!pathsEqual(path.resolve(cwd, sourcePath.trim()), absTarget)) {
 			continue;
 		}
 		const message = lines.slice(i + 1).find((line) => line.trim().length > 0);
@@ -72,6 +80,7 @@ const gleamCheckRunner: RunnerDefinition = {
 		const diagnostics = parseGleamOutput(
 			`${result.stderr || ""}\n${result.stdout || ""}`,
 			ctx.filePath,
+			cwd,
 		);
 		if (diagnostics.length === 0) {
 			if (result.status && result.status !== 0) {

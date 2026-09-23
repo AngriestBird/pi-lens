@@ -12,6 +12,7 @@
 
 import * as path from "node:path";
 import { safeSpawnAsync } from "../../safe-spawn.js";
+import { pathsEqual } from "../../path-utils.js";
 import { resolveRunnerCwd } from "../../tool-cwd.js";
 import { getLinterPolicyForCwd, hasGolangciConfig } from "../../tool-policy.js";
 import { PRIORITY } from "../priorities.js";
@@ -82,15 +83,27 @@ function describeReplacement(
 	return "Apply golangci-lint suggested fix";
 }
 
-function parseGolangciJson(raw: string, filePath: string): Diagnostic[] {
+function parseGolangciJson(
+	raw: string,
+	filePath: string,
+	cwd: string,
+): Diagnostic[] {
 	try {
 		const output: GolangciOutput = JSON.parse(raw);
 		if (!output.Issues) return [];
 
-		const absFile = path.resolve(filePath);
+		const absFile = path.resolve(cwd, filePath);
 
-		return output.Issues.filter(
-			(issue) => path.resolve(issue.Pos.Filename) === absFile,
+		// #3278: one seam for reported-path attribution — see javac.ts. The base
+		// matters here more than anywhere else in the family: golangci-lint's
+		// `PathPrettifier` OVERWRITES `Pos.Filename` with `filepath.Rel(basePath,
+		// …)` before the JSON printer sees it (v1.64.8,
+		// `pkg/result/processors/path_prettifier.go:31` +
+		// `path_relativity.go:43`), so the spelling is relative to the child's
+		// base path — the `cwd` we spawned it in — and `path.resolve` with no
+		// base resolved it against the EXTENSION's cwd instead.
+		return output.Issues.filter((issue) =>
+			pathsEqual(path.resolve(cwd, issue.Pos.Filename), absFile),
 		).map((issue) => {
 			const severity = issue.Severity === "error" ? "error" : "warning";
 			// golangci-lint's --out-format=json emits a Replacement object per
@@ -165,7 +178,7 @@ const golangciRunner: RunnerDefinition = {
 		const parsed = parseToolRun(
 			"golangci-lint",
 			{ result, output: raw },
-			(raw) => parseGolangciJson(raw, ctx.filePath),
+			(raw) => parseGolangciJson(raw, ctx.filePath, cwd),
 		);
 		if (parsed.skipped) return parsed.skipped;
 		return finishParsedRun({
