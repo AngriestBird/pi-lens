@@ -1012,6 +1012,67 @@ describe("git-guard", () => {
 		}
 	});
 
+	it.each([["\\n", "\n"], ["\\n\\n", "\n\n"]])(
+		"#3282 HIGH-3287-1: all-blank blocker text (%s) cannot clear another file's record",
+		(_label, blockerContent) => {
+			// Round 1 shipped this fail-open: `blockerContent` that is non-empty but
+			// all-blank opens no section, and round 1 read "zero sections" as
+			// "nothing left to attribute", so `[].every(…)` was vacuously true and a
+			// clean dispatch of an UNRELATED file deleted a record whose only named
+			// blocking file was `other.ts` — the gate then answered `no_record` and
+			// allowed the commit.
+			//
+			// ADR 0003 amendment 3 already said this: the text is attributable only
+			// if its FIRST non-empty line opens a section. No line opens one here, so
+			// the record is unattributed and fails closed, like any other malformed
+			// record. Reviewer's probe, verbatim: `blockerContent="\n"`,
+			// `blockingFiles=[<cwd>/other.ts]`, clean dispatch of `<cwd>/clean.ts`
+			// observed `{cleared: true, written: false}`.
+			const env = setupTestEnvironment("pi-lens-git-guard-3282-blank-content-");
+			try {
+				const other = path.join(env.tmpDir, "other.ts");
+				const clean = path.join(env.tmpDir, "clean.ts");
+				fs.writeFileSync(other, "const x = 1;\n");
+				fs.writeFileSync(clean, "const y = 2;\n");
+				const runtime = new RuntimeCoordinator();
+				runtime.projectRoot = env.tmpDir;
+				runtime.setTelemetryIdentity({ sessionId: "session-A" });
+				const cache = new CacheManager(false);
+				writeGitGuardRecord(
+					cache,
+					runtime,
+					env.tmpDir,
+					record({
+						content: blockerContent,
+						blockerContent,
+						hasBlockers: true,
+						affectedFiles: [other],
+						blockingFiles: [other],
+						sessionId: "session-A",
+					}),
+				);
+
+				syncGitGuardRecord(runtime, cache, env.tmpDir, clean);
+
+				expect(
+					cache.readCache<Partial<TurnEndFindingsCache>>(
+						"turn-end-findings",
+						env.tmpDir,
+					)?.data?.blockerContent,
+				).toBe(blockerContent);
+				expect(runtime.gitGuardCacheUnknownReason).toBe(
+					"blocking_provenance_untrusted",
+				);
+				expect(evaluateGitGuard(runtime, cache, env.tmpDir)).toMatchObject({
+					block: true,
+					unknown: true,
+				});
+			} finally {
+				env.cleanup();
+			}
+		},
+	);
+
 	it("#3282: a 4.2.1 record whose blocker text names no file stays untrusted", () => {
 		// Old-record direction: this fix adds no field and changes no writer, so a
 		// record persisted by 4.2.1 is read with the SAME verdict as before. The
