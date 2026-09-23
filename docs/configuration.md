@@ -5,7 +5,7 @@ There are **two** pi-lens config files:
 | File | Scope | Notes |
 | --- | --- | --- |
 | `.pi-lens.json` | the project | Committed or not, your call. Nearest one wins **per field** — a package can override one setting without restating the repo root's. |
-| `~/.pi-lens/config.json` | the machine | Your defaults across every project. `PI_LENS_CONFIG_PATH` relocates it. |
+| `~/.pi-lens/config.json` | the machine | Your defaults across every project. `PI_LENS_CONFIG_PATH` relocates it; alternatively `$PI_CODING_AGENT_DIR/extensions/pi-lens.json` is read when it exists and the default does not (see [environment variables](environment-variables.md)). |
 
 Both files have the same shape, with one exception noted below the example:
 everything LSP-related lives under an `lsp` namespace inside them.

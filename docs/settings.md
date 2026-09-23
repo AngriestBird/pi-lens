@@ -238,6 +238,10 @@ manager, or CI config. The handful you are most likely to reach for:
   review graph) out of the workspace.
 - `PI_LENS_HOME` — relocate the machine-global root (logs, tool binaries, install
   caches, instance registry).
+- `PI_LENS_CONFIG_PATH` — point the global config file at an explicit path.
+- `PI_CODING_AGENT_DIR` — when pi sets it, `$PI_CODING_AGENT_DIR/extensions/
+  pi-lens.json` is read when it exists and the default global config file does
+  not; settings editors create there when neither file exists.
 - `PI_LENS_MAX_PROJECT_FILES` — base project-size scale knob (default `2000`).
 - `PI_LENS_STARTUP_MODE` — force the startup path: `full`, `minimal`, or `quick`.
 
