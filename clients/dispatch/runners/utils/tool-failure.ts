@@ -228,6 +228,8 @@ export function recordParsedNothing(input: {
 
 export interface ParseToolRunOptions {
 	fields?: ToolFailureInput["fields"];
+	/** Documented nonzero statuses that still mean the tool completed analysis. */
+	exitCodes?: ClassifyRunOutcomeInput["exitCodes"];
 	/**
 	 * The exact string to hand the parser, when it differs from the string the
 	 * outcome classifier judged (`input.output`, else stdout). `spellcheck`
@@ -270,7 +272,15 @@ export function parseToolRun<D>(
 	parse: (output: string) => readonly D[],
 	options: ParseToolRunOptions = {},
 ): ParsedToolRun<D> {
-	const skipped = skipUnlessToolRan(tool, input, options.fields);
+	const skipped = skipUnlessToolRan(
+		tool,
+		{
+			...input,
+			output: options.parseOutput ?? input.output,
+			exitCodes: options.exitCodes,
+		},
+		options.fields,
+	);
 	if (skipped) return { skipped, diagnostics: [], parsedNothing: false };
 
 	const output =

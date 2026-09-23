@@ -9,12 +9,13 @@ import type {
 	RunnerResult,
 } from "../types.js";
 import { createAvailabilityChecker } from "./utils/runner-helpers.js";
+import { finishParsedRun, parseToolRun } from "./utils/tool-failure.js";
 
 const php = createAvailabilityChecker("php", ".exe");
 
 function parsePhpLintOutput(raw: string, filePath: string): Diagnostic[] {
 	const output = raw.trim();
-	if (!output) return [];
+	if (!output || !/(?:PHP )?Parse error:/i.test(output)) return [];
 
 	const lineMatch = output.match(/on line (\d+)/i);
 	const messageMatch =
@@ -59,23 +60,25 @@ const phpLintRunner: RunnerDefinition = {
 			timeout: 15000,
 			cwd,
 		});
-		if (result.status === 0) {
-			return { status: "succeeded", diagnostics: [], semantic: "none" };
-		}
-
-		const diagnostics = parsePhpLintOutput(
-			`${result.stdout ?? ""}\n${result.stderr ?? ""}`,
-			ctx.filePath,
+		// PHP documents `-l` as a syntax check: zero is clean and nonzero is a
+		// parse failure. Keep its stderr wire alongside stdout for parse errors.
+		const run = parseToolRun<Diagnostic>(
+			"php-lint",
+			{ result },
+			(output) => parsePhpLintOutput(output, ctx.filePath),
+			{
+				parseOutput: `${result.stdout ?? ""}\n${result.stderr ?? ""}`,
+				exitCodes: { ran: [1] },
+			},
 		);
-		if (diagnostics.length === 0) {
-			return { status: "skipped", diagnostics: [], semantic: "none" };
-		}
-
-		return {
-			status: "failed",
-			diagnostics,
-			semantic: "blocking",
-		};
+		if (run.skipped) return run.skipped;
+		return finishParsedRun({
+			tool: "php-lint",
+			ctx,
+			result,
+			diagnostics: run.diagnostics,
+			classify: () => ({ status: "failed", semantic: "blocking" }),
+		});
 	},
 };
 
