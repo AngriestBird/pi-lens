@@ -17,6 +17,11 @@
  * The pins are the rename inventory for #3259. Both directions are guarded:
  * an unpinned new occurrence fails, and a deleted occurrence requires its
  * `file@count` row to shrink. This prevents the #3256 M3c stale-pin failure.
+ *
+ * Glossary retirement grammar: each declaration is a bullet whose bold term
+ * is followed by `retires` plus one or more backtick-delimited synonyms,
+ * ending at the declaration's period. A bullet mentioning `retires` that
+ * does not match this grammar is malformed and must fail loudly.
  */
 
 import * as fs from "node:fs";
@@ -46,8 +51,8 @@ function agentsText(): string {
 	);
 }
 
-function parseGlossary(): Map<string, string[]> {
-	const glossary = agentsText()
+function parseGlossary(source = agentsText()): Map<string, string[]> {
+	const glossary = source
 		.split("## Glossary", 2)[1]
 		?.split("Where two spellings", 2)[0];
 	if (!glossary) throw new Error("AGENTS.md glossary is missing");
@@ -57,7 +62,12 @@ function parseGlossary(): Map<string, string[]> {
 		const match = /^- \*\*([^*]+)\*\* .*?\bretires\s+(.+?)(?=\.\s|$)/.exec(
 			line,
 		);
-		if (!match) continue;
+		if (!match) {
+			if (/\bretires\b/.test(line)) {
+				throw new Error(`malformed glossary retirement declaration: ${line}`);
+			}
+			continue;
+		}
 		const synonyms = [...match[2].matchAll(/`([^`]+)`/g)].map(
 			([, synonym]) => synonym,
 		);
@@ -72,9 +82,12 @@ function parseGlossary(): Map<string, string[]> {
 }
 
 function identifierTerms(glossary: Map<string, string[]>): string[] {
+	const canonicalTerms = new Set(glossary.keys());
 	return [
 		...new Set(
-			[...glossary.values()].flat().filter((term) => IDENTIFIER.test(term)),
+			[...glossary.values()]
+				.flat()
+				.filter((term) => IDENTIFIER.test(term) && !canonicalTerms.has(term)),
 		),
 	].sort();
 }
@@ -128,21 +141,16 @@ function census(
 // A parsed-term pin makes a glossary format or spelling edit red before it
 // can silently change the governed population.
 const EXPECTED_IDENTIFIER_TERMS = [
-	"advisory",
 	"age",
 	"allowlist",
 	"baseline",
-	"blocker",
 	"cache",
 	"channel",
 	"consumer",
-	"diagnostic",
 	"epoch",
 	"error",
 	"exception",
-	"exemption",
 	"filter",
-	"finding",
 	"helper",
 	"ignore",
 	"log",
@@ -159,15 +167,41 @@ const EXPECTED_IDENTIFIER_TERMS = [
 	"warning",
 ] as const;
 
+const EXPECTED_GLOSSARY_TERMS = [
+	"finding",
+	"diagnostic",
+	"blocker",
+	"advisory",
+	"disposition",
+	"strict anchor",
+	"weak anchor",
+	"freshness",
+	"delivery surface",
+	"delivery gate",
+	"lane",
+	"seam",
+	"store",
+	"mirror",
+	"path spelling",
+	"path key",
+	"canonical path",
+	"rendezvous id",
+	"generation",
+	"degradation record",
+	"ratchet",
+	"sweep",
+	"pin",
+	"admission",
+	"exemption",
+	"runner outcome",
+] as const;
+
 /**
  * Population at the synonym-retirement sweep's authoring head. Each nested
  * row is `retired identifier -> file -> count`; update only when a rename or
  * an intentional source change changes the live population.
  */
 const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
-	advisory: {
-		"clients/runtime-turn.ts": 17,
-	},
 	age: {
 		"clients/cache-manager.ts": 10,
 		"clients/project-diagnostics/extractors.ts": 3,
@@ -216,32 +250,6 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/observed-mutation.ts": 3,
 		"clients/read-bridge.ts": 2,
 		"clients/zizmor-config.ts": 13,
-	},
-	diagnostic: {
-		"clients/actionable-warnings.ts": 21,
-		"clients/code-quality-warnings.ts": 27,
-		"clients/diagnostic-dispositions.ts": 6,
-		"clients/dispatch/finding-policy.ts": 36,
-		"clients/dispatch/integration.ts": 19,
-		"clients/dispatch/runners/helm-lint.ts": 2,
-		"clients/dispatch/runners/oxlint.ts": 4,
-		"clients/inline-blocker-dispositions.ts": 9,
-		"clients/lens-events.ts": 5,
-		"clients/lsp/client.ts": 18,
-		"clients/lsp/index.ts": 12,
-		"clients/lsp/workspace-diagnostics-cache.ts": 5,
-		"clients/mcp/analyze.ts": 11,
-		"clients/mcp/review.ts": 10,
-		"clients/pipeline.ts": 4,
-		"clients/project-diagnostics/runner-adapters/runner-findings.ts": 6,
-		"clients/project-diagnostics/scanner.ts": 17,
-		"clients/review-graph/query.ts": 1,
-		"clients/review-graph/types.ts": 1,
-		"clients/runtime-turn.ts": 9,
-		"clients/turn-summary.ts": 3,
-		"clients/widget-state.ts": 21,
-		"tools/lens-diagnostics.ts": 78,
-		"tools/lsp-diagnostics.ts": 4,
 	},
 	epoch: {
 		"clients/lsp/workspace-diagnostics-cache.ts": 3,
@@ -372,9 +380,6 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"tools/module-report.ts": 11,
 		"mcp/analyze-cli.ts": 1,
 		"mcp/server.ts": 31,
-	},
-	exemption: {
-		"clients/read-guard.ts": 3,
 	},
 	filter: {
 		"clients/actionable-warnings.ts": 10,
@@ -548,20 +553,6 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"mcp/analyze-cli.ts": 1,
 		"mcp/server.ts": 9,
 		"index.ts": 21,
-	},
-	finding: {
-		"clients/advisory-provenance.ts": 10,
-		"clients/dispatch/finding-policy.ts": 7,
-		"clients/finding-delivery-gate.ts": 2,
-		"clients/gitleaks-client.ts": 9,
-		"clients/govulncheck-client.ts": 2,
-		"clients/project-diagnostics/runner-adapters/gitleaks.ts": 15,
-		"clients/project-diagnostics/runner-adapters/govulncheck.ts": 11,
-		"clients/project-diagnostics/runner-adapters/opengrep.ts": 13,
-		"clients/project-diagnostics/runner-adapters/trivy.ts": 26,
-		"clients/runtime-turn.ts": 10,
-		"clients/turn-end/lanes/govulncheck.ts": 2,
-		"clients/turn-end/lanes/secrets.ts": 6,
 	},
 	ignore: {
 		"clients/file-utils.ts": 2,
@@ -1142,9 +1133,13 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 describe("glossary synonym-retirement sweep (#3259)", () => {
 	it("parses the complete glossary and pins its identifier population", () => {
 		const glossary = parseGlossary();
+		expect([...glossary.keys()]).toEqual(EXPECTED_GLOSSARY_TERMS);
 		const terms = identifierTerms(glossary);
 		expect(terms).toEqual(EXPECTED_IDENTIFIER_TERMS);
+		expect(terms).toHaveLength(24);
 		const counts = census(terms);
+		expect(Object.keys(counts)).toHaveLength(18);
+		expect(terms.filter((term) => !(term in counts))).toHaveLength(6);
 		for (const term of terms) {
 			const audit = auditSymbolCounts({
 				sweepName: `glossary retired identifier ${term} (#3259)`,
@@ -1154,6 +1149,29 @@ describe("glossary synonym-retirement sweep (#3259)", () => {
 			});
 			expect(audit.problems, term).toEqual([]);
 		}
+	});
+
+	it("rejects malformed retirement declarations loudly", () => {
+		// Prevents #3279 G-3279-1: a typo such as `retires:` must not
+		// self-excuse a glossary family from the governed population.
+		const malformed =
+			"## Glossary\n- **scratch** — probe; retires: `phantom`.\nWhere two spellings";
+		expect(() => parseGlossary(malformed)).toThrow(
+			/malformed glossary retirement declaration/,
+		);
+	});
+
+	it("excludes canonical spellings from the global retirement census", () => {
+		// Prevents #3279 G-3279-2: a canonical `diagnostic` identifier must
+		// remain valid even when another concept retires that spelling.
+		const glossary = parseGlossary();
+		const terms = identifierTerms(glossary);
+		expect(terms).not.toContain("diagnostic");
+		expect(terms).not.toContain("advisory");
+		expect(terms).not.toContain("blocker");
+		expect(terms).not.toContain("exemption");
+		expect(terms).not.toContain("finding");
+		expect(countIdentifier("const diagnostic = 1;", "diagnostic")).toBe(1);
 	});
 
 	it("uses identifier boundaries, not substring matching", () => {
