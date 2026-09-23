@@ -259,9 +259,13 @@ jobs:
       # outages as visible fail-open warnings. `always()` ensures the master
       # read happens even when an earlier smoke layer already failed; the
       # final notifier below still runs after either result.
+      # Reads MASTER's gate, so it is meaningful only on the schedule and on
+      # master itself: a branch dispatch (a PR's exact-head nightly) must not
+      # go red on master's Sonar state. Same scoping as the drift notifier
+      # below (#3346/#3352).
       - name: SonarCloud master quality gate
         id: sonar_master_gate
-        if: always()
+        if: always() && (github.event_name == 'schedule' || github.ref == 'refs/heads/master')
         run: node scripts/sonar-master-gate.mjs
 
       # #2723: the ONLY tracking-issue writer this workflow had before this
