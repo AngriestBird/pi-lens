@@ -8,6 +8,14 @@
 - Reproduce the claimed behavior through the production entry point.
 - Report only proven findings; do not repair the author's branch.
 
+## Standard mechanics
+
+- Write `REVIEW.md` as a file at the worktree root, not only in the final
+  answer. Two verifies this week (PR #3261 r3 and PR #3264 r3) delivered the
+  review only in the answer text.
+- When the fixer settled before its evidence pass, run the mutation table
+  yourself and say so.
+
 ## Verification
 
 - Use `git diff origin/master...HEAD` or the merge-base equivalent.

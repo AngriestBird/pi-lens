@@ -12,6 +12,14 @@ instructions say so.
 
 ## Standing procedure
 
+### Standard mechanics
+
+- Commit the code as soon as the targeted suite is green, then add evidence in
+  a later commit. A worker can be settled mid-evidence-pass; on PR #3268 the
+  orchestrator had to commit the tree.
+- A whole-module `vi.mock` of a production module must spread `importOriginal`.
+  Run `tests/config/vi-mock-export-sweep.test.ts`.
+
 ### Failure list before code
 
 Before the first edit of any fix, write the list of ways the change could fail
