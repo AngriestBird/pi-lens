@@ -457,6 +457,8 @@ const LSP_FIXTURES = [
 	{
 		// #2777: the nested package marker must become the LSP root for this file.
 		lang: "typescript-nested-root-markers",
+		lspGate: true,
+		lspGateMarker: '"not a number"',
 		dir: "tests/fixtures/tool-smoke/typescript-nested-root-markers",
 		file: "packages/app/bad.ts",
 		serverHint: "typescript-language-server (nested rootMarkers)",
@@ -476,6 +478,8 @@ const LSP_FIXTURES = [
 	},
 	{
 		lang: "python",
+		lspGate: true,
+		lspGateMarker: "import os",
 		dir: "tests/fixtures/tool-smoke/python",
 		file: "bad.py",
 		serverHint: "pyright",
@@ -501,6 +505,8 @@ const LSP_FIXTURES = [
 	// diagnostic alone can't tell them apart).
 	{
 		lang: "typescript7",
+		lspGate: true,
+		lspGateMarker: '"not a number"',
 		dir: "tests/fixtures/tool-smoke/typescript7",
 		file: "bad.ts",
 		serverHint: "typescript native (tsc --lsp --stdio, TS7+)",
@@ -522,6 +528,8 @@ const LSP_FIXTURES = [
 	},
 	{
 		lang: "yaml",
+		lspGate: true,
+		lspGateMarker: "name: demo2",
 		dir: "tests/fixtures/tool-smoke/yaml",
 		file: "bad.yaml",
 		serverHint: "yaml-language-server",
@@ -538,6 +546,8 @@ const LSP_FIXTURES = [
 	},
 	{
 		lang: "shell",
+		lspGate: true,
+		lspGateMarker: "echo $f",
 		dir: "tests/fixtures/tool-smoke/shell",
 		file: "bad.sh",
 		serverHint: "bash-language-server",
@@ -554,6 +564,8 @@ const LSP_FIXTURES = [
 	},
 	{
 		lang: "html",
+		lspGate: true,
+		lspGateMarker: "<div>",
 		dir: "tests/fixtures/tool-smoke/html",
 		file: "bad.html",
 		serverHint: "vscode-html-language-server",
@@ -561,6 +573,8 @@ const LSP_FIXTURES = [
 	},
 	{
 		lang: "dockerfile",
+		lspGate: true,
+		lspGateMarker: "FROM ubuntu",
 		dir: "tests/fixtures/tool-smoke/dockerfile",
 		file: "Dockerfile",
 		serverHint: "docker-langserver",
@@ -577,6 +591,8 @@ const LSP_FIXTURES = [
 	},
 	{
 		lang: "terraform",
+		lspGate: true,
+		lspGateMarker: '"${var.name}"',
 		dir: "tests/fixtures/tool-smoke/terraform",
 		file: "bad.tf",
 		serverHint: "terraform-ls",
@@ -587,6 +603,8 @@ const LSP_FIXTURES = [
 		// The fixture's bad.md carries a broken intra-repo link so a provisioned run
 		// also exercises marksman's cross-file check, not just the handshake.
 		lang: "markdown",
+		lspGate: true,
+		lspGateMarker: "./does-not-exist.md",
 		dir: "tests/fixtures/tool-smoke/markdown",
 		file: "bad.md",
 		serverHint: "marksman",
@@ -609,6 +627,8 @@ const LSP_FIXTURES = [
 	},
 	{
 		lang: "prisma",
+		lspGate: true,
+		lspGateMarker: "\n  name\n}",
 		dir: "tests/fixtures/tool-smoke/prisma",
 		file: "schema.prisma",
 		serverHint: "@prisma/language-server",
@@ -616,6 +636,8 @@ const LSP_FIXTURES = [
 	},
 	{
 		lang: "php",
+		lspGate: true,
+		lspGateMarker: "$naem",
 		dir: "tests/fixtures/tool-smoke/php",
 		file: "bad.php",
 		serverHint: "intelephense",
@@ -808,6 +830,8 @@ const LSP_FIXTURES = [
 	},
 	{
 		lang: "clojure",
+		lspGate: true,
+		lspGateMarker: "(defn broken [x",
 		dir: "tests/fixtures/tool-smoke/clojure",
 		file: "main.clj",
 		serverHint: "clojure-lsp",
@@ -836,6 +860,8 @@ const LSP_FIXTURES = [
 	},
 	{
 		lang: "vue",
+		lspGate: true,
+		lspGateMarker: '"not a number"',
 		dir: "tests/fixtures/tool-smoke/vue",
 		file: "App.vue",
 		serverHint: "@vue/language-server",
@@ -843,6 +869,8 @@ const LSP_FIXTURES = [
 	},
 	{
 		lang: "svelte",
+		lspGate: true,
+		lspGateMarker: '"not a number"',
 		dir: "tests/fixtures/tool-smoke/svelte",
 		file: "App.svelte",
 		serverHint: "svelte-language-server",
@@ -931,6 +959,8 @@ const LSP_FIXTURES = [
 	// produced it. Both auto-install via their `tools` ids under --install.
 	{
 		lang: "deno",
+		lspGate: true,
+		lspGateMarker: '"not a number"',
 		dir: "tests/fixtures/tool-smoke/deno-alt",
 		file: "bad.ts",
 		serverHint: "deno (alternate of typescript)",
@@ -941,6 +971,8 @@ const LSP_FIXTURES = [
 	},
 	{
 		lang: "jedi",
+		lspGate: true,
+		lspGateMarker: "def greet(name)",
 		dir: "tests/fixtures/tool-smoke/jedi-alt",
 		file: "bad.py",
 		serverHint: "jedi (alternate of pyright)",

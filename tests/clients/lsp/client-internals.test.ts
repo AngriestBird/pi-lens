@@ -517,15 +517,27 @@ describe("resolveConfigurationSection (#983)", () => {
 		expect(resolveConfigurationSection(initialization, "scan.jobs")).toBe(16);
 	});
 
-	it("returns null for an unknown section instead of the whole blob", () => {
-		expect(resolveConfigurationSection(initialization, "unknown.section")).toBe(
-			null,
-		);
-		expect(resolveConfigurationSection(initialization, "scan.nope")).toBe(null);
+	// #3217 recurrence: this used to answer `null`, and a server that reads the
+	// answer without a null guard loses its diagnostics (vscode-css-language-
+	// server swallowed its own `Cannot read properties of null (reading
+	// 'validProperties')` and returned an empty pull report, so every css-kind
+	// file went undiagnosed for the whole life of the #2780 clean gate) or dies
+	// outright (@prisma/language-server reads `settings.enableDiagnostics` in
+	// `validateTextDocument` and the process exits on the uncaught TypeError).
+	// The invariant #983 added — never the WHOLE BLOB for a section the server
+	// did not ask for — is what these two cases still pin.
+	it("returns empty settings, never the whole blob, for an unknown section", () => {
+		expect(
+			resolveConfigurationSection(initialization, "unknown.section"),
+		).toEqual({});
+		expect(resolveConfigurationSection(initialization, "scan.nope")).toEqual({});
+		expect(
+			resolveConfigurationSection(initialization, "unknown.section"),
+		).not.toBe(initialization);
 	});
 
-	it("returns null for an unknown section when initialization is undefined", () => {
-		expect(resolveConfigurationSection(undefined, "anything")).toBe(null);
+	it("returns empty settings for an unknown section when initialization is undefined", () => {
+		expect(resolveConfigurationSection(undefined, "anything")).toEqual({});
 	});
 });
 
@@ -558,7 +570,7 @@ describe("workspace/configuration handler (#983)", () => {
 			],
 		});
 
-		expect(result).toEqual([{ jobs: 16 }, false, null, initialization]);
+		expect(result).toEqual([{ jobs: 16 }, false, {}, initialization]);
 	});
 
 	it("returns an empty array when the server requests zero items", async () => {
