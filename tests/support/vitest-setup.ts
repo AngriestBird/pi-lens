@@ -751,33 +751,36 @@ export type TmpHygieneOwnerFacts = {
 export function classifyTmpHygieneOwner(
 	facts: TmpHygieneOwnerFacts,
 ): TmpHygieneOwnerVerdict {
-	if (!facts.runMatches) return "foreign"; // G1
+	// Every field is normalised to a total type BEFORE the guards, so each guard
+	// below can be neutered on its own in a mutation run without the ones after
+	// it losing their narrowing — the shape the "mutate it both ways" rule needs.
+	// `-1` and `""` are sentinels no real marker can carry.
 	const marker = facts.marker as {
 		pid?: unknown;
 		startTime?: unknown;
 		file?: unknown;
 	} | null;
-	if (
-		!marker ||
-		typeof marker !== "object" ||
-		typeof marker.pid !== "number" ||
-		typeof marker.file !== "string" ||
-		marker.file === ""
-	)
-		return "malformed"; // G2
-	if (marker.pid === facts.selfPid) return "self";
-	if (
-		facts.markerMtimeMs === undefined ||
-		facts.nowMs - facts.markerMtimeMs > facts.staleAfterMs
-	)
-		return "orphaned"; // G3 — the heartbeat stopped
-	if (!facts.probe.isAlive(marker.pid)) return "orphaned"; // G4
+	const pid = typeof marker?.pid === "number" ? marker.pid : -1;
+	const file = typeof marker?.file === "string" ? marker.file : "";
+	const startTime =
+		typeof marker?.startTime === "string" ? marker.startTime : undefined;
+	const heartbeatAgeMs =
+		facts.markerMtimeMs === undefined
+			? Number.POSITIVE_INFINITY
+			: facts.nowMs - facts.markerMtimeMs;
+
+	if (!facts.runMatches) return "foreign"; // G1
+	if (pid === -1 || file === "") return "malformed"; // G2
+	if (pid === facts.selfPid) return "self";
+	if (heartbeatAgeMs > facts.staleAfterMs) return "orphaned"; // G3 — beat stopped
+	if (!facts.probe.isAlive(pid)) return "orphaned"; // G4
 	if (facts.probe.startTimeSupported) {
 		// G5 — where the platform has start times, a marker without one is not
 		// something this run's setup wrote, and a different one is PID reuse.
-		if (typeof marker.startTime !== "string") return "orphaned";
-		if (facts.probe.startTimeOf(marker.pid) !== marker.startTime)
-			return "orphaned";
+		// This block is an EXTRA on top of G3/G4, never the sole gate: making it
+		// unconditional is exactly HIGH-3297-V1.
+		if (startTime === undefined) return "orphaned";
+		if (facts.probe.startTimeOf(pid) !== startTime) return "orphaned";
 	}
 	return "live";
 }
@@ -820,7 +823,8 @@ function scanTmpHygieneOwners(
 			staleAfterMs: TMP_HYGIENE_OWNER_STALE_MS,
 		});
 		counts[verdict] += 1;
-		if (verdict === "live") live.add((marker as { file: string }).file);
+		const file = (marker as { file?: unknown } | null | undefined)?.file;
+		if (verdict === "live" && typeof file === "string") live.add(file);
 	}
 	return { live, counts };
 }
