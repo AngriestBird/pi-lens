@@ -22,6 +22,70 @@ on:
   workflow_dispatch:
 
 jobs:
+  test-history-rollup:
+    name: Roll up durable unit-test history
+    # History is a nightly concern. In particular, a PR must never become red
+    # because its historical artifacts are unavailable or a data-branch push
+    # loses a race with another bot.
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: true
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+        with:
+          node-version: '22'
+      - name: Download unit-test result artifacts
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/test-history-artifacts"
+          gh api --paginate "/repos/${GITHUB_REPOSITORY}/actions/artifacts?name=unit-test-results-linux&per_page=100" \
+            --jq '.artifacts[] | select(.expired == false) | .id' > "$RUNNER_TEMP/test-history-artifact-ids"
+          while read -r artifact_id; do
+            [ -n "$artifact_id" ] || continue
+            mkdir -p "$RUNNER_TEMP/test-history-artifacts/$artifact_id"
+            gh api "/repos/${GITHUB_REPOSITORY}/actions/artifacts/$artifact_id/zip" > "$RUNNER_TEMP/$artifact_id.zip"
+            unzip -q "$RUNNER_TEMP/$artifact_id.zip" -d "$RUNNER_TEMP/test-history-artifacts/$artifact_id"
+          done < "$RUNNER_TEMP/test-history-artifact-ids"
+      - name: Append history and publish data branch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          script_copy="$RUNNER_TEMP/test-history-rollup.mjs"
+          cp scripts/test-history-rollup.mjs "$script_copy"
+          git fetch origin data/test-history || true
+          for attempt in 1 2 3; do
+            echo "test-history push attempt ${attempt}/3"
+            git checkout --detach "$GITHUB_SHA"
+            old_history="$RUNNER_TEMP/test-history.ndjson"
+            : > "$old_history"
+            if git show origin/data/test-history:history/test-results.ndjson > "$old_history" 2>/dev/null; then :; fi
+            node "$script_copy" --artifact-dir "$RUNNER_TEMP/test-history-artifacts" \
+              --history "$old_history" --summary "$RUNNER_TEMP/test-history-summary.json"
+            if git show-ref --verify --quiet refs/remotes/origin/data/test-history; then
+              git checkout -B data/test-history origin/data/test-history
+            else
+              git checkout --orphan data/test-history
+              git rm -rf . >/dev/null 2>&1 || true
+            fi
+            mkdir -p history
+            cp "$old_history" history/test-results.ndjson
+            cp "$RUNNER_TEMP/test-history-summary.json" history/summary.json
+            git add history
+            git -c user.name='pi-lens nightly' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'chore(nightly): append test history' || true
+            if git push origin HEAD:data/test-history; then exit 0; fi
+            git fetch origin data/test-history
+          done
+          echo 'data/test-history push lost three consecutive races' >&2
+          exit 1
+
   tool-smoke:
     name: Live tool + LSP smoke
     runs-on: ubuntu-latest

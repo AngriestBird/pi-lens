@@ -390,7 +390,36 @@ jobs:
         # mark and a verdict line, so the next `Killed npm test` / exit 137 —
         # which carries no failing assertion and reads as infrastructure noise —
         # arrives with a number attached.
-        run: node scripts/with-memory-watch.mjs -- npm test
+        run: node scripts/with-memory-watch.mjs -- npm test -- --reporter=default --reporter=json --outputFile=${{ runner.temp }}/vitest-results.json
+
+      # Listener input for #3215. The default reporter remains explicit above,
+      # so this adds a file reporter in the same invocation and preserves the
+      # existing result sections and npm/vitest exit status. Vitest also emits
+      # one `JSON report written to <path>` line; that additive console
+      # contract is pinned in `tests/scripts/test-history-rollup.test.ts` by
+      # driving the installed vitest JsonReporter directly, and the local
+      # `npm test` script adds no JSON reporter at all.
+      #
+      # The metadata basename below is `METADATA_FILENAME` from
+      # `scripts/test-history-rollup.mjs` — the consumer's own constant.
+      # `tests/config/test-history-workflow.test.ts` asserts this step against
+      # it, because a producer/consumer basename drift made the nightly rollup
+      # exit 2 on every real artifact (round 3, F8).
+      - name: Write test-history artifact metadata
+        if: always()
+        env:
+          HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+        run: 'node -e "require(\"node:fs\").writeFileSync(process.env.RUNNER_TEMP + \"/test-history-metadata.json\", JSON.stringify({headSha: process.env.HEAD_SHA, runId: process.env.GITHUB_RUN_ID, lane: \"linux\", recordedAt: new Date().toISOString()}))"'
+
+      - name: Upload per-file test results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: unit-test-results-linux
+          path: |
+            ${{ runner.temp }}/vitest-results.json
+            ${{ runner.temp }}/test-history-metadata.json
+          if-no-files-found: warn
 
       # #2042 2026-09-15: the wrapper's console line is a step-crossing summary
       # of host memory only — it cannot show per-cgroup RSS, PID-count churn, or
