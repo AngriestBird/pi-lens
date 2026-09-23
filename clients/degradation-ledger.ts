@@ -146,6 +146,18 @@ export type DegradationKind =
 	 */
 	| "config-ignored"
 	/**
+	 * An existence probe for a global-config location failed (ENOTDIR when a
+	 * file sits where a directory belongs, EACCES, ELOOP), so the resolution
+	 * RETAINED that location under uncertainty instead of silently switching
+	 * config sources (global-config-location PR, refs #2457; review H2
+	 * remedy B). Nothing was ignored — the retained file supplies the global
+	 * settings exactly as before; the read of it reports its own
+	 * `config-ignored` row when it fails. Subject is the retained path; the
+	 * reason names the failed probe's error class. Once per session via
+	 * `recordDegradationOnce`.
+	 */
+	| "config-location-probe-failed"
+	/**
 	 * #2518: the session-root registry hit its cap and dropped a root this
 	 * process was serving, together with that root's loaded LSP config — so the
 	 * operator's `lsp.disabledServers` denial for it stops applying until the

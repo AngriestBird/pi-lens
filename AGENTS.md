@@ -198,9 +198,13 @@ ADR: docs/adr/0009-reported-path-attribution.md
 
 32. **Mixed path comparison:** use one platform-aware containment expression;
     do not combine case-sensitive equality with case-folded relative paths. A
-    runner deciding whether a TOOL-REPORTED path names the dispatched file asks
-    `pathsEqual` against the cwd the tool ran in, never `path.resolve` with no
-    base and never `===`. ADR: docs/adr/0009-reported-path-attribution.md
+    runner OR TOOL CLIENT deciding whether a TOOL-REPORTED path names the
+    dispatched file asks `pathsEqual` against the cwd the tool ran in, never
+    `path.resolve` with no base and never `===`. The reported path is whatever
+    the tool's RENDERER emits, so the CAPTURE comes first: decoration around the
+    path (codespan's `┌─` locus gutter, #3285) belongs outside the captured
+    group, never tolerated by a suffix compare that then blocks the fold.
+    ADR: docs/adr/0009-reported-path-attribution.md
 
 39. **Walk-up result used as eligibility:** return ownership and start-directory
     identity separately; enumerate root-position by ambient-input cells.

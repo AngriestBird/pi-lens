@@ -369,12 +369,9 @@ export function stripSource(
 function matchIsCode(
 	stringsBlanked: string,
 	start: number,
-	_end: number,
+	end: number,
 ): boolean {
-	// A match beginning in code is code. Checking any later character let a
-	// template-text match whose regex body contains `${}` tunnel through the
-	// stripper's template state and self-excuse (#3257).
-	return /[^\s"'`]/.test(stringsBlanked[start] ?? "");
+	return /[^\s"'`]/.test(stringsBlanked.slice(start, end));
 }
 
 /**

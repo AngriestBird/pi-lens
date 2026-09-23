@@ -29,6 +29,7 @@ vi.mock("../../clients/latency-logger.js", async (importOriginal) => {
 });
 
 import { CacheManager } from "../../clients/cache-manager.js";
+import type { ActionableWarningRecord } from "../../clients/actionable-warnings.js";
 import type { FunctionCallGraph } from "../../clients/call-graph.js";
 import {
 	_resetStateCacheForTests,
@@ -40,11 +41,24 @@ import {
 } from "../../clients/dispatch/pending-runner-findings.js";
 import { consumeTurnEndFindings } from "../../clients/runtime-context.js";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
+import { makeLspServiceDouble } from "../support/lsp-service-double.js";
 import {
 	cancelLSPIdleReset,
 	handleTurnEnd,
 } from "../../clients/runtime-turn.js";
 import { setupTestEnvironment } from "./test-utils.js";
+
+const lspFixture = vi.hoisted(() => ({
+	service: undefined as unknown,
+}));
+vi.mock("../../clients/lsp/index.js", async (importOriginal) => {
+	const actual =
+		await importOriginal<typeof import("../../clients/lsp/index.js")>();
+	return {
+		...actual,
+		getLSPService: () => lspFixture.service ?? actual.getLSPService(),
+	};
+});
 
 const SESSION_ID = "turn-end-disposition-seams-session";
 
@@ -140,6 +154,7 @@ function markFalsePositive(
 }
 
 afterEach(() => {
+	lspFixture.service = undefined;
 	cancelLSPIdleReset();
 	resetPendingRunnerFindings();
 	_resetStateCacheForTests();
@@ -554,6 +569,192 @@ describe("dead-code turn-end advisory honors dispositions (#3248)", () => {
 			expect(latencyRow("dead-code")).toMatchObject({
 				dispositionSuppressed: 1,
 			});
+		} finally {
+			env.cleanup();
+		}
+	});
+});
+
+describe("actionable-warnings turn-end advisory honors dispositions (#3248)", () => {
+	function warning(
+		filePath: string,
+		line: number,
+		message: string,
+	): ActionableWarningRecord {
+		return {
+			id: `aw:${line}`,
+			filePath,
+			displayPath: path.basename(filePath),
+			line,
+			severity: "warning",
+			tool: "ast-grep",
+			rule: "no-console",
+			message,
+			actions: [],
+			suppressed: false,
+			origin: "dispatch",
+		};
+	}
+
+	it("filters the built report and keeps its cache raw (#3248)", async () => {
+		const env = setupTestEnvironment("pi-lens-3248-actionable-built-");
+		try {
+			const { tmpDir: cwd } = env;
+			const filePath = path.join(cwd, "src", "app.ts");
+			fs.mkdirSync(path.dirname(filePath), { recursive: true });
+			fs.writeFileSync(
+				filePath,
+				"console.log(1);\nconsole.log(2);\nconsole.log(3);\n",
+			);
+			const runtime = new RuntimeCoordinator();
+			runtime.setTelemetryIdentity({ sessionId: SESSION_ID });
+			const cacheManager = new CacheManager(false);
+			registerEdit(cacheManager, cwd, filePath);
+			runtime.recordActionableWarnings([
+				warning(filePath, 1, "marked warning"),
+				warning(filePath, 2, "live warning"),
+				warning(filePath, 3, "third warning"),
+			]);
+			markFalsePositive(cwd, {
+				filePath,
+				tool: "ast-grep",
+				rule: "no-console",
+				message: "marked warning",
+				line: 1,
+			});
+
+			await handleTurnEnd(
+				makeTurnEndDeps(runtime, cacheManager, cwd, {
+					getFlag: (name: string) => name === "lens-actionable-warnings",
+				}),
+			);
+
+			const text = turnEndText(cacheManager, cwd, runtime);
+			expect(text).toContain("Fixable warnings introduced this turn: 2");
+			expect(text).toContain("suppressed by disposition: 1 finding(s).");
+			expect(text).not.toContain("Fixable warnings introduced this turn: 3");
+			const cached = cacheManager.readCache<any>(
+				"actionable-warnings",
+				cwd,
+			)?.data;
+			expect(cached.summary.unsuppressed).toBe(3);
+			expect(cached.files[0].warnings).toHaveLength(3);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("does not repeat an ast-grep secret at a delivered blocker location (#3270)", async () => {
+		const env = setupTestEnvironment("pi-lens-3270-actionable-location-");
+		try {
+			const { tmpDir: cwd } = env;
+			const filePath = path.join(cwd, "src", "secret.ts");
+			fs.mkdirSync(path.dirname(filePath), { recursive: true });
+			fs.writeFileSync(
+				filePath,
+				"const token = 'AKIA...';\nconst other = 'secret';\n",
+			);
+			const runtime = new RuntimeCoordinator();
+			runtime.setTelemetryIdentity({ sessionId: SESSION_ID });
+			const cacheManager = new CacheManager(false);
+			registerEdit(cacheManager, cwd, filePath);
+			cacheManager.writeCache(
+				"gitleaks",
+				{
+					success: true,
+					scannedAt: "",
+					findings: [
+						{
+							ruleId: "aws-access-token",
+							file: filePath,
+							startLine: 1,
+							description: "AWS key",
+						},
+					],
+				},
+				cwd,
+			);
+			runtime.recordActionableWarnings([
+				{
+					...warning(filePath, 1, "hardcoded secret"),
+					rule: "no-hardcoded-secret-js",
+				},
+				{
+					...warning(filePath, 2, "other secret"),
+					rule: "no-hardcoded-secret-js",
+				},
+			]);
+
+			await handleTurnEnd(
+				makeTurnEndDeps(runtime, cacheManager, cwd, {
+					getFlag: (name: string) => name === "lens-actionable-warnings",
+				}),
+			);
+			const text = turnEndText(cacheManager, cwd, runtime);
+			expect(text).toContain("Fixable warnings introduced this turn: 1");
+			expect(text).toContain("secret.ts: 1");
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("filters a marked warning added by the real LSP builder seam (#3248)", async () => {
+		// Prevents the round-1 bypass: an input-only filter or an `origin=lsp`
+		// escape hatch must not let a disposition-marked builder-added row reach
+		// the advisory while the raw published report keeps it.
+		const env = setupTestEnvironment("pi-lens-3248-actionable-lsp-built-");
+		try {
+			const { tmpDir: cwd } = env;
+			const filePath = path.join(cwd, "src", "lsp.ts");
+			fs.mkdirSync(path.dirname(filePath), { recursive: true });
+			fs.writeFileSync(filePath, "const marked = 1;\nconst live = 2;\n");
+			const lspDiagnostic = {
+				severity: 2,
+				message: "LSP marked warning",
+				code: 6133,
+				range: {
+					start: { line: 0, character: 0 },
+					end: { line: 0, character: 5 },
+				},
+				source: "ts",
+			};
+			lspFixture.service = makeLspServiceDouble({
+				supportsLSP: () => true,
+				getLastKnownDiagnostics: () => [lspDiagnostic],
+				codeAction: async () => [{ title: "Remove warning", kind: "quickfix" }],
+			});
+			const runtime = new RuntimeCoordinator();
+			runtime.setTelemetryIdentity({ sessionId: SESSION_ID });
+			const cacheManager = new CacheManager(false);
+			registerEdit(cacheManager, cwd, filePath);
+			runtime.recordActionableWarnings([
+				warning(filePath, 2, "dispatch live warning"),
+			]);
+			markFalsePositive(cwd, {
+				filePath,
+				tool: "ts",
+				rule: "ts:6133",
+				message: "LSP marked warning",
+				line: 1,
+			});
+
+			await handleTurnEnd(
+				makeTurnEndDeps(runtime, cacheManager, cwd, {
+					getFlag: (name: string) =>
+						name === "lens-actionable-warnings" ||
+						name === "lens-actionable-warning-actions",
+				}),
+			);
+
+			const text = turnEndText(cacheManager, cwd, runtime);
+			expect(text).toContain("Fixable warnings introduced this turn: 1");
+			expect(text).not.toContain("LSP marked warning");
+			const cached = cacheManager.readCache<any>(
+				"actionable-warnings",
+				cwd,
+			)?.data;
+			expect(cached.summary.unsuppressed).toBe(2);
+			expect(cached.files[0].warnings).toHaveLength(2);
 		} finally {
 			env.cleanup();
 		}
