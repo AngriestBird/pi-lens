@@ -669,15 +669,20 @@ const LSP_FIXTURES = [
 	},
 	{
 		lang: "php",
-		// #3217: intelephense DOES publish an "Undefined variable" finding for the
-		// fixture's misspelled variable — but it publishes an EMPTY set first, on
-		// didOpen, before its index is warm, and
-		// pi-lens's push wait early-returns on the first publish. The gate reads
-		// 0 primary findings while a raw session sees the real diagnostic ~5s
-		// later. That is a wait-policy defect, not a fixture defect; tracked
-		// separately rather than papered over with a longer gate budget.
-		lspGateExempt:
-			"intelephense's empty first publish satisfies the push wait; see #3310",
+		// #3310: intelephense publishes an EMPTY set on didOpen, before its
+		// whole-workspace index is warm, and the real "Undefined variable"
+		// finding once indexing ends. The push wait used to early-return on that
+		// first publish, so this row read 0 primary findings — a false clean, not
+		// a fixture defect, which is why it was exempt rather than given a longer
+		// budget. The handler now holds an indexing server's empty first publish
+		// and php carries the measured budget for the index window, so the row is
+		// gated again.
+		lspGate: true,
+		// The undefined-variable read itself, spelled without the fixture's
+		// deliberate misspelling: `scripts/` is not excluded from the `typos`
+		// check the way `tests/fixtures/**` is, and a marker has to be a literal
+		// substring of the fixture so removing it proves the red direction.
+		lspGateMarker: '"Hello " . $',
 		dir: "tests/fixtures/tool-smoke/php",
 		file: "bad.php",
 		serverHint: "intelephense",

@@ -198,6 +198,63 @@ function sendPullPush(uri) {
 	});
 }
 
+// #3310: an ASYNCHRONOUSLY INDEXING push server's publish sequence, measured
+// against the real intelephense 1.18.5 (see docs/lsp-capability-matrix.md's
+// `first-publish` column): it answers `didOpen` with an EMPTY set while its
+// whole-workspace index builds, then publishes again once indexing ends — the
+// real set on a dirty file, another empty set on a clean one.
+//
+// `FAKE_LSP_PUBLISH_SEQUENCE=empty,dirty` spells that sequence on the wire;
+// each element is one publish, `empty` an empty set and `dirty` a one-element
+// set. `FAKE_LSP_PUBLISH_SEQUENCE_GAP_MS` (default 300) is the gap between
+// consecutive publishes, standing in for the index window. Publishes are
+// VERSION-LESS, matching the measured server. Off by default, so every
+// existing test keeps the incumbent silent-on-open behaviour.
+const PUBLISH_SEQUENCE = (process.env.FAKE_LSP_PUBLISH_SEQUENCE ?? "")
+	.split(",")
+	.map((part) => part.trim())
+	.filter(Boolean);
+const PUBLISH_SEQUENCE_GAP_MS = Number(
+	process.env.FAKE_LSP_PUBLISH_SEQUENCE_GAP_MS ?? "300",
+);
+
+function publishSequenceFor(uri) {
+	if (PUBLISH_SEQUENCE.length === 0) return false;
+	PUBLISH_SEQUENCE.forEach((shape, index) => {
+		const emit = () => {
+			send({
+				jsonrpc: "2.0",
+				method: "textDocument/publishDiagnostics",
+				params: {
+					uri,
+					diagnostics:
+						shape === "dirty"
+							? [
+									{
+										severity: 1,
+										source: "fake-indexing",
+										code: "P3310",
+										message: "diagnostic published after the index warmed",
+										range: {
+											start: { line: 0, character: 0 },
+											end: { line: 0, character: 1 },
+										},
+									},
+								]
+							: [],
+				},
+			});
+		};
+		if (index === 0) {
+			emit();
+			return;
+		}
+		const timer = setTimeout(emit, index * PUBLISH_SEQUENCE_GAP_MS);
+		timer.unref?.();
+	});
+	return true;
+}
+
 function sendPullCompletion() {
 	if (!PULL_COMPLETION_SIGNAL) return;
 	send({
@@ -422,11 +479,21 @@ function handle(raw) {
 							"fake.releaseDeferredApplyEdit",
 						],
 					},
-					diagnosticProvider: {
-						interFileDependencies: false,
-						workspaceDiagnostics:
-							process.env.FAKE_LSP_WORKSPACE_DIAGNOSTICS === "1",
-					},
+					// #3310: `FAKE_LSP_NO_DIAGNOSTIC_PROVIDER=1` advertises NO pull
+					// provider, the measured shape of the push-only servers whose
+					// wait policy this fixture stands in for (intelephense 1.18.5
+					// answers `initialize` with no `diagnosticProvider` at all). Without
+					// it every fixture session is Tier 1 pull-authoritative and the
+					// push wait is never exercised. Default unchanged.
+					...(process.env.FAKE_LSP_NO_DIAGNOSTIC_PROVIDER === "1"
+						? {}
+						: {
+								diagnosticProvider: {
+									interFileDependencies: false,
+									workspaceDiagnostics:
+										process.env.FAKE_LSP_WORKSPACE_DIAGNOSTICS === "1",
+								},
+							}),
 				},
 			},
 		});
@@ -533,6 +600,7 @@ function handle(raw) {
 			data.params?.textDocument?.uri,
 			data.params?.textDocument?.text ?? "",
 		);
+		publishSequenceFor(data.params?.textDocument?.uri);
 		if (process.env.FAKE_LSP_PUSH_DIAGNOSTIC === "1") {
 			send({
 				jsonrpc: "2.0",
@@ -573,6 +641,7 @@ function handle(raw) {
 		if (typeof text === "string") {
 			openDocuments.set(data.params?.textDocument?.uri, text);
 		}
+		publishSequenceFor(data.params?.textDocument?.uri);
 		// #1669 review F5: echo the received contentChanges back so a real-init
 		// integration test can assert the ON-THE-WIRE shape (ranged vs
 		// whole-document) that the client actually sent, proving
