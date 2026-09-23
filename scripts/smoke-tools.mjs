@@ -951,8 +951,8 @@ const LSP_FIXTURES = [
 		// Local and ubuntu probes could not establish a ready client. The
 		// documented alternate defects are unknown command, unreachable code,
 		// deprecated syntax, and missing block terminators.
-		lspGateExempt:
-			"harness limit: fish-lsp reported touched=undefined health=undefined and no client ready in 30000ms; documented diagnostics include unknown command and missing block terminators; see #3311",
+		lspGate: true,
+		lspGateMarker: "function; end; end;",
 		dir: "tests/fixtures/tool-smoke/fish",
 		file: "bad.fish",
 		serverHint: "fish-lsp",
