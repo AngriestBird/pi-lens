@@ -43,6 +43,7 @@ import {
 	assertNonEmptyScan,
 	auditSymbolCounts,
 	codeMatches,
+	escapeRegExp,
 	listSourceFiles,
 	matchingOpenIndex,
 	readWalkedFiles,
@@ -139,34 +140,194 @@ function stripForScan(source: string): string {
 	return stripSource(source, { strings: "blank" });
 }
 
-/** The no-predicate direction of this census (#3295). */
-const LOCATION_CALL = /\b(?:match|exec)\s*\(/g;
-const LOCATION_SHAPE = /:\(\\d\+\):\(\\d\+\)/;
-const JSON_PARSE_CALL = /\bJSON\.parse\s*\(/;
 /**
- * JSON path fields currently covered by this lexical census. The two live
- * blanket-stamp shapes are `item.file` (shellcheck) and `resultEntry.Target`
- * (trivy-config); generic `filename`, `path`, and nested `location.file`
- * parsers are intentionally outside this detector until their output contract
- * is separately classified. The runner sweep still covers those shapes when
- * they use a local identity comparison.
+ * ── The NO-PREDICATE direction of this census (#3295), INVERTED ───────────────
+ *
+ * Rounds 1 and 2 of #3304 both enumerated this direction by SHAPE and both
+ * missed a member. Round 1 listed the location captures it knew
+ * (`:(\d+):(\d+)`) and missed `shellcheck`'s `item.file` and `trivy-config`'s
+ * `resultEntry.Target`. Round 2 listed those two JSON fields BY NAME and missed
+ * `stylelint`'s `result.source`, which a real `dispatchForFile` probe delivered
+ * as the dispatched file — plus `vale`'s map KEY, `rubocop`'s `file.path`,
+ * `eslint`'s `fileResult.filePath`, `biome-check`'s `d.location.path`,
+ * `tflint`'s `issue.range.filename`, `swiftlint`/`ktlint`/`hadolint`'s
+ * `item.file`, `actionlint`'s `issue.filepath`, `spellcheck`'s `parsed.path`,
+ * `sqlfluff`'s `item.filepath`, `markdownlint`'s `^.*?:` prefix, `php-lint`'s
+ * `in <file> on line`, and the SHARED diagnostic factory in
+ * `utils/diagnostic-parsers.ts`, whose own docstring says the regex "Must
+ * capture: [fullMatch, file?, line?, col?, ...]" and which then drops
+ * `match[1]` on the floor.
+ *
+ * A list of field names can only ever catch the fields someone remembered. So
+ * this detector names NO path field and NO location shape. A file is a member
+ * when all three hold:
+ *
+ * 1. it CONSTRUCTS a diagnostic — an object literal carrying `tool:` (the
+ *    `Diagnostic` discriminator every runner and the shared factory write) that
+ *    also carries a `filePath` property;
+ * 2. that `filePath` is the DISPATCHED path, not something read out of the
+ *    tool's output — either `ctx.filePath`, or an identifier this file never
+ *    declares, which is therefore the parse function's own path PARAMETER;
+ * 3. it PARSES tool output ({@link PARSE_MARKERS}), and
+ * 4. it holds no `pathsEqual(` call in comment-and-string-blanked source.
+ *
+ * Direction 2 is what separates a blanket stamp from the attribute policy:
+ * `mypy.ts` writes the same `filePath,` shorthand, but over a LOCAL
+ * `const filePath = path.resolve(cwd, reported)`, so its declaration is right
+ * there in the file and the site reads as what it is. Same for `spotbugs.ts`'s
+ * `let filePath` from `<SourceLine sourcepath=…>`. `helm-lint.ts`,
+ * `credo.ts`, `phpstan.ts`, `ruff.ts`, `pyright.ts` and `lsp.ts` write a
+ * non-identifier expression that reads the reported path, and are non-members
+ * for the same reason.
+ *
+ * KNOWN LIMIT, pinned rather than papered over: this detector cannot prove the
+ * OPERANDS of a `pathsEqual(` call. A runner that called `pathsEqual` on two
+ * unrelated paths would launder itself out of this census. That direction is
+ * covered by the sibling census in this file (which counts local predicates,
+ * and would flag a hand-rolled compare) and by the per-member own-file /
+ * sibling-file cells in
+ * `tests/clients/dispatch/runners/reported-path-attribution.test.ts`, whose
+ * mutation signature is the delivered diagnostic, not the call's spelling.
+ * `LAUNDERING_LIMIT` below asserts the limit so it cannot be forgotten.
  */
-const JSON_PATH_FIELD = /\b(?:item\.file|resultEntry\.Target)\b/;
-const DISPATCH_PATH_STAMP = /\bfilePath\s*,/;
+const PARSE_MARKERS: ReadonlyArray<{
+	readonly id: string;
+	readonly needle: RegExp;
+}> = [
+	/**
+	 * Every JSON reporter. Catches actionlint, biome-check, credo, eslint,
+	 * golangci-lint, hadolint, ktlint, oxlint, phpstan, psscriptanalyzer,
+	 * pyright, rubocop, ruff, rust-clippy, shellcheck, spellcheck, sqlfluff,
+	 * stylelint, swiftlint, terragrunt, tflint, trivy-config, vale.
+	 */
+	{ id: "json", needle: /\bJSON\.parse\s*\(/ },
+	/**
+	 * Every regex parse of textual output. Catches biome-check, cue-vet,
+	 * elixir-check, fish-indent, gleam-check, go-vet, helm-lint, helm-render,
+	 * htmlhint, javac, markdownlint, oxlint, php-lint, prisma-validate, shfmt,
+	 * spotbugs, taplo, utils/diagnostic-parsers, yamllint, zig-check.
+	 */
+	{ id: "capture", needle: /\.\s*(?:match|matchAll)\s*\(|\.\s*exec\s*\(/ },
+	/**
+	 * Line-splitting over a captured stream. Catches cpp-check, dart-analyze,
+	 * dotnet-build, fish-indent, go-vet, markdownlint, shfmt, spellcheck,
+	 * taplo, utils/diagnostic-parsers, yamllint — and anything that walks
+	 * stdout by hand instead of matching it.
+	 */
+	{ id: "lines", needle: /\.\s*split\s*\(\s*(?:\/|"|'|`)/ },
+	/**
+	 * A SARIF / scanner report envelope, whose findings hang off `Results` or
+	 * `runs[].results`. Catches trivy-config; present so a future SARIF
+	 * consumer joins the population without a detector change.
+	 */
+	{ id: "report", needle: /\.\s*(?:[Rr]esults|runs)\b/ },
+];
+
+/** The `Diagnostic` discriminator every construction site writes. */
+const DIAGNOSTIC_LITERAL = /\btool\s*:/g;
+
+/** `filePath` as a PROPERTY of that literal — shorthand or with a value. */
+const DIAGNOSTIC_PATH_PROPERTY = /\bfilePath\s*(:|,|\}|\r?\n)/;
+
+/** The dispatch path written out longhand. */
+const DISPATCH_PATH_EXPRESSION = /^ctx\s*\.\s*filePath$/;
+
+/** A bare identifier, i.e. a name whose binding decides the question. */
+const BARE_IDENTIFIER = /^[A-Za-z_$][\w$]*$/;
+
+/**
+ * The `{ … }` containing `index`, as `[open, close]`, or `null`. Walks back over
+ * ALREADY-STRIPPED source, so a brace inside a comment or a string cannot move
+ * the boundary.
+ */
+function enclosingBraceSpan(
+	stripped: string,
+	index: number,
+): [number, number] | null {
+	let depth = 0;
+	let open = -1;
+	for (let i = index; i >= 0; i--) {
+		const ch = stripped[i];
+		if (ch === "}") depth += 1;
+		else if (ch === "{") {
+			if (depth === 0) {
+				open = i;
+				break;
+			}
+			depth -= 1;
+		}
+	}
+	if (open < 0) return null;
+	depth = 0;
+	for (let i = open; i < stripped.length; i++) {
+		const ch = stripped[i];
+		if (ch === "{") depth += 1;
+		else if (ch === "}") {
+			depth -= 1;
+			if (depth === 0) return [open, i];
+		}
+	}
+	return null;
+}
+
+/** The property VALUE starting at `from`, up to this literal's next `,` at depth 0. */
+function propertyValue(stripped: string, from: number, close: number): string {
+	let depth = 0;
+	for (let i = from; i < close; i++) {
+		const ch = stripped[i];
+		if (ch === "(" || ch === "[" || ch === "{") depth += 1;
+		else if (ch === ")" || ch === "]" || ch === "}") depth -= 1;
+		else if (ch === "," && depth === 0) return stripped.slice(from, i).trim();
+	}
+	return stripped.slice(from, close).trim();
+}
+
+/** Does this file DECLARE `name`? A declared name is a local the parser derived. */
+function declaresLocal(stripped: string, name: string): boolean {
+	return new RegExp(`\\b(?:const|let|var)\\s+${escapeRegExp(name)}\\b`).test(
+		stripped,
+	);
+}
+
+/**
+ * Does this file construct a diagnostic stamped with the DISPATCHED path —
+ * rather than with a path read out of the tool's output?
+ */
+export function stampsDispatchPathOnDiagnostic(source: string): boolean {
+	const stripped = stripForScan(source);
+	for (const marker of stripped.matchAll(DIAGNOSTIC_LITERAL)) {
+		const span = enclosingBraceSpan(stripped, marker.index ?? 0);
+		if (!span) continue;
+		const [open, close] = span;
+		const body = stripped.slice(open, close);
+		const property = DIAGNOSTIC_PATH_PROPERTY.exec(body);
+		if (!property) continue;
+		const at = open + (property.index ?? 0);
+		if (property[1] !== ":") {
+			// Shorthand `filePath,` — the binding is `filePath` itself.
+			if (!declaresLocal(stripped, "filePath")) return true;
+			continue;
+		}
+		const value = propertyValue(stripped, at + property[0].length, close);
+		if (DISPATCH_PATH_EXPRESSION.test(value)) return true;
+		if (BARE_IDENTIFIER.test(value) && !declaresLocal(stripped, value))
+			return true;
+	}
+	return false;
+}
+
+/** Which parse markers this file trips, for the census's own report. */
+export function parseMarkersIn(source: string): string[] {
+	const stripped = stripForScan(source);
+	return PARSE_MARKERS.filter((marker) => marker.needle.test(stripped)).map(
+		(marker) => marker.id,
+	);
+}
 
 export function countLocationParsersWithoutPathsEqual(source: string): number {
 	const stripped = stripForScan(source);
-	const hasLocationCapture = codeMatches(source, LOCATION_CALL).some((match) =>
-		LOCATION_SHAPE.test(
-			source.slice(match.index ?? 0, (match.index ?? 0) + 400),
-		),
-	);
-	const hasJsonPath =
-		JSON_PARSE_CALL.test(stripped) &&
-		JSON_PATH_FIELD.test(stripped) &&
-		DISPATCH_PATH_STAMP.test(stripped) &&
-		/\bdiagnostic\w*\b/i.test(stripped);
-	return (hasLocationCapture || hasJsonPath) &&
+	return parseMarkersIn(source).length > 0 &&
+		stampsDispatchPathOnDiagnostic(source) &&
 		!/\bpathsEqual\s*\(/.test(stripped)
 		? 1
 		: 0;
@@ -325,8 +486,41 @@ const REMEDIATION =
  */
 const LOCAL_COMPARE_PINS: Readonly<Record<string, number>> = {};
 
-/** Exact shrink-only pin for parsers that capture locations without a predicate. */
-const NO_PREDICATE_PINS: Readonly<Record<string, number>> = {};
+/**
+ * Exact shrink-only pin for parsers the inverted detector flags that are NOT
+ * members: the tool output they parse carries NO per-diagnostic path for the
+ * site that stamps the dispatched file. Each is registered by name with the
+ * reason MEASURED from the runner's own source — never a silent skip, so a file
+ * that grows a real reported path here presents a count of 1 against a pin of 1
+ * and the per-runner dispatch cells are what must then change.
+ *
+ * - `fish-indent.ts@1` — `/\(line\s+(\d+)\)/` over the first non-blank stderr
+ *   line. The matched span holds a parse POSITION and no path token;
+ *   `fish_indent --check` is handed exactly one file.
+ * - `shfmt.ts@1` — `/^@@\s+-(\d+)/m` over a unified diff BODY. The only path in
+ *   `--diff` output is the `---`/`+++` echo of our own argv, which this parser
+ *   never reads.
+ * - `prisma-validate.ts@1` — `/:(\d+)(?::\d+)?\b/` over the whole output, with
+ *   no path token in the matched span. Adding a path capture would change which
+ *   `:N` in a free-form error wins, on a format this tree holds no captured
+ *   upstream vector for.
+ * - `psscriptanalyzer.ts@1` — the runner's own `PS_SCRIPT` runs
+ *   `Select-Object RuleName,Severity,Line,Column,Message`, so the path is
+ *   PROJECTED AWAY before `ConvertTo-Json`: no path can reach the parser.
+ * - `phpstan.ts@1` — the flagged stamp is the `output.errors[]` arm, phpstan's
+ *   FILE-INDEPENDENT findings (internal errors, ignore patterns that matched
+ *   nothing). Those carry no file at all and attach to the edited file at line 1
+ *   by the documented #1937-round-2 decision. The `output.files` arm right above
+ *   it already attributes each error to its OWN key resolved against the runner
+ *   cwd (#265 A3), which is the attribute policy, not a blanket stamp.
+ */
+const NO_PREDICATE_PINS: Readonly<Record<string, number>> = {
+	"clients/dispatch/runners/fish-indent.ts": 1,
+	"clients/dispatch/runners/phpstan.ts": 1,
+	"clients/dispatch/runners/prisma-validate.ts": 1,
+	"clients/dispatch/runners/psscriptanalyzer.ts": 1,
+	"clients/dispatch/runners/shfmt.ts": 1,
+};
 
 /**
  * Sites the detector flags that are NOT members of this family: BOTH operands
@@ -397,6 +591,10 @@ describe("runner reported-path attribution single-source-of-truth (#3278)", () =
 			remediation: REMEDIATION,
 		});
 		expect(audit.problems).toEqual([]);
+		expect(
+			stalePins(counts, NO_PREDICATE_PINS),
+			"a pinned non-member grew a predicate or stopped parsing — shrink the pin",
+		).toEqual([]);
 	});
 
 	// The detector's own teeth, in both directions, on synthetic source: without
@@ -496,32 +694,6 @@ describe("runner reported-path attribution single-source-of-truth (#3278)", () =
 		).toBe(0);
 		expect(
 			countLocationParsersWithoutPathsEqual(
-				"const match = raw.match(/^(.*?):(\\d+):(\\d+)/);",
-			),
-			"bare location parser remains a census member",
-		).toBe(1);
-		expect(
-			countLocationParsersWithoutPathsEqual(
-				"// pathsEqual\nconst match = raw.match(/^(.*?):(\\d+):(\\d+)/);",
-			),
-			"a comment must not self-excuse a parser",
-		).toBe(1);
-		expect(
-			countLocationParsersWithoutPathsEqual(
-				'const note = "pathsEqual";\nconst match = raw.match(/^(.*?):(\\d+):(\\d+)/);',
-			),
-			"a string literal must not self-excuse a parser",
-		).toBe(1);
-		expect(
-			countLocationParsersWithoutPathsEqual(
-				"const parsed = JSON.parse(raw) as Array<{ file?: string }>;\n" +
-					"const diagnostics = parsed.map((item) => ({ filePath, message: item.file }));\n" +
-					"return diagnostics;",
-			),
-			"JSON file fields are part of the governed population",
-		).toBe(1);
-		expect(
-			countLocationParsersWithoutPathsEqual(
 				readFileSync(
 					path.resolve(
 						REPO_ROOT,
@@ -530,6 +702,113 @@ describe("runner reported-path attribution single-source-of-truth (#3278)", () =
 					"utf8",
 				),
 			),
+			"the seam this census exists to drive parsers onto",
+		).toBe(0);
+	});
+
+	/**
+	 * The inverted detector's own teeth (#3295 round 3). Rounds 1 and 2 each
+	 * shipped a detector that enumerated path SHAPES and each missed a live
+	 * member, so these cells assert the three conjuncts independently — a
+	 * detector that silently stopped matching one of them would read as "census
+	 * clean" over the same 79 files.
+	 */
+	it("flags a diagnostic built from parsed output with no reported-path predicate", () => {
+		const member =
+			"const parsed = JSON.parse(raw) as Array<{ source?: string }>;\n" +
+			"for (const r of parsed) {\n" +
+			"  out.push({ id: r.source, message: m, filePath, tool: 'x' });\n" +
+			"}";
+		expect(
+			countLocationParsersWithoutPathsEqual(member),
+			"JSON.parse + a diagnostic stamped with the path PARAMETER",
+		).toBe(1);
+		expect(
+			countLocationParsersWithoutPathsEqual(
+				"const m = line.match(/^(.*?):(\\d+)/);\n" +
+					"out.push({ id: m[1], filePath: ctx.filePath, tool: 'x' });",
+			),
+			"a regex capture + the dispatch path written out longhand",
+		).toBe(1);
+		expect(
+			countLocationParsersWithoutPathsEqual(
+				"const lines = raw.split('\\n');\n" +
+					"out.push({ id: lines[0], filePath, tool: 'x' });",
+			),
+			"a hand-walked stdout split is a parse marker too",
+		).toBe(1);
+		expect(
+			countLocationParsersWithoutPathsEqual(
+				"const entries = report.Results ?? [];\n" +
+					"out.push({ id: entries[0], filePath, tool: 'x' });",
+			),
+			"a SARIF/scanner report envelope is a parse marker too",
+		).toBe(1);
+		expect(
+			countLocationParsersWithoutPathsEqual(
+				readFileSync(
+					path.resolve(
+						REPO_ROOT,
+						"tests/fixtures/reported-path-attribution/no-predicate.ts",
+					),
+					"utf8",
+				),
+			),
+			"a comment copy AND a string copy of `pathsEqual` must not self-excuse",
+		).toBe(1);
+	});
+
+	it("does not flag a parser that attributes to the path the tool reported", () => {
+		expect(
+			countLocationParsersWithoutPathsEqual(
+				"const parsed = JSON.parse(raw);\n" +
+					"for (const e of parsed) {\n" +
+					"  const filePath = path.resolve(cwd, e.file);\n" +
+					"  out.push({ id: e.id, filePath, tool: 'x' });\n" +
+					"}",
+			),
+			"mypy/spotbugs: the shorthand is a LOCAL derived from the reported path",
+		).toBe(0);
+		expect(
+			countLocationParsersWithoutPathsEqual(
+				"const parsed = JSON.parse(raw);\n" +
+					"out.push({ id: 1, filePath: parsed.file || fallback, tool: 'x' });",
+			),
+			"ruff/pyright/credo: the value expression reads the reported path",
+		).toBe(0);
+		expect(
+			countLocationParsersWithoutPathsEqual(
+				"const m = raw.match(/^(.*?):(\\d+)/);\n" +
+					"logAvailabilityDecision({ tool: 'x', verdict: 'available' });",
+			),
+			"a non-diagnostic literal carrying `tool:` is not a construction site",
+		).toBe(0);
+		expect(
+			countLocationParsersWithoutPathsEqual(
+				"out.push({ id: 1, filePath, tool: 'x' });",
+			),
+			"a diagnostic built with no tool output parsed at all is not a member",
+		).toBe(0);
+	});
+
+	/**
+	 * The detector's NAMED limit (AGENTS.md "detectors match code, not prose"):
+	 * it proves a `pathsEqual(` CALL exists, never that its operands are the
+	 * reported path and the dispatch target. This cell pins the hole so nobody
+	 * reads the census as stronger than it is; the direction it cannot see is
+	 * covered by the sibling local-compare census above and by the per-runner
+	 * own-file / sibling-file cells in
+	 * `tests/clients/dispatch/runners/reported-path-attribution.test.ts`, whose
+	 * signature is the DELIVERED diagnostic.
+	 */
+	it("cannot see through a pathsEqual call on unrelated operands (named limit)", () => {
+		expect(
+			countLocationParsersWithoutPathsEqual(
+				"const parsed = JSON.parse(raw);\n" +
+					"if (pathsEqual(cwd, cwd)) { /* unrelated operands */ }\n" +
+					"out.push({ id: 1, filePath, tool: 'x' });",
+			),
+			"KNOWN LIMIT: operand-blind. Behaviour is pinned by the dispatch cells.",
 		).toBe(0);
 	});
 });

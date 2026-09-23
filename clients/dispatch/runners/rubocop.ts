@@ -8,6 +8,8 @@
  * Supports bundle exec (preferred in Bundler projects).
  */
 
+import * as path from "node:path";
+import { pathsEqual } from "../../path-utils.js";
 import { safeSpawnAsync } from "../../safe-spawn.js";
 import { resolveRunnerCwd } from "../../tool-cwd.js";
 import {
@@ -53,13 +55,22 @@ const SEVERITY_MAP: Record<string, "error" | "warning" | "info"> = {
 	refactor: "info",
 };
 
-function parseRubocopJson(raw: string, filePath: string): Diagnostic[] {
+function parseRubocopJson(
+	raw: string,
+	filePath: string,
+	cwd: string,
+): Diagnostic[] {
 	try {
 		const output: RubocopOutput = JSON.parse(raw);
 		const autofix = getAutofixCapability("rubocop");
 		const diagnostics: Diagnostic[] = [];
+		const absTarget = path.resolve(cwd, filePath);
 
 		for (const file of output.files) {
+			// #3295: `.rubocop.yml` `Include:`/`inherit_from` can widen the run past
+			// the argv, and each result carries its own `path`.
+			if (file.path && !pathsEqual(path.resolve(cwd, file.path), absTarget))
+				continue;
 			for (const offense of file.offenses) {
 				const severity = SEVERITY_MAP[offense.severity] ?? "warning";
 				diagnostics.push({
@@ -131,7 +142,7 @@ const rubocopRunner: RunnerDefinition = {
 				output: `${result.stdout}${result.stderr}`,
 				exitCodes: { ran: [1, 2] },
 			},
-			(output) => parseRubocopJson(output, ctx.filePath),
+			(output) => parseRubocopJson(output, ctx.filePath, cwd),
 			{ parseOutput: result.stdout },
 		);
 		if (run.skipped) return run.skipped;

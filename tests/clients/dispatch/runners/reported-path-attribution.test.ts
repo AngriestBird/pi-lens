@@ -89,6 +89,10 @@ vi.mock(
 		}),
 		resolveAvailableOrInstall: async (_c: unknown, toolId: string) =>
 			unavailableCommands.current.has(toolId) ? null : toolId,
+		resolveToolCommandWithInstallFallback: async (
+			_cwd: string,
+			toolId: string,
+		) => (unavailableCommands.current.has(toolId) ? null : toolId),
 		createCwdCachedProbe: () =>
 			Object.assign(async () => true, {
 				getVerdict: () => ({ outcome: "ok" as const }),
@@ -1190,4 +1194,429 @@ describe("JSON runner reported-path attribution (#3304)", () => {
 	] as const)("%s rejects a sibling JSON path", async (_name, member) => {
 		expectDetached(await dispatch(member, echoesSibling));
 	});
+});
+
+/**
+ * #3295 round 3 — the members the two earlier no-predicate censuses could not
+ * see, because each enumerated path SHAPES (round 1: `:(\d+):(\d+)` captures;
+ * round 2: two JSON field NAMES) instead of asking the inverted question the
+ * census now asks: does this file build a diagnostic, from parsed tool output,
+ * stamped with the DISPATCHED path, holding no identity predicate?
+ *
+ * Recurrence prevented: the over-merge direction of #209 / #3277 / #3278 — a
+ * SECOND file's finding delivered as the edited file's problem. The r2 reviewer
+ * proved it live for `stylelint` (a finding whose `source` was `src/other.css`
+ * arrived on `src/app.css`); every runner below is the same shape through the
+ * same seam, so each gets its own two cells rather than riding stylelint's.
+ *
+ * Every cell enters through the REAL `createDispatchContext` +
+ * `dispatchForFile` + `RunnerRegistry`, with only the process boundary mocked.
+ */
+describe("no-predicate runner reported-path attribution (#3295 r3)", () => {
+	const stylelintMember: Member = {
+		name: "stylelint",
+		runnerId: "stylelint",
+		modulePath: "../../../../clients/dispatch/runners/stylelint.js",
+		file: "src/app.css",
+		sibling: "src/other.css",
+		fileContent: "a { color: red }\n",
+		attached: { status: "succeeded", semantic: "warning" },
+		prepare(root) {
+			fs.writeFileSync(path.join(root, ".stylelintrc.json"), "{}");
+		},
+		output: (reported) => ({
+			status: 2,
+			stdout: JSON.stringify([
+				{
+					source: reported,
+					warnings: [
+						{
+							line: 4,
+							column: 5,
+							rule: "color-named",
+							severity: "warning",
+							text: MARKER,
+						},
+					],
+				},
+			]),
+		}),
+	};
+
+	const rubocopMember: Member = {
+		name: "rubocop",
+		runnerId: "rubocop",
+		modulePath: "../../../../clients/dispatch/runners/rubocop.js",
+		file: "src/app.rb",
+		sibling: "src/other.rb",
+		fileContent: "puts 1\n",
+		attached: { status: "succeeded", semantic: "warning" },
+		output: (reported) => ({
+			status: 0,
+			stdout: JSON.stringify({
+				files: [
+					{
+						path: reported,
+						offenses: [
+							{
+								severity: "convention",
+								message: MARKER,
+								cop_name: "Style/Test",
+								correctable: false,
+								location: { line: 4, column: 5 },
+							},
+						],
+					},
+				],
+			}),
+		}),
+	};
+
+	const eslintMember: Member = {
+		name: "eslint",
+		runnerId: "eslint",
+		modulePath: "../../../../clients/dispatch/runners/eslint.js",
+		file: "src/app.ts",
+		sibling: "src/other.ts",
+		fileContent: "export const a = 1;\n",
+		attached: { status: "succeeded", semantic: "warning" },
+		prepare(root) {
+			fs.writeFileSync(
+				path.join(root, "eslint.config.js"),
+				"export default [];\n",
+			);
+		},
+		output: (reported) => ({
+			status: 1,
+			stdout: JSON.stringify([
+				{
+					filePath: reported,
+					messages: [
+						{
+							ruleId: "no-test",
+							severity: 1,
+							message: MARKER,
+							line: 4,
+							column: 5,
+						},
+					],
+				},
+			]),
+		}),
+	};
+
+	const biomeMember: Member = {
+		name: "biome-check",
+		runnerId: "biome-check-json",
+		modulePath: "../../../../clients/dispatch/runners/biome-check.js",
+		file: "src/app.ts",
+		sibling: "src/other.ts",
+		fileContent: "export const a = 1;\n",
+		attached: { status: "succeeded", semantic: "warning" },
+		prepare(root) {
+			fs.writeFileSync(path.join(root, "biome.json"), "{}");
+		},
+		output: (reported) => ({
+			status: 1,
+			stdout: JSON.stringify({
+				diagnostics: [
+					{
+						severity: "warning",
+						category: "lint/test",
+						message: MARKER,
+						location: {
+							path: reported,
+							start: { line: 4, column: 5 },
+							end: { line: 4, column: 6 },
+						},
+					},
+				],
+			}),
+		}),
+	};
+
+	const tflintMember: Member = {
+		name: "tflint",
+		runnerId: "tflint",
+		modulePath: "../../../../clients/dispatch/runners/tflint.js",
+		file: "src/main.tf",
+		sibling: "src/other.tf",
+		fileContent: 'resource "x" "y" {}\n',
+		attached: { status: "succeeded", semantic: "warning" },
+		output: (reported) => ({
+			status: 2,
+			stdout: JSON.stringify({
+				issues: [
+					{
+						rule: { name: "test_rule", severity: "warning" },
+						message: MARKER,
+						range: { filename: reported, start: { line: 4, column: 5 } },
+					},
+				],
+				errors: [],
+			}),
+		}),
+	};
+
+	const swiftlintMember: Member = {
+		name: "swiftlint",
+		runnerId: "swiftlint",
+		modulePath: "../../../../clients/dispatch/runners/swiftlint.js",
+		file: "src/app.swift",
+		sibling: "src/other.swift",
+		fileContent: "let a = 1\n",
+		attached: { status: "succeeded", semantic: "warning" },
+		output: (reported) => ({
+			status: 0,
+			stdout: JSON.stringify([
+				{
+					file: reported,
+					line: 4,
+					character: 5,
+					severity: "Warning",
+					reason: MARKER,
+					rule_id: "test_rule",
+				},
+			]),
+		}),
+	};
+
+	const ktlintMember: Member = {
+		name: "ktlint",
+		runnerId: "ktlint",
+		modulePath: "../../../../clients/dispatch/runners/ktlint.js",
+		file: "src/App.kt",
+		sibling: "src/Other.kt",
+		fileContent: "val a = 1\n",
+		attached: { status: "succeeded", semantic: "warning" },
+		output: (reported) => ({
+			status: 1,
+			stdout: JSON.stringify([
+				{
+					file: reported,
+					errors: [
+						{ line: 4, col: 5, detail: MARKER, ruleId: "standard:test" },
+					],
+				},
+			]),
+		}),
+	};
+
+	const hadolintMember: Member = {
+		name: "hadolint",
+		runnerId: "hadolint",
+		modulePath: "../../../../clients/dispatch/runners/hadolint.js",
+		file: "src/Dockerfile",
+		sibling: "src/Dockerfile.other",
+		fileContent: "FROM alpine\n",
+		attached: { status: "failed", semantic: "warning" },
+		output: (reported) => ({
+			status: 0,
+			stdout: JSON.stringify([
+				{
+					file: reported,
+					line: 4,
+					column: 5,
+					level: "warning",
+					code: "DL3000",
+					message: MARKER,
+				},
+			]),
+		}),
+	};
+
+	const actionlintMember: Member = {
+		name: "actionlint",
+		runnerId: "actionlint",
+		modulePath: "../../../../clients/dispatch/runners/actionlint.js",
+		file: ".github/workflows/ci.yml",
+		sibling: ".github/workflows/other.yml",
+		fileContent: "on: push\njobs: {}\n",
+		attached: { status: "failed", semantic: "blocking" },
+		output: (reported) => ({
+			status: 1,
+			stdout: JSON.stringify([
+				{
+					message: MARKER,
+					filepath: reported,
+					line: 4,
+					column: 5,
+					kind: "syntax-check",
+				},
+			]),
+		}),
+	};
+
+	const spellcheckMember: Member = {
+		name: "spellcheck",
+		runnerId: "spellcheck",
+		modulePath: "../../../../clients/dispatch/runners/spellcheck.js",
+		file: "docs/app.md",
+		sibling: "docs/other.md",
+		fileContent: "# hello\n",
+		attached: { status: "failed", semantic: "warning" },
+		output: (reported) => ({
+			status: 2,
+			stdout: JSON.stringify({
+				path: reported,
+				line_num: 4,
+				byte_offset: 5,
+				typo: MARKER,
+				corrections: ["marker"],
+			}),
+		}),
+	};
+
+	const sqlfluffMember: Member = {
+		name: "sqlfluff",
+		runnerId: "sqlfluff",
+		modulePath: "../../../../clients/dispatch/runners/sqlfluff.js",
+		file: "src/app.sql",
+		sibling: "src/other.sql",
+		fileContent: "select 1\n",
+		attached: { status: "failed", semantic: "warning" },
+		prepare(root) {
+			fs.writeFileSync(
+				path.join(root, ".sqlfluff"),
+				"[sqlfluff]\ndialect = ansi\n",
+			);
+		},
+		output: (reported) => ({
+			status: 1,
+			stdout: JSON.stringify([
+				{
+					filepath: reported,
+					violations: [
+						{ code: "LT01", description: MARKER, line_no: 4, line_pos: 5 },
+					],
+				},
+			]),
+		}),
+	};
+
+	const valeMember: Member = {
+		name: "vale",
+		runnerId: "vale",
+		modulePath: "../../../../clients/dispatch/runners/vale.js",
+		file: "docs/app.md",
+		sibling: "docs/other.md",
+		fileContent: "# hello\n",
+		attached: { status: "succeeded", semantic: "warning" },
+		prepare(root) {
+			fs.writeFileSync(path.join(root, ".vale.ini"), "StylesPath = styles\n");
+		},
+		output: (reported) => ({
+			status: 1,
+			stdout: JSON.stringify({
+				[reported]: [
+					{
+						Check: "Test.Rule",
+						Message: MARKER,
+						Line: 4,
+						Span: [5, 6],
+						Severity: "warning",
+					},
+				],
+			}),
+		}),
+	};
+
+	const markdownlintMember: Member = {
+		name: "markdownlint",
+		runnerId: "markdownlint",
+		modulePath: "../../../../clients/dispatch/runners/markdownlint.js",
+		file: "docs/app.md",
+		sibling: "docs/other.md",
+		fileContent: "# hello\n",
+		attached: { status: "succeeded", semantic: "warning" },
+		output: (reported) => ({
+			status: 1,
+			stderr: `${reported}:4:5 MD013/line-length ${MARKER}\n`,
+		}),
+	};
+
+	const phpLintMember: Member = {
+		name: "php-lint",
+		runnerId: "php-lint",
+		modulePath: "../../../../clients/dispatch/runners/php-lint.js",
+		file: "src/app.php",
+		sibling: "src/other.php",
+		fileContent: "<?php\n",
+		attached: { status: "failed", semantic: "blocking" },
+		output: (reported) => ({
+			status: 255,
+			stdout: `PHP Parse error:  ${MARKER} in ${reported} on line 4\n`,
+		}),
+	};
+
+	/**
+	 * The SHARED diagnostic factory (`utils/diagnostic-parsers.ts`), reached
+	 * through its live consumer: ruff's TEXT fallback, which runs whenever the
+	 * JSON parser yields nothing. `createLineParser`'s own docstring says group 1
+	 * is the FILE; it dropped that group and stamped the dispatched path.
+	 */
+	const ruffTextMember: Member = {
+		name: "diagnostic-parsers (ruff text fallback)",
+		runnerId: "ruff-lint",
+		modulePath: "../../../../clients/dispatch/runners/ruff.js",
+		file: "src/app.py",
+		sibling: "src/other.py",
+		fileContent: "x = 1\n",
+		attached: { status: "succeeded", semantic: "warning" },
+		output: (reported) => ({
+			status: 1,
+			stdout: `${reported}:4:5: F401 ${MARKER}\n`,
+		}),
+	};
+
+	/**
+	 * `[name, member, ownSpelling?]`. `ownSpelling` exists for the one member
+	 * whose tool does NOT run in the runner cwd: `tflint` spawns with
+	 * `cwd: fileDir` and names `range.filename` relative to THAT, which is
+	 * exactly the "the cwd the tool RAN in" clause of ADR 0009. A shared
+	 * `cwdRelative` here would feed tflint a spelling it never emits (#2432).
+	 */
+	const ROUND3: ReadonlyArray<
+		readonly [string, Member, ((spelling: Spelling) => string)?]
+	> = [
+		["stylelint", stylelintMember],
+		["rubocop", rubocopMember],
+		["eslint", eslintMember],
+		["biome-check", biomeMember],
+		["tflint", tflintMember, ({ argvPath }) => path.basename(argvPath)],
+		["swiftlint", swiftlintMember],
+		["ktlint", ktlintMember],
+		["hadolint", hadolintMember],
+		["actionlint", actionlintMember],
+		["spellcheck", spellcheckMember],
+		["sqlfluff", sqlfluffMember],
+		["vale", valeMember],
+		["markdownlint", markdownlintMember],
+		["php-lint", phpLintMember],
+		["diagnostic-parsers", ruffTextMember],
+	];
+
+	it.each(ROUND3)(
+		"%s keeps a finding it reported for the dispatched file",
+		async (_name, member, ownSpelling) => {
+			expectAttached(
+				await dispatch(member, ownSpelling ?? cwdRelative(member)),
+				member,
+			);
+		},
+	);
+
+	it.each(ROUND3)(
+		"%s rejects a finding it reported for a sibling file",
+		async (_name, member) => {
+			expectDetached(await dispatch(member, echoesSibling));
+		},
+	);
+
+	it.each(ROUND3)(
+		"%s treats a case-variant reported path exactly as this filesystem does",
+		async (_name, member) => {
+			expectFilesystemAnswer(await dispatch(member, caseVariantOfArgv), member);
+		},
+	);
 });
