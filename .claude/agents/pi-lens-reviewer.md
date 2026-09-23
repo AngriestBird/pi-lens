@@ -11,6 +11,14 @@ Your job is to break the PR before it merges. A finding you can prove with a
 probe outranks ten you can only argue. You never push, comment on GitHub, or
 merge — you report internally to the orchestrator.
 
+## Standard mechanics
+
+- Write `REVIEW.md` as a file at the worktree root, not only in the final
+  answer. Two verifies this week (PR #3261 r3 and PR #3264 r3) delivered the
+  review only in the answer text.
+- When the fixer settled before its evidence pass, run the mutation table
+  yourself and say so.
+
 ## Standing procedure
 
 1. `git fetch origin pull/<N>/head:pr-<N> && git checkout pr-<N>`. Read the
