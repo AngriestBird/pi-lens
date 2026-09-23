@@ -2535,6 +2535,84 @@ describe("runtime-tool-result inline behavior warnings", () => {
 		}
 	});
 
+	it("uses the workspace-edit path identity for the dispatched target (#3294)", async () => {
+		const { runPipeline } = await import("../../clients/pipeline.js");
+		const env = setupTestEnvironment("pi-lens-runtime-tool-workspace-edit-path-");
+		const previousCwd = process.cwd();
+		try {
+			const filePath = path.join(env.tmpDir, "src", "main.rs");
+			const unrelatedCwd = path.join(env.tmpDir, "other-cwd");
+			fs.mkdirSync(path.dirname(filePath), { recursive: true });
+			fs.mkdirSync(path.join(unrelatedCwd, "src"), { recursive: true });
+			fs.writeFileSync(filePath, "mod helper;\n");
+			fs.writeFileSync(path.join(unrelatedCwd, "src", "main.rs"), "other\n");
+			process.chdir(unrelatedCwd);
+			vi.mocked(runPipeline).mockResolvedValue({
+				output: "✅ Auto-fixed 1 issue(s)",
+				hasBlockers: false,
+				isError: false,
+				fileModified: true,
+				// A cwd-relative workspace-edit spelling must be resolved against
+				// the workspace passed to applyWorkspaceEdit, not process.cwd().
+				changedFiles: ["src/main.rs"],
+			});
+
+			const modifiedRanges: string[] = [];
+			await handleToolResult({
+				event: {
+					toolName: "edit",
+					input: { path: filePath },
+					details: { diff: "+  1 mod helper;" },
+					content: [{ type: "text", text: "base" }],
+				},
+				getFlag: () => false,
+				dbg: () => {},
+				runtime: {
+					projectRoot: env.tmpDir,
+					setTelemetryIdentity: () => {},
+					updateGitGuardStatus: () => {},
+					appendCascadeResult: () => {},
+					recordInlineBlockers: () => {},
+					clearInlineBlockers: () => {},
+					nextWriteIndex: () => 1,
+					turnIndex: 1,
+					telemetryModel: "test-model",
+					telemetrySessionId: "test-session",
+					fixedThisTurn: new Set<string>(),
+					reportedThisTurn: new Set<string>(),
+					formatPipelineCrashNotice: () => "",
+					lastCascadeOutput: "",
+					cachedExports: new Map(),
+					deferFormat: () => {},
+				},
+				cacheManager: {
+					addModifiedRange: (changedFile: string) => modifiedRanges.push(changedFile),
+					readTurnState: () => ({}),
+				},
+				biomeClient: {},
+				ruffClient: {},
+				testRunnerClient: {},
+				metricsClient: {},
+				resetLSPService: () => {},
+				agentBehaviorRecord: () => [],
+				formatBehaviorWarnings: () => "",
+			} as any);
+
+			// The normal edit receipt records the dispatched target once before
+			// this changedFiles walk. The #3294 guard must not record it again as
+			// a side effect; a genuine neighbour remains covered by the test above.
+			expect(
+				modifiedRanges.filter((changed) => changed === filePath),
+			).toHaveLength(1);
+			expect(modifiedRanges).not.toContain(
+				path.join(unrelatedCwd, "src", "main.rs"),
+			);
+		} finally {
+			process.chdir(previousCwd);
+			env.cleanup();
+		}
+	});
+
 	it("uses fast LSP reset when pipeline crash recovery resets clients", async () => {
 		const { runPipeline } = await import("../../clients/pipeline.js");
 		vi.mocked(runPipeline).mockRejectedValue(new Error("boom"));
