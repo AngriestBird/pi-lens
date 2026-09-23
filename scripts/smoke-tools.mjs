@@ -700,8 +700,13 @@ const LSP_FIXTURES = [
 		// (archive tree bundle), not a binary. Needs pwsh on the runner (present on
 		// the nightly ubuntu image); installs the bundle via the archive strategy.
 		lang: "powershell",
-		lspGate: true,
-		lspGateMarker: "$unused = 'hello'",
+		// Flaky on ubuntu-latest, measured both ways on the same head: run
+		// 35831976090 returned 1 primary finding, run 35833100670 returned 0 with
+		// the identical fixture and marker. PowerShell Editor Services bootstraps
+		// through pwsh and its PSScriptAnalyzer pass does not always land inside
+		// the gate's wait. A row that reds one night in two is worse than no row.
+		lspGateExempt:
+			"PowerShell Editor Services lands its PSScriptAnalyzer pass inside the gate's wait only intermittently (35831976090 green, 35833100670 red); see #3217 follow-up",
 		dir: "tests/fixtures/tool-smoke/powershell",
 		file: "bad.ps1",
 		serverHint:
