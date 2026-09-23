@@ -99,6 +99,16 @@ async function edit(pi: ReturnType<typeof createPiMock>, filePath: string) {
 	);
 }
 
+function tildeProbeHome(): string {
+	const probeHome = path.resolve(process.env.PI_LENS_HOME ?? "");
+	const home = os.homedir();
+	const rel = path.relative(home, probeHome);
+	if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) {
+		return "\u0000never-matches\u0000";
+	}
+	return `~/${rel.replace(/\\/g, "/")}`;
+}
+
 async function endTurn(pi: ReturnType<typeof createPiMock>): Promise<string> {
 	await pi.emit("turn_end", {}, makeCtx({ cwd: tmpDir }));
 	const injected = (await pi.emit(
@@ -106,16 +116,23 @@ async function endTurn(pi: ReturnType<typeof createPiMock>): Promise<string> {
 		{ messages: [{ role: "user", content: "keep working" }] },
 		makeCtx({ cwd: tmpDir }),
 	)) as { messages?: Array<{ content: string }> } | undefined;
-	return (injected?.messages ?? [])
-		.map((message) => message.content)
-		.join("\n\n")
-		.replaceAll(tmpDir, "<PROJECT>")
-		.replaceAll(path.resolve(process.env.PI_LENS_HOME ?? ""), "<PROBE_HOME>")
-		.replace(
-			/<PROBE_HOME>\/projects\/[^/]+\/cache\/actionable-warnings\.json/g,
-			"<ACTIONABLE_REPORT>",
-		)
-		.trimEnd();
+	return (
+		(injected?.messages ?? [])
+			.map((message) => message.content)
+			.join("\n\n")
+			.replaceAll(tmpDir, "<PROJECT>")
+			.replaceAll(path.resolve(process.env.PI_LENS_HOME ?? ""), "<PROBE_HOME>")
+			// `displayProjectDataPath` folds `$HOME` to `~` when the store is not
+			// under cwd. CI runs with PI_LENS_HOME under $HOME, so the report path
+			// renders as `~/.../cache/actionable-warnings.json` there while a
+			// probe home outside $HOME renders absolute; scrub both spellings.
+			.replaceAll(tildeProbeHome(), "<PROBE_HOME>")
+			.replace(
+				/<PROBE_HOME>\/projects\/[^/]+\/cache\/actionable-warnings\.json/g,
+				"<ACTIONABLE_REPORT>",
+			)
+			.trimEnd()
+	);
 }
 
 describe("#3290 witness: actionable warnings through pi", () => {
