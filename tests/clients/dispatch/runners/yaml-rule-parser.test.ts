@@ -68,7 +68,9 @@ afterEach(() => {
  */
 describe("yaml-rule-parser cache freshness (#2262)", () => {
 	it("reloads an edited existing rule when the directory mtime is unchanged", () => {
-		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-pilens-rules-cache-"));
+		const root = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-pilens-rules-cache-"),
+		);
 		ruleCacheTempDirs.push(root);
 		const file = path.join(root, "existing.yml");
 		writeRule(file, "existing", "old");

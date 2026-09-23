@@ -51,7 +51,9 @@ interface RuleDocument {
 }
 
 function makeProject(): string {
-	const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-pilens-precedence-"));
+	const root = fs.mkdtempSync(
+		path.join(os.tmpdir(), "pi-lens-pilens-precedence-"),
+	);
 	tempRoots.push(root);
 	fs.mkdirSync(path.join(root, PRIMARY_RULES), { recursive: true });
 	return root;

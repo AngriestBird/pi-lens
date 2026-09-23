@@ -632,7 +632,9 @@ describe("ensureWarmForSweep warmupOverride floor scoping (#799)", () => {
 		vi.resetModules();
 		getServersForFileWithConfig.mockReset();
 		createLSPClient.mockReset();
-		tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-lsp-warmup-floor-799-"));
+		tmp = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-lsp-warmup-floor-799-"),
+		);
 		process.env.PI_LENS_LSP_WARMUP_RETRY_BACKOFF_MS = "0";
 	});
 	afterEach(() => {

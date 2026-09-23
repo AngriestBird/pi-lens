@@ -259,7 +259,9 @@ describe("touchFile capability-aware AGGREGATE wait (#814)", () => {
 		vi.resetModules();
 		getServersForFileWithConfig.mockReset();
 		createLSPClient.mockReset();
-		tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-lsp-silent-clean-agg-"));
+		tmp = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-lsp-silent-clean-agg-"),
+		);
 		// Flat, tiny diagnostics-wait budget so the mocked servers' real
 		// waitForDiagnostics sleep resolves in ~50ms instead of paying their real
 		// (1000-1500ms) strategy budgets — keeps these tests fast without
@@ -538,7 +540,9 @@ describe("touch debounce after a failed notify write (#1253)", () => {
 		vi.resetModules();
 		getServersForFileWithConfig.mockReset();
 		createLSPClient.mockReset();
-		tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-lsp-silent-clean-debounce-"));
+		tmp = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-lsp-silent-clean-debounce-"),
+		);
 		process.env.PI_LENS_LSP_DIAGNOSTICS_MAX_WAIT_MS = "50";
 		prevNotifyBudget = process.env.PI_LENS_LSP_NOTIFY_BUDGET_MS;
 		process.env.PI_LENS_LSP_NOTIFY_BUDGET_MS = "50";

@@ -330,7 +330,9 @@ describe("floor-call registration over blanked source (#2710)", () => {
 	});
 
 	it("reports a prose-only fixture sweep file uncovered and passes a real call", () => {
-		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-sweep-floor-2710-"));
+		const root = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-sweep-floor-2710-"),
+		);
 		try {
 			fs.writeFileSync(
 				path.join(root, "comment-only.test.ts"),

@@ -306,7 +306,9 @@ describe("prepare chain keeps load-bearing steps load-bearing (#1926)", () => {
 			piLensHome: "empty" as const,
 		},
 	])("$name", ({ piLensHome }) => {
-		const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-warm-home-"));
+		const scratch = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-warm-home-"),
+		);
 		const pinnedHome = path.join(scratch, "pinned-home");
 		const canaryHome = path.join(scratch, "canary-home");
 		// Parity with getGlobalPiLensDir() (clients/file-utils.ts): the value is

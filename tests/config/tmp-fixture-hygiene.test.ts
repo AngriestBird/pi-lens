@@ -445,8 +445,16 @@ describe("tmp-fixture-hygiene", () => {
 		expect(
 			scanUnnamespacedMkdtempSource(
 				[
-					["// ", "fs.mkdtempSync", '(path.join(os.tmpdir(), "comment-"));'].join(""),
-					["const decoy = '", "fs.mkdtempSync", "(path.join(os.tmpdir(), \\\"string-\\\"))';"].join(""),
+					[
+						"// ",
+						"fs.mkdtempSync",
+						'(path.join(os.tmpdir(), "comment-"));',
+					].join(""),
+					[
+						"const decoy = '",
+						"fs.mkdtempSync",
+						'(path.join(os.tmpdir(), \\"string-\\"))\';',
+					].join(""),
 					["fs.mkdtempSync", '(path.join(os.tmpdir(), "real-"));'].join(""),
 				].join("\n"),
 				"fixture.ts",

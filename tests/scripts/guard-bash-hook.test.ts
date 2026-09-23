@@ -446,7 +446,9 @@ describe("scripts/hooks/guard-bash.mjs -- git worktree remove node_modules symli
 		// "node_modules" symlink (e.g. a project's own dependency symlink)
 		// would be denied.
 		const shared = mkdtempSync(join(tmpdir(), "pi-lens-guard-bash-shared-nm-"));
-		const dir = mkdtempSync(join(tmpdir(), "pi-lens-guard-bash-not-a-worktree-"));
+		const dir = mkdtempSync(
+			join(tmpdir(), "pi-lens-guard-bash-not-a-worktree-"),
+		);
 		symlinkSync(shared, join(dir, "node_modules"));
 		try {
 			const result = runHook(`git worktree remove ${dir}`);

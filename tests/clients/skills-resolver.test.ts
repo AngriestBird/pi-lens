@@ -103,7 +103,9 @@ afterEach(() => {
 
 /** A fresh, unique package root under a real temp dir — see the shape-38 note above. */
 function freshPackageRoot(): string {
-	const dir = fsSync.mkdtempSync(path.join(os.tmpdir(), "pi-lens-pilens-skills-test-"));
+	const dir = fsSync.mkdtempSync(
+		path.join(os.tmpdir(), "pi-lens-pilens-skills-test-"),
+	);
 	tmpDirs.push(dir);
 	fsSync.writeFileSync(path.join(dir, "package.json"), "{}");
 	return dir;

@@ -248,7 +248,9 @@ describe("release-QA tool-smoke install lane (#2663)", () => {
 	});
 
 	function stubSmoke(report: Record<string, unknown>, exitCode = 0) {
-		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-release-qa-smoke-"));
+		const root = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-release-qa-smoke-"),
+		);
 		const scripts = path.join(root, "scripts");
 		fs.mkdirSync(scripts);
 		fs.writeFileSync(
@@ -501,7 +503,9 @@ describe("release-QA publish toolchain lane (#2940)", () => {
 	// the subject and nothing reaches the registry. `reports` is what the stub
 	// answers for `--version`; `dryRunExit` is the dry run's exit code.
 	function stubNpx(reports: string, dryRunExit = 0) {
-		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-release-qa-npx-"));
+		const root = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-release-qa-npx-"),
+		);
 		const binDir = path.join(root, "bin");
 		fs.mkdirSync(binDir);
 		const argvLog = path.join(root, "argv.log");
@@ -971,7 +975,9 @@ describe("release-QA scratch hermeticity (#2619 review F1)", () => {
 		// package whose `prepare` writes through `os.homedir()` — the same shape
 		// as scripts/warm-loader-cache.mjs — through the REAL npm() helper, and
 		// checks where the record landed.
-		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-release-qa-canary-"));
+		const root = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-release-qa-canary-"),
+		);
 		const ambient = path.join(root, "ambient-home");
 		const fixture = path.join(root, "fixture");
 		fs.mkdirSync(ambient, { recursive: true });

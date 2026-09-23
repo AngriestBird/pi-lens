@@ -501,7 +501,9 @@ describe("R8 — aux grace: touchFile with-auxiliary path", () => {
 
 	it("partitions real lens_diagnostics results by delivering server id (#2776)", async () => {
 		vi.useRealTimers();
-		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-lsp-provenance-"));
+		const root = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-lsp-provenance-"),
+		);
 		const file = path.join(root, "main.ts");
 		fs.writeFileSync(file, "const value = 1;\n");
 		try {

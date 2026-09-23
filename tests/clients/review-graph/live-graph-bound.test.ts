@@ -177,7 +177,9 @@ const AMPLE_BUDGET = 512 * 1024 * 1024;
 
 describe("live review-graph in-memory bound (#2255)", () => {
 	beforeAll(() => {
-		fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-memcap-fixture-"));
+		fixtureDir = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-memcap-fixture-"),
+		);
 		fs.mkdirSync(path.join(fixtureDir, "src"), { recursive: true });
 		for (let i = 0; i < FIXTURE_FILES; i += 1) {
 			fs.writeFileSync(

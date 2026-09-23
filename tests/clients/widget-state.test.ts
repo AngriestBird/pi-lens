@@ -1479,7 +1479,9 @@ describe("reconcileScanDiagnostics — full-scan/on-demand footer reconciliation
 
 describe("reconcileScanDiagnostics observation timestamp — cache-hit replays must not re-arm staleness (#1093/#1092)", () => {
 	it("stamps touchedAt at the OBSERVED time, so the entry drops once the file's mtime passes that observation", async () => {
-		const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-lens-obs-stamp-"));
+		const tmpDir = await fs.mkdtemp(
+			path.join(os.tmpdir(), "pi-lens-obs-stamp-"),
+		);
 		const filePath = path.join(tmpDir, `cached-${Date.now()}.ts`);
 		try {
 			await fs.writeFile(filePath, "const x = 1;\n");
@@ -1512,7 +1514,9 @@ describe("reconcileScanDiagnostics observation timestamp — cache-hit replays m
 	});
 
 	it("a fresh reconcile (no observation stamp) is observed now and survives an older mtime (control)", async () => {
-		const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-lens-obs-stamp-fresh-"));
+		const tmpDir = await fs.mkdtemp(
+			path.join(os.tmpdir(), "pi-lens-obs-stamp-fresh-"),
+		);
 		const filePath = path.join(tmpDir, `fresh-${Date.now()}.ts`);
 		try {
 			await fs.writeFile(filePath, "const y = 2;\n");
@@ -1615,7 +1619,9 @@ describe("path-key normalization — same file under mixed separators collapses 
 describe("scheduleStaleReconcile — widget self-corrects fixed files (#298 follow-up)", () => {
 	it("drops a widget entry once its file is edited on disk after the last record", async () => {
 		vi.useFakeTimers();
-		const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-lens-stale-reconcile-"));
+		const tmpDir = await fs.mkdtemp(
+			path.join(os.tmpdir(), "pi-lens-stale-reconcile-"),
+		);
 		const filePath = path.join(tmpDir, `stale-reconcile-${Date.now()}.ts`);
 		try {
 			await fs.writeFile(filePath, "const x = 1;\n");
@@ -1709,7 +1715,9 @@ describe("scheduleStaleReconcile — widget self-corrects fixed files (#298 foll
 
 describe("per-entry observation timestamps — the stale gate drops entries, not whole records (#1186)", () => {
 	it("HEADLINE: a merged record keeps a fresher PRESERVED entry when only the older incoming entry is stale", async () => {
-		const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-lens-per-entry-"));
+		const tmpDir = await fs.mkdtemp(
+			path.join(os.tmpdir(), "pi-lens-per-entry-"),
+		);
 		const filePath = path.join(tmpDir, `neighbor-${Date.now()}.ts`);
 		try {
 			await fs.writeFile(filePath, "import { x } from './primary';\n");
@@ -1882,7 +1890,9 @@ describe("PersistedWidgetState v1→v2 migration — per-entry stamps inherit th
 	});
 
 	it("a migrated v1 entry gates correctly: stale once the file's mtime passes the inherited stamp", async () => {
-		const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-lens-v1-migrate-gate-"));
+		const tmpDir = await fs.mkdtemp(
+			path.join(os.tmpdir(), "pi-lens-v1-migrate-gate-"),
+		);
 		const filePath = path.join(tmpDir, `legacy-${Date.now()}.ts`);
 		try {
 			await fs.writeFile(filePath, "const q = 4;\n");
@@ -1928,7 +1938,9 @@ describe("PersistedWidgetState v1→v2 migration — per-entry stamps inherit th
 
 describe("past-EOF diagnostic gate (#1641)", () => {
 	it("RED CASE: demotes a stored diagnostic whose cited line exceeds the file's current on-disk line count", async () => {
-		const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-lens-past-eof-"));
+		const tmpDir = await fs.mkdtemp(
+			path.join(os.tmpdir(), "pi-lens-past-eof-"),
+		);
 		const filePath = path.join(tmpDir, "kilo.ts");
 		try {
 			// A live in-memory-vs-disk desync never touches mtime — the file was
@@ -1972,7 +1984,9 @@ describe("past-EOF diagnostic gate (#1641)", () => {
 	});
 
 	it("does not demote a diagnostic whose cited line is still within the current file", async () => {
-		const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-lens-past-eof-ok-"));
+		const tmpDir = await fs.mkdtemp(
+			path.join(os.tmpdir(), "pi-lens-past-eof-ok-"),
+		);
 		const filePath = path.join(tmpDir, "fine.ts");
 		try {
 			await fs.writeFile(filePath, "a\nb\nc\nd\ne\n");
@@ -1999,7 +2013,9 @@ describe("past-EOF diagnostic gate (#1641)", () => {
 	});
 
 	it("the TUI render loop demotes a past-EOF blocker out of the blocking list it shows", async () => {
-		const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-lens-past-eof-render-"));
+		const tmpDir = await fs.mkdtemp(
+			path.join(os.tmpdir(), "pi-lens-past-eof-render-"),
+		);
 		const filePath = path.join(tmpDir, "widget.ts");
 		try {
 			await fs.writeFile(filePath, "a\nb\nc\n");
@@ -2023,7 +2039,9 @@ describe("past-EOF diagnostic gate (#1641)", () => {
 	});
 
 	it("F3 RE-ARM: a transient shrink demotes, restoring the file un-demotes the STORED record", async () => {
-		const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-lens-past-eof-rearm-"));
+		const tmpDir = await fs.mkdtemp(
+			path.join(os.tmpdir(), "pi-lens-past-eof-rearm-"),
+		);
 		const filePath = path.join(tmpDir, "transient.ts");
 		try {
 			await fs.writeFile(filePath, "a\nb\nc\nd\ne\n"); // 6 addressable lines

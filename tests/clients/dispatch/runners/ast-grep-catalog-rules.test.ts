@@ -424,7 +424,9 @@ d("catalog rules with `fix:` field — CLI rewrite end-to-end", () => {
 			});
 
 			it("ast-grep engine emits the expected `replacement` in the diagnostic JSON", () => {
-				const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-pilens-sg-fix-"));
+				const dir = fs.mkdtempSync(
+					path.join(os.tmpdir(), "pi-lens-pilens-sg-fix-"),
+				);
 				const snippet = path.join(dir, `fixture.${rule.ext}`);
 				fs.writeFileSync(snippet, rule.before, "utf-8");
 				// The CLI exits non-zero when the rule fires (a finding
