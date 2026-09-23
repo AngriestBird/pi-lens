@@ -19,7 +19,16 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+	afterAll,
+	afterEach,
+	beforeAll,
+	beforeEach,
+	describe,
+	expect,
+	it,
+	vi,
+} from "vitest";
 
 // Partial mock: every real export stays, `logLatency` becomes a spy so the
 // per-delivery unread-store row is assertable.
@@ -36,8 +45,12 @@ import {
 } from "../../clients/degradation-ledger.js";
 import type { GitleaksResult } from "../../clients/gitleaks-client.js";
 import { consumeTurnEndFindings } from "../../clients/runtime-context.js";
+import { _resetInstanceRegistryEnabledForTests } from "../../clients/instance-registry.js";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
-import { handleTurnEnd } from "../../clients/runtime-turn.js";
+import {
+	cancelLSPIdleReset,
+	handleTurnEnd,
+} from "../../clients/runtime-turn.js";
 import type { TrivyResult } from "../../clients/trivy-client.js";
 import { setupTestEnvironment } from "./test-utils.js";
 
@@ -204,6 +217,21 @@ function phaseRecords(phase: string): Array<Record<string, unknown>> {
 		.filter((entry) => entry.type === "phase" && entry.phase === phase);
 }
 
+// turn_end fires `void updateHeartbeat()` and never waits for it; a contended
+// registry lock arms a ~20 ms backoff timer that belongs to that fire-and-forget
+// chain, not to the hook. The timer case below counts timers, so the registry is
+// off through its own shipped kill switch — see the same block in
+// `tests/clients/blocker-freshness-turn-end.test.ts` for the measurement.
+beforeAll(() => {
+	vi.stubEnv("PI_LENS_INSTANCE_REGISTRY", "0");
+	_resetInstanceRegistryEnabledForTests();
+});
+
+afterAll(() => {
+	vi.unstubAllEnvs();
+	_resetInstanceRegistryEnabledForTests();
+});
+
 beforeEach(() => {
 	logLatency.mockReset();
 	resetDegradationLedger();
@@ -278,6 +306,39 @@ describe("#3274: the turn-end scanner reads are bounded and shared", () => {
 		// A healthy delivery writes no unread-store row: the record has to be a
 		// discriminator, not a line every turn emits (#2654's shape).
 		expect(phaseRecords("scanner_cache_read_abandoned")).toEqual([]);
+	});
+
+	it("leaves no scanner deadline armed when the turn returns (F9)", async () => {
+		// #3305 review H3305-1. Each read arms a 3000 ms `bounded()` deadline;
+		// `bounded()` clears it in its own try/finally BEFORE the promise the
+		// composer awaits settles, so a read the composer started and awaited is
+		// a timer the composer has already released when it returns. A read
+		// started and NOT awaited breaks that, and the break is observable
+		// rather than counted: the orphan deadline fires after the turn and
+		// abandons a read the turn already delivered on, writing the ledger row
+		// and the unread-store row for a delivery that had neither.
+		//
+		// Asserted this way rather than with `vi.getTimerCount()`, because that
+		// count also sees timers this hook neither owns nor awaits — measured on
+		// this very turn: 12 timers armed, all 12 cleared, and the count still
+		// reads 1 (a timer armed through a channel a `globalThis.setTimeout`
+		// probe does not intercept). The ledger is the signature of a LEAKED
+		// DEADLINE specifically.
+		warmStores();
+		vi.useFakeTimers();
+		try {
+			await handleTurnEnd(makeTurnEndDeps(runtime, cacheManager, env.tmpDir));
+			// Three stores were really read, so three deadlines were really armed
+			// — the assertions below are not vacuous.
+			expect(cacheManager.reads).toHaveLength(3);
+
+			await vi.advanceTimersByTimeAsync(2 * 3_000);
+
+			expect(summaryFor("hook-await-exceeded")).toBeUndefined();
+			expect(phaseRecords("scanner_cache_read_abandoned")).toEqual([]);
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
 	it("reads each store once per DELIVERY, never once per session (F5)", async () => {
