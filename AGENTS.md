@@ -176,6 +176,7 @@ ADR: docs/adr/0004-disposition-policy-seam.md
 ADR: docs/adr/0005-tool-availability-enforcement-seam.md
 ADR: docs/adr/0006-derived-state-benchmark-first.md
 ADR: docs/adr/0007-end-to-end-witness-per-seam-slice.md
+ADR: docs/adr/0009-reported-path-attribution.md
 
 <!-- markdownlint-disable MD029 -->
 
@@ -196,7 +197,10 @@ ADR: docs/adr/0007-end-to-end-witness-per-seam-slice.md
    Prefer `toPosix`, `splitPathSegments`, and the canonical path helpers.
 
 32. **Mixed path comparison:** use one platform-aware containment expression;
-    do not combine case-sensitive equality with case-folded relative paths.
+    do not combine case-sensitive equality with case-folded relative paths. A
+    runner deciding whether a TOOL-REPORTED path names the dispatched file asks
+    `pathsEqual` against the cwd the tool ran in, never `path.resolve` with no
+    base and never `===`. ADR: docs/adr/0009-reported-path-attribution.md
 
 39. **Walk-up result used as eligibility:** return ownership and start-directory
     identity separately; enumerate root-position by ambient-input cells.
