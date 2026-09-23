@@ -192,6 +192,25 @@ describe("JSON/text runner outcome seam (#1816)", () => {
 			},
 		);
 
+		// The inverse direction of each per-tool exit table, and the proof that an
+		// admission stays LOCAL: the status asserted here is one the SIBLING
+		// runner admits (ktlint is handed php-lint's 255, php-lint is handed
+		// ktlint's 2). #3291 round 2 threaded both tables through a shared
+		// `parseToolRun` option whose undefined default erased eleven other
+		// runners' tables; a widened or shared table makes this cell report the
+		// findings instead of skipping.
+		it(`${tool}: the sibling's admitted status stays rejected`, async () => {
+			const observed = await dispatchOutcome(tool, {
+				error: null,
+				status: tool === "ktlint" ? 255 : 2,
+				stdout: tool === "ktlint" ? wire[tool] : "",
+				stderr: tool === "php-lint" ? wire[tool] : "",
+			});
+			expect(observed.status).toBe("skipped");
+			expect(observed.diagnostics).toEqual([]);
+			expect(observed.ledger[0]).toMatchObject({ kind: "runner-empty-result" });
+		});
+
 		it(`${tool}: nonzero text is a parse error`, async () => {
 			const observed = await dispatchOutcome(tool, {
 				error: null,
