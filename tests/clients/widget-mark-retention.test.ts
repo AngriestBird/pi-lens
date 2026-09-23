@@ -33,6 +33,7 @@ import {
 	getFileDiagnostics,
 	importWidgetState,
 	reconcileStaleWidgetFiles,
+	recordDiagnostics,
 	renderWidget,
 } from "../../clients/widget-state.js";
 import { createLensDiagnosticMarkTool } from "../../tools/lens-diagnostic-mark.js";
@@ -316,6 +317,71 @@ describe("the retention identity tells two occurrences of one rule apart (#3183)
 		expect(suppressedChip()).toContain("suppressed: 1");
 	});
 
+	it("replaces a span-less retained row on any collision, as before", async () => {
+		// The coarse fallback, and the safe direction the issue names: a WEAK
+		// `suppress` mark has no strict span, so a collision cannot be resolved by
+		// occurrence at all. It must still REPLACE — under-count, never a phantom
+		// duplicate standing beside the live finding it duplicates. Driven through
+		// `recordDiagnostics`, the seam `clients/pipeline.ts` calls on every edit
+		// and the only writer that can re-report a weak-suppressed finding (a
+		// `source=lsp` probe's own filter drops it before the store ever sees it).
+		const finding = {
+			tool: "lsp",
+			rule: "typescript:2322",
+			message: MESSAGE,
+			line: 1,
+			severity: "warning",
+		};
+		recordDiagnostics(filePath, [finding], 1);
+		const marked = await mark({
+			filePath,
+			line: 1,
+			message: MESSAGE,
+			...CANONICAL_MARK,
+			disposition: "suppress",
+		});
+		expect(marked.isError).toBeFalsy();
+		recordDiagnostics(filePath, [], 2);
+		expect(suppressedChip()).toContain("suppressed: 1");
+
+		recordDiagnostics(filePath, [finding], 3);
+
+		const stored = getFileDiagnostics(filePath) ?? [];
+		expect(stored).toHaveLength(1);
+		expect(stored[0]?.disposition).toBeUndefined();
+		expect(suppressedChip()).toBeUndefined();
+	});
+});
+
+describe("the anchor span travels with the disposition tag (#3183)", () => {
+	it("strips a span from a row that is no longer disposition-tagged", async () => {
+		// The row-level invariant behind retirement rule 1: only a TAGGED row is
+		// exempt from the mtime gate. A span left on an untagged row would exempt a
+		// LIVE finding from the sweep for as long as its old line text survived
+		// anywhere in the file — the same defect class this PR closes, inverted.
+		// Driven through `importWidgetState` because production has no writer that
+		// puts a span on an untagged row; the point is that `reconcileWidgetDisposition`
+		// cannot leave one behind either.
+		const service = makeService([diag(OTHER_MESSAGE, 2304, 2)]);
+		await probe(service);
+		const snapshot = JSON.parse(
+			JSON.stringify(exportWidgetState()),
+		) as ReturnType<typeof exportWidgetState>;
+		for (const file of snapshot.files) {
+			for (const row of [...file.diagnostics, ...file.allDiagnostics]) {
+				(row as Record<string, unknown>).anchorSpan = "deadbeef";
+			}
+		}
+		clearWidgetState();
+		expect(importWidgetState(snapshot)).toBe(true);
+
+		// Any mark on the file re-maps every row through the untagged branch.
+		await markLineOne();
+
+		expect(getFileDiagnostics(filePath)).toEqual([
+			expect.not.objectContaining({ anchorSpan: expect.anything() }),
+		]);
+	});
 });
 
 describe("the weak arm and pre-anchor rows keep the mtime gate (#3183)", () => {

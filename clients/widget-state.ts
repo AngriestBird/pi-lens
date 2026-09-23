@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { readFile, stat } from "node:fs/promises";
+import { stat } from "node:fs/promises";
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
 import { BoundedFifoMap } from "./bounded-cache.js";
@@ -975,18 +975,17 @@ function readContentOrUndefined(filePath: string): string | undefined {
 
 /**
  * {@link strictAnchorSpansIn} over `filePath`'s current content (#3183), or
- * `undefined` when it cannot be read. Async because its caller
- * (`reconcileStaleWidgetFiles`) is the read-path sweep — never the typing path
- * — and already awaits one `stat` per record.
+ * `undefined` when it cannot be read.
+ *
+ * Synchronous in both callers, matching `applyCachedDispositions`
+ * (`tools/lens-diagnostics.ts`) — the seam that asks the very same question on
+ * the very same read path, with `statSync`/`readFileSync`. An async read here
+ * would add two unbounded awaits to a module a registered hook handler imports
+ * directly (`tests/config/hook-await-bounds.test.ts`) for no behavioural gain.
  */
-async function readAnchorSpans(
-	filePath: string,
-): Promise<Set<string> | undefined> {
-	try {
-		return strictAnchorSpansIn(await readFile(filePath, "utf8"));
-	} catch {
-		return undefined;
-	}
+function readAnchorSpans(filePath: string): Set<string> | undefined {
+	const content = readContentOrUndefined(filePath);
+	return content === undefined ? undefined : strictAnchorSpansIn(content);
 }
 
 /**
@@ -1467,30 +1466,24 @@ export async function reconcileStaleWidgetFiles(): Promise<number> {
 					mtimeMs,
 					referenceMs: d.observedAt ?? rec.touchedAt,
 				}).verdict === "stale";
-			// #3183: nothing this file's mtime can invalidate — no read, no change.
-			// This is also what keeps the debounced render sweep off the disk for
-			// every file that merely holds a mark.
-			if (!rec.allDiagnostics.some(mtimeStale)) {
-				return { mapKey, action: "keep" as const };
-			}
-			// A disposition-tagged row carrying a strict anchor span is gated on its
-			// MARK, not on the file's mtime (retirement rule 1 — see
+			// #3183: a disposition-tagged row carrying a strict anchor span is gated
+			// on its MARK, not on the file's mtime (retirement rule 1 — see
 			// `WidgetDiagnostic.suppressedRetained`): it survives while the marked
-			// LINE is still somewhere in the file and is retired when it is not.
-			// Content is read at most once per record, and only once the mtime has
-			// actually moved on a record that holds such a row.
-			const anchored = rec.allDiagnostics.some(
-				(d) => d.anchorSpan !== undefined,
-			);
-			const spans = anchored
-				? await readAnchorSpans(rec.filePath)
+			// LINE is still somewhere in the file, and is retired when it is not.
+			// The content read is gated on a span-carrying row the mtime gate WOULD
+			// have dropped — the only state where reading can change an outcome — so
+			// the debounced render sweep stays off the disk both for a file with no
+			// marks and for a marked file nothing has touched.
+			const spans = rec.allDiagnostics.some(
+				(d) => d.anchorSpan !== undefined && mtimeStale(d),
+			)
+				? readAnchorSpans(rec.filePath)
 				: undefined;
-			const survivors = rec.allDiagnostics.filter((d) => {
-				if (d.anchorSpan !== undefined && spans !== undefined) {
-					return spans.has(d.anchorSpan);
-				}
-				return !mtimeStale(d);
-			});
+			const survivors = rec.allDiagnostics.filter((d) =>
+				d.anchorSpan !== undefined && spans !== undefined
+					? spans.has(d.anchorSpan)
+					: !mtimeStale(d),
+			);
 			if (survivors.length === rec.allDiagnostics.length) {
 				return { mapKey, action: "keep" as const }; // nothing stale
 			}
