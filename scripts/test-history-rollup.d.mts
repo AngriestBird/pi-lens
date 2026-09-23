@@ -1,0 +1,20 @@
+export const HISTORY_MAX_AGE_MS: number;
+export function rowsFromArtifacts(inputs: string[]): Array<{
+	headSha: string;
+	runId: string;
+	file: string;
+	outcome: string;
+	durationMs: number;
+	lane: string;
+	recordedAt: string;
+}>;
+export function rollupTestHistory(options: {
+	artifactPaths: string[];
+	historyPath: string;
+	summaryPath: string;
+	now?: number;
+}): {
+	rowCount: number;
+	files: unknown[];
+	flakeCandidates: Array<{ file: string; headSha: string }>;
+};
