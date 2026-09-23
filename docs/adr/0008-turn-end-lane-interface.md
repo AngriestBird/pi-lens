@@ -79,8 +79,66 @@ blocker section with combined provenance, and the demoted tier merges the same
 two stores. A "gitleaks-only" lane would leave every rendering rule in the
 composer and move only a cache read.
 
+## Amendment — 2026-09-23: the advisory tier joins `TurnEndLaneParts`
+
+`TurnEndLaneParts` gains ONE field, `advisoryParts?: readonly string[]`, with
+the govulncheck lane (`clients/turn-end/lanes/govulncheck.ts`). This is the
+amendment the Decision above anticipated ("the advisory tier joins the type
+with the lane that renders one"), not a widening of the rule.
+
+**Why it was withheld until now.** The rule is "a field per tier the composer
+PUSHES, and no others", because a field the composer does not read is a side
+channel that silently drops a lane's whole output (AGENTS.md shape 5). The
+secrets lane renders no advisory, so an `advisoryParts` shipped with the
+interface would have been exactly that: a slot a later lane could fill and lose.
+The field, the composer's push and the surface's registry id therefore move
+together, in one round, as one claim.
+
+**What the composer pushes it into.** `handleTurnEnd`'s `advisoryParts` array
+(`clients/runtime-turn.ts`), under the existing tag
+`// @delivery-surface: runtime-turn:govulncheck-advisory`, at the same position
+in the tier order the inline block occupied. The tag is what makes the tier a
+registered delivery surface rather than a string, and
+`tests/config/turn-end-lane-boundaries.test.ts` already listed `advisoryParts`
+in the tier-push rule it reds on — so a lane that pushes its own advisory was
+forbidden before the field existed, and still is.
+
+**What did NOT change.** Still three stages; still no lane id; still no fourth
+method. The `runtime-turn:govulncheck-advisory` registry entry keeps its `file`,
+its `gated` mode and its evidence literal `scannerGates.govulncheck` unchanged
+— the composer still binds that gate arm itself and hands it to the lane, so
+unlike the secrets repin nothing was weakened here.
+
+**The interface question this lane was asked and did not need to answer.** The
+brief asked how a lane declares "no freshness source" honestly, since a
+package-pinned row (trivy CVE/license) has no path to stat. The state table is:
+
+| Lane's store | has a cited path | honesty mechanism | fits the interface today |
+|---|---|---|---|
+| govulncheck | yes (first trace frame with a filename) | the shared gate, `onMissing: "demote"` | yes — this round |
+| gitleaks / trivy-secrets | yes (`finding.file`) | the shared gate, `onMissing: "drop"` | yes — #3269 |
+| trivy CVE / license | no — pinned by package, not by file | `formatCacheAgeLabel`, the registry's `labeled` mode | NO |
+| a finding whose `citedPath` returns `undefined` for SOME rows | mixed | the gate leaves the uncited row live and gates the rest | yes — already handled per row |
+
+The last row is the one that matters for "no freshness source": the gate already
+takes `citedPath` returning `undefined` as "leave live", per FINDING, so a lane
+with a partially-uncited store needs nothing new (the govulncheck witness pins
+it: `GO-2026-0103` has an empty trace and renders by module). A store where
+EVERY row is uncited is a different animal — it is not a gated lane at all, it
+is a `labeled` one, and giving it a `sources: {}` `collect` would let it pass
+the composer's gate with an empty declaration and look gated in the registry
+while nothing checked anything. That is the second exception the brief said not
+to bend the lane around, so it is not added: the labeled lanes need a `label`
+stage (an age string the composer renders into the header) before they can be
+extracted, and that is the design decision of the round that extracts one.
+
 ## Consequences
 
+- The composer no longer states a govulncheck rule (2026-09-23): 4,438 →
+  4,403 lines, and the six rules the block held (the `demote`/first-frame
+  freshness declaration, the both-arm disposition anchor, the stale-line
+  withholding and marker, the module/package fallback, the fix hint and the
+  display cap) are stated once, in the lane.
 - The composer no longer states a secrets rule: 4,654 → 4,438 lines, and the
   ten rules the block used to hold (cache key, classification budget and
   fail-open, blocking filter, freshness declaration, two disposition anchors
@@ -100,7 +158,8 @@ composer and move only a cache read.
 
 ## Links
 
-- Umbrella: #1892. Previous slice: #3264 (the shared freshness pass).
+- Umbrella: #1892. Previous slices: #3264 (the shared freshness pass), #3269
+  (this interface and the secrets lane).
 - Witness convention: docs/adr/0007-end-to-end-witness-per-seam-slice.md.
 - Disposition seam: docs/adr/0004-disposition-policy-seam.md.
 - Registry and evidence rules: `clients/finding-delivery-gate.ts`.

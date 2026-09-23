@@ -112,6 +112,21 @@ export interface TurnEndLaneParts {
 	/** Demoted-finding sections (#1622 review M2's own tier). */
 	staleSecretParts?: readonly string[];
 	/**
+	 * ℹ️ Advisory sections: informational this turn, never blocking.
+	 *
+	 * Withheld from this type until #1892's govulncheck round, by the rule
+	 * above and not by oversight: the secrets lane renders no advisory, so an
+	 * `advisoryParts` declared with the interface would have been a field
+	 * nothing pushed — a lane could have filled it and had its whole output
+	 * dropped in silence, which is exactly the side channel the rule prevents.
+	 * It arrives with `clients/turn-end/lanes/govulncheck.ts`, the first lane
+	 * that renders an advisory, together with the composer's tagged push
+	 * (`// @delivery-surface: runtime-turn:govulncheck-advisory` above
+	 * `advisoryParts.push(...)` in `clients/runtime-turn.ts`) — the tag is
+	 * what makes this tier a registered delivery surface rather than a string.
+	 */
+	advisoryParts?: readonly string[];
+	/**
 	 * Store name → findings this lane dropped because of a stored disposition.
 	 * The composer folds these into the turn's ONE suppressed-by-disposition
 	 * notice (#1616's rule: a security finding never vanishes without a
