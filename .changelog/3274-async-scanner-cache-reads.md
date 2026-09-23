@@ -8,5 +8,5 @@ section: Fixed
   deadline or Escape could release it. They now read through
   `CacheManager.readCacheAsync` under the turn_end budget and the hook's abort
   signal; a read that cannot finish inside the budget is abandoned, delivers the
-  same output as a cold cache, and records one degradation row instead of
-  stalling the turn.
+  same output as a cold cache, and is recorded — once per turn, naming the
+  stores the turn was composed without — instead of stalling the turn.
