@@ -502,6 +502,16 @@ ADR: docs/adr/0009-reported-path-attribution.md
 - Vitest keeps the #2912 run-shared home; `vitest-setup.ts` pins only the
   orphan-backstop directory through `resolveBackstopStateDir` (#3083). Explicit
   per-case homes remain authoritative. Never bypass this seam for its lock or stamp.
+- Two vitest invocations may share one `TMPDIR`: `npm run test:targeted` takes
+  one of two SHARED lock slots, and any lane inherits whatever `TMPDIR` its
+  shell exports. The rule is that an invocation judges and sweeps only tmp
+  entries owned by a test file one of ITS OWN workers loaded — the run-file
+  manifest `tmp-hygiene-files-<run id>.log` beside the hygiene baseline. An
+  entry owned by any other file is ignored AND spared: never attributed, never
+  deleted (#3314). A tmp fixture therefore names its family in a literal or
+  template-head prefix at its own `mkdtempSync`/`setupTestEnvironment` call, so
+  the census can name the file behind it instead of `owner: tests/unknown`
+  (#3306).
 - New filesystem walkers use shared exclusions and ignore matching, cap
   walk-down work, and use the correct home-ceiling policy for walk-up discovery.
 

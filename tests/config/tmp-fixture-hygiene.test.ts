@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
 	assertNonEmptyScan,
 	listSourceFiles,
@@ -18,6 +18,9 @@ import {
 	tmpHygieneLeakReport,
 	tmpHygieneObservedEntries,
 	tmpHygieneExcludeLiveOwnerEntries,
+	tmpHygieneForeignRunEntries,
+	tmpHygieneRunFiles,
+	tmpHygieneSweepableEntries,
 	tmpHygieneWaitForOwnerDrain,
 	tmpHygieneUnadmittedEntries,
 	classifyTmpHygieneOwner,
@@ -114,22 +117,206 @@ function scanMkdtempSites(): { file: string; line: number; text: string }[] {
 	return sites;
 }
 
-function ownerForTmpEntry(entry: string): string | undefined {
+/** The tmp-fixture prefixes each `tests/` file declares (#3306).
+ *
+ *  Only `pi-lens-`-prefixed families are indexed, because those are the only
+ *  entries the census observes at all (`snapshotTmpPiLensEntries` in
+ *  tests/support/vitest-setup.ts filters the tmpdir listing on that prefix). */
+type TmpOwnerIndex = {
+	/** prefix -> the `tests/`-relative files that declare it. */
+	prefixes: Map<string, Set<string>>;
+};
+
+// #3306: a raw `mkdtempSync(path.join(os.tmpdir(), "pi-lens-x-"))` root used to
+// map to NO owner, because only literal `setupTestEnvironment("…")` calls were
+// indexed — `tests/index-wiring.test.ts`'s three `pi-lens-wiring-<reason>-`
+// roots therefore reported `owner: tests/unknown` and read as a scanner bug.
+// The decision (criterion 3) is to attribute them, and to derive the
+// registration from the call site itself rather than from a hand-kept list
+// beside it: there is nothing for a new producer to register, and no list to
+// fall out of step with the tree.
+//
+// Round 2, M3328-1: the scan reads CODE, not prose. Comments AND string
+// contents are blanked (`stripSource`'s default), so neither a commented-out
+// call nor an ordinary string that spells one — `const decoy =
+// 'setupTestEnvironment("pi-lens-evil-")'` — can register a prefix. A file that
+// claims another file's family is not a cosmetic mis-label: it becomes a
+// candidate owner, and one candidate that "ran here" is what stops the
+// foreign-run filter from sparing a sibling invocation's live root (#3314).
+//
+// The one deliberate exception the detector rule allows is the prefix ARGUMENT
+// itself, whose only possible evidence IS a string literal. It is read from the
+// raw text at delimiter offsets the BLANKED code located — `stripSource`
+// preserves length, lines and columns — so the callee is always code and only
+// the literal's body comes from the source text.
+/** `setupTestEnvironment(` up to and including its first argument's opening
+ *  delimiter, located in blanked code. */
+const SETUP_ENV_CALL = /setupTestEnvironment\(\s*["'`]/g;
+/** Any literal in an ARGUMENT position — after `(` or `,`. This is first a
+ *  MECHANISM, not a second policy: in blanked code an opening and a closing
+ *  delimiter look alike, and `(`/`,` is how a literal's OPENING one is found. A
+ *  fixture prefix reaches `mkdtempSync` as an argument anyway. Measured on the
+ *  real tree, widening it to assignment and property positions changes nothing
+ *  (2087 prefixes either way), so it is not claimed as a guard. */
+const ARGUMENT_LITERAL = /[(,]\s*["'`]/g;
+
+/** The static head of the string or template literal whose OPENING delimiter
+ *  sits at `open`. Both delimiters are found in `code` (blanked), the body is
+ *  read from `raw`, and an interpolation ends the head — so
+ *  `` `pi-lens-wiring-${reason}-` `` yields `pi-lens-wiring-`, the family the
+ *  entry name actually starts with. */
+function literalHeadAt(
+	code: string,
+	raw: string,
+	open: number,
+): string | undefined {
+	const quote = code[open];
+	if (quote !== '"' && quote !== "'" && quote !== "`") return undefined;
+	const close = code.indexOf(quote, open + 1);
+	if (close < 0) return undefined;
+	const body = raw.slice(open + 1, close);
+	const interpolation = body.indexOf("${");
+	return interpolation < 0 ? body : body.slice(0, interpolation);
+}
+
+/** The prefix argument of one mkdtemp call, read from its own call window in
+ *  blanked code: the static head of a literal, or the identifier standing in
+ *  for it. `windowStart` maps the window back onto the whole file, so the
+ *  literal body can be read from `raw` at the same offsets. */
+function mkdtempPrefixArg(
+	code: string,
+	raw: string,
+	windowStart: number,
+	window: string,
+): { literal?: string; ident?: string } {
+	const call = /\bmkdtemp(?:Sync)?\s*\(/.exec(window);
+	if (call === null) return {};
+	const tailStart = call.index + call[0].length;
+	const tail = window.slice(tailStart);
+	const literal = /,\s*["'`]/.exec(tail);
+	if (literal)
+		return {
+			literal: literalHeadAt(
+				code,
+				raw,
+				windowStart + tailStart + literal.index + literal[0].length - 1,
+			),
+		};
+	const ident = tail.match(/,\s*([A-Za-z_$][\w$]*)\s*\)/);
+	if (ident) return { ident: ident[1] };
+	return {};
+}
+
+function buildTmpOwnerIndex(
+	root: string = path.join(REPO_ROOT, "tests"),
+	/** Population floors, so the scan cannot silently go empty. Parameters
+	 *  because the fixture-driven case below drives this over a planted tree of
+	 *  three sites and would otherwise trip the real tree's floor. */
+	floors: { prefixes: number; files: number } = { prefixes: 200, files: 100 },
+): TmpOwnerIndex {
+	const prefixes = new Map<string, Set<string>>();
+	let fileCount = 0;
+	const add = (prefix: string | undefined, file: string): void => {
+		if (prefix === undefined) return;
+		// A prefix must NAME a family. `pi-lens-` alone is the namespace itself and
+		// would claim every entry in the census: measured, the dynamic
+		// `setupTestEnvironment(`pi-lens-${tool}-${name}-`)` in
+		// tests/clients/dispatch/runners/compiler-outcome-runners-javac-dotnet.test.ts
+		// has that static head, and with it indexed, `pi-lens-nothing-spells-this-`
+		// resolved to that file.
+		if (!prefix.startsWith("pi-lens-") || prefix === "pi-lens-") return;
+		const owners = prefixes.get(prefix) ?? new Set<string>();
+		owners.add(file);
+		prefixes.set(prefix, owners);
+	};
+	for (const { file, source: raw } of readWalkedFiles(
+		listSourceFiles(root, { extensions: [".ts"] }),
+	)) {
+		fileCount += 1;
+		const owner = path.relative(root, file).replace(/\\/g, "/");
+		const code = stripSource(raw);
+		for (const match of code.matchAll(SETUP_ENV_CALL))
+			add(literalHeadAt(code, raw, match.index + match[0].length - 1), owner);
+		const harvested: string[] = [];
+		for (const match of code.matchAll(ARGUMENT_LITERAL)) {
+			const head = literalHeadAt(code, raw, match.index + match[0].length - 1);
+			if (head?.startsWith("pi-lens-")) harvested.push(head);
+		}
+		const lines = code.split("\n");
+		let lineStart = 0;
+		for (const [index, line] of lines.entries()) {
+			const windowStart = lineStart;
+			lineStart += line.length + 1;
+			MKTEMP_CALLEE.lastIndex = 0;
+			if (!MKTEMP_CALLEE.test(line)) continue;
+			// Multi-line calls carry path.join(os.tmpdir(), …) on the following
+			// lines; read the call window, the way the sibling sweep above does.
+			const window = lines.slice(index, index + 3).join("\n");
+			if (!TMPDIR_SOURCE.test(window) && !TMPDIR_ENV_SOURCE.test(window))
+				continue;
+			const { literal, ident } = mkdtempPrefixArg(
+				code,
+				raw,
+				windowStart,
+				window,
+			);
+			if (literal !== undefined) {
+				add(literal, owner);
+				continue;
+			}
+			// The prefix is an identifier: these sites sit in a per-file helper
+			// (`freshTmpDir(prefix)`), and its callers spell the literals in the
+			// SAME file, so the file's own `pi-lens-` literals are the family set.
+			// A file with none cannot produce an entry this census observes
+			// (`snapshotTmpPiLensEntries` only sees `pi-lens-` names), so there is
+			// nothing to attribute and nothing to enforce — measured:
+			// tests/scripts/lsp-fixture-workspace.test.ts:49 passes
+			// `WORKSPACE_TEST_PREFIX = "lsp-fixture-workspace-test-"`.
+			if (ident !== undefined)
+				for (const prefix of harvested) add(prefix, owner);
+		}
+	}
+	assertNonEmptyScan(
+		"tmp owner prefix population",
+		prefixes.size,
+		floors.prefixes,
+	);
+	assertNonEmptyScan("tmp owner file population", fileCount, floors.files);
+	return { prefixes };
+}
+
+let tmpOwnerIndex: TmpOwnerIndex | undefined;
+function ownerIndex(): TmpOwnerIndex {
+	tmpOwnerIndex ??= buildTmpOwnerIndex();
+	return tmpOwnerIndex;
+}
+
+/** EVERY `tests/` file that declares a prefix of this entry. The foreign-run
+ *  filter needs all of them: one candidate that ran in this invocation is
+ *  enough to keep the entry judged (#3314). */
+function ownersForTmpEntry(
+	entry: string,
+	index: TmpOwnerIndex = ownerIndex(),
+): string[] {
+	const owners = new Set<string>();
+	for (const [prefix, files] of index.prefixes)
+		if (entry.startsWith(prefix)) for (const file of files) owners.add(file);
+	return [...owners];
+}
+
+/** The longest declared prefix wins, so an overlapping fixture family is
+ *  attributed to the file that named the more specific one (round-1 LOW-3297-3). */
+function ownerForTmpEntry(
+	entry: string,
+	index: TmpOwnerIndex = ownerIndex(),
+): string | undefined {
 	let owner: string | undefined;
 	let ownerPrefixLength = -1;
-	for (const { file, source } of readWalkedFiles(
-		listSourceFiles(path.join(REPO_ROOT, "tests"), { extensions: [".ts"] }),
-	)) {
-		const match = source.matchAll(/setupTestEnvironment\(\s*["']([^"']+)["']/g);
-		for (const [, prefix] of match) {
-			if (entry.startsWith(prefix) && prefix.length > ownerPrefixLength) {
-				ownerPrefixLength = prefix.length;
-				owner = path
-					.relative(REPO_ROOT, file)
-					.replace(/\\/g, "/")
-					.replace(/^tests\//, "");
-			}
-		}
+	for (const [prefix, files] of index.prefixes) {
+		if (!entry.startsWith(prefix) || prefix.length <= ownerPrefixLength)
+			continue;
+		ownerPrefixLength = prefix.length;
+		owner = [...files].sort()[0];
 	}
 	return owner;
 }
@@ -138,13 +325,25 @@ describe("tmp-fixture-hygiene", () => {
 	afterAll(async () => {
 		const scan = await tmpHygieneWaitForOwnerDrain();
 		const liveOwners = scan.live;
-		// Bounded observability (#3186): ONE census line per hygiene run, not one
-		// record per marker, so a suppressed or attributed entry is explicable
-		// from the run's own output.
-		process.stderr.write(`${formatTmpHygieneOwnerSummary(scan)}\n`);
 		const { testFile, leftovers } = tmpHygieneLeakReport();
+		// #3314: entries whose every candidate owner is a file no worker of THIS
+		// run id loaded belong to another vitest invocation sharing this TMPDIR.
+		// They are dropped before attribution AND spared by the sweep below.
+		const otherInvocation = new Set(
+			tmpHygieneForeignRunEntries(
+				leftovers,
+				ownersForTmpEntry,
+				tmpHygieneRunFiles(),
+			),
+		);
+		// Bounded observability (#3186, extended by #3314): ONE census line per
+		// hygiene run, not one record per marker or per entry, so a suppressed,
+		// ignored or attributed entry is explicable from the run's own output.
+		process.stderr.write(
+			`${formatTmpHygieneOwnerSummary(scan, otherInvocation.size)}\n`,
+		);
 		const attributable = tmpHygieneExcludeLiveOwnerEntries(
-			leftovers,
+			leftovers.filter((entry) => !otherInvocation.has(entry)),
 			ownerForTmpEntry,
 			liveOwners,
 		);
@@ -158,7 +357,7 @@ describe("tmp-fixture-hygiene", () => {
 				`[tmp-hygiene] tests/${testFile} leaked ${attributable.length} top-level entries: ${described.join(",")}; live owners: ${[...liveOwners].join(",") || "none"}`,
 			).toEqual([]);
 		} finally {
-			cleanupTmpHygiene();
+			cleanupTmpHygiene(otherInvocation);
 		}
 	});
 
@@ -268,12 +467,27 @@ describe("tmp-fixture-hygiene", () => {
 		);
 		for (const file of [oldBaseline, liveBaseline])
 			fs.writeFileSync(file, JSON.stringify({ tmp: [], backstopRoot: {} }));
+		// #3314: the run-file manifest is the second member of that class, written
+		// beside the baseline with the same lifetime, so the same stale rule
+		// reclaims an abandoned run's copy. Narrowing the sweep's needle back to
+		// `tmp-hygiene-baseline-` leaves `oldFiles` behind for ever.
+		const oldFiles = path.join(
+			fixture,
+			"tmp-hygiene-files-owner-guard-old.log",
+		);
+		const liveFiles = path.join(
+			fixture,
+			"tmp-hygiene-files-owner-guard-live.log",
+		);
+		for (const file of [oldFiles, liveFiles])
+			fs.writeFileSync(file, "config/tmp-fixture-hygiene.test.ts\n");
 		// A day old: past any six-hour window, and far past the 16-minute
 		// worst-case vitest invocation the window is sized against.
 		const dayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
 		fs.utimesSync(oldForeign, dayAgo, dayAgo);
 		fs.utimesSync(oldRoot, dayAgo, dayAgo);
 		fs.utimesSync(oldBaseline, dayAgo, dayAgo);
+		fs.utimesSync(oldFiles, dayAgo, dayAgo);
 		// Round 5: `mine`'s mtime is put two seconds INTO THE FUTURE, the
 		// boundary that redded CI (run 35072411511). A directory created
 		// microseconds before the sweep can carry a filesystem timestamp later
@@ -291,6 +505,8 @@ describe("tmp-fixture-hygiene", () => {
 			expect(fs.existsSync(liveRoot)).toBe(true);
 			expect(fs.existsSync(oldBaseline)).toBe(false);
 			expect(fs.existsSync(liveBaseline)).toBe(true);
+			expect(fs.existsSync(oldFiles)).toBe(false);
+			expect(fs.existsSync(liveFiles)).toBe(true);
 		} finally {
 			fs.rmSync(fixture, { recursive: true, force: true });
 		}
@@ -350,13 +566,19 @@ describe("tmp-fixture-hygiene", () => {
 			),
 		);
 		const body = setup.match(
-			/export function cleanupTmpHygiene\(\): void \{[\s\S]*?\n\}/,
+			/export function cleanupTmpHygiene\([\s\S]*?\n\}/,
 		)?.[0];
 		expect(
 			body,
 			"cleanupTmpHygiene is no longer declared as expected",
 		).toBeTypeOf("string");
 		expect(body).toMatch(/\bremoveRunBackstopDirs\s*\(/);
+		// #3314: same idiom, same reason — the sweep is destructive and its only
+		// caller is this file's teardown, so a guard that ran it would perform the
+		// run's cleanup inside its own assertion. The decision is pinned
+		// behaviourally by `spares another invocation's entries from the sweep`;
+		// this is the wiring that makes the sweep consult it.
+		expect(body).toMatch(/\btmpHygieneSweepableEntries\s*\(/);
 	});
 
 	it("registers the tmp-hygiene setup hook in every vitest project", () => {
@@ -581,8 +803,26 @@ describe("tmp-fixture-hygiene", () => {
 	// heartbeat these cases are about.
 	describe("owner-marker liveness across platforms (#3186)", () => {
 		const OWNER = "config/tmp-fixture-hygiene.test.ts";
+		// #3316: these cells double the process boundary, and a double answers
+		// `isAlive` for EVERY marker in the directory it is pointed at — including
+		// markers of sibling test files this case never wrote. A fully skipped file
+		// leaves one behind (vitest runs no `afterAll` for a file with no executed
+		// test, so the setup's marker removal never happens), its mtime is minutes
+		// fresh, and `helm-render-iac-real-binary.test.ts` in the same invocation
+		// therefore redded `ignores a marker from a previous run` and `attributes
+		// malformed markers without throwing` on master. The cells get their OWN
+		// marker namespace: every marker the scan sees is one of these cases'.
 		const ownerDir = (): string =>
-			path.join(process.env.PI_LENS_HOME as string, "tmp-hygiene-owners");
+			path.join(
+				process.env.PI_LENS_HOME as string,
+				`tmp-hygiene-owners-cell-${process.env.PI_LENS_TMP_HYGIENE_RUN_ID}`,
+			);
+		beforeAll(() => {
+			fs.mkdirSync(ownerDir(), { recursive: true });
+		});
+		afterAll(() => {
+			fs.rmSync(ownerDir(), { recursive: true, force: true });
+		});
 
 		function writeOwnerMarker(
 			suffix: string,
@@ -622,7 +862,7 @@ describe("tmp-fixture-hygiene", () => {
 		async function suppressed(
 			probe: TmpHygieneProcessProbe,
 		): Promise<{ attributed: string[]; live: string[]; counts: unknown }> {
-			const scan = await tmpHygieneWaitForOwnerDrain(50, probe);
+			const scan = await tmpHygieneWaitForOwnerDrain(50, probe, ownerDir());
 			return {
 				attributed: tmpHygieneExcludeLiveOwnerEntries(
 					["pi-lens-owner-cell-3186"],
@@ -796,7 +1036,27 @@ describe("tmp-fixture-hygiene", () => {
 					},
 				}),
 			).toBe(
-				"[tmp-hygiene-owners] live=1 orphaned=2 malformed=3 foreign=4 self=1",
+				"[tmp-hygiene-owners] live=1 orphaned=2 malformed=3 foreign=4 self=1 otherInvocationEntries=0",
+			);
+			// #3314's field is part of the same ONE line, not a second record: the
+			// entries this run ignored as another invocation's are explicable from
+			// the run's own output.
+			expect(
+				formatTmpHygieneOwnerSummary(
+					{
+						live: new Set<string>(),
+						counts: {
+							live: 0,
+							orphaned: 0,
+							malformed: 0,
+							foreign: 2,
+							self: 1,
+						},
+					},
+					3,
+				),
+			).toBe(
+				"[tmp-hygiene-owners] live=0 orphaned=0 malformed=0 foreign=2 self=1 otherInvocationEntries=3",
 			);
 		});
 
@@ -806,14 +1066,10 @@ describe("tmp-fixture-hygiene", () => {
 			// markers without a start time (which is what made every marker on
 			// darwin/win32 unauthenticatable in round 2).
 			const probe = realTmpHygieneProcessProbe();
+			// This worker's REAL marker, in the run-shared directory the production
+			// census reads — not the private cell namespace above.
 			const ownMarker = JSON.parse(
-				fs.readFileSync(
-					path.join(
-						ownerDir(),
-						`${process.env.PI_LENS_TMP_HYGIENE_RUN_ID}-${process.pid}.json`,
-					),
-					"utf8",
-				),
+				fs.readFileSync(OWN_MARKER_PATH, "utf8"),
 			) as { startTime?: string };
 			expect(typeof ownMarker.startTime === "string").toBe(
 				probe.startTimeSupported,
@@ -878,6 +1134,275 @@ describe("tmp-fixture-hygiene", () => {
 			expect(classifyTmpHygieneOwner(facts())).toBe("orphaned");
 			touchTmpHygieneOwnerMarker(0n);
 			expect(classifyTmpHygieneOwner(facts())).toBe("live");
+		});
+	});
+
+	// #3314 / #3306. Two vitest invocations share one TMPDIR whenever they share a
+	// shell's `TMPDIR`; measured on master, invocation B (`tests/config`) redded
+	// on two roots invocation A (`tests/index-wiring.test.ts`) left behind:
+	// `pi-lens-wiring-resume-… (owner: tests/unknown)`. Both halves of that line
+	// are recurrences these cases prevent — the entry was not this run's to judge,
+	// and the report could not name the file that made it.
+	describe("census scope across invocations (#3314, #3306)", () => {
+		const OWN = "config/tmp-fixture-hygiene.test.ts";
+		const WIRING = "index-wiring.test.ts";
+
+		/** A manifest of this run, written where the reader takes an explicit
+		 *  path: the record is real, its content is the axis under test. */
+		function manifest(files: readonly string[], tag: string): Set<string> {
+			const file = path.join(
+				process.env.PI_LENS_HOME as string,
+				`tmp-hygiene-files-scope-${process.env.PI_LENS_TMP_HYGIENE_RUN_ID}-${tag}.log`,
+			);
+			fs.writeFileSync(file, files.map((name) => `${name}\n`).join(""));
+			try {
+				return tmpHygieneRunFiles(file);
+			} finally {
+				fs.rmSync(file, { force: true });
+			}
+		}
+
+		it("names the test file behind a raw mkdtemp prefix", () => {
+			// F3/F5: `tests/index-wiring.test.ts` creates its roots from a
+			// `pi-lens-wiring-${reason}-` TEMPLATE, so neither a literal
+			// `setupTestEnvironment("…")` scan nor a literal-only mkdtemp scan could
+			// attribute `pi-lens-wiring-resume-…`. The index reads the static head.
+			expect(ownerForTmpEntry("pi-lens-wiring-resume-iCpHXp")).toBe(WIRING);
+			expect(ownersForTmpEntry("pi-lens-wiring-resume-iCpHXp")).toContain(
+				WIRING,
+			);
+			// The raw-literal class in the same file, and an unrelated one
+			// elsewhere, so the needle is not a single-fixture special case.
+			expect(ownerForTmpEntry("pi-lens-wiring-new-AbCdEf")).toBe(WIRING);
+			expect(ownerForTmpEntry("pi-lens-crash-surface-AbCdEf")).toBe(WIRING);
+			// A prefix no tests/ file spells still has no owner: the census must
+			// keep saying so rather than inventing one.
+			expect(ownerForTmpEntry("pi-lens-nothing-spells-this-")).toBeUndefined();
+			// The index is bounded to the namespace the census can observe, and no
+			// entry in it is the bare namespace. Both halves are measured over the
+			// real tree, which spells plenty of non-`pi-lens-` fixture prefixes and
+			// one dynamic `pi-lens-${tool}-` whose static head is the namespace
+			// itself — with either half gone, that head claims every entry.
+			for (const prefix of ownerIndex().prefixes.keys()) {
+				expect(prefix.startsWith("pi-lens-"), prefix).toBe(true);
+				expect(prefix).not.toBe("pi-lens-");
+			}
+		});
+
+		it("ignores entries owned by a file no worker of this run loaded", () => {
+			// F1: the measured #3314 red. The entry's only candidate owner is
+			// index-wiring, which this manifest says never ran here.
+			expect(
+				tmpHygieneForeignRunEntries(
+					["pi-lens-wiring-resume-iCpHXp"],
+					ownersForTmpEntry,
+					manifest([OWN], "foreign"),
+				),
+			).toEqual(["pi-lens-wiring-resume-iCpHXp"]);
+		});
+
+		it("judges an entry whose owner ran here, and every entry with no manifest", () => {
+			// F1's inverse, and the fail-closed arm: this run's own leak must still
+			// red (F4), and a manifest that cannot be read must never silence one.
+			expect(
+				tmpHygieneForeignRunEntries(
+					["pi-lens-wiring-resume-iCpHXp"],
+					ownersForTmpEntry,
+					manifest([OWN, WIRING], "own"),
+				),
+			).toEqual([]);
+			expect(
+				tmpHygieneForeignRunEntries(
+					["pi-lens-wiring-resume-iCpHXp"],
+					ownersForTmpEntry,
+					new Set<string>(),
+				),
+			).toEqual([]);
+			// An entry no file claims is judged too — `pi-lens-ast-grep` is
+			// production-owned and reaches its admission, not this filter.
+			expect(
+				tmpHygieneForeignRunEntries(
+					["pi-lens-ast-grep"],
+					ownersForTmpEntry,
+					manifest([OWN], "unowned"),
+				),
+			).toEqual([]);
+		});
+
+		it("keeps an entry judged when any candidate owner ran here", () => {
+			// Attribution is longest-prefix, so an entry can have several candidate
+			// owners. One of them running here is enough to keep it judged: the
+			// ignore arm must be unanimous, never a first match.
+			const owners = (entry: string): string[] =>
+				entry.startsWith("pi-lens-shared-") ? ["a.test.ts", "b.test.ts"] : [];
+			expect(
+				tmpHygieneForeignRunEntries(
+					["pi-lens-shared-1"],
+					owners,
+					new Set(["b.test.ts"]),
+				),
+			).toEqual([]);
+			expect(
+				tmpHygieneForeignRunEntries(
+					["pi-lens-shared-1"],
+					owners,
+					new Set(["c.test.ts"]),
+				),
+			).toEqual(["pi-lens-shared-1"]);
+		});
+
+		it("spares another invocation's entries from the sweep", () => {
+			// #3314's destructive half: on master, invocation B REMOVED the roots it
+			// mis-attributed, so a sibling invocation lost a live fixture. The
+			// decision is separated from the sweep because the sweep's only caller
+			// is this file's own teardown.
+			const observed = ["pi-lens-sibling-1", "pi-lens-mine-1"];
+			expect(
+				tmpHygieneSweepableEntries(
+					observed,
+					new Set<string>(),
+					new Set(["pi-lens-sibling-1"]),
+				),
+			).toEqual(["pi-lens-mine-1"]);
+			// Without the spare set the same entry is removed — the direction that
+			// broke the other run.
+			expect(tmpHygieneSweepableEntries(observed, new Set<string>())).toEqual(
+				observed,
+			);
+			// The two rules the sweep already had are still in force.
+			expect(
+				tmpHygieneSweepableEntries(observed, new Set(["pi-lens-mine-1"])),
+			).toEqual(["pi-lens-sibling-1"]);
+			expect(
+				tmpHygieneSweepableEntries(["pi-lens-ast-grep"], new Set<string>()),
+			).toEqual([]);
+		});
+
+		it("reads only this run's file manifest", () => {
+			// F7: the manifest is run-id scoped by NAME. This worker's own line is
+			// in the record the default reader opens, and a record written for
+			// another run id is not in it.
+			// Written with the exact name and in the exact directory another
+			// invocation's manifest would occupy, so a reader that merged every
+			// manifest beside it — the shared-namespace mistake the owner markers
+			// made — would pick this up.
+			const foreign = path.join(
+				process.cwd(),
+				".probe-home",
+				"tmp-hygiene-files-3314-foreign-run-guard.log",
+			);
+			fs.writeFileSync(foreign, "config/never-ran-here.test.ts\n");
+			try {
+				expect(tmpHygieneRunFiles()).toContain(OWN);
+				expect(tmpHygieneRunFiles()).not.toContain(
+					"config/never-ran-here.test.ts",
+				);
+			} finally {
+				fs.rmSync(foreign, { force: true });
+			}
+		});
+
+		/** A two-file fixture tree: one file whose CALLS create fixture families,
+		 *  one file that only mentions those families in prose — a comment, a string
+		 *  spelling `setupTestEnvironment`, a string spelling `mkdtempSync`, and a
+		 *  string naming the other file's real family. Both cases below drive the
+		 *  real index over it. */
+		function plantOwnerIndexFixture(): { dir: string; index: TmpOwnerIndex } {
+			const dir = fs.mkdtempSync(
+				path.join(os.tmpdir(), "pi-lens-owner-index-fixture-"),
+			);
+			fs.writeFileSync(
+				path.join(dir, "planted.test.ts"),
+				[
+					'const a = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-planted-lit-"));',
+					"const b = fs.mkdtempSync(",
+					"\tpath.join(os.tmpdir(), `pi-lens-planted-tpl-${reason}-`),",
+					");",
+					"function make(prefix: string) {",
+					"\treturn fs.mkdtempSync(path.join(os.tmpdir(), prefix));",
+					"}",
+					'make("pi-lens-planted-param-");',
+					// The real call of the laundered needle, so the fix cannot be "stop
+					// reading setupTestEnvironment at all".
+					'const real = setupTestEnvironment("pi-lens-planted-setup-");',
+				].join("\n"),
+			);
+			fs.writeFileSync(
+				path.join(dir, "decoy.test.ts"),
+				[
+					'// fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-planted-comment-"));',
+					// The reviewer's decoy, verbatim in shape: prose that spells a call,
+					// in a string a real test fixture could plausibly hold.
+					"const decoy = 'setupTestEnvironment(\"pi-lens-planted-string-\")';",
+					"const decoyTmp = \"fs.mkdtempSync(path.join(os.tmpdir(), 'pi-lens-planted-strtmp-'))\";",
+					// ...and a decoy naming the OTHER file's real family, the shape that
+					// costs a sibling invocation its live root.
+					"const note = 'setupTestEnvironment(\"pi-lens-planted-lit-\")';",
+				].join("\n"),
+			);
+			return { dir, index: buildTmpOwnerIndex(dir, { prefixes: 3, files: 2 }) };
+		}
+
+		it("registers a raw mkdtemp prefix from the call site, never from prose", () => {
+			const { dir: fixture, index } = plantOwnerIndexFixture();
+			try {
+				const owner = (entry: string): string | undefined =>
+					ownerForTmpEntry(entry, index);
+				expect(owner("pi-lens-planted-lit-XyZ")).toBe("planted.test.ts");
+				expect(owner("pi-lens-planted-tpl-fork-XyZ")).toBe("planted.test.ts");
+				expect(owner("pi-lens-planted-param-XyZ")).toBe("planted.test.ts");
+				expect(owner("pi-lens-planted-setup-XyZ")).toBe("planted.test.ts");
+				expect(
+					owner("pi-lens-planted-comment-XyZ"),
+					"a commented-out call must own nothing",
+				).toBeUndefined();
+				expect(
+					owner("pi-lens-planted-string-XyZ"),
+					"a string that spells setupTestEnvironment must own nothing (M3328-1)",
+				).toBeUndefined();
+				expect(
+					owner("pi-lens-planted-strtmp-XyZ"),
+					"a string that spells mkdtempSync must own nothing (M3328-1)",
+				).toBeUndefined();
+				expect(
+					ownersForTmpEntry("pi-lens-planted-lit-XyZ", index),
+					"a string naming another file's family must not make this file a candidate",
+				).toEqual(["planted.test.ts"]);
+			} finally {
+				fs.rmSync(fixture, { recursive: true, force: true });
+			}
+		});
+
+		it("spares a sibling's root when this run only mentioned its prefix in prose", () => {
+			// M3328-1's impact, end to end: this run loaded `decoy.test.ts`, which
+			// merely MENTIONS `pi-lens-planted-lit-` in a string, while the root
+			// belongs to `planted.test.ts`, which no worker of this run loaded.
+			// Laundering that mention into ownership gives the entry a candidate owner
+			// that ran here, the unanimous filter stops sparing it, and the sweep
+			// deletes a live sibling invocation's fixture — #3314's central failure,
+			// reached through prose.
+			const { dir: fixture, index } = plantOwnerIndexFixture();
+			try {
+				expect(
+					tmpHygieneForeignRunEntries(
+						["pi-lens-planted-lit-XyZ"],
+						(entry) => ownersForTmpEntry(entry, index),
+						new Set(["decoy.test.ts"]),
+					),
+					"an entry whose owner this run never loaded stays another invocation's",
+				).toEqual(["pi-lens-planted-lit-XyZ"]);
+				// ...and the same entry IS this run's business once the file that
+				// really creates it ran here.
+				expect(
+					tmpHygieneForeignRunEntries(
+						["pi-lens-planted-lit-XyZ"],
+						(entry) => ownersForTmpEntry(entry, index),
+						new Set(["decoy.test.ts", "planted.test.ts"]),
+					),
+				).toEqual([]);
+			} finally {
+				fs.rmSync(fixture, { recursive: true, force: true });
+			}
 		});
 	});
 });
