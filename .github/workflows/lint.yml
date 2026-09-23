@@ -732,7 +732,7 @@ jobs:
         with:
           python-version: "3.x"
       - name: Install yamllint
-        run: python -m pip install --disable-pip-version-check yamllint==1.37.1
+        run: python -m pip install --disable-pip-version-check --only-binary :all: yamllint==1.37.1
       - name: Lint YAML
         run: |
           mapfile -t yaml_files < <(git ls-files '*.yml' '*.yaml')
