@@ -1,76 +1,95 @@
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
 import yaml from "../../clients/deps/js-yaml.js";
+import { METADATA_FILENAME } from "../../scripts/test-history-rollup.mjs";
 
 const root = path.resolve(import.meta.dirname, "../..");
-const npmCommand = process.platform === "win32" ? "npm.cmd" : "npm";
 const load = (file: string) =>
 	yaml.load(fs.readFileSync(path.join(root, file), "utf8")) as Record<
 		string,
 		unknown
 	>;
 
+function steps(workflow: string, job: string) {
+	const jobs = load(workflow).jobs as Record<string, unknown>;
+	const target = jobs[job] as Record<string, unknown>;
+	if (!target) throw new Error(`${workflow} has no ${job} job`);
+	return target.steps as Array<Record<string, unknown>>;
+}
+
+function step(workflow: string, job: string, name: string) {
+	const found = steps(workflow, job).find((entry) => entry.name === name);
+	if (!found) throw new Error(`${workflow}#${job} has no "${name}" step`);
+	return found;
+}
+
 describe("#3215 durable test-history workflow contract", () => {
-	it("pins the reporter console contract and Linux artifact", () => {
-		const workflow = load(".github/workflows/ci.yml");
-		const jobs = workflow.jobs as Record<string, unknown>;
-		const testJob = jobs.test as Record<string, unknown>;
-		const steps = testJob.steps as Array<Record<string, unknown>>;
-		const run = steps.find((step) => step.name === "Run tests");
-		if (!run) throw new Error("Run tests step is missing");
-		const command = String(run.run);
+	it("pins the reporter flags and the Linux artifact", () => {
+		const command = String(
+			step(".github/workflows/ci.yml", "test", "Run tests").run,
+		);
 		expect(command).toContain("--reporter=default");
 		expect(command).toContain("--reporter=json");
 		expect(command).toContain("--outputFile=");
-		const upload = steps.find(
-			(step) => step.name === "Upload per-file test results",
+		const upload = step(
+			".github/workflows/ci.yml",
+			"test",
+			"Upload per-file test results",
 		);
-		if (!upload) throw new Error("test-history upload step is missing");
 		const uploadWith = upload.with as Record<string, unknown>;
 		expect(uploadWith.name).toBe("unit-test-results-linux");
 		expect(upload.if).toBe("always()");
-		const metadata = steps.find(
-			(step) => step.name === "Write test-history artifact metadata",
+		const metadata = step(
+			".github/workflows/ci.yml",
+			"test",
+			"Write test-history artifact metadata",
 		);
-		if (!metadata) throw new Error("test-history metadata step is missing");
 		const metadataEnv = metadata.env as Record<string, unknown>;
 		expect(metadataEnv.HEAD_SHA).toContain(
 			"github.event.pull_request.head.sha",
 		);
+	});
 
-		const temp = fs.mkdtempSync(
-			path.join(os.tmpdir(), "pi-lens-test-history-console-contract-"),
+	// Round 3 F8: the producer wrote and uploaded `test-history-metadata.json`
+	// while `scripts/test-history-rollup.mjs` looked for a sibling
+	// `metadata.json`, so the nightly rollup exited 2 on every real artifact and
+	// lane 1 never wrote a row. The consumer's own exported constant is the one
+	// source of truth, and both producer steps are asserted against it here —
+	// not against a second copy of the string.
+	it("writes and uploads exactly the basename the rollup consumer reads", () => {
+		const metadata = step(
+			".github/workflows/ci.yml",
+			"test",
+			"Write test-history artifact metadata",
 		);
-		try {
-			const env = {
-				...process.env,
-				PI_LENS_TEST_NO_LOCK: "1",
-				PI_LENS_HOME: path.join(temp, "home"),
-			};
-			const run = (args: string[]) => {
-				const result = spawnSync(npmCommand, ["test", "--", ...args], {
-					cwd: root,
-					env,
-					encoding: "utf8",
-				});
-				expect(result.status).toBe(0);
-				return `${result.stdout}${result.stderr}`;
-			};
-			const ciOutput = run([
-				"tests/scripts/test-history-rollup.test.ts",
-				"--reporter=default",
-				"--reporter=json",
-				`--outputFile=${path.join(temp, "ci-results.json")}`,
-			]);
-			expect(ciOutput.match(/^JSON report written to .+$/gm)).toHaveLength(1);
-			const localOutput = run(["tests/scripts/test-history-rollup.test.ts"]);
-			expect(localOutput).not.toMatch(/^JSON report written to .+$/m);
-		} finally {
-			fs.rmSync(temp, { recursive: true, force: true });
-		}
+		expect(String(metadata.run)).toContain(`/${METADATA_FILENAME}`);
+		const upload = step(
+			".github/workflows/ci.yml",
+			"test",
+			"Upload per-file test results",
+		);
+		const paths = String((upload.with as Record<string, unknown>).path)
+			.split("\n")
+			.map((line) => line.trim())
+			.filter(Boolean);
+		expect(paths.map((entry) => path.posix.basename(entry))).toEqual([
+			"vitest-results.json",
+			METADATA_FILENAME,
+		]);
+	});
+
+	// The additive `JSON report written to ...` line is CI-only: the local
+	// `npm test` script must add no JSON reporter, so a developer's console
+	// stream is untouched. The line's exact text and cardinality are pinned by
+	// driving the real vitest JsonReporter in
+	// `tests/scripts/test-history-rollup.test.ts`.
+	it("keeps the JSON reporter out of the local npm test script", () => {
+		const { scripts } = JSON.parse(
+			fs.readFileSync(path.join(root, "package.json"), "utf8"),
+		) as { scripts: Record<string, string> };
+		expect(scripts.test).not.toContain("--reporter=json");
+		expect(scripts.test).not.toContain("--outputFile");
 	});
 
 	it("runs rollup only from the scheduled nightly and grants data-branch write access", () => {

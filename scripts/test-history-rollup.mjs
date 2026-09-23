@@ -15,6 +15,19 @@ import { pathToFileURL } from "node:url";
 
 export const HISTORY_MAX_AGE_MS = 90 * 24 * 60 * 60 * 1000;
 
+/**
+ * The single source of truth for the producer/consumer artifact contract.
+ *
+ * The CI producer writes this basename beside its vitest JSON, and this
+ * script looks for exactly this basename. Round 3 shipped a producer writing
+ * `test-history-metadata.json` and a consumer reading `metadata.json`, so the
+ * real run-35918869980 artifact rolled up to nothing (exit 2, zero rows) and
+ * lane 1 had never produced a row. `tests/config/test-history-workflow.test.ts`
+ * asserts the workflow steps against THIS constant, so the two halves cannot
+ * drift apart again.
+ */
+export const METADATA_FILENAME = "test-history-metadata.json";
+
 function parseArgs(argv) {
 	const result = {
 		artifacts: [],
@@ -61,7 +74,7 @@ function findArtifactParts(inputs) {
 		const value = readJson(file);
 		if (value && Array.isArray(value.testResults)) {
 			const directory = path.dirname(file);
-			const metadataFile = path.join(directory, "metadata.json");
+			const metadataFile = path.join(directory, METADATA_FILENAME);
 			const metadata = fs.existsSync(metadataFile)
 				? readJson(metadataFile)
 				: {};
@@ -86,7 +99,11 @@ function durationFor(result) {
 }
 
 function isValidHeadSha(value) {
-	return typeof value === "string" && /^[0-9a-f]{40}$/i.test(value);
+	// Lowercase only: `github.sha` and `pull_request.head.sha` are always
+	// lowercase hex, so an uppercase value is a hand-edited or foreign
+	// producer, not a git head. It must not enter the durable journal, where
+	// it would key as a second head for the same commit.
+	return typeof value === "string" && /^[0-9a-f]{40}$/.test(value);
 }
 
 function validateRow(row) {
@@ -223,12 +240,16 @@ export function rollupTestHistory({
 	return output;
 }
 
-if (
-	process.argv[1] &&
-	import.meta.url === pathToFileURL(process.argv[1]).href
-) {
+/**
+ * The CLI arm, exported so its bounded-failure contract is observable in
+ * process. Returns the process exit code: 0 on success, 2 for any bounded
+ * failure (bad options, unreadable artifact, malformed head identity). The
+ * nightly step runs under `set -euo pipefail`, so a nonzero return fails the
+ * job rather than pushing a partial journal.
+ */
+export function runCli(argv) {
 	try {
-		const options = parseArgs(process.argv.slice(2));
+		const options = parseArgs(argv);
 		const output = rollupTestHistory({
 			artifactPaths: options.artifacts,
 			historyPath: options.history,
@@ -246,8 +267,12 @@ if (
 				process.env.GITHUB_STEP_SUMMARY,
 				`## Test history\n\nRows: ${output.rowCount}\n\n### Flake candidates\n\n${output.flakeCandidates.length ? output.flakeCandidates.map(({ file, headSha }) => `- \`${file}\` on \`${headSha}\``).join("\n") : "None"}\n`,
 			);
+		return 0;
 	} catch (error) {
 		console.error(error instanceof Error ? error.message : String(error));
-		process.exitCode = 2;
+		return 2;
 	}
 }
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href)
+	process.exitCode = runCli(process.argv.slice(2));

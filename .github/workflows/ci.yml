@@ -387,8 +387,16 @@ jobs:
       # Listener input for #3215. The default reporter remains explicit above,
       # so this adds a file reporter in the same invocation and preserves the
       # existing result sections and npm/vitest exit status. Vitest also emits
-      # its documented `JSON report written to ...` line; the workflow test
-      # pins that additive console contract.
+      # one `JSON report written to <path>` line; that additive console
+      # contract is pinned in `tests/scripts/test-history-rollup.test.ts` by
+      # driving the installed vitest JsonReporter directly, and the local
+      # `npm test` script adds no JSON reporter at all.
+      #
+      # The metadata basename below is `METADATA_FILENAME` from
+      # `scripts/test-history-rollup.mjs` — the consumer's own constant.
+      # `tests/config/test-history-workflow.test.ts` asserts this step against
+      # it, because a producer/consumer basename drift made the nightly rollup
+      # exit 2 on every real artifact (round 3, F8).
       - name: Write test-history artifact metadata
         if: always()
         env:

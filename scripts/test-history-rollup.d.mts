@@ -1,4 +1,5 @@
 export const HISTORY_MAX_AGE_MS: number;
+export const METADATA_FILENAME: string;
 export function rowsFromArtifacts(inputs: string[]): Array<{
 	headSha: string;
 	runId: string;
@@ -18,3 +19,4 @@ export function rollupTestHistory(options: {
 	files: unknown[];
 	flakeCandidates: Array<{ file: string; headSha: string }>;
 };
+export function runCli(argv: string[]): number;
