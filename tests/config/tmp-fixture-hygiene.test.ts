@@ -152,9 +152,12 @@ type TmpOwnerIndex = {
 /** `setupTestEnvironment(` up to and including its first argument's opening
  *  delimiter, located in blanked code. */
 const SETUP_ENV_CALL = /setupTestEnvironment\(\s*["'`]/g;
-/** Any literal in an ARGUMENT position — after `(` or `,`. A fixture prefix
- *  reaches `mkdtempSync` as an argument; the decoy above sits on the right of
- *  an assignment, so this position alone excludes it even before the blanking. */
+/** Any literal in an ARGUMENT position — after `(` or `,`. This is first a
+ *  MECHANISM, not a second policy: in blanked code an opening and a closing
+ *  delimiter look alike, and `(`/`,` is how a literal's OPENING one is found. A
+ *  fixture prefix reaches `mkdtempSync` as an argument anyway. Measured on the
+ *  real tree, widening it to assignment and property positions changes nothing
+ *  (2087 prefixes either way), so it is not claimed as a guard. */
 const ARGUMENT_LITERAL = /[(,]\s*["'`]/g;
 
 /** The static head of the string or template literal whose OPENING delimiter
@@ -1343,9 +1346,18 @@ describe("tmp-fixture-hygiene", () => {
 				expect(owner("pi-lens-planted-tpl-fork-XyZ")).toBe("planted.test.ts");
 				expect(owner("pi-lens-planted-param-XyZ")).toBe("planted.test.ts");
 				expect(owner("pi-lens-planted-setup-XyZ")).toBe("planted.test.ts");
-				expect(owner("pi-lens-planted-comment-XyZ")).toBeUndefined();
-				expect(owner("pi-lens-planted-string-XyZ")).toBeUndefined();
-				expect(owner("pi-lens-planted-strtmp-XyZ")).toBeUndefined();
+				expect(
+					owner("pi-lens-planted-comment-XyZ"),
+					"a commented-out call must own nothing",
+				).toBeUndefined();
+				expect(
+					owner("pi-lens-planted-string-XyZ"),
+					"a string that spells setupTestEnvironment must own nothing (M3328-1)",
+				).toBeUndefined();
+				expect(
+					owner("pi-lens-planted-strtmp-XyZ"),
+					"a string that spells mkdtempSync must own nothing (M3328-1)",
+				).toBeUndefined();
 			} finally {
 				fs.rmSync(fixture, { recursive: true, force: true });
 			}
