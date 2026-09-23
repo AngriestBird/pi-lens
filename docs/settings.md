@@ -108,6 +108,9 @@ tool. The loader `pi_lens_activate_tools` and MCP lifecycle tools
 required by their host protocols and cannot be disabled. Unknown or
 non-disableable names emit `PILENS_CFG_0009`.
 
+When a lower-precedence supported global config file is shadowed by the
+winning file, pi-lens records the notice once with `PILENS_CFG_0010`.
+
 Valid names for `tools.<name>.enabled` include `ast_grep_search`,
 `ast_grep_replace`, `ast_grep_outline`, `lsp_navigation`,
 `lens_diagnostics`, `lens_diagnostic_mark`, `symbol_search`,

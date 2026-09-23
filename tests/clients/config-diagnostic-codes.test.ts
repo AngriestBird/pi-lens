@@ -71,8 +71,13 @@ describe("config diagnostic code namespace (#2418)", () => {
 			path.join(REPO_ROOT, "docs/public-api-stability.md"),
 			"utf8",
 		);
+		// Keep a docs comment or prose mention from satisfying the table contract.
+		const tableRows = policy
+			.split("\n")
+			.filter((line) => /^\s*\|/.test(line))
+			.join("\n");
 		for (const code of Object.keys(CONFIG_DIAGNOSTIC_CODES)) {
-			expect(policy).toContain(`| \`${code}\` |`);
+			expect(tableRows).toContain(`| \`${code}\` |`);
 		}
 	});
 
