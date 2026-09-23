@@ -189,6 +189,7 @@ jobs:
       # own internal try/catch — same "always exit 0, telemetry only" contract
       # as the probe itself).
       - name: Notify on silentOnClean drift (file/update/close tracking issue)
+        if: always() && (github.event_name == 'schedule' || github.ref == 'refs/heads/master')
         continue-on-error: true
         run: node scripts/notify-clean-signal-drift.mjs
 
@@ -284,7 +285,7 @@ jobs:
       # exits 0) — filing/updating/closing an issue must never change the
       # nightly's own conclusion (acceptance #5).
       - name: Notify on tool-smoke red (file/update/close tracking issue)
-        if: always()
+        if: always() && (github.event_name == 'schedule' || github.ref == 'refs/heads/master')
         continue-on-error: true
         env:
           TOOL_LAYER_OUTCOME: ${{ steps.tool_layer.outcome }}
