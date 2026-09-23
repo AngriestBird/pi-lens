@@ -2500,7 +2500,10 @@ export function setupIncomingHandlers(
 					metadata: {
 						serverId: state.serverId,
 						emptyFirstPublish: strategy.emptyFirstPublish,
-						version: docVersion ?? "push-unversioned",
+						// `pubVersion`, the `[lsp-pub]` trace's own field name for the
+						// publish's LSP document version — not a lifecycle identity, and
+						// not the retired glossary spelling (AGENTS.md "generation").
+						pubVersion: docVersion ?? "push-unversioned",
 					},
 				});
 				return;

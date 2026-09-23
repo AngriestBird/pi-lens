@@ -214,3 +214,80 @@ export function findCleanSignalDrift(rows, lookupSilentOnClean) {
 	}
 	return warnings;
 }
+
+// ---------------------------------------------------------------------------
+// #3310 first-publish class. A SECOND axis of the same dirty-phase trace the
+// clean-behavior classifier already collects, and the measurement behind
+// `emptyFirstPublish` in clients/lsp/wait-policy/strategies.ts.
+//
+// The question it answers: for a DIRTY file, is the server's FIRST publish the
+// answer, or an empty placeholder it sends while a one-time index builds? Only
+// the second shape can turn a file with an error into a "confirmed clean"
+// (#3310), and only for that shape may the client hold the publish — a server
+// that legitimately publishes `[]` once for a clean file must keep resolving
+// the wait on it (the Tier 2/2* rows).
+//
+// Conservative in the same way as `classifyCleanBehavior`: a server observed
+// publishing only empty sets on a dirty fixture is `empty-only`, never guessed
+// into either class, because a dirty fixture the server does not diagnose looks
+// exactly like an index that never finished.
+
+/**
+ * Classify the first-publish shape from the dirty-phase publish trace.
+ *
+ * @param {Array<{ diags: number }>} dirtyPublishes  publishes observed during the
+ *   dirty touch, in arrival order
+ * @returns {{ firstPublish: "empty-first" | "direct" | "empty-only" | "unknown", reason: string }}
+ */
+export function classifyFirstPublish(dirtyPublishes) {
+	const publishes = Array.isArray(dirtyPublishes) ? dirtyPublishes : [];
+	if (publishes.length === 0) {
+		return {
+			firstPublish: "unknown",
+			reason: "no publish observed on the dirty touch (server slow/absent)",
+		};
+	}
+	const first = Number(publishes[0]?.diags ?? 0);
+	if (first > 0) {
+		return {
+			firstPublish: "direct",
+			reason: `first publish carried ${first} diagnostic(s) — the first publish IS the answer`,
+		};
+	}
+	const laterNonEmpty = publishes
+		.slice(1)
+		.find((publish) => Number(publish?.diags ?? 0) > 0);
+	if (laterNonEmpty) {
+		return {
+			firstPublish: "empty-first",
+			reason: `first publish was EMPTY, a later one carried ${Number(laterNonEmpty.diags)} diagnostic(s) — provisional pre-index publish (#3310 class)`,
+		};
+	}
+	return {
+		firstPublish: "empty-only",
+		reason: `${publishes.length} publish(es), all empty — not classifiable on this axis (an undiagnosed dirty fixture looks the same as an unfinished index)`,
+	};
+}
+
+/**
+ * The matrix `first-publish` values that may be compared against the registry
+ * marker at all. `empty-only`/`unknown` are evidence of nothing, in either
+ * direction — the #240 doctrine applied to this axis.
+ */
+export const COMPARABLE_FIRST_PUBLISH = new Set(["empty-first", "direct"]);
+
+/**
+ * Fixture `lang` → `SERVER_DIAGNOSTIC_STRATEGIES` key, for the few fixtures
+ * whose lang is not the server id (a language-alias fixture). Anything absent
+ * falls back to identity, which covers the core set. Shared by
+ * scripts/probe-clean-signal.mjs and tests/config/lsp-first-publish-census.test.ts
+ * so the probe's drift check and the census can never key differently.
+ */
+export const LANG_TO_STRATEGY_KEY = {
+	jedi: "python-jedi",
+};
+
+/** Resolve a matrix/fixture lang to its strategy-table key. */
+export function strategyKeyForLang(lang) {
+	return LANG_TO_STRATEGY_KEY[lang] ?? lang;
+}

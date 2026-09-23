@@ -111,7 +111,7 @@ describe("#3310 empty-first-publish hold (php/intelephense class)", () => {
 		expect(held[0]?.metadata).toMatchObject({
 			serverId: "php",
 			emptyFirstPublish: "indexing",
-			version: "push-unversioned",
+			pubVersion: "push-unversioned",
 		});
 	});
 
