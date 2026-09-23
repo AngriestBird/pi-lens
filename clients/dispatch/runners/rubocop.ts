@@ -8,6 +8,8 @@
  * Supports bundle exec (preferred in Bundler projects).
  */
 
+import * as path from "node:path";
+import { pathsEqual } from "../../path-utils.js";
 import { safeSpawnAsync } from "../../safe-spawn.js";
 import { resolveRunnerCwd } from "../../tool-cwd.js";
 import {
@@ -53,13 +55,22 @@ const SEVERITY_MAP: Record<string, "error" | "warning" | "info"> = {
 	refactor: "info",
 };
 
-function parseRubocopJson(raw: string, filePath: string): Diagnostic[] {
+function parseRubocopJson(
+	raw: string,
+	filePath: string,
+	cwd: string,
+): Diagnostic[] {
 	try {
 		const output: RubocopOutput = JSON.parse(raw);
 		const autofix = getAutofixCapability("rubocop");
 		const diagnostics: Diagnostic[] = [];
+		const absTarget = path.resolve(cwd, filePath);
 
 		for (const file of output.files) {
+			// #3295: `.rubocop.yml` `Include:`/`inherit_from` can widen the run past
+			// the argv, and each result carries its own `path`.
+			if (file.path && !pathsEqual(path.resolve(cwd, file.path), absTarget))
+				continue;
 			for (const offense of file.offenses) {
 				const severity = SEVERITY_MAP[offense.severity] ?? "warning";
 				diagnostics.push({
@@ -119,7 +130,7 @@ const rubocopRunner: RunnerDefinition = {
 			{ timeout: 30000, cwd },
 		);
 
-		// Exit table: 0 = clean, 1 = offenses/findings, 2 = fatal or rejected
+		// EXIT TABLE (RuboCop 1.66 docs https://docs.rubocop.org/rubocop/usage/basic_usage.html): 0 = clean, 1 = offenses/findings, 2 = fatal/error or rejected
 		// invocation. A nonzero exit with valid JSON remains findings; a nonzero
 		// exit with empty or unparsable JSON is never clean (#1816).
 		const run = parseToolRun(
@@ -131,7 +142,7 @@ const rubocopRunner: RunnerDefinition = {
 				output: `${result.stdout}${result.stderr}`,
 				exitCodes: { ran: [1, 2] },
 			},
-			(output) => parseRubocopJson(output, ctx.filePath),
+			(output) => parseRubocopJson(output, ctx.filePath, cwd),
 			{ parseOutput: result.stdout },
 		);
 		if (run.skipped) return run.skipped;

@@ -134,6 +134,7 @@ import {
 	auditRegistry,
 	auditSymbolCounts,
 	assertSortedRegistry,
+	codeMatches,
 	relativePosix,
 	stripSource,
 } from "../support/sweep-kit.js";
@@ -1355,50 +1356,33 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"build itself still runs inside the hook.",
 		owner: "#2523 slice 2",
 	},
-	// #1892 + #3274: the composer awaits the govulncheck lane's `collect`. This
-	// entry is a SYNC-READ ADMISSION, not a "nothing happens here" exemption —
-	// #3273 review H3273-1 caught the first version claiming "no I/O", which was
-	// false. What is true:
+	// #1892 + #3274: the composer awaits the govulncheck lane's `collect`.
 	//
-	//   - The await itself suspends on nothing: `collect` is not `async` and
-	//     returns `Promise.resolve(...)`.
-	//   - Evaluating the call runs `CacheManager.readCache("govulncheck")`
-	//     (`clients/cache-manager.ts:181-206`) on the turn's FIRST read of that
-	//     store: two `fs.existsSync` plus two `readFileSync` + `JSON.parse`.
-	//     That is real blocking work on the turn_end path.
-	//   - `bounded()` cannot bound it, and no rearrangement of this call site
-	//     can. The read completes during ARGUMENT EVALUATION, before `bounded()`
-	//     is ever handed a promise. Probed against the built seam with an
-	//     already-aborted signal and `ms: 0`: `bounded()` returned `undefined`
-	//     and the read had already parsed its JSON. A wrapper here would
-	//     register a turn_end budget that can never be spent, which is a worse
-	//     false claim than the one it replaced.
-	//   - The cost is PRE-EXISTING and unchanged by the extraction: before
-	//     #3273 the identical `readCache` ran as a bare statement two lines
-	//     above this await, where no sweep population could see it at all (this
-	//     suite scans awaits and hand-rolled races, not synchronous calls). The
-	//     neighbouring `#1892` secrets entry below carries the same cost for the
-	//     `gitleaks` store and predates #3273.
-	//   - It stays at ONE read per store per delivery, which IS executable:
-	//     `reads trivy ONCE although the lane and the composer both need it`
-	//     asserts `perStore("govulncheck") === 1`.
+	// The SYNC-READ ADMISSION this entry carried (added by #3273's review,
+	// H3273-1, after the first version claimed "no I/O" and was false) is GONE
+	// because the property it admitted is gone: `collect` no longer runs
+	// `CacheManager.readCache("govulncheck")` during argument evaluation. It
+	// awaits `ctx.readScannerCache`, which is the composer's memo over
+	// `readCacheAsync` under `bounded()` — registered as
+	// `call:clients/runtime-turn.ts#2b57f8b9~67c7ff0d` with the turn_end budget
+	// and `deps.signal`. The bound is one level down, which this syntactic scan
+	// cannot see, so the await still needs an entry; what it says is now a
+	// pointer to a real bound instead of an admission that none was possible.
 	//
-	// #3274 owns closing it (an async/admitted cache seam, plus a population
-	// this suite can red on), and retiring both lane entries when it lands.
-	"clients/runtime-turn.ts#400606a9~3e6599a2": {
+	// The `sync-hook-read` population below is what keeps that honest: a
+	// regression to the synchronous read raises `clients/runtime-turn.ts` from
+	// 11 to 12 and reds, so the removal of this admission cannot outlive the
+	// change that earned it.
+	"clients/runtime-turn.ts#400606a9~53729fa2": {
 		family: "hook-await",
 		site: "turn_end",
 		reason:
-			"SYNC-READ ADMISSION: the await settles immediately (`collect` is not " +
-			"async), but evaluating it runs `CacheManager.readCache('govulncheck')` " +
-			"— 2 existsSync + 2 readFileSync/JSON.parse on the turn's first read of " +
-			"that store. `bounded()` cannot bound it: the read completes during " +
-			"argument evaluation, before bounded() receives a promise (probed with " +
-			"an already-aborted signal — bounded returned undefined, the read had " +
-			"already parsed). Pre-existing and unchanged: the same read ran as a " +
-			"bare statement two lines above on master, outside this sweep's " +
-			"populations. Capped at one read per store per delivery by `reads " +
-			"trivy ONCE although the lane and the composer both need it`.",
+			"The govulncheck lane's `collect` awaits the composer's memoized " +
+			"scanner-store read, which IS bounded — `bounded()` inside " +
+			"`readScannerCache` with `HOOK_WALL_BUDGET_MS.turn_end` and " +
+			"`deps.signal`, registered in BOUNDED_CALL_SITES. Wrapping this await " +
+			"in a second `bounded()` would spend the turn_end budget twice for one " +
+			"read, the same double-count the secrets lane's entry below avoids.",
 		owner: "#3274",
 	},
 	"clients/runtime-turn.ts#5b570c81~b2f3321c": {
@@ -1457,6 +1441,21 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"await's own predecessor was; no second wrap, or the turn_end budget " +
 			"is spent twice for one pass.",
 		owner: "#1892",
+	},
+	// #3274: the composer's OWN trivy read, for the CVE/license tiers and the
+	// age label. It awaits the same memo the secrets lane does — one read, one
+	// TTL boundary, one budget for the store both tiers report on.
+	"clients/runtime-turn.ts#ddb4eaee~e99d3bf9": {
+		family: "hook-await",
+		site: "turn_end",
+		reason:
+			"`readScannerCache('trivy')` — the composer awaiting its own memo. " +
+			"Bounded inside that memo by the registered `bounded()` call " +
+			"(`call:clients/runtime-turn.ts#2b57f8b9~67c7ff0d`), which holds the " +
+			"turn_end budget and `deps.signal`; a second wrap here would " +
+			"double-count one budget, and on the second consumer of a store it " +
+			"would bound a promise that has already settled.",
+		owner: "#3274",
 	},
 	"clients/runtime-turn.ts#dfbc3b71~d09e69a7": {
 		family: "hook-await",
@@ -2152,6 +2151,13 @@ const HELPER_UNBOUNDED: Readonly<Record<string, number>> = {
 	"clients/ast-grep-client.ts": 15,
 	"clients/blocker-freshness.ts": 13,
 	"clients/bootstrap.ts": 23,
+	// #3274: `readCacheAsync`'s two `await readJsonCacheAsync(...)` — the meta
+	// envelope and then the data — which are the whole point of the method: the
+	// synchronous `readCache` beside it cannot be bounded because it never
+	// suspends. Neither can be bounded HERE (the manager holds no hook signal);
+	// the bound belongs at the composer, where `readScannerCache` registers it
+	// in BOUNDED_CALL_SITES with the turn_end budget and `deps.signal`.
+	"clients/cache-manager.ts": 2,
 	"clients/cooperative-budget.ts": 3,
 	"clients/dead-code-client.ts": 4,
 	// `bounded()` itself awaits the raced work; this is the shared primitive's
@@ -2201,7 +2207,18 @@ const HELPER_UNBOUNDED: Readonly<Record<string, number>> = {
 	// number is the measured count, not a blessing: a NEW await in a lane fails
 	// this pin loudly, which is the point of extracting lanes into their own
 	// files.
-	"clients/turn-end/lanes/secrets.ts": 1,
+	// #3274: 1 → 2. `collect` now awaits the composer's memoized scanner read
+	// (one `await Promise.all([gitleaks, trivy])`) beside its existing
+	// `await blockingGitleaksFindings(...)`. The new await IS bounded — by the
+	// `bounded()` call inside `readScannerCache` (clients/runtime-turn.ts),
+	// registered in BOUNDED_CALL_SITES — but one level down, which this
+	// syntactic scan cannot see (SWEEP_HEURISTIC_LIMITS: "a helper that wraps
+	// bounded() one level down reads as unbounded here").
+	"clients/turn-end/lanes/secrets.ts": 2,
+	// #3274: `collect` awaits the same memoized, bounded scanner read for the
+	// govulncheck store. Same one-level-down invisibility as the secrets lane
+	// above; the lane itself adds no unbounded work.
+	"clients/turn-end/lanes/govulncheck.ts": 1,
 	"clients/govulncheck-client.ts": 6,
 	// 192 → 194 (#2722), in two steps, both registered rather than absorbed:
 	//   +1  `verifyNpmPackageEntry` reads the installed package's own
@@ -2439,6 +2456,15 @@ const BOUNDED_CALL_SITES: Readonly<Record<string, string>> = {
 	"call:clients/runtime-tool-result.ts#ensureToolResultClients:2b57f8b9~b4f8a98d":
 		"The tool_result signal is threaded into the fail-open bootstrap demand; " +
 		"the edit budget remains live when a caller has no signal.",
+	"call:clients/runtime-turn.ts#2b57f8b9~67c7ff0d":
+		"`deps.signal` — the live `turn_end` ctx.signal in the pi host, threaded " +
+		"through `TurnEndDeps`, and the SAME optionality as the secrets lane's " +
+		"registered call below (absent only in the standalone MCP adapter and " +
+		"unit harnesses, where the turn_end wall budget is still live). This is " +
+		"#3274's scanner-store read: `readScannerCache` memoizes the bounded " +
+		"promise per store, so the three turn-end stores spend one budget each " +
+		"per delivery however many lanes await them, and an abandoned read " +
+		"yields null — a cold cache to every lane — never a stale envelope.",
 	"call:clients/runtime-turn.ts#4da1e4ca~7e52ce49":
 		"`getAmbientAbortSignal(): AbortSignal | undefined` (clients/safe-spawn.ts) " +
 		"— the turn's registered abort signal, set from the host's `ctx.signal` " +
@@ -2478,6 +2504,116 @@ const BOUNDED_CALL_SITES: Readonly<Record<string, string>> = {
 		"The tool_result handler receives the live pi ctx.signal and the selected " +
 		"read-only or edit budget; the nested handler bound is deliberate.",
 };
+
+/**
+ * A THIRD population: synchronous scanner-cache reads on a hook path (#3274).
+ *
+ * ## The recurrence this prevents
+ *
+ * `CacheManager.readCache` is synchronous — two `existsSync` plus two
+ * `readFileSync`+`JSON.parse` — and `turn_end` ran three of them per delivery.
+ * Nothing above could bound it: `bounded()` takes a PROMISE, and the read
+ * completes during ARGUMENT EVALUATION, so a wrapper registered a turn_end
+ * budget that could never be spent (#3274 probed it against the built seam
+ * with an already-aborted signal and `ms: 0`: `bounded()` returned `undefined`
+ * and the read had already parsed its JSON). The two populations above scan
+ * `await` and `Promise.race` — ASYNC constructs — so a bare synchronous
+ * blocking read on a hook path was invisible to the one mechanism built to
+ * enumerate turn-end stalls, and #3273's review (H3273-1) found it only by
+ * reading the code. That blindness is what this population closes.
+ *
+ * ## A RATCHET, not an admission table
+ *
+ * Unlike {@link EXEMPT_SITES} there is no per-site reason text and no way to
+ * register a new one: the pin is a COUNT per file, and {@link
+ * SYNC_HOOK_READ_CEILING} is the total those counts may never exceed. A new
+ * synchronous read on a hook path reds twice — its file's pin and the ceiling
+ * — and the only green fix is the async seam (`CacheManager.readCacheAsync`).
+ * Migrating one lowers a pin, which also reds, on purpose: the number is the
+ * worklist, and #3300 is the umbrella that walks it down to zero and then
+ * deletes the synchronous method. Slice 1 (#3274) moved the three turn-end
+ * SCANNER stores; every other caller is counted here and unchanged.
+ *
+ * ## What the detector matches, and what it deliberately does not
+ *
+ * The member ACCESS `.readCache`, on any receiver, over
+ * comment-and-string-blanked source. Three deliberate choices:
+ *
+ * - Not `cacheManager.readCache`: a guard that enumerates one receiver
+ *   spelling is AGENTS.md defect shape 34, and the shipped tree already holds
+ *   `args.cacheManager.readCache` beside `cacheManager.readCache`, so renaming
+ *   the local would have walked the count DOWN — the direction this ratchet
+ *   reads as progress.
+ * - Not the call PARENTHESES either. The first version required `(` or a
+ *   generic before it and measured 10 reads in `runtime-turn.ts` where there
+ *   are 12: `readCache<{ testRunGeneration?: number; }>(…)` puts a `;` inside
+ *   the type argument, and three of the four in `test-runner-delivery.ts` hid
+ *   the same way. A member access needs no balanced-generic parser to find,
+ *   and a bare reference that is not called (`const read = cm.readCache`) is a
+ *   use of the synchronous seam too.
+ * - `readCacheAsync` does not match: the lookahead refuses an identifier
+ *   character after `readCache`, so the remedy is never counted as the defect.
+ */
+const SYNC_HOOK_READ_FILES = [
+	...hookPathFiles(REPO_ROOT),
+	...hookHelperModules(REPO_ROOT),
+];
+
+/** `.readCache` on any receiver, never `.readCacheAsync`. */
+const SYNC_CACHE_READ = /\.readCache(?![A-Za-z0-9_$])/;
+
+/**
+ * `codeMatches` is what makes this a CODE scan: it blanks comments and string
+ * contents and drops every match that lands in them. The population
+ * measurement and the mutation cases below both go through this one function,
+ * so the fixtures prove the property the population actually has. An explicit
+ * `stripSource` here was measured to be redundant — deleting it left every
+ * case green, because `codeMatches` had already done it — and a guard nobody
+ * can red is one more thing to keep true for nothing.
+ */
+function countSyncCacheReads(source: string): number {
+	return codeMatches(source, SYNC_CACHE_READ).length;
+}
+
+/** rel -> synchronous `readCache` calls in it RIGHT NOW. */
+function measureSyncHookReads(): Record<string, number> {
+	const out: Record<string, number> = {};
+	for (const absolute of new Set(SYNC_HOOK_READ_FILES)) {
+		const rel = relativePosix(REPO_ROOT, absolute);
+		const count = countSyncCacheReads(fs.readFileSync(absolute, "utf8"));
+		if (count > 0) out[rel] = count;
+	}
+	return out;
+}
+
+/**
+ * file -> synchronous `readCache` uses, pinned exactly. Down only; see the
+ * header. `clients/runtime-turn.ts` is 11 rather than the 12 on
+ * `origin/master`: #3274 moved the scanner-store memo to `readCacheAsync`
+ * under `bounded()`.
+ *
+ * One of `runtime-agent-end.ts`'s two is `typeof cacheManager.readCache ===
+ * "function"` — a capability probe, not a read. It is counted on purpose:
+ * #3300's last slice deletes the method, and deletion sweeps dependents
+ * first, so a use that would break is exactly what this table must show.
+ */
+const SYNC_HOOK_READS: Readonly<Record<string, number>> = {
+	"clients/actionable-warnings.ts": 1,
+	"clients/git-guard.ts": 2,
+	"clients/runtime-agent-end.ts": 2,
+	"clients/runtime-context.ts": 8,
+	"clients/runtime-session.ts": 8,
+	"clients/runtime-turn.ts": 11,
+	"clients/test-runner-delivery.ts": 4,
+	"tools/lens-diagnostics.ts": 2,
+};
+
+/**
+ * The total the pins above may never exceed — the ratchet's one number, 39 on
+ * `origin/master` before this slice. #3300 lowers it per migrated population;
+ * nothing raises it.
+ */
+const SYNC_HOOK_READ_CEILING = 38;
 
 /** `auditRegistry` takes flat strings; the structure is folded in here. */
 function exemptionReasons(): Record<string, string> {
@@ -2540,6 +2676,7 @@ describe("#2523 AC1 every hook-path await is bounded, and no new hand-rolled rac
 		);
 		assertSortedRegistry("EXEMPT_SITES", Object.keys(EXEMPT_SITES));
 		assertSortedRegistry("BOUNDED_CALL_SITES", Object.keys(BOUNDED_CALL_SITES));
+		assertSortedRegistry("SYNC_HOOK_READS", Object.keys(SYNC_HOOK_READS));
 	});
 	it("scans both file groups and finds both families (a dead scan is not a clean one)", () => {
 		// Two floors, two failure modes (#1755 review F4): a broken walk and a
@@ -2861,6 +2998,68 @@ describe("#2523 AC1 every hook-path await is bounded, and no new hand-rolled rac
 		});
 		expect(audit.problems, audit.problems.join("\n\n")).toEqual([]);
 		expect(HELPER_EXEMPTION_REASON.length).toBeGreaterThan(120);
+	});
+
+	it("pins every hook-path file's synchronous readCache count", () => {
+		// Recurrence prevented (#3274): `turn_end` ran three synchronous
+		// `CacheManager.readCache` calls per delivery — 2 existsSync + 2
+		// readFileSync/JSON.parse each — that NO population here could see,
+		// because both scan async constructs. `bounded()` cannot bound one: the
+		// read finishes during argument evaluation, before bounded() receives a
+		// promise. A new one must red, and a migrated one must lower a number.
+		const measured = measureSyncHookReads();
+		// Vacuity floor: an empty measurement would make the audit pass on
+		// nothing at all, which is how #1718 read clean for months.
+		expect(Object.keys(measured).length).toBeGreaterThanOrEqual(5);
+		const audit = auditSymbolCounts({
+			sweepName: "sync-hook-read ratchet (#3274, umbrella #3300)",
+			counts: measured,
+			pinned: SYNC_HOOK_READS,
+			remediation:
+				"A hook-path file gained or lost a synchronous CacheManager.readCache " +
+				"call. A NEW one is refused: it cannot be bounded (bounded() takes a " +
+				"promise; the read completes during argument evaluation), so use " +
+				"`readCacheAsync` and await it under bounded() with the hook's budget " +
+				"and ctx.signal — the shape `readScannerCache` in clients/runtime-turn.ts " +
+				"uses. A MIGRATED one lowers its file's pin and SYNC_HOOK_READ_CEILING " +
+				"in the same PR; #3300 is the umbrella that walks this table to zero " +
+				"and then deletes the synchronous method.",
+		});
+		expect(audit.problems, audit.problems.join("\n\n")).toEqual([]);
+		// The ratchet itself: the total only ever goes down.
+		const total = Object.values(measured).reduce((sum, n) => sum + n, 0);
+		expect(total).toBeLessThanOrEqual(SYNC_HOOK_READ_CEILING);
+		expect(
+			Object.values(SYNC_HOOK_READS).reduce((sum, n) => sum + n, 0),
+		).toBeLessThanOrEqual(SYNC_HOOK_READ_CEILING);
+	});
+
+	it("MUTATION: the sync-read detector sees calls, not prose or spellings", () => {
+		// The self-excuse direction is the dangerous one for a ratchet that
+		// counts DOWN: a real call the detector stops seeing reads as progress.
+		// So the receiver is not part of the match, and a comment or a string
+		// mentioning the call cannot change the number either way.
+		expect(countSyncCacheReads("cacheManager.readCache(a, b);")).toBe(1);
+		expect(countSyncCacheReads("args.cacheManager.readCache<Foo>(a, b);")).toBe(
+			1,
+		);
+		expect(countSyncCacheReads("cm.readCache(a, b);")).toBe(1);
+		// A type argument holding a `;` is the shape the first version of this
+		// detector missed — three of four in `test-runner-delivery.ts` and two in
+		// `runtime-turn.ts` — reading 10 where there were 12.
+		expect(
+			countSyncCacheReads("cm.readCache<{\n  gen?: number;\n}>('x', cwd);"),
+		).toBe(1);
+		// The async seam is the remedy, never a member of the population.
+		expect(countSyncCacheReads("await cm.readCacheAsync(a, b);")).toBe(0);
+		// A comment and a string naming the call satisfy nothing (F7).
+		expect(countSyncCacheReads("// cacheManager.readCache(a, b);")).toBe(0);
+		expect(
+			countSyncCacheReads('const s = "cacheManager.readCache(a, b)";'),
+		).toBe(0);
+		expect(
+			countSyncCacheReads("/** cacheManager.readCache(a, b) */ noop();"),
+		).toBe(0);
 	});
 
 	it("registers every shipped bounded() call with the provenance of its signal", () => {

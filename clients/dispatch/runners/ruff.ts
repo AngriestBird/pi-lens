@@ -100,7 +100,7 @@ const ruffRunner: RunnerDefinition = {
 		);
 
 		const raw = stripAnsi(checkResult.stdout + checkResult.stderr);
-		// Exit table: 0 = clean, 1 = findings, 2 = rejected invocation or
+		// EXIT TABLE (Ruff 0.6 docs https://docs.astral.sh/ruff/linter/): 0 = clean, 1 = findings, 2 = findings/error or
 		// tool error. A nonzero exit with valid findings stays findings; empty or
 		// unparsable output must never become clean (#1816).
 		const run = parseToolRun(
@@ -110,7 +110,7 @@ const ruffRunner: RunnerDefinition = {
 				const diagnostics = parseRuffJson(output, ctx.filePath);
 				return diagnostics.length > 0
 					? diagnostics
-					: parseRuffOutput(output, ctx.filePath);
+					: parseRuffOutput(output, ctx.filePath, cwd);
 			},
 		);
 		if (run.skipped) return run.skipped;

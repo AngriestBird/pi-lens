@@ -7,6 +7,8 @@
  * Gate: skips when no ESLint config is detected (project uses Biome/OxLint instead).
  */
 
+import * as path from "node:path";
+import { pathsEqual } from "../../path-utils.js";
 import { safeSpawnAsync } from "../../safe-spawn.js";
 import { resolveRunnerCwd } from "../../tool-cwd.js";
 import { getAutofixCapability, hasEslintConfig } from "../../tool-policy.js";
@@ -77,13 +79,22 @@ interface EslintFileResult {
 function parseEslintJson(
 	raw: string,
 	filePath: string,
+	cwd: string,
 ): { diagnostics: Diagnostic[]; parseError?: string } {
 	try {
 		const results: EslintFileResult[] = JSON.parse(raw);
 		const autofix = getAutofixCapability("eslint");
 		const diagnostics: Diagnostic[] = [];
+		const absTarget = path.resolve(cwd, filePath);
 
 		for (const fileResult of results) {
+			// #3295: flat config `files`/`ignores` and a directory argv both put a
+			// SECOND result in this array; each names its own `filePath`.
+			if (
+				fileResult.filePath &&
+				!pathsEqual(path.resolve(cwd, fileResult.filePath), absTarget)
+			)
+				continue;
 			for (const msg of fileResult.messages) {
 				const severity = msg.severity === 2 ? "error" : "warning";
 				diagnostics.push({
@@ -163,8 +174,13 @@ const eslintRunner: RunnerDefinition = {
 
 		const parsed = parseToolRun(
 			"eslint",
-			{ result, output: raw },
-			(rawOutput) => parseEslintJson(rawOutput, ctx.filePath).diagnostics,
+			{
+				result,
+				output: raw,
+				// EXIT TABLE (ESLint 9.10 docs https://eslint.org/docs/latest/use/command-line-interface): 0 clean; 1 findings; 2 fatal findings/error; other nonzero rejected.
+				exitCodes: { ran: [1, 2] },
+			},
+			(rawOutput) => parseEslintJson(rawOutput, ctx.filePath, cwd).diagnostics,
 		);
 		if (parsed.skipped) return parsed.skipped;
 		return finishParsedRun({

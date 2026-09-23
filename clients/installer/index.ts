@@ -438,7 +438,15 @@ const MANAGED_PACKAGE_FORMATTERS = [
 		id: "cmake-format",
 		name: "cmake-format",
 		installStrategy: "pip",
-		packageName: "cmakelang",
+		// The `yaml` EXTRA, never the bare distribution (#3312). cmakelang reads a
+		// `.cmake-format.yaml` project config through `import yaml`, and upstream
+		// puts PyYAML behind an extra: cmakelang 0.6.13's PyPI metadata declares
+		// `pyyaml (>=5.3) ; extra == 'yaml'`. A bare install still answers
+		// `cmake-format --version` with status 0 and then dies with
+		// `ModuleNotFoundError: No module named 'yaml'` on the first YAML config —
+		// the nightly's red cmake row. Every rung of the pip ladder passes this
+		// string verbatim to pip/pipx, which both accept the `pkg[extra]` spec.
+		packageName: "cmakelang[yaml]",
 	},
 	{ id: "oxfmt", name: "oxfmt", installStrategy: "npm", packageName: "oxfmt" },
 ] satisfies ManagedPackageFormatterSpec[];
@@ -5542,10 +5550,20 @@ async function installPipTool(
 		};
 
 		if (await isCommandAvailable("pipx")) {
-			const result = await run("pipx", [
-				options.upgrade ? "upgrade" : "install",
-				packageName,
-			]);
+			// `--force` on the install verb (#3312): this function runs ONLY when the
+			// tool was not resolvable, yet plain `pipx install <pkg>` over an
+			// existing venv exits 0 while printing "not modifying existing
+			// installation. Pass '--force' …" — so an install that changes nothing
+			// reports success and hands back the same unusable launcher. That is the
+			// #2638/#2661 shape (an install that installs nothing reporting like a
+			// real one) and it also swallows a changed package spec, e.g. a venv
+			// created before `cmakelang` grew its `[yaml]` extra above.
+			const result = await run(
+				"pipx",
+				options.upgrade
+					? ["upgrade", packageName]
+					: ["install", "--force", packageName],
+			);
 			const error = (result.error?.message ?? result.stderr).trim();
 			if (result.status === 0) {
 				const location = await run("pipx", [

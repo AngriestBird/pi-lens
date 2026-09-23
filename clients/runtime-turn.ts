@@ -1992,12 +1992,63 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	// one delivery is the parallel-store shape this umbrella exists to kill, and
 	// the cache's TTL boundary can fall between them, so the secrets tier and
 	// the CVE tier would disagree about the trivy store they both read.
-	const scannerCacheReads = new Map<string, unknown>();
-	function readScannerCache<T>(scanner: string): CacheEntry<T> | null {
-		if (!scannerCacheReads.has(scanner)) {
-			scannerCacheReads.set(scanner, cacheManager.readCache<T>(scanner, cwd));
+	//
+	// #3274: the memo holds the PROMISE of each store's envelope, not the
+	// envelope. The read itself moved to `CacheManager.readCacheAsync`, which
+	// suspends on `fs.promises`, so `bounded()` finally has something to bound:
+	// the sync `readCache` completed during ARGUMENT EVALUATION, before
+	// `bounded()` was ever handed a promise, and a wrapper around it registered
+	// a turn_end budget that could never be spent (probed on #3274 with an
+	// already-aborted signal and `ms: 0` — bounded returned undefined and the
+	// read had already parsed). Memoizing the promise is also what keeps the
+	// one-envelope-per-store rule under concurrency: two lanes that await the
+	// same store share ONE read and ONE TTL boundary even when neither has
+	// settled yet, which a value memo could not do.
+	//
+	// An abandoned read yields null, never a throw and never a late envelope:
+	// `bounded()` resolves `undefined` on the budget or the hook's signal and
+	// records ONE `hook-await-exceeded` row per (hook, label) for the deadline
+	// arm, and the memoized promise is already settled by the time the
+	// abandoned read resolves, so nothing mutates after the delivery composed.
+	// A lane that receives null behaves exactly as it does for a cold cache.
+	const scannerCacheReads = new Map<
+		string,
+		Promise<CacheEntry<unknown> | null>
+	>();
+	// Stores this delivery composed WITHOUT because a bound fired, in read
+	// order. `bounded()` records the AWAIT's own row (`hook-await-exceeded`),
+	// but only for the deadline arm and only about the await; the agent-facing
+	// consequence — the secrets tier went out with no gitleaks store behind it,
+	// which looks exactly like a clean scan (AGENTS.md defect shape 10) — has no
+	// record otherwise, on either arm. One row per DELIVERY, below, never one
+	// per store and never on a healthy turn.
+	const scannerStoresUnread: string[] = [];
+	function readScannerCache<T>(scanner: string): Promise<CacheEntry<T> | null> {
+		let pending = scannerCacheReads.get(scanner);
+		if (pending === undefined) {
+			// An already-aborted turn does not start the read at all. `bounded()`
+			// abandons the await but cannot cancel work already dispatched, so
+			// without this the cancelled turn still pays six file reads whose
+			// result nothing can use. Checked AFTER the memo lookup: a signal that
+			// fires mid-delivery must not give the second lane a different answer
+			// from the first (that is the TTL-boundary split this memo exists for).
+			// It records nothing, on purpose: an already-cancelled turn is Escape,
+			// which `bounded()` also keeps off the ledger — the row below is for a
+			// delivery that went out degraded, not one the user stopped.
+			pending = deps.signal?.aborted
+				? Promise.resolve(null)
+				: bounded(cacheManager.readCacheAsync<unknown>(scanner, cwd), {
+						ms: HOOK_WALL_BUDGET_MS.turn_end,
+						signal: deps.signal,
+						hook: "turn_end",
+						label: `readScannerCache:${scanner}`,
+					}).then((entry) => {
+						if (entry === undefined) scannerStoresUnread.push(scanner);
+						return entry ?? null;
+					});
+			scannerCacheReads.set(scanner, pending);
 		}
-		return scannerCacheReads.get(scanner) as CacheEntry<T> | null;
+		return pending as Promise<CacheEntry<T> | null>;
 	}
 	const laneCtx: TurnEndLaneContext = {
 		cwd,
@@ -2016,7 +2067,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	// re-run in this slice; the cache refreshes at next session_start. Like every
 	// lane it does NOT gate itself — the freshness pass below is shared.
 	const govSources = await govulncheckLane.collect(laneCtx);
-	const trivyCacheEntry = readScannerCache<TrivyResult>("trivy");
+	const trivyCacheEntry = await readScannerCache<TrivyResult>("trivy");
 	// The secrets lane (`clients/turn-end/lanes/secrets.ts`) reads the gitleaks
 	// and trivy stores, classifies, and states the freshness policy its rows
 	// need; every rendering and disposition rule for the two secrets tiers lives
@@ -2042,6 +2093,19 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	// but loses its line number: the credential may still be there, just not
 	// where the snapshot says. Dropping instead would let any edit — malicious
 	// or accidental — mute a real secret.
+	if (scannerStoresUnread.length > 0) {
+		logLatency({
+			type: "phase",
+			toolName: "turn_end",
+			filePath: cwd,
+			phase: "scanner_cache_read_abandoned",
+			durationMs: 0,
+			metadata: {
+				stores: scannerStoresUnread.join("+"),
+				aborted: deps.signal?.aborted === true,
+			},
+		});
+	}
 	const scannerGates = gateFindingsByPathFreshness({
 		cwd,
 		sources: {

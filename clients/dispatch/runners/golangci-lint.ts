@@ -177,7 +177,12 @@ const golangciRunner: RunnerDefinition = {
 					: "";
 		const parsed = parseToolRun(
 			"golangci-lint",
-			{ result, output: raw },
+			{
+				result,
+				output: raw,
+				// EXIT TABLE (golangci-lint 1.60 docs https://golangci-lint.run/docs/welcome/quick-start/): 0 clean; 1 findings; 2 error; 3 error; 4 error; 5 error; other nonzero rejected.
+				exitCodes: { ran: [1, 2, 3, 4, 5] },
+			},
 			(raw) => parseGolangciJson(raw, ctx.filePath, cwd),
 		);
 		if (parsed.skipped) return parsed.skipped;

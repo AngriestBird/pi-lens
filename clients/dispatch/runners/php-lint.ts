@@ -1,4 +1,5 @@
 import * as path from "node:path";
+import { pathsEqual } from "../../path-utils.js";
 import { safeSpawnAsync } from "../../safe-spawn.js";
 import { resolveRunnerCwd } from "../../tool-cwd.js";
 import { PRIORITY } from "../priorities.js";
@@ -22,14 +23,29 @@ const PHP_LINT_EXIT_CODES = { ran: [1, 255] } as const;
 
 const php = createAvailabilityChecker("php", ".exe");
 
-function parsePhpLintOutput(raw: string, filePath: string): Diagnostic[] {
+function parsePhpLintOutput(
+	raw: string,
+	filePath: string,
+	cwd: string,
+): Diagnostic[] {
 	const output = raw.trim();
 	if (!output || !/(?:PHP )?Parse error:/i.test(output)) return [];
 
 	const lineMatch = output.match(/on line (\d+)/i);
 	const messageMatch =
-		output.match(/PHP Parse error:\s*(.+?)(?:\s+in\s+.+?\s+on line \d+)?$/im) ??
-		output.match(/Parse error:\s*(.+?)(?:\s+in\s+.+?\s+on line \d+)?$/im);
+		output.match(
+			/PHP Parse error:\s*(.+?)(?:\s+in\s+(.+?)\s+on line \d+)?$/im,
+		) ??
+		output.match(/Parse error:\s*(.+?)(?:\s+in\s+(.+?)\s+on line \d+)?$/im);
+	// #3295: PHP names the file it could not parse in the same sentence. `php -l`
+	// follows no includes today, so this drops nothing under our argv — it pins
+	// the attribution the parser was asserting without asking.
+	const reported = messageMatch?.[2]?.trim();
+	if (
+		reported &&
+		!pathsEqual(path.resolve(cwd, reported), path.resolve(cwd, filePath))
+	)
+		return [];
 
 	return [
 		{
@@ -80,7 +96,7 @@ const phpLintRunner: RunnerDefinition = {
 				output: `${result.stdout ?? ""}\n${result.stderr ?? ""}`,
 				exitCodes: PHP_LINT_EXIT_CODES,
 			},
-			(output) => parsePhpLintOutput(output, ctx.filePath),
+			(output) => parsePhpLintOutput(output, ctx.filePath, cwd),
 		);
 		if (run.skipped) return run.skipped;
 		return finishParsedRun({

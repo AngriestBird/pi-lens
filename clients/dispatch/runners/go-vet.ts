@@ -108,7 +108,7 @@ const goVetRunner: RunnerDefinition = {
 			})
 			.join("\n");
 
-		const diagnostics = parseGoVetOutput(relevant, ctx.filePath);
+		const diagnostics = parseGoVetOutput(relevant, ctx.filePath, cwd);
 
 		// Edited file clean → succeeded: a sibling-file error no longer flags
 		// the edited file's turn (it surfaces when that file is itself edited).
