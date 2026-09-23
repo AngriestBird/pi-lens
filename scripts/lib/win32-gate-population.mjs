@@ -28,6 +28,11 @@ export const WINDOWS_LANE_ADMISSIONS = Object.freeze([
 		reason:
 			"#3286: ruff-client's case-variant cell asserts the host filesystem's own case-folding answer, and ruff echoes the absolute argv we hand it, so a real Windows host is the only lane where that direction can attach; safe-spawn is the only mock, so no ruff binary is required.",
 	}),
+	Object.freeze({
+		file: "tests/clients/runtime-tool-result.test.ts",
+		reason:
+			"#3294: workspace-edit changed-file attribution asserts the host filesystem's own case-folding answer through handleToolResult; all pipeline and LSP boundaries are in-process, so no external toolchain is required.",
+	}),
 ]);
 
 function blankSource(source) {
