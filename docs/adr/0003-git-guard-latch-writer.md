@@ -113,6 +113,67 @@ record (no baseline) fails closed. Rejected alternatives, from the table:
 - clearing the verdict in the freshness sweep only: covers cell 8, which the
   existing rewrite already covers, and none of 6, 7 or 9.
 
+### Amendment 3 (#3282): the record's attribution contract
+
+Written before the first edit of #3282's fix. `blockerContent` is the rendered
+blocker text the gate may quote back; it is NOT the gate's source of truth about
+which files block — `blockingFiles` is (`clients/git-guard.ts:31`). The parse of
+that text exists for one consumer, `syncGitGuardRecord`'s
+`clearedLastKnownBlocker`, which drops `blockerContent` when the file that just
+dispatched clean owns everything left in it.
+
+Writers of `blockerContent`, re-verified at `f8fef5f72`:
+
+| Actor | Axis / timing | Shape it writes | Site |
+|---|---|---|---|
+| `syncGitGuardRecord` | per edit, after each dispatch | `<path>: <formatDiagnostics(…,"blocking").trim()>` per live entry, joined `"\n"` | `clients/git-guard.ts:1013` |
+| turn-end composer, main path | per turn, after the policy | `capTurnEndMessage(blockerParts.join("\n\n"))` | `clients/runtime-turn.ts:4291` |
+| turn-end composer, dedupe path | per turn, duplicate signature | the same expression | `clients/runtime-turn.ts:4234` |
+| `mergeGitGuardTestFailure` / `clearGitGuardTestFailure` | test-runner edges | pass `existing.blockerContent` through | `clients/git-guard.ts:1068`, `:1113` |
+| `resyncGitGuardAfterInlinePolicy` | per turn, before the composer | nothing durable — the latch only | `clients/git-guard.ts:919` |
+
+Neither of the two real writers emits one line per file, and `blockerParts` is
+multi-lane: only `Unresolved from this turn — <path>:` sections
+(`clients/runtime-turn.ts:1085`) name a file at all — knip (`:2147`), trivy
+CRITICAL (`:2141`), the secrets lane (`:2099`) and cascade (`:1340`) do not.
+
+> **Contract.** `blockerContent` is a sequence of per-file blocker SECTIONS. A
+> section is opened by an attribution line at column 0 — `<path>: <text>` or
+> `Unresolved from this turn — <path>[ (suppressed by disposition: N
+> finding(s))]:` — and every following line up to the next attribution line or
+> the next ZERO-LENGTH line is its rendered body, attributing nothing. The text
+> is attributable iff at least one line opens a section, no line precedes the
+> first section, and every section's file is named in `blockingFiles`. A clean
+> per-file dispatch may clear the text iff every section in it is that file's.
+>
+> Zero sections is UNATTRIBUTED, never clean (#3287 round 2, HIGH-3287-1): text
+> that is non-empty but all-blank opens nothing, and reading that as "nothing
+> left to attribute" let a clean dispatch of an unrelated file delete a record
+> whose `blockingFiles` named a different file. A record with no blocker text at
+> all never reaches the parse — `syncGitGuardRecord` gates on
+> `existing?.blockerContent` being truthy — so the genuine clean case is decided
+> before this contract applies.
+
+One-directional on purpose. A bijection between sections and `blockingFiles` was
+#3282's second cause: the composer persists `blockingFiles: affectedFiles`
+(`:4292`) — every file the turn touched plus every cascade neighbour with
+diagnostics — so any turn that edited a clean file alongside a blocking one was
+judged untrusted for the rest of the session. The extra direction guarded
+nothing either: the clear now asks about the sections themselves, so a
+`blockingFiles` entry with no section, a duplicate section and a duplicate
+`blockingFiles` entry cannot make it drop a blocker another file owns. Requiring
+`blockingFiles` to be NON-EMPTY is subsumed for the same reason once at least
+one section is required, so that clause is gone too: an empty provenance list
+cannot own a section.
+
+Fail direction (AGENTS.md shape 48): an unattributable line keeps `unknown`. The
+harm it prevents is a live CVE or leaked secret being cleared out of the gate by
+a clean dispatch of the file beside it; the harm it causes is a refused commit
+whose stated remedy ("re-run pi-lens checks or start a fresh session") does not
+clear it, which is why the reason must be reachable only for text no writer
+produces for a single file. `TurnEndFindingsCache` is unchanged by #3282 as
+well: parser-side only, no field added, no writer altered.
+
 ## Consequences
 
 The latch cannot be treated as a read-only projection of the blocker map.
@@ -126,15 +187,17 @@ hash per suppressed record on a commit/push attempt, and nothing when no verdict
 is live. `logDecision`'s existing `git-guard` `decision` record carries the new
 `inline_policy_stale` reason category with the file and tier.
 
-Clearing the latch exposes the gate's SECOND reader, which has its own defect:
-`hasCompleteBlockingProvenance` parses `blockerContent` line by line while both
-writers of that field render multi-line blocker text, so the gate answers
-`blocking_provenance_untrusted` once a session has recorded any blocker —
-measured on `origin/master`, independent of dispositions, and filed as #3282.
+Clearing the latch exposed the gate's SECOND reader, which had its own defect:
+`hasCompleteBlockingProvenance` parsed `blockerContent` line by line while both
+writers of that field render multi-line blocker text, so the gate answered
+`blocking_provenance_untrusted` once a session had recorded any blocker —
+measured on `origin/master`, independent of dispositions, filed as #3282 and
+fixed under amendment 3 above. The witness golden's turns 2 and 3 flip from that
+reason to `block: false`, as this slice committed them to do.
 
 ## Links
 
 - Catalog shape: `AGENTS.md` shape 24.
 - Issue: #3248.
 - PR: #3254, “The git-guard latch” remainder and writers-by-axis table.
-- Follow-up: #3282 (record provenance parse).
+- Follow-up: #3282 (record provenance parse) — amendment 3.

@@ -671,6 +671,132 @@ describe("git-guard commit gate honors the turn-end disposition policy (#3248)",
 		}
 	});
 
+	it("#3282: a turn-end-written record stops gating once the file is FIXED", async () => {
+		// The composer's own `blockerContent` shape, through the real
+		// `handleTurnEnd`: `Unresolved from this turn — <path>:` plus the rendered
+		// body, persisted at `clients/runtime-turn.ts:4291`. Then the agent FIXES
+		// the finding — a clean dispatch, no disposition involved, which is what
+		// makes this case independent of #3248 — and the commit gate must reopen.
+		//
+		// Pre-fix, the next `syncGitGuardRecord` read that record back, found no
+		// line shaped `<path>: <text>`, and latched
+		// `blocking_provenance_untrusted` for the rest of the session.
+		const env = setupTestEnvironment("pi-lens-3282-turn-end-shape-");
+		try {
+			const cwd = env.tmpDir;
+			const filePath = path.join(cwd, "app.ts");
+			fs.writeFileSync(filePath, "alpha();\n");
+
+			const runtime = newRuntime();
+			runtime.projectRoot = cwd;
+			const cacheManager = new CacheManager(false);
+			const diagnostic = blockingDiagnostic(filePath, 1, "alpha is unsafe");
+			editDispatch(runtime, cacheManager, cwd, filePath, [diagnostic]);
+			registerEdit(cacheManager, cwd, filePath);
+			await handleTurnEnd(makeTurnEndDeps(runtime, cacheManager, cwd));
+			// The record under test is the COMPOSER's, not the per-edit writer's.
+			expect(guardRecord(cacheManager, cwd)?.blockerContent ?? "").toContain(
+				"Unresolved from this turn — ",
+			);
+			expect(evaluateGitGuard(runtime, cacheManager, cwd).block).toBe(true);
+
+			// The agent fixes it: next turn's dispatch of the same file is clean.
+			fs.writeFileSync(filePath, "safeAlpha();\n");
+			editDispatch(runtime, cacheManager, cwd, filePath, []);
+
+			expect(runtime.gitGuardCacheUnknownReason).toBeUndefined();
+			expect(evaluateGitGuard(runtime, cacheManager, cwd)).toEqual({
+				block: false,
+			});
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("#3282: a turn that also edited a clean file still reopens the gate", async () => {
+		// The second cause, and the common shape: the composer persists
+		// `blockingFiles: affectedFiles` (`clients/runtime-turn.ts:4292`) — EVERY
+		// file the turn touched — while only the blocking file gets a
+		// `Unresolved from this turn — …` section. A parse that demanded a
+		// bijection between sections and `blockingFiles` therefore judged any
+		// multi-file turn untrusted, and the session never recovered.
+		const env = setupTestEnvironment("pi-lens-3282-clean-sibling-");
+		try {
+			const cwd = env.tmpDir;
+			const blocking = path.join(cwd, "app.ts");
+			const clean = path.join(cwd, "notes.ts");
+			fs.writeFileSync(blocking, "alpha();\n");
+			fs.writeFileSync(clean, "export const note = 1;\n");
+
+			const runtime = newRuntime();
+			runtime.projectRoot = cwd;
+			const cacheManager = new CacheManager(false);
+			editDispatch(runtime, cacheManager, cwd, clean, []);
+			editDispatch(runtime, cacheManager, cwd, blocking, [
+				blockingDiagnostic(blocking, 1, "alpha is unsafe"),
+			]);
+			registerEdit(cacheManager, cwd, clean);
+			registerEdit(cacheManager, cwd, blocking);
+			await handleTurnEnd(makeTurnEndDeps(runtime, cacheManager, cwd));
+
+			const persisted = guardRecord(cacheManager, cwd);
+			expect(persisted?.blockingFiles ?? []).toHaveLength(2);
+			expect(persisted?.blockerContent ?? "").not.toContain("notes.ts");
+			expect(evaluateGitGuard(runtime, cacheManager, cwd).block).toBe(true);
+
+			// The blocker is fixed; the clean sibling was never the gate's business.
+			fs.writeFileSync(blocking, "safeAlpha();\n");
+			editDispatch(runtime, cacheManager, cwd, blocking, []);
+
+			expect(runtime.gitGuardCacheUnknownReason).toBeUndefined();
+			expect(evaluateGitGuard(runtime, cacheManager, cwd)).toEqual({
+				block: false,
+			});
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("#3282: the suppression notice in a section header is not read as a path", async () => {
+		// `Unresolved from this turn — <path> (suppressed by disposition: 1
+		// finding(s)):` (`clients/runtime-turn.ts:1085`) carries its own `": "`.
+		// The per-edit attribution shape would take everything up to
+		// `disposition` as the file name, so this header needs the composer's own
+		// shape to be tried FIRST.
+		const env = setupTestEnvironment("pi-lens-3282-suppressed-note-");
+		try {
+			const cwd = env.tmpDir;
+			const filePath = path.join(cwd, "app.ts");
+			fs.writeFileSync(filePath, "alpha();\nbeta();\n");
+
+			const runtime = newRuntime();
+			runtime.projectRoot = cwd;
+			const cacheManager = new CacheManager(false);
+			const diagnostics = [
+				blockingDiagnostic(filePath, 1, "alpha is unsafe"),
+				blockingDiagnostic(filePath, 2, "beta is unsafe"),
+			];
+			editDispatch(runtime, cacheManager, cwd, filePath, diagnostics);
+			markFalsePositive(cwd, diagnostics[0]);
+			registerEdit(cacheManager, cwd, filePath);
+			await handleTurnEnd(makeTurnEndDeps(runtime, cacheManager, cwd));
+			expect(guardRecord(cacheManager, cwd)?.blockerContent ?? "").toContain(
+				"(suppressed by disposition: 1 finding(s)):",
+			);
+
+			// The surviving blocker is then fixed too.
+			fs.writeFileSync(filePath, "safeAlpha();\nsafeBeta();\n");
+			editDispatch(runtime, cacheManager, cwd, filePath, []);
+
+			expect(runtime.gitGuardCacheUnknownReason).toBeUndefined();
+			expect(evaluateGitGuard(runtime, cacheManager, cwd)).toEqual({
+				block: false,
+			});
+		} finally {
+			env.cleanup();
+		}
+	});
+
 	it("leaves a 4.2.1-shaped record parseable and still blocking after the policy runs", async () => {
 		// Old-record proof: this fix adds NO field to `TurnEndFindingsCache`, so
 		// a record written by 4.2.1 is read by today's gate unchanged, and a

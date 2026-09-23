@@ -81,37 +81,137 @@ function capAffectedFiles(
 	};
 }
 
-/** Recovery is safe only when blocker content and its file provenance agree. */
-function hasCompleteBlockingProvenance(
+/**
+ * The turn-end composer's per-file attribution line
+ * (`clients/runtime-turn.ts:1085`). The optional suppression notice carries its
+ * own `": "`, so this shape is tried BEFORE the per-edit one below — otherwise
+ * everything up to `disposition` reads as the file name (#3282 F5).
+ */
+const TURN_END_BLOCKER_SECTION =
+	/^Unresolved from this turn — ([^\s].*?)(?: \(suppressed by disposition: \d+ finding\(s\)\))?:$/;
+
+/**
+ * The file a line of `blockerContent` ATTRIBUTES a new blocker section to, or
+ * `undefined` when the line is rendered body that attributes nothing.
+ *
+ * Exactly the two shapes the two writers emit, and nothing else:
+ *
+ * - `<path>: <text>` at column 0 — `syncGitGuardRecord`'s own join below;
+ * - `Unresolved from this turn — <path>[ (suppressed by disposition: N
+ *   finding(s))]:` — the turn-end composer's blocker section header.
+ *
+ * Both writers render the blocker BODY with `formatDiagnostics(…, "blocking")`
+ * (`clients/dispatch/utils/format-utils.ts:29`), which indents every line it
+ * emits — the `  L<n>: <message>` diagnostics, their `    💡 Fix:` lines, the
+ * `  ... and N more` tail, and the two-space continuations of a multi-line
+ * message. The leading-whitespace test is therefore what separates body from
+ * attribution, and it is why #3282 happened: a line-by-line parse read
+ * `  L1: alpha is unsafe` as a file named `L1`.
+ */
+function blockerSectionFile(line: string): string | undefined {
+	const turnEndSection = TURN_END_BLOCKER_SECTION.exec(line);
+	if (turnEndSection) return turnEndSection[1];
+	if (/^\s/.test(line)) return undefined;
+	const separator = line.indexOf(": ");
+	if (separator <= 0) return undefined;
+	return line.slice(0, separator);
+}
+
+/**
+ * The path key of every blocker SECTION `blockerContent` attributes, or
+ * `undefined` when the text cannot be attributed at all.
+ *
+ * `blockerContent` is a sequence of per-file blocker SECTIONS: an attribution
+ * line, then the rendered body it owns, up to the next attribution line or the
+ * composer's `"\n\n"` part separator (`clients/runtime-turn.ts:4291`). The one
+ * consumer is `clearedLastKnownBlocker` below, which drops `blockerContent`
+ * when the file that just dispatched clean was the last entry in
+ * `blockingFiles` — sound only if `blockingFiles` accounts for the WHOLE of
+ * that text.
+ *
+ * Named recurrences, both live:
+ *
+ * - #3282: the writers render MULTI-LINE blocker text and a line-by-line parse
+ *   judged every such record untrusted, so the first blocker of a session
+ *   latched `blocking_provenance_untrusted` and refused every later commit —
+ *   including after the agent fixed it.
+ * - #1561: a section for a file `blockingFiles` omits must keep the gate
+ *   closed, and so must a section no file owns at all. `blockerParts` is
+ *   multi-lane — the trivy CRITICAL report (`clients/runtime-turn.ts:2141`),
+ *   knip (`:2147`), the secrets lane (`:2099`) and cascade (`:1340`) each push
+ *   sections belonging to no file — and clearing one of those on a clean
+ *   dispatch of the file beside it would drop a live CVE or leaked secret out
+ *   of the commit gate. That is the fail-closed direction, and the reason an
+ *   unattributable line answers `unknown` rather than being swallowed.
+ *
+ * The rule is one-directional on purpose — every SECTION is owned, and
+ * `blockingFiles` may name more. Demanding a bijection was #3282's second
+ * cause: the composer writes `blockingFiles: affectedFiles`
+ * (`clients/runtime-turn.ts:4292`), which carries every file the turn touched
+ * plus every cascade neighbour with diagnostics, while only the files with a
+ * surviving blocker get a section — so any turn that edited a second file was
+ * judged untrusted for the rest of the session. The extra direction also
+ * guarded nothing: the one consumer clears only when `blockingFiles` has
+ * shrunk to the single file that just dispatched clean, and every section is
+ * then that file's by this rule. For the same reason a duplicate section and a
+ * duplicate `blockingFiles` entry need no clause of their own: neither can make
+ * the clear drop a blocker some other file owns. An all-blank `blockerContent`
+ * is NOT in that company — round 1 claimed it was, and the section-count guard
+ * below is why (HIGH-3287-1).
+ */
+function blockingProvenance(
 	blockerContent: unknown,
 	blockingFiles: unknown,
 	cwd: string,
-): blockingFiles is string[] {
+): string[] | undefined {
 	if (typeof blockerContent !== "string" || blockerContent.length === 0)
-		return false;
-	if (!Array.isArray(blockingFiles) || blockingFiles.length === 0) return false;
+		return undefined;
+	// `Array.isArray` only: a non-empty `blockingFiles` is not a separate
+	// requirement (MEDIUM-3287-2, mutation M11 — it stayed green across the whole
+	// seam suite). With at least one section required below, an empty
+	// `blockingFiles` cannot satisfy the ownership test either way, so the clause
+	// decided nothing; the entry type check under it still does, and has its own
+	// red (M8).
+	if (!Array.isArray(blockingFiles)) return undefined;
 	if (
 		blockingFiles.some(
 			(file) => typeof file !== "string" || file.trim().length === 0,
 		)
 	) {
-		return false;
+		return undefined;
 	}
 	const provenanceKeys = blockingFiles.map((file) => guardPathKey(file, cwd));
-	if (new Set(provenanceKeys).size !== provenanceKeys.length) return false;
-	const blockerKeys = blockerContent.split("\n").map((line) => {
-		const separator = line.indexOf(": ");
-		if (separator <= 0) return undefined;
-		const file = line.slice(0, separator).trim();
-		return file.length > 0 ? guardPathKey(file, cwd) : undefined;
-	});
-	if (blockerKeys.some((key) => key === undefined)) return false;
-	const uniqueBlockerKeys = new Set(blockerKeys as string[]);
-	return (
-		uniqueBlockerKeys.size === blockerKeys.length &&
-		uniqueBlockerKeys.size === provenanceKeys.length &&
-		[...uniqueBlockerKeys].every((key) => provenanceKeys.includes(key))
-	);
+	const sectionKeys: string[] = [];
+	let inSection = false;
+	for (const line of blockerContent.split("\n")) {
+		// A ZERO-LENGTH line only: the composer's part separator. A
+		// whitespace-only line is how `formatDiagnostics` renders a blank line
+		// inside a multi-line diagnostic message, and it is body (#3282 F13).
+		if (line.length === 0) {
+			inSection = false;
+			continue;
+		}
+		const file = blockerSectionFile(line);
+		if (file === undefined) {
+			// Body of the open section, or — with no section open — text that no
+			// entry of `blockingFiles` can be held responsible for.
+			if (!inSection) return undefined;
+			continue;
+		}
+		sectionKeys.push(guardPathKey(file, cwd));
+		inSection = true;
+	}
+	// No line opened a section, so there is nothing for `blockingFiles` to be
+	// checked against and nothing a per-file dispatch may claim authority over.
+	// All-blank-but-non-empty text lands here (HIGH-3287-1, round 1's fail-open):
+	// `[].every(…)` is vacuously true, so treating zero sections as "nothing left
+	// to attribute" let a clean dispatch of an unrelated file DELETE a record
+	// whose `blockingFiles` named a different file, and the gate then answered
+	// `no_record`. Unattributed is not clean.
+	if (sectionKeys.length === 0) return undefined;
+	return sectionKeys.every((key) => provenanceKeys.includes(key))
+		? sectionKeys
+		: undefined;
 }
 
 function getShellCommand(input: unknown): string {
@@ -970,14 +1070,10 @@ export function syncGitGuardRecord(
 		resolveGuardPath(entry.filePath, cwd),
 	);
 	const existingBlockingFiles = existing?.blockingFiles ?? [];
-	const provenanceComplete = existing?.blockerContent
-		? hasCompleteBlockingProvenance(
-				existing.blockerContent,
-				existingBlockingFiles,
-				cwd,
-			)
-		: true;
-	if (existing?.blockerContent && !provenanceComplete) {
+	const blockerSections = existing?.blockerContent
+		? blockingProvenance(existing.blockerContent, existingBlockingFiles, cwd)
+		: undefined;
+	if (existing?.blockerContent && !blockerSections) {
 		markCacheUnknown(runtime, "blocking_provenance_untrusted");
 		return;
 	}
@@ -1004,17 +1100,23 @@ export function syncGitGuardRecord(
 			);
 		}
 	}
-	// A clean per-file dispatch is authoritative for that file. When the
-	// persisted record has explicit blocking-file provenance and the last such
-	// file just reconciled clean, retaining blockerContent would resurrect a
-	// stale blocker on every later git-guard lookup. Records without that
-	// provenance remain fail-closed: they cannot be safely cleared here.
+	// A clean per-file dispatch is authoritative for that file. When every
+	// blocker section the persisted record still carries is THIS file's,
+	// retaining `blockerContent` would resurrect a blocker the dispatch just
+	// cleared on every later git-guard lookup. Records whose text cannot be
+	// attributed remain fail-closed: they returned above.
+	//
+	// The question is asked of the SECTIONS, not of `blockingFiles` (#3282): the
+	// turn-end composer persists `blockingFiles: affectedFiles`
+	// (`clients/runtime-turn.ts:4292`) — every file the turn touched, blocking or
+	// not — so "the list has shrunk to nothing" never became true for a turn that
+	// edited a clean file alongside a blocking one, and the fixed blocker was
+	// quoted back at every commit for the rest of the session.
 	const clearedLastKnownBlocker =
 		!entries.length &&
 		!!editedKey &&
-		provenanceComplete &&
-		existingBlockingFiles.length > 0 &&
-		remainingBlockingFiles.length === 0;
+		!!blockerSections &&
+		blockerSections.every((key) => key === editedKey);
 	const blockerContent =
 		entries.length > 0
 			? entries.map((entry) => `${entry.filePath}: ${entry.summary}`).join("\n")
@@ -1031,6 +1133,13 @@ export function syncGitGuardRecord(
 		.join("\n\n");
 	if (!hasBlockers && !content) {
 		cacheManager.clearCache("turn-end-findings", cwd);
+		// #3282 acceptance 5: this branch is a COMPLETE recomputation of the
+		// gate's state that happens to find nothing left to record, so it owns the
+		// unknown reason exactly as `writeGitGuardRecord` does (`:800`). Without
+		// this, a reason latched earlier in the session outlived the record it
+		// described and refused every commit after it, with no re-run able to
+		// clear it.
+		runtime.clearGitGuardCacheUnknown();
 		return;
 	}
 	writeGitGuardRecord(cacheManager, runtime, cwd, {
