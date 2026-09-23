@@ -495,6 +495,24 @@ describe("documented runner exit-table ratchet (#3292)", () => {
 		].join("\n");
 		expect([...executableStatusCells(siblings)].sort()).toEqual([1, 3, 4]);
 
+		// A declaration in a block that does not CONTAIN the use is not visible
+		// there, however early it appears. Text-level input on purpose: the
+		// detector reads source, and this is the only direction that separates
+		// visibility from textual order.
+		const siblingOnly = [
+			"it('a', () => {",
+			"\tconst statuses = [9];",
+			"\tvoid statuses;",
+			"});",
+			"it('b', () => {",
+			"\tfor (const status of statuses) {",
+			"\t\tconst fixture = { status };",
+			"\t\tvoid fixture;",
+			"\t}",
+			"});",
+		].join("\n");
+		expect([...executableStatusCells(siblingOnly)]).toEqual([]);
+
 		const declaredAfterUse = [
 			"it('a', () => {",
 			"\tfor (const status of statuses) {",
