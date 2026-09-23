@@ -1,5 +1,5 @@
 // flake-shape: real-process-spawn — the regression must run the real installer against executable fake package-manager boundaries.
-import { execFile, execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { promisify } from "node:util";
@@ -488,11 +488,14 @@ exit 0
  * exported — production resolves a pipx console script by name, so the resolved
  * value is bare (`cmake-format`), not a path the test could invent.
  */
-function runResolved(result: { resolved: string; path: string }): string {
-	return execFileSync(result.resolved, ["--dump-config"], {
-		encoding: "utf-8",
+async function runResolved(result: {
+	resolved: string;
+	path: string;
+}): Promise<string> {
+	const { stdout } = await execFileAsync(result.resolved, ["--dump-config"], {
 		env: { ...process.env, PATH: result.path },
-	}).trim();
+	});
+	return stdout.trim();
 }
 
 describe("pip install spec carries the extra the tool actually needs (#3312)", () => {
@@ -510,7 +513,7 @@ describe("pip install spec carries the extra the tool actually needs (#3312)", (
 		);
 		// The independent effect: the launcher the installer resolved can run the
 		// YAML path, not merely `--version`.
-		expect(runResolved(program.result)).toBe("yaml-ok");
+		expect(await runResolved(program.result)).toBe("yaml-ok");
 	});
 
 	it("repairs a cmakelang venv that predates the extra instead of reporting a no-op install", async () => {
@@ -532,7 +535,7 @@ describe("pip install spec carries the extra the tool actually needs (#3312)", (
 		const program = await runInstaller(root, bin, "cmake-format");
 
 		expect(program.result.installed).toBe(true);
-		expect(runResolved(program.result)).toBe("yaml-ok");
+		expect(await runResolved(program.result)).toBe("yaml-ok");
 	});
 
 	it("keeps the extra on the pip --user rung when pipx is absent", async () => {

@@ -2308,11 +2308,12 @@ export function diagnosticTail(
 	text: string | undefined,
 	maxLines = FORMATTER_ERROR_TAIL_LINES,
 ): string | undefined {
-	const lines = (text ?? "")
-		.split("\n")
-		.map((raw) => stripAnsi(raw).trimEnd())
-		.filter((line) => !isDecorativeLine(line))
-		.map((line) => line.slice(0, 300));
+	const lines: string[] = [];
+	for (const raw of (text ?? "").split("\n")) {
+		const line = stripAnsi(raw).trimEnd();
+		if (isDecorativeLine(line)) continue;
+		lines.push(line.slice(0, 300));
+	}
 	if (lines.length === 0) return undefined;
 	return lines.slice(-maxLines).join("\n");
 }
