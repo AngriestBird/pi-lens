@@ -87,9 +87,23 @@ the cost of not doing so.
 
 - Without Git authority, leave changes uncommitted.
 - Write root-level `PR_BODY.md` and `COMMIT_MSG.txt`; keep both untracked.
-- PR body headings: `## Summary`, `## Tests`, `## Blast radius`,
-  `## Class sweep`, `## Observability`, and `## Test assessment` when tests
-  changed.
+- The PR body is the whole `.github/PULL_REQUEST_TEMPLATE.md`, every
+  heading present in order: `## Why` (one sentence), `## Notes for the
+  reviewer`, `## Change outline`, `## Summary`, `## Type of change`,
+  `## Area`, `## Checklist`, `## Tests`, `## Blast radius`,
+  `## Observability` (a record literal from the runtime diff, or exactly
+  `No new failure path; no record added.`), `## Class sweep`, and
+  `## Test assessment`. A brief that names only some headings does not
+  shorten this list.
+- Run `node scripts/check-pr-body.mjs --lint-local PR_BODY.md` and
+  `node scripts/check-changelog-fragments.mjs` before the hand-back; both
+  must pass, and the hand-back quotes them. A changelog fragment is
+  `---` / `section: <Added|Changed|Deprecated|Removed|Fixed|Security>` /
+  `---` / blank / one `- ` bullet. (Four of six Luna PRs on 2026-09-23
+  redded the PR-body and changelog gates on the first head; the fixes were
+  all mechanical.)
+- The hand-back carries the commit SHA; a dirty tree is an incomplete
+  round.
 - Include every red, mutation result, skipped check, and environment block.
 - Answer each finding id with `fixed`, `not fixed`, or `withdrawn (reason)`.
 - Report verdict, changed files, totals, and unverifiable checks.
