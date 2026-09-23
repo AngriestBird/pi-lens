@@ -154,7 +154,7 @@ it("formatFile declines before spawning when agreement evidence is unreadable (#
 it("retains the bounded formatter traceback tail (#3312)", async () => {
 	const traceback = [
 		"Traceback (most recent call last):",
-		"  File \"cmake-format\", line 5, in <module>",
+		'  File "cmake-format", line 5, in <module>',
 		"    from cmakelang.format.__main__ import main",
 		"ModuleNotFoundError: No module named 'cmakelang'",
 	].join("\n");
@@ -170,7 +170,10 @@ it("retains the bounded formatter traceback tail (#3312)", async () => {
 		fs.chmodSync(executable, 0o755);
 		const filePath = fileIn(tmpDir, "CMakeLists.cmake");
 		fs.writeFileSync(filePath, "add_library(foo bar.c)\n");
-		fs.writeFileSync(path.join(tmpDir, ".cmake-format.yaml"), "line_width: 80\n");
+		fs.writeFileSync(
+			path.join(tmpDir, ".cmake-format.yaml"),
+			"line_width: 80\n",
+		);
 
 		const result = await formatFile(filePath, cmakeFormatFormatter);
 		expect(result).toMatchObject({
