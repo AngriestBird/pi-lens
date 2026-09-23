@@ -118,7 +118,8 @@ function blockerSectionFile(line: string): string | undefined {
 }
 
 /**
- * Recovery is safe only when blocker content and its file provenance agree.
+ * The path key of every blocker SECTION `blockerContent` attributes, or
+ * `undefined` when the text cannot be attributed at all.
  *
  * `blockerContent` is a sequence of per-file blocker SECTIONS: an attribution
  * line, then the rendered body it owns, up to the next attribution line or the
@@ -142,24 +143,38 @@ function blockerSectionFile(line: string): string | undefined {
  *   dispatch of the file beside it would drop a live CVE or leaked secret out
  *   of the commit gate. That is the fail-closed direction, and the reason an
  *   unattributable line answers `unknown` rather than being swallowed.
+ *
+ * The rule is one-directional on purpose — every SECTION is owned, and
+ * `blockingFiles` may name more. Demanding a bijection was #3282's second
+ * cause: the composer writes `blockingFiles: affectedFiles`
+ * (`clients/runtime-turn.ts:4292`), which carries every file the turn touched
+ * plus every cascade neighbour with diagnostics, while only the files with a
+ * surviving blocker get a section — so any turn that edited a second file was
+ * judged untrusted for the rest of the session. The extra direction also
+ * guarded nothing: the one consumer clears only when `blockingFiles` has
+ * shrunk to the single file that just dispatched clean, and every section is
+ * then that file's by this rule. For the same reason a duplicate section, a
+ * duplicate `blockingFiles` entry and an all-blank `blockerContent` need no
+ * clause of their own: none of them can make the clear drop a blocker some
+ * other file owns.
  */
-function hasCompleteBlockingProvenance(
+function blockingProvenance(
 	blockerContent: unknown,
 	blockingFiles: unknown,
 	cwd: string,
-): blockingFiles is string[] {
+): string[] | undefined {
 	if (typeof blockerContent !== "string" || blockerContent.length === 0)
-		return false;
-	if (!Array.isArray(blockingFiles) || blockingFiles.length === 0) return false;
+		return undefined;
+	if (!Array.isArray(blockingFiles) || blockingFiles.length === 0)
+		return undefined;
 	if (
 		blockingFiles.some(
 			(file) => typeof file !== "string" || file.trim().length === 0,
 		)
 	) {
-		return false;
+		return undefined;
 	}
 	const provenanceKeys = blockingFiles.map((file) => guardPathKey(file, cwd));
-	if (new Set(provenanceKeys).size !== provenanceKeys.length) return false;
 	const sectionKeys: string[] = [];
 	let inSection = false;
 	for (const line of blockerContent.split("\n")) {
@@ -174,18 +189,15 @@ function hasCompleteBlockingProvenance(
 		if (file === undefined) {
 			// Body of the open section, or — with no section open — text that no
 			// entry of `blockingFiles` can be held responsible for.
-			if (!inSection) return false;
+			if (!inSection) return undefined;
 			continue;
 		}
 		sectionKeys.push(guardPathKey(file, cwd));
 		inSection = true;
 	}
-	const uniqueSectionKeys = new Set(sectionKeys);
-	return (
-		uniqueSectionKeys.size === sectionKeys.length &&
-		uniqueSectionKeys.size === provenanceKeys.length &&
-		[...uniqueSectionKeys].every((key) => provenanceKeys.includes(key))
-	);
+	return sectionKeys.every((key) => provenanceKeys.includes(key))
+		? sectionKeys
+		: undefined;
 }
 
 function getShellCommand(input: unknown): string {
@@ -1044,14 +1056,10 @@ export function syncGitGuardRecord(
 		resolveGuardPath(entry.filePath, cwd),
 	);
 	const existingBlockingFiles = existing?.blockingFiles ?? [];
-	const provenanceComplete = existing?.blockerContent
-		? hasCompleteBlockingProvenance(
-				existing.blockerContent,
-				existingBlockingFiles,
-				cwd,
-			)
-		: true;
-	if (existing?.blockerContent && !provenanceComplete) {
+	const blockerSections = existing?.blockerContent
+		? blockingProvenance(existing.blockerContent, existingBlockingFiles, cwd)
+		: undefined;
+	if (existing?.blockerContent && !blockerSections) {
 		markCacheUnknown(runtime, "blocking_provenance_untrusted");
 		return;
 	}
@@ -1078,17 +1086,23 @@ export function syncGitGuardRecord(
 			);
 		}
 	}
-	// A clean per-file dispatch is authoritative for that file. When the
-	// persisted record has explicit blocking-file provenance and the last such
-	// file just reconciled clean, retaining blockerContent would resurrect a
-	// stale blocker on every later git-guard lookup. Records without that
-	// provenance remain fail-closed: they cannot be safely cleared here.
+	// A clean per-file dispatch is authoritative for that file. When every
+	// blocker section the persisted record still carries is THIS file's,
+	// retaining `blockerContent` would resurrect a blocker the dispatch just
+	// cleared on every later git-guard lookup. Records whose text cannot be
+	// attributed remain fail-closed: they returned above.
+	//
+	// The question is asked of the SECTIONS, not of `blockingFiles` (#3282): the
+	// turn-end composer persists `blockingFiles: affectedFiles`
+	// (`clients/runtime-turn.ts:4292`) — every file the turn touched, blocking or
+	// not — so "the list has shrunk to nothing" never became true for a turn that
+	// edited a clean file alongside a blocking one, and the fixed blocker was
+	// quoted back at every commit for the rest of the session.
 	const clearedLastKnownBlocker =
 		!entries.length &&
 		!!editedKey &&
-		provenanceComplete &&
-		existingBlockingFiles.length > 0 &&
-		remainingBlockingFiles.length === 0;
+		!!blockerSections &&
+		blockerSections.every((key) => key === editedKey);
 	const blockerContent =
 		entries.length > 0
 			? entries.map((entry) => `${entry.filePath}: ${entry.summary}`).join("\n")

@@ -713,6 +713,50 @@ describe("git-guard commit gate honors the turn-end disposition policy (#3248)",
 		}
 	});
 
+	it("#3282: a turn that also edited a clean file still reopens the gate", async () => {
+		// The second cause, and the common shape: the composer persists
+		// `blockingFiles: affectedFiles` (`clients/runtime-turn.ts:4292`) — EVERY
+		// file the turn touched — while only the blocking file gets a
+		// `Unresolved from this turn — …` section. A parse that demanded a
+		// bijection between sections and `blockingFiles` therefore judged any
+		// multi-file turn untrusted, and the session never recovered.
+		const env = setupTestEnvironment("pi-lens-3282-clean-sibling-");
+		try {
+			const cwd = env.tmpDir;
+			const blocking = path.join(cwd, "app.ts");
+			const clean = path.join(cwd, "notes.ts");
+			fs.writeFileSync(blocking, "alpha();\n");
+			fs.writeFileSync(clean, "export const note = 1;\n");
+
+			const runtime = newRuntime();
+			runtime.projectRoot = cwd;
+			const cacheManager = new CacheManager(false);
+			editDispatch(runtime, cacheManager, cwd, clean, []);
+			editDispatch(runtime, cacheManager, cwd, blocking, [
+				blockingDiagnostic(blocking, 1, "alpha is unsafe"),
+			]);
+			registerEdit(cacheManager, cwd, clean);
+			registerEdit(cacheManager, cwd, blocking);
+			await handleTurnEnd(makeTurnEndDeps(runtime, cacheManager, cwd));
+
+			const persisted = guardRecord(cacheManager, cwd);
+			expect(persisted?.blockingFiles ?? []).toHaveLength(2);
+			expect(persisted?.blockerContent ?? "").not.toContain("notes.ts");
+			expect(evaluateGitGuard(runtime, cacheManager, cwd).block).toBe(true);
+
+			// The blocker is fixed; the clean sibling was never the gate's business.
+			fs.writeFileSync(blocking, "safeAlpha();\n");
+			editDispatch(runtime, cacheManager, cwd, blocking, []);
+
+			expect(runtime.gitGuardCacheUnknownReason).toBeUndefined();
+			expect(evaluateGitGuard(runtime, cacheManager, cwd)).toEqual({
+				block: false,
+			});
+		} finally {
+			env.cleanup();
+		}
+	});
+
 	it("#3282: the suppression notice in a section header is not read as a path", async () => {
 		// `Unresolved from this turn — <path> (suppressed by disposition: 1
 		// finding(s)):` (`clients/runtime-turn.ts:1085`) carries its own `": "`.
