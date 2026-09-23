@@ -107,10 +107,8 @@ const credoRunner: RunnerDefinition = {
 		);
 
 		const output = `${result.stdout ?? ""}${result.stderr ?? ""}`;
-		const parsed = parseToolRun(
-			"credo",
-			{ result, output },
-			(raw) => parseCredoJson(raw, ctx.filePath, cwd),
+		const parsed = parseToolRun("credo", { result, output }, (raw) =>
+			parseCredoJson(raw, ctx.filePath, cwd),
 		);
 		if (parsed.skipped) return parsed.skipped;
 		return finishParsedRun({

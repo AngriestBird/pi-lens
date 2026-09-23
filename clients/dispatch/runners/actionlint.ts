@@ -118,10 +118,8 @@ const actionlintRunner: RunnerDefinition = {
 		);
 
 		const output = `${result.stdout ?? ""}${result.stderr ?? ""}`;
-		const parsed = parseToolRun(
-			"actionlint",
-			{ result, output },
-			(raw) => parseActionlintJson(raw, ctx.filePath),
+		const parsed = parseToolRun("actionlint", { result, output }, (raw) =>
+			parseActionlintJson(raw, ctx.filePath),
 		);
 		if (parsed.skipped) return parsed.skipped;
 		return finishParsedRun({
