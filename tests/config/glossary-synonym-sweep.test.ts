@@ -904,7 +904,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/runtime-coordinator.ts": 25,
 		"clients/runtime-session.ts": 15,
 		"clients/runtime-tool-call.ts": 22,
-		"clients/runtime-tool-result.ts": 21,
+		"clients/runtime-tool-result.ts": 22,
 		"clients/runtime-turn.ts": 25,
 		"clients/rust-client.ts": 5,
 		"clients/safe-spawn.ts": 26,
