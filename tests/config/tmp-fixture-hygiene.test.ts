@@ -20,6 +20,11 @@ import {
 	tmpHygieneExcludeLiveOwnerEntries,
 	tmpHygieneWaitForOwnerDrain,
 	tmpHygieneUnadmittedEntries,
+	classifyTmpHygieneOwner,
+	formatTmpHygieneOwnerSummary,
+	realTmpHygieneProcessProbe,
+	TMP_HYGIENE_OWNER_STALE_MS,
+	type TmpHygieneProcessProbe,
 } from "../support/vitest-setup.js";
 import { setupTestEnvironment } from "../clients/test-utils.js";
 import {
@@ -117,18 +122,14 @@ function ownerForTmpEntry(entry: string): string | undefined {
 	return owner;
 }
 
-function processStartTime(pid: number): string {
-	const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
-	const commEnd = stat.lastIndexOf(")");
-	return stat
-		.slice(commEnd + 2)
-		.trim()
-		.split(/\s+/)[19] as string;
-}
-
 describe("tmp-fixture-hygiene", () => {
 	afterAll(async () => {
-		const liveOwners = await tmpHygieneWaitForOwnerDrain();
+		const scan = await tmpHygieneWaitForOwnerDrain();
+		const liveOwners = scan.live;
+		// Bounded observability (#3186): ONE census line per hygiene run, not one
+		// record per marker, so a suppressed or attributed entry is explicable
+		// from the run's own output.
+		process.stderr.write(`${formatTmpHygieneOwnerSummary(scan)}\n`);
 		const { testFile, leftovers } = tmpHygieneLeakReport();
 		const attributable = tmpHygieneExcludeLiveOwnerEntries(
 			leftovers,
@@ -555,50 +556,290 @@ describe("tmp-fixture-hygiene", () => {
 		).toBe(false);
 	});
 
-	it("does not red a live scratch owner, then reds it after the owner drains", async () => {
-		// #3186 mutation proof: removing the live-owner filter makes the first
-		// assertion red, while removing the second assertion would hide a real
-		// post-drain leak. PID 1 is a stable live process and its start time binds
-		// the marker to this exact PID lifetime; removing the marker models the
-		// owner's completed cleanup drain.
-		const owner = "config/tmp-fixture-hygiene.test.ts";
-		const marker = path.join(
-			process.env.PI_LENS_HOME as string,
-			"tmp-hygiene-owners",
-			`${process.env.PI_LENS_TMP_HYGIENE_RUN_ID}-scratch.json`,
-		);
-		const scratch = fs.mkdtempSync(
-			path.join(os.tmpdir(), "pi-lens-scratch-3186-"),
-		);
-		fs.writeFileSync(
-			marker,
-			JSON.stringify({
+	// #3186 round 3. Every case below is one cell of the platform × owner-state
+	// table in PR #3297's body. The recurrence each prevents is named per case;
+	// the class recurrence is HIGH-3297-V1 — round 2 authenticated owner markers
+	// with `/proc/<pid>/stat` as the SOLE gate, so on darwin/win32 every marker
+	// was written without a start time and then rejected, the live-owner arm was
+	// unavailable for all workers, and the hygiene owner reported another
+	// worker's still-draining fixture as a leak (the original #3186 defect).
+	//
+	// The process boundary is the ONLY thing doubled: markers, their heartbeat
+	// mtimes and the directory scan are real, so a `fs` mock cannot launder the
+	// heartbeat these cases are about.
+	describe("owner-marker liveness across platforms (#3186)", () => {
+		const OWNER = "config/tmp-fixture-hygiene.test.ts";
+		const ownerDir = (): string =>
+			path.join(process.env.PI_LENS_HOME as string, "tmp-hygiene-owners");
+
+		function writeOwnerMarker(
+			suffix: string,
+			body: unknown,
+			opts: { runId?: string; ageMs?: number } = {},
+		): string {
+			const file = path.join(
+				ownerDir(),
+				`${opts.runId ?? process.env.PI_LENS_TMP_HYGIENE_RUN_ID}-${suffix}.json`,
+			);
+			fs.writeFileSync(
+				file,
+				typeof body === "string" ? body : JSON.stringify(body),
+			);
+			if (opts.ageMs !== undefined) {
+				const seconds = (Date.now() - opts.ageMs) / 1000;
+				fs.utimesSync(file, seconds, seconds);
+			}
+			return file;
+		}
+
+		/** A platform with no process start time at all (darwin, win32). */
+		const noStartTimes: TmpHygieneProcessProbe = {
+			startTimeSupported: false,
+			startTimeOf: () => undefined,
+			isAlive: () => true,
+		};
+		/** A platform that has start times, observing `observed` for the pid. */
+		const withStartTimes = (
+			observed: string | undefined,
+		): TmpHygieneProcessProbe => ({
+			startTimeSupported: true,
+			startTimeOf: () => observed,
+			isAlive: () => true,
+		});
+
+		async function suppressed(
+			probe: TmpHygieneProcessProbe,
+		): Promise<{ attributed: string[]; live: string[]; counts: unknown }> {
+			const scan = await tmpHygieneWaitForOwnerDrain(50, probe);
+			return {
+				attributed: tmpHygieneExcludeLiveOwnerEntries(
+					["pi-lens-owner-cell-3186"],
+					() => OWNER,
+					scan.live,
+				),
+				live: [...scan.live],
+				counts: scan.counts,
+			};
+		}
+
+		it("suppresses a live worker on a platform with no process start times", async () => {
+			// F1 / HIGH-3297-V1: darwin and win32 write markers with no startTime.
+			// Rejecting them all is the round-2 defect this case exists to catch.
+			const marker = writeOwnerMarker("cell-live-nostart", {
 				pid: 1,
-				startTime: processStartTime(1),
-				file: owner,
-			}),
-		);
-		try {
-			const live = await tmpHygieneWaitForOwnerDrain(50);
+				file: OWNER,
+			});
+			try {
+				expect((await suppressed(noStartTimes)).attributed).toEqual([]);
+				fs.rmSync(marker, { force: true });
+				expect((await suppressed(noStartTimes)).attributed).toEqual([
+					"pi-lens-owner-cell-3186",
+				]);
+			} finally {
+				fs.rmSync(marker, { force: true });
+			}
+		});
+
+		it("attributes a start-time-less marker on a platform that has start times", async () => {
+			// F9 / MEDIUM-3297-2: the reviewer's hand-written `{"pid":1,...}` marker
+			// must not suppress on Linux, where the setup always records a start
+			// time. The heartbeat must not soften this direction.
+			const marker = writeOwnerMarker("cell-nostart-linux", {
+				pid: 1,
+				file: OWNER,
+			});
+			try {
+				expect((await suppressed(withStartTimes("900"))).attributed).toEqual([
+					"pi-lens-owner-cell-3186",
+				]);
+			} finally {
+				fs.rmSync(marker, { force: true });
+			}
+		});
+
+		it("attributes a marker whose pid was reused by another process", async () => {
+			// F2: same pid, different process lifetime.
+			const marker = writeOwnerMarker("cell-reused", {
+				pid: 1,
+				startTime: "900",
+				file: OWNER,
+			});
+			try {
+				expect((await suppressed(withStartTimes("4321"))).attributed).toEqual([
+					"pi-lens-owner-cell-3186",
+				]);
+				// ...and the matching lifetime is the one that suppresses.
+				expect((await suppressed(withStartTimes("900"))).attributed).toEqual(
+					[],
+				);
+			} finally {
+				fs.rmSync(marker, { force: true });
+			}
+		});
+
+		it("attributes a marker whose heartbeat stopped, on every platform", async () => {
+			// F3: a SIGKILLed worker stops beating. This is the bound that holds
+			// where no start time exists, so it is asserted on BOTH platform cells
+			// with every other check passing.
+			const marker = writeOwnerMarker(
+				"cell-stale-heartbeat",
+				{ pid: 1, startTime: "900", file: OWNER },
+				{ ageMs: TMP_HYGIENE_OWNER_STALE_MS + 60_000 },
+			);
+			try {
+				expect((await suppressed(noStartTimes)).attributed).toEqual([
+					"pi-lens-owner-cell-3186",
+				]);
+				expect((await suppressed(withStartTimes("900"))).attributed).toEqual([
+					"pi-lens-owner-cell-3186",
+				]);
+			} finally {
+				fs.rmSync(marker, { force: true });
+			}
+		});
+
+		it("attributes a marker whose pid is gone", async () => {
+			// F2 (dead-pid arm): the portable liveness check, the only immediate
+			// orphan signal where no start time exists.
+			const marker = writeOwnerMarker("cell-dead-pid", {
+				pid: 1,
+				file: OWNER,
+			});
+			try {
+				expect(
+					(await suppressed({ ...noStartTimes, isAlive: () => false }))
+						.attributed,
+				).toEqual(["pi-lens-owner-cell-3186"]);
+			} finally {
+				fs.rmSync(marker, { force: true });
+			}
+		});
+
+		it("ignores a marker from a previous run", async () => {
+			// F4: a stale run's marker is neither live nor attributed here.
+			const marker = writeOwnerMarker(
+				"cell-foreign",
+				{ pid: 1, file: OWNER },
+				{ runId: "run-3186-previous" },
+			);
+			try {
+				const result = await suppressed(noStartTimes);
+				expect(result.attributed).toEqual(["pi-lens-owner-cell-3186"]);
+				expect(result.live).toEqual([]);
+				expect(
+					(result.counts as Record<string, number>).foreign,
+				).toBeGreaterThanOrEqual(1);
+			} finally {
+				fs.rmSync(marker, { force: true });
+			}
+		});
+
+		it("attributes malformed markers without throwing", async () => {
+			// F5: half-written JSON and a marker missing its owner file must never
+			// suppress and must never fail the hygiene owner's own teardown.
+			const bad = writeOwnerMarker("cell-bad-json", '{"pid":1,"file"');
+			const shapeless = writeOwnerMarker("cell-no-file", { pid: 1 });
+			try {
+				const result = await suppressed(noStartTimes);
+				expect(result.attributed).toEqual(["pi-lens-owner-cell-3186"]);
+				expect(result.live).toEqual([]);
+				expect(
+					(result.counts as Record<string, number>).malformed,
+				).toBeGreaterThanOrEqual(2);
+			} finally {
+				fs.rmSync(bad, { force: true });
+				fs.rmSync(shapeless, { force: true });
+			}
+		});
+
+		it("attributes only the drained owner when two owners share the entry set", async () => {
+			// F8: the filter is per entry by owner, so one live owner never
+			// suppresses a second, drained owner's leftovers.
+			const live = new Set(["clients/alpha.test.ts"]);
+			const owners: Record<string, string> = {
+				"pi-lens-alpha-1": "clients/alpha.test.ts",
+				"pi-lens-beta-1": "clients/beta.test.ts",
+			};
 			expect(
 				tmpHygieneExcludeLiveOwnerEntries(
-					[path.basename(scratch)],
-					() => owner,
+					["pi-lens-alpha-1", "pi-lens-beta-1"],
+					(entry) => owners[entry],
 					live,
 				),
-			).toEqual([]);
-			fs.rmSync(marker, { force: true });
-			const drained = await tmpHygieneWaitForOwnerDrain(50);
+			).toEqual(["pi-lens-beta-1"]);
+		});
+
+		it("records one census line per hygiene run, not one per marker", () => {
+			// Bounded observability: the record the afterAll writes is this exact
+			// line, and it is a census, so N markers never produce N records.
 			expect(
-				tmpHygieneExcludeLiveOwnerEntries(
-					[path.basename(scratch)],
-					() => owner,
-					drained,
+				formatTmpHygieneOwnerSummary({
+					live: new Set(["clients/alpha.test.ts"]),
+					counts: {
+						live: 1,
+						orphaned: 2,
+						malformed: 3,
+						foreign: 4,
+						self: 1,
+					},
+				}),
+			).toBe(
+				"[tmp-hygiene-owners] live=1 orphaned=2 malformed=3 foreign=4 self=1",
+			);
+		});
+
+		it("declares start-time support exactly when this host's markers carry one", () => {
+			// The V1 shape stated as an invariant: `startTimeSupported` is measured
+			// against THIS process, so it can never be true while the setup writes
+			// markers without a start time (which is what made every marker on
+			// darwin/win32 unauthenticatable in round 2).
+			const probe = realTmpHygieneProcessProbe();
+			const ownMarker = JSON.parse(
+				fs.readFileSync(
+					path.join(
+						ownerDir(),
+						`${process.env.PI_LENS_TMP_HYGIENE_RUN_ID}-${process.pid}.json`,
+					),
+					"utf8",
 				),
-			).toEqual([path.basename(scratch)]);
-		} finally {
-			fs.rmSync(marker, { force: true });
-			fs.rmSync(scratch, { recursive: true, force: true });
-		}
+			) as { startTime?: string };
+			expect(typeof ownMarker.startTime === "string").toBe(
+				probe.startTimeSupported,
+			);
+			expect(
+				classifyTmpHygieneOwner({
+					runMatches: true,
+					marker: { pid: 1, startTime: ownMarker.startTime, file: OWNER },
+					markerMtimeMs: Date.now(),
+					nowMs: Date.now(),
+					selfPid: process.pid,
+					probe: { ...probe, startTimeOf: () => ownMarker.startTime },
+					staleAfterMs: TMP_HYGIENE_OWNER_STALE_MS,
+				}),
+			).toBe("live");
+		});
+
+		it("keeps the worker heartbeat fresh while the worker runs", () => {
+			// F6/F3 producer side: the marker this worker published is beaten from
+			// the test lifecycle, so a sibling owner reading its REAL mtime right
+			// now classifies it live. No timer is involved, and the assertion is on
+			// the verdict rather than on an elapsed-time delta.
+			const own = path.join(
+				ownerDir(),
+				`${process.env.PI_LENS_TMP_HYGIENE_RUN_ID}-${process.pid}.json`,
+			);
+			expect(
+				classifyTmpHygieneOwner({
+					runMatches: true,
+					// pid swapped so this reads as a SIBLING's marker, not "self".
+					marker: { pid: 1, file: OWNER },
+					markerMtimeMs: fs.statSync(own).mtimeMs,
+					nowMs: Date.now(),
+					selfPid: process.pid,
+					probe: noStartTimes,
+					staleAfterMs: TMP_HYGIENE_OWNER_STALE_MS,
+				}),
+			).toBe("live");
+		});
 	});
 });
