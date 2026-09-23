@@ -62,6 +62,7 @@ jobs:
           cp scripts/test-history-rollup.mjs "$script_copy"
           git fetch origin data/test-history || true
           for attempt in 1 2 3; do
+            echo "test-history push attempt ${attempt}/3"
             git checkout --detach "$GITHUB_SHA"
             old_history="$RUNNER_TEMP/test-history.ndjson"
             : > "$old_history"

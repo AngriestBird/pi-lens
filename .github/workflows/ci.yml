@@ -355,11 +355,15 @@ jobs:
         run: node scripts/with-memory-watch.mjs -- npm test -- --reporter=default --reporter=json --outputFile=${{ runner.temp }}/vitest-results.json
 
       # Listener input for #3215. The default reporter remains explicit above,
-      # so this adds a file reporter without changing the existing console
-      # stream or npm/vitest exit status.
+      # so this adds a file reporter in the same invocation and preserves the
+      # existing result sections and npm/vitest exit status. Vitest also emits
+      # its documented `JSON report written to ...` line; the workflow test
+      # pins that additive console contract.
       - name: Write test-history artifact metadata
         if: always()
-        run: 'node -e "require(\"node:fs\").writeFileSync(process.env.RUNNER_TEMP + \"/test-history-metadata.json\", JSON.stringify({headSha: process.env.GITHUB_SHA, runId: process.env.GITHUB_RUN_ID, lane: \"linux\", recordedAt: new Date().toISOString()}))"'
+        env:
+          HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+        run: 'node -e "require(\"node:fs\").writeFileSync(process.env.RUNNER_TEMP + \"/test-history-metadata.json\", JSON.stringify({headSha: process.env.HEAD_SHA, runId: process.env.GITHUB_RUN_ID, lane: \"linux\", recordedAt: new Date().toISOString()}))"'
 
       - name: Upload per-file test results
         if: always()

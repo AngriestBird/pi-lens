@@ -212,7 +212,10 @@ export function rollupTestHistory({
 	return output;
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (
+	process.argv[1] &&
+	import.meta.url === pathToFileURL(process.argv[1]).href
+) {
 	try {
 		const options = parseArgs(process.argv.slice(2));
 		const output = rollupTestHistory({
