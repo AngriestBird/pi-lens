@@ -764,11 +764,10 @@ const LSP_FIXTURES = [
 	},
 	{
 		lang: "fsharp",
-		// #3311: build the copied project before fsautocomplete is touched so the
-		// server sees the project it is expected to load.
-		lspGate: true,
-		lspGateMarker: 'let gateSeed : int = "not a number"',
-		setup: "dotnet build app.fsproj --nologo",
+		// Fresh ubuntu-latest run 35912920685: fsautocomplete's project build
+		// succeeded, but the server still returned no diagnostic for the seed.
+		lspGateExempt:
+			"fsautocomplete returns no diagnostic even after successfully loading the built fixture project (35912920685); see #3311",
 		dir: "tests/fixtures/tool-smoke/fsharp",
 		file: "Program.fs",
 		serverHint: "fsautocomplete",
@@ -887,11 +886,10 @@ const LSP_FIXTURES = [
 	},
 	{
 		lang: "elixir",
-		// #3311: compile the copied Mix project before ElixirLS is touched so the
-		// server can load the project and report the seeded undefined call.
-		lspGate: true,
-		lspGateMarker: "undefined_function()",
-		setup: "mix compile",
+		// Fresh ubuntu-latest run 35912920685: ElixirLS remained silent after
+		// compiling the Mix project, so this is a server behavior exemption.
+		lspGateExempt:
+			"ElixirLS publishes no diagnostic for the undefined call even after Mix compilation (35912920685); see #3311",
 		dir: "tests/fixtures/tool-smoke/elixir",
 		file: "bad.ex",
 		serverHint: "elixir-ls",
@@ -900,11 +898,10 @@ const LSP_FIXTURES = [
 	{
 		// Expert is an alternate Elixir primary. Disabling ElixirLS makes this
 		// fixture exercise Expert's managed GitHub binary through initialize.
-		// #3311: compile the copied Mix project before Expert is touched so the
-		// server can load the project and report the seeded undefined call.
-		lspGate: true,
-		lspGateMarker: "undefined_function()",
-		setup: "mix compile",
+		// Fresh ubuntu-latest run 35912920685: Expert remained silent after
+		// compiling the Mix project, so this is a server behavior exemption.
+		lspGateExempt:
+			"Expert publishes no diagnostic for the undefined call even after Mix compilation (35912920685); see #3311",
 		lang: "expert",
 		dir: "tests/fixtures/tool-smoke/elixir",
 		file: "bad.ex",
@@ -985,12 +982,11 @@ const LSP_FIXTURES = [
 	},
 	{
 		lang: "vue",
-		// #3311: @vue/language-server needs a workspace-local TypeScript SDK to
-		// resolve the script block's type error. Install it in the copied fixture,
-		// matching the existing typescript7 setup shape.
-		lspGate: true,
-		lspGateMarker: "<template><div></template>",
-		setup: "npm install typescript@5 vue@3 --no-save --no-audit --no-fund",
+		// Fresh ubuntu-latest run 35912920685: Vue remained silent after the
+		// copied workspace installed TypeScript and Vue dependencies and used a
+		// parser defect, so this is a server behavior exemption.
+		lspGateExempt:
+			"@vue/language-server publishes no diagnostic for the parser defect with workspace TypeScript/Vue dependencies installed (35912920685); see #3311",
 		dir: "tests/fixtures/tool-smoke/vue",
 		file: "App.vue",
 		serverHint: "@vue/language-server",
@@ -998,11 +994,11 @@ const LSP_FIXTURES = [
 	},
 	{
 		lang: "svelte",
-		// #3311: provide the TypeScript SDK and Svelte package in the copied
-		// workspace so the server can type-check the script block on the runner.
-		lspGate: true,
-		lspGateMarker: 'let count: number = "not a number";',
-		setup: "npm install typescript@5 svelte@4 --no-save --no-audit --no-fund",
+		// Fresh ubuntu-latest run 35912920685: Svelte remained silent after the
+		// copied workspace installed TypeScript and Svelte dependencies, so this
+		// is a server behavior exemption.
+		lspGateExempt:
+			"svelte-language-server publishes no diagnostic for the TypeScript seed with workspace dependencies installed (35912920685); see #3311",
 		dir: "tests/fixtures/tool-smoke/svelte",
 		file: "App.svelte",
 		serverHint: "svelte-language-server",
