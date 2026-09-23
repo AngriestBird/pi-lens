@@ -308,7 +308,7 @@ describe("#3274: the turn-end scanner reads are bounded and shared", () => {
 		expect(phaseRecords("scanner_cache_read_abandoned")).toEqual([]);
 	});
 
-	it("leaves no scanner deadline armed when the turn returns (F9)", async () => {
+	it("starts only reads it awaits, so no deadline outlives the turn (F9)", async () => {
 		// #3305 review H3305-1. Each read arms a 3000 ms `bounded()` deadline;
 		// `bounded()` clears it in its own try/finally BEFORE the promise the
 		// composer awaits settles, so a read the composer started and awaited is
@@ -322,8 +322,15 @@ describe("#3274: the turn-end scanner reads are bounded and shared", () => {
 		// count also sees timers this hook neither owns nor awaits — measured on
 		// this very turn: 12 timers armed, all 12 cleared, and the count still
 		// reads 1 (a timer armed through a channel a `globalThis.setTimeout`
-		// probe does not intercept). The ledger is the signature of a LEAKED
-		// DEADLINE specifically.
+		// probe does not intercept).
+		//
+		// The LIVE half is the read count: a `void readScannerCache(...)` planted
+		// in the composer reds it (`expected [ 'govulncheck', 'trivy', …(2) ] to
+		// have a length of 3 but got 4`). The ledger half is a belt whose red
+		// needs an orphan read that also never settles — stated rather than
+		// claimed, because an orphan read of a MISSING store settles on its own
+		// and its deadline is cleared with it (measured: the same planted call
+		// with this floor lifted leaves the ledger empty).
 		warmStores();
 		vi.useFakeTimers();
 		try {

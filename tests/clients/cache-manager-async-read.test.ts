@@ -23,7 +23,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { CacheManager } from "../../clients/cache-manager.js";
 import { bounded } from "../../clients/deadline-utils.js";
@@ -133,6 +133,36 @@ describe("#3274 CacheManager.readCacheAsync", () => {
 		expect(
 			cacheManager.readCache("aged", tmpDir, ageMs + 60_000),
 		).not.toBeNull();
+	});
+
+	it("keeps an envelope at EXACTLY maxAgeMs, and drops it one ms later — both seams (F10)", async () => {
+		// #3305 review M3305-1: the shared `freshAgeMs` compares `age > maxAgeMs`,
+		// and nothing redded when that became `>=`. The boundary is the whole
+		// content of a TTL rule, and it has to hold IDENTICALLY on the two seams
+		// while #3300 migrates callers across — a delivery that reads one store
+		// through each method must not see it fresh and stale at once.
+		vi.useFakeTimers();
+		try {
+			const written = new Date("2026-08-18T07:00:00.000Z");
+			vi.setSystemTime(written);
+			cacheManager.writeCache("boundary", { findings: [] }, tmpDir);
+
+			// age === maxAgeMs exactly: still fresh, on both seams.
+			vi.setSystemTime(new Date(written.getTime() + 1_000));
+			expect(cacheManager.readCache("boundary", tmpDir, 1_000)).not.toBeNull();
+			expect(
+				await cacheManager.readCacheAsync("boundary", tmpDir, 1_000),
+			).not.toBeNull();
+
+			// One millisecond past it: stale, on both seams.
+			vi.setSystemTime(new Date(written.getTime() + 1_001));
+			expect(cacheManager.readCache("boundary", tmpDir, 1_000)).toBeNull();
+			expect(
+				await cacheManager.readCacheAsync("boundary", tmpDir, 1_000),
+			).toBeNull();
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
 	it("returns null — never a throw — for a corrupt store (F4)", async () => {
