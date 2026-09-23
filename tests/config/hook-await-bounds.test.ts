@@ -1355,6 +1355,25 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"build itself still runs inside the hook.",
 		owner: "#2523 slice 2",
 	},
+	// #1892: the composer awaits the govulncheck lane's `collect`. Unlike the
+	// secrets lane's below, this one has NOTHING to bound: it reads one already-
+	// memoized `readScannerCache` entry and returns the freshness declaration.
+	// The `Promise` is the `TurnEndLane` interface's shape, not work — one
+	// lane's collect does classify (and IS bounded, inside that lane), so the
+	// stage is async for every lane. Wrapping a synchronous cache read in
+	// `bounded()` would register a turn_end budget spend against a
+	// `Promise.resolve`, which is a false claim about where the turn's time can
+	// go. This exemption is the honest form: if this lane ever gains real work,
+	// the key changes and the sweep re-flags it.
+	"clients/runtime-turn.ts#400606a9~3e6599a2": {
+		family: "hook-await",
+		site: "turn_end",
+		reason:
+			"The govulncheck lane's `collect`: one memoized cache read and a " +
+			"freshness declaration, no I/O and no spawn. Async only because the " +
+			"TurnEndLane stage is; there is no operation here to bound.",
+		owner: "#1892",
+	},
 	"clients/runtime-turn.ts#5b570c81~b2f3321c": {
 		family: "hook-await",
 		site: "turn_end",
@@ -1398,8 +1417,11 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 	// `call:clients/turn-end/lanes/secrets.ts#blockingGitleaksFindings:…` with
 	// the same `HOOK_WALL_BUDGET_MS.turn_end` and the same signal, threaded
 	// through `TurnEndLaneContext.signal`. Wrapping the composer's await in a
-	// second `bounded()` would double-count the same budget.
-	"clients/runtime-turn.ts#bfc0f48e~360b2af5": {
+	// second `bounded()` would double-count the same budget. (#1892 govulncheck
+	// round: the occurrence key's trailing hash moved `360b2af5` → `e4101d9d`
+	// because the govulncheck lane's `collect` now precedes this await; the
+	// site, the bound and the reason are unchanged.)
+	"clients/runtime-turn.ts#bfc0f48e~e4101d9d": {
 		family: "hook-await",
 		site: "turn_end",
 		reason:

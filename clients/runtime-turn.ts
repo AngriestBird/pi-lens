@@ -44,9 +44,9 @@ import {
 	SWEEP_IDLE_SAFETY_MARGIN_MS,
 } from "./lsp/workspace-sweep-hold.js";
 import { isTestRoleCollateral } from "./collateral-test-role.js";
-import type { GovulncheckResult } from "./govulncheck-client.js";
 import type { TrivyResult } from "./trivy-client.js";
 import { isSecretWarning, secretLocationKey } from "./secret-findings.js";
+import { govulncheckLane } from "./turn-end/lanes/govulncheck.js";
 import { secretsLane } from "./turn-end/lanes/secrets.js";
 import type { TurnEndLaneContext } from "./turn-end/lane.js";
 import type { KnipClient, KnipIssue, KnipResult } from "./knip-client.js";
@@ -63,7 +63,6 @@ import {
 	writeProjectDiagnosticsDeltaReport,
 } from "./project-diagnostics/cache.js";
 import { deadCodeIssueToProjectDiagnostic } from "./project-diagnostics/runner-adapters/dead-code.js";
-import { govulncheckFindingToProjectDiagnostic } from "./project-diagnostics/runner-adapters/govulncheck.js";
 import { trivyFindingToProjectDiagnostic } from "./project-diagnostics/runner-adapters/trivy.js";
 import { knipIssuesToProjectDiagnostics } from "./project-diagnostics/runner-adapters/knip.js";
 import type { ProjectDiagnostic } from "./project-diagnostics/types.js";
@@ -1978,14 +1977,21 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		peekActionableWarnings: () => runtime.peekActionableWarnings(),
 	};
 
-	// govulncheck — surface session_start-cached Go CVE findings as advisory.
-	// No per-turn re-run in this slice; the cache refreshes at next session_start.
-	const govCacheEntry = readScannerCache<GovulncheckResult>("govulncheck");
+	// govulncheck — the session_start-cached Go CVE store, delivered as ONE
+	// advisory tier by the govulncheck LANE
+	// (`clients/turn-end/lanes/govulncheck.ts`), which owns every rule this block
+	// used to state inline: the `onMissing: "demote"` freshness declaration and
+	// its first-filename-frame `citedPath` (#1622 H1), the disposition anchor
+	// over BOTH freshness arms (#1694 F1), the stale-line withholding and marker,
+	// the module/package fallback, the fix hint and the display cap. No per-turn
+	// re-run in this slice; the cache refreshes at next session_start. Like every
+	// lane it does NOT gate itself — the freshness pass below is shared.
+	const govSources = await govulncheckLane.collect(laneCtx);
 	const trivyCacheEntry = readScannerCache<TrivyResult>("trivy");
 	// The secrets lane (`clients/turn-end/lanes/secrets.ts`) reads the gitleaks
 	// and trivy stores, classifies, and states the freshness policy its rows
 	// need; every rendering and disposition rule for the two secrets tiers lives
-	// there. It does NOT gate itself — the freshness pass below is shared.
+	// there. It does NOT gate itself either.
 	const secretsSources = await secretsLane.collect(laneCtx);
 	// #1892: ONE freshness pass for the three cached scanner stores that cite a
 	// file. Each store keeps its own `scannedAt` and its own `onMissing` — the
@@ -1994,15 +2000,6 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	// a deleted path cannot reach gitleaks, which must drop it. What IS shared
 	// is the filesystem: one `statSync` per unique cited path per delivery, one
 	// stat budget, and one bounded drop/demote record instead of up to six.
-	//
-	// #1622 on govulncheck: it renders a call site as `file:line`, and the cache
-	// is a session_start snapshot — the same stale-line shape as gitleaks, one
-	// tier lower. A CVE is pinned by go.mod, NOT by the call site, so neither an
-	// edit nor a deletion may drop it: `onMissing: "demote"` routes a vanished
-	// traced file into the same arm as an edited one. (Review round H1: the
-	// first cut let a deleted trace file drop the CVE, and `citedPath` reads
-	// only the FIRST filename frame — so one deleted file in a long trace
-	// silently killed a CVE that go.mod still pins.)
 	//
 	// #1461 slice 1 (#1460) on gitleaks: the cache is TTL-only, so a finding for
 	// a file deleted after the scan was served as a 🔴 blocker for the rest of
@@ -2016,59 +2013,27 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	// but loses its line number: the credential may still be there, just not
 	// where the snapshot says. Dropping instead would let any edit — malicious
 	// or accidental — mute a real secret.
-	const govCacheFindings = govCacheEntry?.data?.findings ?? [];
 	const scannerGates = gateFindingsByPathFreshness({
 		cwd,
 		sources: {
-			govulncheck: {
-				findings: govCacheFindings,
-				scannedAt: govCacheEntry?.data?.scannedAt,
-				citedPath: (finding: (typeof govCacheFindings)[number]) =>
-					finding.trace.find((frame) => frame.filename)?.filename,
-				onMissing: "demote",
-			},
+			...govSources,
 			...secretsSources,
 		},
 	});
 	const govGate = scannerGates.govulncheck;
 	const gitleaksGate = scannerGates.gitleaks;
 	const trivySecretsGate = scannerGates["trivy-secrets"];
-	const govStale = new Set(govGate.stale);
-	// #1625 review round: the #1622 freshness gate runs FIRST — the disposition
-	// filter's anchor is derived from each finding's post-demotion identity
-	// (this array is already the gate's live+stale partition, never the raw
-	// pre-gate cache). #1627's own post-gate guard (`if (govFindings.length)`)
-	// and this round's disposition guard are the SAME guard — compose them,
-	// never fall back to a raw-cache-length check (that would print the header
-	// with zero rows beneath it whenever either filter empties the list).
-	const govFiltered = filterFindingsByDisposition(
-		[...govGate.live, ...govGate.stale],
-		cwd,
-		(f) => govulncheckFindingToProjectDiagnostic(cwd, f),
+	const govDelivery = govulncheckLane.render(
+		govulncheckLane.gate({ govulncheck: govGate }, laneCtx),
+		laneCtx,
 	);
-	recordDispositionSuppressed("govulncheck", govFiltered.suppressed);
-	const govFindings = govFiltered.kept;
-	if (govFindings.length) {
-		const findings = govFindings.slice(0, 5);
-		let report =
-			"🛡️ Go CVEs reachable from this code (govulncheck) — upgrade where possible:\n";
-		for (const f of findings) {
-			const callSite = f.trace.find((t) => t.filename);
-			const stale = govStale.has(f);
-			const where = callSite?.filename
-				? `${toRunnerDisplayPath(cwd, callSite.filename)}${!stale && callSite.line ? `:${callSite.line}` : ""}${stale ? ` ${STALE_LINE_MARKER}` : ""}`
-				: (f.module ?? f.packageName ?? "(module)");
-			const fix = f.fixedVersion
-				? ` — upgrade to ${f.fixedVersion} or later`
-				: " — no fix yet, track upstream";
-			report += `  ${f.osv} (${where})${fix}\n`;
-		}
-		if (govFindings.length > findings.length) {
-			report += `  … and ${govFindings.length - findings.length} more\n`;
-		}
-		// @delivery-surface: runtime-turn:govulncheck-advisory
-		advisoryParts.push(report);
+	for (const [store, count] of Object.entries(
+		govDelivery.dispositionSuppressed ?? {},
+	)) {
+		recordDispositionSuppressed(store, count);
 	}
+	// @delivery-surface: runtime-turn:govulncheck-advisory
+	advisoryParts.push(...(govDelivery.advisoryParts ?? []));
 
 	// Secrets — UNIFIED surfacing (#131 Mode 3). gitleaks, trivy secret, and the
 	// ast-grep hardcoded-secret rules can each flag the SAME line with different
