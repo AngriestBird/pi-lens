@@ -142,9 +142,17 @@ CRITICAL (`:2141`), the secrets lane (`:2099`) and cascade (`:1340`) do not.
 > `Unresolved from this turn — <path>[ (suppressed by disposition: N
 > finding(s))]:` — and every following line up to the next attribution line or
 > the next ZERO-LENGTH line is its rendered body, attributing nothing. The text
-> is attributable iff no line precedes the first section and every section's
-> file is named in `blockingFiles`. A clean per-file dispatch may clear the text
-> iff every section in it is that file's.
+> is attributable iff at least one line opens a section, no line precedes the
+> first section, and every section's file is named in `blockingFiles`. A clean
+> per-file dispatch may clear the text iff every section in it is that file's.
+>
+> Zero sections is UNATTRIBUTED, never clean (#3287 round 2, HIGH-3287-1): text
+> that is non-empty but all-blank opens nothing, and reading that as "nothing
+> left to attribute" let a clean dispatch of an unrelated file delete a record
+> whose `blockingFiles` named a different file. A record with no blocker text at
+> all never reaches the parse — `syncGitGuardRecord` gates on
+> `existing?.blockerContent` being truthy — so the genuine clean case is decided
+> before this contract applies.
 
 One-directional on purpose. A bijection between sections and `blockingFiles` was
 #3282's second cause: the composer persists `blockingFiles: affectedFiles`
@@ -153,7 +161,10 @@ diagnostics — so any turn that edited a clean file alongside a blocking one wa
 judged untrusted for the rest of the session. The extra direction guarded
 nothing either: the clear now asks about the sections themselves, so a
 `blockingFiles` entry with no section, a duplicate section and a duplicate
-`blockingFiles` entry cannot make it drop a blocker another file owns.
+`blockingFiles` entry cannot make it drop a blocker another file owns. Requiring
+`blockingFiles` to be NON-EMPTY is subsumed for the same reason once at least
+one section is required, so that clause is gone too: an empty provenance list
+cannot own a section.
 
 Fail direction (AGENTS.md shape 48): an unattributable line keeps `unknown`. The
 harm it prevents is a live CVE or leaked secret being cleared out of the gate by
