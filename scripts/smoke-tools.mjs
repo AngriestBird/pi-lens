@@ -746,8 +746,12 @@ const LSP_FIXTURES = [
 	},
 	{
 		lang: "csharp",
-		lspGate: true,
-		lspGateMarker: 'int x = "not a number";',
+		// Measured on ubuntu-latest: the identical fixture produced one primary
+		// finding in run 35897633475 and none in run 35899592839. Keep this row
+		// out of the nightly gate until csharp-ls makes that result stable; this
+		// joins #3311's measured exemption list.
+		lspGateExempt:
+			"flaky on the runner: green on 35897633475, red on 35899592839; see https://github.com/apmantza/pi-lens/actions/runs/35899592839 and #3311",
 		dir: "tests/fixtures/tool-smoke/csharp",
 		file: "Program.cs",
 		serverHint: "csharp-ls",
@@ -755,8 +759,11 @@ const LSP_FIXTURES = [
 	},
 	{
 		lang: "fsharp",
-		lspGate: true,
-		lspGateMarker: "let gateSeed : int = undefined_function()",
+		// Measured on ubuntu-latest: fsautocomplete returned no diagnostic for
+		// the undefined-function seed even with app.fsproj present, because it
+		// did not load the project. This joins #3311's measured exemption list.
+		lspGateExempt:
+			"fsautocomplete does not load the fixture project on the runner, even with app.fsproj; see https://github.com/apmantza/pi-lens/actions/runs/35899592839 and #3311",
 		dir: "tests/fixtures/tool-smoke/fsharp",
 		file: "Program.fs",
 		serverHint: "fsautocomplete",
@@ -875,8 +882,11 @@ const LSP_FIXTURES = [
 	},
 	{
 		lang: "elixir",
-		lspGate: true,
-		lspGateMarker: "undefined_function()",
+		// Measured on ubuntu-latest: ElixirLS stays silent because mix.exs is a
+		// declaration, not a compiled Mix project. This joins #3311's measured
+		// exemption list.
+		lspGateExempt:
+			"ElixirLS stays silent because mix.exs is not a compiled Mix project; see https://github.com/apmantza/pi-lens/actions/runs/35899592839 and #3311",
 		dir: "tests/fixtures/tool-smoke/elixir",
 		file: "bad.ex",
 		serverHint: "elixir-ls",
