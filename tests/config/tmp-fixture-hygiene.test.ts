@@ -1078,8 +1078,14 @@ describe("tmp-fixture-hygiene", () => {
 			try {
 				for (const run of ["one", "two", "three"]) {
 					process.env.PI_LENS_TMP_HYGIENE_RUN_ID = `reap-3332-${run}`;
-					const marker = path.join(ownerDir, `${process.env.PI_LENS_TMP_HYGIENE_RUN_ID}-1.json`);
-					const manifest = path.join(recordDir, `tmp-hygiene-files-${process.env.PI_LENS_TMP_HYGIENE_RUN_ID}.log`);
+					const marker = path.join(
+						ownerDir,
+						`${process.env.PI_LENS_TMP_HYGIENE_RUN_ID}-1.json`,
+					);
+					const manifest = path.join(
+						recordDir,
+						`tmp-hygiene-files-${process.env.PI_LENS_TMP_HYGIENE_RUN_ID}.log`,
+					);
 					fs.writeFileSync(marker, JSON.stringify({ pid: 1, file: OWNER }));
 					fs.writeFileSync(manifest, `${OWNER}\n`);
 					fs.utimesSync(marker, old, old);
@@ -1103,7 +1109,8 @@ describe("tmp-fixture-hygiene", () => {
 					"tmp-hygiene-files-reap-3332-three.log",
 				]);
 			} finally {
-				if (originalRunId === undefined) delete process.env.PI_LENS_TMP_HYGIENE_RUN_ID;
+				if (originalRunId === undefined)
+					delete process.env.PI_LENS_TMP_HYGIENE_RUN_ID;
 				else process.env.PI_LENS_TMP_HYGIENE_RUN_ID = originalRunId;
 				fs.rmSync(ownerDir, { recursive: true, force: true });
 				fs.rmSync(recordDir, { recursive: true, force: true });
