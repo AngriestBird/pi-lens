@@ -31,12 +31,7 @@
 // covering test), this builds only and skips the test run — never silently
 // skips the build too.
 import { execFileSync, spawn } from "node:child_process";
-import {
-	appendFileSync,
-	existsSync,
-	readFileSync,
-	readdirSync,
-} from "node:fs";
+import { appendFileSync, existsSync, readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { quoteForWindowsCmd } from "./with-test-lock.mjs";
@@ -273,7 +268,9 @@ export async function main() {
 	const skipBuild = process.argv.includes("--skip-build");
 
 	if (skipBuild) {
-		console.log("[pre-push] build already completed; skipping duplicate build.");
+		console.log(
+			"[pre-push] build already completed; skipping duplicate build.",
+		);
 	} else {
 		console.log("[pre-push] building...");
 		runInherit("npm", ["run", "build"], { needsShimShell: true });

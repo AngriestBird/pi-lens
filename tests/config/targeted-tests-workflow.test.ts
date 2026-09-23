@@ -8,12 +8,19 @@ const WORKFLOW_PATH = resolve(ROOT, ".github/workflows/ci.yml");
 
 function readWorkflow() {
 	return yaml.load(readFileSync(WORKFLOW_PATH, "utf8")) as {
-		jobs: Record<string, {
-			name?: string;
-			if?: string;
-			"continue-on-error"?: boolean;
-			steps?: Array<{ uses?: string; run?: string; with?: Record<string, unknown> }>;
-		}>;
+		jobs: Record<
+			string,
+			{
+				name?: string;
+				if?: string;
+				"continue-on-error"?: boolean;
+				steps?: Array<{
+					uses?: string;
+					run?: string;
+					with?: Record<string, unknown>;
+				}>;
+			}
+		>;
 	};
 }
 
@@ -23,7 +30,9 @@ describe("targeted advisory workflow contract (#3215)", () => {
 		expect(job?.name).toBe("Targeted tests (advisory)");
 		expect(job?.if).toBe("github.event_name == 'pull_request'");
 		expect(job?.["continue-on-error"]).toBe(true);
-		const checkout = job?.steps?.find((step) => step.uses?.startsWith("actions/checkout@"));
+		const checkout = job?.steps?.find((step) =>
+			step.uses?.startsWith("actions/checkout@"),
+		);
 		expect(checkout?.uses).toBe(
 			"actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
 		);
@@ -45,7 +54,9 @@ describe("targeted advisory workflow contract (#3215)", () => {
 		const runs = job?.steps?.map((step) => step.run).filter(Boolean) ?? [];
 		expect(runs).toContain("npm install --no-audit --no-fund");
 		expect(runs).toContain("npm run build");
-		expect(runs).toContain("node scripts/pre-push-targeted-tests.mjs --skip-build");
+		expect(runs).toContain(
+			"node scripts/pre-push-targeted-tests.mjs --skip-build",
+		);
 		expect(selector).toContain("GITHUB_STEP_SUMMARY");
 		expect(selector).toContain("cap exceeded");
 	});
