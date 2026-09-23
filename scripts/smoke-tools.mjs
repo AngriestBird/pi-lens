@@ -479,7 +479,7 @@ const LSP_FIXTURES = [
 	{
 		lang: "python",
 		lspGate: true,
-		lspGateMarker: "import os",
+		lspGateMarker: 'gate_seed: int = "not a number"',
 		dir: "tests/fixtures/tool-smoke/python",
 		file: "bad.py",
 		serverHint: "pyright",
@@ -565,7 +565,7 @@ const LSP_FIXTURES = [
 	{
 		lang: "html",
 		lspGate: true,
-		lspGateMarker: "<div>",
+		lspGateMarker: "colr: red;",
 		dir: "tests/fixtures/tool-smoke/html",
 		file: "bad.html",
 		serverHint: "vscode-html-language-server",
@@ -574,7 +574,7 @@ const LSP_FIXTURES = [
 	{
 		lang: "dockerfile",
 		lspGate: true,
-		lspGateMarker: "FROM ubuntu",
+		lspGateMarker: "COPY only-one-argument",
 		dir: "tests/fixtures/tool-smoke/dockerfile",
 		file: "Dockerfile",
 		serverHint: "docker-langserver",
@@ -605,6 +605,7 @@ const LSP_FIXTURES = [
 		lang: "markdown",
 		lspGate: true,
 		lspGateMarker: "./does-not-exist.md",
+		gitInit: true,
 		dir: "tests/fixtures/tool-smoke/markdown",
 		file: "bad.md",
 		serverHint: "marksman",
