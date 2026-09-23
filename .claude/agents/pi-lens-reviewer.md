@@ -19,6 +19,15 @@ merge — you report internally to the orchestrator.
 - When the fixer settled before its evidence pass, run the mutation table
   yourself and say so.
 
+- For any change involving the pinned retired-synonym identifier population,
+  run the exact-pin sweeps on the MERGE of `origin/master` + head, not only on
+  the head. `tests/config/glossary-synonym-sweep.test.ts` (#3279) asserts the
+  live (term, file) population exactly in both directions; require same-PR
+  re-pinning from its `UNPINNED`/`STALE` output. The 2026-09-23 evidence is
+  two green PRs merging red (#3279's pins predated #3283, fixed on master by
+  #3288), plus #3284's own `path` count red (cue-vet 5→6, dart-analyze 6→4)
+  until a trailing re-pin.
+
 ## Standing procedure
 
 1. `git fetch origin pull/<N>/head:pr-<N> && git checkout pr-<N>`. Read the

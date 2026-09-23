@@ -63,7 +63,9 @@ moved lines; include only structural views that changed.
    them, absent is not green); every failing check
    was read and judged (infra failures — codeload 429/503, SARIF-upload
    errors, Initialize-CodeQL outages — may be waved through only with the
-   log read and the judgment recorded).
+   log read and the judgment recorded). A PR that is green on its head but
+   whose merge with `origin/master` was not tested against the exact-pin
+   sweeps is not green — run the sweep on the merge before merging.
 5. **Merge.** `gh pr merge <N> --merge` (merge commit, repo convention).
    If "not up to date", `gh api -X PUT .../pulls/<N>/update-branch`, wait for
    CI, re-gate, merge. On GitHub 503s: retry with backoff, never switch to
@@ -204,6 +206,7 @@ operator's private notes, so a different orchestrator can run the same train.
   | a field on a durable or shared record (cache entry, diagnostic, ledger row) | old-record parse proof, cache schema version, and every test that deep-equals or snapshots the record — #2783 r1/r3 |
   | a test that spawns a real child (LSP fake server, tool smoke, installer) | the lane admission (header + `vitest.config.ts` project + coverage baseline) and `tests/config/` — #2783 r5 |
   | a new fixture under `tests/fixtures/` | the fixture-contract sweeps for that directory (style-preserving, population guards) — #2782 r2 |
+  | a change that touches identifier uses of a glossary-retired synonym | run `tests/config/glossary-synonym-sweep.test.ts` on the head AND on the merge with `origin/master`, then re-pin in the PR from the sweep's own `UNPINNED`/`STALE` output — #3279, #3283, #3284, #3288 |
   | a new `vi.mock` in a test file | run `tests/config/vi-mock-export-sweep.test.ts`; whole-module mocks of a production module must spread `importOriginal` — PR #3268's CI red, fixed by trailing commit `621d61c5c` |
   | a changelog fragment | front matter `section: <Section>` and exactly one top-level `- **Title (refs #N)** —` entry, never `CHANGELOG.md`, validated by `node scripts/check-changelog-fragments.mjs` — PR #3268 r1 shipped `category:` and a paragraph |
   | a PR body | the header gate: exactly one-sentence `## Why`, `## Notes for the reviewer`, `## Change outline`, plus Summary / Tests with `### Test assessment` / Blast radius / Class sweep / Observability; run `node scripts/check-pr-body.mjs --lint-local` before pushing — three PRs this week needed orchestrator body edits |

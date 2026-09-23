@@ -19,6 +19,15 @@ instructions say so.
   orchestrator had to commit the tree.
 - A whole-module `vi.mock` of a production module must spread `importOriginal`.
   Run `tests/config/vi-mock-export-sweep.test.ts`.
+- Exact-pin sweeps and merge state: `tests/config/glossary-synonym-sweep.test.ts`
+  (#3279) pins the live retired-synonym identifier population per (term, file)
+  exactly, in both directions. If a change adds or removes one of the pinned
+  identifier uses, run the sweep on the head and on the merge of
+  `origin/master` + head before pushing, then re-pin in the same PR using the
+  sweep's own `UNPINNED`/`STALE` output. On 2026-09-23, two green PRs merged
+  red (#3279's pins predated #3283, leaving master red until #3288), and #3284
+  was red on its own `path` count changes (cue-vet 5→6, dart-analyze 6→4)
+  until an orchestrator trailing commit re-pinned.
 
 ### Failure list before code
 
