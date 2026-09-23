@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { getProjectDataDir } from "../../file-utils.js";
+import { pathsEqual } from "../../path-utils.js";
 import { safeSpawnAsync } from "../../safe-spawn.js";
 import { resolveRunnerCwd } from "../../tool-cwd.js";
 import { PRIORITY } from "../priorities.js";
@@ -50,15 +51,16 @@ function parseElixirOutput(
 
 	// elixirc reports paths RELATIVE to its cwd (e.g. `bad.ex`, not the absolute
 	// path we passed), so resolve the reported path against the runner cwd — not
-	// process.cwd(). Elixir 1.16+ also normalizes to a lowercase drive letter and
-	// forward slashes (`c:/...`), which never string-equals `C:\...` on Windows,
-	// so compare case-insensitively there.
-	const matchesTarget = (sourcePath: string): boolean => {
-		const resolved = path.resolve(cwd, sourcePath.trim());
-		return process.platform === "win32"
-			? resolved.toLowerCase() === resolvedTarget.toLowerCase()
-			: resolved === resolvedTarget;
-	};
+	// process.cwd(). Two resolved spellings of ONE file still differ in ways
+	// only the filesystem can settle — Elixir 1.16+ normalizes to a lowercase
+	// drive letter and forward slashes (`c:/...`), which never string-equals
+	// `C:\...` on Windows — so ask `pathsEqual`, the repo's on-disk identity
+	// seam, instead of hand-rolling a win32 case fold here. It folds case
+	// exactly where the filesystem does and nowhere else, which a
+	// `process.platform` test cannot express; `terragrunt.ts:90` asks the same
+	// question the same way (#1193).
+	const matchesTarget = (sourcePath: string): boolean =>
+		pathsEqual(path.resolve(cwd, sourcePath.trim()), resolvedTarget);
 
 	for (let index = 0; index < lines.length; index++) {
 		const line = lines[index];
