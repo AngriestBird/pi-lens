@@ -127,7 +127,11 @@ function parseDartMachineOutput(
 		// The `endsWith` outer arm this replaces was inert on the target (a
 		// string ends with itself) and an over-merge risk everywhere else: any
 		// reported path whose TAIL spelled the absolute target attached to it.
-		if (!pathsEqual(path.resolve(cwd, file.trim()), absTarget)) continue;
+		// `file` is `parts[3]`, which `tsconfig.strict-indexed.json`
+		// (`noUncheckedIndexedAccess`) types as `string | undefined` even behind the
+		// `parts.length < 8` guard above — the strictness ratchet pins that, so the
+		// optional chain stays.
+		if (!pathsEqual(path.resolve(cwd, file?.trim() ?? ""), absTarget)) continue;
 
 		const severity =
 			severityStr?.trim().toLowerCase() === "error" ? "error" : "warning";
