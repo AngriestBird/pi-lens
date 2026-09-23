@@ -341,9 +341,9 @@ describe("vitest JsonReporter contract the CI producer relies on", () => {
 			result: { state: "pass" },
 			tasks: [test],
 		};
-		await reporter.onTestRunEnd([
-			{ task: fileTask },
-		] as unknown as Parameters<JsonReporter["onTestRunEnd"]>[0]);
+		await reporter.onTestRunEnd([{ task: fileTask }] as unknown as Parameters<
+			JsonReporter["onTestRunEnd"]
+		>[0]);
 
 		// The exact additive console contract the `Run tests` step accepts: one
 		// line, that text, the resolved output path — and nothing else.
