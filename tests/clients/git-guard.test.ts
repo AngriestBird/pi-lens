@@ -765,7 +765,16 @@ describe("git-guard", () => {
 
 			syncGitGuardRecord(runtime, cache, env.tmpDir, files[0]);
 
-			expect(evaluateGitGuard(runtime, cache, env.tmpDir).block).toBe(true);
+			// WHICH fail-closed answer matters: the record names a file its own
+			// provenance omits, so it is not a record the gate may rewrite — it is
+			// untrusted. Asserting only `block: true` let the ownership check be
+			// deleted with the suite green (#3282 mutation M7), because the
+			// section-ownership rule below refuses the clear on its own.
+			expect(evaluateGitGuard(runtime, cache, env.tmpDir)).toMatchObject({
+				block: true,
+				unknown: true,
+				reason: expect.stringContaining("blocking_provenance_untrusted"),
+			});
 		} finally {
 			env.cleanup();
 		}
@@ -939,6 +948,62 @@ describe("git-guard", () => {
 				block: true,
 				unknown: true,
 			});
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("#3282: a clean dispatch clears only the sections that are ITS file's", () => {
+		// The clear is a PER-FILE authority claim — `syncGitGuardRecord` is called
+		// with one `editedFilePath` from three sites — and it must not exceed the
+		// file it is about. The record here is the turn-end composer's own shape
+		// for a two-file turn (`clients/runtime-turn.ts:1085`, persisted at
+		// `:4291`), with both files in `blockingFiles`, so it is fully trusted:
+		// nothing but the ownership rule stands between a clean dispatch of `a.ts`
+		// and `b.ts`'s blocker being dropped out of the gate.
+		//
+		// The blocker map is empty here on purpose. Today's writers keep it in step
+		// with the record — every path that removes an entry resyncs, and the
+		// composer rewrites the record from the surviving set — so this state is
+		// not one a session reaches; the rule is pinned at the seam it belongs to
+		// rather than through a caller that cannot express it.
+		const env = setupTestEnvironment("pi-lens-git-guard-3282-own-section-");
+		try {
+			const files = ["a.ts", "b.ts"].map((name) => path.join(env.tmpDir, name));
+			for (const file of files) fs.writeFileSync(file, "const x = 1;\n");
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			runtime.setTelemetryIdentity({ sessionId: "session-A" });
+			const cache = new CacheManager(false);
+			const sections = files
+				.map(
+					(file, index) =>
+						`Unresolved from this turn — ${file}:\n${productionSummary(file, [`issue ${index + 1} is unsafe`])}`,
+				)
+				.join("\n\n");
+			writeGitGuardRecord(
+				cache,
+				runtime,
+				env.tmpDir,
+				record({
+					content: sections,
+					blockerContent: sections,
+					hasBlockers: true,
+					affectedFiles: files,
+					blockingFiles: files,
+					sessionId: "session-A",
+				}),
+			);
+
+			syncGitGuardRecord(runtime, cache, env.tmpDir, files[0]);
+
+			expect(runtime.gitGuardCacheUnknownReason).toBeUndefined();
+			const after = cache.readCache<Partial<TurnEndFindingsCache>>(
+				"turn-end-findings",
+				env.tmpDir,
+			)?.data;
+			expect(after?.blockerContent ?? "").toContain("issue 2 is unsafe");
+			expect(evaluateGitGuard(runtime, cache, env.tmpDir).block).toBe(true);
 		} finally {
 			env.cleanup();
 		}
