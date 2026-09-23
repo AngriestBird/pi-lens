@@ -227,6 +227,8 @@ export function configSearchDirs(
  *                                    canonical spelling, unchanged). This is
  *                                    the tier that fires when NOTHING exists
  *                                    yet.
+ *   When tiers 2 and 3 both exist, tier 2 still wins and the loader emits one
+ *   bounded shadowing notice naming the winning and shadowed paths (#3299).
  *
  * Probe errors are NOT treated as absent (#3251 review H2, defect shape 48):
  * an unstatable candidate (ENOTDIR when a file sits where a directory
@@ -250,6 +252,8 @@ export interface GlobalConfigResolution {
 	readonly path: string;
 	/** Which resolution tier decided. */
 	readonly source: GlobalConfigLocationSource;
+	/** The lower-precedence agent-dir file present while the legacy file won. */
+	readonly shadowedPath?: string;
 	/**
 	 * Set ONLY on the `*-unprobed` sources: the existence probe for `path`
 	 * THREW, the tier was retained (fail closed — a silent source switch
@@ -384,6 +388,13 @@ export function resolveGlobalConfigLocation(
 	const agentPath = agentDir ? agentConfigPathFor(agentDir) : undefined;
 	const legacyProbe = probe(legacyDefault);
 	if (legacyProbe === "present") {
+		if (agentPath !== undefined && probe(agentPath) === "present") {
+			return {
+				path: legacyDefault,
+				source: "legacy-default-existing",
+				shadowedPath: agentPath,
+			};
+		}
 		return { path: legacyDefault, source: "legacy-default-existing" };
 	}
 	if (legacyProbe === "error") {

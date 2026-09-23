@@ -136,6 +136,12 @@ describe("global config location resolution", () => {
 		const resolution = resolveGlobalConfigLocation({ homeDir: home });
 		expect(resolution.source).toBe("pi-lens-config-path");
 		expect(resolution.path).toBe(path.resolve(override));
+		loadPiLensGlobalConfig();
+		expect(
+			getDegradationSummary().some(
+				(candidate) => candidate.kind === "config-location-shadowed",
+			),
+		).toBe(false);
 	});
 
 	it("a legacy ~/.pi-lens/config.json stays authoritative while it exists, even when the agent-dir file also exists (production)", () => {
@@ -150,7 +156,39 @@ describe("global config location resolution", () => {
 		expect(resolveGlobalConfigLocation()).toEqual({
 			path: path.join(home, ".pi-lens", "config.json"),
 			source: "legacy-default-existing",
+			shadowedPath: globalConfigPath,
 		});
+	});
+
+	it("records one bounded notice when both global config files exist", () => {
+		// Regression for #3299: selecting the grandfathered legacy file must not
+		// silently hide a separately-created agent-dir configuration.
+		const maintainerHome = os.homedir();
+		const home = makeTempHome();
+		adoptHomeEnv(home);
+		const legacyPath = writeLegacyConfig(home);
+		const { agentDir, globalConfigPath } = agentDirFixture(home);
+		fs.mkdirSync(path.dirname(globalConfigPath), { recursive: true });
+		fs.writeFileSync(globalConfigPath, "{}");
+		const realHomeConfigBefore = fs.existsSync(
+			path.join(maintainerHome, ".pi-lens"),
+		);
+		const realAgentDir = process.env.PI_CODING_AGENT_DIR;
+		resetGlobalConfigLocationCache();
+
+		loadPiLensGlobalConfig();
+		loadPiLensGlobalConfig();
+
+		const group = getDegradationSummary().find(
+			(candidate) => candidate.kind === "config-location-shadowed",
+		);
+		expect(group?.count).toBe(1);
+		expect(group?.latestReasons[0]?.subject).toBe(legacyPath);
+		expect(group?.latestReasons[0]?.reason).toContain(globalConfigPath);
+		expect(fs.existsSync(path.join(maintainerHome, ".pi-lens"))).toBe(
+			realHomeConfigBefore,
+		);
+		expect(realAgentDir).toBe(agentDir);
 	});
 
 	it("the agent-dir file wins only when it EXISTS and the legacy default is missing (opt-in by creation)", () => {

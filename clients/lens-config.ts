@@ -219,6 +219,23 @@ function reportGlobalConfigProbeRetention(): void {
 	});
 }
 
+/** Report a lower-precedence global config that exists beside the winner. */
+function reportGlobalConfigShadowing(): void {
+	const resolution = getProductionGlobalConfigResolution();
+	if (resolution.shadowedPath === undefined) return;
+	recordDegradationOnce({
+		kind: "config-location-shadowed",
+		subject: resolution.path,
+		reason: `shadowed global config ${resolution.shadowedPath}; winning path is the record subject`,
+		metadata: {
+			subsystem: "lens-config",
+			configPath: resolution.path,
+			shadowedPath: resolution.shadowedPath,
+		},
+		code: "PILENS_CFG_0010",
+	});
+}
+
 export function loadPiLensGlobalConfig(
 	configPath?: string,
 ): PiLensGlobalConfig | undefined {
@@ -231,7 +248,10 @@ export function loadPiLensGlobalConfig(
 	// Explicit-path callers stay silent (#2427 quiet contract); the default
 	// parameter is evaluated FIRST so the body can tell derived from explicit.
 	const derivedPath = configPath === undefined;
-	if (derivedPath) reportGlobalConfigProbeRetention();
+	if (derivedPath) {
+		reportGlobalConfigProbeRetention();
+		reportGlobalConfigShadowing();
+	}
 	const resolvedPath = configPath ?? getPiLensGlobalConfigPath();
 	const location = globalCanonicalLocation();
 	// #2445: this used to be `JSON.parse(fs.readFileSync(...))` inside a bare
