@@ -667,8 +667,9 @@ const LSP_FIXTURES = [
 	},
 	{
 		lang: "php",
-		// #3217: intelephense DOES publish `Undefined variable '$naem'` — but it
-		// publishes an EMPTY set first, on didOpen, before its index is warm, and
+		// #3217: intelephense DOES publish an "Undefined variable" finding for the
+		// fixture's misspelled variable — but it publishes an EMPTY set first, on
+		// didOpen, before its index is warm, and
 		// pi-lens's push wait early-returns on the first publish. The gate reads
 		// 0 primary findings while a raw session sees the real diagnostic ~5s
 		// later. That is a wait-policy defect, not a fixture defect; tracked
