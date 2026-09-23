@@ -47,10 +47,7 @@ import type { GitleaksResult } from "../../clients/gitleaks-client.js";
 import { consumeTurnEndFindings } from "../../clients/runtime-context.js";
 import { _resetInstanceRegistryEnabledForTests } from "../../clients/instance-registry.js";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
-import {
-	cancelLSPIdleReset,
-	handleTurnEnd,
-} from "../../clients/runtime-turn.js";
+import { handleTurnEnd } from "../../clients/runtime-turn.js";
 import type { TrivyResult } from "../../clients/trivy-client.js";
 import { setupTestEnvironment } from "./test-utils.js";
 
