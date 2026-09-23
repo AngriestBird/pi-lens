@@ -307,7 +307,14 @@ const EXPECTED_RETIRED_IN_ONE_SENSE: readonly OneSenseRow[] = [
  */
 const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 	age: {
-		"clients/cache-manager.ts": 10,
+		// 10 -> 16 (#3274): `readCacheAsync` beside `readCache` and the shared
+		// `freshAgeMs` they both apply the TTL through. Every use is the literal
+		// elapsed-time sense (`maxAgeMs`, the envelope's `age`), which the
+		// glossary does NOT retire — `freshness` retires `age` only where
+		// REFERENCE DRIFT is meant, and none of these compare evidence against a
+		// reference. Renaming them would spell a TTL as a freshness verdict,
+		// which is the confusion the glossary exists to prevent.
+		"clients/cache-manager.ts": 16,
 		"clients/project-diagnostics/extractors.ts": 3,
 		"clients/runtime-coordinator.ts": 2,
 	},
