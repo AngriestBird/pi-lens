@@ -29,7 +29,8 @@ contract.
    CI-scoped switches and for the handful of tuning knobs that have no config key.
 2. **CLI flags** (`--no-lsp`, `--immediate-format`, …) — per-session, passed on
    the pi command line.
-3. **Config JSON** — a per-user global file (`~/.pi-lens/config.json`) and an
+3. **Config JSON** — a per-user global file selected by the
+   [global-location table](configuration.md#global-config-location) and an
    optional per-project file (`.pi-lens.json` at the repo root).
 
 Every runtime toggle is settable **both** from the CLI and from `config.json`;
@@ -149,9 +150,10 @@ field docs.
 
 ## Global vs project config
 
-### Global — `~/.pi-lens/config.json`
+### Global — winning location
 
-User-level. Applies to **every** project. Honors **all** flag keys from the
+User-level. The file is selected by the [global-location table](configuration.md#global-config-location)
+and applies to **every** project. It honors **all** flag keys from the
 table above plus the non-flag global knobs (`ignore`, `widget.visible`,
 `dispatch.runnerTimeoutFloorMs`, `format.mode`,
 `actionableWarnings.autoFix.maxFixes`). On Windows the path is
@@ -241,7 +243,7 @@ manager, or CI config. The handful you are most likely to reach for:
 - `PI_LENS_CONFIG_PATH` — point the global config file at an explicit path.
 - `PI_CODING_AGENT_DIR` — when pi sets it, `$PI_CODING_AGENT_DIR/extensions/
   pi-lens.json` is read when it exists and the default global config file does
-  not; settings editors create there when neither file exists.
+  not; pi-lens does not write the file.
 - `PI_LENS_MAX_PROJECT_FILES` — base project-size scale knob (default `2000`).
 - `PI_LENS_STARTUP_MODE` — force the startup path: `full`, `minimal`, or `quick`.
 
