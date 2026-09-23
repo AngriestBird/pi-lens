@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { stat } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
 import { BoundedFifoMap } from "./bounded-cache.js";
@@ -22,6 +22,8 @@ import {
 	applyDispositions,
 	getDisposition,
 	registerWidgetDispositionReconciler,
+	strictAnchorSpan,
+	strictAnchorSpansIn,
 	type Disposition,
 	type DispositionMarkTarget,
 } from "./diagnostic-dispositions.js";
@@ -166,28 +168,24 @@ export interface WidgetDiagnostic {
 	 * `lens_diagnostics mode=all` and `lens_diagnostic_mark`'s cross-check).
 	 *
 	 * Lifetime — a retained row is retired by, and ONLY by:
-	 * 1. the file changing on disk. The row keeps its ORIGINAL `observedAt`, so
-	 *    `reconcileStaleWidgetFiles`' per-entry `mtimeMs > observedAt` gate drops
-	 *    it exactly as it drops any other row observed against superseded bytes.
-	 *    **This is wider than the mark's own lifetime, and the window is stated
-	 *    rather than hidden (#3158 round 2 F3):** ANY edit to the file retires the
-	 *    row, including one that leaves the marked line byte-identical and the
-	 *    mark still applying — and nothing re-creates it, because later scans
+	 * 1. its MARK ceasing to apply to the file's current content (#3183). A row
+	 *    carrying an {@link WidgetDiagnostic.anchorSpan} is NOT gated on the
+	 *    file's mtime: `reconcileStaleWidgetFiles` asks the anchor instead — the
+	 *    row stands while the marked LINE is still somewhere in the file, and
+	 *    goes when it is not. Before #3183 this rule was the per-entry
+	 *    `mtimeMs > observedAt` gate, which is FILE-scoped where the mark is
+	 *    SPAN-scoped: ANY edit retired the row, including one that left the
+	 *    marked line byte-identical, and nothing re-created it (later scans
 	 *    filter the finding out and `reconcileWidgetDisposition` bails on an
-	 *    absent record. So the chip counts a mark until the file's next edit, not
-	 *    for as long as the mark stands. Narrowing rule 1 to "the mark stopped
-	 *    applying" means exempting retained rows from the mtime gate, which in
-	 *    turn requires `getFileDiagnosticSummaries` to stop projecting them —
-	 *    otherwise `mode=all`'s weak-fallback branch (used exactly when the mtime
-	 *    moved) would serve a strict-marked row as LIVE. That projection is
-	 *    consumed by `tools/lens-diagnostics.ts`'s mode=full merge; it is tracked
-	 *    as the #3158 remainder rather than done here;
+	 *    absent record) — so the chip counted a mark until the file's next edit
+	 *    rather than for as long as the mark stood. A row with no span — a
+	 *    WEAK-anchored `suppress` mark, which is intent-level and has no line to
+	 *    hash, or a row persisted by a pre-#3183 build — keeps the mtime gate
+	 *    exactly as before, so neither gains an axis with no content-bound
+	 *    retirement at all. Deletion of the file still drops the whole record;
 	 * 2. a later scan reporting the same finding again — the incoming entry
-	 *    matches by {@link retentionIdentity} (the weak anchor's identity parts)
-	 *    and wins, so a row is never both retained and live. This is also what
-	 *    retires a row whose strict `false-positive` anchor an edit to the marked
-	 *    LINE invalidated: the filter stops dropping the finding, the scan reports
-	 *    it, and the live entry replaces the retained one;
+	 *    matches by {@link retentionIdentity} and wins, so a row is never both
+	 *    retained and live;
 	 * 3. its mark ceasing to suppress it. `reconcileWidgetDisposition` drops a
 	 *    row carrying this flag rather than re-arming it as a live finding the
 	 *    last scan did not report;
@@ -197,15 +195,42 @@ export interface WidgetDiagnostic {
 	 * A retained row is never blocking: `isBlocking` answers `false` for any
 	 * `disposition`, so it cannot draw a footer ● row, cannot be hoisted past a
 	 * live finding by `capStoredDiagnostics`, and cannot enter the turn-end
-	 * blocker sweep (#3158 round 2 F1).
+	 * blocker sweep (#3158 round 2 F1). It is not a live finding either:
+	 * `getFileDiagnosticSummaries` stops projecting every `disposition` row
+	 * (#3183), so `mode=all`'s weak-fallback branch — reached exactly when the
+	 * file's mtime moved past the observation, and unable to match a STRICT
+	 * `false-positive` anchor — can never serve one as live.
 	 *
 	 * NOT stripped on session restore, unlike `stale`/`footerRetired`: those are
-	 * verdicts about one session's disk state, whereas both content-bound
-	 * retirement rules above outlive a resume — the mark is durable (the
-	 * `.pi-lens` disposition store) and the file's mtime is on disk, so a
-	 * restored row is re-evaluated by the same gates a live one is.
+	 * verdicts about one session's disk state, whereas every retirement rule
+	 * above outlives a resume — the mark is durable (the `.pi-lens` disposition
+	 * store) and the anchor span is content-bound, so a restored row is
+	 * re-evaluated by the same gates a live one is.
 	 */
 	suppressedRetained?: true;
+	/**
+	 * #3183: the SPAN component of the strict `false-positive` anchor behind this
+	 * row — `strictAnchorSpan` (`clients/diagnostic-dispositions.ts`) over the
+	 * content the mark was made against, i.e. the `lineContentHash` of the marked
+	 * line. Stamped by `reconcileWidgetDisposition`, the one seam that both tags a
+	 * row and has the content in hand.
+	 *
+	 * It is the row's own identity on the only axis that matters for its
+	 * lifetime, and it answers two questions no other stored field can:
+	 *
+	 * - "does the mark still apply?" — `reconcileStaleWidgetFiles` and
+	 *   `retainSuppressedRows` check the span against the file's CURRENT content
+	 *   (see retirement rule 1 above);
+	 * - "is this incoming finding the SAME one?" — see {@link retentionIdentity}.
+	 *
+	 * Only `false-positive` rows carry it. A `suppress` mark is WEAK-anchored —
+	 * `[tool, rule, message]` with no line content at all — so there is no span
+	 * to stamp and nothing the file's bytes could invalidate; those rows keep the
+	 * pre-#3183 behaviour on both questions. Absent on a row persisted by an
+	 * older build, and every reader treats absent as "fall back to the mtime
+	 * gate / the coarse identity" rather than as a licence to keep the row.
+	 */
+	anchorSpan?: string;
 }
 
 /**
@@ -395,8 +420,24 @@ export function reconcileWidgetDisposition(
 			(entry?.disposition === "false-positive" ||
 				entry?.disposition === "suppress")
 		) {
+			// #3183: stamp the strict anchor's own SPAN so the row's lifetime can
+			// later ask the mark instead of the file's mtime. `source` is the content
+			// the anchors above were derived from, so the span is the one the mark
+			// itself binds to. Only the STRICT arm has a span — a weak `suppress`
+			// mark hashes no line — and re-tagging always re-derives it, so a stale
+			// span from an earlier tag can never survive into a new disposition.
+			const { anchorSpan: _previousSpan, ...base } = diagnostic;
+			const span =
+				entry.disposition === "false-positive"
+					? strictAnchorSpan(source, diagnostic.line)
+					: undefined;
 			return [
-				{ ...diagnostic, disposition: entry.disposition, flagged: false },
+				{
+					...base,
+					disposition: entry.disposition,
+					flagged: false,
+					...(span === undefined ? {} : { anchorSpan: span }),
+				},
 			];
 		}
 		// #3158 retirement rule 3: a row the store holds ONLY because it was
@@ -409,6 +450,10 @@ export function reconcileWidgetDisposition(
 		const {
 			disposition: _disposition,
 			flagged: _flagged,
+			// #3183: a row that is no longer disposition-tagged has no mark to
+			// anchor, so its span goes with the tag — leaving it would exempt a LIVE
+			// row from the sweep's mtime gate.
+			anchorSpan: _anchorSpan,
 			...baseDiagnostic
 		} = diagnostic;
 		return entry?.disposition === "flagged"
@@ -900,6 +945,16 @@ function normalizeDiagnostics(
  * file — so it would discriminate nothing. `normalizeMessage` is the shared
  * derivation from `clients/finding-identity.ts` that the anchor uses, imported
  * rather than re-spelled.
+ *
+ * #3183: this identity is OCCURRENCE-BLIND, and for a STRICT (`false-positive`)
+ * row that is not enough on its own. Two findings of one rule with identical
+ * messages on different lines collapse onto it, so a scan reporting only the
+ * UNMARKED one matched the marked row and replaced it — the chip lost a mark
+ * that was still applying. A collision is therefore resolved by the second half
+ * of {@link WidgetDiagnostic.anchorSpan}'s contract, in `retainSuppressedRows`:
+ * only a colliding incoming finding sitting ON the marked line is the same
+ * finding. That test, not this one, is what keeps the round-2 F2 case above
+ * closed — the marked line's TEXT moved, so its span still matches.
  */
 function retentionIdentity(d: WidgetDiagnostic): string {
 	return JSON.stringify([
@@ -907,6 +962,31 @@ function retentionIdentity(d: WidgetDiagnostic): string {
 		d.rule ?? "",
 		normalizeMessage(d.message),
 	]);
+}
+
+/** `filePath`'s current content, or `undefined` when it cannot be read. */
+function readContentOrUndefined(filePath: string): string | undefined {
+	try {
+		return readFileSync(filePath, "utf8");
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * {@link strictAnchorSpansIn} over `filePath`'s current content (#3183), or
+ * `undefined` when it cannot be read. Async because its caller
+ * (`reconcileStaleWidgetFiles`) is the read-path sweep — never the typing path
+ * — and already awaits one `stat` per record.
+ */
+async function readAnchorSpans(
+	filePath: string,
+): Promise<Set<string> | undefined> {
+	try {
+		return strictAnchorSpansIn(await readFile(filePath, "utf8"));
+	} catch {
+		return undefined;
+	}
 }
 
 /**
@@ -930,8 +1010,45 @@ function retainSuppressedRows(
 ): WidgetDiagnostic[] {
 	const tagged = previous.filter((d) => d.disposition !== undefined);
 	if (tagged.length === 0) return incoming;
-	const reported = new Set(incoming.map(retentionIdentity));
-	const retained = tagged.filter((d) => !reported.has(retentionIdentity(d)));
+	const reported = new Map<string, WidgetDiagnostic[]>();
+	for (const d of incoming) {
+		const id = retentionIdentity(d);
+		const bucket = reported.get(id);
+		if (bucket) bucket.push(d);
+		else reported.set(id, [d]);
+	}
+	// #3183: the ONE file read on this path, and only for the state the coarse
+	// identity genuinely cannot resolve — a strict-anchored row whose identity an
+	// incoming finding collides with. Every other write (no marks at all, a mark
+	// with no collision, a weak `suppress` mark) stays zero-I/O, which is what
+	// keeps this off the per-edit `recordDiagnostics` cost.
+	const content = tagged.some(
+		(d) => d.anchorSpan !== undefined && reported.has(retentionIdentity(d)),
+	)
+		? readContentOrUndefined(filePath)
+		: undefined;
+	const spans = content === undefined ? undefined : strictAnchorSpansIn(content);
+	const retained = tagged.filter((d) => {
+		const collisions = reported.get(retentionIdentity(d));
+		// Nothing re-reported this finding, so retention rule 2 has nothing to say.
+		if (collisions === undefined) return true;
+		// No span to ask (a weak `suppress` mark, or a row from an older build), or
+		// the file is unreadable: fall back to the pre-#3183 coarse rule. The safe
+		// direction is to UNDER-count, never to leave a phantom duplicate standing
+		// beside a live finding.
+		if (d.anchorSpan === undefined || spans === undefined) return false;
+		// The mark stopped applying — its line is gone from the file — so the
+		// colliding finding IS this one, re-reported now that the filter no longer
+		// drops it (retirement rule 2, and the same verdict the sweep reaches).
+		if (!spans.has(d.anchorSpan)) return false;
+		// The mark still applies. Only a collision sitting ON the marked line is
+		// the same finding (its line number may have shifted under an edit — #3158
+		// round 2 F2); any other is a DIFFERENT occurrence this strict anchor never
+		// covered, and replacing the row with it loses a live mark (#3183).
+		return !collisions.some(
+			(i) => strictAnchorSpan(content, i.line) === d.anchorSpan,
+		);
+	});
 	if (retained.length > MAX_RETAINED_SUPPRESSED_PER_FILE) {
 		// Freshest observations win the cap. One record per FILE, never one per
 		// dropped row (AGENTS.md "bounded observability"): the chip under-counts
@@ -1345,12 +1462,34 @@ export async function reconcileStaleWidgetFiles(): Promise<number> {
 			// at dispatch/integration.ts). A missing per-entry stamp (a migrated
 			// pre-#1186 record) inherits the record's `touchedAt`. Tolerance matches
 			// the Windows host-clock skew rationale above.
-			const survivors = rec.allDiagnostics.filter((d) => {
-				const v = freshnessFromMtime({
+			const mtimeStale = (d: WidgetDiagnostic): boolean =>
+				freshnessFromMtime({
 					mtimeMs,
 					referenceMs: d.observedAt ?? rec.touchedAt,
-				});
-				return v.verdict !== "stale";
+				}).verdict === "stale";
+			// #3183: nothing this file's mtime can invalidate — no read, no change.
+			// This is also what keeps the debounced render sweep off the disk for
+			// every file that merely holds a mark.
+			if (!rec.allDiagnostics.some(mtimeStale)) {
+				return { mapKey, action: "keep" as const };
+			}
+			// A disposition-tagged row carrying a strict anchor span is gated on its
+			// MARK, not on the file's mtime (retirement rule 1 — see
+			// `WidgetDiagnostic.suppressedRetained`): it survives while the marked
+			// LINE is still somewhere in the file and is retired when it is not.
+			// Content is read at most once per record, and only once the mtime has
+			// actually moved on a record that holds such a row.
+			const anchored = rec.allDiagnostics.some(
+				(d) => d.anchorSpan !== undefined,
+			);
+			const spans = anchored
+				? await readAnchorSpans(rec.filePath)
+				: undefined;
+			const survivors = rec.allDiagnostics.filter((d) => {
+				if (d.anchorSpan !== undefined && spans !== undefined) {
+					return spans.has(d.anchorSpan);
+				}
+				return !mtimeStale(d);
 			});
 			if (survivors.length === rec.allDiagnostics.length) {
 				return { mapKey, action: "keep" as const }; // nothing stale
@@ -1706,10 +1845,14 @@ export interface FileDiagnosticSummary {
 	advisories: number;
 	hasFinalSnapshot: boolean;
 	/**
-	 * The full, uncapped diagnostics for this file (not limited by the TUI's
+	 * The full, uncapped LIVE diagnostics for this file (not limited by the TUI's
 	 * per-file storage cap). `blocking + errors + warnings` may exceed
 	 * `diagnostics.length` because a single diagnostic can be both blocking and
 	 * an error — these are the actual records, deduplicated by the runners.
+	 *
+	 * `disposition`-tagged rows are NOT here (#3183): they are what the
+	 * `suppressed: N` chip counts, not findings the last scan reported. See
+	 * {@link getFileDiagnosticSummaries}.
 	 */
 	diagnostics: WidgetDiagnostic[];
 }
@@ -1719,18 +1862,38 @@ export interface FileDiagnosticSummary {
  * Used by lens_diagnostics tool (mode: "all"). Exposes the FULL per-file
  * diagnostic set — decoupled from the widget's display cap — so the agent sees
  * everything, not just the 12 the TUI keeps for rendering.
+ *
+ * #3183: "everything" means every row a live scan stands behind.
+ * `disposition`-tagged rows are the store's own bookkeeping for a mark — the
+ * scan that produced this record did not report them — and they are excluded
+ * here. That is the same predicate `countDiagnostics` and `isBlocking` have
+ * always used, so this makes the projected array agree with the counts beside
+ * it; before #3183 the array disagreed, and once retirement rule 1 let a row
+ * outlive the file's mtime, `applyCachedDispositions` reached it in the
+ * WEAK-fallback branch — which can never match a STRICT `false-positive`
+ * anchor — and `mode=all` served a marked finding as a live warning (#3158 AC3).
+ * The exclusion lives HERE, at the one projection every cache-only surface and
+ * the mode=full merge read, rather than as a second disposition rule inside
+ * `summarizeDiagnostics`' tally: that tally still skips `stale` only, and the
+ * disposition filter still reaches it pre-applied through the shared
+ * `applyCachedDispositions` seam.
+ *
+ * Deliberately NOT applied to {@link getFileDiagnostics}, the per-file read:
+ * `reconcileWidgetDisposition` needs the tagged rows to enforce retirement
+ * rule 3, and `lens_diagnostic_mark`'s cross-check re-marks through them.
  */
 export function getFileDiagnosticSummaries(): FileDiagnosticSummary[] {
 	return [...files.values()].map((rec) => {
 		applyPastEofGate(rec);
+		const live = rec.allDiagnostics.filter((d) => d.disposition === undefined);
 		return {
 			filePath: rec.filePath,
 			blocking: rec.diagnosticCounts.blocking,
 			errors: rec.diagnosticCounts.errors,
 			warnings: rec.diagnosticCounts.warnings,
-			advisories: countAdvisories(rec.allDiagnostics),
+			advisories: countAdvisories(live),
 			hasFinalSnapshot: rec.hasFinalDiagnosticsSnapshot,
-			diagnostics: rec.allDiagnostics.map((d) => ({ ...d })),
+			diagnostics: live.map((d) => ({ ...d })),
 		};
 	});
 }

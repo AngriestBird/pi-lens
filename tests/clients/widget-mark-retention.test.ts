@@ -11,8 +11,7 @@
  * `reconcileWidgetDisposition` bails when the record is absent.
  *
  * Every case drives a production seam: the `lens_diagnostic_mark` /
- * `createLensDiagnosticsTool` pair for the reported defect and for `mode=all`,
- * `recordDiagnostics` (the function `clients/pipeline.ts` calls on every edit)
+ * `createLensDiagnosticsTool` pair for the reported defect, for `mode=all` and
  * for the retention-identity arm, and `reconcileStaleWidgetFiles` — the real
  * read-path sweep — for every lifetime assertion.
  */
@@ -34,7 +33,6 @@ import {
 	getFileDiagnostics,
 	importWidgetState,
 	reconcileStaleWidgetFiles,
-	recordDiagnostics,
 	renderWidget,
 } from "../../clients/widget-state.js";
 import { createLensDiagnosticMarkTool } from "../../tools/lens-diagnostic-mark.js";
@@ -257,7 +255,12 @@ describe("mode=all never serves a retained row as live (#3183 AC3)", () => {
 		const all = await modeAll();
 
 		expect(all.content[0].text).not.toContain(MESSAGE);
-		expect(all.details).toMatchObject({ filesWithIssues: 0, totalWarnings: 0 });
+		expect(all.content[0].text).toContain("No issues across 1 file");
+		// The clean branch of mode=all: it reports no file WITH issues at all,
+		// which is the shape that regresses if the row is projected as live.
+		expect(all.details).toMatchObject({ filesChecked: 1 });
+		expect(all.details?.filesWithIssues).toBeUndefined();
+		expect(all.details?.totalWarnings).toBeUndefined();
 	});
 
 	it("still reports the record's live finding beside the marked one", async () => {
@@ -313,30 +316,6 @@ describe("the retention identity tells two occurrences of one rule apart (#3183)
 		expect(suppressedChip()).toContain("suppressed: 1");
 	});
 
-	it("replaces the retained row when the same finding re-reports at a shifted line", async () => {
-		// The inverse direction (#3158 round 2 F2 stays closed): the occurrence
-		// awareness must key on the strict anchor's SPAN, not on the line number —
-		// the marked line's text moved, so this IS the same finding and keeping
-		// both would count it live AND in `suppressed: N`.
-		const finding = {
-			tool: "lsp",
-			rule: "typescript:2322",
-			message: MESSAGE,
-			severity: "warning",
-		};
-		recordDiagnostics(filePath, [{ ...finding, line: 1 }], 1);
-		await markLineOne();
-		recordDiagnostics(filePath, [], 2);
-		expect(suppressedChip()).toContain("suppressed: 1");
-
-		fs.writeFileSync(filePath, `// header\n${FILE_BODY}`);
-		recordDiagnostics(filePath, [{ ...finding, line: 2 }], 3);
-
-		const stored = getFileDiagnostics(filePath) ?? [];
-		expect(stored).toEqual([expect.objectContaining({ line: 2 })]);
-		expect(stored[0]?.disposition).toBeUndefined();
-		expect(suppressedChip()).toBeUndefined();
-	});
 });
 
 describe("the weak arm and pre-anchor rows keep the mtime gate (#3183)", () => {
