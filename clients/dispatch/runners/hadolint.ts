@@ -38,30 +38,27 @@ function parseHadolintOutput(
 		if (!Array.isArray(parsed)) return [];
 
 		const absTarget = path.resolve(cwd, filePath);
-		return (
-			parsed
-				// #3295: hadolint takes a LIST of Dockerfiles and names each finding's
-				// own `file`.
-				.filter(
-					(item) =>
-						!item.file || pathsEqual(path.resolve(cwd, item.file), absTarget),
-				)
-				.map((item) => {
-					const severity = item.level === "error" ? "error" : "warning";
-					return {
-						id: `hadolint-${item.code}-${item.line}`,
-						message: `[${item.code}] ${item.message}`,
-						filePath,
-						line: item.line,
-						column: item.column ?? 1,
-						severity,
-						semantic: severity === "error" ? "blocking" : "warning",
-						tool: "hadolint",
-						rule: item.code,
-						fixable: false,
-					};
-				})
-		);
+		return parsed.flatMap((item) => {
+			// #3295: hadolint takes a LIST of Dockerfiles and names each finding's
+			// own `file`.
+			if (item.file && !pathsEqual(path.resolve(cwd, item.file), absTarget))
+				return [];
+			const severity = item.level === "error" ? "error" : "warning";
+			return [
+				{
+					id: `hadolint-${item.code}-${item.line}`,
+					message: `[${item.code}] ${item.message}`,
+					filePath,
+					line: item.line,
+					column: item.column ?? 1,
+					severity,
+					semantic: severity === "error" ? "blocking" : "warning",
+					tool: "hadolint",
+					rule: item.code,
+					fixable: false,
+				},
+			];
+		});
 	} catch {
 		return [];
 	}

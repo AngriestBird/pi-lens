@@ -74,9 +74,9 @@ export function parseActionlintJson(
 	try {
 		const parsed = JSON.parse(trimmed) as ActionlintIssue[] | ActionlintIssue;
 		const issues = Array.isArray(parsed) ? parsed : [parsed];
-		return issues
-			.filter(isTarget)
-			.map((issue) => toDiagnostic(issue, filePath));
+		return issues.flatMap((issue) =>
+			isTarget(issue) ? [toDiagnostic(issue, filePath)] : [],
+		);
 	} catch {
 		// Some actionlint versions or wrappers may emit one JSON object per line.
 		const diagnostics: Diagnostic[] = [];

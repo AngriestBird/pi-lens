@@ -106,43 +106,46 @@ export function parseBiomeJson(
 		const absTarget = path.resolve(cwd, filePath);
 
 		return {
-			diagnostics: diagnostics
+			diagnostics: diagnostics.flatMap((d) => {
 				// #3295: `location.path` is biome's own name for the file each
 				// diagnostic is about; `biome.json` `files.includes` can widen the
 				// run past the argv.
-				.filter(
-					(d) =>
-						!d.location?.path ||
-						pathsEqual(path.resolve(cwd, d.location.path), absTarget),
+				if (
+					d.location?.path &&
+					!pathsEqual(path.resolve(cwd, d.location.path), absTarget)
 				)
-				.map((d) => {
+					return [];
+				{
 					const ruleName = biomeRuleNameFromCategory(d.category);
 					const fixKind = ruleName ? fixKindByRule?.get(ruleName) : undefined;
 					const isFixable = fixKind === "safe" || fixKind === "unsafe";
 
-					return {
-						id: `biome:${d.category}:${d.location.start.line}`,
-						message: d.message,
-						filePath,
-						line: d.location.start.line,
-						column: d.location.start.column,
-						severity: normalizeBiomeSeverity(d.severity),
-						semantic:
-							d.severity === "error" ? "blocking" : ("warning" as const),
-						tool: "biome",
-						rule: d.category,
-						fixable: isFixable,
-						// Mirrors `biomeClient.fixFileAsync`'s own `lint --write` call
-						// (no `--unsafe`, clients/biome-client.ts): the pipeline only
-						// ever applies SAFE fixes, so only "safe" earns autoFixAvailable.
-						autoFixAvailable:
-							fixKind === "safe" && (autofix?.safePipelineAutofix ?? false),
-						fixKind:
-							isFixable && autofix?.fixKind !== "none"
-								? autofix?.fixKind
-								: undefined,
-					};
-				}),
+					return [
+						{
+							id: `biome:${d.category}:${d.location.start.line}`,
+							message: d.message,
+							filePath,
+							line: d.location.start.line,
+							column: d.location.start.column,
+							severity: normalizeBiomeSeverity(d.severity),
+							semantic:
+								d.severity === "error" ? "blocking" : ("warning" as const),
+							tool: "biome",
+							rule: d.category,
+							fixable: isFixable,
+							// Mirrors `biomeClient.fixFileAsync`'s own `lint --write` call
+							// (no `--unsafe`, clients/biome-client.ts): the pipeline only
+							// ever applies SAFE fixes, so only "safe" earns autoFixAvailable.
+							autoFixAvailable:
+								fixKind === "safe" && (autofix?.safePipelineAutofix ?? false),
+							fixKind:
+								isFixable && autofix?.fixKind !== "none"
+									? autofix?.fixKind
+									: undefined,
+						},
+					];
+				}
+			}),
 		};
 	} catch (err) {
 		return {

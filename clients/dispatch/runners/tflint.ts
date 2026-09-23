@@ -64,15 +64,15 @@ function parseTflintOutput(
 		// the directory it ran in (`toolCwd`, which is the file's dir, not the
 		// runner cwd).
 		const absTarget = path.resolve(toolCwd, filePath);
-		return issues
-			.filter(
-				(issue) =>
-					!issue.range?.filename ||
-					pathsEqual(path.resolve(toolCwd, issue.range.filename), absTarget),
+		return issues.flatMap((issue) => {
+			if (
+				issue.range?.filename &&
+				!pathsEqual(path.resolve(toolCwd, issue.range.filename), absTarget)
 			)
-			.map((issue) => {
-				const severity = issue.rule.severity === "error" ? "error" : "warning";
-				return {
+				return [];
+			const severity = issue.rule.severity === "error" ? "error" : "warning";
+			return [
+				{
 					id: `tflint-${issue.rule.name}-${issue.range.start.line}`,
 					message: `[${issue.rule.name}] ${issue.message}`,
 					filePath,
@@ -83,8 +83,9 @@ function parseTflintOutput(
 					tool: "tflint",
 					rule: issue.rule.name,
 					fixable: false,
-				};
-			});
+				},
+			];
+		});
 	} catch {
 		return [];
 	}
