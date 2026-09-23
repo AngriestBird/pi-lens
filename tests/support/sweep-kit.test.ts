@@ -397,7 +397,7 @@ describe("sweep-kit: stripSource", () => {
 });
 
 describe("sweep-kit: listSourceFiles", () => {
-	const root = fs.mkdtempSync(path.join(os.tmpdir(), "sweep-kit-"));
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-sweep-kit-"));
 	afterAll(() => fs.rmSync(root, { recursive: true, force: true }));
 
 	fs.mkdirSync(path.join(root, "nested"), { recursive: true });

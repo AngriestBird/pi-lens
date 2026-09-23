@@ -24,6 +24,7 @@ import {
 	tmpHygieneWaitForOwnerDrain,
 	tmpHygieneUnadmittedEntries,
 	classifyTmpHygieneOwner,
+	reapStaleTmpHygieneRecords,
 	formatTmpHygieneOwnerSummary,
 	realTmpHygieneProcessProbe,
 	touchTmpHygieneOwnerMarker,
@@ -177,6 +178,47 @@ function literalHeadAt(
 	const body = raw.slice(open + 1, close);
 	const interpolation = body.indexOf("${");
 	return interpolation < 0 ? body : body.slice(0, interpolation);
+}
+
+function scanUnnamespacedMkdtempSource(
+	raw: string,
+	file: string,
+): { file: string; line: number; prefix: string }[] {
+	const code = stripSource(raw);
+	const sites: { file: string; line: number; prefix: string }[] = [];
+	const call =
+		/\bmkdtemp(?:Sync)?\s*\(\s*(?:path\.)?join\(\s*(?:os\.tmpdir|tmpdir)\s*\(\s*\)\s*,\s*["'`]/g;
+	for (const match of code.matchAll(call)) {
+		const open = (match.index ?? 0) + match[0].length - 1;
+		const prefix = literalHeadAt(code, raw, open);
+		if (prefix !== undefined && prefix !== "" && !prefix.startsWith("pi-lens-"))
+			sites.push({
+				file,
+				line: code.slice(0, open).split("\n").length,
+				prefix,
+			});
+	}
+	return sites;
+}
+
+function scanUnnamespacedMkdtempRoots(): {
+	file: string;
+	line: number;
+	prefix: string;
+}[] {
+	const sites: { file: string; line: number; prefix: string }[] = [];
+	for (const { file, source } of readWalkedFiles(
+		listSourceFiles(path.join(REPO_ROOT, "tests"), { extensions: [".ts"] }),
+	)) {
+		const relative = path.relative(REPO_ROOT, file).replace(/\\/g, "/");
+		if (
+			relative === "tests/support/vitest-setup.ts" ||
+			relative === "tests/clients/lens-map.test.ts"
+		)
+			continue;
+		sites.push(...scanUnnamespacedMkdtempSource(source, relative));
+	}
+	return sites;
 }
 
 /** The prefix argument of one mkdtemp call, read from its own call window in
@@ -336,12 +378,6 @@ describe("tmp-fixture-hygiene", () => {
 				tmpHygieneRunFiles(),
 			),
 		);
-		// Bounded observability (#3186, extended by #3314): ONE census line per
-		// hygiene run, not one record per marker or per entry, so a suppressed,
-		// ignored or attributed entry is explicable from the run's own output.
-		process.stderr.write(
-			`${formatTmpHygieneOwnerSummary(scan, otherInvocation.size)}\n`,
-		);
 		const attributable = tmpHygieneExcludeLiveOwnerEntries(
 			leftovers.filter((entry) => !otherInvocation.has(entry)),
 			ownerForTmpEntry,
@@ -357,7 +393,13 @@ describe("tmp-fixture-hygiene", () => {
 				`[tmp-hygiene] tests/${testFile} leaked ${attributable.length} top-level entries: ${described.join(",")}; live owners: ${[...liveOwners].join(",") || "none"}`,
 			).toEqual([]);
 		} finally {
-			cleanupTmpHygiene(otherInvocation);
+			const reaped = cleanupTmpHygiene(otherInvocation);
+			// Bounded observability (#3186, extended by #3314): ONE census line per
+			// hygiene run, not one record per marker or per entry, so a suppressed,
+			// ignored, attributed, or reaped entry is explicable from this run.
+			process.stderr.write(
+				`${formatTmpHygieneOwnerSummary(scan, otherInvocation.size, reaped)}\n`,
+			);
 		}
 	});
 
@@ -394,6 +436,31 @@ describe("tmp-fixture-hygiene", () => {
 		expect(
 			escapees.map((site) => `${site.file}:${site.line}: ${site.text}`),
 		).toEqual([]);
+	});
+
+	it("keeps every real-tmp mkdtemp prefix in the pi-lens namespace", () => {
+		// #3329 recurrence: an unnamespaced real-tmp root is invisible to the
+		// pi-lens census and can leak without an owner. Source is blanked first so
+		// comments and string decoys cannot self-excuse a new producer.
+		expect(scanUnnamespacedMkdtempRoots()).toEqual([]);
+		expect(
+			scanUnnamespacedMkdtempSource(
+				[
+					[
+						"// ",
+						"fs.mkdtempSync",
+						'(path.join(os.tmpdir(), "comment-"));',
+					].join(""),
+					[
+						"const decoy = '",
+						"fs.mkdtempSync",
+						'(path.join(os.tmpdir(), \\"string-\\"))\';',
+					].join(""),
+					["fs.mkdtempSync", '(path.join(os.tmpdir(), "real-"));'].join(""),
+				].join("\n"),
+				"fixture.ts",
+			),
+		).toEqual([{ file: "fixture.ts", line: 3, prefix: "real-" }]);
 	});
 
 	// PR #3100 review F2: #3083's per-file backstop directories live under the
@@ -1036,7 +1103,7 @@ describe("tmp-fixture-hygiene", () => {
 					},
 				}),
 			).toBe(
-				"[tmp-hygiene-owners] live=1 orphaned=2 malformed=3 foreign=4 self=1 otherInvocationEntries=0",
+				"[tmp-hygiene-owners] live=1 orphaned=2 malformed=3 foreign=4 self=1 otherInvocationEntries=0 reaped=0",
 			);
 			// #3314's field is part of the same ONE line, not a second record: the
 			// entries this run ignored as another invocation's are explicable from
@@ -1056,8 +1123,64 @@ describe("tmp-fixture-hygiene", () => {
 					3,
 				),
 			).toBe(
-				"[tmp-hygiene-owners] live=0 orphaned=0 malformed=0 foreign=2 self=1 otherInvocationEntries=3",
+				"[tmp-hygiene-owners] live=0 orphaned=0 malformed=0 foreign=2 self=1 otherInvocationEntries=3 reaped=0",
 			);
+		});
+
+		it("reaps only stale foreign owner records across three censuses", () => {
+			// #3332: a skipped file or killed worker never reaches teardown, so its
+			// marker and run manifest used to accumulate under the persistent home.
+			// The current run stays protected by name, while a fresh sibling stays
+			// protected by age (#3314).
+			const ownerDir = fs.mkdtempSync(
+				path.join(os.tmpdir(), "pi-lens-tmp-reap-owners-"),
+			);
+			const recordDir = fs.mkdtempSync(
+				path.join(os.tmpdir(), "pi-lens-tmp-reap-records-"),
+			);
+			const originalRunId = process.env.PI_LENS_TMP_HYGIENE_RUN_ID;
+			const now = Date.now();
+			const old = new Date(now - TMP_HYGIENE_OWNER_STALE_MS - 1);
+			try {
+				for (const run of ["one", "two", "three"]) {
+					process.env.PI_LENS_TMP_HYGIENE_RUN_ID = `reap-3332-${run}`;
+					const marker = path.join(
+						ownerDir,
+						`${process.env.PI_LENS_TMP_HYGIENE_RUN_ID}-1.json`,
+					);
+					const manifest = path.join(
+						recordDir,
+						`tmp-hygiene-files-${process.env.PI_LENS_TMP_HYGIENE_RUN_ID}.log`,
+					);
+					fs.writeFileSync(marker, JSON.stringify({ pid: 1, file: OWNER }));
+					fs.writeFileSync(manifest, `${OWNER}\n`);
+					fs.utimesSync(marker, old, old);
+					fs.utimesSync(manifest, old, old);
+					reapStaleTmpHygieneRecords(ownerDir, recordDir, now);
+				}
+				const freshMarker = path.join(ownerDir, "reap-3332-fresh-1.json");
+				const freshManifest = path.join(
+					recordDir,
+					"tmp-hygiene-files-reap-3332-fresh.log",
+				);
+				fs.writeFileSync(freshMarker, JSON.stringify({ pid: 1, file: OWNER }));
+				fs.writeFileSync(freshManifest, `${OWNER}\n`);
+				reapStaleTmpHygieneRecords(ownerDir, recordDir, now);
+				expect(fs.readdirSync(ownerDir).sort()).toEqual([
+					"reap-3332-fresh-1.json",
+					"reap-3332-three-1.json",
+				]);
+				expect(fs.readdirSync(recordDir).sort()).toEqual([
+					"tmp-hygiene-files-reap-3332-fresh.log",
+					"tmp-hygiene-files-reap-3332-three.log",
+				]);
+			} finally {
+				if (originalRunId === undefined)
+					delete process.env.PI_LENS_TMP_HYGIENE_RUN_ID;
+				else process.env.PI_LENS_TMP_HYGIENE_RUN_ID = originalRunId;
+				fs.rmSync(ownerDir, { recursive: true, force: true });
+				fs.rmSync(recordDir, { recursive: true, force: true });
+			}
 		});
 
 		it("declares start-time support exactly when this host's markers carry one", () => {

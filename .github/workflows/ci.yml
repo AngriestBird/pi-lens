@@ -227,6 +227,44 @@ jobs:
       - name: ast-grep rule pair audit
         run: npm run audit:astgrep-rule-pairs
 
+  targeted-tests-advisory:
+    name: Targeted tests (advisory)
+    needs: validate-merge-train-dispatch
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 15
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.sha || github.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+        with:
+          node-version: '22'
+
+      # Lockfile-locked and script-free (SonarCloud githubactions:S8543 /
+      # S6505 flagged the copied `npm install` here); the one piece of
+      # `prepare` the targeted vitest files need is the grammar download, run
+      # explicitly below. The Unit job keeps `npm install` because its
+      # lockfile-in-sync check depends on it.
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund --ignore-scripts
+
+      - name: Download core grammars
+        run: node scripts/download-grammars.js --core --dest grammars
+
+      - name: Build
+        run: npm run build
+
+      - name: Run targeted tests
+        run: node scripts/pre-push-targeted-tests.mjs --skip-build
+
   test:
     name: Unit tests
     needs: validate-merge-train-dispatch

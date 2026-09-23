@@ -922,9 +922,43 @@ export async function tmpHygieneWaitForOwnerDrain(
 export function formatTmpHygieneOwnerSummary(
 	scan: TmpHygieneOwnerScan,
 	otherInvocationEntries = 0,
+	reaped = 0,
 ): string {
 	const { counts } = scan;
-	return `[tmp-hygiene-owners] live=${counts.live} orphaned=${counts.orphaned} malformed=${counts.malformed} foreign=${counts.foreign} self=${counts.self} otherInvocationEntries=${otherInvocationEntries}`;
+	return `[tmp-hygiene-owners] live=${counts.live} orphaned=${counts.orphaned} malformed=${counts.malformed} foreign=${counts.foreign} self=${counts.self} otherInvocationEntries=${otherInvocationEntries} reaped=${reaped}`;
+}
+
+/** Reclaim abandoned owner records at the serialized census. A run id is the
+ * ownership discriminator; mtime is the liveness bound for a worker killed
+ * before its teardown can remove its records. Fresh foreign records belong to
+ * a concurrent invocation and must remain untouched (#3332, #3314). */
+export function reapStaleTmpHygieneRecords(
+	ownerDir: string = tmpHygieneOwnerDir,
+	recordDir: string = path.dirname(tmpHygieneBaselinePath),
+	nowMs = Date.now(),
+): number {
+	const runId = process.env.PI_LENS_TMP_HYGIENE_RUN_ID;
+	const ownerPrefix = `${runId}-`;
+	const manifestPrefix = "tmp-hygiene-files-";
+	let reaped = 0;
+	const reap = (entryPath: string): void => {
+		const mtimeMs = fs.statSync(entryPath, { throwIfNoEntry: false })?.mtimeMs;
+		if (mtimeMs === undefined || nowMs - mtimeMs <= TMP_HYGIENE_OWNER_STALE_MS)
+			return;
+		removeTempDirSync(entryPath);
+		if (!fs.existsSync(entryPath)) reaped += 1;
+	};
+	for (const name of readTmpDirEntries(ownerDir)) {
+		if (name.startsWith(ownerPrefix)) continue;
+		reap(path.join(ownerDir, name));
+	}
+	for (const name of readTmpDirEntries(recordDir)) {
+		if (!name.startsWith(manifestPrefix) || !name.endsWith(".log")) continue;
+		if (runId !== undefined && name === `${manifestPrefix}${runId}.log`)
+			continue;
+		reap(path.join(recordDir, name));
+	}
+	return reaped;
 }
 
 /**
@@ -1047,7 +1081,7 @@ export function tmpHygieneSweepableEntries(
 
 export function cleanupTmpHygiene(
 	spare: ReadonlySet<string> = new Set<string>(),
-): void {
+): number {
 	const after = snapshotTmpPiLensEntries(readTmpDirEntries(tmpHygieneRealTmp));
 	for (const name of tmpHygieneSweepableEntries(
 		after,
@@ -1057,12 +1091,14 @@ export function cleanupTmpHygiene(
 		removeTempDirSync(path.join(tmpHygieneRealTmp, name));
 	}
 	removeRunBackstopDirs();
+	const reaped = reapStaleTmpHygieneRecords();
 	try {
 		fs.rmSync(tmpHygieneBaselinePath, { force: true });
 		fs.rmSync(tmpHygieneRunFilesPath, { force: true });
 	} catch {
 		// A stale ignored baseline is harmless; the next run uses a new id.
 	}
+	return reaped;
 }
 
 // These roots belong to a separate live process or shared owner. Every other

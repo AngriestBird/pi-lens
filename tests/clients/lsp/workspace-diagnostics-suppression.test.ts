@@ -66,7 +66,7 @@ describe("runWorkspaceDiagnostics — auxiliary inline-suppression (#586)", () =
 		getServersForFileWithConfig.mockReset();
 		createLSPClient.mockReset();
 		delete process.env.PI_LENS_LSP_WORKSPACE_PULL;
-		tmp = fs.mkdtempSync(path.join(os.tmpdir(), "wsd-nosemgrep-"));
+		tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-wsd-nosemgrep-"));
 	});
 	afterEach(() => removeTempDirSync(tmp));
 
@@ -165,7 +165,7 @@ describe("runWorkspaceDiagnostics — per-rule ignores carve-out (#3041)", () =>
 		getServersForFileWithConfig.mockReset();
 		createLSPClient.mockReset();
 		delete process.env.PI_LENS_LSP_WORKSPACE_PULL;
-		tmp = fs.mkdtempSync(path.join(os.tmpdir(), "wsd-rule-ignores-"));
+		tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-wsd-rule-ignores-"));
 	});
 	afterEach(() => removeTempDirSync(tmp));
 
