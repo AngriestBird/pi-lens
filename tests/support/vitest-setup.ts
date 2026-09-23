@@ -154,6 +154,23 @@ try {
 	}
 }
 process.env.PI_LENS_HOME = tmpHygieneHome;
+
+// Hermeticity, same class as PI_LENS_CONFIG_PATH above: the global-config-
+// location PR (refs #2457) reads the host's config dir in the resolution's
+// agent-dir tier, and an ambient value (a pi host sets PI_CODING_AGENT_DIR)
+// must not decide which file a test reads — or where a test that resolves-
+// then-writes the resolved path lands: seen live 2026-09-21, an un-neutralized
+// ambient value redirected a suite's config write into the maintainer's REAL
+// dotfiles-managed extensions/pi-lens.json.
+//
+// UNLIKE PI_LENS_CONFIG_PATH above, the path must be REAL and WRITABLE: the
+// real-pi harness children inherit this env and pi initializes its config
+// layout in it, so a nonexistent path killed every real-harness suite on CI
+// (pi child died at startup; seen live on PR #3251). Pointing it under the
+// pinned PI_LENS_HOME keeps the harness children deterministic instead of
+// maintainer-specific, and keeps the tier's file out of the real home.
+process.env.PI_CODING_AGENT_DIR = path.join(tmpHygieneHome, "agent");
+fs.mkdirSync(path.join(tmpHygieneHome, "agent"), { recursive: true });
 installGitFixtureEnv(tmpHygieneHome);
 
 // #3083: session_start reaches the backstop transitively through index.js.

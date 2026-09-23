@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { resetGlobalConfigLocationCache } from "../../clients/lens-config.js";
 import {
 	findPiLensProjectConfig,
 	loadPiLensConfigInDir,
@@ -996,15 +997,26 @@ describe("a global-only setting's notice names the file the resolver actually re
 			.some((arg) => typeof arg === "string" && arg.includes(substring));
 	}
 
-	it("names the ~/.pi-lens/config.json default when PI_LENS_CONFIG_PATH is unset", () => {
-		delete process.env.PI_LENS_CONFIG_PATH;
-		fs.writeFileSync(
-			path.join(tmpDir, ".pi-lens.json"),
-			JSON.stringify({ delta: { enabled: false } }),
-		);
-		loadPiLensProjectConfig(tmpDir);
-		expect(warnedFor("set it in ~/.pi-lens/config.json")).toBe(true);
-	});
+	it.skipIf(fs.existsSync(path.join(os.homedir(), ".pi-lens", "config.json")))(
+		"names the ~/.pi-lens/config.json default when PI_LENS_CONFIG_PATH is unset",
+		() => {
+			// Premise (the skip condition above): the maintainer's real home carries
+			// no legacy config — a real one would win the grandfathering tier and
+			// change the named file. The production resolution is
+			// homedir-anchored: PI_LENS_HOME does not participate (the #2457
+			// split-brain stays a separate issue), and vitest-setup neutralizes the
+			// agent-dir env the resolution does read.
+			delete process.env.PI_LENS_CONFIG_PATH;
+			resetGlobalConfigLocationCache();
+			fs.writeFileSync(
+				path.join(tmpDir, ".pi-lens.json"),
+				JSON.stringify({ delta: { enabled: false } }),
+			);
+			loadPiLensProjectConfig(tmpDir);
+			expect(warnedFor("set it in ~/.pi-lens/config.json")).toBe(true);
+			resetGlobalConfigLocationCache();
+		},
+	);
 
 	it("names the PI_LENS_CONFIG_PATH override, not the hardcoded ~/.pi-lens/config.json", () => {
 		// Under the override the resolver reads THIS file for the global tier,

@@ -84,6 +84,7 @@ import {
 	type ConfigLocation,
 	configSearchDirs,
 	getPiLensGlobalConfigPath,
+	isResolvedGlobalConfigPath,
 	PROJECT_CONFIG_BASENAMES,
 	PROJECT_CONFIG_LOCATIONS,
 } from "./config-locations.js";
@@ -574,6 +575,11 @@ function discoverPiLensProjectConfig(startDir: string): DiscoveryCacheEntry {
 		if (!info) {
 			for (const name of PROJECT_CONFIG_BASENAMES) {
 				const candidate = path.join(dir, name);
+				// The global tier reads its file by absolute path; a candidate that
+				// IS that file is refused here rather than adopted as a project
+				// config, which would double-read and double-validate it
+				// (global-config-location PR, refs #2457).
+				if (isResolvedGlobalConfigPath(candidate)) continue;
 				const stat = safeFileStat(candidate);
 				if (stat?.isFile()) {
 					info = {
@@ -588,6 +594,7 @@ function discoverPiLensProjectConfig(startDir: string): DiscoveryCacheEntry {
 		}
 		for (const location of LEGACY_PROJECT_LOCATIONS) {
 			const file = path.join(dir, location.relativePath);
+			if (isResolvedGlobalConfigPath(file)) continue;
 			const stat = safeFileStat(file);
 			if (!stat?.isFile()) continue;
 			legacySources.push({
