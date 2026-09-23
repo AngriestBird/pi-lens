@@ -427,5 +427,10 @@ describe("classifyFirstPublish (#3310)", () => {
 	it("maps an alias fixture lang onto its strategy key", () => {
 		expect(strategyKeyForLang("jedi")).toBe("python-jedi");
 		expect(strategyKeyForLang("php")).toBe("php");
+		// #3347: markdown's server id is `marksman`, the key its silentOnClean
+		// marker lives under. While this mapping was missing, the drift check
+		// looked the marker up under `markdown`, found nothing, and reported the
+		// MARKED marksman as silent-not-marked on every run that reached it.
+		expect(strategyKeyForLang("markdown")).toBe("marksman");
 	});
 });

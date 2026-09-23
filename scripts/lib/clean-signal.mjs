@@ -285,6 +285,13 @@ export const COMPARABLE_FIRST_PUBLISH = new Set(["empty-first", "direct"]);
  */
 export const LANG_TO_STRATEGY_KEY = {
 	jedi: "python-jedi",
+	// #3347: the markdown fixture's server id is `marksman` (its `serverHint` in
+	// scripts/smoke-tools.mjs, `id: "marksman"` in clients/lsp/server.ts), and that
+	// is the key its `silentOnClean: true` marker lives under. Without this entry
+	// the lookup misses under `markdown`, so the drift check below reported the
+	// MARKED marksman as `silent-not-marked` on every run that reached it, and a
+	// census keyed the same way cannot cover that marker in either direction.
+	markdown: "marksman",
 };
 
 /** Resolve a matrix/fixture lang to its strategy-table key. */

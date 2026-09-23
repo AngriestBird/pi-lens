@@ -1,14 +1,32 @@
 /**
  * #3347 — the expiry check on the clean-signal marker class.
  *
- * The repaired probe updates the generated matrix, while the wait-policy
- * registry is hand-maintained. Without this census a measured transition can
- * silently move in either direction: a newly silent server burns its whole
- * wait, or a server that publishes is incorrectly treated as silent.
+ * ## The recurrence each assertion prevents
  *
- * This is deliberately a two-source governance test. It parses the checked-in
- * matrix with the same parser used by the nightly generator and reads the real
- * registry imported by the LSP client; it does not recreate either source.
+ * The repaired `probe-clean-signal.mjs` rewrites the matrix's `clean-behavior`
+ * column from a measurement (through the nightly `bot/lsp-docs-refresh` auto-PR),
+ * while `silentOnClean` in clients/lsp/wait-policy/strategies.ts is
+ * hand-maintained. The two sources drift in five distinct ways, and each one is a
+ * live wait-policy defect rather than a docs nit:
+ *
+ *  1. a row measured `silent` with no marker — the cascade burns the whole
+ *     in-lane wait it could skip (the pre-#458 situation);
+ *  2. a marker on a row measured `publishes-*` — the cascade skips a wait the
+ *     server would have resolved with a real publish (#3347's cue case);
+ *  3. a marker whose server has NO measured push row at all — nothing can ever
+ *     expire it, so it outlives the measurement that justified it (the escape
+ *     that shipped in round 2: a marker added to `typos` passed the census);
+ *  4. a push row whose cell goes blank or back to `TBD`/`unknown` — the row drops
+ *     out of a matrix-driven comparison silently, taking its marker coverage
+ *     with it;
+ *  5. a row whose `mode` flips to `pull` while keeping a `silent` cell —
+ *     `clean-behavior` is a push-wait measurement, so that combination is not
+ *     evidence for the marker it still appears to support.
+ *
+ * So the census walks BOTH populations: every matrix row (1, 2, 4, 5) and every
+ * registry entry (3). Deliberately a two-source governance test — it parses the
+ * checked-in matrix with the same parser the nightly generator uses and reads the
+ * real registry the LSP client imports; it recreates neither.
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -24,20 +42,30 @@ const repoRoot = path.resolve(
 );
 const MATRIX_PATH = path.join(repoRoot, "docs", "lsp-capability-matrix.md");
 
+/** The only `clean-behavior` values that are a measurement of anything. */
 const MEASURED_CLEAN_BEHAVIORS = new Set([
 	"publishes-versioned",
 	"publishes-unversioned",
 	"silent",
 ]);
 
-// Named admissions: unknown is not evidence for or against a marker. Keep this
-// list shrink-only as the nightly probe makes those rows measurable.
-const UNKNOWN_CLEAN_BEHAVIOR_ADMISSIONS = new Map<string, string>([]);
-
-// marksman is measured silent in the current generated matrix, but its
-// strategy key is intentionally pending the master-nightly server-id refresh.
-const MARKSMAN_ADMISSION = new Map([
-	["markdown", "marksman server-id mapping remains pending master nightly"],
+/**
+ * Named admissions for a push-only row the clean-signal probe has not yet
+ * classified: `lang` → why. `unknown`/`TBD` is evidence in neither direction
+ * (the #240 doctrine), but it has to be admitted BY NAME rather than filtered
+ * out, or a measured row escapes the census simply by losing its cell.
+ * Shrink-only: the population test reds when an admitted row becomes measured,
+ * so a landed measurement cannot leave a stale exemption behind.
+ */
+const UNMEASURED_PUSH_ADMISSIONS = new Map<string, string>([
+	[
+		"terraform",
+		"terraform-ls: clean-behavior not yet classified by probe-clean-signal.mjs (the matrix tier cell is still `2/3?`); no silentOnClean marker may be set for it until it is",
+	],
+	[
+		"vue",
+		"@vue/language-server: clean-behavior not yet classified by probe-clean-signal.mjs (the matrix tier cell is still `2/3?`); no silentOnClean marker may be set for it until it is",
+	],
 ]);
 
 interface MatrixRow {
@@ -71,30 +99,46 @@ function matrixRows(): MatrixRow[] {
 	}));
 }
 
+function markedServers(): string[] {
+	return Object.entries(SERVER_DIAGNOSTIC_STRATEGIES)
+		.filter(([, strategy]) => strategy.silentOnClean === true)
+		.map(([serverId]) => serverId);
+}
+
 describe("#3347 clean-behavior marker census", () => {
-	it("keeps the measured push population and admissions explicit", () => {
-		const rows = matrixRows();
-		const unknownRows = rows.filter(
-			(row) => row.mode === "push-only" && row.cleanBehavior === "unknown",
-		);
-		const admittedUnknown = new Set(UNKNOWN_CLEAN_BEHAVIOR_ADMISSIONS.keys());
-		expect(unknownRows.length).toBeGreaterThanOrEqual(0);
-		for (const row of unknownRows) {
-			expect(
-				admittedUnknown.has(row.lang),
-				`${row.lang} (${row.server}) is unknown and needs a named admission reason`,
-			).toBe(true);
-		}
-		for (const lang of admittedUnknown) {
-			expect(
-				unknownRows.some((row) => row.lang === lang),
-				`${lang} has a stale unknown clean-behavior admission`,
-			).toBe(true);
-		}
-		const comparable = rows.filter(
-			(row) =>
-				row.mode === "push-only" &&
-				MEASURED_CLEAN_BEHAVIORS.has(row.cleanBehavior),
+	it("measures or admits by name every push row", () => {
+		const pushRows = matrixRows().filter((row) => row.mode === "push-only");
+		const unaccounted = pushRows
+			.filter(
+				(row) =>
+					!MEASURED_CLEAN_BEHAVIORS.has(row.cleanBehavior) &&
+					!UNMEASURED_PUSH_ADMISSIONS.has(row.lang),
+			)
+			.map(
+				(row) =>
+					`${row.lang} (${row.server}): clean-behavior=${JSON.stringify(row.cleanBehavior)} is neither measured nor admitted — a push row that leaves the measured population takes its silentOnClean coverage with it`,
+			);
+		expect(unaccounted).toEqual([]);
+
+		const stale = [...UNMEASURED_PUSH_ADMISSIONS.keys()]
+			.filter(
+				(lang) =>
+					!pushRows.some(
+						(row) =>
+							row.lang === lang &&
+							!MEASURED_CLEAN_BEHAVIORS.has(row.cleanBehavior),
+					),
+			)
+			.map(
+				(lang) =>
+					`${lang}: stale unmeasured-push admission — the row is now measured (or gone), so the admission must be deleted`,
+			);
+		expect(stale).toEqual([]);
+
+		// A floor, not a ratchet: the census must never pass by comparing nothing
+		// (defect shape 10 — an empty census fails loud).
+		const comparable = pushRows.filter((row) =>
+			MEASURED_CLEAN_BEHAVIORS.has(row.cleanBehavior),
 		);
 		expect(comparable.length).toBeGreaterThanOrEqual(3);
 	});
@@ -104,8 +148,7 @@ describe("#3347 clean-behavior marker census", () => {
 		for (const row of matrixRows()) {
 			if (
 				row.mode !== "push-only" ||
-				!MEASURED_CLEAN_BEHAVIORS.has(row.cleanBehavior) ||
-				MARKSMAN_ADMISSION.has(row.lang)
+				!MEASURED_CLEAN_BEHAVIORS.has(row.cleanBehavior)
 			)
 				continue;
 			const key = strategyKeyForLang(row.lang);
@@ -120,10 +163,48 @@ describe("#3347 clean-behavior marker census", () => {
 		expect(mismatches).toEqual([]);
 	});
 
-	it("keeps the marksman admission attached to a measured row", () => {
-		const row = matrixRows().find((candidate) => candidate.lang === "markdown");
-		expect(row?.server).toBe("marksman");
-		expect(row?.cleanBehavior).toBe("silent");
-		expect(MARKSMAN_ADMISSION.get("markdown")).toContain("master nightly");
+	it("backs every silentOnClean marker with a measured silent push row", () => {
+		const rows = matrixRows();
+		const unsupported = markedServers()
+			.map((serverId) => {
+				const owned = rows.filter(
+					(row) => strategyKeyForLang(row.lang) === serverId,
+				);
+				if (
+					owned.some(
+						(row) => row.mode === "push-only" && row.cleanBehavior === "silent",
+					)
+				)
+					return undefined;
+				const detail = owned.length
+					? owned
+							.map(
+								(row) =>
+									`${row.lang}: mode=${row.mode}, clean-behavior=${JSON.stringify(row.cleanBehavior)}`,
+							)
+							.join("; ")
+					: "no matrix row maps to this server id";
+				return `${serverId}: silentOnClean:true with no push-only matrix row measured silent (${detail}) — nothing can expire this marker`;
+			})
+			.filter((entry): entry is string => entry !== undefined);
+		expect(unsupported).toEqual([]);
+
+		// The marker population is the reason this census exists; an empty one
+		// satisfies the loop above vacuously.
+		expect(markedServers().length).toBeGreaterThanOrEqual(3);
+	});
+
+	it("never reads a clean-behavior measurement off a non-push row", () => {
+		const offenders = matrixRows()
+			.filter(
+				(row) =>
+					row.mode !== "push-only" &&
+					MEASURED_CLEAN_BEHAVIORS.has(row.cleanBehavior),
+			)
+			.map(
+				(row) =>
+					`${row.lang} (${row.server}): mode=${row.mode} carries clean-behavior=${row.cleanBehavior} — clean-behavior is a push-wait measurement, so this row is evidence for neither direction of its silentOnClean marker`,
+			);
+		expect(offenders).toEqual([]);
 	});
 });
