@@ -117,16 +117,14 @@ function scanMkdtempSites(): { file: string; line: number; text: string }[] {
 	return sites;
 }
 
-/** The tmp-fixture prefixes each `tests/` file declares, and the mkdtemp sites
- *  no prefix could be derived for (#3306).
+/** The tmp-fixture prefixes each `tests/` file declares (#3306).
  *
  *  Only `pi-lens-`-prefixed families are indexed, because those are the only
- *  entries the census observes at all
- *  (`snapshotTmpPiLensEntries`, tests/support/vitest-setup.ts:599). */
+ *  entries the census observes at all (`snapshotTmpPiLensEntries` in
+ *  tests/support/vitest-setup.ts filters the tmpdir listing on that prefix). */
 type TmpOwnerIndex = {
 	/** prefix -> the `tests/`-relative files that declare it. */
 	prefixes: Map<string, Set<string>>;
-	fileCount: number;
 };
 
 // #3306: a raw `mkdtempSync(path.join(os.tmpdir(), "pi-lens-x-"))` root used to
@@ -236,7 +234,7 @@ function buildTmpOwnerIndex(
 		floors.prefixes,
 	);
 	assertNonEmptyScan("tmp owner file population", fileCount, floors.files);
-	return { prefixes, fileCount };
+	return { prefixes };
 }
 
 let tmpOwnerIndex: TmpOwnerIndex | undefined;
@@ -421,12 +419,27 @@ describe("tmp-fixture-hygiene", () => {
 		);
 		for (const file of [oldBaseline, liveBaseline])
 			fs.writeFileSync(file, JSON.stringify({ tmp: [], backstopRoot: {} }));
+		// #3314: the run-file manifest is the second member of that class, written
+		// beside the baseline with the same lifetime, so the same stale rule
+		// reclaims an abandoned run's copy. Narrowing the sweep's needle back to
+		// `tmp-hygiene-baseline-` leaves `oldFiles` behind for ever.
+		const oldFiles = path.join(
+			fixture,
+			"tmp-hygiene-files-owner-guard-old.log",
+		);
+		const liveFiles = path.join(
+			fixture,
+			"tmp-hygiene-files-owner-guard-live.log",
+		);
+		for (const file of [oldFiles, liveFiles])
+			fs.writeFileSync(file, "config/tmp-fixture-hygiene.test.ts\n");
 		// A day old: past any six-hour window, and far past the 16-minute
 		// worst-case vitest invocation the window is sized against.
 		const dayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
 		fs.utimesSync(oldForeign, dayAgo, dayAgo);
 		fs.utimesSync(oldRoot, dayAgo, dayAgo);
 		fs.utimesSync(oldBaseline, dayAgo, dayAgo);
+		fs.utimesSync(oldFiles, dayAgo, dayAgo);
 		// Round 5: `mine`'s mtime is put two seconds INTO THE FUTURE, the
 		// boundary that redded CI (run 35072411511). A directory created
 		// microseconds before the sweep can carry a filesystem timestamp later
@@ -444,6 +457,8 @@ describe("tmp-fixture-hygiene", () => {
 			expect(fs.existsSync(liveRoot)).toBe(true);
 			expect(fs.existsSync(oldBaseline)).toBe(false);
 			expect(fs.existsSync(liveBaseline)).toBe(true);
+			expect(fs.existsSync(oldFiles)).toBe(false);
+			expect(fs.existsSync(liveFiles)).toBe(true);
 		} finally {
 			fs.rmSync(fixture, { recursive: true, force: true });
 		}
