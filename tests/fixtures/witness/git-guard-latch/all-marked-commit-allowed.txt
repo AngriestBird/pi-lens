@@ -17,12 +17,12 @@ Run lens_diagnostics mode=all for full details, then commit again.
 
 === turn 2 (every blocker marked false-positive): context message ===
 (nothing injected)
---- turn 2: git commit (residual block is #3282, not the latch) ---
-block: true
-reason: 🔴 COMMIT BLOCKED (--lens-guard): blocker state is unknown (blocking_provenance_untrusted). Re-run pi-lens checks or start a fresh session, then retry.
+--- turn 2: git commit (allowed: banner and gate agree) ---
+block: false
+reason: (none)
 
 === turn 3 (an unrelated file edited): context message ===
 (nothing injected)
---- turn 3: git commit (residual block is #3282, not the latch) ---
-block: true
-reason: 🔴 COMMIT BLOCKED (--lens-guard): blocker state is unknown (blocking_provenance_untrusted). Re-run pi-lens checks or start a fresh session, then retry.
+--- turn 3: git commit (allowed: the marked blockers stay gone) ---
+block: false
+reason: (none)

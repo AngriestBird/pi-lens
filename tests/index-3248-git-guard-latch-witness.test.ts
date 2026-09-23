@@ -11,15 +11,18 @@
  * `evaluateGitGuard` the pre-commit path calls, so a future change that
  * silences one surface without the other shows up as a diff.
  *
- * What the golden shows, and what it does NOT: turn 2's commit attempt is
- * still blocked — with `blocking_provenance_untrusted`, NOT with the latch's
- * "unresolved blockers must be fixed" and the marked findings quoted back.
- * That second reason is #3282, a pre-existing defect in the persisted record's
- * provenance parse that this slice does not own (measured on `origin/master`
- * in that issue, with the blocker FIXED rather than marked, so it is
- * independent of dispositions). The golden pins both halves on purpose: the
- * latch defect is gone, and the exact fingerprint of what still blocks is
- * committed, so #3282's fix flips this file visibly instead of silently.
+ * What the golden shows: turn 1 blocks with the latch's "unresolved blockers
+ * must be fixed" and the two findings quoted back; turns 2 and 3 allow the
+ * commit outright.
+ *
+ * #3282 flipped the last two frames, as this file was committed to do. Under
+ * #3248 alone they read `blocking_provenance_untrusted`: clearing the latch
+ * exposed the gate's SECOND reader, whose provenance parse judged every
+ * multi-line `blockerContent` — the only kind either writer emits — untrusted,
+ * and latched that reason for the rest of the session. Turn 2's frame is the
+ * one the per-edit `syncGitGuardRecord` poisoned while re-reading turn 1's own
+ * record; turn 3's is the same latch still standing a turn later, for a session
+ * whose record had already been cleared as clean.
  *
  * Doubles: `clients/pipeline.js` only — a true process boundary (it spawns
  * every configured linter). Its result is shaped exactly as `pipeline.ts`
@@ -233,12 +236,12 @@ describe("#3248 witness: the commit gate and the banner agree through pi", () =>
 			"",
 			"=== turn 2 (every blocker marked false-positive): context message ===",
 			turn2,
-			"--- turn 2: git commit (residual block is #3282, not the latch) ---",
+			"--- turn 2: git commit (allowed: banner and gate agree) ---",
 			verdict(turn2Commit),
 			"",
 			"=== turn 3 (an unrelated file edited): context message ===",
 			turn3,
-			"--- turn 3: git commit (residual block is #3282, not the latch) ---",
+			"--- turn 3: git commit (allowed: the marked blockers stay gone) ---",
 			verdict(turn3Commit),
 		].join("\n")}\n`;
 
