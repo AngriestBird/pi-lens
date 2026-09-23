@@ -14,14 +14,32 @@
  * this lexical sweep. There are no identifier needles with string-only
  * evidence in this population, so no `codeMatches` exception is needed.
  *
- * The pins are the rename inventory for #3259. Both directions are guarded:
- * an unpinned new occurrence fails, and a deleted occurrence requires its
- * `file@count` row to shrink. This prevents the #3256 M3c stale-pin failure.
+ * The pins are the rename inventory for #3259, held to EXACT equality per
+ * `(term, file)`. `auditSymbolCounts` alone cannot do that: `auditRegistry`
+ * is deliberately asymmetric, so a REGISTERED `file@count` row the scan no
+ * longer flags passes. Round 2 shipped exactly that hole — deleting five live
+ * `warning` identifiers from `clients/runtime-turn.ts` left the suite green
+ * (#3279 G-3279-4), which is the #3256 M3c stale-pin failure again. Equality
+ * is therefore audited as TWO calls with the roles swapped, each carrying its
+ * own message, so a rename slice knows which direction it hit:
+ *   - `UNPINNED live uses` — live rows the pin does not name (grow).
+ *   - `STALE pins` — pinned rows the live census no longer produces (shrink).
+ * Both clean means the two `file@count` key sets are equal.
  *
  * Glossary retirement grammar: each declaration is a bullet whose bold term
  * is followed by `retires` plus one or more backtick-delimited synonyms,
  * ending at the declaration's period. A bullet mentioning `retires` that
  * does not match this grammar is malformed and must fail loudly.
+ *
+ * A spelling can be BOTH canonical for its own concept and retired by another
+ * concept (`finding` retires `diagnostic`, while `diagnostic` is canonical at
+ * `clients/dispatch/types.ts`). Those `retired-in-one-sense` terms are
+ * excluded from the global census — a lexical spelling count cannot tell the
+ * two senses apart — so the exclusion itself is pinned as a DERIVED list of
+ * `term -> owning module -> retiring concept`, read out of the glossary's own
+ * `owned by` clause. Every per-concept rename slice under #3259 works from
+ * that list, and a new collision reds it instead of vanishing silently
+ * (#3279 G-3279-2).
  */
 
 import * as fs from "node:fs";
@@ -51,13 +69,20 @@ function agentsText(): string {
 	);
 }
 
-function parseGlossary(source = agentsText()): Map<string, string[]> {
+/** One parsed glossary declaration: the module that owns it, and what it retires. */
+interface GlossaryEntry {
+	/** The module named by the bullet's `owned by` clause. */
+	owner: string;
+	retires: string[];
+}
+
+function parseGlossary(source = agentsText()): Map<string, GlossaryEntry> {
 	const glossary = source
 		.split("## Glossary", 2)[1]
 		?.split("Where two spellings", 2)[0];
 	if (!glossary) throw new Error("AGENTS.md glossary is missing");
 
-	const parsed = new Map<string, string[]>();
+	const parsed = new Map<string, GlossaryEntry>();
 	for (const line of glossary.split("\n")) {
 		const match = /^- \*\*([^*]+)\*\* .*?\bretires\s+(.+?)(?=\.\s|$)/.exec(
 			line,
@@ -76,20 +101,58 @@ function parseGlossary(source = agentsText()): Map<string, string[]> {
 				`glossary term has no parsed retired synonyms: ${match[1]}`,
 			);
 		}
-		parsed.set(match[1], synonyms);
+		// An absent `owned by` clause needs no guard of its own: the owner lands
+		// in the pinned `retired-in-one-sense` list, so it reds there.
+		parsed.set(match[1], {
+			owner: /\bowned by `([^`]+)`/.exec(line)?.[1] ?? "",
+			retires: synonyms,
+		});
 	}
 	return parsed;
 }
 
-function identifierTerms(glossary: Map<string, string[]>): string[] {
+function identifierTerms(glossary: Map<string, GlossaryEntry>): string[] {
 	const canonicalTerms = new Set(glossary.keys());
 	return [
 		...new Set(
 			[...glossary.values()]
-				.flat()
+				.flatMap((entry) => entry.retires)
 				.filter((term) => IDENTIFIER.test(term) && !canonicalTerms.has(term)),
 		),
 	].sort();
+}
+
+/** A spelling that is canonical for one concept and retired by another. */
+interface OneSenseRow {
+	term: string;
+	/** The module the glossary says owns the CANONICAL sense. */
+	owner: string;
+	/** The canonical concept(s) whose declaration retires this spelling. */
+	retiredBy: string[];
+}
+
+/**
+ * The exclusion the global census applies, as a machine-derived report.
+ *
+ * `identifierTerms` drops these spellings because one lexical count cannot
+ * separate the canonical sense from the retired one. That exclusion is the
+ * widest hole in the sweep, so it is enumerated from the glossary rather than
+ * described in prose: each row names the module that owns the canonical sense
+ * and the concept that retires the other sense, which is what a per-concept
+ * rename slice needs to do the work the census cannot.
+ */
+function retiredInOneSense(
+	glossary: Map<string, GlossaryEntry>,
+): OneSenseRow[] {
+	const rows: OneSenseRow[] = [];
+	for (const [term, entry] of glossary) {
+		const retiredBy = [...glossary]
+			.filter(([, other]) => other.retires.includes(term))
+			.map(([canonical]) => canonical);
+		if (retiredBy.length > 0)
+			rows.push({ term, owner: entry.owner, retiredBy });
+	}
+	return rows.sort((a, b) => a.term.localeCompare(b.term));
 }
 
 function sourceFiles(): string[] {
@@ -195,6 +258,47 @@ const EXPECTED_GLOSSARY_TERMS = [
 	"exemption",
 	"runner outcome",
 ] as const;
+
+/**
+ * The census's canonical-collision exclusions, pinned with their owners.
+ *
+ * Derived by {@link retiredInOneSense}; this pin is the executable form of the
+ * hand-written table round 2 put in the PR body (#3279 G-3279-2), which had
+ * both the wrong owner for `exemption` and no row for `canonical path`. A new
+ * collision, a removed one, or a moved `owned by` module reds here.
+ */
+const EXPECTED_RETIRED_IN_ONE_SENSE: readonly OneSenseRow[] = [
+	{
+		term: "advisory",
+		owner: "clients/finding-delivery-gate.ts",
+		retiredBy: ["finding"],
+	},
+	{
+		term: "blocker",
+		owner: "clients/dispatch/types.ts",
+		retiredBy: ["finding"],
+	},
+	{
+		term: "canonical path",
+		owner: "clients/path-utils.ts",
+		retiredBy: ["path key"],
+	},
+	{
+		term: "diagnostic",
+		owner: "clients/dispatch/types.ts",
+		retiredBy: ["finding"],
+	},
+	{
+		term: "exemption",
+		owner: "tests/support/sweep-kit.ts",
+		retiredBy: ["admission"],
+	},
+	{
+		term: "finding",
+		owner: "clients/finding-delivery-gate.ts",
+		retiredBy: ["diagnostic"],
+	},
+];
 
 /**
  * Population at the synonym-retirement sweep's authoring head. Each nested
@@ -1141,14 +1245,68 @@ describe("glossary synonym-retirement sweep (#3259)", () => {
 		expect(Object.keys(counts)).toHaveLength(18);
 		expect(terms.filter((term) => !(term in counts))).toHaveLength(6);
 		for (const term of terms) {
-			const audit = auditSymbolCounts({
-				sweepName: `glossary retired identifier ${term} (#3259)`,
-				counts: counts[term] ?? {},
-				pinned: PINS[term] ?? {},
-				remediation: `Rename or route retired glossary identifier ${term}; then update its per-file pin. Refs #3259.`,
+			const live = counts[term] ?? {};
+			const pinned = PINS[term] ?? {};
+			// GROW arm: every live `file@count` must be pinned.
+			const grow = auditSymbolCounts({
+				sweepName: `glossary retired identifier ${term} — UNPINNED live uses (#3259)`,
+				counts: live,
+				pinned,
+				remediation: `A new or changed use of retired glossary identifier ${term} is not pinned. Rename or route it; only then raise its per-file pin. Refs #3259.`,
 			});
-			expect(audit.problems, term).toEqual([]);
+			// SHRINK arm: the same call with the roles SWAPPED, because
+			// `auditRegistry` deliberately permits a registered id the scan no
+			// longer flags. Feeding the PINS as the flagged population and the
+			// live census as the registry turns a vanished row into an ordinary
+			// unaccounted item, so the two key sets must be equal for both arms
+			// to be clean (#3279 G-3279-4, the #3256 M3c shape).
+			const shrink = auditSymbolCounts({
+				sweepName: `glossary retired identifier ${term} — STALE pins (#3259)`,
+				counts: pinned,
+				pinned: live,
+				remediation: `A pinned use of retired glossary identifier ${term} is gone from the live census. SHRINK the pin to the live count (or delete the row) so the inventory cannot hold a retired use that no longer exists. Refs #3259.`,
+			});
+			// Asserted TOGETHER, never one arm at a time: a count that MOVED
+			// (rather than appeared or vanished) is unaccounted in both arms, and
+			// a short-circuit on the grow assertion would report only the
+			// `UNPINNED live uses` half and mislabel a shrink as a new use.
+			expect({ grow: grow.problems, shrink: shrink.problems }, term).toEqual({
+				grow: [],
+				shrink: [],
+			});
 		}
+	});
+
+	it("pins the retired-in-one-sense terms with their glossary owners", () => {
+		// Prevents #3279 G-3279-2: the canonical-collision exclusion is the
+		// census's widest hole, so it must be a derived, pinned list with an
+		// owning module per term — not a prose table in a PR body that can
+		// carry a wrong owner or miss a row.
+		expect(retiredInOneSense(parseGlossary())).toEqual(
+			EXPECTED_RETIRED_IN_ONE_SENSE,
+		);
+		// That every pinned row is actually excluded from the census is asserted
+		// once, by `excludes canonical spellings from the global retirement
+		// census`, which loops this same pin.
+	});
+
+	it("derives a new canonical collision and its owner from the glossary", () => {
+		// The derivation is real logic, not a restatement of the pin: a scratch
+		// glossary that promotes a currently retired-only spelling to a
+		// canonical bullet must appear in the report with that bullet's owner.
+		const scratch = [
+			"## Glossary",
+			"- **advisory** — tier; owned by `clients/finding-delivery-gate.ts`; retires `warning`.",
+			"- **warning** — promoted; owned by `clients/actionable-warnings.ts`; retires `note`.",
+			"Where two spellings",
+		].join("\n");
+		expect(retiredInOneSense(parseGlossary(scratch))).toEqual([
+			{
+				term: "warning",
+				owner: "clients/actionable-warnings.ts",
+				retiredBy: ["advisory"],
+			},
+		]);
 	});
 
 	it("rejects malformed retirement declarations loudly", () => {
@@ -1159,18 +1317,25 @@ describe("glossary synonym-retirement sweep (#3259)", () => {
 		expect(() => parseGlossary(malformed)).toThrow(
 			/malformed glossary retirement declaration/,
 		);
+		// The sibling direction: a declaration that matches the grammar but
+		// names no backticked synonym would contribute an empty family.
+		const synonymless =
+			"## Glossary\n- **scratch** — probe; retires nothing at all.\nWhere two spellings";
+		expect(() => parseGlossary(synonymless)).toThrow(
+			/no parsed retired synonyms/,
+		);
 	});
 
 	it("excludes canonical spellings from the global retirement census", () => {
 		// Prevents #3279 G-3279-2: a canonical `diagnostic` identifier must
-		// remain valid even when another concept retires that spelling.
+		// remain valid even when another concept retires that spelling. The
+		// control below proves the counter itself still sees such a token, so
+		// the exclusion is a policy choice and not a broken detector.
 		const glossary = parseGlossary();
 		const terms = identifierTerms(glossary);
-		expect(terms).not.toContain("diagnostic");
-		expect(terms).not.toContain("advisory");
-		expect(terms).not.toContain("blocker");
-		expect(terms).not.toContain("exemption");
-		expect(terms).not.toContain("finding");
+		for (const { term } of EXPECTED_RETIRED_IN_ONE_SENSE) {
+			expect(terms, term).not.toContain(term);
+		}
 		expect(countIdentifier("const diagnostic = 1;", "diagnostic")).toBe(1);
 	});
 
