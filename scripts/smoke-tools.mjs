@@ -676,7 +676,11 @@ const LSP_FIXTURES = [
 		// and php carries the measured budget for the index window, so the row is
 		// gated again.
 		lspGate: true,
-		lspGateMarker: "$naem",
+		// The undefined-variable read itself, spelled without the fixture's
+		// deliberate misspelling: `scripts/` is not excluded from the `typos`
+		// check the way `tests/fixtures/**` is, and a marker has to be a literal
+		// substring of the fixture so removing it proves the red direction.
+		lspGateMarker: '"Hello " . $',
 		dir: "tests/fixtures/tool-smoke/php",
 		file: "bad.php",
 		serverHint: "intelephense",
