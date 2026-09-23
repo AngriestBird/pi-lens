@@ -2,7 +2,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { afterAll, expect, vi } from "vitest";
+import { afterAll, afterEach, beforeEach, expect, vi } from "vitest";
 import { installGitFixtureEnv } from "./git-fixture-env.js";
 import { installKillGuard, killGuardReport } from "./kill-guard.js";
 import { reportPeakRss } from "./worker-peak-rss.js";
@@ -71,6 +71,83 @@ const tmpHygieneBaselinePath = path.join(
 	`tmp-hygiene-baseline-${process.env.PI_LENS_TMP_HYGIENE_RUN_ID}.json`,
 );
 fs.mkdirSync(path.dirname(tmpHygieneBaselinePath), { recursive: true });
+
+// #3186: a process-shared marker lets the serialized hygiene owner distinguish
+// a root whose test file is still running from one whose cleanup drain ended.
+// The marker is deliberately per worker and run-scoped. PID alone is not an
+// identity: a killed worker can leave an orphan whose PID is still live or is
+// later reused.
+//
+// Round 3 (HIGH-3297-V1): the identity is the marker's OWN mtime, refreshed by
+// this worker's test lifecycle — a heartbeat no other process can forge and no
+// platform can withhold. `/proc/<pid>/stat`'s start time stays as an EXTRA
+// check where the platform supplies one; round 2 made it the sole gate, which
+// on darwin/win32 wrote every marker without a start time and then rejected
+// every marker, disabling the live-owner arm for all workers.
+const tmpHygieneOwnerDir = path.join(tmpHygieneHome, "tmp-hygiene-owners");
+fs.mkdirSync(tmpHygieneOwnerDir, { recursive: true });
+const tmpHygieneOwnerMarker = path.join(
+	tmpHygieneOwnerDir,
+	`${process.env.PI_LENS_TMP_HYGIENE_RUN_ID}-${process.pid}.json`,
+);
+const tmpHygieneOwnerMarkerBody = JSON.stringify({
+	pid: process.pid,
+	startTime: readTmpHygieneProcessStartTime(process.pid),
+	file: String(expect.getState().testPath ?? "unknown")
+		.replace(/\\/g, "/")
+		.split("/tests/")
+		.pop(),
+});
+fs.writeFileSync(tmpHygieneOwnerMarker, tmpHygieneOwnerMarkerBody);
+
+function removeTmpHygieneOwnerMarker(): void {
+	try {
+		fs.rmSync(tmpHygieneOwnerMarker, { force: true });
+	} catch {
+		// The marker is only a liveness hint; a later run uses a new run id.
+	}
+}
+
+/**
+ * Refresh this worker's heartbeat (#3186 round 3). Driven by the test
+ * lifecycle, NOT by a timer: a `setInterval` here would be a new
+ * `raw-timer-wait` on the support seam every test file imports, and
+ * `tests/support/vitest-setup.ts` cannot join the serialized
+ * `wallClockBudgetInclude` lane an admission requires.
+ *
+ * Two deliberate choices, both about fake timers — most of this suite installs
+ * them, and this hook runs inside their scope:
+ *
+ * - the throttle reads `process.hrtime.bigint()`, not `Date.now()`, which
+ *   Vitest's default `toFake` list replaces;
+ * - the beat REWRITES the marker instead of calling `utimes` with a computed
+ *   timestamp, so the mtime the reader compares comes from the kernel clock and
+ *   a test's fake `Date` can never stamp a live worker as an orphan.
+ *
+ * There is deliberately NO "already drained" guard here: `isolate: true` gives
+ * every test FILE its own fork (see vitest.config.ts), so no `afterEach` can
+ * run after the file-level `afterAll` that removed the marker, and a guard for
+ * that could not be made to red.
+ */
+const TMP_HYGIENE_OWNER_HEARTBEAT_MS = 250;
+const TMP_HYGIENE_OWNER_HEARTBEAT_NS =
+	BigInt(TMP_HYGIENE_OWNER_HEARTBEAT_MS) * 1_000_000n;
+let tmpHygieneLastHeartbeatNs = process.hrtime.bigint();
+export function touchTmpHygieneOwnerMarker(
+	minIntervalNs = TMP_HYGIENE_OWNER_HEARTBEAT_NS,
+): void {
+	const now = process.hrtime.bigint();
+	if (now - tmpHygieneLastHeartbeatNs < minIntervalNs) return;
+	tmpHygieneLastHeartbeatNs = now;
+	try {
+		fs.writeFileSync(tmpHygieneOwnerMarker, tmpHygieneOwnerMarkerBody);
+	} catch {
+		// The shared home can be gone under a teardown race; a missed beat only
+		// ages this marker toward the orphan bound, which fails safe.
+	}
+}
+beforeEach(() => touchTmpHygieneOwnerMarker());
+afterEach(() => touchTmpHygieneOwnerMarker());
 
 /** Root-level `orphan-backstop*` entries of a home, each with its mtime: the
  *  stamp, the transient lock, and the `orphan-backstop.lock.quarantine-…/`
@@ -583,6 +660,218 @@ export function tmpHygieneLeakReport(): {
 	};
 }
 
+const TMP_HYGIENE_OWNER_DRAIN_BUDGET_MS = 5_000;
+/** Vitest's `hookTimeout` — 60 s in every project of `vitest.config.ts`. It is
+ *  the hard ceiling on the one window a live worker spends with no
+ *  `beforeEach`/`afterEach` in it (a single `beforeAll`/`afterAll`), so it is
+ *  the longest a LIVE worker can legitimately go without beating. */
+const TMP_HYGIENE_OWNER_HOOK_TIMEOUT_MS = 60_000;
+/** A marker whose heartbeat is older than this is an orphan on EVERY platform:
+ *  the ceiling above, plus the owner's own drain budget (it re-reads the mtime
+ *  up to that long after it started waiting), plus two heartbeat intervals of
+ *  slack for the throttle. This is what bounds suppression where no process
+ *  start time exists (darwin/win32) — the bound the platform cannot withhold. */
+export const TMP_HYGIENE_OWNER_STALE_MS =
+	TMP_HYGIENE_OWNER_HOOK_TIMEOUT_MS +
+	TMP_HYGIENE_OWNER_DRAIN_BUDGET_MS +
+	2 * TMP_HYGIENE_OWNER_HEARTBEAT_MS;
+
+function readTmpHygieneProcessStartTime(pid: number): string | undefined {
+	try {
+		const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
+		const commEnd = stat.lastIndexOf(")");
+		if (commEnd < 0) return undefined;
+		return stat
+			.slice(commEnd + 2)
+			.trim()
+			.split(/\s+/)[19];
+	} catch {
+		return undefined;
+	}
+}
+
+/** The process-boundary facts the owner classifier needs about a marker's pid.
+ *  This is the ONE seam a test doubles to reach a platform it is not running
+ *  on: the darwin/win32 cell of the state table is "no process start time
+ *  exists", and it is reached by doubling this boundary — never by mocking
+ *  `fs`, which would also fake the heartbeat the cell is about. */
+export type TmpHygieneProcessProbe = {
+	/** Does this platform supply a process start time at all? Measured against
+	 *  THIS process, so it can never be true while every marker is written
+	 *  without one (HIGH-3297-V1).
+	 *
+	 *  Same shape as `PROC_PPID_READABLE` in `clients/safe-spawn.ts` (#3091 F4),
+	 *  and for the same reason it gives: `process.platform === "linux"` is a
+	 *  different question, because a container or a hardened host runs Linux
+	 *  with no `/proc` mounted. Computed per call rather than at module load, so
+	 *  it is not a module-load platform const (AGENTS.md shape 30). */
+	startTimeSupported: boolean;
+	startTimeOf: (pid: number) => string | undefined;
+	isAlive: (pid: number) => boolean;
+};
+
+export function realTmpHygieneProcessProbe(): TmpHygieneProcessProbe {
+	return {
+		startTimeSupported:
+			readTmpHygieneProcessStartTime(process.pid) !== undefined,
+		startTimeOf: readTmpHygieneProcessStartTime,
+		isAlive: (pid) => {
+			try {
+				process.kill(pid, 0);
+				return true;
+			} catch (err) {
+				// EPERM: the process exists, this user may not signal it.
+				return (err as NodeJS.ErrnoException).code === "EPERM";
+			}
+		},
+	};
+}
+
+export type TmpHygieneOwnerVerdict =
+	| "foreign"
+	| "self"
+	| "malformed"
+	| "orphaned"
+	| "live";
+
+export type TmpHygieneOwnerFacts = {
+	/** The marker filename carries the run id (G1). */
+	runMatches: boolean;
+	/** Parsed marker, or `undefined` when it did not read or parse. */
+	marker: unknown;
+	markerMtimeMs: number | undefined;
+	nowMs: number;
+	selfPid: number;
+	probe: TmpHygieneProcessProbe;
+	staleAfterMs: number;
+};
+
+/**
+ * Classify one owner marker. Pure, so the whole platform × owner-state table of
+ * #3186 round 3 is executable on one host.
+ *
+ * Only `live` suppresses. `orphaned` and `malformed` are ATTRIBUTED — a marker
+ * that cannot authenticate itself must never hide a leak (MEDIUM-3297-2), and a
+ * platform that cannot authenticate at all must never reject every live worker
+ * (HIGH-3297-V1). The heartbeat (G3) is the check that holds on every platform;
+ * the start time (G5) is an extra where one exists.
+ */
+export function classifyTmpHygieneOwner(
+	facts: TmpHygieneOwnerFacts,
+): TmpHygieneOwnerVerdict {
+	// Every field is normalised to a total type BEFORE the guards, so each guard
+	// below can be neutered on its own in a mutation run without the ones after
+	// it losing their narrowing — the shape the "mutate it both ways" rule needs.
+	// `-1` and `""` are sentinels no real marker can carry.
+	const marker = facts.marker as {
+		pid?: unknown;
+		startTime?: unknown;
+		file?: unknown;
+	} | null;
+	const pid = typeof marker?.pid === "number" ? marker.pid : -1;
+	const file = typeof marker?.file === "string" ? marker.file : "";
+	const startTime =
+		typeof marker?.startTime === "string" ? marker.startTime : undefined;
+	const heartbeatAgeMs =
+		facts.markerMtimeMs === undefined
+			? Number.POSITIVE_INFINITY
+			: facts.nowMs - facts.markerMtimeMs;
+
+	if (!facts.runMatches) return "foreign"; // G1
+	if (pid === -1 || file === "") return "malformed"; // G2
+	if (pid === facts.selfPid) return "self";
+	if (heartbeatAgeMs > facts.staleAfterMs) return "orphaned"; // G3 — beat stopped
+	if (!facts.probe.isAlive(pid)) return "orphaned"; // G4
+	if (facts.probe.startTimeSupported) {
+		// G5 — where the platform has start times, a marker without one is not
+		// something this run's setup wrote, and a different one is PID reuse.
+		// This block is an EXTRA on top of G3/G4, never the sole gate: making it
+		// unconditional is exactly HIGH-3297-V1.
+		if (startTime === undefined) return "orphaned";
+		if (facts.probe.startTimeOf(pid) !== startTime) return "orphaned";
+	}
+	return "live";
+}
+
+export type TmpHygieneOwnerScan = {
+	live: Set<string>;
+	counts: Record<TmpHygieneOwnerVerdict, number>;
+};
+
+function scanTmpHygieneOwners(
+	probe: TmpHygieneProcessProbe,
+): TmpHygieneOwnerScan {
+	const live = new Set<string>();
+	const counts: Record<TmpHygieneOwnerVerdict, number> = {
+		foreign: 0,
+		self: 0,
+		malformed: 0,
+		orphaned: 0,
+		live: 0,
+	};
+	const runPrefix = `${process.env.PI_LENS_TMP_HYGIENE_RUN_ID}-`;
+	for (const name of readTmpDirEntries(tmpHygieneOwnerDir)) {
+		const markerPath = path.join(tmpHygieneOwnerDir, name);
+		let marker: unknown;
+		try {
+			marker = JSON.parse(fs.readFileSync(markerPath, "utf8"));
+		} catch {
+			// Unreadable, half-written or not JSON: classified `malformed` below,
+			// which attributes rather than suppresses.
+			marker = undefined;
+		}
+		const verdict = classifyTmpHygieneOwner({
+			runMatches: name.startsWith(runPrefix),
+			marker,
+			markerMtimeMs: fs.statSync(markerPath, { throwIfNoEntry: false })
+				?.mtimeMs,
+			nowMs: Date.now(),
+			selfPid: process.pid,
+			probe,
+			staleAfterMs: TMP_HYGIENE_OWNER_STALE_MS,
+		});
+		counts[verdict] += 1;
+		const file = (marker as { file?: unknown } | null | undefined)?.file;
+		if (verdict === "live" && typeof file === "string") live.add(file);
+	}
+	return { live, counts };
+}
+
+/** Wait for every owner worker to finish its own afterEach/afterAll drain. */
+export async function tmpHygieneWaitForOwnerDrain(
+	budgetMs = TMP_HYGIENE_OWNER_DRAIN_BUDGET_MS,
+	probe: TmpHygieneProcessProbe = realTmpHygieneProcessProbe(),
+): Promise<TmpHygieneOwnerScan> {
+	const deadline = Date.now() + budgetMs;
+	let scan = scanTmpHygieneOwners(probe);
+	while (scan.live.size > 0 && Date.now() < deadline) {
+		await new Promise<void>((resolve) => setImmediate(resolve));
+		scan = scanTmpHygieneOwners(probe);
+	}
+	return scan;
+}
+
+/** ONE record per hygiene run (not one per marker): the owner-marker census the
+ *  hygiene owner acted on, so a suppressed or attributed entry is explicable
+ *  from the run's own output. */
+export function formatTmpHygieneOwnerSummary(
+	scan: TmpHygieneOwnerScan,
+): string {
+	const { counts } = scan;
+	return `[tmp-hygiene-owners] live=${counts.live} orphaned=${counts.orphaned} malformed=${counts.malformed} foreign=${counts.foreign} self=${counts.self}`;
+}
+
+export function tmpHygieneExcludeLiveOwnerEntries(
+	entries: readonly string[],
+	ownerFor: (entry: string) => string | undefined,
+	liveOwners: ReadonlySet<string>,
+): string[] {
+	return entries.filter((entry) => {
+		const owner = ownerFor(entry);
+		return owner === undefined || !liveOwners.has(owner);
+	});
+}
+
 function checkTmpHygiene(): void {
 	const { testFile, leftovers } = tmpHygieneLeakReport();
 	const after = new Set(
@@ -633,10 +922,14 @@ export function runTeardownWithMemReport(
 }
 
 afterAll(() => {
-	runTeardownWithMemReport(
-		[checkKillGuard, checkTmpHygiene, checkBackstop],
-		emitMemReport,
-	);
+	try {
+		runTeardownWithMemReport(
+			[checkKillGuard, checkTmpHygiene, checkBackstop],
+			emitMemReport,
+		);
+	} finally {
+		removeTmpHygieneOwnerMarker();
+	}
 });
 
 export function cleanupTmpHygiene(): void {
