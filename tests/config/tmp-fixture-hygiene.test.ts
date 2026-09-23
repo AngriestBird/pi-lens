@@ -98,19 +98,32 @@ function scanMkdtempSites(): { file: string; line: number; text: string }[] {
 }
 
 function ownerForTmpEntry(entry: string): string | undefined {
+	let owner: string | undefined;
+	let ownerPrefixLength = -1;
 	for (const { file, source } of readWalkedFiles(
 		listSourceFiles(path.join(REPO_ROOT, "tests"), { extensions: [".ts"] }),
 	)) {
 		const match = source.matchAll(/setupTestEnvironment\(\s*["']([^"']+)["']/g);
 		for (const [, prefix] of match) {
-			if (entry.startsWith(prefix))
-				return path
+			if (entry.startsWith(prefix) && prefix.length > ownerPrefixLength) {
+				ownerPrefixLength = prefix.length;
+				owner = path
 					.relative(REPO_ROOT, file)
 					.replace(/\\/g, "/")
 					.replace(/^tests\//, "");
+			}
 		}
 	}
-	return undefined;
+	return owner;
+}
+
+function processStartTime(pid: number): string {
+	const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
+	const commEnd = stat.lastIndexOf(")");
+	return stat
+		.slice(commEnd + 2)
+		.trim()
+		.split(/\s+/)[19] as string;
 }
 
 describe("tmp-fixture-hygiene", () => {
@@ -545,8 +558,9 @@ describe("tmp-fixture-hygiene", () => {
 	it("does not red a live scratch owner, then reds it after the owner drains", async () => {
 		// #3186 mutation proof: removing the live-owner filter makes the first
 		// assertion red, while removing the second assertion would hide a real
-		// post-drain leak. PID 1 is a stable live process; the marker is removed
-		// to model the owner's completed cleanup drain.
+		// post-drain leak. PID 1 is a stable live process and its start time binds
+		// the marker to this exact PID lifetime; removing the marker models the
+		// owner's completed cleanup drain.
 		const owner = "config/tmp-fixture-hygiene.test.ts";
 		const marker = path.join(
 			process.env.PI_LENS_HOME as string,
@@ -556,7 +570,14 @@ describe("tmp-fixture-hygiene", () => {
 		const scratch = fs.mkdtempSync(
 			path.join(os.tmpdir(), "pi-lens-scratch-3186-"),
 		);
-		fs.writeFileSync(marker, JSON.stringify({ pid: 1, file: owner }));
+		fs.writeFileSync(
+			marker,
+			JSON.stringify({
+				pid: 1,
+				startTime: processStartTime(1),
+				file: owner,
+			}),
+		);
 		try {
 			const live = await tmpHygieneWaitForOwnerDrain(50);
 			expect(

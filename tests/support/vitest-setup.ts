@@ -74,8 +74,9 @@ fs.mkdirSync(path.dirname(tmpHygieneBaselinePath), { recursive: true });
 
 // #3186: a process-shared marker lets the serialized hygiene owner distinguish
 // a root whose test file is still running from one whose cleanup drain ended.
-// The marker is deliberately per worker and run-scoped; a killed worker leaves
-// no false "live" admission because the marker's pid is checked by the reader.
+// The marker is deliberately per worker and run-scoped. PID alone is not an
+// identity: a killed worker can leave an orphan whose PID is still live or is
+// later reused. Linux's process start time distinguishes that lifetime.
 const tmpHygieneOwnerDir = path.join(tmpHygieneHome, "tmp-hygiene-owners");
 fs.mkdirSync(tmpHygieneOwnerDir, { recursive: true });
 const tmpHygieneOwnerMarker = path.join(
@@ -86,6 +87,7 @@ fs.writeFileSync(
 	tmpHygieneOwnerMarker,
 	JSON.stringify({
 		pid: process.pid,
+		startTime: readTmpHygieneProcessStartTime(process.pid),
 		file: String(expect.getState().testPath ?? "unknown")
 			.replace(/\\/g, "/")
 			.split("/tests/")
@@ -597,6 +599,20 @@ export function tmpHygieneLeakReport(): {
 
 const TMP_HYGIENE_OWNER_DRAIN_BUDGET_MS = 5_000;
 
+function readTmpHygieneProcessStartTime(pid: number): string | undefined {
+	try {
+		const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
+		const commEnd = stat.lastIndexOf(")");
+		if (commEnd < 0) return undefined;
+		return stat
+			.slice(commEnd + 2)
+			.trim()
+			.split(/\s+/)[19];
+	} catch {
+		return undefined;
+	}
+}
+
 function liveTmpHygieneOwnerFiles(): Set<string> {
 	const live = new Set<string>();
 	for (const name of readTmpDirEntries(tmpHygieneOwnerDir)) {
@@ -606,18 +622,18 @@ function liveTmpHygieneOwnerFiles(): Set<string> {
 		try {
 			const marker = JSON.parse(fs.readFileSync(markerPath, "utf8")) as {
 				pid?: number;
+				startTime?: string;
 				file?: string;
 			};
-			if (!marker.file || typeof marker.pid !== "number") continue;
+			if (
+				!marker.file ||
+				typeof marker.pid !== "number" ||
+				typeof marker.startTime !== "string"
+			)
+				continue;
 			if (marker.pid === process.pid) continue;
-			try {
-				process.kill(marker.pid, 0);
-			} catch (error) {
-				if ((error as NodeJS.ErrnoException).code !== "EPERM") {
-					fs.rmSync(markerPath, { force: true });
-					continue;
-				}
-			}
+			if (readTmpHygieneProcessStartTime(marker.pid) !== marker.startTime)
+				continue;
 			live.add(marker.file);
 		} catch {
 			// A concurrently-written marker is retried on the next poll.
@@ -633,7 +649,7 @@ export async function tmpHygieneWaitForOwnerDrain(
 	const deadline = Date.now() + budgetMs;
 	let live = liveTmpHygieneOwnerFiles();
 	while (live.size > 0 && Date.now() < deadline) {
-		await new Promise<void>((resolve) => setTimeout(resolve, 25));
+		await new Promise<void>((resolve) => setImmediate(resolve));
 		live = liveTmpHygieneOwnerFiles();
 	}
 	return live;
