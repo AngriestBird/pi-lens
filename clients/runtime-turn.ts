@@ -15,7 +15,7 @@ import {
 	formatCodeQualityWarningsAdvisory,
 	writeCodeQualityWarningsReport,
 } from "./code-quality-warnings.js";
-import type { CacheManager } from "./cache-manager.js";
+import type { CacheEntry, CacheManager } from "./cache-manager.js";
 import type { CascadeSkipReason } from "./cascade-types.js";
 import {
 	clearGitGuardTestFailure,
@@ -44,20 +44,11 @@ import {
 	SWEEP_IDLE_SAFETY_MARGIN_MS,
 } from "./lsp/workspace-sweep-hold.js";
 import { isTestRoleCollateral } from "./collateral-test-role.js";
-import {
-	classifyAndFilterFindings,
-	type GitleaksResult,
-} from "./gitleaks-client.js";
 import type { GovulncheckResult } from "./govulncheck-client.js";
 import type { TrivyResult } from "./trivy-client.js";
-import {
-	dedupeSecretFindings,
-	fromAstGrepWarnings,
-	fromGitleaks,
-	fromTrivySecrets,
-	isSecretWarning,
-	secretLocationKey,
-} from "./secret-findings.js";
+import { isSecretWarning, secretLocationKey } from "./secret-findings.js";
+import { secretsLane } from "./turn-end/lanes/secrets.js";
+import type { TurnEndLaneContext } from "./turn-end/lane.js";
 import type { KnipClient, KnipIssue, KnipResult } from "./knip-client.js";
 import type { DeadCodeClient, DeadCodeResult } from "./dead-code-client.js";
 import {
@@ -80,10 +71,6 @@ import {
 } from "./project-diagnostics/runner-adapters/trivy.js";
 import { knipIssuesToProjectDiagnostics } from "./project-diagnostics/runner-adapters/knip.js";
 import type { ProjectDiagnostic } from "./project-diagnostics/types.js";
-import {
-	applyDispositionsMultiFile,
-	type DispositionCandidate,
-} from "./diagnostic-dispositions.js";
 import { logLatency } from "./latency-logger.js";
 import {
 	getLspBudgetIdleTimeoutMs,
@@ -134,7 +121,7 @@ import {
 import { cascadeCarrySuffix } from "./cascade-format.js";
 import {
 	applyPushedFindingPolicy,
-	renderedRuleIdentities,
+	filterFindingsByDisposition,
 } from "./dispatch/finding-policy.js";
 import { detectFileRole } from "./file-role.js";
 import {
@@ -479,82 +466,6 @@ interface TurnEndDeps {
 	signal?: AbortSignal;
 	/** Delivery adapter whose tool names appear in agent-facing advisories. */
 	host?: LensToolHost;
-}
-
-/**
- * #1617: turn_end reads gitleaks/govulncheck/trivy straight from their
- * session-scan caches and formats them into advisory/blocker text — a
- * reporting lane parallel to (and, before this fix, entirely bypassing)
- * `dispatcher.ts:924`'s `applyDispositions` filter. An agent-marked
- * false-positive/won't-fix on one of these findings never suppressed it
- * here, so it re-reported on every turn.
- *
- * Filters `findings` through the SAME anchor derivation the dispatch path
- * and `lens_diagnostics mode=full` use (`applyDispositionsMultiFile` in
- * `diagnostic-dispositions.ts`), keyed off each lane's own canonical
- * `ProjectDiagnostic` adapter (`toDiagnostic`) — the exact tool/rule/message
- * identity `lens_diagnostics` already surfaces and `lens_diagnostic_mark`
- * already anchors a mark against, not a second, cloned identity that would
- * silently diverge from what the agent actually marked.
- *
- * Returns the surviving findings plus how many were dropped, so a caller can
- * still surface a "suppressed by disposition: N" trace (the #1616
- * suppressed-bucket rule — a security finding must never vanish with no
- * trace, even when the disposition that dropped it is working as intended).
- */
-function filterFindingsByDisposition<F>(
-	findings: F[],
-	cwd: string,
-	toDiagnostic: (finding: F) => ProjectDiagnostic,
-): { kept: F[]; suppressed: number } {
-	if (findings.length === 0) return { kept: findings, suppressed: 0 };
-	// #3248: every `(tool, rule)` spelling a mark against these findings can
-	// carry, not just the canonical one. NONE of these turn-end surfaces prints
-	// a tool — knip renders `<file>:<line> — <type>: <name>`, dead-code
-	// `unused <kind> <name>`, the security lanes `Potential secret: <rule>` —
-	// so an agent marking from what it was SHOWN has no tool to pass, and
-	// `lens_diagnostic_mark`'s `tool` parameter is optional. Honouring only the
-	// spelling `lens_diagnostics` happens to show is the #3088 non-convergence,
-	// and it is fixed HERE, once, for every caller of this helper rather than
-	// per lane. Widening is safe for the blocking members because a
-	// `semantic: "blocking"` finding can still only be dropped by the STRICT,
-	// content-bound false-positive anchor, which keeps binding the normalized
-	// message and the flagged line's content.
-	// The expanded candidate is a `DispositionCandidate` with a path, NOT a
-	// `ProjectDiagnostic`: the tool-omitted spelling has no `tool`, which that
-	// type requires. Only the anchor derivation reads it.
-	const candidates = findings.flatMap((finding) => {
-		const diagnostic = toDiagnostic(finding);
-		return renderedRuleIdentities(diagnostic).map((identity) => ({
-			finding,
-			candidate: {
-				filePath: diagnostic.filePath,
-				message: diagnostic.message,
-				...(diagnostic.line !== undefined && { line: diagnostic.line }),
-				...(diagnostic.semantic !== undefined && {
-					semantic: diagnostic.semantic,
-				}),
-				...(identity.tool !== undefined && { tool: identity.tool }),
-				...(identity.rule !== undefined && { rule: identity.rule }),
-			} satisfies DispositionCandidate & { filePath: string },
-		}));
-	});
-	const survivors = new Set(
-		applyDispositionsMultiFile(
-			candidates.map((c) => c.candidate),
-			cwd,
-			(d) => d.filePath,
-		),
-	);
-	const disposed = new Set<F>();
-	for (const candidate of candidates) {
-		if (!survivors.has(candidate.candidate)) disposed.add(candidate.finding);
-	}
-	const kept =
-		disposed.size === 0
-			? findings
-			: findings.filter((finding) => !disposed.has(finding));
-	return { kept, suppressed: findings.length - kept.length };
 }
 
 /**
@@ -2050,46 +1961,36 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			(dispositionSuppressedByLane[lane] ?? 0) + count;
 	}
 
+	// #1892: ONE read per scanner store per turn_end. The inline lanes got this
+	// for free by reading each cache into a local; now that a lane reads its own
+	// stores (`TurnEndLaneContext.readScannerCache`), the composer and the lanes
+	// must still share one envelope per store — two reads of one store inside
+	// one delivery is the parallel-store shape this umbrella exists to kill, and
+	// the cache's TTL boundary can fall between them, so the secrets tier and
+	// the CVE tier would disagree about the trivy store they both read.
+	const scannerCacheReads = new Map<string, unknown>();
+	function readScannerCache<T>(scanner: string): CacheEntry<T> | null {
+		if (!scannerCacheReads.has(scanner)) {
+			scannerCacheReads.set(scanner, cacheManager.readCache<T>(scanner, cwd));
+		}
+		return scannerCacheReads.get(scanner) as CacheEntry<T> | null;
+	}
+	const laneCtx: TurnEndLaneContext = {
+		cwd,
+		signal: deps.signal,
+		readScannerCache,
+		peekActionableWarnings: () => runtime.peekActionableWarnings(),
+	};
+
 	// govulncheck — surface session_start-cached Go CVE findings as advisory.
 	// No per-turn re-run in this slice; the cache refreshes at next session_start.
-	const govCacheEntry = cacheManager.readCache<GovulncheckResult>(
-		"govulncheck",
-		cwd,
-	);
-	const trivyCacheEntry = cacheManager.readCache<TrivyResult>("trivy", cwd);
-	const gitleaksData = cacheManager.readCache<GitleaksResult>(
-		"gitleaks",
-		cwd,
-	)?.data;
-	const trivySecretsData = trivyCacheEntry?.data;
-	// Gitleaks deliberately scans gitignored local files and nested repositories
-	// so an explicit security audit can still inspect them. The adapter is the
-	// source of truth for whether a finding belongs in a blocking delivery lane;
-	// filter here before freshness handling so demoted findings cannot leak into
-	// either the blocker or stale-secret turn context.
-	const boundedClassification = await bounded(
-		classifyAndFilterFindings(gitleaksData?.findings ?? [], cwd),
-		{
-			ms: HOOK_WALL_BUDGET_MS.turn_end,
-			signal: deps.signal,
-			hook: "turn_end",
-			label: "classifyAndFilterFindings",
-		},
-	);
-	const classifiedGitleaksFindings =
-		boundedClassification ?? gitleaksData?.findings ?? [];
-	if (boundedClassification === undefined) {
-		recordDegradationOnce({
-			kind: "gitleaks_classification_timeout",
-			subject: cwd,
-			reason:
-				"gitleaks classification exceeded the turn_end budget; retained raw findings to fail open",
-		});
-	}
-	const blockingGitleaksFindings = classifiedGitleaksFindings.filter(
-		(finding) =>
-			gitleaksFindingToProjectDiagnostic(cwd, finding).semantic === "blocking",
-	);
+	const govCacheEntry = readScannerCache<GovulncheckResult>("govulncheck");
+	const trivyCacheEntry = readScannerCache<TrivyResult>("trivy");
+	// The secrets lane (`clients/turn-end/lanes/secrets.ts`) reads the gitleaks
+	// and trivy stores, classifies, and states the freshness policy its rows
+	// need; every rendering and disposition rule for the two secrets tiers lives
+	// there. It does NOT gate itself — the freshness pass below is shared.
+	const secretsSources = await secretsLane.collect(laneCtx);
 	// #1892: ONE freshness pass for the three cached scanner stores that cite a
 	// file. Each store keeps its own `scannedAt` and its own `onMissing` — the
 	// gate carries source identity, so gitleaks' older scan cannot demote a
@@ -2120,7 +2021,6 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	// where the snapshot says. Dropping instead would let any edit — malicious
 	// or accidental — mute a real secret.
 	const govCacheFindings = govCacheEntry?.data?.findings ?? [];
-	const trivySecretFindings = trivySecretsData?.secrets ?? [];
 	const scannerGates = gateFindingsByPathFreshness({
 		cwd,
 		sources: {
@@ -2131,18 +2031,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 					finding.trace.find((frame) => frame.filename)?.filename,
 				onMissing: "demote",
 			},
-			gitleaks: {
-				findings: blockingGitleaksFindings,
-				scannedAt: gitleaksData?.scannedAt,
-				citedPath: (finding: (typeof blockingGitleaksFindings)[number]) =>
-					finding.file,
-			},
-			"trivy-secrets": {
-				findings: trivySecretFindings,
-				scannedAt: trivySecretsData?.scannedAt,
-				citedPath: (finding: (typeof trivySecretFindings)[number]) =>
-					finding.file,
-			},
+			...secretsSources,
 		},
 	});
 	const govGate = scannerGates.govulncheck;
@@ -2191,137 +2080,36 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	// location so a committed/hardcoded secret is reported ONCE (with combined
 	// provenance) — a blocker, since credentials need rotation before merge.
 	//
-	// #1617: THE bug this issue exists for — gitleaks findings never passed
-	// through `applyDispositions`, so an agent-marked false-positive/won't-fix
-	// re-reported as a 🔴 STOP blocker on every turn. Filter through the SAME
-	// `gitleaksFindingToProjectDiagnostic` identity `lens_diagnostics
-	// mode=full` surfaces (tool="gitleaks", rule="gitleaks:<ruleId>", the
-	// exact "Potential secret: …" message) so a mark made against what the
-	// agent was shown is honored here too.
-	//
-	// #1625 review round: filtered AFTER the #1622 freshness gate above — the
-	// anchor is derived from each finding's post-demotion identity, never the
-	// raw pre-gate cache. Applied to BOTH `gitleaksGate.live` AND
-	// `gitleaksGate.stale`: `staleSecretEntries` below derives from the stale
-	// arm, and an fp-marked finding that later goes stale must not reappear
-	// there — a suppression escape (and a double count against
-	// `dispositionSuppressedTotal`) that a live-only filter would have missed.
-	//
-	// #1628: trivy-secret findings get the SAME treatment, now that
-	// `trivySecretFindingToProjectDiagnostic` (project-diagnostics/runner-
-	// adapters/trivy.ts) gives them a `lens_diagnostics`-surfaced identity
-	// (tool="trivy", rule="trivy-secret:<ruleId>") to anchor a mark against —
-	// same pattern as gitleaks above, applied to both the live and stale arms
-	// for the same reason.
-	//
-	// ast-grep secret findings need no filtering here — they already went
-	// through dispatch's applyDispositions before reaching
-	// `peekActionableWarnings()`.
-	const gitleaksLiveFiltered = filterFindingsByDisposition(
-		gitleaksGate.live,
-		cwd,
-		(f) => gitleaksFindingToProjectDiagnostic(cwd, f),
+	// #1892: both tiers are rendered by the secrets LANE
+	// (`clients/turn-end/lanes/secrets.ts`), which owns every rule this block
+	// used to state inline — the two stores' disposition anchors over BOTH
+	// freshness arms (#1617/#1625/#1628), the location dedupe and ast-grep
+	// provenance enrichment, the demoted tier's file+rule+source identity
+	// (#1622 M1) and its own-tier placement (#1622 M2). The composer keeps only
+	// what is not one lane's rule: the gated arms it hands over, the order the
+	// tiers are pushed in, and the per-lane suppression counts that fold into
+	// the one notice below.
+	const secretsDelivery = secretsLane.render(
+		secretsLane.gate(
+			{
+				gitleaks: gitleaksGate,
+				"trivy-secrets": trivySecretsGate,
+			},
+			laneCtx,
+		),
+		laneCtx,
 	);
-	const gitleaksStaleFiltered = filterFindingsByDisposition(
-		gitleaksGate.stale,
-		cwd,
-		(f) => gitleaksFindingToProjectDiagnostic(cwd, f),
-	);
-	recordDispositionSuppressed(
-		"gitleaks",
-		gitleaksLiveFiltered.suppressed + gitleaksStaleFiltered.suppressed,
-	);
-	const trivySecretsLiveFiltered = filterFindingsByDisposition(
-		trivySecretsGate.live,
-		cwd,
-		(f) => trivySecretFindingToProjectDiagnostic(cwd, f),
-	);
-	const trivySecretsStaleFiltered = filterFindingsByDisposition(
-		trivySecretsGate.stale,
-		cwd,
-		(f) => trivySecretFindingToProjectDiagnostic(cwd, f),
-	);
-	recordDispositionSuppressed(
-		"trivy-secrets",
-		trivySecretsLiveFiltered.suppressed + trivySecretsStaleFiltered.suppressed,
-	);
-	const astSecretWarnings = runtime
-		.peekActionableWarnings()
-		.filter(isSecretWarning);
-	const sessionSecrets = dedupeSecretFindings([
-		...fromGitleaks(gitleaksLiveFiltered.kept),
-		...fromTrivySecrets(trivySecretsLiveFiltered.kept),
-	]);
-	// Demoted secrets are addressed by FILE, never by line — the line is the one
-	// field the edit invalidated. Rule id and source survive it and must be
-	// carried through (review round M1): an agent triages an `aws-access-token`
-	// differently from a low-confidence `generic-api-key`, and cannot do that
-	// from a bare path. Deduped on file+rule+source so a file with twenty stale
-	// hits of one rule is named once.
-	const staleSecretEntries = [
-		...gitleaksStaleFiltered.kept.map((f) => ({
-			file: toRunnerDisplayPath(cwd, f.file),
-			rule: f.ruleId,
-			source: "gitleaks",
-		})),
-		...trivySecretsStaleFiltered.kept.map((f) => ({
-			file: toRunnerDisplayPath(cwd, f.file),
-			rule: f.ruleId,
-			source: "trivy",
-		})),
-	];
-	const staleSecrets = [
-		...new Map(
-			staleSecretEntries.map((e) => [`${e.file}|${e.rule}|${e.source}`, e]),
-		).values(),
-	];
-	// Locations already surfaced as session-scan secret blockers — used to enrich
-	// provenance where ast-grep agrees and to suppress the duplicate ast-grep copy
-	// from the actionable-warnings advisory below.
-	const secretBlockedLocations = new Set(
-		sessionSecrets.map((f) => secretLocationKey(f.file, f.line)),
-	);
-	if (sessionSecrets.length) {
-		// Fold in ast-grep provenance ONLY where it coincides with a session
-		// secret — don't promote ast-grep-only findings out of their advisory tier.
-		const enriched = dedupeSecretFindings([
-			...sessionSecrets,
-			...fromAstGrepWarnings(astSecretWarnings).filter((a) =>
-				secretBlockedLocations.has(secretLocationKey(a.file, a.line)),
-			),
-		]);
-		const shown = enriched.slice(0, 5);
-		let report =
-			"🔴 STOP — hardcoded secrets detected. Rotate the credentials and remove them from source:\n";
-		for (const f of shown) {
-			const where = `${toRunnerDisplayPath(cwd, f.file)}:${f.line}`;
-			report += `  ${where} — ${f.rule} [${f.sources.join(" + ")}]${f.description ? `: ${f.description}` : ""}\n`;
-		}
-		if (enriched.length > shown.length) {
-			report += `  … and ${enriched.length - shown.length} more\n`;
-		}
-		// @delivery-surface: runtime-turn:secrets-gitleaks,runtime-turn:secrets-trivy
-		blockerParts.push(report);
+	for (const [store, count] of Object.entries(
+		secretsDelivery.dispositionSuppressed ?? {},
+	)) {
+		recordDispositionSuppressed(store, count);
 	}
-	if (staleSecrets.length) {
-		// Its OWN tier, never `advisoryParts` (review round M2). The advisory tier
-		// is labelled "no action required this turn", which would sit directly
-		// above copy telling the agent to re-scan — a section that contradicts its
-		// own heading. This preamble is imperative because the action is real: the
-		// finding is unverified, not dismissed.
-		const shown = staleSecrets.slice(0, 5);
-		let report =
-			`🔑 ACTION NEEDED — secrets were flagged in files that changed after the scan. ${STALE_LINE_MARKER}\n` +
-			"The cached line numbers are no longer trustworthy, so they are withheld. Re-run a secrets scan to confirm or clear these:\n";
-		for (const entry of shown) {
-			report += `  ${entry.file} — ${entry.rule} [${entry.source}]\n`;
-		}
-		if (staleSecrets.length > shown.length) {
-			report += `  … and ${staleSecrets.length - shown.length} more\n`;
-		}
-		// @delivery-surface: runtime-turn:stale-secrets-tier
-		staleSecretParts.push(report);
-	}
+	const secretBlockedLocations =
+		secretsDelivery.deliveredLocationKeys ?? new Set<string>();
+	// @delivery-surface: runtime-turn:secrets-gitleaks,runtime-turn:secrets-trivy
+	blockerParts.push(...(secretsDelivery.blockerParts ?? []));
+	// @delivery-surface: runtime-turn:stale-secrets-tier
+	staleSecretParts.push(...(secretsDelivery.staleSecretParts ?? []));
 
 	// trivy — surface session_start-cached dependency CVEs (#131, Phase 1).
 	// CRITICAL is a blocker (a known-exploitable CVE in a shipped dep is real

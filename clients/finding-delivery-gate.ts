@@ -30,7 +30,11 @@
  *     deliver unchanged. A missed demotion is noise; a wrong drop can hide a
  *     live credential or CVE.
  * The turn-end secrets (gitleaks/trivy-secrets) and govulncheck advisory both
- * route through this gate in `clients/runtime-turn.ts`.
+ * route through this gate in `clients/runtime-turn.ts`, in ONE shared call
+ * (#3264) whose arms the secrets LANE (`clients/turn-end/lanes/secrets.ts`,
+ * #1892) renders. A lane declares its sources and never gates itself: the
+ * pass, its stat budget and its bounded records are per DELIVERY, not per
+ * lane.
  *
  * The SAME freshness family, one level up, covers cross-file drift: a cached
  * inline blocker is a verdict about its file *and everything that file
@@ -317,21 +321,33 @@ const RUNTIME_TURN_FILE = "clients/runtime-turn.ts";
 const LENS_DIAGNOSTICS_FILE = "tools/lens-diagnostics.ts";
 
 export const DELIVERY_SURFACES: Record<string, DeliverySurfaceEntry> = {
+	// #1892 (lane extraction): both secrets tiers are rendered by the secrets
+	// LANE (`clients/turn-end/lanes/secrets.ts`), so `clients/runtime-turn.ts`
+	// no longer reads `.live`/`.stale` itself — the arm it can still be pinned
+	// to is the whole gated store object it hands the lane. That is WEAKER than
+	// the previous `gitleaksGate.live,` pin (it no longer says which partition
+	// feeds which tier) and the loss is deliberate: the live/stale split is a
+	// lane rule now, pinned behaviourally instead, by
+	// `tests/clients/runtime-turn-finding-freshness.test.ts` ("keeps an
+	// unmodified file's finding as a full-severity blocker" / "DEMOTES a
+	// finding whose file was edited after the scan — kept, no line") and the
+	// committed witness goldens under `tests/fixtures/witness/`. What the pin
+	// still proves is what this registry exists for: the rows the tier renders
+	// came out of a real `gateFindingsByPathFreshness` call and not out of a
+	// hand-built object (the R2 binding chain in
+	// `tests/clients/finding-delivery-gate.test.ts` walks
+	// `gitleaksGate` → `scannerGates` → the call).
 	"runtime-turn:secrets-gitleaks": gated(
 		RUNTIME_TURN_FILE,
 		"Turn-end 🔴 secrets blocker, gitleaks cache.",
 		["gateFindingsByPathFreshness"],
-		// #1892: the three scanner lanes share ONE gate call, so the evidence is
-		// no longer a per-call `store:` argument. It is this surface's read of
-		// its own store's gated arm — stronger, because it also pins WHICH
-		// partition the blocker tier renders.
-		["gitleaksGate.live,"],
+		["gitleaksGate,"],
 	),
 	"runtime-turn:secrets-trivy": gated(
 		RUNTIME_TURN_FILE,
 		"Turn-end 🔴 secrets blocker, trivy secrets cache.",
 		["gateFindingsByPathFreshness"],
-		["trivySecretsGate.live,"],
+		["trivySecretsGate,"],
 	),
 	"runtime-turn:govulncheck-advisory": gated(
 		RUNTIME_TURN_FILE,
@@ -353,13 +369,15 @@ export const DELIVERY_SURFACES: Record<string, DeliverySurfaceEntry> = {
 		["sweepInlineBlockerFreshness(runtime, cwd, {"],
 		{ evidenceMin: 2 },
 	),
-	// Same two gate calls as the live secrets tier — this tier renders their
-	// `.stale` arm, so it has no OWN gate call to point at.
+	// The same shared gate call and the same two stores as the live secrets
+	// tier — one lane renders both tiers, so this surface has no gate call and
+	// no arm read of its own; see the note above the live tier for what the pin
+	// does and does not prove.
 	"runtime-turn:stale-secrets-tier": gated(
 		RUNTIME_TURN_FILE,
 		"Turn-end 🔑 demoted-secrets tier (drifted since scan).",
 		["gateFindingsByPathFreshness"],
-		["gitleaksGate.stale,", "trivySecretsGate.stale,"],
+		["gitleaksGate,", "trivySecretsGate,"],
 	),
 	// The evidence below is the literal header FRAGMENT including the
 	// interpolation — proves the label is actually rendered, not merely
