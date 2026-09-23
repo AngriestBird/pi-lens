@@ -49,6 +49,37 @@ const gleam = createAvailabilityChecker("gleam", ".exe");
  * own fold here and filed #3285.
  */
 const GLEAM_LOCUS = /^\s*┌─\s+(.+?):(\d+):(\d+)$/;
+const GLEAM_HEADER = /^\s*(error|warning):\s*(.+?)\s*$/;
+const GLEAM_LABEL = /^\s*│\s*\^+\s*(.*?)\s*$/;
+
+/** One codespan diagnostic: its title line, and every line up to the next title. */
+type GleamBlock = { header: RegExpMatchArray; body: string[] };
+
+/**
+ * codespan writes ONE title line per diagnostic and then everything that
+ * belongs to it — locus, borders, snippet, labels, notes — before the next
+ * title (`codespan-reporting` 0.13.1 `src/term/renderer.rs:141-210`). Splitting
+ * on the title is therefore the diagnostic boundary, and it is what keeps an
+ * adjacent diagnostic's label out of its predecessor's message. Lines before
+ * the first title are gleam's own progress output (`Compiling demo`), which
+ * belongs to no diagnostic.
+ */
+function gleamBlocks(lines: string[]): GleamBlock[] {
+	const blocks: GleamBlock[] = [];
+	for (const line of lines) {
+		const header = line.match(GLEAM_HEADER);
+		if (header) blocks.push({ header, body: [] });
+		else blocks.at(-1)?.body.push(line);
+	}
+	return blocks;
+}
+
+function gleamMessage(title: string, body: string[]): string {
+	const labels = body.flatMap(
+		(line) => line.match(GLEAM_LABEL)?.[1]?.trim() || [],
+	);
+	return labels.length > 0 ? `${title} — ${labels.join(" ")}` : title;
+}
 
 function parseGleamOutput(
 	raw: string,
@@ -65,21 +96,29 @@ function parseGleamOutput(
 	// prefix; an anchored capture would drop every diagnostic in that
 	// environment.
 	const lines = stripAnsi(raw).split(/\r?\n/);
-	for (let i = 0; i < lines.length; i++) {
-		const location = lines[i].match(GLEAM_LOCUS);
+	for (const { header, body } of gleamBlocks(lines)) {
+		const severity = header[1] === "warning" ? "warning" : "error";
+		const title = `${header[1]}: ${header[2]}`;
+		// A Gleam diagnostic with NO locus describes the whole project: `check`
+		// receives no file argument (`Diagnostic::write_title`, no codespan emit).
+		// Leave it for the nonzero-without-diagnostics fallback instead of
+		// charging it to whichever file happened to trigger dispatch — ADR 0009:
+		// without a reported path there is no evidence it is about this file.
+		const location = body
+			.find((line) => GLEAM_LOCUS.test(line))
+			?.match(GLEAM_LOCUS);
 		if (!location) continue;
 		const [, sourcePath, lineStr, colStr] = location;
 		// #3278: one seam for reported-path attribution — see javac.ts.
 		if (!pathsEqual(path.resolve(cwd, sourcePath.trim()), absTarget)) continue;
-		const message = lines.slice(i + 1).find((line) => line.trim().length > 0);
 		diagnostics.push({
 			id: `gleam-check-${lineStr}-${colStr}`,
-			message: message?.trim() || "gleam check reported an error",
+			message: gleamMessage(title, body),
 			filePath,
 			line: Number.parseInt(lineStr, 10) || 1,
 			column: Number.parseInt(colStr, 10) || 1,
-			severity: "error",
-			semantic: "blocking",
+			severity,
+			semantic: severity === "error" ? "blocking" : "warning",
 			tool: "gleam",
 			rule: "gleam-check",
 			fixable: false,
