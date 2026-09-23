@@ -10,6 +10,7 @@ import type {
 	RunnerResult,
 } from "../types.js";
 import { createAvailabilityChecker } from "./utils/runner-helpers.js";
+import { finishParsedRun, parseToolRun } from "./utils/tool-failure.js";
 
 const dotnet = createAvailabilityChecker("dotnet", ".exe");
 
@@ -169,26 +170,25 @@ const dotnetBuildRunner: RunnerDefinition = {
 		);
 		const raw = `${result.stdout ?? ""}\n${result.stderr ?? ""}`.trim();
 
-		if (result.status === 0 && !raw) {
-			return { status: "succeeded", diagnostics: [], semantic: "none" };
-		}
-
-		const diagnostics = parseDotnetBuildOutput(raw, ctx.filePath);
-		if (diagnostics.length === 0) {
-			return {
-				status: result.status === 0 ? "succeeded" : "failed",
-				diagnostics: [],
-				semantic: "warning",
-				rawOutput: raw,
-			};
-		}
-
-		const hasErrors = diagnostics.some((d) => d.severity === "error");
-		return {
-			status: hasErrors ? "failed" : "succeeded",
-			diagnostics,
-			semantic: hasErrors ? "blocking" : "warning",
-		};
+		const parsed = parseToolRun(
+			"dotnet-build",
+			{ result, output: raw },
+			(output) => parseDotnetBuildOutput(output, ctx.filePath),
+		);
+		if (parsed.skipped) return parsed.skipped;
+		return finishParsedRun({
+			tool: "dotnet-build",
+			ctx,
+			result,
+			diagnostics: parsed.diagnostics,
+			classify: (diagnostics) => {
+				const hasErrors = diagnostics.some((d) => d.severity === "error");
+				return {
+					status: hasErrors ? "failed" : "succeeded",
+					semantic: hasErrors ? "blocking" : "warning",
+				};
+			},
+		});
 	},
 };
 
