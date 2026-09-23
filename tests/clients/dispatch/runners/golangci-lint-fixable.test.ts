@@ -138,10 +138,14 @@ describe("parseGolangciJson — fixable propagation (#112 slice)", () => {
 	});
 
 	it("handles empty / malformed output gracefully", () => {
-		expect(parseGolangciJson("", "main.go")).toEqual([]);
-		expect(parseGolangciJson("not json", "main.go")).toEqual([]);
+		expect(parseGolangciJson("", "main.go", process.cwd())).toEqual([]);
+		expect(parseGolangciJson("not json", "main.go", process.cwd())).toEqual([]);
 		expect(
-			parseGolangciJson(JSON.stringify({ Issues: null }), "main.go"),
+			parseGolangciJson(
+				JSON.stringify({ Issues: null }),
+				"main.go",
+				process.cwd(),
+			),
 		).toEqual([]);
 	});
 });
