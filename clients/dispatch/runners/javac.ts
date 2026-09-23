@@ -10,6 +10,7 @@ import type {
 	RunnerResult,
 } from "../types.js";
 import { createAvailabilityChecker } from "./utils/runner-helpers.js";
+import { finishParsedRun, parseToolRun } from "./utils/tool-failure.js";
 
 const javac = createAvailabilityChecker("javac", ".exe");
 
@@ -91,26 +92,22 @@ const javacRunner: RunnerDefinition = {
 		);
 		const raw = `${result.stdout ?? ""}\n${result.stderr ?? ""}`.trim();
 
-		if (result.status === 0 && !raw) {
-			return { status: "succeeded", diagnostics: [], semantic: "none" };
-		}
-
-		const diagnostics = parseJavacOutput(raw, ctx.filePath);
-		if (diagnostics.length === 0) {
-			return {
-				status: result.status === 0 ? "succeeded" : "failed",
-				diagnostics: [],
+		const parsed = parseToolRun("javac", { result, output: raw }, (output) =>
+			parseJavacOutput(output, ctx.filePath),
+		);
+		if (parsed.skipped) return parsed.skipped;
+		return finishParsedRun({
+			tool: "javac",
+			ctx,
+			result,
+			diagnostics: parsed.diagnostics,
+			classify: (diagnostics) => ({
+				status: diagnostics.some((d) => d.severity === "error")
+					? "failed"
+					: "succeeded",
 				semantic: "warning",
-				rawOutput: raw,
-			};
-		}
-
-		const hasErrors = diagnostics.some((d) => d.severity === "error");
-		return {
-			status: hasErrors ? "failed" : "succeeded",
-			diagnostics,
-			semantic: "warning",
-		};
+			}),
+		});
 	},
 };
 
