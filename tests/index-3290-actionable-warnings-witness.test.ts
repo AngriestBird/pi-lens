@@ -56,7 +56,15 @@ function warning(
 		tool: "ast-grep",
 		rule: "no-console",
 		message,
-		actions: [{ title: "Fix warning", kind: "quickfix" }],
+		actions: [
+			{
+				title: "Fix warning",
+				kind: "quickfix",
+				hasEdit: false,
+				hasCommand: false,
+				autoFixEligible: false,
+			},
+		],
 		suppressed: false,
 		origin: "dispatch",
 	};

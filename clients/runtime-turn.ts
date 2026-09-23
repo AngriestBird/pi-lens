@@ -3537,19 +3537,22 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 							const policy = filterFindingsByDisposition(
 								file.warnings,
 								cwd,
-								(warning) => ({
-									filePath: warning.filePath,
-									line: warning.line,
-									column: warning.column,
-									severity: warning.severity,
-									semantic: "warning",
-									tool: warning.tool,
-									runner: warning.tool,
-									rule: warning.rule,
-									code: warning.code,
-									message: warning.message,
-									source: warning.origin === "lsp" ? "lsp" : "dispatch",
-								}),
+								(warning) => {
+									const { line, column, rule, code } = warning;
+									return {
+										filePath: warning.filePath,
+										severity: warning.severity,
+										semantic: "warning",
+										tool: warning.tool,
+										runner: warning.tool,
+										message: warning.message,
+										source: warning.origin === "lsp" ? "lsp" : "dispatch",
+										...(line === undefined ? {} : { line: warning.line }),
+										...(column === undefined ? {} : { column: warning.column }),
+										...(rule === undefined ? {} : { rule: warning.rule }),
+										...(code === undefined ? {} : { code }),
+									};
+								},
 							);
 							dispositionSuppressed += policy.suppressed;
 							const kept = policy.kept.filter(

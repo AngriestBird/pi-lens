@@ -29,6 +29,7 @@ vi.mock("../../clients/latency-logger.js", async (importOriginal) => {
 });
 
 import { CacheManager } from "../../clients/cache-manager.js";
+import type { ActionableWarningRecord } from "../../clients/actionable-warnings.js";
 import type { FunctionCallGraph } from "../../clients/call-graph.js";
 import {
 	_resetStateCacheForTests,
@@ -579,7 +580,7 @@ describe("actionable-warnings turn-end advisory honors dispositions (#3248)", ()
 		filePath: string,
 		line: number,
 		message: string,
-	): Record<string, unknown> {
+	): ActionableWarningRecord {
 		return {
 			id: `aw:${line}`,
 			filePath,
