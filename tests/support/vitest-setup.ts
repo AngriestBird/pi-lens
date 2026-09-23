@@ -90,15 +90,76 @@ const tmpHygieneOwnerMarker = path.join(
 	tmpHygieneOwnerDir,
 	`${process.env.PI_LENS_TMP_HYGIENE_RUN_ID}-${process.pid}.json`,
 );
+/** This worker's test file in the ONE spelling the whole hygiene seam uses:
+ *  the path below `tests/`, forward slashes. The owner marker, the run-file
+ *  manifest and the leak report all name a file this way, and the owner index
+ *  in `tests/config/tmp-fixture-hygiene.test.ts` maps a tmp prefix to the same
+ *  spelling — one derivation, so the four can never disagree. */
+function tmpHygieneFileOf(testPath: unknown): string {
+	return (
+		String(testPath ?? "unknown")
+			.replace(/\\/g, "/")
+			.split("/tests/")
+			.pop() ?? "unknown"
+	);
+}
+const tmpHygieneOwnFile = tmpHygieneFileOf(expect.getState().testPath);
 const tmpHygieneOwnerMarkerBody = JSON.stringify({
 	pid: process.pid,
 	startTime: readTmpHygieneProcessStartTime(process.pid),
-	file: String(expect.getState().testPath ?? "unknown")
-		.replace(/\\/g, "/")
-		.split("/tests/")
-		.pop(),
+	file: tmpHygieneOwnFile,
 });
 fs.writeFileSync(tmpHygieneOwnerMarker, tmpHygieneOwnerMarkerBody);
+
+/**
+ * #3314: the run-file manifest — every test file a worker of THIS run id
+ * loaded, appended once at module load.
+ *
+ * The marker above answers "is this owner alive right now?" and is removed at
+ * teardown. This record answers a different question the census has never been
+ * able to ask: "did this invocation run the file that owns this tmp entry at
+ * all?" Two vitest invocations share one TMPDIR whenever they share a shell's
+ * `TMPDIR` — `npm run test:targeted` takes one of two SHARED slots
+ * (scripts/with-test-lock.mjs), so this is the daily case, not a corner — and
+ * the run baseline cannot separate them: a root the sibling invocation creates
+ * after our snapshot is new to us, is attributed to whatever prefix matches (or
+ * to nothing at all), and is then DELETED by our own `cleanupTmpHygiene`.
+ *
+ * Append-only, one short line per worker, so ~1150 concurrent appends need no
+ * lock. A line somehow torn by a concurrent append simply fails to match a file
+ * name, which puts the entry back in the judged set — the fail-closed
+ * direction. The manifest is run-id scoped by NAME, so a previous or concurrent
+ * run's manifest is never read (F7), and it is removed beside this run's
+ * baseline record in `cleanupTmpHygiene` below.
+ */
+const tmpHygieneRunFilesPath = path.join(
+	path.dirname(tmpHygieneBaselinePath),
+	`tmp-hygiene-files-${process.env.PI_LENS_TMP_HYGIENE_RUN_ID}.log`,
+);
+try {
+	fs.appendFileSync(tmpHygieneRunFilesPath, `${tmpHygieneOwnFile}\n`);
+} catch {
+	// An unwritable shared home costs attribution precision only: with an empty
+	// manifest the census judges every entry, exactly as it did before #3314.
+}
+
+/** The test files this run's workers loaded (#3314). An EMPTY set means the
+ *  manifest could not be read, and every consumer must then judge everything —
+ *  an entry is never ignored on the strength of a record that is not there. */
+export function tmpHygieneRunFiles(
+	manifestPath: string = tmpHygieneRunFilesPath,
+): Set<string> {
+	try {
+		return new Set(
+			fs
+				.readFileSync(manifestPath, "utf8")
+				.split("\n")
+				.filter((line) => line.length > 0),
+		);
+	} catch {
+		return new Set();
+	}
+}
 
 function removeTmpHygieneOwnerMarker(): void {
 	try {
@@ -374,7 +435,11 @@ export function removeRunBackstopDirs(
 	// `cleanupTmpHygiene` (it was read or written at setup, moments ago), so it
 	// is untouched here and removed explicitly afterward.
 	for (const name of readTmpDirEntries(baselineDir)) {
-		if (!name.startsWith("tmp-hygiene-baseline-")) continue;
+		// `tmp-hygiene-` covers both per-run records written beside each other:
+		// the `tmp-hygiene-baseline-<run>.json` snapshot and #3314's
+		// `tmp-hygiene-files-<run>.log` manifest. Same owner, same lifetime, same
+		// unbounded-growth failure if an owner-less run never reclaims them.
+		if (!name.startsWith("tmp-hygiene-")) continue;
 		const entryPath = path.join(baselineDir, name);
 		const mtimeMs = fs.statSync(entryPath, { throwIfNoEntry: false })?.mtimeMs;
 		if (mtimeMs === undefined || Date.now() - mtimeMs < BACKSTOP_STALE_MS)
@@ -575,13 +640,6 @@ const TMP_LEAK_ADMISSIONS: TmpLeakAdmission[] = [
 	},
 	{
 		file: "*",
-		prefix: "pi-lens-wiring-fork-",
-		reason:
-			"A concurrent wiring-fork probe owns this explicitly named fixture outside the Vitest worker population; the hygiene owner cannot remove a sibling probe's live root.",
-		issue: "#2912",
-	},
-	{
-		file: "*",
 		prefix: "pi-lens-lockfile-complete-",
 		reason:
 			"A concurrent lockfile-completeness probe owns this fixture outside the Vitest worker population; the serialized owner cannot remove its live temporary root.",
@@ -643,11 +701,7 @@ export function tmpHygieneLeakReport(): {
 	testFile: string;
 	leftovers: string[];
 } {
-	const testFile =
-		String(expect.getState().testPath ?? "unknown")
-			.replace(/\\/g, "/")
-			.split("/tests/")
-			.pop() ?? "unknown";
+	const testFile = tmpHygieneFileOf(expect.getState().testPath);
 	const after = new Set(
 		snapshotTmpPiLensEntries(readTmpDirEntries(tmpHygieneRealTmp)),
 	);
@@ -800,6 +854,7 @@ export type TmpHygieneOwnerScan = {
 
 function scanTmpHygieneOwners(
 	probe: TmpHygieneProcessProbe,
+	ownerDir: string = tmpHygieneOwnerDir,
 ): TmpHygieneOwnerScan {
 	const live = new Set<string>();
 	const counts: Record<TmpHygieneOwnerVerdict, number> = {
@@ -810,8 +865,8 @@ function scanTmpHygieneOwners(
 		live: 0,
 	};
 	const runPrefix = `${process.env.PI_LENS_TMP_HYGIENE_RUN_ID}-`;
-	for (const name of readTmpDirEntries(tmpHygieneOwnerDir)) {
-		const markerPath = path.join(tmpHygieneOwnerDir, name);
+	for (const name of readTmpDirEntries(ownerDir)) {
+		const markerPath = path.join(ownerDir, name);
 		let marker: unknown;
 		try {
 			marker = JSON.parse(fs.readFileSync(markerPath, "utf8"));
@@ -837,16 +892,26 @@ function scanTmpHygieneOwners(
 	return { live, counts };
 }
 
-/** Wait for every owner worker to finish its own afterEach/afterAll drain. */
+/** Wait for every owner worker to finish its own afterEach/afterAll drain.
+ *
+ *  `ownerDir` is the marker NAMESPACE this scan judges, and it is a parameter
+ *  for one reason (#3316): a caller that supplies a platform double answers
+ *  `isAlive` for EVERY marker in the directory it scans, including markers of
+ *  sibling test files it never wrote — a fully skipped file leaves one behind,
+ *  since vitest runs no `afterAll` for a file with no executed test. The
+ *  production owner keeps the default, the run-shared directory; a case that
+ *  doubles the process boundary passes its own directory so its double can only
+ *  ever speak about pids that case invented. */
 export async function tmpHygieneWaitForOwnerDrain(
 	budgetMs = TMP_HYGIENE_OWNER_DRAIN_BUDGET_MS,
 	probe: TmpHygieneProcessProbe = realTmpHygieneProcessProbe(),
+	ownerDir: string = tmpHygieneOwnerDir,
 ): Promise<TmpHygieneOwnerScan> {
 	const deadline = Date.now() + budgetMs;
-	let scan = scanTmpHygieneOwners(probe);
+	let scan = scanTmpHygieneOwners(probe, ownerDir);
 	while (scan.live.size > 0 && Date.now() < deadline) {
 		await new Promise<void>((resolve) => setImmediate(resolve));
-		scan = scanTmpHygieneOwners(probe);
+		scan = scanTmpHygieneOwners(probe, ownerDir);
 	}
 	return scan;
 }
@@ -856,9 +921,35 @@ export async function tmpHygieneWaitForOwnerDrain(
  *  from the run's own output. */
 export function formatTmpHygieneOwnerSummary(
 	scan: TmpHygieneOwnerScan,
+	otherInvocationEntries = 0,
 ): string {
 	const { counts } = scan;
-	return `[tmp-hygiene-owners] live=${counts.live} orphaned=${counts.orphaned} malformed=${counts.malformed} foreign=${counts.foreign} self=${counts.self}`;
+	return `[tmp-hygiene-owners] live=${counts.live} orphaned=${counts.orphaned} malformed=${counts.malformed} foreign=${counts.foreign} self=${counts.self} otherInvocationEntries=${otherInvocationEntries}`;
+}
+
+/**
+ * The leftovers this invocation is NOT answerable for (#3314): entries whose
+ * every candidate owner file is a test file no worker of this run loaded, so
+ * another vitest invocation sharing this TMPDIR created them. They are neither
+ * attributed nor swept — reporting them names an innocent file, and removing
+ * them mutates a sibling invocation's live fixture.
+ *
+ * `ownersFor` returns EVERY tests/ file whose declared tmp prefix matches the
+ * entry, not just the longest-prefix winner: with two candidates, one of which
+ * ran here, the entry stays judged. Fail-closed is the rule on both axes — an
+ * unreadable manifest (`runFiles` empty) and an entry no file claims are both
+ * judged exactly as before this record existed.
+ */
+export function tmpHygieneForeignRunEntries(
+	entries: readonly string[],
+	ownersFor: (entry: string) => readonly string[],
+	runFiles: ReadonlySet<string>,
+): string[] {
+	if (runFiles.size === 0) return [];
+	return entries.filter((entry) => {
+		const owners = ownersFor(entry);
+		return owners.length > 0 && owners.every((owner) => !runFiles.has(owner));
+	});
 }
 
 export function tmpHygieneExcludeLiveOwnerEntries(
@@ -932,19 +1023,43 @@ afterAll(() => {
 	}
 });
 
-export function cleanupTmpHygiene(): void {
+/** Which observed tmp entries this run may DELETE. Separated from the sweep
+ *  below because the sweep is destructive and its only caller is the last
+ *  worker of the run: a guard that called it would perform the run's own
+ *  cleanup inside its assertion (the same reason `removeRunBackstopDirs` takes
+ *  a `home`).
+ *
+ *  `spare` is #3314's other direction. Ignoring a sibling invocation's root in
+ *  the report is half the fix; deleting it from under a LIVE sibling is the
+ *  half that breaks the other run. */
+export function tmpHygieneSweepableEntries(
+	entries: readonly string[],
+	before: ReadonlySet<string> = tmpHygieneBefore,
+	spare: ReadonlySet<string> = new Set<string>(),
+): string[] {
+	return entries.filter(
+		(name) =>
+			!before.has(name) &&
+			!spare.has(name) &&
+			!TMP_HYGIENE_INDEPENDENT_OWNERS.some((prefix) => name.startsWith(prefix)),
+	);
+}
+
+export function cleanupTmpHygiene(
+	spare: ReadonlySet<string> = new Set<string>(),
+): void {
 	const after = snapshotTmpPiLensEntries(readTmpDirEntries(tmpHygieneRealTmp));
-	for (const name of after) {
-		if (tmpHygieneBefore.has(name)) continue;
-		if (
-			TMP_HYGIENE_INDEPENDENT_OWNERS.some((prefix) => name.startsWith(prefix))
-		)
-			continue;
+	for (const name of tmpHygieneSweepableEntries(
+		after,
+		tmpHygieneBefore,
+		spare,
+	)) {
 		removeTempDirSync(path.join(tmpHygieneRealTmp, name));
 	}
 	removeRunBackstopDirs();
 	try {
 		fs.rmSync(tmpHygieneBaselinePath, { force: true });
+		fs.rmSync(tmpHygieneRunFilesPath, { force: true });
 	} catch {
 		// A stale ignored baseline is harmless; the next run uses a new id.
 	}
@@ -961,7 +1076,6 @@ const TMP_HYGIENE_INDEPENDENT_OWNERS = [
 	"pi-lens-test-home-",
 	"pi-lens-mcp-",
 	"pi-lens-result-contract-",
-	"pi-lens-wiring-fork-",
 	"pi-lens-lockfile-complete-",
 ];
 
