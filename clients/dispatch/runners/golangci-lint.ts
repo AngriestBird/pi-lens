@@ -150,9 +150,21 @@ const golangciRunner: RunnerDefinition = {
 			{ timeout: 60000, cwd },
 		);
 
+		// Exit table: 0 is clean-or-findings; 1 means issues, 3 failure,
+		// 4 timeout, and 5 missing config. Every nonzero code is a ran outcome
+		// whose parser decides: JSON issues remain findings, while emitted
+		// non-JSON text becomes a parse-error diagnostic and no output stays
+		// skipped. Keep stderr as the parse input when stdout is absent so tool
+		// errors cannot be mistaken for a clean file.
+		const raw =
+			(result.stdout ?? "").length > 0
+				? (result.stdout ?? "")
+				: result.status !== 0
+					? result.stderr || ""
+					: "";
 		const parsed = parseToolRun(
 			"golangci-lint",
-			{ result, output: result.stdout ?? "" },
+			{ result, output: raw },
 			(raw) => parseGolangciJson(raw, ctx.filePath),
 		);
 		if (parsed.skipped) return parsed.skipped;

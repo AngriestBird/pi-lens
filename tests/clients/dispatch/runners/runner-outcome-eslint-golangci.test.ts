@@ -217,6 +217,80 @@ describe("JSON runner outcome seam (#1816)", () => {
 					.trim(),
 			);
 		});
+		it(`${tool}: nonzero JSON findings survive every tool exit class`, async () => {
+			const statuses = tool === "eslint" ? [1, 2] : [1, 3, 4, 5];
+			for (const status of statuses) {
+				const observed = await dispatchOutcome(tool, {
+					error: null,
+					status,
+					stdout:
+						tool === "eslint" && status === 2
+							? JSON.stringify([
+									{
+										filePath: "main.js",
+										messages: [
+											{
+												ruleId: null,
+												severity: 2,
+												fatal: true,
+												message: "Parsing error: Unexpected token",
+												line: 1,
+												column: 4,
+											},
+										],
+									},
+								])
+							: wire[tool],
+					stderr: "",
+				});
+				expect(observed.status, `${tool} exit ${status}`).toBe("failed");
+				expect(observed.diagnostics).toHaveLength(1);
+			}
+		});
+		it(`${tool}: nonzero text is a parse error for every tool error class`, async () => {
+			const statuses = tool === "eslint" ? [2] : [1, 3, 4, 5];
+			for (const status of statuses) {
+				const observed = await dispatchOutcome(tool, {
+					error: null,
+					status,
+					stdout: "",
+					stderr: "tool configuration or execution error",
+				});
+				expect(observed.status, `${tool} exit ${status}`).toBe("failed");
+				expect(observed.diagnostics[0]).toMatchObject({
+					id: `${tool}:parse-error:1`,
+				});
+			}
+		});
+		if (tool === "eslint") {
+			it("eslint: status 2 warning findings remain delivered", async () => {
+				const observed = await dispatchOutcome(tool, {
+					error: null,
+					status: 2,
+					stdout: JSON.stringify([
+						{
+							filePath: "main.js",
+							messages: [
+								{
+									ruleId: "no-warning-comments",
+									severity: 1,
+									message: "warning",
+									line: 1,
+									column: 1,
+								},
+							],
+						},
+					]),
+					stderr: "",
+				});
+				expect(observed.status).toBe("succeeded");
+				expect(observed.diagnostics).toHaveLength(1);
+				expect(observed.diagnostics[0]).toMatchObject({
+					severity: "warning",
+					semantic: "warning",
+				});
+			});
+		}
 		it.each([
 			["empty", { status: 1, stdout: "", stderr: "" }],
 			["stderr-only", { status: 1, stdout: "", stderr: "garbage" }],

@@ -143,12 +143,11 @@ const eslintRunner: RunnerDefinition = {
 			{ timeout: 30000, cwd },
 		);
 
-		// ESLint exits 2 on fatal/config errors — nothing was linted, so this
-		// is an unavailable run, not a clean or failed one.
-		if (result.status === 2) {
-			return { status: "skipped", diagnostics: [], semantic: "none" };
-		}
-
+		// Exit table: 0 is clean-or-findings, and 1/2 are ran outcomes whose
+		// JSON parser decides whether findings or a parse/config error reached the
+		// user. In particular, status 2 carries file-local fatal parse messages
+		// as JSON and must not be discarded before parsing.
+		//
 		// ESLint exits 0 whenever nothing reached ERROR severity — that
 		// includes a run that found only warnings (#1954), which also prints a
 		// full JSON report. So parse stdout unconditionally and branch on the
