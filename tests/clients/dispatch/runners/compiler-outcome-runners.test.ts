@@ -9,7 +9,10 @@ import { setupTestEnvironment } from "../../test-utils.js";
 const safeSpawnAsync = vi.fn();
 let available = true;
 
-vi.mock("../../../../clients/safe-spawn.js", () => ({ safeSpawnAsync }));
+vi.mock("../../../../clients/safe-spawn.js", async (importOriginal) => ({
+	...(await importOriginal<Record<string, unknown>>()),
+	safeSpawnAsync,
+}));
 vi.mock("../../../../clients/tool-probe.js", () => ({
 	probeToolAsync: vi.fn(async () => ({
 		error: new Error("unavailable"),
