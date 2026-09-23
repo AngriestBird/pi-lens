@@ -2623,7 +2623,9 @@ export function setupIncomingHandlers(
 	// dot-path into the server's config, e.g. "scan.jobs") — not a fixed
 	// single-element array duplicating the whole blob for every item. An item
 	// with no `section` gets the whole blob (that's what "no section" means
-	// per spec); an unresolvable section gets `null`, never the whole blob.
+	// per spec); an unresolvable section gets `{}` (never `null`: strict consumers such as
+	// vscode-css-language-server and @prisma/language-server throw or exit on
+	// null), never the whole blob.
 	state.connection.onRequest(
 		"workspace/configuration",
 		async (params: { items?: Array<{ section?: string }> }) => {
