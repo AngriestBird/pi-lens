@@ -2220,8 +2220,29 @@ export function applyDynamicCapabilities(state: LSPClientState): void {
  * e.g. "scan.jobs") against the server's `initializationOptions` blob.
  * - No section (undefined/empty) → the whole blob, per spec ("if a scope
  *   isn't asked for" the client returns the full settings for that scope).
- * - An unresolvable path → `null`, never the whole blob — a server asking
- *   for a section it doesn't get must not silently receive unrelated config.
+ * - An unresolvable path → an EMPTY settings object, never the whole blob — a
+ *   server asking for a section it doesn't get must not silently receive
+ *   unrelated config.
+ *
+ * #3217: that second case used to answer `null`, and a server that reads the
+ * answer without a null guard loses its diagnostics or dies outright. Both
+ * shapes are live in the nightly LSP fixture set:
+ *   - vscode-css-language-server hands the answer to
+ *     `new LintConfigurationSettings(settings && settings.lint)` whose
+ *     `constructor(conf = {})` default only fires for `undefined`, then throws
+ *     `Cannot read properties of null (reading 'validProperties')` INSIDE its
+ *     own diagnostics computation and answers the pull with an empty report —
+ *     visible to a client only as a `window/logMessage`. Every `.css`/`.scss`/
+ *     `.less`/`.sass` file was silently undiagnosed, which is why the #2780
+ *     clean gate read "0 diagnostic(s)" for css on every nightly since it
+ *     landed.
+ *   - @prisma/language-server reads `settings.enableDiagnostics` in
+ *     `validateTextDocument` with no guard and the whole SERVER PROCESS exits
+ *     on the uncaught `TypeError`.
+ * `{}` is what a client with no value for that section actually means ("no
+ * settings here"), it is already what this function answers for an item with
+ * no section at all against an absent blob, and it leaves the "never the whole
+ * blob" invariant #983 added untouched.
  * Exported for the #983 regression test.
  */
 export type ConfigurationSection =
@@ -2236,12 +2257,12 @@ export function resolveConfigurationSection(
 	initialization: Record<string, unknown> | undefined,
 	section: string | undefined,
 ): ConfigurationSection {
-	if (!initialization) return section ? null : {};
+	if (!initialization) return {};
 	if (!section) return initialization;
 	let cur: unknown = initialization;
 	for (const part of section.split(".")) {
 		if (typeof cur !== "object" || cur === null || !Object.hasOwn(cur, part)) {
-			return null;
+			return {};
 		}
 		cur = (cur as Record<string, unknown>)[part];
 	}
@@ -2602,7 +2623,9 @@ export function setupIncomingHandlers(
 	// dot-path into the server's config, e.g. "scan.jobs") — not a fixed
 	// single-element array duplicating the whole blob for every item. An item
 	// with no `section` gets the whole blob (that's what "no section" means
-	// per spec); an unresolvable section gets `null`, never the whole blob.
+	// per spec); an unresolvable section gets `{}` (never `null`: strict consumers such as
+	// vscode-css-language-server and @prisma/language-server throw or exit on
+	// null), never the whole blob.
 	state.connection.onRequest(
 		"workspace/configuration",
 		async (params: { items?: Array<{ section?: string }> }) => {
