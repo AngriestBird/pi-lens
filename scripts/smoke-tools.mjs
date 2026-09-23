@@ -622,7 +622,7 @@ const LSP_FIXTURES = [
 		// + the terraform binary) in the fixture workspace. Measured: no
 		// publishDiagnostics in 10s and no pull provider at initialize.
 		lspGateExempt:
-			"terraform-ls publishes diagnostics only after `terraform init`; see #3217 follow-up",
+			"terraform-ls publishes diagnostics only after `terraform init`; see #3311",
 		dir: "tests/fixtures/tool-smoke/terraform",
 		file: "bad.tf",
 		serverHint: "terraform-ls",
@@ -675,7 +675,7 @@ const LSP_FIXTURES = [
 		// later. That is a wait-policy defect, not a fixture defect; tracked
 		// separately rather than papered over with a longer gate budget.
 		lspGateExempt:
-			"intelephense's empty first publish satisfies the push wait; see #3217 follow-up",
+			"intelephense's empty first publish satisfies the push wait; see #3310",
 		dir: "tests/fixtures/tool-smoke/php",
 		file: "bad.php",
 		serverHint: "intelephense",
@@ -690,7 +690,7 @@ const LSP_FIXTURES = [
 		// gate's budget for one server is the wrong lever; the row needs a warm
 		// server, not a longer wait.
 		lspGateExempt:
-			"rust-analyzer is still loading the cargo workspace at the gate's wait budget; see #3217 follow-up",
+			"rust-analyzer is still loading the cargo workspace at the gate's wait budget; see #3311",
 		dir: "tests/fixtures/tool-smoke/rust",
 		file: "src/main.rs",
 		serverHint: "rust-analyzer",
@@ -707,7 +707,7 @@ const LSP_FIXTURES = [
 		// through pwsh and its PSScriptAnalyzer pass does not always land inside
 		// the gate's wait. A row that reds one night in two is worse than no row.
 		lspGateExempt:
-			"PowerShell Editor Services lands its PSScriptAnalyzer pass inside the gate's wait only intermittently (35831976090 green, 35833100670 red); see #3217 follow-up",
+			"PowerShell Editor Services lands its PSScriptAnalyzer pass inside the gate's wait only intermittently (35831976090 green, 35833100670 red); see #3311",
 		dir: "tests/fixtures/tool-smoke/powershell",
 		file: "bad.ps1",
 		serverHint:
@@ -888,7 +888,7 @@ const LSP_FIXTURES = [
 		// needs a compiled mix project, which the bare fixture is not. `elixir`
 		// above covers ElixirLS on the same source.
 		lspGateExempt:
-			"Expert publishes no diagnostics without a compiled mix project; see #3217 follow-up",
+			"Expert publishes no diagnostics without a compiled mix project; see #3311",
 		lang: "expert",
 		dir: "tests/fixtures/tool-smoke/elixir",
 		file: "bad.ex",
@@ -940,7 +940,7 @@ const LSP_FIXTURES = [
 		// diagnostic set does not cover the block-structure error the fixture
 		// seeds.
 		lspGateExempt:
-			"fish-lsp publishes no diagnostic for the fixture's unterminated `if`; see #3217 follow-up",
+			"fish-lsp publishes no diagnostic for the fixture's unterminated `if`; see #3311",
 		dir: "tests/fixtures/tool-smoke/fish",
 		file: "bad.fish",
 		serverHint: "fish-lsp",
@@ -952,7 +952,7 @@ const LSP_FIXTURES = [
 		// installs and spawns but returns 0 diagnostics — it offers completion and
 		// hover over the CMake API and does not lint unknown commands.
 		lspGateExempt:
-			"cmake-language-server does not lint unknown commands; see #3217 follow-up",
+			"cmake-language-server does not lint unknown commands; see #3311",
 		dir: "tests/fixtures/tool-smoke/cmake",
 		file: "CMakeLists.txt",
 		serverHint: "cmake-language-server",
@@ -975,7 +975,7 @@ const LSP_FIXTURES = [
 		// diagnostics too. Making it green needs a real `npm install` in the
 		// fixture workspace, which is the typescript7 `setup` shape.
 		lspGateExempt:
-			"@vue/language-server needs the fixture's node_modules installed; see #3217 follow-up",
+			"@vue/language-server needs the fixture's node_modules installed; see #3311",
 		dir: "tests/fixtures/tool-smoke/vue",
 		file: "App.vue",
 		serverHint: "@vue/language-server",
@@ -989,7 +989,7 @@ const LSP_FIXTURES = [
 		// still reports the server as replying. Gating it on the local result
 		// alone would red the nightly, which is the exact failure F4 names.
 		lspGateExempt:
-			"svelte-language-server serves the finding on a dev box but not on ubuntu-latest (run 35831976090); see #3217 follow-up",
+			"svelte-language-server serves the finding on a dev box but not on ubuntu-latest (run 35831976090); see #3311",
 		dir: "tests/fixtures/tool-smoke/svelte",
 		file: "App.svelte",
 		serverHint: "svelte-language-server",
