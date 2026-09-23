@@ -1,4 +1,5 @@
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { FactStore } from "../../../../clients/dispatch/fact-store.js";
@@ -40,6 +41,25 @@ function createCtx(
 	return makeRunnerCtx(filePath, cwd, { kind });
 }
 
+/**
+ * Does THIS filesystem fold case? Measured once against a real temp directory,
+ * never asserted from `process.platform` (#3159 round 2: a platform-shaped
+ * case claim redded EEXIST on the first real macOS run). APFS and NTFS answer
+ * true, ext4 answers false, and the case-variant cell below asserts the
+ * filesystem's own answer on every lane instead of skipping off Windows.
+ */
+function hostFoldsPathCase(): boolean {
+	const probe = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-case-probe-"));
+	try {
+		fs.writeFileSync(path.join(probe, "probe.ex"), "");
+		return fs.existsSync(path.join(probe, "PROBE.ex"));
+	} finally {
+		fs.rmSync(probe, { recursive: true, force: true });
+	}
+}
+
+const HOST_FOLDS_PATH_CASE = hostFoldsPathCase();
+
 interface SpawnShape {
 	error?: Error | null;
 	status: number | null;
@@ -60,7 +80,16 @@ async function dispatchOutcome(
 	tool: "dart-analyze" | "elixir-check",
 	caseName: string,
 	spawnResult: SpawnShape | ((filePath: string) => SpawnShape),
-	options: { available?: boolean; mixProject?: boolean } = {},
+	options: {
+		available?: boolean;
+		mixProject?: boolean;
+		/**
+		 * Extra on-disk fixture work, run after the target file exists and
+		 * before the runner is dispatched. The path-identity cells (#1193) use
+		 * it to build the symlink whose two spellings name one file.
+		 */
+		setup?: (tmpDir: string, filePath: string) => void;
+	} = {},
 ) {
 	vi.resetModules();
 	const env = setupTestEnvironment(`pi-lens-${tool}-${caseName}-`);
@@ -80,6 +109,7 @@ async function dispatchOutcome(
 			);
 		}
 
+		options.setup?.(env.tmpDir, filePath);
 		mockRunnerHelpers(() => options.available ?? true);
 		if (options.available ?? true)
 			safeSpawnAsync.mockResolvedValue(
@@ -573,5 +603,92 @@ describe("secondary language fallback runners", () => {
 		expect(observed.semantic).toBe("warning");
 		expect(observed.diagnostics[0]?.semantic).toBe("warning");
 		expect(observed.output).not.toContain("🔴 STOP");
+	});
+
+	it("matches an elixir diagnostic reported through a symlinked directory (#1193)", async () => {
+		// D1. The dispatcher holds `lib/app.ex`; `mix` reports the same file
+		// through `src/`, a symlink to `lib/`. Two spellings, one inode — the
+		// recurrence is #1193's "two spellings of one path derive two keys",
+		// here in its comparison form: a hand-rolled string compare drops the
+		// finding for the file the agent just edited.
+		const observed = await dispatchOutcome(
+			"elixir-check",
+			"symlink-spelling",
+			{
+				error: null,
+				status: 1,
+				stdout: "",
+				stderr: [
+					"    error: undefined function boom/0",
+					"    └─ src/app.ex:4:5: App.greet/0",
+				].join("\n"),
+			},
+			{
+				setup: (tmpDir) =>
+					fs.symlinkSync("lib", path.join(tmpDir, "src"), "dir"),
+			},
+		);
+		// The id, not the count: a nonzero run whose output the parser matches
+		// to nothing still yields ONE diagnostic — `elixir-check:parse-error:1`
+		// from the #1816 unparseable-output guard. Pre-fix that is exactly what
+		// the agent got: a generic warning instead of the blocking error on
+		// line 4 of the file it just edited.
+		expect(observed.diagnostics.map((d) => d.id)).toEqual([
+			"elixir-check-error-4-5",
+		]);
+		expect(observed.diagnostics[0]?.semantic).toBe("blocking");
+		expect(observed.output).toContain("undefined function boom/0");
+	});
+
+	it("matches an elixir diagnostic whose reported path uses a backslash separator (#1193)", async () => {
+		// D4. The separator direction #3256 declined this member for, now
+		// decided and pinned: the identity seam slash-folds on EVERY platform,
+		// so `lib\app.ex` and `lib/app.ex` name one file on the ubuntu lane
+		// too. Folding can only merge, never split, and the pre-fix failure
+		// mode was a dropped finding — so this is the safe direction. A POSIX
+		// file literally named `lib\app.ex` alongside `lib/app.ex` is the
+		// price, recorded in the PR body.
+		const observed = await dispatchOutcome(
+			"elixir-check",
+			"backslash-spelling",
+			{
+				error: null,
+				status: 1,
+				stdout: "",
+				stderr: [
+					"    error: undefined function boom/0",
+					"    └─ lib\\app.ex:4:5: App.greet/0",
+				].join("\n"),
+			},
+		);
+		expect(observed.diagnostics.map((d) => d.id)).toEqual([
+			"elixir-check-error-4-5",
+		]);
+		expect(observed.output).toContain("undefined function boom/0");
+	});
+
+	it("treats a case-variant elixir path exactly as this filesystem does (#1193)", async () => {
+		// D2/D3, both directions in one cell. `lib/App.ex` is a DIFFERENT file
+		// from `lib/app.ex` on a case-sensitive host and the SAME file on a
+		// case-folding one, and the seam asks the filesystem rather than
+		// asserting a platform. This is the over-merge guard: an unconditional
+		// fold reds it on ubuntu, and dropping the fold reds it on the
+		// windows-vitest and macOS lanes.
+		const observed = await dispatchOutcome(
+			"elixir-check",
+			"case-variant",
+			{
+				error: null,
+				status: 1,
+				stdout: "",
+				stderr: [
+					"    error: undefined function boom/0",
+					"    └─ lib/App.ex:4:5: App.greet/0",
+				].join("\n"),
+			},
+		);
+		expect(
+			observed.diagnostics.filter((d) => d.id === "elixir-check-error-4-5"),
+		).toHaveLength(HOST_FOLDS_PATH_CASE ? 1 : 0);
 	});
 });
