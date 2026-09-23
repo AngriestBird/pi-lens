@@ -1115,6 +1115,15 @@ describe("tmp-fixture-hygiene", () => {
 			// A prefix no tests/ file spells still has no owner: the census must
 			// keep saying so rather than inventing one.
 			expect(ownerForTmpEntry("pi-lens-nothing-spells-this-")).toBeUndefined();
+			// The index is bounded to the namespace the census can observe, and no
+			// entry in it is the bare namespace. Both halves are measured over the
+			// real tree, which spells plenty of non-`pi-lens-` fixture prefixes and
+			// one dynamic `pi-lens-${tool}-` whose static head is the namespace
+			// itself — with either half gone, that head claims every entry.
+			for (const prefix of ownerIndex().prefixes.keys()) {
+				expect(prefix.startsWith("pi-lens-"), prefix).toBe(true);
+				expect(prefix).not.toBe("pi-lens-");
+			}
 		});
 
 		it("ignores entries owned by a file no worker of this run loaded", () => {
@@ -1210,9 +1219,14 @@ describe("tmp-fixture-hygiene", () => {
 			// F7: the manifest is run-id scoped by NAME. This worker's own line is
 			// in the record the default reader opens, and a record written for
 			// another run id is not in it.
+			// Written with the exact name and in the exact directory another
+			// invocation's manifest would occupy, so a reader that merged every
+			// manifest beside it — the shared-namespace mistake the owner markers
+			// made — would pick this up.
 			const foreign = path.join(
-				process.env.PI_LENS_HOME as string,
-				"tmp-hygiene-files-scope-foreign-run.log",
+				process.cwd(),
+				".probe-home",
+				"tmp-hygiene-files-3314-foreign-run-guard.log",
 			);
 			fs.writeFileSync(foreign, "config/never-ran-here.test.ts\n");
 			try {
