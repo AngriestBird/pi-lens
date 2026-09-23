@@ -72,6 +72,35 @@ const tmpHygieneBaselinePath = path.join(
 );
 fs.mkdirSync(path.dirname(tmpHygieneBaselinePath), { recursive: true });
 
+// #3186: a process-shared marker lets the serialized hygiene owner distinguish
+// a root whose test file is still running from one whose cleanup drain ended.
+// The marker is deliberately per worker and run-scoped; a killed worker leaves
+// no false "live" admission because the marker's pid is checked by the reader.
+const tmpHygieneOwnerDir = path.join(tmpHygieneHome, "tmp-hygiene-owners");
+fs.mkdirSync(tmpHygieneOwnerDir, { recursive: true });
+const tmpHygieneOwnerMarker = path.join(
+	tmpHygieneOwnerDir,
+	`${process.env.PI_LENS_TMP_HYGIENE_RUN_ID}-${process.pid}.json`,
+);
+fs.writeFileSync(
+	tmpHygieneOwnerMarker,
+	JSON.stringify({
+		pid: process.pid,
+		file: String(expect.getState().testPath ?? "unknown")
+			.replace(/\\/g, "/")
+			.split("/tests/")
+			.pop(),
+	}),
+);
+
+function removeTmpHygieneOwnerMarker(): void {
+	try {
+		fs.rmSync(tmpHygieneOwnerMarker, { force: true });
+	} catch {
+		// The marker is only a liveness hint; a later run uses a new run id.
+	}
+}
+
 /** Root-level `orphan-backstop*` entries of a home, each with its mtime: the
  *  stamp, the transient lock, and the `orphan-backstop.lock.quarantine-…/`
  *  directory a contended lock leaves behind. One definition, used by the
@@ -566,6 +595,61 @@ export function tmpHygieneLeakReport(): {
 	};
 }
 
+const TMP_HYGIENE_OWNER_DRAIN_BUDGET_MS = 5_000;
+
+function liveTmpHygieneOwnerFiles(): Set<string> {
+	const live = new Set<string>();
+	for (const name of readTmpDirEntries(tmpHygieneOwnerDir)) {
+		if (!name.startsWith(`${process.env.PI_LENS_TMP_HYGIENE_RUN_ID}-`))
+			continue;
+		const markerPath = path.join(tmpHygieneOwnerDir, name);
+		try {
+			const marker = JSON.parse(fs.readFileSync(markerPath, "utf8")) as {
+				pid?: number;
+				file?: string;
+			};
+			if (!marker.file || typeof marker.pid !== "number") continue;
+			if (marker.pid === process.pid) continue;
+			try {
+				process.kill(marker.pid, 0);
+			} catch (error) {
+				if ((error as NodeJS.ErrnoException).code !== "EPERM") {
+					fs.rmSync(markerPath, { force: true });
+					continue;
+				}
+			}
+			live.add(marker.file);
+		} catch {
+			// A concurrently-written marker is retried on the next poll.
+		}
+	}
+	return live;
+}
+
+/** Wait for every owner worker to finish its own afterEach/afterAll drain. */
+export async function tmpHygieneWaitForOwnerDrain(
+	budgetMs = TMP_HYGIENE_OWNER_DRAIN_BUDGET_MS,
+): Promise<Set<string>> {
+	const deadline = Date.now() + budgetMs;
+	let live = liveTmpHygieneOwnerFiles();
+	while (live.size > 0 && Date.now() < deadline) {
+		await new Promise<void>((resolve) => setTimeout(resolve, 25));
+		live = liveTmpHygieneOwnerFiles();
+	}
+	return live;
+}
+
+export function tmpHygieneExcludeLiveOwnerEntries(
+	entries: readonly string[],
+	ownerFor: (entry: string) => string | undefined,
+	liveOwners: ReadonlySet<string>,
+): string[] {
+	return entries.filter((entry) => {
+		const owner = ownerFor(entry);
+		return owner === undefined || !liveOwners.has(owner);
+	});
+}
+
 function checkTmpHygiene(): void {
 	const { testFile, leftovers } = tmpHygieneLeakReport();
 	const after = new Set(
@@ -616,10 +700,14 @@ export function runTeardownWithMemReport(
 }
 
 afterAll(() => {
-	runTeardownWithMemReport(
-		[checkKillGuard, checkTmpHygiene, checkBackstop],
-		emitMemReport,
-	);
+	try {
+		runTeardownWithMemReport(
+			[checkKillGuard, checkTmpHygiene, checkBackstop],
+			emitMemReport,
+		);
+	} finally {
+		removeTmpHygieneOwnerMarker();
+	}
 });
 
 export function cleanupTmpHygiene(): void {

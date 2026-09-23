@@ -17,6 +17,8 @@ import {
 	tmpHygieneAdmissionFor,
 	tmpHygieneLeakReport,
 	tmpHygieneObservedEntries,
+	tmpHygieneExcludeLiveOwnerEntries,
+	tmpHygieneWaitForOwnerDrain,
 	tmpHygieneUnadmittedEntries,
 } from "../support/vitest-setup.js";
 import { setupTestEnvironment } from "../clients/test-utils.js";
@@ -95,13 +97,39 @@ function scanMkdtempSites(): { file: string; line: number; text: string }[] {
 	return sites;
 }
 
+function ownerForTmpEntry(entry: string): string | undefined {
+	for (const { file, source } of readWalkedFiles(
+		listSourceFiles(path.join(REPO_ROOT, "tests"), { extensions: [".ts"] }),
+	)) {
+		const match = source.matchAll(/setupTestEnvironment\(\s*["']([^"']+)["']/g);
+		for (const [, prefix] of match) {
+			if (entry.startsWith(prefix))
+				return path
+					.relative(REPO_ROOT, file)
+					.replace(/\\/g, "/")
+					.replace(/^tests\//, "");
+		}
+	}
+	return undefined;
+}
+
 describe("tmp-fixture-hygiene", () => {
-	afterAll(() => {
+	afterAll(async () => {
+		const liveOwners = await tmpHygieneWaitForOwnerDrain();
 		const { testFile, leftovers } = tmpHygieneLeakReport();
+		const attributable = tmpHygieneExcludeLiveOwnerEntries(
+			leftovers,
+			ownerForTmpEntry,
+			liveOwners,
+		);
+		const described = attributable.map((entry) => {
+			const owner = ownerForTmpEntry(entry);
+			return `${entry} (owner: tests/${owner ?? "unknown"})`;
+		});
 		try {
 			expect(
-				leftovers,
-				`[tmp-hygiene] tests/${testFile} leaked ${leftovers.length} top-level entries: ${leftovers.join(",")}`,
+				attributable,
+				`[tmp-hygiene] tests/${testFile} leaked ${attributable.length} top-level entries: ${described.join(",")}; live owners: ${[...liveOwners].join(",") || "none"}`,
 			).toEqual([]);
 		} finally {
 			cleanupTmpHygiene();
@@ -512,5 +540,44 @@ describe("tmp-fixture-hygiene", () => {
 			fs.existsSync(env.tmpDir),
 			"nothing was left pending to recreate the directory cleanup just removed",
 		).toBe(false);
+	});
+
+	it("does not red a live scratch owner, then reds it after the owner drains", async () => {
+		// #3186 mutation proof: removing the live-owner filter makes the first
+		// assertion red, while removing the second assertion would hide a real
+		// post-drain leak. PID 1 is a stable live process; the marker is removed
+		// to model the owner's completed cleanup drain.
+		const owner = "config/tmp-fixture-hygiene.test.ts";
+		const marker = path.join(
+			process.env.PI_LENS_HOME as string,
+			"tmp-hygiene-owners",
+			`${process.env.PI_LENS_TMP_HYGIENE_RUN_ID}-scratch.json`,
+		);
+		const scratch = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-scratch-3186-"),
+		);
+		fs.writeFileSync(marker, JSON.stringify({ pid: 1, file: owner }));
+		try {
+			const live = await tmpHygieneWaitForOwnerDrain(50);
+			expect(
+				tmpHygieneExcludeLiveOwnerEntries(
+					[path.basename(scratch)],
+					() => owner,
+					live,
+				),
+			).toEqual([]);
+			fs.rmSync(marker, { force: true });
+			const drained = await tmpHygieneWaitForOwnerDrain(50);
+			expect(
+				tmpHygieneExcludeLiveOwnerEntries(
+					[path.basename(scratch)],
+					() => owner,
+					drained,
+				),
+			).toEqual([path.basename(scratch)]);
+		} finally {
+			fs.rmSync(marker, { force: true });
+			fs.rmSync(scratch, { recursive: true, force: true });
+		}
 	});
 });
