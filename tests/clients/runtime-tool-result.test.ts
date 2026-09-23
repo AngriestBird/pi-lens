@@ -2537,7 +2537,9 @@ describe("runtime-tool-result inline behavior warnings", () => {
 
 	it("uses the workspace-edit path identity for the dispatched target (#3294)", async () => {
 		const { runPipeline } = await import("../../clients/pipeline.js");
-		const env = setupTestEnvironment("pi-lens-runtime-tool-workspace-edit-path-");
+		const env = setupTestEnvironment(
+			"pi-lens-runtime-tool-workspace-edit-path-",
+		);
 		const previousCwd = process.cwd();
 		try {
 			const filePath = path.join(env.tmpDir, "src", "main.rs");
@@ -2586,7 +2588,8 @@ describe("runtime-tool-result inline behavior warnings", () => {
 					deferFormat: () => {},
 				},
 				cacheManager: {
-					addModifiedRange: (changedFile: string) => modifiedRanges.push(changedFile),
+					addModifiedRange: (changedFile: string) =>
+						modifiedRanges.push(changedFile),
 					readTurnState: () => ({}),
 				},
 				biomeClient: {},
