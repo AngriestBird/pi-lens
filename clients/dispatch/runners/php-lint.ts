@@ -11,6 +11,11 @@ import type {
 import { createAvailabilityChecker } from "./utils/runner-helpers.js";
 import { finishParsedRun, parseToolRun } from "./utils/tool-failure.js";
 
+// PHP 8.3's `-l` returns 1 for a syntax-check failure in the usual CLI path,
+// and 255 for the parse-error wire captured on Windows. Both are completed
+// analyses whose stderr/stdout must reach the parser.
+const PHP_LINT_EXIT_CODES = { ran: [1, 255] } as const;
+
 const php = createAvailabilityChecker("php", ".exe");
 
 function parsePhpLintOutput(raw: string, filePath: string): Diagnostic[] {
@@ -68,7 +73,7 @@ const phpLintRunner: RunnerDefinition = {
 			(output) => parsePhpLintOutput(output, ctx.filePath),
 			{
 				parseOutput: `${result.stdout ?? ""}\n${result.stderr ?? ""}`,
-				exitCodes: { ran: [1] },
+				exitCodes: PHP_LINT_EXIT_CODES,
 			},
 		);
 		if (run.skipped) return run.skipped;

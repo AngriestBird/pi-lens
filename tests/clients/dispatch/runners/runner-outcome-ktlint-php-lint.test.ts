@@ -164,28 +164,33 @@ describe("JSON/text runner outcome seam (#1816)", () => {
 			expect(observed.diagnostics).toEqual([]);
 		});
 
-		it(`${tool}: valid nonzero findings survive`, async () => {
-			const observed = await dispatchOutcome(tool, {
-				error: null,
-				status: 1,
-				stdout: tool === "ktlint" ? wire[tool] : "",
-				stderr: tool === "php-lint" ? wire[tool] : "",
-			});
-			expect(observed.status).toBe(tool === "ktlint" ? "succeeded" : "failed");
-			expect(observed.diagnostics).toHaveLength(1);
-			if (tool === "php-lint") {
-				expect(observed.output.trim()).toBe(
-					fs
-						.readFileSync(
-							path.resolve(
-								"tests/fixtures/witness/runner-outcome-ktlint-php-lint/php-lint.txt",
-							),
-							"utf8",
-						)
-						.trim(),
+		it.each(tool === "ktlint" ? [1, 2, 3] : [1, 255])(
+			`${tool}: documented status %s findings survive`,
+			async (status) => {
+				const observed = await dispatchOutcome(tool, {
+					error: null,
+					status,
+					stdout: tool === "ktlint" ? wire[tool] : "",
+					stderr: tool === "php-lint" ? wire[tool] : "",
+				});
+				expect(observed.status).toBe(
+					tool === "ktlint" ? "succeeded" : "failed",
 				);
-			}
-		});
+				expect(observed.diagnostics).toHaveLength(1);
+				if (tool === "php-lint") {
+					expect(observed.output.trim()).toBe(
+						fs
+							.readFileSync(
+								path.resolve(
+									"tests/fixtures/witness/runner-outcome-ktlint-php-lint/php-lint.txt",
+								),
+								"utf8",
+							)
+							.trim(),
+					);
+				}
+			},
+		);
 
 		it(`${tool}: nonzero text is a parse error`, async () => {
 			const observed = await dispatchOutcome(tool, {

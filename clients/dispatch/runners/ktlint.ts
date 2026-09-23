@@ -20,6 +20,12 @@ import { finishParsedRun, parseToolRun } from "./utils/tool-failure.js";
 
 const ktlint = createAvailabilityChecker("ktlint", ".exe");
 
+// KtLint 1.8.0 uses nonzero statuses for lint violations and CLI/configuration
+// errors. Keep every documented completed-tool class parseable: a valid JSON
+// reporter result is evidence that the tool reached analysis, regardless of
+// which nonzero error class produced it.
+const KTLINT_EXIT_CODES = { ran: [1, 2, 3] } as const;
+
 interface KtlintError {
 	line: number;
 	col: number;
@@ -114,7 +120,7 @@ const ktlintRunner: RunnerDefinition = {
 			(output) => parseKtlintOutput(output, ctx.filePath) ?? [],
 			{
 				parseOutput: `${result.stdout ?? ""}\n${result.stderr ?? ""}`,
-				exitCodes: { ran: [1] },
+				exitCodes: KTLINT_EXIT_CODES,
 			},
 		);
 		if (run.skipped) return run.skipped;
