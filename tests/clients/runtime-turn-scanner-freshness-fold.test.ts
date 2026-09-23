@@ -371,3 +371,82 @@ describe("#1892: scanner cache records written by 4.2.1 still parse and render",
 		}
 	});
 });
+
+/**
+ * A subclass of the REAL cache manager that counts reads — no module mock, no
+ * stubbed read. Everything below it is the production path.
+ */
+class CountingCacheManager extends CacheManager {
+	readonly reads: string[] = [];
+	override readCache<T>(
+		scanner: string,
+		cwd: string,
+		maxAgeMs?: number,
+	): ReturnType<CacheManager["readCache"]> {
+		this.reads.push(scanner);
+		return maxAgeMs === undefined
+			? super.readCache<T>(scanner, cwd)
+			: super.readCache<T>(scanner, cwd, maxAgeMs);
+	}
+}
+
+describe("#1892: one read per scanner store per delivery", () => {
+	// Recurrence prevented: the inline turn-end lanes each read their store into
+	// a local, so one delivery saw one envelope per store for free. Extracting a
+	// lane (#1892) gives it its own `readScannerCache`, and the trivy store is
+	// read by BOTH the secrets lane (its `secrets` rows) and the composer (the
+	// CVE/license tiers and the age label). Two reads of one store inside one
+	// delivery is the parallel-store shape this umbrella exists to kill — and the
+	// cache's TTL boundary can fall between them, so the secrets tier and the CVE
+	// tier would then disagree about the same store.
+	it("reads trivy ONCE although the lane and the composer both need it", async () => {
+		const env = setupTestEnvironment("pi-lens-1892-onereads-");
+		try {
+			const runtime = new RuntimeCoordinator();
+			runtime.setTelemetryIdentity({ sessionId: "onereads-session" });
+			const cacheManager = new CountingCacheManager(false);
+			const edited = writeFileAt(env.tmpDir, "src/edited.ts", SCAN_MS - 5_000);
+			cacheManager.addModifiedRange(
+				edited,
+				{ start: 1, end: 1 },
+				false,
+				env.tmpDir,
+				"onereads-session",
+			);
+			cacheManager.writeCache(
+				"gitleaks",
+				{
+					success: true,
+					scannedAt: SCAN_AT,
+					findings: [{ ruleId: "aws-access-token", file: edited, startLine: 1 }],
+				} satisfies GitleaksResult,
+				env.tmpDir,
+			);
+			cacheManager.writeCache(
+				"trivy",
+				{
+					success: true,
+					scannedAt: SCAN_AT,
+					findings: [],
+					secrets: [{ ruleId: "aws-access-key-id", file: edited, line: 1 }],
+					licenses: [],
+				} satisfies TrivyResult,
+				env.tmpDir,
+			);
+			cacheManager.reads.length = 0;
+
+			const content = await turnEndContent(runtime, cacheManager, env.tmpDir);
+
+			// Both stores actually reached the agent through this one read each.
+			expect(content).toContain("hardcoded secrets detected");
+			expect(content).toContain("aws-access-token");
+			const perStore = (scanner: string) =>
+				cacheManager.reads.filter((name) => name === scanner).length;
+			expect(perStore("trivy")).toBe(1);
+			expect(perStore("gitleaks")).toBe(1);
+			expect(perStore("govulncheck")).toBe(1);
+		} finally {
+			env.cleanup();
+		}
+	});
+});
