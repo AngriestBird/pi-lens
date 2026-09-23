@@ -120,20 +120,20 @@ classification standing.
 | typescript | typescript-language-server | push-only | silent | direct | 3 | dev+ci |
 | markdown | marksman | push-only | silent | direct | 3 | ci |
 | lua | lua-language-server | push-only | silent | direct | 3 | dev+ci |
-| python | pyright | push-only | publishes-versioned | TBD | 2 | dev+ci |
-| jedi | jedi-language-server (alt of python) | push-only | publishes-versioned | TBD | 2 | ci |
-| yaml | yaml-language-server | push-only | publishes-unversioned | TBD | 2* | dev+ci |
-| shell | bash-language-server | push-only | publishes-versioned | TBD | 2 | dev+ci |
-| dockerfile | docker-langserver | push-only | publishes-unversioned | TBD | 2* | dev+ci |
-| toml | taplo | push-only | publishes-unversioned | TBD | 2* | dev+ci |
+| python | pyright | push-only | publishes-versioned | direct | 2 | dev+ci |
+| jedi | jedi-language-server (alt of python) | push-only | publishes-versioned | direct | 2 | ci |
+| yaml | yaml-language-server | push-only | publishes-unversioned | direct | 2* | dev+ci |
+| shell | bash-language-server | push-only | publishes-versioned | direct | 2 | dev+ci |
+| dockerfile | docker-langserver | push-only | publishes-unversioned | direct | 2* | dev+ci |
+| toml | taplo | push-only | publishes-unversioned | direct | 2* | dev+ci |
 | terraform | terraform-ls | push-only | TBD | TBD | 2/3? | dev+ci |
-| prisma | @prisma/language-server | push-only | publishes-unversioned | TBD | 2* | dev+ci |
+| prisma | @prisma/language-server | push-only | publishes-unversioned | direct | 2* | dev+ci |
 | php | intelephense | push-only | publishes-unversioned | empty-first | 2* | dev+ci |
-| zig | zls | push-only | publishes-unversioned | TBD | 2* | dev+ci |
-| vue | @vue/language-server | push-only | TBD | TBD | 2/3? | dev+ci |
-| dart | dart language-server | push-only | publishes-unversioned | TBD | 2* | ci |
-| gleam | gleam lsp | push-only | publishes-unversioned | TBD | 2* | ci |
-| clojure | clojure-lsp | push-only | publishes-unversioned | TBD | 2* | ci |
+| zig | zls | push-only | publishes-unversioned | direct | 2* | dev+ci |
+| vue | @vue/language-server | push-only | publishes-unversioned | direct | 2* | dev+ci |
+| dart | dart language-server | push-only | publishes-unversioned | direct | 2* | ci |
+| gleam | gleam lsp | push-only | publishes-unversioned | direct | 2* | ci |
+| clojure | clojure-lsp | push-only | publishes-unversioned | direct | 2* | ci |
 | opengrep | opengrep (aux) | push-only | publishes-unversioned | direct | 2* | dev+ci |
 | ast-grep | ast-grep (aux) | push-only | publishes-versioned | direct | 2 | dev+ci |
 | cue | CUE Language Server (cue lsp serve) | push-only | publishes-versioned | direct | 2 | dev+ci |

@@ -62,10 +62,6 @@ const UNMEASURED_PUSH_ADMISSIONS = new Map<string, string>([
 		"terraform",
 		"terraform-ls: clean-behavior not yet classified by probe-clean-signal.mjs (the matrix tier cell is still `2/3?`); no silentOnClean marker may be set for it until it is",
 	],
-	[
-		"vue",
-		"@vue/language-server: clean-behavior not yet classified by probe-clean-signal.mjs (the matrix tier cell is still `2/3?`); no silentOnClean marker may be set for it until it is",
-	],
 ]);
 
 interface MatrixRow {
