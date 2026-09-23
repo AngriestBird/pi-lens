@@ -253,7 +253,7 @@ describe("actionlintRunner.run", () => {
 		expect(result.diagnostics[0].tool).toBe("actionlint");
 	});
 
-	it("synthesises a fallback diagnostic on non-zero exit with no JSON", async () => {
+	it("returns the shared parse-error diagnostic on non-zero unparseable output", async () => {
 		safeSpawnAsync.mockResolvedValue({
 			status: 1,
 			stdout: "",
@@ -266,7 +266,7 @@ describe("actionlintRunner.run", () => {
 		const result = await runner.run(ctx as never);
 		expect(result.status).toBe("failed");
 		expect(result.diagnostics[0].message).toBe(
-			"actionlint: no such file or directory",
+			"actionlint exited 1 but its output could not be parsed",
 		);
 		expect(result.diagnostics[0].line).toBe(1);
 	});

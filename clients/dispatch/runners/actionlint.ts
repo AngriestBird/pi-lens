@@ -12,6 +12,7 @@ import {
 	createAvailabilityChecker,
 	resolveToolCommandWithInstallFallback,
 } from "./utils/runner-helpers.js";
+import { finishParsedRun, parseToolRun } from "./utils/tool-failure.js";
 
 const actionlint = createAvailabilityChecker("actionlint", ".exe");
 
@@ -116,35 +117,20 @@ const actionlintRunner: RunnerDefinition = {
 			},
 		);
 
-		const raw = `${result.stdout ?? ""}${result.stderr ?? ""}`;
-		let diagnostics = parseActionlintJson(raw, ctx.filePath);
-
-		if (diagnostics.length === 0 && result.status !== 0 && raw.trim()) {
-			diagnostics = [
-				{
-					id: `actionlint-${path.basename(ctx.filePath)}-failure`,
-					message: raw.trim().split(/\r?\n/)[0] || "actionlint failed",
-					filePath: ctx.filePath,
-					line: 1,
-					column: 1,
-					severity: "error",
-					semantic: "blocking",
-					tool: "actionlint",
-					rule: "actionlint",
-					defectClass: "correctness",
-				},
-			];
-		}
-
-		if (diagnostics.length === 0) {
-			return { status: "succeeded", diagnostics: [], semantic: "none" };
-		}
-
-		return {
-			status: "failed",
-			diagnostics,
-			semantic: "blocking",
-		};
+		const output = `${result.stdout ?? ""}${result.stderr ?? ""}`;
+		const parsed = parseToolRun(
+			"actionlint",
+			{ result, output },
+			(raw) => parseActionlintJson(raw, ctx.filePath),
+		);
+		if (parsed.skipped) return parsed.skipped;
+		return finishParsedRun({
+			tool: "actionlint",
+			ctx,
+			result,
+			diagnostics: parsed.diagnostics,
+			classify: () => ({ status: "failed", semantic: "blocking" }),
+		});
 	},
 };
 
