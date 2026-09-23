@@ -1012,7 +1012,10 @@ describe("git-guard", () => {
 		}
 	});
 
-	it.each([["\\n", "\n"], ["\\n\\n", "\n\n"]])(
+	it.each([
+		["\\n", "\n"],
+		["\\n\\n", "\n\n"],
+	])(
 		"#3282 HIGH-3287-1: all-blank blocker text (%s) cannot clear another file's record",
 		(_label, blockerContent) => {
 			// Round 1 shipped this fail-open: `blockerContent` that is non-empty but
