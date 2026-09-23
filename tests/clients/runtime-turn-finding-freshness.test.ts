@@ -628,7 +628,17 @@ describe("turn_end demoted-secret rendering (#1622 review M1/M2)", () => {
 
 			const entry = turnEndResult();
 			expect(entry.result).toBeDefined();
-			expect(entry.result).not.toBe("clean");
+			// #1892 mutation M1b: `not "clean"` alone left the tier itself
+			// unpinned — pushing the demoted section into `blockerParts` is
+			// text-invariant at the delivery seam (the message concatenates the
+			// blocker tier and then the stale tier), so the only thing that can
+			// catch the promotion the source comment forbids is this
+			// discriminator. Assert it exactly.
+			expect(entry.result).toBe("stale_secrets_pending");
+			expect(entry.metadata).toMatchObject({
+				blockerSections: 0,
+				staleSecretSections: 1,
+			});
 		} finally {
 			env.cleanup();
 		}
