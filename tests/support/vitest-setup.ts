@@ -100,9 +100,7 @@ const tmpHygieneOwnerMarkerBody = JSON.stringify({
 });
 fs.writeFileSync(tmpHygieneOwnerMarker, tmpHygieneOwnerMarkerBody);
 
-let tmpHygieneOwnerMarkerDrained = false;
 function removeTmpHygieneOwnerMarker(): void {
-	tmpHygieneOwnerMarkerDrained = true;
 	try {
 		fs.rmSync(tmpHygieneOwnerMarker, { force: true });
 	} catch {
@@ -125,6 +123,11 @@ function removeTmpHygieneOwnerMarker(): void {
  * - the beat REWRITES the marker instead of calling `utimes` with a computed
  *   timestamp, so the mtime the reader compares comes from the kernel clock and
  *   a test's fake `Date` can never stamp a live worker as an orphan.
+ *
+ * There is deliberately NO "already drained" guard here: `isolate: true` gives
+ * every test FILE its own fork (see vitest.config.ts), so no `afterEach` can
+ * run after the file-level `afterAll` that removed the marker, and a guard for
+ * that could not be made to red.
  */
 const TMP_HYGIENE_OWNER_HEARTBEAT_MS = 250;
 const TMP_HYGIENE_OWNER_HEARTBEAT_NS =
@@ -133,7 +136,6 @@ let tmpHygieneLastHeartbeatNs = process.hrtime.bigint();
 export function touchTmpHygieneOwnerMarker(
 	minIntervalNs = TMP_HYGIENE_OWNER_HEARTBEAT_NS,
 ): void {
-	if (tmpHygieneOwnerMarkerDrained) return;
 	const now = process.hrtime.bigint();
 	if (now - tmpHygieneLastHeartbeatNs < minIntervalNs) return;
 	tmpHygieneLastHeartbeatNs = now;
