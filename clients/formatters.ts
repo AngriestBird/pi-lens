@@ -2249,7 +2249,10 @@ export function clearFormatterRuntimeState(): void {
 }
 
 const BOX_DRAWING_GLOBAL = /[\u2500-\u257F]/g;
-const HAS_BOX_DRAWING = /[\u2500-\u257F]/;
+/** Blank, or a rule made of box-drawing characters and spacing alone. */
+const DECORATION_RULE = /^[\u2500-\u257F\s]*$/;
+/** The renderer's section heading: one word, then box-drawing to end of line. */
+const DECORATION_HEADING = /^\S+[ \t]+[\u2500-\u257F][\u2500-\u257F\s]*$/;
 
 /**
  * First line of `text` that actually carries a diagnostic.
@@ -2268,15 +2271,55 @@ export function firstDiagnosticLine(
 ): string | undefined {
 	for (const raw of (text ?? "").split("\n")) {
 		const line = stripAnsi(raw).trimEnd();
-		const stripped = line.replace(BOX_DRAWING_GLOBAL, "").trim();
-		if (!stripped) continue;
-		// "format ━━━━━━━━" is a section banner, not a diagnostic. Require a rule
-		// AND a short remainder so a real one-line error containing a box
-		// character is not discarded.
-		if (HAS_BOX_DRAWING.test(line) && stripped.length <= 24) continue;
-		return stripped.slice(0, 300);
+		if (isDecorativeLine(line)) continue;
+		return line.replace(BOX_DRAWING_GLOBAL, "").trim().slice(0, 300);
 	}
 	return undefined;
+}
+
+/**
+ * The two decoration SHAPES a renderer emits, and nothing else: a rule made of
+ * box-drawing characters alone (blank lines included), and a `<word> ━━━━`
+ * section heading whose remainder after the word is box-drawing only.
+ *
+ * The single normalization both readers above and below share, so the bounded
+ * tail cannot surface what the first-line reader already rejects (#3312 review
+ * R3-4: the tail put biome's `format ━━━━` banner back in front of the strict
+ * #1337 seam). Matching SHAPES rather than "contains a box character and is
+ * short" is #3312 review R4-1: the length heuristic deleted
+ * `━ traceback source excerpt`, a diagnostic whose own text opens with a box
+ * character. A line carrying any non-decorative text is never decoration.
+ */
+function isDecorativeLine(line: string): boolean {
+	return DECORATION_RULE.test(line) || DECORATION_HEADING.test(line);
+}
+
+const FORMATTER_ERROR_TAIL_LINES = 20;
+
+/**
+ * Preserve a bounded tail of a formatter's diagnostic output.
+ *
+ * A traceback's first line is not actionable on its own (#3312). Keep the
+ * final lines, which include the exception and its message, while bounding
+ * the model-facing error when a formatter emits an unexpectedly large log.
+ *
+ * Decorative lines are dropped FIRST, by the same predicate `firstDiagnosticLine`
+ * uses: a tail that kept them would hand the strict #1337 seam the banner this
+ * module already decided is not a diagnostic, and every banner line it kept
+ * would evict a real traceback line from the bound.
+ */
+export function diagnosticTail(
+	text: string | undefined,
+	maxLines = FORMATTER_ERROR_TAIL_LINES,
+): string | undefined {
+	const lines: string[] = [];
+	for (const raw of (text ?? "").split("\n")) {
+		const line = stripAnsi(raw).trimEnd();
+		if (isDecorativeLine(line)) continue;
+		lines.push(line.slice(0, 300));
+	}
+	if (lines.length === 0) return undefined;
+	return lines.slice(-maxLines).join("\n");
 }
 
 /**
@@ -2415,11 +2458,11 @@ export async function formatFile(
 				outcome: "failed",
 				error:
 					result.error?.message ||
-					firstDiagnosticLine(result.stderr) ||
+					diagnosticTail(result.stderr) ||
 					// biome, ktlint and `mix format` report on STDOUT; without this
 					// their diagnostic is discarded and the user is told only that
 					// the tool "exited with status 1".
-					firstDiagnosticLine(result.stdout) ||
+					diagnosticTail(result.stdout) ||
 					`${formatter.name} exited with status ${result.status}`,
 			};
 		}
