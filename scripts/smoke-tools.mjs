@@ -2192,7 +2192,7 @@ function report(rows, title) {
  * intentionally separate from the handshake layer, whose contract is only
  * initialize-and-answer and therefore passed the #2776 provenance regression.
  */
-async function runLspGate({ langs, install, verbose }) {
+export async function runLspGate({ langs = [], install, verbose, deps } = {}) {
 	const lspToolEntry = path.join(
 		repoRoot,
 		"dist",
@@ -2206,19 +2206,27 @@ async function runLspGate({ langs, install, verbose }) {
 		"lsp",
 		"config.js",
 	);
-	if (!fs.existsSync(lspToolEntry) || !fs.existsSync(configEntry)) {
+	if (!deps && (!fs.existsSync(lspToolEntry) || !fs.existsSync(configEntry))) {
 		console.error(
 			`dist build missing: ${lspToolEntry}\nRun \`npm run build:dist\` first.`,
 		);
 		process.exit(2);
 	}
-	const { createLspDiagnosticsTool } = await import(
-		pathToFileURL(lspToolEntry).href
-	);
-	const { initLSPConfig } = await import(pathToFileURL(configEntry).href);
+	let createLspDiagnosticsTool;
+	let initLSPConfig;
+	if (deps) {
+		({ createLspDiagnosticsTool, initLSPConfig } = deps);
+	} else {
+		({ createLspDiagnosticsTool } = await import(
+			pathToFileURL(lspToolEntry).href
+		));
+		({ initLSPConfig } = await import(pathToFileURL(configEntry).href));
+	}
 	let ensureTool;
 	let getInstallAttempt;
-	{
+	if (deps) {
+		({ ensureTool, getInstallAttempt } = deps);
+	} else {
 		const installerEntry = path.join(
 			repoRoot,
 			"dist",
@@ -2230,7 +2238,7 @@ async function runLspGate({ langs, install, verbose }) {
 			pathToFileURL(installerEntry).href
 		));
 	}
-	const population = lspGatePopulation();
+	const population = deps?.population ?? lspGatePopulation();
 	const selected = population.gated.filter(
 		(f) => !langs.length || langs.includes(f.lang),
 	);
@@ -2278,7 +2286,9 @@ async function runLspGate({ langs, install, verbose }) {
 		let absFile;
 		let cleanup;
 		try {
-			({ workspace, absFile, cleanup } = await bootstrapFixtureWorkspace(fx, {
+			({ workspace, absFile, cleanup } = await (
+				deps?.bootstrapFixtureWorkspace ?? bootstrapFixtureWorkspace
+			)(fx, {
 				initLSPConfig,
 				repoRoot,
 				tmpPrefix: "pi-lens-smoke-gate-",
