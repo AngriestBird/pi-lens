@@ -117,8 +117,15 @@ const htmlhintRunner: RunnerDefinition = {
 		// #1948: htmlhint exits 1 when it finds errors and prints them in `unix`
 		// format on stdout. Zero parsed out of a nonzero exit is a parser break.
 		const output = result.stdout || result.stderr || "";
-		const run = parseToolRun("htmlhint", { result, output }, (out) =>
-			parseHtmlhintOutput(out, ctx.filePath, cwd),
+		const run = parseToolRun(
+			"htmlhint",
+			{
+				result,
+				output,
+				// EXIT TABLE (HTMLHint 1.1 measured fixture): 0 clean; 1 findings; 2 error; other nonzero rejected.
+				exitCodes: { ran: [1, 2] },
+			},
+			(out) => parseHtmlhintOutput(out, ctx.filePath, cwd),
 		);
 		if (run.skipped) return run.skipped;
 

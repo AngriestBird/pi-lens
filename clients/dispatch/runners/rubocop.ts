@@ -130,7 +130,7 @@ const rubocopRunner: RunnerDefinition = {
 			{ timeout: 30000, cwd },
 		);
 
-		// Exit table: 0 = clean, 1 = offenses/findings, 2 = fatal or rejected
+		// EXIT TABLE (RuboCop 1.66 docs https://docs.rubocop.org/rubocop/usage/basic_usage.html): 0 = clean, 1 = offenses/findings, 2 = fatal/error or rejected
 		// invocation. A nonzero exit with valid JSON remains findings; a nonzero
 		// exit with empty or unparsable JSON is never clean (#1816).
 		const run = parseToolRun(

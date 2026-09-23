@@ -25,6 +25,7 @@ const sqlfluff = createAvailabilityChecker("sqlfluff", ".exe");
 // Only 2 is a rejected invocation.
 //
 // The exit TABLE is what protects this runner, not the nothing-to-parse rule:
+// EXIT TABLE (SQLFluff 3.1 docs https://docs.sqlfluff.com/en/stable/production.html): 0 clean; 1 findings/error; other nonzero rejected.
 // sqlfluff writes its user errors to STDOUT, not stderr (live: an unknown
 // dialect prints the error there), so stdout is non-empty and the fallback
 // rule would read the failed run as a run that found nothing.

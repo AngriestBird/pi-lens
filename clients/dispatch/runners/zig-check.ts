@@ -79,7 +79,12 @@ const zigCheckRunner: RunnerDefinition = {
 		const raw = `${result.stdout || ""}\n${result.stderr || ""}`;
 		const parsed = parseToolRun(
 			"zig-check",
-			{ result, output: raw },
+			{
+				result,
+				output: raw,
+				// EXIT TABLE (Zig 0.13 measured fixture): 0 clean; 1 findings; 2 error; other nonzero rejected.
+				exitCodes: { ran: [1, 2] },
+			},
 			(output) => parseZigOutput(output, ctx.filePath, cwd),
 		);
 		if (parsed.skipped) return parsed.skipped;

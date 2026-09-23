@@ -103,7 +103,12 @@ const yamllintRunner: RunnerDefinition = {
 		// record when a failing run yields nothing.
 		const run = parseToolRun(
 			"yamllint",
-			{ result, output: result.stdout },
+			{
+				result,
+				output: result.stdout,
+				// EXIT TABLE (yamllint 1.35 docs https://yamllint.readthedocs.io/en/stable/): 0 clean; 1 findings; 2 error; other nonzero rejected.
+				exitCodes: { ran: [1, 2] },
+			},
 			(out) => parseYamllintParsable(out, ctx.filePath, cwd),
 			{ parseOutput: raw },
 		);

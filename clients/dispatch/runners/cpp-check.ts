@@ -238,7 +238,12 @@ const cppCheckRunner: RunnerDefinition = {
 		const raw = `${result.stdout ?? ""}\n${result.stderr ?? ""}`.trim();
 		const parsed = parseToolRun(
 			"cpp-check",
-			{ result, output: raw },
+			{
+				result,
+				output: raw,
+				// EXIT TABLE (gcc/clang 13 measured fixture): 0 clean; 1 findings; 2 error; other nonzero rejected.
+				exitCodes: { ran: [1, 2] },
+			},
 			(output) =>
 				compiler.flavor === "msvc"
 					? parseMsvcOutput(output, ctx.filePath, cwd)

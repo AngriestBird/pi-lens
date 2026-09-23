@@ -97,8 +97,14 @@ const hadolintRunner: RunnerDefinition = {
 		// #1948: hadolint runs with `--no-fail`, so it exits 0 even when it finds
 		// something. A nonzero exit therefore means hadolint itself failed, and
 		// zero parsed diagnostics out of whatever it printed is a parser break.
-		const run = parseToolRun("hadolint", { result }, (out) =>
-			parseHadolintOutput(out, ctx.filePath, cwd),
+		const run = parseToolRun(
+			"hadolint",
+			{
+				result,
+				// EXIT TABLE (Hadolint 2.12 measured fixture): 0 clean; 1 findings; 2 error; other nonzero rejected.
+				exitCodes: { ran: [1, 2] },
+			},
+			(out) => parseHadolintOutput(out, ctx.filePath, cwd),
 		);
 		if (run.skipped) return run.skipped;
 

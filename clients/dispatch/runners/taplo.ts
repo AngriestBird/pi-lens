@@ -27,6 +27,7 @@ const taplo = createAvailabilityChecker("taplo", ".exe");
 //
 // #1937 round 2: the parser fix alone turned the old silent-clean into a false
 // BLOCKING diagnostic. clap prints `error: unexpected argument '--output'
+// EXIT TABLE (taplo 0.9 measured fixture): 0 clean; 1 findings; other nonzero rejected/error.
 // found`, which starts with the same lowercase `error:` a real taplo
 // diagnostic does, so a mistyped flag would have reddened every valid TOML
 // file. Both readings are wrong; the exit code is what separates them.

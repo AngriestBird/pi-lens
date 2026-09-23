@@ -38,7 +38,7 @@ import { parseToolRun } from "./utils/tool-failure.js";
 
 const typos = createAvailabilityChecker("typos", ".exe");
 
-// typos-cli exit codes: 0 = no typos, 2 = typos found, 1 = an error that
+// EXIT TABLE (typos-cli 1.29 docs https://github.com/crate-ci/typos): 0 = no typos, 2 = typos found, 1 = an error that
 // stopped the scan. Anything nonzero outside {2} is a rejected invocation.
 const TYPOS_EXIT_CODES: ToolExitCodes = { ran: [2] };
 

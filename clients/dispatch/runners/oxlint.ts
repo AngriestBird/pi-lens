@@ -165,7 +165,12 @@ const oxlintRunner: RunnerDefinition = {
 			Diagnostic | typeof OXLINT_NO_FILES | typeof OXLINT_NO_FILES_UNCONFIRMED
 		>(
 			"oxlint",
-			{ result, output: parsedOutput },
+			{
+				result,
+				output: parsedOutput,
+				// EXIT TABLE (oxlint 0.8 measured fixture): 0 clean; 1 findings; 2 error; other nonzero rejected.
+				exitCodes: { ran: [1, 2] },
+			},
 			() => {
 				if (noFilesDecision.kind === "expected-no-files") {
 					return [OXLINT_NO_FILES];

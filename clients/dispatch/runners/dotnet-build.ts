@@ -177,7 +177,12 @@ const dotnetBuildRunner: RunnerDefinition = {
 
 		const parsed = parseToolRun(
 			"dotnet-build",
-			{ result, output: raw },
+			{
+				result,
+				output: raw,
+				// EXIT TABLE (.NET SDK 8 measured fixture): 0 clean; 1 findings; 2 error; other nonzero rejected.
+				exitCodes: { ran: [1, 2] },
+			},
 			(output) => parseDotnetBuildOutput(output, ctx.filePath, cwd),
 		);
 		if (parsed.skipped) return parsed.skipped;

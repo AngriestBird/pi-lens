@@ -30,7 +30,7 @@ const markdownlint = createAvailabilityChecker("markdownlint-cli2", ".cmd", [
 	"-",
 ]);
 
-// markdownlint-cli2 exit codes (its README's "Exit Codes" section): 0 = no
+// EXIT TABLE (markdownlint-cli2 0.17 README https://github.com/DavidAnson/markdownlint-cli2#exit-codes): 0 = no
 // findings, 1 = lint findings, 2 = unexpected error (unreadable config, bad
 // glob, crash). Only 2 is a rejected invocation.
 const MARKDOWNLINT_EXIT_CODES: ToolExitCodes = { ran: [1] };

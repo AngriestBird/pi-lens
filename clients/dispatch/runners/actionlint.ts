@@ -128,8 +128,15 @@ const actionlintRunner: RunnerDefinition = {
 		);
 
 		const output = `${result.stdout ?? ""}${result.stderr ?? ""}`;
-		const parsed = parseToolRun("actionlint", { result, output }, (raw) =>
-			parseActionlintJson(raw, ctx.filePath, cwd),
+		const parsed = parseToolRun(
+			"actionlint",
+			{
+				result,
+				output,
+				// EXIT TABLE (actionlint 1.7.7 measured fixture): 0 clean; 1 findings; 2 error; other nonzero rejected.
+				exitCodes: { ran: [1, 2] },
+			},
+			(raw) => parseActionlintJson(raw, ctx.filePath, cwd),
 		);
 		if (parsed.skipped) return parsed.skipped;
 		return finishParsedRun({
