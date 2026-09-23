@@ -32,7 +32,6 @@ const NOT_YET_ON_PRIMITIVE: Record<string, string> = {
 	// Spawning runners that already consult the spawn outcome with their own
 	// per-tool check. Correct today, not yet unified. #1737.
 	"actionlint.ts": "reads its own exit status; #1737 strangler",
-	"cpp-check.ts": "reads its own exit status; #1737 strangler",
 	"credo.ts": "reads its own exit status; #1737 strangler",
 	"dotnet-build.ts": "reads its own exit status; #1737 strangler",
 	"eslint.ts": "reads its own exit status; #1737 strangler",
@@ -49,7 +48,6 @@ const NOT_YET_ON_PRIMITIVE: Record<string, string> = {
 	"rust-clippy.ts": "reads its own exit status; #1737 strangler",
 	"shfmt.ts": "reads its own exit status; #1737 strangler",
 	"spotbugs.ts": "reads its own exit status; #1737 strangler",
-	"zig-check.ts": "reads its own exit status; #1737 strangler",
 };
 
 function runnerFiles(): string[] {
@@ -122,6 +120,8 @@ describe("run-outcome primitive ratchet", () => {
 			"yamllint.ts",
 			"dart-analyze.ts",
 			"elixir-check.ts",
+			"cpp-check.ts",
+			"zig-check.ts",
 			"rubocop.ts",
 			"ruff.ts",
 		]) {

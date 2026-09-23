@@ -329,7 +329,7 @@ describe("secondary language fallback runners", () => {
 
 			expect(result.status).toBe("failed");
 			expect(result.semantic).toBe("warning");
-			expect(result.diagnostics[0]?.message).toContain("zig failed");
+			expect(result.diagnostics[0]?.id).toBe("zig-check:parse-error:1");
 		} finally {
 			env.cleanup();
 		}
