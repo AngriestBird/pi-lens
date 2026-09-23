@@ -85,11 +85,15 @@ function durationFor(result) {
 	return 0;
 }
 
+function isValidHeadSha(value) {
+	return typeof value === "string" && /^[0-9a-f]{40}$/i.test(value);
+}
+
 function validateRow(row) {
 	return (
 		row &&
 		typeof row === "object" &&
-		typeof row.headSha === "string" &&
+		isValidHeadSha(row.headSha) &&
 		typeof row.runId === "string" &&
 		typeof row.file === "string" &&
 		typeof row.outcome === "string" &&
@@ -105,7 +109,9 @@ export function rowsFromArtifacts(inputs) {
 		const runId = String(metadata.runId ?? "");
 		const lane = metadata.lane ?? "linux";
 		const recordedAt = metadata.recordedAt ?? new Date().toISOString();
-		if (!headSha || !runId)
+		if (!isValidHeadSha(headSha))
+			throw new Error("headSha must be a 40-hex SHA");
+		if (!runId)
 			throw new Error("artifact metadata must contain headSha and runId");
 		return value.testResults.map((result) => ({
 			headSha,
@@ -125,7 +131,12 @@ function readRows(file) {
 		.readFileSync(file, "utf8")
 		.split(/\r?\n/)
 		.filter(Boolean)
-		.map(JSON.parse)
+		.map((line) => {
+			const row = JSON.parse(line);
+			if (row && typeof row === "object" && !isValidHeadSha(row.headSha))
+				throw new Error("headSha must be a 40-hex SHA");
+			return row;
+		})
 		.filter(validateRow);
 }
 

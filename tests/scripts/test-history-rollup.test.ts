@@ -1,10 +1,13 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { spawnSync } from "node:child_process";
 import { afterEach, describe, expect, it } from "vitest";
 import { rollupTestHistory } from "../../scripts/test-history-rollup.mjs";
 
 const roots: string[] = [];
+const validHead = "a".repeat(40);
+const repoRoot = path.resolve(import.meta.dirname, "../..");
 afterEach(() =>
 	roots
 		.splice(0)
@@ -19,7 +22,7 @@ function fixture() {
 	fs.writeFileSync(
 		path.join(artifact, "metadata.json"),
 		JSON.stringify({
-			headSha: "head-a",
+			headSha: validHead,
 			runId: 101,
 			lane: "linux",
 			recordedAt: "2026-09-22T00:00:00.000Z",
@@ -45,7 +48,7 @@ describe("test-history-rollup real entry point", () => {
 		fs.writeFileSync(
 			path.join(second, "metadata.json"),
 			JSON.stringify({
-				headSha: "head-a",
+				headSha: validHead,
 				runId: 102,
 				lane: "linux",
 				recordedAt: "2026-09-22T01:00:00.000Z",
@@ -69,7 +72,7 @@ describe("test-history-rollup real entry point", () => {
 		});
 		expect(output.rowCount).toBe(2);
 		expect(output.flakeCandidates).toEqual([
-			{ file: "tests/flaky.test.ts", headSha: "head-a" },
+			{ file: "tests/flaky.test.ts", headSha: validHead },
 		]);
 		expect(fs.readFileSync(history, "utf8").trim().split("\n")).toHaveLength(2);
 		expect(JSON.parse(fs.readFileSync(summary, "utf8")).files).toEqual(
@@ -78,7 +81,7 @@ describe("test-history-rollup real entry point", () => {
 					file: "tests/flaky.test.ts",
 					passCount: 1,
 					failCount: 1,
-					lastFailHead: "head-a",
+					lastFailHead: validHead,
 					meanDurationMs: 11,
 				},
 			]),
@@ -90,7 +93,7 @@ describe("test-history-rollup real entry point", () => {
 		const oldHistory = path.join(root, "history.ndjson");
 		fs.writeFileSync(
 			oldHistory,
-			`${JSON.stringify({ headSha: "old", runId: "1", file: "old.test.ts", outcome: "passed", durationMs: 1, lane: "linux", recordedAt: "2026-01-01T00:00:00.000Z" })}\n`,
+			`${JSON.stringify({ headSha: "b".repeat(40), runId: "1", file: "old.test.ts", outcome: "passed", durationMs: 1, lane: "linux", recordedAt: "2026-01-01T00:00:00.000Z" })}\n`,
 		);
 		const summary = path.join(root, "summary.json");
 		const output = rollupTestHistory({
@@ -103,5 +106,35 @@ describe("test-history-rollup real entry point", () => {
 		expect(fs.readFileSync(oldHistory, "utf8")).not.toContain(
 			'"headSha":"old"',
 		);
+	});
+
+	it("rejects malformed metadata head SHAs with the CLI's bounded error exit", () => {
+		const { root, artifact } = fixture();
+		fs.writeFileSync(
+			path.join(artifact, "metadata.json"),
+			JSON.stringify({
+				headSha: "x",
+				runId: 101,
+				lane: "linux",
+				recordedAt: "2026-09-22T00:00:00.000Z",
+			}),
+		);
+		const history = path.join(root, "history.ndjson");
+		const summary = path.join(root, "summary.json");
+		const result = spawnSync(
+			process.execPath,
+			[
+				path.join(repoRoot, "scripts/test-history-rollup.mjs"),
+				"--artifact-dir",
+				artifact,
+				"--history",
+				history,
+				"--summary",
+				summary,
+			],
+			{ encoding: "utf8" },
+		);
+		expect(result.status).toBe(2);
+		expect(result.stderr).toContain("headSha must be a 40-hex SHA");
 	});
 });

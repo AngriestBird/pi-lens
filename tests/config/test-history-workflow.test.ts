@@ -1,9 +1,12 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
+import { spawnSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
 import yaml from "../../clients/deps/js-yaml.js";
 
 const root = path.resolve(import.meta.dirname, "../..");
+const npmCommand = process.platform === "win32" ? "npm.cmd" : "npm";
 const load = (file: string) =>
 	yaml.load(fs.readFileSync(path.join(root, file), "utf8")) as Record<
 		string,
@@ -37,6 +40,37 @@ describe("#3215 durable test-history workflow contract", () => {
 		expect(metadataEnv.HEAD_SHA).toContain(
 			"github.event.pull_request.head.sha",
 		);
+
+		const temp = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-test-history-console-contract-"),
+		);
+		try {
+			const env = {
+				...process.env,
+				PI_LENS_TEST_NO_LOCK: "1",
+				PI_LENS_HOME: path.join(temp, "home"),
+			};
+			const run = (args: string[]) => {
+				const result = spawnSync(npmCommand, ["test", "--", ...args], {
+					cwd: root,
+					env,
+					encoding: "utf8",
+				});
+				expect(result.status).toBe(0);
+				return `${result.stdout}${result.stderr}`;
+			};
+			const ciOutput = run([
+				"tests/scripts/test-history-rollup.test.ts",
+				"--reporter=default",
+				"--reporter=json",
+				`--outputFile=${path.join(temp, "ci-results.json")}`,
+			]);
+			expect(ciOutput.match(/^JSON report written to .+$/gm)).toHaveLength(1);
+			const localOutput = run(["tests/scripts/test-history-rollup.test.ts"]);
+			expect(localOutput).not.toMatch(/^JSON report written to .+$/m);
+		} finally {
+			fs.rmSync(temp, { recursive: true, force: true });
+		}
 	});
 
 	it("runs rollup only from the scheduled nightly and grants data-branch write access", () => {
