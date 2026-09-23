@@ -296,7 +296,7 @@ function runAstGrep(
 	exitCode: number;
 	fired: boolean;
 } {
-	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pilens-sg-"));
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-pilens-sg-"));
 	const snippet = path.join(dir, `fixture.${ext}`);
 	fs.writeFileSync(snippet, code, "utf-8");
 	// #902: `safeSpawn` (see probeCli comment) instead of a raw
@@ -424,7 +424,9 @@ d("catalog rules with `fix:` field — CLI rewrite end-to-end", () => {
 			});
 
 			it("ast-grep engine emits the expected `replacement` in the diagnostic JSON", () => {
-				const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pilens-sg-fix-"));
+				const dir = fs.mkdtempSync(
+					path.join(os.tmpdir(), "pi-lens-pilens-sg-fix-"),
+				);
 				const snippet = path.join(dir, `fixture.${rule.ext}`);
 				fs.writeFileSync(snippet, rule.before, "utf-8");
 				// The CLI exits non-zero when the rule fires (a finding

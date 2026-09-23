@@ -179,6 +179,47 @@ function literalHeadAt(
 	return interpolation < 0 ? body : body.slice(0, interpolation);
 }
 
+function scanUnnamespacedMkdtempSource(
+	raw: string,
+	file: string,
+): { file: string; line: number; prefix: string }[] {
+	const code = stripSource(raw);
+	const sites: { file: string; line: number; prefix: string }[] = [];
+	const call =
+		/\bmkdtemp(?:Sync)?\s*\(\s*(?:path\.)?join\(\s*(?:os\.tmpdir|tmpdir)\s*\(\s*\)\s*,\s*["'`]/g;
+	for (const match of code.matchAll(call)) {
+		const open = (match.index ?? 0) + match[0].length - 1;
+		const prefix = literalHeadAt(code, raw, open);
+		if (prefix !== undefined && prefix !== "" && !prefix.startsWith("pi-lens-"))
+			sites.push({
+				file,
+				line: code.slice(0, open).split("\n").length,
+				prefix,
+			});
+	}
+	return sites;
+}
+
+function scanUnnamespacedMkdtempRoots(): {
+	file: string;
+	line: number;
+	prefix: string;
+}[] {
+	const sites: { file: string; line: number; prefix: string }[] = [];
+	for (const { file, source } of readWalkedFiles(
+		listSourceFiles(path.join(REPO_ROOT, "tests"), { extensions: [".ts"] }),
+	)) {
+		const relative = path.relative(REPO_ROOT, file).replace(/\\/g, "/");
+		if (
+			relative === "tests/support/vitest-setup.ts" ||
+			relative === "tests/clients/lens-map.test.ts"
+		)
+			continue;
+		sites.push(...scanUnnamespacedMkdtempSource(source, relative));
+	}
+	return sites;
+}
+
 /** The prefix argument of one mkdtemp call, read from its own call window in
  *  blanked code: the static head of a literal, or the identifier standing in
  *  for it. `windowStart` maps the window back onto the whole file, so the
@@ -394,6 +435,31 @@ describe("tmp-fixture-hygiene", () => {
 		expect(
 			escapees.map((site) => `${site.file}:${site.line}: ${site.text}`),
 		).toEqual([]);
+	});
+
+	it("keeps every real-tmp mkdtemp prefix in the pi-lens namespace", () => {
+		// #3329 recurrence: an unnamespaced real-tmp root is invisible to the
+		// pi-lens census and can leak without an owner. Source is blanked first so
+		// comments and string decoys cannot self-excuse a new producer.
+		expect(scanUnnamespacedMkdtempRoots()).toEqual([]);
+		expect(
+			scanUnnamespacedMkdtempSource(
+				[
+					[
+						"// ",
+						"fs.mkdtempSync",
+						'(path.join(os.tmpdir(), "comment-"));',
+					].join(""),
+					[
+						"const decoy = '",
+						"fs.mkdtempSync",
+						'(path.join(os.tmpdir(), \\"string-\\"))\';',
+					].join(""),
+					["fs.mkdtempSync", '(path.join(os.tmpdir(), "real-"));'].join(""),
+				].join("\n"),
+				"fixture.ts",
+			),
+		).toEqual([{ file: "fixture.ts", line: 3, prefix: "real-" }]);
 	});
 
 	// PR #3100 review F2: #3083's per-file backstop directories live under the

@@ -18,7 +18,7 @@ import { removeTempDirSync } from "../test-utils.js";
 const PRIMARY_RULES = path.join("rules", "ast-grep-rules", "rules");
 
 function makeProject(): string {
-	return fs.mkdtempSync(path.join(os.tmpdir(), "ast-grep-catalog-"));
+	return fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-ast-grep-catalog-"));
 }
 
 function writeRule(

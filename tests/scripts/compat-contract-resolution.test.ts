@@ -78,7 +78,7 @@ describe("resolveAndCheckContracts", () => {
 
 	beforeEach(() => {
 		installDir = fs.mkdtempSync(
-			path.join(os.tmpdir(), "compat-resolution-fixture-"),
+			path.join(os.tmpdir(), "pi-lens-compat-resolution-fixture-"),
 		);
 		fs.mkdirSync(path.join(installDir, "node_modules/fixture-pkg-a/src"), {
 			recursive: true,
