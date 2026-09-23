@@ -677,7 +677,10 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/ast-grep-tool-logger.ts": 1,
 		"clients/biome-client.ts": 4,
 		"clients/bus-events-logger.ts": 1,
-		"clients/cache-manager.ts": 10,
+		// 10 -> 12 (#3274): `readCacheAsync` and the shared `freshAgeMs` each log
+		// their own verdict through the manager's existing verbose logger. Same
+		// sense as the ten beside them; no new logging concept.
+		"clients/cache-manager.ts": 12,
 		"clients/cascade-logger.ts": 1,
 		"clients/complexity-client.ts": 5,
 		"clients/dead-code-client.ts": 7,
@@ -744,7 +747,10 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/build-identity.ts": 3,
 		"clients/bus-events-logger.ts": 2,
 		"clients/bus-publish.ts": 3,
-		"clients/cache-manager.ts": 17,
+		// 17 -> 19 (#3274): `readCacheAsync` builds the same two store paths its
+		// synchronous sibling does (`cachePath`, `metaPath`). Same sense, one more
+		// reader of the same two files.
+		"clients/cache-manager.ts": 19,
 		"clients/cache/rule-cache.ts": 7,
 		"clients/call-graph.ts": 4,
 		"clients/cargo-manifest.ts": 7,
