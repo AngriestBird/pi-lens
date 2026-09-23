@@ -8,6 +8,18 @@ const TEST_FILE = /\.test\.ts$/;
 const GATE_PATTERN =
 	/(?:it|describe)\.(?:skipIf|runIf)\(\s*process\.platform\s*(?:!==|===)\s*["']\s*["']\s*\)/g;
 
+// Shrink-only admissions for tests whose filesystem contract needs a real
+// Windows host but is not expressed as a process.platform gate. Each row must
+// have a matching `// lane: windows-vitest` header in its test file and a
+// reason in the PR that introduced it (#3277).
+export const WINDOWS_LANE_ADMISSIONS = Object.freeze([
+	Object.freeze({
+		file: "tests/clients/dispatch/runners/go-vet.test.ts",
+		reason:
+			"#3277: go-vet path identity uses the host filesystem's case-folding answer; the safe-spawn boundary is mocked, so no Go binary is required.",
+	}),
+]);
+
 function blankSource(source) {
 	const output = source.split("");
 	let quote;
@@ -162,6 +174,7 @@ export function getWin32GateFiles(cwd = process.cwd()) {
 export function getWin32LaneFiles(cwd = process.cwd()) {
 	const root = resolve(cwd);
 	const files = new Set(getWin32GateFiles(root));
+	for (const admission of WINDOWS_LANE_ADMISSIONS) files.add(admission.file);
 	for (const absolute of sourceFiles(root)) {
 		const file = relative(root, absolute).replaceAll("\\", "/");
 		if (file.startsWith("tests/config/")) files.add(file);

@@ -1,3 +1,6 @@
+// lane: windows-vitest — #3277 requires a real Windows filesystem to exercise
+// the case-folding arm; the safe-spawn boundary is mocked, so no Go binary is
+// required by this lane admission.
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";

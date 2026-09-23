@@ -3,6 +3,13 @@ export interface Win32Gate {
 	line: number;
 }
 
+export interface WindowsLaneAdmission {
+	file: string;
+	reason: string;
+}
+
+export declare const WINDOWS_LANE_ADMISSIONS: readonly WindowsLaneAdmission[];
+
 /** Per-fork cap on remembered vanished paths; see the TypeScript seam's twin
  *  in tests/support/sweep-kit.ts for why it is bounded. */
 export declare const VANISHED_PATH_RECORD_CAP: number;
