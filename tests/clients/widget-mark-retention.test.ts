@@ -20,7 +20,10 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { resetDegradationLedger } from "../../clients/degradation-ledger.js";
+import {
+	getDegradationSummary,
+	resetDegradationLedger,
+} from "../../clients/degradation-ledger.js";
 import {
 	_resetDeferredForTests,
 	_resetStateCacheForTests,
@@ -437,6 +440,40 @@ describe("the weak arm and pre-anchor rows keep the mtime gate (#3183)", () => {
 		await reconcileStaleWidgetFiles();
 
 		expect(suppressedChip()).toBeUndefined();
+	});
+
+	it("records one bounded degradation when the marked file cannot be read", async () => {
+		// The fallback's own observability. Replacing the file with a DIRECTORY
+		// leaves `stat` succeeding — so the sweep still reaches the read — while
+		// `readFileSync` throws on every platform and for any user; a chmod fixture
+		// would pass vacuously wherever the suite runs as root.
+		const service = makeService([diag(MESSAGE, 2322, 1)]);
+		await probe(service);
+		await markLineOne();
+		await probe(service);
+		expect(suppressedChip()).toContain("suppressed: 1");
+
+		fs.rmSync(filePath);
+		fs.mkdirSync(filePath);
+		const later = Date.now() + 60_000;
+		fs.utimesSync(filePath, later / 1000, later / 1000);
+		await reconcileStaleWidgetFiles();
+
+		// Fell back to the mtime gate, exactly as a pre-#3183 build would have.
+		expect(suppressedChip()).toBeUndefined();
+		const record = getDegradationSummary().find(
+			(group) => group.kind === "widget-mark-anchor-unreadable",
+		);
+		expect(record?.count).toBe(1);
+		expect(record?.latestReasons[0]?.reason).toContain("under-count");
+
+		// Bounded: a second sweep of the same file adds no new record.
+		await reconcileStaleWidgetFiles();
+		expect(
+			getDegradationSummary().find(
+				(group) => group.kind === "widget-mark-anchor-unreadable",
+			)?.count,
+		).toBe(1);
 	});
 
 	it("retires a restored row that predates the anchor stamp", async () => {

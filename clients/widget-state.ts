@@ -969,6 +969,17 @@ function readContentOrUndefined(filePath: string): string | undefined {
 	try {
 		return readFileSync(filePath, "utf8");
 	} catch {
+		// Only reached once this module has established there IS a span-carrying row
+		// to ask about, so the record is bounded by that population — and worth
+		// making: with no content both callers fall back to the pre-#3183 rules (the
+		// per-entry mtime gate, the coarse retention identity), which is the
+		// conservative direction but can retire a mark that still stands.
+		recordDegradationOnce({
+			kind: "widget-mark-anchor-unreadable",
+			subject: filePath,
+			reason:
+				"the marked file could not be read, so its suppressed rows fall back to the file-mtime retirement gate and the footer chip may under-count it",
+		});
 		return undefined;
 	}
 }
