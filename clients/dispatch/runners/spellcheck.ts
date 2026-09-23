@@ -19,6 +19,8 @@
  * Or: npm install -g typos-cli (if wrapped)
  */
 
+import * as path from "node:path";
+import { pathsEqual } from "../../path-utils.js";
 import { safeSpawnAsync } from "../../safe-spawn.js";
 import { PRIORITY } from "../priorities.js";
 import type {
@@ -52,8 +54,13 @@ const TYPOS_EXIT_CODES: ToolExitCodes = { ran: [2] };
  *   "corrections": ["receive"]
  * }
  */
-function parseTyposOutput(raw: string, filePath: string): Diagnostic[] {
+function parseTyposOutput(
+	raw: string,
+	filePath: string,
+	cwd: string,
+): Diagnostic[] {
 	const diagnostics: Diagnostic[] = [];
+	const absTarget = path.resolve(cwd, filePath);
 
 	if (!raw.trim()) {
 		return diagnostics;
@@ -75,6 +82,10 @@ function parseTyposOutput(raw: string, filePath: string): Diagnostic[] {
 			};
 
 			if (!parsed.typo || !parsed.line_num) continue;
+			// #3295: every typos JSONL record names its own `path`; a `typos.toml`
+			// `files.extend-exclude` or a directory argv makes that a second file.
+			if (parsed.path && !pathsEqual(path.resolve(cwd, parsed.path), absTarget))
+				continue;
 
 			const corrections = parsed.corrections?.join(", ") || "no suggestions";
 			const message = `Typo: "${parsed.typo}" → ${corrections}`;
@@ -137,7 +148,7 @@ const spellcheckRunner: RunnerDefinition = {
 		const run = parseToolRun(
 			"spellcheck",
 			{ result, exitCodes: TYPOS_EXIT_CODES },
-			(out) => parseTyposOutput(out, ctx.filePath),
+			(out) => parseTyposOutput(out, ctx.filePath, cwd),
 			{ parseOutput: `${result.stdout ?? ""}${result.stderr ?? ""}` },
 		);
 		if (run.skipped) return run.skipped;

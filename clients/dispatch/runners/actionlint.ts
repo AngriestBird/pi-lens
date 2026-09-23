@@ -1,4 +1,5 @@
 import path from "node:path";
+import { pathsEqual } from "../../path-utils.js";
 import { safeSpawnAsync } from "../../safe-spawn.js";
 import { resolveRunnerCwd } from "../../tool-cwd.js";
 import { PRIORITY } from "../priorities.js";
@@ -60,14 +61,22 @@ function toDiagnostic(issue: ActionlintIssue, filePath: string): Diagnostic {
 export function parseActionlintJson(
 	raw: string,
 	filePath: string,
+	cwd: string,
 ): Diagnostic[] {
 	const trimmed = raw.trim();
 	if (!trimmed) return [];
+	// #3295: actionlint resolves reusable-workflow and composite-action refs, so
+	// its `filepath` is not always the workflow we asked about.
+	const absTarget = path.resolve(cwd, filePath);
+	const isTarget = (issue: ActionlintIssue): boolean =>
+		!issue.filepath || pathsEqual(path.resolve(cwd, issue.filepath), absTarget);
 
 	try {
 		const parsed = JSON.parse(trimmed) as ActionlintIssue[] | ActionlintIssue;
 		const issues = Array.isArray(parsed) ? parsed : [parsed];
-		return issues.map((issue) => toDiagnostic(issue, filePath));
+		return issues.flatMap((issue) =>
+			isTarget(issue) ? [toDiagnostic(issue, filePath)] : [],
+		);
 	} catch {
 		// Some actionlint versions or wrappers may emit one JSON object per line.
 		const diagnostics: Diagnostic[] = [];
@@ -75,6 +84,7 @@ export function parseActionlintJson(
 			if (!line.trim()) continue;
 			try {
 				const parsed = JSON.parse(line) as ActionlintIssue;
+				if (!isTarget(parsed)) continue;
 				diagnostics.push(toDiagnostic(parsed, filePath));
 			} catch {
 				// Ignore non-JSON chatter; the caller will synthesize a generic diagnostic
@@ -126,7 +136,7 @@ const actionlintRunner: RunnerDefinition = {
 				// EXIT TABLE (actionlint 1.7.7 measured fixture): 0 clean; 1 findings; 2 error; other nonzero rejected.
 				exitCodes: { ran: [1, 2] },
 			},
-			(raw) => parseActionlintJson(raw, ctx.filePath),
+			(raw) => parseActionlintJson(raw, ctx.filePath, cwd),
 		);
 		if (parsed.skipped) return parsed.skipped;
 		return finishParsedRun({

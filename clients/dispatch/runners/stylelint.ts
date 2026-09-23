@@ -1,4 +1,5 @@
 import * as path from "node:path";
+import { pathsEqual } from "../../path-utils.js";
 import { safeSpawnAsync } from "../../safe-spawn.js";
 import { logRunnerAdvisoryOnce, resolveRunnerCwd } from "../../tool-cwd.js";
 import {
@@ -114,11 +115,23 @@ const STYLELINT_FIXABLE_RULES = new Set<string>([
 	"value-no-vendor-prefix",
 ]);
 
-function parseStylelintJson(raw: string, filePath: string): Diagnostic[] {
+function parseStylelintJson(
+	raw: string,
+	filePath: string,
+	cwd: string,
+): Diagnostic[] {
 	try {
 		const results: StylelintResult[] = JSON.parse(raw);
 		const diagnostics: Diagnostic[] = [];
+		const absTarget = path.resolve(cwd, filePath);
 		for (const result of results) {
+			// #3295: stylelint keys each result by its own `source`; a config
+			// `files`/`overrides` entry or an `@import` makes that a DIFFERENT file.
+			if (
+				result.source &&
+				!pathsEqual(path.resolve(cwd, result.source), absTarget)
+			)
+				continue;
 			for (const w of result.warnings) {
 				const severity = w.severity === "error" ? "error" : "warning";
 				const fixable = STYLELINT_FIXABLE_RULES.has(w.rule);
@@ -192,7 +205,7 @@ const stylelintRunner: RunnerDefinition = {
 		const run = parseToolRun(
 			"stylelint",
 			{ result, output: raw, exitCodes: STYLELINT_EXIT_CODES },
-			(out) => parseStylelintJson(out, ctx.filePath),
+			(out) => parseStylelintJson(out, ctx.filePath, cwd),
 		);
 		if (run.skipped) return run.skipped;
 

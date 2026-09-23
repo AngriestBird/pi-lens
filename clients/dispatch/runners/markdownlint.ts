@@ -1,3 +1,5 @@
+import * as path from "node:path";
+import { pathsEqual } from "../../path-utils.js";
 import { safeSpawnAsync } from "../../safe-spawn.js";
 import { logRunnerAdvisoryOnce, resolveRunnerCwd } from "../../tool-cwd.js";
 import {
@@ -79,18 +81,27 @@ const MARKDOWNLINT_FIXABLE_RULES = new Set<string>([
 //   2. some rules carry MULTIPLE slash-separated names (e.g.
 //      `MD041/first-line-heading/first-line-h1`).
 // The severity token is optional so older/relative-path output still parses.
-function parseMarkdownlintOutput(raw: string, filePath: string): Diagnostic[] {
+function parseMarkdownlintOutput(
+	raw: string,
+	filePath: string,
+	cwd: string,
+): Diagnostic[] {
 	const diagnostics: Diagnostic[] = [];
+	const absTarget = path.resolve(cwd, filePath);
 	for (const line of raw.split(/\r?\n/)) {
 		if (!line.trim()) continue;
 		// Rule code is MD### followed by one or more slash-joined names. Use a
 		// single char class (`[\w/-]+`) rather than a nested quantifier
 		// (`(?:/[\w-]+)+`) so there's no super-linear backtracking (S5852).
 		const match = line.match(
-			/^.*?:(\d+)(?::(\d+))?\s+(?:error|warning)?\s*(MD\d+\/[\w/-]+)\s+(.+)$/,
+			/^(.*?):(\d+)(?::(\d+))?\s+(?:error|warning)?\s*(MD\d+\/[\w/-]+)\s+(.+)$/,
 		);
 		if (!match) continue;
-		const [, lineNum, col, ruleCode, message] = match;
+		const [, reported, lineNum, col, ruleCode, message] = match;
+		// #3295: the leading `.*?` this parser discarded IS markdownlint-cli2's
+		// reported path, and its config globs can widen the run past the argv.
+		if (reported && !pathsEqual(path.resolve(cwd, reported), absTarget))
+			continue;
 		const ruleName = ruleCode.split("/")[0];
 		const fixable = MARKDOWNLINT_FIXABLE_RULES.has(ruleName);
 		diagnostics.push({
@@ -177,7 +188,7 @@ const markdownlintRunner: RunnerDefinition = {
 		const run = parseToolRun(
 			"markdownlint",
 			{ result, output: raw, exitCodes: MARKDOWNLINT_EXIT_CODES },
-			(out) => parseMarkdownlintOutput(out, ctx.filePath),
+			(out) => parseMarkdownlintOutput(out, ctx.filePath, cwd),
 		);
 		if (run.skipped) return run.skipped;
 

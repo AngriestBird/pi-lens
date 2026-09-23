@@ -1,4 +1,5 @@
 import * as path from "node:path";
+import { pathsEqual } from "../../path-utils.js";
 import { safeSpawnAsync } from "../../safe-spawn.js";
 import { resolveRunnerCwd } from "../../tool-cwd.js";
 import {
@@ -56,14 +57,23 @@ function normalizeKtlintResults(parsed: unknown): KtlintResult[] | null {
 	return null;
 }
 
-function parseKtlintOutput(raw: string, filePath: string): Diagnostic[] | null {
+function parseKtlintOutput(
+	raw: string,
+	filePath: string,
+	cwd: string,
+): Diagnostic[] | null {
 	try {
 		const parsed = normalizeKtlintResults(JSON.parse(raw));
 		if (!parsed) return null;
 
 		const autofix = getAutofixCapability("ktlint");
 		const diagnostics: Diagnostic[] = [];
+		const absTarget = path.resolve(cwd, filePath);
 		for (const result of parsed) {
+			// #3295: ktlint's JSON reporter is an array of FILES; `.editorconfig`
+			// globs put more than the argv in it.
+			if (result.file && !pathsEqual(path.resolve(cwd, result.file), absTarget))
+				continue;
 			for (const err of result.errors ?? []) {
 				diagnostics.push({
 					id: `ktlint-${err.ruleId}-${err.line}-${err.col}`,
@@ -126,7 +136,7 @@ const ktlintRunner: RunnerDefinition = {
 				output: `${result.stdout ?? ""}\n${result.stderr ?? ""}`,
 				exitCodes: KTLINT_EXIT_CODES,
 			},
-			(output) => parseKtlintOutput(output, ctx.filePath) ?? [],
+			(output) => parseKtlintOutput(output, ctx.filePath, cwd) ?? [],
 		);
 		if (run.skipped) return run.skipped;
 		return finishParsedRun({

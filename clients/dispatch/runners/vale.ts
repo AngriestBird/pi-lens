@@ -1,5 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { pathsEqual } from "../../path-utils.js";
 import { safeSpawnAsync } from "../../safe-spawn.js";
 import { resolveRunnerCwd } from "../../tool-cwd.js";
 import { PRIORITY } from "../priorities.js";
@@ -80,17 +81,28 @@ interface ValeAlert {
 
 type ValeOutput = Record<string, ValeAlert[]>;
 
-export function parseValeOutput(raw: string, filePath: string): Diagnostic[] {
+export function parseValeOutput(
+	raw: string,
+	filePath: string,
+	cwd: string,
+): Diagnostic[] {
 	const diagnostics: Diagnostic[] = [];
 
 	if (!raw.trim()) return diagnostics;
+	const absTarget = path.resolve(cwd, filePath);
 
 	try {
 		const parsed = JSON.parse(raw) as ValeOutput;
 		if (!parsed || typeof parsed !== "object") return diagnostics;
 
-		for (const alerts of Object.values(parsed)) {
+		// #3295: vale's top level is keyed BY the linted file's path — the only
+		// place the reported path appears. `Object.values` dropped it, so a
+		// `.vale.ini` glob or a directory argv charged a second file's alerts to
+		// the dispatched one.
+		for (const [reported, alerts] of Object.entries(parsed)) {
 			if (!Array.isArray(alerts)) continue;
+			if (reported && !pathsEqual(path.resolve(cwd, reported), absTarget))
+				continue;
 
 			for (const alert of alerts) {
 				if (!alert.Message) continue;
@@ -172,7 +184,7 @@ const valeRunner: RunnerDefinition = {
 				// EXIT TABLE (Vale 3.9.6 docs https://vale.sh/docs/topics/metrics/): 0 clean; 1 findings; 2 error; other nonzero rejected.
 				exitCodes: { ran: [1, 2] },
 			},
-			(raw) => parseValeOutput(raw, ctx.filePath),
+			(raw) => parseValeOutput(raw, ctx.filePath, cwd),
 		);
 		if (run.skipped) return run.skipped;
 
