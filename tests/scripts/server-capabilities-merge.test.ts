@@ -335,12 +335,12 @@ describe("mergeServerCapabilitiesDoc (#469)", () => {
 		expect(preservedCount).toBe(2); // php + rust rows preserved
 
 		expect(text).toContain("- **php**: definitionProvider, hoverProvider");
-			expect(text).toContain(
-				"- **rust**: callHierarchyProvider, definitionProvider",
-			);
-			expect(text).toContain(
-				"- **rust** (3): rust-analyzer.debugSingle, rust-analyzer.runSingle, rust-analyzer.showReferences",
-			);
+		expect(text).toContain(
+			"- **rust**: callHierarchyProvider, definitionProvider",
+		);
+		expect(text).toContain(
+			"- **rust** (3): rust-analyzer.debugSingle, rust-analyzer.runSingle, rust-analyzer.showReferences",
+		);
 		// the host-truth "Unavailable" section is untouched (regenerated as-is)
 		expect(text).toContain("- rust-analyzer");
 		expect(text).toContain("- intelephense");

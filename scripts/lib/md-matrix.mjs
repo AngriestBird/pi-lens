@@ -102,12 +102,23 @@ export function renderServerCapabilitiesDoc({
 			`| ${s.serverId} | ${s.workspaceDiagnosticsSupport?.mode ?? "?"} | ${yn(s.workspaceDiagnosticsSupport?.workspaceDiagnostics)} | ${opsText} | ${sortedStrings(s.advertisedCommands).length} |`,
 		);
 	}
-	lines.push("", "## Raw advertised capability keys", "", "Top-level keys of each server's `ServerCapabilities` — the full advertised", "surface, including providers pi-lens does not yet consume.", "");
+	lines.push(
+		"",
+		"## Raw advertised capability keys",
+		"",
+		"Top-level keys of each server's `ServerCapabilities` — the full advertised",
+		"surface, including providers pi-lens does not yet consume.",
+		"",
+	);
 	for (const s of sortedRows) {
 		const keys = sortedStrings(s.rawCapabilityKeys);
-		lines.push(`- **${s.serverId}**: ${keys.length ? keys.join(", ") : "(none reported)"}`);
+		lines.push(
+			`- **${s.serverId}**: ${keys.length ? keys.join(", ") : "(none reported)"}`,
+		);
 	}
-	const withCmds = sortedRows.filter((s) => sortedStrings(s.advertisedCommands).length > 0);
+	const withCmds = sortedRows.filter(
+		(s) => sortedStrings(s.advertisedCommands).length > 0,
+	);
 	if (withCmds.length) {
 		lines.push("", "## Advertised executeCommand allowlists", "");
 		for (const s of withCmds) {
@@ -119,7 +130,14 @@ export function renderServerCapabilitiesDoc({
 	}
 	const unavailableSorted = sortedStrings(unavailable);
 	if (unavailableSorted.length) {
-		lines.push("", "## Unavailable on the generating host", "", "Toolchain/binary not installed here, so capabilities weren't captured", "(many are the toolchain-gated family tracked in #241):", "");
+		lines.push(
+			"",
+			"## Unavailable on the generating host",
+			"",
+			"Toolchain/binary not installed here, so capabilities weren't captured",
+			"(many are the toolchain-gated family tracked in #241):",
+			"",
+		);
 		for (const name of unavailableSorted) lines.push(`- ${name}`);
 	}
 	lines.push("");
@@ -153,7 +171,7 @@ export function mergeRows(
 ) {
 	const idx = (name) => header.indexOf(name);
 	const keyIdx = idx(keyCol);
-		const byKey = new Map();
+	const byKey = new Map();
 	const order = [];
 	for (const cells of existing) {
 		const k = cells[keyIdx];
@@ -341,7 +359,7 @@ export function mergeBulletSection(
 		if (byKey.has(k)) continue; // captured this run — always wins
 		const prior = priorBullets.get(k);
 		if (prior === undefined) continue; // prior doc had no bullet — skip silently
-			byKey.set(k, `- ${sortBulletValues(prior)}`);
+		byKey.set(k, `- ${sortBulletValues(prior)}`);
 		added = true;
 	}
 	if (!added) return newText;
