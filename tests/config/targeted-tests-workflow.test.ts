@@ -52,7 +52,16 @@ describe("targeted advisory workflow contract (#3215)", () => {
 		);
 		const job = readWorkflow().jobs["targeted-tests-advisory"];
 		const runs = job?.steps?.map((step) => step.run).filter(Boolean) ?? [];
-		expect(runs).toContain("npm install --no-audit --no-fund");
+		// Lockfile-locked and script-free (SonarCloud githubactions:S8543 /
+		// S6505 on the copied `npm install`); the grammar download is the one
+		// `prepare` piece the targeted files need, so it is an explicit step.
+		expect(runs).toContain("npm ci --no-audit --no-fund --ignore-scripts");
+		expect(runs).toContain(
+			"node scripts/download-grammars.js --core --dest grammars",
+		);
+		expect(
+			runs.indexOf("node scripts/download-grammars.js --core --dest grammars"),
+		).toBeLessThan(runs.indexOf("npm run build"));
 		expect(runs).toContain("npm run build");
 		expect(runs).toContain(
 			"node scripts/pre-push-targeted-tests.mjs --skip-build",
