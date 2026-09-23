@@ -560,6 +560,104 @@ describe("dead-code turn-end advisory honors dispositions (#3248)", () => {
 	});
 });
 
+describe("actionable-warnings turn-end advisory honors dispositions (#3248)", () => {
+	function warning(
+		filePath: string,
+		line: number,
+		message: string,
+	): Record<string, unknown> {
+		return {
+			id: `aw:${line}`,
+			filePath,
+			displayPath: path.basename(filePath),
+			line,
+			severity: "warning",
+			tool: "ast-grep",
+			rule: "no-console",
+			message,
+			actions: [],
+			suppressed: false,
+			origin: "dispatch",
+		};
+	}
+
+	it("filters the built report and keeps its cache raw (#3248)", async () => {
+		const env = setupTestEnvironment("pi-lens-3248-actionable-built-");
+		try {
+			const { tmpDir: cwd } = env;
+			const filePath = path.join(cwd, "src", "app.ts");
+			fs.mkdirSync(path.dirname(filePath), { recursive: true });
+			fs.writeFileSync(filePath, "console.log(1);\nconsole.log(2);\nconsole.log(3);\n");
+			const runtime = new RuntimeCoordinator();
+			runtime.setTelemetryIdentity({ sessionId: SESSION_ID });
+			const cacheManager = new CacheManager(false);
+			registerEdit(cacheManager, cwd, filePath);
+			runtime.recordActionableWarnings([
+				warning(filePath, 1, "marked warning"),
+				warning(filePath, 2, "live warning"),
+				warning(filePath, 3, "third warning"),
+			]);
+			markFalsePositive(cwd, {
+				filePath,
+				tool: "ast-grep",
+				rule: "no-console",
+				message: "marked warning",
+				line: 1,
+			});
+
+			await handleTurnEnd(
+				makeTurnEndDeps(runtime, cacheManager, cwd, {
+					getFlag: (name: string) => name === "lens-actionable-warnings",
+				}),
+			);
+
+			const text = turnEndText(cacheManager, cwd, runtime);
+			expect(text).toContain("Fixable warnings introduced this turn: 2");
+			expect(text).toContain("suppressed by disposition: 1 finding(s).");
+			expect(text).not.toContain("Fixable warnings introduced this turn: 3");
+			const cached = cacheManager.readCache<any>("actionable-warnings", cwd)?.data;
+			expect(cached.summary.unsuppressed).toBe(3);
+			expect(cached.files[0].warnings).toHaveLength(3);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("does not repeat an ast-grep secret at a delivered blocker location (#3270)", async () => {
+		const env = setupTestEnvironment("pi-lens-3270-actionable-location-");
+		try {
+			const { tmpDir: cwd } = env;
+			const filePath = path.join(cwd, "src", "secret.ts");
+			fs.mkdirSync(path.dirname(filePath), { recursive: true });
+			fs.writeFileSync(filePath, "const token = 'AKIA...';\nconst other = 'secret';\n");
+			const runtime = new RuntimeCoordinator();
+			runtime.setTelemetryIdentity({ sessionId: SESSION_ID });
+			const cacheManager = new CacheManager(false);
+			registerEdit(cacheManager, cwd, filePath);
+			cacheManager.writeCache(
+				"gitleaks",
+				{ success: true, scannedAt: "", findings: [{ ruleId: "aws-access-token", file: filePath, startLine: 1, description: "AWS key" }] },
+				cwd,
+			);
+			runtime.recordActionableWarnings([
+				{ ...warning(filePath, 1, "hardcoded secret"), rule: "no-hardcoded-secret-js" },
+				{ ...warning(filePath, 2, "other secret"), rule: "no-hardcoded-secret-js" },
+			]);
+
+			await handleTurnEnd(
+				makeTurnEndDeps(runtime, cacheManager, cwd, {
+					getFlag: (name: string) => name === "lens-actionable-warnings",
+				}),
+			);
+			const text = turnEndText(cacheManager, cwd, runtime);
+			expect(text).toContain("Fixable warnings introduced this turn: 1");
+			expect(text).toContain("secret.ts: 1");
+		} finally {
+			env.cleanup();
+		}
+	});
+});
+
 describe("call-graph impact advisory honors dispositions (#3248)", () => {
 	function graphWith(callee: string, callers: string[]): FunctionCallGraph {
 		return {

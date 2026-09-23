@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import {
 	type ActionableWarningsReport,
+	type ActionableWarningsAdvisoryFilterResult,
 	buildActionableWarningsReport,
 	formatActionableWarningsAdvisory,
 	publishActionableWarningsReport,
@@ -3412,21 +3413,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				turnIndex: runtime.turnIndex,
 				files,
 				modifiedRangesByFile,
-				// Suppress the ast-grep secret advisory at any location already
-				// surfaced in the unified secrets blocker above (#131 Mode 3) — the
-				// secret is reported once, not twice.
-				dispatchWarnings: runtime
-					.peekActionableWarnings()
-					.filter(
-						(w) =>
-							!(
-								isSecretWarning(w) &&
-								typeof w.line === "number" &&
-								secretBlockedLocations.has(
-									secretLocationKey(w.filePath, w.line),
-								)
-							),
-					),
+				dispatchWarnings: runtime.peekActionableWarnings(),
 				includeLspCodeActions: !!getFlag("lens-actionable-warning-actions"),
 				projectSeqStart: runtime.turnStartProjectSeq,
 				projectSeqEnd: runtime.projectSeq,
@@ -3543,6 +3530,47 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				publishResult.report,
 				cwd,
 				host,
+				(report): ActionableWarningsAdvisoryFilterResult => {
+					let dispositionSuppressed = 0;
+					const files = report.files
+						.map((file) => {
+							const policy = filterFindingsByDisposition(
+								file.warnings,
+								cwd,
+								(warning) => ({
+									filePath: warning.filePath,
+									line: warning.line,
+									column: warning.column,
+									severity: warning.severity,
+									semantic: "warning",
+									tool: warning.tool,
+									runner: warning.tool,
+									rule: warning.rule,
+									code: warning.code,
+									message: warning.message,
+									source: warning.origin === "lsp" ? "lsp" : "dispatch",
+								}),
+							);
+							dispositionSuppressed += policy.suppressed;
+							const kept = policy.kept.filter(
+								(warning) =>
+									!(isSecretWarning(warning) &&
+										typeof warning.line === "number" &&
+										secretBlockedLocations.has(
+											secretLocationKey(warning.filePath, warning.line),
+										)),
+							);
+							return kept.length > 0 ? { ...file, warnings: kept } : undefined;
+						})
+						.filter(
+							(file): file is NonNullable<typeof file> => file !== undefined,
+						);
+					recordDispositionSuppressed(
+						"actionable-warnings",
+						dispositionSuppressed,
+					);
+					return { files, suppressed: dispositionSuppressed };
+				},
 			);
 			// @delivery-surface: runtime-turn:actionable-warnings-advisory
 			if (advisory) advisoryParts.push(advisory);

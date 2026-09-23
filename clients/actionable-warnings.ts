@@ -38,6 +38,11 @@ import { commitDurableStore } from "./durable-store.js";
 import { establishToolAgreement } from "./tool-agreement.js";
 import { resolveLensToolName, type LensToolHost } from "./tool-config.js";
 
+export interface ActionableWarningsAdvisoryFilterResult {
+	files: ActionableWarningsReportFile[];
+	suppressed: number;
+}
+
 export interface ActionableWarningAction {
 	title: string;
 	kind?: string;
@@ -2176,9 +2181,25 @@ export function formatActionableWarningsAdvisory(
 	report: ActionableWarningsReport,
 	cwd: string,
 	host: LensToolHost = "pi",
+	filterBuiltReport?: (
+		report: ActionableWarningsReport,
+	) => ActionableWarningsAdvisoryFilterResult,
 ): string | undefined {
-	if (report.summary.unsuppressed === 0) return undefined;
-	const files = report.files.filter((file) =>
+	// The cache record is deliberately kept raw: lens_diagnostics mode=delta
+	// applies dispositions on read. The turn-end advisory is a separate
+	// delivery surface, so filter the report AFTER its builder and after the
+	// deferred merge (which is where LSP-enriched rows enter), then derive the
+	// summary from the same per-file rows before rendering.
+	const filtered = filterBuiltReport?.(report);
+	const advisoryReport = filtered
+		? {
+			...report,
+			files: filtered.files,
+			summary: summarizeReportFiles(filtered.files),
+		}
+		: report;
+	if (advisoryReport.summary.unsuppressed === 0) return undefined;
+	const files = advisoryReport.files.filter((file) =>
 		file.warnings.some((warning) => !warning.suppressed),
 	);
 	const fileList = files
@@ -2191,13 +2212,13 @@ export function formatActionableWarningsAdvisory(
 	const more =
 		files.length > 5 ? `\n  ... and ${files.length - 5} more file(s)` : "";
 	const safe =
-		report.summary.autoFixEligible > 0
-			? ` ${report.summary.autoFixEligible} appear to have conservative preferred quickfixes.`
+		advisoryReport.summary.autoFixEligible > 0
+			? ` ${advisoryReport.summary.autoFixEligible} appear to have conservative preferred quickfixes.`
 			: "";
 	// #1777: hint and info are style opinions, so say how much of the count is
 	// opinion. The line appears only when a quiet tier is actually present —
 	// an all-warning turn already says everything in the count above.
-	const byTier = report.summary.byTier;
+	const byTier = advisoryReport.summary.byTier;
 	const quiet = byTier ? byTier.hint + byTier.info : 0;
 	const tierLine =
 		quiet > 0
@@ -2220,7 +2241,10 @@ export function formatActionableWarningsAdvisory(
 	// defensive only.
 	const diagnosticsTool = resolveLensToolName("lens_diagnostics", host);
 	return [
-		`🟡 Fixable warnings introduced this turn: ${report.summary.unsuppressed}.${safe}`,
+		`🟡 Fixable warnings introduced this turn: ${advisoryReport.summary.unsuppressed}.${safe}`,
+		filtered && filtered.suppressed > 0
+			? `suppressed by disposition: ${filtered.suppressed} finding(s).`
+			: undefined,
 		tierLine,
 		diagnosticsTool
 			? `Use ${diagnosticsTool} with mode=delta to inspect these warnings.`
