@@ -953,13 +953,16 @@ describe("gleam-check reported-path attribution (#3285)", () => {
 		expect(observed.semantic).toBe("blocking");
 	});
 
-	it("attaches a locationless project diagnostic to the sole dispatch target (#3293)", async () => {
+	it("keeps a locationless project diagnostic unattributed (#3293)", async () => {
 		const observed = await dispatch(gleamCheckLocationless, echoesArgv);
+		// Recurrence prevented (#3293): `gleam check` analyzes the whole project,
+		// so a diagnostic without a reported locus must not be charged to the file
+		// that happened to trigger this project-scoped runner. It reaches the
+		// existing nonzero-without-diagnostics project fallback instead.
 		expect(observed.diagnostics).toHaveLength(1);
 		expect(observed.diagnostics[0]).toMatchObject({
-			id: "gleam-check-error-0",
+			id: "gleam-check-nonzero-no-diagnostics",
 			message: "error: Could not find a package required by this project",
-			filePath: observed.dispatchedPath,
 			severity: "error",
 			semantic: "blocking",
 		});
@@ -979,10 +982,10 @@ describe("gleam-check reported-path attribution (#3285)", () => {
 		const observed = await dispatch(gleamCheckOrphan, echoesArgv);
 		expect(observed.diagnostics).toHaveLength(1);
 		expect(observed.diagnostics[0]).toMatchObject({
-			message: "gleam check reported an error",
-			line: 1,
-			column: 8,
+			id: "gleam-check-nonzero-no-diagnostics",
 		});
+		expect(observed.diagnostics[0]?.line).toBeUndefined();
+		expect(observed.diagnostics[0]?.column).toBeUndefined();
 	});
 
 	// The over-merge direction: one gleam diagnostic renders one locus line PER

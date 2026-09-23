@@ -83,27 +83,10 @@ function parseGleamOutput(
 	const lines = stripAnsi(raw).split(/\r?\n/);
 	for (let i = 0; i < lines.length; i++) {
 		const header = lines[i].match(GLEAM_HEADER);
-		if (!header) {
-			const orphanLocation = lines[i].match(GLEAM_LOCUS);
-			if (!orphanLocation || (i > 0 && GLEAM_HEADER.test(lines[i - 1])))
-				continue;
-			const [, sourcePath, lineStr, colStr] = orphanLocation;
-			if (!pathsEqual(path.resolve(cwd, sourcePath.trim()), absTarget))
-				continue;
-			diagnostics.push({
-				id: `gleam-check-${lineStr}-${colStr}`,
-				message: "gleam check reported an error",
-				filePath,
-				line: Number.parseInt(lineStr, 10) || 1,
-				column: Number.parseInt(colStr, 10) || 1,
-				severity: "error",
-				semantic: "blocking",
-				tool: "gleam",
-				rule: "gleam-check",
-				fixable: false,
-			});
-			continue;
-		}
+		// A locationless Gleam diagnostic describes the whole project: `check`
+		// receives no file argument. Leave it for the nonzero-without-diagnostics
+		// fallback instead of charging it to whichever file triggered dispatch.
+		if (!header) continue;
 		const title = `${header[1]}: ${header[2]}`;
 		const severity = header[1] === "warning" ? "warning" : "error";
 		const nextHeader = lines.findIndex(
@@ -120,19 +103,9 @@ function parseGleamOutput(
 				break;
 			}
 		}
-		if (!location) {
-			diagnostics.push({
-				id: `gleam-check-${severity}-${i}`,
-				message: title,
-				filePath,
-				severity,
-				semantic: severity === "error" ? "blocking" : "warning",
-				tool: "gleam",
-				rule: "gleam-check",
-				fixable: false,
-			});
-			continue;
-		}
+		// A title without a locus is also project-level output. The runner's
+		// nonzero-without-diagnostics fallback preserves it without a reported locus.
+		if (!location) continue;
 		const [, sourcePath, lineStr, colStr] = location;
 		// #3278: one seam for reported-path attribution — see javac.ts.
 		if (!pathsEqual(path.resolve(cwd, sourcePath.trim()), absTarget)) continue;
