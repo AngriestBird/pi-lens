@@ -1,3 +1,6 @@
+// lane: windows-vitest — #3294's case-spelling cell asserts the host
+// filesystem's own answer; no external toolchain is required because the
+// production handleToolResult path and pipeline boundary are in-process.
 import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
@@ -2609,6 +2612,81 @@ describe("runtime-tool-result inline behavior warnings", () => {
 			);
 		} finally {
 			process.chdir(previousCwd);
+			env.cleanup();
+		}
+	});
+
+	it("uses the filesystem answer for case-variant workspace-edit paths (#3294)", async () => {
+		const { runPipeline } = await import("../../clients/pipeline.js");
+		const env = setupTestEnvironment("pi-lens-runtime-tool-case-variant-");
+		try {
+			const filePath = path.join(env.tmpDir, "src", "main.rs");
+			const caseVariantPath = path.join(env.tmpDir, "src", "MAIN.rs");
+			fs.mkdirSync(path.dirname(filePath), { recursive: true });
+			fs.writeFileSync(filePath, "mod helper;\n");
+			if (!fs.existsSync(caseVariantPath))
+				fs.writeFileSync(caseVariantPath, "pub fn helper() {}\n");
+
+			const filesystemTarget = fs.realpathSync.native(filePath);
+			const filesystemChanged = fs.realpathSync.native(caseVariantPath);
+			const isSameFilesystemFile = filesystemTarget === filesystemChanged;
+			vi.mocked(runPipeline).mockResolvedValue({
+				output: "✅ Auto-fixed 1 issue(s)",
+				hasBlockers: false,
+				isError: false,
+				fileModified: true,
+				changedFiles: [caseVariantPath],
+			});
+
+			const modifiedRanges: string[] = [];
+			await handleToolResult({
+				event: {
+					toolName: "edit",
+					input: { path: filePath },
+					details: { diff: "+  1 mod helper;" },
+					content: [{ type: "text", text: "base" }],
+				},
+				getFlag: () => false,
+				dbg: () => {},
+				runtime: {
+					projectRoot: env.tmpDir,
+					setTelemetryIdentity: () => {},
+					updateGitGuardStatus: () => {},
+					appendCascadeResult: () => {},
+					recordInlineBlockers: () => {},
+					clearInlineBlockers: () => {},
+					nextWriteIndex: () => 1,
+					turnIndex: 1,
+					telemetryModel: "test-model",
+					telemetrySessionId: "test-session",
+					fixedThisTurn: new Set<string>(),
+					reportedThisTurn: new Set<string>(),
+					formatPipelineCrashNotice: () => "",
+					lastCascadeOutput: "",
+					cachedExports: new Map(),
+					deferFormat: () => {},
+				},
+				cacheManager: {
+					addModifiedRange: (changedFile: string) =>
+						modifiedRanges.push(changedFile),
+					readTurnState: () => ({}),
+				},
+				biomeClient: {},
+				ruffClient: {},
+				testRunnerClient: {},
+				metricsClient: {},
+				resetLSPService: () => {},
+				agentBehaviorRecord: () => [],
+				formatBehaviorWarnings: () => "",
+			} as any);
+
+			// The recurrence is a case-folding host receiving the target's spelling
+			// back from applyWorkspaceEdit; ext4 instead has a distinct file that
+			// must remain visible as a side effect.
+			if (isSameFilesystemFile)
+				expect(modifiedRanges).not.toContain(caseVariantPath);
+			else expect(modifiedRanges).toContain(caseVariantPath);
+		} finally {
 			env.cleanup();
 		}
 	});
