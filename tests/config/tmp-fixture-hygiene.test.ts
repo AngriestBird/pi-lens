@@ -136,35 +136,69 @@ type TmpOwnerIndex = {
 // beside it: there is nothing for a new producer to register, and no list to
 // fall out of step with the tree.
 //
-// Comments are blanked and STRINGS ARE KEPT (`strings: "keep"`). This is the
-// per-needle policy the detector rule asks for: a fixture prefix's only
-// possible evidence IS a string literal, so blanking strings would empty the
-// population outright, while blanking comments is what stops a commented-out
-// `mkdtempSync(path.join(os.tmpdir(), "pi-lens-…"))` from registering a
-// prefix nothing creates.
-/** The static head of the argument, so a template
- *  (`` setupTestEnvironment(`pi-lens-wiring-${reason}-`) ``) registers the
- *  family the entry name starts with, exactly as the raw-mkdtemp needle does.
- *  No closing delimiter is required: an interpolation ends the head. */
-const SETUP_ENV_PREFIX = /setupTestEnvironment\(\s*["'`]([^"'`$]*)/g;
-/** Every `pi-lens-…-` literal in the file, for the identifier case: those sites
- *  sit inside a per-file helper (`makeDir(prefix)`) whose CALLERS spell the
- *  literals, in the same file. */
-const PI_LENS_PREFIX_LITERAL = /["'`](pi-lens-[A-Za-z0-9._-]*-)["'`]/g;
+// Round 2, M3328-1: the scan reads CODE, not prose. Comments AND string
+// contents are blanked (`stripSource`'s default), so neither a commented-out
+// call nor an ordinary string that spells one — `const decoy =
+// 'setupTestEnvironment("pi-lens-evil-")'` — can register a prefix. A file that
+// claims another file's family is not a cosmetic mis-label: it becomes a
+// candidate owner, and one candidate that "ran here" is what stops the
+// foreign-run filter from sparing a sibling invocation's live root (#3314).
+//
+// The one deliberate exception the detector rule allows is the prefix ARGUMENT
+// itself, whose only possible evidence IS a string literal. It is read from the
+// raw text at delimiter offsets the BLANKED code located — `stripSource`
+// preserves length, lines and columns — so the callee is always code and only
+// the literal's body comes from the source text.
+/** `setupTestEnvironment(` up to and including its first argument's opening
+ *  delimiter, located in blanked code. */
+const SETUP_ENV_CALL = /setupTestEnvironment\(\s*["'`]/g;
+/** Any literal in an ARGUMENT position — after `(` or `,`. A fixture prefix
+ *  reaches `mkdtempSync` as an argument; the decoy above sits on the right of
+ *  an assignment, so this position alone excludes it even before the blanking. */
+const ARGUMENT_LITERAL = /[(,]\s*["'`]/g;
 
-/** The prefix argument of one mkdtemp call, read from its own call window: the
- *  static head of a string OR template literal (so
+/** The static head of the string or template literal whose OPENING delimiter
+ *  sits at `open`. Both delimiters are found in `code` (blanked), the body is
+ *  read from `raw`, and an interpolation ends the head — so
  *  `` `pi-lens-wiring-${reason}-` `` yields `pi-lens-wiring-`, the family the
- *  entry name actually starts with), or the identifier standing in for it. */
-function mkdtempPrefixArg(window: string): {
-	literal?: string;
-	ident?: string;
-} {
+ *  entry name actually starts with. */
+function literalHeadAt(
+	code: string,
+	raw: string,
+	open: number,
+): string | undefined {
+	const quote = code[open];
+	if (quote !== '"' && quote !== "'" && quote !== "`") return undefined;
+	const close = code.indexOf(quote, open + 1);
+	if (close < 0) return undefined;
+	const body = raw.slice(open + 1, close);
+	const interpolation = body.indexOf("${");
+	return interpolation < 0 ? body : body.slice(0, interpolation);
+}
+
+/** The prefix argument of one mkdtemp call, read from its own call window in
+ *  blanked code: the static head of a literal, or the identifier standing in
+ *  for it. `windowStart` maps the window back onto the whole file, so the
+ *  literal body can be read from `raw` at the same offsets. */
+function mkdtempPrefixArg(
+	code: string,
+	raw: string,
+	windowStart: number,
+	window: string,
+): { literal?: string; ident?: string } {
 	const call = /\bmkdtemp(?:Sync)?\s*\(/.exec(window);
 	if (call === null) return {};
-	const tail = window.slice(call.index + call[0].length);
-	const literal = tail.match(/,\s*["'`]([^"'`$]*)/);
-	if (literal) return { literal: literal[1] };
+	const tailStart = call.index + call[0].length;
+	const tail = window.slice(tailStart);
+	const literal = /,\s*["'`]/.exec(tail);
+	if (literal)
+		return {
+			literal: literalHeadAt(
+				code,
+				raw,
+				windowStart + tailStart + literal.index + literal[0].length - 1,
+			),
+		};
 	const ident = tail.match(/,\s*([A-Za-z_$][\w$]*)\s*\)/);
 	if (ident) return { ident: ident[1] };
 	return {};
@@ -179,7 +213,8 @@ function buildTmpOwnerIndex(
 ): TmpOwnerIndex {
 	const prefixes = new Map<string, Set<string>>();
 	let fileCount = 0;
-	const add = (prefix: string, file: string): void => {
+	const add = (prefix: string | undefined, file: string): void => {
+		if (prefix === undefined) return;
 		// A prefix must NAME a family. `pi-lens-` alone is the namespace itself and
 		// would claim every entry in the census: measured, the dynamic
 		// `setupTestEnvironment(`pi-lens-${tool}-${name}-`)` in
@@ -196,14 +231,19 @@ function buildTmpOwnerIndex(
 	)) {
 		fileCount += 1;
 		const owner = path.relative(root, file).replace(/\\/g, "/");
-		const code = stripSource(raw, { strings: "keep" });
-		for (const [, prefix] of code.matchAll(SETUP_ENV_PREFIX))
-			add(prefix, owner);
-		const harvested = [...code.matchAll(PI_LENS_PREFIX_LITERAL)].map(
-			([, prefix]) => prefix,
-		);
+		const code = stripSource(raw);
+		for (const match of code.matchAll(SETUP_ENV_CALL))
+			add(literalHeadAt(code, raw, match.index + match[0].length - 1), owner);
+		const harvested: string[] = [];
+		for (const match of code.matchAll(ARGUMENT_LITERAL)) {
+			const head = literalHeadAt(code, raw, match.index + match[0].length - 1);
+			if (head?.startsWith("pi-lens-")) harvested.push(head);
+		}
 		const lines = code.split("\n");
+		let lineStart = 0;
 		for (const [index, line] of lines.entries()) {
+			const windowStart = lineStart;
+			lineStart += line.length + 1;
 			MKTEMP_CALLEE.lastIndex = 0;
 			if (!MKTEMP_CALLEE.test(line)) continue;
 			// Multi-line calls carry path.join(os.tmpdir(), …) on the following
@@ -211,7 +251,12 @@ function buildTmpOwnerIndex(
 			const window = lines.slice(index, index + 3).join("\n");
 			if (!TMPDIR_SOURCE.test(window) && !TMPDIR_ENV_SOURCE.test(window))
 				continue;
-			const { literal, ident } = mkdtempPrefixArg(window);
+			const { literal, ident } = mkdtempPrefixArg(
+				code,
+				raw,
+				windowStart,
+				window,
+			);
 			if (literal !== undefined) {
 				add(literal, owner);
 				continue;
@@ -1254,13 +1299,15 @@ describe("tmp-fixture-hygiene", () => {
 			}
 		});
 
-		it("registers a raw mkdtemp prefix from the call site and never from a comment", () => {
+		it("registers a raw mkdtemp prefix from the call site, never from prose", () => {
 			// F6: the index's own extraction, over a planted fixture tree. Three
-			// shapes in one file — a literal site, a template site, and a
-			// helper-parameter site whose literals are spelled by its callers — plus
-			// a commented-out site, which must register nothing (comments are
-			// blanked; strings are kept, because a prefix's only evidence IS a
-			// string literal).
+			// real shapes in one file — a literal site, a template site, and a
+			// helper-parameter site whose literals are spelled by its callers —
+			// against two decoys that must own nothing: a commented-out call, and
+			// (round 2, M3328-1) an ordinary STRING whose text spells a call.
+			// Laundering a prefix through either is how one file claims another
+			// file's fixture family, and with it a candidate owner that stops the
+			// foreign-run filter from sparing a sibling invocation's live root.
 			const fixture = fs.mkdtempSync(
 				path.join(os.tmpdir(), "pi-lens-owner-index-fixture-"),
 			);
@@ -1277,6 +1324,13 @@ describe("tmp-fixture-hygiene", () => {
 						"}",
 						'make("pi-lens-planted-param-");',
 						'// fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-planted-comment-"));',
+						// The reviewer's decoy, verbatim in shape: prose that spells a
+						// call, in a string a real test fixture could plausibly hold.
+						"const decoy = 'setupTestEnvironment(\"pi-lens-planted-string-\")';",
+						"const decoyTmp = \"fs.mkdtempSync(path.join(os.tmpdir(), 'pi-lens-planted-strtmp-'))\";",
+						// ...and the real call of the same needle, so the fix cannot be
+						// "stop reading setupTestEnvironment at all".
+						'const real = setupTestEnvironment("pi-lens-planted-setup-");',
 					].join("\n"),
 				);
 				const index = buildTmpOwnerIndex(fixture, {
@@ -1288,7 +1342,10 @@ describe("tmp-fixture-hygiene", () => {
 				expect(owner("pi-lens-planted-lit-XyZ")).toBe("planted.test.ts");
 				expect(owner("pi-lens-planted-tpl-fork-XyZ")).toBe("planted.test.ts");
 				expect(owner("pi-lens-planted-param-XyZ")).toBe("planted.test.ts");
+				expect(owner("pi-lens-planted-setup-XyZ")).toBe("planted.test.ts");
 				expect(owner("pi-lens-planted-comment-XyZ")).toBeUndefined();
+				expect(owner("pi-lens-planted-string-XyZ")).toBeUndefined();
+				expect(owner("pi-lens-planted-strtmp-XyZ")).toBeUndefined();
 			} finally {
 				fs.rmSync(fixture, { recursive: true, force: true });
 			}
