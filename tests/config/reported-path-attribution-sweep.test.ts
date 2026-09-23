@@ -42,7 +42,7 @@ import {
 	auditSymbolCounts,
 	codeMatches,
 	listSourceFiles,
-	matchingCloseIndex,
+	matchingOpenIndex,
 	readWalkedFiles,
 	relativePosix,
 	stripSource,
@@ -55,26 +55,48 @@ const REPO_ROOT = path.resolve(
 const RUNNERS_ROOT = path.resolve(REPO_ROOT, "clients/dispatch/runners");
 
 /**
- * A call that produces a path IDENTITY. Unlike `path-key-fold-sweep`'s
- * `PATH_CALL`, the `path.`/`win32.`/`posix.` qualifier is OPTIONAL, so a bare
- * `resolve(`/`join(` imported from `node:path` counts. `basename` IS here (it
- * is `cue-vet`'s own over-merge shape) — that is the difference from the
- * key-fold sweep, where lowercasing a basename is kind detection.
+ * A string or template-literal operand. Comparing a path against a LITERAL is
+ * never reported-path identity: it is kind detection (`=== ".bin"`) or
+ * containment (`!== ".."`, `startsWith("../")`). String contents are blanked by
+ * `stripForScan`, so the opening quote or backtick is what survives — a
+ * template with a live `${…}` interpolation still starts with a backtick.
+ */
+const LITERAL_OPERAND = /^\s*(?:"|'|`)/;
+
+/**
+ * A call that produces a whole-path IDENTITY, with the `path.`/`win32.`/`posix.`
+ * qualifier OPTIONAL so a bare `resolve(`/`join(` imported from `node:path`
+ * counts — the blind spot `path-key-fold-sweep`'s `PATH_CALL` has, measured on
+ * `go-vet.ts` (#3278 criterion 4).
+ *
+ * `relative` and `dirname` are deliberately NOT here. A `path.relative` result
+ * is a FRAGMENT used for containment (`helm-lint.ts`'s `isWithin`,
+ * `go-vet.ts`'s `fileRel.startsWith("../")`) and a `path.dirname` result is a
+ * walk cursor (`shellcheck.ts`/`vale.ts`'s `parent === current` termination) —
+ * different questions with different correctness arguments, and no member of
+ * this family was ever written with either. `basename` IS here: it is
+ * `cue-vet.ts`'s own over-merge shape.
  */
 const PATH_CALL_HERE =
-	/\b(?:(?:path|win32|posix)\s*\.\s*)?(?:resolve|normalize|basename|relative|join)\s*\(/g;
+	/\b(?:(?:path|win32|posix)\s*\.\s*)?(?:resolve|normalize|basename|join)\s*\(/;
 
-/** `=== ""` / `!== ""` after string blanking: a kind check, not path identity. */
-const LITERAL_OPERAND = /^\s*(?:!==?|===?)\s*(?:""|''|``)/;
+const PATH_CALLEE =
+	/(?:(?:path|win32|posix)\s*\.\s*)?(?:resolve|normalize|basename|join)\s*$/;
 
-/** A bare identity comparison immediately after the call's closing paren. */
-const COMPARISON_AFTER = /^\s*(?:===|!==)/;
-/** A suffix comparison hung off the call's result. */
-const SUFFIX_AFTER = /^\s*\.\s*(?:endsWith|startsWith)\s*\(/;
-/** The call sits on the RIGHT of an identity comparison. */
-const COMPARISON_BEFORE = /(?:===|!==)\s*$/;
-/** The call is the ARGUMENT of a suffix comparison. */
-const SUFFIX_BEFORE = /\.\s*(?:endsWith|startsWith)\s*\(\s*$/;
+/**
+ * A local whose initializer IS such a call: `const resolvedTarget =
+ * path.resolve(filePath);`. Six of #3278's members wrote the comparison in TWO
+ * statements, so both operands are plain identifiers and an adjacency-only
+ * needle sees nothing — measured: the first draft of this sweep flagged 5 of the
+ * 9 live members and silently missed `javac`, `zig-check`, `cpp-check` and
+ * `dotnet-build`. One hop of local dataflow is what closes that.
+ */
+const PATH_DERIVED_DECL =
+	/\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:(?:path|win32|posix)\s*\.\s*)?(?:resolve|normalize|basename|join)\s*\(/g;
+
+/** The two operators this family compares with. */
+const IDENTITY_COMPARISON = /===|!==/g;
+const SUFFIX_COMPARISON = /\.\s*(?:endsWith|startsWith)\s*\(/g;
 
 /**
  * The second family spelling: hand-fold the separators, THEN compare — the shape
@@ -91,33 +113,110 @@ function stripForScan(source: string): string {
 	return stripSource(source, { strings: "blank" });
 }
 
+/** Names bound, one hop, to a whole-path call in this file. */
+function pathDerivedNames(stripped: string): Set<string> {
+	const names = new Set<string>();
+	for (const match of stripped.matchAll(PATH_DERIVED_DECL)) names.add(match[1]);
+	return names;
+}
+
+interface Operand {
+	/** The expression IS a path call written right at the operator. */
+	inlineCall: boolean;
+	/** The expression is a name bound one hop to a path call. */
+	derivedName: boolean;
+}
+
+/** The expression ENDING at `index` (exclusive). */
+function leftOperand(
+	stripped: string,
+	index: number,
+	names: Set<string>,
+): Operand {
+	const before = stripped.slice(0, index);
+	const trimmed = before.trimEnd();
+	if (trimmed.endsWith(")")) {
+		const open = matchingOpenIndex(stripped, trimmed.length - 1, "(", ")");
+		return {
+			inlineCall:
+				open > 0 &&
+				PATH_CALLEE.test(stripped.slice(Math.max(0, open - 40), open)),
+			derivedName: false,
+		};
+	}
+	const name = /([A-Za-z_$][\w$]*)$/.exec(trimmed);
+	return { inlineCall: false, derivedName: name != null && names.has(name[1]) };
+}
+
+/** The expression STARTING at `index`. */
+function rightOperand(
+	stripped: string,
+	index: number,
+	names: Set<string>,
+): Operand {
+	const after = stripped.slice(index, index + 200).trimStart();
+	const inlineCall = new RegExp(`^${PATH_CALL_HERE.source}`).test(after);
+	const name = /^([A-Za-z_$][\w$]*)/.exec(after);
+	return {
+		inlineCall,
+		derivedName: !inlineCall && name != null && names.has(name[1]),
+	};
+}
+
+/**
+ * Two path expressions compared for identity: either side written as the path
+ * call itself, or BOTH sides names bound to one. "One side derived, the other
+ * anything" is deliberately NOT enough — that rule flagged the `parent ===
+ * current` walk termination in `shellcheck.ts` and `vale.ts`, which is not this
+ * family (measured; see PATH_CALL_HERE's doc).
+ */
+function isFamilyCompare(left: Operand, right: Operand): boolean {
+	return (
+		left.inlineCall ||
+		right.inlineCall ||
+		(left.derivedName && right.derivedName)
+	);
+}
+
 /**
  * Every site in one runner file that decides path identity with its own
- * predicate. Keyed on the PATH CALL's position, so a site both arms see counts
+ * predicate, keyed on the COMPARISON's position so a site both arms see counts
  * once.
  */
 export function countLocalPathIdentityCompares(source: string): number {
 	const stripped = stripForScan(source);
+	const names = pathDerivedNames(stripped);
 	const flagged = new Set<number>();
-	for (const match of stripped.matchAll(PATH_CALL_HERE)) {
-		const openIndex = (match.index ?? 0) + match[0].length - 1;
-		const closeIndex = matchingCloseIndex(stripped, openIndex, "(", ")");
-		if (closeIndex < 0) continue;
-		const after = stripped.slice(closeIndex + 1, closeIndex + 40);
-		const before = stripped.slice(
-			Math.max(0, (match.index ?? 0) - 40),
-			match.index,
-		);
-		if (LITERAL_OPERAND.test(after)) continue;
+
+	for (const match of stripped.matchAll(IDENTITY_COMPARISON)) {
+		const at = match.index ?? 0;
+		const rightStart = at + match[0].length;
+		if (LITERAL_OPERAND.test(stripped.slice(rightStart, rightStart + 8)))
+			continue;
 		if (
-			COMPARISON_AFTER.test(after) ||
-			SUFFIX_AFTER.test(after) ||
-			COMPARISON_BEFORE.test(before) ||
-			SUFFIX_BEFORE.test(before)
+			isFamilyCompare(
+				leftOperand(stripped, at, names),
+				rightOperand(stripped, rightStart, names),
+			)
 		) {
-			flagged.add(match.index ?? 0);
+			flagged.add(at);
 		}
 	}
+
+	for (const match of stripped.matchAll(SUFFIX_COMPARISON)) {
+		const at = match.index ?? 0;
+		const argStart = at + match[0].length;
+		if (LITERAL_OPERAND.test(stripped.slice(argStart, argStart + 8))) continue;
+		if (
+			isFamilyCompare(
+				leftOperand(stripped, at, names),
+				rightOperand(stripped, argStart, names),
+			)
+		) {
+			flagged.add(at);
+		}
+	}
+
 	for (const match of codeMatches(source, SLASH_FOLD_COMPARE)) {
 		flagged.add(match.index ?? 0);
 	}
@@ -191,9 +290,17 @@ describe("runner reported-path attribution single-source-of-truth (#3278)", () =
 	it("detects every spelling the family has actually shipped", () => {
 		expect(
 			countLocalPathIdentityCompares(
+				"const a = path.resolve(reported);\n" +
+					"const b = path.resolve(filePath);\n" +
+					"if (a !== b) continue;",
+			),
+			"the TWO-statement form — javac, zig-check, cpp-check, dotnet-build",
+		).toBe(1);
+		expect(
+			countLocalPathIdentityCompares(
 				"if (path.resolve(reported) !== absTarget) continue;",
 			),
-			"bare !== after a qualified call (javac/zig/detekt/cpp-check/dotnet)",
+			"inline qualified call on the left (detekt)",
 		).toBe(1);
 		expect(
 			countLocalPathIdentityCompares(
@@ -217,7 +324,7 @@ describe("runner reported-path attribution single-source-of-truth (#3278)", () =
 			countLocalPathIdentityCompares(
 				"if (!sourcePath.endsWith(path.resolve(filePath))) continue;",
 			),
-			"the call as the endsWith ARGUMENT (gleam-check)",
+			"the call as the endsWith ARGUMENT",
 		).toBe(1);
 		expect(
 			countLocalPathIdentityCompares(
@@ -233,7 +340,7 @@ describe("runner reported-path attribution single-source-of-truth (#3278)", () =
 		).toBe(1);
 	});
 
-	it("does not fire on the sanctioned spelling, on kind detection, or on prose", () => {
+	it("does not fire on the sanctioned spelling, on neighbouring path idioms, or on prose", () => {
 		expect(
 			countLocalPathIdentityCompares(
 				"if (!pathsEqual(path.resolve(cwd, reported), absTarget)) continue;",
@@ -242,9 +349,24 @@ describe("runner reported-path attribution single-source-of-truth (#3278)", () =
 		).toBe(0);
 		expect(
 			countLocalPathIdentityCompares(
+				"let current = path.resolve(cwd);\n" +
+					"const parent = path.dirname(current);\n" +
+					"if (parent === current) break;",
+			),
+			"walk-up termination (shellcheck.ts, vale.ts) — not this family",
+		).toBe(0);
+		expect(
+			countLocalPathIdentityCompares(
+				"const relative = path.relative(root, candidate);\n" +
+					'return relative === "" || !relative.startsWith("..");',
+			),
+			"containment (helm-lint.ts's isWithin, helm-render.ts) — not this family",
+		).toBe(0);
+		expect(
+			countLocalPathIdentityCompares(
 				'if (path.basename(filePath).toLowerCase() === "dockerfile") return;',
 			),
-			"file-KIND detection, not path identity (LITERAL_OPERAND policy)",
+			"file-KIND detection against a literal (LITERAL_OPERAND policy)",
 		).toBe(0);
 		expect(
 			countLocalPathIdentityCompares(
