@@ -42,6 +42,8 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { getDiagnosticLogger } from "../clients/diagnostic-logger.js";
+import { getGlobalPiLensLogDir } from "../clients/probe-home-state.js";
 
 /**
  * The router lives in the hoisted block, NOT inside the `vi.mock` factory:
@@ -122,8 +124,30 @@ const GOLDEN_DIR = path.join(
 );
 
 let tmpDir: string;
+const originalTestMode = process.env.PI_LENS_TEST_MODE;
+
+function diagnosticLogPath(): string {
+	const date = new Date().toISOString().split("T")[0];
+	return path.join(getGlobalPiLensLogDir(), "logs", `${date}.jsonl`);
+}
+
+async function readNewDiagnosticRows(
+	offset: number,
+): Promise<Array<Record<string, unknown>>> {
+	await getDiagnosticLogger().flush();
+	const file = diagnosticLogPath();
+	if (!fs.existsSync(file)) return [];
+	return fs
+		.readFileSync(file, "utf8")
+		.slice(offset)
+		.trim()
+		.split("\n")
+		.filter(Boolean)
+		.map((line) => JSON.parse(line) as Record<string, unknown>);
+}
 
 beforeEach(() => {
+	process.env.PI_LENS_TEST_MODE = "0";
 	tmpDir = fs.realpathSync(
 		fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-3190-witness-")),
 	);
@@ -131,7 +155,11 @@ beforeEach(() => {
 	spawnRouter.state.helmLintStdout = "";
 });
 
-afterEach(() => removeTempDirSync(tmpDir));
+afterEach(() => {
+	removeTempDirSync(tmpDir);
+	if (originalTestMode === undefined) delete process.env.PI_LENS_TEST_MODE;
+	else process.env.PI_LENS_TEST_MODE = originalTestMode;
+});
 
 /**
  * A minimal chart in its OWN directory, so the two cells never share a chart
@@ -200,8 +228,15 @@ function scrub(text: string): string {
 async function witnessTurn(
 	name: string,
 	deleteValues: boolean,
-): Promise<{ chartRoot: string; toolResult: string; turnEnd: string }> {
+): Promise<{
+	chartRoot: string;
+	toolResult: string;
+	turnEnd: string;
+	diagnosticRows: Array<Record<string, unknown>>;
+}> {
 	const { chartRoot, template, values } = createChart(name);
+	const logFile = diagnosticLogPath();
+	const logOffset = fs.existsSync(logFile) ? fs.statSync(logFile).size : 0;
 	spawnRouter.state.helmLintStdout = HELM_LINT_OUTPUT;
 	if (deleteValues) fs.rmSync(values);
 
@@ -242,6 +277,7 @@ async function witnessTurn(
 		turnEnd:
 			scrub((injected?.messages ?? []).map((m) => m.content).join("\n\n")) ||
 			"(nothing injected)",
+		diagnosticRows: await readNewDiagnosticRows(logOffset),
 	};
 }
 
@@ -263,6 +299,26 @@ describe("#3190 witness: a retracted deleted-path blocker through pi", () => {
 		// ran first.
 		const retracted = await witnessTurn("retracted", true);
 		const intact = await witnessTurn("intact", false);
+
+		const retractedRows = retracted.diagnosticRows.filter(
+			(row) =>
+				typeof row.filePath === "string" &&
+				row.filePath.includes("charts/retracted"),
+		);
+		expect(retractedRows).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					filePath: expect.stringContaining("values.yaml"),
+					shownInline: false,
+					shownToAgent: false,
+				}),
+				expect.objectContaining({
+					filePath: expect.stringContaining("deployment.yaml"),
+					shownInline: true,
+					shownToAgent: true,
+				}),
+			]),
+		);
 
 		// The real helm-lint runner really ran, once per cell, through the mocked
 		// process boundary — without this the golden could record silence from a
