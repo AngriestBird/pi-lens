@@ -56,9 +56,6 @@ jobs:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       PI_LENS_HOME: /tmp/pi-lens-home
       PILENS_DATA_DIR: /tmp/pi-lens-home
-      # The pip installer puts packages under this private user base. Keep the
-      # Python launched by those console scripts on the same import path.
-      PYTHONUSERBASE: /tmp/pi-lens-home/pip-user
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -237,10 +234,6 @@ jobs:
         id: format_layer
         run: |
           set -o pipefail
-          # cmakelang's YAML config support is an optional pipx dependency;
-          # keep the fixture representative of the common `.cmake-format.yaml`
-          # project config rather than silently switching it to JSON/Python.
-          pipx inject cmakelang pyyaml
           node scripts/smoke-tools.mjs --format --install --verbose 2>&1 | tee "$RUNNER_TEMP/tool-smoke-format-layer.log"
 
       # #2723: the ONLY tracking-issue writer this workflow had before this

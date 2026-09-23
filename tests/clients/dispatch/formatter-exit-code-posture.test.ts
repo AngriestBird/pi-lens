@@ -308,6 +308,42 @@ describe("formatFile is strict by default at the seam (#1337)", () => {
 		}
 	});
 
+	// Recurrence: #3312 round 3 bounded the multi-line diagnostic tail but let
+	// every non-empty line through, so a decorated banner ahead of a traceback
+	// came back to this seam — the exact noise #1337 removed — and each banner
+	// line it kept evicted a real traceback line from the bound.
+	it("drops the banner while keeping every multi-line traceback line", async () => {
+		const env = setupTestEnvironment("pi-lens-exit-msg-banner-tail-");
+		try {
+			fs.writeFileSync(
+				path.join(env.tmpDir, "go.mod"),
+				"module example.com/probe\n",
+			);
+			const filePath = path.join(env.tmpDir, "main.go");
+			fs.writeFileSync(filePath, "package main\n");
+			const traceback = [
+				"Traceback (most recent call last):",
+				'  File "/opt/pipx/venvs/cmakelang/lib/python3.12/site-packages/cmakelang/format/__main__.py", line 212, in load_yaml',
+				"    import yaml",
+				"ModuleNotFoundError: No module named 'yaml'",
+			];
+			safeSpawnAsync.mockResolvedValue({
+				status: 1,
+				stdout: "",
+				stderr: `format ${"━".repeat(90)}\n\n${traceback.join("\n")}\n`,
+			});
+
+			const { formatFile, gofmtFormatter } = await loadFormatters();
+			const result = await formatFile(filePath, gofmtFormatter);
+
+			expect(result.success).toBe(false);
+			expect(result.error).toBe(traceback.join("\n"));
+			expect(result.error).not.toMatch(/[─-╿]/);
+		} finally {
+			env.cleanup();
+		}
+	});
+
 	// biome, ktlint and `mix format` report on stdout. Reading stderr only threw
 	// the diagnostic away and told the user just "exited with status 1".
 	it("falls back to stdout when stderr carries nothing useful", async () => {

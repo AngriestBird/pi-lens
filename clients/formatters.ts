@@ -2268,15 +2268,26 @@ export function firstDiagnosticLine(
 ): string | undefined {
 	for (const raw of (text ?? "").split("\n")) {
 		const line = stripAnsi(raw).trimEnd();
-		const stripped = line.replace(BOX_DRAWING_GLOBAL, "").trim();
-		if (!stripped) continue;
-		// "format ━━━━━━━━" is a section banner, not a diagnostic. Require a rule
-		// AND a short remainder so a real one-line error containing a box
-		// character is not discarded.
-		if (HAS_BOX_DRAWING.test(line) && stripped.length <= 24) continue;
-		return stripped.slice(0, 300);
+		if (isDecorativeLine(line)) continue;
+		return line.replace(BOX_DRAWING_GLOBAL, "").trim().slice(0, 300);
 	}
 	return undefined;
+}
+
+/**
+ * Blank, a pure box-drawing rule, or a short decorated section heading.
+ *
+ * The single normalization both readers below share, so the bounded tail cannot
+ * surface what the first-line reader already rejects (#3312 review R3-4: the
+ * tail put biome's `format ━━━━` banner back in front of the strict #1337 seam).
+ */
+function isDecorativeLine(line: string): boolean {
+	const stripped = line.replace(BOX_DRAWING_GLOBAL, "").trim();
+	if (!stripped) return true;
+	// "format ━━━━━━━━" is a section banner, not a diagnostic. Require a rule AND
+	// a short remainder so a real one-line error containing a box character is
+	// not discarded.
+	return HAS_BOX_DRAWING.test(line) && stripped.length <= 24;
 }
 
 const FORMATTER_ERROR_TAIL_LINES = 20;
@@ -2287,6 +2298,11 @@ const FORMATTER_ERROR_TAIL_LINES = 20;
  * A traceback's first line is not actionable on its own (#3312). Keep the
  * final lines, which include the exception and its message, while bounding
  * the model-facing error when a formatter emits an unexpectedly large log.
+ *
+ * Decorative lines are dropped FIRST, by the same predicate `firstDiagnosticLine`
+ * uses: a tail that kept them would hand the strict #1337 seam the banner this
+ * module already decided is not a diagnostic, and every banner line it kept
+ * would evict a real traceback line from the bound.
  */
 export function diagnosticTail(
 	text: string | undefined,
@@ -2295,7 +2311,7 @@ export function diagnosticTail(
 	const lines = (text ?? "")
 		.split("\n")
 		.map((raw) => stripAnsi(raw).trimEnd())
-		.filter((line) => line.trim().length > 0)
+		.filter((line) => !isDecorativeLine(line))
 		.map((line) => line.slice(0, 300));
 	if (lines.length === 0) return undefined;
 	return lines.slice(-maxLines).join("\n");
