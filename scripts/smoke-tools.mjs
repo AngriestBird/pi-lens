@@ -532,8 +532,6 @@ const LSP_FIXTURES = [
 		lang: "typescript7",
 		lspGate: true,
 		lspGateMarker: '"not a number"',
-		lspGate: true,
-		lspGateMarker: '"not a number"',
 		dir: "tests/fixtures/tool-smoke/typescript7",
 		file: "bad.ts",
 		serverHint: "typescript native (tsc --lsp --stdio, TS7+)",
