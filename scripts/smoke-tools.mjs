@@ -659,7 +659,7 @@ const LSP_FIXTURES = [
 	{
 		lang: "prisma",
 		lspGate: true,
-		lspGateMarker: "\n  name\n}",
+		lspGateMarker: "  id   Int @id\n  name\n}",
 		dir: "tests/fixtures/tool-smoke/prisma",
 		file: "schema.prisma",
 		serverHint: "@prisma/language-server",
