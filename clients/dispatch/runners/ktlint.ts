@@ -20,10 +20,14 @@ import { finishParsedRun, parseToolRun } from "./utils/tool-failure.js";
 
 const ktlint = createAvailabilityChecker("ktlint", ".exe");
 
-// KtLint 1.8.0 uses nonzero statuses for lint violations and CLI/configuration
-// errors. Keep every documented completed-tool class parseable: a valid JSON
-// reporter result is evidence that the tool reached analysis, regardless of
-// which nonzero error class produced it.
+// KtLint's exit contract, declared HERE rather than in the shared classifier:
+// an admission is a property of this tool, and #3291 round 2 shipped it through
+// a shared `parseToolRun` option that silently erased every OTHER runner's
+// table. KtLint 1.8.0's CLI page documents the JSON reporter and a nonzero exit
+// on violations, but does not enumerate numeric classes; 1, 2 and 3 are the
+// statuses this runner observes carrying a valid reporter payload, and a valid
+// payload is the evidence that analysis was reached. Any other nonzero status
+// stays a rejected invocation.
 const KTLINT_EXIT_CODES = { ran: [1, 2, 3] } as const;
 
 interface KtlintError {
@@ -111,17 +115,18 @@ const ktlintRunner: RunnerDefinition = {
 			timeout: 30000,
 		});
 
-		// Ktlint documents zero for clean and nonzero for lint violations. The
-		// shared gates keep unavailable/signal runs distinct and never skip a
-		// nonzero run that carries valid JSON findings.
+		// `output` is what the classifier judges AND what the parser reads: ktlint
+		// writes its reporter payload to stdout and its errors to stderr, so both
+		// are one wire here. The exit table rides in this same per-runner input,
+		// never in a shared option (#3291 r3).
 		const run = parseToolRun<Diagnostic>(
 			"ktlint",
-			{ result },
-			(output) => parseKtlintOutput(output, ctx.filePath) ?? [],
 			{
-				parseOutput: `${result.stdout ?? ""}\n${result.stderr ?? ""}`,
+				result,
+				output: `${result.stdout ?? ""}\n${result.stderr ?? ""}`,
 				exitCodes: KTLINT_EXIT_CODES,
 			},
+			(output) => parseKtlintOutput(output, ctx.filePath) ?? [],
 		);
 		if (run.skipped) return run.skipped;
 		return finishParsedRun({

@@ -11,9 +11,13 @@ import type {
 import { createAvailabilityChecker } from "./utils/runner-helpers.js";
 import { finishParsedRun, parseToolRun } from "./utils/tool-failure.js";
 
-// PHP 8.3's `-l` returns 1 for a syntax-check failure in the usual CLI path,
-// and 255 for the parse-error wire captured on Windows. Both are completed
-// analyses whose stderr/stdout must reach the parser.
+// PHP's `-l` exit contract, declared HERE rather than in the shared classifier
+// (#3291 r3): an admission is a property of this tool. The manual documents
+// `-l` as syntax-check-only with a nonzero return on failure; the captured
+// PHP 8.3.32 wire exits 1 in the usual CLI path and 255 (the shell reading of
+// PHP's documented -1) for the parse-error wire. Both are completed analyses
+// whose output must reach the parser; any other nonzero status stays a
+// rejected invocation.
 const PHP_LINT_EXIT_CODES = { ran: [1, 255] } as const;
 
 const php = createAvailabilityChecker("php", ".exe");
@@ -65,16 +69,18 @@ const phpLintRunner: RunnerDefinition = {
 			timeout: 15000,
 			cwd,
 		});
-		// PHP documents `-l` as a syntax check: zero is clean and nonzero is a
-		// parse failure. Keep its stderr wire alongside stdout for parse errors.
+		// `output` is what the classifier judges AND what the parser reads: the
+		// parse error arrives on stderr, so both streams are one wire here. The
+		// exit table rides in this same per-runner input, never in a shared
+		// option (#3291 r3).
 		const run = parseToolRun<Diagnostic>(
 			"php-lint",
-			{ result },
-			(output) => parsePhpLintOutput(output, ctx.filePath),
 			{
-				parseOutput: `${result.stdout ?? ""}\n${result.stderr ?? ""}`,
+				result,
+				output: `${result.stdout ?? ""}\n${result.stderr ?? ""}`,
 				exitCodes: PHP_LINT_EXIT_CODES,
 			},
+			(output) => parsePhpLintOutput(output, ctx.filePath),
 		);
 		if (run.skipped) return run.skipped;
 		return finishParsedRun({
