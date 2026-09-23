@@ -25,6 +25,7 @@ import {
 	createAvailabilityChecker,
 	resolveAvailableOrInstall,
 } from "./utils/runner-helpers.js";
+import { finishParsedRun, parseToolRun } from "./utils/tool-failure.js";
 
 const golangci = createAvailabilityChecker("golangci-lint", ".exe");
 
@@ -149,28 +150,18 @@ const golangciRunner: RunnerDefinition = {
 			{ timeout: 60000, cwd },
 		);
 
-		if (result.status === 0) {
-			return { status: "succeeded", diagnostics: [], semantic: "none" };
-		}
-
-		const diagnostics = parseGolangciJson(result.stdout, ctx.filePath);
-		let semantic: RunnerResult["semantic"] = "none";
-		if (diagnostics.some((d) => d.semantic === "blocking")) {
-			semantic = "blocking";
-		} else if (diagnostics.length > 0) {
-			semantic = "warning";
-		}
-
-		if (semantic === "none") {
-			// Non-zero exit but no parseable issues — likely a config/tool error
-			return { status: "skipped", diagnostics: [], semantic };
-		}
-
-		return {
-			status: semantic === "blocking" ? "failed" : "succeeded",
-			diagnostics,
-			semantic,
-		};
+		const parsed = parseToolRun(
+			"golangci-lint",
+			{ result, output: result.stdout ?? "" },
+			(raw) => parseGolangciJson(raw, ctx.filePath),
+		);
+		if (parsed.skipped) return parsed.skipped;
+		return finishParsedRun({
+			tool: "golangci-lint",
+			ctx,
+			result,
+			diagnostics: parsed.diagnostics,
+		});
 	},
 };
 

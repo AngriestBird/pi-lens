@@ -21,6 +21,7 @@ import {
 	createCwdCachedProbe,
 	resolveToolCommand,
 } from "./utils/runner-helpers.js";
+import { finishParsedRun, parseToolRun } from "./utils/tool-failure.js";
 
 const ESLINT_PROBE_BUDGET_MS = 5000;
 
@@ -161,49 +162,18 @@ const eslintRunner: RunnerDefinition = {
 			raw = result.stderr || "";
 		}
 
-		const parsed = parseEslintJson(raw, ctx.filePath);
-		if (parsed.parseError && raw.trim().length > 0) {
-			const preview = raw.replace(/\s+/g, " ").slice(0, 160);
-			return {
-				status: "failed",
-				diagnostics: [
-					{
-						id: "eslint:parse-error:1",
-						message:
-							"ESLint JSON parse failed: " +
-							parsed.parseError +
-							(preview ? " (output preview: " + preview + ")" : ""),
-						filePath: ctx.filePath,
-						line: 1,
-						column: 1,
-						severity: "warning",
-						semantic: "warning",
-						tool: "eslint",
-					},
-				],
-				semantic: "warning",
-			};
-		}
-
-		const diagnostics = parsed.diagnostics;
-		if (diagnostics.length === 0) {
-			return { status: "succeeded", diagnostics: [], semantic: "none" };
-		}
-
-		const hasErrors = diagnostics.some((d) => d.semantic === "blocking");
-		// A warning-only result on exit 0 is ESLint's normal outcome, not a
-		// failure: exit 0 means nothing hit ERROR severity. Keying status off
-		// blocking severity plus exit code (the sibling convention from oxlint,
-		// biome-check, golangci-lint, rubocop) keeps plan.ts's fallback group
-		// ["eslint", "oxlint", "biome-check-json"] stopping at eslint instead
-		// of re-running oxlint and biome-check-json on every warning-only save.
-		// The findings reach delivery regardless of status — dispatcher.ts
-		// buckets by each diagnostic's own `semantic`.
-		return {
-			status: !hasErrors && result.status === 0 ? "succeeded" : "failed",
-			diagnostics,
-			semantic: hasErrors ? "blocking" : "warning",
-		};
+		const parsed = parseToolRun(
+			"eslint",
+			{ result, output: raw },
+			(rawOutput) => parseEslintJson(rawOutput, ctx.filePath).diagnostics,
+		);
+		if (parsed.skipped) return parsed.skipped;
+		return finishParsedRun({
+			tool: "eslint",
+			ctx,
+			result,
+			diagnostics: parsed.diagnostics,
+		});
 	},
 };
 
