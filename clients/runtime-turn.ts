@@ -2032,6 +2032,9 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			// result nothing can use. Checked AFTER the memo lookup: a signal that
 			// fires mid-delivery must not give the second lane a different answer
 			// from the first (that is the TTL-boundary split this memo exists for).
+			// It records nothing, on purpose: an already-cancelled turn is Escape,
+			// which `bounded()` also keeps off the ledger — the row below is for a
+			// delivery that went out degraded, not one the user stopped.
 			pending = deps.signal?.aborted
 				? Promise.resolve(null)
 				: bounded(cacheManager.readCacheAsync<unknown>(scanner, cwd), {
