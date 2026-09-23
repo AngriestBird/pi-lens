@@ -21,6 +21,14 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+// Partial mock: every real export stays, `logLatency` becomes a spy so the
+// per-delivery unread-store row is assertable.
+const logLatency = vi.hoisted(() => vi.fn());
+vi.mock("../../clients/latency-logger.js", async (importOriginal) => ({
+	...(await importOriginal<typeof import("../../clients/latency-logger.js")>()),
+	logLatency,
+}));
+
 import { CacheManager, type CacheEntry } from "../../clients/cache-manager.js";
 import {
 	getDegradationSummary,
@@ -189,7 +197,15 @@ async function turnEndContent(signal?: AbortSignal): Promise<string> {
 	);
 }
 
+/** Every `logLatency` phase row of one phase name from the turn just handled. */
+function phaseRecords(phase: string): Array<Record<string, unknown>> {
+	return logLatency.mock.calls
+		.map((call) => call[0] as Record<string, unknown>)
+		.filter((entry) => entry.type === "phase" && entry.phase === phase);
+}
+
 beforeEach(() => {
+	logLatency.mockReset();
 	resetDegradationLedger();
 	env = setupTestEnvironment("pi-lens-3274-bound-");
 	runtime = new RuntimeCoordinator();
@@ -259,6 +275,9 @@ describe("#3274: the turn-end scanner reads are bounded and shared", () => {
 
 		expect(content).toContain("aws-secret-access-key");
 		expect(cacheManager.countOf("trivy")).toBe(1);
+		// A healthy delivery writes no unread-store row: the record has to be a
+		// discriminator, not a line every turn emits (#2654's shape).
+		expect(phaseRecords("scanner_cache_read_abandoned")).toEqual([]);
 	});
 
 	it("reads each store once per DELIVERY, never once per session (F5)", async () => {
@@ -305,6 +324,15 @@ describe("#3274: the turn-end scanner reads are bounded and shared", () => {
 			"turn_end:readScannerCache:gitleaks",
 		);
 		expect(group?.count).toBe(1);
+		// ONE row per delivery naming the store the tiers were composed without —
+		// the consequence `hook-await-exceeded` does not state, and the only
+		// record at all when the bound's caller-abort arm fires.
+		const unread = phaseRecords("scanner_cache_read_abandoned");
+		expect(unread).toHaveLength(1);
+		expect(unread[0]!.metadata).toMatchObject({
+			stores: "gitleaks",
+			aborted: false,
+		});
 	});
 
 	it("is inert when the abandoned read resolves after the delivery composed (F3)", async () => {

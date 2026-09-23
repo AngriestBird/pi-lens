@@ -2015,6 +2015,14 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		string,
 		Promise<CacheEntry<unknown> | null>
 	>();
+	// Stores this delivery composed WITHOUT because a bound fired, in read
+	// order. `bounded()` records the AWAIT's own row (`hook-await-exceeded`),
+	// but only for the deadline arm and only about the await; the agent-facing
+	// consequence — the secrets tier went out with no gitleaks store behind it,
+	// which looks exactly like a clean scan (AGENTS.md defect shape 10) — has no
+	// record otherwise, on either arm. One row per DELIVERY, below, never one
+	// per store and never on a healthy turn.
+	const scannerStoresUnread: string[] = [];
 	function readScannerCache<T>(scanner: string): Promise<CacheEntry<T> | null> {
 		let pending = scannerCacheReads.get(scanner);
 		if (pending === undefined) {
@@ -2031,7 +2039,10 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 						signal: deps.signal,
 						hook: "turn_end",
 						label: `readScannerCache:${scanner}`,
-					}).then((entry) => entry ?? null);
+					}).then((entry) => {
+						if (entry === undefined) scannerStoresUnread.push(scanner);
+						return entry ?? null;
+					});
 			scannerCacheReads.set(scanner, pending);
 		}
 		return pending as Promise<CacheEntry<T> | null>;
@@ -2079,6 +2090,19 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	// but loses its line number: the credential may still be there, just not
 	// where the snapshot says. Dropping instead would let any edit — malicious
 	// or accidental — mute a real secret.
+	if (scannerStoresUnread.length > 0) {
+		logLatency({
+			type: "phase",
+			toolName: "turn_end",
+			filePath: cwd,
+			phase: "scanner_cache_read_abandoned",
+			durationMs: 0,
+			metadata: {
+				stores: scannerStoresUnread.join("+"),
+				aborted: deps.signal?.aborted === true,
+			},
+		});
+	}
 	const scannerGates = gateFindingsByPathFreshness({
 		cwd,
 		sources: {
