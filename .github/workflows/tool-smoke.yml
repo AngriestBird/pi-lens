@@ -236,6 +236,17 @@ jobs:
           set -o pipefail
           node scripts/smoke-tools.mjs --format --install --verbose 2>&1 | tee "$RUNNER_TEMP/tool-smoke-format-layer.log"
 
+      # #3319: PR analyses cover only their diff, so a master-only SonarCloud
+      # quality regression otherwise stays invisible to the merge train. Keep
+      # this as a real gate, but let the script classify SonarCloud transport
+      # outages as visible fail-open warnings. `always()` ensures the master
+      # read happens even when an earlier smoke layer already failed; the
+      # final notifier below still runs after either result.
+      - name: SonarCloud master quality gate
+        id: sonar_master_gate
+        if: always()
+        run: node scripts/sonar-master-gate.mjs
+
       # #2723: the ONLY tracking-issue writer this workflow had before this
       # step (`Notify on silentOnClean drift` above) sits behind the LSP
       # handshake layer with `continue-on-error: true` but no `if: always()`,

@@ -448,6 +448,11 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		reason:
 			"the fixture-ordering defect lives in the CLI's own module-load order; no in-process call is the script under test",
 	},
+	"real-process-spawn:scripts/sonar-master-gate.test.ts": {
+		detector: "real-process-spawn",
+		reason:
+			"the CLI's exit codes and rendered stdout/stderr are the process-boundary contract; an in-process fetch call cannot certify the real entry point",
+	},
 	// 2026-09-06 (#2586 review F1): proves the actual delimiter
 	// supply-host-provided-deps.mjs prints in its own stdout bytes; an
 	// in-process double would just re-assert the test author's assumption.

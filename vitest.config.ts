@@ -471,6 +471,9 @@ export const wallClockBudgetInclude = [
 	// #2369: the fixture-ordering defect lives in the CLI's own module-load
 	// order; only a real child process is the script under test.
 	"tests/scripts/smoke-tools-lsp-fixture-registration.test.ts",
+	// #3322: the Sonar gate CLI's exit codes and rendered stdout/stderr are the
+	// process-boundary contract; keep its real child out of the fork storm.
+	"tests/scripts/sonar-master-gate.test.ts",
 	// #2586 review F1: proves the ACTUAL stdout bytes supply-host-provided-deps.mjs
 	// prints (real child process, flake-shape admission).
 	"tests/scripts/supply-host-provided-deps.test.ts",
