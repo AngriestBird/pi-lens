@@ -1114,7 +1114,7 @@ let report = \`CRITICAL dependency CVEs (trivy, \${trivyAgeLabel}). Upgrade befo
 			"const unrelatedGate = gateFindingsByPathFreshness({ sources: {} });",
 			"const gitleaksGate = { live: rawFindings, stale: [] };",
 			"const keptLive = filterFindingsByDisposition(",
-			"  gitleaksGate.live,",
+			"  gitleaksGate,",
 			");",
 			"// @delivery-surface: runtime-turn:secrets-gitleaks",
 			'advisoryParts.push("finding");',
@@ -1133,7 +1133,7 @@ let report = \`CRITICAL dependency CVEs (trivy, \${trivyAgeLabel}). Upgrade befo
 		const ownGateSource = [
 			"const gitleaksGate = gateFindingsByPathFreshness({ sources: {} });",
 			"const keptLive = filterFindingsByDisposition(",
-			"  gitleaksGate.live,",
+			"  gitleaksGate,",
 			");",
 			"// @delivery-surface: runtime-turn:secrets-gitleaks",
 			'advisoryParts.push("finding");',
@@ -1312,7 +1312,7 @@ let report = \`CRITICAL dependency CVEs (trivy, \${trivyAgeLabel}). Upgrade befo
 			"const gitleaksGate = scannerGates;",
 			"const scannerGates = gitleaksGate;",
 			"const keptLive = filterFindingsByDisposition(",
-			"  gitleaksGate.live,",
+			"  gitleaksGate,",
 			");",
 			"// @delivery-surface: runtime-turn:secrets-gitleaks",
 			'advisoryParts.push("finding");',
@@ -1328,7 +1328,7 @@ let report = \`CRITICAL dependency CVEs (trivy, \${trivyAgeLabel}). Upgrade befo
 
 	it("control (#3266): an inline gate result on the same line is accepted", () => {
 		const inlineSource = [
-			"const keptLive = filterFindingsByDisposition(gateFindingsByPathFreshness({}).gitleaksGate.live,",
+			"const keptLive = filterFindingsByDisposition(gateFindingsByPathFreshness({}).gitleaksGate,",
 			");",
 			"// @delivery-surface: runtime-turn:secrets-gitleaks",
 			'advisoryParts.push("finding");',
